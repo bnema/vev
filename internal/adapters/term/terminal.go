@@ -47,12 +47,15 @@ type Terminal struct {
 	rawSkipped bool         // true if fd wasn't a tty, so MakeRaw/Restore were skipped
 	restoreFn  func() error // the single idempotent restore closure for the current session
 
-	resizeStart sync.Once
-	resizeStop  sync.Once
-	resizeCh    chan domain.Size
-	resizeQuit  chan struct{}
-	sigCh       chan os.Signal
-	resizeWG    sync.WaitGroup
+	// Resize watcher state, also guarded by mu so watcher start
+	// (ResizeEvents) and watcher stop (restore) are strictly ordered:
+	// a restore that runs before the first ResizeEvents call must
+	// prevent any watcher (and its signal.Notify) from ever starting.
+	resizeCh   chan domain.Size
+	resizeQuit chan struct{}
+	sigCh      chan os.Signal
+	resizeDone bool // set by stopResizeLocked; no watcher may start afterwards
+	resizeWG   sync.WaitGroup
 }
 
 // New creates a Terminal backed by os.Stdin and os.Stdout.
@@ -140,7 +143,7 @@ func (t *Terminal) restore() error {
 	t.entered = false
 	t.restoreFn = nil
 
-	t.stopResize()
+	t.stopResizeLocked()
 
 	switch {
 	case werr != nil:
@@ -177,33 +180,53 @@ func (t *Terminal) Size() (domain.Size, error) {
 // ResizeEvents returns a channel of coalesced terminal sizes, one per
 // SIGWINCH burst. The SIGWINCH watcher starts lazily on the first call;
 // subsequent calls return the same channel. The channel is closed once
-// restore (returned by EnterRaw) runs.
+// restore (returned by EnterRaw) runs. If restore has already run when
+// ResizeEvents is first called, no watcher is started and the returned
+// channel is already closed.
 func (t *Terminal) ResizeEvents() <-chan domain.Size {
-	t.resizeStart.Do(func() {
-		t.resizeCh = make(chan domain.Size)
-		t.resizeQuit = make(chan struct{})
-		t.sigCh = make(chan os.Signal, 1)
-		signal.Notify(t.sigCh, syscall.SIGWINCH)
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
-		t.resizeWG.Add(1)
-		go func() {
-			defer t.resizeWG.Done()
-			defer signal.Stop(t.sigCh)
-			resizeLoop(t.sigCh, t.resizeCh, t.resizeQuit, t.Size)
-		}()
-	})
+	if t.resizeCh != nil {
+		return t.resizeCh
+	}
+	t.resizeCh = make(chan domain.Size)
+
+	if t.resizeDone {
+		// restore ran before the first ResizeEvents call: never start a
+		// watcher (or a signal handler) after stop; hand back a closed
+		// channel so a consumer selecting on it doesn't hang.
+		close(t.resizeCh)
+		return t.resizeCh
+	}
+
+	t.resizeQuit = make(chan struct{})
+	t.sigCh = make(chan os.Signal, 1)
+	signal.Notify(t.sigCh, syscall.SIGWINCH)
+
+	t.resizeWG.Add(1)
+	go func() {
+		defer t.resizeWG.Done()
+		defer signal.Stop(t.sigCh)
+		resizeLoop(t.sigCh, t.resizeCh, t.resizeQuit, t.Size)
+	}()
+
 	return t.resizeCh
 }
 
-// stopResize stops the SIGWINCH watcher goroutine (if one was started)
-// and waits for it to exit, so its channel is guaranteed closed before
-// stopResize returns.
-func (t *Terminal) stopResize() {
-	t.resizeStop.Do(func() {
+// stopResizeLocked stops the SIGWINCH watcher goroutine (if one was
+// started) and waits for it to exit, so its channel is guaranteed
+// closed before stopResizeLocked returns. It marks the watcher as done
+// so no watcher can start afterwards. Must be called with t.mu held;
+// the watcher goroutine never takes t.mu, so waiting under the lock
+// cannot deadlock.
+func (t *Terminal) stopResizeLocked() {
+	if !t.resizeDone {
+		t.resizeDone = true
 		if t.resizeQuit != nil {
 			close(t.resizeQuit)
 		}
-	})
+	}
 	t.resizeWG.Wait()
 }
 

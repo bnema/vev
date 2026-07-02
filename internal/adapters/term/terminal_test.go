@@ -6,6 +6,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/bnema/vev/internal/domain"
 )
 
 // pipePair returns an os.Pipe and a goroutine that continuously copies
@@ -176,6 +178,119 @@ func TestTerminal_ResizeEvents_ReturnsSameChannelAndClosesOnRestore(t *testing.T
 
 	outW.Close()
 	<-done
+}
+
+func TestTerminal_ResizeEvents_AfterRestore_NoWatcherAndClosedChannel(t *testing.T) {
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe(in): %v", err)
+	}
+	defer inW.Close()
+	defer inR.Close()
+
+	outR, outW, _, done := pipeCapture(t)
+	defer outR.Close()
+
+	tm := NewWithFiles(inR, outW)
+
+	restore, err := tm.EnterRaw()
+	if err != nil {
+		t.Fatalf("EnterRaw: %v", err)
+	}
+	// restore BEFORE the first ResizeEvents call (signal-driven shutdown
+	// racing ahead of the resize pump's startup).
+	if err := restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	ch := tm.ResizeEvents()
+
+	// The channel must already be closed so a consumer selecting on it
+	// doesn't hang.
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatalf("expected closed resize channel, got a value")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("resize channel not closed after restore-before-ResizeEvents")
+	}
+
+	// No watcher may have started: no signal handler installed, no quit
+	// channel allocated, no goroutine registered.
+	tm.mu.Lock()
+	sigCh, quit := tm.sigCh, tm.resizeQuit
+	tm.mu.Unlock()
+	if sigCh != nil {
+		t.Fatalf("expected no signal channel (no signal.Notify) after restore-first ordering")
+	}
+	if quit != nil {
+		t.Fatalf("expected no quit channel (no watcher goroutine) after restore-first ordering")
+	}
+	// Returns immediately iff no watcher goroutine was leaked.
+	tm.resizeWG.Wait()
+
+	outW.Close()
+	<-done
+}
+
+func TestTerminal_ResizeEvents_ConcurrentWithRestore(t *testing.T) {
+	// Race ResizeEvents against a restore triggered from another
+	// goroutine (the signal-driven shutdown shape). Under -race this
+	// locks in that watcher start/stop are ordered by the mutex; in all
+	// interleavings the returned channel must eventually be closed and
+	// no watcher goroutine may leak.
+	for i := 0; i < 50; i++ {
+		inR, inW, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("os.Pipe(in): %v", err)
+		}
+		outR, outW, _, done := pipeCapture(t)
+
+		tm := NewWithFiles(inR, outW)
+		restore, err := tm.EnterRaw()
+		if err != nil {
+			t.Fatalf("EnterRaw: %v", err)
+		}
+
+		start := make(chan struct{})
+		chch := make(chan (<-chan domain.Size), 1)
+		go func() {
+			<-start
+			chch <- tm.ResizeEvents()
+		}()
+		go func() {
+			<-start
+			_ = restore()
+		}()
+		close(start)
+
+		ch := <-chch
+		// restore may still be in flight; it is idempotent and returns
+		// only after the watcher (if any) has fully stopped.
+		if err := restore(); err != nil {
+			t.Fatalf("iteration %d: restore: %v", i, err)
+		}
+
+		select {
+		case _, ok := <-ch:
+			if ok {
+				// A real size emission is impossible here (pipe, not a
+				// tty, and no SIGWINCH sent) — anything but a close is a
+				// bug.
+				t.Fatalf("iteration %d: expected closed channel, got a value", i)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iteration %d: resize channel never closed", i)
+		}
+		tm.resizeWG.Wait()
+
+		outW.Close()
+		<-done
+		inR.Close()
+		inW.Close()
+		outR.Close()
+	}
 }
 
 func TestTerminal_Size_NonTTY_ReturnsError(t *testing.T) {
