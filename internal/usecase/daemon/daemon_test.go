@@ -49,6 +49,11 @@ func newTestDaemon(t *testing.T, ptys ports.PTYFactory, clk ports.Clock) *Daemon
 // then reports io.EOF (the "child exited" signal).
 func newBlockingPTY(t *testing.T) (*portsmocks.MockPTY, func()) {
 	t.Helper()
+	return newBlockingPTYWithWrites(t, nil)
+}
+
+func newBlockingPTYWithWrites(t *testing.T, writes chan<- []byte) (*portsmocks.MockPTY, func()) {
+	t.Helper()
 	p := portsmocks.NewMockPTY(t)
 	release := make(chan struct{})
 	var once sync.Once
@@ -57,7 +62,13 @@ func newBlockingPTY(t *testing.T) (*portsmocks.MockPTY, func()) {
 		<-release
 		return 0, io.EOF
 	}).Maybe()
-	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) { return len(b), nil }).Maybe()
+	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) {
+		if writes != nil {
+			cp := append([]byte(nil), b...)
+			writes <- cp
+		}
+		return len(b), nil
+	}).Maybe()
 	p.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
 	// Close unblocks a parked Read, exactly as the real PTY does (its Close
 	// closes the master fd, failing the in-flight read).
@@ -70,6 +81,26 @@ func newFactory(t *testing.T, p ports.PTY) *portsmocks.MockPTYFactory {
 	t.Helper()
 	f := portsmocks.NewMockPTYFactory(t)
 	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(p, nil).Maybe()
+	return f
+}
+
+func newFactorySeq(t *testing.T, ptys ...ports.PTY) *portsmocks.MockPTYFactory {
+	t.Helper()
+	f := portsmocks.NewMockPTYFactory(t)
+	var mu sync.Mutex
+	next := 0
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(string, []string, []string, domain.Size) (ports.PTY, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if next >= len(ptys) {
+				t.Fatalf("unexpected PTY open #%d", next+1)
+			}
+			p := ptys[next]
+			next++
+			return p, nil
+		},
+	).Maybe()
 	return f
 }
 
@@ -111,6 +142,10 @@ func mustHello(intent uint8, name string, sz domain.Size) ports.Frame {
 	})}
 }
 
+func frameInput(data []byte) ports.Frame {
+	return ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: data})}
+}
+
 // awaitFrame waits for the next frame of type typ on ch, failing on timeout.
 func awaitFrame(t *testing.T, ch chan ports.Frame, typ ports.MsgType) ports.Frame {
 	t.Helper()
@@ -140,6 +175,63 @@ func sessionCount(d *Daemon) int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return len(d.sessions)
+}
+
+func listSessions(t *testing.T, d *Daemon) ports.Sessions {
+	t.Helper()
+	tr, sends, _ := newConn(t, ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(ports.List{})})
+	d.handleList(tr)
+	f := awaitFrame(t, sends, ports.MsgSessions)
+	sessions, err := ports.UnmarshalSessions(f.Payload)
+	require.NoError(t, err)
+	return sessions
+}
+
+func newCapturingTransport(t *testing.T) (*portsmocks.MockTransport, chan ports.Frame) {
+	t.Helper()
+	tr := portsmocks.NewMockTransport(t)
+	sends := make(chan ports.Frame, 64)
+	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f ports.Frame) error {
+		sends <- f
+		return nil
+	}).Maybe()
+	tr.EXPECT().Close().Return(nil).Maybe()
+	return tr, sends
+}
+
+func newManualSessionWithPTYs(t *testing.T, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan ports.Frame) {
+	t.Helper()
+	d := newTestDaemon(t, nil, stubClock{})
+	tr, sends := newCapturingTransport(t)
+	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	sctx, cancel := context.WithCancel(d.serveCtx)
+	windows := make([]*window, 0, len(ptys))
+	for _, p := range ptys {
+		windows = append(windows, &window{pty: p, screen: vt.NewScreen(80, 24), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 24}})
+	}
+	sess := &session{id: "manual", name: "work", ctx: sctx, cancel: cancel, windows: windows, client: ac}
+	d.sessions[sess.id] = sess
+	t.Cleanup(cancel)
+	return d, sess, ac, sends
+}
+
+func newManualWindowSession(t *testing.T, n int) (*Daemon, *session, *attachedClient, chan ports.Frame, []func()) {
+	t.Helper()
+	ptys := make([]ports.PTY, 0, n)
+	releases := make([]func(), 0, n)
+	for range n {
+		p, release := newBlockingPTY(t)
+		ptys = append(ptys, p)
+		releases = append(releases, release)
+	}
+	d, sess, ac, sends := newManualSessionWithPTYs(t, ptys...)
+	return d, sess, ac, sends, releases
+}
+
+func activeWindowIndex(sess *session) int {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	return sess.active
 }
 
 // --- handshake --------------------------------------------------------------
@@ -246,6 +338,129 @@ func TestEphemeralNumberingReuse(t *testing.T) {
 }
 
 // --- attach replace ---------------------------------------------------------
+
+func TestAltDigitSwitchesActiveWindow(t *testing.T) {
+	writes1 := make(chan []byte, 1)
+	writes2 := make(chan []byte, 1)
+	p1, releasePTY1 := newBlockingPTYWithWrites(t, writes1)
+	p2, releasePTY2 := newBlockingPTYWithWrites(t, writes2)
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
+	tr, sends, releaseConn := newConn(t,
+		mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}),
+		frameInput([]byte("\x1bc")),
+		frameInput([]byte("\x1b1")),
+		frameInput([]byte("A")),
+		frameInput([]byte("\x1b2")),
+		frameInput([]byte("B")),
+	)
+
+	var hg sync.WaitGroup
+	hg.Go(func() { d.handleConn(tr) })
+	awaitFrame(t, sends, ports.MsgWelcome)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	require.Eventually(t, func() bool { return len(writes1) == 1 }, 2*time.Second, 5*time.Millisecond)
+	require.Equal(t, []byte("A"), <-writes1)
+	require.Eventually(t, func() bool { return len(writes2) == 1 }, 2*time.Second, 5*time.Millisecond)
+	require.Equal(t, []byte("B"), <-writes2)
+
+	releaseConn()
+	releasePTY1()
+	releasePTY2()
+	hg.Wait()
+	d.sessWg.Wait()
+}
+
+func TestAltCCreatesSecondActiveWindow(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
+	tr, sends, releaseConn := newConn(t,
+		mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}),
+		frameInput([]byte("\x1bc")),
+	)
+
+	var hg sync.WaitGroup
+	hg.Go(func() { d.handleConn(tr) })
+	awaitFrame(t, sends, ports.MsgWelcome)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	require.Eventually(t, func() bool {
+		sessions := listSessions(t, d)
+		return len(sessions.Sessions) == 1 && sessions.Sessions[0].Windows == 2
+	}, 2*time.Second, 5*time.Millisecond)
+
+	releaseConn()
+	releasePTY1()
+	releasePTY2()
+	hg.Wait()
+	d.sessWg.Wait()
+}
+
+func TestAltNextPreviousSwitchActiveWindow(t *testing.T) {
+	cases := []struct {
+		name      string
+		start     int
+		input     []byte
+		wantIndex int
+	}{
+		{name: "next advances", start: 0, input: []byte("\x1bn"), wantIndex: 1},
+		{name: "next wraps", start: 2, input: []byte("\x1bn"), wantIndex: 0},
+		{name: "previous moves back", start: 2, input: []byte("\x1bp"), wantIndex: 1},
+		{name: "previous wraps", start: 0, input: []byte("\x1bp"), wantIndex: 2},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sess, ac, _, releases := newManualWindowSession(t, 3)
+			defer func() {
+				for _, release := range releases {
+					release()
+				}
+			}()
+			sess.active = tc.start
+
+			d.handleInput(sess, ac, tc.input)
+
+			require.Equal(t, tc.wantIndex, activeWindowIndex(sess))
+		})
+	}
+}
+
+func TestAltXClosesActiveWindowAndSelectsRemaining(t *testing.T) {
+	writes := make(chan []byte, 1)
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	p3, releasePTY3 := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p1, p2, p3)
+	sess.active = 1
+
+	d.handleInput(sess, ac, []byte("\x1bx"))
+
+	require.Equal(t, 1, sessionCount(d))
+	require.Len(t, sess.windows, 2)
+	require.Equal(t, 1, activeWindowIndex(sess), "closing middle window selects the next remaining window")
+	d.handleInput(sess, ac, []byte("Z"))
+	require.Eventually(t, func() bool { return len(writes) == 1 }, 2*time.Second, 5*time.Millisecond)
+	require.Equal(t, []byte("Z"), <-writes)
+
+	releasePTY1()
+	releasePTY2()
+	releasePTY3()
+}
+
+func TestAltXClosesFinalWindowAndDetaches(t *testing.T) {
+	d, sess, ac, sends, releases := newManualWindowSession(t, 1)
+	defer releases[0]()
+
+	d.handleInput(sess, ac, []byte("\x1bx"))
+
+	require.Equal(t, 0, sessionCount(d))
+	f := awaitFrame(t, sends, ports.MsgDetached)
+	det, err := ports.UnmarshalDetached(f.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.ReasonSessionKilled, det.Reason)
+}
 
 func TestAttachReplaceDetachesOld(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
@@ -368,14 +583,14 @@ func TestSchedulerDebounceCoalesces(t *testing.T) {
 	sctx, cancel := context.WithCancel(context.Background())
 	win := &window{screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}}
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
-	sess := &session{id: "s", name: "s", win: win, ctx: sctx, cancel: cancel, client: ac}
+	sess := &session{id: "s", name: "s", windows: []*window{win}, ctx: sctx, cancel: cancel, client: ac}
 
 	win.mu.Lock()
 	win.screen.Write([]byte("hi"))
 	win.mu.Unlock()
 
 	d.sessWg.Add(1)
-	go d.scheduler(sess)
+	go d.scheduler(sess, win)
 
 	// First dirty opens the debounce window.
 	win.dirty <- struct{}{}
@@ -424,7 +639,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
-	sess := &session{id: "s", name: "s", win: win, client: ac}
+	sess := &session{id: "s", name: "s", windows: []*window{win}, client: ac}
 
 	d.resize(sess, ac, newSize)
 
@@ -717,7 +932,7 @@ func TestSendErrorKillsEphemeral(t *testing.T) {
 	win := &window{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}}
 	sctx, cancel := context.WithCancel(context.Background())
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
-	sess := &session{id: "e", name: "0", ephemeral: true, win: win, ctx: sctx, cancel: cancel, client: ac}
+	sess := &session{id: "e", name: "0", ephemeral: true, windows: []*window{win}, ctx: sctx, cancel: cancel, client: ac}
 	d.sessions[sess.id] = sess
 
 	win.mu.Lock()

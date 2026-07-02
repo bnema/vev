@@ -102,19 +102,20 @@ type Daemon struct {
 	connWg sync.WaitGroup // per-connection handler goroutines
 }
 
-// session is a single multiplexed session. For the MVP it owns exactly one
-// window and at most one attached client.
+// session is a single multiplexed session. It owns one or more full-screen
+// windows and at most one attached client.
 type session struct {
 	id        domain.SessionID
 	name      string
 	ephemeral bool
-	win       *window
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu     sync.Mutex // guards client
-	client *attachedClient
+	mu      sync.Mutex // guards windows, active, and client
+	windows []*window
+	active  int
+	client  *attachedClient
 }
 
 // window is one PTY-backed screen. dirty is a cap-1 channel so bursty output
@@ -348,11 +349,12 @@ func (d *Daemon) handleList(tr ports.Transport) {
 		s.mu.Lock()
 		attached := s.client != nil
 		s.mu.Unlock()
+		windows := len(s.windows)
 		infos = append(infos, ports.SessionInfo{
 			SessionID: string(s.id),
 			Name:      s.name,
 			Ephemeral: s.ephemeral,
-			Windows:   1,
+			Windows:   uint16(windows),
 			Attached:  attached,
 		})
 	}
@@ -506,16 +508,38 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, sz domain.Size
 		id:        id,
 		name:      name,
 		ephemeral: ephemeral,
-		win:       win,
 		ctx:       sctx,
 		cancel:    cancel,
+		windows:   []*window{win},
 	}
 	d.sessions[id] = sess
-
-	d.sessWg.Add(2)
-	go d.ptyReader(sess)
-	go d.scheduler(sess)
+	d.startWindowGoroutines(sess, win)
 	return sess, nil
+}
+
+func (d *Daemon) createWindow(sess *session, sz domain.Size) error {
+	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(sess.name), sz)
+	if err != nil {
+		return fmt.Errorf("daemon: spawning window for session %q: %w", sess.name, err)
+	}
+	win := &window{
+		pty:    pty,
+		screen: vt.NewScreen(sz.Cols, sz.Rows),
+		dirty:  make(chan struct{}, 1),
+		size:   sz,
+	}
+	sess.mu.Lock()
+	sess.windows = append(sess.windows, win)
+	sess.active = len(sess.windows) - 1
+	sess.mu.Unlock()
+	d.startWindowGoroutines(sess, win)
+	return nil
+}
+
+func (d *Daemon) startWindowGoroutines(sess *session, win *window) {
+	d.sessWg.Add(2)
+	go d.ptyReader(sess, win)
+	go d.scheduler(sess, win)
 }
 
 // attachClient makes ac the session's current client, displacing any prior one
@@ -544,7 +568,10 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size)
 // the window size differs from the client's it resizes first (which paints a
 // full redraw), otherwise it forces a full paint against the fresh renderer.
 func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain.Size) {
-	win := sess.win
+	win := sess.activeWindow()
+	if win == nil {
+		return
+	}
 	win.mu.Lock()
 	wsz := win.size
 	win.mu.Unlock()
@@ -559,7 +586,6 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 // runConnLoop is the per-connection input router: it pumps client messages
 // until detach, EOF, or a transport error.
 func (d *Daemon) runConnLoop(sess *session, ac *attachedClient) {
-	win := sess.win
 	for {
 		f, err := ac.tr.Recv()
 		if err != nil {
@@ -569,7 +595,7 @@ func (d *Daemon) runConnLoop(sess *session, ac *attachedClient) {
 		switch f.Type {
 		case ports.MsgInput:
 			if in, derr := ports.UnmarshalInput(f.Payload); derr == nil {
-				_, _ = win.pty.Write(in.Data)
+				d.handleInput(sess, ac, in.Data)
 			}
 		case ports.MsgResize:
 			if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil {
@@ -619,12 +645,112 @@ func (s *session) detachIfCurrent(ac *attachedClient) bool {
 	return false
 }
 
+func (s *session) activeWindow() *window {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active < 0 || s.active >= len(s.windows) {
+		return nil
+	}
+	return s.windows[s.active]
+}
+
+func (d *Daemon) handleInput(sess *session, ac *attachedClient, data []byte) {
+	switch string(data) {
+	case "\x1bc":
+		if err := d.createWindow(sess, ac.size); err != nil {
+			d.log.Error("create window failed", "err", err, "session", sess.name)
+			return
+		}
+		d.paint(sess, ac, true)
+		return
+	case "\x1b1", "\x1b2", "\x1b3", "\x1b4", "\x1b5", "\x1b6", "\x1b7", "\x1b8", "\x1b9":
+		idx := int(data[1] - '1')
+		if sess.switchWindow(idx) {
+			d.paint(sess, ac, true)
+		}
+		return
+	case "\x1bn":
+		if sess.switchRelative(1) {
+			d.paint(sess, ac, true)
+		}
+		return
+	case "\x1bp":
+		if sess.switchRelative(-1) {
+			d.paint(sess, ac, true)
+		}
+		return
+	case "\x1bx":
+		win := sess.activeWindow()
+		if win != nil {
+			d.closeWindow(sess, win, true)
+		}
+		return
+	}
+	win := sess.activeWindow()
+	if win == nil {
+		return
+	}
+	_, _ = win.pty.Write(data)
+}
+
+func (s *session) switchWindow(idx int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if idx < 0 || idx >= len(s.windows) || idx == s.active {
+		return false
+	}
+	s.active = idx
+	return true
+}
+
+func (s *session) switchRelative(delta int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.windows) < 2 {
+		return false
+	}
+	s.active = (s.active + delta + len(s.windows)) % len(s.windows)
+	return true
+}
+
+func (d *Daemon) closeWindow(sess *session, win *window, repaint bool) {
+	sess.mu.Lock()
+	idx := -1
+	for i, w := range sess.windows {
+		if w == win {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		sess.mu.Unlock()
+		return
+	}
+	if len(sess.windows) == 1 {
+		sess.mu.Unlock()
+		d.killSession(sess, ports.ReasonSessionKilled)
+		return
+	}
+	sess.windows = append(sess.windows[:idx], sess.windows[idx+1:]...)
+	if sess.active >= len(sess.windows) {
+		sess.active = len(sess.windows) - 1
+	} else if idx < sess.active {
+		sess.active--
+	}
+	ac := sess.client
+	sess.mu.Unlock()
+
+	_ = win.pty.Close()
+	if repaint && ac != nil {
+		d.paint(sess, ac, true)
+	}
+}
+
 // ptyReader drains child output into the VT screen and pokes the dirty channel
 // (non-blocking: a full channel already means a render is pending). On any read
 // error (EOF when the child exits) it kills the session.
-func (d *Daemon) ptyReader(sess *session) {
+func (d *Daemon) ptyReader(sess *session, win *window) {
 	defer d.sessWg.Done()
-	win := sess.win
 	buf := make([]byte, ptyReadBufSize)
 	for {
 		n, err := win.pty.Read(buf)
@@ -638,7 +764,7 @@ func (d *Daemon) ptyReader(sess *session) {
 			}
 		}
 		if err != nil {
-			d.killSession(sess, ports.ReasonSessionKilled)
+			d.closeWindow(sess, win, false)
 			return
 		}
 	}
@@ -646,9 +772,8 @@ func (d *Daemon) ptyReader(sess *session) {
 
 // scheduler debounces dirty signals: the first opens a fixed window during
 // which further dirties are absorbed, then it renders exactly once.
-func (d *Daemon) scheduler(sess *session) {
+func (d *Daemon) scheduler(sess *session, win *window) {
 	defer d.sessWg.Done()
-	win := sess.win
 	for {
 		select {
 		case <-sess.ctx.Done():
@@ -669,19 +794,19 @@ func (d *Daemon) scheduler(sess *session) {
 				break absorb
 			}
 		}
-		d.render(sess)
+		d.render(sess, win)
 	}
 }
 
 // render paints the current client, or (when detached) just clears accumulated
 // damage so it never grows unbounded while headless.
-func (d *Daemon) render(sess *session) {
-	win := sess.win
+func (d *Daemon) render(sess *session, win *window) {
 	sess.mu.Lock()
 	ac := sess.client
+	active := sess.active >= 0 && sess.active < len(sess.windows) && sess.windows[sess.active] == win
 	sess.mu.Unlock()
 
-	if ac == nil {
+	if ac == nil || !active {
 		win.mu.Lock()
 		win.screen.ClearDamage()
 		win.mu.Unlock()
@@ -694,7 +819,10 @@ func (d *Daemon) render(sess *session) {
 // shadow is read/written under win.mu; sendMu makes Draw→Send atomic per client
 // so the scheduler and a concurrent resize never interleave their output.
 func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
-	win := sess.win
+	win := sess.activeWindow()
+	if win == nil {
+		return
+	}
 
 	ac.sendMu.Lock()
 	win.mu.Lock()
@@ -727,7 +855,10 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	if !sz.Valid() {
 		return
 	}
-	win := sess.win
+	win := sess.activeWindow()
+	if win == nil {
+		return
+	}
 
 	if err := win.pty.Resize(sz); err != nil {
 		d.log.Warn("pty resize failed", "err", err, "session", sess.name)
@@ -800,7 +931,12 @@ func (d *Daemon) killSession(sess *session, reason uint8) {
 	sess.mu.Unlock()
 
 	sess.cancel()
-	_ = sess.win.pty.Close()
+	sess.mu.Lock()
+	windows := append([]*window(nil), sess.windows...)
+	sess.mu.Unlock()
+	for _, win := range windows {
+		_ = win.pty.Close()
+	}
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
 	}
