@@ -49,13 +49,19 @@ type Screen struct {
 	savedCursor      cursorState
 	alternate        *screenState
 	syncUpdateActive bool
+	cursorVisible    bool
+	cursorStyle      int
+	cursorStyleSet   bool
+	mouseMode        int
+	mouseSGR         bool
 }
 
 func NewScreen(width, height int) *Screen {
 	s := &Screen{
-		Frame:  renderer.NewFrame(width, height),
-		Style:  renderer.DefaultStyle(),
-		damage: []renderer.Damage{renderer.FullRedraw()},
+		Frame:         renderer.NewFrame(width, height),
+		Style:         renderer.DefaultStyle(),
+		damage:        []renderer.Damage{renderer.FullRedraw()},
+		cursorVisible: true,
 	}
 	s.resetScrollRegion()
 	return s
@@ -71,6 +77,11 @@ func (s *Screen) Resize(width, height int) {
 	s.escapeBuf = s.escapeBuf[:0]
 	s.savedCursor = cursorState{}
 	s.alternate = nil
+	s.cursorVisible = true
+	s.cursorStyle = 0
+	s.cursorStyleSet = false
+	s.mouseMode = 0
+	s.mouseSGR = false
 	s.resetScrollRegion()
 	s.fullRedraw()
 }
@@ -88,6 +99,15 @@ func (s *Screen) SyncUpdateActive() bool { return s.syncUpdateActive }
 // Hosts use this as a safety valve if a child enters synchronized update mode
 // and never sends the matching end sequence.
 func (s *Screen) ForceSyncEnd() { s.syncUpdateActive = false }
+
+func (s *Screen) CursorRow() int { return s.Row }
+func (s *Screen) CursorCol() int { return s.Col }
+func (s *Screen) CursorVisible() bool {
+	return s.cursorVisible
+}
+func (s *Screen) CursorStyle() (int, bool) { return s.cursorStyle, s.cursorStyleSet }
+func (s *Screen) MouseMode() (int, bool)   { return s.mouseMode, s.mouseSGR }
+func (s *Screen) AltScreenActive() bool    { return s.alternate != nil }
 
 func (s *Screen) Write(data []byte) {
 	if len(s.escapeBuf) > 0 {
@@ -645,9 +665,10 @@ func (s *Screen) applyCSI(params string, cmd byte) {
 	parts := parseCSIInts(params)
 	switch cmd {
 	case 'c':
-		if params == "" || params == "0" {
+		switch params {
+		case "", "0":
 			s.respond([]byte("\x1b[?6c"))
-		} else if params == ">" || params == ">0" {
+		case ">", ">0":
 			s.respond([]byte("\x1b[>0;0;0c"))
 		}
 	case 'n':
@@ -694,6 +715,8 @@ func (s *Screen) applyCSI(params string, cmd byte) {
 			return
 		}
 		s.applySGR(params)
+	case 'q':
+		s.applyCursorStyle(params)
 	case 'J':
 		mode := 0
 		if len(parts) > 0 {
@@ -768,6 +791,23 @@ func firstPositive(parts []int, fallback int) int {
 		return fallback
 	}
 	return parts[0]
+}
+
+func (s *Screen) applyCursorStyle(params string) {
+	if strings.HasPrefix(params, ">") || !strings.HasSuffix(params, " ") {
+		return
+	}
+	styleParam := strings.TrimSuffix(params, " ")
+	style := 0
+	if styleParam != "" {
+		v, err := strconv.Atoi(styleParam)
+		if err != nil {
+			return
+		}
+		style = v
+	}
+	s.cursorStyle = style
+	s.cursorStyleSet = true
 }
 
 func (s *Screen) applySGR(params string) {
@@ -860,6 +900,11 @@ func (s *Screen) reset() {
 	s.escapeBuf = s.escapeBuf[:0]
 	s.savedCursor = cursorState{}
 	s.alternate = nil
+	s.cursorVisible = true
+	s.cursorStyle = 0
+	s.cursorStyleSet = false
+	s.mouseMode = 0
+	s.mouseSGR = false
 	s.resetScrollRegion()
 	s.fullRedraw()
 }
@@ -910,7 +955,17 @@ func (s *Screen) setMode(private bool, parts []int, enabled bool) {
 			}
 		case 2026:
 			s.syncUpdateActive = enabled
-		case 1, 25, 1000, 1002, 1003, 1004, 1005, 1006, 2004:
+		case 25:
+			s.cursorVisible = enabled
+		case 1000, 1002, 1003:
+			if enabled {
+				s.mouseMode = mode
+			} else if s.mouseMode == mode {
+				s.mouseMode = 0
+			}
+		case 1006:
+			s.mouseSGR = enabled
+		case 1, 1004, 1005, 2004:
 			// Trackable terminal modes that do not directly affect the current
 			// cell model yet. Consuming them prevents mode bytes from leaking.
 			continue

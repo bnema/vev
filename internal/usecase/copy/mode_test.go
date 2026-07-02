@@ -88,6 +88,47 @@ func TestCopyModeNavigationBounds(t *testing.T) {
 	}
 }
 
+func TestCopyModeAtBottom(t *testing.T) {
+	s := snapshot([]string{"00", "01", "02", "03", "04"}, 3)
+	m := NewMode(s)
+	if !m.AtBottom(s) {
+		t.Fatalf("AtBottom() after NewMode = false, want true; cursor/top=%d/%d", m.Cursor, m.ViewportTop)
+	}
+
+	m.Move(s, -1)
+	if m.AtBottom(s) {
+		t.Fatalf("AtBottom() after moving above bottom = true, want false; cursor/top=%d/%d", m.Cursor, m.ViewportTop)
+	}
+
+	m.Bottom(s)
+	if !m.AtBottom(s) {
+		t.Fatalf("AtBottom() after Bottom = false, want true; cursor/top=%d/%d", m.Cursor, m.ViewportTop)
+	}
+
+	m.Top(s)
+	if m.AtBottom(s) {
+		t.Fatalf("AtBottom() after Top = true, want false; cursor/top=%d/%d", m.Cursor, m.ViewportTop)
+	}
+}
+
+func TestCopyModeAtBottomWithShortSnapshot(t *testing.T) {
+	s := snapshot([]string{"00", "01"}, 5)
+	m := NewMode(s)
+	if !m.AtBottom(s) {
+		t.Fatalf("AtBottom() after NewMode on short snapshot = false, want true; cursor/top=%d/%d", m.Cursor, m.ViewportTop)
+	}
+
+	m.Top(s)
+	if m.AtBottom(s) {
+		t.Fatalf("AtBottom() after Top on short snapshot = true, want false; cursor/top=%d/%d", m.Cursor, m.ViewportTop)
+	}
+
+	m.Bottom(s)
+	if !m.AtBottom(s) {
+		t.Fatalf("AtBottom() after Bottom on short snapshot = false, want true; cursor/top=%d/%d", m.Cursor, m.ViewportTop)
+	}
+}
+
 func TestCopyModeSelectionPayloadAndInverse(t *testing.T) {
 	s := snapshot([]string{"alpha   ", "beta    ", "gamma   "}, 2)
 	m := &Mode{ViewportTop: 0, Cursor: 0, Anchor: 0, Selecting: true}
@@ -101,6 +142,32 @@ func TestCopyModeSelectionPayloadAndInverse(t *testing.T) {
 		if !frame.At(0, y).Style.Inverse {
 			t.Fatalf("row %d first cell not inverse", y)
 		}
+	}
+}
+
+func TestCopyModeMoveWhileSelectingKeepsAnchorAndExtendsSelection(t *testing.T) {
+	s := snapshot([]string{"00", "01", "02", "03", "04", "05"}, 3)
+	m := NewMode(s)
+	m.Move(s, -2)
+	m.ToggleSelection()
+	anchor := m.Anchor
+
+	m.Move(s, 3)
+	if m.Anchor != anchor {
+		t.Fatalf("Anchor after Move(+3) while selecting = %d, want %d", m.Anchor, anchor)
+	}
+	lo, hi, ok := m.SelectedBounds()
+	if !ok || lo != anchor || hi != m.Cursor {
+		t.Fatalf("SelectedBounds after Move(+3) = %d/%d/%v, want %d/%d/true", lo, hi, ok, anchor, m.Cursor)
+	}
+
+	m.Move(s, -3)
+	if m.Anchor != anchor {
+		t.Fatalf("Anchor after Move(-3) while selecting = %d, want %d", m.Anchor, anchor)
+	}
+	lo, hi, ok = m.SelectedBounds()
+	if !ok || lo != m.Cursor || hi != anchor {
+		t.Fatalf("SelectedBounds after Move(-3) = %d/%d/%v, want %d/%d/true", lo, hi, ok, m.Cursor, anchor)
 	}
 }
 

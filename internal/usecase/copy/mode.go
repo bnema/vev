@@ -60,6 +60,14 @@ func (m *Mode) Page(s Snapshot, pages int) { m.setCursor(s, m.Cursor+pages*max(s
 func (m *Mode) Top(s Snapshot)             { m.setCursor(s, 0) }
 func (m *Mode) Bottom(s Snapshot)          { m.setCursor(s, len(s.Rows)-1) }
 
+func (m *Mode) AtBottom(s Snapshot) bool {
+	total := len(s.Rows)
+	if total == 0 {
+		return m.Cursor == 0 && m.ViewportTop == 0
+	}
+	return m.Cursor == total-1 && m.ViewportTop == max(total-max(s.Height, 1), 0)
+}
+
 func (m *Mode) ToggleSelection() {
 	if m.Selecting {
 		m.Selecting = false

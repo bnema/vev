@@ -2204,3 +2204,108 @@ func TestForceSyncEnd(t *testing.T) {
 		t.Fatal("sync update mode should be inactive after forcing end")
 	}
 }
+
+func TestScreenCursorAndMouseStateAccessors(t *testing.T) {
+	tests := []struct {
+		name  string
+		seq   string
+		check func(t *testing.T, s *Screen)
+	}{
+		{
+			name: "cursor position and visibility are exposed",
+			seq:  "\x1b[2;3H\x1b[?25l",
+			check: func(t *testing.T, s *Screen) {
+				if s.CursorRow() != 1 || s.CursorCol() != 2 {
+					t.Fatalf("cursor = row %d col %d, want row 1 col 2", s.CursorRow(), s.CursorCol())
+				}
+				if s.CursorVisible() {
+					t.Fatal("cursor should be hidden")
+				}
+				s.Write([]byte("\x1b[?25h"))
+				if !s.CursorVisible() {
+					t.Fatal("cursor should be visible")
+				}
+			},
+		},
+		{
+			name: "mouse mode and SGR are exposed",
+			seq:  "\x1b[?1002h\x1b[?1006h",
+			check: func(t *testing.T, s *Screen) {
+				mode, sgr := s.MouseMode()
+				if mode != 1002 || !sgr {
+					t.Fatalf("MouseMode() = (%d, %v), want (1002, true)", mode, sgr)
+				}
+			},
+		},
+		{
+			name: "reset restores cursor and mouse defaults",
+			seq:  "\x1b[?25l\x1b[?1003h\x1b[?1006h\x1bc",
+			check: func(t *testing.T, s *Screen) {
+				mode, sgr := s.MouseMode()
+				if !s.CursorVisible() || mode != 0 || sgr {
+					t.Fatalf("after reset CursorVisible=%v MouseMode=(%d,%v), want true,(0,false)", s.CursorVisible(), mode, sgr)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewScreen(10, 4)
+			s.Write([]byte(tt.seq))
+			tt.check(t, s)
+		})
+	}
+}
+
+func TestScreenMouseModeDisableInactiveIsNoOp(t *testing.T) {
+	s := NewScreen(10, 2)
+	s.Write([]byte("\x1b[?1002h"))
+	s.Write([]byte("\x1b[?1000l"))
+	mode, _ := s.MouseMode()
+	if mode != 1002 {
+		t.Fatalf("mouse mode after disabling inactive 1000 = %d, want 1002", mode)
+	}
+	s.Write([]byte("\x1b[?1002l"))
+	mode, _ = s.MouseMode()
+	if mode != 0 {
+		t.Fatalf("mouse mode after disabling active 1002 = %d, want 0", mode)
+	}
+}
+
+func TestScreenCursorStyleDECSCUSR(t *testing.T) {
+	tests := []struct {
+		name      string
+		seq       string
+		wantStyle int
+		wantSet   bool
+	}{
+		{name: "explicit style", seq: "\x1b[5 q", wantStyle: 5, wantSet: true},
+		{name: "blank style parameter", seq: "\x1b[ q", wantStyle: 0, wantSet: true},
+		{name: "XTVERSION is ignored", seq: "\x1b[>0q", wantStyle: 0, wantSet: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewScreen(10, 2)
+			s.Write([]byte(tt.seq))
+			style, set := s.CursorStyle()
+			if style != tt.wantStyle || set != tt.wantSet {
+				t.Fatalf("CursorStyle() = (%d, %v), want (%d, %v)", style, set, tt.wantStyle, tt.wantSet)
+			}
+		})
+	}
+}
+
+func TestScreenAltScreenActiveAccessor(t *testing.T) {
+	s := NewScreen(10, 2)
+	if s.AltScreenActive() {
+		t.Fatal("alt screen should start inactive")
+	}
+	s.Write([]byte("\x1b[?1049h"))
+	if !s.AltScreenActive() {
+		t.Fatal("alt screen should be active")
+	}
+	s.Write([]byte("\x1b[?1049l"))
+	if s.AltScreenActive() {
+		t.Fatal("alt screen should be inactive after exit")
+	}
+}
