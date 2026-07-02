@@ -1463,6 +1463,136 @@ func TestWideAndZeroWidthRunes(t *testing.T) {
 			},
 		},
 		{
+			name: "wrap abandoning a continuation cell clears its pair and extends damage",
+			run: func(t *testing.T) {
+				s := NewScreen(4, 2)
+				s.Write([]byte("AB你"))       // A(0) B(1) 你(2) cont(3)
+				s.Write([]byte("\x1b[1;4H")) // cursor to col 3: the continuation cell
+				s.ClearDamage()
+				// A wide rune at the last column wraps; the abandoned last cell
+				// is a continuation, so its wide left half (col 2) must be
+				// cleared too and the damage must span both columns.
+				s.Write([]byte("好"))
+
+				assertCell(t, s, 0, 0, 'A')
+				assertCell(t, s, 1, 0, 'B')
+				assertBlank(t, s, 2, 0) // orphaned wide left cleared
+				assertBlank(t, s, 3, 0) // abandoned continuation cleared
+				assertCell(t, s, 0, 1, '好')
+				assertContinuation(t, s, 1, 1)
+				if s.Col != 2 || s.Row != 1 {
+					t.Errorf("cursor at col=%d row=%d, want col=2 row=1", s.Col, s.Row)
+				}
+
+				d := s.Damage()
+				if len(d) == 0 {
+					t.Fatal("expected damage")
+				}
+				// First damage item covers the cleared pair on row 0.
+				if d[0].X != 2 || d[0].Y != 0 || d[0].Width != 2 {
+					t.Errorf("wrap damage = {X:%d Y:%d W:%d}, want {X:2 Y:0 W:2}", d[0].X, d[0].Y, d[0].Width)
+				}
+			},
+		},
+		{
+			name: "insert chars at a continuation splits the pair and repairs orphans",
+			run: func(t *testing.T) {
+				s := NewScreen(6, 2)
+				s.Write([]byte("你好"))        // 你(0) cont(1) 好(2) cont(3)
+				s.Write([]byte("\x1b[1;4H")) // cursor to col 3: continuation of 好
+				s.ClearDamage()
+				s.Write([]byte("\x1b[1@")) // ICH 1: shift right from col 3
+
+				// The shift splits 好/cont: 好 stays at col 2, its continuation
+				// moves to col 4. Both orphans must be repaired to blanks.
+				assertCell(t, s, 0, 0, '你')
+				assertContinuation(t, s, 1, 0)
+				assertBlank(t, s, 2, 0) // 好 orphaned by the split → cleared
+				assertBlank(t, s, 3, 0) // inserted blank
+				assertBlank(t, s, 4, 0) // shifted continuation orphaned → cleared
+				assertBlank(t, s, 5, 0)
+
+				d := s.Damage()
+				if len(d) == 0 {
+					t.Fatal("expected damage")
+				}
+				// Damage must extend one column left to cover the repaired 好.
+				if d[0].X != 2 || d[0].Width != 4 {
+					t.Errorf("ICH damage = {X:%d W:%d}, want {X:2 W:4}", d[0].X, d[0].Width)
+				}
+			},
+		},
+		{
+			name: "insert chars shifting a wide pair off the right edge repairs the left half",
+			run: func(t *testing.T) {
+				s := NewScreen(4, 2)
+				s.Write([]byte("你好"))        // 你(0) cont(1) 好(2) cont(3)
+				s.Write([]byte("\x1b[1;1H")) // cursor home
+				s.Write([]byte("\x1b[1@"))   // ICH 1: shift the row right by 1
+
+				// 好 lands on the last column with its continuation pushed off
+				// the edge; the orphaned wide left must be blanked.
+				assertBlank(t, s, 0, 0)
+				assertCell(t, s, 1, 0, '你')
+				assertContinuation(t, s, 2, 0)
+				assertBlank(t, s, 3, 0) // 好 lost its continuation → cleared
+			},
+		},
+		{
+			name: "delete char at the left half of a wide pair repairs the orphan",
+			run: func(t *testing.T) {
+				s := NewScreen(6, 2)
+				s.Write([]byte("你好AB"))      // 你(0) cont(1) 好(2) cont(3) A(4) B(5)
+				s.Write([]byte("\x1b[1;1H")) // cursor to col 0: wide left of 你
+				s.ClearDamage()
+				s.Write([]byte("\x1b[1P")) // DCH 1
+
+				// 你's continuation shifts to col 0 with no left half → repaired.
+				assertBlank(t, s, 0, 0)
+				assertCell(t, s, 1, 0, '好')
+				assertContinuation(t, s, 2, 0)
+				assertCell(t, s, 3, 0, 'A')
+				assertCell(t, s, 4, 0, 'B')
+				assertBlank(t, s, 5, 0)
+
+				d := s.Damage()
+				if len(d) == 0 {
+					t.Fatal("expected damage")
+				}
+				if d[0].X != 0 || d[0].Width != 6 {
+					t.Errorf("DCH damage = {X:%d W:%d}, want {X:0 W:6}", d[0].X, d[0].Width)
+				}
+			},
+		},
+		{
+			name: "delete char at a continuation repairs the wide left and extends damage",
+			run: func(t *testing.T) {
+				s := NewScreen(6, 2)
+				s.Write([]byte("你好AB"))      // 你(0) cont(1) 好(2) cont(3) A(4) B(5)
+				s.Write([]byte("\x1b[1;2H")) // cursor to col 1: continuation of 你
+				s.ClearDamage()
+				s.Write([]byte("\x1b[1P")) // DCH 1: delete the continuation
+
+				// 你 at col 0 loses its continuation → repaired to blank.
+				assertBlank(t, s, 0, 0)
+				assertCell(t, s, 1, 0, '好')
+				assertContinuation(t, s, 2, 0)
+				assertCell(t, s, 3, 0, 'A')
+				assertCell(t, s, 4, 0, 'B')
+				assertBlank(t, s, 5, 0)
+
+				d := s.Damage()
+				if len(d) == 0 {
+					t.Fatal("expected damage")
+				}
+				// Damage must extend one column left (to col 0) to cover the
+				// repaired wide left half.
+				if d[0].X != 0 || d[0].Width != 6 {
+					t.Errorf("DCH damage = {X:%d W:%d}, want {X:0 W:6}", d[0].X, d[0].Width)
+				}
+			},
+		},
+		{
 			name: "wide char on a width-1 screen degrades to a single cell",
 			run: func(t *testing.T) {
 				s := NewScreen(1, 2)
