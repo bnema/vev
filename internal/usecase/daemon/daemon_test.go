@@ -340,6 +340,39 @@ func TestCopyModeEscapeRestoresLiveFullRepaint(t *testing.T) {
 	}
 }
 
+func TestCopyModeEnterExitConcurrentWithPaintRace(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	sess.windows[0].scrollback = scopy.NewScrollback(4)
+	sess.windows[0].screen.Write([]byte("live"))
+
+	done := make(chan struct{})
+	var drain sync.WaitGroup
+	drain.Go(func() {
+		for {
+			select {
+			case <-sends:
+			case <-done:
+				return
+			}
+		}
+	})
+
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Go(func() {
+			d.enterCopyMode(sess, ac)
+			d.handleInput(sess, ac, []byte("q"))
+		})
+		wg.Go(func() {
+			d.paint(sess, ac, true)
+		})
+	}
+	wg.Wait()
+	close(done)
+	drain.Wait()
+}
+
 func windowCount(sess *session) int {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()

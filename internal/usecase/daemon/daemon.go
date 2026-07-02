@@ -147,8 +147,15 @@ type attachedClient struct {
 	rend     *renderer.Renderer
 	size     domain.Size
 	keys     *keys.Router
+	copyMu   sync.Mutex
 	copyMode *scopy.Mode
 	sendMu   sync.Mutex
+}
+
+func (ac *attachedClient) copyModeActive() bool {
+	ac.copyMu.Lock()
+	defer ac.copyMu.Unlock()
+	return ac.copyMode != nil
 }
 
 // send serialises a frame onto the client's transport.
@@ -680,7 +687,7 @@ func (s *session) activeWindow() *window {
 }
 
 func (d *Daemon) handleInput(sess *session, ac *attachedClient, data []byte) {
-	if ac.copyMode != nil {
+	if ac.copyModeActive() {
 		d.handleCopyInput(sess, ac, data)
 		return
 	}
@@ -698,17 +705,25 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	win.mu.Lock()
 	snap := scopy.NewSnapshot(win.scrollback, win.screen.Frame)
 	win.mu.Unlock()
+	ac.copyMu.Lock()
 	ac.copyMode = scopy.NewMode(snap)
+	ac.copyMu.Unlock()
 	d.paint(sess, ac, true)
 }
 
 func (d *Daemon) handleCopyInput(sess *session, ac *attachedClient, data []byte) {
 	win := sess.activeWindow()
-	if win == nil || ac.copyMode == nil {
+	if win == nil {
 		return
 	}
 
 	win.mu.Lock()
+	ac.copyMu.Lock()
+	if ac.copyMode == nil {
+		ac.copyMu.Unlock()
+		win.mu.Unlock()
+		return
+	}
 	snap := scopy.NewSnapshot(win.scrollback, win.screen.Frame)
 	changed := false
 	copyOut := false
@@ -749,6 +764,10 @@ func (d *Daemon) handleCopyInput(sess *session, ac *attachedClient, data []byte)
 	if copyOut {
 		text = ac.copyMode.SelectedText(snap)
 	}
+	if exit {
+		ac.copyMode = nil
+	}
+	ac.copyMu.Unlock()
 	win.mu.Unlock()
 
 	if copyOut {
@@ -760,7 +779,6 @@ func (d *Daemon) handleCopyInput(sess *session, ac *attachedClient, data []byte)
 		}
 	}
 	if exit {
-		ac.copyMode = nil
 		d.paint(sess, ac, true)
 		return
 	}
@@ -1001,6 +1019,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 
 	ac.sendMu.Lock()
 	win.mu.Lock()
+	ac.copyMu.Lock()
 	if reset || ac.copyMode != nil {
 		ac.rend.Reset()
 	}
@@ -1008,6 +1027,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	if ac.copyMode != nil {
 		frame, damage = composeCopyClientFrame(ac.copyMode, win)
 	}
+	ac.copyMu.Unlock()
 	data, err := ac.rend.Draw(frame, damage)
 	win.screen.ClearDamage()
 	win.mu.Unlock()
