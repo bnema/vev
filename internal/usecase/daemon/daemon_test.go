@@ -1338,6 +1338,102 @@ func TestSendErrorKillsEphemeral(t *testing.T) {
 	d.waitNotifies()
 }
 
+func TestSchedulerDefersPendingDirtyTimerDuringSynchronizedUpdate(t *testing.T) {
+	mc := portsmocks.NewMockClock(t)
+	mc.EXPECT().Now().Return(time.Now()).Maybe()
+	mt := portsmocks.NewMockTimer(t)
+	timerCh := make(chan time.Time, 1)
+	mc.EXPECT().NewTimer(mock.Anything).Return(mt).Maybe()
+	mt.EXPECT().C().Return(timerCh).Maybe()
+	mt.EXPECT().Stop().Return(true).Maybe()
+
+	var outputs atomic.Int32
+	gotOutput := make(chan struct{}, 1)
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f ports.Frame) error {
+		if f.Type == ports.MsgOutput {
+			outputs.Add(1)
+			select {
+			case gotOutput <- struct{}{}:
+			default:
+			}
+		}
+		return nil
+	}).Maybe()
+
+	d := New(nil, mc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	sctx, cancel := context.WithCancel(context.Background())
+	win := &window{screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	sess := &session{id: "sync", name: "sync", windows: []*window{win}, ctx: sctx, cancel: cancel, client: ac}
+
+	win.mu.Lock()
+	win.screen.Write([]byte("before"))
+	win.mu.Unlock()
+
+	d.sessWg.Add(1)
+	go d.scheduler(sess, win)
+	win.dirty <- struct{}{}
+
+	win.mu.Lock()
+	win.screen.Write([]byte("\x1b[?2026hafter"))
+	win.mu.Unlock()
+	timerCh <- time.Now()
+
+	select {
+	case <-gotOutput:
+		t.Fatal("scheduler rendered while synchronized update was active")
+	case <-time.After(20 * time.Millisecond):
+	}
+	require.Equal(t, int32(0), outputs.Load())
+
+	win.mu.Lock()
+	win.screen.Write([]byte(" done\x1b[?2026l"))
+	win.mu.Unlock()
+	win.flush <- struct{}{}
+	select {
+	case <-gotOutput:
+	case <-time.After(time.Second):
+		t.Fatal("sync end did not flush deferred damage")
+	}
+
+	cancel()
+	d.sessWg.Wait()
+}
+
+func TestPTYReaderSameReadSynchronizedUpdateStartEndFlushesImmediately(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	p := portsmocks.NewMockPTY(t)
+	chunks := [][]byte{[]byte("\x1b[?2026hhello\x1b[?2026l")}
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
+		if len(chunks) == 0 {
+			return 0, io.EOF
+		}
+		n := copy(buf, chunks[0])
+		chunks = chunks[1:]
+		return n, nil
+	})
+	p.EXPECT().Close().Return(nil).Maybe()
+
+	sctx, cancel := context.WithCancel(context.Background())
+	win := &window{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	sess := &session{id: "sync", name: "sync", windows: []*window{win}, ctx: sctx, cancel: cancel}
+	d.sessions[sess.id] = sess
+	d.sessWg.Add(1)
+	d.ptyReader(sess, win)
+
+	select {
+	case <-win.dirty:
+		t.Fatal("same-read synchronized update end should request flush, not dirty")
+	default:
+	}
+	select {
+	case <-win.flush:
+	case <-time.After(time.Second):
+		t.Fatal("same-read synchronized update end did not request immediate flush")
+	}
+}
+
 func TestPTYReaderDefersDirtyDuringSynchronizedUpdateAndFlushesAtEnd(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	p := portsmocks.NewMockPTY(t)

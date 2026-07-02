@@ -26,6 +26,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -951,12 +952,13 @@ func (d *Daemon) ptyReader(sess *session, win *window) {
 	for {
 		n, err := win.pty.Read(buf)
 		if n > 0 {
+			data := buf[:n]
 			win.mu.Lock()
 			wasSyncing := win.screen.SyncUpdateActive()
-			win.screen.Write(buf[:n])
+			win.screen.Write(data)
 			isSyncing := win.screen.SyncUpdateActive()
 			win.mu.Unlock()
-			if wasSyncing && !isSyncing {
+			if (wasSyncing && !isSyncing) || (!isSyncing && syncUpdateEndIn(data)) {
 				signal(win.flush)
 				continue
 			}
@@ -1050,9 +1052,20 @@ func windowDone(win *window) <-chan struct{} {
 	return win.ctx.Done()
 }
 
+func syncUpdateEndIn(data []byte) bool {
+	return bytes.Contains(data, []byte("\x1b[?2026l"))
+}
+
 // render paints the current client, or (when detached) just clears accumulated
 // damage so it never grows unbounded while headless.
 func (d *Daemon) render(sess *session, win *window) {
+	win.mu.Lock()
+	if win.screen.SyncUpdateActive() {
+		win.mu.Unlock()
+		return
+	}
+	win.mu.Unlock()
+
 	sess.mu.Lock()
 	ac := sess.client
 	active := sess.active >= 0 && sess.active < len(sess.windows) && sess.windows[sess.active] == win

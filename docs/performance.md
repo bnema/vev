@@ -20,11 +20,12 @@ Full end-to-end vev-vs-tmux workload baselines were not run for this change beca
 4. Capture client/daemon syscall summaries with `strace -c` (or platform equivalent), bytes written per rendered frame, and heap profiles or `-benchmem` allocation counts.
 5. Store raw command lines and outputs beside this document before comparing.
 
-Microbenchmarks executed locally for this review using `go test ./internal/adapters/ipc -run '^$' -bench=BenchmarkTransportRecvReuse -benchmem`:
+Microbenchmarks executed locally for this review using `go test ./internal/adapters/ipc -run '^$' -bench=. -benchmem`:
 
-| benchmark | result |
+| benchmark | methodology |
 | --- | --- |
-| BenchmarkTransportRecvReuse | recorded during review; isolates the receiver loop by reusing both transports and moving frame encoding/sending to a helper goroutine |
+| BenchmarkTransportSend | writes encoded frames to an in-memory discard `net.Conn`; allocations reported here are Send-side frame assembly costs. |
+| BenchmarkTransportRecvReuse | reads a pre-encoded frame from a looping in-memory reader; no `Send` call, goroutine, channel, or frame production work runs inside the measured loop, so allocations reported here are Recv-side costs only. |
 
 | workload | vev baseline | tmux baseline | notes |
 | --- | --- | --- | --- |
