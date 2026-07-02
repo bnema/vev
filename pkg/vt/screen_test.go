@@ -2192,3 +2192,15 @@ func TestScreenReportsSynchronizedUpdateMode(t *testing.T) {
 		t.Fatal("sync update mode should be inactive")
 	}
 }
+
+func TestForceSyncEnd(t *testing.T) {
+	s := NewScreen(10, 2)
+	s.Write([]byte("\x1b[?2026h"))
+	if !s.SyncUpdateActive() {
+		t.Fatal("sync update mode should be active before forcing end")
+	}
+	s.ForceSyncEnd()
+	if s.SyncUpdateActive() {
+		t.Fatal("sync update mode should be inactive after forcing end")
+	}
+}

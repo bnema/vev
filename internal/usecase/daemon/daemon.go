@@ -49,9 +49,10 @@ import (
 // Scheduler debounce bounds. Idle updates use the minimum for low latency;
 // sustained floods step toward the maximum to reduce frame/syscall pressure.
 const (
-	minDebounceInterval = 2 * time.Millisecond
-	maxDebounceInterval = 16 * time.Millisecond
-	debounceStep        = 2 * time.Millisecond
+	minDebounceInterval   = 2 * time.Millisecond
+	maxDebounceInterval   = 16 * time.Millisecond
+	debounceStep          = 2 * time.Millisecond
+	maxSyncUpdateDuration = 500 * time.Millisecond
 )
 
 // debounceInterval is kept as a test/back-compat alias for the initial delay.
@@ -135,11 +136,12 @@ type session struct {
 // already pending"), never by blocking the reader.
 type window struct {
 	pty        ports.PTY
-	mu         sync.Mutex // guards screen and every attached renderer's shadow
+	mu         sync.Mutex // guards screen, syncGen, and every attached renderer's shadow
 	screen     *vt.Screen
 	scrollback *scopy.Scrollback
 	dirty      chan struct{}
 	flush      chan struct{}
+	syncGen    uint64
 	size       domain.Size
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -151,13 +153,14 @@ type window struct {
 // scheduler and the connection handler — so the transport's single-writer
 // contract holds and Draw→Send stays atomic (correct output ordering).
 type attachedClient struct {
-	tr       ports.Transport
-	rend     *renderer.Renderer
-	size     domain.Size
-	keys     *keys.Router
-	copyMu   sync.Mutex
-	copyMode *scopy.Mode
-	sendMu   sync.Mutex
+	tr          ports.Transport
+	rend        *renderer.Renderer
+	size        domain.Size
+	keys        *keys.Router
+	copyMu      sync.Mutex
+	copyMode    *scopy.Mode
+	copyPending []byte
+	sendMu      sync.Mutex
 }
 
 func (ac *attachedClient) copyModeActive() bool {
@@ -700,9 +703,6 @@ func (d *Daemon) handleInput(sess *session, ac *attachedClient, data []byte) {
 		d.handleCopyInput(sess, ac, data)
 		return
 	}
-	if ac.keys == nil {
-		ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, sess: sess, ac: ac})
-	}
 	ac.keys.Route(data)
 }
 
@@ -729,9 +729,17 @@ func (d *Daemon) handleCopyInput(sess *session, ac *attachedClient, data []byte)
 	win.mu.Lock()
 	ac.copyMu.Lock()
 	if ac.copyMode == nil {
+		ac.copyPending = nil
 		ac.copyMu.Unlock()
 		win.mu.Unlock()
 		return
+	}
+	if len(ac.copyPending) > 0 {
+		combined := make([]byte, 0, len(ac.copyPending)+len(data))
+		combined = append(combined, ac.copyPending...)
+		combined = append(combined, data...)
+		data = combined
+		ac.copyPending = nil
 	}
 	snap := scopy.NewSnapshot(win.scrollback, win.screen.Frame)
 	changed := false
@@ -759,11 +767,16 @@ func (d *Daemon) handleCopyInput(sess *session, ac *attachedClient, data []byte)
 			exit = true
 		case 'q', 0x03, 0x1b:
 			if data[i] == 0x1b {
-				consumed, ok := routeCopyEscape(ac.copyMode, snap, data[i:])
+				tail := data[i:]
+				consumed, ok := routeCopyEscape(ac.copyMode, snap, tail)
 				if ok {
 					i += consumed - 1
 					changed = true
 					continue
+				}
+				if isCopyEscapePrefix(tail) {
+					ac.copyPending = append(ac.copyPending[:0], tail...)
+					break
 				}
 			}
 			exit = true
@@ -779,7 +792,7 @@ func (d *Daemon) handleCopyInput(sess *session, ac *attachedClient, data []byte)
 	ac.copyMu.Unlock()
 	win.mu.Unlock()
 
-	if copyOut {
+	if copyOut && text != "" {
 		for _, chunk := range scopy.OSC52(text) {
 			if err := ac.send(frameOutput(chunk)); err != nil {
 				d.detachOnSendError(sess, ac)
@@ -818,6 +831,11 @@ func routeCopyEscape(m *scopy.Mode, snap scopy.Snapshot, data []byte) (int, bool
 		}
 	}
 	return 0, false
+}
+
+func isCopyEscapePrefix(data []byte) bool {
+	return len(data) == 2 && data[0] == 0x1b && data[1] == '[' ||
+		len(data) == 3 && data[0] == 0x1b && data[1] == '[' && (data[2] == '5' || data[2] == '6')
 }
 
 type daemonKeyHandler struct {
@@ -951,6 +969,10 @@ func signal(ch chan struct{}) {
 func (d *Daemon) ptyReader(sess *session, win *window) {
 	defer d.sessWg.Done()
 	buf := make([]byte, ptyReadBufSize)
+	var resp []byte
+	win.mu.Lock()
+	win.screen.OnResponse = func(b []byte) { resp = append(resp, b...) }
+	win.mu.Unlock()
 	for {
 		n, err := win.pty.Read(buf)
 		if n > 0 {
@@ -960,6 +982,21 @@ func (d *Daemon) ptyReader(sess *session, win *window) {
 			win.screen.Write(data)
 			isSyncing := win.screen.SyncUpdateActive()
 			win.mu.Unlock()
+			if len(resp) > 0 {
+				if _, writeErr := win.pty.Write(resp); writeErr != nil {
+					d.log.Warn("pty response write failed", "err", writeErr, "session", sess.name)
+				}
+				resp = resp[:0]
+			}
+			if wasSyncing != isSyncing {
+				win.mu.Lock()
+				win.syncGen++
+				gen := win.syncGen
+				win.mu.Unlock()
+				if isSyncing {
+					go d.syncWatchdog(win, gen)
+				}
+			}
 			if (wasSyncing && !isSyncing) || (!isSyncing && syncUpdateEndIn(data)) {
 				signal(win.flush)
 				continue
@@ -1045,6 +1082,25 @@ func nextDebounceDelay(delay time.Duration, coalesced int) time.Duration {
 		return maxDebounceInterval
 	}
 	return delay
+}
+
+func (d *Daemon) syncWatchdog(win *window, gen uint64) {
+	timer := d.clock.NewTimer(maxSyncUpdateDuration)
+	select {
+	case <-windowDone(win):
+		timer.Stop()
+		return
+	case <-timer.C():
+	}
+
+	win.mu.Lock()
+	if win.syncGen != gen || !win.screen.SyncUpdateActive() {
+		win.mu.Unlock()
+		return
+	}
+	win.screen.ForceSyncEnd()
+	win.mu.Unlock()
+	signal(win.flush)
 }
 
 func windowDone(win *window) <-chan struct{} {

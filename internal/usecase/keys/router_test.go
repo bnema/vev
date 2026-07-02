@@ -121,6 +121,47 @@ func TestRouterRetainsSplitESCAndInterceptsNextBoundByte(t *testing.T) {
 	require.Empty(t, h.forwards)
 }
 
+func TestRouterForwardsCSIAfterRetainedESCAcrossReads(t *testing.T) {
+	cases := []struct {
+		name        string
+		secondInput []byte
+		want        []byte
+	}{
+		{name: "CSI up", secondInput: []byte("[A"), want: []byte{ESC, '[', 'A'}},
+		{name: "SS3 function key", secondInput: []byte("OP"), want: []byte{ESC, 'O', 'P'}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := &fakeClock{}
+			h := &captureHandler{}
+			r := NewRouter(clk, h)
+			r.Route([]byte{ESC})
+			require.Len(t, clk.timers, 1)
+			require.Empty(t, h.forwards)
+
+			r.Route(tc.secondInput)
+
+			require.True(t, clk.timers[0].stopped)
+			require.Empty(t, h.actions)
+			require.Equal(t, [][]byte{tc.want[:2], tc.want[2:]}, h.forwards)
+		})
+	}
+}
+
+func TestRouterRoutesBytesAfterRetainedEscapePrefix(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	r := NewRouter(clk, h)
+	r.Route([]byte{ESC})
+
+	r.Route([]byte{'[', 'A', ESC, 'c'})
+
+	require.True(t, clk.timers[0].stopped)
+	require.Equal(t, [][]byte{{ESC, '['}, []byte("A")}, h.forwards)
+	require.Equal(t, []Action{ActionCreateWindow}, h.actions)
+}
+
 func TestRouterCancelsPendingESCWaiterWhenNextReadConsumesESC(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
@@ -166,9 +207,4 @@ func TestRouterFlushesPendingESCBeforeOtherByte(t *testing.T) {
 	r.Route([]byte{'z'})
 	require.Equal(t, [][]byte{{ESC}, []byte("z")}, h.forwards)
 	require.Empty(t, h.actions)
-}
-
-func TestPartialInputSuffixLen(t *testing.T) {
-	require.Equal(t, 1, PartialInputSuffixLen([]byte("abc\x1b")))
-	require.Equal(t, 0, PartialInputSuffixLen([]byte("abc")))
 }

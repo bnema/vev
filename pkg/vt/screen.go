@@ -36,6 +36,10 @@ type Screen struct {
 	// OnLineEvicted is called just before a full-width upward scroll recycles
 	// and blanks rows. The callback receives a stable copy of each evicted row.
 	OnLineEvicted func([]renderer.Cell)
+	// OnResponse is called synchronously from Write with reply bytes that the
+	// emulator must send back to the child process (DA, DSR, DECRQM reports).
+	// The host wires it to the PTY input. Nil disables responses.
+	OnResponse func([]byte)
 
 	damage    []renderer.Damage
 	escapeBuf []byte
@@ -79,6 +83,11 @@ func (s *Screen) ClearDamage()              { s.damage = s.damage[:0] }
 // SyncUpdateActive reports whether DEC private mode 2026 (synchronized update)
 // is currently enabled by the child process.
 func (s *Screen) SyncUpdateActive() bool { return s.syncUpdateActive }
+
+// ForceSyncEnd forcibly leaves DEC private mode 2026 (synchronized update).
+// Hosts use this as a safety valve if a child enters synchronized update mode
+// and never sends the matching end sequence.
+func (s *Screen) ForceSyncEnd() { s.syncUpdateActive = false }
 
 func (s *Screen) Write(data []byte) {
 	if len(s.escapeBuf) > 0 {
@@ -487,6 +496,12 @@ func (s *Screen) emitLineEvicted(top, n int) {
 	}
 }
 
+func (s *Screen) respond(b []byte) {
+	if s.OnResponse != nil {
+		s.OnResponse(b)
+	}
+}
+
 func (s *Screen) scrollDownRegion(top, bottom, n int) {
 	if s.Frame.Width == 0 || s.Frame.Height == 0 || n <= 0 {
 		return
@@ -629,6 +644,51 @@ func (s *Screen) applyCSI(params string, cmd byte) {
 	private := strings.HasPrefix(params, "?")
 	parts := parseCSIInts(params)
 	switch cmd {
+	case 'c':
+		if params == "" || params == "0" {
+			s.respond([]byte("\x1b[?6c"))
+		} else if params == ">" || params == ">0" {
+			s.respond([]byte("\x1b[>0;0;0c"))
+		}
+	case 'n':
+		switch firstPositive(parts, 0) {
+		case 5:
+			if !private {
+				s.respond([]byte("\x1b[0n"))
+			}
+		case 6:
+			resp := make([]byte, 0, 16)
+			resp = append(resp, "\x1b["...)
+			if private {
+				resp = append(resp, '?')
+			}
+			resp = strconv.AppendInt(resp, int64(s.Row+1), 10)
+			resp = append(resp, ';')
+			resp = strconv.AppendInt(resp, int64(s.Col+1), 10)
+			resp = append(resp, 'R')
+			s.respond(resp)
+		}
+	case 'p':
+		if private && strings.HasSuffix(params, "$") {
+			mode, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(params, "?"), "$"))
+			if err != nil {
+				return
+			}
+			state := 0
+			if mode == 2026 {
+				state = 2
+				if s.syncUpdateActive {
+					state = 1
+				}
+			}
+			resp := make([]byte, 0, 16)
+			resp = append(resp, "\x1b[?"...)
+			resp = strconv.AppendInt(resp, int64(mode), 10)
+			resp = append(resp, ';')
+			resp = strconv.AppendInt(resp, int64(state), 10)
+			resp = append(resp, "$y"...)
+			s.respond(resp)
+		}
 	case 'm':
 		if strings.HasPrefix(params, ">") {
 			return
@@ -693,7 +753,9 @@ func (s *Screen) applyCSI(params string, cmd byte) {
 	case 's':
 		s.saveCursor()
 	case 'u':
-		s.restoreCursor()
+		if params == "" {
+			s.restoreCursor()
+		}
 	case 'h':
 		s.setMode(private, parts, true)
 	case 'l':

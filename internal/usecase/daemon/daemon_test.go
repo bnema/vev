@@ -3,7 +3,9 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -19,6 +21,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -41,14 +44,30 @@ func (stubTimer) Stop() bool               { return true }
 
 type signalClock struct {
 	called chan struct{}
+	timers chan *signalTimer
 	once   sync.Once
 }
 
 func (c *signalClock) Now() time.Time { return time.Time{} }
 func (c *signalClock) NewTimer(time.Duration) ports.Timer {
-	c.once.Do(func() { close(c.called) })
-	return stubTimer{}
+	if c.called != nil {
+		c.once.Do(func() { close(c.called) })
+	}
+	if c.timers == nil {
+		return stubTimer{}
+	}
+	t := &signalTimer{ch: make(chan time.Time, 1)}
+	c.timers <- t
+	return t
 }
+
+type signalTimer struct {
+	ch chan time.Time
+}
+
+func (t *signalTimer) C() <-chan time.Time      { return t.ch }
+func (t *signalTimer) Reset(time.Duration) bool { return false }
+func (t *signalTimer) Stop() bool               { return true }
 
 func newTestDaemon(t *testing.T, ptys ports.PTYFactory, clk ports.Clock) *Daemon {
 	t.Helper()
@@ -161,6 +180,14 @@ func frameInput(data []byte) ports.Frame {
 	return ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: data})}
 }
 
+func screenLineText(s *vt.Screen, y int) string {
+	out := make([]rune, s.Frame.Width)
+	for x := range s.Frame.Width {
+		out[x] = s.Frame.At(x, y).Rune
+	}
+	return string(out)
+}
+
 // awaitFrame waits for the next frame of type typ on ch, failing on timeout.
 func awaitFrame(t *testing.T, ch chan ports.Frame, typ ports.MsgType) ports.Frame {
 	t.Helper()
@@ -226,6 +253,7 @@ func newManualSessionWithPTYs(t *testing.T, ptys ...ports.PTY) (*Daemon, *sessio
 		windows = append(windows, &window{pty: p, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: wctx, cancel: wcancel})
 	}
 	sess := &session{id: "manual", name: "work", ctx: sctx, cancel: cancel, windows: windows, client: ac}
+	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, sess: sess, ac: ac})
 	d.sessions[sess.id] = sess
 	t.Cleanup(cancel)
 	return d, sess, ac, sends
@@ -339,6 +367,76 @@ func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 	}
 }
 
+func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
+	p := portsmocks.NewMockPTY(t)
+	reads := make(chan []byte, 64)
+	readDone := make(chan struct{})
+	var closeOnce sync.Once
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func(b []byte) (int, error) {
+		select {
+		case data := <-reads:
+			return copy(b, data), nil
+		case <-readDone:
+			return 0, io.EOF
+		}
+	}).Maybe()
+	p.EXPECT().Write(mock.Anything).Return(0, errors.New("unexpected PTY write")).Maybe()
+	p.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
+	p.EXPECT().Close().RunAndReturn(func() error { closeOnce.Do(func() { close(readDone) }); return nil }).Maybe()
+	p.EXPECT().Pid().Return(4242).Maybe()
+
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	tr, sends, releaseConn := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 16, Rows: 5}))
+	var hg sync.WaitGroup
+	hg.Go(func() { d.handleConn(tr) })
+	awaitFrame(t, sends, ports.MsgWelcome)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	for i := range 12 {
+		reads <- fmt.Appendf(nil, "line-%02d\r\n", i)
+	}
+	require.Eventually(t, func() bool {
+		sess := firstSession(d)
+		if sess == nil {
+			return false
+		}
+		win := sess.activeWindow()
+		if win == nil {
+			return false
+		}
+		win.mu.Lock()
+		defer win.mu.Unlock()
+		return len(scopy.NewSnapshot(win.scrollback, win.screen.Frame).Rows) >= 12
+	}, 2*time.Second, 5*time.Millisecond)
+
+	sess := firstSession(d)
+	require.NotNil(t, sess)
+	ac := sess.client
+	require.NotNil(t, ac)
+	d.handleInput(sess, ac, []byte("\x1bu"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte{'g', ' ', 'G', 'y'})
+
+	var payload string
+	require.Eventually(t, func() bool {
+		out := awaitFrame(t, sends, ports.MsgOutput)
+		msg, err := ports.UnmarshalOutput(out.Payload)
+		require.NoError(t, err)
+		payload = string(msg.Data)
+		return strings.HasPrefix(payload, "\x1b]52;c;")
+	}, 2*time.Second, 5*time.Millisecond)
+	require.True(t, strings.HasPrefix(payload, "\x1b]52;c;"), "OSC52 payload = %q", payload)
+	require.True(t, strings.HasSuffix(payload, "\a"), "OSC52 payload = %q", payload)
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(strings.TrimPrefix(payload, "\x1b]52;c;"), "\a"))
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(string(decoded), "line-00"), "decoded yank = %q", string(decoded))
+
+	releaseConn()
+	closeOnce.Do(func() { close(readDone) })
+	hg.Wait()
+	d.sessWg.Wait()
+}
+
 func TestCopyModeEscapeRestoresLiveFullRepaint(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
@@ -357,6 +455,75 @@ func TestCopyModeEscapeRestoresLiveFullRepaint(t *testing.T) {
 	require.NoError(t, err)
 	if strings.Contains(string(msg.Data), "[COPY]") || !strings.Contains(string(msg.Data), "live") {
 		t.Fatalf("exit repaint = %q, want live full repaint without copy status", string(msg.Data))
+	}
+}
+
+func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
+	cases := []struct {
+		name        string
+		firstInput  []byte
+		secondInput []byte
+		wantActive  bool
+	}{
+		{name: "split up arrow", firstInput: []byte("\x1b["), secondInput: []byte("A"), wantActive: true},
+		{name: "split page down", firstInput: []byte("\x1b[6"), secondInput: []byte("~"), wantActive: true},
+		{name: "lone escape exits", firstInput: []byte("\x1b"), wantActive: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _ := newBlockingPTY(t)
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			sess.windows[0].scrollback = scopy.NewScrollback(4)
+			sess.windows[0].scrollback.Append(testRow("old1    "))
+			sess.windows[0].scrollback.Append(testRow("old2    "))
+			sess.windows[0].screen.Write([]byte("live"))
+
+			d.enterCopyMode(sess, ac)
+			awaitFrame(t, sends, ports.MsgOutput)
+			d.handleInput(sess, ac, tc.firstInput)
+			if tc.secondInput != nil {
+				d.handleInput(sess, ac, tc.secondInput)
+			}
+
+			if gotActive := ac.copyMode != nil; gotActive != tc.wantActive {
+				t.Fatalf("copy mode active = %v, want %v", gotActive, tc.wantActive)
+			}
+		})
+	}
+}
+
+func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
+	cases := []struct {
+		name  string
+		input []byte
+	}{
+		{name: "yank", input: []byte("y")},
+		{name: "enter", input: []byte("\r")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _ := newBlockingPTY(t)
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			sess.windows[0].scrollback = scopy.NewScrollback(4)
+			sess.windows[0].screen.Write([]byte("live"))
+
+			d.enterCopyMode(sess, ac)
+			awaitFrame(t, sends, ports.MsgOutput)
+			d.handleInput(sess, ac, tc.input)
+
+			if ac.copyMode != nil {
+				t.Fatal("copy mode still active after empty yank")
+			}
+			out := awaitFrame(t, sends, ports.MsgOutput)
+			msg, err := ports.UnmarshalOutput(out.Payload)
+			require.NoError(t, err)
+			if strings.Contains(string(msg.Data), "\x1b]52;") {
+				t.Fatalf("empty yank emitted OSC52 clipboard clear: %q", string(msg.Data))
+			}
+			if strings.Contains(string(msg.Data), "[COPY]") || !strings.Contains(string(msg.Data), "live") {
+				t.Fatalf("empty yank repaint = %q, want live full repaint", string(msg.Data))
+			}
+		})
 	}
 }
 
@@ -1421,6 +1588,46 @@ func TestSchedulerDefersPendingDirtyTimerDuringSynchronizedUpdate(t *testing.T) 
 	d.sessWg.Wait()
 }
 
+func TestPTYQueryGetsResponseWrittenBackToPTY(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	p := portsmocks.NewMockPTY(t)
+	chunks := [][]byte{[]byte("\x1b[6n")}
+	writes := make(chan []byte, 1)
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
+		if len(chunks) == 0 {
+			return 0, io.EOF
+		}
+		n := copy(buf, chunks[0])
+		chunks = chunks[1:]
+		return n, nil
+	})
+	p.EXPECT().Write(mock.Anything).RunAndReturn(func(b []byte) (int, error) {
+		writes <- append([]byte(nil), b...)
+		return len(b), nil
+	}).Once()
+	p.EXPECT().Close().Return(nil).Maybe()
+
+	tr, sends := newCapturingTransport(t)
+	sctx, cancel := context.WithCancel(context.Background())
+	win := &window{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	sess := &session{id: "query", name: "query", windows: []*window{win}, ctx: sctx, cancel: cancel, client: &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}}
+	d.sessions[sess.id] = sess
+	d.sessWg.Add(1)
+	d.ptyReader(sess, win)
+
+	select {
+	case got := <-writes:
+		require.Equal(t, []byte("\x1b[1;1R"), got)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for PTY response write")
+	}
+	select {
+	case f := <-sends:
+		require.NotEqual(t, ports.MsgOutput, f.Type)
+	default:
+	}
+}
+
 func TestPTYReaderSameReadSynchronizedUpdateStartEndFlushesImmediately(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	p := portsmocks.NewMockPTY(t)
@@ -1485,4 +1692,92 @@ func TestPTYReaderDefersDirtyDuringSynchronizedUpdateAndFlushesAtEnd(t *testing.
 	case <-time.After(time.Second):
 		t.Fatal("sync end did not request immediate flush")
 	}
+}
+
+func TestSyncUpdateWatchdogAbandonedSyncRenders(t *testing.T) {
+	clk := &signalClock{timers: make(chan *signalTimer, 1)}
+	d := newTestDaemon(t, nil, clk)
+	p := portsmocks.NewMockPTY(t)
+	release := make(chan struct{})
+	read := 0
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
+		if read == 0 {
+			read++
+			return copy(buf, []byte("\x1b[?2026habandoned")), nil
+		}
+		<-release
+		return 0, io.EOF
+	})
+	p.EXPECT().Close().Return(nil).Maybe()
+
+	tr, sends := newCapturingTransport(t)
+	sctx, cancel := context.WithCancel(context.Background())
+	win := &window{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	sess := &session{id: "sync", name: "sync", windows: []*window{win}, ctx: sctx, cancel: cancel, client: &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}}
+	d.sessions[sess.id] = sess
+	d.sessWg.Add(2)
+	go d.scheduler(sess, win)
+	go d.ptyReader(sess, win)
+
+	timer := <-clk.timers
+	timer.ch <- time.Now()
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	win.mu.Lock()
+	active := win.screen.SyncUpdateActive()
+	got := screenLineText(win.screen, 0)
+	win.mu.Unlock()
+	require.False(t, active)
+	require.Contains(t, got, "abandoned")
+
+	close(release)
+	cancel()
+	d.sessWg.Wait()
+}
+
+func TestSyncUpdateWatchdogStaleGenerationNoopAfterEnd(t *testing.T) {
+	clk := &signalClock{timers: make(chan *signalTimer, 1)}
+	d := newTestDaemon(t, nil, clk)
+	p := portsmocks.NewMockPTY(t)
+	release := make(chan struct{})
+	chunks := [][]byte{[]byte("\x1b[?2026hhello"), []byte(" world\x1b[?2026l")}
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
+		if len(chunks) > 0 {
+			n := copy(buf, chunks[0])
+			chunks = chunks[1:]
+			return n, nil
+		}
+		<-release
+		return 0, io.EOF
+	})
+	p.EXPECT().Close().Return(nil).Maybe()
+
+	tr, sends := newCapturingTransport(t)
+	sctx, cancel := context.WithCancel(context.Background())
+	win := &window{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	sess := &session{id: "sync", name: "sync", windows: []*window{win}, ctx: sctx, cancel: cancel, client: &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}}
+	d.sessions[sess.id] = sess
+	d.sessWg.Add(2)
+	go d.scheduler(sess, win)
+	go d.ptyReader(sess, win)
+
+	timer := <-clk.timers
+	awaitFrame(t, sends, ports.MsgOutput)
+	timer.ch <- time.Now()
+
+	select {
+	case f := <-sends:
+		if f.Type == ports.MsgOutput {
+			t.Fatal("stale synchronized update watchdog produced an extra render")
+		}
+	case <-time.After(50 * time.Millisecond):
+	}
+	win.mu.Lock()
+	active := win.screen.SyncUpdateActive()
+	win.mu.Unlock()
+	require.False(t, active)
+
+	close(release)
+	cancel()
+	d.sessWg.Wait()
 }

@@ -78,16 +78,6 @@ func (r *Router) Route(data []byte) {
 	r.route(data)
 }
 
-// PartialInputSuffixLen reports the suffix length that must be retained for a
-// later read. The current protocol only has one partial suffix: a lone trailing
-// ESC. This mirrors the YMUX partial-input pattern in a deliberately small form.
-func PartialInputSuffixLen(data []byte) int {
-	if len(data) > 0 && data[len(data)-1] == ESC {
-		return 1
-	}
-	return 0
-}
-
 func (r *Router) route(data []byte) {
 	buf := make([]byte, 0, len(data))
 	flush := func() {

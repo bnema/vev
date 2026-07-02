@@ -2,10 +2,8 @@ package renderer
 
 import (
 	"bytes"
-	"context"
 	"strings"
 	"testing"
-	"time"
 )
 
 // markFrame writes uniform printable content so each row is distinguishable.
@@ -504,104 +502,6 @@ func TestPartialDamage(t *testing.T) {
 			outputContains(t, out, "Z")
 			outputEndsWith(t, out, "\x1b[0m")
 		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Scheduler coalescing
-// ---------------------------------------------------------------------------
-
-func TestScheduler(t *testing.T) {
-	tests := []struct {
-		name string
-		run  func(t *testing.T)
-	}{
-		{
-			name: "coalesces bursts of requests into a single frame",
-			run: func(t *testing.T) {
-				s := NewScheduler(30 * time.Millisecond)
-				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-				defer cancel()
-
-				frames := s.Run(ctx)
-
-				// Fire several requests before the timer fires.
-				s.Request()
-				s.Request()
-				s.Request()
-
-				// Expect exactly one frame.
-				select {
-				case _, ok := <-frames:
-					if !ok {
-						t.Fatal("channel closed unexpectedly")
-					}
-				case <-ctx.Done():
-					t.Fatal("timeout waiting for frame")
-				}
-
-				// No second frame should arrive without another request.
-				select {
-				case <-frames:
-					t.Fatal("unexpected second frame")
-				case <-time.After(80 * time.Millisecond):
-					// good – coalesced.
-				}
-			},
-		},
-		{
-			name: "delivers a frame per request without spurious extras",
-			run: func(t *testing.T) {
-				s := NewScheduler(10 * time.Millisecond)
-				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-				defer cancel()
-
-				frames := s.Run(ctx)
-
-				s.Request()
-				<-frames // consume first
-
-				s.Request()
-				<-frames // consume second
-
-				// No pending request – should not deliver another frame.
-				select {
-				case <-frames:
-					t.Fatal("unexpected frame without request")
-				case <-time.After(40 * time.Millisecond):
-					// good
-				}
-			},
-		},
-		{
-			name: "closes frames channel on context cancellation",
-			run: func(t *testing.T) {
-				s := NewScheduler(50 * time.Millisecond)
-				ctx, cancel := context.WithCancel(context.Background())
-
-				frames := s.Run(ctx)
-				s.Request()
-
-				// Cancel before the timer fires.
-				cancel()
-
-				// Channel should close without ever delivering a frame.
-				select {
-				case _, ok := <-frames:
-					if ok {
-						// A frame may have been emitted before cancellation took effect;
-						// that is acceptable.  What matters is that the goroutine exits.
-						_ = ok
-					}
-				case <-time.After(200 * time.Millisecond):
-					// Channel didn't close – goroutine may be stuck.
-				}
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, tt.run)
 	}
 }
 

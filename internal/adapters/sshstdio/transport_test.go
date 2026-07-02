@@ -1,10 +1,13 @@
 package sshstdio
 
 import (
+	"bytes"
 	"errors"
 	"io"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/ports"
 )
@@ -96,5 +99,62 @@ func TestTransportRejectsZeroLengthFrame(t *testing.T) {
 	_, err := tr.Recv()
 	if !errors.Is(err, ErrZeroLengthFrame) {
 		t.Fatalf("Recv error = %v, want ErrZeroLengthFrame", err)
+	}
+}
+
+func TestProcessCloser(t *testing.T) {
+	tests := []struct {
+		name      string
+		cmd       *exec.Cmd
+		timeout   time.Duration
+		wantErrs  []string
+		wantBound bool
+	}{
+		{
+			name:      "wedged process is killed after timeout and reaped",
+			cmd:       exec.Command("sleep", "30"),
+			timeout:   50 * time.Millisecond,
+			wantErrs:  []string{"sshstdio: ssh exited:"},
+			wantBound: true,
+		},
+		{
+			name:     "stderr from failing shell command is included in error",
+			cmd:      exec.Command("sh", "-c", "echo kaboom >&2; exit 7"),
+			timeout:  time.Second,
+			wantErrs: []string{"sshstdio: ssh exited:", "kaboom"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stdin, err := tt.cmd.StdinPipe()
+			if err != nil {
+				t.Fatalf("StdinPipe: %v", err)
+			}
+			var stderr bytes.Buffer
+			tt.cmd.Stderr = &stderr
+			if err := tt.cmd.Start(); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+
+			started := time.Now()
+			err = newProcessCloser(tt.cmd, stdin, &stderr, tt.timeout)()
+			elapsed := time.Since(started)
+
+			if err == nil {
+				t.Fatalf("Close error = nil, want error containing %q", tt.wantErrs)
+			}
+			for _, want := range tt.wantErrs {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("Close error = %q, want substring %q", err.Error(), want)
+				}
+			}
+			if tt.wantBound && elapsed > time.Second {
+				t.Fatalf("Close took %s, want bounded below 1s", elapsed)
+			}
+			if tt.cmd.ProcessState == nil {
+				t.Fatalf("ProcessState is nil, want child reaped")
+			}
+		})
 	}
 }

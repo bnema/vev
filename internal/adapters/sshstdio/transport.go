@@ -5,6 +5,7 @@
 package sshstdio
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -12,13 +13,15 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bnema/vev/internal/ports"
 )
 
 const (
-	maxFrameLen    = 16 << 20
-	frameHeaderLen = 4
+	maxFrameLen     = 16 << 20
+	frameHeaderLen  = 4
+	sshCloseTimeout = 3 * time.Second
 )
 
 var (
@@ -91,6 +94,32 @@ func (t *transport) Recv() (ports.Frame, error) {
 
 func (t *transport) Close() error { return t.close() }
 
+func newProcessCloser(cmd *exec.Cmd, stdin io.Closer, stderr *bytes.Buffer, timeout time.Duration) closeFunc {
+	return func() error {
+		_ = stdin.Close()
+
+		waitErr := make(chan error, 1)
+		go func() { waitErr <- cmd.Wait() }()
+
+		var err error
+		select {
+		case err = <-waitErr:
+		case <-time.After(timeout):
+			_ = cmd.Process.Kill()
+			err = <-waitErr
+		}
+		if err == nil {
+			return nil
+		}
+
+		stderrText := strings.TrimSpace(stderr.String())
+		if stderrText != "" {
+			return fmt.Errorf("sshstdio: ssh exited: %w: %s", err, stderrText)
+		}
+		return fmt.Errorf("sshstdio: ssh exited: %w", err)
+	}
+}
+
 // CommandSpec is the exact ssh argv vev will execute locally.
 type CommandSpec struct {
 	Path string
@@ -127,16 +156,11 @@ func Dial(target, session string) (ports.Transport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sshstdio: stdout pipe: %w", err)
 	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("sshstdio: start ssh: %w", err)
 	}
 
-	return NewTransport(stdout, stdin, func() error {
-		_ = stdin.Close()
-		err := cmd.Wait()
-		if err != nil {
-			return fmt.Errorf("sshstdio: ssh exited: %w", err)
-		}
-		return nil
-	}), nil
+	return NewTransport(stdout, stdin, newProcessCloser(cmd, stdin, &stderr, sshCloseTimeout)), nil
 }
