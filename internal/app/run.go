@@ -11,9 +11,13 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 	"text/tabwriter"
 
+	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/adapters/pty"
 	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/client"
@@ -135,8 +139,9 @@ func dispatch(ctx context.Context, cmd command) error {
 }
 
 // runDaemon runs the daemon in the foreground (the hidden --daemon path,
-// entered by an auto-spawned child). The daemon core lands in Task 11; here
-// we set up logging, bind the socket, and hand off to daemon.Serve.
+// entered by an auto-spawned child): it sets up logging, binds the socket,
+// constructs the daemon, and serves until the last session exits or a
+// termination signal arrives (graceful shutdown notifies attached clients).
 func runDaemon() error {
 	logFile, err := setupLogging()
 	if err != nil {
@@ -150,10 +155,17 @@ func runDaemon() error {
 	}
 	defer ln.Close()
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	slog.Info("daemon starting", "socket", ln.Addr())
-	err = daemon.Serve(ln)
-	slog.Error("daemon exited", "err", err)
-	return err
+	d := daemon.New(pty.NewFactory(), clock.New(), slog.Default())
+	if err := d.Serve(ctx, ln); err != nil {
+		slog.Error("daemon exited", "err", err)
+		return err
+	}
+	slog.Info("daemon exited cleanly")
+	return nil
 }
 
 // runAttach dials (auto-spawning the daemon if needed) and runs the client
