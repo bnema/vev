@@ -933,7 +933,7 @@ func TestSchedulerDebounceCoalesces(t *testing.T) {
 	timerCh := make(chan time.Time, 1)
 	newTimerCalled := make(chan struct{}, 4)
 
-	mc.EXPECT().NewTimer(debounceInterval).RunAndReturn(func(time.Duration) ports.Timer {
+	mc.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(time.Duration) ports.Timer {
 		select {
 		case newTimerCalled <- struct{}{}:
 		default:
@@ -989,6 +989,58 @@ func TestSchedulerDebounceCoalesces(t *testing.T) {
 	cancel()
 	d.sessWg.Wait()
 	require.Equal(t, int32(1), outputs.Load(), "N dirties in one window must render exactly once")
+}
+
+func TestSchedulerAdaptiveDebounceFloodAndIdle(t *testing.T) {
+	mc := portsmocks.NewMockClock(t)
+	timers := make(chan chan time.Time, 4)
+	var delaysMu sync.Mutex
+	var delays []time.Duration
+	mc.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
+		delaysMu.Lock()
+		delays = append(delays, d)
+		delaysMu.Unlock()
+		mt := portsmocks.NewMockTimer(t)
+		ch := make(chan time.Time, 1)
+		mt.EXPECT().C().Return(ch).Maybe()
+		mt.EXPECT().Stop().Return(true).Maybe()
+		timers <- ch
+		return mt
+	}).Maybe()
+
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	d := New(nil, mc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	sctx, cancel := context.WithCancel(context.Background())
+	win := &window{screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}}
+	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	sess := &session{id: "s", name: "s", windows: []*window{win}, ctx: sctx, cancel: cancel, client: ac}
+	d.sessWg.Add(1)
+	go d.scheduler(sess, win)
+
+	for range 2 {
+		win.dirty <- struct{}{}
+		ch := <-timers
+		for range 4 {
+			select {
+			case win.dirty <- struct{}{}:
+			default:
+			}
+		}
+		ch <- time.Now()
+	}
+	win.dirty <- struct{}{}
+	ch := <-timers
+	ch <- time.Now()
+
+	cancel()
+	d.sessWg.Wait()
+	delaysMu.Lock()
+	defer delaysMu.Unlock()
+	require.GreaterOrEqual(t, len(delays), 3)
+	require.Equal(t, minDebounceInterval, delays[0])
+	require.Greater(t, delays[1], delays[0], "sustained flood should widen debounce")
+	require.Greater(t, delays[2], delays[1], "continued flood should keep adapting")
 }
 
 // --- resize ordering --------------------------------------------------------

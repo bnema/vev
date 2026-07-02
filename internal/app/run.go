@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -157,6 +159,15 @@ func runDaemon() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	if addr := os.Getenv("VEV_PPROF_ADDR"); addr != "" {
+		go func() {
+			if err := http.ListenAndServe(addr, nil); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("pprof server exited", "err", err)
+			}
+		}()
+		slog.Info("pprof enabled", "addr", addr)
+	}
 
 	slog.Info("daemon starting", "socket", ln.Addr())
 	d := daemon.New(pty.NewFactory(), clock.New(), slog.Default())

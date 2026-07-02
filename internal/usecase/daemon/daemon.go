@@ -45,10 +45,16 @@ import (
 	"github.com/bnema/vev/pkg/vt"
 )
 
-// debounceInterval is the fixed window opened on the first dirty signal: all
-// further dirties arriving within it are absorbed and coalesced into a single
-// render. It bounds render frequency to ~100Hz per session.
-const debounceInterval = 10 * time.Millisecond
+// Scheduler debounce bounds. Idle updates use the minimum for low latency;
+// sustained floods step toward the maximum to reduce frame/syscall pressure.
+const (
+	minDebounceInterval = 2 * time.Millisecond
+	maxDebounceInterval = 16 * time.Millisecond
+	debounceStep        = 2 * time.Millisecond
+)
+
+// debounceInterval is kept as a test/back-compat alias for the initial delay.
+const debounceInterval = minDebounceInterval
 
 // ptyReadBufSize is the PTY reader's read buffer.
 const ptyReadBufSize = 32 * 1024
@@ -951,10 +957,12 @@ func (d *Daemon) ptyReader(sess *session, win *window) {
 	}
 }
 
-// scheduler debounces dirty signals: the first opens a fixed window during
-// which further dirties are absorbed, then it renders exactly once.
+// scheduler debounces dirty signals. The first dirty opens a short window;
+// sustained floods progressively widen that window, while isolated updates
+// return to the minimum delay for interactive latency.
 func (d *Daemon) scheduler(sess *session, win *window) {
 	defer d.sessWg.Done()
+	delay := minDebounceInterval
 	for {
 		select {
 		case <-sess.ctx.Done():
@@ -964,7 +972,8 @@ func (d *Daemon) scheduler(sess *session, win *window) {
 		case <-win.dirty:
 		}
 
-		timer := d.clock.NewTimer(debounceInterval)
+		coalesced := 0
+		timer := d.clock.NewTimer(delay)
 	absorb:
 		for {
 			select {
@@ -975,9 +984,17 @@ func (d *Daemon) scheduler(sess *session, win *window) {
 				timer.Stop()
 				return
 			case <-win.dirty:
-				// Coalesced into the pending render.
+				coalesced++
 			case <-timer.C():
 				break absorb
+			}
+		}
+		if coalesced == 0 {
+			delay = minDebounceInterval
+		} else if delay < maxDebounceInterval {
+			delay += debounceStep
+			if delay > maxDebounceInterval {
+				delay = maxDebounceInterval
 			}
 		}
 		d.render(sess, win)
