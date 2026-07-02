@@ -543,10 +543,7 @@ func windowSize(clientSize domain.Size) domain.Size {
 	if !clientSize.Valid() {
 		clientSize = defaultSize
 	}
-	rows := clientSize.Rows - 1
-	if rows < 1 {
-		rows = 1
-	}
+	rows := max(clientSize.Rows-1, 1)
 	return domain.Size{Cols: clientSize.Cols, Rows: rows}
 }
 
@@ -898,7 +895,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 func composeClientFrame(sess *session, win *window, full bool) (renderer.Frame, []renderer.Damage) {
 	width, screenRows := win.screen.Frame.Width, win.screen.Frame.Height
 	frame := renderer.NewFrame(width, screenRows+1)
-	for y := 0; y < screenRows; y++ {
+	for y := range screenRows {
 		copy(frame.Row(y), win.screen.Frame.Row(y))
 	}
 	drawStatus(frame.Row(screenRows), sess)

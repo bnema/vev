@@ -1,6 +1,8 @@
 package keys
 
 import (
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,6 +119,28 @@ func TestRouterRetainsSplitESCAndInterceptsNextBoundByte(t *testing.T) {
 	require.True(t, clk.timers[0].stopped)
 	require.Equal(t, []Action{ActionNextWindow}, h.actions)
 	require.Empty(t, h.forwards)
+}
+
+func TestRouterCancelsPendingESCWaiterWhenNextReadConsumesESC(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	r := NewRouter(clk, h)
+
+	before := retainESCWaiters()
+	r.Route([]byte{ESC})
+	require.Eventually(t, func() bool { return retainESCWaiters() > before }, time.Second, time.Millisecond)
+
+	r.Route([]byte{'n'})
+	require.Eventually(t, func() bool { return retainESCWaiters() == before }, time.Second, time.Millisecond)
+	require.True(t, clk.timers[0].stopped)
+	require.Equal(t, []Action{ActionNextWindow}, h.actions)
+	require.Empty(t, h.forwards)
+}
+
+func retainESCWaiters() int {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), "github.com/bnema/vev/internal/usecase/keys.(*Router).retainESC.func1")
 }
 
 func TestRouterFlushesLoneESCAfterTimer(t *testing.T) {

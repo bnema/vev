@@ -51,9 +51,10 @@ type Router struct {
 	delay time.Duration
 	h     Handler
 
-	mu      sync.Mutex
-	pending bool
-	timer   ports.Timer
+	mu          sync.Mutex
+	pending     bool
+	timer       ports.Timer
+	pendingDone chan struct{}
 }
 
 func NewRouter(clock ports.Clock, h Handler) *Router {
@@ -142,21 +143,30 @@ func (r *Router) routeAfterPendingESC(data []byte) int {
 func (r *Router) retainESC() {
 	r.pending = true
 	r.timer = r.clock.NewTimer(r.delay)
-	go func(timer ports.Timer) {
-		<-timer.C()
+	r.pendingDone = make(chan struct{})
+	go func(timer ports.Timer, done <-chan struct{}) {
+		select {
+		case <-timer.C():
+		case <-done:
+			return
+		}
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		if r.pending && r.timer == timer {
 			r.pending = false
 			r.forward([]byte{ESC})
 		}
-	}(r.timer)
+	}(r.timer, r.pendingDone)
 }
 
 func (r *Router) stopTimer() {
 	if r.timer != nil {
 		r.timer.Stop()
 		r.timer = nil
+	}
+	if r.pendingDone != nil {
+		close(r.pendingDone)
+		r.pendingDone = nil
 	}
 }
 
