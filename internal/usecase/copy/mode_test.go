@@ -97,42 +97,47 @@ func TestCopyModeSelectionPayloadAndInverse(t *testing.T) {
 		t.Fatalf("SelectedText() = %q, want %q", got, want)
 	}
 	frame := m.Render(s)
-	for y := 0; y < 2; y++ {
+	for y := range 2 {
 		if !frame.At(0, y).Style.Inverse {
 			t.Fatalf("row %d first cell not inverse", y)
 		}
 	}
 }
 
-func TestOSC52Base64EncodingAndChunking(t *testing.T) {
+func TestOSC52Base64Encoding(t *testing.T) {
 	tests := []struct {
 		name string
 		text string
 	}{
 		{name: "small payload", text: "hello\nworld"},
-		{name: "chunked payload", text: strings.Repeat("x", OSC52ChunkSize)},
+		{name: "large payload", text: strings.Repeat("x", OSC52ChunkSize)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			chunks := OSC52(tt.text)
-			joined := ""
+			if len(chunks) != 1 {
+				t.Fatalf("len(chunks) = %d, want 1", len(chunks))
+			}
 			for _, chunk := range chunks {
-				s := string(chunk)
-				if !strings.HasPrefix(s, "\x1b]52;c;") || !strings.HasSuffix(s, "\x07") {
-					t.Fatalf("chunk %q missing OSC52 wrapper", s)
+				decoded := decodeOSC52Chunk(t, chunk)
+				if string(decoded) != tt.text {
+					t.Fatalf("decoded = %q, want %q", string(decoded), tt.text)
 				}
-				joined += strings.TrimSuffix(strings.TrimPrefix(s, "\x1b]52;c;"), "\x07")
-			}
-			decoded, err := base64.StdEncoding.DecodeString(joined)
-			if err != nil {
-				t.Fatalf("DecodeString() error = %v", err)
-			}
-			if string(decoded) != tt.text {
-				t.Fatalf("decoded = %q, want %q", string(decoded), tt.text)
-			}
-			if tt.name == "chunked payload" && len(chunks) < 2 {
-				t.Fatalf("len(chunks) = %d, want chunking", len(chunks))
 			}
 		})
 	}
+}
+
+func decodeOSC52Chunk(t *testing.T, chunk []byte) []byte {
+	t.Helper()
+	s := string(chunk)
+	if !strings.HasPrefix(s, "\x1b]52;c;") || !strings.HasSuffix(s, "\x07") {
+		t.Fatalf("chunk %q missing OSC52 wrapper", s)
+	}
+	encoded := strings.TrimSuffix(strings.TrimPrefix(s, "\x1b]52;c;"), "\x07")
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("DecodeString(%q) error = %v", encoded, err)
+	}
+	return decoded
 }

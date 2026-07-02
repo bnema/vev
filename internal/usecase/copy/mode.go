@@ -169,20 +169,10 @@ func drawCopyStatus(row []renderer.Cell, m *Mode, total int) {
 	}
 }
 
-// OSC52 encodes text for clipboard transfer. Large payloads are split into
-// multiple complete OSC 52 sequences so each MsgOutput remains bounded.
+// OSC52 encodes text for clipboard transfer as one complete OSC 52 sequence.
 func OSC52(text string) [][]byte {
 	encoded := base64.StdEncoding.EncodeToString([]byte(text))
-	if encoded == "" {
-		return [][]byte{[]byte("\x1b]52;c;\x07")}
-	}
-	chunks := make([][]byte, 0, len(encoded)/OSC52ChunkSize+1)
-	for len(encoded) > 0 {
-		n := min(len(encoded), OSC52ChunkSize)
-		chunks = append(chunks, []byte("\x1b]52;c;"+encoded[:n]+"\x07"))
-		encoded = encoded[n:]
-	}
-	return chunks
+	return [][]byte{[]byte("\x1b]52;c;" + encoded + "\x07")}
 }
 
 func strconvItoa(n int) string {
