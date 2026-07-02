@@ -90,6 +90,29 @@ type Detached struct {
 	Reason uint8
 }
 
+// List asks the daemon to enumerate its live sessions. It carries no
+// fields; the request is fully described by its message type.
+type List struct{}
+
+// Kill asks the daemon to terminate the named session.
+type Kill struct {
+	Name string
+}
+
+// SessionInfo describes one session in a Sessions listing.
+type SessionInfo struct {
+	SessionID string
+	Name      string
+	Ephemeral bool
+	Windows   uint16
+	Attached  bool
+}
+
+// Sessions is the daemon's reply to a List, enumerating live sessions.
+type Sessions struct {
+	Sessions []SessionInfo
+}
+
 // payloadWriter builds a message payload by appending fields in wire order.
 type payloadWriter struct {
 	b []byte
@@ -377,4 +400,98 @@ func UnmarshalDetached(b []byte) (Detached, error) {
 		return Detached{}, err
 	}
 	return Detached{Reason: reason}, nil
+}
+
+// MarshalList encodes a List message payload (always empty).
+func MarshalList(List) []byte {
+	return nil
+}
+
+// UnmarshalList decodes a List message payload.
+func UnmarshalList(b []byte) (List, error) {
+	r := payloadReader{b: b}
+	if err := r.done(); err != nil {
+		return List{}, err
+	}
+	return List{}, nil
+}
+
+// MarshalKill encodes m into a Kill message payload.
+func MarshalKill(m Kill) []byte {
+	w := payloadWriter{}
+	w.putString(m.Name)
+	return w.b
+}
+
+// UnmarshalKill decodes a Kill message payload.
+func UnmarshalKill(b []byte) (Kill, error) {
+	r := payloadReader{b: b}
+	name, err := r.getString()
+	if err != nil {
+		return Kill{}, err
+	}
+	if err := r.done(); err != nil {
+		return Kill{}, err
+	}
+	return Kill{Name: name}, nil
+}
+
+// MarshalSessions encodes m into a Sessions message payload: a uint16 count
+// followed by that many session records.
+func MarshalSessions(m Sessions) []byte {
+	w := payloadWriter{}
+	w.putUint16(uint16(len(m.Sessions)))
+	for _, s := range m.Sessions {
+		w.putString(s.SessionID)
+		w.putString(s.Name)
+		if s.Ephemeral {
+			w.putUint8(1)
+		} else {
+			w.putUint8(0)
+		}
+		w.putUint16(s.Windows)
+		if s.Attached {
+			w.putUint8(1)
+		} else {
+			w.putUint8(0)
+		}
+	}
+	return w.b
+}
+
+// UnmarshalSessions decodes a Sessions message payload.
+func UnmarshalSessions(b []byte) (Sessions, error) {
+	r := payloadReader{b: b}
+	count, err := r.getUint16()
+	if err != nil {
+		return Sessions{}, err
+	}
+	sessions := make([]SessionInfo, 0, count)
+	for i := 0; i < int(count); i++ {
+		var s SessionInfo
+		if s.SessionID, err = r.getString(); err != nil {
+			return Sessions{}, err
+		}
+		if s.Name, err = r.getString(); err != nil {
+			return Sessions{}, err
+		}
+		eph, err := r.getUint8()
+		if err != nil {
+			return Sessions{}, err
+		}
+		s.Ephemeral = eph != 0
+		if s.Windows, err = r.getUint16(); err != nil {
+			return Sessions{}, err
+		}
+		att, err := r.getUint8()
+		if err != nil {
+			return Sessions{}, err
+		}
+		s.Attached = att != 0
+		sessions = append(sessions, s)
+	}
+	if err := r.done(); err != nil {
+		return Sessions{}, err
+	}
+	return Sessions{Sessions: sessions}, nil
 }

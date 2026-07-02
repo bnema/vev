@@ -14,12 +14,15 @@ const (
 	MsgResize MsgType = 3
 	MsgDetach MsgType = 4
 	MsgPing   MsgType = 5
+	MsgList   MsgType = 6
+	MsgKill   MsgType = 7
 
 	MsgWelcome  MsgType = 16
 	MsgError    MsgType = 17
 	MsgOutput   MsgType = 18
 	MsgDetached MsgType = 19
 	MsgPong     MsgType = 20
+	MsgSessions MsgType = 21
 )
 
 // Frame is the unit of exchange over a Transport: a typed, length-delimited

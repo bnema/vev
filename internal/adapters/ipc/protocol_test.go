@@ -299,6 +299,102 @@ func TestDetachedGoldenAndRoundTrip(t *testing.T) {
 	assertTrailingGarbageFails(t, got, UnmarshalDetached)
 }
 
+func TestListGoldenAndRoundTrip(t *testing.T) {
+	got := MarshalList(List{})
+	if len(got) != 0 {
+		t.Fatalf("MarshalList() = %#v, want empty", got)
+	}
+	back, err := UnmarshalList(got)
+	if err != nil {
+		t.Fatalf("UnmarshalList() error = %v", err)
+	}
+	if back != (List{}) {
+		t.Fatalf("round trip = %#v, want %#v", back, List{})
+	}
+	assertTrailingGarbageFails(t, got, UnmarshalList)
+}
+
+func TestKillGoldenAndRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  Kill
+		want []byte
+	}{
+		{name: "named", msg: Kill{Name: "main"}, want: []byte{0x00, 0x04, 0x6d, 0x61, 0x69, 0x6e}},
+		{name: "empty", msg: Kill{Name: ""}, want: []byte{0x00, 0x00}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MarshalKill(tt.msg)
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("MarshalKill() = %#v, want %#v", got, tt.want)
+			}
+			back, err := UnmarshalKill(got)
+			if err != nil {
+				t.Fatalf("UnmarshalKill() error = %v", err)
+			}
+			if !reflect.DeepEqual(back, tt.msg) {
+				t.Fatalf("round trip = %#v, want %#v", back, tt.msg)
+			}
+		})
+	}
+
+	full := MarshalKill(tests[0].msg)
+	assertAllPrefixesFail(t, full, UnmarshalKill)
+	assertTrailingGarbageFails(t, full, UnmarshalKill)
+}
+
+func TestSessionsGoldenAndRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  Sessions
+		want []byte
+	}{
+		{
+			name: "empty",
+			msg:  Sessions{},
+			want: []byte{0x00, 0x00},
+		},
+		{
+			name: "two",
+			msg: Sessions{Sessions: []SessionInfo{
+				{SessionID: "0", Name: "0", Ephemeral: true, Windows: 1, Attached: false},
+				{SessionID: "work", Name: "proj", Ephemeral: false, Windows: 5, Attached: true},
+			}},
+			want: []byte{
+				0x00, 0x02,
+				0x00, 0x01, 0x30, 0x00, 0x01, 0x30, 0x01, 0x00, 0x01, 0x00,
+				0x00, 0x04, 0x77, 0x6f, 0x72, 0x6b, 0x00, 0x04, 0x70, 0x72, 0x6f, 0x6a, 0x00, 0x00, 0x05, 0x01,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MarshalSessions(tt.msg)
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("MarshalSessions() = %#v, want %#v", got, tt.want)
+			}
+			back, err := UnmarshalSessions(got)
+			if err != nil {
+				t.Fatalf("UnmarshalSessions() error = %v", err)
+			}
+			// Normalize nil vs empty slice for comparison.
+			if len(back.Sessions) == 0 && len(tt.msg.Sessions) == 0 {
+				return
+			}
+			if !reflect.DeepEqual(back, tt.msg) {
+				t.Fatalf("round trip = %#v, want %#v", back, tt.msg)
+			}
+		})
+	}
+
+	full := MarshalSessions(tests[1].msg)
+	assertAllPrefixesFail(t, full, UnmarshalSessions)
+	assertTrailingGarbageFails(t, full, UnmarshalSessions)
+}
+
 // TestMsgTypeConstantsDistinct guards the enumerations defined in this
 // package against accidental collisions (Intent, ErrorMsg code, Detached
 // reason are each independent small spaces, but duplicates within one

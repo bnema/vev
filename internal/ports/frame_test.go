@@ -12,11 +12,14 @@ func TestMsgTypeUnique(t *testing.T) {
 		{"MsgResize", MsgResize},
 		{"MsgDetach", MsgDetach},
 		{"MsgPing", MsgPing},
+		{"MsgList", MsgList},
+		{"MsgKill", MsgKill},
 		{"MsgWelcome", MsgWelcome},
 		{"MsgError", MsgError},
 		{"MsgOutput", MsgOutput},
 		{"MsgDetached", MsgDetached},
 		{"MsgPong", MsgPong},
+		{"MsgSessions", MsgSessions},
 	}
 
 	seen := make(map[MsgType]string, len(tests))
