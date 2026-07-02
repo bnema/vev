@@ -20,6 +20,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/pty"
+	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/client"
@@ -34,6 +35,7 @@ const (
 	kindList
 	kindKill
 	kindDaemon
+	kindStdio
 	kindHelp
 	kindVersion
 )
@@ -41,9 +43,10 @@ const (
 // command is the parsed CLI invocation: what to do, plus the attach intent
 // and session name where relevant.
 type command struct {
-	kind   cmdKind
-	intent uint8
-	name   string
+	kind         cmdKind
+	intent       uint8
+	name         string
+	remoteTarget string
 }
 
 // usageError is a user-facing argument error; the app prints it (with usage)
@@ -62,6 +65,8 @@ usage:
   vev                 attach to (or create) an ephemeral session
   vev new <name>      create and attach to a named session
   vev attach <name>   attach to an existing named session (alias: a)
+  vev attach user@host[:session]
+                      attach through SSH to a remote vev daemon
   vev ls              list sessions
   vev kill <name>     kill a named session
   vev --help          show this help
@@ -92,6 +97,15 @@ func parseArgs(args []string) (command, error) {
 	switch args[0] {
 	case "--daemon":
 		return command{kind: kindDaemon}, nil
+	case "_stdio":
+		if len(args) > 2 {
+			return command{}, usagef("`_stdio` accepts at most one session name")
+		}
+		cmd := command{kind: kindStdio}
+		if len(args) == 2 {
+			cmd.name = args[1]
+		}
+		return cmd, nil
 	case "new":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`new` requires a session name")
@@ -101,7 +115,12 @@ func parseArgs(args []string) (command, error) {
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`attach` requires a session name")
 		}
-		return command{kind: kindAttach, intent: ports.IntentAttach, name: args[1]}, nil
+		cmd := command{kind: kindAttach, intent: ports.IntentAttach, name: args[1]}
+		if target, session, ok := parseRemoteAttachTarget(args[1]); ok {
+			cmd.remoteTarget = target
+			cmd.name = session
+		}
+		return cmd, nil
 	case "ls", "list":
 		return command{kind: kindList}, nil
 	case "kill":
@@ -129,12 +148,14 @@ func dispatch(ctx context.Context, cmd command) error {
 		return nil
 	case kindDaemon:
 		return runDaemon()
+	case kindStdio:
+		return runStdio(ctx)
 	case kindList:
 		return runList(ctx)
 	case kindKill:
 		return runKill(ctx, cmd.name)
 	case kindAttach:
-		return runAttach(ctx, cmd.intent, cmd.name)
+		return runAttach(ctx, cmd.intent, cmd.name, cmd.remoteTarget)
 	default:
 		return usagef("unhandled command")
 	}
@@ -182,19 +203,67 @@ func runDaemon() error {
 // runAttach dials (auto-spawning the daemon if needed) and runs the client
 // attach loop. Logging goes to the shared file: the client must never write
 // to the console while the terminal is raw.
-func runAttach(ctx context.Context, intent uint8, name string) error {
+func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) error {
 	logFile, err := setupLogging()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = logFile.Close() }()
 
-	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+	var transport ports.Transport
+	if remoteTarget != "" {
+		transport, err = sshstdio.Dial(remoteTarget, name)
+	} else {
+		transport, err = ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+	}
 	if err != nil {
 		return err
 	}
 	// client.Attach owns and closes transport.
 	return client.Attach(ctx, transport, term.New(), intent, name)
+}
+
+// runStdio is the hidden remote-side mode used by `ssh host vev _stdio`: it
+// connects to the per-user daemon (auto-spawning it if needed) and proxies the
+// framed protocol between process stdio and the daemon socket.
+func runStdio(ctx context.Context) error {
+	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = transport.Close() }()
+
+	stdio := sshstdio.NewTransport(os.Stdin, os.Stdout, nil)
+	return proxyTransports(ctx, stdio, transport)
+}
+
+func proxyTransports(ctx context.Context, a, b ports.Transport) error {
+	errCh := make(chan error, 2)
+	copyFrames := func(dst, src ports.Transport) {
+		for {
+			f, err := src.Recv()
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if err := dst.Send(f); err != nil {
+				errCh <- err
+				return
+			}
+		}
+	}
+	go copyFrames(b, a)
+	go copyFrames(a, b)
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-errCh:
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
 }
 
 // runList prints the daemon's session listing. With no daemon running there
