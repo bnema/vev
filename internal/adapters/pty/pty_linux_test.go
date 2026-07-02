@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -159,7 +160,7 @@ func TestClose_ReapsChildNoZombie(t *testing.T) {
 	err = syscall.Kill(pid, 0)
 	if err == nil {
 		// Still visible: ensure it is a zombie's parent-less remnant is not our child.
-		data, rerr := os.ReadFile("/proc/" + itoa(pid) + "/status")
+		data, rerr := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/status")
 		if rerr == nil {
 			require.Contains(t, string(data), "State:\tZ", "child still alive and not a zombie")
 		}
@@ -230,19 +231,4 @@ func TestResize_DeliversSIGWINCH(t *testing.T) {
 		}
 	}
 	require.Contains(t, acc, "GOTWINCH")
-}
-
-// itoa avoids importing strconv just for a couple call sites in this file.
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b [20]byte
-	pos := len(b)
-	for i > 0 {
-		pos--
-		b[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	return string(b[pos:])
 }

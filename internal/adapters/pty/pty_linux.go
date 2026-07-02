@@ -108,9 +108,6 @@ type linuxPTY struct {
 	master *os.File
 	cmd    *exec.Cmd
 
-	waitOnce sync.Once
-	waitErr  error
-
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -137,8 +134,24 @@ func (p *linuxPTY) Write(b []byte) (int, error) {
 
 // Resize updates the terminal window size, which also delivers SIGWINCH to the
 // child's foreground process group.
+//
+// The ioctl goes through SyscallConn rather than os.File.Fd(): Fd() would flip
+// the master to blocking mode and detach it from the runtime poller, turning
+// every subsequent Read into a thread-parking syscall and breaking the
+// Close-unblocks-Read behavior. Control also pins the fd for the duration and
+// fails cleanly (os.ErrClosed) after Close.
 func (p *linuxPTY) Resize(sz domain.Size) error {
-	return setWinsize(int(p.master.Fd()), sz)
+	rc, err := p.master.SyscallConn()
+	if err != nil {
+		return fmt.Errorf("pty: resize: %w", err)
+	}
+	var ioctlErr error
+	if err := rc.Control(func(fd uintptr) {
+		ioctlErr = setWinsize(int(fd), sz)
+	}); err != nil {
+		return fmt.Errorf("pty: resize: %w", err)
+	}
+	return ioctlErr
 }
 
 // Pid reports the child process id.
@@ -159,9 +172,11 @@ func (p *linuxPTY) Close() error {
 		// leader thanks to Setsid). Ignore errors: the child may already be gone.
 		_ = unix.Kill(-pid, unix.SIGHUP)
 
+		// Reap the child (exit status is intentionally discarded; the port has no
+		// Wait — "child gone" surfaces to callers as io.EOF on Read).
 		reaped := make(chan struct{})
 		go func() {
-			p.wait()
+			_ = p.cmd.Wait()
 			close(reaped)
 		}()
 
@@ -175,12 +190,6 @@ func (p *linuxPTY) Close() error {
 		p.closeErr = p.master.Close()
 	})
 	return p.closeErr
-}
-
-// wait reaps the child exactly once, memoizing the exit error.
-func (p *linuxPTY) wait() error {
-	p.waitOnce.Do(func() { p.waitErr = p.cmd.Wait() })
-	return p.waitErr
 }
 
 // setWinsize applies sz to the terminal referenced by fd via TIOCSWINSZ.
