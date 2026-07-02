@@ -29,10 +29,14 @@ type screenState struct {
 const maxEscapeBufferLen = 4096
 
 type Screen struct {
-	Frame     renderer.Frame
-	Row       int
-	Col       int
-	Style     renderer.Style
+	Frame renderer.Frame
+	Row   int
+	Col   int
+	Style renderer.Style
+	// OnLineEvicted is called just before a full-width upward scroll recycles
+	// and blanks rows. The callback receives a stable copy of each evicted row.
+	OnLineEvicted func([]renderer.Cell)
+
 	damage    []renderer.Damage
 	escapeBuf []byte
 
@@ -463,9 +467,19 @@ func (s *Screen) scrollUpRegion(top, bottom, n int) {
 	// VT scroll regions always span the full frame width, so we rotate the
 	// frame's line offsets (recycling and blanking the evicted rows in place)
 	// instead of copying cells. See renderer.Frame.ScrollUp.
+	s.emitLineEvicted(top, n)
 	s.Frame.ScrollUp(top, bottom, n)
 	s.record(renderer.Damage{Kind: renderer.DamageScrollUp, X: 0, Y: top, Width: w, Height: height, Count: n})
 	s.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: bottom - n + 1, Width: w, Height: n, Count: 1})
+}
+
+func (s *Screen) emitLineEvicted(top, n int) {
+	if s.OnLineEvicted == nil || s.alternate != nil {
+		return
+	}
+	for y := top; y < top+n; y++ {
+		s.OnLineEvicted(append([]renderer.Cell(nil), s.Frame.Row(y)...))
+	}
 }
 
 func (s *Screen) scrollDownRegion(top, bottom, n int) {

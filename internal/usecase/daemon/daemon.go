@@ -39,6 +39,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
@@ -51,6 +52,9 @@ const debounceInterval = 10 * time.Millisecond
 
 // ptyReadBufSize is the PTY reader's read buffer.
 const ptyReadBufSize = 32 * 1024
+
+// defaultScrollbackRows is the per-window retained history size.
+const defaultScrollbackRows = 10_000
 
 // detachNotifyTimeout bounds the best-effort Detached notification on the
 // detach/kill/shutdown paths: if a wedged client (full kernel send buffer)
@@ -123,13 +127,14 @@ type session struct {
 // applies back-pressure by collapsing (a full buffer means "a render is
 // already pending"), never by blocking the reader.
 type window struct {
-	pty    ports.PTY
-	mu     sync.Mutex // guards screen and every attached renderer's shadow
-	screen *vt.Screen
-	dirty  chan struct{}
-	size   domain.Size
-	ctx    context.Context
-	cancel context.CancelFunc
+	pty        ports.PTY
+	mu         sync.Mutex // guards screen and every attached renderer's shadow
+	screen     *vt.Screen
+	scrollback *scopy.Scrollback
+	dirty      chan struct{}
+	size       domain.Size
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 // attachedClient is a client currently attached to a session's window. rend is
@@ -501,12 +506,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, sz domain.Size
 	id := domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
 	d.nextID++
 
-	win := &window{
-		pty:    pty,
-		screen: vt.NewScreen(winSize.Cols, winSize.Rows),
-		dirty:  make(chan struct{}, 1),
-		size:   winSize,
-	}
+	win := newWindow(pty, winSize)
 	sctx, cancel := context.WithCancel(d.serveCtx)
 	win.ctx, win.cancel = context.WithCancel(sctx)
 	sess := &session{
@@ -528,12 +528,7 @@ func (d *Daemon) createWindow(sess *session, sz domain.Size) error {
 	if err != nil {
 		return fmt.Errorf("daemon: spawning window for session %q: %w", sess.name, err)
 	}
-	win := &window{
-		pty:    pty,
-		screen: vt.NewScreen(winSize.Cols, winSize.Rows),
-		dirty:  make(chan struct{}, 1),
-		size:   winSize,
-	}
+	win := newWindow(pty, winSize)
 	win.ctx, win.cancel = context.WithCancel(sess.ctx)
 	sess.mu.Lock()
 	sess.windows = append(sess.windows, win)
@@ -541,6 +536,19 @@ func (d *Daemon) createWindow(sess *session, sz domain.Size) error {
 	sess.mu.Unlock()
 	d.startWindowGoroutines(sess, win)
 	return nil
+}
+
+func newWindow(pty ports.PTY, sz domain.Size) *window {
+	sb := scopy.NewScrollback(defaultScrollbackRows)
+	screen := vt.NewScreen(sz.Cols, sz.Rows)
+	screen.OnLineEvicted = sb.Append
+	return &window{
+		pty:        pty,
+		screen:     screen,
+		scrollback: sb,
+		dirty:      make(chan struct{}, 1),
+		size:       sz,
+	}
 }
 
 func windowSize(clientSize domain.Size) domain.Size {
