@@ -1,0 +1,161 @@
+package ipc
+
+import (
+	"errors"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"testing"
+
+	"github.com/bnema/vev/internal/ports"
+)
+
+func TestListenAcceptRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	ln, err := Listen(dir)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer ln.Close()
+
+	wantPath := filepath.Join(dir, "daemon.sock")
+	if ln.Addr() != wantPath {
+		t.Fatalf("Addr() = %q, want %q", ln.Addr(), wantPath)
+	}
+
+	fi, err := os.Stat(wantPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("socket perm = %o, want 0600", perm)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		conn, err := net.Dial("unix", wantPath)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer conn.Close()
+		client := NewTransport(conn)
+		errCh <- client.Send(ports.Frame{Type: ports.MsgPing})
+	}()
+
+	transport, err := ln.Accept()
+	if err != nil {
+		t.Fatalf("Accept() error = %v", err)
+	}
+	defer transport.Close()
+
+	got, err := transport.Recv()
+	if err != nil {
+		t.Fatalf("Recv() error = %v", err)
+	}
+	if got.Type != ports.MsgPing {
+		t.Fatalf("Recv() type = %v, want MsgPing", got.Type)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("client dial/send error = %v", err)
+	}
+}
+
+func TestListenMkdirsSocketDir(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "nested", "socketdir")
+
+	ln, err := Listen(dir)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer ln.Close()
+
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if !fi.IsDir() {
+		t.Fatalf("%s is not a directory", dir)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("dir perm = %o, want 0700", perm)
+	}
+}
+
+func TestListenStaleSocketCleanedUp(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "daemon.sock")
+
+	// Create a socket file with nobody listening behind it: bind, then
+	// close without unlinking, to simulate a daemon that died without
+	// cleaning up after itself.
+	addr, err := net.ResolveUnixAddr("unix", sockPath)
+	if err != nil {
+		t.Fatalf("ResolveUnixAddr() error = %v", err)
+	}
+	dead, err := net.ListenUnix("unix", addr)
+	if err != nil {
+		t.Fatalf("ListenUnix() error = %v", err)
+	}
+	dead.SetUnlinkOnClose(false)
+	if err := dead.Close(); err != nil {
+		t.Fatalf("closing dead listener: %v", err)
+	}
+	if _, err := os.Stat(sockPath); err != nil {
+		t.Fatalf("expected stale socket file to exist: %v", err)
+	}
+
+	// A real Listen() should detect the dead peer and recover.
+	ln, err := Listen(dir)
+	if err != nil {
+		t.Fatalf("Listen() over stale socket error = %v, want success", err)
+	}
+	defer ln.Close()
+}
+
+func TestListenLiveDaemonRejected(t *testing.T) {
+	dir := t.TempDir()
+
+	first, err := Listen(dir)
+	if err != nil {
+		t.Fatalf("first Listen() error = %v", err)
+	}
+	defer first.Close()
+
+	_, err = Listen(dir)
+	if !errors.Is(err, ErrDaemonRunning) {
+		t.Fatalf("second Listen() error = %v, want ErrDaemonRunning", err)
+	}
+}
+
+func TestSocketDirUsesXDGRuntimeDir(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/example-xdg")
+
+	got := SocketDir()
+	want := "/tmp/example-xdg/vev"
+	if got != want {
+		t.Fatalf("SocketDir() = %q, want %q", got, want)
+	}
+}
+
+func TestSocketDirFallsBackWithoutXDGRuntimeDir(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "")
+
+	got := SocketDir()
+	uid := os.Getuid()
+
+	runUser := filepath.Join("/run/user", strconv.Itoa(uid))
+	var want string
+	if fi, err := os.Stat(runUser); err == nil && fi.IsDir() {
+		want = filepath.Join(runUser, "vev")
+	} else {
+		want = "/tmp/vev-" + strconv.Itoa(uid)
+	}
+
+	if got != want {
+		t.Fatalf("SocketDir() = %q, want %q", got, want)
+	}
+}
