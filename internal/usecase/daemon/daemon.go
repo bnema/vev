@@ -42,6 +42,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/mouse"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -160,7 +161,18 @@ type attachedClient struct {
 	copyMu      sync.Mutex
 	copyMode    *scopy.Mode
 	copyPending []byte
+	mouseScan   mouse.Scanner
+	lastCursor  cursorOut
 	sendMu      sync.Mutex
+}
+
+type cursorOut struct {
+	valid    bool
+	hidden   bool
+	row      int
+	col      int
+	style    int
+	hasStyle bool
 }
 
 func (ac *attachedClient) copyModeActive() bool {
@@ -699,11 +711,93 @@ func (s *session) activeWindow() *window {
 }
 
 func (d *Daemon) handleInput(sess *session, ac *attachedClient, data []byte) {
-	if ac.copyModeActive() {
-		d.handleCopyInput(sess, ac, data)
+	ac.mouseScan.Scan(data,
+		func(ev mouse.Event) { d.handleMouse(sess, ac, ev) },
+		func(b []byte) {
+			if ac.copyModeActive() {
+				d.handleCopyInput(sess, ac, b)
+				return
+			}
+			ac.keys.Route(b)
+		},
+	)
+}
+
+func (d *Daemon) handleMouse(sess *session, ac *attachedClient, ev mouse.Event) {
+	win := sess.activeWindow()
+	if win == nil {
 		return
 	}
-	ac.keys.Route(data)
+
+	if ac.copyModeActive() {
+		switch ev.Button {
+		case mouse.WheelUp:
+			d.copyWheel(sess, ac, -3)
+		case mouse.WheelDown:
+			d.copyWheel(sess, ac, 3)
+		}
+		return
+	}
+
+	win.mu.Lock()
+	childRows := win.screen.Frame.Height
+	mouseMode, mouseSGR := win.screen.MouseMode()
+	altScreen := win.screen.AltScreenActive()
+	win.mu.Unlock()
+
+	if mouseMode != 0 {
+		if !mouseSGR || ev.Row >= childRows {
+			return
+		}
+		daemonKeyHandler{d: d, sess: sess, ac: ac}.Forward(ev.Raw)
+		return
+	}
+
+	switch ev.Button {
+	case mouse.WheelUp:
+		if altScreen {
+			daemonKeyHandler{d: d, sess: sess, ac: ac}.Forward([]byte("\x1b[A\x1b[A\x1b[A"))
+			return
+		}
+		d.enterCopyMode(sess, ac)
+		d.copyWheel(sess, ac, -3)
+	case mouse.WheelDown:
+		if altScreen {
+			daemonKeyHandler{d: d, sess: sess, ac: ac}.Forward([]byte("\x1b[B\x1b[B\x1b[B"))
+		}
+	}
+}
+
+func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
+	win := sess.activeWindow()
+	if win == nil {
+		return
+	}
+
+	win.mu.Lock()
+	ac.copyMu.Lock()
+	if ac.copyMode == nil {
+		ac.copyMu.Unlock()
+		win.mu.Unlock()
+		return
+	}
+	snap := scopy.NewSnapshot(win.scrollback, win.screen.Frame)
+	if delta > 0 && ac.copyMode.AtBottom(snap) {
+		ac.copyMode = nil
+		ac.copyMu.Unlock()
+		win.mu.Unlock()
+		d.paint(sess, ac, true)
+		return
+	}
+	ac.copyMode.Move(snap, delta)
+	exit := delta > 0 && ac.copyMode.AtBottom(snap)
+	if exit {
+		ac.copyMode = nil
+	}
+	ac.copyMu.Unlock()
+	win.mu.Unlock()
+
+	d.paint(sess, ac, true)
 }
 
 func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
@@ -1150,21 +1244,33 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	ac.sendMu.Lock()
 	win.mu.Lock()
 	ac.copyMu.Lock()
-	if reset || ac.copyMode != nil {
+	copyActive := ac.copyMode != nil
+	if reset || copyActive {
 		ac.rend.Reset()
 	}
+	if reset {
+		ac.lastCursor.valid = false
+	}
 	frame, damage := composeClientFrame(sess, win, reset)
-	if ac.copyMode != nil {
+	if copyActive {
 		frame, damage = composeCopyClientFrame(ac.copyMode, win)
 	}
+	desiredCursor := desiredCursorOut(win.screen, copyActive)
 	ac.copyMu.Unlock()
 	data, err := ac.rend.Draw(frame, damage)
+	var cursorTail []byte
+	if err == nil {
+		cursorTail = ac.encodeCursorTail(desiredCursor, len(data) > 0)
+	}
 	win.screen.ClearDamage()
 	win.mu.Unlock()
 
 	var serr error
-	if err == nil && len(data) > 0 {
-		serr = ac.tr.Send(frameOutput(data))
+	if err == nil {
+		data = append(data, cursorTail...)
+		if len(data) > 0 {
+			serr = ac.tr.Send(frameOutput(data))
+		}
 	}
 	ac.sendMu.Unlock()
 
@@ -1180,6 +1286,43 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 // resize applies a client size change to every window using rows-1 for the PTY
 // and VT screen, then resets the renderer shadow and repaints the composed
 // client-sized frame (including the status row).
+func desiredCursorOut(s *vt.Screen, copyActive bool) cursorOut {
+	if copyActive || !s.CursorVisible() {
+		return cursorOut{hidden: true}
+	}
+	style, ok := s.CursorStyle()
+	if !ok {
+		style = 5
+	}
+	return cursorOut{row: s.CursorRow(), col: s.CursorCol(), style: style, hasStyle: true}
+}
+
+func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte {
+	changed := force || !ac.lastCursor.valid || ac.lastCursor.hidden != desired.hidden || ac.lastCursor.row != desired.row || ac.lastCursor.col != desired.col || ac.lastCursor.style != desired.style || ac.lastCursor.hasStyle != desired.hasStyle
+	if !changed {
+		return nil
+	}
+	prev := ac.lastCursor
+	ac.lastCursor = desired
+	ac.lastCursor.valid = true
+	if desired.hidden {
+		return []byte("\x1b[?25l")
+	}
+	var b []byte
+	b = append(b, "\x1b["...)
+	b = strconv.AppendInt(b, int64(desired.row+1), 10)
+	b = append(b, ';')
+	b = strconv.AppendInt(b, int64(desired.col+1), 10)
+	b = append(b, 'H')
+	if !prev.valid || prev.hidden || prev.style != desired.style || prev.hasStyle != desired.hasStyle {
+		b = append(b, "\x1b["...)
+		b = strconv.AppendInt(b, int64(desired.style), 10)
+		b = append(b, " q"...)
+	}
+	b = append(b, "\x1b[?25h"...)
+	return b
+}
+
 func composeClientFrame(sess *session, win *window, full bool) (renderer.Frame, []renderer.Damage) {
 	width, screenRows := win.screen.Frame.Width, win.screen.Frame.Height
 	frame := renderer.NewFrame(width, screenRows+1)

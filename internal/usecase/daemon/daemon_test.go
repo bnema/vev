@@ -1781,3 +1781,137 @@ func TestSyncUpdateWatchdogStaleGenerationNoopAfterEnd(t *testing.T) {
 	cancel()
 	d.sessWg.Wait()
 }
+
+func mustOutputData(t *testing.T, sends chan ports.Frame) []byte {
+	t.Helper()
+	f := awaitFrame(t, sends, ports.MsgOutput)
+	out, err := ports.UnmarshalOutput(f.Payload)
+	require.NoError(t, err)
+	return out.Data
+}
+
+func TestMouseWheelCopyEntryExitAndStreamOrder(t *testing.T) {
+	writes := make(chan []byte, 4)
+	p, _ := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	win := sess.windows[0]
+	win.screen.Write([]byte("live"))
+
+	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
+	mustOutputData(t, sends)
+	require.NotNil(t, ac.copyMode)
+	require.Equal(t, 19, ac.copyMode.Cursor)
+
+	d.handleInput(sess, ac, []byte("\x1b[<65;1;1M"))
+	mustOutputData(t, sends)
+	require.Nil(t, ac.copyMode)
+
+	d.handleInput(sess, ac, []byte("\x1b[<64;1;1Mq"))
+	mustOutputData(t, sends)
+	mustOutputData(t, sends)
+	require.Nil(t, ac.copyMode, "q after wheel in same input must be routed after copy mode is entered")
+	select {
+	case got := <-writes:
+		t.Fatalf("mouse/copy input forwarded to PTY: %q", got)
+	default:
+	}
+}
+
+func TestMouseAltScreenWheelMapsToArrows(t *testing.T) {
+	writes := make(chan []byte, 2)
+	p, _ := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	sess.windows[0].screen.Write([]byte("\x1b[?1049h"))
+
+	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
+	d.handleInput(sess, ac, []byte("\x1b[<65;1;1M"))
+
+	require.Equal(t, []byte("\x1b[A\x1b[A\x1b[A"), <-writes)
+	require.Equal(t, []byte("\x1b[B\x1b[B\x1b[B"), <-writes)
+	require.Nil(t, ac.copyMode)
+}
+
+func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
+	writes := make(chan []byte, 4)
+	p, _ := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
+	select {
+	case got := <-writes:
+		t.Fatalf("press without child mouse mode forwarded: %q", got)
+	default:
+	}
+
+	sess.windows[0].screen.Write([]byte("\x1b[?1000h"))
+	raw := []byte("\x1b[<0;2;3M")
+	d.handleInput(sess, ac, raw)
+	select {
+	case got := <-writes:
+		t.Fatalf("SGR report forwarded to child without SGR mode: %q", got)
+	default:
+	}
+
+	sess.windows[0].screen.Write([]byte("\x1b[?1006h"))
+	d.handleInput(sess, ac, raw)
+	require.Equal(t, raw, <-writes)
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;24M"))
+	select {
+	case got := <-writes:
+		t.Fatalf("status-row mouse report forwarded: %q", got)
+	default:
+	}
+}
+
+func TestMouseSplitReportPreservesOrder(t *testing.T) {
+	writes := make(chan []byte, 2)
+	p, _ := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	sess.windows[0].screen.Write([]byte("live"))
+
+	d.handleInput(sess, ac, []byte("\x1b[<64;"))
+	d.handleInput(sess, ac, []byte("1;1Mq"))
+
+	mustOutputData(t, sends)
+	mustOutputData(t, sends)
+	require.Nil(t, ac.copyMode)
+	select {
+	case got := <-writes:
+		t.Fatalf("split mouse/copy bytes forwarded to PTY: %q", got)
+	default:
+	}
+}
+
+func TestCursorTailVisibleHideAndMoveOnly(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	win := sess.windows[0]
+	win.screen.Write([]byte("A"))
+
+	d.paint(sess, ac, true)
+	data := mustOutputData(t, sends)
+	require.Contains(t, string(data), "\x1b[5 q")
+	require.Contains(t, string(data), "\x1b[?25h")
+
+	win.screen.Write([]byte("\x1b[2;3H"))
+	d.paint(sess, ac, false)
+	data = mustOutputData(t, sends)
+	require.Contains(t, string(data), "\x1b[2;3H")
+	require.Contains(t, string(data), "\x1b[?25h")
+
+	win.screen.Write([]byte("\x1b[?25l"))
+	d.paint(sess, ac, false)
+	data = mustOutputData(t, sends)
+	require.Contains(t, string(data), "\x1b[?25l")
+}
+
+func TestCursorTailHidesInCopyMode(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	sess.windows[0].screen.Write([]byte("live"))
+
+	d.enterCopyMode(sess, ac)
+	data := mustOutputData(t, sends)
+	require.Contains(t, string(data), "\x1b[?25l")
+}

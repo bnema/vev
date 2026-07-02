@@ -248,6 +248,11 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 	for {
 		select {
 		case f := <-in:
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			if err := transport.Send(f); err != nil {
 				select {
 				case errCh <- err:

@@ -65,6 +65,12 @@ Copy mode freezes a view over the scrollback while the program keeps running und
 
 Copying uses OSC 52, so the selection lands in your terminal's clipboard even across SSH.
 
+## Mouse
+
+vev enables terminal mouse reporting while attached. Mouse input on the status row is reserved for vev and is not sent to the child. In copy mode, the wheel scrolls the copy-mode view. When the child enables mouse reporting, SGR mouse events are forwarded to it. Otherwise, wheel events in the alternate screen are translated to Up/Down arrow keys (`ESC[A` / `ESC[B`). This translation intentionally does not honor DECCKM application-cursor mode (`ESC OA` / `ESC OB`). An extremely rare input read split exactly between `ESC[` and `<` in an SGR mouse sequence may leak the partial `ESC[` to the child.
+
+vev follows the child application's cursor visibility and style requests and appends a hardware cursor update after each paint. Visible cursors blink as requested by the terminal/application state.
+
 ## Development
 
 ```sh
