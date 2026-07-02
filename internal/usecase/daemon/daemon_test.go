@@ -207,7 +207,7 @@ func newManualSessionWithPTYs(t *testing.T, ptys ...ports.PTY) (*Daemon, *sessio
 	sctx, cancel := context.WithCancel(d.serveCtx)
 	windows := make([]*window, 0, len(ptys))
 	for _, p := range ptys {
-		windows = append(windows, &window{pty: p, screen: vt.NewScreen(80, 24), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 24}})
+		windows = append(windows, &window{pty: p, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}})
 	}
 	sess := &session{id: "manual", name: "work", ctx: sctx, cancel: cancel, windows: windows, client: ac}
 	d.sessions[sess.id] = sess
@@ -476,7 +476,7 @@ func TestAltDDetachesCurrentClient(t *testing.T) {
 }
 
 func TestAltRPromotesEphemeralSessionPromptlessly(t *testing.T) {
-	d, sess, ac, _, releases := newManualWindowSession(t, 1)
+	d, sess, ac, sends, releases := newManualWindowSession(t, 1)
 	defer releases[0]()
 	sess.ephemeral = true
 	sess.name = "0"
@@ -485,6 +485,76 @@ func TestAltRPromotesEphemeralSessionPromptlessly(t *testing.T) {
 
 	require.False(t, sess.ephemeral)
 	require.Equal(t, "0", sess.name)
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestStatusCompositionGolden(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	_, sess, _, _ := newManualSessionWithPTYs(t, p1, p2)
+	defer releasePTY1()
+	defer releasePTY2()
+	sess.active = 1
+	sess.name = "work"
+
+	win := sess.activeWindow()
+	win.screen = vt.NewScreen(12, 2)
+	win.size = domain.Size{Cols: 12, Rows: 2}
+	win.screen.Write([]byte("hello"))
+
+	frame, damage := composeClientFrame(sess, win, true)
+
+	require.Equal(t, 12, frame.Width)
+	require.Equal(t, 3, frame.Height)
+	require.Equal(t, "hello       ", rowText(frame.Row(0)))
+	require.Equal(t, " work  1  2 ", rowText(frame.Row(2)))
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+	for i, c := range frame.Row(2) {
+		if i >= len(" work  1 ") && i < len(" work  1  2 ") {
+			require.True(t, c.Style.Inverse, "active window segment cell %d should be inverse", i)
+		}
+	}
+}
+
+func TestStatusRepaintsOnCreateSwitchAndResize(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
+	tr, sends, releaseConn := newConn(t,
+		mustHello(ports.IntentNew, "work", domain.Size{Cols: 20, Rows: 5}),
+		frameInput([]byte("\x1bc")),
+		frameInput([]byte("\x1b1")),
+		ports.Frame{Type: ports.MsgResize, Payload: ports.MarshalResize(ports.Resize{Size: domain.Size{Cols: 22, Rows: 6}})},
+	)
+
+	var hg sync.WaitGroup
+	hg.Go(func() { d.handleConn(tr) })
+	awaitFrame(t, sends, ports.MsgWelcome)
+	first := awaitFrame(t, sends, ports.MsgOutput)
+	created := awaitFrame(t, sends, ports.MsgOutput)
+	switched := awaitFrame(t, sends, ports.MsgOutput)
+	resized := awaitFrame(t, sends, ports.MsgOutput)
+
+	for _, f := range []ports.Frame{first, created, switched, resized} {
+		out, err := ports.UnmarshalOutput(f.Payload)
+		require.NoError(t, err)
+		require.Contains(t, string(out.Data), "work")
+		require.Contains(t, string(out.Data), ";7m", "active status window should be inverse-highlighted")
+	}
+
+	releaseConn()
+	releasePTY1()
+	releasePTY2()
+	hg.Wait()
+	d.sessWg.Wait()
+}
+
+func rowText(row []renderer.Cell) string {
+	runes := make([]rune, len(row))
+	for i, c := range row {
+		runes[i] = c.Rune
+	}
+	return string(runes)
 }
 
 func TestAttachReplaceDetachesOld(t *testing.T) {
@@ -646,7 +716,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	p := portsmocks.NewMockPTY(t)
 	var screenWidthAtResize int
 	win := &window{screen: vt.NewScreen(80, 24), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 24}}
-	p.EXPECT().Resize(newSize).RunAndReturn(func(sz domain.Size) error {
+	p.EXPECT().Resize(domain.Size{Cols: 100, Rows: 29}).RunAndReturn(func(sz domain.Size) error {
 		// The screen must not yet be resized when the PTY is: proves order.
 		screenWidthAtResize = win.screen.Frame.Width
 		return nil
@@ -670,6 +740,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 
 	require.Equal(t, 80, screenWidthAtResize, "pty.Resize must run before screen.Resize")
 	require.Equal(t, 100, win.screen.Frame.Width, "screen resized after pty")
+	require.Equal(t, 29, win.screen.Frame.Height, "screen reserves bottom status row")
 	require.True(t, gotOutput.Load(), "resize forces a full redraw output")
 }
 

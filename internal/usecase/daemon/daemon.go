@@ -490,7 +490,8 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 // createSessionLocked spawns a PTY-backed session and starts its reader and
 // scheduler goroutines. Caller holds d.mu.
 func (d *Daemon) createSessionLocked(name string, ephemeral bool, sz domain.Size) (*session, error) {
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), sz)
+	winSize := windowSize(sz)
+	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), winSize)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: spawning session %q: %w", name, err)
 	}
@@ -500,9 +501,9 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, sz domain.Size
 
 	win := &window{
 		pty:    pty,
-		screen: vt.NewScreen(sz.Cols, sz.Rows),
+		screen: vt.NewScreen(winSize.Cols, winSize.Rows),
 		dirty:  make(chan struct{}, 1),
-		size:   sz,
+		size:   winSize,
 	}
 	sctx, cancel := context.WithCancel(d.serveCtx)
 	sess := &session{
@@ -519,15 +520,16 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, sz domain.Size
 }
 
 func (d *Daemon) createWindow(sess *session, sz domain.Size) error {
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(sess.name), sz)
+	winSize := windowSize(sz)
+	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(sess.name), winSize)
 	if err != nil {
 		return fmt.Errorf("daemon: spawning window for session %q: %w", sess.name, err)
 	}
 	win := &window{
 		pty:    pty,
-		screen: vt.NewScreen(sz.Cols, sz.Rows),
+		screen: vt.NewScreen(winSize.Cols, winSize.Rows),
 		dirty:  make(chan struct{}, 1),
-		size:   sz,
+		size:   winSize,
 	}
 	sess.mu.Lock()
 	sess.windows = append(sess.windows, win)
@@ -535,6 +537,17 @@ func (d *Daemon) createWindow(sess *session, sz domain.Size) error {
 	sess.mu.Unlock()
 	d.startWindowGoroutines(sess, win)
 	return nil
+}
+
+func windowSize(clientSize domain.Size) domain.Size {
+	if !clientSize.Valid() {
+		clientSize = defaultSize
+	}
+	rows := clientSize.Rows - 1
+	if rows < 1 {
+		rows = 1
+	}
+	return domain.Size{Cols: clientSize.Cols, Rows: rows}
 }
 
 func (d *Daemon) startWindowGoroutines(sess *session, win *window) {
@@ -578,7 +591,7 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 	wsz := win.size
 	win.mu.Unlock()
 
-	if clientSize.Valid() && wsz != clientSize {
+	if clientSize.Valid() && wsz != windowSize(clientSize) {
 		d.resize(sess, ac, clientSize)
 		return
 	}
@@ -704,6 +717,7 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 		// M4 will install copy-mode state here; for M3 the binding is intentionally intercepted.
 	case keys.ActionRenameSession:
 		h.sess.promoteEphemeral()
+		h.d.paint(h.sess, h.ac, true)
 	case keys.ActionSwitchWindow1, keys.ActionSwitchWindow2, keys.ActionSwitchWindow3,
 		keys.ActionSwitchWindow4, keys.ActionSwitchWindow5, keys.ActionSwitchWindow6,
 		keys.ActionSwitchWindow7, keys.ActionSwitchWindow8, keys.ActionSwitchWindow9:
@@ -844,9 +858,9 @@ func (d *Daemon) render(sess *session, win *window) {
 	d.paint(sess, ac, false)
 }
 
-// paint draws the screen for ac and sends the resulting bytes. The renderer
-// shadow is read/written under win.mu; sendMu makes Draw→Send atomic per client
-// so the scheduler and a concurrent resize never interleave their output.
+// paint draws the composed client frame (active window plus status bar) and
+// sends the resulting bytes. The renderer shadow is reset on explicit invalidations
+// such as switch/create/close/rename/resize so the repaint is complete.
 func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	win := sess.activeWindow()
 	if win == nil {
@@ -858,7 +872,8 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	if reset {
 		ac.rend.Reset()
 	}
-	data, err := ac.rend.Draw(win.screen.Frame, win.screen.Damage())
+	frame, damage := composeClientFrame(sess, win, reset)
+	data, err := ac.rend.Draw(frame, damage)
 	win.screen.ClearDamage()
 	win.mu.Unlock()
 
@@ -877,44 +892,95 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	}
 }
 
-// resize applies a client size change in the plan's strict order: pty.Resize,
-// then screen.Resize under the window lock, then a renderer reset + full
-// redraw, then send.
+// resize applies a client size change to every window using rows-1 for the PTY
+// and VT screen, then resets the renderer shadow and repaints the composed
+// client-sized frame (including the status row).
+func composeClientFrame(sess *session, win *window, full bool) (renderer.Frame, []renderer.Damage) {
+	width, screenRows := win.screen.Frame.Width, win.screen.Frame.Height
+	frame := renderer.NewFrame(width, screenRows+1)
+	for y := 0; y < screenRows; y++ {
+		copy(frame.Row(y), win.screen.Frame.Row(y))
+	}
+	drawStatus(frame.Row(screenRows), sess)
+	if full {
+		return frame, []renderer.Damage{renderer.FullRedraw()}
+	}
+	damage := append([]renderer.Damage(nil), win.screen.Damage()...)
+	damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: screenRows, Width: width, Height: 1})
+	return frame, damage
+}
+
+func drawStatus(row []renderer.Cell, sess *session) {
+	for i := range row {
+		row[i] = renderer.BlankCell()
+	}
+	status := sess.statusSegments()
+	x := 0
+	writeStatusText(row, &x, " "+status.session+" ", renderer.DefaultStyle())
+	for _, w := range status.windows {
+		style := renderer.DefaultStyle()
+		if w.active {
+			style.Inverse = true
+		}
+		writeStatusText(row, &x, " "+w.name+" ", style)
+	}
+}
+
+type statusSnapshot struct {
+	session string
+	windows []statusWindow
+}
+
+type statusWindow struct {
+	name   string
+	active bool
+}
+
+func (s *session) statusSegments() statusSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snap := statusSnapshot{session: s.name, windows: make([]statusWindow, len(s.windows))}
+	for i := range s.windows {
+		name := strconv.Itoa(i + 1)
+		snap.windows[i] = statusWindow{name: name, active: i == s.active}
+	}
+	return snap
+}
+
+func writeStatusText(row []renderer.Cell, x *int, text string, style renderer.Style) {
+	for _, r := range text {
+		if *x >= len(row) {
+			return
+		}
+		row[*x] = renderer.Cell{Rune: r, Style: style}
+		(*x)++
+	}
+}
+
 func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	if !sz.Valid() {
 		return
 	}
-	win := sess.activeWindow()
-	if win == nil {
+	winSize := windowSize(sz)
+	ac.size = sz
+
+	sess.mu.Lock()
+	windows := append([]*window(nil), sess.windows...)
+	sess.mu.Unlock()
+	if len(windows) == 0 {
 		return
 	}
 
-	if err := win.pty.Resize(sz); err != nil {
-		d.log.Warn("pty resize failed", "err", err, "session", sess.name)
+	for _, win := range windows {
+		if err := win.pty.Resize(winSize); err != nil {
+			d.log.Warn("pty resize failed", "err", err, "session", sess.name)
+		}
+		win.mu.Lock()
+		win.screen.Resize(winSize.Cols, winSize.Rows)
+		win.size = winSize
+		win.mu.Unlock()
 	}
-
-	ac.sendMu.Lock()
-	win.mu.Lock()
-	win.screen.Resize(sz.Cols, sz.Rows)
-	win.size = sz
-	ac.rend.Reset()
-	data, err := ac.rend.Draw(win.screen.Frame, win.screen.Damage())
-	win.screen.ClearDamage()
-	win.mu.Unlock()
-
-	var serr error
-	if err == nil && len(data) > 0 {
-		serr = ac.tr.Send(frameOutput(data))
-	}
-	ac.sendMu.Unlock()
-
-	if err != nil {
-		d.log.Error("resize draw failed", "err", err, "session", sess.name)
-		return
-	}
-	if serr != nil {
-		d.detachOnSendError(sess, ac)
-	}
+	d.paint(sess, ac, true)
 }
 
 // detachOnSendError drops a client whose transport failed. Like every other
