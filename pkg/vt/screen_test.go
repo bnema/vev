@@ -38,6 +38,31 @@ func assertCell(t *testing.T, s *Screen, x, y int, expected rune) {
 	if c.Rune != expected {
 		t.Errorf("cell(%d,%d) rune = %q, want %q", x, y, c.Rune, expected)
 	}
+	if c.Continuation {
+		t.Errorf("cell(%d,%d) unexpectedly marked as continuation", x, y)
+	}
+}
+
+// assertContinuation asserts the cell at (x,y) is the right half of a
+// wide-character pair (Continuation set, Rune 0).
+func assertContinuation(t *testing.T, s *Screen, x, y int) {
+	t.Helper()
+	c := cellAt(s, x, y)
+	if !c.Continuation {
+		t.Errorf("cell(%d,%d) expected continuation, got rune=%q continuation=%v", x, y, c.Rune, c.Continuation)
+	}
+	if c.Rune != 0 {
+		t.Errorf("cell(%d,%d) continuation rune = %q, want 0", x, y, c.Rune)
+	}
+}
+
+// assertBlank asserts the cell at (x,y) is a blank default cell.
+func assertBlank(t *testing.T, s *Screen, x, y int) {
+	t.Helper()
+	c := cellAt(s, x, y)
+	if c.Rune != ' ' || c.Continuation {
+		t.Errorf("cell(%d,%d) = {rune:%q cont:%v}, want blank space", x, y, c.Rune, c.Continuation)
+	}
 }
 
 func lineText(s *Screen, y int) string {
@@ -1226,17 +1251,19 @@ func TestWideAndZeroWidthRunes(t *testing.T) {
 		run  func(t *testing.T)
 	}{
 		{
-			name: "CJK wide characters render as single-cell placeholders",
+			name: "CJK writes wide left cell plus continuation",
 			run: func(t *testing.T) {
 				s := NewScreen(10, 3)
-				// Write two CJK characters that are width 2 in a real terminal.
-				// They should be rendered as '?' placeholders, advancing cursor by 1 each.
-				s.Write([]byte("\xe4\xbd\xa0\xe5\xa5\xbd")) // 你好
+				// Two CJK characters, each width 2: left cell holds the rune,
+				// right cell is a continuation marker.
+				s.Write([]byte("你好"))
 
-				assertCell(t, s, 0, 0, '?')
-				assertCell(t, s, 1, 0, '?')
-				if s.Col != 2 || s.Row != 0 {
-					t.Errorf("cursor at col=%d row=%d, want col=2 row=0", s.Col, s.Row)
+				assertCell(t, s, 0, 0, '你')
+				assertContinuation(t, s, 1, 0)
+				assertCell(t, s, 2, 0, '好')
+				assertContinuation(t, s, 3, 0)
+				if s.Col != 4 || s.Row != 0 {
+					t.Errorf("cursor at col=%d row=%d, want col=4 row=0", s.Col, s.Row)
 				}
 			},
 		},
@@ -1244,27 +1271,27 @@ func TestWideAndZeroWidthRunes(t *testing.T) {
 			name: "CJK mixed with ASCII",
 			run: func(t *testing.T) {
 				s := NewScreen(10, 3)
-				s.Write([]byte("A\xe4\xbd\xa0B")) // A你B
+				s.Write([]byte("A你B"))
 
 				assertCell(t, s, 0, 0, 'A')
-				assertCell(t, s, 1, 0, '?')
-				assertCell(t, s, 2, 0, 'B')
-				if s.Col != 3 {
-					t.Errorf("cursor at col=%d, want 3", s.Col)
+				assertCell(t, s, 1, 0, '你')
+				assertContinuation(t, s, 2, 0)
+				assertCell(t, s, 3, 0, 'B')
+				if s.Col != 4 {
+					t.Errorf("cursor at col=%d, want 4", s.Col)
 				}
 			},
 		},
 		{
-			name: "emoji rendered as placeholder",
+			name: "emoji writes wide pair",
 			run: func(t *testing.T) {
 				s := NewScreen(10, 3)
-				em := []byte("\U0001f600") // 😀 grinning face
-				s.Write(em)
+				s.Write([]byte("\U0001f600")) // 😀 grinning face
 
-				// Wide emoji is rendered as '?' placeholder.
-				assertCell(t, s, 0, 0, '?')
-				if s.Col != 1 {
-					t.Errorf("cursor at col=%d, want 1", s.Col)
+				assertCell(t, s, 0, 0, '\U0001f600')
+				assertContinuation(t, s, 1, 0)
+				if s.Col != 2 {
+					t.Errorf("cursor at col=%d, want 2", s.Col)
 				}
 			},
 		},
@@ -1300,65 +1327,53 @@ func TestWideAndZeroWidthRunes(t *testing.T) {
 			name: "CJK surrounded by ASCII on both sides",
 			run: func(t *testing.T) {
 				s := NewScreen(10, 3)
-				s.Write([]byte("a\xe4\xbd\xa0b\xe5\xa5\xbdc")) // a你b好c
+				s.Write([]byte("a你b好c"))
 
 				assertCell(t, s, 0, 0, 'a')
-				assertCell(t, s, 1, 0, '?')
-				assertCell(t, s, 2, 0, 'b')
-				assertCell(t, s, 3, 0, '?')
-				assertCell(t, s, 4, 0, 'c')
-				if s.Col != 5 {
-					t.Errorf("cursor at col=%d, want 5", s.Col)
+				assertCell(t, s, 1, 0, '你')
+				assertContinuation(t, s, 2, 0)
+				assertCell(t, s, 3, 0, 'b')
+				assertCell(t, s, 4, 0, '好')
+				assertContinuation(t, s, 5, 0)
+				assertCell(t, s, 6, 0, 'c')
+				if s.Col != 7 {
+					t.Errorf("cursor at col=%d, want 7", s.Col)
 				}
 			},
 		},
 		{
-			name: "CJK at the edge of the line wraps via scroll on a 1-row screen",
+			name: "wide char at last column wraps to next line, abandoned cell cleared",
 			run: func(t *testing.T) {
-				s := NewScreen(2, 1)
-				// Write two ASCII chars to fill the line.
-				s.Write([]byte("AB")) // Cells = [A B], Col=2
-				// CJK at col 2 (edge) triggers newline → scroll on 1-row screen.
-				// scrollUp blanks the only row, then '?' is written at col 0.
-				s.Write([]byte("\xe4\xbd\xa0")) // 你
+				s := NewScreen(3, 2)
+				// Fill the first two columns; cursor lands on the last column.
+				s.Write([]byte("AB")) // cells [A B _], Col=2
+				// A wide char at the last column cannot straddle the edge: it
+				// wraps to the next line, clearing the abandoned last cell.
+				s.Write([]byte("你"))
 
-				assertCell(t, s, 0, 0, '?') // CJK placeholder after scroll+blank
-				assertCell(t, s, 1, 0, ' ') // untouched
-				if s.Col != 1 || s.Row != 0 {
-					t.Errorf("cursor at col=%d row=%d, want col=1 row=0", s.Col, s.Row)
+				assertCell(t, s, 0, 0, 'A')
+				assertCell(t, s, 1, 0, 'B')
+				assertBlank(t, s, 2, 0) // abandoned last cell cleared
+				assertCell(t, s, 0, 1, '你')
+				assertContinuation(t, s, 1, 1)
+				if s.Col != 2 || s.Row != 1 {
+					t.Errorf("cursor at col=%d row=%d, want col=2 row=1", s.Col, s.Row)
 				}
 			},
 		},
 		{
-			name: "CJK damage width is normalized to 1",
+			name: "CJK damage width is 2",
 			run: func(t *testing.T) {
 				s := NewScreen(10, 3)
 				s.ClearDamage()
-				s.Write([]byte("\xe4\xbd\xa0")) // 你
+				s.Write([]byte("你"))
 
 				d := s.Damage()
 				if len(d) == 0 {
 					t.Fatal("expected damage")
 				}
-				// After normalization, damage width should be 1, not 2.
-				if d[0].Width != 1 {
-					t.Errorf("damage width = %d, want 1 (normalized)", d[0].Width)
-				}
-			},
-		},
-		{
-			name: "emoji damage width is normalized to 1",
-			run: func(t *testing.T) {
-				s := NewScreen(10, 3)
-				s.ClearDamage()
-				s.Write([]byte("\U0001f600")) // 😀
-
-				d := s.Damage()
-				if len(d) == 0 {
-					t.Fatal("expected damage")
-				}
-				if d[0].Width != 1 {
-					t.Errorf("damage width = %d, want 1 (normalized)", d[0].Width)
+				if d[0].Width != 2 {
+					t.Errorf("damage width = %d, want 2", d[0].Width)
 				}
 			},
 		},
@@ -1366,18 +1381,111 @@ func TestWideAndZeroWidthRunes(t *testing.T) {
 			name: "mixed ASCII, CJK, emoji, and combining marks keep cursor aligned",
 			run: func(t *testing.T) {
 				s := NewScreen(10, 3)
-				// ASCII 'a', CJK '你', emoji '😀', ASCII 'b', combining acute '◌́'
-				s.Write([]byte("a\xe4\xbd\xa0\U0001f600b\xcc\x81"))
+				// ASCII 'a', CJK '你', emoji '😀', ASCII 'b', combining acute.
+				s.Write([]byte("a你\U0001f600b\xcc\x81"))
 
-				assertCell(t, s, 0, 0, 'a') // 'a'
-				assertCell(t, s, 1, 0, '?') // 你 normalized
-				assertCell(t, s, 2, 0, '?') // 😀 normalized
-				assertCell(t, s, 3, 0, 'b') // 'b'
-				// Combining mark skipped, no cell at col 4.
-				// Cursor at col 4 (advanced by a, CJK, emoji, b).
-				if s.Col != 4 || s.Row != 0 {
-					t.Errorf("cursor at col=%d row=%d, want col=4 row=0", s.Col, s.Row)
+				assertCell(t, s, 0, 0, 'a')
+				assertCell(t, s, 1, 0, '你')
+				assertContinuation(t, s, 2, 0)
+				assertCell(t, s, 3, 0, '\U0001f600')
+				assertContinuation(t, s, 4, 0)
+				assertCell(t, s, 5, 0, 'b')
+				// Combining mark skipped, no cell at col 6.
+				if s.Col != 6 || s.Row != 0 {
+					t.Errorf("cursor at col=%d row=%d, want col=6 row=0", s.Col, s.Row)
 				}
+			},
+		},
+		{
+			name: "overwrite left half of wide pair with narrow clears both",
+			run: func(t *testing.T) {
+				s := NewScreen(10, 3)
+				s.Write([]byte("你"))         // (0)=你 (1)=cont
+				s.Write([]byte("\x1b[1;1H")) // cursor home
+				s.Write([]byte("X"))         // overwrite the wide left half
+
+				assertCell(t, s, 0, 0, 'X')
+				assertBlank(t, s, 1, 0) // orphaned continuation cleared
+			},
+		},
+		{
+			name: "overwrite right half (continuation) with narrow clears both",
+			run: func(t *testing.T) {
+				s := NewScreen(10, 3)
+				s.Write([]byte("你"))         // (0)=你 (1)=cont
+				s.Write([]byte("\x1b[1;2H")) // cursor to col 1 (continuation)
+				s.Write([]byte("X"))         // overwrite the continuation
+
+				assertBlank(t, s, 0, 0) // orphaned wide left cleared
+				assertCell(t, s, 1, 0, 'X')
+			},
+		},
+		{
+			name: "overwrite half of wide pair with a new wide char",
+			run: func(t *testing.T) {
+				s := NewScreen(10, 3)
+				s.Write([]byte("你好"))        // (0)你 (1)cont (2)好 (3)cont
+				s.Write([]byte("\x1b[1;2H")) // cursor to col 1 (cont of 你)
+				s.Write([]byte("学"))         // wide write at cols 1,2
+
+				assertBlank(t, s, 0, 0) // 你 left half orphaned → cleared
+				assertCell(t, s, 1, 0, '学')
+				assertContinuation(t, s, 2, 0)
+				assertBlank(t, s, 3, 0) // 好 continuation orphaned → cleared
+			},
+		},
+		{
+			name: "erase to end of line covering a continuation clears its wide left half",
+			run: func(t *testing.T) {
+				s := NewScreen(10, 3)
+				s.Write([]byte("A你B"))       // A(0) 你(1) cont(2) B(3)
+				s.Write([]byte("\x1b[1;3H")) // cursor to col 2 (continuation)
+				s.Write([]byte("\x1b[K"))    // erase from col 2 to end of line
+
+				assertCell(t, s, 0, 0, 'A')
+				assertBlank(t, s, 1, 0) // 你 left half orphaned by erase → cleared
+				assertBlank(t, s, 2, 0)
+				assertBlank(t, s, 3, 0)
+			},
+		},
+		{
+			name: "erase to start of line covering a wide left clears its continuation",
+			run: func(t *testing.T) {
+				s := NewScreen(10, 3)
+				s.Write([]byte("A你B"))       // A(0) 你(1) cont(2) B(3)
+				s.Write([]byte("\x1b[1;2H")) // cursor to col 1 (wide left)
+				s.Write([]byte("\x1b[1K"))   // erase from start to col 1 inclusive
+
+				assertBlank(t, s, 0, 0)
+				assertBlank(t, s, 1, 0)
+				assertBlank(t, s, 2, 0) // continuation orphaned by erase → cleared
+				assertCell(t, s, 3, 0, 'B')
+			},
+		},
+		{
+			name: "wide char on a width-1 screen degrades to a single cell",
+			run: func(t *testing.T) {
+				s := NewScreen(1, 2)
+				// A wide rune cannot fit on a 1-column screen; it must not write
+				// an out-of-bounds continuation cell.
+				s.Write([]byte("你"))
+
+				assertCell(t, s, 0, 0, '你')
+				if s.Col != 1 {
+					t.Errorf("cursor at col=%d, want 1", s.Col)
+				}
+			},
+		},
+		{
+			name: "wide pair survives a scroll",
+			run: func(t *testing.T) {
+				s := NewScreen(4, 2)
+				s.Write([]byte("你\r\n好")) // row0: 你, row1: 好
+				s.Write([]byte("\r\n"))   // bottom row → scroll up
+
+				// After scrolling up, row1's 好 moves to row0 intact.
+				assertCell(t, s, 0, 0, '好')
+				assertContinuation(t, s, 1, 0)
 			},
 		},
 		{
@@ -1440,6 +1548,12 @@ func TestRuneWidth(t *testing.T) {
 		{"Fullwidth Cent Sign", 0xFFE0, 2},
 		{"grinning face emoji", 0x1F600, 2},
 		{"rocket emoji", 0x1F680, 2},
+		{"hiragana a", 0x3042, 2},
+		{"katakana a", 0x30A2, 2},
+		{"CJK Extension B", 0x20000, 2},
+		{"supplemental symbols (robot)", 0x1F916, 2},
+		{"symbols extended-A (sari)", 0x1FA71, 2},
+		{"ideographic full stop", 0x3002, 2},
 		{"NUL", '\x00', 0},
 		{"SOH", '\x01', 0},
 		{"ESC", '\x1b', 0},

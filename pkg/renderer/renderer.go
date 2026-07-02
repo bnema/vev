@@ -180,6 +180,11 @@ func (r *Renderer) writeDamage(out *bytes.Buffer, frame Frame, damage []Damage, 
 func (r *Renderer) writeRun(out *bytes.Buffer, frame Frame, y, x, width int, style *Style) {
 	for col := x; col < x+width; col++ {
 		cell := frame.At(col, y)
+		// Continuation cells are the right half of a wide rune. Emit nothing:
+		// the terminal already advanced two columns for the left cell's rune.
+		if cell.Continuation {
+			continue
+		}
 		if !cell.Style.Equal(*style) {
 			writeStyle(out, cell.Style)
 			*style = cell.Style

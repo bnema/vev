@@ -816,6 +816,18 @@ func TestCellEqual(t *testing.T) {
 			b:    BlankCell(),
 			want: false,
 		},
+		{
+			name: "continuation flag participates in equality",
+			a:    Cell{Continuation: true},
+			b:    Cell{},
+			want: false,
+		},
+		{
+			name: "two continuation cells are equal",
+			a:    Cell{Continuation: true},
+			b:    Cell{Continuation: true},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1027,5 +1039,99 @@ func TestDrawFallbackAndClampingEdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, tt.run)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Wide (double-width) character rendering
+// ---------------------------------------------------------------------------
+
+func TestWideCharRendering(t *testing.T) {
+	// A wide left cell {Rune: r} followed by a continuation cell
+	// {Continuation: true}. The renderer must emit the rune once and emit
+	// nothing at all for the continuation cell (the terminal advances two
+	// columns by itself). It must never emit a space for a continuation.
+	tests := []struct {
+		name  string
+		build func() Frame
+		want  string
+	}{
+		{
+			name: "single wide char followed by ascii",
+			build: func() Frame {
+				f := NewFrame(4, 1)
+				f.Set(0, 0, Cell{Rune: '你', Style: DefaultStyle()})
+				f.Set(1, 0, Cell{Continuation: true, Style: DefaultStyle()})
+				f.Set(2, 0, Cell{Rune: 'A', Style: DefaultStyle()})
+				return f
+			},
+			// row 0: cursor home, 你, (skip continuation), A, trailing space, reset
+			want: "\x1b[1;1H你A \x1b[0m",
+		},
+		{
+			name: "two adjacent wide chars then ascii",
+			build: func() Frame {
+				f := NewFrame(6, 1)
+				f.Set(0, 0, Cell{Rune: '你', Style: DefaultStyle()})
+				f.Set(1, 0, Cell{Continuation: true, Style: DefaultStyle()})
+				f.Set(2, 0, Cell{Rune: '好', Style: DefaultStyle()})
+				f.Set(3, 0, Cell{Continuation: true, Style: DefaultStyle()})
+				f.Set(4, 0, Cell{Rune: 'X', Style: DefaultStyle()})
+				return f
+			},
+			want: "\x1b[1;1H你好X \x1b[0m",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := New(Capabilities{})
+			frame := tt.build()
+			out, err := r.Draw(frame, []Damage{FullRedraw()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(out) != tt.want {
+				t.Errorf("output = %q, want %q", string(out), tt.want)
+			}
+			// No continuation must ever be rendered as a space: the visible
+			// glyph count is exactly the number of non-continuation cells.
+			// A second draw with no damage must be a no-op, proving the shadow
+			// matches the frame (continuation cells included).
+			out2, err := r.Draw(frame, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(out2) != 0 {
+				t.Errorf("second draw not a no-op: %q (shadow inconsistent)", string(out2))
+			}
+		})
+	}
+}
+
+func TestWideCharDamageEmission(t *testing.T) {
+	// Populate the shadow with a blank frame, then place a wide char and draw
+	// with a text-damage rect covering the pair. The continuation cell must
+	// not produce a space.
+	r := New(Capabilities{})
+	blank := NewFrame(4, 1)
+	if _, err := r.Draw(blank, []Damage{FullRedraw()}); err != nil {
+		t.Fatal(err)
+	}
+
+	frame := NewFrame(4, 1)
+	frame.Set(0, 0, Cell{Rune: '好', Style: DefaultStyle()})
+	frame.Set(1, 0, Cell{Continuation: true, Style: DefaultStyle()})
+
+	out, err := r.Draw(frame, []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 2, Height: 1, Count: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "好") {
+		t.Errorf("output %q missing wide rune", got)
+	}
+	if strings.Contains(got, "好 ") {
+		t.Errorf("output %q emitted a space for the continuation cell", got)
 	}
 }
