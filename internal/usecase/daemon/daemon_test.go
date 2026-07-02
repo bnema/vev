@@ -150,8 +150,7 @@ func TestHandshakeEphemeralHappy(t *testing.T) {
 	tr, sends, releaseConn := newConn(t, mustHello(ports.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 
 	var hg sync.WaitGroup
-	hg.Add(1)
-	go func() { defer hg.Done(); d.handleConn(tr) }()
+	hg.Go(func() { d.handleConn(tr) })
 
 	w := awaitFrame(t, sends, ports.MsgWelcome)
 	welcome, err := ports.UnmarshalWelcome(w.Payload)
@@ -173,8 +172,7 @@ func TestHandshakeNewHappy(t *testing.T) {
 	tr, sends, releaseConn := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
 
 	var hg sync.WaitGroup
-	hg.Add(1)
-	go func() { defer hg.Done(); d.handleConn(tr) }()
+	hg.Go(func() { d.handleConn(tr) })
 
 	w := awaitFrame(t, sends, ports.MsgWelcome)
 	welcome, err := ports.UnmarshalWelcome(w.Payload)
@@ -256,8 +254,7 @@ func TestAttachReplaceDetachesOld(t *testing.T) {
 	// Client A creates and attaches to ephemeral "0".
 	trA, sendsA, releaseA := newConn(t, mustHello(ports.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 	var hg sync.WaitGroup
-	hg.Add(1)
-	go func() { defer hg.Done(); d.handleConn(trA) }()
+	hg.Go(func() { d.handleConn(trA) })
 	awaitFrame(t, sendsA, ports.MsgWelcome)
 	awaitFrame(t, sendsA, ports.MsgOutput)
 	sess := firstSession(d)
@@ -265,8 +262,7 @@ func TestAttachReplaceDetachesOld(t *testing.T) {
 
 	// Client B attaches to the same session, displacing A.
 	trB, sendsB, releaseB := newConn(t, mustHello(ports.IntentAttach, "0", domain.Size{Cols: 80, Rows: 24}))
-	hg.Add(1)
-	go func() { defer hg.Done(); d.handleConn(trB) }()
+	hg.Go(func() { d.handleConn(trB) })
 	awaitFrame(t, sendsB, ports.MsgWelcome)
 
 	// A is notified it was detached.
@@ -299,8 +295,7 @@ func TestDetachKillsEphemeral(t *testing.T) {
 	)
 
 	var hg sync.WaitGroup
-	hg.Add(1)
-	go func() { defer hg.Done(); d.handleConn(tr) }()
+	hg.Go(func() { d.handleConn(tr) })
 	awaitFrame(t, sends, ports.MsgWelcome)
 
 	require.Eventually(t, func() bool { return sessionCount(d) == 0 }, 2*time.Second, 5*time.Millisecond,
@@ -320,8 +315,7 @@ func TestDetachKeepsNamed(t *testing.T) {
 	)
 
 	var hg sync.WaitGroup
-	hg.Add(1)
-	go func() { defer hg.Done(); d.handleConn(tr) }()
+	hg.Go(func() { d.handleConn(tr) })
 	awaitFrame(t, sends, ports.MsgWelcome)
 	awaitFrame(t, sends, ports.MsgDetached) // ack for explicit detach
 	hg.Wait()                               // handler returns after detach
@@ -388,7 +382,7 @@ func TestSchedulerDebounceCoalesces(t *testing.T) {
 	<-newTimerCalled
 
 	// A burst of further dirties inside the window must be absorbed.
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		select {
 		case win.dirty <- struct{}{}:
 		default:
@@ -452,8 +446,7 @@ func TestReaderEOFRemovesSessionAndSignalsShutdown(t *testing.T) {
 	tr, sends, _ := newConn(t, mustHello(ports.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 
 	var hg sync.WaitGroup
-	hg.Add(1)
-	go func() { defer hg.Done(); d.handleConn(tr) }()
+	hg.Go(func() { d.handleConn(tr) })
 
 	// The client is detached with ReasonSessionKilled when the child exits.
 	det := awaitFrame(t, sends, ports.MsgDetached)
@@ -576,8 +569,7 @@ func TestHelloRacingShutdownIsRejected(t *testing.T) {
 
 	tr1, sends1, release1 := newConn(t, mustHello(ports.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 	var hg sync.WaitGroup
-	hg.Add(1)
-	go func() { defer hg.Done(); d.handleConn(tr1) }()
+	hg.Go(func() { d.handleConn(tr1) })
 	awaitFrame(t, sends1, ports.MsgWelcome)
 	sess := firstSession(d)
 	require.NotNil(t, sess)

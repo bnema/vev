@@ -240,7 +240,7 @@ func TestTerminal_ResizeEvents_ConcurrentWithRestore(t *testing.T) {
 	// locks in that watcher start/stop are ordered by the mutex; in all
 	// interleavings the returned channel must eventually be closed and
 	// no watcher goroutine may leak.
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		inR, inW, err := os.Pipe()
 		if err != nil {
 			t.Fatalf("os.Pipe(in): %v", err)

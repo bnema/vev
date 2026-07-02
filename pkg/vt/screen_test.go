@@ -567,8 +567,8 @@ func TestClearAndErase(t *testing.T) {
 				s.Write([]byte("\x1b[2J"))
 
 				// All cells should be blank.
-				for y := 0; y < 3; y++ {
-					for x := 0; x < 5; x++ {
+				for y := range 3 {
+					for x := range 5 {
 						if c := cellAt(s, x, y); c.Rune != ' ' {
 							t.Errorf("cell(%d,%d) = %q, want space after clear", x, y, c.Rune)
 						}
@@ -646,7 +646,7 @@ func TestClearAndErase(t *testing.T) {
 				s.Write([]byte("abcde"))
 				s.Write([]byte("\x1b[1;3H"))
 				s.Write([]byte("\x1b[2K"))
-				for x := 0; x < 5; x++ {
+				for x := range 5 {
 					if c := cellAt(s, x, 0); c.Rune != ' ' {
 						t.Fatalf("line clear left %q at %d", c.Rune, x)
 					}
@@ -1097,7 +1097,7 @@ func TestResize(t *testing.T) {
 					t.Errorf("frame size = %dx%d, want 10x5", s.Frame.Width, s.Frame.Height)
 				}
 				// Should be blank (new frame).
-				for x := 0; x < 10; x++ {
+				for x := range 10 {
 					assertCell(t, s, x, 0, ' ')
 				}
 				// Cursor reset.
@@ -1182,8 +1182,8 @@ func TestInvalidInputIgnored(t *testing.T) {
 			s := NewScreen(10, 3)
 			s.Write(tt.input)
 			// Should not panic, and no cells should be modified.
-			for y := 0; y < 3; y++ {
-				for x := 0; x < 10; x++ {
+			for y := range 3 {
+				for x := range 10 {
 					if c := cellAt(s, x, y); c.Rune != ' ' {
 						t.Errorf("cell(%d,%d) = %q, want space", x, y, c.Rune)
 					}
@@ -1626,8 +1626,8 @@ func TestWideAndZeroWidthRunes(t *testing.T) {
 				s.Write([]byte("\xcc\x81")) // combining acute accent alone (no base char)
 
 				// No cells should be modified.
-				for y := 0; y < 3; y++ {
-					for x := 0; x < 10; x++ {
+				for y := range 3 {
+					for x := range 10 {
 						if c := cellAt(s, x, y); c.Rune != ' ' {
 							t.Errorf("cell(%d,%d) = %q, want space", x, y, c.Rune)
 						}
@@ -1795,8 +1795,8 @@ func TestCSIScrollUp(t *testing.T) {
 				s.Write([]byte("\x1b[100S"))
 
 				// All rows should be blank.
-				for y := 0; y < 3; y++ {
-					for x := 0; x < 5; x++ {
+				for y := range 3 {
+					for x := range 5 {
 						assertCell(t, s, x, y, ' ')
 					}
 				}
@@ -2002,8 +2002,8 @@ func TestC1Controls(t *testing.T) {
 				s.Write([]byte{0xC2, 0x9F}) // U+009F APC
 
 				// No cells should be modified.
-				for y := 0; y < 3; y++ {
-					for x := 0; x < 10; x++ {
+				for y := range 3 {
+					for x := range 10 {
 						if c := cellAt(s, x, y); c.Rune != ' ' {
 							t.Errorf("cell(%d,%d) = %q, want space after C1 controls", x, y, c.Rune)
 						}
@@ -2025,8 +2025,8 @@ func TestC1Controls(t *testing.T) {
 				}
 
 				// No cells should be modified.
-				for y := 0; y < 3; y++ {
-					for x := 0; x < 10; x++ {
+				for y := range 3 {
+					for x := range 10 {
 						if c := cellAt(s, x, y); c.Rune != ' ' {
 							t.Errorf("cell(%d,%d) = %q, want space after C1 range", x, y, c.Rune)
 						}

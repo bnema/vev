@@ -204,12 +204,10 @@ func (t *Terminal) ResizeEvents() <-chan domain.Size {
 	t.sigCh = make(chan os.Signal, 1)
 	signal.Notify(t.sigCh, syscall.SIGWINCH)
 
-	t.resizeWG.Add(1)
-	go func() {
-		defer t.resizeWG.Done()
+	t.resizeWG.Go(func() {
 		defer signal.Stop(t.sigCh)
 		resizeLoop(t.sigCh, t.resizeCh, t.resizeQuit, t.Size)
-	}()
+	})
 
 	return t.resizeCh
 }

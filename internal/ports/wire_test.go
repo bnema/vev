@@ -27,8 +27,7 @@ func mustNotPanic(t *testing.T, f func()) {
 // mid-string-len, mid-string — in one sweep.
 func assertAllPrefixesFail[T any](t *testing.T, full []byte, unmarshal func([]byte) (T, error)) {
 	t.Helper()
-	for n := 0; n < len(full); n++ {
-		n := n
+	for n := range len(full) {
 		t.Run(fmt.Sprintf("truncated_at_%d", n), func(t *testing.T) {
 			mustNotPanic(t, func() {
 				if _, err := unmarshal(full[:n]); err == nil {

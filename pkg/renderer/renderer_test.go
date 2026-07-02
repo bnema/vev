@@ -10,8 +10,8 @@ import (
 
 // markFrame writes uniform printable content so each row is distinguishable.
 func markFrame(f *Frame) {
-	for y := 0; y < f.Height; y++ {
-		for x := 0; x < f.Width; x++ {
+	for y := range f.Height {
+		for x := range f.Width {
 			f.Set(x, y, Cell{Rune: rune('A' + (y*f.Width+x)%26), Style: DefaultStyle()})
 		}
 	}

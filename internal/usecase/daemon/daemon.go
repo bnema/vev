@@ -270,11 +270,9 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 		if err != nil {
 			break
 		}
-		d.connWg.Add(1)
-		go func() {
-			defer d.connWg.Done()
+		d.connWg.Go(func() {
 			d.handleConn(tr)
-		}()
+		})
 	}
 
 	// Tear down. shutdownAll marks the daemon closing (route now rejects any
@@ -403,8 +401,7 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 
 	sess, ac, rerr := d.route(h, tr)
 	if rerr != nil {
-		var pe *protoErr
-		if errors.As(rerr, &pe) {
+		if pe, ok := errors.AsType[*protoErr](rerr); ok {
 			_ = tr.Send(frameError(pe.code, pe.text))
 		} else {
 			_ = tr.Send(frameError(ports.ErrInternal, rerr.Error()))

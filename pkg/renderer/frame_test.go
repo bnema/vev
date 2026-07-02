@@ -22,7 +22,7 @@ func fillFrame(f Frame, rows []string) {
 
 func TestNewFrameCanonicalOffsets(t *testing.T) {
 	f := NewFrame(4, 3)
-	for y := 0; y < f.Height; y++ {
+	for y := range f.Height {
 		if f.lineOffset[y] != y*f.Width {
 			t.Fatalf("lineOffset[%d] = %d, want %d", y, f.lineOffset[y], y*f.Width)
 		}
@@ -88,7 +88,7 @@ func TestScrollUpEquivalence(t *testing.T) {
 			f := NewFrame(tt.width, tt.height)
 			fillFrame(f, tt.rows)
 			f.ScrollUp(tt.top, tt.bottom, tt.n)
-			for y := 0; y < f.Height; y++ {
+			for y := range f.Height {
 				if got := rowRunes(f, y); got != tt.want[y] {
 					t.Errorf("row %d = %q, want %q", y, got, tt.want[y])
 				}
@@ -127,7 +127,7 @@ func TestScrollDownEquivalence(t *testing.T) {
 			f := NewFrame(tt.width, tt.height)
 			fillFrame(f, tt.rows)
 			f.ScrollDown(tt.top, tt.bottom, tt.n)
-			for y := 0; y < f.Height; y++ {
+			for y := range f.Height {
 				if got := rowRunes(f, y); got != tt.want[y] {
 					t.Errorf("row %d = %q, want %q", y, got, tt.want[y])
 				}

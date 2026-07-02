@@ -15,7 +15,7 @@ func TestResizeLoop_CoalescesBurstToOneEmission(t *testing.T) {
 	// consuming: draining is synchronous and deterministic here since
 	// nothing else sends concurrently.
 	sig := make(chan os.Signal, 8)
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		sig <- syscall.SIGWINCH
 	}
 

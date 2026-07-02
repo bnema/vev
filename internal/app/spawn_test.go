@@ -28,10 +28,8 @@ func TestAcquireSpawnLockSingleWinnerUnderRace(t *testing.T) {
 	start := make(chan struct{})
 	releases := make(chan func(), racers)
 
-	for i := 0; i < racers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range racers {
+		wg.Go(func() {
 			<-start
 			release, acquired, err := acquireSpawnLock(dir)
 			if err != nil {
@@ -42,7 +40,7 @@ func TestAcquireSpawnLockSingleWinnerUnderRace(t *testing.T) {
 				wins.Add(1)
 				releases <- release
 			}
-		}()
+		})
 	}
 
 	close(start)

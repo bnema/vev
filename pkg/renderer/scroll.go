@@ -46,7 +46,7 @@ func (r *Renderer) canApplyScroll(frame Frame, scroll Damage, damage []Damage) b
 	for y := scroll.Y; y < scroll.Y+scroll.Height-scroll.Count; y++ {
 		frameRow := frame.Row(y)
 		shadowStart := (y+scroll.Count)*r.width + scroll.X
-		for x := 0; x < scroll.Width; x++ {
+		for x := range scroll.Width {
 			if r.shadow[shadowStart+x].Equal(frameRow[scroll.X+x]) {
 				continue
 			}

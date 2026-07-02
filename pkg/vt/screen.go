@@ -377,7 +377,7 @@ func (s *Screen) repairRow(y int) {
 		return
 	}
 	w := s.Frame.Width
-	for x := 0; x < w; x++ {
+	for x := range w {
 		c := s.Frame.At(x, y)
 		if c.Continuation {
 			if x == 0 {
@@ -876,7 +876,7 @@ func (s *Screen) exitAlternateScreen() {
 // canonical, so a rotated source is normalized in the clone.
 func cloneFrame(frame renderer.Frame) renderer.Frame {
 	out := renderer.NewFrame(frame.Width, frame.Height)
-	for y := 0; y < frame.Height; y++ {
+	for y := range frame.Height {
 		copy(out.Row(y), frame.Row(y))
 	}
 	return out

@@ -25,13 +25,11 @@ func TestTransportSendRecvBothDirections(t *testing.T) {
 	serverToClient := ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(ports.Welcome{SessionID: "s1", SessionName: "main"})}
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if err := client.Send(clientToServer); err != nil {
 			t.Errorf("client.Send() error = %v", err)
 		}
-	}()
+	})
 
 	got, err := server.Recv()
 	wg.Wait() // ensure the sender goroutine has fully returned before any Fatalf
@@ -42,13 +40,11 @@ func TestTransportSendRecvBothDirections(t *testing.T) {
 		t.Fatalf("server.Recv() = %#v, want %#v", got, clientToServer)
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if err := server.Send(serverToClient); err != nil {
 			t.Errorf("server.Send() error = %v", err)
 		}
-	}()
+	})
 
 	got, err = client.Recv()
 	wg.Wait()
@@ -106,13 +102,11 @@ func TestTransportLargeFrameNearCap(t *testing.T) {
 	want := ports.Frame{Type: ports.MsgOutput, Payload: payload}
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if err := client.Send(want); err != nil {
 			t.Errorf("client.Send() error = %v", err)
 		}
-	}()
+	})
 
 	got, err := server.Recv()
 	wg.Wait() // ensure the sender goroutine has fully returned before any Fatalf
@@ -147,16 +141,14 @@ func TestTransportManySmallFramesBackToBack(t *testing.T) {
 	frames[150] = ports.Frame{Type: ports.MsgResize, Payload: ports.MarshalResize(ports.Resize{Size: domain.Size{Cols: 5, Rows: 6}})}
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, f := range frames {
 			if err := client.Send(f); err != nil {
 				t.Errorf("client.Send() error = %v", err)
 				return
 			}
 		}
-	}()
+	})
 
 	// Report mismatches with Errorf (not Fatalf) and keep draining: the
 	// sender goroutine's net.Pipe writes block until read, so bailing out

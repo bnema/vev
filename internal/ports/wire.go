@@ -474,7 +474,7 @@ func UnmarshalSessions(b []byte) (Sessions, error) {
 		return Sessions{}, err
 	}
 	sessions := make([]SessionInfo, 0, count)
-	for i := 0; i < int(count); i++ {
+	for range int(count) {
 		var s SessionInfo
 		if s.SessionID, err = r.getString(); err != nil {
 			return Sessions{}, err

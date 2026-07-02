@@ -115,7 +115,7 @@ func putBuffer(buf *bytes.Buffer) {
 }
 
 func (r *Renderer) hasDirtyLines(frame Frame) bool {
-	for y := 0; y < frame.Height; y++ {
+	for y := range frame.Height {
 		if r.lineDirty(frame, y) {
 			return true
 		}
@@ -145,7 +145,7 @@ func hasScrollDamage(damage []Damage) bool {
 }
 
 func (r *Renderer) writeFull(out *bytes.Buffer, frame Frame, st *drawState) {
-	for y := 0; y < frame.Height; y++ {
+	for y := range frame.Height {
 		r.emitSpan(out, frame, y, 0, frame.Width, st)
 	}
 	out.WriteString("\x1b[0m")
@@ -153,7 +153,7 @@ func (r *Renderer) writeFull(out *bytes.Buffer, frame Frame, st *drawState) {
 
 func (r *Renderer) writeDamage(out *bytes.Buffer, frame Frame, damage []Damage, skip *Damage, st *drawState) {
 	if len(damage) == 0 {
-		for y := 0; y < frame.Height; y++ {
+		for y := range frame.Height {
 			if r.lineDirty(frame, y) {
 				r.emitSpan(out, frame, y, 0, frame.Width, st)
 			}
@@ -184,7 +184,7 @@ func (r *Renderer) lineDirty(frame Frame, y int) bool {
 	// through its logical accessor so the frame's physical layout is invisible.
 	start := y * frame.Width
 	row := frame.Row(y)
-	for i := 0; i < frame.Width; i++ {
+	for i := range frame.Width {
 		if !r.shadow[start+i].Equal(row[i]) {
 			return true
 		}
@@ -203,7 +203,7 @@ func (r *Renderer) replaceShadow(frame Frame) {
 	}
 	// Copy logical rows into canonical shadow order so the frame's line-offset
 	// rotation never leaks into the renderer's own buffer.
-	for y := 0; y < frame.Height; y++ {
+	for y := range frame.Height {
 		copy(r.shadow[y*frame.Width:], frame.Row(y))
 	}
 }
