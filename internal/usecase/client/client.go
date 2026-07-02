@@ -2,9 +2,9 @@
 // IPC protocol to a daemon, pumping terminal input, resize events, and PTY
 // output between the controlling terminal and the session.
 //
-// The package depends only on ports (transport, terminal) plus the ipc
-// message codecs, never on a concrete transport or terminal implementation;
-// the app layer wires those in.
+// The package depends only on ports (transport, terminal, wire codecs) and
+// domain, never on a concrete transport or terminal implementation; the app
+// layer wires those in.
 package client
 
 import (
@@ -15,7 +15,6 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
@@ -112,14 +111,14 @@ func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal,
 	if err != nil {
 		return fmt.Errorf("vev: reading terminal size: %w", err)
 	}
-	hello := ipc.Hello{
+	hello := ports.Hello{
 		Version: ports.ProtocolVersion,
 		Intent:  intent,
 		Name:    name,
 		Size:    size,
 		TermEnv: os.Getenv("TERM"),
 	}
-	if err := transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ipc.MarshalHello(hello)}); err != nil {
+	if err := transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
 		return fmt.Errorf("vev: sending hello: %w", err)
 	}
 	ms.helloSent = true
@@ -133,7 +132,7 @@ func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal,
 	case ports.MsgWelcome:
 		ms.welcomed = true
 	case ports.MsgError:
-		em, derr := ipc.UnmarshalErrorMsg(reply.Payload)
+		em, derr := ports.UnmarshalErrorMsg(reply.Payload)
 		if derr != nil {
 			return fmt.Errorf("vev: decoding error reply: %w", derr)
 		}
@@ -191,7 +190,7 @@ func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal,
 			}
 			switch r.frame.Type {
 			case ports.MsgOutput:
-				o, derr := ipc.UnmarshalOutput(r.frame.Payload)
+				o, derr := ports.UnmarshalOutput(r.frame.Payload)
 				if derr != nil {
 					return fmt.Errorf("vev: decoding output: %w", derr)
 				}
@@ -203,7 +202,7 @@ func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal,
 				}
 				ms.firstOutput = true
 			case ports.MsgDetached:
-				d, derr := ipc.UnmarshalDetached(r.frame.Payload)
+				d, derr := ports.UnmarshalDetached(r.frame.Payload)
 				if derr != nil {
 					return fmt.Errorf("vev: decoding detached: %w", derr)
 				}
@@ -266,6 +265,13 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 // runStdin pumps terminal input to the daemon as Input frames. A read error
 // or EOF is treated as a detach: it best-effort sends a Detach frame and
 // cancels the loop.
+//
+// Known MVP limitation: a bare io.Reader cannot be unblocked from outside,
+// so on shutdown initiated elsewhere (daemon detach, transport loss) this
+// goroutine stays parked in Read until the next byte arrives or the process
+// exits. That is harmless here — Attach has already returned and restored
+// the terminal — and matches the standard pattern for stdin pumps; a
+// closable stdin duplicate could lift it later if ever needed.
 func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame) {
 	buf := make([]byte, stdinBufSize)
 	for {
@@ -273,7 +279,7 @@ func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out 
 		if n > 0 {
 			data := make([]byte, n)
 			copy(data, buf[:n])
-			frame := ports.Frame{Type: ports.MsgInput, Payload: ipc.MarshalInput(ipc.Input{Data: data})}
+			frame := ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: data})}
 			select {
 			case out <- frame:
 			case <-ctx.Done():
@@ -283,7 +289,7 @@ func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out 
 		if rerr != nil {
 			// Best-effort detach notification, then unwind.
 			select {
-			case out <- ports.Frame{Type: ports.MsgDetach, Payload: ipc.MarshalDetach(ipc.Detach{})}:
+			case out <- ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})}:
 			case <-ctx.Done():
 			}
 			cancel()
@@ -302,7 +308,7 @@ func runResize(ctx context.Context, events <-chan domain.Size, out chan<- ports.
 			if !ok {
 				return
 			}
-			frame := ports.Frame{Type: ports.MsgResize, Payload: ipc.MarshalResize(ipc.Resize{Size: sz})}
+			frame := ports.Frame{Type: ports.MsgResize, Payload: ports.MarshalResize(ports.Resize{Size: sz})}
 			select {
 			case out <- frame:
 			case <-ctx.Done():
@@ -319,11 +325,11 @@ func runResize(ctx context.Context, events <-chan domain.Size, out chan<- ports.
 // the user learns why the session went away.
 func detachedResult(reason uint8) error {
 	switch reason {
-	case ipc.ReasonDetach:
+	case ports.ReasonDetach:
 		return nil
-	case ipc.ReasonSessionKilled:
+	case ports.ReasonSessionKilled:
 		return &DetachedError{Reason: reason, Text: "session was killed"}
-	case ipc.ReasonServerShutdown:
+	case ports.ReasonServerShutdown:
 		return &DetachedError{Reason: reason, Text: "daemon shut down"}
 	default:
 		return &DetachedError{Reason: reason, Text: "detached by daemon"}

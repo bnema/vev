@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/ports"
 )
 
 func TestParseArgs(t *testing.T) {
@@ -16,13 +16,13 @@ func TestParseArgs(t *testing.T) {
 		wantName   string
 		wantErr    bool
 	}{
-		{name: "no args -> ephemeral attach", args: nil, wantKind: kindAttach, wantIntent: ipc.IntentEphemeral},
-		{name: "empty slice -> ephemeral attach", args: []string{}, wantKind: kindAttach, wantIntent: ipc.IntentEphemeral},
-		{name: "new named", args: []string{"new", "work"}, wantKind: kindAttach, wantIntent: ipc.IntentNew, wantName: "work"},
+		{name: "no args -> ephemeral attach", args: nil, wantKind: kindAttach, wantIntent: ports.IntentEphemeral},
+		{name: "empty slice -> ephemeral attach", args: []string{}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral},
+		{name: "new named", args: []string{"new", "work"}, wantKind: kindAttach, wantIntent: ports.IntentNew, wantName: "work"},
 		{name: "new without name", args: []string{"new"}, wantErr: true},
 		{name: "new empty name", args: []string{"new", ""}, wantErr: true},
-		{name: "attach named", args: []string{"attach", "work"}, wantKind: kindAttach, wantIntent: ipc.IntentAttach, wantName: "work"},
-		{name: "attach alias a", args: []string{"a", "work"}, wantKind: kindAttach, wantIntent: ipc.IntentAttach, wantName: "work"},
+		{name: "attach named", args: []string{"attach", "work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work"},
+		{name: "attach alias a", args: []string{"a", "work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work"},
 		{name: "attach without name", args: []string{"attach"}, wantErr: true},
 		{name: "ls", args: []string{"ls"}, wantKind: kindList},
 		{name: "list", args: []string{"list"}, wantKind: kindList},

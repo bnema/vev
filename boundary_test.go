@@ -24,6 +24,11 @@ func TestImportBoundaries(t *testing.T) {
 			root:             "pkg",
 			disallowedPrefix: "github.com/bnema/vev/internal",
 		},
+		{
+			name:             "usecase must not import adapters",
+			root:             "internal/usecase",
+			disallowedPrefix: "github.com/bnema/vev/internal/adapters",
+		},
 	}
 
 	for _, rule := range rules {

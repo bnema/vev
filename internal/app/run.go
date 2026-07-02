@@ -80,7 +80,7 @@ func Run(args []string) error {
 // I/O.
 func parseArgs(args []string) (command, error) {
 	if len(args) == 0 {
-		return command{kind: kindAttach, intent: ipc.IntentEphemeral}, nil
+		return command{kind: kindAttach, intent: ports.IntentEphemeral}, nil
 	}
 
 	switch args[0] {
@@ -90,12 +90,12 @@ func parseArgs(args []string) (command, error) {
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`new` requires a session name")
 		}
-		return command{kind: kindAttach, intent: ipc.IntentNew, name: args[1]}, nil
+		return command{kind: kindAttach, intent: ports.IntentNew, name: args[1]}, nil
 	case "attach", "a":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`attach` requires a session name")
 		}
-		return command{kind: kindAttach, intent: ipc.IntentAttach, name: args[1]}, nil
+		return command{kind: kindAttach, intent: ports.IntentAttach, name: args[1]}, nil
 	case "ls", "list":
 		return command{kind: kindList}, nil
 	case "kill":
@@ -184,7 +184,7 @@ func runList(_ context.Context) error {
 	}
 	defer transport.Close()
 
-	if err := transport.Send(ports.Frame{Type: ports.MsgList, Payload: ipc.MarshalList(ipc.List{})}); err != nil {
+	if err := transport.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(ports.List{})}); err != nil {
 		return fmt.Errorf("vev: requesting session list: %w", err)
 	}
 	reply, err := transport.Recv()
@@ -192,13 +192,13 @@ func runList(_ context.Context) error {
 		return fmt.Errorf("vev: reading session list: %w", err)
 	}
 	if reply.Type == ports.MsgError {
-		em, _ := ipc.UnmarshalErrorMsg(reply.Payload)
+		em, _ := ports.UnmarshalErrorMsg(reply.Payload)
 		return fmt.Errorf("vev: %s", em.Text)
 	}
 	if reply.Type != ports.MsgSessions {
 		return fmt.Errorf("vev: unexpected reply type %d to list", reply.Type)
 	}
-	sessions, err := ipc.UnmarshalSessions(reply.Payload)
+	sessions, err := ports.UnmarshalSessions(reply.Payload)
 	if err != nil {
 		return fmt.Errorf("vev: decoding session list: %w", err)
 	}
@@ -207,7 +207,7 @@ func runList(_ context.Context) error {
 }
 
 // printSessions renders a session table (or a friendly note when empty).
-func printSessions(w io.Writer, sessions []ipc.SessionInfo) {
+func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 	if len(sessions) == 0 {
 		fmt.Fprintln(w, "no sessions")
 		return
@@ -232,7 +232,7 @@ func runKill(_ context.Context, name string) error {
 	}
 	defer transport.Close()
 
-	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ipc.MarshalKill(ipc.Kill{Name: name})}); err != nil {
+	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{Name: name})}); err != nil {
 		return fmt.Errorf("vev: requesting kill: %w", err)
 	}
 	reply, err := transport.Recv()
@@ -246,7 +246,7 @@ func runKill(_ context.Context, name string) error {
 		return fmt.Errorf("vev: reading kill reply: %w", err)
 	}
 	if reply.Type == ports.MsgError {
-		em, _ := ipc.UnmarshalErrorMsg(reply.Payload)
+		em, _ := ports.UnmarshalErrorMsg(reply.Payload)
 		return fmt.Errorf("vev: %s", em.Text)
 	}
 	fmt.Printf("killed %s\n", name)

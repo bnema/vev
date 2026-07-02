@@ -1,4 +1,10 @@
-package ipc
+// Wire codecs for vev's IPC message payloads. They live in ports (alongside
+// Frame and the MsgType constants) because wire encoding is protocol
+// surface, not I/O: everything here is pure, stdlib-only byte marshalling.
+// Adapters keep what actually performs I/O (framing over a connection,
+// listening on a socket) and import these types for the payloads they carry.
+
+package ports
 
 import (
 	"encoding/binary"
@@ -9,12 +15,12 @@ import (
 
 // errShortPayload is returned when a payload ends before a required field
 // has been fully read.
-var errShortPayload = errors.New("ipc: payload too short")
+var errShortPayload = errors.New("ports: payload too short")
 
 // errTrailingBytes is returned when a fixed-shape payload has bytes left
 // over after every field has been consumed. Protocol strictness here
 // catches version drift early instead of silently ignoring extra data.
-var errTrailingBytes = errors.New("ipc: unexpected trailing bytes in payload")
+var errTrailingBytes = errors.New("ports: unexpected trailing bytes in payload")
 
 // Intent values carried by Hello, describing what the client wants to do.
 const (
