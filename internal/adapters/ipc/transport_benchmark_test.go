@@ -26,7 +26,7 @@ func BenchmarkTransportRecvReuse(b *testing.B) {
 	}()
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		frames <- ports.Frame{Type: ports.MsgOutput, Payload: payload}
 		if _, err := recv.Recv(); err != nil {
 			b.Fatal(err)
