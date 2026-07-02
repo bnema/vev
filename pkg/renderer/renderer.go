@@ -198,9 +198,12 @@ func (r *Renderer) writeRun(out *bytes.Buffer, frame Frame, y, x, width int, sty
 }
 
 func (r *Renderer) lineDirty(frame Frame, y int) bool {
+	// The shadow is stored in canonical (logical) row order; the frame is read
+	// through its logical accessor so the frame's physical layout is invisible.
 	start := y * frame.Width
+	row := frame.Row(y)
 	for i := 0; i < frame.Width; i++ {
-		if !r.shadow[start+i].Equal(frame.Cells[start+i]) {
+		if !r.shadow[start+i].Equal(row[i]) {
 			return true
 		}
 	}
@@ -210,7 +213,17 @@ func (r *Renderer) lineDirty(frame Frame, y int) bool {
 func (r *Renderer) replaceShadow(frame Frame) {
 	r.width = frame.Width
 	r.height = frame.Height
-	r.shadow = append(r.shadow[:0], frame.Cells...)
+	n := len(frame.Cells)
+	if cap(r.shadow) >= n {
+		r.shadow = r.shadow[:n]
+	} else {
+		r.shadow = make([]Cell, n)
+	}
+	// Copy logical rows into canonical shadow order so the frame's line-offset
+	// rotation never leaks into the renderer's own buffer.
+	for y := 0; y < frame.Height; y++ {
+		copy(r.shadow[y*frame.Width:], frame.Row(y))
+	}
 }
 
 func (r *Renderer) syncDamage(frame Frame, damage []Damage, scroll *Damage) {
@@ -236,7 +249,8 @@ func (r *Renderer) syncRect(frame Frame, x, y, width, height int) {
 	}
 	for row := y; row < y+height; row++ {
 		start := row*frame.Width + x
-		copy(r.shadow[start:start+width], frame.Cells[start:start+width])
+		frameRow := frame.Row(row)
+		copy(r.shadow[start:start+width], frameRow[x:x+width])
 	}
 }
 

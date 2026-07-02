@@ -460,17 +460,10 @@ func (s *Screen) scrollUpRegion(top, bottom, n int) {
 	if n > height {
 		n = height
 	}
-	for y := top; y <= bottom-n; y++ {
-		dst := y * w
-		src := (y + n) * w
-		copy(s.Frame.Cells[dst:dst+w], s.Frame.Cells[src:src+w])
-	}
-	for y := bottom - n + 1; y <= bottom; y++ {
-		start := y * w
-		for i := start; i < start+w; i++ {
-			s.Frame.Cells[i] = renderer.BlankCell()
-		}
-	}
+	// VT scroll regions always span the full frame width, so we rotate the
+	// frame's line offsets (recycling and blanking the evicted rows in place)
+	// instead of copying cells. See renderer.Frame.ScrollUp.
+	s.Frame.ScrollUp(top, bottom, n)
 	s.record(renderer.Damage{Kind: renderer.DamageScrollUp, X: 0, Y: top, Width: w, Height: height, Count: n})
 	s.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: bottom - n + 1, Width: w, Height: n, Count: 1})
 }
@@ -488,17 +481,8 @@ func (s *Screen) scrollDownRegion(top, bottom, n int) {
 	if n > height {
 		n = height
 	}
-	for y := bottom; y >= top+n; y-- {
-		dst := y * w
-		src := (y - n) * w
-		copy(s.Frame.Cells[dst:dst+w], s.Frame.Cells[src:src+w])
-	}
-	for y := top; y < top+n; y++ {
-		start := y * w
-		for i := start; i < start+w; i++ {
-			s.Frame.Cells[i] = renderer.BlankCell()
-		}
-	}
+	// Full-width region: rotate line offsets instead of copying cells.
+	s.Frame.ScrollDown(top, bottom, n)
 	s.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: top, Width: w, Height: height, Count: 1})
 }
 
@@ -887,9 +871,14 @@ func (s *Screen) exitAlternateScreen() {
 	s.fullRedraw()
 }
 
+// cloneFrame produces an independent copy in canonical layout: it copies the
+// source's logical rows (via Row) into a fresh frame whose offsets are already
+// canonical, so a rotated source is normalized in the clone.
 func cloneFrame(frame renderer.Frame) renderer.Frame {
 	out := renderer.NewFrame(frame.Width, frame.Height)
-	copy(out.Cells, frame.Cells)
+	for y := 0; y < frame.Height; y++ {
+		copy(out.Row(y), frame.Row(y))
+	}
 	return out
 }
 
@@ -901,15 +890,15 @@ func (s *Screen) insertChars(n int) {
 	if n > w-s.Col {
 		n = w - s.Col
 	}
-	rowStart := s.Row * w
+	row := s.Frame.Row(s.Row)
 	// A wide left half at Col-1 whose continuation sits at Col will be orphaned
 	// by the shift; its repair falls outside the default damage rect.
-	leftSplit := s.Col > 0 && s.Frame.At(s.Col, s.Row).Continuation
+	leftSplit := s.Col > 0 && row[s.Col].Continuation
 	for x := w - 1; x >= s.Col+n; x-- {
-		s.Frame.Cells[rowStart+x] = s.Frame.Cells[rowStart+x-n]
+		row[x] = row[x-n]
 	}
 	for x := s.Col; x < s.Col+n; x++ {
-		s.Frame.Cells[rowStart+x] = renderer.BlankCell()
+		row[x] = renderer.BlankCell()
 	}
 	s.repairRow(s.Row)
 	dmgX := s.Col
@@ -927,15 +916,15 @@ func (s *Screen) deleteChars(n int) {
 	if n > w-s.Col {
 		n = w - s.Col
 	}
-	rowStart := s.Row * w
+	row := s.Frame.Row(s.Row)
 	// A wide left half at Col-1 whose continuation sits at Col will be orphaned
 	// by the shift; its repair falls outside the default damage rect.
-	leftSplit := s.Col > 0 && s.Frame.At(s.Col, s.Row).Continuation
+	leftSplit := s.Col > 0 && row[s.Col].Continuation
 	for x := s.Col; x < w-n; x++ {
-		s.Frame.Cells[rowStart+x] = s.Frame.Cells[rowStart+x+n]
+		row[x] = row[x+n]
 	}
 	for x := w - n; x < w; x++ {
-		s.Frame.Cells[rowStart+x] = renderer.BlankCell()
+		row[x] = renderer.BlankCell()
 	}
 	s.repairRow(s.Row)
 	dmgX := s.Col

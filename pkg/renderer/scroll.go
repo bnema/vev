@@ -44,10 +44,10 @@ func emitScrollUp(out *bytes.Buffer, d Damage) {
 
 func (r *Renderer) canApplyScroll(frame Frame, scroll Damage, damage []Damage) bool {
 	for y := scroll.Y; y < scroll.Y+scroll.Height-scroll.Count; y++ {
-		frameStart := y*frame.Width + scroll.X
+		frameRow := frame.Row(y)
 		shadowStart := (y+scroll.Count)*r.width + scroll.X
 		for x := 0; x < scroll.Width; x++ {
-			if r.shadow[shadowStart+x].Equal(frame.Cells[frameStart+x]) {
+			if r.shadow[shadowStart+x].Equal(frameRow[scroll.X+x]) {
 				continue
 			}
 			if !damageCoversCell(damage, scroll.X+x, y) {
