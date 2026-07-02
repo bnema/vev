@@ -110,15 +110,24 @@ func parseArgs(args []string) (command, error) {
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`new` requires a session name")
 		}
+		if len(args) > 2 {
+			return command{}, usagef("`new` does not support command overrides")
+		}
 		return command{kind: kindAttach, intent: ports.IntentNew, name: args[1]}, nil
 	case "attach", "a":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`attach` requires a session name")
 		}
+		if len(args) > 2 {
+			return command{}, usagef("`attach` accepts exactly one session name or remote target")
+		}
 		cmd := command{kind: kindAttach, intent: ports.IntentAttach, name: args[1]}
 		if target, session, ok := parseRemoteAttachTarget(args[1]); ok {
 			cmd.remoteTarget = target
 			cmd.name = session
+			if session == "" {
+				cmd.intent = ports.IntentEphemeral
+			}
 		}
 		return cmd, nil
 	case "ls", "list":
@@ -126,6 +135,9 @@ func parseArgs(args []string) (command, error) {
 	case "kill":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`kill` requires a session name")
+		}
+		if len(args) > 2 {
+			return command{}, usagef("`kill` accepts exactly one session name")
 		}
 		return command{kind: kindKill, name: args[1]}, nil
 	case "-h", "--help", "help":

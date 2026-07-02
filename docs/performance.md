@@ -8,19 +8,17 @@ Run microbenchmarks with:
 go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc -bench=. -benchmem
 ```
 
-Demo flood workloads are scripted in `scripts/bench-workloads.sh` for `yes`, `seq`, and `cat` styles. Capture bytes/frame and syscalls/frame externally (for example with `strace -c` around the client/daemon) and allocations with `-benchmem`/pprof.
+Demo flood workloads are scripted in `scripts/bench-workloads.sh` for `yes`, `seq`, and `cat` styles for raw/tmux runs. vev does not currently support `vev new <name> -- command`, so automated vev workload command overrides are intentionally not documented. Capture bytes/frame and syscalls/frame externally (for example with `strace -c` around the client/daemon) and allocations with `-benchmem`/pprof.
 
 ## Local baseline status
 
-Full end-to-end vev-vs-tmux workload baselines are deferred/waived for this non-interactive branch because they require an interactive terminal/daemon pair and external tracing tools around both processes. Run them later from an interactive shell with these exact command shapes, substituting only the vev binary path, tmux binary path, terminal size, duration, and sample file path:
+Full end-to-end vev-vs-tmux workload baselines are deferred/waived for this non-interactive branch because they require an interactive terminal/daemon pair, external tracing tools around both processes, and (for automated vev flood workloads) future command override support. Until that exists, only start the daemon/client normally and do not claim a scripted vev flood command. tmux/raw comparison commands remain useful for shaping workloads:
 
 ```sh
-VEV_PPROF_ADDR=127.0.0.1:6060 strace -ff -c -o vev-yes.strace vev --daemon
-strace -ff -c -o vev-client-yes.strace vev new perf-yes -- sh -lc 'timeout 30s yes'
+VEV_PPROF_ADDR=127.0.0.1:6060 strace -ff -c -o vev-daemon.strace vev --daemon
+strace -ff -c -o vev-client.strace vev new perf-manual
 strace -ff -c -o tmux-yes.strace tmux new-session -d -s perf-yes 'timeout 30s yes'
-strace -ff -c -o vev-client-seq.strace vev new perf-seq -- sh -lc 'timeout 30s sh -c "while :; do seq 1 10000; done"'
 strace -ff -c -o tmux-seq.strace tmux new-session -d -s perf-seq 'timeout 30s sh -c "while :; do seq 1 10000; done"'
-strace -ff -c -o vev-client-cat.strace vev new perf-cat -- sh -lc 'timeout 30s sh -c "while :; do cat /path/to/sample.txt; done"'
 strace -ff -c -o tmux-cat.strace tmux new-session -d -s perf-cat 'timeout 30s sh -c "while :; do cat /path/to/sample.txt; done"'
 ```
 
