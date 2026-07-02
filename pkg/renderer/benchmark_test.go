@@ -16,6 +16,7 @@ func BenchmarkRendererFullFrameDraw(b *testing.B) {
 	r := New(Capabilities{})
 	damage := []Damage{FullRedraw()}
 	b.ReportAllocs()
+	var outBytes int64
 	for b.Loop() {
 		r.Reset()
 		out, err := r.Draw(frame, damage)
@@ -25,7 +26,9 @@ func BenchmarkRendererFullFrameDraw(b *testing.B) {
 		if len(out) == 0 {
 			b.Fatal("expected renderer output")
 		}
+		outBytes += int64(len(out))
 	}
+	b.ReportMetric(float64(outBytes)/float64(b.N), "outbytes/op")
 }
 
 func BenchmarkRendererScrollFastPath(b *testing.B) {
@@ -50,6 +53,7 @@ func BenchmarkRendererScrollFastPath(b *testing.B) {
 	}
 
 	b.ReportAllocs()
+	var outBytes int64
 	for b.Loop() {
 		r.replaceShadow(frame)
 		out, err := r.Draw(scrolled, damage)
@@ -59,5 +63,7 @@ func BenchmarkRendererScrollFastPath(b *testing.B) {
 		if len(out) == 0 {
 			b.Fatal("expected renderer output")
 		}
+		outBytes += int64(len(out))
 	}
+	b.ReportMetric(float64(outBytes)/float64(b.N), "outbytes/op")
 }

@@ -51,8 +51,12 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 		buf.WriteString(SyncStartCSI)
 	}
 
+	// Per-Draw terminal state model shared by every emission path so cursor
+	// tracking and the SGR pen persist across all rects within one Draw.
+	st := newDrawState()
+
 	if r.width != frame.Width || r.height != frame.Height || len(r.shadow) != len(frame.Cells) || needsFull(damage) {
-		r.writeFull(buf, frame)
+		r.writeFull(buf, frame, &st)
 		r.replaceShadow(frame)
 		if r.caps.SynchronizedOutput {
 			buf.WriteString(SyncEndCSI)
@@ -62,8 +66,11 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 
 	if scroll, ok := findSafeScroll(frame, damage); ok && r.canApplyScroll(frame, scroll, damage) {
 		emitScrollUp(buf, scroll)
+		// emitScrollUp resets the SGR pen to default (matching st's initial
+		// pen) but leaves the cursor wherever the DECSTBM restore put it —
+		// terminal-dependent, so cursor tracking stays invalidated.
 		r.applyScroll(scroll)
-		r.writeDamage(buf, frame, damage, &scroll)
+		r.writeDamage(buf, frame, damage, &scroll, &st)
 		r.syncDamage(frame, damage, &scroll)
 		if r.caps.SynchronizedOutput {
 			buf.WriteString(SyncEndCSI)
@@ -75,7 +82,7 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 	// If the fast path is not safe, redraw the frame instead of applying
 	// partial damage and leaving the terminal/shadow stale.
 	if hasScrollDamage(damage) {
-		r.writeFull(buf, frame)
+		r.writeFull(buf, frame, &st)
 		r.replaceShadow(frame)
 		if r.caps.SynchronizedOutput {
 			buf.WriteString(SyncEndCSI)
@@ -83,7 +90,7 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 		return copyBytes(buf), nil
 	}
 
-	r.writeDamage(buf, frame, damage, nil)
+	r.writeDamage(buf, frame, damage, nil, &st)
 	r.syncDamage(frame, damage, nil)
 	if r.caps.SynchronizedOutput {
 		buf.WriteString(SyncEndCSI)
@@ -137,22 +144,18 @@ func hasScrollDamage(damage []Damage) bool {
 	return false
 }
 
-func (r *Renderer) writeFull(out *bytes.Buffer, frame Frame) {
-	style := DefaultStyle()
+func (r *Renderer) writeFull(out *bytes.Buffer, frame Frame, st *drawState) {
 	for y := 0; y < frame.Height; y++ {
-		writeCursor(out, y, 0)
-		r.writeRun(out, frame, y, 0, frame.Width, &style)
+		r.emitSpan(out, frame, y, 0, frame.Width, st)
 	}
 	out.WriteString("\x1b[0m")
 }
 
-func (r *Renderer) writeDamage(out *bytes.Buffer, frame Frame, damage []Damage, skip *Damage) {
-	style := DefaultStyle()
+func (r *Renderer) writeDamage(out *bytes.Buffer, frame Frame, damage []Damage, skip *Damage, st *drawState) {
 	if len(damage) == 0 {
 		for y := 0; y < frame.Height; y++ {
 			if r.lineDirty(frame, y) {
-				writeCursor(out, y, 0)
-				r.writeRun(out, frame, y, 0, frame.Width, &style)
+				r.emitSpan(out, frame, y, 0, frame.Width, st)
 			}
 		}
 		out.WriteString("\x1b[0m")
@@ -169,32 +172,11 @@ func (r *Renderer) writeDamage(out *bytes.Buffer, frame Frame, damage []Damage, 
 				continue
 			}
 			for row := y; row < y+h; row++ {
-				writeCursor(out, row, x)
-				r.writeRun(out, frame, row, x, w, &style)
+				r.emitSpan(out, frame, row, x, w, st)
 			}
 		}
 	}
 	out.WriteString("\x1b[0m")
-}
-
-func (r *Renderer) writeRun(out *bytes.Buffer, frame Frame, y, x, width int, style *Style) {
-	for col := x; col < x+width; col++ {
-		cell := frame.At(col, y)
-		// Continuation cells are the right half of a wide rune. Emit nothing:
-		// the terminal already advanced two columns for the left cell's rune.
-		if cell.Continuation {
-			continue
-		}
-		if !cell.Style.Equal(*style) {
-			writeStyle(out, cell.Style)
-			*style = cell.Style
-		}
-		if cell.Rune == 0 {
-			out.WriteByte(' ')
-		} else {
-			out.WriteRune(cell.Rune)
-		}
-	}
 }
 
 func (r *Renderer) lineDirty(frame Frame, y int) bool {
