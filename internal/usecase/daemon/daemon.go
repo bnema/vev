@@ -343,7 +343,7 @@ func (d *Daemon) handleConn(tr ports.Transport) {
 // handleList replies with the current session listing and closes the (one-shot
 // control) connection.
 func (d *Daemon) handleList(tr ports.Transport) {
-	defer tr.Close()
+	defer func() { _ = tr.Close() }()
 
 	d.mu.Lock()
 	infos := make([]ports.SessionInfo, 0, len(d.sessions))
@@ -368,7 +368,7 @@ func (d *Daemon) handleList(tr ports.Transport) {
 // handleKill terminates the named session (if any) and closes the control
 // connection; the resulting EOF is the client's success signal.
 func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
-	defer tr.Close()
+	defer func() { _ = tr.Close() }()
 
 	k, err := ports.UnmarshalKill(f.Payload)
 	if err != nil {

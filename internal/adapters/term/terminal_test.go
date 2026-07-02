@@ -33,11 +33,11 @@ func TestTerminal_EnterRaw_NonTTY_EmitsAltScreenAndCursorEscapes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Pipe(in): %v", err)
 	}
-	defer inW.Close()
-	defer inR.Close()
+	defer func() { _ = inW.Close() }()
+	defer func() { _ = inR.Close() }()
 
 	outR, outW, captured, done := pipeCapture(t)
-	defer outR.Close()
+	defer func() { _ = outR.Close() }()
 
 	tm := NewWithFiles(inR, outW)
 
@@ -57,7 +57,7 @@ func TestTerminal_EnterRaw_NonTTY_EmitsAltScreenAndCursorEscapes(t *testing.T) {
 		t.Fatalf("second restore call: %v", err)
 	}
 
-	outW.Close()
+	_ = outW.Close()
 	<-done
 
 	want := altScreenEnter + cursorHide + cursorShow + altScreenExit
@@ -71,11 +71,11 @@ func TestTerminal_EnterRaw_IsIdempotentAcrossCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Pipe(in): %v", err)
 	}
-	defer inW.Close()
-	defer inR.Close()
+	defer func() { _ = inW.Close() }()
+	defer func() { _ = inR.Close() }()
 
 	outR, outW, captured, done := pipeCapture(t)
-	defer outR.Close()
+	defer func() { _ = outR.Close() }()
 
 	tm := NewWithFiles(inR, outW)
 
@@ -95,7 +95,7 @@ func TestTerminal_EnterRaw_IsIdempotentAcrossCalls(t *testing.T) {
 		t.Fatalf("restore2: %v", err)
 	}
 
-	outW.Close()
+	_ = outW.Close()
 	<-done
 
 	// Alt-screen/cursor escapes must appear exactly once for enter and
@@ -112,11 +112,11 @@ func TestTerminal_InOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Pipe(in): %v", err)
 	}
-	defer inW.Close()
-	defer inR.Close()
+	defer func() { _ = inW.Close() }()
+	defer func() { _ = inR.Close() }()
 
 	outR, outW, captured, done := pipeCapture(t)
-	defer outR.Close()
+	defer func() { _ = outR.Close() }()
 
 	tm := NewWithFiles(inR, outW)
 
@@ -131,7 +131,7 @@ func TestTerminal_InOut(t *testing.T) {
 		t.Fatalf("Flush: %v", err)
 	}
 
-	outW.Close()
+	_ = outW.Close()
 	<-done
 
 	if got := captured.String(); got != "payload" {
@@ -144,11 +144,11 @@ func TestTerminal_ResizeEvents_ReturnsSameChannelAndClosesOnRestore(t *testing.T
 	if err != nil {
 		t.Fatalf("os.Pipe(in): %v", err)
 	}
-	defer inW.Close()
-	defer inR.Close()
+	defer func() { _ = inW.Close() }()
+	defer func() { _ = inR.Close() }()
 
 	outR, outW, _, done := pipeCapture(t)
-	defer outR.Close()
+	defer func() { _ = outR.Close() }()
 
 	tm := NewWithFiles(inR, outW)
 
@@ -176,7 +176,7 @@ func TestTerminal_ResizeEvents_ReturnsSameChannelAndClosesOnRestore(t *testing.T
 		t.Fatalf("resize channel was not closed after restore")
 	}
 
-	outW.Close()
+	_ = outW.Close()
 	<-done
 }
 
@@ -185,11 +185,11 @@ func TestTerminal_ResizeEvents_AfterRestore_NoWatcherAndClosedChannel(t *testing
 	if err != nil {
 		t.Fatalf("os.Pipe(in): %v", err)
 	}
-	defer inW.Close()
-	defer inR.Close()
+	defer func() { _ = inW.Close() }()
+	defer func() { _ = inR.Close() }()
 
 	outR, outW, _, done := pipeCapture(t)
-	defer outR.Close()
+	defer func() { _ = outR.Close() }()
 
 	tm := NewWithFiles(inR, outW)
 
@@ -230,7 +230,7 @@ func TestTerminal_ResizeEvents_AfterRestore_NoWatcherAndClosedChannel(t *testing
 	// Returns immediately iff no watcher goroutine was leaked.
 	tm.resizeWG.Wait()
 
-	outW.Close()
+	_ = outW.Close()
 	<-done
 }
 
@@ -285,11 +285,11 @@ func TestTerminal_ResizeEvents_ConcurrentWithRestore(t *testing.T) {
 		}
 		tm.resizeWG.Wait()
 
-		outW.Close()
+		_ = outW.Close()
 		<-done
-		inR.Close()
-		inW.Close()
-		outR.Close()
+		_ = inR.Close()
+		_ = inW.Close()
+		_ = outR.Close()
 	}
 }
 
@@ -298,12 +298,12 @@ func TestTerminal_Size_NonTTY_ReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Pipe(in): %v", err)
 	}
-	defer inW.Close()
-	defer inR.Close()
+	defer func() { _ = inW.Close() }()
+	defer func() { _ = inR.Close() }()
 
 	outR, outW, _, _ := pipeCapture(t)
-	defer outR.Close()
-	defer outW.Close()
+	defer func() { _ = outR.Close() }()
+	defer func() { _ = outW.Close() }()
 
 	tm := NewWithFiles(inR, outW)
 

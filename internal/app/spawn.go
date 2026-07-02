@@ -141,7 +141,7 @@ func realSpawn() error {
 	if err != nil {
 		return fmt.Errorf("opening %s: %w", os.DevNull, err)
 	}
-	defer devNull.Close()
+	defer func() { _ = devNull.Close() }()
 
 	cmd := exec.Command("/proc/self/exe", "--daemon")
 	cmd.Stdin = devNull

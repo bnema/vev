@@ -24,20 +24,20 @@ func openPTYPair(t *testing.T) (master, slave *os.File) {
 	}
 
 	if err := unix.IoctlSetPointerInt(int(m.Fd()), unix.TIOCSPTLCK, 0); err != nil {
-		m.Close()
+		_ = m.Close()
 		t.Fatalf("unlock pty (TIOCSPTLCK): %v", err)
 	}
 
 	n, err := unix.IoctlGetInt(int(m.Fd()), unix.TIOCGPTN)
 	if err != nil {
-		m.Close()
+		_ = m.Close()
 		t.Fatalf("get pty number (TIOCGPTN): %v", err)
 	}
 
 	slavePath := fmt.Sprintf("/dev/pts/%d", n)
 	s, err := os.OpenFile(slavePath, os.O_RDWR|unix.O_NOCTTY, 0)
 	if err != nil {
-		m.Close()
+		_ = m.Close()
 		t.Fatalf("open slave %s: %v", slavePath, err)
 	}
 
@@ -50,8 +50,8 @@ func openPTYPair(t *testing.T) (master, slave *os.File) {
 // pipes can't cover.
 func TestTerminal_RealPTY_RawModeSizeAndEscapes(t *testing.T) {
 	master, slave := openPTYPair(t)
-	defer master.Close()
-	defer slave.Close()
+	defer func() { _ = master.Close() }()
+	defer func() { _ = slave.Close() }()
 
 	ws := &unix.Winsize{Row: 24, Col: 80}
 	if err := unix.IoctlSetWinsize(int(slave.Fd()), unix.TIOCSWINSZ, ws); err != nil {

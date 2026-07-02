@@ -18,7 +18,7 @@ func TestListenAcceptRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	wantPath := filepath.Join(dir, "daemon.sock")
 	if ln.Addr() != wantPath {
@@ -40,7 +40,7 @@ func TestListenAcceptRoundTrip(t *testing.T) {
 			errCh <- err
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		client := NewTransport(conn)
 		errCh <- client.Send(ports.Frame{Type: ports.MsgPing})
 	}()
@@ -49,7 +49,7 @@ func TestListenAcceptRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Accept() error = %v", err)
 	}
-	defer transport.Close()
+	defer func() { _ = transport.Close() }()
 
 	got, err := transport.Recv()
 	if err != nil {
@@ -71,7 +71,7 @@ func TestListenMkdirsSocketDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	fi, err := os.Stat(dir)
 	if err != nil {
@@ -113,7 +113,7 @@ func TestListenStaleSocketCleanedUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen() over stale socket error = %v, want success", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 }
 
 func TestListenLiveDaemonRejected(t *testing.T) {
@@ -123,7 +123,7 @@ func TestListenLiveDaemonRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Listen() error = %v", err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 
 	_, err = Listen(dir)
 	if !errors.Is(err, ErrDaemonRunning) {

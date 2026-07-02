@@ -147,13 +147,13 @@ func runDaemon() error {
 	if err != nil {
 		return err
 	}
-	defer logFile.Close()
+	defer func() { _ = logFile.Close() }()
 
 	ln, err := ipc.Listen(ipc.SocketDir())
 	if err != nil {
 		return fmt.Errorf("vev: daemon listen: %w", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -176,7 +176,7 @@ func runAttach(ctx context.Context, intent uint8, name string) error {
 	if err != nil {
 		return err
 	}
-	defer logFile.Close()
+	defer func() { _ = logFile.Close() }()
 
 	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
 	if err != nil {
@@ -194,7 +194,7 @@ func runList(_ context.Context) error {
 		fmt.Println("no sessions")
 		return nil
 	}
-	defer transport.Close()
+	defer func() { _ = transport.Close() }()
 
 	if err := transport.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(ports.List{})}); err != nil {
 		return fmt.Errorf("vev: requesting session list: %w", err)
@@ -221,17 +221,17 @@ func runList(_ context.Context) error {
 // printSessions renders a session table (or a friendly note when empty).
 func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 	if len(sessions) == 0 {
-		fmt.Fprintln(w, "no sessions")
+		_, _ = fmt.Fprintln(w, "no sessions")
 		return
 	}
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tWINDOWS\tATTACHED")
+	_, _ = fmt.Fprintln(tw, "NAME\tWINDOWS\tATTACHED")
 	for _, s := range sessions {
 		attached := "no"
 		if s.Attached {
 			attached = "yes"
 		}
-		fmt.Fprintf(tw, "%s\t%d\t%s\n", s.Name, s.Windows, attached)
+		_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\n", s.Name, s.Windows, attached)
 	}
 	_ = tw.Flush()
 }
@@ -242,7 +242,7 @@ func runKill(_ context.Context, name string) error {
 	if err != nil {
 		return fmt.Errorf("vev: no daemon running")
 	}
-	defer transport.Close()
+	defer func() { _ = transport.Close() }()
 
 	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{Name: name})}); err != nil {
 		return fmt.Errorf("vev: requesting kill: %w", err)

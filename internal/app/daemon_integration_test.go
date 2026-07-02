@@ -128,7 +128,7 @@ func TestIntegration_AttachFirstOutput(t *testing.T) {
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf HELLO; sleep 30"}))
 
 	tr, p := attach(t, dir, ports.IntentEphemeral, "", sz)
-	defer tr.Close()
+	defer func() { _ = tr.Close() }()
 
 	awaitText(t, p, sz, "HELLO")
 }
@@ -138,7 +138,7 @@ func TestIntegration_InputRoundtrip(t *testing.T) {
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/cat", nil))
 
 	tr, p := attach(t, dir, ports.IntentEphemeral, "", sz)
-	defer tr.Close()
+	defer func() { _ = tr.Close() }()
 
 	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("PINGPONG\n")})}))
 	awaitText(t, p, sz, "PINGPONG")
@@ -182,6 +182,6 @@ func TestIntegration_NamedSurvivesReattach(t *testing.T) {
 
 	// Re-attach: the first paint must reproduce the retained screen state.
 	tr2, p2 := attach(t, dir, ports.IntentAttach, "work", sz)
-	defer tr2.Close()
+	defer func() { _ = tr2.Close() }()
 	awaitText(t, p2, sz, "MARKER")
 }

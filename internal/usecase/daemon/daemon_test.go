@@ -339,19 +339,24 @@ func TestEphemeralNumberingReuse(t *testing.T) {
 
 // --- attach replace ---------------------------------------------------------
 
-func TestAltDigitSwitchesActiveWindow(t *testing.T) {
+func TestAltDigitSwitchesBetweenThreeWindows(t *testing.T) {
 	writes1 := make(chan []byte, 1)
 	writes2 := make(chan []byte, 1)
+	writes3 := make(chan []byte, 1)
 	p1, releasePTY1 := newBlockingPTYWithWrites(t, writes1)
 	p2, releasePTY2 := newBlockingPTYWithWrites(t, writes2)
-	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
+	p3, releasePTY3 := newBlockingPTYWithWrites(t, writes3)
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2, p3), stubClock{})
 	tr, sends, releaseConn := newConn(t,
 		mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}),
+		frameInput([]byte("\x1bc")),
 		frameInput([]byte("\x1bc")),
 		frameInput([]byte("\x1b1")),
 		frameInput([]byte("A")),
 		frameInput([]byte("\x1b2")),
 		frameInput([]byte("B")),
+		frameInput([]byte("\x1b3")),
+		frameInput([]byte("C")),
 	)
 
 	var hg sync.WaitGroup
@@ -359,14 +364,21 @@ func TestAltDigitSwitchesActiveWindow(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgWelcome)
 	awaitFrame(t, sends, ports.MsgOutput)
 
+	require.Eventually(t, func() bool {
+		sessions := listSessions(t, d)
+		return len(sessions.Sessions) == 1 && sessions.Sessions[0].Windows == 3
+	}, 2*time.Second, 5*time.Millisecond)
 	require.Eventually(t, func() bool { return len(writes1) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, []byte("A"), <-writes1)
 	require.Eventually(t, func() bool { return len(writes2) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, []byte("B"), <-writes2)
+	require.Eventually(t, func() bool { return len(writes3) == 1 }, 2*time.Second, 5*time.Millisecond)
+	require.Equal(t, []byte("C"), <-writes3)
 
 	releaseConn()
 	releasePTY1()
 	releasePTY2()
+	releasePTY3()
 	hg.Wait()
 	d.sessWg.Wait()
 }

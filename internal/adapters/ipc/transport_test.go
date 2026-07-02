@@ -15,8 +15,8 @@ import (
 
 func TestTransportSendRecvBothDirections(t *testing.T) {
 	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	defer func() { _ = c1.Close() }()
+	defer func() { _ = c2.Close() }()
 
 	client := NewTransport(c1)
 	server := NewTransport(c2)
@@ -73,7 +73,7 @@ func TestTransportEOFOnClose(t *testing.T) {
 func TestTransportCloseClosesUnderlyingConn(t *testing.T) {
 	c1, c2 := net.Pipe()
 	client := NewTransport(c1)
-	defer c2.Close()
+	defer func() { _ = c2.Close() }()
 
 	if err := client.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -87,8 +87,8 @@ func TestTransportCloseClosesUnderlyingConn(t *testing.T) {
 
 func TestTransportLargeFrameNearCap(t *testing.T) {
 	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	defer func() { _ = c1.Close() }()
+	defer func() { _ = c2.Close() }()
 
 	client := NewTransport(c1)
 	server := NewTransport(c2)
@@ -125,8 +125,8 @@ func TestTransportLargeFrameNearCap(t *testing.T) {
 
 func TestTransportManySmallFramesBackToBack(t *testing.T) {
 	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	defer func() { _ = c1.Close() }()
+	defer func() { _ = c2.Close() }()
 
 	client := NewTransport(c1)
 	server := NewTransport(c2)
@@ -168,8 +168,8 @@ func TestTransportManySmallFramesBackToBack(t *testing.T) {
 
 func TestTransportRecvOversizeFrame(t *testing.T) {
 	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	defer func() { _ = c1.Close() }()
+	defer func() { _ = c2.Close() }()
 
 	server := NewTransport(c2)
 
@@ -187,8 +187,8 @@ func TestTransportRecvOversizeFrame(t *testing.T) {
 
 func TestTransportRecvZeroLengthFrame(t *testing.T) {
 	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	defer func() { _ = c1.Close() }()
+	defer func() { _ = c2.Close() }()
 
 	server := NewTransport(c2)
 
@@ -221,8 +221,8 @@ func TestTransportRecvTruncatedHeader(t *testing.T) {
 
 func TestTransportSendOversizePayloadRejected(t *testing.T) {
 	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	defer func() { _ = c1.Close() }()
+	defer func() { _ = c2.Close() }()
 
 	client := NewTransport(c1)
 	payload := make([]byte, maxFrameLen) // +1 byte type => exceeds max

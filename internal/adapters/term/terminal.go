@@ -102,11 +102,11 @@ func (t *Terminal) EnterRaw() (func() error, error) {
 	t.orig = old
 
 	if _, err := t.bw.WriteString(altScreenEnter + cursorHide); err != nil {
-		t.restoreRawLocked()
+		_ = t.restoreRawLocked()
 		return nil, fmt.Errorf("term: enter alt screen: %w", err)
 	}
 	if err := t.bw.Flush(); err != nil {
-		t.restoreRawLocked()
+		_ = t.restoreRawLocked()
 		return nil, fmt.Errorf("term: enter alt screen: %w", err)
 	}
 

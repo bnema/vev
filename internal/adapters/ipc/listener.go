@@ -64,7 +64,7 @@ func Listen(dir string) (ports.Listener, error) {
 	}
 
 	if err := os.Chmod(sockPath, 0o600); err != nil {
-		ln.Close()
+		_ = ln.Close()
 		return nil, fmt.Errorf("ipc: chmod %s: %w", sockPath, err)
 	}
 
@@ -92,7 +92,7 @@ func probeLiveDaemon(sockPath string) error {
 		}
 		return fmt.Errorf("ipc: probing socket %s: %w", sockPath, err)
 	}
-	conn.Close()
+	_ = conn.Close()
 	return ErrDaemonRunning
 }
 

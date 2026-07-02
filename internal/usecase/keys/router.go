@@ -11,7 +11,7 @@ import (
 
 const (
 	ESC      byte = 0x1b
-	ESCDelay      = 500 * time.Millisecond
+	ESCDelay      = 40 * time.Millisecond
 )
 
 // Action is an intercepted vev key binding.
