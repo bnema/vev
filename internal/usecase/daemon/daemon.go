@@ -39,6 +39,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -138,6 +139,7 @@ type attachedClient struct {
 	tr     ports.Transport
 	rend   *renderer.Renderer
 	size   domain.Size
+	keys   *keys.Router
 	sendMu sync.Mutex
 }
 
@@ -347,16 +349,15 @@ func (d *Daemon) handleList(tr ports.Transport) {
 	infos := make([]ports.SessionInfo, 0, len(d.sessions))
 	for _, s := range d.sessions {
 		s.mu.Lock()
-		attached := s.client != nil
-		s.mu.Unlock()
-		windows := len(s.windows)
-		infos = append(infos, ports.SessionInfo{
+		info := ports.SessionInfo{
 			SessionID: string(s.id),
 			Name:      s.name,
 			Ephemeral: s.ephemeral,
-			Windows:   uint16(windows),
-			Attached:  attached,
-		})
+			Windows:   uint16(len(s.windows)),
+			Attached:  s.client != nil,
+		}
+		s.mu.Unlock()
+		infos = append(infos, info)
 	}
 	d.mu.Unlock()
 
@@ -551,6 +552,7 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size)
 		rend: renderer.New(renderer.Capabilities{}),
 		size: sz,
 	}
+	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, sess: sess, ac: ac})
 	sess.mu.Lock()
 	old := sess.client
 	sess.client = ac
@@ -655,42 +657,61 @@ func (s *session) activeWindow() *window {
 }
 
 func (d *Daemon) handleInput(sess *session, ac *attachedClient, data []byte) {
-	switch string(data) {
-	case "\x1bc":
-		if err := d.createWindow(sess, ac.size); err != nil {
-			d.log.Error("create window failed", "err", err, "session", sess.name)
-			return
-		}
-		d.paint(sess, ac, true)
-		return
-	case "\x1b1", "\x1b2", "\x1b3", "\x1b4", "\x1b5", "\x1b6", "\x1b7", "\x1b8", "\x1b9":
-		idx := int(data[1] - '1')
-		if sess.switchWindow(idx) {
-			d.paint(sess, ac, true)
-		}
-		return
-	case "\x1bn":
-		if sess.switchRelative(1) {
-			d.paint(sess, ac, true)
-		}
-		return
-	case "\x1bp":
-		if sess.switchRelative(-1) {
-			d.paint(sess, ac, true)
-		}
-		return
-	case "\x1bx":
-		win := sess.activeWindow()
-		if win != nil {
-			d.closeWindow(sess, win, true)
-		}
-		return
+	if ac.keys == nil {
+		ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, sess: sess, ac: ac})
 	}
-	win := sess.activeWindow()
+	ac.keys.Route(data)
+}
+
+type daemonKeyHandler struct {
+	d    *Daemon
+	sess *session
+	ac   *attachedClient
+}
+
+func (h daemonKeyHandler) Forward(data []byte) {
+	win := h.sess.activeWindow()
 	if win == nil {
 		return
 	}
 	_, _ = win.pty.Write(data)
+}
+
+func (h daemonKeyHandler) Action(action keys.Action) {
+	switch action {
+	case keys.ActionCreateWindow:
+		if err := h.d.createWindow(h.sess, h.ac.size); err != nil {
+			h.d.log.Error("create window failed", "err", err, "session", h.sess.name)
+			return
+		}
+		h.d.paint(h.sess, h.ac, true)
+	case keys.ActionNextWindow:
+		if h.sess.switchRelative(1) {
+			h.d.paint(h.sess, h.ac, true)
+		}
+	case keys.ActionPreviousWindow:
+		if h.sess.switchRelative(-1) {
+			h.d.paint(h.sess, h.ac, true)
+		}
+	case keys.ActionDetach:
+		h.d.clientGone(h.sess, h.ac, true)
+	case keys.ActionCloseWindow:
+		win := h.sess.activeWindow()
+		if win != nil {
+			h.d.closeWindow(h.sess, win, true)
+		}
+	case keys.ActionCopyMode:
+		// M4 will install copy-mode state here; for M3 the binding is intentionally intercepted.
+	case keys.ActionRenameSession:
+		h.sess.promoteEphemeral()
+	case keys.ActionSwitchWindow1, keys.ActionSwitchWindow2, keys.ActionSwitchWindow3,
+		keys.ActionSwitchWindow4, keys.ActionSwitchWindow5, keys.ActionSwitchWindow6,
+		keys.ActionSwitchWindow7, keys.ActionSwitchWindow8, keys.ActionSwitchWindow9:
+		idx := int(action - keys.ActionSwitchWindow1)
+		if h.sess.switchWindow(idx) {
+			h.d.paint(h.sess, h.ac, true)
+		}
+	}
 }
 
 func (s *session) switchWindow(idx int) bool {
@@ -711,6 +732,14 @@ func (s *session) switchRelative(delta int) bool {
 	}
 	s.active = (s.active + delta + len(s.windows)) % len(s.windows)
 	return true
+}
+
+// promoteEphemeral is M3's promptless Alt+r behavior: without a naming UI yet,
+// the current ephemeral numeric name is kept and the session is made persistent.
+func (s *session) promoteEphemeral() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ephemeral = false
 }
 
 func (d *Daemon) closeWindow(sess *session, win *window, repaint bool) {

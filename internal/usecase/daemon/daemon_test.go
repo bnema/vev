@@ -462,6 +462,31 @@ func TestAltXClosesFinalWindowAndDetaches(t *testing.T) {
 	require.Equal(t, ports.ReasonSessionKilled, det.Reason)
 }
 
+func TestAltDDetachesCurrentClient(t *testing.T) {
+	d, sess, ac, sends, releases := newManualWindowSession(t, 1)
+	defer releases[0]()
+
+	d.handleInput(sess, ac, []byte("\x1bd"))
+
+	require.Nil(t, sess.client)
+	f := awaitFrame(t, sends, ports.MsgDetached)
+	det, err := ports.UnmarshalDetached(f.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.ReasonDetach, det.Reason)
+}
+
+func TestAltRPromotesEphemeralSessionPromptlessly(t *testing.T) {
+	d, sess, ac, _, releases := newManualWindowSession(t, 1)
+	defer releases[0]()
+	sess.ephemeral = true
+	sess.name = "0"
+
+	d.handleInput(sess, ac, []byte("\x1br"))
+
+	require.False(t, sess.ephemeral)
+	require.Equal(t, "0", sess.name)
+}
+
 func TestAttachReplaceDetachesOld(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})

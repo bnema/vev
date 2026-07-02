@@ -1,0 +1,191 @@
+// Package keys routes terminal input bytes into vev Alt/ESC bindings or PTY
+// passthrough bytes.
+package keys
+
+import (
+	"sync"
+	"time"
+
+	"github.com/bnema/vev/internal/ports"
+)
+
+const (
+	ESC      byte = 0x1b
+	ESCDelay      = 500 * time.Millisecond
+)
+
+// Action is an intercepted vev key binding.
+type Action int
+
+const (
+	ActionCreateWindow Action = iota
+	ActionNextWindow
+	ActionPreviousWindow
+	ActionDetach
+	ActionCloseWindow
+	ActionCopyMode
+	ActionRenameSession
+	ActionSwitchWindow1
+	ActionSwitchWindow2
+	ActionSwitchWindow3
+	ActionSwitchWindow4
+	ActionSwitchWindow5
+	ActionSwitchWindow6
+	ActionSwitchWindow7
+	ActionSwitchWindow8
+	ActionSwitchWindow9
+)
+
+// Handler receives router outputs. Forward is called only for bytes that should
+// reach the PTY; Action is called for intercepted bindings.
+type Handler interface {
+	Forward([]byte)
+	Action(Action)
+}
+
+// Router implements vev's Alt/ESC input routing. It retains a trailing ESC for
+// ESCDelay so split Alt-key sequences can still be intercepted without delaying
+// known terminal control prefixes (ESC [ and ESC O), which pass through.
+type Router struct {
+	clock ports.Clock
+	delay time.Duration
+	h     Handler
+
+	mu      sync.Mutex
+	pending bool
+	timer   ports.Timer
+}
+
+func NewRouter(clock ports.Clock, h Handler) *Router {
+	return &Router{clock: clock, delay: ESCDelay, h: h}
+}
+
+// Route routes one transport read.
+func (r *Router) Route(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pending {
+		r.stopTimer()
+		r.pending = false
+		if consumed := r.routeAfterPendingESC(data); consumed > 0 {
+			data = data[consumed:]
+		}
+	}
+	r.route(data)
+}
+
+// PartialInputSuffixLen reports the suffix length that must be retained for a
+// later read. The current protocol only has one partial suffix: a lone trailing
+// ESC. This mirrors the YMUX partial-input pattern in a deliberately small form.
+func PartialInputSuffixLen(data []byte) int {
+	if len(data) > 0 && data[len(data)-1] == ESC {
+		return 1
+	}
+	return 0
+}
+
+func (r *Router) route(data []byte) {
+	buf := make([]byte, 0, len(data))
+	flush := func() {
+		if len(buf) == 0 {
+			return
+		}
+		r.forward(buf)
+		buf = buf[:0]
+	}
+	for i := 0; i < len(data); {
+		if data[i] != ESC {
+			buf = append(buf, data[i])
+			i++
+			continue
+		}
+		if i == len(data)-1 {
+			flush()
+			r.retainESC()
+			return
+		}
+		next := data[i+1]
+		if passThroughPrefix(next) {
+			buf = append(buf, ESC, next)
+			i += 2
+			continue
+		}
+		if action, ok := binding(next); ok {
+			flush()
+			r.h.Action(action)
+			i += 2
+			continue
+		}
+		buf = append(buf, ESC)
+		i++
+	}
+	flush()
+}
+
+func (r *Router) routeAfterPendingESC(data []byte) int {
+	next := data[0]
+	if passThroughPrefix(next) {
+		r.forward([]byte{ESC, next})
+		return 1
+	}
+	if action, ok := binding(next); ok {
+		r.h.Action(action)
+		return 1
+	}
+	r.forward([]byte{ESC})
+	return 0
+}
+
+func (r *Router) retainESC() {
+	r.pending = true
+	r.timer = r.clock.NewTimer(r.delay)
+	go func(timer ports.Timer) {
+		<-timer.C()
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.pending && r.timer == timer {
+			r.pending = false
+			r.forward([]byte{ESC})
+		}
+	}(r.timer)
+}
+
+func (r *Router) stopTimer() {
+	if r.timer != nil {
+		r.timer.Stop()
+		r.timer = nil
+	}
+}
+
+func (r *Router) forward(data []byte) {
+	cp := append([]byte(nil), data...)
+	r.h.Forward(cp)
+}
+
+func passThroughPrefix(b byte) bool { return b == '[' || b == 'O' }
+
+func binding(b byte) (Action, bool) {
+	switch b {
+	case 'c':
+		return ActionCreateWindow, true
+	case 'n':
+		return ActionNextWindow, true
+	case 'p':
+		return ActionPreviousWindow, true
+	case 'd':
+		return ActionDetach, true
+	case 'x':
+		return ActionCloseWindow, true
+	case 'u':
+		return ActionCopyMode, true
+	case 'r':
+		return ActionRenameSession, true
+	case '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		return ActionSwitchWindow1 + Action(b-'1'), true
+	default:
+		return 0, false
+	}
+}
