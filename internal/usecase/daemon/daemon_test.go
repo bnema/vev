@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -244,6 +246,98 @@ func activeWindowIndex(sess *session) int {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	return sess.active
+}
+
+func testRow(text string) []renderer.Cell {
+	cells := make([]renderer.Cell, 0, len(text))
+	for _, r := range text {
+		cells = append(cells, renderer.Cell{Rune: r, Style: renderer.DefaultStyle()})
+	}
+	return cells
+}
+
+func TestCopyModeAltUInterceptsAndDoesNotForward(t *testing.T) {
+	writes := make(chan []byte, 1)
+	p, _ := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	sess.windows[0].scrollback = scopy.NewScrollback(4)
+	sess.windows[0].screen.Write([]byte("live"))
+
+	d.handleInput(sess, ac, []byte("\x1bu"))
+
+	if ac.copyMode == nil {
+		t.Fatal("copy mode not entered")
+	}
+	select {
+	case got := <-writes:
+		t.Fatalf("copy-mode binding forwarded to PTY: %q", got)
+	default:
+	}
+	out := awaitFrame(t, sends, ports.MsgOutput)
+	msg, err := ports.UnmarshalOutput(out.Payload)
+	require.NoError(t, err)
+	if !strings.Contains(string(msg.Data), "[COPY]") {
+		t.Fatalf("copy mode paint = %q, want [COPY] status", string(msg.Data))
+	}
+}
+
+func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
+	writes := make(chan []byte, 1)
+	p, _ := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	sess.windows[0].scrollback = scopy.NewScrollback(4)
+	sess.windows[0].scrollback.Append(testRow("old1    "))
+	sess.windows[0].scrollback.Append(testRow("old2    "))
+	sess.windows[0].screen.Write([]byte("live"))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte{'g', ' ', 'j', 'y'})
+
+	select {
+	case got := <-writes:
+		t.Fatalf("copy-mode navigation forwarded to PTY: %q", got)
+	default:
+	}
+	out := awaitFrame(t, sends, ports.MsgOutput)
+	msg, err := ports.UnmarshalOutput(out.Payload)
+	require.NoError(t, err)
+	if got, want := string(msg.Data), "\x1b]52;c;b2xkMQpvbGQy\x07"; got != want {
+		t.Fatalf("OSC52 = %q, want %q", got, want)
+	}
+	if ac.copyMode != nil {
+		t.Fatal("copy mode still active after yank")
+	}
+	live := awaitFrame(t, sends, ports.MsgOutput)
+	liveMsg, err := ports.UnmarshalOutput(live.Payload)
+	require.NoError(t, err)
+	if strings.Contains(string(liveMsg.Data), "[COPY]") {
+		t.Fatalf("live repaint still contains copy status: %q", string(liveMsg.Data))
+	}
+	if !strings.Contains(string(liveMsg.Data), "live") {
+		t.Fatalf("live repaint = %q, want live screen", string(liveMsg.Data))
+	}
+}
+
+func TestCopyModeEscapeRestoresLiveFullRepaint(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	sess.windows[0].scrollback = scopy.NewScrollback(4)
+	sess.windows[0].screen.Write([]byte("live"))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("q"))
+
+	if ac.copyMode != nil {
+		t.Fatal("copy mode still active after q")
+	}
+	out := awaitFrame(t, sends, ports.MsgOutput)
+	msg, err := ports.UnmarshalOutput(out.Payload)
+	require.NoError(t, err)
+	if strings.Contains(string(msg.Data), "[COPY]") || !strings.Contains(string(msg.Data), "live") {
+		t.Fatalf("exit repaint = %q, want live full repaint without copy status", string(msg.Data))
+	}
 }
 
 func windowCount(sess *session) int {

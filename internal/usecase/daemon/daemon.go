@@ -143,11 +143,12 @@ type window struct {
 // scheduler and the connection handler — so the transport's single-writer
 // contract holds and Draw→Send stays atomic (correct output ordering).
 type attachedClient struct {
-	tr     ports.Transport
-	rend   *renderer.Renderer
-	size   domain.Size
-	keys   *keys.Router
-	sendMu sync.Mutex
+	tr       ports.Transport
+	rend     *renderer.Renderer
+	size     domain.Size
+	keys     *keys.Router
+	copyMode *scopy.Mode
+	sendMu   sync.Mutex
 }
 
 // send serialises a frame onto the client's transport.
@@ -679,10 +680,117 @@ func (s *session) activeWindow() *window {
 }
 
 func (d *Daemon) handleInput(sess *session, ac *attachedClient, data []byte) {
+	if ac.copyMode != nil {
+		d.handleCopyInput(sess, ac, data)
+		return
+	}
 	if ac.keys == nil {
 		ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, sess: sess, ac: ac})
 	}
 	ac.keys.Route(data)
+}
+
+func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
+	win := sess.activeWindow()
+	if win == nil {
+		return
+	}
+	win.mu.Lock()
+	snap := scopy.NewSnapshot(win.scrollback, win.screen.Frame)
+	win.mu.Unlock()
+	ac.copyMode = scopy.NewMode(snap)
+	d.paint(sess, ac, true)
+}
+
+func (d *Daemon) handleCopyInput(sess *session, ac *attachedClient, data []byte) {
+	win := sess.activeWindow()
+	if win == nil || ac.copyMode == nil {
+		return
+	}
+
+	win.mu.Lock()
+	snap := scopy.NewSnapshot(win.scrollback, win.screen.Frame)
+	changed := false
+	copyOut := false
+	exit := false
+	for i := 0; i < len(data); i++ {
+		switch data[i] {
+		case 'j':
+			ac.copyMode.Move(snap, 1)
+			changed = true
+		case 'k':
+			ac.copyMode.Move(snap, -1)
+			changed = true
+		case 'g':
+			ac.copyMode.Top(snap)
+			changed = true
+		case 'G':
+			ac.copyMode.Bottom(snap)
+			changed = true
+		case ' ':
+			ac.copyMode.ToggleSelection()
+			changed = true
+		case '\r', '\n', 'y':
+			copyOut = true
+			exit = true
+		case 'q', 0x03, 0x1b:
+			if data[i] == 0x1b {
+				consumed, ok := routeCopyEscape(ac.copyMode, snap, data[i:])
+				if ok {
+					i += consumed - 1
+					changed = true
+					continue
+				}
+			}
+			exit = true
+		}
+	}
+	text := ""
+	if copyOut {
+		text = ac.copyMode.SelectedText(snap)
+	}
+	win.mu.Unlock()
+
+	if copyOut {
+		for _, chunk := range scopy.OSC52(text) {
+			if err := ac.send(frameOutput(chunk)); err != nil {
+				d.detachOnSendError(sess, ac)
+				return
+			}
+		}
+	}
+	if exit {
+		ac.copyMode = nil
+		d.paint(sess, ac, true)
+		return
+	}
+	if changed {
+		d.paint(sess, ac, true)
+	}
+}
+
+func routeCopyEscape(m *scopy.Mode, snap scopy.Snapshot, data []byte) (int, bool) {
+	if len(data) >= 3 && data[1] == '[' {
+		switch data[2] {
+		case 'A':
+			m.Move(snap, -1)
+			return 3, true
+		case 'B':
+			m.Move(snap, 1)
+			return 3, true
+		}
+	}
+	if len(data) >= 4 && data[1] == '[' && data[3] == '~' {
+		switch data[2] {
+		case '5':
+			m.Page(snap, -1)
+			return 4, true
+		case '6':
+			m.Page(snap, 1)
+			return 4, true
+		}
+	}
+	return 0, false
 }
 
 type daemonKeyHandler struct {
@@ -723,7 +831,7 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 			h.d.closeWindow(h.sess, win, true)
 		}
 	case keys.ActionCopyMode:
-		// M4 will install copy-mode state here; for M3 the binding is intentionally intercepted.
+		h.d.enterCopyMode(h.sess, h.ac)
 	case keys.ActionRenameSession:
 		h.sess.promoteEphemeral()
 		h.d.paint(h.sess, h.ac, true)
@@ -893,10 +1001,13 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 
 	ac.sendMu.Lock()
 	win.mu.Lock()
-	if reset {
+	if reset || ac.copyMode != nil {
 		ac.rend.Reset()
 	}
 	frame, damage := composeClientFrame(sess, win, reset)
+	if ac.copyMode != nil {
+		frame, damage = composeCopyClientFrame(ac.copyMode, win)
+	}
 	data, err := ac.rend.Draw(frame, damage)
 	win.screen.ClearDamage()
 	win.mu.Unlock()
@@ -932,6 +1043,12 @@ func composeClientFrame(sess *session, win *window, full bool) (renderer.Frame, 
 	damage := append([]renderer.Damage(nil), win.screen.Damage()...)
 	damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: screenRows, Width: width, Height: 1})
 	return frame, damage
+}
+
+func composeCopyClientFrame(mode *scopy.Mode, win *window) (renderer.Frame, []renderer.Damage) {
+	snap := scopy.NewSnapshot(win.scrollback, win.screen.Frame)
+	frame := mode.Render(snap)
+	return frame, []renderer.Damage{renderer.FullRedraw()}
 }
 
 func drawStatus(row []renderer.Cell, sess *session) {
