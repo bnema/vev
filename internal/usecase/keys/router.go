@@ -18,22 +18,23 @@ const (
 type Action int
 
 const (
-	ActionCreateWindow Action = iota
-	ActionNextWindow
-	ActionPreviousWindow
+	ActionCreateTab Action = iota
+	ActionNextTab
+	ActionPreviousTab
 	ActionDetach
-	ActionCloseWindow
+	ActionCloseTab
 	ActionCopyMode
 	ActionRenameSession
-	ActionSwitchWindow1
-	ActionSwitchWindow2
-	ActionSwitchWindow3
-	ActionSwitchWindow4
-	ActionSwitchWindow5
-	ActionSwitchWindow6
-	ActionSwitchWindow7
-	ActionSwitchWindow8
-	ActionSwitchWindow9
+	ActionOpenPicker
+	ActionSwitchTab1
+	ActionSwitchTab2
+	ActionSwitchTab3
+	ActionSwitchTab4
+	ActionSwitchTab5
+	ActionSwitchTab6
+	ActionSwitchTab7
+	ActionSwitchTab8
+	ActionSwitchTab9
 )
 
 // Handler receives router outputs. Forward is called only for bytes that should
@@ -170,21 +171,23 @@ func passThroughPrefix(b byte) bool { return b == '[' || b == 'O' }
 func binding(b byte) (Action, bool) {
 	switch b {
 	case 'c':
-		return ActionCreateWindow, true
+		return ActionCreateTab, true
 	case 'n':
-		return ActionNextWindow, true
+		return ActionNextTab, true
 	case 'p':
-		return ActionPreviousWindow, true
+		return ActionPreviousTab, true
 	case 'd':
 		return ActionDetach, true
 	case 'x':
-		return ActionCloseWindow, true
+		return ActionCloseTab, true
 	case 'u':
 		return ActionCopyMode, true
 	case 'r':
 		return ActionRenameSession, true
+	case 't':
+		return ActionOpenPicker, true
 	case '1', '2', '3', '4', '5', '6', '7', '8', '9':
-		return ActionSwitchWindow1 + Action(b-'1'), true
+		return ActionSwitchTab1 + Action(b-'1'), true
 	default:
 		return 0, false
 	}

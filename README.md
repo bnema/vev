@@ -23,7 +23,7 @@ vev --help                       show help
 vev --version                    show version
 ```
 
-Ephemeral sessions get a number (0, 1, 2...) and die when you detach. Named sessions survive detach and live until killed or their last window closes. The daemon starts on first use and exits when no sessions remain.
+Ephemeral sessions get a number (0, 1, 2...) and die when you detach. Named sessions survive detach and live until killed or their last tab closes. The daemon starts on first use and exits when no sessions remain.
 
 Remote attach runs `ssh user@host vev _stdio ...` under the hood, so vev must be installed on the remote host and reachable via your normal SSH config. Each remote attach opens one ssh connection. To make reconnects near-instant, enable OpenSSH connection reuse for your hosts in `~/.ssh/config`:
 
@@ -42,12 +42,13 @@ All bindings use the Alt modifier directly, no prefix key.
 
 | Key | Action |
 |---|---|
-| Alt+c | new window |
-| Alt+n / Alt+p | next / previous window |
-| Alt+1 .. Alt+9 | select window by number |
-| Alt+x | close window (last window ends the session) |
+| Alt+c | new tab |
+| Alt+n / Alt+p | next / previous tab |
+| Alt+1 .. Alt+9 | select tab by number |
+| Alt+x | close tab (last tab ends the session) |
 | Alt+d | detach |
 | Alt+r | promote the current ephemeral session to named |
+| Alt+t | open session/tab picker |
 | Alt+u | enter copy mode |
 
 ## Copy mode

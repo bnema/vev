@@ -111,7 +111,7 @@ type SessionInfo struct {
 	SessionID string
 	Name      string
 	Ephemeral bool
-	Windows   uint16
+	Tabs      uint16
 	Attached  bool
 }
 
@@ -456,7 +456,7 @@ func MarshalSessions(m Sessions) []byte {
 		} else {
 			w.putUint8(0)
 		}
-		w.putUint16(s.Windows)
+		w.putUint16(s.Tabs)
 		if s.Attached {
 			w.putUint8(1)
 		} else {
@@ -487,7 +487,7 @@ func UnmarshalSessions(b []byte) (Sessions, error) {
 			return Sessions{}, err
 		}
 		s.Ephemeral = eph != 0
-		if s.Windows, err = r.getUint16(); err != nil {
+		if s.Tabs, err = r.getUint16(); err != nil {
 			return Sessions{}, err
 		}
 		att, err := r.getUint8()

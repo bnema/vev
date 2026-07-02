@@ -317,13 +317,13 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 		return
 	}
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "NAME\tWINDOWS\tATTACHED")
+	_, _ = fmt.Fprintln(tw, "NAME\tTABS\tATTACHED")
 	for _, s := range sessions {
 		attached := "no"
 		if s.Attached {
 			attached = "yes"
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\n", s.Name, s.Windows, attached)
+		_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\n", s.Name, s.Tabs, attached)
 	}
 	_ = tw.Flush()
 }
