@@ -110,7 +110,7 @@ func TestOSC52Base64Encoding(t *testing.T) {
 		text string
 	}{
 		{name: "small payload", text: "hello\nworld"},
-		{name: "large payload", text: strings.Repeat("x", OSC52ChunkSize)},
+		{name: "maximum payload", text: strings.Repeat("x", OSC52MaxPayloadBytes)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -125,6 +125,13 @@ func TestOSC52Base64Encoding(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestOSC52OversizedPayloadIsDeferred(t *testing.T) {
+	chunks := OSC52(strings.Repeat("x", OSC52MaxPayloadBytes+1))
+	if len(chunks) != 0 {
+		t.Fatalf("len(chunks) = %d, want 0 to avoid corrupt multi-sequence clipboard replacement", len(chunks))
 	}
 }
 

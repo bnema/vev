@@ -7,7 +7,12 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-const OSC52ChunkSize = 75_000
+// OSC52MaxPayloadBytes caps clipboard payloads while vev intentionally emits
+// exactly one OSC 52 sequence. Splitting one clipboard copy across multiple OSC
+// 52 sequences replaces the clipboard repeatedly in common terminals, corrupting
+// the intended result, so oversized selections are deferred until a terminal-
+// specific continuation protocol is supported.
+const OSC52MaxPayloadBytes = 75_000
 
 // Snapshot is the copy-mode document: scrollback followed by the live screen.
 type Snapshot struct {
@@ -170,7 +175,12 @@ func drawCopyStatus(row []renderer.Cell, m *Mode, total int) {
 }
 
 // OSC52 encodes text for clipboard transfer as one complete OSC 52 sequence.
+// Oversized payloads return no sequence rather than emitting corrupting
+// multi-sequence replacements.
 func OSC52(text string) [][]byte {
+	if len([]byte(text)) > OSC52MaxPayloadBytes {
+		return nil
+	}
 	encoded := base64.StdEncoding.EncodeToString([]byte(text))
 	return [][]byte{[]byte("\x1b]52;c;" + encoded + "\x07")}
 }

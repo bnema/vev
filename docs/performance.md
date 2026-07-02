@@ -12,13 +12,19 @@ Demo flood workloads are scripted in `scripts/bench-workloads.sh` for `yes`, `se
 
 ## Local baseline status
 
-Full end-to-end vev-vs-tmux workload baselines were not run for this change because they require an interactive terminal/daemon pair and external tracing tools around both processes. The reproducible methodology is:
+Full end-to-end vev-vs-tmux workload baselines are deferred/waived for this non-interactive branch because they require an interactive terminal/daemon pair and external tracing tools around both processes. Run them later from an interactive shell with these exact command shapes, substituting only the vev binary path, tmux binary path, terminal size, duration, and sample file path:
 
-1. Record host CPU, OS/kernel, terminal emulator, vev commit, tmux version, terminal size, and workload duration.
-2. Start vev daemon with pprof enabled only when collecting profiles.
-3. Run each workload (`yes`, `seq`, `cat`) for the same fixed duration and terminal size under vev and tmux.
-4. Capture client/daemon syscall summaries with `strace -c` (or platform equivalent), bytes written per rendered frame, and heap profiles or `-benchmem` allocation counts.
-5. Store raw command lines and outputs beside this document before comparing.
+```sh
+VEV_PPROF_ADDR=127.0.0.1:6060 strace -ff -c -o vev-yes.strace vev --daemon
+strace -ff -c -o vev-client-yes.strace vev new perf-yes -- sh -lc 'timeout 30s yes'
+strace -ff -c -o tmux-yes.strace tmux new-session -d -s perf-yes 'timeout 30s yes'
+strace -ff -c -o vev-client-seq.strace vev new perf-seq -- sh -lc 'timeout 30s sh -c "while :; do seq 1 10000; done"'
+strace -ff -c -o tmux-seq.strace tmux new-session -d -s perf-seq 'timeout 30s sh -c "while :; do seq 1 10000; done"'
+strace -ff -c -o vev-client-cat.strace vev new perf-cat -- sh -lc 'timeout 30s sh -c "while :; do cat /path/to/sample.txt; done"'
+strace -ff -c -o tmux-cat.strace tmux new-session -d -s perf-cat 'timeout 30s sh -c "while :; do cat /path/to/sample.txt; done"'
+```
+
+Record host CPU, OS/kernel, terminal emulator, vev commit, tmux version, terminal size, workload duration, raw command lines, syscall summaries, bytes written per rendered frame, and heap profiles or allocation counts before comparing.
 
 Microbenchmarks executed locally for this review using `go test ./internal/adapters/ipc -run '^$' -bench=. -benchmem`:
 

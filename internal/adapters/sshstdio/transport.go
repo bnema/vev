@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/bnema/vev/internal/ports"
@@ -96,13 +97,20 @@ type CommandSpec struct {
 	Args []string
 }
 
-// BuildCommand constructs the ssh subprocess argv without invoking a shell.
+// BuildCommand constructs the local ssh subprocess argv without invoking a
+// local shell. OpenSSH sends the remote command as one string for the remote
+// user's shell to interpret, so every remote argv word is POSIX single-quoted.
 func BuildCommand(target, session string) CommandSpec {
-	args := []string{target, "vev", "_stdio"}
+	remote := []string{shellQuote("vev"), shellQuote("_stdio")}
 	if session != "" {
-		args = append(args, session)
+		remote = append(remote, shellQuote(session))
 	}
+	args := []string{"--", target, strings.Join(remote, " ")}
 	return CommandSpec{Path: "ssh", Args: args}
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // Dial starts ssh target vev _stdio [session] and returns a Transport over the

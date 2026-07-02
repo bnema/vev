@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -227,6 +229,24 @@ func newManualSessionWithPTYs(t *testing.T, ptys ...ports.PTY) (*Daemon, *sessio
 	d.sessions[sess.id] = sess
 	t.Cleanup(cancel)
 	return d, sess, ac, sends
+}
+
+func TestPTYWriteErrorIsLogged(t *testing.T) {
+	var logs bytes.Buffer
+	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(&logs, nil)))
+	errBoom := errors.New("boom")
+	p := portsmocks.NewMockPTY(t)
+	p.EXPECT().Write([]byte("input")).Return(0, errBoom).Once()
+	win := &window{pty: p, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}}
+	sess := &session{id: "manual", name: "work", windows: []*window{win}}
+	ac := &attachedClient{}
+
+	daemonKeyHandler{d: d, sess: sess, ac: ac}.Forward([]byte("input"))
+
+	got := logs.String()
+	if !strings.Contains(got, "pty write failed") || !strings.Contains(got, "boom") || !strings.Contains(got, "work") {
+		t.Fatalf("log output %q does not contain PTY write failure details", got)
+	}
 }
 
 func newManualWindowSession(t *testing.T, n int) (*Daemon, *session, *attachedClient, chan ports.Frame, []func()) {

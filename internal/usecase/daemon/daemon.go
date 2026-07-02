@@ -831,7 +831,9 @@ func (h daemonKeyHandler) Forward(data []byte) {
 	if win == nil {
 		return
 	}
-	_, _ = win.pty.Write(data)
+	if _, err := win.pty.Write(data); err != nil {
+		h.d.log.Error("pty write failed", "err", err, "session", h.sess.name)
+	}
 }
 
 func (h daemonKeyHandler) Action(action keys.Action) {
