@@ -804,7 +804,7 @@ func (d *Daemon) ptyReader(sess *session, win *window) {
 			}
 		}
 		if err != nil {
-			d.closeWindow(sess, win, false)
+			d.closeWindow(sess, win, true)
 			return
 		}
 	}

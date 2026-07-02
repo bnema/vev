@@ -474,6 +474,74 @@ func TestAltXClosesFinalWindowAndDetaches(t *testing.T) {
 	require.Equal(t, ports.ReasonSessionKilled, det.Reason)
 }
 
+func TestPTYEOFClosesActiveNonFinalWindowAndRepaintsRemaining(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	d, sess, _, sends := newManualSessionWithPTYs(t, p1, p2)
+	defer releasePTY2()
+	sess.active = 0
+	sess.windows[1].screen.Write([]byte("remaining"))
+
+	d.sessWg.Add(1)
+	go d.ptyReader(sess, sess.windows[0])
+	releasePTY1()
+
+	require.Eventually(t, func() bool { return len(sess.windows) == 1 }, 2*time.Second, 5*time.Millisecond)
+	require.Equal(t, 1, sessionCount(d))
+	require.Equal(t, 0, activeWindowIndex(sess))
+	f := awaitFrame(t, sends, ports.MsgOutput)
+	out, err := ports.UnmarshalOutput(f.Payload)
+	require.NoError(t, err)
+	data := string(out.Data)
+	require.Contains(t, data, "remaining")
+	require.Contains(t, data, "work")
+	require.Contains(t, data, ";7m")
+
+	d.sessWg.Wait()
+}
+
+func TestPTYEOFClosesInactiveNonFinalWindowAndRepaintsStatus(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	d, sess, _, sends := newManualSessionWithPTYs(t, p1, p2)
+	defer releasePTY1()
+	sess.active = 0
+	sess.windows[0].screen.Write([]byte("active"))
+
+	d.sessWg.Add(1)
+	go d.ptyReader(sess, sess.windows[1])
+	releasePTY2()
+
+	require.Eventually(t, func() bool { return len(sess.windows) == 1 }, 2*time.Second, 5*time.Millisecond)
+	require.Equal(t, 1, sessionCount(d))
+	require.Equal(t, 0, activeWindowIndex(sess))
+	f := awaitFrame(t, sends, ports.MsgOutput)
+	out, err := ports.UnmarshalOutput(f.Payload)
+	require.NoError(t, err)
+	data := string(out.Data)
+	require.Contains(t, data, "active")
+	require.Contains(t, data, "work")
+	require.NotContains(t, data, "  2 ")
+
+	d.sessWg.Wait()
+}
+
+func TestPTYEOFFinalWindowKillsSessionAndDetaches(t *testing.T) {
+	d, sess, _, sends, releases := newManualWindowSession(t, 1)
+
+	d.sessWg.Add(1)
+	go d.ptyReader(sess, sess.windows[0])
+	releases[0]()
+
+	require.Eventually(t, func() bool { return sessionCount(d) == 0 }, 2*time.Second, 5*time.Millisecond)
+	f := awaitFrame(t, sends, ports.MsgDetached)
+	det, err := ports.UnmarshalDetached(f.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.ReasonSessionKilled, det.Reason)
+
+	d.sessWg.Wait()
+}
+
 func TestAltDDetachesCurrentClient(t *testing.T) {
 	d, sess, ac, sends, releases := newManualWindowSession(t, 1)
 	defer releases[0]()
