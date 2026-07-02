@@ -35,6 +35,17 @@ func (stubTimer) C() <-chan time.Time      { return nil }
 func (stubTimer) Reset(time.Duration) bool { return false }
 func (stubTimer) Stop() bool               { return true }
 
+type signalClock struct {
+	called chan struct{}
+	once   sync.Once
+}
+
+func (c *signalClock) Now() time.Time { return time.Time{} }
+func (c *signalClock) NewTimer(time.Duration) ports.Timer {
+	c.once.Do(func() { close(c.called) })
+	return stubTimer{}
+}
+
 func newTestDaemon(t *testing.T, ptys ports.PTYFactory, clk ports.Clock) *Daemon {
 	t.Helper()
 	d := New(ptys, clk, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -207,7 +218,8 @@ func newManualSessionWithPTYs(t *testing.T, ptys ...ports.PTY) (*Daemon, *sessio
 	sctx, cancel := context.WithCancel(d.serveCtx)
 	windows := make([]*window, 0, len(ptys))
 	for _, p := range ptys {
-		windows = append(windows, &window{pty: p, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}})
+		wctx, wcancel := context.WithCancel(sctx)
+		windows = append(windows, &window{pty: p, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: wctx, cancel: wcancel})
 	}
 	sess := &session{id: "manual", name: "work", ctx: sctx, cancel: cancel, windows: windows, client: ac}
 	d.sessions[sess.id] = sess
@@ -232,6 +244,12 @@ func activeWindowIndex(sess *session) int {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	return sess.active
+}
+
+func windowCount(sess *session) int {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	return len(sess.windows)
 }
 
 // --- handshake --------------------------------------------------------------
@@ -461,6 +479,64 @@ func TestAltXClosesActiveWindowAndSelectsRemaining(t *testing.T) {
 	releasePTY3()
 }
 
+func waitGroupDone(wg *sync.WaitGroup) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	return done
+}
+
+func TestAltXClosesNonFinalWindowScheduler(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	clk := &signalClock{called: make(chan struct{})}
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p1, p2)
+	d.clock = clk
+	defer releasePTY1()
+	defer releasePTY2()
+
+	d.sessWg.Add(1)
+	go d.scheduler(sess, sess.windows[1])
+	sess.windows[1].dirty <- struct{}{}
+	<-clk.called
+
+	d.handleInput(sess, ac, []byte("\x1b2"))
+	d.handleInput(sess, ac, []byte("\x1bx"))
+
+	select {
+	case <-waitGroupDone(&d.sessWg):
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduler for removed window did not exit")
+	}
+	require.Equal(t, 1, sessionCount(d))
+}
+
+func TestPTYEOFClosesNonFinalWindowScheduler(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	clk := &signalClock{called: make(chan struct{})}
+	d, sess, _, _ := newManualSessionWithPTYs(t, p1, p2)
+	d.clock = clk
+	defer releasePTY1()
+	defer releasePTY2()
+
+	d.sessWg.Add(2)
+	go d.scheduler(sess, sess.windows[1])
+	go d.ptyReader(sess, sess.windows[1])
+	sess.windows[1].dirty <- struct{}{}
+	<-clk.called
+	releasePTY2()
+
+	select {
+	case <-waitGroupDone(&d.sessWg):
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduler for EOF-removed window did not exit")
+	}
+	require.Equal(t, 1, sessionCount(d))
+}
+
 func TestAltXClosesFinalWindowAndDetaches(t *testing.T) {
 	d, sess, ac, sends, releases := newManualWindowSession(t, 1)
 	defer releases[0]()
@@ -486,7 +562,7 @@ func TestPTYEOFClosesActiveNonFinalWindowAndRepaintsRemaining(t *testing.T) {
 	go d.ptyReader(sess, sess.windows[0])
 	releasePTY1()
 
-	require.Eventually(t, func() bool { return len(sess.windows) == 1 }, 2*time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool { return windowCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, 1, sessionCount(d))
 	require.Equal(t, 0, activeWindowIndex(sess))
 	f := awaitFrame(t, sends, ports.MsgOutput)
@@ -512,7 +588,7 @@ func TestPTYEOFClosesInactiveNonFinalWindowAndRepaintsStatus(t *testing.T) {
 	go d.ptyReader(sess, sess.windows[1])
 	releasePTY2()
 
-	require.Eventually(t, func() bool { return len(sess.windows) == 1 }, 2*time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool { return windowCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, 1, sessionCount(d))
 	require.Equal(t, 0, activeWindowIndex(sess))
 	f := awaitFrame(t, sends, ports.MsgOutput)

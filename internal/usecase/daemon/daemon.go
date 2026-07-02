@@ -128,6 +128,8 @@ type window struct {
 	screen *vt.Screen
 	dirty  chan struct{}
 	size   domain.Size
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // attachedClient is a client currently attached to a session's window. rend is
@@ -506,6 +508,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, sz domain.Size
 		size:   winSize,
 	}
 	sctx, cancel := context.WithCancel(d.serveCtx)
+	win.ctx, win.cancel = context.WithCancel(sctx)
 	sess := &session{
 		id:        id,
 		name:      name,
@@ -531,6 +534,7 @@ func (d *Daemon) createWindow(sess *session, sz domain.Size) error {
 		dirty:  make(chan struct{}, 1),
 		size:   winSize,
 	}
+	win.ctx, win.cancel = context.WithCancel(sess.ctx)
 	sess.mu.Lock()
 	sess.windows = append(sess.windows, win)
 	sess.active = len(sess.windows) - 1
@@ -780,6 +784,9 @@ func (d *Daemon) closeWindow(sess *session, win *window, repaint bool) {
 	ac := sess.client
 	sess.mu.Unlock()
 
+	if win.cancel != nil {
+		win.cancel()
+	}
 	_ = win.pty.Close()
 	if repaint && ac != nil {
 		d.paint(sess, ac, true)
@@ -818,6 +825,8 @@ func (d *Daemon) scheduler(sess *session, win *window) {
 		select {
 		case <-sess.ctx.Done():
 			return
+		case <-windowDone(win):
+			return
 		case <-win.dirty:
 		}
 
@@ -828,6 +837,9 @@ func (d *Daemon) scheduler(sess *session, win *window) {
 			case <-sess.ctx.Done():
 				timer.Stop()
 				return
+			case <-windowDone(win):
+				timer.Stop()
+				return
 			case <-win.dirty:
 				// Coalesced into the pending render.
 			case <-timer.C():
@@ -836,6 +848,13 @@ func (d *Daemon) scheduler(sess *session, win *window) {
 		}
 		d.render(sess, win)
 	}
+}
+
+func windowDone(win *window) <-chan struct{} {
+	if win.ctx == nil {
+		return nil
+	}
+	return win.ctx.Done()
 }
 
 // render paints the current client, or (when detached) just clears accumulated
