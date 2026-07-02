@@ -2,7 +2,7 @@
 // accept loop, the ephemeral/named session registry, the per-tab PTY reader
 // and VT screen, and the per-client debounced render scheduler.
 //
-// Concurrency model (one tab per session for the MVP; multi-tab is M3):
+// Concurrency model (sessions own one or more PTY-backed tabs):
 //
 //   - Serve runs the accept loop. Each accepted connection is handled by its
 //     own goroutine (handleConn): it reads the first frame and routes it to a
@@ -487,7 +487,7 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 		return
 	}
 	d.firstPaint(sess, ac, h.Size)
-	d.runConnLoop(sess, ac)
+	d.runConnLoop(ac)
 	_ = tr.Close()
 }
 
@@ -675,9 +675,9 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 
 // runConnLoop is the per-connection input router: it pumps client messages
 // until detach, EOF, or a transport error.
-func (d *Daemon) runConnLoop(sess *session, ac *attachedClient) {
+func (d *Daemon) runConnLoop(ac *attachedClient) {
 	for {
-		sess = ac.currentSession()
+		sess := ac.currentSession()
 		if sess == nil {
 			return
 		}
@@ -1200,11 +1200,8 @@ func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker
 		return
 	}
 	if targetSess == sess {
-		if sess.switchTab(target.TabIndex) {
-			d.paint(sess, ac, true)
-		} else {
-			d.paint(sess, ac, true)
-		}
+		sess.switchTab(target.TabIndex)
+		d.paint(sess, ac, true)
 		return
 	}
 	if !sess.detachIfCurrent(ac) {

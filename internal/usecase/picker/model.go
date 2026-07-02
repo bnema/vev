@@ -8,6 +8,7 @@ import (
 const (
 	MinPreviewWidth = 24
 	MinListWidth    = 16
+	MaxListWidth    = 32
 	MinPaneHeight   = 4
 	MinStackHeight  = 12
 )
@@ -83,12 +84,14 @@ func ChooseLayout(inner domain.Size) Layout {
 	if inner.Cols <= 0 || inner.Rows <= 0 {
 		return Layout{}
 	}
-	if inner.Cols >= 40 && inner.Rows >= MinPaneHeight {
-		listWidth := max(MinListWidth, inner.Cols*30/100)
+	if inner.Rows >= MinPaneHeight && inner.Cols >= MinListWidth+1+MinPreviewWidth {
+		listWidth := clamp(inner.Cols*30/100, MinListWidth, MaxListWidth)
 		previewWidth := inner.Cols - listWidth - 1
-		return Layout{
-			List:    domain.Rect{Width: listWidth, Height: inner.Rows},
-			Preview: domain.Rect{X: listWidth + 1, Width: previewWidth, Height: inner.Rows},
+		if previewWidth >= MinPreviewWidth {
+			return Layout{
+				List:    domain.Rect{Width: listWidth, Height: inner.Rows},
+				Preview: domain.Rect{X: listWidth + 1, Width: previewWidth, Height: inner.Rows},
+			}
 		}
 	}
 	if inner.Rows >= MinStackHeight && inner.Cols >= MinPreviewWidth {
@@ -158,8 +161,10 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect) {
 	if m == nil || rect.Width <= 0 || rect.Height <= 0 {
 		return
 	}
-	for y := range min(rect.Height, frame.Height-rect.Y) {
-		idx := y
+	visible := min(rect.Height, frame.Height-rect.Y)
+	offset := m.scrollOffset(visible)
+	for y := range visible {
+		idx := offset + y
 		if idx >= len(m.rows) {
 			break
 		}
@@ -174,6 +179,17 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect) {
 		}
 		drawText(frame, rect.X, rect.Y+y, rect.Width, label, style)
 	}
+}
+
+func (m *Model) scrollOffset(visible int) int {
+	if visible <= 0 || len(m.rows) <= visible || m.selected < 0 {
+		return 0
+	}
+	if m.selected < visible {
+		return 0
+	}
+	offset := m.selected - visible + 1
+	return min(offset, len(m.rows)-visible)
 }
 
 func drawText(frame renderer.Frame, x, y, width int, text string, style renderer.Style) {
@@ -196,6 +212,16 @@ func drawText(frame renderer.Frame, x, y, width int, text string, style renderer
 		row[x+col] = renderer.Cell{Rune: r, Style: style}
 		col++
 	}
+}
+
+func clamp(n, low, high int) int {
+	if n < low {
+		return low
+	}
+	if n > high {
+		return high
+	}
+	return n
 }
 
 func blitPreview(frame renderer.Frame, rect domain.Rect, preview Preview) {

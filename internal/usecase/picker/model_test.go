@@ -70,8 +70,16 @@ func TestChooseLayoutBoundaries(t *testing.T) {
 	require.Equal(t, domain.Rect{Y: 5, Width: 39, Height: 7}, layout.Preview)
 
 	layout = ChooseLayout(domain.Size{Cols: 40, Rows: 4})
+	require.Equal(t, domain.Rect{Width: 40, Height: 4}, layout.List)
+	require.Equal(t, domain.Rect{}, layout.Preview)
+
+	layout = ChooseLayout(domain.Size{Cols: 41, Rows: 4})
 	require.Equal(t, domain.Rect{Width: 16, Height: 4}, layout.List)
-	require.Equal(t, domain.Rect{X: 17, Width: 23, Height: 4}, layout.Preview)
+	require.Equal(t, domain.Rect{X: 17, Width: 24, Height: 4}, layout.Preview)
+
+	layout = ChooseLayout(domain.Size{Cols: 120, Rows: 4})
+	require.Equal(t, domain.Rect{Width: MaxListWidth, Height: 4}, layout.List)
+	require.Equal(t, domain.Rect{X: MaxListWidth + 1, Width: 87, Height: 4}, layout.Preview)
 
 	layout = ChooseLayout(domain.Size{Cols: 24, Rows: 11})
 	require.Equal(t, domain.Rect{Width: 24, Height: 11}, layout.List)
@@ -101,16 +109,28 @@ func TestRenderPreviewClipsPadsDropsWideRuneAndInvertsSelection(t *testing.T) {
 		Rows: [][]renderer.Cell{{
 			cell('a'), cell('b'), cell('c'), cell('d'), cell('e'), cell('f'), cell('g'), cell('h'), cell('i'), cell('j'),
 			cell('k'), cell('l'), cell('m'), cell('n'), cell('o'), cell('p'), cell('q'), cell('r'), cell('s'), cell('t'),
-			cell('u'), cell('v'), {Rune: '界', Style: renderer.DefaultStyle()}, {Continuation: true, Style: renderer.DefaultStyle()},
+			cell('u'), cell('v'), cell('w'), {Rune: '界', Style: renderer.DefaultStyle()}, {Continuation: true, Style: renderer.DefaultStyle()},
 		}},
 	}
 
-	frame := m.Render(domain.Size{Cols: 40, Rows: 4}, preview)
+	frame := m.Render(domain.Size{Cols: 41, Rows: 4}, preview)
 	require.True(t, frame.At(0, 1).Style.Inverse)
 	require.Equal(t, 'a', frame.At(17, 0).Rune)
-	require.Equal(t, 'v', frame.At(38, 0).Rune)
-	require.Equal(t, ' ', frame.At(39, 0).Rune, "wide rune crossing preview pane is dropped")
+	require.Equal(t, 'w', frame.At(39, 0).Rune)
+	require.Equal(t, ' ', frame.At(40, 0).Rune, "wide rune crossing preview pane is dropped")
 	require.Equal(t, ' ', frame.At(17, 1).Rune, "preview pane is padded with blanks")
+}
+
+func TestRenderListScrollsSelectionIntoView(t *testing.T) {
+	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []string{"a", "b", "c", "d", "e", "f"}, Active: 0}}, "s1", 0)
+	for range 5 {
+		m.Down()
+	}
+
+	frame := m.Render(domain.Size{Cols: 23, Rows: 4}, Preview{})
+	require.Equal(t, ' ', frame.At(0, 3).Rune)
+	require.Equal(t, 'f', frame.At(2, 3).Rune)
+	require.True(t, frame.At(0, 3).Style.Inverse)
 }
 
 func TestRenderListOnlyDoesNotDrawPreview(t *testing.T) {
