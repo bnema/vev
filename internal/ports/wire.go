@@ -34,6 +34,7 @@ const (
 	ErrVersionMismatch uint16 = 1
 	ErrNoSuchSession   uint16 = 2
 	ErrNameTaken       uint16 = 3
+	ErrServerShutdown  uint16 = 4
 	ErrInternal        uint16 = 255
 )
 

@@ -51,6 +51,12 @@ const debounceInterval = 10 * time.Millisecond
 // ptyReadBufSize is the PTY reader's read buffer.
 const ptyReadBufSize = 32 * 1024
 
+// detachNotifyTimeout bounds the best-effort Detached notification on the
+// detach/kill/shutdown paths: if a wedged client (full kernel send buffer)
+// blocks the write for this long, its transport is force-closed, which fails
+// the in-flight send. Teardown is never gated on a client draining its socket.
+const detachNotifyTimeout = time.Second
+
 // defaultSize is used when a client's Hello carries no valid dimensions.
 var defaultSize = domain.Size{Cols: 80, Rows: 24}
 
@@ -60,6 +66,18 @@ type Daemon struct {
 	mu       sync.Mutex
 	sessions map[domain.SessionID]*session
 	nextID   uint64
+	// closing marks that shutdown has irreversibly begun. It is set under mu,
+	// atomically with the event that makes shutdown inevitable (the registry
+	// emptying in killSession, or shutdownAll starting), and checked by route
+	// under the same mutex — so a Hello racing shutdown can never insert a new
+	// session that nobody would tear down.
+	closing bool
+	// notifies holds one completion channel per in-flight async Detached
+	// notification (guarded by mu, pruned on insert). Channels rather than a
+	// WaitGroup: notifications are spawned from arbitrary goroutines while
+	// Serve may be waiting, and WaitGroup forbids Add-from-zero concurrent
+	// with Wait.
+	notifies []chan struct{}
 
 	ptys      ports.PTYFactory
 	clock     ports.Clock
@@ -127,6 +145,67 @@ func (ac *attachedClient) send(f ports.Frame) error {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 	return ac.tr.Send(f)
+}
+
+// boundedSend sends f to ac with a deadline watchdog: if the send (including
+// waiting on sendMu behind a wedged paint) does not complete within
+// detachNotifyTimeout, the transport is force-closed, failing the in-flight
+// write. Detach/kill/shutdown paths use this so they are never gated on a
+// client that has stopped draining its socket.
+func (d *Daemon) boundedSend(ac *attachedClient, f ports.Frame) {
+	timer := d.clock.NewTimer(detachNotifyTimeout)
+	sent := make(chan struct{})
+	go func() {
+		select {
+		case <-timer.C():
+			_ = ac.tr.Close()
+		case <-sent:
+		}
+	}()
+	_ = ac.send(f)
+	timer.Stop()
+	close(sent)
+}
+
+// notifyDetachedAsync delivers a best-effort Detached notice off the caller's
+// goroutine and then closes the transport. Session teardown (killSession) must
+// complete regardless of client state, so the notice is both asynchronous and
+// deadline-bounded; Serve waits for pending notices before force-closing
+// connections so a graceful notice is not raced by the hard close.
+func (d *Daemon) notifyDetachedAsync(ac *attachedClient, reason uint8) {
+	done := make(chan struct{})
+	d.mu.Lock()
+	// Prune completed entries so the slice stays bounded by the number of
+	// notifications actually in flight.
+	kept := d.notifies[:0]
+	for _, c := range d.notifies {
+		select {
+		case <-c:
+		default:
+			kept = append(kept, c)
+		}
+	}
+	d.notifies = append(kept, done)
+	d.mu.Unlock()
+
+	go func() {
+		defer close(done)
+		d.boundedSend(ac, frameDetached(reason))
+		_ = ac.tr.Close()
+	}()
+}
+
+// waitNotifies blocks until every Detached notification in flight at the time
+// of the call has completed. Each is deadline-bounded (boundedSend), so this
+// wait is bounded too.
+func (d *Daemon) waitNotifies() {
+	d.mu.Lock()
+	snapshot := make([]chan struct{}, len(d.notifies))
+	copy(snapshot, d.notifies)
+	d.mu.Unlock()
+	for _, c := range snapshot {
+		<-c
+	}
 }
 
 // Option customises a Daemon at construction.
@@ -198,22 +277,33 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 		}()
 	}
 
-	// Tear down: first notify any attached clients and close their PTYs and
-	// transports (killSession), THEN force-close whatever connections are still
-	// parked (control conns, in-flight handshakes), then cancel the serve
-	// context and wait for every goroutine.
+	// Tear down. shutdownAll marks the daemon closing (route now rejects any
+	// racing Hello) and kills every session: PTYs are closed and contexts
+	// cancelled unconditionally, with the Detached notices sent asynchronously
+	// under a deadline. Wait for those notices (bounded — a wedged client's
+	// transport is force-closed by the deadline) before hard-closing the
+	// remaining parked connections, so graceful notices are never raced by the
+	// force-close. Finally drain the conn handlers, run one defensive sweep in
+	// case any ordering ever leaves a session behind, and join the session
+	// goroutines (readers unblock via pty.Close, schedulers via ctx cancel).
 	d.shutdownAll(ports.ReasonServerShutdown)
+	d.waitNotifies()
 	d.hardCancel()
 	d.serveCancel()
-	d.sessWg.Wait()
 	d.connWg.Wait()
+	d.shutdownAll(ports.ReasonServerShutdown)
+	d.sessWg.Wait()
+	d.waitNotifies()
 	return nil
 }
 
-// shutdownAll kills every live session, snapshotting under the registry lock so
-// killSession (which relocks) never runs while the lock is held.
+// shutdownAll marks the daemon closing and kills every live session. Setting
+// closing under the same lock as the snapshot guarantees no session can be
+// inserted after the snapshot: route rejects once closing is set, and both run
+// under d.mu. killSession (which relocks) runs after the lock is released.
 func (d *Daemon) shutdownAll(reason uint8) {
 	d.mu.Lock()
+	d.closing = true
 	snapshot := make([]*session, 0, len(d.sessions))
 	for _, s := range d.sessions {
 		snapshot = append(snapshot, s)
@@ -349,6 +439,14 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	}
 
 	d.mu.Lock()
+	// Shutdown/create interlock: once shutdown has begun (last session removed,
+	// or shutdownAll started) no new session may be created and no attach may
+	// proceed — the teardown snapshot has already been (or is being) taken, so
+	// anything inserted now would leak its PTY and hang Serve.
+	if d.closing {
+		d.mu.Unlock()
+		return nil, nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+	}
 	switch h.Intent {
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
@@ -438,8 +536,9 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size)
 	sess.mu.Unlock()
 
 	if old != nil {
-		_ = old.send(frameDetached(ports.ReasonDetach))
-		_ = old.tr.Close()
+		// Async + bounded: a dead or wedged old client must not stall the new
+		// client's handshake.
+		d.notifyDetachedAsync(old, ports.ReasonDetach)
 	}
 	return ac
 }
@@ -499,7 +598,11 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, explicit bool) {
 		return // already displaced by a newer client; nothing to do
 	}
 	if explicit {
-		_ = ac.send(frameDetached(ports.ReasonDetach))
+		// Synchronous so the ack is delivered before the transport closes
+		// (the client is actively awaiting it), but deadline-bounded so a
+		// wedged client cannot pin this conn handler and hang Serve's
+		// connWg.Wait.
+		d.boundedSend(ac, frameDetached(ports.ReasonDetach))
 	}
 	_ = ac.tr.Close()
 	if sess.ephemeral {
@@ -657,18 +760,27 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	}
 }
 
-// detachOnSendError drops a client whose transport failed but keeps the session
-// running headless (per plan: output errors never kill the session).
+// detachOnSendError drops a client whose transport failed. Like every other
+// detach path, losing the client kills an ephemeral session (its lifetime is
+// its client's); a named session keeps running headless.
 func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient) {
 	if sess.detachIfCurrent(ac) {
 		_ = ac.tr.Close()
 		d.log.Warn("detached client after send error", "session", sess.name)
+		if sess.ephemeral {
+			d.killSession(sess, ports.ReasonSessionKilled)
+		}
 	}
 }
 
 // killSession removes a session and tears down its resources. It is
 // idempotent: only the caller that wins the registry delete acts. When the
-// registry empties it signals daemon shutdown.
+// registry empties it marks the daemon closing (atomically with the
+// empty-check, under d.mu) and signals shutdown.
+//
+// Teardown ordering matters: context cancel, pty.Close, and the done signal
+// run first and unconditionally — never gated behind a client send. The
+// Detached notice is best-effort, asynchronous, and deadline-bounded.
 func (d *Daemon) killSession(sess *session, reason uint8) {
 	d.mu.Lock()
 	if _, ok := d.sessions[sess.id]; !ok {
@@ -677,22 +789,27 @@ func (d *Daemon) killSession(sess *session, reason uint8) {
 	}
 	delete(d.sessions, sess.id)
 	empty := len(d.sessions) == 0
+	if empty {
+		// Shutdown is now inevitable and irreversible (doneOnce below): stop
+		// route from inserting new sessions from this instant, while we still
+		// hold the same lock route checks under.
+		d.closing = true
+	}
 	d.mu.Unlock()
 
 	sess.mu.Lock()
 	ac := sess.client
 	sess.client = nil
 	sess.mu.Unlock()
-	if ac != nil {
-		_ = ac.send(frameDetached(reason))
-		_ = ac.tr.Close()
-	}
 
 	sess.cancel()
 	_ = sess.win.pty.Close()
-
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
+	}
+
+	if ac != nil {
+		d.notifyDetachedAsync(ac, reason)
 	}
 }
 

@@ -190,6 +190,7 @@ func TestHandshakeNewHappy(t *testing.T) {
 	releasePTY()
 	hg.Wait()
 	d.sessWg.Wait()
+	d.waitNotifies()
 }
 
 func TestHandshakeVersionMismatch(t *testing.T) {
@@ -284,6 +285,7 @@ func TestAttachReplaceDetachesOld(t *testing.T) {
 	releasePTY()
 	hg.Wait()
 	d.sessWg.Wait()
+	d.waitNotifies()
 }
 
 // --- detach semantics -------------------------------------------------------
@@ -333,6 +335,7 @@ func TestDetachKeepsNamed(t *testing.T) {
 	d.killSession(sess, ports.ReasonServerShutdown)
 	releasePTY()
 	d.sessWg.Wait()
+	d.waitNotifies()
 }
 
 // --- render scheduler debounce ----------------------------------------------
@@ -466,6 +469,7 @@ func TestReaderEOFRemovesSessionAndSignalsShutdown(t *testing.T) {
 
 	hg.Wait()
 	d.sessWg.Wait()
+	d.waitNotifies()
 }
 
 // --- full Serve lifecycle ---------------------------------------------------
@@ -551,4 +555,185 @@ func TestServeGracefulShutdownOnContextCancel(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Serve did not return after context cancel")
 	}
+}
+
+// --- shutdown/create interlock ------------------------------------------------
+
+// TestHelloRacingShutdownIsRejected covers the interlock between the
+// registry-empty shutdown decision and session creation: once killSession has
+// removed the last session (making shutdown irreversible via doneOnce), a
+// Hello landing at any later instant must be rejected cleanly — never spawn a
+// child that no teardown pass would reap. The interleaving is deterministic:
+// killSession runs to completion before the racing Hellos are handled, which
+// models the worst case (insertion attempt after the shutdown snapshot).
+func TestHelloRacingShutdownIsRejected(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	f := portsmocks.NewMockPTYFactory(t)
+	// Exactly one child may ever be spawned; a second Open call (a leaked
+	// child) fails the test via mock expectations.
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(p, nil).Once()
+	d := newTestDaemon(t, f, stubClock{})
+
+	tr1, sends1, release1 := newConn(t, mustHello(ports.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
+	var hg sync.WaitGroup
+	hg.Add(1)
+	go func() { defer hg.Done(); d.handleConn(tr1) }()
+	awaitFrame(t, sends1, ports.MsgWelcome)
+	sess := firstSession(d)
+	require.NotNil(t, sess)
+
+	// The last session dies: shutdown begins irreversibly.
+	d.killSession(sess, ports.ReasonSessionKilled)
+	select {
+	case <-d.done:
+	default:
+		t.Fatal("registry-empty shutdown must be signalled synchronously by killSession")
+	}
+
+	// Racing Hellos — both creation intents must be rejected with a clean
+	// typed error, and nothing may be inserted into the registry.
+	for _, intent := range []struct {
+		name   string
+		intent uint8
+		sess   string
+	}{
+		{"ephemeral", ports.IntentEphemeral, ""},
+		{"named", ports.IntentNew, "latecomer"},
+	} {
+		tr2, sends2, _ := newConn(t, mustHello(intent.intent, intent.sess, domain.Size{Cols: 80, Rows: 24}))
+		d.handleConn(tr2)
+		e := awaitFrame(t, sends2, ports.MsgError)
+		em, err := ports.UnmarshalErrorMsg(e.Payload)
+		require.NoError(t, err)
+		require.Equal(t, ports.ErrServerShutdown, em.Code, "%s hello racing shutdown must be rejected", intent.name)
+	}
+	require.Equal(t, 0, sessionCount(d), "no session may be inserted after shutdown began")
+
+	release1()
+	releasePTY()
+	hg.Wait()
+	d.sessWg.Wait()
+	d.waitNotifies()
+}
+
+// --- wedged-client teardown ---------------------------------------------------
+
+// notifyClock drives the daemon with a stub debounce timer (schedulers park)
+// but a short real timer for the detach-notify deadline, so a wedged client's
+// transport is force-closed quickly and deterministically.
+type notifyClock struct{}
+
+func (notifyClock) Now() time.Time { return time.Now() }
+func (notifyClock) NewTimer(d time.Duration) ports.Timer {
+	if d == debounceInterval {
+		return stubTimer{}
+	}
+	return realTimer{t: time.NewTimer(5 * time.Millisecond)}
+}
+
+type realTimer struct{ t *time.Timer }
+
+func (r realTimer) C() <-chan time.Time        { return r.t.C }
+func (r realTimer) Reset(d time.Duration) bool { return r.t.Reset(d) }
+func (r realTimer) Stop() bool                 { return r.t.Stop() }
+
+// TestServeReturnsDespiteWedgedClientOnShutdown: killSession's teardown must
+// not be gated behind the Detached notice. The client transport wedges every
+// MsgDetached send until the transport is closed (mirroring a full kernel
+// send buffer: only Close fails the in-flight write). Serve must still tear
+// down the PTY and return.
+func TestServeReturnsDespiteWedgedClientOnShutdown(t *testing.T) {
+	p, _ := newBlockingPTY(t) // Close unblocks the parked reader
+
+	tr := portsmocks.NewMockTransport(t)
+	sends := make(chan ports.Frame, 64)
+	recvCh := make(chan ports.Frame, 1)
+	recvCh <- mustHello(ports.IntentNew, "wedge", domain.Size{Cols: 80, Rows: 24})
+	connDone := make(chan struct{})
+	var connOnce sync.Once
+	closeConn := func() { connOnce.Do(func() { close(connDone) }) }
+
+	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		select {
+		case f := <-recvCh:
+			return f, nil
+		case <-connDone:
+			return ports.Frame{}, io.EOF
+		}
+	}).Maybe()
+	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f ports.Frame) error {
+		if f.Type == ports.MsgDetached {
+			// Wedged: blocks until the transport is force-closed.
+			<-connDone
+			return io.ErrClosedPipe
+		}
+		sends <- f
+		return nil
+	}).Maybe()
+	tr.EXPECT().Close().RunAndReturn(func() error { closeConn(); return nil }).Maybe()
+
+	l := portsmocks.NewMockListener(t)
+	connCh := make(chan ports.Transport, 1)
+	connCh <- tr
+	lnClosed := make(chan struct{})
+	var lnOnce sync.Once
+	l.EXPECT().Accept().RunAndReturn(func() (ports.Transport, error) {
+		select {
+		case c := <-connCh:
+			return c, nil
+		case <-lnClosed:
+			return nil, io.EOF
+		}
+	}).Maybe()
+	l.EXPECT().Close().RunAndReturn(func() error { lnOnce.Do(func() { close(lnClosed) }); return nil }).Maybe()
+	l.EXPECT().Addr().Return("mock").Maybe()
+
+	d := New(newFactory(t, p), notifyClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+
+	served := make(chan error, 1)
+	go func() { served <- d.Serve(ctx, l) }()
+
+	awaitFrame(t, sends, ports.MsgWelcome)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	cancel() // shutdown with the wedged client still attached
+
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve hung on a wedged client during teardown")
+	}
+	require.Equal(t, 0, sessionCount(d), "session must be torn down despite the wedged client")
+}
+
+// --- send-error kills ephemeral -----------------------------------------------
+
+// TestSendErrorKillsEphemeral: a failed output send detaches the client, and —
+// like every other detach path — that kills an ephemeral session rather than
+// leaving it headless-but-alive forever.
+func TestSendErrorKillsEphemeral(t *testing.T) {
+	p := portsmocks.NewMockPTY(t)
+	p.EXPECT().Close().Return(nil).Maybe()
+
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(mock.Anything).Return(io.ErrClosedPipe).Maybe()
+	tr.EXPECT().Close().Return(nil).Maybe()
+
+	d := newTestDaemon(t, nil, stubClock{})
+	win := &window{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}}
+	sctx, cancel := context.WithCancel(context.Background())
+	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	sess := &session{id: "e", name: "0", ephemeral: true, win: win, ctx: sctx, cancel: cancel, client: ac}
+	d.sessions[sess.id] = sess
+
+	win.mu.Lock()
+	win.screen.Write([]byte("x"))
+	win.mu.Unlock()
+
+	d.paint(sess, ac, true) // send fails -> detach -> ephemeral killed
+
+	require.Equal(t, 0, sessionCount(d), "ephemeral session must die when its client's send fails")
+	d.waitNotifies()
 }
