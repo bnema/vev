@@ -2180,3 +2180,15 @@ func TestLineOffsetInvariantAfterVTSequences(t *testing.T) {
 		}
 	}
 }
+
+func TestScreenReportsSynchronizedUpdateMode(t *testing.T) {
+	s := NewScreen(10, 2)
+	s.Write([]byte("\x1b[?2026h"))
+	if !s.SyncUpdateActive() {
+		t.Fatal("sync update mode should be active")
+	}
+	s.Write([]byte("\x1b[?2026l"))
+	if s.SyncUpdateActive() {
+		t.Fatal("sync update mode should be inactive")
+	}
+}

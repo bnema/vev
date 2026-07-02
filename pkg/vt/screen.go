@@ -40,10 +40,11 @@ type Screen struct {
 	damage    []renderer.Damage
 	escapeBuf []byte
 
-	scrollTop    int
-	scrollBottom int
-	savedCursor  cursorState
-	alternate    *screenState
+	scrollTop        int
+	scrollBottom     int
+	savedCursor      cursorState
+	alternate        *screenState
+	syncUpdateActive bool
 }
 
 func NewScreen(width, height int) *Screen {
@@ -74,6 +75,10 @@ func (s *Screen) Resize(width, height int) {
 // returned slice; ClearDamage must be called after the damage is consumed.
 func (s *Screen) Damage() []renderer.Damage { return s.damage }
 func (s *Screen) ClearDamage()              { s.damage = s.damage[:0] }
+
+// SyncUpdateActive reports whether DEC private mode 2026 (synchronized update)
+// is currently enabled by the child process.
+func (s *Screen) SyncUpdateActive() bool { return s.syncUpdateActive }
 
 func (s *Screen) Write(data []byte) {
 	if len(s.escapeBuf) > 0 {
@@ -841,7 +846,9 @@ func (s *Screen) setMode(private bool, parts []int, enabled bool) {
 			} else {
 				s.exitAlternateScreen()
 			}
-		case 1, 25, 1000, 1002, 1003, 1004, 1005, 1006, 2004, 2026:
+		case 2026:
+			s.syncUpdateActive = enabled
+		case 1, 25, 1000, 1002, 1003, 1004, 1005, 1006, 2004:
 			// Trackable terminal modes that do not directly affect the current
 			// cell model yet. Consuming them prevents mode bytes from leaking.
 			continue

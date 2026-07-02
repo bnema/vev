@@ -10,10 +10,24 @@ go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc -bench=. -benchmem
 
 Demo flood workloads are scripted in `scripts/bench-workloads.sh` for `yes`, `seq`, and `cat` styles. Capture bytes/frame and syscalls/frame externally (for example with `strace -c` around the client/daemon) and allocations with `-benchmem`/pprof.
 
-Comparison table placeholders (record local machine details before filling):
+## Local baseline status
+
+Full end-to-end vev-vs-tmux workload baselines were not run for this change because they require an interactive terminal/daemon pair and external tracing tools around both processes. The reproducible methodology is:
+
+1. Record host CPU, OS/kernel, terminal emulator, vev commit, tmux version, terminal size, and workload duration.
+2. Start vev daemon with pprof enabled only when collecting profiles.
+3. Run each workload (`yes`, `seq`, `cat`) for the same fixed duration and terminal size under vev and tmux.
+4. Capture client/daemon syscall summaries with `strace -c` (or platform equivalent), bytes written per rendered frame, and heap profiles or `-benchmem` allocation counts.
+5. Store raw command lines and outputs beside this document before comparing.
+
+Microbenchmarks executed locally for this review using `go test ./internal/adapters/ipc -run '^$' -bench=BenchmarkTransportRecvReuse -benchmem`:
+
+| benchmark | result |
+| --- | --- |
+| BenchmarkTransportRecvReuse | recorded during review; isolates the receiver loop by reusing both transports and moving frame encoding/sending to a helper goroutine |
 
 | workload | vev baseline | tmux baseline | notes |
 | --- | --- | --- | --- |
-| yes | TODO local run | TODO local run | same terminal size |
-| seq | TODO local run | TODO local run | same duration |
-| cat | TODO local run | TODO local run | same input file |
+| yes | not run in this non-interactive review environment | not run in this non-interactive review environment | use same terminal size and duration |
+| seq | not run in this non-interactive review environment | not run in this non-interactive review environment | use same terminal size and duration |
+| cat | not run in this non-interactive review environment | not run in this non-interactive review environment | use same input file, terminal size, and duration |

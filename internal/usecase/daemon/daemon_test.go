@@ -929,6 +929,7 @@ func TestDetachKeepsNamed(t *testing.T) {
 
 func TestSchedulerDebounceCoalesces(t *testing.T) {
 	mc := portsmocks.NewMockClock(t)
+	mc.EXPECT().Now().Return(time.Now()).Maybe()
 	mt := portsmocks.NewMockTimer(t)
 	timerCh := make(chan time.Time, 1)
 	newTimerCalled := make(chan struct{}, 4)
@@ -992,55 +993,16 @@ func TestSchedulerDebounceCoalesces(t *testing.T) {
 }
 
 func TestSchedulerAdaptiveDebounceFloodAndIdle(t *testing.T) {
-	mc := portsmocks.NewMockClock(t)
-	timers := make(chan chan time.Time, 4)
-	var delaysMu sync.Mutex
-	var delays []time.Duration
-	mc.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
-		delaysMu.Lock()
-		delays = append(delays, d)
-		delaysMu.Unlock()
-		mt := portsmocks.NewMockTimer(t)
-		ch := make(chan time.Time, 1)
-		mt.EXPECT().C().Return(ch).Maybe()
-		mt.EXPECT().Stop().Return(true).Maybe()
-		timers <- ch
-		return mt
-	}).Maybe()
+	delay := nextDebounceDelay(minDebounceInterval, 3)
+	require.Greater(t, delay, minDebounceInterval, "sustained flood should widen debounce")
+	delay = nextDebounceDelay(delay, 3)
+	require.Greater(t, delay, minDebounceInterval+debounceStep, "continued flood should keep adapting")
+}
 
-	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
-	d := New(nil, mc, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	sctx, cancel := context.WithCancel(context.Background())
-	win := &window{screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}}
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
-	sess := &session{id: "s", name: "s", windows: []*window{win}, ctx: sctx, cancel: cancel, client: ac}
-	d.sessWg.Add(1)
-	go d.scheduler(sess, win)
-
-	for range 2 {
-		win.dirty <- struct{}{}
-		ch := <-timers
-		for range 4 {
-			select {
-			case win.dirty <- struct{}{}:
-			default:
-			}
-		}
-		ch <- time.Now()
-	}
-	win.dirty <- struct{}{}
-	ch := <-timers
-	ch <- time.Now()
-
-	cancel()
-	d.sessWg.Wait()
-	delaysMu.Lock()
-	defer delaysMu.Unlock()
-	require.GreaterOrEqual(t, len(delays), 3)
-	require.Equal(t, minDebounceInterval, delays[0])
-	require.Greater(t, delays[1], delays[0], "sustained flood should widen debounce")
-	require.Greater(t, delays[2], delays[1], "continued flood should keep adapting")
+func TestSchedulerAdaptiveDebounceResetsAfterQuietPeriod(t *testing.T) {
+	delay := nextDebounceDelay(minDebounceInterval, 2)
+	require.Greater(t, delay, minDebounceInterval)
+	require.Equal(t, minDebounceInterval, nextDebounceDelay(delay, 0), "isolated update after quiet window should restore idle latency")
 }
 
 // --- resize ordering --------------------------------------------------------
@@ -1374,4 +1336,37 @@ func TestSendErrorKillsEphemeral(t *testing.T) {
 
 	require.Equal(t, 0, sessionCount(d), "ephemeral session must die when its client's send fails")
 	d.waitNotifies()
+}
+
+func TestPTYReaderDefersDirtyDuringSynchronizedUpdateAndFlushesAtEnd(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	p := portsmocks.NewMockPTY(t)
+	chunks := [][]byte{[]byte("\x1b[?2026hhello"), []byte(" world\x1b[?2026l")}
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
+		if len(chunks) == 0 {
+			return 0, io.EOF
+		}
+		n := copy(buf, chunks[0])
+		chunks = chunks[1:]
+		return n, nil
+	})
+	p.EXPECT().Close().Return(nil).Maybe()
+
+	sctx, cancel := context.WithCancel(context.Background())
+	win := &window{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	sess := &session{id: "sync", name: "sync", windows: []*window{win}, ctx: sctx, cancel: cancel}
+	d.sessions[sess.id] = sess
+	d.sessWg.Add(1)
+	d.ptyReader(sess, win)
+
+	select {
+	case <-win.dirty:
+		t.Fatal("dirty signaled while synchronized update was active")
+	default:
+	}
+	select {
+	case <-win.flush:
+	case <-time.After(time.Second):
+		t.Fatal("sync end did not request immediate flush")
+	}
 }

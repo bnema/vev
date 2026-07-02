@@ -11,21 +11,28 @@ func BenchmarkTransportRecvReuse(b *testing.B) {
 	c1, c2 := net.Pipe()
 	defer func() { _ = c1.Close() }()
 	defer func() { _ = c2.Close() }()
-	tr := NewTransport(c2)
+	recv := NewTransport(c2)
+	send := NewTransport(c1)
 	payload := []byte("payload payload payload")
+	frames := make(chan ports.Frame, 1024)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < b.N; i++ {
-			_ = NewTransport(c1).Send(ports.Frame{Type: ports.MsgOutput, Payload: payload})
+		for frame := range frames {
+			if err := send.Send(frame); err != nil {
+				return
+			}
 		}
 	}()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := tr.Recv(); err != nil {
+		frames <- ports.Frame{Type: ports.MsgOutput, Payload: payload}
+		if _, err := recv.Recv(); err != nil {
 			b.Fatal(err)
 		}
 	}
+	b.StopTimer()
+	close(frames)
 	<-done
 }

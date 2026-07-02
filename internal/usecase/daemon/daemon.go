@@ -138,6 +138,7 @@ type window struct {
 	screen     *vt.Screen
 	scrollback *scopy.Scrollback
 	dirty      chan struct{}
+	flush      chan struct{}
 	size       domain.Size
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -561,6 +562,7 @@ func newWindow(pty ports.PTY, sz domain.Size) *window {
 		screen:     screen,
 		scrollback: sb,
 		dirty:      make(chan struct{}, 1),
+		flush:      make(chan struct{}, 1),
 		size:       sz,
 	}
 }
@@ -936,6 +938,13 @@ func (d *Daemon) closeWindow(sess *session, win *window, repaint bool) {
 // ptyReader drains child output into the VT screen and pokes the dirty channel
 // (non-blocking: a full channel already means a render is pending). On any read
 // error (EOF when the child exits) it kills the session.
+func signal(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
 func (d *Daemon) ptyReader(sess *session, win *window) {
 	defer d.sessWg.Done()
 	buf := make([]byte, ptyReadBufSize)
@@ -943,12 +952,18 @@ func (d *Daemon) ptyReader(sess *session, win *window) {
 		n, err := win.pty.Read(buf)
 		if n > 0 {
 			win.mu.Lock()
+			wasSyncing := win.screen.SyncUpdateActive()
 			win.screen.Write(buf[:n])
+			isSyncing := win.screen.SyncUpdateActive()
 			win.mu.Unlock()
-			select {
-			case win.dirty <- struct{}{}:
-			default:
+			if wasSyncing && !isSyncing {
+				signal(win.flush)
+				continue
 			}
+			if isSyncing {
+				continue
+			}
+			signal(win.dirty)
 		}
 		if err != nil {
 			d.closeWindow(sess, win, true)
@@ -963,13 +978,22 @@ func (d *Daemon) ptyReader(sess *session, win *window) {
 func (d *Daemon) scheduler(sess *session, win *window) {
 	defer d.sessWg.Done()
 	delay := minDebounceInterval
+	lastRender := d.clock.Now()
+outer:
 	for {
 		select {
 		case <-sess.ctx.Done():
 			return
 		case <-windowDone(win):
 			return
+		case <-win.flush:
+			d.render(sess, win)
+			lastRender = d.clock.Now()
+			continue
 		case <-win.dirty:
+			if d.clock.Now().Sub(lastRender) >= maxDebounceInterval {
+				delay = minDebounceInterval
+			}
 		}
 
 		coalesced := 0
@@ -983,22 +1007,40 @@ func (d *Daemon) scheduler(sess *session, win *window) {
 			case <-windowDone(win):
 				timer.Stop()
 				return
+			case <-win.flush:
+				if !timer.Stop() {
+					select {
+					case <-timer.C():
+					default:
+					}
+				}
+				d.render(sess, win)
+				lastRender = d.clock.Now()
+				continue outer
 			case <-win.dirty:
 				coalesced++
 			case <-timer.C():
 				break absorb
 			}
 		}
-		if coalesced == 0 {
-			delay = minDebounceInterval
-		} else if delay < maxDebounceInterval {
-			delay += debounceStep
-			if delay > maxDebounceInterval {
-				delay = maxDebounceInterval
-			}
-		}
+		delay = nextDebounceDelay(delay, coalesced)
 		d.render(sess, win)
+		lastRender = d.clock.Now()
 	}
+}
+
+func nextDebounceDelay(delay time.Duration, coalesced int) time.Duration {
+	if coalesced == 0 {
+		return minDebounceInterval
+	}
+	if delay >= maxDebounceInterval {
+		return maxDebounceInterval
+	}
+	delay += debounceStep
+	if delay > maxDebounceInterval {
+		return maxDebounceInterval
+	}
+	return delay
 }
 
 func windowDone(win *window) <-chan struct{} {
