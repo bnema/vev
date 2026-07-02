@@ -2281,6 +2281,8 @@ func TestScreenCursorStyleDECSCUSR(t *testing.T) {
 	}{
 		{name: "explicit style", seq: "\x1b[5 q", wantStyle: 5, wantSet: true},
 		{name: "blank style parameter", seq: "\x1b[ q", wantStyle: 0, wantSet: true},
+		{name: "invalid low style is ignored", seq: "\x1b[-1 q", wantStyle: 0, wantSet: false},
+		{name: "invalid high style is ignored", seq: "\x1b[7 q", wantStyle: 0, wantSet: false},
 		{name: "XTVERSION is ignored", seq: "\x1b[>0q", wantStyle: 0, wantSet: false},
 	}
 	for _, tt := range tests {
@@ -2292,6 +2294,16 @@ func TestScreenCursorStyleDECSCUSR(t *testing.T) {
 				t.Fatalf("CursorStyle() = (%d, %v), want (%d, %v)", style, set, tt.wantStyle, tt.wantSet)
 			}
 		})
+	}
+}
+
+func TestScreenInvalidCursorStyleDoesNotOverwriteCurrentStyle(t *testing.T) {
+	s := NewScreen(10, 2)
+	s.Write([]byte("\x1b[5 q"))
+	s.Write([]byte("\x1b[99 q"))
+	style, set := s.CursorStyle()
+	if style != 5 || !set {
+		t.Fatalf("CursorStyle() = (%d, %v), want (5, true)", style, set)
 	}
 }
 

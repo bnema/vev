@@ -806,6 +806,9 @@ func (s *Screen) applyCursorStyle(params string) {
 		}
 		style = v
 	}
+	if style < 0 || style > 6 {
+		return
+	}
 	s.cursorStyle = style
 	s.cursorStyleSet = true
 }
