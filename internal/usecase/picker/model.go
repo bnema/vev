@@ -2,6 +2,7 @@ package picker
 
 import (
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -177,7 +178,8 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect) {
 		if !r.header {
 			label = "  " + label
 		}
-		drawText(frame, rect.X, rect.Y+y, rect.Width, label, style)
+		ui.FillRect(frame, domain.Rect{X: rect.X, Y: rect.Y + y, Width: rect.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
+		ui.DrawText(frame, rect.X, rect.Y+y, rect.X+rect.Width, label, style)
 	}
 }
 
@@ -190,28 +192,6 @@ func (m *Model) scrollOffset(visible int) int {
 	}
 	offset := m.selected - visible + 1
 	return min(offset, len(m.rows)-visible)
-}
-
-func drawText(frame renderer.Frame, x, y, width int, text string, style renderer.Style) {
-	if y < 0 || y >= frame.Height || x >= frame.Width || width <= 0 {
-		return
-	}
-	limit := min(width, frame.Width-x)
-	if limit <= 0 {
-		return
-	}
-	row := frame.Row(y)
-	for i := range limit {
-		row[x+i] = renderer.Cell{Rune: ' ', Style: style}
-	}
-	col := 0
-	for _, r := range text {
-		if col >= limit {
-			break
-		}
-		row[x+col] = renderer.Cell{Rune: r, Style: style}
-		col++
-	}
 }
 
 func clamp(n, low, high int) int {

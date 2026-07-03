@@ -54,16 +54,18 @@ func (m Modal) Inner(base domain.Size) domain.Rect {
 // the inner content rectangle. Cells outside the modal bounds are not changed.
 func (m Modal) Composite(f renderer.Frame, border renderer.Style) domain.Rect {
 	bounds := m.Bounds(domain.Size{Cols: f.Width, Rows: f.Height})
-	inner := m.Inner(domain.Size{Cols: f.Width, Rows: f.Height})
+	inner := domain.Rect{
+		X:      bounds.X + 1,
+		Y:      bounds.Y + 1,
+		Width:  max(0, bounds.Width-2),
+		Height: max(0, bounds.Height-2),
+	}
 	DrawBox(f, bounds, border)
 	FillRect(f, inner, renderer.BlankCell())
 	if bounds.Width > 2 && bounds.Height > 0 && m.Title != "" {
 		left := bounds.X + 1
 		right := bounds.X + bounds.Width - 1
-		start := bounds.X + (bounds.Width-textWidth(m.Title))/2
-		if start < left {
-			start = left
-		}
+		start := max(left, bounds.X+(bounds.Width-textWidth(m.Title))/2)
 		DrawText(f, start, bounds.Y, right, m.Title, border)
 	}
 	return inner

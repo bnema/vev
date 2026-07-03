@@ -754,16 +754,16 @@ func (s *session) activeTab() *tab {
 	return s.tabs[s.active]
 }
 
-func (d *Daemon) handleInput(sess *session, ac *attachedClient, data []byte) {
+func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 	ac.mouseScan.Scan(data,
-		func(ev mouse.Event) { d.handleMouse(sess, ac, ev) },
+		func(ev mouse.Event) { d.handleMouse(ac, ev) },
 		func(b []byte) {
 			if ac.pickerActive() {
-				d.handlePickerInput(sess, ac, b)
+				d.handlePickerInput(ac, b)
 				return
 			}
 			if ac.copyModeActive() {
-				d.handleCopyInput(sess, ac, b)
+				d.handleCopyInput(ac, b)
 				return
 			}
 			ac.keys.Route(b)
@@ -771,7 +771,14 @@ func (d *Daemon) handleInput(sess *session, ac *attachedClient, data []byte) {
 	)
 }
 
-func (d *Daemon) handleMouse(sess *session, ac *attachedClient, ev mouse.Event) {
+func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
+	if ac.pickerActive() {
+		return
+	}
+	sess := ac.currentSession()
+	if sess == nil {
+		return
+	}
 	tb := sess.activeTab()
 	if tb == nil {
 		return
@@ -862,7 +869,11 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	d.paint(sess, ac, true)
 }
 
-func (d *Daemon) handleCopyInput(sess *session, ac *attachedClient, data []byte) {
+func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
+	sess := ac.currentSession()
+	if sess == nil {
+		return
+	}
 	tb := sess.activeTab()
 	if tb == nil {
 		return
@@ -1017,7 +1028,11 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 	return views, curTab
 }
 
-func (d *Daemon) handlePickerInput(sess *session, ac *attachedClient, data []byte) {
+func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
+	sess := ac.currentSession()
+	if sess == nil {
+		return
+	}
 	ac.pickerMu.Lock()
 	if ac.picker == nil {
 		ac.pickerPending = nil
@@ -1164,6 +1179,25 @@ func (d *Daemon) unregisterPreview(ac *attachedClient) {
 	}
 }
 
+func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
+	tb.mu.Lock()
+	previewer := tb.previewClient
+	tb.mu.Unlock()
+	if previewer == nil {
+		return
+	}
+	previewer.pickerMu.Lock()
+	if previewer.pickerPreview == tb {
+		previewer.pickerPreview = nil
+	}
+	previewer.pickerMu.Unlock()
+	tb.mu.Lock()
+	if tb.previewClient == previewer {
+		tb.previewClient = nil
+	}
+	tb.mu.Unlock()
+}
+
 func (d *Daemon) closePicker(ac *attachedClient) {
 	ac.pickerMu.Lock()
 	ac.picker = nil
@@ -1204,27 +1238,45 @@ func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker
 		d.paint(sess, ac, true)
 		return
 	}
-	if !sess.detachIfCurrent(ac) {
+	old := d.stealClientForTarget(sess, ac, targetSess, target)
+	if ac.currentSession() != targetSess {
+		d.paint(sess, ac, true)
 		return
 	}
-	targetSess.stealClient(d, ac, target.TabIndex)
-	ac.setSession(targetSess)
-	d.firstPaint(targetSess, ac, ac.size)
-}
-
-func (s *session) stealClient(d *Daemon, ac *attachedClient, idx int) {
-	s.mu.Lock()
-	old := s.client
-	s.client = ac
-	if idx >= 0 && idx < len(s.tabs) {
-		s.active = idx
-	}
-	s.mu.Unlock()
 	if old != nil && old != ac {
 		d.unregisterPreview(old)
 		old.setSession(nil)
 		d.notifyDetachedAsync(old, ports.ReasonDetach)
 	}
+	d.firstPaint(targetSess, ac, ac.size)
+}
+
+func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetSess *session, target picker.Target) *attachedClient {
+	d.mu.Lock()
+	if d.sessions[target.Session] != targetSess {
+		d.mu.Unlock()
+		return nil
+	}
+	from.mu.Lock()
+	if from.client != ac {
+		from.mu.Unlock()
+		d.mu.Unlock()
+		return nil
+	}
+	from.client = nil
+	ac.setSession(nil)
+	from.mu.Unlock()
+
+	targetSess.mu.Lock()
+	old := targetSess.client
+	targetSess.client = ac
+	if target.TabIndex >= 0 && target.TabIndex < len(targetSess.tabs) {
+		targetSess.active = target.TabIndex
+	}
+	targetSess.mu.Unlock()
+	ac.setSession(targetSess)
+	d.mu.Unlock()
+	return old
 }
 
 type daemonKeyHandler struct {
@@ -1345,6 +1397,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	ac := sess.client
 	sess.mu.Unlock()
 
+	d.clearDestroyedTabPreview(tb)
 	if tb.cancel != nil {
 		tb.cancel()
 	}
@@ -1833,6 +1886,7 @@ func (d *Daemon) killSession(sess *session, reason uint8) {
 	tabs := append([]*tab(nil), sess.tabs...)
 	sess.mu.Unlock()
 	for _, tb := range tabs {
+		d.clearDestroyedTabPreview(tb)
 		_ = tb.pty.Close()
 	}
 	if empty {

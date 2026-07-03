@@ -1136,8 +1136,8 @@ func TestPickerOpenCloseNavigationConcurrentWithRenderRace(t *testing.T) {
 			d.enterPicker(sess, ac)
 		})
 		wg.Go(func() {
-			d.handlePickerInput(sess, ac, []byte("j"))
-			d.handlePickerInput(sess, ac, []byte("k"))
+			d.handlePickerInput(ac, []byte("j"))
+			d.handlePickerInput(ac, []byte("k"))
 		})
 		wg.Go(func() {
 			d.closePicker(ac)
