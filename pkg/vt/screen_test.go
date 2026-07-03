@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -71,6 +72,81 @@ func lineText(s *Screen, y int) string {
 		out[x] = s.Frame.At(x, y).Rune
 	}
 	return string(out)
+}
+
+func rowString(row []renderer.Cell) string {
+	out := make([]rune, len(row))
+	for i, cell := range row {
+		out[i] = cell.Rune
+	}
+	return string(out)
+}
+
+// ---------------------------------------------------------------------------
+// Bell / notifications
+// ---------------------------------------------------------------------------
+
+func TestOnBellFiresForLoneBEL(t *testing.T) {
+	s := NewScreen(10, 2)
+	rang := 0
+	s.OnBell = func() { rang++ }
+	s.Write([]byte("hi\ahi\a"))
+	require.Equal(t, 2, rang)
+	require.Equal(t, "hihi", strings.TrimRight(rowString(s.Frame.Row(0)), " "))
+}
+
+func TestOnBellIgnoresOSCTerminator(t *testing.T) {
+	s := NewScreen(10, 2)
+	rang := 0
+	s.OnBell = func() { rang++ }
+	s.Write([]byte("\x1b]0;title\a")) // BEL terminates the OSC, it is not a bell
+	require.Equal(t, 0, rang)
+}
+
+func TestBELWithoutCallbackIsDiscarded(t *testing.T) {
+	s := NewScreen(10, 2)
+	s.Write([]byte("a\ab")) // no OnBell set: must not panic
+	require.Equal(t, "ab", strings.TrimRight(rowString(s.Frame.Row(0)), " "))
+}
+
+func TestOnNotifyOSC9(t *testing.T) {
+	s := NewScreen(10, 2)
+	var gotTitle, gotBody string
+	calls := 0
+	s.OnNotify = func(title, body string) { gotTitle, gotBody = title, body; calls++ }
+	s.Write([]byte("\x1b]9;agent done\x07"))
+	require.Equal(t, 1, calls)
+	require.Equal(t, "", gotTitle)
+	require.Equal(t, "agent done", gotBody)
+}
+
+func TestOnNotifyOSC777STTerminated(t *testing.T) {
+	s := NewScreen(10, 2)
+	var gotTitle, gotBody string
+	calls := 0
+	s.OnNotify = func(title, body string) { gotTitle, gotBody = title, body; calls++ }
+	s.Write([]byte("\x1b]777;notify;Claude;needs input\x1b\\"))
+	require.Equal(t, 1, calls)
+	require.Equal(t, "Claude", gotTitle)
+	require.Equal(t, "needs input", gotBody)
+}
+
+func TestOnNotifyIgnoresOtherOSC(t *testing.T) {
+	s := NewScreen(10, 2)
+	calls := 0
+	s.OnNotify = func(string, string) { calls++ }
+	s.Write([]byte("\x1b]0;window title\x07"))  // title: discarded
+	s.Write([]byte("\x1b]777;other;x;y\x1b\\")) // not "notify": discarded
+	require.Equal(t, 0, calls)
+}
+
+func TestOnNotifySplitAcrossWrites(t *testing.T) {
+	s := NewScreen(10, 2)
+	calls := 0
+	s.OnNotify = func(string, string) { calls++ }
+	s.Write([]byte("\x1b]9;par"))
+	s.Write([]byte("tial\x07"))
+	require.Equal(t, 1, calls)
 }
 
 // ---------------------------------------------------------------------------
