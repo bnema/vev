@@ -89,6 +89,11 @@ func TestRouterInterceptsAltAZERTYUTF8SplitAcrossReads(t *testing.T) {
 	r.Route([]byte{0xa9})
 	require.Equal(t, []Action{ActionSwitchTab2}, h.actions)
 	require.Empty(t, h.forwards)
+	assertRouterPendingCleared(t, r)
+
+	r.Route([]byte{ESC, ' '})
+	require.Equal(t, []Action{ActionSwitchTab2, ActionOpenPalette}, h.actions)
+	require.Empty(t, h.forwards)
 }
 
 func TestRouterInterceptsRetainedAltAZERTYUTF8SplitAcrossReads(t *testing.T) {
@@ -105,6 +110,11 @@ func TestRouterInterceptsRetainedAltAZERTYUTF8SplitAcrossReads(t *testing.T) {
 	r.Route([]byte{0xa9})
 	require.Equal(t, []Action{ActionSwitchTab2}, h.actions)
 	require.Empty(t, h.forwards)
+	assertRouterPendingCleared(t, r)
+
+	r.Route([]byte{ESC, ' '})
+	require.Equal(t, []Action{ActionSwitchTab2, ActionOpenPalette}, h.actions)
+	require.Empty(t, h.forwards)
 }
 
 func TestRouterForwardsUnboundAltUTF8SplitAcrossReads(t *testing.T) {
@@ -117,6 +127,11 @@ func TestRouterForwardsUnboundAltUTF8SplitAcrossReads(t *testing.T) {
 
 	require.Empty(t, h.actions)
 	require.Equal(t, [][]byte{{ESC, 0xc3, 0xb1}}, h.forwards)
+	assertRouterPendingCleared(t, r)
+
+	r.Route([]byte("Z"))
+	require.Empty(t, h.actions)
+	require.Equal(t, [][]byte{{ESC, 0xc3, 0xb1}, []byte("Z")}, h.forwards)
 }
 
 func TestRouterForwardsInvalidSplitAltUTF8WithoutDroppingBytes(t *testing.T) {
@@ -129,6 +144,19 @@ func TestRouterForwardsInvalidSplitAltUTF8WithoutDroppingBytes(t *testing.T) {
 
 	require.Empty(t, h.actions)
 	require.Equal(t, [][]byte{{ESC, 0xc3}, []byte("X")}, h.forwards)
+	assertRouterPendingCleared(t, r)
+
+	r.Route([]byte{ESC, ' '})
+	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
+	require.Equal(t, [][]byte{{ESC, 0xc3}, []byte("X")}, h.forwards)
+}
+
+func assertRouterPendingCleared(t *testing.T, r *Router) {
+	t.Helper()
+	require.False(t, r.pending)
+	require.Nil(t, r.pendingAlt)
+	require.Nil(t, r.timer)
+	require.Nil(t, r.pendingDone)
 }
 
 func TestTopRowDigitIndexAcceptsQWERTYAndAZERTYVariants(t *testing.T) {
