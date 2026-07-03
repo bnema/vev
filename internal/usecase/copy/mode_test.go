@@ -265,6 +265,23 @@ func TestCopyModeRenderLineCursorMarker(t *testing.T) {
 	}
 }
 
+func TestCopyModeSelectionFallbackKeepsAlreadyInverseCellInverse(t *testing.T) {
+	// A cell that was already rendered inverse by the child program (e.g. its
+	// own reverse-video attribute) must stay visibly selected: the fallback
+	// selection style is a solid "force inverse", not an XOR toggle that would
+	// flip it back to non-inverse and hide the highlight.
+	rows := [][]renderer.Cell{row("alpha   "), row("beta    ")}
+	rows[0][0].Style.Inverse = true
+	s := Snapshot{Rows: rows, Width: 16, Height: 2}
+	m := &Mode{ViewportTop: 0, Cursor: 0, Anchor: 0, Selecting: true}
+
+	frame := m.Render(s)
+
+	if !frame.At(0, 0).Style.Inverse {
+		t.Fatalf("already-inverse selected cell became non-inverse; want Inverse=true")
+	}
+}
+
 func TestCopyModeSelectionUsesProvidedStyle(t *testing.T) {
 	s := snapshot([]string{"alpha   ", "beta    "}, 2)
 	m := &Mode{ViewportTop: 0, Cursor: 0, Anchor: 0, Selecting: true}

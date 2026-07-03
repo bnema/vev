@@ -259,6 +259,32 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size)
 	return ac, old
 }
 
+// resetScreenDefaultColors clears the known default foreground/background
+// colors on every tab in sess. Called once a client has been detached, this
+// makes child OSC 10/11 queries go back to being swallowed (Known=false)
+// instead of being answered with the departed client's colors, which the
+// next client (with a different terminal theme) may never have reported.
+// Mirrors attachClient's reset loop: snapshot sess.tabs under sess.mu,
+// release it, then take each tb.mu in turn — never holding sess.mu and
+// tb.mu together. Guarded against a race with a newer attach: if sess.client
+// is non-nil by the time sess.mu is taken, a new client has already attached
+// (and run its own attach-time reset), so this call must leave the tabs
+// alone rather than clobbering that client's freshly applied colors.
+func (d *Daemon) resetScreenDefaultColors(sess *session) {
+	sess.mu.Lock()
+	if sess.client != nil {
+		sess.mu.Unlock()
+		return
+	}
+	tabs := append([]*tab(nil), sess.tabs...)
+	sess.mu.Unlock()
+	for _, tb := range tabs {
+		tb.mu.Lock()
+		tb.screen.SetDefaultColors(renderer.RGB{}, renderer.RGB{}, false)
+		tb.mu.Unlock()
+	}
+}
+
 func (d *Daemon) detachReplacedClient(old *attachedClient) {
 	if old == nil {
 		return
@@ -339,6 +365,7 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, explicit bool) {
 		return // already displaced by a newer client; nothing to do
 	}
 	d.unregisterPreview(ac)
+	d.resetScreenDefaultColors(sess)
 	if explicit {
 		// Synchronous so the ack is delivered before the transport closes
 		// (the client is actively awaiting it), but deadline-bounded so a
@@ -414,6 +441,7 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient) {
 	if sess.detachIfCurrent(ac) {
 		d.unregisterPreview(ac)
+		d.resetScreenDefaultColors(sess)
 		_ = ac.tr.Close()
 		d.log.Warn("detached client after send error", "session", sess.name)
 		if sess.ephemeral {

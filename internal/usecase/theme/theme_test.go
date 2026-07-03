@@ -113,6 +113,78 @@ func TestScannerForwardsStandaloneEscapeImmediately(t *testing.T) {
 	}
 }
 
+func TestScannerDoesNotSplitSGRMouseReport(t *testing.T) {
+	var s Scanner
+	var chunks [][]byte
+	colors := 0
+
+	in := []byte("\x1b[<0;1;1M")
+	s.Scan(in, func(kind int, rgb renderer.RGB) { colors++ }, func(b []byte) {
+		chunks = append(chunks, append([]byte(nil), b...))
+	})
+
+	if colors != 0 {
+		t.Fatalf("colors=%d want 0", colors)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("chunks=%d want 1: %q", len(chunks), chunks)
+	}
+	if !bytes.Equal(chunks[0], in) {
+		t.Fatalf("chunk=%q want %q", chunks[0], in)
+	}
+}
+
+func TestScannerDoesNotSplitArrowKey(t *testing.T) {
+	var s Scanner
+	var chunks [][]byte
+
+	in := []byte("\x1b[A")
+	s.Scan(in, func(kind int, rgb renderer.RGB) {}, func(b []byte) {
+		chunks = append(chunks, append([]byte(nil), b...))
+	})
+
+	if len(chunks) != 1 {
+		t.Fatalf("chunks=%d want 1: %q", len(chunks), chunks)
+	}
+	if !bytes.Equal(chunks[0], in) {
+		t.Fatalf("chunk=%q want %q", chunks[0], in)
+	}
+}
+
+func TestScannerKeepsMouseReportContiguousAroundColorResponse(t *testing.T) {
+	var s Scanner
+	var chunks [][]byte
+	var colors []struct {
+		kind int
+		rgb  renderer.RGB
+	}
+
+	s.Scan([]byte("abc\x1b[<64;5;5Mdef\x1b]11;rgb:11/22/33\x07ghi"), func(kind int, rgb renderer.RGB) {
+		colors = append(colors, struct {
+			kind int
+			rgb  renderer.RGB
+		}{kind: kind, rgb: rgb})
+	}, func(b []byte) {
+		chunks = append(chunks, append([]byte(nil), b...))
+	})
+
+	if len(colors) != 1 || colors[0].kind != 11 || colors[0].rgb != (renderer.RGB{R: 0x11, G: 0x22, B: 0x33}) {
+		t.Fatalf("colors=%+v", colors)
+	}
+
+	var joined bytes.Buffer
+	for _, c := range chunks {
+		joined.Write(c)
+	}
+	if want := "abc\x1b[<64;5;5Mdef" + "ghi"; joined.String() != want {
+		t.Fatalf("joined=%q want %q", joined.String(), want)
+	}
+
+	if len(chunks) == 0 || string(chunks[0]) != "abc\x1b[<64;5;5Mdef" {
+		t.Fatalf("first chunk=%q want %q (must stay contiguous)", chunks[0], "abc\x1b[<64;5;5Mdef")
+	}
+}
+
 func TestScannerFlushesOverflowingPartialQueue(t *testing.T) {
 	var s Scanner
 	var out bytes.Buffer

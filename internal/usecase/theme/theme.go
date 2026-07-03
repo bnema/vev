@@ -88,9 +88,13 @@ type Scanner struct {
 }
 
 // Scan extracts ESC ] 10;<color> and ESC ] 11;<color> terminated by BEL or ST.
-// All non-matching bytes are emitted through onBytes in original order. Partial
-// OSC color responses are buffered across calls, but the buffer is bounded so an
-// unterminated OSC cannot block unrelated input forever.
+// All non-matching bytes are emitted through onBytes in original order, and a
+// contiguous run of ordinary bytes (including any ESC that does not start a
+// color-OSC sequence, e.g. keyboard/mouse escape sequences like SGR mouse
+// reports or arrow keys) is always delivered as a single onBytes call so
+// callers never see it split. Partial OSC color responses are buffered across
+// calls, but the buffer is bounded so an unterminated OSC cannot block
+// unrelated input forever.
 func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), onBytes func([]byte)) {
 	if len(s.pending) > 0 {
 		combined := make([]byte, 0, len(s.pending)+len(data))
@@ -100,44 +104,54 @@ func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), on
 		s.pending = nil
 	}
 
-	for pos := 0; pos < len(data); {
-		rel := bytes.IndexByte(data[pos:], '\x1b')
-		if rel < 0 {
-			onBytes(data[pos:])
-			return
-		}
-		start := pos + rel
-		if pos < start {
-			onBytes(data[pos:start])
-		}
-
-		completePrefix, possiblePrefix := colorOSCPrefix(data[start:])
-		if !completePrefix {
-			if possiblePrefix {
-				s.bufferOrFlush(data[start:], onBytes)
-				return
-			}
-			onBytes(data[start : start+1])
-			pos = start + 1
+	byteStart := 0
+	for i := 0; i < len(data); i++ {
+		if data[i] != '\x1b' {
 			continue
 		}
 
-		termStart, termEnd := findTerminator(data[start+5:])
+		completePrefix, possiblePrefix := colorOSCPrefix(data[i:])
+		if !completePrefix {
+			if possiblePrefix {
+				if byteStart < i {
+					onBytes(data[byteStart:i])
+				}
+				s.bufferOrFlush(data[i:], onBytes)
+				return
+			}
+			// Not the start of a color-OSC sequence: leave this ESC inside
+			// the current passthrough run instead of splitting it out. It
+			// may be the introducer of an unrelated escape sequence (SGR
+			// mouse report, arrow key, etc.) that must reach the reader
+			// intact.
+			continue
+		}
+
+		if byteStart < i {
+			onBytes(data[byteStart:i])
+		}
+
+		termStart, termEnd := findTerminator(data[i+5:])
 		if termStart < 0 {
-			s.bufferOrFlush(data[start:], onBytes)
+			s.bufferOrFlush(data[i:], onBytes)
 			return
 		}
-		termStart += start + 5
-		termEnd += start + 5
-		raw := data[start:termEnd]
-		kind := int(data[start+3]-'0') + 10
-		rgb, ok := ParseXColor(string(data[start+5 : termStart]))
+		termStart += i + 5
+		termEnd += i + 5
+		raw := data[i:termEnd]
+		kind := int(data[i+3]-'0') + 10
+		rgb, ok := ParseXColor(string(data[i+5 : termStart]))
 		if ok {
 			onColor(kind, rgb)
 		} else {
 			onBytes(raw)
 		}
-		pos = termEnd
+		i = termEnd - 1
+		byteStart = termEnd
+	}
+
+	if byteStart < len(data) {
+		onBytes(data[byteStart:])
 	}
 }
 

@@ -180,7 +180,7 @@ func optionalStyle(styles []renderer.Style, idx int) (renderer.Style, bool) {
 
 func applySelectionStyle(dst *renderer.Style, selection renderer.Style, ok bool) {
 	if !ok || selection.Equal(inverseStyle()) {
-		dst.Inverse = !dst.Inverse
+		dst.Inverse = true
 		return
 	}
 	*dst = selection
