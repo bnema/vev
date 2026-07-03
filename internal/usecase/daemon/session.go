@@ -191,8 +191,8 @@ func (s *session) switchRelative(delta int) bool {
 	return true
 }
 
-// promoteEphemeral is M3's promptless Alt+r behavior: without a naming UI yet,
-// the current ephemeral numeric name is kept and the session is made persistent.
+// promoteEphemeral is the promptless rename-session command behavior: without a
+// naming UI yet, the current ephemeral numeric name is kept and the session is made persistent.
 func (s *session) promoteEphemeral() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

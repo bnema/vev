@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
 
@@ -34,6 +37,42 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b"))
 	require.False(t, ac.paletteActive())
 	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteCommandNoopRepaintsAfterClose(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
+	defer releases[0]()
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	paletteFrame := awaitFrame(t, sends, ports.MsgOutput)
+	paletteOutput, err := ports.UnmarshalOutput(paletteFrame.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(paletteOutput.Data), "Commands")
+
+	d.handleInput(sess, ac, []byte("NXT\r"))
+	require.False(t, ac.paletteActive())
+	repaint := awaitFrame(t, sends, ports.MsgOutput)
+	repaintOutput, err := ports.UnmarshalOutput(repaint.Payload)
+	require.NoError(t, err)
+	require.NotContains(t, string(repaintOutput.Data), "Commands")
+}
+
+func TestPaletteCreateTabErrorRepaintsAfterClose(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
+	defer releases[0]()
+	ptys := portsmocks.NewMockPTYFactory(t)
+	ptys.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("open failed"))
+	d.ptys = ptys
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("CNT\r"))
+	require.False(t, ac.paletteActive())
+	repaint := awaitFrame(t, sends, ports.MsgOutput)
+	repaintOutput, err := ports.UnmarshalOutput(repaint.Payload)
+	require.NoError(t, err)
+	require.NotContains(t, string(repaintOutput.Data), "Commands")
+	require.Len(t, sess.tabs, 1)
 }
 
 func TestPaletteEnterNoMatchKeepsOpenAndEscapeSplit(t *testing.T) {

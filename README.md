@@ -51,7 +51,7 @@ Some terminals encode Alt+Space as a non-breaking space instead of `ESC Space`; 
 
 ## Command palette
 
-Open the palette with Alt+Space, then type a command code or fuzzy-match its label. Use Up/Down or Ctrl-N/Ctrl-P to move through matches, Enter to run the selected command, and Esc to close the palette. Some terminals emit NBSP for Alt+Space; in those terminals the binding depends on terminal configuration.
+Open the palette with Alt+Space, then type a command code or fuzzy-match its label. Use Up/Down or Ctrl-N/Ctrl-P to move through matches, Enter to run the selected command, and Esc to close the palette.
 
 | Code | Action |
 |---|---|
@@ -61,7 +61,7 @@ Open the palette with Alt+Space, then type a command code or fuzzy-match its lab
 | PVT | switch to previous tab |
 | SSP | switch session or tab |
 | CPY | enter scrollback mode |
-| RNS | rename session |
+| RNS | promote session |
 | DET | detach |
 
 ## Scrollback and visual copy

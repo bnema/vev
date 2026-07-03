@@ -154,6 +154,7 @@ type paletteExec struct {
 
 func (e paletteExec) CreateTab() error {
 	if err := e.d.createTab(e.sess, e.ac.size); err != nil {
+		e.d.paint(e.sess, e.ac, true)
 		return err
 	}
 	e.d.paint(e.sess, e.ac, true)
@@ -168,16 +169,14 @@ func (e paletteExec) CloseTab() error {
 }
 
 func (e paletteExec) NextTab() error {
-	if e.sess.switchRelative(1) {
-		e.d.paint(e.sess, e.ac, true)
-	}
+	e.sess.switchRelative(1)
+	e.d.paint(e.sess, e.ac, true)
 	return nil
 }
 
 func (e paletteExec) PrevTab() error {
-	if e.sess.switchRelative(-1) {
-		e.d.paint(e.sess, e.ac, true)
-	}
+	e.sess.switchRelative(-1)
+	e.d.paint(e.sess, e.ac, true)
 	return nil
 }
 

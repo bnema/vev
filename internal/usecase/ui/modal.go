@@ -28,7 +28,7 @@ type Modal struct {
 	BottomMargin int
 }
 
-// Bounds returns the modal rectangle centered within base and clamped to base.
+// Bounds returns the modal rectangle positioned within base and clamped to base.
 func (m Modal) Bounds(base domain.Size) domain.Rect {
 	if base.Cols <= 0 || base.Rows <= 0 {
 		return domain.Rect{}
