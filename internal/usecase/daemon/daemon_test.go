@@ -807,6 +807,18 @@ func TestHandshakeNoSuchSession(t *testing.T) {
 	require.Equal(t, ports.ErrNoSuchSession, em.Code)
 }
 
+func TestKillAllEmptyDaemonSignalsShutdown(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	tr, _, _ := newConn(t, ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})})
+	d.handleConn(tr)
+
+	select {
+	case <-d.done:
+	case <-time.After(time.Second):
+		t.Fatal("kill all on empty daemon did not signal shutdown")
+	}
+}
+
 // --- ephemeral numbering ----------------------------------------------------
 
 func TestEphemeralNumberingReuse(t *testing.T) {

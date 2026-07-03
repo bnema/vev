@@ -102,9 +102,10 @@ type Detached struct {
 // fields; the request is fully described by its message type.
 type List struct{}
 
-// Kill asks the daemon to terminate the named session.
+// Kill asks the daemon to terminate one named session or all sessions.
 type Kill struct {
 	Name string
+	All  bool
 }
 
 // SessionInfo describes one session in a Sessions listing.
@@ -440,6 +441,9 @@ func UnmarshalList(b []byte) (List, error) {
 func MarshalKill(m Kill) []byte {
 	w := payloadWriter{}
 	w.putString(m.Name)
+	if m.All {
+		w.putUint8(1)
+	}
 	return w.b
 }
 
@@ -450,10 +454,17 @@ func UnmarshalKill(b []byte) (Kill, error) {
 	if err != nil {
 		return Kill{}, err
 	}
+	var all uint8
+	if len(r.b) > 0 {
+		all, err = r.getUint8()
+		if err != nil {
+			return Kill{}, err
+		}
+	}
 	if err := r.done(); err != nil {
 		return Kill{}, err
 	}
-	return Kill{Name: name}, nil
+	return Kill{Name: name, All: all != 0}, nil
 }
 
 // MarshalSessions encodes m into a Sessions message payload: a uint16 count

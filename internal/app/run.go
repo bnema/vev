@@ -47,6 +47,8 @@ type command struct {
 	intent       uint8
 	name         string
 	remoteTarget string
+	killAll      bool
+	killDaemon   bool
 }
 
 // usageError is a user-facing argument error; the app prints it (with usage)
@@ -69,6 +71,8 @@ usage:
                       attach through SSH to a remote vev daemon
   vev ls              list sessions
   vev kill <name>     kill a named session
+  vev kill --all      kill all sessions and stop the daemon
+  vev kill --daemon   stop the active vev daemon
   vev --help          show this help
   vev --version       show version`
 
@@ -134,12 +138,25 @@ func parseArgs(args []string) (command, error) {
 		return command{kind: kindList}, nil
 	case "kill":
 		if len(args) < 2 || args[1] == "" {
-			return command{}, usagef("`kill` requires a session name")
+			return command{}, usagef("`kill` requires a session name, --all, or --daemon")
+		}
+		if args[1] == "--" {
+			if len(args) != 3 || args[2] == "" {
+				return command{}, usagef("`kill --` requires a session name")
+			}
+			return command{kind: kindKill, name: args[2]}, nil
 		}
 		if len(args) > 2 {
-			return command{}, usagef("`kill` accepts exactly one session name")
+			return command{}, usagef("`kill` accepts exactly one session name, --all, or --daemon")
 		}
-		return command{kind: kindKill, name: args[1]}, nil
+		switch args[1] {
+		case "--all":
+			return command{kind: kindKill, killAll: true}, nil
+		case "--daemon":
+			return command{kind: kindKill, killDaemon: true}, nil
+		default:
+			return command{kind: kindKill, name: args[1]}, nil
+		}
 	case "-h", "--help", "help":
 		return command{kind: kindHelp}, nil
 	case "--version", "version":
@@ -165,7 +182,7 @@ func dispatch(ctx context.Context, cmd command) error {
 	case kindList:
 		return runList(ctx)
 	case kindKill:
-		return runKill(ctx, cmd.name)
+		return runKill(ctx, cmd.name, cmd.killAll, cmd.killDaemon)
 	case kindAttach:
 		return runAttach(ctx, cmd.intent, cmd.name, cmd.remoteTarget)
 	default:
@@ -332,15 +349,15 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 	_ = tw.Flush()
 }
 
-// runKill asks the daemon to terminate a named session.
-func runKill(_ context.Context, name string) error {
+// runKill asks the daemon to terminate a named session, every session, or the daemon.
+func runKill(_ context.Context, name string, all, daemon bool) error {
 	transport, err := realDial(ipc.SocketDir())
 	if err != nil {
 		return fmt.Errorf("vev: no daemon running")
 	}
 	defer func() { _ = transport.Close() }()
 
-	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{Name: name})}); err != nil {
+	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{Name: name, All: all || daemon})}); err != nil {
 		return fmt.Errorf("vev: requesting kill: %w", err)
 	}
 	reply, err := transport.Recv()
@@ -348,7 +365,7 @@ func runKill(_ context.Context, name string) error {
 		// The daemon may close the connection after killing; treat a clean
 		// EOF as success.
 		if errors.Is(err, io.EOF) {
-			fmt.Printf("killed %s\n", name)
+			printKillSuccess(name, all, daemon)
 			return nil
 		}
 		return fmt.Errorf("vev: reading kill reply: %w", err)
@@ -357,6 +374,18 @@ func runKill(_ context.Context, name string) error {
 		em, _ := ports.UnmarshalErrorMsg(reply.Payload)
 		return fmt.Errorf("vev: %s", em.Text)
 	}
-	fmt.Printf("killed %s\n", name)
+	printKillSuccess(name, all, daemon)
 	return nil
+}
+
+func printKillSuccess(name string, all, daemon bool) {
+	if daemon {
+		fmt.Println("killed daemon")
+		return
+	}
+	if all {
+		fmt.Println("killed all sessions and stopped daemon")
+		return
+	}
+	fmt.Printf("killed %s\n", name)
 }

@@ -17,6 +17,8 @@ func TestParseArgs(t *testing.T) {
 		wantIntent uint8
 		wantName   string
 		wantRemote string
+		wantAll    bool
+		wantDaemon bool
 		wantErr    bool
 	}{
 		{name: "no args -> ephemeral attach", args: nil, wantKind: kindAttach, wantIntent: ports.IntentEphemeral},
@@ -35,7 +37,13 @@ func TestParseArgs(t *testing.T) {
 		{name: "ls", args: []string{"ls"}, wantKind: kindList},
 		{name: "list", args: []string{"list"}, wantKind: kindList},
 		{name: "kill named", args: []string{"kill", "work"}, wantKind: kindKill, wantName: "work"},
+		{name: "kill dashed name via terminator", args: []string{"kill", "--", "--all"}, wantKind: kindKill, wantName: "--all"},
+		{name: "kill all", args: []string{"kill", "--all"}, wantKind: kindKill, wantAll: true},
+		{name: "kill daemon", args: []string{"kill", "--daemon"}, wantKind: kindKill, wantDaemon: true},
 		{name: "kill without name", args: []string{"kill"}, wantErr: true},
+		{name: "kill terminator without name", args: []string{"kill", "--"}, wantErr: true},
+		{name: "kill all rejects extra arg", args: []string{"kill", "--all", "extra"}, wantErr: true},
+		{name: "kill daemon rejects extra arg", args: []string{"kill", "--daemon", "extra"}, wantErr: true},
 		{name: "kill extra arg", args: []string{"kill", "work", "extra"}, wantErr: true},
 		{name: "daemon", args: []string{"--daemon"}, wantKind: kindDaemon},
 		{name: "stdio", args: []string{"_stdio"}, wantKind: kindStdio},
@@ -74,6 +82,12 @@ func TestParseArgs(t *testing.T) {
 			}
 			if got.remoteTarget != tt.wantRemote {
 				t.Errorf("remoteTarget = %q, want %q", got.remoteTarget, tt.wantRemote)
+			}
+			if got.killAll != tt.wantAll {
+				t.Errorf("killAll = %v, want %v", got.killAll, tt.wantAll)
+			}
+			if got.killDaemon != tt.wantDaemon {
+				t.Errorf("killDaemon = %v, want %v", got.killDaemon, tt.wantDaemon)
 			}
 		})
 	}

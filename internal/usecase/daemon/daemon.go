@@ -421,7 +421,12 @@ func (d *Daemon) shutdownAll(reason uint8) {
 	for _, s := range d.sessions {
 		snapshot = append(snapshot, s)
 	}
+	empty := len(snapshot) == 0
 	d.mu.Unlock()
+	if empty {
+		d.doneOnce.Do(func() { close(d.done) })
+		return
+	}
 	for _, s := range snapshot {
 		d.killSession(s, reason)
 	}
@@ -477,14 +482,19 @@ func (d *Daemon) handleList(tr ports.Transport) {
 	_ = tr.Send(frameSessions(infos))
 }
 
-// handleKill terminates the named session (if any) and closes the control
-// connection; the resulting EOF is the client's success signal.
+// handleKill terminates the named session (if any), or all sessions, and
+// closes the control connection; the resulting EOF is the client's success
+// signal.
 func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	defer func() { _ = tr.Close() }()
 
 	k, err := ports.UnmarshalKill(f.Payload)
 	if err != nil {
 		_ = tr.Send(frameError(ports.ErrInternal, "malformed kill request"))
+		return
+	}
+	if k.All {
+		d.shutdownAll(ports.ReasonServerShutdown)
 		return
 	}
 
