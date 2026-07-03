@@ -263,8 +263,9 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	_ = tb.pty.Close()
 	if repaint && ac != nil {
 		d.paint(sess, ac, true)
-	} else if ringing {
-		d.repaintAttachedClients(sess)
+	}
+	if ringing {
+		d.repaintAllAttachedClients()
 	}
 }
 

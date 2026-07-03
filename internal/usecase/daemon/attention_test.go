@@ -11,6 +11,8 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
 
@@ -122,7 +124,14 @@ func TestAckAttentionClearsOnlyPaintedVisibleTab(t *testing.T) {
 
 	d.paint(sess, ac, true)
 	_ = mustOutputData(t, sends)
-	_ = mustOutputData(t, sends) // deferred repaint after acknowledging the visible tab
+	// The deferred repaint (from ackAttention) targets all attached clients,
+	// including this one, but the bars it would draw are already exactly what
+	// the full paint above just sent: no second frame should follow.
+	select {
+	case f := <-sends:
+		t.Fatalf("unexpected extra frame after ack: %v", f.Type)
+	case <-time.After(50 * time.Millisecond):
+	}
 
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
@@ -165,7 +174,13 @@ func TestSwitchTabClearsAttentionEndToEnd(t *testing.T) {
 	require.True(t, sess.switchTab(1))
 	d.paint(sess, ac, true)
 	data := mustOutputData(t, sends)
-	_ = mustOutputData(t, sends) // deferred repaint after acknowledging the visited tab
+	// As above: the deferred all-clients repaint has nothing new to say about
+	// this client's bars, so no second frame follows.
+	select {
+	case f := <-sends:
+		t.Fatalf("unexpected extra frame after ack: %v", f.Type)
+	case <-time.After(50 * time.Millisecond):
+	}
 
 	require.NotContains(t, string(data), "")
 	sess.mu.Lock()
@@ -193,6 +208,114 @@ func TestCloseRingingTabClearsClientBar(t *testing.T) {
 	d.closeTab(sess, ringing, true)
 	after := mustOutputData(t, sends)
 	require.NotContains(t, string(after), "")
+}
+
+// TestAnimationRepaintConfinedToBarRows is the regression test for the pulse
+// animator: repaintAttachedClients must diff against the warm barCache
+// (reset=false), so a repaint with nothing new to say sends no frame at all,
+// and a repaint following only a pulse-frame advance touches the bar rows
+// without re-emitting screen content.
+func TestAnimationRepaintConfinedToBarRows(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 2)
+	defer releases[0]()
+	defer releases[1]()
+	sess.active = 0
+	sess.tabs[0].screen.Write([]byte("MIDSCREENMARKER"))
+	sess.mu.Lock()
+	sess.tabs[1].attention = true
+	sess.tabs[1].attentionAt = time.Unix(1, 0)
+	sess.mu.Unlock()
+
+	d.paint(sess, ac, true)
+	full := mustOutputData(t, sends)
+	require.Contains(t, string(full), "MIDSCREENMARKER")
+
+	// Nothing changed: a repaint against the warm cache must send nothing.
+	d.repaintAttachedClients(sess)
+	select {
+	case f := <-sends:
+		t.Fatalf("unexpected frame on unchanged repaint: %v", f.Type)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Advance the pulse frame (only the bells' rendered style changes) and
+	// repaint: the bytes sent must not repaint screen content.
+	d.advanceAttentionFrame()
+	d.repaintAttachedClients(sess)
+	data := mustOutputData(t, sends)
+	require.NotContains(t, string(data), "MIDSCREENMARKER")
+}
+
+// TestComposeClientFrameWithStateAttentionFrameChangeDamagesOnlyBars pins the
+// same invariant at the composeClientFrameWithState level: with a warm
+// barCache and no screen damage, changing only bars.attentionFrame must
+// produce damage confined to row 0 (top bar) and the last row (bottom bar).
+func TestComposeClientFrameWithStateAttentionFrameChangeDamagesOnlyBars(t *testing.T) {
+	d, sess, _, _, releases := newManualTabSession(t, 2)
+	defer releases[0]()
+	defer releases[1]()
+	sess.active = 0
+	sess.mu.Lock()
+	sess.tabs[1].attention = true
+	sess.tabs[1].attentionAt = time.Unix(1, 0)
+	sess.mu.Unlock()
+
+	tb := sess.tabs[0]
+	var cache barCache
+	bars := d.barStateFor(sess, "")
+	_, damage := composeClientFrameWithState(bars, tb, true, &cache)
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+	tb.screen.ClearDamage()
+
+	bars.attentionFrame++
+	_, damage = composeClientFrameWithState(bars, tb, false, &cache)
+	require.NotEmpty(t, damage)
+	lastRow := tb.screen.Frame.Height + 1
+	for _, dmg := range damage {
+		require.Contains(t, []int{0, lastRow}, dmg.Y, "expected damage confined to bar rows, got y=%d", dmg.Y)
+	}
+}
+
+// TestCloseRingingTabRefreshesOtherSessionBottomBar covers Fix 2c: closing a
+// ringing tab in one session must refresh the bottom bar of a client attached
+// to a DIFFERENT session, since that client's bar shows the ringing session's
+// bell until it stops.
+func TestCloseRingingTabRefreshesOtherSessionBottomBar(t *testing.T) {
+	pA1, releaseA1 := newBlockingPTY(t)
+	pA2, releaseA2 := newBlockingPTY(t)
+	pB, releaseB := newBlockingPTY(t)
+	defer releaseA1()
+	defer releaseA2()
+	defer releaseB()
+
+	d, sessA, _, sendsA := newManualSessionWithPTYs(t, pA1, pA2)
+	sessA.name = "ringer"
+	ringing := sessA.tabs[1]
+	sessA.mu.Lock()
+	ringing.attention = true
+	ringing.attentionAt = time.Unix(1, 0)
+	sessA.mu.Unlock()
+	d.setAttentionFrame(1) // pulse frame 0 renders the bell glyph as blank
+
+	trB, sendsB := newCapturingTransport(t)
+	acB := &attachedClient{tr: trB, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	sctxB, cancelB := context.WithCancel(d.serveCtx)
+	t.Cleanup(cancelB)
+	tbB := &tab{pty: pB, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctxB, cancel: cancelB}
+	sessB := &session{id: "sessB", name: "other", ctx: sctxB, cancel: cancelB, tabs: []*tab{tbB}, client: acB}
+	acB.setSession(sessB)
+	acB.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acB})
+	d.sessions[sessB.id] = sessB
+
+	d.paint(sessB, acB, true)
+	before := mustOutputData(t, sendsB)
+	require.Contains(t, string(before), string(attentionGlyph))
+
+	d.closeTab(sessA, ringing, true)
+	_ = mustOutputData(t, sendsA)
+
+	after := mustOutputData(t, sendsB)
+	require.NotContains(t, string(after), string(attentionGlyph))
 }
 
 func TestAltAJumpAttentionSelectsOldestLocalTab(t *testing.T) {

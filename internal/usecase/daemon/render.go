@@ -282,7 +282,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		ac.promptMu.Unlock()
 	}
 	if sess.ackAttention(tb) {
-		defer d.repaintAttachedClients(sess)
+		defer d.repaintAllAttachedClients()
 	}
 	bars := d.barStateFor(sess, copyFeedback)
 	bars.theme = ac.getTheme()

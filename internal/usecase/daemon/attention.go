@@ -32,7 +32,7 @@ func (d *Daemon) noteAttention(sess *session, tb *tab) {
 	tb.attention = true
 	sess.mu.Unlock()
 
-	d.repaintAttachedClients(sess)
+	d.repaintAllAttachedClients()
 	d.pokeAttentionTicker()
 }
 
@@ -112,7 +112,7 @@ func (d *Daemon) repaintAttachedClients(sess *session) {
 	ac := sess.client
 	sess.mu.Unlock()
 	if ac != nil {
-		d.paint(sess, ac, true)
+		d.paint(sess, ac, false)
 	}
 }
 
