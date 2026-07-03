@@ -1,9 +1,6 @@
 package daemon
 
 import (
-	"unicode"
-	"unicode/utf8"
-
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -41,76 +38,38 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		ac.paletteMu.Unlock()
 		return
 	}
-	if len(ac.palettePending) > 0 {
-		combined := make([]byte, 0, len(ac.palettePending)+len(data))
-		combined = append(combined, ac.palettePending...)
-		combined = append(combined, data...)
-		data = combined
-		ac.palettePending = nil
-	}
-
 	changed := false
 	exit := false
 	run := false
 	var cmd command.Command
 	var ok bool
 
-	for i := 0; i < len(data); {
-		switch data[i] {
-		case 0x1b:
-			consumed, routed := routePaletteEscape(ac.palette, data[i:])
-			if routed {
-				i += consumed
-				changed = true
-				continue
-			}
-			if isPaletteEscapePrefix(data[i:]) {
-				ac.palettePending = append(ac.palettePending[:0], data[i:]...)
-				i = len(data)
-				continue
-			}
-			exit = true
-			i++
-		case 0x03:
-			exit = true
-			i++
-		case 0x0e:
-			ac.palette.Down()
+	routeOverlayBytes(data, &ac.palettePending, overlayEvents{
+		rune: func(r rune) {
+			ac.palette.Insert(r)
 			changed = true
-			i++
-		case 0x10:
-			ac.palette.Up()
+		},
+		backspace: func() {
+			ac.palette.Backspace()
 			changed = true
-			i++
-		case '\r', '\n':
+		},
+		enter: func() {
 			cmd, ok = ac.palette.Selected()
 			if ok {
 				run = true
 				exit = true
 			}
-			i++
-		case 0x7f, 0x08:
-			ac.palette.Backspace()
+		},
+		cancel: func() { exit = true },
+		up: func() {
+			ac.palette.Up()
 			changed = true
-			i++
-		default:
-			r, size := utf8.DecodeRune(data[i:])
-			if r == utf8.RuneError {
-				if !utf8.FullRune(data[i:]) {
-					ac.palettePending = append(ac.palettePending[:0], data[i:]...)
-					i = len(data)
-					continue
-				}
-				i++
-				continue
-			}
-			if !unicode.IsControl(r) {
-				ac.palette.Insert(r)
-				changed = true
-			}
-			i += size
-		}
-	}
+		},
+		down: func() {
+			ac.palette.Down()
+			changed = true
+		},
+	})
 	if exit {
 		ac.palette = nil
 		ac.palettePending = nil
@@ -126,24 +85,6 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	if exit || changed {
 		d.paint(sess, ac, true)
 	}
-}
-
-func routePaletteEscape(m *palette.Model, data []byte) (int, bool) {
-	if len(data) >= 3 && data[1] == '[' {
-		switch data[2] {
-		case 'A':
-			m.Up()
-			return 3, true
-		case 'B':
-			m.Down()
-			return 3, true
-		}
-	}
-	return 0, false
-}
-
-func isPaletteEscapePrefix(data []byte) bool {
-	return len(data) == 2 && data[0] == 0x1b && data[1] == '['
 }
 
 type paletteExec struct {
