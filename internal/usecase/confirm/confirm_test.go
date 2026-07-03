@@ -30,6 +30,16 @@ func TestConfirmerDefaultsNo(t *testing.T) {
 	}
 }
 
+func TestConfirmerDefaultsNoOnEOF(t *testing.T) {
+	ok, err := NewConfirmer(strings.NewReader(""), &bytes.Buffer{}).Confirm("Kill daemon?")
+	if err != nil {
+		t.Fatalf("Confirm returned error: %v", err)
+	}
+	if ok {
+		t.Fatal("Confirm returned true for EOF, want false")
+	}
+}
+
 func TestConfirmerRejectsUnknownAnswer(t *testing.T) {
 	ok, err := NewConfirmer(strings.NewReader("later\n"), &bytes.Buffer{}).Confirm("Kill daemon?")
 	if err != nil {

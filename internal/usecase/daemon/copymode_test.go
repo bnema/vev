@@ -211,6 +211,7 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 		{name: "escape then up arrow", input: [][]byte{[]byte("\x1b"), []byte("[A")}, wantCursor: 23},
 		{name: "escape then down arrow", input: [][]byte{[]byte("g"), []byte("\x1b"), []byte("[B")}, wantCursor: 1},
 		{name: "split up arrow", input: [][]byte{[]byte("\x1b["), []byte("A")}, wantCursor: 23},
+		{name: "split SS3 up arrow", input: [][]byte{[]byte("\x1bO"), []byte("A")}, wantCursor: 23},
 		{name: "split page down", input: [][]byte{[]byte("g"), []byte("\x1b[6"), []byte("~")}, wantCursor: 23},
 	}
 	for _, tc := range cases {

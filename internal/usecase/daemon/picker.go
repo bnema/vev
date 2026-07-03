@@ -179,7 +179,7 @@ func (d *Daemon) stopPickerPendingTimerLocked(ac *attachedClient) {
 }
 
 func routePickerEscape(m *picker.Model, data []byte) (int, bool) {
-	if len(data) >= 3 && data[1] == '[' {
+	if len(data) >= 3 && (data[1] == '[' || data[1] == 'O') {
 		switch data[2] {
 		case 'A':
 			m.Up()
@@ -193,7 +193,7 @@ func routePickerEscape(m *picker.Model, data []byte) (int, bool) {
 }
 
 func isPickerEscapePrefix(data []byte) bool {
-	return len(data) == 2 && data[0] == 0x1b && data[1] == '['
+	return len(data) == 2 && data[0] == 0x1b && (data[1] == '[' || data[1] == 'O')
 }
 
 func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {

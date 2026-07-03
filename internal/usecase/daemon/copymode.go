@@ -218,7 +218,7 @@ func (d *Daemon) stopCopyPendingTimerLocked(ac *attachedClient) {
 }
 
 func routeCopyEscape(m *scopy.Mode, snap scopy.Snapshot, data []byte) (int, bool) {
-	if len(data) >= 3 && data[1] == '[' {
+	if len(data) >= 3 && (data[1] == '[' || data[1] == 'O') {
 		switch data[2] {
 		case 'A':
 			m.Move(snap, -1)
@@ -242,7 +242,7 @@ func routeCopyEscape(m *scopy.Mode, snap scopy.Snapshot, data []byte) (int, bool
 }
 
 func isCopyEscapePrefix(data []byte) bool {
-	return len(data) == 2 && data[0] == 0x1b && data[1] == '[' ||
+	return len(data) == 2 && data[0] == 0x1b && (data[1] == '[' || data[1] == 'O') ||
 		len(data) == 3 && data[0] == 0x1b && data[1] == '[' && (data[2] == '5' || data[2] == '6')
 }
 

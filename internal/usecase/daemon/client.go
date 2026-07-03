@@ -222,7 +222,7 @@ func (d *Daemon) waitNotifies() {
 	}
 }
 
-func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size) *attachedClient {
+func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size) (*attachedClient, *attachedClient) {
 	ac := &attachedClient{
 		tr:   tr,
 		rend: renderer.New(renderer.Capabilities{}),
@@ -234,15 +234,18 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size)
 	old := sess.client
 	sess.client = ac
 	sess.mu.Unlock()
+	return ac, old
+}
 
-	if old != nil {
-		d.unregisterPreview(old)
-		old.setSession(nil)
-		// Async + bounded: a dead or wedged old client must not stall the new
-		// client's handshake.
-		d.notifyDetachedAsync(old, ports.ReasonDetach)
+func (d *Daemon) detachReplacedClient(old *attachedClient) {
+	if old == nil {
+		return
 	}
-	return ac
+	d.unregisterPreview(old)
+	old.setSession(nil)
+	// Async + bounded: a dead or wedged old client must not stall the new
+	// client's handshake.
+	d.notifyDetachedAsync(old, ports.ReasonDetach)
 }
 
 // firstPaint guarantees the freshly attached client sees the full screen: if

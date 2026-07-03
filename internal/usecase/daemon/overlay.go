@@ -75,7 +75,7 @@ func routeOverlayBytes(data []byte, pending *[]byte, ev overlayEvents) {
 }
 
 func routeOverlayEscape(data []byte, ev overlayEvents) (int, bool) {
-	if len(data) >= 3 && data[1] == '[' {
+	if len(data) >= 3 && (data[1] == '[' || data[1] == 'O') {
 		switch data[2] {
 		case 'A':
 			call(ev.up)
@@ -89,7 +89,7 @@ func routeOverlayEscape(data []byte, ev overlayEvents) (int, bool) {
 }
 
 func isOverlayEscapePrefix(data []byte) bool {
-	return len(data) == 2 && data[0] == 0x1b && data[1] == '['
+	return len(data) == 2 && data[0] == 0x1b && (data[1] == '[' || data[1] == 'O')
 }
 
 func call(fn func()) {

@@ -359,11 +359,14 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
 		sess, err := d.createSessionLocked(name, true, h.Cwd, sz)
-		d.mu.Unlock()
 		if err != nil {
+			d.mu.Unlock()
 			return nil, nil, err
 		}
-		return sess, d.attachClient(sess, tr, sz), nil
+		ac, old := d.attachClient(sess, tr, sz)
+		d.mu.Unlock()
+		d.detachReplacedClient(old)
+		return sess, ac, nil
 
 	case ports.IntentNew:
 		if h.Name == "" {
@@ -375,19 +378,25 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}
 		}
 		sess, err := d.createSessionLocked(h.Name, false, h.Cwd, sz)
-		d.mu.Unlock()
 		if err != nil {
+			d.mu.Unlock()
 			return nil, nil, err
 		}
-		return sess, d.attachClient(sess, tr, sz), nil
+		ac, old := d.attachClient(sess, tr, sz)
+		d.mu.Unlock()
+		d.detachReplacedClient(old)
+		return sess, ac, nil
 
 	case ports.IntentAttach:
 		sess := d.findByNameLocked(h.Name)
-		d.mu.Unlock()
 		if sess == nil {
+			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNoSuchSession, "no such session: " + h.Name}
 		}
-		return sess, d.attachClient(sess, tr, sz), nil
+		ac, old := d.attachClient(sess, tr, sz)
+		d.mu.Unlock()
+		d.detachReplacedClient(old)
+		return sess, ac, nil
 
 	default:
 		d.mu.Unlock()

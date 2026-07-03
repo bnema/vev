@@ -27,7 +27,7 @@ func (c Confirmer) Confirm(question string) (bool, error) {
 		}
 	}
 	answer, err := bufio.NewReader(c.in).ReadString('\n')
-	if err != nil && !isEOFWithAnswer(err, answer) {
+	if err != nil && err != io.EOF {
 		return false, err
 	}
 	switch strings.ToLower(strings.TrimSpace(answer)) {
@@ -36,8 +36,4 @@ func (c Confirmer) Confirm(question string) (bool, error) {
 	default:
 		return false, nil
 	}
-}
-
-func isEOFWithAnswer(err error, answer string) bool {
-	return err == io.EOF && answer != ""
 }

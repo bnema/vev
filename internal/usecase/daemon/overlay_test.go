@@ -39,6 +39,23 @@ func TestRouteOverlayBytesHandlesSplitArrowsAndCtrlNavigation(t *testing.T) {
 	require.Equal(t, 2, down)
 }
 
+func TestRouteOverlayBytesHandlesSS3Arrows(t *testing.T) {
+	var pending []byte
+	var up, down int
+	ev := overlayEvents{
+		up:   func() { up++ },
+		down: func() { down++ },
+	}
+
+	routeOverlayBytes([]byte("\x1bO"), &pending, ev)
+	require.Equal(t, []byte("\x1bO"), pending)
+	routeOverlayBytes([]byte("A\x1bOB"), &pending, ev)
+
+	require.Equal(t, 1, up)
+	require.Equal(t, 1, down)
+	require.Empty(t, pending)
+}
+
 func TestRouteOverlayBytesHandlesEditingSubmitAndCancel(t *testing.T) {
 	var pending []byte
 	var backspace, enter, cancel int

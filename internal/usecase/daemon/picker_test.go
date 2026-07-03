@@ -69,6 +69,7 @@ func TestPickerSplitArrowNavigatesWithoutExiting(t *testing.T) {
 		{name: "escape then down arrow", input: [][]byte{[]byte("\x1b"), []byte("[B")}, wantActive: 1},
 		{name: "escape then up arrow", input: [][]byte{[]byte("j"), []byte("\x1b"), []byte("[A")}, wantActive: 0},
 		{name: "split down arrow", input: [][]byte{[]byte("\x1b["), []byte("B")}, wantActive: 1},
+		{name: "split SS3 down arrow", input: [][]byte{[]byte("\x1bO"), []byte("B")}, wantActive: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
