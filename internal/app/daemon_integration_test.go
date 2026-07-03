@@ -185,3 +185,26 @@ func TestIntegration_NamedSurvivesReattach(t *testing.T) {
 	defer func() { _ = tr2.Close() }()
 	awaitText(t, p2, sz, "MARKER")
 }
+
+func TestIntegration_KillAllShutsDownDaemon(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	dir, served := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "sleep 30"}))
+
+	tr1, _ := attach(t, dir, ports.IntentNew, "one", sz)
+	require.NoError(t, tr1.Close())
+	tr2, _ := attach(t, dir, ports.IntentNew, "two", sz)
+	require.NoError(t, tr2.Close())
+
+	killTr, err := ipc.Dial(dir)
+	require.NoError(t, err)
+	require.NoError(t, killTr.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}))
+
+	_, err = killTr.Recv()
+	require.ErrorIs(t, err, io.EOF)
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not shut down after kill all")
+	}
+}
