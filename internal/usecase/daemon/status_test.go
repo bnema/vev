@@ -45,6 +45,21 @@ func TestStatusCompositionGolden(t *testing.T) {
 	}
 }
 
+func TestStatusMarksEphemeralSession(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	_, sess, _, _ := newManualSessionWithPTYs(t, p)
+	defer release()
+	sess.name = "0"
+	sess.ephemeral = true
+	win := sess.activeTab()
+	win.screen = vt.NewScreen(12, 2)
+	win.size = domain.Size{Cols: 12, Rows: 2}
+
+	frame, _ := composeClientFrame(sess, win, true, "")
+
+	require.Equal(t, " 0*  1      ", rowText(frame.Row(2)))
+}
+
 func TestStatusCopyFeedbackRendersOnlyWhenFullyFits(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	_, sess, _, _ := newManualSessionWithPTYs(t, p)

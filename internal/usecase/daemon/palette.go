@@ -132,8 +132,12 @@ func (e paletteExec) EnterCopyMode() error {
 }
 
 func (e paletteExec) RenameSession() error {
-	e.sess.promoteEphemeral()
-	e.d.paint(e.sess, e.ac, true)
+	e.sess.mu.Lock()
+	currentName := e.sess.name
+	e.sess.mu.Unlock()
+	e.d.enterPrompt(e.sess, e.ac, " Rename session ", currentName, func(name string) error {
+		return e.d.renameSession(e.sess, name)
+	})
 	return nil
 }
 

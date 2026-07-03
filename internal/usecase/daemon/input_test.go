@@ -141,18 +141,24 @@ func TestAltDDetachesCurrentClient(t *testing.T) {
 	require.Equal(t, ports.ReasonDetach, det.Reason)
 }
 
-func TestAltRPromotesEphemeralSessionPromptlessly(t *testing.T) {
+func TestRNSOpensPromptAndEnterPromotesEphemeralSession(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 1)
 	defer releases[0]()
 	sess.ephemeral = true
 	sess.name = "0"
 
 	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("RNS\r"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.True(t, ac.promptActive())
 
+	d.handleInput(sess, ac, []byte("\r"))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	require.False(t, ac.promptActive())
 	require.False(t, sess.ephemeral)
 	require.Equal(t, "0", sess.name)
-	awaitFrame(t, sends, ports.MsgOutput)
 }
 
 func TestMouseWheelEntersScrollbackModeAndExitsAtBottom(t *testing.T) {

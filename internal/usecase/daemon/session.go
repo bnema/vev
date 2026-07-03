@@ -27,6 +27,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -191,12 +192,20 @@ func (s *session) switchRelative(delta int) bool {
 	return true
 }
 
-// promoteEphemeral is the promptless rename-session command behavior: without a
-// naming UI yet, the current ephemeral numeric name is kept and the session is made persistent.
-func (s *session) promoteEphemeral() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.ephemeral = false
+func (d *Daemon) renameSession(sess *session, name string) error {
+	if name == "" {
+		return errors.New("name required")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if taken := d.findByNameLocked(name); taken != nil && taken != sess {
+		return errors.New("name already in use")
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	sess.name = name
+	sess.ephemeral = false
+	return nil
 }
 
 func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {

@@ -11,7 +11,7 @@ func Registry() []Command {
 		{Code: "PVT", Name: "Previous tab", Desc: "Switch to the previous tab", Run: func(ctx Context) error { return ctx.PrevTab() }},
 		{Code: "SSP", Name: "Session picker", Desc: "Open the session picker", Run: func(ctx Context) error { return ctx.OpenSessionPicker() }},
 		{Code: "CPY", Name: "Copy mode", Desc: "Enter copy mode", Run: func(ctx Context) error { return ctx.EnterCopyMode() }},
-		{Code: "RNS", Name: "Promote session", Desc: "Promote ephemeral session to named", Run: func(ctx Context) error { return ctx.RenameSession() }},
+		{Code: "RNS", Name: "Rename session", Desc: "Rename the session (an ephemeral session becomes named)", Run: func(ctx Context) error { return ctx.RenameSession() }},
 		{Code: "DET", Name: "Detach", Desc: "Detach from the session", Run: func(ctx Context) error { return ctx.Detach() }},
 	}
 

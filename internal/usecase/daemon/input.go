@@ -34,6 +34,10 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 	ac.mouseScan.Scan(data,
 		func(ev mouse.Event) { d.handleMouse(ac, ev) },
 		func(b []byte) {
+			if ac.promptActive() {
+				d.handlePromptInput(ac, b)
+				return
+			}
 			if ac.paletteActive() {
 				d.handlePaletteInput(ac, b)
 				return
@@ -52,7 +56,7 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 }
 
 func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
-	if ac.paletteActive() || ac.pickerActive() {
+	if ac.promptActive() || ac.paletteActive() || ac.pickerActive() {
 		return
 	}
 	sess := ac.currentSession()

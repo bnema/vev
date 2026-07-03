@@ -70,7 +70,11 @@ type statusTab struct {
 func (s *session) statusSegments() statusSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	snap := statusSnapshot{session: s.name, tabs: make([]statusTab, len(s.tabs))}
+	name := s.name
+	if s.ephemeral {
+		name += "*"
+	}
+	snap := statusSnapshot{session: name, tabs: make([]statusTab, len(s.tabs))}
 	for i := range s.tabs {
 		name := strconv.Itoa(i + 1)
 		snap.tabs[i] = statusTab{name: name, active: i == s.active}

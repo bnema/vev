@@ -37,6 +37,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/mouse"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
+	promptui "github.com/bnema/vev/internal/usecase/prompt"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -60,6 +61,10 @@ type attachedClient struct {
 	paletteMu      sync.Mutex
 	palette        *palette.Model
 	palettePending []byte
+	promptMu       sync.Mutex
+	prompt         *promptui.Model
+	promptSubmit   func(string) error
+	promptPending  []byte
 	mouseScan      mouse.Scanner
 	lastCursor     cursorOut
 	sendMu         sync.Mutex
@@ -131,6 +136,12 @@ func (ac *attachedClient) paletteActive() bool {
 	ac.paletteMu.Lock()
 	defer ac.paletteMu.Unlock()
 	return ac.palette != nil
+}
+
+func (ac *attachedClient) promptActive() bool {
+	ac.promptMu.Lock()
+	defer ac.promptMu.Unlock()
+	return ac.prompt != nil
 }
 
 // send serialises a frame onto the client's transport.

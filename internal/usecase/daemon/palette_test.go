@@ -154,7 +154,9 @@ func TestPaletteExecMethods(t *testing.T) {
 	require.Equal(t, 0, activeTabIndex(sess))
 	sess.ephemeral = true
 	require.NoError(t, exec.RenameSession())
-	require.False(t, sess.ephemeral)
+	require.True(t, ac.promptActive())
+	d.closePrompt(ac)
+	require.True(t, sess.ephemeral)
 	require.NoError(t, exec.OpenSessionPicker())
 	require.True(t, ac.pickerActive())
 	d.closePicker(ac)
