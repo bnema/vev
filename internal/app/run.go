@@ -23,6 +23,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/pty"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/adapters/term"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/confirm"
@@ -235,15 +236,30 @@ func runDaemon() error {
 // attach loop. Logging goes to the shared file: the client must never write
 // to the console while the terminal is raw.
 func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) error {
-	if os.Getenv("VEV") != "" {
-		return errors.New("vev: sessions should be nested with care; unset VEV to force")
-	}
-
 	logFile, err := setupLogging()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = logFile.Close() }()
+
+	return runAttachWithDeps(ctx, intent, name, remoteTarget, os.Getenv("VEV"), runAttachDeps{
+		attachLocal:    attachLocalDaemon,
+		createDetached: createDetachedLocalSession,
+	})
+}
+
+type runAttachDeps struct {
+	attachLocal    func(context.Context, uint8, string) error
+	createDetached func(context.Context, string) error
+}
+
+func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, deps runAttachDeps) error {
+	if activeSession != "" {
+		if remoteTarget == "" && intent == ports.IntentNew {
+			return deps.createDetached(ctx, name)
+		}
+		return errors.New("vev: sessions should be nested with care; unset VEV to force")
+	}
 
 	if remoteTarget != "" {
 		transport, err := sshstdio.Dial(remoteTarget, name)
@@ -256,7 +272,7 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) err
 
 	return runLocalAttachWithRecovery(ctx, intent, name, attachRecoveryDeps{
 		confirmer:       confirm.NewConfirmer(os.Stdin, os.Stderr),
-		attach:          attachLocalDaemon,
+		attach:          deps.attachLocal,
 		killDaemon:      requestDaemonStop,
 		settleAfterKill: waitForDaemonStop,
 	})
@@ -314,6 +330,62 @@ func attachLocalDaemon(ctx context.Context, intent uint8, name string) error {
 	}
 	// client.Attach owns and closes transport.
 	return client.Attach(ctx, transport, term.New(), intent, name)
+}
+
+func createDetachedLocalSession(ctx context.Context, name string) error {
+	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = transport.Close() }()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	hello := ports.Hello{
+		Version: ports.ProtocolVersion,
+		Intent:  ports.IntentNew,
+		Name:    name,
+		Size:    domain.Size{Cols: 80, Rows: 24},
+		TermEnv: os.Getenv("TERM"),
+		Cwd:     cwd,
+	}
+	if err := transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
+		return fmt.Errorf("vev: creating detached session: %w", err)
+	}
+
+	type detachedReply struct {
+		frame ports.Frame
+		err   error
+	}
+	replyCh := make(chan detachedReply, 1)
+	go func() {
+		f, err := transport.Recv()
+		replyCh <- detachedReply{frame: f, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		_ = transport.Close()
+		return ctx.Err()
+	case reply := <-replyCh:
+		if reply.err != nil {
+			return fmt.Errorf("vev: awaiting detached session creation: %w", reply.err)
+		}
+		switch reply.frame.Type {
+		case ports.MsgWelcome:
+			return nil
+		case ports.MsgError:
+			em, derr := ports.UnmarshalErrorMsg(reply.frame.Payload)
+			if derr != nil {
+				return fmt.Errorf("vev: decoding error reply: %w", derr)
+			}
+			return &client.ProtocolError{Code: em.Code, Text: em.Text}
+		default:
+			return fmt.Errorf("vev: unexpected reply type %d to detached session creation", reply.frame.Type)
+		}
+	}
 }
 
 func waitForDaemonStop(ctx context.Context) error {

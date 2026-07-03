@@ -101,6 +101,13 @@ func (e paletteExec) CreateTab() error {
 	return e.d.createTab(e.sess, e.ac.size)
 }
 
+func (e paletteExec) CreateSession() error {
+	e.d.enterPrompt(e.sess, e.ac, " Create session ", "", func(name string) error {
+		return e.d.createSessionAndSwitch(e.sess, e.ac, name)
+	})
+	return nil
+}
+
 func (e paletteExec) CloseTab() error {
 	if tb := e.sess.activeTab(); tb != nil {
 		e.d.closeTab(e.sess, tb, true)

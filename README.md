@@ -58,6 +58,7 @@ The status bar marks ephemeral sessions with `*`, for example `0*`. Ephemeral se
 | Code | Action |
 |---|---|
 | CNT | create new tab |
+| CNS | create and switch to a named session |
 | CLT | close current tab |
 | NXT | switch to next tab |
 | PVT | switch to previous tab |

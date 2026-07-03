@@ -108,6 +108,55 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	return sess, nil
 }
 
+func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name string) error {
+	if name == "" {
+		return errors.New("name required")
+	}
+	sz := ac.size
+	d.mu.Lock()
+	if d.closing {
+		d.mu.Unlock()
+		return errors.New("daemon is shutting down")
+	}
+	if d.nameTakenLocked(name) {
+		d.mu.Unlock()
+		return errors.New("name already in use")
+	}
+	from.mu.Lock()
+	cwd := from.cwd
+	if from.client != ac {
+		from.mu.Unlock()
+		d.mu.Unlock()
+		return errors.New("client detached")
+	}
+	from.mu.Unlock()
+
+	newSess, err := d.createSessionLocked(name, false, cwd, sz)
+	if err != nil {
+		d.mu.Unlock()
+		return err
+	}
+	from.mu.Lock()
+	if from.client != ac {
+		from.mu.Unlock()
+		d.mu.Unlock()
+		d.killSession(newSess, ports.ReasonSessionKilled)
+		return errors.New("client detached")
+	}
+	from.client = nil
+	ac.setSession(nil)
+	from.mu.Unlock()
+
+	newSess.mu.Lock()
+	newSess.client = ac
+	newSess.mu.Unlock()
+	ac.setSession(newSess)
+	d.mu.Unlock()
+
+	d.firstPaint(newSess, ac, sz)
+	return nil
+}
+
 func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	tbSize := tabSize(sz)
 	sess.mu.Lock()

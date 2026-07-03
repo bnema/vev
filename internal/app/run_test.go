@@ -222,12 +222,44 @@ func TestRunLocalAttachDeclineKeepsOriginalError(t *testing.T) {
 }
 
 func TestRunAttachRejectsNestedVEVBeforeDial(t *testing.T) {
-	t.Setenv("VEV", "outer")
-	err := runAttach(context.Background(), ports.IntentEphemeral, "", "")
+	called := false
+	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "outer", runAttachDeps{
+		attachLocal: func(context.Context, uint8, string) error {
+			called = true
+			return nil
+		},
+		createDetached: func(context.Context, string) error {
+			called = true
+			return nil
+		},
+	})
 	if err == nil {
 		t.Fatal("runAttach with VEV set returned nil error")
 	}
+	if called {
+		t.Fatal("runAttach dialed while nested attach should be rejected")
+	}
 	if !strings.Contains(err.Error(), "sessions should be nested with care") {
 		t.Fatalf("runAttach error = %q, want nested-session warning", err)
+	}
+}
+
+func TestRunAttachNestedNewCreatesDetachedSession(t *testing.T) {
+	var gotName string
+	err := runAttachWithDeps(context.Background(), ports.IntentNew, "scratch", "", "outer", runAttachDeps{
+		attachLocal: func(context.Context, uint8, string) error {
+			t.Fatal("nested new should not attach to the session")
+			return nil
+		},
+		createDetached: func(_ context.Context, name string) error {
+			gotName = name
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("runAttachWithDeps returned error: %v", err)
+	}
+	if gotName != "scratch" {
+		t.Fatalf("detached name = %q, want scratch", gotName)
 	}
 }

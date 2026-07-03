@@ -8,7 +8,7 @@ import (
 
 func TestRegistryCodesAreUniqueUppercaseThreeLettersInOrder(t *testing.T) {
 	commands := Registry()
-	wantCodes := []string{"CNT", "CLT", "NXT", "PVT", "SSP", "VIS", "RNS", "DET"}
+	wantCodes := []string{"CNT", "CNS", "CLT", "NXT", "PVT", "SSP", "VIS", "RNS", "DET"}
 
 	if len(commands) != len(wantCodes) {
 		t.Fatalf("Registry() returned %d commands, want %d", len(commands), len(wantCodes))
@@ -52,6 +52,7 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 		want string
 	}{
 		{code: "CNT", want: "CreateTab"},
+		{code: "CNS", want: "CreateSession"},
 		{code: "CLT", want: "CloseTab"},
 		{code: "NXT", want: "NextTab"},
 		{code: "PVT", want: "PrevTab"},
@@ -96,6 +97,7 @@ func (s *spyContext) onlyCall() string {
 }
 
 func (s *spyContext) CreateTab() error         { return s.record("CreateTab") }
+func (s *spyContext) CreateSession() error     { return s.record("CreateSession") }
 func (s *spyContext) CloseTab() error          { return s.record("CloseTab") }
 func (s *spyContext) NextTab() error           { return s.record("NextTab") }
 func (s *spyContext) PrevTab() error           { return s.record("PrevTab") }

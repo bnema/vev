@@ -6,6 +6,7 @@ import "strings"
 func Registry() []Command {
 	commands := []Command{
 		{Code: "CNT", Name: "New tab", Desc: "Create a new tab", Run: func(ctx Context) error { return ctx.CreateTab() }},
+		{Code: "CNS", Name: "New session", Desc: "Create and switch to a named session", Run: func(ctx Context) error { return ctx.CreateSession() }},
 		{Code: "CLT", Name: "Close tab", Desc: "Close the current tab", Run: func(ctx Context) error { return ctx.CloseTab() }},
 		{Code: "NXT", Name: "Next tab", Desc: "Switch to the next tab", Run: func(ctx Context) error { return ctx.NextTab() }},
 		{Code: "PVT", Name: "Previous tab", Desc: "Switch to the previous tab", Run: func(ctx Context) error { return ctx.PrevTab() }},
