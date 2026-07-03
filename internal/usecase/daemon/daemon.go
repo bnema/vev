@@ -1,8 +1,8 @@
 // Package daemon holds vev's server-side session multiplexer use case: the
-// accept loop, the ephemeral/named session registry, the per-window PTY reader
+// accept loop, the ephemeral/named session registry, the per-tab PTY reader
 // and VT screen, and the per-client debounced render scheduler.
 //
-// Concurrency model (one window per session for the MVP; multi-window is M3):
+// Concurrency model (sessions own one or more PTY-backed tabs):
 //
 //   - Serve runs the accept loop. Each accepted connection is handled by its
 //     own goroutine (handleConn): it reads the first frame and routes it to a
@@ -18,10 +18,10 @@
 //     attached clients with ReasonServerShutdown).
 //
 // Locking: a session's screen and per-client renderer shadow are both guarded
-// by window.mu; the attached-client pointer by session.mu; the registry by
+// by tab.mu; the attached-client pointer by session.mu; the registry by
 // Daemon.mu. When more than one is held the order is always
 // Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// window.mu — the PTY reader only ever takes window.mu, so it never blocks on
+// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
 // a slow client.
 package daemon
 
@@ -43,6 +43,8 @@ import (
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/mouse"
+	"github.com/bnema/vev/internal/usecase/picker"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -56,13 +58,15 @@ const (
 	maxSyncUpdateDuration = 500 * time.Millisecond
 )
 
+var pickerModal = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight: 8, Title: " Sessions "}
+
 // debounceInterval is kept as a test/back-compat alias for the initial delay.
 const debounceInterval = minDebounceInterval
 
 // ptyReadBufSize is the PTY reader's read buffer.
 const ptyReadBufSize = 32 * 1024
 
-// defaultScrollbackRows is the per-window retained history size.
+// defaultScrollbackRows is the per-tab retained history size.
 const defaultScrollbackRows = 10_000
 
 // detachNotifyTimeout bounds the best-effort Detached notification on the
@@ -117,7 +121,7 @@ type Daemon struct {
 }
 
 // session is a single multiplexed session. It owns one or more full-screen
-// windows and at most one attached client.
+// tabs and at most one attached client.
 type session struct {
 	id        domain.SessionID
 	name      string
@@ -126,16 +130,16 @@ type session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu      sync.Mutex // guards windows, active, and client
-	windows []*window
-	active  int
-	client  *attachedClient
+	mu     sync.Mutex // guards tabs, active, and client
+	tabs   []*tab
+	active int
+	client *attachedClient
 }
 
-// window is one PTY-backed screen. dirty is a cap-1 channel so bursty output
+// tab is one PTY-backed screen. dirty is a cap-1 channel so bursty output
 // applies back-pressure by collapsing (a full buffer means "a render is
 // already pending"), never by blocking the reader.
-type window struct {
+type tab struct {
 	pty        ports.PTY
 	mu         sync.Mutex // guards screen, syncGen, and every attached renderer's shadow
 	screen     *vt.Screen
@@ -143,27 +147,36 @@ type window struct {
 	dirty      chan struct{}
 	flush      chan struct{}
 	syncGen    uint64
-	size       domain.Size
-	ctx        context.Context
-	cancel     context.CancelFunc
+	// previewClient tracks the one client currently previewing this tab in the picker.
+	// v1 is last-writer-wins: multiple clients previewing the same tab are not supported.
+	previewClient *attachedClient
+	size          domain.Size
+	ctx           context.Context
+	cancel        context.CancelFunc
 }
 
-// attachedClient is a client currently attached to a session's window. rend is
+// attachedClient is a client currently attached to a session's tab. rend is
 // its private renderer shadow (so each client gets output minimised against
 // what it has actually seen). sendMu serialises the two senders — the render
 // scheduler and the connection handler — so the transport's single-writer
 // contract holds and Draw→Send stays atomic (correct output ordering).
 type attachedClient struct {
-	tr          ports.Transport
-	rend        *renderer.Renderer
-	size        domain.Size
-	keys        *keys.Router
-	copyMu      sync.Mutex
-	copyMode    *scopy.Mode
-	copyPending []byte
-	mouseScan   mouse.Scanner
-	lastCursor  cursorOut
-	sendMu      sync.Mutex
+	tr            ports.Transport
+	rend          *renderer.Renderer
+	size          domain.Size
+	keys          *keys.Router
+	sessMu        sync.Mutex
+	sess          *session
+	copyMu        sync.Mutex
+	copyMode      *scopy.Mode
+	copyPending   []byte
+	pickerMu      sync.Mutex
+	picker        *picker.Model
+	pickerPreview *tab
+	pickerPending []byte
+	mouseScan     mouse.Scanner
+	lastCursor    cursorOut
+	sendMu        sync.Mutex
 }
 
 type cursorOut struct {
@@ -175,10 +188,28 @@ type cursorOut struct {
 	hasStyle bool
 }
 
+func (ac *attachedClient) currentSession() *session {
+	ac.sessMu.Lock()
+	defer ac.sessMu.Unlock()
+	return ac.sess
+}
+
+func (ac *attachedClient) setSession(sess *session) {
+	ac.sessMu.Lock()
+	defer ac.sessMu.Unlock()
+	ac.sess = sess
+}
+
 func (ac *attachedClient) copyModeActive() bool {
 	ac.copyMu.Lock()
 	defer ac.copyMu.Unlock()
 	return ac.copyMode != nil
+}
+
+func (ac *attachedClient) pickerActive() bool {
+	ac.pickerMu.Lock()
+	defer ac.pickerMu.Unlock()
+	return ac.picker != nil
 }
 
 // send serialises a frame onto the client's transport.
@@ -391,7 +422,7 @@ func (d *Daemon) handleList(tr ports.Transport) {
 			SessionID: string(s.id),
 			Name:      s.name,
 			Ephemeral: s.ephemeral,
-			Windows:   uint16(len(s.windows)),
+			Tabs:      uint16(len(s.tabs)),
 			Attached:  s.client != nil,
 		}
 		s.mu.Unlock()
@@ -456,7 +487,7 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 		return
 	}
 	d.firstPaint(sess, ac, h.Size)
-	d.runConnLoop(sess, ac)
+	d.runConnLoop(ac)
 	_ = tr.Close()
 }
 
@@ -528,8 +559,8 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 // createSessionLocked spawns a PTY-backed session and starts its reader and
 // scheduler goroutines. Caller holds d.mu.
 func (d *Daemon) createSessionLocked(name string, ephemeral bool, sz domain.Size) (*session, error) {
-	winSize := windowSize(sz)
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), winSize)
+	tbSize := tabSize(sz)
+	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), tbSize)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: spawning session %q: %w", name, err)
 	}
@@ -537,43 +568,43 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, sz domain.Size
 	id := domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
 	d.nextID++
 
-	win := newWindow(pty, winSize)
+	tb := newTab(pty, tbSize)
 	sctx, cancel := context.WithCancel(d.serveCtx)
-	win.ctx, win.cancel = context.WithCancel(sctx)
+	tb.ctx, tb.cancel = context.WithCancel(sctx)
 	sess := &session{
 		id:        id,
 		name:      name,
 		ephemeral: ephemeral,
 		ctx:       sctx,
 		cancel:    cancel,
-		windows:   []*window{win},
+		tabs:      []*tab{tb},
 	}
 	d.sessions[id] = sess
-	d.startWindowGoroutines(sess, win)
+	d.startTabGoroutines(sess, tb)
 	return sess, nil
 }
 
-func (d *Daemon) createWindow(sess *session, sz domain.Size) error {
-	winSize := windowSize(sz)
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(sess.name), winSize)
+func (d *Daemon) createTab(sess *session, sz domain.Size) error {
+	tbSize := tabSize(sz)
+	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(sess.name), tbSize)
 	if err != nil {
-		return fmt.Errorf("daemon: spawning window for session %q: %w", sess.name, err)
+		return fmt.Errorf("daemon: spawning tab for session %q: %w", sess.name, err)
 	}
-	win := newWindow(pty, winSize)
-	win.ctx, win.cancel = context.WithCancel(sess.ctx)
+	tb := newTab(pty, tbSize)
+	tb.ctx, tb.cancel = context.WithCancel(sess.ctx)
 	sess.mu.Lock()
-	sess.windows = append(sess.windows, win)
-	sess.active = len(sess.windows) - 1
+	sess.tabs = append(sess.tabs, tb)
+	sess.active = len(sess.tabs) - 1
 	sess.mu.Unlock()
-	d.startWindowGoroutines(sess, win)
+	d.startTabGoroutines(sess, tb)
 	return nil
 }
 
-func newWindow(pty ports.PTY, sz domain.Size) *window {
+func newTab(pty ports.PTY, sz domain.Size) *tab {
 	sb := scopy.NewScrollback(defaultScrollbackRows)
 	screen := vt.NewScreen(sz.Cols, sz.Rows)
 	screen.OnLineEvicted = sb.Append
-	return &window{
+	return &tab{
 		pty:        pty,
 		screen:     screen,
 		scrollback: sb,
@@ -583,7 +614,7 @@ func newWindow(pty ports.PTY, sz domain.Size) *window {
 	}
 }
 
-func windowSize(clientSize domain.Size) domain.Size {
+func tabSize(clientSize domain.Size) domain.Size {
 	if !clientSize.Valid() {
 		clientSize = defaultSize
 	}
@@ -591,10 +622,10 @@ func windowSize(clientSize domain.Size) domain.Size {
 	return domain.Size{Cols: clientSize.Cols, Rows: rows}
 }
 
-func (d *Daemon) startWindowGoroutines(sess *session, win *window) {
+func (d *Daemon) startTabGoroutines(sess *session, tb *tab) {
 	d.sessWg.Add(2)
-	go d.ptyReader(sess, win)
-	go d.scheduler(sess, win)
+	go d.ptyReader(sess, tb)
+	go d.scheduler(sess, tb)
 }
 
 // attachClient makes ac the session's current client, displacing any prior one
@@ -606,13 +637,16 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size)
 		rend: renderer.New(renderer.Capabilities{}),
 		size: sz,
 	}
-	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, sess: sess, ac: ac})
+	ac.setSession(sess)
+	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac})
 	sess.mu.Lock()
 	old := sess.client
 	sess.client = ac
 	sess.mu.Unlock()
 
 	if old != nil {
+		d.unregisterPreview(old)
+		old.setSession(nil)
 		// Async + bounded: a dead or wedged old client must not stall the new
 		// client's handshake.
 		d.notifyDetachedAsync(old, ports.ReasonDetach)
@@ -621,18 +655,18 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size)
 }
 
 // firstPaint guarantees the freshly attached client sees the full screen: if
-// the window size differs from the client's it resizes first (which paints a
+// the tab size differs from the client's it resizes first (which paints a
 // full redraw), otherwise it forces a full paint against the fresh renderer.
 func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain.Size) {
-	win := sess.activeWindow()
-	if win == nil {
+	tb := sess.activeTab()
+	if tb == nil {
 		return
 	}
-	win.mu.Lock()
-	wsz := win.size
-	win.mu.Unlock()
+	tb.mu.Lock()
+	wsz := tb.size
+	tb.mu.Unlock()
 
-	if clientSize.Valid() && wsz != windowSize(clientSize) {
+	if clientSize.Valid() && wsz != tabSize(clientSize) {
 		d.resize(sess, ac, clientSize)
 		return
 	}
@@ -641,11 +675,19 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 
 // runConnLoop is the per-connection input router: it pumps client messages
 // until detach, EOF, or a transport error.
-func (d *Daemon) runConnLoop(sess *session, ac *attachedClient) {
+func (d *Daemon) runConnLoop(ac *attachedClient) {
 	for {
+		sess := ac.currentSession()
+		if sess == nil {
+			return
+		}
 		f, err := ac.tr.Recv()
 		if err != nil {
 			d.clientGone(sess, ac, false)
+			return
+		}
+		sess = ac.currentSession()
+		if sess == nil {
 			return
 		}
 		switch f.Type {
@@ -676,6 +718,7 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, explicit bool) {
 	if !sess.detachIfCurrent(ac) {
 		return // already displaced by a newer client; nothing to do
 	}
+	d.unregisterPreview(ac)
 	if explicit {
 		// Synchronous so the ack is delivered before the transport closes
 		// (the client is actively awaiting it), but deadline-bounded so a
@@ -696,26 +739,31 @@ func (s *session) detachIfCurrent(ac *attachedClient) bool {
 	defer s.mu.Unlock()
 	if s.client == ac {
 		s.client = nil
+		ac.setSession(nil)
 		return true
 	}
 	return false
 }
 
-func (s *session) activeWindow() *window {
+func (s *session) activeTab() *tab {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.active < 0 || s.active >= len(s.windows) {
+	if s.active < 0 || s.active >= len(s.tabs) {
 		return nil
 	}
-	return s.windows[s.active]
+	return s.tabs[s.active]
 }
 
-func (d *Daemon) handleInput(sess *session, ac *attachedClient, data []byte) {
+func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 	ac.mouseScan.Scan(data,
-		func(ev mouse.Event) { d.handleMouse(sess, ac, ev) },
+		func(ev mouse.Event) { d.handleMouse(ac, ev) },
 		func(b []byte) {
+			if ac.pickerActive() {
+				d.handlePickerInput(ac, b)
+				return
+			}
 			if ac.copyModeActive() {
-				d.handleCopyInput(sess, ac, b)
+				d.handleCopyInput(ac, b)
 				return
 			}
 			ac.keys.Route(b)
@@ -723,9 +771,16 @@ func (d *Daemon) handleInput(sess *session, ac *attachedClient, data []byte) {
 	)
 }
 
-func (d *Daemon) handleMouse(sess *session, ac *attachedClient, ev mouse.Event) {
-	win := sess.activeWindow()
-	if win == nil {
+func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
+	if ac.pickerActive() {
+		return
+	}
+	sess := ac.currentSession()
+	if sess == nil {
+		return
+	}
+	tb := sess.activeTab()
+	if tb == nil {
 		return
 	}
 
@@ -739,53 +794,53 @@ func (d *Daemon) handleMouse(sess *session, ac *attachedClient, ev mouse.Event) 
 		return
 	}
 
-	win.mu.Lock()
-	childRows := win.screen.Frame.Height
-	mouseMode, mouseSGR := win.screen.MouseMode()
-	altScreen := win.screen.AltScreenActive()
-	win.mu.Unlock()
+	tb.mu.Lock()
+	childRows := tb.screen.Frame.Height
+	mouseMode, mouseSGR := tb.screen.MouseMode()
+	altScreen := tb.screen.AltScreenActive()
+	tb.mu.Unlock()
 
 	if mouseMode != 0 {
 		if !mouseSGR || ev.Row >= childRows {
 			return
 		}
-		daemonKeyHandler{d: d, sess: sess, ac: ac}.Forward(ev.Raw)
+		daemonKeyHandler{d: d, ac: ac}.Forward(ev.Raw)
 		return
 	}
 
 	switch ev.Button {
 	case mouse.WheelUp:
 		if altScreen {
-			daemonKeyHandler{d: d, sess: sess, ac: ac}.Forward([]byte("\x1b[A\x1b[A\x1b[A"))
+			daemonKeyHandler{d: d, ac: ac}.Forward([]byte("\x1b[A\x1b[A\x1b[A"))
 			return
 		}
 		d.enterCopyMode(sess, ac)
 		d.copyWheel(sess, ac, -3)
 	case mouse.WheelDown:
 		if altScreen {
-			daemonKeyHandler{d: d, sess: sess, ac: ac}.Forward([]byte("\x1b[B\x1b[B\x1b[B"))
+			daemonKeyHandler{d: d, ac: ac}.Forward([]byte("\x1b[B\x1b[B\x1b[B"))
 		}
 	}
 }
 
 func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
-	win := sess.activeWindow()
-	if win == nil {
+	tb := sess.activeTab()
+	if tb == nil {
 		return
 	}
 
-	win.mu.Lock()
+	tb.mu.Lock()
 	ac.copyMu.Lock()
 	if ac.copyMode == nil {
 		ac.copyMu.Unlock()
-		win.mu.Unlock()
+		tb.mu.Unlock()
 		return
 	}
-	snap := scopy.NewSnapshot(win.scrollback, win.screen.Frame)
+	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
 	if delta > 0 && ac.copyMode.AtBottom(snap) {
 		ac.copyMode = nil
 		ac.copyMu.Unlock()
-		win.mu.Unlock()
+		tb.mu.Unlock()
 		d.paint(sess, ac, true)
 		return
 	}
@@ -795,37 +850,41 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 		ac.copyMode = nil
 	}
 	ac.copyMu.Unlock()
-	win.mu.Unlock()
+	tb.mu.Unlock()
 
 	d.paint(sess, ac, true)
 }
 
 func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
-	win := sess.activeWindow()
-	if win == nil {
+	tb := sess.activeTab()
+	if tb == nil {
 		return
 	}
-	win.mu.Lock()
-	snap := scopy.NewSnapshot(win.scrollback, win.screen.Frame)
-	win.mu.Unlock()
+	tb.mu.Lock()
+	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
+	tb.mu.Unlock()
 	ac.copyMu.Lock()
 	ac.copyMode = scopy.NewMode(snap)
 	ac.copyMu.Unlock()
 	d.paint(sess, ac, true)
 }
 
-func (d *Daemon) handleCopyInput(sess *session, ac *attachedClient, data []byte) {
-	win := sess.activeWindow()
-	if win == nil {
+func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
+	sess := ac.currentSession()
+	if sess == nil {
+		return
+	}
+	tb := sess.activeTab()
+	if tb == nil {
 		return
 	}
 
-	win.mu.Lock()
+	tb.mu.Lock()
 	ac.copyMu.Lock()
 	if ac.copyMode == nil {
 		ac.copyPending = nil
 		ac.copyMu.Unlock()
-		win.mu.Unlock()
+		tb.mu.Unlock()
 		return
 	}
 	if len(ac.copyPending) > 0 {
@@ -835,7 +894,7 @@ func (d *Daemon) handleCopyInput(sess *session, ac *attachedClient, data []byte)
 		data = combined
 		ac.copyPending = nil
 	}
-	snap := scopy.NewSnapshot(win.scrollback, win.screen.Frame)
+	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
 	changed := false
 	copyOut := false
 	exit := false
@@ -884,7 +943,7 @@ func (d *Daemon) handleCopyInput(sess *session, ac *attachedClient, data []byte)
 		ac.copyMode = nil
 	}
 	ac.copyMu.Unlock()
-	win.mu.Unlock()
+	tb.mu.Unlock()
 
 	if copyOut && text != "" {
 		for _, chunk := range scopy.OSC52(text) {
@@ -932,64 +991,361 @@ func isCopyEscapePrefix(data []byte) bool {
 		len(data) == 3 && data[0] == 0x1b && data[1] == '[' && (data[2] == '5' || data[2] == '6')
 }
 
+func (d *Daemon) enterPicker(sess *session, ac *attachedClient) {
+	views, curTab := d.pickerViews(sess)
+	ac.pickerMu.Lock()
+	ac.picker = picker.New(views, sess.id, curTab)
+	ac.pickerPending = nil
+	ac.pickerPreview = nil
+	ac.pickerMu.Unlock()
+	d.registerPreviewForSelection(ac)
+	d.paint(sess, ac, true)
+}
+
+func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
+	d.mu.Lock()
+	sessions := make([]*session, 0, len(d.sessions))
+	for _, s := range d.sessions {
+		sessions = append(sessions, s)
+	}
+	d.mu.Unlock()
+	sort.Slice(sessions, func(i, j int) bool { return sessions[i].name < sessions[j].name })
+
+	views := make([]picker.SessionView, 0, len(sessions))
+	curTab := 0
+	for _, s := range sessions {
+		s.mu.Lock()
+		view := picker.SessionView{ID: s.id, Name: s.name, Active: s.active, Tabs: make([]string, len(s.tabs))}
+		for i := range s.tabs {
+			view.Tabs[i] = strconv.Itoa(i + 1)
+		}
+		if s == cur {
+			curTab = s.active
+		}
+		s.mu.Unlock()
+		views = append(views, view)
+	}
+	return views, curTab
+}
+
+func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
+	sess := ac.currentSession()
+	if sess == nil {
+		return
+	}
+	ac.pickerMu.Lock()
+	if ac.picker == nil {
+		ac.pickerPending = nil
+		ac.pickerMu.Unlock()
+		return
+	}
+	if len(ac.pickerPending) > 0 {
+		combined := make([]byte, 0, len(ac.pickerPending)+len(data))
+		combined = append(combined, ac.pickerPending...)
+		combined = append(combined, data...)
+		data = combined
+		ac.pickerPending = nil
+	}
+	changed := false
+	exit := false
+	switchTarget := false
+	for i := 0; i < len(data); i++ {
+		switch data[i] {
+		case 'j':
+			ac.picker.Down()
+			changed = true
+		case 'k':
+			ac.picker.Up()
+			changed = true
+		case '\r', '\n':
+			switchTarget = true
+			exit = true
+		case 'q', 0x03, 0x1b:
+			if data[i] == 0x1b {
+				tail := data[i:]
+				consumed, ok := routePickerEscape(ac.picker, tail)
+				if ok {
+					i += consumed - 1
+					changed = true
+					continue
+				}
+				if isPickerEscapePrefix(tail) {
+					ac.pickerPending = append(ac.pickerPending[:0], tail...)
+					break
+				}
+			}
+			exit = true
+		}
+	}
+	var target picker.Target
+	var ok bool
+	if switchTarget {
+		target, ok = ac.picker.Selected()
+	}
+	ac.pickerMu.Unlock()
+
+	if changed {
+		d.registerPreviewForSelection(ac)
+	}
+	if exit {
+		d.closePicker(ac)
+	}
+	if switchTarget && ok {
+		d.switchToTarget(sess, ac, target)
+		return
+	}
+	if exit || changed {
+		d.paint(sess, ac, true)
+	}
+}
+
+func routePickerEscape(m *picker.Model, data []byte) (int, bool) {
+	if len(data) >= 3 && data[1] == '[' {
+		switch data[2] {
+		case 'A':
+			m.Up()
+			return 3, true
+		case 'B':
+			m.Down()
+			return 3, true
+		}
+	}
+	return 0, false
+}
+
+func isPickerEscapePrefix(data []byte) bool {
+	return len(data) == 2 && data[0] == 0x1b && data[1] == '['
+}
+
+func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
+	ac.pickerMu.Lock()
+	var target picker.Target
+	var ok bool
+	if ac.picker != nil {
+		target, ok = ac.picker.Selected()
+	}
+	ac.pickerMu.Unlock()
+
+	var next *tab
+	if ok {
+		next = d.tabByTarget(target)
+	}
+
+	ac.pickerMu.Lock()
+	old := ac.pickerPreview
+	if ac.picker == nil {
+		next = nil
+	}
+	ac.pickerPreview = next
+	ac.pickerMu.Unlock()
+
+	if old != nil && old != next {
+		old.mu.Lock()
+		if old.previewClient == ac {
+			old.previewClient = nil
+		}
+		old.mu.Unlock()
+	}
+	if next != nil {
+		next.mu.Lock()
+		next.previewClient = ac
+		next.mu.Unlock()
+
+		ac.pickerMu.Lock()
+		keep := ac.pickerPreview == next
+		ac.pickerMu.Unlock()
+		if !keep {
+			next.mu.Lock()
+			if next.previewClient == ac {
+				next.previewClient = nil
+			}
+			next.mu.Unlock()
+		}
+	}
+}
+
+func (d *Daemon) unregisterPreview(ac *attachedClient) {
+	ac.pickerMu.Lock()
+	old := ac.pickerPreview
+	ac.pickerPreview = nil
+	ac.pickerMu.Unlock()
+
+	if old != nil {
+		old.mu.Lock()
+		if old.previewClient == ac {
+			old.previewClient = nil
+		}
+		old.mu.Unlock()
+	}
+}
+
+func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
+	tb.mu.Lock()
+	previewer := tb.previewClient
+	tb.mu.Unlock()
+	if previewer == nil {
+		return
+	}
+	previewer.pickerMu.Lock()
+	if previewer.pickerPreview == tb {
+		previewer.pickerPreview = nil
+	}
+	previewer.pickerMu.Unlock()
+	tb.mu.Lock()
+	if tb.previewClient == previewer {
+		tb.previewClient = nil
+	}
+	tb.mu.Unlock()
+}
+
+func (d *Daemon) closePicker(ac *attachedClient) {
+	ac.pickerMu.Lock()
+	ac.picker = nil
+	ac.pickerPending = nil
+	ac.pickerMu.Unlock()
+	d.unregisterPreview(ac)
+}
+
+func (d *Daemon) tabByTarget(target picker.Target) *tab {
+	d.mu.Lock()
+	sess := d.sessions[target.Session]
+	d.mu.Unlock()
+	if sess == nil {
+		return nil
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if target.TabIndex < 0 || target.TabIndex >= len(sess.tabs) {
+		return nil
+	}
+	return sess.tabs[target.TabIndex]
+}
+
+func (d *Daemon) sessionByID(id domain.SessionID) *session {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.sessions[id]
+}
+
+func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker.Target) {
+	targetSess := d.sessionByID(target.Session)
+	if targetSess == nil {
+		d.paint(sess, ac, true)
+		return
+	}
+	if targetSess == sess {
+		sess.switchTab(target.TabIndex)
+		d.paint(sess, ac, true)
+		return
+	}
+	old := d.stealClientForTarget(sess, ac, targetSess, target)
+	if ac.currentSession() != targetSess {
+		d.paint(sess, ac, true)
+		return
+	}
+	if old != nil && old != ac {
+		d.unregisterPreview(old)
+		old.setSession(nil)
+		d.notifyDetachedAsync(old, ports.ReasonDetach)
+	}
+	d.firstPaint(targetSess, ac, ac.size)
+}
+
+func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetSess *session, target picker.Target) *attachedClient {
+	d.mu.Lock()
+	if d.sessions[target.Session] != targetSess {
+		d.mu.Unlock()
+		return nil
+	}
+	from.mu.Lock()
+	if from.client != ac {
+		from.mu.Unlock()
+		d.mu.Unlock()
+		return nil
+	}
+	from.client = nil
+	ac.setSession(nil)
+	from.mu.Unlock()
+
+	targetSess.mu.Lock()
+	old := targetSess.client
+	targetSess.client = ac
+	if target.TabIndex >= 0 && target.TabIndex < len(targetSess.tabs) {
+		targetSess.active = target.TabIndex
+	}
+	targetSess.mu.Unlock()
+	ac.setSession(targetSess)
+	d.mu.Unlock()
+	return old
+}
+
 type daemonKeyHandler struct {
-	d    *Daemon
-	sess *session
-	ac   *attachedClient
+	d  *Daemon
+	ac *attachedClient
 }
 
 func (h daemonKeyHandler) Forward(data []byte) {
-	win := h.sess.activeWindow()
-	if win == nil {
+	sess := h.ac.currentSession()
+	if sess == nil {
 		return
 	}
-	if _, err := win.pty.Write(data); err != nil {
-		h.d.log.Error("pty write failed", "err", err, "session", h.sess.name)
+	tb := sess.activeTab()
+	if tb == nil {
+		return
+	}
+	if _, err := tb.pty.Write(data); err != nil {
+		h.d.log.Error("pty write failed", "err", err, "session", sess.name)
 	}
 }
 
 func (h daemonKeyHandler) Action(action keys.Action) {
+	sess := h.ac.currentSession()
+	if sess == nil {
+		return
+	}
 	switch action {
-	case keys.ActionCreateWindow:
-		if err := h.d.createWindow(h.sess, h.ac.size); err != nil {
-			h.d.log.Error("create window failed", "err", err, "session", h.sess.name)
+	case keys.ActionCreateTab:
+		if err := h.d.createTab(sess, h.ac.size); err != nil {
+			h.d.log.Error("create tab failed", "err", err, "session", sess.name)
 			return
 		}
-		h.d.paint(h.sess, h.ac, true)
-	case keys.ActionNextWindow:
-		if h.sess.switchRelative(1) {
-			h.d.paint(h.sess, h.ac, true)
+		h.d.paint(sess, h.ac, true)
+	case keys.ActionNextTab:
+		if sess.switchRelative(1) {
+			h.d.paint(sess, h.ac, true)
 		}
-	case keys.ActionPreviousWindow:
-		if h.sess.switchRelative(-1) {
-			h.d.paint(h.sess, h.ac, true)
+	case keys.ActionPreviousTab:
+		if sess.switchRelative(-1) {
+			h.d.paint(sess, h.ac, true)
 		}
 	case keys.ActionDetach:
-		h.d.clientGone(h.sess, h.ac, true)
-	case keys.ActionCloseWindow:
-		win := h.sess.activeWindow()
-		if win != nil {
-			h.d.closeWindow(h.sess, win, true)
+		h.d.clientGone(sess, h.ac, true)
+	case keys.ActionCloseTab:
+		tb := sess.activeTab()
+		if tb != nil {
+			h.d.closeTab(sess, tb, true)
 		}
 	case keys.ActionCopyMode:
-		h.d.enterCopyMode(h.sess, h.ac)
+		h.d.enterCopyMode(sess, h.ac)
 	case keys.ActionRenameSession:
-		h.sess.promoteEphemeral()
-		h.d.paint(h.sess, h.ac, true)
-	case keys.ActionSwitchWindow1, keys.ActionSwitchWindow2, keys.ActionSwitchWindow3,
-		keys.ActionSwitchWindow4, keys.ActionSwitchWindow5, keys.ActionSwitchWindow6,
-		keys.ActionSwitchWindow7, keys.ActionSwitchWindow8, keys.ActionSwitchWindow9:
-		idx := int(action - keys.ActionSwitchWindow1)
-		if h.sess.switchWindow(idx) {
-			h.d.paint(h.sess, h.ac, true)
+		sess.promoteEphemeral()
+		h.d.paint(sess, h.ac, true)
+	case keys.ActionOpenPicker:
+		h.d.enterPicker(sess, h.ac)
+	case keys.ActionSwitchTab1, keys.ActionSwitchTab2, keys.ActionSwitchTab3,
+		keys.ActionSwitchTab4, keys.ActionSwitchTab5, keys.ActionSwitchTab6,
+		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:
+		idx := int(action - keys.ActionSwitchTab1)
+		if sess.switchTab(idx) {
+			h.d.paint(sess, h.ac, true)
 		}
 	}
 }
 
-func (s *session) switchWindow(idx int) bool {
+func (s *session) switchTab(idx int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if idx < 0 || idx >= len(s.windows) || idx == s.active {
+	if idx < 0 || idx >= len(s.tabs) || idx == s.active {
 		return false
 	}
 	s.active = idx
@@ -999,10 +1355,10 @@ func (s *session) switchWindow(idx int) bool {
 func (s *session) switchRelative(delta int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.windows) < 2 {
+	if len(s.tabs) < 2 {
 		return false
 	}
-	s.active = (s.active + delta + len(s.windows)) % len(s.windows)
+	s.active = (s.active + delta + len(s.tabs)) % len(s.tabs)
 	return true
 }
 
@@ -1014,11 +1370,11 @@ func (s *session) promoteEphemeral() {
 	s.ephemeral = false
 }
 
-func (d *Daemon) closeWindow(sess *session, win *window, repaint bool) {
+func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	sess.mu.Lock()
 	idx := -1
-	for i, w := range sess.windows {
-		if w == win {
+	for i, w := range sess.tabs {
+		if w == tb {
 			idx = i
 			break
 		}
@@ -1027,24 +1383,25 @@ func (d *Daemon) closeWindow(sess *session, win *window, repaint bool) {
 		sess.mu.Unlock()
 		return
 	}
-	if len(sess.windows) == 1 {
+	if len(sess.tabs) == 1 {
 		sess.mu.Unlock()
 		d.killSession(sess, ports.ReasonSessionKilled)
 		return
 	}
-	sess.windows = append(sess.windows[:idx], sess.windows[idx+1:]...)
-	if sess.active >= len(sess.windows) {
-		sess.active = len(sess.windows) - 1
+	sess.tabs = append(sess.tabs[:idx], sess.tabs[idx+1:]...)
+	if sess.active >= len(sess.tabs) {
+		sess.active = len(sess.tabs) - 1
 	} else if idx < sess.active {
 		sess.active--
 	}
 	ac := sess.client
 	sess.mu.Unlock()
 
-	if win.cancel != nil {
-		win.cancel()
+	d.clearDestroyedTabPreview(tb)
+	if tb.cancel != nil {
+		tb.cancel()
 	}
-	_ = win.pty.Close()
+	_ = tb.pty.Close()
 	if repaint && ac != nil {
 		d.paint(sess, ac, true)
 	}
@@ -1060,57 +1417,57 @@ func signal(ch chan struct{}) {
 	}
 }
 
-func (d *Daemon) ptyReader(sess *session, win *window) {
+func (d *Daemon) ptyReader(sess *session, tb *tab) {
 	defer d.sessWg.Done()
 	buf := make([]byte, ptyReadBufSize)
 	var resp []byte
-	win.mu.Lock()
-	win.screen.OnResponse = func(b []byte) { resp = append(resp, b...) }
-	win.mu.Unlock()
+	tb.mu.Lock()
+	tb.screen.OnResponse = func(b []byte) { resp = append(resp, b...) }
+	tb.mu.Unlock()
 	for {
-		n, err := win.pty.Read(buf)
+		n, err := tb.pty.Read(buf)
 		if n > 0 {
 			data := buf[:n]
-			win.mu.Lock()
-			wasSyncing := win.screen.SyncUpdateActive()
-			win.screen.Write(data)
-			isSyncing := win.screen.SyncUpdateActive()
-			win.mu.Unlock()
+			tb.mu.Lock()
+			wasSyncing := tb.screen.SyncUpdateActive()
+			tb.screen.Write(data)
+			isSyncing := tb.screen.SyncUpdateActive()
+			tb.mu.Unlock()
 			if len(resp) > 0 {
-				if _, writeErr := win.pty.Write(resp); writeErr != nil {
+				if _, writeErr := tb.pty.Write(resp); writeErr != nil {
 					d.log.Warn("pty response write failed", "err", writeErr, "session", sess.name)
 				}
 				resp = resp[:0]
 			}
 			if wasSyncing != isSyncing {
-				win.mu.Lock()
-				win.syncGen++
-				gen := win.syncGen
-				win.mu.Unlock()
+				tb.mu.Lock()
+				tb.syncGen++
+				gen := tb.syncGen
+				tb.mu.Unlock()
 				if isSyncing {
-					go d.syncWatchdog(win, gen)
+					go d.syncWatchdog(tb, gen)
 				}
 			}
 			if (wasSyncing && !isSyncing) || (!isSyncing && syncUpdateEndIn(data)) {
-				signal(win.flush)
+				signal(tb.flush)
 				continue
 			}
 			if isSyncing {
 				continue
 			}
-			signal(win.dirty)
+			signal(tb.dirty)
 		}
 		if err != nil {
-			d.closeWindow(sess, win, true)
+			d.closeTab(sess, tb, true)
 			return
 		}
 	}
 }
 
-// scheduler debounces dirty signals. The first dirty opens a short window;
-// sustained floods progressively widen that window, while isolated updates
+// scheduler debounces dirty signals. The first dirty opens a short tab;
+// sustained floods progressively widen that tab, while isolated updates
 // return to the minimum delay for interactive latency.
-func (d *Daemon) scheduler(sess *session, win *window) {
+func (d *Daemon) scheduler(sess *session, tb *tab) {
 	defer d.sessWg.Done()
 	delay := minDebounceInterval
 	lastRender := d.clock.Now()
@@ -1119,13 +1476,13 @@ outer:
 		select {
 		case <-sess.ctx.Done():
 			return
-		case <-windowDone(win):
+		case <-tabDone(tb):
 			return
-		case <-win.flush:
-			d.render(sess, win)
+		case <-tb.flush:
+			d.render(sess, tb)
 			lastRender = d.clock.Now()
 			continue
-		case <-win.dirty:
+		case <-tb.dirty:
 			if d.clock.Now().Sub(lastRender) >= maxDebounceInterval {
 				delay = minDebounceInterval
 			}
@@ -1139,27 +1496,27 @@ outer:
 			case <-sess.ctx.Done():
 				timer.Stop()
 				return
-			case <-windowDone(win):
+			case <-tabDone(tb):
 				timer.Stop()
 				return
-			case <-win.flush:
+			case <-tb.flush:
 				if !timer.Stop() {
 					select {
 					case <-timer.C():
 					default:
 					}
 				}
-				d.render(sess, win)
+				d.render(sess, tb)
 				lastRender = d.clock.Now()
 				continue outer
-			case <-win.dirty:
+			case <-tb.dirty:
 				coalesced++
 			case <-timer.C():
 				break absorb
 			}
 		}
 		delay = nextDebounceDelay(delay, coalesced)
-		d.render(sess, win)
+		d.render(sess, tb)
 		lastRender = d.clock.Now()
 	}
 }
@@ -1178,30 +1535,30 @@ func nextDebounceDelay(delay time.Duration, coalesced int) time.Duration {
 	return delay
 }
 
-func (d *Daemon) syncWatchdog(win *window, gen uint64) {
+func (d *Daemon) syncWatchdog(tb *tab, gen uint64) {
 	timer := d.clock.NewTimer(maxSyncUpdateDuration)
 	select {
-	case <-windowDone(win):
+	case <-tabDone(tb):
 		timer.Stop()
 		return
 	case <-timer.C():
 	}
 
-	win.mu.Lock()
-	if win.syncGen != gen || !win.screen.SyncUpdateActive() {
-		win.mu.Unlock()
+	tb.mu.Lock()
+	if tb.syncGen != gen || !tb.screen.SyncUpdateActive() {
+		tb.mu.Unlock()
 		return
 	}
-	win.screen.ForceSyncEnd()
-	win.mu.Unlock()
-	signal(win.flush)
+	tb.screen.ForceSyncEnd()
+	tb.mu.Unlock()
+	signal(tb.flush)
 }
 
-func windowDone(win *window) <-chan struct{} {
-	if win.ctx == nil {
+func tabDone(tb *tab) <-chan struct{} {
+	if tb.ctx == nil {
 		return nil
 	}
-	return win.ctx.Done()
+	return tb.ctx.Done()
 }
 
 func syncUpdateEndIn(data []byte) bool {
@@ -1210,60 +1567,92 @@ func syncUpdateEndIn(data []byte) bool {
 
 // render paints the current client, or (when detached) just clears accumulated
 // damage so it never grows unbounded while headless.
-func (d *Daemon) render(sess *session, win *window) {
-	win.mu.Lock()
-	if win.screen.SyncUpdateActive() {
-		win.mu.Unlock()
+func (d *Daemon) render(sess *session, tb *tab) {
+	tb.mu.Lock()
+	if tb.screen.SyncUpdateActive() {
+		tb.mu.Unlock()
 		return
 	}
-	win.mu.Unlock()
+	tb.mu.Unlock()
+
+	tb.mu.Lock()
+	previewer := tb.previewClient
+	tb.mu.Unlock()
 
 	sess.mu.Lock()
 	ac := sess.client
-	active := sess.active >= 0 && sess.active < len(sess.windows) && sess.windows[sess.active] == win
+	active := sess.active >= 0 && sess.active < len(sess.tabs) && sess.tabs[sess.active] == tb
 	sess.mu.Unlock()
 
+	if previewer != nil {
+		if previewSess := previewer.currentSession(); previewSess != nil {
+			d.paint(previewSess, previewer, false)
+		}
+		if ac != nil && active && ac != previewer {
+			d.paint(sess, ac, false)
+			return
+		}
+		tb.mu.Lock()
+		tb.screen.ClearDamage()
+		tb.mu.Unlock()
+		return
+	}
+
 	if ac == nil || !active {
-		win.mu.Lock()
-		win.screen.ClearDamage()
-		win.mu.Unlock()
+		tb.mu.Lock()
+		tb.screen.ClearDamage()
+		tb.mu.Unlock()
 		return
 	}
 	d.paint(sess, ac, false)
 }
 
-// paint draws the composed client frame (active window plus status bar) and
+// paint draws the composed client frame (active tab plus status bar) and
 // sends the resulting bytes. The renderer shadow is reset on explicit invalidations
 // such as switch/create/close/rename/resize so the repaint is complete.
 func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
-	win := sess.activeWindow()
-	if win == nil {
+	tb := sess.activeTab()
+	if tb == nil {
 		return
 	}
 
 	ac.sendMu.Lock()
-	win.mu.Lock()
 	ac.copyMu.Lock()
 	copyActive := ac.copyMode != nil
-	if reset || copyActive {
+	copyMode := ac.copyMode
+	ac.copyMu.Unlock()
+	ac.pickerMu.Lock()
+	pickerActive := ac.picker != nil
+	pickerModel := ac.picker
+	previewTab := ac.pickerPreview
+	preview := snapshotPickerPreview(previewTab)
+
+	tb.mu.Lock()
+	if reset || copyActive || pickerActive {
 		ac.rend.Reset()
 	}
-	if reset {
+	if reset || pickerActive {
 		ac.lastCursor.valid = false
 	}
-	frame, damage := composeClientFrame(sess, win, reset)
+	frame, damage := composeClientFrame(sess, tb, reset)
 	if copyActive {
-		frame, damage = composeCopyClientFrame(ac.copyMode, win)
+		frame, damage = composeCopyClientFrame(copyMode, tb)
 	}
-	desiredCursor := desiredCursorOut(win.screen, copyActive)
-	ac.copyMu.Unlock()
+	if pickerActive {
+		if previewTab == tb {
+			preview = pickerPreviewFromLockedTab(tb)
+		}
+		frame, damage = composePickerClientFrame(pickerModel, preview, frame)
+	}
+	ac.pickerMu.Unlock()
+	desiredCursor := desiredCursorOut(tb.screen, copyActive || pickerActive)
 	data, err := ac.rend.Draw(frame, damage)
 	var cursorTail []byte
 	if err == nil {
 		cursorTail = ac.encodeCursorTail(desiredCursor, len(data) > 0)
 	}
-	win.screen.ClearDamage()
-	win.mu.Unlock()
+	tb.screen.ClearDamage()
+	tb.mu.Unlock()
 
 	var serr error
 	if err == nil {
@@ -1283,7 +1672,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	}
 }
 
-// resize applies a client size change to every window using rows-1 for the PTY
+// resize applies a client size change to every tab using rows-1 for the PTY
 // and VT screen, then resets the renderer shadow and repaints the composed
 // client-sized frame (including the status row).
 func desiredCursorOut(s *vt.Screen, copyActive bool) cursorOut {
@@ -1323,25 +1712,53 @@ func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte
 	return b
 }
 
-func composeClientFrame(sess *session, win *window, full bool) (renderer.Frame, []renderer.Damage) {
-	width, screenRows := win.screen.Frame.Width, win.screen.Frame.Height
+func composeClientFrame(sess *session, tb *tab, full bool) (renderer.Frame, []renderer.Damage) {
+	width, screenRows := tb.screen.Frame.Width, tb.screen.Frame.Height
 	frame := renderer.NewFrame(width, screenRows+1)
 	for y := range screenRows {
-		copy(frame.Row(y), win.screen.Frame.Row(y))
+		copy(frame.Row(y), tb.screen.Frame.Row(y))
 	}
 	drawStatus(frame.Row(screenRows), sess)
 	if full {
 		return frame, []renderer.Damage{renderer.FullRedraw()}
 	}
-	damage := append([]renderer.Damage(nil), win.screen.Damage()...)
+	damage := append([]renderer.Damage(nil), tb.screen.Damage()...)
 	damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: screenRows, Width: width, Height: 1})
 	return frame, damage
 }
 
-func composeCopyClientFrame(mode *scopy.Mode, win *window) (renderer.Frame, []renderer.Damage) {
-	snap := scopy.NewSnapshot(win.scrollback, win.screen.Frame)
+func composeCopyClientFrame(mode *scopy.Mode, tb *tab) (renderer.Frame, []renderer.Damage) {
+	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
 	frame := mode.Render(snap)
 	return frame, []renderer.Damage{renderer.FullRedraw()}
+}
+
+func composePickerClientFrame(model *picker.Model, preview picker.Preview, base renderer.Frame) (renderer.Frame, []renderer.Damage) {
+	inner := pickerModal.Composite(base, renderer.DefaultStyle())
+	modalFrame := model.Render(domain.Size{Cols: inner.Width, Rows: inner.Height}, preview)
+	for y := range min(inner.Height, modalFrame.Height) {
+		for x := range min(inner.Width, modalFrame.Width) {
+			base.Set(inner.X+x, inner.Y+y, modalFrame.At(x, y))
+		}
+	}
+	return base, []renderer.Damage{renderer.FullRedraw()}
+}
+
+func snapshotPickerPreview(tb *tab) picker.Preview {
+	if tb == nil {
+		return picker.Preview{}
+	}
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	return pickerPreviewFromLockedTab(tb)
+}
+
+func pickerPreviewFromLockedTab(tb *tab) picker.Preview {
+	rows := make([][]renderer.Cell, tb.screen.Frame.Height)
+	for y := range rows {
+		rows[y] = append([]renderer.Cell(nil), tb.screen.Frame.Row(y)...)
+	}
+	return picker.Preview{Rows: rows, Width: tb.screen.Frame.Width, Height: tb.screen.Frame.Height}
 }
 
 func drawStatus(row []renderer.Cell, sess *session) {
@@ -1351,7 +1768,7 @@ func drawStatus(row []renderer.Cell, sess *session) {
 	status := sess.statusSegments()
 	x := 0
 	writeStatusText(row, &x, " "+status.session+" ", renderer.DefaultStyle())
-	for _, w := range status.windows {
+	for _, w := range status.tabs {
 		style := renderer.DefaultStyle()
 		if w.active {
 			style.Inverse = true
@@ -1362,10 +1779,10 @@ func drawStatus(row []renderer.Cell, sess *session) {
 
 type statusSnapshot struct {
 	session string
-	windows []statusWindow
+	tabs    []statusTab
 }
 
-type statusWindow struct {
+type statusTab struct {
 	name   string
 	active bool
 }
@@ -1373,10 +1790,10 @@ type statusWindow struct {
 func (s *session) statusSegments() statusSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	snap := statusSnapshot{session: s.name, windows: make([]statusWindow, len(s.windows))}
-	for i := range s.windows {
+	snap := statusSnapshot{session: s.name, tabs: make([]statusTab, len(s.tabs))}
+	for i := range s.tabs {
 		name := strconv.Itoa(i + 1)
-		snap.windows[i] = statusWindow{name: name, active: i == s.active}
+		snap.tabs[i] = statusTab{name: name, active: i == s.active}
 	}
 	return snap
 }
@@ -1395,24 +1812,24 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	if !sz.Valid() {
 		return
 	}
-	winSize := windowSize(sz)
+	tbSize := tabSize(sz)
 	ac.size = sz
 
 	sess.mu.Lock()
-	windows := append([]*window(nil), sess.windows...)
+	tabs := append([]*tab(nil), sess.tabs...)
 	sess.mu.Unlock()
-	if len(windows) == 0 {
+	if len(tabs) == 0 {
 		return
 	}
 
-	for _, win := range windows {
-		if err := win.pty.Resize(winSize); err != nil {
+	for _, tb := range tabs {
+		if err := tb.pty.Resize(tbSize); err != nil {
 			d.log.Warn("pty resize failed", "err", err, "session", sess.name)
 		}
-		win.mu.Lock()
-		win.screen.Resize(winSize.Cols, winSize.Rows)
-		win.size = winSize
-		win.mu.Unlock()
+		tb.mu.Lock()
+		tb.screen.Resize(tbSize.Cols, tbSize.Rows)
+		tb.size = tbSize
+		tb.mu.Unlock()
 	}
 	d.paint(sess, ac, true)
 }
@@ -1422,6 +1839,7 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 // its client's); a named session keeps running headless.
 func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient) {
 	if sess.detachIfCurrent(ac) {
+		d.unregisterPreview(ac)
 		_ = ac.tr.Close()
 		d.log.Warn("detached client after send error", "session", sess.name)
 		if sess.ephemeral {
@@ -1458,13 +1876,18 @@ func (d *Daemon) killSession(sess *session, reason uint8) {
 	ac := sess.client
 	sess.client = nil
 	sess.mu.Unlock()
+	if ac != nil {
+		d.unregisterPreview(ac)
+		ac.setSession(nil)
+	}
 
 	sess.cancel()
 	sess.mu.Lock()
-	windows := append([]*window(nil), sess.windows...)
+	tabs := append([]*tab(nil), sess.tabs...)
 	sess.mu.Unlock()
-	for _, win := range windows {
-		_ = win.pty.Close()
+	for _, tb := range tabs {
+		d.clearDestroyedTabPreview(tb)
+		_ = tb.pty.Close()
 	}
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })

@@ -18,22 +18,22 @@ type Rect struct {
 // SessionID uniquely identifies a session.
 type SessionID string
 
-// WindowID uniquely identifies a window within a session.
-type WindowID string
+// TabID uniquely identifies a tab within a session.
+type TabID string
 
-// Window is a single window (tab) within a session.
-type Window struct {
-	ID     WindowID
+// Tab is a single tab within a session.
+type Tab struct {
+	ID     TabID
 	Index  int // 0-based; drives Alt+1..9 and status-bar order
 	Name   string
 	Active bool
 }
 
-// Session is a persistent multiplexer session containing one or more windows.
+// Session is a persistent multiplexer session containing one or more tabs.
 type Session struct {
 	ID        SessionID
 	Name      string // display name; numbered "0","1"... when ephemeral
 	Ephemeral bool
-	Windows   []Window
-	ActiveWin WindowID
+	Tabs      []Tab
+	ActiveTab TabID
 }

@@ -6,7 +6,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 )
 
-func TestNewWindowInitializesScrollback(t *testing.T) {
+func TestNewTabInitializesScrollback(t *testing.T) {
 	tests := []struct {
 		name    string
 		write   []byte
@@ -14,7 +14,7 @@ func TestNewWindowInitializesScrollback(t *testing.T) {
 		wantRow string
 	}{
 		{
-			name:    "window owns scrollback wired to vt eviction callback",
+			name:    "tab owns scrollback wired to vt eviction callback",
 			write:   []byte("AAAA\r\nBBBB\r\nCCCC\r\n"),
 			wantLen: 1,
 			wantRow: "AAAA",
@@ -23,7 +23,7 @@ func TestNewWindowInitializesScrollback(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			win := newWindow(nil, domain.Size{Cols: 4, Rows: 3})
+			win := newTab(nil, domain.Size{Cols: 4, Rows: 3})
 			if win.scrollback == nil {
 				t.Fatal("scrollback is nil")
 			}

@@ -247,13 +247,14 @@ func newManualSessionWithPTYs(t *testing.T, ptys ...ports.PTY) (*Daemon, *sessio
 	tr, sends := newCapturingTransport(t)
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
 	sctx, cancel := context.WithCancel(d.serveCtx)
-	windows := make([]*window, 0, len(ptys))
+	tabs := make([]*tab, 0, len(ptys))
 	for _, p := range ptys {
 		wctx, wcancel := context.WithCancel(sctx)
-		windows = append(windows, &window{pty: p, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: wctx, cancel: wcancel})
+		tabs = append(tabs, &tab{pty: p, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: wctx, cancel: wcancel})
 	}
-	sess := &session{id: "manual", name: "work", ctx: sctx, cancel: cancel, windows: windows, client: ac}
-	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, sess: sess, ac: ac})
+	sess := &session{id: "manual", name: "work", ctx: sctx, cancel: cancel, tabs: tabs, client: ac}
+	ac.setSession(sess)
+	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac})
 	d.sessions[sess.id] = sess
 	t.Cleanup(cancel)
 	return d, sess, ac, sends
@@ -265,11 +266,12 @@ func TestPTYWriteErrorIsLogged(t *testing.T) {
 	errBoom := errors.New("boom")
 	p := portsmocks.NewMockPTY(t)
 	p.EXPECT().Write([]byte("input")).Return(0, errBoom).Once()
-	win := &window{pty: p, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}}
-	sess := &session{id: "manual", name: "work", windows: []*window{win}}
+	win := &tab{pty: p, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}}
+	sess := &session{id: "manual", name: "work", tabs: []*tab{win}}
 	ac := &attachedClient{}
+	ac.setSession(sess)
 
-	daemonKeyHandler{d: d, sess: sess, ac: ac}.Forward([]byte("input"))
+	daemonKeyHandler{d: d, ac: ac}.Forward([]byte("input"))
 
 	got := logs.String()
 	if !strings.Contains(got, "pty write failed") || !strings.Contains(got, "boom") || !strings.Contains(got, "work") {
@@ -277,7 +279,7 @@ func TestPTYWriteErrorIsLogged(t *testing.T) {
 	}
 }
 
-func newManualWindowSession(t *testing.T, n int) (*Daemon, *session, *attachedClient, chan ports.Frame, []func()) {
+func newManualTabSession(t *testing.T, n int) (*Daemon, *session, *attachedClient, chan ports.Frame, []func()) {
 	t.Helper()
 	ptys := make([]ports.PTY, 0, n)
 	releases := make([]func(), 0, n)
@@ -290,7 +292,7 @@ func newManualWindowSession(t *testing.T, n int) (*Daemon, *session, *attachedCl
 	return d, sess, ac, sends, releases
 }
 
-func activeWindowIndex(sess *session) int {
+func activeTabIndex(sess *session) int {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	return sess.active
@@ -308,8 +310,8 @@ func TestCopyModeAltUInterceptsAndDoesNotForward(t *testing.T) {
 	writes := make(chan []byte, 1)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.windows[0].scrollback = scopy.NewScrollback(4)
-	sess.windows[0].screen.Write([]byte("live"))
+	sess.tabs[0].scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].screen.Write([]byte("live"))
 
 	d.handleInput(sess, ac, []byte("\x1bu"))
 
@@ -333,10 +335,10 @@ func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 	writes := make(chan []byte, 1)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.windows[0].scrollback = scopy.NewScrollback(4)
-	sess.windows[0].scrollback.Append(testRow("old1    "))
-	sess.windows[0].scrollback.Append(testRow("old2    "))
-	sess.windows[0].screen.Write([]byte("live"))
+	sess.tabs[0].scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].scrollback.Append(testRow("old1    "))
+	sess.tabs[0].scrollback.Append(testRow("old2    "))
+	sess.tabs[0].screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -400,7 +402,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 		if sess == nil {
 			return false
 		}
-		win := sess.activeWindow()
+		win := sess.activeTab()
 		if win == nil {
 			return false
 		}
@@ -440,8 +442,8 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 func TestCopyModeEscapeRestoresLiveFullRepaint(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.windows[0].scrollback = scopy.NewScrollback(4)
-	sess.windows[0].screen.Write([]byte("live"))
+	sess.tabs[0].scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -473,10 +475,10 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p, _ := newBlockingPTY(t)
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-			sess.windows[0].scrollback = scopy.NewScrollback(4)
-			sess.windows[0].scrollback.Append(testRow("old1    "))
-			sess.windows[0].scrollback.Append(testRow("old2    "))
-			sess.windows[0].screen.Write([]byte("live"))
+			sess.tabs[0].scrollback = scopy.NewScrollback(4)
+			sess.tabs[0].scrollback.Append(testRow("old1    "))
+			sess.tabs[0].scrollback.Append(testRow("old2    "))
+			sess.tabs[0].screen.Write([]byte("live"))
 
 			d.enterCopyMode(sess, ac)
 			awaitFrame(t, sends, ports.MsgOutput)
@@ -504,8 +506,8 @@ func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p, _ := newBlockingPTY(t)
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-			sess.windows[0].scrollback = scopy.NewScrollback(4)
-			sess.windows[0].screen.Write([]byte("live"))
+			sess.tabs[0].scrollback = scopy.NewScrollback(4)
+			sess.tabs[0].screen.Write([]byte("live"))
 
 			d.enterCopyMode(sess, ac)
 			awaitFrame(t, sends, ports.MsgOutput)
@@ -530,8 +532,8 @@ func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
 func TestCopyModeEnterExitConcurrentWithPaintRace(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.windows[0].scrollback = scopy.NewScrollback(4)
-	sess.windows[0].screen.Write([]byte("live"))
+	sess.tabs[0].scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].screen.Write([]byte("live"))
 
 	done := make(chan struct{})
 	var drain sync.WaitGroup
@@ -560,10 +562,10 @@ func TestCopyModeEnterExitConcurrentWithPaintRace(t *testing.T) {
 	drain.Wait()
 }
 
-func windowCount(sess *session) int {
+func tabCount(sess *session) int {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
-	return len(sess.windows)
+	return len(sess.tabs)
 }
 
 // --- handshake --------------------------------------------------------------
@@ -671,7 +673,7 @@ func TestEphemeralNumberingReuse(t *testing.T) {
 
 // --- attach replace ---------------------------------------------------------
 
-func TestAltDigitSwitchesBetweenThreeWindows(t *testing.T) {
+func TestAltDigitSwitchesBetweenThreeTabs(t *testing.T) {
 	writes1 := make(chan []byte, 1)
 	writes2 := make(chan []byte, 1)
 	writes3 := make(chan []byte, 1)
@@ -698,7 +700,7 @@ func TestAltDigitSwitchesBetweenThreeWindows(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		sessions := listSessions(t, d)
-		return len(sessions.Sessions) == 1 && sessions.Sessions[0].Windows == 3
+		return len(sessions.Sessions) == 1 && sessions.Sessions[0].Tabs == 3
 	}, 2*time.Second, 5*time.Millisecond)
 	require.Eventually(t, func() bool { return len(writes1) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, []byte("A"), <-writes1)
@@ -715,7 +717,7 @@ func TestAltDigitSwitchesBetweenThreeWindows(t *testing.T) {
 	d.sessWg.Wait()
 }
 
-func TestAltCCreatesSecondActiveWindow(t *testing.T) {
+func TestAltCCreatesSecondActiveTab(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
 	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
@@ -731,7 +733,7 @@ func TestAltCCreatesSecondActiveWindow(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		sessions := listSessions(t, d)
-		return len(sessions.Sessions) == 1 && sessions.Sessions[0].Windows == 2
+		return len(sessions.Sessions) == 1 && sessions.Sessions[0].Tabs == 2
 	}, 2*time.Second, 5*time.Millisecond)
 
 	releaseConn()
@@ -741,7 +743,7 @@ func TestAltCCreatesSecondActiveWindow(t *testing.T) {
 	d.sessWg.Wait()
 }
 
-func TestAltNextPreviousSwitchActiveWindow(t *testing.T) {
+func TestAltNextPreviousSwitchActiveTab(t *testing.T) {
 	cases := []struct {
 		name      string
 		start     int
@@ -756,7 +758,7 @@ func TestAltNextPreviousSwitchActiveWindow(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			d, sess, ac, _, releases := newManualWindowSession(t, 3)
+			d, sess, ac, _, releases := newManualTabSession(t, 3)
 			defer func() {
 				for _, release := range releases {
 					release()
@@ -766,12 +768,12 @@ func TestAltNextPreviousSwitchActiveWindow(t *testing.T) {
 
 			d.handleInput(sess, ac, tc.input)
 
-			require.Equal(t, tc.wantIndex, activeWindowIndex(sess))
+			require.Equal(t, tc.wantIndex, activeTabIndex(sess))
 		})
 	}
 }
 
-func TestAltXClosesActiveWindowAndSelectsRemaining(t *testing.T) {
+func TestAltXClosesActiveTabAndSelectsRemaining(t *testing.T) {
 	writes := make(chan []byte, 1)
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
@@ -782,8 +784,8 @@ func TestAltXClosesActiveWindowAndSelectsRemaining(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1bx"))
 
 	require.Equal(t, 1, sessionCount(d))
-	require.Len(t, sess.windows, 2)
-	require.Equal(t, 1, activeWindowIndex(sess), "closing middle window selects the next remaining window")
+	require.Len(t, sess.tabs, 2)
+	require.Equal(t, 1, activeTabIndex(sess), "closing middle tab selects the next remaining tab")
 	d.handleInput(sess, ac, []byte("Z"))
 	require.Eventually(t, func() bool { return len(writes) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, []byte("Z"), <-writes)
@@ -802,7 +804,7 @@ func waitGroupDone(wg *sync.WaitGroup) <-chan struct{} {
 	return done
 }
 
-func TestAltXClosesNonFinalWindowScheduler(t *testing.T) {
+func TestAltXClosesNonFinalTabScheduler(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
 	clk := &signalClock{called: make(chan struct{})}
@@ -812,8 +814,8 @@ func TestAltXClosesNonFinalWindowScheduler(t *testing.T) {
 	defer releasePTY2()
 
 	d.sessWg.Add(1)
-	go d.scheduler(sess, sess.windows[1])
-	sess.windows[1].dirty <- struct{}{}
+	go d.scheduler(sess, sess.tabs[1])
+	sess.tabs[1].dirty <- struct{}{}
 	<-clk.called
 
 	d.handleInput(sess, ac, []byte("\x1b2"))
@@ -822,12 +824,12 @@ func TestAltXClosesNonFinalWindowScheduler(t *testing.T) {
 	select {
 	case <-waitGroupDone(&d.sessWg):
 	case <-time.After(2 * time.Second):
-		t.Fatal("scheduler for removed window did not exit")
+		t.Fatal("scheduler for removed tab did not exit")
 	}
 	require.Equal(t, 1, sessionCount(d))
 }
 
-func TestPTYEOFClosesNonFinalWindowScheduler(t *testing.T) {
+func TestPTYEOFClosesNonFinalTabScheduler(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
 	clk := &signalClock{called: make(chan struct{})}
@@ -837,22 +839,22 @@ func TestPTYEOFClosesNonFinalWindowScheduler(t *testing.T) {
 	defer releasePTY2()
 
 	d.sessWg.Add(2)
-	go d.scheduler(sess, sess.windows[1])
-	go d.ptyReader(sess, sess.windows[1])
-	sess.windows[1].dirty <- struct{}{}
+	go d.scheduler(sess, sess.tabs[1])
+	go d.ptyReader(sess, sess.tabs[1])
+	sess.tabs[1].dirty <- struct{}{}
 	<-clk.called
 	releasePTY2()
 
 	select {
 	case <-waitGroupDone(&d.sessWg):
 	case <-time.After(2 * time.Second):
-		t.Fatal("scheduler for EOF-removed window did not exit")
+		t.Fatal("scheduler for EOF-removed tab did not exit")
 	}
 	require.Equal(t, 1, sessionCount(d))
 }
 
-func TestAltXClosesFinalWindowAndDetaches(t *testing.T) {
-	d, sess, ac, sends, releases := newManualWindowSession(t, 1)
+func TestAltXClosesFinalTabAndDetaches(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
 	defer releases[0]()
 
 	d.handleInput(sess, ac, []byte("\x1bx"))
@@ -864,21 +866,21 @@ func TestAltXClosesFinalWindowAndDetaches(t *testing.T) {
 	require.Equal(t, ports.ReasonSessionKilled, det.Reason)
 }
 
-func TestPTYEOFClosesActiveNonFinalWindowAndRepaintsRemaining(t *testing.T) {
+func TestPTYEOFClosesActiveNonFinalTabAndRepaintsRemaining(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
 	d, sess, _, sends := newManualSessionWithPTYs(t, p1, p2)
 	defer releasePTY2()
 	sess.active = 0
-	sess.windows[1].screen.Write([]byte("remaining"))
+	sess.tabs[1].screen.Write([]byte("remaining"))
 
 	d.sessWg.Add(1)
-	go d.ptyReader(sess, sess.windows[0])
+	go d.ptyReader(sess, sess.tabs[0])
 	releasePTY1()
 
-	require.Eventually(t, func() bool { return windowCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool { return tabCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, 1, sessionCount(d))
-	require.Equal(t, 0, activeWindowIndex(sess))
+	require.Equal(t, 0, activeTabIndex(sess))
 	f := awaitFrame(t, sends, ports.MsgOutput)
 	out, err := ports.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
@@ -890,21 +892,21 @@ func TestPTYEOFClosesActiveNonFinalWindowAndRepaintsRemaining(t *testing.T) {
 	d.sessWg.Wait()
 }
 
-func TestPTYEOFClosesInactiveNonFinalWindowAndRepaintsStatus(t *testing.T) {
+func TestPTYEOFClosesInactiveNonFinalTabAndRepaintsStatus(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
 	d, sess, _, sends := newManualSessionWithPTYs(t, p1, p2)
 	defer releasePTY1()
 	sess.active = 0
-	sess.windows[0].screen.Write([]byte("active"))
+	sess.tabs[0].screen.Write([]byte("active"))
 
 	d.sessWg.Add(1)
-	go d.ptyReader(sess, sess.windows[1])
+	go d.ptyReader(sess, sess.tabs[1])
 	releasePTY2()
 
-	require.Eventually(t, func() bool { return windowCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool { return tabCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, 1, sessionCount(d))
-	require.Equal(t, 0, activeWindowIndex(sess))
+	require.Equal(t, 0, activeTabIndex(sess))
 	f := awaitFrame(t, sends, ports.MsgOutput)
 	out, err := ports.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
@@ -916,11 +918,11 @@ func TestPTYEOFClosesInactiveNonFinalWindowAndRepaintsStatus(t *testing.T) {
 	d.sessWg.Wait()
 }
 
-func TestPTYEOFFinalWindowKillsSessionAndDetaches(t *testing.T) {
-	d, sess, _, sends, releases := newManualWindowSession(t, 1)
+func TestPTYEOFFinalTabKillsSessionAndDetaches(t *testing.T) {
+	d, sess, _, sends, releases := newManualTabSession(t, 1)
 
 	d.sessWg.Add(1)
-	go d.ptyReader(sess, sess.windows[0])
+	go d.ptyReader(sess, sess.tabs[0])
 	releases[0]()
 
 	require.Eventually(t, func() bool { return sessionCount(d) == 0 }, 2*time.Second, 5*time.Millisecond)
@@ -933,7 +935,7 @@ func TestPTYEOFFinalWindowKillsSessionAndDetaches(t *testing.T) {
 }
 
 func TestAltDDetachesCurrentClient(t *testing.T) {
-	d, sess, ac, sends, releases := newManualWindowSession(t, 1)
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
 	defer releases[0]()
 
 	d.handleInput(sess, ac, []byte("\x1bd"))
@@ -946,7 +948,7 @@ func TestAltDDetachesCurrentClient(t *testing.T) {
 }
 
 func TestAltRPromotesEphemeralSessionPromptlessly(t *testing.T) {
-	d, sess, ac, sends, releases := newManualWindowSession(t, 1)
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
 	defer releases[0]()
 	sess.ephemeral = true
 	sess.name = "0"
@@ -958,6 +960,217 @@ func TestAltRPromotesEphemeralSessionPromptlessly(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
+func TestAltTOpensPickerModalAndDoesNotForward(t *testing.T) {
+	writes := make(chan []byte, 1)
+	p, releasePTY := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+
+	d.handleInput(sess, ac, []byte("\x1bt"))
+
+	require.True(t, ac.pickerActive())
+	select {
+	case got := <-writes:
+		t.Fatalf("picker binding forwarded to PTY: %q", got)
+	default:
+	}
+	out := awaitFrame(t, sends, ports.MsgOutput)
+	msg, err := ports.UnmarshalOutput(out.Payload)
+	require.NoError(t, err)
+	data := string(msg.Data)
+	require.Contains(t, data, "┌")
+	require.Contains(t, data, "Sessions")
+}
+
+func TestPickerSameSessionNavigationSwitchAndEscClose(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 2)
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
+	d.handleInput(sess, ac, []byte("\x1bt"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("j"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("\r"))
+
+	require.Equal(t, 1, activeTabIndex(sess))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("\x1bt"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("\x1b"))
+	require.False(t, ac.pickerActive())
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	defer releasePTY1()
+	defer releasePTY2()
+	d := newTestDaemon(t, nil, stubClock{})
+	tr1, sends1 := newCapturingTransport(t)
+	tr2, sends2 := newCapturingTransport(t)
+	ac1 := &attachedClient{tr: tr1, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac2 := &attachedClient{tr: tr2, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	sctx1, cancel1 := context.WithCancel(d.serveCtx)
+	sctx2, cancel2 := context.WithCancel(d.serveCtx)
+	defer cancel1()
+	defer cancel2()
+	sess1 := &session{id: "s1", name: "alpha", ephemeral: true, ctx: sctx1, cancel: cancel1, tabs: []*tab{{pty: p1, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctx1, cancel: cancel1}}, client: ac1}
+	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{{pty: p2, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctx2, cancel: cancel2}}, client: ac2}
+	ac1.setSession(sess1)
+	ac2.setSession(sess2)
+	ac1.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac1})
+	ac2.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac2})
+	d.sessions[sess1.id] = sess1
+	d.sessions[sess2.id] = sess2
+
+	d.handleInput(sess1, ac1, []byte("\x1bt"))
+	awaitFrame(t, sends1, ports.MsgOutput)
+	d.handleInput(sess1, ac1, []byte("j"))
+	awaitFrame(t, sends1, ports.MsgOutput)
+	d.handleInput(sess1, ac1, []byte("\r"))
+
+	require.Same(t, sess2, ac1.currentSession())
+	require.Same(t, ac1, sess2.client)
+	require.Nil(t, sess1.client)
+	require.Equal(t, 2, sessionCount(d), "old ephemeral session remains alive after picker switch")
+	det := awaitFrame(t, sends2, ports.MsgDetached)
+	dm, err := ports.UnmarshalDetached(det.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.ReasonDetach, dm.Reason)
+	awaitFrame(t, sends1, ports.MsgOutput)
+}
+
+func TestPickerLivePreviewRepaintsInactiveTab(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 2)
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
+	d.handleInput(sess, ac, []byte("\x1bt"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("j"))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	previewTab := sess.tabs[1]
+	previewTab.mu.Lock()
+	previewTab.screen.Write([]byte("inactive-preview-live"))
+	previewTab.mu.Unlock()
+	d.render(sess, previewTab)
+
+	previewOut := awaitFrame(t, sends, ports.MsgOutput)
+	previewMsg, err := ports.UnmarshalOutput(previewOut.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(previewMsg.Data), "inactive-preview-live")
+}
+
+func TestPickerLivePreviewRepaintsCrossSessionTab(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	defer releasePTY1()
+	defer releasePTY2()
+	d := newTestDaemon(t, nil, stubClock{})
+	tr1, sends1 := newCapturingTransport(t)
+	tr2, _ := newCapturingTransport(t)
+	ac1 := &attachedClient{tr: tr1, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac2 := &attachedClient{tr: tr2, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	sctx1, cancel1 := context.WithCancel(d.serveCtx)
+	sctx2, cancel2 := context.WithCancel(d.serveCtx)
+	defer cancel1()
+	defer cancel2()
+	sess1 := &session{id: "s1", name: "alpha", ctx: sctx1, cancel: cancel1, tabs: []*tab{{pty: p1, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctx1, cancel: cancel1}}, client: ac1}
+	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{{pty: p2, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctx2, cancel: cancel2}}, client: ac2}
+	ac1.setSession(sess1)
+	ac2.setSession(sess2)
+	ac1.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac1})
+	ac2.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac2})
+	d.sessions[sess1.id] = sess1
+	d.sessions[sess2.id] = sess2
+
+	d.handleInput(sess1, ac1, []byte("\x1bt"))
+	awaitFrame(t, sends1, ports.MsgOutput)
+	d.handleInput(sess1, ac1, []byte("j"))
+	awaitFrame(t, sends1, ports.MsgOutput)
+
+	previewTab := sess2.tabs[0]
+	previewTab.mu.Lock()
+	previewTab.screen.Write([]byte("cross-session-preview-live"))
+	previewTab.mu.Unlock()
+	d.render(sess2, previewTab)
+
+	previewOut := awaitFrame(t, sends1, ports.MsgOutput)
+	previewMsg, err := ports.UnmarshalOutput(previewOut.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(previewMsg.Data), "cross-session-preview-live")
+}
+
+func TestPickerOpenCloseNavigationConcurrentWithRenderRace(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 3)
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
+	done := make(chan struct{})
+	var drain sync.WaitGroup
+	drain.Go(func() {
+		for {
+			select {
+			case <-sends:
+			case <-done:
+				return
+			}
+		}
+	})
+
+	var wg sync.WaitGroup
+	for i := range 100 {
+		wg.Go(func() {
+			d.enterPicker(sess, ac)
+		})
+		wg.Go(func() {
+			d.handlePickerInput(ac, []byte("j"))
+			d.handlePickerInput(ac, []byte("k"))
+		})
+		wg.Go(func() {
+			d.closePicker(ac)
+		})
+		tb := sess.tabs[i%len(sess.tabs)]
+		wg.Go(func() {
+			tb.mu.Lock()
+			tb.screen.Write([]byte("render-race"))
+			tb.mu.Unlock()
+			d.render(sess, tb)
+		})
+	}
+	wg.Wait()
+	close(done)
+	drain.Wait()
+}
+
+func TestPickerResizeRecomposesModal(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+
+	d.handleInput(sess, ac, []byte("\x1bt"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.resize(sess, ac, domain.Size{Cols: 100, Rows: 30})
+
+	out := awaitFrame(t, sends, ports.MsgOutput)
+	msg, err := ports.UnmarshalOutput(out.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(msg.Data), "┌")
+	require.Contains(t, string(msg.Data), "Sessions")
+}
+
 func TestStatusCompositionGolden(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
@@ -967,7 +1180,7 @@ func TestStatusCompositionGolden(t *testing.T) {
 	sess.active = 1
 	sess.name = "work"
 
-	win := sess.activeWindow()
+	win := sess.activeTab()
 	win.screen = vt.NewScreen(12, 2)
 	win.size = domain.Size{Cols: 12, Rows: 2}
 	win.screen.Write([]byte("hello"))
@@ -981,7 +1194,7 @@ func TestStatusCompositionGolden(t *testing.T) {
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
 	for i, c := range frame.Row(2) {
 		if i >= len(" work  1 ") && i < len(" work  1  2 ") {
-			require.True(t, c.Style.Inverse, "active window segment cell %d should be inverse", i)
+			require.True(t, c.Style.Inverse, "active tab segment cell %d should be inverse", i)
 		}
 	}
 }
@@ -1009,7 +1222,7 @@ func TestStatusRepaintsOnCreateSwitchAndResize(t *testing.T) {
 		out, err := ports.UnmarshalOutput(f.Payload)
 		require.NoError(t, err)
 		require.Contains(t, string(out.Data), "work")
-		require.Contains(t, string(out.Data), ";7m", "active status window should be inverse-highlighted")
+		require.Contains(t, string(out.Data), ";7m", "active status tab should be inverse-highlighted")
 	}
 
 	releaseConn()
@@ -1147,9 +1360,10 @@ func TestSchedulerDebounceCoalesces(t *testing.T) {
 
 	d := New(nil, mc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &window{screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}}
+	win := &tab{screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}}
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
-	sess := &session{id: "s", name: "s", windows: []*window{win}, ctx: sctx, cancel: cancel, client: ac}
+	sess := &session{id: "s", name: "s", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
+	ac.setSession(sess)
 
 	win.mu.Lock()
 	win.screen.Write([]byte("hi"))
@@ -1176,7 +1390,7 @@ func TestSchedulerDebounceCoalesces(t *testing.T) {
 
 	cancel()
 	d.sessWg.Wait()
-	require.Equal(t, int32(1), outputs.Load(), "N dirties in one window must render exactly once")
+	require.Equal(t, int32(1), outputs.Load(), "N dirties in one tab must render exactly once")
 }
 
 func TestSchedulerAdaptiveDebounceFloodAndIdle(t *testing.T) {
@@ -1199,7 +1413,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 
 	p := portsmocks.NewMockPTY(t)
 	var screenWidthAtResize int
-	win := &window{screen: vt.NewScreen(80, 24), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 24}}
+	win := &tab{screen: vt.NewScreen(80, 24), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 24}}
 	p.EXPECT().Resize(domain.Size{Cols: 100, Rows: 29}).RunAndReturn(func(sz domain.Size) error {
 		// The screen must not yet be resized when the PTY is: proves order.
 		screenWidthAtResize = win.screen.Frame.Width
@@ -1218,7 +1432,8 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
-	sess := &session{id: "s", name: "s", windows: []*window{win}, client: ac}
+	sess := &session{id: "s", name: "s", tabs: []*tab{win}, client: ac}
+	ac.setSession(sess)
 
 	d.resize(sess, ac, newSize)
 
@@ -1509,10 +1724,11 @@ func TestSendErrorKillsEphemeral(t *testing.T) {
 	tr.EXPECT().Close().Return(nil).Maybe()
 
 	d := newTestDaemon(t, nil, stubClock{})
-	win := &window{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}}
+	win := &tab{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}}
 	sctx, cancel := context.WithCancel(context.Background())
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
-	sess := &session{id: "e", name: "0", ephemeral: true, windows: []*window{win}, ctx: sctx, cancel: cancel, client: ac}
+	sess := &session{id: "e", name: "0", ephemeral: true, tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
+	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 
 	win.mu.Lock()
@@ -1550,9 +1766,10 @@ func TestSchedulerDefersPendingDirtyTimerDuringSynchronizedUpdate(t *testing.T) 
 
 	d := New(nil, mc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &window{screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	win := &tab{screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
-	sess := &session{id: "sync", name: "sync", windows: []*window{win}, ctx: sctx, cancel: cancel, client: ac}
+	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
+	ac.setSession(sess)
 
 	win.mu.Lock()
 	win.screen.Write([]byte("before"))
@@ -1609,8 +1826,10 @@ func TestPTYQueryGetsResponseWrittenBackToPTY(t *testing.T) {
 
 	tr, sends := newCapturingTransport(t)
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &window{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
-	sess := &session{id: "query", name: "query", windows: []*window{win}, ctx: sctx, cancel: cancel, client: &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}}
+	win := &tab{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	sess := &session{id: "query", name: "query", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
+	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 	d.sessWg.Add(1)
 	d.ptyReader(sess, win)
@@ -1643,8 +1862,8 @@ func TestPTYReaderSameReadSynchronizedUpdateStartEndFlushesImmediately(t *testin
 	p.EXPECT().Close().Return(nil).Maybe()
 
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &window{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
-	sess := &session{id: "sync", name: "sync", windows: []*window{win}, ctx: sctx, cancel: cancel}
+	win := &tab{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	d.sessions[sess.id] = sess
 	d.sessWg.Add(1)
 	d.ptyReader(sess, win)
@@ -1676,8 +1895,8 @@ func TestPTYReaderDefersDirtyDuringSynchronizedUpdateAndFlushesAtEnd(t *testing.
 	p.EXPECT().Close().Return(nil).Maybe()
 
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &window{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
-	sess := &session{id: "sync", name: "sync", windows: []*window{win}, ctx: sctx, cancel: cancel}
+	win := &tab{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	d.sessions[sess.id] = sess
 	d.sessWg.Add(1)
 	d.ptyReader(sess, win)
@@ -1712,8 +1931,10 @@ func TestSyncUpdateWatchdogAbandonedSyncRenders(t *testing.T) {
 
 	tr, sends := newCapturingTransport(t)
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &window{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
-	sess := &session{id: "sync", name: "sync", windows: []*window{win}, ctx: sctx, cancel: cancel, client: &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}}
+	win := &tab{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
+	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 	d.sessWg.Add(2)
 	go d.scheduler(sess, win)
@@ -1754,8 +1975,10 @@ func TestSyncUpdateWatchdogStaleGenerationNoopAfterEnd(t *testing.T) {
 
 	tr, sends := newCapturingTransport(t)
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &window{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
-	sess := &session{id: "sync", name: "sync", windows: []*window{win}, ctx: sctx, cancel: cancel, client: &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}}
+	win := &tab{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
+	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 	d.sessWg.Add(2)
 	go d.scheduler(sess, win)
@@ -1794,7 +2017,7 @@ func TestMouseWheelCopyEntryExitAndStreamOrder(t *testing.T) {
 	writes := make(chan []byte, 4)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	win := sess.windows[0]
+	win := sess.tabs[0]
 	win.screen.Write([]byte("live"))
 
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
@@ -1821,7 +2044,7 @@ func TestMouseAltScreenWheelMapsToArrows(t *testing.T) {
 	writes := make(chan []byte, 2)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	sess.windows[0].screen.Write([]byte("\x1b[?1049h"))
+	sess.tabs[0].screen.Write([]byte("\x1b[?1049h"))
 
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
 	d.handleInput(sess, ac, []byte("\x1b[<65;1;1M"))
@@ -1843,7 +2066,7 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 	default:
 	}
 
-	sess.windows[0].screen.Write([]byte("\x1b[?1000h"))
+	sess.tabs[0].screen.Write([]byte("\x1b[?1000h"))
 	raw := []byte("\x1b[<0;2;3M")
 	d.handleInput(sess, ac, raw)
 	select {
@@ -1852,7 +2075,7 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 	default:
 	}
 
-	sess.windows[0].screen.Write([]byte("\x1b[?1006h"))
+	sess.tabs[0].screen.Write([]byte("\x1b[?1006h"))
 	d.handleInput(sess, ac, raw)
 	require.Equal(t, raw, <-writes)
 
@@ -1868,7 +2091,7 @@ func TestMouseSplitReportPreservesOrder(t *testing.T) {
 	writes := make(chan []byte, 2)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.windows[0].screen.Write([]byte("live"))
+	sess.tabs[0].screen.Write([]byte("live"))
 
 	d.handleInput(sess, ac, []byte("\x1b[<64;"))
 	d.handleInput(sess, ac, []byte("1;1Mq"))
@@ -1886,7 +2109,7 @@ func TestMouseSplitReportPreservesOrder(t *testing.T) {
 func TestCursorTailVisibleHideAndMoveOnly(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	win := sess.windows[0]
+	win := sess.tabs[0]
 	win.screen.Write([]byte("A"))
 
 	d.paint(sess, ac, true)
@@ -1909,7 +2132,7 @@ func TestCursorTailVisibleHideAndMoveOnly(t *testing.T) {
 func TestCursorTailHidesInCopyMode(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.windows[0].screen.Write([]byte("live"))
+	sess.tabs[0].screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
 	data := mustOutputData(t, sends)

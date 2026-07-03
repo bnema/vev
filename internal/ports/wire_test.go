@@ -358,8 +358,8 @@ func TestSessionsGoldenAndRoundTrip(t *testing.T) {
 		{
 			name: "two",
 			msg: Sessions{Sessions: []SessionInfo{
-				{SessionID: "0", Name: "0", Ephemeral: true, Windows: 1, Attached: false},
-				{SessionID: "work", Name: "proj", Ephemeral: false, Windows: 5, Attached: true},
+				{SessionID: "0", Name: "0", Ephemeral: true, Tabs: 1, Attached: false},
+				{SessionID: "work", Name: "proj", Ephemeral: false, Tabs: 5, Attached: true},
 			}},
 			want: []byte{
 				0x00, 0x02,
