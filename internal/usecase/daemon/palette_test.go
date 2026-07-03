@@ -103,6 +103,7 @@ func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
 	d := &Daemon{}
 	d.recordPaletteUse("SSP")
 	d.recordPaletteUse("NXT")
+	// STALE is not a registered command code; it must be dropped from output.
 	d.recordPaletteUse("STALE")
 	d.recordPaletteUse("SSP")
 
