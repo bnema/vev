@@ -34,6 +34,7 @@ func TestModelRenderDrawsInputAndError(t *testing.T) {
 	require.Equal(t, "> work                  ", promptRowText(frame.Row(0)))
 	require.True(t, frame.At(6, 0).Style.Inverse, "caret follows prefilled value")
 	require.Equal(t, "name already in use     ", promptRowText(frame.Row(1)))
+	require.True(t, frame.At(0, 1).Style.Inverse, "error line is visually distinct")
 }
 
 func promptRowText(row []renderer.Cell) string {

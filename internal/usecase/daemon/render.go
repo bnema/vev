@@ -263,10 +263,15 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	ac.paletteMu.Lock()
 	paletteModel := ac.palette
 	paletteActive := paletteModel != nil
-	ac.paletteMu.Unlock()
+	if !paletteActive {
+		ac.paletteMu.Unlock()
+	}
 	ac.promptMu.Lock()
 	promptModel := ac.prompt
 	promptActive := promptModel != nil
+	if !promptActive {
+		ac.promptMu.Unlock()
+	}
 
 	tb.mu.Lock()
 	if reset || copyActive || pickerActive || paletteActive || promptActive {
@@ -287,11 +292,12 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	}
 	if paletteActive {
 		frame, damage = composePaletteClientFrame(paletteModel, frame)
+		ac.paletteMu.Unlock()
 	}
 	if promptActive {
 		frame, damage = composePromptClientFrame(promptModel, frame)
+		ac.promptMu.Unlock()
 	}
-	ac.promptMu.Unlock()
 	desiredCursor := desiredCursorOut(tb.screen, copyActive || pickerActive || paletteActive || promptActive)
 	data, err := ac.rend.Draw(frame, damage)
 	var cursorTail []byte

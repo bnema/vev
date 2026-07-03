@@ -103,10 +103,11 @@ func (m *Model) Render(inner domain.Size) renderer.Frame {
 	}
 	base := renderer.DefaultStyle()
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: base})
-	ui.DrawInputLine(frame, 0, "> ", m.Query(), base)
 	if m == nil {
+		ui.DrawInputLine(frame, 0, "> ", "", base)
 		return frame
 	}
+	ui.DrawInputLine(frame, 0, "> ", m.Query(), base)
 	visible := frame.Height - 1
 	if visible <= 0 {
 		return frame

@@ -63,7 +63,9 @@ func (m *Model) Render(inner domain.Size) renderer.Frame {
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: base})
 	ui.DrawInputLine(frame, 0, "> ", m.Value(), base)
 	if frame.Height > 1 && m != nil && m.errMsg != "" {
-		ui.DrawText(frame, 0, 1, frame.Width, m.errMsg, base)
+		errStyle := base
+		errStyle.Inverse = true
+		ui.DrawText(frame, 0, 1, frame.Width, m.errMsg, errStyle)
 	}
 	return frame
 }

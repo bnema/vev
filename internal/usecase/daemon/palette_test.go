@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/mock"
@@ -136,6 +137,46 @@ func TestPaletteUTF8PendingCompletesFilter(t *testing.T) {
 	d.handlePaletteInput(ac, []byte{0xa9})
 	require.Empty(t, ac.palettePending)
 	require.Equal(t, "é", ac.palette.Query())
+}
+
+func TestPaletteRenderAndInputCanRunConcurrently(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	defer release()
+	d.enterPalette(sess, ac)
+
+	drainDone := make(chan struct{})
+	drainStopped := make(chan struct{})
+	go func() {
+		defer close(drainStopped)
+		for {
+			select {
+			case <-sends:
+			case <-drainDone:
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(drainDone)
+		<-drainStopped
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			d.paint(sess, ac, true)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			d.handlePaletteInput(ac, []byte("abc\x7f"))
+		}
+	}()
+	wg.Wait()
 }
 
 func TestPaletteExecMethods(t *testing.T) {

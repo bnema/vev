@@ -53,7 +53,7 @@ Some terminals encode Alt+Space as a non-breaking space instead of `ESC Space`; 
 
 Open the palette with Alt+Space, then type a command code or fuzzy-match its label. Use Up/Down or Ctrl-N/Ctrl-P to move through matches, Enter to run the selected command, and Esc to close the palette.
 
-Ephemeral sessions are marked with `*` in the status bar, for example `0*`. Renaming an ephemeral session makes it persistent and removes the marker.
+The status bar marks ephemeral sessions with `*`, for example `0*`. Ephemeral sessions are removed when their client detaches. Renaming an ephemeral session makes it a persistent named session and removes the marker.
 
 | Code | Action |
 |---|---|
@@ -66,7 +66,7 @@ Ephemeral sessions are marked with `*` in the status bar, for example `0*`. Rena
 | RNS | rename session |
 | DET | detach |
 
-Rename prompts are prefilled with the current name. Type text, use Backspace to edit, Enter to submit, or Esc/Ctrl-C to cancel. If validation fails, the prompt stays open and shows the error.
+Rename prompts are prefilled with the current session name. Type text, use Backspace to edit, Enter to submit, or Esc/Ctrl-C to cancel. Empty names and names already used by another session are rejected; the prompt stays open and shows the validation error.
 
 ## Scrollback and visual copy
 
