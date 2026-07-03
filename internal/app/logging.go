@@ -6,25 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bnema/vev/internal/platform"
 )
 
 // logFileName is the fixed name of vev's shared log file, used by both the
 // daemon and the raw-attached client (which must never log to the console).
 const logFileName = "vev.log"
-
-// stateDir returns the directory vev writes its log to: $XDG_STATE_HOME/vev
-// if set, else ~/.local/state/vev.
-func stateDir() string {
-	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
-		return filepath.Join(xdg, "vev")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		// Last resort: a per-uid temp path so logging never aborts startup.
-		return filepath.Join(os.TempDir(), fmt.Sprintf("vev-state-%d", os.Getuid()))
-	}
-	return filepath.Join(home, ".local", "state", "vev")
-}
 
 // parseLogLevel maps VEV_LOG to a slog level, defaulting to info.
 func parseLogLevel(s string) slog.Level {
@@ -48,7 +36,7 @@ func parseLogLevel(s string) slog.Level {
 //
 // No log rotation is performed for the MVP (future work).
 func setupLogging() (*os.File, error) {
-	dir := stateDir()
+	dir := platform.StateDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("vev: creating state dir: %w", err)
 	}

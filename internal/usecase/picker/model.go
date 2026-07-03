@@ -15,15 +15,18 @@ const (
 )
 
 type SessionView struct {
-	ID     domain.SessionID
-	Name   string
-	Tabs   []string
-	Active int
+	ID      domain.SessionID
+	Name    string
+	Tabs    []string
+	Active  int
+	Stopped bool
 }
 
 type Target struct {
 	Session  domain.SessionID
+	Name     string
 	TabIndex int
+	Stopped  bool
 }
 
 type Preview struct {
@@ -46,21 +49,27 @@ type row struct {
 	header   bool
 	label    string
 	session  domain.SessionID
+	name     string
 	tabIndex int
+	stopped  bool
 }
 
 func New(sessions []SessionView, cur domain.SessionID, curTab int) *Model {
 	m := &Model{selected: -1}
 	activeSelection := -1
 	for _, session := range sessions {
-		m.rows = append(m.rows, row{header: true, label: session.Name, session: session.ID, tabIndex: -1})
+		name := ""
+		if session.Stopped {
+			name = session.Name
+		}
+		m.rows = append(m.rows, row{header: true, label: session.Name, session: session.ID, name: name, tabIndex: -1, stopped: session.Stopped})
 		active := session.Active
 		if active < 0 || active >= len(session.Tabs) {
 			active = 0
 		}
 		for i, tab := range session.Tabs {
 			idx := len(m.rows)
-			m.rows = append(m.rows, row{label: tab, session: session.ID, tabIndex: i})
+			m.rows = append(m.rows, row{label: tab, session: session.ID, name: name, tabIndex: i, stopped: session.Stopped})
 			if session.ID == cur && i == curTab {
 				m.selected = idx
 			}
@@ -122,7 +131,7 @@ func (m *Model) Selected() (Target, bool) {
 	if r.header {
 		return Target{}, false
 	}
-	return Target{Session: r.session, TabIndex: r.tabIndex}, true
+	return Target{Session: r.session, Name: r.name, TabIndex: r.tabIndex, Stopped: r.stopped}, true
 }
 
 func (m *Model) Clone() *Model {
@@ -189,6 +198,9 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, selection ren
 			style = selection
 		}
 		label := r.label
+		if r.header && r.stopped {
+			label += " (stopped)"
+		}
 		if !r.header {
 			label = "  " + label
 		}

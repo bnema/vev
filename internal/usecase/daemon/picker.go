@@ -30,6 +30,7 @@ import (
 	"strconv"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/picker"
@@ -53,10 +54,17 @@ func (d *Daemon) enterPicker(sess *session, ac *attachedClient) {
 func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 	d.mu.Lock()
 	sessions := d.sessionsSnapshotLocked()
+	stopped := make([]stoppedSession, 0, len(d.stopped))
+	for _, s := range d.stopped {
+		if !s.purging {
+			stopped = append(stopped, s)
+		}
+	}
 	d.mu.Unlock()
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].name < sessions[j].name })
+	sort.Slice(stopped, func(i, j int) bool { return stopped[i].name < stopped[j].name })
 
-	views := make([]picker.SessionView, 0, len(sessions))
+	views := make([]picker.SessionView, 0, len(sessions)+len(stopped))
 	curTab := 0
 	for _, s := range sessions {
 		s.mu.Lock()
@@ -78,6 +86,14 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 		}
 		s.mu.Unlock()
 		views = append(views, view)
+	}
+	for _, s := range stopped {
+		views = append(views, picker.SessionView{
+			ID:      domain.SessionID("stopped:" + s.name),
+			Name:    s.name,
+			Tabs:    []string{""},
+			Stopped: true,
+		})
 	}
 	return views, curTab
 }
@@ -111,6 +127,15 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 	switchTarget := false
 	for i := 0; i < len(data); i++ {
 		switch data[i] {
+		case 'x':
+			target, ok := ac.picker.Selected()
+			ac.pickerMu.Unlock()
+			if ok {
+				d.killPickerTarget(target)
+			}
+			d.refreshPicker(ac)
+			d.paint(sess, ac, true)
+			return
 		case 'j':
 			ac.picker.Down()
 			changed = true
@@ -325,6 +350,10 @@ func (d *Daemon) sessionByID(id domain.SessionID) *session {
 }
 
 func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker.Target) {
+	if target.Stopped {
+		d.resumeStoppedAndSwitch(sess, ac, target)
+		return
+	}
 	targetSess := d.sessionByID(target.Session)
 	if targetSess == nil {
 		d.paint(sess, ac, true)
@@ -374,6 +403,79 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 	ac.setSession(targetSess)
 	d.mu.Unlock()
 	return old
+}
+
+func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, target picker.Target) {
+	d.mu.Lock()
+	stopped, ok := d.stopped[target.Name]
+	if !ok || stopped.purging {
+		d.mu.Unlock()
+		d.paint(from, ac, true)
+		return
+	}
+	from.mu.Lock()
+	if from.client != ac {
+		from.mu.Unlock()
+		d.mu.Unlock()
+		return
+	}
+	cwd := platform.DirOrHome(stopped.cwd)
+	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.size)
+	if err != nil {
+		from.mu.Unlock()
+		d.mu.Unlock()
+		d.log.Warn("resuming stopped session failed", "err", err, "session", target.Name)
+		d.paint(from, ac, true)
+		return
+	}
+	from.client = nil
+	ac.setSession(nil)
+	from.mu.Unlock()
+	targetSess.mu.Lock()
+	targetSess.client = ac
+	targetSess.mu.Unlock()
+	ac.setSession(targetSess)
+	d.mu.Unlock()
+	d.firstPaint(targetSess, ac, ac.size)
+}
+
+func (d *Daemon) killPickerTarget(target picker.Target) {
+	if target.Stopped {
+		d.mu.Lock()
+		stopped, ok := d.stopped[target.Name]
+		if ok && !stopped.purging {
+			if err := d.persist.Delete(target.Name); err != nil {
+				d.mu.Unlock()
+				d.log.Warn("deleting persisted stopped session failed", "err", err, "session", target.Name)
+				return
+			}
+			if cur, ok := d.stopped[target.Name]; ok && cur == stopped {
+				delete(d.stopped, target.Name)
+			}
+		}
+		d.mu.Unlock()
+		return
+	}
+	d.mu.Lock()
+	targetSess := d.sessions[target.Session]
+	d.mu.Unlock()
+	if targetSess != nil {
+		_ = d.killSession(targetSess, ports.ReasonSessionKilled, true)
+	}
+}
+
+func (d *Daemon) refreshPicker(ac *attachedClient) {
+	sess := ac.currentSession()
+	if sess == nil {
+		return
+	}
+	views, curTab := d.pickerViews(sess)
+	ac.pickerMu.Lock()
+	if ac.picker != nil {
+		ac.picker = picker.New(views, sess.id, curTab)
+	}
+	ac.pickerMu.Unlock()
+	d.registerPreviewForSelection(ac)
 }
 
 func composePickerClientFrame(model *picker.Model, preview picker.Preview, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {

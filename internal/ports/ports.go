@@ -43,6 +43,19 @@ type Listener interface {
 	Addr() string
 }
 
+// Store is a small byte-key/value persistence port.
+//
+// Implementations may buffer writes; Sync is the durability barrier.
+type Store interface {
+	Get(key []byte) ([]byte, bool)
+	Set(key, val []byte) error
+	Delete(key []byte) error
+	// Range iterates key/value pairs; fn returning false stops iteration early.
+	Range(fn func(k, v []byte) bool)
+	Sync() error
+	Close() error
+}
+
 // Clock abstracts time so usecases can be tested without real delays.
 type Clock interface {
 	Now() time.Time

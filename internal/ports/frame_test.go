@@ -2,6 +2,12 @@ package ports
 
 import "testing"
 
+func TestProtocolVersion(t *testing.T) {
+	if ProtocolVersion != 4 {
+		t.Fatalf("ProtocolVersion = %d, want 4", ProtocolVersion)
+	}
+}
+
 func TestMsgTypeUnique(t *testing.T) {
 	tests := []struct {
 		name string

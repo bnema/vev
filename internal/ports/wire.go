@@ -126,6 +126,7 @@ type SessionInfo struct {
 	Ephemeral bool
 	Tabs      uint16
 	Attached  bool
+	Stopped   bool
 }
 
 // Sessions is the daemon's reply to a List, enumerating live sessions.
@@ -559,6 +560,11 @@ func MarshalSessions(m Sessions) []byte {
 		} else {
 			w.putUint8(0)
 		}
+		if s.Stopped {
+			w.putUint8(1)
+		} else {
+			w.putUint8(0)
+		}
 	}
 	return w.b
 }
@@ -592,6 +598,11 @@ func UnmarshalSessions(b []byte) (Sessions, error) {
 			return Sessions{}, err
 		}
 		s.Attached = att != 0
+		stopped, err := r.getUint8()
+		if err != nil {
+			return Sessions{}, err
+		}
+		s.Stopped = stopped != 0
 		sessions = append(sessions, s)
 	}
 	if err := r.done(); err != nil {

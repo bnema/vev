@@ -35,6 +35,8 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/persist"
+	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -67,6 +69,7 @@ var defaultSize = domain.Size{Cols: 80, Rows: 24}
 type Daemon struct {
 	mu       sync.Mutex
 	sessions map[domain.SessionID]*session
+	stopped  map[string]stoppedSession
 	nextID   uint64
 	// closing marks that shutdown has irreversibly begun. It is set under mu,
 	// atomically with the event that makes shutdown inevitable (the registry
@@ -85,12 +88,15 @@ type Daemon struct {
 	animFrame int
 	animWake  chan struct{}
 
-	ptys      ports.PTYFactory
-	clock     ports.Clock
-	log       *slog.Logger
-	baseEnv   []string
-	shell     string
-	shellArgs []string
+	ptys           ports.PTYFactory
+	clock          ports.Clock
+	log            *slog.Logger
+	baseEnv        []string
+	shell          string
+	shellArgs      []string
+	persist        *persist.Persister
+	persistEnabled bool
+	procCwd        func(int) (string, error)
 
 	serveCtx    context.Context
 	serveCancel context.CancelFunc
@@ -110,6 +116,13 @@ type Daemon struct {
 
 // session is a single multiplexed session. It owns one or more full-screen
 
+type stoppedSession struct {
+	name      string
+	cwd       string
+	createdAt int64
+	purging   bool
+}
+
 type Option func(*Daemon)
 
 // WithShell overrides the command (and its args) each session spawns. The
@@ -119,6 +132,24 @@ func WithShell(cmd string, args []string) Option {
 	return func(d *Daemon) {
 		d.shell = cmd
 		d.shellArgs = args
+	}
+}
+
+// WithStore enables persisted named session metadata. A nil store keeps the
+// daemon in no-op persistence mode.
+func WithStore(store ports.Store) Option {
+	return func(d *Daemon) {
+		d.persist = persist.New(store)
+		d.persistEnabled = store != nil
+	}
+}
+
+// WithCwdReader overrides the process cwd reader used for persistence tests.
+func WithCwdReader(fn func(int) (string, error)) Option {
+	return func(d *Daemon) {
+		if fn != nil {
+			d.procCwd = fn
+		}
 	}
 }
 
@@ -134,16 +165,32 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	d := &Daemon{
 		sessions: make(map[domain.SessionID]*session),
+		stopped:  make(map[string]stoppedSession),
 		ptys:     ptys,
 		clock:    clock,
 		log:      log,
 		baseEnv:  os.Environ(),
 		shell:    shell,
+		persist:  persist.New(nil),
+		procCwd:  platform.ProcessCwd,
 		done:     make(chan struct{}),
 		animWake: make(chan struct{}, 1),
 	}
 	for _, o := range opts {
 		o(d)
+	}
+	if d.persist == nil {
+		d.persist = persist.New(nil)
+	}
+	if d.procCwd == nil {
+		d.procCwd = platform.ProcessCwd
+	}
+	if records, err := d.persist.LoadAll(); err != nil {
+		d.log.Warn("loading persisted sessions failed", "err", err)
+	} else {
+		for _, r := range records {
+			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt}
+		}
 	}
 	return d
 }
@@ -160,6 +207,11 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	d.sessWg.Go(func() {
 		d.attentionAnimator(d.serveCtx)
 	})
+	if d.persistEnabled && d.procCwd != nil {
+		d.sessWg.Go(func() {
+			d.cwdSampler(d.serveCtx)
+		})
+	}
 
 	// Break the accept loop when either the parent context is cancelled or the
 	// registry drains to empty: both close the listener, which fails Accept.
@@ -198,6 +250,9 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	d.shutdownAll(ports.ReasonServerShutdown)
 	d.sessWg.Wait()
 	d.waitNotifies()
+	if err := d.persist.Close(); err != nil {
+		d.log.Warn("closing session persister failed", "err", err)
+	}
 	return nil
 }
 
@@ -216,7 +271,7 @@ func (d *Daemon) shutdownAll(reason uint8) {
 		return
 	}
 	for _, s := range snapshot {
-		d.killSession(s, reason)
+		_ = d.killSession(s, reason, false)
 	}
 }
 
@@ -259,7 +314,8 @@ func (d *Daemon) handleList(tr ports.Transport) {
 	defer func() { _ = tr.Close() }()
 
 	d.mu.Lock()
-	infos := make([]ports.SessionInfo, 0, len(d.sessions))
+	infos := make([]ports.SessionInfo, 0, len(d.sessions)+len(d.stopped))
+	liveNames := make(map[string]struct{}, len(d.sessions))
 	for _, s := range d.sessions {
 		s.mu.Lock()
 		info := ports.SessionInfo{
@@ -269,8 +325,18 @@ func (d *Daemon) handleList(tr ports.Transport) {
 			Tabs:      uint16(len(s.tabs)),
 			Attached:  s.client != nil,
 		}
+		liveNames[s.name] = struct{}{}
 		s.mu.Unlock()
 		infos = append(infos, info)
+	}
+	for name, stopped := range d.stopped {
+		if stopped.purging {
+			continue
+		}
+		if _, live := liveNames[name]; live {
+			continue
+		}
+		infos = append(infos, ports.SessionInfo{Name: name, Stopped: true})
 	}
 	d.mu.Unlock()
 
@@ -296,13 +362,30 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 
 	d.mu.Lock()
 	target := d.findByNameLocked(k.Name)
+	if target == nil {
+		if stopped, ok := d.stopped[k.Name]; ok {
+			if err := d.persist.Delete(k.Name); err != nil {
+				d.mu.Unlock()
+				d.log.Warn("deleting persisted stopped session failed", "err", err, "session", k.Name)
+				_ = tr.Send(frameError(ports.ErrInternal, "deleting persisted stopped session failed"))
+				return
+			}
+			if cur, ok := d.stopped[k.Name]; ok && cur == stopped {
+				delete(d.stopped, k.Name)
+			}
+			d.mu.Unlock()
+			return
+		}
+	}
 	d.mu.Unlock()
 
 	if target == nil {
 		_ = tr.Send(frameError(ports.ErrNoSuchSession, "no such session: "+k.Name))
 		return
 	}
-	d.killSession(target, ports.ReasonSessionKilled)
+	if err := d.killSession(target, ports.ReasonSessionKilled, true); err != nil {
+		_ = tr.Send(frameError(ports.ErrInternal, "deleting persisted session failed"))
+	}
 }
 
 // handleHello runs the attach handshake: version check, intent routing,
@@ -387,7 +470,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrInternal, "empty session name"}
 		}
-		if d.nameTakenLocked(h.Name) {
+		if d.nameLiveOrStoppedLocked(h.Name) {
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}
 		}
@@ -404,8 +487,18 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	case ports.IntentAttach:
 		sess := d.findByNameLocked(h.Name)
 		if sess == nil {
-			d.mu.Unlock()
-			return nil, nil, &protoErr{ports.ErrNoSuchSession, "no such session: " + h.Name}
+			stopped, ok := d.stopped[h.Name]
+			if !ok || stopped.purging {
+				d.mu.Unlock()
+				return nil, nil, &protoErr{ports.ErrNoSuchSession, "no such session: " + h.Name}
+			}
+			cwd := platform.DirOrHome(stopped.cwd)
+			var err error
+			sess, err = d.createSessionLocked(h.Name, false, cwd, sz)
+			if err != nil {
+				d.mu.Unlock()
+				return nil, nil, err
+			}
 		}
 		ac, old := d.attachClient(sess, tr, sz)
 		d.mu.Unlock()

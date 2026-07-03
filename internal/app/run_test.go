@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/confirm"
@@ -94,6 +99,124 @@ func TestParseArgs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPrintSessionsShowsStoppedState(t *testing.T) {
+	var out bytes.Buffer
+	printSessions(&out, []ports.SessionInfo{
+		{Name: "main", Tabs: 2, Attached: true},
+		{Name: "old", Stopped: true},
+	})
+	got := out.String()
+	for _, want := range []string{"NAME", "STATE", "main", "running", "2", "yes", "old", "stopped", "-"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("printSessions output %q missing %q", got, want)
+		}
+	}
+}
+
+func TestRunListReadsStoppedSessionsWithoutDaemon(t *testing.T) {
+	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+
+	p, err := persist.Open(filepath.Join(stateRoot, "vev"))
+	if err != nil {
+		t.Fatalf("persist.Open error = %v", err)
+	}
+	now := time.Now().UnixNano()
+	if err := p.Save(persist.Record{Name: "stored", Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatalf("Save error = %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close error = %v", err)
+	}
+
+	got := captureStdout(t, func() {
+		if err := runList(context.Background()); err != nil {
+			t.Fatalf("runList error = %v", err)
+		}
+	})
+	for _, want := range []string{"stored", "stopped", "-"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("runList output %q missing %q", got, want)
+		}
+	}
+}
+
+func TestRunKillMissingStoppedSessionDoesNotCreateStore(t *testing.T) {
+	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+
+	err := runKill(context.Background(), "missing", false, false)
+	if err == nil || !strings.Contains(err.Error(), "no such session: missing") {
+		t.Fatalf("runKill error = %v, want no such session", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(stateRoot, "vev", "sessions.kv")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("sessions.kv stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestRunKillDeletesStoppedSessionWithoutDaemon(t *testing.T) {
+	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+
+	p, err := persist.Open(filepath.Join(stateRoot, "vev"))
+	if err != nil {
+		t.Fatalf("persist.Open error = %v", err)
+	}
+	now := time.Now().UnixNano()
+	if err := p.Save(persist.Record{Name: "stored", Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatalf("Save error = %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close error = %v", err)
+	}
+
+	got := captureStdout(t, func() {
+		if err := runKill(context.Background(), "stored", false, false); err != nil {
+			t.Fatalf("runKill error = %v", err)
+		}
+	})
+	if !strings.Contains(got, "killed stored") {
+		t.Fatalf("runKill output = %q, want success", got)
+	}
+	records, err := persist.LoadReadOnly(filepath.Join(stateRoot, "vev"))
+	if err != nil {
+		t.Fatalf("LoadReadOnly error = %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("records after kill = %#v, want none", records)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe error = %v", err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	defer func() { _ = r.Close() }()
+	outCh := make(chan []byte, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		out, err := io.ReadAll(r)
+		outCh <- out
+		errCh <- err
+	}()
+
+	fn()
+	_ = w.Close()
+	out := <-outCh
+	if err := <-errCh; err != nil {
+		t.Fatalf("ReadAll stdout error = %v", err)
+	}
+	return string(out)
 }
 
 func TestRunLocalAttachPromptsAndRestartsOnProtocolMismatch(t *testing.T) {

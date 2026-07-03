@@ -101,6 +101,16 @@ func TestSelectedMapping(t *testing.T) {
 	require.Equal(t, Target{Session: "beta", TabIndex: 1}, got)
 }
 
+func TestStoppedSessionSelectableAndRendered(t *testing.T) {
+	m := New([]SessionView{{ID: "stopped:work", Name: "work", Tabs: []string{""}, Stopped: true}}, "", 0)
+	got, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, Target{Session: "stopped:work", Name: "work", TabIndex: 0, Stopped: true}, got)
+	frame := m.Render(domain.Size{Cols: 24, Rows: 4}, Preview{})
+	require.Equal(t, 'w', frame.At(0, 0).Rune)
+	require.Equal(t, '(', frame.At(5, 0).Rune)
+}
+
 func TestRenderPreviewClipsPadsDropsWideRuneAndInvertsSelection(t *testing.T) {
 	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []string{"tab"}, Active: 0}}, "s1", 0)
 	preview := Preview{
