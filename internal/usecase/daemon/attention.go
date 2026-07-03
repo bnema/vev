@@ -33,7 +33,12 @@ func (d *Daemon) noteAttention(sess *session, tb *tab) {
 	tb.attention = true
 	sess.mu.Unlock()
 
-	d.repaintAllAttachedClients()
+	// Do not repaint here: this runs on the PTY reader goroutine, and paint
+	// can block on a slow client's socket (Transport.Send has no deadline) —
+	// that would let one wedged client stall a different session's reader.
+	// The animator's first tick (<=120ms) delivers the repaint, and pulse
+	// frame 0 renders the bell as blank anyway, so nothing is visibly lost
+	// by not painting immediately.
 	d.pokeAttentionTicker()
 }
 

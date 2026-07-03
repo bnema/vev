@@ -7,10 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
@@ -76,6 +78,53 @@ func TestPTYReaderBellMarksBackgroundTab(t *testing.T) {
 
 	_ = p2.Close()
 	d.sessWg.Wait()
+}
+
+// TestNoteAttentionDoesNotBlockOnWedgedOtherClient is the regression test for
+// the reader-blocks-on-a-slow-client bug: noteAttention runs on the PTY
+// reader goroutine (see ptyReader in render.go), so it must never repaint
+// synchronously — paint ends in Transport.Send, which has no deadline, and a
+// stalled client's socket would otherwise stall the reader of an unrelated
+// session. A second session's client whose Send never returns must not stop
+// noteAttention from returning promptly.
+func TestNoteAttentionDoesNotBlockOnWedgedOtherClient(t *testing.T) {
+	d, sess, _, _, releases := newManualTabSession(t, 2)
+	defer releases[0]()
+	defer releases[1]()
+	sess.active = 0
+
+	trW := portsmocks.NewMockTransport(t)
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	trW.EXPECT().Send(mock.Anything).RunAndReturn(func(ports.Frame) error {
+		<-block
+		return nil
+	}).Maybe()
+	trW.EXPECT().Close().Return(nil).Maybe()
+	acW := &attachedClient{tr: trW, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	sctxW, cancelW := context.WithCancel(d.serveCtx)
+	t.Cleanup(cancelW)
+	tabW := &tab{screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctxW, cancel: cancelW}
+	sessW := &session{id: "wedged", name: "wedged", ctx: sctxW, cancel: cancelW, tabs: []*tab{tabW}, client: acW}
+	acW.setSession(sessW)
+	acW.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acW})
+	d.sessions[sessW.id] = sessW
+
+	done := make(chan struct{})
+	go func() {
+		d.noteAttention(sess, sess.tabs[1])
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("noteAttention blocked on a wedged other-session client's Send")
+	}
+
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	require.True(t, sess.tabs[1].attention)
 }
 
 type scriptPTY struct {
