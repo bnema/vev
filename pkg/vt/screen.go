@@ -70,17 +70,39 @@ func (s *Screen) Resize(width, height int) {
 	if width == s.Frame.Width && height == s.Frame.Height {
 		return
 	}
-	s.Frame = renderer.NewFrame(width, height)
-	s.Row, s.Col = 0, 0
-	s.Style = renderer.DefaultStyle()
+	evict := func(row []renderer.Cell) {
+		if s.OnLineEvicted != nil {
+			s.OnLineEvicted(append([]renderer.Cell(nil), row...))
+		}
+	}
+
+	if s.alternate != nil {
+		var shift int
+		s.Frame, shift = resizeFrame(s.Frame, width, height, s.Row, nil)
+		s.Row = clamp(s.Row-shift, 0, height-1)
+		s.Col = clamp(s.Col, 0, width-1)
+		s.savedCursor = resizedCursor(s.savedCursor, shift, width, height)
+		s.alternate.frame, shift = resizeFrame(s.alternate.frame, width, height, s.alternate.row, evict)
+		s.alternate.row = clamp(s.alternate.row-shift, 0, height-1)
+		s.alternate.col = clamp(s.alternate.col, 0, width-1)
+		s.alternate.savedCursor = resizedCursor(s.alternate.savedCursor, shift, width, height)
+		s.alternate.scrollTop = clamp(s.alternate.scrollTop-shift, 0, height-1)
+		s.alternate.scrollBottom = clamp(s.alternate.scrollBottom-shift, 0, height-1)
+		if s.alternate.scrollTop >= s.alternate.scrollBottom {
+			s.alternate.scrollTop = 0
+			s.alternate.scrollBottom = max(height-1, 0)
+		}
+	} else {
+		var shift int
+		s.Frame, shift = resizeFrame(s.Frame, width, height, s.Row, evict)
+		s.Row = clamp(s.Row-shift, 0, height-1)
+		s.Col = clamp(s.Col, 0, width-1)
+		s.savedCursor = resizedCursor(s.savedCursor, shift, width, height)
+	}
+
+	// A resize can split an in-flight escape sequence from the terminal state it
+	// was meant to mutate; keep the durable child state but discard partial bytes.
 	s.escapeBuf = s.escapeBuf[:0]
-	s.savedCursor = cursorState{}
-	s.alternate = nil
-	s.cursorVisible = true
-	s.cursorStyle = 0
-	s.cursorStyleSet = false
-	s.mouseMode = 0
-	s.mouseSGR = false
 	s.resetScrollRegion()
 	s.fullRedraw()
 }
@@ -892,6 +914,33 @@ func (s *Screen) exitAlternateScreen() {
 	s.savedCursor = state.savedCursor
 	s.alternate = nil
 	s.fullRedraw()
+}
+
+func resizeFrame(old renderer.Frame, newW, newH, cursorRow int, evict func([]renderer.Cell)) (renderer.Frame, int) {
+	next := renderer.NewFrame(newW, newH)
+	shift := clamp(cursorRow-(newH-1), 0, max(old.Height-newH, 0))
+	if evict != nil {
+		for y := 0; y < shift; y++ {
+			evict(old.Row(y))
+		}
+	}
+	for dy := 0; dy < newH; dy++ {
+		sy := dy + shift
+		if sy >= old.Height {
+			break
+		}
+		copy(next.Row(dy), old.Row(sy))
+	}
+	return next, shift
+}
+
+func resizedCursor(cur cursorState, shift, width, height int) cursorState {
+	if !cur.saved {
+		return cur
+	}
+	cur.row = clamp(cur.row-shift, 0, height-1)
+	cur.col = clamp(cur.col, 0, width-1)
+	return cur
 }
 
 // cloneFrame produces an independent copy in canonical layout: it copies the

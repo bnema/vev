@@ -34,7 +34,7 @@ func TestCopyModePaletteCommandEntersAndDoesNotForward(t *testing.T) {
 
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
-	d.handleInput(sess, ac, []byte("CPY\r"))
+	d.handleInput(sess, ac, []byte("VIS\r"))
 
 	if ac.copyMode == nil {
 		t.Fatal("scrollback mode not entered")
@@ -47,16 +47,16 @@ func TestCopyModePaletteCommandEntersAndDoesNotForward(t *testing.T) {
 	out := awaitFrame(t, sends, ports.MsgOutput)
 	msg, err := ports.UnmarshalOutput(out.Payload)
 	require.NoError(t, err)
-	if got := string(msg.Data); !strings.Contains(got, "[SCROLL]") || strings.Contains(got, "[COPY]") {
-		t.Fatalf("scrollback mode paint = %q, want [SCROLL] without [COPY]", got)
+	if got := string(msg.Data); !strings.Contains(got, "[VISUAL]") || strings.Contains(got, "[COPY]") {
+		t.Fatalf("visual mode paint = %q, want [VISUAL] without [COPY]", got)
 	}
 
 	d.handleInput(sess, ac, []byte(" "))
 	out = awaitFrame(t, sends, ports.MsgOutput)
 	msg, err = ports.UnmarshalOutput(out.Payload)
 	require.NoError(t, err)
-	if got := string(msg.Data); !strings.Contains(got, "[VISUAL]") || strings.Contains(got, "[SCROLL]") {
-		t.Fatalf("visual selection paint = %q, want [VISUAL] without [SCROLL]", got)
+	if got := string(msg.Data); !strings.Contains(got, "[SELECT]") || strings.Contains(got, "[SCROLL]") {
+		t.Fatalf("visual selection paint = %q, want [SELECT] without [SCROLL]", got)
 	}
 }
 
@@ -157,7 +157,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 	require.NotNil(t, ac)
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
-	d.handleInput(sess, ac, []byte("CPY\r"))
+	d.handleInput(sess, ac, []byte("VIS\r"))
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte{'g', ' ', 'G', 'y'})
 

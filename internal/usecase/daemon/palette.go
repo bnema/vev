@@ -125,7 +125,7 @@ func (e paletteExec) Detach() error {
 	return nil
 }
 
-func (e paletteExec) EnterCopyMode() error {
+func (e paletteExec) EnterVisualMode() error {
 	e.d.enterCopyMode(e.sess, e.ac)
 	return nil
 }

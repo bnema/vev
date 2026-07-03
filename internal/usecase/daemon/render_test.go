@@ -259,6 +259,51 @@ func TestSchedulerAdaptiveDebounceResetsAfterQuietPeriod(t *testing.T) {
 
 // --- resize ordering --------------------------------------------------------
 
+func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
+	p := portsmocks.NewMockPTY(t)
+	p.EXPECT().Resize(domain.Size{Cols: 4, Rows: 2}).Return(nil).Once()
+	p.EXPECT().Resize(domain.Size{Cols: 6, Rows: 4}).Return(nil).Once()
+
+	win := newTab(p, domain.Size{Cols: 4, Rows: 4})
+	for y, text := range []string{"0000", "1111", "2222", "3333"} {
+		copy(win.screen.Frame.Row(y), testRow(text))
+	}
+	win.screen.Row = 3
+
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Close().Return(nil).Maybe()
+	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+
+	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	sess := &session{id: "s", name: "s", tabs: []*tab{win}, client: ac}
+	ac.setSession(sess)
+
+	d.resize(sess, ac, domain.Size{Cols: 4, Rows: 3})
+	require.Equal(t, "2222", frameRowString(win.screen.Frame, 0))
+	require.Equal(t, "3333", frameRowString(win.screen.Frame, 1))
+	require.Equal(t, 2, win.scrollback.Len())
+	require.Equal(t, "0000", cellsString(win.scrollback.Row(0)))
+	require.Equal(t, "1111", cellsString(win.scrollback.Row(1)))
+
+	d.resize(sess, ac, domain.Size{Cols: 6, Rows: 5})
+	require.Equal(t, "2222  ", frameRowString(win.screen.Frame, 0))
+	require.Equal(t, "3333  ", frameRowString(win.screen.Frame, 1))
+	require.Equal(t, 2, win.scrollback.Len())
+}
+
+func frameRowString(f renderer.Frame, y int) string {
+	return cellsString(f.Row(y))
+}
+
+func cellsString(row []renderer.Cell) string {
+	runes := make([]rune, len(row))
+	for i, c := range row {
+		runes[i] = c.Rune
+	}
+	return string(runes)
+}
+
 func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	newSize := domain.Size{Cols: 100, Rows: 30}
 

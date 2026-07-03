@@ -16,6 +16,14 @@ func snapshot(lines []string, height int) Snapshot {
 	return Snapshot{Rows: rows, Width: 16, Height: height}
 }
 
+func inverseRow(text string) []renderer.Cell {
+	cells := row(text)
+	for i := range cells {
+		cells[i].Style.Inverse = true
+	}
+	return cells
+}
+
 func TestCopyModeNavigationBounds(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -129,24 +137,94 @@ func TestCopyModeAtBottomWithShortSnapshot(t *testing.T) {
 	}
 }
 
+func TestCopyModeSelectionAPI(t *testing.T) {
+	tests := []struct {
+		name          string
+		ops           func(*Mode, Snapshot)
+		wantCursor    int
+		wantTop       int
+		wantAnchor    int
+		wantSelecting bool
+	}{
+		{
+			name: "SetCursor clamps and scrolls viewport",
+			ops: func(m *Mode, s Snapshot) {
+				m.SetCursor(s, -10)
+			},
+			wantCursor: 0,
+			wantTop:    0,
+			wantAnchor: -1,
+		},
+		{
+			name: "StartSelectionAt sets cursor anchor and selecting",
+			ops: func(m *Mode, s Snapshot) {
+				m.StartSelectionAt(s, 2)
+			},
+			wantCursor:    2,
+			wantTop:       2,
+			wantAnchor:    2,
+			wantSelecting: true,
+		},
+		{
+			name: "ExtendTo preserves anchor while moving cursor",
+			ops: func(m *Mode, s Snapshot) {
+				m.StartSelectionAt(s, 1)
+				m.ExtendTo(s, 4)
+			},
+			wantCursor:    4,
+			wantTop:       2,
+			wantAnchor:    1,
+			wantSelecting: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := snapshot([]string{"00", "01", "02", "03", "04"}, 3)
+			m := NewMode(s)
+			tt.ops(m, s)
+			if m.Cursor != tt.wantCursor || m.ViewportTop != tt.wantTop || m.Anchor != tt.wantAnchor || m.Selecting != tt.wantSelecting {
+				t.Fatalf("mode = cursor:%d top:%d anchor:%d selecting:%v, want cursor:%d top:%d anchor:%d selecting:%v", m.Cursor, m.ViewportTop, m.Anchor, m.Selecting, tt.wantCursor, tt.wantTop, tt.wantAnchor, tt.wantSelecting)
+			}
+		})
+	}
+}
+
+func TestCopyModeExtendToAboveAnchorSwapsSelectedBounds(t *testing.T) {
+	s := snapshot([]string{"00", "01", "02", "03", "04"}, 3)
+	m := NewMode(s)
+
+	m.StartSelectionAt(s, 4)
+	m.ExtendTo(s, 1)
+
+	if m.Cursor != 1 || m.ViewportTop != 1 || m.Anchor != 4 || !m.Selecting {
+		t.Fatalf("mode = cursor:%d top:%d anchor:%d selecting:%v, want cursor:1 top:1 anchor:4 selecting:true", m.Cursor, m.ViewportTop, m.Anchor, m.Selecting)
+	}
+	lo, hi, ok := m.SelectedBounds()
+	if !ok || lo != 1 || hi != 4 {
+		t.Fatalf("SelectedBounds = (%d,%d,%v), want (1,4,true)", lo, hi, ok)
+	}
+}
+
 func TestScrollbackModeStatusDistinguishesPassiveAndVisual(t *testing.T) {
 	s := snapshot([]string{"alpha   ", "beta    ", "gamma   "}, 2)
 	m := NewMode(s)
 
 	frame := m.Render(s)
-	if got := frameText(frame.Row(s.Height)); !strings.Contains(got, "[SCROLL]") || strings.Contains(got, "[COPY]") || strings.Contains(got, "[VISUAL]") {
-		t.Fatalf("passive status = %q, want [SCROLL] and no copy/visual label", got)
+	if got := frameText(frame.Row(s.Height)); !strings.Contains(got, "[VISUAL]") || !strings.Contains(got, "3/3") || strings.Contains(got, "[SCROLL]") || strings.Contains(got, "[SELECT]") {
+		t.Fatalf("passive status = %q, want [VISUAL] with N/M and no scroll/select label", got)
 	}
 
 	m.ToggleSelection()
 	frame = m.Render(s)
-	if got := frameText(frame.Row(s.Height)); !strings.Contains(got, "[VISUAL]") || strings.Contains(got, "[SCROLL]") {
-		t.Fatalf("selection status = %q, want [VISUAL] and no [SCROLL]", got)
+	if got := frameText(frame.Row(s.Height)); !strings.Contains(got, "[SELECT]") || !strings.Contains(got, "3/3") || strings.Contains(got, "[VISUAL]") {
+		t.Fatalf("selection status = %q, want [SELECT] with N/M and no [VISUAL]", got)
 	}
 }
 
 func TestCopyModeSelectionPayloadAndInverse(t *testing.T) {
 	s := snapshot([]string{"alpha   ", "beta    ", "gamma   "}, 2)
+	s.Rows[1] = inverseRow("beta    ")
 	m := &Mode{ViewportTop: 0, Cursor: 0, Anchor: 0, Selecting: true}
 	m.Move(s, 1)
 
@@ -155,8 +233,34 @@ func TestCopyModeSelectionPayloadAndInverse(t *testing.T) {
 	}
 	frame := m.Render(s)
 	for y := range 2 {
-		if !frame.At(0, y).Style.Inverse {
-			t.Fatalf("row %d first cell not inverse", y)
+		for x, c := range frame.Row(y) {
+			if !c.Style.Inverse {
+				t.Fatalf("row %d cell %d not inverse", y, x)
+			}
+		}
+	}
+}
+
+func TestCopyModeRenderLineCursorMarker(t *testing.T) {
+	s := snapshot([]string{"alpha   ", "beta    ", "gamma   "}, 3)
+	m := &Mode{ViewportTop: 0, Cursor: 1, Anchor: -1}
+
+	frame := m.Render(s)
+	if !frame.At(0, 1).Style.Inverse {
+		t.Fatalf("cursor line first cell inverse = false, want true")
+	}
+	if frame.At(1, 1).Style.Inverse {
+		t.Fatalf("cursor line second cell inverse = true, want marker on first cell only")
+	}
+	if frame.At(0, 0).Style.Inverse || frame.At(0, 2).Style.Inverse {
+		t.Fatalf("non-cursor lines have inverse marker, want none")
+	}
+
+	m.StartSelectionAt(s, 1)
+	frame = m.Render(s)
+	for x, c := range frame.Row(1) {
+		if !c.Style.Inverse {
+			t.Fatalf("selected cursor row cell %d inverse = false, want full-line selection highlight", x)
 		}
 	}
 }

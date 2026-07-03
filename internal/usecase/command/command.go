@@ -7,7 +7,7 @@ type Context interface {
 	NextTab() error
 	PrevTab() error
 	Detach() error
-	EnterCopyMode() error
+	EnterVisualMode() error
 	RenameSession() error
 	OpenSessionPicker() error
 }

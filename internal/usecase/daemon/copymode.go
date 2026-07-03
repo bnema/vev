@@ -31,6 +31,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/mouse"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -76,8 +77,62 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	tb.mu.Unlock()
 	ac.copyMu.Lock()
 	ac.copyMode = scopy.NewMode(snap)
+	ac.copyPressRowValid = false
+	ac.copyDragging = false
+	ac.normalMousePressValid = false
 	ac.copyMu.Unlock()
 	d.paint(sess, ac, true)
+}
+
+func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
+	if ev.Button != mouse.Left {
+		return
+	}
+	tb := sess.activeTab()
+	if tb == nil {
+		return
+	}
+
+	tb.mu.Lock()
+	if ev.Row >= tb.screen.Frame.Height {
+		tb.mu.Unlock()
+		return
+	}
+	ac.copyMu.Lock()
+	if ac.copyMode == nil {
+		ac.copyMu.Unlock()
+		tb.mu.Unlock()
+		return
+	}
+	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
+	absRow := ac.copyMode.ViewportTop + ev.Row
+	changed := false
+	switch ev.Type {
+	case mouse.Press:
+		ac.copyMode.SetCursor(snap, absRow)
+		ac.copyPressRow = ac.copyMode.Cursor
+		ac.copyPressRowValid = true
+		ac.copyDragging = false
+		changed = true
+	case mouse.Motion:
+		if !ac.copyPressRowValid {
+			break
+		}
+		if !ac.copyDragging {
+			ac.copyMode.StartSelectionAt(snap, ac.copyPressRow)
+			ac.copyDragging = true
+		}
+		ac.copyMode.ExtendTo(snap, absRow)
+		changed = true
+	case mouse.Release:
+		// Button release intentionally has no visual effect.
+	}
+	ac.copyMu.Unlock()
+	tb.mu.Unlock()
+
+	if changed {
+		d.paint(sess, ac, true)
+	}
 }
 
 func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
@@ -125,7 +180,7 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		case 'G':
 			ac.copyMode.Bottom(snap)
 			changed = true
-		case ' ':
+		case ' ', 'v':
 			ac.copyMode.ToggleSelection()
 			changed = true
 		case '\r', '\n', 'y':

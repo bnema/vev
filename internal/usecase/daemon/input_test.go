@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"encoding/base64"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -172,7 +174,7 @@ func TestMouseWheelEntersScrollbackModeAndExitsAtBottom(t *testing.T) {
 	data := mustOutputData(t, sends)
 	require.NotNil(t, ac.copyMode)
 	require.Equal(t, 19, ac.copyMode.Cursor)
-	require.Contains(t, string(data), "[SCROLL]")
+	require.Contains(t, string(data), "[VISUAL]")
 
 	d.handleInput(sess, ac, []byte("\x1b[<65;1;1M"))
 	mustOutputData(t, sends)
@@ -206,7 +208,7 @@ func TestMouseAltScreenWheelMapsToArrows(t *testing.T) {
 func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 	writes := make(chan []byte, 4)
 	p, _ := newBlockingPTYWithWrites(t, writes)
-	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
 	select {
@@ -214,6 +216,7 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 		t.Fatalf("press without child mouse mode forwarded: %q", got)
 	default:
 	}
+	require.Nil(t, ac.copyMode, "press alone must not enter visual mode")
 
 	sess.tabs[0].screen.Write([]byte("\x1b[?1000h"))
 	raw := []byte("\x1b[<0;2;3M")
@@ -234,6 +237,49 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 		t.Fatalf("status-row mouse report forwarded: %q", got)
 	default:
 	}
+
+	sess.tabs[0].screen.Write([]byte("\x1b[?1006l\x1b[?1000l"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
+	require.Nil(t, ac.copyMode, "press alone must still not enter visual mode")
+	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
+	mustOutputData(t, sends)
+	require.NotNil(t, ac.copyMode)
+	lo, hi, ok := ac.copyMode.SelectedBounds()
+	require.True(t, ok)
+	require.Equal(t, 0, lo)
+	require.Equal(t, 2, hi)
+}
+
+func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	copy(sess.tabs[0].screen.Frame.Row(0), testRow("alpha"))
+	copy(sess.tabs[0].screen.Frame.Row(1), testRow("bravo"))
+	copy(sess.tabs[0].screen.Frame.Row(2), testRow("charlie"))
+
+	d.enterCopyMode(sess, ac)
+	mustOutputData(t, sends)
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;2M"))
+	mustOutputData(t, sends)
+	require.NotNil(t, ac.copyMode)
+	lo, hi, ok := ac.copyMode.SelectedBounds()
+	require.True(t, ok)
+	require.Equal(t, 0, lo)
+	require.Equal(t, 1, hi)
+
+	d.handleInput(sess, ac, []byte("y"))
+	data := ""
+	require.Eventually(t, func() bool {
+		data = string(mustOutputData(t, sends))
+		return strings.HasPrefix(data, "\x1b]52;c;")
+	}, 2*time.Second, 5*time.Millisecond, "OSC52 output = %q", data)
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(strings.TrimPrefix(data, "\x1b]52;c;"), "\a"))
+	require.NoError(t, err)
+	require.Equal(t, "alpha\nbravo", string(decoded))
+	require.Nil(t, ac.copyMode)
+
+	exitPaint := string(mustOutputData(t, sends))
+	require.NotContains(t, exitPaint, "[SELECT]")
 }
 
 func TestMouseSplitReportPreservesOrder(t *testing.T) {
