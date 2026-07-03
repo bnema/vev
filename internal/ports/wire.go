@@ -11,6 +11,7 @@ import (
 	"errors"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/pkg/renderer"
 )
 
 // errShortPayload is returned when a payload ends before a required field
@@ -63,6 +64,16 @@ type Input struct {
 // Resize notifies the daemon of a client-side terminal size change.
 type Resize struct {
 	Size domain.Size
+}
+
+// Theme reports the client's terminal foreground/background colors and
+// whether the client terminal supports truecolor.
+type Theme struct {
+	HasForeground bool
+	Foreground    renderer.RGB
+	HasBackground bool
+	Background    renderer.RGB
+	TrueColor     bool
 }
 
 // Detach asks the daemon to detach the current client without killing the
@@ -270,6 +281,68 @@ func MarshalResize(m Resize) []byte {
 	w.putUint16(uint16(m.Size.Cols))
 	w.putUint16(uint16(m.Size.Rows))
 	return w.b
+}
+
+// MarshalTheme encodes m into a fixed-width Theme message payload.
+func MarshalTheme(m Theme) []byte {
+	var flags uint8
+	if m.HasForeground {
+		flags |= 0x01
+	}
+	if m.HasBackground {
+		flags |= 0x02
+	}
+	if m.TrueColor {
+		flags |= 0x04
+	}
+	return []byte{
+		flags,
+		m.Foreground.R, m.Foreground.G, m.Foreground.B,
+		m.Background.R, m.Background.G, m.Background.B,
+	}
+}
+
+// UnmarshalTheme decodes a fixed-width Theme message payload.
+func UnmarshalTheme(b []byte) (Theme, error) {
+	r := payloadReader{b: b}
+	flags, err := r.getUint8()
+	if err != nil {
+		return Theme{}, err
+	}
+	fgR, err := r.getUint8()
+	if err != nil {
+		return Theme{}, err
+	}
+	fgG, err := r.getUint8()
+	if err != nil {
+		return Theme{}, err
+	}
+	fgB, err := r.getUint8()
+	if err != nil {
+		return Theme{}, err
+	}
+	bgR, err := r.getUint8()
+	if err != nil {
+		return Theme{}, err
+	}
+	bgG, err := r.getUint8()
+	if err != nil {
+		return Theme{}, err
+	}
+	bgB, err := r.getUint8()
+	if err != nil {
+		return Theme{}, err
+	}
+	if err := r.done(); err != nil {
+		return Theme{}, err
+	}
+	return Theme{
+		HasForeground: flags&0x01 != 0,
+		Foreground:    renderer.RGB{R: fgR, G: fgG, B: fgB},
+		HasBackground: flags&0x02 != 0,
+		Background:    renderer.RGB{R: bgR, G: bgG, B: bgB},
+		TrueColor:     flags&0x04 != 0,
+	}, nil
 }
 
 // UnmarshalResize decodes a Resize message payload.

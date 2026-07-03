@@ -110,12 +110,17 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	sess.mu.Lock()
 	name := sess.name
 	cwd := sess.cwd
+	client := sess.client
 	sess.mu.Unlock()
 	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), cwd, tbSize)
 	if err != nil {
 		return fmt.Errorf("daemon: spawning tab for session %q: %w", name, err)
 	}
 	tb := newTab(pty, tbSize)
+	if client != nil {
+		t := client.getTheme()
+		tb.screen.SetDefaultColors(t.Foreground, t.Background, t.HasFG && t.HasBG)
+	}
 	d.mu.Lock()
 	if d.closing || d.sessions[sess.id] != sess || sess.ctx.Err() != nil {
 		d.mu.Unlock()

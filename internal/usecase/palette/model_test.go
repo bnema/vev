@@ -5,6 +5,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
+	"github.com/bnema/vev/pkg/renderer"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,4 +89,21 @@ func TestRenderDrawsInputCaretSelectedLineAndCodeHighlight(t *testing.T) {
 	require.True(t, frame.At(0, 1).Style.Bold, "matched C is bold")
 	require.False(t, frame.At(1, 1).Style.Bold, "unmatched P is not highlighted")
 	require.True(t, frame.At(2, 1).Style.Bold, "matched Y is bold")
+}
+
+func TestRenderUsesSelectionStyleForFuzzyHighlights(t *testing.T) {
+	m := New([]command.Command{cmd("CPY", "Copy", "Enter copy mode")})
+	m.Insert('c')
+	m.Insert('y')
+	accent := renderer.DefaultStyle()
+	accent.HasBackgroundRGB = true
+	accent.BackgroundRGB = renderer.RGB{R: 1, G: 2, B: 3}
+
+	frame := m.Render(domain.Size{Cols: 28, Rows: 3}, accent)
+
+	matched := frame.At(0, 1).Style
+	require.True(t, matched.Bold)
+	require.False(t, matched.Inverse)
+	require.True(t, matched.HasBackgroundRGB)
+	require.Equal(t, renderer.RGB{R: 1, G: 2, B: 3}, matched.BackgroundRGB)
 }

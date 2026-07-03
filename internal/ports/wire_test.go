@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/pkg/renderer"
 )
 
 // mustNotPanic runs f and fails the test (instead of crashing the test
@@ -137,6 +138,60 @@ func TestInputGoldenAndRoundTrip(t *testing.T) {
 			t.Fatalf("UnmarshalInput() unexpected error = %v", err)
 		}
 	})
+}
+
+func TestThemeGoldenAndRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  Theme
+		want []byte
+	}{
+		{
+			name: "foreground background truecolor",
+			msg: Theme{
+				HasForeground: true,
+				Foreground:    renderer.RGB{R: 1, G: 2, B: 3},
+				HasBackground: true,
+				Background:    renderer.RGB{R: 4, G: 5, B: 6},
+				TrueColor:     true,
+			},
+			want: []byte{0x07, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+		},
+		{
+			name: "foreground only no truecolor",
+			msg: Theme{
+				HasForeground: true,
+				Foreground:    renderer.RGB{R: 10, G: 20, B: 30},
+				Background:    renderer.RGB{R: 40, G: 50, B: 60},
+			},
+			want: []byte{0x01, 0x0a, 0x14, 0x1e, 0x28, 0x32, 0x3c},
+		},
+		{
+			name: "empty",
+			msg:  Theme{},
+			want: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MarshalTheme(tt.msg)
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("MarshalTheme() = %#v, want %#v", got, tt.want)
+			}
+			back, err := UnmarshalTheme(got)
+			if err != nil {
+				t.Fatalf("UnmarshalTheme() error = %v", err)
+			}
+			if !reflect.DeepEqual(back, tt.msg) {
+				t.Fatalf("round trip = %#v, want %#v", back, tt.msg)
+			}
+		})
+	}
+
+	full := MarshalTheme(tests[0].msg)
+	assertAllPrefixesFail(t, full, UnmarshalTheme)
+	assertTrailingGarbageFails(t, full, UnmarshalTheme)
 }
 
 func TestResizeGoldenAndRoundTrip(t *testing.T) {

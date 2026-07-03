@@ -265,6 +265,21 @@ func TestCopyModeRenderLineCursorMarker(t *testing.T) {
 	}
 }
 
+func TestCopyModeSelectionUsesProvidedStyle(t *testing.T) {
+	s := snapshot([]string{"alpha   ", "beta    "}, 2)
+	m := &Mode{ViewportTop: 0, Cursor: 0, Anchor: 0, Selecting: true}
+	selection := renderer.DefaultStyle()
+	selection.HasBackgroundRGB = true
+	selection.BackgroundRGB = renderer.RGB{R: 1, G: 2, B: 3}
+
+	frame := m.Render(s, renderer.DefaultStyle(), selection)
+
+	got := frame.At(0, 0).Style
+	if got.Inverse || !got.HasBackgroundRGB || got.BackgroundRGB != selection.BackgroundRGB {
+		t.Fatalf("selected cell style = %+v, want themed selection %+v", got, selection)
+	}
+}
+
 func frameText(row []renderer.Cell) string {
 	var b strings.Builder
 	for _, c := range row {

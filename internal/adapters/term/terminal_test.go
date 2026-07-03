@@ -60,7 +60,7 @@ func TestTerminal_EnterRaw_NonTTY_EmitsAltScreenAndCursorEscapes(t *testing.T) {
 	_ = outW.Close()
 	<-done
 
-	want := altScreenEnter + cursorHide + mouseEnable + cursorShow + cursorStyleDefault + mouseDisable + altScreenExit
+	want := altScreenEnter + cursorHide + mouseEnable + oscColorQuery + cursorShow + cursorStyleDefault + mouseDisable + altScreenExit
 	if got := captured.String(); got != want {
 		t.Fatalf("captured escapes = %q, want %q", got, want)
 	}
@@ -98,10 +98,10 @@ func TestTerminal_EnterRaw_IsIdempotentAcrossCalls(t *testing.T) {
 	_ = outW.Close()
 	<-done
 
-	// Alt-screen/cursor escapes must appear exactly once for enter and
-	// once for exit, regardless of how many times EnterRaw/restore were
-	// called.
-	want := altScreenEnter + cursorHide + mouseEnable + cursorShow + cursorStyleDefault + mouseDisable + altScreenExit
+	// Alt-screen/cursor/theme-query escapes must appear exactly once for enter and
+	// cursor/alt-screen exits exactly once, regardless of how many times
+	// EnterRaw/restore were called.
+	want := altScreenEnter + cursorHide + mouseEnable + oscColorQuery + cursorShow + cursorStyleDefault + mouseDisable + altScreenExit
 	if got := captured.String(); got != want {
 		t.Fatalf("captured escapes = %q, want %q", got, want)
 	}

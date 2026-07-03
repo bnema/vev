@@ -134,10 +134,15 @@ func (m *Model) Clone() *Model {
 	return &clone
 }
 
-func (m *Model) Render(inner domain.Size, preview Preview) renderer.Frame {
+func (m *Model) Render(inner domain.Size, preview Preview, selectedStyle ...renderer.Style) renderer.Frame {
 	frame := renderer.NewFrame(max(inner.Cols, 0), max(inner.Rows, 0))
 	layout := ChooseLayout(inner)
-	m.renderList(frame, layout.List)
+	selection := renderer.DefaultStyle()
+	selection.Inverse = true
+	if len(selectedStyle) > 0 {
+		selection = selectedStyle[0]
+	}
+	m.renderList(frame, layout.List, selection)
 	blitPreview(frame, layout.Preview, preview)
 	return frame
 }
@@ -167,7 +172,7 @@ func (m *Model) firstLeaf() int {
 	return -1
 }
 
-func (m *Model) renderList(frame renderer.Frame, rect domain.Rect) {
+func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, selection renderer.Style) {
 	if m == nil || rect.Width <= 0 || rect.Height <= 0 {
 		return
 	}
@@ -181,7 +186,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect) {
 		r := m.rows[idx]
 		style := renderer.DefaultStyle()
 		if idx == m.selected {
-			style.Inverse = true
+			style = selection
 		}
 		label := r.label
 		if !r.header {

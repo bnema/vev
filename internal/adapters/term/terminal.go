@@ -28,6 +28,7 @@ const (
 	cursorStyleDefault = "\x1b[0 q"
 	mouseEnable        = "\x1b[?1002h\x1b[?1006h"
 	mouseDisable       = "\x1b[?1002l\x1b[?1006l"
+	oscColorQuery      = "\x1b]10;?\x07\x1b]11;?\x07"
 )
 
 // bufSize is the batched writer's buffer capacity.
@@ -104,7 +105,7 @@ func (t *Terminal) EnterRaw() (func() error, error) {
 	}
 	t.orig = old
 
-	if _, err := t.bw.WriteString(altScreenEnter + cursorHide + mouseEnable); err != nil {
+	if _, err := t.bw.WriteString(altScreenEnter + cursorHide + mouseEnable + oscColorQuery); err != nil {
 		_ = t.restoreRawLocked()
 		return nil, fmt.Errorf("term: enter alt screen: %w", err)
 	}

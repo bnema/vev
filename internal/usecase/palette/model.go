@@ -96,18 +96,23 @@ func (m *Model) clamp() {
 	}
 }
 
-func (m *Model) Render(inner domain.Size) renderer.Frame {
+func (m *Model) Render(inner domain.Size, selectedStyle ...renderer.Style) renderer.Frame {
 	frame := renderer.NewFrame(max(inner.Cols, 0), max(inner.Rows, 0))
 	if frame.Width == 0 || frame.Height == 0 {
 		return frame
 	}
 	base := renderer.DefaultStyle()
+	selection := base
+	selection.Inverse = true
+	if len(selectedStyle) > 0 {
+		selection = selectedStyle[0]
+	}
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: base})
 	if m == nil {
-		ui.DrawInputLine(frame, 0, "> ", "", base)
+		ui.DrawInputLine(frame, 0, "> ", "", base, selection)
 		return frame
 	}
-	ui.DrawInputLine(frame, 0, "> ", m.Query(), base)
+	ui.DrawInputLine(frame, 0, "> ", m.Query(), base, selection)
 	visible := frame.Height - 1
 	if visible <= 0 {
 		return frame
@@ -135,7 +140,7 @@ func (m *Model) Render(inner domain.Size) renderer.Frame {
 		match := m.matches[idx]
 		style := base
 		if idx == m.selected {
-			style.Inverse = true
+			style = selection
 		}
 		ui.FillRect(frame, domain.Rect{Y: y + 1, Width: frame.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
 		x := 0
@@ -146,8 +151,8 @@ func (m *Model) Render(inner domain.Size) renderer.Frame {
 		for i, r := range []rune(match.Command.Code) {
 			cellStyle := style
 			if highlight[i] {
+				cellStyle = selection
 				cellStyle.Bold = true
-				cellStyle.Inverse = true
 			}
 			if x < frame.Width {
 				frame.Set(x, y+1, renderer.Cell{Rune: r, Style: cellStyle})

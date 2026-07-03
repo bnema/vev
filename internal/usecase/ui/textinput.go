@@ -21,7 +21,7 @@ func (t *TextInput) Value() string { return string(t.runes) }
 func (t *TextInput) SetValue(value string) { t.runes = []rune(value) }
 
 // DrawInputLine draws prefix + value followed by a reverse-video caret cell.
-func DrawInputLine(f renderer.Frame, y int, prefix, value string, style renderer.Style) {
+func DrawInputLine(f renderer.Frame, y int, prefix, value string, style renderer.Style, caretStyle ...renderer.Style) {
 	if y < 0 || y >= f.Height {
 		return
 	}
@@ -29,6 +29,9 @@ func DrawInputLine(f renderer.Frame, y int, prefix, value string, style renderer
 	if x >= 0 && x < f.Width {
 		caret := style
 		caret.Inverse = true
+		if len(caretStyle) > 0 {
+			caret = caretStyle[0]
+		}
 		f.Set(x, y, renderer.Cell{Rune: ' ', Style: caret})
 	}
 }

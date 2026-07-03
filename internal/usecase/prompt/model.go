@@ -54,18 +54,21 @@ func (m *Model) SetError(msg string) {
 	}
 }
 
-func (m *Model) Render(inner domain.Size) renderer.Frame {
+func (m *Model) Render(inner domain.Size, accentStyle ...renderer.Style) renderer.Frame {
 	frame := renderer.NewFrame(max(inner.Cols, 0), max(inner.Rows, 0))
 	if frame.Width == 0 || frame.Height == 0 {
 		return frame
 	}
 	base := renderer.DefaultStyle()
+	accent := base
+	accent.Inverse = true
+	if len(accentStyle) > 0 {
+		accent = accentStyle[0]
+	}
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: base})
-	ui.DrawInputLine(frame, 0, "> ", m.Value(), base)
+	ui.DrawInputLine(frame, 0, "> ", m.Value(), base, accent)
 	if frame.Height > 1 && m != nil && m.errMsg != "" {
-		errStyle := base
-		errStyle.Inverse = true
-		ui.DrawText(frame, 0, 1, frame.Width, m.errMsg, errStyle)
+		ui.DrawText(frame, 0, 1, frame.Width, m.errMsg, accent)
 	}
 	return frame
 }

@@ -38,6 +38,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
 	promptui "github.com/bnema/vev/internal/usecase/prompt"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -71,6 +72,8 @@ type attachedClient struct {
 	promptSubmit          func(string) error
 	promptPending         []byte
 	mouseScan             mouse.Scanner
+	themeMu               sync.Mutex
+	theme                 themeui.Theme
 	lastCursor            cursorOut
 	sendMu                sync.Mutex
 }
@@ -116,6 +119,18 @@ func (p *pendingByteTimer) stop() {
 func (ac *attachedClient) currentSession() *session { return ac.sess.Get() }
 
 func (ac *attachedClient) setSession(sess *session) { ac.sess.Set(sess) }
+
+func (ac *attachedClient) getTheme() themeui.Theme {
+	ac.themeMu.Lock()
+	defer ac.themeMu.Unlock()
+	return ac.theme
+}
+
+func (ac *attachedClient) setTheme(t themeui.Theme) {
+	ac.themeMu.Lock()
+	ac.theme = t
+	ac.themeMu.Unlock()
+}
 
 func (ac *attachedClient) copyModeActive() bool {
 	ac.copyMu.Lock()
@@ -234,7 +249,13 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size)
 	sess.mu.Lock()
 	old := sess.client
 	sess.client = ac
+	tabs := append([]*tab(nil), sess.tabs...)
 	sess.mu.Unlock()
+	for _, tb := range tabs {
+		tb.mu.Lock()
+		tb.screen.SetDefaultColors(renderer.RGB{}, renderer.RGB{}, false)
+		tb.mu.Unlock()
+	}
 	return ac, old
 }
 
@@ -294,6 +315,10 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 			if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil {
 				d.resize(sess, ac, rz.Size)
 			}
+		case ports.MsgTheme:
+			if th, derr := ports.UnmarshalTheme(f.Payload); derr == nil {
+				d.applyTheme(sess, ac, th)
+			}
 		case ports.MsgDetach:
 			d.clientGone(sess, ac, true)
 			return
@@ -328,6 +353,34 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, explicit bool) {
 }
 
 // detachIfCurrent clears the client iff ac is the current one, reporting
+
+func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) {
+	t := themeui.Theme{
+		Foreground: msg.Foreground,
+		Background: msg.Background,
+		HasFG:      msg.HasForeground,
+		HasBG:      msg.HasBackground,
+		TrueColor:  msg.TrueColor,
+		Known:      msg.HasForeground && msg.HasBackground,
+	}
+
+	knownDefaultColors := t.HasFG && t.HasBG
+	sess.mu.Lock()
+	if sess.client != ac {
+		sess.mu.Unlock()
+		return
+	}
+	tabs := append([]*tab(nil), sess.tabs...)
+	sess.mu.Unlock()
+
+	ac.setTheme(t)
+	for _, tb := range tabs {
+		tb.mu.Lock()
+		tb.screen.SetDefaultColors(t.Foreground, t.Background, knownDefaultColors)
+		tb.mu.Unlock()
+	}
+	d.paint(sess, ac, true)
+}
 
 func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	if !sz.Valid() {

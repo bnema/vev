@@ -145,9 +145,10 @@ func (e paletteExec) OpenSessionPicker() error {
 	return nil
 }
 
-func composePaletteClientFrame(model *palette.Model, base renderer.Frame) (renderer.Frame, []renderer.Damage) {
-	inner := paletteModal.Composite(base, renderer.DefaultStyle())
-	modalFrame := model.Render(domain.Size{Cols: inner.Width, Rows: inner.Height})
+func composePaletteClientFrame(model *palette.Model, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
+	styleSet := resolveThemeStyles(styles)
+	inner := paletteModal.Composite(base, styleSet.border)
+	modalFrame := model.Render(domain.Size{Cols: inner.Width, Rows: inner.Height}, styleSet.selection)
 	for y := range min(inner.Height, modalFrame.Height) {
 		for x := range min(inner.Width, modalFrame.Width) {
 			base.Set(inner.X+x, inner.Y+y, modalFrame.At(x, y))

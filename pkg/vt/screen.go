@@ -40,6 +40,10 @@ type Screen struct {
 	// The host wires it to the PTY input. Nil disables responses.
 	OnResponse func([]byte)
 
+	defaultFG          renderer.RGB
+	defaultBG          renderer.RGB
+	defaultColorsKnown bool
+
 	damage    []renderer.Damage
 	escapeBuf []byte
 
@@ -120,6 +124,15 @@ func (s *Screen) SyncUpdateActive() bool { return s.syncUpdateActive }
 // Hosts use this as a safety valve if a child enters synchronized update mode
 // and never sends the matching end sequence.
 func (s *Screen) ForceSyncEnd() { s.syncUpdateActive = false }
+
+// SetDefaultColors sets the terminal default foreground/background colors used
+// to answer child OSC 10/11 color queries. Passing ok=false makes color queries
+// silent until known colors are supplied again.
+func (s *Screen) SetDefaultColors(fg, bg renderer.RGB, ok bool) {
+	s.defaultFG = fg
+	s.defaultBG = bg
+	s.defaultColorsKnown = ok
+}
 
 func (s *Screen) CursorRow() int { return s.Row }
 func (s *Screen) CursorCol() int { return s.Col }
@@ -480,7 +493,7 @@ func (s *Screen) consumeEscape(data []byte) (consumed int, partial bool) {
 	}
 	switch data[1] {
 	case ']':
-		return consumeOSC(data)
+		return s.consumeOSC(data)
 	case 'P':
 		return consumeSTString(data)
 	case '_', '^', 'X':
@@ -541,18 +554,54 @@ func (s *Screen) consumeCSI(data []byte) (consumed int, partial bool) {
 	return end + 1, false
 }
 
-func consumeOSC(data []byte) (consumed int, partial bool) {
+func (s *Screen) consumeOSC(data []byte) (consumed int, partial bool) {
 	for i := 2; i < len(data); i++ {
 		switch data[i] {
 		case 0x07:
+			s.applyOSC(data[2:i], []byte{0x07})
 			return i + 1, false
 		case 0x1b:
 			if i+1 < len(data) && data[i+1] == '\\' {
+				s.applyOSC(data[2:i], []byte{0x1b, '\\'})
 				return i + 2, false
 			}
 		}
 	}
 	return 0, true
+}
+
+func (s *Screen) applyOSC(payload, terminator []byte) {
+	if !s.defaultColorsKnown {
+		return
+	}
+
+	var color renderer.RGB
+	switch string(payload) {
+	case "10;?":
+		color = s.defaultFG
+	case "11;?":
+		color = s.defaultBG
+	default:
+		return
+	}
+
+	resp := make([]byte, 0, len(payload)+len("\x1b];rgb:0000/0000/0000")+len(terminator))
+	resp = append(resp, "\x1b]"...)
+	resp = append(resp, payload[:2]...)
+	resp = append(resp, ";rgb:"...)
+	resp = appendOSCColorComponent(resp, color.R)
+	resp = append(resp, '/')
+	resp = appendOSCColorComponent(resp, color.G)
+	resp = append(resp, '/')
+	resp = appendOSCColorComponent(resp, color.B)
+	resp = append(resp, terminator...)
+	s.respond(resp)
+}
+
+func appendOSCColorComponent(dst []byte, c uint8) []byte {
+	const hex = "0123456789abcdef"
+	v := uint16(c)<<8 | uint16(c)
+	return append(dst, hex[v>>12&0xf], hex[v>>8&0xf], hex[v>>4&0xf], hex[v&0xf])
 }
 
 func consumeSTString(data []byte) (consumed int, partial bool) {
