@@ -114,6 +114,9 @@ func (m *Model) Render(inner domain.Size) renderer.Frame {
 	if visible <= 0 {
 		return frame
 	}
+	if len(m.matches) == 0 {
+		return frame
+	}
 	if m.selected < m.scroll {
 		m.scroll = m.selected
 	}

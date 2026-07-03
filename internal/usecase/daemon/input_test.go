@@ -26,8 +26,10 @@ func TestAltDigitSwitchesBetweenThreeTabs(t *testing.T) {
 	d := newTestDaemon(t, newFactorySeq(t, p1, p2, p3), stubClock{})
 	tr, sends, releaseConn := newConn(t,
 		mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}),
-		frameInput([]byte("\x1bc")),
-		frameInput([]byte("\x1bc")),
+		frameInput([]byte("\x1b ")),
+		frameInput([]byte("CNT\r")),
+		frameInput([]byte("\x1b ")),
+		frameInput([]byte("CNT\r")),
 		frameInput([]byte("\x1b1")),
 		frameInput([]byte("A")),
 		frameInput([]byte("\x1b2")),
@@ -60,43 +62,28 @@ func TestAltDigitSwitchesBetweenThreeTabs(t *testing.T) {
 	d.sessWg.Wait()
 }
 
-func TestAltCCreatesSecondActiveTab(t *testing.T) {
-	p1, releasePTY1 := newBlockingPTY(t)
-	p2, releasePTY2 := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
-	tr, sends, releaseConn := newConn(t,
-		mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}),
-		frameInput([]byte("\x1bc")),
-	)
+func TestAltCForwardsToPTY(t *testing.T) {
+	writes := make(chan []byte, 2)
+	p, releasePTY := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 
-	var hg sync.WaitGroup
-	hg.Go(func() { d.handleConn(tr) })
-	awaitFrame(t, sends, ports.MsgWelcome)
-	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("\x1bc"))
 
-	require.Eventually(t, func() bool {
-		sessions := listSessions(t, d)
-		return len(sessions.Sessions) == 1 && sessions.Sessions[0].Tabs == 2
-	}, 2*time.Second, 5*time.Millisecond)
-
-	releaseConn()
-	releasePTY1()
-	releasePTY2()
-	hg.Wait()
-	d.sessWg.Wait()
+	require.Equal(t, []byte("\x1bc"), <-writes)
+	releasePTY()
 }
 
-func TestAltNextPreviousSwitchActiveTab(t *testing.T) {
+func TestPaletteNextPreviousSwitchActiveTab(t *testing.T) {
 	cases := []struct {
 		name      string
 		start     int
-		input     []byte
+		query     []byte
 		wantIndex int
 	}{
-		{name: "next advances", start: 0, input: []byte("\x1bn"), wantIndex: 1},
-		{name: "next wraps", start: 2, input: []byte("\x1bn"), wantIndex: 0},
-		{name: "previous moves back", start: 2, input: []byte("\x1bp"), wantIndex: 1},
-		{name: "previous wraps", start: 0, input: []byte("\x1bp"), wantIndex: 2},
+		{name: "next advances", start: 0, query: []byte("NXT\r"), wantIndex: 1},
+		{name: "next wraps", start: 2, query: []byte("NXT\r"), wantIndex: 0},
+		{name: "previous moves back", start: 2, query: []byte("PVT\r"), wantIndex: 1},
+		{name: "previous wraps", start: 0, query: []byte("PVT\r"), wantIndex: 2},
 	}
 
 	for _, tc := range cases {
@@ -109,7 +96,8 @@ func TestAltNextPreviousSwitchActiveTab(t *testing.T) {
 			}()
 			sess.active = tc.start
 
-			d.handleInput(sess, ac, tc.input)
+			d.handleInput(sess, ac, []byte("\x1b "))
+			d.handleInput(sess, ac, tc.query)
 
 			require.Equal(t, tc.wantIndex, activeTabIndex(sess))
 		})
@@ -124,7 +112,8 @@ func TestAltXClosesActiveTabAndSelectsRemaining(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p1, p2, p3)
 	sess.active = 1
 
-	d.handleInput(sess, ac, []byte("\x1bx"))
+	d.handleInput(sess, ac, []byte("\x1b "))
+	d.handleInput(sess, ac, []byte("CLT\r"))
 
 	require.Equal(t, 1, sessionCount(d))
 	require.Len(t, sess.tabs, 2)
@@ -142,7 +131,8 @@ func TestAltDDetachesCurrentClient(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 1)
 	defer releases[0]()
 
-	d.handleInput(sess, ac, []byte("\x1bd"))
+	d.handleInput(sess, ac, []byte("\x1b "))
+	d.handleInput(sess, ac, []byte("DET\r"))
 
 	require.Nil(t, sess.client)
 	f := awaitFrame(t, sends, ports.MsgDetached)
@@ -157,7 +147,8 @@ func TestAltRPromotesEphemeralSessionPromptlessly(t *testing.T) {
 	sess.ephemeral = true
 	sess.name = "0"
 
-	d.handleInput(sess, ac, []byte("\x1br"))
+	d.handleInput(sess, ac, []byte("\x1b "))
+	d.handleInput(sess, ac, []byte("RNS\r"))
 
 	require.False(t, sess.ephemeral)
 	require.Equal(t, "0", sess.name)

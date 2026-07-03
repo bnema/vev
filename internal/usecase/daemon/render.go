@@ -256,15 +256,19 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	ac.copyMu.Unlock()
 	ac.pickerMu.Lock()
 	pickerActive := ac.picker != nil
-	pickerModel := ac.picker
+	pickerModel := ac.picker.Clone()
 	previewTab := ac.pickerPreview
+	ac.pickerMu.Unlock()
 	preview := snapshotPickerPreview(previewTab)
+	ac.paletteMu.Lock()
+	paletteModel := ac.palette
+	paletteActive := paletteModel != nil
 
 	tb.mu.Lock()
-	if reset || copyActive || pickerActive {
+	if reset || copyActive || pickerActive || paletteActive {
 		ac.rend.Reset()
 	}
-	if reset || pickerActive {
+	if reset || pickerActive || paletteActive {
 		ac.lastCursor.valid = false
 	}
 	frame, damage := composeClientFrame(sess, tb, reset, copyFeedback)
@@ -277,8 +281,11 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		}
 		frame, damage = composePickerClientFrame(pickerModel, preview, frame)
 	}
-	ac.pickerMu.Unlock()
-	desiredCursor := desiredCursorOut(tb.screen, copyActive || pickerActive)
+	if paletteActive {
+		frame, damage = composePaletteClientFrame(paletteModel, frame)
+	}
+	ac.paletteMu.Unlock()
+	desiredCursor := desiredCursorOut(tb.screen, copyActive || pickerActive || paletteActive)
 	data, err := ac.rend.Draw(frame, damage)
 	var cursorTail []byte
 	if err == nil {

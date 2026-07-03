@@ -70,7 +70,8 @@ func TestStatusRepaintsOnCreateSwitchAndResize(t *testing.T) {
 	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
 	tr, sends, releaseConn := newConn(t,
 		mustHello(ports.IntentNew, "work", domain.Size{Cols: 20, Rows: 5}),
-		frameInput([]byte("\x1bc")),
+		frameInput([]byte("\x1b ")),
+		frameInput([]byte("CNT\r")),
 		frameInput([]byte("\x1b1")),
 		ports.Frame{Type: ports.MsgResize, Payload: ports.MarshalResize(ports.Resize{Size: domain.Size{Cols: 22, Rows: 6}})},
 	)
@@ -79,10 +80,12 @@ func TestStatusRepaintsOnCreateSwitchAndResize(t *testing.T) {
 	hg.Go(func() { d.handleConn(tr) })
 	awaitFrame(t, sends, ports.MsgWelcome)
 	first := awaitFrame(t, sends, ports.MsgOutput)
+	palette := awaitFrame(t, sends, ports.MsgOutput)
 	created := awaitFrame(t, sends, ports.MsgOutput)
 	switched := awaitFrame(t, sends, ports.MsgOutput)
 	resized := awaitFrame(t, sends, ports.MsgOutput)
 
+	_ = palette
 	for _, f := range []ports.Frame{first, created, switched, resized} {
 		out, err := ports.UnmarshalOutput(f.Payload)
 		require.NoError(t, err)

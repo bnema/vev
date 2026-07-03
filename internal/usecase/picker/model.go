@@ -125,6 +125,15 @@ func (m *Model) Selected() (Target, bool) {
 	return Target{Session: r.session, TabIndex: r.tabIndex}, true
 }
 
+func (m *Model) Clone() *Model {
+	if m == nil {
+		return nil
+	}
+	clone := *m
+	clone.rows = append([]row(nil), m.rows...)
+	return &clone
+}
+
 func (m *Model) Render(inner domain.Size, preview Preview) renderer.Frame {
 	frame := renderer.NewFrame(max(inner.Cols, 0), max(inner.Rows, 0))
 	layout := ChooseLayout(inner)

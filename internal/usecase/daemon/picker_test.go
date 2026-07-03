@@ -20,26 +20,16 @@ import (
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
 
-func TestAltTOpensPickerModalAndDoesNotForward(t *testing.T) {
-	writes := make(chan []byte, 1)
+func TestAltTForwardsToPTY(t *testing.T) {
+	writes := make(chan []byte, 2)
 	p, releasePTY := newBlockingPTYWithWrites(t, writes)
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
 
 	d.handleInput(sess, ac, []byte("\x1bt"))
 
-	require.True(t, ac.pickerActive())
-	select {
-	case got := <-writes:
-		t.Fatalf("picker binding forwarded to PTY: %q", got)
-	default:
-	}
-	out := awaitFrame(t, sends, ports.MsgOutput)
-	msg, err := ports.UnmarshalOutput(out.Payload)
-	require.NoError(t, err)
-	data := string(msg.Data)
-	require.Contains(t, data, "┌")
-	require.Contains(t, data, "Sessions")
+	require.False(t, ac.pickerActive())
+	require.Equal(t, []byte("\x1bt"), <-writes)
 }
 
 func TestPickerSameSessionNavigationSwitchAndEscClose(t *testing.T) {
@@ -50,7 +40,7 @@ func TestPickerSameSessionNavigationSwitchAndEscClose(t *testing.T) {
 		}
 	}()
 
-	d.handleInput(sess, ac, []byte("\x1bt"))
+	d.enterPicker(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("j"))
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -58,7 +48,7 @@ func TestPickerSameSessionNavigationSwitchAndEscClose(t *testing.T) {
 
 	require.Equal(t, 1, activeTabIndex(sess))
 	awaitFrame(t, sends, ports.MsgOutput)
-	d.handleInput(sess, ac, []byte("\x1bt"))
+	d.enterPicker(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
 	clk := &signalClock{timers: make(chan *signalTimer, 1)}
 	d.clock = clk
@@ -89,7 +79,7 @@ func TestPickerSplitArrowNavigatesWithoutExiting(t *testing.T) {
 				}
 			}()
 
-			d.handleInput(sess, ac, []byte("\x1bt"))
+			d.enterPicker(sess, ac)
 			awaitFrame(t, sends, ports.MsgOutput)
 			for _, input := range tc.input {
 				d.handleInput(sess, ac, input)
@@ -105,7 +95,7 @@ func TestPickerLoneEscapeExitsAfterDelay(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 1)
 	defer releases[0]()
 
-	d.handleInput(sess, ac, []byte("\x1bt"))
+	d.enterPicker(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
 	clk := &signalClock{timers: make(chan *signalTimer, 1)}
 	d.clock = clk
@@ -139,7 +129,7 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	d.sessions[sess1.id] = sess1
 	d.sessions[sess2.id] = sess2
 
-	d.handleInput(sess1, ac1, []byte("\x1bt"))
+	d.enterPicker(sess1, ac1)
 	awaitFrame(t, sends1, ports.MsgOutput)
 	d.handleInput(sess1, ac1, []byte("j"))
 	awaitFrame(t, sends1, ports.MsgOutput)
@@ -164,7 +154,7 @@ func TestPickerLivePreviewRepaintsInactiveTab(t *testing.T) {
 		}
 	}()
 
-	d.handleInput(sess, ac, []byte("\x1bt"))
+	d.enterPicker(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("j"))
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -204,7 +194,7 @@ func TestPickerLivePreviewRepaintsCrossSessionTab(t *testing.T) {
 	d.sessions[sess1.id] = sess1
 	d.sessions[sess2.id] = sess2
 
-	d.handleInput(sess1, ac1, []byte("\x1bt"))
+	d.enterPicker(sess1, ac1)
 	awaitFrame(t, sends1, ports.MsgOutput)
 	d.handleInput(sess1, ac1, []byte("j"))
 	awaitFrame(t, sends1, ports.MsgOutput)
@@ -271,7 +261,7 @@ func TestPickerResizeRecomposesModal(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
 
-	d.handleInput(sess, ac, []byte("\x1bt"))
+	d.enterPicker(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.resize(sess, ac, domain.Size{Cols: 100, Rows: 30})
 

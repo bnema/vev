@@ -35,30 +35,34 @@ import (
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/mouse"
+	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
 type attachedClient struct {
-	tr            ports.Transport
-	rend          *renderer.Renderer
-	size          domain.Size
-	keys          *keys.Router
-	sessMu        sync.Mutex
-	sess          *session
-	copyMu        sync.Mutex
-	copyMode      *scopy.Mode
-	copyPending   []byte
-	copyESC       pendingByteTimer
-	copyFeedback  string
-	pickerMu      sync.Mutex
-	picker        *picker.Model
-	pickerPreview *tab
-	pickerPending []byte
-	pickerESC     pendingByteTimer
-	mouseScan     mouse.Scanner
-	lastCursor    cursorOut
-	sendMu        sync.Mutex
+	tr             ports.Transport
+	rend           *renderer.Renderer
+	size           domain.Size
+	keys           *keys.Router
+	sessMu         sync.Mutex
+	sess           *session
+	copyMu         sync.Mutex
+	copyMode       *scopy.Mode
+	copyPending    []byte
+	copyESC        pendingByteTimer
+	copyFeedback   string
+	pickerMu       sync.Mutex
+	picker         *picker.Model
+	pickerPreview  *tab
+	pickerPending  []byte
+	pickerESC      pendingByteTimer
+	paletteMu      sync.Mutex
+	palette        *palette.Model
+	palettePending []byte
+	mouseScan      mouse.Scanner
+	lastCursor     cursorOut
+	sendMu         sync.Mutex
 }
 
 type cursorOut struct {
@@ -121,6 +125,12 @@ func (ac *attachedClient) pickerActive() bool {
 	ac.pickerMu.Lock()
 	defer ac.pickerMu.Unlock()
 	return ac.picker != nil
+}
+
+func (ac *attachedClient) paletteActive() bool {
+	ac.paletteMu.Lock()
+	defer ac.paletteMu.Unlock()
+	return ac.palette != nil
 }
 
 // send serialises a frame onto the client's transport.

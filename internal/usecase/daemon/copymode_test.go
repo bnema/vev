@@ -25,14 +25,16 @@ import (
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
 
-func TestScrollbackModeAltUInterceptsAndDoesNotForward(t *testing.T) {
+func TestCopyModePaletteCommandEntersAndDoesNotForward(t *testing.T) {
 	writes := make(chan []byte, 1)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	sess.tabs[0].scrollback = scopy.NewScrollback(4)
 	sess.tabs[0].screen.Write([]byte("live"))
 
-	d.handleInput(sess, ac, []byte("\x1bu"))
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("CPY\r"))
 
 	if ac.copyMode == nil {
 		t.Fatal("scrollback mode not entered")
@@ -153,7 +155,9 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 	require.NotNil(t, sess)
 	ac := sess.client
 	require.NotNil(t, ac)
-	d.handleInput(sess, ac, []byte("\x1bu"))
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("CPY\r"))
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte{'g', ' ', 'G', 'y'})
 

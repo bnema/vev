@@ -60,7 +60,8 @@ func TestAltXClosesNonFinalTabScheduler(t *testing.T) {
 	<-clk.called
 
 	d.handleInput(sess, ac, []byte("\x1b2"))
-	d.handleInput(sess, ac, []byte("\x1bx"))
+	d.handleInput(sess, ac, []byte("\x1b "))
+	d.handleInput(sess, ac, []byte("CLT\r"))
 
 	select {
 	case <-waitGroupDone(&d.sessWg):
@@ -98,7 +99,8 @@ func TestAltXClosesFinalTabAndDetaches(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 1)
 	defer releases[0]()
 
-	d.handleInput(sess, ac, []byte("\x1bx"))
+	d.handleInput(sess, ac, []byte("\x1b "))
+	d.handleInput(sess, ac, []byte("CLT\r"))
 
 	require.Equal(t, 0, sessionCount(d))
 	f := awaitFrame(t, sends, ports.MsgDetached)

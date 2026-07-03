@@ -34,6 +34,10 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 	ac.mouseScan.Scan(data,
 		func(ev mouse.Event) { d.handleMouse(ac, ev) },
 		func(b []byte) {
+			if ac.paletteActive() {
+				d.handlePaletteInput(ac, b)
+				return
+			}
 			if ac.pickerActive() {
 				d.handlePickerInput(ac, b)
 				return
@@ -48,7 +52,7 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 }
 
 func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
-	if ac.pickerActive() {
+	if ac.paletteActive() || ac.pickerActive() {
 		return
 	}
 	sess := ac.currentSession()
@@ -124,34 +128,8 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 		return
 	}
 	switch action {
-	case keys.ActionCreateTab:
-		if err := h.d.createTab(sess, h.ac.size); err != nil {
-			h.d.log.Error("create tab failed", "err", err, "session", sess.name)
-			return
-		}
-		h.d.paint(sess, h.ac, true)
-	case keys.ActionNextTab:
-		if sess.switchRelative(1) {
-			h.d.paint(sess, h.ac, true)
-		}
-	case keys.ActionPreviousTab:
-		if sess.switchRelative(-1) {
-			h.d.paint(sess, h.ac, true)
-		}
-	case keys.ActionDetach:
-		h.d.clientGone(sess, h.ac, true)
-	case keys.ActionCloseTab:
-		tb := sess.activeTab()
-		if tb != nil {
-			h.d.closeTab(sess, tb, true)
-		}
-	case keys.ActionCopyMode:
-		h.d.enterCopyMode(sess, h.ac)
-	case keys.ActionRenameSession:
-		sess.promoteEphemeral()
-		h.d.paint(sess, h.ac, true)
-	case keys.ActionOpenPicker:
-		h.d.enterPicker(sess, h.ac)
+	case keys.ActionOpenPalette:
+		h.d.enterPalette(sess, h.ac)
 	case keys.ActionSwitchTab1, keys.ActionSwitchTab2, keys.ActionSwitchTab3,
 		keys.ActionSwitchTab4, keys.ActionSwitchTab5, keys.ActionSwitchTab6,
 		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:
