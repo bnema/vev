@@ -1,4 +1,4 @@
-package prompt
+package confirm
 
 import (
 	"bytes"

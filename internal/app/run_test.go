@@ -9,7 +9,7 @@ import (
 
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/client"
-	"github.com/bnema/vev/internal/usecase/prompt"
+	"github.com/bnema/vev/internal/usecase/confirm"
 )
 
 func TestParseArgs(t *testing.T) {
@@ -103,7 +103,7 @@ func TestRunLocalAttachPromptsAndRestartsOnProtocolMismatch(t *testing.T) {
 	killCalls := 0
 
 	err := runLocalAttachWithRecovery(context.Background(), ports.IntentEphemeral, "", attachRecoveryDeps{
-		confirmer: prompt.NewConfirmer(answers, &prompts),
+		confirmer: confirm.NewConfirmer(answers, &prompts),
 		attach: func(context.Context, uint8, string) error {
 			attachCalls++
 			if attachCalls == 1 {
@@ -137,7 +137,7 @@ func TestRunLocalAttachDeclineKeepsOriginalError(t *testing.T) {
 	killCalls := 0
 
 	err := runLocalAttachWithRecovery(context.Background(), ports.IntentEphemeral, "", attachRecoveryDeps{
-		confirmer: prompt.NewConfirmer(answers, &bytes.Buffer{}),
+		confirmer: confirm.NewConfirmer(answers, &bytes.Buffer{}),
 		attach: func(context.Context, uint8, string) error {
 			attachCalls++
 			return wantErr

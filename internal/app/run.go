@@ -24,8 +24,8 @@ import (
 	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/client"
+	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
-	"github.com/bnema/vev/internal/usecase/prompt"
 )
 
 // cmdKind identifies which sub-command the CLI parsed.
@@ -254,14 +254,14 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) err
 	}
 
 	return runLocalAttachWithRecovery(ctx, intent, name, attachRecoveryDeps{
-		confirmer:  prompt.NewConfirmer(os.Stdin, os.Stderr),
+		confirmer:  confirm.NewConfirmer(os.Stdin, os.Stderr),
 		attach:     attachLocalDaemon,
 		killDaemon: requestDaemonStop,
 	})
 }
 
 type attachRecoveryDeps struct {
-	confirmer  prompt.Confirmer
+	confirmer  confirm.Confirmer
 	attach     func(context.Context, uint8, string) error
 	killDaemon func(context.Context) error
 }
