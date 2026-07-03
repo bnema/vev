@@ -565,19 +565,29 @@ func runKill(_ context.Context, name string, all, daemon bool) error {
 			} else if statErr != nil {
 				return fmt.Errorf("vev: reading stored sessions: %w", statErr)
 			}
-			store, openErr := kv.Open(storePath)
+			records, loadErr := persist.LoadReadOnly(platform.StateDir())
+			if loadErr != nil {
+				return fmt.Errorf("vev: reading stored sessions: %w", loadErr)
+			}
+			found := false
+			for _, record := range records {
+				if record.Name == name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("vev: no such session: %s", name)
+			}
+			p, openErr := persist.Open(platform.StateDir())
 			if openErr != nil {
 				return fmt.Errorf("vev: opening stored sessions: %w", openErr)
 			}
-			if _, ok := store.Get([]byte(name)); !ok {
-				_ = store.Close()
-				return fmt.Errorf("vev: no such session: %s", name)
-			}
-			if deleteErr := store.Delete([]byte(name)); deleteErr != nil {
-				_ = store.Close()
+			if deleteErr := p.Delete(name); deleteErr != nil {
+				_ = p.Close()
 				return fmt.Errorf("vev: deleting stored session: %w", deleteErr)
 			}
-			if closeErr := store.Close(); closeErr != nil {
+			if closeErr := p.Close(); closeErr != nil {
 				return fmt.Errorf("vev: closing stored sessions: %w", closeErr)
 			}
 			printKillSuccess(name, all, daemon)

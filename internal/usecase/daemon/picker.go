@@ -91,7 +91,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 		views = append(views, picker.SessionView{
 			ID:      domain.SessionID("stopped:" + s.name),
 			Name:    s.name,
-			Tabs:    []string{"(stopped)"},
+			Tabs:    []string{""},
 			Stopped: true,
 		})
 	}

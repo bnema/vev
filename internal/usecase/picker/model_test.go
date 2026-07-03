@@ -102,7 +102,7 @@ func TestSelectedMapping(t *testing.T) {
 }
 
 func TestStoppedSessionSelectableAndRendered(t *testing.T) {
-	m := New([]SessionView{{ID: "stopped:work", Name: "work", Tabs: []string{"(stopped)"}, Stopped: true}}, "", 0)
+	m := New([]SessionView{{ID: "stopped:work", Name: "work", Tabs: []string{""}, Stopped: true}}, "", 0)
 	got, ok := m.Selected()
 	require.True(t, ok)
 	require.Equal(t, Target{Session: "stopped:work", Name: "work", TabIndex: 0, Stopped: true}, got)

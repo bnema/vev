@@ -3,6 +3,7 @@ package kv
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
@@ -203,12 +204,19 @@ func (s *Store) appendRecord(op byte, key, val []byte) error {
 	}
 	n, err := s.file.Write(buf)
 	if err != nil || n != len(buf) {
-		_ = s.file.Truncate(pos)
-		_, _ = s.file.Seek(pos, io.SeekStart)
-		if err != nil {
-			return err
+		writeErr := err
+		if writeErr == nil {
+			writeErr = io.ErrShortWrite
 		}
-		return io.ErrShortWrite
+		if tErr := s.file.Truncate(pos); tErr != nil {
+			s.closed = true
+			return fmt.Errorf("write failed (%v) and recovery truncate failed: %w", writeErr, tErr)
+		}
+		if _, sErr := s.file.Seek(pos, io.SeekStart); sErr != nil {
+			s.closed = true
+			return fmt.Errorf("write failed (%v) and recovery seek failed: %w", writeErr, sErr)
+		}
+		return writeErr
 	}
 
 	k := string(key)

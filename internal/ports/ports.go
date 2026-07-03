@@ -50,6 +50,7 @@ type Store interface {
 	Get(key []byte) ([]byte, bool)
 	Set(key, val []byte) error
 	Delete(key []byte) error
+	// Range iterates key/value pairs; fn returning false stops iteration early.
 	Range(fn func(k, v []byte) bool)
 	Sync() error
 	Close() error

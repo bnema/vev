@@ -202,18 +202,18 @@ func captureStdout(t *testing.T, fn func()) string {
 	os.Stdout = w
 	defer func() { os.Stdout = old }()
 	defer func() { _ = r.Close() }()
-	closed := false
-	defer func() {
-		if !closed {
-			_ = w.Close()
-		}
+	outCh := make(chan []byte, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		out, err := io.ReadAll(r)
+		outCh <- out
+		errCh <- err
 	}()
 
 	fn()
 	_ = w.Close()
-	closed = true
-	out, err := io.ReadAll(r)
-	if err != nil {
+	out := <-outCh
+	if err := <-errCh; err != nil {
 		t.Fatalf("ReadAll stdout error = %v", err)
 	}
 	return string(out)

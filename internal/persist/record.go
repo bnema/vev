@@ -44,8 +44,13 @@ func decodeRecordValue(name string, value []byte) (Record, error) {
 	if len(value) < 4 {
 		return Record{}, errMalformedRecord
 	}
-	cwdLen := int(binary.BigEndian.Uint32(value[:4]))
-	if cwdLen > len(value)-4 || len(value) != 4+cwdLen+8+8 {
+	cwdLen32 := binary.BigEndian.Uint32(value[:4])
+	remaining := len(value) - 4
+	if uint64(cwdLen32) > uint64(remaining) {
+		return Record{}, errMalformedRecord
+	}
+	cwdLen := int(cwdLen32)
+	if len(value) != 4+cwdLen+8+8 {
 		return Record{}, errMalformedRecord
 	}
 	off := 4 + cwdLen
