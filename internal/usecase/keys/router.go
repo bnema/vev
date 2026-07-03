@@ -71,7 +71,7 @@ func (r *Router) Route(data []byte) {
 		r.pending = false
 		r.pendingAlt = nil
 		combined := append(append([]byte(nil), pendingAlt...), data...)
-		if consumed := r.routeAfterPendingESC(combined); consumed > len(pendingAlt) {
+		if consumed := r.routeAfterPendingESC(combined, len(pendingAlt)); consumed > len(pendingAlt) {
 			data = data[consumed-len(pendingAlt):]
 		}
 	}
@@ -122,7 +122,7 @@ func (r *Router) route(data []byte) {
 	flush()
 }
 
-func (r *Router) routeAfterPendingESC(data []byte) int {
+func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int) int {
 	next := data[0]
 	if passThroughPrefix(next) {
 		r.forward([]byte{ESC, next})
@@ -136,9 +136,14 @@ func (r *Router) routeAfterPendingESC(data []byte) int {
 		r.retainESC(data)
 		return len(data)
 	}
-	if _, size := utf8.DecodeRune(data); size > 1 {
+	key, size := utf8.DecodeRune(data)
+	if size > 1 {
 		r.forward(append([]byte{ESC}, data[:size]...))
 		return size
+	}
+	if key == utf8.RuneError && pendingAltLen > 0 {
+		r.forward(append([]byte{ESC}, data[:pendingAltLen]...))
+		return pendingAltLen
 	}
 	r.forward([]byte{ESC})
 	return 0

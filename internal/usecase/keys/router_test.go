@@ -119,6 +119,18 @@ func TestRouterForwardsUnboundAltUTF8SplitAcrossReads(t *testing.T) {
 	require.Equal(t, [][]byte{{ESC, 0xc3, 0xb1}}, h.forwards)
 }
 
+func TestRouterForwardsInvalidSplitAltUTF8WithoutDroppingBytes(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	r := NewRouter(clk, h)
+
+	r.Route([]byte{ESC, 0xc3})
+	r.Route([]byte("X"))
+
+	require.Empty(t, h.actions)
+	require.Equal(t, [][]byte{{ESC, 0xc3}, []byte("X")}, h.forwards)
+}
+
 func TestTopRowDigitIndexAcceptsQWERTYAndAZERTYVariants(t *testing.T) {
 	cases := []struct {
 		key  rune
