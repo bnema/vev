@@ -32,6 +32,36 @@ func TestModalBounds(t *testing.T) {
 			m:    Modal{WidthPct: 50, HeightPct: 50},
 			want: domain.Rect{X: 3, Y: 2, Width: 5, Height: 3},
 		},
+		{
+			name: "zero value fills base centered",
+			base: domain.Size{Cols: 12, Rows: 8},
+			m:    Modal{},
+			want: domain.Rect{X: 0, Y: 0, Width: 12, Height: 8},
+		},
+		{
+			name: "bottom anchor honors bottom margin",
+			base: domain.Size{Cols: 100, Rows: 40},
+			m:    Modal{WidthPct: 50, HeightPct: 25, Anchor: AnchorBottom, BottomMargin: 3},
+			want: domain.Rect{X: 25, Y: 27, Width: 50, Height: 10},
+		},
+		{
+			name: "fixed dimensions override percentages",
+			base: domain.Size{Cols: 100, Rows: 40},
+			m:    Modal{WidthPct: 80, HeightPct: 80, FixedWidth: 30, FixedHeight: 12},
+			want: domain.Rect{X: 35, Y: 14, Width: 30, Height: 12},
+		},
+		{
+			name: "fixed dimensions clamp on small terminal",
+			base: domain.Size{Cols: 10, Rows: 4},
+			m:    Modal{FixedWidth: 30, FixedHeight: 12, Anchor: AnchorBottom, BottomMargin: 2},
+			want: domain.Rect{X: 0, Y: 0, Width: 10, Height: 4},
+		},
+		{
+			name: "bottom margin clamps to screen",
+			base: domain.Size{Cols: 20, Rows: 10},
+			m:    Modal{FixedWidth: 8, FixedHeight: 4, Anchor: AnchorBottom, BottomMargin: 20},
+			want: domain.Rect{X: 6, Y: 0, Width: 8, Height: 4},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
