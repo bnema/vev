@@ -325,9 +325,8 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	}
 }
 
-// resize applies a client size change to every tab using rows-1 for the PTY
-// and VT screen, then resets the renderer shadow and repaints the composed
-// client-sized frame (including the status row).
+// desiredCursorOut computes the terminal cursor state that should be shown to
+// the client for the current tab and overlay mode.
 func desiredCursorOut(s *vt.Screen, copyActive bool) cursorOut {
 	if copyActive || !s.CursorVisible() {
 		return cursorOut{hidden: true}

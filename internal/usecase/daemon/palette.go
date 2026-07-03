@@ -78,7 +78,10 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 
 	if run && ok {
 		if err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac}); err != nil {
-			d.log.Error("palette command failed", "err", err, "session", sess.name, "command", cmd.Code)
+			sess.mu.Lock()
+			name := sess.name
+			sess.mu.Unlock()
+			d.log.Error("palette command failed", "err", err, "session", name, "command", cmd.Code)
 		}
 		return
 	}
@@ -94,12 +97,8 @@ type paletteExec struct {
 }
 
 func (e paletteExec) CreateTab() error {
-	if err := e.d.createTab(e.sess, e.ac.size); err != nil {
-		e.d.paint(e.sess, e.ac, true)
-		return err
-	}
-	e.d.paint(e.sess, e.ac, true)
-	return nil
+	defer e.d.paint(e.sess, e.ac, true)
+	return e.d.createTab(e.sess, e.ac.size)
 }
 
 func (e paletteExec) CloseTab() error {

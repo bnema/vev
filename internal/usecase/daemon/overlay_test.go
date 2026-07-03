@@ -56,6 +56,22 @@ func TestRouteOverlayBytesHandlesSS3Arrows(t *testing.T) {
 	require.Empty(t, pending)
 }
 
+func TestRouteOverlayBytesConsumesUnhandledEscapeSequences(t *testing.T) {
+	var pending []byte
+	var got []rune
+	var cancel int
+	ev := overlayEvents{
+		rune:   func(r rune) { got = append(got, r) },
+		cancel: func() { cancel++ },
+	}
+
+	routeOverlayBytes([]byte("a\x1b[D\x1b[3~b\x1bOQ"), &pending, ev)
+
+	require.Equal(t, []rune{'a', 'b'}, got)
+	require.Equal(t, 0, cancel)
+	require.Empty(t, pending)
+}
+
 func TestRouteOverlayBytesHandlesEditingSubmitAndCancel(t *testing.T) {
 	var pending []byte
 	var backspace, enter, cancel int

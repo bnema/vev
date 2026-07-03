@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/ipc"
@@ -254,17 +255,25 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) err
 	}
 
 	return runLocalAttachWithRecovery(ctx, intent, name, attachRecoveryDeps{
-		confirmer:  confirm.NewConfirmer(os.Stdin, os.Stderr),
-		attach:     attachLocalDaemon,
-		killDaemon: requestDaemonStop,
+		confirmer:       confirm.NewConfirmer(os.Stdin, os.Stderr),
+		attach:          attachLocalDaemon,
+		killDaemon:      requestDaemonStop,
+		settleAfterKill: waitForDaemonStop,
 	})
 }
 
 type attachRecoveryDeps struct {
-	confirmer  confirm.Confirmer
-	attach     func(context.Context, uint8, string) error
-	killDaemon func(context.Context) error
+	confirmer       confirm.Confirmer
+	attach          func(context.Context, uint8, string) error
+	killDaemon      func(context.Context) error
+	settleAfterKill func(context.Context) error
 }
+
+const (
+	daemonStopTimeout          = 2 * time.Second
+	daemonRestartSettle        = 50 * time.Millisecond
+	legacyMalformedHelloSignal = "malformed hello"
+)
 
 func runLocalAttachWithRecovery(ctx context.Context, intent uint8, name string, deps attachRecoveryDeps) error {
 	err := deps.attach(ctx, intent, name)
@@ -282,6 +291,11 @@ func runLocalAttachWithRecovery(ctx context.Context, intent uint8, name string, 
 	if killErr := deps.killDaemon(ctx); killErr != nil {
 		return killErr
 	}
+	if deps.settleAfterKill != nil {
+		if settleErr := deps.settleAfterKill(ctx); settleErr != nil {
+			return settleErr
+		}
+	}
 	return deps.attach(ctx, intent, name)
 }
 
@@ -290,7 +304,7 @@ func isDaemonVersionDrift(err error) bool {
 	if !errors.As(err, &protocolErr) {
 		return false
 	}
-	return protocolErr.Code == ports.ErrVersionMismatch || protocolErr.Text == "malformed hello"
+	return protocolErr.Code == ports.ErrVersionMismatch || protocolErr.Text == legacyMalformedHelloSignal
 }
 
 func attachLocalDaemon(ctx context.Context, intent uint8, name string) error {
@@ -302,19 +316,55 @@ func attachLocalDaemon(ctx context.Context, intent uint8, name string) error {
 	return client.Attach(ctx, transport, term.New(), intent, name)
 }
 
-func requestDaemonStop(_ context.Context) error {
-	transport, err := realDial(ipc.SocketDir())
-	if err != nil {
-		return fmt.Errorf("vev: no daemon running")
+func waitForDaemonStop(ctx context.Context) error {
+	timer := time.NewTimer(daemonRestartSettle)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
-	defer func() { _ = transport.Close() }()
-	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}); err != nil {
-		return fmt.Errorf("vev: requesting daemon stop: %w", err)
+}
+
+func requestDaemonStop(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, daemonStopTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		transport, err := realDial(ipc.SocketDir())
+		if err != nil {
+			done <- fmt.Errorf("vev: no daemon running")
+			return
+		}
+		defer func() { _ = transport.Close() }()
+		closed := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = transport.Close()
+			case <-closed:
+			}
+		}()
+		defer close(closed)
+		if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}); err != nil {
+			done <- fmt.Errorf("vev: requesting daemon stop: %w", err)
+			return
+		}
+		if _, err := transport.Recv(); err != nil && !errors.Is(err, io.EOF) {
+			done <- fmt.Errorf("vev: reading daemon stop reply: %w", err)
+			return
+		}
+		done <- nil
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("vev: stopping daemon: %w", ctx.Err())
 	}
-	if _, err := transport.Recv(); err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("vev: reading daemon stop reply: %w", err)
-	}
-	return nil
 }
 
 // runStdio is the hidden remote-side mode used by `ssh host vev _stdio`: it
