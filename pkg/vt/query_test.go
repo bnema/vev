@@ -3,6 +3,8 @@ package vt
 import (
 	"bytes"
 	"testing"
+
+	"github.com/bnema/vev/pkg/renderer"
 )
 
 func TestScreenQueryResponses(t *testing.T) {
@@ -44,9 +46,63 @@ func TestScreenQueryResponses(t *testing.T) {
 	}
 }
 
+func TestScreenOSCDefaultColorQueries(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "foreground BEL", input: "\x1b]10;?\a", want: "\x1b]10;rgb:1212/3434/5656\a"},
+		{name: "background BEL", input: "\x1b]11;?\a", want: "\x1b]11;rgb:7878/9a9a/bcbc\a"},
+		{name: "foreground ST", input: "\x1b]10;?\x1b\\", want: "\x1b]10;rgb:1212/3434/5656\x1b\\"},
+		{name: "background ST", input: "\x1b]11;?\x1b\\", want: "\x1b]11;rgb:7878/9a9a/bcbc\x1b\\"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewScreen(80, 24)
+			s.SetDefaultColors(
+				renderer.RGB{R: 0x12, G: 0x34, B: 0x56},
+				renderer.RGB{R: 0x78, G: 0x9a, B: 0xbc},
+				true,
+			)
+			var got bytes.Buffer
+			s.OnResponse = func(b []byte) { got.Write(b) }
+			s.Write([]byte(tc.input))
+			if got.String() != tc.want {
+				t.Fatalf("response = %q, want %q", got.String(), tc.want)
+			}
+		})
+	}
+}
+
+func TestScreenOSCDefaultColorQueriesUnknownAreSilent(t *testing.T) {
+	s := NewScreen(80, 24)
+	s.SetDefaultColors(renderer.RGB{R: 1, G: 2, B: 3}, renderer.RGB{R: 4, G: 5, B: 6}, false)
+	var got bytes.Buffer
+	s.OnResponse = func(b []byte) { got.Write(b) }
+	s.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	if got.Len() != 0 {
+		t.Fatalf("response = %q, want silence", got.String())
+	}
+}
+
+func TestScreenOSCDefaultColorQuerySplitAcrossWrites(t *testing.T) {
+	s := NewScreen(80, 24)
+	s.SetDefaultColors(renderer.RGB{R: 0x01, G: 0x02, B: 0x03}, renderer.RGB{R: 0x04, G: 0x05, B: 0x06}, true)
+	var got bytes.Buffer
+	s.OnResponse = func(b []byte) { got.Write(b) }
+	s.Write([]byte("\x1b]10"))
+	s.Write([]byte(";?\a"))
+	if got.String() != "\x1b]10;rgb:0101/0202/0303\a" {
+		t.Fatalf("response = %q", got.String())
+	}
+}
+
 func TestScreenQueriesWithNilResponderDoNotPanic(t *testing.T) {
 	s := NewScreen(80, 24)
 	s.Write([]byte("\x1b[c\x1b[6n\x1b[?2026$p"))
+	s.SetDefaultColors(renderer.RGB{R: 1, G: 2, B: 3}, renderer.RGB{R: 4, G: 5, B: 6}, true)
+	s.Write([]byte("\x1b]10;?\a\x1b]11;?\x1b\\"))
 }
 
 func TestCSIuDispatch(t *testing.T) {

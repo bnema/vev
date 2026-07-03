@@ -14,9 +14,12 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/theme"
+	"github.com/bnema/vev/pkg/renderer"
 )
 
 // ProtocolError is a session- or protocol-level failure reported by the
@@ -115,6 +118,8 @@ func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal,
 	if err != nil {
 		cwd = ""
 	}
+	colorTerm := strings.ToLower(os.Getenv("COLORTERM"))
+	trueColor := colorTerm == "truecolor" || colorTerm == "24bit"
 	hello := ports.Hello{
 		Version: ports.ProtocolVersion,
 		Intent:  intent,
@@ -168,7 +173,7 @@ func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal,
 	sendErrCh := make(chan error, 1)
 
 	go runSender(loopCtx, cancel, transport, sendCh, sendErrCh)
-	go runStdin(loopCtx, cancel, term.In(), sendCh)
+	go runStdin(loopCtx, cancel, term.In(), sendCh, trueColor)
 	go runResize(loopCtx, term.ResizeEvents(), sendCh)
 
 	// 5. Output/main loop: the only goroutine that touches the terminal.
@@ -282,17 +287,42 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 // exits. That is harmless here — Attach has already returned and restored
 // the terminal — and matches the standard pattern for stdin pumps; a
 // closable stdin duplicate could lift it later if ever needed.
-func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame) {
+func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame, trueColor bool) {
 	buf := make([]byte, stdinBufSize)
+	var scanner theme.Scanner
+	current := ports.Theme{TrueColor: trueColor}
+	send := func(frame ports.Frame) bool {
+		select {
+		case out <- frame:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
 	for {
 		n, rerr := in.Read(buf)
 		if n > 0 {
-			data := make([]byte, n)
-			copy(data, buf[:n])
-			frame := ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: data})}
-			select {
-			case out <- frame:
-			case <-ctx.Done():
+			ok := true
+			scanner.Scan(buf[:n], func(kind int, rgb renderer.RGB) {
+				switch kind {
+				case 10:
+					current.HasForeground = true
+					current.Foreground = rgb
+				case 11:
+					current.HasBackground = true
+					current.Background = rgb
+				default:
+					return
+				}
+				ok = send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(current)})
+			}, func(data []byte) {
+				if len(data) == 0 || !ok {
+					return
+				}
+				copyData := append([]byte(nil), data...)
+				ok = send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: copyData})})
+			})
+			if !ok {
 				return
 			}
 		}

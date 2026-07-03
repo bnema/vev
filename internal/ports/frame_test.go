@@ -14,6 +14,7 @@ func TestMsgTypeUnique(t *testing.T) {
 		{"MsgPing", MsgPing},
 		{"MsgList", MsgList},
 		{"MsgKill", MsgKill},
+		{"MsgTheme", MsgTheme},
 		{"MsgWelcome", MsgWelcome},
 		{"MsgError", MsgError},
 		{"MsgOutput", MsgOutput},

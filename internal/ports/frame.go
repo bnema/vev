@@ -6,8 +6,9 @@ const ProtocolVersion uint16 = 3
 // MsgType identifies the kind of payload carried by a Frame.
 type MsgType uint8
 
-// Frame message types. Client-originated messages are numbered from 1,
-// server-originated messages from 16, leaving room for growth in each band.
+// Frame message types. Client-originated messages are numbered from 1
+// through 15, server-originated messages from 16, leaving room for growth in
+// each band.
 const (
 	MsgHello  MsgType = 1
 	MsgInput  MsgType = 2
@@ -16,6 +17,7 @@ const (
 	MsgPing   MsgType = 5
 	MsgList   MsgType = 6
 	MsgKill   MsgType = 7
+	MsgTheme  MsgType = 8
 
 	MsgWelcome  MsgType = 16
 	MsgError    MsgType = 17

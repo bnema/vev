@@ -31,24 +31,25 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-func drawStatus(row []renderer.Cell, sess *session, rightText string) {
+func drawStatus(row []renderer.Cell, sess *session, rightText string, styles ...themeStyles) {
 	for i := range row {
 		row[i] = renderer.BlankCell()
 	}
+	styleSet := resolveThemeStyles(styles)
 	status := sess.statusSegments()
 	x := 0
-	writeStatusText(row, &x, " "+status.session+" ", renderer.DefaultStyle())
+	writeStatusText(row, &x, " "+status.session+" ", styleSet.statusBar)
 	for _, w := range status.tabs {
-		style := renderer.DefaultStyle()
+		style := styleSet.statusBar
 		if w.active {
-			style.Inverse = true
+			style = styleSet.accent
 		}
 		writeStatusText(row, &x, " "+w.name+" ", style)
 	}
 	if rightText == "" {
 		return
 	}
-	style := renderer.DefaultStyle()
+	style := styleSet.statusBar
 	rightWidth := len([]rune(rightText)) + 1
 	if len(row)-x-1 < rightWidth {
 		return

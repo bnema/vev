@@ -307,8 +307,8 @@ func isCopyEscapePrefix(data []byte) bool {
 		len(data) == 3 && data[0] == 0x1b && data[1] == '[' && (data[2] == '5' || data[2] == '6')
 }
 
-func composeCopyClientFrame(mode *scopy.Mode, tb *tab) (renderer.Frame, []renderer.Damage) {
+func composeCopyClientFrame(mode *scopy.Mode, tb *tab, copyStatusStyle, selectionStyle renderer.Style) (renderer.Frame, []renderer.Damage) {
 	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
-	frame := mode.Render(snap)
+	frame := mode.Render(snap, copyStatusStyle, selectionStyle)
 	return frame, []renderer.Damage{renderer.FullRedraw()}
 }

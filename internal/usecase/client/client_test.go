@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -65,6 +66,31 @@ func (b *blockingReader) Read(p []byte) (int, error) {
 	return 0, io.EOF
 }
 func (b *blockingReader) unblock() { close(b.ch) }
+
+type oneShotBlockingReader struct {
+	data []byte
+	done chan struct{}
+	once sync.Once
+}
+
+func newOneShotBlockingReader(data []byte) *oneShotBlockingReader {
+	return &oneShotBlockingReader{data: data, done: make(chan struct{})}
+}
+
+func (r *oneShotBlockingReader) Read(p []byte) (int, error) {
+	read := false
+	r.once.Do(func() {
+		copy(p, r.data)
+		read = true
+	})
+	if read {
+		return len(r.data), nil
+	}
+	<-r.done
+	return 0, io.EOF
+}
+
+func (r *oneShotBlockingReader) unblock() { close(r.done) }
 
 func newHappyTerminal(t *testing.T, out *bytes.Buffer, restoreCount *atomic.Int32, resizeCh chan domain.Size) (*portsmocks.MockTerminal, *blockingReader) {
 	tm := portsmocks.NewMockTerminal(t)
@@ -170,6 +196,279 @@ func TestAttachDaemonVanishedOnEOF(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, io.EOF)
 	require.Equal(t, int32(1), restoreCount.Load())
+}
+
+func TestAttachStdinOSCColorResponseSendsThemeAndPreservesInput(t *testing.T) {
+	t.Setenv("COLORTERM", "truecolor")
+
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	input := newOneShotBlockingReader([]byte("a\x1b]11;rgb:0101/0202/0303\x07b"))
+	defer input.unblock()
+
+	tm := portsmocks.NewMockTerminal(t)
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().EnterRaw().Return(func() error {
+		restoreCount.Add(1)
+		return nil
+	}, nil).Once()
+	tm.EXPECT().In().Return(input).Maybe()
+	tm.EXPECT().Out().Return(&out).Maybe()
+	tm.EXPECT().Flush().Return(nil).Maybe()
+	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
+
+	gotTheme := make(chan ports.Theme, 1)
+	gotInput := make(chan []byte, 2)
+	allowDetach := make(chan struct{})
+
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
+		in, err := ports.UnmarshalInput(f.Payload)
+		require.NoError(t, err)
+		require.NotContains(t, string(in.Data), "\x1b]11;")
+		gotInput <- append([]byte(nil), in.Data...)
+		if bytes.Contains(in.Data, []byte("b")) {
+			close(allowDetach)
+		}
+		return nil
+	}).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgTheme)).RunAndReturn(func(f ports.Frame) error {
+		th, err := ports.UnmarshalTheme(f.Payload)
+		require.NoError(t, err)
+		gotTheme <- th
+		return nil
+	}).Once()
+
+	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
+	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
+	recvCh := make(chan recvItem, 1)
+	recvCh <- recvItem{f: welcome}
+	closed := make(chan struct{})
+	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		select {
+		case it := <-recvCh:
+			return it.f, it.err
+		case <-allowDetach:
+			select {
+			case <-closed:
+				return ports.Frame{}, io.EOF
+			default:
+				close(closed)
+				return detached, nil
+			}
+		case <-closed:
+			return ports.Frame{}, io.EOF
+		}
+	}).Maybe()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	require.NoError(t, err)
+	require.Equal(t, int32(1), restoreCount.Load())
+
+	select {
+	case th := <-gotTheme:
+		require.True(t, th.HasBackground)
+		require.Equal(t, uint8(1), th.Background.R)
+		require.Equal(t, uint8(2), th.Background.G)
+		require.Equal(t, uint8(3), th.Background.B)
+		require.True(t, th.TrueColor)
+	case <-time.After(2 * time.Second):
+		t.Fatal("theme frame was not sent")
+	}
+
+	var inputBytes []byte
+	for {
+		select {
+		case b := <-gotInput:
+			inputBytes = append(inputBytes, b...)
+		default:
+			require.Equal(t, []byte("ab"), inputBytes)
+			return
+		}
+	}
+}
+
+func TestAttachStdinThemeTrueColorFalseWhenCOLORTERMNotTruecolor(t *testing.T) {
+	t.Setenv("COLORTERM", "")
+
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	input := newOneShotBlockingReader([]byte("\x1b]10;#010203\x07"))
+	defer input.unblock()
+
+	tm := portsmocks.NewMockTerminal(t)
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
+	tm.EXPECT().In().Return(input).Maybe()
+	tm.EXPECT().Out().Return(&out).Maybe()
+	tm.EXPECT().Flush().Return(nil).Maybe()
+	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
+
+	gotTheme := make(chan ports.Theme, 1)
+	allowDetach := make(chan struct{})
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(ports.MsgTheme)).RunAndReturn(func(f ports.Frame) error {
+		th, err := ports.UnmarshalTheme(f.Payload)
+		require.NoError(t, err)
+		gotTheme <- th
+		close(allowDetach)
+		return nil
+	}).Once()
+	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
+	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
+	recvCh := make(chan recvItem, 1)
+	recvCh <- recvItem{f: welcome}
+	closed := make(chan struct{})
+	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		select {
+		case it := <-recvCh:
+			return it.f, it.err
+		case <-allowDetach:
+			select {
+			case <-closed:
+				return ports.Frame{}, io.EOF
+			default:
+				close(closed)
+				return detached, nil
+			}
+		case <-closed:
+			return ports.Frame{}, io.EOF
+		}
+	}).Maybe()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	require.NoError(t, err)
+	select {
+	case th := <-gotTheme:
+		require.True(t, th.HasForeground)
+		require.False(t, th.TrueColor)
+	case <-time.After(2 * time.Second):
+		t.Fatal("theme frame was not sent")
+	}
+}
+
+func TestAttachForwardsStandaloneEscapeInput(t *testing.T) {
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	input := newOneShotBlockingReader([]byte("\x1b"))
+	defer input.unblock()
+
+	tm := portsmocks.NewMockTerminal(t)
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
+	tm.EXPECT().In().Return(input).Maybe()
+	tm.EXPECT().Out().Return(&out).Maybe()
+	tm.EXPECT().Flush().Return(nil).Maybe()
+	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
+
+	gotInput := make(chan []byte, 1)
+	allowDetach := make(chan struct{})
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
+		in, err := ports.UnmarshalInput(f.Payload)
+		require.NoError(t, err)
+		gotInput <- in.Data
+		close(allowDetach)
+		return nil
+	}).Once()
+	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
+	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
+	recvCh := make(chan recvItem, 1)
+	recvCh <- recvItem{f: welcome}
+	closed := make(chan struct{})
+	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		select {
+		case it := <-recvCh:
+			return it.f, it.err
+		case <-allowDetach:
+			select {
+			case <-closed:
+				return ports.Frame{}, io.EOF
+			default:
+				close(closed)
+				return detached, nil
+			}
+		case <-closed:
+			return ports.Frame{}, io.EOF
+		}
+	}).Maybe()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	require.NoError(t, err)
+	select {
+	case got := <-gotInput:
+		require.Equal(t, []byte("\x1b"), got)
+	case <-time.After(2 * time.Second):
+		t.Fatal("standalone escape input was not sent")
+	}
+}
+
+func TestAttachStdinForwardsSGRMouseReportAsSingleFrame(t *testing.T) {
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	input := newOneShotBlockingReader([]byte("\x1b[<0;1;1M"))
+	defer input.unblock()
+
+	tm := portsmocks.NewMockTerminal(t)
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
+	tm.EXPECT().In().Return(input).Maybe()
+	tm.EXPECT().Out().Return(&out).Maybe()
+	tm.EXPECT().Flush().Return(nil).Maybe()
+	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
+
+	gotInput := make(chan []byte, 2)
+	allowDetach := make(chan struct{})
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
+		in, err := ports.UnmarshalInput(f.Payload)
+		require.NoError(t, err)
+		gotInput <- in.Data
+		close(allowDetach)
+		return nil
+	}).Once()
+	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
+	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
+	recvCh := make(chan recvItem, 1)
+	recvCh <- recvItem{f: welcome}
+	closed := make(chan struct{})
+	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		select {
+		case it := <-recvCh:
+			return it.f, it.err
+		case <-allowDetach:
+			select {
+			case <-closed:
+				return ports.Frame{}, io.EOF
+			default:
+				close(closed)
+				return detached, nil
+			}
+		case <-closed:
+			return ports.Frame{}, io.EOF
+		}
+	}).Maybe()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	require.NoError(t, err)
+	select {
+	case got := <-gotInput:
+		require.Equal(t, []byte("\x1b[<0;1;1M"), got, "SGR mouse report must arrive as one intact MsgInput frame")
+	case <-time.After(2 * time.Second):
+		t.Fatal("mouse report input was not sent")
+	}
 }
 
 func TestAttachForwardsResize(t *testing.T) {

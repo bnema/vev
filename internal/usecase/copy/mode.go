@@ -141,10 +141,11 @@ func (m *Mode) SelectedText(s Snapshot) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *Mode) Render(s Snapshot) renderer.Frame {
+func (m *Mode) Render(s Snapshot, styles ...renderer.Style) renderer.Frame {
 	m.clamp(s)
 	frame := renderer.NewFrame(s.Width, s.Height+1)
 	lo, hi, selected := m.SelectedBounds()
+	selectionStyle, hasSelectionStyle := optionalStyle(styles, 1)
 	for y := range s.Height {
 		src := m.ViewportTop + y
 		if src >= len(s.Rows) {
@@ -155,15 +156,40 @@ func (m *Mode) Render(s Snapshot) renderer.Frame {
 		lineSelected := selected && src >= lo && src <= hi
 		if lineSelected {
 			for x := range row {
-				row[x].Style.Inverse = true
+				applySelectionStyle(&row[x].Style, selectionStyle, hasSelectionStyle)
 			}
 		}
 		if src == m.Cursor && !lineSelected && len(row) > 0 {
-			row[0].Style.Inverse = true
+			applySelectionStyle(&row[0].Style, selectionStyle, hasSelectionStyle)
 		}
 	}
-	drawCopyStatus(frame.Row(s.Height), m, len(s.Rows))
+	style := inverseStyle()
+	if len(styles) > 0 {
+		style = styles[0]
+	}
+	drawCopyStatus(frame.Row(s.Height), m, len(s.Rows), style)
 	return frame
+}
+
+func optionalStyle(styles []renderer.Style, idx int) (renderer.Style, bool) {
+	if idx >= len(styles) {
+		return renderer.Style{}, false
+	}
+	return styles[idx], true
+}
+
+func applySelectionStyle(dst *renderer.Style, selection renderer.Style, ok bool) {
+	if !ok || selection.Equal(inverseStyle()) {
+		dst.Inverse = true
+		return
+	}
+	*dst = selection
+}
+
+func inverseStyle() renderer.Style {
+	style := renderer.DefaultStyle()
+	style.Inverse = true
+	return style
 }
 
 func rowString(row []renderer.Cell) string {
@@ -181,7 +207,7 @@ func rowString(row []renderer.Cell) string {
 	return strings.TrimRight(string(runes), " ")
 }
 
-func drawCopyStatus(row []renderer.Cell, m *Mode, total int) {
+func drawCopyStatus(row []renderer.Cell, m *Mode, total int, style renderer.Style) {
 	for i := range row {
 		row[i] = renderer.BlankCell()
 	}
@@ -194,8 +220,6 @@ func drawCopyStatus(row []renderer.Cell, m *Mode, total int) {
 	} else {
 		text += "0/0 "
 	}
-	style := renderer.DefaultStyle()
-	style.Inverse = true
 	for i, r := range text {
 		if i >= len(row) {
 			break

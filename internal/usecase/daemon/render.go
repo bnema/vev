@@ -31,6 +31,7 @@ import (
 	"time"
 
 	scopy "github.com/bnema/vev/internal/usecase/copy"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -273,6 +274,8 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		ac.promptMu.Unlock()
 	}
 
+	styles := newThemeStyles(ac.getTheme())
+
 	tb.mu.Lock()
 	if reset || copyActive || pickerActive || paletteActive || promptActive {
 		ac.rend.Reset()
@@ -280,22 +283,22 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	if reset || pickerActive || paletteActive || promptActive {
 		ac.lastCursor.valid = false
 	}
-	frame, damage := composeClientFrame(sess, tb, reset, copyFeedback)
+	frame, damage := composeClientFrame(sess, tb, reset, copyFeedback, styles)
 	if copyActive {
-		frame, damage = composeCopyClientFrame(copyMode, tb)
+		frame, damage = composeCopyClientFrame(copyMode, tb, styles.copyStatus, styles.selection)
 	}
 	if pickerActive {
 		if previewTab == tb {
 			preview = pickerPreviewFromLockedTab(tb)
 		}
-		frame, damage = composePickerClientFrame(pickerModel, preview, frame)
+		frame, damage = composePickerClientFrame(pickerModel, preview, frame, styles)
 	}
 	if paletteActive {
-		frame, damage = composePaletteClientFrame(paletteModel, frame)
+		frame, damage = composePaletteClientFrame(paletteModel, frame, styles)
 		ac.paletteMu.Unlock()
 	}
 	if promptActive {
-		frame, damage = composePromptClientFrame(promptModel, frame)
+		frame, damage = composePromptClientFrame(promptModel, frame, styles)
 		ac.promptMu.Unlock()
 	}
 	desiredCursor := desiredCursorOut(tb.screen, copyActive || pickerActive || paletteActive || promptActive)
@@ -364,13 +367,39 @@ func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte
 	return b
 }
 
-func composeClientFrame(sess *session, tb *tab, full bool, rightStatus string) (renderer.Frame, []renderer.Damage) {
+type themeStyles struct {
+	statusBar  renderer.Style
+	accent     renderer.Style
+	border     renderer.Style
+	selection  renderer.Style
+	copyStatus renderer.Style
+}
+
+func newThemeStyles(t themeui.Theme) themeStyles {
+	return themeStyles{
+		statusBar:  themeui.StatusBarStyle(t),
+		accent:     themeui.AccentStyle(t),
+		border:     themeui.BorderStyle(t),
+		selection:  themeui.SelectionStyle(t),
+		copyStatus: themeui.SelectionStyle(t),
+	}
+}
+
+func resolveThemeStyles(styles []themeStyles) themeStyles {
+	if len(styles) > 0 {
+		return styles[0]
+	}
+	return newThemeStyles(themeui.Theme{})
+}
+
+func composeClientFrame(sess *session, tb *tab, full bool, rightStatus string, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
 	width, screenRows := tb.screen.Frame.Width, tb.screen.Frame.Height
 	frame := renderer.NewFrame(width, screenRows+1)
 	for y := range screenRows {
 		copy(frame.Row(y), tb.screen.Frame.Row(y))
 	}
-	drawStatus(frame.Row(screenRows), sess, rightStatus)
+	styleSet := resolveThemeStyles(styles)
+	drawStatus(frame.Row(screenRows), sess, rightStatus, styleSet)
 	if full {
 		return frame, []renderer.Damage{renderer.FullRedraw()}
 	}

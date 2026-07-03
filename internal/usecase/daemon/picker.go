@@ -363,9 +363,10 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 	return old
 }
 
-func composePickerClientFrame(model *picker.Model, preview picker.Preview, base renderer.Frame) (renderer.Frame, []renderer.Damage) {
-	inner := pickerModal.Composite(base, renderer.DefaultStyle())
-	modalFrame := model.Render(domain.Size{Cols: inner.Width, Rows: inner.Height}, preview)
+func composePickerClientFrame(model *picker.Model, preview picker.Preview, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
+	styleSet := resolveThemeStyles(styles)
+	inner := pickerModal.Composite(base, styleSet.border)
+	modalFrame := model.Render(domain.Size{Cols: inner.Width, Rows: inner.Height}, preview, styleSet.selection)
 	for y := range min(inner.Height, modalFrame.Height) {
 		for x := range min(inner.Width, modalFrame.Width) {
 			base.Set(inner.X+x, inner.Y+y, modalFrame.At(x, y))
