@@ -79,7 +79,9 @@ func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte) {
 			return
 		}
 		d.closePrompt(ac)
-		d.paint(sess, ac, true)
+		if current := ac.currentSession(); current != nil {
+			d.paint(current, ac, true)
+		}
 		return
 	}
 	if exit {

@@ -61,8 +61,12 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.Contains(t, string(promptOutput.Data), "Create session")
 
 	d.handleInput(sess, ac, []byte("scratch\r"))
-	repaint := awaitFrame(t, sends, ports.MsgOutput)
-	repaintOutput, err := ports.UnmarshalOutput(repaint.Payload)
+	// The submit first paints the newly attached session while the prompt is
+	// still open, then handlePromptInput closes the prompt and repaints the
+	// client's current session. The final frame must be for the new session.
+	awaitFrame(t, sends, ports.MsgOutput)
+	finalRepaint := awaitFrame(t, sends, ports.MsgOutput)
+	finalOutput, err := ports.UnmarshalOutput(finalRepaint.Payload)
 	require.NoError(t, err)
 	require.False(t, ac.promptActive())
 	require.Equal(t, 2, sessionCount(d))
@@ -73,7 +77,8 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.Equal(t, "scratch", newSess.name)
 	require.False(t, newSess.ephemeral)
 	require.Same(t, ac, newSess.client)
-	require.Contains(t, string(repaintOutput.Data), "scratch")
+	require.Contains(t, string(finalOutput.Data), "scratch")
+	require.NotContains(t, string(finalOutput.Data), "Create session")
 }
 
 func TestPaletteCommandNoopRepaintsAfterClose(t *testing.T) {
