@@ -1241,6 +1241,22 @@ func TestStatusCompositionGolden(t *testing.T) {
 	}
 }
 
+func TestStatusCopyFeedbackRendersOnlyWhenFullyFits(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	_, sess, _, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+	sess.name = "work"
+	win := sess.activeTab()
+	win.screen = vt.NewScreen(30, 2)
+	win.size = domain.Size{Cols: 30, Rows: 2}
+
+	frame, _ := composeClientFrame(sess, win, true, "ok")
+	require.Equal(t, " work  1                    ok", rowText(frame.Row(2)))
+
+	frame, _ = composeClientFrame(sess, win, true, "selection too large to copy")
+	require.Equal(t, " work  1                      ", rowText(frame.Row(2)))
+}
+
 func TestStatusRepaintsOnCreateSwitchAndResize(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)

@@ -64,7 +64,7 @@ Scrollback mode freezes a view over history while the program keeps running unde
 | y or Enter | copy selection and exit |
 | q, Esc, Ctrl-C | exit without copying |
 
-Copying uses OSC 52, so the selection lands in your terminal's clipboard even across SSH. After a successful copy, the right side of the status bar reports `copied N chars to clipboard` until the next screen update.
+Copying uses OSC 52, so the selection lands in your terminal's clipboard even across SSH. After a successful copy, the right side of the status bar reports `copied N chars to clipboard` until the next screen update. If the selection exceeds the OSC 52 copy limit, the status bar reports `selection too large to copy` instead.
 
 ## Mouse
 

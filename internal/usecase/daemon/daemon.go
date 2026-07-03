@@ -240,6 +240,11 @@ func (d *Daemon) boundedSendErr(ac *attachedClient, f ports.Frame) error {
 		timer.Stop()
 		return err
 	case <-timer.C():
+		select {
+		case err := <-result:
+			return err
+		default:
+		}
 		_ = ac.tr.Close()
 		return errors.New("send timed out")
 	}
@@ -1801,11 +1806,11 @@ func drawStatus(row []renderer.Cell, sess *session, rightText string) {
 		return
 	}
 	style := renderer.DefaultStyle()
-	start := max(len(row)-len([]rune(rightText))-1, x+1)
-	if start >= len(row) {
+	rightWidth := len([]rune(rightText)) + 1
+	if len(row)-x-1 < rightWidth {
 		return
 	}
-	x = start
+	x = len(row) - rightWidth
 	writeStatusText(row, &x, " "+rightText, style)
 }
 
