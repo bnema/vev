@@ -216,6 +216,10 @@ func runDaemon() error {
 // attach loop. Logging goes to the shared file: the client must never write
 // to the console while the terminal is raw.
 func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) error {
+	if os.Getenv("VEV") != "" {
+		return errors.New("vev: sessions should be nested with care; unset VEV to force")
+	}
+
 	logFile, err := setupLogging()
 	if err != nil {
 		return err

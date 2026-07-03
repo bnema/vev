@@ -1692,9 +1692,9 @@ func TestRuneWidth(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := runeWidth(tt.r)
+			got := renderer.RuneWidth(tt.r)
 			if got != tt.width {
-				t.Errorf("runeWidth(%U %q) = %d, want %d", tt.r, tt.r, got, tt.width)
+				t.Errorf("renderer.RuneWidth(%U %q) = %d, want %d", tt.r, tt.r, got, tt.width)
 			}
 		})
 	}

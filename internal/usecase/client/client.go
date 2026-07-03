@@ -111,12 +111,17 @@ func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal,
 	if err != nil {
 		return fmt.Errorf("vev: reading terminal size: %w", err)
 	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
 	hello := ports.Hello{
 		Version: ports.ProtocolVersion,
 		Intent:  intent,
 		Name:    name,
 		Size:    size,
 		TermEnv: os.Getenv("TERM"),
+		Cwd:     cwd,
 	}
 	if err := transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
 		return fmt.Errorf("vev: sending hello: %w", err)
