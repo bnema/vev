@@ -13,7 +13,7 @@ func snapshot(lines []string, height int) Snapshot {
 	for i, line := range lines {
 		rows[i] = row(line)
 	}
-	return Snapshot{Rows: rows, Width: 8, Height: height}
+	return Snapshot{Rows: rows, Width: 16, Height: height}
 }
 
 func TestCopyModeNavigationBounds(t *testing.T) {
@@ -129,6 +129,22 @@ func TestCopyModeAtBottomWithShortSnapshot(t *testing.T) {
 	}
 }
 
+func TestScrollbackModeStatusDistinguishesPassiveAndVisual(t *testing.T) {
+	s := snapshot([]string{"alpha   ", "beta    ", "gamma   "}, 2)
+	m := NewMode(s)
+
+	frame := m.Render(s)
+	if got := frameText(frame.Row(s.Height)); !strings.Contains(got, "[SCROLL]") || strings.Contains(got, "[COPY]") || strings.Contains(got, "[VISUAL]") {
+		t.Fatalf("passive status = %q, want [SCROLL] and no copy/visual label", got)
+	}
+
+	m.ToggleSelection()
+	frame = m.Render(s)
+	if got := frameText(frame.Row(s.Height)); !strings.Contains(got, "[VISUAL]") || strings.Contains(got, "[SCROLL]") {
+		t.Fatalf("selection status = %q, want [VISUAL] and no [SCROLL]", got)
+	}
+}
+
 func TestCopyModeSelectionPayloadAndInverse(t *testing.T) {
 	s := snapshot([]string{"alpha   ", "beta    ", "gamma   "}, 2)
 	m := &Mode{ViewportTop: 0, Cursor: 0, Anchor: 0, Selecting: true}
@@ -143,6 +159,18 @@ func TestCopyModeSelectionPayloadAndInverse(t *testing.T) {
 			t.Fatalf("row %d first cell not inverse", y)
 		}
 	}
+}
+
+func frameText(row []renderer.Cell) string {
+	var b strings.Builder
+	for _, c := range row {
+		if c.Rune == 0 {
+			b.WriteRune(' ')
+			continue
+		}
+		b.WriteRune(c.Rune)
+	}
+	return b.String()
 }
 
 func TestCopyModeMoveWhileSelectingKeepsAnchorAndExtendsSelection(t *testing.T) {

@@ -49,26 +49,26 @@ All bindings use the Alt modifier directly, no prefix key.
 | Alt+d | detach |
 | Alt+r | promote the current ephemeral session to named |
 | Alt+t | open session/tab picker |
-| Alt+u | enter copy mode |
+| Alt+u | enter scrollback mode |
 
-## Copy mode
+## Scrollback and visual copy
 
-Copy mode freezes a view over the scrollback while the program keeps running underneath. The status bar shows `[COPY]` and the cursor position.
+Scrollback mode freezes a view over history while the program keeps running underneath. Mouse wheel up enters scrollback mode and shows `[SCROLL]`; scrolling back down to the live bottom exits. When a line selection is active, the selected rows are highlighted and the status bar shows `[VISUAL]`.
 
 | Key | Action |
 |---|---|
 | j / k, Up / Down | move one line |
 | PgUp / PgDn | move one page |
 | g / G | jump to top / bottom |
-| Space | toggle line selection |
+| Space | toggle visual line selection |
 | y or Enter | copy selection and exit |
 | q, Esc, Ctrl-C | exit without copying |
 
-Copying uses OSC 52, so the selection lands in your terminal's clipboard even across SSH.
+Copying uses OSC 52, so the selection lands in your terminal's clipboard even across SSH. After a successful copy, the right side of the status bar reports `copied N chars to clipboard` until the next screen update.
 
 ## Mouse
 
-vev enables terminal mouse reporting while attached. Mouse input on the status row is reserved for vev and is not sent to the child. In copy mode, the wheel scrolls the copy-mode view. When the child enables mouse reporting, SGR mouse events are forwarded to it. Otherwise, wheel events in the alternate screen are translated to Up/Down arrow keys (`ESC[A` / `ESC[B`). This translation intentionally does not honor DECCKM application-cursor mode (`ESC OA` / `ESC OB`). An extremely rare input read split exactly between `ESC[` and `<` in an SGR mouse sequence may leak the partial `ESC[` to the child.
+vev enables terminal mouse reporting while attached. Mouse input on the status row is reserved for vev and is not sent to the child. In scrollback mode, the wheel scrolls the scrollback view. When the child enables mouse reporting, SGR mouse events are forwarded to it. Otherwise, wheel events in the alternate screen are translated to Up/Down arrow keys (`ESC[A` / `ESC[B`). This translation intentionally does not honor DECCKM application-cursor mode (`ESC OA` / `ESC OB`). An extremely rare input read split exactly between `ESC[` and `<` in an SGR mouse sequence may leak the partial `ESC[` to the child.
 
 vev follows the child application's cursor visibility and style requests and appends a hardware cursor update after each paint. Visible cursors blink as requested by the terminal/application state.
 

@@ -306,7 +306,7 @@ func testRow(text string) []renderer.Cell {
 	return cells
 }
 
-func TestCopyModeAltUInterceptsAndDoesNotForward(t *testing.T) {
+func TestScrollbackModeAltUInterceptsAndDoesNotForward(t *testing.T) {
 	writes := make(chan []byte, 1)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
@@ -316,18 +316,26 @@ func TestCopyModeAltUInterceptsAndDoesNotForward(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1bu"))
 
 	if ac.copyMode == nil {
-		t.Fatal("copy mode not entered")
+		t.Fatal("scrollback mode not entered")
 	}
 	select {
 	case got := <-writes:
-		t.Fatalf("copy-mode binding forwarded to PTY: %q", got)
+		t.Fatalf("scrollback binding forwarded to PTY: %q", got)
 	default:
 	}
 	out := awaitFrame(t, sends, ports.MsgOutput)
 	msg, err := ports.UnmarshalOutput(out.Payload)
 	require.NoError(t, err)
-	if !strings.Contains(string(msg.Data), "[COPY]") {
-		t.Fatalf("copy mode paint = %q, want [COPY] status", string(msg.Data))
+	if got := string(msg.Data); !strings.Contains(got, "[SCROLL]") || strings.Contains(got, "[COPY]") {
+		t.Fatalf("scrollback mode paint = %q, want [SCROLL] without [COPY]", got)
+	}
+
+	d.handleInput(sess, ac, []byte(" "))
+	out = awaitFrame(t, sends, ports.MsgOutput)
+	msg, err = ports.UnmarshalOutput(out.Payload)
+	require.NoError(t, err)
+	if got := string(msg.Data); !strings.Contains(got, "[VISUAL]") || strings.Contains(got, "[SCROLL]") {
+		t.Fatalf("visual selection paint = %q, want [VISUAL] without [SCROLL]", got)
 	}
 }
 
@@ -361,11 +369,22 @@ func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 	live := awaitFrame(t, sends, ports.MsgOutput)
 	liveMsg, err := ports.UnmarshalOutput(live.Payload)
 	require.NoError(t, err)
-	if strings.Contains(string(liveMsg.Data), "[COPY]") {
-		t.Fatalf("live repaint still contains copy status: %q", string(liveMsg.Data))
+	if strings.Contains(string(liveMsg.Data), "[COPY]") || strings.Contains(string(liveMsg.Data), "[SCROLL]") {
+		t.Fatalf("live repaint still contains copy/scroll status: %q", string(liveMsg.Data))
+	}
+	if !strings.Contains(string(liveMsg.Data), "copied 9 chars to clipboard") {
+		t.Fatalf("live repaint = %q, want copy success feedback", string(liveMsg.Data))
 	}
 	if !strings.Contains(string(liveMsg.Data), "live") {
 		t.Fatalf("live repaint = %q, want live screen", string(liveMsg.Data))
+	}
+
+	d.paint(sess, ac, true)
+	followup := awaitFrame(t, sends, ports.MsgOutput)
+	followupMsg, err := ports.UnmarshalOutput(followup.Payload)
+	require.NoError(t, err)
+	if strings.Contains(string(followupMsg.Data), "copied 9 chars to clipboard") {
+		t.Fatalf("copy feedback persisted after next repaint: %q", string(followupMsg.Data))
 	}
 }
 
@@ -1185,7 +1204,7 @@ func TestStatusCompositionGolden(t *testing.T) {
 	win.size = domain.Size{Cols: 12, Rows: 2}
 	win.screen.Write([]byte("hello"))
 
-	frame, damage := composeClientFrame(sess, win, true)
+	frame, damage := composeClientFrame(sess, win, true, "")
 
 	require.Equal(t, 12, frame.Width)
 	require.Equal(t, 3, frame.Height)
@@ -2013,7 +2032,7 @@ func mustOutputData(t *testing.T, sends chan ports.Frame) []byte {
 	return out.Data
 }
 
-func TestMouseWheelCopyEntryExitAndStreamOrder(t *testing.T) {
+func TestMouseWheelEntersScrollbackModeAndExitsAtBottom(t *testing.T) {
 	writes := make(chan []byte, 4)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
@@ -2021,9 +2040,10 @@ func TestMouseWheelCopyEntryExitAndStreamOrder(t *testing.T) {
 	win.screen.Write([]byte("live"))
 
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
-	mustOutputData(t, sends)
+	data := mustOutputData(t, sends)
 	require.NotNil(t, ac.copyMode)
 	require.Equal(t, 19, ac.copyMode.Cursor)
+	require.Contains(t, string(data), "[SCROLL]")
 
 	d.handleInput(sess, ac, []byte("\x1b[<65;1;1M"))
 	mustOutputData(t, sends)

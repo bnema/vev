@@ -14,7 +14,7 @@ import (
 // specific continuation protocol is supported.
 const OSC52MaxPayloadBytes = 75_000
 
-// Snapshot is the copy-mode document: scrollback followed by the live screen.
+// Snapshot is the scrollback-mode document: scrollback followed by the live screen.
 type Snapshot struct {
 	Rows   [][]renderer.Cell
 	Width  int
@@ -39,7 +39,7 @@ func NewSnapshot(sb *Scrollback, screen renderer.Frame) Snapshot {
 	return Snapshot{Rows: rows, Width: screen.Width, Height: screen.Height}
 }
 
-// Mode stores per-client copy-mode viewport and line-selection state.
+// Mode stores per-client scrollback viewport and line-selection state.
 type Mode struct {
 	ViewportTop int
 	Cursor      int
@@ -166,7 +166,10 @@ func drawCopyStatus(row []renderer.Cell, m *Mode, total int) {
 	for i := range row {
 		row[i] = renderer.BlankCell()
 	}
-	text := " [COPY] "
+	text := " [SCROLL] "
+	if m.Selecting {
+		text = " [VISUAL] "
+	}
 	if total > 0 {
 		text += strconvItoa(m.Cursor+1) + "/" + strconvItoa(total) + " "
 	} else {
