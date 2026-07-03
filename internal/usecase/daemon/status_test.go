@@ -4,6 +4,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -36,12 +37,13 @@ func TestStatusCompositionGolden(t *testing.T) {
 	frame, damage := composeClientFrame(sess, win, true, "")
 
 	require.Equal(t, 12, frame.Width)
-	require.Equal(t, 3, frame.Height)
-	require.Equal(t, "hello       ", rowText(frame.Row(0)))
-	require.Equal(t, " work  1  2 ", rowText(frame.Row(2)))
+	require.Equal(t, 4, frame.Height)
+	require.Equal(t, " 1  2       ", rowText(frame.Row(0)))
+	require.Equal(t, "hello       ", rowText(frame.Row(1)))
+	require.Equal(t, " work       ", rowText(frame.Row(3)))
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
-	for i, c := range frame.Row(2) {
-		if i >= len(" work  1 ") && i < len(" work  1  2 ") {
+	for i, c := range frame.Row(0) {
+		if i >= len(" 1 ") && i < len(" 1  2 ") {
 			require.True(t, c.Style.Inverse, "active tab segment cell %d should be inverse", i)
 		}
 	}
@@ -63,8 +65,8 @@ func TestStatusCompositionUsesTruecolorTheme(t *testing.T) {
 		Known:      true,
 	})
 
-	d := newThemeStyles(ac.getTheme())
-	frame, damage := composeClientFrame(sess, win, true, "", d)
+	bars := barState{status: sess.statusSegments(), theme: ac.getTheme()}
+	frame, damage := composeClientFrameWithState(bars, win, true)
 	out, err := renderer.New(renderer.Capabilities{}).Draw(frame, damage)
 
 	require.NoError(t, err)
@@ -216,7 +218,8 @@ func TestStatusMarksEphemeralSession(t *testing.T) {
 
 	frame, _ := composeClientFrame(sess, win, true, "")
 
-	require.Equal(t, " 0*  1      ", rowText(frame.Row(2)))
+	require.Equal(t, " 1          ", rowText(frame.Row(0)))
+	require.Equal(t, " 0*         ", rowText(frame.Row(3)))
 }
 
 func TestStatusCopyFeedbackRendersOnlyWhenFullyFits(t *testing.T) {
@@ -229,13 +232,102 @@ func TestStatusCopyFeedbackRendersOnlyWhenFullyFits(t *testing.T) {
 	win.size = domain.Size{Cols: 30, Rows: 2}
 
 	frame, _ := composeClientFrame(sess, win, true, "ok")
-	require.Equal(t, " work  1                    ok", rowText(frame.Row(2)))
+	require.Equal(t, " work                       ok", rowText(frame.Row(3)))
 
 	frame, _ = composeClientFrame(sess, win, true, "1234567890123456789")
-	require.Equal(t, " work  1   1234567890123456789", rowText(frame.Row(2)))
+	require.Equal(t, " work      1234567890123456789", rowText(frame.Row(3)))
 
 	frame, _ = composeClientFrame(sess, win, true, "selection too large to copy")
-	require.Equal(t, " work  1                      ", rowText(frame.Row(2)))
+	require.Equal(t, " work                         ", rowText(frame.Row(3)))
+}
+
+func TestAttentionConstants(t *testing.T) {
+	require.Equal(t, '', attentionGlyph)
+	require.Equal(t, 30, pulseFrameCount)
+	require.Equal(t, 120*time.Millisecond, pulseFrameInterval)
+}
+
+func TestPulseStyleHidesAtFrameZeroAndRamps(t *testing.T) {
+	_, visible := pulseStyle(0)
+	require.False(t, visible)
+
+	low, visible := pulseStyle(1)
+	require.True(t, visible)
+	peak, visible := pulseStyle(pulseFrameCount / 2)
+	require.True(t, visible)
+	require.Greater(t, peak.Foreground, low.Foreground)
+}
+
+func TestTopBarRendersAttentionBell(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	_, sess, _, _ := newManualSessionWithPTYs(t, p1, p2)
+	defer releasePTY1()
+	defer releasePTY2()
+	win := sess.activeTab()
+	win.screen = vt.NewScreen(18, 2)
+	win.size = domain.Size{Cols: 18, Rows: 2}
+	sess.mu.Lock()
+	sess.tabs[1].attention = true
+	sess.tabs[1].attentionAt = time.Unix(10, 0)
+	sess.mu.Unlock()
+
+	frame, _ := composeClientFrameWithState(barState{status: sess.statusSegments(), attentionFrame: 1}, win, true)
+
+	require.Contains(t, rowText(frame.Row(0)), "2 ")
+	for _, c := range frame.Row(0) {
+		if c.Rune == attentionGlyph {
+			require.True(t, c.Style.Bold)
+			return
+		}
+	}
+	t.Fatalf("attention glyph not rendered in top bar: %q", rowText(frame.Row(0)))
+}
+
+func TestStatusBarRendersOtherAttentionOldestFirstAndCollapses(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, sess, _, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+	sess.name = "current"
+	base := time.Unix(100, 0)
+	newAttendedSession := func(id, name string, at time.Time) *session {
+		tb := &tab{attention: true, attentionAt: at}
+		return &session{id: domain.SessionID(id), name: name, tabs: []*tab{tb}}
+	}
+	d.sessions["old"] = newAttendedSession("old", "old", base)
+	d.sessions["new"] = newAttendedSession("new", "new", base.Add(time.Minute))
+
+	state := d.barStateFor(sess, "")
+	state.attentionFrame = 1
+	require.Equal(t, []string{"old", "new"}, state.otherAttention)
+
+	styles := resolveThemeStyles(nil)
+	wide := make([]renderer.Cell, 24)
+	drawStatusBarState(wide, state, styles)
+	require.Equal(t, " current     old   new", rowText(wide))
+
+	narrow := make([]renderer.Cell, 14)
+	drawStatusBarState(narrow, state, styles)
+	require.Equal(t, " current   ×2", rowText(narrow))
+
+	drawStatusBarState(narrow, barState{status: state.status, copyFeedback: "ok", otherAttention: state.otherAttention}, styles)
+	require.Equal(t, " current    ok", rowText(narrow))
+}
+
+func TestBarStateForExcludesCurrentSession(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, sess, _, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+	sess.name = "current"
+	sess.mu.Lock()
+	sess.tabs[0].attention = true
+	sess.tabs[0].attentionAt = time.Unix(1, 0)
+	sess.mu.Unlock()
+	d.sessions["other"] = &session{id: "other", name: "other", tabs: []*tab{{attention: true, attentionAt: time.Unix(2, 0)}}}
+
+	state := d.barStateFor(sess, "")
+
+	require.Equal(t, []string{"other"}, state.otherAttention)
 }
 
 func TestStatusRepaintsOnCreateSwitchAndResize(t *testing.T) {

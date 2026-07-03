@@ -279,14 +279,17 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 	sess := &session{id: "s", name: "s", tabs: []*tab{win}, client: ac}
 	ac.setSession(sess)
 
-	d.resize(sess, ac, domain.Size{Cols: 4, Rows: 3})
+	// Client rows are one more than the equivalent case in a single-bar
+	// layout: tabSize reserves 2 chrome rows (top + bottom bar) here, not 1,
+	// so a client height of 4 (not 3) is what yields the same 2-row tab.
+	d.resize(sess, ac, domain.Size{Cols: 4, Rows: 4})
 	require.Equal(t, "2222", frameRowString(win.screen.Frame, 0))
 	require.Equal(t, "3333", frameRowString(win.screen.Frame, 1))
 	require.Equal(t, 2, win.scrollback.Len())
 	require.Equal(t, "0000", cellsString(win.scrollback.Row(0)))
 	require.Equal(t, "1111", cellsString(win.scrollback.Row(1)))
 
-	d.resize(sess, ac, domain.Size{Cols: 6, Rows: 5})
+	d.resize(sess, ac, domain.Size{Cols: 6, Rows: 6})
 	require.Equal(t, "2222  ", frameRowString(win.screen.Frame, 0))
 	require.Equal(t, "3333  ", frameRowString(win.screen.Frame, 1))
 	require.Equal(t, 2, win.scrollback.Len())
@@ -304,13 +307,79 @@ func cellsString(row []renderer.Cell) string {
 	return string(runes)
 }
 
+func TestTabSizeReservesTopAndBottomChromeRows(t *testing.T) {
+	require.Equal(t, domain.Size{Cols: 80, Rows: 22}, tabSize(domain.Size{Cols: 80, Rows: 24}))
+	require.Equal(t, domain.Size{Cols: 80, Rows: 1}, tabSize(domain.Size{Cols: 80, Rows: 2}))
+}
+
+func TestOffsetDamageShiftsScreenDamageBelowTopBar(t *testing.T) {
+	damage := offsetDamage([]renderer.Damage{
+		{Kind: renderer.DamageText, X: 2, Y: 3, Width: 4, Height: 1},
+		renderer.FullRedraw(),
+	})
+	require.Equal(t, []renderer.Damage{
+		{Kind: renderer.DamageText, X: 2, Y: 4, Width: 4, Height: 1},
+		renderer.FullRedraw(),
+	}, damage)
+}
+
+func TestComposeClientFrameBarCacheSkipsUnchangedBars(t *testing.T) {
+	sess, win := newBarCacheTestSession()
+	var cache barCache
+
+	_, damage := composeClientFrame(sess, win, true, "", &cache)
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+	win.screen.ClearDamage()
+	win.screen.Write([]byte("x"))
+
+	_, damage = composeClientFrame(sess, win, false, "", &cache)
+
+	require.NotEmpty(t, damage)
+	for _, d := range damage {
+		require.NotEqual(t, 0, d.Y, "unchanged top bar should not be damaged")
+		require.NotEqual(t, win.screen.Frame.Height+1, d.Y, "unchanged bottom bar should not be damaged")
+	}
+}
+
+func TestComposeClientFrameBarCacheDamagesChangedBottomOnly(t *testing.T) {
+	sess, win := newBarCacheTestSession()
+	var cache barCache
+	composeClientFrame(sess, win, true, "", &cache)
+	win.screen.ClearDamage()
+
+	sess.name = "renamed"
+	_, damage := composeClientFrame(sess, win, false, "", &cache)
+
+	require.Equal(t, []renderer.Damage{{Kind: renderer.DamageText, X: 0, Y: win.screen.Frame.Height + 1, Width: win.screen.Frame.Width, Height: 1}}, damage)
+}
+
+func TestComposeClientFrameFullRedrawPrimesBarCache(t *testing.T) {
+	sess, win := newBarCacheTestSession()
+	var cache barCache
+	cache.top = []renderer.Cell{renderer.BlankCell()}
+	cache.bottom = []renderer.Cell{renderer.BlankCell()}
+
+	_, damage := composeClientFrame(sess, win, true, "", &cache)
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+	win.screen.ClearDamage()
+
+	_, damage = composeClientFrame(sess, win, false, "", &cache)
+	require.Empty(t, damage)
+}
+
+func newBarCacheTestSession() (*session, *tab) {
+	win := &tab{screen: vt.NewScreen(20, 3), size: domain.Size{Cols: 20, Rows: 3}}
+	sess := &session{id: "s", name: "work", tabs: []*tab{win}}
+	return sess, win
+}
+
 func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	newSize := domain.Size{Cols: 100, Rows: 30}
 
 	p := portsmocks.NewMockPTY(t)
 	var screenWidthAtResize int
 	win := &tab{screen: vt.NewScreen(80, 24), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 24}}
-	p.EXPECT().Resize(domain.Size{Cols: 100, Rows: 29}).RunAndReturn(func(sz domain.Size) error {
+	p.EXPECT().Resize(domain.Size{Cols: 100, Rows: 28}).RunAndReturn(func(sz domain.Size) error {
 		// The screen must not yet be resized when the PTY is: proves order.
 		screenWidthAtResize = win.screen.Frame.Width
 		return nil
@@ -336,7 +405,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 
 	require.Equal(t, 80, screenWidthAtResize, "pty.Resize must run before screen.Resize")
 	require.Equal(t, 100, win.screen.Frame.Width, "screen resized after pty")
-	require.Equal(t, 29, win.screen.Frame.Height, "screen reserves bottom status row")
+	require.Equal(t, 28, win.screen.Frame.Height, "screen reserves top and bottom chrome rows")
 	require.True(t, gotOutput.Load(), "resize forces a full redraw output")
 }
 
@@ -647,7 +716,7 @@ func TestCursorTailVisibleHideAndMoveOnly(t *testing.T) {
 	win.screen.Write([]byte("\x1b[2;3H"))
 	d.paint(sess, ac, false)
 	data = mustOutputData(t, sends)
-	require.Contains(t, string(data), "\x1b[2;3H")
+	require.Contains(t, string(data), "\x1b[3;3H")
 	require.Contains(t, string(data), "\x1b[?25h")
 
 	win.screen.Write([]byte("\x1b[?25l"))

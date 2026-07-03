@@ -69,6 +69,15 @@ func TestRouterInterceptsAltDigits(t *testing.T) {
 	require.Empty(t, h.forwards)
 }
 
+func TestRouterInterceptsAltAForJumpAttention(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	NewRouter(clk, h).Route([]byte{ESC, 'a'})
+	require.Equal(t, []Action{ActionJumpAttention}, h.actions)
+	require.Empty(t, h.forwards)
+	require.Empty(t, clk.timers)
+}
+
 func TestRouterForwardsRemovedAltLetterBindings(t *testing.T) {
 	for _, b := range []byte("cnpdxurt") {
 		t.Run(string(b), func(t *testing.T) {

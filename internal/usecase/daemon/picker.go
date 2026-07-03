@@ -61,8 +61,17 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 	for _, s := range sessions {
 		s.mu.Lock()
 		view := picker.SessionView{ID: s.id, Name: s.name, Active: s.active, Tabs: make([]string, len(s.tabs))}
-		for i := range s.tabs {
-			view.Tabs[i] = strconv.Itoa(i + 1)
+		sessionAttention := false
+		for i, tb := range s.tabs {
+			label := strconv.Itoa(i + 1)
+			if tb.attention {
+				label = attentionSuffix(label)
+				sessionAttention = true
+			}
+			view.Tabs[i] = label
+		}
+		if sessionAttention {
+			view.Name = attentionSuffix(view.Name)
 		}
 		if s == cur {
 			curTab = s.active
@@ -71,6 +80,10 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 		views = append(views, view)
 	}
 	return views, curTab
+}
+
+func attentionSuffix(label string) string {
+	return label + " " + string(attentionGlyph)
 }
 
 func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {

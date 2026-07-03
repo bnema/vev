@@ -26,36 +26,99 @@
 package daemon
 
 import (
+	"sort"
 	"strconv"
+	"strings"
+	"time"
 
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-func drawStatus(row []renderer.Cell, sess *session, rightText string, styles ...themeStyles) {
-	for i := range row {
-		row[i] = renderer.BlankCell()
+const (
+	attentionGlyph     = ''
+	pulseFrameCount    = 30
+	pulseFrameInterval = 120 * time.Millisecond
+)
+
+func pulseStyle(frame int) (renderer.Style, bool) {
+	f := frame % pulseFrameCount
+	if f == 0 {
+		return renderer.DefaultStyle(), false
 	}
-	styleSet := resolveThemeStyles(styles)
-	status := sess.statusSegments()
+	peak := pulseFrameCount / 2
+	distance := f - peak
+	if distance < 0 {
+		distance = -distance
+	}
+	intensity := 1 - float64(distance)/float64(peak)
+	style := renderer.DefaultStyle()
+	style.Bold = true
+	style.Foreground = 244 + int(intensity*11)
+	return style, true
+}
+
+func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, styles themeStyles) {
+	clearStatusRow(row)
 	x := 0
-	writeStatusText(row, &x, " "+status.session+" ", styleSet.statusBar)
 	for _, w := range status.tabs {
-		style := styleSet.statusBar
+		style := styles.statusBar
 		if w.active {
-			style = styleSet.accent
+			style = styles.accent
 		}
-		writeStatusText(row, &x, " "+w.name+" ", style)
+		writeStatusText(row, &x, " "+w.name, style)
+		if w.attention {
+			writeStatusText(row, &x, " ", style)
+			writeBell(row, &x, frame)
+		}
+		writeStatusText(row, &x, " ", style)
 	}
+}
+
+func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles) {
+	clearStatusRow(row)
+	leftText := " " + state.status.session + " "
+	x := 0
+	writeStatusText(row, &x, leftText, styles.statusBar)
+
+	reservedLeft := len([]rune(leftText))
+	if state.copyFeedback != "" {
+		drawRightPlainText(row, state.copyFeedback, reservedLeft, styles.statusBar)
+		return
+	}
+	rightText := state.attentionStackText(len(row), reservedLeft)
 	if rightText == "" {
 		return
 	}
-	style := styleSet.statusBar
 	rightWidth := len([]rune(rightText)) + 1
-	if len(row)-x-1 < rightWidth {
+	x = len(row) - rightWidth
+	writeStatusText(row, &x, " ", styles.statusBar)
+	writeAttentionText(row, &x, rightText, state.attentionFrame, styles.statusBar)
+}
+
+func drawRightPlainText(row []renderer.Cell, text string, reservedLeft int, style renderer.Style) {
+	if len([]rune(text))+1+reservedLeft > len(row) {
 		return
 	}
-	x = len(row) - rightWidth
-	writeStatusText(row, &x, " "+rightText, style)
+	x := len(row) - len([]rune(text)) - 1
+	writeStatusText(row, &x, " "+text, style)
+}
+
+func clearStatusRow(row []renderer.Cell) {
+	for i := range row {
+		row[i] = renderer.BlankCell()
+	}
+}
+
+type barState struct {
+	status         statusSnapshot
+	copyFeedback   string
+	otherAttention []string
+	attentionFrame int
+	// theme is the client's terminal theme, if reported. Its zero value
+	// (Theme{}, Known: false) is a valid "no theme" default that resolves to
+	// the pre-theme fallback styles (see newThemeStyles / theme.usable).
+	theme themeui.Theme
 }
 
 type statusSnapshot struct {
@@ -64,8 +127,9 @@ type statusSnapshot struct {
 }
 
 type statusTab struct {
-	name   string
-	active bool
+	name      string
+	active    bool
+	attention bool
 }
 
 func (s *session) statusSegments() statusSnapshot {
@@ -76,11 +140,94 @@ func (s *session) statusSegments() statusSnapshot {
 		name += "*"
 	}
 	snap := statusSnapshot{session: name, tabs: make([]statusTab, len(s.tabs))}
-	for i := range s.tabs {
+	for i, tb := range s.tabs {
 		name := strconv.Itoa(i + 1)
-		snap.tabs[i] = statusTab{name: name, active: i == s.active}
+		snap.tabs[i] = statusTab{name: name, active: i == s.active, attention: tb.attention}
 	}
 	return snap
+}
+
+func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
+	state := barState{copyFeedback: copyFeedback}
+	if d != nil {
+		state.attentionFrame = d.attentionFrame(d.clock.Now())
+	}
+	if cur != nil {
+		state.status = cur.statusSegments()
+	}
+	if d == nil || copyFeedback != "" {
+		return state
+	}
+	type attentionSession struct {
+		name string
+		at   time.Time
+	}
+	d.mu.Lock()
+	attention := make([]attentionSession, 0, len(d.sessions))
+	for _, sess := range d.sessions {
+		if sess == cur {
+			continue
+		}
+		sess.mu.Lock()
+		oldest := time.Time{}
+		for _, tb := range sess.tabs {
+			if !tb.attention {
+				continue
+			}
+			if oldest.IsZero() || tb.attentionAt.Before(oldest) {
+				oldest = tb.attentionAt
+			}
+		}
+		if !oldest.IsZero() {
+			attention = append(attention, attentionSession{name: sess.name, at: oldest})
+		}
+		sess.mu.Unlock()
+	}
+	d.mu.Unlock()
+	sort.SliceStable(attention, func(i, j int) bool { return attention[i].at.Before(attention[j].at) })
+	state.otherAttention = make([]string, len(attention))
+	for i := range attention {
+		state.otherAttention[i] = attention[i].name
+	}
+	return state
+}
+
+func (s barState) attentionStackText(width, reservedLeft int) string {
+	if len(s.otherAttention) == 0 {
+		return ""
+	}
+	parts := make([]string, len(s.otherAttention))
+	for i, name := range s.otherAttention {
+		parts[i] = string(attentionGlyph) + " " + name
+	}
+	full := strings.Join(parts, "  ")
+	if len([]rune(full))+1+reservedLeft <= width {
+		return full
+	}
+	collapsed := string(attentionGlyph) + " ×" + strconv.Itoa(len(s.otherAttention))
+	if len([]rune(collapsed))+1+reservedLeft <= width {
+		return collapsed
+	}
+	return ""
+}
+
+func writeAttentionText(row []renderer.Cell, x *int, text string, frame int, style renderer.Style) {
+	for _, r := range text {
+		if r == attentionGlyph {
+			writeBell(row, x, frame)
+			continue
+		}
+		writeStatusText(row, x, string(r), style)
+	}
+}
+
+func writeBell(row []renderer.Cell, x *int, frame int) {
+	style, visible := pulseStyle(frame)
+	if !visible {
+		writeStatusText(row, x, " ", renderer.DefaultStyle())
+		return
+	}
+	writeStatusText(row, x, string(attentionGlyph), style)
 }
 
 func writeStatusText(row []renderer.Cell, x *int, text string, style renderer.Style) {
