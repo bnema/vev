@@ -53,6 +53,8 @@ Some terminals encode Alt+Space as a non-breaking space instead of `ESC Space`; 
 
 Open the palette with Alt+Space, then type a command code or fuzzy-match its label. Use Up/Down or Ctrl-N/Ctrl-P to move through matches, Enter to run the selected command, and Esc to close the palette.
 
+Ephemeral sessions are marked with `*` in the status bar, for example `0*`. Renaming an ephemeral session makes it persistent and removes the marker.
+
 | Code | Action |
 |---|---|
 | CNT | create new tab |
@@ -61,8 +63,10 @@ Open the palette with Alt+Space, then type a command code or fuzzy-match its lab
 | PVT | switch to previous tab |
 | SSP | switch session or tab |
 | CPY | enter scrollback mode |
-| RNS | promote session |
+| RNS | rename session |
 | DET | detach |
+
+Rename prompts are prefilled with the current name. Type text, use Backspace to edit, Enter to submit, or Esc/Ctrl-C to cancel. If validation fails, the prompt stays open and shows the error.
 
 ## Scrollback and visual copy
 

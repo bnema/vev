@@ -190,6 +190,39 @@ func TestIntegration_CommandPaletteCreatesTab(t *testing.T) {
 	require.Contains(t, text, " 1  2 ")
 }
 
+func TestIntegration_CommandPaletteRenamesEphemeralSession(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
+
+	tr, p := attach(t, dir, ports.IntentEphemeral, "", sz)
+	defer func() { _ = tr.Close() }()
+	text := awaitScreenText(t, p, sz, "READY")
+	require.Contains(t, text, " 0* ")
+
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x1b ")})}))
+	awaitText(t, p, sz, "Commands")
+
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("RNS\r")})}))
+	awaitText(t, p, sz, "Rename session")
+
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x7fwork\r")})}))
+	text = awaitScreenText(t, p, sz, " work ")
+	require.NotContains(t, text, "work*")
+
+	listTr, err := ipc.Dial(dir)
+	require.NoError(t, err)
+	defer func() { _ = listTr.Close() }()
+	require.NoError(t, listTr.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(ports.List{})}))
+	f, err := listTr.Recv()
+	require.NoError(t, err)
+	require.Equal(t, ports.MsgSessions, f.Type)
+	sessions, err := ports.UnmarshalSessions(f.Payload)
+	require.NoError(t, err)
+	require.Len(t, sessions.Sessions, 1)
+	require.Equal(t, "work", sessions.Sessions[0].Name)
+	require.False(t, sessions.Sessions[0].Ephemeral)
+}
+
 func TestIntegration_AltCWithoutPaletteDoesNotCreateTab(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
