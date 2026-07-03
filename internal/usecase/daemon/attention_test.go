@@ -433,7 +433,7 @@ func TestAttentionAnimatorParksAdvancesAndResets(t *testing.T) {
 	timer := clk.nextTimer(t)
 	timer.fire()
 	_ = mustOutputData(t, sends)
-	require.Equal(t, 1, d.attentionFrame(time.Time{}))
+	require.Equal(t, 1, d.attentionFrame())
 
 	sess.mu.Lock()
 	sess.tabs[1].attention = false
@@ -441,7 +441,7 @@ func TestAttentionAnimatorParksAdvancesAndResets(t *testing.T) {
 	sess.mu.Unlock()
 	d.pokeAttentionTicker()
 
-	require.Eventually(t, func() bool { return d.attentionFrame(time.Time{}) == 0 }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return d.attentionFrame() == 0 }, time.Second, time.Millisecond)
 	_ = mustOutputData(t, sends)
 	select {
 	case <-clk.timers:

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
@@ -164,7 +165,7 @@ func (d *Daemon) pokeAttentionTicker() {
 	}
 }
 
-func (d *Daemon) attentionFrame(time.Time) int {
+func (d *Daemon) attentionFrame() int {
 	if d == nil {
 		return 0
 	}
@@ -175,7 +176,7 @@ func (d *Daemon) attentionFrame(time.Time) int {
 
 func (d *Daemon) attentionAnimator(ctx context.Context) {
 	active := false
-	var timer portsTimer
+	var timer ports.Timer
 	for {
 		if !active {
 			if !d.anyAttention() {
@@ -248,10 +249,4 @@ func (d *Daemon) setAttentionFrame(frame int) {
 	d.attnMu.Lock()
 	d.animFrame = frame
 	d.attnMu.Unlock()
-}
-
-type portsTimer interface {
-	C() <-chan time.Time
-	Reset(time.Duration) bool
-	Stop() bool
 }

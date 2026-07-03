@@ -150,7 +150,7 @@ func (s *session) statusSegments() statusSnapshot {
 func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 	state := barState{copyFeedback: copyFeedback}
 	if d != nil {
-		state.attentionFrame = d.attentionFrame(d.clock.Now())
+		state.attentionFrame = d.attentionFrame()
 	}
 	if cur != nil {
 		state.status = cur.statusSegments()

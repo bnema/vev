@@ -20,9 +20,8 @@
 // Locking: a session's screen and per-client renderer shadow are both guarded
 // by tab.mu; the attached-client pointer by session.mu; the registry by
 // Daemon.mu. When more than one is held the order is always
-// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
-// a slow client.
+// sendMu > Daemon.mu > session.mu > tab.mu — the PTY reader only ever takes
+// tab.mu, so it never blocks on a slow client.
 package daemon
 
 import (
