@@ -44,14 +44,29 @@ All bindings use the Alt modifier directly, no prefix key.
 
 | Key | Action |
 |---|---|
-| Alt+c | new tab |
-| Alt+n / Alt+p | next / previous tab |
-| Alt+1 .. Alt+9 | select tab by number |
-| Alt+x | close tab (last tab ends the session) |
-| Alt+d | detach |
-| Alt+r | promote the current ephemeral session to named |
-| Alt+t | open session/tab picker |
-| Alt+u | enter scrollback mode |
+| Alt+Space | open the command palette |
+| Alt+1 .. Alt+9 | switch to tab by number |
+
+Some terminals encode Alt+Space as a non-breaking space instead of `ESC Space`; in those terminals, the palette binding depends on whether the terminal can send `ESC Space` for Alt+Space.
+
+## Command palette
+
+Open the palette with Alt+Space, then type a command code or fuzzy-match its label. Use Up/Down or Ctrl-N/Ctrl-P to move through matches, Enter to run the selected command, and Esc to close the palette.
+
+The status bar marks ephemeral sessions with `*`, for example `0*`. Ephemeral sessions are removed when their client detaches. Renaming an ephemeral session makes it a persistent named session and removes the marker.
+
+| Code | Action |
+|---|---|
+| CNT | create new tab |
+| CLT | close current tab |
+| NXT | switch to next tab |
+| PVT | switch to previous tab |
+| SSP | switch session or tab |
+| CPY | enter scrollback mode |
+| RNS | rename session |
+| DET | detach |
+
+Rename prompts are prefilled with the current session name. Type text, use Backspace to edit, Enter to submit, or Esc/Ctrl-C to cancel. Empty names and names already used by another session are rejected; the prompt stays open and shows the validation error.
 
 ## Scrollback and visual copy
 

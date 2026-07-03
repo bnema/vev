@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/ipc"
@@ -24,6 +25,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/client"
+	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
 )
 
@@ -243,17 +245,126 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) err
 	}
 	defer func() { _ = logFile.Close() }()
 
-	var transport ports.Transport
 	if remoteTarget != "" {
-		transport, err = sshstdio.Dial(remoteTarget, name)
-	} else {
-		transport, err = ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+		transport, err := sshstdio.Dial(remoteTarget, name)
+		if err != nil {
+			return err
+		}
+		// client.Attach owns and closes transport.
+		return client.Attach(ctx, transport, term.New(), intent, name)
 	}
+
+	return runLocalAttachWithRecovery(ctx, intent, name, attachRecoveryDeps{
+		confirmer:       confirm.NewConfirmer(os.Stdin, os.Stderr),
+		attach:          attachLocalDaemon,
+		killDaemon:      requestDaemonStop,
+		settleAfterKill: waitForDaemonStop,
+	})
+}
+
+type attachRecoveryDeps struct {
+	confirmer       confirm.Confirmer
+	attach          func(context.Context, uint8, string) error
+	killDaemon      func(context.Context) error
+	settleAfterKill func(context.Context) error
+}
+
+const (
+	daemonStopTimeout          = 2 * time.Second
+	daemonRestartSettle        = 50 * time.Millisecond
+	legacyMalformedHelloSignal = "malformed hello"
+)
+
+func runLocalAttachWithRecovery(ctx context.Context, intent uint8, name string, deps attachRecoveryDeps) error {
+	err := deps.attach(ctx, intent, name)
+	if !isDaemonVersionDrift(err) {
+		return err
+	}
+
+	ok, promptErr := deps.confirmer.Confirm("Your vev version differs from the running daemon; kill it and restart?")
+	if promptErr != nil {
+		return fmt.Errorf("vev: reading confirmation: %w", promptErr)
+	}
+	if !ok {
+		return err
+	}
+	if killErr := deps.killDaemon(ctx); killErr != nil {
+		return killErr
+	}
+	if deps.settleAfterKill != nil {
+		if settleErr := deps.settleAfterKill(ctx); settleErr != nil {
+			return settleErr
+		}
+	}
+	return deps.attach(ctx, intent, name)
+}
+
+func isDaemonVersionDrift(err error) bool {
+	var protocolErr *client.ProtocolError
+	if !errors.As(err, &protocolErr) {
+		return false
+	}
+	return protocolErr.Code == ports.ErrVersionMismatch || protocolErr.Text == legacyMalformedHelloSignal
+}
+
+func attachLocalDaemon(ctx context.Context, intent uint8, name string) error {
+	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
 	if err != nil {
 		return err
 	}
 	// client.Attach owns and closes transport.
 	return client.Attach(ctx, transport, term.New(), intent, name)
+}
+
+func waitForDaemonStop(ctx context.Context) error {
+	timer := time.NewTimer(daemonRestartSettle)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func requestDaemonStop(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, daemonStopTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		transport, err := realDial(ipc.SocketDir())
+		if err != nil {
+			done <- fmt.Errorf("vev: no daemon running")
+			return
+		}
+		defer func() { _ = transport.Close() }()
+		closed := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = transport.Close()
+			case <-closed:
+			}
+		}()
+		defer close(closed)
+		if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}); err != nil {
+			done <- fmt.Errorf("vev: requesting daemon stop: %w", err)
+			return
+		}
+		if _, err := transport.Recv(); err != nil && !errors.Is(err, io.EOF) {
+			done <- fmt.Errorf("vev: reading daemon stop reply: %w", err)
+			return
+		}
+		done <- nil
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("vev: stopping daemon: %w", ctx.Err())
+	}
 }
 
 // runStdio is the hidden remote-side mode used by `ssh host vev _stdio`: it

@@ -5,16 +5,30 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-// Modal describes a centered rectangular overlay.
+// Anchor describes where a modal is positioned within its base rectangle.
+type Anchor int
+
+const (
+	// AnchorCenter centers the modal within the base rectangle.
+	AnchorCenter Anchor = iota
+	// AnchorBottom positions the modal at the bottom above BottomMargin rows.
+	AnchorBottom
+)
+
+// Modal describes a rectangular overlay.
 type Modal struct {
-	WidthPct  int
-	HeightPct int
-	MinWidth  int
-	MinHeight int
-	Title     string
+	WidthPct     int
+	HeightPct    int
+	MinWidth     int
+	MinHeight    int
+	Title        string
+	Anchor       Anchor
+	FixedWidth   int
+	FixedHeight  int
+	BottomMargin int
 }
 
-// Bounds returns the modal rectangle centered within base and clamped to base.
+// Bounds returns the modal rectangle positioned within base and clamped to base.
 func (m Modal) Bounds(base domain.Size) domain.Rect {
 	if base.Cols <= 0 || base.Rows <= 0 {
 		return domain.Rect{}
@@ -22,6 +36,12 @@ func (m Modal) Bounds(base domain.Size) domain.Rect {
 
 	width := percentOf(base.Cols, m.WidthPct)
 	height := percentOf(base.Rows, m.HeightPct)
+	if m.FixedWidth > 0 {
+		width = m.FixedWidth
+	}
+	if m.FixedHeight > 0 {
+		height = m.FixedHeight
+	}
 	if width < m.MinWidth {
 		width = m.MinWidth
 	}
@@ -31,9 +51,15 @@ func (m Modal) Bounds(base domain.Size) domain.Rect {
 	width = clamp(width, 0, base.Cols)
 	height = clamp(height, 0, base.Rows)
 
+	x := (base.Cols - width) / 2
+	y := (base.Rows - height) / 2
+	if m.Anchor == AnchorBottom {
+		y = clamp(base.Rows-m.BottomMargin-height, 0, base.Rows-height)
+	}
+
 	return domain.Rect{
-		X:      (base.Cols - width) / 2,
-		Y:      (base.Rows - height) / 2,
+		X:      x,
+		Y:      y,
 		Width:  width,
 		Height: height,
 	}

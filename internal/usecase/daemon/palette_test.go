@@ -1,0 +1,215 @@
+package daemon
+
+import (
+	"errors"
+	"sync"
+	"testing"
+
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/usecase/ui"
+)
+
+func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
+	p1, release1 := newBlockingPTY(t)
+	p2, release2 := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p1, p2)
+	defer release1()
+	defer release2()
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	require.True(t, ac.paletteActive())
+	out := awaitFrame(t, sends, ports.MsgOutput)
+	msg, err := ports.UnmarshalOutput(out.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(msg.Data), "Commands")
+
+	d.handleInput(sess, ac, []byte("NXT\r"))
+	require.False(t, ac.paletteActive())
+	require.Equal(t, 1, activeTabIndex(sess))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("\x1b"))
+	require.False(t, ac.paletteActive())
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteCommandNoopRepaintsAfterClose(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
+	defer releases[0]()
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	paletteFrame := awaitFrame(t, sends, ports.MsgOutput)
+	paletteOutput, err := ports.UnmarshalOutput(paletteFrame.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(paletteOutput.Data), "Commands")
+
+	d.handleInput(sess, ac, []byte("NXT\r"))
+	require.False(t, ac.paletteActive())
+	repaint := awaitFrame(t, sends, ports.MsgOutput)
+	repaintOutput, err := ports.UnmarshalOutput(repaint.Payload)
+	require.NoError(t, err)
+	require.NotContains(t, string(repaintOutput.Data), "Commands")
+}
+
+func TestPaletteCreateTabErrorRepaintsAfterClose(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
+	defer releases[0]()
+	ptys := portsmocks.NewMockPTYFactory(t)
+	ptys.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("open failed"))
+	d.ptys = ptys
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("CNT\r"))
+	require.False(t, ac.paletteActive())
+	repaint := awaitFrame(t, sends, ports.MsgOutput)
+	repaintOutput, err := ports.UnmarshalOutput(repaint.Payload)
+	require.NoError(t, err)
+	require.NotContains(t, string(repaintOutput.Data), "Commands")
+	require.Len(t, sess.tabs, 1)
+}
+
+func TestPaletteEnterNoMatchKeepsOpenAndEscapeSplit(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
+	defer releases[0]()
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("zzzz\r"))
+	require.True(t, ac.paletteActive())
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	d.handlePaletteInput(ac, []byte{0x1b, '['})
+	require.True(t, ac.paletteActive())
+	require.Equal(t, []byte{0x1b, '['}, ac.palettePending)
+	d.handlePaletteInput(ac, []byte{'A'})
+	require.True(t, ac.paletteActive())
+	require.Empty(t, ac.palettePending)
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteCtrlNAndCtrlPNavigate(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
+	defer releases[0]()
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	d.handlePaletteInput(ac, []byte{0x0e})
+	awaitFrame(t, sends, ports.MsgOutput)
+	cmd, ok := ac.palette.Selected()
+	require.True(t, ok)
+	require.Equal(t, "CLT", cmd.Code)
+
+	d.handlePaletteInput(ac, []byte{0x10})
+	awaitFrame(t, sends, ports.MsgOutput)
+	cmd, ok = ac.palette.Selected()
+	require.True(t, ok)
+	require.Equal(t, "CNT", cmd.Code)
+}
+
+func TestPaletteModalGeometry(t *testing.T) {
+	require.Equal(t, 100, paletteModal.WidthPct)
+	require.Equal(t, 11, paletteModal.FixedHeight)
+	require.Equal(t, ui.AnchorBottom, paletteModal.Anchor)
+	require.Equal(t, 1, paletteModal.BottomMargin)
+	require.Equal(t, 32, paletteModal.MinWidth)
+
+	bounds := paletteModal.Bounds(domain.Size{Cols: 120, Rows: 40})
+	require.Equal(t, domain.Rect{X: 0, Y: 28, Width: 120, Height: 11}, bounds)
+}
+
+func TestPaletteUTF8PendingCompletesFilter(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
+	defer releases[0]()
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handlePaletteInput(ac, []byte{0xc3})
+	require.Equal(t, []byte{0xc3}, ac.palettePending)
+	d.handlePaletteInput(ac, []byte{0xa9})
+	require.Empty(t, ac.palettePending)
+	require.Equal(t, "é", ac.palette.Query())
+}
+
+func TestPaletteRenderAndInputCanRunConcurrently(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	defer release()
+	d.enterPalette(sess, ac)
+
+	drainDone := make(chan struct{})
+	drainStopped := make(chan struct{})
+	go func() {
+		defer close(drainStopped)
+		for {
+			select {
+			case <-sends:
+			case <-drainDone:
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(drainDone)
+		<-drainStopped
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			d.paint(sess, ac, true)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			d.handlePaletteInput(ac, []byte("abc\x7f"))
+		}
+	}()
+	wg.Wait()
+}
+
+func TestPaletteExecMethods(t *testing.T) {
+	p1, release1 := newBlockingPTY(t)
+	p2, release2 := newBlockingPTY(t)
+	p3, release3 := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p1, p2, p3)
+	defer release1()
+	defer release2()
+	defer release3()
+	exec := paletteExec{d: d, sess: sess, ac: ac}
+
+	require.NoError(t, exec.NextTab())
+	require.Equal(t, 1, activeTabIndex(sess))
+	require.NoError(t, exec.PrevTab())
+	require.Equal(t, 0, activeTabIndex(sess))
+	sess.ephemeral = true
+	require.NoError(t, exec.RenameSession())
+	require.True(t, ac.promptActive())
+	d.closePrompt(ac)
+	require.True(t, sess.ephemeral)
+	require.NoError(t, exec.OpenSessionPicker())
+	require.True(t, ac.pickerActive())
+	d.closePicker(ac)
+	require.NoError(t, exec.EnterCopyMode())
+	require.True(t, ac.copyModeActive())
+	ac.copyMu.Lock()
+	ac.copyMode = nil
+	ac.copyMu.Unlock()
+	require.NoError(t, exec.CloseTab())
+	require.Len(t, sess.tabs, 2)
+	// Drain paints generated by methods above.
+	for len(sends) > 0 {
+		<-sends
+	}
+}

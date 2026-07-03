@@ -18,14 +18,7 @@ const (
 type Action int
 
 const (
-	ActionCreateTab Action = iota
-	ActionNextTab
-	ActionPreviousTab
-	ActionDetach
-	ActionCloseTab
-	ActionCopyMode
-	ActionRenameSession
-	ActionOpenPicker
+	ActionOpenPalette Action = iota
 	ActionSwitchTab1
 	ActionSwitchTab2
 	ActionSwitchTab3
@@ -170,22 +163,8 @@ func passThroughPrefix(b byte) bool { return b == '[' || b == 'O' }
 
 func binding(b byte) (Action, bool) {
 	switch b {
-	case 'c':
-		return ActionCreateTab, true
-	case 'n':
-		return ActionNextTab, true
-	case 'p':
-		return ActionPreviousTab, true
-	case 'd':
-		return ActionDetach, true
-	case 'x':
-		return ActionCloseTab, true
-	case 'u':
-		return ActionCopyMode, true
-	case 'r':
-		return ActionRenameSession, true
-	case 't':
-		return ActionOpenPicker, true
+	case ' ':
+		return ActionOpenPalette, true
 	case '1', '2', '3', '4', '5', '6', '7', '8', '9':
 		return ActionSwitchTab1 + Action(b-'1'), true
 	default:

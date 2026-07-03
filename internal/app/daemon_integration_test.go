@@ -87,6 +87,13 @@ func attach(t *testing.T, dir string, intent uint8, name string, sz domain.Size)
 // the reconstructed grid contains want.
 func awaitText(t *testing.T, p *pump, sz domain.Size, want string) {
 	t.Helper()
+	_ = awaitScreenText(t, p, sz, want)
+}
+
+// awaitScreenText is like awaitText, but returns the reconstructed screen text
+// at the point the wanted text appears so callers can make additional checks.
+func awaitScreenText(t *testing.T, p *pump, sz domain.Size, want string) string {
+	t.Helper()
 	screen := vt.NewScreen(sz.Cols, sz.Rows)
 	timeout := time.After(5 * time.Second)
 	for {
@@ -99,12 +106,35 @@ func awaitText(t *testing.T, p *pump, sz domain.Size, want string) {
 				o, err := ports.UnmarshalOutput(f.Payload)
 				require.NoError(t, err)
 				screen.Write(o.Data)
-				if strings.Contains(screenText(screen), want) {
-					return
+				text := screenText(screen)
+				if strings.Contains(text, want) {
+					return text
 				}
 			}
 		case <-timeout:
 			t.Fatalf("timed out waiting for %q; screen=%q", want, screenText(screen))
+		}
+	}
+}
+
+func assertNoTextAfterInput(t *testing.T, p *pump, sz domain.Size, absent string) {
+	t.Helper()
+	screen := vt.NewScreen(sz.Cols, sz.Rows)
+	timeout := time.After(300 * time.Millisecond)
+	for {
+		select {
+		case f, ok := <-p.ch:
+			if !ok {
+				return
+			}
+			if f.Type == ports.MsgOutput {
+				o, err := ports.UnmarshalOutput(f.Payload)
+				require.NoError(t, err)
+				screen.Write(o.Data)
+				require.NotContains(t, screenText(screen), absent)
+			}
+		case <-timeout:
+			return
 		}
 	}
 }
@@ -142,6 +172,68 @@ func TestIntegration_InputRoundtrip(t *testing.T) {
 
 	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("PINGPONG\n")})}))
 	awaitText(t, p, sz, "PINGPONG")
+}
+
+func TestIntegration_CommandPaletteCreatesTab(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
+
+	tr, p := attach(t, dir, ports.IntentEphemeral, "", sz)
+	defer func() { _ = tr.Close() }()
+	awaitText(t, p, sz, "READY")
+
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x1b ")})}))
+	awaitText(t, p, sz, "Commands")
+
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("CNT\r")})}))
+	text := awaitScreenText(t, p, sz, " 1  2 ")
+	require.Contains(t, text, " 1  2 ")
+}
+
+func TestIntegration_CommandPaletteRenamesEphemeralSession(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
+
+	tr, p := attach(t, dir, ports.IntentEphemeral, "", sz)
+	defer func() { _ = tr.Close() }()
+	text := awaitScreenText(t, p, sz, "READY")
+	require.Contains(t, text, " 0* ")
+
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x1b ")})}))
+	awaitText(t, p, sz, "Commands")
+
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("RNS\r")})}))
+	awaitText(t, p, sz, "Rename session")
+
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x7fwork\r")})}))
+	text = awaitScreenText(t, p, sz, " work ")
+	require.NotContains(t, text, "work*")
+
+	listTr, err := ipc.Dial(dir)
+	require.NoError(t, err)
+	defer func() { _ = listTr.Close() }()
+	require.NoError(t, listTr.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(ports.List{})}))
+	f, err := listTr.Recv()
+	require.NoError(t, err)
+	require.Equal(t, ports.MsgSessions, f.Type)
+	sessions, err := ports.UnmarshalSessions(f.Payload)
+	require.NoError(t, err)
+	require.Len(t, sessions.Sessions, 1)
+	require.Equal(t, "work", sessions.Sessions[0].Name)
+	require.False(t, sessions.Sessions[0].Ephemeral)
+}
+
+func TestIntegration_AltCWithoutPaletteDoesNotCreateTab(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	dir, _ := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
+
+	tr, p := attach(t, dir, ports.IntentEphemeral, "", sz)
+	defer func() { _ = tr.Close() }()
+	text := awaitScreenText(t, p, sz, "READY")
+	require.NotContains(t, text, " 1  2 ")
+
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x1bc")})}))
+	assertNoTextAfterInput(t, p, sz, " 1  2 ")
 }
 
 func TestIntegration_EphemeralGoneOnDetach(t *testing.T) {

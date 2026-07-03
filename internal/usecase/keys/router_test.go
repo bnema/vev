@@ -45,31 +45,13 @@ func (h *captureHandler) Forward(data []byte) {
 }
 func (h *captureHandler) Action(a Action) { h.actions = append(h.actions, a) }
 
-func TestRouterInterceptsSameReadAltBindings(t *testing.T) {
-	cases := []struct {
-		name string
-		in   []byte
-		want Action
-	}{
-		{"Alt+c", []byte{ESC, 'c'}, ActionCreateTab},
-		{"Alt+n", []byte{ESC, 'n'}, ActionNextTab},
-		{"Alt+p", []byte{ESC, 'p'}, ActionPreviousTab},
-		{"Alt+d", []byte{ESC, 'd'}, ActionDetach},
-		{"Alt+x", []byte{ESC, 'x'}, ActionCloseTab},
-		{"Alt+u", []byte{ESC, 'u'}, ActionCopyMode},
-		{"Alt+r", []byte{ESC, 'r'}, ActionRenameSession},
-		{"Alt+t", []byte{ESC, 't'}, ActionOpenPicker},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			clk := &fakeClock{}
-			h := &captureHandler{}
-			NewRouter(clk, h).Route(tc.in)
-			require.Equal(t, []Action{tc.want}, h.actions)
-			require.Empty(t, h.forwards)
-			require.Empty(t, clk.timers)
-		})
-	}
+func TestRouterInterceptsAltSpaceForPalette(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	NewRouter(clk, h).Route([]byte{ESC, ' '})
+	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
+	require.Empty(t, h.forwards)
+	require.Empty(t, clk.timers)
 }
 
 func TestRouterInterceptsAltDigits(t *testing.T) {
@@ -87,11 +69,23 @@ func TestRouterInterceptsAltDigits(t *testing.T) {
 	require.Empty(t, h.forwards)
 }
 
+func TestRouterForwardsRemovedAltLetterBindings(t *testing.T) {
+	for _, b := range []byte("cnpdxurt") {
+		t.Run(string(b), func(t *testing.T) {
+			clk := &fakeClock{}
+			h := &captureHandler{}
+			NewRouter(clk, h).Route([]byte{ESC, b})
+			require.Empty(t, h.actions)
+			require.Equal(t, [][]byte{{ESC, b}}, h.forwards)
+		})
+	}
+}
+
 func TestRouterForwardsOnlyNonInterceptedBytes(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	NewRouter(clk, h).Route([]byte{'a', ESC, 'c', 'b'})
-	require.Equal(t, []Action{ActionCreateTab}, h.actions)
+	NewRouter(clk, h).Route([]byte{'a', ESC, ' ', 'b'})
+	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
 	require.Equal(t, [][]byte{[]byte("a"), []byte("b")}, h.forwards)
 }
 
@@ -116,24 +110,9 @@ func TestRouterRetainsSplitESCAndInterceptsNextBoundByte(t *testing.T) {
 	require.Equal(t, ESCDelay, clk.timers[0].d)
 	require.Empty(t, h.forwards)
 
-	r.Route([]byte{'n'})
+	r.Route([]byte{' '})
 	require.True(t, clk.timers[0].stopped)
-	require.Equal(t, []Action{ActionNextTab}, h.actions)
-	require.Empty(t, h.forwards)
-}
-
-func TestRouterRetainsSplitESCAndInterceptsPickerBinding(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	r := NewRouter(clk, h)
-	r.Route([]byte{ESC})
-	require.Len(t, clk.timers, 1)
-	require.Equal(t, ESCDelay, clk.timers[0].d)
-	require.Empty(t, h.forwards)
-
-	r.Route([]byte{'t'})
-	require.True(t, clk.timers[0].stopped)
-	require.Equal(t, []Action{ActionOpenPicker}, h.actions)
+	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
 	require.Empty(t, h.forwards)
 }
 
@@ -179,11 +158,11 @@ func TestRouterRoutesBytesAfterRetainedEscapePrefix(t *testing.T) {
 	r := NewRouter(clk, h)
 	r.Route([]byte{ESC})
 
-	r.Route([]byte{'[', 'A', ESC, 'c'})
+	r.Route([]byte{'[', 'A', ESC, ' '})
 
 	require.True(t, clk.timers[0].stopped)
 	require.Equal(t, [][]byte{{ESC, '['}, []byte("A")}, h.forwards)
-	require.Equal(t, []Action{ActionCreateTab}, h.actions)
+	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
 }
 
 func TestRouterCancelsPendingESCWaiterWhenNextReadConsumesESC(t *testing.T) {
@@ -195,10 +174,10 @@ func TestRouterCancelsPendingESCWaiterWhenNextReadConsumesESC(t *testing.T) {
 	r.Route([]byte{ESC})
 	require.Eventually(t, func() bool { return retainESCWaiters() > before }, time.Second, time.Millisecond)
 
-	r.Route([]byte{'n'})
+	r.Route([]byte{' '})
 	require.Eventually(t, func() bool { return retainESCWaiters() == before }, time.Second, time.Millisecond)
 	require.True(t, clk.timers[0].stopped)
-	require.Equal(t, []Action{ActionNextTab}, h.actions)
+	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
 	require.Empty(t, h.forwards)
 }
 
