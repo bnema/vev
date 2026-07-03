@@ -1,0 +1,163 @@
+package palette
+
+import (
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/command"
+	"github.com/bnema/vev/internal/usecase/ui"
+	"github.com/bnema/vev/pkg/renderer"
+)
+
+type Model struct {
+	commands []command.Command
+	input    []rune
+	matches  []Match
+	selected int
+	scroll   int
+}
+
+func New(commands []command.Command) *Model {
+	m := &Model{commands: append([]command.Command(nil), commands...)}
+	m.refresh()
+	return m
+}
+
+func NewRegistry() *Model { return New(command.Registry()) }
+
+func (m *Model) Insert(r rune) {
+	if m != nil {
+		m.input = append(m.input, r)
+		m.selected = 0
+		m.scroll = 0
+		m.refresh()
+	}
+}
+func (m *Model) Backspace() {
+	if m != nil && len(m.input) > 0 {
+		m.input = m.input[:len(m.input)-1]
+		m.selected = 0
+		m.scroll = 0
+		m.refresh()
+	}
+}
+func (m *Model) Query() string {
+	if m == nil {
+		return ""
+	}
+	return string(m.input)
+}
+func (m *Model) Up() {
+	if m != nil && m.selected > 0 {
+		m.selected--
+		m.clamp()
+	}
+}
+func (m *Model) Down() {
+	if m != nil && m.selected+1 < len(m.matches) {
+		m.selected++
+		m.clamp()
+	}
+}
+func (m *Model) Selected() (command.Command, bool) {
+	if m == nil || m.selected < 0 || m.selected >= len(m.matches) {
+		return command.Command{}, false
+	}
+	return m.matches[m.selected].Command, true
+}
+func (m *Model) Matches() []Match {
+	if m == nil {
+		return nil
+	}
+	out := make([]Match, len(m.matches))
+	for i, match := range m.matches {
+		out[i] = match
+		out[i].Positions = append([]int(nil), match.Positions...)
+	}
+	return out
+}
+
+func (m *Model) refresh() { m.matches = Fuzzy(m.commands, string(m.input)); m.clamp() }
+func (m *Model) clamp() {
+	if len(m.matches) == 0 {
+		m.selected = -1
+		m.scroll = 0
+		return
+	}
+	if m.selected < 0 {
+		m.selected = 0
+	}
+	if m.selected >= len(m.matches) {
+		m.selected = len(m.matches) - 1
+	}
+	if m.scroll < 0 {
+		m.scroll = 0
+	}
+	if m.scroll > m.selected {
+		m.scroll = m.selected
+	}
+}
+
+func (m *Model) Render(inner domain.Size) renderer.Frame {
+	frame := renderer.NewFrame(max(inner.Cols, 0), max(inner.Rows, 0))
+	if frame.Width == 0 || frame.Height == 0 {
+		return frame
+	}
+	base := renderer.DefaultStyle()
+	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: base})
+	x := ui.DrawText(frame, 0, 0, frame.Width, "> "+m.Query(), base)
+	if x < frame.Width {
+		frame.Set(x, 0, renderer.Cell{Rune: ' ', Style: renderer.Style{Inverse: true, Foreground: -1, Background: -1}})
+	}
+	if m == nil {
+		return frame
+	}
+	visible := frame.Height - 1
+	if visible <= 0 {
+		return frame
+	}
+	if m.selected < m.scroll {
+		m.scroll = m.selected
+	}
+	if m.selected >= m.scroll+visible {
+		m.scroll = m.selected - visible + 1
+	}
+	codeWidth := 0
+	for _, match := range m.matches {
+		if len([]rune(match.Command.Code)) > codeWidth {
+			codeWidth = len([]rune(match.Command.Code))
+		}
+	}
+	for y := 0; y < visible; y++ {
+		idx := m.scroll + y
+		if idx >= len(m.matches) {
+			break
+		}
+		match := m.matches[idx]
+		style := base
+		if idx == m.selected {
+			style.Inverse = true
+		}
+		ui.FillRect(frame, domain.Rect{Y: y + 1, Width: frame.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
+		x := 0
+		highlight := map[int]bool{}
+		for _, p := range match.Positions {
+			highlight[p] = true
+		}
+		for i, r := range []rune(match.Command.Code) {
+			cellStyle := style
+			if highlight[i] {
+				cellStyle.Bold = true
+				cellStyle.Inverse = true
+			}
+			if x < frame.Width {
+				frame.Set(x, y+1, renderer.Cell{Rune: r, Style: cellStyle})
+			}
+			x++
+		}
+		for x < codeWidth+1 && x < frame.Width {
+			frame.Set(x, y+1, renderer.Cell{Rune: ' ', Style: style})
+			x++
+		}
+		ui.DrawText(frame, x, y+1, frame.Width, match.Command.Name+" — "+match.Command.Desc, style)
+	}
+	return frame
+}
