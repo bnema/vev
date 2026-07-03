@@ -101,17 +101,23 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 
 	switch ev.Button {
 	case mouse.Left:
-		if altScreen || ev.Row >= childRows {
-			return
-		}
 		switch ev.Type {
 		case mouse.Press:
+			if altScreen || ev.Row >= childRows {
+				ac.copyMu.Lock()
+				ac.normalMousePressValid = false
+				ac.copyMu.Unlock()
+				return
+			}
 			ac.copyMu.Lock()
 			ac.normalMousePressRow = ev.Row
 			ac.normalMousePressTop = scrollbackRows
 			ac.normalMousePressValid = true
 			ac.copyMu.Unlock()
 		case mouse.Motion:
+			if altScreen || ev.Row >= childRows {
+				return
+			}
 			ac.copyMu.Lock()
 			pressValid := ac.normalMousePressValid
 			pressRow := ac.normalMousePressRow
@@ -128,7 +134,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 			ac.copyMu.Lock()
 			mode := scopy.NewMode(snap)
 			mode.StartSelectionAt(snap, pressTop+pressRow)
-			mode.ExtendTo(snap, pressTop+ev.Row)
+			mode.ExtendTo(snap, len(snap.Rows)-snap.Height+ev.Row)
 			ac.copyMode = mode
 			ac.copyPressRow = pressTop + pressRow
 			ac.copyPressRowValid = true

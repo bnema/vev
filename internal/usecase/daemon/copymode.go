@@ -95,6 +95,12 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
 
 	tb.mu.Lock()
 	if ev.Row >= tb.screen.Frame.Height {
+		if ev.Type == mouse.Press {
+			ac.copyMu.Lock()
+			ac.copyPressRowValid = false
+			ac.copyDragging = false
+			ac.copyMu.Unlock()
+		}
 		tb.mu.Unlock()
 		return
 	}
