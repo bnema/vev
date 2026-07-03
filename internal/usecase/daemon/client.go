@@ -366,7 +366,10 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, explicit bool) {
 		return // already displaced by a newer client; nothing to do
 	}
 	d.unregisterPreview(ac)
-	if !sess.ephemeral {
+	sess.mu.Lock()
+	ephemeral := sess.ephemeral
+	sess.mu.Unlock()
+	if !ephemeral {
 		d.refreshSessionCwd(sess)
 	}
 	d.resetScreenDefaultColors(sess)
@@ -378,7 +381,7 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, explicit bool) {
 		d.boundedSend(ac, frameDetached(ports.ReasonDetach))
 	}
 	_ = ac.tr.Close()
-	if sess.ephemeral {
+	if ephemeral {
 		_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 	}
 }
@@ -448,7 +451,10 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient) {
 		d.resetScreenDefaultColors(sess)
 		_ = ac.tr.Close()
 		d.log.Warn("detached client after send error", "session", sess.name)
-		if sess.ephemeral {
+		sess.mu.Lock()
+		ephemeral := sess.ephemeral
+		sess.mu.Unlock()
+		if ephemeral {
 			_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 		}
 	}

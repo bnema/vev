@@ -1196,6 +1196,68 @@ func (_c *MockStore_Delete_Call) RunAndReturn(run func(key []byte) error) *MockS
 	return _c
 }
 
+// Get provides a mock function for the type MockStore
+func (_mock *MockStore) Get(key []byte) ([]byte, bool) {
+	ret := _mock.Called(key)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Get")
+	}
+
+	var r0 []byte
+	var r1 bool
+	if returnFunc, ok := ret.Get(0).(func([]byte) ([]byte, bool)); ok {
+		return returnFunc(key)
+	}
+	if returnFunc, ok := ret.Get(0).(func([]byte) []byte); ok {
+		r0 = returnFunc(key)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]byte)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func([]byte) bool); ok {
+		r1 = returnFunc(key)
+	} else {
+		r1 = ret.Get(1).(bool)
+	}
+	return r0, r1
+}
+
+// MockStore_Get_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Get'
+type MockStore_Get_Call struct {
+	*mock.Call
+}
+
+// Get is a helper method to define mock.On call
+//   - key []byte
+func (_e *MockStore_Expecter) Get(key any) *MockStore_Get_Call {
+	return &MockStore_Get_Call{Call: _e.mock.On("Get", key)}
+}
+
+func (_c *MockStore_Get_Call) Run(run func(key []byte)) *MockStore_Get_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 []byte
+		if args[0] != nil {
+			arg0 = args[0].([]byte)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_Get_Call) Return(bytes []byte, b bool) *MockStore_Get_Call {
+	_c.Call.Return(bytes, b)
+	return _c
+}
+
+func (_c *MockStore_Get_Call) RunAndReturn(run func(key []byte) ([]byte, bool)) *MockStore_Get_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Range provides a mock function for the type MockStore
 func (_mock *MockStore) Range(fn func(k []byte, v []byte) bool) {
 	_mock.Called(fn)

@@ -1,6 +1,7 @@
 package persist
 
 import (
+	"log/slog"
 	"path/filepath"
 	"sort"
 
@@ -10,6 +11,11 @@ import (
 
 const filename = "sessions.kv"
 
+// StorePath returns the canonical path for the persisted session metadata store.
+func StorePath(dir string) string {
+	return filepath.Join(dir, filename)
+}
+
 // Persister stores named session metadata. A nil Store makes all mutating
 // operations no-ops, so callers can keep persistence optional.
 type Persister struct {
@@ -18,7 +24,7 @@ type Persister struct {
 
 // Open opens the session persister under dir.
 func Open(dir string) (*Persister, error) {
-	store, err := kv.Open(filepath.Join(dir, filename))
+	store, err := kv.Open(StorePath(dir))
 	if err != nil {
 		return nil, err
 	}
@@ -32,7 +38,7 @@ func New(store ports.Store) *Persister {
 
 // LoadReadOnly replays the session store under dir without mutating it.
 func LoadReadOnly(dir string) ([]Record, error) {
-	data, err := kv.Replay(filepath.Join(dir, filename))
+	data, err := kv.Replay(StorePath(dir))
 	if err != nil {
 		return nil, err
 	}
@@ -64,16 +70,11 @@ func (p *Persister) Touch(name, cwd string, at int64) error {
 	}
 
 	createdAt := at
-	p.store.Range(func(k, v []byte) bool {
-		if string(k) != name {
-			return true
-		}
-		r, err := decodeRecordValue(name, v)
-		if err == nil {
+	if v, ok := p.store.Get([]byte(name)); ok {
+		if r, err := decodeRecordValue(name, v); err == nil {
 			createdAt = r.CreatedAt
 		}
-		return false
-	})
+	}
 
 	value, err := encodeRecordValue(Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: at})
 	if err != nil {
@@ -122,7 +123,8 @@ func decodeAll(data map[string][]byte) ([]Record, error) {
 	for name, value := range data {
 		r, err := decodeRecordValue(name, value)
 		if err != nil {
-			return nil, err
+			slog.Warn("skipping malformed persisted session", "session", name, "err", err)
+			continue
 		}
 		records = append(records, r)
 	}

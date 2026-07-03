@@ -47,6 +47,7 @@ type Listener interface {
 //
 // Implementations may buffer writes; Sync is the durability barrier.
 type Store interface {
+	Get(key []byte) ([]byte, bool)
 	Set(key, val []byte) error
 	Delete(key []byte) error
 	Range(fn func(k, v []byte) bool)

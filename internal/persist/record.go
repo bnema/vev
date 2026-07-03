@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 )
 
 // Record is the persisted metadata for a named session.
@@ -23,7 +24,7 @@ func encodeRecordValue(r Record) ([]byte, error) {
 	if r.Name == "" {
 		return nil, errEmptyName
 	}
-	if len(r.Cwd) > int(^uint32(0)) {
+	if uint64(len(r.Cwd)) > math.MaxUint32 {
 		return nil, fmt.Errorf("persist: cwd too large")
 	}
 

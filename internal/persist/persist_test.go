@@ -5,7 +5,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
 func TestRecordCodecRoundTrip(t *testing.T) {
@@ -82,6 +85,18 @@ func TestPersisterSaveTouchDeleteLoadAll(t *testing.T) {
 	require.NoError(t, p.Close())
 }
 
+func TestDecodeAllSkipsMalformedRecords(t *testing.T) {
+	good, err := encodeRecordValue(Record{Name: "good", Cwd: "/ok", CreatedAt: 1, UpdatedAt: 2})
+	require.NoError(t, err)
+
+	records, err := decodeAll(map[string][]byte{
+		"bad":  []byte{0, 0, 0, 5, 'x'},
+		"good": good,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []Record{{Name: "good", Cwd: "/ok", CreatedAt: 1, UpdatedAt: 2}}, records)
+}
+
 func TestLoadReadOnlyUsesReplay(t *testing.T) {
 	dir := t.TempDir()
 	p, err := Open(dir)
@@ -101,33 +116,33 @@ func TestLoadReadOnlyUsesReplay(t *testing.T) {
 }
 
 func TestSyncBehavior(t *testing.T) {
-	store := newFakeStore()
+	store, state := newMockStore(t)
 	p := New(store)
 
 	require.NoError(t, p.Save(Record{Name: "work", Cwd: "/work", CreatedAt: 1, UpdatedAt: 1}))
-	require.Equal(t, 1, store.sets)
-	require.Equal(t, 1, store.syncs)
+	require.Equal(t, 1, state.sets)
+	require.Equal(t, 1, state.syncs)
 
 	require.NoError(t, p.Touch("work", "/work/next", 2))
-	require.Equal(t, 2, store.sets)
-	require.Equal(t, 1, store.syncs)
+	require.Equal(t, 2, state.sets)
+	require.Equal(t, 1, state.syncs)
 
 	require.NoError(t, p.Delete("work"))
-	require.Equal(t, 1, store.deletes)
-	require.Equal(t, 2, store.syncs)
+	require.Equal(t, 1, state.deletes)
+	require.Equal(t, 2, state.syncs)
 }
 
 func TestSavePropagatesSetErrorWithoutSync(t *testing.T) {
-	store := newFakeStore()
-	store.errSet = errors.New("set failed")
+	store, state := newMockStore(t)
+	state.errSet = errors.New("set failed")
 	p := New(store)
 
 	err := p.Save(Record{Name: "work", Cwd: "/work", CreatedAt: 1, UpdatedAt: 1})
-	require.ErrorIs(t, err, store.errSet)
-	require.Zero(t, store.syncs)
+	require.ErrorIs(t, err, state.errSet)
+	require.Zero(t, state.syncs)
 }
 
-type fakeStore struct {
+type mockStoreState struct {
 	data    map[string][]byte
 	sets    int
 	deletes int
@@ -136,39 +151,41 @@ type fakeStore struct {
 	errSet  error
 }
 
-func newFakeStore() *fakeStore {
-	return &fakeStore{data: make(map[string][]byte)}
-}
-
-func (s *fakeStore) Set(key, val []byte) error {
-	s.sets++
-	if s.errSet != nil {
-		return s.errSet
-	}
-	s.data[string(key)] = append([]byte(nil), val...)
-	return nil
-}
-
-func (s *fakeStore) Delete(key []byte) error {
-	s.deletes++
-	delete(s.data, string(key))
-	return nil
-}
-
-func (s *fakeStore) Range(fn func(k, v []byte) bool) {
-	for k, v := range s.data {
-		if !fn([]byte(k), append([]byte(nil), v...)) {
-			return
+func newMockStore(t *testing.T) (*portsmocks.MockStore, *mockStoreState) {
+	t.Helper()
+	state := &mockStoreState{data: make(map[string][]byte)}
+	store := portsmocks.NewMockStore(t)
+	store.EXPECT().Get(mock.Anything).RunAndReturn(func(key []byte) ([]byte, bool) {
+		v, ok := state.data[string(key)]
+		return append([]byte(nil), v...), ok
+	}).Maybe()
+	store.EXPECT().Set(mock.Anything, mock.Anything).RunAndReturn(func(key, val []byte) error {
+		state.sets++
+		if state.errSet != nil {
+			return state.errSet
 		}
-	}
-}
-
-func (s *fakeStore) Sync() error {
-	s.syncs++
-	return nil
-}
-
-func (s *fakeStore) Close() error {
-	s.closed = true
-	return nil
+		state.data[string(key)] = append([]byte(nil), val...)
+		return nil
+	}).Maybe()
+	store.EXPECT().Delete(mock.Anything).RunAndReturn(func(key []byte) error {
+		state.deletes++
+		delete(state.data, string(key))
+		return nil
+	}).Maybe()
+	store.EXPECT().Range(mock.Anything).Run(func(fn func(k, v []byte) bool) {
+		for k, v := range state.data {
+			if !fn([]byte(k), append([]byte(nil), v...)) {
+				return
+			}
+		}
+	}).Maybe()
+	store.EXPECT().Sync().RunAndReturn(func() error {
+		state.syncs++
+		return nil
+	}).Maybe()
+	store.EXPECT().Close().RunAndReturn(func() error {
+		state.closed = true
+		return nil
+	}).Maybe()
+	return store, state
 }

@@ -201,10 +201,14 @@ func (s *Store) appendRecord(op byte, key, val []byte) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.file.Write(buf); err != nil {
+	n, err := s.file.Write(buf)
+	if err != nil || n != len(buf) {
 		_ = s.file.Truncate(pos)
 		_, _ = s.file.Seek(pos, io.SeekStart)
-		return err
+		if err != nil {
+			return err
+		}
+		return io.ErrShortWrite
 	}
 
 	k := string(key)
@@ -271,25 +275,36 @@ func (s *Store) compactLocked() error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	if err := s.file.Close(); err != nil {
+	bak := s.path + ".bak"
+	_ = os.Remove(bak)
+	if err := os.Rename(s.path, bak); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, s.path); err != nil {
+		_ = os.Rename(bak, s.path)
+		_ = os.Remove(tmp)
 		return err
 	}
 	f, err := os.OpenFile(s.path, os.O_RDWR, 0o600)
 	if err != nil {
+		_ = os.Remove(s.path)
+		_ = os.Rename(bak, s.path)
 		return err
 	}
 	if _, err := f.Seek(0, io.SeekEnd); err != nil {
 		_ = f.Close()
+		_ = os.Remove(s.path)
+		_ = os.Rename(bak, s.path)
 		return err
 	}
+	old := s.file
 	s.file = f
 	s.entrySize = newSizes
 	s.total = newTotal
 	s.live = newLive
+	_ = old.Close()
+	_ = os.Remove(bak)
 	return nil
 }
 

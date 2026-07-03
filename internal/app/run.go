@@ -14,7 +14,6 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -228,7 +227,7 @@ func runDaemon() error {
 
 	slog.Info("daemon starting", "socket", ln.Addr())
 	daemonOpts := []daemon.Option(nil)
-	if store, err := kv.Open(filepath.Join(platform.StateDir(), "sessions.kv")); err != nil {
+	if store, err := kv.Open(persist.StorePath(platform.StateDir())); err != nil {
 		slog.Warn("opening session store failed; persistence disabled", "err", err)
 	} else {
 		daemonOpts = append(daemonOpts, daemon.WithStore(store))
@@ -560,7 +559,13 @@ func runKill(_ context.Context, name string, all, daemon bool) error {
 	transport, err := realDial(ipc.SocketDir())
 	if err != nil {
 		if name != "" && !all && !daemon {
-			store, openErr := kv.Open(filepath.Join(platform.StateDir(), "sessions.kv"))
+			storePath := persist.StorePath(platform.StateDir())
+			if _, statErr := os.Stat(storePath); errors.Is(statErr, os.ErrNotExist) {
+				return fmt.Errorf("vev: no such session: %s", name)
+			} else if statErr != nil {
+				return fmt.Errorf("vev: reading stored sessions: %w", statErr)
+			}
+			store, openErr := kv.Open(storePath)
 			if openErr != nil {
 				return fmt.Errorf("vev: opening stored sessions: %w", openErr)
 			}

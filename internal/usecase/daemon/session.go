@@ -293,13 +293,16 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		createdAt = time.Now().UnixNano()
 		sess.createdAt = createdAt
 	}
-	if !wasEphemeral && oldName != name {
-		if err := d.persist.Delete(oldName); err != nil {
+	if wasEphemeral || oldName != name {
+		if err := d.persist.Save(persist.Record{Name: name, Cwd: sess.cwd, CreatedAt: createdAt, UpdatedAt: time.Now().UnixNano()}); err != nil {
 			return err
 		}
 	}
-	if wasEphemeral || oldName != name {
-		if err := d.persist.Save(persist.Record{Name: name, Cwd: sess.cwd, CreatedAt: createdAt, UpdatedAt: time.Now().UnixNano()}); err != nil {
+	if !wasEphemeral && oldName != name {
+		if err := d.persist.Delete(oldName); err != nil {
+			if cleanupErr := d.persist.Delete(name); cleanupErr != nil {
+				d.log.Warn("cleaning up renamed persisted session failed", "err", cleanupErr, "session", name)
+			}
 			return err
 		}
 	}
@@ -375,11 +378,8 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	ephemeral := sess.ephemeral
 	sess.mu.Unlock()
 	if !ephemeral {
-		if purge {
-			delete(d.stopped, stoppedName)
-		} else {
-			d.stopped[stoppedName] = stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt}
-		}
+		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, purging: purge}
+		d.stopped[stoppedName] = stopped
 	}
 	empty := len(d.sessions) == 0
 	if empty {
@@ -396,8 +396,15 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 			purgeErr = err
 			d.log.Warn("deleting persisted session failed", "err", err, "session", stoppedName)
 			d.mu.Lock()
-			if _, live := d.sessions[sess.id]; !live {
-				d.stopped[stoppedName] = stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt}
+			if stopped, ok := d.stopped[stoppedName]; ok && stopped.purging {
+				stopped.purging = false
+				d.stopped[stoppedName] = stopped
+			}
+			d.mu.Unlock()
+		} else {
+			d.mu.Lock()
+			if stopped, ok := d.stopped[stoppedName]; ok && stopped.purging {
+				delete(d.stopped, stoppedName)
 			}
 			d.mu.Unlock()
 		}

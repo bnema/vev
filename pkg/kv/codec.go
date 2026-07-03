@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"math"
 )
 
 const (
@@ -36,6 +37,9 @@ func encodeRecord(op byte, key, value []byte) ([]byte, error) {
 	payloadLen := payloadPrefixLen + len(key)
 	if op == opSet {
 		payloadLen += len(value)
+	}
+	if uint64(payloadLen) > math.MaxUint32 {
+		return nil, errors.New("payload too large")
 	}
 
 	buf := make([]byte, headerLen+payloadLen)

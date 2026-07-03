@@ -144,6 +144,20 @@ func TestRunListReadsStoppedSessionsWithoutDaemon(t *testing.T) {
 	}
 }
 
+func TestRunKillMissingStoppedSessionDoesNotCreateStore(t *testing.T) {
+	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+
+	err := runKill(context.Background(), "missing", false, false)
+	if err == nil || !strings.Contains(err.Error(), "no such session: missing") {
+		t.Fatalf("runKill error = %v, want no such session", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(stateRoot, "vev", "sessions.kv")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("sessions.kv stat error = %v, want not exist", statErr)
+	}
+}
+
 func TestRunKillDeletesStoppedSessionWithoutDaemon(t *testing.T) {
 	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateRoot)

@@ -596,6 +596,12 @@ func newMockStore(t *testing.T) (*portsmocks.MockStore, *mockStoreState) {
 	t.Helper()
 	state := &mockStoreState{data: make(map[string][]byte)}
 	store := portsmocks.NewMockStore(t)
+	store.EXPECT().Get(mock.Anything).RunAndReturn(func(k []byte) ([]byte, bool) {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		v, ok := state.data[string(k)]
+		return append([]byte(nil), v...), ok
+	}).Maybe()
 	store.EXPECT().Set(mock.Anything, mock.Anything).RunAndReturn(func(k, v []byte) error {
 		state.mu.Lock()
 		defer state.mu.Unlock()

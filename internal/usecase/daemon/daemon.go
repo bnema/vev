@@ -120,6 +120,7 @@ type stoppedSession struct {
 	name      string
 	cwd       string
 	createdAt int64
+	purging   bool
 }
 
 type Option func(*Daemon)
@@ -206,9 +207,11 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	d.sessWg.Go(func() {
 		d.attentionAnimator(d.serveCtx)
 	})
-	d.sessWg.Go(func() {
-		d.cwdSampler(d.serveCtx)
-	})
+	if d.persistEnabled && d.procCwd != nil {
+		d.sessWg.Go(func() {
+			d.cwdSampler(d.serveCtx)
+		})
+	}
 
 	// Break the accept loop when either the parent context is cancelled or the
 	// registry drains to empty: both close the listener, which fails Accept.
@@ -326,7 +329,10 @@ func (d *Daemon) handleList(tr ports.Transport) {
 		s.mu.Unlock()
 		infos = append(infos, info)
 	}
-	for name := range d.stopped {
+	for name, stopped := range d.stopped {
+		if stopped.purging {
+			continue
+		}
 		if _, live := liveNames[name]; live {
 			continue
 		}
@@ -358,13 +364,12 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	target := d.findByNameLocked(k.Name)
 	if target == nil {
 		if stopped, ok := d.stopped[k.Name]; ok {
-			d.mu.Unlock()
 			if err := d.persist.Delete(k.Name); err != nil {
+				d.mu.Unlock()
 				d.log.Warn("deleting persisted stopped session failed", "err", err, "session", k.Name)
 				_ = tr.Send(frameError(ports.ErrInternal, "deleting persisted stopped session failed"))
 				return
 			}
-			d.mu.Lock()
 			if cur, ok := d.stopped[k.Name]; ok && cur == stopped {
 				delete(d.stopped, k.Name)
 			}
@@ -483,7 +488,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 		sess := d.findByNameLocked(h.Name)
 		if sess == nil {
 			stopped, ok := d.stopped[h.Name]
-			if !ok {
+			if !ok || stopped.purging {
 				d.mu.Unlock()
 				return nil, nil, &protoErr{ports.ErrNoSuchSession, "no such session: " + h.Name}
 			}

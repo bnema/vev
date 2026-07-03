@@ -56,7 +56,9 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 	sessions := d.sessionsSnapshotLocked()
 	stopped := make([]stoppedSession, 0, len(d.stopped))
 	for _, s := range d.stopped {
-		stopped = append(stopped, s)
+		if !s.purging {
+			stopped = append(stopped, s)
+		}
 	}
 	d.mu.Unlock()
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].name < sessions[j].name })
@@ -406,7 +408,7 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, target picker.Target) {
 	d.mu.Lock()
 	stopped, ok := d.stopped[target.Name]
-	if !ok {
+	if !ok || stopped.purging {
 		d.mu.Unlock()
 		d.paint(from, ac, true)
 		return
@@ -441,18 +443,17 @@ func (d *Daemon) killPickerTarget(target picker.Target) {
 	if target.Stopped {
 		d.mu.Lock()
 		stopped, ok := d.stopped[target.Name]
-		d.mu.Unlock()
-		if ok {
+		if ok && !stopped.purging {
 			if err := d.persist.Delete(target.Name); err != nil {
+				d.mu.Unlock()
 				d.log.Warn("deleting persisted stopped session failed", "err", err, "session", target.Name)
 				return
 			}
-			d.mu.Lock()
 			if cur, ok := d.stopped[target.Name]; ok && cur == stopped {
 				delete(d.stopped, target.Name)
 			}
-			d.mu.Unlock()
 		}
+		d.mu.Unlock()
 		return
 	}
 	d.mu.Lock()
