@@ -20,20 +20,3 @@ type SessionID string
 
 // TabID uniquely identifies a tab within a session.
 type TabID string
-
-// Tab is a single tab within a session.
-type Tab struct {
-	ID     TabID
-	Index  int // 0-based; drives Alt+1..9 and status-bar order
-	Name   string
-	Active bool
-}
-
-// Session is a persistent multiplexer session containing one or more tabs.
-type Session struct {
-	ID        SessionID
-	Name      string // display name; numbered "0","1"... when ephemeral
-	Ephemeral bool
-	Tabs      []Tab
-	ActiveTab TabID
-}
