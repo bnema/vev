@@ -210,11 +210,11 @@ func (s *Store) appendRecord(op byte, key, val []byte) error {
 		}
 		if tErr := s.file.Truncate(pos); tErr != nil {
 			s.closed = true
-			return fmt.Errorf("write failed (%v) and recovery truncate failed: %w", writeErr, tErr)
+			return fmt.Errorf("write failed (%w) and recovery truncate failed: %w", writeErr, tErr)
 		}
 		if _, sErr := s.file.Seek(pos, io.SeekStart); sErr != nil {
 			s.closed = true
-			return fmt.Errorf("write failed (%v) and recovery seek failed: %w", writeErr, sErr)
+			return fmt.Errorf("write failed (%w) and recovery seek failed: %w", writeErr, sErr)
 		}
 		return writeErr
 	}
