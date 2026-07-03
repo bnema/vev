@@ -3,6 +3,7 @@ package command
 // Context is the set of application actions available to commands.
 type Context interface {
 	CreateTab() error
+	CreateSession() error
 	CloseTab() error
 	NextTab() error
 	PrevTab() error

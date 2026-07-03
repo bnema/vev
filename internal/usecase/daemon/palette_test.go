@@ -40,6 +40,47 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
+func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
+	p1, release1 := newBlockingPTY(t)
+	p2, release2 := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
+	defer release1()
+	defer release2()
+	ptys := portsmocks.NewMockPTYFactory(t)
+	ptys.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(p2, nil).Once()
+	d.ptys = ptys
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("CNS\r"))
+	promptFrame := awaitFrame(t, sends, ports.MsgOutput)
+	promptOutput, err := ports.UnmarshalOutput(promptFrame.Payload)
+	require.NoError(t, err)
+	require.False(t, ac.paletteActive())
+	require.True(t, ac.promptActive())
+	require.Contains(t, string(promptOutput.Data), "Create session")
+
+	d.handleInput(sess, ac, []byte("scratch\r"))
+	// The submit first paints the newly attached session while the prompt is
+	// still open, then handlePromptInput closes the prompt and repaints the
+	// client's current session. The final frame must be for the new session.
+	awaitFrame(t, sends, ports.MsgOutput)
+	finalRepaint := awaitFrame(t, sends, ports.MsgOutput)
+	finalOutput, err := ports.UnmarshalOutput(finalRepaint.Payload)
+	require.NoError(t, err)
+	require.False(t, ac.promptActive())
+	require.Equal(t, 2, sessionCount(d))
+	require.Nil(t, sess.client)
+	newSess := ac.currentSession()
+	require.NotNil(t, newSess)
+	require.NotSame(t, sess, newSess)
+	require.Equal(t, "scratch", newSess.name)
+	require.False(t, newSess.ephemeral)
+	require.Same(t, ac, newSess.client)
+	require.Contains(t, string(finalOutput.Data), "scratch")
+	require.NotContains(t, string(finalOutput.Data), "Create session")
+}
+
 func TestPaletteCommandNoopRepaintsAfterClose(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 1)
 	defer releases[0]()
@@ -106,7 +147,7 @@ func TestPaletteCtrlNAndCtrlPNavigate(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 	cmd, ok := ac.palette.Selected()
 	require.True(t, ok)
-	require.Equal(t, "CLT", cmd.Code)
+	require.Equal(t, "CNS", cmd.Code)
 
 	d.handlePaletteInput(ac, []byte{0x10})
 	awaitFrame(t, sends, ports.MsgOutput)
