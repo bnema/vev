@@ -1,0 +1,353 @@
+// Package daemon holds vev's server-side session multiplexer use case: the
+// accept loop, the ephemeral/named session registry, the per-tab PTY reader
+// and VT screen, and the per-client debounced render scheduler.
+//
+// Concurrency model (sessions own one or more PTY-backed tabs):
+//
+//   - Serve runs the accept loop. Each accepted connection is handled by its
+//     own goroutine (handleConn): it reads the first frame and routes it to a
+//     session create/attach, a list, or a kill.
+//   - Per session there are exactly two long-lived goroutines: the PTY reader
+//     (drains child output into the VT screen and pokes a cap-1 dirty channel)
+//     and the render scheduler (debounces dirties and paints the attached
+//     client). Both are tied to the session context and unwind when the
+//     session is killed (pty.Close unblocks the reader; ctx cancel stops the
+//     scheduler).
+//   - The daemon exits (Serve returns) when the last session is removed, or
+//     when the parent context is cancelled (graceful shutdown notifies any
+//     attached clients with ReasonServerShutdown).
+//
+// Locking: a session's screen and per-client renderer shadow are both guarded
+// by tab.mu; the attached-client pointer by session.mu; the registry by
+// Daemon.mu. When more than one is held the order is always
+// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
+// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
+// a slow client.
+package daemon
+
+import (
+	"errors"
+	"sync"
+	"time"
+
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
+	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/mouse"
+	"github.com/bnema/vev/internal/usecase/picker"
+	"github.com/bnema/vev/pkg/renderer"
+)
+
+type attachedClient struct {
+	tr            ports.Transport
+	rend          *renderer.Renderer
+	size          domain.Size
+	keys          *keys.Router
+	sessMu        sync.Mutex
+	sess          *session
+	copyMu        sync.Mutex
+	copyMode      *scopy.Mode
+	copyPending   []byte
+	copyESC       pendingByteTimer
+	copyFeedback  string
+	pickerMu      sync.Mutex
+	picker        *picker.Model
+	pickerPreview *tab
+	pickerPending []byte
+	pickerESC     pendingByteTimer
+	mouseScan     mouse.Scanner
+	lastCursor    cursorOut
+	sendMu        sync.Mutex
+}
+
+type cursorOut struct {
+	valid    bool
+	hidden   bool
+	row      int
+	col      int
+	style    int
+	hasStyle bool
+}
+
+type pendingByteTimer struct {
+	timer ports.Timer
+	done  chan struct{}
+}
+
+func (p *pendingByteTimer) retain(clock ports.Clock, delay time.Duration, onFire func(ports.Timer)) {
+	p.timer = clock.NewTimer(delay)
+	p.done = make(chan struct{})
+	go func(timer ports.Timer, done <-chan struct{}) {
+		select {
+		case <-timer.C():
+		case <-done:
+			return
+		}
+		onFire(timer)
+	}(p.timer, p.done)
+}
+
+func (p *pendingByteTimer) stop() {
+	if p.timer != nil {
+		p.timer.Stop()
+		p.timer = nil
+	}
+	if p.done != nil {
+		close(p.done)
+		p.done = nil
+	}
+}
+
+func (ac *attachedClient) currentSession() *session {
+	ac.sessMu.Lock()
+	defer ac.sessMu.Unlock()
+	return ac.sess
+}
+
+func (ac *attachedClient) setSession(sess *session) {
+	ac.sessMu.Lock()
+	defer ac.sessMu.Unlock()
+	ac.sess = sess
+}
+
+func (ac *attachedClient) copyModeActive() bool {
+	ac.copyMu.Lock()
+	defer ac.copyMu.Unlock()
+	return ac.copyMode != nil
+}
+
+func (ac *attachedClient) pickerActive() bool {
+	ac.pickerMu.Lock()
+	defer ac.pickerMu.Unlock()
+	return ac.picker != nil
+}
+
+// send serialises a frame onto the client's transport.
+func (ac *attachedClient) send(f ports.Frame) error {
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+	return ac.tr.Send(f)
+}
+
+// boundedSend sends f to ac with a deadline watchdog: if the send (including
+// waiting on sendMu behind a wedged paint) does not complete within
+// detachNotifyTimeout, the transport is force-closed, failing the in-flight
+// write. Detach/kill/shutdown paths use this so they are never gated on a
+// client that has stopped draining its socket.
+func (d *Daemon) boundedSend(ac *attachedClient, f ports.Frame) {
+	_ = d.boundedSendErr(ac, f)
+}
+
+func (d *Daemon) boundedSendErr(ac *attachedClient, f ports.Frame) error {
+	timer := d.clock.NewTimer(detachNotifyTimeout)
+	result := make(chan error, 1)
+	go func() {
+		result <- ac.send(f)
+	}()
+	select {
+	case err := <-result:
+		timer.Stop()
+		return err
+	case <-timer.C():
+		select {
+		case err := <-result:
+			return err
+		default:
+		}
+		_ = ac.tr.Close()
+		return errors.New("send timed out")
+	}
+}
+
+// notifyDetachedAsync delivers a best-effort Detached notice off the caller's
+// goroutine and then closes the transport. Session teardown (killSession) must
+// complete regardless of client state, so the notice is both asynchronous and
+// deadline-bounded; Serve waits for pending notices before force-closing
+// connections so a graceful notice is not raced by the hard close.
+func (d *Daemon) notifyDetachedAsync(ac *attachedClient, reason uint8) {
+	done := make(chan struct{})
+	d.mu.Lock()
+	// Prune completed entries so the slice stays bounded by the number of
+	// notifications actually in flight.
+	kept := d.notifies[:0]
+	for _, c := range d.notifies {
+		select {
+		case <-c:
+		default:
+			kept = append(kept, c)
+		}
+	}
+	d.notifies = append(kept, done)
+	d.mu.Unlock()
+
+	go func() {
+		defer close(done)
+		d.boundedSend(ac, frameDetached(reason))
+		_ = ac.tr.Close()
+	}()
+}
+
+// waitNotifies blocks until every Detached notification in flight at the time
+// of the call has completed. Each is deadline-bounded (boundedSend), so this
+// wait is bounded too.
+func (d *Daemon) waitNotifies() {
+	d.mu.Lock()
+	snapshot := make([]chan struct{}, len(d.notifies))
+	copy(snapshot, d.notifies)
+	d.mu.Unlock()
+	for _, c := range snapshot {
+		<-c
+	}
+}
+
+func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size) *attachedClient {
+	ac := &attachedClient{
+		tr:   tr,
+		rend: renderer.New(renderer.Capabilities{}),
+		size: sz,
+	}
+	ac.setSession(sess)
+	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac})
+	sess.mu.Lock()
+	old := sess.client
+	sess.client = ac
+	sess.mu.Unlock()
+
+	if old != nil {
+		d.unregisterPreview(old)
+		old.setSession(nil)
+		// Async + bounded: a dead or wedged old client must not stall the new
+		// client's handshake.
+		d.notifyDetachedAsync(old, ports.ReasonDetach)
+	}
+	return ac
+}
+
+// firstPaint guarantees the freshly attached client sees the full screen: if
+// the tab size differs from the client's it resizes first (which paints a
+// full redraw), otherwise it forces a full paint against the fresh renderer.
+func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain.Size) {
+	tb := sess.activeTab()
+	if tb == nil {
+		return
+	}
+	tb.mu.Lock()
+	wsz := tb.size
+	tb.mu.Unlock()
+
+	if clientSize.Valid() && wsz != tabSize(clientSize) {
+		d.resize(sess, ac, clientSize)
+		return
+	}
+	d.paint(sess, ac, true)
+}
+
+// runConnLoop is the per-connection input router: it pumps client messages
+// until detach, EOF, or a transport error.
+func (d *Daemon) runConnLoop(ac *attachedClient) {
+	for {
+		sess := ac.currentSession()
+		if sess == nil {
+			return
+		}
+		f, err := ac.tr.Recv()
+		if err != nil {
+			d.clientGone(sess, ac, false)
+			return
+		}
+		sess = ac.currentSession()
+		if sess == nil {
+			return
+		}
+		switch f.Type {
+		case ports.MsgInput:
+			if in, derr := ports.UnmarshalInput(f.Payload); derr == nil {
+				d.handleInput(sess, ac, in.Data)
+			}
+		case ports.MsgResize:
+			if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil {
+				d.resize(sess, ac, rz.Size)
+			}
+		case ports.MsgDetach:
+			d.clientGone(sess, ac, true)
+			return
+		case ports.MsgPing:
+			_ = ac.send(framePong())
+		default:
+			// Unknown/out-of-band client messages are ignored so a newer
+			// client can add message types without breaking an older daemon.
+		}
+	}
+}
+
+// clientGone detaches ac if it is still the session's current client. An
+// ephemeral session dies with its client; a named one survives headless. When
+
+func (d *Daemon) clientGone(sess *session, ac *attachedClient, explicit bool) {
+	if !sess.detachIfCurrent(ac) {
+		return // already displaced by a newer client; nothing to do
+	}
+	d.unregisterPreview(ac)
+	if explicit {
+		// Synchronous so the ack is delivered before the transport closes
+		// (the client is actively awaiting it), but deadline-bounded so a
+		// wedged client cannot pin this conn handler and hang Serve's
+		// connWg.Wait.
+		d.boundedSend(ac, frameDetached(ports.ReasonDetach))
+	}
+	_ = ac.tr.Close()
+	if sess.ephemeral {
+		d.killSession(sess, ports.ReasonSessionKilled)
+	}
+}
+
+// detachIfCurrent clears the client iff ac is the current one, reporting
+
+func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
+	if !sz.Valid() {
+		return
+	}
+	tbSize := tabSize(sz)
+	ac.size = sz
+
+	sess.mu.Lock()
+	tabs := append([]*tab(nil), sess.tabs...)
+	sess.mu.Unlock()
+	if len(tabs) == 0 {
+		return
+	}
+
+	for _, tb := range tabs {
+		if err := tb.pty.Resize(tbSize); err != nil {
+			d.log.Warn("pty resize failed", "err", err, "session", sess.name)
+		}
+		tb.mu.Lock()
+		tb.screen.Resize(tbSize.Cols, tbSize.Rows)
+		tb.size = tbSize
+		tb.mu.Unlock()
+	}
+	d.paint(sess, ac, true)
+}
+
+// detachOnSendError drops a client whose transport failed. Like every other
+// detach path, losing the client kills an ephemeral session (its lifetime is
+// its client's); a named session keeps running headless.
+func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient) {
+	if sess.detachIfCurrent(ac) {
+		d.unregisterPreview(ac)
+		_ = ac.tr.Close()
+		d.log.Warn("detached client after send error", "session", sess.name)
+		if sess.ephemeral {
+			d.killSession(sess, ports.ReasonSessionKilled)
+		}
+	}
+}
+
+// killSession removes a session and tears down its resources. It is
+// idempotent: only the caller that wins the registry delete acts. When the
+// registry empties it marks the daemon closing (atomically with the
+// empty-check, under d.mu) and signals shutdown.
+//
+// Teardown ordering matters: context cancel, pty.Close, and the done signal
+// run first and unconditionally — never gated behind a client send. The
