@@ -117,7 +117,7 @@ func DrawText(f renderer.Frame, x, y, clipX int, text string, style renderer.Sty
 	clipX = clamp(clipX, 0, f.Width)
 	pos := x
 	for _, r := range text {
-		w := runeWidth(r)
+		w := renderer.RuneWidth(r)
 		if w == 0 {
 			continue
 		}
@@ -165,46 +165,7 @@ func clamp(n, low, high int) int {
 func textWidth(text string) int {
 	width := 0
 	for _, r := range text {
-		width += runeWidth(r)
+		width += renderer.RuneWidth(r)
 	}
 	return width
-}
-
-func runeWidth(r rune) int {
-	switch {
-	case r < 0x20 || r == 0x7F || (r >= 0x80 && r <= 0x9F):
-		return 0
-	case r >= 0x1100 && r <= 0x115F:
-		return 2
-	case r == 0x2329 || r == 0x232A:
-		return 2
-	case r >= 0x2E80 && r <= 0xA4CF:
-		return 2
-	case r >= 0xAC00 && r <= 0xD7FF:
-		return 2
-	case r >= 0xF900 && r <= 0xFAFF:
-		return 2
-	case r >= 0xFE10 && r <= 0xFE19:
-		return 2
-	case r >= 0xFE30 && r <= 0xFE6F:
-		return 2
-	case r >= 0xFF01 && r <= 0xFF60:
-		return 2
-	case r >= 0xFFE0 && r <= 0xFFE6:
-		return 2
-	case r >= 0x1B000 && r <= 0x1B12F:
-		return 2
-	case r >= 0x1F000 && r <= 0x1F64F:
-		return 2
-	case r >= 0x1F680 && r <= 0x1F6FF:
-		return 2
-	case r >= 0x1F900 && r <= 0x1F9FF:
-		return 2
-	case r >= 0x1FA70 && r <= 0x1FAFF:
-		return 2
-	case r >= 0x20000 && r <= 0x3FFFF:
-		return 2
-	default:
-		return 1
-	}
 }

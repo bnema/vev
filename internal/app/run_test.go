@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bnema/vev/internal/ports"
@@ -74,5 +76,16 @@ func TestParseArgs(t *testing.T) {
 				t.Errorf("remoteTarget = %q, want %q", got.remoteTarget, tt.wantRemote)
 			}
 		})
+	}
+}
+
+func TestRunAttachRejectsNestedVEVBeforeDial(t *testing.T) {
+	t.Setenv("VEV", "outer")
+	err := runAttach(context.Background(), ports.IntentEphemeral, "", "")
+	if err == nil {
+		t.Fatal("runAttach with VEV set returned nil error")
+	}
+	if !strings.Contains(err.Error(), "sessions should be nested with care") {
+		t.Fatalf("runAttach error = %q, want nested-session warning", err)
 	}
 }

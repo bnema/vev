@@ -52,6 +52,7 @@ type Hello struct {
 	Name    string
 	Size    domain.Size
 	TermEnv string
+	Cwd     string
 }
 
 // Input carries raw bytes typed/pasted by the client, destined for the PTY.
@@ -193,6 +194,14 @@ func (r *payloadReader) done() error {
 	return nil
 }
 
+// PeekHelloVersion returns the leading protocol version from a Hello payload.
+func PeekHelloVersion(b []byte) (uint16, bool) {
+	if len(b) < 2 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint16(b), true
+}
+
 // MarshalHello encodes h into a Hello message payload.
 func MarshalHello(h Hello) []byte {
 	w := payloadWriter{}
@@ -202,6 +211,7 @@ func MarshalHello(h Hello) []byte {
 	w.putUint16(uint16(h.Size.Cols))
 	w.putUint16(uint16(h.Size.Rows))
 	w.putString(h.TermEnv)
+	w.putString(h.Cwd)
 	return w.b
 }
 
@@ -230,6 +240,9 @@ func UnmarshalHello(b []byte) (Hello, error) {
 	}
 	h.Size = domain.Size{Cols: int(cols), Rows: int(rows)}
 	if h.TermEnv, err = r.getString(); err != nil {
+		return Hello{}, err
+	}
+	if h.Cwd, err = r.getString(); err != nil {
 		return Hello{}, err
 	}
 	if err := r.done(); err != nil {

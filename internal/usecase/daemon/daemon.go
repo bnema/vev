@@ -134,6 +134,7 @@ type session struct {
 	tabs   []*tab
 	active int
 	client *attachedClient
+	cwd    string
 }
 
 // tab is one PTY-backed screen. dirty is a cap-1 channel so bursty output
@@ -170,11 +171,13 @@ type attachedClient struct {
 	copyMu        sync.Mutex
 	copyMode      *scopy.Mode
 	copyPending   []byte
+	copyESC       pendingByteTimer
 	copyFeedback  string
 	pickerMu      sync.Mutex
 	picker        *picker.Model
 	pickerPreview *tab
 	pickerPending []byte
+	pickerESC     pendingByteTimer
 	mouseScan     mouse.Scanner
 	lastCursor    cursorOut
 	sendMu        sync.Mutex
@@ -187,6 +190,35 @@ type cursorOut struct {
 	col      int
 	style    int
 	hasStyle bool
+}
+
+type pendingByteTimer struct {
+	timer ports.Timer
+	done  chan struct{}
+}
+
+func (p *pendingByteTimer) retain(clock ports.Clock, delay time.Duration, onFire func(ports.Timer)) {
+	p.timer = clock.NewTimer(delay)
+	p.done = make(chan struct{})
+	go func(timer ports.Timer, done <-chan struct{}) {
+		select {
+		case <-timer.C():
+		case <-done:
+			return
+		}
+		onFire(timer)
+	}(p.timer, p.done)
+}
+
+func (p *pendingByteTimer) stop() {
+	if p.timer != nil {
+		p.timer.Stop()
+		p.timer = nil
+	}
+	if p.done != nil {
+		close(p.done)
+		p.done = nil
+	}
 }
 
 func (ac *attachedClient) currentSession() *session {
@@ -472,7 +504,11 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 	h, err := ports.UnmarshalHello(f.Payload)
 	if err != nil {
-		_ = tr.Send(frameError(ports.ErrInternal, "malformed hello"))
+		if version, ok := ports.PeekHelloVersion(f.Payload); ok && version != ports.ProtocolVersion {
+			_ = tr.Send(frameError(ports.ErrVersionMismatch, "protocol version mismatch"))
+		} else {
+			_ = tr.Send(frameError(ports.ErrInternal, "malformed hello"))
+		}
 		_ = tr.Close()
 		return
 	}
@@ -530,7 +566,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	switch h.Intent {
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
-		sess, err := d.createSessionLocked(name, true, sz)
+		sess, err := d.createSessionLocked(name, true, h.Cwd, sz)
 		d.mu.Unlock()
 		if err != nil {
 			return nil, nil, err
@@ -546,7 +582,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}
 		}
-		sess, err := d.createSessionLocked(h.Name, false, sz)
+		sess, err := d.createSessionLocked(h.Name, false, h.Cwd, sz)
 		d.mu.Unlock()
 		if err != nil {
 			return nil, nil, err
@@ -569,9 +605,9 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 
 // createSessionLocked spawns a PTY-backed session and starts its reader and
 // scheduler goroutines. Caller holds d.mu.
-func (d *Daemon) createSessionLocked(name string, ephemeral bool, sz domain.Size) (*session, error) {
+func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size) (*session, error) {
 	tbSize := tabSize(sz)
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), tbSize)
+	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), cwd, tbSize)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: spawning session %q: %w", name, err)
 	}
@@ -589,6 +625,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, sz domain.Size
 		ctx:       sctx,
 		cancel:    cancel,
 		tabs:      []*tab{tb},
+		cwd:       cwd,
 	}
 	d.sessions[id] = sess
 	d.startTabGoroutines(sess, tb)
@@ -597,7 +634,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, sz domain.Size
 
 func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	tbSize := tabSize(sz)
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(sess.name), tbSize)
+	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(sess.name), sess.cwd, tbSize)
 	if err != nil {
 		return fmt.Errorf("daemon: spawning tab for session %q: %w", sess.name, err)
 	}
@@ -894,11 +931,13 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	ac.copyMu.Lock()
 	if ac.copyMode == nil {
 		ac.copyPending = nil
+		d.stopCopyPendingTimerLocked(ac)
 		ac.copyMu.Unlock()
 		tb.mu.Unlock()
 		return
 	}
 	if len(ac.copyPending) > 0 {
+		d.stopCopyPendingTimerLocked(ac)
 		combined := make([]byte, 0, len(ac.copyPending)+len(data))
 		combined = append(combined, ac.copyPending...)
 		combined = append(combined, data...)
@@ -938,6 +977,10 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 					changed = true
 					continue
 				}
+				if len(tail) == 1 {
+					d.retainCopyESCLocked(ac)
+					break
+				}
 				if isCopyEscapePrefix(tail) {
 					ac.copyPending = append(ac.copyPending[:0], tail...)
 					break
@@ -951,6 +994,7 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		text = ac.copyMode.SelectedText(snap)
 	}
 	if exit {
+		d.stopCopyPendingTimerLocked(ac)
 		ac.copyMode = nil
 	}
 	ac.copyMu.Unlock()
@@ -979,6 +1023,35 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	if changed {
 		d.paint(sess, ac, true)
 	}
+}
+
+func (d *Daemon) retainCopyESCLocked(ac *attachedClient) {
+	mode := ac.copyMode
+	ac.copyPending = append(ac.copyPending[:0], keys.ESC)
+	ac.copyESC.retain(d.clock, keys.ESCDelay, func(timer ports.Timer) {
+		ac.copyMu.Lock()
+		if ac.copyESC.timer != timer {
+			ac.copyMu.Unlock()
+			return
+		}
+		ac.copyPending = nil
+		ac.copyESC.timer = nil
+		ac.copyESC.done = nil
+		if ac.copyMode != mode || ac.copyMode == nil {
+			ac.copyMu.Unlock()
+			return
+		}
+		ac.copyMode = nil
+		ac.copyMu.Unlock()
+
+		if sess := ac.currentSession(); sess != nil {
+			d.paint(sess, ac, true)
+		}
+	})
+}
+
+func (d *Daemon) stopCopyPendingTimerLocked(ac *attachedClient) {
+	ac.copyESC.stop()
 }
 
 func routeCopyEscape(m *scopy.Mode, snap scopy.Snapshot, data []byte) (int, bool) {
@@ -1055,10 +1128,12 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 	ac.pickerMu.Lock()
 	if ac.picker == nil {
 		ac.pickerPending = nil
+		d.stopPickerPendingTimerLocked(ac)
 		ac.pickerMu.Unlock()
 		return
 	}
 	if len(ac.pickerPending) > 0 {
+		d.stopPickerPendingTimerLocked(ac)
 		combined := make([]byte, 0, len(ac.pickerPending)+len(data))
 		combined = append(combined, ac.pickerPending...)
 		combined = append(combined, data...)
@@ -1088,6 +1163,10 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 					changed = true
 					continue
 				}
+				if len(tail) == 1 {
+					d.retainPickerESCLocked(ac)
+					break
+				}
 				if isPickerEscapePrefix(tail) {
 					ac.pickerPending = append(ac.pickerPending[:0], tail...)
 					break
@@ -1116,6 +1195,31 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 	if exit || changed {
 		d.paint(sess, ac, true)
 	}
+}
+
+func (d *Daemon) retainPickerESCLocked(ac *attachedClient) {
+	ac.pickerPending = append(ac.pickerPending[:0], keys.ESC)
+	ac.pickerESC.retain(d.clock, keys.ESCDelay, func(timer ports.Timer) {
+		ac.pickerMu.Lock()
+		if ac.pickerESC.timer != timer || len(ac.pickerPending) != 1 || ac.pickerPending[0] != keys.ESC || ac.picker == nil {
+			ac.pickerMu.Unlock()
+			return
+		}
+		ac.pickerPending = nil
+		ac.pickerESC.timer = nil
+		ac.pickerESC.done = nil
+		ac.picker = nil
+		ac.pickerMu.Unlock()
+
+		d.unregisterPreview(ac)
+		if sess := ac.currentSession(); sess != nil {
+			d.paint(sess, ac, true)
+		}
+	})
+}
+
+func (d *Daemon) stopPickerPendingTimerLocked(ac *attachedClient) {
+	ac.pickerESC.stop()
 }
 
 func routePickerEscape(m *picker.Model, data []byte) (int, bool) {
@@ -1205,9 +1309,11 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 	if previewer == nil {
 		return
 	}
+	cleared := false
 	previewer.pickerMu.Lock()
 	if previewer.pickerPreview == tb {
 		previewer.pickerPreview = nil
+		cleared = true
 	}
 	previewer.pickerMu.Unlock()
 	tb.mu.Lock()
@@ -1215,12 +1321,18 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 		tb.previewClient = nil
 	}
 	tb.mu.Unlock()
+	if cleared {
+		if sess := previewer.currentSession(); sess != nil {
+			d.paint(sess, previewer, true)
+		}
+	}
 }
 
 func (d *Daemon) closePicker(ac *attachedClient) {
 	ac.pickerMu.Lock()
 	ac.picker = nil
 	ac.pickerPending = nil
+	d.stopPickerPendingTimerLocked(ac)
 	ac.pickerMu.Unlock()
 	d.unregisterPreview(ac)
 }

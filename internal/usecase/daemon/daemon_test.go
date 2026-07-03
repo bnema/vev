@@ -114,7 +114,7 @@ func newBlockingPTYWithWrites(t *testing.T, writes chan<- []byte) (*portsmocks.M
 func newFactory(t *testing.T, p ports.PTY) *portsmocks.MockPTYFactory {
 	t.Helper()
 	f := portsmocks.NewMockPTYFactory(t)
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(p, nil).Maybe()
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(p, nil).Maybe()
 	return f
 }
 
@@ -123,8 +123,8 @@ func newFactorySeq(t *testing.T, ptys ...ports.PTY) *portsmocks.MockPTYFactory {
 	f := portsmocks.NewMockPTYFactory(t)
 	var mu sync.Mutex
 	next := 0
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(string, []string, []string, domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(string, []string, []string, string, domain.Size) (ports.PTY, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			if next >= len(ptys) {
@@ -174,6 +174,45 @@ func mustHello(intent uint8, name string, sz domain.Size) ports.Frame {
 	return ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(ports.Hello{
 		Version: ports.ProtocolVersion, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color",
 	})}
+}
+
+func TestRoutePropagatesHelloCwdAndTabsInheritIt(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	first, releaseFirst := newBlockingPTY(t)
+	defer releaseFirst()
+	second, releaseSecond := newBlockingPTY(t)
+	defer releaseSecond()
+	f := portsmocks.NewMockPTYFactory(t)
+	var dirs []string
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ string, _ []string, _ []string, dir string, _ domain.Size) (ports.PTY, error) {
+			dirs = append(dirs, dir)
+			if len(dirs) == 1 {
+				return first, nil
+			}
+			return second, nil
+		},
+	).Twice()
+
+	d := newTestDaemon(t, f, stubClock{})
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr.EXPECT().Close().Return(nil).Maybe()
+
+	sess, ac, err := d.route(ports.Hello{
+		Version: ports.ProtocolVersion,
+		Intent:  ports.IntentNew,
+		Name:    "work",
+		Size:    sz,
+		TermEnv: "xterm-256color",
+		Cwd:     "/tmp/work",
+	}, tr)
+	require.NoError(t, err)
+	require.NotNil(t, ac)
+	require.Equal(t, "/tmp/work", sess.cwd)
+
+	require.NoError(t, d.createTab(sess, sz))
+	require.Equal(t, []string{"/tmp/work", "/tmp/work"}, dirs)
 }
 
 func frameInput(data []byte) ports.Frame {
@@ -481,14 +520,14 @@ func TestCopyModeEscapeRestoresLiveFullRepaint(t *testing.T) {
 
 func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 	cases := []struct {
-		name        string
-		firstInput  []byte
-		secondInput []byte
-		wantActive  bool
+		name       string
+		input      [][]byte
+		wantCursor int
 	}{
-		{name: "split up arrow", firstInput: []byte("\x1b["), secondInput: []byte("A"), wantActive: true},
-		{name: "split page down", firstInput: []byte("\x1b[6"), secondInput: []byte("~"), wantActive: true},
-		{name: "lone escape exits", firstInput: []byte("\x1b"), wantActive: false},
+		{name: "escape then up arrow", input: [][]byte{[]byte("\x1b"), []byte("[A")}, wantCursor: 23},
+		{name: "escape then down arrow", input: [][]byte{[]byte("g"), []byte("\x1b"), []byte("[B")}, wantCursor: 1},
+		{name: "split up arrow", input: [][]byte{[]byte("\x1b["), []byte("A")}, wantCursor: 23},
+		{name: "split page down", input: [][]byte{[]byte("g"), []byte("\x1b[6"), []byte("~")}, wantCursor: 23},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -501,14 +540,12 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 
 			d.enterCopyMode(sess, ac)
 			awaitFrame(t, sends, ports.MsgOutput)
-			d.handleInput(sess, ac, tc.firstInput)
-			if tc.secondInput != nil {
-				d.handleInput(sess, ac, tc.secondInput)
+			for _, input := range tc.input {
+				d.handleInput(sess, ac, input)
 			}
 
-			if gotActive := ac.copyMode != nil; gotActive != tc.wantActive {
-				t.Fatalf("copy mode active = %v, want %v", gotActive, tc.wantActive)
-			}
+			require.NotNil(t, ac.copyMode)
+			require.Equal(t, tc.wantCursor, ac.copyMode.Cursor)
 		})
 	}
 }
@@ -534,6 +571,57 @@ func TestCopyModeOversizedYankShowsTooLargeFeedback(t *testing.T) {
 	if !strings.Contains(string(msg.Data), "selection too large to copy") {
 		t.Fatalf("oversized yank repaint = %q, want too-large feedback", string(msg.Data))
 	}
+}
+
+func TestCopyModeLoneEscapeExitsAfterDelay(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	clk := &signalClock{timers: make(chan *signalTimer, 1)}
+	d.clock = clk
+	sess.tabs[0].scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].screen.Write([]byte("live"))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("\x1b"))
+	timer := <-clk.timers
+	ac.copyMu.Lock()
+	require.NotNil(t, ac.copyMode)
+	ac.copyMu.Unlock()
+	timer.ch <- time.Now()
+	require.Eventually(t, func() bool {
+		ac.copyMu.Lock()
+		defer ac.copyMu.Unlock()
+		return ac.copyMode == nil
+	}, time.Second, 5*time.Millisecond)
+}
+
+func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	clk := &signalClock{timers: make(chan *signalTimer, 1)}
+	d.clock = clk
+	sess.tabs[0].scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].screen.Write([]byte("live"))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("\x1b"))
+	timer := <-clk.timers
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	timer.ch <- time.Now()
+	require.Never(t, func() bool {
+		ac.copyMu.Lock()
+		defer ac.copyMu.Unlock()
+		return ac.copyMode == nil
+	}, 50*time.Millisecond, 5*time.Millisecond)
+	ac.copyMu.Lock()
+	require.Nil(t, ac.copyESC.timer)
+	require.Nil(t, ac.copyESC.done)
+	require.Empty(t, ac.copyPending)
+	ac.copyMu.Unlock()
 }
 
 func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
@@ -668,6 +756,26 @@ func TestHandshakeVersionMismatch(t *testing.T) {
 	tr, sends, _ := newConn(t, bad)
 
 	d.handleConn(tr) // returns after the rejection; no session, no goroutines
+
+	e := awaitFrame(t, sends, ports.MsgError)
+	em, err := ports.UnmarshalErrorMsg(e.Payload)
+	require.NoError(t, err)
+	require.Equal(t, ports.ErrVersionMismatch, em.Code)
+	require.Equal(t, 0, sessionCount(d))
+}
+
+func TestHandshakeOldHelloLayoutReportsVersionMismatch(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	oldLayout := []byte{
+		0x00, byte(ports.ProtocolVersion - 1),
+		ports.IntentEphemeral,
+		0x00, 0x00,
+		0x00, 0x50,
+		0x00, 0x18,
+		0x00, 0x00,
+	}
+	tr, sends, _ := newConn(t, ports.Frame{Type: ports.MsgHello, Payload: oldLayout})
+	d.handleConn(tr)
 
 	e := awaitFrame(t, sends, ports.MsgError)
 	em, err := ports.UnmarshalErrorMsg(e.Payload)
@@ -1042,9 +1150,60 @@ func TestPickerSameSessionNavigationSwitchAndEscClose(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("\x1bt"))
 	awaitFrame(t, sends, ports.MsgOutput)
+	clk := &signalClock{timers: make(chan *signalTimer, 1)}
+	d.clock = clk
 	d.handleInput(sess, ac, []byte("\x1b"))
-	require.False(t, ac.pickerActive())
+	timer := <-clk.timers
+	require.True(t, ac.pickerActive())
+	timer.ch <- time.Now()
+	require.Eventually(t, func() bool { return !ac.pickerActive() }, time.Second, 5*time.Millisecond)
 	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPickerSplitArrowNavigatesWithoutExiting(t *testing.T) {
+	cases := []struct {
+		name       string
+		input      [][]byte
+		wantActive int
+	}{
+		{name: "escape then down arrow", input: [][]byte{[]byte("\x1b"), []byte("[B")}, wantActive: 1},
+		{name: "escape then up arrow", input: [][]byte{[]byte("j"), []byte("\x1b"), []byte("[A")}, wantActive: 0},
+		{name: "split down arrow", input: [][]byte{[]byte("\x1b["), []byte("B")}, wantActive: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sess, ac, sends, releases := newManualTabSession(t, 2)
+			defer func() {
+				for _, release := range releases {
+					release()
+				}
+			}()
+
+			d.handleInput(sess, ac, []byte("\x1bt"))
+			awaitFrame(t, sends, ports.MsgOutput)
+			for _, input := range tc.input {
+				d.handleInput(sess, ac, input)
+			}
+			require.True(t, ac.pickerActive())
+			d.handleInput(sess, ac, []byte("\r"))
+			require.Equal(t, tc.wantActive, activeTabIndex(sess))
+		})
+	}
+}
+
+func TestPickerLoneEscapeExitsAfterDelay(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
+	defer releases[0]()
+
+	d.handleInput(sess, ac, []byte("\x1bt"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	clk := &signalClock{timers: make(chan *signalTimer, 1)}
+	d.clock = clk
+	d.handleInput(sess, ac, []byte("\x1b"))
+	timer := <-clk.timers
+	require.True(t, ac.pickerActive())
+	timer.ch <- time.Now()
+	require.Eventually(t, func() bool { return !ac.pickerActive() }, time.Second, 5*time.Millisecond)
 }
 
 func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
@@ -1408,6 +1567,7 @@ func TestSchedulerDebounceCoalesces(t *testing.T) {
 	var outputs atomic.Int32
 	gotOutput := make(chan struct{}, 1)
 	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Close().Return(nil).Maybe()
 	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f ports.Frame) error {
 		if f.Type == ports.MsgOutput {
 			outputs.Add(1)
@@ -1484,6 +1644,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 
 	var gotOutput atomic.Bool
 	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Close().Return(nil).Maybe()
 	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f ports.Frame) error {
 		if f.Type == ports.MsgOutput {
 			gotOutput.Store(true)
@@ -1635,7 +1796,7 @@ func TestHelloRacingShutdownIsRejected(t *testing.T) {
 	f := portsmocks.NewMockPTYFactory(t)
 	// Exactly one child may ever be spawned; a second Open call (a leaked
 	// child) fails the test via mock expectations.
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(p, nil).Once()
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(p, nil).Once()
 	d := newTestDaemon(t, f, stubClock{})
 
 	tr1, sends1, release1 := newConn(t, mustHello(ports.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
@@ -1814,6 +1975,7 @@ func TestSchedulerDefersPendingDirtyTimerDuringSynchronizedUpdate(t *testing.T) 
 	var outputs atomic.Int32
 	gotOutput := make(chan struct{}, 1)
 	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Close().Return(nil).Maybe()
 	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f ports.Frame) error {
 		if f.Type == ports.MsgOutput {
 			outputs.Add(1)

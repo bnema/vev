@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -144,6 +145,7 @@ func realSpawn() error {
 	defer func() { _ = devNull.Close() }()
 
 	cmd := exec.Command("/proc/self/exe", "--daemon")
+	cmd.Dir = platform.DirOrHome("")
 	cmd.Stdin = devNull
 	cmd.Stdout = devNull
 	cmd.Stderr = devNull
