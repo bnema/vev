@@ -46,8 +46,7 @@ type attachedClient struct {
 	rend           *renderer.Renderer
 	size           domain.Size
 	keys           *keys.Router
-	sessMu         sync.Mutex
-	sess           *session
+	sess           Guarded[*session]
 	copyMu         sync.Mutex
 	copyMode       *scopy.Mode
 	copyPending    []byte
@@ -108,17 +107,9 @@ func (p *pendingByteTimer) stop() {
 	}
 }
 
-func (ac *attachedClient) currentSession() *session {
-	ac.sessMu.Lock()
-	defer ac.sessMu.Unlock()
-	return ac.sess
-}
+func (ac *attachedClient) currentSession() *session { return ac.sess.Get() }
 
-func (ac *attachedClient) setSession(sess *session) {
-	ac.sessMu.Lock()
-	defer ac.sessMu.Unlock()
-	ac.sess = sess
-}
+func (ac *attachedClient) setSession(sess *session) { ac.sess.Set(sess) }
 
 func (ac *attachedClient) copyModeActive() bool {
 	ac.copyMu.Lock()
@@ -213,13 +204,17 @@ func (d *Daemon) notifyDetachedAsync(ac *attachedClient, reason uint8) {
 // of the call has completed. Each is deadline-bounded (boundedSend), so this
 // wait is bounded too.
 func (d *Daemon) waitNotifies() {
-	d.mu.Lock()
-	snapshot := make([]chan struct{}, len(d.notifies))
-	copy(snapshot, d.notifies)
-	d.mu.Unlock()
-	for _, c := range snapshot {
+	for _, c := range d.notifiesSnapshot() {
 		<-c
 	}
+}
+
+func (d *Daemon) notifiesSnapshot() []chan struct{} {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	snapshot := make([]chan struct{}, len(d.notifies))
+	copy(snapshot, d.notifies)
+	return snapshot
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size) (*attachedClient, *attachedClient) {

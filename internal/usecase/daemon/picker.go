@@ -52,10 +52,7 @@ func (d *Daemon) enterPicker(sess *session, ac *attachedClient) {
 
 func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 	d.mu.Lock()
-	sessions := make([]*session, 0, len(d.sessions))
-	for _, s := range d.sessions {
-		sessions = append(sessions, s)
-	}
+	sessions := d.sessionsSnapshotLocked()
 	d.mu.Unlock()
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].name < sessions[j].name })
 

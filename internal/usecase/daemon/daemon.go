@@ -199,10 +199,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 func (d *Daemon) shutdownAll(reason uint8) {
 	d.mu.Lock()
 	d.closing = true
-	snapshot := make([]*session, 0, len(d.sessions))
-	for _, s := range d.sessions {
-		snapshot = append(snapshot, s)
-	}
+	snapshot := d.sessionsSnapshotLocked()
 	empty := len(snapshot) == 0
 	d.mu.Unlock()
 	if empty {
@@ -212,6 +209,14 @@ func (d *Daemon) shutdownAll(reason uint8) {
 	for _, s := range snapshot {
 		d.killSession(s, reason)
 	}
+}
+
+func (d *Daemon) sessionsSnapshotLocked() []*session {
+	snapshot := make([]*session, 0, len(d.sessions))
+	for _, s := range d.sessions {
+		snapshot = append(snapshot, s)
+	}
+	return snapshot
 }
 
 // handleConn reads the first frame off a fresh connection and routes it. A
