@@ -1253,6 +1253,9 @@ func TestStatusCopyFeedbackRendersOnlyWhenFullyFits(t *testing.T) {
 	frame, _ := composeClientFrame(sess, win, true, "ok")
 	require.Equal(t, " work  1                    ok", rowText(frame.Row(2)))
 
+	frame, _ = composeClientFrame(sess, win, true, "1234567890123456789")
+	require.Equal(t, " work  1   1234567890123456789", rowText(frame.Row(2)))
+
 	frame, _ = composeClientFrame(sess, win, true, "selection too large to copy")
 	require.Equal(t, " work  1                      ", rowText(frame.Row(2)))
 }
