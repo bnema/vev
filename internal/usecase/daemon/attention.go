@@ -55,20 +55,8 @@ func (d *Daemon) jumpAttention(sess *session, ac *attachedClient) {
 }
 
 func oldestAttentionTab(sess *session) (int, bool) {
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	idx := -1
-	var oldest time.Time
-	for i, tb := range sess.tabs {
-		if !tb.attention {
-			continue
-		}
-		if idx == -1 || tb.attentionAt.Before(oldest) {
-			idx = i
-			oldest = tb.attentionAt
-		}
-	}
-	return idx, idx != -1
+	idx, _, ok := oldestAttentionTabWithTime(sess)
+	return idx, ok
 }
 
 type attentionTarget struct {

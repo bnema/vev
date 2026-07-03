@@ -18,12 +18,33 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 // --- test doubles -----------------------------------------------------------
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
+
+func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	_, sess, _, _ := newManualSessionWithPTYs(t, p)
+	defer release()
+	sess.name = "work"
+	tb := sess.activeTab()
+	tb.screen = vt.NewScreen(12, 3)
+	tb.screen.Write([]byte("live"))
+	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
+	mode := scopy.NewMode(snap)
+
+	frame, damage := composeCopyClientFrame(mode, tb, barState{status: sess.statusSegments()})
+
+	require.Equal(t, 12, frame.Width)
+	require.Equal(t, 5, frame.Height)
+	require.Equal(t, " 1          ", rowText(frame.Row(0)))
+	require.Contains(t, rowText(frame.Row(4)), "[VISUAL]")
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+}
 
 func TestCopyModePaletteCommandEntersAndDoesNotForward(t *testing.T) {
 	writes := make(chan []byte, 1)

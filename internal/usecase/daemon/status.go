@@ -169,16 +169,18 @@ func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 			continue
 		}
 		sess.mu.Lock()
-		oldest := time.Time{}
+		var oldest time.Time
+		found := false
 		for _, tb := range sess.tabs {
 			if !tb.attention {
 				continue
 			}
-			if oldest.IsZero() || tb.attentionAt.Before(oldest) {
+			if !found || tb.attentionAt.Before(oldest) {
 				oldest = tb.attentionAt
+				found = true
 			}
 		}
-		if !oldest.IsZero() {
+		if found {
 			attention = append(attention, attentionSession{name: sess.name, at: oldest})
 		}
 		sess.mu.Unlock()

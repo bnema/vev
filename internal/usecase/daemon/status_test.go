@@ -314,6 +314,17 @@ func TestStatusBarRendersOtherAttentionOldestFirstAndCollapses(t *testing.T) {
 	require.Equal(t, " current    ok", rowText(narrow))
 }
 
+func TestBarStateForIncludesZeroTimeAttention(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, sess, _, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+	d.sessions["zero"] = &session{id: "zero", name: "zero", tabs: []*tab{{attention: true}}}
+
+	state := d.barStateFor(sess, "")
+
+	require.Equal(t, []string{"zero"}, state.otherAttention)
+}
+
 func TestBarStateForExcludesCurrentSession(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)

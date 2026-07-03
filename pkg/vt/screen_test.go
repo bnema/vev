@@ -120,6 +120,14 @@ func TestOnNotifyOSC9(t *testing.T) {
 	require.Equal(t, "agent done", gotBody)
 }
 
+func TestOnNotifyIgnoresOSC9Progress(t *testing.T) {
+	s := NewScreen(10, 2)
+	calls := 0
+	s.OnNotify = func(string, string) { calls++ }
+	s.Write([]byte("\x1b]9;4;1;50\x07"))
+	require.Equal(t, 0, calls)
+}
+
 func TestOnNotifyOSC777STTerminated(t *testing.T) {
 	s := NewScreen(10, 2)
 	var gotTitle, gotBody string

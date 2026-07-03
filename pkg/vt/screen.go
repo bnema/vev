@@ -629,6 +629,9 @@ func (s *Screen) handleOSC(payload []byte) {
 	p := string(payload)
 	switch {
 	case strings.HasPrefix(p, "9;"):
+		if strings.HasPrefix(p, "9;4;") {
+			return
+		}
 		s.OnNotify("", p[len("9;"):])
 	case strings.HasPrefix(p, "777;"):
 		parts := strings.SplitN(p[len("777;"):], ";", 3)

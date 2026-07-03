@@ -307,8 +307,16 @@ func isCopyEscapePrefix(data []byte) bool {
 		len(data) == 3 && data[0] == 0x1b && data[1] == '[' && (data[2] == '5' || data[2] == '6')
 }
 
-func composeCopyClientFrame(mode *scopy.Mode, tb *tab, copyStatusStyle, selectionStyle renderer.Style) (renderer.Frame, []renderer.Damage) {
+func composeCopyClientFrame(mode *scopy.Mode, tb *tab, bars barState) (renderer.Frame, []renderer.Damage) {
+	styles := newThemeStyles(bars.theme)
 	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
-	frame := mode.Render(snap, copyStatusStyle, selectionStyle)
+	copyFrame := mode.Render(snap, styles.copyStatus, styles.selection)
+	width, screenRows := tb.screen.Frame.Width, tb.screen.Frame.Height
+	frame := renderer.NewFrame(width, screenRows+2)
+	drawTopBarSnapshot(frame.Row(0), bars.status, bars.attentionFrame, styles)
+	for y := range screenRows {
+		copy(frame.Row(y+1), copyFrame.Row(y))
+	}
+	copy(frame.Row(screenRows+1), copyFrame.Row(screenRows))
 	return frame, []renderer.Damage{renderer.FullRedraw()}
 }

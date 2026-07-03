@@ -299,7 +299,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	}
 	frame, damage := composeClientFrameWithState(bars, tb, reset, &ac.bars)
 	if copyActive {
-		frame, damage = composeCopyClientFrame(copyMode, tb, styles.copyStatus, styles.selection)
+		frame, damage = composeCopyClientFrame(copyMode, tb, bars)
 	}
 	if pickerActive {
 		if previewTab == tb {

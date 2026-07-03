@@ -222,6 +222,8 @@ func TestSGRRowOffset(t *testing.T) {
 		{name: "leaves malformed fields unchanged", raw: []byte("\x1b[<0;2M"), delta: -1, want: []byte("\x1b[<0;2M")},
 		{name: "leaves non numeric row unchanged", raw: []byte("\x1b[<0;2;xM"), delta: -1, want: []byte("\x1b[<0;2;xM")},
 		{name: "leaves invalid shifted row unchanged", raw: []byte("\x1b[<0;2;1M"), delta: -1, want: []byte("\x1b[<0;2;1M")},
+		{name: "handles digit width increase", raw: []byte("\x1b[<0;2;9M"), delta: 1, want: []byte("\x1b[<0;2;10M")},
+		{name: "handles digit width decrease", raw: []byte("\x1b[<0;2;10m"), delta: -1, want: []byte("\x1b[<0;2;9m")},
 	}
 
 	for _, tc := range cases {
