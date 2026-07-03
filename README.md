@@ -44,14 +44,23 @@ All bindings use the Alt modifier directly, no prefix key.
 
 | Key | Action |
 |---|---|
-| Alt+c | new tab |
-| Alt+n / Alt+p | next / previous tab |
-| Alt+1 .. Alt+9 | select tab by number |
-| Alt+x | close tab (last tab ends the session) |
-| Alt+d | detach |
-| Alt+r | promote the current ephemeral session to named |
-| Alt+t | open session/tab picker |
-| Alt+u | enter scrollback mode |
+| Alt+Space | open the command palette |
+| Alt+1 .. Alt+9 | switch to tab by number |
+
+## Command palette
+
+Open the palette with Alt+Space, then type a command code or fuzzy-match its label. Use Up/Down or Ctrl-N/Ctrl-P to move through matches, Enter to run the selected command, and Esc to close the palette. Some terminals emit NBSP for Alt+Space; in those terminals the binding depends on terminal configuration.
+
+| Code | Action |
+|---|---|
+| CNT | create new tab |
+| CLT | close current tab |
+| NXT | switch to next tab |
+| PVT | switch to previous tab |
+| SSP | switch session or tab |
+| CPY | enter scrollback mode |
+| RNS | rename session |
+| DET | detach |
 
 ## Scrollback and visual copy
 
