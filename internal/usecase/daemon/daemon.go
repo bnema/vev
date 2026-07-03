@@ -226,18 +226,23 @@ func (ac *attachedClient) send(f ports.Frame) error {
 // write. Detach/kill/shutdown paths use this so they are never gated on a
 // client that has stopped draining its socket.
 func (d *Daemon) boundedSend(ac *attachedClient, f ports.Frame) {
+	_ = d.boundedSendErr(ac, f)
+}
+
+func (d *Daemon) boundedSendErr(ac *attachedClient, f ports.Frame) error {
 	timer := d.clock.NewTimer(detachNotifyTimeout)
-	sent := make(chan struct{})
+	result := make(chan error, 1)
 	go func() {
-		select {
-		case <-timer.C():
-			_ = ac.tr.Close()
-		case <-sent:
-		}
+		result <- ac.send(f)
 	}()
-	_ = ac.send(f)
-	timer.Stop()
-	close(sent)
+	select {
+	case err := <-result:
+		timer.Stop()
+		return err
+	case <-timer.C():
+		_ = ac.tr.Close()
+		return errors.New("send timed out")
+	}
 }
 
 // notifyDetachedAsync delivers a best-effort Detached notice off the caller's
@@ -949,7 +954,7 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	if copyOut && text != "" {
 		chunks := scopy.OSC52(text)
 		for _, chunk := range chunks {
-			if err := ac.send(frameOutput(chunk)); err != nil {
+			if err := d.boundedSendErr(ac, frameOutput(chunk)); err != nil {
 				d.detachOnSendError(sess, ac)
 				return
 			}
