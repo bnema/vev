@@ -201,7 +201,7 @@ func TestPaletteExecMethods(t *testing.T) {
 	require.NoError(t, exec.OpenSessionPicker())
 	require.True(t, ac.pickerActive())
 	d.closePicker(ac)
-	require.NoError(t, exec.EnterCopyMode())
+	require.NoError(t, exec.EnterVisualMode())
 	require.True(t, ac.copyModeActive())
 	ac.copyMu.Lock()
 	ac.copyMode = nil

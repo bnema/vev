@@ -8,7 +8,7 @@ import (
 
 func TestRegistryCodesAreUniqueUppercaseThreeLettersInOrder(t *testing.T) {
 	commands := Registry()
-	wantCodes := []string{"CNT", "CLT", "NXT", "PVT", "SSP", "CPY", "RNS", "DET"}
+	wantCodes := []string{"CNT", "CLT", "NXT", "PVT", "SSP", "VIS", "RNS", "DET"}
 
 	if len(commands) != len(wantCodes) {
 		t.Fatalf("Registry() returned %d commands, want %d", len(commands), len(wantCodes))
@@ -56,7 +56,7 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 		{code: "NXT", want: "NextTab"},
 		{code: "PVT", want: "PrevTab"},
 		{code: "SSP", want: "OpenSessionPicker"},
-		{code: "CPY", want: "EnterCopyMode"},
+		{code: "VIS", want: "EnterVisualMode"},
 		{code: "RNS", want: "RenameSession"},
 		{code: "DET", want: "Detach"},
 	}
@@ -100,6 +100,6 @@ func (s *spyContext) CloseTab() error          { return s.record("CloseTab") }
 func (s *spyContext) NextTab() error           { return s.record("NextTab") }
 func (s *spyContext) PrevTab() error           { return s.record("PrevTab") }
 func (s *spyContext) Detach() error            { return s.record("Detach") }
-func (s *spyContext) EnterCopyMode() error     { return s.record("EnterCopyMode") }
+func (s *spyContext) EnterVisualMode() error   { return s.record("EnterVisualMode") }
 func (s *spyContext) RenameSession() error     { return s.record("RenameSession") }
 func (s *spyContext) OpenSessionPicker() error { return s.record("OpenSessionPicker") }

@@ -62,30 +62,30 @@ The status bar marks ephemeral sessions with `*`, for example `0*`. Ephemeral se
 | NXT | switch to next tab |
 | PVT | switch to previous tab |
 | SSP | switch session or tab |
-| CPY | enter scrollback mode |
+| VIS | enter visual mode |
 | RNS | rename session |
 | DET | detach |
 
 Rename prompts are prefilled with the current session name. Type text, use Backspace to edit, Enter to submit, or Esc/Ctrl-C to cancel. Empty names and names already used by another session are rejected; the prompt stays open and shows the validation error.
 
-## Scrollback and visual copy
+## Visual mode
 
-Scrollback mode freezes a view over history while the program keeps running underneath. Mouse wheel up enters scrollback mode and shows `[SCROLL]`; scrolling back down to the live bottom exits. When a line selection is active, the selected rows are highlighted and the status bar shows `[VISUAL]`.
+Visual mode freezes a view over history while the program keeps running underneath. Enter it with the `VIS` palette command or by scrolling up with the mouse wheel. The status bar shows `[VISUAL]`; when a line selection is active, selected rows are highlighted, the status bar shows `[SELECT]`, and a visible line cursor marks the active row.
 
 | Key | Action |
 |---|---|
 | j / k, Up / Down | move one line |
 | PgUp / PgDn | move one page |
 | g / G | jump to top / bottom |
-| Space | toggle visual line selection |
+| v or Space | toggle line selection |
 | y or Enter | copy selection and exit |
 | q, Esc, Ctrl-C | exit without copying |
 
-Copying uses OSC 52, so the selection lands in your terminal's clipboard even across SSH. After a successful copy, the right side of the status bar reports `copied N chars to clipboard` until the next screen update. If the selection exceeds the OSC 52 copy limit, the status bar reports `selection too large to copy` instead.
+Drag with the mouse to select lines in visual mode. Copying uses OSC 52, so the selection lands in your terminal's clipboard even across SSH. After a successful copy, the right side of the status bar reports `copied N chars to clipboard` until the next screen update. If the selection exceeds the OSC 52 copy limit, the status bar reports `selection too large to copy` instead.
 
 ## Mouse
 
-vev enables terminal mouse reporting while attached. Mouse input on the status row is reserved for vev and is not sent to the child. In scrollback mode, the wheel scrolls the scrollback view. When the child enables mouse reporting, SGR mouse events are forwarded to it. Otherwise, wheel events in the alternate screen are translated to Up/Down arrow keys (`ESC[A` / `ESC[B`). This translation intentionally does not honor DECCKM application-cursor mode (`ESC OA` / `ESC OB`). An extremely rare input read split exactly between `ESC[` and `<` in an SGR mouse sequence may leak the partial `ESC[` to the child.
+vev enables terminal mouse reporting while attached. Mouse input on the status row is reserved for vev and is not sent to the child. In visual mode, the wheel scrolls the frozen view and left-button drag selects lines. On the normal screen, left-button drag enters visual mode and selects the dragged lines; a simple click is left alone. When the child enables mouse reporting, SGR mouse events are forwarded to it. Otherwise, wheel events in the alternate screen are translated to Up/Down arrow keys (`ESC[A` / `ESC[B`). This translation intentionally does not honor DECCKM application-cursor mode (`ESC OA` / `ESC OB`). An extremely rare input read split exactly between `ESC[` and `<` in an SGR mouse sequence may leak the partial `ESC[` to the child.
 
 vev follows the child application's cursor visibility and style requests and appends a hardware cursor update after each paint. Visible cursors blink as requested by the terminal/application state.
 

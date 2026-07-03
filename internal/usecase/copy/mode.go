@@ -55,10 +55,25 @@ func NewMode(s Snapshot) *Mode {
 	return m
 }
 
-func (m *Mode) Move(s Snapshot, delta int) { m.setCursor(s, m.Cursor+delta) }
-func (m *Mode) Page(s Snapshot, pages int) { m.setCursor(s, m.Cursor+pages*max(s.Height, 1)) }
-func (m *Mode) Top(s Snapshot)             { m.setCursor(s, 0) }
-func (m *Mode) Bottom(s Snapshot)          { m.setCursor(s, len(s.Rows)-1) }
+func (m *Mode) Move(s Snapshot, delta int) { m.SetCursor(s, m.Cursor+delta) }
+func (m *Mode) Page(s Snapshot, pages int) { m.SetCursor(s, m.Cursor+pages*max(s.Height, 1)) }
+func (m *Mode) Top(s Snapshot)             { m.SetCursor(s, 0) }
+func (m *Mode) Bottom(s Snapshot)          { m.SetCursor(s, len(s.Rows)-1) }
+
+// SetCursor moves the visual cursor to row, clamping it to the snapshot and
+// scrolling the viewport just enough to keep it visible.
+func (m *Mode) SetCursor(s Snapshot, row int) { m.setCursor(s, row) }
+
+// StartSelectionAt starts a line-wise visual selection at row.
+func (m *Mode) StartSelectionAt(s Snapshot, row int) {
+	m.SetCursor(s, row)
+	m.Anchor = m.Cursor
+	m.Selecting = true
+}
+
+// ExtendTo extends an active line-wise visual selection to row while preserving
+// the original anchor.
+func (m *Mode) ExtendTo(s Snapshot, row int) { m.SetCursor(s, row) }
 
 func (m *Mode) AtBottom(s Snapshot) bool {
 	total := len(s.Rows)
@@ -137,10 +152,14 @@ func (m *Mode) Render(s Snapshot) renderer.Frame {
 		}
 		row := frame.Row(y)
 		copy(row, s.Rows[src])
-		if selected && src >= lo && src <= hi {
+		lineSelected := selected && src >= lo && src <= hi
+		if lineSelected {
 			for x := range row {
-				row[x].Style.Inverse = !row[x].Style.Inverse
+				row[x].Style.Inverse = true
 			}
+		}
+		if src == m.Cursor && !lineSelected && len(row) > 0 {
+			row[0].Style.Inverse = true
 		}
 	}
 	drawCopyStatus(frame.Row(s.Height), m, len(s.Rows))
@@ -166,9 +185,9 @@ func drawCopyStatus(row []renderer.Cell, m *Mode, total int) {
 	for i := range row {
 		row[i] = renderer.BlankCell()
 	}
-	text := " [SCROLL] "
+	text := " [VISUAL] "
 	if m.Selecting {
-		text = " [VISUAL] "
+		text = " [SELECT] "
 	}
 	if total > 0 {
 		text += strconvItoa(m.Cursor+1) + "/" + strconvItoa(total) + " "

@@ -42,31 +42,37 @@ import (
 )
 
 type attachedClient struct {
-	tr             ports.Transport
-	rend           *renderer.Renderer
-	size           domain.Size
-	keys           *keys.Router
-	sess           Guarded[*session]
-	copyMu         sync.Mutex
-	copyMode       *scopy.Mode
-	copyPending    []byte
-	copyESC        pendingByteTimer
-	copyFeedback   string
-	pickerMu       sync.Mutex
-	picker         *picker.Model
-	pickerPreview  *tab
-	pickerPending  []byte
-	pickerESC      pendingByteTimer
-	paletteMu      sync.Mutex
-	palette        *palette.Model
-	palettePending []byte
-	promptMu       sync.Mutex
-	prompt         *promptui.Model
-	promptSubmit   func(string) error
-	promptPending  []byte
-	mouseScan      mouse.Scanner
-	lastCursor     cursorOut
-	sendMu         sync.Mutex
+	tr                    ports.Transport
+	rend                  *renderer.Renderer
+	size                  domain.Size
+	keys                  *keys.Router
+	sess                  Guarded[*session]
+	copyMu                sync.Mutex
+	copyMode              *scopy.Mode
+	copyPending           []byte
+	copyESC               pendingByteTimer
+	copyFeedback          string
+	copyPressRow          int
+	copyPressRowValid     bool
+	copyDragging          bool
+	normalMousePressRow   int
+	normalMousePressTop   int
+	normalMousePressValid bool
+	pickerMu              sync.Mutex
+	picker                *picker.Model
+	pickerPreview         *tab
+	pickerPending         []byte
+	pickerESC             pendingByteTimer
+	paletteMu             sync.Mutex
+	palette               *palette.Model
+	palettePending        []byte
+	promptMu              sync.Mutex
+	prompt                *promptui.Model
+	promptSubmit          func(string) error
+	promptPending         []byte
+	mouseScan             mouse.Scanner
+	lastCursor            cursorOut
+	sendMu                sync.Mutex
 }
 
 type cursorOut struct {

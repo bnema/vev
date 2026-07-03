@@ -26,6 +26,7 @@
 package daemon
 
 import (
+	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/mouse"
 )
@@ -70,6 +71,8 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 
 	if ac.copyModeActive() {
 		switch ev.Button {
+		case mouse.Left:
+			d.copyMouse(sess, ac, ev)
 		case mouse.WheelUp:
 			d.copyWheel(sess, ac, -3)
 		case mouse.WheelDown:
@@ -82,6 +85,10 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	childRows := tb.screen.Frame.Height
 	mouseMode, mouseSGR := tb.screen.MouseMode()
 	altScreen := tb.screen.AltScreenActive()
+	scrollbackRows := 0
+	if tb.scrollback != nil {
+		scrollbackRows = tb.scrollback.Len()
+	}
 	tb.mu.Unlock()
 
 	if mouseMode != 0 {
@@ -93,6 +100,53 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	}
 
 	switch ev.Button {
+	case mouse.Left:
+		switch ev.Type {
+		case mouse.Press:
+			if altScreen || ev.Row >= childRows {
+				ac.copyMu.Lock()
+				ac.normalMousePressValid = false
+				ac.copyMu.Unlock()
+				return
+			}
+			ac.copyMu.Lock()
+			ac.normalMousePressRow = ev.Row
+			ac.normalMousePressTop = scrollbackRows
+			ac.normalMousePressValid = true
+			ac.copyMu.Unlock()
+		case mouse.Motion:
+			if altScreen || ev.Row >= childRows {
+				return
+			}
+			ac.copyMu.Lock()
+			pressValid := ac.normalMousePressValid
+			pressRow := ac.normalMousePressRow
+			pressTop := ac.normalMousePressTop
+			ac.copyMu.Unlock()
+			if !pressValid {
+				return
+			}
+
+			tb.mu.Lock()
+			snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
+			tb.mu.Unlock()
+
+			ac.copyMu.Lock()
+			mode := scopy.NewMode(snap)
+			mode.StartSelectionAt(snap, pressTop+pressRow)
+			mode.ExtendTo(snap, len(snap.Rows)-snap.Height+ev.Row)
+			ac.copyMode = mode
+			ac.copyPressRow = pressTop + pressRow
+			ac.copyPressRowValid = true
+			ac.copyDragging = true
+			ac.normalMousePressValid = false
+			ac.copyMu.Unlock()
+			d.paint(sess, ac, true)
+		case mouse.Release:
+			ac.copyMu.Lock()
+			ac.normalMousePressValid = false
+			ac.copyMu.Unlock()
+		}
 	case mouse.WheelUp:
 		if altScreen {
 			daemonKeyHandler{d: d, ac: ac}.Forward([]byte("\x1b[A\x1b[A\x1b[A"))
