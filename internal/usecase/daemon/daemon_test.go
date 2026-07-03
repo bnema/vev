@@ -513,6 +513,29 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 	}
 }
 
+func TestCopyModeOversizedYankShowsTooLargeFeedback(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	sess.tabs[0].scrollback = scopy.NewScrollback(1)
+	longLine := strings.Repeat("x", scopy.OSC52MaxPayloadBytes+1)
+	sess.tabs[0].screen.Frame = renderer.NewFrame(len(longLine), 1)
+	copy(sess.tabs[0].screen.Frame.Row(0), testRow(longLine))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte{' ', 'y'})
+
+	out := awaitFrame(t, sends, ports.MsgOutput)
+	msg, err := ports.UnmarshalOutput(out.Payload)
+	require.NoError(t, err)
+	if strings.Contains(string(msg.Data), "\x1b]52;") {
+		t.Fatalf("oversized yank emitted OSC52: %q", string(msg.Data))
+	}
+	if !strings.Contains(string(msg.Data), "selection too large to copy") {
+		t.Fatalf("oversized yank repaint = %q, want too-large feedback", string(msg.Data))
+	}
+}
+
 func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
 	cases := []struct {
 		name  string

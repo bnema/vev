@@ -954,11 +954,13 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 				return
 			}
 		}
+		ac.copyMu.Lock()
 		if len(chunks) > 0 {
-			ac.copyMu.Lock()
 			ac.copyFeedback = "copied " + strconv.Itoa(len([]rune(text))) + " chars to clipboard"
-			ac.copyMu.Unlock()
+		} else {
+			ac.copyFeedback = "selection too large to copy"
 		}
+		ac.copyMu.Unlock()
 	}
 	if exit {
 		d.paint(sess, ac, true)
