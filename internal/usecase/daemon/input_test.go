@@ -206,6 +206,33 @@ func TestMouseAltScreenWheelMapsToArrows(t *testing.T) {
 	require.Nil(t, ac.copyMode)
 }
 
+func TestSGRRowOffset(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		raw   []byte
+		delta int
+		want  []byte
+	}{
+		{name: "decrements press row", raw: []byte("\x1b[<0;2;3M"), delta: -1, want: []byte("\x1b[<0;2;2M")},
+		{name: "increments release row", raw: []byte("\x1b[<0;2;3m"), delta: 2, want: []byte("\x1b[<0;2;5m")},
+		{name: "leaves empty unchanged", raw: []byte(""), delta: -1, want: []byte("")},
+		{name: "leaves non sgr unchanged", raw: []byte("abc"), delta: -1, want: []byte("abc")},
+		{name: "leaves malformed fields unchanged", raw: []byte("\x1b[<0;2M"), delta: -1, want: []byte("\x1b[<0;2M")},
+		{name: "leaves non numeric row unchanged", raw: []byte("\x1b[<0;2;xM"), delta: -1, want: []byte("\x1b[<0;2;xM")},
+		{name: "leaves invalid shifted row unchanged", raw: []byte("\x1b[<0;2;1M"), delta: -1, want: []byte("\x1b[<0;2;1M")},
+		{name: "handles digit width increase", raw: []byte("\x1b[<0;2;9M"), delta: 1, want: []byte("\x1b[<0;2;10M")},
+		{name: "handles digit width decrease", raw: []byte("\x1b[<0;2;10m"), delta: -1, want: []byte("\x1b[<0;2;9m")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, sgrRowOffset(tc.raw, tc.delta))
+		})
+	}
+}
+
 func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 	writes := make(chan []byte, 4)
 	p, _ := newBlockingPTYWithWrites(t, writes)
@@ -230,9 +257,17 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 
 	sess.tabs[0].screen.Write([]byte("\x1b[?1006h"))
 	d.handleInput(sess, ac, raw)
-	require.Equal(t, raw, <-writes)
+	require.Equal(t, []byte("\x1b[<0;2;2M"), <-writes)
 
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;24M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
+	select {
+	case got := <-writes:
+		t.Fatalf("top-row mouse report forwarded: %q", got)
+	default:
+	}
+
+	statusRowReport := []byte("\x1b[<0;1;25M")
+	d.handleInput(sess, ac, statusRowReport)
 	select {
 	case got := <-writes:
 		t.Fatalf("status-row mouse report forwarded: %q", got)

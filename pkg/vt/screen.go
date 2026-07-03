@@ -39,6 +39,14 @@ type Screen struct {
 	// emulator must send back to the child process (DA, DSR, DECRQM reports).
 	// The host wires it to the PTY input. Nil disables responses.
 	OnResponse func([]byte)
+	// OnBell is called synchronously from Write for each lone BEL (0x07)
+	// outside escape sequences. BELs that terminate an OSC never fire it.
+	// Nil disables bell reporting.
+	OnBell func()
+	// OnNotify is called synchronously from Write for explicit terminal
+	// notifications: OSC 9 (body only) and OSC 777 "notify" (title;body).
+	// All other OSC payloads remain discarded. Nil disables it.
+	OnNotify func(title, body string)
 
 	defaultFG          renderer.RGB
 	defaultBG          renderer.RGB
@@ -178,7 +186,12 @@ func (s *Screen) Write(data []byte) {
 
 func (s *Screen) putRune(r rune) {
 	switch r {
-	case '\a', 0x00, 0x0e, 0x0f, 0x7f:
+	case '\a':
+		if s.OnBell != nil {
+			s.OnBell()
+		}
+		return
+	case 0x00, 0x0e, 0x0f, 0x7f:
 		return
 	case '\r':
 		s.Col = 0
@@ -559,10 +572,12 @@ func (s *Screen) consumeOSC(data []byte) (consumed int, partial bool) {
 		switch data[i] {
 		case 0x07:
 			s.applyOSC(data[2:i], []byte{0x07})
+			s.handleOSC(data[2:i])
 			return i + 1, false
 		case 0x1b:
 			if i+1 < len(data) && data[i+1] == '\\' {
 				s.applyOSC(data[2:i], []byte{0x1b, '\\'})
+				s.handleOSC(data[2:i])
 				return i + 2, false
 			}
 		}
@@ -602,6 +617,36 @@ func appendOSCColorComponent(dst []byte, c uint8) []byte {
 	const hex = "0123456789abcdef"
 	v := uint16(c)<<8 | uint16(c)
 	return append(dst, hex[v>>12&0xf], hex[v>>8&0xf], hex[v>>4&0xf], hex[v&0xf])
+}
+
+// handleOSC inspects a complete OSC payload (between "ESC ]" and its
+// terminator). Only notification sequences are acted on; titles, clipboard
+// and every other OSC are still discarded.
+func (s *Screen) handleOSC(payload []byte) {
+	if s.OnNotify == nil {
+		return
+	}
+	p := string(payload)
+	switch {
+	case strings.HasPrefix(p, "9;"):
+		if strings.HasPrefix(p, "9;4;") {
+			return
+		}
+		s.OnNotify("", p[len("9;"):])
+	case strings.HasPrefix(p, "777;"):
+		parts := strings.SplitN(p[len("777;"):], ";", 3)
+		if parts[0] != "notify" {
+			return
+		}
+		var title, body string
+		if len(parts) > 1 {
+			title = parts[1]
+		}
+		if len(parts) > 2 {
+			body = parts[2]
+		}
+		s.OnNotify(title, body)
+	}
 }
 
 func consumeSTString(data []byte) (consumed int, partial bool) {

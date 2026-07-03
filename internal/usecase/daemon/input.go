@@ -26,6 +26,9 @@
 package daemon
 
 import (
+	"bytes"
+	"strconv"
+
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/mouse"
@@ -92,10 +95,10 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	tb.mu.Unlock()
 
 	if mouseMode != 0 {
-		if !mouseSGR || ev.Row >= childRows {
+		if !mouseSGR || ev.Row == 0 || ev.Row > childRows {
 			return
 		}
-		daemonKeyHandler{d: d, ac: ac}.Forward(ev.Raw)
+		daemonKeyHandler{d: d, ac: ac}.Forward(sgrRowOffset(ev.Raw, -1))
 		return
 	}
 
@@ -161,6 +164,39 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	}
 }
 
+func sgrRowOffset(raw []byte, delta int) []byte {
+	if len(raw) < len("\x1b[<0;1;1M") {
+		return raw
+	}
+	end := len(raw) - 1
+	if raw[0] != '\x1b' || raw[1] != '[' || raw[2] != '<' || (raw[end] != 'M' && raw[end] != 'm') {
+		return raw
+	}
+
+	parts := bytes.Split(raw[3:end], []byte(";"))
+	if len(parts) != 3 {
+		return raw
+	}
+	cy, err := strconv.Atoi(string(parts[2]))
+	if err != nil {
+		return raw
+	}
+	cy += delta
+	if cy < 1 {
+		return raw
+	}
+
+	out := make([]byte, 0, len(raw)+4)
+	out = append(out, raw[:3]...)
+	out = append(out, parts[0]...)
+	out = append(out, ';')
+	out = append(out, parts[1]...)
+	out = append(out, ';')
+	out = strconv.AppendInt(out, int64(cy), 10)
+	out = append(out, raw[end])
+	return out
+}
+
 type daemonKeyHandler struct {
 	d  *Daemon
 	ac *attachedClient
@@ -188,6 +224,8 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 	switch action {
 	case keys.ActionOpenPalette:
 		h.d.enterPalette(sess, h.ac)
+	case keys.ActionJumpAttention:
+		h.d.jumpAttention(sess, h.ac)
 	case keys.ActionSwitchTab1, keys.ActionSwitchTab2, keys.ActionSwitchTab3,
 		keys.ActionSwitchTab4, keys.ActionSwitchTab5, keys.ActionSwitchTab6,
 		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:

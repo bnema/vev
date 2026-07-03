@@ -81,6 +81,10 @@ type Daemon struct {
 	// with Wait.
 	notifies []chan struct{}
 
+	attnMu    sync.Mutex
+	animFrame int
+	animWake  chan struct{}
+
 	ptys      ports.PTYFactory
 	clock     ports.Clock
 	log       *slog.Logger
@@ -136,6 +140,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		baseEnv:  os.Environ(),
 		shell:    shell,
 		done:     make(chan struct{}),
+		animWake: make(chan struct{}, 1),
 	}
 	for _, o := range opts {
 		o(d)
@@ -151,6 +156,10 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	defer d.serveCancel()
 	d.hardCtx, d.hardCancel = context.WithCancel(context.Background())
 	defer d.hardCancel()
+
+	d.sessWg.Go(func() {
+		d.attentionAnimator(d.serveCtx)
+	})
 
 	// Break the accept loop when either the parent context is cancelled or the
 	// registry drains to empty: both close the listener, which fails Accept.

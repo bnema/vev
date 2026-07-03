@@ -47,8 +47,11 @@ func (d *Daemon) ptyReader(sess *session, tb *tab) {
 	defer d.sessWg.Done()
 	buf := make([]byte, ptyReadBufSize)
 	var resp []byte
+	attentionCh := make(chan struct{}, 1)
 	tb.mu.Lock()
 	tb.screen.OnResponse = func(b []byte) { resp = append(resp, b...) }
+	tb.screen.OnBell = func() { signal(attentionCh) }
+	tb.screen.OnNotify = func(string, string) { signal(attentionCh) }
 	tb.mu.Unlock()
 	for {
 		n, err := tb.pty.Read(buf)
@@ -59,6 +62,11 @@ func (d *Daemon) ptyReader(sess *session, tb *tab) {
 			tb.screen.Write(data)
 			isSyncing := tb.screen.SyncUpdateActive()
 			tb.mu.Unlock()
+			select {
+			case <-attentionCh:
+				d.noteAttention(sess, tb)
+			default:
+			}
 			if len(resp) > 0 {
 				if _, writeErr := tb.pty.Write(resp); writeErr != nil {
 					d.log.Warn("pty response write failed", "err", writeErr, "session", sess.name)
@@ -273,19 +281,25 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	if !promptActive {
 		ac.promptMu.Unlock()
 	}
+	if sess.ackAttention(tb) {
+		defer d.repaintAllAttachedClients()
+	}
+	bars := d.barStateFor(sess, copyFeedback)
+	bars.theme = ac.getTheme()
 
 	styles := newThemeStyles(ac.getTheme())
 
 	tb.mu.Lock()
 	if reset || copyActive || pickerActive || paletteActive || promptActive {
 		ac.rend.Reset()
+		ac.bars.Reset()
 	}
 	if reset || pickerActive || paletteActive || promptActive {
 		ac.lastCursor.valid = false
 	}
-	frame, damage := composeClientFrame(sess, tb, reset, copyFeedback, styles)
+	frame, damage := composeClientFrameWithState(bars, tb, reset, &ac.bars)
 	if copyActive {
-		frame, damage = composeCopyClientFrame(copyMode, tb, styles.copyStatus, styles.selection)
+		frame, damage = composeCopyClientFrame(copyMode, tb, bars)
 	}
 	if pickerActive {
 		if previewTab == tb {
@@ -338,7 +352,7 @@ func desiredCursorOut(s *vt.Screen, copyActive bool) cursorOut {
 	if !ok {
 		style = 5
 	}
-	return cursorOut{row: s.CursorRow(), col: s.CursorCol(), style: style, hasStyle: true}
+	return cursorOut{row: s.CursorRow() + 1, col: s.CursorCol(), style: style, hasStyle: true}
 }
 
 func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte {
@@ -392,18 +406,88 @@ func resolveThemeStyles(styles []themeStyles) themeStyles {
 	return newThemeStyles(themeui.Theme{})
 }
 
-func composeClientFrame(sess *session, tb *tab, full bool, rightStatus string, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
-	width, screenRows := tb.screen.Frame.Width, tb.screen.Frame.Height
-	frame := renderer.NewFrame(width, screenRows+1)
-	for y := range screenRows {
-		copy(frame.Row(y), tb.screen.Frame.Row(y))
+type barCache struct {
+	top    []renderer.Cell
+	bottom []renderer.Cell
+}
+
+func (c *barCache) Reset() {
+	c.top = nil
+	c.bottom = nil
+}
+
+func composeClientFrame(sess *session, tb *tab, full bool, rightStatus string, caches ...*barCache) (renderer.Frame, []renderer.Damage) {
+	return composeClientFrameWithState(barState{status: sess.statusSegments(), copyFeedback: rightStatus}, tb, full, caches...)
+}
+
+func composeClientFrameWithState(bars barState, tb *tab, full bool, caches ...*barCache) (renderer.Frame, []renderer.Damage) {
+	var cache *barCache
+	if len(caches) > 0 {
+		cache = caches[0]
 	}
-	styleSet := resolveThemeStyles(styles)
-	drawStatus(frame.Row(screenRows), sess, rightStatus, styleSet)
+	styles := newThemeStyles(bars.theme)
+	width, screenRows := tb.screen.Frame.Width, tb.screen.Frame.Height
+	frame := renderer.NewFrame(width, screenRows+2)
+	topBar := frame.Row(0)
+	drawTopBarSnapshot(topBar, bars.status, bars.attentionFrame, styles)
+	for y := range screenRows {
+		copy(frame.Row(y+1), tb.screen.Frame.Row(y))
+	}
+	bottomBar := frame.Row(screenRows + 1)
+	drawStatusBarState(bottomBar, bars, styles)
 	if full {
+		if cache != nil {
+			cache.capture(topBar, bottomBar)
+		}
 		return frame, []renderer.Damage{renderer.FullRedraw()}
 	}
-	damage := append([]renderer.Damage(nil), tb.screen.Damage()...)
-	damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: screenRows, Width: width, Height: 1})
+	damage := offsetDamage(tb.screen.Damage())
+	if cache == nil || !sameCells(cache.top, topBar) {
+		damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 0, Width: width, Height: 1})
+	}
+	if cache == nil || !sameCells(cache.bottom, bottomBar) {
+		damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: screenRows + 1, Width: width, Height: 1})
+	}
+	if cache != nil {
+		cache.capture(topBar, bottomBar)
+	}
 	return frame, damage
+}
+
+func (c *barCache) capture(top, bottom []renderer.Cell) {
+	c.top = cloneCells(c.top, top)
+	c.bottom = cloneCells(c.bottom, bottom)
+}
+
+func cloneCells(dst, src []renderer.Cell) []renderer.Cell {
+	if cap(dst) < len(src) {
+		dst = make([]renderer.Cell, len(src))
+	} else {
+		dst = dst[:len(src)]
+	}
+	copy(dst, src)
+	return dst
+}
+
+func sameCells(a, b []renderer.Cell) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !a[i].Equal(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func offsetDamage(in []renderer.Damage) []renderer.Damage {
+	out := make([]renderer.Damage, len(in))
+	for i, d := range in {
+		out[i] = d
+		if d.Kind != renderer.DamageFullRedraw {
+			out[i].Y++
+		}
+	}
+	return out
 }

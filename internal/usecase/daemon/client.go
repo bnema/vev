@@ -45,6 +45,7 @@ import (
 type attachedClient struct {
 	tr                    ports.Transport
 	rend                  *renderer.Renderer
+	bars                  barCache // only touched while sendMu is held
 	size                  domain.Size
 	keys                  *keys.Router
 	sess                  Guarded[*session]

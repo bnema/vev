@@ -32,6 +32,29 @@ func TestAltTForwardsToPTY(t *testing.T) {
 	require.Equal(t, []byte("\x1bt"), <-writes)
 }
 
+func TestPickerViewsAddsBellSuffixForAttention(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	ctx, cancel := context.WithCancel(d.serveCtx)
+	defer cancel()
+	current := &session{id: "s1", name: "alpha", ctx: ctx, cancel: cancel, tabs: []*tab{{}, {}}}
+	ringing := &session{id: "s2", name: "beta", ctx: ctx, cancel: cancel, tabs: []*tab{{}, {}}}
+	ringing.mu.Lock()
+	ringing.tabs[1].attention = true
+	ringing.tabs[1].attentionAt = time.Unix(10, 0)
+	ringing.mu.Unlock()
+	d.sessions[current.id] = current
+	d.sessions[ringing.id] = ringing
+
+	views, curTab := d.pickerViews(current)
+
+	require.Equal(t, 0, curTab)
+	require.Len(t, views, 2)
+	require.Equal(t, "alpha", views[0].Name)
+	require.Equal(t, []string{"1", "2"}, views[0].Tabs)
+	require.Equal(t, "beta ", views[1].Name)
+	require.Equal(t, []string{"1", "2 "}, views[1].Tabs)
+}
+
 func TestPickerSameSessionNavigationSwitchAndEscClose(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
 	defer func() {

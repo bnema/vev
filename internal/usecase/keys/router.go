@@ -28,6 +28,7 @@ const (
 	ActionSwitchTab7
 	ActionSwitchTab8
 	ActionSwitchTab9
+	ActionJumpAttention
 )
 
 // Handler receives router outputs. Forward is called only for bytes that should
@@ -167,6 +168,8 @@ func binding(b byte) (Action, bool) {
 		return ActionOpenPalette, true
 	case '1', '2', '3', '4', '5', '6', '7', '8', '9':
 		return ActionSwitchTab1 + Action(b-'1'), true
+	case 'a':
+		return ActionJumpAttention, true
 	default:
 		return 0, false
 	}

@@ -20,9 +20,8 @@
 // Locking: a session's screen and per-client renderer shadow are both guarded
 // by tab.mu; the attached-client pointer by session.mu; the registry by
 // Daemon.mu. When more than one is held the order is always
-// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
-// a slow client.
+// sendMu > Daemon.mu > session.mu > tab.mu — the PTY reader only ever takes
+// tab.mu, so it never blocks on a slow client.
 package daemon
 
 import (
@@ -32,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -68,9 +68,12 @@ type tab struct {
 	// previewClient tracks the one client currently previewing this tab in the picker.
 	// v1 is last-writer-wins: multiple clients previewing the same tab are not supported.
 	previewClient *attachedClient
-	size          domain.Size
-	ctx           context.Context
-	cancel        context.CancelFunc
+	// attention and attentionAt are guarded by the owning session.mu.
+	attention   bool
+	attentionAt time.Time
+	size        domain.Size
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 // attachedClient is a client currently attached to a session's tab. rend is
@@ -155,7 +158,7 @@ func tabSize(clientSize domain.Size) domain.Size {
 	if !clientSize.Valid() {
 		clientSize = defaultSize
 	}
-	rows := max(clientSize.Rows-1, 1)
+	rows := max(clientSize.Rows-2, 1)
 	return domain.Size{Cols: clientSize.Cols, Rows: rows}
 }
 
@@ -242,6 +245,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 		d.killSession(sess, ports.ReasonSessionKilled)
 		return
 	}
+	ringing := tb.attention
 	sess.tabs = append(sess.tabs[:idx], sess.tabs[idx+1:]...)
 	if sess.active >= len(sess.tabs) {
 		sess.active = len(sess.tabs) - 1
@@ -259,12 +263,16 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	if repaint && ac != nil {
 		d.paint(sess, ac, true)
 	}
+	if ringing {
+		d.repaintAllAttachedClients()
+	}
 }
 
 // ptyReader drains child output into the VT screen and pokes the dirty channel
 // (non-blocking: a full channel already means a render is pending). On any read
 
 func (d *Daemon) killSession(sess *session, reason uint8) {
+	ringing := sess.anyAttention()
 	d.mu.Lock()
 	if _, ok := d.sessions[sess.id]; !ok {
 		d.mu.Unlock()
@@ -299,6 +307,8 @@ func (d *Daemon) killSession(sess *session, reason uint8) {
 	}
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
+	} else if ringing {
+		d.repaintAllAttachedClients()
 	}
 
 	if ac != nil {
