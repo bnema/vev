@@ -179,6 +179,56 @@ func TestKillAllEmptyDaemonSignalsShutdown(t *testing.T) {
 	}
 }
 
+func TestCreateTabClosesPTYIfSessionKilledDuringOpen(t *testing.T) {
+	p1, release1 := newBlockingPTY(t)
+	defer release1()
+	p2 := portsmocks.NewMockPTY(t)
+	opened := make(chan struct{})
+	releaseOpen := make(chan struct{})
+	closed := make(chan struct{})
+	p2.EXPECT().Close().RunAndReturn(func() error {
+		close(closed)
+		return nil
+	}).Once()
+	p2.EXPECT().Pid().Return(4242).Maybe()
+
+	f := portsmocks.NewMockPTYFactory(t)
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(p1, nil).Once()
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(string, []string, []string, string, domain.Size) (ports.PTY, error) {
+			close(opened)
+			<-releaseOpen
+			return p2, nil
+		},
+	).Once()
+
+	d := newTestDaemon(t, f, stubClock{})
+	tr, sends, releaseConn := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
+	var hg sync.WaitGroup
+	hg.Go(func() { d.handleConn(tr) })
+	awaitFrame(t, sends, ports.MsgWelcome)
+	awaitFrame(t, sends, ports.MsgOutput)
+	sess := firstSession(d)
+	require.NotNil(t, sess)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.createTab(sess, domain.Size{Cols: 80, Rows: 24}) }()
+	<-opened
+	d.killSession(sess, ports.ReasonSessionKilled)
+	close(releaseOpen)
+
+	require.Error(t, <-errCh)
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("new PTY was not closed after session died during tab creation")
+	}
+	require.Equal(t, 0, sessionCount(d))
+	releaseConn()
+	hg.Wait()
+	d.sessWg.Wait()
+}
+
 // --- ephemeral numbering ----------------------------------------------------
 
 func TestEphemeralNumberingReuse(t *testing.T) {

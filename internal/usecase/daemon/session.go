@@ -107,17 +107,28 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 
 func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	tbSize := tabSize(sz)
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(sess.name), sess.cwd, tbSize)
+	sess.mu.Lock()
+	name := sess.name
+	cwd := sess.cwd
+	sess.mu.Unlock()
+	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), cwd, tbSize)
 	if err != nil {
-		return fmt.Errorf("daemon: spawning tab for session %q: %w", sess.name, err)
+		return fmt.Errorf("daemon: spawning tab for session %q: %w", name, err)
 	}
 	tb := newTab(pty, tbSize)
+	d.mu.Lock()
+	if d.closing || d.sessions[sess.id] != sess || sess.ctx.Err() != nil {
+		d.mu.Unlock()
+		_ = pty.Close()
+		return errors.New("daemon: session closed")
+	}
 	tb.ctx, tb.cancel = context.WithCancel(sess.ctx)
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, tb)
 	sess.active = len(sess.tabs) - 1
 	sess.mu.Unlock()
 	d.startTabGoroutines(sess, tb)
+	d.mu.Unlock()
 	return nil
 }
 
