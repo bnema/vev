@@ -5,7 +5,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/ui"
 )
 
 func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
@@ -51,6 +53,37 @@ func TestPaletteEnterNoMatchKeepsOpenAndEscapeSplit(t *testing.T) {
 	require.True(t, ac.paletteActive())
 	require.Empty(t, ac.palettePending)
 	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteCtrlNAndCtrlPNavigate(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
+	defer releases[0]()
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	d.handlePaletteInput(ac, []byte{0x0e})
+	awaitFrame(t, sends, ports.MsgOutput)
+	cmd, ok := ac.palette.Selected()
+	require.True(t, ok)
+	require.Equal(t, "CLT", cmd.Code)
+
+	d.handlePaletteInput(ac, []byte{0x10})
+	awaitFrame(t, sends, ports.MsgOutput)
+	cmd, ok = ac.palette.Selected()
+	require.True(t, ok)
+	require.Equal(t, "CNT", cmd.Code)
+}
+
+func TestPaletteModalGeometry(t *testing.T) {
+	require.Equal(t, 100, paletteModal.WidthPct)
+	require.Equal(t, 11, paletteModal.FixedHeight)
+	require.Equal(t, ui.AnchorBottom, paletteModal.Anchor)
+	require.Equal(t, 1, paletteModal.BottomMargin)
+	require.Equal(t, 32, paletteModal.MinWidth)
+
+	bounds := paletteModal.Bounds(domain.Size{Cols: 120, Rows: 40})
+	require.Equal(t, domain.Rect{X: 0, Y: 28, Width: 120, Height: 11}, bounds)
 }
 
 func TestPaletteUTF8PendingCompletesFilter(t *testing.T) {

@@ -11,7 +11,7 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-var paletteModal = ui.Modal{WidthPct: 80, HeightPct: 40, MinWidth: 32, MinHeight: 6, Title: " Commands ", Anchor: ui.AnchorBottom, BottomMargin: 1}
+var paletteModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Commands ", Anchor: ui.AnchorBottom, BottomMargin: 1}
 
 func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	d.closePalette(ac)
@@ -73,6 +73,14 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 			i++
 		case 0x03:
 			exit = true
+			i++
+		case 0x0e:
+			ac.palette.Down()
+			changed = true
+			i++
+		case 0x10:
+			ac.palette.Up()
+			changed = true
 			i++
 		case '\r', '\n':
 			cmd, ok = ac.palette.Selected()

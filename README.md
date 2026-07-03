@@ -47,6 +47,8 @@ All bindings use the Alt modifier directly, no prefix key.
 | Alt+Space | open the command palette |
 | Alt+1 .. Alt+9 | switch to tab by number |
 
+Some terminals encode Alt+Space as a non-breaking space instead of `ESC Space`; in those terminals, the palette binding depends on whether the terminal can send `ESC Space` for Alt+Space.
+
 ## Command palette
 
 Open the palette with Alt+Space, then type a command code or fuzzy-match its label. Use Up/Down or Ctrl-N/Ctrl-P to move through matches, Enter to run the selected command, and Esc to close the palette. Some terminals emit NBSP for Alt+Space; in those terminals the binding depends on terminal configuration.
