@@ -25,6 +25,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/daemon"
+	"github.com/bnema/vev/internal/usecase/prompt"
 )
 
 // cmdKind identifies which sub-command the CLI parsed.
@@ -243,17 +244,77 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) err
 	}
 	defer func() { _ = logFile.Close() }()
 
-	var transport ports.Transport
 	if remoteTarget != "" {
-		transport, err = sshstdio.Dial(remoteTarget, name)
-	} else {
-		transport, err = ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+		transport, err := sshstdio.Dial(remoteTarget, name)
+		if err != nil {
+			return err
+		}
+		// client.Attach owns and closes transport.
+		return client.Attach(ctx, transport, term.New(), intent, name)
 	}
+
+	return runLocalAttachWithRecovery(ctx, intent, name, attachRecoveryDeps{
+		confirmer:  prompt.NewConfirmer(os.Stdin, os.Stderr),
+		attach:     attachLocalDaemon,
+		killDaemon: requestDaemonStop,
+	})
+}
+
+type attachRecoveryDeps struct {
+	confirmer  prompt.Confirmer
+	attach     func(context.Context, uint8, string) error
+	killDaemon func(context.Context) error
+}
+
+func runLocalAttachWithRecovery(ctx context.Context, intent uint8, name string, deps attachRecoveryDeps) error {
+	err := deps.attach(ctx, intent, name)
+	if !isDaemonVersionDrift(err) {
+		return err
+	}
+
+	ok, promptErr := deps.confirmer.Confirm("Your vev version differs from the running daemon; kill it and restart?")
+	if promptErr != nil {
+		return fmt.Errorf("vev: reading confirmation: %w", promptErr)
+	}
+	if !ok {
+		return err
+	}
+	if killErr := deps.killDaemon(ctx); killErr != nil {
+		return killErr
+	}
+	return deps.attach(ctx, intent, name)
+}
+
+func isDaemonVersionDrift(err error) bool {
+	var protocolErr *client.ProtocolError
+	if !errors.As(err, &protocolErr) {
+		return false
+	}
+	return protocolErr.Code == ports.ErrVersionMismatch || protocolErr.Text == "malformed hello"
+}
+
+func attachLocalDaemon(ctx context.Context, intent uint8, name string) error {
+	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
 	if err != nil {
 		return err
 	}
 	// client.Attach owns and closes transport.
 	return client.Attach(ctx, transport, term.New(), intent, name)
+}
+
+func requestDaemonStop(_ context.Context) error {
+	transport, err := realDial(ipc.SocketDir())
+	if err != nil {
+		return fmt.Errorf("vev: no daemon running")
+	}
+	defer func() { _ = transport.Close() }()
+	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}); err != nil {
+		return fmt.Errorf("vev: requesting daemon stop: %w", err)
+	}
+	if _, err := transport.Recv(); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("vev: reading daemon stop reply: %w", err)
+	}
+	return nil
 }
 
 // runStdio is the hidden remote-side mode used by `ssh host vev _stdio`: it

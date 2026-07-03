@@ -1,12 +1,15 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/client"
+	"github.com/bnema/vev/internal/usecase/prompt"
 )
 
 func TestParseArgs(t *testing.T) {
@@ -90,6 +93,68 @@ func TestParseArgs(t *testing.T) {
 				t.Errorf("killDaemon = %v, want %v", got.killDaemon, tt.wantDaemon)
 			}
 		})
+	}
+}
+
+func TestRunLocalAttachPromptsAndRestartsOnProtocolMismatch(t *testing.T) {
+	var prompts bytes.Buffer
+	answers := strings.NewReader("y\n")
+	attachCalls := 0
+	killCalls := 0
+
+	err := runLocalAttachWithRecovery(context.Background(), ports.IntentEphemeral, "", attachRecoveryDeps{
+		confirmer: prompt.NewConfirmer(answers, &prompts),
+		attach: func(context.Context, uint8, string) error {
+			attachCalls++
+			if attachCalls == 1 {
+				return &client.ProtocolError{Code: ports.ErrVersionMismatch, Text: "protocol version mismatch"}
+			}
+			return nil
+		},
+		killDaemon: func(context.Context) error {
+			killCalls++
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("runLocalAttachWithRecovery returned error: %v", err)
+	}
+	if attachCalls != 2 {
+		t.Fatalf("attach calls = %d, want 2", attachCalls)
+	}
+	if killCalls != 1 {
+		t.Fatalf("kill calls = %d, want 1", killCalls)
+	}
+	if got := prompts.String(); !strings.Contains(got, "Your vev version differs") || !strings.Contains(got, "kill it") {
+		t.Fatalf("prompt = %q, want version/kill prompt", got)
+	}
+}
+
+func TestRunLocalAttachDeclineKeepsOriginalError(t *testing.T) {
+	answers := strings.NewReader("n\n")
+	wantErr := &client.ProtocolError{Code: ports.ErrInternal, Text: "malformed hello"}
+	attachCalls := 0
+	killCalls := 0
+
+	err := runLocalAttachWithRecovery(context.Background(), ports.IntentEphemeral, "", attachRecoveryDeps{
+		confirmer: prompt.NewConfirmer(answers, &bytes.Buffer{}),
+		attach: func(context.Context, uint8, string) error {
+			attachCalls++
+			return wantErr
+		},
+		killDaemon: func(context.Context) error {
+			killCalls++
+			return nil
+		},
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v, want original %v", err, wantErr)
+	}
+	if attachCalls != 1 {
+		t.Fatalf("attach calls = %d, want 1", attachCalls)
+	}
+	if killCalls != 0 {
+		t.Fatalf("kill calls = %d, want 0", killCalls)
 	}
 }
 
