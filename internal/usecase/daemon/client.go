@@ -366,6 +366,9 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, explicit bool) {
 		return // already displaced by a newer client; nothing to do
 	}
 	d.unregisterPreview(ac)
+	if !sess.ephemeral {
+		d.refreshSessionCwd(sess)
+	}
 	d.resetScreenDefaultColors(sess)
 	if explicit {
 		// Synchronous so the ack is delivered before the transport closes
@@ -376,7 +379,7 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, explicit bool) {
 	}
 	_ = ac.tr.Close()
 	if sess.ephemeral {
-		d.killSession(sess, ports.ReasonSessionKilled)
+		_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 	}
 }
 
@@ -446,7 +449,7 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient) {
 		_ = ac.tr.Close()
 		d.log.Warn("detached client after send error", "session", sess.name)
 		if sess.ephemeral {
-			d.killSession(sess, ports.ReasonSessionKilled)
+			_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 		}
 	}
 }

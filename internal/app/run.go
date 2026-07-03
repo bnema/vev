@@ -14,6 +14,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -24,10 +25,13 @@ import (
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/persist"
+	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
+	"github.com/bnema/vev/pkg/kv"
 )
 
 // cmdKind identifies which sub-command the CLI parsed.
@@ -223,7 +227,13 @@ func runDaemon() error {
 	}
 
 	slog.Info("daemon starting", "socket", ln.Addr())
-	d := daemon.New(pty.NewFactory(), clock.New(), slog.Default())
+	daemonOpts := []daemon.Option(nil)
+	if store, err := kv.Open(filepath.Join(platform.StateDir(), "sessions.kv")); err != nil {
+		slog.Warn("opening session store failed; persistence disabled", "err", err)
+	} else {
+		daemonOpts = append(daemonOpts, daemon.WithStore(store))
+	}
+	d := daemon.New(pty.NewFactory(), clock.New(), slog.Default(), daemonOpts...)
 	if err := d.Serve(ctx, ln); err != nil {
 		slog.Error("daemon exited", "err", err)
 		return err
@@ -482,12 +492,20 @@ func proxyTransports(ctx context.Context, a, b ports.Transport) error {
 	}
 }
 
-// runList prints the daemon's session listing. With no daemon running there
-// are, by definition, no sessions.
+// runList prints the daemon's session listing. With no daemon running, it
+// falls back to the persisted stopped-session records.
 func runList(_ context.Context) error {
 	transport, err := realDial(ipc.SocketDir())
 	if err != nil {
-		fmt.Println("no sessions")
+		records, loadErr := persist.LoadReadOnly(platform.StateDir())
+		if loadErr != nil {
+			return fmt.Errorf("vev: reading stored sessions: %w", loadErr)
+		}
+		infos := make([]ports.SessionInfo, 0, len(records))
+		for _, r := range records {
+			infos = append(infos, ports.SessionInfo{Name: r.Name, Stopped: true})
+		}
+		printSessions(os.Stdout, infos)
 		return nil
 	}
 	defer func() { _ = transport.Close() }()
@@ -521,13 +539,18 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 		return
 	}
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "NAME\tTABS\tATTACHED")
+	_, _ = fmt.Fprintln(tw, "NAME\tSTATE\tTABS\tATTACHED")
 	for _, s := range sessions {
+		state := "running"
+		tabs := fmt.Sprintf("%d", s.Tabs)
 		attached := "no"
-		if s.Attached {
+		if s.Stopped {
+			state = "stopped"
+			tabs = "-"
+		} else if s.Attached {
 			attached = "yes"
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\n", s.Name, s.Tabs, attached)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", s.Name, state, tabs, attached)
 	}
 	_ = tw.Flush()
 }
@@ -536,6 +559,25 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 func runKill(_ context.Context, name string, all, daemon bool) error {
 	transport, err := realDial(ipc.SocketDir())
 	if err != nil {
+		if name != "" && !all && !daemon {
+			store, openErr := kv.Open(filepath.Join(platform.StateDir(), "sessions.kv"))
+			if openErr != nil {
+				return fmt.Errorf("vev: opening stored sessions: %w", openErr)
+			}
+			if _, ok := store.Get([]byte(name)); !ok {
+				_ = store.Close()
+				return fmt.Errorf("vev: no such session: %s", name)
+			}
+			if deleteErr := store.Delete([]byte(name)); deleteErr != nil {
+				_ = store.Close()
+				return fmt.Errorf("vev: deleting stored session: %w", deleteErr)
+			}
+			if closeErr := store.Close(); closeErr != nil {
+				return fmt.Errorf("vev: closing stored sessions: %w", closeErr)
+			}
+			printKillSuccess(name, all, daemon)
+			return nil
+		}
 		return fmt.Errorf("vev: no daemon running")
 	}
 	defer func() { _ = transport.Close() }()

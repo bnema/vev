@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/pkg/vt"
@@ -47,11 +48,12 @@ type session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu     sync.Mutex // guards tabs, active, and client
-	tabs   []*tab
-	active int
-	client *attachedClient
-	cwd    string
+	mu        sync.Mutex // guards tabs, active, and client
+	tabs      []*tab
+	active    int
+	client    *attachedClient
+	cwd       string
+	createdAt int64
 }
 
 // tab is one PTY-backed screen. dirty is a cap-1 channel so bursty output
@@ -90,6 +92,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 
 	id := domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
 	d.nextID++
+	createdAt := time.Now().UnixNano()
 
 	tb := newTab(pty, tbSize)
 	sctx, cancel := context.WithCancel(d.serveCtx)
@@ -102,6 +105,15 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		cancel:    cancel,
 		tabs:      []*tab{tb},
 		cwd:       cwd,
+		createdAt: createdAt,
+	}
+	if !ephemeral {
+		if err := d.persist.Save(persist.Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt}); err != nil {
+			_ = pty.Close()
+			cancel()
+			return nil, err
+		}
+		delete(d.stopped, name)
 	}
 	d.sessions[id] = sess
 	d.startTabGoroutines(sess, tb)
@@ -118,7 +130,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 		d.mu.Unlock()
 		return errors.New("daemon is shutting down")
 	}
-	if d.nameTakenLocked(name) {
+	if d.nameLiveOrStoppedLocked(name) {
 		d.mu.Unlock()
 		return errors.New("name already in use")
 	}
@@ -140,7 +152,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	if from.client != ac {
 		from.mu.Unlock()
 		d.mu.Unlock()
-		d.killSession(newSess, ports.ReasonSessionKilled)
+		_ = d.killSession(newSess, ports.ReasonSessionKilled, true)
 		return errors.New("client detached")
 	}
 	from.client = nil
@@ -269,8 +281,30 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	if taken := d.findByNameLocked(name); taken != nil && taken != sess {
 		return errors.New("name already in use")
 	}
+	if stopped, ok := d.stopped[name]; ok && stopped.name != sess.name {
+		return errors.New("name already in use")
+	}
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
+	oldName := sess.name
+	wasEphemeral := sess.ephemeral
+	createdAt := sess.createdAt
+	if createdAt == 0 {
+		createdAt = time.Now().UnixNano()
+		sess.createdAt = createdAt
+	}
+	if !wasEphemeral && oldName != name {
+		if err := d.persist.Delete(oldName); err != nil {
+			return err
+		}
+	}
+	if wasEphemeral || oldName != name {
+		if err := d.persist.Save(persist.Record{Name: name, Cwd: sess.cwd, CreatedAt: createdAt, UpdatedAt: time.Now().UnixNano()}); err != nil {
+			return err
+		}
+	}
+	delete(d.stopped, oldName)
+	delete(d.stopped, name)
 	sess.name = name
 	sess.ephemeral = false
 	return nil
@@ -291,7 +325,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	}
 	if len(sess.tabs) == 1 {
 		sess.mu.Unlock()
-		d.killSession(sess, ports.ReasonSessionKilled)
+		_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 		return
 	}
 	ringing := tb.attention
@@ -320,14 +354,33 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 // ptyReader drains child output into the VT screen and pokes the dirty channel
 // (non-blocking: a full channel already means a render is pending). On any read
 
-func (d *Daemon) killSession(sess *session, reason uint8) {
+func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	ringing := sess.anyAttention()
+	sess.mu.Lock()
+	isEphemeral := sess.ephemeral
+	sess.mu.Unlock()
+	if !purge && !isEphemeral && d.persistEnabled {
+		d.refreshSessionCwd(sess)
+	}
 	d.mu.Lock()
 	if _, ok := d.sessions[sess.id]; !ok {
 		d.mu.Unlock()
-		return
+		return nil
 	}
 	delete(d.sessions, sess.id)
+	sess.mu.Lock()
+	stoppedName := sess.name
+	stoppedCwd := sess.cwd
+	createdAt := sess.createdAt
+	ephemeral := sess.ephemeral
+	sess.mu.Unlock()
+	if !ephemeral {
+		if purge {
+			delete(d.stopped, stoppedName)
+		} else {
+			d.stopped[stoppedName] = stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt}
+		}
+	}
 	empty := len(d.sessions) == 0
 	if empty {
 		// Shutdown is now inevitable and irreversible (doneOnce below): stop
@@ -336,6 +389,19 @@ func (d *Daemon) killSession(sess *session, reason uint8) {
 		d.closing = true
 	}
 	d.mu.Unlock()
+
+	var purgeErr error
+	if !ephemeral && purge {
+		if err := d.persist.Delete(stoppedName); err != nil {
+			purgeErr = err
+			d.log.Warn("deleting persisted session failed", "err", err, "session", stoppedName)
+			d.mu.Lock()
+			if _, live := d.sessions[sess.id]; !live {
+				d.stopped[stoppedName] = stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt}
+			}
+			d.mu.Unlock()
+		}
+	}
 
 	sess.mu.Lock()
 	ac := sess.client
@@ -363,14 +429,18 @@ func (d *Daemon) killSession(sess *session, reason uint8) {
 	if ac != nil {
 		d.notifyDetachedAsync(ac, reason)
 	}
+	return purgeErr
 }
 
 // allocEphemeralNameLocked returns the lowest free decimal name. Caller holds
 // d.mu.
 func (d *Daemon) allocEphemeralNameLocked() string {
-	used := make(map[string]struct{}, len(d.sessions))
+	used := make(map[string]struct{}, len(d.sessions)+len(d.stopped))
 	for _, s := range d.sessions {
 		used[s.name] = struct{}{}
+	}
+	for name := range d.stopped {
+		used[name] = struct{}{}
 	}
 	for i := 0; ; i++ {
 		n := strconv.Itoa(i)
@@ -389,7 +459,75 @@ func (d *Daemon) findByNameLocked(name string) *session {
 	return nil
 }
 
-func (d *Daemon) nameTakenLocked(name string) bool { return d.findByNameLocked(name) != nil }
+func (d *Daemon) nameLiveOrStoppedLocked(name string) bool {
+	if d.findByNameLocked(name) != nil {
+		return true
+	}
+	_, ok := d.stopped[name]
+	return ok
+}
+
+func (d *Daemon) cwdSampler(ctx context.Context) {
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			d.refreshNamedSessionCwds()
+		}
+	}
+}
+
+func (d *Daemon) refreshNamedSessionCwds() {
+	d.mu.Lock()
+	sessions := d.sessionsSnapshotLocked()
+	d.mu.Unlock()
+	for _, sess := range sessions {
+		sess.mu.Lock()
+		ephemeral := sess.ephemeral
+		sess.mu.Unlock()
+		if !ephemeral {
+			d.refreshSessionCwd(sess)
+		}
+	}
+}
+
+func (d *Daemon) refreshSessionCwd(sess *session) {
+	if d.procCwd == nil {
+		return
+	}
+	tb := sess.activeTab()
+	if tb == nil {
+		return
+	}
+	cwd, err := d.procCwd(tb.pty.Pid())
+	if err != nil || cwd == "" {
+		return
+	}
+	d.mu.Lock()
+	if d.sessions[sess.id] != sess {
+		d.mu.Unlock()
+		return
+	}
+	sess.mu.Lock()
+	if sess.cwd == cwd {
+		sess.mu.Unlock()
+		d.mu.Unlock()
+		return
+	}
+	sess.cwd = cwd
+	name := sess.name
+	ephemeral := sess.ephemeral
+	sess.mu.Unlock()
+	if !ephemeral {
+		if err := d.persist.Touch(name, cwd, time.Now().UnixNano()); err != nil {
+			d.log.Warn("touching persisted session cwd failed", "err", err, "session", name)
+		}
+	}
+	d.mu.Unlock()
+}
 
 // childEnv builds the session child's environment: the daemon's own, with TERM
 // and VEV forced to well-known values.

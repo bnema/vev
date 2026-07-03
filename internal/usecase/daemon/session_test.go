@@ -12,8 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/usecase/picker"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -100,7 +102,7 @@ func TestHandshakeNewHappy(t *testing.T) {
 	require.NotNil(t, sess)
 
 	releaseConn()
-	d.killSession(sess, ports.ReasonServerShutdown)
+	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
 	releasePTY()
 	hg.Wait()
 	d.sessWg.Wait()
@@ -214,7 +216,7 @@ func TestCreateTabClosesPTYIfSessionKilledDuringOpen(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- d.createTab(sess, domain.Size{Cols: 80, Rows: 24}) }()
 	<-opened
-	d.killSession(sess, ports.ReasonSessionKilled)
+	_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 	close(releaseOpen)
 
 	require.Error(t, <-errCh)
@@ -275,7 +277,7 @@ func TestAttachReplaceDetachesOld(t *testing.T) {
 
 	releaseA()
 	releaseB()
-	d.killSession(sess, ports.ReasonServerShutdown)
+	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
 	releasePTY()
 	hg.Wait()
 	d.sessWg.Wait()
@@ -324,7 +326,7 @@ func TestDetachKeepsNamed(t *testing.T) {
 	require.Nil(t, sess.client, "named session is headless after detach")
 	sess.mu.Unlock()
 
-	d.killSession(sess, ports.ReasonServerShutdown)
+	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
 	releasePTY()
 	d.sessWg.Wait()
 	d.waitNotifies()
@@ -472,7 +474,7 @@ func TestHelloRacingShutdownIsRejected(t *testing.T) {
 	require.NotNil(t, sess)
 
 	// The last session dies: shutdown begins irreversibly.
-	d.killSession(sess, ports.ReasonSessionKilled)
+	_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 	select {
 	case <-d.done:
 	default:
@@ -580,3 +582,227 @@ func TestServeReturnsDespiteWedgedClientOnShutdown(t *testing.T) {
 
 // TestSendErrorKillsEphemeral: a failed output send detaches the client, and —
 // like every other detach path — that kills an ephemeral session rather than
+
+type mockStoreState struct {
+	mu     sync.Mutex
+	data   map[string][]byte
+	sets   int
+	dels   []string
+	syncs  int
+	closed bool
+}
+
+func newMockStore(t *testing.T) (*portsmocks.MockStore, *mockStoreState) {
+	t.Helper()
+	state := &mockStoreState{data: make(map[string][]byte)}
+	store := portsmocks.NewMockStore(t)
+	store.EXPECT().Set(mock.Anything, mock.Anything).RunAndReturn(func(k, v []byte) error {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		state.sets++
+		state.data[string(k)] = append([]byte(nil), v...)
+		return nil
+	}).Maybe()
+	store.EXPECT().Delete(mock.Anything).RunAndReturn(func(k []byte) error {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		state.dels = append(state.dels, string(k))
+		delete(state.data, string(k))
+		return nil
+	}).Maybe()
+	store.EXPECT().Range(mock.Anything).Run(func(fn func(k, v []byte) bool) {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		for k, v := range state.data {
+			if !fn([]byte(k), append([]byte(nil), v...)) {
+				return
+			}
+		}
+	}).Maybe()
+	store.EXPECT().Sync().RunAndReturn(func() error {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		state.syncs++
+		return nil
+	}).Maybe()
+	store.EXPECT().Close().RunAndReturn(func() error {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		state.closed = true
+		return nil
+	}).Maybe()
+	return store, state
+}
+
+func (s *mockStoreState) has(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.data[name]
+	return ok
+}
+
+func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
+	store, _ := newMockStore(t)
+	seed := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
+	require.NoError(t, seed.persist.Save(persist.Record{Name: "work", Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8}))
+
+	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
+	d.mu.Lock()
+	stopped := d.stopped["work"]
+	d.mu.Unlock()
+	require.Equal(t, stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7}, stopped)
+}
+
+func TestCreateRenameKillPersistenceLifecycle(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, release := newBlockingPTY(t)
+	defer release()
+	store, state := newMockStore(t)
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	WithStore(store)(d)
+
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz)
+	require.NoError(t, err)
+	require.True(t, state.has("work"))
+
+	require.NoError(t, d.renameSession(sess, "renamed"))
+	require.False(t, state.has("work"))
+	require.True(t, state.has("renamed"))
+
+	_ = d.killSession(sess, ports.ReasonSessionKilled, true)
+	require.False(t, state.has("renamed"))
+}
+
+func TestEphemeralRenamePromotesAndStoppedCollisionRejected(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, release := newBlockingPTY(t)
+	defer release()
+	store, state := newMockStore(t)
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	WithStore(store)(d)
+	d.stopped["taken"] = stoppedSession{name: "taken", cwd: "/tmp", createdAt: 1}
+
+	sess, err := d.createSessionLocked("0", true, "/tmp/e", sz)
+	require.NoError(t, err)
+	require.False(t, state.has("0"))
+	require.EqualError(t, d.renameSession(sess, "taken"), "name already in use")
+	require.NoError(t, d.renameSession(sess, "named"))
+	require.True(t, state.has("named"))
+}
+
+func TestRefreshSessionCwdTouchesOnlyOnChange(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, release := newBlockingPTY(t)
+	defer release()
+	store, state := newMockStore(t)
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	WithStore(store)(d)
+	cwd := "/tmp/work"
+	WithCwdReader(func(int) (string, error) { return cwd, nil })(d)
+
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz)
+	require.NoError(t, err)
+	state.mu.Lock()
+	setsAfterCreate := state.sets
+	state.mu.Unlock()
+
+	d.refreshSessionCwd(sess)
+	state.mu.Lock()
+	require.Equal(t, setsAfterCreate, state.sets)
+	state.mu.Unlock()
+
+	cwd = "/tmp/next"
+	d.refreshSessionCwd(sess)
+	state.mu.Lock()
+	require.Equal(t, setsAfterCreate+1, state.sets)
+	state.mu.Unlock()
+}
+
+func TestAttachResumesStoppedSessionFromStoredCwd(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, release := newBlockingPTY(t)
+	defer release()
+	store, _ := newMockStore(t)
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	WithStore(store)(d)
+	cwd := t.TempDir()
+	d.stopped["work"] = stoppedSession{name: "work", cwd: cwd, createdAt: 1}
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr.EXPECT().Close().Return(nil).Maybe()
+
+	sess, ac, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: sz}, tr)
+	require.NoError(t, err)
+	require.NotNil(t, ac)
+	require.Equal(t, "work", sess.name)
+	require.Equal(t, cwd, sess.cwd)
+	d.mu.Lock()
+	_, stillStopped := d.stopped["work"]
+	d.mu.Unlock()
+	require.False(t, stillStopped)
+}
+
+func TestAttachStoppedMissingCwdFallsBackToHome(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, release := newBlockingPTY(t)
+	defer release()
+	store, _ := newMockStore(t)
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	WithStore(store)(d)
+	d.stopped["work"] = stoppedSession{name: "work", cwd: "/definitely/missing/vev", createdAt: 1}
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr.EXPECT().Close().Return(nil).Maybe()
+
+	sess, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: sz}, tr)
+	require.NoError(t, err)
+	require.NotEqual(t, "/definitely/missing/vev", sess.cwd)
+}
+
+func TestPickerStoppedTargetKillPurges(t *testing.T) {
+	store, state := newMockStore(t)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	WithStore(store)(d)
+	require.NoError(t, d.persist.Save(persist.Record{Name: "old", Cwd: "/tmp", CreatedAt: 1, UpdatedAt: 1}))
+	d.stopped["old"] = stoppedSession{name: "old", cwd: "/tmp", createdAt: 1}
+	d.killPickerTarget(picker.Target{Name: "old", Stopped: true})
+	require.False(t, state.has("old"))
+	d.mu.Lock()
+	_, ok := d.stopped["old"]
+	d.mu.Unlock()
+	require.False(t, ok)
+}
+
+func TestIntentNewStoppedNameRejected(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d.stopped["taken"] = stoppedSession{name: "taken", cwd: "/tmp", createdAt: 1}
+	tr := portsmocks.NewMockTransport(t)
+	_, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "taken", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
+	require.ErrorContains(t, err, "name already in use")
+}
+
+func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p1, release1 := newBlockingPTY(t)
+	defer release1()
+	p2, release2 := newBlockingPTY(t)
+	defer release2()
+	store, state := newMockStore(t)
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
+	WithStore(store)(d)
+	WithCwdReader(func(int) (string, error) { return "/tmp/latest", nil })(d)
+
+	natural, err := d.createSessionLocked("natural", false, "/tmp/old", sz)
+	require.NoError(t, err)
+	other, err := d.createSessionLocked("other", false, "/tmp/other", sz)
+	require.NoError(t, err)
+	_ = d.killSession(natural, ports.ReasonSessionKilled, false)
+	require.True(t, state.has("natural"))
+	d.mu.Lock()
+	stopped := d.stopped["natural"]
+	d.mu.Unlock()
+	require.Equal(t, "/tmp/latest", stopped.cwd)
+
+	_ = d.killSession(other, ports.ReasonSessionKilled, true)
+	require.False(t, state.has("other"))
+}
