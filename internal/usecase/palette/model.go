@@ -9,7 +9,7 @@ import (
 
 type Model struct {
 	commands []command.Command
-	input    []rune
+	input    ui.TextInput
 	matches  []Match
 	selected int
 	scroll   int
@@ -25,15 +25,15 @@ func NewRegistry() *Model { return New(command.Registry()) }
 
 func (m *Model) Insert(r rune) {
 	if m != nil {
-		m.input = append(m.input, r)
+		m.input.Insert(r)
 		m.selected = 0
 		m.scroll = 0
 		m.refresh()
 	}
 }
 func (m *Model) Backspace() {
-	if m != nil && len(m.input) > 0 {
-		m.input = m.input[:len(m.input)-1]
+	if m != nil && m.input.Value() != "" {
+		m.input.Backspace()
 		m.selected = 0
 		m.scroll = 0
 		m.refresh()
@@ -43,7 +43,7 @@ func (m *Model) Query() string {
 	if m == nil {
 		return ""
 	}
-	return string(m.input)
+	return m.input.Value()
 }
 func (m *Model) Up() {
 	if m != nil && m.selected > 0 {
@@ -75,7 +75,7 @@ func (m *Model) Matches() []Match {
 	return out
 }
 
-func (m *Model) refresh() { m.matches = Fuzzy(m.commands, string(m.input)); m.clamp() }
+func (m *Model) refresh() { m.matches = Fuzzy(m.commands, m.input.Value()); m.clamp() }
 func (m *Model) clamp() {
 	if len(m.matches) == 0 {
 		m.selected = -1
@@ -103,10 +103,7 @@ func (m *Model) Render(inner domain.Size) renderer.Frame {
 	}
 	base := renderer.DefaultStyle()
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: base})
-	x := ui.DrawText(frame, 0, 0, frame.Width, "> "+m.Query(), base)
-	if x < frame.Width {
-		frame.Set(x, 0, renderer.Cell{Rune: ' ', Style: renderer.Style{Inverse: true, Foreground: -1, Background: -1}})
-	}
+	ui.DrawInputLine(frame, 0, "> ", m.Query(), base)
 	if m == nil {
 		return frame
 	}
