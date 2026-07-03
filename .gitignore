@@ -2,3 +2,4 @@
 *.test
 .superpowers/
 docs/superpowers/
+.worktrees/
