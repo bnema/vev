@@ -71,8 +71,8 @@ usage:
                       attach through SSH to a remote vev daemon
   vev ls              list sessions
   vev kill <name>     kill a named session
-  vev kill --all      kill all sessions
-  vev kill --daemon   kill the active vev daemon
+  vev kill --all      kill all sessions and stop the daemon
+  vev kill --daemon   stop the active vev daemon
   vev --help          show this help
   vev --version       show version`
 
@@ -139,6 +139,12 @@ func parseArgs(args []string) (command, error) {
 	case "kill":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`kill` requires a session name, --all, or --daemon")
+		}
+		if args[1] == "--" {
+			if len(args) != 3 || args[2] == "" {
+				return command{}, usagef("`kill --` requires a session name")
+			}
+			return command{kind: kindKill, name: args[2]}, nil
 		}
 		if len(args) > 2 {
 			return command{}, usagef("`kill` accepts exactly one session name, --all, or --daemon")
@@ -374,7 +380,7 @@ func printKillSuccess(name string, all, daemon bool) {
 		return
 	}
 	if all {
-		fmt.Println("killed all sessions")
+		fmt.Println("killed all sessions and stopped daemon")
 		return
 	}
 	fmt.Printf("killed %s\n", name)

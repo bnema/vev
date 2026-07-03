@@ -430,8 +430,6 @@ func MarshalKill(m Kill) []byte {
 	w.putString(m.Name)
 	if m.All {
 		w.putUint8(1)
-	} else {
-		w.putUint8(0)
 	}
 	return w.b
 }

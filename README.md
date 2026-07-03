@@ -19,8 +19,8 @@ vev attach <name>                attach to an existing named session (alias: a)
 vev attach user@host[:session]   attach to a remote vev daemon over SSH
 vev ls                           list sessions
 vev kill <name>                  kill a named session
-vev kill --all                   kill all sessions
-vev kill --daemon                kill the active vev daemon
+vev kill --all                   kill all sessions and stop the daemon
+vev kill --daemon                stop the active vev daemon
 vev --help                       show help
 vev --version                    show version
 ```

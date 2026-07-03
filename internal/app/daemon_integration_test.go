@@ -197,6 +197,7 @@ func TestIntegration_KillAllShutsDownDaemon(t *testing.T) {
 
 	killTr, err := ipc.Dial(dir)
 	require.NoError(t, err)
+	defer func() { _ = killTr.Close() }()
 	require.NoError(t, killTr.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}))
 
 	_, err = killTr.Recv()

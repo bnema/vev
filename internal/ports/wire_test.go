@@ -319,8 +319,8 @@ func TestKillGoldenAndRoundTrip(t *testing.T) {
 		msg  Kill
 		want []byte
 	}{
-		{name: "named", msg: Kill{Name: "main"}, want: []byte{0x00, 0x04, 0x6d, 0x61, 0x69, 0x6e, 0x00}},
-		{name: "empty", msg: Kill{Name: ""}, want: []byte{0x00, 0x00, 0x00}},
+		{name: "named", msg: Kill{Name: "main"}, want: []byte{0x00, 0x04, 0x6d, 0x61, 0x69, 0x6e}},
+		{name: "empty", msg: Kill{Name: ""}, want: []byte{0x00, 0x00}},
 		{name: "all", msg: Kill{All: true}, want: []byte{0x00, 0x00, 0x01}},
 	}
 
@@ -340,8 +340,7 @@ func TestKillGoldenAndRoundTrip(t *testing.T) {
 		})
 	}
 
-	full := MarshalKill(tests[0].msg)
-	legacy := full[:len(full)-1]
+	legacy := MarshalKill(tests[0].msg)
 	back, err := UnmarshalKill(legacy)
 	if err != nil {
 		t.Fatalf("UnmarshalKill(legacy) error = %v", err)
@@ -350,7 +349,7 @@ func TestKillGoldenAndRoundTrip(t *testing.T) {
 		t.Fatalf("legacy round trip = %#v, want named kill", back)
 	}
 	assertAllPrefixesFail(t, legacy, UnmarshalKill)
-	assertTrailingGarbageFails(t, full, UnmarshalKill)
+	assertTrailingGarbageFails(t, append(append([]byte(nil), legacy...), 0x00), UnmarshalKill)
 }
 
 func TestSessionsGoldenAndRoundTrip(t *testing.T) {
