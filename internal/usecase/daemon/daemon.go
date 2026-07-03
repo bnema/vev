@@ -170,6 +170,7 @@ type attachedClient struct {
 	copyMu        sync.Mutex
 	copyMode      *scopy.Mode
 	copyPending   []byte
+	copyFeedback  string
 	pickerMu      sync.Mutex
 	picker        *picker.Model
 	pickerPreview *tab
@@ -225,18 +226,28 @@ func (ac *attachedClient) send(f ports.Frame) error {
 // write. Detach/kill/shutdown paths use this so they are never gated on a
 // client that has stopped draining its socket.
 func (d *Daemon) boundedSend(ac *attachedClient, f ports.Frame) {
+	_ = d.boundedSendErr(ac, f)
+}
+
+func (d *Daemon) boundedSendErr(ac *attachedClient, f ports.Frame) error {
 	timer := d.clock.NewTimer(detachNotifyTimeout)
-	sent := make(chan struct{})
+	result := make(chan error, 1)
 	go func() {
-		select {
-		case <-timer.C():
-			_ = ac.tr.Close()
-		case <-sent:
-		}
+		result <- ac.send(f)
 	}()
-	_ = ac.send(f)
-	timer.Stop()
-	close(sent)
+	select {
+	case err := <-result:
+		timer.Stop()
+		return err
+	case <-timer.C():
+		select {
+		case err := <-result:
+			return err
+		default:
+		}
+		_ = ac.tr.Close()
+		return errors.New("send timed out")
+	}
 }
 
 // notifyDetachedAsync delivers a best-effort Detached notice off the caller's
@@ -946,12 +957,20 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	tb.mu.Unlock()
 
 	if copyOut && text != "" {
-		for _, chunk := range scopy.OSC52(text) {
-			if err := ac.send(frameOutput(chunk)); err != nil {
+		chunks := scopy.OSC52(text)
+		for _, chunk := range chunks {
+			if err := d.boundedSendErr(ac, frameOutput(chunk)); err != nil {
 				d.detachOnSendError(sess, ac)
 				return
 			}
 		}
+		ac.copyMu.Lock()
+		if len(chunks) > 0 {
+			ac.copyFeedback = "copied " + strconv.Itoa(len([]rune(text))) + " chars to clipboard"
+		} else {
+			ac.copyFeedback = "selection too large to copy"
+		}
+		ac.copyMu.Unlock()
 	}
 	if exit {
 		d.paint(sess, ac, true)
@@ -1619,7 +1638,15 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	ac.sendMu.Lock()
 	ac.copyMu.Lock()
 	copyActive := ac.copyMode != nil
-	copyMode := ac.copyMode
+	var copyMode *scopy.Mode
+	if ac.copyMode != nil {
+		copyModeValue := *ac.copyMode
+		copyMode = &copyModeValue
+	}
+	copyFeedback := ac.copyFeedback
+	if copyFeedback != "" && !copyActive {
+		ac.copyFeedback = ""
+	}
 	ac.copyMu.Unlock()
 	ac.pickerMu.Lock()
 	pickerActive := ac.picker != nil
@@ -1634,7 +1661,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	if reset || pickerActive {
 		ac.lastCursor.valid = false
 	}
-	frame, damage := composeClientFrame(sess, tb, reset)
+	frame, damage := composeClientFrame(sess, tb, reset, copyFeedback)
 	if copyActive {
 		frame, damage = composeCopyClientFrame(copyMode, tb)
 	}
@@ -1712,13 +1739,13 @@ func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte
 	return b
 }
 
-func composeClientFrame(sess *session, tb *tab, full bool) (renderer.Frame, []renderer.Damage) {
+func composeClientFrame(sess *session, tb *tab, full bool, rightStatus string) (renderer.Frame, []renderer.Damage) {
 	width, screenRows := tb.screen.Frame.Width, tb.screen.Frame.Height
 	frame := renderer.NewFrame(width, screenRows+1)
 	for y := range screenRows {
 		copy(frame.Row(y), tb.screen.Frame.Row(y))
 	}
-	drawStatus(frame.Row(screenRows), sess)
+	drawStatus(frame.Row(screenRows), sess, rightStatus)
 	if full {
 		return frame, []renderer.Damage{renderer.FullRedraw()}
 	}
@@ -1761,7 +1788,7 @@ func pickerPreviewFromLockedTab(tb *tab) picker.Preview {
 	return picker.Preview{Rows: rows, Width: tb.screen.Frame.Width, Height: tb.screen.Frame.Height}
 }
 
-func drawStatus(row []renderer.Cell, sess *session) {
+func drawStatus(row []renderer.Cell, sess *session, rightText string) {
 	for i := range row {
 		row[i] = renderer.BlankCell()
 	}
@@ -1775,6 +1802,16 @@ func drawStatus(row []renderer.Cell, sess *session) {
 		}
 		writeStatusText(row, &x, " "+w.name+" ", style)
 	}
+	if rightText == "" {
+		return
+	}
+	style := renderer.DefaultStyle()
+	rightWidth := len([]rune(rightText)) + 1
+	if len(row)-x-1 < rightWidth {
+		return
+	}
+	x = len(row) - rightWidth
+	writeStatusText(row, &x, " "+rightText, style)
 }
 
 type statusSnapshot struct {
