@@ -5,6 +5,7 @@ package keys
 import (
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/ports"
 )
@@ -48,6 +49,7 @@ type Router struct {
 
 	mu          sync.Mutex
 	pending     bool
+	pendingAlt  []byte
 	timer       ports.Timer
 	pendingDone chan struct{}
 }
@@ -64,10 +66,13 @@ func (r *Router) Route(data []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.pending {
+		pendingAlt := r.pendingAlt
 		r.stopTimer()
 		r.pending = false
-		if consumed := r.routeAfterPendingESC(data); consumed > 0 {
-			data = data[consumed:]
+		r.pendingAlt = nil
+		combined := append(append([]byte(nil), pendingAlt...), data...)
+		if consumed := r.routeAfterPendingESC(combined); consumed > len(pendingAlt) {
+			data = data[consumed-len(pendingAlt):]
 		}
 	}
 	r.route(data)
@@ -99,11 +104,17 @@ func (r *Router) route(data []byte) {
 			i += 2
 			continue
 		}
-		if action, ok := binding(next); ok {
+		remaining := data[i+1:]
+		if action, size, ok := binding(remaining); ok {
 			flush()
 			r.h.Action(action)
-			i += 2
+			i += 1 + size
 			continue
+		}
+		if partialUTF8Rune(remaining) {
+			flush()
+			r.retainESC(remaining)
+			return
 		}
 		buf = append(buf, ESC)
 		i++
@@ -117,16 +128,28 @@ func (r *Router) routeAfterPendingESC(data []byte) int {
 		r.forward([]byte{ESC, next})
 		return 1
 	}
-	if action, ok := binding(next); ok {
+	if action, size, ok := binding(data); ok {
 		r.h.Action(action)
-		return 1
+		return size
+	}
+	if partialUTF8Rune(data) {
+		r.retainESC(data)
+		return len(data)
+	}
+	if _, size := utf8.DecodeRune(data); size > 1 {
+		r.forward(append([]byte{ESC}, data[:size]...))
+		return size
 	}
 	r.forward([]byte{ESC})
 	return 0
 }
 
-func (r *Router) retainESC() {
+func (r *Router) retainESC(altBytes ...[]byte) {
 	r.pending = true
+	r.pendingAlt = nil
+	if len(altBytes) > 0 {
+		r.pendingAlt = append([]byte(nil), altBytes[0]...)
+	}
 	r.timer = r.clock.NewTimer(r.delay)
 	r.pendingDone = make(chan struct{})
 	go func(timer ports.Timer, done <-chan struct{}) {
@@ -139,7 +162,9 @@ func (r *Router) retainESC() {
 		defer r.mu.Unlock()
 		if r.pending && r.timer == timer {
 			r.pending = false
-			r.forward([]byte{ESC})
+			data := append([]byte{ESC}, r.pendingAlt...)
+			r.pendingAlt = nil
+			r.forward(data)
 		}
 	}(r.timer, r.pendingDone)
 }
@@ -155,6 +180,14 @@ func (r *Router) stopTimer() {
 	}
 }
 
+func partialUTF8Rune(data []byte) bool {
+	if len(data) == 0 || utf8.FullRune(data) {
+		return false
+	}
+	key, size := utf8.DecodeRune(data)
+	return key == utf8.RuneError && size == 1
+}
+
 func (r *Router) forward(data []byte) {
 	cp := append([]byte(nil), data...)
 	r.h.Forward(cp)
@@ -162,15 +195,40 @@ func (r *Router) forward(data []byte) {
 
 func passThroughPrefix(b byte) bool { return b == '[' || b == 'O' }
 
-func binding(b byte) (Action, bool) {
-	switch b {
-	case ' ':
-		return ActionOpenPalette, true
-	case '1', '2', '3', '4', '5', '6', '7', '8', '9':
-		return ActionSwitchTab1 + Action(b-'1'), true
-	case 'a':
-		return ActionJumpAttention, true
-	default:
-		return 0, false
+func binding(data []byte) (Action, int, bool) {
+	if len(data) == 0 {
+		return 0, 0, false
 	}
+	switch data[0] {
+	case ' ':
+		return ActionOpenPalette, 1, true
+	case 'a':
+		return ActionJumpAttention, 1, true
+	}
+
+	key, size := utf8.DecodeRune(data)
+	if key == utf8.RuneError && size == 1 {
+		return 0, 0, false
+	}
+	if idx, ok := topRowDigitIndex(key); ok {
+		return ActionSwitchTab1 + Action(idx), size, true
+	}
+	return 0, 0, false
+}
+
+var azertyTopRowDigitVariants = []rune{'&', 'é', '"', '\'', '(', '-', 'è', '_', 'ç'}
+
+// topRowDigitIndex maps the symbols emitted by physical top-row digit keys to
+// zero-based digit positions. It is modifier-agnostic so Alt+digit and future
+// Ctrl+digit bindings can share the same layout support.
+func topRowDigitIndex(key rune) (int, bool) {
+	if key >= '1' && key <= '9' {
+		return int(key - '1'), true
+	}
+	for idx, variant := range azertyTopRowDigitVariants {
+		if key == variant {
+			return idx, true
+		}
+	}
+	return 0, false
 }

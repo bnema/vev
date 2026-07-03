@@ -61,12 +61,95 @@ func TestRouterInterceptsAltDigits(t *testing.T) {
 	for b := byte('1'); b <= '9'; b++ {
 		r.Route([]byte{ESC, b})
 	}
-	require.Equal(t, []Action{
+	require.Equal(t, switchTabActions(), h.actions)
+	require.Empty(t, h.forwards)
+}
+
+func TestRouterInterceptsAltAZERTYTopRowAsDigits(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	r := NewRouter(clk, h)
+	for _, key := range []string{"&", "é", "\"", "'", "(", "-", "è", "_", "ç"} {
+		r.Route(append([]byte{ESC}, []byte(key)...))
+	}
+	require.Equal(t, switchTabActions(), h.actions)
+	require.Empty(t, h.forwards)
+}
+
+func TestRouterInterceptsAltAZERTYUTF8SplitAcrossReads(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	r := NewRouter(clk, h)
+
+	r.Route([]byte{ESC, 0xc3})
+	require.Empty(t, h.actions)
+	require.Empty(t, h.forwards)
+	require.Len(t, clk.timers, 1)
+
+	r.Route([]byte{0xa9})
+	require.Equal(t, []Action{ActionSwitchTab2}, h.actions)
+	require.Empty(t, h.forwards)
+}
+
+func TestRouterInterceptsRetainedAltAZERTYUTF8SplitAcrossReads(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	r := NewRouter(clk, h)
+
+	r.Route([]byte{ESC})
+	r.Route([]byte{0xc3})
+	require.Empty(t, h.actions)
+	require.Empty(t, h.forwards)
+	require.Len(t, clk.timers, 2)
+
+	r.Route([]byte{0xa9})
+	require.Equal(t, []Action{ActionSwitchTab2}, h.actions)
+	require.Empty(t, h.forwards)
+}
+
+func TestRouterForwardsUnboundAltUTF8SplitAcrossReads(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	r := NewRouter(clk, h)
+
+	r.Route([]byte{ESC, 0xc3})
+	r.Route([]byte{0xb1})
+
+	require.Empty(t, h.actions)
+	require.Equal(t, [][]byte{{ESC, 0xc3, 0xb1}}, h.forwards)
+}
+
+func TestTopRowDigitIndexAcceptsQWERTYAndAZERTYVariants(t *testing.T) {
+	cases := []struct {
+		key  rune
+		want int
+	}{
+		{key: '1', want: 0}, {key: '&', want: 0},
+		{key: '2', want: 1}, {key: 'é', want: 1},
+		{key: '3', want: 2}, {key: '"', want: 2},
+		{key: '4', want: 3}, {key: '\'', want: 3},
+		{key: '5', want: 4}, {key: '(', want: 4},
+		{key: '6', want: 5}, {key: '-', want: 5},
+		{key: '7', want: 6}, {key: 'è', want: 6},
+		{key: '8', want: 7}, {key: '_', want: 7},
+		{key: '9', want: 8}, {key: 'ç', want: 8},
+	}
+	for _, tc := range cases {
+		got, ok := topRowDigitIndex(tc.key)
+		require.True(t, ok, "key %q", tc.key)
+		require.Equal(t, tc.want, got, "key %q", tc.key)
+	}
+
+	_, ok := topRowDigitIndex('0')
+	require.False(t, ok)
+}
+
+func switchTabActions() []Action {
+	return []Action{
 		ActionSwitchTab1, ActionSwitchTab2, ActionSwitchTab3,
 		ActionSwitchTab4, ActionSwitchTab5, ActionSwitchTab6,
 		ActionSwitchTab7, ActionSwitchTab8, ActionSwitchTab9,
-	}, h.actions)
-	require.Empty(t, h.forwards)
+	}
 }
 
 func TestRouterInterceptsAltAForJumpAttention(t *testing.T) {
