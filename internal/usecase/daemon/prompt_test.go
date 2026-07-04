@@ -19,7 +19,7 @@ func TestEnterPromptRendersTitleAndPrefill(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(msg.Data), "Rename session")
 	require.Contains(t, string(msg.Data), "> 0")
-	require.True(t, ac.promptActive())
+	require.True(t, ac.overlays.promptActive())
 }
 
 func TestPromptSubmitRenamesAndPromotesSession(t *testing.T) {
@@ -34,7 +34,7 @@ func TestPromptSubmitRenamesAndPromotesSession(t *testing.T) {
 	d.handlePromptInput(ac, []byte("work\r"))
 	repaint := awaitFrame(t, sends, ports.MsgOutput)
 
-	require.False(t, ac.promptActive())
+	require.False(t, ac.overlays.promptActive())
 	require.Equal(t, "0work", sess.name)
 	require.False(t, sess.ephemeral)
 	out, err := ports.UnmarshalOutput(repaint.Payload)
@@ -58,7 +58,7 @@ func TestPromptSubmitErrorKeepsPromptOpen(t *testing.T) {
 	d.handlePromptInput(ac, []byte("taken\r"))
 	repaint := awaitFrame(t, sends, ports.MsgOutput)
 
-	require.True(t, ac.promptActive())
+	require.True(t, ac.overlays.promptActive())
 	require.NotEqual(t, "taken", sess.name)
 	out, err := ports.UnmarshalOutput(repaint.Payload)
 	require.NoError(t, err)
@@ -76,7 +76,7 @@ func TestPromptEscapeCancelsWithoutRename(t *testing.T) {
 	d.handlePromptInput(ac, []byte("new\x1b"))
 	awaitFrame(t, sends, ports.MsgOutput)
 
-	require.False(t, ac.promptActive())
+	require.False(t, ac.overlays.promptActive())
 	require.Equal(t, oldName, sess.name)
 }
 
@@ -92,8 +92,8 @@ func TestPaletteRNSOpensRenamePrompt(t *testing.T) {
 	d.handlePaletteInput(ac, []byte("RNS\r"))
 	out := awaitFrame(t, sends, ports.MsgOutput)
 
-	require.False(t, ac.paletteActive())
-	require.True(t, ac.promptActive())
+	require.False(t, ac.overlays.paletteActive())
+	require.True(t, ac.overlays.promptActive())
 	msg, err := ports.UnmarshalOutput(out.Payload)
 	require.NoError(t, err)
 	require.Contains(t, string(msg.Data), "Rename session")

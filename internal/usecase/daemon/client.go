@@ -32,58 +32,32 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/mouse"
-	"github.com/bnema/vev/internal/usecase/palette"
-	"github.com/bnema/vev/internal/usecase/picker"
-	promptui "github.com/bnema/vev/internal/usecase/prompt"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
 type attachedClient struct {
-	tr                    ports.Transport
-	rend                  *renderer.Renderer
-	clientID              [16]byte
-	resumeCapable         bool
-	resumeToken           uint64
-	parked                bool
-	nextStateNum          uint64
-	echoAck               atomic.Uint64
-	bars                  barCache // only touched while sendMu is held
-	size                  domain.Size
-	keys                  *keys.Router
-	sess                  Guarded[*session]
-	copyMu                sync.Mutex
-	copyMode              *scopy.Mode
-	copyPending           []byte
-	copyESC               pendingByteTimer
-	copyFeedback          string
-	copyPressRow          int
-	copyPressRowValid     bool
-	copyDragging          bool
-	normalMousePressRow   int
-	normalMousePressTop   int
-	normalMousePressValid bool
-	pickerMu              sync.Mutex
-	picker                *picker.Model
-	pickerPreview         *tab
-	pickerPending         []byte
-	pickerESC             pendingByteTimer
-	paletteMu             sync.Mutex
-	palette               *palette.Model
-	palettePending        []byte
-	promptMu              sync.Mutex
-	prompt                *promptui.Model
-	promptSubmit          func(string) error
-	promptPending         []byte
-	mouseScan             mouse.Scanner
-	themeMu               sync.Mutex
-	theme                 themeui.Theme
-	lastCursor            cursorOut
-	linkMu                sync.Mutex
-	sendMu                sync.Mutex
+	tr            ports.Transport
+	rend          *renderer.Renderer
+	overlays      *overlayRuntime
+	clientID      [16]byte
+	resumeCapable bool
+	resumeToken   uint64
+	parked        bool
+	nextStateNum  uint64
+	echoAck       atomic.Uint64
+	bars          barCache // only touched while sendMu is held
+	size          domain.Size
+	keys          *keys.Router
+	sess          Guarded[*session]
+	mouseScan     mouse.Scanner
+	themeMu       sync.Mutex
+	theme         themeui.Theme
+	lastCursor    cursorOut
+	linkMu        sync.Mutex
+	sendMu        sync.Mutex
 }
 
 type cursorOut struct {
@@ -124,6 +98,12 @@ func (p *pendingByteTimer) stop() {
 	}
 }
 
+func (ac *attachedClient) initOverlays() {
+	if ac.overlays == nil {
+		ac.overlays = newOverlayRuntime(ac)
+	}
+}
+
 func (ac *attachedClient) currentSession() *session { return ac.sess.Get() }
 
 func (ac *attachedClient) setSession(sess *session) { ac.sess.Set(sess) }
@@ -138,30 +118,6 @@ func (ac *attachedClient) setTheme(t themeui.Theme) {
 	ac.themeMu.Lock()
 	ac.theme = t
 	ac.themeMu.Unlock()
-}
-
-func (ac *attachedClient) copyModeActive() bool {
-	ac.copyMu.Lock()
-	defer ac.copyMu.Unlock()
-	return ac.copyMode != nil
-}
-
-func (ac *attachedClient) pickerActive() bool {
-	ac.pickerMu.Lock()
-	defer ac.pickerMu.Unlock()
-	return ac.picker != nil
-}
-
-func (ac *attachedClient) paletteActive() bool {
-	ac.paletteMu.Lock()
-	defer ac.paletteMu.Unlock()
-	return ac.palette != nil
-}
-
-func (ac *attachedClient) promptActive() bool {
-	ac.promptMu.Lock()
-	defer ac.promptMu.Unlock()
-	return ac.prompt != nil
 }
 
 func (ac *attachedClient) transport() ports.Transport {
@@ -362,6 +318,7 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 		resumeCapable: opts.resumeCapable,
 		resumeToken:   resumeToken,
 	}
+	ac.initOverlays()
 	ac.setSession(sess)
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac})
 	sess.mu.Lock()

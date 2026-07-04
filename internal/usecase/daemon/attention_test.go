@@ -101,6 +101,7 @@ func TestNoteAttentionDoesNotBlockOnWedgedOtherClient(t *testing.T) {
 	}).Maybe()
 	trW.EXPECT().Close().Return(nil).Maybe()
 	acW := &attachedClient{tr: trW, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	acW.initOverlays()
 	sctxW, cancelW := context.WithCancel(d.serveCtx)
 	t.Cleanup(cancelW)
 	tabW := newTestTabWithContext(newScriptPTY(nil), sctxW, cancelW)
@@ -348,6 +349,7 @@ func TestCloseRingingTabRefreshesOtherSessionBottomBar(t *testing.T) {
 
 	trB, sendsB := newCapturingTransport(t)
 	acB := &attachedClient{tr: trB, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	acB.initOverlays()
 	sctxB, cancelB := context.WithCancel(d.serveCtx)
 	t.Cleanup(cancelB)
 	tbB := newTestTabWithContext(pB, sctxB, cancelB)

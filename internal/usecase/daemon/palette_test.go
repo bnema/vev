@@ -22,21 +22,21 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	defer release2()
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	require.True(t, ac.paletteActive())
+	require.True(t, ac.overlays.paletteActive())
 	out := awaitFrame(t, sends, ports.MsgOutput)
 	msg, err := ports.UnmarshalOutput(out.Payload)
 	require.NoError(t, err)
 	require.Contains(t, string(msg.Data), "Commands")
 
 	d.handleInput(sess, ac, []byte("NXT\r"))
-	require.False(t, ac.paletteActive())
+	require.False(t, ac.overlays.paletteActive())
 	require.Equal(t, 1, activeTabIndex(sess))
 	awaitFrame(t, sends, ports.MsgOutput)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("\x1b"))
-	require.False(t, ac.paletteActive())
+	require.False(t, ac.overlays.paletteActive())
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
@@ -56,8 +56,8 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	promptFrame := awaitFrame(t, sends, ports.MsgOutput)
 	promptOutput, err := ports.UnmarshalOutput(promptFrame.Payload)
 	require.NoError(t, err)
-	require.False(t, ac.paletteActive())
-	require.True(t, ac.promptActive())
+	require.False(t, ac.overlays.paletteActive())
+	require.True(t, ac.overlays.promptActive())
 	require.Contains(t, string(promptOutput.Data), "Create session")
 
 	d.handleInput(sess, ac, []byte("scratch\r"))
@@ -68,7 +68,7 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	finalRepaint := awaitFrame(t, sends, ports.MsgOutput)
 	finalOutput, err := ports.UnmarshalOutput(finalRepaint.Payload)
 	require.NoError(t, err)
-	require.False(t, ac.promptActive())
+	require.False(t, ac.overlays.promptActive())
 	require.Equal(t, 2, sessionCount(d))
 	require.Nil(t, sess.client)
 	newSess := ac.currentSession()
@@ -89,12 +89,12 @@ func TestPaletteReopensWithSuccessfulCommandFirst(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("NXT\r"))
-	require.False(t, ac.paletteActive())
+	require.False(t, ac.overlays.paletteActive())
 	awaitFrame(t, sends, ports.MsgOutput)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
-	cmd, ok := ac.palette.Selected()
+	cmd, ok := ac.overlays.palette.Selected()
 	require.True(t, ok)
 	require.Equal(t, "NXT", cmd.Code)
 }
@@ -152,7 +152,7 @@ func TestPaletteCommandNoopRepaintsAfterClose(t *testing.T) {
 	require.Contains(t, string(paletteOutput.Data), "Commands")
 
 	d.handleInput(sess, ac, []byte("NXT\r"))
-	require.False(t, ac.paletteActive())
+	require.False(t, ac.overlays.paletteActive())
 	repaint := awaitFrame(t, sends, ports.MsgOutput)
 	repaintOutput, err := ports.UnmarshalOutput(repaint.Payload)
 	require.NoError(t, err)
@@ -169,7 +169,7 @@ func TestPaletteCreateTabErrorRepaintsAfterClose(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("CNT\r"))
-	require.False(t, ac.paletteActive())
+	require.False(t, ac.overlays.paletteActive())
 	repaint := awaitFrame(t, sends, ports.MsgOutput)
 	repaintOutput, err := ports.UnmarshalOutput(repaint.Payload)
 	require.NoError(t, err)
@@ -184,15 +184,15 @@ func TestPaletteEnterNoMatchKeepsOpenAndEscapeSplit(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("zzzz\r"))
-	require.True(t, ac.paletteActive())
+	require.True(t, ac.overlays.paletteActive())
 	awaitFrame(t, sends, ports.MsgOutput)
 
 	d.handlePaletteInput(ac, []byte{0x1b, '['})
-	require.True(t, ac.paletteActive())
-	require.Equal(t, []byte{0x1b, '['}, ac.palettePending)
+	require.True(t, ac.overlays.paletteActive())
+	require.Equal(t, []byte{0x1b, '['}, ac.overlays.palettePending)
 	d.handlePaletteInput(ac, []byte{'A'})
-	require.True(t, ac.paletteActive())
-	require.Empty(t, ac.palettePending)
+	require.True(t, ac.overlays.paletteActive())
+	require.Empty(t, ac.overlays.palettePending)
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
@@ -205,13 +205,13 @@ func TestPaletteCtrlNAndCtrlPNavigate(t *testing.T) {
 
 	d.handlePaletteInput(ac, []byte{0x0e})
 	awaitFrame(t, sends, ports.MsgOutput)
-	cmd, ok := ac.palette.Selected()
+	cmd, ok := ac.overlays.palette.Selected()
 	require.True(t, ok)
 	require.Equal(t, "CNS", cmd.Code)
 
 	d.handlePaletteInput(ac, []byte{0x10})
 	awaitFrame(t, sends, ports.MsgOutput)
-	cmd, ok = ac.palette.Selected()
+	cmd, ok = ac.overlays.palette.Selected()
 	require.True(t, ok)
 	require.Equal(t, "CNT", cmd.Code)
 }
@@ -234,10 +234,10 @@ func TestPaletteUTF8PendingCompletesFilter(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handlePaletteInput(ac, []byte{0xc3})
-	require.Equal(t, []byte{0xc3}, ac.palettePending)
+	require.Equal(t, []byte{0xc3}, ac.overlays.palettePending)
 	d.handlePaletteInput(ac, []byte{0xa9})
-	require.Empty(t, ac.palettePending)
-	require.Equal(t, "é", ac.palette.Query())
+	require.Empty(t, ac.overlays.palettePending)
+	require.Equal(t, "é", ac.overlays.palette.Query())
 }
 
 func TestPaletteRenderAndInputCanRunConcurrently(t *testing.T) {
@@ -296,17 +296,15 @@ func TestPaletteExecMethods(t *testing.T) {
 	require.Equal(t, 0, activeTabIndex(sess))
 	sess.ephemeral = true
 	require.NoError(t, exec.RenameSession())
-	require.True(t, ac.promptActive())
+	require.True(t, ac.overlays.promptActive())
 	d.closePrompt(ac)
 	require.True(t, sess.ephemeral)
 	require.NoError(t, exec.OpenSessionPicker())
-	require.True(t, ac.pickerActive())
+	require.True(t, ac.overlays.pickerActive())
 	d.closePicker(ac)
 	require.NoError(t, exec.EnterVisualMode())
-	require.True(t, ac.copyModeActive())
-	ac.copyMu.Lock()
-	ac.copyMode = nil
-	ac.copyMu.Unlock()
+	require.True(t, ac.overlays.copyActive())
+	d.exitCopyMode(ac)
 	require.NoError(t, exec.SplitRight())
 	require.NoError(t, exec.SplitLeft())
 	require.NoError(t, exec.SplitUp())

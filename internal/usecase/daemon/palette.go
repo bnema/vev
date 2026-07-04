@@ -13,18 +13,18 @@ var paletteModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title:
 
 func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	d.closePalette(ac)
-	ac.paletteMu.Lock()
-	ac.palette = palette.New(d.paletteCommands())
-	ac.palettePending = nil
-	ac.paletteMu.Unlock()
+	ac.overlays.paletteMu.Lock()
+	ac.overlays.palette = palette.New(d.paletteCommands())
+	ac.overlays.palettePending = nil
+	ac.overlays.paletteMu.Unlock()
 	d.paint(sess, ac, true)
 }
 
 func (d *Daemon) closePalette(ac *attachedClient) {
-	ac.paletteMu.Lock()
-	ac.palette = nil
-	ac.palettePending = nil
-	ac.paletteMu.Unlock()
+	ac.overlays.paletteMu.Lock()
+	ac.overlays.palette = nil
+	ac.overlays.palettePending = nil
+	ac.overlays.paletteMu.Unlock()
 }
 
 func (d *Daemon) paletteCommands() []command.Command {
@@ -75,10 +75,10 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		return
 	}
 
-	ac.paletteMu.Lock()
-	if ac.palette == nil {
-		ac.palettePending = nil
-		ac.paletteMu.Unlock()
+	ac.overlays.paletteMu.Lock()
+	if ac.overlays.palette == nil {
+		ac.overlays.palettePending = nil
+		ac.overlays.paletteMu.Unlock()
 		return
 	}
 	changed := false
@@ -87,17 +87,17 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	var cmd command.Command
 	var ok bool
 
-	routeOverlayBytes(data, &ac.palettePending, overlayEvents{
+	routeOverlayBytes(data, &ac.overlays.palettePending, overlayEvents{
 		rune: func(r rune) {
-			ac.palette.Insert(r)
+			ac.overlays.palette.Insert(r)
 			changed = true
 		},
 		backspace: func() {
-			ac.palette.Backspace()
+			ac.overlays.palette.Backspace()
 			changed = true
 		},
 		enter: func() {
-			cmd, ok = ac.palette.Selected()
+			cmd, ok = ac.overlays.palette.Selected()
 			if ok {
 				run = true
 				exit = true
@@ -105,19 +105,19 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		},
 		cancel: func() { exit = true },
 		up: func() {
-			ac.palette.Up()
+			ac.overlays.palette.Up()
 			changed = true
 		},
 		down: func() {
-			ac.palette.Down()
+			ac.overlays.palette.Down()
 			changed = true
 		},
 	})
 	if exit {
-		ac.palette = nil
-		ac.palettePending = nil
+		ac.overlays.palette = nil
+		ac.overlays.palettePending = nil
 	}
-	ac.paletteMu.Unlock()
+	ac.overlays.paletteMu.Unlock()
 
 	if run && ok {
 		if err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac}); err != nil {

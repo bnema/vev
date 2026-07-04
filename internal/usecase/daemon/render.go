@@ -32,7 +32,6 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -276,44 +275,22 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		return
 	}
 
+	ac.initOverlays()
 	ac.sendMu.Lock()
-	ac.copyMu.Lock()
-	copyActive := ac.copyMode != nil
-	var copyMode *scopy.Mode
-	if ac.copyMode != nil {
-		copyModeValue := *ac.copyMode
-		copyMode = &copyModeValue
-	}
-	copyFeedback := ac.copyFeedback
-	if copyFeedback != "" && !copyActive {
-		ac.copyFeedback = ""
-	}
-	ac.copyMu.Unlock()
-	ac.pickerMu.Lock()
-	pickerActive := ac.picker != nil
-	pickerModel := ac.picker.Clone()
-	previewTab := ac.pickerPreview
-	ac.pickerMu.Unlock()
+	overlays := ac.overlays.SnapshotForRender()
+	repaintAttachedClients := false
+	defer func() {
+		if repaintAttachedClients {
+			d.repaintAllAttachedClients()
+		}
+	}()
+	defer overlays.Unlock()
 	preview := snapshotPickerPreview(nil)
-	if previewTab != tb {
-		preview = snapshotPickerPreview(previewTab)
+	if overlays.previewTab != tb {
+		preview = snapshotPickerPreview(overlays.previewTab)
 	}
-	ac.paletteMu.Lock()
-	paletteModel := ac.palette
-	paletteActive := paletteModel != nil
-	if !paletteActive {
-		ac.paletteMu.Unlock()
-	}
-	ac.promptMu.Lock()
-	promptModel := ac.prompt
-	promptActive := promptModel != nil
-	if !promptActive {
-		ac.promptMu.Unlock()
-	}
-	if sess.ackAttention(tb) {
-		defer d.repaintAllAttachedClients()
-	}
-	bars := d.barStateFor(sess, copyFeedback)
+	repaintAttachedClients = sess.ackAttention(tb)
+	bars := d.barStateFor(sess, overlays.copyFeedback)
 	bars.theme = ac.getTheme()
 
 	styles := newThemeStyles(ac.getTheme())
@@ -332,28 +309,22 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	p := tb.focusedPane()
 	if p == nil {
 		tb.mu.Unlock()
-		if paletteActive {
-			ac.paletteMu.Unlock()
-		}
-		if promptActive {
-			ac.promptMu.Unlock()
-		}
 		ac.sendMu.Unlock()
 		return
 	}
-	if reset || copyActive || pickerActive || paletteActive || promptActive {
+	if reset || overlays.copyActive || overlays.pickerActive || overlays.paletteActive || overlays.promptActive {
 		ac.rend.Reset()
 		ac.bars.Reset()
 	}
-	if reset || pickerActive || paletteActive || promptActive {
+	if reset || overlays.pickerActive || overlays.paletteActive || overlays.promptActive {
 		ac.lastCursor.valid = false
 	}
 	frame, damage := composeClientFrameWithLayout(bars, tb, reset, layoutSnap, &ac.bars)
-	if copyActive {
-		frame, damage = composeCopyClientFrame(copyMode, tb, bars)
+	if overlays.copyActive {
+		frame, damage = composeCopyClientFrame(overlays.copyMode, tb, bars)
 	}
-	if pickerActive {
-		if previewTab == tb {
+	if overlays.pickerActive {
+		if overlays.previewTab == tb {
 			if layoutSnap.ok && tb.tree != nil && tb.tree.Root != nil && tb.tree.Root.Kind != layout.Leaf {
 				previewFrame, _ := composeTabFrameWithLayout(tb, layoutSnap.area, themeui.Theme{}, layoutSnap)
 				preview = pickerPreviewFromFrame(previewFrame)
@@ -361,19 +332,18 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 				preview = pickerPreviewFromLockedTab(tb)
 			}
 		}
-		frame, damage = composePickerClientFrame(pickerModel, preview, frame, styles)
+		frame, damage = composePickerClientFrame(overlays.pickerModel, preview, frame, styles)
 	}
-	if paletteActive {
-		frame, damage = composePaletteClientFrame(paletteModel, frame, styles)
-		ac.paletteMu.Unlock()
+	if overlays.paletteActive {
+		frame, damage = composePaletteClientFrame(overlays.paletteModel, frame, styles)
 	}
-	if promptActive {
-		frame, damage = composePromptClientFrame(promptModel, frame, styles)
-		ac.promptMu.Unlock()
+	if overlays.promptActive {
+		frame, damage = composePromptClientFrame(overlays.promptModel, frame, styles)
 	}
+	overlays.Unlock()
 	cursorContent, cursorVisible := focusedPaneContentRect(layoutSnap, p.id)
 	p.mu.Lock()
-	desiredCursor := desiredCursorOut(p.screen, cursorContent, !cursorVisible || copyActive || pickerActive || paletteActive || promptActive)
+	desiredCursor := desiredCursorOut(p.screen, cursorContent, !cursorVisible || overlays.copyActive || overlays.pickerActive || overlays.paletteActive || overlays.promptActive)
 	p.mu.Unlock()
 	data, err := ac.rend.Draw(frame, damage)
 	var cursorTail []byte

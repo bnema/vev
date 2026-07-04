@@ -142,10 +142,11 @@ func (d *Daemon) exitCopyMode(ac *attachedClient) {
 	if ac == nil {
 		return
 	}
-	ac.copyMu.Lock()
-	ac.copyMode = nil
-	ac.copyPressRowValid = false
-	ac.copyDragging = false
-	ac.normalMousePressValid = false
-	ac.copyMu.Unlock()
+	rt := ac.overlays
+	rt.copyMu.Lock()
+	rt.copyMode = nil
+	rt.copyPressRowValid = false
+	rt.copyDragging = false
+	rt.normalMousePressValid = false
+	rt.copyMu.Unlock()
 }

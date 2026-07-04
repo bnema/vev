@@ -26,6 +26,7 @@ import (
 func TestBoundedSendOutputErrTransportReturnsTransportUsedBySend(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	ac := &attachedClient{}
+	ac.initOverlays()
 	replacement := &closeTrackingTransport{}
 	sendErr := errors.New("send failed")
 	failed := &swapErrorTransport{ac: ac, replacement: replacement, err: sendErr}
@@ -119,7 +120,7 @@ func TestCopyModePaletteCommandEntersAndDoesNotForward(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("VIS\r"))
 
-	if ac.copyMode == nil {
+	if ac.overlays.copyMode == nil {
 		t.Fatal("scrollback mode not entered")
 	}
 	select {
@@ -167,7 +168,7 @@ func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 	if got, want := string(msg.Data), "\x1b]52;c;b2xkMQpvbGQy\x07"; got != want {
 		t.Fatalf("OSC52 = %q, want %q", got, want)
 	}
-	if ac.copyMode != nil {
+	if ac.overlays.copyMode != nil {
 		t.Fatal("copy mode still active after yank")
 	}
 	live := awaitFrame(t, sends, ports.MsgOutput)
@@ -280,7 +281,7 @@ func TestCopyModeEscapeRestoresLiveFullRepaint(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("q"))
 
-	if ac.copyMode != nil {
+	if ac.overlays.copyMode != nil {
 		t.Fatal("copy mode still active after q")
 	}
 	out := awaitFrame(t, sends, ports.MsgOutput)
@@ -318,8 +319,8 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 				d.handleInput(sess, ac, input)
 			}
 
-			require.NotNil(t, ac.copyMode)
-			require.Equal(t, tc.wantCursor, ac.copyMode.Cursor)
+			require.NotNil(t, ac.overlays.copyMode)
+			require.Equal(t, tc.wantCursor, ac.overlays.copyMode.Cursor)
 		})
 	}
 }
@@ -359,14 +360,14 @@ func TestCopyModeLoneEscapeExitsAfterDelay(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("\x1b"))
 	timer := <-clk.timers
-	ac.copyMu.Lock()
-	require.NotNil(t, ac.copyMode)
-	ac.copyMu.Unlock()
+	ac.overlays.copyMu.Lock()
+	require.NotNil(t, ac.overlays.copyMode)
+	ac.overlays.copyMu.Unlock()
 	timer.ch <- time.Now()
 	require.Eventually(t, func() bool {
-		ac.copyMu.Lock()
-		defer ac.copyMu.Unlock()
-		return ac.copyMode == nil
+		ac.overlays.copyMu.Lock()
+		defer ac.overlays.copyMu.Unlock()
+		return ac.overlays.copyMode == nil
 	}, time.Second, 5*time.Millisecond)
 }
 
@@ -387,15 +388,15 @@ func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
 
 	timer.ch <- time.Now()
 	require.Never(t, func() bool {
-		ac.copyMu.Lock()
-		defer ac.copyMu.Unlock()
-		return ac.copyMode == nil
+		ac.overlays.copyMu.Lock()
+		defer ac.overlays.copyMu.Unlock()
+		return ac.overlays.copyMode == nil
 	}, 50*time.Millisecond, 5*time.Millisecond)
-	ac.copyMu.Lock()
-	require.Nil(t, ac.copyESC.timer)
-	require.Nil(t, ac.copyESC.done)
-	require.Empty(t, ac.copyPending)
-	ac.copyMu.Unlock()
+	ac.overlays.copyMu.Lock()
+	require.Nil(t, ac.overlays.copyESC.timer)
+	require.Nil(t, ac.overlays.copyESC.done)
+	require.Empty(t, ac.overlays.copyPending)
+	ac.overlays.copyMu.Unlock()
 }
 
 func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
@@ -417,7 +418,7 @@ func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
 			awaitFrame(t, sends, ports.MsgOutput)
 			d.handleInput(sess, ac, tc.input)
 
-			if ac.copyMode != nil {
+			if ac.overlays.copyMode != nil {
 				t.Fatal("copy mode still active after empty yank")
 			}
 			out := awaitFrame(t, sends, ports.MsgOutput)

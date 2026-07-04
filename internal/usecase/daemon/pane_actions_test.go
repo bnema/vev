@@ -150,12 +150,14 @@ func TestFocusDirMovesFocusAndExitsCopyMode(t *testing.T) {
 	tb.panes["pane-1"].rect = domain.Rect{Width: 20, Height: 10}
 	tb.panes["pane-2"].rect = domain.Rect{X: 21, Width: 20, Height: 10}
 	tr, _ := newCapturingTransport(t)
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 41, Rows: 12}, copyMode: &scopy.Mode{}}
+	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 41, Rows: 12}}
+	ac.initOverlays()
+	ac.overlays.copyMode = &scopy.Mode{}
 
 	require.NoError(t, d.focusDir(sess, ac, layout.Right))
 
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
-	require.Nil(t, ac.copyMode)
+	require.Nil(t, ac.overlays.copyMode)
 	oldPTY.AssertNotCalled(t, "Resize", mock.Anything)
 	newPTY.AssertNotCalled(t, "Resize", mock.Anything)
 }
@@ -301,6 +303,7 @@ func TestCloseOriginalPaneLeavesSurvivorFunctional(t *testing.T) {
 	require.Equal(t, layout.PaneID("pane-2"), tb.focusedPane().id)
 
 	ac := &attachedClient{}
+	ac.initOverlays()
 	ac.setSession(sess)
 	daemonKeyHandler{d: d, ac: ac}.Forward([]byte("Z"))
 	require.Equal(t, []byte("Z"), <-writes)
