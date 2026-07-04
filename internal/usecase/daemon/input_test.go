@@ -79,6 +79,21 @@ func TestAltCForwardsToPTY(t *testing.T) {
 	releasePTY()
 }
 
+func TestBracketedMultilinePasteForwardsDelimitersAndNewlines(t *testing.T) {
+	writes := make(chan []byte, 1)
+	p, releasePTY := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	pane := sess.tabs[0].focusedPane()
+	pane.screen.Write([]byte("\x1b[?2004h"))
+	require.True(t, pane.screen.BracketedPasteMode())
+
+	paste := []byte("\x1b[200~first line\nsecond line\n\x1b[201~")
+	d.handleInput(sess, ac, paste)
+
+	require.Equal(t, paste, <-writes)
+	releasePTY()
+}
+
 func TestPaletteNextPreviousSwitchActiveTab(t *testing.T) {
 	cases := []struct {
 		name      string

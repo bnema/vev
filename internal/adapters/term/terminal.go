@@ -21,14 +21,16 @@ var _ ports.Terminal = (*Terminal)(nil)
 // Escape sequences for alt-screen and cursor visibility control. All
 // emissions go through the batched writer and are explicitly flushed.
 const (
-	altScreenEnter     = "\x1b[?1049h"
-	altScreenExit      = "\x1b[?1049l"
-	cursorHide         = "\x1b[?25l"
-	cursorShow         = "\x1b[?25h"
-	cursorStyleDefault = "\x1b[0 q"
-	mouseEnable        = "\x1b[?1002h\x1b[?1006h"
-	mouseDisable       = "\x1b[?1002l\x1b[?1006l"
-	oscColorQuery      = "\x1b]10;?\x07\x1b]11;?\x07"
+	altScreenEnter        = "\x1b[?1049h"
+	altScreenExit         = "\x1b[?1049l"
+	cursorHide            = "\x1b[?25l"
+	cursorShow            = "\x1b[?25h"
+	cursorStyleDefault    = "\x1b[0 q"
+	mouseEnable           = "\x1b[?1002h\x1b[?1006h"
+	mouseDisable          = "\x1b[?1002l\x1b[?1006l"
+	bracketedPasteEnable  = "\x1b[?2004h"
+	bracketedPasteDisable = "\x1b[?2004l"
+	oscColorQuery         = "\x1b]10;?\x07\x1b]11;?\x07"
 )
 
 // bufSize is the batched writer's buffer capacity.
@@ -105,7 +107,7 @@ func (t *Terminal) EnterRaw() (func() error, error) {
 	}
 	t.orig = old
 
-	if _, err := t.bw.WriteString(altScreenEnter + cursorHide + mouseEnable + oscColorQuery); err != nil {
+	if _, err := t.bw.WriteString(altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + oscColorQuery); err != nil {
 		_ = t.restoreRawLocked()
 		return nil, fmt.Errorf("term: enter alt screen: %w", err)
 	}
@@ -139,7 +141,7 @@ func (t *Terminal) restore() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	_, werr := t.bw.WriteString(cursorShow + cursorStyleDefault + mouseDisable + altScreenExit)
+	_, werr := t.bw.WriteString(cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + altScreenExit)
 	ferr := t.bw.Flush()
 
 	rerr := t.restoreRawLocked()

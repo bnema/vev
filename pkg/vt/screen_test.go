@@ -1352,10 +1352,10 @@ func TestResize(t *testing.T) {
 			},
 		},
 		{
-			name: "style mouse and cursor modes survive",
+			name: "style mouse cursor and bracketed paste modes survive",
 			run: func(t *testing.T) {
 				s := NewScreen(5, 2)
-				s.Write([]byte("\x1b[1m\x1b[?1000h\x1b[?1006h\x1b[?25l\x1b[3 q"))
+				s.Write([]byte("\x1b[1m\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l\x1b[3 q"))
 
 				s.Resize(6, 3)
 
@@ -1365,11 +1365,18 @@ func TestResize(t *testing.T) {
 				if mode, sgr := s.MouseMode(); mode != 1000 || !sgr {
 					t.Fatalf("mouse mode = (%d,%v), want (1000,true)", mode, sgr)
 				}
+				if !s.BracketedPasteMode() {
+					t.Fatal("bracketed paste mode was reset")
+				}
 				if s.CursorVisible() {
 					t.Fatal("cursor visibility was reset")
 				}
 				if style, ok := s.CursorStyle(); style != 3 || !ok {
 					t.Fatalf("cursor style = (%d,%v), want (3,true)", style, ok)
+				}
+				s.Write([]byte("\x1b[?2004l"))
+				if s.BracketedPasteMode() {
+					t.Fatal("bracketed paste mode remained enabled after reset")
 				}
 			},
 		},
