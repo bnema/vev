@@ -88,7 +88,9 @@ var processClientID = newClientID()
 
 func newClientID() [16]byte {
 	var id [16]byte
-	_, _ = rand.Read(id[:])
+	if _, err := rand.Read(id[:]); err != nil {
+		panic("crypto/rand failed generating client ID: " + err.Error())
+	}
 	return id
 }
 
@@ -105,6 +107,8 @@ type reconnectBackoff struct {
 }
 
 var defaultReconnectBackoff = reconnectBackoff{initial: 100 * time.Millisecond, max: 2 * time.Second}
+
+var reconnectSleep = sleepReconnect
 
 const (
 	statusReconnect = "\r\x1b[2Kreconnecting…"
@@ -175,7 +179,7 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, intent u
 				return err
 			}
 			drawStatus()
-			if !sleepReconnect(ctx, backoff) {
+			if !reconnectSleep(ctx, backoff) {
 				return ctx.Err()
 			}
 			backoff = nextReconnectBackoff(backoff, defaultReconnectBackoff.max)
@@ -183,9 +187,11 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, intent u
 			continue
 		}
 		ms.dialed = true
-		backoff = defaultReconnectBackoff.initial
 
 		result := attachOnce(ctx, transport, term, attemptIntent, name, resumeToken, processClientID, &ms, enterRaw, clearStatus)
+		if result.welcomed {
+			backoff = defaultReconnectBackoff.initial
+		}
 		_ = transport.Close()
 		if result.resumeToken != 0 {
 			resumeToken = result.resumeToken
@@ -199,7 +205,7 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, intent u
 			return result.err
 		}
 		drawStatus()
-		if !sleepReconnect(ctx, backoff) {
+		if !reconnectSleep(ctx, backoff) {
 			clearStatus()
 			return ctx.Err()
 		}
@@ -255,6 +261,7 @@ func (d singleTransportDialer) Dial(context.Context) (ports.Transport, error) {
 
 type attachResult struct {
 	resumeToken uint64
+	welcomed    bool
 	err         error
 }
 
@@ -310,7 +317,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 
 	// 3. Enter raw mode after Welcome; Run owns restoration.
 	if err := enterRaw(); err != nil {
-		return attachResult{resumeToken: resumeToken, err: err}
+		return attachResult{resumeToken: resumeToken, welcomed: true, err: err}
 	}
 	clearStatus()
 
@@ -338,37 +345,37 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 			// context was cancelled. A queued sender error takes priority.
 			select {
 			case serr := <-sendErrCh:
-				return attachResult{resumeToken: resumeToken, err: fmt.Errorf("vev: sending to daemon: %w", serr)}
+				return attachResult{resumeToken: resumeToken, welcomed: true, err: fmt.Errorf("vev: sending to daemon: %w", serr)}
 			default:
-				return attachResult{resumeToken: resumeToken}
+				return attachResult{resumeToken: resumeToken, welcomed: true}
 			}
 		case r := <-recvCh:
 			if r.err != nil {
 				if errors.Is(r.err, io.EOF) {
-					return attachResult{resumeToken: resumeToken, err: fmt.Errorf("vev: daemon vanished (missing: %v): %w", ms.missing(), r.err)}
+					return attachResult{resumeToken: resumeToken, welcomed: true, err: fmt.Errorf("vev: daemon vanished (missing: %v): %w", ms.missing(), r.err)}
 				}
-				return attachResult{resumeToken: resumeToken, err: fmt.Errorf("vev: receiving from daemon: %w", r.err)}
+				return attachResult{resumeToken: resumeToken, welcomed: true, err: fmt.Errorf("vev: receiving from daemon: %w", r.err)}
 			}
 			switch r.frame.Type {
 			case ports.MsgOutput:
 				o, derr := ports.UnmarshalOutput(r.frame.Payload)
 				if derr != nil {
-					return attachResult{resumeToken: resumeToken, err: fmt.Errorf("vev: decoding output: %w", derr)}
+					return attachResult{resumeToken: resumeToken, welcomed: true, err: fmt.Errorf("vev: decoding output: %w", derr)}
 				}
 				if _, werr := term.Out().Write(o.Data); werr != nil {
-					return attachResult{resumeToken: resumeToken, err: fmt.Errorf("vev: writing terminal output: %w", werr)}
+					return attachResult{resumeToken: resumeToken, welcomed: true, err: fmt.Errorf("vev: writing terminal output: %w", werr)}
 				}
 				if ferr := term.Flush(); ferr != nil {
-					return attachResult{resumeToken: resumeToken, err: fmt.Errorf("vev: flushing terminal: %w", ferr)}
+					return attachResult{resumeToken: resumeToken, welcomed: true, err: fmt.Errorf("vev: flushing terminal: %w", ferr)}
 				}
 				ms.firstOutput = true
 			case ports.MsgDetached:
 				d, derr := ports.UnmarshalDetached(r.frame.Payload)
 				if derr != nil {
-					return attachResult{resumeToken: resumeToken, err: fmt.Errorf("vev: decoding detached: %w", derr)}
+					return attachResult{resumeToken: resumeToken, welcomed: true, err: fmt.Errorf("vev: decoding detached: %w", derr)}
 				}
 				ms.detached = true
-				return attachResult{resumeToken: resumeToken, err: detachedResult(d.Reason)}
+				return attachResult{resumeToken: resumeToken, welcomed: true, err: detachedResult(d.Reason)}
 			case ports.MsgPong:
 				// Liveness reply; nothing to do.
 			default:

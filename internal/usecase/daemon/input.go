@@ -34,16 +34,12 @@ import (
 	"github.com/bnema/vev/internal/usecase/mouse"
 )
 
-func (d *Daemon) handleSequencedInput(sess *session, ac *attachedClient, seq uint64, data []byte) {
+func (d *Daemon) handleSequencedInput(sess *session, ac *attachedClient, _ uint64, data []byte) {
+	// Do not acknowledge client-side echo prediction here: input has only been
+	// accepted/routed, not necessarily echoed by the PTY and incorporated into a
+	// rendered screen state. Until prediction is implemented against rendered
+	// output state, EchoAck must remain conservative.
 	d.handleInput(sess, ac, data)
-	if seq > 0 {
-		for {
-			cur := ac.echoAck.Load()
-			if seq <= cur || ac.echoAck.CompareAndSwap(cur, seq) {
-				break
-			}
-		}
-	}
 }
 
 func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {

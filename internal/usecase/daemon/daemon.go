@@ -441,7 +441,7 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 	}
 
 	if err := ac.send(frameWelcome(sess, ac)); err != nil {
-		d.clientGone(sess, ac, false)
+		d.clientGone(sess, ac, tr, false)
 		return
 	}
 	d.firstPaint(sess, ac, h.Size)

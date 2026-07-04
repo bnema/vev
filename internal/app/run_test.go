@@ -393,39 +393,6 @@ func (d namedDialer) Dial(context.Context) (ports.Transport, error) {
 	return nil, errors.New("not used")
 }
 
-func TestSSHTargetHost(t *testing.T) {
-	tests := []struct {
-		target string
-		want   string
-	}{
-		{target: "example.com", want: "example.com"},
-		{target: "user@example.com", want: "example.com"},
-		{target: "example.com:2222", want: "example.com"},
-		{target: "user@[2001:db8::1]:2222", want: "2001:db8::1"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.target, func(t *testing.T) {
-			if got := sshTargetHost(tt.target); got != tt.want {
-				t.Fatalf("sshTargetHost(%q) = %q, want %q", tt.target, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestShellQuote(t *testing.T) {
-	tests := map[string]string{
-		"vev":        "'vev'",
-		"has space":  "'has space'",
-		"can't stop": "'can'\\''t stop'",
-		"":           "''",
-	}
-	for in, want := range tests {
-		if got := shellQuote(in); got != want {
-			t.Fatalf("shellQuote(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestRunAttachWithDepsBuildsRemoteDialer(t *testing.T) {
 	var gotTarget, gotSession, gotDialer string
 	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", runAttachDeps{

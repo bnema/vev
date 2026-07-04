@@ -2,6 +2,7 @@ package dgram
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net"
 	"sync"
@@ -207,6 +208,117 @@ func TestOutputRetransmitsUntilAck(t *testing.T) {
 	}
 }
 
+func TestReliableDeliveryPreservesSequenceOrder(t *testing.T) {
+	aPC, bPC := newPair()
+	a, _ := NewTransport(aPC, testAddr("b"), key(), 1, 2)
+	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+
+	for i := 0; i < 100; i++ {
+		if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 100; i++ {
+		got := recvWithin(t, b, time.Second)
+		if got.Type != ports.MsgOutput || len(got.Payload) != 1 || got.Payload[0] != byte(i) {
+			t.Fatalf("frame %d delivered out of order: %+v", i, got)
+		}
+	}
+}
+
+func TestAckProcessingContinuesWhenConsumerBackpressured(t *testing.T) {
+	aPC, bPC := newPair()
+	a, _ := NewTransport(aPC, testAddr("b"), key(), 1, 2)
+	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+
+	for i := 0; i < cap(b.in)+20; i++ {
+		if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		a.mu.Lock()
+		pending := len(a.pending)
+		a.mu.Unlock()
+		if pending == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	a.mu.Lock()
+	pending := len(a.pending)
+	a.mu.Unlock()
+	t.Fatalf("acks blocked behind undrained consumer; pending=%d", pending)
+}
+
+func TestProbeTimeoutAndSuccess(t *testing.T) {
+	aPC, bPC := newPair()
+	a, _ := NewTransport(aPC, testAddr("b"), key(), 1, 2)
+	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	if err := a.Probe(ctx); err != nil {
+		cancel()
+		t.Fatalf("probe success: %v", err)
+	}
+	cancel()
+
+	bPC.drop = func(_ []byte, addr net.Addr) bool { return addr.String() == "a" }
+	ctx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := a.Probe(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("probe timeout err=%v, want context deadline", err)
+	}
+}
+
+func TestRecvUnblocksWhenPeerSilent(t *testing.T) {
+	aPC, bPC := newPair()
+	a, _ := NewTransport(aPC, testAddr("b"), key(), 1, 2)
+	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+	a.mu.Lock()
+	a.silence = 75 * time.Millisecond
+	a.lastHeard = time.Now().Add(-time.Second)
+	a.mu.Unlock()
+
+	_, err := recvErrWithin(t, a, time.Second)
+	if !errors.Is(err, ErrLinkDead) {
+		t.Fatalf("Recv err=%v, want ErrLinkDead", err)
+	}
+}
+
+func TestPendingReliableQueueBounded(t *testing.T) {
+	aPC, bPC := newPair()
+	aPC.drop = func(_ []byte, addr net.Addr) bool { return addr.String() == "b" }
+	a, _ := NewTransport(aPC, testAddr("b"), key(), 1, 2)
+	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+
+	for i := 0; i < maxPendingReliable; i++ {
+		if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte{byte(i)}}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("full")}); !errors.Is(err, ErrPendingFull) {
+		t.Fatalf("send past bound err=%v, want ErrPendingFull", err)
+	}
+	a.mu.Lock()
+	pending := len(a.pending)
+	a.mu.Unlock()
+	if pending > maxPendingReliable {
+		t.Fatalf("pending=%d, want <= %d", pending, maxPendingReliable)
+	}
+}
+
 func recvMaybe(tr *Transport, d time.Duration) (ports.Frame, bool) {
 	ch := make(chan ports.Frame, 1)
 	go func() { f, _ := tr.Recv(); ch <- f }()
@@ -228,5 +340,25 @@ func recvWithin(t *testing.T, tr *Transport, d time.Duration) ports.Frame {
 	case <-time.After(d):
 		t.Fatal("timeout")
 		return ports.Frame{}
+	}
+}
+
+func recvErrWithin(t *testing.T, tr *Transport, d time.Duration) (ports.Frame, error) {
+	t.Helper()
+	type result struct {
+		f   ports.Frame
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		f, err := tr.Recv()
+		ch <- result{f: f, err: err}
+	}()
+	select {
+	case r := <-ch:
+		return r.f, r.err
+	case <-time.After(d):
+		t.Fatal("timeout")
+		return ports.Frame{}, nil
 	}
 }

@@ -49,7 +49,6 @@ type attachedClient struct {
 	resumeCapable         bool
 	resumeToken           uint64
 	parked                bool
-	ackedStateNum         uint64
 	nextStateNum          uint64
 	echoAck               atomic.Uint64
 	bars                  barCache // only touched while sendMu is held
@@ -192,6 +191,21 @@ func (ac *attachedClient) closeCapturedTransport(tr ports.Transport) error {
 	return tr.Close()
 }
 
+func (ac *attachedClient) transportIs(tr ports.Transport) bool {
+	ac.linkMu.Lock()
+	defer ac.linkMu.Unlock()
+	return ac.tr == tr
+}
+
+func (ac *attachedClient) currentTransportIs(tr ports.Transport) bool {
+	return tr != nil && ac.transportIs(tr)
+}
+
+func (ac *attachedClient) nextOutputFrameLocked(b []byte) ports.Frame {
+	ac.nextStateNum++
+	return frameOutputState(b, ac.nextStateNum, ac.echoAck.Load())
+}
+
 // send serialises a frame onto the client's transport.
 func (ac *attachedClient) send(f ports.Frame) error {
 	ac.sendMu.Lock()
@@ -213,10 +227,26 @@ func (d *Daemon) boundedSend(ac *attachedClient, f ports.Frame) {
 }
 
 func (d *Daemon) boundedSendErr(ac *attachedClient, f ports.Frame) error {
+	return d.boundedSendWith(ac, func() error { return ac.send(f) })
+}
+
+func (d *Daemon) boundedSendOutputErr(ac *attachedClient, b []byte) error {
+	return d.boundedSendWith(ac, func() error {
+		ac.sendMu.Lock()
+		defer ac.sendMu.Unlock()
+		tr := ac.transport()
+		if tr == nil {
+			return errors.New("client transport is nil")
+		}
+		return tr.Send(ac.nextOutputFrameLocked(b))
+	})
+}
+
+func (d *Daemon) boundedSendWith(ac *attachedClient, send func() error) error {
 	timer := d.clock.NewTimer(detachNotifyTimeout)
 	result := make(chan error, 1)
 	go func() {
-		result <- ac.send(f)
+		result <- send()
 	}()
 	select {
 	case err := <-result:
@@ -286,7 +316,7 @@ type attachClientOptions struct {
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, *attachedClient) {
 	resumeToken := uint64(0)
 	if opts.resumeCapable {
-		resumeToken = newResumeToken()
+		resumeToken = d.nextResumeTokenLocked()
 	}
 	ac := &attachedClient{
 		tr:            tr,
@@ -380,18 +410,24 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 // runConnLoop is the per-connection input router: it pumps client messages
 // until detach, EOF, or a transport error.
 func (d *Daemon) runConnLoop(ac *attachedClient) {
+	tr := ac.transport()
+	if tr == nil {
+		return
+	}
 	for {
+		if !ac.currentTransportIs(tr) {
+			return
+		}
 		sess := ac.currentSession()
 		if sess == nil {
 			return
 		}
-		tr := ac.transport()
-		if tr == nil {
-			return
-		}
 		f, err := tr.Recv()
 		if err != nil {
-			d.clientGone(sess, ac, false)
+			d.clientGone(sess, ac, tr, false)
+			return
+		}
+		if !ac.currentTransportIs(tr) {
 			return
 		}
 		sess = ac.currentSession()
@@ -412,12 +448,11 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 				d.applyTheme(sess, ac, th)
 			}
 		case ports.MsgDetach:
-			d.clientGone(sess, ac, true)
+			d.clientGone(sess, ac, tr, true)
 			return
 		case ports.MsgAck:
-			if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
-				ac.ackedStateNum = ack.AckedStateNum
-			}
+			// Output state ACKs are reserved for the datagram renderer path; the
+			// reliable transport daemon has no state reader today.
 		case ports.MsgPing:
 			_ = ac.send(framePong())
 		default:
@@ -430,7 +465,10 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 // clientGone detaches ac if it is still the session's current client. An
 // ephemeral session dies with its client; a named one survives headless. When
 
-func (d *Daemon) clientGone(sess *session, ac *attachedClient, explicit bool) {
+func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
+	if failed != nil && !ac.currentTransportIs(failed) {
+		return // stale connection loop; a newer transport owns this client
+	}
 	if !sess.detachIfCurrent(ac) {
 		return // already displaced by a newer client; nothing to do
 	}
@@ -441,7 +479,10 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, explicit bool) {
 	if !ephemeral {
 		d.refreshSessionCwd(sess)
 	}
-	oldTr := ac.transport()
+	oldTr := failed
+	if oldTr == nil {
+		oldTr = ac.transport()
+	}
 	if !explicit && d.parkAttachment(sess, ac) {
 		_ = ac.closeCapturedTransport(oldTr)
 		return
@@ -525,17 +566,19 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 // detachOnSendError drops a client whose transport failed. Like every other
 // detach path, losing the client kills an ephemeral session (its lifetime is
 // its client's); a named session keeps running headless.
-func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient) {
+func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed ports.Transport) {
+	if failed != nil && !ac.currentTransportIs(failed) {
+		return
+	}
 	if sess.detachIfCurrent(ac) {
 		d.unregisterPreview(ac)
 		d.resetScreenDefaultColors(sess)
-		oldTr := ac.transport()
 		if d.parkAttachment(sess, ac) {
-			_ = ac.closeCapturedTransport(oldTr)
+			_ = ac.closeCapturedTransport(failed)
 			d.log.Warn("parked client after send error", "session", sess.name)
 			return
 		}
-		_ = ac.closeCapturedTransport(oldTr)
+		_ = ac.closeCapturedTransport(failed)
 		d.log.Warn("detached client after send error", "session", sess.name)
 		sess.mu.Lock()
 		ephemeral := sess.ephemeral

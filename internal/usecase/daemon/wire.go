@@ -36,9 +36,6 @@ func frameWelcome(s *session, ac *attachedClient) ports.Frame {
 		Capabilities: ports.CapabilityResume,
 		ResumeToken:  ac.resumeToken,
 	}
-	if ac.resumeCapable && ac.resumeToken == 0 {
-		w.ResumeToken = 0
-	}
 	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(w)}
 }
 
@@ -46,16 +43,8 @@ func frameError(code uint16, text string) ports.Frame {
 	return ports.Frame{Type: ports.MsgError, Payload: ports.MarshalErrorMsg(ports.ErrorMsg{Code: code, Text: text})}
 }
 
-func frameOutput(b []byte) ports.Frame {
-	return frameOutputState(b, 0)
-}
-
-func frameOutputState(b []byte, state uint64, echoAck ...uint64) ports.Frame {
-	ack := uint64(0)
-	if len(echoAck) > 0 {
-		ack = echoAck[0]
-	}
-	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{NewStateNum: state, EchoAck: ack, Data: b})}
+func frameOutputState(b []byte, state uint64, echoAck uint64) ports.Frame {
+	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{NewStateNum: state, EchoAck: echoAck, Data: b})}
 }
 
 func frameDetached(reason uint8) ports.Frame {

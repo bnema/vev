@@ -15,9 +15,15 @@ import (
 type closeTrackingTransport struct {
 	mu     sync.Mutex
 	closed bool
+	sends  []ports.Frame
 }
 
-func (t *closeTrackingTransport) Send(ports.Frame) error { return nil }
+func (t *closeTrackingTransport) Send(f ports.Frame) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.sends = append(t.sends, f)
+	return nil
+}
 func (t *closeTrackingTransport) Recv() (ports.Frame, error) {
 	return ports.Frame{}, errors.New("closed")
 }
@@ -31,6 +37,12 @@ func (t *closeTrackingTransport) Closed() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.closed
+}
+
+func (t *closeTrackingTransport) Sends() []ports.Frame {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]ports.Frame(nil), t.sends...)
 }
 
 func helloResumeCapable(intent uint8, name string, token uint64) ports.Hello {
@@ -56,7 +68,7 @@ func TestNamedLinkLossParksButEphemeralLinkLossKills(t *testing.T) {
 	token := ac.resumeToken
 	require.NotZero(t, token)
 
-	d.clientGone(sess, ac, false)
+	d.clientGone(sess, ac, ac.transport(), false)
 	require.Equal(t, 1, sessionCount(d), "named session survives parked link loss")
 	require.Nil(t, sess.client)
 	d.mu.Lock()
@@ -70,7 +82,7 @@ func TestNamedLinkLossParksButEphemeralLinkLossKills(t *testing.T) {
 	tr2, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
 	es, eac, err := d2.route(helloResumeCapable(ports.IntentEphemeral, "", 0), tr2)
 	require.NoError(t, err)
-	d2.clientGone(es, eac, false)
+	d2.clientGone(es, eac, eac.transport(), false)
 	require.Equal(t, 0, sessionCount(d2), "ephemeral link loss still destroys session")
 }
 
@@ -83,7 +95,7 @@ func TestResumeRebindsRotatesAndDoesNotOpenPTY(t *testing.T) {
 	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
 	require.NoError(t, err)
 	oldToken := ac.resumeToken
-	d.clientGone(sess, ac, false)
+	d.clientGone(sess, ac, ac.transport(), false)
 
 	tr2, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
 	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, "work", oldToken), tr2)
@@ -103,7 +115,7 @@ func TestResumeClientIDMismatchDoesNotConsumeParkedToken(t *testing.T) {
 	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
 	require.NoError(t, err)
 	token := ac.resumeToken
-	d.clientGone(sess, ac, false)
+	d.clientGone(sess, ac, ac.transport(), false)
 
 	wrongClient := helloResumeCapable(ports.IntentResume, "work", token)
 	wrongClient.ClientID = [16]byte{9, 9, 9, 9}
@@ -158,7 +170,7 @@ func TestExplicitDetachDoesNotPark(t *testing.T) {
 	tr, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
 	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
 	require.NoError(t, err)
-	d.clientGone(sess, ac, true)
+	d.clientGone(sess, ac, ac.transport(), true)
 	d.mu.Lock()
 	parked := len(d.parked)
 	d.mu.Unlock()
@@ -174,7 +186,7 @@ func TestParkExpiryAndShutdownCleanup(t *testing.T) {
 	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
 	require.NoError(t, err)
 	token := ac.resumeToken
-	d.clientGone(sess, ac, false)
+	d.clientGone(sess, ac, ac.transport(), false)
 	timer := <-clk.timers
 	timer.ch <- clk.Now()
 	require.Eventually(t, func() bool {
@@ -190,7 +202,7 @@ func TestParkExpiryAndShutdownCleanup(t *testing.T) {
 	tr2, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
 	sess2, ac2, err := d2.route(helloResumeCapable(ports.IntentNew, "other", 0), tr2)
 	require.NoError(t, err)
-	d2.clientGone(sess2, ac2, false)
+	d2.clientGone(sess2, ac2, ac2.transport(), false)
 	d2.shutdownAll(ports.ReasonServerShutdown)
 	d2.mu.Lock()
 	parked := len(d2.parked)
@@ -206,7 +218,7 @@ func TestKilledSessionPurgesParkedResumeToken(t *testing.T) {
 	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
 	require.NoError(t, err)
 	token := ac.resumeToken
-	d.clientGone(sess, ac, false)
+	d.clientGone(sess, ac, ac.transport(), false)
 
 	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, true))
 	d.mu.Lock()
@@ -226,7 +238,7 @@ func TestStaleParkedTokenCannotStealActiveAttachment(t *testing.T) {
 	sess, oldAC, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
 	require.NoError(t, err)
 	token := oldAC.resumeToken
-	d.clientGone(sess, oldAC, false)
+	d.clientGone(sess, oldAC, oldAC.transport(), false)
 
 	activeTr := &closeTrackingTransport{}
 	_, activeAC, err := d.route(helloResumeCapable(ports.IntentAttach, "work", 0), activeTr)
@@ -242,4 +254,53 @@ func TestStaleParkedTokenCannotStealActiveAttachment(t *testing.T) {
 	require.False(t, ok)
 	require.Nil(t, resumedAC)
 	require.Same(t, activeAC, sess.client)
+}
+
+func TestStaleClientGoneDoesNotDetachOrCloseFreshTransport(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+
+	oldTr := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTr)
+	require.NoError(t, err)
+	freshTr := &closeTrackingTransport{}
+	ac.replaceTransport(freshTr)
+
+	d.clientGone(sess, ac, oldTr, false)
+
+	require.Same(t, ac, sess.client, "stale connection must not detach current client")
+	require.False(t, oldTr.Closed(), "stale transport is owned by its own loop/handler")
+	require.False(t, freshTr.Closed(), "fresh resumed transport must not be closed by stale loop")
+}
+
+func TestOutputStateNumberingIsSharedAndMonotone(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	tr := &closeTrackingTransport{}
+	ac := &attachedClient{tr: tr}
+
+	require.NoError(t, d.boundedSendOutputErr(ac, []byte("copy")))
+	require.NoError(t, d.boundedSendOutputErr(ac, []byte("more")))
+
+	sends := tr.Sends()
+	require.Len(t, sends, 2)
+	first, err := ports.UnmarshalOutput(sends[0].Payload)
+	require.NoError(t, err)
+	second, err := ports.UnmarshalOutput(sends[1].Payload)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), first.NewStateNum)
+	require.Equal(t, uint64(2), second.NewStateNum)
+}
+
+func TestSequencedInputDoesNotPrematurelyEchoAck(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	tr := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
+	require.NoError(t, err)
+
+	d.handleSequencedInput(sess, ac, 42, []byte("x"))
+
+	require.Zero(t, ac.echoAck.Load())
 }

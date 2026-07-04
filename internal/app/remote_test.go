@@ -1,37 +1,6 @@
 package app
 
-import (
-	"context"
-	"strings"
-	"testing"
-)
-
-func TestLimitedBufferCapsBootstrapStderr(t *testing.T) {
-	var b limitedBuffer
-	chunk := strings.Repeat("x", maxBootstrapStderr+1024)
-	n, err := b.Write([]byte(chunk))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != len(chunk) {
-		t.Fatalf("n=%d, want %d", n, len(chunk))
-	}
-	if got := len(b.String()); got != maxBootstrapStderr {
-		t.Fatalf("captured=%d, want %d", got, maxBootstrapStderr)
-	}
-}
-
-func TestRemoteDatagramDialerReportsUDPAndStdioFailures(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	_, err := (remoteDatagramDialer{target: "example.invalid"}).Dial(context.Background())
-	if err == nil {
-		t.Fatal("expected dial error")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "datagram dial failed") || !strings.Contains(msg, "stdio fallback failed") {
-		t.Fatalf("error %q does not include both failures", msg)
-	}
-}
+import "testing"
 
 func TestParseRemoteAttachTarget(t *testing.T) {
 	tests := []struct {

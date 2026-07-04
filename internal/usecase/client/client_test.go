@@ -531,17 +531,6 @@ func TestAttachForwardsResize(t *testing.T) {
 	}
 }
 
-type testDialer struct {
-	tr    ports.Transport
-	err   error
-	calls atomic.Int32
-}
-
-func (d *testDialer) Dial(context.Context) (ports.Transport, error) {
-	d.calls.Add(1)
-	return d.tr, d.err
-}
-
 func TestRunRestoresRawModeAfterAttachError(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
@@ -558,7 +547,8 @@ func TestRunRestoresRawModeAfterAttachError(t *testing.T) {
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
-	d := &testDialer{tr: tr}
+	d := portsmocks.NewMockDialer(t)
+	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 
 	err := client.Run(context.Background(), d, tm, ports.IntentEphemeral, "")
 	require.Error(t, err)
@@ -577,23 +567,23 @@ func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
 		nil,
 	).Once()
 	tr.EXPECT().Close().Return(nil).Once()
-	d := &testDialer{tr: tr}
+	d := portsmocks.NewMockDialer(t)
+	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 
 	err := client.Run(context.Background(), d, tm, ports.IntentAttach, "main")
 	require.Error(t, err)
 	var pe *client.ProtocolError
 	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
-	require.Equal(t, int32(1), d.calls.Load())
 }
 
 func TestRunPhaseASingleAttempt(t *testing.T) {
 	dialErr := errors.New("dial failed")
-	d := &testDialer{err: dialErr}
+	d := portsmocks.NewMockDialer(t)
+	d.EXPECT().Dial(mock.Anything).Return(nil, dialErr).Once()
 	tm := portsmocks.NewMockTerminal(t)
 
 	err := client.Run(context.Background(), d, tm, ports.IntentEphemeral, "")
 	require.ErrorIs(t, err, dialErr)
-	require.Equal(t, int32(1), d.calls.Load(), "Phase A Run must not retry")
 }
 
 type sequenceDialer struct {

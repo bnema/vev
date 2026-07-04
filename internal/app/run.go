@@ -5,7 +5,6 @@
 package app
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -17,9 +16,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"os/exec"
 	"os/signal"
-	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -281,7 +278,7 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) err
 func defaultLocalDialer() ports.Dialer { return localDaemonDialer{dir: ipc.SocketDir()} }
 
 func defaultRemoteDialer(target, session string) ports.Dialer {
-	return remoteDatagramDialer{target: target, session: session}
+	return dgram.NewRemoteDialer(target, session)
 }
 
 type runAttachDeps struct {
@@ -379,118 +376,6 @@ type localDaemonDialer struct{ dir string }
 
 func (d localDaemonDialer) Dial(ctx context.Context) (ports.Transport, error) {
 	return ensureDaemon(ctx, d.dir, realDial, realSpawn, defaultBackoff)
-}
-
-const maxBootstrapStderr = 64 * 1024
-
-type limitedBuffer struct {
-	buf []byte
-}
-
-func (b *limitedBuffer) Write(p []byte) (int, error) {
-	if len(b.buf) < maxBootstrapStderr {
-		keep := min(len(p), maxBootstrapStderr-len(b.buf))
-		b.buf = append(b.buf, p[:keep]...)
-	}
-	return len(p), nil
-}
-
-func (b *limitedBuffer) String() string { return string(b.buf) }
-
-type remoteDatagramDialer struct {
-	target  string
-	session string
-}
-
-func (d remoteDatagramDialer) Dial(ctx context.Context) (ports.Transport, error) {
-	tr, udpErr := d.dialDatagram(ctx)
-	if udpErr == nil {
-		return tr, nil
-	}
-	tr, stdioErr := sshstdio.Dial(d.target, d.session)
-	if stdioErr != nil {
-		return nil, fmt.Errorf("datagram dial failed: %w; stdio fallback failed: %w", udpErr, stdioErr)
-	}
-	return tr, nil
-}
-
-func (d remoteDatagramDialer) dialDatagram(ctx context.Context) (ports.Transport, error) {
-	remote := []string{shellQuote("vev"), shellQuote("_udp-bootstrap")}
-	if d.session != "" {
-		remote = append(remote, shellQuote(d.session))
-	}
-	cmd := exec.CommandContext(ctx, "ssh", "--", d.target, strings.Join(remote, " "))
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	var stderr limitedBuffer
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	started := true
-	defer func() {
-		if started {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}
-	}()
-
-	line, err := bufio.NewReader(stdout).ReadString('\n')
-	if err != nil {
-		return nil, fmt.Errorf("udp bootstrap: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	fields := strings.Fields(strings.TrimSpace(line))
-	if len(fields) != 3 || fields[0] != "VEV-UDP" {
-		return nil, fmt.Errorf("udp bootstrap: unexpected reply %q", strings.TrimSpace(line))
-	}
-	key, err := base64.StdEncoding.DecodeString(fields[2])
-	if err != nil {
-		return nil, err
-	}
-	host := sshTargetHost(d.target)
-	peer, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, fields[1]))
-	if err != nil {
-		return nil, err
-	}
-	var lc net.ListenConfig
-	pc, err := lc.ListenPacket(ctx, "udp", ":0")
-	if err != nil {
-		return nil, err
-	}
-	tr, err := dgram.NewTransport(pc, peer, key, 1, 2)
-	if err != nil {
-		_ = pc.Close()
-		return nil, err
-	}
-	started = false
-	return closeBothTransport{Transport: tr, close: func() error {
-		_ = tr.Close()
-		_ = cmd.Process.Kill()
-		return cmd.Wait()
-	}}, nil
-}
-
-func sshTargetHost(target string) string {
-	if at := strings.LastIndexByte(target, '@'); at >= 0 {
-		target = target[at+1:]
-	}
-	if h, _, err := net.SplitHostPort(target); err == nil {
-		return h
-	}
-	return target
-}
-
-type closeBothTransport struct {
-	ports.Transport
-	close func() error
-}
-
-func (t closeBothTransport) Close() error { return t.close() }
-
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func createDetachedLocalSession(ctx context.Context, name string) error {

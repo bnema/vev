@@ -43,6 +43,19 @@ func TestBuildCommandUsesExecArgs(t *testing.T) {
 	}
 }
 
+func TestBuildCommandForModeUsesCanonicalSSHArgs(t *testing.T) {
+	got := BuildCommandForMode("user@example.com", "_udp-bootstrap", "work")
+	want := []string{"--", "user@example.com", "'vev' '_udp-bootstrap' 'work'"}
+	if got.Path != "ssh" {
+		t.Fatalf("Path = %q, want ssh", got.Path)
+	}
+	for i := range want {
+		if got.Args[i] != want[i] {
+			t.Fatalf("Args[%d] = %q, want %q (all args %q)", i, got.Args[i], want[i], got.Args)
+		}
+	}
+}
+
 func TestTransportRoundTripAndVersionMismatchFrame(t *testing.T) {
 	clientRead, serverWrite := io.Pipe()
 	serverRead, clientWrite := io.Pipe()

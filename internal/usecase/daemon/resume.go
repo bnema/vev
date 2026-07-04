@@ -11,7 +11,7 @@ import (
 func newResumeToken() uint64 {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return 0
+		panic("crypto/rand failed generating resume token: " + err.Error())
 	}
 	return binary.BigEndian.Uint64(b[:])
 }

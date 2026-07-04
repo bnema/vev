@@ -127,7 +127,7 @@ func TestClientGoneResetsScreenDefaultColors(t *testing.T) {
 	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.NotEmpty(t, before)
 
-	d.clientGone(sess, ac, true)
+	d.clientGone(sess, ac, ac.transport(), true)
 
 	var got []byte
 	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
@@ -177,7 +177,7 @@ func TestDetachOnSendErrorResetsScreenDefaultColors(t *testing.T) {
 		HasBackground: true, Background: renderer.RGB{R: 10, G: 11, B: 12},
 	})
 
-	d.detachOnSendError(sess, ac)
+	d.detachOnSendError(sess, ac, ac.transport())
 
 	tb := sess.activeTab()
 	var got []byte
