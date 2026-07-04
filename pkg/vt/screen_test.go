@@ -157,6 +157,70 @@ func TestOnNotifySplitAcrossWrites(t *testing.T) {
 	require.Equal(t, 1, calls)
 }
 
+func TestOnClipboardBELTerminated(t *testing.T) {
+	s := NewScreen(10, 2)
+	var got string
+	calls := 0
+	s.OnClipboard = func(b64 string) { got = b64; calls++ }
+	s.Write([]byte("\x1b]52;c;aGVsbG8=\x07"))
+	require.Equal(t, 1, calls)
+	require.Equal(t, "aGVsbG8=", got)
+}
+
+func TestOnClipboardSTTerminated(t *testing.T) {
+	s := NewScreen(10, 2)
+	var got string
+	calls := 0
+	s.OnClipboard = func(b64 string) { got = b64; calls++ }
+	s.Write([]byte("\x1b]52;c;aGVsbG8=\x1b\\"))
+	require.Equal(t, 1, calls)
+	require.Equal(t, "aGVsbG8=", got)
+}
+
+func TestOnClipboardQueryIgnored(t *testing.T) {
+	s := NewScreen(10, 2)
+	calls := 0
+	s.OnClipboard = func(string) { calls++ }
+	s.Write([]byte("\x1b]52;c;?\x07"))
+	require.Equal(t, 0, calls)
+}
+
+func TestOnClipboardEmptySelection(t *testing.T) {
+	s := NewScreen(10, 2)
+	var got string
+	calls := 0
+	s.OnClipboard = func(b64 string) { got = b64; calls++ }
+	s.Write([]byte("\x1b]52;;aGVsbG8=\x07"))
+	require.Equal(t, 1, calls)
+	require.Equal(t, "aGVsbG8=", got)
+}
+
+func TestOnClipboardNilCallbackDoesNotPanic(t *testing.T) {
+	s := NewScreen(10, 2)
+	require.NotPanics(t, func() {
+		s.Write([]byte("\x1b]52;c;aGVsbG8=\x07"))
+	})
+}
+
+func TestOnClipboardSplitAcrossWrites(t *testing.T) {
+	s := NewScreen(10, 2)
+	var got string
+	calls := 0
+	s.OnClipboard = func(b64 string) { got = b64; calls++ }
+	s.Write([]byte("\x1b]52;c;aGVs"))
+	s.Write([]byte("bG8=\x07"))
+	require.Equal(t, 1, calls)
+	require.Equal(t, "aGVsbG8=", got)
+}
+
+func TestOnClipboardNoSecondSemicolonIgnored(t *testing.T) {
+	s := NewScreen(10, 2)
+	calls := 0
+	s.OnClipboard = func(string) { calls++ }
+	s.Write([]byte("\x1b]52;c\x07")) // no second ";" -> no data field
+	require.Equal(t, 0, calls)
+}
+
 // ---------------------------------------------------------------------------
 // Printable ASCII / UTF-8
 // ---------------------------------------------------------------------------

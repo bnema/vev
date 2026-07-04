@@ -1,6 +1,9 @@
 # vev
 
-A terminal multiplexer for Linux, written in Go with no runtime dependencies beyond `golang.org/x/sys` and `golang.org/x/term`. Sessions run in a per-user daemon; the client is a thin pipe. Rendering happens server-side with damage tracking, so only minimal diffs cross the socket (or the SSH link).
+There is many terminal multiplexers but this one is mine. Written in Go, with no runtime dependencies beyond `golang.org/x/sys` and `golang.org/x/term`. Purely focused on performance, rendering of high output of vertical text, agentic coding and remote work over ssh. 
+
+> [!IMPORTANT]  
+> This is totally in alpha 
 
 ## Install
 
@@ -81,19 +84,3 @@ Visual mode freezes a view over history while the program keeps running undernea
 | v or Space | toggle line selection |
 | y or Enter | copy selection and exit |
 | q, Esc, Ctrl-C | exit without copying |
-
-Drag with the mouse to select lines in visual mode. Copying uses OSC 52, so the selection lands in your terminal's clipboard even across SSH. After a successful copy, the right side of the status bar reports `copied N chars to clipboard` until the next screen update. If the selection exceeds the OSC 52 copy limit, the status bar reports `selection too large to copy` instead.
-
-## Mouse
-
-vev enables terminal mouse reporting while attached. Mouse input on the status row is reserved for vev and is not sent to the child. In visual mode, the wheel scrolls the frozen view and left-button drag selects lines. On the normal screen, left-button drag enters visual mode and selects the dragged lines; a simple click is left alone. When the child enables mouse reporting, SGR mouse events are forwarded to it. Otherwise, wheel events in the alternate screen are translated to Up/Down arrow keys (`ESC[A` / `ESC[B`). This translation intentionally does not honor DECCKM application-cursor mode (`ESC OA` / `ESC OB`). An extremely rare input read split exactly between `ESC[` and `<` in an SGR mouse sequence may leak the partial `ESC[` to the child.
-
-vev follows the child application's cursor visibility and style requests and appends a hardware cursor update after each paint. Visible cursors blink as requested by the terminal/application state.
-
-## Development
-
-```sh
-go test ./... -race
-```
-
-`pkg/` (VT emulator, renderer) never imports `internal/`; a boundary test enforces this. Format Go code with `goimports`. Benchmark notes live in `docs/performance.md`.

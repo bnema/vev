@@ -59,9 +59,8 @@ func (p *fakePC) WriteTo(b []byte, addr net.Addr) (int, error) {
 	}
 	peer := p.peers[addr.String()]
 	peer.mu.Lock()
-	peerClosed := peer.closed
-	peer.mu.Unlock()
-	if peerClosed {
+	defer peer.mu.Unlock()
+	if peer.closed {
 		return 0, errors.New("peer closed")
 	}
 	peer.in <- packet{append([]byte(nil), b...), p.addr}

@@ -506,7 +506,7 @@ func TestRouterForwardsSingleFramePasteVerbatim(t *testing.T) {
 	h := &captureHandler{}
 	r := NewRouter(clk, h)
 
-	paste := append(append(append([]byte(nil), pasteOpenMarker...), pasteBindingLookalikes...), pasteCloseMarker...)
+	paste := append(append(append([]byte(nil), ports.BracketedPasteOpenMarker...), pasteBindingLookalikes...), ports.BracketedPasteCloseMarker...)
 	r.Route(paste)
 
 	require.Empty(t, h.actions, "paste content must not fire any binding")

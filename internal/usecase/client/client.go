@@ -126,8 +126,10 @@ const (
 // ClipboardReader configured (clipboard non-nil) — local attaches forward
 // 0x16 untouched so the locally running agent's own clipboard handling
 // applies.
-func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader) (retErr error) {
-	log := slog.Default().With("component", "client")
+func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) (retErr error) {
+	if log == nil {
+		log = slog.Default()
+	}
 	ms := milestones{}
 
 	defer func() {
@@ -186,6 +188,7 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 			if resumeToken == 0 || ctx.Err() != nil {
 				return err
 			}
+			log.Warn("reconnect dial failed", "err", err, "backoff", backoff)
 			drawStatus()
 			if !reconnectSleep(ctx, backoff) {
 				return ctx.Err()
@@ -196,7 +199,7 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 		}
 		ms.dialed = true
 
-		result := attachOnce(ctx, transport, term, clk, attemptIntent, name, resumeToken, processClientID, &ms, enterRaw, clearStatus, remote, clipboard)
+		result := attachOnce(ctx, transport, term, clk, attemptIntent, name, resumeToken, processClientID, &ms, enterRaw, clearStatus, remote, clipboard, log)
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
@@ -212,6 +215,7 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 			clearStatus()
 			return result.err
 		}
+		log.Warn("reconnecting after attach error", "err", result.err, "backoff", backoff)
 		drawStatus()
 		if !reconnectSleep(ctx, backoff) {
 			clearStatus()
@@ -258,7 +262,7 @@ func shouldReconnect(err error) bool {
 //
 // It is kept as a compatibility wrapper for callers that still own dialing.
 func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string) error {
-	return Run(ctx, singleTransportDialer{transport: transport}, term, clk, intent, name, false, nil)
+	return Run(ctx, singleTransportDialer{transport: transport}, term, clk, intent, name, false, nil, slog.Default())
 }
 
 type singleTransportDialer struct{ transport ports.Transport }
@@ -273,7 +277,7 @@ type attachResult struct {
 	err         error
 }
 
-func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func(), remote bool, clipboard ports.ClipboardReader) attachResult {
+func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func(), remote bool, clipboard ports.ClipboardReader, log *slog.Logger) attachResult {
 	// 1. Handshake: send Hello with our size and TERM.
 	size, err := term.Size()
 	if err != nil {
@@ -313,6 +317,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 		}
 		resumeToken = welcome.ResumeToken
 		ms.welcomed = true
+		log.Debug("welcomed by daemon", "resume_token_present", resumeToken != 0)
 	case ports.MsgError:
 		em, derr := ports.UnmarshalErrorMsg(reply.Payload)
 		if derr != nil {
@@ -342,13 +347,13 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	if remote {
 		clip = clipboard
 	}
-	go runSender(loopCtx, cancel, transport, sendCh, sendErrCh)
-	go runStdin(loopCtx, cancel, term.In(), sendCh, clk, trueColor, clip)
-	go runResize(loopCtx, term.ResizeEvents(), sendCh)
+	go runSender(loopCtx, cancel, transport, sendCh, sendErrCh, log)
+	go runStdin(loopCtx, cancel, term.In(), sendCh, clk, trueColor, clip, log)
+	go runResize(loopCtx, term.ResizeEvents(), sendCh, log)
 
 	// 5. Output/main loop: the only goroutine that touches the terminal.
 	recvCh := make(chan recvResult, 1)
-	go runRecv(loopCtx, transport, recvCh)
+	go runRecv(loopCtx, transport, recvCh, log)
 
 	for {
 		select {
@@ -380,13 +385,21 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 				if ferr := term.Flush(); ferr != nil {
 					return attachResult{resumeToken: resumeToken, welcomed: true, err: fmt.Errorf("vev: flushing terminal: %w", ferr)}
 				}
-				ms.firstOutput = true
+				if !ms.firstOutput {
+					ms.firstOutput = true
+					log.Debug("received first output")
+				}
 			case ports.MsgDetached:
 				d, derr := ports.UnmarshalDetached(r.frame.Payload)
 				if derr != nil {
 					return attachResult{resumeToken: resumeToken, welcomed: true, err: fmt.Errorf("vev: decoding detached: %w", derr)}
 				}
 				ms.detached = true
+				if d.Reason == ports.ReasonDetach {
+					log.Info("detached cleanly", "reason", d.Reason)
+				} else {
+					log.Warn("detached by daemon", "reason", d.Reason)
+				}
 				return attachResult{resumeToken: resumeToken, welcomed: true, err: detachedResult(d.Reason)}
 			case ports.MsgPong:
 				// Liveness reply; nothing to do.
@@ -407,7 +420,8 @@ type recvResult struct {
 
 // runRecv reads frames until an error, forwarding each to the main loop.
 // It exits on the first error or when the loop context is cancelled.
-func runRecv(ctx context.Context, transport ports.Transport, out chan<- recvResult) {
+func runRecv(ctx context.Context, transport ports.Transport, out chan<- recvResult, log *slog.Logger) {
+	defer log.Debug("receive pump exited")
 	for {
 		f, err := transport.Recv()
 		select {
@@ -424,7 +438,8 @@ func runRecv(ctx context.Context, transport ports.Transport, out chan<- recvResu
 // runSender is the sole caller of transport.Send: serialising the input and
 // resize pumps through one goroutine keeps the transport's single-writer
 // contract intact. A send failure cancels the loop and is surfaced once.
-func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, in <-chan ports.Frame, errCh chan<- error) {
+func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, in <-chan ports.Frame, errCh chan<- error, log *slog.Logger) {
+	defer log.Debug("sender pump exited")
 	for {
 		select {
 		case f := <-in:
@@ -457,7 +472,8 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 // exits. That is harmless here — Attach has already returned and restored
 // the terminal — and matches the standard pattern for stdin pumps; a
 // closable stdin duplicate could lift it later if ever needed.
-func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame, clk ports.Clock, trueColor bool, clipboard ports.ClipboardReader) {
+func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame, clk ports.Clock, trueColor bool, clipboard ports.ClipboardReader, log *slog.Logger) {
+	defer log.Debug("stdin pump exited")
 	buf := make([]byte, stdinBufSize)
 	var scanner theme.Scanner
 	var inputSeq uint64
@@ -493,7 +509,7 @@ func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out 
 		ci := &clipboardIntercept{
 			coalescer: coalescer,
 			reader:    clipboard,
-			log:       slog.Default(),
+			log:       log,
 			sendImage: func(mime string, data []byte) {
 				send(ports.Frame{Type: ports.MsgImagePush, Payload: ports.MarshalImagePush(ports.ImagePush{Mime: mime, Data: data})})
 			},
@@ -537,7 +553,8 @@ func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out 
 // runResize forwards coalesced terminal resize events to the daemon. It
 // tolerates an already-closed resize channel (which the terminal adapter
 // hands back when restore ran before ResizeEvents was first called).
-func runResize(ctx context.Context, events <-chan domain.Size, out chan<- ports.Frame) {
+func runResize(ctx context.Context, events <-chan domain.Size, out chan<- ports.Frame, log *slog.Logger) {
+	defer log.Debug("resize pump exited")
 	for {
 		select {
 		case sz, ok := <-events:

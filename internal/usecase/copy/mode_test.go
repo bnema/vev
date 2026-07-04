@@ -1,6 +1,7 @@
 package copy
 
 import (
+	"bytes"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -363,6 +364,30 @@ func TestOSC52OversizedPayloadIsDeferred(t *testing.T) {
 	chunks := OSC52(strings.Repeat("x", OSC52MaxPayloadBytes+1))
 	if len(chunks) != 0 {
 		t.Fatalf("len(chunks) = %d, want 0 to avoid corrupt multi-sequence clipboard replacement", len(chunks))
+	}
+}
+
+func TestOSC52FromBase64(t *testing.T) {
+	valid := base64.StdEncoding.EncodeToString([]byte("hello"))
+	oversized := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", OSC52MaxPayloadBytes+1)))
+
+	tests := []struct {
+		name string
+		in   string
+		want []byte
+	}{
+		{name: "valid", in: valid, want: []byte("\x1b]52;c;" + valid + "\x07")},
+		{name: "empty payload", in: "", want: []byte("\x1b]52;c;\x07")},
+		{name: "invalid base64", in: "not-valid-base64!!", want: nil},
+		{name: "oversized decoded payload", in: oversized, want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := OSC52FromBase64(tt.in)
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("OSC52FromBase64(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }
 

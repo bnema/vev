@@ -85,7 +85,7 @@ func (c *clipboardIntercept) Scan(data []byte) {
 // might be a split-across-reads prefix of) the bracketed-paste opening
 // marker. It returns len(data) when neither is present.
 func pasteMarkerBoundary(data []byte) int {
-	if idx := bytes.Index(data, pasteOpenMarker); idx >= 0 {
+	if idx := bytes.Index(data, ports.BracketedPasteOpenMarker); idx >= 0 {
 		return idx
 	}
 	if p := trailingOpenPrefixLen(data); p > 0 {

@@ -257,6 +257,11 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	for {
 		tr, err := l.Accept()
 		if err != nil {
+			if d.serveCtx.Err() != nil {
+				d.log.Info("accept loop exiting", "err", err, "reason", "context canceled")
+			} else {
+				d.log.Warn("accept loop exiting", "err", err)
+			}
 			break
 		}
 		d.connWg.Go(func() {
@@ -300,6 +305,7 @@ func (d *Daemon) shutdownAll(reason uint8) {
 	snapshot := d.sessionsSnapshotLocked()
 	empty := len(snapshot) == 0
 	d.mu.Unlock()
+	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
 		return
@@ -326,6 +332,7 @@ func (d *Daemon) handleConn(tr ports.Transport) {
 
 	first, err := tr.Recv()
 	if err != nil {
+		d.log.Warn("connection closed before hello", "err", err)
 		_ = tr.Close()
 		return
 	}
@@ -337,6 +344,7 @@ func (d *Daemon) handleConn(tr ports.Transport) {
 	case ports.MsgHello:
 		d.handleHello(tr, first)
 	default:
+		d.log.Warn("hello rejected", "err", "expected hello", "type", first.Type)
 		_ = tr.Send(frameError(ports.ErrInternal, "expected hello"))
 		_ = tr.Close()
 	}
@@ -428,14 +436,17 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 	h, err := ports.UnmarshalHello(f.Payload)
 	if err != nil {
 		if version, ok := ports.PeekHelloVersion(f.Payload); ok && version != ports.ProtocolVersion {
+			d.log.Warn("hello rejected", "err", "protocol version mismatch", "version", version, "expected", ports.ProtocolVersion)
 			_ = tr.Send(frameError(ports.ErrVersionMismatch, "protocol version mismatch"))
 		} else {
+			d.log.Warn("hello rejected", "err", err)
 			_ = tr.Send(frameError(ports.ErrInternal, "malformed hello"))
 		}
 		_ = tr.Close()
 		return
 	}
 	if h.Version != ports.ProtocolVersion {
+		d.log.Warn("hello rejected", "err", "protocol version mismatch", "version", h.Version, "expected", ports.ProtocolVersion, "intent", h.Intent, "session", h.Name)
 		_ = tr.Send(frameError(ports.ErrVersionMismatch, "protocol version mismatch"))
 		_ = tr.Close()
 		return
@@ -443,6 +454,7 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 
 	sess, ac, rerr := d.route(h, tr)
 	if rerr != nil {
+		d.log.Warn("hello rejected", "err", rerr, "intent", h.Intent, "session", h.Name)
 		if pe, ok := errors.AsType[*protoErr](rerr); ok {
 			_ = tr.Send(frameError(pe.code, pe.text))
 		} else {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -346,8 +347,8 @@ func TestRunLocalAttachDeclineKeepsOriginalError(t *testing.T) {
 
 func TestRunAttachRejectsNestedVEVBeforeDial(t *testing.T) {
 	called := false
-	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "outer", runAttachDeps{
-		attachLocal: func(context.Context, uint8, string) error {
+	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "outer", nil, runAttachDeps{
+		attachLocal: func(context.Context, uint8, string, *slog.Logger) error {
 			called = true
 			return nil
 		},
@@ -369,8 +370,8 @@ func TestRunAttachRejectsNestedVEVBeforeDial(t *testing.T) {
 
 func TestRunAttachNestedNewCreatesDetachedSession(t *testing.T) {
 	var gotName string
-	err := runAttachWithDeps(context.Background(), ports.IntentNew, "scratch", "", "outer", runAttachDeps{
-		attachLocal: func(context.Context, uint8, string) error {
+	err := runAttachWithDeps(context.Background(), ports.IntentNew, "scratch", "", "outer", nil, runAttachDeps{
+		attachLocal: func(context.Context, uint8, string, *slog.Logger) error {
 			t.Fatal("nested new should not attach to the session")
 			return nil
 		},
@@ -403,13 +404,13 @@ func TestRunAttachWithDepsBuildsRemoteDialer(t *testing.T) {
 	var gotRemote bool
 	var gotClipboard ports.ClipboardReader
 	clip := &fakeClipboardReader{}
-	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", runAttachDeps{
-		remoteDialer: func(target, session string) ports.Dialer {
+	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+		remoteDialer: func(target, session string, _ *slog.Logger) ports.Dialer {
 			gotTarget, gotSession = target, session
 			return namedDialer{name: "remote"}
 		},
 		clipboard: clip,
-		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader) error {
+		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, _ *slog.Logger) error {
 			gotDialer = d.(namedDialer).name
 			gotRemote = remote
 			gotClipboard = clipboard
@@ -437,10 +438,10 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 	var gotDialer string
 	gotRemote := true
 	gotClipboard := ports.ClipboardReader(&fakeClipboardReader{})
-	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "", runAttachDeps{
+	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "", nil, runAttachDeps{
 		localDialer: func() ports.Dialer { return namedDialer{name: "local"} },
 		clipboard:   &fakeClipboardReader{}, // must NOT reach runClient for a local attach
-		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader) error {
+		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, _ *slog.Logger) error {
 			gotDialer = d.(namedDialer).name
 			gotRemote = remote
 			gotClipboard = clipboard
