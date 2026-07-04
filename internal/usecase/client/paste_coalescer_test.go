@@ -117,6 +117,18 @@ func TestPasteCoalescerByteByByte(t *testing.T) {
 		"paste fed one byte at a time must still emit as one contiguous paste")
 }
 
+func TestPasteCoalescerBackToBackPastesInOneRead(t *testing.T) {
+	pc, _, col := newTestCoalescer()
+	defer pc.Close()
+
+	first := []byte("\x1b[200~first\x1b[201~")
+	second := []byte("\x1b[200~second\x1b[201~")
+	pc.Scan(append(append([]byte(nil), first...), second...))
+
+	require.Equal(t, [][]byte{first, second}, col.snapshot(),
+		"back-to-back pastes in one read must emit as two intact paste frames")
+}
+
 func TestPasteCoalescerLoneEscapeFlushedAfterTimer(t *testing.T) {
 	pc, clk, col := newTestCoalescer()
 	defer pc.Close()

@@ -107,6 +107,31 @@ func (r *oneShotBlockingReader) Read(p []byte) (int, error) {
 
 func (r *oneShotBlockingReader) unblock() { close(r.done) }
 
+type chunkedBlockingReader struct {
+	chunks [][]byte
+	done   chan struct{}
+	mu     sync.Mutex
+	next   int
+}
+
+func newChunkedBlockingReader(chunks ...[]byte) *chunkedBlockingReader {
+	return &chunkedBlockingReader{chunks: chunks, done: make(chan struct{})}
+}
+
+func (r *chunkedBlockingReader) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.next < len(r.chunks) {
+		chunk := r.chunks[r.next]
+		r.next++
+		return copy(p, chunk), nil
+	}
+	<-r.done
+	return 0, io.EOF
+}
+
+func (r *chunkedBlockingReader) unblock() { close(r.done) }
+
 func newHappyTerminal(t *testing.T, out *bytes.Buffer, restoreCount *atomic.Int32, resizeCh chan domain.Size) (*portsmocks.MockTerminal, *blockingReader) {
 	tm := portsmocks.NewMockTerminal(t)
 	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
@@ -483,6 +508,66 @@ func TestAttachStdinForwardsSGRMouseReportAsSingleFrame(t *testing.T) {
 		require.Equal(t, []byte("\x1b[<0;1;1M"), got, "SGR mouse report must arrive as one intact MsgInput frame")
 	case <-time.After(2 * time.Second):
 		t.Fatal("mouse report input was not sent")
+	}
+}
+
+func TestAttachStdinCoalescesSplitBracketedPaste(t *testing.T) {
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	paste := []byte("\x1b[200~hello\nworld\x1b[201~")
+	input := newChunkedBlockingReader([]byte("\x1b[200~hello\n"), []byte("world\x1b[201~"))
+	defer input.unblock()
+
+	tm := portsmocks.NewMockTerminal(t)
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
+	tm.EXPECT().In().Return(input).Maybe()
+	tm.EXPECT().Out().Return(&out).Maybe()
+	tm.EXPECT().Flush().Return(nil).Maybe()
+	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
+
+	gotInput := make(chan []byte, 1)
+	allowDetach := make(chan struct{})
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
+		in, err := ports.UnmarshalInput(f.Payload)
+		require.NoError(t, err)
+		gotInput <- in.Data
+		close(allowDetach)
+		return nil
+	}).Once()
+	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
+	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
+	recvCh := make(chan recvItem, 1)
+	recvCh <- recvItem{f: welcome}
+	closed := make(chan struct{})
+	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		select {
+		case it := <-recvCh:
+			return it.f, it.err
+		case <-allowDetach:
+			select {
+			case <-closed:
+				return ports.Frame{}, io.EOF
+			default:
+				close(closed)
+				return detached, nil
+			}
+		case <-closed:
+			return ports.Frame{}, io.EOF
+		}
+	}).Maybe()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
+	require.NoError(t, err)
+	select {
+	case got := <-gotInput:
+		require.Equal(t, paste, got, "split bracketed paste must arrive as one intact MsgInput frame")
+	case <-time.After(2 * time.Second):
+		t.Fatal("split bracketed paste input was not sent")
 	}
 }
 

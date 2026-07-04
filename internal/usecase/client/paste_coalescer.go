@@ -8,14 +8,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// Bracketed-paste markers. A terminal in bracketed-paste mode brackets pasted
-// text with these so the receiving application can tell a paste from typed
-// input.
-var (
-	pasteOpenMarker  = []byte("\x1b[200~")
-	pasteCloseMarker = []byte("\x1b[201~")
-)
-
 const (
 	// pasteFlushDelay bounds how long a trailing strict prefix of the opening
 	// marker is held before it is emitted as ordinary bytes. It only has to
@@ -91,9 +83,17 @@ func (c *pasteCoalescer) Scan(data []byte) {
 func (c *pasteCoalescer) process(data []byte) {
 	for {
 		if c.buffering {
+			searchFrom := len(c.buf)
+			if overlap := len(ports.BracketedPasteCloseMarker) - 1; searchFrom > overlap {
+				searchFrom -= overlap
+			} else {
+				searchFrom = 0
+			}
 			c.buf = append(c.buf, data...)
-			data = nil
-			idx := bytes.Index(c.buf, pasteCloseMarker)
+			idx := bytes.Index(c.buf[searchFrom:], ports.BracketedPasteCloseMarker)
+			if idx >= 0 {
+				idx += searchFrom
+			}
 			if idx < 0 {
 				if len(c.buf) > maxPasteBuffer {
 					c.emit(c.buf)
@@ -101,7 +101,7 @@ func (c *pasteCoalescer) process(data []byte) {
 				}
 				return
 			}
-			end := idx + len(pasteCloseMarker)
+			end := idx + len(ports.BracketedPasteCloseMarker)
 			c.emit(c.buf[:end])
 			rest := append([]byte(nil), c.buf[end:]...)
 			c.resetBuffering()
@@ -113,7 +113,7 @@ func (c *pasteCoalescer) process(data []byte) {
 			return
 		}
 
-		if idx := bytes.Index(data, pasteOpenMarker); idx >= 0 {
+		if idx := bytes.Index(data, ports.BracketedPasteOpenMarker); idx >= 0 {
 			if idx > 0 {
 				c.emit(data[:idx])
 			}
@@ -240,12 +240,12 @@ func (c *pasteCoalescer) stopSafetyTimer() {
 // is a non-empty strict prefix of the opening marker (e.g. a trailing "\x1b" or
 // "\x1b[20"). A full marker match is handled by the caller before this runs.
 func trailingOpenPrefixLen(data []byte) int {
-	max := len(pasteOpenMarker) - 1
-	if max > len(data) {
-		max = len(data)
+	matchLimit := len(ports.BracketedPasteOpenMarker) - 1
+	if matchLimit > len(data) {
+		matchLimit = len(data)
 	}
-	for n := max; n >= 1; n-- {
-		if bytes.Equal(data[len(data)-n:], pasteOpenMarker[:n]) {
+	for n := matchLimit; n >= 1; n-- {
+		if bytes.Equal(data[len(data)-n:], ports.BracketedPasteOpenMarker[:n]) {
 			return n
 		}
 	}
