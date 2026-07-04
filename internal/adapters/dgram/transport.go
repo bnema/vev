@@ -23,6 +23,7 @@ const (
 	defaultHeartbeat      = 3 * time.Second
 	defaultSilenceTimeout = 10 * time.Second
 	maxPendingReliable    = 1024
+	maxRecvBuffer         = 1024
 )
 
 var (
@@ -303,6 +304,15 @@ func (t *Transport) enqueueReliable(seq uint64, f ports.Frame) {
 	}
 	if _, exists := t.recvBuf[seq]; exists {
 		return
+	}
+	if len(t.recvBuf) >= maxRecvBuffer {
+		if seq != t.nextRecvSeq {
+			return
+		}
+		for bufferedSeq := range t.recvBuf {
+			delete(t.recvBuf, bufferedSeq)
+			break
+		}
 	}
 	t.recvBuf[seq] = f
 	t.deliverCond.Signal()

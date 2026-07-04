@@ -319,6 +319,24 @@ func TestPendingReliableQueueBounded(t *testing.T) {
 	}
 }
 
+func TestReliableRecvBufferBoundedForFarFutureSequences(t *testing.T) {
+	tr := &Transport{nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame), done: make(chan struct{})}
+	tr.deliverCond = sync.NewCond(&tr.deliverMu)
+	for i := 0; i < maxRecvBuffer+100; i++ {
+		tr.enqueueReliable(uint64(1000+i), ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}})
+	}
+	if got := len(tr.recvBuf); got != maxRecvBuffer {
+		t.Fatalf("recvBuf len=%d, want %d", got, maxRecvBuffer)
+	}
+	tr.enqueueReliable(1, ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")})
+	if _, ok := tr.recvBuf[1]; !ok {
+		t.Fatalf("next expected sequence was dropped when far-future buffer was full")
+	}
+	if got := len(tr.recvBuf); got > maxRecvBuffer {
+		t.Fatalf("recvBuf len=%d, want <= %d", got, maxRecvBuffer)
+	}
+}
+
 func recvMaybe(tr *Transport, d time.Duration) (ports.Frame, bool) {
 	ch := make(chan ports.Frame, 1)
 	go func() { f, _ := tr.Recv(); ch <- f }()

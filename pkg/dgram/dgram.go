@@ -79,9 +79,11 @@ func (c *Codec) Open(packet []byte, wantDirection uint32, aad []byte, replay *Re
 	return ctr, pt, nil
 }
 
+const replayWindowSize = maxFragmentCount
+
 type ReplayWindow struct {
 	max  uint64
-	seen uint64
+	seen map[uint64]struct{}
 	init bool
 }
 
@@ -94,31 +96,28 @@ func (w *ReplayWindow) Check(counter uint64) bool {
 	if counter > w.max {
 		return true
 	}
-	delta := w.max - counter
-	if delta >= 64 {
+	if w.max-counter >= uint64(replayWindowSize) {
 		return false
 	}
-	return (w.seen & (uint64(1) << delta)) == 0
+	_, ok := w.seen[counter]
+	return !ok
 }
 
 func (w *ReplayWindow) Accept(counter uint64) {
+	if w.seen == nil {
+		w.seen = make(map[uint64]struct{})
+	}
 	if !w.init {
-		w.max, w.seen, w.init = counter, 1, true
-		return
+		w.max, w.init = counter, true
 	}
 	if counter > w.max {
-		shift := counter - w.max
-		if shift >= 64 {
-			w.seen = 1
-		} else {
-			w.seen = (w.seen << shift) | 1
-		}
 		w.max = counter
-		return
 	}
-	delta := w.max - counter
-	if delta < 64 {
-		w.seen |= uint64(1) << delta
+	w.seen[counter] = struct{}{}
+	for seen := range w.seen {
+		if w.max-seen >= uint64(replayWindowSize) {
+			delete(w.seen, seen)
+		}
 	}
 }
 
@@ -133,18 +132,18 @@ func FragmentPayload(seq uint64, payload []byte, mtu int) ([]Fragment, error) {
 	if mtu <= fragmentHdr {
 		return nil, ErrFragment
 	}
-	max := mtu - fragmentHdr
-	count := (len(payload) + max - 1) / max
+	maxData := mtu - fragmentHdr
+	count := (len(payload) + maxData - 1) / maxData
 	if count == 0 {
 		count = 1
 	}
-	if count > 0xffff {
+	if count > maxFragmentCount {
 		return nil, ErrFragment
 	}
 	out := make([]Fragment, count)
 	for i := 0; i < count; i++ {
-		start := i * max
-		end := min(len(payload), start+max)
+		start := i * maxData
+		end := min(len(payload), start+maxData)
 		out[i] = Fragment{Seq: seq, Index: uint16(i), Count: uint16(count), Data: append([]byte(nil), payload[start:end]...)}
 	}
 	return out, nil
@@ -176,7 +175,10 @@ func UnmarshalFragment(b []byte) (Fragment, error) {
 	return f, nil
 }
 
-const maxReassemblyInflight = 1024
+const (
+	maxFragmentCount      = 1024
+	maxReassemblyInflight = 1024
+)
 
 type Reassembler struct {
 	inflight map[uint64]*assembly
@@ -190,7 +192,7 @@ type assembly struct {
 
 func NewReassembler() *Reassembler { return &Reassembler{inflight: make(map[uint64]*assembly)} }
 func (r *Reassembler) Add(f Fragment) ([]byte, bool, error) {
-	if f.Count == 0 || f.Index >= f.Count {
+	if f.Count == 0 || int(f.Count) > maxFragmentCount || f.Index >= f.Count {
 		return nil, false, ErrFragment
 	}
 	a := r.inflight[f.Seq]

@@ -2,6 +2,7 @@ package sshstdio
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os/exec"
@@ -112,6 +113,15 @@ func TestTransportRejectsZeroLengthFrame(t *testing.T) {
 	_, err := tr.Recv()
 	if !errors.Is(err, ErrZeroLengthFrame) {
 		t.Fatalf("Recv error = %v, want ErrZeroLengthFrame", err)
+	}
+}
+
+func TestDialContextCanceledBeforeStart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := DialContext(ctx, "example.com", "work")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("DialContext error = %v, want context.Canceled", err)
 	}
 }
 

@@ -6,6 +6,7 @@ package sshstdio
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -152,8 +153,17 @@ func shellQuote(s string) string {
 // child process' stdio. The subprocess is started with exec.Command argv, never
 // through a shell.
 func Dial(target, session string) (ports.Transport, error) {
+	return DialContext(context.Background(), target, session)
+}
+
+// DialContext is like Dial, but the context is propagated to ssh startup so a
+// canceled attach attempt interrupts the local ssh process.
+func DialContext(ctx context.Context, target, session string) (ports.Transport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	spec := BuildCommand(target, session)
-	cmd := exec.Command(spec.Path, spec.Args...)
+	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("sshstdio: stdin pipe: %w", err)

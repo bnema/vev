@@ -231,15 +231,30 @@ func (d *Daemon) boundedSendErr(ac *attachedClient, f ports.Frame) error {
 }
 
 func (d *Daemon) boundedSendOutputErr(ac *attachedClient, b []byte) error {
-	return d.boundedSendWith(ac, func() error {
+	_, err := d.boundedSendOutputErrTransport(ac, b)
+	return err
+}
+
+func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (ports.Transport, error) {
+	var (
+		usedMu sync.Mutex
+		used   ports.Transport
+	)
+	err := d.boundedSendWith(ac, func() error {
 		ac.sendMu.Lock()
 		defer ac.sendMu.Unlock()
 		tr := ac.transport()
+		usedMu.Lock()
+		used = tr
+		usedMu.Unlock()
 		if tr == nil {
 			return errors.New("client transport is nil")
 		}
 		return tr.Send(ac.nextOutputFrameLocked(b))
 	})
+	usedMu.Lock()
+	defer usedMu.Unlock()
+	return used, err
 }
 
 func (d *Daemon) boundedSendWith(ac *attachedClient, send func() error) error {

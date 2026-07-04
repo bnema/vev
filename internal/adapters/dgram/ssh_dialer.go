@@ -50,7 +50,7 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 		return nil, ctx.Err()
 	default:
 	}
-	return sshstdio.Dial(d.Target, d.Session)
+	return sshstdio.DialContext(ctx, d.Target, d.Session)
 }
 
 func sshTargetHost(target string) string {

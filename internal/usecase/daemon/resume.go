@@ -35,14 +35,13 @@ func (d *Daemon) prepareParkAttachment(sess *session, ac *attachedClient) bool {
 	if ephemeral || !ac.resumeCapable {
 		return false
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closing {
+		return false
+	}
 	if ac.resumeToken == 0 {
-		d.mu.Lock()
-		if d.closing {
-			d.mu.Unlock()
-			return false
-		}
 		ac.resumeToken = d.nextResumeTokenLocked()
-		d.mu.Unlock()
 	}
 	return true
 }

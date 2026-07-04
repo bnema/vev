@@ -56,6 +56,25 @@ func TestReplayReject(t *testing.T) {
 	}
 }
 
+func TestReplayWindowAllowsLargeFragmentReordering(t *testing.T) {
+	c := testCodec(t)
+	rw := NewReplayWindow()
+	last := uint64(maxFragmentCount)
+	if _, _, err := c.Open(c.Seal(1, last, []byte("last"), nil), 1, nil, rw); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.Open(c.Seal(1, 1, []byte("first"), nil), 1, nil, rw); err != nil {
+		t.Fatalf("fragment within max fragment window rejected: %v", err)
+	}
+	if _, _, err := c.Open(c.Seal(1, last+2, []byte("advance"), nil), 1, nil, rw); err != nil {
+		t.Fatal(err)
+	}
+	tooOld := c.Seal(1, 0, []byte("old"), nil)
+	if _, _, err := c.Open(tooOld, 1, nil, rw); !errors.Is(err, ErrReplay) {
+		t.Fatalf("err=%v, want ErrReplay", err)
+	}
+}
+
 func TestFragmentation(t *testing.T) {
 	payload := bytes.Repeat([]byte("abcdef"), 400)
 	frags, err := FragmentPayload(9, payload, 100)
@@ -101,6 +120,23 @@ func TestReassemblyDisorderDuplicates(t *testing.T) {
 	}
 	if !done || !bytes.Equal(got, payload) {
 		t.Fatalf("done=%v got=%q", done, got)
+	}
+}
+
+func TestReassemblyRejectsOversizedCountBeforeInsert(t *testing.T) {
+	r := NewReassembler()
+	if _, _, err := r.Add(Fragment{Seq: 99, Index: 0, Count: uint16(maxFragmentCount + 1), Data: []byte("x")}); !errors.Is(err, ErrFragment) {
+		t.Fatalf("err=%v, want ErrFragment", err)
+	}
+	if len(r.inflight) != 0 || len(r.order) != 0 {
+		t.Fatalf("oversized fragment was inserted: inflight=%d order=%d", len(r.inflight), len(r.order))
+	}
+}
+
+func TestFragmentPayloadRejectsOverMaxFragmentCount(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), maxFragmentCount+1)
+	if _, err := FragmentPayload(1, payload, fragmentHdr+1); !errors.Is(err, ErrFragment) {
+		t.Fatalf("err=%v, want ErrFragment", err)
 	}
 }
 
