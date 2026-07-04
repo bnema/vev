@@ -25,7 +25,7 @@ type screenState struct {
 	savedCursor  cursorState
 }
 
-const maxEscapeBufferLen = 4096
+const maxEscapeBufferLen = 128 * 1024
 
 type Screen struct {
 	Frame renderer.Frame
@@ -47,6 +47,11 @@ type Screen struct {
 	// notifications: OSC 9 (body only) and OSC 777 "notify" (title;body).
 	// All other OSC payloads remain discarded. Nil disables it.
 	OnNotify func(title, body string)
+	// OnClipboard is called synchronously from Write for a complete OSC 52
+	// clipboard set request from the child ("52;<selection>;<base64>"),
+	// receiving the raw base64 payload. Clipboard queries (data == "?") and
+	// malformed payloads are ignored and never invoke it. Nil disables it.
+	OnClipboard func(b64 string)
 
 	defaultFG          renderer.RGB
 	defaultBG          renderer.RGB
@@ -625,13 +630,18 @@ func appendOSCColorComponent(dst []byte, c uint8) []byte {
 }
 
 // handleOSC inspects a complete OSC payload (between "ESC ]" and its
-// terminator). Only notification sequences are acted on; titles, clipboard
-// and every other OSC are still discarded.
+// terminator). Notification sequences (OSC 9, OSC 777 "notify") and clipboard
+// set requests (OSC 52) are acted on; titles and every other OSC are still
+// discarded.
 func (s *Screen) handleOSC(payload []byte) {
+	p := string(payload)
+	if strings.HasPrefix(p, "52;") {
+		s.handleOSC52(p[len("52;"):])
+		return
+	}
 	if s.OnNotify == nil {
 		return
 	}
-	p := string(payload)
 	switch {
 	case strings.HasPrefix(p, "9;"):
 		if strings.HasPrefix(p, "9;4;") {
@@ -651,6 +661,24 @@ func (s *Screen) handleOSC(payload []byte) {
 			body = parts[2]
 		}
 		s.OnNotify(title, body)
+	}
+}
+
+// handleOSC52 parses the "<selection>;<data>" remainder of an OSC 52
+// clipboard payload (selection may be empty; split on the first ";"). A
+// clipboard query (data == "?") is always ignored — vev never answers
+// clipboard queries. A payload with no second ";" is malformed and ignored.
+func (s *Screen) handleOSC52(rest string) {
+	idx := strings.IndexByte(rest, ';')
+	if idx < 0 {
+		return
+	}
+	data := rest[idx+1:]
+	if data == "?" {
+		return
+	}
+	if s.OnClipboard != nil {
+		s.OnClipboard(data)
 	}
 }
 
