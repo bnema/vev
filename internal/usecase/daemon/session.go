@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,7 +48,7 @@ type session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu                     sync.Mutex // guards tabs, active, client, and clipboard queue state
+	mu                     sync.Mutex // guards tabs, active, client, clipFiles, and clipboard queue state
 	tabs                   []*tab
 	active                 int
 	client                 *attachedClient
@@ -55,6 +56,10 @@ type session struct {
 	clipboardWorkerRunning bool
 	cwd                    string
 	createdAt              int64
+	// clipFiles records clipboard-image-transfer temp file paths (see
+	// clipboard.go) written for this session, removed best-effort in
+	// killSession.
+	clipFiles []string
 }
 
 // tab is a pane layout container; pane owns PTY/screen/scrollback/render scheduling state.
@@ -484,10 +489,17 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	sess.cancel()
 	sess.mu.Lock()
 	tabs := append([]*tab(nil), sess.tabs...)
+	clipFiles := sess.clipFiles
+	sess.clipFiles = nil
 	sess.mu.Unlock()
 	for _, tb := range tabs {
 		d.clearDestroyedTabPreview(tb)
 		tb.closeAllPanes()
+	}
+	for _, path := range clipFiles {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			d.log.Warn("removing clipboard temp file failed", "err", err, "path", path)
+		}
 	}
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })

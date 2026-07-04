@@ -87,6 +87,15 @@ type Theme struct {
 	TrueColor     bool
 }
 
+// ImagePush carries a clipboard image from a remote client, to be written to
+// a temp file and injected into the focused pane's PTY as a path (see
+// docs/superpowers/specs/2026-07-04-clipboard-image-transfer-design.md).
+type ImagePush struct {
+	InputSeq uint64
+	Mime     string
+	Data     []byte
+}
+
 // Detach asks the daemon to detach the current client without killing the
 // session.
 type Detach struct{}
@@ -355,6 +364,31 @@ func UnmarshalInput(b []byte) (Input, error) {
 		return Input{}, err
 	}
 	return Input{InputSeq: seq, Data: r.rest()}, nil
+}
+
+// MarshalImagePush encodes m into an ImagePush message payload.
+func MarshalImagePush(m ImagePush) []byte {
+	w := payloadWriter{}
+	w.putUint64(m.InputSeq)
+	w.putString(m.Mime)
+	w.putBytes(m.Data)
+	return w.b
+}
+
+// UnmarshalImagePush decodes an ImagePush message payload. After the fixed
+// input sequence and length-prefixed mime string, the rest of the payload is
+// data; there is no length prefix for it.
+func UnmarshalImagePush(b []byte) (ImagePush, error) {
+	r := payloadReader{b: b}
+	seq, err := r.getUint64()
+	if err != nil {
+		return ImagePush{}, err
+	}
+	mime, err := r.getString()
+	if err != nil {
+		return ImagePush{}, err
+	}
+	return ImagePush{InputSeq: seq, Mime: mime, Data: r.rest()}, nil
 }
 
 // MarshalResize encodes m into a Resize message payload.

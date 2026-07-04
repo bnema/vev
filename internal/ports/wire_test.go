@@ -140,6 +140,40 @@ func TestInputGoldenAndRoundTrip(t *testing.T) {
 	assertAllPrefixesFail(t, full[:8], UnmarshalInput)
 }
 
+func TestImagePushGoldenAndRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  ImagePush
+		want []byte
+	}{
+		{
+			name: "png data",
+			msg:  ImagePush{InputSeq: 7, Mime: "image/png", Data: []byte{0x01, 0x02, 0x03}},
+			want: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x09, 0x69, 0x6d, 0x61, 0x67, 0x65, 0x2f, 0x70, 0x6e, 0x67, 0x01, 0x02, 0x03},
+		},
+		{name: "empty", msg: ImagePush{}, want: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MarshalImagePush(tt.msg)
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("MarshalImagePush() = %#v, want %#v", got, tt.want)
+			}
+			back, err := UnmarshalImagePush(got)
+			if err != nil {
+				t.Fatalf("UnmarshalImagePush() error = %v", err)
+			}
+			if !reflect.DeepEqual(back, tt.msg) {
+				t.Fatalf("round trip = %#v, want %#v", back, tt.msg)
+			}
+		})
+	}
+
+	full := MarshalImagePush(tests[0].msg)
+	assertAllPrefixesFail(t, full[:19], UnmarshalImagePush)
+}
+
 func TestThemeGoldenAndRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string

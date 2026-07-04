@@ -103,6 +103,9 @@ type Daemon struct {
 	persistEnabled bool
 	procCwd        func(int) (string, error)
 	procComm       func(int) (string, error)
+	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
+	// (see clipboard.go); empty means use os.TempDir().
+	tempDir string
 
 	serveCtx    context.Context
 	serveCancel context.CancelFunc
@@ -164,6 +167,15 @@ func WithCwdReader(fn func(int) (string, error)) Option {
 		if fn != nil {
 			d.procCwd = fn
 		}
+	}
+}
+
+// WithTempDir overrides the directory clipboard-image-transfer writes temp
+// files into (production default: os.TempDir()); tests use this with
+// t.TempDir() so writes are isolated and auto-cleaned.
+func WithTempDir(dir string) Option {
+	return func(d *Daemon) {
+		d.tempDir = dir
 	}
 }
 

@@ -119,7 +119,14 @@ const (
 // Run connects via dialer and runs the attach client. It owns the terminal
 // lifecycle above attach attempts so raw mode remains active while a live
 // client process redials a lost link.
-func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, log *slog.Logger) (retErr error) {
+//
+// remote and clipboard together gate the clipboard-image-transfer feature
+// (docs/superpowers/specs/2026-07-04-clipboard-image-transfer-design.md):
+// Ctrl+V is only intercepted on a remote attach (remote true) with a
+// ClipboardReader configured (clipboard non-nil) — local attaches forward
+// 0x16 untouched so the locally running agent's own clipboard handling
+// applies.
+func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) (retErr error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -192,7 +199,7 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 		}
 		ms.dialed = true
 
-		result := attachOnce(ctx, transport, term, clk, attemptIntent, name, resumeToken, processClientID, &ms, enterRaw, clearStatus, log)
+		result := attachOnce(ctx, transport, term, clk, attemptIntent, name, resumeToken, processClientID, &ms, enterRaw, clearStatus, remote, clipboard, log)
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
@@ -255,7 +262,7 @@ func shouldReconnect(err error) bool {
 //
 // It is kept as a compatibility wrapper for callers that still own dialing.
 func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string) error {
-	return Run(ctx, singleTransportDialer{transport: transport}, term, clk, intent, name, slog.Default())
+	return Run(ctx, singleTransportDialer{transport: transport}, term, clk, intent, name, false, nil, slog.Default())
 }
 
 type singleTransportDialer struct{ transport ports.Transport }
@@ -270,7 +277,7 @@ type attachResult struct {
 	err         error
 }
 
-func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func(), log *slog.Logger) attachResult {
+func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func(), remote bool, clipboard ports.ClipboardReader, log *slog.Logger) attachResult {
 	// 1. Handshake: send Hello with our size and TERM.
 	size, err := term.Size()
 	if err != nil {
@@ -336,8 +343,12 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	sendCh := make(chan ports.Frame, sendQueueDepth)
 	sendErrCh := make(chan error, 1)
 
+	var clip ports.ClipboardReader
+	if remote {
+		clip = clipboard
+	}
 	go runSender(loopCtx, cancel, transport, sendCh, sendErrCh, log)
-	go runStdin(loopCtx, cancel, term.In(), sendCh, clk, trueColor, log)
+	go runStdin(loopCtx, cancel, term.In(), sendCh, clk, trueColor, clip, log)
 	go runResize(loopCtx, term.ResizeEvents(), sendCh, log)
 
 	// 5. Output/main loop: the only goroutine that touches the terminal.
@@ -461,7 +472,7 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 // exits. That is harmless here — Attach has already returned and restored
 // the terminal — and matches the standard pattern for stdin pumps; a
 // closable stdin duplicate could lift it later if ever needed.
-func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame, clk ports.Clock, trueColor bool, log *slog.Logger) {
+func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame, clk ports.Clock, trueColor bool, clipboard ports.ClipboardReader, log *slog.Logger) {
 	defer log.Debug("stdin pump exited")
 	buf := make([]byte, stdinBufSize)
 	var scanner theme.Scanner
@@ -488,6 +499,26 @@ func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out 
 		send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{InputSeq: inputSeq, Data: copyData})})
 	})
 	defer coalescer.Close()
+
+	// On a remote attach with a ClipboardReader configured, splice in the
+	// clipboard interceptor ahead of the coalescer so a bare Ctrl+V (0x16)
+	// becomes a clipboard image push instead of reaching the coalescer (and
+	// from there the remote pane) as an ordinary keystroke.
+	sink := coalescer.Scan
+	if clipboard != nil {
+		ci := &clipboardIntercept{
+			coalescer: coalescer,
+			reader:    clipboard,
+			log:       log,
+			sendImage: func(mime string, data []byte) {
+				inputSeq++
+				send(ports.Frame{Type: ports.MsgImagePush, Payload: ports.MarshalImagePush(ports.ImagePush{InputSeq: inputSeq, Mime: mime, Data: data})})
+			},
+			next: coalescer.Scan,
+		}
+		sink = ci.Scan
+	}
+
 	for {
 		n, rerr := in.Read(buf)
 		if n > 0 {
@@ -503,7 +534,7 @@ func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out 
 					return
 				}
 				send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(current)})
-			}, coalescer.Scan)
+			}, sink)
 			if !sendOK.Load() {
 				return
 			}

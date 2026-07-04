@@ -21,6 +21,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/clipboard"
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/ipc"
@@ -286,6 +287,7 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) err
 		remoteDialer:   defaultRemoteDialer,
 		runClient:      client.Run,
 		createDetached: createDetachedLocalSession,
+		clipboard:      clipboard.New(),
 	})
 }
 
@@ -299,8 +301,13 @@ type runAttachDeps struct {
 	attachLocal    func(context.Context, uint8, string, *slog.Logger) error // compatibility hook for focused tests
 	localDialer    func() ports.Dialer
 	remoteDialer   func(target, session string, log *slog.Logger) ports.Dialer
-	runClient      func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, *slog.Logger) error
+	runClient      func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, bool, ports.ClipboardReader, *slog.Logger) error
 	createDetached func(context.Context, string) error
+	// clipboard reads a clipboard image on a remote attach's Ctrl+V (see
+	// docs/superpowers/specs/2026-07-04-clipboard-image-transfer-design.md).
+	// Only used for the remote-dialer branch below; local attaches never
+	// intercept Ctrl+V regardless of this field.
+	clipboard ports.ClipboardReader
 }
 
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
@@ -323,7 +330,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if log != nil {
 			log.Info("attaching to remote session", "target", remoteTarget, "name", name)
 		}
-		return runClient(ctx, remoteDialer(remoteTarget, name, log), term.New(), clock.New(), intent, name, log)
+		return runClient(ctx, remoteDialer(remoteTarget, name, log), term.New(), clock.New(), intent, name, true, deps.clipboard, log)
 	}
 
 	attachLocal := deps.attachLocal
@@ -336,7 +343,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			if log != nil {
 				log.Info("attaching to local session", "intent", intent, "name", name)
 			}
-			return runClient(ctx, localDialer(), term.New(), clock.New(), intent, name, log)
+			return runClient(ctx, localDialer(), term.New(), clock.New(), intent, name, false, nil, log)
 		}
 	}
 	return runLocalAttachWithRecovery(ctx, intent, name, attachRecoveryDeps{
