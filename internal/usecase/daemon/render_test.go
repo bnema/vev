@@ -17,6 +17,8 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/usecase/layout"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -323,6 +325,68 @@ func TestOffsetDamageShiftsScreenDamageBelowTopBar(t *testing.T) {
 	}, damage)
 }
 
+func TestTranslateDamageShiftsXYAndPreservesFullRedraw(t *testing.T) {
+	damage := translateDamage([]renderer.Damage{
+		{Kind: renderer.DamageText, X: 2, Y: 3, Width: 4, Height: 1},
+		renderer.FullRedraw(),
+	}, 5, 7)
+	require.Equal(t, []renderer.Damage{
+		{Kind: renderer.DamageText, X: 7, Y: 10, Width: 4, Height: 1},
+		renderer.FullRedraw(),
+	}, damage)
+}
+
+func TestComposeTabFrameTwoPaneSplitBlitsDividersDimsAndTranslatesDamage(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 41, Rows: 4})
+	left := win.focusedPane()
+	left.screen.ClearDamage()
+	left.screen.Write([]byte("L"))
+	left.screen.ClearDamage()
+
+	right := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 4})
+	right.screen.Write([]byte("R"))
+	right.screen.ClearDamage()
+	right.screen.Write([]byte("x"))
+
+	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
+	win.tree.Focus = right.id
+	win.panes[right.id] = right
+
+	theme := themeui.Theme{Known: true, TrueColor: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 10, B: 10}}
+	frame, damage := composeTabFrame(win, domain.Rect{Width: 41, Height: 4}, theme)
+
+	require.Equal(t, 'L', frame.At(0, 0).Rune)
+	require.Equal(t, '│', frame.At(20, 0).Rune)
+	require.Equal(t, 'R', frame.At(21, 0).Rune)
+	require.True(t, frame.At(0, 0).Style.HasForegroundRGB, "unfocused left pane should be dimmed during blit")
+	require.False(t, left.screen.Frame.At(0, 0).Style.HasForegroundRGB, "dimming must not mutate vt.Screen")
+	require.Contains(t, damage, renderer.Damage{Kind: renderer.DamageText, X: 22, Y: 0, Width: 1, Height: 1, Count: 1})
+}
+
+func TestComposeTabFrameStackDrawsTitleBarsAndDimsCollapsed(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
+	p1 := win.focusedPane()
+	p1.title = "one"
+	p1.screen.ClearDamage()
+	p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 3})
+	p2.title = "two"
+	p2.screen.Write([]byte("T"))
+	p2.screen.ClearDamage()
+
+	win.tree.Root = &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(p1.id), layout.NewLeaf(p2.id)}, Expanded: p2.id}
+	win.tree.Focus = p2.id
+	win.panes[p2.id] = p2
+
+	theme := themeui.Theme{Known: true, TrueColor: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 10, B: 10}}
+	frame, _ := composeTabFrame(win, domain.Rect{Width: 20, Height: 5}, theme)
+
+	require.Equal(t, "one", rowText(frame.Row(0))[:3])
+	require.Equal(t, "two", rowText(frame.Row(1))[:3])
+	require.Equal(t, 'T', frame.At(0, 2).Rune)
+	require.True(t, frame.At(0, 0).Style.HasForegroundRGB, "collapsed title bar should use dimmed chrome")
+	require.True(t, frame.At(0, 1).Style.Inverse || frame.At(0, 1).Style.HasBackgroundRGB, "focused title bar should use accent chrome")
+}
+
 func TestComposeClientFrameBarCacheSkipsUnchangedBars(t *testing.T) {
 	sess, win := newBarCacheTestSession()
 	var cache barCache
@@ -463,22 +527,25 @@ func TestSchedulerDefersPendingDirtyTimerDuringSynchronizedUpdate(t *testing.T) 
 
 	d := New(nil, mc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &tab{screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
+	win.ctx, win.cancel = sctx, cancel
+	p := win.focusedPane()
+	p.ctx, p.cancel = sctx, cancel
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
 	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 
-	win.mu.Lock()
-	win.screen.Write([]byte("before"))
-	win.mu.Unlock()
+	p.mu.Lock()
+	p.screen.Write([]byte("before"))
+	p.mu.Unlock()
 
 	d.sessWg.Add(1)
-	go d.scheduler(sess, win)
-	win.dirty <- struct{}{}
+	go d.scheduler(sess, win, p)
+	p.dirty <- struct{}{}
 
-	win.mu.Lock()
-	win.screen.Write([]byte("\x1b[?2026hafter"))
-	win.mu.Unlock()
+	p.mu.Lock()
+	p.screen.Write([]byte("\x1b[?2026hafter"))
+	p.mu.Unlock()
 	timerCh <- time.Now()
 
 	select {
@@ -488,10 +555,10 @@ func TestSchedulerDefersPendingDirtyTimerDuringSynchronizedUpdate(t *testing.T) 
 	}
 	require.Equal(t, int32(0), outputs.Load())
 
-	win.mu.Lock()
-	win.screen.Write([]byte(" done\x1b[?2026l"))
-	win.mu.Unlock()
-	win.flush <- struct{}{}
+	p.mu.Lock()
+	p.screen.Write([]byte(" done\x1b[?2026l"))
+	p.mu.Unlock()
+	p.flush <- struct{}{}
 	select {
 	case <-gotOutput:
 	case <-time.After(time.Second):

@@ -3,6 +3,7 @@
 package keys
 
 import (
+	"slices"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -30,6 +31,10 @@ const (
 	ActionSwitchTab8
 	ActionSwitchTab9
 	ActionJumpAttention
+	ActionFocusPaneLeft
+	ActionFocusPaneRight
+	ActionFocusPaneUp
+	ActionFocusPaneDown
 )
 
 // Handler receives router outputs. Forward is called only for bytes that should
@@ -98,13 +103,23 @@ func (r *Router) route(data []byte) {
 			r.retainESC()
 			return
 		}
+		remaining := data[i+1:]
+		if action, size, ok, partial := altArrowCSI(remaining); ok {
+			flush()
+			r.h.Action(action)
+			i += 1 + size
+			continue
+		} else if partial {
+			flush()
+			r.retainESC(remaining)
+			return
+		}
 		next := data[i+1]
 		if passThroughPrefix(next) {
 			buf = append(buf, ESC, next)
 			i += 2
 			continue
 		}
-		remaining := data[i+1:]
 		if action, size, ok := binding(remaining); ok {
 			flush()
 			r.h.Action(action)
@@ -123,11 +138,14 @@ func (r *Router) route(data []byte) {
 }
 
 func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int) int {
-	next := data[0]
-	if passThroughPrefix(next) {
-		r.forward([]byte{ESC, next})
-		return 1
+	if action, size, ok, partial := altArrowCSI(data); ok {
+		r.h.Action(action)
+		return size
+	} else if partial {
+		r.retainESC(data)
+		return len(data)
 	}
+	next := data[0]
 	if action, size, ok := binding(data); ok {
 		r.h.Action(action)
 		return size
@@ -136,14 +154,18 @@ func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int) int {
 		r.retainESC(data)
 		return len(data)
 	}
-	key, size := utf8.DecodeRune(data)
+	_, size := utf8.DecodeRune(data)
 	if size > 1 {
 		r.forward(append([]byte{ESC}, data[:size]...))
 		return size
 	}
-	if key == utf8.RuneError && pendingAltLen > 0 {
+	if pendingAltLen > 0 {
 		r.forward(append([]byte{ESC}, data[:pendingAltLen]...))
 		return pendingAltLen
+	}
+	if passThroughPrefix(next) {
+		r.forward([]byte{ESC, next})
+		return 1
 	}
 	r.forward([]byte{ESC})
 	return 0
@@ -200,6 +222,50 @@ func (r *Router) forward(data []byte) {
 
 func passThroughPrefix(b byte) bool { return b == '[' || b == 'O' }
 
+func altArrowCSI(data []byte) (Action, int, bool, bool) {
+	const seqLen = len("[1;3A")
+	if len(data) > seqLen {
+		return 0, 0, false, false
+	}
+	if len(data) < seqLen {
+		return 0, 0, false, hasAltArrowCSIPrefix(data)
+	}
+	if data[0] != '[' || data[1] != '1' || data[2] != ';' || (data[3] != '3' && data[3] != '9') {
+		return 0, 0, false, false
+	}
+	switch data[4] {
+	case 'A':
+		return ActionFocusPaneUp, seqLen, true, false
+	case 'B':
+		return ActionFocusPaneDown, seqLen, true, false
+	case 'C':
+		return ActionFocusPaneRight, seqLen, true, false
+	case 'D':
+		return ActionFocusPaneLeft, seqLen, true, false
+	default:
+		return 0, 0, false, false
+	}
+}
+
+func hasAltArrowCSIPrefix(data []byte) bool {
+	if len(data) == 0 || len(data) >= len("[1;3A") {
+		return false
+	}
+	return matchesPrefix(data, "[1;3") || matchesPrefix(data, "[1;9")
+}
+
+func matchesPrefix(data []byte, want string) bool {
+	if len(data) > len(want) {
+		return false
+	}
+	for i := range data {
+		if data[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func binding(data []byte) (Action, int, bool) {
 	if len(data) == 0 {
 		return 0, 0, false
@@ -238,10 +304,8 @@ var topRowDigitAliases = [][]rune{
 // Ctrl+digit bindings can share the same layout support.
 func topRowDigitIndex(key rune) (int, bool) {
 	for idx, aliases := range topRowDigitAliases {
-		for _, alias := range aliases {
-			if key == alias {
-				return idx, true
-			}
+		if slices.Contains(aliases, key) {
+			return idx, true
 		}
 	}
 	return 0, false

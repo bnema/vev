@@ -11,7 +11,9 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"github.com/bnema/vev/internal/usecase/layout"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -406,7 +408,7 @@ func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 
 	// Simulate 5 lines evicted into scrollback between the Press and the
 	// first Motion (e.g. the child kept producing output).
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		sess.tabs[0].scrollback.Append(testRow("evicted"))
 	}
 
@@ -440,4 +442,49 @@ func TestMouseSplitReportPreservesOrder(t *testing.T) {
 		t.Fatalf("split mouse/copy bytes forwarded to PTY: %q", got)
 	default:
 	}
+}
+
+func TestMouseHitTestFocusesPaneAndTranslatesSGRColumns(t *testing.T) {
+	p1 := portsmocks.NewMockPTY(t)
+	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2 := portsmocks.NewMockPTY(t)
+	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2.EXPECT().Write([]byte("\x1b[<0;1;1M")).Return(len("\x1b[<0;1;1M"), nil).Once()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
+	d.procComm = nil
+	tb := sess.activeTab()
+	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 5})
+	p2pane.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 41, Rows: 5}
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+	tb.tree.Focus = "pane-1"
+	tb.panes["pane-2"] = p2pane
+	tb.mu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;22;2M"))
+
+	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
+}
+
+func TestMouseCollapsedStackBarExpandsAndFocuses(t *testing.T) {
+	p1 := portsmocks.NewMockPTY(t)
+	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 3}).Return(nil).Maybe()
+	p2 := portsmocks.NewMockPTY(t)
+	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 3}).Return(nil).Maybe()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
+	d.procComm = nil
+	tb := sess.activeTab()
+	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 3})
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 20, Rows: 5}
+	tb.tree.Root = &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}, Expanded: "pane-1"}
+	tb.tree.Focus = "pane-1"
+	tb.panes["pane-2"] = p2pane
+	tb.mu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;6M"))
+
+	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
+	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Root.Expanded)
 }

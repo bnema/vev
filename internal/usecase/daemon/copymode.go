@@ -17,20 +17,21 @@
 //     when the parent context is cancelled (graceful shutdown notifies any
 //     attached clients with ReasonServerShutdown).
 //
-// Locking: a session's screen and per-client renderer shadow are both guarded
-// by tab.mu; the attached-client pointer by session.mu; the registry by
-// Daemon.mu. When more than one is held the order is always
-// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
-// a slow client.
+// Locking: a pane's screen/scrollback and per-client renderer shadow are
+// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
+// session.mu; the registry by Daemon.mu. When more than one is held the order
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
+// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
 package daemon
 
 import (
 	"strconv"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -42,17 +43,23 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 	}
 
 	tb.mu.Lock()
+	p := tb.focusedPane()
+	tb.mu.Unlock()
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
 	ac.copyMu.Lock()
 	if ac.copyMode == nil {
 		ac.copyMu.Unlock()
-		tb.mu.Unlock()
+		p.mu.Unlock()
 		return
 	}
-	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
+	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
 	if delta > 0 && ac.copyMode.AtBottom(snap) {
 		ac.copyMode = nil
 		ac.copyMu.Unlock()
-		tb.mu.Unlock()
+		p.mu.Unlock()
 		d.paint(sess, ac, true)
 		return
 	}
@@ -62,7 +69,7 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 		ac.copyMode = nil
 	}
 	ac.copyMu.Unlock()
-	tb.mu.Unlock()
+	p.mu.Unlock()
 
 	d.paint(sess, ac, true)
 }
@@ -73,8 +80,14 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 		return
 	}
 	tb.mu.Lock()
-	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
+	p := tb.focusedPane()
 	tb.mu.Unlock()
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+	p.mu.Unlock()
 	ac.copyMu.Lock()
 	ac.copyMode = scopy.NewMode(snap)
 	ac.copyPressRowValid = false
@@ -94,23 +107,29 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
 	}
 
 	tb.mu.Lock()
-	if ev.Row >= tb.screen.Frame.Height {
+	p := tb.focusedPane()
+	tb.mu.Unlock()
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	if ev.Row >= p.screen.Frame.Height {
 		if ev.Type == mouse.Press {
 			ac.copyMu.Lock()
 			ac.copyPressRowValid = false
 			ac.copyDragging = false
 			ac.copyMu.Unlock()
 		}
-		tb.mu.Unlock()
+		p.mu.Unlock()
 		return
 	}
 	ac.copyMu.Lock()
 	if ac.copyMode == nil {
 		ac.copyMu.Unlock()
-		tb.mu.Unlock()
+		p.mu.Unlock()
 		return
 	}
-	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
+	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
 	absRow := ac.copyMode.ViewportTop + ev.Row
 	changed := false
 	switch ev.Type {
@@ -134,7 +153,7 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
 		// Button release intentionally has no visual effect.
 	}
 	ac.copyMu.Unlock()
-	tb.mu.Unlock()
+	p.mu.Unlock()
 
 	if changed {
 		d.paint(sess, ac, true)
@@ -152,12 +171,18 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	}
 
 	tb.mu.Lock()
+	p := tb.focusedPane()
+	tb.mu.Unlock()
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
 	ac.copyMu.Lock()
 	if ac.copyMode == nil {
 		ac.copyPending = nil
 		d.stopCopyPendingTimerLocked(ac)
 		ac.copyMu.Unlock()
-		tb.mu.Unlock()
+		p.mu.Unlock()
 		return
 	}
 	if len(ac.copyPending) > 0 {
@@ -168,7 +193,7 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		data = combined
 		ac.copyPending = nil
 	}
-	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
+	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
 	changed := false
 	copyOut := false
 	exit := false
@@ -222,7 +247,7 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		ac.copyMode = nil
 	}
 	ac.copyMu.Unlock()
-	tb.mu.Unlock()
+	p.mu.Unlock()
 
 	if copyOut && text != "" {
 		chunks := scopy.OSC52(text)
@@ -309,14 +334,27 @@ func isCopyEscapePrefix(data []byte) bool {
 
 func composeCopyClientFrame(mode *scopy.Mode, tb *tab, bars barState) (renderer.Frame, []renderer.Damage) {
 	styles := newThemeStyles(bars.theme)
-	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
+	p := tb.focusedPane()
+	pl, ok := focusedPlacementLocked(tb)
+	if !ok {
+		pl = layout.Placement{Content: domain.Rect{Width: p.screen.Frame.Width, Height: p.screen.Frame.Height}}
+	}
+	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
 	copyFrame := mode.Render(snap, styles.copyStatus, styles.selection)
-	width, screenRows := tb.screen.Frame.Width, tb.screen.Frame.Height
+	width, screenRows := p.screen.Frame.Width, p.screen.Frame.Height
+	if len(tb.panes) > 1 && tb.size.Valid() {
+		width, screenRows = tb.size.Cols, tb.size.Rows
+	}
 	frame := renderer.NewFrame(width, screenRows+2)
 	drawTopBarSnapshot(frame.Row(0), bars.status, bars.attentionFrame, styles)
+	base, _ := composeTabFrame(tb, domain.Rect{Width: width, Height: screenRows}, bars.theme)
 	for y := range screenRows {
-		copy(frame.Row(y+1), copyFrame.Row(y))
+		copy(frame.Row(y+1), base.Row(y))
 	}
-	copy(frame.Row(screenRows+1), copyFrame.Row(screenRows))
+	for y := 0; y < pl.Content.Height && y < copyFrame.Height-1; y++ {
+		copy(frame.Row(pl.Content.Y + 1 + y)[pl.Content.X:pl.Content.X+min(pl.Content.Width, copyFrame.Width)], copyFrame.Row(y)[:min(pl.Content.Width, copyFrame.Width)])
+	}
+	statusY := screenRows + 1
+	copy(frame.Row(statusY), copyFrame.Row(copyFrame.Height - 1)[:min(width, copyFrame.Width)])
 	return frame, []renderer.Damage{renderer.FullRedraw()}
 }

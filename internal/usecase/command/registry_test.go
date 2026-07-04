@@ -8,7 +8,7 @@ import (
 
 func TestRegistryCodesAreUniqueUppercaseThreeLettersInOrder(t *testing.T) {
 	commands := Registry()
-	wantCodes := []string{"CNT", "CNS", "CLT", "NXT", "PVT", "SSP", "VIS", "RNS", "DET"}
+	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "SSP", "VIS", "RNS", "DET"}
 
 	if len(commands) != len(wantCodes) {
 		t.Fatalf("Registry() returned %d commands, want %d", len(commands), len(wantCodes))
@@ -54,6 +54,17 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 		{code: "CNT", want: "CreateTab"},
 		{code: "CNS", want: "CreateSession"},
 		{code: "CLT", want: "CloseTab"},
+		{code: "SPR", want: "SplitRight"},
+		{code: "SPL", want: "SplitLeft"},
+		{code: "SPU", want: "SplitUp"},
+		{code: "SPD", want: "SplitDown"},
+		{code: "STP", want: "StackPane"},
+		{code: "TST", want: "ToggleStack"},
+		{code: "CLP", want: "ClosePane"},
+		{code: "FPL", want: "FocusPaneLeft"},
+		{code: "FPR", want: "FocusPaneRight"},
+		{code: "FPU", want: "FocusPaneUp"},
+		{code: "FPD", want: "FocusPaneDown"},
 		{code: "NXT", want: "NextTab"},
 		{code: "PVT", want: "PrevTab"},
 		{code: "SSP", want: "OpenSessionPicker"},
@@ -99,6 +110,17 @@ func (s *spyContext) onlyCall() string {
 func (s *spyContext) CreateTab() error         { return s.record("CreateTab") }
 func (s *spyContext) CreateSession() error     { return s.record("CreateSession") }
 func (s *spyContext) CloseTab() error          { return s.record("CloseTab") }
+func (s *spyContext) SplitRight() error        { return s.record("SplitRight") }
+func (s *spyContext) SplitLeft() error         { return s.record("SplitLeft") }
+func (s *spyContext) SplitUp() error           { return s.record("SplitUp") }
+func (s *spyContext) SplitDown() error         { return s.record("SplitDown") }
+func (s *spyContext) StackPane() error         { return s.record("StackPane") }
+func (s *spyContext) ToggleStack() error       { return s.record("ToggleStack") }
+func (s *spyContext) ClosePane() error         { return s.record("ClosePane") }
+func (s *spyContext) FocusPaneLeft() error     { return s.record("FocusPaneLeft") }
+func (s *spyContext) FocusPaneRight() error    { return s.record("FocusPaneRight") }
+func (s *spyContext) FocusPaneUp() error       { return s.record("FocusPaneUp") }
+func (s *spyContext) FocusPaneDown() error     { return s.record("FocusPaneDown") }
 func (s *spyContext) NextTab() error           { return s.record("NextTab") }
 func (s *spyContext) PrevTab() error           { return s.record("PrevTab") }
 func (s *spyContext) Detach() error            { return s.record("Detach") }

@@ -156,8 +156,9 @@ func (p *scriptPTY) Close() error {
 	p.once.Do(func() { close(p.closed) })
 	return nil
 }
-func (p *scriptPTY) Resize(domain.Size) error { return nil }
-func (p *scriptPTY) Pid() int                 { return 4242 }
+func (p *scriptPTY) Resize(domain.Size) error     { return nil }
+func (p *scriptPTY) Pid() int                     { return 4242 }
+func (p *scriptPTY) ForegroundPgid() (int, error) { return 4242, nil }
 
 func TestAckAttentionClearsOnlyPaintedVisibleTab(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)

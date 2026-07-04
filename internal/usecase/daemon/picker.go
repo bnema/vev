@@ -17,12 +17,11 @@
 //     when the parent context is cancelled (graceful shutdown notifies any
 //     attached clients with ReasonServerShutdown).
 //
-// Locking: a session's screen and per-client renderer shadow are both guarded
-// by tab.mu; the attached-client pointer by session.mu; the registry by
-// Daemon.mu. When more than one is held the order is always
-// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
-// a slow client.
+// Locking: a pane's screen/scrollback and per-client renderer shadow are
+// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
+// session.mu; the registry by Daemon.mu. When more than one is held the order
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
+// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
 package daemon
 
 import (
@@ -500,9 +499,19 @@ func snapshotPickerPreview(tb *tab) picker.Preview {
 }
 
 func pickerPreviewFromLockedTab(tb *tab) picker.Preview {
-	rows := make([][]renderer.Cell, tb.screen.Frame.Height)
-	for y := range rows {
-		rows[y] = append([]renderer.Cell(nil), tb.screen.Frame.Row(y)...)
+	p := tb.focusedPane()
+	if p == nil {
+		return picker.Preview{}
 	}
-	return picker.Preview{Rows: rows, Width: tb.screen.Frame.Width, Height: tb.screen.Frame.Height}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return pickerPreviewFromLockedPane(p)
+}
+
+func pickerPreviewFromLockedPane(p *pane) picker.Preview {
+	rows := make([][]renderer.Cell, p.screen.Frame.Height)
+	for y := range rows {
+		rows[y] = append([]renderer.Cell(nil), p.screen.Frame.Row(y)...)
+	}
+	return picker.Preview{Rows: rows, Width: p.screen.Frame.Width, Height: p.screen.Frame.Height}
 }

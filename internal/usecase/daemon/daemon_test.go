@@ -243,7 +243,12 @@ func newManualSessionWithPTYs(t *testing.T, ptys ...ports.PTY) (*Daemon, *sessio
 	tabs := make([]*tab, 0, len(ptys))
 	for _, p := range ptys {
 		wctx, wcancel := context.WithCancel(sctx)
-		tabs = append(tabs, &tab{pty: p, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: wctx, cancel: wcancel})
+		tb := newTab(p, domain.Size{Cols: 80, Rows: 23})
+		tb.ctx, tb.cancel = wctx, wcancel
+		for _, pane := range tb.panes {
+			pane.ctx, pane.cancel = wctx, wcancel
+		}
+		tabs = append(tabs, tb)
 	}
 	sess := &session{id: "manual", name: "work", ctx: sctx, cancel: cancel, tabs: tabs, client: ac}
 	ac.setSession(sess)

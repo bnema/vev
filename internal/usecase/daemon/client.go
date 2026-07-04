@@ -17,12 +17,11 @@
 //     when the parent context is cancelled (graceful shutdown notifies any
 //     attached clients with ReasonServerShutdown).
 //
-// Locking: a session's screen and per-client renderer shadow are both guarded
-// by tab.mu; the attached-client pointer by session.mu; the registry by
-// Daemon.mu. When more than one is held the order is always
-// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
-// a slow client.
+// Locking: a pane's screen/scrollback and per-client renderer shadow are
+// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
+// session.mu; the registry by Daemon.mu. When more than one is held the order
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
+// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
 package daemon
 
 import (
@@ -254,8 +253,13 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size)
 	sess.mu.Unlock()
 	for _, tb := range tabs {
 		tb.mu.Lock()
-		tb.screen.SetDefaultColors(renderer.RGB{}, renderer.RGB{}, false)
+		panes := tb.panesSnapshot()
 		tb.mu.Unlock()
+		for _, p := range panes {
+			p.mu.Lock()
+			p.screen.SetDefaultColors(renderer.RGB{}, renderer.RGB{}, false)
+			p.mu.Unlock()
+		}
 	}
 	return ac, old
 }
@@ -281,8 +285,13 @@ func (d *Daemon) resetScreenDefaultColors(sess *session) {
 	sess.mu.Unlock()
 	for _, tb := range tabs {
 		tb.mu.Lock()
-		tb.screen.SetDefaultColors(renderer.RGB{}, renderer.RGB{}, false)
+		panes := tb.panesSnapshot()
 		tb.mu.Unlock()
+		for _, p := range panes {
+			p.mu.Lock()
+			p.screen.SetDefaultColors(renderer.RGB{}, renderer.RGB{}, false)
+			p.mu.Unlock()
+		}
 	}
 }
 
@@ -410,8 +419,13 @@ func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) 
 	ac.setTheme(t)
 	for _, tb := range tabs {
 		tb.mu.Lock()
-		tb.screen.SetDefaultColors(t.Foreground, t.Background, knownDefaultColors)
+		panes := tb.panesSnapshot()
 		tb.mu.Unlock()
+		for _, p := range panes {
+			p.mu.Lock()
+			p.screen.SetDefaultColors(t.Foreground, t.Background, knownDefaultColors)
+			p.mu.Unlock()
+		}
 	}
 	d.paint(sess, ac, true)
 }
@@ -421,7 +435,9 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 		return
 	}
 	tbSize := tabSize(sz)
-	ac.size = sz
+	if ac != nil {
+		ac.size = sz
+	}
 
 	sess.mu.Lock()
 	tabs := append([]*tab(nil), sess.tabs...)
@@ -431,15 +447,27 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	}
 
 	for _, tb := range tabs {
-		if err := tb.pty.Resize(tbSize); err != nil {
-			d.log.Warn("pty resize failed", "err", err, "session", sess.name)
-		}
 		tb.mu.Lock()
-		tb.screen.Resize(tbSize.Cols, tbSize.Rows)
 		tb.size = tbSize
+		if tb.tree == nil {
+			p := tb.focusedPane()
+			if p != nil {
+				if err := p.pty.Resize(tbSize); err != nil {
+					d.log.Warn("pty resize failed", "err", err, "session", sess.name)
+				}
+				p.mu.Lock()
+				p.screen.Resize(tbSize.Cols, tbSize.Rows)
+				p.rect = domain.Rect{Width: tbSize.Cols, Height: tbSize.Rows}
+				p.mu.Unlock()
+			}
+		} else {
+			d.applyLayoutLocked(tb)
+		}
 		tb.mu.Unlock()
 	}
-	d.paint(sess, ac, true)
+	if ac != nil {
+		d.paint(sess, ac, true)
+	}
 }
 
 // detachOnSendError drops a client whose transport failed. Like every other

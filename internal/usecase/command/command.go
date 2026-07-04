@@ -5,6 +5,17 @@ type Context interface {
 	CreateTab() error
 	CreateSession() error
 	CloseTab() error
+	SplitRight() error
+	SplitLeft() error
+	SplitUp() error
+	SplitDown() error
+	StackPane() error
+	ToggleStack() error
+	ClosePane() error
+	FocusPaneLeft() error
+	FocusPaneRight() error
+	FocusPaneUp() error
+	FocusPaneDown() error
 	NextTab() error
 	PrevTab() error
 	Detach() error

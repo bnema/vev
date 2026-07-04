@@ -17,12 +17,11 @@
 //     when the parent context is cancelled (graceful shutdown notifies any
 //     attached clients with ReasonServerShutdown).
 //
-// Locking: a session's screen and per-client renderer shadow are both guarded
-// by tab.mu; the attached-client pointer by session.mu; the registry by
-// Daemon.mu. When more than one is held the order is always
-// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
-// a slow client.
+// Locking: a pane's screen/scrollback and per-client renderer shadow are
+// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
+// session.mu; the registry by Daemon.mu. When more than one is held the order
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
+// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
 package daemon
 
 import (
@@ -30,8 +29,11 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -43,56 +45,65 @@ func signal(ch chan struct{}) {
 	}
 }
 
-func (d *Daemon) ptyReader(sess *session, tb *tab) {
+func (d *Daemon) ptyReader(sess *session, tb *tab, panes ...*pane) {
 	defer d.sessWg.Done()
+	var p *pane
+	if len(panes) > 0 {
+		p = panes[0]
+	} else {
+		p = tb.focusedPane()
+	}
+	if p == nil {
+		return
+	}
 	buf := make([]byte, ptyReadBufSize)
 	var resp []byte
 	attentionCh := make(chan struct{}, 1)
-	tb.mu.Lock()
-	tb.screen.OnResponse = func(b []byte) { resp = append(resp, b...) }
-	tb.screen.OnBell = func() { signal(attentionCh) }
-	tb.screen.OnNotify = func(string, string) { signal(attentionCh) }
-	tb.mu.Unlock()
+	p.mu.Lock()
+	p.screen.OnResponse = func(b []byte) { resp = append(resp, b...) }
+	p.screen.OnBell = func() { signal(attentionCh) }
+	p.screen.OnNotify = func(string, string) { signal(attentionCh) }
+	p.mu.Unlock()
 	for {
-		n, err := tb.pty.Read(buf)
+		n, err := p.pty.Read(buf)
 		if n > 0 {
 			data := buf[:n]
-			tb.mu.Lock()
-			wasSyncing := tb.screen.SyncUpdateActive()
-			tb.screen.Write(data)
-			isSyncing := tb.screen.SyncUpdateActive()
-			tb.mu.Unlock()
+			p.mu.Lock()
+			wasSyncing := p.screen.SyncUpdateActive()
+			p.screen.Write(data)
+			isSyncing := p.screen.SyncUpdateActive()
+			p.mu.Unlock()
 			select {
 			case <-attentionCh:
 				d.noteAttention(sess, tb)
 			default:
 			}
 			if len(resp) > 0 {
-				if _, writeErr := tb.pty.Write(resp); writeErr != nil {
+				if _, writeErr := p.pty.Write(resp); writeErr != nil {
 					d.log.Warn("pty response write failed", "err", writeErr, "session", sess.name)
 				}
 				resp = resp[:0]
 			}
 			if wasSyncing != isSyncing {
-				tb.mu.Lock()
-				tb.syncGen++
-				gen := tb.syncGen
-				tb.mu.Unlock()
+				p.mu.Lock()
+				p.syncGen++
+				gen := p.syncGen
+				p.mu.Unlock()
 				if isSyncing {
-					go d.syncWatchdog(tb, gen)
+					go d.syncWatchdog(p, gen)
 				}
 			}
 			if (wasSyncing && !isSyncing) || (!isSyncing && syncUpdateEndIn(data)) {
-				signal(tb.flush)
+				signal(p.flush)
 				continue
 			}
 			if isSyncing {
 				continue
 			}
-			signal(tb.dirty)
+			signal(p.dirty)
 		}
 		if err != nil {
-			d.closeTab(sess, tb, true)
+			d.reapPane(sess, tb, p)
 			return
 		}
 	}
@@ -101,8 +112,17 @@ func (d *Daemon) ptyReader(sess *session, tb *tab) {
 // scheduler debounces dirty signals. The first dirty opens a short tab;
 // sustained floods progressively widen that tab, while isolated updates
 // return to the minimum delay for interactive latency.
-func (d *Daemon) scheduler(sess *session, tb *tab) {
+func (d *Daemon) scheduler(sess *session, tb *tab, panes ...*pane) {
 	defer d.sessWg.Done()
+	var p *pane
+	if len(panes) > 0 {
+		p = panes[0]
+	} else {
+		p = tb.focusedPane()
+	}
+	if p == nil {
+		return
+	}
 	delay := minDebounceInterval
 	lastRender := d.clock.Now()
 outer:
@@ -110,13 +130,13 @@ outer:
 		select {
 		case <-sess.ctx.Done():
 			return
-		case <-tabDone(tb):
+		case <-paneDone(p):
 			return
-		case <-tb.flush:
+		case <-p.flush:
 			d.render(sess, tb)
 			lastRender = d.clock.Now()
 			continue
-		case <-tb.dirty:
+		case <-p.dirty:
 			if d.clock.Now().Sub(lastRender) >= maxDebounceInterval {
 				delay = minDebounceInterval
 			}
@@ -130,10 +150,10 @@ outer:
 			case <-sess.ctx.Done():
 				timer.Stop()
 				return
-			case <-tabDone(tb):
+			case <-paneDone(p):
 				timer.Stop()
 				return
-			case <-tb.flush:
+			case <-p.flush:
 				if !timer.Stop() {
 					select {
 					case <-timer.C():
@@ -143,7 +163,7 @@ outer:
 				d.render(sess, tb)
 				lastRender = d.clock.Now()
 				continue outer
-			case <-tb.dirty:
+			case <-p.dirty:
 				coalesced++
 			case <-timer.C():
 				break absorb
@@ -169,30 +189,23 @@ func nextDebounceDelay(delay time.Duration, coalesced int) time.Duration {
 	return delay
 }
 
-func (d *Daemon) syncWatchdog(tb *tab, gen uint64) {
+func (d *Daemon) syncWatchdog(p *pane, gen uint64) {
 	timer := d.clock.NewTimer(maxSyncUpdateDuration)
 	select {
-	case <-tabDone(tb):
+	case <-paneDone(p):
 		timer.Stop()
 		return
 	case <-timer.C():
 	}
 
-	tb.mu.Lock()
-	if tb.syncGen != gen || !tb.screen.SyncUpdateActive() {
-		tb.mu.Unlock()
+	p.mu.Lock()
+	if p.syncGen != gen || !p.screen.SyncUpdateActive() {
+		p.mu.Unlock()
 		return
 	}
-	tb.screen.ForceSyncEnd()
-	tb.mu.Unlock()
-	signal(tb.flush)
-}
-
-func tabDone(tb *tab) <-chan struct{} {
-	if tb.ctx == nil {
-		return nil
-	}
-	return tb.ctx.Done()
+	p.screen.ForceSyncEnd()
+	p.mu.Unlock()
+	signal(p.flush)
 }
 
 func syncUpdateEndIn(data []byte) bool {
@@ -203,15 +216,18 @@ func syncUpdateEndIn(data []byte) bool {
 // damage so it never grows unbounded while headless.
 func (d *Daemon) render(sess *session, tb *tab) {
 	tb.mu.Lock()
-	if tb.screen.SyncUpdateActive() {
-		tb.mu.Unlock()
-		return
-	}
-	tb.mu.Unlock()
-
-	tb.mu.Lock()
+	p := tb.focusedPane()
 	previewer := tb.previewClient
 	tb.mu.Unlock()
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	if p.screen.SyncUpdateActive() {
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
 
 	sess.mu.Lock()
 	ac := sess.client
@@ -226,16 +242,16 @@ func (d *Daemon) render(sess *session, tb *tab) {
 			d.paint(sess, ac, false)
 			return
 		}
-		tb.mu.Lock()
-		tb.screen.ClearDamage()
-		tb.mu.Unlock()
+		p.mu.Lock()
+		p.screen.ClearDamage()
+		p.mu.Unlock()
 		return
 	}
 
 	if ac == nil || !active {
-		tb.mu.Lock()
-		tb.screen.ClearDamage()
-		tb.mu.Unlock()
+		p.mu.Lock()
+		p.screen.ClearDamage()
+		p.mu.Unlock()
 		return
 	}
 	d.paint(sess, ac, false)
@@ -288,8 +304,27 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	bars.theme = ac.getTheme()
 
 	styles := newThemeStyles(ac.getTheme())
+	tb.mu.Lock()
+	var titleIDs []layout.PaneID
+	if placements, ok := solvedPlacementsLocked(tb); ok {
+		for _, pl := range placements {
+			if pl.TitleBar.Height > 0 {
+				titleIDs = append(titleIDs, pl.ID)
+			}
+		}
+	}
+	tb.mu.Unlock()
+	for _, id := range titleIDs {
+		d.refreshPaneTitle(sess, id)
+	}
 
 	tb.mu.Lock()
+	p := tb.focusedPane()
+	if p == nil {
+		tb.mu.Unlock()
+		ac.sendMu.Unlock()
+		return
+	}
 	if reset || copyActive || pickerActive || paletteActive || promptActive {
 		ac.rend.Reset()
 		ac.bars.Reset()
@@ -303,7 +338,9 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	}
 	if pickerActive {
 		if previewTab == tb {
-			preview = pickerPreviewFromLockedTab(tb)
+			p.mu.Lock()
+			preview = pickerPreviewFromLockedPane(p)
+			p.mu.Unlock()
 		}
 		frame, damage = composePickerClientFrame(pickerModel, preview, frame, styles)
 	}
@@ -315,13 +352,19 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		frame, damage = composePromptClientFrame(promptModel, frame, styles)
 		ac.promptMu.Unlock()
 	}
-	desiredCursor := desiredCursorOut(tb.screen, copyActive || pickerActive || paletteActive || promptActive)
+	p.mu.Lock()
+	desiredCursor := desiredCursorOut(p.screen, copyActive || pickerActive || paletteActive || promptActive)
+	p.mu.Unlock()
 	data, err := ac.rend.Draw(frame, damage)
 	var cursorTail []byte
 	if err == nil {
 		cursorTail = ac.encodeCursorTail(desiredCursor, len(data) > 0)
 	}
-	tb.screen.ClearDamage()
+	for _, pane := range tb.panesSnapshot() {
+		pane.mu.Lock()
+		pane.screen.ClearDamage()
+		pane.mu.Unlock()
+	}
 	tb.mu.Unlock()
 
 	var serr error
@@ -425,13 +468,18 @@ func composeClientFrameWithState(bars barState, tb *tab, full bool, caches ...*b
 	if len(caches) > 0 {
 		cache = caches[0]
 	}
+	p := tb.focusedPane()
 	styles := newThemeStyles(bars.theme)
-	width, screenRows := tb.screen.Frame.Width, tb.screen.Frame.Height
+	width, screenRows := p.screen.Frame.Width, p.screen.Frame.Height
+	if tb.size.Valid() {
+		width, screenRows = tb.size.Cols, tb.size.Rows
+	}
 	frame := renderer.NewFrame(width, screenRows+2)
 	topBar := frame.Row(0)
 	drawTopBarSnapshot(topBar, bars.status, bars.attentionFrame, styles)
+	contentFrame, contentDamage := composeTabFrame(tb, domain.Rect{Width: width, Height: screenRows}, bars.theme)
 	for y := range screenRows {
-		copy(frame.Row(y+1), tb.screen.Frame.Row(y))
+		copy(frame.Row(y+1), contentFrame.Row(y))
 	}
 	bottomBar := frame.Row(screenRows + 1)
 	drawStatusBarState(bottomBar, bars, styles)
@@ -441,7 +489,7 @@ func composeClientFrameWithState(bars barState, tb *tab, full bool, caches ...*b
 		}
 		return frame, []renderer.Damage{renderer.FullRedraw()}
 	}
-	damage := offsetDamage(tb.screen.Damage())
+	damage := translateDamage(contentDamage, 0, 1)
 	if cache == nil || !sameCells(cache.top, topBar) {
 		damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 0, Width: width, Height: 1})
 	}
@@ -452,6 +500,130 @@ func composeClientFrameWithState(bars barState, tb *tab, full bool, caches ...*b
 		cache.capture(topBar, bottomBar)
 	}
 	return frame, damage
+}
+
+func composeTabFrame(tb *tab, area domain.Rect, theme themeui.Theme) (renderer.Frame, []renderer.Damage) {
+	frame := renderer.NewFrame(area.Width, area.Height)
+	var root *layout.Node
+	if tb.tree != nil {
+		root = tb.tree.Root
+	}
+	placements, ok := layout.Solve(root, area)
+	var fallback *pane
+	if !ok {
+		fallback = tb.focusedPane()
+		if fallback == nil {
+			return frame, nil
+		}
+		placements = []layout.Placement{{ID: fallback.id, Content: area}}
+	}
+	drawDividers(frame, root, area, newThemeStyles(theme).border)
+	var damage []renderer.Damage
+	for _, pl := range placements {
+		p := tb.panes[pl.ID]
+		if len(tb.panes) == 1 && tb.tree != nil && tb.tree.Focus == pl.ID {
+			p = tb.focusedPane()
+		}
+		if p == nil && fallback != nil && pl.ID == fallback.id {
+			p = fallback
+		}
+		if p == nil {
+			continue
+		}
+		focused := tb.tree == nil || tb.tree.Focus == pl.ID
+		if pl.TitleBar.Height > 0 {
+			drawPaneTitleBar(frame, pl, p, focused, theme, "")
+		}
+		if pl.Collapsed || pl.Content.Width <= 0 || pl.Content.Height <= 0 {
+			continue
+		}
+		p.mu.Lock()
+		blitPaneFrame(frame, pl.Content, p.screen.Frame, !focused, theme)
+		for _, d := range p.screen.Damage() {
+			damage = append(damage, translateDamage([]renderer.Damage{d}, pl.Content.X, pl.Content.Y)...)
+		}
+		p.mu.Unlock()
+	}
+	return frame, damage
+}
+
+func blitPaneFrame(dst renderer.Frame, r domain.Rect, src renderer.Frame, dim bool, theme themeui.Theme) {
+	rows := min(r.Height, src.Height)
+	cols := min(r.Width, src.Width)
+	for y := range rows {
+		for x := range cols {
+			cell := src.At(x, y)
+			if dim {
+				cell.Style = themeui.DimStyle(cell.Style, theme)
+			}
+			dst.Set(r.X+x, r.Y+y, cell)
+		}
+	}
+}
+
+func drawPaneTitleBar(frame renderer.Frame, pl layout.Placement, p *pane, focused bool, theme themeui.Theme, fallback string) {
+	styles := newThemeStyles(theme)
+	style := styles.border
+	if focused {
+		style = styles.accent
+	} else {
+		style = themeui.DimStyle(style, theme)
+	}
+	for x := pl.TitleBar.X; x < pl.TitleBar.X+pl.TitleBar.Width && x < frame.Width; x++ {
+		frame.Set(x, pl.TitleBar.Y, renderer.Cell{Rune: ' ', Style: style})
+	}
+	title := p.title
+	if title == "" {
+		title = fallback
+	}
+	if title == "" {
+		title = string(p.id)
+	}
+	ui.DrawText(frame, pl.TitleBar.X, pl.TitleBar.Y, pl.TitleBar.X+pl.TitleBar.Width, title, style)
+}
+
+func drawDividers(frame renderer.Frame, n *layout.Node, r domain.Rect, style renderer.Style) {
+	if n == nil || n.Kind != layout.Split || len(n.Children) <= 1 {
+		return
+	}
+	count := len(n.Children)
+	if n.Dir == layout.Horizontal {
+		usable := r.Width - (count - 1)
+		base, rem := usable/count, usable%count
+		x := r.X
+		for i, child := range n.Children {
+			w := base
+			if i < rem {
+				w++
+			}
+			drawDividers(frame, child, domain.Rect{X: x, Y: r.Y, Width: w, Height: r.Height}, style)
+			x += w
+			if i < count-1 {
+				for y := r.Y; y < r.Y+r.Height; y++ {
+					frame.Set(x, y, renderer.Cell{Rune: '│', Style: style})
+				}
+				x++
+			}
+		}
+		return
+	}
+	usable := r.Height - (count - 1)
+	base, rem := usable/count, usable%count
+	y := r.Y
+	for i, child := range n.Children {
+		h := base
+		if i < rem {
+			h++
+		}
+		drawDividers(frame, child, domain.Rect{X: r.X, Y: y, Width: r.Width, Height: h}, style)
+		y += h
+		if i < count-1 {
+			for x := r.X; x < r.X+r.Width; x++ {
+				frame.Set(x, y, renderer.Cell{Rune: '─', Style: style})
+			}
+			y++
+		}
+	}
 }
 
 func (c *barCache) capture(top, bottom []renderer.Cell) {
@@ -482,11 +654,16 @@ func sameCells(a, b []renderer.Cell) bool {
 }
 
 func offsetDamage(in []renderer.Damage) []renderer.Damage {
+	return translateDamage(in, 0, 1)
+}
+
+func translateDamage(in []renderer.Damage, dx, dy int) []renderer.Damage {
 	out := make([]renderer.Damage, len(in))
 	for i, d := range in {
 		out[i] = d
 		if d.Kind != renderer.DamageFullRedraw {
-			out[i].Y++
+			out[i].X += dx
+			out[i].Y += dy
 		}
 	}
 	return out

@@ -168,8 +168,14 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 			return false
 		}
 		win.mu.Lock()
-		defer win.mu.Unlock()
-		return len(scopy.NewSnapshot(win.scrollback, win.screen.Frame).Rows) >= 12
+		p := win.focusedPane()
+		win.mu.Unlock()
+		if p == nil {
+			return false
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(scopy.NewSnapshot(p.scrollback, p.screen.Frame).Rows) >= 12
 	}, 2*time.Second, 5*time.Millisecond)
 
 	sess := firstSession(d)

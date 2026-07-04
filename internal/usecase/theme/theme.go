@@ -184,7 +184,7 @@ func colorOSCPrefix(data []byte) (complete bool, possible bool) {
 }
 
 func findTerminator(data []byte) (start int, end int) {
-	for i := 0; i < len(data); i++ {
+	for i := range data {
 		switch data[i] {
 		case '\x07':
 			return i, i + 1
@@ -248,6 +248,23 @@ func BorderStyle(t Theme) renderer.Style {
 	style.HasForegroundRGB = true
 	style.ForegroundRGB = Blend(t.Foreground, t.Background, 0.40)
 	return style
+}
+
+func DimStyle(style renderer.Style, t Theme) renderer.Style {
+	if !usable(t) {
+		return style
+	}
+	out := style
+	out.HasForegroundRGB = true
+	if style.HasForegroundRGB {
+		out.ForegroundRGB = Blend(style.ForegroundRGB, t.Background, 0.35)
+	} else {
+		out.ForegroundRGB = Blend(t.Foreground, t.Background, 0.35)
+	}
+	if style.HasBackgroundRGB {
+		out.BackgroundRGB = Blend(style.BackgroundRGB, t.Background, 0.35)
+	}
+	return out
 }
 
 func SelectionStyle(t Theme) renderer.Style {

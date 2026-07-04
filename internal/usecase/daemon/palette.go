@@ -3,6 +3,7 @@ package daemon
 import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
@@ -157,6 +158,50 @@ func (e paletteExec) CloseTab() error {
 		e.d.closeTab(e.sess, tb, true)
 	}
 	return nil
+}
+
+func (e paletteExec) SplitRight() error {
+	return e.d.splitPane(e.sess, e.ac, layout.Right)
+}
+
+func (e paletteExec) SplitLeft() error {
+	return e.d.splitPane(e.sess, e.ac, layout.Left)
+}
+
+func (e paletteExec) SplitUp() error {
+	return e.d.splitPane(e.sess, e.ac, layout.Up)
+}
+
+func (e paletteExec) SplitDown() error {
+	return e.d.splitPane(e.sess, e.ac, layout.Down)
+}
+
+func (e paletteExec) StackPane() error {
+	return e.d.stackPane(e.sess, e.ac)
+}
+
+func (e paletteExec) ToggleStack() error {
+	return e.d.toggleStack(e.sess, e.ac)
+}
+
+func (e paletteExec) ClosePane() error {
+	return e.d.closeFocusedPane(e.sess, e.ac)
+}
+
+func (e paletteExec) FocusPaneLeft() error {
+	return e.d.focusDir(e.sess, e.ac, layout.Left)
+}
+
+func (e paletteExec) FocusPaneRight() error {
+	return e.d.focusDir(e.sess, e.ac, layout.Right)
+}
+
+func (e paletteExec) FocusPaneUp() error {
+	return e.d.focusDir(e.sess, e.ac, layout.Up)
+}
+
+func (e paletteExec) FocusPaneDown() error {
+	return e.d.focusDir(e.sess, e.ac, layout.Down)
 }
 
 func (e paletteExec) NextTab() error {

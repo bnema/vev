@@ -17,12 +17,11 @@
 //     when the parent context is cancelled (graceful shutdown notifies any
 //     attached clients with ReasonServerShutdown).
 //
-// Locking: a session's screen and per-client renderer shadow are both guarded
-// by tab.mu; the attached-client pointer by session.mu; the registry by
-// Daemon.mu. When more than one is held the order is always
-// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
-// a slow client.
+// Locking: a pane's screen/scrollback and per-client renderer shadow are
+// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
+// session.mu; the registry by Daemon.mu. When more than one is held the order
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
+// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
 package daemon
 
 import (
@@ -100,6 +99,7 @@ type Daemon struct {
 	persist        *persist.Persister
 	persistEnabled bool
 	procCwd        func(int) (string, error)
+	procComm       func(int) (string, error)
 
 	serveCtx    context.Context
 	serveCancel context.CancelFunc
@@ -176,6 +176,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		shell:    shell,
 		persist:  persist.New(nil),
 		procCwd:  platform.ProcessCwd,
+		procComm: platform.ProcessComm,
 		done:     make(chan struct{}),
 		animWake: make(chan struct{}, 1),
 	}
@@ -187,6 +188,9 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	if d.procCwd == nil {
 		d.procCwd = platform.ProcessCwd
+	}
+	if d.procComm == nil {
+		d.procComm = platform.ProcessComm
 	}
 	if records, err := d.persist.LoadAll(); err != nil {
 		d.log.Warn("loading persisted sessions failed", "err", err)

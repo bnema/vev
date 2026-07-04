@@ -244,6 +244,81 @@ func TestRouterPassesThroughTerminalEscapePrefixes(t *testing.T) {
 	}
 }
 
+func TestRouterInterceptsAltArrowCSIForPaneFocus(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []byte
+		want Action
+	}{
+		{name: "alt up", in: []byte{ESC, '[', '1', ';', '3', 'A'}, want: ActionFocusPaneUp},
+		{name: "alt down", in: []byte{ESC, '[', '1', ';', '3', 'B'}, want: ActionFocusPaneDown},
+		{name: "alt right", in: []byte{ESC, '[', '1', ';', '3', 'C'}, want: ActionFocusPaneRight},
+		{name: "alt left", in: []byte{ESC, '[', '1', ';', '3', 'D'}, want: ActionFocusPaneLeft},
+		{name: "meta up", in: []byte{ESC, '[', '1', ';', '9', 'A'}, want: ActionFocusPaneUp},
+		{name: "meta down", in: []byte{ESC, '[', '1', ';', '9', 'B'}, want: ActionFocusPaneDown},
+		{name: "meta right", in: []byte{ESC, '[', '1', ';', '9', 'C'}, want: ActionFocusPaneRight},
+		{name: "meta left", in: []byte{ESC, '[', '1', ';', '9', 'D'}, want: ActionFocusPaneLeft},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := &fakeClock{}
+			h := &captureHandler{}
+			NewRouter(clk, h).Route(tc.in)
+			require.Equal(t, []Action{tc.want}, h.actions)
+			require.Empty(t, h.forwards)
+			require.Empty(t, clk.timers)
+		})
+	}
+}
+
+func TestRouterAltArrowCSIPartialsAcrossReads(t *testing.T) {
+	cases := []struct {
+		name   string
+		reads  [][]byte
+		want   Action
+		timers int
+	}{
+		{name: "esc then rest", reads: [][]byte{{ESC}, []byte("[1;3D")}, want: ActionFocusPaneLeft, timers: 1},
+		{name: "csi prefix then rest", reads: [][]byte{{ESC, '['}, []byte("1;3C")}, want: ActionFocusPaneRight, timers: 1},
+		{name: "modifier prefix then final", reads: [][]byte{{ESC, '[', '1', ';', '3'}, []byte("A")}, want: ActionFocusPaneUp, timers: 1},
+		{name: "meta modifier prefix then final", reads: [][]byte{{ESC, '[', '1', ';', '9'}, []byte("B")}, want: ActionFocusPaneDown, timers: 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := &fakeClock{}
+			h := &captureHandler{}
+			r := NewRouter(clk, h)
+			for _, read := range tc.reads {
+				r.Route(read)
+			}
+			require.Equal(t, []Action{tc.want}, h.actions)
+			require.Empty(t, h.forwards)
+			require.Len(t, clk.timers, tc.timers)
+			assertRouterPendingCleared(t, r)
+		})
+	}
+}
+
+func TestRouterPassesThroughBareArrows(t *testing.T) {
+	for _, in := range [][]byte{
+		{ESC, '[', 'A'},
+		{ESC, '[', 'B'},
+		{ESC, '[', 'C'},
+		{ESC, '[', 'D'},
+	} {
+		t.Run(string(in), func(t *testing.T) {
+			clk := &fakeClock{}
+			h := &captureHandler{}
+			NewRouter(clk, h).Route(in)
+			require.Empty(t, h.actions)
+			require.Equal(t, [][]byte{in}, h.forwards)
+			require.Empty(t, clk.timers)
+		})
+	}
+}
+
 func TestRouterRetainsSplitESCAndInterceptsNextBoundByte(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}

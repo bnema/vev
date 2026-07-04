@@ -12,6 +12,7 @@ type PTY interface {
 	io.ReadWriteCloser // Read = child output, Write = child input
 	Resize(sz domain.Size) error
 	Pid() int
+	ForegroundPgid() (int, error)
 }
 
 // PTYFactory creates PTYs by spawning a command attached to a new pseudo-terminal.
