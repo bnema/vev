@@ -15,7 +15,6 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/pkg/renderer"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 func TestNoteAttentionFlagsBackgroundTab(t *testing.T) {
@@ -68,7 +67,7 @@ func TestPTYReaderBellMarksBackgroundTab(t *testing.T) {
 	sess.active = 0
 
 	d.sessWg.Add(1)
-	go d.ptyReader(sess, sess.tabs[1])
+	go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
 
 	require.Eventually(t, func() bool {
 		sess.mu.Lock()
@@ -104,7 +103,7 @@ func TestNoteAttentionDoesNotBlockOnWedgedOtherClient(t *testing.T) {
 	acW := &attachedClient{tr: trW, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
 	sctxW, cancelW := context.WithCancel(d.serveCtx)
 	t.Cleanup(cancelW)
-	tabW := &tab{screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctxW, cancel: cancelW}
+	tabW := newTestTabWithContext(newScriptPTY(nil), sctxW, cancelW)
 	sessW := &session{id: "wedged", name: "wedged", ctx: sctxW, cancel: cancelW, tabs: []*tab{tabW}, client: acW}
 	acW.setSession(sessW)
 	acW.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acW})
@@ -156,8 +155,9 @@ func (p *scriptPTY) Close() error {
 	p.once.Do(func() { close(p.closed) })
 	return nil
 }
-func (p *scriptPTY) Resize(domain.Size) error { return nil }
-func (p *scriptPTY) Pid() int                 { return 4242 }
+func (p *scriptPTY) Resize(domain.Size) error     { return nil }
+func (p *scriptPTY) Pid() int                     { return 4242 }
+func (p *scriptPTY) ForegroundPgid() (int, error) { return 4242, nil }
 
 func TestAckAttentionClearsOnlyPaintedVisibleTab(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
@@ -269,7 +269,7 @@ func TestAnimationRepaintConfinedToBarRows(t *testing.T) {
 	defer releases[0]()
 	defer releases[1]()
 	sess.active = 0
-	sess.tabs[0].screen.Write([]byte("MIDSCREENMARKER"))
+	sess.tabs[0].focusedPane().screen.Write([]byte("MIDSCREENMARKER"))
 	sess.mu.Lock()
 	sess.tabs[1].attention = true
 	sess.tabs[1].attentionAt = time.Unix(1, 0)
@@ -314,12 +314,12 @@ func TestComposeClientFrameWithStateAttentionFrameChangeDamagesOnlyBars(t *testi
 	bars := d.barStateFor(sess, "")
 	_, damage := composeClientFrameWithState(bars, tb, true, &cache)
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
-	tb.screen.ClearDamage()
+	tb.focusedPane().screen.ClearDamage()
 
 	bars.attentionFrame++
 	_, damage = composeClientFrameWithState(bars, tb, false, &cache)
 	require.NotEmpty(t, damage)
-	lastRow := tb.screen.Frame.Height + 1
+	lastRow := tb.focusedPane().screen.Frame.Height + 1
 	for _, dmg := range damage {
 		require.Contains(t, []int{0, lastRow}, dmg.Y, "expected damage confined to bar rows, got y=%d", dmg.Y)
 	}
@@ -350,7 +350,7 @@ func TestCloseRingingTabRefreshesOtherSessionBottomBar(t *testing.T) {
 	acB := &attachedClient{tr: trB, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
 	sctxB, cancelB := context.WithCancel(d.serveCtx)
 	t.Cleanup(cancelB)
-	tbB := &tab{pty: pB, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctxB, cancel: cancelB}
+	tbB := newTestTabWithContext(pB, sctxB, cancelB)
 	sessB := &session{id: "sessB", name: "other", ctx: sctxB, cancel: cancelB, tabs: []*tab{tbB}, client: acB}
 	acB.setSession(sessB)
 	acB.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acB})
@@ -396,33 +396,18 @@ func TestJumpAttentionCrossesSessionsWhenNoLocalBells(t *testing.T) {
 	d, sess1, ac, sends := newManualSessionWithPTYs(t, p1)
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel2()
+	tab2a := newTestTabWithContext(p2, sctx2, cancel2)
+	tab2b := newTestTabWithContext(p3, sctx2, cancel2)
+	tab2a.attention = true
+	tab2a.attentionAt = time.Unix(9, 0)
+	tab2b.attention = true
+	tab2b.attentionAt = time.Unix(5, 0)
 	sess2 := &session{
 		id:     "other",
 		name:   "other",
 		ctx:    sctx2,
 		cancel: cancel2,
-		tabs: []*tab{
-			{
-				pty:         p2,
-				screen:      vt.NewScreen(80, 23),
-				dirty:       make(chan struct{}, 1),
-				size:        domain.Size{Cols: 80, Rows: 23},
-				ctx:         sctx2,
-				cancel:      cancel2,
-				attention:   true,
-				attentionAt: time.Unix(9, 0),
-			},
-			{
-				pty:         p3,
-				screen:      vt.NewScreen(80, 23),
-				dirty:       make(chan struct{}, 1),
-				size:        domain.Size{Cols: 80, Rows: 23},
-				ctx:         sctx2,
-				cancel:      cancel2,
-				attention:   true,
-				attentionAt: time.Unix(5, 0),
-			},
-		},
+		tabs:   []*tab{tab2a, tab2b},
 	}
 	d.sessions[sess2.id] = sess2
 

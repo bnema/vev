@@ -17,11 +17,11 @@
 //     when the parent context is cancelled (graceful shutdown notifies any
 //     attached clients with ReasonServerShutdown).
 //
-// Locking: a session's screen and per-client renderer shadow are both guarded
-// by tab.mu; the attached-client pointer by session.mu; the registry by
-// Daemon.mu. When more than one is held the order is always
-// sendMu > Daemon.mu > session.mu > tab.mu — the PTY reader only ever takes
-// tab.mu, so it never blocks on a slow client.
+// Locking: a pane's screen/scrollback and per-client renderer shadow are
+// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
+// session.mu; the registry by Daemon.mu. When more than one is held the order
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
+// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
 package daemon
 
 import (
@@ -36,8 +36,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
-	"github.com/bnema/vev/pkg/vt"
+	"github.com/bnema/vev/internal/usecase/layout"
 )
 
 type session struct {
@@ -56,26 +55,23 @@ type session struct {
 	createdAt int64
 }
 
-// tab is one PTY-backed screen. dirty is a cap-1 channel so bursty output
-// applies back-pressure by collapsing (a full buffer means "a render is
-// already pending"), never by blocking the reader.
+// tab is a pane layout container; pane owns PTY/screen/scrollback/render scheduling state.
 type tab struct {
-	pty        ports.PTY
-	mu         sync.Mutex // guards screen, syncGen, and every attached renderer's shadow
-	screen     *vt.Screen
-	scrollback *scopy.Scrollback
-	dirty      chan struct{}
-	flush      chan struct{}
-	syncGen    uint64
+	mu sync.Mutex // guards tree, panes, nextPaneID, size, previewClient, and pane map membership
+
+	tree       *layout.Tree
+	panes      map[layout.PaneID]*pane
+	nextPaneID int
+	size       domain.Size
+	ctx        context.Context
+	cancel     context.CancelFunc
+
 	// previewClient tracks the one client currently previewing this tab in the picker.
 	// v1 is last-writer-wins: multiple clients previewing the same tab are not supported.
 	previewClient *attachedClient
 	// attention and attentionAt are guarded by the owning session.mu.
 	attention   bool
 	attentionAt time.Time
-	size        domain.Size
-	ctx         context.Context
-	cancel      context.CancelFunc
 }
 
 // attachedClient is a client currently attached to a session's tab. rend is
@@ -183,7 +179,14 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	tb := newTab(pty, tbSize)
 	if client != nil {
 		t := client.getTheme()
-		tb.screen.SetDefaultColors(t.Foreground, t.Background, t.HasFG && t.HasBG)
+		tb.mu.Lock()
+		p := tb.focusedPane()
+		tb.mu.Unlock()
+		if p != nil {
+			p.mu.Lock()
+			p.screen.SetDefaultColors(t.Foreground, t.Background, t.HasFG && t.HasBG)
+			p.mu.Unlock()
+		}
 	}
 	d.mu.Lock()
 	if d.closing || d.sessions[sess.id] != sess || sess.ctx.Err() != nil {
@@ -192,6 +195,9 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 		return errors.New("daemon: session closed")
 	}
 	tb.ctx, tb.cancel = context.WithCancel(sess.ctx)
+	for _, p := range tb.panes {
+		p.ctx, p.cancel = context.WithCancel(tb.ctx)
+	}
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, tb)
 	sess.active = len(sess.tabs) - 1
@@ -202,16 +208,45 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 }
 
 func newTab(pty ports.PTY, sz domain.Size) *tab {
-	sb := scopy.NewScrollback(defaultScrollbackRows)
-	screen := vt.NewScreen(sz.Cols, sz.Rows)
-	screen.OnLineEvicted = sb.Append
+	id := layout.PaneID("pane-1")
+	p := newPane(id, pty, sz)
 	return &tab{
-		pty:        pty,
-		screen:     screen,
-		scrollback: sb,
-		dirty:      make(chan struct{}, 1),
-		flush:      make(chan struct{}, 1),
+		tree:       layout.NewTree(id),
+		panes:      map[layout.PaneID]*pane{id: p},
+		nextPaneID: 2,
 		size:       sz,
+	}
+}
+
+func (tb *tab) focusedPane() *pane {
+	if tb == nil || tb.tree == nil || tb.panes == nil {
+		return nil
+	}
+	return tb.panes[tb.tree.Focus]
+}
+
+func (tb *tab) panesSnapshot() []*pane {
+	if tb == nil {
+		return nil
+	}
+	out := make([]*pane, 0, len(tb.panes))
+	for _, p := range tb.panes {
+		out = append(out, p)
+	}
+	return out
+}
+
+func (tb *tab) closeAllPanes() {
+	tb.mu.Lock()
+	panes := tb.panesSnapshot()
+	tb.mu.Unlock()
+	for _, p := range panes {
+		if p.cancel != nil {
+			p.cancel()
+		}
+		if p.pty != nil {
+			_ = p.pty.Close()
+		}
 	}
 }
 
@@ -224,9 +259,18 @@ func tabSize(clientSize domain.Size) domain.Size {
 }
 
 func (d *Daemon) startTabGoroutines(sess *session, tb *tab) {
+	tb.mu.Lock()
+	panes := tb.panesSnapshot()
+	tb.mu.Unlock()
+	for _, p := range panes {
+		d.startPaneGoroutines(sess, tb, p)
+	}
+}
+
+func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 	d.sessWg.Add(2)
-	go d.ptyReader(sess, tb)
-	go d.scheduler(sess, tb)
+	go d.ptyReader(sess, tb, p)
+	go d.scheduler(sess, tb, p)
 }
 
 // attachClient makes ac the session's current client, displacing any prior one
@@ -345,7 +389,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	if tb.cancel != nil {
 		tb.cancel()
 	}
-	_ = tb.pty.Close()
+	tb.closeAllPanes()
 	if repaint && ac != nil {
 		d.paint(sess, ac, true)
 	}
@@ -425,7 +469,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	sess.mu.Unlock()
 	for _, tb := range tabs {
 		d.clearDestroyedTabPreview(tb)
-		_ = tb.pty.Close()
+		tb.closeAllPanes()
 	}
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
@@ -509,7 +553,13 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 	if tb == nil {
 		return
 	}
-	cwd, err := d.procCwd(tb.pty.Pid())
+	tb.mu.Lock()
+	p := tb.focusedPane()
+	tb.mu.Unlock()
+	if p == nil {
+		return
+	}
+	cwd, err := d.procCwd(p.pty.Pid())
 	if err != nil || cwd == "" {
 		return
 	}

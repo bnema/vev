@@ -7,11 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"github.com/bnema/vev/internal/usecase/layout"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -169,7 +172,7 @@ func TestMouseWheelEntersScrollbackModeAndExitsAtBottom(t *testing.T) {
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	win := sess.tabs[0]
-	win.screen.Write([]byte("live"))
+	win.focusedPane().screen.Write([]byte("live"))
 
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
 	data := mustOutputData(t, sends)
@@ -196,7 +199,7 @@ func TestMouseAltScreenWheelMapsToArrows(t *testing.T) {
 	writes := make(chan []byte, 2)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].screen.Write([]byte("\x1b[?1049h"))
+	sess.tabs[0].focusedPane().screen.Write([]byte("\x1b[?1049h"))
 
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
 	d.handleInput(sess, ac, []byte("\x1b[<65;1;1M"))
@@ -246,7 +249,7 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 	}
 	require.Nil(t, ac.copyMode, "press alone must not enter visual mode")
 
-	sess.tabs[0].screen.Write([]byte("\x1b[?1000h"))
+	sess.tabs[0].focusedPane().screen.Write([]byte("\x1b[?1000h"))
 	raw := []byte("\x1b[<0;2;3M")
 	d.handleInput(sess, ac, raw)
 	select {
@@ -255,7 +258,7 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 	default:
 	}
 
-	sess.tabs[0].screen.Write([]byte("\x1b[?1006h"))
+	sess.tabs[0].focusedPane().screen.Write([]byte("\x1b[?1006h"))
 	d.handleInput(sess, ac, raw)
 	require.Equal(t, []byte("\x1b[<0;2;2M"), <-writes)
 
@@ -274,7 +277,7 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 	default:
 	}
 
-	sess.tabs[0].screen.Write([]byte("\x1b[?1006l\x1b[?1000l"))
+	sess.tabs[0].focusedPane().screen.Write([]byte("\x1b[?1006l\x1b[?1000l"))
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
 	require.Nil(t, ac.copyMode, "press alone must still not enter visual mode")
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
@@ -289,9 +292,9 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	copy(sess.tabs[0].screen.Frame.Row(0), testRow("alpha"))
-	copy(sess.tabs[0].screen.Frame.Row(1), testRow("bravo"))
-	copy(sess.tabs[0].screen.Frame.Row(2), testRow("charlie"))
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow("alpha"))
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(1), testRow("bravo"))
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(2), testRow("charlie"))
 
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
@@ -328,7 +331,7 @@ func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 func TestMouseNormalScreenStatusRowClearsStalePressState(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	require.Equal(t, 23, sess.tabs[0].screen.Frame.Height, "fixture assumption: status row is wire row 24")
+	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
 
 	// Press on a content row establishes a (soon to be stale) anchor.
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
@@ -357,10 +360,10 @@ func TestMouseNormalScreenStatusRowClearsStalePressState(t *testing.T) {
 func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	copy(sess.tabs[0].screen.Frame.Row(0), testRow("alpha"))
-	copy(sess.tabs[0].screen.Frame.Row(1), testRow("bravo"))
-	copy(sess.tabs[0].screen.Frame.Row(2), testRow("charlie"))
-	require.Equal(t, 23, sess.tabs[0].screen.Frame.Height, "fixture assumption: status row is wire row 24")
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow("alpha"))
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(1), testRow("bravo"))
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(2), testRow("charlie"))
+	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
 
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
@@ -397,8 +400,8 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].scrollback = scopy.NewScrollback(50)
-	require.Equal(t, 23, sess.tabs[0].screen.Frame.Height, "fixture assumption: status row is wire row 24")
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(50)
+	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
 
 	// Press on a content row while scrollback is empty: the anchor is
 	// content-stable at pressTop(0)+pressRow(0) = row 0.
@@ -406,8 +409,8 @@ func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 
 	// Simulate 5 lines evicted into scrollback between the Press and the
 	// first Motion (e.g. the child kept producing output).
-	for i := 0; i < 5; i++ {
-		sess.tabs[0].scrollback.Append(testRow("evicted"))
+	for range 5 {
+		sess.tabs[0].focusedPane().scrollback.Append(testRow("evicted"))
 	}
 
 	// Motion lands on wire row 3 (0-based row 2 of the *current* screen).
@@ -427,7 +430,7 @@ func TestMouseSplitReportPreservesOrder(t *testing.T) {
 	writes := make(chan []byte, 2)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.handleInput(sess, ac, []byte("\x1b[<64;"))
 	d.handleInput(sess, ac, []byte("1;1Mq"))
@@ -440,4 +443,145 @@ func TestMouseSplitReportPreservesOrder(t *testing.T) {
 		t.Fatalf("split mouse/copy bytes forwarded to PTY: %q", got)
 	default:
 	}
+}
+
+func TestMouseWheelOverUnfocusedPaneDoesNotFocusAndForwardsChildMouse(t *testing.T) {
+	p1 := portsmocks.NewMockPTY(t)
+	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2 := portsmocks.NewMockPTY(t)
+	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2.EXPECT().Write([]byte("\x1b[<64;1;1M")).Return(len("\x1b[<64;1;1M"), nil).Once()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
+	d.procComm = nil
+	tb := sess.activeTab()
+	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 5})
+	p2pane.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 41, Rows: 5}
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+	tb.tree.Focus = "pane-1"
+	tb.panes["pane-2"] = p2pane
+	tb.mu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\x1b[<64;22;2M"))
+
+	require.Equal(t, layout.PaneID("pane-1"), tb.tree.Focus)
+}
+
+func TestMouseDividerAndTitleBarDoNotForwardBogusCoordinates(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  []byte
+		root *layout.Node
+		size domain.Size
+	}{
+		{
+			name: "divider",
+			raw:  []byte("\x1b[<0;21;2M"),
+			root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}},
+			size: domain.Size{Cols: 41, Rows: 5},
+		},
+		{
+			name: "expanded title bar",
+			raw:  []byte("\x1b[<0;1;1M"),
+			root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}, Expanded: "pane-1"},
+			size: domain.Size{Cols: 20, Rows: 5},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p1 := portsmocks.NewMockPTY(t)
+			p1.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
+			p2 := portsmocks.NewMockPTY(t)
+			p2.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
+			d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
+			d.procComm = nil
+			tb := sess.activeTab()
+			tb.focusedPane().screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+			tb.mu.Lock()
+			tb.size = tc.size
+			tb.tree.Root = tc.root
+			tb.tree.Focus = "pane-1"
+			tb.panes["pane-2"] = newPane("pane-2", p2, tc.size)
+			tb.mu.Unlock()
+
+			d.handleInput(sess, ac, tc.raw)
+
+			require.Equal(t, layout.PaneID("pane-1"), tb.tree.Focus)
+		})
+	}
+}
+
+func TestCopyModeDragOutsideSplitPaneClampsToPaneContent(t *testing.T) {
+	p1 := portsmocks.NewMockPTY(t)
+	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Maybe()
+	p2 := portsmocks.NewMockPTY(t)
+	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Maybe()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
+	d.procComm = nil
+	tb := sess.activeTab()
+	for i := range 10 {
+		copy(tb.focusedPane().screen.Frame.Row(i), testRow(string(rune('a'+i))))
+	}
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 41, Rows: 10}
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+	tb.tree.Focus = "pane-1"
+	tb.panes["pane-2"] = newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 10})
+	tb.mu.Unlock()
+	d.enterCopyMode(sess, ac)
+	mustOutputData(t, sends)
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;12M"))
+	mustOutputData(t, sends)
+
+	lo, hi, ok := ac.copyMode.SelectedBounds()
+	require.True(t, ok)
+	require.Equal(t, 0, lo)
+	require.Equal(t, 9, hi)
+}
+
+func TestMouseHitTestFocusesPaneAndTranslatesSGRColumns(t *testing.T) {
+	p1 := portsmocks.NewMockPTY(t)
+	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2 := portsmocks.NewMockPTY(t)
+	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2.EXPECT().Write([]byte("\x1b[<0;1;1M")).Return(len("\x1b[<0;1;1M"), nil).Once()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
+	d.procComm = nil
+	tb := sess.activeTab()
+	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 5})
+	p2pane.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 41, Rows: 5}
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+	tb.tree.Focus = "pane-1"
+	tb.panes["pane-2"] = p2pane
+	tb.mu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;22;2M"))
+
+	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
+}
+
+func TestMouseCollapsedStackBarExpandsAndFocuses(t *testing.T) {
+	p1 := portsmocks.NewMockPTY(t)
+	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 3}).Return(nil).Maybe()
+	p2 := portsmocks.NewMockPTY(t)
+	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 3}).Return(nil).Maybe()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
+	d.procComm = nil
+	tb := sess.activeTab()
+	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 3})
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 20, Rows: 5}
+	tb.tree.Root = &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}, Expanded: "pane-1"}
+	tb.tree.Focus = "pane-1"
+	tb.panes["pane-2"] = p2pane
+	tb.mu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;6M"))
+
+	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
+	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Root.Expanded)
 }

@@ -28,3 +28,10 @@ packages:
       dir: internal/ports/mocks
       filename: mocks.go
       pkgname: portsmocks
+  github.com/bnema/vev/internal/usecase/command:
+    interfaces:
+      Context:
+        config:
+          dir: internal/usecase/command
+          filename: context_mock_test.go
+          pkgname: command

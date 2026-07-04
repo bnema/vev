@@ -184,7 +184,7 @@ func colorOSCPrefix(data []byte) (complete bool, possible bool) {
 }
 
 func findTerminator(data []byte) (start int, end int) {
-	for i := 0; i < len(data); i++ {
+	for i := range data {
 		switch data[i] {
 		case '\x07':
 			return i, i + 1
@@ -248,6 +248,58 @@ func BorderStyle(t Theme) renderer.Style {
 	style.HasForegroundRGB = true
 	style.ForegroundRGB = Blend(t.Foreground, t.Background, 0.40)
 	return style
+}
+
+func DimStyle(style renderer.Style, t Theme) renderer.Style {
+	if !usable(t) {
+		return style
+	}
+	out := style
+	out.HasForegroundRGB = true
+	if style.HasForegroundRGB {
+		out.ForegroundRGB = Blend(style.ForegroundRGB, t.Background, 0.35)
+	} else if style.Foreground >= 0 {
+		out.ForegroundRGB = Blend(xterm256Color(style.Foreground), t.Background, 0.35)
+	} else {
+		out.ForegroundRGB = Blend(t.Foreground, t.Background, 0.35)
+	}
+	out.HasBackgroundRGB = true
+	if style.HasBackgroundRGB {
+		out.BackgroundRGB = Blend(style.BackgroundRGB, t.Background, 0.35)
+	} else if style.Background >= 0 {
+		out.BackgroundRGB = Blend(xterm256Color(style.Background), t.Background, 0.35)
+	} else {
+		out.BackgroundRGB = Blend(t.Background, t.Background, 0.35)
+	}
+	return out
+}
+
+var (
+	xterm256Base = [...]renderer.RGB{
+		{R: 0x00, G: 0x00, B: 0x00}, {R: 0x80, G: 0x00, B: 0x00}, {R: 0x00, G: 0x80, B: 0x00}, {R: 0x80, G: 0x80, B: 0x00},
+		{R: 0x00, G: 0x00, B: 0x80}, {R: 0x80, G: 0x00, B: 0x80}, {R: 0x00, G: 0x80, B: 0x80}, {R: 0xc0, G: 0xc0, B: 0xc0},
+		{R: 0x80, G: 0x80, B: 0x80}, {R: 0xff, G: 0x00, B: 0x00}, {R: 0x00, G: 0xff, B: 0x00}, {R: 0xff, G: 0xff, B: 0x00},
+		{R: 0x00, G: 0x00, B: 0xff}, {R: 0xff, G: 0x00, B: 0xff}, {R: 0x00, G: 0xff, B: 0xff}, {R: 0xff, G: 0xff, B: 0xff},
+	}
+	xterm256Levels = [...]uint8{0, 95, 135, 175, 215, 255}
+)
+
+func xterm256Color(index int) renderer.RGB {
+	if index < 0 {
+		return renderer.RGB{}
+	}
+	if index < len(xterm256Base) {
+		return xterm256Base[index]
+	}
+	if index < 232 {
+		index -= 16
+		return renderer.RGB{R: xterm256Levels[index/36], G: xterm256Levels[(index/6)%6], B: xterm256Levels[index%6]}
+	}
+	if index < 256 {
+		level := uint8(8 + (index-232)*10)
+		return renderer.RGB{R: level, G: level, B: level}
+	}
+	return xterm256Base[index%len(xterm256Base)]
 }
 
 func SelectionStyle(t Theme) renderer.Style {

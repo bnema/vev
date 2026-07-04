@@ -11,11 +11,20 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/pkg/renderer"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 // --- test doubles -----------------------------------------------------------
+
+func newTestTabWithContext(p ports.PTY, ctx context.Context, cancel context.CancelFunc) *tab {
+	tb := newTab(p, domain.Size{Cols: 80, Rows: 23})
+	tb.ctx, tb.cancel = ctx, cancel
+	for _, pane := range tb.panes {
+		pane.ctx, pane.cancel = ctx, cancel
+	}
+	return tb
+}
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
@@ -144,8 +153,8 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
 	defer cancel2()
-	sess1 := &session{id: "s1", name: "alpha", ephemeral: true, ctx: sctx1, cancel: cancel1, tabs: []*tab{{pty: p1, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctx1, cancel: cancel1}}, client: ac1}
-	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{{pty: p2, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctx2, cancel: cancel2}}, client: ac2}
+	sess1 := &session{id: "s1", name: "alpha", ephemeral: true, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, client: ac1}
+	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, client: ac2}
 	ac1.setSession(sess1)
 	ac2.setSession(sess2)
 	ac1.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac1})
@@ -170,6 +179,51 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	awaitFrame(t, sends1, ports.MsgOutput)
 }
 
+func TestPickerPreviewSinglePaneSnapshotsFocusedPane(t *testing.T) {
+	tb := newTab(nil, domain.Size{Cols: 10, Rows: 3})
+	p := tb.focusedPane()
+	p.screen.Write([]byte("focused"))
+
+	preview := snapshotPickerPreview(tb)
+
+	require.Equal(t, 10, preview.Width)
+	require.Equal(t, 3, preview.Height)
+	require.Equal(t, 'f', preview.Rows[0][0].Rune)
+	require.Equal(t, 'o', preview.Rows[0][1].Rune)
+}
+
+func TestPickerPreviewMultiPaneComposesTabFrame(t *testing.T) {
+	tb := newTab(nil, domain.Size{Cols: 41, Rows: 5})
+	left := tb.focusedPane()
+	left.title = "one"
+	left.screen.Write([]byte("L"))
+	rightTop := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 3})
+	rightTop.title = "two"
+	rightBottom := newPane("pane-3", nil, domain.Size{Cols: 20, Rows: 2})
+	rightBottom.title = "three"
+	rightBottom.screen.Write([]byte("R"))
+
+	tb.mu.Lock()
+	tb.panes[rightTop.id] = rightTop
+	tb.panes[rightBottom.id] = rightBottom
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
+		layout.NewLeaf(left.id),
+		{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(rightTop.id), layout.NewLeaf(rightBottom.id)}, Expanded: rightBottom.id},
+	}}
+	tb.tree.Focus = rightBottom.id
+	tb.mu.Unlock()
+
+	preview := snapshotPickerPreview(tb)
+
+	require.Equal(t, 41, preview.Width)
+	require.Equal(t, 5, preview.Height)
+	require.Equal(t, 'L', preview.Rows[0][0].Rune, "left pane content should remain visible")
+	require.Equal(t, '│', preview.Rows[0][20].Rune, "split divider should be included")
+	require.Equal(t, "two", rowText(preview.Rows[0][21:24]), "collapsed stack title bar should be included")
+	require.Equal(t, "three", rowText(preview.Rows[1][21:26]), "expanded stack title bar should be included")
+	require.Equal(t, 'R', preview.Rows[2][21].Rune, "expanded stacked pane content should be included")
+}
+
 func TestPickerLivePreviewRepaintsInactiveTab(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
 	defer func() {
@@ -185,9 +239,9 @@ func TestPickerLivePreviewRepaintsInactiveTab(t *testing.T) {
 
 	previewTab := sess.tabs[1]
 	previewTab.mu.Lock()
-	previewTab.screen.Write([]byte("inactive-preview-live"))
+	previewTab.focusedPane().screen.Write([]byte("inactive-preview-live"))
 	previewTab.mu.Unlock()
-	d.render(sess, previewTab)
+	d.render(sess, previewTab, previewTab.focusedPane())
 
 	previewOut := awaitFrame(t, sends, ports.MsgOutput)
 	previewMsg, err := ports.UnmarshalOutput(previewOut.Payload)
@@ -209,8 +263,8 @@ func TestPickerLivePreviewRepaintsCrossSessionTab(t *testing.T) {
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
 	defer cancel2()
-	sess1 := &session{id: "s1", name: "alpha", ctx: sctx1, cancel: cancel1, tabs: []*tab{{pty: p1, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctx1, cancel: cancel1}}, client: ac1}
-	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{{pty: p2, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctx2, cancel: cancel2}}, client: ac2}
+	sess1 := &session{id: "s1", name: "alpha", ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, client: ac1}
+	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, client: ac2}
 	ac1.setSession(sess1)
 	ac2.setSession(sess2)
 	ac1.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac1})
@@ -225,9 +279,9 @@ func TestPickerLivePreviewRepaintsCrossSessionTab(t *testing.T) {
 
 	previewTab := sess2.tabs[0]
 	previewTab.mu.Lock()
-	previewTab.screen.Write([]byte("cross-session-preview-live"))
+	previewTab.focusedPane().screen.Write([]byte("cross-session-preview-live"))
 	previewTab.mu.Unlock()
-	d.render(sess2, previewTab)
+	d.render(sess2, previewTab, previewTab.focusedPane())
 
 	previewOut := awaitFrame(t, sends1, ports.MsgOutput)
 	previewMsg, err := ports.UnmarshalOutput(previewOut.Payload)
@@ -270,9 +324,14 @@ func TestPickerOpenCloseNavigationConcurrentWithRenderRace(t *testing.T) {
 		tb := sess.tabs[i%len(sess.tabs)]
 		wg.Go(func() {
 			tb.mu.Lock()
-			tb.screen.Write([]byte("render-race"))
+			p := tb.focusedPane()
 			tb.mu.Unlock()
-			d.render(sess, tb)
+			if p != nil {
+				p.mu.Lock()
+				p.screen.Write([]byte("render-race"))
+				p.mu.Unlock()
+			}
+			d.render(sess, tb, p)
 		})
 	}
 	wg.Wait()

@@ -4,9 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,7 +51,7 @@ func TestPromptSubmitErrorKeepsPromptOpen(t *testing.T) {
 	defer release2()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	d.sessions["other"] = &session{id: "other", name: "taken", ctx: ctx, cancel: cancel, tabs: []*tab{{pty: p2, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: ctx, cancel: cancel}}}
+	d.sessions["other"] = &session{id: "other", name: "taken", ctx: ctx, cancel: cancel, tabs: []*tab{newTestTabWithContext(p2, ctx, cancel)}}
 
 	d.enterPrompt(sess, ac, " Rename session ", "", func(name string) error { return d.renameSession(sess, name) })
 	awaitFrame(t, sends, ports.MsgOutput)

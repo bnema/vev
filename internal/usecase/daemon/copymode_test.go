@@ -26,15 +26,48 @@ import (
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
 
+func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	_, sess, _, _ := newManualSessionWithPTYs(t, p)
+	tb := sess.activeTab()
+	pane := tb.focusedPane()
+	pane.mu.Lock()
+	snap := scopy.NewSnapshot(pane.scrollback, pane.screen.Frame)
+	pane.mu.Unlock()
+	mode := scopy.NewMode(snap)
+	bars := barState{status: sess.statusSegments()}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			pane.mu.Lock()
+			pane.screen.Write([]byte("output\n"))
+			pane.mu.Unlock()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			tb.mu.Lock()
+			_, _ = composeCopyClientFrame(mode, tb, bars)
+			tb.mu.Unlock()
+		}
+	}()
+	wg.Wait()
+}
+
 func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	_, sess, _, _ := newManualSessionWithPTYs(t, p)
 	defer release()
 	sess.name = "work"
 	tb := sess.activeTab()
-	tb.screen = vt.NewScreen(12, 3)
-	tb.screen.Write([]byte("live"))
-	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
+	tb.focusedPane().screen = vt.NewScreen(12, 3)
+	tb.focusedPane().screen.Write([]byte("live"))
+	snap := scopy.NewSnapshot(tb.focusedPane().scrollback, tb.focusedPane().screen.Frame)
 	mode := scopy.NewMode(snap)
 
 	frame, damage := composeCopyClientFrame(mode, tb, barState{status: sess.statusSegments()})
@@ -50,8 +83,8 @@ func TestCopyModePaletteCommandEntersAndDoesNotForward(t *testing.T) {
 	writes := make(chan []byte, 1)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].scrollback = scopy.NewScrollback(4)
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -85,10 +118,10 @@ func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 	writes := make(chan []byte, 1)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].scrollback = scopy.NewScrollback(4)
-	sess.tabs[0].scrollback.Append(testRow("old1    "))
-	sess.tabs[0].scrollback.Append(testRow("old2    "))
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].focusedPane().scrollback.Append(testRow("old1    "))
+	sess.tabs[0].focusedPane().scrollback.Append(testRow("old2    "))
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -168,8 +201,14 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 			return false
 		}
 		win.mu.Lock()
-		defer win.mu.Unlock()
-		return len(scopy.NewSnapshot(win.scrollback, win.screen.Frame).Rows) >= 12
+		p := win.focusedPane()
+		win.mu.Unlock()
+		if p == nil {
+			return false
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(scopy.NewSnapshot(p.scrollback, p.screen.Frame).Rows) >= 12
 	}, 2*time.Second, 5*time.Millisecond)
 
 	sess := firstSession(d)
@@ -205,8 +244,8 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 func TestCopyModeEscapeRestoresLiveFullRepaint(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].scrollback = scopy.NewScrollback(4)
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -239,10 +278,10 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p, _ := newBlockingPTY(t)
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-			sess.tabs[0].scrollback = scopy.NewScrollback(4)
-			sess.tabs[0].scrollback.Append(testRow("old1    "))
-			sess.tabs[0].scrollback.Append(testRow("old2    "))
-			sess.tabs[0].screen.Write([]byte("live"))
+			sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+			sess.tabs[0].focusedPane().scrollback.Append(testRow("old1    "))
+			sess.tabs[0].focusedPane().scrollback.Append(testRow("old2    "))
+			sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 			d.enterCopyMode(sess, ac)
 			awaitFrame(t, sends, ports.MsgOutput)
@@ -259,10 +298,10 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 func TestCopyModeOversizedYankShowsTooLargeFeedback(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].scrollback = scopy.NewScrollback(1)
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(1)
 	longLine := strings.Repeat("x", scopy.OSC52MaxPayloadBytes+1)
-	sess.tabs[0].screen.Frame = renderer.NewFrame(len(longLine), 1)
-	copy(sess.tabs[0].screen.Frame.Row(0), testRow(longLine))
+	sess.tabs[0].focusedPane().screen.Frame = renderer.NewFrame(len(longLine), 1)
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow(longLine))
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -284,8 +323,8 @@ func TestCopyModeLoneEscapeExitsAfterDelay(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	clk := &signalClock{timers: make(chan *signalTimer, 1)}
 	d.clock = clk
-	sess.tabs[0].scrollback = scopy.NewScrollback(4)
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -307,8 +346,8 @@ func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	clk := &signalClock{timers: make(chan *signalTimer, 1)}
 	d.clock = clk
-	sess.tabs[0].scrollback = scopy.NewScrollback(4)
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -342,8 +381,8 @@ func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p, _ := newBlockingPTY(t)
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-			sess.tabs[0].scrollback = scopy.NewScrollback(4)
-			sess.tabs[0].screen.Write([]byte("live"))
+			sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+			sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 			d.enterCopyMode(sess, ac)
 			awaitFrame(t, sends, ports.MsgOutput)
@@ -368,8 +407,8 @@ func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
 func TestCopyModeEnterExitConcurrentWithPaintRace(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].scrollback = scopy.NewScrollback(4)
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	done := make(chan struct{})
 	var drain sync.WaitGroup
@@ -401,7 +440,7 @@ func TestCopyModeEnterExitConcurrentWithPaintRace(t *testing.T) {
 func TestCursorTailHidesInCopyMode(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
 	data := mustOutputData(t, sends)

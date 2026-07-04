@@ -1,14 +1,13 @@
 package command
 
 import (
-	"fmt"
 	"regexp"
 	"testing"
 )
 
 func TestRegistryCodesAreUniqueUppercaseThreeLettersInOrder(t *testing.T) {
 	commands := Registry()
-	wantCodes := []string{"CNT", "CNS", "CLT", "NXT", "PVT", "SSP", "VIS", "RNS", "DET"}
+	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "SSP", "VIS", "RNS", "DET"}
 
 	if len(commands) != len(wantCodes) {
 		t.Fatalf("Registry() returned %d commands, want %d", len(commands), len(wantCodes))
@@ -48,18 +47,29 @@ func TestByCodeIsCaseInsensitive(t *testing.T) {
 
 func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 	tests := []struct {
-		code string
-		want string
+		code   string
+		expect func(*MockContext)
 	}{
-		{code: "CNT", want: "CreateTab"},
-		{code: "CNS", want: "CreateSession"},
-		{code: "CLT", want: "CloseTab"},
-		{code: "NXT", want: "NextTab"},
-		{code: "PVT", want: "PrevTab"},
-		{code: "SSP", want: "OpenSessionPicker"},
-		{code: "VIS", want: "EnterVisualMode"},
-		{code: "RNS", want: "RenameSession"},
-		{code: "DET", want: "Detach"},
+		{code: "CNT", expect: func(ctx *MockContext) { ctx.EXPECT().CreateTab().Return(nil).Once() }},
+		{code: "CNS", expect: func(ctx *MockContext) { ctx.EXPECT().CreateSession().Return(nil).Once() }},
+		{code: "CLT", expect: func(ctx *MockContext) { ctx.EXPECT().CloseTab().Return(nil).Once() }},
+		{code: "SPR", expect: func(ctx *MockContext) { ctx.EXPECT().SplitRight().Return(nil).Once() }},
+		{code: "SPL", expect: func(ctx *MockContext) { ctx.EXPECT().SplitLeft().Return(nil).Once() }},
+		{code: "SPU", expect: func(ctx *MockContext) { ctx.EXPECT().SplitUp().Return(nil).Once() }},
+		{code: "SPD", expect: func(ctx *MockContext) { ctx.EXPECT().SplitDown().Return(nil).Once() }},
+		{code: "STP", expect: func(ctx *MockContext) { ctx.EXPECT().StackPane().Return(nil).Once() }},
+		{code: "TST", expect: func(ctx *MockContext) { ctx.EXPECT().ToggleStack().Return(nil).Once() }},
+		{code: "CLP", expect: func(ctx *MockContext) { ctx.EXPECT().ClosePane().Return(nil).Once() }},
+		{code: "FPL", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneLeft().Return(nil).Once() }},
+		{code: "FPR", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneRight().Return(nil).Once() }},
+		{code: "FPU", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneUp().Return(nil).Once() }},
+		{code: "FPD", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneDown().Return(nil).Once() }},
+		{code: "NXT", expect: func(ctx *MockContext) { ctx.EXPECT().NextTab().Return(nil).Once() }},
+		{code: "PVT", expect: func(ctx *MockContext) { ctx.EXPECT().PrevTab().Return(nil).Once() }},
+		{code: "SSP", expect: func(ctx *MockContext) { ctx.EXPECT().OpenSessionPicker().Return(nil).Once() }},
+		{code: "VIS", expect: func(ctx *MockContext) { ctx.EXPECT().EnterVisualMode().Return(nil).Once() }},
+		{code: "RNS", expect: func(ctx *MockContext) { ctx.EXPECT().RenameSession().Return(nil).Once() }},
+		{code: "DET", expect: func(ctx *MockContext) { ctx.EXPECT().Detach().Return(nil).Once() }},
 	}
 
 	for _, tt := range tests {
@@ -69,39 +79,11 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 				t.Fatalf("ByCode(%q) ok = false, want true", tt.code)
 			}
 
-			ctx := &spyContext{}
+			ctx := NewMockContext(t)
+			tt.expect(ctx)
 			if err := cmd.Run(ctx); err != nil {
 				t.Fatalf("Run() error = %v, want nil", err)
-			}
-			if got := ctx.onlyCall(); got != tt.want {
-				t.Fatalf("Run() called %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
-
-type spyContext struct {
-	calls []string
-}
-
-func (s *spyContext) record(name string) error {
-	s.calls = append(s.calls, name)
-	return nil
-}
-
-func (s *spyContext) onlyCall() string {
-	if len(s.calls) != 1 {
-		return fmt.Sprintf("%v", s.calls)
-	}
-	return s.calls[0]
-}
-
-func (s *spyContext) CreateTab() error         { return s.record("CreateTab") }
-func (s *spyContext) CreateSession() error     { return s.record("CreateSession") }
-func (s *spyContext) CloseTab() error          { return s.record("CloseTab") }
-func (s *spyContext) NextTab() error           { return s.record("NextTab") }
-func (s *spyContext) PrevTab() error           { return s.record("PrevTab") }
-func (s *spyContext) Detach() error            { return s.record("Detach") }
-func (s *spyContext) EnterVisualMode() error   { return s.record("EnterVisualMode") }
-func (s *spyContext) RenameSession() error     { return s.record("RenameSession") }
-func (s *spyContext) OpenSessionPicker() error { return s.record("OpenSessionPicker") }

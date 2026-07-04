@@ -17,12 +17,11 @@
 //     when the parent context is cancelled (graceful shutdown notifies any
 //     attached clients with ReasonServerShutdown).
 //
-// Locking: a session's screen and per-client renderer shadow are both guarded
-// by tab.mu; the attached-client pointer by session.mu; the registry by
-// Daemon.mu. When more than one is held the order is always
-// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
-// a slow client.
+// Locking: a pane's screen/scrollback and per-client renderer shadow are
+// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
+// session.mu; the registry by Daemon.mu. When more than one is held the order
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
+// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
 package daemon
 
 import (
@@ -33,7 +32,9 @@ import (
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -500,9 +501,34 @@ func snapshotPickerPreview(tb *tab) picker.Preview {
 }
 
 func pickerPreviewFromLockedTab(tb *tab) picker.Preview {
-	rows := make([][]renderer.Cell, tb.screen.Frame.Height)
-	for y := range rows {
-		rows[y] = append([]renderer.Cell(nil), tb.screen.Frame.Row(y)...)
+	p := tb.focusedPane()
+	if p == nil {
+		return picker.Preview{}
 	}
-	return picker.Preview{Rows: rows, Width: tb.screen.Frame.Width, Height: tb.screen.Frame.Height}
+	if tb.tree == nil || tb.tree.Root == nil || tb.tree.Root.Kind == layout.Leaf {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return pickerPreviewFromLockedPane(p)
+	}
+
+	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
+	if area.Width <= 0 || area.Height <= 0 {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return pickerPreviewFromLockedPane(p)
+	}
+	frame, _ := composeTabFrame(tb, area, themeui.Theme{})
+	return pickerPreviewFromFrame(frame)
+}
+
+func pickerPreviewFromLockedPane(p *pane) picker.Preview {
+	return pickerPreviewFromFrame(p.screen.Frame)
+}
+
+func pickerPreviewFromFrame(frame renderer.Frame) picker.Preview {
+	rows := make([][]renderer.Cell, frame.Height)
+	for y := range rows {
+		rows[y] = append([]renderer.Cell(nil), frame.Row(y)...)
+	}
+	return picker.Preview{Rows: rows, Width: frame.Width, Height: frame.Height}
 }

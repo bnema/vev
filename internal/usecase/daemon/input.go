@@ -17,12 +17,11 @@
 //     when the parent context is cancelled (graceful shutdown notifies any
 //     attached clients with ReasonServerShutdown).
 //
-// Locking: a session's screen and per-client renderer shadow are both guarded
-// by tab.mu; the attached-client pointer by session.mu; the registry by
-// Daemon.mu. When more than one is held the order is always
-// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
-// a slow client.
+// Locking: a pane's screen/scrollback and per-client renderer shadow are
+// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
+// session.mu; the registry by Daemon.mu. When more than one is held the order
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
+// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
 package daemon
 
 import (
@@ -31,6 +30,7 @@ import (
 
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
 )
 
@@ -73,6 +73,39 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	}
 
 	if ac.copyModeActive() {
+		if ev.Button == mouse.Left {
+			contentRow := ev.Row - 1
+			tb.mu.Lock()
+			p := tb.focusedPane()
+			var pl layout.Placement
+			var ok bool
+			multi := len(tb.panes) > 1
+			if p != nil {
+				pl, ok = focusedPlacementLocked(tb)
+			}
+			if ok && multi && !pointInRect(ev.Col, contentRow, pl.Content) && ev.Type == mouse.Press {
+				if target, hit := hitTestPlacementLocked(tb, ev.Col, contentRow); hit {
+					oldFocus := tb.tree.Focus
+					focusPlacementLocked(tb, target.ID)
+					d.applyLayoutLocked(tb)
+					tb.mu.Unlock()
+					d.exitCopyMode(ac)
+					if target.ID != oldFocus {
+						d.refreshPaneTitleOnFocus(sess, target.ID)
+					}
+					d.paint(sess, ac, true)
+					return
+				}
+			}
+			tb.mu.Unlock()
+			if ok && multi {
+				clampedCol := clampInt(ev.Col, pl.Content.X, pl.Content.X+pl.Content.Width-1)
+				clampedRow := clampInt(contentRow, pl.Content.Y, pl.Content.Y+pl.Content.Height-1)
+				ev.Col = clampedCol
+				ev.Row = clampedRow
+				ev = translateMouseEvent(ev, pl.Content.X, pl.Content.Y)
+			}
+		}
 		switch ev.Button {
 		case mouse.Left:
 			d.copyMouse(sess, ac, ev)
@@ -85,20 +118,83 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	}
 
 	tb.mu.Lock()
-	childRows := tb.screen.Frame.Height
-	mouseMode, mouseSGR := tb.screen.MouseMode()
-	altScreen := tb.screen.AltScreenActive()
-	scrollbackRows := 0
-	if tb.scrollback != nil {
-		scrollbackRows = tb.scrollback.Len()
+	contentRow := ev.Row - 1
+	pl, hit := hitTestPlacementLocked(tb, ev.Col, contentRow)
+	multi := len(tb.panes) > 1
+	focusedID := layout.PaneID("")
+	if tb.tree != nil {
+		focusedID = tb.tree.Focus
 	}
-	tb.mu.Unlock()
+	if hit && pointInRect(ev.Col, contentRow, pl.TitleBar) {
+		if !isMouseFocusPress(ev) {
+			tb.mu.Unlock()
+			return
+		}
+		oldFocus := focusedID
+		focusPlacementLocked(tb, pl.ID)
+		d.applyLayoutLocked(tb)
+		tb.mu.Unlock()
+		if pl.ID != oldFocus {
+			d.exitCopyMode(ac)
+			d.refreshPaneTitleOnFocus(sess, pl.ID)
+		}
+		d.paint(sess, ac, true)
+		return
+	}
+	var p *pane
+	translated := false
+	hoveredFocused := true
+	if hit && !pl.Collapsed && pointInRect(ev.Col, contentRow, pl.Content) {
+		oldFocus := focusedID
+		if isMouseFocusPress(ev) {
+			focusPlacementLocked(tb, pl.ID)
+			d.applyLayoutLocked(tb)
+		}
+		p = tb.panes[pl.ID]
+		hoveredFocused = pl.ID == oldFocus
+		tb.mu.Unlock()
+		if p == nil {
+			return
+		}
+		if isMouseFocusPress(ev) && pl.ID != oldFocus {
+			d.exitCopyMode(ac)
+			d.refreshPaneTitleOnFocus(sess, pl.ID)
+			d.paint(sess, ac, true)
+		}
+		if multi {
+			ev = translateMouseEvent(ev, pl.Content.X, pl.Content.Y)
+			translated = true
+		}
+	} else {
+		if multi {
+			tb.mu.Unlock()
+			return
+		}
+		p = tb.focusedPane()
+		tb.mu.Unlock()
+		if p == nil {
+			return
+		}
+	}
+	p.mu.Lock()
+	childRows := p.screen.Frame.Height
+	mouseMode, mouseSGR := p.screen.MouseMode()
+	altScreen := p.screen.AltScreenActive()
+	scrollbackRows := 0
+	if p.scrollback != nil {
+		scrollbackRows = p.scrollback.Len()
+	}
+	p.mu.Unlock()
 
 	if mouseMode != 0 {
 		if !mouseSGR || ev.Row == 0 || ev.Row > childRows {
 			return
 		}
-		daemonKeyHandler{d: d, ac: ac}.Forward(sgrRowOffset(ev.Raw, -1))
+		if translated {
+			d.writeToPane(sess, p, ev.Raw)
+		} else {
+			d.writeToPane(sess, p, sgrRowOffset(ev.Raw, -1))
+		}
 		return
 	}
 
@@ -130,9 +226,9 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 				return
 			}
 
-			tb.mu.Lock()
-			snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
-			tb.mu.Unlock()
+			p.mu.Lock()
+			snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+			p.mu.Unlock()
 
 			ac.copyMu.Lock()
 			mode := scopy.NewMode(snap)
@@ -152,19 +248,53 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 		}
 	case mouse.WheelUp:
 		if altScreen {
-			daemonKeyHandler{d: d, ac: ac}.Forward([]byte("\x1b[A\x1b[A\x1b[A"))
+			d.writeToPane(sess, p, []byte("\x1b[A\x1b[A\x1b[A"))
+			return
+		}
+		if !hoveredFocused {
 			return
 		}
 		d.enterCopyMode(sess, ac)
 		d.copyWheel(sess, ac, -3)
 	case mouse.WheelDown:
 		if altScreen {
-			daemonKeyHandler{d: d, ac: ac}.Forward([]byte("\x1b[B\x1b[B\x1b[B"))
+			d.writeToPane(sess, p, []byte("\x1b[B\x1b[B\x1b[B"))
 		}
 	}
 }
 
+func isMouseFocusPress(ev mouse.Event) bool {
+	return ev.Type == mouse.Press && (ev.Button == mouse.Left || ev.Button == mouse.Middle || ev.Button == mouse.Right)
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func (d *Daemon) writeToPane(sess *session, p *pane, data []byte) {
+	if p == nil || p.pty == nil {
+		return
+	}
+	if _, err := p.pty.Write(data); err != nil {
+		name := ""
+		if sess != nil {
+			name = sess.name
+		}
+		d.log.Error("pty write failed", "err", err, "session", name)
+	}
+}
+
 func sgrRowOffset(raw []byte, delta int) []byte {
+	return sgrOffset(raw, 0, delta)
+}
+
+func sgrOffset(raw []byte, colDelta, rowDelta int) []byte {
 	if len(raw) < len("\x1b[<0;1;1M") {
 		return raw
 	}
@@ -177,12 +307,17 @@ func sgrRowOffset(raw []byte, delta int) []byte {
 	if len(parts) != 3 {
 		return raw
 	}
+	cx, err := strconv.Atoi(string(parts[1]))
+	if err != nil {
+		return raw
+	}
 	cy, err := strconv.Atoi(string(parts[2]))
 	if err != nil {
 		return raw
 	}
-	cy += delta
-	if cy < 1 {
+	cx += colDelta
+	cy += rowDelta
+	if cx < 1 || cy < 1 {
 		return raw
 	}
 
@@ -190,7 +325,7 @@ func sgrRowOffset(raw []byte, delta int) []byte {
 	out = append(out, raw[:3]...)
 	out = append(out, parts[0]...)
 	out = append(out, ';')
-	out = append(out, parts[1]...)
+	out = strconv.AppendInt(out, int64(cx), 10)
 	out = append(out, ';')
 	out = strconv.AppendInt(out, int64(cy), 10)
 	out = append(out, raw[end])
@@ -211,9 +346,10 @@ func (h daemonKeyHandler) Forward(data []byte) {
 	if tb == nil {
 		return
 	}
-	if _, err := tb.pty.Write(data); err != nil {
-		h.d.log.Error("pty write failed", "err", err, "session", sess.name)
-	}
+	tb.mu.Lock()
+	p := tb.focusedPane()
+	tb.mu.Unlock()
+	h.d.writeToPane(sess, p, data)
 }
 
 func (h daemonKeyHandler) Action(action keys.Action) {
@@ -226,6 +362,14 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 		h.d.enterPalette(sess, h.ac)
 	case keys.ActionJumpAttention:
 		h.d.jumpAttention(sess, h.ac)
+	case keys.ActionFocusPaneLeft:
+		_ = h.d.focusDir(sess, h.ac, layout.Left)
+	case keys.ActionFocusPaneRight:
+		_ = h.d.focusDir(sess, h.ac, layout.Right)
+	case keys.ActionFocusPaneUp:
+		_ = h.d.focusDir(sess, h.ac, layout.Up)
+	case keys.ActionFocusPaneDown:
+		_ = h.d.focusDir(sess, h.ac, layout.Down)
 	case keys.ActionSwitchTab1, keys.ActionSwitchTab2, keys.ActionSwitchTab3,
 		keys.ActionSwitchTab4, keys.ActionSwitchTab5, keys.ActionSwitchTab6,
 		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:

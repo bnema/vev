@@ -197,6 +197,92 @@ func TestScannerFlushesOverflowingPartialQueue(t *testing.T) {
 	}
 }
 
+func TestDimStyle(t *testing.T) {
+	theme := Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 20, B: 30}, HasFG: true, HasBG: true, Known: true, TrueColor: true}
+	tests := []struct {
+		name string
+		in   renderer.Style
+		want renderer.Style
+	}{
+		{
+			name: "default foreground and background dim to theme colors",
+			in:   renderer.DefaultStyle(),
+			want: renderer.Style{
+				Foreground:       -1,
+				Background:       -1,
+				HasForegroundRGB: true,
+				ForegroundRGB:    Blend(theme.Foreground, theme.Background, 0.35),
+				HasBackgroundRGB: true,
+				BackgroundRGB:    theme.Background,
+			},
+		},
+		{
+			name: "indexed foreground is mapped before dimming",
+			in:   renderer.Style{Foreground: 196, Background: -1},
+			want: renderer.Style{
+				Foreground:       196,
+				Background:       -1,
+				HasForegroundRGB: true,
+				ForegroundRGB:    Blend(renderer.RGB{R: 255, G: 0, B: 0}, theme.Background, 0.35),
+				HasBackgroundRGB: true,
+				BackgroundRGB:    theme.Background,
+			},
+		},
+		{
+			name: "indexed foregrounds remain distinct",
+			in:   renderer.Style{Foreground: 46, Background: -1},
+			want: renderer.Style{
+				Foreground:       46,
+				Background:       -1,
+				HasForegroundRGB: true,
+				ForegroundRGB:    Blend(renderer.RGB{R: 0, G: 255, B: 0}, theme.Background, 0.35),
+				HasBackgroundRGB: true,
+				BackgroundRGB:    theme.Background,
+			},
+		},
+		{
+			name: "indexed background is mapped before dimming",
+			in:   renderer.Style{Foreground: -1, Background: 21},
+			want: renderer.Style{
+				Foreground:       -1,
+				Background:       21,
+				HasForegroundRGB: true,
+				ForegroundRGB:    Blend(theme.Foreground, theme.Background, 0.35),
+				HasBackgroundRGB: true,
+				BackgroundRGB:    Blend(renderer.RGB{R: 0, G: 0, B: 255}, theme.Background, 0.35),
+			},
+		},
+		{
+			name: "rgb foreground and background are dimmed",
+			in: renderer.Style{
+				Foreground:       -1,
+				Background:       -1,
+				HasForegroundRGB: true,
+				ForegroundRGB:    renderer.RGB{R: 100, G: 50, B: 25},
+				HasBackgroundRGB: true,
+				BackgroundRGB:    renderer.RGB{R: 20, G: 100, B: 180},
+			},
+			want: renderer.Style{
+				Foreground:       -1,
+				Background:       -1,
+				HasForegroundRGB: true,
+				ForegroundRGB:    Blend(renderer.RGB{R: 100, G: 50, B: 25}, theme.Background, 0.35),
+				HasBackgroundRGB: true,
+				BackgroundRGB:    Blend(renderer.RGB{R: 20, G: 100, B: 180}, theme.Background, 0.35),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DimStyle(tt.in, theme)
+			if !got.Equal(tt.want) {
+				t.Fatalf("DimStyle()=%+v want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStyleHelpersFallbackAndThemed(t *testing.T) {
 	unknown := Theme{}
 	if got := StatusBarStyle(unknown); !got.Equal(renderer.DefaultStyle()) {

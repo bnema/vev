@@ -161,6 +161,26 @@ func (p *linuxPTY) Pid() int {
 	return p.cmd.Process.Pid
 }
 
+// ForegroundPgid reports the process group currently in the foreground for the
+// pty's controlling terminal.
+func (p *linuxPTY) ForegroundPgid() (int, error) {
+	rc, err := p.master.SyscallConn()
+	if err != nil {
+		return 0, fmt.Errorf("pty: foreground pgid: %w", err)
+	}
+	var pgid int
+	var ioctlErr error
+	if err := rc.Control(func(fd uintptr) {
+		pgid, ioctlErr = unix.IoctlGetInt(int(fd), unix.TIOCGPGRP)
+	}); err != nil {
+		return 0, fmt.Errorf("pty: foreground pgid: %w", err)
+	}
+	if ioctlErr != nil {
+		return 0, fmt.Errorf("pty: foreground pgid: %w", ioctlErr)
+	}
+	return pgid, nil
+}
+
 // Close terminates the child and releases the master. It signals the child's
 // process group with SIGHUP, waits up to killGracePeriod for it to exit, then
 // escalates to SIGKILL. The child is reaped (via cmd.Wait) to avoid a zombie,
