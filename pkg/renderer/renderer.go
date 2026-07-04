@@ -12,8 +12,16 @@ var bufferPool = sync.Pool{
 	New: func() any { return new(bytes.Buffer) },
 }
 
+type AdvancePolicy uint8
+
+const (
+	AdvanceOnSend AdvancePolicy = iota
+	AdvanceOnAck
+)
+
 type Capabilities struct {
 	SynchronizedOutput bool
+	AdvancePolicy      AdvancePolicy
 }
 
 type Renderer struct {
@@ -64,7 +72,7 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 
 	if !knownSameDimensions {
 		r.writeFull(buf, frame, &st)
-		r.replaceShadow(frame)
+		r.advanceShadow(frame)
 		if r.caps.SynchronizedOutput {
 			buf.WriteString(SyncEndCSI)
 		}
@@ -73,7 +81,7 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 
 	if needsFull(damage) {
 		r.writeDamage(buf, frame, nil, nil, &st)
-		r.replaceShadow(frame)
+		r.advanceShadow(frame)
 		if r.caps.SynchronizedOutput {
 			buf.WriteString(SyncEndCSI)
 		}
@@ -85,9 +93,11 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 		// emitScrollUp resets the SGR pen to default (matching st's initial
 		// pen) but leaves the cursor wherever the DECSTBM restore put it —
 		// terminal-dependent, so cursor tracking stays invalidated.
-		r.applyScroll(scroll)
+		if r.caps.AdvancePolicy == AdvanceOnSend {
+			r.applyScroll(scroll)
+		}
 		r.writeDamage(buf, frame, damage, &scroll, &st)
-		r.syncDamage(frame, damage, &scroll)
+		r.advanceDamage(frame, damage, &scroll)
 		if r.caps.SynchronizedOutput {
 			buf.WriteString(SyncEndCSI)
 		}
@@ -99,7 +109,7 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 	// partial damage and leaving the terminal/shadow stale.
 	if hasScrollDamage(damage) {
 		r.writeFull(buf, frame, &st)
-		r.replaceShadow(frame)
+		r.advanceShadow(frame)
 		if r.caps.SynchronizedOutput {
 			buf.WriteString(SyncEndCSI)
 		}
@@ -107,7 +117,7 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 	}
 
 	r.writeDamage(buf, frame, damage, nil, &st)
-	r.syncDamage(frame, damage, nil)
+	r.advanceDamage(frame, damage, nil)
 	if r.caps.SynchronizedOutput {
 		buf.WriteString(SyncEndCSI)
 	}
@@ -206,6 +216,30 @@ func (r *Renderer) lineDirty(frame Frame, y int) bool {
 		}
 	}
 	return false
+}
+
+// Ack advances an AdvanceOnAck renderer's shadow after the caller knows the
+// bytes for frame reached the terminal. It is harmless for AdvanceOnSend.
+func (r *Renderer) Ack(frame Frame) error {
+	if err := frame.Validate(); err != nil {
+		return err
+	}
+	r.replaceShadow(frame)
+	return nil
+}
+
+func (r *Renderer) advanceShadow(frame Frame) {
+	if r.caps.AdvancePolicy == AdvanceOnAck {
+		return
+	}
+	r.replaceShadow(frame)
+}
+
+func (r *Renderer) advanceDamage(frame Frame, damage []Damage, scroll *Damage) {
+	if r.caps.AdvancePolicy == AdvanceOnAck {
+		return
+	}
+	r.syncDamage(frame, damage, scroll)
 }
 
 func (r *Renderer) replaceShadow(frame Frame) {

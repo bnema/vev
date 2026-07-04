@@ -28,6 +28,14 @@ const (
 	IntentEphemeral uint8 = 0
 	IntentNew       uint8 = 1
 	IntentAttach    uint8 = 2
+	IntentResume    uint8 = 3
+)
+
+// Capability bits advertised in Welcome.
+const (
+	CapabilityResume  uint32 = 1 << 0
+	CapabilityUDP     uint32 = 1 << 1
+	CapabilityPredict uint32 = 1 << 2
 )
 
 // ErrorMsg codes.
@@ -48,17 +56,20 @@ const (
 
 // Hello is sent by the client immediately after connecting.
 type Hello struct {
-	Version uint16
-	Intent  uint8
-	Name    string
-	Size    domain.Size
-	TermEnv string
-	Cwd     string
+	Version     uint16
+	Intent      uint8
+	ClientID    [16]byte
+	ResumeToken uint64
+	Name        string
+	Size        domain.Size
+	TermEnv     string
+	Cwd         string
 }
 
 // Input carries raw bytes typed/pasted by the client, destined for the PTY.
 type Input struct {
-	Data []byte
+	InputSeq uint64
+	Data     []byte
 }
 
 // Resize notifies the daemon of a client-side terminal size change.
@@ -86,11 +97,18 @@ type Ping struct{}
 // Pong answers a Ping.
 type Pong struct{}
 
+// Ack acknowledges receipt/application of an output state number.
+type Ack struct {
+	AckedStateNum uint64
+}
+
 // Welcome is the daemon's reply to a successful Hello.
 type Welcome struct {
-	SessionID   string
-	SessionName string
-	Ephemeral   bool
+	SessionID    string
+	SessionName  string
+	Ephemeral    bool
+	ResumeToken  uint64
+	Capabilities uint32
 }
 
 // ErrorMsg reports a protocol- or session-level failure to the client.
@@ -101,7 +119,10 @@ type ErrorMsg struct {
 
 // Output carries raw PTY output, destined for the client's terminal.
 type Output struct {
-	Data []byte
+	BaseStateNum uint64
+	NewStateNum  uint64
+	EchoAck      uint64
+	Data         []byte
 }
 
 // Detached tells a client it has been disconnected from its session and why.
@@ -149,6 +170,22 @@ func (w *payloadWriter) putUint16(v uint16) {
 	w.b = append(w.b, tmp[:]...)
 }
 
+func (w *payloadWriter) putUint32(v uint32) {
+	var tmp [4]byte
+	binary.BigEndian.PutUint32(tmp[:], v)
+	w.b = append(w.b, tmp[:]...)
+}
+
+func (w *payloadWriter) putUint64(v uint64) {
+	var tmp [8]byte
+	binary.BigEndian.PutUint64(tmp[:], v)
+	w.b = append(w.b, tmp[:]...)
+}
+
+func (w *payloadWriter) putBytes(b []byte) {
+	w.b = append(w.b, b...)
+}
+
 func (w *payloadWriter) putString(s string) {
 	w.putUint16(uint16(len(s)))
 	w.b = append(w.b, s...)
@@ -176,6 +213,33 @@ func (r *payloadReader) getUint16() (uint16, error) {
 	v := binary.BigEndian.Uint16(r.b)
 	r.b = r.b[2:]
 	return v, nil
+}
+
+func (r *payloadReader) getUint32() (uint32, error) {
+	if len(r.b) < 4 {
+		return 0, errShortPayload
+	}
+	v := binary.BigEndian.Uint32(r.b)
+	r.b = r.b[4:]
+	return v, nil
+}
+
+func (r *payloadReader) getUint64() (uint64, error) {
+	if len(r.b) < 8 {
+		return 0, errShortPayload
+	}
+	v := binary.BigEndian.Uint64(r.b)
+	r.b = r.b[8:]
+	return v, nil
+}
+
+func (r *payloadReader) getBytes(n int) ([]byte, error) {
+	if len(r.b) < n {
+		return nil, errShortPayload
+	}
+	b := append([]byte(nil), r.b[:n]...)
+	r.b = r.b[n:]
+	return b, nil
 }
 
 func (r *payloadReader) getString() (string, error) {
@@ -220,6 +284,8 @@ func MarshalHello(h Hello) []byte {
 	w := payloadWriter{}
 	w.putUint16(h.Version)
 	w.putUint8(h.Intent)
+	w.putBytes(h.ClientID[:])
+	w.putUint64(h.ResumeToken)
 	w.putString(h.Name)
 	w.putUint16(uint16(h.Size.Cols))
 	w.putUint16(uint16(h.Size.Rows))
@@ -238,6 +304,14 @@ func UnmarshalHello(b []byte) (Hello, error) {
 		return Hello{}, err
 	}
 	if h.Intent, err = r.getUint8(); err != nil {
+		return Hello{}, err
+	}
+	clientID, err := r.getBytes(len(h.ClientID))
+	if err != nil {
+		return Hello{}, err
+	}
+	copy(h.ClientID[:], clientID)
+	if h.ResumeToken, err = r.getUint64(); err != nil {
 		return Hello{}, err
 	}
 	if h.Name, err = r.getString(); err != nil {
@@ -266,14 +340,21 @@ func UnmarshalHello(b []byte) (Hello, error) {
 
 // MarshalInput encodes m into an Input message payload.
 func MarshalInput(m Input) []byte {
-	return append([]byte(nil), m.Data...)
+	w := payloadWriter{}
+	w.putUint64(m.InputSeq)
+	w.putBytes(m.Data)
+	return w.b
 }
 
-// UnmarshalInput decodes an Input message payload. The whole payload is the
-// data; there is no separate length prefix.
+// UnmarshalInput decodes an Input message payload. After the fixed input
+// sequence, the rest of the payload is data; there is no length prefix.
 func UnmarshalInput(b []byte) (Input, error) {
 	r := payloadReader{b: b}
-	return Input{Data: r.rest()}, nil
+	seq, err := r.getUint64()
+	if err != nil {
+		return Input{}, err
+	}
+	return Input{InputSeq: seq, Data: r.rest()}, nil
 }
 
 // MarshalResize encodes m into a Resize message payload.
@@ -405,6 +486,26 @@ func UnmarshalPong(b []byte) (Pong, error) {
 	return Pong{}, nil
 }
 
+// MarshalAck encodes m into an Ack message payload.
+func MarshalAck(m Ack) []byte {
+	w := payloadWriter{}
+	w.putUint64(m.AckedStateNum)
+	return w.b
+}
+
+// UnmarshalAck decodes an Ack message payload.
+func UnmarshalAck(b []byte) (Ack, error) {
+	r := payloadReader{b: b}
+	acked, err := r.getUint64()
+	if err != nil {
+		return Ack{}, err
+	}
+	if err := r.done(); err != nil {
+		return Ack{}, err
+	}
+	return Ack{AckedStateNum: acked}, nil
+}
+
 // MarshalWelcome encodes m into a Welcome message payload.
 func MarshalWelcome(m Welcome) []byte {
 	w := payloadWriter{}
@@ -415,6 +516,8 @@ func MarshalWelcome(m Welcome) []byte {
 	} else {
 		w.putUint8(0)
 	}
+	w.putUint64(m.ResumeToken)
+	w.putUint32(m.Capabilities)
 	return w.b
 }
 
@@ -435,6 +538,12 @@ func UnmarshalWelcome(b []byte) (Welcome, error) {
 		return Welcome{}, err
 	}
 	m.Ephemeral = eph != 0
+	if m.ResumeToken, err = r.getUint64(); err != nil {
+		return Welcome{}, err
+	}
+	if m.Capabilities, err = r.getUint32(); err != nil {
+		return Welcome{}, err
+	}
 	if err := r.done(); err != nil {
 		return Welcome{}, err
 	}
@@ -469,14 +578,31 @@ func UnmarshalErrorMsg(b []byte) (ErrorMsg, error) {
 
 // MarshalOutput encodes m into an Output message payload.
 func MarshalOutput(m Output) []byte {
-	return append([]byte(nil), m.Data...)
+	w := payloadWriter{}
+	w.putUint64(m.BaseStateNum)
+	w.putUint64(m.NewStateNum)
+	w.putUint64(m.EchoAck)
+	w.putBytes(m.Data)
+	return w.b
 }
 
-// UnmarshalOutput decodes an Output message payload. The whole payload is
-// the data; there is no separate length prefix.
+// UnmarshalOutput decodes an Output message payload. After fixed state
+// numbers, the rest of the payload is data; there is no length prefix.
 func UnmarshalOutput(b []byte) (Output, error) {
 	r := payloadReader{b: b}
-	return Output{Data: r.rest()}, nil
+	base, err := r.getUint64()
+	if err != nil {
+		return Output{}, err
+	}
+	newState, err := r.getUint64()
+	if err != nil {
+		return Output{}, err
+	}
+	echoAck, err := r.getUint64()
+	if err != nil {
+		return Output{}, err
+	}
+	return Output{BaseStateNum: base, NewStateNum: newState, EchoAck: echoAck, Data: r.rest()}, nil
 }
 
 // MarshalDetached encodes m into a Detached message payload.

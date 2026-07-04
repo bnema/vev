@@ -28,12 +28,18 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-func frameWelcome(s *session) ports.Frame {
-	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(ports.Welcome{
-		SessionID:   string(s.id),
-		SessionName: s.name,
-		Ephemeral:   s.ephemeral,
-	})}
+func frameWelcome(s *session, ac *attachedClient) ports.Frame {
+	w := ports.Welcome{
+		SessionID:    string(s.id),
+		SessionName:  s.name,
+		Ephemeral:    s.ephemeral,
+		Capabilities: ports.CapabilityResume,
+		ResumeToken:  ac.resumeToken,
+	}
+	if ac.resumeCapable && ac.resumeToken == 0 {
+		w.ResumeToken = 0
+	}
+	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(w)}
 }
 
 func frameError(code uint16, text string) ports.Frame {
@@ -41,7 +47,15 @@ func frameError(code uint16, text string) ports.Frame {
 }
 
 func frameOutput(b []byte) ports.Frame {
-	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{Data: b})}
+	return frameOutputState(b, 0)
+}
+
+func frameOutputState(b []byte, state uint64, echoAck ...uint64) ports.Frame {
+	ack := uint64(0)
+	if len(echoAck) > 0 {
+		ack = echoAck[0]
+	}
+	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{NewStateNum: state, EchoAck: ack, Data: b})}
 }
 
 func frameDetached(reason uint8) ports.Frame {

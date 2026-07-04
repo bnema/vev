@@ -34,6 +34,18 @@ import (
 	"github.com/bnema/vev/internal/usecase/mouse"
 )
 
+func (d *Daemon) handleSequencedInput(sess *session, ac *attachedClient, seq uint64, data []byte) {
+	d.handleInput(sess, ac, data)
+	if seq > 0 {
+		for {
+			cur := ac.echoAck.Load()
+			if seq <= cur || ac.echoAck.CompareAndSwap(cur, seq) {
+				break
+			}
+		}
+	}
+}
+
 func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 	ac.mouseScan.Scan(data,
 		func(ev mouse.Event) { d.handleMouse(ac, ev) },

@@ -5,20 +5,27 @@
 package app
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/clock"
+	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/pty"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
@@ -42,6 +49,7 @@ const (
 	kindKill
 	kindDaemon
 	kindStdio
+	kindUDPBootstrap
 	kindHelp
 	kindVersion
 )
@@ -116,6 +124,15 @@ func parseArgs(args []string) (command, error) {
 			cmd.name = args[1]
 		}
 		return cmd, nil
+	case "_udp-bootstrap":
+		if len(args) > 2 {
+			return command{}, usagef("`_udp-bootstrap` accepts at most one session name")
+		}
+		cmd := command{kind: kindUDPBootstrap}
+		if len(args) == 2 {
+			cmd.name = args[1]
+		}
+		return cmd, nil
 	case "new":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`new` requires a session name")
@@ -185,6 +202,8 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runDaemon()
 	case kindStdio:
 		return runStdio(ctx)
+	case kindUDPBootstrap:
+		return runUDPBootstrap(ctx, cmd.name)
 	case kindList:
 		return runList(ctx)
 	case kindKill:
@@ -252,13 +271,24 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) err
 	defer func() { _ = logFile.Close() }()
 
 	return runAttachWithDeps(ctx, intent, name, remoteTarget, os.Getenv("VEV"), runAttachDeps{
-		attachLocal:    attachLocalDaemon,
+		localDialer:    defaultLocalDialer,
+		remoteDialer:   defaultRemoteDialer,
+		runClient:      client.Run,
 		createDetached: createDetachedLocalSession,
 	})
 }
 
+func defaultLocalDialer() ports.Dialer { return localDaemonDialer{dir: ipc.SocketDir()} }
+
+func defaultRemoteDialer(target, session string) ports.Dialer {
+	return remoteDatagramDialer{target: target, session: session}
+}
+
 type runAttachDeps struct {
-	attachLocal    func(context.Context, uint8, string) error
+	attachLocal    func(context.Context, uint8, string) error // compatibility hook for focused tests
+	localDialer    func() ports.Dialer
+	remoteDialer   func(target, session string) ports.Dialer
+	runClient      func(context.Context, ports.Dialer, ports.Terminal, uint8, string) error
 	createDetached func(context.Context, string) error
 }
 
@@ -270,18 +300,31 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		return errors.New("vev: sessions should be nested with care; unset VEV to force")
 	}
 
+	runClient := deps.runClient
+	if runClient == nil {
+		runClient = client.Run
+	}
 	if remoteTarget != "" {
-		transport, err := sshstdio.Dial(remoteTarget, name)
-		if err != nil {
-			return err
+		remoteDialer := deps.remoteDialer
+		if remoteDialer == nil {
+			remoteDialer = defaultRemoteDialer
 		}
-		// client.Attach owns and closes transport.
-		return client.Attach(ctx, transport, term.New(), intent, name)
+		return runClient(ctx, remoteDialer(remoteTarget, name), term.New(), intent, name)
 	}
 
+	attachLocal := deps.attachLocal
+	if attachLocal == nil {
+		localDialer := deps.localDialer
+		if localDialer == nil {
+			localDialer = defaultLocalDialer
+		}
+		attachLocal = func(ctx context.Context, intent uint8, name string) error {
+			return runClient(ctx, localDialer(), term.New(), intent, name)
+		}
+	}
 	return runLocalAttachWithRecovery(ctx, intent, name, attachRecoveryDeps{
 		confirmer:       confirm.NewConfirmer(os.Stdin, os.Stderr),
-		attach:          deps.attachLocal,
+		attach:          attachLocal,
 		killDaemon:      requestDaemonStop,
 		settleAfterKill: waitForDaemonStop,
 	})
@@ -332,13 +375,122 @@ func isDaemonVersionDrift(err error) bool {
 	return protocolErr.Code == ports.ErrVersionMismatch || protocolErr.Text == legacyMalformedHelloSignal
 }
 
-func attachLocalDaemon(ctx context.Context, intent uint8, name string) error {
-	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
-	if err != nil {
-		return err
+type localDaemonDialer struct{ dir string }
+
+func (d localDaemonDialer) Dial(ctx context.Context) (ports.Transport, error) {
+	return ensureDaemon(ctx, d.dir, realDial, realSpawn, defaultBackoff)
+}
+
+const maxBootstrapStderr = 64 * 1024
+
+type limitedBuffer struct {
+	buf []byte
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if len(b.buf) < maxBootstrapStderr {
+		keep := min(len(p), maxBootstrapStderr-len(b.buf))
+		b.buf = append(b.buf, p[:keep]...)
 	}
-	// client.Attach owns and closes transport.
-	return client.Attach(ctx, transport, term.New(), intent, name)
+	return len(p), nil
+}
+
+func (b *limitedBuffer) String() string { return string(b.buf) }
+
+type remoteDatagramDialer struct {
+	target  string
+	session string
+}
+
+func (d remoteDatagramDialer) Dial(ctx context.Context) (ports.Transport, error) {
+	tr, udpErr := d.dialDatagram(ctx)
+	if udpErr == nil {
+		return tr, nil
+	}
+	tr, stdioErr := sshstdio.Dial(d.target, d.session)
+	if stdioErr != nil {
+		return nil, fmt.Errorf("datagram dial failed: %w; stdio fallback failed: %w", udpErr, stdioErr)
+	}
+	return tr, nil
+}
+
+func (d remoteDatagramDialer) dialDatagram(ctx context.Context) (ports.Transport, error) {
+	remote := []string{shellQuote("vev"), shellQuote("_udp-bootstrap")}
+	if d.session != "" {
+		remote = append(remote, shellQuote(d.session))
+	}
+	cmd := exec.CommandContext(ctx, "ssh", "--", d.target, strings.Join(remote, " "))
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	var stderr limitedBuffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	started := true
+	defer func() {
+		if started {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
+
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		return nil, fmt.Errorf("udp bootstrap: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) != 3 || fields[0] != "VEV-UDP" {
+		return nil, fmt.Errorf("udp bootstrap: unexpected reply %q", strings.TrimSpace(line))
+	}
+	key, err := base64.StdEncoding.DecodeString(fields[2])
+	if err != nil {
+		return nil, err
+	}
+	host := sshTargetHost(d.target)
+	peer, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, fields[1]))
+	if err != nil {
+		return nil, err
+	}
+	var lc net.ListenConfig
+	pc, err := lc.ListenPacket(ctx, "udp", ":0")
+	if err != nil {
+		return nil, err
+	}
+	tr, err := dgram.NewTransport(pc, peer, key, 1, 2)
+	if err != nil {
+		_ = pc.Close()
+		return nil, err
+	}
+	started = false
+	return closeBothTransport{Transport: tr, close: func() error {
+		_ = tr.Close()
+		_ = cmd.Process.Kill()
+		return cmd.Wait()
+	}}, nil
+}
+
+func sshTargetHost(target string) string {
+	if at := strings.LastIndexByte(target, '@'); at >= 0 {
+		target = target[at+1:]
+	}
+	if h, _, err := net.SplitHostPort(target); err == nil {
+		return h
+	}
+	return target
+}
+
+type closeBothTransport struct {
+	ports.Transport
+	close func() error
+}
+
+func (t closeBothTransport) Close() error { return t.close() }
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func createDetachedLocalSession(ctx context.Context, name string) error {
@@ -460,6 +612,73 @@ func runStdio(ctx context.Context) error {
 
 	stdio := sshstdio.NewTransport(os.Stdin, os.Stdout, nil)
 	return proxyTransports(ctx, stdio, transport)
+}
+
+// runUDPBootstrap is the hidden remote-side bootstrap used before switching to
+// authenticated datagrams. It deliberately prints only an ephemeral UDP port and
+// random session key to stdout so callers can fall back to _stdio if setup fails.
+func runUDPBootstrap(ctx context.Context, session string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	var lc net.ListenConfig
+	conn, err := lc.ListenPacket(ctx, "udp", "0.0.0.0:0")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return err
+	}
+	daemonTr, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = daemonTr.Close() }()
+	dg, err := dgram.NewTransport(conn, nil, key, 2, 1)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dg.Close() }()
+
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return errors.New("vev: udp bootstrap did not get a UDP address")
+	}
+	if _, err := fmt.Fprintf(os.Stdout, "VEV-UDP %d %s\n", addr.Port, base64.StdEncoding.EncodeToString(key)); err != nil {
+		return err
+	}
+	_ = os.Stdout.Sync()
+
+	var dgramTr ports.Transport = dg
+	if session != "" {
+		dgramTr = preHelloNameTransport{Transport: dg, session: session}
+	}
+	return proxyTransports(ctx, dgramTr, daemonTr)
+}
+
+type preHelloNameTransport struct {
+	ports.Transport
+	session string
+}
+
+func (t preHelloNameTransport) Recv() (ports.Frame, error) {
+	f, err := t.Transport.Recv()
+	if err != nil || f.Type != ports.MsgHello || t.session == "" {
+		return f, err
+	}
+	h, err := ports.UnmarshalHello(f.Payload)
+	if err != nil {
+		return f, nil
+	}
+	if h.Name == "" {
+		h.Name = t.session
+		f.Payload = ports.MarshalHello(h)
+	}
+	return f, nil
 }
 
 func proxyTransports(ctx context.Context, a, b ports.Transport) error {

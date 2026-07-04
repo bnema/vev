@@ -27,6 +27,7 @@ package daemon
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -44,6 +45,13 @@ import (
 type attachedClient struct {
 	tr                    ports.Transport
 	rend                  *renderer.Renderer
+	clientID              [16]byte
+	resumeCapable         bool
+	resumeToken           uint64
+	parked                bool
+	ackedStateNum         uint64
+	nextStateNum          uint64
+	echoAck               atomic.Uint64
 	bars                  barCache // only touched while sendMu is held
 	size                  domain.Size
 	keys                  *keys.Router
@@ -75,6 +83,7 @@ type attachedClient struct {
 	themeMu               sync.Mutex
 	theme                 themeui.Theme
 	lastCursor            cursorOut
+	linkMu                sync.Mutex
 	sendMu                sync.Mutex
 }
 
@@ -156,11 +165,42 @@ func (ac *attachedClient) promptActive() bool {
 	return ac.prompt != nil
 }
 
+func (ac *attachedClient) transport() ports.Transport {
+	ac.linkMu.Lock()
+	defer ac.linkMu.Unlock()
+	return ac.tr
+}
+
+func (ac *attachedClient) replaceTransport(tr ports.Transport) {
+	ac.linkMu.Lock()
+	ac.tr = tr
+	ac.linkMu.Unlock()
+}
+
+func (ac *attachedClient) closeTransport() error {
+	tr := ac.transport()
+	if tr == nil {
+		return nil
+	}
+	return tr.Close()
+}
+
+func (ac *attachedClient) closeCapturedTransport(tr ports.Transport) error {
+	if tr == nil {
+		return nil
+	}
+	return tr.Close()
+}
+
 // send serialises a frame onto the client's transport.
 func (ac *attachedClient) send(f ports.Frame) error {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
-	return ac.tr.Send(f)
+	tr := ac.transport()
+	if tr == nil {
+		return errors.New("client transport is nil")
+	}
+	return tr.Send(f)
 }
 
 // boundedSend sends f to ac with a deadline watchdog: if the send (including
@@ -188,7 +228,7 @@ func (d *Daemon) boundedSendErr(ac *attachedClient, f ports.Frame) error {
 			return err
 		default:
 		}
-		_ = ac.tr.Close()
+		_ = ac.closeTransport()
 		return errors.New("send timed out")
 	}
 }
@@ -217,7 +257,7 @@ func (d *Daemon) notifyDetachedAsync(ac *attachedClient, reason uint8) {
 	go func() {
 		defer close(done)
 		d.boundedSend(ac, frameDetached(reason))
-		_ = ac.tr.Close()
+		_ = ac.closeTransport()
 	}()
 }
 
@@ -238,11 +278,23 @@ func (d *Daemon) notifiesSnapshot() []chan struct{} {
 	return snapshot
 }
 
-func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size) (*attachedClient, *attachedClient) {
+type attachClientOptions struct {
+	clientID      [16]byte
+	resumeCapable bool
+}
+
+func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, *attachedClient) {
+	resumeToken := uint64(0)
+	if opts.resumeCapable {
+		resumeToken = newResumeToken()
+	}
 	ac := &attachedClient{
-		tr:   tr,
-		rend: renderer.New(renderer.Capabilities{}),
-		size: sz,
+		tr:            tr,
+		rend:          renderer.New(renderer.Capabilities{}),
+		size:          sz,
+		clientID:      opts.clientID,
+		resumeCapable: opts.resumeCapable,
+		resumeToken:   resumeToken,
 	}
 	ac.setSession(sess)
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac})
@@ -333,7 +385,11 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		if sess == nil {
 			return
 		}
-		f, err := ac.tr.Recv()
+		tr := ac.transport()
+		if tr == nil {
+			return
+		}
+		f, err := tr.Recv()
 		if err != nil {
 			d.clientGone(sess, ac, false)
 			return
@@ -345,7 +401,7 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		switch f.Type {
 		case ports.MsgInput:
 			if in, derr := ports.UnmarshalInput(f.Payload); derr == nil {
-				d.handleInput(sess, ac, in.Data)
+				d.handleSequencedInput(sess, ac, in.InputSeq, in.Data)
 			}
 		case ports.MsgResize:
 			if rz, derr := ports.UnmarshalResize(f.Payload); derr == nil {
@@ -358,6 +414,10 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		case ports.MsgDetach:
 			d.clientGone(sess, ac, true)
 			return
+		case ports.MsgAck:
+			if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
+				ac.ackedStateNum = ack.AckedStateNum
+			}
 		case ports.MsgPing:
 			_ = ac.send(framePong())
 		default:
@@ -381,6 +441,11 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, explicit bool) {
 	if !ephemeral {
 		d.refreshSessionCwd(sess)
 	}
+	oldTr := ac.transport()
+	if !explicit && d.parkAttachment(sess, ac) {
+		_ = ac.closeCapturedTransport(oldTr)
+		return
+	}
 	d.resetScreenDefaultColors(sess)
 	if explicit {
 		// Synchronous so the ack is delivered before the transport closes
@@ -389,7 +454,7 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, explicit bool) {
 		// connWg.Wait.
 		d.boundedSend(ac, frameDetached(ports.ReasonDetach))
 	}
-	_ = ac.tr.Close()
+	_ = ac.closeCapturedTransport(oldTr)
 	if ephemeral {
 		_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 	}
@@ -464,7 +529,13 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient) {
 	if sess.detachIfCurrent(ac) {
 		d.unregisterPreview(ac)
 		d.resetScreenDefaultColors(sess)
-		_ = ac.tr.Close()
+		oldTr := ac.transport()
+		if d.parkAttachment(sess, ac) {
+			_ = ac.closeCapturedTransport(oldTr)
+			d.log.Warn("parked client after send error", "session", sess.name)
+			return
+		}
+		_ = ac.closeCapturedTransport(oldTr)
 		d.log.Warn("detached client after send error", "session", sess.name)
 		sess.mu.Lock()
 		ephemeral := sess.ephemeral

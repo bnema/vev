@@ -1,0 +1,232 @@
+package dgram
+
+import (
+	"bytes"
+	"errors"
+	"net"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/bnema/vev/internal/ports"
+	pdgram "github.com/bnema/vev/pkg/dgram"
+)
+
+type testAddr string
+
+func (a testAddr) Network() string { return "mem" }
+func (a testAddr) String() string  { return string(a) }
+
+type packet struct {
+	b    []byte
+	addr net.Addr
+}
+type fakePC struct {
+	addr   net.Addr
+	mu     sync.Mutex
+	closed bool
+	in     chan packet
+	peers  map[string]*fakePC
+	drop   func([]byte, net.Addr) bool
+}
+
+func newPair() (*fakePC, *fakePC) {
+	a := &fakePC{addr: testAddr("a"), in: make(chan packet, 100), peers: map[string]*fakePC{}}
+	b := &fakePC{addr: testAddr("b"), in: make(chan packet, 100), peers: map[string]*fakePC{}}
+	a.peers["b"] = b
+	b.peers["a"] = a
+	return a, b
+}
+func (p *fakePC) ReadFrom(b []byte) (int, net.Addr, error) {
+	q, ok := <-p.in
+	if !ok {
+		return 0, nil, errors.New("closed")
+	}
+	copy(b, q.b)
+	return len(q.b), q.addr, nil
+}
+func (p *fakePC) WriteTo(b []byte, addr net.Addr) (int, error) {
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if closed {
+		return 0, errors.New("closed")
+	}
+	if p.drop != nil && p.drop(b, addr) {
+		return len(b), nil
+	}
+	peer := p.peers[addr.String()]
+	peer.mu.Lock()
+	peerClosed := peer.closed
+	peer.mu.Unlock()
+	if peerClosed {
+		return 0, errors.New("peer closed")
+	}
+	peer.in <- packet{append([]byte(nil), b...), p.addr}
+	return len(b), nil
+}
+func (p *fakePC) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.closed {
+		p.closed = true
+		close(p.in)
+	}
+	return nil
+}
+func (p *fakePC) LocalAddr() net.Addr              { return p.addr }
+func (p *fakePC) SetDeadline(time.Time) error      { return nil }
+func (p *fakePC) SetReadDeadline(time.Time) error  { return nil }
+func (p *fakePC) SetWriteDeadline(time.Time) error { return nil }
+
+func key() []byte { return bytes.Repeat([]byte{1}, pdgram.KeySize) }
+
+func TestReliableDuplicateAckedButNotDeliveredTwice(t *testing.T) {
+	aPC, bPC := newPair()
+	var droppedAck atomic.Bool
+	bPC.drop = func(_ []byte, addr net.Addr) bool {
+		return addr.String() == "a" && droppedAck.CompareAndSwap(false, true)
+	}
+	a, err := NewTransport(aPC, testAddr("b"), key(), 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewTransport(bPC, testAddr("a"), key(), 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := a.Close(); err != nil {
+			t.Errorf("close a: %v", err)
+		}
+	}()
+	defer func() {
+		if err := b.Close(); err != nil {
+			t.Errorf("close b: %v", err)
+		}
+	}()
+	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("typed")}); err != nil {
+		t.Fatal(err)
+	}
+	got := recvWithin(t, b, time.Second)
+	if got.Type != ports.MsgInput || string(got.Payload) != "typed" || !droppedAck.Load() {
+		t.Fatalf("got=%+v droppedAck=%v", got, droppedAck.Load())
+	}
+	if got, ok := recvMaybe(b, 3*defaultResend); ok {
+		t.Fatalf("duplicate reliable frame delivered: %+v", got)
+	}
+}
+
+func TestReliableInputRetransmitsUntilAck(t *testing.T) {
+	aPC, bPC := newPair()
+	var dropped atomic.Bool
+	aPC.drop = func(_ []byte, addr net.Addr) bool {
+		return addr.String() == "b" && dropped.CompareAndSwap(false, true)
+	}
+	a, err := NewTransport(aPC, testAddr("b"), key(), 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewTransport(bPC, testAddr("a"), key(), 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := a.Close(); err != nil {
+			t.Errorf("close a: %v", err)
+		}
+	}()
+	defer func() {
+		if err := b.Close(); err != nil {
+			t.Errorf("close b: %v", err)
+		}
+	}()
+	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("typed")}); err != nil {
+		t.Fatal(err)
+	}
+	got := recvWithin(t, b, time.Second)
+	if got.Type != ports.MsgInput || string(got.Payload) != "typed" || !dropped.Load() {
+		t.Fatalf("got=%+v dropped=%v", got, dropped.Load())
+	}
+}
+
+func TestAuthenticatedOnlyRehome(t *testing.T) {
+	aPC, bPC := newPair()
+	a, err := NewTransport(aPC, testAddr("b"), key(), 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := a.Close(); err != nil {
+			t.Errorf("close a: %v", err)
+		}
+	}()
+	_ = bPC
+	old := a.Peer().String()
+	aPC.in <- packet{[]byte("not authenticated"), testAddr("evil")}
+	time.Sleep(30 * time.Millisecond)
+	if a.Peer().String() != old {
+		t.Fatalf("unauthenticated packet changed peer to %v", a.Peer())
+	}
+	c, _ := pdgram.NewCodec(key())
+	rec := encodeData(7, false, ports.Frame{Type: ports.MsgPing})
+	frags, _ := pdgram.FragmentPayload(9, rec, pdgram.DefaultMTU)
+	raw, _ := pdgram.MarshalFragment(frags[0])
+	aPC.in <- packet{c.Seal(2, 99, raw, nil), testAddr("evil")}
+	time.Sleep(30 * time.Millisecond)
+	if a.Peer().String() != "evil" {
+		t.Fatalf("authenticated packet did not rehome: %v", a.Peer())
+	}
+}
+
+func TestOutputRetransmitsUntilAck(t *testing.T) {
+	aPC, bPC := newPair()
+	var dropped atomic.Bool
+	aPC.drop = func(_ []byte, addr net.Addr) bool {
+		return addr.String() == "b" && dropped.CompareAndSwap(false, true)
+	}
+	a, _ := NewTransport(aPC, testAddr("b"), key(), 1, 2)
+	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
+	defer func() {
+		if err := a.Close(); err != nil {
+			t.Errorf("close a: %v", err)
+		}
+	}()
+	defer func() {
+		if err := b.Close(); err != nil {
+			t.Errorf("close b: %v", err)
+		}
+	}()
+	if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("state1")}); err != nil {
+		t.Fatal(err)
+	}
+	got := recvWithin(t, b, time.Second)
+	if got.Type != ports.MsgOutput || string(got.Payload) != "state1" || !dropped.Load() {
+		t.Fatalf("got=%+v dropped=%v", got, dropped.Load())
+	}
+}
+
+func recvMaybe(tr *Transport, d time.Duration) (ports.Frame, bool) {
+	ch := make(chan ports.Frame, 1)
+	go func() { f, _ := tr.Recv(); ch <- f }()
+	select {
+	case f := <-ch:
+		return f, true
+	case <-time.After(d):
+		return ports.Frame{}, false
+	}
+}
+
+func recvWithin(t *testing.T, tr *Transport, d time.Duration) ports.Frame {
+	t.Helper()
+	ch := make(chan ports.Frame, 1)
+	go func() { f, _ := tr.Recv(); ch <- f }()
+	select {
+	case f := <-ch:
+		return f
+	case <-time.After(d):
+		t.Fatal("timeout")
+		return ports.Frame{}
+	}
+}

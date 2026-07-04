@@ -384,6 +384,20 @@ func TestRenderClearsDamageOnEmittingPaneWhenDetached(t *testing.T) {
 	require.Empty(t, emitting.screen.Damage(), "emitting pane damage should be drained")
 }
 
+func TestRenderWithNilTransportDoesNotAdvanceStateCounter(t *testing.T) {
+	tb := newTab(nil, domain.Size{Cols: 10, Rows: 3})
+	sess := &session{id: "s", name: "work", tabs: []*tab{tb}, active: 0}
+	ac := &attachedClient{rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 10, Rows: 4}}
+	sess.client = ac
+	ac.setSession(sess)
+	d := newTestDaemon(t, nil, stubClock{})
+
+	tb.focusedPane().screen.Write([]byte("x"))
+	d.render(sess, tb, tb.focusedPane())
+
+	require.Zero(t, ac.nextStateNum)
+}
+
 func TestComposeTabFrameTwoPaneSplitBlitsDividersDimsAndTranslatesDamage(t *testing.T) {
 	win := newTab(nil, domain.Size{Cols: 41, Rows: 4})
 	left := win.focusedPane()

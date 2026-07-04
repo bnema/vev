@@ -26,6 +26,7 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"strconv"
 	"time"
 
@@ -381,7 +382,13 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	if err == nil {
 		data = append(data, cursorTail...)
 		if len(data) > 0 {
-			serr = ac.tr.Send(frameOutput(data))
+			tr := ac.transport()
+			if tr == nil {
+				serr = errors.New("client transport is nil")
+			} else {
+				ac.nextStateNum++
+				serr = tr.Send(frameOutputState(data, ac.nextStateNum, ac.echoAck.Load()))
+			}
 		}
 	}
 	ac.sendMu.Unlock()
