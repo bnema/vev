@@ -78,7 +78,7 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 			}
 			if len(clipboards) > 0 {
 				for _, b64 := range clipboards {
-					d.forwardClipboard(sess, b64)
+					d.forwardClipboardAsync(sess, b64)
 				}
 				clipboards = clipboards[:0]
 			}

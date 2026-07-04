@@ -45,12 +45,13 @@ type Screen struct {
 	OnBell func()
 	// OnNotify is called synchronously from Write for explicit terminal
 	// notifications: OSC 9 (body only) and OSC 777 "notify" (title;body).
-	// All other OSC payloads remain discarded. Nil disables it.
+	// Other non-clipboard OSC payloads remain discarded. Nil disables it.
 	OnNotify func(title, body string)
 	// OnClipboard is called synchronously from Write for a complete OSC 52
-	// clipboard set request from the child ("52;<selection>;<base64>"),
-	// receiving the raw base64 payload. Clipboard queries (data == "?") and
-	// malformed payloads are ignored and never invoke it. Nil disables it.
+	// clipboard set request from the child. The OSC 52 selection field is
+	// accepted but ignored; the callback receives only the raw base64 payload.
+	// Clipboard queries (data == "?") and malformed payloads are ignored and
+	// never invoke it. Nil disables it.
 	OnClipboard func(b64 string)
 
 	defaultFG          renderer.RGB
@@ -634,14 +635,14 @@ func appendOSCColorComponent(dst []byte, c uint8) []byte {
 // set requests (OSC 52) are acted on; titles and every other OSC are still
 // discarded.
 func (s *Screen) handleOSC(payload []byte) {
-	p := string(payload)
-	if strings.HasPrefix(p, "52;") {
-		s.handleOSC52(p[len("52;"):])
+	if len(payload) >= len("52;") && payload[0] == '5' && payload[1] == '2' && payload[2] == ';' {
+		s.handleOSC52(string(payload[len("52;"):]))
 		return
 	}
 	if s.OnNotify == nil {
 		return
 	}
+	p := string(payload)
 	switch {
 	case strings.HasPrefix(p, "9;"):
 		if strings.HasPrefix(p, "9;4;") {
@@ -1050,11 +1051,11 @@ func resizeFrame(old renderer.Frame, newW, newH, cursorRow int, evict func([]ren
 	next := renderer.NewFrame(newW, newH)
 	shift := clamp(cursorRow-(newH-1), 0, max(old.Height-newH, 0))
 	if evict != nil {
-		for y := 0; y < shift; y++ {
+		for y := range shift {
 			evict(old.Row(y))
 		}
 	}
-	for dy := 0; dy < newH; dy++ {
+	for dy := range newH {
 		sy := dy + shift
 		if sy >= old.Height {
 			break
@@ -1154,7 +1155,7 @@ func (s *Screen) clearScreenMode(mode int) {
 	s.clampCursor()
 	switch mode {
 	case 1:
-		for y := 0; y <= s.Row && y < s.Frame.Height; y++ {
+		for y := range min(s.Row+1, s.Frame.Height) {
 			end := s.Frame.Width
 			if y == s.Row {
 				end = min(s.Col+1, s.Frame.Width)

@@ -27,7 +27,11 @@ func chunkReadPTY(t *testing.T, chunks ...[]byte) *portsmocks.MockPTY {
 			return 0, io.EOF
 		}
 		n := copy(buf, chunks[0])
-		chunks = chunks[1:]
+		if n == len(chunks[0]) {
+			chunks = chunks[1:]
+		} else {
+			chunks[0] = chunks[0][n:]
+		}
 		return n, nil
 	})
 	p.EXPECT().Write(mock.Anything).Return(0, nil).Maybe()
