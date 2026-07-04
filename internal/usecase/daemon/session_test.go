@@ -667,7 +667,7 @@ func TestCreateRenameKillPersistenceLifecycle(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(store)(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz)
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, nil)
 	require.NoError(t, err)
 	require.True(t, state.has("work"))
 
@@ -679,6 +679,64 @@ func TestCreateRenameKillPersistenceLifecycle(t *testing.T) {
 	require.False(t, state.has("renamed"))
 }
 
+func TestRenameTabPersistsForNamedSession(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, release := newBlockingPTY(t)
+	defer release()
+	store, _ := newMockStore(t)
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	WithStore(store)(d)
+
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, nil)
+	require.NoError(t, err)
+	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
+
+	records, err := d.persist.LoadAll()
+	require.NoError(t, err)
+	require.Equal(t, []persist.Record{{Name: "work", Cwd: "/tmp/work", CreatedAt: sess.createdAt, UpdatedAt: records[0].UpdatedAt, TabNames: []string{"shell"}}}, records)
+}
+
+func TestRenameTabDoesNotPersistForEphemeralSession(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, release := newBlockingPTY(t)
+	defer release()
+	store, state := newMockStore(t)
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	WithStore(store)(d)
+
+	sess, err := d.createSessionLocked("0", true, "/tmp/work", sz, nil)
+	require.NoError(t, err)
+	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
+
+	require.False(t, state.has("0"))
+	records, err := d.persist.LoadAll()
+	require.NoError(t, err)
+	require.Empty(t, records)
+}
+
+func TestAttachRestoresPersistedTabNames(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p1, release1 := newBlockingPTY(t)
+	p2, release2 := newBlockingPTY(t)
+	defer release1()
+	defer release2()
+	store, _ := newMockStore(t)
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
+	WithStore(store)(d)
+	require.NoError(t, d.persist.Save(persist.Record{Name: "work", Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, TabNames: []string{"shell", "logs"}}))
+	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}}
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr.EXPECT().Close().Return(nil).Maybe()
+
+	sess, ac, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: sz}, tr)
+	require.NoError(t, err)
+	require.NotNil(t, ac)
+	require.Len(t, sess.tabs, 2)
+	require.Equal(t, "shell", sess.tabs[0].name)
+	require.Equal(t, "logs", sess.tabs[1].name)
+}
+
 func TestEphemeralRenamePromotesAndStoppedCollisionRejected(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	p, release := newBlockingPTY(t)
@@ -688,7 +746,7 @@ func TestEphemeralRenamePromotesAndStoppedCollisionRejected(t *testing.T) {
 	WithStore(store)(d)
 	d.stopped["taken"] = stoppedSession{name: "taken", cwd: "/tmp", createdAt: 1}
 
-	sess, err := d.createSessionLocked("0", true, "/tmp/e", sz)
+	sess, err := d.createSessionLocked("0", true, "/tmp/e", sz, nil)
 	require.NoError(t, err)
 	require.False(t, state.has("0"))
 	require.EqualError(t, d.renameSession(sess, "taken"), "name already in use")
@@ -706,7 +764,7 @@ func TestRefreshSessionCwdTouchesOnlyOnChange(t *testing.T) {
 	cwd := "/tmp/work"
 	WithCwdReader(func(int) (string, error) { return cwd, nil })(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz)
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, nil)
 	require.NoError(t, err)
 	state.mu.Lock()
 	setsAfterCreate := state.sets
@@ -798,9 +856,9 @@ func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {
 	WithStore(store)(d)
 	WithCwdReader(func(int) (string, error) { return "/tmp/latest", nil })(d)
 
-	natural, err := d.createSessionLocked("natural", false, "/tmp/old", sz)
+	natural, err := d.createSessionLocked("natural", false, "/tmp/old", sz, nil)
 	require.NoError(t, err)
-	other, err := d.createSessionLocked("other", false, "/tmp/other", sz)
+	other, err := d.createSessionLocked("other", false, "/tmp/other", sz, nil)
 	require.NoError(t, err)
 	_ = d.killSession(natural, ports.ReasonSessionKilled, false)
 	require.True(t, state.has("natural"))

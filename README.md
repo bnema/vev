@@ -65,9 +65,10 @@ The status bar marks ephemeral sessions with `*`, for example `0*`. Ephemeral se
 | SSP | switch session or tab |
 | VIS | enter visual mode |
 | RNS | rename session |
+| RNT | rename current tab |
 | DET | detach |
 
-Rename prompts are prefilled with the current session name. Type text, use Backspace to edit, Enter to submit, or Esc/Ctrl-C to cancel. Empty names and names already used by another session are rejected; the prompt stays open and shows the validation error.
+Rename prompts are prefilled with the current session or tab name. Type text, use Backspace to edit, Enter to submit, or Esc/Ctrl-C to cancel. Empty session names and names already used by another session are rejected; the prompt stays open and shows the validation error. Custom tab names are saved for named sessions and are not persisted for ephemeral sessions.
 
 ## Visual mode
 

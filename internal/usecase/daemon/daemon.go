@@ -30,6 +30,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -120,7 +121,16 @@ type stoppedSession struct {
 	name      string
 	cwd       string
 	createdAt int64
+	tabNames  []string
 	purging   bool
+}
+
+func (s stoppedSession) same(other stoppedSession) bool {
+	return s.name == other.name &&
+		s.cwd == other.cwd &&
+		s.createdAt == other.createdAt &&
+		s.purging == other.purging &&
+		slices.Equal(s.tabNames, other.tabNames)
 }
 
 type Option func(*Daemon)
@@ -189,7 +199,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		d.log.Warn("loading persisted sessions failed", "err", err)
 	} else {
 		for _, r := range records {
-			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt}
+			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, tabNames: r.TabNames}
 		}
 	}
 	return d
@@ -370,7 +380,7 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 				_ = tr.Send(frameError(ports.ErrInternal, "deleting persisted stopped session failed"))
 				return
 			}
-			if cur, ok := d.stopped[k.Name]; ok && cur == stopped {
+			if cur, ok := d.stopped[k.Name]; ok && cur.same(stopped) {
 				delete(d.stopped, k.Name)
 			}
 			d.mu.Unlock()
@@ -455,7 +465,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	switch h.Intent {
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
-		sess, err := d.createSessionLocked(name, true, h.Cwd, sz)
+		sess, err := d.createSessionLocked(name, true, h.Cwd, sz, nil)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
@@ -474,7 +484,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}
 		}
-		sess, err := d.createSessionLocked(h.Name, false, h.Cwd, sz)
+		sess, err := d.createSessionLocked(h.Name, false, h.Cwd, sz, nil)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
@@ -494,7 +504,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 			cwd := platform.DirOrHome(stopped.cwd)
 			var err error
-			sess, err = d.createSessionLocked(h.Name, false, cwd, sz)
+			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err

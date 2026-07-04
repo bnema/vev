@@ -61,6 +61,7 @@ type session struct {
 // already pending"), never by blocking the reader.
 type tab struct {
 	pty        ports.PTY
+	name       string
 	mu         sync.Mutex // guards screen, syncGen, and every attached renderer's shadow
 	screen     *vt.Screen
 	scrollback *scopy.Scrollback
@@ -83,40 +84,58 @@ type tab struct {
 // what it has actually seen). sendMu serialises the two senders — the render
 // scheduler and the connection handler — so the transport's single-writer
 
-func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size) (*session, error) {
+func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, tabNames []string) (*session, error) {
 	tbSize := tabSize(sz)
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), cwd, tbSize)
-	if err != nil {
-		return nil, fmt.Errorf("daemon: spawning session %q: %w", name, err)
+	names := append([]string(nil), tabNames...)
+	tabCount := max(1, len(names))
+	tabs := make([]*tab, 0, tabCount)
+	for i := range tabCount {
+		pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), cwd, tbSize)
+		if err != nil {
+			for _, tb := range tabs {
+				_ = tb.pty.Close()
+			}
+			return nil, fmt.Errorf("daemon: spawning session %q: %w", name, err)
+		}
+		tb := newTab(pty, tbSize)
+		if i < len(names) {
+			tb.name = names[i]
+		}
+		tabs = append(tabs, tb)
 	}
 
 	id := domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
 	d.nextID++
 	createdAt := time.Now().UnixNano()
 
-	tb := newTab(pty, tbSize)
 	sctx, cancel := context.WithCancel(d.serveCtx)
-	tb.ctx, tb.cancel = context.WithCancel(sctx)
+	for _, tb := range tabs {
+		tb.ctx, tb.cancel = context.WithCancel(sctx)
+	}
 	sess := &session{
 		id:        id,
 		name:      name,
 		ephemeral: ephemeral,
 		ctx:       sctx,
 		cancel:    cancel,
-		tabs:      []*tab{tb},
+		tabs:      tabs,
 		cwd:       cwd,
 		createdAt: createdAt,
 	}
 	if !ephemeral {
-		if err := d.persist.Save(persist.Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt}); err != nil {
-			_ = pty.Close()
+		if err := d.persist.Save(persist.Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, TabNames: names}); err != nil {
+			for _, tb := range tabs {
+				_ = tb.pty.Close()
+			}
 			cancel()
 			return nil, err
 		}
 		delete(d.stopped, name)
 	}
 	d.sessions[id] = sess
-	d.startTabGoroutines(sess, tb)
+	for _, tb := range tabs {
+		d.startTabGoroutines(sess, tb)
+	}
 	return sess, nil
 }
 
@@ -143,7 +162,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	}
 	from.mu.Unlock()
 
-	newSess, err := d.createSessionLocked(name, false, cwd, sz)
+	newSess, err := d.createSessionLocked(name, false, cwd, sz, nil)
 	if err != nil {
 		d.mu.Unlock()
 		return err
@@ -193,8 +212,21 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	}
 	tb.ctx, tb.cancel = context.WithCancel(sess.ctx)
 	sess.mu.Lock()
+	oldActive := sess.active
 	sess.tabs = append(sess.tabs, tb)
 	sess.active = len(sess.tabs) - 1
+	record := sess.persistRecordLocked(time.Now().UnixNano())
+	ephemeral := sess.ephemeral
+	if !ephemeral {
+		if err := d.persist.Save(record); err != nil {
+			sess.tabs = sess.tabs[:len(sess.tabs)-1]
+			sess.active = oldActive
+			sess.mu.Unlock()
+			d.mu.Unlock()
+			_ = pty.Close()
+			return err
+		}
+	}
 	sess.mu.Unlock()
 	d.startTabGoroutines(sess, tb)
 	d.mu.Unlock()
@@ -294,7 +326,10 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		sess.createdAt = createdAt
 	}
 	if wasEphemeral || oldName != name {
-		if err := d.persist.Save(persist.Record{Name: name, Cwd: sess.cwd, CreatedAt: createdAt, UpdatedAt: time.Now().UnixNano()}); err != nil {
+		record := sess.persistRecordLocked(time.Now().UnixNano())
+		record.Name = name
+		record.CreatedAt = createdAt
+		if err := d.persist.Save(record); err != nil {
 			return err
 		}
 	}
@@ -311,6 +346,67 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	sess.name = name
 	sess.ephemeral = false
 	return nil
+}
+
+func (d *Daemon) renameTab(sess *session, tb *tab, name string) error {
+	if tb == nil {
+		return errors.New("tab required")
+	}
+	d.mu.Lock()
+	if d.sessions[sess.id] != sess {
+		d.mu.Unlock()
+		return errors.New("daemon: session closed")
+	}
+	sess.mu.Lock()
+	found := false
+	for _, candidate := range sess.tabs {
+		if candidate == tb {
+			found = true
+			break
+		}
+	}
+	if !found {
+		sess.mu.Unlock()
+		d.mu.Unlock()
+		return errors.New("tab not found")
+	}
+	oldName := tb.name
+	tb.name = name
+	record := sess.persistRecordLocked(time.Now().UnixNano())
+	ephemeral := sess.ephemeral
+	if !ephemeral {
+		if err := d.persist.Save(record); err != nil {
+			tb.name = oldName
+			sess.mu.Unlock()
+			d.mu.Unlock()
+			return err
+		}
+	}
+	sess.mu.Unlock()
+	d.mu.Unlock()
+	return nil
+}
+
+func (s *session) persistRecordLocked(updatedAt int64) persist.Record {
+	createdAt := s.createdAt
+	if createdAt == 0 {
+		createdAt = updatedAt
+		s.createdAt = createdAt
+	}
+	tabNames := make([]string, len(s.tabs))
+	lastCustom := -1
+	for i, tb := range s.tabs {
+		tabNames[i] = tb.name
+		if tb.name != "" {
+			lastCustom = i
+		}
+	}
+	if lastCustom == -1 {
+		tabNames = nil
+	} else {
+		tabNames = tabNames[:lastCustom+1]
+	}
+	return persist.Record{Name: s.name, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, TabNames: tabNames}
 }
 
 func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
@@ -339,8 +435,15 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 		sess.active--
 	}
 	ac := sess.client
+	ephemeral := sess.ephemeral
+	record := sess.persistRecordLocked(time.Now().UnixNano())
 	sess.mu.Unlock()
 
+	if !ephemeral {
+		if err := d.persist.Save(record); err != nil {
+			d.log.Warn("persisting closed tab failed", "err", err, "session", record.Name)
+		}
+	}
 	d.clearDestroyedTabPreview(tb)
 	if tb.cancel != nil {
 		tb.cancel()
@@ -375,10 +478,11 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	stoppedName := sess.name
 	stoppedCwd := sess.cwd
 	createdAt := sess.createdAt
+	tabNames := sess.persistRecordLocked(time.Now().UnixNano()).TabNames
 	ephemeral := sess.ephemeral
 	sess.mu.Unlock()
 	if !ephemeral {
-		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, purging: purge}
+		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, tabNames: tabNames, purging: purge}
 		d.stopped[stoppedName] = stopped
 	}
 	empty := len(d.sessions) == 0

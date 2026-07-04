@@ -70,13 +70,15 @@ func (p *Persister) Touch(name, cwd string, at int64) error {
 	}
 
 	createdAt := at
+	var tabNames []string
 	if v, ok := p.store.Get([]byte(name)); ok {
 		if r, err := decodeRecordValue(name, v); err == nil {
 			createdAt = r.CreatedAt
+			tabNames = r.TabNames
 		}
 	}
 
-	value, err := encodeRecordValue(Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: at})
+	value, err := encodeRecordValue(Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: at, TabNames: tabNames})
 	if err != nil {
 		return err
 	}

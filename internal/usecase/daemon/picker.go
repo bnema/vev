@@ -420,7 +420,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 		return
 	}
 	cwd := platform.DirOrHome(stopped.cwd)
-	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.size)
+	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.size, stopped.tabNames)
 	if err != nil {
 		from.mu.Unlock()
 		d.mu.Unlock()
@@ -449,7 +449,7 @@ func (d *Daemon) killPickerTarget(target picker.Target) {
 				d.log.Warn("deleting persisted stopped session failed", "err", err, "session", target.Name)
 				return
 			}
-			if cur, ok := d.stopped[target.Name]; ok && cur == stopped {
+			if cur, ok := d.stopped[target.Name]; ok && cur.same(stopped) {
 				delete(d.stopped, target.Name)
 			}
 		}

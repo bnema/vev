@@ -1,6 +1,7 @@
 package persist
 
 import (
+	"encoding/binary"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -12,13 +13,27 @@ import (
 )
 
 func TestRecordCodecRoundTrip(t *testing.T) {
-	r := Record{Name: "work", Cwd: "/tmp/project", CreatedAt: 11, UpdatedAt: 22}
+	r := Record{Name: "work", Cwd: "/tmp/project", CreatedAt: 11, UpdatedAt: 22, TabNames: []string{"shell", "logs"}}
 	value, err := encodeRecordValue(r)
 	require.NoError(t, err)
 
 	got, err := decodeRecordValue(r.Name, value)
 	require.NoError(t, err)
 	require.Equal(t, r, got)
+}
+
+func TestRecordCodecReadsLegacyRecordWithoutTabNames(t *testing.T) {
+	cwd := "/tmp/project"
+	value := make([]byte, 4+len(cwd)+8+8)
+	binary.BigEndian.PutUint32(value[:4], uint32(len(cwd)))
+	copy(value[4:], cwd)
+	off := 4 + len(cwd)
+	binary.BigEndian.PutUint64(value[off:off+8], 11)
+	binary.BigEndian.PutUint64(value[off+8:off+16], 22)
+
+	got, err := decodeRecordValue("work", value)
+	require.NoError(t, err)
+	require.Equal(t, Record{Name: "work", Cwd: cwd, CreatedAt: 11, UpdatedAt: 22}, got)
 }
 
 func TestRecordCodecRejectsMalformedData(t *testing.T) {
@@ -32,6 +47,7 @@ func TestRecordCodecRejectsMalformedData(t *testing.T) {
 		{0, 0, 0, 1, 'a', 0},
 		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255},
 	}
 	for _, value := range badValues {
 		_, err := decodeRecordValue("name", value)
@@ -67,7 +83,7 @@ func TestPersisterSaveTouchDeleteLoadAll(t *testing.T) {
 	p, err := Open(dir)
 	require.NoError(t, err)
 
-	require.NoError(t, p.Save(Record{Name: "b", Cwd: "/b", CreatedAt: 10, UpdatedAt: 10}))
+	require.NoError(t, p.Save(Record{Name: "b", Cwd: "/b", CreatedAt: 10, UpdatedAt: 10, TabNames: []string{"shell", "logs"}}))
 	require.NoError(t, p.Save(Record{Name: "a", Cwd: "/a", CreatedAt: 20, UpdatedAt: 20}))
 	require.NoError(t, p.Touch("b", "/b/next", 30))
 
@@ -75,13 +91,13 @@ func TestPersisterSaveTouchDeleteLoadAll(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []Record{
 		{Name: "a", Cwd: "/a", CreatedAt: 20, UpdatedAt: 20},
-		{Name: "b", Cwd: "/b/next", CreatedAt: 10, UpdatedAt: 30},
+		{Name: "b", Cwd: "/b/next", CreatedAt: 10, UpdatedAt: 30, TabNames: []string{"shell", "logs"}},
 	}, records)
 
 	require.NoError(t, p.Delete("a"))
 	records, err = p.LoadAll()
 	require.NoError(t, err)
-	require.Equal(t, []Record{{Name: "b", Cwd: "/b/next", CreatedAt: 10, UpdatedAt: 30}}, records)
+	require.Equal(t, []Record{{Name: "b", Cwd: "/b/next", CreatedAt: 10, UpdatedAt: 30, TabNames: []string{"shell", "logs"}}}, records)
 	require.NoError(t, p.Close())
 }
 
