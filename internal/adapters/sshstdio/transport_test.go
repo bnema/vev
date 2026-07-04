@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"testing"
@@ -125,6 +126,35 @@ func TestDialContextCanceledBeforeStart(t *testing.T) {
 	}
 }
 
+func TestProcessCloserLogsNonCleanExitStderr(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "echo remote failure >&2; exit 7")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("StdinPipe: %v", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logBuf, nil))
+	err = newProcessCloser(cmd, stdin, &stderr, time.Second, log, "user@example.com", "work")()
+	if err == nil {
+		t.Fatal("Close error = nil, want non-clean ssh exit")
+	}
+	entry := logBuf.String()
+	for _, want := range []string{"ssh exited non-cleanly", "remote failure", "user@example.com", "work"} {
+		if !strings.Contains(entry, want) {
+			t.Fatalf("log entry = %q, want substring %q", entry, want)
+		}
+	}
+	if strings.Contains(entry, "'vev' '_stdio'") || strings.Contains(entry, "-- user@example.com") {
+		t.Fatalf("log entry includes generated command line: %q", entry)
+	}
+}
+
 func TestProcessCloser(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -161,7 +191,7 @@ func TestProcessCloser(t *testing.T) {
 			}
 
 			started := time.Now()
-			err = newProcessCloser(tt.cmd, stdin, &stderr, tt.timeout)()
+			err = newProcessCloser(tt.cmd, stdin, &stderr, tt.timeout, nil, "", "")()
 			elapsed := time.Since(started)
 
 			if err == nil {

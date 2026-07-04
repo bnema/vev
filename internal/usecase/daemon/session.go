@@ -47,12 +47,14 @@ type session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu        sync.Mutex // guards tabs, active, and client
-	tabs      []*tab
-	active    int
-	client    *attachedClient
-	cwd       string
-	createdAt int64
+	mu                     sync.Mutex // guards tabs, active, client, and clipboard queue state
+	tabs                   []*tab
+	active                 int
+	client                 *attachedClient
+	clipboardQueue         []clipboardForward
+	clipboardWorkerRunning bool
+	cwd                    string
+	createdAt              int64
 }
 
 // tab is a pane layout container; pane owns PTY/screen/scrollback/render scheduling state.
@@ -83,6 +85,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	tbSize := tabSize(sz)
 	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), cwd, tbSize)
 	if err != nil {
+		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "session")
 		return nil, fmt.Errorf("daemon: spawning session %q: %w", name, err)
 	}
 
@@ -112,6 +115,8 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		delete(d.stopped, name)
 	}
 	d.sessions[id] = sess
+	d.log.Info("session created", "session", name, "id", id, "ephemeral", ephemeral)
+	d.log.Info("tab created", "session", name, "tab", 0)
 	d.startTabGoroutines(sess, tb)
 	return sess, nil
 }
@@ -159,6 +164,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	newSess.client = ac
 	newSess.mu.Unlock()
 	ac.setSession(newSess)
+	d.log.Info("client attached", "session", newSess.name, "resume", ac.resumeCapable)
 	d.mu.Unlock()
 
 	d.firstPaint(newSess, ac, sz)
@@ -174,6 +180,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	sess.mu.Unlock()
 	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), cwd, tbSize)
 	if err != nil {
+		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "tab")
 		return fmt.Errorf("daemon: spawning tab for session %q: %w", name, err)
 	}
 	tb := newTab(pty, tbSize)
@@ -201,7 +208,9 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, tb)
 	sess.active = len(sess.tabs) - 1
+	tabIndex := sess.active
 	sess.mu.Unlock()
+	d.log.Info("tab created", "session", name, "tab", tabIndex)
 	d.startTabGoroutines(sess, tb)
 	d.mu.Unlock()
 	return nil
@@ -268,6 +277,9 @@ func (d *Daemon) startTabGoroutines(sess *session, tb *tab) {
 }
 
 func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
+	if p != nil {
+		d.log.Info("pane created", "session", sess.name, "pane", p.id)
+	}
 	d.sessWg.Add(2)
 	go d.ptyReader(sess, tb, p)
 	go d.scheduler(sess, tb, p)
@@ -371,7 +383,9 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 		return
 	}
 	if len(sess.tabs) == 1 {
+		name := sess.name
 		sess.mu.Unlock()
+		d.log.Info("tab closed", "session", name, "last", true)
 		_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 		return
 	}
@@ -383,7 +397,9 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 		sess.active--
 	}
 	ac := sess.client
+	name := sess.name
 	sess.mu.Unlock()
+	d.log.Info("tab closed", "session", name)
 
 	d.clearDestroyedTabPreview(tb)
 	if tb.cancel != nil {
@@ -434,6 +450,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 		d.closing = true
 	}
 	d.mu.Unlock()
+	d.log.Info("session closed", "session", stoppedName, "id", sess.id, "ephemeral", ephemeral, "purge", purge, "reason", reason)
 
 	var purgeErr error
 	if !ephemeral && purge {

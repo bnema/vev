@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"sync"
@@ -95,7 +96,7 @@ func (t *transport) Recv() (ports.Frame, error) {
 
 func (t *transport) Close() error { return t.close() }
 
-func newProcessCloser(cmd *exec.Cmd, stdin io.Closer, stderr *bytes.Buffer, timeout time.Duration) closeFunc {
+func newProcessCloser(cmd *exec.Cmd, stdin io.Closer, stderr *bytes.Buffer, timeout time.Duration, log *slog.Logger, target, session string) closeFunc {
 	return func() error {
 		_ = stdin.Close()
 
@@ -114,6 +115,13 @@ func newProcessCloser(cmd *exec.Cmd, stdin io.Closer, stderr *bytes.Buffer, time
 		}
 
 		stderrText := strings.TrimSpace(stderr.String())
+		if log != nil {
+			attrs := []any{"target", target, "session", session, "err", err}
+			if stderrText != "" {
+				attrs = append(attrs, "stderr", stderrText)
+			}
+			log.Warn("ssh exited non-cleanly", attrs...)
+		}
 		if stderrText != "" {
 			return fmt.Errorf("sshstdio: ssh exited: %w: %s", err, stderrText)
 		}
@@ -157,10 +165,16 @@ func Dial(target, session string) (ports.Transport, error) {
 }
 
 // DialContext is like Dial, but the context is propagated to ssh startup so a
-// canceled attach attempt interrupts the local ssh process.
-func DialContext(ctx context.Context, target, session string) (ports.Transport, error) {
+// canceled attach attempt interrupts the local ssh process. Callers may pass a
+// logger to record ssh start failures and non-clean exits without logging the
+// generated command line.
+func DialContext(ctx context.Context, target, session string, logger ...*slog.Logger) (ports.Transport, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	var log *slog.Logger
+	if len(logger) > 0 {
+		log = logger[0]
 	}
 	spec := BuildCommand(target, session)
 	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
@@ -175,8 +189,11 @@ func DialContext(ctx context.Context, target, session string) (ports.Transport, 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
+		if log != nil {
+			log.Error("ssh start failed", "target", target, "session", session, "err", err)
+		}
 		return nil, fmt.Errorf("sshstdio: start ssh: %w", err)
 	}
 
-	return NewTransport(stdout, stdin, newProcessCloser(cmd, stdin, &stderr, sshCloseTimeout)), nil
+	return NewTransport(stdout, stdin, newProcessCloser(cmd, stdin, &stderr, sshCloseTimeout, log, target, session)), nil
 }
