@@ -43,6 +43,7 @@ func (d *Daemon) prepareParkAttachment(sess *session, ac *attachedClient) bool {
 	if ac.resumeToken == 0 {
 		ac.resumeToken = d.nextResumeTokenLocked()
 	}
+	d.log.Info("parking client prepared", "session", sess.name)
 	return true
 }
 
@@ -65,6 +66,7 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 	ac.parked = true
 	d.parked[token] = parked
 	d.mu.Unlock()
+	d.log.Info("client parked for resume", "session", sess.name, "grace", resumeParkGrace)
 
 	go func(token uint64, parked *parkedAttachment) {
 		select {
@@ -80,6 +82,9 @@ func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 	d.mu.Lock()
 	if d.parked[token] == parked {
 		d.removeParkedLocked(token, parked)
+		d.mu.Unlock()
+		d.log.Warn("parked client expired", "session", parked.sess.name)
+		return
 	}
 	d.mu.Unlock()
 }
@@ -126,10 +131,12 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	sess.mu.Unlock()
 	if !registered || active {
 		d.removeParkedLocked(h.ResumeToken, parked)
+		d.log.Warn("resume rejected", "session", sess.name, "registered", registered, "active", active)
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	ac := parked.ac
 	if ac.clientID != h.ClientID {
+		d.log.Warn("resume rejected", "session", sess.name, "err", "client id mismatch")
 		return nil, nil, false, &protoErr{ports.ErrNoSuchSession, "resume token is no longer valid"}
 	}
 	delete(d.parked, h.ResumeToken)
@@ -143,5 +150,6 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	sess.mu.Lock()
 	sess.client = ac
 	sess.mu.Unlock()
+	d.log.Info("client resumed", "session", sess.name)
 	return sess, ac, true, nil
 }

@@ -19,6 +19,7 @@ go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc -bench=. -benchmem   # m
 
 - Format with **goimports**, not gofmt — lint enforces it.
 - Daemon pprof is opt-in via `VEV_PPROF_ADDR=127.0.0.1:6060 vev --daemon` (see `docs/performance.md`).
+- Live logs are under `$XDG_STATE_HOME/vev` (or `~/.local/state/vev` when `XDG_STATE_HOME` is unset): `vev-daemon.log`, `vev-client.log`, `vev-stdio.log`, plus matching `*-crash.log` files.
 - Feature branches live in git worktrees under `.worktrees/<branch-name>`.
 
 ## Architecture
