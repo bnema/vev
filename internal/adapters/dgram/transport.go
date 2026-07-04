@@ -288,26 +288,27 @@ func (t *Transport) handleRecord(p []byte) {
 			return
 		}
 		if reliable {
-			t.sendAck(seq)
-			t.enqueueReliable(seq, f)
+			if t.enqueueReliable(seq, f) {
+				t.sendAck(seq)
+			}
 			return
 		}
 		t.deliver(f)
 	}
 }
 
-func (t *Transport) enqueueReliable(seq uint64, f ports.Frame) {
+func (t *Transport) enqueueReliable(seq uint64, f ports.Frame) bool {
 	t.deliverMu.Lock()
 	defer t.deliverMu.Unlock()
 	if seq < t.nextRecvSeq {
-		return
+		return true
 	}
 	if _, exists := t.recvBuf[seq]; exists {
-		return
+		return true
 	}
 	if len(t.recvBuf) >= maxRecvBuffer {
 		if seq != t.nextRecvSeq {
-			return
+			return false
 		}
 		for bufferedSeq := range t.recvBuf {
 			delete(t.recvBuf, bufferedSeq)
@@ -316,6 +317,7 @@ func (t *Transport) enqueueReliable(seq uint64, f ports.Frame) {
 	}
 	t.recvBuf[seq] = f
 	t.deliverCond.Signal()
+	return true
 }
 
 func (t *Transport) deliveryLoop() {

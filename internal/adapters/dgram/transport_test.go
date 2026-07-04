@@ -337,6 +337,35 @@ func TestReliableRecvBufferBoundedForFarFutureSequences(t *testing.T) {
 	}
 }
 
+func TestReliableFullRecvBufferDoesNotAckDroppedFarFutureFrame(t *testing.T) {
+	aPC, bPC := newPair()
+	codec, err := pdgram.NewCodec(key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := &Transport{pc: aPC, peer: testAddr("b"), codec: codec, sendDir: 1, mtu: pdgram.DefaultMTU, nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame), done: make(chan struct{})}
+	tr.deliverCond = sync.NewCond(&tr.deliverMu)
+	defer func() { _ = aPC.Close() }()
+	defer func() { _ = bPC.Close() }()
+
+	for i := 0; i < maxRecvBuffer; i++ {
+		tr.recvBuf[uint64(1000+i)] = ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}
+	}
+	tr.handleRecord(encodeData(9999, true, ports.Frame{Type: ports.MsgOutput, Payload: []byte("dropped")}))
+	select {
+	case pkt := <-bPC.in:
+		t.Fatalf("unexpected ACK packet for dropped frame: %x", pkt.b)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	tr.handleRecord(encodeData(1, true, ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")}))
+	select {
+	case <-bPC.in:
+	case <-time.After(time.Second):
+		t.Fatal("expected ACK for buffered contiguous frame")
+	}
+}
+
 func recvMaybe(tr *Transport, d time.Duration) (ports.Frame, bool) {
 	ch := make(chan ports.Frame, 1)
 	go func() { f, _ := tr.Recv(); ch <- f }()

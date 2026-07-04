@@ -208,13 +208,18 @@ func (ac *attachedClient) nextOutputFrameLocked(b []byte) ports.Frame {
 
 // send serialises a frame onto the client's transport.
 func (ac *attachedClient) send(f ports.Frame) error {
+	_, err := ac.sendTransport(f)
+	return err
+}
+
+func (ac *attachedClient) sendTransport(f ports.Frame) (ports.Transport, error) {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 	tr := ac.transport()
 	if tr == nil {
-		return errors.New("client transport is nil")
+		return nil, errors.New("client transport is nil")
 	}
-	return tr.Send(f)
+	return tr, tr.Send(f)
 }
 
 // boundedSend sends f to ac with a deadline watchdog: if the send (including
@@ -227,7 +232,15 @@ func (d *Daemon) boundedSend(ac *attachedClient, f ports.Frame) {
 }
 
 func (d *Daemon) boundedSendErr(ac *attachedClient, f ports.Frame) error {
-	return d.boundedSendWith(ac, func() error { return ac.send(f) })
+	tr, err := d.boundedSendWith(ac, func(capture func(ports.Transport)) error {
+		tr, err := ac.sendTransport(f)
+		capture(tr)
+		return err
+	})
+	if err != nil && errors.Is(err, errSendTimedOut) {
+		_ = ac.closeCapturedTransport(tr)
+	}
+	return err
 }
 
 func (d *Daemon) boundedSendOutputErr(ac *attachedClient, b []byte) error {
@@ -236,45 +249,51 @@ func (d *Daemon) boundedSendOutputErr(ac *attachedClient, b []byte) error {
 }
 
 func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (ports.Transport, error) {
-	var (
-		usedMu sync.Mutex
-		used   ports.Transport
-	)
-	err := d.boundedSendWith(ac, func() error {
+	return d.boundedSendWith(ac, func(capture func(ports.Transport)) error {
 		ac.sendMu.Lock()
 		defer ac.sendMu.Unlock()
 		tr := ac.transport()
-		usedMu.Lock()
-		used = tr
-		usedMu.Unlock()
+		capture(tr)
 		if tr == nil {
 			return errors.New("client transport is nil")
 		}
 		return tr.Send(ac.nextOutputFrameLocked(b))
 	})
-	usedMu.Lock()
-	defer usedMu.Unlock()
-	return used, err
 }
 
-func (d *Daemon) boundedSendWith(ac *attachedClient, send func() error) error {
+var errSendTimedOut = errors.New("send timed out")
+
+func (d *Daemon) boundedSendWith(ac *attachedClient, send func(capture func(ports.Transport)) error) (ports.Transport, error) {
 	timer := d.clock.NewTimer(detachNotifyTimeout)
 	result := make(chan error, 1)
+	var (
+		capturedMu sync.Mutex
+		captured   ports.Transport
+	)
+	capture := func(tr ports.Transport) {
+		capturedMu.Lock()
+		captured = tr
+		capturedMu.Unlock()
+	}
+	capturedTransport := func() ports.Transport {
+		capturedMu.Lock()
+		defer capturedMu.Unlock()
+		return captured
+	}
 	go func() {
-		result <- send()
+		result <- send(capture)
 	}()
 	select {
 	case err := <-result:
 		timer.Stop()
-		return err
+		return capturedTransport(), err
 	case <-timer.C():
 		select {
 		case err := <-result:
-			return err
+			return capturedTransport(), err
 		default:
 		}
-		_ = ac.closeTransport()
-		return errors.New("send timed out")
+		return capturedTransport(), errSendTimedOut
 	}
 }
 
