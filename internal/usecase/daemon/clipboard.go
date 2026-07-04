@@ -4,9 +4,7 @@
 package daemon
 
 import (
-	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/bnema/vev/internal/ports"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
@@ -14,9 +12,9 @@ import (
 
 // maxImagePushSize independently caps an accepted MsgImagePush payload,
 // defending against an old or foreign client even though the client is
-// expected to enforce the same cap before sending
-// (docs/superpowers/specs/2026-07-04-clipboard-image-transfer-design.md).
-const maxImagePushSize = 10 << 20 // 10 MiB
+// expected to enforce the same cap before sending. Kept at 1 MiB so one
+// ImagePush fits the datagram transport's fragmented payload ceiling.
+const maxImagePushSize = 1 << 20 // 1 MiB
 
 // Bracketed-paste markers used to wrap the injected clip path when the
 // focused pane has DEC private mode 2004 enabled. Mirrors the client's
@@ -26,6 +24,14 @@ var (
 	clipPasteOpenMarker  = []byte("\x1b[200~")
 	clipPasteCloseMarker = []byte("\x1b[201~")
 )
+
+// handleSequencedImagePush routes an ImagePush through the same input-sequence
+// surface as ordinary keystrokes. Echo prediction is still conservative; the
+// sequence is carried so resume/dedup plumbing can order image pushes with
+// surrounding input when that state reader grows beyond ordinary input.
+func (d *Daemon) handleSequencedImagePush(sess *session, _ *attachedClient, _ uint64, ip ports.ImagePush) {
+	d.handleImagePush(sess, ip)
+}
 
 // handleImagePush writes an ImagePush's bytes to a temp file and injects the
 // file's path into the session's focused pane, as if typed/pasted there.
@@ -56,9 +62,18 @@ func (d *Daemon) writeClipboardImage(sess *session, ip ports.ImagePush) (string,
 	if dir == "" {
 		dir = os.TempDir()
 	}
-	name := fmt.Sprintf("vev-clip-%d.%s", d.clock.Now().UnixNano(), clipboardExt(ip.Mime))
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, ip.Data, 0o600); err != nil {
+	f, err := os.CreateTemp(dir, "vev-clip-*."+clipboardExt(ip.Mime))
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	if _, err := f.Write(ip.Data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
 		return "", err
 	}
 	sess.mu.Lock()

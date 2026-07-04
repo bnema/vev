@@ -119,6 +119,7 @@ func TestRunRemoteClipboardCtrlVWithImageSendsImagePushNoCtrlVForwarded(t *testi
 
 	select {
 	case ip := <-gotImage:
+		require.Equal(t, uint64(2), ip.InputSeq)
 		require.Equal(t, "image/png", ip.Mime)
 		require.Equal(t, []byte("PNGDATA"), ip.Data)
 	case <-time.After(2 * time.Second):
@@ -137,7 +138,7 @@ func TestRunRemoteClipboardCtrlVWithNoImageForwardsCtrlV(t *testing.T) {
 }
 
 func TestRunRemoteClipboardOversizedImageForwardsCtrlV(t *testing.T) {
-	huge := bytes.Repeat([]byte{0xff}, 10<<20+1) // one byte over the 10 MiB cap
+	huge := bytes.Repeat([]byte{0xff}, 1<<20+1) // one byte over the image-push cap
 	clip := portsmocks.NewMockClipboardReader(t)
 	clip.EXPECT().ReadImage(mock.Anything).Return("image/png", huge, nil).Once()
 

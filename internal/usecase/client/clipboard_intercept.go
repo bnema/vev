@@ -13,9 +13,9 @@ import (
 const ctrlV = 0x16
 
 // maxClipboardImagePush caps the image the client will send in one
-// MsgImagePush, mirroring the daemon's independent cap. A 16 MiB frame limit
-// means one frame always suffices under this cap.
-const maxClipboardImagePush = 10 << 20 // 10 MiB
+// MsgImagePush, mirroring the daemon's independent cap. The 1 MiB cap fits
+// both sshstdio and the datagram transport's fragmented payload ceiling.
+const maxClipboardImagePush = 1 << 20 // 1 MiB
 
 // clipboardIntercept sits between the terminal's theme scanner and the paste
 // coalescer on a remote attach. It splits pass-through stdin bytes on Ctrl+V

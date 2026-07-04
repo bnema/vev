@@ -29,8 +29,9 @@ const listTypesTimeout = 1 * time.Second
 // wl-paste that hangs mid-read (as opposed to during the --list-types probe,
 // which listTypesTimeout already covers) would stall the client's stdin pump
 // indefinitely, since ReadImage is called with context.Background() from the
-// interceptor. Generous for a read of up to the 10 MiB cap.
-const defaultReadTimeout = 10 * time.Second
+// interceptor. Keep this short so a slow clipboard read cannot noticeably
+// freeze typing for longer than the image-transfer MVP's small payload cap.
+const defaultReadTimeout = time.Second
 
 // WlPaste implements ports.ClipboardReader by shelling out to wl-paste. It
 // holds no state and is safe for concurrent use; every call runs a fresh

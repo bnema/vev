@@ -511,7 +511,8 @@ func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out 
 			reader:    clipboard,
 			log:       log,
 			sendImage: func(mime string, data []byte) {
-				send(ports.Frame{Type: ports.MsgImagePush, Payload: ports.MarshalImagePush(ports.ImagePush{Mime: mime, Data: data})})
+				inputSeq++
+				send(ports.Frame{Type: ports.MsgImagePush, Payload: ports.MarshalImagePush(ports.ImagePush{InputSeq: inputSeq, Mime: mime, Data: data})})
 			},
 			next: coalescer.Scan,
 		}

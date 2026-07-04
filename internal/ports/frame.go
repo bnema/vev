@@ -1,7 +1,7 @@
 package ports
 
 // ProtocolVersion is the current vev IPC wire protocol version.
-const ProtocolVersion uint16 = 6
+const ProtocolVersion uint16 = 7
 
 // MsgType identifies the kind of payload carried by a Frame.
 type MsgType uint8

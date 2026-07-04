@@ -488,7 +488,7 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 			}
 		case ports.MsgImagePush:
 			if ip, derr := ports.UnmarshalImagePush(f.Payload); derr == nil {
-				d.handleImagePush(sess, ip)
+				d.handleSequencedImagePush(sess, ac, ip.InputSeq, ip)
 			}
 		case ports.MsgDetach:
 			d.clientGone(sess, ac, tr, true)
