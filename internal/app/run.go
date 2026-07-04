@@ -28,6 +28,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/logging"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
@@ -212,19 +213,30 @@ func dispatch(ctx context.Context, cmd command) error {
 	}
 }
 
+func configureLogging(component logging.Component, rotateAtRuntime bool) (*slog.Logger, io.Closer, error) {
+	return logging.Setup(logging.Config{
+		Dir:             platform.StateDir(),
+		Component:       component,
+		Level:           logging.EnvLevel(),
+		MaxBytes:        logging.DefaultMaxBytes,
+		RotateAtRuntime: rotateAtRuntime,
+	})
+}
+
 // runDaemon runs the daemon in the foreground (the hidden --daemon path,
 // entered by an auto-spawned child): it sets up logging, binds the socket,
 // constructs the daemon, and serves until the last session exits or a
 // termination signal arrives (graceful shutdown notifies attached clients).
 func runDaemon() error {
-	logFile, err := setupLogging()
+	log, logCloser, err := configureLogging(logging.Daemon, true)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = logFile.Close() }()
+	defer func() { _ = logCloser.Close() }()
 
 	ln, err := ipc.Listen(ipc.SocketDir())
 	if err != nil {
+		log.Error("daemon listen failed", "socket_dir", ipc.SocketDir(), "err", err)
 		return fmt.Errorf("vev: daemon listen: %w", err)
 	}
 	defer func() { _ = ln.Close() }()
@@ -235,25 +247,27 @@ func runDaemon() error {
 	if addr := os.Getenv("VEV_PPROF_ADDR"); addr != "" {
 		go func() {
 			if err := http.ListenAndServe(addr, nil); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				slog.Error("pprof server exited", "err", err)
+				log.Error("pprof server exited", "err", err)
 			}
 		}()
-		slog.Info("pprof enabled", "addr", addr)
+		log.Info("pprof enabled", "addr", addr)
 	}
 
-	slog.Info("daemon starting", "socket", ln.Addr())
+	log.Info("daemon starting", "socket", ln.Addr())
 	daemonOpts := []daemon.Option(nil)
-	if store, err := kv.Open(persist.StorePath(platform.StateDir())); err != nil {
-		slog.Warn("opening session store failed; persistence disabled", "err", err)
+	storePath := persist.StorePath(platform.StateDir())
+	if store, err := kv.Open(storePath); err != nil {
+		log.Warn("opening session store failed; persistence disabled", "path", storePath, "err", err)
 	} else {
+		log.Info("session persistence enabled", "path", storePath)
 		daemonOpts = append(daemonOpts, daemon.WithStore(store))
 	}
-	d := daemon.New(pty.NewFactory(), clock.New(), slog.Default(), daemonOpts...)
+	d := daemon.New(pty.NewFactory(), clock.New(), log, daemonOpts...)
 	if err := d.Serve(ctx, ln); err != nil {
-		slog.Error("daemon exited", "err", err)
+		log.Error("daemon exited", "err", err)
 		return err
 	}
-	slog.Info("daemon exited cleanly")
+	log.Info("daemon exited cleanly")
 	return nil
 }
 
@@ -261,13 +275,13 @@ func runDaemon() error {
 // attach loop. Logging goes to the shared file: the client must never write
 // to the console while the terminal is raw.
 func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) error {
-	logFile, err := setupLogging()
+	log, logCloser, err := configureLogging(logging.Client, false)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = logFile.Close() }()
+	defer func() { _ = logCloser.Close() }()
 
-	return runAttachWithDeps(ctx, intent, name, remoteTarget, os.Getenv("VEV"), runAttachDeps{
+	return runAttachWithDeps(ctx, intent, name, remoteTarget, os.Getenv("VEV"), log, runAttachDeps{
 		localDialer:    defaultLocalDialer,
 		remoteDialer:   defaultRemoteDialer,
 		runClient:      client.Run,
@@ -277,19 +291,19 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) err
 
 func defaultLocalDialer() ports.Dialer { return localDaemonDialer{dir: ipc.SocketDir()} }
 
-func defaultRemoteDialer(target, session string) ports.Dialer {
-	return dgram.NewRemoteDialer(target, session)
+func defaultRemoteDialer(target, session string, log *slog.Logger) ports.Dialer {
+	return dgram.NewRemoteDialerWithLogger(target, session, log)
 }
 
 type runAttachDeps struct {
-	attachLocal    func(context.Context, uint8, string) error // compatibility hook for focused tests
+	attachLocal    func(context.Context, uint8, string, *slog.Logger) error // compatibility hook for focused tests
 	localDialer    func() ports.Dialer
-	remoteDialer   func(target, session string) ports.Dialer
-	runClient      func(context.Context, ports.Dialer, ports.Terminal, uint8, string) error
+	remoteDialer   func(target, session string, log *slog.Logger) ports.Dialer
+	runClient      func(context.Context, ports.Dialer, ports.Terminal, uint8, string, *slog.Logger) error
 	createDetached func(context.Context, string) error
 }
 
-func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, deps runAttachDeps) error {
+func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
 	if activeSession != "" {
 		if remoteTarget == "" && intent == ports.IntentNew {
 			return deps.createDetached(ctx, name)
@@ -306,7 +320,10 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if remoteDialer == nil {
 			remoteDialer = defaultRemoteDialer
 		}
-		return runClient(ctx, remoteDialer(remoteTarget, name), term.New(), intent, name)
+		if log != nil {
+			log.Info("attaching to remote session", "target", remoteTarget, "name", name)
+		}
+		return runClient(ctx, remoteDialer(remoteTarget, name, log), term.New(), intent, name, log)
 	}
 
 	attachLocal := deps.attachLocal
@@ -315,13 +332,18 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if localDialer == nil {
 			localDialer = defaultLocalDialer
 		}
-		attachLocal = func(ctx context.Context, intent uint8, name string) error {
-			return runClient(ctx, localDialer(), term.New(), intent, name)
+		attachLocal = func(ctx context.Context, intent uint8, name string, log *slog.Logger) error {
+			if log != nil {
+				log.Info("attaching to local session", "intent", intent, "name", name)
+			}
+			return runClient(ctx, localDialer(), term.New(), intent, name, log)
 		}
 	}
 	return runLocalAttachWithRecovery(ctx, intent, name, attachRecoveryDeps{
-		confirmer:       confirm.NewConfirmer(os.Stdin, os.Stderr),
-		attach:          attachLocal,
+		confirmer: confirm.NewConfirmer(os.Stdin, os.Stderr),
+		attach: func(ctx context.Context, intent uint8, name string) error {
+			return attachLocal(ctx, intent, name, log)
+		},
 		killDaemon:      requestDaemonStop,
 		settleAfterKill: waitForDaemonStop,
 	})
@@ -489,6 +511,13 @@ func requestDaemonStop(ctx context.Context) error {
 // connects to the per-user daemon (auto-spawning it if needed) and proxies the
 // framed protocol between process stdio and the daemon socket.
 func runStdio(ctx context.Context) error {
+	log, logCloser, err := configureLogging(logging.Stdio, false)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = logCloser.Close() }()
+	log.Debug("stdio proxy starting")
+
 	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
 	if err != nil {
 		return err
@@ -496,13 +525,20 @@ func runStdio(ctx context.Context) error {
 	defer func() { _ = transport.Close() }()
 
 	stdio := sshstdio.NewTransport(os.Stdin, os.Stdout, nil)
-	return proxyTransports(ctx, stdio, transport)
+	return proxyTransports(ctx, stdio, transport, log)
 }
 
 // runUDPBootstrap is the hidden remote-side bootstrap used before switching to
 // authenticated datagrams. It deliberately prints only an ephemeral UDP port and
 // random session key to stdout so callers can fall back to _stdio if setup fails.
 func runUDPBootstrap(ctx context.Context, session string) error {
+	log, logCloser, err := configureLogging(logging.Stdio, false)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = logCloser.Close() }()
+	log.Debug("udp bootstrap starting", "session", session)
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -542,7 +578,7 @@ func runUDPBootstrap(ctx context.Context, session string) error {
 	if session != "" {
 		dgramTr = preHelloNameTransport{Transport: dg, session: session}
 	}
-	return proxyTransports(ctx, dgramTr, daemonTr)
+	return proxyTransports(ctx, dgramTr, daemonTr, log)
 }
 
 type preHelloNameTransport struct {
@@ -566,7 +602,7 @@ func (t preHelloNameTransport) Recv() (ports.Frame, error) {
 	return f, nil
 }
 
-func proxyTransports(ctx context.Context, a, b ports.Transport) error {
+func proxyTransports(ctx context.Context, a, b ports.Transport, log *slog.Logger) error {
 	errCh := make(chan error, 2)
 	copyFrames := func(dst, src ports.Transport) {
 		for {
@@ -586,10 +622,19 @@ func proxyTransports(ctx context.Context, a, b ports.Transport) error {
 
 	select {
 	case <-ctx.Done():
+		if log != nil {
+			log.Info("stdio proxy stopped by context", "err", ctx.Err())
+		}
 		return ctx.Err()
 	case err := <-errCh:
 		if errors.Is(err, io.EOF) {
+			if log != nil {
+				log.Info("stdio proxy reached clean EOF")
+			}
 			return nil
+		}
+		if log != nil {
+			log.Error("stdio proxy copy failed", "err", err)
 		}
 		return err
 	}

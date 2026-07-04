@@ -61,6 +61,7 @@ func (d *Daemon) spawnPaneOp(
 
 	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), cwd, rectSize(newRect))
 	if err != nil {
+		d.log.Warn("pty spawn failed", "err", err, "session", name, "pane", newID, "kind", "pane")
 		tb.mu.Lock()
 		_ = tb.tree.Close(newID)
 		tb.tree.Focus = oldFocus
@@ -236,6 +237,7 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	if p.pty != nil {
 		_ = p.pty.Close()
 	}
+	d.log.Info("pane closed", "session", sess.name, "pane", id)
 	if repaint {
 		if ac == nil {
 			sess.mu.Lock()

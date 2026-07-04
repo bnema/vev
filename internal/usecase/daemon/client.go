@@ -232,7 +232,7 @@ func (d *Daemon) boundedSend(ac *attachedClient, f ports.Frame) {
 }
 
 func (d *Daemon) boundedSendErr(ac *attachedClient, f ports.Frame) error {
-	tr, err := d.boundedSendWith(ac, func(capture func(ports.Transport)) error {
+	tr, err := d.boundedSendWith(func(capture func(ports.Transport)) error {
 		tr, err := ac.sendTransport(f)
 		capture(tr)
 		return err
@@ -249,7 +249,7 @@ func (d *Daemon) boundedSendOutputErr(ac *attachedClient, b []byte) error {
 }
 
 func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (ports.Transport, error) {
-	return d.boundedSendWith(ac, func(capture func(ports.Transport)) error {
+	return d.boundedSendWith(func(capture func(ports.Transport)) error {
 		ac.sendMu.Lock()
 		defer ac.sendMu.Unlock()
 		tr := ac.transport()
@@ -263,7 +263,7 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 
 var errSendTimedOut = errors.New("send timed out")
 
-func (d *Daemon) boundedSendWith(ac *attachedClient, send func(capture func(ports.Transport)) error) (ports.Transport, error) {
+func (d *Daemon) boundedSendWith(send func(capture func(ports.Transport)) error) (ports.Transport, error) {
 	timer := d.clock.NewTimer(detachNotifyTimeout)
 	result := make(chan error, 1)
 	var (
@@ -293,6 +293,7 @@ func (d *Daemon) boundedSendWith(ac *attachedClient, send func(capture func(port
 			return capturedTransport(), err
 		default:
 		}
+		d.log.Warn("bounded send timed out; force closing client transport")
 		return capturedTransport(), errSendTimedOut
 	}
 }
@@ -322,6 +323,7 @@ func (d *Daemon) notifyDetachedAsync(ac *attachedClient, reason uint8) {
 		defer close(done)
 		d.boundedSend(ac, frameDetached(reason))
 		_ = ac.closeTransport()
+		d.log.Info("client detached", "reason", reason)
 	}()
 }
 
@@ -365,8 +367,10 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	sess.mu.Lock()
 	old := sess.client
 	sess.client = ac
+	name := sess.name
 	tabs := append([]*tab(nil), sess.tabs...)
 	sess.mu.Unlock()
+	d.log.Info("client attached", "session", name, "resume", opts.resumeCapable)
 	for _, tb := range tabs {
 		tb.mu.Lock()
 		panes := tb.panesSnapshot()
@@ -417,6 +421,7 @@ func (d *Daemon) detachReplacedClient(old *attachedClient) {
 	}
 	d.unregisterPreview(old)
 	old.setSession(nil)
+	d.log.Info("client displaced")
 	// Async + bounded: a dead or wedged old client must not stall the new
 	// client's handshake.
 	d.notifyDetachedAsync(old, ports.ReasonDetach)
@@ -513,12 +518,14 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 	if !ephemeral {
 		d.refreshSessionCwd(sess)
 	}
+	d.log.Info("client detach begin", "session", sess.name, "explicit", explicit, "ephemeral", ephemeral)
 	oldTr := failed
 	if oldTr == nil {
 		oldTr = ac.transport()
 	}
 	if !explicit && d.parkAttachment(sess, ac) {
 		_ = ac.closeCapturedTransport(oldTr)
+		d.log.Info("client parked", "session", sess.name)
 		return
 	}
 	d.resetScreenDefaultColors(sess)
@@ -530,6 +537,7 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 		d.boundedSend(ac, frameDetached(ports.ReasonDetach))
 	}
 	_ = ac.closeCapturedTransport(oldTr)
+	d.log.Info("client detached", "session", sess.name, "explicit", explicit)
 	if ephemeral {
 		_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 	}

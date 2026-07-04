@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,6 +58,7 @@ var defaultBackoff = backoffConfig{
 // backoff until the socket is live or the budget expires.
 func ensureDaemon(ctx context.Context, dir string, dial dialFunc, spawn spawnFunc, cfg backoffConfig) (ports.Transport, error) {
 	if t, err := dial(dir); err == nil {
+		slog.Debug("daemon already reachable", "socket_dir", dir)
 		return t, nil
 	}
 
@@ -69,9 +71,13 @@ func ensureDaemon(ctx context.Context, dir string, dial dialFunc, spawn spawnFun
 		// dialable (or spawn fails) so late-arriving clients keep waiting
 		// rather than spawning a second daemon.
 		defer release()
+		slog.Info("spawning daemon", "socket_dir", dir)
 		if err := spawn(); err != nil {
+			slog.Error("daemon spawn failed", "err", err)
 			return nil, fmt.Errorf("vev: spawning daemon: %w", err)
 		}
+	} else {
+		slog.Debug("waiting for daemon spawned by another process", "socket_dir", dir)
 	}
 
 	return retryDial(ctx, dir, dial, cfg)
@@ -95,6 +101,8 @@ func acquireSpawnLock(dir string) (release func(), acquired bool, err error) {
 
 	// Lock exists: take it over only if it looks abandoned.
 	if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > staleLockAge {
+		age := time.Since(info.ModTime())
+		slog.Warn("taking over stale daemon spawn lock", "path", path, "age", age)
 		_ = os.Remove(path)
 		if mkErr := os.Mkdir(path, 0o700); mkErr == nil {
 			return func() { _ = os.Remove(path) }, true, nil
@@ -115,6 +123,7 @@ func retryDial(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig
 			return t, nil
 		}
 		if !time.Now().Before(deadline) {
+			slog.Error("daemon did not become reachable before retry budget expired", "socket_dir", dir, "budget", cfg.total)
 			return nil, ErrDaemonUnreachable
 		}
 		select {
@@ -153,6 +162,7 @@ func realSpawn() error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	slog.Info("daemon process started", "pid", cmd.Process.Pid)
 	// Detach: we neither wait for nor signal the daemon after launch.
 	return cmd.Process.Release()
 }

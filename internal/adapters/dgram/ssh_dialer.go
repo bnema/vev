@@ -2,6 +2,7 @@ package dgram
 
 import (
 	"context"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
@@ -35,10 +36,15 @@ type RemoteDialer struct {
 	Target       string
 	Session      string
 	ProbeTimeout time.Duration
+	Log          *slog.Logger
 }
 
 func NewRemoteDialer(target, session string) RemoteDialer {
 	return RemoteDialer{Target: target, Session: session, ProbeTimeout: defaultProbeTimeout}
+}
+
+func NewRemoteDialerWithLogger(target, session string, log *slog.Logger) RemoteDialer {
+	return RemoteDialer{Target: target, Session: session, ProbeTimeout: defaultProbeTimeout, Log: log}
 }
 
 func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
@@ -50,7 +56,7 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 		return nil, ctx.Err()
 	default:
 	}
-	return sshstdio.DialContext(ctx, d.Target, d.Session)
+	return sshstdio.DialContext(ctx, d.Target, d.Session, d.Log)
 }
 
 func sshTargetHost(target string) string {
