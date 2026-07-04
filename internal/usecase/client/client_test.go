@@ -565,7 +565,7 @@ func TestRunRestoresRawModeAfterAttachError(t *testing.T) {
 	d := portsmocks.NewMockDialer(t)
 	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 
-	err := client.Run(context.Background(), d, tm, realClock{}, ports.IntentEphemeral, "")
+	err := client.Run(context.Background(), d, tm, realClock{}, ports.IntentEphemeral, "", false, nil)
 	require.Error(t, err)
 	require.Equal(t, int32(1), restoreCount.Load(), "Run must restore raw mode after attachOnce errors")
 }
@@ -585,7 +585,7 @@ func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
 	d := portsmocks.NewMockDialer(t)
 	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 
-	err := client.Run(context.Background(), d, tm, realClock{}, ports.IntentAttach, "main")
+	err := client.Run(context.Background(), d, tm, realClock{}, ports.IntentAttach, "main", false, nil)
 	require.Error(t, err)
 	var pe *client.ProtocolError
 	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
@@ -597,7 +597,7 @@ func TestRunPhaseASingleAttempt(t *testing.T) {
 	d.EXPECT().Dial(mock.Anything).Return(nil, dialErr).Once()
 	tm := portsmocks.NewMockTerminal(t)
 
-	err := client.Run(context.Background(), d, tm, realClock{}, ports.IntentEphemeral, "")
+	err := client.Run(context.Background(), d, tm, realClock{}, ports.IntentEphemeral, "", false, nil)
 	require.ErrorIs(t, err, dialErr)
 }
 
@@ -686,7 +686,7 @@ func TestRunReconnectsWithRotatedTokenAndSameClientID(t *testing.T) {
 	tr3 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(33)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))}}}
 	d := &sequenceDialer{trs: []ports.Transport{tr1, tr2, tr3}}
 
-	err := client.Run(context.Background(), d, term, realClock{}, ports.IntentAttach, "main")
+	err := client.Run(context.Background(), d, term, realClock{}, ports.IntentAttach, "main", false, nil)
 	require.NoError(t, err)
 	require.Equal(t, int32(3), d.calls.Load())
 	require.Equal(t, int32(1), term.rawCount.Load())
@@ -713,7 +713,7 @@ func TestRunDoesNotRetryTerminalDetachedError(t *testing.T) {
 	tr := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonSessionKilled}))}}}
 	d := &sequenceDialer{trs: []ports.Transport{tr}}
 
-	err := client.Run(context.Background(), d, term, realClock{}, ports.IntentAttach, "main")
+	err := client.Run(context.Background(), d, term, realClock{}, ports.IntentAttach, "main", false, nil)
 	require.Error(t, err)
 	var de *client.DetachedError
 	require.True(t, errors.As(err, &de))

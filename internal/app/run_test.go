@@ -393,15 +393,26 @@ func (d namedDialer) Dial(context.Context) (ports.Transport, error) {
 	return nil, errors.New("not used")
 }
 
+// fakeClipboardReader is a distinguishable ports.ClipboardReader used only to
+// verify identity (that runAttachWithDeps threads the *same* reader through),
+// never actually invoked in these wiring tests.
+type fakeClipboardReader struct{ ports.ClipboardReader }
+
 func TestRunAttachWithDepsBuildsRemoteDialer(t *testing.T) {
 	var gotTarget, gotSession, gotDialer string
+	var gotRemote bool
+	var gotClipboard ports.ClipboardReader
+	clip := &fakeClipboardReader{}
 	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", runAttachDeps{
 		remoteDialer: func(target, session string) ports.Dialer {
 			gotTarget, gotSession = target, session
 			return namedDialer{name: "remote"}
 		},
-		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string) error {
+		clipboard: clip,
+		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader) error {
 			gotDialer = d.(namedDialer).name
+			gotRemote = remote
+			gotClipboard = clipboard
 			if intent != ports.IntentAttach || name != "work" {
 				t.Fatalf("intent/name = %d/%q, want attach/work", intent, name)
 			}
@@ -414,14 +425,25 @@ func TestRunAttachWithDepsBuildsRemoteDialer(t *testing.T) {
 	if gotTarget != "remote.example" || gotSession != "work" || gotDialer != "remote" {
 		t.Fatalf("remote dialer wiring = target %q session %q dialer %q", gotTarget, gotSession, gotDialer)
 	}
+	if !gotRemote {
+		t.Fatal("remote attach must pass remote=true to runClient")
+	}
+	if gotClipboard != ports.ClipboardReader(clip) {
+		t.Fatalf("remote attach must thread the configured ClipboardReader through, got %#v", gotClipboard)
+	}
 }
 
 func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 	var gotDialer string
+	gotRemote := true
+	gotClipboard := ports.ClipboardReader(&fakeClipboardReader{})
 	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "", runAttachDeps{
 		localDialer: func() ports.Dialer { return namedDialer{name: "local"} },
-		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string) error {
+		clipboard:   &fakeClipboardReader{}, // must NOT reach runClient for a local attach
+		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader) error {
 			gotDialer = d.(namedDialer).name
+			gotRemote = remote
+			gotClipboard = clipboard
 			if intent != ports.IntentEphemeral || name != "" {
 				t.Fatalf("intent/name = %d/%q, want ephemeral/empty", intent, name)
 			}
@@ -433,5 +455,11 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 	}
 	if gotDialer != "local" {
 		t.Fatalf("local dialer = %q, want local", gotDialer)
+	}
+	if gotRemote {
+		t.Fatal("local attach must pass remote=false to runClient")
+	}
+	if gotClipboard != nil {
+		t.Fatalf("local attach must not thread a ClipboardReader through, got %#v", gotClipboard)
 	}
 }

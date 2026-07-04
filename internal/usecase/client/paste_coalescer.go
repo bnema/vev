@@ -144,6 +144,20 @@ func (c *pasteCoalescer) resetBuffering() {
 	c.stopSafetyTimer()
 }
 
+// Buffering reports whether it is currently unsafe to reinterpret incoming
+// bytes as ordinary keystrokes: either a bracketed paste is being
+// accumulated, or a trailing strict prefix of the opening marker is being
+// held across a read boundary (pending, awaiting either completion into a
+// real paste or the flush timer proving it was not one). The clipboard
+// Ctrl+V interceptor uses this to avoid treating bytes that are, or might
+// turn out to be, part of an in-flight paste as a standalone keystroke —
+// pasted text may legitimately contain 0x16.
+func (c *pasteCoalescer) Buffering() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buffering || len(c.pending) > 0
+}
+
 // Close stops any pending timers and their goroutines. Held bytes are dropped:
 // Close runs only as the stdin pump unwinds on detach, when there is nowhere
 // left to deliver them.

@@ -21,6 +21,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/clipboard"
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/ipc"
@@ -272,6 +273,7 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) err
 		remoteDialer:   defaultRemoteDialer,
 		runClient:      client.Run,
 		createDetached: createDetachedLocalSession,
+		clipboard:      clipboard.New(),
 	})
 }
 
@@ -285,8 +287,13 @@ type runAttachDeps struct {
 	attachLocal    func(context.Context, uint8, string) error // compatibility hook for focused tests
 	localDialer    func() ports.Dialer
 	remoteDialer   func(target, session string) ports.Dialer
-	runClient      func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string) error
+	runClient      func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, bool, ports.ClipboardReader) error
 	createDetached func(context.Context, string) error
+	// clipboard reads a clipboard image on a remote attach's Ctrl+V (see
+	// docs/superpowers/specs/2026-07-04-clipboard-image-transfer-design.md).
+	// Only used for the remote-dialer branch below; local attaches never
+	// intercept Ctrl+V regardless of this field.
+	clipboard ports.ClipboardReader
 }
 
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, deps runAttachDeps) error {
@@ -306,7 +313,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if remoteDialer == nil {
 			remoteDialer = defaultRemoteDialer
 		}
-		return runClient(ctx, remoteDialer(remoteTarget, name), term.New(), clock.New(), intent, name)
+		return runClient(ctx, remoteDialer(remoteTarget, name), term.New(), clock.New(), intent, name, true, deps.clipboard)
 	}
 
 	attachLocal := deps.attachLocal
@@ -316,7 +323,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			localDialer = defaultLocalDialer
 		}
 		attachLocal = func(ctx context.Context, intent uint8, name string) error {
-			return runClient(ctx, localDialer(), term.New(), clock.New(), intent, name)
+			return runClient(ctx, localDialer(), term.New(), clock.New(), intent, name, false, nil)
 		}
 	}
 	return runLocalAttachWithRecovery(ctx, intent, name, attachRecoveryDeps{
