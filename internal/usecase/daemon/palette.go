@@ -217,7 +217,7 @@ func (e paletteExec) PrevTab() error {
 }
 
 func (e paletteExec) Detach() error {
-	e.d.clientGone(e.sess, e.ac, true)
+	e.d.clientGone(e.sess, e.ac, e.ac.transport(), true)
 	return nil
 }
 

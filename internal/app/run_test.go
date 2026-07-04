@@ -386,3 +386,52 @@ func TestRunAttachNestedNewCreatesDetachedSession(t *testing.T) {
 		t.Fatalf("detached name = %q, want scratch", gotName)
 	}
 }
+
+type namedDialer struct{ name string }
+
+func (d namedDialer) Dial(context.Context) (ports.Transport, error) {
+	return nil, errors.New("not used")
+}
+
+func TestRunAttachWithDepsBuildsRemoteDialer(t *testing.T) {
+	var gotTarget, gotSession, gotDialer string
+	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", runAttachDeps{
+		remoteDialer: func(target, session string) ports.Dialer {
+			gotTarget, gotSession = target, session
+			return namedDialer{name: "remote"}
+		},
+		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, intent uint8, name string) error {
+			gotDialer = d.(namedDialer).name
+			if intent != ports.IntentAttach || name != "work" {
+				t.Fatalf("intent/name = %d/%q, want attach/work", intent, name)
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("runAttachWithDeps returned error: %v", err)
+	}
+	if gotTarget != "remote.example" || gotSession != "work" || gotDialer != "remote" {
+		t.Fatalf("remote dialer wiring = target %q session %q dialer %q", gotTarget, gotSession, gotDialer)
+	}
+}
+
+func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
+	var gotDialer string
+	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "", runAttachDeps{
+		localDialer: func() ports.Dialer { return namedDialer{name: "local"} },
+		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, intent uint8, name string) error {
+			gotDialer = d.(namedDialer).name
+			if intent != ports.IntentEphemeral || name != "" {
+				t.Fatalf("intent/name = %d/%q, want ephemeral/empty", intent, name)
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("runAttachWithDeps returned error: %v", err)
+	}
+	if gotDialer != "local" {
+		t.Fatalf("local dialer = %q, want local", gotDialer)
+	}
+}

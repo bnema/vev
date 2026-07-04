@@ -1,6 +1,7 @@
 package ports
 
 import (
+	"context"
 	"io"
 	"time"
 
@@ -35,6 +36,11 @@ type Transport interface {
 	Send(Frame) error
 	Recv() (Frame, error) // blocking; io.EOF on close
 	Close() error
+}
+
+// Dialer establishes outbound Transport connections.
+type Dialer interface {
+	Dial(ctx context.Context) (Transport, error)
 }
 
 // Listener accepts incoming Transport connections.

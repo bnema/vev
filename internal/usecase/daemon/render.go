@@ -26,10 +26,12 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"strconv"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -378,10 +380,16 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	tb.mu.Unlock()
 
 	var serr error
+	var sendTr ports.Transport
 	if err == nil {
 		data = append(data, cursorTail...)
 		if len(data) > 0 {
-			serr = ac.tr.Send(frameOutput(data))
+			sendTr = ac.transport()
+			if sendTr == nil {
+				serr = errors.New("client transport is nil")
+			} else {
+				serr = sendTr.Send(ac.nextOutputFrameLocked(data))
+			}
 		}
 	}
 	ac.sendMu.Unlock()
@@ -391,7 +399,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		return
 	}
 	if serr != nil {
-		d.detachOnSendError(sess, ac)
+		d.detachOnSendError(sess, ac, sendTr)
 	}
 }
 

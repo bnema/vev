@@ -65,6 +65,7 @@ type Screen struct {
 	cursorStyleSet   bool
 	mouseMode        int
 	mouseSGR         bool
+	bracketedPaste   bool
 }
 
 func NewScreen(width, height int) *Screen {
@@ -127,6 +128,10 @@ func (s *Screen) ClearDamage()              { s.damage = s.damage[:0] }
 // SyncUpdateActive reports whether DEC private mode 2026 (synchronized update)
 // is currently enabled by the child process.
 func (s *Screen) SyncUpdateActive() bool { return s.syncUpdateActive }
+
+// BracketedPasteMode reports whether DEC private mode 2004 is currently enabled
+// by the child process.
+func (s *Screen) BracketedPasteMode() bool { return s.bracketedPaste }
 
 // ForceSyncEnd forcibly leaves DEC private mode 2026 (synchronized update).
 // Hosts use this as a safety valve if a child enters synchronized update mode
@@ -906,6 +911,7 @@ func (s *Screen) reset() {
 	s.cursorStyleSet = false
 	s.mouseMode = 0
 	s.mouseSGR = false
+	s.bracketedPaste = false
 	s.resetScrollRegion()
 	s.fullRedraw()
 }
@@ -966,7 +972,9 @@ func (s *Screen) setMode(private bool, parts []int, enabled bool) {
 			}
 		case 1006:
 			s.mouseSGR = enabled
-		case 1, 1004, 1005, 2004:
+		case 2004:
+			s.bracketedPaste = enabled
+		case 1, 1004, 1005:
 			// Trackable terminal modes that do not directly affect the current
 			// cell model yet. Consuming them prevents mode bytes from leaking.
 			continue

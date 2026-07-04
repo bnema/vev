@@ -530,3 +530,178 @@ func TestAttachForwardsResize(t *testing.T) {
 		t.Fatal("resize was not forwarded")
 	}
 }
+
+func TestRunRestoresRawModeAfterAttachError(t *testing.T) {
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
+	defer in.unblock()
+
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	boom := errors.New("connection reset")
+	unblock := scriptRecv(tr,
+		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+		recvItem{err: boom},
+	)
+	defer unblock()
+	tr.EXPECT().Close().Return(nil).Once()
+	d := portsmocks.NewMockDialer(t)
+	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
+
+	err := client.Run(context.Background(), d, tm, ports.IntentEphemeral, "")
+	require.Error(t, err)
+	require.Equal(t, int32(1), restoreCount.Load(), "Run must restore raw mode after attachOnce errors")
+}
+
+func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
+	tm := portsmocks.NewMockTerminal(t)
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	// EnterRaw must NOT be called when the daemon rejects Hello before Welcome.
+
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Recv().Return(
+		frameOf(ports.MsgError, ports.MarshalErrorMsg(ports.ErrorMsg{Code: ports.ErrVersionMismatch, Text: "version mismatch"})),
+		nil,
+	).Once()
+	tr.EXPECT().Close().Return(nil).Once()
+	d := portsmocks.NewMockDialer(t)
+	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
+
+	err := client.Run(context.Background(), d, tm, ports.IntentAttach, "main")
+	require.Error(t, err)
+	var pe *client.ProtocolError
+	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
+}
+
+func TestRunPhaseASingleAttempt(t *testing.T) {
+	dialErr := errors.New("dial failed")
+	d := portsmocks.NewMockDialer(t)
+	d.EXPECT().Dial(mock.Anything).Return(nil, dialErr).Once()
+	tm := portsmocks.NewMockTerminal(t)
+
+	err := client.Run(context.Background(), d, tm, ports.IntentEphemeral, "")
+	require.ErrorIs(t, err, dialErr)
+}
+
+type sequenceDialer struct {
+	trs   []ports.Transport
+	errs  []error
+	calls atomic.Int32
+}
+
+func (d *sequenceDialer) Dial(context.Context) (ports.Transport, error) {
+	i := int(d.calls.Add(1)) - 1
+	if i < len(d.errs) && d.errs[i] != nil {
+		return nil, d.errs[i]
+	}
+	if i >= len(d.trs) {
+		return nil, io.EOF
+	}
+	return d.trs[i], nil
+}
+
+type recordingTransport struct {
+	recvs  []recvItem
+	sends  []ports.Frame
+	closed atomic.Int32
+}
+
+func (t *recordingTransport) Send(f ports.Frame) error {
+	t.sends = append(t.sends, f)
+	return nil
+}
+
+func (t *recordingTransport) Recv() (ports.Frame, error) {
+	if len(t.recvs) == 0 {
+		return ports.Frame{}, io.EOF
+	}
+	it := t.recvs[0]
+	t.recvs = t.recvs[1:]
+	return it.f, it.err
+}
+
+func (t *recordingTransport) Close() error {
+	t.closed.Add(1)
+	return nil
+}
+
+type runTerminal struct {
+	in           *blockingReader
+	out          bytes.Buffer
+	rawCount     atomic.Int32
+	restoreCount atomic.Int32
+	resizeCh     chan domain.Size
+}
+
+func newRunTerminal() *runTerminal {
+	return &runTerminal{in: newBlockingReader(), resizeCh: make(chan domain.Size)}
+}
+
+func (t *runTerminal) EnterRaw() (func() error, error) {
+	t.rawCount.Add(1)
+	return func() error { t.restoreCount.Add(1); return nil }, nil
+}
+func (t *runTerminal) Size() (domain.Size, error)       { return domain.Size{Cols: 80, Rows: 24}, nil }
+func (t *runTerminal) ResizeEvents() <-chan domain.Size { return t.resizeCh }
+func (t *runTerminal) In() io.Reader                    { return t.in }
+func (t *runTerminal) Out() io.Writer                   { return &t.out }
+func (t *runTerminal) Flush() error                     { return nil }
+
+func helloFromSend(t *testing.T, tr *recordingTransport) ports.Hello {
+	t.Helper()
+	require.NotEmpty(t, tr.sends)
+	require.Equal(t, ports.MsgHello, tr.sends[0].Type)
+	h, err := ports.UnmarshalHello(tr.sends[0].Payload)
+	require.NoError(t, err)
+	return h
+}
+
+func welcomeFrame(token uint64) ports.Frame {
+	return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1", SessionName: "main", ResumeToken: token, Capabilities: ports.CapabilityResume}))
+}
+
+func TestRunReconnectsWithRotatedTokenAndSameClientID(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+	tr1 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {err: io.EOF}}}
+	tr2 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(22)}, {err: io.EOF}}}
+	tr3 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(33)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))}}}
+	d := &sequenceDialer{trs: []ports.Transport{tr1, tr2, tr3}}
+
+	err := client.Run(context.Background(), d, term, ports.IntentAttach, "main")
+	require.NoError(t, err)
+	require.Equal(t, int32(3), d.calls.Load())
+	require.Equal(t, int32(1), term.rawCount.Load())
+	require.Equal(t, int32(1), term.restoreCount.Load())
+
+	h1 := helloFromSend(t, tr1)
+	h2 := helloFromSend(t, tr2)
+	h3 := helloFromSend(t, tr3)
+	require.Equal(t, ports.IntentAttach, h1.Intent)
+	require.Zero(t, h1.ResumeToken)
+	require.Equal(t, ports.IntentResume, h2.Intent)
+	require.Equal(t, uint64(11), h2.ResumeToken)
+	require.Equal(t, ports.IntentResume, h3.Intent)
+	require.Equal(t, uint64(22), h3.ResumeToken)
+	require.Equal(t, h1.ClientID, h2.ClientID)
+	require.Equal(t, h1.ClientID, h3.ClientID)
+	require.Contains(t, term.out.String(), "reconnecting…")
+	require.Contains(t, term.out.String(), "\x1b[2K")
+}
+
+func TestRunDoesNotRetryTerminalDetachedError(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+	tr := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonSessionKilled}))}}}
+	d := &sequenceDialer{trs: []ports.Transport{tr}}
+
+	err := client.Run(context.Background(), d, term, ports.IntentAttach, "main")
+	require.Error(t, err)
+	var de *client.DetachedError
+	require.True(t, errors.As(err, &de))
+	require.Equal(t, int32(1), d.calls.Load())
+	require.Equal(t, int32(1), term.restoreCount.Load())
+}

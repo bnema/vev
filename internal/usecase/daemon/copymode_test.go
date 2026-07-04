@@ -23,6 +23,35 @@ import (
 
 // --- test doubles -----------------------------------------------------------
 
+func TestBoundedSendOutputErrTransportReturnsTransportUsedBySend(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	ac := &attachedClient{}
+	replacement := &closeTrackingTransport{}
+	sendErr := errors.New("send failed")
+	failed := &swapErrorTransport{ac: ac, replacement: replacement, err: sendErr}
+	ac.replaceTransport(failed)
+
+	used, err := d.boundedSendOutputErrTransport(ac, []byte("copy"))
+
+	require.ErrorIs(t, err, sendErr)
+	require.Same(t, failed, used)
+	require.Same(t, replacement, ac.transport())
+}
+
+type swapErrorTransport struct {
+	ac          *attachedClient
+	replacement ports.Transport
+	err         error
+}
+
+func (t *swapErrorTransport) Send(ports.Frame) error {
+	t.ac.replaceTransport(t.replacement)
+	return t.err
+}
+
+func (t *swapErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (t *swapErrorTransport) Close() error               { return nil }
+
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
 

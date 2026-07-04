@@ -28,20 +28,23 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-func frameWelcome(s *session) ports.Frame {
-	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(ports.Welcome{
-		SessionID:   string(s.id),
-		SessionName: s.name,
-		Ephemeral:   s.ephemeral,
-	})}
+func frameWelcome(s *session, ac *attachedClient) ports.Frame {
+	w := ports.Welcome{
+		SessionID:    string(s.id),
+		SessionName:  s.name,
+		Ephemeral:    s.ephemeral,
+		Capabilities: ports.CapabilityResume,
+		ResumeToken:  ac.resumeToken,
+	}
+	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(w)}
 }
 
 func frameError(code uint16, text string) ports.Frame {
 	return ports.Frame{Type: ports.MsgError, Payload: ports.MarshalErrorMsg(ports.ErrorMsg{Code: code, Text: text})}
 }
 
-func frameOutput(b []byte) ports.Frame {
-	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{Data: b})}
+func frameOutputState(b []byte, state uint64, echoAck uint64) ports.Frame {
+	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{NewStateNum: state, EchoAck: echoAck, Data: b})}
 }
 
 func frameDetached(reason uint8) ports.Frame {

@@ -252,8 +252,9 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	if copyOut && text != "" {
 		chunks := scopy.OSC52(text)
 		for _, chunk := range chunks {
-			if err := d.boundedSendErr(ac, frameOutput(chunk)); err != nil {
-				d.detachOnSendError(sess, ac)
+			failed, err := d.boundedSendOutputErrTransport(ac, chunk)
+			if err != nil {
+				d.detachOnSendError(sess, ac, failed)
 				return
 			}
 		}

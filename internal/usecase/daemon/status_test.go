@@ -102,7 +102,7 @@ func TestAttachClientClearsStaleScreenDefaultColors(t *testing.T) {
 	})
 	tr, _ := newCapturingTransport(t)
 
-	d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24})
+	d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 
 	var got []byte
 	tb := sess.activeTab()
@@ -127,7 +127,7 @@ func TestClientGoneResetsScreenDefaultColors(t *testing.T) {
 	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.NotEmpty(t, before)
 
-	d.clientGone(sess, ac, true)
+	d.clientGone(sess, ac, ac.transport(), true)
 
 	var got []byte
 	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
@@ -151,7 +151,7 @@ func TestClientGoneResetDoesNotClobberNewlyAttachedClient(t *testing.T) {
 	require.True(t, sess.detachIfCurrent(ac))
 
 	tr, _ := newCapturingTransport(t)
-	newAC, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24})
+	newAC, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 	d.applyTheme(sess, newAC, ports.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 20, G: 21, B: 22},
 		HasBackground: true, Background: renderer.RGB{R: 23, G: 24, B: 25},
@@ -177,7 +177,7 @@ func TestDetachOnSendErrorResetsScreenDefaultColors(t *testing.T) {
 		HasBackground: true, Background: renderer.RGB{R: 10, G: 11, B: 12},
 	})
 
-	d.detachOnSendError(sess, ac)
+	d.detachOnSendError(sess, ac, ac.transport())
 
 	tb := sess.activeTab()
 	var got []byte
@@ -191,7 +191,7 @@ func TestApplyThemeIgnoresReplacedClient(t *testing.T) {
 	d, sess, old, _ := newManualSessionWithPTYs(t, p)
 	defer release()
 	tr, _ := newCapturingTransport(t)
-	d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24})
+	d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 
 	d.applyTheme(sess, old, ports.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},

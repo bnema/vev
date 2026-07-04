@@ -62,6 +62,8 @@ const defaultScrollbackRows = 10_000
 // the in-flight send. Teardown is never gated on a client draining its socket.
 const detachNotifyTimeout = time.Second
 
+const resumeParkGrace = 60 * time.Second
+
 // defaultSize is used when a client's Hello carries no valid dimensions.
 var defaultSize = domain.Size{Cols: 80, Rows: 24}
 
@@ -82,6 +84,7 @@ type Daemon struct {
 	// Serve may be waiting, and WaitGroup forbids Add-from-zero concurrent
 	// with Wait.
 	notifies []chan struct{}
+	parked   map[uint64]*parkedAttachment
 
 	attnMu    sync.Mutex
 	animFrame int
@@ -115,6 +118,14 @@ type Daemon struct {
 
 	sessWg sync.WaitGroup // PTY reader + scheduler goroutines
 	connWg sync.WaitGroup // per-connection handler goroutines
+}
+
+type parkedAttachment struct {
+	sess     *session
+	ac       *attachedClient
+	timer    ports.Timer
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 // session is a single multiplexed session. It owns one or more full-screen
@@ -169,6 +180,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	d := &Daemon{
 		sessions: make(map[domain.SessionID]*session),
 		stopped:  make(map[string]stoppedSession),
+		parked:   make(map[uint64]*parkedAttachment),
 		ptys:     ptys,
 		clock:    clock,
 		log:      log,
@@ -270,6 +282,9 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 func (d *Daemon) shutdownAll(reason uint8) {
 	d.mu.Lock()
 	d.closing = true
+	for token, parked := range d.parked {
+		d.removeParkedLocked(token, parked)
+	}
 	snapshot := d.sessionsSnapshotLocked()
 	empty := len(snapshot) == 0
 	d.mu.Unlock()
@@ -425,8 +440,8 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 		return
 	}
 
-	if err := ac.send(frameWelcome(sess)); err != nil {
-		d.clientGone(sess, ac, false)
+	if err := ac.send(frameWelcome(sess, ac)); err != nil {
+		d.clientGone(sess, ac, tr, false)
 		return
 	}
 	d.firstPaint(sess, ac, h.Size)
@@ -460,6 +475,33 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 		return nil, nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
 	}
 	switch h.Intent {
+	case ports.IntentResume:
+		if sess, ac, ok, err := d.resumeParkedLocked(h, tr, sz); ok || err != nil {
+			d.mu.Unlock()
+			return sess, ac, err
+		}
+		// Resume miss/expiry falls back to normal attach semantics.
+		sess := d.findByNameLocked(h.Name)
+		if sess == nil {
+			stopped, ok := d.stopped[h.Name]
+			if !ok || stopped.purging {
+				d.mu.Unlock()
+				return nil, nil, &protoErr{ports.ErrNoSuchSession, "no such session: " + h.Name}
+			}
+			cwd := platform.DirOrHome(stopped.cwd)
+			var err error
+			sess, err = d.createSessionLocked(h.Name, false, cwd, sz)
+			if err != nil {
+				d.mu.Unlock()
+				return nil, nil, err
+			}
+		}
+		d.purgeParkedForSessionLocked(sess)
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
+		d.mu.Unlock()
+		d.detachReplacedClient(old)
+		return sess, ac, nil
+
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
 		sess, err := d.createSessionLocked(name, true, h.Cwd, sz)
@@ -467,7 +509,8 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, err
 		}
-		ac, old := d.attachClient(sess, tr, sz)
+		d.purgeParkedForSessionLocked(sess)
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID})
 		d.mu.Unlock()
 		d.detachReplacedClient(old)
 		return sess, ac, nil
@@ -486,7 +529,8 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, err
 		}
-		ac, old := d.attachClient(sess, tr, sz)
+		d.purgeParkedForSessionLocked(sess)
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
 		d.mu.Unlock()
 		d.detachReplacedClient(old)
 		return sess, ac, nil
@@ -507,7 +551,8 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 				return nil, nil, err
 			}
 		}
-		ac, old := d.attachClient(sess, tr, sz)
+		d.purgeParkedForSessionLocked(sess)
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
 		d.mu.Unlock()
 		d.detachReplacedClient(old)
 		return sess, ac, nil
