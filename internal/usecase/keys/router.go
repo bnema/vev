@@ -221,18 +221,27 @@ func binding(data []byte) (Action, int, bool) {
 	return 0, 0, false
 }
 
-var azertyTopRowDigitVariants = []rune{'&', 'é', '"', '\'', '(', '-', 'è', '_', 'ç'}
+var topRowDigitAliases = [][]rune{
+	{'1', '&'},
+	{'2', 'é'},
+	{'3', '"'},
+	{'4', '\''},
+	{'5', '('},
+	{'6', '-', '§'},
+	{'7', 'è'},
+	{'8', '_', '!'},
+	{'9', 'ç'},
+}
 
-// topRowDigitIndex maps the symbols emitted by physical top-row digit keys to
+// topRowDigitIndex maps symbols emitted by physical top-row digit keys to
 // zero-based digit positions. It is modifier-agnostic so Alt+digit and future
 // Ctrl+digit bindings can share the same layout support.
 func topRowDigitIndex(key rune) (int, bool) {
-	if key >= '1' && key <= '9' {
-		return int(key - '1'), true
-	}
-	for idx, variant := range azertyTopRowDigitVariants {
-		if key == variant {
-			return idx, true
+	for idx, aliases := range topRowDigitAliases {
+		for _, alias := range aliases {
+			if key == alias {
+				return idx, true
+			}
 		}
 	}
 	return 0, false

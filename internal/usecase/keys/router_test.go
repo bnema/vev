@@ -65,15 +65,28 @@ func TestRouterInterceptsAltDigits(t *testing.T) {
 	require.Empty(t, h.forwards)
 }
 
-func TestRouterInterceptsAltAZERTYTopRowAsDigits(t *testing.T) {
-	clk := &fakeClock{}
-	h := &captureHandler{}
-	r := NewRouter(clk, h)
-	for _, key := range []string{"&", "é", "\"", "'", "(", "-", "è", "_", "ç"} {
-		r.Route(append([]byte{ESC}, []byte(key)...))
+func TestRouterInterceptsAltLayoutDigitAliases(t *testing.T) {
+	cases := []struct {
+		name string
+		keys []string
+	}{
+		{name: "QWERTY", keys: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}},
+		{name: "French AZERTY", keys: []string{"&", "é", "\"", "'", "(", "-", "è", "_", "ç"}},
+		{name: "Belgian AZERTY", keys: []string{"&", "é", "\"", "'", "(", "§", "è", "!", "ç"}},
 	}
-	require.Equal(t, switchTabActions(), h.actions)
-	require.Empty(t, h.forwards)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := &fakeClock{}
+			h := &captureHandler{}
+			r := NewRouter(clk, h)
+			for _, key := range tc.keys {
+				r.Route(append([]byte{ESC}, []byte(key)...))
+			}
+			require.Equal(t, switchTabActions(), h.actions)
+			require.Empty(t, h.forwards)
+		})
+	}
 }
 
 func TestRouterInterceptsAltAZERTYUTF8SplitAcrossReads(t *testing.T) {
@@ -159,25 +172,23 @@ func assertRouterPendingCleared(t *testing.T, r *Router) {
 	require.Nil(t, r.pendingDone)
 }
 
-func TestTopRowDigitIndexAcceptsQWERTYAndAZERTYVariants(t *testing.T) {
-	cases := []struct {
-		key  rune
-		want int
-	}{
-		{key: '1', want: 0}, {key: '&', want: 0},
-		{key: '2', want: 1}, {key: 'é', want: 1},
-		{key: '3', want: 2}, {key: '"', want: 2},
-		{key: '4', want: 3}, {key: '\'', want: 3},
-		{key: '5', want: 4}, {key: '(', want: 4},
-		{key: '6', want: 5}, {key: '-', want: 5},
-		{key: '7', want: 6}, {key: 'è', want: 6},
-		{key: '8', want: 7}, {key: '_', want: 7},
-		{key: '9', want: 8}, {key: 'ç', want: 8},
-	}
-	for _, tc := range cases {
-		got, ok := topRowDigitIndex(tc.key)
-		require.True(t, ok, "key %q", tc.key)
-		require.Equal(t, tc.want, got, "key %q", tc.key)
+func TestTopRowDigitIndexAcceptsLayoutAliases(t *testing.T) {
+	for want, aliases := range [][]rune{
+		{'1', '&'},
+		{'2', 'é'},
+		{'3', '"'},
+		{'4', '\''},
+		{'5', '('},
+		{'6', '-', '§'},
+		{'7', 'è'},
+		{'8', '_', '!'},
+		{'9', 'ç'},
+	} {
+		for _, key := range aliases {
+			got, ok := topRowDigitIndex(key)
+			require.True(t, ok, "key %q", key)
+			require.Equal(t, want, got, "key %q", key)
+		}
 	}
 
 	_, ok := topRowDigitIndex('0')
