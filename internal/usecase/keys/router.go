@@ -3,6 +3,7 @@
 package keys
 
 import (
+	"bytes"
 	"slices"
 	"sync"
 	"time"
@@ -104,6 +105,21 @@ func (r *Router) route(data []byte) {
 			return
 		}
 		remaining := data[i+1:]
+		if bytes.HasPrefix(data[i:], ports.BracketedPasteOpenMarker) {
+			// A bracketed paste whose closing marker is in this same frame is
+			// forwarded verbatim: pasted content bytes (including embedded
+			// ESC+letter Alt lookalikes or ESC [ 1 ; 3 A sequences) must never
+			// fire an Action mid-paste. Without a closing marker in-frame we
+			// fall through to today's per-byte routing (the '[' passes through
+			// as a control prefix); Part A keeps pastes single-frame in
+			// practice, so no cross-frame paste state is tracked here.
+			if rel := bytes.Index(data[i:], ports.BracketedPasteCloseMarker); rel >= 0 {
+				end := i + rel + len(ports.BracketedPasteCloseMarker)
+				buf = append(buf, data[i:end]...)
+				i = end
+				continue
+			}
+		}
 		if action, size, ok, partial := altArrowCSI(remaining); ok {
 			flush()
 			r.h.Action(action)

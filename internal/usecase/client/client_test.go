@@ -25,6 +25,21 @@ func init() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
+// realClock is a stdlib-backed ports.Clock for tests that exercise the stdin
+// pump end to end; the paste coalescer's flush timer runs on wall time here.
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }
+func (realClock) NewTimer(d time.Duration) ports.Timer {
+	return &realTimer{t: time.NewTimer(d)}
+}
+
+type realTimer struct{ t *time.Timer }
+
+func (r *realTimer) C() <-chan time.Time        { return r.t.C }
+func (r *realTimer) Reset(d time.Duration) bool { return r.t.Reset(d) }
+func (r *realTimer) Stop() bool                 { return r.t.Stop() }
+
 // recvItem is one scripted Recv result.
 type recvItem struct {
 	f   ports.Frame
@@ -92,6 +107,31 @@ func (r *oneShotBlockingReader) Read(p []byte) (int, error) {
 
 func (r *oneShotBlockingReader) unblock() { close(r.done) }
 
+type chunkedBlockingReader struct {
+	chunks [][]byte
+	done   chan struct{}
+	mu     sync.Mutex
+	next   int
+}
+
+func newChunkedBlockingReader(chunks ...[]byte) *chunkedBlockingReader {
+	return &chunkedBlockingReader{chunks: chunks, done: make(chan struct{})}
+}
+
+func (r *chunkedBlockingReader) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.next < len(r.chunks) {
+		chunk := r.chunks[r.next]
+		r.next++
+		return copy(p, chunk), nil
+	}
+	<-r.done
+	return 0, io.EOF
+}
+
+func (r *chunkedBlockingReader) unblock() { close(r.done) }
+
 func newHappyTerminal(t *testing.T, out *bytes.Buffer, restoreCount *atomic.Int32, resizeCh chan domain.Size) (*portsmocks.MockTerminal, *blockingReader) {
 	tm := portsmocks.NewMockTerminal(t)
 	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
@@ -128,7 +168,7 @@ func TestAttachHappyPath(t *testing.T) {
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.NoError(t, err)
 	require.Equal(t, "hello world", out.String())
 	require.Equal(t, int32(1), restoreCount.Load(), "restore must run exactly once")
@@ -147,7 +187,7 @@ func TestAttachVersionMismatch(t *testing.T) {
 	).Once()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentAttach, "main")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentAttach, "main")
 	require.Error(t, err)
 	var pe *client.ProtocolError
 	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
@@ -171,7 +211,7 @@ func TestAttachRestoredOnRecvErrorMidStream(t *testing.T) {
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.Error(t, err)
 	require.Equal(t, int32(1), restoreCount.Load(), "restore must run after mid-stream Recv error")
 }
@@ -192,7 +232,7 @@ func TestAttachDaemonVanishedOnEOF(t *testing.T) {
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.Error(t, err)
 	require.ErrorIs(t, err, io.EOF)
 	require.Equal(t, int32(1), restoreCount.Load())
@@ -264,7 +304,7 @@ func TestAttachStdinOSCColorResponseSendsThemeAndPreservesInput(t *testing.T) {
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.NoError(t, err)
 	require.Equal(t, int32(1), restoreCount.Load())
 
@@ -342,7 +382,7 @@ func TestAttachStdinThemeTrueColorFalseWhenCOLORTERMNotTruecolor(t *testing.T) {
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.NoError(t, err)
 	select {
 	case th := <-gotTheme:
@@ -402,7 +442,7 @@ func TestAttachForwardsStandaloneEscapeInput(t *testing.T) {
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.NoError(t, err)
 	select {
 	case got := <-gotInput:
@@ -461,13 +501,73 @@ func TestAttachStdinForwardsSGRMouseReportAsSingleFrame(t *testing.T) {
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.NoError(t, err)
 	select {
 	case got := <-gotInput:
 		require.Equal(t, []byte("\x1b[<0;1;1M"), got, "SGR mouse report must arrive as one intact MsgInput frame")
 	case <-time.After(2 * time.Second):
 		t.Fatal("mouse report input was not sent")
+	}
+}
+
+func TestAttachStdinCoalescesSplitBracketedPaste(t *testing.T) {
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	paste := []byte("\x1b[200~hello\nworld\x1b[201~")
+	input := newChunkedBlockingReader([]byte("\x1b[200~hello\n"), []byte("world\x1b[201~"))
+	defer input.unblock()
+
+	tm := portsmocks.NewMockTerminal(t)
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
+	tm.EXPECT().In().Return(input).Maybe()
+	tm.EXPECT().Out().Return(&out).Maybe()
+	tm.EXPECT().Flush().Return(nil).Maybe()
+	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
+
+	gotInput := make(chan []byte, 1)
+	allowDetach := make(chan struct{})
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
+		in, err := ports.UnmarshalInput(f.Payload)
+		require.NoError(t, err)
+		gotInput <- in.Data
+		close(allowDetach)
+		return nil
+	}).Once()
+	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
+	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
+	recvCh := make(chan recvItem, 1)
+	recvCh <- recvItem{f: welcome}
+	closed := make(chan struct{})
+	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		select {
+		case it := <-recvCh:
+			return it.f, it.err
+		case <-allowDetach:
+			select {
+			case <-closed:
+				return ports.Frame{}, io.EOF
+			default:
+				close(closed)
+				return detached, nil
+			}
+		case <-closed:
+			return ports.Frame{}, io.EOF
+		}
+	}).Maybe()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
+	require.NoError(t, err)
+	select {
+	case got := <-gotInput:
+		require.Equal(t, paste, got, "split bracketed paste must arrive as one intact MsgInput frame")
+	case <-time.After(2 * time.Second):
+		t.Fatal("split bracketed paste input was not sent")
 	}
 }
 
@@ -521,7 +621,7 @@ func TestAttachForwardsResize(t *testing.T) {
 		resizeCh <- domain.Size{Cols: 120, Rows: 40}
 	}()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.NoError(t, err)
 	select {
 	case r := <-gotResize:
@@ -550,7 +650,7 @@ func TestRunRestoresRawModeAfterAttachError(t *testing.T) {
 	d := portsmocks.NewMockDialer(t)
 	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 
-	err := client.Run(context.Background(), d, tm, ports.IntentEphemeral, "", slog.New(slog.DiscardHandler))
+	err := client.Run(context.Background(), d, tm, realClock{}, ports.IntentEphemeral, "", slog.New(slog.DiscardHandler))
 	require.Error(t, err)
 	require.Equal(t, int32(1), restoreCount.Load(), "Run must restore raw mode after attachOnce errors")
 }
@@ -570,7 +670,7 @@ func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
 	d := portsmocks.NewMockDialer(t)
 	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 
-	err := client.Run(context.Background(), d, tm, ports.IntentAttach, "main", slog.New(slog.DiscardHandler))
+	err := client.Run(context.Background(), d, tm, realClock{}, ports.IntentAttach, "main", slog.New(slog.DiscardHandler))
 	require.Error(t, err)
 	var pe *client.ProtocolError
 	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
@@ -582,7 +682,7 @@ func TestRunPhaseASingleAttempt(t *testing.T) {
 	d.EXPECT().Dial(mock.Anything).Return(nil, dialErr).Once()
 	tm := portsmocks.NewMockTerminal(t)
 
-	err := client.Run(context.Background(), d, tm, ports.IntentEphemeral, "", slog.New(slog.DiscardHandler))
+	err := client.Run(context.Background(), d, tm, realClock{}, ports.IntentEphemeral, "", slog.New(slog.DiscardHandler))
 	require.ErrorIs(t, err, dialErr)
 }
 
@@ -671,7 +771,7 @@ func TestRunReconnectsWithRotatedTokenAndSameClientID(t *testing.T) {
 	tr3 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(33)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))}}}
 	d := &sequenceDialer{trs: []ports.Transport{tr1, tr2, tr3}}
 
-	err := client.Run(context.Background(), d, term, ports.IntentAttach, "main", slog.New(slog.DiscardHandler))
+	err := client.Run(context.Background(), d, term, realClock{}, ports.IntentAttach, "main", slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	require.Equal(t, int32(3), d.calls.Load())
 	require.Equal(t, int32(1), term.rawCount.Load())
@@ -698,7 +798,7 @@ func TestRunDoesNotRetryTerminalDetachedError(t *testing.T) {
 	tr := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonSessionKilled}))}}}
 	d := &sequenceDialer{trs: []ports.Transport{tr}}
 
-	err := client.Run(context.Background(), d, term, ports.IntentAttach, "main", slog.New(slog.DiscardHandler))
+	err := client.Run(context.Background(), d, term, realClock{}, ports.IntentAttach, "main", slog.New(slog.DiscardHandler))
 	require.Error(t, err)
 	var de *client.DetachedError
 	require.True(t, errors.As(err, &de))

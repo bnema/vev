@@ -401,7 +401,7 @@ func TestRunAttachWithDepsBuildsRemoteDialer(t *testing.T) {
 			gotTarget, gotSession = target, session
 			return namedDialer{name: "remote"}
 		},
-		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, intent uint8, name string, _ *slog.Logger) error {
+		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, _ *slog.Logger) error {
 			gotDialer = d.(namedDialer).name
 			if intent != ports.IntentAttach || name != "work" {
 				t.Fatalf("intent/name = %d/%q, want attach/work", intent, name)
@@ -421,7 +421,7 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 	var gotDialer string
 	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "", nil, runAttachDeps{
 		localDialer: func() ports.Dialer { return namedDialer{name: "local"} },
-		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, intent uint8, name string, _ *slog.Logger) error {
+		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, _ *slog.Logger) error {
 			gotDialer = d.(namedDialer).name
 			if intent != ports.IntentEphemeral || name != "" {
 				t.Fatalf("intent/name = %d/%q, want ephemeral/empty", intent, name)

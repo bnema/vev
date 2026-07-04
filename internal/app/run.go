@@ -299,7 +299,7 @@ type runAttachDeps struct {
 	attachLocal    func(context.Context, uint8, string, *slog.Logger) error // compatibility hook for focused tests
 	localDialer    func() ports.Dialer
 	remoteDialer   func(target, session string, log *slog.Logger) ports.Dialer
-	runClient      func(context.Context, ports.Dialer, ports.Terminal, uint8, string, *slog.Logger) error
+	runClient      func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, *slog.Logger) error
 	createDetached func(context.Context, string) error
 }
 
@@ -323,7 +323,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if log != nil {
 			log.Info("attaching to remote session", "target", remoteTarget, "name", name)
 		}
-		return runClient(ctx, remoteDialer(remoteTarget, name, log), term.New(), intent, name, log)
+		return runClient(ctx, remoteDialer(remoteTarget, name, log), term.New(), clock.New(), intent, name, log)
 	}
 
 	attachLocal := deps.attachLocal
@@ -336,7 +336,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			if log != nil {
 				log.Info("attaching to local session", "intent", intent, "name", name)
 			}
-			return runClient(ctx, localDialer(), term.New(), intent, name, log)
+			return runClient(ctx, localDialer(), term.New(), clock.New(), intent, name, log)
 		}
 	}
 	return runLocalAttachWithRecovery(ctx, intent, name, attachRecoveryDeps{
