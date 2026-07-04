@@ -13,7 +13,7 @@ var paletteModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title:
 func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	d.closePalette(ac)
 	ac.paletteMu.Lock()
-	ac.palette = palette.NewRegistry()
+	ac.palette = palette.New(d.paletteCommands())
 	ac.palettePending = nil
 	ac.paletteMu.Unlock()
 	d.paint(sess, ac, true)
@@ -24,6 +24,48 @@ func (d *Daemon) closePalette(ac *attachedClient) {
 	ac.palette = nil
 	ac.palettePending = nil
 	ac.paletteMu.Unlock()
+}
+
+func (d *Daemon) paletteCommands() []command.Command {
+	commands := command.Registry()
+	d.paletteRecentMu.Lock()
+	recent := append([]string(nil), d.paletteRecent...)
+	d.paletteRecentMu.Unlock()
+
+	byCode := make(map[string]command.Command, len(commands))
+	for _, cmd := range commands {
+		byCode[cmd.Code] = cmd
+	}
+	out := make([]command.Command, 0, len(commands))
+	used := make(map[string]bool, len(recent))
+	for _, code := range recent {
+		cmd, ok := byCode[code]
+		if !ok || used[code] {
+			continue
+		}
+		out = append(out, cmd)
+		used[code] = true
+	}
+	for _, cmd := range commands {
+		if !used[cmd.Code] {
+			out = append(out, cmd)
+		}
+	}
+	return out
+}
+
+func (d *Daemon) recordPaletteUse(code string) {
+	d.paletteRecentMu.Lock()
+	defer d.paletteRecentMu.Unlock()
+
+	recent := make([]string, 0, len(d.paletteRecent)+1)
+	recent = append(recent, code)
+	for _, existing := range d.paletteRecent {
+		if existing != code {
+			recent = append(recent, existing)
+		}
+	}
+	d.paletteRecent = recent
 }
 
 func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
@@ -82,6 +124,8 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 			name := sess.name
 			sess.mu.Unlock()
 			d.log.Error("palette command failed", "err", err, "session", name, "command", cmd.Code)
+		} else {
+			d.recordPaletteUse(cmd.Code)
 		}
 		return
 	}

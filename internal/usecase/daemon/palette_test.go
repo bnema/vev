@@ -81,6 +81,66 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	require.NotContains(t, string(finalOutput.Data), "Create session")
 }
 
+func TestPaletteReopensWithSuccessfulCommandFirst(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 2)
+	defer releases[0]()
+	defer releases[1]()
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("NXT\r"))
+	require.False(t, ac.paletteActive())
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	cmd, ok := ac.palette.Selected()
+	require.True(t, ok)
+	require.Equal(t, "NXT", cmd.Code)
+}
+
+func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
+	d := &Daemon{}
+	d.recordPaletteUse("SSP")
+	d.recordPaletteUse("NXT")
+	// STALE is not a registered command code; it must be dropped from output.
+	d.recordPaletteUse("STALE")
+	d.recordPaletteUse("SSP")
+
+	commands := d.paletteCommands()
+	codes := make([]string, len(commands))
+	for i, cmd := range commands {
+		codes[i] = cmd.Code
+	}
+	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "PVT", "VIS", "RNS", "DET"}, codes)
+}
+
+func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
+	d := &Daemon{}
+	codes := []string{"CNT", "CNS", "CLT", "NXT", "PVT", "SSP", "VIS", "RNS", "DET"}
+
+	var wg sync.WaitGroup
+	for range 50 {
+		for _, code := range codes {
+			wg.Add(1)
+			go func(code string) {
+				defer wg.Done()
+				d.recordPaletteUse(code)
+				_ = d.paletteCommands()
+			}(code)
+		}
+	}
+	wg.Wait()
+
+	commands := d.paletteCommands()
+	require.Len(t, commands, len(codes))
+	seen := map[string]bool{}
+	for _, cmd := range commands {
+		require.False(t, seen[cmd.Code], "duplicate command %s", cmd.Code)
+		seen[cmd.Code] = true
+	}
+}
+
 func TestPaletteCommandNoopRepaintsAfterClose(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 1)
 	defer releases[0]()

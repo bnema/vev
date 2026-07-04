@@ -88,6 +88,9 @@ type Daemon struct {
 	animFrame int
 	animWake  chan struct{}
 
+	paletteRecentMu sync.Mutex
+	paletteRecent   []string
+
 	ptys           ports.PTYFactory
 	clock          ports.Clock
 	log            *slog.Logger
