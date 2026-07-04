@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -837,4 +838,58 @@ func TestCursorTailVisibleHideAndMoveOnly(t *testing.T) {
 	d.paint(sess, ac, false)
 	data = mustOutputData(t, sends)
 	require.Contains(t, string(data), "\x1b[?25l")
+}
+
+func TestCursorTailUsesFocusedPanePlacement(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+	win := sess.tabs[0]
+	win.size = domain.Size{Cols: 80, Rows: 23}
+	left := win.focusedPane()
+	right := newPane("pane-2", nil, domain.Size{Cols: 39, Rows: 23})
+	win.panes[right.id] = right
+	win.tree = layout.NewTree(left.id)
+	require.NoError(t, win.tree.Split(left.id, layout.Right, true, right.id, domain.Rect{Width: 80, Height: 23}))
+	win.tree.Focus = right.id
+	right.screen.Write([]byte("\x1b[2;3H"))
+	placements, ok := layout.Solve(win.tree.Root, domain.Rect{Width: 80, Height: 23})
+	require.True(t, ok)
+	rightContent := placementContent(placements, right.id)
+
+	d.paint(sess, ac, true)
+	data := mustOutputData(t, sends)
+	want := cursorCSI(rightContent.Y+right.screen.CursorRow()+2, rightContent.X+right.screen.CursorCol()+1)
+	require.Contains(t, string(data), want)
+}
+
+func TestCursorTailUsesExpandedStackContentPlacement(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+	win := sess.tabs[0]
+	win.size = domain.Size{Cols: 80, Rows: 23}
+	one := win.focusedPane()
+	two := newPane("pane-2", nil, domain.Size{Cols: 80, Rows: 20})
+	three := newPane("pane-3", nil, domain.Size{Cols: 80, Rows: 20})
+	win.panes[two.id] = two
+	win.panes[three.id] = three
+	win.tree = &layout.Tree{
+		Root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{
+			layout.NewLeaf(one.id),
+			layout.NewLeaf(two.id),
+			layout.NewLeaf(three.id),
+		}, Expanded: two.id},
+		Focus: two.id,
+	}
+	two.screen.Write([]byte("\x1b[2;3H"))
+	placements, ok := layout.Solve(win.tree.Root, domain.Rect{Width: 80, Height: 23})
+	require.True(t, ok)
+	twoContent := placementContent(placements, two.id)
+	require.Greater(t, twoContent.Y, 0, "stack title bars should offset content")
+
+	d.paint(sess, ac, true)
+	data := mustOutputData(t, sends)
+	want := cursorCSI(twoContent.Y+two.screen.CursorRow()+2, twoContent.X+two.screen.CursorCol()+1)
+	require.Contains(t, string(data), want)
+}
+
+func cursorCSI(row, col int) string {
+	return "\x1b[" + strconv.Itoa(row) + ";" + strconv.Itoa(col) + "H"
 }

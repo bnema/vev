@@ -355,8 +355,9 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		frame, damage = composePromptClientFrame(promptModel, frame, styles)
 		ac.promptMu.Unlock()
 	}
+	cursorContent, cursorVisible := focusedPaneContentRect(layoutSnap, p.id)
 	p.mu.Lock()
-	desiredCursor := desiredCursorOut(p.screen, copyActive || pickerActive || paletteActive || promptActive)
+	desiredCursor := desiredCursorOut(p.screen, cursorContent, !cursorVisible || copyActive || pickerActive || paletteActive || promptActive)
 	p.mu.Unlock()
 	data, err := ac.rend.Draw(frame, damage)
 	var cursorTail []byte
@@ -388,17 +389,29 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	}
 }
 
+func focusedPaneContentRect(layoutSnap tabLayoutSnapshot, id layout.PaneID) (domain.Rect, bool) {
+	if !layoutSnap.ok {
+		return layoutSnap.area, layoutSnap.area.Width > 0 && layoutSnap.area.Height > 0
+	}
+	for _, pl := range layoutSnap.placements {
+		if pl.ID == id && !pl.Collapsed && pl.Content.Width > 0 && pl.Content.Height > 0 {
+			return pl.Content, true
+		}
+	}
+	return domain.Rect{}, false
+}
+
 // desiredCursorOut computes the terminal cursor state that should be shown to
-// the client for the current tab and overlay mode.
-func desiredCursorOut(s *vt.Screen, copyActive bool) cursorOut {
-	if copyActive || !s.CursorVisible() {
+// the client for the current pane placement and overlay mode.
+func desiredCursorOut(s *vt.Screen, content domain.Rect, hide bool) cursorOut {
+	if hide || !s.CursorVisible() {
 		return cursorOut{hidden: true}
 	}
 	style, ok := s.CursorStyle()
 	if !ok {
 		style = 5
 	}
-	return cursorOut{row: s.CursorRow() + 1, col: s.CursorCol(), style: style, hasStyle: true}
+	return cursorOut{row: content.Y + s.CursorRow() + 1, col: content.X + s.CursorCol(), style: style, hasStyle: true}
 }
 
 func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte {
@@ -537,7 +550,7 @@ func composeTabFrameWithLayout(tb *tab, area domain.Rect, theme themeui.Theme, l
 		}
 		placements = []layout.Placement{{ID: fallback.id, Content: area}}
 	}
-	drawDividers(frame, root, area, newThemeStyles(theme).border)
+	drawDividers(frame, root, area, themeui.DimStyle(newThemeStyles(theme).border, theme))
 	var damage []renderer.Damage
 	for _, pl := range placements {
 		p := tb.panes[pl.ID]
