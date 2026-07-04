@@ -409,7 +409,7 @@ func desiredCursorOut(s *vt.Screen, content domain.Rect, hide bool) cursorOut {
 	}
 	style, ok := s.CursorStyle()
 	if !ok {
-		style = 5
+		style = 1
 	}
 	return cursorOut{row: content.Y + s.CursorRow() + 1, col: content.X + s.CursorCol(), style: style, hasStyle: true}
 }

@@ -825,7 +825,7 @@ func TestCursorTailVisibleHideAndMoveOnly(t *testing.T) {
 
 	d.paint(sess, ac, true)
 	data := mustOutputData(t, sends)
-	require.Contains(t, string(data), "\x1b[5 q")
+	require.Contains(t, string(data), "\x1b[1 q")
 	require.Contains(t, string(data), "\x1b[?25h")
 
 	win.focusedPane().screen.Write([]byte("\x1b[2;3H"))
