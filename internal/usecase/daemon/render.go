@@ -247,6 +247,19 @@ func (d *Daemon) render(sess *session, tb *tab, p *pane) {
 // paint draws the composed client frame (active tab plus status bar) and
 // sends the resulting bytes. The renderer shadow is reset on explicit invalidations
 // such as switch/create/close/rename/resize so the repaint is complete.
+func titleBarPaneIDs(placements []layout.Placement, ok bool) []layout.PaneID {
+	if !ok {
+		return nil
+	}
+	ids := make([]layout.PaneID, 0, len(placements))
+	for _, pl := range placements {
+		if pl.TitleBar.Height > 0 {
+			ids = append(ids, pl.ID)
+		}
+	}
+	return ids
+}
+
 func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	tb := sess.activeTab()
 	if tb == nil {
@@ -271,7 +284,10 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	pickerModel := ac.picker.Clone()
 	previewTab := ac.pickerPreview
 	ac.pickerMu.Unlock()
-	preview := snapshotPickerPreview(previewTab)
+	preview := snapshotPickerPreview(nil)
+	if previewTab != tb {
+		preview = snapshotPickerPreview(previewTab)
+	}
 	ac.paletteMu.Lock()
 	paletteModel := ac.palette
 	paletteActive := paletteModel != nil
@@ -292,20 +308,17 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 
 	styles := newThemeStyles(ac.getTheme())
 	tb.mu.Lock()
-	var titleIDs []layout.PaneID
-	if placements, ok := solvedPlacementsLocked(tb); ok {
-		for _, pl := range placements {
-			if pl.TitleBar.Height > 0 {
-				titleIDs = append(titleIDs, pl.ID)
-			}
-		}
-	}
+	layoutSnap := solveTabLayoutLocked(tb)
+	titleIDs := titleBarPaneIDs(layoutSnap.placements, layoutSnap.ok)
 	tb.mu.Unlock()
 	for _, id := range titleIDs {
 		d.refreshPaneTitle(sess, id)
 	}
 
 	tb.mu.Lock()
+	if !layoutSnap.matchesLocked(tb) {
+		layoutSnap = solveTabLayoutLocked(tb)
+	}
 	p := tb.focusedPane()
 	if p == nil {
 		tb.mu.Unlock()
@@ -319,15 +332,18 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	if reset || pickerActive || paletteActive || promptActive {
 		ac.lastCursor.valid = false
 	}
-	frame, damage := composeClientFrameWithState(bars, tb, reset, &ac.bars)
+	frame, damage := composeClientFrameWithLayout(bars, tb, reset, layoutSnap, &ac.bars)
 	if copyActive {
 		frame, damage = composeCopyClientFrame(copyMode, tb, bars)
 	}
 	if pickerActive {
 		if previewTab == tb {
-			p.mu.Lock()
-			preview = pickerPreviewFromLockedPane(p)
-			p.mu.Unlock()
+			if layoutSnap.ok && tb.tree != nil && tb.tree.Root != nil && tb.tree.Root.Kind != layout.Leaf {
+				previewFrame, _ := composeTabFrameWithLayout(tb, layoutSnap.area, themeui.Theme{}, layoutSnap)
+				preview = pickerPreviewFromFrame(previewFrame)
+			} else {
+				preview = pickerPreviewFromLockedTab(tb)
+			}
 		}
 		frame, damage = composePickerClientFrame(pickerModel, preview, frame, styles)
 	}
@@ -451,6 +467,10 @@ func composeClientFrame(sess *session, tb *tab, full bool, rightStatus string, c
 }
 
 func composeClientFrameWithState(bars barState, tb *tab, full bool, caches ...*barCache) (renderer.Frame, []renderer.Damage) {
+	return composeClientFrameWithLayout(bars, tb, full, solveTabLayoutLocked(tb), caches...)
+}
+
+func composeClientFrameWithLayout(bars barState, tb *tab, full bool, layoutSnap tabLayoutSnapshot, caches ...*barCache) (renderer.Frame, []renderer.Damage) {
 	var cache *barCache
 	if len(caches) > 0 {
 		cache = caches[0]
@@ -473,7 +493,7 @@ func composeClientFrameWithState(bars barState, tb *tab, full bool, caches ...*b
 	frame := renderer.NewFrame(width, screenRows+2)
 	topBar := frame.Row(0)
 	drawTopBarSnapshot(topBar, bars.status, bars.attentionFrame, styles)
-	contentFrame, contentDamage := composeTabFrame(tb, domain.Rect{Width: width, Height: screenRows}, bars.theme)
+	contentFrame, contentDamage := composeTabFrameWithLayout(tb, domain.Rect{Width: width, Height: screenRows}, bars.theme, layoutSnap)
 	for y := range screenRows {
 		copy(frame.Row(y+1), contentFrame.Row(y))
 	}
@@ -499,9 +519,16 @@ func composeClientFrameWithState(bars barState, tb *tab, full bool, caches ...*b
 }
 
 func composeTabFrame(tb *tab, area domain.Rect, theme themeui.Theme) (renderer.Frame, []renderer.Damage) {
+	return composeTabFrameWithLayout(tb, area, theme, tabLayoutSnapshot{})
+}
+
+func composeTabFrameWithLayout(tb *tab, area domain.Rect, theme themeui.Theme, layoutSnap tabLayoutSnapshot) (renderer.Frame, []renderer.Damage) {
 	frame := renderer.NewFrame(area.Width, area.Height)
 	root := tb.tree.Root
-	placements, ok := layout.Solve(root, area)
+	placements, ok := layoutSnap.placements, layoutSnap.ok && layoutSnap.root == root && layoutSnap.area == area
+	if !ok {
+		placements, ok = layout.Solve(root, area)
+	}
 	var fallback *pane
 	if !ok {
 		fallback = tb.focusedPane()

@@ -11,6 +11,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -176,6 +177,51 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, ports.ReasonDetach, dm.Reason)
 	awaitFrame(t, sends1, ports.MsgOutput)
+}
+
+func TestPickerPreviewSinglePaneSnapshotsFocusedPane(t *testing.T) {
+	tb := newTab(nil, domain.Size{Cols: 10, Rows: 3})
+	p := tb.focusedPane()
+	p.screen.Write([]byte("focused"))
+
+	preview := snapshotPickerPreview(tb)
+
+	require.Equal(t, 10, preview.Width)
+	require.Equal(t, 3, preview.Height)
+	require.Equal(t, 'f', preview.Rows[0][0].Rune)
+	require.Equal(t, 'o', preview.Rows[0][1].Rune)
+}
+
+func TestPickerPreviewMultiPaneComposesTabFrame(t *testing.T) {
+	tb := newTab(nil, domain.Size{Cols: 41, Rows: 5})
+	left := tb.focusedPane()
+	left.title = "one"
+	left.screen.Write([]byte("L"))
+	rightTop := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 3})
+	rightTop.title = "two"
+	rightBottom := newPane("pane-3", nil, domain.Size{Cols: 20, Rows: 2})
+	rightBottom.title = "three"
+	rightBottom.screen.Write([]byte("R"))
+
+	tb.mu.Lock()
+	tb.panes[rightTop.id] = rightTop
+	tb.panes[rightBottom.id] = rightBottom
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
+		layout.NewLeaf(left.id),
+		{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(rightTop.id), layout.NewLeaf(rightBottom.id)}, Expanded: rightBottom.id},
+	}}
+	tb.tree.Focus = rightBottom.id
+	tb.mu.Unlock()
+
+	preview := snapshotPickerPreview(tb)
+
+	require.Equal(t, 41, preview.Width)
+	require.Equal(t, 5, preview.Height)
+	require.Equal(t, 'L', preview.Rows[0][0].Rune, "left pane content should remain visible")
+	require.Equal(t, '│', preview.Rows[0][20].Rune, "split divider should be included")
+	require.Equal(t, "two", rowText(preview.Rows[0][21:24]), "collapsed stack title bar should be included")
+	require.Equal(t, "three", rowText(preview.Rows[1][21:26]), "expanded stack title bar should be included")
+	require.Equal(t, 'R', preview.Rows[2][21].Rune, "expanded stacked pane content should be included")
 }
 
 func TestPickerLivePreviewRepaintsInactiveTab(t *testing.T) {

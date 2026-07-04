@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"strings"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
@@ -38,11 +40,55 @@ func hitTestPlacementLocked(tb *tab, col, row int) (layout.Placement, bool) {
 	return layout.Placement{}, false
 }
 
+type tabLayoutSnapshot struct {
+	root        *layout.Node
+	fingerprint string
+	area        domain.Rect
+	focus       layout.PaneID
+	placements  []layout.Placement
+	ok          bool
+}
+
 func solvedPlacementsLocked(tb *tab) ([]layout.Placement, bool) {
+	snap := solveTabLayoutLocked(tb)
+	return snap.placements, snap.ok
+}
+
+func solveTabLayoutLocked(tb *tab) tabLayoutSnapshot {
 	if tb == nil || tb.tree == nil || tb.tree.Root == nil || !tb.size.Valid() {
-		return nil, false
+		return tabLayoutSnapshot{}
 	}
-	return layout.Solve(tb.tree.Root, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
+	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
+	placements, ok := layout.Solve(tb.tree.Root, area)
+	return tabLayoutSnapshot{root: tb.tree.Root, fingerprint: layoutFingerprint(tb.tree.Root), area: area, focus: tb.tree.Focus, placements: placements, ok: ok}
+}
+
+func (snap tabLayoutSnapshot) matchesLocked(tb *tab) bool {
+	return snap.ok && tb != nil && tb.tree != nil && tb.tree.Root == snap.root && tb.tree.Focus == snap.focus && tb.size.Cols == snap.area.Width && tb.size.Rows == snap.area.Height && snap.fingerprint == layoutFingerprint(tb.tree.Root)
+}
+
+func layoutFingerprint(root *layout.Node) string {
+	var b strings.Builder
+	writeLayoutFingerprint(&b, root)
+	return b.String()
+}
+
+func writeLayoutFingerprint(b *strings.Builder, n *layout.Node) {
+	if n == nil {
+		b.WriteByte('0')
+		return
+	}
+	b.WriteByte(byte('0' + n.Kind))
+	b.WriteByte(byte('0' + n.Dir))
+	b.WriteString(string(n.Leaf))
+	b.WriteByte('|')
+	b.WriteString(string(n.Expanded))
+	b.WriteByte('[')
+	for _, child := range n.Children {
+		writeLayoutFingerprint(b, child)
+		b.WriteByte(',')
+	}
+	b.WriteByte(']')
 }
 
 func pointInRect(col, row int, r domain.Rect) bool {

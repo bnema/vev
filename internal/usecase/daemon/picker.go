@@ -32,7 +32,9 @@ import (
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -503,15 +505,30 @@ func pickerPreviewFromLockedTab(tb *tab) picker.Preview {
 	if p == nil {
 		return picker.Preview{}
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return pickerPreviewFromLockedPane(p)
+	if tb.tree == nil || tb.tree.Root == nil || tb.tree.Root.Kind == layout.Leaf {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return pickerPreviewFromLockedPane(p)
+	}
+
+	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
+	if area.Width <= 0 || area.Height <= 0 {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return pickerPreviewFromLockedPane(p)
+	}
+	frame, _ := composeTabFrame(tb, area, themeui.Theme{})
+	return pickerPreviewFromFrame(frame)
 }
 
 func pickerPreviewFromLockedPane(p *pane) picker.Preview {
-	rows := make([][]renderer.Cell, p.screen.Frame.Height)
+	return pickerPreviewFromFrame(p.screen.Frame)
+}
+
+func pickerPreviewFromFrame(frame renderer.Frame) picker.Preview {
+	rows := make([][]renderer.Cell, frame.Height)
 	for y := range rows {
-		rows[y] = append([]renderer.Cell(nil), p.screen.Frame.Row(y)...)
+		rows[y] = append([]renderer.Cell(nil), frame.Row(y)...)
 	}
-	return picker.Preview{Rows: rows, Width: p.screen.Frame.Width, Height: p.screen.Frame.Height}
+	return picker.Preview{Rows: rows, Width: frame.Width, Height: frame.Height}
 }

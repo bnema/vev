@@ -9,6 +9,17 @@ import (
 )
 
 func (d *Daemon) splitPane(sess *session, ac *attachedClient, dir layout.Direction) error {
+	after := dir == layout.Right || dir == layout.Down
+	return d.spawnPaneOp(sess, ac, func(tree *layout.Tree, oldFocus, newID layout.PaneID, area domain.Rect) error {
+		return tree.Split(oldFocus, dir, after, newID, area)
+	})
+}
+
+func (d *Daemon) spawnPaneOp(
+	sess *session,
+	ac *attachedClient,
+	mutate func(tree *layout.Tree, oldFocus, newID layout.PaneID, area domain.Rect) error,
+) error {
 	if d.ptys == nil {
 		if ac != nil {
 			d.paint(sess, ac, true)
@@ -31,9 +42,8 @@ func (d *Daemon) splitPane(sess *session, ac *attachedClient, dir layout.Directi
 	}
 	oldFocus := tb.tree.Focus
 	newID := layout.PaneID(fmt.Sprintf("pane-%d", tb.nextPaneID))
-	after := dir == layout.Right || dir == layout.Down
 	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
-	if err := tb.tree.Split(oldFocus, dir, after, newID, area); err != nil {
+	if err := mutate(tb.tree, oldFocus, newID, area); err != nil {
 		tb.mu.Unlock()
 		return err
 	}
@@ -134,75 +144,9 @@ func placementContent(placements []layout.Placement, id layout.PaneID) domain.Re
 func rectSize(r domain.Rect) domain.Size { return domain.Size{Cols: r.Width, Rows: r.Height} }
 
 func (d *Daemon) stackPane(sess *session, ac *attachedClient) error {
-	if d.ptys == nil {
-		if ac != nil {
-			d.paint(sess, ac, true)
-		}
-		return nil
-	}
-	tb := sess.activeTab()
-	if tb == nil {
-		return layout.ErrNotFound
-	}
-
-	sess.mu.Lock()
-	name, cwd := sess.name, sess.cwd
-	sess.mu.Unlock()
-
-	tb.mu.Lock()
-	if tb.tree == nil || tb.tree.Root == nil {
-		tb.mu.Unlock()
-		return layout.ErrNotFound
-	}
-	oldFocus := tb.tree.Focus
-	newID := layout.PaneID(fmt.Sprintf("pane-%d", tb.nextPaneID))
-	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
-	if err := tb.tree.StackNew(oldFocus, newID, area); err != nil {
-		tb.mu.Unlock()
-		return err
-	}
-	tb.nextPaneID++
-	placements, ok := layout.Solve(tb.tree.Root, area)
-	if !ok {
-		_ = tb.tree.Close(newID)
-		tb.tree.Focus = oldFocus
-		tb.mu.Unlock()
-		return layout.ErrTooSmall
-	}
-	newRect := placementContent(placements, newID)
-	tb.mu.Unlock()
-
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), cwd, rectSize(newRect))
-	if err != nil {
-		tb.mu.Lock()
-		_ = tb.tree.Close(newID)
-		tb.tree.Focus = oldFocus
-		tb.mu.Unlock()
-		return err
-	}
-
-	pctx, cancel := context.WithCancel(tb.ctx)
-	p := newPane(newID, pty, rectSize(newRect))
-	p.ctx, p.cancel = pctx, cancel
-	p.rect = newRect
-
-	tb.mu.Lock()
-	if _, ok := tb.panes[newID]; ok || !layout.ContainsLeaf(tb.tree.Root, newID) {
-		tb.mu.Unlock()
-		cancel()
-		_ = pty.Close()
-		return layout.ErrNotFound
-	}
-	tb.panes[newID] = p
-	tb.tree.Focus = newID
-	d.applyLayoutLocked(tb)
-	tb.mu.Unlock()
-
-	d.startPaneGoroutines(sess, tb, p)
-	if ac != nil {
-		d.paint(sess, ac, true)
-	}
-	return nil
+	return d.spawnPaneOp(sess, ac, func(tree *layout.Tree, oldFocus, newID layout.PaneID, area domain.Rect) error {
+		return tree.StackNew(oldFocus, newID, area)
+	})
 }
 
 func (d *Daemon) toggleStack(sess *session, ac *attachedClient) error {

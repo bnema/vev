@@ -15,7 +15,9 @@ func TestRefreshPaneTitleUsesForegroundProcessComm(t *testing.T) {
 	pty := portsmocks.NewMockPTY(t)
 	pty.EXPECT().ForegroundPgid().Return(1234, nil).Once()
 	_, sess, _, _ := newManualSessionWithPTYs(t, pty)
-	d := newTestDaemon(t, nil, stubClock{})
+	clk := portsmocks.NewMockClock(t)
+	clk.EXPECT().Now().Return(time.Time{}).Maybe()
+	d := newTestDaemon(t, nil, clk)
 	d.shell = "/bin/zsh"
 	d.procComm = func(pid int) (string, error) {
 		require.Equal(t, 1234, pid)
@@ -55,7 +57,9 @@ func TestRefreshPaneTitleFallsBackToShellBase(t *testing.T) {
 	pty := portsmocks.NewMockPTY(t)
 	pty.EXPECT().ForegroundPgid().Return(0, errors.New("no foreground process")).Once()
 	_, sess, _, _ := newManualSessionWithPTYs(t, pty)
-	d := newTestDaemon(t, nil, stubClock{})
+	clk := portsmocks.NewMockClock(t)
+	clk.EXPECT().Now().Return(time.Time{}).Maybe()
+	d := newTestDaemon(t, nil, clk)
 	d.shell = "/usr/bin/fish"
 	d.procComm = func(int) (string, error) { return "", errors.New("unused") }
 
