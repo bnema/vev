@@ -89,5 +89,8 @@ func (n *Node) clone() *Node {
 }
 
 func (t *Tree) clone() *Tree {
+	if t == nil {
+		return nil
+	}
 	return &Tree{Root: t.Root.clone(), Focus: t.Focus}
 }

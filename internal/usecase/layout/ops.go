@@ -68,7 +68,7 @@ func insertSplit(n *Node, target PaneID, axis SplitDir, after bool, newID PaneID
 // StackNew puts newID in target's stack, creating one if target is not stacked.
 func (t *Tree) StackNew(target, newID PaneID, area domain.Rect) error {
 	candidate := t.clone()
-	if !stackNew(candidate.Root, target, newID) {
+	if candidate == nil || !stackNew(candidate.Root, target, newID) {
 		return ErrNotFound
 	}
 	candidate.Focus = newID
@@ -80,6 +80,9 @@ func (t *Tree) StackNew(target, newID PaneID, area domain.Rect) error {
 }
 
 func stackNew(n *Node, target, newID PaneID) bool {
+	if n == nil {
+		return false
+	}
 	if n.Kind == Stack {
 		for _, child := range n.Children {
 			if child.Kind == Leaf && child.Leaf == target {
@@ -184,33 +187,36 @@ func splitDirectLeavesContain(n *Node, target PaneID) bool {
 
 // Close removes target and dissolves single-child containers.
 func (t *Tree) Close(target PaneID) error {
-	if t.Root == nil || !containsLeaf(t.Root, target) {
+	candidate := t.clone()
+	if candidate == nil || candidate.Root == nil || !containsLeaf(candidate.Root, target) {
 		return ErrNotFound
 	}
-	if t.Root.Kind == Leaf && t.Root.Leaf == target {
-		t.Root = nil
-		t.Focus = ""
+	if candidate.Root.Kind == Leaf && candidate.Root.Leaf == target {
+		candidate.Root = nil
+		candidate.Focus = ""
+		*t = *candidate
 		return nil
 	}
-	refocus := closeRefocusCandidate(t.Root, target)
-	root, removed := closeNode(t.Root, target)
+	refocus := closeRefocusCandidate(candidate.Root, target)
+	root, removed := closeNode(candidate.Root, target)
 	if !removed {
 		return ErrNotFound
 	}
-	t.Root = root
-	if t.Focus == target {
-		if refocus != "" && containsLeaf(t.Root, refocus) {
-			t.Focus = refocus
+	candidate.Root = root
+	if candidate.Focus == target {
+		if refocus != "" && containsLeaf(candidate.Root, refocus) {
+			candidate.Focus = refocus
 		} else {
-			ids := leafIDs(t.Root)
+			ids := leafIDs(candidate.Root)
 			if len(ids) > 0 {
-				t.Focus = ids[0]
+				candidate.Focus = ids[0]
 			} else {
-				t.Focus = ""
+				candidate.Focus = ""
 			}
 		}
-		setExpanded(t.Root, t.Focus)
+		setExpanded(candidate.Root, candidate.Focus)
 	}
+	*t = *candidate
 	return nil
 }
 
@@ -412,24 +418,11 @@ func (t *Tree) FocusDir(dir Direction, area domain.Rect) error {
 
 func focusStackLocal(n *Node, id PaneID, dir Direction, focus *PaneID) bool {
 	if n.Kind == Stack {
-		idx := -1
-		for i, child := range n.Children {
-			if child.Kind == Leaf && child.Leaf == id {
-				idx = i
-				break
-			}
-		}
+		idx := stackDirectLeafIndex(n, id)
 		if idx >= 0 {
-			next := idx
-			if dir == Up && idx > 0 {
-				next = idx - 1
-			}
-			if dir == Down && idx < len(n.Children)-1 {
-				next = idx + 1
-			}
-			if next != idx {
-				n.Expanded = n.Children[next].Leaf
-				*focus = n.Children[next].Leaf
+			if next := adjacentStackLeaf(n, idx, dir); next != "" {
+				n.Expanded = next
+				*focus = next
 				return true
 			}
 			return false
@@ -441,6 +434,24 @@ func focusStackLocal(n *Node, id PaneID, dir Direction, focus *PaneID) bool {
 		}
 	}
 	return false
+}
+
+func adjacentStackLeaf(n *Node, idx int, dir Direction) PaneID {
+	step := 0
+	switch dir {
+	case Up:
+		step = -1
+	case Down:
+		step = 1
+	default:
+		return ""
+	}
+	for i := idx + step; i >= 0 && i < len(n.Children); i += step {
+		if n.Children[i].Kind == Leaf {
+			return n.Children[i].Leaf
+		}
+	}
+	return ""
 }
 
 func focusRect(p Placement) domain.Rect {

@@ -73,6 +73,20 @@ func TestSolveStackFitAndOverflow(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestStackNewEmptyTreeReturnsError(t *testing.T) {
+	t.Parallel()
+	tr := &Tree{}
+	require.ErrorIs(t, tr.StackNew("missing", "new", domain.Rect{Width: 20, Height: 2}), ErrNotFound)
+	require.Nil(t, tr.Root)
+	require.Empty(t, tr.Focus)
+}
+
+func TestNilTreeCloneIsSafe(t *testing.T) {
+	t.Parallel()
+	var tr *Tree
+	require.Nil(t, tr.clone())
+}
+
 func TestTooSmallRefusalsDoNotMutate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -218,6 +232,17 @@ func TestCloseRefocusPrefersSibling(t *testing.T) {
 	require.Equal(t, PaneID("b"), tr.Focus)
 }
 
+func TestCloseNotFoundDoesNotMutate(t *testing.T) {
+	t.Parallel()
+	tr := &Tree{Focus: "b", Root: &Node{Kind: Split, Dir: Horizontal, Children: []*Node{
+		NewLeaf("a"),
+		{Kind: Stack, Children: []*Node{NewLeaf("b"), NewLeaf("c")}, Expanded: "b"},
+	}}}
+	before := tr.clone()
+	require.ErrorIs(t, tr.Close("missing"), ErrNotFound)
+	require.Equal(t, before, tr)
+}
+
 func TestSolveRejectsStackWithMissingExpanded(t *testing.T) {
 	t.Parallel()
 	_, ok := Solve(&Node{Kind: Stack, Children: []*Node{NewLeaf("a"), NewLeaf("b")}, Expanded: "missing"}, domain.Rect{Width: 20, Height: 4})
@@ -340,6 +365,22 @@ func TestFocusDirEnteringStackExpandsMember(t *testing.T) {
 			require.Equal(t, tt.want, stack.Expanded)
 		})
 	}
+}
+
+func TestFocusDirStackLocalSkipsNonLeafChildren(t *testing.T) {
+	t.Parallel()
+	tr := &Tree{
+		Root: &Node{Kind: Stack, Children: []*Node{
+			NewLeaf("a"),
+			{Kind: Split, Dir: Horizontal, Children: []*Node{NewLeaf("nested")}},
+			NewLeaf("b"),
+		}, Expanded: "a"},
+		Focus: "a",
+	}
+
+	require.NoError(t, tr.FocusDir(Down, domain.Rect{Width: 80, Height: 6}))
+	require.Equal(t, PaneID("b"), tr.Focus)
+	require.Equal(t, PaneID("b"), tr.Root.Expanded)
 }
 
 func contents(ps []Placement) map[PaneID]domain.Rect {
