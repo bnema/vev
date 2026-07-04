@@ -1,7 +1,7 @@
 package ports
 
 // ProtocolVersion is the current vev IPC wire protocol version.
-const ProtocolVersion uint16 = 5
+const ProtocolVersion uint16 = 6
 
 // MsgType identifies the kind of payload carried by a Frame.
 type MsgType uint8
@@ -10,15 +10,16 @@ type MsgType uint8
 // through 15, server-originated messages from 16, leaving room for growth in
 // each band.
 const (
-	MsgHello  MsgType = 1
-	MsgInput  MsgType = 2
-	MsgResize MsgType = 3
-	MsgDetach MsgType = 4
-	MsgPing   MsgType = 5
-	MsgList   MsgType = 6
-	MsgKill   MsgType = 7
-	MsgTheme  MsgType = 8
-	MsgAck    MsgType = 9
+	MsgHello     MsgType = 1
+	MsgInput     MsgType = 2
+	MsgResize    MsgType = 3
+	MsgDetach    MsgType = 4
+	MsgPing      MsgType = 5
+	MsgList      MsgType = 6
+	MsgKill      MsgType = 7
+	MsgTheme     MsgType = 8
+	MsgAck       MsgType = 9
+	MsgImagePush MsgType = 10
 
 	MsgWelcome  MsgType = 16
 	MsgError    MsgType = 17
