@@ -57,6 +57,31 @@ func TestSplitPaneCreatesFocusedShellInRequestedPosition(t *testing.T) {
 	}
 }
 
+func TestSplitPaneRightFromStackSplitsWholeStack(t *testing.T) {
+	d, sess, _, factory := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 4})
+	tb := sess.activeTab()
+	stackPTY := portsmocks.NewMockPTY(t)
+	stackPane := newPane("pane-2", stackPTY, domain.Size{Cols: 41, Rows: 2})
+	tb.panes[stackPane.id] = stackPane
+	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}, Expanded: "pane-2"}, Focus: "pane-2"}
+	tb.nextPaneID = 3
+	newPTY := portsmocks.NewMockPTY(t)
+	stackPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 2}).Return(nil).Once()
+	newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
+	factory.EXPECT().Open("/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 4}).Return(newPTY, nil).Once()
+
+	require.NoError(t, d.splitPane(sess, nil, layout.Right))
+
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	placements, ok := layout.Solve(tb.tree.Root, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
+	require.True(t, ok)
+	require.Equal(t, layout.PaneID("pane-3"), tb.tree.Focus)
+	require.Len(t, tb.panes, 3)
+	require.Equal(t, domain.Rect{Y: 2, Width: 20, Height: 2}, placementContent(placements, "pane-2"))
+	require.Equal(t, domain.Rect{X: 21, Width: 20, Height: 4}, placementContent(placements, "pane-3"))
+}
+
 func TestSplitPaneOpenErrorRollsBackTreeAndPaneMap(t *testing.T) {
 	d, sess, _, factory := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
 	factory.EXPECT().Open("/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).Return(nil, errors.New("open failed")).Once()

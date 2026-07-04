@@ -43,6 +43,15 @@ func insertSplit(n *Node, target PaneID, axis SplitDir, after bool, newID PaneID
 				n.Children[at] = newLeaf
 				return true
 			}
+			if n.Kind == Stack {
+				stack := n.clone()
+				children := []*Node{stack, newLeaf}
+				if !after {
+					children = []*Node{newLeaf, stack}
+				}
+				*n = Node{Kind: Split, Dir: axis, Children: children}
+				return true
+			}
 			children := []*Node{child, newLeaf}
 			if !after {
 				children = []*Node{newLeaf, child}

@@ -595,7 +595,7 @@ func drawPaneTitleBar(frame renderer.Frame, pl layout.Placement, p *pane, focuse
 	styles := newThemeStyles(theme)
 	style := styles.border
 	if focused {
-		style = styles.accent
+		style = styles.statusBar
 	} else {
 		style = themeui.DimStyle(style, theme)
 	}

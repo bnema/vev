@@ -212,6 +212,29 @@ func TestRouterInterceptsAltAForJumpAttention(t *testing.T) {
 	require.Empty(t, clk.timers)
 }
 
+func TestRouterInterceptsAltHJKLForPaneFocus(t *testing.T) {
+	cases := []struct {
+		name string
+		key  byte
+		want Action
+	}{
+		{name: "left", key: 'h', want: ActionFocusPaneLeft},
+		{name: "down", key: 'j', want: ActionFocusPaneDown},
+		{name: "up", key: 'k', want: ActionFocusPaneUp},
+		{name: "right", key: 'l', want: ActionFocusPaneRight},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := &fakeClock{}
+			h := &captureHandler{}
+			NewRouter(clk, h).Route([]byte{ESC, tc.key})
+			require.Equal(t, []Action{tc.want}, h.actions)
+			require.Empty(t, h.forwards)
+			require.Empty(t, clk.timers)
+		})
+	}
+}
+
 func TestRouterForwardsRemovedAltLetterBindings(t *testing.T) {
 	for _, b := range []byte("cnpdxurt") {
 		t.Run(string(b), func(t *testing.T) {

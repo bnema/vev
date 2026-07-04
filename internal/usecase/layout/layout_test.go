@@ -73,6 +73,22 @@ func TestSolveStackFitAndOverflow(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestSplitStackedLeafSplitsWholeStack(t *testing.T) {
+	t.Parallel()
+	tr := &Tree{
+		Root:  &Node{Kind: Stack, Children: []*Node{NewLeaf("one"), NewLeaf("two")}, Expanded: "two"},
+		Focus: "two",
+	}
+	area := domain.Rect{Width: 41, Height: 4}
+
+	require.NoError(t, tr.Split("two", Right, true, "three", area))
+	placements, ok := Solve(tr.Root, area)
+	require.True(t, ok)
+	require.Equal(t, PaneID("three"), tr.Focus)
+	require.Equal(t, domain.Rect{Y: 2, Width: 20, Height: 2}, contents(placements)["two"], "existing stack should remain visible on the left")
+	require.Equal(t, domain.Rect{X: 21, Width: 20, Height: 4}, contents(placements)["three"], "new split pane should appear to the right of the stack")
+}
+
 func TestStackNewEmptyTreeReturnsError(t *testing.T) {
 	t.Parallel()
 	tr := &Tree{}

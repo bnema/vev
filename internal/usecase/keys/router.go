@@ -273,6 +273,14 @@ func binding(data []byte) (Action, int, bool) {
 		return ActionOpenPalette, 1, true
 	case 'a':
 		return ActionJumpAttention, 1, true
+	case 'h':
+		return ActionFocusPaneLeft, 1, true
+	case 'j':
+		return ActionFocusPaneDown, 1, true
+	case 'k':
+		return ActionFocusPaneUp, 1, true
+	case 'l':
+		return ActionFocusPaneRight, 1, true
 	}
 
 	key, size := utf8.DecodeRune(data)
