@@ -61,12 +61,146 @@ func TestRouterInterceptsAltDigits(t *testing.T) {
 	for b := byte('1'); b <= '9'; b++ {
 		r.Route([]byte{ESC, b})
 	}
-	require.Equal(t, []Action{
+	require.Equal(t, switchTabActions(), h.actions)
+	require.Empty(t, h.forwards)
+}
+
+func TestRouterInterceptsAltLayoutDigitAliases(t *testing.T) {
+	cases := []struct {
+		name string
+		keys []string
+	}{
+		{name: "QWERTY", keys: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}},
+		{name: "French AZERTY", keys: []string{"&", "é", "\"", "'", "(", "-", "è", "_", "ç"}},
+		{name: "Belgian AZERTY", keys: []string{"&", "é", "\"", "'", "(", "§", "è", "!", "ç"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := &fakeClock{}
+			h := &captureHandler{}
+			r := NewRouter(clk, h)
+			for _, key := range tc.keys {
+				r.Route(append([]byte{ESC}, []byte(key)...))
+			}
+			require.Equal(t, switchTabActions(), h.actions)
+			require.Empty(t, h.forwards)
+		})
+	}
+}
+
+func TestRouterInterceptsAltAZERTYUTF8SplitAcrossReads(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	r := NewRouter(clk, h)
+
+	r.Route([]byte{ESC, 0xc3})
+	require.Empty(t, h.actions)
+	require.Empty(t, h.forwards)
+	require.Len(t, clk.timers, 1)
+
+	r.Route([]byte{0xa9})
+	require.Equal(t, []Action{ActionSwitchTab2}, h.actions)
+	require.Empty(t, h.forwards)
+	assertRouterPendingCleared(t, r)
+
+	r.Route([]byte{ESC, ' '})
+	require.Equal(t, []Action{ActionSwitchTab2, ActionOpenPalette}, h.actions)
+	require.Empty(t, h.forwards)
+}
+
+func TestRouterInterceptsRetainedAltAZERTYUTF8SplitAcrossReads(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	r := NewRouter(clk, h)
+
+	r.Route([]byte{ESC})
+	r.Route([]byte{0xc3})
+	require.Empty(t, h.actions)
+	require.Empty(t, h.forwards)
+	require.Len(t, clk.timers, 2)
+
+	r.Route([]byte{0xa9})
+	require.Equal(t, []Action{ActionSwitchTab2}, h.actions)
+	require.Empty(t, h.forwards)
+	assertRouterPendingCleared(t, r)
+
+	r.Route([]byte{ESC, ' '})
+	require.Equal(t, []Action{ActionSwitchTab2, ActionOpenPalette}, h.actions)
+	require.Empty(t, h.forwards)
+}
+
+func TestRouterForwardsUnboundAltUTF8SplitAcrossReads(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	r := NewRouter(clk, h)
+
+	r.Route([]byte{ESC, 0xc3})
+	r.Route([]byte{0xb1})
+
+	require.Empty(t, h.actions)
+	require.Equal(t, [][]byte{{ESC, 0xc3, 0xb1}}, h.forwards)
+	assertRouterPendingCleared(t, r)
+
+	r.Route([]byte("Z"))
+	require.Empty(t, h.actions)
+	require.Equal(t, [][]byte{{ESC, 0xc3, 0xb1}, []byte("Z")}, h.forwards)
+}
+
+func TestRouterForwardsInvalidSplitAltUTF8WithoutDroppingBytes(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	r := NewRouter(clk, h)
+
+	r.Route([]byte{ESC, 0xc3})
+	r.Route([]byte("X"))
+
+	require.Empty(t, h.actions)
+	require.Equal(t, [][]byte{{ESC, 0xc3}, []byte("X")}, h.forwards)
+	assertRouterPendingCleared(t, r)
+
+	r.Route([]byte{ESC, ' '})
+	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
+	require.Equal(t, [][]byte{{ESC, 0xc3}, []byte("X")}, h.forwards)
+}
+
+func assertRouterPendingCleared(t *testing.T, r *Router) {
+	t.Helper()
+	require.False(t, r.pending)
+	require.Nil(t, r.pendingAlt)
+	require.Nil(t, r.timer)
+	require.Nil(t, r.pendingDone)
+}
+
+func TestTopRowDigitIndexAcceptsLayoutAliases(t *testing.T) {
+	for want, aliases := range [][]rune{
+		{'1', '&'},
+		{'2', 'é'},
+		{'3', '"'},
+		{'4', '\''},
+		{'5', '('},
+		{'6', '-', '§'},
+		{'7', 'è'},
+		{'8', '_', '!'},
+		{'9', 'ç'},
+	} {
+		for _, key := range aliases {
+			got, ok := topRowDigitIndex(key)
+			require.True(t, ok, "key %q", key)
+			require.Equal(t, want, got, "key %q", key)
+		}
+	}
+
+	_, ok := topRowDigitIndex('0')
+	require.False(t, ok)
+}
+
+func switchTabActions() []Action {
+	return []Action{
 		ActionSwitchTab1, ActionSwitchTab2, ActionSwitchTab3,
 		ActionSwitchTab4, ActionSwitchTab5, ActionSwitchTab6,
 		ActionSwitchTab7, ActionSwitchTab8, ActionSwitchTab9,
-	}, h.actions)
-	require.Empty(t, h.forwards)
+	}
 }
 
 func TestRouterInterceptsAltAForJumpAttention(t *testing.T) {
