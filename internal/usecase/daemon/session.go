@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -358,14 +359,7 @@ func (d *Daemon) renameTab(sess *session, tb *tab, name string) error {
 		return errors.New("daemon: session closed")
 	}
 	sess.mu.Lock()
-	found := false
-	for _, candidate := range sess.tabs {
-		if candidate == tb {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !slices.Contains(sess.tabs, tb) {
 		sess.mu.Unlock()
 		d.mu.Unlock()
 		return errors.New("tab not found")
@@ -410,6 +404,11 @@ func (s *session) persistRecordLocked(updatedAt int64) persist.Record {
 }
 
 func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
+	d.mu.Lock()
+	if d.sessions[sess.id] != sess {
+		d.mu.Unlock()
+		return
+	}
 	sess.mu.Lock()
 	idx := -1
 	for i, w := range sess.tabs {
@@ -420,10 +419,12 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	}
 	if idx == -1 {
 		sess.mu.Unlock()
+		d.mu.Unlock()
 		return
 	}
 	if len(sess.tabs) == 1 {
 		sess.mu.Unlock()
+		d.mu.Unlock()
 		_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 		return
 	}
@@ -437,13 +438,14 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	ac := sess.client
 	ephemeral := sess.ephemeral
 	record := sess.persistRecordLocked(time.Now().UnixNano())
-	sess.mu.Unlock()
-
 	if !ephemeral {
 		if err := d.persist.Save(record); err != nil {
 			d.log.Warn("persisting closed tab failed", "err", err, "session", record.Name)
 		}
 	}
+	sess.mu.Unlock()
+	d.mu.Unlock()
+
 	d.clearDestroyedTabPreview(tb)
 	if tb.cancel != nil {
 		tb.cancel()

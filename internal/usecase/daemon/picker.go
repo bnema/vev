@@ -449,9 +449,7 @@ func (d *Daemon) killPickerTarget(target picker.Target) {
 				d.log.Warn("deleting persisted stopped session failed", "err", err, "session", target.Name)
 				return
 			}
-			if cur, ok := d.stopped[target.Name]; ok && cur.same(stopped) {
-				delete(d.stopped, target.Name)
-			}
+			delete(d.stopped, target.Name)
 		}
 		d.mu.Unlock()
 		return

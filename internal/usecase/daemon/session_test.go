@@ -650,13 +650,13 @@ func (s *mockStoreState) has(name string) bool {
 func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
 	store, _ := newMockStore(t)
 	seed := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
-	require.NoError(t, seed.persist.Save(persist.Record{Name: "work", Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8}))
+	require.NoError(t, seed.persist.Save(persist.Record{Name: "work", Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, TabNames: []string{"shell", "logs"}}))
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
 	d.mu.Lock()
 	stopped := d.stopped["work"]
 	d.mu.Unlock()
-	require.Equal(t, stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7}, stopped)
+	require.Equal(t, stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}}, stopped)
 }
 
 func TestCreateRenameKillPersistenceLifecycle(t *testing.T) {

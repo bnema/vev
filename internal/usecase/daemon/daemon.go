@@ -30,7 +30,6 @@ import (
 	"errors"
 	"log/slog"
 	"os"
-	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -123,14 +122,6 @@ type stoppedSession struct {
 	createdAt int64
 	tabNames  []string
 	purging   bool
-}
-
-func (s stoppedSession) same(other stoppedSession) bool {
-	return s.name == other.name &&
-		s.cwd == other.cwd &&
-		s.createdAt == other.createdAt &&
-		s.purging == other.purging &&
-		slices.Equal(s.tabNames, other.tabNames)
 }
 
 type Option func(*Daemon)
@@ -373,16 +364,14 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	d.mu.Lock()
 	target := d.findByNameLocked(k.Name)
 	if target == nil {
-		if stopped, ok := d.stopped[k.Name]; ok {
+		if _, ok := d.stopped[k.Name]; ok {
 			if err := d.persist.Delete(k.Name); err != nil {
 				d.mu.Unlock()
 				d.log.Warn("deleting persisted stopped session failed", "err", err, "session", k.Name)
 				_ = tr.Send(frameError(ports.ErrInternal, "deleting persisted stopped session failed"))
 				return
 			}
-			if cur, ok := d.stopped[k.Name]; ok && cur.same(stopped) {
-				delete(d.stopped, k.Name)
-			}
+			delete(d.stopped, k.Name)
 			d.mu.Unlock()
 			return
 		}
