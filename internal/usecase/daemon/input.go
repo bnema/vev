@@ -278,7 +278,7 @@ func clampInt(v, lo, hi int) int {
 }
 
 func (d *Daemon) writeToPane(sess *session, p *pane, data []byte) {
-	if p == nil {
+	if p == nil || p.pty == nil {
 		return
 	}
 	if _, err := p.pty.Write(data); err != nil {
@@ -349,12 +349,7 @@ func (h daemonKeyHandler) Forward(data []byte) {
 	tb.mu.Lock()
 	p := tb.focusedPane()
 	tb.mu.Unlock()
-	if p == nil {
-		return
-	}
-	if _, err := p.pty.Write(data); err != nil {
-		h.d.log.Error("pty write failed", "err", err, "session", sess.name)
-	}
+	h.d.writeToPane(sess, p, data)
 }
 
 func (h daemonKeyHandler) Action(action keys.Action) {

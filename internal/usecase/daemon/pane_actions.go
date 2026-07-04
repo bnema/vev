@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/bnema/vev/internal/domain"
@@ -123,8 +124,10 @@ func (d *Daemon) resizePane(p *pane, r domain.Rect) {
 		return
 	}
 	sz := rectSize(r)
-	if err := p.pty.Resize(sz); err != nil {
-		d.log.Warn("pty resize failed", "err", err)
+	if p.pty != nil {
+		if err := p.pty.Resize(sz); err != nil {
+			d.log.Warn("pty resize failed", "err", err)
+		}
 	}
 	p.mu.Lock()
 	p.screen.Resize(sz.Cols, sz.Rows)
@@ -161,6 +164,10 @@ func (d *Daemon) toggleStack(sess *session, ac *attachedClient) error {
 		return layout.ErrNotFound
 	}
 	tb.mu.Lock()
+	if tb.tree == nil {
+		tb.mu.Unlock()
+		return layout.ErrNotFound
+	}
 	err := tb.tree.ToggleStack(tb.tree.Focus, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
 	if err == nil {
 		d.applyLayoutLocked(tb)
@@ -226,7 +233,9 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	if p.cancel != nil {
 		p.cancel()
 	}
-	_ = p.pty.Close()
+	if p.pty != nil {
+		_ = p.pty.Close()
+	}
 	if repaint {
 		if ac == nil {
 			sess.mu.Lock()
@@ -269,7 +278,7 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 		}
 		d.paint(sess, ac, true)
 	}
-	if err == layout.ErrNoPane {
+	if errors.Is(err, layout.ErrNoPane) {
 		return nil
 	}
 	return err

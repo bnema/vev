@@ -18,7 +18,7 @@ var (
 // is placed after target on the chosen axis.
 func (t *Tree) Split(target PaneID, dir Direction, after bool, newID PaneID, area domain.Rect) error {
 	candidate := t.clone()
-	if !insertSplit(candidate.Root, target, axisFor(dir), after, newID) {
+	if candidate == nil || candidate.Root == nil || !insertSplit(candidate.Root, target, axisFor(dir), after, newID) {
 		return ErrNotFound
 	}
 	candidate.Focus = newID
@@ -30,6 +30,9 @@ func (t *Tree) Split(target PaneID, dir Direction, after bool, newID PaneID, are
 }
 
 func insertSplit(n *Node, target PaneID, axis SplitDir, after bool, newID PaneID) bool {
+	if n == nil {
+		return false
+	}
 	for i, child := range n.Children {
 		if child.Kind == Leaf && child.Leaf == target {
 			newLeaf := NewLeaf(newID)

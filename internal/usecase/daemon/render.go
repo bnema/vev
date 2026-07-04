@@ -322,6 +322,12 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	p := tb.focusedPane()
 	if p == nil {
 		tb.mu.Unlock()
+		if paletteActive {
+			ac.paletteMu.Unlock()
+		}
+		if promptActive {
+			ac.promptMu.Unlock()
+		}
 		ac.sendMu.Unlock()
 		return
 	}
@@ -550,7 +556,9 @@ func composeTabFrameWithLayout(tb *tab, area domain.Rect, theme themeui.Theme, l
 		}
 		placements = []layout.Placement{{ID: fallback.id, Content: area}}
 	}
-	drawDividers(frame, root, area, themeui.DimStyle(newThemeStyles(theme).border, theme))
+	if ok {
+		drawDividers(frame, root, area, themeui.DimStyle(newThemeStyles(theme).border, theme))
+	}
 	var damage []renderer.Damage
 	for _, pl := range placements {
 		p := tb.panes[pl.ID]

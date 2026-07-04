@@ -274,29 +274,32 @@ func DimStyle(style renderer.Style, t Theme) renderer.Style {
 	return out
 }
 
-func xterm256Color(index int) renderer.RGB {
-	if index < 0 {
-		return renderer.RGB{}
-	}
-	base := [...]renderer.RGB{
+var (
+	xterm256Base = [...]renderer.RGB{
 		{R: 0x00, G: 0x00, B: 0x00}, {R: 0x80, G: 0x00, B: 0x00}, {R: 0x00, G: 0x80, B: 0x00}, {R: 0x80, G: 0x80, B: 0x00},
 		{R: 0x00, G: 0x00, B: 0x80}, {R: 0x80, G: 0x00, B: 0x80}, {R: 0x00, G: 0x80, B: 0x80}, {R: 0xc0, G: 0xc0, B: 0xc0},
 		{R: 0x80, G: 0x80, B: 0x80}, {R: 0xff, G: 0x00, B: 0x00}, {R: 0x00, G: 0xff, B: 0x00}, {R: 0xff, G: 0xff, B: 0x00},
 		{R: 0x00, G: 0x00, B: 0xff}, {R: 0xff, G: 0x00, B: 0xff}, {R: 0x00, G: 0xff, B: 0xff}, {R: 0xff, G: 0xff, B: 0xff},
 	}
-	if index < len(base) {
-		return base[index]
+	xterm256Levels = [...]uint8{0, 95, 135, 175, 215, 255}
+)
+
+func xterm256Color(index int) renderer.RGB {
+	if index < 0 {
+		return renderer.RGB{}
+	}
+	if index < len(xterm256Base) {
+		return xterm256Base[index]
 	}
 	if index < 232 {
 		index -= 16
-		levels := [...]uint8{0, 95, 135, 175, 215, 255}
-		return renderer.RGB{R: levels[index/36], G: levels[(index/6)%6], B: levels[index%6]}
+		return renderer.RGB{R: xterm256Levels[index/36], G: xterm256Levels[(index/6)%6], B: xterm256Levels[index%6]}
 	}
 	if index < 256 {
 		level := uint8(8 + (index-232)*10)
 		return renderer.RGB{R: level, G: level, B: level}
 	}
-	return base[index%len(base)]
+	return xterm256Base[index%len(xterm256Base)]
 }
 
 func SelectionStyle(t Theme) renderer.Style {

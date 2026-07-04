@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/bnema/vev/internal/domain"
@@ -80,15 +81,22 @@ func writeLayoutFingerprint(b *strings.Builder, n *layout.Node) {
 	}
 	b.WriteByte(byte('0' + n.Kind))
 	b.WriteByte(byte('0' + n.Dir))
-	b.WriteString(string(n.Leaf))
+	writePaneIDFingerprint(b, n.Leaf)
 	b.WriteByte('|')
-	b.WriteString(string(n.Expanded))
+	writePaneIDFingerprint(b, n.Expanded)
 	b.WriteByte('[')
 	for _, child := range n.Children {
 		writeLayoutFingerprint(b, child)
 		b.WriteByte(',')
 	}
 	b.WriteByte(']')
+}
+
+func writePaneIDFingerprint(b *strings.Builder, id layout.PaneID) {
+	s := string(id)
+	b.WriteString(strconv.Itoa(len(s)))
+	b.WriteByte(':')
+	b.WriteString(s)
 }
 
 func pointInRect(col, row int, r domain.Rect) bool {

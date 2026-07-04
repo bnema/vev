@@ -25,12 +25,12 @@ func TestSplitPaneCreatesFocusedShellInRequestedPosition(t *testing.T) {
 		size      domain.Size
 		wantNew   domain.Rect
 		wantOld   domain.Rect
-		isNewSide func(old, new domain.Rect) bool
+		isNewSide func(oldRect, newRect domain.Rect) bool
 	}{
-		{name: "right", dir: layout.Right, size: domain.Size{Cols: 41, Rows: 10}, wantOld: domain.Rect{Width: 20, Height: 10}, wantNew: domain.Rect{X: 21, Width: 20, Height: 10}, isNewSide: func(old, new domain.Rect) bool { return new.X > old.X }},
-		{name: "left", dir: layout.Left, size: domain.Size{Cols: 41, Rows: 10}, wantOld: domain.Rect{X: 21, Width: 20, Height: 10}, wantNew: domain.Rect{Width: 20, Height: 10}, isNewSide: func(old, new domain.Rect) bool { return new.X < old.X }},
-		{name: "down", dir: layout.Down, size: domain.Size{Cols: 80, Rows: 5}, wantOld: domain.Rect{Width: 80, Height: 2}, wantNew: domain.Rect{Y: 3, Width: 80, Height: 2}, isNewSide: func(old, new domain.Rect) bool { return new.Y > old.Y }},
-		{name: "up", dir: layout.Up, size: domain.Size{Cols: 80, Rows: 5}, wantOld: domain.Rect{Y: 3, Width: 80, Height: 2}, wantNew: domain.Rect{Width: 80, Height: 2}, isNewSide: func(old, new domain.Rect) bool { return new.Y < old.Y }},
+		{name: "right", dir: layout.Right, size: domain.Size{Cols: 41, Rows: 10}, wantOld: domain.Rect{Width: 20, Height: 10}, wantNew: domain.Rect{X: 21, Width: 20, Height: 10}, isNewSide: func(oldRect, newRect domain.Rect) bool { return newRect.X > oldRect.X }},
+		{name: "left", dir: layout.Left, size: domain.Size{Cols: 41, Rows: 10}, wantOld: domain.Rect{X: 21, Width: 20, Height: 10}, wantNew: domain.Rect{Width: 20, Height: 10}, isNewSide: func(oldRect, newRect domain.Rect) bool { return newRect.X < oldRect.X }},
+		{name: "down", dir: layout.Down, size: domain.Size{Cols: 80, Rows: 5}, wantOld: domain.Rect{Width: 80, Height: 2}, wantNew: domain.Rect{Y: 3, Width: 80, Height: 2}, isNewSide: func(oldRect, newRect domain.Rect) bool { return newRect.Y > oldRect.Y }},
+		{name: "up", dir: layout.Up, size: domain.Size{Cols: 80, Rows: 5}, wantOld: domain.Rect{Y: 3, Width: 80, Height: 2}, wantNew: domain.Rect{Width: 80, Height: 2}, isNewSide: func(oldRect, newRect domain.Rect) bool { return newRect.Y < oldRect.Y }},
 	}
 
 	for _, tt := range tests {

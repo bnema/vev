@@ -103,11 +103,7 @@ func TestNoteAttentionDoesNotBlockOnWedgedOtherClient(t *testing.T) {
 	acW := &attachedClient{tr: trW, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
 	sctxW, cancelW := context.WithCancel(d.serveCtx)
 	t.Cleanup(cancelW)
-	tabW := newTab(newScriptPTY(nil), domain.Size{Cols: 80, Rows: 23})
-	tabW.ctx, tabW.cancel = sctxW, cancelW
-	for _, pane := range tabW.panes {
-		pane.ctx, pane.cancel = sctxW, cancelW
-	}
+	tabW := newTestTabWithContext(newScriptPTY(nil), sctxW, cancelW)
 	sessW := &session{id: "wedged", name: "wedged", ctx: sctxW, cancel: cancelW, tabs: []*tab{tabW}, client: acW}
 	acW.setSession(sessW)
 	acW.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acW})
@@ -354,11 +350,7 @@ func TestCloseRingingTabRefreshesOtherSessionBottomBar(t *testing.T) {
 	acB := &attachedClient{tr: trB, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
 	sctxB, cancelB := context.WithCancel(d.serveCtx)
 	t.Cleanup(cancelB)
-	tbB := newTab(pB, domain.Size{Cols: 80, Rows: 23})
-	tbB.ctx, tbB.cancel = sctxB, cancelB
-	for _, pane := range tbB.panes {
-		pane.ctx, pane.cancel = sctxB, cancelB
-	}
+	tbB := newTestTabWithContext(pB, sctxB, cancelB)
 	sessB := &session{id: "sessB", name: "other", ctx: sctxB, cancel: cancelB, tabs: []*tab{tbB}, client: acB}
 	acB.setSession(sessB)
 	acB.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acB})
@@ -404,14 +396,8 @@ func TestJumpAttentionCrossesSessionsWhenNoLocalBells(t *testing.T) {
 	d, sess1, ac, sends := newManualSessionWithPTYs(t, p1)
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel2()
-	tab2a := newTab(p2, domain.Size{Cols: 80, Rows: 23})
-	tab2b := newTab(p3, domain.Size{Cols: 80, Rows: 23})
-	for _, tb := range []*tab{tab2a, tab2b} {
-		tb.ctx, tb.cancel = sctx2, cancel2
-		for _, pane := range tb.panes {
-			pane.ctx, pane.cancel = sctx2, cancel2
-		}
-	}
+	tab2a := newTestTabWithContext(p2, sctx2, cancel2)
+	tab2b := newTestTabWithContext(p3, sctx2, cancel2)
 	tab2a.attention = true
 	tab2a.attentionAt = time.Unix(9, 0)
 	tab2b.attention = true

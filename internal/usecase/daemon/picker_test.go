@@ -331,7 +331,7 @@ func TestPickerOpenCloseNavigationConcurrentWithRenderRace(t *testing.T) {
 				p.screen.Write([]byte("render-race"))
 				p.mu.Unlock()
 			}
-			d.render(sess, tb, tb.focusedPane())
+			d.render(sess, tb, p)
 		})
 	}
 	wg.Wait()

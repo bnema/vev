@@ -195,6 +195,9 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 		return errors.New("daemon: session closed")
 	}
 	tb.ctx, tb.cancel = context.WithCancel(sess.ctx)
+	for _, p := range tb.panes {
+		p.ctx, p.cancel = context.WithCancel(tb.ctx)
+	}
 	sess.mu.Lock()
 	sess.tabs = append(sess.tabs, tb)
 	sess.active = len(sess.tabs) - 1
@@ -231,6 +234,20 @@ func (tb *tab) panesSnapshot() []*pane {
 		out = append(out, p)
 	}
 	return out
+}
+
+func (tb *tab) closeAllPanes() {
+	tb.mu.Lock()
+	panes := tb.panesSnapshot()
+	tb.mu.Unlock()
+	for _, p := range panes {
+		if p.cancel != nil {
+			p.cancel()
+		}
+		if p.pty != nil {
+			_ = p.pty.Close()
+		}
+	}
 }
 
 func tabSize(clientSize domain.Size) domain.Size {
@@ -372,15 +389,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	if tb.cancel != nil {
 		tb.cancel()
 	}
-	tb.mu.Lock()
-	panes := tb.panesSnapshot()
-	tb.mu.Unlock()
-	for _, p := range panes {
-		if p.cancel != nil {
-			p.cancel()
-		}
-		_ = p.pty.Close()
-	}
+	tb.closeAllPanes()
 	if repaint && ac != nil {
 		d.paint(sess, ac, true)
 	}
@@ -460,15 +469,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	sess.mu.Unlock()
 	for _, tb := range tabs {
 		d.clearDestroyedTabPreview(tb)
-		tb.mu.Lock()
-		panes := tb.panesSnapshot()
-		tb.mu.Unlock()
-		for _, p := range panes {
-			if p.cancel != nil {
-				p.cancel()
-			}
-			_ = p.pty.Close()
-		}
+		tb.closeAllPanes()
 	}
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })

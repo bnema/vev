@@ -97,6 +97,14 @@ func TestStackNewEmptyTreeReturnsError(t *testing.T) {
 	require.Empty(t, tr.Focus)
 }
 
+func TestSplitEmptyTreeReturnsError(t *testing.T) {
+	t.Parallel()
+	tr := &Tree{}
+	require.ErrorIs(t, tr.Split("missing", Right, true, "new", domain.Rect{Width: 41, Height: 2}), ErrNotFound)
+	require.Nil(t, tr.Root)
+	require.Empty(t, tr.Focus)
+}
+
 func TestNilTreeCloneIsSafe(t *testing.T) {
 	t.Parallel()
 	var tr *Tree
