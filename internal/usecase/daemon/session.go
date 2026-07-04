@@ -47,12 +47,14 @@ type session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu        sync.Mutex // guards tabs, active, and client
-	tabs      []*tab
-	active    int
-	client    *attachedClient
-	cwd       string
-	createdAt int64
+	mu                     sync.Mutex // guards tabs, active, client, and clipboard queue state
+	tabs                   []*tab
+	active                 int
+	client                 *attachedClient
+	clipboardQueue         []clipboardForward
+	clipboardWorkerRunning bool
+	cwd                    string
+	createdAt              int64
 }
 
 // tab is a pane layout container; pane owns PTY/screen/scrollback/render scheduling state.

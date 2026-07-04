@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -124,3 +125,70 @@ func TestPTYReaderClipboardNoAttachedClientDoesNotPanic(t *testing.T) {
 		d.ptyReader(sess, win, win.focusedPane())
 	})
 }
+
+func TestForwardClipboardAsyncSerializesClipboardWrites(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	tr := newBlockingClipboardTransport()
+	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	sctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sess := &session{id: "clip-order", name: "clip-order", ctx: sctx, cancel: cancel, client: ac}
+	ac.setSession(sess)
+
+	first := base64.StdEncoding.EncodeToString([]byte("first"))
+	second := base64.StdEncoding.EncodeToString([]byte("second"))
+	d.forwardClipboardAsync(sess, first)
+	require.Equal(t, "first", <-tr.started)
+
+	d.forwardClipboardAsync(sess, second)
+	select {
+	case got := <-tr.started:
+		t.Fatalf("second clipboard send started before first completed: %q", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(tr.releaseFirst)
+	require.Equal(t, "first", <-tr.sent)
+	require.Equal(t, "second", <-tr.started)
+	require.Equal(t, "second", <-tr.sent)
+}
+
+type blockingClipboardTransport struct {
+	started      chan string
+	sent         chan string
+	releaseFirst chan struct{}
+}
+
+func newBlockingClipboardTransport() *blockingClipboardTransport {
+	return &blockingClipboardTransport{
+		started:      make(chan string, 2),
+		sent:         make(chan string, 2),
+		releaseFirst: make(chan struct{}),
+	}
+}
+
+func (tr *blockingClipboardTransport) Send(f ports.Frame) error {
+	out, err := ports.UnmarshalOutput(f.Payload)
+	if err != nil {
+		return err
+	}
+	data := string(out.Data)
+	var label string
+	switch {
+	case strings.Contains(data, base64.StdEncoding.EncodeToString([]byte("first"))):
+		label = "first"
+	case strings.Contains(data, base64.StdEncoding.EncodeToString([]byte("second"))):
+		label = "second"
+	default:
+		label = data
+	}
+	tr.started <- label
+	if label == "first" {
+		<-tr.releaseFirst
+	}
+	tr.sent <- label
+	return nil
+}
+
+func (tr *blockingClipboardTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (tr *blockingClipboardTransport) Close() error               { return nil }

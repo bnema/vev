@@ -25,6 +25,10 @@ type screenState struct {
 	savedCursor  cursorState
 }
 
+// maxEscapeBufferLen must stay large enough for OSC 52 clipboard payloads
+// forwarded by internal/usecase/copy.OSC52MaxPayloadBytes after base64
+// expansion plus the OSC wrapper. pkg/vt cannot import internal/usecase/copy,
+// so keep this value in sync if that payload cap changes.
 const maxEscapeBufferLen = 128 * 1024
 
 type Screen struct {
