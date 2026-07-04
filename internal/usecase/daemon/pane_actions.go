@@ -42,7 +42,6 @@ func (d *Daemon) splitPane(sess *session, ac *attachedClient, dir layout.Directi
 	if !ok {
 		_ = tb.tree.Close(newID)
 		tb.tree.Focus = oldFocus
-		tb.nextPaneID--
 		tb.mu.Unlock()
 		return layout.ErrTooSmall
 	}
@@ -54,7 +53,6 @@ func (d *Daemon) splitPane(sess *session, ac *attachedClient, dir layout.Directi
 		tb.mu.Lock()
 		_ = tb.tree.Close(newID)
 		tb.tree.Focus = oldFocus
-		tb.nextPaneID--
 		tb.mu.Unlock()
 		return err
 	}
@@ -65,7 +63,7 @@ func (d *Daemon) splitPane(sess *session, ac *attachedClient, dir layout.Directi
 	p.rect = newRect
 
 	tb.mu.Lock()
-	if _, ok := tb.panes[newID]; ok || !layoutContains(tb.tree.Root, newID) {
+	if _, ok := tb.panes[newID]; ok || !layout.ContainsLeaf(tb.tree.Root, newID) {
 		tb.mu.Unlock()
 		cancel()
 		_ = pty.Close()
@@ -135,21 +133,6 @@ func placementContent(placements []layout.Placement, id layout.PaneID) domain.Re
 
 func rectSize(r domain.Rect) domain.Size { return domain.Size{Cols: r.Width, Rows: r.Height} }
 
-func layoutContains(n *layout.Node, id layout.PaneID) bool {
-	if n == nil {
-		return false
-	}
-	if n.Kind == layout.Leaf {
-		return n.Leaf == id
-	}
-	for _, child := range n.Children {
-		if layoutContains(child, id) {
-			return true
-		}
-	}
-	return false
-}
-
 func (d *Daemon) stackPane(sess *session, ac *attachedClient) error {
 	if d.ptys == nil {
 		if ac != nil {
@@ -183,7 +166,6 @@ func (d *Daemon) stackPane(sess *session, ac *attachedClient) error {
 	if !ok {
 		_ = tb.tree.Close(newID)
 		tb.tree.Focus = oldFocus
-		tb.nextPaneID--
 		tb.mu.Unlock()
 		return layout.ErrTooSmall
 	}
@@ -195,7 +177,6 @@ func (d *Daemon) stackPane(sess *session, ac *attachedClient) error {
 		tb.mu.Lock()
 		_ = tb.tree.Close(newID)
 		tb.tree.Focus = oldFocus
-		tb.nextPaneID--
 		tb.mu.Unlock()
 		return err
 	}
@@ -206,7 +187,7 @@ func (d *Daemon) stackPane(sess *session, ac *attachedClient) error {
 	p.rect = newRect
 
 	tb.mu.Lock()
-	if _, ok := tb.panes[newID]; ok || !layoutContains(tb.tree.Root, newID) {
+	if _, ok := tb.panes[newID]; ok || !layout.ContainsLeaf(tb.tree.Root, newID) {
 		tb.mu.Unlock()
 		cancel()
 		_ = pty.Close()
@@ -281,11 +262,11 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	}
 	tb.mu.Lock()
 	p := tb.panes[id]
-	if p == nil || tb.tree == nil || !layoutContains(tb.tree.Root, id) {
+	if p == nil || tb.tree == nil || !layout.ContainsLeaf(tb.tree.Root, id) {
 		tb.mu.Unlock()
 		return nil
 	}
-	if len(tb.panes) <= 1 {
+	if len(layout.LeafIDs(tb.tree.Root)) <= 1 {
 		tb.mu.Unlock()
 		d.closeTab(sess, tb, repaint)
 		return nil
@@ -339,7 +320,7 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 			pl, ok := focusedPlacementLocked(tb)
 			tb.mu.Unlock()
 			if ok && pl.TitleBar.Height > 0 {
-				d.refreshPaneTitle(sess, newFocus)
+				d.refreshPaneTitleOnFocus(sess, newFocus)
 			}
 		}
 		d.paint(sess, ac, true)

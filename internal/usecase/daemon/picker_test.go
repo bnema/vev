@@ -12,10 +12,18 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/pkg/renderer"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 // --- test doubles -----------------------------------------------------------
+
+func newTestTabWithContext(p ports.PTY, ctx context.Context, cancel context.CancelFunc) *tab {
+	tb := newTab(p, domain.Size{Cols: 80, Rows: 23})
+	tb.ctx, tb.cancel = ctx, cancel
+	for _, pane := range tb.panes {
+		pane.ctx, pane.cancel = ctx, cancel
+	}
+	return tb
+}
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
@@ -144,8 +152,8 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
 	defer cancel2()
-	sess1 := &session{id: "s1", name: "alpha", ephemeral: true, ctx: sctx1, cancel: cancel1, tabs: []*tab{{pty: p1, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctx1, cancel: cancel1}}, client: ac1}
-	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{{pty: p2, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctx2, cancel: cancel2}}, client: ac2}
+	sess1 := &session{id: "s1", name: "alpha", ephemeral: true, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, client: ac1}
+	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, client: ac2}
 	ac1.setSession(sess1)
 	ac2.setSession(sess2)
 	ac1.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac1})
@@ -185,9 +193,9 @@ func TestPickerLivePreviewRepaintsInactiveTab(t *testing.T) {
 
 	previewTab := sess.tabs[1]
 	previewTab.mu.Lock()
-	previewTab.screen.Write([]byte("inactive-preview-live"))
+	previewTab.focusedPane().screen.Write([]byte("inactive-preview-live"))
 	previewTab.mu.Unlock()
-	d.render(sess, previewTab)
+	d.render(sess, previewTab, previewTab.focusedPane())
 
 	previewOut := awaitFrame(t, sends, ports.MsgOutput)
 	previewMsg, err := ports.UnmarshalOutput(previewOut.Payload)
@@ -209,8 +217,8 @@ func TestPickerLivePreviewRepaintsCrossSessionTab(t *testing.T) {
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
 	defer cancel2()
-	sess1 := &session{id: "s1", name: "alpha", ctx: sctx1, cancel: cancel1, tabs: []*tab{{pty: p1, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctx1, cancel: cancel1}}, client: ac1}
-	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{{pty: p2, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: sctx2, cancel: cancel2}}, client: ac2}
+	sess1 := &session{id: "s1", name: "alpha", ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, client: ac1}
+	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, client: ac2}
 	ac1.setSession(sess1)
 	ac2.setSession(sess2)
 	ac1.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac1})
@@ -225,9 +233,9 @@ func TestPickerLivePreviewRepaintsCrossSessionTab(t *testing.T) {
 
 	previewTab := sess2.tabs[0]
 	previewTab.mu.Lock()
-	previewTab.screen.Write([]byte("cross-session-preview-live"))
+	previewTab.focusedPane().screen.Write([]byte("cross-session-preview-live"))
 	previewTab.mu.Unlock()
-	d.render(sess2, previewTab)
+	d.render(sess2, previewTab, previewTab.focusedPane())
 
 	previewOut := awaitFrame(t, sends1, ports.MsgOutput)
 	previewMsg, err := ports.UnmarshalOutput(previewOut.Payload)
@@ -277,7 +285,7 @@ func TestPickerOpenCloseNavigationConcurrentWithRenderRace(t *testing.T) {
 				p.screen.Write([]byte("render-race"))
 				p.mu.Unlock()
 			}
-			d.render(sess, tb)
+			d.render(sess, tb, tb.focusedPane())
 		})
 	}
 	wg.Wait()

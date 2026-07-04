@@ -449,20 +449,7 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	for _, tb := range tabs {
 		tb.mu.Lock()
 		tb.size = tbSize
-		if tb.tree == nil {
-			p := tb.focusedPane()
-			if p != nil {
-				if err := p.pty.Resize(tbSize); err != nil {
-					d.log.Warn("pty resize failed", "err", err, "session", sess.name)
-				}
-				p.mu.Lock()
-				p.screen.Resize(tbSize.Cols, tbSize.Rows)
-				p.rect = domain.Rect{Width: tbSize.Cols, Height: tbSize.Rows}
-				p.mu.Unlock()
-			}
-		} else {
-			d.applyLayoutLocked(tb)
-		}
+		d.applyLayoutLocked(tb)
 		tb.mu.Unlock()
 	}
 	if ac != nil {

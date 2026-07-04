@@ -36,9 +36,16 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 		return nil, err
 	}
 
-	// Unchanged frame no-op: same dimensions, shadow populated, no damage, no dirty lines.
-	if r.width == frame.Width && r.height == frame.Height && len(r.shadow) == len(frame.Cells) {
+	knownSameDimensions := r.width == frame.Width && r.height == frame.Height && len(r.shadow) == len(frame.Cells)
+
+	// Unchanged frame no-op: same dimensions, shadow populated, and either no
+	// damage or a structural redraw request that can be satisfied from the
+	// known terminal shadow.
+	if knownSameDimensions {
 		if len(damage) == 0 && !r.hasDirtyLines(frame) {
+			return nil, nil
+		}
+		if needsFull(damage) && !r.hasDirtyLines(frame) {
 			return nil, nil
 		}
 	}
@@ -55,8 +62,17 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 	// tracking and the SGR pen persist across all rects within one Draw.
 	st := newDrawState()
 
-	if r.width != frame.Width || r.height != frame.Height || len(r.shadow) != len(frame.Cells) || needsFull(damage) {
+	if !knownSameDimensions {
 		r.writeFull(buf, frame, &st)
+		r.replaceShadow(frame)
+		if r.caps.SynchronizedOutput {
+			buf.WriteString(SyncEndCSI)
+		}
+		return copyBytes(buf), nil
+	}
+
+	if needsFull(damage) {
+		r.writeDamage(buf, frame, nil, nil, &st)
 		r.replaceShadow(frame)
 		if r.caps.SynchronizedOutput {
 			buf.WriteString(SyncEndCSI)

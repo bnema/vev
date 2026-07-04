@@ -45,14 +45,8 @@ func signal(ch chan struct{}) {
 	}
 }
 
-func (d *Daemon) ptyReader(sess *session, tb *tab, panes ...*pane) {
+func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 	defer d.sessWg.Done()
-	var p *pane
-	if len(panes) > 0 {
-		p = panes[0]
-	} else {
-		p = tb.focusedPane()
-	}
 	if p == nil {
 		return
 	}
@@ -112,14 +106,8 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, panes ...*pane) {
 // scheduler debounces dirty signals. The first dirty opens a short tab;
 // sustained floods progressively widen that tab, while isolated updates
 // return to the minimum delay for interactive latency.
-func (d *Daemon) scheduler(sess *session, tb *tab, panes ...*pane) {
+func (d *Daemon) scheduler(sess *session, tb *tab, p *pane) {
 	defer d.sessWg.Done()
-	var p *pane
-	if len(panes) > 0 {
-		p = panes[0]
-	} else {
-		p = tb.focusedPane()
-	}
 	if p == nil {
 		return
 	}
@@ -133,7 +121,7 @@ outer:
 		case <-paneDone(p):
 			return
 		case <-p.flush:
-			d.render(sess, tb)
+			d.render(sess, tb, p)
 			lastRender = d.clock.Now()
 			continue
 		case <-p.dirty:
@@ -160,7 +148,7 @@ outer:
 					default:
 					}
 				}
-				d.render(sess, tb)
+				d.render(sess, tb, p)
 				lastRender = d.clock.Now()
 				continue outer
 			case <-p.dirty:
@@ -170,7 +158,7 @@ outer:
 			}
 		}
 		delay = nextDebounceDelay(delay, coalesced)
-		d.render(sess, tb)
+		d.render(sess, tb, p)
 		lastRender = d.clock.Now()
 	}
 }
@@ -214,9 +202,8 @@ func syncUpdateEndIn(data []byte) bool {
 
 // render paints the current client, or (when detached) just clears accumulated
 // damage so it never grows unbounded while headless.
-func (d *Daemon) render(sess *session, tb *tab) {
+func (d *Daemon) render(sess *session, tb *tab, p *pane) {
 	tb.mu.Lock()
-	p := tb.focusedPane()
 	previewer := tb.previewClient
 	tb.mu.Unlock()
 	if p == nil {
@@ -470,7 +457,16 @@ func composeClientFrameWithState(bars barState, tb *tab, full bool, caches ...*b
 	}
 	p := tb.focusedPane()
 	styles := newThemeStyles(bars.theme)
+	if p == nil {
+		width, screenRows := tb.size.Cols, tb.size.Rows
+		if width <= 0 || screenRows <= 0 {
+			return renderer.NewFrame(0, 0), nil
+		}
+		return renderer.NewFrame(width, screenRows+2), nil
+	}
+	p.mu.Lock()
 	width, screenRows := p.screen.Frame.Width, p.screen.Frame.Height
+	p.mu.Unlock()
 	if tb.size.Valid() {
 		width, screenRows = tb.size.Cols, tb.size.Rows
 	}
@@ -504,10 +500,7 @@ func composeClientFrameWithState(bars barState, tb *tab, full bool, caches ...*b
 
 func composeTabFrame(tb *tab, area domain.Rect, theme themeui.Theme) (renderer.Frame, []renderer.Damage) {
 	frame := renderer.NewFrame(area.Width, area.Height)
-	var root *layout.Node
-	if tb.tree != nil {
-		root = tb.tree.Root
-	}
+	root := tb.tree.Root
 	placements, ok := layout.Solve(root, area)
 	var fallback *pane
 	if !ok {
@@ -521,16 +514,13 @@ func composeTabFrame(tb *tab, area domain.Rect, theme themeui.Theme) (renderer.F
 	var damage []renderer.Damage
 	for _, pl := range placements {
 		p := tb.panes[pl.ID]
-		if len(tb.panes) == 1 && tb.tree != nil && tb.tree.Focus == pl.ID {
-			p = tb.focusedPane()
-		}
 		if p == nil && fallback != nil && pl.ID == fallback.id {
 			p = fallback
 		}
 		if p == nil {
 			continue
 		}
-		focused := tb.tree == nil || tb.tree.Focus == pl.ID
+		focused := tb.tree.Focus == pl.ID
 		if pl.TitleBar.Height > 0 {
 			drawPaneTitleBar(frame, pl, p, focused, theme, "")
 		}
@@ -540,7 +530,7 @@ func composeTabFrame(tb *tab, area domain.Rect, theme themeui.Theme) (renderer.F
 		p.mu.Lock()
 		blitPaneFrame(frame, pl.Content, p.screen.Frame, !focused, theme)
 		for _, d := range p.screen.Damage() {
-			damage = append(damage, translateDamage([]renderer.Damage{d}, pl.Content.X, pl.Content.Y)...)
+			damage = append(damage, translatePaneDamage(d, pl.Content, area)...)
 		}
 		p.mu.Unlock()
 	}
@@ -572,7 +562,9 @@ func drawPaneTitleBar(frame renderer.Frame, pl layout.Placement, p *pane, focuse
 	for x := pl.TitleBar.X; x < pl.TitleBar.X+pl.TitleBar.Width && x < frame.Width; x++ {
 		frame.Set(x, pl.TitleBar.Y, renderer.Cell{Rune: ' ', Style: style})
 	}
+	p.mu.Lock()
 	title := p.title
+	p.mu.Unlock()
 	if title == "" {
 		title = fallback
 	}
@@ -667,4 +659,16 @@ func translateDamage(in []renderer.Damage, dx, dy int) []renderer.Damage {
 		}
 	}
 	return out
+}
+
+func translatePaneDamage(d renderer.Damage, content domain.Rect, area domain.Rect) []renderer.Damage {
+	if d.Kind == renderer.DamageFullRedraw {
+		return []renderer.Damage{d}
+	}
+	if d.Kind == renderer.DamageScrollUp && (content.X != 0 || content.Width != area.Width) {
+		return []renderer.Damage{{Kind: renderer.DamageText, X: content.X, Y: content.Y, Width: content.Width, Height: content.Height}}
+	}
+	d.X += content.X
+	d.Y += content.Y
+	return []renderer.Damage{d}
 }

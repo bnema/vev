@@ -301,6 +301,50 @@ func TestRouterAltArrowCSIPartialsAcrossReads(t *testing.T) {
 	}
 }
 
+func TestRouterAltArrowCSIPrefixRouting(t *testing.T) {
+	cases := []struct {
+		name         string
+		reads        [][]byte
+		wantActions  []Action
+		wantForwards [][]byte
+	}{
+		{
+			name:        "two alt arrows in one read",
+			reads:       [][]byte{{ESC, '[', '1', ';', '3', 'A', ESC, '[', '1', ';', '3', 'A'}},
+			wantActions: []Action{ActionFocusPaneUp, ActionFocusPaneUp},
+		},
+		{
+			name:         "alt arrow followed by normal byte",
+			reads:        [][]byte{{ESC, '[', '1', ';', '3', 'A', 'x'}},
+			wantActions:  []Action{ActionFocusPaneUp},
+			wantForwards: [][]byte{[]byte("x")},
+		},
+		{
+			name:         "bare arrow passthrough",
+			reads:        [][]byte{{ESC, '[', 'A'}},
+			wantForwards: [][]byte{{ESC, '[', 'A'}},
+		},
+		{
+			name:        "retained escape alt arrow across reads",
+			reads:       [][]byte{{ESC}, []byte("[1;3A")},
+			wantActions: []Action{ActionFocusPaneUp},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := &fakeClock{}
+			h := &captureHandler{}
+			r := NewRouter(clk, h)
+			for _, read := range tc.reads {
+				r.Route(read)
+			}
+			require.Equal(t, tc.wantActions, h.actions)
+			require.Equal(t, tc.wantForwards, h.forwards)
+		})
+	}
+}
+
 func TestRouterPassesThroughBareArrows(t *testing.T) {
 	for _, in := range [][]byte{
 		{ESC, '[', 'A'},

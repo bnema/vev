@@ -93,7 +93,7 @@ func solveStack(n *Node, r domain.Rect, out *[]Placement) bool {
 		}
 	}
 	if idx < 0 {
-		idx = 0
+		return false
 	}
 	contentRows := r.Height - count
 	for i, child := range n.Children {

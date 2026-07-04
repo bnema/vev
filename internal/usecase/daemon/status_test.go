@@ -12,7 +12,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -30,9 +29,9 @@ func TestStatusCompositionGolden(t *testing.T) {
 	sess.name = "work"
 
 	win := sess.activeTab()
-	win.screen = vt.NewScreen(12, 2)
+	win.focusedPane().screen.Resize(12, 2)
 	win.size = domain.Size{Cols: 12, Rows: 2}
-	win.screen.Write([]byte("hello"))
+	win.focusedPane().screen.Write([]byte("hello"))
 
 	frame, damage := composeClientFrame(sess, win, true, "")
 
@@ -54,7 +53,7 @@ func TestStatusCompositionUsesTruecolorTheme(t *testing.T) {
 	_, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer release()
 	win := sess.activeTab()
-	win.screen = vt.NewScreen(12, 2)
+	win.focusedPane().screen.Resize(12, 2)
 	win.size = domain.Size{Cols: 12, Rows: 2}
 	ac.setTheme(themeui.Theme{
 		Foreground: renderer.RGB{R: 220, G: 220, B: 220},
@@ -86,8 +85,8 @@ func TestStatusApplyThemeStoresClientAndPropagatesScreens(t *testing.T) {
 	require.Equal(t, renderer.RGB{R: 1, G: 2, B: 3}, ac.getTheme().Foreground)
 	for _, tb := range sess.tabs {
 		var got []byte
-		tb.screen.OnResponse = func(b []byte) { got = append(got, b...) }
-		tb.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+		tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+		tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 		require.True(t, strings.Contains(string(got), "rgb:0101/0202/0303"), string(got))
 		require.True(t, strings.Contains(string(got), "rgb:0404/0505/0606"), string(got))
 	}
@@ -107,8 +106,8 @@ func TestAttachClientClearsStaleScreenDefaultColors(t *testing.T) {
 
 	var got []byte
 	tb := sess.activeTab()
-	tb.screen.OnResponse = func(b []byte) { got = append(got, b...) }
-	tb.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.Empty(t, got)
 }
 
@@ -124,15 +123,15 @@ func TestClientGoneResetsScreenDefaultColors(t *testing.T) {
 	// Sanity: the tab answers OSC 10/11 while ac is attached.
 	tb := sess.activeTab()
 	var before []byte
-	tb.screen.OnResponse = func(b []byte) { before = append(before, b...) }
-	tb.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	tb.focusedPane().screen.OnResponse = func(b []byte) { before = append(before, b...) }
+	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.NotEmpty(t, before)
 
 	d.clientGone(sess, ac, true)
 
 	var got []byte
-	tb.screen.OnResponse = func(b []byte) { got = append(got, b...) }
-	tb.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.Empty(t, got, "OSC 10/11 queries must be swallowed once the client that reported these colors is gone")
 }
 
@@ -164,8 +163,8 @@ func TestClientGoneResetDoesNotClobberNewlyAttachedClient(t *testing.T) {
 
 	tb := sess.activeTab()
 	var got []byte
-	tb.screen.OnResponse = func(b []byte) { got = append(got, b...) }
-	tb.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.NotEmpty(t, got, "a newer client's screen default colors must survive a stale detach's reset")
 }
 
@@ -182,8 +181,8 @@ func TestDetachOnSendErrorResetsScreenDefaultColors(t *testing.T) {
 
 	tb := sess.activeTab()
 	var got []byte
-	tb.screen.OnResponse = func(b []byte) { got = append(got, b...) }
-	tb.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.Empty(t, got, "OSC 10/11 queries must be swallowed once the client that reported these colors is gone")
 }
 
@@ -201,8 +200,8 @@ func TestApplyThemeIgnoresReplacedClient(t *testing.T) {
 
 	var got []byte
 	tb := sess.activeTab()
-	tb.screen.OnResponse = func(b []byte) { got = append(got, b...) }
-	tb.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.Empty(t, got)
 }
 
@@ -213,7 +212,7 @@ func TestStatusMarksEphemeralSession(t *testing.T) {
 	sess.name = "0"
 	sess.ephemeral = true
 	win := sess.activeTab()
-	win.screen = vt.NewScreen(12, 2)
+	win.focusedPane().screen.Resize(12, 2)
 	win.size = domain.Size{Cols: 12, Rows: 2}
 
 	frame, _ := composeClientFrame(sess, win, true, "")
@@ -228,7 +227,7 @@ func TestStatusCopyFeedbackRendersOnlyWhenFullyFits(t *testing.T) {
 	defer releasePTY()
 	sess.name = "work"
 	win := sess.activeTab()
-	win.screen = vt.NewScreen(30, 2)
+	win.focusedPane().screen.Resize(30, 2)
 	win.size = domain.Size{Cols: 30, Rows: 2}
 
 	frame, _ := composeClientFrame(sess, win, true, "ok")
@@ -265,7 +264,7 @@ func TestTopBarRendersAttentionBell(t *testing.T) {
 	defer releasePTY1()
 	defer releasePTY2()
 	win := sess.activeTab()
-	win.screen = vt.NewScreen(18, 2)
+	win.focusedPane().screen.Resize(18, 2)
 	win.size = domain.Size{Cols: 18, Rows: 2}
 	sess.mu.Lock()
 	sess.tabs[1].attention = true

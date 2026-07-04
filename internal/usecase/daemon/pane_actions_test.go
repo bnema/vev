@@ -72,7 +72,7 @@ func TestSplitPaneOpenErrorRollsBackTreeAndPaneMap(t *testing.T) {
 	defer tb.mu.Unlock()
 	require.Equal(t, beforeRoot, tb.tree.Root.Leaf)
 	require.Equal(t, beforeFocus, tb.tree.Focus)
-	require.Equal(t, beforeNext, tb.nextPaneID)
+	require.Equal(t, beforeNext+1, tb.nextPaneID)
 	require.Len(t, tb.panes, beforePaneCount)
 	require.Nil(t, tb.panes["pane-2"])
 }
@@ -173,6 +173,19 @@ func TestReapPaneSharesClosePathAndIsIdempotent(t *testing.T) {
 	require.NotContains(t, tb.panes, layout.PaneID("pane-2"))
 }
 
+func TestClosePaneKeepsTabOpenWhenPendingSpawnLeafExists(t *testing.T) {
+	d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
+	tb := sess.activeTab()
+	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
+	oldPTY.EXPECT().Close().Return(nil).Once()
+
+	require.NoError(t, d.closePane(sess, tb, "pane-1", nil, false))
+
+	require.Len(t, sess.tabs, 1)
+	require.Empty(t, tb.panes)
+	require.True(t, layout.ContainsLeaf(tb.tree.Root, "pane-2"))
+}
+
 func TestCloseFocusedLastPaneDelegatesToCloseTab(t *testing.T) {
 	d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
 	otherPTY := portsmocks.NewMockPTY(t)
@@ -241,6 +254,34 @@ func newSplitTestDaemon(t *testing.T, sz domain.Size) (*Daemon, *session, *ports
 	}
 	sess := &session{id: "s", name: "s", cwd: "/work", tabs: []*tab{tb}, ctx: tctx, cancel: cancel}
 	return d, sess, oldPTY, factory
+}
+
+func TestCloseOriginalPaneLeavesSurvivorFunctional(t *testing.T) {
+	writes := make(chan []byte, 1)
+	d, sess, oldPTY, factory := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
+	newPTY, releaseNew := newBlockingPTYWithWrites(t, writes)
+	defer releaseNew()
+	oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Once()
+	newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
+	factory.EXPECT().Open("/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).Return(newPTY, nil).Once()
+
+	require.NoError(t, d.splitPane(sess, nil, layout.Right))
+	tb := sess.activeTab()
+	tb.mu.Lock()
+	tb.tree.Focus = "pane-1"
+	tb.mu.Unlock()
+	oldPTY.EXPECT().Close().Return(nil).Once()
+
+	require.NoError(t, d.closePane(sess, tb, "pane-1", nil, false))
+	require.Equal(t, layout.PaneID("pane-2"), tb.focusedPane().id)
+
+	ac := &attachedClient{}
+	ac.setSession(sess)
+	daemonKeyHandler{d: d, ac: ac}.Forward([]byte("Z"))
+	require.Equal(t, []byte("Z"), <-writes)
+	tb.focusedPane().screen.Write([]byte("survivor"))
+	frame, _ := composeClientFrame(sess, tb, false, "")
+	require.Contains(t, frameRowString(frame, 1), "survivor")
 }
 
 func blockingRead(t *testing.T) func([]byte) (int, error) {

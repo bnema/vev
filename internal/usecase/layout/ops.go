@@ -8,9 +8,10 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("pane not found")
-	ErrTooSmall = errors.New("layout too small")
-	ErrNoPane   = errors.New("no pane in direction")
+	ErrNotFound      = errors.New("pane not found")
+	ErrTooSmall      = errors.New("layout too small")
+	ErrNoPane        = errors.New("no pane in direction")
+	ErrNotToggleable = errors.New("layout node is not toggleable")
 )
 
 // Split adds newID next to target. The after flag controls whether the new pane
@@ -108,8 +109,12 @@ func stackNew(n *Node, target, newID PaneID) bool {
 // a two-child split, it converts that split to a stack.
 func (t *Tree) ToggleStack(target PaneID, area domain.Rect) error {
 	candidate := t.clone()
-	if !toggleStack(candidate.Root, target) {
+	result := toggleStack(candidate.Root, target)
+	switch result {
+	case toggleNotFound:
 		return ErrNotFound
+	case toggleNotToggleable:
+		return ErrNotToggleable
 	}
 	if _, ok := Solve(candidate.Root, area); !ok {
 		return ErrTooSmall
@@ -118,24 +123,63 @@ func (t *Tree) ToggleStack(target PaneID, area domain.Rect) error {
 	return nil
 }
 
-func toggleStack(n *Node, target PaneID) bool {
-	if n.Kind == Stack && containsLeaf(n, target) {
+type toggleResult int
+
+const (
+	toggleNotFound toggleResult = iota
+	toggleToggled
+	toggleNotToggleable
+)
+
+func toggleStack(n *Node, target PaneID) toggleResult {
+	if n == nil {
+		return toggleNotFound
+	}
+	for _, child := range n.Children {
+		if child.Kind == Leaf || !containsLeaf(child, target) {
+			continue
+		}
+		result := toggleStack(child, target)
+		if result != toggleNotFound {
+			return result
+		}
+	}
+	if !containsLeaf(n, target) {
+		return toggleNotFound
+	}
+	if n.Kind == Stack {
+		if stackDirectLeafIndex(n, target) < 0 {
+			return toggleNotToggleable
+		}
 		n.Kind = Split
 		n.Dir = Vertical
 		n.Expanded = ""
-		return true
+		return toggleToggled
 	}
-	if n.Kind == Split && len(n.Children) == 2 && containsLeaf(n, target) {
+	if n.Kind == Split && len(n.Children) == 2 && splitDirectLeavesContain(n, target) {
 		n.Kind = Stack
 		n.Expanded = target
-		return true
+		return toggleToggled
 	}
-	for _, child := range n.Children {
-		if toggleStack(child, target) {
-			return true
+	return toggleNotToggleable
+}
+
+func stackDirectLeafIndex(n *Node, target PaneID) int {
+	for i, child := range n.Children {
+		if child.Kind == Leaf && child.Leaf == target {
+			return i
 		}
 	}
-	return false
+	return -1
+}
+
+func splitDirectLeavesContain(n *Node, target PaneID) bool {
+	for _, child := range n.Children {
+		if child.Kind != Leaf {
+			return false
+		}
+	}
+	return n.Children[0].Leaf == target || n.Children[1].Leaf == target
 }
 
 // Close removes target and dissolves single-child containers.
@@ -148,18 +192,24 @@ func (t *Tree) Close(target PaneID) error {
 		t.Focus = ""
 		return nil
 	}
+	refocus := closeRefocusCandidate(t.Root, target)
 	root, removed := closeNode(t.Root, target)
 	if !removed {
 		return ErrNotFound
 	}
 	t.Root = root
 	if t.Focus == target {
-		ids := leafIDs(t.Root)
-		if len(ids) > 0 {
-			t.Focus = ids[0]
+		if refocus != "" && containsLeaf(t.Root, refocus) {
+			t.Focus = refocus
 		} else {
-			t.Focus = ""
+			ids := leafIDs(t.Root)
+			if len(ids) > 0 {
+				t.Focus = ids[0]
+			} else {
+				t.Focus = ""
+			}
 		}
+		setExpanded(t.Root, t.Focus)
 	}
 	return nil
 }
@@ -198,6 +248,40 @@ func closeNode(n *Node, target PaneID) (*Node, bool) {
 	return n, true
 }
 
+func closeRefocusCandidate(n *Node, target PaneID) PaneID {
+	if n == nil || n.Kind == Leaf {
+		return ""
+	}
+	for i, child := range n.Children {
+		if !containsLeaf(child, target) {
+			continue
+		}
+		if child.Kind == Leaf && child.Leaf == target {
+			if i > 0 {
+				return lastLeaf(n.Children[i-1])
+			}
+			if i+1 < len(n.Children) {
+				return firstLeaf(n.Children[i+1])
+			}
+			return ""
+		}
+		if id := closeRefocusCandidate(child, target); id != "" {
+			return id
+		}
+		if i > 0 {
+			return lastLeaf(n.Children[i-1])
+		}
+		if i+1 < len(n.Children) {
+			return firstLeaf(n.Children[i+1])
+		}
+		return ""
+	}
+	return ""
+}
+
+// ContainsLeaf reports whether n contains a leaf with id.
+func ContainsLeaf(n *Node, id PaneID) bool { return containsLeaf(n, id) }
+
 func containsLeaf(n *Node, id PaneID) bool {
 	if n == nil {
 		return false
@@ -224,6 +308,37 @@ func firstLeaf(n *Node) PaneID {
 	}
 	return ""
 }
+
+func lastLeaf(n *Node) PaneID {
+	if n.Kind == Leaf {
+		return n.Leaf
+	}
+	for i := len(n.Children) - 1; i >= 0; i-- {
+		if id := lastLeaf(n.Children[i]); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func setExpanded(n *Node, id PaneID) bool {
+	if n == nil {
+		return false
+	}
+	if n.Kind == Stack && stackDirectLeafIndex(n, id) >= 0 {
+		n.Expanded = id
+		return true
+	}
+	for _, child := range n.Children {
+		if setExpanded(child, id) {
+			return true
+		}
+	}
+	return false
+}
+
+// LeafIDs returns the leaf ids under n in layout order.
+func LeafIDs(n *Node) []PaneID { return leafIDs(n) }
 
 func leafIDs(n *Node) []PaneID {
 	if n == nil {
@@ -291,6 +406,7 @@ func (t *Tree) FocusDir(dir Direction, area domain.Rect) error {
 		return candidates[i].id < candidates[j].id
 	})
 	t.Focus = candidates[0].id
+	setExpanded(t.Root, t.Focus)
 	return nil
 }
 

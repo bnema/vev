@@ -36,9 +36,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 type session struct {
@@ -57,18 +55,8 @@ type session struct {
 	createdAt int64
 }
 
-// tab is a pane layout container. In the single-leaf case it preserves the old
-// one-PTY tab behavior; pane owns PTY/screen/scrollback/render scheduling state.
+// tab is a pane layout container; pane owns PTY/screen/scrollback/render scheduling state.
 type tab struct {
-	// Compatibility aliases for the single focused pane. Production call sites use
-	// focusedPane/all-pane loops; tests still inspect the single-leaf state directly.
-	pty        ports.PTY
-	screen     *vt.Screen
-	scrollback *scopy.Scrollback
-	dirty      chan struct{}
-	flush      chan struct{}
-	syncGen    uint64
-
 	mu sync.Mutex // guards tree, panes, nextPaneID, size, previewClient, and pane map membership
 
 	tree       *layout.Tree
@@ -220,11 +208,6 @@ func newTab(pty ports.PTY, sz domain.Size) *tab {
 	id := layout.PaneID("pane-1")
 	p := newPane(id, pty, sz)
 	return &tab{
-		pty:        p.pty,
-		screen:     p.screen,
-		scrollback: p.scrollback,
-		dirty:      p.dirty,
-		flush:      p.flush,
 		tree:       layout.NewTree(id),
 		panes:      map[layout.PaneID]*pane{id: p},
 		nextPaneID: 2,
@@ -233,32 +216,15 @@ func newTab(pty ports.PTY, sz domain.Size) *tab {
 }
 
 func (tb *tab) focusedPane() *pane {
-	if tb == nil {
+	if tb == nil || tb.tree == nil || tb.panes == nil {
 		return nil
 	}
-	if tb.tree != nil && tb.panes != nil {
-		p := tb.panes[tb.tree.Focus]
-		if p == nil {
-			return nil
-		}
-		if len(tb.panes) == 1 && ((tb.pty != nil && tb.pty != p.pty) || (tb.screen != nil && tb.screen != p.screen) || (tb.scrollback != nil && tb.scrollback != p.scrollback) || (tb.dirty != nil && tb.dirty != p.dirty) || (tb.flush != nil && tb.flush != p.flush)) {
-			return &pane{id: p.id, pty: tb.pty, screen: tb.screen, scrollback: tb.scrollback, dirty: tb.dirty, flush: tb.flush, syncGen: tb.syncGen, rect: p.rect, ctx: tb.ctx, cancel: tb.cancel}
-		}
-		return p
-	}
-	if tb.pty != nil || tb.screen != nil || tb.scrollback != nil {
-		return &pane{pty: tb.pty, screen: tb.screen, scrollback: tb.scrollback, dirty: tb.dirty, flush: tb.flush, syncGen: tb.syncGen, ctx: tb.ctx, cancel: tb.cancel}
-	}
-	return nil
+	return tb.panes[tb.tree.Focus]
 }
 
 func (tb *tab) panesSnapshot() []*pane {
 	if tb == nil {
 		return nil
-	}
-	p0 := tb.focusedPane()
-	if len(tb.panes) == 0 && p0 != nil {
-		return []*pane{p0}
 	}
 	out := make([]*pane, 0, len(tb.panes))
 	for _, p := range tb.panes {

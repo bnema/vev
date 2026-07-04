@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -26,6 +27,8 @@ type pane struct {
 	syncGen    uint64
 	rect       domain.Rect
 	title      string
+	titleAt    time.Time
+	titleValid bool
 	ctx        context.Context
 	cancel     context.CancelFunc
 }

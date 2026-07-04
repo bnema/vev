@@ -74,6 +74,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 
 	if ac.copyModeActive() {
 		if ev.Button == mouse.Left {
+			contentRow := ev.Row - 1
 			tb.mu.Lock()
 			p := tb.focusedPane()
 			var pl layout.Placement
@@ -82,11 +83,26 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 			if p != nil {
 				pl, ok = focusedPlacementLocked(tb)
 			}
-			tb.mu.Unlock()
-			if ok && multi {
-				if !pointInRect(ev.Col, ev.Row-1, pl.Content) {
+			if ok && multi && !pointInRect(ev.Col, contentRow, pl.Content) && ev.Type == mouse.Press {
+				if target, hit := hitTestPlacementLocked(tb, ev.Col, contentRow); hit {
+					oldFocus := tb.tree.Focus
+					focusPlacementLocked(tb, target.ID)
+					d.applyLayoutLocked(tb)
+					tb.mu.Unlock()
+					d.exitCopyMode(ac)
+					if target.ID != oldFocus {
+						d.refreshPaneTitleOnFocus(sess, target.ID)
+					}
+					d.paint(sess, ac, true)
 					return
 				}
+			}
+			tb.mu.Unlock()
+			if ok && multi {
+				clampedCol := clampInt(ev.Col, pl.Content.X, pl.Content.X+pl.Content.Width-1)
+				clampedRow := clampInt(contentRow, pl.Content.Y, pl.Content.Y+pl.Content.Height-1)
+				ev.Col = clampedCol
+				ev.Row = clampedRow
 				ev = translateMouseEvent(ev, pl.Content.X, pl.Content.Y)
 			}
 		}
@@ -104,42 +120,56 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	tb.mu.Lock()
 	contentRow := ev.Row - 1
 	pl, hit := hitTestPlacementLocked(tb, ev.Col, contentRow)
-	if hit && pl.Collapsed && pointInRect(ev.Col, contentRow, pl.TitleBar) {
-		oldFocus := tb.tree.Focus
+	multi := len(tb.panes) > 1
+	focusedID := layout.PaneID("")
+	if tb.tree != nil {
+		focusedID = tb.tree.Focus
+	}
+	if hit && pointInRect(ev.Col, contentRow, pl.TitleBar) {
+		if !isMouseFocusPress(ev) {
+			tb.mu.Unlock()
+			return
+		}
+		oldFocus := focusedID
 		focusPlacementLocked(tb, pl.ID)
 		d.applyLayoutLocked(tb)
 		tb.mu.Unlock()
 		if pl.ID != oldFocus {
 			d.exitCopyMode(ac)
-			d.refreshPaneTitle(sess, pl.ID)
+			d.refreshPaneTitleOnFocus(sess, pl.ID)
 		}
 		d.paint(sess, ac, true)
 		return
 	}
 	var p *pane
 	translated := false
+	hoveredFocused := true
 	if hit && !pl.Collapsed && pointInRect(ev.Col, contentRow, pl.Content) {
-		oldFocus := tb.tree.Focus
-		focusPlacementLocked(tb, pl.ID)
-		d.applyLayoutLocked(tb)
-		p = tb.panes[pl.ID]
-		if len(tb.panes) == 1 {
-			p = tb.focusedPane()
+		oldFocus := focusedID
+		if isMouseFocusPress(ev) {
+			focusPlacementLocked(tb, pl.ID)
+			d.applyLayoutLocked(tb)
 		}
+		p = tb.panes[pl.ID]
+		hoveredFocused = pl.ID == oldFocus
 		tb.mu.Unlock()
 		if p == nil {
 			return
 		}
-		if pl.ID != oldFocus {
+		if isMouseFocusPress(ev) && pl.ID != oldFocus {
 			d.exitCopyMode(ac)
-			d.refreshPaneTitle(sess, pl.ID)
+			d.refreshPaneTitleOnFocus(sess, pl.ID)
 			d.paint(sess, ac, true)
 		}
-		if len(tb.panes) > 1 {
+		if multi {
 			ev = translateMouseEvent(ev, pl.Content.X, pl.Content.Y)
 			translated = true
 		}
 	} else {
+		if multi {
+			tb.mu.Unlock()
+			return
+		}
 		p = tb.focusedPane()
 		tb.mu.Unlock()
 		if p == nil {
@@ -161,9 +191,9 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 			return
 		}
 		if translated {
-			daemonKeyHandler{d: d, ac: ac}.Forward(ev.Raw)
+			d.writeToPane(sess, p, ev.Raw)
 		} else {
-			daemonKeyHandler{d: d, ac: ac}.Forward(sgrRowOffset(ev.Raw, -1))
+			d.writeToPane(sess, p, sgrRowOffset(ev.Raw, -1))
 		}
 		return
 	}
@@ -218,15 +248,45 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 		}
 	case mouse.WheelUp:
 		if altScreen {
-			daemonKeyHandler{d: d, ac: ac}.Forward([]byte("\x1b[A\x1b[A\x1b[A"))
+			d.writeToPane(sess, p, []byte("\x1b[A\x1b[A\x1b[A"))
+			return
+		}
+		if !hoveredFocused {
 			return
 		}
 		d.enterCopyMode(sess, ac)
 		d.copyWheel(sess, ac, -3)
 	case mouse.WheelDown:
 		if altScreen {
-			daemonKeyHandler{d: d, ac: ac}.Forward([]byte("\x1b[B\x1b[B\x1b[B"))
+			d.writeToPane(sess, p, []byte("\x1b[B\x1b[B\x1b[B"))
 		}
+	}
+}
+
+func isMouseFocusPress(ev mouse.Event) bool {
+	return ev.Type == mouse.Press && (ev.Button == mouse.Left || ev.Button == mouse.Middle || ev.Button == mouse.Right)
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func (d *Daemon) writeToPane(sess *session, p *pane, data []byte) {
+	if p == nil {
+		return
+	}
+	if _, err := p.pty.Write(data); err != nil {
+		name := ""
+		if sess != nil {
+			name = sess.name
+		}
+		d.log.Error("pty write failed", "err", err, "session", name)
 	}
 }
 

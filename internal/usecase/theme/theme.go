@@ -258,13 +258,45 @@ func DimStyle(style renderer.Style, t Theme) renderer.Style {
 	out.HasForegroundRGB = true
 	if style.HasForegroundRGB {
 		out.ForegroundRGB = Blend(style.ForegroundRGB, t.Background, 0.35)
+	} else if style.Foreground >= 0 {
+		out.ForegroundRGB = Blend(xterm256Color(style.Foreground), t.Background, 0.35)
 	} else {
 		out.ForegroundRGB = Blend(t.Foreground, t.Background, 0.35)
 	}
+	out.HasBackgroundRGB = true
 	if style.HasBackgroundRGB {
 		out.BackgroundRGB = Blend(style.BackgroundRGB, t.Background, 0.35)
+	} else if style.Background >= 0 {
+		out.BackgroundRGB = Blend(xterm256Color(style.Background), t.Background, 0.35)
+	} else {
+		out.BackgroundRGB = Blend(t.Background, t.Background, 0.35)
 	}
 	return out
+}
+
+func xterm256Color(index int) renderer.RGB {
+	if index < 0 {
+		return renderer.RGB{}
+	}
+	base := [...]renderer.RGB{
+		{R: 0x00, G: 0x00, B: 0x00}, {R: 0x80, G: 0x00, B: 0x00}, {R: 0x00, G: 0x80, B: 0x00}, {R: 0x80, G: 0x80, B: 0x00},
+		{R: 0x00, G: 0x00, B: 0x80}, {R: 0x80, G: 0x00, B: 0x80}, {R: 0x00, G: 0x80, B: 0x80}, {R: 0xc0, G: 0xc0, B: 0xc0},
+		{R: 0x80, G: 0x80, B: 0x80}, {R: 0xff, G: 0x00, B: 0x00}, {R: 0x00, G: 0xff, B: 0x00}, {R: 0xff, G: 0xff, B: 0x00},
+		{R: 0x00, G: 0x00, B: 0xff}, {R: 0xff, G: 0x00, B: 0xff}, {R: 0x00, G: 0xff, B: 0xff}, {R: 0xff, G: 0xff, B: 0xff},
+	}
+	if index < len(base) {
+		return base[index]
+	}
+	if index < 232 {
+		index -= 16
+		levels := [...]uint8{0, 95, 135, 175, 215, 255}
+		return renderer.RGB{R: levels[index/36], G: levels[(index/6)%6], B: levels[index%6]}
+	}
+	if index < 256 {
+		level := uint8(8 + (index-232)*10)
+		return renderer.RGB{R: level, G: level, B: level}
+	}
+	return base[index%len(base)]
 }
 
 func SelectionStyle(t Theme) renderer.Style {

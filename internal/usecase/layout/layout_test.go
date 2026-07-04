@@ -136,6 +136,102 @@ func TestTreeSurgeryShapes(t *testing.T) {
 	})
 }
 
+func TestToggleStackNestedShapes(t *testing.T) {
+	t.Parallel()
+	area := domain.Rect{Width: 62, Height: 5}
+	tests := []struct {
+		name       string
+		root       *Node
+		target     PaneID
+		wantKind   Kind
+		wantDir    SplitDir
+		wantErr    error
+		wantLeaves []PaneID
+	}{
+		{
+			name: "nested stack toggles directly containing stack",
+			root: &Node{Kind: Split, Dir: Horizontal, Children: []*Node{
+				NewLeaf("a"),
+				{Kind: Stack, Children: []*Node{NewLeaf("b"), NewLeaf("c")}, Expanded: "b"},
+			}},
+			target:     "b",
+			wantKind:   Split,
+			wantDir:    Vertical,
+			wantLeaves: []PaneID{"b", "c"},
+		},
+		{
+			name: "nested split toggles directly containing two-leaf split",
+			root: &Node{Kind: Split, Dir: Horizontal, Children: []*Node{
+				NewLeaf("a"),
+				{Kind: Split, Dir: Vertical, Children: []*Node{NewLeaf("b"), NewLeaf("c")}},
+			}},
+			target:     "b",
+			wantKind:   Stack,
+			wantLeaves: []PaneID{"b", "c"},
+		},
+		{
+			name: "nested non toggleable split reports not toggleable",
+			root: &Node{Kind: Split, Dir: Horizontal, Children: []*Node{
+				NewLeaf("a"),
+				{Kind: Split, Dir: Vertical, Children: []*Node{NewLeaf("b"), NewLeaf("c"), NewLeaf("d")}},
+			}},
+			target:  "b",
+			wantErr: ErrNotToggleable,
+		},
+		{
+			name: "three leaf split reports not toggleable not too small",
+			root: &Node{Kind: Split, Dir: Horizontal, Children: []*Node{
+				NewLeaf("a"), NewLeaf("b"), NewLeaf("c"),
+			}},
+			target:  "b",
+			wantErr: ErrNotToggleable,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := &Tree{Root: tt.root, Focus: tt.target}
+			err := tr.ToggleStack(tt.target, area)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				require.NotErrorIs(t, err, ErrTooSmall)
+				return
+			}
+			require.NoError(t, err)
+			container := tr.Root.Children[1]
+			require.Equal(t, tt.wantKind, container.Kind)
+			if tt.wantKind == Split {
+				require.Equal(t, tt.wantDir, container.Dir)
+			}
+			require.Equal(t, tt.wantLeaves, LeafIDs(container))
+		})
+	}
+}
+
+func TestCloseRefocusPrefersSibling(t *testing.T) {
+	t.Parallel()
+	tr := &Tree{Focus: "c", Root: &Node{Kind: Split, Dir: Horizontal, Children: []*Node{
+		NewLeaf("a"),
+		{Kind: Split, Dir: Vertical, Children: []*Node{NewLeaf("b"), NewLeaf("c")}},
+		NewLeaf("d"),
+	}}}
+	require.NoError(t, tr.Close("c"))
+	require.Equal(t, PaneID("b"), tr.Focus)
+}
+
+func TestSolveRejectsStackWithMissingExpanded(t *testing.T) {
+	t.Parallel()
+	_, ok := Solve(&Node{Kind: Stack, Children: []*Node{NewLeaf("a"), NewLeaf("b")}, Expanded: "missing"}, domain.Rect{Width: 20, Height: 4})
+	require.False(t, ok)
+}
+
+func TestExportedLeafHelpers(t *testing.T) {
+	t.Parallel()
+	root := &Node{Kind: Split, Dir: Horizontal, Children: []*Node{NewLeaf("a"), NewLeaf("b")}}
+	require.True(t, ContainsLeaf(root, "b"))
+	require.False(t, ContainsLeaf(root, "c"))
+	require.Equal(t, []PaneID{"a", "b"}, LeafIDs(root))
+}
+
 func TestFocusDir(t *testing.T) {
 	t.Parallel()
 	area := domain.Rect{Width: 62, Height: 5}
@@ -168,6 +264,7 @@ func TestFocusDir(t *testing.T) {
 		require.Equal(t, PaneID("c"), tr.Root.Expanded)
 		require.NoError(t, tr.FocusDir(Up, domain.Rect{Width: 20, Height: 4}))
 		require.Equal(t, PaneID("b"), tr.Focus)
+		require.Equal(t, PaneID("b"), tr.Root.Expanded)
 	})
 
 	t.Run("no pane in direction", func(t *testing.T) {
@@ -177,10 +274,91 @@ func TestFocusDir(t *testing.T) {
 	})
 }
 
+func TestFocusDirEnteringStackExpandsMember(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		root  *Node
+		area  domain.Rect
+		focus PaneID
+		dir   Direction
+		want  PaneID
+	}{
+		{
+			name:  "from left",
+			area:  domain.Rect{Width: 62, Height: 8},
+			focus: "a",
+			dir:   Right,
+			root: &Node{Kind: Split, Dir: Horizontal, Children: []*Node{
+				{Kind: Split, Dir: Vertical, Children: []*Node{NewLeaf("x"), NewLeaf("a")}},
+				{Kind: Stack, Children: []*Node{NewLeaf("b"), NewLeaf("c"), NewLeaf("d"), NewLeaf("e")}, Expanded: "b"},
+			}},
+			want: "c",
+		},
+		{
+			name:  "from right",
+			area:  domain.Rect{Width: 62, Height: 8},
+			focus: "a",
+			dir:   Left,
+			root: &Node{Kind: Split, Dir: Horizontal, Children: []*Node{
+				{Kind: Stack, Children: []*Node{NewLeaf("b"), NewLeaf("c"), NewLeaf("d"), NewLeaf("e")}, Expanded: "b"},
+				{Kind: Split, Dir: Vertical, Children: []*Node{NewLeaf("x"), NewLeaf("a")}},
+			}},
+			want: "c",
+		},
+		{
+			name:  "from above",
+			area:  domain.Rect{Width: 41, Height: 7},
+			focus: "a",
+			dir:   Down,
+			root: &Node{Kind: Split, Dir: Vertical, Children: []*Node{
+				NewLeaf("a"),
+				{Kind: Stack, Children: []*Node{NewLeaf("b"), NewLeaf("c")}, Expanded: "c"},
+			}},
+			want: "b",
+		},
+		{
+			name:  "from below",
+			area:  domain.Rect{Width: 41, Height: 7},
+			focus: "a",
+			dir:   Up,
+			root: &Node{Kind: Split, Dir: Vertical, Children: []*Node{
+				{Kind: Stack, Children: []*Node{NewLeaf("b"), NewLeaf("c")}, Expanded: "b"},
+				NewLeaf("a"),
+			}},
+			want: "c",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := &Tree{Root: tt.root, Focus: tt.focus}
+			var stack *Node
+			findStack(tr.Root, &stack)
+			require.NotEqual(t, tt.want, stack.Expanded)
+			require.NoError(t, tr.FocusDir(tt.dir, tt.area))
+			require.Equal(t, tt.want, tr.Focus)
+			require.Equal(t, tt.want, stack.Expanded)
+		})
+	}
+}
+
 func contents(ps []Placement) map[PaneID]domain.Rect {
 	out := make(map[PaneID]domain.Rect, len(ps))
 	for _, p := range ps {
 		out[p.ID] = p.Content
 	}
 	return out
+}
+
+func findStack(n *Node, out **Node) {
+	if n == nil || *out != nil {
+		return
+	}
+	if n.Kind == Stack {
+		*out = n
+		return
+	}
+	for _, child := range n.Children {
+		findStack(child, out)
+	}
 }

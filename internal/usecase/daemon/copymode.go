@@ -335,13 +335,20 @@ func isCopyEscapePrefix(data []byte) bool {
 func composeCopyClientFrame(mode *scopy.Mode, tb *tab, bars barState) (renderer.Frame, []renderer.Damage) {
 	styles := newThemeStyles(bars.theme)
 	p := tb.focusedPane()
+	if p == nil {
+		return renderer.NewFrame(0, 0), nil
+	}
+	p.mu.Lock()
+	paneFrame := p.screen.Frame
+	paneWidth, paneRows := paneFrame.Width, paneFrame.Height
+	snap := scopy.NewSnapshot(p.scrollback, paneFrame)
+	p.mu.Unlock()
+	copyFrame := mode.Render(snap, styles.copyStatus, styles.selection)
 	pl, ok := focusedPlacementLocked(tb)
 	if !ok {
-		pl = layout.Placement{Content: domain.Rect{Width: p.screen.Frame.Width, Height: p.screen.Frame.Height}}
+		pl = layout.Placement{Content: domain.Rect{Width: paneWidth, Height: paneRows}}
 	}
-	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
-	copyFrame := mode.Render(snap, styles.copyStatus, styles.selection)
-	width, screenRows := p.screen.Frame.Width, p.screen.Frame.Height
+	width, screenRows := paneWidth, paneRows
 	if len(tb.panes) > 1 && tb.size.Valid() {
 		width, screenRows = tb.size.Cols, tb.size.Rows
 	}

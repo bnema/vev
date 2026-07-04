@@ -224,16 +224,14 @@ func passThroughPrefix(b byte) bool { return b == '[' || b == 'O' }
 
 func altArrowCSI(data []byte) (Action, int, bool, bool) {
 	const seqLen = len("[1;3A")
-	if len(data) > seqLen {
-		return 0, 0, false, false
-	}
 	if len(data) < seqLen {
 		return 0, 0, false, hasAltArrowCSIPrefix(data)
 	}
-	if data[0] != '[' || data[1] != '1' || data[2] != ';' || (data[3] != '3' && data[3] != '9') {
+	seq := data[:seqLen]
+	if seq[0] != '[' || seq[1] != '1' || seq[2] != ';' || (seq[3] != '3' && seq[3] != '9') {
 		return 0, 0, false, false
 	}
-	switch data[4] {
+	switch seq[4] {
 	case 'A':
 		return ActionFocusPaneUp, seqLen, true, false
 	case 'B':
