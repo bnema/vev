@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -118,7 +119,7 @@ const (
 // Run connects via dialer and runs the attach client. It owns the terminal
 // lifecycle above attach attempts so raw mode remains active while a live
 // client process redials a lost link.
-func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, intent uint8, name string) (retErr error) {
+func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string) (retErr error) {
 	log := slog.Default().With("component", "client")
 	ms := milestones{}
 
@@ -188,7 +189,7 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, intent u
 		}
 		ms.dialed = true
 
-		result := attachOnce(ctx, transport, term, attemptIntent, name, resumeToken, processClientID, &ms, enterRaw, clearStatus)
+		result := attachOnce(ctx, transport, term, clk, attemptIntent, name, resumeToken, processClientID, &ms, enterRaw, clearStatus)
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
@@ -249,8 +250,8 @@ func shouldReconnect(err error) bool {
 // disappears, or the context is cancelled.
 //
 // It is kept as a compatibility wrapper for callers that still own dialing.
-func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal, intent uint8, name string) error {
-	return Run(ctx, singleTransportDialer{transport: transport}, term, intent, name)
+func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string) error {
+	return Run(ctx, singleTransportDialer{transport: transport}, term, clk, intent, name)
 }
 
 type singleTransportDialer struct{ transport ports.Transport }
@@ -265,7 +266,7 @@ type attachResult struct {
 	err         error
 }
 
-func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func()) attachResult {
+func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func()) attachResult {
 	// 1. Handshake: send Hello with our size and TERM.
 	size, err := term.Size()
 	if err != nil {
@@ -331,7 +332,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	sendErrCh := make(chan error, 1)
 
 	go runSender(loopCtx, cancel, transport, sendCh, sendErrCh)
-	go runStdin(loopCtx, cancel, term.In(), sendCh, trueColor)
+	go runStdin(loopCtx, cancel, term.In(), sendCh, clk, trueColor)
 	go runResize(loopCtx, term.ResizeEvents(), sendCh)
 
 	// 5. Output/main loop: the only goroutine that touches the terminal.
@@ -445,23 +446,35 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 // exits. That is harmless here — Attach has already returned and restored
 // the terminal — and matches the standard pattern for stdin pumps; a
 // closable stdin duplicate could lift it later if ever needed.
-func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame, trueColor bool) {
+func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame, clk ports.Clock, trueColor bool) {
 	buf := make([]byte, stdinBufSize)
 	var scanner theme.Scanner
 	var inputSeq uint64
 	current := ports.Theme{TrueColor: trueColor}
-	send := func(frame ports.Frame) bool {
+	var sendOK atomic.Bool
+	sendOK.Store(true)
+	send := func(frame ports.Frame) {
 		select {
 		case out <- frame:
-			return true
 		case <-ctx.Done():
-			return false
+			sendOK.Store(false)
 		}
 	}
+	// The coalescer reframes a bracketed paste split across reads into one
+	// MsgInput frame, so a marker boundary can never leave a lone ESC on the
+	// wire. Its emit runs one MsgInput per call, keeping the inputSeq contract.
+	coalescer := newPasteCoalescer(clk, func(data []byte) {
+		if len(data) == 0 {
+			return
+		}
+		copyData := append([]byte(nil), data...)
+		inputSeq++
+		send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{InputSeq: inputSeq, Data: copyData})})
+	})
+	defer coalescer.Close()
 	for {
 		n, rerr := in.Read(buf)
 		if n > 0 {
-			ok := true
 			scanner.Scan(buf[:n], func(kind int, rgb renderer.RGB) {
 				switch kind {
 				case 10:
@@ -473,16 +486,9 @@ func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out 
 				default:
 					return
 				}
-				ok = send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(current)})
-			}, func(data []byte) {
-				if len(data) == 0 || !ok {
-					return
-				}
-				copyData := append([]byte(nil), data...)
-				inputSeq++
-				ok = send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{InputSeq: inputSeq, Data: copyData})})
-			})
-			if !ok {
+				send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(current)})
+			}, coalescer.Scan)
+			if !sendOK.Load() {
 				return
 			}
 		}

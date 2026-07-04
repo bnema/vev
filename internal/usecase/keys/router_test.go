@@ -496,3 +496,51 @@ func TestRouterFlushesPendingESCBeforeOtherByte(t *testing.T) {
 	require.Equal(t, [][]byte{{ESC}, []byte("z")}, h.forwards)
 	require.Empty(t, h.actions)
 }
+
+// pasteBindingLookalikes are content bytes that, seen outside a paste, each map
+// to a binding: Alt-j, Alt-space, Alt-1, and an Alt-arrow CSI.
+var pasteBindingLookalikes = []byte("\x1bj\x1b \x1b1\x1b[1;3A")
+
+func TestRouterForwardsSingleFramePasteVerbatim(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	r := NewRouter(clk, h)
+
+	paste := append(append(append([]byte(nil), pasteOpenMarker...), pasteBindingLookalikes...), pasteCloseMarker...)
+	r.Route(paste)
+
+	require.Empty(t, h.actions, "paste content must not fire any binding")
+	require.Equal(t, [][]byte{paste}, h.forwards, "the whole paste must be forwarded byte-identical")
+	require.Empty(t, clk.timers, "a fully bracketed paste retains no trailing ESC")
+}
+
+func TestRouterFiresBindingsForSameBytesOutsidePaste(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	r := NewRouter(clk, h)
+
+	r.Route(pasteBindingLookalikes)
+
+	require.Equal(t, []Action{
+		ActionFocusPaneDown, // Alt-j
+		ActionOpenPalette,   // Alt-space
+		ActionSwitchTab1,    // Alt-1
+		ActionFocusPaneUp,   // Alt-arrow up
+	}, h.actions)
+	require.Empty(t, h.forwards)
+}
+
+func TestRouterPasteMarkerSplitAcrossFramesKeepsCurrentBehavior(t *testing.T) {
+	clk := &fakeClock{}
+	h := &captureHandler{}
+	r := NewRouter(clk, h)
+
+	// Opening marker + content in one frame, closing marker in the next: with
+	// no closing marker in-frame the router keeps its historical per-byte
+	// routing, forwarding each frame's bytes as they arrive.
+	r.Route([]byte("\x1b[200~hello"))
+	r.Route([]byte("\x1b[201~"))
+
+	require.Empty(t, h.actions)
+	require.Equal(t, [][]byte{[]byte("\x1b[200~hello"), []byte("\x1b[201~")}, h.forwards)
+}

@@ -3,6 +3,7 @@
 package keys
 
 import (
+	"bytes"
 	"slices"
 	"sync"
 	"time"
@@ -14,6 +15,13 @@ import (
 const (
 	ESC      byte = 0x1b
 	ESCDelay      = 40 * time.Millisecond
+)
+
+// Bracketed-paste markers. A paste whose opening and closing markers land in
+// one frame is forwarded verbatim so its content can never trip a key binding.
+var (
+	pasteOpenMarker  = []byte("\x1b[200~")
+	pasteCloseMarker = []byte("\x1b[201~")
 )
 
 // Action is an intercepted vev key binding.
@@ -104,6 +112,21 @@ func (r *Router) route(data []byte) {
 			return
 		}
 		remaining := data[i+1:]
+		if bytes.HasPrefix(data[i:], pasteOpenMarker) {
+			// A bracketed paste whose closing marker is in this same frame is
+			// forwarded verbatim: pasted content bytes (including embedded
+			// ESC+letter Alt lookalikes or ESC [ 1 ; 3 A sequences) must never
+			// fire an Action mid-paste. Without a closing marker in-frame we
+			// fall through to today's per-byte routing (the '[' passes through
+			// as a control prefix); Part A keeps pastes single-frame in
+			// practice, so no cross-frame paste state is tracked here.
+			if rel := bytes.Index(data[i:], pasteCloseMarker); rel >= 0 {
+				end := i + rel + len(pasteCloseMarker)
+				buf = append(buf, data[i:end]...)
+				i = end
+				continue
+			}
+		}
 		if action, size, ok, partial := altArrowCSI(remaining); ok {
 			flush()
 			r.h.Action(action)
