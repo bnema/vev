@@ -693,7 +693,12 @@ func TestRenameTabPersistsForNamedSession(t *testing.T) {
 
 	records, err := d.persist.LoadAll()
 	require.NoError(t, err)
-	require.Equal(t, []persist.Record{{Name: "work", Cwd: "/tmp/work", CreatedAt: sess.createdAt, UpdatedAt: records[0].UpdatedAt, TabNames: []string{"shell"}}}, records)
+	require.Len(t, records, 1)
+	require.Equal(t, "work", records[0].Name)
+	require.Equal(t, "/tmp/work", records[0].Cwd)
+	require.Equal(t, sess.createdAt, records[0].CreatedAt)
+	require.GreaterOrEqual(t, records[0].UpdatedAt, records[0].CreatedAt)
+	require.Equal(t, []string{"shell"}, records[0].TabNames)
 }
 
 func TestRenameTabDoesNotPersistForEphemeralSession(t *testing.T) {
@@ -707,6 +712,7 @@ func TestRenameTabDoesNotPersistForEphemeralSession(t *testing.T) {
 	sess, err := d.createSessionLocked("0", true, "/tmp/work", sz, nil)
 	require.NoError(t, err)
 	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
+	require.Equal(t, "shell", sess.tabs[0].name)
 
 	require.False(t, state.has("0"))
 	records, err := d.persist.LoadAll()

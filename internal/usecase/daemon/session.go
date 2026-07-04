@@ -222,6 +222,9 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 		if err := d.persist.Save(record); err != nil {
 			sess.tabs = sess.tabs[:len(sess.tabs)-1]
 			sess.active = oldActive
+			if tb.cancel != nil {
+				tb.cancel()
+			}
 			sess.mu.Unlock()
 			d.mu.Unlock()
 			_ = pty.Close()
