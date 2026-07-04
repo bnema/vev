@@ -54,11 +54,13 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 	}
 	buf := make([]byte, ptyReadBufSize)
 	var resp []byte
+	var clipboards []string
 	attentionCh := make(chan struct{}, 1)
 	p.mu.Lock()
 	p.screen.OnResponse = func(b []byte) { resp = append(resp, b...) }
 	p.screen.OnBell = func() { signal(attentionCh) }
 	p.screen.OnNotify = func(string, string) { signal(attentionCh) }
+	p.screen.OnClipboard = func(b64 string) { clipboards = append(clipboards, b64) }
 	p.mu.Unlock()
 	for {
 		n, err := p.pty.Read(buf)
@@ -73,6 +75,12 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 			case <-attentionCh:
 				d.noteAttention(sess, tb)
 			default:
+			}
+			if len(clipboards) > 0 {
+				for _, b64 := range clipboards {
+					d.forwardClipboardAsync(sess, b64)
+				}
+				clipboards = clipboards[:0]
 			}
 			if len(resp) > 0 {
 				if _, writeErr := p.pty.Write(resp); writeErr != nil {

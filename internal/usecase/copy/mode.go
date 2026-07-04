@@ -239,6 +239,18 @@ func OSC52(text string) [][]byte {
 	return [][]byte{[]byte("\x1b]52;c;" + encoded + "\x07")}
 }
 
+// OSC52FromBase64 builds the normalized OSC 52 sequence to forward a
+// clipboard set request that a pane app already emitted as base64. It
+// returns nil if b64 is not valid base64 or its decoded length exceeds
+// OSC52MaxPayloadBytes — callers must drop the request silently in that case.
+func OSC52FromBase64(b64 string) []byte {
+	decoded, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(decoded) > OSC52MaxPayloadBytes {
+		return nil
+	}
+	return []byte("\x1b]52;c;" + b64 + "\x07")
+}
+
 func strconvItoa(n int) string {
 	if n == 0 {
 		return "0"
