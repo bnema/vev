@@ -34,11 +34,10 @@ func (d *Daemon) navigateRecentSession(sess *session, ac *attachedClient, delta 
 		return
 	}
 	trail := recentSessionTrail(sess, d.barStateFor(sess, ""))
-	if len(trail) == 0 {
-		d.paint(sess, ac, true)
-		return
+	if ac.recentNav.index == 0 && !sameSessionTrail(ac.recentNav.ids, trail) {
+		ac.recentNav.reset(trail)
 	}
-	if !d.recentNavValid(&ac.recentNav) || ac.recentNav.index < 0 || ac.recentNav.index >= len(ac.recentNav.ids) || ac.recentNav.ids[ac.recentNav.index] != sess.id {
+	if !d.pruneRecentNav(&ac.recentNav) || ac.recentNav.index < 0 || ac.recentNav.index >= len(ac.recentNav.ids) || ac.recentNav.ids[ac.recentNav.index] != sess.id {
 		ac.recentNav.reset(trail)
 	}
 
@@ -47,30 +46,40 @@ func (d *Daemon) navigateRecentSession(sess *session, ac *attachedClient, delta 
 		d.paint(sess, ac, true)
 		return
 	}
-	targetID := ac.recentNav.ids[next]
-	if d.sessionByID(targetID) == nil {
-		ac.recentNav.reset(trail)
-		next = ac.recentNav.index + delta
-		if next < 0 || next >= len(ac.recentNav.ids) {
-			d.paint(sess, ac, true)
-			return
-		}
-		targetID = ac.recentNav.ids[next]
-		if d.sessionByID(targetID) == nil {
-			d.paint(sess, ac, true)
-			return
-		}
-	}
 	ac.recentNav.index = next
-	d.switchToTarget(sess, ac, picker.Target{Session: targetID, TabIndex: -1})
+	d.switchToTarget(sess, ac, picker.Target{Session: ac.recentNav.ids[next], TabIndex: -1})
 }
 
-func (d *Daemon) recentNavValid(n *recentSessionNavigator) bool {
-	if n == nil || len(n.ids) == 0 {
+func (d *Daemon) pruneRecentNav(n *recentSessionNavigator) bool {
+	if n == nil || len(n.ids) == 0 || n.index < 0 || n.index >= len(n.ids) {
 		return false
 	}
+	current := n.ids[n.index]
+	kept := n.ids[:0]
+	nextIndex := -1
 	for _, id := range n.ids {
 		if d.sessionByID(id) == nil {
+			continue
+		}
+		if id == current {
+			nextIndex = len(kept)
+		}
+		kept = append(kept, id)
+	}
+	n.ids = kept
+	if nextIndex == -1 {
+		return false
+	}
+	n.index = nextIndex
+	return true
+}
+
+func sameSessionTrail(a, b []domain.SessionID) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}

@@ -287,6 +287,41 @@ func TestPaletteBackForwardSessionBoundaries(t *testing.T) {
 	})
 }
 
+func TestPaletteBackForwardSessionStaleTrail(t *testing.T) {
+	t.Run("forward skips a killed intermediate session", func(t *testing.T) {
+		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+		recent := d.sessions[domain.SessionID("recent")]
+		older := d.sessions[domain.SessionID("older")]
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+		runPaletteCommand(t, d, recent, ac, "BSK")
+		require.Same(t, older, ac.currentSession())
+
+		d.mu.Lock()
+		delete(d.sessions, recent.id)
+		d.mu.Unlock()
+
+		runPaletteCommand(t, d, older, ac, "FSK")
+		require.Same(t, current, ac.currentSession())
+	})
+
+	t.Run("back from current refreshes newly recent sessions", func(t *testing.T) {
+		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+		p, release := newBlockingPTY(t)
+		defer release()
+		newer := &session{id: "newer", name: "newer", ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p, domain.Size{Cols: 80, Rows: 23})}}
+		newer.mruAt.Store(25)
+		d.mu.Lock()
+		d.sessions[newer.id] = newer
+		d.mu.Unlock()
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+		require.Same(t, newer, ac.currentSession())
+	})
+}
+
 func newRecentNavigationTestSessions(t *testing.T) (*Daemon, *session, *attachedClient, chan ports.Frame, []func()) {
 	t.Helper()
 	p1, release1 := newBlockingPTY(t)
