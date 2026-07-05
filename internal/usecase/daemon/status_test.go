@@ -290,7 +290,7 @@ func TestBarStateForMRUFreshestFirstCapCurrentExcludedAndAttention(t *testing.T)
 	defer releasePTY()
 	sess.name = "current"
 	sess.mruAt.Store(100)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		other := &session{id: domain.SessionID("s" + strconv.Itoa(i)), name: "s" + strconv.Itoa(i), tabs: []*tab{{attention: i == 8}}}
 		other.mruAt.Store(uint64(i + 1))
 		d.sessions[other.id] = other
@@ -404,6 +404,7 @@ func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
 
 	plain := mruStyle(renderer.DefaultStyle(), themeui.Theme{}, 1, 3)
 	require.False(t, plain.HasForegroundRGB)
+	require.False(t, plain.HasBackgroundRGB)
 }
 
 func TestStatusBarNarrowRowsDropWholeOldestMRUEntries(t *testing.T) {

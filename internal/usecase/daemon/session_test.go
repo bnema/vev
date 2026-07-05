@@ -705,9 +705,7 @@ func TestTouchMRUConcurrentUpdatesRemainMonotonic(t *testing.T) {
 	var wg sync.WaitGroup
 	var observer sync.WaitGroup
 
-	observer.Add(1)
-	go func() {
-		defer observer.Done()
+	observer.Go(func() {
 		previous := sess.mruAt.Load()
 		for {
 			select {
@@ -722,17 +720,15 @@ func TestTouchMRUConcurrentUpdatesRemainMonotonic(t *testing.T) {
 			}
 			previous = current
 		}
-	}()
+	})
 
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			for range iterations {
 				d.touchMRU(sess)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

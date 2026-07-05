@@ -320,6 +320,19 @@ func TestPaletteBackForwardSessionStaleTrail(t *testing.T) {
 		runPaletteCommand(t, d, current, ac, "BSK")
 		require.Same(t, newer, ac.currentSession())
 	})
+
+	t.Run("failed switch does not advance navigator index", func(t *testing.T) {
+		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+		current.mu.Lock()
+		current.client = nil
+		current.mu.Unlock()
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+
+		require.Same(t, current, ac.currentSession())
+		require.Zero(t, ac.recentNav.index)
+	})
 }
 
 func newRecentNavigationTestSessions(t *testing.T) (*Daemon, *session, *attachedClient, chan ports.Frame, []func()) {

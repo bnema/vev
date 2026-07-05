@@ -46,8 +46,16 @@ func (d *Daemon) navigateRecentSession(sess *session, ac *attachedClient, delta 
 		d.paint(sess, ac, true)
 		return
 	}
-	ac.recentNav.index = next
-	d.switchToTarget(sess, ac, picker.Target{Session: ac.recentNav.ids[next], TabIndex: -1})
+	targetID := ac.recentNav.ids[next]
+	targetSess := d.sessionByID(targetID)
+	if targetSess == nil {
+		d.paint(sess, ac, true)
+		return
+	}
+	d.switchToTarget(sess, ac, picker.Target{Session: targetID, TabIndex: -1})
+	if ac.currentSession() == targetSess {
+		ac.recentNav.index = next
+	}
 }
 
 func (d *Daemon) pruneRecentNav(n *recentSessionNavigator) bool {

@@ -244,16 +244,23 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 	return entries
 }
 
+const (
+	mruReserveMinRow  = 40
+	mruReserveDivisor = 4
+	mruReserveMin     = 12
+	mruReserveMax     = 24
+)
+
 func mruFutureRightReserve(rowLen int) int {
-	if rowLen < 40 {
+	if rowLen < mruReserveMinRow {
 		return 0
 	}
-	reserve := rowLen / 4
-	if reserve < 12 {
-		return 12
+	reserve := rowLen / mruReserveDivisor
+	if reserve < mruReserveMin {
+		return mruReserveMin
 	}
-	if reserve > 24 {
-		return 24
+	if reserve > mruReserveMax {
+		return mruReserveMax
 	}
 	return reserve
 }
