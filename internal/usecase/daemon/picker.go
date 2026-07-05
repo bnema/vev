@@ -401,6 +401,7 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 		targetSess.active = target.TabIndex
 	}
 	targetSess.mu.Unlock()
+	d.touchMRU(targetSess)
 	ac.setSession(targetSess)
 	d.mu.Unlock()
 	return old
@@ -435,6 +436,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	targetSess.mu.Lock()
 	targetSess.client = ac
 	targetSess.mu.Unlock()
+	d.touchMRU(targetSess)
 	ac.setSession(targetSess)
 	d.mu.Unlock()
 	d.firstPaint(targetSess, ac, ac.size)

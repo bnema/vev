@@ -27,7 +27,6 @@ package daemon
 import (
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -36,6 +35,7 @@ import (
 
 const (
 	attentionGlyph     = ''
+	maxMRUSessions     = 9
 	pulseFrameCount    = 30
 	pulseFrameInterval = 120 * time.Millisecond
 )
@@ -76,27 +76,27 @@ func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, s
 
 func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles) {
 	clearStatusRow(row)
-	leftText := " " + state.status.session + " "
 	x := 0
-	writeStatusText(row, &x, leftText, styles.statusBar)
+	writeStatusText(row, &x, " "+state.status.session+" ", styles.statusBar)
 
-	reservedLeft := len([]rune(leftText))
-	if state.copyFeedback != "" {
-		drawRightPlainText(row, state.copyFeedback, reservedLeft, styles.statusBar)
-		return
+	fittedMRU := fitMRU(state.mru, len(row), x, state.copyFeedback)
+	for i, sess := range fittedMRU {
+		style := mruStyle(styles.statusBar, state.theme, i, len(fittedMRU))
+		name := sess.name
+		if sess.ephemeral {
+			name += "*"
+		}
+		writeStatusText(row, &x, " "+name, style)
+		if sess.attention {
+			writeStatusText(row, &x, " ", style)
+			writeBell(row, &x, state.attentionFrame)
+		}
 	}
-	rightText := state.attentionStackText(len(row), reservedLeft)
-	if rightText == "" {
-		return
-	}
-	rightWidth := len([]rune(rightText)) + 1
-	x = len(row) - rightWidth
-	writeStatusText(row, &x, " ", styles.statusBar)
-	writeAttentionText(row, &x, rightText, state.attentionFrame, styles.statusBar)
+	drawRightPlainText(row, state.copyFeedback, x, styles.statusBar)
 }
 
 func drawRightPlainText(row []renderer.Cell, text string, reservedLeft int, style renderer.Style) {
-	if len([]rune(text))+1+reservedLeft > len(row) {
+	if text == "" || len([]rune(text))+1+reservedLeft > len(row) {
 		return
 	}
 	x := len(row) - len([]rune(text)) - 1
@@ -112,12 +112,20 @@ func clearStatusRow(row []renderer.Cell) {
 type barState struct {
 	status         statusSnapshot
 	copyFeedback   string
-	otherAttention []string
+	mru            []mruSession
 	attentionFrame int
 	// theme is the client's terminal theme, if reported. Its zero value
 	// (Theme{}, Known: false) is a valid "no theme" default that resolves to
 	// the pre-theme fallback styles (see newThemeStyles / theme.usable).
 	theme themeui.Theme
+}
+
+type mruSession struct {
+	name      string
+	ephemeral bool
+	attention bool
+	// mruAt orders entries in barStateFor (freshest first); drawing ignores it.
+	mruAt uint64
 }
 
 type statusSnapshot struct {
@@ -154,72 +162,79 @@ func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 	if cur != nil {
 		state.status = cur.statusSegments()
 	}
-	if d == nil || copyFeedback != "" {
+	if d == nil {
 		return state
 	}
-	type attentionSession struct {
-		name string
-		at   time.Time
-	}
 	d.mu.Lock()
-	attention := make([]attentionSession, 0, len(d.sessions))
+	mru := make([]mruSession, 0, len(d.sessions))
 	for _, sess := range d.sessions {
 		if sess == cur {
 			continue
 		}
+		at := sess.mruAt.Load()
 		sess.mu.Lock()
-		var oldest time.Time
-		found := false
+		entry := mruSession{name: sess.name, ephemeral: sess.ephemeral, mruAt: at}
 		for _, tb := range sess.tabs {
-			if !tb.attention {
-				continue
+			if tb.attention {
+				entry.attention = true
+				break
 			}
-			if !found || tb.attentionAt.Before(oldest) {
-				oldest = tb.attentionAt
-				found = true
-			}
-		}
-		if found {
-			attention = append(attention, attentionSession{name: sess.name, at: oldest})
 		}
 		sess.mu.Unlock()
+		mru = append(mru, entry)
 	}
 	d.mu.Unlock()
-	sort.SliceStable(attention, func(i, j int) bool { return attention[i].at.Before(attention[j].at) })
-	state.otherAttention = make([]string, len(attention))
-	for i := range attention {
-		state.otherAttention[i] = attention[i].name
+	sort.SliceStable(mru, func(i, j int) bool {
+		if mru[i].mruAt == mru[j].mruAt {
+			return mru[i].name < mru[j].name
+		}
+		return mru[i].mruAt > mru[j].mruAt
+	})
+	if len(mru) > maxMRUSessions {
+		mru = mru[:maxMRUSessions]
 	}
+	state.mru = mru
 	return state
 }
 
-func (s barState) attentionStackText(width, reservedLeft int) string {
-	if len(s.otherAttention) == 0 {
-		return ""
+func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSession {
+	// With no feedback, keep one blank trailing cell; with feedback, reserve
+	// its " text" width plus a one-cell gap so drawRightPlainText always fits.
+	copyReserve := 1
+	if feedback != "" {
+		copyReserve = len([]rune(feedback)) + 2
 	}
-	parts := make([]string, len(s.otherAttention))
-	for i, name := range s.otherAttention {
-		parts[i] = string(attentionGlyph) + " " + name
+	budget := rowLen - leftUsed - copyReserve
+	if budget <= 0 || len(entries) == 0 {
+		return nil
 	}
-	full := strings.Join(parts, "  ")
-	if len([]rune(full))+1+reservedLeft <= width {
-		return full
+	cost := func(e mruSession) int {
+		n := 1 + len([]rune(e.name))
+		if e.ephemeral {
+			n++
+		}
+		if e.attention {
+			n += 2
+		}
+		return n
 	}
-	collapsed := string(attentionGlyph) + " ×" + strconv.Itoa(len(s.otherAttention))
-	if len([]rune(collapsed))+1+reservedLeft <= width {
-		return collapsed
+	used := 0
+	for i, e := range entries {
+		used += cost(e)
+		if used > budget {
+			return entries[:i]
+		}
 	}
-	return ""
+	return entries
 }
 
-func writeAttentionText(row []renderer.Cell, x *int, text string, frame int, style renderer.Style) {
-	for _, r := range text {
-		if r == attentionGlyph {
-			writeBell(row, x, frame)
-			continue
-		}
-		writeStatusText(row, x, string(r), style)
+func mruStyle(base renderer.Style, t themeui.Theme, i, count int) renderer.Style {
+	if count <= 1 || !base.HasForegroundRGB {
+		return base
 	}
+	amount := (float64(i) / float64(count-1)) * 0.6
+	base.ForegroundRGB = themeui.Blend(base.ForegroundRGB, t.Background, amount)
+	return base
 }
 
 func writeBell(row []renderer.Cell, x *int, frame int) {

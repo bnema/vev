@@ -150,6 +150,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	sess.mu.Lock()
 	sess.client = ac
 	sess.mu.Unlock()
+	d.touchMRU(sess)
 	d.log.Info("client resumed", "session", sess.name)
 	return sess, ac, true, nil
 }

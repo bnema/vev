@@ -327,6 +327,7 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	name := sess.name
 	tabs := append([]*tab(nil), sess.tabs...)
 	sess.mu.Unlock()
+	d.touchMRU(sess)
 	d.log.Info("client attached", "session", name, "resume", opts.resumeCapable)
 	for _, tb := range tabs {
 		tb.mu.Lock()

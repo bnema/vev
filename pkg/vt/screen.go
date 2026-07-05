@@ -31,6 +31,14 @@ type screenState struct {
 // so keep this value in sync if that payload cap changes.
 const maxEscapeBufferLen = 128 * 1024
 
+const (
+	progressStateClear = iota
+	progressStateNormal
+	progressStateError
+	progressStateIndeterminate
+	progressStatePaused
+)
+
 type Screen struct {
 	Frame renderer.Frame
 	Row   int
@@ -51,6 +59,10 @@ type Screen struct {
 	// notifications: OSC 9 (body only) and OSC 777 "notify" (title;body).
 	// Other non-clipboard OSC payloads remain discarded. Nil disables it.
 	OnNotify func(title, body string)
+	// OnProgress is called synchronously from Write for OSC 9;4 progress
+	// transitions that request attention: active progress cleared or first entry
+	// into error state. Nil disables progress reporting.
+	OnProgress func(errored bool)
 	// OnClipboard is called synchronously from Write for a complete OSC 52
 	// clipboard set request from the child. The OSC 52 selection field is
 	// accepted but ignored; the callback receives only the raw base64 payload.
@@ -70,6 +82,7 @@ type Screen struct {
 	savedCursor      cursorState
 	alternate        *screenState
 	syncUpdateActive bool
+	progressState    int
 	cursorVisible    bool
 	cursorStyle      int
 	cursorStyleSet   bool
@@ -643,15 +656,16 @@ func (s *Screen) handleOSC(payload []byte) {
 		s.handleOSC52(string(payload[len("52;"):]))
 		return
 	}
+	p := string(payload)
+	if p == "9;4" || strings.HasPrefix(p, "9;4;") {
+		s.handleProgress(p[len("9;4"):])
+		return
+	}
 	if s.OnNotify == nil {
 		return
 	}
-	p := string(payload)
 	switch {
 	case strings.HasPrefix(p, "9;"):
-		if strings.HasPrefix(p, "9;4;") {
-			return
-		}
 		s.OnNotify("", p[len("9;"):])
 	case strings.HasPrefix(p, "777;"):
 		parts := strings.SplitN(p[len("777;"):], ";", 3)
@@ -666,6 +680,38 @@ func (s *Screen) handleOSC(payload []byte) {
 			body = parts[2]
 		}
 		s.OnNotify(title, body)
+	}
+}
+
+func (s *Screen) handleProgress(rest string) {
+	rest = strings.TrimPrefix(rest, ";")
+	if rest == "" {
+		return
+	}
+	token, _, _ := strings.Cut(rest, ";")
+	state, err := strconv.Atoi(token)
+	if err != nil {
+		return
+	}
+	switch state {
+	case progressStateNormal, progressStateIndeterminate, progressStatePaused:
+		s.progressState = state
+	case progressStateClear:
+		previous := s.progressState
+		s.progressState = state
+		if previous == progressStateNormal || previous == progressStateIndeterminate || previous == progressStatePaused {
+			if s.OnProgress != nil {
+				s.OnProgress(false)
+			}
+		}
+	case progressStateError:
+		previous := s.progressState
+		s.progressState = state
+		if previous != progressStateError {
+			if s.OnProgress != nil {
+				s.OnProgress(true)
+			}
+		}
 	}
 }
 
