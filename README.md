@@ -40,10 +40,10 @@ Only one client is attached to a session at a time; attaching again displaces th
 
 ## Configuration
 
-vev reads `$XDG_CONFIG_HOME/vev/config`, or `~/.config/vev/config` when `XDG_CONFIG_HOME` is unset. The daemon reloads it while running.
+vev reads `$XDG_CONFIG_HOME/vev/config`, or `~/.config/vev/config` when `XDG_CONFIG_HOME` is unset. Missing files use defaults. The daemon reloads mtime/size changes while running, polling about every two seconds.
 
 ```text
-# Theme: auto, dark, or light.
+# Theme: auto follows the client; dark/light force built-in palettes.
 theme = auto
 
 # Rebindable actions. Leave a line out to keep its built-in binding.
@@ -63,7 +63,7 @@ switch-tab-7 = alt+7
 switch-tab-8 = alt+8
 switch-tab-9 = alt+9
 
-# Command palette codes: 2-3 uppercase letters or digits.
+# Command palette codes are trimmed, uppercased, then checked as 2-3 letters or digits.
 code.new-tab = CNT
 code.new-session = CNS
 code.close-tab = CLT
@@ -90,7 +90,7 @@ code.detach = DET
 
 Configuring an action replaces all of its built-in aliases. In the example above, the focus-pane lines keep Alt+h/j/k/l but not the Alt+Arrow aliases; omit those lines to keep all built-ins.
 
-Key specs support `alt+<char>`, `alt+space`, and `alt+left/right/up/down`; digit key specs support `alt+1` through `alt+9`, not `alt+0`. `jump-attention` first opens the oldest attention tab in the current session; if none exists, it opens the oldest attention tab in another session. Invalid entries are logged as warnings and skipped where possible.
+Key specs support `alt+<char>`, `alt+space`, and `alt+left/right/up/down`; digit key specs support `alt+1` through `alt+9`, not `alt+0`. `jump-attention` first opens the oldest attention tab in the current session; if none exists, it opens the oldest attention tab in another session. Invalid entries are logged as warnings and skipped where possible; duplicate config keys use the last value, binding conflicts keep the later action's defaults, and command-code conflicts drop the conflicting override.
 
 ## Remote attach
 
