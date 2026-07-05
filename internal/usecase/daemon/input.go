@@ -71,6 +71,9 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	}
 
 	if rt.copyActive() {
+		if rt.copySearchActive() {
+			return
+		}
 		if ev.Button == mouse.Left {
 			contentRow := ev.Row - 1
 			tb.mu.Lock()

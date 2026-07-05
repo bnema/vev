@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/stretchr/testify/require"
 )
 
 func snapshot(lines []string, height int) Snapshot {
@@ -308,6 +309,91 @@ func frameText(row []renderer.Cell) string {
 		b.WriteRune(c.Rune)
 	}
 	return b.String()
+}
+
+func TestCopyModeSearchMovesAndCyclesMatches(t *testing.T) {
+	s := snapshot([]string{"alpha", "beta alpha", "gamma", "alpha omega"}, 2)
+	m := NewMode(s)
+
+	require.True(t, m.Search(s, "alpha"))
+	require.Equal(t, 0, m.Cursor)
+	require.Equal(t, 0, m.ViewportTop)
+
+	require.True(t, m.NextSearchMatch(s, 1))
+	require.Equal(t, 1, m.Cursor)
+	require.Equal(t, 0, m.ViewportTop)
+
+	require.True(t, m.NextSearchMatch(s, 1))
+	require.Equal(t, 3, m.Cursor)
+	require.Equal(t, 2, m.ViewportTop)
+
+	require.True(t, m.NextSearchMatch(s, 1))
+	require.Equal(t, 0, m.Cursor)
+
+	require.True(t, m.NextSearchMatch(s, -1))
+	require.Equal(t, 3, m.Cursor)
+}
+
+func TestFindMatchesReturnsNonOverlappingRepeatedMatches(t *testing.T) {
+	s := snapshot([]string{"aaa"}, 1)
+
+	matches := FindMatches(s, "aa")
+
+	require.Len(t, matches, 1)
+	require.Equal(t, 0, matches[0].Start)
+	require.Equal(t, 2, matches[0].End)
+}
+
+func TestFindMatchesKeepsRuneAndCellIndexesAlignedWhenLowercasing(t *testing.T) {
+	s := snapshot([]string{"İa"}, 1)
+
+	matches := FindMatches(s, "İa")
+
+	require.Len(t, matches, 1)
+	require.Equal(t, 0, matches[0].Start)
+	require.Equal(t, 2, matches[0].End)
+}
+
+func TestCopyModeSearchUsesDisplayCellOffsetsForWideRows(t *testing.T) {
+	row := []renderer.Cell{
+		{Rune: '界'},
+		{Continuation: true},
+		{Rune: ' '},
+		{Rune: 'a'},
+		{Rune: 'l'},
+		{Rune: 'p'},
+		{Rune: 'h'},
+		{Rune: 'a'},
+	}
+	s := Snapshot{Rows: [][]renderer.Cell{row}, Width: 8, Height: 1}
+
+	wideMatches := FindMatches(s, "界")
+	require.Len(t, wideMatches, 1)
+	require.Equal(t, 0, wideMatches[0].Start)
+	require.Equal(t, 2, wideMatches[0].End)
+
+	matches := FindMatches(s, "alpha")
+	require.Len(t, matches, 1)
+	require.Equal(t, 3, matches[0].Start)
+	require.Equal(t, 8, matches[0].End)
+}
+
+func TestCopyModeRenderHighlightsCurrentSearchMatch(t *testing.T) {
+	s := snapshot([]string{"alpha", "beta alpha"}, 2)
+	s.Width = 32
+	m := NewMode(s)
+	require.True(t, m.Search(s, "alpha"))
+
+	frame := m.Render(s)
+
+	for x := range len("alpha") {
+		if !frame.At(x, 0).Style.Inverse {
+			t.Fatalf("search match cell %d inverse = false, want highlighted", x)
+		}
+	}
+	if !strings.Contains(frameText(frame.Row(s.Height)), "/alpha") {
+		t.Fatalf("status row = %q, want search query", frameText(frame.Row(s.Height)))
+	}
 }
 
 func TestCopyModeMoveWhileSelectingKeepsAnchorAndExtendsSelection(t *testing.T) {

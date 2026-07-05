@@ -7,8 +7,9 @@ import (
 )
 
 func row(text string) []renderer.Cell {
-	cells := make([]renderer.Cell, len(text))
-	for i, r := range text {
+	runes := []rune(text)
+	cells := make([]renderer.Cell, len(runes))
+	for i, r := range runes {
 		cells[i] = renderer.Cell{Rune: r, Style: renderer.DefaultStyle()}
 	}
 	return cells

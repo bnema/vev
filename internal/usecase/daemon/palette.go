@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -243,12 +242,5 @@ func (e paletteExec) OpenSessionPicker() error {
 
 func composePaletteClientFrame(model *palette.Model, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
 	styleSet := resolveThemeStyles(styles)
-	inner := paletteModal.Composite(base, styleSet.border)
-	modalFrame := model.Render(domain.Size{Cols: inner.Width, Rows: inner.Height}, styleSet.selection)
-	for y := range min(inner.Height, modalFrame.Height) {
-		for x := range min(inner.Width, modalFrame.Width) {
-			base.Set(inner.X+x, inner.Y+y, modalFrame.At(x, y))
-		}
-	}
-	return base, []renderer.Damage{renderer.FullRedraw()}
+	return composeModalClientFrame(base, paletteModal, styleSet, styleSet.selection, model.Render)
 }
