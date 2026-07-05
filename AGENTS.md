@@ -57,9 +57,9 @@ Before touching daemon teardown paths, read the lock-ordering notes at the top o
 
 ## Wire protocol
 
-Wire code lives in `internal/ports/frame.go` and `internal/ports/wire.go`.
+Wire payload types/codecs live in `internal/ports/frame.go` and `internal/ports/wire.go`. Connection framing lives in `internal/adapters/ipc/transport.go`.
 
-- Frames are 4-byte big-endian length, 1 type byte, then payload.
+- IPC frames on a connection are 4-byte big-endian length, 1 type byte, then payload.
 - Client message types are `1–15`; server message types are `16+`.
 - Version negotiation requires strict equality.
 - `Hello.Version` must stay first so `PeekHelloVersion` works.
