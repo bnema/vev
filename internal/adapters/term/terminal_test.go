@@ -60,7 +60,7 @@ func TestTerminal_EnterRaw_NonTTY_EmitsAltScreenAndCursorEscapes(t *testing.T) {
 	_ = outW.Close()
 	<-done
 
-	want := altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + oscColorQuery + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + altScreenExit
+	want := altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + oscColorQuery + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + altScreenExit
 	if got := captured.String(); got != want {
 		t.Fatalf("captured escapes = %q, want %q", got, want)
 	}
@@ -101,9 +101,31 @@ func TestTerminal_EnterRaw_IsIdempotentAcrossCalls(t *testing.T) {
 	// Alt-screen/cursor/theme-query escapes must appear exactly once for enter and
 	// cursor/alt-screen exits exactly once, regardless of how many times
 	// EnterRaw/restore were called.
-	want := altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + oscColorQuery + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + altScreenExit
+	want := altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + oscColorQuery + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + altScreenExit
 	if got := captured.String(); got != want {
 		t.Fatalf("captured escapes = %q, want %q", got, want)
+	}
+}
+
+func TestTerminal_QueryColors(t *testing.T) {
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe(in): %v", err)
+	}
+	defer func() { _ = inW.Close() }()
+	defer func() { _ = inR.Close() }()
+
+	outR, outW, captured, done := pipeCapture(t)
+	defer func() { _ = outR.Close() }()
+
+	tm := NewWithFiles(inR, outW)
+	if err := tm.QueryColors(); err != nil {
+		t.Fatalf("QueryColors: %v", err)
+	}
+	_ = outW.Close()
+	<-done
+	if got := captured.String(); got != oscColorQuery {
+		t.Fatalf("captured = %q, want %q", got, oscColorQuery)
 	}
 }
 

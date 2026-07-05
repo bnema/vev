@@ -3,6 +3,7 @@ package keys
 import (
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,6 +45,39 @@ func (h *captureHandler) Forward(data []byte) {
 	}
 }
 func (h *captureHandler) Action(a Action) { h.actions = append(h.actions, a) }
+
+func TestDefaultBindingsParityRoutesBuiltInBindings(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []byte
+		want Action
+	}{
+		{name: "palette", in: []byte{ESC, ' '}, want: ActionOpenPalette},
+		{name: "jump attention", in: []byte{ESC, 'a'}, want: ActionJumpAttention},
+		{name: "focus left", in: []byte{ESC, 'h'}, want: ActionFocusPaneLeft},
+		{name: "focus down", in: []byte{ESC, 'j'}, want: ActionFocusPaneDown},
+		{name: "focus up", in: []byte{ESC, 'k'}, want: ActionFocusPaneUp},
+		{name: "focus right", in: []byte{ESC, 'l'}, want: ActionFocusPaneRight},
+		{name: "arrow left", in: []byte{ESC, '[', '1', ';', '3', 'D'}, want: ActionFocusPaneLeft},
+		{name: "arrow right", in: []byte{ESC, '[', '1', ';', '3', 'C'}, want: ActionFocusPaneRight},
+		{name: "arrow up", in: []byte{ESC, '[', '1', ';', '3', 'A'}, want: ActionFocusPaneUp},
+		{name: "arrow down", in: []byte{ESC, '[', '1', ';', '3', 'B'}, want: ActionFocusPaneDown},
+		{name: "digit", in: []byte{ESC, '1'}, want: ActionSwitchTab1},
+		{name: "digit alias", in: append([]byte{ESC}, []byte("é")...), want: ActionSwitchTab2},
+	}
+
+	var bindings atomic.Pointer[Bindings]
+	bindings.Store(DefaultBindings())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := &fakeClock{}
+			h := &captureHandler{}
+			NewRouter(clk, h, &bindings).Route(tc.in)
+			require.Equal(t, []Action{tc.want}, h.actions)
+			require.Empty(t, h.forwards)
+		})
+	}
+}
 
 func TestRouterInterceptsAltSpaceForPalette(t *testing.T) {
 	clk := &fakeClock{}

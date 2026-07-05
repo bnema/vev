@@ -85,6 +85,8 @@ type Theme struct {
 	HasBackground bool
 	Background    renderer.RGB
 	TrueColor     bool
+	SchemeKnown   bool
+	Light         bool
 }
 
 // ImagePush carries a clipboard image from a remote client, to be written to
@@ -411,6 +413,12 @@ func MarshalTheme(m Theme) []byte {
 	if m.TrueColor {
 		flags |= 0x04
 	}
+	if m.SchemeKnown {
+		flags |= 0x08
+	}
+	if m.Light {
+		flags |= 0x10
+	}
 	return []byte{
 		flags,
 		m.Foreground.R, m.Foreground.G, m.Foreground.B,
@@ -458,6 +466,8 @@ func UnmarshalTheme(b []byte) (Theme, error) {
 		HasBackground: flags&0x02 != 0,
 		Background:    renderer.RGB{R: bgR, G: bgG, B: bgB},
 		TrueColor:     flags&0x04 != 0,
+		SchemeKnown:   flags&0x08 != 0,
+		Light:         flags&0x10 != 0,
 	}, nil
 }
 

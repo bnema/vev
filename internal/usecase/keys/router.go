@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -49,9 +50,10 @@ type Handler interface {
 // ESCDelay so split Alt-key sequences can still be intercepted without delaying
 // known terminal control prefixes (ESC [ and ESC O), which pass through.
 type Router struct {
-	clock ports.Clock
-	delay time.Duration
-	h     Handler
+	clock    ports.Clock
+	delay    time.Duration
+	h        Handler
+	bindings *atomic.Pointer[Bindings]
 
 	mu          sync.Mutex
 	pending     bool
@@ -60,8 +62,12 @@ type Router struct {
 	pendingDone chan struct{}
 }
 
-func NewRouter(clock ports.Clock, h Handler) *Router {
-	return &Router{clock: clock, delay: ESCDelay, h: h}
+func NewRouter(clock ports.Clock, h Handler, bindings ...*atomic.Pointer[Bindings]) *Router {
+	var bindingPtr *atomic.Pointer[Bindings]
+	if len(bindings) > 0 {
+		bindingPtr = bindings[0]
+	}
+	return &Router{clock: clock, delay: ESCDelay, h: h, bindings: bindingPtr}
 }
 
 // Route routes one transport read.
@@ -120,7 +126,7 @@ func (r *Router) route(data []byte) {
 				continue
 			}
 		}
-		if action, size, ok, partial := altArrowCSI(remaining); ok {
+		if action, size, ok, partial := r.altArrowCSI(remaining); ok {
 			flush()
 			r.h.Action(action)
 			i += 1 + size
@@ -136,7 +142,7 @@ func (r *Router) route(data []byte) {
 			i += 2
 			continue
 		}
-		if action, size, ok := binding(remaining); ok {
+		if action, size, ok := r.binding(remaining); ok {
 			flush()
 			r.h.Action(action)
 			i += 1 + size
@@ -154,7 +160,7 @@ func (r *Router) route(data []byte) {
 }
 
 func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int) int {
-	if action, size, ok, partial := altArrowCSI(data); ok {
+	if action, size, ok, partial := r.altArrowCSI(data); ok {
 		r.h.Action(action)
 		return size
 	} else if partial {
@@ -162,7 +168,7 @@ func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int) int {
 		return len(data)
 	}
 	next := data[0]
-	if action, size, ok := binding(data); ok {
+	if action, size, ok := r.binding(data); ok {
 		r.h.Action(action)
 		return size
 	}
@@ -238,7 +244,18 @@ func (r *Router) forward(data []byte) {
 
 func passThroughPrefix(b byte) bool { return b == '[' || b == 'O' }
 
-func altArrowCSI(data []byte) (Action, int, bool, bool) {
+func (r *Router) currentBindings() *Bindings {
+	if r.bindings == nil {
+		return defaultBindings
+	}
+	bindings := r.bindings.Load()
+	if bindings == nil {
+		return defaultBindings
+	}
+	return bindings
+}
+
+func (r *Router) altArrowCSI(data []byte) (Action, int, bool, bool) {
 	const seqLen = len("[1;3A")
 	if len(data) < seqLen {
 		return 0, 0, false, hasAltArrowCSIPrefix(data)
@@ -247,18 +264,10 @@ func altArrowCSI(data []byte) (Action, int, bool, bool) {
 	if seq[0] != '[' || seq[1] != '1' || seq[2] != ';' || (seq[3] != '3' && seq[3] != '9') {
 		return 0, 0, false, false
 	}
-	switch seq[4] {
-	case 'A':
-		return ActionFocusPaneUp, seqLen, true, false
-	case 'B':
-		return ActionFocusPaneDown, seqLen, true, false
-	case 'C':
-		return ActionFocusPaneRight, seqLen, true, false
-	case 'D':
-		return ActionFocusPaneLeft, seqLen, true, false
-	default:
-		return 0, 0, false, false
+	if action, ok := r.currentBindings().actionForAltArrow(seq[4]); ok {
+		return action, seqLen, true, false
 	}
+	return 0, 0, false, false
 }
 
 func hasAltArrowCSIPrefix(data []byte) bool {
@@ -280,33 +289,8 @@ func matchesPrefix(data []byte, want string) bool {
 	return true
 }
 
-func binding(data []byte) (Action, int, bool) {
-	if len(data) == 0 {
-		return 0, 0, false
-	}
-	switch data[0] {
-	case ' ':
-		return ActionOpenPalette, 1, true
-	case 'a':
-		return ActionJumpAttention, 1, true
-	case 'h':
-		return ActionFocusPaneLeft, 1, true
-	case 'j':
-		return ActionFocusPaneDown, 1, true
-	case 'k':
-		return ActionFocusPaneUp, 1, true
-	case 'l':
-		return ActionFocusPaneRight, 1, true
-	}
-
-	key, size := utf8.DecodeRune(data)
-	if key == utf8.RuneError && size == 1 {
-		return 0, 0, false
-	}
-	if idx, ok := topRowDigitIndex(key); ok {
-		return ActionSwitchTab1 + Action(idx), size, true
-	}
-	return 0, 0, false
+func (r *Router) binding(data []byte) (Action, int, bool) {
+	return r.currentBindings().actionForAltBytes(data)
 }
 
 var topRowDigitAliases = [][]rune{

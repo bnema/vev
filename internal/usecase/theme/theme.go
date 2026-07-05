@@ -12,13 +12,38 @@ const maxPending = 64
 
 // Theme describes terminal default colors reported by OSC 10/11.
 type Theme struct {
-	Foreground renderer.RGB
-	Background renderer.RGB
-	HasFG      bool
-	HasBG      bool
-	TrueColor  bool
-	Known      bool
+	Foreground  renderer.RGB
+	Background  renderer.RGB
+	HasFG       bool
+	HasBG       bool
+	TrueColor   bool
+	Known       bool
+	SchemeKnown bool
+	Light       bool
 }
+
+var (
+	BuiltinDark = Theme{
+		Foreground:  renderer.RGB{R: 0xd8, G: 0xd8, B: 0xd8},
+		Background:  renderer.RGB{R: 0x18, G: 0x18, B: 0x18},
+		HasFG:       true,
+		HasBG:       true,
+		TrueColor:   true,
+		Known:       true,
+		SchemeKnown: true,
+		Light:       false,
+	}
+	BuiltinLight = Theme{
+		Foreground:  renderer.RGB{R: 0x20, G: 0x20, B: 0x20},
+		Background:  renderer.RGB{R: 0xf8, G: 0xf8, B: 0xf8},
+		HasFG:       true,
+		HasBG:       true,
+		TrueColor:   true,
+		Known:       true,
+		SchemeKnown: true,
+		Light:       true,
+	}
+)
 
 // ParseXColor parses the XParseColor formats commonly returned by OSC 10/11.
 func ParseXColor(s string) (renderer.RGB, bool) {
@@ -95,7 +120,7 @@ type Scanner struct {
 // callers never see it split. Partial OSC color responses are buffered across
 // calls, but the buffer is bounded so an unterminated OSC cannot block
 // unrelated input forever.
-func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), onBytes func([]byte)) {
+func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), onScheme func(light bool), onBytes func([]byte)) {
 	if len(s.pending) > 0 {
 		combined := make([]byte, 0, len(s.pending)+len(data))
 		combined = append(combined, s.pending...)
@@ -108,6 +133,22 @@ func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), on
 	for i := 0; i < len(data); i++ {
 		if data[i] != '\x1b' {
 			continue
+		}
+
+		if complete, possible, light := schemeCSINotification(data[i:]); complete {
+			if byteStart < i {
+				onBytes(data[byteStart:i])
+			}
+			onScheme(light)
+			i += len("\x1b[?997;1n") - 1
+			byteStart = i + 1
+			continue
+		} else if possible {
+			if byteStart < i {
+				onBytes(data[byteStart:i])
+			}
+			s.bufferOrFlush(data[i:], onBytes)
+			return
 		}
 
 		completePrefix, possiblePrefix := colorOSCPrefix(data[i:])
@@ -181,6 +222,31 @@ func colorOSCPrefix(data []byte) (complete bool, possible bool) {
 		}
 	}
 	return false, false
+}
+
+func schemeCSINotification(data []byte) (complete bool, possible bool, light bool) {
+	if len(data) < 2 {
+		return false, false, false
+	}
+	prefixes := []struct {
+		seq   []byte
+		light bool
+	}{
+		{seq: []byte("\x1b[?997;1n"), light: false},
+		{seq: []byte("\x1b[?997;2n"), light: true},
+	}
+	for _, prefix := range prefixes {
+		if len(data) >= len(prefix.seq) {
+			if bytes.Equal(data[:len(prefix.seq)], prefix.seq) {
+				return true, true, prefix.light
+			}
+			continue
+		}
+		if bytes.Equal(data, prefix.seq[:len(data)]) {
+			return false, true, false
+		}
+	}
+	return false, false, false
 }
 
 func findTerminator(data []byte) (start int, end int) {

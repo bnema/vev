@@ -181,15 +181,23 @@ func TestThemeGoldenAndRoundTrip(t *testing.T) {
 		want []byte
 	}{
 		{
-			name: "foreground background truecolor",
+			name: "foreground background truecolor dark scheme",
 			msg: Theme{
 				HasForeground: true,
 				Foreground:    renderer.RGB{R: 1, G: 2, B: 3},
 				HasBackground: true,
 				Background:    renderer.RGB{R: 4, G: 5, B: 6},
 				TrueColor:     true,
+				SchemeKnown:   true,
 			},
-			want: []byte{0x07, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+			want: []byte{0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+		},
+		{
+			name: "light scheme bit without known is preserved",
+			msg: Theme{
+				Light: true,
+			},
+			want: []byte{0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 		},
 		{
 			name: "foreground only no truecolor",

@@ -30,6 +30,8 @@ const (
 	mouseDisable          = "\x1b[?1002l\x1b[?1006l"
 	bracketedPasteEnable  = "\x1b[?2004h"
 	bracketedPasteDisable = "\x1b[?2004l"
+	colorSchemeEnable     = "\x1b[?2031h"
+	colorSchemeDisable    = "\x1b[?2031l"
 	oscColorQuery         = "\x1b]10;?\x07\x1b]11;?\x07"
 )
 
@@ -107,7 +109,7 @@ func (t *Terminal) EnterRaw() (func() error, error) {
 	}
 	t.orig = old
 
-	if _, err := t.bw.WriteString(altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + oscColorQuery); err != nil {
+	if _, err := t.bw.WriteString(altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + oscColorQuery); err != nil {
 		_ = t.restoreRawLocked()
 		return nil, fmt.Errorf("term: enter alt screen: %w", err)
 	}
@@ -141,7 +143,7 @@ func (t *Terminal) restore() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	_, werr := t.bw.WriteString(cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + altScreenExit)
+	_, werr := t.bw.WriteString(cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + altScreenExit)
 	ferr := t.bw.Flush()
 
 	rerr := t.restoreRawLocked()
@@ -232,6 +234,19 @@ func (t *Terminal) stopResizeLocked() {
 		}
 	}
 	t.resizeWG.Wait()
+}
+
+// QueryColors re-emits OSC 10/11 queries for default foreground/background.
+func (t *Terminal) QueryColors() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, err := t.bw.WriteString(oscColorQuery); err != nil {
+		return fmt.Errorf("term: query colors: %w", err)
+	}
+	if err := t.bw.Flush(); err != nil {
+		return fmt.Errorf("term: query colors: %w", err)
+	}
+	return nil
 }
 
 // In returns the reader for the controlling terminal's input.
