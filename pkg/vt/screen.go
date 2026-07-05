@@ -656,9 +656,6 @@ func (s *Screen) handleOSC(payload []byte) {
 		s.handleOSC52(string(payload[len("52;"):]))
 		return
 	}
-	if s.OnNotify == nil && s.OnProgress == nil {
-		return
-	}
 	p := string(payload)
 	if p == "9;4" || strings.HasPrefix(p, "9;4;") {
 		s.handleProgress(p[len("9;4"):])

@@ -206,6 +206,23 @@ func TestOSC9ProgressNilCallbackDoesNotPanic(t *testing.T) {
 	})
 }
 
+func TestOSC9ProgressSTTerminated(t *testing.T) {
+	s := NewScreen(10, 2)
+	var got []bool
+	s.OnProgress = func(errored bool) { got = append(got, errored) }
+	s.Write([]byte("\x1b]9;4;1;50\x1b\\\x1b]9;4;0;100\x1b\\"))
+	require.Equal(t, []bool{false}, got)
+}
+
+func TestOSC9ProgressStateTrackedBeforeCallbackSet(t *testing.T) {
+	s := NewScreen(10, 2)
+	s.Write([]byte("\x1b]9;4;1;50\x07"))
+	var got []bool
+	s.OnProgress = func(errored bool) { got = append(got, errored) }
+	s.Write([]byte("\x1b]9;4;0;100\x07"))
+	require.Equal(t, []bool{false}, got)
+}
+
 func TestOnNotifyIgnoresOSC9Progress(t *testing.T) {
 	s := NewScreen(10, 2)
 	calls := 0

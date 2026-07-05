@@ -124,7 +124,8 @@ type mruSession struct {
 	name      string
 	ephemeral bool
 	attention bool
-	mruAt     uint64
+	// mruAt orders entries in barStateFor (freshest first); drawing ignores it.
+	mruAt uint64
 }
 
 type statusSnapshot struct {
@@ -197,6 +198,8 @@ func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 }
 
 func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSession {
+	// With no feedback, keep one blank trailing cell; with feedback, reserve
+	// its " text" width plus a one-cell gap so drawRightPlainText always fits.
 	copyReserve := 1
 	if feedback != "" {
 		copyReserve = len([]rune(feedback)) + 2
