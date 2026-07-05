@@ -88,7 +88,9 @@ code.rename-session = RNS
 code.detach = DET
 ```
 
-Key specs support `alt+<char>`, `alt+space`, and `alt+left/right/up/down`. `jump-attention` goes to the oldest tab or session asking for attention. Invalid entries are logged as warnings and skipped where possible.
+Configuring an action replaces all of its built-in aliases. In the example above, the focus-pane lines keep Alt+h/j/k/l but not the Alt+Arrow aliases; omit those lines to keep all built-ins.
+
+Key specs support `alt+<char>`, `alt+space`, and `alt+left/right/up/down`. `jump-attention` first opens the oldest attention tab in the current session; if none exists, it opens the oldest attention tab in another session. Invalid entries are logged as warnings and skipped where possible.
 
 ## Remote attach
 
