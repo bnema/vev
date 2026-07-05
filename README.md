@@ -87,6 +87,7 @@ Successful commands are promoted near the top the next time the palette opens.
 | CLP | close focused pane |
 | FPL / FPR / FPU / FPD | focus pane left / right / up / down |
 | NXT / PVT | switch to next / previous tab |
+| BSK / FSK | move back / forward through recent sessions |
 | SSP | open session picker |
 | VIS | enter visual mode |
 | RNS | rename session |
@@ -109,7 +110,7 @@ Open it with `SSP` in the palette. It lists sessions and tabs, previews the sele
 
 Tabs hold pane layouts. Panes can be split left/right/up/down, stacked, focused by direction, and closed from the command palette. Clicking a pane focuses it.
 
-The top bar shows numbered tabs. The bottom bar shows the session name; ephemeral sessions are marked with `*`, for example `0*`.
+The top bar shows numbered tabs. The bottom bar shows the active session followed by recent sessions, fading toward older entries. Ephemeral sessions are marked with `*`, for example `0*`.
 
 ## Visual mode and copy
 
