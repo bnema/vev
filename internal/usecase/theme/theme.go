@@ -224,18 +224,28 @@ func colorOSCPrefix(data []byte) (complete bool, possible bool) {
 	return false, false
 }
 
+// schemeCSIPrefixes lists the CSI ?997 scheme-notification sequences vev
+// recognizes. Package-level so schemeCSINotification (called per ESC byte in
+// the stdin hot path) doesn't allocate on every call.
+var schemeCSIPrefixes = []struct {
+	seq   []byte
+	light bool
+}{
+	{seq: []byte("\x1b[?997;1n"), light: false},
+	{seq: []byte("\x1b[?997;2n"), light: true},
+}
+
 func schemeCSINotification(data []byte) (complete bool, possible bool, light bool) {
-	if len(data) < 2 {
+	// A bare trailing ESC (handled elsewhere) or "ESC [" (2 bytes) is
+	// something a user can type; unlike OSC's "ESC ]" it must never be
+	// withheld as a partial match with nothing following, or those keystrokes
+	// would be buffered and never forwarded. Partial buffering only starts
+	// from "ESC [ ?" onward; a complete match is always >= 9 bytes, so this
+	// guard cannot reject one.
+	if len(data) < 3 {
 		return false, false, false
 	}
-	prefixes := []struct {
-		seq   []byte
-		light bool
-	}{
-		{seq: []byte("\x1b[?997;1n"), light: false},
-		{seq: []byte("\x1b[?997;2n"), light: true},
-	}
-	for _, prefix := range prefixes {
+	for _, prefix := range schemeCSIPrefixes {
 		if len(data) >= len(prefix.seq) {
 			if bytes.Equal(data[:len(prefix.seq)], prefix.seq) {
 				return true, true, prefix.light

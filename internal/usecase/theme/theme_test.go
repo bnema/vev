@@ -98,6 +98,28 @@ func TestScannerHandlesSplitSchemeNotifications(t *testing.T) {
 	}
 }
 
+func TestScannerForwardsBareCSIIntroducerImmediately(t *testing.T) {
+	var s Scanner
+	var out bytes.Buffer
+	schemes := 0
+
+	s.Scan([]byte("a\x1b["), func(kind int, rgb renderer.RGB) {}, func(light bool) { schemes++ }, func(b []byte) { out.Write(b) })
+
+	if out.String() != "a\x1b[" {
+		t.Fatalf("passthrough=%q want %q", out.String(), "a\x1b[")
+	}
+	if schemes != 0 {
+		t.Fatalf("schemes=%d want 0", schemes)
+	}
+
+	out.Reset()
+	s.Scan([]byte("A"), func(kind int, rgb renderer.RGB) {}, func(light bool) { schemes++ }, func(b []byte) { out.Write(b) })
+
+	if out.String() != "A" {
+		t.Fatalf("follow-up passthrough=%q want %q (no stale state)", out.String(), "A")
+	}
+}
+
 func TestScannerForwardsInterleavedGarbageInOrder(t *testing.T) {
 	var s Scanner
 	var out bytes.Buffer

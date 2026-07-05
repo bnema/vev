@@ -17,9 +17,6 @@ var commandCodePattern = regexp.MustCompile(`^[A-Z0-9]{2,3}$`)
 // ApplyConfig validates and atomically swaps daemon runtime configuration.
 func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	bindings, warnings := keys.BuildBindingEntries(cfg.BindingEntries)
-	if len(cfg.BindingEntries) == 0 && len(cfg.Bindings) > 0 {
-		bindings, warnings = keys.BuildBindings(cfg.Bindings)
-	}
 	for _, warning := range warnings {
 		d.logConfigWarning(warning)
 	}
@@ -52,28 +49,68 @@ func (d *Daemon) buildCodeOverrides(configured map[string]string) map[string]str
 		desired[slug] = code
 	}
 
-	used := make(map[string]string, len(commands))
-	for _, cmd := range commands {
-		used[cmd.Code] = cmd.Slug
+	// The effective code for a slug is its accepted override if it has one,
+	// or its registry default otherwise. Resolve to a fixpoint rather than a
+	// single sorted pass: dropping one slug's override to resolve a conflict
+	// can free up its default code, which may in turn conflict with a
+	// *different* slug's override — that must be re-checked regardless of
+	// where the two slugs fall in sort order.
+	accepted := make(map[string]string, len(desired))
+	for slug, code := range desired {
+		accepted[slug] = code
 	}
-	overrides := make(map[string]string)
-	for _, slug := range sortedKeys(desired) {
-		code := desired[slug]
-		fallback := bySlug[slug].Code
-		delete(used, fallback)
-		if existing, ok := used[code]; ok && existing != slug {
-			d.logConfigWarning(domain.Warning{Msg: fmt.Sprintf("command code %q for %q conflicts with %q", code, slug, existing)})
-			if fallbackOwner, fallbackUsed := used[fallback]; fallbackUsed && fallbackOwner != slug {
-				d.logConfigWarning(domain.Warning{Msg: fmt.Sprintf("default command code %q for %q conflicts with %q", fallback, slug, fallbackOwner)})
+	effectiveCode := func(slug string) string {
+		if code, ok := accepted[slug]; ok {
+			return code
+		}
+		return bySlug[slug].Code
+	}
+
+	for {
+		claimants := make(map[string][]string, len(commands))
+		for _, cmd := range commands {
+			code := effectiveCode(cmd.Slug)
+			claimants[code] = append(claimants[code], cmd.Slug)
+		}
+
+		dropped := false
+		for code, slugs := range claimants {
+			if len(slugs) < 2 {
 				continue
 			}
-			used[fallback] = slug
-			continue
+			sort.Strings(slugs)
+
+			// If one claimant holds this code by default (no accepted
+			// override), every override claimant loses to it and is
+			// dropped. Otherwise every claimant is an override; keep the
+			// lexicographically smallest slug and drop the rest.
+			keep := ""
+			for _, slug := range slugs {
+				if _, isOverride := accepted[slug]; !isOverride {
+					keep = slug
+					break
+				}
+			}
+			if keep == "" {
+				keep = slugs[0]
+			}
+			for _, slug := range slugs {
+				if slug == keep {
+					continue
+				}
+				if _, isOverride := accepted[slug]; !isOverride {
+					continue
+				}
+				d.logConfigWarning(domain.Warning{Msg: fmt.Sprintf("command code %q for %q conflicts with %q", code, slug, keep)})
+				delete(accepted, slug)
+				dropped = true
+			}
 		}
-		used[code] = slug
-		overrides[slug] = code
+		if !dropped {
+			break
+		}
 	}
-	return overrides
+	return accepted
 }
 
 func sortedKeys(values map[string]string) []string {
@@ -147,6 +184,6 @@ func (d *Daemon) reapplyThemeAllSessions() {
 		if ac != nil {
 			clientTheme = ac.getClientTheme()
 		}
-		d.applyHostTheme(sess, ac, d.effectiveTheme(clientTheme))
+		d.applyHostTheme(sess, ac, d.effectiveTheme(clientTheme), ac == nil)
 	}
 }

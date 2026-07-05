@@ -341,7 +341,7 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	sess.mu.Unlock()
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", name, "resume", opts.resumeCapable)
-	d.applyHostTheme(sess, ac, d.effectiveTheme(themeui.Theme{}))
+	d.applyHostTheme(sess, ac, d.effectiveTheme(themeui.Theme{}), true)
 	return ac, old
 }
 
@@ -357,7 +357,7 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 // (and run its own attach-time reset), so this call must leave the tabs
 // alone rather than clobbering that client's freshly applied colors.
 func (d *Daemon) resetScreenDefaultColors(sess *session) {
-	d.applyHostTheme(sess, nil, d.effectiveTheme(themeui.Theme{}))
+	d.applyHostTheme(sess, nil, d.effectiveTheme(themeui.Theme{}), true)
 }
 
 func (d *Daemon) detachReplacedClient(old *attachedClient) {
@@ -508,7 +508,7 @@ func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) 
 	ac.setClientTheme(clientTheme)
 	t := d.effectiveTheme(clientTheme)
 
-	if !d.applyHostTheme(sess, ac, t) {
+	if !d.applyHostTheme(sess, ac, t, false) {
 		return
 	}
 	d.paint(sess, ac, true)

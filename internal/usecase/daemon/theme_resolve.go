@@ -2,7 +2,7 @@ package daemon
 
 import "github.com/bnema/vev/internal/usecase/theme"
 
-func (d *Daemon) applyHostTheme(sess *session, ac *attachedClient, t theme.Theme) bool {
+func (d *Daemon) applyHostTheme(sess *session, ac *attachedClient, t theme.Theme, clearUnknownScheme bool) bool {
 	sess.mu.Lock()
 	if ac != nil {
 		if sess.client != ac {
@@ -25,7 +25,7 @@ func (d *Daemon) applyHostTheme(sess *session, ac *attachedClient, t theme.Theme
 		tb.mu.Unlock()
 		for _, p := range panes {
 			p.mu.Lock()
-			applyPaneThemeLocked(p, t, ac == nil)
+			applyPaneThemeLocked(p, t, clearUnknownScheme)
 			p.mu.Unlock()
 		}
 	}

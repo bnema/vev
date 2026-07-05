@@ -30,10 +30,6 @@ func TestParse(t *testing.T) {
 			input: "# full line\nnew-tab = alt+t # open tab\ndetach = alt+#\n",
 			want: domain.Config{
 				Theme: domain.ThemeAuto,
-				Bindings: map[string]string{
-					"new-tab": "alt+t",
-					"detach":  "alt+#",
-				},
 				BindingEntries: []domain.ConfigEntry{
 					{Key: "new-tab", Value: "alt+t"},
 					{Key: "detach", Value: "alt+#"},
@@ -46,7 +42,6 @@ func TestParse(t *testing.T) {
 			input: "theme = light\r\ncode.detach = dt\r\n",
 			want: domain.Config{
 				Theme:          domain.ThemeLight,
-				Bindings:       map[string]string{},
 				BindingEntries: []domain.ConfigEntry{},
 				Codes:          map[string]string{"detach": "dt"},
 			},
@@ -56,7 +51,6 @@ func TestParse(t *testing.T) {
 			input: "theme = blue\n",
 			want: domain.Config{
 				Theme:          domain.ThemeAuto,
-				Bindings:       map[string]string{},
 				BindingEntries: []domain.ConfigEntry{},
 				Codes:          map[string]string{},
 			},
@@ -67,7 +61,6 @@ func TestParse(t *testing.T) {
 			input: "unknown.action = alt+x\n",
 			want: domain.Config{
 				Theme:          domain.ThemeAuto,
-				Bindings:       map[string]string{"unknown.action": "alt+x"},
 				BindingEntries: []domain.ConfigEntry{{Key: "unknown.action", Value: "alt+x"}},
 				Codes:          map[string]string{},
 			},
@@ -77,7 +70,6 @@ func TestParse(t *testing.T) {
 			input: "new-tab = alt+t\nnew-tab = alt+n\ncode.detach = DT\ncode.detach = DX\n",
 			want: domain.Config{
 				Theme:          domain.ThemeAuto,
-				Bindings:       map[string]string{"new-tab": "alt+n"},
 				BindingEntries: []domain.ConfigEntry{{Key: "new-tab", Value: "alt+n"}},
 				Codes:          map[string]string{"detach": "DX"},
 			},
@@ -91,7 +83,6 @@ func TestParse(t *testing.T) {
 			input: "\nno equals\n = value\ntheme = dark\n",
 			want: domain.Config{
 				Theme:          domain.ThemeDark,
-				Bindings:       map[string]string{},
 				BindingEntries: []domain.ConfigEntry{},
 				Codes:          map[string]string{},
 			},

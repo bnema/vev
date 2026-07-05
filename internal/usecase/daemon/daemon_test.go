@@ -253,7 +253,7 @@ func newManualSessionWithPTYs(t *testing.T, ptys ...ports.PTY) (*Daemon, *sessio
 	}
 	sess := &session{id: "manual", name: "work", ctx: sctx, cancel: cancel, tabs: tabs, client: ac}
 	ac.setSession(sess)
-	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac})
+	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, nil)
 	d.sessions[sess.id] = sess
 	t.Cleanup(cancel)
 	return d, sess, ac, sends

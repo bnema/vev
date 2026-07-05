@@ -19,11 +19,10 @@ type ConfigEntry struct {
 }
 
 // Config is the user-editable vev configuration after parsing. Unknown binding
-// keys are preserved here so the usecase layer can decide which actions it
-// understands.
+// keys are preserved here (in BindingEntries, in file order) so the usecase
+// layer can decide which actions it understands.
 type Config struct {
 	Theme          ThemeMode
-	Bindings       map[string]string
 	BindingEntries []ConfigEntry
 	Codes          map[string]string
 }
@@ -39,7 +38,6 @@ type Warning struct {
 func Defaults() Config {
 	return Config{
 		Theme:          ThemeAuto,
-		Bindings:       map[string]string{},
 		BindingEntries: []ConfigEntry{},
 		Codes:          map[string]string{},
 	}

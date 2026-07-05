@@ -62,12 +62,10 @@ type Router struct {
 	pendingDone chan struct{}
 }
 
-func NewRouter(clock ports.Clock, h Handler, bindings ...*atomic.Pointer[Bindings]) *Router {
-	var bindingPtr *atomic.Pointer[Bindings]
-	if len(bindings) > 0 {
-		bindingPtr = bindings[0]
-	}
-	return &Router{clock: clock, delay: ESCDelay, h: h, bindings: bindingPtr}
+// NewRouter constructs a Router. bindings may be nil, in which case
+// currentBindings falls back to defaultBindings.
+func NewRouter(clock ports.Clock, h Handler, bindings *atomic.Pointer[Bindings]) *Router {
+	return &Router{clock: clock, delay: ESCDelay, h: h, bindings: bindings}
 }
 
 // Route routes one transport read.

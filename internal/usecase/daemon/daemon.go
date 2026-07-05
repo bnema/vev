@@ -38,7 +38,6 @@ import (
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/keys"
 )
 
@@ -107,7 +106,6 @@ type Daemon struct {
 	persistEnabled bool
 	procCwd        func(int) (string, error)
 	procComm       func(int) (string, error)
-	commandByCode  func(string) (command.Command, bool)
 	bindings       atomic.Pointer[keys.Bindings]
 	codeOverrides  atomic.Pointer[map[string]string]
 	themeMode      atomic.Uint32
@@ -230,9 +228,6 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	if d.procComm == nil {
 		d.procComm = platform.ProcessComm
-	}
-	if d.commandByCode == nil {
-		d.commandByCode = d.commandByEffectiveCode
 	}
 	if d.bindings.Load() == nil {
 		d.bindings.Store(keys.DefaultBindings())

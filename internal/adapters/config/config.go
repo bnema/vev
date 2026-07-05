@@ -22,6 +22,7 @@ const pollInterval = 2 * time.Second
 func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	cfg := domain.Defaults()
 	var warnings []domain.Warning
+	seenBindingKeys := make(map[string]bool)
 
 	scanner := bufio.NewScanner(r)
 	lineNo := 0
@@ -67,13 +68,13 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 			}
 			cfg.Codes[codeKey] = value
 		default:
-			if _, exists := cfg.Bindings[key]; exists {
+			if seenBindingKeys[key] {
 				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("duplicate key %q", key)})
 				updateBindingEntry(cfg.BindingEntries, key, value)
 			} else {
+				seenBindingKeys[key] = true
 				cfg.BindingEntries = append(cfg.BindingEntries, domain.ConfigEntry{Key: key, Value: value})
 			}
-			cfg.Bindings[key] = value
 		}
 	}
 	if err := scanner.Err(); err != nil {

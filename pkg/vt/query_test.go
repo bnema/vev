@@ -151,6 +151,26 @@ func TestScreenColorSchemeQueriesUnknownAreSilent(t *testing.T) {
 	}
 }
 
+func TestScreenResetClearsColorSchemeModeSubscription(t *testing.T) {
+	s := NewScreen(80, 24)
+	var got bytes.Buffer
+	s.OnResponse = func(b []byte) { got.Write(b) }
+
+	s.Write([]byte("\x1b[?2031h"))
+	s.Write([]byte("\x1bc"))
+
+	s.SetColorScheme(true)
+	if got.Len() != 0 {
+		t.Fatalf("unsolicited response after reset = %q, want silence", got.String())
+	}
+
+	got.Reset()
+	s.Write([]byte("\x1b[?2031$p"))
+	if got.String() != "\x1b[?2031;2$y" {
+		t.Fatalf("DECRQM 2031 after reset = %q, want reset state", got.String())
+	}
+}
+
 func TestScreenColorSchemeUnsolicitedOnlySubscribedAndChanged(t *testing.T) {
 	s := NewScreen(80, 24)
 	var got bytes.Buffer

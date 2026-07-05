@@ -159,8 +159,8 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, client: ac2}
 	ac1.setSession(sess1)
 	ac2.setSession(sess2)
-	ac1.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac1})
-	ac2.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac2})
+	ac1.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac1}, nil)
+	ac2.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac2}, nil)
 	d.sessions[sess1.id] = sess1
 	d.sessions[sess2.id] = sess2
 
@@ -271,8 +271,8 @@ func TestPickerLivePreviewRepaintsCrossSessionTab(t *testing.T) {
 	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, client: ac2}
 	ac1.setSession(sess1)
 	ac2.setSession(sess2)
-	ac1.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac1})
-	ac2.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac2})
+	ac1.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac1}, nil)
+	ac2.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac2}, nil)
 	d.sessions[sess1.id] = sess1
 	d.sessions[sess2.id] = sess2
 

@@ -175,6 +175,24 @@ func TestAutoThemeDetachClearsPaneColorScheme(t *testing.T) {
 	assertSessionColorSchemeUnknown(t, sess)
 }
 
+func TestAttachClientClearsStaleColorSchemeOnReplacement(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+	d.ApplyConfig(domain.Config{Theme: domain.ThemeAuto})
+	d.applyTheme(sess, ac, ports.Theme{
+		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
+		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
+		TrueColor: true, SchemeKnown: true, Light: true,
+	})
+	assertSessionColorScheme(t, sess, true)
+
+	tr, _ := newCapturingTransport(t)
+	d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+
+	assertSessionColorSchemeUnknown(t, sess)
+}
+
 func TestForcedThemeDetachPreservesBuiltinOnPanes(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)

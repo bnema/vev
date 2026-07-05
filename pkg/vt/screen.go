@@ -1037,6 +1037,7 @@ func (s *Screen) reset() {
 	s.mouseMode = 0
 	s.mouseSGR = false
 	s.bracketedPaste = false
+	s.colorSchemeMode = false
 	s.resetScrollRegion()
 	s.fullRedraw()
 }

@@ -82,7 +82,7 @@ func TestDefaultBindingsParityRoutesBuiltInBindings(t *testing.T) {
 func TestRouterInterceptsAltSpaceForPalette(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	NewRouter(clk, h).Route([]byte{ESC, ' '})
+	NewRouter(clk, h, nil).Route([]byte{ESC, ' '})
 	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
 	require.Empty(t, h.forwards)
 	require.Empty(t, clk.timers)
@@ -91,7 +91,7 @@ func TestRouterInterceptsAltSpaceForPalette(t *testing.T) {
 func TestRouterInterceptsAltDigits(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	r := NewRouter(clk, h)
+	r := NewRouter(clk, h, nil)
 	for b := byte('1'); b <= '9'; b++ {
 		r.Route([]byte{ESC, b})
 	}
@@ -113,7 +113,7 @@ func TestRouterInterceptsAltLayoutDigitAliases(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			clk := &fakeClock{}
 			h := &captureHandler{}
-			r := NewRouter(clk, h)
+			r := NewRouter(clk, h, nil)
 			for _, key := range tc.keys {
 				r.Route(append([]byte{ESC}, []byte(key)...))
 			}
@@ -126,7 +126,7 @@ func TestRouterInterceptsAltLayoutDigitAliases(t *testing.T) {
 func TestRouterInterceptsAltAZERTYUTF8SplitAcrossReads(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	r := NewRouter(clk, h)
+	r := NewRouter(clk, h, nil)
 
 	r.Route([]byte{ESC, 0xc3})
 	require.Empty(t, h.actions)
@@ -146,7 +146,7 @@ func TestRouterInterceptsAltAZERTYUTF8SplitAcrossReads(t *testing.T) {
 func TestRouterInterceptsRetainedAltAZERTYUTF8SplitAcrossReads(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	r := NewRouter(clk, h)
+	r := NewRouter(clk, h, nil)
 
 	r.Route([]byte{ESC})
 	r.Route([]byte{0xc3})
@@ -167,7 +167,7 @@ func TestRouterInterceptsRetainedAltAZERTYUTF8SplitAcrossReads(t *testing.T) {
 func TestRouterForwardsUnboundAltUTF8SplitAcrossReads(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	r := NewRouter(clk, h)
+	r := NewRouter(clk, h, nil)
 
 	r.Route([]byte{ESC, 0xc3})
 	r.Route([]byte{0xb1})
@@ -184,7 +184,7 @@ func TestRouterForwardsUnboundAltUTF8SplitAcrossReads(t *testing.T) {
 func TestRouterForwardsInvalidSplitAltUTF8WithoutDroppingBytes(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	r := NewRouter(clk, h)
+	r := NewRouter(clk, h, nil)
 
 	r.Route([]byte{ESC, 0xc3})
 	r.Route([]byte("X"))
@@ -240,7 +240,7 @@ func switchTabActions() []Action {
 func TestRouterInterceptsAltAForJumpAttention(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	NewRouter(clk, h).Route([]byte{ESC, 'a'})
+	NewRouter(clk, h, nil).Route([]byte{ESC, 'a'})
 	require.Equal(t, []Action{ActionJumpAttention}, h.actions)
 	require.Empty(t, h.forwards)
 	require.Empty(t, clk.timers)
@@ -261,7 +261,7 @@ func TestRouterInterceptsAltHJKLForPaneFocus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			clk := &fakeClock{}
 			h := &captureHandler{}
-			NewRouter(clk, h).Route([]byte{ESC, tc.key})
+			NewRouter(clk, h, nil).Route([]byte{ESC, tc.key})
 			require.Equal(t, []Action{tc.want}, h.actions)
 			require.Empty(t, h.forwards)
 			require.Empty(t, clk.timers)
@@ -274,7 +274,7 @@ func TestRouterForwardsRemovedAltLetterBindings(t *testing.T) {
 		t.Run(string(b), func(t *testing.T) {
 			clk := &fakeClock{}
 			h := &captureHandler{}
-			NewRouter(clk, h).Route([]byte{ESC, b})
+			NewRouter(clk, h, nil).Route([]byte{ESC, b})
 			require.Empty(t, h.actions)
 			require.Equal(t, [][]byte{{ESC, b}}, h.forwards)
 		})
@@ -284,7 +284,7 @@ func TestRouterForwardsRemovedAltLetterBindings(t *testing.T) {
 func TestRouterForwardsOnlyNonInterceptedBytes(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	NewRouter(clk, h).Route([]byte{'a', ESC, ' ', 'b'})
+	NewRouter(clk, h, nil).Route([]byte{'a', ESC, ' ', 'b'})
 	require.Equal(t, []Action{ActionOpenPalette}, h.actions)
 	require.Equal(t, [][]byte{[]byte("a"), []byte("b")}, h.forwards)
 }
@@ -294,7 +294,7 @@ func TestRouterPassesThroughTerminalEscapePrefixes(t *testing.T) {
 	for _, in := range cases {
 		clk := &fakeClock{}
 		h := &captureHandler{}
-		NewRouter(clk, h).Route(in)
+		NewRouter(clk, h, nil).Route(in)
 		require.Empty(t, h.actions)
 		require.Equal(t, [][]byte{in}, h.forwards)
 		require.Empty(t, clk.timers)
@@ -321,7 +321,7 @@ func TestRouterInterceptsAltArrowCSIForPaneFocus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			clk := &fakeClock{}
 			h := &captureHandler{}
-			NewRouter(clk, h).Route(tc.in)
+			NewRouter(clk, h, nil).Route(tc.in)
 			require.Equal(t, []Action{tc.want}, h.actions)
 			require.Empty(t, h.forwards)
 			require.Empty(t, clk.timers)
@@ -346,7 +346,7 @@ func TestRouterAltArrowCSIPartialsAcrossReads(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			clk := &fakeClock{}
 			h := &captureHandler{}
-			r := NewRouter(clk, h)
+			r := NewRouter(clk, h, nil)
 			for _, read := range tc.reads {
 				r.Route(read)
 			}
@@ -392,7 +392,7 @@ func TestRouterAltArrowCSIPrefixRouting(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			clk := &fakeClock{}
 			h := &captureHandler{}
-			r := NewRouter(clk, h)
+			r := NewRouter(clk, h, nil)
 			for _, read := range tc.reads {
 				r.Route(read)
 			}
@@ -412,7 +412,7 @@ func TestRouterPassesThroughBareArrows(t *testing.T) {
 		t.Run(string(in), func(t *testing.T) {
 			clk := &fakeClock{}
 			h := &captureHandler{}
-			NewRouter(clk, h).Route(in)
+			NewRouter(clk, h, nil).Route(in)
 			require.Empty(t, h.actions)
 			require.Equal(t, [][]byte{in}, h.forwards)
 			require.Empty(t, clk.timers)
@@ -423,7 +423,7 @@ func TestRouterPassesThroughBareArrows(t *testing.T) {
 func TestRouterRetainsSplitESCAndInterceptsNextBoundByte(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	r := NewRouter(clk, h)
+	r := NewRouter(clk, h, nil)
 	r.Route([]byte{ESC})
 	require.Len(t, clk.timers, 1)
 	require.Equal(t, ESCDelay, clk.timers[0].d)
@@ -438,7 +438,7 @@ func TestRouterRetainsSplitESCAndInterceptsNextBoundByte(t *testing.T) {
 func TestRouterForwardsBareT(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	NewRouter(clk, h).Route([]byte{'t'})
+	NewRouter(clk, h, nil).Route([]byte{'t'})
 	require.Empty(t, h.actions)
 	require.Equal(t, [][]byte{[]byte("t")}, h.forwards)
 }
@@ -457,7 +457,7 @@ func TestRouterForwardsCSIAfterRetainedESCAcrossReads(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			clk := &fakeClock{}
 			h := &captureHandler{}
-			r := NewRouter(clk, h)
+			r := NewRouter(clk, h, nil)
 			r.Route([]byte{ESC})
 			require.Len(t, clk.timers, 1)
 			require.Empty(t, h.forwards)
@@ -474,7 +474,7 @@ func TestRouterForwardsCSIAfterRetainedESCAcrossReads(t *testing.T) {
 func TestRouterRoutesBytesAfterRetainedEscapePrefix(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	r := NewRouter(clk, h)
+	r := NewRouter(clk, h, nil)
 	r.Route([]byte{ESC})
 
 	r.Route([]byte{'[', 'A', ESC, ' '})
@@ -487,7 +487,7 @@ func TestRouterRoutesBytesAfterRetainedEscapePrefix(t *testing.T) {
 func TestRouterCancelsPendingESCWaiterWhenNextReadConsumesESC(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	r := NewRouter(clk, h)
+	r := NewRouter(clk, h, nil)
 
 	before := retainESCWaiters()
 	r.Route([]byte{ESC})
@@ -509,7 +509,7 @@ func retainESCWaiters() int {
 func TestRouterFlushesLoneESCAfterTimer(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{notify: make(chan struct{}, 1)}
-	r := NewRouter(clk, h)
+	r := NewRouter(clk, h, nil)
 	r.Route([]byte{ESC})
 	clk.timers[0].fire()
 	select {
@@ -524,7 +524,7 @@ func TestRouterFlushesLoneESCAfterTimer(t *testing.T) {
 func TestRouterFlushesPendingESCBeforeOtherByte(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	r := NewRouter(clk, h)
+	r := NewRouter(clk, h, nil)
 	r.Route([]byte{ESC})
 	r.Route([]byte{'z'})
 	require.Equal(t, [][]byte{{ESC}, []byte("z")}, h.forwards)
@@ -538,7 +538,7 @@ var pasteBindingLookalikes = []byte("\x1bj\x1b \x1b1\x1b[1;3A")
 func TestRouterForwardsSingleFramePasteVerbatim(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	r := NewRouter(clk, h)
+	r := NewRouter(clk, h, nil)
 
 	paste := append(append(append([]byte(nil), ports.BracketedPasteOpenMarker...), pasteBindingLookalikes...), ports.BracketedPasteCloseMarker...)
 	r.Route(paste)
@@ -551,7 +551,7 @@ func TestRouterForwardsSingleFramePasteVerbatim(t *testing.T) {
 func TestRouterFiresBindingsForSameBytesOutsidePaste(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	r := NewRouter(clk, h)
+	r := NewRouter(clk, h, nil)
 
 	r.Route(pasteBindingLookalikes)
 
@@ -567,7 +567,7 @@ func TestRouterFiresBindingsForSameBytesOutsidePaste(t *testing.T) {
 func TestRouterPasteMarkerSplitAcrossFramesKeepsCurrentBehavior(t *testing.T) {
 	clk := &fakeClock{}
 	h := &captureHandler{}
-	r := NewRouter(clk, h)
+	r := NewRouter(clk, h, nil)
 
 	// Opening marker + content in one frame, closing marker in the next: with
 	// no closing marker in-frame the router keeps its historical per-byte

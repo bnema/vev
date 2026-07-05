@@ -29,8 +29,8 @@ func TestApplyConfigHotReloadSwapsBindingsAndCodes(t *testing.T) {
 
 	d.ApplyConfig(domain.Config{
 		Theme: domain.ThemeAuto,
-		Bindings: map[string]string{
-			"focus-pane-left": "alt+q",
+		BindingEntries: []domain.ConfigEntry{
+			{Key: "focus-pane-left", Value: "alt+q"},
 		},
 		Codes: map[string]string{
 			"new-tab": "nt",
@@ -43,7 +43,7 @@ func TestApplyConfigHotReloadSwapsBindingsAndCodes(t *testing.T) {
 	r.Route([]byte("\x1bq"))
 	require.Equal(t, []keys.Action{keys.ActionFocusPaneLeft, keys.ActionFocusPaneLeft}, h.actions)
 
-	cmd, ok := d.commandByCode("NT")
+	cmd, ok := d.commandByEffectiveCode("NT")
 	require.True(t, ok)
 	require.Equal(t, "new-tab", cmd.Slug)
 	require.Equal(t, "NT", cmd.Code)
@@ -63,7 +63,7 @@ func TestPaletteCommandsApplyOverridesAndResolveByCode(t *testing.T) {
 	require.Equal(t, "new-tab", commands[0].Slug)
 	require.Equal(t, "NN", commands[0].Code)
 
-	cmd, ok := d.commandByCode("nn")
+	cmd, ok := d.commandByEffectiveCode("nn")
 	require.True(t, ok)
 	require.Equal(t, "new-tab", cmd.Slug)
 	require.Equal(t, "NN", cmd.Code)
@@ -117,14 +117,36 @@ func TestCodeOverrideConflictRestoresDefaultWithoutDuplicates(t *testing.T) {
 	require.Equal(t, "detach", byCode["DET"])
 }
 
+func TestCodeOverrideVacatedDefaultIsReusableRegardlessOfSlugOrder(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{
+		Theme: domain.ThemeAuto,
+		Codes: map[string]string{
+			"new-tab":     "NT",
+			"new-session": "CNT",
+		},
+	})
+
+	commands := d.paletteCommands()
+	byCode := make(map[string]string, len(commands))
+	for _, cmd := range commands {
+		if existing, ok := byCode[cmd.Code]; ok {
+			t.Fatalf("duplicate effective code %q for %q and %q", cmd.Code, existing, cmd.Slug)
+		}
+		byCode[cmd.Code] = cmd.Slug
+	}
+	require.Equal(t, "new-tab", byCode["NT"])
+	require.Equal(t, "new-session", byCode["CNT"])
+}
+
 func TestApplyConfigInvalidDefaultsWithoutPanic(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	require.NotPanics(t, func() {
 		d.ApplyConfig(domain.Config{
 			Theme: domain.ThemeAuto,
-			Bindings: map[string]string{
-				"unknown-action":  "alt+x",
-				"focus-pane-left": "ctrl+x",
+			BindingEntries: []domain.ConfigEntry{
+				{Key: "unknown-action", Value: "alt+x"},
+				{Key: "focus-pane-left", Value: "ctrl+x"},
 			},
 			Codes: map[string]string{
 				"new-tab":         "toolong",
@@ -134,9 +156,9 @@ func TestApplyConfigInvalidDefaultsWithoutPanic(t *testing.T) {
 		})
 	})
 
-	cmd, ok := d.commandByCode("CNT")
+	cmd, ok := d.commandByEffectiveCode("CNT")
 	require.True(t, ok)
 	require.Equal(t, "new-tab", cmd.Slug)
-	_, ok = d.commandByCode("TOOLONG")
+	_, ok = d.commandByEffectiveCode("TOOLONG")
 	require.False(t, ok)
 }
