@@ -395,6 +395,55 @@ func TestStatusBarNarrowRowsDropWholeOldestMRUEntries(t *testing.T) {
 	require.NotContains(t, text, "old")
 }
 
+func TestStatusBarMRUWidthAwareBudget(t *testing.T) {
+	mru := make([]mruSession, 0, maxMRUSessions)
+	for i := 1; i <= maxMRUSessions; i++ {
+		mru = append(mru, mruSession{name: "recent" + strconv.Itoa(i)})
+	}
+	state := barState{status: statusSnapshot{session: "cur"}, mru: mru}
+
+	tests := []struct {
+		name       string
+		cols       int
+		wantShown  []string
+		wantHidden []string
+	}{
+		{
+			name:       "narrow keeps first recent when it physically fits",
+			cols:       15,
+			wantShown:  []string{"cur", "recent1"},
+			wantHidden: []string{"recent2"},
+		},
+		{
+			name:       "medium reserves right-side room instead of filling all recents",
+			cols:       80,
+			wantShown:  []string{"recent1", "recent6"},
+			wantHidden: []string{"recent7", "recent9"},
+		},
+		{
+			name:       "wide shows more recents while still keeping a right-side reserve",
+			cols:       120,
+			wantShown:  []string{"recent1", "recent9"},
+			wantHidden: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := make([]renderer.Cell, tt.cols)
+
+			drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+			text := rowText(row)
+			for _, want := range tt.wantShown {
+				require.Contains(t, text, want)
+			}
+			for _, hidden := range tt.wantHidden {
+				require.NotContains(t, text, hidden)
+			}
+		})
+	}
+}
+
 func TestStatusBarCopyFeedbackFullyRenderedAlongsideMRU(t *testing.T) {
 	state := barState{status: statusSnapshot{session: "cur"}, copyFeedback: "copied", mru: []mruSession{{name: "a"}, {name: "b"}, {name: "c"}}}
 	row := make([]renderer.Cell, 20)

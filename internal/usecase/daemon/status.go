@@ -207,8 +207,8 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 	if feedback != "" {
 		copyReserve = len([]rune(feedback)) + 2
 	}
-	budget := rowLen - leftUsed - copyReserve
-	if budget <= 0 || len(entries) == 0 {
+	physicalBudget := rowLen - leftUsed - copyReserve
+	if physicalBudget <= 0 || len(entries) == 0 {
 		return nil
 	}
 	cost := func(e mruSession) int {
@@ -221,6 +221,19 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 		}
 		return n
 	}
+
+	budget := physicalBudget
+	if feedback == "" {
+		budget -= mruFutureRightReserve(rowLen)
+		// Keep at least one recent session when it physically fits; the reserved
+		// right side is only a budget preference, not a reason to hide all recents.
+		if firstCost := cost(entries[0]); firstCost <= physicalBudget && budget < firstCost {
+			budget = firstCost
+		}
+	}
+	if budget <= 0 {
+		return nil
+	}
 	used := 0
 	for i, e := range entries {
 		used += cost(e)
@@ -229,6 +242,20 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 		}
 	}
 	return entries
+}
+
+func mruFutureRightReserve(rowLen int) int {
+	if rowLen < 40 {
+		return 0
+	}
+	reserve := rowLen / 4
+	if reserve < 12 {
+		return 12
+	}
+	if reserve > 24 {
+		return 24
+	}
+	return reserve
 }
 
 func mruStyle(base renderer.Style, t themeui.Theme, i, count int) renderer.Style {
