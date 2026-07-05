@@ -334,7 +334,7 @@ func TestStatusBarRendersMRUNamesEphemeralAndInlineBell(t *testing.T) {
 
 	drawStatusBarState(row, state, resolveThemeStyles(nil))
 
-	require.Equal(t, " cur  fresh tmp*       ", rowText(row))
+	require.Equal(t, " cur  fresh  tmp*      ", rowText(row))
 	for _, c := range row {
 		if c.Rune == attentionGlyph {
 			require.True(t, c.Style.Bold)
@@ -342,6 +342,19 @@ func TestStatusBarRendersMRUNamesEphemeralAndInlineBell(t *testing.T) {
 		}
 	}
 	t.Fatalf("inline bell not rendered: %q", rowText(row))
+}
+
+func TestStatusBarCurrentSessionUsesAccentStyle(t *testing.T) {
+	theme := themeui.Theme{Foreground: renderer.RGB{R: 220, G: 220, B: 220}, Background: renderer.RGB{R: 10, G: 10, B: 10}, HasFG: true, HasBG: true, TrueColor: true, Known: true}
+	styles := newThemeStyles(theme)
+	row := make([]renderer.Cell, 16)
+
+	drawStatusBarState(row, barState{status: statusSnapshot{session: "cur"}, theme: theme}, styles)
+
+	for _, idx := range []int{0, 1, 2, 3, 4} {
+		require.True(t, row[idx].Style.Equal(styles.accent), "cell %d should use accent style", idx)
+	}
+	require.NotEqual(t, styles.statusBar.BackgroundRGB, styles.accent.BackgroundRGB)
 }
 
 func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
@@ -352,12 +365,19 @@ func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
 
 	drawStatusBarState(row, state, styles)
 
-	first := row[3].Style.ForegroundRGB.R
-	second := row[5].Style.ForegroundRGB.R
-	third := row[7].Style.ForegroundRGB.R
-	require.Equal(t, styles.statusBar.ForegroundRGB.R, first)
-	require.Greater(t, first, second)
-	require.Greater(t, second, third)
+	firstFG := row[4].Style.ForegroundRGB.R
+	secondFG := row[7].Style.ForegroundRGB.R
+	thirdFG := row[10].Style.ForegroundRGB.R
+	require.Equal(t, styles.statusBar.ForegroundRGB.R, firstFG)
+	require.Greater(t, firstFG, secondFG)
+	require.Greater(t, secondFG, thirdFG)
+
+	firstBG := row[4].Style.BackgroundRGB.R
+	secondBG := row[7].Style.BackgroundRGB.R
+	thirdBG := row[10].Style.BackgroundRGB.R
+	require.Equal(t, styles.statusBar.BackgroundRGB.R, firstBG)
+	require.Greater(t, firstBG, secondBG)
+	require.Greater(t, secondBG, thirdBG)
 
 	plain := mruStyle(renderer.DefaultStyle(), themeui.Theme{}, 1, 3)
 	require.False(t, plain.HasForegroundRGB)
@@ -365,7 +385,7 @@ func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
 
 func TestStatusBarNarrowRowsDropWholeOldestMRUEntries(t *testing.T) {
 	state := barState{status: statusSnapshot{session: "cur"}, mru: []mruSession{{name: "fresh"}, {name: "middle"}, {name: "old"}}}
-	row := make([]renderer.Cell, 19)
+	row := make([]renderer.Cell, 21)
 
 	drawStatusBarState(row, state, resolveThemeStyles(nil))
 

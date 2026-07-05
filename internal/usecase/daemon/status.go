@@ -77,7 +77,7 @@ func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, s
 func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles) {
 	clearStatusRow(row)
 	x := 0
-	writeStatusText(row, &x, " "+state.status.session+" ", styles.statusBar)
+	writeStatusText(row, &x, " "+state.status.session+" ", styles.accent)
 
 	fittedMRU := fitMRU(state.mru, len(row), x, state.copyFeedback)
 	for i, sess := range fittedMRU {
@@ -91,6 +91,7 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles)
 			writeStatusText(row, &x, " ", style)
 			writeBell(row, &x, state.attentionFrame)
 		}
+		writeStatusText(row, &x, " ", style)
 	}
 	drawRightPlainText(row, state.copyFeedback, x, styles.statusBar)
 }
@@ -209,7 +210,7 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 		return nil
 	}
 	cost := func(e mruSession) int {
-		n := 1 + len([]rune(e.name))
+		n := 2 + len([]rune(e.name))
 		if e.ephemeral {
 			n++
 		}
@@ -229,11 +230,12 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 }
 
 func mruStyle(base renderer.Style, t themeui.Theme, i, count int) renderer.Style {
-	if count <= 1 || !base.HasForegroundRGB {
+	if count <= 1 || !base.HasForegroundRGB || !base.HasBackgroundRGB || !t.HasBG {
 		return base
 	}
 	amount := (float64(i) / float64(count-1)) * 0.6
 	base.ForegroundRGB = themeui.Blend(base.ForegroundRGB, t.Background, amount)
+	base.BackgroundRGB = themeui.Blend(base.BackgroundRGB, t.Background, amount)
 	return base
 }
 
