@@ -58,6 +58,7 @@ func TestNilPTYInputPathsDoNotPanic(t *testing.T) {
 	tb := newTab(nil, domain.Size{Cols: 10, Rows: 3})
 	sess := &session{id: "s", name: "s", ctx: ctx, cancel: cancel, tabs: []*tab{tb}}
 	ac := &attachedClient{}
+	ac.initOverlays()
 	ac.setSession(sess)
 
 	require.NotPanics(t, func() { d.writeToPane(sess, tb.focusedPane(), []byte("x")) })

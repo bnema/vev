@@ -37,7 +37,7 @@ func TestAltTForwardsToPTY(t *testing.T) {
 
 	d.handleInput(sess, ac, []byte("\x1bt"))
 
-	require.False(t, ac.pickerActive())
+	require.False(t, ac.overlays.pickerActive())
 	require.Equal(t, []byte("\x1bt"), <-writes)
 }
 
@@ -86,9 +86,9 @@ func TestPickerSameSessionNavigationSwitchAndEscClose(t *testing.T) {
 	d.clock = clk
 	d.handleInput(sess, ac, []byte("\x1b"))
 	timer := <-clk.timers
-	require.True(t, ac.pickerActive())
+	require.True(t, ac.overlays.pickerActive())
 	timer.ch <- time.Now()
-	require.Eventually(t, func() bool { return !ac.pickerActive() }, time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool { return !ac.overlays.pickerActive() }, time.Second, 5*time.Millisecond)
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
@@ -117,7 +117,7 @@ func TestPickerSplitArrowNavigatesWithoutExiting(t *testing.T) {
 			for _, input := range tc.input {
 				d.handleInput(sess, ac, input)
 			}
-			require.True(t, ac.pickerActive())
+			require.True(t, ac.overlays.pickerActive())
 			d.handleInput(sess, ac, []byte("\r"))
 			require.Equal(t, tc.wantActive, activeTabIndex(sess))
 		})
@@ -134,9 +134,9 @@ func TestPickerLoneEscapeExitsAfterDelay(t *testing.T) {
 	d.clock = clk
 	d.handleInput(sess, ac, []byte("\x1b"))
 	timer := <-clk.timers
-	require.True(t, ac.pickerActive())
+	require.True(t, ac.overlays.pickerActive())
 	timer.ch <- time.Now()
-	require.Eventually(t, func() bool { return !ac.pickerActive() }, time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool { return !ac.overlays.pickerActive() }, time.Second, 5*time.Millisecond)
 }
 
 func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
@@ -148,7 +148,9 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	tr1, sends1 := newCapturingTransport(t)
 	tr2, sends2 := newCapturingTransport(t)
 	ac1 := &attachedClient{tr: tr1, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac1.initOverlays()
 	ac2 := &attachedClient{tr: tr2, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac2.initOverlays()
 	sctx1, cancel1 := context.WithCancel(d.serveCtx)
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
@@ -258,7 +260,9 @@ func TestPickerLivePreviewRepaintsCrossSessionTab(t *testing.T) {
 	tr1, sends1 := newCapturingTransport(t)
 	tr2, _ := newCapturingTransport(t)
 	ac1 := &attachedClient{tr: tr1, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac1.initOverlays()
 	ac2 := &attachedClient{tr: tr2, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac2.initOverlays()
 	sctx1, cancel1 := context.WithCancel(d.serveCtx)
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()

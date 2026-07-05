@@ -278,6 +278,7 @@ func TestOutputStateNumberingIsSharedAndMonotone(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	tr := &closeTrackingTransport{}
 	ac := &attachedClient{tr: tr}
+	ac.initOverlays()
 
 	require.NoError(t, d.boundedSendOutputErr(ac, []byte("copy")))
 	require.NoError(t, d.boundedSendOutputErr(ac, []byte("more")))

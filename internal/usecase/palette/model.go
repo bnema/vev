@@ -132,7 +132,7 @@ func (m *Model) Render(inner domain.Size, selectedStyle ...renderer.Style) rende
 			codeWidth = len([]rune(match.Command.Code))
 		}
 	}
-	for y := 0; y < visible; y++ {
+	for y := range visible {
 		idx := m.scroll + y
 		if idx >= len(m.matches) {
 			break

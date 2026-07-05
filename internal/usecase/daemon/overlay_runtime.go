@@ -1,0 +1,204 @@
+package daemon
+
+import (
+	"sync"
+
+	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"github.com/bnema/vev/internal/usecase/palette"
+	"github.com/bnema/vev/internal/usecase/picker"
+	promptui "github.com/bnema/vev/internal/usecase/prompt"
+)
+
+type overlayRuntime struct {
+	ac *attachedClient
+
+	pickerMu      sync.Mutex
+	picker        *picker.Model
+	pickerPreview *tab
+	pickerPending []byte
+	pickerESC     pendingByteTimer
+
+	paletteMu      sync.Mutex
+	palette        *palette.Model
+	palettePending []byte
+
+	promptMu      sync.Mutex
+	prompt        *promptui.Model
+	promptSubmit  func(string) error
+	promptPending []byte
+
+	copyMu                sync.Mutex
+	copyMode              *scopy.Mode
+	copyPending           []byte
+	copyESC               pendingByteTimer
+	copyFeedback          string
+	copyPressRow          int
+	copyPressRowValid     bool
+	copyDragging          bool
+	normalMousePressRow   int
+	normalMousePressTop   int
+	normalMousePressValid bool
+}
+
+func newOverlayRuntime(ac *attachedClient) *overlayRuntime {
+	return &overlayRuntime{ac: ac}
+}
+
+func (rt *overlayRuntime) Active() bool {
+	if rt == nil || rt.ac == nil {
+		return false
+	}
+	return rt.promptActive() || rt.paletteActive() || rt.pickerActive() || rt.copyActive()
+}
+
+func (rt *overlayRuntime) promptActive() bool {
+	if rt == nil {
+		return false
+	}
+	rt.promptMu.Lock()
+	defer rt.promptMu.Unlock()
+	return rt.prompt != nil
+}
+
+func (rt *overlayRuntime) paletteActive() bool {
+	if rt == nil {
+		return false
+	}
+	rt.paletteMu.Lock()
+	defer rt.paletteMu.Unlock()
+	return rt.palette != nil
+}
+
+func (rt *overlayRuntime) pickerActive() bool {
+	if rt == nil {
+		return false
+	}
+	rt.pickerMu.Lock()
+	defer rt.pickerMu.Unlock()
+	return rt.picker != nil
+}
+
+func (rt *overlayRuntime) copyActive() bool {
+	if rt == nil {
+		return false
+	}
+	rt.copyMu.Lock()
+	defer rt.copyMu.Unlock()
+	return rt.copyMode != nil
+}
+
+func (rt *overlayRuntime) HandleInput(d *Daemon, data []byte) bool {
+	if rt == nil || rt.ac == nil {
+		return false
+	}
+	ac := rt.ac
+	if rt.promptActive() {
+		d.handlePromptInput(ac, data)
+		return true
+	}
+	if rt.paletteActive() {
+		d.handlePaletteInput(ac, data)
+		return true
+	}
+	if rt.pickerActive() {
+		d.handlePickerInput(ac, data)
+		return true
+	}
+	if rt.copyActive() {
+		d.handleCopyInput(ac, data)
+		return true
+	}
+	return false
+}
+
+type overlayRenderSnapshot struct {
+	rt *overlayRuntime
+
+	copyActive   bool
+	copyMode     *scopy.Mode
+	copyFeedback string
+
+	pickerActive bool
+	pickerModel  *picker.Model
+	previewTab   *tab
+
+	paletteActive bool
+	paletteModel  *palette.Model
+	paletteLocked bool
+
+	promptActive bool
+	promptModel  *promptui.Model
+	promptLocked bool
+}
+
+// SnapshotForRender captures the overlay state needed by paint.
+//
+// The snapshot owns any prompt or palette locks it had to keep held so the
+// returned model pointers stay stable during composition. Callers must release
+// those locks with overlayRenderSnapshot.Unlock, usually with defer immediately
+// after acquisition and before any path that may re-enter rendering.
+func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
+	snap := &overlayRenderSnapshot{rt: rt}
+	if rt == nil {
+		return snap
+	}
+
+	rt.copyMu.Lock()
+	snap.copyActive = rt.copyMode != nil
+	if rt.copyMode != nil {
+		copyModeValue := *rt.copyMode
+		snap.copyMode = &copyModeValue
+	}
+	snap.copyFeedback = rt.copyFeedback
+	if snap.copyFeedback != "" && !snap.copyActive {
+		rt.copyFeedback = ""
+	}
+	rt.copyMu.Unlock()
+
+	rt.pickerMu.Lock()
+	snap.pickerActive = rt.picker != nil
+	snap.pickerModel = rt.picker.Clone()
+	snap.previewTab = rt.pickerPreview
+	rt.pickerMu.Unlock()
+
+	rt.paletteMu.Lock()
+	snap.paletteModel = rt.palette
+	snap.paletteActive = snap.paletteModel != nil
+	if snap.paletteActive {
+		snap.paletteLocked = true
+	} else {
+		rt.paletteMu.Unlock()
+	}
+
+	rt.promptMu.Lock()
+	snap.promptModel = rt.prompt
+	snap.promptActive = snap.promptModel != nil
+	if snap.promptActive {
+		snap.promptLocked = true
+	} else {
+		rt.promptMu.Unlock()
+	}
+
+	return snap
+}
+
+func (rt *overlayRuntime) UnlockRenderSnapshot(snap *overlayRenderSnapshot) {
+	if snap == nil {
+		return
+	}
+	snap.Unlock()
+}
+
+func (snap *overlayRenderSnapshot) Unlock() {
+	if snap == nil || snap.rt == nil {
+		return
+	}
+	if snap.promptLocked {
+		snap.rt.promptMu.Unlock()
+		snap.promptLocked = false
+	}
+	if snap.paletteLocked {
+		snap.rt.paletteMu.Unlock()
+		snap.paletteLocked = false
+	}
+}

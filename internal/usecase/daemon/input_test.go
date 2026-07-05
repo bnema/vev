@@ -94,6 +94,117 @@ func TestBracketedMultilinePasteForwardsDelimitersAndNewlines(t *testing.T) {
 	releasePTY()
 }
 
+func TestOverlayInputPrecedence(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan ports.Frame)
+		input []byte
+		check func(t *testing.T, ac *attachedClient, writes chan []byte)
+	}{
+		{
+			name: "prompt before palette picker copy and normal",
+			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan ports.Frame) {
+				t.Helper()
+				d.enterCopyMode(sess, ac)
+				d.enterPicker(sess, ac)
+				d.enterPalette(sess, ac)
+				d.enterPrompt(sess, ac, "Rename", "", func(string) error { return nil })
+			},
+			input: []byte("x"),
+			check: func(t *testing.T, ac *attachedClient, writes chan []byte) {
+				t.Helper()
+				require.Equal(t, "x", ac.overlays.prompt.Value())
+				require.Equal(t, "", ac.overlays.palette.Query())
+				require.True(t, ac.overlays.pickerActive())
+				require.True(t, ac.overlays.copyActive())
+				requireNoPTYWrite(t, writes)
+			},
+		},
+		{
+			name: "palette before picker copy and normal",
+			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan ports.Frame) {
+				t.Helper()
+				d.enterCopyMode(sess, ac)
+				d.enterPicker(sess, ac)
+				d.enterPalette(sess, ac)
+			},
+			input: []byte("x"),
+			check: func(t *testing.T, ac *attachedClient, writes chan []byte) {
+				t.Helper()
+				require.Equal(t, "x", ac.overlays.palette.Query())
+				require.True(t, ac.overlays.pickerActive())
+				require.True(t, ac.overlays.copyActive())
+				requireNoPTYWrite(t, writes)
+			},
+		},
+		{
+			name: "picker before copy and normal",
+			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan ports.Frame) {
+				t.Helper()
+				d.enterCopyMode(sess, ac)
+				d.enterPicker(sess, ac)
+			},
+			input: []byte("j"),
+			check: func(t *testing.T, ac *attachedClient, writes chan []byte) {
+				t.Helper()
+				target, ok := ac.overlays.picker.Selected()
+				require.True(t, ok)
+				require.Equal(t, 1, target.TabIndex)
+				require.True(t, ac.overlays.copyActive())
+				requireNoPTYWrite(t, writes)
+			},
+		},
+		{
+			name: "copy before normal",
+			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan ports.Frame) {
+				t.Helper()
+				d.enterCopyMode(sess, ac)
+			},
+			input: []byte("q"),
+			check: func(t *testing.T, ac *attachedClient, writes chan []byte) {
+				t.Helper()
+				require.False(t, ac.overlays.copyActive())
+				requireNoPTYWrite(t, writes)
+			},
+		},
+		{
+			name:  "normal keys when no overlay is active",
+			input: []byte("Z"),
+			check: func(t *testing.T, ac *attachedClient, writes chan []byte) {
+				t.Helper()
+				require.Equal(t, []byte("Z"), <-writes)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writes := make(chan []byte, 1)
+			p, releasePTY := newBlockingPTYWithWrites(t, writes)
+			p2, releasePTY2 := newBlockingPTY(t)
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p, p2)
+			defer releasePTY()
+			defer releasePTY2()
+			if tc.setup != nil {
+				tc.setup(t, d, sess, ac, sends)
+			}
+
+			d.handleInput(sess, ac, tc.input)
+
+			tc.check(t, ac, writes)
+		})
+	}
+}
+
+func requireNoPTYWrite(t *testing.T, writes chan []byte) {
+	t.Helper()
+	select {
+	case got := <-writes:
+		t.Fatalf("input forwarded to PTY: %q", got)
+	default:
+	}
+}
+
 func TestPaletteNextPreviousSwitchActiveTab(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -172,12 +283,12 @@ func TestRNSOpensPromptAndEnterPromotesEphemeralSession(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("RNS\r"))
 	awaitFrame(t, sends, ports.MsgOutput)
-	require.True(t, ac.promptActive())
+	require.True(t, ac.overlays.promptActive())
 
 	d.handleInput(sess, ac, []byte("\r"))
 	awaitFrame(t, sends, ports.MsgOutput)
 
-	require.False(t, ac.promptActive())
+	require.False(t, ac.overlays.promptActive())
 	require.False(t, sess.ephemeral)
 	require.Equal(t, "0", sess.name)
 }
@@ -191,18 +302,18 @@ func TestMouseWheelEntersScrollbackModeAndExitsAtBottom(t *testing.T) {
 
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
 	data := mustOutputData(t, sends)
-	require.NotNil(t, ac.copyMode)
-	require.Equal(t, 19, ac.copyMode.Cursor)
+	require.NotNil(t, ac.overlays.copyMode)
+	require.Equal(t, 19, ac.overlays.copyMode.Cursor)
 	require.Contains(t, string(data), "[VISUAL]")
 
 	d.handleInput(sess, ac, []byte("\x1b[<65;1;1M"))
 	mustOutputData(t, sends)
-	require.Nil(t, ac.copyMode)
+	require.Nil(t, ac.overlays.copyMode)
 
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1Mq"))
 	mustOutputData(t, sends)
 	mustOutputData(t, sends)
-	require.Nil(t, ac.copyMode, "q after wheel in same input must be routed after copy mode is entered")
+	require.Nil(t, ac.overlays.copyMode, "q after wheel in same input must be routed after copy mode is entered")
 	select {
 	case got := <-writes:
 		t.Fatalf("mouse/copy input forwarded to PTY: %q", got)
@@ -221,7 +332,7 @@ func TestMouseAltScreenWheelMapsToArrows(t *testing.T) {
 
 	require.Equal(t, []byte("\x1b[A\x1b[A\x1b[A"), <-writes)
 	require.Equal(t, []byte("\x1b[B\x1b[B\x1b[B"), <-writes)
-	require.Nil(t, ac.copyMode)
+	require.Nil(t, ac.overlays.copyMode)
 }
 
 func TestSGRRowOffset(t *testing.T) {
@@ -262,7 +373,7 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 		t.Fatalf("press without child mouse mode forwarded: %q", got)
 	default:
 	}
-	require.Nil(t, ac.copyMode, "press alone must not enter visual mode")
+	require.Nil(t, ac.overlays.copyMode, "press alone must not enter visual mode")
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("\x1b[?1000h"))
 	raw := []byte("\x1b[<0;2;3M")
@@ -294,11 +405,11 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("\x1b[?1006l\x1b[?1000l"))
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
-	require.Nil(t, ac.copyMode, "press alone must still not enter visual mode")
+	require.Nil(t, ac.overlays.copyMode, "press alone must still not enter visual mode")
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 	mustOutputData(t, sends)
-	require.NotNil(t, ac.copyMode)
-	lo, hi, ok := ac.copyMode.SelectedBounds()
+	require.NotNil(t, ac.overlays.copyMode)
+	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
 	require.True(t, ok)
 	require.Equal(t, 0, lo)
 	require.Equal(t, 2, hi)
@@ -315,8 +426,8 @@ func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 	mustOutputData(t, sends)
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;2M"))
 	mustOutputData(t, sends)
-	require.NotNil(t, ac.copyMode)
-	lo, hi, ok := ac.copyMode.SelectedBounds()
+	require.NotNil(t, ac.overlays.copyMode)
+	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
 	require.True(t, ok)
 	require.Equal(t, 0, lo)
 	require.Equal(t, 1, hi)
@@ -330,7 +441,7 @@ func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(strings.TrimPrefix(data, "\x1b]52;c;"), "\a"))
 	require.NoError(t, err)
 	require.Equal(t, "alpha\nbravo", string(decoded))
-	require.Nil(t, ac.copyMode)
+	require.Nil(t, ac.overlays.copyMode)
 
 	exitPaint := string(mustOutputData(t, sends))
 	require.NotContains(t, exitPaint, "[SELECT]")
@@ -350,7 +461,7 @@ func TestMouseNormalScreenStatusRowClearsStalePressState(t *testing.T) {
 
 	// Press on a content row establishes a (soon to be stale) anchor.
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
-	require.Nil(t, ac.copyMode)
+	require.Nil(t, ac.overlays.copyMode)
 
 	// Release lands on the status row: must still clear the press state,
 	// regardless of the row it landed on.
@@ -363,7 +474,7 @@ func TestMouseNormalScreenStatusRowClearsStalePressState(t *testing.T) {
 	// Motion onto a content row must not resurrect a stale anchor.
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 
-	require.Nil(t, ac.copyMode, "stale press state must not resurrect a selection")
+	require.Nil(t, ac.overlays.copyMode, "stale press state must not resurrect a selection")
 }
 
 // TestCopyModeStatusRowPressClearsDragState covers the copy-mode counterpart
@@ -386,8 +497,8 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	// Full drag: press row0, motion to row1 -> selection [0,1].
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;2M"))
 	mustOutputData(t, sends)
-	require.NotNil(t, ac.copyMode)
-	lo, hi, ok := ac.copyMode.SelectedBounds()
+	require.NotNil(t, ac.overlays.copyMode)
+	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
 	require.True(t, ok)
 	require.Equal(t, 0, lo)
 	require.Equal(t, 1, hi)
@@ -400,8 +511,8 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	// have cleared copyPressRowValid/copyDragging.
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 
-	require.NotNil(t, ac.copyMode)
-	lo, hi, ok = ac.copyMode.SelectedBounds()
+	require.NotNil(t, ac.overlays.copyMode)
+	lo, hi, ok = ac.overlays.copyMode.SelectedBounds()
 	require.True(t, ok)
 	require.Equal(t, 0, lo, "anchor must not have moved")
 	require.Equal(t, 1, hi, "status-row press must invalidate the drag so the motion is a no-op")
@@ -434,8 +545,8 @@ func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 	// pressTop(0)+ev.Row(2) = 2.
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 
-	require.NotNil(t, ac.copyMode)
-	lo, hi, ok := ac.copyMode.SelectedBounds()
+	require.NotNil(t, ac.overlays.copyMode)
+	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
 	require.True(t, ok)
 	require.Equal(t, 0, lo, "anchor stays content-stable at the row under the pointer at press time")
 	require.Equal(t, 7, hi, "extend target must track the pointer's current content row, not a stale scrollback offset")
@@ -452,7 +563,7 @@ func TestMouseSplitReportPreservesOrder(t *testing.T) {
 
 	mustOutputData(t, sends)
 	mustOutputData(t, sends)
-	require.Nil(t, ac.copyMode)
+	require.Nil(t, ac.overlays.copyMode)
 	select {
 	case got := <-writes:
 		t.Fatalf("split mouse/copy bytes forwarded to PTY: %q", got)
@@ -550,7 +661,7 @@ func TestCopyModeDragOutsideSplitPaneClampsToPaneContent(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;12M"))
 	mustOutputData(t, sends)
 
-	lo, hi, ok := ac.copyMode.SelectedBounds()
+	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
 	require.True(t, ok)
 	require.Equal(t, 0, lo)
 	require.Equal(t, 9, hi)

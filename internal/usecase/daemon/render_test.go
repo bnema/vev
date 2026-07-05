@@ -18,6 +18,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
@@ -37,6 +38,7 @@ func TestPTYWriteErrorIsLogged(t *testing.T) {
 	win := newTab(p, domain.Size{Cols: 80, Rows: 23})
 	sess := &session{id: "manual", name: "work", tabs: []*tab{win}}
 	ac := &attachedClient{}
+	ac.initOverlays()
 	ac.setSession(sess)
 
 	daemonKeyHandler{d: d, ac: ac}.Forward([]byte("input"))
@@ -215,6 +217,7 @@ func TestSchedulerDebounceCoalesces(t *testing.T) {
 	sctx, cancel := context.WithCancel(context.Background())
 	win := newTab(newScriptPTY(nil), domain.Size{Cols: 20, Rows: 5})
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "s", name: "s", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 
@@ -278,6 +281,7 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "s", name: "s", tabs: []*tab{win}, client: ac}
 	ac.setSession(sess)
 
@@ -388,6 +392,7 @@ func TestRenderWithNilTransportDoesNotAdvanceStateCounter(t *testing.T) {
 	tb := newTab(nil, domain.Size{Cols: 10, Rows: 3})
 	sess := &session{id: "s", name: "work", tabs: []*tab{tb}, active: 0}
 	ac := &attachedClient{rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 10, Rows: 4}}
+	ac.initOverlays()
 	sess.client = ac
 	ac.setSession(sess)
 	d := newTestDaemon(t, nil, stubClock{})
@@ -447,6 +452,115 @@ func TestComposeTabFrameStackDrawsTitleBarsAndDimsCollapsed(t *testing.T) {
 	require.Equal(t, 'T', frame.At(0, 2).Rune)
 	require.True(t, frame.At(0, 0).Style.HasForegroundRGB, "collapsed title bar should use dimmed chrome")
 	require.True(t, frame.At(0, 1).Style.Inverse || frame.At(0, 1).Style.HasBackgroundRGB, "focused title bar should use accent chrome")
+}
+
+func TestOverlayPaintInvalidationShowsAndRestoresBaseFrame(t *testing.T) {
+	tests := []struct {
+		name          string
+		open          func(*Daemon, *session, *attachedClient)
+		close         func(*Daemon, *session, *attachedClient)
+		visible       string
+		notVisible    string
+		wantRestored  string
+		prepareScreen func(*session)
+	}{
+		{
+			name: "prompt",
+			open: func(d *Daemon, sess *session, ac *attachedClient) {
+				d.enterPrompt(sess, ac, " Rename session ", "work", func(string) error { return nil })
+			},
+			close:      func(d *Daemon, _ *session, ac *attachedClient) { d.handlePromptInput(ac, []byte("\x1b")) },
+			visible:    "Rename session",
+			notVisible: "Rename session",
+		},
+		{
+			name:       "palette",
+			open:       func(d *Daemon, sess *session, ac *attachedClient) { d.enterPalette(sess, ac) },
+			close:      func(d *Daemon, _ *session, ac *attachedClient) { d.handlePaletteInput(ac, []byte("\x1b")) },
+			visible:    "Commands",
+			notVisible: "Commands",
+		},
+		{
+			name:       "picker",
+			open:       func(d *Daemon, sess *session, ac *attachedClient) { d.enterPicker(sess, ac) },
+			close:      func(d *Daemon, sess *session, ac *attachedClient) { d.closePicker(ac); d.paint(sess, ac, true) },
+			visible:    "Sessions",
+			notVisible: "Sessions",
+		},
+		{
+			name:  "copy mode",
+			open:  func(d *Daemon, sess *session, ac *attachedClient) { d.enterCopyMode(sess, ac) },
+			close: func(d *Daemon, _ *session, ac *attachedClient) { d.handleCopyInput(ac, []byte("q")) },
+			prepareScreen: func(sess *session) {
+				sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+			},
+			visible:      "[VISUAL]",
+			notVisible:   "[VISUAL]",
+			wantRestored: "live",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			defer release()
+			sess.tabs[0].focusedPane().screen.Write([]byte("live"))
+			if tt.prepareScreen != nil {
+				tt.prepareScreen(sess)
+			}
+			if tt.wantRestored == "" {
+				tt.wantRestored = "live"
+			}
+
+			tt.open(d, sess, ac)
+			shown := string(mustOutputData(t, sends))
+			require.Contains(t, shown, tt.visible)
+
+			tt.close(d, sess, ac)
+			restored := string(mustOutputData(t, sends))
+			require.Contains(t, restored, tt.wantRestored)
+			require.NotContains(t, restored, tt.notVisible)
+		})
+	}
+}
+
+func TestPaintEarlyReturnReleasesOverlayRenderLocks(t *testing.T) {
+	tests := []struct {
+		name string
+		open func(*Daemon, *session, *attachedClient)
+		try  func(*overlayRuntime) bool
+		give func(*overlayRuntime)
+	}{
+		{
+			name: "prompt",
+			open: func(d *Daemon, sess *session, ac *attachedClient) {
+				d.enterPrompt(sess, ac, " Rename session ", "work", func(string) error { return nil })
+			},
+			try:  func(rt *overlayRuntime) bool { return rt.promptMu.TryLock() },
+			give: func(rt *overlayRuntime) { rt.promptMu.Unlock() },
+		},
+		{
+			name: "palette",
+			open: func(d *Daemon, sess *session, ac *attachedClient) {
+				d.enterPalette(sess, ac)
+			},
+			try:  func(rt *overlayRuntime) bool { return rt.paletteMu.TryLock() },
+			give: func(rt *overlayRuntime) { rt.paletteMu.Unlock() },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+			defer release()
+			sess.tabs[0].tree.Focus = layout.PaneID("missing")
+
+			tt.open(d, sess, ac)
+
+			require.True(t, tt.try(ac.overlays), "overlay render lock should be released after paint returns early")
+			tt.give(ac.overlays)
+		})
+	}
 }
 
 func TestComposeClientFrameBarCacheSkipsUnchangedBars(t *testing.T) {
@@ -524,6 +638,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "s", name: "s", tabs: []*tab{win}, client: ac}
 	ac.setSession(sess)
 
@@ -549,6 +664,7 @@ func TestSendErrorKillsEphemeral(t *testing.T) {
 	win := newTab(p, domain.Size{Cols: 20, Rows: 5})
 	sctx, cancel := context.WithCancel(context.Background())
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "e", name: "0", ephemeral: true, tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -594,6 +710,7 @@ func TestSchedulerDefersPendingDirtyTimerDuringSynchronizedUpdate(t *testing.T) 
 	p := win.focusedPane()
 	p.ctx, p.cancel = sctx, cancel
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 
@@ -654,6 +771,7 @@ func TestPTYQueryGetsResponseWrittenBackToPTY(t *testing.T) {
 	sctx, cancel := context.WithCancel(context.Background())
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "query", name: "query", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -759,6 +877,7 @@ func TestSyncUpdateWatchdogAbandonedSyncRenders(t *testing.T) {
 	sctx, cancel := context.WithCancel(context.Background())
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -803,6 +922,7 @@ func TestSyncUpdateWatchdogStaleGenerationNoopAfterEnd(t *testing.T) {
 	sctx, cancel := context.WithCancel(context.Background())
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess

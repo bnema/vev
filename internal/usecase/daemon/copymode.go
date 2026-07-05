@@ -37,6 +37,7 @@ import (
 )
 
 func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
+	rt := ac.overlays
 	tb := sess.activeTab()
 	if tb == nil {
 		return
@@ -49,32 +50,33 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 		return
 	}
 	p.mu.Lock()
-	ac.copyMu.Lock()
-	if ac.copyMode == nil {
-		ac.copyMu.Unlock()
+	rt.copyMu.Lock()
+	if rt.copyMode == nil {
+		rt.copyMu.Unlock()
 		p.mu.Unlock()
 		return
 	}
 	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
-	if delta > 0 && ac.copyMode.AtBottom(snap) {
-		ac.copyMode = nil
-		ac.copyMu.Unlock()
+	if delta > 0 && rt.copyMode.AtBottom(snap) {
+		rt.copyMode = nil
+		rt.copyMu.Unlock()
 		p.mu.Unlock()
 		d.paint(sess, ac, true)
 		return
 	}
-	ac.copyMode.Move(snap, delta)
-	exit := delta > 0 && ac.copyMode.AtBottom(snap)
+	rt.copyMode.Move(snap, delta)
+	exit := delta > 0 && rt.copyMode.AtBottom(snap)
 	if exit {
-		ac.copyMode = nil
+		rt.copyMode = nil
 	}
-	ac.copyMu.Unlock()
+	rt.copyMu.Unlock()
 	p.mu.Unlock()
 
 	d.paint(sess, ac, true)
 }
 
 func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
+	rt := ac.overlays
 	tb := sess.activeTab()
 	if tb == nil {
 		return
@@ -88,16 +90,17 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	p.mu.Lock()
 	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
 	p.mu.Unlock()
-	ac.copyMu.Lock()
-	ac.copyMode = scopy.NewMode(snap)
-	ac.copyPressRowValid = false
-	ac.copyDragging = false
-	ac.normalMousePressValid = false
-	ac.copyMu.Unlock()
+	rt.copyMu.Lock()
+	rt.copyMode = scopy.NewMode(snap)
+	rt.copyPressRowValid = false
+	rt.copyDragging = false
+	rt.normalMousePressValid = false
+	rt.copyMu.Unlock()
 	d.paint(sess, ac, true)
 }
 
 func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
+	rt := ac.overlays
 	if ev.Button != mouse.Left {
 		return
 	}
@@ -115,44 +118,44 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
 	p.mu.Lock()
 	if ev.Row >= p.screen.Frame.Height {
 		if ev.Type == mouse.Press {
-			ac.copyMu.Lock()
-			ac.copyPressRowValid = false
-			ac.copyDragging = false
-			ac.copyMu.Unlock()
+			rt.copyMu.Lock()
+			rt.copyPressRowValid = false
+			rt.copyDragging = false
+			rt.copyMu.Unlock()
 		}
 		p.mu.Unlock()
 		return
 	}
-	ac.copyMu.Lock()
-	if ac.copyMode == nil {
-		ac.copyMu.Unlock()
+	rt.copyMu.Lock()
+	if rt.copyMode == nil {
+		rt.copyMu.Unlock()
 		p.mu.Unlock()
 		return
 	}
 	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
-	absRow := ac.copyMode.ViewportTop + ev.Row
+	absRow := rt.copyMode.ViewportTop + ev.Row
 	changed := false
 	switch ev.Type {
 	case mouse.Press:
-		ac.copyMode.SetCursor(snap, absRow)
-		ac.copyPressRow = ac.copyMode.Cursor
-		ac.copyPressRowValid = true
-		ac.copyDragging = false
+		rt.copyMode.SetCursor(snap, absRow)
+		rt.copyPressRow = rt.copyMode.Cursor
+		rt.copyPressRowValid = true
+		rt.copyDragging = false
 		changed = true
 	case mouse.Motion:
-		if !ac.copyPressRowValid {
+		if !rt.copyPressRowValid {
 			break
 		}
-		if !ac.copyDragging {
-			ac.copyMode.StartSelectionAt(snap, ac.copyPressRow)
-			ac.copyDragging = true
+		if !rt.copyDragging {
+			rt.copyMode.StartSelectionAt(snap, rt.copyPressRow)
+			rt.copyDragging = true
 		}
-		ac.copyMode.ExtendTo(snap, absRow)
+		rt.copyMode.ExtendTo(snap, absRow)
 		changed = true
 	case mouse.Release:
 		// Button release intentionally has no visual effect.
 	}
-	ac.copyMu.Unlock()
+	rt.copyMu.Unlock()
 	p.mu.Unlock()
 
 	if changed {
@@ -161,6 +164,7 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
 }
 
 func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
+	rt := ac.overlays
 	sess := ac.currentSession()
 	if sess == nil {
 		return
@@ -177,21 +181,21 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		return
 	}
 	p.mu.Lock()
-	ac.copyMu.Lock()
-	if ac.copyMode == nil {
-		ac.copyPending = nil
+	rt.copyMu.Lock()
+	if rt.copyMode == nil {
+		rt.copyPending = nil
 		d.stopCopyPendingTimerLocked(ac)
-		ac.copyMu.Unlock()
+		rt.copyMu.Unlock()
 		p.mu.Unlock()
 		return
 	}
-	if len(ac.copyPending) > 0 {
+	if len(rt.copyPending) > 0 {
 		d.stopCopyPendingTimerLocked(ac)
-		combined := make([]byte, 0, len(ac.copyPending)+len(data))
-		combined = append(combined, ac.copyPending...)
+		combined := make([]byte, 0, len(rt.copyPending)+len(data))
+		combined = append(combined, rt.copyPending...)
 		combined = append(combined, data...)
 		data = combined
-		ac.copyPending = nil
+		rt.copyPending = nil
 	}
 	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
 	changed := false
@@ -200,19 +204,19 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	for i := 0; i < len(data); i++ {
 		switch data[i] {
 		case 'j':
-			ac.copyMode.Move(snap, 1)
+			rt.copyMode.Move(snap, 1)
 			changed = true
 		case 'k':
-			ac.copyMode.Move(snap, -1)
+			rt.copyMode.Move(snap, -1)
 			changed = true
 		case 'g':
-			ac.copyMode.Top(snap)
+			rt.copyMode.Top(snap)
 			changed = true
 		case 'G':
-			ac.copyMode.Bottom(snap)
+			rt.copyMode.Bottom(snap)
 			changed = true
 		case ' ', 'v':
-			ac.copyMode.ToggleSelection()
+			rt.copyMode.ToggleSelection()
 			changed = true
 		case '\r', '\n', 'y':
 			copyOut = true
@@ -220,7 +224,7 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		case 'q', 0x03, 0x1b:
 			if data[i] == 0x1b {
 				tail := data[i:]
-				consumed, ok := routeCopyEscape(ac.copyMode, snap, tail)
+				consumed, ok := routeCopyEscape(rt.copyMode, snap, tail)
 				if ok {
 					i += consumed - 1
 					changed = true
@@ -231,7 +235,7 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 					break
 				}
 				if isCopyEscapePrefix(tail) {
-					ac.copyPending = append(ac.copyPending[:0], tail...)
+					rt.copyPending = append(rt.copyPending[:0], tail...)
 					break
 				}
 			}
@@ -240,13 +244,13 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	}
 	text := ""
 	if copyOut {
-		text = ac.copyMode.SelectedText(snap)
+		text = rt.copyMode.SelectedText(snap)
 	}
 	if exit {
 		d.stopCopyPendingTimerLocked(ac)
-		ac.copyMode = nil
+		rt.copyMode = nil
 	}
-	ac.copyMu.Unlock()
+	rt.copyMu.Unlock()
 	p.mu.Unlock()
 
 	if copyOut && text != "" {
@@ -258,13 +262,13 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 				return
 			}
 		}
-		ac.copyMu.Lock()
+		rt.copyMu.Lock()
 		if len(chunks) > 0 {
-			ac.copyFeedback = "copied " + strconv.Itoa(len([]rune(text))) + " chars to clipboard"
+			rt.copyFeedback = "copied " + strconv.Itoa(len([]rune(text))) + " chars to clipboard"
 		} else {
-			ac.copyFeedback = "selection too large to copy"
+			rt.copyFeedback = "selection too large to copy"
 		}
-		ac.copyMu.Unlock()
+		rt.copyMu.Unlock()
 	}
 	if exit {
 		d.paint(sess, ac, true)
@@ -276,23 +280,24 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 }
 
 func (d *Daemon) retainCopyESCLocked(ac *attachedClient) {
-	mode := ac.copyMode
-	ac.copyPending = append(ac.copyPending[:0], keys.ESC)
-	ac.copyESC.retain(d.clock, keys.ESCDelay, func(timer ports.Timer) {
-		ac.copyMu.Lock()
-		if ac.copyESC.timer != timer {
-			ac.copyMu.Unlock()
+	rt := ac.overlays
+	mode := rt.copyMode
+	rt.copyPending = append(rt.copyPending[:0], keys.ESC)
+	rt.copyESC.retain(d.clock, keys.ESCDelay, func(timer ports.Timer) {
+		rt.copyMu.Lock()
+		if rt.copyESC.timer != timer {
+			rt.copyMu.Unlock()
 			return
 		}
-		ac.copyPending = nil
-		ac.copyESC.timer = nil
-		ac.copyESC.done = nil
-		if ac.copyMode != mode || ac.copyMode == nil {
-			ac.copyMu.Unlock()
+		rt.copyPending = nil
+		rt.copyESC.timer = nil
+		rt.copyESC.done = nil
+		if rt.copyMode != mode || rt.copyMode == nil {
+			rt.copyMu.Unlock()
 			return
 		}
-		ac.copyMode = nil
-		ac.copyMu.Unlock()
+		rt.copyMode = nil
+		rt.copyMu.Unlock()
 
 		if sess := ac.currentSession(); sess != nil {
 			d.paint(sess, ac, true)
@@ -301,7 +306,8 @@ func (d *Daemon) retainCopyESCLocked(ac *attachedClient) {
 }
 
 func (d *Daemon) stopCopyPendingTimerLocked(ac *attachedClient) {
-	ac.copyESC.stop()
+	rt := ac.overlays
+	rt.copyESC.stop()
 }
 
 func routeCopyEscape(m *scopy.Mode, snap scopy.Snapshot, data []byte) (int, bool) {

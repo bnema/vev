@@ -43,23 +43,11 @@ func (d *Daemon) handleSequencedInput(sess *session, ac *attachedClient, _ uint6
 }
 
 func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
+	ac.initOverlays()
 	ac.mouseScan.Scan(data,
 		func(ev mouse.Event) { d.handleMouse(ac, ev) },
 		func(b []byte) {
-			if ac.promptActive() {
-				d.handlePromptInput(ac, b)
-				return
-			}
-			if ac.paletteActive() {
-				d.handlePaletteInput(ac, b)
-				return
-			}
-			if ac.pickerActive() {
-				d.handlePickerInput(ac, b)
-				return
-			}
-			if ac.copyModeActive() {
-				d.handleCopyInput(ac, b)
+			if ac.overlays.HandleInput(d, b) {
 				return
 			}
 			ac.keys.Route(b)
@@ -68,7 +56,9 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 }
 
 func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
-	if ac.promptActive() || ac.paletteActive() || ac.pickerActive() {
+	ac.initOverlays()
+	rt := ac.overlays
+	if rt.promptActive() || rt.paletteActive() || rt.pickerActive() {
 		return
 	}
 	sess := ac.currentSession()
@@ -80,7 +70,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 		return
 	}
 
-	if ac.copyModeActive() {
+	if rt.copyActive() {
 		if ev.Button == mouse.Left {
 			contentRow := ev.Row - 1
 			tb.mu.Lock()
@@ -211,25 +201,25 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 		switch ev.Type {
 		case mouse.Press:
 			if altScreen || ev.Row >= childRows {
-				ac.copyMu.Lock()
-				ac.normalMousePressValid = false
-				ac.copyMu.Unlock()
+				rt.copyMu.Lock()
+				rt.normalMousePressValid = false
+				rt.copyMu.Unlock()
 				return
 			}
-			ac.copyMu.Lock()
-			ac.normalMousePressRow = ev.Row
-			ac.normalMousePressTop = scrollbackRows
-			ac.normalMousePressValid = true
-			ac.copyMu.Unlock()
+			rt.copyMu.Lock()
+			rt.normalMousePressRow = ev.Row
+			rt.normalMousePressTop = scrollbackRows
+			rt.normalMousePressValid = true
+			rt.copyMu.Unlock()
 		case mouse.Motion:
 			if altScreen || ev.Row >= childRows {
 				return
 			}
-			ac.copyMu.Lock()
-			pressValid := ac.normalMousePressValid
-			pressRow := ac.normalMousePressRow
-			pressTop := ac.normalMousePressTop
-			ac.copyMu.Unlock()
+			rt.copyMu.Lock()
+			pressValid := rt.normalMousePressValid
+			pressRow := rt.normalMousePressRow
+			pressTop := rt.normalMousePressTop
+			rt.copyMu.Unlock()
 			if !pressValid {
 				return
 			}
@@ -238,21 +228,21 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 			snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
 			p.mu.Unlock()
 
-			ac.copyMu.Lock()
+			rt.copyMu.Lock()
 			mode := scopy.NewMode(snap)
 			mode.StartSelectionAt(snap, pressTop+pressRow)
 			mode.ExtendTo(snap, len(snap.Rows)-snap.Height+ev.Row)
-			ac.copyMode = mode
-			ac.copyPressRow = pressTop + pressRow
-			ac.copyPressRowValid = true
-			ac.copyDragging = true
-			ac.normalMousePressValid = false
-			ac.copyMu.Unlock()
+			rt.copyMode = mode
+			rt.copyPressRow = pressTop + pressRow
+			rt.copyPressRowValid = true
+			rt.copyDragging = true
+			rt.normalMousePressValid = false
+			rt.copyMu.Unlock()
 			d.paint(sess, ac, true)
 		case mouse.Release:
-			ac.copyMu.Lock()
-			ac.normalMousePressValid = false
-			ac.copyMu.Unlock()
+			rt.copyMu.Lock()
+			rt.normalMousePressValid = false
+			rt.copyMu.Unlock()
 		}
 	case mouse.WheelUp:
 		if altScreen {

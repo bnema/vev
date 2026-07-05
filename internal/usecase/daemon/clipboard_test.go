@@ -191,6 +191,7 @@ func TestPTYReaderForwardsOSC52ClipboardToAttachedClient(t *testing.T) {
 	defer cancel()
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "clip", name: "clip", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -215,6 +216,7 @@ func TestPTYReaderDropsOversizedClipboardPayload(t *testing.T) {
 	defer cancel()
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "clip-big", name: "clip-big", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -238,6 +240,7 @@ func TestPTYReaderDropsInvalidBase64Clipboard(t *testing.T) {
 	defer cancel()
 	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "clip-bad", name: "clip-bad", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
@@ -272,6 +275,7 @@ func TestForwardClipboardAsyncSerializesClipboardWrites(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	tr := newBlockingClipboardTransport()
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sess := &session{id: "clip-order", name: "clip-order", ctx: sctx, cancel: cancel, client: ac}
