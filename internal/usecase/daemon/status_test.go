@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -283,61 +284,129 @@ func TestTopBarRendersAttentionBell(t *testing.T) {
 	t.Fatalf("attention glyph not rendered in top bar: %q", rowText(frame.Row(0)))
 }
 
-func TestStatusBarRendersOtherAttentionOldestFirstAndCollapses(t *testing.T) {
+func TestBarStateForMRUFreshestFirstCapCurrentExcludedAndAttention(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
 	sess.name = "current"
-	base := time.Unix(100, 0)
-	newAttendedSession := func(id, name string, at time.Time) *session {
-		tb := &tab{attention: true, attentionAt: at}
-		return &session{id: domain.SessionID(id), name: name, tabs: []*tab{tb}}
+	sess.mruAt.Store(100)
+	for i := 0; i < 10; i++ {
+		other := &session{id: domain.SessionID("s" + strconv.Itoa(i)), name: "s" + strconv.Itoa(i), tabs: []*tab{{attention: i == 8}}}
+		other.mruAt.Store(uint64(i + 1))
+		d.sessions[other.id] = other
 	}
-	d.sessions["old"] = newAttendedSession("old", "old", base)
-	d.sessions["new"] = newAttendedSession("new", "new", base.Add(time.Minute))
 
 	state := d.barStateFor(sess, "")
-	state.attentionFrame = 1
-	require.Equal(t, []string{"old", "new"}, state.otherAttention)
 
-	styles := resolveThemeStyles(nil)
-	wide := make([]renderer.Cell, 24)
-	drawStatusBarState(wide, state, styles)
-	require.Equal(t, " current     old   new", rowText(wide))
-
-	narrow := make([]renderer.Cell, 14)
-	drawStatusBarState(narrow, state, styles)
-	require.Equal(t, " current   ×2", rowText(narrow))
-
-	drawStatusBarState(narrow, barState{status: state.status, copyFeedback: "ok", otherAttention: state.otherAttention}, styles)
-	require.Equal(t, " current    ok", rowText(narrow))
+	require.Len(t, state.mru, 9)
+	require.Equal(t, "s9", state.mru[0].name)
+	require.Equal(t, "s1", state.mru[8].name)
+	for _, got := range state.mru {
+		require.NotEqual(t, "current", got.name)
+	}
+	require.True(t, state.mru[1].attention, "s8 attention should be carried into MRU state")
 }
 
-func TestBarStateForIncludesZeroTimeAttention(t *testing.T) {
+func TestBarStateForMRUZeroTimesUseDeterministicNameOrder(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
-	d.sessions["zero"] = &session{id: "zero", name: "zero", tabs: []*tab{{attention: true}}}
+	for _, name := range []string{"bravo", "alpha", "charlie"} {
+		d.sessions[domain.SessionID(name)] = &session{id: domain.SessionID(name), name: name, tabs: []*tab{{}}}
+	}
 
 	state := d.barStateFor(sess, "")
 
-	require.Equal(t, []string{"zero"}, state.otherAttention)
+	require.GreaterOrEqual(t, len(state.mru), 3)
+	require.Equal(t, []string{"alpha", "bravo", "charlie"}, []string{state.mru[0].name, state.mru[1].name, state.mru[2].name})
 }
 
-func TestBarStateForExcludesCurrentSession(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	defer releasePTY()
-	sess.name = "current"
-	sess.mu.Lock()
-	sess.tabs[0].attention = true
-	sess.tabs[0].attentionAt = time.Unix(1, 0)
-	sess.mu.Unlock()
-	d.sessions["other"] = &session{id: "other", name: "other", tabs: []*tab{{attention: true, attentionAt: time.Unix(2, 0)}}}
+func TestStatusBarRendersMRUNamesEphemeralAndInlineBell(t *testing.T) {
+	state := barState{
+		status:         statusSnapshot{session: "cur"},
+		attentionFrame: 1,
+		mru: []mruSession{
+			{name: "fresh"},
+			{name: "tmp", ephemeral: true, attention: true},
+		},
+	}
+	row := make([]renderer.Cell, 24)
 
-	state := d.barStateFor(sess, "")
+	drawStatusBarState(row, state, resolveThemeStyles(nil))
 
-	require.Equal(t, []string{"other"}, state.otherAttention)
+	require.Equal(t, " cur  fresh tmp*       ", rowText(row))
+	for _, c := range row {
+		if c.Rune == attentionGlyph {
+			require.True(t, c.Style.Bold)
+			return
+		}
+	}
+	t.Fatalf("inline bell not rendered: %q", rowText(row))
+}
+
+func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
+	theme := themeui.Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 20, G: 20, B: 20}, HasFG: true, HasBG: true, TrueColor: true, Known: true}
+	styles := newThemeStyles(theme)
+	state := barState{status: statusSnapshot{session: "c"}, theme: theme, mru: []mruSession{{name: "a"}, {name: "b"}, {name: "c"}}}
+	row := make([]renderer.Cell, 16)
+
+	drawStatusBarState(row, state, styles)
+
+	first := row[3].Style.ForegroundRGB.R
+	second := row[5].Style.ForegroundRGB.R
+	third := row[7].Style.ForegroundRGB.R
+	require.Equal(t, styles.statusBar.ForegroundRGB.R, first)
+	require.Greater(t, first, second)
+	require.Greater(t, second, third)
+
+	plain := mruStyle(renderer.DefaultStyle(), themeui.Theme{}, 1, 3)
+	require.False(t, plain.HasForegroundRGB)
+}
+
+func TestStatusBarNarrowRowsDropWholeOldestMRUEntries(t *testing.T) {
+	state := barState{status: statusSnapshot{session: "cur"}, mru: []mruSession{{name: "fresh"}, {name: "middle"}, {name: "old"}}}
+	row := make([]renderer.Cell, 19)
+
+	drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+	text := rowText(row)
+	require.Contains(t, text, "fresh")
+	require.Contains(t, text, "middle")
+	require.NotContains(t, text, "old")
+}
+
+func TestStatusBarCopyFeedbackFullyRenderedAlongsideMRU(t *testing.T) {
+	state := barState{status: statusSnapshot{session: "cur"}, copyFeedback: "copied", mru: []mruSession{{name: "a"}, {name: "b"}, {name: "c"}}}
+	row := make([]renderer.Cell, 20)
+
+	drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+	text := rowText(row)
+	require.Contains(t, text, " a")
+	require.Contains(t, text, " b")
+	require.Contains(t, text, " c")
+	require.True(t, strings.HasSuffix(text, " copied"), text)
+}
+
+func TestStatusBarCopyFeedbackBoundaryWidths(t *testing.T) {
+	state := barState{status: statusSnapshot{session: "cur"}, copyFeedback: "copied", mru: []mruSession{{name: "fresh"}}}
+	tests := []struct {
+		name string
+		cols int
+		want string
+	}{
+		{name: "just wide enough for feedback after dropping MRU", cols: 12, want: " cur  copied"},
+		{name: "too narrow drops feedback instead of clipping", cols: 11, want: " cur       "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := make([]renderer.Cell, tt.cols)
+
+			drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+			require.Equal(t, tt.want, rowText(row))
+		})
+	}
 }
 
 func TestStatusRepaintsOnCreateSwitchAndResize(t *testing.T) {

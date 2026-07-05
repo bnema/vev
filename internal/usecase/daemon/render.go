@@ -59,6 +59,7 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 	p.screen.OnResponse = func(b []byte) { resp = append(resp, b...) }
 	p.screen.OnBell = func() { signal(attentionCh) }
 	p.screen.OnNotify = func(string, string) { signal(attentionCh) }
+	p.screen.OnProgress = func(bool) { signal(attentionCh) }
 	p.screen.OnClipboard = func(b64 string) { clipboards = append(clipboards, b64) }
 	p.mu.Unlock()
 	for {

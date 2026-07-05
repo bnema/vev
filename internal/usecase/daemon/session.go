@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -56,6 +57,7 @@ type session struct {
 	clipboardWorkerRunning bool
 	cwd                    string
 	createdAt              int64
+	mruAt                  atomic.Uint64
 	// clipFiles records clipboard-image-transfer temp file paths (see
 	// clipboard.go) written for this session, removed best-effort in
 	// killSession.
@@ -85,6 +87,22 @@ type tab struct {
 // its private renderer shadow (so each client gets output minimised against
 // what it has actually seen). sendMu serialises the two senders — the render
 // scheduler and the connection handler — so the transport's single-writer
+
+func (d *Daemon) touchMRU(sess *session) {
+	if d == nil || sess == nil {
+		return
+	}
+	seq := d.mruSeq.Add(1)
+	for {
+		old := sess.mruAt.Load()
+		if old >= seq {
+			return
+		}
+		if sess.mruAt.CompareAndSwap(old, seq) {
+			return
+		}
+	}
+}
 
 func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size) (*session, error) {
 	tbSize := tabSize(sz)
@@ -120,6 +138,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		delete(d.stopped, name)
 	}
 	d.sessions[id] = sess
+	d.touchMRU(sess)
 	d.log.Info("session created", "session", name, "id", id, "ephemeral", ephemeral)
 	d.log.Info("tab created", "session", name, "tab", 0)
 	d.startTabGoroutines(sess, tb)
@@ -168,6 +187,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	newSess.mu.Lock()
 	newSess.client = ac
 	newSess.mu.Unlock()
+	d.touchMRU(newSess)
 	ac.setSession(newSess)
 	d.log.Info("client attached", "session", newSess.name, "resume", ac.resumeCapable)
 	d.mu.Unlock()

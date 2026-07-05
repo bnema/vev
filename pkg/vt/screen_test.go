@@ -120,12 +120,111 @@ func TestOnNotifyOSC9(t *testing.T) {
 	require.Equal(t, "agent done", gotBody)
 }
 
+func TestOSC9ProgressTransitions(t *testing.T) {
+	tests := []struct {
+		name string
+		seqs []string
+		want []bool
+	}{
+		{
+			name: "finish fires once",
+			seqs: []string{"9;4;1;50", "9;4;0;100", "9;4;0;100"},
+			want: []bool{false},
+		},
+		{
+			name: "error fires once repeat no fire",
+			seqs: []string{"9;4;2;0", "9;4;2;50"},
+			want: []bool{true},
+		},
+		{
+			name: "indeterminate clear fires",
+			seqs: []string{"9;4;3", "9;4;0"},
+			want: []bool{false},
+		},
+		{
+			name: "paused clear fires",
+			seqs: []string{"9;4;4;80", "9;4;0;80"},
+			want: []bool{false},
+		},
+		{
+			name: "ongoing updates silent",
+			seqs: []string{"9;4;1;10", "9;4;1;50", "9;4;3;90", "9;4;4;90"},
+		},
+		{
+			name: "bare clear silent",
+			seqs: []string{"9;4;0"},
+		},
+		{
+			name: "bare progress ignored",
+			seqs: []string{"9;4"},
+		},
+		{
+			name: "unparseable ignored",
+			seqs: []string{"9;4;bogus", "9;4;99", "9;4;1", "9;4;0"},
+			want: []bool{false},
+		},
+		{
+			name: "error active clear fires error then finish",
+			seqs: []string{"9;4;2;0", "9;4;1;50", "9;4;0;100"},
+			want: []bool{true, false},
+		},
+		{
+			name: "error clear only fires error",
+			seqs: []string{"9;4;2;0", "9;4;0;100"},
+			want: []bool{true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewScreen(10, 2)
+			var got []bool
+			s.OnProgress = func(errored bool) { got = append(got, errored) }
+			for _, seq := range tt.seqs {
+				s.Write([]byte("\x1b]" + seq + "\x07"))
+			}
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestOSC9ProgressSplitAcrossWritesFiresOnce(t *testing.T) {
+	s := NewScreen(10, 2)
+	calls := 0
+	s.OnProgress = func(bool) { calls++ }
+	s.Write([]byte("\x1b]9;4;1"))
+	s.Write([]byte(";50\x07\x1b]9;4;0;100\x07"))
+	require.Equal(t, 1, calls)
+}
+
+func TestOSC9ProgressNilCallbackDoesNotPanic(t *testing.T) {
+	s := NewScreen(10, 2)
+	require.NotPanics(t, func() {
+		s.Write([]byte("\x1b]9;4;1;50\x07"))
+		s.Write([]byte("\x1b]9;4;0;100\x07"))
+		s.Write([]byte("\x1b]9;4;2;0\x07"))
+	})
+}
+
 func TestOnNotifyIgnoresOSC9Progress(t *testing.T) {
 	s := NewScreen(10, 2)
 	calls := 0
 	s.OnNotify = func(string, string) { calls++ }
 	s.Write([]byte("\x1b]9;4;1;50\x07"))
+	s.Write([]byte("\x1b]9;4;0;100\x07"))
+	s.Write([]byte("\x1b]9;4;2;0\x07"))
 	require.Equal(t, 0, calls)
+}
+
+func TestOnNotifyOSC940RemainsGeneric(t *testing.T) {
+	s := NewScreen(10, 2)
+	var gotTitle, gotBody string
+	calls := 0
+	s.OnNotify = func(title, body string) { gotTitle, gotBody = title, body; calls++ }
+	s.Write([]byte("\x1b]9;40;not progress\x07"))
+	require.Equal(t, 1, calls)
+	require.Equal(t, "", gotTitle)
+	require.Equal(t, "40;not progress", gotBody)
 }
 
 func TestOnNotifyOSC777STTerminated(t *testing.T) {

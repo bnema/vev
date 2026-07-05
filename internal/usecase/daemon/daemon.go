@@ -31,6 +31,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -72,6 +73,7 @@ type Daemon struct {
 	sessions map[domain.SessionID]*session
 	stopped  map[string]stoppedSession
 	nextID   uint64
+	mruSeq   atomic.Uint64
 	// closing marks that shutdown has irreversibly begun. It is set under mu,
 	// atomically with the event that makes shutdown inevitable (the registry
 	// emptying in killSession, or shutdownAll starting), and checked by route
