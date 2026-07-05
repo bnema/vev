@@ -290,7 +290,7 @@ func TestBarStateForMRUFreshestFirstCapCurrentExcludedAndAttention(t *testing.T)
 	defer releasePTY()
 	sess.name = "current"
 	sess.mruAt.Store(100)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		other := &session{id: domain.SessionID("s" + strconv.Itoa(i)), name: "s" + strconv.Itoa(i), tabs: []*tab{{attention: i == 8}}}
 		other.mruAt.Store(uint64(i + 1))
 		d.sessions[other.id] = other
@@ -321,6 +321,29 @@ func TestBarStateForMRUZeroTimesUseDeterministicNameOrder(t *testing.T) {
 	require.Equal(t, []string{"alpha", "bravo", "charlie"}, []string{state.mru[0].name, state.mru[1].name, state.mru[2].name})
 }
 
+func TestBarStateForMRURestoredStoppedSessionsUsePersistedOrder(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p1, releasePTY1 := newBlockingPTY(t)
+	defer releasePTY1()
+	p2, releasePTY2 := newBlockingPTY(t)
+	defer releasePTY2()
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
+	d.stopped["alpha"] = stoppedSession{name: "alpha", cwd: "/tmp/alpha", createdAt: 1, lastUsedSeq: 30}
+	d.stopped["zeta"] = stoppedSession{name: "zeta", cwd: "/tmp/zeta", createdAt: 1, lastUsedSeq: 20}
+	d.mruSeq.Store(30)
+	cur := &session{id: "cur", name: "current", tabs: []*tab{{}}}
+	d.sessions[cur.id] = cur
+
+	_, err := d.createSessionLocked("zeta", false, "/tmp/zeta", sz)
+	require.NoError(t, err)
+	_, err = d.createSessionLocked("alpha", false, "/tmp/alpha", sz)
+	require.NoError(t, err)
+
+	state := d.barStateFor(cur, "")
+	require.GreaterOrEqual(t, len(state.mru), 2)
+	require.Equal(t, []string{"alpha", "zeta"}, []string{state.mru[0].name, state.mru[1].name})
+}
+
 func TestStatusBarRendersMRUNamesEphemeralAndInlineBell(t *testing.T) {
 	state := barState{
 		status:         statusSnapshot{session: "cur"},
@@ -334,7 +357,7 @@ func TestStatusBarRendersMRUNamesEphemeralAndInlineBell(t *testing.T) {
 
 	drawStatusBarState(row, state, resolveThemeStyles(nil))
 
-	require.Equal(t, " cur  fresh tmp*       ", rowText(row))
+	require.Equal(t, " cur  fresh  tmp*      ", rowText(row))
 	for _, c := range row {
 		if c.Rune == attentionGlyph {
 			require.True(t, c.Style.Bold)
@@ -342,6 +365,19 @@ func TestStatusBarRendersMRUNamesEphemeralAndInlineBell(t *testing.T) {
 		}
 	}
 	t.Fatalf("inline bell not rendered: %q", rowText(row))
+}
+
+func TestStatusBarCurrentSessionUsesAccentStyle(t *testing.T) {
+	theme := themeui.Theme{Foreground: renderer.RGB{R: 220, G: 220, B: 220}, Background: renderer.RGB{R: 10, G: 10, B: 10}, HasFG: true, HasBG: true, TrueColor: true, Known: true}
+	styles := newThemeStyles(theme)
+	row := make([]renderer.Cell, 16)
+
+	drawStatusBarState(row, barState{status: statusSnapshot{session: "cur"}, theme: theme}, styles)
+
+	for _, idx := range []int{0, 1, 2, 3, 4} {
+		require.True(t, row[idx].Style.Equal(styles.accent), "cell %d should use accent style", idx)
+	}
+	require.NotEqual(t, styles.statusBar.BackgroundRGB, styles.accent.BackgroundRGB)
 }
 
 func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
@@ -352,20 +388,28 @@ func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
 
 	drawStatusBarState(row, state, styles)
 
-	first := row[3].Style.ForegroundRGB.R
-	second := row[5].Style.ForegroundRGB.R
-	third := row[7].Style.ForegroundRGB.R
-	require.Equal(t, styles.statusBar.ForegroundRGB.R, first)
-	require.Greater(t, first, second)
-	require.Greater(t, second, third)
+	firstFG := row[4].Style.ForegroundRGB.R
+	secondFG := row[7].Style.ForegroundRGB.R
+	thirdFG := row[10].Style.ForegroundRGB.R
+	require.Equal(t, styles.statusBar.ForegroundRGB.R, firstFG)
+	require.Greater(t, firstFG, secondFG)
+	require.Greater(t, secondFG, thirdFG)
+
+	firstBG := row[4].Style.BackgroundRGB.R
+	secondBG := row[7].Style.BackgroundRGB.R
+	thirdBG := row[10].Style.BackgroundRGB.R
+	require.Equal(t, styles.statusBar.BackgroundRGB.R, firstBG)
+	require.Greater(t, firstBG, secondBG)
+	require.Greater(t, secondBG, thirdBG)
 
 	plain := mruStyle(renderer.DefaultStyle(), themeui.Theme{}, 1, 3)
 	require.False(t, plain.HasForegroundRGB)
+	require.False(t, plain.HasBackgroundRGB)
 }
 
 func TestStatusBarNarrowRowsDropWholeOldestMRUEntries(t *testing.T) {
 	state := barState{status: statusSnapshot{session: "cur"}, mru: []mruSession{{name: "fresh"}, {name: "middle"}, {name: "old"}}}
-	row := make([]renderer.Cell, 19)
+	row := make([]renderer.Cell, 21)
 
 	drawStatusBarState(row, state, resolveThemeStyles(nil))
 
@@ -373,6 +417,55 @@ func TestStatusBarNarrowRowsDropWholeOldestMRUEntries(t *testing.T) {
 	require.Contains(t, text, "fresh")
 	require.Contains(t, text, "middle")
 	require.NotContains(t, text, "old")
+}
+
+func TestStatusBarMRUWidthAwareBudget(t *testing.T) {
+	mru := make([]mruSession, 0, maxMRUSessions)
+	for i := 1; i <= maxMRUSessions; i++ {
+		mru = append(mru, mruSession{name: "recent" + strconv.Itoa(i)})
+	}
+	state := barState{status: statusSnapshot{session: "cur"}, mru: mru}
+
+	tests := []struct {
+		name       string
+		cols       int
+		wantShown  []string
+		wantHidden []string
+	}{
+		{
+			name:       "narrow keeps first recent when it physically fits",
+			cols:       15,
+			wantShown:  []string{"cur", "recent1"},
+			wantHidden: []string{"recent2"},
+		},
+		{
+			name:       "medium reserves right-side room instead of filling all recents",
+			cols:       80,
+			wantShown:  []string{"recent1", "recent6"},
+			wantHidden: []string{"recent7", "recent9"},
+		},
+		{
+			name:       "wide shows more recents while still keeping a right-side reserve",
+			cols:       120,
+			wantShown:  []string{"recent1", "recent9"},
+			wantHidden: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := make([]renderer.Cell, tt.cols)
+
+			drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+			text := rowText(row)
+			for _, want := range tt.wantShown {
+				require.Contains(t, text, want)
+			}
+			for _, hidden := range tt.wantHidden {
+				require.NotContains(t, text, hidden)
+			}
+		})
+	}
 }
 
 func TestStatusBarCopyFeedbackFullyRenderedAlongsideMRU(t *testing.T) {

@@ -648,16 +648,50 @@ func (s *mockStoreState) has(name string) bool {
 	return ok
 }
 
+func (s *mockStoreState) record(t *testing.T, name string) persist.Record {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	records, err := persist.New(newStaticStore(s.data)).LoadAll()
+	require.NoError(t, err)
+	for _, r := range records {
+		if r.Name == name {
+			return r
+		}
+	}
+	t.Fatalf("record %q not found", name)
+	return persist.Record{}
+}
+
+type newStaticStore map[string][]byte
+
+func (s newStaticStore) Get(key []byte) ([]byte, bool) {
+	v, ok := s[string(key)]
+	return append([]byte(nil), v...), ok
+}
+func (s newStaticStore) Set(_, _ []byte) error { return nil }
+func (s newStaticStore) Delete(_ []byte) error { return nil }
+func (s newStaticStore) Range(fn func(k, v []byte) bool) {
+	for k, v := range s {
+		if !fn([]byte(k), append([]byte(nil), v...)) {
+			return
+		}
+	}
+}
+func (s newStaticStore) Sync() error  { return nil }
+func (s newStaticStore) Close() error { return nil }
+
 func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
 	store, _ := newMockStore(t)
 	seed := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
-	require.NoError(t, seed.persist.Save(persist.Record{Name: "work", Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8}))
+	require.NoError(t, seed.persist.Save(persist.Record{Name: "work", Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, LastUsedSeq: 9}))
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
 	d.mu.Lock()
 	stopped := d.stopped["work"]
 	d.mu.Unlock()
-	require.Equal(t, stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7}, stopped)
+	require.Equal(t, stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, lastUsedSeq: 9}, stopped)
+	require.Equal(t, uint64(9), d.mruSeq.Load())
 }
 
 func TestTouchMRUConcurrentUpdatesRemainMonotonic(t *testing.T) {
@@ -671,9 +705,7 @@ func TestTouchMRUConcurrentUpdatesRemainMonotonic(t *testing.T) {
 	var wg sync.WaitGroup
 	var observer sync.WaitGroup
 
-	observer.Add(1)
-	go func() {
-		defer observer.Done()
+	observer.Go(func() {
 		previous := sess.mruAt.Load()
 		for {
 			select {
@@ -688,17 +720,15 @@ func TestTouchMRUConcurrentUpdatesRemainMonotonic(t *testing.T) {
 			}
 			previous = current
 		}
-	}()
+	})
 
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			for range iterations {
 				d.touchMRU(sess)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -707,6 +737,39 @@ func TestTouchMRUConcurrentUpdatesRemainMonotonic(t *testing.T) {
 
 	require.False(t, decreased.Load())
 	require.Equal(t, d.mruSeq.Load(), sess.mruAt.Load())
+}
+
+func TestTouchMRUPersistsNamedButNotEphemeral(t *testing.T) {
+	store, state := newMockStore(t)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	WithStore(store)(d)
+	named := &session{name: "work", tabs: []*tab{{}}, createdAt: 1}
+	require.NoError(t, d.persist.Save(persist.Record{Name: "work", Cwd: "/work", CreatedAt: 1, UpdatedAt: 1}))
+
+	d.touchMRU(named)
+	require.Equal(t, named.mruAt.Load(), state.record(t, "work").LastUsedSeq)
+	setsAfterNamed := state.sets
+
+	ephemeral := &session{name: "0", ephemeral: true, tabs: []*tab{{}}}
+	d.touchMRU(ephemeral)
+	require.False(t, state.has("0"))
+	require.Equal(t, setsAfterNamed, state.sets)
+}
+
+func TestCreateSessionSeedsMRUFromStopped(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, release := newBlockingPTY(t)
+	defer release()
+	store, state := newMockStore(t)
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	WithStore(store)(d)
+	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 1, lastUsedSeq: 42}
+	d.mruSeq.Store(42)
+
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz)
+	require.NoError(t, err)
+	require.Equal(t, uint64(42), sess.mruAt.Load())
+	require.Equal(t, uint64(42), state.record(t, "work").LastUsedSeq)
 }
 
 func TestCreateRenameKillPersistenceLifecycle(t *testing.T) {

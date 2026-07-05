@@ -215,6 +215,16 @@ func (e paletteExec) PrevTab() error {
 	return nil
 }
 
+func (e paletteExec) BackSession() error {
+	e.d.navigateRecentSession(e.sess, e.ac, 1)
+	return nil
+}
+
+func (e paletteExec) ForwardSession() error {
+	e.d.navigateRecentSession(e.sess, e.ac, -1)
+	return nil
+}
+
 func (e paletteExec) Detach() error {
 	e.d.clientGone(e.sess, e.ac, e.ac.transport(), true)
 	return nil
