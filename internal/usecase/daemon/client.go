@@ -55,6 +55,7 @@ type attachedClient struct {
 	mouseScan     mouse.Scanner
 	themeMu       sync.Mutex
 	theme         themeui.Theme
+	clientTheme   themeui.Theme
 	lastCursor    cursorOut
 	recentNav     recentSessionNavigator
 	linkMu        sync.Mutex
@@ -115,9 +116,21 @@ func (ac *attachedClient) getTheme() themeui.Theme {
 	return ac.theme
 }
 
+func (ac *attachedClient) getClientTheme() themeui.Theme {
+	ac.themeMu.Lock()
+	defer ac.themeMu.Unlock()
+	return ac.clientTheme
+}
+
 func (ac *attachedClient) setTheme(t themeui.Theme) {
 	ac.themeMu.Lock()
 	ac.theme = t
+	ac.themeMu.Unlock()
+}
+
+func (ac *attachedClient) setClientTheme(t themeui.Theme) {
+	ac.themeMu.Lock()
+	ac.clientTheme = t
 	ac.themeMu.Unlock()
 }
 
@@ -321,25 +334,15 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	}
 	ac.initOverlays()
 	ac.setSession(sess)
-	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac})
+	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, &d.bindings)
 	sess.mu.Lock()
 	old := sess.client
 	sess.client = ac
 	name := sess.name
-	tabs := append([]*tab(nil), sess.tabs...)
 	sess.mu.Unlock()
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", name, "resume", opts.resumeCapable)
-	for _, tb := range tabs {
-		tb.mu.Lock()
-		panes := tb.panesSnapshot()
-		tb.mu.Unlock()
-		for _, p := range panes {
-			p.mu.Lock()
-			p.screen.SetDefaultColors(renderer.RGB{}, renderer.RGB{}, false)
-			p.mu.Unlock()
-		}
-	}
+	d.applyHostTheme(sess, ac, d.effectiveTheme(themeui.Theme{}), true)
 	return ac, old
 }
 
@@ -355,23 +358,7 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 // (and run its own attach-time reset), so this call must leave the tabs
 // alone rather than clobbering that client's freshly applied colors.
 func (d *Daemon) resetScreenDefaultColors(sess *session) {
-	sess.mu.Lock()
-	if sess.client != nil {
-		sess.mu.Unlock()
-		return
-	}
-	tabs := append([]*tab(nil), sess.tabs...)
-	sess.mu.Unlock()
-	for _, tb := range tabs {
-		tb.mu.Lock()
-		panes := tb.panesSnapshot()
-		tb.mu.Unlock()
-		for _, p := range panes {
-			p.mu.Lock()
-			p.screen.SetDefaultColors(renderer.RGB{}, renderer.RGB{}, false)
-			p.mu.Unlock()
-		}
-	}
+	d.applyHostTheme(sess, nil, d.effectiveTheme(themeui.Theme{}), true)
 }
 
 func (d *Daemon) detachReplacedClient(old *attachedClient) {
@@ -509,34 +496,21 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 // detachIfCurrent clears the client iff ac is the current one, reporting
 
 func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) {
-	t := themeui.Theme{
-		Foreground: msg.Foreground,
-		Background: msg.Background,
-		HasFG:      msg.HasForeground,
-		HasBG:      msg.HasBackground,
-		TrueColor:  msg.TrueColor,
-		Known:      msg.HasForeground && msg.HasBackground,
+	clientTheme := themeui.Theme{
+		Foreground:  msg.Foreground,
+		Background:  msg.Background,
+		HasFG:       msg.HasForeground,
+		HasBG:       msg.HasBackground,
+		TrueColor:   msg.TrueColor,
+		Known:       msg.HasForeground && msg.HasBackground,
+		SchemeKnown: msg.SchemeKnown,
+		Light:       msg.Light,
 	}
+	ac.setClientTheme(clientTheme)
+	t := d.effectiveTheme(clientTheme)
 
-	knownDefaultColors := t.HasFG && t.HasBG
-	sess.mu.Lock()
-	if sess.client != ac {
-		sess.mu.Unlock()
+	if !d.applyHostTheme(sess, ac, t, false) {
 		return
-	}
-	tabs := append([]*tab(nil), sess.tabs...)
-	sess.mu.Unlock()
-
-	ac.setTheme(t)
-	for _, tb := range tabs {
-		tb.mu.Lock()
-		panes := tb.panesSnapshot()
-		tb.mu.Unlock()
-		for _, p := range panes {
-			p.mu.Lock()
-			p.screen.SetDefaultColors(t.Foreground, t.Background, knownDefaultColors)
-			p.mu.Unlock()
-		}
 	}
 	d.paint(sess, ac, true)
 }

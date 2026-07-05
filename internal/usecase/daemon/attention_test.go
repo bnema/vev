@@ -107,7 +107,7 @@ func TestNoteAttentionDoesNotBlockOnWedgedOtherClient(t *testing.T) {
 	tabW := newTestTabWithContext(newScriptPTY(nil), sctxW, cancelW)
 	sessW := &session{id: "wedged", name: "wedged", ctx: sctxW, cancel: cancelW, tabs: []*tab{tabW}, client: acW}
 	acW.setSession(sessW)
-	acW.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acW})
+	acW.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acW}, nil)
 	d.sessions[sessW.id] = sessW
 
 	done := make(chan struct{})
@@ -355,7 +355,7 @@ func TestCloseRingingTabRefreshesOtherSessionBottomBar(t *testing.T) {
 	tbB := newTestTabWithContext(pB, sctxB, cancelB)
 	sessB := &session{id: "sessB", name: "other", ctx: sctxB, cancel: cancelB, tabs: []*tab{tbB}, client: acB}
 	acB.setSession(sessB)
-	acB.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acB})
+	acB.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acB}, nil)
 	d.sessions[sessB.id] = sessB
 
 	d.paint(sessB, acB, true)

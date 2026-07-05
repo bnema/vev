@@ -684,6 +684,50 @@ func (_c *MockTerminal_Out_Call) RunAndReturn(run func() io.Writer) *MockTermina
 	return _c
 }
 
+// QueryColors provides a mock function for the type MockTerminal
+func (_mock *MockTerminal) QueryColors() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for QueryColors")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockTerminal_QueryColors_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'QueryColors'
+type MockTerminal_QueryColors_Call struct {
+	*mock.Call
+}
+
+// QueryColors is a helper method to define mock.On call
+func (_e *MockTerminal_Expecter) QueryColors() *MockTerminal_QueryColors_Call {
+	return &MockTerminal_QueryColors_Call{Call: _e.mock.On("QueryColors")}
+}
+
+func (_c *MockTerminal_QueryColors_Call) Run(run func()) *MockTerminal_QueryColors_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockTerminal_QueryColors_Call) Return(err error) *MockTerminal_QueryColors_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockTerminal_QueryColors_Call) RunAndReturn(run func() error) *MockTerminal_QueryColors_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ResizeEvents provides a mock function for the type MockTerminal
 func (_mock *MockTerminal) ResizeEvents() <-chan domain.Size {
 	ret := _mock.Called()

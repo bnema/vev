@@ -746,6 +746,7 @@ func (t *runTerminal) EnterRaw() (func() error, error) {
 }
 func (t *runTerminal) Size() (domain.Size, error)       { return domain.Size{Cols: 80, Rows: 24}, nil }
 func (t *runTerminal) ResizeEvents() <-chan domain.Size { return t.resizeCh }
+func (t *runTerminal) QueryColors() error               { return nil }
 func (t *runTerminal) In() io.Reader                    { return t.in }
 func (t *runTerminal) Out() io.Writer                   { return &t.out }
 func (t *runTerminal) Flush() error                     { return nil }

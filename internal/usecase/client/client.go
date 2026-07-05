@@ -343,12 +343,25 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	sendCh := make(chan ports.Frame, sendQueueDepth)
 	sendErrCh := make(chan error, 1)
 
+	// colorQueryCh hands an OSC 10/11 re-query request from the stdin pump to
+	// the main loop, which is the only goroutine allowed to touch term.Out()/
+	// term.Flush(); QueryColors writes through the same batched writer, so
+	// calling it directly from the stdin pump would race the main loop's
+	// output writes.
+	colorQueryCh := make(chan struct{}, 1)
+	requestColors := func() {
+		select {
+		case colorQueryCh <- struct{}{}:
+		default:
+		}
+	}
+
 	var clip ports.ClipboardReader
 	if remote {
 		clip = clipboard
 	}
 	go runSender(loopCtx, cancel, transport, sendCh, sendErrCh, log)
-	go runStdin(loopCtx, cancel, term.In(), sendCh, clk, trueColor, clip, log)
+	go runStdin(loopCtx, cancel, term.In(), sendCh, clk, trueColor, requestColors, clip, log)
 	go runResize(loopCtx, term.ResizeEvents(), sendCh, log)
 
 	// 5. Output/main loop: the only goroutine that touches the terminal.
@@ -365,6 +378,10 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 				return attachResult{resumeToken: resumeToken, welcomed: true, err: fmt.Errorf("vev: sending to daemon: %w", serr)}
 			default:
 				return attachResult{resumeToken: resumeToken, welcomed: true}
+			}
+		case <-colorQueryCh:
+			if err := term.QueryColors(); err != nil {
+				log.Warn("querying terminal colors", "err", err)
 			}
 		case r := <-recvCh:
 			if r.err != nil {
@@ -472,7 +489,7 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 // exits. That is harmless here — Attach has already returned and restored
 // the terminal — and matches the standard pattern for stdin pumps; a
 // closable stdin duplicate could lift it later if ever needed.
-func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame, clk ports.Clock, trueColor bool, clipboard ports.ClipboardReader, log *slog.Logger) {
+func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame, clk ports.Clock, trueColor bool, requestColors func(), clipboard ports.ClipboardReader, log *slog.Logger) {
 	defer log.Debug("stdin pump exited")
 	buf := make([]byte, stdinBufSize)
 	var scanner theme.Scanner
@@ -522,6 +539,9 @@ func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out 
 	for {
 		n, rerr := in.Read(buf)
 		if n > 0 {
+			sendTheme := func() {
+				send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(current)})
+			}
 			scanner.Scan(buf[:n], func(kind int, rgb renderer.RGB) {
 				switch kind {
 				case 10:
@@ -533,7 +553,14 @@ func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out 
 				default:
 					return
 				}
-				send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(current)})
+				sendTheme()
+			}, func(light bool) {
+				current.SchemeKnown = true
+				current.Light = light
+				if requestColors != nil {
+					requestColors()
+				}
+				sendTheme()
 			}, sink)
 			if !sendOK.Load() {
 				return

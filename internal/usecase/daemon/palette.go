@@ -31,9 +31,11 @@ func (d *Daemon) paletteCommands() []command.Command {
 	d.paletteRecentMu.Lock()
 	recent := append([]string(nil), d.paletteRecent...)
 	d.paletteRecentMu.Unlock()
+	overrides := d.codeOverrideSnapshot()
 
 	byCode := make(map[string]command.Command, len(commands))
 	for _, cmd := range commands {
+		cmd = commandWithOverrides(cmd, overrides)
 		byCode[cmd.Code] = cmd
 	}
 	out := make([]command.Command, 0, len(commands))
@@ -47,6 +49,7 @@ func (d *Daemon) paletteCommands() []command.Command {
 		used[code] = true
 	}
 	for _, cmd := range commands {
+		cmd = commandWithOverrides(cmd, overrides)
 		if !used[cmd.Code] {
 			out = append(out, cmd)
 		}

@@ -28,6 +28,6 @@ type Context interface {
 
 // Command describes an executable command.
 type Command struct {
-	Code, Name, Desc string
-	Run              func(Context) error
+	Slug, Code, Name, Desc string
+	Run                    func(Context) error
 }

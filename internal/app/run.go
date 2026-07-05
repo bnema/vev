@@ -23,6 +23,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/clipboard"
 	"github.com/bnema/vev/internal/adapters/clock"
+	"github.com/bnema/vev/internal/adapters/config"
 	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/pty"
@@ -224,6 +225,16 @@ func configureLogging(component logging.Component, rotateAtRuntime bool) (*slog.
 	})
 }
 
+func logConfigWarnings(log *slog.Logger, warnings []domain.Warning) {
+	for _, warning := range warnings {
+		if warning.Line > 0 {
+			log.Warn("config warning", "line", warning.Line, "msg", warning.Msg)
+			continue
+		}
+		log.Warn("config warning", "msg", warning.Msg)
+	}
+}
+
 // runDaemon runs the daemon in the foreground (the hidden --daemon path,
 // entered by an auto-spawned child): it sets up logging, binds the socket,
 // constructs the daemon, and serves until the last session exits or a
@@ -256,6 +267,14 @@ func runDaemon() error {
 
 	log.Info("daemon starting", "socket", ln.Addr())
 	daemonOpts := []daemon.Option(nil)
+	configPath := platform.ConfigPath()
+	cfg, warnings, err := config.Load(configPath)
+	if err != nil {
+		log.Warn("loading config failed; using defaults", "path", configPath, "err", err)
+		cfg = domain.Defaults()
+	}
+	logConfigWarnings(log, warnings)
+	daemonOpts = append(daemonOpts, daemon.WithConfig(cfg))
 	storePath := persist.StorePath(platform.StateDir())
 	if store, err := kv.Open(storePath); err != nil {
 		log.Warn("opening session store failed; persistence disabled", "path", storePath, "err", err)
@@ -263,7 +282,18 @@ func runDaemon() error {
 		log.Info("session persistence enabled", "path", storePath)
 		daemonOpts = append(daemonOpts, daemon.WithStore(store))
 	}
-	d := daemon.New(pty.NewFactory(), clock.New(), log, daemonOpts...)
+	clk := clock.New()
+	d := daemon.New(pty.NewFactory(), clk, log, daemonOpts...)
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
+	go func() {
+		if err := config.Watch(watchCtx, clk, configPath, func(cfg domain.Config, warnings []domain.Warning) {
+			logConfigWarnings(log, warnings)
+			d.ApplyConfig(cfg)
+		}); err != nil && !errors.Is(err, context.Canceled) {
+			log.Warn("config watcher stopped", "path", configPath, "err", err)
+		}
+	}()
 	if err := d.Serve(ctx, ln); err != nil {
 		log.Error("daemon exited", "err", err)
 		return err

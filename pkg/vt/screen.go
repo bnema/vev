@@ -32,6 +32,13 @@ type screenState struct {
 const maxEscapeBufferLen = 128 * 1024
 
 const (
+	// ColorSchemeReportDark is the DEC 2031 dark-scheme report.
+	ColorSchemeReportDark = "\x1b[?997;1n"
+	// ColorSchemeReportLight is the DEC 2031 light-scheme report.
+	ColorSchemeReportLight = "\x1b[?997;2n"
+)
+
+const (
 	progressStateClear = iota
 	progressStateNormal
 	progressStateError
@@ -89,6 +96,9 @@ type Screen struct {
 	mouseMode        int
 	mouseSGR         bool
 	bracketedPaste   bool
+	colorSchemeMode  bool
+	colorSchemeLight bool
+	colorSchemeSet   bool
 }
 
 func NewScreen(width, height int) *Screen {
@@ -155,6 +165,27 @@ func (s *Screen) SyncUpdateActive() bool { return s.syncUpdateActive }
 // BracketedPasteMode reports whether DEC private mode 2004 is currently enabled
 // by the child process.
 func (s *Screen) BracketedPasteMode() bool { return s.bracketedPaste }
+
+// ColorSchemeMode reports whether DEC private mode 2031 is currently enabled.
+func (s *Screen) ColorSchemeMode() bool { return s.colorSchemeMode }
+
+// SetColorScheme updates the host color scheme and notifies subscribed child apps.
+func (s *Screen) SetColorScheme(light bool) {
+	if s.colorSchemeSet && s.colorSchemeLight == light {
+		return
+	}
+	s.colorSchemeSet = true
+	s.colorSchemeLight = light
+	if s.colorSchemeMode {
+		s.respond(s.colorSchemeReport())
+	}
+}
+
+// ClearColorScheme marks the host color scheme as unknown. Future child color
+// scheme queries are silent until SetColorScheme supplies a known value again.
+func (s *Screen) ClearColorScheme() {
+	s.colorSchemeSet = false
+}
 
 // ForceSyncEnd forcibly leaves DEC private mode 2026 (synchronized update).
 // Hosts use this as a safety valve if a child enters synchronized update mode
@@ -480,6 +511,16 @@ func (s *Screen) respond(b []byte) {
 	}
 }
 
+func (s *Screen) colorSchemeReport() []byte {
+	if !s.colorSchemeSet {
+		return nil
+	}
+	if s.colorSchemeLight {
+		return []byte(ColorSchemeReportLight)
+	}
+	return []byte(ColorSchemeReportDark)
+}
+
 func (s *Screen) scrollDownRegion(top, bottom, n int) {
 	if s.Frame.Width == 0 || s.Frame.Height == 0 || n <= 0 {
 		return
@@ -720,11 +761,10 @@ func (s *Screen) handleProgress(rest string) {
 // clipboard query (data == "?") is always ignored — vev never answers
 // clipboard queries. A payload with no second ";" is malformed and ignored.
 func (s *Screen) handleOSC52(rest string) {
-	idx := strings.IndexByte(rest, ';')
-	if idx < 0 {
+	_, data, ok := strings.Cut(rest, ";")
+	if !ok {
 		return
 	}
-	data := rest[idx+1:]
 	if data == "?" {
 		return
 	}
@@ -759,6 +799,12 @@ func (s *Screen) applyCSI(params string, cmd byte) {
 			if !private {
 				s.respond([]byte("\x1b[0n"))
 			}
+		case 996:
+			if private {
+				if report := s.colorSchemeReport(); report != nil {
+					s.respond(report)
+				}
+			}
 		case 6:
 			resp := make([]byte, 0, 16)
 			resp = append(resp, "\x1b["...)
@@ -778,9 +824,15 @@ func (s *Screen) applyCSI(params string, cmd byte) {
 				return
 			}
 			state := 0
-			if mode == 2026 {
+			switch mode {
+			case 2026:
 				state = 2
 				if s.syncUpdateActive {
+					state = 1
+				}
+			case 2031:
+				state = 2
+				if s.colorSchemeMode {
 					state = 1
 				}
 			}
@@ -991,6 +1043,7 @@ func (s *Screen) reset() {
 	s.mouseMode = 0
 	s.mouseSGR = false
 	s.bracketedPaste = false
+	s.colorSchemeMode = false
 	s.resetScrollRegion()
 	s.fullRedraw()
 }
@@ -1041,6 +1094,8 @@ func (s *Screen) setMode(private bool, parts []int, enabled bool) {
 			}
 		case 2026:
 			s.syncUpdateActive = enabled
+		case 2031:
+			s.colorSchemeMode = enabled
 		case 25:
 			s.cursorVisible = enabled
 		case 1000, 1002, 1003:

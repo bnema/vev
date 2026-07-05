@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestRegistryCodesAreUniqueUppercaseThreeLettersInOrder(t *testing.T) {
+func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
 	commands := Registry()
 	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "FSK", "SSP", "VIS", "RNS", "DET"}
 
@@ -14,7 +14,8 @@ func TestRegistryCodesAreUniqueUppercaseThreeLettersInOrder(t *testing.T) {
 	}
 
 	codePattern := regexp.MustCompile(`^[A-Z]{3}$`)
-	seen := make(map[string]bool, len(commands))
+	seenCodes := make(map[string]bool, len(commands))
+	seenSlugs := make(map[string]bool, len(commands))
 	for i, cmd := range commands {
 		if cmd.Code != wantCodes[i] {
 			t.Fatalf("Registry()[%d].Code = %q, want %q", i, cmd.Code, wantCodes[i])
@@ -22,10 +23,17 @@ func TestRegistryCodesAreUniqueUppercaseThreeLettersInOrder(t *testing.T) {
 		if !codePattern.MatchString(cmd.Code) {
 			t.Errorf("Registry()[%d].Code = %q, want three uppercase letters", i, cmd.Code)
 		}
-		if seen[cmd.Code] {
+		if seenCodes[cmd.Code] {
 			t.Errorf("Registry()[%d].Code = %q, duplicate code", i, cmd.Code)
 		}
-		seen[cmd.Code] = true
+		seenCodes[cmd.Code] = true
+		if cmd.Slug == "" {
+			t.Errorf("Registry()[%d].Slug is empty", i)
+		}
+		if seenSlugs[cmd.Slug] {
+			t.Errorf("Registry()[%d].Slug = %q, duplicate slug", i, cmd.Slug)
+		}
+		seenSlugs[cmd.Slug] = true
 	}
 }
 

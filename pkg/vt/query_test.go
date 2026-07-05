@@ -23,6 +23,10 @@ func TestScreenQueryResponses(t *testing.T) {
 		{name: "private CPR", input: "\x1b[3;7H\x1b[?6n", want: "\x1b[?3;7R"},
 		{name: "DECRQM 2026 reset", input: "\x1b[?2026$p", want: "\x1b[?2026;2$y"},
 		{name: "DECRQM 2026 set", input: "\x1b[?2026h\x1b[?2026$p", want: "\x1b[?2026;1$y"},
+		{name: "DECRQM 2031 reset", input: "\x1b[?2031$p", want: "\x1b[?2031;2$y"},
+		{name: "DECRQM 2031 set", input: "\x1b[?2031h\x1b[?2031$p", want: "\x1b[?2031;1$y"},
+		{name: "color scheme DSR dark", input: "\x1b[?996n", want: ColorSchemeReportDark},
+		{name: "color scheme DSR light", input: "\x1b[?996n", want: ColorSchemeReportLight},
 		{name: "DECRQM unknown mode", input: "\x1b[?1337$p", want: "\x1b[?1337;0$y"},
 		{name: "kitty keyboard query unanswered", input: "\x1b[?u", want: ""},
 		{name: "XTVERSION unanswered", input: "\x1b[>0q", want: ""},
@@ -33,10 +37,17 @@ func TestScreenQueryResponses(t *testing.T) {
 			s := NewScreen(80, 24)
 			var got bytes.Buffer
 			s.OnResponse = func(b []byte) { got.Write(b) }
-			if tc.name == "DA split across writes" {
+			switch tc.name {
+			case "DA split across writes":
 				s.Write([]byte("\x1b["))
 				s.Write([]byte("0c"))
-			} else {
+			case "color scheme DSR light":
+				s.SetColorScheme(true)
+				s.Write([]byte(tc.input))
+			case "color scheme DSR dark":
+				s.SetColorScheme(false)
+				s.Write([]byte(tc.input))
+			default:
 				s.Write([]byte(tc.input))
 			}
 			if got.String() != tc.want {
@@ -125,5 +136,67 @@ func TestCSIuDispatch(t *testing.T) {
 				t.Fatalf("cursor = %d;%d, want %d;%d", s.Row, s.Col, tc.wantRow, tc.wantCol)
 			}
 		})
+	}
+}
+
+func TestScreenColorSchemeQueriesUnknownAreSilent(t *testing.T) {
+	s := NewScreen(80, 24)
+	s.SetColorScheme(true)
+	s.ClearColorScheme()
+	var got bytes.Buffer
+	s.OnResponse = func(b []byte) { got.Write(b) }
+	s.Write([]byte("\x1b[?996n"))
+	if got.Len() != 0 {
+		t.Fatalf("response = %q, want silence", got.String())
+	}
+}
+
+func TestScreenResetClearsColorSchemeModeSubscription(t *testing.T) {
+	s := NewScreen(80, 24)
+	var got bytes.Buffer
+	s.OnResponse = func(b []byte) { got.Write(b) }
+
+	s.Write([]byte("\x1b[?2031h"))
+	s.Write([]byte("\x1bc"))
+
+	s.SetColorScheme(true)
+	if got.Len() != 0 {
+		t.Fatalf("unsolicited response after reset = %q, want silence", got.String())
+	}
+
+	got.Reset()
+	s.Write([]byte("\x1b[?2031$p"))
+	if got.String() != "\x1b[?2031;2$y" {
+		t.Fatalf("DECRQM 2031 after reset = %q, want reset state", got.String())
+	}
+}
+
+func TestScreenColorSchemeUnsolicitedOnlySubscribedAndChanged(t *testing.T) {
+	s := NewScreen(80, 24)
+	var got bytes.Buffer
+	s.OnResponse = func(b []byte) { got.Write(b) }
+
+	s.SetColorScheme(true)
+	if got.Len() != 0 {
+		t.Fatalf("unsubscribed response = %q, want silence", got.String())
+	}
+
+	s.Write([]byte("\x1b[?2031h"))
+	if !s.ColorSchemeMode() {
+		t.Fatalf("ColorSchemeMode() = false, want true")
+	}
+	s.SetColorScheme(true)
+	if got.Len() != 0 {
+		t.Fatalf("unchanged response = %q, want silence", got.String())
+	}
+	s.SetColorScheme(false)
+	if got.String() != ColorSchemeReportDark {
+		t.Fatalf("changed response = %q, want dark notification", got.String())
+	}
+	got.Reset()
+	s.Write([]byte("\x1b[?2031l"))
+	s.SetColorScheme(true)
+	if got.Len() != 0 {
+		t.Fatalf("disabled response = %q, want silence", got.String())
 	}
 }

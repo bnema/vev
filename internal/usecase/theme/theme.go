@@ -6,19 +6,45 @@ import (
 	"strings"
 
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 const maxPending = 64
 
 // Theme describes terminal default colors reported by OSC 10/11.
 type Theme struct {
-	Foreground renderer.RGB
-	Background renderer.RGB
-	HasFG      bool
-	HasBG      bool
-	TrueColor  bool
-	Known      bool
+	Foreground  renderer.RGB
+	Background  renderer.RGB
+	HasFG       bool
+	HasBG       bool
+	TrueColor   bool
+	Known       bool
+	SchemeKnown bool
+	Light       bool
 }
+
+var (
+	BuiltinDark = Theme{
+		Foreground:  renderer.RGB{R: 0xd8, G: 0xd8, B: 0xd8},
+		Background:  renderer.RGB{R: 0x18, G: 0x18, B: 0x18},
+		HasFG:       true,
+		HasBG:       true,
+		TrueColor:   true,
+		Known:       true,
+		SchemeKnown: true,
+		Light:       false,
+	}
+	BuiltinLight = Theme{
+		Foreground:  renderer.RGB{R: 0x20, G: 0x20, B: 0x20},
+		Background:  renderer.RGB{R: 0xf8, G: 0xf8, B: 0xf8},
+		HasFG:       true,
+		HasBG:       true,
+		TrueColor:   true,
+		Known:       true,
+		SchemeKnown: true,
+		Light:       true,
+	}
+)
 
 // ParseXColor parses the XParseColor formats commonly returned by OSC 10/11.
 func ParseXColor(s string) (renderer.RGB, bool) {
@@ -95,7 +121,7 @@ type Scanner struct {
 // callers never see it split. Partial OSC color responses are buffered across
 // calls, but the buffer is bounded so an unterminated OSC cannot block
 // unrelated input forever.
-func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), onBytes func([]byte)) {
+func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), onScheme func(light bool), onBytes func([]byte)) {
 	if len(s.pending) > 0 {
 		combined := make([]byte, 0, len(s.pending)+len(data))
 		combined = append(combined, s.pending...)
@@ -108,6 +134,22 @@ func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), on
 	for i := 0; i < len(data); i++ {
 		if data[i] != '\x1b' {
 			continue
+		}
+
+		if complete, possible, light := schemeCSINotification(data[i:]); complete {
+			if byteStart < i {
+				onBytes(data[byteStart:i])
+			}
+			onScheme(light)
+			i += len(vt.ColorSchemeReportDark) - 1
+			byteStart = i + 1
+			continue
+		} else if possible {
+			if byteStart < i {
+				onBytes(data[byteStart:i])
+			}
+			s.bufferOrFlush(data[i:], onBytes)
+			return
 		}
 
 		completePrefix, possiblePrefix := colorOSCPrefix(data[i:])
@@ -181,6 +223,41 @@ func colorOSCPrefix(data []byte) (complete bool, possible bool) {
 		}
 	}
 	return false, false
+}
+
+// schemeCSIPrefixes lists the CSI ?997 scheme-notification sequences vev
+// recognizes. Package-level so schemeCSINotification (called per ESC byte in
+// the stdin hot path) doesn't allocate on every call.
+var schemeCSIPrefixes = []struct {
+	seq   []byte
+	light bool
+}{
+	{seq: []byte(vt.ColorSchemeReportDark), light: false},
+	{seq: []byte(vt.ColorSchemeReportLight), light: true},
+}
+
+func schemeCSINotification(data []byte) (complete bool, possible bool, light bool) {
+	// A bare trailing ESC (handled elsewhere) or "ESC [" (2 bytes) is
+	// something a user can type; unlike OSC's "ESC ]" it must never be
+	// withheld as a partial match with nothing following, or those keystrokes
+	// would be buffered and never forwarded. Partial buffering only starts
+	// from "ESC [ ?" onward; a complete match is always >= 9 bytes, so this
+	// guard cannot reject one.
+	if len(data) < 3 {
+		return false, false, false
+	}
+	for _, prefix := range schemeCSIPrefixes {
+		if len(data) >= len(prefix.seq) {
+			if bytes.Equal(data[:len(prefix.seq)], prefix.seq) {
+				return true, true, prefix.light
+			}
+			continue
+		}
+		if bytes.Equal(data, prefix.seq[:len(data)]) {
+			return false, true, false
+		}
+	}
+	return false, false, false
 }
 
 func findTerminator(data []byte) (start int, end int) {

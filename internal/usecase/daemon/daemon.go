@@ -38,6 +38,7 @@ import (
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/keys"
 )
 
 // Scheduler debounce bounds. Idle updates use the minimum for low latency;
@@ -105,6 +106,9 @@ type Daemon struct {
 	persistEnabled bool
 	procCwd        func(int) (string, error)
 	procComm       func(int) (string, error)
+	bindings       atomic.Pointer[keys.Bindings]
+	codeOverrides  atomic.Pointer[map[string]string]
+	themeMode      atomic.Uint32
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
 	tempDir string
@@ -182,6 +186,13 @@ func WithTempDir(dir string) Option {
 	}
 }
 
+// WithConfig applies the initial user configuration.
+func WithConfig(cfg domain.Config) Option {
+	return func(d *Daemon) {
+		d.ApplyConfig(cfg)
+	}
+}
+
 // New constructs a Daemon. ptys spawns PTY-backed children, clock drives the
 // render debounce, and log receives diagnostics (defaults to slog.Default).
 func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Option) *Daemon {
@@ -218,6 +229,13 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	if d.procComm == nil {
 		d.procComm = platform.ProcessComm
+	}
+	if d.bindings.Load() == nil {
+		d.bindings.Store(keys.DefaultBindings())
+	}
+	if d.codeOverrides.Load() == nil {
+		empty := map[string]string{}
+		d.codeOverrides.Store(&empty)
 	}
 	if records, err := d.persist.LoadAll(); err != nil {
 		d.log.Warn("loading persisted sessions failed", "err", err)

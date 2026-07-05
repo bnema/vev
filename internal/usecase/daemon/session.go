@@ -235,13 +235,13 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	}
 	tb := newTab(pty, tbSize)
 	if client != nil {
-		t := client.getTheme()
+		t := d.effectiveTheme(client.getClientTheme())
 		tb.mu.Lock()
 		p := tb.focusedPane()
 		tb.mu.Unlock()
 		if p != nil {
 			p.mu.Lock()
-			p.screen.SetDefaultColors(t.Foreground, t.Background, t.HasFG && t.HasBG)
+			applyPaneThemeLocked(p, t, false)
 			p.mu.Unlock()
 		}
 	}
