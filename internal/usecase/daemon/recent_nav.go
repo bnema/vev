@@ -37,7 +37,7 @@ func (d *Daemon) navigateRecentSession(sess *session, ac *attachedClient, delta 
 	if ac.recentNav.index == 0 && !sameSessionTrail(ac.recentNav.ids, trail) {
 		ac.recentNav.reset(trail)
 	}
-	if !d.pruneRecentNav(&ac.recentNav) || ac.recentNav.index < 0 || ac.recentNav.index >= len(ac.recentNav.ids) || ac.recentNav.ids[ac.recentNav.index] != sess.id {
+	if !d.pruneRecentNav(&ac.recentNav) || ac.recentNav.ids[ac.recentNav.index] != sess.id {
 		ac.recentNav.reset(trail)
 	}
 
