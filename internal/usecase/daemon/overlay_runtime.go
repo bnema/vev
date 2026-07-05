@@ -7,6 +7,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
 	promptui "github.com/bnema/vev/internal/usecase/prompt"
+	"github.com/bnema/vev/internal/usecase/visualsearch"
 )
 
 type overlayRuntime struct {
@@ -31,6 +32,8 @@ type overlayRuntime struct {
 	copyMode              *scopy.Mode
 	copyPending           []byte
 	copyESC               pendingByteTimer
+	copySearch            *visualsearch.Model
+	copySearchPending     []byte
 	copyFeedback          string
 	copyPressRow          int
 	copyPressRowValid     bool
@@ -87,6 +90,21 @@ func (rt *overlayRuntime) copyActive() bool {
 	return rt.copyMode != nil
 }
 
+func (rt *overlayRuntime) copySearchActive() bool {
+	if rt == nil {
+		return false
+	}
+	rt.copyMu.Lock()
+	defer rt.copyMu.Unlock()
+	return rt.copySearch != nil
+}
+
+func (rt *overlayRuntime) clearCopyModeLocked() {
+	rt.copyMode = nil
+	rt.copySearch = nil
+	rt.copySearchPending = nil
+}
+
 func (rt *overlayRuntime) HandleInput(d *Daemon, data []byte) bool {
 	if rt == nil || rt.ac == nil {
 		return false
@@ -114,9 +132,10 @@ func (rt *overlayRuntime) HandleInput(d *Daemon, data []byte) bool {
 type overlayRenderSnapshot struct {
 	rt *overlayRuntime
 
-	copyActive   bool
-	copyMode     *scopy.Mode
-	copyFeedback string
+	copyActive      bool
+	copyMode        *scopy.Mode
+	copySearchModel *visualsearch.Model
+	copyFeedback    string
 
 	pickerActive bool
 	pickerModel  *picker.Model
@@ -147,8 +166,10 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 	snap.copyActive = rt.copyMode != nil
 	if rt.copyMode != nil {
 		copyModeValue := *rt.copyMode
+		copyModeValue.Searches = append([]scopy.SearchMatch(nil), rt.copyMode.Searches...)
 		snap.copyMode = &copyModeValue
 	}
+	snap.copySearchModel = rt.copySearch.Clone()
 	snap.copyFeedback = rt.copyFeedback
 	if snap.copyFeedback != "" && !snap.copyActive {
 		rt.copyFeedback = ""

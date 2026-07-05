@@ -144,6 +144,127 @@ func TestCopyModePaletteCommandEntersAndDoesNotForward(t *testing.T) {
 	}
 }
 
+func TestCopyModeSearchModalRoutesBatchedInputAfterSlash(t *testing.T) {
+	writes := make(chan []byte, 1)
+	p, _ := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	pane := sess.tabs[0].focusedPane()
+	copy(pane.screen.Frame.Row(0), testRow("alpha"))
+	copy(pane.screen.Frame.Row(1), testRow("beta alpha"))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("/alpha\r"))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	require.Nil(t, ac.overlays.copySearch)
+	require.NotNil(t, ac.overlays.copyMode)
+	require.Equal(t, 0, ac.overlays.copyMode.Cursor)
+	select {
+	case got := <-writes:
+		t.Fatalf("batched visual search input forwarded to PTY: %q", got)
+	default:
+	}
+}
+
+func TestCopyModeSearchModalJumpsAndKeepsNavigation(t *testing.T) {
+	writes := make(chan []byte, 1)
+	p, _ := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	pane := sess.tabs[0].focusedPane()
+	copy(pane.screen.Frame.Row(0), testRow("alpha"))
+	copy(pane.screen.Frame.Row(1), testRow("beta alpha"))
+	copy(pane.screen.Frame.Row(2), testRow("gamma"))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("/"))
+	out := awaitFrame(t, sends, ports.MsgOutput)
+	msg, err := ports.UnmarshalOutput(out.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(msg.Data), "Search")
+	require.NotNil(t, ac.overlays.copySearch)
+
+	d.handleInput(sess, ac, []byte("alpha"))
+	out = awaitFrame(t, sends, ports.MsgOutput)
+	msg, err = ports.UnmarshalOutput(out.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(msg.Data), "/alpha")
+	require.Contains(t, string(msg.Data), "1:1  alpha")
+	require.Contains(t, string(msg.Data), "2:6  beta alpha")
+
+	d.handleInput(sess, ac, []byte("\r"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Nil(t, ac.overlays.copySearch)
+	require.Equal(t, 0, ac.overlays.copyMode.Cursor)
+
+	d.handleInput(sess, ac, []byte("n"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Equal(t, 1, ac.overlays.copyMode.Cursor)
+	d.handleInput(sess, ac, []byte("N"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Equal(t, 0, ac.overlays.copyMode.Cursor)
+
+	select {
+	case got := <-writes:
+		t.Fatalf("visual search input forwarded to PTY: %q", got)
+	default:
+	}
+}
+
+func TestCopyModeSearchModalSelectionPreviewsBehindModal(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	pane := sess.tabs[0].focusedPane()
+	copy(pane.screen.Frame.Row(0), testRow("alpha"))
+	copy(pane.screen.Frame.Row(1), testRow("beta alpha"))
+	copy(pane.screen.Frame.Row(2), testRow("gamma"))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	d.handleInput(sess, ac, []byte("/"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("alpha"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.NotNil(t, ac.overlays.copySearch)
+	require.Equal(t, 0, ac.overlays.copyMode.Cursor, "typing a query previews the selected first result behind the modal")
+
+	d.handleInput(sess, ac, []byte{0x0e})
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.NotNil(t, ac.overlays.copySearch)
+	require.Equal(t, 1, ac.overlays.copyMode.Cursor, "moving modal selection previews that result without Enter")
+}
+
+func TestCopyModeSearchModalCapturesMouseAndClearsOnExit(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	pane := sess.tabs[0].focusedPane()
+	pane.scrollback = scopy.NewScrollback(4)
+	pane.scrollback.Append(testRow("old alpha"))
+	copy(pane.screen.Frame.Row(0), testRow("live alpha"))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("/alpha"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.NotNil(t, ac.overlays.copySearch)
+	cursor := ac.overlays.copyMode.Cursor
+
+	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
+	require.NotNil(t, ac.overlays.copySearch)
+	require.Equal(t, cursor, ac.overlays.copyMode.Cursor)
+
+	d.handleInput(sess, ac, []byte("\x1b"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Nil(t, ac.overlays.copySearch)
+	require.NotNil(t, ac.overlays.copyMode)
+	d.handleInput(sess, ac, []byte("q"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Nil(t, ac.overlays.copySearch)
+	require.Nil(t, ac.overlays.copyMode)
+}
+
 func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 	writes := make(chan []byte, 1)
 	p, _ := newBlockingPTYWithWrites(t, writes)

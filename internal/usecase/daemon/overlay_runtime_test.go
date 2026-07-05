@@ -3,8 +3,12 @@ package daemon
 import (
 	"testing"
 
-	promptui "github.com/bnema/vev/internal/usecase/prompt"
 	"github.com/stretchr/testify/require"
+
+	scopy "github.com/bnema/vev/internal/usecase/copy"
+	promptui "github.com/bnema/vev/internal/usecase/prompt"
+	"github.com/bnema/vev/internal/usecase/visualsearch"
+	"github.com/bnema/vev/pkg/renderer"
 )
 
 func TestOverlayRuntimeActive(t *testing.T) {
@@ -103,6 +107,34 @@ func TestOverlayRuntimeHandleInputPrecedence(t *testing.T) {
 			tc.check(t, ac)
 		})
 	}
+}
+
+func TestOverlayRuntimeSnapshotDoesNotAliasCopySearchState(t *testing.T) {
+	ac := &attachedClient{}
+	ac.initOverlays()
+	snap := scopy.Snapshot{Rows: [][]renderer.Cell{testRow("alpha"), testRow("beta alpha")}, Width: 16, Height: 2}
+	mode := scopy.NewMode(snap)
+	require.True(t, mode.Search(snap, "alpha"))
+	search := visualsearch.New(snap)
+	for _, r := range "alpha" {
+		search.Insert(r)
+	}
+
+	ac.overlays.copyMu.Lock()
+	ac.overlays.copyMode = mode
+	ac.overlays.copySearch = search
+	ac.overlays.copyMu.Unlock()
+
+	renderSnap := ac.overlays.SnapshotForRender()
+	defer renderSnap.Unlock()
+
+	ac.overlays.copyMu.Lock()
+	ac.overlays.copyMode.Searches[0].Row = 99
+	ac.overlays.copySearch.Insert('z')
+	ac.overlays.copyMu.Unlock()
+
+	require.Equal(t, 0, renderSnap.copyMode.Searches[0].Row)
+	require.Equal(t, "alpha", renderSnap.copySearchModel.Query())
 }
 
 func TestOverlayRuntimeHandleInputInactive(t *testing.T) {

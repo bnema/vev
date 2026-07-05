@@ -323,6 +323,9 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	if overlays.copyActive {
 		frame, damage = composeCopyClientFrame(overlays.copyMode, tb, bars)
 	}
+	if overlays.copySearchModel != nil {
+		frame, damage = composeCopySearchClientFrame(overlays.copySearchModel, frame, styles)
+	}
 	if overlays.pickerActive {
 		if overlays.previewTab == tb {
 			if layoutSnap.ok && tb.tree != nil && tb.tree.Root != nil && tb.tree.Root.Kind != layout.Leaf {
@@ -343,7 +346,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	overlays.Unlock()
 	cursorContent, cursorVisible := focusedPaneContentRect(layoutSnap, p.id)
 	p.mu.Lock()
-	desiredCursor := desiredCursorOut(p.screen, cursorContent, !cursorVisible || overlays.copyActive || overlays.pickerActive || overlays.paletteActive || overlays.promptActive)
+	desiredCursor := desiredCursorOut(p.screen, cursorContent, !cursorVisible || overlays.copyActive || overlays.copySearchModel != nil || overlays.pickerActive || overlays.paletteActive || overlays.promptActive)
 	p.mu.Unlock()
 	data, err := ac.rend.Draw(frame, damage)
 	var cursorTail []byte

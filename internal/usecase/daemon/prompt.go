@@ -3,7 +3,6 @@ package daemon
 import (
 	"strings"
 
-	"github.com/bnema/vev/internal/domain"
 	promptui "github.com/bnema/vev/internal/usecase/prompt"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
@@ -98,12 +97,5 @@ func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte) {
 
 func composePromptClientFrame(model *promptui.Model, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
 	styleSet := resolveThemeStyles(styles)
-	inner := promptModalFor(model.Title()).Composite(base, styleSet.border)
-	modalFrame := model.Render(domain.Size{Cols: inner.Width, Rows: inner.Height}, styleSet.accent)
-	for y := range min(inner.Height, modalFrame.Height) {
-		for x := range min(inner.Width, modalFrame.Width) {
-			base.Set(inner.X+x, inner.Y+y, modalFrame.At(x, y))
-		}
-	}
-	return base, []renderer.Damage{renderer.FullRedraw()}
+	return composeModalClientFrame(base, promptModalFor(model.Title()), styleSet, styleSet.accent, model.Render)
 }

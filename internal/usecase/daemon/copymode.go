@@ -33,8 +33,12 @@ import (
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
+	"github.com/bnema/vev/internal/usecase/ui"
+	"github.com/bnema/vev/internal/usecase/visualsearch"
 	"github.com/bnema/vev/pkg/renderer"
 )
+
+var copySearchModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Search ", Anchor: ui.AnchorBottom, BottomMargin: 1}
 
 func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 	rt := ac.overlays
@@ -58,7 +62,7 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 	}
 	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
 	if delta > 0 && rt.copyMode.AtBottom(snap) {
-		rt.copyMode = nil
+		rt.clearCopyModeLocked()
 		rt.copyMu.Unlock()
 		p.mu.Unlock()
 		d.paint(sess, ac, true)
@@ -67,7 +71,7 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 	rt.copyMode.Move(snap, delta)
 	exit := delta > 0 && rt.copyMode.AtBottom(snap)
 	if exit {
-		rt.copyMode = nil
+		rt.clearCopyModeLocked()
 	}
 	rt.copyMu.Unlock()
 	p.mu.Unlock()
@@ -92,6 +96,8 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	p.mu.Unlock()
 	rt.copyMu.Lock()
 	rt.copyMode = scopy.NewMode(snap)
+	rt.copySearch = nil
+	rt.copySearchPending = nil
 	rt.copyPressRowValid = false
 	rt.copyDragging = false
 	rt.normalMousePressValid = false
@@ -198,6 +204,15 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		rt.copyPending = nil
 	}
 	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+	if rt.copySearch != nil {
+		changed, closeSearch, accepted := d.routeCopySearchInputLocked(rt, snap, data)
+		rt.copyMu.Unlock()
+		p.mu.Unlock()
+		if changed || closeSearch || accepted {
+			d.paint(sess, ac, true)
+		}
+		return
+	}
 	changed := false
 	copyOut := false
 	exit := false
@@ -218,6 +233,19 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		case ' ', 'v':
 			rt.copyMode.ToggleSelection()
 			changed = true
+		case '/':
+			rt.copySearch = visualsearch.New(snap)
+			rt.copySearchPending = nil
+			changed = true
+			if i+1 < len(data) {
+				searchChanged, _, accepted := d.routeCopySearchInputLocked(rt, snap, data[i+1:])
+				changed = changed || searchChanged || accepted
+			}
+			i = len(data)
+		case 'n':
+			changed = rt.copyMode.NextSearchMatch(snap, 1) || changed
+		case 'N':
+			changed = rt.copyMode.NextSearchMatch(snap, -1) || changed
 		case '\r', '\n', 'y':
 			copyOut = true
 			exit = true
@@ -248,7 +276,7 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	}
 	if exit {
 		d.stopCopyPendingTimerLocked(ac)
-		rt.copyMode = nil
+		rt.clearCopyModeLocked()
 	}
 	rt.copyMu.Unlock()
 	p.mu.Unlock()
@@ -279,6 +307,54 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	}
 }
 
+func (d *Daemon) routeCopySearchInputLocked(rt *overlayRuntime, snap scopy.Snapshot, data []byte) (changed bool, closeSearch bool, accepted bool) {
+	routeOverlayBytes(data, &rt.copySearchPending, overlayEvents{
+		rune: func(r rune) {
+			rt.copySearch.Insert(r)
+			changed = true
+		},
+		backspace: func() {
+			rt.copySearch.Backspace()
+			changed = true
+		},
+		enter: func() {
+			if _, ok := rt.copySearch.Selected(); ok {
+				searchSnap := rt.copySearch.Snapshot()
+				accepted = rt.copyMode.SetSearchMatches(searchSnap, rt.copySearch.Query(), rt.copySearch.Matches(), rt.copySearch.SelectedIndex())
+				closeSearch = accepted
+			}
+		},
+		cancel: func() { closeSearch = true },
+		up: func() {
+			rt.copySearch.Up()
+			changed = true
+		},
+		down: func() {
+			rt.copySearch.Down()
+			changed = true
+		},
+	})
+	if changed && !closeSearch {
+		d.previewCopySearchSelectionLocked(rt, snap)
+	}
+	if closeSearch {
+		rt.copySearch = nil
+		rt.copySearchPending = nil
+	}
+	return changed, closeSearch, accepted
+}
+
+func (d *Daemon) previewCopySearchSelectionLocked(rt *overlayRuntime, snap scopy.Snapshot) {
+	if rt == nil || rt.copyMode == nil || rt.copySearch == nil {
+		return
+	}
+	match, ok := rt.copySearch.Selected()
+	if !ok {
+		return
+	}
+	rt.copyMode.SetCursor(snap, match.Row)
+}
+
 func (d *Daemon) retainCopyESCLocked(ac *attachedClient) {
 	rt := ac.overlays
 	mode := rt.copyMode
@@ -296,7 +372,7 @@ func (d *Daemon) retainCopyESCLocked(ac *attachedClient) {
 			rt.copyMu.Unlock()
 			return
 		}
-		rt.copyMode = nil
+		rt.clearCopyModeLocked()
 		rt.copyMu.Unlock()
 
 		if sess := ac.currentSession(); sess != nil {
@@ -337,6 +413,11 @@ func routeCopyEscape(m *scopy.Mode, snap scopy.Snapshot, data []byte) (int, bool
 func isCopyEscapePrefix(data []byte) bool {
 	return len(data) == 2 && data[0] == 0x1b && (data[1] == '[' || data[1] == 'O') ||
 		len(data) == 3 && data[0] == 0x1b && data[1] == '[' && (data[2] == '5' || data[2] == '6')
+}
+
+func composeCopySearchClientFrame(model *visualsearch.Model, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
+	styleSet := resolveThemeStyles(styles)
+	return composeModalClientFrame(base, copySearchModal, styleSet, styleSet.selection, model.Render)
 }
 
 func composeCopyClientFrame(mode *scopy.Mode, tb *tab, bars barState) (renderer.Frame, []renderer.Damage) {
