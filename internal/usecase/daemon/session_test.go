@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -657,6 +658,55 @@ func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
 	stopped := d.stopped["work"]
 	d.mu.Unlock()
 	require.Equal(t, stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7}, stopped)
+}
+
+func TestTouchMRUConcurrentUpdatesRemainMonotonic(t *testing.T) {
+	d := &Daemon{}
+	sess := &session{}
+	const goroutines = 16
+	const iterations = 1000
+	start := make(chan struct{})
+	done := make(chan struct{})
+	var decreased atomic.Bool
+	var wg sync.WaitGroup
+	var observer sync.WaitGroup
+
+	observer.Add(1)
+	go func() {
+		defer observer.Done()
+		previous := sess.mruAt.Load()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			current := sess.mruAt.Load()
+			if current < previous {
+				decreased.Store(true)
+				return
+			}
+			previous = current
+		}
+	}()
+
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range iterations {
+				d.touchMRU(sess)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(done)
+	observer.Wait()
+
+	require.False(t, decreased.Load())
+	require.Equal(t, d.mruSeq.Load(), sess.mruAt.Load())
 }
 
 func TestCreateRenameKillPersistenceLifecycle(t *testing.T) {
