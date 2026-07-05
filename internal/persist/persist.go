@@ -70,13 +70,38 @@ func (p *Persister) Touch(name, cwd string, at int64) error {
 	}
 
 	createdAt := at
+	lastUsedSeq := uint64(0)
 	if v, ok := p.store.Get([]byte(name)); ok {
 		if r, err := decodeRecordValue(name, v); err == nil {
 			createdAt = r.CreatedAt
+			lastUsedSeq = r.LastUsedSeq
 		}
 	}
 
-	value, err := encodeRecordValue(Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: at})
+	value, err := encodeRecordValue(Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: at, LastUsedSeq: lastUsedSeq})
+	if err != nil {
+		return err
+	}
+	return p.store.Set([]byte(name), value)
+}
+
+// TouchMRU updates hot-path session recency without forcing an fsync.
+func (p *Persister) TouchMRU(name string, lastUsedSeq uint64) error {
+	if p == nil || p.store == nil {
+		return nil
+	}
+	if name == "" {
+		return errEmptyName
+	}
+
+	r := Record{Name: name, LastUsedSeq: lastUsedSeq}
+	if v, ok := p.store.Get([]byte(name)); ok {
+		if decoded, err := decodeRecordValue(name, v); err == nil {
+			r = decoded
+			r.LastUsedSeq = lastUsedSeq
+		}
+	}
+	value, err := encodeRecordValue(r)
 	if err != nil {
 		return err
 	}

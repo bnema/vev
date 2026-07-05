@@ -321,6 +321,29 @@ func TestBarStateForMRUZeroTimesUseDeterministicNameOrder(t *testing.T) {
 	require.Equal(t, []string{"alpha", "bravo", "charlie"}, []string{state.mru[0].name, state.mru[1].name, state.mru[2].name})
 }
 
+func TestBarStateForMRURestoredStoppedSessionsUsePersistedOrder(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p1, releasePTY1 := newBlockingPTY(t)
+	defer releasePTY1()
+	p2, releasePTY2 := newBlockingPTY(t)
+	defer releasePTY2()
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
+	d.stopped["alpha"] = stoppedSession{name: "alpha", cwd: "/tmp/alpha", createdAt: 1, lastUsedSeq: 30}
+	d.stopped["zeta"] = stoppedSession{name: "zeta", cwd: "/tmp/zeta", createdAt: 1, lastUsedSeq: 20}
+	d.mruSeq.Store(30)
+	cur := &session{id: "cur", name: "current", tabs: []*tab{{}}}
+	d.sessions[cur.id] = cur
+
+	_, err := d.createSessionLocked("zeta", false, "/tmp/zeta", sz)
+	require.NoError(t, err)
+	_, err = d.createSessionLocked("alpha", false, "/tmp/alpha", sz)
+	require.NoError(t, err)
+
+	state := d.barStateFor(cur, "")
+	require.GreaterOrEqual(t, len(state.mru), 2)
+	require.Equal(t, []string{"alpha", "zeta"}, []string{state.mru[0].name, state.mru[1].name})
+}
+
 func TestStatusBarRendersMRUNamesEphemeralAndInlineBell(t *testing.T) {
 	state := barState{
 		status:         statusSnapshot{session: "cur"},
