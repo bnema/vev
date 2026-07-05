@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -122,6 +123,7 @@ type barState struct {
 }
 
 type mruSession struct {
+	id        domain.SessionID
 	name      string
 	ephemeral bool
 	attention bool
@@ -174,7 +176,7 @@ func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 		}
 		at := sess.mruAt.Load()
 		sess.mu.Lock()
-		entry := mruSession{name: sess.name, ephemeral: sess.ephemeral, mruAt: at}
+		entry := mruSession{id: sess.id, name: sess.name, ephemeral: sess.ephemeral, mruAt: at}
 		for _, tb := range sess.tabs {
 			if tb.attention {
 				entry.attention = true

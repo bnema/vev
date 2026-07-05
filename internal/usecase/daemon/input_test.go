@@ -236,6 +236,88 @@ func TestPaletteNextPreviousSwitchActiveTab(t *testing.T) {
 	}
 }
 
+func TestPaletteBackForwardSession(t *testing.T) {
+	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	recent := d.sessions[domain.SessionID("recent")]
+	older := d.sessions[domain.SessionID("older")]
+
+	runPaletteCommand(t, d, current, ac, "BSK")
+	require.Same(t, recent, ac.currentSession())
+
+	runPaletteCommand(t, d, recent, ac, "BSK")
+	require.Same(t, older, ac.currentSession())
+
+	runPaletteCommand(t, d, older, ac, "FSK")
+	require.Same(t, recent, ac.currentSession())
+
+	runPaletteCommand(t, d, recent, ac, "FSK")
+	require.Same(t, current, ac.currentSession())
+}
+
+func TestPaletteBackForwardSessionBoundaries(t *testing.T) {
+	t.Run("forward from current does not wrap", func(t *testing.T) {
+		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+
+		runPaletteCommand(t, d, current, ac, "FSK")
+		require.Same(t, current, ac.currentSession())
+	})
+
+	t.Run("back with no MRU does not move", func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+
+		runPaletteCommand(t, d, sess, ac, "BSK")
+		require.Same(t, sess, ac.currentSession())
+	})
+
+	t.Run("back at oldest does not wrap", func(t *testing.T) {
+		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+		older := d.sessions[domain.SessionID("older")]
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+		runPaletteCommand(t, d, ac.currentSession(), ac, "BSK")
+		require.Same(t, older, ac.currentSession())
+
+		runPaletteCommand(t, d, older, ac, "BSK")
+		require.Same(t, older, ac.currentSession())
+	})
+}
+
+func newRecentNavigationTestSessions(t *testing.T) (*Daemon, *session, *attachedClient, chan ports.Frame, []func()) {
+	t.Helper()
+	p1, release1 := newBlockingPTY(t)
+	p2, release2 := newBlockingPTY(t)
+	p3, release3 := newBlockingPTY(t)
+	d, current, ac, sends := newManualSessionWithPTYs(t, p1)
+	current.id = "current"
+	delete(d.sessions, domain.SessionID("manual"))
+	d.sessions[current.id] = current
+	recent := &session{id: "recent", name: "recent", ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}}
+	older := &session{id: "older", name: "older", ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p3, domain.Size{Cols: 80, Rows: 23})}}
+	d.sessions[recent.id] = recent
+	d.sessions[older.id] = older
+	current.mruAt.Store(30)
+	recent.mruAt.Store(20)
+	older.mruAt.Store(10)
+	return d, current, ac, sends, []func(){release1, release2, release3}
+}
+
+func runPaletteCommand(t *testing.T, d *Daemon, sess *session, ac *attachedClient, code string) {
+	t.Helper()
+	d.handleInput(sess, ac, []byte("\x1b "))
+	d.handleInput(sess, ac, []byte(code+"\r"))
+}
+
+func releaseAll(releases []func()) {
+	for _, release := range releases {
+		release()
+	}
+}
+
 func TestAltXClosesActiveTabAndSelectsRemaining(t *testing.T) {
 	writes := make(chan []byte, 1)
 	p1, releasePTY1 := newBlockingPTY(t)

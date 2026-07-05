@@ -18,6 +18,8 @@ type Context interface {
 	FocusPaneDown() error
 	NextTab() error
 	PrevTab() error
+	BackSession() error
+	ForwardSession() error
 	Detach() error
 	EnterVisualMode() error
 	RenameSession() error
