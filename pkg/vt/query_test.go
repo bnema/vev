@@ -25,8 +25,8 @@ func TestScreenQueryResponses(t *testing.T) {
 		{name: "DECRQM 2026 set", input: "\x1b[?2026h\x1b[?2026$p", want: "\x1b[?2026;1$y"},
 		{name: "DECRQM 2031 reset", input: "\x1b[?2031$p", want: "\x1b[?2031;2$y"},
 		{name: "DECRQM 2031 set", input: "\x1b[?2031h\x1b[?2031$p", want: "\x1b[?2031;1$y"},
-		{name: "color scheme DSR dark", input: "\x1b[?996n", want: "\x1b[?997;1n"},
-		{name: "color scheme DSR light", input: "\x1b[?996n", want: "\x1b[?997;2n"},
+		{name: "color scheme DSR dark", input: "\x1b[?996n", want: ColorSchemeReportDark},
+		{name: "color scheme DSR light", input: "\x1b[?996n", want: ColorSchemeReportLight},
 		{name: "DECRQM unknown mode", input: "\x1b[?1337$p", want: "\x1b[?1337;0$y"},
 		{name: "kitty keyboard query unanswered", input: "\x1b[?u", want: ""},
 		{name: "XTVERSION unanswered", input: "\x1b[>0q", want: ""},
@@ -190,7 +190,7 @@ func TestScreenColorSchemeUnsolicitedOnlySubscribedAndChanged(t *testing.T) {
 		t.Fatalf("unchanged response = %q, want silence", got.String())
 	}
 	s.SetColorScheme(false)
-	if got.String() != "\x1b[?997;1n" {
+	if got.String() != ColorSchemeReportDark {
 		t.Fatalf("changed response = %q, want dark notification", got.String())
 	}
 	got.Reset()

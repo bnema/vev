@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 const maxPending = 64
@@ -140,7 +141,7 @@ func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), on
 				onBytes(data[byteStart:i])
 			}
 			onScheme(light)
-			i += len("\x1b[?997;1n") - 1
+			i += len(vt.ColorSchemeReportDark) - 1
 			byteStart = i + 1
 			continue
 		} else if possible {
@@ -231,8 +232,8 @@ var schemeCSIPrefixes = []struct {
 	seq   []byte
 	light bool
 }{
-	{seq: []byte("\x1b[?997;1n"), light: false},
-	{seq: []byte("\x1b[?997;2n"), light: true},
+	{seq: []byte(vt.ColorSchemeReportDark), light: false},
+	{seq: []byte(vt.ColorSchemeReportLight), light: true},
 }
 
 func schemeCSINotification(data []byte) (complete bool, possible bool, light bool) {

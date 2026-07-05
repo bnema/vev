@@ -2,6 +2,7 @@ package theme
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
@@ -83,18 +84,43 @@ func TestScannerHandlesSplitSequences(t *testing.T) {
 }
 
 func TestScannerHandlesSplitSchemeNotifications(t *testing.T) {
-	var s Scanner
-	var schemes []bool
-	var out bytes.Buffer
-
-	s.Scan([]byte("a\x1b[?997"), func(kind int, rgb renderer.RGB) {}, func(light bool) { schemes = append(schemes, light) }, func(b []byte) { out.Write(b) })
-	s.Scan([]byte(";1nb\x1b[?997;2nc"), func(kind int, rgb renderer.RGB) {}, func(light bool) { schemes = append(schemes, light) }, func(b []byte) { out.Write(b) })
-
-	if out.String() != "abc" {
-		t.Fatalf("passthrough=%q want abc", out.String())
+	tests := []struct {
+		name        string
+		chunks      []string
+		wantOut     string
+		wantSchemes []bool
+	}{
+		{
+			name:        "split dark then complete light",
+			chunks:      []string{"a\x1b[?997", ";1nb\x1b[?997;2nc"},
+			wantOut:     "abc",
+			wantSchemes: []bool{false, true},
+		},
+		{
+			name:        "split light",
+			chunks:      []string{"x\x1b[?997;", "2ny"},
+			wantOut:     "xy",
+			wantSchemes: []bool{true},
+		},
 	}
-	if len(schemes) != 2 || schemes[0] != false || schemes[1] != true {
-		t.Fatalf("schemes=%v want [false true]", schemes)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var s Scanner
+			var schemes []bool
+			var out bytes.Buffer
+
+			for _, chunk := range tt.chunks {
+				s.Scan([]byte(chunk), func(kind int, rgb renderer.RGB) {}, func(light bool) { schemes = append(schemes, light) }, func(b []byte) { out.Write(b) })
+			}
+
+			if out.String() != tt.wantOut {
+				t.Fatalf("passthrough=%q want %q", out.String(), tt.wantOut)
+			}
+			if !reflect.DeepEqual(schemes, tt.wantSchemes) {
+				t.Fatalf("schemes=%v want %v", schemes, tt.wantSchemes)
+			}
+		})
 	}
 }
 

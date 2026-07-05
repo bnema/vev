@@ -32,6 +32,13 @@ type screenState struct {
 const maxEscapeBufferLen = 128 * 1024
 
 const (
+	// ColorSchemeReportDark is the DEC 2031 dark-scheme report.
+	ColorSchemeReportDark = "\x1b[?997;1n"
+	// ColorSchemeReportLight is the DEC 2031 light-scheme report.
+	ColorSchemeReportLight = "\x1b[?997;2n"
+)
+
+const (
 	progressStateClear = iota
 	progressStateNormal
 	progressStateError
@@ -509,9 +516,9 @@ func (s *Screen) colorSchemeReport() []byte {
 		return nil
 	}
 	if s.colorSchemeLight {
-		return []byte("\x1b[?997;2n")
+		return []byte(ColorSchemeReportLight)
 	}
-	return []byte("\x1b[?997;1n")
+	return []byte(ColorSchemeReportDark)
 }
 
 func (s *Screen) scrollDownRegion(top, bottom, n int) {
@@ -754,11 +761,10 @@ func (s *Screen) handleProgress(rest string) {
 // clipboard query (data == "?") is always ignored — vev never answers
 // clipboard queries. A payload with no second ";" is malformed and ignored.
 func (s *Screen) handleOSC52(rest string) {
-	idx := strings.IndexByte(rest, ';')
-	if idx < 0 {
+	_, data, ok := strings.Cut(rest, ";")
+	if !ok {
 		return
 	}
-	data := rest[idx+1:]
 	if data == "?" {
 		return
 	}

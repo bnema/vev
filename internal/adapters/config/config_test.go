@@ -194,6 +194,47 @@ func TestWatchReloadsChangedFileWithFakeClock(t *testing.T) {
 	}
 }
 
+func TestWatchUsesDefaultsWhenReloadLoadFails(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(path, []byte("theme = dark\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	clk := newFakeClock(time.Unix(0, 0))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type change struct {
+		cfg      domain.Config
+		warnings []domain.Warning
+	}
+	changes := make(chan change, 2)
+	done := make(chan error, 1)
+	go func() {
+		done <- Watch(ctx, clk, path, func(cfg domain.Config, warnings []domain.Warning) {
+			changes <- change{cfg: cfg, warnings: warnings}
+		})
+	}()
+
+	clk.waitForTimers(t, 1)
+	tooLong := strings.Repeat("x", 70*1024)
+	if err := os.WriteFile(path, []byte(tooLong), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clk.advance(2 * time.Second)
+
+	got := <-changes
+	require.Equal(t, domain.Defaults(), got.cfg)
+	require.NotEmpty(t, got.warnings)
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Watch() error = %v, want context.Canceled", err)
+	}
+}
+
 func TestWatchDoesNotRepeatPersistentStatError(t *testing.T) {
 	t.Parallel()
 

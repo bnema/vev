@@ -128,6 +128,7 @@ func Watch(ctx context.Context, clock ports.Clock, path string, onChange func(do
 				last = current
 				cfg, warnings, err := Load(path)
 				if err != nil {
+					cfg = domain.Defaults()
 					warnings = append(warnings, domain.Warning{Msg: err.Error()})
 				}
 				onChange(cfg, warnings)
