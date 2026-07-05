@@ -57,6 +57,7 @@ type attachedClient struct {
 	theme         themeui.Theme
 	clientTheme   themeui.Theme
 	lastCursor    cursorOut
+	recentNav     recentSessionNavigator
 	linkMu        sync.Mutex
 	sendMu        sync.Mutex
 }

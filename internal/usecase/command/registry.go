@@ -21,6 +21,8 @@ func Registry() []Command {
 		{Slug: "focus-pane-down", Code: "FPD", Name: "Focus pane down", Desc: "Focus the pane below", Run: func(ctx Context) error { return ctx.FocusPaneDown() }},
 		{Slug: "next-tab", Code: "NXT", Name: "Next tab", Desc: "Switch to the next tab", Run: func(ctx Context) error { return ctx.NextTab() }},
 		{Slug: "previous-tab", Code: "PVT", Name: "Previous tab", Desc: "Switch to the previous tab", Run: func(ctx Context) error { return ctx.PrevTab() }},
+		{Slug: "back-session", Code: "BSK", Name: "Back session", Desc: "Switch back through recent sessions", Run: func(ctx Context) error { return ctx.BackSession() }},
+		{Slug: "forward-session", Code: "FSK", Name: "Forward session", Desc: "Switch forward through recent sessions", Run: func(ctx Context) error { return ctx.ForwardSession() }},
 		{Slug: "session-picker", Code: "SSP", Name: "Session picker", Desc: "Open the session picker", Run: func(ctx Context) error { return ctx.OpenSessionPicker() }},
 		{Slug: "visual-mode", Code: "VIS", Name: "Visual mode", Desc: "Enter visual mode", Run: func(ctx Context) error { return ctx.EnterVisualMode() }},
 		{Slug: "rename-session", Code: "RNS", Name: "Rename session", Desc: "Rename the session (an ephemeral session becomes named)", Run: func(ctx Context) error { return ctx.RenameSession() }},

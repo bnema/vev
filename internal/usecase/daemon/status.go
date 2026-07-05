@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -77,7 +78,7 @@ func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, s
 func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles) {
 	clearStatusRow(row)
 	x := 0
-	writeStatusText(row, &x, " "+state.status.session+" ", styles.statusBar)
+	writeStatusText(row, &x, " "+state.status.session+" ", styles.accent)
 
 	fittedMRU := fitMRU(state.mru, len(row), x, state.copyFeedback)
 	for i, sess := range fittedMRU {
@@ -91,6 +92,7 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles)
 			writeStatusText(row, &x, " ", style)
 			writeBell(row, &x, state.attentionFrame)
 		}
+		writeStatusText(row, &x, " ", style)
 	}
 	drawRightPlainText(row, state.copyFeedback, x, styles.statusBar)
 }
@@ -121,6 +123,7 @@ type barState struct {
 }
 
 type mruSession struct {
+	id        domain.SessionID
 	name      string
 	ephemeral bool
 	attention bool
@@ -173,7 +176,7 @@ func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 		}
 		at := sess.mruAt.Load()
 		sess.mu.Lock()
-		entry := mruSession{name: sess.name, ephemeral: sess.ephemeral, mruAt: at}
+		entry := mruSession{id: sess.id, name: sess.name, ephemeral: sess.ephemeral, mruAt: at}
 		for _, tb := range sess.tabs {
 			if tb.attention {
 				entry.attention = true
@@ -204,12 +207,12 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 	if feedback != "" {
 		copyReserve = len([]rune(feedback)) + 2
 	}
-	budget := rowLen - leftUsed - copyReserve
-	if budget <= 0 || len(entries) == 0 {
+	physicalBudget := rowLen - leftUsed - copyReserve
+	if physicalBudget <= 0 || len(entries) == 0 {
 		return nil
 	}
 	cost := func(e mruSession) int {
-		n := 1 + len([]rune(e.name))
+		n := 2 + len([]rune(e.name))
 		if e.ephemeral {
 			n++
 		}
@@ -217,6 +220,19 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 			n += 2
 		}
 		return n
+	}
+
+	budget := physicalBudget
+	if feedback == "" {
+		budget -= mruFutureRightReserve(rowLen)
+		// Keep at least one recent session when it physically fits; the reserved
+		// right side is only a budget preference, not a reason to hide all recents.
+		if firstCost := cost(entries[0]); firstCost <= physicalBudget && budget < firstCost {
+			budget = firstCost
+		}
+	}
+	if budget <= 0 {
+		return nil
 	}
 	used := 0
 	for i, e := range entries {
@@ -228,12 +244,34 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 	return entries
 }
 
+const (
+	mruReserveMinRow  = 40
+	mruReserveDivisor = 4
+	mruReserveMin     = 12
+	mruReserveMax     = 24
+)
+
+func mruFutureRightReserve(rowLen int) int {
+	if rowLen < mruReserveMinRow {
+		return 0
+	}
+	reserve := rowLen / mruReserveDivisor
+	if reserve < mruReserveMin {
+		return mruReserveMin
+	}
+	if reserve > mruReserveMax {
+		return mruReserveMax
+	}
+	return reserve
+}
+
 func mruStyle(base renderer.Style, t themeui.Theme, i, count int) renderer.Style {
-	if count <= 1 || !base.HasForegroundRGB {
+	if count <= 1 || !base.HasForegroundRGB || !base.HasBackgroundRGB || !t.HasBG {
 		return base
 	}
 	amount := (float64(i) / float64(count-1)) * 0.6
 	base.ForegroundRGB = themeui.Blend(base.ForegroundRGB, t.Background, amount)
+	base.BackgroundRGB = themeui.Blend(base.BackgroundRGB, t.Background, amount)
 	return base
 }
 

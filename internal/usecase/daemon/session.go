@@ -93,13 +93,27 @@ func (d *Daemon) touchMRU(sess *session) {
 		return
 	}
 	seq := d.mruSeq.Add(1)
+	updated := false
 	for {
 		old := sess.mruAt.Load()
 		if old >= seq {
 			return
 		}
 		if sess.mruAt.CompareAndSwap(old, seq) {
-			return
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		return
+	}
+	sess.mu.Lock()
+	name := sess.name
+	ephemeral := sess.ephemeral
+	sess.mu.Unlock()
+	if !ephemeral && d.persist != nil {
+		if err := d.persist.TouchMRU(name, seq); err != nil {
+			d.log.Warn("touching persisted session recency failed", "err", err, "session", name)
 		}
 	}
 }
@@ -119,6 +133,12 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	tb := newTab(pty, tbSize)
 	sctx, cancel := context.WithCancel(d.serveCtx)
 	tb.ctx, tb.cancel = context.WithCancel(sctx)
+	lastUsedSeq := uint64(0)
+	if !ephemeral {
+		if stopped, ok := d.stopped[name]; ok {
+			lastUsedSeq = stopped.lastUsedSeq
+		}
+	}
 	sess := &session{
 		id:        id,
 		name:      name,
@@ -129,8 +149,11 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		cwd:       cwd,
 		createdAt: createdAt,
 	}
+	if lastUsedSeq > 0 {
+		sess.mruAt.Store(lastUsedSeq)
+	}
 	if !ephemeral {
-		if err := d.persist.Save(persist.Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt}); err != nil {
+		if err := d.persist.Save(persist.Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq}); err != nil {
 			_ = pty.Close()
 			cancel()
 			return nil, err
@@ -138,7 +161,9 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		delete(d.stopped, name)
 	}
 	d.sessions[id] = sess
-	d.touchMRU(sess)
+	if lastUsedSeq == 0 {
+		d.touchMRU(sess)
+	}
 	d.log.Info("session created", "session", name, "id", id, "ephemeral", ephemeral)
 	d.log.Info("tab created", "session", name, "tab", 0)
 	d.startTabGoroutines(sess, tb)
@@ -374,8 +399,9 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		createdAt = time.Now().UnixNano()
 		sess.createdAt = createdAt
 	}
+	lastUsedSeq := sess.mruAt.Load()
 	if wasEphemeral || oldName != name {
-		if err := d.persist.Save(persist.Record{Name: name, Cwd: sess.cwd, CreatedAt: createdAt, UpdatedAt: time.Now().UnixNano()}); err != nil {
+		if err := d.persist.Save(persist.Record{Name: name, Cwd: sess.cwd, CreatedAt: createdAt, UpdatedAt: time.Now().UnixNano(), LastUsedSeq: lastUsedSeq}); err != nil {
 			return err
 		}
 	}
@@ -464,7 +490,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	ephemeral := sess.ephemeral
 	sess.mu.Unlock()
 	if !ephemeral {
-		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, purging: purge}
+		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, lastUsedSeq: sess.mruAt.Load(), purging: purge}
 		d.stopped[stoppedName] = stopped
 	}
 	empty := len(d.sessions) == 0

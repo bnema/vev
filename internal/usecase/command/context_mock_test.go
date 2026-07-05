@@ -35,6 +35,50 @@ func (_m *MockContext) EXPECT() *MockContext_Expecter {
 	return &MockContext_Expecter{mock: &_m.Mock}
 }
 
+// BackSession provides a mock function for the type MockContext
+func (_mock *MockContext) BackSession() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for BackSession")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_BackSession_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'BackSession'
+type MockContext_BackSession_Call struct {
+	*mock.Call
+}
+
+// BackSession is a helper method to define mock.On call
+func (_e *MockContext_Expecter) BackSession() *MockContext_BackSession_Call {
+	return &MockContext_BackSession_Call{Call: _e.mock.On("BackSession")}
+}
+
+func (_c *MockContext_BackSession_Call) Run(run func()) *MockContext_BackSession_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_BackSession_Call) Return(err error) *MockContext_BackSession_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_BackSession_Call) RunAndReturn(run func() error) *MockContext_BackSession_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ClosePane provides a mock function for the type MockContext
 func (_mock *MockContext) ClosePane() error {
 	ret := _mock.Called()
@@ -471,6 +515,50 @@ func (_c *MockContext_FocusPaneUp_Call) Return(err error) *MockContext_FocusPane
 }
 
 func (_c *MockContext_FocusPaneUp_Call) RunAndReturn(run func() error) *MockContext_FocusPaneUp_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ForwardSession provides a mock function for the type MockContext
+func (_mock *MockContext) ForwardSession() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for ForwardSession")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_ForwardSession_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ForwardSession'
+type MockContext_ForwardSession_Call struct {
+	*mock.Call
+}
+
+// ForwardSession is a helper method to define mock.On call
+func (_e *MockContext_Expecter) ForwardSession() *MockContext_ForwardSession_Call {
+	return &MockContext_ForwardSession_Call{Call: _e.mock.On("ForwardSession")}
+}
+
+func (_c *MockContext_ForwardSession_Call) Run(run func()) *MockContext_ForwardSession_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_ForwardSession_Call) Return(err error) *MockContext_ForwardSession_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_ForwardSession_Call) RunAndReturn(run func() error) *MockContext_ForwardSession_Call {
 	_c.Call.Return(run)
 	return _c
 }

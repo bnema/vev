@@ -140,10 +140,11 @@ type parkedAttachment struct {
 // session is a single multiplexed session. It owns one or more full-screen
 
 type stoppedSession struct {
-	name      string
-	cwd       string
-	createdAt int64
-	purging   bool
+	name        string
+	cwd         string
+	createdAt   int64
+	lastUsedSeq uint64
+	purging     bool
 }
 
 type Option func(*Daemon)
@@ -239,9 +240,14 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	if records, err := d.persist.LoadAll(); err != nil {
 		d.log.Warn("loading persisted sessions failed", "err", err)
 	} else {
+		var maxSeq uint64
 		for _, r := range records {
-			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt}
+			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, lastUsedSeq: r.LastUsedSeq}
+			if r.LastUsedSeq > maxSeq {
+				maxSeq = r.LastUsedSeq
+			}
 		}
+		d.mruSeq.Store(maxSeq)
 	}
 	return d
 }
