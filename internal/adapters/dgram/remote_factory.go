@@ -1,0 +1,42 @@
+package dgram
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/bnema/vev/internal/adapters/sshstdio"
+	"github.com/bnema/vev/internal/ports"
+)
+
+// RemoteDialerFactory selects the requested remote transport adapter.
+type RemoteDialerFactory struct{}
+
+func NewRemoteDialerFactory() RemoteDialerFactory { return RemoteDialerFactory{} }
+
+func (RemoteDialerFactory) DialerForRemote(target string, session string, mode ports.RemoteTransportMode, log *slog.Logger) (ports.Dialer, error) {
+	switch mode {
+	case ports.RemoteTransportUDP:
+		if log != nil {
+			log.Info("remote transport selected", "mode", mode, "target", target, "session", session)
+		}
+		return NewRemoteDialerWithLogger(target, session, log), nil
+	case ports.RemoteTransportStdio:
+		if log != nil {
+			log.Info("remote transport selected", "mode", mode, "target", target, "session", session)
+		}
+		return stdioDialer{target: target, session: session, log: log}, nil
+	default:
+		return nil, fmt.Errorf("vev: unsupported remote transport %q", mode)
+	}
+}
+
+type stdioDialer struct {
+	target  string
+	session string
+	log     *slog.Logger
+}
+
+func (d stdioDialer) Dial(ctx context.Context) (ports.Transport, error) {
+	return sshstdio.DialContext(ctx, d.target, d.session, d.log)
+}

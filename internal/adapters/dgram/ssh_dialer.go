@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -30,8 +29,8 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 
 func (b *limitedBuffer) String() string { return string(b.buf) }
 
-// RemoteDialer tries the authenticated datagram bootstrap first and falls back
-// to ssh stdio whenever bootstrap, UDP resolution, or the UDP probe fails.
+// RemoteDialer connects to the authenticated datagram bootstrap for UDP remote
+// attach. SSH stdio is selected only through the explicit stdio transport mode.
 type RemoteDialer struct {
 	Target       string
 	Session      string
@@ -48,15 +47,12 @@ func NewRemoteDialerWithLogger(target, session string, log *slog.Logger) RemoteD
 }
 
 func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
-	// The UDP bootstrap currently requires a long-lived remote proxy process. Do
-	// not select it as the app's remote attach path until that process can detach
-	// from SSH safely; stdio is the bounded fallback path.
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
 	}
-	return sshstdio.DialContext(ctx, d.Target, d.Session, d.Log)
+	return nil, ErrLinkDead
 }
 
 func sshTargetHost(target string) string {

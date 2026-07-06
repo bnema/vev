@@ -339,32 +339,8 @@ const envRemoteTransport = "VEV_REMOTE_TRANSPORT"
 
 func defaultLocalDialer() ports.Dialer { return localDaemonDialer{dir: ipc.SocketDir()} }
 
-func defaultRemoteDialerFactory() ports.RemoteDialerFactory { return remoteDialerFactory{} }
-
-type remoteDialerFactory struct{}
-
-func (remoteDialerFactory) DialerForRemote(target string, session string, mode ports.RemoteTransportMode, log *slog.Logger) (ports.Dialer, error) {
-	switch mode {
-	case ports.RemoteTransportUDP:
-		return dgram.NewRemoteDialerWithLogger(target, session, log), nil
-	case ports.RemoteTransportStdio:
-		if log != nil {
-			log.Info("remote transport selected", "mode", string(ports.RemoteTransportStdio))
-		}
-		return sshStdioDialer{target: target, session: session, log: log}, nil
-	default:
-		return nil, fmt.Errorf("vev: unsupported remote transport %q", mode)
-	}
-}
-
-type sshStdioDialer struct {
-	target  string
-	session string
-	log     *slog.Logger
-}
-
-func (d sshStdioDialer) Dial(ctx context.Context) (ports.Transport, error) {
-	return sshstdio.DialContext(ctx, d.target, d.session, d.log)
+func defaultRemoteDialerFactory() ports.RemoteDialerFactory {
+	return dgram.NewRemoteDialerFactory()
 }
 
 type runAttachDeps struct {
@@ -632,8 +608,9 @@ func runStdio(ctx context.Context) error {
 }
 
 // runUDPBootstrap is the hidden remote-side bootstrap used before switching to
-// authenticated datagrams. It deliberately prints only an ephemeral UDP port and
-// random session key to stdout so callers can fall back to _stdio if setup fails.
+// authenticated datagrams. It prints only an ephemeral UDP port and random
+// session key to stdout; stdio remains available only as an explicit remote
+// transport mode.
 func runUDPBootstrap(ctx context.Context, session string) error {
 	log, logCloser, err := configureLogging(logging.Stdio, false)
 	if err != nil {
