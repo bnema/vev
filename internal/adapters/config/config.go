@@ -71,7 +71,9 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 			}
 			cfg.Codes[codeKey] = value
 		case key == "snapshot.restore_processes":
-			cfg.Snapshot.RestoreProcesses = parseProcessList(value, lineNo, &warnings)
+			var processWarnings []domain.Warning
+			cfg.Snapshot.RestoreProcesses, processWarnings = parseProcessList(value, lineNo)
+			warnings = append(warnings, processWarnings...)
 			cfg.Snapshot.RestoreProcessesSet = true
 		default:
 			if seenBindingKeys[key] {
@@ -170,12 +172,13 @@ func updateBindingEntry(entries []domain.ConfigEntry, key, value string) {
 	}
 }
 
-func parseProcessList(value string, lineNo int, warnings *[]domain.Warning) []string {
+func parseProcessList(value string, lineNo int) ([]string, []domain.Warning) {
 	if strings.TrimSpace(value) == "" {
-		return nil
+		return nil, nil
 	}
 	parts := strings.Split(value, ",")
 	out := make([]string, 0, len(parts))
+	warnings := make([]domain.Warning, 0)
 	seen := make(map[string]struct{}, len(parts))
 	for _, part := range parts {
 		item := strings.TrimSpace(part)
@@ -183,7 +186,7 @@ func parseProcessList(value string, lineNo int, warnings *[]domain.Warning) []st
 			continue
 		}
 		if !processNamePattern.MatchString(item) {
-			*warnings = append(*warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid snapshot restore process %q", item)})
+			warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid snapshot restore process %q", item)})
 			continue
 		}
 		if _, ok := seen[item]; ok {
@@ -192,7 +195,7 @@ func parseProcessList(value string, lineNo int, warnings *[]domain.Warning) []st
 		seen[item] = struct{}{}
 		out = append(out, item)
 	}
-	return out
+	return out, warnings
 }
 
 func parseTheme(value string) (domain.ThemeMode, bool) {

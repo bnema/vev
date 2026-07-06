@@ -27,19 +27,40 @@ func TestProcessArgvRejectsEmptyCmdline(t *testing.T) {
 	}
 }
 
-func TestProcessGroupArgvSelection(t *testing.T) {
-	recs := []processRecord{{pid: 10, pgrp: 7}, {pid: 12, pgrp: 7}, {pid: 20, pgrp: 9}}
-	pid, ok := selectProcessGroupPID(recs, 7, 10)
-	if !ok || pid != 12 {
-		t.Fatalf("selectProcessGroupPID = %d, %v; want 12, true", pid, ok)
+func TestSelectProcessGroupPID(t *testing.T) {
+	tests := []struct {
+		name    string
+		recs    []processRecord
+		pgid    int
+		shell   int
+		wantPID int
+		wantOK  bool
+	}{
+		{
+			name:    "selects other member",
+			recs:    []processRecord{{pid: 10, pgrp: 7}, {pid: 12, pgrp: 7}, {pid: 20, pgrp: 9}},
+			pgid:    7,
+			shell:   10,
+			wantPID: 12,
+			wantOK:  true,
+		},
+		{
+			name:    "bare shell has no candidate",
+			recs:    []processRecord{{pid: 10, pgrp: 7}, {pid: 20, pgrp: 9}},
+			pgid:    7,
+			shell:   10,
+			wantPID: 0,
+			wantOK:  false,
+		},
 	}
-}
 
-func TestProcessGroupArgvBareShellReturnsNoPID(t *testing.T) {
-	recs := []processRecord{{pid: 10, pgrp: 7}, {pid: 20, pgrp: 9}}
-	pid, ok := selectProcessGroupPID(recs, 7, 10)
-	if ok || pid != 0 {
-		t.Fatalf("selectProcessGroupPID bare shell = %d, %v; want 0, false", pid, ok)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pid, ok := selectProcessGroupPID(tt.recs, tt.pgid, tt.shell)
+			if ok != tt.wantOK || pid != tt.wantPID {
+				t.Fatalf("selectProcessGroupPID = %d, %v; want %d, %v", pid, ok, tt.wantPID, tt.wantOK)
+			}
+		})
 	}
 }
 
@@ -51,16 +72,36 @@ func TestParseStatPgrp(t *testing.T) {
 }
 
 func TestProcessArgvFileParsing(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cmdline")
-	if err := os.WriteFile(path, []byte("cmd\x00two words\x00"), 0o600); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name string
+		data []byte
+		want []string
+	}{
+		{
+			name: "splits nul-delimited argv",
+			data: []byte("cmd\x00two words\x00"),
+			want: []string{"cmd", "two words"},
+		},
+		{
+			name: "preserves empty argument",
+			data: []byte("cmd\x00\x00arg\x00"),
+			want: []string{"cmd", "", "arg"},
+		},
 	}
-	got, err := processArgv(path, 123)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"cmd", "two words"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("processArgv = %#v; want %#v", got, want)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "cmdline")
+			if err := os.WriteFile(path, tt.data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := processArgv(path, 123)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("processArgv = %#v; want %#v", got, tt.want)
+			}
+		})
 	}
 }

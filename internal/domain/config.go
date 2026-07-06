@@ -24,10 +24,15 @@ type SnapshotConfig struct {
 	RestoreProcessesSet bool
 }
 
-// DefaultSnapshotRestoreProcesses is the default allowlist for process restore.
-var DefaultSnapshotRestoreProcesses = []string{
+// defaultSnapshotRestoreProcesses is the default allowlist for process restore.
+var defaultSnapshotRestoreProcesses = []string{
 	"vi", "vim", "nvim", "emacs", "man", "less", "more", "tail", "top", "htop", "btop",
 	"claude", "codex", "pi", "opencode",
+}
+
+// DefaultSnapshotRestoreProcesses returns a copy of the default process restore allowlist.
+func DefaultSnapshotRestoreProcesses() []string {
+	return append([]string(nil), defaultSnapshotRestoreProcesses...)
 }
 
 // Config is the user-editable vev configuration after parsing. Unknown binding
@@ -54,7 +59,7 @@ func Defaults() Config {
 		BindingEntries: []ConfigEntry{},
 		Codes:          map[string]string{},
 		Snapshot: SnapshotConfig{
-			RestoreProcesses: append([]string(nil), DefaultSnapshotRestoreProcesses...),
+			RestoreProcesses: DefaultSnapshotRestoreProcesses(),
 		},
 	}
 }

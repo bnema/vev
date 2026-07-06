@@ -130,7 +130,7 @@ func restoreProcessAllowlistFromConfig(cfg domain.SnapshotConfig) map[string]str
 	if len(cfg.RestoreProcesses) > 0 {
 		return buildRestoreProcessAllowlist(cfg.RestoreProcesses)
 	}
-	return buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses)
+	return buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses())
 }
 
 func buildRestoreProcessAllowlist(values []string) map[string]struct{} {
@@ -148,7 +148,7 @@ func buildRestoreProcessAllowlist(values []string) map[string]struct{} {
 func (d *Daemon) restoreProcessAllowlistSnapshot() map[string]struct{} {
 	allow := d.restoreProcessAllowlist.Load()
 	if allow == nil {
-		return buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses)
+		return buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses())
 	}
 	return *allow
 }

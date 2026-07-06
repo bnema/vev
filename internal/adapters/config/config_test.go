@@ -91,6 +91,49 @@ func TestParse(t *testing.T) {
 				{Line: 3, Msg: "missing key"},
 			},
 		},
+		{
+			name:  "snapshot restore processes",
+			input: "snapshot.restore_processes = claude, codex, pi, opencode, btop\n",
+			want: domain.Config{
+				Theme:          domain.ThemeAuto,
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+				Snapshot: domain.SnapshotConfig{
+					RestoreProcesses:    []string{"claude", "codex", "pi", "opencode", "btop"},
+					RestoreProcessesSet: true,
+				},
+			},
+		},
+		{
+			name:  "snapshot restore processes empty disables",
+			input: "snapshot.restore_processes =\n",
+			want: domain.Config{
+				Theme:          domain.ThemeAuto,
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+				Snapshot: domain.SnapshotConfig{
+					RestoreProcessesSet: true,
+				},
+			},
+		},
+		{
+			name:  "snapshot restore processes warns on malformed entries",
+			input: "snapshot.restore_processes = claude, custom-tool, /bin/sh, :all:, bad name, claude, , zsh\n",
+			want: domain.Config{
+				Theme:          domain.ThemeAuto,
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+				Snapshot: domain.SnapshotConfig{
+					RestoreProcesses:    []string{"claude", "custom-tool", "zsh"},
+					RestoreProcessesSet: true,
+				},
+			},
+			wantWarnings: []domain.Warning{
+				{Line: 1, Msg: "invalid snapshot restore process \"/bin/sh\""},
+				{Line: 1, Msg: "invalid snapshot restore process \":all:\""},
+				{Line: 1, Msg: "invalid snapshot restore process \"bad name\""},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -98,7 +141,7 @@ func TestParse(t *testing.T) {
 			t.Parallel()
 
 			if tt.want.Snapshot.RestoreProcesses == nil && !tt.want.Snapshot.RestoreProcessesSet {
-				tt.want.Snapshot.RestoreProcesses = append([]string(nil), domain.DefaultSnapshotRestoreProcesses...)
+				tt.want.Snapshot.RestoreProcesses = append([]string(nil), domain.DefaultSnapshotRestoreProcesses()...)
 			}
 			got, warnings, err := Parse(strings.NewReader(tt.input))
 			if err != nil {
@@ -112,40 +155,6 @@ func TestParse(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestParseSnapshotRestoreProcesses(t *testing.T) {
-	t.Parallel()
-
-	cfg, warnings, err := Parse(strings.NewReader("snapshot.restore_processes = claude, codex, pi, opencode, btop\n"))
-	require.NoError(t, err)
-	require.Empty(t, warnings)
-	require.Equal(t, []string{"claude", "codex", "pi", "opencode", "btop"}, cfg.Snapshot.RestoreProcesses)
-	require.True(t, cfg.Snapshot.RestoreProcessesSet)
-}
-
-func TestParseSnapshotRestoreProcessesEmptyDisables(t *testing.T) {
-	t.Parallel()
-
-	cfg, warnings, err := Parse(strings.NewReader("snapshot.restore_processes =\n"))
-	require.NoError(t, err)
-	require.Empty(t, warnings)
-	require.Empty(t, cfg.Snapshot.RestoreProcesses)
-	require.True(t, cfg.Snapshot.RestoreProcessesSet)
-}
-
-func TestParseSnapshotRestoreProcessesWarnsOnMalformedEntries(t *testing.T) {
-	t.Parallel()
-
-	cfg, warnings, err := Parse(strings.NewReader("snapshot.restore_processes = claude, custom-tool, /bin/sh, :all:, bad name, claude, , zsh\n"))
-	require.NoError(t, err)
-	require.Equal(t, []domain.Warning{
-		{Line: 1, Msg: "invalid snapshot restore process \"/bin/sh\""},
-		{Line: 1, Msg: "invalid snapshot restore process \":all:\""},
-		{Line: 1, Msg: "invalid snapshot restore process \"bad name\""},
-	}, warnings)
-	require.Equal(t, []string{"claude", "custom-tool", "zsh"}, cfg.Snapshot.RestoreProcesses)
-	require.True(t, cfg.Snapshot.RestoreProcessesSet)
 }
 
 func TestDefaultsCopiesSnapshotRestoreProcesses(t *testing.T) {

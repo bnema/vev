@@ -273,7 +273,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		d.codeOverrides.Store(&empty)
 	}
 	if d.restoreProcessAllowlist.Load() == nil {
-		allow := buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses)
+		allow := buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses())
 		d.restoreProcessAllowlist.Store(&allow)
 	}
 	if records, err := d.persist.LoadAll(); err != nil {
@@ -632,11 +632,11 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	case ports.IntentNew:
 		if h.Name == "" {
 			d.mu.Unlock()
-			return nil, nil, &protoErr{ports.ErrInternal, "empty session name"}
+			return nil, nil, &protoErr{ports.ErrInvalidSessionName, "empty session name"}
 		}
 		if err := domain.ValidateSessionName(h.Name); err != nil {
 			d.mu.Unlock()
-			return nil, nil, &protoErr{ports.ErrInternal, err.Error()}
+			return nil, nil, &protoErr{ports.ErrInvalidSessionName, err.Error()}
 		}
 		if d.nameLiveOrStoppedLocked(h.Name) {
 			d.mu.Unlock()

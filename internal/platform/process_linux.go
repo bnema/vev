@@ -35,14 +35,9 @@ func processArgv(path string, pid int) ([]string, error) {
 		return nil, fmt.Errorf("process argv: empty argv for pid %d", pid)
 	}
 	parts := bytes.Split(data, []byte{0})
-	argv := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if len(part) > 0 {
-			argv = append(argv, string(part))
-		}
-	}
-	if len(argv) == 0 {
-		return nil, fmt.Errorf("process argv: empty argv for pid %d", pid)
+	argv := make([]string, len(parts))
+	for i, part := range parts {
+		argv[i] = string(part)
 	}
 	return argv, nil
 }

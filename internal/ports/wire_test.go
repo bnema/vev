@@ -542,13 +542,15 @@ func TestMsgTypeConstantsDistinct(t *testing.T) {
 
 	t.Run("error codes", func(t *testing.T) {
 		vals := map[uint16]string{
-			ErrVersionMismatch: "ErrVersionMismatch",
-			ErrNoSuchSession:   "ErrNoSuchSession",
-			ErrNameTaken:       "ErrNameTaken",
-			ErrInternal:        "ErrInternal",
+			ErrVersionMismatch:    "ErrVersionMismatch",
+			ErrNoSuchSession:      "ErrNoSuchSession",
+			ErrNameTaken:          "ErrNameTaken",
+			ErrServerShutdown:     "ErrServerShutdown",
+			ErrInvalidSessionName: "ErrInvalidSessionName",
+			ErrInternal:           "ErrInternal",
 		}
-		if len(vals) != 4 {
-			t.Fatalf("expected 4 distinct error codes, got %d", len(vals))
+		if len(vals) != 6 {
+			t.Fatalf("expected 6 distinct error codes, got %d", len(vals))
 		}
 	})
 
