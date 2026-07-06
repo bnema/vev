@@ -1,6 +1,7 @@
-# vev — Norwegian: web, weave, tissue
+# vev
+***Norwegian: web, weave, tissue***
 
-There are many terminal multiplexers, but this one is mine. Written in Go, with no runtime dependencies beyond `golang.org/x/sys` and `golang.org/x/term`. Purely focused on performance, rendering high-output vertical text, agentic coding, and remote work over SSH.
+There are many terminal multiplexers, but this one is mine. Minimal aesthetic, purely focused on performance, rendering high-output vertical text, agentic coding, and remote work over SSH. Built in Go with no external deps as much as possible.
 
 > [!IMPORTANT]
 > This is totally in alpha.
