@@ -122,7 +122,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	ac.overlays.paletteMu.Unlock()
 
 	if run && ok {
-		if !isHistoryNavigationCommand(cmd.Code) {
+		if !isHistoryNavigationCommand(cmd.Slug) {
 			d.clearHistoryNav(ac)
 		}
 		if err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac}); err != nil {
@@ -140,8 +140,8 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	}
 }
 
-func isHistoryNavigationCommand(code string) bool {
-	return code == "BSK" || code == "FSK"
+func isHistoryNavigationCommand(slug string) bool {
+	return slug == "back-session" || slug == "forward-session"
 }
 
 type paletteExec struct {

@@ -120,6 +120,9 @@ func (d *Daemon) showHistoryNav(ac *attachedClient) {
 }
 
 func (d *Daemon) clearHistoryNav(ac *attachedClient) {
+	if ac == nil {
+		return
+	}
 	ac.clearHistoryNav()
 }
 

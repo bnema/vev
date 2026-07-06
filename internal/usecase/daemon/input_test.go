@@ -310,6 +310,14 @@ func TestHistoryNavDisplay(t *testing.T) {
 	require.Equal(t, uint64(7), h.gen)
 }
 
+func TestHistoryNavigationCommandDetectionUsesSlug(t *testing.T) {
+	require.True(t, isHistoryNavigationCommand("back-session"))
+	require.True(t, isHistoryNavigationCommand("forward-session"))
+	require.False(t, isHistoryNavigationCommand("BSK"))
+	require.False(t, isHistoryNavigationCommand("FSK"))
+	require.False(t, isHistoryNavigationCommand("next-tab"))
+}
+
 func TestHistoryNavActivation(t *testing.T) {
 	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)

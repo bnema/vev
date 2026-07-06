@@ -19,9 +19,11 @@
 //
 // Locking: a pane's screen/scrollback and per-client renderer shadow are
 // guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
-// session.mu; the registry by Daemon.mu. When more than one is held the order
-// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
-// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
+// session.mu; the registry by Daemon.mu. History-navigation display state is
+// guarded by attachedClient.historyNavMu. When more than one is held the order
+// is always attachedClient.sendMu > attachedClient.historyNavMu > Daemon.mu >
+// session.mu > tab.mu > pane.mu. The PTY reader only ever takes pane.mu, so it
+// never blocks on a slow client.
 package daemon
 
 import (
@@ -91,16 +93,7 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles)
 	fittedMRU := fitMRU(state.mru, len(row), x, rightText)
 	for i, sess := range fittedMRU {
 		style := mruStyle(styles.statusBar, state.theme, i, len(fittedMRU))
-		name := sess.name
-		if sess.ephemeral {
-			name += "*"
-		}
-		writeStatusText(row, &x, " "+name, style)
-		if sess.attention {
-			writeStatusText(row, &x, " ", style)
-			writeBell(row, &x, state.attentionFrame)
-		}
-		writeStatusText(row, &x, " ", style)
+		drawStatusSessionEntry(row, &x, sess.name, sess.ephemeral, sess.attention, style, state.attentionFrame)
 	}
 	drawRightPlainText(row, rightText, x, styles.statusBar)
 }
@@ -111,17 +104,20 @@ func drawHistoryNavSessions(row []renderer.Cell, x *int, entries []historyNavSes
 		if sess.active {
 			style = styles.accent
 		}
-		name := sess.name
-		if sess.ephemeral {
-			name += "*"
-		}
-		writeStatusText(row, x, " "+name, style)
-		if sess.attention {
-			writeStatusText(row, x, " ", style)
-			writeBell(row, x, attentionFrame)
-		}
-		writeStatusText(row, x, " ", style)
+		drawStatusSessionEntry(row, x, sess.name, sess.ephemeral, sess.attention, style, attentionFrame)
 	}
+}
+
+func drawStatusSessionEntry(row []renderer.Cell, x *int, name string, ephemeral, attention bool, style renderer.Style, attentionFrame int) {
+	if ephemeral {
+		name += "*"
+	}
+	writeStatusText(row, x, " "+name, style)
+	if attention {
+		writeStatusText(row, x, " ", style)
+		writeBell(row, x, attentionFrame)
+	}
+	writeStatusText(row, x, " ", style)
 }
 
 func composeBottomRightText(scriptText, copyFeedback string) string {

@@ -39,25 +39,27 @@ import (
 )
 
 type attachedClient struct {
-	tr              ports.Transport
-	rend            *renderer.Renderer
-	overlays        *overlayRuntime
-	clientID        [16]byte
-	resumeCapable   bool
-	resumeToken     uint64
-	parked          bool
-	nextStateNum    uint64
-	echoAck         atomic.Uint64
-	bars            barCache // only touched while sendMu is held
-	size            domain.Size
-	keys            *keys.Router
-	sess            Guarded[*session]
-	mouseScan       mouse.Scanner
-	themeMu         sync.Mutex
-	theme           themeui.Theme
-	clientTheme     themeui.Theme
-	lastCursor      cursorOut
-	recentNav       recentSessionNavigator
+	tr            ports.Transport
+	rend          *renderer.Renderer
+	overlays      *overlayRuntime
+	clientID      [16]byte
+	resumeCapable bool
+	resumeToken   uint64
+	parked        bool
+	nextStateNum  uint64
+	echoAck       atomic.Uint64
+	bars          barCache // only touched while sendMu is held
+	size          domain.Size
+	keys          *keys.Router
+	sess          Guarded[*session]
+	mouseScan     mouse.Scanner
+	themeMu       sync.Mutex
+	theme         themeui.Theme
+	clientTheme   themeui.Theme
+	lastCursor    cursorOut
+	recentNav     recentSessionNavigator
+	// historyNavMu protects historyNav and historyNavTimer. When paint needs
+	// several locks, take sendMu before historyNavMu, then Daemon.mu/session.mu.
 	historyNavMu    sync.Mutex
 	historyNav      historyNavDisplay
 	historyNavTimer pendingByteTimer
