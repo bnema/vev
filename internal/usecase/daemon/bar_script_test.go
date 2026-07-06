@@ -83,9 +83,20 @@ func TestBarScriptContextEnv(t *testing.T) {
 }
 
 func TestBarScriptRunner(t *testing.T) {
+	t.Run("nil runner returns explicit error for command", func(t *testing.T) {
+		runner := barScriptRunner{}
+		got, err := runner.run(context.Background(), "date", barScriptContext{})
+		if err == nil || err.Error() != "bar script command runner is nil" {
+			t.Fatalf("run err = %v, want explicit nil runner error", err)
+		}
+		if got != "" {
+			t.Fatalf("run output = %q, want empty", got)
+		}
+	})
+
 	t.Run("empty command skips port runner", func(t *testing.T) {
 		runner := barScriptRunner{}
-		got, err := runner.run(context.Background(), "", barScriptContext{})
+		got, err := runner.run(context.Background(), " \t\n ", barScriptContext{})
 		if err != nil {
 			t.Fatalf("run err = %v, want nil", err)
 		}
@@ -100,17 +111,38 @@ func TestBarScriptRunner(t *testing.T) {
 			return spec.Command == "printf 'ok\\nignored'" &&
 				spec.Timeout == 50*time.Millisecond &&
 				spec.StdoutLimit == barScriptOutputLimit &&
+				containsEnv(spec.Env, "PATH=/bin") &&
 				containsEnv(spec.Env, "VEV_ANCHOR=top-right") &&
-				containsEnv(spec.Env, "VEV_COLS=120")
-		})).Return([]byte("ok\nignored"), nil)
+				containsEnv(spec.Env, "VEV_SESSION=work") &&
+				containsEnv(spec.Env, "VEV_TAB=tab-1") &&
+				containsEnv(spec.Env, "VEV_PANE=pane-1") &&
+				containsEnv(spec.Env, "VEV_PANE_CWD=/repo") &&
+				containsEnv(spec.Env, "VEV_COLS=120") &&
+				!containsEnv(spec.Env, "VEV_ANCHOR=old")
+		})).Return([]byte("\x1b[31mok\x1b[0m\nignored"), nil)
 		runner := barScriptRunner{runner: portRunner, timeout: 50 * time.Millisecond, baseEnv: []string{"PATH=/bin", "VEV_ANCHOR=old"}}
 
-		got, err := runner.run(context.Background(), "printf 'ok\\nignored'", barScriptContext{Anchor: "top-right", Cols: 120})
+		got, err := runner.run(context.Background(), "printf 'ok\\nignored'", barScriptContext{Anchor: "top-right", Session: "work", Tab: "tab-1", Pane: "pane-1", PaneCWD: "/repo", Cols: 120})
 		if err != nil {
 			t.Fatalf("run err = %v, want nil", err)
 		}
 		if got != "ok" {
 			t.Fatalf("run output = %q, want %q", got, "ok")
+		}
+	})
+
+	t.Run("port failure returns sanitized partial stdout and error", func(t *testing.T) {
+		wantErr := errors.New("exit 1")
+		portRunner := portsmocks.NewMockShellCommandRunner(t)
+		portRunner.EXPECT().Run(mock.Anything, mock.Anything).Return([]byte("partial\x00 output\nignored"), wantErr)
+		runner := barScriptRunner{runner: portRunner, timeout: time.Second}
+
+		got, err := runner.run(context.Background(), "false", barScriptContext{})
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("run err = %v, want %v", err, wantErr)
+		}
+		if got != "partial output" {
+			t.Fatalf("run output = %q, want %q", got, "partial output")
 		}
 	})
 
