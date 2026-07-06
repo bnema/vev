@@ -110,6 +110,7 @@ type reconnectBackoff struct {
 var defaultReconnectBackoff = reconnectBackoff{initial: 100 * time.Millisecond, max: 2 * time.Second}
 
 var reconnectSleep = sleepReconnect
+var reconnectSleepWithResize = sleepReconnectWithResizeEvents
 
 const (
 	statusReconnect = "\r\x1b[2Kreconnecting…"
@@ -165,32 +166,65 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 	attemptIntent := intent
 	backoff := defaultReconnectBackoff.initial
 	showingStatus := false
+	var reconnectToastSize domain.Size
+	redrawRemoteStatus := func(size domain.Size) {
+		if !rawEntered || !remote {
+			return
+		}
+		if showingStatus {
+			_ = clearReconnectToast(term.Out(), reconnectToastSize)
+		}
+		_ = drawReconnectToast(term.Out(), size)
+		reconnectToastSize = size
+		_ = term.Flush()
+		showingStatus = true
+	}
 	drawStatus := func() {
 		if !rawEntered || showingStatus {
 			return
 		}
-		_, _ = term.Out().Write([]byte(statusReconnect))
-		_ = term.Flush()
-		showingStatus = true
+		if remote {
+			size, err := term.Size()
+			if err != nil {
+				return
+			}
+			redrawRemoteStatus(size)
+		} else {
+			_, _ = term.Out().Write([]byte(statusReconnect))
+			_ = term.Flush()
+			showingStatus = true
+		}
 	}
 	clearStatus := func() {
 		if !showingStatus {
 			return
 		}
-		_, _ = term.Out().Write([]byte(statusClear))
+		if remote {
+			_ = clearReconnectToast(term.Out(), reconnectToastSize)
+		} else {
+			_, _ = term.Out().Write([]byte(statusClear))
+		}
 		_ = term.Flush()
 		showingStatus = false
+	}
+	sleepWhileReconnecting := func(d time.Duration) bool {
+		if remote && showingStatus {
+			return reconnectSleepWithResize(ctx, clk, d, term.ResizeEvents(), redrawRemoteStatus)
+		}
+		return reconnectSleep(ctx, clk, d)
 	}
 
 	for {
 		transport, err := dialer.Dial(ctx)
 		if err != nil {
 			if resumeToken == 0 || ctx.Err() != nil {
+				clearStatus()
 				return err
 			}
 			log.Warn("reconnect dial failed", "err", err, "backoff", backoff)
 			drawStatus()
-			if !reconnectSleep(ctx, backoff) {
+			if !sleepWhileReconnecting(backoff) {
+				clearStatus()
 				return ctx.Err()
 			}
 			backoff = nextReconnectBackoff(backoff, defaultReconnectBackoff.max)
@@ -217,7 +251,7 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 		}
 		log.Warn("reconnecting after attach error", "err", result.err, "backoff", backoff)
 		drawStatus()
-		if !reconnectSleep(ctx, backoff) {
+		if !sleepWhileReconnecting(backoff) {
 			clearStatus()
 			return ctx.Err()
 		}
@@ -226,14 +260,35 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 	}
 }
 
-func sleepReconnect(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
+func sleepReconnect(ctx context.Context, clk ports.Clock, d time.Duration) bool {
+	t := clk.NewTimer(d)
 	defer t.Stop()
 	select {
-	case <-t.C:
+	case <-t.C():
 		return true
 	case <-ctx.Done():
 		return false
+	}
+}
+
+func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time.Duration, resizeEvents <-chan domain.Size, onResize func(domain.Size)) bool {
+	t := clk.NewTimer(d)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C():
+			return true
+		case <-ctx.Done():
+			return false
+		case size, ok := <-resizeEvents:
+			if !ok {
+				resizeEvents = nil
+				continue
+			}
+			if onResize != nil {
+				onResize(size)
+			}
+		}
 	}
 }
 
