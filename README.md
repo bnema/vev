@@ -38,6 +38,60 @@ Ephemeral sessions get a number (`0`, `1`, `2`, ...) and die when you detach. Na
 
 Only one client is attached to a session at a time; attaching again displaces the old client.
 
+## Configuration
+
+vev reads `$XDG_CONFIG_HOME/vev/config`, or `~/.config/vev/config` when `XDG_CONFIG_HOME` is unset. Missing files use defaults. The daemon reloads mtime/size changes while running, polling about every two seconds.
+
+```text
+# Theme: auto follows the client; dark/light force built-in palettes.
+theme = auto
+
+# Rebindable actions. Leave a line out to keep its built-in binding.
+open-palette = alt+space
+jump-attention = alt+a
+focus-pane-left = alt+h
+focus-pane-right = alt+l
+focus-pane-up = alt+k
+focus-pane-down = alt+j
+switch-tab-1 = alt+1
+switch-tab-2 = alt+2
+switch-tab-3 = alt+3
+switch-tab-4 = alt+4
+switch-tab-5 = alt+5
+switch-tab-6 = alt+6
+switch-tab-7 = alt+7
+switch-tab-8 = alt+8
+switch-tab-9 = alt+9
+
+# Command palette codes are trimmed, uppercased, then checked as 2-3 letters or digits.
+code.new-tab = CNT
+code.new-session = CNS
+code.close-tab = CLT
+code.split-right = SPR
+code.split-left = SPL
+code.split-up = SPU
+code.split-down = SPD
+code.stack-pane = STP
+code.toggle-stack = TST
+code.close-pane = CLP
+code.focus-pane-left = FPL
+code.focus-pane-right = FPR
+code.focus-pane-up = FPU
+code.focus-pane-down = FPD
+code.next-tab = NXT
+code.previous-tab = PVT
+code.back-session = BSK
+code.forward-session = FSK
+code.session-picker = SSP
+code.visual-mode = VIS
+code.rename-session = RNS
+code.detach = DET
+```
+
+Configuring an action replaces all of its built-in aliases. In the example above, the focus-pane lines keep Alt+h/j/k/l but not the Alt+Arrow aliases; omit those lines to keep all built-ins.
+
+Key specs support `alt+<char>`, `alt+space`, and `alt+left/right/up/down`; digit key specs support `alt+1` through `alt+9`, not `alt+0`. `jump-attention` first opens the oldest attention tab in the current session; if none exists, it opens the oldest attention tab in another session. Invalid entries are logged as warnings and skipped where possible; duplicate config keys use the last value, binding conflicts keep the later action's defaults, and command-code conflicts drop the conflicting override.
+
 ## Remote attach
 
 ```sh
