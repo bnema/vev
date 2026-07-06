@@ -58,6 +58,7 @@ type session struct {
 	cwd                    string
 	createdAt              int64
 	mruAt                  atomic.Uint64
+	snapDirty              atomic.Bool
 	// clipFiles records clipboard-image-transfer temp file paths (see
 	// clipboard.go) written for this session, removed best-effort in
 	// killSession.
@@ -263,6 +264,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	d.log.Info("tab created", "session", name, "tab", tabIndex)
 	d.startTabGoroutines(sess, tb)
 	d.mu.Unlock()
+	markSnapshotDirty(sess)
 	return nil
 }
 
@@ -360,21 +362,25 @@ func (s *session) activeTab() *tab {
 
 func (s *session) switchTab(idx int) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if idx < 0 || idx >= len(s.tabs) || idx == s.active {
+		s.mu.Unlock()
 		return false
 	}
 	s.active = idx
+	s.mu.Unlock()
+	markSnapshotDirty(s)
 	return true
 }
 
 func (s *session) switchRelative(delta int) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if len(s.tabs) < 2 {
+		s.mu.Unlock()
 		return false
 	}
 	s.active = (s.active + delta + len(s.tabs)) % len(s.tabs)
+	s.mu.Unlock()
+	markSnapshotDirty(s)
 	return true
 }
 
@@ -391,7 +397,6 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		return errors.New("name already in use")
 	}
 	sess.mu.Lock()
-	defer sess.mu.Unlock()
 	oldName := sess.name
 	wasEphemeral := sess.ephemeral
 	createdAt := sess.createdAt
@@ -402,14 +407,25 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	lastUsedSeq := sess.mruAt.Load()
 	if wasEphemeral || oldName != name {
 		if err := d.persist.Save(persist.Record{Name: name, Cwd: sess.cwd, CreatedAt: createdAt, UpdatedAt: time.Now().UnixNano(), LastUsedSeq: lastUsedSeq}); err != nil {
+			sess.mu.Unlock()
 			return err
 		}
 	}
 	if !wasEphemeral && oldName != name {
+		if d.snapsEnabled && d.snaps != nil {
+			if err := d.snaps.Delete(oldName); err != nil {
+				if cleanupErr := d.persist.Delete(name); cleanupErr != nil {
+					d.log.Warn("cleaning up renamed persisted session failed", "err", cleanupErr, "session", name)
+				}
+				sess.mu.Unlock()
+				return err
+			}
+		}
 		if err := d.persist.Delete(oldName); err != nil {
 			if cleanupErr := d.persist.Delete(name); cleanupErr != nil {
 				d.log.Warn("cleaning up renamed persisted session failed", "err", cleanupErr, "session", name)
 			}
+			sess.mu.Unlock()
 			return err
 		}
 	}
@@ -417,6 +433,8 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	delete(d.stopped, name)
 	sess.name = name
 	sess.ephemeral = false
+	sess.mu.Unlock()
+	markSnapshotDirty(sess)
 	return nil
 }
 
@@ -451,6 +469,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	name := sess.name
 	sess.mu.Unlock()
 	d.log.Info("tab closed", "session", name)
+	markSnapshotDirty(sess)
 
 	d.clearDestroyedTabPreview(tb)
 	if tb.cancel != nil {
@@ -475,6 +494,19 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	sess.mu.Unlock()
 	if !purge && !isEphemeral && d.persistEnabled {
 		d.refreshSessionCwd(sess)
+	}
+	if d.snapsEnabled && !isEphemeral {
+		if purge {
+			sess.mu.Lock()
+			name := sess.name
+			sess.mu.Unlock()
+			if err := d.snaps.Delete(name); err != nil {
+				d.log.Warn("deleting session snapshot failed", "err", err, "session", name)
+				return err
+			}
+		} else {
+			d.captureSession(sess)
+		}
 	}
 	d.mu.Lock()
 	if _, ok := d.sessions[sess.id]; !ok {
@@ -658,6 +690,7 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 		if err := d.persist.Touch(name, cwd, time.Now().UnixNano()); err != nil {
 			d.log.Warn("touching persisted session cwd failed", "err", err, "session", name)
 		}
+		markSnapshotDirty(sess)
 	}
 	d.mu.Unlock()
 }

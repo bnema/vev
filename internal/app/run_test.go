@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/client"
@@ -175,6 +176,10 @@ func TestRunKillDeletesStoppedSessionWithoutDaemon(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close error = %v", err)
 	}
+	snapshots := snapshot.NewStore(filepath.Join(stateRoot, "vev", "snapshots"))
+	if err := snapshots.Write("stored", []byte("snapshot bytes")); err != nil {
+		t.Fatalf("snapshot Write error = %v", err)
+	}
 
 	got := captureStdout(t, func() {
 		if err := runKill(context.Background(), "stored", false, false); err != nil {
@@ -190,6 +195,13 @@ func TestRunKillDeletesStoppedSessionWithoutDaemon(t *testing.T) {
 	}
 	if len(records) != 0 {
 		t.Fatalf("records after kill = %#v, want none", records)
+	}
+	blobs, err := snapshots.Load()
+	if err != nil {
+		t.Fatalf("snapshot Load error = %v", err)
+	}
+	if len(blobs) != 0 {
+		t.Fatalf("snapshots after kill = %#v, want none", blobs)
 	}
 }
 

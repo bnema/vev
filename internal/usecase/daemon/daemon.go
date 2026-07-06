@@ -104,6 +104,10 @@ type Daemon struct {
 	shellArgs      []string
 	persist        *persist.Persister
 	persistEnabled bool
+	snaps          ports.SnapshotStore
+	snapsEnabled   bool
+	restoreDone    chan struct{}
+	restoreOnce    sync.Once
 	procCwd        func(int) (string, error)
 	procComm       func(int) (string, error)
 	bindings       atomic.Pointer[keys.Bindings]
@@ -168,6 +172,15 @@ func WithStore(store ports.Store) Option {
 	}
 }
 
+// WithSnapshotStore enables durable named session snapshots. A nil store keeps
+// the daemon in no-op snapshot mode.
+func WithSnapshotStore(store ports.SnapshotStore) Option {
+	return func(d *Daemon) {
+		d.snaps = store
+		d.snapsEnabled = store != nil
+	}
+}
+
 // WithCwdReader overrides the process cwd reader used for persistence tests.
 func WithCwdReader(fn func(int) (string, error)) Option {
 	return func(d *Daemon) {
@@ -204,19 +217,20 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		shell = "/bin/sh"
 	}
 	d := &Daemon{
-		sessions: make(map[domain.SessionID]*session),
-		stopped:  make(map[string]stoppedSession),
-		parked:   make(map[uint64]*parkedAttachment),
-		ptys:     ptys,
-		clock:    clock,
-		log:      log,
-		baseEnv:  os.Environ(),
-		shell:    shell,
-		persist:  persist.New(nil),
-		procCwd:  platform.ProcessCwd,
-		procComm: platform.ProcessComm,
-		done:     make(chan struct{}),
-		animWake: make(chan struct{}, 1),
+		sessions:    make(map[domain.SessionID]*session),
+		stopped:     make(map[string]stoppedSession),
+		parked:      make(map[uint64]*parkedAttachment),
+		ptys:        ptys,
+		clock:       clock,
+		log:         log,
+		baseEnv:     os.Environ(),
+		shell:       shell,
+		persist:     persist.New(nil),
+		procCwd:     platform.ProcessCwd,
+		procComm:    platform.ProcessComm,
+		done:        make(chan struct{}),
+		restoreDone: make(chan struct{}),
+		animWake:    make(chan struct{}, 1),
 	}
 	for _, o := range opts {
 		o(d)
@@ -268,6 +282,16 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 		d.sessWg.Go(func() {
 			d.cwdSampler(d.serveCtx)
 		})
+	}
+	if d.snapsEnabled {
+		d.sessWg.Go(func() {
+			d.snapshotSaver(d.serveCtx)
+		})
+		d.sessWg.Go(func() {
+			d.restoreSnapshots(d.serveCtx)
+		})
+	} else {
+		d.closeRestoreDone()
 	}
 
 	// Break the accept loop when either the parent context is cancelled or the
@@ -432,12 +456,20 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	target := d.findByNameLocked(k.Name)
 	if target == nil {
 		if stopped, ok := d.stopped[k.Name]; ok {
+			d.mu.Unlock()
+			if d.snapsEnabled && d.snaps != nil {
+				if err := d.snaps.Delete(k.Name); err != nil {
+					d.log.Warn("deleting stopped session snapshot failed", "err", err, "session", k.Name)
+					_ = tr.Send(frameError(ports.ErrInternal, "deleting stopped session snapshot failed"))
+					return
+				}
+			}
 			if err := d.persist.Delete(k.Name); err != nil {
-				d.mu.Unlock()
 				d.log.Warn("deleting persisted stopped session failed", "err", err, "session", k.Name)
 				_ = tr.Send(frameError(ports.ErrInternal, "deleting persisted stopped session failed"))
 				return
 			}
+			d.mu.Lock()
 			if cur, ok := d.stopped[k.Name]; ok && cur == stopped {
 				delete(d.stopped, k.Name)
 			}
@@ -513,6 +545,9 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	sz := h.Size
 	if !sz.Valid() {
 		sz = defaultSize
+	}
+	if d.snapsEnabled && (h.Intent == ports.IntentResume || h.Intent == ports.IntentAttach || h.Intent == ports.IntentNew) {
+		<-d.restoreDone
 	}
 
 	d.mu.Lock()

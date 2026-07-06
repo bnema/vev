@@ -537,6 +537,7 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 		d.applyLayoutLocked(tb)
 		tb.mu.Unlock()
 	}
+	markSnapshotDirty(sess)
 	if ac != nil {
 		d.paint(sess, ac, true)
 	}
