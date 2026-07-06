@@ -225,6 +225,15 @@ func WithTempDir(dir string) Option {
 	}
 }
 
+// WithBarScriptCommandRunner installs the shell command runner used by bar scripts.
+func WithBarScriptCommandRunner(runner ports.ShellCommandRunner) Option {
+	return func(d *Daemon) {
+		if runner != nil {
+			d.barScripts.runner = barScriptRunner{runner: runner, baseEnv: d.baseEnv}
+		}
+	}
+}
+
 // WithConfig applies the initial user configuration.
 func WithConfig(cfg domain.Config) Option {
 	return func(d *Daemon) {
@@ -258,7 +267,6 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		animWake:    make(chan struct{}, 1),
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
-			runner:      barScriptRunner{baseEnv: os.Environ()},
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
 			lastRefresh: make(map[domain.SessionID]time.Time),
 			lastContext: make(map[domain.SessionID]barScriptContext),

@@ -4,13 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
-	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/bnema/vev/internal/ports"
 )
 
 const (
@@ -54,6 +53,7 @@ func (c barScriptContext) env(base []string) []string {
 }
 
 type barScriptRunner struct {
+	runner  ports.ShellCommandRunner
 	timeout time.Duration
 	baseEnv []string
 }
@@ -62,6 +62,9 @@ func (r barScriptRunner) run(ctx context.Context, command string, scriptCtx barS
 	if strings.TrimSpace(command) == "" {
 		return "", nil
 	}
+	if r.runner == nil {
+		return "", errors.New("bar script command runner is nil")
+	}
 	timeout := r.timeout
 	if timeout <= 0 {
 		timeout = barScriptTimeout
@@ -69,52 +72,21 @@ func (r barScriptRunner) run(ctx context.Context, command string, scriptCtx barS
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	cmd.Env = scriptCtx.env(r.baseEnv)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = timeout
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
-	var stdout boundedBuffer
-	stdout.limit = barScriptOutputLimit
-	cmd.Stdout = &stdout
-	cmd.Stderr = io.Discard
-
-	err := cmd.Run()
+	stdout, err := r.runner.Run(ctx, ports.CommandSpec{
+		Command:     command,
+		Env:         scriptCtx.env(r.baseEnv),
+		Timeout:     timeout,
+		StdoutLimit: barScriptOutputLimit,
+	})
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "", context.DeadlineExceeded
 	}
-	text := sanitizeBarScriptOutput(stdout.Bytes(), barScriptOutputLimit)
+	text := sanitizeBarScriptOutput(stdout, barScriptOutputLimit)
 	if err != nil {
 		return text, err
 	}
 	return text, nil
 }
-
-type boundedBuffer struct {
-	buf   bytes.Buffer
-	limit int
-}
-
-func (b *boundedBuffer) Write(p []byte) (int, error) {
-	if b.limit <= 0 {
-		return len(p), nil
-	}
-	remaining := b.limit - b.buf.Len()
-	if remaining > 0 {
-		if len(p) < remaining {
-			remaining = len(p)
-		}
-		_, _ = b.buf.Write(p[:remaining])
-	}
-	return len(p), nil
-}
-
-func (b *boundedBuffer) Bytes() []byte { return b.buf.Bytes() }
 
 func sanitizeBarScriptOutput(raw []byte, limit int) string {
 	if limit <= 0 || limit > len(raw) {
@@ -209,5 +181,3 @@ func trimUTF8Bytes(s string, limit int) string {
 	}
 	return s[:limit]
 }
-
-var _ io.Writer = (*boundedBuffer)(nil)
