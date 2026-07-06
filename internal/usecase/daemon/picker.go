@@ -180,7 +180,6 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 		d.closePicker(ac)
 	}
 	if switchTarget && ok {
-		d.clearHistoryNav(ac)
 		d.switchToTarget(sess, ac, target)
 		return
 	}
@@ -358,14 +357,10 @@ func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker
 	}
 	targetSess := d.sessionByID(target.Session)
 	if targetSess == nil {
-		d.clearHistoryNav(ac)
 		d.paint(sess, ac, true)
 		return
 	}
 	if targetSess == sess {
-		if target.TabIndex >= 0 {
-			d.clearHistoryNav(ac)
-		}
 		sess.switchTab(target.TabIndex)
 		d.paint(sess, ac, true)
 		return
