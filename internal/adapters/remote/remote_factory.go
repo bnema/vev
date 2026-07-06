@@ -13,6 +13,8 @@ import (
 // DialerFactory selects the requested remote transport adapter.
 type DialerFactory struct{}
 
+var _ ports.RemoteDialerFactory = DialerFactory{}
+
 func NewDialerFactory() DialerFactory { return DialerFactory{} }
 
 func (DialerFactory) DialerForRemote(target string, session string, mode ports.RemoteTransportMode, log *slog.Logger) (ports.Dialer, error) {

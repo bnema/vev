@@ -113,6 +113,10 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 
 	ready, err := readUDPReady(stdout)
 	if err != nil {
+		_ = proc.Kill()
+		_ = proc.Wait()
+		waited = true
+		cleanup = false
 		return nil, udpUnavailable("read bootstrap readiness", err, &stderr)
 	}
 	if err := proc.Wait(); err != nil {

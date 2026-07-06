@@ -20,6 +20,7 @@ func TestParseRemoteAttachTarget(t *testing.T) {
 		{name: "bracketed ipv6 no session", input: "user@[2001:db8::1]", wantTarget: "user@[2001:db8::1]", wantOK: true},
 		{name: "bracketed ipv6 with session", input: "user@[2001:db8::1]:work", wantTarget: "user@[2001:db8::1]", wantSession: "work", wantOK: true},
 		{name: "malformed bracketed ipv6", input: "user@[2001:db8::1"},
+		{name: "malformed suffix after bracket", input: "user@[2001:db8::1]work"},
 		{name: "target with at in userinfo", input: "first@user@example.com:work", wantTarget: "first@user@example.com", wantSession: "work", wantOK: true},
 	}
 

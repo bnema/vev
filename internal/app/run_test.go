@@ -466,7 +466,11 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 				selectedRemoteTransport: tt.selectedTransport,
 				clipboard:               clip,
 				runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, _ *slog.Logger) error {
-					gotDialer = d.(namedDialer).name
+					nd, ok := d.(namedDialer)
+					if !ok {
+						t.Fatalf("dialer type = %T, want namedDialer", d)
+					}
+					gotDialer = nd.name
 					gotRemote = remote
 					gotClipboard = clipboard
 					if intent != ports.IntentAttach || name != "work" {
@@ -542,7 +546,11 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 		remoteDialerFactory: factory,
 		clipboard:           &fakeClipboardReader{}, // must NOT reach runClient for a local attach
 		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, _ *slog.Logger) error {
-			gotDialer = d.(namedDialer).name
+			nd, ok := d.(namedDialer)
+			if !ok {
+				t.Fatalf("dialer type = %T, want namedDialer", d)
+			}
+			gotDialer = nd.name
 			gotRemote = remote
 			gotClipboard = clipboard
 			if intent != ports.IntentEphemeral || name != "" {
@@ -570,20 +578,13 @@ func TestRunUDPBootstrapForwardsReadinessAndExits(t *testing.T) {
 	udpBootstrapTimeout = time.Second
 	t.Cleanup(func() { udpBootstrapTimeout = oldTimeout })
 	oldCommand := udpProxyCommand
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = r.Close() }()
 	var gotCmd *exec.Cmd
 	udpProxyCommand = func(context.Context, string, ...string) *exec.Cmd {
 		cmd := exec.Command("/bin/sh", "-c", "printf 'VEV-UDP 4242 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\\n'")
-		cmd.Stdout = w
 		gotCmd = cmd
 		return cmd
 	}
 	t.Cleanup(func() { udpProxyCommand = oldCommand })
-	defer func() { _ = w.Close() }()
 
 	got := captureStdout(t, func() {
 		if err := runUDPBootstrap(context.Background(), "work"); err != nil {
