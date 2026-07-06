@@ -88,9 +88,15 @@ func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 	require.Equal(t, "t_saved", tabStableID)
 	require.Equal(t, "p_saved_1", pane1StableID)
 	require.Equal(t, "p_saved_2", pane2StableID)
-	require.Contains(t, factory.opens[0].env, "TERM=xterm-direct")
+	require.Contains(t, factory.opens[0].env, "TERM=xterm-256color")
+	require.NotContains(t, factory.opens[0].env, "TERM=xterm-direct")
+	require.NotContains(t, factory.opens[0].env, "COLORTERM=truecolor")
+	require.Contains(t, factory.opens[0].env, "TERM_PROGRAM=vev")
 	require.Contains(t, factory.opens[0].env, "VEV=session=work,tab="+tabStableID+",pane="+pane1StableID)
-	require.Contains(t, factory.opens[1].env, "TERM=xterm-direct")
+	require.Contains(t, factory.opens[1].env, "TERM=xterm-256color")
+	require.NotContains(t, factory.opens[1].env, "TERM=xterm-direct")
+	require.NotContains(t, factory.opens[1].env, "COLORTERM=truecolor")
+	require.Contains(t, factory.opens[1].env, "TERM_PROGRAM=vev")
 	require.Contains(t, factory.opens[1].env, "VEV=session=work,tab="+tabStableID+",pane="+pane2StableID)
 }
 

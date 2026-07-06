@@ -332,6 +332,17 @@ type attachResult struct {
 	err         error
 }
 
+// DetectTrueColor reports whether TERM/COLORTERM advertise direct color support.
+func DetectTrueColor(termEnv, colorTerm string) bool {
+	switch strings.ToLower(strings.TrimSpace(colorTerm)) {
+	case "truecolor", "24bit":
+		return true
+	}
+
+	termEnv = strings.ToLower(strings.TrimSpace(termEnv))
+	return termEnv == "xterm-direct" || strings.HasSuffix(termEnv, "-direct")
+}
+
 func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func(), remote bool, clipboard ports.ClipboardReader, log *slog.Logger) attachResult {
 	// 1. Handshake: send Hello with our size and TERM.
 	size, err := term.Size()
@@ -342,8 +353,9 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	if err != nil {
 		cwd = ""
 	}
-	colorTerm := strings.ToLower(os.Getenv("COLORTERM"))
-	trueColor := colorTerm == "truecolor" || colorTerm == "24bit"
+	termEnv := os.Getenv("TERM")
+	colorTerm := os.Getenv("COLORTERM")
+	trueColor := DetectTrueColor(termEnv, colorTerm)
 	hello := ports.Hello{
 		Version:     ports.ProtocolVersion,
 		Intent:      intent,
@@ -351,8 +363,9 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 		ResumeToken: resumeToken,
 		Name:        name,
 		Size:        size,
-		TermEnv:     os.Getenv("TERM"),
+		TermEnv:     termEnv,
 		Cwd:         cwd,
+		TrueColor:   trueColor,
 	}
 	if err := transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
 		return attachResult{err: fmt.Errorf("vev: sending hello: %w", err)}

@@ -390,12 +390,14 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 		d.mu.Unlock()
 		return nil
 	}
+	term := from.terminal
 	from.client = nil
 	ac.setSession(nil)
 	from.mu.Unlock()
 
 	targetSess.mu.Lock()
 	old := targetSess.client
+	targetSess.terminal = term
 	targetSess.client = ac
 	if target.TabIndex >= 0 && target.TabIndex < len(targetSess.tabs) {
 		targetSess.active = target.TabIndex
@@ -421,8 +423,9 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 		d.mu.Unlock()
 		return
 	}
+	term := from.terminal
 	cwd := d.dirOrHome(stopped.cwd)
-	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.size)
+	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.size, term)
 	if err != nil {
 		from.mu.Unlock()
 		d.mu.Unlock()

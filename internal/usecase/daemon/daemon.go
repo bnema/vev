@@ -598,6 +598,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
 		}
 	}
+	term := terminalEnv{TrueColor: h.TrueColor}
 
 	d.mu.Lock()
 	// Shutdown/create interlock: once shutdown has begun (last session removed,
@@ -624,7 +625,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			var err error
-			sess, err = d.createSessionLocked(h.Name, false, cwd, sz)
+			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, term)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err
@@ -632,19 +633,25 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 		}
 		d.purgeParkedForSessionLocked(sess)
 		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
+		sess.mu.Lock()
+		sess.terminal = term
+		sess.mu.Unlock()
 		d.mu.Unlock()
 		d.detachReplacedClient(old)
 		return sess, ac, nil
 
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
-		sess, err := d.createSessionLocked(name, true, h.Cwd, sz)
+		sess, err := d.createSessionLocked(name, true, h.Cwd, sz, term)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
 		}
 		d.purgeParkedForSessionLocked(sess)
 		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID})
+		sess.mu.Lock()
+		sess.terminal = term
+		sess.mu.Unlock()
 		d.mu.Unlock()
 		d.detachReplacedClient(old)
 		return sess, ac, nil
@@ -662,13 +669,16 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}
 		}
-		sess, err := d.createSessionLocked(h.Name, false, h.Cwd, sz)
+		sess, err := d.createSessionLocked(h.Name, false, h.Cwd, sz, term)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
 		}
 		d.purgeParkedForSessionLocked(sess)
 		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
+		sess.mu.Lock()
+		sess.terminal = term
+		sess.mu.Unlock()
 		d.mu.Unlock()
 		d.detachReplacedClient(old)
 		return sess, ac, nil
@@ -683,7 +693,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			var err error
-			sess, err = d.createSessionLocked(h.Name, false, cwd, sz)
+			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, term)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err
@@ -691,6 +701,9 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 		}
 		d.purgeParkedForSessionLocked(sess)
 		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
+		sess.mu.Lock()
+		sess.terminal = term
+		sess.mu.Unlock()
 		d.mu.Unlock()
 		d.detachReplacedClient(old)
 		return sess, ac, nil

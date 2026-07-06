@@ -305,3 +305,28 @@ func TestSequencedInputDoesNotPrematurelyEchoAck(t *testing.T) {
 
 	require.Zero(t, ac.echoAck.Load())
 }
+
+func TestResumeParkedUpdatesTerminalEnv(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	tr, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
+	hello := helloResumeCapable(ports.IntentNew, "work", 0)
+	hello.TrueColor = false
+	sess, ac, err := d.route(hello, tr)
+	require.NoError(t, err)
+	token := ac.resumeToken
+	require.True(t, sess.detachIfCurrent(ac))
+	require.True(t, d.parkAttachment(sess, ac))
+
+	resumeHello := helloResumeCapable(ports.IntentResume, "work", token)
+	resumeHello.TrueColor = true
+	d.mu.Lock()
+	_, _, ok, err := d.resumeParkedLocked(resumeHello, &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
+	d.mu.Unlock()
+	require.NoError(t, err)
+	require.True(t, ok)
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	require.True(t, sess.terminal.TrueColor)
+}

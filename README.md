@@ -131,6 +131,12 @@ Host *
     ControlPersist 10m
 ```
 
+## Terminal color
+
+When the attaching client reports truecolor support, vev advertises newly spawned panes as `TERM=xterm-direct` and exports `COLORTERM=truecolor` to child processes. Otherwise, panes use the conservative `TERM=xterm-256color` and do not receive `COLORTERM`. This works for local and remote attach because the client capability is carried inside vev's protocol rather than relying on SSH `SendEnv`/`AcceptEnv`.
+
+Applications that use terminfo can detect direct color from `xterm-direct`; applications that use the common environment convention can use `COLORTERM=truecolor` when it is present. Panes restored from a saved snapshot start conservatively before any client attaches; after attach or resume, newly spawned panes use that client's reported capability.
+
 ## Keys
 
 All bindings use Alt directly; there is no prefix key.
