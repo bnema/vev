@@ -73,6 +73,7 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		}
 		cancel()
 	}
+	allowlist := d.restoreProcessAllowlistSnapshot()
 	for _, tabSnap := range snap.Tabs {
 		if err := ctx.Err(); err != nil {
 			closeOpened()
@@ -92,13 +93,26 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		for _, pl := range placements {
 			placementByPane[pl.ID] = pl.Content
 		}
-		tb := &tab{tree: tabSnap.Tree.Clone(), panes: make(map[layout.PaneID]*pane, len(tabSnap.Panes)), nextPaneID: int(tabSnap.NextPaneID), size: tbSize}
+		tabStableID := tabSnap.StableID
+		if tabStableID == "" {
+			var err error
+			tabStableID, err = newStableID("t")
+			if err != nil {
+				closeOpened()
+				return fmt.Errorf("snapshot: generating tab identity: %w", err)
+			}
+		}
+		tb := &tab{stableID: tabStableID, tree: tabSnap.Tree.Clone(), panes: make(map[layout.PaneID]*pane, len(tabSnap.Panes)), nextPaneID: int(tabSnap.NextPaneID), size: tbSize}
 		if tb.nextPaneID <= 0 {
 			tb.nextPaneID = 1
 		}
 		tb.ctx, tb.cancel = context.WithCancel(sctx)
 		opened = append(opened, tb)
 		for _, paneSnap := range tabSnap.Panes {
+			restoreCommand := ""
+			if decision := planProcessRestore(paneSnap.Process, allowlist); decision.Restore {
+				restoreCommand = decision.Command
+			}
 			if err := ctx.Err(); err != nil {
 				closeOpened()
 				return err
@@ -109,15 +123,29 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 				return fmt.Errorf("snapshot: missing pane placement")
 			}
 			contentSize := restorePTYSize(contentRect, tbSize)
-			pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(snap.Name), paneSnap.Cwd, contentSize)
+			paneStableID := paneSnap.StableID
+			if paneStableID == "" {
+				var err error
+				paneStableID, err = newStableID("p")
+				if err != nil {
+					closeOpened()
+					return fmt.Errorf("snapshot: generating pane identity: %w", err)
+				}
+			}
+			pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(snap.Name, tabStableID, paneStableID), paneSnap.Cwd, contentSize)
 			if err != nil {
 				closeOpened()
 				return err
 			}
-			p := newPane(paneSnap.ID, pty, contentSize)
+			p := newPaneWithStableID(paneSnap.ID, paneStableID, pty, contentSize)
 			p.ctx, p.cancel = context.WithCancel(tb.ctx)
 			p.rect = contentRect
 			seedPaneRows(p, paneSnap.Scrollback, paneSnap.Visible)
+			if restoreCommand != "" {
+				if _, err := pty.Write([]byte(restoreCommand + "\n")); err != nil {
+					d.log.Warn("writing snapshot restore command failed", "err", err, "session", snap.Name, "pane", paneSnap.ID)
+				}
+			}
 			tb.panes[paneSnap.ID] = p
 		}
 	}
@@ -235,6 +263,7 @@ func (d *Daemon) captureSession(sess *session) bool {
 	for _, tb := range tabs {
 		tb.mu.Lock()
 		tabSnap := snapcodec.Tab{
+			StableID:   tb.stableID,
 			Cols:       uint16(max(tb.size.Cols, 0)),
 			Rows:       uint16(max(tb.size.Rows, 0)),
 			NextPaneID: uint64(max(tb.nextPaneID, 0)),
@@ -254,11 +283,13 @@ func (d *Daemon) captureSession(sess *session) bool {
 		for _, p := range panes {
 			p.mu.Lock()
 			pid := 0
-			if p.pty != nil {
-				pid = p.pty.Pid()
+			pty := p.pty
+			if pty != nil {
+				pid = pty.Pid()
 			}
 			paneSnap := snapcodec.Pane{
 				ID:         p.id,
+				StableID:   p.stableID,
 				Scrollback: cloneRows(p.scrollback.Snapshot()),
 				Visible:    cloneRows(p.screen.PrimaryVisibleRows()),
 			}
@@ -269,6 +300,7 @@ func (d *Daemon) captureSession(sess *session) bool {
 					paneSnap.Cwd = cwd
 				}
 			}
+			paneSnap.Process = d.capturePaneProcess(pty, pid)
 			paneIDs[paneSnap.ID] = struct{}{}
 			paneSnaps = append(paneSnaps, paneSnap)
 		}
@@ -289,6 +321,28 @@ func (d *Daemon) captureSession(sess *session) bool {
 		return false
 	}
 	return true
+}
+
+func (d *Daemon) capturePaneProcess(pty interface{ ForegroundPgid() (int, error) }, shellPid int) *snapcodec.Process {
+	if d == nil || pty == nil || shellPid <= 0 || d.procGroupArgv == nil {
+		return nil
+	}
+	pgid, err := pty.ForegroundPgid()
+	if err != nil || pgid <= 0 || pgid == shellPid {
+		return nil
+	}
+	argv, err := d.procGroupArgv(pgid, shellPid)
+	if err != nil || len(argv) == 0 || argv[0] == "" {
+		return nil
+	}
+	strategy := detectProcessStrategy(argv)
+	return &snapcodec.Process{
+		Argv:     append([]string(nil), argv...),
+		Strategy: strategy,
+		Opts: snapcodec.ProcessOpts{
+			AgentSessionID: extractAgentSessionID(strategy, argv),
+		},
+	}
 }
 
 func (d *Daemon) snapshotSaver(ctx context.Context) {

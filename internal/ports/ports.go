@@ -96,6 +96,15 @@ type Timer interface {
 	Stop() bool
 }
 
+// ProcessInspector reads process metadata for daemon snapshot/persistence use.
+// Implementations may live in platform packages; usecases depend on this port.
+type ProcessInspector interface {
+	Cwd(pid int) (string, error)
+	Comm(pid int) (string, error)
+	Argv(pid int) ([]string, error)
+	GroupArgv(pgid int, shellPid int) ([]string, error)
+}
+
 // ClipboardReader reads an image off the CLIENT-side system clipboard, for
 // forwarding to a remote session's focused pane. Implementations live in
 // internal/adapters (e.g. a wl-paste-backed one for Wayland); usecases only

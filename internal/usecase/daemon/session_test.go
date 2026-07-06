@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -892,12 +893,85 @@ func TestPickerStoppedTargetKillPurges(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestChildEnvEscapesLegacySessionName(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+
+	got := d.childEnv("legacy,name=value", "t_alpha", "p_beta")
+
+	require.Contains(t, got, "VEV=session=legacy%2Cname%3Dvalue,tab=t_alpha,pane=p_beta")
+}
+
+func TestNewSessionAssignsStableIDsAndChildEnv(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+
+	var gotEnv []string
+	f := portsmocks.NewMockPTYFactory(t)
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+			gotEnv = append([]string(nil), env...)
+			return p, nil
+		},
+	).Once()
+	d := newTestDaemon(t, f, stubClock{})
+	d.baseEnv = []string{"KEEP=1", "TERM=old", "VEV=old"}
+
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz)
+	require.NoError(t, err)
+	defer func() {
+		_ = d.killSession(sess, ports.ReasonServerShutdown, false)
+		releasePTY()
+		d.sessWg.Wait()
+	}()
+
+	sess.mu.Lock()
+	require.Len(t, sess.tabs, 1)
+	tb := sess.tabs[0]
+	sess.mu.Unlock()
+	tb.mu.Lock()
+	paneStableID := tb.panes["pane-1"].stableID
+	tabStableID := tb.stableID
+	tb.mu.Unlock()
+
+	require.True(t, strings.HasPrefix(tabStableID, "t_"), tabStableID)
+	require.True(t, strings.HasPrefix(paneStableID, "p_"), paneStableID)
+	require.NotEqual(t, tabStableID, paneStableID)
+	require.Contains(t, gotEnv, "KEEP=1")
+	require.NotContains(t, gotEnv, "TERM=old")
+	require.NotContains(t, gotEnv, "VEV=old")
+	require.Contains(t, gotEnv, "TERM=xterm-direct")
+	require.Contains(t, gotEnv, "VEV=session=work,tab="+tabStableID+",pane="+paneStableID)
+}
+
 func TestIntentNewStoppedNameRejected(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	d.stopped["taken"] = stoppedSession{name: "taken", cwd: "/tmp", createdAt: 1}
 	tr := portsmocks.NewMockTransport(t)
 	_, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "taken", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
 	require.ErrorContains(t, err, "name already in use")
+}
+
+func TestIntentNewUnsafeNameRejected(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	tr := portsmocks.NewMockTransport(t)
+	_, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "my work", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
+	require.ErrorContains(t, err, domain.ErrInvalidSessionName.Error())
+}
+
+func TestCreateSessionAndSwitchUnsafeNameRejected(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	require.ErrorIs(t, d.createSessionAndSwitch(nil, nil, "my work"), domain.ErrInvalidSessionName)
+}
+
+func TestRenameSessionUnsafeNameRejected(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz)
+	require.NoError(t, err)
+	require.ErrorIs(t, d.renameSession(sess, "my work"), domain.ErrInvalidSessionName)
 }
 
 func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {

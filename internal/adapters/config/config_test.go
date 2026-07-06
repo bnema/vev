@@ -91,12 +91,58 @@ func TestParse(t *testing.T) {
 				{Line: 3, Msg: "missing key"},
 			},
 		},
+		{
+			name:  "snapshot restore processes",
+			input: "snapshot.restore_processes = claude, codex, pi, opencode, btop\n",
+			want: domain.Config{
+				Theme:          domain.ThemeAuto,
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+				Snapshot: domain.SnapshotConfig{
+					RestoreProcesses:    []string{"claude", "codex", "pi", "opencode", "btop"},
+					RestoreProcessesSet: true,
+				},
+			},
+		},
+		{
+			name:  "snapshot restore processes empty disables",
+			input: "snapshot.restore_processes =\n",
+			want: domain.Config{
+				Theme:          domain.ThemeAuto,
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+				Snapshot: domain.SnapshotConfig{
+					RestoreProcessesSet: true,
+				},
+			},
+		},
+		{
+			name:  "snapshot restore processes warns on malformed entries",
+			input: "snapshot.restore_processes = claude, custom-tool, /bin/sh, :all:, bad name, claude, , zsh\n",
+			want: domain.Config{
+				Theme:          domain.ThemeAuto,
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+				Snapshot: domain.SnapshotConfig{
+					RestoreProcesses:    []string{"claude", "custom-tool", "zsh"},
+					RestoreProcessesSet: true,
+				},
+			},
+			wantWarnings: []domain.Warning{
+				{Line: 1, Msg: "invalid snapshot restore process \"/bin/sh\""},
+				{Line: 1, Msg: "invalid snapshot restore process \":all:\""},
+				{Line: 1, Msg: "invalid snapshot restore process \"bad name\""},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			if tt.want.Snapshot.RestoreProcesses == nil && !tt.want.Snapshot.RestoreProcessesSet {
+				tt.want.Snapshot.RestoreProcesses = append([]string(nil), domain.DefaultSnapshotRestoreProcesses()...)
+			}
 			got, warnings, err := Parse(strings.NewReader(tt.input))
 			if err != nil {
 				t.Fatalf("Parse() error = %v", err)
@@ -109,6 +155,15 @@ func TestParse(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefaultsCopiesSnapshotRestoreProcesses(t *testing.T) {
+	t.Parallel()
+
+	first := domain.Defaults()
+	first.Snapshot.RestoreProcesses[0] = "mutated"
+	second := domain.Defaults()
+	require.Equal(t, "vi", second.Snapshot.RestoreProcesses[0])
 }
 
 func TestParsePreservesBindingFileOrder(t *testing.T) {

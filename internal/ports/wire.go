@@ -40,11 +40,12 @@ const (
 
 // ErrorMsg codes.
 const (
-	ErrVersionMismatch uint16 = 1
-	ErrNoSuchSession   uint16 = 2
-	ErrNameTaken       uint16 = 3
-	ErrServerShutdown  uint16 = 4
-	ErrInternal        uint16 = 255
+	ErrVersionMismatch    uint16 = 1
+	ErrNoSuchSession      uint16 = 2
+	ErrNameTaken          uint16 = 3
+	ErrServerShutdown     uint16 = 4
+	ErrInvalidSessionName uint16 = 5
+	ErrInternal           uint16 = 255
 )
 
 // Detached reasons.

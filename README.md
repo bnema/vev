@@ -35,9 +35,9 @@ vev --help                       show help (aliases: -h, help)
 vev --version                    show version (alias: version)
 ```
 
-Ephemeral sessions get a number (`0`, `1`, `2`, ...) and die when you detach. Named sessions survive detach and can be resumed later. The daemon starts on first use and exits when no sessions remain.
+Ephemeral sessions get a number (`0`, `1`, `2`, ...) and die when you detach. Named sessions survive detach and can be resumed later. New and renamed session names must start with a letter or number and may contain only letters, numbers, dots, underscores, and dashes.
 
-Only one client is attached to a session at a time; attaching again displaces the old client.
+The daemon starts on first use and exits when no sessions remain. Only one client is attached to a session at a time; attaching again displaces the old client.
 
 ## Configuration
 
@@ -63,6 +63,11 @@ switch-tab-6 = alt+6
 switch-tab-7 = alt+7
 switch-tab-8 = alt+8
 switch-tab-9 = alt+9
+
+# Named session snapshots restore layout, cwd, visible content, scrollback,
+# and foreground processes from this allowlist. Omit the key for these defaults;
+# set it empty to disable process relaunch.
+snapshot.restore_processes = vi,vim,nvim,emacs,man,less,more,tail,top,htop,btop,claude,codex,pi,opencode
 
 # Command palette codes are trimmed, uppercased, then checked as 2-3 letters or digits.
 code.new-tab = CNT

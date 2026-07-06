@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 )
 
 const pollInterval = 2 * time.Second
+
+var processNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
 
 // Parse reads vev's flat action = value config format. Duplicate action keys
 // are accepted with a warning; the last value wins while first-seen action order
@@ -67,6 +70,11 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("duplicate key %q", key)})
 			}
 			cfg.Codes[codeKey] = value
+		case key == "snapshot.restore_processes":
+			var processWarnings []domain.Warning
+			cfg.Snapshot.RestoreProcesses, processWarnings = parseProcessList(value, lineNo)
+			warnings = append(warnings, processWarnings...)
+			cfg.Snapshot.RestoreProcessesSet = true
 		default:
 			if seenBindingKeys[key] {
 				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("duplicate key %q", key)})
@@ -162,6 +170,32 @@ func updateBindingEntry(entries []domain.ConfigEntry, key, value string) {
 			return
 		}
 	}
+}
+
+func parseProcessList(value string, lineNo int) ([]string, []domain.Warning) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	warnings := make([]domain.Warning, 0)
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+		if !processNamePattern.MatchString(item) {
+			warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid snapshot restore process %q", item)})
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out, warnings
 }
 
 func parseTheme(value string) (domain.ThemeMode, bool) {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/snapshot"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/client"
@@ -38,6 +39,7 @@ func TestParseArgs(t *testing.T) {
 		{name: "new empty name", args: []string{"new", ""}, wantErr: true},
 		{name: "new command override unsupported", args: []string{"new", "work", "--", "sh"}, wantErr: true},
 		{name: "attach named", args: []string{"attach", "work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work"},
+		{name: "attach preserves legacy unsafe name", args: []string{"attach", "my work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "my work"},
 		{name: "attach alias a", args: []string{"a", "work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work"},
 		{name: "attach remote without session uses ephemeral", args: []string{"attach", "user@example.com"}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral, wantRemote: "user@example.com"},
 		{name: "attach remote with empty session uses ephemeral", args: []string{"attach", "user@example.com:"}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral, wantRemote: "user@example.com"},
@@ -47,6 +49,7 @@ func TestParseArgs(t *testing.T) {
 		{name: "ls", args: []string{"ls"}, wantKind: kindList},
 		{name: "list", args: []string{"list"}, wantKind: kindList},
 		{name: "kill named", args: []string{"kill", "work"}, wantKind: kindKill, wantName: "work"},
+		{name: "kill preserves legacy unsafe name via terminator", args: []string{"kill", "--", "my work"}, wantKind: kindKill, wantName: "my work"},
 		{name: "kill dashed name via terminator", args: []string{"kill", "--", "--all"}, wantKind: kindKill, wantName: "--all"},
 		{name: "kill all", args: []string{"kill", "--all"}, wantKind: kindKill, wantAll: true},
 		{name: "kill daemon", args: []string{"kill", "--daemon"}, wantKind: kindKill, wantDaemon: true},
@@ -58,6 +61,7 @@ func TestParseArgs(t *testing.T) {
 		{name: "daemon", args: []string{"--daemon"}, wantKind: kindDaemon},
 		{name: "stdio", args: []string{"_stdio"}, wantKind: kindStdio},
 		{name: "stdio with session", args: []string{"_stdio", "work"}, wantKind: kindStdio, wantName: "work"},
+		{name: "stdio preserves legacy unsafe name", args: []string{"_stdio", "my work"}, wantKind: kindStdio, wantName: "my work"},
 		{name: "stdio too many args", args: []string{"_stdio", "work", "extra"}, wantErr: true},
 		{name: "help", args: []string{"--help"}, wantKind: kindHelp},
 		{name: "help subcommand", args: []string{"help"}, wantKind: kindHelp},
@@ -100,6 +104,13 @@ func TestParseArgs(t *testing.T) {
 				t.Errorf("killDaemon = %v, want %v", got.killDaemon, tt.wantDaemon)
 			}
 		})
+	}
+}
+
+func TestParseArgsNewRejectsUnsafeSessionName(t *testing.T) {
+	_, err := parseArgs([]string{"new", "my work"})
+	if !errors.Is(err, domain.ErrInvalidSessionName) {
+		t.Fatalf("parseArgs new unsafe error = %v, want %v", err, domain.ErrInvalidSessionName)
 	}
 }
 

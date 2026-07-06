@@ -142,6 +142,9 @@ func parseArgs(args []string) (command, error) {
 		if len(args) > 2 {
 			return command{}, usagef("`new` does not support command overrides")
 		}
+		if err := domain.ValidateSessionName(args[1]); err != nil {
+			return command{}, err
+		}
 		return command{kind: kindAttach, intent: ports.IntentNew, name: args[1]}, nil
 	case "attach", "a":
 		if len(args) < 2 || args[1] == "" {
@@ -281,6 +284,7 @@ func runDaemon() error {
 	}
 	logConfigWarnings(log, warnings)
 	daemonOpts = append(daemonOpts, daemon.WithConfig(cfg))
+	daemonOpts = append(daemonOpts, daemon.WithProcessInspector(platform.NewProcessInspector()), daemon.WithDirOrHome(platform.DirOrHome))
 	daemonOpts = append(daemonOpts, daemon.WithSnapshotStore(snapshotadapter.NewStore(snapshotDir())))
 	storePath := persist.StorePath(platform.StateDir())
 	if store, err := kv.Open(storePath); err != nil {

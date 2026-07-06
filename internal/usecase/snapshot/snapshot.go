@@ -15,6 +15,7 @@ type Session struct {
 
 // Tab captures one tab's layout, dimensions, and pane snapshots.
 type Tab struct {
+	StableID   string
 	Cols       uint16
 	Rows       uint16
 	NextPaneID uint64
@@ -27,7 +28,21 @@ type Tab struct {
 // with its scrollback and final visible primary screen.
 type Pane struct {
 	ID         layout.PaneID
+	StableID   string
 	Cwd        string
 	Scrollback [][]renderer.Cell
 	Visible    [][]renderer.Cell
+	Process    *Process
+}
+
+// Process captures restorable foreground process metadata.
+type Process struct {
+	Argv     []string
+	Strategy string
+	Opts     ProcessOpts
+}
+
+// ProcessOpts captures strategy-specific process restore options.
+type ProcessOpts struct {
+	AgentSessionID string
 }
