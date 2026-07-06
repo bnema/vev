@@ -27,6 +27,7 @@ type bootstrapProcess interface {
 	StdoutPipe() (io.ReadCloser, error)
 	Start() error
 	Kill() error
+	Wait() error
 }
 
 type execBootstrapProcess struct{ cmd *exec.Cmd }
@@ -34,6 +35,7 @@ type execBootstrapProcess struct{ cmd *exec.Cmd }
 func (p execBootstrapProcess) StdoutPipe() (io.ReadCloser, error) { return p.cmd.StdoutPipe() }
 func (p execBootstrapProcess) Start() error                       { return p.cmd.Start() }
 func (p execBootstrapProcess) Kill() error                        { return p.cmd.Process.Kill() }
+func (p execBootstrapProcess) Wait() error                        { return p.cmd.Wait() }
 
 var (
 	startUDPBootstrap = func(ctx context.Context, target, session string, stderr io.Writer) bootstrapProcess {
@@ -98,9 +100,13 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 		return nil, udpUnavailable("start bootstrap", err, &stderr)
 	}
 	cleanup := true
+	waited := false
 	defer func() {
 		if cleanup {
 			_ = proc.Kill()
+		}
+		if !waited {
+			_ = proc.Wait()
 		}
 		_ = stdout.Close()
 	}()
@@ -109,6 +115,13 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 	if err != nil {
 		return nil, udpUnavailable("read bootstrap readiness", err, &stderr)
 	}
+	if err := proc.Wait(); err != nil {
+		waited = true
+		cleanup = false
+		return nil, udpUnavailable("wait bootstrap", err, &stderr)
+	}
+	waited = true
+	cleanup = false
 	peer, err := net.ResolveUDPAddr("udp", net.JoinHostPort(sshTargetHost(d.Target), strconv.Itoa(ready.port)))
 	if err != nil {
 		return nil, udpUnavailable("resolve UDP peer", err, &stderr)

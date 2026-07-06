@@ -646,10 +646,17 @@ func runUDPBootstrap(ctx context.Context, session string) error {
 	if session != "" {
 		args = append(args, session)
 	}
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		_ = w.Close()
+		return err
+	}
+	defer func() { _ = devNull.Close() }()
+
 	cmd := udpProxyCommand(ctx, exe, args...)
-	cmd.Stdin = nil
+	cmd.Stdin = devNull
 	cmd.Stdout = w
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = devNull
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		_ = w.Close()
@@ -677,9 +684,11 @@ func runUDPBootstrap(ctx context.Context, session string) error {
 		_, err := fmt.Fprint(os.Stdout, line)
 		return err
 	case err := <-errCh:
+		_ = cmd.Wait()
 		return err
 	case <-readyCtx.Done():
 		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 		return fmt.Errorf("vev: udp bootstrap readiness: %w", readyCtx.Err())
 	}
 }
@@ -694,7 +703,7 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 	log.Debug("udp proxy starting", "session", session)
 
 	var lc net.ListenConfig
-	conn, err := lc.ListenPacket(ctx, "udp", "0.0.0.0:0")
+	conn, err := lc.ListenPacket(ctx, "udp", ":0")
 	if err != nil {
 		return err
 	}

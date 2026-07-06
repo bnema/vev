@@ -575,9 +575,11 @@ func TestRunUDPBootstrapForwardsReadinessAndExits(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
+	var gotCmd *exec.Cmd
 	udpProxyCommand = func(context.Context, string, ...string) *exec.Cmd {
 		cmd := exec.Command("/bin/sh", "-c", "printf 'VEV-UDP 4242 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\\n'")
 		cmd.Stdout = w
+		gotCmd = cmd
 		return cmd
 	}
 	t.Cleanup(func() { udpProxyCommand = oldCommand })
@@ -590,5 +592,11 @@ func TestRunUDPBootstrapForwardsReadinessAndExits(t *testing.T) {
 	})
 	if got != "VEV-UDP 4242 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n" {
 		t.Fatalf("readiness = %q", got)
+	}
+	if gotCmd.Stdin == nil || gotCmd.Stderr == nil {
+		t.Fatalf("proxy stdio = stdin %T stderr %T, want detached from SSH channels", gotCmd.Stdin, gotCmd.Stderr)
+	}
+	if gotCmd.Stdout == os.Stdout || gotCmd.Stderr == os.Stderr || gotCmd.Stdin == os.Stdin {
+		t.Fatalf("proxy inherited SSH stdio handles")
 	}
 }

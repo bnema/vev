@@ -85,12 +85,15 @@ func TestStdioDialerUsesContextBeforeStartingSSH(t *testing.T) {
 type fakeBootstrapProcess struct {
 	stdout   io.ReadCloser
 	startErr error
+	waitErr  error
 	killed   bool
+	waited   bool
 }
 
 func (p *fakeBootstrapProcess) StdoutPipe() (io.ReadCloser, error) { return p.stdout, nil }
 func (p *fakeBootstrapProcess) Start() error                       { return p.startErr }
 func (p *fakeBootstrapProcess) Kill() error                        { p.killed = true; return nil }
+func (p *fakeBootstrapProcess) Wait() error                        { p.waited = true; return p.waitErr }
 
 func withBootstrapStarter(t *testing.T, fn func(context.Context, string, string, io.Writer) bootstrapProcess) {
 	t.Helper()
@@ -115,14 +118,19 @@ func TestRemoteDialerUDPBootstrapFailures(t *testing.T) {
 		listen error
 		want   string
 		killed bool
+		waited bool
 	}{
 		{name: "start failure", start: errors.New("ssh missing"), want: "vev: remote UDP transport unavailable: start bootstrap: ssh missing"},
-		{name: "malformed readiness", stdout: "hello\n", want: "malformed readiness line", killed: true},
-		{name: "packet listen failure", stdout: "VEV-UDP 4444 " + key + "\n", listen: errors.New("bind denied"), want: "listen UDP: bind denied", killed: true},
+		{name: "malformed readiness", stdout: "hello\n", want: "malformed readiness line", killed: true, waited: true},
+		{name: "bootstrap wait failure", stdout: "VEV-UDP 4444 " + key + "\n", want: "wait bootstrap: exit status 255", waited: true},
+		{name: "packet listen failure", stdout: "VEV-UDP 4444 " + key + "\n", listen: errors.New("bind denied"), want: "listen UDP: bind denied", waited: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			proc := &fakeBootstrapProcess{stdout: io.NopCloser(strings.NewReader(tt.stdout)), startErr: tt.start}
+			if tt.name == "bootstrap wait failure" {
+				proc.waitErr = errors.New("exit status 255")
+			}
 			withBootstrapStarter(t, func(context.Context, string, string, io.Writer) bootstrapProcess { return proc })
 			if tt.listen != nil {
 				withListenUDP(t, func(context.Context) (net.PacketConn, error) { return nil, tt.listen })
@@ -137,7 +145,25 @@ func TestRemoteDialerUDPBootstrapFailures(t *testing.T) {
 			if proc.killed != tt.killed {
 				t.Fatalf("killed=%v, want %v", proc.killed, tt.killed)
 			}
+			if proc.waited != tt.waited {
+				t.Fatalf("waited=%v, want %v", proc.waited, tt.waited)
+			}
 		})
+	}
+}
+
+func TestListenUDPPacketUsesDualStackWildcard(t *testing.T) {
+	pc, err := listenUDPPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = pc.Close() }()
+	addr, ok := pc.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("local addr = %T, want *net.UDPAddr", pc.LocalAddr())
+	}
+	if !addr.IP.IsUnspecified() {
+		t.Fatalf("listen IP = %v, want unspecified wildcard", addr.IP)
 	}
 }
 
@@ -170,8 +196,11 @@ func TestRemoteDialerProbeFailureCleansUpWithoutStdioFallback(t *testing.T) {
 	if !closed {
 		t.Fatal("packet conn not closed after probe failure")
 	}
-	if !proc.killed {
-		t.Fatal("bootstrap process not killed after probe failure")
+	if proc.killed {
+		t.Fatal("bootstrap process killed after it was already waited")
+	}
+	if !proc.waited {
+		t.Fatal("bootstrap process not waited after probe failure")
 	}
 }
 
