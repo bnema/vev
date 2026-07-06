@@ -110,11 +110,20 @@ func composeBottomRightText(scriptText, copyFeedback string) string {
 }
 
 func drawRightPlainText(row []renderer.Cell, text string, reservedLeft int, style renderer.Style) {
-	if text == "" || len([]rune(text))+1+reservedLeft > len(row) {
+	textWidth := statusTextWidth(text)
+	if text == "" || textWidth+1+reservedLeft > len(row) {
 		return
 	}
-	x := len(row) - len([]rune(text)) - 1
+	x := len(row) - textWidth - 1
 	writeStatusText(row, &x, " "+text, style)
+}
+
+func statusTextWidth(text string) int {
+	width := 0
+	for _, r := range text {
+		width += renderer.RuneWidth(r)
+	}
+	return width
 }
 
 func clearStatusRow(row []renderer.Cell) {
@@ -303,10 +312,18 @@ func writeBell(row []renderer.Cell, x *int, frame int) {
 
 func writeStatusText(row []renderer.Cell, x *int, text string, style renderer.Style) {
 	for _, r := range text {
-		if *x >= len(row) {
+		width := renderer.RuneWidth(r)
+		if width == 0 {
+			continue
+		}
+		if *x >= len(row) || *x+width > len(row) {
 			return
 		}
 		row[*x] = renderer.Cell{Rune: r, Style: style}
 		(*x)++
+		if width == 2 {
+			row[*x] = renderer.Cell{Style: style, Continuation: true}
+			(*x)++
+		}
 	}
 }

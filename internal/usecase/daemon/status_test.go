@@ -416,6 +416,16 @@ func TestTopBarRightAnchorHidesOnOverlap(t *testing.T) {
 	require.Equal(t, " 1  2     ", rowText(row))
 }
 
+func TestTopBarRightAnchorUsesDisplayWidth(t *testing.T) {
+	row := make([]renderer.Cell, 12)
+	status := statusSnapshot{tabs: []statusTab{{name: "1", active: true}}}
+
+	drawTopBarSnapshot(row, status, 0, "界a", resolveThemeStyles(nil))
+
+	require.Equal(t, " 1       界 a", rowText(row))
+	require.True(t, row[10].Continuation)
+}
+
 func TestStatusCopyFeedbackRendersOnlyWhenFullyFits(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	_, sess, _, _ := newManualSessionWithPTYs(t, p)

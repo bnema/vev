@@ -106,6 +106,20 @@ func TestParse(t *testing.T) {
 			},
 		},
 		{
+			name:  "bar settings quoted commands unquote",
+			input: "bar.top-right = \"date +%H:%M\"\nbar.bottom-right = \"\"\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Bar: domain.BarConfig{
+					TopRight:    "date +%H:%M",
+					BottomRight: "",
+					Interval:    5 * time.Second,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+		},
+		{
 			name:  "bar settings empty commands disable anchors",
 			input: "bar.top-right =\nbar.bottom-right =\nbar.interval = 5s\n",
 			want: domain.Config{

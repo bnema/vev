@@ -261,6 +261,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 			runner:      barScriptRunner{baseEnv: os.Environ()},
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
 			lastRefresh: make(map[domain.SessionID]time.Time),
+			lastContext: make(map[domain.SessionID]barScriptContext),
 			running:     make(map[domain.SessionID]bool),
 		},
 	}

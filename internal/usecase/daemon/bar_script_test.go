@@ -19,6 +19,8 @@ func TestBarScriptSanitizeOutput(t *testing.T) {
 		{name: "first line only", raw: "one\ntwo\n", limit: barScriptOutputLimit, want: "one"},
 		{name: "ansi stripped", raw: "\x1b[31mred\x1b[0m", limit: barScriptOutputLimit, want: "red"},
 		{name: "controls stripped", raw: "a\x00b\x07c", limit: barScriptOutputLimit, want: "abc"},
+		{name: "osc stripped", raw: "a\x1b]0;bad\ab", limit: barScriptOutputLimit, want: "ab"},
+		{name: "c1 controls stripped", raw: "a\u009b31mb\u009d0;bad\ac", limit: barScriptOutputLimit, want: "abc"},
 		{name: "utf8 and nerd font preserved", raw: "󰍛 14:32 ↑3", limit: barScriptOutputLimit, want: "󰍛 14:32 ↑3"},
 		{name: "display capped", raw: strings.Repeat("a", barScriptDisplayLimit+10), limit: barScriptOutputLimit, want: strings.Repeat("a", barScriptDisplayLimit)},
 		{name: "capture capped before first line", raw: strings.Repeat("a", 8) + "\nignored", limit: 4, want: "aaaa"},

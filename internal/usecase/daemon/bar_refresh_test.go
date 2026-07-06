@@ -69,6 +69,11 @@ func TestBarScriptContextUsesActivePaneSessionAndClientCols(t *testing.T) {
 	sess.tabs[1].size = domain.Size{Cols: 132, Rows: 38}
 	active := sess.tabs[1].focusedPane()
 	active.stableID = "pane-active"
+	active.pty = newScriptPTY(nil)
+	d.procCwd = func(pid int) (string, error) {
+		require.Equal(t, 4242, pid)
+		return "/pane-repo", nil
+	}
 
 	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(0, 0), true))
 	waitBarRefreshIdle(t, d)
@@ -77,7 +82,7 @@ func TestBarScriptContextUsesActivePaneSessionAndClientCols(t *testing.T) {
 		require.Equal(t, "work", call.Session)
 		require.Equal(t, "tab-active", call.Tab)
 		require.Equal(t, "pane-active", call.Pane)
-		require.Equal(t, "/repo", call.PaneCWD)
+		require.Equal(t, "/pane-repo", call.PaneCWD)
 		require.Equal(t, 132, call.Cols)
 	}
 	require.Equal(t, "top-right", r.calls[0].Anchor)
@@ -91,6 +96,21 @@ func TestBarScriptRefreshSkipsWithoutAttachedClient(t *testing.T) {
 
 	require.False(t, d.refreshBarScriptsIfDue(sess, time.Unix(0, 0), true))
 	require.Empty(t, r.calls)
+}
+
+func TestBarScriptRefreshForcesWhenContextChanges(t *testing.T) {
+	r := &fakeBarRunner{outs: []string{"top1", "bottom1", "top2", "bottom2"}}
+	d := newBarRefreshTestDaemon(r, 5*time.Second)
+	sess := newBarRefreshTestSession()
+	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+
+	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(0, 0), false))
+	waitBarRefreshIdle(t, d)
+	sess.cwd = "/other"
+	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(1, 0), false))
+	waitBarRefreshIdle(t, d)
+	require.Len(t, r.calls, 4)
+	require.Equal(t, "/other", r.calls[2].PaneCWD)
 }
 
 func TestBarScriptRefreshIsPerSession(t *testing.T) {
@@ -124,6 +144,7 @@ func newBarRefreshTestDaemon(r *fakeBarRunner, interval time.Duration) *Daemon {
 		runner:      r,
 		outputs:     make(map[domain.SessionID]barScriptOutputs),
 		lastRefresh: make(map[domain.SessionID]time.Time),
+		lastContext: make(map[domain.SessionID]barScriptContext),
 		running:     make(map[domain.SessionID]bool),
 	}}
 	return d

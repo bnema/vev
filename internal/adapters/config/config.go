@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,9 +65,9 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 			}
 			cfg.Theme = mode
 		case key == "bar.top-right":
-			cfg.Bar.TopRight = value
+			cfg.Bar.TopRight = parseBarCommand(value)
 		case key == "bar.bottom-right":
-			cfg.Bar.BottomRight = value
+			cfg.Bar.BottomRight = parseBarCommand(value)
 		case key == "bar.interval":
 			interval, err := time.ParseDuration(value)
 			if err != nil {
@@ -214,6 +215,16 @@ func parseProcessList(value string, lineNo int) ([]string, []domain.Warning) {
 		out = append(out, item)
 	}
 	return out, warnings
+}
+
+func parseBarCommand(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			return unquoted
+		}
+	}
+	return value
 }
 
 func parseTheme(value string) (domain.ThemeMode, bool) {

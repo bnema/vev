@@ -306,6 +306,10 @@ func waitGroupDone(wg *sync.WaitGroup) <-chan struct{} {
 func rowText(row []renderer.Cell) string {
 	runes := make([]rune, len(row))
 	for i, c := range row {
+		if c.Continuation {
+			runes[i] = ' '
+			continue
+		}
 		runes[i] = c.Rune
 	}
 	return string(runes)

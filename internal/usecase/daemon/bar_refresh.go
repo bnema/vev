@@ -31,6 +31,7 @@ type barScriptState struct {
 	runner      barScriptExecutor
 	outputs     map[domain.SessionID]barScriptOutputs
 	lastRefresh map[domain.SessionID]time.Time
+	lastContext map[domain.SessionID]barScriptContext
 	running     map[domain.SessionID]bool
 }
 
@@ -54,6 +55,9 @@ func (s *barScriptState) initLocked() {
 	}
 	if s.lastRefresh == nil {
 		s.lastRefresh = make(map[domain.SessionID]time.Time)
+	}
+	if s.lastContext == nil {
+		s.lastContext = make(map[domain.SessionID]barScriptContext)
 	}
 	if s.running == nil {
 		s.running = make(map[domain.SessionID]bool)
@@ -100,10 +104,19 @@ func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScrip
 	tb.mu.Lock()
 	ctx.Tab = tb.stableID
 	ctx.Cols = tb.size.Cols
+	pid := 0
 	if p := tb.focusedPane(); p != nil {
 		ctx.Pane = p.stableID
+		if d != nil && d.procCwd != nil && p.pty != nil {
+			pid = p.pty.Pid()
+		}
 	}
 	tb.mu.Unlock()
+	if pid != 0 && d != nil && d.procCwd != nil {
+		if cwd, err := d.procCwd(pid); err == nil && cwd != "" {
+			ctx.PaneCWD = cwd
+		}
+	}
 	return ctx, true
 }
 
@@ -141,6 +154,7 @@ func (d *Daemon) clearBarScriptsForSession(id domain.SessionID) {
 	defer d.barScripts.mu.Unlock()
 	delete(d.barScripts.outputs, id)
 	delete(d.barScripts.lastRefresh, id)
+	delete(d.barScripts.lastContext, id)
 	delete(d.barScripts.running, id)
 }
 
@@ -154,12 +168,16 @@ func (d *Daemon) refreshBarScriptsIfDue(sess *session, now time.Time, force bool
 	}
 	d.barScripts.mu.Lock()
 	d.barScripts.initLocked()
+	if d.barScripts.lastContext[sess.id] != baseCtx {
+		force = true
+	}
 	if d.barScripts.running[sess.id] || (!force && !d.barScripts.lastRefresh[sess.id].IsZero() && now.Sub(d.barScripts.lastRefresh[sess.id]) < d.barScripts.cfg.interval) {
 		d.barScripts.mu.Unlock()
 		return false
 	}
 	d.barScripts.running[sess.id] = true
 	d.barScripts.lastRefresh[sess.id] = now
+	d.barScripts.lastContext[sess.id] = baseCtx
 	cfg := d.barScripts.cfg
 	runner := d.barScripts.runner
 	d.barScripts.mu.Unlock()

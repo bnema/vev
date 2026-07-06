@@ -72,9 +72,8 @@ func (r barScriptRunner) run(ctx context.Context, command string, scriptCtx barS
 	cmd.Env = scriptCtx.env(r.baseEnv)
 	var stdout boundedBuffer
 	stdout.limit = barScriptOutputLimit
-	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stderr = io.Discard
 
 	err := cmd.Run()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -128,21 +127,17 @@ func stripANSIAndControls(s string) string {
 	var out strings.Builder
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if r == '\x1b' {
-			i += size
-			if i < len(s) && s[i] == '[' {
-				i++
-				for i < len(s) {
-					c := s[i]
-					i++
-					if c >= 0x40 && c <= 0x7e {
-						break
-					}
-				}
-			}
+		switch {
+		case r == '\x1b':
+			i = skipEscapeSequence(s, i+size)
 			continue
-		}
-		if r < 0x20 || r == 0x7f {
+		case r == 0x9b:
+			i = skipCSI(s, i+size)
+			continue
+		case r == 0x90 || r == 0x98 || r == 0x9d || r == 0x9e || r == 0x9f:
+			i = skipStringControl(s, i+size)
+			continue
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
 			i += size
 			continue
 		}
@@ -150,6 +145,45 @@ func stripANSIAndControls(s string) string {
 		i += size
 	}
 	return out.String()
+}
+
+func skipEscapeSequence(s string, i int) int {
+	if i >= len(s) {
+		return i
+	}
+	switch s[i] {
+	case '[':
+		return skipCSI(s, i+1)
+	case ']', 'P', '^', '_', 'X':
+		return skipStringControl(s, i+1)
+	default:
+		return i + 1
+	}
+}
+
+func skipCSI(s string, i int) int {
+	for i < len(s) {
+		c := s[i]
+		i++
+		if c >= 0x40 && c <= 0x7e {
+			break
+		}
+	}
+	return i
+}
+
+func skipStringControl(s string, i int) int {
+	for i < len(s) {
+		if s[i] == '\a' {
+			return i + 1
+		}
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '\\' {
+			return i + 2
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+	}
+	return i
 }
 
 func trimUTF8Bytes(s string, limit int) string {
