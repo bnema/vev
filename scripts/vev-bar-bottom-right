@@ -1,0 +1,50 @@
+#!/bin/sh
+
+# Print compact git state for vev's bottom-right bar anchor.
+# Always inspect VEV_PANE_CWD, never the daemon's current working directory.
+
+if [ -z "${VEV_PANE_CWD:-}" ]; then
+	printf '\n'
+	exit 0
+fi
+
+if ! git -C "$VEV_PANE_CWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+	printf '\n'
+	exit 0
+fi
+
+name=$(git -C "$VEV_PANE_CWD" branch --show-current 2>/dev/null || true)
+if [ -z "$name" ]; then
+	name=$(git -C "$VEV_PANE_CWD" rev-parse --short HEAD 2>/dev/null || true)
+fi
+if [ -z "$name" ]; then
+	printf '\n'
+	exit 0
+fi
+
+line=$name
+
+counts=$(git -C "$VEV_PANE_CWD" rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null || true)
+if [ -n "$counts" ]; then
+	set -- $counts
+	behind=${1:-0}
+	ahead=${2:-0}
+	case $ahead in
+		''|*[!0-9]*) ahead=0 ;;
+	esac
+	case $behind in
+		''|*[!0-9]*) behind=0 ;;
+	esac
+	if [ "$ahead" -gt 0 ] 2>/dev/null; then
+		line="$line ↑$ahead"
+	fi
+	if [ "$behind" -gt 0 ] 2>/dev/null; then
+		line="$line ↓$behind"
+	fi
+fi
+
+if [ -n "$(git -C "$VEV_PANE_CWD" status --porcelain 2>/dev/null || true)" ]; then
+	line="$line *"
+fi
+
+printf '%s\n' "$line"

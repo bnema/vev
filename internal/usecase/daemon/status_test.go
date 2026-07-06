@@ -398,6 +398,24 @@ func TestStatusMarksEphemeralSession(t *testing.T) {
 	require.Equal(t, " 0*         ", rowText(frame.Row(3)))
 }
 
+func TestTopBarRightAnchorRendersFlushRightWhenFullyFits(t *testing.T) {
+	row := make([]renderer.Cell, 20)
+	status := statusSnapshot{tabs: []statusTab{{name: "1", active: true}}}
+
+	drawTopBarSnapshot(row, status, 0, "14:32", resolveThemeStyles(nil))
+
+	require.Equal(t, " 1             14:32", rowText(row))
+}
+
+func TestTopBarRightAnchorHidesOnOverlap(t *testing.T) {
+	row := make([]renderer.Cell, 10)
+	status := statusSnapshot{tabs: []statusTab{{name: "1"}, {name: "2"}}}
+
+	drawTopBarSnapshot(row, status, 0, "12345", resolveThemeStyles(nil))
+
+	require.Equal(t, " 1  2     ", rowText(row))
+}
+
 func TestStatusCopyFeedbackRendersOnlyWhenFullyFits(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	_, sess, _, _ := newManualSessionWithPTYs(t, p)
@@ -642,6 +660,50 @@ func TestStatusBarMRUWidthAwareBudget(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStatusBarBottomRightScriptTextAndCopyFeedback(t *testing.T) {
+	state := barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", copyFeedback: "copied", mru: []mruSession{{name: "a"}}}
+	row := make([]renderer.Cell, 32)
+
+	drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+	text := rowText(row)
+	require.Contains(t, text, " a")
+	require.True(t, strings.HasSuffix(text, " main ↑3 * copied"), text)
+}
+
+func TestStatusBarBottomRightHidesOnOverlap(t *testing.T) {
+	state := barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", copyFeedback: "copied", mru: []mruSession{{name: "fresh"}}}
+	row := make([]renderer.Cell, 16)
+
+	drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+	text := rowText(row)
+	require.Equal(t, " cur            ", text)
+	require.NotContains(t, text, "main")
+	require.NotContains(t, text, "copied")
+}
+
+func TestStatusBarEmptyBottomRightScriptKeepsCopyFeedbackBehavior(t *testing.T) {
+	state := barState{status: statusSnapshot{session: "cur"}, bottomRight: "", copyFeedback: "copied", mru: []mruSession{{name: "fresh"}}}
+	row := make([]renderer.Cell, 12)
+
+	drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+	require.Equal(t, " cur  copied", rowText(row))
+}
+
+func TestStatusBarMRUWholeEntryFittingWithBottomRightScript(t *testing.T) {
+	state := barState{status: statusSnapshot{session: "cur"}, bottomRight: "git", mru: []mruSession{{name: "fresh"}, {name: "middle"}, {name: "old"}}}
+	row := make([]renderer.Cell, 24)
+
+	drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+	text := rowText(row)
+	require.Contains(t, text, " fresh")
+	require.NotContains(t, text, "middle")
+	require.True(t, strings.HasSuffix(text, " git"), text)
 }
 
 func TestStatusBarCopyFeedbackFullyRenderedAlongsideMRU(t *testing.T) {

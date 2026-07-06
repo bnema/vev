@@ -252,6 +252,7 @@ func (d *Daemon) render(sess *session, tb *tab, p *pane) {
 		p.mu.Unlock()
 		return
 	}
+	d.refreshBarScriptsIfDue(sess, d.clock.Now(), false)
 	d.paint(sess, ac, false)
 }
 
@@ -502,7 +503,7 @@ func composeClientFrameWithLayout(bars barState, tb *tab, full bool, layoutSnap 
 	}
 	frame := renderer.NewFrame(width, screenRows+2)
 	topBar := frame.Row(0)
-	drawTopBarSnapshot(topBar, bars.status, bars.attentionFrame, styles)
+	drawTopBarSnapshot(topBar, bars.status, bars.attentionFrame, bars.topRight, styles)
 	contentFrame, contentDamage := composeTabFrameWithLayout(tb, domain.Rect{Width: width, Height: screenRows}, bars.theme, layoutSnap)
 	for y := range screenRows {
 		copy(frame.Row(y+1), contentFrame.Row(y))

@@ -15,7 +15,10 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-const pollInterval = 2 * time.Second
+const (
+	pollInterval       = 2 * time.Second
+	minimumBarInterval = time.Second
+)
 
 var processNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
 
@@ -60,6 +63,21 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				continue
 			}
 			cfg.Theme = mode
+		case key == "bar.top-right":
+			cfg.Bar.TopRight = value
+		case key == "bar.bottom-right":
+			cfg.Bar.BottomRight = value
+		case key == "bar.interval":
+			interval, err := time.ParseDuration(value)
+			if err != nil {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid bar.interval %q", value)})
+				continue
+			}
+			if interval < minimumBarInterval {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: "bar.interval below minimum \"1s\""})
+				interval = minimumBarInterval
+			}
+			cfg.Bar.Interval = interval
 		case strings.HasPrefix(key, "code."):
 			codeKey := strings.TrimPrefix(key, "code.")
 			if codeKey == "" {

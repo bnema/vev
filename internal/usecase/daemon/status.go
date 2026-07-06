@@ -58,7 +58,7 @@ func pulseStyle(frame int) (renderer.Style, bool) {
 	return style, true
 }
 
-func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, styles themeStyles) {
+func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, topRight string, styles themeStyles) {
 	clearStatusRow(row)
 	x := 0
 	for _, w := range status.tabs {
@@ -73,6 +73,7 @@ func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, s
 		}
 		writeStatusText(row, &x, " ", style)
 	}
+	drawRightPlainText(row, topRight, x, styles.statusBar)
 }
 
 func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles) {
@@ -80,7 +81,8 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles)
 	x := 0
 	writeStatusText(row, &x, " "+state.status.session+" ", styles.accent)
 
-	fittedMRU := fitMRU(state.mru, len(row), x, state.copyFeedback)
+	rightText := composeBottomRightText(state.bottomRight, state.copyFeedback)
+	fittedMRU := fitMRU(state.mru, len(row), x, rightText)
 	for i, sess := range fittedMRU {
 		style := mruStyle(styles.statusBar, state.theme, i, len(fittedMRU))
 		name := sess.name
@@ -94,7 +96,17 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles)
 		}
 		writeStatusText(row, &x, " ", style)
 	}
-	drawRightPlainText(row, state.copyFeedback, x, styles.statusBar)
+	drawRightPlainText(row, rightText, x, styles.statusBar)
+}
+
+func composeBottomRightText(scriptText, copyFeedback string) string {
+	if scriptText == "" {
+		return copyFeedback
+	}
+	if copyFeedback == "" {
+		return scriptText
+	}
+	return scriptText + " " + copyFeedback
 }
 
 func drawRightPlainText(row []renderer.Cell, text string, reservedLeft int, style renderer.Style) {
@@ -113,6 +125,8 @@ func clearStatusRow(row []renderer.Cell) {
 
 type barState struct {
 	status         statusSnapshot
+	topRight       string
+	bottomRight    string
 	copyFeedback   string
 	mru            []mruSession
 	attentionFrame int
@@ -164,6 +178,9 @@ func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 	}
 	if cur != nil {
 		state.status = cur.statusSegments()
+	}
+	if d != nil {
+		state.topRight, state.bottomRight = d.barScriptSnapshot(cur)
 	}
 	if d == nil {
 		return state

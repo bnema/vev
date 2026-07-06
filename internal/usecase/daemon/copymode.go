@@ -441,7 +441,7 @@ func composeCopyClientFrame(mode *scopy.Mode, tb *tab, bars barState) (renderer.
 		width, screenRows = tb.size.Cols, tb.size.Rows
 	}
 	frame := renderer.NewFrame(width, screenRows+2)
-	drawTopBarSnapshot(frame.Row(0), bars.status, bars.attentionFrame, styles)
+	drawTopBarSnapshot(frame.Row(0), bars.status, bars.attentionFrame, bars.topRight, styles)
 	base, _ := composeTabFrame(tb, domain.Rect{Width: width, Height: screenRows}, bars.theme)
 	for y := range screenRows {
 		copy(frame.Row(y+1), base.Row(y))

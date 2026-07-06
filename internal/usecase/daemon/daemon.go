@@ -116,6 +116,7 @@ type Daemon struct {
 	codeOverrides           atomic.Pointer[map[string]string]
 	restoreProcessAllowlist atomic.Pointer[map[string]struct{}]
 	themeMode               atomic.Uint32
+	barScripts              *barScriptState
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
 	tempDir string
@@ -255,6 +256,13 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		done:        make(chan struct{}),
 		restoreDone: make(chan struct{}),
 		animWake:    make(chan struct{}, 1),
+		barScripts: &barScriptState{
+			cfg:         barConfigFromDomain(domain.Defaults().Bar),
+			runner:      barScriptRunner{baseEnv: os.Environ()},
+			outputs:     make(map[domain.SessionID]barScriptOutputs),
+			lastRefresh: make(map[domain.SessionID]time.Time),
+			running:     make(map[domain.SessionID]bool),
+		},
 	}
 	for _, o := range opts {
 		o(d)
@@ -302,6 +310,9 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 
 	d.sessWg.Go(func() {
 		d.attentionAnimator(d.serveCtx)
+	})
+	d.sessWg.Go(func() {
+		d.barScriptPoller(d.serveCtx)
 	})
 	if d.persistEnabled && d.procCwd != nil {
 		d.sessWg.Go(func() {
