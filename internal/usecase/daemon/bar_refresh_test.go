@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -98,6 +101,36 @@ func TestBarScriptRefreshSkipsWithoutAttachedClient(t *testing.T) {
 	require.Empty(t, r.calls)
 }
 
+func TestBarScriptForcedRefreshRespectsMinimumInterval(t *testing.T) {
+	r := &fakeBarRunner{outs: []string{"top1", "bottom1", "top2", "bottom2"}}
+	d := newBarRefreshTestDaemon(r, 5*time.Second)
+	sess := newBarRefreshTestSession()
+	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+
+	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(10, 0), true))
+	waitBarRefreshIdle(t, d)
+	require.False(t, d.refreshBarScriptsIfDue(sess, time.Unix(10, int64(500*time.Millisecond)), true))
+	require.Len(t, r.calls, 2)
+}
+
+func TestBarScriptContextChangeDebouncesUntilMinimumInterval(t *testing.T) {
+	r := &fakeBarRunner{outs: []string{"top1", "bottom1", "top2", "bottom2"}}
+	d := newBarRefreshTestDaemon(r, 5*time.Second)
+	sess := newBarRefreshTestSession()
+	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+
+	require.True(t, d.refreshBarScriptsIfDue(sess, time.Now(), false))
+	waitBarRefreshIdle(t, d)
+	sess.cwd = "/other"
+	require.False(t, d.refreshBarScriptsIfDue(sess, time.Now().Add(100*time.Millisecond), false))
+	require.Eventually(t, func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return len(r.calls) == 4
+	}, 1500*time.Millisecond, 10*time.Millisecond)
+	require.Equal(t, "/other", r.calls[2].PaneCWD)
+}
+
 func TestBarScriptRefreshForcesWhenContextChanges(t *testing.T) {
 	r := &fakeBarRunner{outs: []string{"top1", "bottom1", "top2", "bottom2"}}
 	d := newBarRefreshTestDaemon(r, 5*time.Second)
@@ -111,6 +144,40 @@ func TestBarScriptRefreshForcesWhenContextChanges(t *testing.T) {
 	waitBarRefreshIdle(t, d)
 	require.Len(t, r.calls, 4)
 	require.Equal(t, "/other", r.calls[2].PaneCWD)
+}
+
+func TestApplyConfigPreservesBarOutputsWhenBarConfigUnchanged(t *testing.T) {
+	r := &fakeBarRunner{}
+	d := newBarRefreshTestDaemon(r, time.Second)
+	sess := newBarRefreshTestSession()
+	d.barScripts.outputs[sess.id] = barScriptOutputs{topRight: "top-good", bottomRight: "bottom-good"}
+
+	d.ApplyConfig(domain.Config{Bar: domain.BarConfig{TopRight: "top", BottomRight: "bottom", Interval: time.Second}})
+
+	state := d.barStateFor(sess, "")
+	require.Equal(t, "top-good", state.topRight)
+	require.Equal(t, "bottom-good", state.bottomRight)
+}
+
+func TestBarScriptFailureLogsAndRetainsLastGood(t *testing.T) {
+	var logs bytes.Buffer
+	r := &fakeBarRunner{outs: []string{"top-good", "bottom-good"}}
+	d := newBarRefreshTestDaemon(r, time.Second)
+	d.log = slog.New(slog.NewTextHandler(&logs, nil))
+	sess := newBarRefreshTestSession()
+	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+
+	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(10, 0), true))
+	waitBarRefreshIdle(t, d)
+	r.errs = []error{nil, nil, errors.New("boom"), errors.New("bang")}
+	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(11, 0), true))
+	waitBarRefreshIdle(t, d)
+
+	state := d.barStateFor(sess, "")
+	require.Equal(t, "top-good", state.topRight)
+	require.Equal(t, "bottom-good", state.bottomRight)
+	require.True(t, strings.Contains(logs.String(), "bar script failed; keeping last good output"), logs.String())
+	require.True(t, strings.Contains(logs.String(), "anchor=top-right"), logs.String())
 }
 
 func TestBarScriptRunDoesNotRestoreClearedSessionState(t *testing.T) {
@@ -178,6 +245,7 @@ func newBarRefreshTestDaemon(r *fakeBarRunner, interval time.Duration) *Daemon {
 		lastRefresh: make(map[domain.SessionID]time.Time),
 		lastContext: make(map[domain.SessionID]barScriptContext),
 		running:     make(map[domain.SessionID]bool),
+		pending:     make(map[domain.SessionID]bool),
 	}}
 	return d
 }

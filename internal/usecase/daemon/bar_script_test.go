@@ -20,6 +20,8 @@ func TestBarScriptSanitizeOutput(t *testing.T) {
 		{name: "ansi stripped", raw: "\x1b[31mred\x1b[0m", limit: barScriptOutputLimit, want: "red"},
 		{name: "controls stripped", raw: "a\x00b\x07c", limit: barScriptOutputLimit, want: "abc"},
 		{name: "osc stripped", raw: "a\x1b]0;bad\ab", limit: barScriptOutputLimit, want: "ab"},
+		{name: "charset escape stripped", raw: "a\x1b(Bb\x1b)0c", limit: barScriptOutputLimit, want: "abc"},
+		{name: "non csi escape stripped", raw: "a\x1b7b\x1b8c", limit: barScriptOutputLimit, want: "abc"},
 		{name: "c1 controls stripped", raw: "a\u009b31mb\u009d0;bad\ac", limit: barScriptOutputLimit, want: "abc"},
 		{name: "utf8 and nerd font preserved", raw: "󰍛 14:32 ↑3", limit: barScriptOutputLimit, want: "󰍛 14:32 ↑3"},
 		{name: "display capped", raw: strings.Repeat("a", barScriptDisplayLimit+10), limit: barScriptOutputLimit, want: strings.Repeat("a", barScriptDisplayLimit)},
@@ -97,6 +99,18 @@ func TestBarScriptRunner(t *testing.T) {
 	}
 	if got != "" {
 		t.Fatalf("timeout output = %q, want empty", got)
+	}
+}
+
+func TestBarScriptRunnerBackgroundChildStdoutTimeout(t *testing.T) {
+	runner := barScriptRunner{timeout: 50 * time.Millisecond, baseEnv: os.Environ()}
+	start := time.Now()
+	_, err := runner.run(context.Background(), "sleep 1 &", barScriptContext{})
+	if err == nil {
+		t.Fatalf("background child run err = nil, want timeout/wait error")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("background child run elapsed = %s, want <= 500ms", elapsed)
 	}
 }
 

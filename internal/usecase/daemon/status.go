@@ -231,7 +231,7 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 	// its " text" width plus a one-cell gap so drawRightPlainText always fits.
 	copyReserve := 1
 	if feedback != "" {
-		copyReserve = len([]rune(feedback)) + 2
+		copyReserve = statusTextWidth(feedback) + 2
 	}
 	physicalBudget := rowLen - leftUsed - copyReserve
 	if physicalBudget <= 0 || len(entries) == 0 {

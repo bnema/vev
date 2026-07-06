@@ -33,6 +33,7 @@ type barScriptState struct {
 	lastRefresh map[domain.SessionID]time.Time
 	lastContext map[domain.SessionID]barScriptContext
 	running     map[domain.SessionID]bool
+	pending     map[domain.SessionID]bool
 	version     uint64
 }
 
@@ -62,6 +63,9 @@ func (s *barScriptState) initLocked() {
 	}
 	if s.running == nil {
 		s.running = make(map[domain.SessionID]bool)
+	}
+	if s.pending == nil {
+		s.pending = make(map[domain.SessionID]bool)
 	}
 }
 
@@ -157,6 +161,7 @@ func (d *Daemon) clearBarScriptsForSession(id domain.SessionID) {
 	delete(d.barScripts.lastRefresh, id)
 	delete(d.barScripts.lastContext, id)
 	delete(d.barScripts.running, id)
+	delete(d.barScripts.pending, id)
 }
 
 func (d *Daemon) refreshBarScriptsIfDue(sess *session, now time.Time, force bool) bool {
@@ -172,7 +177,15 @@ func (d *Daemon) refreshBarScriptsIfDue(sess *session, now time.Time, force bool
 	if d.barScripts.lastContext[sess.id] != baseCtx {
 		force = true
 	}
-	if d.barScripts.running[sess.id] || (!force && !d.barScripts.lastRefresh[sess.id].IsZero() && now.Sub(d.barScripts.lastRefresh[sess.id]) < d.barScripts.cfg.interval) {
+	lastRefresh := d.barScripts.lastRefresh[sess.id]
+	if d.barScripts.running[sess.id] || (!lastRefresh.IsZero() && now.Sub(lastRefresh) < minBarScriptInterval) {
+		if force {
+			d.scheduleBarScriptRefreshLocked(sess, lastRefresh.Add(minBarScriptInterval).Sub(now))
+		}
+		d.barScripts.mu.Unlock()
+		return false
+	}
+	if !force && !lastRefresh.IsZero() && now.Sub(lastRefresh) < d.barScripts.cfg.interval {
 		d.barScripts.mu.Unlock()
 		return false
 	}
@@ -187,6 +200,45 @@ func (d *Daemon) refreshBarScriptsIfDue(sess *session, now time.Time, force bool
 	return true
 }
 
+func (d *Daemon) scheduleBarScriptRefreshLocked(sess *session, delay time.Duration) {
+	if d.barScripts.pending[sess.id] {
+		return
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	d.barScripts.pending[sess.id] = true
+	go func() {
+		ctx := sess.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if d.clock != nil {
+			timer := d.clock.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C():
+			}
+		} else {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+		}
+		d.barScripts.mu.Lock()
+		delete(d.barScripts.pending, sess.id)
+		d.barScripts.mu.Unlock()
+		now := time.Now()
+		if d.clock != nil {
+			now = d.clock.Now()
+		}
+		d.refreshBarScriptsIfDue(sess, now, true)
+	}()
+}
+
 func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barScriptConfig, base barScriptContext, version uint64) {
 	if runner == nil {
 		runner = barScriptRunner{baseEnv: d.baseEnv}
@@ -195,8 +247,8 @@ func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barS
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	top, topOK := runOneBarScript(ctx, runner, cfg.topRight, base, "top-right")
-	bottom, bottomOK := runOneBarScript(ctx, runner, cfg.bottomRight, base, "bottom-right")
+	top, topOK := d.runOneBarScript(ctx, runner, cfg.topRight, base, "top-right", sess.name)
+	bottom, bottomOK := d.runOneBarScript(ctx, runner, cfg.bottomRight, base, "bottom-right", sess.name)
 	d.barScripts.mu.Lock()
 	d.barScripts.initLocked()
 	if !d.barScripts.running[sess.id] || d.barScripts.version != version {
@@ -222,13 +274,19 @@ func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barS
 	}
 }
 
-func runOneBarScript(ctx context.Context, runner barScriptExecutor, command string, base barScriptContext, anchor string) (string, bool) {
+func (d *Daemon) runOneBarScript(ctx context.Context, runner barScriptExecutor, command string, base barScriptContext, anchor, sessionName string) (string, bool) {
 	if command == "" {
 		return "", true
 	}
 	base.Anchor = anchor
 	out, err := runner.run(ctx, command, base)
-	return out, err == nil
+	if err != nil {
+		if d.log != nil {
+			d.log.Warn("bar script failed; keeping last good output", "anchor", anchor, "session", sessionName, "err", err)
+		}
+		return "", false
+	}
+	return out, true
 }
 
 func (d *Daemon) pokeSessionRender(sess *session) {

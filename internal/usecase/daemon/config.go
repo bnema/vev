@@ -30,11 +30,16 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	d.themeMode.Store(uint32(cfg.Theme))
 	if d.barScripts != nil {
 		d.barScripts.mu.Lock()
-		d.barScripts.cfg = barConfigFromDomain(cfg.Bar)
-		d.barScripts.outputs = make(map[domain.SessionID]barScriptOutputs)
-		d.barScripts.lastRefresh = make(map[domain.SessionID]time.Time)
-		d.barScripts.lastContext = make(map[domain.SessionID]barScriptContext)
-		d.barScripts.version++
+		d.barScripts.initLocked()
+		barCfg := barConfigFromDomain(cfg.Bar)
+		if d.barScripts.cfg != barCfg {
+			d.barScripts.cfg = barCfg
+			d.barScripts.outputs = make(map[domain.SessionID]barScriptOutputs)
+			d.barScripts.lastRefresh = make(map[domain.SessionID]time.Time)
+			d.barScripts.lastContext = make(map[domain.SessionID]barScriptContext)
+			d.barScripts.pending = make(map[domain.SessionID]bool)
+			d.barScripts.version++
+		}
 		d.barScripts.mu.Unlock()
 	}
 	d.reapplyThemeAllSessions()

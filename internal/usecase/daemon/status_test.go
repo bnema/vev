@@ -716,6 +716,19 @@ func TestStatusBarMRUWholeEntryFittingWithBottomRightScript(t *testing.T) {
 	require.True(t, strings.HasSuffix(text, " git"), text)
 }
 
+func TestStatusBarMRUFittingReservesWideRightAnchorWidth(t *testing.T) {
+	state := barState{status: statusSnapshot{session: "cur"}, bottomRight: "界界", mru: []mruSession{{name: "a"}}}
+	row := make([]renderer.Cell, 12)
+
+	drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+	text := rowText(row)
+	require.NotContains(t, text, " a ")
+	require.True(t, strings.HasSuffix(text, " 界 界 "), text)
+	require.True(t, row[9].Continuation)
+	require.True(t, row[11].Continuation)
+}
+
 func TestStatusBarCopyFeedbackFullyRenderedAlongsideMRU(t *testing.T) {
 	state := barState{status: statusSnapshot{session: "cur"}, copyFeedback: "copied", mru: []mruSession{{name: "a"}, {name: "b"}, {name: "c"}}}
 	row := make([]renderer.Cell, 20)

@@ -26,9 +26,8 @@ line=$name
 
 counts=$(git -C "$VEV_PANE_CWD" rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null || true)
 if [ -n "$counts" ]; then
-	set -- $counts
-	behind=${1:-0}
-	ahead=${2:-0}
+	behind=$(printf '%s\n' "$counts" | awk '{ print $1 }')
+	ahead=$(printf '%s\n' "$counts" | awk '{ print $2 }')
 	case $ahead in
 		''|*[!0-9]*) ahead=0 ;;
 	esac

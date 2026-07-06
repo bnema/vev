@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -70,6 +71,14 @@ func (r barScriptRunner) run(ctx context.Context, command string, scriptCtx barS
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Env = scriptCtx.env(r.baseEnv)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = timeout
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	var stdout boundedBuffer
 	stdout.limit = barScriptOutputLimit
 	cmd.Stdout = &stdout
@@ -156,9 +165,14 @@ func skipEscapeSequence(s string, i int) int {
 		return skipCSI(s, i+1)
 	case ']', 'P', '^', '_', 'X':
 		return skipStringControl(s, i+1)
-	default:
+	}
+	for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+		i++
+	}
+	if i < len(s) && s[i] >= 0x30 && s[i] <= 0x7e {
 		return i + 1
 	}
+	return i
 }
 
 func skipCSI(s string, i int) int {
