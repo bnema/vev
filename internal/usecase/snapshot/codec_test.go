@@ -26,6 +26,37 @@ func TestMarshalMinimalGolden(t *testing.T) {
 	}
 }
 
+func TestRoundTripNilTreeAndRootDoNotMaterializeLeaf(t *testing.T) {
+	cases := []struct {
+		name string
+		tab  Tab
+	}{
+		{name: "nil tree", tab: Tab{Tree: nil}},
+		{name: "nil root", tab: Tab{Tree: &layout.Tree{Root: nil}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := Marshal(Session{Name: "s", Tabs: []Tab{tc.tab}})
+			if err != nil {
+				t.Fatalf("Marshal() error = %v", err)
+			}
+			got, err := Unmarshal(b)
+			if err != nil {
+				t.Fatalf("Unmarshal() error = %v", err)
+			}
+			if len(got.Tabs) != 1 {
+				t.Fatalf("tabs len = %d, want 1", len(got.Tabs))
+			}
+			if got.Tabs[0].Tree == nil {
+				t.Fatalf("Tree = nil, want tree with nil root")
+			}
+			if got.Tabs[0].Tree.Root != nil {
+				t.Fatalf("Root = %#v, want nil", got.Tabs[0].Tree.Root)
+			}
+		})
+	}
+}
+
 func TestRoundTripSessions(t *testing.T) {
 	boldRGB := renderer.DefaultStyle()
 	boldRGB.Bold = true
@@ -217,7 +248,7 @@ func equalSession(a, b Session) bool {
 }
 
 func equalTab(a, b Tab) bool {
-	if a.Cols != b.Cols || a.Rows != b.Rows || a.NextPaneID != b.NextPaneID || a.Focus != b.Focus || len(a.Panes) != len(b.Panes) || !equalNode(a.Tree.Root, b.Tree.Root) {
+	if a.Cols != b.Cols || a.Rows != b.Rows || a.NextPaneID != b.NextPaneID || a.Focus != b.Focus || len(a.Panes) != len(b.Panes) || !equalNode(treeRoot(a.Tree), treeRoot(b.Tree)) {
 		return false
 	}
 	for i := range a.Panes {
@@ -226,6 +257,13 @@ func equalTab(a, b Tab) bool {
 		}
 	}
 	return true
+}
+
+func treeRoot(t *layout.Tree) *layout.Node {
+	if t == nil {
+		return nil
+	}
+	return t.Root
 }
 
 func equalNode(a, b *layout.Node) bool {

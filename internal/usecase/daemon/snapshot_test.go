@@ -110,6 +110,7 @@ func TestPTYReaderSynchronizedUpdateFlushMarksSnapshotDirty(t *testing.T) {
 	defer cancel()
 	tb := newTestTabWithContext(p, sctx, cancel)
 	sess := &session{id: "sync", name: "sync", tabs: []*tab{tb}, ctx: sctx, cancel: cancel}
+	sess.snapEligible.Store(true)
 	d.sessions[sess.id] = sess
 	d.sessWg.Add(1)
 	d.ptyReader(sess, tb, tb.focusedPane())
@@ -173,9 +174,14 @@ func TestKillSessionPurgeReturnsSnapshotDeleteError(t *testing.T) {
 	d.sessions[sess.id] = sess
 
 	store.EXPECT().Delete("work").Return(errors.New("delete failed")).Once()
+	mockPTY, ok := sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+	require.True(t, ok)
+	mockPTY.EXPECT().Close().Return(nil).Once()
+
 	err := d.killSession(sess, 0, true)
 	require.ErrorContains(t, err, "delete failed")
-	require.Contains(t, d.sessions, sess.id)
+	require.NotContains(t, d.sessions, sess.id)
+	require.NotContains(t, d.stopped, "work")
 }
 
 func TestRefreshSessionCwdMarksSnapshotDirty(t *testing.T) {
@@ -300,7 +306,7 @@ func newSnapshotTestSession(t *testing.T, name string, ephemeral bool, cwd strin
 	p := tb.panes["pane-1"]
 	p.screen.Write([]byte("hello"))
 	p.scrollback.Append([]renderer.Cell{{Rune: 'h'}, {Rune: 'i'}})
-	return &session{
+	sess := &session{
 		id:        domain.SessionID("sess-" + name),
 		name:      name,
 		ephemeral: ephemeral,
@@ -311,6 +317,8 @@ func newSnapshotTestSession(t *testing.T, name string, ephemeral bool, cwd strin
 		cwd:       cwd,
 		createdAt: 42,
 	}
+	sess.snapEligible.Store(!ephemeral && name != "")
+	return sess
 }
 
 type manualSnapshotClock struct {

@@ -547,7 +547,11 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 		sz = defaultSize
 	}
 	if d.snapsEnabled && (h.Intent == ports.IntentResume || h.Intent == ports.IntentAttach || h.Intent == ports.IntentNew) {
-		<-d.restoreDone
+		select {
+		case <-d.restoreDone:
+		case <-d.serveCtx.Done():
+			return nil, nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+		}
 	}
 
 	d.mu.Lock()

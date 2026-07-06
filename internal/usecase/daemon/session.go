@@ -59,6 +59,7 @@ type session struct {
 	createdAt              int64
 	mruAt                  atomic.Uint64
 	snapDirty              atomic.Bool
+	snapEligible           atomic.Bool
 	// clipFiles records clipboard-image-transfer temp file paths (see
 	// clipboard.go) written for this session, removed best-effort in
 	// killSession.
@@ -153,6 +154,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	if lastUsedSeq > 0 {
 		sess.mruAt.Store(lastUsedSeq)
 	}
+	sess.snapEligible.Store(!ephemeral && name != "")
 	if !ephemeral {
 		if err := d.persist.Save(persist.Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq}); err != nil {
 			_ = pty.Close()
@@ -433,6 +435,7 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	delete(d.stopped, name)
 	sess.name = name
 	sess.ephemeral = false
+	sess.snapEligible.Store(name != "")
 	sess.mu.Unlock()
 	markSnapshotDirty(sess)
 	return nil
@@ -495,14 +498,15 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	if !purge && !isEphemeral && d.persistEnabled {
 		d.refreshSessionCwd(sess)
 	}
+	var snapshotDeleteErr error
 	if d.snapsEnabled && !isEphemeral {
 		if purge {
 			sess.mu.Lock()
 			name := sess.name
 			sess.mu.Unlock()
 			if err := d.snaps.Delete(name); err != nil {
+				snapshotDeleteErr = err
 				d.log.Warn("deleting session snapshot failed", "err", err, "session", name)
-				return err
 			}
 		} else {
 			d.captureSession(sess)
@@ -535,7 +539,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	d.mu.Unlock()
 	d.log.Info("session closed", "session", stoppedName, "id", sess.id, "ephemeral", ephemeral, "purge", purge, "reason", reason)
 
-	var purgeErr error
+	purgeErr := snapshotDeleteErr
 	if !ephemeral && purge {
 		if err := d.persist.Delete(stoppedName); err != nil {
 			purgeErr = err

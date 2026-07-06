@@ -95,7 +95,7 @@ func (s *Store) Load() ([]ports.SnapshotBlob, error) {
 		path := filepath.Join(s.dir, base)
 		if strings.HasPrefix(base, ".tmp-") {
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				s.log.Warn("remove stale snapshot temp", "path", path, "error", err)
+				s.log.Warn("remove stale snapshot temp", "path", path, "err", err)
 			}
 			continue
 		}
@@ -104,7 +104,7 @@ func (s *Store) Load() ([]ports.SnapshotBlob, error) {
 		}
 		data, err := readSnapshotFileBounded(path)
 		if err != nil {
-			s.log.Warn("read snapshot", "path", path, "error", err)
+			s.log.Warn("read snapshot", "path", path, "err", err)
 			continue
 		}
 		name := strings.TrimSuffix(base, ".snap")

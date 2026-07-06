@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"io"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -142,6 +143,33 @@ func TestRestoreSnapshotsSkipsLiveCorruptAndEmpty(t *testing.T) {
 	}
 }
 
+func TestRestoreSnapshotsSkipsCreatedAtOverflow(t *testing.T) {
+	store := &restoreSnapshotStore{blobs: []ports.SnapshotBlob{{Name: "overflow", Data: mustSnapshotBytes(t, snapcodec.Session{
+		Name:      "overflow",
+		CreatedAt: uint64(math.MaxInt64) + 1,
+		Tabs: []snapcodec.Tab{{
+			Cols:  80,
+			Rows:  24,
+			Tree:  layout.NewTree("pane-1"),
+			Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/bad"}},
+		}},
+	})}}}
+	factory := &restorePTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	WithSnapshotStore(store)(d)
+
+	d.restoreSnapshots(context.Background())
+
+	records, err := d.persist.LoadAll()
+	require.NoError(t, err)
+	require.Empty(t, records)
+	require.Len(t, factory.opens, 0)
+	d.mu.Lock()
+	restored := d.findByNameLocked("overflow")
+	d.mu.Unlock()
+	require.Nil(t, restored)
+}
+
 func TestNamedRouteWaitsForRestoreBarrier(t *testing.T) {
 	releaseLoad := make(chan struct{})
 	loaded := make(chan struct{})
@@ -181,6 +209,21 @@ func TestNamedRouteWaitsForRestoreBarrier(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for named attach after restore")
 	}
+}
+
+func TestNamedRouteRestoreBarrierReturnsShutdown(t *testing.T) {
+	d := newTestDaemon(t, &restorePTYFactory{}, stubClock{})
+	WithSnapshotStore(&restoreSnapshotStore{})(d)
+	d.serveCancel()
+
+	tr, _ := newCapturingTransport(t)
+	sess, ac, err := d.route(ports.Hello{Intent: ports.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
+
+	require.Nil(t, sess)
+	require.Nil(t, ac)
+	var perr *protoErr
+	require.ErrorAs(t, err, &perr)
+	require.Equal(t, ports.ErrServerShutdown, perr.code)
 }
 
 func mustSnapshotBytes(t *testing.T, s snapcodec.Session) []byte {

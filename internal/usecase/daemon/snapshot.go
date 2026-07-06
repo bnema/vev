@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -48,8 +49,14 @@ func (d *Daemon) restoreSnapshots(ctx context.Context) {
 }
 
 func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if snap.Name == "" {
 		return fmt.Errorf("snapshot: empty session name")
+	}
+	if snap.CreatedAt > math.MaxInt64 {
+		return fmt.Errorf("snapshot: created_at overflows int64")
 	}
 	d.mu.Lock()
 	if d.closing || d.findByNameLocked(snap.Name) != nil {
@@ -67,6 +74,10 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		cancel()
 	}
 	for _, tabSnap := range snap.Tabs {
+		if err := ctx.Err(); err != nil {
+			closeOpened()
+			return err
+		}
 		tbSize := domain.Size{Cols: int(tabSnap.Cols), Rows: int(tabSnap.Rows)}
 		if !tbSize.Valid() {
 			closeOpened()
@@ -88,6 +99,10 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		tb.ctx, tb.cancel = context.WithCancel(sctx)
 		opened = append(opened, tb)
 		for _, paneSnap := range tabSnap.Panes {
+			if err := ctx.Err(); err != nil {
+				closeOpened()
+				return err
+			}
 			contentRect, ok := placementByPane[paneSnap.ID]
 			if !ok {
 				closeOpened()
@@ -115,6 +130,7 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 	if sess.active < 0 || sess.active >= len(sess.tabs) {
 		sess.active = 0
 	}
+	sess.snapEligible.Store(true)
 	if len(snap.Tabs) > 0 && len(snap.Tabs[0].Panes) > 0 {
 		sess.cwd = snap.Tabs[0].Panes[0].Cwd
 	}
@@ -151,10 +167,7 @@ func markSnapshotDirty(sess *session) {
 	if sess == nil {
 		return
 	}
-	sess.mu.Lock()
-	named := !sess.ephemeral && sess.name != ""
-	sess.mu.Unlock()
-	if named {
+	if sess.snapEligible.Load() {
 		sess.snapDirty.Store(true)
 	}
 }
@@ -292,10 +305,7 @@ func (d *Daemon) snapshotSaver(ctx context.Context) {
 		sessions := d.sessionsSnapshotLocked()
 		d.mu.Unlock()
 		for _, sess := range sessions {
-			sess.mu.Lock()
-			named := !sess.ephemeral && sess.name != ""
-			sess.mu.Unlock()
-			if named && sess.snapDirty.Swap(false) {
+			if sess.snapEligible.Load() && sess.snapDirty.Swap(false) {
 				if !d.captureSession(sess) {
 					sess.snapDirty.Store(true)
 				}

@@ -273,10 +273,11 @@ func writeTab(w *payloadWriter, t Tab) error {
 	if err := w.putString(string(t.Focus)); err != nil {
 		return err
 	}
-	if t.Tree == nil {
-		t.Tree = &layout.Tree{Focus: t.Focus}
+	var root *layout.Node
+	if t.Tree != nil {
+		root = t.Tree.Root
 	}
-	if err := writeNode(w, t.Tree.Root); err != nil {
+	if err := writeNode(w, root); err != nil {
 		return err
 	}
 	if len(t.Panes) > math.MaxUint16 {
@@ -329,8 +330,8 @@ func readTab(r *payloadReader) (Tab, error) {
 
 func writeNode(w *payloadWriter, n *layout.Node) error {
 	if n == nil {
-		w.putUint8(0)
-		return w.putString("")
+		w.putUint8(3)
+		return nil
 	}
 	switch n.Kind {
 	case layout.Leaf:
@@ -396,6 +397,8 @@ func readNode(r *payloadReader) (*layout.Node, error) {
 			return nil, err
 		}
 		return &layout.Node{Kind: layout.Stack, Expanded: layout.PaneID(exp), Children: children}, nil
+	case 3:
+		return nil, nil
 	default:
 		return nil, fmt.Errorf("%w: unknown node kind", ErrInvalidData)
 	}
@@ -713,7 +716,7 @@ func validateTree(t *layout.Tree, ids map[layout.PaneID]struct{}) error {
 
 func validateNode(n *layout.Node, ids map[layout.PaneID]struct{}) error {
 	if n == nil {
-		return nil
+		return fmt.Errorf("%w: nil child node", ErrInvalidData)
 	}
 	switch n.Kind {
 	case layout.Leaf:
