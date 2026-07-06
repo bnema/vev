@@ -450,6 +450,19 @@ func (d localDaemonDialer) Dial(ctx context.Context) (ports.Transport, error) {
 	return ensureDaemon(ctx, d.dir, realDial, realSpawn, defaultBackoff)
 }
 
+func detachedLocalHello(name, cwd string) ports.Hello {
+	termEnv := os.Getenv("TERM")
+	return ports.Hello{
+		Version:   ports.ProtocolVersion,
+		Intent:    ports.IntentNew,
+		Name:      name,
+		Size:      domain.Size{Cols: 80, Rows: 24},
+		TermEnv:   termEnv,
+		Cwd:       cwd,
+		TrueColor: client.DetectTrueColor(termEnv, os.Getenv("COLORTERM")),
+	}
+}
+
 func createDetachedLocalSession(ctx context.Context, name string) error {
 	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
 	if err != nil {
@@ -461,14 +474,7 @@ func createDetachedLocalSession(ctx context.Context, name string) error {
 	if err != nil {
 		cwd = ""
 	}
-	hello := ports.Hello{
-		Version: ports.ProtocolVersion,
-		Intent:  ports.IntentNew,
-		Name:    name,
-		Size:    domain.Size{Cols: 80, Rows: 24},
-		TermEnv: os.Getenv("TERM"),
-		Cwd:     cwd,
-	}
+	hello := detachedLocalHello(name, cwd)
 	if err := transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
 		return fmt.Errorf("vev: creating detached session: %w", err)
 	}

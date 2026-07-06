@@ -18,6 +18,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/confirm"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseArgs(t *testing.T) {
@@ -409,6 +410,19 @@ func TestRunAttachNestedNewCreatesDetachedSession(t *testing.T) {
 	if gotName != "scratch" {
 		t.Fatalf("detached name = %q, want scratch", gotName)
 	}
+}
+
+func TestDetachedLocalHelloIncludesTrueColor(t *testing.T) {
+	t.Setenv("TERM", "xterm-direct")
+	t.Setenv("COLORTERM", "")
+
+	hello := detachedLocalHello("scratch", "/tmp/work")
+
+	require.Equal(t, ports.IntentNew, hello.Intent)
+	require.Equal(t, "scratch", hello.Name)
+	require.Equal(t, "xterm-direct", hello.TermEnv)
+	require.Equal(t, "/tmp/work", hello.Cwd)
+	require.True(t, hello.TrueColor)
 }
 
 type namedDialer struct{ name string }

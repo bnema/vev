@@ -332,7 +332,8 @@ type attachResult struct {
 	err         error
 }
 
-func detectTrueColor(termEnv, colorTerm string) bool {
+// DetectTrueColor reports whether TERM/COLORTERM advertise direct color support.
+func DetectTrueColor(termEnv, colorTerm string) bool {
 	switch strings.ToLower(strings.TrimSpace(colorTerm)) {
 	case "truecolor", "24bit":
 		return true
@@ -354,7 +355,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	}
 	termEnv := os.Getenv("TERM")
 	colorTerm := os.Getenv("COLORTERM")
-	trueColor := detectTrueColor(termEnv, colorTerm)
+	trueColor := DetectTrueColor(termEnv, colorTerm)
 	hello := ports.Hello{
 		Version:     ports.ProtocolVersion,
 		Intent:      intent,

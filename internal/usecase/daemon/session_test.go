@@ -1091,6 +1091,49 @@ func TestAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
 }
 
+func TestLiveAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p1, release1 := newBlockingPTY(t)
+	defer release1()
+	p2, release2 := newBlockingPTY(t)
+	defer release2()
+
+	var opens [][]string
+	f := portsmocks.NewMockPTYFactory(t)
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+			opens = append(opens, append([]string(nil), env...))
+			if len(opens) == 1 {
+				return p1, nil
+			}
+			return p2, nil
+		},
+	).Twice()
+
+	d := newTestDaemon(t, f, stubClock{})
+	tr1 := portsmocks.NewMockTransport(t)
+	tr1.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr1.EXPECT().Close().Return(nil).Maybe()
+	tr2 := portsmocks.NewMockTransport(t)
+	tr2.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr2.EXPECT().Close().Return(nil).Maybe()
+	sess, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work", Size: sz, TrueColor: false}, tr1)
+	require.NoError(t, err)
+	_, ac, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: sz, TrueColor: true}, tr2)
+	require.NoError(t, err)
+	defer func() {
+		_ = d.killSession(sess, ports.ReasonServerShutdown, false)
+		d.sessWg.Wait()
+	}()
+
+	require.Contains(t, opens[0], "TERM=xterm-256color")
+	require.NotContains(t, opens[0], "COLORTERM=truecolor")
+	require.NoError(t, d.createTab(sess, ac.size))
+	require.Contains(t, opens[1], "TERM=xterm-direct")
+	require.Contains(t, opens[1], "COLORTERM=truecolor")
+	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
+}
+
 func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	p1, release1 := newBlockingPTY(t)
