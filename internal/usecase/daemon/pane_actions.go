@@ -87,6 +87,7 @@ func (d *Daemon) spawnPaneOp(
 	tb.mu.Unlock()
 
 	d.startPaneGoroutines(sess, tb, p)
+	markSnapshotDirty(sess)
 	if ac != nil {
 		d.paint(sess, ac, true)
 	}
@@ -174,8 +175,11 @@ func (d *Daemon) toggleStack(sess *session, ac *attachedClient) error {
 		d.applyLayoutLocked(tb)
 	}
 	tb.mu.Unlock()
-	if err == nil && ac != nil {
-		d.paint(sess, ac, true)
+	if err == nil {
+		markSnapshotDirty(sess)
+		if ac != nil {
+			d.paint(sess, ac, true)
+		}
 	}
 	return err
 }
@@ -238,6 +242,7 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 		_ = p.pty.Close()
 	}
 	d.log.Info("pane closed", "session", sess.name, "pane", id)
+	markSnapshotDirty(sess)
 	if repaint {
 		if ac == nil {
 			sess.mu.Lock()
@@ -268,6 +273,11 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 		d.applyLayoutLocked(tb)
 	}
 	tb.mu.Unlock()
+	if err == nil {
+		if newFocus != oldFocus {
+			markSnapshotDirty(sess)
+		}
+	}
 	if err == nil && ac != nil {
 		if newFocus != oldFocus {
 			d.exitCopyMode(ac)

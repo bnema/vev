@@ -71,6 +71,7 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 			p.screen.Write(data)
 			isSyncing := p.screen.SyncUpdateActive()
 			p.mu.Unlock()
+			markSnapshotDirty(sess)
 			select {
 			case <-attentionCh:
 				d.noteAttention(sess, tb)

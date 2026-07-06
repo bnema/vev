@@ -17,6 +17,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/pty"
+	snapshotadapter "github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/domain"
@@ -235,6 +237,10 @@ func logConfigWarnings(log *slog.Logger, warnings []domain.Warning) {
 	}
 }
 
+func snapshotDir() string {
+	return filepath.Join(platform.StateDir(), "snapshots")
+}
+
 // runDaemon runs the daemon in the foreground (the hidden --daemon path,
 // entered by an auto-spawned child): it sets up logging, binds the socket,
 // constructs the daemon, and serves until the last session exits or a
@@ -275,6 +281,7 @@ func runDaemon() error {
 	}
 	logConfigWarnings(log, warnings)
 	daemonOpts = append(daemonOpts, daemon.WithConfig(cfg))
+	daemonOpts = append(daemonOpts, daemon.WithSnapshotStore(snapshotadapter.NewStore(snapshotDir())))
 	storePath := persist.StorePath(platform.StateDir())
 	if store, err := kv.Open(storePath); err != nil {
 		log.Warn("opening session store failed; persistence disabled", "path", storePath, "err", err)
@@ -775,6 +782,10 @@ func runKill(_ context.Context, name string, all, daemon bool) error {
 			}
 			if closeErr := p.Close(); closeErr != nil {
 				return fmt.Errorf("vev: closing stored sessions: %w", closeErr)
+			}
+			snapshots := snapshotadapter.NewStore(snapshotDir())
+			if deleteErr := snapshots.Delete(name); deleteErr != nil {
+				return fmt.Errorf("vev: deleting session snapshot: %w", deleteErr)
 			}
 			printKillSuccess(name, all, daemon)
 			return nil

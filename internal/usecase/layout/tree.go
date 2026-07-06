@@ -94,3 +94,6 @@ func (t *Tree) clone() *Tree {
 	}
 	return &Tree{Root: t.Root.clone(), Focus: t.Focus}
 }
+
+// Clone returns an independent copy of the tree.
+func (t *Tree) Clone() *Tree { return t.clone() }

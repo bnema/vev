@@ -109,6 +109,30 @@ func TestNilTreeCloneIsSafe(t *testing.T) {
 	t.Parallel()
 	var tr *Tree
 	require.Nil(t, tr.clone())
+	require.Nil(t, tr.Clone())
+}
+
+func TestTreeCloneReturnsIndependentCopy(t *testing.T) {
+	t.Parallel()
+	tr := &Tree{
+		Root: &Node{
+			Kind: Split,
+			Dir:  Horizontal,
+			Children: []*Node{
+				NewLeaf("a"),
+				NewLeaf("b"),
+			},
+		},
+		Focus: "b",
+	}
+
+	clone := tr.Clone()
+	require.Equal(t, tr, clone)
+
+	clone.Root.Children[0].Leaf = "changed"
+	clone.Focus = "changed"
+	require.Equal(t, PaneID("a"), tr.Root.Children[0].Leaf)
+	require.Equal(t, PaneID("b"), tr.Focus)
 }
 
 func TestTooSmallRefusalsDoNotMutate(t *testing.T) {

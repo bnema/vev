@@ -70,6 +70,19 @@ type Store interface {
 	Close() error
 }
 
+// SnapshotBlob is a durable named session snapshot payload.
+type SnapshotBlob struct {
+	Name string
+	Data []byte
+}
+
+// SnapshotStore persists encoded session snapshots by name.
+type SnapshotStore interface {
+	Write(name string, data []byte) error
+	Load() ([]SnapshotBlob, error)
+	Delete(name string) error
+}
+
 // Clock abstracts time so usecases can be tested without real delays.
 type Clock interface {
 	Now() time.Time
