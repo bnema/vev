@@ -75,7 +75,7 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				continue
 			}
 			if interval < minimumBarInterval {
-				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: "bar.interval below minimum \"1s\""})
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("bar.interval below minimum %q", minimumBarInterval)})
 				interval = minimumBarInterval
 			}
 			cfg.Bar.Interval = interval

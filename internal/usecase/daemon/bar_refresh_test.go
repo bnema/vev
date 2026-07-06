@@ -113,6 +113,38 @@ func TestBarScriptRefreshForcesWhenContextChanges(t *testing.T) {
 	require.Equal(t, "/other", r.calls[2].PaneCWD)
 }
 
+func TestBarScriptRunDoesNotRestoreClearedSessionState(t *testing.T) {
+	r := &fakeBarRunner{outs: []string{"top", "bottom"}}
+	d := newBarRefreshTestDaemon(r, time.Second)
+	sess := newBarRefreshTestSession()
+	d.barScripts.mu.Lock()
+	d.barScripts.running[sess.id] = true
+	d.barScripts.mu.Unlock()
+
+	d.clearBarScriptsForSession(sess.id)
+	d.runBarScripts(sess, r, d.barScripts.cfg, barScriptContext{}, 0)
+
+	state := d.barStateFor(sess, "")
+	require.Empty(t, state.topRight)
+	require.Empty(t, state.bottomRight)
+}
+
+func TestBarScriptRunIgnoresStaleConfigVersion(t *testing.T) {
+	r := &fakeBarRunner{outs: []string{"top", "bottom"}}
+	d := newBarRefreshTestDaemon(r, time.Second)
+	sess := newBarRefreshTestSession()
+	d.barScripts.mu.Lock()
+	d.barScripts.running[sess.id] = true
+	d.barScripts.version = 2
+	d.barScripts.mu.Unlock()
+
+	d.runBarScripts(sess, r, d.barScripts.cfg, barScriptContext{}, 1)
+
+	state := d.barStateFor(sess, "")
+	require.Empty(t, state.topRight)
+	require.Empty(t, state.bottomRight)
+}
+
 func TestBarScriptRefreshIsPerSession(t *testing.T) {
 	r := &fakeBarRunner{outs: []string{"top-a", "bottom-a", "top-b", "bottom-b"}}
 	d := newBarRefreshTestDaemon(r, time.Second)

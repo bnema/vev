@@ -34,7 +34,7 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 		d.barScripts.outputs = make(map[domain.SessionID]barScriptOutputs)
 		d.barScripts.lastRefresh = make(map[domain.SessionID]time.Time)
 		d.barScripts.lastContext = make(map[domain.SessionID]barScriptContext)
-		d.barScripts.running = make(map[domain.SessionID]bool)
+		d.barScripts.version++
 		d.barScripts.mu.Unlock()
 	}
 	d.reapplyThemeAllSessions()

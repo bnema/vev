@@ -111,7 +111,7 @@ The top and bottom bar right anchors run configurable commands on the daemon hos
 
 Both anchors share `bar.interval`, which defaults to `5s`; values below `1s` are clamped to `1s`. vev also refreshes around attach, resize, focus, and copy-feedback changes. Commands are bounded by a timeout and output limit. On failure or timeout, vev keeps the last good value; if there is none, the anchor is empty.
 
-Scripts receive these environment variables when available: `VEV_ANCHOR` (`top-right` or `bottom-right`), `VEV_SESSION`, `VEV_TAB`, `VEV_PANE`, `VEV_PANE_CWD`, and `VEV_COLS`. vev reads stdout only, uses the first line only, treats it as plain UTF-8 display text, and strips ANSI escape sequences and other control characters. Unicode and Nerd Font glyphs are supported. The v1 API does not support colors, styles, JSON, streaming output, or per-anchor intervals.
+Scripts receive these environment variables when available: `VEV_ANCHOR` (`top-right` or `bottom-right`), `VEV_SESSION`, `VEV_TAB`, `VEV_PANE`, `VEV_PANE_CWD`, and `VEV_COLS`. vev reads stdout only, uses the first line only, treats it as plain UTF-8 display text, and strips ANSI escape sequences and other control characters. Unicode and Nerd Font glyphs are supported. The v1 API does not support colors, styles, JSON, streaming output, or per-anchor intervals. The default git script runs `git status --porcelain` each refresh, so increase `bar.interval` or replace the command if that is too expensive for a large repository.
 
 ## Remote attach
 

@@ -33,6 +33,7 @@ type barScriptState struct {
 	lastRefresh map[domain.SessionID]time.Time
 	lastContext map[domain.SessionID]barScriptContext
 	running     map[domain.SessionID]bool
+	version     uint64
 }
 
 func effectiveBarInterval(d time.Duration) time.Duration {
@@ -180,12 +181,13 @@ func (d *Daemon) refreshBarScriptsIfDue(sess *session, now time.Time, force bool
 	d.barScripts.lastContext[sess.id] = baseCtx
 	cfg := d.barScripts.cfg
 	runner := d.barScripts.runner
+	version := d.barScripts.version
 	d.barScripts.mu.Unlock()
-	go d.runBarScripts(sess, runner, cfg, baseCtx)
+	go d.runBarScripts(sess, runner, cfg, baseCtx, version)
 	return true
 }
 
-func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barScriptConfig, base barScriptContext) {
+func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barScriptConfig, base barScriptContext, version uint64) {
 	if runner == nil {
 		runner = barScriptRunner{baseEnv: d.baseEnv}
 	}
@@ -197,6 +199,11 @@ func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barS
 	bottom, bottomOK := runOneBarScript(ctx, runner, cfg.bottomRight, base, "bottom-right")
 	d.barScripts.mu.Lock()
 	d.barScripts.initLocked()
+	if !d.barScripts.running[sess.id] || d.barScripts.version != version {
+		delete(d.barScripts.running, sess.id)
+		d.barScripts.mu.Unlock()
+		return
+	}
 	current := d.barScripts.outputs[sess.id]
 	changed := false
 	if topOK && current.topRight != top {
