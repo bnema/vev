@@ -69,15 +69,11 @@ func agentSessionFlag(strategy, arg string) bool {
 }
 
 func planProcessRestore(proc *snapcodec.Process, allow map[string]struct{}) processRestoreDecision {
-	if proc == nil || len(proc.Argv) == 0 {
+	if proc == nil || len(proc.Argv) == 0 || proc.Argv[0] == "" {
 		return processRestoreDecision{Reason: "missing_process"}
 	}
-	strategy := proc.Strategy
-	if strategy == "" {
-		strategy = detectProcessStrategy(proc.Argv)
-	}
-	name := filepath.Base(proc.Argv[0])
-	if _, ok := allow[name]; !ok {
+	strategy := normalizeProcessStrategy(proc.Strategy, proc.Argv)
+	if _, ok := allow[processAllowlistKey(strategy, proc.Argv)]; !ok {
 		return processRestoreDecision{Reason: "not_allowlisted"}
 	}
 
@@ -92,14 +88,17 @@ func planProcessRestore(proc *snapcodec.Process, allow map[string]struct{}) proc
 		if id != "" {
 			return processRestoreDecision{Command: shellQuoteArgvMust([]string{"claude", "--resume", id}), Restore: true}
 		}
+		return processRestoreDecision{Command: "claude --continue", Restore: true}
 	case processStrategyOpenCode:
 		if id != "" {
 			return processRestoreDecision{Command: shellQuoteArgvMust([]string{"opencode", "--session", id}), Restore: true}
 		}
+		return processRestoreDecision{Command: "opencode --continue", Restore: true}
 	case processStrategyCodex:
 		if id != "" {
 			return processRestoreDecision{Command: shellQuoteArgvMust([]string{"codex", "resume", id}), Restore: true}
 		}
+		return processRestoreDecision{Command: "codex resume --last", Restore: true}
 	}
 
 	command, ok := shellQuoteArgv(proc.Argv)
@@ -107,6 +106,26 @@ func planProcessRestore(proc *snapcodec.Process, allow map[string]struct{}) proc
 		return processRestoreDecision{Reason: "empty_command"}
 	}
 	return processRestoreDecision{Command: command, Restore: true}
+}
+
+func normalizeProcessStrategy(strategy string, argv []string) string {
+	switch strategy {
+	case processStrategyClaude, processStrategyCodex, processStrategyOpenCode, processStrategyPi:
+		return strategy
+	case "", processStrategyGeneric:
+		return detectProcessStrategy(argv)
+	default:
+		return processStrategyGeneric
+	}
+}
+
+func processAllowlistKey(strategy string, argv []string) string {
+	switch strategy {
+	case processStrategyClaude, processStrategyCodex, processStrategyOpenCode, processStrategyPi:
+		return strategy
+	default:
+		return filepath.Base(argv[0])
+	}
 }
 
 func shellQuoteArgvMust(argv []string) string {

@@ -7,7 +7,7 @@ import (
 )
 
 func TestProcessRestorePlan(t *testing.T) {
-	allow := map[string]struct{}{
+	defaultAllow := map[string]struct{}{
 		"less":     {},
 		"pi":       {},
 		"claude":   {},
@@ -17,6 +17,7 @@ func TestProcessRestorePlan(t *testing.T) {
 	tests := []struct {
 		name    string
 		proc    *snapcodec.Process
+		allow   map[string]struct{}
 		restore bool
 		command string
 		reason  string
@@ -45,10 +46,22 @@ func TestProcessRestorePlan(t *testing.T) {
 			command: "pi --continue",
 		},
 		{
+			name:    "claude no ID continues",
+			proc:    &snapcodec.Process{Argv: []string{"claude"}, Strategy: processStrategyClaude},
+			restore: true,
+			command: "claude --continue",
+		},
+		{
 			name:    "opencode session command",
 			proc:    &snapcodec.Process{Argv: []string{"opencode"}, Strategy: processStrategyOpenCode, Opts: snapcodec.ProcessOpts{AgentSessionID: "abc"}},
 			restore: true,
 			command: "opencode --session abc",
+		},
+		{
+			name:    "opencode no ID continues",
+			proc:    &snapcodec.Process{Argv: []string{"opencode"}, Strategy: processStrategyOpenCode},
+			restore: true,
+			command: "opencode --continue",
 		},
 		{
 			name:    "codex resume command",
@@ -56,10 +69,31 @@ func TestProcessRestorePlan(t *testing.T) {
 			restore: true,
 			command: "codex resume abc",
 		},
+		{
+			name:    "codex no ID resumes last",
+			proc:    &snapcodec.Process{Argv: []string{"codex"}, Strategy: processStrategyCodex},
+			restore: true,
+			command: "codex resume --last",
+		},
+		{
+			name:   "agent strategy matches allowlist by strategy not argv basename",
+			proc:   &snapcodec.Process{Argv: []string{"less"}, Strategy: processStrategyClaude, Opts: snapcodec.ProcessOpts{AgentSessionID: "abc"}},
+			allow:  map[string]struct{}{"less": {}},
+			reason: "not_allowlisted",
+		},
+		{
+			name:   "empty executable rejected",
+			proc:   &snapcodec.Process{Argv: []string{""}, Strategy: processStrategyGeneric},
+			reason: "missing_process",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			allow := tt.allow
+			if allow == nil {
+				allow = defaultAllow
+			}
 			got := planProcessRestore(tt.proc, allow)
 			if got.Restore != tt.restore || got.Command != tt.command || got.Reason != tt.reason {
 				t.Fatalf("planProcessRestore() = %+v, want restore=%v command=%q reason=%q", got, tt.restore, tt.command, tt.reason)
@@ -92,12 +126,24 @@ func TestExtractAgentSessionID(t *testing.T) {
 }
 
 func TestShellQuoteArgv(t *testing.T) {
-	got, ok := shellQuoteArgv([]string{"cmd", "two words", "it's"})
-	if !ok {
-		t.Fatal("shellQuoteArgv() returned !ok")
+	tests := []struct {
+		name string
+		argv []string
+		want string
+		ok   bool
+	}{
+		{name: "empty argv", ok: false},
+		{name: "spaces and single quote", argv: []string{"cmd", "two words", "it's"}, want: "cmd 'two words' 'it'\\''s'", ok: true},
+		{name: "shell metacharacters", argv: []string{"cmd", "$(touch /tmp/pwned)", "a;b", "line\nbreak"}, want: "cmd '$(touch /tmp/pwned)' 'a;b' 'line\nbreak'", ok: true},
+		{name: "empty argument", argv: []string{"cmd", ""}, want: "cmd ''", ok: true},
 	}
-	want := "cmd 'two words' 'it'\\''s'"
-	if got != want {
-		t.Fatalf("shellQuoteArgv() = %q, want %q", got, want)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := shellQuoteArgv(tt.argv)
+			if ok != tt.ok || got != tt.want {
+				t.Fatalf("shellQuoteArgv() = %q, %v; want %q, %v", got, ok, tt.want, tt.ok)
+			}
+		})
 	}
 }
