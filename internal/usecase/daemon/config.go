@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"sort"
 	"strings"
@@ -21,8 +22,10 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 		d.logConfigWarning(warning)
 	}
 	overrides := d.buildCodeOverrides(cfg.Codes)
+	allowlist := restoreProcessAllowlistFromConfig(cfg.Snapshot)
 	d.bindings.Store(bindings)
 	d.codeOverrides.Store(&overrides)
+	d.restoreProcessAllowlist.Store(&allowlist)
 	d.themeMode.Store(uint32(cfg.Theme))
 	d.reapplyThemeAllSessions()
 	d.repaintAllAttachedClients()
@@ -56,9 +59,7 @@ func (d *Daemon) buildCodeOverrides(configured map[string]string) map[string]str
 	// *different* slug's override — that must be re-checked regardless of
 	// where the two slugs fall in sort order.
 	accepted := make(map[string]string, len(desired))
-	for slug, code := range desired {
-		accepted[slug] = code
-	}
+	maps.Copy(accepted, desired)
 	effectiveCode := func(slug string) string {
 		if code, ok := accepted[slug]; ok {
 			return code
@@ -120,6 +121,36 @@ func sortedKeys(values map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func restoreProcessAllowlistFromConfig(cfg domain.SnapshotConfig) map[string]struct{} {
+	if cfg.RestoreProcessesSet {
+		return buildRestoreProcessAllowlist(cfg.RestoreProcesses)
+	}
+	if len(cfg.RestoreProcesses) > 0 {
+		return buildRestoreProcessAllowlist(cfg.RestoreProcesses)
+	}
+	return buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses)
+}
+
+func buildRestoreProcessAllowlist(values []string) map[string]struct{} {
+	allow := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		allow[value] = struct{}{}
+	}
+	return allow
+}
+
+func (d *Daemon) restoreProcessAllowlistSnapshot() map[string]struct{} {
+	allow := d.restoreProcessAllowlist.Load()
+	if allow == nil {
+		return buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses)
+	}
+	return *allow
 }
 
 func (d *Daemon) logConfigWarning(w domain.Warning) {

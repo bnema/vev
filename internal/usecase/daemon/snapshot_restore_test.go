@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"math"
 	"sync"
@@ -91,6 +92,65 @@ func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 	require.Contains(t, factory.opens[0].env, "VEV=session=work,tab="+tabStableID+",pane="+pane1StableID)
 	require.Contains(t, factory.opens[1].env, "TERM=xterm-direct")
 	require.Contains(t, factory.opens[1].env, "VEV=session=work,tab="+tabStableID+",pane="+pane2StableID)
+}
+
+func processRestoreTestStore(t *testing.T, name string, proc *snapcodec.Process) *restoreSnapshotStore {
+	t.Helper()
+	return &restoreSnapshotStore{blobs: []ports.SnapshotBlob{{Name: name, Data: mustSnapshotBytes(t, snapcodec.Session{
+		Name: name,
+		Tabs: []snapcodec.Tab{{
+			Cols: 80,
+			Rows: 24,
+			Tree: layout.NewTree("pane-1"),
+			Panes: []snapcodec.Pane{{
+				ID:      "pane-1",
+				Cwd:     "/tmp",
+				Process: proc,
+			}},
+		}},
+	})}}}
+}
+
+func TestRestoreSnapshotsWritesAllowlistedProcessCommands(t *testing.T) {
+	store := processRestoreTestStore(t, "proc", &snapcodec.Process{Argv: []string{"less", "README.md"}, Strategy: processStrategyGeneric})
+	factory := &restorePTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	WithSnapshotStore(store)(d)
+	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"less"}}})
+
+	d.restoreSnapshots(context.Background())
+
+	require.Len(t, factory.opens, 1)
+	require.Equal(t, []string{"less README.md\n"}, factory.opens[0].pty.writes)
+}
+
+func TestRestoreSnapshotsSkipsDeniedProcessCommands(t *testing.T) {
+	store := processRestoreTestStore(t, "proc", &snapcodec.Process{Argv: []string{"less", "README.md"}, Strategy: processStrategyGeneric})
+	factory := &restorePTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	WithSnapshotStore(store)(d)
+	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"vim"}}})
+
+	d.restoreSnapshots(context.Background())
+
+	require.Len(t, factory.opens, 1)
+	require.Empty(t, factory.opens[0].pty.writes)
+}
+
+func TestRestoreSnapshotsWritesAgentIDCommandAndWriteFailureIsNonFatal(t *testing.T) {
+	proc := &snapcodec.Process{Argv: []string{"pi"}, Strategy: processStrategyPi, Opts: snapcodec.ProcessOpts{AgentSessionID: "abc123"}}
+	store := processRestoreTestStore(t, "agent", proc)
+	factory := &restorePTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	WithSnapshotStore(store)(d)
+	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"pi"}}})
+
+	d.restoreSnapshots(context.Background())
+
+	require.Len(t, factory.opens, 1)
+	require.Equal(t, []string{"pi --session-id abc123\n"}, factory.opens[0].pty.writes)
+	factory.writeErr = errors.New("boom")
+	require.NoError(t, d.restoreSession(context.Background(), snapcodec.Session{Name: "agent2", Tabs: []snapcodec.Tab{{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/tmp", Process: proc}}}}}))
 }
 
 func TestRestoreSnapshotsOpensCollapsedStackPanesWithValidPTYSize(t *testing.T) {
@@ -274,26 +334,33 @@ func (s *restoreSnapshotStore) Load() ([]ports.SnapshotBlob, error) {
 }
 
 type restorePTYFactory struct {
-	mu    sync.Mutex
-	opens []restorePTYOpen
+	mu       sync.Mutex
+	opens    []restorePTYOpen
+	writeErr error
 }
 
 type restorePTYOpen struct {
 	dir  string
 	size domain.Size
 	env  []string
+	pty  *restorePTY
 }
 
 func (f *restorePTYFactory) Open(_ string, _ []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.opens = append(f.opens, restorePTYOpen{dir: dir, size: sz, env: append([]string(nil), env...)})
-	return newRestorePTY(), nil
+	pty := newRestorePTY()
+	pty.writeErr = f.writeErr
+	f.opens = append(f.opens, restorePTYOpen{dir: dir, size: sz, env: append([]string(nil), env...), pty: pty})
+	return pty, nil
 }
 
 type restorePTY struct {
-	done chan struct{}
-	once sync.Once
+	mu       sync.Mutex
+	writes   []string
+	writeErr error
+	done     chan struct{}
+	once     sync.Once
 }
 
 func newRestorePTY() *restorePTY { return &restorePTY{done: make(chan struct{})} }
@@ -301,7 +368,15 @@ func (p *restorePTY) Read([]byte) (int, error) {
 	<-p.done
 	return 0, io.EOF
 }
-func (p *restorePTY) Write(b []byte) (int, error)  { return len(b), nil }
+func (p *restorePTY) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.writes = append(p.writes, string(b))
+	if p.writeErr != nil {
+		return 0, p.writeErr
+	}
+	return len(b), nil
+}
 func (p *restorePTY) Close() error                 { p.once.Do(func() { close(p.done) }); return nil }
 func (p *restorePTY) Resize(domain.Size) error     { return nil }
 func (p *restorePTY) Pid() int                     { return 0 }

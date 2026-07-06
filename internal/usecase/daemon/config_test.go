@@ -49,6 +49,22 @@ func TestApplyConfigHotReloadSwapsBindingsAndCodes(t *testing.T) {
 	require.Equal(t, "NT", cmd.Code)
 }
 
+func TestApplyConfigSnapshotRestoreProcesses(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+
+	_, ok := d.restoreProcessAllowlistSnapshot()["claude"]
+	require.True(t, ok)
+
+	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true}})
+	require.Empty(t, d.restoreProcessAllowlistSnapshot())
+
+	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"less", "", " pi "}}})
+	allow := d.restoreProcessAllowlistSnapshot()
+	require.Contains(t, allow, "less")
+	require.Contains(t, allow, "pi")
+	require.NotContains(t, allow, "")
+}
+
 func TestPaletteCommandsApplyOverridesAndResolveByCode(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	d.ApplyConfig(domain.Config{

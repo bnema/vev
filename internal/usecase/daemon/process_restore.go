@@ -81,7 +81,7 @@ func planProcessRestore(proc *snapcodec.Process, allow map[string]struct{}) proc
 	switch strategy {
 	case processStrategyPi:
 		if id != "" {
-			return processRestoreDecision{Command: shellQuoteArgvMust([]string{"pi", "--resume", id}), Restore: true}
+			return processRestoreDecision{Command: shellQuoteArgvMust([]string{"pi", "--session-id", id}), Restore: true}
 		}
 		return processRestoreDecision{Command: "pi --continue", Restore: true}
 	case processStrategyClaude:

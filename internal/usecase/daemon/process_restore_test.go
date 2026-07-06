@@ -37,7 +37,7 @@ func TestProcessRestorePlan(t *testing.T) {
 			name:    "pi with ID resumes",
 			proc:    &snapcodec.Process{Argv: []string{"pi", "cli"}, Strategy: processStrategyPi, Opts: snapcodec.ProcessOpts{AgentSessionID: "session-123"}},
 			restore: true,
-			command: "pi --resume session-123",
+			command: "pi --session-id session-123",
 		},
 		{
 			name:    "pi no ID continues",

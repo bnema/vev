@@ -95,26 +95,27 @@ type Daemon struct {
 	paletteRecentMu sync.Mutex
 	paletteRecent   []string
 
-	ptys           ports.PTYFactory
-	clock          ports.Clock
-	log            *slog.Logger
-	baseEnv        []string
-	shell          string
-	shellArgs      []string
-	persist        *persist.Persister
-	persistEnabled bool
-	snaps          ports.SnapshotStore
-	snapsEnabled   bool
-	restoreDone    chan struct{}
-	restoreOnce    sync.Once
-	procCwd        func(int) (string, error)
-	procComm       func(int) (string, error)
-	procArgv       func(int) ([]string, error)
-	procGroupArgv  func(int, int) ([]string, error)
-	dirOrHome      func(string) string
-	bindings       atomic.Pointer[keys.Bindings]
-	codeOverrides  atomic.Pointer[map[string]string]
-	themeMode      atomic.Uint32
+	ptys                    ports.PTYFactory
+	clock                   ports.Clock
+	log                     *slog.Logger
+	baseEnv                 []string
+	shell                   string
+	shellArgs               []string
+	persist                 *persist.Persister
+	persistEnabled          bool
+	snaps                   ports.SnapshotStore
+	snapsEnabled            bool
+	restoreDone             chan struct{}
+	restoreOnce             sync.Once
+	procCwd                 func(int) (string, error)
+	procComm                func(int) (string, error)
+	procArgv                func(int) ([]string, error)
+	procGroupArgv           func(int, int) ([]string, error)
+	dirOrHome               func(string) string
+	bindings                atomic.Pointer[keys.Bindings]
+	codeOverrides           atomic.Pointer[map[string]string]
+	restoreProcessAllowlist atomic.Pointer[map[string]struct{}]
+	themeMode               atomic.Uint32
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
 	tempDir string
@@ -270,6 +271,10 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	if d.codeOverrides.Load() == nil {
 		empty := map[string]string{}
 		d.codeOverrides.Store(&empty)
+	}
+	if d.restoreProcessAllowlist.Load() == nil {
+		allow := buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses)
+		d.restoreProcessAllowlist.Store(&allow)
 	}
 	if records, err := d.persist.LoadAll(); err != nil {
 		d.log.Warn("loading persisted sessions failed", "err", err)
