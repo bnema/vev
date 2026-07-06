@@ -120,16 +120,9 @@ vev attach user@host
 vev attach user@host:session
 ```
 
-Remote attach runs `ssh user@host vev _stdio ...` under the hood, so `vev` must be installed on the remote host and reachable through your normal SSH config. Omitting `:session` opens an ephemeral remote session.
+Remote attach uses SSH to bootstrap a UDP transport by default, so `vev` must be installed on the remote host and reachable through your normal SSH config. Omitting `:session` opens an ephemeral remote session. Named sessions can resume after temporary network disconnects, such as sleep or Wi-Fi changes.
 
-For faster reconnects, enable OpenSSH connection reuse:
-
-```sshconfig
-Host *
-    ControlMaster auto
-    ControlPath ~/.ssh/cm-%r@%h:%p
-    ControlPersist 10m
-```
+Set `VEV_REMOTE_TRANSPORT=stdio` to use SSH stdio compatibility mode on networks where UDP is blocked. Stdio mode can work through SSH-only paths, but it may not notice sleep or Wi-Fi loss promptly.
 
 ## Terminal color
 
