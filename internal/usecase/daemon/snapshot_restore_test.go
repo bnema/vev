@@ -111,97 +111,100 @@ func processRestoreTestStore(t *testing.T, name string, proc *snapcodec.Process)
 	})}}}
 }
 
-func TestRestoreSnapshotsWritesAllowlistedProcessCommands(t *testing.T) {
-	store := processRestoreTestStore(t, "proc", &snapcodec.Process{Argv: []string{"less", "README.md"}, Strategy: processStrategyGeneric})
-	factory := &restorePTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
-	WithSnapshotStore(store)(d)
-	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"less"}}})
+func TestRestoreSnapshotsProcessRestoreCommands(t *testing.T) {
+	lessProc := &snapcodec.Process{Argv: []string{"less", "README.md"}, Strategy: processStrategyGeneric}
+	agentProc := &snapcodec.Process{Argv: []string{"pi"}, Strategy: processStrategyPi, Opts: snapcodec.ProcessOpts{AgentSessionID: "abc123"}}
+	controlAgentProc := &snapcodec.Process{Argv: []string{"pi"}, Strategy: processStrategyPi, Opts: snapcodec.ProcessOpts{AgentSessionID: "abc\nmalicious"}}
 
-	d.restoreSnapshots(context.Background())
-
-	require.Len(t, factory.opens, 1)
-	require.Equal(t, []string{"less README.md\n"}, factory.opens[0].pty.writes)
-}
-
-func TestRestoreSnapshotsSkipsDeniedProcessCommands(t *testing.T) {
-	store := processRestoreTestStore(t, "proc", &snapcodec.Process{Argv: []string{"less", "README.md"}, Strategy: processStrategyGeneric})
-	factory := &restorePTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
-	WithSnapshotStore(store)(d)
-	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"vim"}}})
-
-	d.restoreSnapshots(context.Background())
-
-	require.Len(t, factory.opens, 1)
-	require.Empty(t, factory.opens[0].pty.writes)
-}
-
-func TestRestoreSnapshotsKeepsProcessCommandsScopedToPane(t *testing.T) {
-	store := &restoreSnapshotStore{blobs: []ports.SnapshotBlob{{Name: "scoped", Data: mustSnapshotBytes(t, snapcodec.Session{
-		Name: "scoped",
-		Tabs: []snapcodec.Tab{
-			{
-				Cols: 80,
-				Rows: 24,
-				Tree: layout.NewTree("pane-1"),
-				Panes: []snapcodec.Pane{{
-					ID:      "pane-1",
-					Cwd:     "/one",
-					Process: &snapcodec.Process{Argv: []string{"less", "README.md"}, Strategy: processStrategyGeneric},
-				}},
-			},
-			{
-				Cols: 80,
-				Rows: 24,
-				Tree: layout.NewTree("pane-1"),
-				Panes: []snapcodec.Pane{{
-					ID:  "pane-1",
-					Cwd: "/two",
-				}},
-			},
+	tests := []struct {
+		name       string
+		store      *restoreSnapshotStore
+		allow      []string
+		wantWrites [][]string
+	}{
+		{
+			name:       "allowlisted generic command",
+			store:      processRestoreTestStore(t, "allowlisted", lessProc),
+			allow:      []string{"less"},
+			wantWrites: [][]string{{"less README.md\n"}},
 		},
-	})}}}
-	factory := &restorePTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
-	WithSnapshotStore(store)(d)
-	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"less"}}})
+		{
+			name:       "denied generic command",
+			store:      processRestoreTestStore(t, "denied", lessProc),
+			allow:      []string{"vim"},
+			wantWrites: [][]string{{}},
+		},
+		{
+			name: "pane scoped command",
+			store: &restoreSnapshotStore{blobs: []ports.SnapshotBlob{{Name: "scoped", Data: mustSnapshotBytes(t, snapcodec.Session{
+				Name: "scoped",
+				Tabs: []snapcodec.Tab{
+					{
+						Cols: 80,
+						Rows: 24,
+						Tree: layout.NewTree("pane-1"),
+						Panes: []snapcodec.Pane{{
+							ID:      "pane-1",
+							Cwd:     "/one",
+							Process: lessProc,
+						}},
+					},
+					{
+						Cols: 80,
+						Rows: 24,
+						Tree: layout.NewTree("pane-1"),
+						Panes: []snapcodec.Pane{{
+							ID:  "pane-1",
+							Cwd: "/two",
+						}},
+					},
+				},
+			})}}},
+			allow:      []string{"less"},
+			wantWrites: [][]string{{"less README.md\n"}, {}},
+		},
+		{
+			name:       "agent ID command",
+			store:      processRestoreTestStore(t, "agent", agentProc),
+			allow:      []string{"pi"},
+			wantWrites: [][]string{{"pi --resume abc123\n"}},
+		},
+		{
+			name:       "agent ID with control byte rejected",
+			store:      processRestoreTestStore(t, "agent-control", controlAgentProc),
+			allow:      []string{"pi"},
+			wantWrites: [][]string{{}},
+		},
+	}
 
-	d.restoreSnapshots(context.Background())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			factory := &restorePTYFactory{}
+			d := newTestDaemon(t, factory, stubClock{})
+			WithSnapshotStore(tt.store)(d)
+			d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: tt.allow}})
 
-	require.Len(t, factory.opens, 2)
-	require.Equal(t, []string{"less README.md\n"}, factory.opens[0].pty.writes)
-	require.Empty(t, factory.opens[1].pty.writes)
+			d.restoreSnapshots(context.Background())
+
+			require.Len(t, factory.opens, len(tt.wantWrites))
+			for i, want := range tt.wantWrites {
+				if len(want) == 0 {
+					require.Empty(t, factory.opens[i].pty.writes)
+					continue
+				}
+				require.Equal(t, want, factory.opens[i].pty.writes)
+			}
+		})
+	}
 }
 
-func TestRestoreSnapshotsWritesAgentIDCommandAndWriteFailureIsNonFatal(t *testing.T) {
+func TestRestoreSnapshotsProcessCommandWriteFailureIsNonFatal(t *testing.T) {
 	proc := &snapcodec.Process{Argv: []string{"pi"}, Strategy: processStrategyPi, Opts: snapcodec.ProcessOpts{AgentSessionID: "abc123"}}
-	store := processRestoreTestStore(t, "agent", proc)
-	factory := &restorePTYFactory{}
+	factory := &restorePTYFactory{writeErr: errors.New("boom")}
 	d := newTestDaemon(t, factory, stubClock{})
-	WithSnapshotStore(store)(d)
 	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"pi"}}})
 
-	d.restoreSnapshots(context.Background())
-
-	require.Len(t, factory.opens, 1)
-	require.Equal(t, []string{"pi --resume abc123\n"}, factory.opens[0].pty.writes)
-	factory.writeErr = errors.New("boom")
-	require.NoError(t, d.restoreSession(context.Background(), snapcodec.Session{Name: "agent2", Tabs: []snapcodec.Tab{{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/tmp", Process: proc}}}}}))
-}
-
-func TestRestoreSnapshotsRejectsAgentIDWithControlBytes(t *testing.T) {
-	proc := &snapcodec.Process{Argv: []string{"pi"}, Strategy: processStrategyPi, Opts: snapcodec.ProcessOpts{AgentSessionID: "abc\nmalicious"}}
-	store := processRestoreTestStore(t, "agent-control", proc)
-	factory := &restorePTYFactory{}
-	d := newTestDaemon(t, factory, stubClock{})
-	WithSnapshotStore(store)(d)
-	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"pi"}}})
-
-	d.restoreSnapshots(context.Background())
-
-	require.Len(t, factory.opens, 1)
-	require.Empty(t, factory.opens[0].pty.writes)
+	require.NoError(t, d.restoreSession(context.Background(), snapcodec.Session{Name: "agent", Tabs: []snapcodec.Tab{{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/tmp", Process: proc}}}}}))
 }
 
 func TestRestoreSnapshotsOpensCollapsedStackPanesWithValidPTYSize(t *testing.T) {

@@ -6,7 +6,11 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
+	"time"
 )
+
+var fallbackStableIDCounter atomic.Uint64
 
 func newStableID(prefix string) (string, error) {
 	var b [16]byte
@@ -32,7 +36,7 @@ func (d *Daemon) newTabPaneStableIDs() (string, string, error) {
 func fallbackStableID(prefix string) string {
 	id, err := newStableID(prefix)
 	if err != nil {
-		return prefix + "_unknown"
+		return fmt.Sprintf("%s_fallback_%x_%x", prefix, time.Now().UnixNano(), fallbackStableIDCounter.Add(1))
 	}
 	return id
 }

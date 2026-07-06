@@ -66,6 +66,36 @@ func TestSelectProcessGroupPID(t *testing.T) {
 	}
 }
 
+func TestProcessInspectorUsesConfiguredRoot(t *testing.T) {
+	root := t.TempDir()
+	writeProcStat(t, root, 10, 7)
+	pidDir := filepath.Join(root, "10")
+	cwdTarget := t.TempDir()
+	if err := os.Symlink(cwdTarget, filepath.Join(pidDir, "cwd")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pidDir, "comm"), []byte("custom\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pidDir, "cmdline"), []byte("custom\x00arg\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ins := newProcessInspector(root)
+
+	cwd, err := ins.Cwd(10)
+	if err != nil || cwd != cwdTarget {
+		t.Fatalf("Cwd = %q, %v; want %q, nil", cwd, err, cwdTarget)
+	}
+	comm, err := ins.Comm(10)
+	if err != nil || comm != "custom" {
+		t.Fatalf("Comm = %q, %v; want custom, nil", comm, err)
+	}
+	argv, err := ins.Argv(10)
+	if err != nil || !reflect.DeepEqual(argv, []string{"custom", "arg"}) {
+		t.Fatalf("Argv = %#v, %v; want custom argv, nil", argv, err)
+	}
+}
+
 func TestProcessInspectorCachesProcessRecordsBriefly(t *testing.T) {
 	root := t.TempDir()
 	writeProcStat(t, root, 10, 7)

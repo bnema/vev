@@ -28,9 +28,15 @@ func NewProcessInspector() *ProcessInspector { return newProcessInspector("/proc
 
 func newProcessInspector(root string) *ProcessInspector { return &ProcessInspector{root: root} }
 
-func (*ProcessInspector) Cwd(pid int) (string, error)    { return ProcessCwd(pid) }
-func (*ProcessInspector) Comm(pid int) (string, error)   { return ProcessComm(pid) }
-func (*ProcessInspector) Argv(pid int) ([]string, error) { return ProcessArgv(pid) }
+func (p *ProcessInspector) Cwd(pid int) (string, error) {
+	return processCwd(p.root, pid)
+}
+func (p *ProcessInspector) Comm(pid int) (string, error) {
+	return processComm(p.root, pid)
+}
+func (p *ProcessInspector) Argv(pid int) ([]string, error) {
+	return processArgv(filepath.Join(p.root, strconv.Itoa(pid), "cmdline"), pid)
+}
 func (p *ProcessInspector) GroupArgv(pgid int, shellPid int) ([]string, error) {
 	recs, err := p.processRecords()
 	if err != nil {
@@ -40,7 +46,7 @@ func (p *ProcessInspector) GroupArgv(pgid int, shellPid int) ([]string, error) {
 	if !ok {
 		return nil, nil
 	}
-	return ProcessArgv(pid)
+	return p.Argv(pid)
 }
 
 func (p *ProcessInspector) processRecords() ([]processRecord, error) {
