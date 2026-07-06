@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -318,5 +319,51 @@ func blockingRead(t *testing.T) func([]byte) (int, error) {
 	return func([]byte) (int, error) {
 		<-ch
 		return 0, io.EOF
+	}
+}
+
+func TestSplitPaneInheritsTerminalEnv(t *testing.T) {
+	tests := []struct {
+		name           string
+		term           terminalEnv
+		wantContain    []string
+		wantNotContain []string
+	}{
+		{
+			name:        "truecolor",
+			term:        terminalEnv{TrueColor: true},
+			wantContain: []string{"TERM=xterm-direct", "COLORTERM=truecolor", "TERM_PROGRAM=vev"},
+		},
+		{
+			name:           "no truecolor",
+			term:           terminalEnv{},
+			wantContain:    []string{"TERM=xterm-256color", "TERM_PROGRAM=vev"},
+			wantNotContain: []string{"TERM=xterm-direct", "COLORTERM=truecolor"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, sess, oldPTY, factory := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
+			sess.terminal = tt.term
+			newPTY := portsmocks.NewMockPTY(t)
+			oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Once()
+			newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
+			var gotEnv []string
+			factory.EXPECT().Open("/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).RunAndReturn(
+				func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+					gotEnv = append([]string(nil), env...)
+					return newPTY, nil
+				},
+			).Once()
+
+			require.NoError(t, d.splitPane(sess, nil, layout.Right))
+			for _, want := range tt.wantContain {
+				require.Contains(t, gotEnv, want)
+			}
+			for _, notWant := range tt.wantNotContain {
+				require.NotContains(t, gotEnv, notWant)
+			}
+		})
 	}
 }

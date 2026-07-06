@@ -65,6 +65,7 @@ type Hello struct {
 	Size        domain.Size
 	TermEnv     string
 	Cwd         string
+	TrueColor   bool
 }
 
 // Input carries raw bytes typed/pasted by the client, destined for the PTY.
@@ -303,6 +304,11 @@ func MarshalHello(h Hello) []byte {
 	w.putUint16(uint16(h.Size.Rows))
 	w.putString(h.TermEnv)
 	w.putString(h.Cwd)
+	if h.TrueColor {
+		w.putUint8(1)
+	} else {
+		w.putUint8(0)
+	}
 	return w.b
 }
 
@@ -344,6 +350,11 @@ func UnmarshalHello(b []byte) (Hello, error) {
 	if h.Cwd, err = r.getString(); err != nil {
 		return Hello{}, err
 	}
+	trueColor, err := r.getUint8()
+	if err != nil {
+		return Hello{}, err
+	}
+	h.TrueColor = trueColor != 0
 	if err := r.done(); err != nil {
 		return Hello{}, err
 	}

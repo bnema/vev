@@ -151,6 +151,43 @@ func isType(typ ports.MsgType) any {
 	return mock.MatchedBy(func(f ports.Frame) bool { return f.Type == typ })
 }
 
+func TestAttachHelloIncludesTrueColor(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("COLORTERM", "truecolor")
+
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
+	defer in.unblock()
+
+	gotHello := make(chan ports.Hello, 1)
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).RunAndReturn(func(f ports.Frame) error {
+		hello, err := ports.UnmarshalHello(f.Payload)
+		require.NoError(t, err)
+		gotHello <- hello
+		return nil
+	}).Once()
+	unblock := scriptRecv(tr,
+		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	)
+	defer unblock()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
+	require.NoError(t, err)
+
+	select {
+	case hello := <-gotHello:
+		require.Equal(t, "xterm-256color", hello.TermEnv)
+		require.True(t, hello.TrueColor)
+	case <-time.After(2 * time.Second):
+		t.Fatal("hello frame was not sent")
+	}
+}
+
 func TestAttachHappyPath(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
@@ -332,6 +369,7 @@ func TestAttachStdinOSCColorResponseSendsThemeAndPreservesInput(t *testing.T) {
 }
 
 func TestAttachStdinThemeTrueColorFalseWhenCOLORTERMNotTruecolor(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
 	t.Setenv("COLORTERM", "")
 
 	var out bytes.Buffer

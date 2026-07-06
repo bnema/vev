@@ -767,7 +767,7 @@ func TestCreateSessionSeedsMRUFromStopped(t *testing.T) {
 	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 1, lastUsedSeq: 42}
 	d.mruSeq.Store(42)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz)
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
 	require.NoError(t, err)
 	require.Equal(t, uint64(42), sess.mruAt.Load())
 	require.Equal(t, uint64(42), state.record(t, "work").LastUsedSeq)
@@ -781,7 +781,7 @@ func TestCreateRenameKillPersistenceLifecycle(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(store)(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz)
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
 	require.NoError(t, err)
 	require.True(t, state.has("work"))
 
@@ -802,7 +802,7 @@ func TestEphemeralRenamePromotesAndStoppedCollisionRejected(t *testing.T) {
 	WithStore(store)(d)
 	d.stopped["taken"] = stoppedSession{name: "taken", cwd: "/tmp", createdAt: 1}
 
-	sess, err := d.createSessionLocked("0", true, "/tmp/e", sz)
+	sess, err := d.createSessionLocked("0", true, "/tmp/e", sz, terminalEnv{})
 	require.NoError(t, err)
 	require.False(t, state.has("0"))
 	require.EqualError(t, d.renameSession(sess, "taken"), "name already in use")
@@ -820,7 +820,7 @@ func TestRefreshSessionCwdTouchesOnlyOnChange(t *testing.T) {
 	cwd := "/tmp/work"
 	WithCwdReader(func(int) (string, error) { return cwd, nil })(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz)
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
 	require.NoError(t, err)
 	state.mu.Lock()
 	setsAfterCreate := state.sets
@@ -896,7 +896,7 @@ func TestPickerStoppedTargetKillPurges(t *testing.T) {
 func TestChildEnvEscapesLegacySessionName(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 
-	got := d.childEnv("legacy,name=value", "t_alpha", "p_beta")
+	got := d.childEnv("legacy,name=value", "t_alpha", "p_beta", terminalEnv{TrueColor: true})
 
 	require.Contains(t, got, "VEV=session=legacy%2Cname%3Dvalue,tab=t_alpha,pane=p_beta")
 }
@@ -915,9 +915,9 @@ func TestNewSessionAssignsStableIDsAndChildEnv(t *testing.T) {
 		},
 	).Once()
 	d := newTestDaemon(t, f, stubClock{})
-	d.baseEnv = []string{"KEEP=1", "TERM=old", "VEV=old"}
+	d.baseEnv = []string{"KEEP=1", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz)
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{TrueColor: true})
 	require.NoError(t, err)
 	defer func() {
 		_ = d.killSession(sess, ports.ReasonServerShutdown, false)
@@ -939,8 +939,12 @@ func TestNewSessionAssignsStableIDsAndChildEnv(t *testing.T) {
 	require.NotEqual(t, tabStableID, paneStableID)
 	require.Contains(t, gotEnv, "KEEP=1")
 	require.NotContains(t, gotEnv, "TERM=old")
+	require.NotContains(t, gotEnv, "COLORTERM=old")
+	require.NotContains(t, gotEnv, "TERM_PROGRAM=old")
 	require.NotContains(t, gotEnv, "VEV=old")
 	require.Contains(t, gotEnv, "TERM=xterm-direct")
+	require.Contains(t, gotEnv, "COLORTERM=truecolor")
+	require.Contains(t, gotEnv, "TERM_PROGRAM=vev")
 	require.Contains(t, gotEnv, "VEV=session=work,tab="+tabStableID+",pane="+paneStableID)
 }
 
@@ -969,7 +973,7 @@ func TestRenameSessionUnsafeNameRejected(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz)
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
 	require.NoError(t, err)
 	require.ErrorIs(t, d.renameSession(sess, "my work"), domain.ErrInvalidSessionName)
 }
@@ -985,9 +989,9 @@ func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {
 	WithStore(store)(d)
 	WithCwdReader(func(int) (string, error) { return "/tmp/latest", nil })(d)
 
-	natural, err := d.createSessionLocked("natural", false, "/tmp/old", sz)
+	natural, err := d.createSessionLocked("natural", false, "/tmp/old", sz, terminalEnv{})
 	require.NoError(t, err)
-	other, err := d.createSessionLocked("other", false, "/tmp/other", sz)
+	other, err := d.createSessionLocked("other", false, "/tmp/other", sz, terminalEnv{})
 	require.NoError(t, err)
 	_ = d.killSession(natural, ports.ReasonSessionKilled, false)
 	require.True(t, state.has("natural"))
@@ -998,4 +1002,126 @@ func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {
 
 	_ = d.killSession(other, ports.ReasonSessionKilled, true)
 	require.False(t, state.has("other"))
+}
+
+func TestChildEnvTrueColorCapability(t *testing.T) {
+	tests := []struct {
+		name           string
+		baseEnv        []string
+		term           terminalEnv
+		wantContain    []string
+		wantNotContain []string
+	}{
+		{
+			name:    "exports truecolor",
+			baseEnv: []string{"KEEP=1", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"},
+			term:    terminalEnv{TrueColor: true},
+			wantContain: []string{
+				"KEEP=1",
+				"TERM=xterm-direct",
+				"COLORTERM=truecolor",
+				"TERM_PROGRAM=vev",
+				"VEV=session=work,tab=t_alpha,pane=p_beta",
+			},
+			wantNotContain: []string{"TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"},
+		},
+		{
+			name:           "omits truecolor when unsupported",
+			baseEnv:        []string{"COLORTERM=old"},
+			term:           terminalEnv{},
+			wantContain:    []string{"TERM=xterm-256color", "TERM_PROGRAM=vev"},
+			wantNotContain: []string{"TERM=xterm-direct", "COLORTERM=truecolor"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			d.baseEnv = tt.baseEnv
+
+			got := d.childEnv("work", "t_alpha", "p_beta", tt.term)
+
+			for _, want := range tt.wantContain {
+				require.Contains(t, got, want)
+			}
+			for _, notWant := range tt.wantNotContain {
+				require.NotContains(t, got, notWant)
+			}
+		})
+	}
+}
+
+func TestAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p1, release1 := newBlockingPTY(t)
+	defer release1()
+	p2, release2 := newBlockingPTY(t)
+	defer release2()
+
+	var opens [][]string
+	f := portsmocks.NewMockPTYFactory(t)
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+			opens = append(opens, append([]string(nil), env...))
+			if len(opens) == 1 {
+				return p1, nil
+			}
+			return p2, nil
+		},
+	).Twice()
+
+	d := newTestDaemon(t, f, stubClock{})
+	d.baseEnv = []string{"KEEP=1", "COLORTERM=old"}
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr.EXPECT().Close().Return(nil).Maybe()
+	sess, ac, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work", Size: sz, TrueColor: true}, tr)
+	require.NoError(t, err)
+	defer func() {
+		_ = d.killSession(sess, ports.ReasonServerShutdown, false)
+		d.sessWg.Wait()
+	}()
+
+	require.Contains(t, opens[0], "TERM=xterm-direct")
+	require.Contains(t, opens[0], "COLORTERM=truecolor")
+	require.Contains(t, opens[0], "TERM_PROGRAM=vev")
+	require.NoError(t, d.createTab(sess, ac.size))
+	require.Contains(t, opens[1], "TERM=xterm-direct")
+	require.Contains(t, opens[1], "COLORTERM=truecolor")
+	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
+}
+
+func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p1, release1 := newBlockingPTY(t)
+	defer release1()
+	p2, release2 := newBlockingPTY(t)
+	defer release2()
+	var opens [][]string
+	f := portsmocks.NewMockPTYFactory(t)
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+			opens = append(opens, append([]string(nil), env...))
+			if len(opens) == 1 {
+				return p1, nil
+			}
+			return p2, nil
+		},
+	).Twice()
+	d := newTestDaemon(t, f, stubClock{})
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr.EXPECT().Close().Return(nil).Maybe()
+	sess, ac, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work", Size: sz, TrueColor: true}, tr)
+	require.NoError(t, err)
+	require.NoError(t, d.createSessionAndSwitch(sess, ac, "next"))
+	got := ac.sess.Get()
+	require.NotNil(t, got)
+	got.mu.Lock()
+	defer got.mu.Unlock()
+	require.True(t, got.terminal.TrueColor)
+	require.Len(t, opens, 2)
+	require.Contains(t, opens[1], "TERM=xterm-direct")
+	require.Contains(t, opens[1], "COLORTERM=truecolor")
+	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
 }

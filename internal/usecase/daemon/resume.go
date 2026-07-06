@@ -149,6 +149,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	ac.setSession(sess)
 	sess.mu.Lock()
 	sess.client = ac
+	sess.terminal = terminalEnv{TrueColor: h.TrueColor}
 	sess.mu.Unlock()
 	d.touchMRU(sess)
 	d.log.Info("client resumed", "session", sess.name)

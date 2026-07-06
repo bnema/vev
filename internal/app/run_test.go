@@ -423,6 +423,8 @@ func (d namedDialer) Dial(context.Context) (ports.Transport, error) {
 type fakeClipboardReader struct{ ports.ClipboardReader }
 
 func TestRunAttachWithDepsBuildsRemoteDialer(t *testing.T) {
+	// The local client still owns terminal capability detection for remote attach;
+	// sshstdio is only a framed transport to `vev _stdio` on the remote host.
 	var gotTarget, gotSession, gotDialer string
 	var gotRemote bool
 	var gotClipboard ports.ClipboardReader

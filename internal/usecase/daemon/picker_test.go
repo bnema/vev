@@ -6,12 +6,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -179,6 +182,47 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, ports.ReasonDetach, dm.Reason)
 	awaitFrame(t, sends1, ports.MsgOutput)
+}
+
+func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	p3, releasePTY3 := newBlockingPTY(t)
+	defer releasePTY1()
+	defer releasePTY2()
+	defer releasePTY3()
+	var openedEnv []string
+	f := portsmocks.NewMockPTYFactory(t)
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+			openedEnv = append([]string(nil), env...)
+			return p3, nil
+		},
+	).Once()
+	d := newTestDaemon(t, f, stubClock{})
+	tr1, _ := newCapturingTransport(t)
+	tr2, _ := newCapturingTransport(t)
+	ac1 := &attachedClient{tr: tr1, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac2 := &attachedClient{tr: tr2, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	sctx1, cancel1 := context.WithCancel(d.serveCtx)
+	sctx2, cancel2 := context.WithCancel(d.serveCtx)
+	defer cancel1()
+	defer cancel2()
+	sess1 := &session{id: "s1", name: "alpha", cwd: t.TempDir(), ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, client: ac1, terminal: terminalEnv{}}
+	sess2 := &session{id: "s2", name: "beta", cwd: t.TempDir(), ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, client: ac2, terminal: terminalEnv{TrueColor: true}}
+	ac1.setSession(sess1)
+	ac2.setSession(sess2)
+	d.sessions[sess1.id] = sess1
+	d.sessions[sess2.id] = sess2
+
+	old := d.stealClientForTarget(sess1, ac1, sess2, picker.Target{Session: sess2.id})
+
+	require.Same(t, ac2, old)
+	require.False(t, sess2.terminal.TrueColor)
+	require.NoError(t, d.createTab(sess2, domain.Size{Cols: 80, Rows: 24}))
+	require.Contains(t, openedEnv, "TERM=xterm-256color")
+	require.NotContains(t, openedEnv, "COLORTERM=truecolor")
+	require.NotContains(t, openedEnv, "TERM=xterm-direct")
 }
 
 func TestPickerPreviewSinglePaneSnapshotsFocusedPane(t *testing.T) {
@@ -357,4 +401,40 @@ func TestPickerResizeRecomposesModal(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(msg.Data), "┌")
 	require.Contains(t, string(msg.Data), "Sessions")
+}
+
+func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p1, release1 := newBlockingPTY(t)
+	defer release1()
+	p2, release2 := newBlockingPTY(t)
+	defer release2()
+	var opens [][]string
+	f := portsmocks.NewMockPTYFactory(t)
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+			opens = append(opens, append([]string(nil), env...))
+			if len(opens) == 1 {
+				return p1, nil
+			}
+			return p2, nil
+		},
+	).Twice()
+	d := newTestDaemon(t, f, stubClock{})
+	d.stopped["old"] = stoppedSession{name: "old", cwd: t.TempDir(), createdAt: 1}
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr.EXPECT().Close().Return(nil).Maybe()
+	sess, ac, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work", Size: sz, TrueColor: true}, tr)
+	require.NoError(t, err)
+	d.resumeStoppedAndSwitch(sess, ac, picker.Target{Name: "old", Stopped: true})
+	got := ac.sess.Get()
+	require.NotNil(t, got)
+	got.mu.Lock()
+	defer got.mu.Unlock()
+	require.True(t, got.terminal.TrueColor)
+	require.Len(t, opens, 2)
+	require.Contains(t, opens[1], "TERM=xterm-direct")
+	require.Contains(t, opens[1], "COLORTERM=truecolor")
+	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
 }

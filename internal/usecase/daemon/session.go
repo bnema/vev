@@ -41,6 +41,10 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
+type terminalEnv struct {
+	TrueColor bool
+}
+
 type session struct {
 	id        domain.SessionID
 	name      string
@@ -56,6 +60,7 @@ type session struct {
 	clipboardQueue         []clipboardForward
 	clipboardWorkerRunning bool
 	cwd                    string
+	terminal               terminalEnv
 	createdAt              int64
 	mruAt                  atomic.Uint64
 	snapDirty              atomic.Bool
@@ -121,13 +126,13 @@ func (d *Daemon) touchMRU(sess *session) {
 	}
 }
 
-func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size) (*session, error) {
+func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv) (*session, error) {
 	tbSize := tabSize(sz)
 	tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 	if err != nil {
 		return nil, err
 	}
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID), cwd, tbSize)
+	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
 	if err != nil {
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "session")
 		return nil, fmt.Errorf("daemon: spawning session %q: %w", name, err)
@@ -154,6 +159,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		cancel:    cancel,
 		tabs:      []*tab{tb},
 		cwd:       cwd,
+		terminal:  term,
 		createdAt: createdAt,
 	}
 	if lastUsedSeq > 0 {
@@ -197,6 +203,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	}
 	from.mu.Lock()
 	cwd := from.cwd
+	term := from.terminal
 	if from.client != ac {
 		from.mu.Unlock()
 		d.mu.Unlock()
@@ -204,7 +211,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	}
 	from.mu.Unlock()
 
-	newSess, err := d.createSessionLocked(name, false, cwd, sz)
+	newSess, err := d.createSessionLocked(name, false, cwd, sz, term)
 	if err != nil {
 		d.mu.Unlock()
 		return err
@@ -238,12 +245,13 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	name := sess.name
 	cwd := sess.cwd
 	client := sess.client
+	term := sess.terminal
 	sess.mu.Unlock()
 	tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 	if err != nil {
 		return err
 	}
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID), cwd, tbSize)
+	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
 	if err != nil {
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "tab")
 		return fmt.Errorf("daemon: spawning tab for session %q: %w", name, err)
@@ -720,15 +728,26 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 	d.mu.Unlock()
 }
 
-// childEnv builds the session child's environment: the daemon's own, with TERM
-// and VEV forced to well-known values.
-func (d *Daemon) childEnv(name, tabStableID, paneStableID string) []string {
-	out := make([]string, 0, len(d.baseEnv)+2)
+// childEnv builds the session child's environment: the daemon's own, with terminal
+// and VEV values forced to well-known values.
+func (d *Daemon) childEnv(name, tabStableID, paneStableID string, term terminalEnv) []string {
+	out := make([]string, 0, len(d.baseEnv)+4)
 	for _, e := range d.baseEnv {
-		if strings.HasPrefix(e, "TERM=") || strings.HasPrefix(e, "VEV=") {
+		if strings.HasPrefix(e, "TERM=") ||
+			strings.HasPrefix(e, "COLORTERM=") ||
+			strings.HasPrefix(e, "TERM_PROGRAM=") ||
+			strings.HasPrefix(e, "VEV=") {
 			continue
 		}
 		out = append(out, e)
 	}
-	return append(out, "TERM=xterm-direct", "VEV=session="+escapeVEVComponent(name)+",tab="+tabStableID+",pane="+paneStableID)
+	if term.TrueColor {
+		out = append(out, "TERM=xterm-direct", "COLORTERM=truecolor")
+	} else {
+		out = append(out, "TERM=xterm-256color")
+	}
+	return append(out,
+		"TERM_PROGRAM=vev",
+		"VEV=session="+escapeVEVComponent(name)+",tab="+tabStableID+",pane="+paneStableID,
+	)
 }
