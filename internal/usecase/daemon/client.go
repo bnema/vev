@@ -58,8 +58,13 @@ type attachedClient struct {
 	clientTheme   themeui.Theme
 	lastCursor    cursorOut
 	recentNav     recentSessionNavigator
-	linkMu        sync.Mutex
-	sendMu        sync.Mutex
+	// historyNavMu protects historyNav and historyNavTimer. When paint needs
+	// several locks, take sendMu before historyNavMu, then Daemon.mu/session.mu.
+	historyNavMu    sync.Mutex
+	historyNav      historyNavDisplay
+	historyNavTimer pendingByteTimer
+	linkMu          sync.Mutex
+	sendMu          sync.Mutex
 }
 
 type cursorOut struct {
@@ -108,7 +113,23 @@ func (ac *attachedClient) initOverlays() {
 
 func (ac *attachedClient) currentSession() *session { return ac.sess.Get() }
 
-func (ac *attachedClient) setSession(sess *session) { ac.sess.Set(sess) }
+func (ac *attachedClient) setSession(sess *session) {
+	if sess == nil {
+		ac.clearHistoryNav()
+	}
+	ac.sess.Set(sess)
+}
+
+func (ac *attachedClient) clearHistoryNav() {
+	if ac == nil {
+		return
+	}
+	ac.historyNavMu.Lock()
+	ac.historyNav.gen++
+	ac.historyNavTimer.stop()
+	ac.historyNav.clear()
+	ac.historyNavMu.Unlock()
+}
 
 func (ac *attachedClient) getTheme() themeui.Theme {
 	ac.themeMu.Lock()

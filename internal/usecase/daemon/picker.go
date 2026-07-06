@@ -350,6 +350,7 @@ func (d *Daemon) sessionByID(id domain.SessionID) *session {
 }
 
 func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker.Target) {
+	d.clearHistoryNav(ac)
 	if target.Stopped {
 		d.resumeStoppedAndSwitch(sess, ac, target)
 		return

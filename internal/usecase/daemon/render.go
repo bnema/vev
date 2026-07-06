@@ -293,7 +293,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		preview = snapshotPickerPreview(overlays.previewTab)
 	}
 	repaintAttachedClients = sess.ackAttention(tb)
-	bars := d.barStateFor(sess, overlays.copyFeedback)
+	bars := d.barStateForClient(sess, ac, overlays.copyFeedback)
 	bars.theme = ac.getTheme()
 
 	styles := newThemeStyles(ac.getTheme())
