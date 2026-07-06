@@ -2,9 +2,9 @@ package daemon
 
 import (
 	"context"
+	"encoding/binary"
 	"io"
 	"math"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -26,6 +26,7 @@ func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 		CreatedAt: 99,
 		Active:    0,
 		Tabs: []snapcodec.Tab{{
+			StableID:   "t_saved",
 			Cols:       80,
 			Rows:       24,
 			NextPaneID: 3,
@@ -35,8 +36,8 @@ func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 				layout.NewLeaf("pane-2"),
 			}}},
 			Panes: []snapcodec.Pane{
-				{ID: "pane-1", Cwd: "/one", Scrollback: [][]renderer.Cell{cells("old1")}, Visible: [][]renderer.Cell{cells("vis1")}},
-				{ID: "pane-2", Cwd: "/two", Scrollback: [][]renderer.Cell{cells("old2")}, Visible: [][]renderer.Cell{cells("vis2")}},
+				{ID: "pane-1", StableID: "p_saved_1", Cwd: "/one", Scrollback: [][]renderer.Cell{cells("old1")}, Visible: [][]renderer.Cell{cells("vis1")}},
+				{ID: "pane-2", StableID: "p_saved_2", Cwd: "/two", Scrollback: [][]renderer.Cell{cells("old2")}, Visible: [][]renderer.Cell{cells("vis2")}},
 			},
 		}},
 	})}}
@@ -83,9 +84,9 @@ func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 	pane1StableID := tb.panes["pane-1"].stableID
 	pane2StableID := tb.panes["pane-2"].stableID
 	tb.mu.Unlock()
-	require.True(t, strings.HasPrefix(tabStableID, "t_"), tabStableID)
-	require.True(t, strings.HasPrefix(pane1StableID, "p_"), pane1StableID)
-	require.True(t, strings.HasPrefix(pane2StableID, "p_"), pane2StableID)
+	require.Equal(t, "t_saved", tabStableID)
+	require.Equal(t, "p_saved_1", pane1StableID)
+	require.Equal(t, "p_saved_2", pane2StableID)
 	require.Contains(t, factory.opens[0].env, "TERM=xterm-direct")
 	require.Contains(t, factory.opens[0].env, "VEV=session=work,tab="+tabStableID+",pane="+pane1StableID)
 	require.Contains(t, factory.opens[1].env, "TERM=xterm-direct")
@@ -132,6 +133,8 @@ func TestRestoreSnapshotsOpensCollapsedStackPanesWithValidPTYSize(t *testing.T) 
 
 func TestRestoreSnapshotsSkipsLiveCorruptAndEmpty(t *testing.T) {
 	valid := mustSnapshotBytes(t, snapcodec.Session{Name: "live", CreatedAt: 1, Tabs: []snapcodec.Tab{{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/ok"}}}}})
+	badVersion := append([]byte(nil), valid...)
+	binary.BigEndian.PutUint16(badVersion[4:6], 1)
 	tests := []struct {
 		name     string
 		blobs    []ports.SnapshotBlob
@@ -140,6 +143,7 @@ func TestRestoreSnapshotsSkipsLiveCorruptAndEmpty(t *testing.T) {
 	}{
 		{name: "empty store"},
 		{name: "corrupt blob", blobs: []ports.SnapshotBlob{{Name: "bad", Data: []byte("not a snapshot")}}},
+		{name: "old v1 blob", blobs: []ports.SnapshotBlob{{Name: "old", Data: badVersion}}},
 		{name: "live name", blobs: []ports.SnapshotBlob{{Name: "live", Data: valid}}, liveName: "live"},
 	}
 	for _, tt := range tests {

@@ -18,7 +18,7 @@ func TestMarshalMinimalGolden(t *testing.T) {
 		t.Fatalf("Marshal() error = %v", err)
 	}
 	want := []byte{
-		'V', 'E', 'V', 'S', 0, 1, 0, 0, 0, 0, 0, 15, 0xff, 0xc2, 0x2e, 0xcb,
+		'V', 'E', 'V', 'S', 0, 2, 0, 0, 0, 0, 0, 15, 0xff, 0xc2, 0x2e, 0xcb,
 		0, 1, 's', 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0,
 	}
 	if !bytes.Equal(got, want) {
@@ -76,7 +76,7 @@ func TestRoundTripSessions(t *testing.T) {
 		{Rune: 'x', Style: indexed},
 	}}
 	multi := Session{Name: "named", CreatedAt: 42, Active: 1, Tabs: []Tab{
-		{Cols: 100, Rows: 40, NextPaneID: 9, Focus: "2", Tree: deepTree, Panes: []Pane{{ID: "1", Cwd: "/a", Scrollback: rows("abc"), Visible: rows("v")}, {ID: "2", Cwd: "/b", Visible: rows("focus")}, {ID: "3", Cwd: "/c"}}},
+		{StableID: "t_stable", Cols: 100, Rows: 40, NextPaneID: 9, Focus: "2", Tree: deepTree, Panes: []Pane{{ID: "1", StableID: "p_one", Cwd: "/a", Scrollback: rows("abc"), Visible: rows("v"), Process: &Process{Argv: []string{"claude", "--resume"}, Strategy: "claude", Opts: ProcessOpts{AgentSessionID: "agent-123"}}}, {ID: "2", StableID: "p_two", Cwd: "/b", Visible: rows("focus")}, {ID: "3", StableID: "p_three", Cwd: "/c"}}},
 		{Cols: 80, Rows: 24, NextPaneID: 2, Focus: "a", Tree: layout.NewTree("a"), Panes: []Pane{{ID: "a", Cwd: "/tmp", Visible: cjkVisible}}},
 	}}
 	empty := Session{Name: "blank", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Cwd: "/", Scrollback: nil, Visible: rows("   ", "")}}}}}
@@ -116,7 +116,7 @@ func TestUnmarshalRejectsMalformedWithoutPanic(t *testing.T) {
 		data []byte
 	}{
 		{"bad magic", append([]byte("NOPE"), good[4:]...)},
-		{"bad version", replaceU16(good, 4, 2)},
+		{"bad version", replaceU16(good, 4, 1)},
 		{"bad crc", append([]byte(nil), good[:len(good)-1]...)},
 		{"trailing", append(append([]byte(nil), good...), 0)},
 		{"body len overrun", replaceU32(good, 8, 999999)},
@@ -140,6 +140,42 @@ func TestUnmarshalRejectsMalformedWithoutPanic(t *testing.T) {
 		if _, err := Unmarshal(good[:i]); err == nil {
 			t.Fatalf("prefix length %d unexpectedly succeeded", i)
 		}
+	}
+}
+
+func TestMarshalRejectsProcessWithoutArgv(t *testing.T) {
+	_, err := Marshal(Session{Name: "s", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Process: &Process{Strategy: "generic"}}}}}})
+	if !errors.Is(err, ErrInvalidData) {
+		t.Fatalf("Marshal() error = %v, want %v", err, ErrInvalidData)
+	}
+}
+
+func TestUnmarshalRejectsProcessWithoutArgv(t *testing.T) {
+	var w payloadWriter
+	_ = w.putString("x")
+	w.putUint64(0)
+	w.putUint16(0)
+	w.putUint16(1)
+	_ = w.putString("t")
+	w.putUint16(80)
+	w.putUint16(24)
+	w.putUint64(1)
+	_ = w.putString("p")
+	_ = writeNode(&w, layout.NewLeaf("p"))
+	w.putUint16(1)
+	_ = w.putString("p")
+	_ = w.putString("p_stable")
+	_ = w.putString("")
+	w.putUint16(0)
+	w.putUint32(0)
+	w.putUint32(0)
+	w.putUint8(1)
+	w.putUint16(0)
+	_ = w.putString("generic")
+	_ = w.putString("")
+	_, err := Unmarshal(reheader(w.b, 0))
+	if !errors.Is(err, ErrInvalidData) {
+		t.Fatalf("Unmarshal() error = %v, want %v", err, ErrInvalidData)
 	}
 }
 
@@ -248,11 +284,26 @@ func equalSession(a, b Session) bool {
 }
 
 func equalTab(a, b Tab) bool {
-	if a.Cols != b.Cols || a.Rows != b.Rows || a.NextPaneID != b.NextPaneID || a.Focus != b.Focus || len(a.Panes) != len(b.Panes) || !equalNode(treeRoot(a.Tree), treeRoot(b.Tree)) {
+	if a.StableID != b.StableID || a.Cols != b.Cols || a.Rows != b.Rows || a.NextPaneID != b.NextPaneID || a.Focus != b.Focus || len(a.Panes) != len(b.Panes) || !equalNode(treeRoot(a.Tree), treeRoot(b.Tree)) {
 		return false
 	}
 	for i := range a.Panes {
-		if a.Panes[i].ID != b.Panes[i].ID || a.Panes[i].Cwd != b.Panes[i].Cwd || !equalRows(a.Panes[i].Scrollback, b.Panes[i].Scrollback) || !equalRows(a.Panes[i].Visible, b.Panes[i].Visible) {
+		if a.Panes[i].ID != b.Panes[i].ID || a.Panes[i].StableID != b.Panes[i].StableID || a.Panes[i].Cwd != b.Panes[i].Cwd || !equalProcess(a.Panes[i].Process, b.Panes[i].Process) || !equalRows(a.Panes[i].Scrollback, b.Panes[i].Scrollback) || !equalRows(a.Panes[i].Visible, b.Panes[i].Visible) {
+			return false
+		}
+	}
+	return true
+}
+
+func equalProcess(a, b *Process) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Strategy != b.Strategy || a.Opts.AgentSessionID != b.Opts.AgentSessionID || len(a.Argv) != len(b.Argv) {
+		return false
+	}
+	for i := range a.Argv {
+		if a.Argv[i] != b.Argv[i] {
 			return false
 		}
 	}
@@ -311,7 +362,7 @@ func trimSession(s Session) Session {
 func reheader(body []byte, flags uint16) []byte {
 	out := make([]byte, 16+len(body))
 	copy(out[:4], []byte("VEVS"))
-	binary.BigEndian.PutUint16(out[4:6], 1)
+	binary.BigEndian.PutUint16(out[4:6], version)
 	binary.BigEndian.PutUint16(out[6:8], flags)
 	binary.BigEndian.PutUint32(out[8:12], uint32(len(body)))
 	binary.BigEndian.PutUint32(out[12:16], crc32.ChecksumIEEE(body))
@@ -336,6 +387,7 @@ func malformedRowsSnapshot(rowCount uint32, runCount uint16) []byte {
 	w.putUint64(0)
 	w.putUint16(0)
 	w.putUint16(1)
+	_ = w.putString("")
 	w.putUint16(0)
 	w.putUint16(0)
 	w.putUint64(0)
@@ -343,6 +395,7 @@ func malformedRowsSnapshot(rowCount uint32, runCount uint16) []byte {
 	_ = writeNode(&w, layout.NewLeaf("p"))
 	w.putUint16(1)
 	_ = w.putString("p")
+	_ = w.putString("")
 	_ = w.putString("")
 	w.putUint16(0)
 	w.putUint32(rowCount)

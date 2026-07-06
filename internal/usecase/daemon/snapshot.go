@@ -92,10 +92,14 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		for _, pl := range placements {
 			placementByPane[pl.ID] = pl.Content
 		}
-		tabStableID, err := newStableID("t")
-		if err != nil {
-			closeOpened()
-			return fmt.Errorf("snapshot: generating tab identity: %w", err)
+		tabStableID := tabSnap.StableID
+		if tabStableID == "" {
+			var err error
+			tabStableID, err = newStableID("t")
+			if err != nil {
+				closeOpened()
+				return fmt.Errorf("snapshot: generating tab identity: %w", err)
+			}
 		}
 		tb := &tab{stableID: tabStableID, tree: tabSnap.Tree.Clone(), panes: make(map[layout.PaneID]*pane, len(tabSnap.Panes)), nextPaneID: int(tabSnap.NextPaneID), size: tbSize}
 		if tb.nextPaneID <= 0 {
@@ -114,10 +118,14 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 				return fmt.Errorf("snapshot: missing pane placement")
 			}
 			contentSize := restorePTYSize(contentRect, tbSize)
-			paneStableID, err := newStableID("p")
-			if err != nil {
-				closeOpened()
-				return fmt.Errorf("snapshot: generating pane identity: %w", err)
+			paneStableID := paneSnap.StableID
+			if paneStableID == "" {
+				var err error
+				paneStableID, err = newStableID("p")
+				if err != nil {
+					closeOpened()
+					return fmt.Errorf("snapshot: generating pane identity: %w", err)
+				}
 			}
 			pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(snap.Name, tabStableID, paneStableID), paneSnap.Cwd, contentSize)
 			if err != nil {
@@ -245,6 +253,7 @@ func (d *Daemon) captureSession(sess *session) bool {
 	for _, tb := range tabs {
 		tb.mu.Lock()
 		tabSnap := snapcodec.Tab{
+			StableID:   tb.stableID,
 			Cols:       uint16(max(tb.size.Cols, 0)),
 			Rows:       uint16(max(tb.size.Rows, 0)),
 			NextPaneID: uint64(max(tb.nextPaneID, 0)),
@@ -269,6 +278,7 @@ func (d *Daemon) captureSession(sess *session) bool {
 			}
 			paneSnap := snapcodec.Pane{
 				ID:         p.id,
+				StableID:   p.stableID,
 				Scrollback: cloneRows(p.scrollback.Snapshot()),
 				Visible:    cloneRows(p.screen.PrimaryVisibleRows()),
 			}

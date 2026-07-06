@@ -27,7 +27,7 @@ var (
 
 const (
 	magic              = "VEVS"
-	version            = uint16(1)
+	version            = uint16(2)
 	flagFlate          = uint16(1 << 0)
 	flateCutoff        = 4 << 10
 	maxDecodedBodySize = 256 << 20
@@ -36,7 +36,7 @@ const (
 	maxDecodedCells    = 16 << 20
 )
 
-// Marshal encodes a v1 durable snapshot.
+// Marshal encodes a v2 durable snapshot.
 func Marshal(s Session) ([]byte, error) {
 	var w payloadWriter
 	if err := writeSession(&w, s); err != nil {
@@ -73,7 +73,7 @@ func Marshal(s Session) ([]byte, error) {
 	return out, nil
 }
 
-// Unmarshal decodes a strict v1 durable snapshot.
+// Unmarshal decodes a strict v2 durable snapshot.
 func Unmarshal(b []byte) (Session, error) {
 	if len(b) < 16 {
 		return Session{}, ErrShortPayload
@@ -166,6 +166,18 @@ func (w *payloadWriter) putString(s string) error {
 	w.b = append(w.b, s...)
 	return nil
 }
+func (w *payloadWriter) putStrings(ss []string) error {
+	if len(ss) > math.MaxUint16 {
+		return fmt.Errorf("%w: too many strings", ErrInvalidData)
+	}
+	w.putUint16(uint16(len(ss)))
+	for _, s := range ss {
+		if err := w.putString(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 type payloadReader struct{ b []byte }
 
@@ -212,6 +224,21 @@ func (r *payloadReader) getString() (string, error) {
 	s := string(r.b[:n])
 	r.b = r.b[n:]
 	return s, nil
+}
+func (r *payloadReader) getStrings() ([]string, error) {
+	n, err := r.getUint16()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, n)
+	for i := range out {
+		s, err := r.getString()
+		if err != nil {
+			return nil, err
+		}
+		out[i] = s
+	}
+	return out, nil
 }
 func (r *payloadReader) done() error {
 	if len(r.b) != 0 {
@@ -267,6 +294,9 @@ func readSession(r *payloadReader) (Session, error) {
 }
 
 func writeTab(w *payloadWriter, t Tab) error {
+	if err := w.putString(t.StableID); err != nil {
+		return err
+	}
 	w.putUint16(t.Cols)
 	w.putUint16(t.Rows)
 	w.putUint64(t.NextPaneID)
@@ -293,6 +323,10 @@ func writeTab(w *payloadWriter, t Tab) error {
 }
 
 func readTab(r *payloadReader) (Tab, error) {
+	stableID, err := r.getString()
+	if err != nil {
+		return Tab{}, err
+	}
 	cols, err := r.getUint16()
 	if err != nil {
 		return Tab{}, err
@@ -317,7 +351,7 @@ func readTab(r *payloadReader) (Tab, error) {
 	if err != nil {
 		return Tab{}, err
 	}
-	t := Tab{Cols: cols, Rows: rows, NextPaneID: next, Focus: layout.PaneID(focus), Tree: &layout.Tree{Root: root, Focus: layout.PaneID(focus)}, Panes: make([]Pane, np)}
+	t := Tab{StableID: stableID, Cols: cols, Rows: rows, NextPaneID: next, Focus: layout.PaneID(focus), Tree: &layout.Tree{Root: root, Focus: layout.PaneID(focus)}, Panes: make([]Pane, np)}
 	for i := range t.Panes {
 		p, err := readPane(r)
 		if err != nil {
@@ -424,6 +458,9 @@ func writePane(w *payloadWriter, p Pane) error {
 	if err := w.putString(string(p.ID)); err != nil {
 		return err
 	}
+	if err := w.putString(p.StableID); err != nil {
+		return err
+	}
 	if err := w.putString(p.Cwd); err != nil {
 		return err
 	}
@@ -442,11 +479,18 @@ func writePane(w *payloadWriter, p Pane) error {
 	if err := writeRows(w, p.Scrollback, idx, false); err != nil {
 		return err
 	}
-	return writeRows(w, p.Visible, idx, true)
+	if err := writeRows(w, p.Visible, idx, true); err != nil {
+		return err
+	}
+	return writeProcess(w, p.Process)
 }
 
 func readPane(r *payloadReader) (Pane, error) {
 	id, err := r.getString()
+	if err != nil {
+		return Pane{}, err
+	}
+	stableID, err := r.getString()
 	if err != nil {
 		return Pane{}, err
 	}
@@ -475,7 +519,58 @@ func readPane(r *payloadReader) (Pane, error) {
 	if err != nil {
 		return Pane{}, err
 	}
-	return Pane{ID: layout.PaneID(id), Cwd: cwd, Scrollback: sb, Visible: vis}, nil
+	proc, err := readProcess(r)
+	if err != nil {
+		return Pane{}, err
+	}
+	return Pane{ID: layout.PaneID(id), StableID: stableID, Cwd: cwd, Scrollback: sb, Visible: vis, Process: proc}, nil
+}
+
+func writeProcess(w *payloadWriter, p *Process) error {
+	if p == nil {
+		w.putUint8(0)
+		return nil
+	}
+	if len(p.Argv) == 0 {
+		return fmt.Errorf("%w: process argv empty", ErrInvalidData)
+	}
+	w.putUint8(1)
+	if err := w.putStrings(p.Argv); err != nil {
+		return err
+	}
+	if err := w.putString(p.Strategy); err != nil {
+		return err
+	}
+	return w.putString(p.Opts.AgentSessionID)
+}
+
+func readProcess(r *payloadReader) (*Process, error) {
+	present, err := r.getUint8()
+	if err != nil {
+		return nil, err
+	}
+	if present == 0 {
+		return nil, nil
+	}
+	if present != 1 {
+		return nil, fmt.Errorf("%w: process presence", ErrInvalidData)
+	}
+	argv, err := r.getStrings()
+	if err != nil {
+		return nil, err
+	}
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("%w: process argv empty", ErrInvalidData)
+	}
+	strategy, err := r.getString()
+	if err != nil {
+		return nil, err
+	}
+	agentSessionID, err := r.getString()
+	if err != nil {
+		return nil, err
+	}
+	return &Process{Argv: argv, Strategy: strategy, Opts: ProcessOpts{AgentSessionID: agentSessionID}}, nil
 }
 
 func writeRows(w *payloadWriter, rows [][]renderer.Cell, idx map[renderer.Style]uint16, trimBlankRows bool) error {
