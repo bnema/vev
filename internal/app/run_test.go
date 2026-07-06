@@ -601,3 +601,35 @@ func TestRunUDPBootstrapForwardsReadinessAndExits(t *testing.T) {
 		t.Fatalf("proxy inherited SSH stdio handles")
 	}
 }
+
+func TestRunUDPBootstrapReturnsReadinessEOF(t *testing.T) {
+	oldTimeout := udpBootstrapTimeout
+	udpBootstrapTimeout = time.Second
+	t.Cleanup(func() { udpBootstrapTimeout = oldTimeout })
+	oldCommand := udpProxyCommand
+	udpProxyCommand = func(context.Context, string, ...string) *exec.Cmd {
+		return exec.Command("/bin/sh", "-c", "exit 7")
+	}
+	t.Cleanup(func() { udpProxyCommand = oldCommand })
+
+	err := runUDPBootstrap(context.Background(), "work")
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("runUDPBootstrap() error = %v, want EOF", err)
+	}
+}
+
+func TestRunUDPBootstrapTimesOutWaitingForReadiness(t *testing.T) {
+	oldTimeout := udpBootstrapTimeout
+	udpBootstrapTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { udpBootstrapTimeout = oldTimeout })
+	oldCommand := udpProxyCommand
+	udpProxyCommand = func(context.Context, string, ...string) *exec.Cmd {
+		return exec.Command("/bin/sh", "-c", "sleep 5")
+	}
+	t.Cleanup(func() { udpProxyCommand = oldCommand })
+
+	err := runUDPBootstrap(context.Background(), "work")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runUDPBootstrap() error = %v, want deadline exceeded", err)
+	}
+}

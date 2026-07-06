@@ -183,7 +183,10 @@ func TestReconnectSleepWithResizeEventsRedrawsUntilTimerFires(t *testing.T) {
 
 func TestRemoteReconnectToastLifecycleWithWrappedTransportError(t *testing.T) {
 	linkDead := errors.New("remote link dead")
-	wrappedLinkDead := errors.Join(fmt.Errorf("remote transport receive failed: %w", linkDead), errors.New("read side closed"))
+	wrappedLinkDead := errors.Join(
+		fmt.Errorf("remote transport receive failed: %w", io.EOF),
+		linkDead,
+	)
 	oldSleep := reconnectSleep
 	oldSleepWithResize := reconnectSleepWithResize
 	reconnectSleep = func(context.Context, ports.Clock, time.Duration) bool { return true }

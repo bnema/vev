@@ -655,6 +655,8 @@ func runUDPBootstrap(ctx context.Context, session string) error {
 	defer func() { _ = devNull.Close() }()
 
 	cmd := udpProxyCommand(ctx, exe, args...)
+	// _udp-proxy writes diagnostics through configureLogging(logging.Stdio, false);
+	// stdio is detached here so the bootstrap SSH channel can close.
 	cmd.Stdin = devNull
 	cmd.Stdout = w
 	cmd.Stderr = devNull

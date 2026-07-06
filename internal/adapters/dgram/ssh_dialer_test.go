@@ -119,7 +119,8 @@ func TestRemoteDialerProbeFailureCleansUpWithoutStdioFallback(t *testing.T) {
 		}
 		return proc
 	})
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	pc, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
