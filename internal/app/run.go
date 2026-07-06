@@ -326,31 +326,70 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) err
 	defer func() { _ = logCloser.Close() }()
 
 	return runAttachWithDeps(ctx, intent, name, remoteTarget, os.Getenv("VEV"), log, runAttachDeps{
-		localDialer:    defaultLocalDialer,
-		remoteDialer:   defaultRemoteDialer,
-		runClient:      client.Run,
-		createDetached: createDetachedLocalSession,
-		clipboard:      clipboard.New(),
+		localDialer:             defaultLocalDialer,
+		remoteDialerFactory:     defaultRemoteDialerFactory(),
+		selectedRemoteTransport: os.Getenv(envRemoteTransport),
+		runClient:               client.Run,
+		createDetached:          createDetachedLocalSession,
+		clipboard:               clipboard.New(),
 	})
 }
 
+const envRemoteTransport = "VEV_REMOTE_TRANSPORT"
+
 func defaultLocalDialer() ports.Dialer { return localDaemonDialer{dir: ipc.SocketDir()} }
 
-func defaultRemoteDialer(target, session string, log *slog.Logger) ports.Dialer {
-	return dgram.NewRemoteDialerWithLogger(target, session, log)
+func defaultRemoteDialerFactory() ports.RemoteDialerFactory { return remoteDialerFactory{} }
+
+type remoteDialerFactory struct{}
+
+func (remoteDialerFactory) DialerForRemote(target string, session string, mode ports.RemoteTransportMode, log *slog.Logger) (ports.Dialer, error) {
+	switch mode {
+	case ports.RemoteTransportUDP:
+		return dgram.NewRemoteDialerWithLogger(target, session, log), nil
+	case ports.RemoteTransportStdio:
+		if log != nil {
+			log.Info("remote transport selected", "mode", string(ports.RemoteTransportStdio))
+		}
+		return sshStdioDialer{target: target, session: session, log: log}, nil
+	default:
+		return nil, fmt.Errorf("vev: unsupported remote transport %q", mode)
+	}
+}
+
+type sshStdioDialer struct {
+	target  string
+	session string
+	log     *slog.Logger
+}
+
+func (d sshStdioDialer) Dial(ctx context.Context) (ports.Transport, error) {
+	return sshstdio.DialContext(ctx, d.target, d.session, d.log)
 }
 
 type runAttachDeps struct {
-	attachLocal    func(context.Context, uint8, string, *slog.Logger) error // compatibility hook for focused tests
-	localDialer    func() ports.Dialer
-	remoteDialer   func(target, session string, log *slog.Logger) ports.Dialer
-	runClient      func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, bool, ports.ClipboardReader, *slog.Logger) error
-	createDetached func(context.Context, string) error
+	attachLocal             func(context.Context, uint8, string, *slog.Logger) error // compatibility hook for focused tests
+	localDialer             func() ports.Dialer
+	remoteDialerFactory     ports.RemoteDialerFactory
+	selectedRemoteTransport string
+	runClient               func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, bool, ports.ClipboardReader, *slog.Logger) error
+	createDetached          func(context.Context, string) error
 	// clipboard reads a clipboard image on a remote attach's Ctrl+V (see
 	// docs/superpowers/specs/2026-07-04-clipboard-image-transfer-design.md).
 	// Only used for the remote-dialer branch below; local attaches never
 	// intercept Ctrl+V regardless of this field.
 	clipboard ports.ClipboardReader
+}
+
+func remoteTransportModeFromEnv(value string) (ports.RemoteTransportMode, error) {
+	switch value {
+	case "", string(ports.RemoteTransportUDP):
+		return ports.RemoteTransportUDP, nil
+	case string(ports.RemoteTransportStdio):
+		return ports.RemoteTransportStdio, nil
+	default:
+		return "", fmt.Errorf("vev: invalid remote transport %q (want %q or %q)", value, ports.RemoteTransportUDP, ports.RemoteTransportStdio)
+	}
 }
 
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
@@ -366,14 +405,22 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		runClient = client.Run
 	}
 	if remoteTarget != "" {
-		remoteDialer := deps.remoteDialer
-		if remoteDialer == nil {
-			remoteDialer = defaultRemoteDialer
+		mode, err := remoteTransportModeFromEnv(deps.selectedRemoteTransport)
+		if err != nil {
+			return err
+		}
+		factory := deps.remoteDialerFactory
+		if factory == nil {
+			factory = defaultRemoteDialerFactory()
 		}
 		if log != nil {
-			log.Info("attaching to remote session", "target", remoteTarget, "name", name)
+			log.Info("attaching to remote session", "target", remoteTarget, "name", name, "transport", string(mode))
 		}
-		return runClient(ctx, remoteDialer(remoteTarget, name, log), term.New(), clock.New(), intent, name, true, deps.clipboard, log)
+		dialer, err := factory.DialerForRemote(remoteTarget, name, mode, log)
+		if err != nil {
+			return err
+		}
+		return runClient(ctx, dialer, term.New(), clock.New(), intent, name, true, deps.clipboard, log)
 	}
 
 	attachLocal := deps.attachLocal

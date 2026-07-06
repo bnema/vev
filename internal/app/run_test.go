@@ -16,8 +16,10 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/confirm"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -436,40 +438,93 @@ func (d namedDialer) Dial(context.Context) (ports.Transport, error) {
 // never actually invoked in these wiring tests.
 type fakeClipboardReader struct{ ports.ClipboardReader }
 
-func TestRunAttachWithDepsBuildsRemoteDialer(t *testing.T) {
-	// The local client still owns terminal capability detection for remote attach;
-	// sshstdio is only a framed transport to `vev _stdio` on the remote host.
-	var gotTarget, gotSession, gotDialer string
-	var gotRemote bool
-	var gotClipboard ports.ClipboardReader
-	clip := &fakeClipboardReader{}
-	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-		remoteDialer: func(target, session string, _ *slog.Logger) ports.Dialer {
-			gotTarget, gotSession = target, session
-			return namedDialer{name: "remote"}
-		},
-		clipboard: clip,
-		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, _ *slog.Logger) error {
-			gotDialer = d.(namedDialer).name
-			gotRemote = remote
-			gotClipboard = clipboard
-			if intent != ports.IntentAttach || name != "work" {
-				t.Fatalf("intent/name = %d/%q, want attach/work", intent, name)
+func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
+	tests := []struct {
+		name              string
+		selectedTransport string
+		wantMode          ports.RemoteTransportMode
+	}{
+		{name: "default remote mode is udp", selectedTransport: "", wantMode: ports.RemoteTransportUDP},
+		{name: "explicit stdio mode", selectedTransport: "stdio", wantMode: ports.RemoteTransportStdio},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotDialer string
+			var gotRemote bool
+			var gotClipboard ports.ClipboardReader
+			clip := &fakeClipboardReader{}
+			factory := portsmocks.NewMockRemoteDialerFactory(t)
+			factory.EXPECT().DialerForRemote("remote.example", "work", tt.wantMode, mock.Anything).Return(namedDialer{name: "remote"}, nil)
+
+			err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+				remoteDialerFactory:     factory,
+				selectedRemoteTransport: tt.selectedTransport,
+				clipboard:               clip,
+				runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, _ *slog.Logger) error {
+					gotDialer = d.(namedDialer).name
+					gotRemote = remote
+					gotClipboard = clipboard
+					if intent != ports.IntentAttach || name != "work" {
+						t.Fatalf("intent/name = %d/%q, want attach/work", intent, name)
+					}
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("runAttachWithDeps returned error: %v", err)
 			}
+			if gotDialer != "remote" {
+				t.Fatalf("remote dialer = %q, want remote", gotDialer)
+			}
+			if !gotRemote {
+				t.Fatal("remote attach must pass remote=true to runClient")
+			}
+			if gotClipboard != ports.ClipboardReader(clip) {
+				t.Fatalf("remote attach must thread the configured ClipboardReader through, got %#v", gotClipboard)
+			}
+		})
+	}
+}
+
+func TestRunAttachWithDepsRejectsInvalidRemoteTransportBeforeDialing(t *testing.T) {
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	runClientCalled := false
+
+	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+		remoteDialerFactory:     factory,
+		selectedRemoteTransport: "serial",
+		runClient: func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, bool, ports.ClipboardReader, *slog.Logger) error {
+			runClientCalled = true
 			return nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("runAttachWithDeps returned error: %v", err)
+	if err == nil || err.Error() != `vev: invalid remote transport "serial" (want "udp" or "stdio")` {
+		t.Fatalf("runAttachWithDeps error = %v, want invalid transport", err)
 	}
-	if gotTarget != "remote.example" || gotSession != "work" || gotDialer != "remote" {
-		t.Fatalf("remote dialer wiring = target %q session %q dialer %q", gotTarget, gotSession, gotDialer)
+	if runClientCalled {
+		t.Fatal("runClient called after invalid remote transport")
 	}
-	if !gotRemote {
-		t.Fatal("remote attach must pass remote=true to runClient")
+}
+
+func TestRunAttachWithDepsReturnsFactoryErrorBeforeRunClient(t *testing.T) {
+	factoryErr := errors.New("factory failed")
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(nil, factoryErr)
+	runClientCalled := false
+
+	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+		remoteDialerFactory: factory,
+		runClient: func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, bool, ports.ClipboardReader, *slog.Logger) error {
+			runClientCalled = true
+			return nil
+		},
+	})
+	if !errors.Is(err, factoryErr) {
+		t.Fatalf("runAttachWithDeps error = %v, want %v", err, factoryErr)
 	}
-	if gotClipboard != ports.ClipboardReader(clip) {
-		t.Fatalf("remote attach must thread the configured ClipboardReader through, got %#v", gotClipboard)
+	if runClientCalled {
+		t.Fatal("runClient called after remote factory error")
 	}
 }
 
@@ -477,9 +532,11 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 	var gotDialer string
 	gotRemote := true
 	gotClipboard := ports.ClipboardReader(&fakeClipboardReader{})
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
 	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "", nil, runAttachDeps{
-		localDialer: func() ports.Dialer { return namedDialer{name: "local"} },
-		clipboard:   &fakeClipboardReader{}, // must NOT reach runClient for a local attach
+		localDialer:         func() ports.Dialer { return namedDialer{name: "local"} },
+		remoteDialerFactory: factory,
+		clipboard:           &fakeClipboardReader{}, // must NOT reach runClient for a local attach
 		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, _ *slog.Logger) error {
 			gotDialer = d.(namedDialer).name
 			gotRemote = remote
