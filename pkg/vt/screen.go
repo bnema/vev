@@ -952,7 +952,7 @@ func (s *Screen) applySGR(params string) {
 		s.Style = renderer.DefaultStyle()
 		return
 	}
-	parts := parseCSIInts(params)
+	parts := parseSGRInts(params)
 	for i := 0; i < len(parts); i++ {
 		switch parts[i] {
 		case 0:
@@ -1314,18 +1314,66 @@ func parseCSIInts(params string) []int {
 	parts := strings.Split(params, ";")
 	out := make([]int, 0, len(parts))
 	for _, p := range parts {
-		if p == "" {
-			out = append(out, 0)
-			continue
-		}
-		v, err := strconv.Atoi(p)
-		if err != nil {
-			out = append(out, 0)
-			continue
-		}
-		out = append(out, v)
+		out = append(out, parseCSIInt(p))
 	}
 	return out
+}
+
+func parseSGRInts(params string) []int {
+	if params == "" {
+		return nil
+	}
+	groups := strings.Split(params, ";")
+	out := make([]int, 0, len(groups))
+	for _, group := range groups {
+		if !strings.Contains(group, ":") {
+			out = append(out, parseCSIInt(group))
+			continue
+		}
+		sub := strings.Split(group, ":")
+		code := parseCSIInt(sub[0])
+		if code != 38 && code != 48 {
+			out = append(out, code)
+			continue
+		}
+		mode := 0
+		if len(sub) > 1 {
+			mode = parseCSIInt(sub[1])
+		}
+		switch mode {
+		case 5:
+			if len(sub) < 3 {
+				continue
+			}
+			out = append(out, code, mode, parseCSIInt(sub[2]))
+		case 2:
+			// code:mode::R:G:B and code:mode:cs:R:G:B both put RGB after
+			// the colorspace slot; code:mode:R:G:B omits that slot.
+			start := 2
+			if len(sub) > 2 && (sub[2] == "" || len(sub) >= 6) {
+				start = 3
+			}
+			if len(sub) < start+3 {
+				continue
+			}
+			out = append(out, code, mode)
+			for i := 0; i < 3; i++ {
+				out = append(out, parseCSIInt(sub[start+i]))
+			}
+		}
+	}
+	return out
+}
+
+func parseCSIInt(param string) int {
+	if param == "" {
+		return 0
+	}
+	v, err := strconv.Atoi(param)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 func clamp(v, lo, hi int) int {

@@ -739,12 +739,119 @@ func TestSGRTruecolor(t *testing.T) {
 			},
 		},
 		{
+			name: "SGR 38:2 sets truecolor foreground",
+			seq:  "\x1b[38:2:12:34:56mX",
+			check: func(t *testing.T, s *Screen) {
+				want := renderer.RGB{R: 12, G: 34, B: 56}
+				if !s.Style.HasForegroundRGB || s.Style.ForegroundRGB != want {
+					t.Errorf("foreground RGB = (%v, %+v), want true/%+v", s.Style.HasForegroundRGB, s.Style.ForegroundRGB, want)
+				}
+				if got := cellAt(s, 0, 0).Style.ForegroundRGB; got != want {
+					t.Errorf("cell foreground RGB = %+v, want %+v", got, want)
+				}
+			},
+		},
+		{
+			name: "SGR 38:2 empty color space sets truecolor foreground",
+			seq:  "\x1b[38:2::12:34:56mX",
+			check: func(t *testing.T, s *Screen) {
+				want := renderer.RGB{R: 12, G: 34, B: 56}
+				if !s.Style.HasForegroundRGB || s.Style.ForegroundRGB != want {
+					t.Errorf("foreground RGB = (%v, %+v), want true/%+v", s.Style.HasForegroundRGB, s.Style.ForegroundRGB, want)
+				}
+				if got := cellAt(s, 0, 0).Style.ForegroundRGB; got != want {
+					t.Errorf("cell foreground RGB = %+v, want %+v", got, want)
+				}
+			},
+		},
+		{
+			name: "SGR 38:2 color space id sets truecolor foreground",
+			seq:  "\x1b[38:2:1:12:34:56mX",
+			check: func(t *testing.T, s *Screen) {
+				want := renderer.RGB{R: 12, G: 34, B: 56}
+				if !s.Style.HasForegroundRGB || s.Style.ForegroundRGB != want {
+					t.Errorf("foreground RGB = (%v, %+v), want true/%+v", s.Style.HasForegroundRGB, s.Style.ForegroundRGB, want)
+				}
+				if got := cellAt(s, 0, 0).Style.ForegroundRGB; got != want {
+					t.Errorf("cell foreground RGB = %+v, want %+v", got, want)
+				}
+			},
+		},
+		{
+			name: "mixed semicolon and colon SGR groups",
+			seq:  "\x1b[1;38:2:10:20:30;7mX",
+			check: func(t *testing.T, s *Screen) {
+				want := renderer.RGB{R: 10, G: 20, B: 30}
+				if !s.Style.Bold || !s.Style.Inverse {
+					t.Errorf("bold/inverse = %v/%v, want true/true", s.Style.Bold, s.Style.Inverse)
+				}
+				if !s.Style.HasForegroundRGB || s.Style.ForegroundRGB != want {
+					t.Errorf("foreground RGB = (%v, %+v), want true/%+v", s.Style.HasForegroundRGB, s.Style.ForegroundRGB, want)
+				}
+			},
+		},
+		{
+			name: "truncated colon truecolor group does not consume next parameter",
+			seq:  "\x1b[38:2:1:2;31m",
+			check: func(t *testing.T, s *Screen) {
+				if s.Style.Foreground != 1 || s.Style.HasForegroundRGB {
+					t.Errorf("foreground = %d rgb:%v, want 1 false", s.Style.Foreground, s.Style.HasForegroundRGB)
+				}
+			},
+		},
+		{
 			name: "SGR 48;2 sets truecolor background",
 			seq:  "\x1b[48;2;200;100;50m",
 			check: func(t *testing.T, s *Screen) {
 				want := renderer.RGB{R: 200, G: 100, B: 50}
 				if !s.Style.HasBackgroundRGB || s.Style.BackgroundRGB != want {
 					t.Errorf("background RGB = (%v, %+v), want true/%+v", s.Style.HasBackgroundRGB, s.Style.BackgroundRGB, want)
+				}
+			},
+		},
+		{
+			name: "SGR 48:2 sets truecolor background",
+			seq:  "\x1b[48:2:200:100:50m",
+			check: func(t *testing.T, s *Screen) {
+				want := renderer.RGB{R: 200, G: 100, B: 50}
+				if !s.Style.HasBackgroundRGB || s.Style.BackgroundRGB != want {
+					t.Errorf("background RGB = (%v, %+v), want true/%+v", s.Style.HasBackgroundRGB, s.Style.BackgroundRGB, want)
+				}
+			},
+		},
+		{
+			name: "SGR 38:5 sets 256-color foreground",
+			seq:  "\x1b[38:5:82m",
+			check: func(t *testing.T, s *Screen) {
+				if s.Style.Foreground != 82 || s.Style.HasForegroundRGB {
+					t.Errorf("foreground = %d rgb:%v, want 82 false", s.Style.Foreground, s.Style.HasForegroundRGB)
+				}
+			},
+		},
+		{
+			name: "SGR 48:5 sets 256-color background",
+			seq:  "\x1b[48:5:200m",
+			check: func(t *testing.T, s *Screen) {
+				if s.Style.Background != 200 || s.Style.HasBackgroundRGB {
+					t.Errorf("background = %d rgb:%v, want 200 false", s.Style.Background, s.Style.HasBackgroundRGB)
+				}
+			},
+		},
+		{
+			name: "truncated colon foreground index group does not consume next parameter",
+			seq:  "\x1b[38:5;31m",
+			check: func(t *testing.T, s *Screen) {
+				if s.Style.Foreground != 1 || s.Style.HasForegroundRGB {
+					t.Errorf("foreground = %d rgb:%v, want 1 false", s.Style.Foreground, s.Style.HasForegroundRGB)
+				}
+			},
+		},
+		{
+			name: "truncated colon background index group does not consume next parameter",
+			seq:  "\x1b[48:5;44m",
+			check: func(t *testing.T, s *Screen) {
+				if s.Style.Background != 4 || s.Style.HasBackgroundRGB {
+					t.Errorf("background = %d rgb:%v, want 4 false", s.Style.Background, s.Style.HasBackgroundRGB)
 				}
 			},
 		},
