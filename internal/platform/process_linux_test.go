@@ -9,6 +9,12 @@ import (
 	"testing"
 )
 
+func TestProcessCwdRejectsInvalidPID(t *testing.T) {
+	if _, err := processCwd("/proc", 0); err == nil {
+		t.Fatal("processCwd accepted invalid pid")
+	}
+}
+
 func TestProcessArgv(t *testing.T) {
 	argv, err := ProcessArgv(os.Getpid())
 	if err != nil {

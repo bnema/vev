@@ -12,6 +12,9 @@ func ProcessCwd(pid int) (string, error) {
 }
 
 func processCwd(root string, pid int) (string, error) {
+	if pid <= 0 {
+		return "", fmt.Errorf("process cwd: invalid pid %d", pid)
+	}
 	return os.Readlink(fmt.Sprintf("%s/%d/cwd", root, pid))
 }
 

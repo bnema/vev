@@ -205,6 +205,8 @@ func TestRestoreSnapshotsProcessCommandWriteFailureIsNonFatal(t *testing.T) {
 	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"pi"}}})
 
 	require.NoError(t, d.restoreSession(context.Background(), snapcodec.Session{Name: "agent", Tabs: []snapcodec.Tab{{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/tmp", Process: proc}}}}}))
+	require.Len(t, factory.opens, 1)
+	require.Equal(t, []string{"pi --resume abc123\n"}, factory.opens[0].pty.writes)
 }
 
 func TestRestoreSnapshotsOpensCollapsedStackPanesWithValidPTYSize(t *testing.T) {
