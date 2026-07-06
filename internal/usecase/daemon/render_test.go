@@ -1027,3 +1027,68 @@ func TestCursorTailUsesExpandedStackContentPlacement(t *testing.T) {
 func cursorCSI(row, col int) string {
 	return "\x1b[" + strconv.Itoa(row) + ";" + strconv.Itoa(col) + "H"
 }
+
+func TestHistoryNavBottomBar(t *testing.T) {
+	styles := newThemeStyles(themeui.Theme{})
+
+	t.Run("frozen order active styling and right text", func(t *testing.T) {
+		row := make([]renderer.Cell, 40)
+		state := barState{
+			bottomRight: "script",
+			history: []historyNavSession{
+				{id: "work", name: "work"},
+				{id: "api", name: "api", active: true},
+				{id: "docs", name: "docs", ephemeral: true},
+			},
+		}
+
+		drawStatusBarState(row, state, styles)
+
+		got := cellsString(row)
+		require.Contains(t, got, " work  api  docs* ")
+		require.Contains(t, got, " script")
+		apiCol := strings.Index(got, "api")
+		require.NotEqual(t, -1, apiCol)
+		require.True(t, row[apiCol].Style.Equal(styles.accent))
+		workCol := strings.Index(got, "work")
+		require.NotEqual(t, -1, workCol)
+		require.True(t, row[workCol].Style.Equal(styles.statusBar))
+	})
+
+	t.Run("empty history falls back to normal mru", func(t *testing.T) {
+		row := make([]renderer.Cell, 30)
+		state := barState{
+			status: statusSnapshot{session: "work"},
+			mru:    []mruSession{{name: "api"}, {name: "docs"}},
+		}
+
+		drawStatusBarState(row, state, styles)
+
+		got := cellsString(row)
+		require.Contains(t, got, " work  api  docs ")
+		workCol := strings.Index(got, "work")
+		require.NotEqual(t, -1, workCol)
+		require.True(t, row[workCol].Style.Equal(styles.accent))
+	})
+
+	t.Run("narrow fitting keeps active visible in contiguous window", func(t *testing.T) {
+		row := make([]renderer.Cell, 13)
+		state := barState{history: []historyNavSession{
+			{name: "work"},
+			{name: "api"},
+			{name: "docs", active: true},
+			{name: "infra"},
+			{name: "ops"},
+		}}
+
+		drawStatusBarState(row, state, styles)
+
+		got := cellsString(row)
+		require.Contains(t, got, "docs")
+		require.NotContains(t, got, "work")
+		require.NotContains(t, got, "ops")
+		docsCol := strings.Index(got, "docs")
+		require.NotEqual(t, -1, docsCol)
+		require.True(t, row[docsCol].Style.Equal(styles.accent))
+	})
+}

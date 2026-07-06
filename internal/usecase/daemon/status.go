@@ -79,9 +79,15 @@ func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, t
 func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles) {
 	clearStatusRow(row)
 	x := 0
+	rightText := composeBottomRightText(state.bottomRight, state.copyFeedback)
+	if len(state.history) > 0 {
+		drawHistoryNavSessions(row, &x, state.history, rightText, state.attentionFrame, styles)
+		drawRightPlainText(row, rightText, x, styles.statusBar)
+		return
+	}
+
 	writeStatusText(row, &x, " "+state.status.session+" ", styles.accent)
 
-	rightText := composeBottomRightText(state.bottomRight, state.copyFeedback)
 	fittedMRU := fitMRU(state.mru, len(row), x, rightText)
 	for i, sess := range fittedMRU {
 		style := mruStyle(styles.statusBar, state.theme, i, len(fittedMRU))
@@ -97,6 +103,25 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles)
 		writeStatusText(row, &x, " ", style)
 	}
 	drawRightPlainText(row, rightText, x, styles.statusBar)
+}
+
+func drawHistoryNavSessions(row []renderer.Cell, x *int, entries []historyNavSession, rightText string, attentionFrame int, styles themeStyles) {
+	for _, sess := range fitHistoryNav(entries, len(row), *x, rightText) {
+		style := styles.statusBar
+		if sess.active {
+			style = styles.accent
+		}
+		name := sess.name
+		if sess.ephemeral {
+			name += "*"
+		}
+		writeStatusText(row, x, " "+name, style)
+		if sess.attention {
+			writeStatusText(row, x, " ", style)
+			writeBell(row, x, attentionFrame)
+		}
+		writeStatusText(row, x, " ", style)
+	}
 }
 
 func composeBottomRightText(scriptText, copyFeedback string) string {
@@ -138,6 +163,7 @@ type barState struct {
 	bottomRight    string
 	copyFeedback   string
 	mru            []mruSession
+	history        []historyNavSession
 	attentionFrame int
 	// theme is the client's terminal theme, if reported. Its zero value
 	// (Theme{}, Known: false) is a valid "no theme" default that resolves to
@@ -152,6 +178,14 @@ type mruSession struct {
 	attention bool
 	// mruAt orders entries in barStateFor (freshest first); drawing ignores it.
 	mruAt uint64
+}
+
+type historyNavSession struct {
+	id        domain.SessionID
+	name      string
+	ephemeral bool
+	attention bool
+	active    bool
 }
 
 type statusSnapshot struct {
@@ -178,6 +212,53 @@ func (s *session) statusSegments() statusSnapshot {
 		snap.tabs[i] = statusTab{name: name, active: i == s.active, attention: tb.attention}
 	}
 	return snap
+}
+
+func (d *Daemon) barStateForClient(cur *session, ac *attachedClient, copyFeedback string) barState {
+	state := d.barStateFor(cur, copyFeedback)
+	state.history = d.historyNavBarState(ac)
+	return state
+}
+
+func (d *Daemon) historyNavBarState(ac *attachedClient) []historyNavSession {
+	if d == nil || ac == nil {
+		return nil
+	}
+	ac.historyNavMu.Lock()
+	if !ac.historyNav.active() {
+		ac.historyNavMu.Unlock()
+		return nil
+	}
+	ids := append([]domain.SessionID(nil), ac.historyNav.ids...)
+	activeIndex := ac.historyNav.index
+	ac.historyNavMu.Unlock()
+
+	d.mu.Lock()
+	out := make([]historyNavSession, 0, len(ids))
+	valid := true
+	for i, id := range ids {
+		sess := d.sessions[id]
+		if sess == nil {
+			valid = false
+			break
+		}
+		sess.mu.Lock()
+		entry := historyNavSession{id: sess.id, name: sess.name, ephemeral: sess.ephemeral, active: i == activeIndex}
+		for _, tb := range sess.tabs {
+			if tb.attention {
+				entry.attention = true
+				break
+			}
+		}
+		sess.mu.Unlock()
+		out = append(out, entry)
+	}
+	d.mu.Unlock()
+	if !valid {
+		d.clearHistoryNav(ac)
+		return nil
+	}
+	return out
 }
 
 func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
@@ -224,6 +305,70 @@ func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 	}
 	state.mru = mru
 	return state
+}
+
+func fitHistoryNav(entries []historyNavSession, rowLen, leftUsed int, feedback string) []historyNavSession {
+	copyReserve := 1
+	if feedback != "" {
+		copyReserve = statusTextWidth(feedback) + 2
+	}
+	budget := rowLen - leftUsed - copyReserve
+	if budget <= 0 || len(entries) == 0 {
+		return nil
+	}
+	cost := func(e historyNavSession) int {
+		name := e.name
+		if e.ephemeral {
+			name += "*"
+		}
+		n := 2 + statusTextWidth(name)
+		if e.attention {
+			n += 1 + renderer.RuneWidth(attentionGlyph)
+		}
+		return n
+	}
+	used := 0
+	for _, e := range entries {
+		used += cost(e)
+	}
+	if used <= budget {
+		return entries
+	}
+	active := 0
+	for i, e := range entries {
+		if e.active {
+			active = i
+			break
+		}
+	}
+	if cost(entries[active]) > budget {
+		return nil
+	}
+	start, end := active, active+1
+	used = cost(entries[active])
+	for {
+		expanded := false
+		if start > 0 {
+			c := cost(entries[start-1])
+			if used+c <= budget {
+				start--
+				used += c
+				expanded = true
+			}
+		}
+		if end < len(entries) {
+			c := cost(entries[end])
+			if used+c <= budget {
+				end++
+				used += c
+				expanded = true
+			}
+		}
+		if !expanded {
+			break
+		}
+	}
+	return entries[start:end]
 }
 
 func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSession {

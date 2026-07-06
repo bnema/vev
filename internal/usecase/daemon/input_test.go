@@ -287,6 +287,216 @@ func TestPaletteBackForwardSessionBoundaries(t *testing.T) {
 	})
 }
 
+func TestHistoryNavDisplay(t *testing.T) {
+	ids := []domain.SessionID{"current", "recent", "older"}
+	var h historyNavDisplay
+
+	h.set(ids, 1, 7)
+	ids[1] = "mutated"
+	require.True(t, h.active())
+	require.Equal(t, []domain.SessionID{domain.SessionID("current"), domain.SessionID("recent"), domain.SessionID("older")}, h.ids)
+	require.Equal(t, 1, h.index)
+	require.Equal(t, uint64(7), h.gen)
+
+	h.index = -1
+	require.False(t, h.active())
+	h.index = len(h.ids)
+	require.False(t, h.active())
+
+	h.clear()
+	require.False(t, h.active())
+	require.Empty(t, h.ids)
+	require.Zero(t, h.index)
+	require.Equal(t, uint64(7), h.gen)
+}
+
+func TestHistoryNavActivation(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	recent := d.sessions[domain.SessionID("recent")]
+	older := d.sessions[domain.SessionID("older")]
+
+	runPaletteCommand(t, d, current, ac, "BSK")
+	require.Same(t, recent, ac.currentSession())
+	requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
+	require.GreaterOrEqual(t, drainOutputFrames(sends), 2)
+
+	runPaletteCommand(t, d, recent, ac, "BSK")
+	require.Same(t, older, ac.currentSession())
+	requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 2)
+
+	runPaletteCommand(t, d, older, ac, "FSK")
+	require.Same(t, recent, ac.currentSession())
+	requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
+}
+
+func TestHistoryNavBoundaryDoesNotActivate(t *testing.T) {
+	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+
+	runPaletteCommand(t, d, current, ac, "FSK")
+
+	require.Same(t, current, ac.currentSession())
+	ac.historyNavMu.Lock()
+	active := ac.historyNav.active()
+	ac.historyNavMu.Unlock()
+	require.False(t, active)
+}
+
+func TestHistoryNavTimeoutExpires(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	clock := &historyNavTestClock{timers: make(chan *historyNavTestTimer, 1)}
+	d.clock = clock
+
+	runPaletteCommand(t, d, current, ac, "BSK")
+	requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
+	timer := <-clock.timers
+	drainOutputFrames(sends)
+	timer.fire()
+
+	require.Eventually(t, func() bool {
+		ac.historyNavMu.Lock()
+		defer ac.historyNavMu.Unlock()
+		return !ac.historyNav.active()
+	}, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return drainOutputFrames(sends) > 0 }, time.Second, time.Millisecond)
+}
+
+func TestHistoryNavStaleTimerCannotClearFreshActivation(t *testing.T) {
+	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	clock := &historyNavTestClock{timers: make(chan *historyNavTestTimer, 2)}
+	d.clock = clock
+
+	runPaletteCommand(t, d, current, ac, "BSK")
+	staleTimer := <-clock.timers
+	ac.clearHistoryNav()
+	runPaletteCommand(t, d, ac.currentSession(), ac, "FSK")
+	<-clock.timers
+
+	staleTimer.fire()
+
+	require.Eventually(t, func() bool {
+		ac.historyNavMu.Lock()
+		defer ac.historyNavMu.Unlock()
+		return ac.historyNav.active() && ac.historyNav.index == 0 && ac.historyNav.gen > 1
+	}, time.Second, time.Millisecond)
+}
+
+func TestHistoryNavTimerStoppedOnDetachAndReplacement(t *testing.T) {
+	t.Run("detach stops stale timer repaint", func(t *testing.T) {
+		d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+		clock := &historyNavTestClock{timers: make(chan *historyNavTestTimer, 1)}
+		d.clock = clock
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+		timer := <-clock.timers
+		recent := ac.currentSession()
+		d.clientGone(recent, ac, ac.transport(), true)
+		drainOutputFrames(sends)
+		timer.fire()
+
+		requireNoHistoryNav(t, ac)
+		require.Never(t, func() bool { return drainOutputFrames(sends) > 0 }, 25*time.Millisecond, time.Millisecond)
+	})
+
+	t.Run("replacement stops stale timer repaint", func(t *testing.T) {
+		d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+		clock := &historyNavTestClock{timers: make(chan *historyNavTestTimer, 1)}
+		d.clock = clock
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+		timer := <-clock.timers
+		d.detachReplacedClient(ac)
+		drainOutputFrames(sends)
+		timer.fire()
+
+		requireNoHistoryNav(t, ac)
+		require.Never(t, func() bool { return drainOutputFrames(sends) > 0 }, 25*time.Millisecond, time.Millisecond)
+	})
+}
+
+func TestHistoryNavClearsOnInvalidTrailAndNonHistorySwitch(t *testing.T) {
+	t.Run("invalid frozen trail clears", func(t *testing.T) {
+		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+		requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
+		d.mu.Lock()
+		delete(d.sessions, domain.SessionID("older"))
+		d.mu.Unlock()
+
+		require.Nil(t, d.historyNavBarState(ac))
+		requireNoHistoryNav(t, ac)
+	})
+
+	t.Run("non history palette command clears frozen trail", func(t *testing.T) {
+		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+		requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
+		runPaletteCommand(t, d, ac.currentSession(), ac, "NXT")
+
+		requireNoHistoryNav(t, ac)
+	})
+}
+
+func requireHistoryNav(t *testing.T, ac *attachedClient, want []domain.SessionID, wantIndex int) {
+	t.Helper()
+	ac.historyNavMu.Lock()
+	defer ac.historyNavMu.Unlock()
+	require.True(t, ac.historyNav.active())
+	require.Equal(t, want, ac.historyNav.ids)
+	require.Equal(t, wantIndex, ac.historyNav.index)
+}
+
+func requireNoHistoryNav(t *testing.T, ac *attachedClient) {
+	t.Helper()
+	ac.historyNavMu.Lock()
+	defer ac.historyNavMu.Unlock()
+	require.False(t, ac.historyNav.active())
+}
+
+func drainOutputFrames(sends chan ports.Frame) int {
+	count := 0
+	for {
+		select {
+		case f := <-sends:
+			if f.Type == ports.MsgOutput {
+				count++
+			}
+		default:
+			return count
+		}
+	}
+}
+
+type historyNavTestClock struct {
+	timers chan *historyNavTestTimer
+}
+
+func (c *historyNavTestClock) Now() time.Time { return time.Time{} }
+
+func (c *historyNavTestClock) NewTimer(time.Duration) ports.Timer {
+	t := &historyNavTestTimer{ch: make(chan time.Time, 1)}
+	c.timers <- t
+	return t
+}
+
+type historyNavTestTimer struct {
+	ch chan time.Time
+}
+
+func (t *historyNavTestTimer) C() <-chan time.Time      { return t.ch }
+func (t *historyNavTestTimer) Reset(time.Duration) bool { return false }
+func (t *historyNavTestTimer) Stop() bool               { return true }
+func (t *historyNavTestTimer) fire()                    { t.ch <- time.Time{} }
+
 func TestPaletteBackForwardSessionStaleTrail(t *testing.T) {
 	t.Run("forward skips a killed intermediate session", func(t *testing.T) {
 		d, current, ac, _, releases := newRecentNavigationTestSessions(t)

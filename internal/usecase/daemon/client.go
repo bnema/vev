@@ -39,27 +39,30 @@ import (
 )
 
 type attachedClient struct {
-	tr            ports.Transport
-	rend          *renderer.Renderer
-	overlays      *overlayRuntime
-	clientID      [16]byte
-	resumeCapable bool
-	resumeToken   uint64
-	parked        bool
-	nextStateNum  uint64
-	echoAck       atomic.Uint64
-	bars          barCache // only touched while sendMu is held
-	size          domain.Size
-	keys          *keys.Router
-	sess          Guarded[*session]
-	mouseScan     mouse.Scanner
-	themeMu       sync.Mutex
-	theme         themeui.Theme
-	clientTheme   themeui.Theme
-	lastCursor    cursorOut
-	recentNav     recentSessionNavigator
-	linkMu        sync.Mutex
-	sendMu        sync.Mutex
+	tr              ports.Transport
+	rend            *renderer.Renderer
+	overlays        *overlayRuntime
+	clientID        [16]byte
+	resumeCapable   bool
+	resumeToken     uint64
+	parked          bool
+	nextStateNum    uint64
+	echoAck         atomic.Uint64
+	bars            barCache // only touched while sendMu is held
+	size            domain.Size
+	keys            *keys.Router
+	sess            Guarded[*session]
+	mouseScan       mouse.Scanner
+	themeMu         sync.Mutex
+	theme           themeui.Theme
+	clientTheme     themeui.Theme
+	lastCursor      cursorOut
+	recentNav       recentSessionNavigator
+	historyNavMu    sync.Mutex
+	historyNav      historyNavDisplay
+	historyNavTimer pendingByteTimer
+	linkMu          sync.Mutex
+	sendMu          sync.Mutex
 }
 
 type cursorOut struct {
@@ -108,7 +111,23 @@ func (ac *attachedClient) initOverlays() {
 
 func (ac *attachedClient) currentSession() *session { return ac.sess.Get() }
 
-func (ac *attachedClient) setSession(sess *session) { ac.sess.Set(sess) }
+func (ac *attachedClient) setSession(sess *session) {
+	if sess == nil {
+		ac.clearHistoryNav()
+	}
+	ac.sess.Set(sess)
+}
+
+func (ac *attachedClient) clearHistoryNav() {
+	if ac == nil {
+		return
+	}
+	ac.historyNavMu.Lock()
+	ac.historyNav.gen++
+	ac.historyNavTimer.stop()
+	ac.historyNav.clear()
+	ac.historyNavMu.Unlock()
+}
 
 func (ac *attachedClient) getTheme() themeui.Theme {
 	ac.themeMu.Lock()
