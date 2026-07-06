@@ -73,7 +73,6 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		}
 		cancel()
 	}
-	restoreCommands := make(map[layout.PaneID]string)
 	allowlist := d.restoreProcessAllowlistSnapshot()
 	for _, tabSnap := range snap.Tabs {
 		if err := ctx.Err(); err != nil {
@@ -110,8 +109,9 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		tb.ctx, tb.cancel = context.WithCancel(sctx)
 		opened = append(opened, tb)
 		for _, paneSnap := range tabSnap.Panes {
+			restoreCommand := ""
 			if decision := planProcessRestore(paneSnap.Process, allowlist); decision.Restore {
-				restoreCommands[paneSnap.ID] = decision.Command
+				restoreCommand = decision.Command
 			}
 			if err := ctx.Err(); err != nil {
 				closeOpened()
@@ -141,8 +141,8 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 			p.ctx, p.cancel = context.WithCancel(tb.ctx)
 			p.rect = contentRect
 			seedPaneRows(p, paneSnap.Scrollback, paneSnap.Visible)
-			if command := restoreCommands[paneSnap.ID]; command != "" {
-				if _, err := pty.Write([]byte(command + "\n")); err != nil {
+			if restoreCommand != "" {
+				if _, err := pty.Write([]byte(restoreCommand + "\n")); err != nil {
 					d.log.Warn("writing snapshot restore command failed", "err", err, "session", snap.Name, "pane", paneSnap.ID)
 				}
 			}

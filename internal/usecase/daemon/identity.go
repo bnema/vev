@@ -17,7 +17,7 @@ func newStableID(prefix string) (string, error) {
 	return prefix + "_" + strings.ToLower(enc), nil
 }
 
-func mustTestStableID(prefix string) string {
+func fallbackStableID(prefix string) string {
 	id, err := newStableID(prefix)
 	if err != nil {
 		return prefix + "_unknown"

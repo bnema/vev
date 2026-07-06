@@ -137,6 +137,43 @@ func TestRestoreSnapshotsSkipsDeniedProcessCommands(t *testing.T) {
 	require.Empty(t, factory.opens[0].pty.writes)
 }
 
+func TestRestoreSnapshotsKeepsProcessCommandsScopedToPane(t *testing.T) {
+	store := &restoreSnapshotStore{blobs: []ports.SnapshotBlob{{Name: "scoped", Data: mustSnapshotBytes(t, snapcodec.Session{
+		Name: "scoped",
+		Tabs: []snapcodec.Tab{
+			{
+				Cols: 80,
+				Rows: 24,
+				Tree: layout.NewTree("pane-1"),
+				Panes: []snapcodec.Pane{{
+					ID:      "pane-1",
+					Cwd:     "/one",
+					Process: &snapcodec.Process{Argv: []string{"less", "README.md"}, Strategy: processStrategyGeneric},
+				}},
+			},
+			{
+				Cols: 80,
+				Rows: 24,
+				Tree: layout.NewTree("pane-1"),
+				Panes: []snapcodec.Pane{{
+					ID:  "pane-1",
+					Cwd: "/two",
+				}},
+			},
+		},
+	})}}}
+	factory := &restorePTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	WithSnapshotStore(store)(d)
+	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"less"}}})
+
+	d.restoreSnapshots(context.Background())
+
+	require.Len(t, factory.opens, 2)
+	require.Equal(t, []string{"less README.md\n"}, factory.opens[0].pty.writes)
+	require.Empty(t, factory.opens[1].pty.writes)
+}
+
 func TestRestoreSnapshotsWritesAgentIDCommandAndWriteFailureIsNonFatal(t *testing.T) {
 	proc := &snapcodec.Process{Argv: []string{"pi"}, Strategy: processStrategyPi, Opts: snapcodec.ProcessOpts{AgentSessionID: "abc123"}}
 	store := processRestoreTestStore(t, "agent", proc)

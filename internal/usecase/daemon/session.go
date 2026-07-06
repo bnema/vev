@@ -291,7 +291,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 }
 
 func newTab(pty ports.PTY, sz domain.Size) *tab {
-	return newTabWithStableID(mustTestStableID("t"), mustTestStableID("p"), pty, sz)
+	return newTabWithStableID(fallbackStableID("t"), fallbackStableID("p"), pty, sz)
 }
 
 func newTabWithStableID(tabStableID, paneStableID string, pty ports.PTY, sz domain.Size) *tab {
