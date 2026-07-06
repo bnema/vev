@@ -97,6 +97,7 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 		return nil, udpUnavailable("bootstrap stdout", err, &stderr)
 	}
 	if err := proc.Start(); err != nil {
+		_ = stdout.Close()
 		return nil, udpUnavailable("start bootstrap", err, &stderr)
 	}
 	cleanup := true

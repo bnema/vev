@@ -21,6 +21,13 @@ type fakeBootstrapProcess struct {
 	waited   bool
 }
 
+type closeTrackReadCloser struct {
+	io.Reader
+	closed *bool
+}
+
+func (r closeTrackReadCloser) Close() error { *r.closed = true; return nil }
+
 func (p *fakeBootstrapProcess) StdoutPipe() (io.ReadCloser, error) { return p.stdout, nil }
 func (p *fakeBootstrapProcess) Start() error                       { return p.startErr }
 func (p *fakeBootstrapProcess) Kill() error                        { p.killed = true; return nil }
@@ -43,22 +50,24 @@ func withListenUDP(t *testing.T, fn func(context.Context) (net.PacketConn, error
 func TestRemoteDialerUDPBootstrapFailures(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(make([]byte, pdgram.KeySize))
 	tests := []struct {
-		name   string
-		stdout string
-		start  error
-		listen error
-		want   string
-		killed bool
-		waited bool
+		name             string
+		stdout           string
+		start            error
+		listen           error
+		want             string
+		killed           bool
+		waited           bool
+		wantStdoutClosed bool
 	}{
-		{name: "start failure", start: errors.New("ssh missing"), want: "vev: remote UDP transport unavailable: start bootstrap: ssh missing"},
-		{name: "malformed readiness", stdout: "hello\n", want: "malformed readiness line", killed: true, waited: true},
-		{name: "bootstrap wait failure", stdout: "VEV-UDP 4444 " + key + "\n", want: "wait bootstrap: exit status 255", waited: true},
-		{name: "packet listen failure", stdout: "VEV-UDP 4444 " + key + "\n", listen: errors.New("bind denied"), want: "listen UDP: bind denied", waited: true},
+		{name: "start failure", start: errors.New("ssh missing"), want: "vev: remote UDP transport unavailable: start bootstrap: ssh missing", wantStdoutClosed: true},
+		{name: "malformed readiness", stdout: "hello\n", want: "malformed readiness line", killed: true, waited: true, wantStdoutClosed: true},
+		{name: "bootstrap wait failure", stdout: "VEV-UDP 4444 " + key + "\n", want: "wait bootstrap: exit status 255", waited: true, wantStdoutClosed: true},
+		{name: "packet listen failure", stdout: "VEV-UDP 4444 " + key + "\n", listen: errors.New("bind denied"), want: "listen UDP: bind denied", waited: true, wantStdoutClosed: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			proc := &fakeBootstrapProcess{stdout: io.NopCloser(strings.NewReader(tt.stdout)), startErr: tt.start}
+			stdoutClosed := false
+			proc := &fakeBootstrapProcess{stdout: closeTrackReadCloser{Reader: strings.NewReader(tt.stdout), closed: &stdoutClosed}, startErr: tt.start}
 			if tt.name == "bootstrap wait failure" {
 				proc.waitErr = errors.New("exit status 255")
 			}
@@ -78,6 +87,9 @@ func TestRemoteDialerUDPBootstrapFailures(t *testing.T) {
 			}
 			if proc.waited != tt.waited {
 				t.Fatalf("waited=%v, want %v", proc.waited, tt.waited)
+			}
+			if stdoutClosed != tt.wantStdoutClosed {
+				t.Fatalf("stdout closed=%v, want %v", stdoutClosed, tt.wantStdoutClosed)
 			}
 		})
 	}
