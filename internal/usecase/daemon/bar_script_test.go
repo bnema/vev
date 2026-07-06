@@ -80,25 +80,30 @@ func TestBarScriptContextEnv(t *testing.T) {
 
 func TestBarScriptRunner(t *testing.T) {
 	runner := barScriptRunner{timeout: 50 * time.Millisecond, baseEnv: os.Environ()}
-	got, err := runner.run(context.Background(), "", barScriptContext{})
-	if err != nil || got != "" {
-		t.Fatalf("empty command = %q, %v; want empty nil", got, err)
+	tests := []struct {
+		name    string
+		command string
+		want    string
+		wantErr error
+	}{
+		{name: "empty command", command: "", want: ""},
+		{name: "success first line", command: "printf 'ok\\nignored'", want: "ok"},
+		{name: "timeout", command: "sleep 1; printf late", wantErr: context.DeadlineExceeded},
 	}
-
-	got, err = runner.run(context.Background(), "printf 'ok\\nignored'", barScriptContext{})
-	if err != nil {
-		t.Fatalf("run command: %v", err)
-	}
-	if got != "ok" {
-		t.Fatalf("run command = %q, want ok", got)
-	}
-
-	got, err = runner.run(context.Background(), "sleep 1; printf late", barScriptContext{})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("timeout err = %v, want DeadlineExceeded", err)
-	}
-	if got != "" {
-		t.Fatalf("timeout output = %q, want empty", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := runner.run(context.Background(), tt.command, barScriptContext{})
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("run err = %v, want %v", err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("run err = %v, want nil", err)
+			}
+			if got != tt.want {
+				t.Fatalf("run output = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

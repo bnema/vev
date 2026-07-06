@@ -238,12 +238,13 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 		return nil
 	}
 	cost := func(e mruSession) int {
-		n := 2 + len([]rune(e.name))
+		name := e.name
 		if e.ephemeral {
-			n++
+			name += "*"
 		}
+		n := 2 + statusTextWidth(name)
 		if e.attention {
-			n += 2
+			n += 1 + renderer.RuneWidth(attentionGlyph)
 		}
 		return n
 	}

@@ -2,6 +2,9 @@ package domain
 
 import "time"
 
+// MinBarInterval is the minimum supported bar refresh interval.
+const MinBarInterval = time.Second
+
 // ThemeMode selects how vev derives its color scheme.
 type ThemeMode int
 

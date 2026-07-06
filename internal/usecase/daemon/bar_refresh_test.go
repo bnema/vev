@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
 )
@@ -101,6 +102,22 @@ func TestBarScriptRefreshSkipsWithoutAttachedClient(t *testing.T) {
 	require.Empty(t, r.calls)
 }
 
+func TestBarScriptRefreshSkipsRunnerWhenCommandsDisabled(t *testing.T) {
+	r := &fakeBarRunner{}
+	d := newBarRefreshTestDaemon(r, time.Second)
+	d.barScripts.cfg.topRight = ""
+	d.barScripts.cfg.bottomRight = ""
+	sess := newBarRefreshTestSession()
+	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+	d.barScripts.outputs[sess.id] = barScriptOutputs{topRight: "old", bottomRight: "old"}
+
+	require.False(t, d.refreshBarScriptsIfDue(sess, time.Unix(0, 0), true))
+	require.Empty(t, r.calls)
+	state := d.barStateFor(sess, "")
+	require.Empty(t, state.topRight)
+	require.Empty(t, state.bottomRight)
+}
+
 func TestBarScriptForcedRefreshRespectsMinimumInterval(t *testing.T) {
 	r := &fakeBarRunner{outs: []string{"top1", "bottom1", "top2", "bottom2"}}
 	d := newBarRefreshTestDaemon(r, 5*time.Second)
@@ -111,6 +128,11 @@ func TestBarScriptForcedRefreshRespectsMinimumInterval(t *testing.T) {
 	waitBarRefreshIdle(t, d)
 	require.False(t, d.refreshBarScriptsIfDue(sess, time.Unix(10, int64(500*time.Millisecond)), true))
 	require.Len(t, r.calls, 2)
+	require.Eventually(t, func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return len(r.calls) == 4
+	}, 1500*time.Millisecond, 10*time.Millisecond)
 }
 
 func TestBarScriptContextChangeDebouncesUntilMinimumInterval(t *testing.T) {
@@ -196,6 +218,22 @@ func TestBarScriptRunDoesNotRestoreClearedSessionState(t *testing.T) {
 	require.Empty(t, state.bottomRight)
 }
 
+func TestBarScriptRunConsumesPendingAfterRunningClears(t *testing.T) {
+	r := &fakeBarRunner{outs: []string{"top1", "bottom1", "top2", "bottom2"}}
+	d := newBarRefreshTestDaemon(r, time.Second)
+	sess := newBarRefreshTestSession()
+	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+
+	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(10, 0), true))
+	require.False(t, d.refreshBarScriptsIfDue(sess, time.Unix(11, 0), true))
+	waitBarRefreshIdle(t, d)
+	require.Eventually(t, func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return len(r.calls) == 4
+	}, time.Second, time.Millisecond)
+}
+
 func TestBarScriptRunIgnoresStaleConfigVersion(t *testing.T) {
 	r := &fakeBarRunner{outs: []string{"top", "bottom"}}
 	d := newBarRefreshTestDaemon(r, time.Second)
@@ -238,7 +276,7 @@ func TestBarScriptRefreshIsPerSession(t *testing.T) {
 }
 
 func newBarRefreshTestDaemon(r *fakeBarRunner, interval time.Duration) *Daemon {
-	d := &Daemon{barScripts: &barScriptState{
+	d := &Daemon{clock: barRefreshTestClock{}, barScripts: &barScriptState{
 		cfg:         barScriptConfig{topRight: "top", bottomRight: "bottom", interval: effectiveBarInterval(interval)},
 		runner:      r,
 		outputs:     make(map[domain.SessionID]barScriptOutputs),
@@ -248,6 +286,13 @@ func newBarRefreshTestDaemon(r *fakeBarRunner, interval time.Duration) *Daemon {
 		pending:     make(map[domain.SessionID]bool),
 	}}
 	return d
+}
+
+type barRefreshTestClock struct{}
+
+func (barRefreshTestClock) Now() time.Time { return time.Now() }
+func (barRefreshTestClock) NewTimer(d time.Duration) ports.Timer {
+	return realTimer{t: time.NewTimer(d)}
 }
 
 func newBarRefreshTestSession() *session {

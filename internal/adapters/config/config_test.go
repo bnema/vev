@@ -120,6 +120,35 @@ func TestParse(t *testing.T) {
 			},
 		},
 		{
+			name:  "bar settings quoted commands preserve hash",
+			input: "bar.top-right = \"echo foo #1\" # inline comment\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Bar: domain.BarConfig{
+					TopRight:    "echo foo #1",
+					BottomRight: "vev-bar-bottom-right",
+					Interval:    5 * time.Second,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+		},
+		{
+			name:  "bar settings malformed quoted command warns and keeps default",
+			input: "bar.top-right = \"bad\\q\"\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Bar: domain.BarConfig{
+					TopRight:    "vev-bar-top-right",
+					BottomRight: "vev-bar-bottom-right",
+					Interval:    5 * time.Second,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+			wantWarnings: []domain.Warning{{Line: 1, Msg: "invalid bar.top-right \"\\\"bad\\\\q\\\"\""}},
+		},
+		{
 			name:  "bar settings empty commands disable anchors",
 			input: "bar.top-right =\nbar.bottom-right =\nbar.interval = 5s\n",
 			want: domain.Config{

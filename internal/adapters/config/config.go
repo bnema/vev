@@ -16,10 +16,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-const (
-	pollInterval       = 2 * time.Second
-	minimumBarInterval = time.Second
-)
+const pollInterval = 2 * time.Second
 
 var processNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
 
@@ -65,18 +62,28 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 			}
 			cfg.Theme = mode
 		case key == "bar.top-right":
-			cfg.Bar.TopRight = parseBarCommand(value)
+			command, ok := parseBarCommand(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid bar.top-right %q", value)})
+				continue
+			}
+			cfg.Bar.TopRight = command
 		case key == "bar.bottom-right":
-			cfg.Bar.BottomRight = parseBarCommand(value)
+			command, ok := parseBarCommand(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid bar.bottom-right %q", value)})
+				continue
+			}
+			cfg.Bar.BottomRight = command
 		case key == "bar.interval":
 			interval, err := time.ParseDuration(value)
 			if err != nil {
 				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid bar.interval %q", value)})
 				continue
 			}
-			if interval < minimumBarInterval {
-				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("bar.interval below minimum %q", minimumBarInterval)})
-				interval = minimumBarInterval
+			if interval < domain.MinBarInterval {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("bar.interval below minimum %q", domain.MinBarInterval)})
+				interval = domain.MinBarInterval
 			}
 			cfg.Bar.Interval = interval
 		case strings.HasPrefix(key, "code."):
@@ -217,14 +224,16 @@ func parseProcessList(value string, lineNo int) ([]string, []domain.Warning) {
 	return out, warnings
 }
 
-func parseBarCommand(value string) string {
+func parseBarCommand(value string) (string, bool) {
 	value = strings.TrimSpace(value)
 	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
-		if unquoted, err := strconv.Unquote(value); err == nil {
-			return unquoted
+		unquoted, err := strconv.Unquote(value)
+		if err != nil {
+			return value, false
 		}
+		return unquoted, true
 	}
-	return value
+	return value, true
 }
 
 func parseTheme(value string) (domain.ThemeMode, bool) {
@@ -241,8 +250,22 @@ func parseTheme(value string) (domain.ThemeMode, bool) {
 }
 
 func stripInlineComment(line string) string {
+	inQuote := false
+	escaped := false
 	for i, r := range line {
-		if r == '#' && (i == 0 || isSpace(rune(line[i-1]))) {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inQuote && r == '\\' {
+			escaped = true
+			continue
+		}
+		if r == '"' {
+			inQuote = !inQuote
+			continue
+		}
+		if !inQuote && r == '#' && (i == 0 || isSpace(rune(line[i-1]))) {
 			return strings.TrimSpace(line[:i])
 		}
 	}

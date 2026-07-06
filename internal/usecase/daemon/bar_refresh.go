@@ -8,8 +8,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 )
 
-const minBarScriptInterval = time.Second
-
 type barScriptExecutor interface {
 	run(context.Context, string, barScriptContext) (string, error)
 }
@@ -41,8 +39,8 @@ func effectiveBarInterval(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 5 * time.Second
 	}
-	if d < minBarScriptInterval {
-		return minBarScriptInterval
+	if d < domain.MinBarInterval {
+		return domain.MinBarInterval
 	}
 	return d
 }
@@ -178,9 +176,16 @@ func (d *Daemon) refreshBarScriptsIfDue(sess *session, now time.Time, force bool
 		force = true
 	}
 	lastRefresh := d.barScripts.lastRefresh[sess.id]
-	if d.barScripts.running[sess.id] || (!lastRefresh.IsZero() && now.Sub(lastRefresh) < minBarScriptInterval) {
+	if d.barScripts.running[sess.id] {
 		if force {
-			d.scheduleBarScriptRefreshLocked(sess, lastRefresh.Add(minBarScriptInterval).Sub(now))
+			d.barScripts.pending[sess.id] = true
+		}
+		d.barScripts.mu.Unlock()
+		return false
+	}
+	if !lastRefresh.IsZero() && now.Sub(lastRefresh) < domain.MinBarInterval {
+		if force {
+			d.scheduleBarScriptRefreshLocked(sess, lastRefresh.Add(domain.MinBarInterval).Sub(now))
 		}
 		d.barScripts.mu.Unlock()
 		return false
@@ -189,10 +194,22 @@ func (d *Daemon) refreshBarScriptsIfDue(sess *session, now time.Time, force bool
 		d.barScripts.mu.Unlock()
 		return false
 	}
+	cfg := d.barScripts.cfg
+	if cfg.topRight == "" && cfg.bottomRight == "" {
+		d.barScripts.lastRefresh[sess.id] = now
+		d.barScripts.lastContext[sess.id] = baseCtx
+		current := d.barScripts.outputs[sess.id]
+		changed := current.topRight != "" || current.bottomRight != ""
+		delete(d.barScripts.outputs, sess.id)
+		d.barScripts.mu.Unlock()
+		if changed {
+			d.pokeSessionRender(sess)
+		}
+		return false
+	}
 	d.barScripts.running[sess.id] = true
 	d.barScripts.lastRefresh[sess.id] = now
 	d.barScripts.lastContext[sess.id] = baseCtx
-	cfg := d.barScripts.cfg
 	runner := d.barScripts.runner
 	version := d.barScripts.version
 	d.barScripts.mu.Unlock()
@@ -204,6 +221,9 @@ func (d *Daemon) scheduleBarScriptRefreshLocked(sess *session, delay time.Durati
 	if d.barScripts.pending[sess.id] {
 		return
 	}
+	if d.clock == nil {
+		return
+	}
 	if delay < 0 {
 		delay = 0
 	}
@@ -213,29 +233,17 @@ func (d *Daemon) scheduleBarScriptRefreshLocked(sess *session, delay time.Durati
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		if d.clock != nil {
-			timer := d.clock.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C():
-			}
-		} else {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(delay):
-			}
+		timer := d.clock.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C():
 		}
 		d.barScripts.mu.Lock()
 		delete(d.barScripts.pending, sess.id)
 		d.barScripts.mu.Unlock()
-		now := time.Now()
-		if d.clock != nil {
-			now = d.clock.Now()
-		}
-		d.refreshBarScriptsIfDue(sess, now, true)
+		d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
 	}()
 }
 
@@ -267,10 +275,15 @@ func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barS
 		changed = true
 	}
 	d.barScripts.outputs[sess.id] = current
+	pending := d.barScripts.pending[sess.id]
 	delete(d.barScripts.running, sess.id)
+	delete(d.barScripts.pending, sess.id)
 	d.barScripts.mu.Unlock()
 	if changed {
 		d.pokeSessionRender(sess)
+	}
+	if pending {
+		d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
 	}
 }
 
