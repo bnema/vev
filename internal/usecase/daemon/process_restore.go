@@ -56,7 +56,7 @@ func extractAgentSessionID(strategy string, argv []string) string {
 func agentSessionFlag(strategy, arg string) bool {
 	switch strategy {
 	case processStrategyClaude:
-		return arg == "--session-id" || arg == "--resume"
+		return arg == "--session-id" || arg == "--resume" || arg == "-r"
 	case processStrategyOpenCode:
 		return arg == "-s" || arg == "--session"
 	case processStrategyCodex:
@@ -81,7 +81,7 @@ func planProcessRestore(proc *snapcodec.Process, allow map[string]struct{}) proc
 	switch strategy {
 	case processStrategyPi:
 		if id != "" {
-			return processRestoreDecision{Command: shellQuoteArgvMust([]string{"pi", "--session-id", id}), Restore: true}
+			return processRestoreDecision{Command: shellQuoteArgvMust([]string{"pi", "--resume", id}), Restore: true}
 		}
 		return processRestoreDecision{Command: "pi --continue", Restore: true}
 	case processStrategyClaude:

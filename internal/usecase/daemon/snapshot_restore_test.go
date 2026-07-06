@@ -148,7 +148,7 @@ func TestRestoreSnapshotsWritesAgentIDCommandAndWriteFailureIsNonFatal(t *testin
 	d.restoreSnapshots(context.Background())
 
 	require.Len(t, factory.opens, 1)
-	require.Equal(t, []string{"pi --session-id abc123\n"}, factory.opens[0].pty.writes)
+	require.Equal(t, []string{"pi --resume abc123\n"}, factory.opens[0].pty.writes)
 	factory.writeErr = errors.New("boom")
 	require.NoError(t, d.restoreSession(context.Background(), snapcodec.Session{Name: "agent2", Tabs: []snapcodec.Tab{{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/tmp", Process: proc}}}}}))
 }

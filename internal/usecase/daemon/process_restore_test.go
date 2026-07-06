@@ -37,7 +37,7 @@ func TestProcessRestorePlan(t *testing.T) {
 			name:    "pi with ID resumes",
 			proc:    &snapcodec.Process{Argv: []string{"pi", "cli"}, Strategy: processStrategyPi, Opts: snapcodec.ProcessOpts{AgentSessionID: "session-123"}},
 			restore: true,
-			command: "pi --session-id session-123",
+			command: "pi --resume session-123",
 		},
 		{
 			name:    "pi no ID continues",
@@ -110,6 +110,7 @@ func TestExtractAgentSessionID(t *testing.T) {
 		want     string
 	}{
 		{name: "claude session flag extraction", strategy: processStrategyClaude, argv: []string{"claude", "--session-id", "uuid-123"}, want: "uuid-123"},
+		{name: "claude short resume extraction", strategy: processStrategyClaude, argv: []string{"claude", "-r", "uuid-456"}, want: "uuid-456"},
 		{name: "opencode short session flag extraction", strategy: processStrategyOpenCode, argv: []string{"opencode", "-s", "abc"}, want: "abc"},
 		{name: "codex resume extraction", strategy: processStrategyCodex, argv: []string{"codex", "resume", "abc"}, want: "abc"},
 		{name: "claude flag-looking ID rejected", strategy: processStrategyClaude, argv: []string{"claude", "--resume", "--continue"}},
