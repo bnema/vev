@@ -1,0 +1,117 @@
+package platform
+
+import (
+	"bytes"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// ProcessInspector implements ports.ProcessInspector using Linux /proc.
+type ProcessInspector struct{}
+
+func (ProcessInspector) Cwd(pid int) (string, error)    { return ProcessCwd(pid) }
+func (ProcessInspector) Comm(pid int) (string, error)   { return ProcessComm(pid) }
+func (ProcessInspector) Argv(pid int) ([]string, error) { return ProcessArgv(pid) }
+func (ProcessInspector) GroupArgv(pgid int, shellPid int) ([]string, error) {
+	return ProcessGroupArgv(pgid, shellPid)
+}
+
+// ProcessArgv returns argv from /proc/<pid>/cmdline.
+func ProcessArgv(pid int) ([]string, error) {
+	return processArgv(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"), pid)
+}
+
+func processArgv(path string, pid int) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	data = bytes.TrimRight(data, "\x00")
+	if len(data) == 0 {
+		return nil, fmt.Errorf("process argv: empty argv for pid %d", pid)
+	}
+	parts := bytes.Split(data, []byte{0})
+	argv := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if len(part) > 0 {
+			argv = append(argv, string(part))
+		}
+	}
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("process argv: empty argv for pid %d", pid)
+	}
+	return argv, nil
+}
+
+type processRecord struct{ pid, pgrp int }
+
+// ProcessGroupArgv returns argv for a restorable foreground process in pgid.
+// A bare pane shell (the only process in its foreground group) returns nil argv.
+func ProcessGroupArgv(pgid int, shellPid int) ([]string, error) {
+	recs, err := readProcRecords("/proc")
+	if err != nil {
+		return nil, err
+	}
+	pid, ok := selectProcessGroupPID(recs, pgid, shellPid)
+	if !ok {
+		return nil, nil
+	}
+	return ProcessArgv(pid)
+}
+
+func selectProcessGroupPID(recs []processRecord, pgid int, shellPid int) (int, bool) {
+	if pgid <= 0 {
+		return 0, false
+	}
+	matches := make([]int, 0)
+	for _, r := range recs {
+		if r.pgrp == pgid && r.pid != shellPid {
+			matches = append(matches, r.pid)
+		}
+	}
+	if len(matches) == 0 {
+		return 0, false
+	}
+	sort.Ints(matches)
+	return matches[0], true
+}
+
+func readProcRecords(root string) ([]processRecord, error) {
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	var recs []processRecord
+	for _, ent := range ents {
+		pid, err := strconv.Atoi(ent.Name())
+		if err != nil {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(root, ent.Name(), "stat"))
+		if err != nil {
+			continue
+		}
+		pgrp, err := parseStatPgrp(string(data))
+		if err != nil {
+			continue
+		}
+		recs = append(recs, processRecord{pid: pid, pgrp: pgrp})
+	}
+	return recs, nil
+}
+
+func parseStatPgrp(stat string) (int, error) {
+	end := strings.LastIndex(stat, ")")
+	if end < 0 || end+2 >= len(stat) {
+		return 0, fmt.Errorf("invalid stat")
+	}
+	fields := strings.Fields(stat[end+2:])
+	if len(fields) < 3 {
+		return 0, fmt.Errorf("invalid stat")
+	}
+	return strconv.Atoi(fields[2])
+}

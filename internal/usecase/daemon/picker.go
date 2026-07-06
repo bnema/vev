@@ -29,7 +29,6 @@ import (
 	"strconv"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -421,7 +420,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 		d.mu.Unlock()
 		return
 	}
-	cwd := platform.DirOrHome(stopped.cwd)
+	cwd := d.dirOrHome(stopped.cwd)
 	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.size)
 	if err != nil {
 		from.mu.Unlock()

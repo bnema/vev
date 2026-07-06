@@ -1,0 +1,138 @@
+package daemon
+
+import (
+	"path/filepath"
+	"strings"
+	"unicode"
+
+	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
+)
+
+const (
+	processStrategyGeneric  = "generic"
+	processStrategyClaude   = "claude"
+	processStrategyCodex    = "codex"
+	processStrategyOpenCode = "opencode"
+	processStrategyPi       = "pi"
+)
+
+type processRestoreDecision struct {
+	Command string
+	Restore bool
+	Reason  string
+}
+
+func detectProcessStrategy(argv []string) string {
+	if len(argv) == 0 {
+		return processStrategyGeneric
+	}
+	switch filepath.Base(argv[0]) {
+	case "claude":
+		return processStrategyClaude
+	case "codex":
+		return processStrategyCodex
+	case "opencode":
+		return processStrategyOpenCode
+	case "pi":
+		return processStrategyPi
+	default:
+		return processStrategyGeneric
+	}
+}
+
+func extractAgentSessionID(strategy string, argv []string) string {
+	for i, arg := range argv {
+		if !agentSessionFlag(strategy, arg) || i+1 >= len(argv) {
+			continue
+		}
+		candidate := argv[i+1]
+		if candidate != "" && !strings.HasPrefix(candidate, "-") {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func agentSessionFlag(strategy, arg string) bool {
+	switch strategy {
+	case processStrategyClaude:
+		return arg == "--session-id" || arg == "--resume"
+	case processStrategyOpenCode:
+		return arg == "-s" || arg == "--session"
+	case processStrategyCodex:
+		return arg == "resume"
+	case processStrategyPi:
+		return arg == "--resume" || arg == "-r"
+	default:
+		return false
+	}
+}
+
+func planProcessRestore(proc *snapcodec.Process, allow map[string]struct{}) processRestoreDecision {
+	if proc == nil || len(proc.Argv) == 0 {
+		return processRestoreDecision{Reason: "missing_process"}
+	}
+	strategy := proc.Strategy
+	if strategy == "" {
+		strategy = detectProcessStrategy(proc.Argv)
+	}
+	name := filepath.Base(proc.Argv[0])
+	if _, ok := allow[name]; !ok {
+		return processRestoreDecision{Reason: "not_allowlisted"}
+	}
+
+	id := proc.Opts.AgentSessionID
+	switch strategy {
+	case processStrategyPi:
+		if id != "" {
+			return processRestoreDecision{Command: shellQuoteArgvMust([]string{"pi", "--resume", id}), Restore: true}
+		}
+		return processRestoreDecision{Command: "pi --continue", Restore: true}
+	case processStrategyClaude:
+		if id != "" {
+			return processRestoreDecision{Command: shellQuoteArgvMust([]string{"claude", "--resume", id}), Restore: true}
+		}
+	case processStrategyOpenCode:
+		if id != "" {
+			return processRestoreDecision{Command: shellQuoteArgvMust([]string{"opencode", "--session", id}), Restore: true}
+		}
+	case processStrategyCodex:
+		if id != "" {
+			return processRestoreDecision{Command: shellQuoteArgvMust([]string{"codex", "resume", id}), Restore: true}
+		}
+	}
+
+	command, ok := shellQuoteArgv(proc.Argv)
+	if !ok {
+		return processRestoreDecision{Reason: "empty_command"}
+	}
+	return processRestoreDecision{Command: command, Restore: true}
+}
+
+func shellQuoteArgvMust(argv []string) string {
+	command, _ := shellQuoteArgv(argv)
+	return command
+}
+
+func shellQuoteArgv(argv []string) (string, bool) {
+	if len(argv) == 0 {
+		return "", false
+	}
+	quoted := make([]string, 0, len(argv))
+	for _, arg := range argv {
+		quoted = append(quoted, shellQuote(arg))
+	}
+	return strings.Join(quoted, " "), true
+}
+
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if strings.IndexFunc(s, func(r rune) bool {
+		return r != '-' && r != '_' && r != '.' && r != '/' && r != ':' && r != '+' && r != '=' && !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) == -1 {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}

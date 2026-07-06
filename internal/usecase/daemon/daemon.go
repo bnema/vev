@@ -36,7 +36,6 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
-	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
 )
@@ -110,6 +109,9 @@ type Daemon struct {
 	restoreOnce    sync.Once
 	procCwd        func(int) (string, error)
 	procComm       func(int) (string, error)
+	procArgv       func(int) ([]string, error)
+	procGroupArgv  func(int, int) ([]string, error)
+	dirOrHome      func(string) string
 	bindings       atomic.Pointer[keys.Bindings]
 	codeOverrides  atomic.Pointer[map[string]string]
 	themeMode      atomic.Uint32
@@ -190,6 +192,28 @@ func WithCwdReader(fn func(int) (string, error)) Option {
 	}
 }
 
+// WithProcessInspector installs the platform process-inspection implementation.
+func WithProcessInspector(ins ports.ProcessInspector) Option {
+	return func(d *Daemon) {
+		if ins == nil {
+			return
+		}
+		d.procCwd = ins.Cwd
+		d.procComm = ins.Comm
+		d.procArgv = ins.Argv
+		d.procGroupArgv = ins.GroupArgv
+	}
+}
+
+// WithDirOrHome installs path fallback behavior from the application layer.
+func WithDirOrHome(fn func(string) string) Option {
+	return func(d *Daemon) {
+		if fn != nil {
+			d.dirOrHome = fn
+		}
+	}
+}
+
 // WithTempDir overrides the directory clipboard-image-transfer writes temp
 // files into (production default: os.TempDir()); tests use this with
 // t.TempDir() so writes are isolated and auto-cleaned.
@@ -226,8 +250,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		baseEnv:     os.Environ(),
 		shell:       shell,
 		persist:     persist.New(nil),
-		procCwd:     platform.ProcessCwd,
-		procComm:    platform.ProcessComm,
+		dirOrHome:   dirOrHome,
 		done:        make(chan struct{}),
 		restoreDone: make(chan struct{}),
 		animWake:    make(chan struct{}, 1),
@@ -238,11 +261,8 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	if d.persist == nil {
 		d.persist = persist.New(nil)
 	}
-	if d.procCwd == nil {
-		d.procCwd = platform.ProcessCwd
-	}
-	if d.procComm == nil {
-		d.procComm = platform.ProcessComm
+	if d.dirOrHome == nil {
+		d.dirOrHome = dirOrHome
 	}
 	if d.bindings.Load() == nil {
 		d.bindings.Store(keys.DefaultBindings())
@@ -577,7 +597,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 				d.mu.Unlock()
 				return nil, nil, &protoErr{ports.ErrNoSuchSession, "no such session: " + h.Name}
 			}
-			cwd := platform.DirOrHome(stopped.cwd)
+			cwd := d.dirOrHome(stopped.cwd)
 			var err error
 			sess, err = d.createSessionLocked(h.Name, false, cwd, sz)
 			if err != nil {
@@ -636,7 +656,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 				d.mu.Unlock()
 				return nil, nil, &protoErr{ports.ErrNoSuchSession, "no such session: " + h.Name}
 			}
-			cwd := platform.DirOrHome(stopped.cwd)
+			cwd := d.dirOrHome(stopped.cwd)
 			var err error
 			sess, err = d.createSessionLocked(h.Name, false, cwd, sz)
 			if err != nil {

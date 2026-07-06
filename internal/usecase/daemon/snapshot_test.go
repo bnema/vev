@@ -63,6 +63,77 @@ func TestSnapshotSaverWritesDirtyNamedSessionsOnly(t *testing.T) {
 	}
 }
 
+func TestSnapshotCaptureStoresForegroundProcessMetadata(t *testing.T) {
+	store := portsmocks.NewMockSnapshotStore(t)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	WithSnapshotStore(store)(d)
+	d.procGroupArgv = func(pgid int, shellPid int) ([]string, error) {
+		require.Equal(t, 4321, pgid)
+		require.Equal(t, 1234, shellPid)
+		return []string{"claude", "--session-id", "agent-123"}, nil
+	}
+
+	sess := newSnapshotTestSession(t, "work", false, "/fallback")
+	pty := snapshotProcessPTY(t, 4321)
+	sess.tabs[0].panes["pane-1"].pty = pty
+
+	store.EXPECT().Write("work", mock.Anything).RunAndReturn(func(_ string, data []byte) error {
+		snap, err := snapcodec.Unmarshal(data)
+		require.NoError(t, err)
+		proc := snap.Tabs[0].Panes[0].Process
+		require.NotNil(t, proc)
+		require.Equal(t, []string{"claude", "--session-id", "agent-123"}, proc.Argv)
+		require.Equal(t, processStrategyClaude, proc.Strategy)
+		require.Equal(t, "agent-123", proc.Opts.AgentSessionID)
+		return nil
+	}).Once()
+
+	require.True(t, d.captureSession(sess))
+}
+
+func TestSnapshotCaptureProcessFailureDoesNotBlockSnapshot(t *testing.T) {
+	store := portsmocks.NewMockSnapshotStore(t)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	WithSnapshotStore(store)(d)
+	d.procGroupArgv = func(int, int) ([]string, error) { return nil, errors.New("inspect failed") }
+
+	sess := newSnapshotTestSession(t, "work", false, "/fallback")
+	pty := snapshotProcessPTY(t, 4321)
+	sess.tabs[0].panes["pane-1"].pty = pty
+
+	store.EXPECT().Write("work", mock.Anything).RunAndReturn(func(_ string, data []byte) error {
+		snap, err := snapcodec.Unmarshal(data)
+		require.NoError(t, err)
+		require.Nil(t, snap.Tabs[0].Panes[0].Process)
+		return nil
+	}).Once()
+
+	require.True(t, d.captureSession(sess))
+}
+
+func TestSnapshotCaptureSkipsBareShellProcess(t *testing.T) {
+	store := portsmocks.NewMockSnapshotStore(t)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	WithSnapshotStore(store)(d)
+	d.procGroupArgv = func(int, int) ([]string, error) {
+		t.Fatal("bare shell should not inspect argv")
+		return nil, nil
+	}
+
+	sess := newSnapshotTestSession(t, "work", false, "/fallback")
+	pty := snapshotProcessPTY(t, 1234)
+	sess.tabs[0].panes["pane-1"].pty = pty
+
+	store.EXPECT().Write("work", mock.Anything).RunAndReturn(func(_ string, data []byte) error {
+		snap, err := snapcodec.Unmarshal(data)
+		require.NoError(t, err)
+		require.Nil(t, snap.Tabs[0].Panes[0].Process)
+		return nil
+	}).Once()
+
+	require.True(t, d.captureSession(sess))
+}
+
 func TestKillSessionSnapshotsNamedSessionBeforeClosingPanes(t *testing.T) {
 	store := portsmocks.NewMockSnapshotStore(t)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
@@ -291,6 +362,17 @@ func TestSnapshotSaverCapturesLayoutOnlyDirtySave(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for layout-only dirty snapshot write")
 	}
+}
+
+func snapshotProcessPTY(t *testing.T, pgid int) *portsmocks.MockPTY {
+	t.Helper()
+	pty := portsmocks.NewMockPTY(t)
+	pty.EXPECT().Pid().Return(1234).Maybe()
+	pty.EXPECT().Read(mock.Anything).Return(0, errors.New("unused")).Maybe()
+	pty.EXPECT().Write(mock.Anything).Return(0, errors.New("unused")).Maybe()
+	pty.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
+	pty.EXPECT().ForegroundPgid().Return(pgid, nil).Once()
+	return pty
 }
 
 func newSnapshotTestSession(t *testing.T, name string, ephemeral bool, cwd string) *session {

@@ -273,8 +273,9 @@ func (d *Daemon) captureSession(sess *session) bool {
 		for _, p := range panes {
 			p.mu.Lock()
 			pid := 0
-			if p.pty != nil {
-				pid = p.pty.Pid()
+			pty := p.pty
+			if pty != nil {
+				pid = pty.Pid()
 			}
 			paneSnap := snapcodec.Pane{
 				ID:         p.id,
@@ -289,6 +290,7 @@ func (d *Daemon) captureSession(sess *session) bool {
 					paneSnap.Cwd = cwd
 				}
 			}
+			paneSnap.Process = d.capturePaneProcess(pty, pid)
 			paneIDs[paneSnap.ID] = struct{}{}
 			paneSnaps = append(paneSnaps, paneSnap)
 		}
@@ -309,6 +311,28 @@ func (d *Daemon) captureSession(sess *session) bool {
 		return false
 	}
 	return true
+}
+
+func (d *Daemon) capturePaneProcess(pty interface{ ForegroundPgid() (int, error) }, shellPid int) *snapcodec.Process {
+	if d == nil || pty == nil || shellPid <= 0 || d.procGroupArgv == nil {
+		return nil
+	}
+	pgid, err := pty.ForegroundPgid()
+	if err != nil || pgid <= 0 || pgid == shellPid {
+		return nil
+	}
+	argv, err := d.procGroupArgv(pgid, shellPid)
+	if err != nil || len(argv) == 0 || argv[0] == "" {
+		return nil
+	}
+	strategy := detectProcessStrategy(argv)
+	return &snapcodec.Process{
+		Argv:     append([]string(nil), argv...),
+		Strategy: strategy,
+		Opts: snapcodec.ProcessOpts{
+			AgentSessionID: extractAgentSessionID(strategy, argv),
+		},
+	}
 }
 
 func (d *Daemon) snapshotSaver(ctx context.Context) {

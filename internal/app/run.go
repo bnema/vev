@@ -284,6 +284,7 @@ func runDaemon() error {
 	}
 	logConfigWarnings(log, warnings)
 	daemonOpts = append(daemonOpts, daemon.WithConfig(cfg))
+	daemonOpts = append(daemonOpts, daemon.WithProcessInspector(platform.ProcessInspector{}), daemon.WithDirOrHome(platform.DirOrHome))
 	daemonOpts = append(daemonOpts, daemon.WithSnapshotStore(snapshotadapter.NewStore(snapshotDir())))
 	storePath := persist.StorePath(platform.StateDir())
 	if store, err := kv.Open(storePath); err != nil {
