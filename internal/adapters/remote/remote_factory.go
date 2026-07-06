@@ -1,26 +1,27 @@
-package dgram
+package remote
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
 
+	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/ports"
 )
 
-// RemoteDialerFactory selects the requested remote transport adapter.
-type RemoteDialerFactory struct{}
+// DialerFactory selects the requested remote transport adapter.
+type DialerFactory struct{}
 
-func NewRemoteDialerFactory() RemoteDialerFactory { return RemoteDialerFactory{} }
+func NewDialerFactory() DialerFactory { return DialerFactory{} }
 
-func (RemoteDialerFactory) DialerForRemote(target string, session string, mode ports.RemoteTransportMode, log *slog.Logger) (ports.Dialer, error) {
+func (DialerFactory) DialerForRemote(target string, session string, mode ports.RemoteTransportMode, log *slog.Logger) (ports.Dialer, error) {
 	switch mode {
 	case ports.RemoteTransportUDP:
 		if log != nil {
 			log.Info("remote transport selected", "mode", mode, "target", target, "session", session)
 		}
-		return NewRemoteDialerWithLogger(target, session, log), nil
+		return dgram.NewRemoteDialerWithLogger(target, session, log), nil
 	case ports.RemoteTransportStdio:
 		if log != nil {
 			log.Info("remote transport selected", "mode", mode, "target", target, "session", session)

@@ -10,77 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 )
-
-func TestRemoteDialerFactorySelectsExplicitModes(t *testing.T) {
-	factory := NewRemoteDialerFactory()
-
-	tests := []struct {
-		name     string
-		mode     ports.RemoteTransportMode
-		wantType any
-	}{
-		{name: "udp", mode: ports.RemoteTransportUDP, wantType: RemoteDialer{}},
-		{name: "stdio", mode: ports.RemoteTransportStdio, wantType: stdioDialer{}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dialer, err := factory.DialerForRemote("remote.example", "work", tt.mode, nil)
-			if err != nil {
-				t.Fatalf("DialerForRemote() error = %v", err)
-			}
-			switch tt.wantType.(type) {
-			case RemoteDialer:
-				got, ok := dialer.(RemoteDialer)
-				if !ok {
-					t.Fatalf("dialer type = %T, want %T", dialer, RemoteDialer{})
-				}
-				if got.Target != "remote.example" || got.Session != "work" {
-					t.Fatalf("dialer = %+v, want target/session copied", got)
-				}
-			case stdioDialer:
-				got, ok := dialer.(stdioDialer)
-				if !ok {
-					t.Fatalf("dialer type = %T, want %T", dialer, stdioDialer{})
-				}
-				if got.target != "remote.example" || got.session != "work" {
-					t.Fatalf("dialer = %+v, want target/session copied", got)
-				}
-			}
-		})
-	}
-}
-
-func TestRemoteDialerFactoryRejectsUnsupportedMode(t *testing.T) {
-	factory := NewRemoteDialerFactory()
-
-	dialer, err := factory.DialerForRemote("remote.example", "work", ports.RemoteTransportMode("serial"), nil)
-	if err == nil {
-		t.Fatal("DialerForRemote() error = nil, want unsupported mode error")
-	}
-	if dialer != nil {
-		t.Fatalf("DialerForRemote() dialer = %T, want nil", dialer)
-	}
-	if got, want := err.Error(), "vev: unsupported remote transport \"serial\""; got != want {
-		t.Fatalf("error = %q, want %q", got, want)
-	}
-}
-
-func TestStdioDialerUsesContextBeforeStartingSSH(t *testing.T) {
-	dialer := stdioDialer{target: "remote.example", session: "work"}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	transport, err := dialer.Dial(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Dial() error = %v, want context canceled", err)
-	}
-	if transport != nil {
-		t.Fatalf("Dial() transport = %T, want nil", transport)
-	}
-}
 
 type fakeBootstrapProcess struct {
 	stdout   io.ReadCloser

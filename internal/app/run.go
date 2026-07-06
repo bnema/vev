@@ -30,6 +30,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/pty"
+	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/adapters/shellcmd"
 	snapshotadapter "github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
@@ -354,7 +355,7 @@ const envRemoteTransport = "VEV_REMOTE_TRANSPORT"
 func defaultLocalDialer() ports.Dialer { return localDaemonDialer{dir: ipc.SocketDir()} }
 
 func defaultRemoteDialerFactory() ports.RemoteDialerFactory {
-	return dgram.NewRemoteDialerFactory()
+	return remoteadapter.NewDialerFactory()
 }
 
 type runAttachDeps struct {
