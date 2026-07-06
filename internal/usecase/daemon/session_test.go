@@ -893,6 +893,14 @@ func TestPickerStoppedTargetKillPurges(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestChildEnvEscapesLegacySessionName(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+
+	got := d.childEnv("legacy,name=value", "t_alpha", "p_beta")
+
+	require.Contains(t, got, "VEV=session=legacy%2Cname%3Dvalue,tab=t_alpha,pane=p_beta")
+}
+
 func TestNewSessionAssignsStableIDsAndChildEnv(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	p, releasePTY := newBlockingPTY(t)

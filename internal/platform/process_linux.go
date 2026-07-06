@@ -8,16 +8,55 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
-// ProcessInspector implements ports.ProcessInspector using Linux /proc.
-type ProcessInspector struct{}
+const processRecordCacheTTL = 250 * time.Millisecond
 
-func (ProcessInspector) Cwd(pid int) (string, error)    { return ProcessCwd(pid) }
-func (ProcessInspector) Comm(pid int) (string, error)   { return ProcessComm(pid) }
-func (ProcessInspector) Argv(pid int) ([]string, error) { return ProcessArgv(pid) }
-func (ProcessInspector) GroupArgv(pgid int, shellPid int) ([]string, error) {
-	return ProcessGroupArgv(pgid, shellPid)
+// ProcessInspector implements ports.ProcessInspector using Linux /proc.
+type ProcessInspector struct {
+	root string
+
+	mu                 sync.Mutex
+	cachedRecords      []processRecord
+	cachedRecordsUntil time.Time
+}
+
+// NewProcessInspector returns a Linux /proc-backed process inspector.
+func NewProcessInspector() *ProcessInspector { return newProcessInspector("/proc") }
+
+func newProcessInspector(root string) *ProcessInspector { return &ProcessInspector{root: root} }
+
+func (*ProcessInspector) Cwd(pid int) (string, error)    { return ProcessCwd(pid) }
+func (*ProcessInspector) Comm(pid int) (string, error)   { return ProcessComm(pid) }
+func (*ProcessInspector) Argv(pid int) ([]string, error) { return ProcessArgv(pid) }
+func (p *ProcessInspector) GroupArgv(pgid int, shellPid int) ([]string, error) {
+	recs, err := p.processRecords()
+	if err != nil {
+		return nil, err
+	}
+	pid, ok := selectProcessGroupPID(recs, pgid, shellPid)
+	if !ok {
+		return nil, nil
+	}
+	return ProcessArgv(pid)
+}
+
+func (p *ProcessInspector) processRecords() ([]processRecord, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	if now.Before(p.cachedRecordsUntil) {
+		return p.cachedRecords, nil
+	}
+	recs, err := readProcRecords(p.root)
+	if err != nil {
+		return nil, err
+	}
+	p.cachedRecords = recs
+	p.cachedRecordsUntil = now.Add(processRecordCacheTTL)
+	return recs, nil
 }
 
 // ProcessArgv returns argv from /proc/<pid>/cmdline.

@@ -82,6 +82,11 @@ func TestProcessRestorePlan(t *testing.T) {
 			reason: "not_allowlisted",
 		},
 		{
+			name:   "agent ID with control byte rejected",
+			proc:   &snapcodec.Process{Argv: []string{"pi", "cli"}, Strategy: processStrategyPi, Opts: snapcodec.ProcessOpts{AgentSessionID: "session\rmalicious"}},
+			reason: "invalid_agent_session_id",
+		},
+		{
 			name:   "empty executable rejected",
 			proc:   &snapcodec.Process{Argv: []string{""}, Strategy: processStrategyGeneric},
 			reason: "missing_process",
@@ -115,6 +120,7 @@ func TestExtractAgentSessionID(t *testing.T) {
 		{name: "codex resume extraction", strategy: processStrategyCodex, argv: []string{"codex", "resume", "abc"}, want: "abc"},
 		{name: "claude flag-looking ID rejected", strategy: processStrategyClaude, argv: []string{"claude", "--resume", "--continue"}},
 		{name: "pi flag-looking ID rejected", strategy: processStrategyPi, argv: []string{"pi", "-r", "--last"}},
+		{name: "control byte ID rejected", strategy: processStrategyPi, argv: []string{"pi", "--resume", "abc\nmalicious"}},
 	}
 
 	for _, tt := range tests {

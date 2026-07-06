@@ -17,10 +17,38 @@ func newStableID(prefix string) (string, error) {
 	return prefix + "_" + strings.ToLower(enc), nil
 }
 
+func (d *Daemon) newTabPaneStableIDs() (string, string, error) {
+	tabStableID, err := newStableID("t")
+	if err != nil {
+		return "", "", fmt.Errorf("daemon: generating tab identity: %w", err)
+	}
+	paneStableID, err := newStableID("p")
+	if err != nil {
+		return "", "", fmt.Errorf("daemon: generating pane identity: %w", err)
+	}
+	return tabStableID, paneStableID, nil
+}
+
 func fallbackStableID(prefix string) string {
 	id, err := newStableID(prefix)
 	if err != nil {
 		return prefix + "_unknown"
 	}
 	return id
+}
+
+func escapeVEVComponent(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		const hex = "0123456789ABCDEF"
+		b.WriteByte(hex[c>>4])
+		b.WriteByte(hex[c&0x0f])
+	}
+	return b.String()
 }

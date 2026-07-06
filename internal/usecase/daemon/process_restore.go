@@ -46,7 +46,7 @@ func extractAgentSessionID(strategy string, argv []string) string {
 			continue
 		}
 		candidate := argv[i+1]
-		if candidate != "" && !strings.HasPrefix(candidate, "-") {
+		if candidate != "" && !strings.HasPrefix(candidate, "-") && !containsControl(candidate) {
 			return candidate
 		}
 	}
@@ -78,6 +78,9 @@ func planProcessRestore(proc *snapcodec.Process, allow map[string]struct{}) proc
 	}
 
 	id := proc.Opts.AgentSessionID
+	if containsControl(id) {
+		return processRestoreDecision{Reason: "invalid_agent_session_id"}
+	}
 	switch strategy {
 	case processStrategyPi:
 		if id != "" {
@@ -126,6 +129,10 @@ func processAllowlistKey(strategy string, argv []string) string {
 	default:
 		return filepath.Base(argv[0])
 	}
+}
+
+func containsControl(s string) bool {
+	return strings.IndexFunc(s, unicode.IsControl) >= 0
 }
 
 func shellQuoteArgvMust(argv []string) string {

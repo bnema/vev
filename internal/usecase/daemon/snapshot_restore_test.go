@@ -190,6 +190,20 @@ func TestRestoreSnapshotsWritesAgentIDCommandAndWriteFailureIsNonFatal(t *testin
 	require.NoError(t, d.restoreSession(context.Background(), snapcodec.Session{Name: "agent2", Tabs: []snapcodec.Tab{{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/tmp", Process: proc}}}}}))
 }
 
+func TestRestoreSnapshotsRejectsAgentIDWithControlBytes(t *testing.T) {
+	proc := &snapcodec.Process{Argv: []string{"pi"}, Strategy: processStrategyPi, Opts: snapcodec.ProcessOpts{AgentSessionID: "abc\nmalicious"}}
+	store := processRestoreTestStore(t, "agent-control", proc)
+	factory := &restorePTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	WithSnapshotStore(store)(d)
+	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"pi"}}})
+
+	d.restoreSnapshots(context.Background())
+
+	require.Len(t, factory.opens, 1)
+	require.Empty(t, factory.opens[0].pty.writes)
+}
+
 func TestRestoreSnapshotsOpensCollapsedStackPanesWithValidPTYSize(t *testing.T) {
 	store := &restoreSnapshotStore{blobs: []ports.SnapshotBlob{{Name: "stacked", Data: mustSnapshotBytes(t, snapcodec.Session{
 		Name: "stacked",

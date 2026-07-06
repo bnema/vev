@@ -123,13 +123,9 @@ func (d *Daemon) touchMRU(sess *session) {
 
 func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size) (*session, error) {
 	tbSize := tabSize(sz)
-	tabStableID, err := newStableID("t")
+	tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 	if err != nil {
-		return nil, fmt.Errorf("daemon: generating tab identity: %w", err)
-	}
-	paneStableID, err := newStableID("p")
-	if err != nil {
-		return nil, fmt.Errorf("daemon: generating pane identity: %w", err)
+		return nil, err
 	}
 	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID), cwd, tbSize)
 	if err != nil {
@@ -243,13 +239,9 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	cwd := sess.cwd
 	client := sess.client
 	sess.mu.Unlock()
-	tabStableID, err := newStableID("t")
+	tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 	if err != nil {
-		return fmt.Errorf("daemon: generating tab identity: %w", err)
-	}
-	paneStableID, err := newStableID("p")
-	if err != nil {
-		return fmt.Errorf("daemon: generating pane identity: %w", err)
+		return err
 	}
 	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID), cwd, tbSize)
 	if err != nil {
@@ -737,5 +729,5 @@ func (d *Daemon) childEnv(name, tabStableID, paneStableID string) []string {
 		}
 		out = append(out, e)
 	}
-	return append(out, "TERM=xterm-direct", "VEV=session="+name+",tab="+tabStableID+",pane="+paneStableID)
+	return append(out, "TERM=xterm-direct", "VEV=session="+escapeVEVComponent(name)+",tab="+tabStableID+",pane="+paneStableID)
 }

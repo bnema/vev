@@ -1,9 +1,11 @@
 package platform
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -61,6 +63,37 @@ func TestSelectProcessGroupPID(t *testing.T) {
 				t.Fatalf("selectProcessGroupPID = %d, %v; want %d, %v", pid, ok, tt.wantPID, tt.wantOK)
 			}
 		})
+	}
+}
+
+func TestProcessInspectorCachesProcessRecordsBriefly(t *testing.T) {
+	root := t.TempDir()
+	writeProcStat(t, root, 10, 7)
+	ins := newProcessInspector(root)
+
+	first, err := ins.processRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProcStat(t, root, 12, 7)
+	second, err := ins.processRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("cached processRecords lengths = %d, %d; want 1, 1", len(first), len(second))
+	}
+}
+
+func writeProcStat(t *testing.T, root string, pid int, pgrp int) {
+	t.Helper()
+	dir := filepath.Join(root, strconv.Itoa(pid))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stat := fmt.Sprintf("%d (cmd) S 1 %d 1 0 0", pid, pgrp)
+	if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(stat), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
