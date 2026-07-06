@@ -209,9 +209,9 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 	}
 	sleepWhileReconnecting := func(d time.Duration) bool {
 		if remote && showingStatus {
-			return reconnectSleepWithResize(ctx, d, term.ResizeEvents(), redrawRemoteStatus)
+			return reconnectSleepWithResize(ctx, clk, d, term.ResizeEvents(), redrawRemoteStatus)
 		}
-		return reconnectSleep(ctx, d)
+		return reconnectSleep(ctx, clk, d)
 	}
 
 	for {
@@ -260,23 +260,23 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 	}
 }
 
-func sleepReconnect(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
+func sleepReconnect(ctx context.Context, clk ports.Clock, d time.Duration) bool {
+	t := clk.NewTimer(d)
 	defer t.Stop()
 	select {
-	case <-t.C:
+	case <-t.C():
 		return true
 	case <-ctx.Done():
 		return false
 	}
 }
 
-func sleepReconnectWithResizeEvents(ctx context.Context, d time.Duration, resizeEvents <-chan domain.Size, onResize func(domain.Size)) bool {
-	t := time.NewTimer(d)
+func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time.Duration, resizeEvents <-chan domain.Size, onResize func(domain.Size)) bool {
+	t := clk.NewTimer(d)
 	defer t.Stop()
 	for {
 		select {
-		case <-t.C:
+		case <-t.C():
 			return true
 		case <-ctx.Done():
 			return false

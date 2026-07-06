@@ -68,10 +68,10 @@ func writeReconnectToast(out io.Writer, bounds domain.Rect, lines []string) erro
 		return err
 	}
 	for i, line := range lines {
-		if _, err := fmt.Fprintf(out, "\x1b[%d;%dH%s", bounds.Y+i+1, bounds.X+1, line); err != nil {
+		if _, err := fmt.Fprintf(out, "\x1b[%d;%dH\x1b[0m%s", bounds.Y+i+1, bounds.X+1, line); err != nil {
 			return err
 		}
 	}
-	_, err := io.WriteString(out, "\x1b[u")
+	_, err := io.WriteString(out, "\x1b[0m\x1b[u")
 	return err
 }

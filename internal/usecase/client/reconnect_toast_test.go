@@ -18,18 +18,28 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-type reconnectToastClock struct{}
-
-func (reconnectToastClock) Now() time.Time { return time.Now() }
-func (reconnectToastClock) NewTimer(d time.Duration) ports.Timer {
-	return &reconnectToastTimer{t: time.NewTimer(d)}
+type reconnectToastClock struct {
+	timer   *reconnectToastTimer
+	created chan struct{}
 }
 
-type reconnectToastTimer struct{ t *time.Timer }
+func newReconnectToastClock() *reconnectToastClock {
+	return &reconnectToastClock{created: make(chan struct{})}
+}
 
-func (t *reconnectToastTimer) C() <-chan time.Time        { return t.t.C }
-func (t *reconnectToastTimer) Reset(d time.Duration) bool { return t.t.Reset(d) }
-func (t *reconnectToastTimer) Stop() bool                 { return t.t.Stop() }
+func (*reconnectToastClock) Now() time.Time { return time.Time{} }
+func (c *reconnectToastClock) NewTimer(time.Duration) ports.Timer {
+	c.timer = &reconnectToastTimer{ch: make(chan time.Time, 1)}
+	close(c.created)
+	return c.timer
+}
+
+type reconnectToastTimer struct{ ch chan time.Time }
+
+func (t *reconnectToastTimer) C() <-chan time.Time      { return t.ch }
+func (t *reconnectToastTimer) Reset(time.Duration) bool { return true }
+func (t *reconnectToastTimer) Stop() bool               { return true }
+func (t *reconnectToastTimer) fire()                    { t.ch <- time.Time{} }
 
 type reconnectToastDialer struct {
 	trs   []ports.Transport
@@ -115,6 +125,7 @@ func TestReconnectToastDrawAndClearHelpers(t *testing.T) {
 	require.NoError(t, drawReconnectToast(&out, size))
 	require.Contains(t, out.String(), "┌")
 	require.Contains(t, out.String(), reconnectToastMessage)
+	require.Contains(t, out.String(), "\x1b[0m")
 
 	require.NoError(t, clearReconnectToast(&out, size))
 	bounds := reconnectToastBounds(size)
@@ -140,23 +151,33 @@ func displayWidth(s string) int {
 }
 
 func TestReconnectSleepWithResizeEventsRedrawsUntilTimerFires(t *testing.T) {
-	resizeCh := make(chan domain.Size, 1)
+	clk := newReconnectToastClock()
+	resizeCh := make(chan domain.Size, 2)
 	resizeCh <- domain.Size{Cols: 100, Rows: 30}
-	var got domain.Size
+	resizeCh <- domain.Size{Cols: 120, Rows: 40}
+	got := make(chan domain.Size, 2)
+	done := make(chan bool, 1)
 
-	ok := sleepReconnectWithResizeEvents(context.Background(), time.Millisecond, resizeCh, func(size domain.Size) {
-		got = size
-	})
+	go func() {
+		done <- sleepReconnectWithResizeEvents(context.Background(), clk, time.Hour, resizeCh, func(size domain.Size) {
+			got <- size
+		})
+	}()
 
-	require.True(t, ok)
-	require.Equal(t, domain.Size{Cols: 100, Rows: 30}, got)
+	<-clk.created
+	require.Equal(t, domain.Size{Cols: 100, Rows: 30}, <-got)
+	require.Equal(t, domain.Size{Cols: 120, Rows: 40}, <-got)
+	clk.timer.fire()
+	require.True(t, <-done)
 }
 
 func TestRemoteReconnectToastClearsOnSuccessfulReconnect(t *testing.T) {
 	oldSleep := reconnectSleep
 	oldSleepWithResize := reconnectSleepWithResize
-	reconnectSleep = func(context.Context, time.Duration) bool { return true }
-	reconnectSleepWithResize = func(context.Context, time.Duration, <-chan domain.Size, func(domain.Size)) bool { return true }
+	reconnectSleep = func(context.Context, ports.Clock, time.Duration) bool { return true }
+	reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Size, func(domain.Size)) bool {
+		return true
+	}
 	defer func() {
 		reconnectSleep = oldSleep
 		reconnectSleepWithResize = oldSleepWithResize
@@ -168,7 +189,7 @@ func TestRemoteReconnectToastClearsOnSuccessfulReconnect(t *testing.T) {
 	tr2 := &reconnectToastTransport{recvs: []reconnectToastRecv{{frame: reconnectToastWelcome(22)}, {frame: reconnectToastDetach(ports.ReasonDetach)}}}
 	dialer := &reconnectToastDialer{trs: []ports.Transport{tr1, tr2}}
 
-	err := Run(context.Background(), dialer, term, reconnectToastClock{}, ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
+	err := Run(context.Background(), dialer, term, newReconnectToastClock(), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	out := term.out.String()
 	require.Contains(t, out, reconnectToastMessage)
@@ -179,11 +200,11 @@ func TestRemoteReconnectToastClearsOnCancellation(t *testing.T) {
 	oldSleep := reconnectSleep
 	oldSleepWithResize := reconnectSleepWithResize
 	ctx, cancel := context.WithCancel(context.Background())
-	reconnectSleep = func(context.Context, time.Duration) bool {
+	reconnectSleep = func(context.Context, ports.Clock, time.Duration) bool {
 		cancel()
 		return false
 	}
-	reconnectSleepWithResize = func(context.Context, time.Duration, <-chan domain.Size, func(domain.Size)) bool {
+	reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Size, func(domain.Size)) bool {
 		cancel()
 		return false
 	}
@@ -197,7 +218,7 @@ func TestRemoteReconnectToastClearsOnCancellation(t *testing.T) {
 	tr := &reconnectToastTransport{recvs: []reconnectToastRecv{{frame: reconnectToastWelcome(11)}, {err: io.EOF}}}
 	dialer := &reconnectToastDialer{trs: []ports.Transport{tr}}
 
-	err := Run(ctx, dialer, term, reconnectToastClock{}, ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
+	err := Run(ctx, dialer, term, newReconnectToastClock(), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
 	require.ErrorIs(t, err, context.Canceled)
 	out := term.out.String()
 	require.Contains(t, out, reconnectToastMessage)
@@ -207,8 +228,10 @@ func TestRemoteReconnectToastClearsOnCancellation(t *testing.T) {
 func TestRemoteReconnectToastClearsOnFinalExit(t *testing.T) {
 	oldSleep := reconnectSleep
 	oldSleepWithResize := reconnectSleepWithResize
-	reconnectSleep = func(context.Context, time.Duration) bool { return true }
-	reconnectSleepWithResize = func(context.Context, time.Duration, <-chan domain.Size, func(domain.Size)) bool { return true }
+	reconnectSleep = func(context.Context, ports.Clock, time.Duration) bool { return true }
+	reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Size, func(domain.Size)) bool {
+		return true
+	}
 	defer func() {
 		reconnectSleep = oldSleep
 		reconnectSleepWithResize = oldSleepWithResize
@@ -220,7 +243,7 @@ func TestRemoteReconnectToastClearsOnFinalExit(t *testing.T) {
 	tr2 := &reconnectToastTransport{recvs: []reconnectToastRecv{{frame: reconnectToastWelcome(22)}, {frame: reconnectToastDetach(ports.ReasonSessionKilled)}}}
 	dialer := &reconnectToastDialer{trs: []ports.Transport{tr1, tr2}}
 
-	err := Run(context.Background(), dialer, term, reconnectToastClock{}, ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
+	err := Run(context.Background(), dialer, term, newReconnectToastClock(), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
 	var detached *DetachedError
 	require.True(t, errors.As(err, &detached))
 	out := term.out.String()
