@@ -28,6 +28,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/pty"
+	"github.com/bnema/vev/internal/adapters/shellcmd"
 	snapshotadapter "github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/adapters/term"
@@ -284,6 +285,7 @@ func runDaemon() error {
 	}
 	logConfigWarnings(log, warnings)
 	daemonOpts = append(daemonOpts, daemon.WithConfig(cfg))
+	daemonOpts = append(daemonOpts, daemon.WithBarScriptCommandRunner(shellcmd.New()))
 	daemonOpts = append(daemonOpts, daemon.WithProcessInspector(platform.NewProcessInspector()), daemon.WithDirOrHome(platform.DirOrHome))
 	daemonOpts = append(daemonOpts, daemon.WithSnapshotStore(snapshotadapter.NewStore(snapshotDir())))
 	storePath := persist.StorePath(platform.StateDir())

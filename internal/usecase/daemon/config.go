@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
@@ -27,6 +28,20 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	d.codeOverrides.Store(&overrides)
 	d.restoreProcessAllowlist.Store(&allowlist)
 	d.themeMode.Store(uint32(cfg.Theme))
+	if d.barScripts != nil {
+		d.barScripts.mu.Lock()
+		d.barScripts.initLocked()
+		barCfg := barConfigFromDomain(cfg.Bar)
+		if d.barScripts.cfg != barCfg {
+			d.barScripts.cfg = barCfg
+			d.barScripts.outputs = make(map[domain.SessionID]barScriptOutputs)
+			d.barScripts.lastRefresh = make(map[domain.SessionID]time.Time)
+			d.barScripts.lastContext = make(map[domain.SessionID]barScriptContext)
+			d.barScripts.pending = make(map[domain.SessionID]bool)
+			d.barScripts.version++
+		}
+		d.barScripts.mu.Unlock()
+	}
 	d.reapplyThemeAllSessions()
 	d.repaintAllAttachedClients()
 }

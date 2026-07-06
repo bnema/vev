@@ -389,6 +389,7 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 		d.resize(sess, ac, clientSize)
 		return
 	}
+	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
 	d.paint(sess, ac, true)
 }
 
@@ -539,6 +540,7 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	}
 	markSnapshotDirty(sess)
 	if ac != nil {
+		d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
 		d.paint(sess, ac, true)
 	}
 }

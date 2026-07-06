@@ -398,6 +398,52 @@ func TestStatusMarksEphemeralSession(t *testing.T) {
 	require.Equal(t, " 0*         ", rowText(frame.Row(3)))
 }
 
+func TestTopBarRightAnchor(t *testing.T) {
+	tests := []struct {
+		name             string
+		width            int
+		status           statusSnapshot
+		topRight         string
+		want             string
+		continuationCell int
+	}{
+		{
+			name:     "renders flush right when fully fits",
+			width:    20,
+			status:   statusSnapshot{tabs: []statusTab{{name: "1", active: true}}},
+			topRight: "14:32",
+			want:     " 1             14:32",
+		},
+		{
+			name:     "hides on overlap",
+			width:    10,
+			status:   statusSnapshot{tabs: []statusTab{{name: "1"}, {name: "2"}}},
+			topRight: "12345",
+			want:     " 1  2     ",
+		},
+		{
+			name:             "uses display width",
+			width:            12,
+			status:           statusSnapshot{tabs: []statusTab{{name: "1", active: true}}},
+			topRight:         "界a",
+			want:             " 1       界 a",
+			continuationCell: 10,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := make([]renderer.Cell, tt.width)
+
+			drawTopBarSnapshot(row, tt.status, 0, tt.topRight, resolveThemeStyles(nil))
+
+			require.Equal(t, tt.want, rowText(row))
+			if tt.continuationCell > 0 {
+				require.True(t, row[tt.continuationCell].Continuation)
+			}
+		})
+	}
+}
+
 func TestStatusCopyFeedbackRendersOnlyWhenFullyFits(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	_, sess, _, _ := newManualSessionWithPTYs(t, p)
@@ -639,6 +685,88 @@ func TestStatusBarMRUWidthAwareBudget(t *testing.T) {
 			}
 			for _, hidden := range tt.wantHidden {
 				require.NotContains(t, text, hidden)
+			}
+		})
+	}
+}
+
+func TestStatusBarBottomRightAndMRUFitting(t *testing.T) {
+	tests := []struct {
+		name              string
+		width             int
+		state             barState
+		want              string
+		wantContains      []string
+		wantNotContains   []string
+		wantSuffix        string
+		continuationCells []int
+	}{
+		{
+			name:         "script text and copy feedback",
+			width:        32,
+			state:        barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", copyFeedback: "copied", mru: []mruSession{{name: "a"}}},
+			wantContains: []string{" a"},
+			wantSuffix:   " main ↑3 * copied",
+		},
+		{
+			name:            "hide on overlap",
+			width:           16,
+			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", copyFeedback: "copied", mru: []mruSession{{name: "fresh"}}},
+			want:            " cur            ",
+			wantNotContains: []string{"main", "copied"},
+		},
+		{
+			name:  "empty script keeps copy feedback behavior",
+			width: 12,
+			state: barState{status: statusSnapshot{session: "cur"}, bottomRight: "", copyFeedback: "copied", mru: []mruSession{{name: "fresh"}}},
+			want:  " cur  copied",
+		},
+		{
+			name:            "mru whole entry fitting with script text",
+			width:           24,
+			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "git", mru: []mruSession{{name: "fresh"}, {name: "middle"}, {name: "old"}}},
+			wantContains:    []string{" fresh"},
+			wantNotContains: []string{"middle"},
+			wantSuffix:      " git",
+		},
+		{
+			name:              "mru fitting reserves wide right anchor width",
+			width:             12,
+			state:             barState{status: statusSnapshot{session: "cur"}, bottomRight: "界界", mru: []mruSession{{name: "a"}}},
+			wantNotContains:   []string{" a "},
+			wantSuffix:        " 界 界 ",
+			continuationCells: []int{9, 11},
+		},
+		{
+			name:            "mru fitting counts wide session names",
+			width:           20,
+			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "git", mru: []mruSession{{name: "界"}, {name: "界"}, {name: "b"}}},
+			wantContains:    []string{" 界 "},
+			wantNotContains: []string{" b "},
+			wantSuffix:      " git",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := make([]renderer.Cell, tt.width)
+
+			drawStatusBarState(row, tt.state, resolveThemeStyles(nil))
+
+			text := rowText(row)
+			if tt.want != "" {
+				require.Equal(t, tt.want, text)
+			}
+			for _, want := range tt.wantContains {
+				require.Contains(t, text, want)
+			}
+			for _, hidden := range tt.wantNotContains {
+				require.NotContains(t, text, hidden)
+			}
+			if tt.wantSuffix != "" {
+				require.True(t, strings.HasSuffix(text, tt.wantSuffix), text)
+			}
+			for _, cell := range tt.continuationCells {
+				require.True(t, row[cell].Continuation)
 			}
 		})
 	}

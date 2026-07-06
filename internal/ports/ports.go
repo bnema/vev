@@ -96,6 +96,19 @@ type Timer interface {
 	Stop() bool
 }
 
+// CommandSpec describes a bounded shell command execution request.
+type CommandSpec struct {
+	Command     string
+	Env         []string
+	Timeout     time.Duration
+	StdoutLimit int
+}
+
+// ShellCommandRunner runs shell commands and returns bounded stdout bytes.
+type ShellCommandRunner interface {
+	Run(ctx context.Context, spec CommandSpec) ([]byte, error)
+}
+
 // ProcessInspector reads process metadata for daemon snapshot/persistence use.
 // Implementations may live in platform packages; usecases depend on this port.
 type ProcessInspector interface {

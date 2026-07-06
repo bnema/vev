@@ -538,6 +538,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 		return nil
 	}
 	delete(d.sessions, sess.id)
+	d.clearBarScriptsForSession(sess.id)
 	d.purgeParkedForSessionLocked(sess)
 	sess.mu.Lock()
 	stoppedName := sess.name

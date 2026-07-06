@@ -15,9 +15,11 @@ go install github.com/bnema/vev@latest
 From a checkout:
 
 ```sh
-make install        # go install .
+make install        # install vev and default bar scripts to Go's bin directory
 go build -o vev .  # local binary
 ```
+
+`make install` places `vev-bar-top-right` and `vev-bar-bottom-right` beside the installed `vev` binary. If you install another way, copy the scripts from `scripts/` into a directory on `PATH` or replace the bar commands in config.
 
 ## Usage
 
@@ -69,6 +71,11 @@ switch-tab-9 = alt+9
 # set it empty to disable process relaunch.
 snapshot.restore_processes = vi,vim,nvim,emacs,man,less,more,tail,top,htop,btop,claude,codex,pi,opencode
 
+# Right bar anchors. Empty command values disable the matching anchor.
+bar.top-right = vev-bar-top-right
+bar.bottom-right = vev-bar-bottom-right
+bar.interval = 5s
+
 # Command palette codes are trimmed, uppercased, then checked as 2-3 letters or digits.
 code.new-tab = CNT
 code.new-session = CNS
@@ -97,6 +104,14 @@ code.detach = DET
 Configuring an action replaces all of its built-in aliases. In the example above, the focus-pane lines keep Alt+h/j/k/l but not the Alt+Arrow aliases; omit those lines to keep all built-ins.
 
 Key specs support `alt+<char>`, `alt+space`, and `alt+left/right/up/down`; digit key specs support `alt+1` through `alt+9`, not `alt+0`. `jump-attention` first opens the oldest attention tab in the current session; if none exists, it opens the oldest attention tab in another session. Invalid entries are logged as warnings and skipped where possible; duplicate config keys use the last value, binding conflicts keep the later action's defaults, and command-code conflicts drop the conflicting override.
+
+### Bar right anchors
+
+The top and bottom bar right anchors run configurable commands on the daemon host. By default, `bar.top-right = vev-bar-top-right` prints hour, CPU, and memory text, and `bar.bottom-right = vev-bar-bottom-right` prints compact git state for the focused pane's `VEV_PANE_CWD`. Set either value empty to disable that anchor, or set it to another command to replace it.
+
+Both anchors share `bar.interval`, which defaults to `5s`; values below `1s` are clamped to `1s`. vev also refreshes around attach, resize, focus, and copy-feedback changes. Commands are bounded by a timeout and output limit. On failure or timeout, vev keeps the last good value; if there is none, the anchor is empty.
+
+Scripts receive these environment variables when available: `VEV_ANCHOR` (`top-right` or `bottom-right`), `VEV_SESSION`, `VEV_TAB`, `VEV_PANE`, `VEV_PANE_CWD`, and `VEV_COLS`. vev reads stdout only, uses the first line only, treats it as plain UTF-8 display text, and strips ANSI escape sequences and other control characters. Unicode and Nerd Font glyphs are supported. The v1 API does not support colors, styles, JSON, streaming output, or per-anchor intervals. The default git script runs `git status --porcelain` each refresh, so increase `bar.interval` or replace the command if that is too expensive for a large repository.
 
 ## Remote attach
 

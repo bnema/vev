@@ -92,6 +92,107 @@ func TestParse(t *testing.T) {
 			},
 		},
 		{
+			name:  "bar settings custom values",
+			input: "bar.top-right = custom-top\nbar.bottom-right = custom-bottom\nbar.interval = 2s\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Bar: domain.BarConfig{
+					TopRight:    "custom-top",
+					BottomRight: "custom-bottom",
+					Interval:    2 * time.Second,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+		},
+		{
+			name:  "bar settings quoted commands unquote",
+			input: "bar.top-right = \"date +%H:%M\"\nbar.bottom-right = \"\"\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Bar: domain.BarConfig{
+					TopRight:    "date +%H:%M",
+					BottomRight: "",
+					Interval:    5 * time.Second,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+		},
+		{
+			name:  "bar settings quoted commands preserve hash",
+			input: "bar.top-right = \"echo foo #1\" # inline comment\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Bar: domain.BarConfig{
+					TopRight:    "echo foo #1",
+					BottomRight: "vev-bar-bottom-right",
+					Interval:    5 * time.Second,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+		},
+		{
+			name:  "bar settings malformed quoted command warns and keeps default",
+			input: "bar.top-right = \"bad\\q\"\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Bar: domain.BarConfig{
+					TopRight:    "vev-bar-top-right",
+					BottomRight: "vev-bar-bottom-right",
+					Interval:    5 * time.Second,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+			wantWarnings: []domain.Warning{{Line: 1, Msg: "invalid bar.top-right \"\\\"bad\\\\q\\\"\""}},
+		},
+		{
+			name:  "bar settings empty commands disable anchors",
+			input: "bar.top-right =\nbar.bottom-right =\nbar.interval = 5s\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Bar: domain.BarConfig{
+					TopRight:    "",
+					BottomRight: "",
+					Interval:    5 * time.Second,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+		},
+		{
+			name:  "bar interval invalid warns and keeps default",
+			input: "bar.interval = nope\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Bar: domain.BarConfig{
+					TopRight:    "vev-bar-top-right",
+					BottomRight: "vev-bar-bottom-right",
+					Interval:    5 * time.Second,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+			wantWarnings: []domain.Warning{{Line: 1, Msg: "invalid bar.interval \"nope\""}},
+		},
+		{
+			name:  "bar interval below minimum clamps and warns",
+			input: "bar.interval = 100ms\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Bar: domain.BarConfig{
+					TopRight:    "vev-bar-top-right",
+					BottomRight: "vev-bar-bottom-right",
+					Interval:    time.Second,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+			wantWarnings: []domain.Warning{{Line: 1, Msg: "bar.interval below minimum \"1s\""}},
+		},
+		{
 			name:  "snapshot restore processes",
 			input: "snapshot.restore_processes = claude, codex, pi, opencode, btop\n",
 			want: domain.Config{
@@ -140,6 +241,9 @@ func TestParse(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			if tt.want.Bar.Interval == 0 {
+				tt.want.Bar = domain.Defaults().Bar
+			}
 			if tt.want.Snapshot.RestoreProcesses == nil && !tt.want.Snapshot.RestoreProcessesSet {
 				tt.want.Snapshot.RestoreProcesses = append([]string(nil), domain.DefaultSnapshotRestoreProcesses()...)
 			}

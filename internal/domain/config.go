@@ -1,5 +1,10 @@
 package domain
 
+import "time"
+
+// MinBarInterval is the minimum supported bar refresh interval.
+const MinBarInterval = time.Second
+
 // ThemeMode selects how vev derives its color scheme.
 type ThemeMode int
 
@@ -35,11 +40,19 @@ func DefaultSnapshotRestoreProcesses() []string {
 	return append([]string(nil), defaultSnapshotRestoreProcesses...)
 }
 
+// BarConfig contains user-configurable bar right-anchor settings.
+type BarConfig struct {
+	TopRight    string
+	BottomRight string
+	Interval    time.Duration
+}
+
 // Config is the user-editable vev configuration after parsing. Unknown binding
 // keys are preserved here (in BindingEntries, in file order) so the usecase
 // layer can decide which actions it understands.
 type Config struct {
 	Theme          ThemeMode
+	Bar            BarConfig
 	BindingEntries []ConfigEntry
 	Codes          map[string]string
 	Snapshot       SnapshotConfig
@@ -55,7 +68,12 @@ type Warning struct {
 // Defaults returns vev's default configuration.
 func Defaults() Config {
 	return Config{
-		Theme:          ThemeAuto,
+		Theme: ThemeAuto,
+		Bar: BarConfig{
+			TopRight:    "vev-bar-top-right",
+			BottomRight: "vev-bar-bottom-right",
+			Interval:    5 * time.Second,
+		},
 		BindingEntries: []ConfigEntry{},
 		Codes:          map[string]string{},
 		Snapshot: SnapshotConfig{

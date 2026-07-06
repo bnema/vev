@@ -58,7 +58,7 @@ func pulseStyle(frame int) (renderer.Style, bool) {
 	return style, true
 }
 
-func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, styles themeStyles) {
+func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, topRight string, styles themeStyles) {
 	clearStatusRow(row)
 	x := 0
 	for _, w := range status.tabs {
@@ -73,6 +73,7 @@ func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, s
 		}
 		writeStatusText(row, &x, " ", style)
 	}
+	drawRightPlainText(row, topRight, x, styles.statusBar)
 }
 
 func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles) {
@@ -80,7 +81,8 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles)
 	x := 0
 	writeStatusText(row, &x, " "+state.status.session+" ", styles.accent)
 
-	fittedMRU := fitMRU(state.mru, len(row), x, state.copyFeedback)
+	rightText := composeBottomRightText(state.bottomRight, state.copyFeedback)
+	fittedMRU := fitMRU(state.mru, len(row), x, rightText)
 	for i, sess := range fittedMRU {
 		style := mruStyle(styles.statusBar, state.theme, i, len(fittedMRU))
 		name := sess.name
@@ -94,15 +96,34 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles)
 		}
 		writeStatusText(row, &x, " ", style)
 	}
-	drawRightPlainText(row, state.copyFeedback, x, styles.statusBar)
+	drawRightPlainText(row, rightText, x, styles.statusBar)
+}
+
+func composeBottomRightText(scriptText, copyFeedback string) string {
+	if scriptText == "" {
+		return copyFeedback
+	}
+	if copyFeedback == "" {
+		return scriptText
+	}
+	return scriptText + " " + copyFeedback
 }
 
 func drawRightPlainText(row []renderer.Cell, text string, reservedLeft int, style renderer.Style) {
-	if text == "" || len([]rune(text))+1+reservedLeft > len(row) {
+	textWidth := statusTextWidth(text)
+	if text == "" || textWidth+1+reservedLeft > len(row) {
 		return
 	}
-	x := len(row) - len([]rune(text)) - 1
+	x := len(row) - textWidth - 1
 	writeStatusText(row, &x, " "+text, style)
+}
+
+func statusTextWidth(text string) int {
+	width := 0
+	for _, r := range text {
+		width += renderer.RuneWidth(r)
+	}
+	return width
 }
 
 func clearStatusRow(row []renderer.Cell) {
@@ -113,6 +134,8 @@ func clearStatusRow(row []renderer.Cell) {
 
 type barState struct {
 	status         statusSnapshot
+	topRight       string
+	bottomRight    string
 	copyFeedback   string
 	mru            []mruSession
 	attentionFrame int
@@ -165,6 +188,9 @@ func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 	if cur != nil {
 		state.status = cur.statusSegments()
 	}
+	if d != nil {
+		state.topRight, state.bottomRight = d.barScriptSnapshot(cur)
+	}
 	if d == nil {
 		return state
 	}
@@ -205,19 +231,20 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 	// its " text" width plus a one-cell gap so drawRightPlainText always fits.
 	copyReserve := 1
 	if feedback != "" {
-		copyReserve = len([]rune(feedback)) + 2
+		copyReserve = statusTextWidth(feedback) + 2
 	}
 	physicalBudget := rowLen - leftUsed - copyReserve
 	if physicalBudget <= 0 || len(entries) == 0 {
 		return nil
 	}
 	cost := func(e mruSession) int {
-		n := 2 + len([]rune(e.name))
+		name := e.name
 		if e.ephemeral {
-			n++
+			name += "*"
 		}
+		n := 2 + statusTextWidth(name)
 		if e.attention {
-			n += 2
+			n += 1 + renderer.RuneWidth(attentionGlyph)
 		}
 		return n
 	}
@@ -286,10 +313,18 @@ func writeBell(row []renderer.Cell, x *int, frame int) {
 
 func writeStatusText(row []renderer.Cell, x *int, text string, style renderer.Style) {
 	for _, r := range text {
-		if *x >= len(row) {
+		width := renderer.RuneWidth(r)
+		if width == 0 {
+			continue
+		}
+		if *x >= len(row) || *x+width > len(row) {
 			return
 		}
 		row[*x] = renderer.Cell{Rune: r, Style: style}
 		(*x)++
+		if width == 2 {
+			row[*x] = renderer.Cell{Style: style, Continuation: true}
+			(*x)++
+		}
 	}
 }
