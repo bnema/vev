@@ -142,6 +142,9 @@ func parseArgs(args []string) (command, error) {
 		if len(args) > 2 {
 			return command{}, usagef("`new` does not support command overrides")
 		}
+		if err := domain.ValidateSessionName(args[1]); err != nil {
+			return command{}, err
+		}
 		return command{kind: kindAttach, intent: ports.IntentNew, name: args[1]}, nil
 	case "attach", "a":
 		if len(args) < 2 || args[1] == "" {

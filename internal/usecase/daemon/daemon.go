@@ -609,6 +609,10 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrInternal, "empty session name"}
 		}
+		if err := domain.ValidateSessionName(h.Name); err != nil {
+			d.mu.Unlock()
+			return nil, nil, &protoErr{ports.ErrInternal, err.Error()}
+		}
 		if d.nameLiveOrStoppedLocked(h.Name) {
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}

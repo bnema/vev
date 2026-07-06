@@ -900,6 +900,28 @@ func TestIntentNewStoppedNameRejected(t *testing.T) {
 	require.ErrorContains(t, err, "name already in use")
 }
 
+func TestIntentNewUnsafeNameRejected(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	tr := portsmocks.NewMockTransport(t)
+	_, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "my work", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
+	require.ErrorContains(t, err, domain.ErrInvalidSessionName.Error())
+}
+
+func TestCreateSessionAndSwitchUnsafeNameRejected(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	require.ErrorIs(t, d.createSessionAndSwitch(nil, nil, "my work"), domain.ErrInvalidSessionName)
+}
+
+func TestRenameSessionUnsafeNameRejected(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz)
+	require.NoError(t, err)
+	require.ErrorIs(t, d.renameSession(sess, "my work"), domain.ErrInvalidSessionName)
+}
+
 func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	p1, release1 := newBlockingPTY(t)

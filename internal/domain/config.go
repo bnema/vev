@@ -18,6 +18,18 @@ type ConfigEntry struct {
 	Value string
 }
 
+// SnapshotConfig contains user-configurable snapshot restore settings.
+type SnapshotConfig struct {
+	RestoreProcesses    []string
+	RestoreProcessesSet bool
+}
+
+// DefaultSnapshotRestoreProcesses is the default allowlist for process restore.
+var DefaultSnapshotRestoreProcesses = []string{
+	"vi", "vim", "nvim", "emacs", "man", "less", "more", "tail", "top", "htop", "btop",
+	"claude", "codex", "pi", "opencode",
+}
+
 // Config is the user-editable vev configuration after parsing. Unknown binding
 // keys are preserved here (in BindingEntries, in file order) so the usecase
 // layer can decide which actions it understands.
@@ -25,6 +37,7 @@ type Config struct {
 	Theme          ThemeMode
 	BindingEntries []ConfigEntry
 	Codes          map[string]string
+	Snapshot       SnapshotConfig
 }
 
 // Warning describes a non-fatal config problem. Parsers and reloaders should
@@ -40,5 +53,8 @@ func Defaults() Config {
 		Theme:          ThemeAuto,
 		BindingEntries: []ConfigEntry{},
 		Codes:          map[string]string{},
+		Snapshot: SnapshotConfig{
+			RestoreProcesses: append([]string(nil), DefaultSnapshotRestoreProcesses...),
+		},
 	}
 }

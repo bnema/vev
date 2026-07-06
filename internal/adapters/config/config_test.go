@@ -97,6 +97,9 @@ func TestParse(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			if tt.want.Snapshot.RestoreProcesses == nil && !tt.want.Snapshot.RestoreProcessesSet {
+				tt.want.Snapshot.RestoreProcesses = append([]string(nil), domain.DefaultSnapshotRestoreProcesses...)
+			}
 			got, warnings, err := Parse(strings.NewReader(tt.input))
 			if err != nil {
 				t.Fatalf("Parse() error = %v", err)
@@ -109,6 +112,49 @@ func TestParse(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseSnapshotRestoreProcesses(t *testing.T) {
+	t.Parallel()
+
+	cfg, warnings, err := Parse(strings.NewReader("snapshot.restore_processes = claude, codex, pi, opencode, btop\n"))
+	require.NoError(t, err)
+	require.Empty(t, warnings)
+	require.Equal(t, []string{"claude", "codex", "pi", "opencode", "btop"}, cfg.Snapshot.RestoreProcesses)
+	require.True(t, cfg.Snapshot.RestoreProcessesSet)
+}
+
+func TestParseSnapshotRestoreProcessesEmptyDisables(t *testing.T) {
+	t.Parallel()
+
+	cfg, warnings, err := Parse(strings.NewReader("snapshot.restore_processes =\n"))
+	require.NoError(t, err)
+	require.Empty(t, warnings)
+	require.Empty(t, cfg.Snapshot.RestoreProcesses)
+	require.True(t, cfg.Snapshot.RestoreProcessesSet)
+}
+
+func TestParseSnapshotRestoreProcessesWarnsOnMalformedEntries(t *testing.T) {
+	t.Parallel()
+
+	cfg, warnings, err := Parse(strings.NewReader("snapshot.restore_processes = claude, custom-tool, /bin/sh, :all:, bad name, claude, , zsh\n"))
+	require.NoError(t, err)
+	require.Equal(t, []domain.Warning{
+		{Line: 1, Msg: "invalid snapshot restore process \"/bin/sh\""},
+		{Line: 1, Msg: "invalid snapshot restore process \":all:\""},
+		{Line: 1, Msg: "invalid snapshot restore process \"bad name\""},
+	}, warnings)
+	require.Equal(t, []string{"claude", "custom-tool", "zsh"}, cfg.Snapshot.RestoreProcesses)
+	require.True(t, cfg.Snapshot.RestoreProcessesSet)
+}
+
+func TestDefaultsCopiesSnapshotRestoreProcesses(t *testing.T) {
+	t.Parallel()
+
+	first := domain.Defaults()
+	first.Snapshot.RestoreProcesses[0] = "mutated"
+	second := domain.Defaults()
+	require.Equal(t, "vi", second.Snapshot.RestoreProcesses[0])
 }
 
 func TestParsePreservesBindingFileOrder(t *testing.T) {

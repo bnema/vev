@@ -177,6 +177,9 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	if name == "" {
 		return errors.New("name required")
 	}
+	if err := domain.ValidateSessionName(name); err != nil {
+		return err
+	}
 	sz := ac.size
 	d.mu.Lock()
 	if d.closing {
@@ -389,6 +392,9 @@ func (s *session) switchRelative(delta int) bool {
 func (d *Daemon) renameSession(sess *session, name string) error {
 	if name == "" {
 		return errors.New("name required")
+	}
+	if err := domain.ValidateSessionName(name); err != nil {
+		return err
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
