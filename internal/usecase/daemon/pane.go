@@ -18,6 +18,7 @@ import (
 // The PTY reader takes only pane.mu, so child output never waits on client IO.
 type pane struct {
 	id         layout.PaneID
+	stableID   string
 	pty        ports.PTY
 	mu         sync.Mutex // guards screen, scrollback, syncGen, rect, and title
 	screen     *vt.Screen
@@ -34,11 +35,16 @@ type pane struct {
 }
 
 func newPane(id layout.PaneID, pty ports.PTY, sz domain.Size) *pane {
+	return newPaneWithStableID(id, mustTestStableID("pane"), pty, sz)
+}
+
+func newPaneWithStableID(id layout.PaneID, stableID string, pty ports.PTY, sz domain.Size) *pane {
 	sb := scopy.NewScrollback(defaultScrollbackRows)
 	screen := vt.NewScreen(sz.Cols, sz.Rows)
 	screen.OnLineEvicted = sb.Append
 	return &pane{
 		id:         id,
+		stableID:   stableID,
 		pty:        pty,
 		screen:     screen,
 		scrollback: sb,

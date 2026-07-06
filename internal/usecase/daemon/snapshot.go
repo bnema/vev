@@ -92,7 +92,12 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		for _, pl := range placements {
 			placementByPane[pl.ID] = pl.Content
 		}
-		tb := &tab{tree: tabSnap.Tree.Clone(), panes: make(map[layout.PaneID]*pane, len(tabSnap.Panes)), nextPaneID: int(tabSnap.NextPaneID), size: tbSize}
+		tabStableID, err := newStableID()
+		if err != nil {
+			closeOpened()
+			return fmt.Errorf("snapshot: generating tab identity: %w", err)
+		}
+		tb := &tab{stableID: tabStableID, tree: tabSnap.Tree.Clone(), panes: make(map[layout.PaneID]*pane, len(tabSnap.Panes)), nextPaneID: int(tabSnap.NextPaneID), size: tbSize}
 		if tb.nextPaneID <= 0 {
 			tb.nextPaneID = 1
 		}
@@ -109,12 +114,17 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 				return fmt.Errorf("snapshot: missing pane placement")
 			}
 			contentSize := restorePTYSize(contentRect, tbSize)
-			pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(snap.Name), paneSnap.Cwd, contentSize)
+			paneStableID, err := newStableID()
+			if err != nil {
+				closeOpened()
+				return fmt.Errorf("snapshot: generating pane identity: %w", err)
+			}
+			pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(snap.Name, tabStableID, paneStableID), paneSnap.Cwd, contentSize)
 			if err != nil {
 				closeOpened()
 				return err
 			}
-			p := newPane(paneSnap.ID, pty, contentSize)
+			p := newPaneWithStableID(paneSnap.ID, paneStableID, pty, contentSize)
 			p.ctx, p.cancel = context.WithCancel(tb.ctx)
 			p.rect = contentRect
 			seedPaneRows(p, paneSnap.Scrollback, paneSnap.Visible)

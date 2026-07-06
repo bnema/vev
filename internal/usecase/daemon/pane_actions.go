@@ -57,9 +57,18 @@ func (d *Daemon) spawnPaneOp(
 		return layout.ErrTooSmall
 	}
 	newRect := placementContent(placements, newID)
+	tabStableID := tb.stableID
 	tb.mu.Unlock()
 
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), cwd, rectSize(newRect))
+	paneStableID, err := newStableID()
+	if err != nil {
+		tb.mu.Lock()
+		_ = tb.tree.Close(newID)
+		tb.tree.Focus = oldFocus
+		tb.mu.Unlock()
+		return fmt.Errorf("daemon: generating pane identity: %w", err)
+	}
+	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID), cwd, rectSize(newRect))
 	if err != nil {
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "pane", newID, "kind", "pane")
 		tb.mu.Lock()
@@ -70,7 +79,7 @@ func (d *Daemon) spawnPaneOp(
 	}
 
 	pctx, cancel := context.WithCancel(tb.ctx)
-	p := newPane(newID, pty, rectSize(newRect))
+	p := newPaneWithStableID(newID, paneStableID, pty, rectSize(newRect))
 	p.ctx, p.cancel = pctx, cancel
 	p.rect = newRect
 

@@ -70,6 +70,7 @@ type session struct {
 type tab struct {
 	mu sync.Mutex // guards tree, panes, nextPaneID, size, previewClient, and pane map membership
 
+	stableID   string
 	tree       *layout.Tree
 	panes      map[layout.PaneID]*pane
 	nextPaneID int
@@ -122,7 +123,15 @@ func (d *Daemon) touchMRU(sess *session) {
 
 func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size) (*session, error) {
 	tbSize := tabSize(sz)
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), cwd, tbSize)
+	tabStableID, err := newStableID()
+	if err != nil {
+		return nil, fmt.Errorf("daemon: generating tab identity: %w", err)
+	}
+	paneStableID, err := newStableID()
+	if err != nil {
+		return nil, fmt.Errorf("daemon: generating pane identity: %w", err)
+	}
+	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID), cwd, tbSize)
 	if err != nil {
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "session")
 		return nil, fmt.Errorf("daemon: spawning session %q: %w", name, err)
@@ -234,12 +243,20 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	cwd := sess.cwd
 	client := sess.client
 	sess.mu.Unlock()
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name), cwd, tbSize)
+	tabStableID, err := newStableID()
+	if err != nil {
+		return fmt.Errorf("daemon: generating tab identity: %w", err)
+	}
+	paneStableID, err := newStableID()
+	if err != nil {
+		return fmt.Errorf("daemon: generating pane identity: %w", err)
+	}
+	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID), cwd, tbSize)
 	if err != nil {
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "tab")
 		return fmt.Errorf("daemon: spawning tab for session %q: %w", name, err)
 	}
-	tb := newTab(pty, tbSize)
+	tb := newTabWithStableID(tabStableID, paneStableID, pty, tbSize)
 	if client != nil {
 		t := d.effectiveTheme(client.getClientTheme())
 		tb.mu.Lock()
@@ -274,9 +291,14 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 }
 
 func newTab(pty ports.PTY, sz domain.Size) *tab {
+	return newTabWithStableID(mustTestStableID("tab"), mustTestStableID("pane"), pty, sz)
+}
+
+func newTabWithStableID(tabStableID, paneStableID string, pty ports.PTY, sz domain.Size) *tab {
 	id := layout.PaneID("pane-1")
-	p := newPane(id, pty, sz)
+	p := newPaneWithStableID(id, paneStableID, pty, sz)
 	return &tab{
+		stableID:   tabStableID,
 		tree:       layout.NewTree(id),
 		panes:      map[layout.PaneID]*pane{id: p},
 		nextPaneID: 2,
@@ -707,7 +729,7 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 
 // childEnv builds the session child's environment: the daemon's own, with TERM
 // and VEV forced to well-known values.
-func (d *Daemon) childEnv(name string) []string {
+func (d *Daemon) childEnv(name, tabStableID, paneStableID string) []string {
 	out := make([]string, 0, len(d.baseEnv)+2)
 	for _, e := range d.baseEnv {
 		if strings.HasPrefix(e, "TERM=") || strings.HasPrefix(e, "VEV=") {
@@ -715,5 +737,5 @@ func (d *Daemon) childEnv(name string) []string {
 		}
 		out = append(out, e)
 	}
-	return append(out, "TERM=xterm-256color", "VEV="+name)
+	return append(out, "TERM=xterm-direct", "VEV=session="+name+",tab="+tabStableID+",pane="+paneStableID)
 }
