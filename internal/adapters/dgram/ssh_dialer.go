@@ -15,6 +15,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/ports"
+	pdgram "github.com/bnema/vev/pkg/dgram"
 )
 
 const (
@@ -41,7 +42,11 @@ var (
 		cmd.Stderr = stderr
 		return execBootstrapProcess{cmd: cmd}
 	}
-	listenUDPPacket = func() (net.PacketConn, error) { return net.ListenPacket("udp", ":0") }
+	listenUDPPacket = func(ctx context.Context) (net.PacketConn, error) {
+		var lc net.ListenConfig
+		return lc.ListenPacket(ctx, "udp", ":0")
+	}
+	probeUDPTransport = func(ctx context.Context, t *Transport) error { return t.Probe(ctx) }
 )
 
 type limitedBuffer struct {
@@ -108,7 +113,7 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 	if err != nil {
 		return nil, udpUnavailable("resolve UDP peer", err, &stderr)
 	}
-	pc, err := listenUDPPacket()
+	pc, err := listenUDPPacket(ctx)
 	if err != nil {
 		return nil, udpUnavailable("listen UDP", err, &stderr)
 	}
@@ -119,7 +124,7 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	if err := t.Probe(probeCtx); err != nil {
+	if err := probeUDPTransport(probeCtx, t); err != nil {
 		_ = t.Close()
 		return nil, udpUnavailable("probe UDP transport", err, &stderr)
 	}
@@ -149,6 +154,9 @@ func readUDPReady(r io.Reader) (udpReady, error) {
 	if err != nil {
 		return udpReady{}, fmt.Errorf("invalid bootstrap key: %w", err)
 	}
+	if len(key) != pdgram.KeySize {
+		return udpReady{}, fmt.Errorf("invalid bootstrap key length %d", len(key))
+	}
 	return udpReady{port: port, key: key}, nil
 }
 
@@ -166,6 +174,9 @@ func sshTargetHost(target string) string {
 	}
 	if h, _, err := net.SplitHostPort(target); err == nil {
 		return h
+	}
+	if strings.HasPrefix(target, "[") && strings.HasSuffix(target, "]") {
+		return strings.TrimPrefix(strings.TrimSuffix(target, "]"), "[")
 	}
 	return target
 }

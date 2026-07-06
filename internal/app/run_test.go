@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -66,6 +67,9 @@ func TestParseArgs(t *testing.T) {
 		{name: "stdio with session", args: []string{"_stdio", "work"}, wantKind: kindStdio, wantName: "work"},
 		{name: "stdio preserves legacy unsafe name", args: []string{"_stdio", "my work"}, wantKind: kindStdio, wantName: "my work"},
 		{name: "stdio too many args", args: []string{"_stdio", "work", "extra"}, wantErr: true},
+		{name: "udp bootstrap", args: []string{"_udp-bootstrap", "work"}, wantKind: kindUDPBootstrap, wantName: "work"},
+		{name: "udp proxy", args: []string{"_udp-proxy", "work"}, wantKind: kindUDPProxy, wantName: "work"},
+		{name: "udp proxy too many args", args: []string{"_udp-proxy", "work", "extra"}, wantErr: true},
 		{name: "help", args: []string{"--help"}, wantKind: kindHelp},
 		{name: "help subcommand", args: []string{"help"}, wantKind: kindHelp},
 		{name: "version", args: []string{"--version"}, wantKind: kindVersion},
@@ -558,5 +562,33 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 	}
 	if gotClipboard != nil {
 		t.Fatalf("local attach must not thread a ClipboardReader through, got %#v", gotClipboard)
+	}
+}
+
+func TestRunUDPBootstrapForwardsReadinessAndExits(t *testing.T) {
+	oldTimeout := udpBootstrapTimeout
+	udpBootstrapTimeout = time.Second
+	t.Cleanup(func() { udpBootstrapTimeout = oldTimeout })
+	oldCommand := udpProxyCommand
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	udpProxyCommand = func(context.Context, string, ...string) *exec.Cmd {
+		cmd := exec.Command("/bin/sh", "-c", "printf 'VEV-UDP 4242 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\\n'")
+		cmd.Stdout = w
+		return cmd
+	}
+	t.Cleanup(func() { udpProxyCommand = oldCommand })
+	defer func() { _ = w.Close() }()
+
+	got := captureStdout(t, func() {
+		if err := runUDPBootstrap(context.Background(), "work"); err != nil {
+			t.Fatalf("runUDPBootstrap() error = %v", err)
+		}
+	})
+	if got != "VEV-UDP 4242 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n" {
+		t.Fatalf("readiness = %q", got)
 	}
 }

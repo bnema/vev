@@ -99,7 +99,7 @@ func withBootstrapStarter(t *testing.T, fn func(context.Context, string, string,
 	t.Cleanup(func() { startUDPBootstrap = old })
 }
 
-func withListenUDP(t *testing.T, fn func() (net.PacketConn, error)) {
+func withListenUDP(t *testing.T, fn func(context.Context) (net.PacketConn, error)) {
 	t.Helper()
 	old := listenUDPPacket
 	listenUDPPacket = fn
@@ -125,7 +125,7 @@ func TestRemoteDialerUDPBootstrapFailures(t *testing.T) {
 			proc := &fakeBootstrapProcess{stdout: io.NopCloser(strings.NewReader(tt.stdout)), startErr: tt.start}
 			withBootstrapStarter(t, func(context.Context, string, string, io.Writer) bootstrapProcess { return proc })
 			if tt.listen != nil {
-				withListenUDP(t, func() (net.PacketConn, error) { return nil, tt.listen })
+				withListenUDP(t, func(context.Context) (net.PacketConn, error) { return nil, tt.listen })
 			}
 			tr, err := NewRemoteDialer("127.0.0.1", "work").Dial(context.Background())
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
@@ -155,7 +155,9 @@ func TestRemoteDialerProbeFailureCleansUpWithoutStdioFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	closed := false
-	withListenUDP(t, func() (net.PacketConn, error) { return closeTrackPacketConn{PacketConn: pc, closed: &closed}, nil })
+	withListenUDP(t, func(context.Context) (net.PacketConn, error) {
+		return closeTrackPacketConn{PacketConn: pc, closed: &closed}, nil
+	})
 	d := NewRemoteDialer("127.0.0.1", "work")
 	d.ProbeTimeout = time.Nanosecond
 	tr, err := d.Dial(context.Background())
