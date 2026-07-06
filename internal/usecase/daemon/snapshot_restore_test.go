@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"math"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -76,6 +77,19 @@ func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 	require.Equal(t, "old2", rowText(copySnap.Rows[0][:4]))
 	require.Equal(t, "vis2", rowText(copySnap.Rows[1][:4]))
 	p.mu.Unlock()
+
+	tb.mu.Lock()
+	tabStableID := tb.stableID
+	pane1StableID := tb.panes["pane-1"].stableID
+	pane2StableID := tb.panes["pane-2"].stableID
+	tb.mu.Unlock()
+	require.True(t, strings.HasPrefix(tabStableID, "t_"), tabStableID)
+	require.True(t, strings.HasPrefix(pane1StableID, "p_"), pane1StableID)
+	require.True(t, strings.HasPrefix(pane2StableID, "p_"), pane2StableID)
+	require.Contains(t, factory.opens[0].env, "TERM=xterm-direct")
+	require.Contains(t, factory.opens[0].env, "VEV=session=work,tab="+tabStableID+",pane="+pane1StableID)
+	require.Contains(t, factory.opens[1].env, "TERM=xterm-direct")
+	require.Contains(t, factory.opens[1].env, "VEV=session=work,tab="+tabStableID+",pane="+pane2StableID)
 }
 
 func TestRestoreSnapshotsOpensCollapsedStackPanesWithValidPTYSize(t *testing.T) {
@@ -263,12 +277,13 @@ type restorePTYFactory struct {
 type restorePTYOpen struct {
 	dir  string
 	size domain.Size
+	env  []string
 }
 
-func (f *restorePTYFactory) Open(_ string, _ []string, _ []string, dir string, sz domain.Size) (ports.PTY, error) {
+func (f *restorePTYFactory) Open(_ string, _ []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.opens = append(f.opens, restorePTYOpen{dir: dir, size: sz})
+	f.opens = append(f.opens, restorePTYOpen{dir: dir, size: sz, env: append([]string(nil), env...)})
 	return newRestorePTY(), nil
 }
 

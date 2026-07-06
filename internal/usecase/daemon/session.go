@@ -123,11 +123,11 @@ func (d *Daemon) touchMRU(sess *session) {
 
 func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size) (*session, error) {
 	tbSize := tabSize(sz)
-	tabStableID, err := newStableID()
+	tabStableID, err := newStableID("t")
 	if err != nil {
 		return nil, fmt.Errorf("daemon: generating tab identity: %w", err)
 	}
-	paneStableID, err := newStableID()
+	paneStableID, err := newStableID("p")
 	if err != nil {
 		return nil, fmt.Errorf("daemon: generating pane identity: %w", err)
 	}
@@ -141,7 +141,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	d.nextID++
 	createdAt := time.Now().UnixNano()
 
-	tb := newTab(pty, tbSize)
+	tb := newTabWithStableID(tabStableID, paneStableID, pty, tbSize)
 	sctx, cancel := context.WithCancel(d.serveCtx)
 	tb.ctx, tb.cancel = context.WithCancel(sctx)
 	lastUsedSeq := uint64(0)
@@ -243,11 +243,11 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	cwd := sess.cwd
 	client := sess.client
 	sess.mu.Unlock()
-	tabStableID, err := newStableID()
+	tabStableID, err := newStableID("t")
 	if err != nil {
 		return fmt.Errorf("daemon: generating tab identity: %w", err)
 	}
-	paneStableID, err := newStableID()
+	paneStableID, err := newStableID("p")
 	if err != nil {
 		return fmt.Errorf("daemon: generating pane identity: %w", err)
 	}
@@ -291,7 +291,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 }
 
 func newTab(pty ports.PTY, sz domain.Size) *tab {
-	return newTabWithStableID(mustTestStableID("tab"), mustTestStableID("pane"), pty, sz)
+	return newTabWithStableID(mustTestStableID("t"), mustTestStableID("p"), pty, sz)
 }
 
 func newTabWithStableID(tabStableID, paneStableID string, pty ports.PTY, sz domain.Size) *tab {

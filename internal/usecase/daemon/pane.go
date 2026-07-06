@@ -35,7 +35,7 @@ type pane struct {
 }
 
 func newPane(id layout.PaneID, pty ports.PTY, sz domain.Size) *pane {
-	return newPaneWithStableID(id, mustTestStableID("pane"), pty, sz)
+	return newPaneWithStableID(id, mustTestStableID("p"), pty, sz)
 }
 
 func newPaneWithStableID(id layout.PaneID, stableID string, pty ports.PTY, sz domain.Size) *pane {

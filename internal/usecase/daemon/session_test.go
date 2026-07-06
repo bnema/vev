@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -890,6 +891,49 @@ func TestPickerStoppedTargetKillPurges(t *testing.T) {
 	_, ok := d.stopped["old"]
 	d.mu.Unlock()
 	require.False(t, ok)
+}
+
+func TestNewSessionAssignsStableIDsAndChildEnv(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+
+	var gotEnv []string
+	f := portsmocks.NewMockPTYFactory(t)
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+			gotEnv = append([]string(nil), env...)
+			return p, nil
+		},
+	).Once()
+	d := newTestDaemon(t, f, stubClock{})
+	d.baseEnv = []string{"KEEP=1", "TERM=old", "VEV=old"}
+
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz)
+	require.NoError(t, err)
+	defer func() {
+		_ = d.killSession(sess, ports.ReasonServerShutdown, false)
+		releasePTY()
+		d.sessWg.Wait()
+	}()
+
+	sess.mu.Lock()
+	require.Len(t, sess.tabs, 1)
+	tb := sess.tabs[0]
+	sess.mu.Unlock()
+	tb.mu.Lock()
+	paneStableID := tb.panes["pane-1"].stableID
+	tabStableID := tb.stableID
+	tb.mu.Unlock()
+
+	require.True(t, strings.HasPrefix(tabStableID, "t_"), tabStableID)
+	require.True(t, strings.HasPrefix(paneStableID, "p_"), paneStableID)
+	require.NotEqual(t, tabStableID, paneStableID)
+	require.Contains(t, gotEnv, "KEEP=1")
+	require.NotContains(t, gotEnv, "TERM=old")
+	require.NotContains(t, gotEnv, "VEV=old")
+	require.Contains(t, gotEnv, "TERM=xterm-direct")
+	require.Contains(t, gotEnv, "VEV=session=work,tab="+tabStableID+",pane="+paneStableID)
 }
 
 func TestIntentNewStoppedNameRejected(t *testing.T) {

@@ -92,7 +92,7 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		for _, pl := range placements {
 			placementByPane[pl.ID] = pl.Content
 		}
-		tabStableID, err := newStableID()
+		tabStableID, err := newStableID("t")
 		if err != nil {
 			closeOpened()
 			return fmt.Errorf("snapshot: generating tab identity: %w", err)
@@ -114,7 +114,7 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 				return fmt.Errorf("snapshot: missing pane placement")
 			}
 			contentSize := restorePTYSize(contentRect, tbSize)
-			paneStableID, err := newStableID()
+			paneStableID, err := newStableID("p")
 			if err != nil {
 				closeOpened()
 				return fmt.Errorf("snapshot: generating pane identity: %w", err)

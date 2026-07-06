@@ -60,7 +60,7 @@ func (d *Daemon) spawnPaneOp(
 	tabStableID := tb.stableID
 	tb.mu.Unlock()
 
-	paneStableID, err := newStableID()
+	paneStableID, err := newStableID("p")
 	if err != nil {
 		tb.mu.Lock()
 		_ = tb.tree.Close(newID)
