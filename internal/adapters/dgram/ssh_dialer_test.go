@@ -59,7 +59,7 @@ func TestRemoteDialerUDPBootstrapFailures(t *testing.T) {
 		waited           bool
 		wantStdoutClosed bool
 	}{
-		{name: "start failure", start: errors.New("ssh missing"), want: "vev: remote UDP transport unavailable: start bootstrap: ssh missing", wantStdoutClosed: true},
+		{name: "start failure", start: errors.New("ssh missing"), want: "remote UDP transport unavailable: start bootstrap: ssh missing", wantStdoutClosed: true},
 		{name: "malformed readiness", stdout: "hello\n", want: "malformed readiness line", killed: true, waited: true, wantStdoutClosed: true},
 		{name: "bootstrap wait failure", stdout: "VEV-UDP 4444 " + key + "\n", want: "wait bootstrap: exit status 255", waited: true, wantStdoutClosed: true},
 		{name: "packet listen failure", stdout: "VEV-UDP 4444 " + key + "\n", listen: errors.New("bind denied"), want: "listen UDP: bind denied", waited: true, wantStdoutClosed: true},
@@ -131,8 +131,13 @@ func TestRemoteDialerProbeFailureCleansUpWithoutStdioFallback(t *testing.T) {
 	d := NewRemoteDialer("127.0.0.1", "work")
 	d.ProbeTimeout = time.Nanosecond
 	tr, err := d.Dial(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "vev: remote UDP transport unavailable: probe UDP transport") {
+	if err == nil || !strings.Contains(err.Error(), "remote UDP transport unavailable: probe UDP transport") {
 		t.Fatalf("Dial() error = %v, want probe unavailable", err)
+	}
+	for _, want := range []string{"firewall", "VEV_REMOTE_TRANSPORT=stdio vev attach 127.0.0.1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Dial() error = %q, want actionable hint %q", err, want)
+		}
 	}
 	if tr != nil {
 		t.Fatalf("transport=%T, want nil", tr)

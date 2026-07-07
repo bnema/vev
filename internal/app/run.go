@@ -374,10 +374,10 @@ type runAttachDeps struct {
 
 func remoteTransportModeFromEnv(value string) (ports.RemoteTransportMode, error) {
 	switch value {
-	case "", string(ports.RemoteTransportStdio):
-		return ports.RemoteTransportStdio, nil
-	case string(ports.RemoteTransportUDP):
+	case "", string(ports.RemoteTransportUDP):
 		return ports.RemoteTransportUDP, nil
+	case string(ports.RemoteTransportStdio):
+		return ports.RemoteTransportStdio, nil
 	default:
 		return "", fmt.Errorf("vev: invalid remote transport %q (want %q or %q)", value, ports.RemoteTransportUDP, ports.RemoteTransportStdio)
 	}
