@@ -501,7 +501,7 @@ func (t *Transport) resendPending() {
 	}
 	t.mu.Lock()
 	for seq, p := range t.pending {
-		if p.last.IsZero() || now.Sub(p.last) >= defaultResend {
+		if p.last.IsZero() || now.Sub(p.last) >= t.resendAfter {
 			p.last = now
 			resend = append(resend, struct {
 				seq uint64

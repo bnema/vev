@@ -169,7 +169,6 @@ func TestAuthenticatedPeerChangeUpdatesPeerAndEmitsConnected(t *testing.T) {
 	a.setLinkState(ports.LinkStateOffline, nil)
 	<-a.LinkEvents()
 	aPC.in <- packet{[]byte("not authenticated"), testAddr("evil")}
-	time.Sleep(30 * time.Millisecond)
 	if a.Peer().String() != old {
 		t.Fatalf("unauthenticated packet changed peer to %v", a.Peer())
 	}
@@ -178,10 +177,7 @@ func TestAuthenticatedPeerChangeUpdatesPeerAndEmitsConnected(t *testing.T) {
 	frags, _ := pdgram.FragmentPayload(9, rec, pdgram.DefaultMTU)
 	raw, _ := pdgram.MarshalFragment(frags[0])
 	aPC.in <- packet{c.Seal(2, 99, raw, nil), testAddr("evil")}
-	time.Sleep(30 * time.Millisecond)
-	if a.Peer().String() != "evil" {
-		t.Fatalf("authenticated packet did not rehome: %v", a.Peer())
-	}
+	waitPeer(t, a, "evil")
 	select {
 	case ev := <-a.LinkEvents():
 		if ev.State != ports.LinkStateConnected {
@@ -518,6 +514,18 @@ func recvWithin(t *testing.T, tr *Transport, d time.Duration) ports.Frame {
 		t.Fatal("timeout")
 		return ports.Frame{}
 	}
+}
+
+func waitPeer(t *testing.T, tr *Transport, want string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if tr.Peer().String() == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("peer=%v, want %s", tr.Peer(), want)
 }
 
 func recvErrWithin(t *testing.T, tr *Transport, d time.Duration) (ports.Frame, error) {
