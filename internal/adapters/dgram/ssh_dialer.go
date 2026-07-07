@@ -52,6 +52,34 @@ var (
 	probeUDPTransport = func(ctx context.Context, t *Transport) error { return t.Probe(ctx) }
 )
 
+// RemoteDialFailureKind classifies which part of UDP remote bootstrap failed
+// so client-side recovery policy and tests do not have to parse human text.
+type RemoteDialFailureKind uint8
+
+const (
+	RemoteDialBootstrapUnavailable RemoteDialFailureKind = iota + 1
+	RemoteDialProbeUnreachable
+)
+
+// RemoteDialError wraps a UDP remote bootstrap failure with a stable machine
+// classification while preserving the existing human-facing error text.
+type RemoteDialError struct {
+	Kind   RemoteDialFailureKind
+	Action string
+	Err    error
+	Hint   string
+}
+
+func (e *RemoteDialError) Error() string {
+	base := fmt.Sprintf("remote UDP transport unavailable: %s: %v", e.Action, e.Err)
+	if e.Hint != "" {
+		return base + e.Hint
+	}
+	return base
+}
+
+func (e *RemoteDialError) Unwrap() error { return e.Err }
+
 type limitedBuffer struct {
 	buf []byte
 }
@@ -233,11 +261,14 @@ func readUDPReady(r io.Reader) (udpReady, error) {
 }
 
 func udpUnavailable(action string, err error, stderr fmt.Stringer) error {
-	msg := strings.TrimSpace(stderr.String())
-	if msg != "" {
-		return fmt.Errorf("remote UDP transport unavailable: %s: %w (stderr: %s)", action, err, msg)
+	return udpDialFailure(RemoteDialBootstrapUnavailable, action, err, stderr, "")
+}
+
+func udpDialFailure(kind RemoteDialFailureKind, action string, err error, stderr fmt.Stringer, hint string) error {
+	if msg := strings.TrimSpace(stderr.String()); msg != "" {
+		hint = fmt.Sprintf(" (stderr: %s)%s", msg, hint)
 	}
-	return fmt.Errorf("remote UDP transport unavailable: %s: %w", action, err)
+	return &RemoteDialError{Kind: kind, Action: action, Err: err, Hint: hint}
 }
 
 // udpProbeUnreachable wraps a probe failure with actionable guidance. A failed
@@ -245,10 +276,9 @@ func udpUnavailable(action string, err error, stderr fmt.Stringer) error {
 // vev's UDP proxy rather than a vev bug, so name the two real fixes instead of
 // surfacing a bare deadline error.
 func udpProbeUnreachable(target string, err error, stderr fmt.Stringer) error {
-	return fmt.Errorf("%w\n"+
+	return udpDialFailure(RemoteDialProbeUnreachable, "probe UDP transport", err, stderr, fmt.Sprintf("\n"+
 		"  the remote host is not reachable over UDP; a firewall is likely dropping the datagrams.\n"+
-		"  open UDP on the remote (e.g. `sudo ufw allow in on tailscale0`) or attach over SSH with `VEV_REMOTE_TRANSPORT=stdio vev attach %s`",
-		udpUnavailable("probe UDP transport", err, stderr), target)
+		"  open UDP on the remote (e.g. `sudo ufw allow in on tailscale0`) or attach over SSH with `VEV_REMOTE_TRANSPORT=stdio vev attach %s`", target))
 }
 
 func sshTargetHost(target string) string {

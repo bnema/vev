@@ -10,14 +10,34 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-const reconnectToastMessage = "Reconnection attempts…"
+const reconnectToastMessage = "offline; retrying…"
+
+func reconnectStageMessage(stage reconnectStage) string {
+	switch stage {
+	case reconnectStageDegraded:
+		return "connection degraded"
+	case reconnectStageProbingUDP:
+		return "probing UDP path"
+	case reconnectStageSSH:
+		return "offline; retrying… reconnecting through SSH"
+	case reconnectStageOfflineRetrying:
+		return reconnectToastMessage
+	default:
+		return reconnectToastMessage
+	}
+}
 
 func drawReconnectToast(out io.Writer, size domain.Size) error {
-	bounds := reconnectToastBounds(size)
+	return drawReconnectToastStage(out, size, reconnectStageOfflineRetrying)
+}
+
+func drawReconnectToastStage(out io.Writer, size domain.Size, stage reconnectStage) error {
+	message := reconnectStageMessage(stage)
+	bounds := reconnectToastBoundsFor(size, message)
 	if bounds.Width <= 0 || bounds.Height <= 0 {
 		return nil
 	}
-	return writeReconnectToast(out, bounds, reconnectToastLines(bounds))
+	return writeReconnectToast(out, bounds, reconnectToastLinesFor(bounds, message))
 }
 
 func clearReconnectToast(out io.Writer, size domain.Size) error {
@@ -34,15 +54,23 @@ func clearReconnectToast(out io.Writer, size domain.Size) error {
 }
 
 func reconnectToastBounds(size domain.Size) domain.Rect {
-	return ui.ToastBounds(size, ui.Toast{Message: reconnectToastMessage, Anchor: ui.ToastCenter})
+	return reconnectToastBoundsFor(size, reconnectToastMessage)
+}
+
+func reconnectToastBoundsFor(size domain.Size, message string) domain.Rect {
+	return ui.ToastBounds(size, ui.Toast{Message: message, Anchor: ui.ToastCenter})
 }
 
 func reconnectToastLines(bounds domain.Rect) []string {
+	return reconnectToastLinesFor(bounds, reconnectToastMessage)
+}
+
+func reconnectToastLinesFor(bounds domain.Rect, message string) []string {
 	if bounds.Width <= 0 || bounds.Height <= 0 {
 		return nil
 	}
 	frame := renderer.NewFrame(bounds.Width, bounds.Height)
-	ui.CompositeToasts(frame, []ui.ActiveToast{{Toast: ui.Toast{Message: reconnectToastMessage, Anchor: ui.ToastCenter}}}, ui.ToastStyles{
+	ui.CompositeToasts(frame, []ui.ActiveToast{{Toast: ui.Toast{Message: message, Anchor: ui.ToastCenter}}}, ui.ToastStyles{
 		Text: renderer.DefaultStyle(),
 		Box:  renderer.DefaultStyle(),
 	}, nil)

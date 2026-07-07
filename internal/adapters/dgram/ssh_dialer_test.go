@@ -79,6 +79,13 @@ func TestRemoteDialerUDPBootstrapFailures(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Dial() error = %v, want containing %q", err, tt.want)
 			}
+			var dialErr *RemoteDialError
+			if !errors.As(err, &dialErr) {
+				t.Fatalf("Dial() error = %T, want *RemoteDialError", err)
+			}
+			if dialErr.Kind != RemoteDialBootstrapUnavailable {
+				t.Fatalf("Dial() error kind = %v, want bootstrap unavailable", dialErr.Kind)
+			}
 			if tr != nil {
 				t.Fatalf("Dial() transport = %T, want nil", tr)
 			}
@@ -133,6 +140,13 @@ func TestRemoteDialerProbeFailureCleansUpWithoutStdioFallback(t *testing.T) {
 	tr, err := d.Dial(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "remote UDP transport unavailable: probe UDP transport") {
 		t.Fatalf("Dial() error = %v, want probe unavailable", err)
+	}
+	var dialErr *RemoteDialError
+	if !errors.As(err, &dialErr) {
+		t.Fatalf("Dial() error = %T, want *RemoteDialError", err)
+	}
+	if dialErr.Kind != RemoteDialProbeUnreachable {
+		t.Fatalf("Dial() error kind = %v, want probe unreachable", dialErr.Kind)
 	}
 	for _, want := range []string{"firewall", "VEV_REMOTE_TRANSPORT=stdio vev attach 127.0.0.1"} {
 		if !strings.Contains(err.Error(), want) {

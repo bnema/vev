@@ -126,6 +126,37 @@ func TestResumeRebindsRotatesAndDoesNotOpenPTY(t *testing.T) {
 	require.Same(t, resumedAC, sess.client)
 }
 
+func TestOutputAckGapForcesFullStateRepaint(t *testing.T) {
+	ac := &attachedClient{}
+	ac.nextStateNum = 3
+	ac.advanceOutputAck(3)
+	ac.advanceOutputAck(2)
+	ac.advanceOutputAck(4)
+	require.Equal(t, uint64(3), ac.outputAck.Load(), "stale or future ACKs must not move output state incorrectly")
+	ac.sendMu.Lock()
+	ac.nextStateNum = 5
+	reset := ac.shouldResetOutputState(false)
+	require.True(t, reset, "client ack gap should force dependency-free full repaint")
+
+	f := ac.nextOutputFrameLocked([]byte("full repaint"), reset)
+	ac.sendMu.Unlock()
+	out, err := ports.UnmarshalOutput(f.Payload)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), out.BaseStateNum, "full repaint must not depend on dropped prior output states")
+	require.Equal(t, uint64(6), out.NewStateNum)
+
+	ac.outputAck.Store(out.NewStateNum)
+	ac.sendMu.Lock()
+	reset = ac.shouldResetOutputState(false)
+	require.False(t, reset, "acked current state can resume incremental output")
+	incremental := ac.nextOutputFrameLocked([]byte("incremental"), reset)
+	ac.sendMu.Unlock()
+	incrementalOut, err := ports.UnmarshalOutput(incremental.Payload)
+	require.NoError(t, err)
+	require.Equal(t, uint64(6), incrementalOut.BaseStateNum)
+	require.Equal(t, uint64(7), incrementalOut.NewStateNum)
+}
+
 func TestResumeClientIDMismatchDoesNotConsumeParkedToken(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
@@ -195,6 +226,34 @@ func TestExplicitDetachDoesNotPark(t *testing.T) {
 	parked := len(d.parked)
 	d.mu.Unlock()
 	require.Zero(t, parked)
+}
+
+func TestResumeParkUsesConfiguredGraceAndExpiresOnlyAfterGrace(t *testing.T) {
+	clk := &signalClock{timers: make(chan *signalTimer, 8)}
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), clk)
+	WithResumeParkGrace(20 * time.Minute)(d)
+	tr, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
+	require.NoError(t, err)
+	token := ac.resumeToken
+
+	d.clientGone(sess, ac, ac.transport(), false)
+	timer := <-clk.timers
+	require.Equal(t, 20*time.Minute, timer.duration)
+	d.mu.Lock()
+	_, parkedBeforeGrace := d.parked[token]
+	d.mu.Unlock()
+	require.True(t, parkedBeforeGrace, "parked attachment remains before configured grace timer fires")
+
+	timer.ch <- clk.Now()
+	require.Eventually(t, func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		_, ok := d.parked[token]
+		return !ok
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestParkExpiryAndShutdownCleanup(t *testing.T) {

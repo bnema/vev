@@ -58,12 +58,13 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 		old.timer.Stop()
 		old.closeDone()
 	}
-	timer := d.clock.NewTimer(resumeParkGrace)
+	grace := d.resumeParkGrace
+	timer := d.clock.NewTimer(grace)
 	parked := &parkedAttachment{sess: sess, ac: ac, timer: timer, done: make(chan struct{})}
 	ac.parked = true
 	d.parked[token] = parked
 	d.mu.Unlock()
-	d.log.Info("client parked for resume", "session", sess.name, "grace", resumeParkGrace)
+	d.log.Info("client parked for resume", "session", sess.name, "grace", grace)
 
 	go func(token uint64, parked *parkedAttachment) {
 		select {
