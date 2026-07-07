@@ -20,6 +20,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -705,8 +707,11 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 	defer func() { _ = logCloser.Close() }()
 	log.Debug("udp proxy starting", "session", session)
 
-	var lc net.ListenConfig
-	conn, err := lc.ListenPacket(ctx, "udp", ":0")
+	portRange, err := parseUDPPortRange(os.Getenv(envUDPPortRange))
+	if err != nil {
+		return err
+	}
+	conn, err := listenUDPInRange(ctx, portRange)
 	if err != nil {
 		return err
 	}
@@ -739,6 +744,87 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 		dgramTr = preHelloNameTransport{Transport: dg, session: session}
 	}
 	return proxyTransports(ctx, dgramTr, daemonTr, log)
+}
+
+const (
+	// envUDPPortRange configures the remote UDP proxy's listen port range so a
+	// host firewall can allow a known range instead of a random ephemeral port.
+	// Format: "START-END" (inclusive), a single "PORT", or "0" for a random
+	// ephemeral port. Unset uses the default range below.
+	envUDPPortRange     = "VEV_UDP_PORT_RANGE"
+	defaultUDPPortStart = 61000
+	defaultUDPPortEnd   = 61023
+)
+
+// udpPortRange is an inclusive [start, end] UDP port range. start == 0 means a
+// random ephemeral port (the old ":0" behavior).
+type udpPortRange struct {
+	start int
+	end   int
+}
+
+// parseUDPPortRange parses VEV_UDP_PORT_RANGE. Empty -> default range. "0" ->
+// ephemeral. "N" -> single port N. "A-B" -> inclusive range. Ports must be in
+// 1..65535 (or 0 for ephemeral) and end must be >= start.
+func parseUDPPortRange(value string) (udpPortRange, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return udpPortRange{start: defaultUDPPortStart, end: defaultUDPPortEnd}, nil
+	}
+	startStr, endStr, hasRange := strings.Cut(value, "-")
+	start, err := parseUDPPort(startStr)
+	if err != nil {
+		return udpPortRange{}, fmt.Errorf("invalid %s %q: %w", envUDPPortRange, value, err)
+	}
+	if start == 0 {
+		if hasRange {
+			return udpPortRange{}, fmt.Errorf("invalid %s %q: port 0 (ephemeral) cannot be combined with a range", envUDPPortRange, value)
+		}
+		return udpPortRange{start: 0, end: 0}, nil
+	}
+	end := start
+	if hasRange {
+		end, err = parseUDPPort(endStr)
+		if err != nil {
+			return udpPortRange{}, fmt.Errorf("invalid %s %q: %w", envUDPPortRange, value, err)
+		}
+	}
+	if end < start {
+		return udpPortRange{}, fmt.Errorf("invalid %s %q: end %d before start %d", envUDPPortRange, value, end, start)
+	}
+	return udpPortRange{start: start, end: end}, nil
+}
+
+func parseUDPPort(s string) (int, error) {
+	p, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0, fmt.Errorf("port %q is not a number", strings.TrimSpace(s))
+	}
+	if p < 0 || p > 65535 {
+		return 0, fmt.Errorf("port %d out of range 0-65535", p)
+	}
+	return p, nil
+}
+
+// listenUDPInRange binds a UDP packet conn on the first free port in the range,
+// skipping busy ports. A zero-start range binds a random ephemeral port.
+func listenUDPInRange(ctx context.Context, r udpPortRange) (net.PacketConn, error) {
+	var lc net.ListenConfig
+	if r.start == 0 {
+		return lc.ListenPacket(ctx, "udp", ":0")
+	}
+	if r.start < 0 || r.end < r.start {
+		return nil, fmt.Errorf("invalid UDP port range %d-%d", r.start, r.end)
+	}
+	var lastErr error
+	for port := r.start; port <= r.end; port++ {
+		conn, err := lc.ListenPacket(ctx, "udp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("no free UDP port in range %d-%d: %w", r.start, r.end, lastErr)
 }
 
 type preHelloNameTransport struct {

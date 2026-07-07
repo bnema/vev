@@ -122,6 +122,8 @@ vev attach user@host:session
 
 Remote attach uses SSH only to start a UDP proxy on the remote host; the session itself then talks directly to the remote host over UDP. `vev` must be installed on the remote host, and the host name you pass to `vev attach` must be reachable both by SSH for bootstrap and by UDP for the session transport. Omitting `:session` opens an ephemeral remote session. Named sessions can resume after temporary network disconnects, such as sleep or Wi-Fi changes.
 
+The UDP proxy binds a port in a fixed range on the remote (default `61000-61023`), so a host firewall that only allows SSH will drop the session datagrams and attach fails with `remote UDP transport unavailable: probe UDP transport`. Allow inbound UDP for that range on the remote to fix it — for example `sudo ufw allow 61000:61023/udp`, or on a trusted Tailscale network `sudo ufw allow in on tailscale0`. Override the range with `VEV_UDP_PORT_RANGE` on the remote (e.g. `VEV_UDP_PORT_RANGE=51000-51009`, a single `VEV_UDP_PORT_RANGE=51000`, or `VEV_UDP_PORT_RANGE=0` for a random ephemeral port).
+
 Set `VEV_REMOTE_TRANSPORT=stdio` to use SSH stdio compatibility mode on networks where direct UDP is blocked or the SSH target is only reachable through jump-host or SSH-config-only routing. Stdio mode keeps all traffic inside SSH, but it may not notice sleep or Wi-Fi loss promptly.
 
 ## Terminal color

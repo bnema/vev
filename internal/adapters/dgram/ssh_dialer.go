@@ -153,7 +153,7 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 	defer cancel()
 	if err := probeUDPTransport(probeCtx, t); err != nil {
 		_ = t.Close()
-		return nil, udpUnavailable("probe UDP transport", err, &stderr)
+		return nil, udpProbeUnreachable(d.Target, err, &stderr)
 	}
 	cleanup = false
 	return t, nil
@@ -235,9 +235,20 @@ func readUDPReady(r io.Reader) (udpReady, error) {
 func udpUnavailable(action string, err error, stderr fmt.Stringer) error {
 	msg := strings.TrimSpace(stderr.String())
 	if msg != "" {
-		return fmt.Errorf("vev: remote UDP transport unavailable: %s: %w (stderr: %s)", action, err, msg)
+		return fmt.Errorf("remote UDP transport unavailable: %s: %w (stderr: %s)", action, err, msg)
 	}
-	return fmt.Errorf("vev: remote UDP transport unavailable: %s: %w", action, err)
+	return fmt.Errorf("remote UDP transport unavailable: %s: %w", action, err)
+}
+
+// udpProbeUnreachable wraps a probe failure with actionable guidance. A failed
+// probe almost always means a firewall on the remote is dropping datagrams to
+// vev's UDP proxy rather than a vev bug, so name the two real fixes instead of
+// surfacing a bare deadline error.
+func udpProbeUnreachable(target string, err error, stderr fmt.Stringer) error {
+	return fmt.Errorf("%w\n"+
+		"  the remote host is not reachable over UDP; a firewall is likely dropping the datagrams.\n"+
+		"  open UDP on the remote (e.g. `sudo ufw allow in on tailscale0`) or attach over SSH with `VEV_REMOTE_TRANSPORT=stdio vev attach %s`",
+		udpUnavailable("probe UDP transport", err, stderr), target)
 }
 
 func sshTargetHost(target string) string {
