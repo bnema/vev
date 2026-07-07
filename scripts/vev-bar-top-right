@@ -38,19 +38,22 @@ if [ -r /proc/meminfo ]; then
 	)
 fi
 
-line=$now
+line=
 if [ -n "$cpu_pct" ]; then
-	if [ -n "$line" ]; then
-		line="$line cpu $cpu_pct%"
-	else
-		line="cpu $cpu_pct%"
-	fi
+	line="C $cpu_pct%"
 fi
 if [ -n "$mem_pct" ]; then
 	if [ -n "$line" ]; then
-		line="$line mem $mem_pct%"
+		line="$line M $mem_pct%"
 	else
-		line="mem $mem_pct%"
+		line="M $mem_pct%"
+	fi
+fi
+if [ -n "$now" ]; then
+	if [ -n "$line" ]; then
+		line="$line $now"
+	else
+		line="$now"
 	fi
 fi
 
