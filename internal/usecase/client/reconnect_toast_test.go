@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -75,6 +76,54 @@ type reconnectToastRecv struct {
 	err   error
 }
 
+type reconnectToastSequenceDialer struct {
+	transports []ports.Transport
+	calls      int
+}
+
+func (d *reconnectToastSequenceDialer) Dial(context.Context) (ports.Transport, error) {
+	if d.calls >= len(d.transports) {
+		return nil, io.EOF
+	}
+	tr := d.transports[d.calls]
+	d.calls++
+	return tr, nil
+}
+
+type reconnectToastRecordingTransport struct {
+	recvs  []reconnectToastRecv
+	sends  []ports.Frame
+	closed bool
+}
+
+func (t *reconnectToastRecordingTransport) Send(f ports.Frame) error {
+	t.sends = append(t.sends, f)
+	return nil
+}
+
+func (t *reconnectToastRecordingTransport) Recv() (ports.Frame, error) {
+	if len(t.recvs) == 0 {
+		return ports.Frame{}, io.EOF
+	}
+	recv := t.recvs[0]
+	t.recvs = t.recvs[1:]
+	return recv.frame, recv.err
+}
+
+func (t *reconnectToastRecordingTransport) Close() error {
+	t.closed = true
+	return nil
+}
+
+func reconnectToastHelloFromSend(t *testing.T, tr *reconnectToastRecordingTransport) ports.Hello {
+	t.Helper()
+	require.NotEmpty(t, tr.sends)
+	require.Equal(t, ports.MsgHello, tr.sends[0].Type)
+	hello, err := ports.UnmarshalHello(tr.sends[0].Payload)
+	require.NoError(t, err)
+	return hello
+}
+
 func TestReconnectToastDrawAndClearHelpers(t *testing.T) {
 	var out bytes.Buffer
 	size := domain.Size{Cols: 80, Rows: 24}
@@ -130,6 +179,54 @@ func TestReconnectSleepWithResizeEventsRedrawsUntilTimerFires(t *testing.T) {
 	require.Equal(t, domain.Size{Cols: 120, Rows: 40}, <-got)
 	timerCh <- time.Time{}
 	require.True(t, <-done)
+}
+
+func TestRemoteReconnectToastLifecycleWithWrappedTransportError(t *testing.T) {
+	linkDead := errors.New("remote link dead")
+	wrappedLinkDead := errors.Join(
+		fmt.Errorf("remote transport receive failed: %w", io.EOF),
+		linkDead,
+	)
+	oldSleep := reconnectSleep
+	oldSleepWithResize := reconnectSleepWithResize
+	reconnectSleep = func(context.Context, ports.Clock, time.Duration) bool { return true }
+	reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Size, func(domain.Size)) bool {
+		return true
+	}
+	defer func() {
+		reconnectSleep = oldSleep
+		reconnectSleepWithResize = oldSleepWithResize
+	}()
+
+	term := newReconnectToastTerminalHarness(t)
+	defer term.closeInput()
+	tr1 := &reconnectToastRecordingTransport{recvs: []reconnectToastRecv{
+		{frame: reconnectToastWelcome(44)},
+		{err: wrappedLinkDead},
+	}}
+	tr2 := &reconnectToastRecordingTransport{recvs: []reconnectToastRecv{
+		{frame: reconnectToastWelcome(55)},
+		{frame: reconnectToastDetach(ports.ReasonDetach)},
+	}}
+	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr1, tr2}}
+
+	err := Run(context.Background(), dialer, term.term, portsmocks.NewMockClock(t), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.True(t, tr1.closed)
+	require.True(t, tr2.closed)
+	require.Equal(t, 2, dialer.calls)
+
+	firstHello := reconnectToastHelloFromSend(t, tr1)
+	resumeHello := reconnectToastHelloFromSend(t, tr2)
+	require.Equal(t, ports.IntentAttach, firstHello.Intent)
+	require.Zero(t, firstHello.ResumeToken)
+	require.Equal(t, ports.IntentResume, resumeHello.Intent)
+	require.Equal(t, uint64(44), resumeHello.ResumeToken)
+	require.Equal(t, firstHello.ClientID, resumeHello.ClientID)
+
+	out := term.out.String()
+	require.Contains(t, out, reconnectToastMessage)
+	require.Contains(t, out, strings.Repeat(" ", reconnectToastBounds(term.size).Width))
 }
 
 func TestRemoteReconnectToastLifecycle(t *testing.T) {

@@ -5,6 +5,7 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -28,6 +30,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/pty"
+	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/adapters/shellcmd"
 	snapshotadapter "github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
@@ -53,6 +56,7 @@ const (
 	kindDaemon
 	kindStdio
 	kindUDPBootstrap
+	kindUDPProxy
 	kindHelp
 	kindVersion
 )
@@ -136,6 +140,15 @@ func parseArgs(args []string) (command, error) {
 			cmd.name = args[1]
 		}
 		return cmd, nil
+	case "_udp-proxy":
+		if len(args) > 2 {
+			return command{}, usagef("`_udp-proxy` accepts at most one session name")
+		}
+		cmd := command{kind: kindUDPProxy}
+		if len(args) == 2 {
+			cmd.name = args[1]
+		}
+		return cmd, nil
 	case "new":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`new` requires a session name")
@@ -210,6 +223,8 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runStdio(ctx)
 	case kindUDPBootstrap:
 		return runUDPBootstrap(ctx, cmd.name)
+	case kindUDPProxy:
+		return runUDPProxy(ctx, cmd.name, os.Stdout)
 	case kindList:
 		return runList(ctx)
 	case kindKill:
@@ -326,31 +341,46 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) err
 	defer func() { _ = logCloser.Close() }()
 
 	return runAttachWithDeps(ctx, intent, name, remoteTarget, os.Getenv("VEV"), log, runAttachDeps{
-		localDialer:    defaultLocalDialer,
-		remoteDialer:   defaultRemoteDialer,
-		runClient:      client.Run,
-		createDetached: createDetachedLocalSession,
-		clipboard:      clipboard.New(),
+		localDialer:             defaultLocalDialer,
+		remoteDialerFactory:     defaultRemoteDialerFactory(),
+		selectedRemoteTransport: os.Getenv(envRemoteTransport),
+		runClient:               client.Run,
+		createDetached:          createDetachedLocalSession,
+		clipboard:               clipboard.New(),
 	})
 }
 
+const envRemoteTransport = "VEV_REMOTE_TRANSPORT"
+
 func defaultLocalDialer() ports.Dialer { return localDaemonDialer{dir: ipc.SocketDir()} }
 
-func defaultRemoteDialer(target, session string, log *slog.Logger) ports.Dialer {
-	return dgram.NewRemoteDialerWithLogger(target, session, log)
+func defaultRemoteDialerFactory() ports.RemoteDialerFactory {
+	return remoteadapter.NewDialerFactory()
 }
 
 type runAttachDeps struct {
-	attachLocal    func(context.Context, uint8, string, *slog.Logger) error // compatibility hook for focused tests
-	localDialer    func() ports.Dialer
-	remoteDialer   func(target, session string, log *slog.Logger) ports.Dialer
-	runClient      func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, bool, ports.ClipboardReader, *slog.Logger) error
-	createDetached func(context.Context, string) error
+	attachLocal             func(context.Context, uint8, string, *slog.Logger) error // compatibility hook for focused tests
+	localDialer             func() ports.Dialer
+	remoteDialerFactory     ports.RemoteDialerFactory
+	selectedRemoteTransport string
+	runClient               func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, bool, ports.ClipboardReader, *slog.Logger) error
+	createDetached          func(context.Context, string) error
 	// clipboard reads a clipboard image on a remote attach's Ctrl+V (see
 	// docs/superpowers/specs/2026-07-04-clipboard-image-transfer-design.md).
 	// Only used for the remote-dialer branch below; local attaches never
 	// intercept Ctrl+V regardless of this field.
 	clipboard ports.ClipboardReader
+}
+
+func remoteTransportModeFromEnv(value string) (ports.RemoteTransportMode, error) {
+	switch value {
+	case "", string(ports.RemoteTransportUDP):
+		return ports.RemoteTransportUDP, nil
+	case string(ports.RemoteTransportStdio):
+		return ports.RemoteTransportStdio, nil
+	default:
+		return "", fmt.Errorf("vev: invalid remote transport %q (want %q or %q)", value, ports.RemoteTransportUDP, ports.RemoteTransportStdio)
+	}
 }
 
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
@@ -366,14 +396,22 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		runClient = client.Run
 	}
 	if remoteTarget != "" {
-		remoteDialer := deps.remoteDialer
-		if remoteDialer == nil {
-			remoteDialer = defaultRemoteDialer
+		mode, err := remoteTransportModeFromEnv(deps.selectedRemoteTransport)
+		if err != nil {
+			return err
+		}
+		factory := deps.remoteDialerFactory
+		if factory == nil {
+			factory = defaultRemoteDialerFactory()
 		}
 		if log != nil {
-			log.Info("attaching to remote session", "target", remoteTarget, "name", name)
+			log.Info("attaching to remote session", "target", remoteTarget, "name", name, "transport", string(mode))
 		}
-		return runClient(ctx, remoteDialer(remoteTarget, name, log), term.New(), clock.New(), intent, name, true, deps.clipboard, log)
+		dialer, err := factory.DialerForRemote(remoteTarget, name, mode, log)
+		if err != nil {
+			return err
+		}
+		return runClient(ctx, dialer, term.New(), clock.New(), intent, name, true, deps.clipboard, log)
 	}
 
 	attachLocal := deps.attachLocal
@@ -584,24 +622,91 @@ func runStdio(ctx context.Context) error {
 	return proxyTransports(ctx, stdio, transport, log)
 }
 
-// runUDPBootstrap is the hidden remote-side bootstrap used before switching to
-// authenticated datagrams. It deliberately prints only an ephemeral UDP port and
-// random session key to stdout so callers can fall back to _stdio if setup fails.
+var (
+	udpBootstrapTimeout = 5 * time.Second
+	udpProxyCommand     = func(ctx context.Context, exe string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, exe, args...)
+	}
+)
+
+// runUDPBootstrap starts a detached _udp-proxy, forwards its single readiness
+// line, and exits so SSH stdio can close without owning the UDP proxy lifetime.
 func runUDPBootstrap(ctx context.Context, session string) error {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = r.Close() }()
+
+	exe, err := os.Executable()
+	if err != nil {
+		_ = w.Close()
+		return err
+	}
+	args := []string{"_udp-proxy"}
+	if session != "" {
+		args = append(args, session)
+	}
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		_ = w.Close()
+		return err
+	}
+	defer func() { _ = devNull.Close() }()
+
+	cmd := udpProxyCommand(ctx, exe, args...)
+	// _udp-proxy writes diagnostics through configureLogging(logging.Stdio, false);
+	// stdio is detached here so the bootstrap SSH channel can close.
+	cmd.Stdin = devNull
+	cmd.Stdout = w
+	cmd.Stderr = devNull
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		_ = w.Close()
+		return err
+	}
+	_ = w.Close()
+
+	readyCtx, cancel := context.WithTimeout(ctx, udpBootstrapTimeout)
+	defer cancel()
+	lineCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		line, err := bufio.NewReader(r).ReadString('\n')
+		if err != nil {
+			errCh <- err
+			return
+		}
+		lineCh <- line
+	}()
+	select {
+	case line := <-lineCh:
+		if err := cmd.Process.Release(); err != nil {
+			return err
+		}
+		_, err := fmt.Fprint(os.Stdout, line)
+		return err
+	case err := <-errCh:
+		_ = cmd.Wait()
+		return err
+	case <-readyCtx.Done():
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("vev: udp bootstrap readiness: %w", readyCtx.Err())
+	}
+}
+
+// runUDPProxy is the detached long-lived remote-side datagram proxy.
+func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 	log, logCloser, err := configureLogging(logging.Stdio, false)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = logCloser.Close() }()
-	log.Debug("udp bootstrap starting", "session", session)
+	log.Debug("udp proxy starting", "session", session)
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
 	var lc net.ListenConfig
-	conn, err := lc.ListenPacket(ctx, "udp", "0.0.0.0:0")
+	conn, err := lc.ListenPacket(ctx, "udp", ":0")
 	if err != nil {
 		return err
 	}
@@ -623,12 +728,11 @@ func runUDPBootstrap(ctx context.Context, session string) error {
 
 	addr, ok := conn.LocalAddr().(*net.UDPAddr)
 	if !ok {
-		return errors.New("vev: udp bootstrap did not get a UDP address")
+		return errors.New("vev: udp proxy did not get a UDP address")
 	}
-	if _, err := fmt.Fprintf(os.Stdout, "VEV-UDP %d %s\n", addr.Port, base64.StdEncoding.EncodeToString(key)); err != nil {
+	if _, err := fmt.Fprintf(ready, "VEV-UDP %d %s\n", addr.Port, base64.StdEncoding.EncodeToString(key)); err != nil {
 		return err
 	}
-	_ = os.Stdout.Sync()
 
 	var dgramTr ports.Transport = dg
 	if session != "" {

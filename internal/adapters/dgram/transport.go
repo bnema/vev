@@ -127,7 +127,7 @@ func (t *Transport) Close() error {
 func (t *Transport) Peer() net.Addr { t.mu.Lock(); defer t.mu.Unlock(); return t.peer }
 
 // Probe sends an authenticated datagram and waits for the peer to authenticate a
-// response or for ctx to expire. It is intended for UDP bootstrap/fallback checks.
+// response or for ctx to expire. It is intended for UDP bootstrap reachability checks.
 func (t *Transport) Probe(ctx context.Context) error {
 	id, ch, err := t.registerProbe()
 	if err != nil {
