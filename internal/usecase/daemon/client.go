@@ -48,6 +48,7 @@ type attachedClient struct {
 	parked        bool
 	nextStateNum  uint64
 	echoAck       atomic.Uint64
+	outputAck     atomic.Uint64
 	bars          barCache // only touched while sendMu is held
 	size          domain.Size
 	keys          *keys.Router
@@ -192,9 +193,44 @@ func (ac *attachedClient) currentTransportIs(tr ports.Transport) bool {
 	return tr != nil && ac.transportIs(tr)
 }
 
-func (ac *attachedClient) nextOutputFrameLocked(b []byte) ports.Frame {
+func (ac *attachedClient) nextOutputFrameLocked(b []byte, reset bool) ports.Frame {
 	ac.nextStateNum++
-	return frameOutputState(b, ac.nextStateNum, ac.echoAck.Load())
+	baseStateNum := ac.nextStateNum - 1
+	if reset {
+		baseStateNum = 0
+	}
+	return frameOutputState(b, baseStateNum, ac.nextStateNum, ac.echoAck.Load())
+}
+
+// shouldResetOutputState reads nextStateNum and must only be called while
+// sendMu is held, matching nextOutputFrameLocked.
+func (ac *attachedClient) shouldResetOutputState(reset bool) bool {
+	if reset {
+		return true
+	}
+	latest := ac.nextStateNum
+	if latest == 0 {
+		return false
+	}
+	acked := ac.outputAck.Load()
+	return acked+1 < latest
+}
+
+func (ac *attachedClient) advanceOutputAck(state uint64) {
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+	if state > ac.nextStateNum {
+		return
+	}
+	for {
+		cur := ac.outputAck.Load()
+		if state <= cur {
+			return
+		}
+		if ac.outputAck.CompareAndSwap(cur, state) {
+			return
+		}
+	}
 }
 
 // send serialises a frame onto the client's transport.
@@ -248,7 +284,7 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 		if tr == nil {
 			return errors.New("client transport is nil")
 		}
-		return tr.Send(ac.nextOutputFrameLocked(b))
+		return tr.Send(ac.nextOutputFrameLocked(b, false))
 	})
 }
 
@@ -462,8 +498,9 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 			d.clientGone(sess, ac, tr, true)
 			return
 		case ports.MsgAck:
-			// Output state ACKs are reserved for the datagram renderer path; the
-			// reliable transport daemon has no state reader today.
+			if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
+				ac.advanceOutputAck(ack.AckedStateNum)
+			}
 		case ports.MsgPing:
 			_ = ac.send(framePong())
 		default:

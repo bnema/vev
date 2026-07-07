@@ -102,13 +102,6 @@ const stdinBufSize = 4096
 // goroutine, decoupling the input/resize pumps from transport back-pressure.
 const sendQueueDepth = 64
 
-type reconnectBackoff struct {
-	initial time.Duration
-	max     time.Duration
-}
-
-var defaultReconnectBackoff = reconnectBackoff{initial: 100 * time.Millisecond, max: 2 * time.Second}
-
 var reconnectSleep = sleepReconnect
 var reconnectSleepWithResize = sleepReconnectWithResizeEvents
 
@@ -168,6 +161,7 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 	backoff := defaultReconnectBackoff.initial
 	showingStatus := false
 	var reconnectToastSize domain.Size
+	statusStage := reconnectStageOfflineRetrying
 	redrawRemoteStatus := func(size domain.Size) {
 		if !rawEntered || !remote {
 			return
@@ -175,12 +169,24 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 		if showingStatus {
 			_ = clearReconnectToast(term.Out(), reconnectToastSize)
 		}
-		_ = drawReconnectToast(term.Out(), size)
+		_ = drawReconnectToastStage(term.Out(), size, statusStage)
 		reconnectToastSize = size
 		_ = term.Flush()
 		showingStatus = true
 	}
-	drawStatus := func() {
+	var drawStatus func()
+	drawStatusStage := func(stage reconnectStage) {
+		statusStage = stage
+		if showingStatus && remote {
+			size, err := term.Size()
+			if err == nil {
+				redrawRemoteStatus(size)
+			}
+			return
+		}
+		drawStatus()
+	}
+	drawStatus = func() {
 		if !rawEntered || showingStatus {
 			return
 		}
@@ -234,7 +240,11 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 		}
 		ms.dialed = true
 
-		result := attachOnce(ctx, transport, term, clk, attemptIntent, attemptName, resumeToken, processClientID, &ms, enterRaw, clearStatus, remote, clipboard, log)
+		var linkEvents <-chan ports.LinkEvent
+		if reporter, ok := transport.(ports.LinkStateReporter); ok {
+			linkEvents = reporter.LinkEvents()
+		}
+		result := attachOnce(ctx, transport, term, clk, attemptIntent, attemptName, resumeToken, processClientID, &ms, enterRaw, clearStatus, drawStatusStage, linkEvents, remote, clipboard, log)
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
@@ -254,7 +264,7 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 			return result.err
 		}
 		log.Warn("reconnecting after attach error", "err", result.err, "backoff", backoff)
-		drawStatus()
+		drawStatusStage(reconnectStageSSH)
 		if !sleepWhileReconnecting(backoff) {
 			clearStatus()
 			return ctx.Err()
@@ -296,25 +306,6 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 	}
 }
 
-func nextReconnectBackoff(cur, limit time.Duration) time.Duration {
-	cur *= 2
-	if cur > limit {
-		return limit
-	}
-	return cur
-}
-
-func shouldReconnect(err error) bool {
-	if err == nil {
-		return false
-	}
-	if _, ok := errors.AsType[*ProtocolError](err); ok {
-		return false
-	}
-	_, ok := errors.AsType[*DetachedError](err)
-	return !ok
-}
-
 // Attach connects an already-dialed transport to the controlling terminal
 // and runs the attach loop until the session detaches, the daemon
 // disappears, or the context is cancelled.
@@ -348,7 +339,7 @@ func DetectTrueColor(termEnv, colorTerm string) bool {
 	return termEnv == "xterm-direct" || strings.HasSuffix(termEnv, "-direct")
 }
 
-func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func(), remote bool, clipboard ports.ClipboardReader, log *slog.Logger) attachResult {
+func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func(), drawStatusStage func(reconnectStage), linkEvents <-chan ports.LinkEvent, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) attachResult {
 	// 1. Handshake: send Hello with our size and TERM.
 	size, err := term.Size()
 	if err != nil {
@@ -457,6 +448,16 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 			default:
 				return welcomedResult(nil)
 			}
+		case ev, ok := <-linkEvents:
+			if !ok {
+				linkEvents = nil
+				continue
+			}
+			if ev.State == ports.LinkStateConnected {
+				clearStatus()
+				continue
+			}
+			drawStatusStage(stageForLinkState(ev.State))
 		case <-colorQueryCh:
 			if err := term.QueryColors(); err != nil {
 				log.Warn("querying terminal colors", "err", err)
@@ -479,6 +480,16 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 				}
 				if ferr := term.Flush(); ferr != nil {
 					return welcomedResult(fmt.Errorf("vev: flushing terminal: %w", ferr))
+				}
+				if o.NewStateNum != 0 {
+					ack := ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{AckedStateNum: o.NewStateNum})}
+					select {
+					case sendCh <- ack:
+					case <-loopCtx.Done():
+						return welcomedResult(nil)
+					default:
+						log.Debug("dropping output ack because send queue is full", "state_num", o.NewStateNum)
+					}
 				}
 				if !ms.firstOutput {
 					ms.firstOutput = true

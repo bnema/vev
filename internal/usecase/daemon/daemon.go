@@ -65,7 +65,7 @@ const defaultScrollbackRows = 10_000
 // the in-flight send. Teardown is never gated on a client draining its socket.
 const detachNotifyTimeout = time.Second
 
-const resumeParkGrace = 60 * time.Second
+const defaultResumeParkGrace = 15 * time.Minute
 
 // defaultSize is used when a client's Hello carries no valid dimensions.
 var defaultSize = domain.Size{Cols: 80, Rows: 24}
@@ -119,6 +119,7 @@ type Daemon struct {
 	restoreProcessAllowlist atomic.Pointer[map[string]struct{}]
 	themeMode               atomic.Uint32
 	barScripts              *barScriptState
+	resumeParkGrace         time.Duration
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
 	tempDir string
@@ -236,6 +237,16 @@ func WithBarScriptCommandRunner(runner ports.ShellCommandRunner) Option {
 	}
 }
 
+// WithResumeParkGrace overrides how long detached resume-capable clients stay
+// parked for reconnection. Non-positive durations keep the default.
+func WithResumeParkGrace(grace time.Duration) Option {
+	return func(d *Daemon) {
+		if grace > 0 {
+			d.resumeParkGrace = grace
+		}
+	}
+}
+
 // WithConfig applies the initial user configuration.
 func WithConfig(cfg domain.Config) Option {
 	return func(d *Daemon) {
@@ -254,19 +265,20 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		shell = "/bin/sh"
 	}
 	d := &Daemon{
-		sessions:    make(map[domain.SessionID]*session),
-		stopped:     make(map[string]stoppedSession),
-		parked:      make(map[uint64]*parkedAttachment),
-		ptys:        ptys,
-		clock:       clock,
-		log:         log,
-		baseEnv:     os.Environ(),
-		shell:       shell,
-		persist:     persist.New(nil),
-		dirOrHome:   dirOrHome,
-		done:        make(chan struct{}),
-		restoreDone: make(chan struct{}),
-		animWake:    make(chan struct{}, 1),
+		sessions:        make(map[domain.SessionID]*session),
+		stopped:         make(map[string]stoppedSession),
+		parked:          make(map[uint64]*parkedAttachment),
+		ptys:            ptys,
+		clock:           clock,
+		log:             log,
+		baseEnv:         os.Environ(),
+		shell:           shell,
+		persist:         persist.New(nil),
+		dirOrHome:       dirOrHome,
+		done:            make(chan struct{}),
+		restoreDone:     make(chan struct{}),
+		animWake:        make(chan struct{}, 1),
+		resumeParkGrace: defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),

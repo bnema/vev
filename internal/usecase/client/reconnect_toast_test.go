@@ -100,6 +100,37 @@ type reconnectToastRecordingTransport struct {
 	closed bool
 }
 
+type reconnectToastLinkTransport struct {
+	recvCh chan reconnectToastRecv
+	sends  []ports.Frame
+	events chan ports.LinkEvent
+	state  ports.LinkState
+}
+
+func newReconnectToastLinkTransport() *reconnectToastLinkTransport {
+	return &reconnectToastLinkTransport{
+		recvCh: make(chan reconnectToastRecv, 4),
+		events: make(chan ports.LinkEvent, 4),
+		state:  ports.LinkStateConnected,
+	}
+}
+
+func (t *reconnectToastLinkTransport) Send(f ports.Frame) error {
+	t.sends = append(t.sends, f)
+	return nil
+}
+
+func (t *reconnectToastLinkTransport) Recv() (ports.Frame, error) {
+	recv := <-t.recvCh
+	return recv.frame, recv.err
+}
+
+func (t *reconnectToastLinkTransport) Close() error { return nil }
+
+func (t *reconnectToastLinkTransport) LinkEvents() <-chan ports.LinkEvent { return t.events }
+
+func (t *reconnectToastLinkTransport) LinkState() ports.LinkState { return t.state }
+
 func (t *reconnectToastRecordingTransport) Send(f ports.Frame) error {
 	t.sends = append(t.sends, f)
 	return nil
@@ -126,6 +157,34 @@ func reconnectToastHelloFromSend(t *testing.T, tr *reconnectToastRecordingTransp
 	hello, err := ports.UnmarshalHello(tr.sends[0].Payload)
 	require.NoError(t, err)
 	return hello
+}
+
+func TestAttachOnceLinkStateEventsDriveReconnectUIStage(t *testing.T) {
+	term := newReconnectToastTerminalHarness(t)
+	defer term.closeInput()
+	tr := newReconnectToastLinkTransport()
+	tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
+
+	stages := make(chan reconnectStage, 4)
+	resultCh := make(chan attachResult, 1)
+	ms := milestones{}
+	go func() {
+		resultCh <- attachOnce(context.Background(), tr, term.term, portsmocks.NewMockClock(t), ports.IntentAttach, "main", 0, [16]byte{1}, &ms, func() error {
+			_, err := term.term.EnterRaw()
+			return err
+		}, func() {}, func(stage reconnectStage) {
+			stages <- stage
+		}, tr.LinkEvents(), true, nil, slog.New(slog.DiscardHandler))
+	}()
+
+	tr.events <- ports.LinkEvent{State: ports.LinkStateDegraded}
+	require.Equal(t, reconnectStageDegraded, <-stages)
+	tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
+	require.Equal(t, reconnectStageProbingUDP, <-stages)
+	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)}
+	result := <-resultCh
+	require.NoError(t, result.err)
+	require.True(t, result.welcomed)
 }
 
 func TestReconnectToastDrawAndClearHelpers(t *testing.T) {

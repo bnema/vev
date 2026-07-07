@@ -315,6 +315,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		ac.sendMu.Unlock()
 		return
 	}
+	reset = ac.shouldResetOutputState(reset)
 	if reset || overlays.copyActive || overlays.pickerActive || overlays.paletteActive || overlays.promptActive {
 		ac.rend.Reset()
 		ac.bars.Reset()
@@ -372,7 +373,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 			if sendTr == nil {
 				serr = errors.New("client transport is nil")
 			} else {
-				serr = sendTr.Send(ac.nextOutputFrameLocked(data))
+				serr = sendTr.Send(ac.nextOutputFrameLocked(data, reset))
 			}
 		}
 	}

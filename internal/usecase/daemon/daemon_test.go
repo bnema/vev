@@ -42,20 +42,21 @@ type signalClock struct {
 }
 
 func (c *signalClock) Now() time.Time { return time.Time{} }
-func (c *signalClock) NewTimer(time.Duration) ports.Timer {
+func (c *signalClock) NewTimer(d time.Duration) ports.Timer {
 	if c.called != nil {
 		c.once.Do(func() { close(c.called) })
 	}
 	if c.timers == nil {
 		return stubTimer{}
 	}
-	t := &signalTimer{ch: make(chan time.Time, 1)}
+	t := &signalTimer{ch: make(chan time.Time, 1), duration: d}
 	c.timers <- t
 	return t
 }
 
 type signalTimer struct {
-	ch chan time.Time
+	ch       chan time.Time
+	duration time.Duration
 }
 
 func (t *signalTimer) C() <-chan time.Time      { return t.ch }

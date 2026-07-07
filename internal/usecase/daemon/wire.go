@@ -43,8 +43,8 @@ func frameError(code uint16, text string) ports.Frame {
 	return ports.Frame{Type: ports.MsgError, Payload: ports.MarshalErrorMsg(ports.ErrorMsg{Code: code, Text: text})}
 }
 
-func frameOutputState(b []byte, state uint64, echoAck uint64) ports.Frame {
-	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{NewStateNum: state, EchoAck: echoAck, Data: b})}
+func frameOutputState(b []byte, baseState uint64, state uint64, echoAck uint64) ports.Frame {
+	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: baseState, NewStateNum: state, EchoAck: echoAck, Data: b})}
 }
 
 func frameDetached(reason uint8) ports.Frame {

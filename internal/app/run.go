@@ -634,6 +634,11 @@ var (
 // runUDPBootstrap starts a detached _udp-proxy, forwards its single readiness
 // line, and exits so SSH stdio can close without owning the UDP proxy lifetime.
 func runUDPBootstrap(ctx context.Context, session string) error {
+	// Always start a fresh proxy for a bootstrap request. A client attach begins
+	// with MsgHello, which must reach the daemon handshake path; reusing an
+	// already-running proxy would forward that Hello into the daemon connection's
+	// post-handshake runConnLoop, where it is intentionally ignored. The new
+	// proxy publishes itself and retires any older registry entry once ready.
 	r, w, err := os.Pipe()
 	if err != nil {
 		return err
@@ -735,7 +740,14 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 	if !ok {
 		return errors.New("vev: udp proxy did not get a UDP address")
 	}
-	if _, err := fmt.Fprintf(ready, "VEV-UDP %d %s\n", addr.Port, base64.StdEncoding.EncodeToString(key)); err != nil {
+	keyText := base64.StdEncoding.EncodeToString(key)
+	registry := dgram.NewProxyRegistry(filepath.Join(ipc.SocketDir(), "udp-proxies"))
+	record := dgram.ProxyRecord{Session: session, PID: os.Getpid(), Port: addr.Port, Key: keyText}
+	if err := registry.Publish(record); err != nil {
+		return err
+	}
+	defer func() { _ = registry.RemoveOwned(record) }()
+	if _, err := fmt.Fprintf(ready, "VEV-UDP %d %s\n", addr.Port, keyText); err != nil {
 		return err
 	}
 
@@ -743,7 +755,7 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 	if session != "" {
 		dgramTr = preHelloNameTransport{Transport: dg, session: session}
 	}
-	return proxyTransports(ctx, dgramTr, daemonTr, log)
+	return dgram.ProxyRuntime{Client: dgramTr, Daemon: daemonTr, Log: log}.Run(ctx)
 }
 
 const (
@@ -849,41 +861,7 @@ func (t preHelloNameTransport) Recv() (ports.Frame, error) {
 }
 
 func proxyTransports(ctx context.Context, a, b ports.Transport, log *slog.Logger) error {
-	errCh := make(chan error, 2)
-	copyFrames := func(dst, src ports.Transport) {
-		for {
-			f, err := src.Recv()
-			if err != nil {
-				errCh <- err
-				return
-			}
-			if err := dst.Send(f); err != nil {
-				errCh <- err
-				return
-			}
-		}
-	}
-	go copyFrames(b, a)
-	go copyFrames(a, b)
-
-	select {
-	case <-ctx.Done():
-		if log != nil {
-			log.Info("stdio proxy stopped by context", "err", ctx.Err())
-		}
-		return ctx.Err()
-	case err := <-errCh:
-		if errors.Is(err, io.EOF) {
-			if log != nil {
-				log.Info("stdio proxy reached clean EOF")
-			}
-			return nil
-		}
-		if log != nil {
-			log.Error("stdio proxy copy failed", "err", err)
-		}
-		return err
-	}
+	return dgram.ProxyRuntime{Client: a, Daemon: b, Log: log}.Run(ctx)
 }
 
 // runList prints the daemon's session listing. With no daemon running, it
