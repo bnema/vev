@@ -15,7 +15,9 @@
 //     scheduler).
 //   - The daemon exits (Serve returns) when the last session is removed, or
 //     when the parent context is cancelled (graceful shutdown notifies any
-//     attached clients with ReasonServerShutdown).
+//     attached clients with ReasonServerShutdown). Client detach does not end
+//     a session: ephemeral sessions stay in memory until explicitly killed or
+//     until the daemon exits, and named sessions can also persist on disk.
 //
 // Locking: a pane's screen/scrollback and per-client renderer shadow are
 // guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
@@ -481,9 +483,9 @@ func (d *Daemon) handleList(tr ports.Transport) {
 	_ = tr.Send(frameSessions(infos))
 }
 
-// handleKill terminates the named session (if any), or all sessions, and
-// closes the control connection; the resulting EOF is the client's success
-// signal.
+// handleKill terminates the requested live session or stopped named session,
+// or all sessions, and closes the control connection; the resulting EOF is the
+// client's success signal.
 func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	defer func() { _ = tr.Close() }()
 
@@ -648,7 +650,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID})
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
 		sess.mu.Lock()
 		sess.terminal = term
 		sess.mu.Unlock()

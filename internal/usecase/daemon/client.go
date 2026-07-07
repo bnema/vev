@@ -473,9 +473,8 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 	}
 }
 
-// clientGone detaches ac if it is still the session's current client. An
-// ephemeral session dies with its client; a named one survives headless. When
-
+// clientGone detaches ac if it is still the session's current client. The
+// session remains registered and headless after the client is gone.
 func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Transport, explicit bool) {
 	if failed != nil && !ac.currentTransportIs(failed) {
 		return // stale connection loop; a newer transport owns this client
@@ -510,9 +509,6 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 	}
 	_ = ac.closeCapturedTransport(oldTr)
 	d.log.Info("client detached", "session", sess.name, "explicit", explicit)
-	if ephemeral {
-		_ = d.killSession(sess, ports.ReasonSessionKilled, false)
-	}
 }
 
 // detachIfCurrent clears the client iff ac is the current one, reporting
@@ -566,29 +562,22 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	}
 }
 
-// detachOnSendError drops a client whose transport failed. Like every other
-// detach path, losing the client kills an ephemeral session (its lifetime is
-// its client's); a named session keeps running headless.
+// detachOnSendError drops a client whose transport failed, leaving the session
+// registered and headless.
 func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed ports.Transport) {
 	if failed != nil && !ac.currentTransportIs(failed) {
 		return
 	}
 	if sess.detachIfCurrent(ac) {
 		d.unregisterPreview(ac)
-		d.resetScreenDefaultColors(sess)
 		if d.parkAttachment(sess, ac) {
 			_ = ac.closeCapturedTransport(failed)
 			d.log.Warn("parked client after send error", "session", sess.name)
 			return
 		}
+		d.resetScreenDefaultColors(sess)
 		_ = ac.closeCapturedTransport(failed)
 		d.log.Warn("detached client after send error", "session", sess.name)
-		sess.mu.Lock()
-		ephemeral := sess.ephemeral
-		sess.mu.Unlock()
-		if ephemeral {
-			_ = d.killSession(sess, ports.ReasonSessionKilled, false)
-		}
 	}
 }
 

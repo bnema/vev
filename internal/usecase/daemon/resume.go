@@ -29,10 +29,7 @@ func (d *Daemon) nextResumeTokenLocked() uint64 {
 }
 
 func (d *Daemon) prepareParkAttachment(sess *session, ac *attachedClient) bool {
-	sess.mu.Lock()
-	ephemeral := sess.ephemeral
-	sess.mu.Unlock()
-	if ephemeral || !ac.resumeCapable {
+	if !ac.resumeCapable {
 		return false
 	}
 	d.mu.Lock()

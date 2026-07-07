@@ -57,7 +57,7 @@ func helloResumeCapable(intent uint8, name string, token uint64) ports.Hello {
 	}
 }
 
-func TestNamedLinkLossParksButEphemeralLinkLossKills(t *testing.T) {
+func TestNamedLinkLossParks(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
@@ -75,15 +75,35 @@ func TestNamedLinkLossParksButEphemeralLinkLossKills(t *testing.T) {
 	_, parked := d.parked[token]
 	d.mu.Unlock()
 	require.True(t, parked, "named resume-capable link loss is parked")
+}
 
-	pty2, release2 := newBlockingPTY(t)
-	defer release2()
-	d2 := newTestDaemon(t, newFactory(t, pty2), stubClock{})
-	tr2, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
-	es, eac, err := d2.route(helloResumeCapable(ports.IntentEphemeral, "", 0), tr2)
+func TestEphemeralLinkLossParksAndResumes(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+
+	tr := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentEphemeral, "", 0), tr)
 	require.NoError(t, err)
-	d2.clientGone(es, eac, eac.transport(), false)
-	require.Equal(t, 0, sessionCount(d2), "ephemeral link loss still destroys session")
+	require.True(t, sess.ephemeral)
+	token := ac.resumeToken
+	require.NotZero(t, token, "ephemeral sessions receive resume tokens")
+
+	d.clientGone(sess, ac, ac.transport(), false)
+	require.Equal(t, 1, sessionCount(d), "ephemeral link loss keeps session alive")
+	require.Nil(t, sess.client)
+	d.mu.Lock()
+	_, parked := d.parked[token]
+	d.mu.Unlock()
+	require.True(t, parked, "ephemeral resume-capable link loss is parked")
+
+	newTr := &closeTrackingTransport{}
+	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, sess.name, token), newTr)
+	require.NoError(t, err)
+	require.Same(t, sess, resumedSess)
+	require.Same(t, ac, resumedAC)
+	require.NotEqual(t, token, resumedAC.resumeToken, "resume rotates token")
+	require.Same(t, resumedAC, sess.client)
 }
 
 func TestResumeRebindsRotatesAndDoesNotOpenPTY(t *testing.T) {
@@ -208,6 +228,35 @@ func TestParkExpiryAndShutdownCleanup(t *testing.T) {
 	parked := len(d2.parked)
 	d2.mu.Unlock()
 	require.Zero(t, parked)
+}
+
+func TestEphemeralParkExpiryKeepsSession(t *testing.T) {
+	clk := &signalClock{timers: make(chan *signalTimer, 8)}
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), clk)
+
+	tr := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentEphemeral, "", 0), tr)
+	require.NoError(t, err)
+	token := ac.resumeToken
+	require.NotZero(t, token)
+
+	d.clientGone(sess, ac, ac.transport(), false)
+	timer := <-clk.timers
+	timer.ch <- clk.Now()
+
+	require.Eventually(t, func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		_, ok := d.parked[token]
+		return !ok
+	}, 2*time.Second, 10*time.Millisecond)
+
+	require.Equal(t, 1, sessionCount(d), "token expiry does not kill ephemeral session")
+	sess.mu.Lock()
+	require.Nil(t, sess.client)
+	sess.mu.Unlock()
 }
 
 func TestKilledSessionPurgesParkedResumeToken(t *testing.T) {

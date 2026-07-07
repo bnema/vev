@@ -136,6 +136,19 @@ func TestPrintSessionsShowsStoppedState(t *testing.T) {
 	}
 }
 
+func TestPrintSessionsMarksEphemeral(t *testing.T) {
+	var buf bytes.Buffer
+	printSessions(&buf, []ports.SessionInfo{
+		{Name: "0", Ephemeral: true, Tabs: 1, Attached: false},
+		{Name: "work", Tabs: 2, Attached: true},
+		{Name: "old", Stopped: true},
+	})
+	out := buf.String()
+	for _, want := range []string{"0", "temporary", "work", "running", "old", "stopped"} {
+		require.Contains(t, out, want)
+	}
+}
+
 func TestRunListReadsStoppedSessionsWithoutDaemon(t *testing.T) {
 	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateRoot)

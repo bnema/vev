@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -34,7 +35,11 @@ func discardLog() *slog.Logger {
 // The returned served channel receives Serve's result exactly once.
 func startDaemon(t *testing.T, opts ...daemon.Option) (dir string, served <-chan error) {
 	t.Helper()
-	dir = t.TempDir()
+	return startDaemonInDir(t, t.TempDir(), opts...)
+}
+
+func startDaemonInDir(t *testing.T, dir string, opts ...daemon.Option) (string, <-chan error) {
+	t.Helper()
 	ln, err := ipc.Listen(dir)
 	require.NoError(t, err)
 
@@ -81,6 +86,36 @@ func attach(t *testing.T, dir string, intent uint8, name string, sz domain.Size)
 		t.Fatal("timed out waiting for welcome")
 	}
 	return tr, p
+}
+
+func listRemoteSessions(t *testing.T, dir string) ports.Sessions {
+	t.Helper()
+	tr, err := ipc.Dial(dir)
+	require.NoError(t, err)
+	defer func() { _ = tr.Close() }()
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(ports.List{})}))
+	f, err := tr.Recv()
+	require.NoError(t, err)
+	require.Equal(t, ports.MsgSessions, f.Type)
+	sessions, err := ports.UnmarshalSessions(f.Payload)
+	require.NoError(t, err)
+	return sessions
+}
+
+func killAll(dir string) error {
+	tr, err := ipc.Dial(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tr.Close() }()
+	if err := tr.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}); err != nil {
+		return err
+	}
+	_, err = tr.Recv()
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	return err
 }
 
 // awaitText decodes MsgOutput frames into a fresh VT screen and returns once
@@ -236,22 +271,63 @@ func TestIntegration_AltCWithoutPaletteDoesNotCreateTab(t *testing.T) {
 	assertNoTextAfterInput(t, p, sz, " 1  2 ")
 }
 
-func TestIntegration_EphemeralGoneOnDetach(t *testing.T) {
+func TestIntegration_EphemeralSurvivesDetachAndReattaches(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
-	dir, served := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf READY; sleep 30"}))
+	dir, served := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "printf MARKER; sleep 30"}))
 
-	tr, p := attach(t, dir, ports.IntentEphemeral, "", sz)
-	awaitText(t, p, sz, "READY")
+	tr1, p1 := attach(t, dir, ports.IntentEphemeral, "", sz)
+	awaitText(t, p1, sz, "MARKER")
+	require.NoError(t, tr1.Close())
 
-	// Detach by dropping the connection: the ephemeral session must die, which
-	// (being the last session) shuts the daemon down.
-	require.NoError(t, tr.Close())
+	select {
+	case err := <-served:
+		t.Fatalf("daemon shut down while an ephemeral session was alive: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
 
+	tr2, p2 := attach(t, dir, ports.IntentAttach, "0", sz)
+	defer func() { _ = tr2.Close() }()
+	awaitText(t, p2, sz, "MARKER")
+
+	require.NoError(t, killAll(dir))
 	select {
 	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("daemon did not shut down after the ephemeral session detached")
+		t.Fatal("daemon did not shut down after kill all")
+	}
+}
+
+func TestIntegration_EphemeralNotListedAfterDaemonRestart(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	dir := ipc.SocketDir()
+
+	_, served := startDaemonInDir(t, dir, daemon.WithShell("/bin/sh", []string{"-c", "printf TEMP; sleep 30"}))
+	tr, p := attach(t, dir, ports.IntentEphemeral, "", sz)
+	awaitText(t, p, sz, "TEMP")
+	require.NoError(t, tr.Close())
+
+	require.NoError(t, runKill(context.Background(), "", false, true))
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not stop after kill --daemon")
+	}
+
+	_, served2 := startDaemonInDir(t, dir, daemon.WithShell("/bin/sh", []string{"-c", "sleep 30"}))
+	sessions := listRemoteSessions(t, dir)
+	require.Empty(t, sessions.Sessions)
+
+	require.NoError(t, runKill(context.Background(), "", false, true))
+	select {
+	case err := <-served2:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("restarted daemon did not stop after kill --daemon")
 	}
 }
 
