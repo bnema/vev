@@ -32,19 +32,25 @@ var (
 )
 
 type closeFunc func() error
+type eofErrFunc func() error
 
 // NewTransport wraps separate reader/writer streams as a framed Transport.
 func NewTransport(r io.Reader, w io.Writer, close closeFunc) ports.Transport {
+	return newTransport(r, w, close, nil)
+}
+
+func newTransport(r io.Reader, w io.Writer, close closeFunc, eofErr eofErrFunc) ports.Transport {
 	if close == nil {
 		close = func() error { return nil }
 	}
-	return &transport{r: r, w: w, close: close}
+	return &transport{r: r, w: w, close: close, eofErr: eofErr}
 }
 
 type transport struct {
-	r     io.Reader
-	w     io.Writer
-	close closeFunc
+	r      io.Reader
+	w      io.Writer
+	close  closeFunc
+	eofErr eofErrFunc
 
 	mu      sync.Mutex
 	readBuf []byte
@@ -70,7 +76,7 @@ func (t *transport) Send(f ports.Frame) error {
 func (t *transport) Recv() (ports.Frame, error) {
 	var hdr [frameHeaderLen]byte
 	if _, err := io.ReadFull(t.r, hdr[:]); err != nil {
-		return ports.Frame{}, err
+		return ports.Frame{}, t.mapEOFError(err)
 	}
 
 	n := binary.BigEndian.Uint32(hdr[:])
@@ -94,39 +100,91 @@ func (t *transport) Recv() (ports.Frame, error) {
 	return ports.Frame{Type: ports.MsgType(t.readBuf[0]), Payload: payload}, nil
 }
 
+func (t *transport) mapEOFError(err error) error {
+	if t.eofErr == nil || !errors.Is(err, io.EOF) {
+		return err
+	}
+	if sshErr := t.eofErr(); sshErr != nil {
+		return sshErr
+	}
+	return err
+}
+
 func (t *transport) Close() error { return t.close() }
 
-func newProcessCloser(cmd *exec.Cmd, stdin io.Closer, stderr *bytes.Buffer, timeout time.Duration, log *slog.Logger, target, session string) closeFunc {
-	return func() error {
-		_ = stdin.Close()
+type processWaiter struct {
+	cmd     *exec.Cmd
+	stdin   io.Closer
+	stderr  *bytes.Buffer
+	timeout time.Duration
+	log     *slog.Logger
+	target  string
+	session string
 
-		waitErr := make(chan error, 1)
-		go func() { waitErr <- cmd.Wait() }()
+	waitOnce sync.Once
+	waitErr  error
+}
 
-		var err error
-		select {
-		case err = <-waitErr:
-		case <-time.After(timeout):
-			_ = cmd.Process.Kill()
-			err = <-waitErr
-		}
-		if err == nil {
-			return nil
-		}
-
-		stderrText := strings.TrimSpace(stderr.String())
-		if log != nil {
-			attrs := []any{"target", target, "session", session, "err", err}
-			if stderrText != "" {
-				attrs = append(attrs, "stderr", stderrText)
-			}
-			log.Warn("ssh exited non-cleanly", attrs...)
-		}
-		if stderrText != "" {
-			return fmt.Errorf("sshstdio: ssh exited: %w: %s", err, stderrText)
-		}
-		return fmt.Errorf("sshstdio: ssh exited: %w", err)
+func newProcessWaiter(cmd *exec.Cmd, stdin io.Closer, stderr *bytes.Buffer, timeout time.Duration, log *slog.Logger, target, session string) *processWaiter {
+	w := &processWaiter{
+		cmd:     cmd,
+		stdin:   stdin,
+		stderr:  stderr,
+		timeout: timeout,
+		log:     log,
+		target:  target,
+		session: session,
 	}
+	return w
+}
+
+func (w *processWaiter) close() error {
+	_ = w.stdin.Close()
+	return w.wait(w.timeout)
+}
+
+func (w *processWaiter) eofErr() error {
+	return w.wait(sshCloseTimeout)
+}
+
+func (w *processWaiter) wait(timeout time.Duration) error {
+	w.waitOnce.Do(func() {
+		// cmd.Wait must start only after stdout is no longer being read. os/exec
+		// requires callers to finish reading StdoutPipe before Wait, so DialContext
+		// calls this from transport Close or after Recv has already observed EOF.
+		waitCh := make(chan error, 1)
+		go func() { waitCh <- w.cmd.Wait() }()
+		select {
+		case w.waitErr = <-waitCh:
+		case <-time.After(timeout):
+			_ = w.cmd.Process.Kill()
+			w.waitErr = <-waitCh
+		}
+		w.waitErr = formatProcessWaitError(w.waitErr, w.stderr, w.log, w.target, w.session)
+	})
+	return w.waitErr
+}
+
+func formatProcessWaitError(err error, stderr *bytes.Buffer, log *slog.Logger, target, session string) error {
+	if err == nil {
+		return nil
+	}
+	stderrText := strings.TrimSpace(stderr.String())
+	if log != nil {
+		attrs := []any{"target", target, "session", session, "err", err}
+		if stderrText != "" {
+			attrs = append(attrs, "stderr", stderrText)
+		}
+		log.Warn("ssh exited non-cleanly", attrs...)
+	}
+	if stderrText != "" {
+		return fmt.Errorf("sshstdio: ssh exited: %w: %s", err, stderrText)
+	}
+	return fmt.Errorf("sshstdio: ssh exited: %w", err)
+}
+
+func newProcessCloser(cmd *exec.Cmd, stdin io.Closer, stderr *bytes.Buffer, timeout time.Duration, log *slog.Logger, target, session string) closeFunc {
+	return newProcessWaiter(cmd, stdin, stderr, timeout, log, target, session).close
 }
 
 // CommandSpec is the exact ssh argv vev will execute locally.
@@ -195,5 +253,6 @@ func DialContext(ctx context.Context, target, session string, logger ...*slog.Lo
 		return nil, fmt.Errorf("sshstdio: start ssh: %w", err)
 	}
 
-	return NewTransport(stdout, stdin, newProcessCloser(cmd, stdin, &stderr, sshCloseTimeout, log, target, session)), nil
+	waiter := newProcessWaiter(cmd, stdin, &stderr, sshCloseTimeout, log, target, session)
+	return newTransport(stdout, stdin, waiter.close, waiter.eofErr), nil
 }

@@ -448,7 +448,8 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 		selectedTransport string
 		wantMode          ports.RemoteTransportMode
 	}{
-		{name: "default remote mode is udp", selectedTransport: "", wantMode: ports.RemoteTransportUDP},
+		{name: "default remote mode is stdio", selectedTransport: "", wantMode: ports.RemoteTransportStdio},
+		{name: "explicit udp mode", selectedTransport: "udp", wantMode: ports.RemoteTransportUDP},
 		{name: "explicit stdio mode", selectedTransport: "stdio", wantMode: ports.RemoteTransportStdio},
 	}
 
@@ -518,7 +519,7 @@ func TestRunAttachWithDepsRejectsInvalidRemoteTransportBeforeDialing(t *testing.
 func TestRunAttachWithDepsReturnsFactoryErrorBeforeRunClient(t *testing.T) {
 	factoryErr := errors.New("factory failed")
 	factory := portsmocks.NewMockRemoteDialerFactory(t)
-	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(nil, factoryErr)
+	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportStdio, mock.Anything).Return(nil, factoryErr)
 	runClientCalled := false
 
 	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{

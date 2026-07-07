@@ -128,6 +128,36 @@ func TestDialContextCanceledBeforeStart(t *testing.T) {
 	}
 }
 
+func TestRecvReportsSSHExitWhenProcessClosesBeforeFrame(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "echo connection refused >&2; exit 255")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("StdinPipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	waiter := newProcessWaiter(cmd, stdin, &stderr, time.Second, nil, "user@example.com", "work")
+	tr := newTransport(stdout, stdin, waiter.close, waiter.eofErr)
+
+	_, err = tr.Recv()
+	if err == nil {
+		t.Fatal("Recv error = nil, want ssh exit error")
+	}
+	for _, want := range []string{"sshstdio: ssh exited:", "connection refused"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Recv error = %q, want substring %q", err, want)
+		}
+	}
+}
+
 func TestProcessCloserLogsNonCleanExitStderr(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "echo remote failure >&2; exit 7")
 	stdin, err := cmd.StdinPipe()
