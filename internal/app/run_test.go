@@ -644,6 +644,7 @@ func TestParseUDPPortRange(t *testing.T) {
 	}{
 		{name: "empty uses default", value: "", want: udpPortRange{start: defaultUDPPortStart, end: defaultUDPPortEnd}},
 		{name: "zero is ephemeral", value: "0", want: udpPortRange{start: 0, end: 0}},
+		{name: "zero range rejected", value: "0-100", wantError: true},
 		{name: "single port", value: "61000", want: udpPortRange{start: 61000, end: 61000}},
 		{name: "range", value: "61000-61023", want: udpPortRange{start: 61000, end: 61023}},
 		{name: "range with spaces", value: " 61000 - 61023 ", want: udpPortRange{start: 61000, end: 61023}},
@@ -679,7 +680,15 @@ func TestListenUDPInRange(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = occupied.Close() }()
-	busyPort := occupied.LocalAddr().(*net.UDPAddr).Port
+	udpPort := func(t *testing.T, conn net.PacketConn) int {
+		t.Helper()
+		addr, ok := conn.LocalAddr().(*net.UDPAddr)
+		if !ok {
+			t.Fatalf("LocalAddr() = %T, want *net.UDPAddr", conn.LocalAddr())
+		}
+		return addr.Port
+	}
+	busyPort := udpPort(t, occupied)
 
 	t.Run("skips busy port", func(t *testing.T) {
 		conn, err := listenUDPInRange(context.Background(), udpPortRange{start: busyPort, end: busyPort + 8})
@@ -687,7 +696,7 @@ func TestListenUDPInRange(t *testing.T) {
 			t.Fatalf("listenUDPInRange error = %v", err)
 		}
 		defer func() { _ = conn.Close() }()
-		got := conn.LocalAddr().(*net.UDPAddr).Port
+		got := udpPort(t, conn)
 		if got == busyPort {
 			t.Fatalf("bound busy port %d, want a different port in range", busyPort)
 		}
@@ -706,13 +715,23 @@ func TestListenUDPInRange(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid direct range errors", func(t *testing.T) {
+		_, err := listenUDPInRange(context.Background(), udpPortRange{start: busyPort + 8, end: busyPort})
+		if err == nil {
+			t.Fatal("listenUDPInRange error = nil, want invalid-range error")
+		}
+		if !strings.Contains(err.Error(), "invalid UDP port range") {
+			t.Fatalf("error = %v, want 'invalid UDP port range'", err)
+		}
+	})
+
 	t.Run("ephemeral binds", func(t *testing.T) {
 		conn, err := listenUDPInRange(context.Background(), udpPortRange{start: 0, end: 0})
 		if err != nil {
 			t.Fatalf("listenUDPInRange ephemeral error = %v", err)
 		}
 		defer func() { _ = conn.Close() }()
-		if conn.LocalAddr().(*net.UDPAddr).Port == 0 {
+		if udpPort(t, conn) == 0 {
 			t.Fatal("ephemeral bind returned port 0")
 		}
 	})

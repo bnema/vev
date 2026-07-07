@@ -109,7 +109,7 @@ printf 'target: %s\nattach_target: %s\nmode: %s\nduration: %s\n' "$target" "$att
 ) >"$out_dir/git.txt" 2>&1 || true
 
 run_capture local-version "$vev_bin" --version
-ssh -o BatchMode=yes -o ConnectTimeout=8 "$target" 'command -v vev; vev --version; pgrep -a vev || true; state="${XDG_STATE_HOME:-$HOME/.local/state}/vev"; echo "state=$state"' \
+ssh -o BatchMode=yes -o ConnectTimeout=8 "$target" 'set -e; command -v vev; vev --version; pgrep -a vev || true; state="${XDG_STATE_HOME:-$HOME/.local/state}/vev"; echo "state=$state"' \
   >"$out_dir/remote-version.out" 2>"$out_dir/remote-version.err" || echo "$?" >"$out_dir/remote-version.exit"
 
 copy_local_logs before
@@ -119,7 +119,7 @@ attach_log="$out_dir/attach.typescript"
 attach_err="$out_dir/attach.err"
 cmd=("$vev_bin" attach "$attach_target")
 if [[ "$mode" == "default" ]]; then
-  env_cmd=(env -u VEV)
+  env_cmd=(env -u VEV -u VEV_REMOTE_TRANSPORT)
 else
   env_cmd=(env -u VEV "VEV_REMOTE_TRANSPORT=$mode")
 fi
@@ -150,7 +150,7 @@ copy_remote_logs after
     sed 's/^/  /' "$attach_err" | tail -40
   fi
   echo "recent local after logs:"
-  find "$out_dir/local-after" -type f -maxdepth 1 -print 2>/dev/null | while read -r f; do
+  find "$out_dir/local-after" -maxdepth 1 -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
     echo "  --- $(basename "$f") ---"
     tail -20 "$f" | sed 's/^/    /'
   done

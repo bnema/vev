@@ -128,8 +128,18 @@ func TestDialContextCanceledBeforeStart(t *testing.T) {
 	}
 }
 
+func TestRecvMapsUnexpectedEOFDuringHeaderToSSHExit(t *testing.T) {
+	sshErr := errors.New("ssh exited with status 255")
+	tr := newTransport(strings.NewReader("\x00"), io.Discard, nil, func() error { return sshErr })
+
+	_, err := tr.Recv()
+	if !errors.Is(err, sshErr) {
+		t.Fatalf("Recv error = %v, want %v", err, sshErr)
+	}
+}
+
 func TestRecvReportsSSHExitWhenProcessClosesBeforeFrame(t *testing.T) {
-	cmd := exec.Command("sh", "-c", "echo connection refused >&2; exit 255")
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "echo connection refused >&2; exit 255")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatalf("StdinPipe: %v", err)

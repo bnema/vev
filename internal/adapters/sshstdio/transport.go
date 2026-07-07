@@ -35,15 +35,15 @@ type closeFunc func() error
 type eofErrFunc func() error
 
 // NewTransport wraps separate reader/writer streams as a framed Transport.
-func NewTransport(r io.Reader, w io.Writer, close closeFunc) ports.Transport {
-	return newTransport(r, w, close, nil)
+func NewTransport(r io.Reader, w io.Writer, closeFn closeFunc) ports.Transport {
+	return newTransport(r, w, closeFn, nil)
 }
 
-func newTransport(r io.Reader, w io.Writer, close closeFunc, eofErr eofErrFunc) ports.Transport {
-	if close == nil {
-		close = func() error { return nil }
+func newTransport(r io.Reader, w io.Writer, closeFn closeFunc, eofErr eofErrFunc) ports.Transport {
+	if closeFn == nil {
+		closeFn = func() error { return nil }
 	}
-	return &transport{r: r, w: w, close: close, eofErr: eofErr}
+	return &transport{r: r, w: w, close: closeFn, eofErr: eofErr}
 }
 
 type transport struct {
@@ -93,7 +93,7 @@ func (t *transport) Recv() (ports.Frame, error) {
 		t.readBuf = t.readBuf[:n]
 	}
 	if _, err := io.ReadFull(t.r, t.readBuf); err != nil {
-		return ports.Frame{}, err
+		return ports.Frame{}, t.mapEOFError(err)
 	}
 
 	payload := append([]byte(nil), t.readBuf[1:]...)
@@ -101,7 +101,7 @@ func (t *transport) Recv() (ports.Frame, error) {
 }
 
 func (t *transport) mapEOFError(err error) error {
-	if t.eofErr == nil || !errors.Is(err, io.EOF) {
+	if t.eofErr == nil || (!errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF)) {
 		return err
 	}
 	if sshErr := t.eofErr(); sshErr != nil {

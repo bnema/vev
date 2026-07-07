@@ -777,6 +777,9 @@ func parseUDPPortRange(value string) (udpPortRange, error) {
 		return udpPortRange{}, fmt.Errorf("invalid %s %q: %w", envUDPPortRange, value, err)
 	}
 	if start == 0 {
+		if hasRange {
+			return udpPortRange{}, fmt.Errorf("invalid %s %q: port 0 (ephemeral) cannot be combined with a range", envUDPPortRange, value)
+		}
 		return udpPortRange{start: 0, end: 0}, nil
 	}
 	end := start
@@ -809,6 +812,9 @@ func listenUDPInRange(ctx context.Context, r udpPortRange) (net.PacketConn, erro
 	var lc net.ListenConfig
 	if r.start == 0 {
 		return lc.ListenPacket(ctx, "udp", ":0")
+	}
+	if r.start < 0 || r.end < r.start {
+		return nil, fmt.Errorf("invalid UDP port range %d-%d", r.start, r.end)
 	}
 	var lastErr error
 	for port := r.start; port <= r.end; port++ {
