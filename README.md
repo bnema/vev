@@ -107,7 +107,7 @@ Key specs support `alt+<char>`, `alt+space`, and `alt+left/right/up/down`; digit
 
 ### Bar right anchors
 
-The top and bottom bar right anchors run configurable commands on the daemon host. By default, `bar.top-right = vev-bar-top-right` prints CPU, memory, and hour text, and `bar.bottom-right = vev-bar-bottom-right` prints compact git state for the focused pane's `VEV_PANE_CWD`. Set either value empty to disable that anchor, or set it to another command to replace it.
+The top and bottom bar right anchors run configurable commands on the daemon host. By default, `bar.top-right = vev-bar-top-right` prints CPU, memory, then hour text (for example `C 12% M 48% 09:41`), and `bar.bottom-right = vev-bar-bottom-right` prints compact git state for the focused pane's `VEV_PANE_CWD`. Set either value empty to disable that anchor, or set it to another command to replace it.
 
 Both anchors share `bar.interval`, which defaults to `5s`; values below `1s` are clamped to `1s`. vev also refreshes around attach, resize, focus, and copy-feedback changes. Commands are bounded by a timeout and output limit. On failure or timeout, vev keeps the last good value; if there is none, the anchor is empty.
 
