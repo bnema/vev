@@ -959,10 +959,14 @@ func (s *Screen) applySGR(params string) {
 			s.Style = renderer.DefaultStyle()
 		case 1:
 			s.Style.Bold = true
+		case 3:
+			s.Style.Italic = true
 		case 7:
 			s.Style.Inverse = true
 		case 22:
 			s.Style.Bold = false
+		case 23:
+			s.Style.Italic = false
 		case 27:
 			s.Style.Inverse = false
 		case 30, 31, 32, 33, 34, 35, 36, 37:

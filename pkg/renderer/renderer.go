@@ -319,6 +319,9 @@ func writeStyle(out *bytes.Buffer, style Style) {
 	if style.Bold {
 		out.WriteString(";1")
 	}
+	if style.Italic {
+		out.WriteString(";3")
+	}
 	if style.Inverse {
 		out.WriteString(";7")
 	}

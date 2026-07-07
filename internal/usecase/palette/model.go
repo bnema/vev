@@ -7,6 +7,11 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
+type RenderStyles struct {
+	Selection   renderer.Style
+	Description renderer.Style
+}
+
 type Model struct {
 	commands []command.Command
 	input    ui.TextInput
@@ -22,6 +27,14 @@ func New(commands []command.Command) *Model {
 }
 
 func NewRegistry() *Model { return New(command.Registry()) }
+
+func DefaultRenderStyles() RenderStyles {
+	selection := renderer.DefaultStyle()
+	selection.Inverse = true
+	description := renderer.DefaultStyle()
+	description.Italic = true
+	return RenderStyles{Selection: selection, Description: description}
+}
 
 func (m *Model) Insert(r rune) {
 	if m != nil {
@@ -96,17 +109,15 @@ func (m *Model) clamp() {
 	}
 }
 
-func (m *Model) Render(inner domain.Size, selectedStyle ...renderer.Style) renderer.Frame {
+func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 	frame := renderer.NewFrame(max(inner.Cols, 0), max(inner.Rows, 0))
 	if frame.Width == 0 || frame.Height == 0 {
 		return frame
 	}
 	base := renderer.DefaultStyle()
-	selection := base
-	selection.Inverse = true
-	if len(selectedStyle) > 0 {
-		selection = selectedStyle[0]
-	}
+	selection := styles.Selection
+	desc := styles.Description
+	desc.Italic = true
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: base})
 	if m == nil {
 		ui.DrawInputLine(frame, 0, "> ", "", base, selection)
@@ -150,6 +161,7 @@ func (m *Model) Render(inner domain.Size, selectedStyle ...renderer.Style) rende
 		}
 		for i, r := range []rune(match.Command.Code) {
 			cellStyle := style
+			cellStyle.Bold = true
 			if highlight[i] {
 				cellStyle = selection
 				cellStyle.Bold = true
@@ -163,7 +175,22 @@ func (m *Model) Render(inner domain.Size, selectedStyle ...renderer.Style) rende
 			frame.Set(x, y+1, renderer.Cell{Rune: ' ', Style: style})
 			x++
 		}
-		ui.DrawText(frame, x, y+1, frame.Width, match.Command.Name+" — "+match.Command.Desc, style)
+		x = ui.DrawText(frame, x, y+1, frame.Width, match.Command.Name+" — ", style)
+		ui.DrawText(frame, x, y+1, frame.Width, match.Command.Desc, mergePaletteDescStyle(style, desc))
 	}
 	return frame
+}
+
+func mergePaletteDescStyle(line, desc renderer.Style) renderer.Style {
+	out := line
+	out.Italic = true
+	if desc.HasForegroundRGB {
+		out.HasForegroundRGB = true
+		out.ForegroundRGB = desc.ForegroundRGB
+		out.Foreground = desc.Foreground
+	} else if desc.Foreground >= 0 {
+		out.HasForegroundRGB = false
+		out.Foreground = desc.Foreground
+	}
+	return out
 }

@@ -751,6 +751,9 @@ func writeStyle(w *payloadWriter, s renderer.Style) {
 	if s.HasBackgroundRGB {
 		flags |= 8
 	}
+	if s.Italic {
+		flags |= 16
+	}
 	w.putUint8(flags)
 	w.putUint32(uint32(int32(s.Foreground)))
 	w.putUint32(uint32(int32(s.Background)))
@@ -799,7 +802,7 @@ func readStyle(r *payloadReader) (renderer.Style, error) {
 	if err != nil {
 		return renderer.Style{}, err
 	}
-	return renderer.Style{Bold: flags&1 != 0, Inverse: flags&2 != 0, HasForegroundRGB: flags&4 != 0, HasBackgroundRGB: flags&8 != 0, Foreground: int(int32(fg)), Background: int(int32(bg)), ForegroundRGB: renderer.RGB{R: fr, G: fgc, B: fb}, BackgroundRGB: renderer.RGB{R: br, G: bgc, B: bb}}, nil
+	return renderer.Style{Bold: flags&1 != 0, Italic: flags&16 != 0, Inverse: flags&2 != 0, HasForegroundRGB: flags&4 != 0, HasBackgroundRGB: flags&8 != 0, Foreground: int(int32(fg)), Background: int(int32(bg)), ForegroundRGB: renderer.RGB{R: fr, G: fgc, B: fb}, BackgroundRGB: renderer.RGB{R: br, G: bgc, B: bb}}, nil
 }
 
 func validateTree(t *layout.Tree, ids map[layout.PaneID]struct{}) error {

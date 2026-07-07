@@ -66,6 +66,7 @@ func TestRoundTripSessions(t *testing.T) {
 	indexed.Foreground = 2
 	indexed.Background = 4
 	indexed.Inverse = true
+	indexed.Italic = true
 	deepTree := &layout.Tree{Focus: "2", Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
 		layout.NewLeaf("1"),
 		&layout.Node{Kind: layout.Stack, Expanded: "2", Children: []*layout.Node{layout.NewLeaf("2"), layout.NewLeaf("3")}},

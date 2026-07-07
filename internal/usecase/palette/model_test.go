@@ -73,7 +73,7 @@ func TestRenderDrawsInputCaretSelectedLineAndCodeHighlight(t *testing.T) {
 	})
 	m.Insert('c')
 	m.Insert('y')
-	frame := m.Render(domain.Size{Cols: 28, Rows: 3})
+	frame := m.Render(domain.Size{Cols: 28, Rows: 3}, DefaultRenderStyles())
 
 	require.Equal(t, '>', frame.At(0, 0).Rune)
 	require.Equal(t, ' ', frame.At(1, 0).Rune)
@@ -86,9 +86,10 @@ func TestRenderDrawsInputCaretSelectedLineAndCodeHighlight(t *testing.T) {
 	require.Equal(t, 'Y', frame.At(2, 1).Rune)
 	require.True(t, frame.At(0, 1).Style.Inverse, "selected line is inverse")
 	require.True(t, frame.At(5, 1).Style.Inverse, "selected line padding/text remains inverse")
-	require.True(t, frame.At(0, 1).Style.Bold, "matched C is bold")
-	require.False(t, frame.At(1, 1).Style.Bold, "unmatched P is not highlighted")
-	require.True(t, frame.At(2, 1).Style.Bold, "matched Y is bold")
+	require.True(t, frame.At(0, 1).Style.Bold, "command code C is bold")
+	require.True(t, frame.At(1, 1).Style.Bold, "command code P is bold")
+	require.True(t, frame.At(2, 1).Style.Bold, "command code Y is bold")
+	require.True(t, frame.At(13, 1).Style.Italic, "description is italic")
 }
 
 func TestRenderUsesSelectionStyleForFuzzyHighlights(t *testing.T) {
@@ -99,11 +100,29 @@ func TestRenderUsesSelectionStyleForFuzzyHighlights(t *testing.T) {
 	accent.HasBackgroundRGB = true
 	accent.BackgroundRGB = renderer.RGB{R: 1, G: 2, B: 3}
 
-	frame := m.Render(domain.Size{Cols: 28, Rows: 3}, accent)
+	styles := DefaultRenderStyles()
+	styles.Selection = accent
+	frame := m.Render(domain.Size{Cols: 28, Rows: 3}, styles)
 
 	matched := frame.At(0, 1).Style
 	require.True(t, matched.Bold)
 	require.False(t, matched.Inverse)
 	require.True(t, matched.HasBackgroundRGB)
 	require.Equal(t, renderer.RGB{R: 1, G: 2, B: 3}, matched.BackgroundRGB)
+}
+
+func TestRenderUsesMutedItalicDescriptionStyle(t *testing.T) {
+	m := New([]command.Command{cmd("CPY", "Copy", "Enter copy mode")})
+	muted := renderer.DefaultStyle()
+	muted.HasForegroundRGB = true
+	muted.ForegroundRGB = renderer.RGB{R: 10, G: 20, B: 30}
+
+	styles := DefaultRenderStyles()
+	styles.Description = muted
+	frame := m.Render(domain.Size{Cols: 28, Rows: 3}, styles)
+
+	desc := frame.At(13, 1).Style
+	require.True(t, desc.Italic)
+	require.True(t, desc.HasForegroundRGB)
+	require.Equal(t, renderer.RGB{R: 10, G: 20, B: 30}, desc.ForegroundRGB)
 }

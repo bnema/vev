@@ -700,6 +700,21 @@ func TestSGR(t *testing.T) {
 			},
 		},
 		{
+			name: "SGR 3 sets italic on style and cell, SGR 23 clears it",
+			seq:  "\x1b[3mX\x1b[23mY",
+			check: func(t *testing.T, s *Screen) {
+				if !cellAt(s, 0, 0).Style.Italic {
+					t.Errorf("first cell italic = false, want true")
+				}
+				if cellAt(s, 1, 0).Style.Italic {
+					t.Errorf("second cell italic = true, want false after SGR 23")
+				}
+				if s.Style.Italic {
+					t.Errorf("current style italic = true, want false after SGR 23")
+				}
+			},
+		},
+		{
 			name: "empty SGR params reset style",
 			seq:  "\x1b[31m\x1b[1m\x1b[m", // empty params → reset
 			check: func(t *testing.T, s *Screen) {
