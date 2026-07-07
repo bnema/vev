@@ -67,8 +67,8 @@ Wire payload types/codecs live in `internal/ports/frame.go` and `internal/ports/
 
 ## Session flow
 
-- Ephemeral numbered sessions die on detach.
-- Named sessions survive headless.
+- Ephemeral numbered sessions survive detach while the daemon retains them, but are not persisted.
+- Named sessions survive headless and persist across daemon restarts.
 - The daemon starts on first use and exits when the last session ends.
 - Local attach sends `Hello`, receives `Welcome`, then pumps `Input`/`Resize` and `Output` frames.
 - Remote attach runs `ssh -- host vev _stdio [session]` and proxies the same protocol over stdio.

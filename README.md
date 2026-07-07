@@ -26,10 +26,10 @@ go build -o vev .  # local binary
 ```text
 vev                              attach to (or create) an ephemeral session
 vev new <name>                   create and attach to a named session
-vev attach <name>                attach to an existing named session (alias: a)
+vev attach <name>                attach to an existing session (alias: a)
 vev attach user@host[:session]   attach to a remote vev daemon over SSH
 vev ls                           list sessions (alias: list)
-vev kill <name>                  kill a named session
+vev kill <name>                  kill a session
 vev kill -- <name>               kill a name that starts with -
 vev kill --all                   kill all sessions and stop the daemon
 vev kill --daemon                stop the active vev daemon
@@ -37,7 +37,7 @@ vev --help                       show help (aliases: -h, help)
 vev --version                    show version (alias: version)
 ```
 
-Ephemeral sessions get a number (`0`, `1`, `2`, ...) and die when you detach. Named sessions survive detach and can be resumed later. New and renamed session names must start with a letter or number and may contain only letters, numbers, dots, underscores, and dashes.
+Ephemeral sessions get a number (`0`, `1`, `2`, ...) and are temporary daemon-retained sessions. They survive detach and transient client connection loss while the daemon is running, but they are not persisted to disk and disappear when the daemon is killed, exits, or the machine restarts. Named sessions are persisted, survive daemon restarts, and can be resumed later. New and renamed session names must start with a letter or number and may contain only letters, numbers, dots, underscores, and dashes.
 
 The daemon starts on first use and exits when no sessions remain. Only one client is attached to a session at a time; attaching again displaces the old client.
 
@@ -120,7 +120,7 @@ vev attach user@host
 vev attach user@host:session
 ```
 
-Remote attach uses SSH only to start a UDP proxy on the remote host; the session itself then talks directly to the remote host over UDP. `vev` must be installed on the remote host, and the host name you pass to `vev attach` must be reachable both by SSH for bootstrap and by UDP for the session transport. Omitting `:session` opens an ephemeral remote session. Named sessions can resume after temporary network disconnects, such as sleep or Wi-Fi changes.
+Remote attach uses SSH only to start a UDP proxy on the remote host; the session itself then talks directly to the remote host over UDP. `vev` must be installed on the remote host, and the host name you pass to `vev attach` must be reachable both by SSH for bootstrap and by UDP for the session transport. Omitting `:session` opens an ephemeral remote session. Remote sessions can resume after temporary network disconnects, such as sleep or Wi-Fi changes, while the daemon still has the session. Named sessions additionally persist across daemon restarts.
 
 The UDP proxy binds a port in a fixed range on the remote (default `61000-61023`), so a host firewall that only allows SSH will drop the session datagrams and attach fails with `remote UDP transport unavailable: probe UDP transport`. Allow inbound UDP for that range on the remote to fix it — for example `sudo ufw allow 61000:61023/udp`, or on a trusted Tailscale network `sudo ufw allow in on tailscale0`. Override the range with `VEV_UDP_PORT_RANGE` on the remote (e.g. `VEV_UDP_PORT_RANGE=51000-51009`, a single `VEV_UDP_PORT_RANGE=51000`, or `VEV_UDP_PORT_RANGE=0` for a random ephemeral port).
 

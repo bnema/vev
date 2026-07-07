@@ -89,11 +89,11 @@ const usageText = `vev — a terminal multiplexer
 usage:
   vev                 attach to (or create) an ephemeral session
   vev new <name>      create and attach to a named session
-  vev attach <name>   attach to an existing named session (alias: a)
+  vev attach <name>   attach to an existing session (alias: a)
   vev attach user@host[:session]
                       attach through SSH to a remote vev daemon
   vev ls              list sessions
-  vev kill <name>     kill a named session
+  vev kill <name>     kill a session
   vev kill --all      kill all sessions and stop the daemon
   vev kill --daemon   stop the active vev daemon
   vev --help          show this help
@@ -941,7 +941,10 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 		if s.Stopped {
 			state = "stopped"
 			tabs = "-"
-		} else if s.Attached {
+		} else if s.Ephemeral {
+			state = "temporary"
+		}
+		if s.Attached {
 			attached = "yes"
 		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", s.Name, state, tabs, attached)

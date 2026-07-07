@@ -652,7 +652,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 
 // --- reader EOF -> registry-empty shutdown ----------------------------------
 
-func TestSendErrorKillsEphemeral(t *testing.T) {
+func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 	p := portsmocks.NewMockPTY(t)
 	p.EXPECT().Close().Return(nil).Maybe()
 
@@ -673,9 +673,15 @@ func TestSendErrorKillsEphemeral(t *testing.T) {
 	win.focusedPane().screen.Write([]byte("x"))
 	win.mu.Unlock()
 
-	d.paint(sess, ac, true) // send fails -> detach -> ephemeral killed
+	d.paint(sess, ac, true)
 
-	require.Equal(t, 0, sessionCount(d), "ephemeral session must die when its client's send fails")
+	require.Equal(t, 1, sessionCount(d), "ephemeral session survives failed client send")
+	sess.mu.Lock()
+	require.Nil(t, sess.client)
+	sess.mu.Unlock()
+
+	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
+	cancel()
 	d.waitNotifies()
 }
 

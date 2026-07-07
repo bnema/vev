@@ -481,9 +481,9 @@ func (d *Daemon) handleList(tr ports.Transport) {
 	_ = tr.Send(frameSessions(infos))
 }
 
-// handleKill terminates the named session (if any), or all sessions, and
-// closes the control connection; the resulting EOF is the client's success
-// signal.
+// handleKill terminates the requested live session or stopped named session,
+// or all sessions, and closes the control connection; the resulting EOF is the
+// client's success signal.
 func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	defer func() { _ = tr.Close() }()
 
@@ -648,7 +648,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID})
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
 		sess.mu.Lock()
 		sess.terminal = term
 		sess.mu.Unlock()

@@ -52,7 +52,11 @@ func newReconnectToastTerminalHarness(t *testing.T) *reconnectToastTerminalHarne
 func (h *reconnectToastTerminalHarness) closeInput() { _ = h.inWriter.Close() }
 
 func reconnectToastWelcome(token uint64) ports.Frame {
-	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(ports.Welcome{SessionID: "s1", ResumeToken: token, Capabilities: ports.CapabilityResume})}
+	return reconnectToastWelcomeNamed("", token)
+}
+
+func reconnectToastWelcomeNamed(name string, token uint64) ports.Frame {
+	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(ports.Welcome{SessionID: "s1", SessionName: name, ResumeToken: token, Capabilities: ports.CapabilityResume})}
 }
 
 func reconnectToastDetach(reason uint8) ports.Frame {
@@ -227,6 +231,47 @@ func TestRemoteReconnectToastLifecycleWithWrappedTransportError(t *testing.T) {
 	out := term.out.String()
 	require.Contains(t, out, reconnectToastMessage)
 	require.Contains(t, out, strings.Repeat(" ", reconnectToastBounds(term.size).Width))
+}
+
+func TestRemoteEphemeralReconnectUsesAssignedSessionName(t *testing.T) {
+	linkDead := errors.New("remote link dead")
+	oldSleep := reconnectSleep
+	oldSleepWithResize := reconnectSleepWithResize
+	reconnectSleep = func(context.Context, ports.Clock, time.Duration) bool { return true }
+	reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Size, func(domain.Size)) bool {
+		return true
+	}
+	defer func() {
+		reconnectSleep = oldSleep
+		reconnectSleepWithResize = oldSleepWithResize
+	}()
+
+	term := newReconnectToastTerminalHarness(t)
+	defer term.closeInput()
+	tr1 := &reconnectToastRecordingTransport{recvs: []reconnectToastRecv{
+		{frame: reconnectToastWelcomeNamed("0", 44)},
+		{err: linkDead},
+	}}
+	tr2 := &reconnectToastRecordingTransport{recvs: []reconnectToastRecv{
+		{frame: reconnectToastWelcomeNamed("0", 55)},
+		{frame: reconnectToastDetach(ports.ReasonDetach)},
+	}}
+	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr1, tr2}}
+
+	err := Run(context.Background(), dialer, term.term, portsmocks.NewMockClock(t), ports.IntentEphemeral, "", true, nil, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, 2, dialer.calls)
+
+	firstHello := reconnectToastHelloFromSend(t, tr1)
+	resumeHello := reconnectToastHelloFromSend(t, tr2)
+	require.Equal(t, ports.IntentEphemeral, firstHello.Intent)
+	require.Empty(t, firstHello.Name)
+	require.Zero(t, firstHello.ResumeToken)
+	require.Equal(t, ports.IntentResume, resumeHello.Intent)
+	require.Equal(t, "0", resumeHello.Name)
+	require.Equal(t, uint64(44), resumeHello.ResumeToken)
+	require.Equal(t, firstHello.ClientID, resumeHello.ClientID)
+	require.Contains(t, term.out.String(), reconnectToastMessage)
 }
 
 func TestRemoteReconnectToastLifecycle(t *testing.T) {

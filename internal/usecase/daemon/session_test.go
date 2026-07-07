@@ -288,7 +288,7 @@ func TestAttachReplaceDetachesOld(t *testing.T) {
 
 // --- detach semantics -------------------------------------------------------
 
-func TestDetachKillsEphemeral(t *testing.T) {
+func TestDetachKeepsEphemeralHeadless(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	tr, sends, _ := newConn(t,
@@ -299,13 +299,42 @@ func TestDetachKillsEphemeral(t *testing.T) {
 	var hg sync.WaitGroup
 	hg.Go(func() { d.handleConn(tr) })
 	awaitFrame(t, sends, ports.MsgWelcome)
-
-	require.Eventually(t, func() bool { return sessionCount(d) == 0 }, 2*time.Second, 5*time.Millisecond,
-		"ephemeral session must die on client detach")
-
-	releasePTY()
+	awaitFrame(t, sends, ports.MsgDetached)
 	hg.Wait()
+
+	require.Equal(t, 1, sessionCount(d), "ephemeral session survives explicit detach")
+	sess := firstSession(d)
+	require.NotNil(t, sess)
+	sess.mu.Lock()
+	require.True(t, sess.ephemeral)
+	require.Nil(t, sess.client, "ephemeral session is headless after detach")
+	sess.mu.Unlock()
+
+	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
+	releasePTY()
 	d.sessWg.Wait()
+	d.waitNotifies()
+}
+
+func TestListShowsDetachedEphemeralSession(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+
+	tr := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentEphemeral, "", 0), tr)
+	require.NoError(t, err)
+	d.clientGone(sess, ac, ac.transport(), true)
+
+	got := listSessions(t, d)
+	require.Len(t, got.Sessions, 1)
+	require.Equal(t, sess.name, got.Sessions[0].Name)
+	require.True(t, got.Sessions[0].Ephemeral)
+	require.False(t, got.Sessions[0].Attached)
+
+	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
+	d.sessWg.Wait()
+	d.waitNotifies()
 }
 
 func TestDetachKeepsNamed(t *testing.T) {
@@ -579,11 +608,6 @@ func TestServeReturnsDespiteWedgedClientOnShutdown(t *testing.T) {
 	}
 	require.Equal(t, 0, sessionCount(d), "session must be torn down despite the wedged client")
 }
-
-// --- send-error kills ephemeral -----------------------------------------------
-
-// TestSendErrorKillsEphemeral: a failed output send detaches the client, and —
-// like every other detach path — that kills an ephemeral session rather than
 
 type mockStoreState struct {
 	mu     sync.Mutex
