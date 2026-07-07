@@ -440,20 +440,22 @@ func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte
 }
 
 type themeStyles struct {
-	statusBar  renderer.Style
-	accent     renderer.Style
-	border     renderer.Style
-	selection  renderer.Style
-	copyStatus renderer.Style
+	statusBar   renderer.Style
+	accent      renderer.Style
+	border      renderer.Style
+	selection   renderer.Style
+	copyStatus  renderer.Style
+	paletteDesc renderer.Style
 }
 
 func newThemeStyles(t themeui.Theme) themeStyles {
 	return themeStyles{
-		statusBar:  themeui.StatusBarStyle(t),
-		accent:     themeui.AccentStyle(t),
-		border:     themeui.BorderStyle(t),
-		selection:  themeui.SelectionStyle(t),
-		copyStatus: themeui.SelectionStyle(t),
+		statusBar:   themeui.StatusBarStyle(t),
+		accent:      themeui.AccentStyle(t),
+		border:      themeui.BorderStyle(t),
+		selection:   themeui.SelectionStyle(t),
+		copyStatus:  themeui.SelectionStyle(t),
+		paletteDesc: themeui.MutedTextStyle(t),
 	}
 }
 

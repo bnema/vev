@@ -73,7 +73,7 @@ func TestRenderDrawsInputCaretSelectedLineAndCodeHighlight(t *testing.T) {
 	})
 	m.Insert('c')
 	m.Insert('y')
-	frame := m.Render(domain.Size{Cols: 28, Rows: 3})
+	frame := m.Render(domain.Size{Cols: 28, Rows: 3}, DefaultRenderStyles())
 
 	require.Equal(t, '>', frame.At(0, 0).Rune)
 	require.Equal(t, ' ', frame.At(1, 0).Rune)
@@ -86,24 +86,78 @@ func TestRenderDrawsInputCaretSelectedLineAndCodeHighlight(t *testing.T) {
 	require.Equal(t, 'Y', frame.At(2, 1).Rune)
 	require.True(t, frame.At(0, 1).Style.Inverse, "selected line is inverse")
 	require.True(t, frame.At(5, 1).Style.Inverse, "selected line padding/text remains inverse")
-	require.True(t, frame.At(0, 1).Style.Bold, "matched C is bold")
-	require.False(t, frame.At(1, 1).Style.Bold, "unmatched P is not highlighted")
-	require.True(t, frame.At(2, 1).Style.Bold, "matched Y is bold")
+	require.True(t, frame.At(0, 1).Style.Bold, "command code C is bold")
+	require.True(t, frame.At(1, 1).Style.Bold, "command code P is bold")
+	require.True(t, frame.At(2, 1).Style.Bold, "command code Y is bold")
+	require.True(t, frame.At(13, 1).Style.Italic, "description is italic")
 }
 
-func TestRenderUsesSelectionStyleForFuzzyHighlights(t *testing.T) {
-	m := New([]command.Command{cmd("CPY", "Copy", "Enter copy mode")})
-	m.Insert('c')
-	m.Insert('y')
-	accent := renderer.DefaultStyle()
-	accent.HasBackgroundRGB = true
-	accent.BackgroundRGB = renderer.RGB{R: 1, G: 2, B: 3}
+func TestRenderUsesConfiguredStyles(t *testing.T) {
+	tests := []struct {
+		name   string
+		styles func() RenderStyles
+		x      int
+		assert func(t *testing.T, style renderer.Style)
+	}{
+		{
+			name: "selection style for fuzzy highlights",
+			styles: func() RenderStyles {
+				accent := renderer.DefaultStyle()
+				accent.HasBackgroundRGB = true
+				accent.BackgroundRGB = renderer.RGB{R: 1, G: 2, B: 3}
+				styles := DefaultRenderStyles()
+				styles.Selection = accent
+				return styles
+			},
+			x: 0,
+			assert: func(t *testing.T, style renderer.Style) {
+				require.True(t, style.Bold)
+				require.False(t, style.Inverse)
+				require.True(t, style.HasBackgroundRGB)
+				require.Equal(t, renderer.RGB{R: 1, G: 2, B: 3}, style.BackgroundRGB)
+			},
+		},
+		{
+			name: "muted italic description style",
+			styles: func() RenderStyles {
+				muted := renderer.DefaultStyle()
+				muted.Italic = true
+				muted.HasForegroundRGB = true
+				muted.ForegroundRGB = renderer.RGB{R: 10, G: 20, B: 30}
+				styles := DefaultRenderStyles()
+				styles.Description = muted
+				return styles
+			},
+			x: 13,
+			assert: func(t *testing.T, style renderer.Style) {
+				require.True(t, style.Italic)
+				require.True(t, style.HasForegroundRGB)
+				require.Equal(t, -1, style.Foreground)
+				require.Equal(t, renderer.RGB{R: 10, G: 20, B: 30}, style.ForegroundRGB)
+			},
+		},
+		{
+			name: "description italic is configurable",
+			styles: func() RenderStyles {
+				styles := DefaultRenderStyles()
+				styles.Description.Italic = false
+				return styles
+			},
+			x: 13,
+			assert: func(t *testing.T, style renderer.Style) {
+				require.False(t, style.Italic)
+			},
+		},
+	}
 
-	frame := m.Render(domain.Size{Cols: 28, Rows: 3}, accent)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New([]command.Command{cmd("CPY", "Copy", "Enter copy mode")})
+			m.Insert('c')
+			m.Insert('y')
+			frame := m.Render(domain.Size{Cols: 28, Rows: 3}, tt.styles())
 
-	matched := frame.At(0, 1).Style
-	require.True(t, matched.Bold)
-	require.False(t, matched.Inverse)
-	require.True(t, matched.HasBackgroundRGB)
-	require.Equal(t, renderer.RGB{R: 1, G: 2, B: 3}, matched.BackgroundRGB)
+			tt.assert(t, frame.At(tt.x, 1).Style)
+		})
+	}
 }

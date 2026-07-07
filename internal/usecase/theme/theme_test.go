@@ -355,6 +355,9 @@ func TestStyleHelpersFallbackAndThemed(t *testing.T) {
 	if got := BorderStyle(Theme{Known: true}); !got.Equal(renderer.DefaultStyle()) {
 		t.Fatalf("border fallback=%+v", got)
 	}
+	if got := MutedTextStyle(unknown); !got.Equal(renderer.DefaultStyle()) {
+		t.Fatalf("muted fallback=%+v", got)
+	}
 	inverse := renderer.DefaultStyle()
 	inverse.Inverse = true
 	if got := AccentStyle(unknown); !got.Equal(inverse) {
@@ -379,5 +382,9 @@ func TestStyleHelpersFallbackAndThemed(t *testing.T) {
 	border := BorderStyle(theme)
 	if !border.HasForegroundRGB || border.ForegroundRGB != (renderer.RGB{R: 124, G: 128, B: 132}) {
 		t.Fatalf("border themed=%+v", border)
+	}
+	muted := MutedTextStyle(theme)
+	if !muted.HasForegroundRGB || muted.ForegroundRGB != (renderer.RGB{R: 115, G: 119, B: 124}) {
+		t.Fatalf("muted themed=%+v", muted)
 	}
 }

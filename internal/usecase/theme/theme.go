@@ -327,6 +327,16 @@ func BorderStyle(t Theme) renderer.Style {
 	return style
 }
 
+func MutedTextStyle(t Theme) renderer.Style {
+	if !usable(t) {
+		return renderer.DefaultStyle()
+	}
+	style := renderer.DefaultStyle()
+	style.HasForegroundRGB = true
+	style.ForegroundRGB = Blend(t.Foreground, t.Background, 0.45)
+	return style
+}
+
 func DimStyle(style renderer.Style, t Theme) renderer.Style {
 	if !usable(t) {
 		return style

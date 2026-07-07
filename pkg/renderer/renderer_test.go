@@ -272,6 +272,16 @@ func TestRendererEmitsSGR(t *testing.T) {
 			damage:  []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 3, Height: 1}},
 			wantAll: []string{"\x1b[0;38;2;1;2;3m", "R", "\x1b[0;38;5;82m", "I", "\x1b[0mD"},
 		},
+		{
+			name:   "bold italic inverse",
+			width:  1,
+			height: 1,
+			setup: func(frame Frame) {
+				frame.Set(0, 0, Cell{Rune: 'X', Style: Style{Bold: true, Italic: true, Inverse: true, Foreground: -1, Background: -1}})
+			},
+			damage:  []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 1, Height: 1}},
+			wantAll: []string{"\x1b[0;1;3;7m", "X"},
+		},
 	}
 
 	for _, tt := range tests {

@@ -8,6 +8,7 @@ type RGB struct {
 
 type Style struct {
 	Bold       bool
+	Italic     bool
 	Inverse    bool
 	Foreground int // -1 means unset; ignored when HasForegroundRGB is true
 	Background int // -1 means unset; ignored when HasBackgroundRGB is true
@@ -21,7 +22,7 @@ type Style struct {
 func DefaultStyle() Style { return Style{Foreground: -1, Background: -1} }
 
 func (s Style) Equal(other Style) bool {
-	if s.Bold != other.Bold || s.Inverse != other.Inverse {
+	if s.Bold != other.Bold || s.Italic != other.Italic || s.Inverse != other.Inverse {
 		return false
 	}
 	if s.HasForegroundRGB != other.HasForegroundRGB || s.HasBackgroundRGB != other.HasBackgroundRGB {
