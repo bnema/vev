@@ -117,7 +117,6 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 	base := renderer.DefaultStyle()
 	selection := styles.Selection
 	desc := styles.Description
-	desc.Italic = true
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: base})
 	if m == nil {
 		ui.DrawInputLine(frame, 0, "> ", "", base, selection)
@@ -183,11 +182,11 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 
 func mergePaletteDescStyle(line, desc renderer.Style) renderer.Style {
 	out := line
-	out.Italic = true
+	out.Italic = desc.Italic
 	if desc.HasForegroundRGB {
 		out.HasForegroundRGB = true
 		out.ForegroundRGB = desc.ForegroundRGB
-		out.Foreground = desc.Foreground
+		out.Foreground = -1
 	} else if desc.Foreground >= 0 {
 		out.HasForegroundRGB = false
 		out.Foreground = desc.Foreground
