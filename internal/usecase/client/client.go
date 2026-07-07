@@ -382,11 +382,14 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	if err != nil {
 		return attachResult{err: fmt.Errorf("vev: awaiting welcome: %w", err)}
 	}
+	result := func(welcomed bool, err error) attachResult {
+		return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: welcomed, err: err}
+	}
 	switch reply.Type {
 	case ports.MsgWelcome:
 		welcome, derr := ports.UnmarshalWelcome(reply.Payload)
 		if derr != nil {
-			return attachResult{err: fmt.Errorf("vev: decoding welcome: %w", derr)}
+			return result(false, fmt.Errorf("vev: decoding welcome: %w", derr))
 		}
 		resumeToken = welcome.ResumeToken
 		name = welcome.SessionName
@@ -395,16 +398,17 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	case ports.MsgError:
 		em, derr := ports.UnmarshalErrorMsg(reply.Payload)
 		if derr != nil {
-			return attachResult{err: fmt.Errorf("vev: decoding error reply: %w", derr)}
+			return result(false, fmt.Errorf("vev: decoding error reply: %w", derr))
 		}
-		return attachResult{resumeToken: resumeToken, sessionName: name, err: &ProtocolError{Code: em.Code, Text: em.Text}}
+		return result(false, &ProtocolError{Code: em.Code, Text: em.Text})
 	default:
-		return attachResult{resumeToken: resumeToken, sessionName: name, err: fmt.Errorf("vev: unexpected reply type %d before welcome", reply.Type)}
+		return result(false, fmt.Errorf("vev: unexpected reply type %d before welcome", reply.Type))
 	}
+	welcomedResult := func(err error) attachResult { return result(true, err) }
 
 	// 3. Enter raw mode after Welcome; Run owns restoration.
 	if err := enterRaw(); err != nil {
-		return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: true, err: err}
+		return welcomedResult(err)
 	}
 	clearStatus()
 
@@ -449,9 +453,9 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 			// context was cancelled. A queued sender error takes priority.
 			select {
 			case serr := <-sendErrCh:
-				return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: true, err: fmt.Errorf("vev: sending to daemon: %w", serr)}
+				return welcomedResult(fmt.Errorf("vev: sending to daemon: %w", serr))
 			default:
-				return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: true}
+				return welcomedResult(nil)
 			}
 		case <-colorQueryCh:
 			if err := term.QueryColors(); err != nil {
@@ -460,21 +464,21 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 		case r := <-recvCh:
 			if r.err != nil {
 				if errors.Is(r.err, io.EOF) {
-					return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: true, err: fmt.Errorf("vev: daemon vanished (missing: %v): %w", ms.missing(), r.err)}
+					return welcomedResult(fmt.Errorf("vev: daemon vanished (missing: %v): %w", ms.missing(), r.err))
 				}
-				return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: true, err: fmt.Errorf("vev: receiving from daemon: %w", r.err)}
+				return welcomedResult(fmt.Errorf("vev: receiving from daemon: %w", r.err))
 			}
 			switch r.frame.Type {
 			case ports.MsgOutput:
 				o, derr := ports.UnmarshalOutput(r.frame.Payload)
 				if derr != nil {
-					return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: true, err: fmt.Errorf("vev: decoding output: %w", derr)}
+					return welcomedResult(fmt.Errorf("vev: decoding output: %w", derr))
 				}
 				if _, werr := term.Out().Write(o.Data); werr != nil {
-					return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: true, err: fmt.Errorf("vev: writing terminal output: %w", werr)}
+					return welcomedResult(fmt.Errorf("vev: writing terminal output: %w", werr))
 				}
 				if ferr := term.Flush(); ferr != nil {
-					return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: true, err: fmt.Errorf("vev: flushing terminal: %w", ferr)}
+					return welcomedResult(fmt.Errorf("vev: flushing terminal: %w", ferr))
 				}
 				if !ms.firstOutput {
 					ms.firstOutput = true
@@ -483,7 +487,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 			case ports.MsgDetached:
 				d, derr := ports.UnmarshalDetached(r.frame.Payload)
 				if derr != nil {
-					return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: true, err: fmt.Errorf("vev: decoding detached: %w", derr)}
+					return welcomedResult(fmt.Errorf("vev: decoding detached: %w", derr))
 				}
 				ms.detached = true
 				if d.Reason == ports.ReasonDetach {
@@ -491,7 +495,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 				} else {
 					log.Warn("detached by daemon", "reason", d.Reason)
 				}
-				return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: true, err: detachedResult(d.Reason)}
+				return welcomedResult(detachedResult(d.Reason))
 			case ports.MsgPong:
 				// Liveness reply; nothing to do.
 			default:

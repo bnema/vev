@@ -570,12 +570,12 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed por
 	}
 	if sess.detachIfCurrent(ac) {
 		d.unregisterPreview(ac)
-		d.resetScreenDefaultColors(sess)
 		if d.parkAttachment(sess, ac) {
 			_ = ac.closeCapturedTransport(failed)
 			d.log.Warn("parked client after send error", "session", sess.name)
 			return
 		}
+		d.resetScreenDefaultColors(sess)
 		_ = ac.closeCapturedTransport(failed)
 		d.log.Warn("detached client after send error", "session", sess.name)
 	}

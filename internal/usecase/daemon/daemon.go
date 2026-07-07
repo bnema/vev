@@ -15,7 +15,9 @@
 //     scheduler).
 //   - The daemon exits (Serve returns) when the last session is removed, or
 //     when the parent context is cancelled (graceful shutdown notifies any
-//     attached clients with ReasonServerShutdown).
+//     attached clients with ReasonServerShutdown). Client detach does not end
+//     a session: ephemeral sessions stay in memory until explicitly killed or
+//     until the daemon exits, and named sessions can also persist on disk.
 //
 // Locking: a pane's screen/scrollback and per-client renderer shadow are
 // guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by

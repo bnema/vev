@@ -363,6 +363,25 @@ func TestDetachOnSendErrorResetsScreenDefaultColors(t *testing.T) {
 	require.Empty(t, got, "OSC 10/11 queries must be swallowed once the client that reported these colors is gone")
 }
 
+func TestDetachOnSendErrorParkPreservesScreenDefaultColors(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	defer release()
+	ac.resumeCapable = true
+	d.applyTheme(sess, ac, ports.Theme{
+		HasForeground: true, Foreground: renderer.RGB{R: 7, G: 8, B: 9},
+		HasBackground: true, Background: renderer.RGB{R: 10, G: 11, B: 12},
+	})
+
+	d.detachOnSendError(sess, ac, ac.transport())
+
+	tb := sess.activeTab()
+	var got []byte
+	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	require.NotEmpty(t, got, "parked clients resume the same attachment, so screen default colors must be preserved")
+}
+
 func TestApplyThemeIgnoresReplacedClient(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	d, sess, old, _ := newManualSessionWithPTYs(t, p)
