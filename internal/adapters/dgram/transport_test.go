@@ -3,6 +3,7 @@ package dgram
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"sync"
@@ -81,6 +82,112 @@ func (p *fakePC) SetReadDeadline(time.Time) error  { return nil }
 func (p *fakePC) SetWriteDeadline(time.Time) error { return nil }
 
 func key() []byte { return bytes.Repeat([]byte{1}, pdgram.KeySize) }
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string { return "i/o timeout" }
+func (timeoutErr) Timeout() bool { return true }
+
+type blockingWritePC struct {
+	addr net.Addr
+
+	mu       sync.Mutex
+	closed   bool
+	deadline time.Time
+	done     chan struct{}
+}
+
+func newBlockingWritePC() *blockingWritePC {
+	return &blockingWritePC{addr: testAddr("blocked"), done: make(chan struct{})}
+}
+
+func (p *blockingWritePC) ReadFrom([]byte) (int, net.Addr, error) {
+	<-p.done
+	return 0, nil, errors.New("closed")
+}
+
+func (p *blockingWritePC) WriteTo([]byte, net.Addr) (int, error) {
+	for {
+		p.mu.Lock()
+		closed := p.closed
+		deadline := p.deadline
+		p.mu.Unlock()
+		if closed {
+			return 0, errors.New("closed")
+		}
+		if !deadline.IsZero() {
+			wait := time.Until(deadline)
+			if wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-p.done:
+					timer.Stop()
+					return 0, errors.New("closed")
+				}
+			}
+			return 0, timeoutErr{}
+		}
+		select {
+		case <-time.After(time.Millisecond):
+		case <-p.done:
+			return 0, errors.New("closed")
+		}
+	}
+}
+
+func (p *blockingWritePC) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.closed {
+		p.closed = true
+		close(p.done)
+	}
+	return nil
+}
+
+func (p *blockingWritePC) LocalAddr() net.Addr { return p.addr }
+func (p *blockingWritePC) SetDeadline(t time.Time) error {
+	p.mu.Lock()
+	p.deadline = t
+	p.mu.Unlock()
+	return nil
+}
+func (p *blockingWritePC) SetReadDeadline(time.Time) error { return nil }
+func (p *blockingWritePC) SetWriteDeadline(t time.Time) error {
+	p.mu.Lock()
+	p.deadline = t
+	p.mu.Unlock()
+	return nil
+}
+
+func TestSendWriteTimeoutBoundsBlockedPacketConn(t *testing.T) {
+	pc := newBlockingWritePC()
+	tr, err := NewTransportWithOptions(pc, testAddr("peer"), key(), 1, 2, Options{
+		WriteTimeout: 10 * time.Millisecond,
+		ResendAfter:  time.Hour,
+		Heartbeat:    time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tr.Close() }()
+
+	done := make(chan error, 1)
+	go func() { done <- tr.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("blocked")}) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Send returned nil, want write timeout")
+		}
+		var timeout interface{ Timeout() bool }
+		if !errors.As(err, &timeout) || !timeout.Timeout() {
+			t.Fatalf("Send err=%v, want timeout error", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("Send blocked without honoring WriteTimeout")
+	}
+}
 
 func TestReliableDuplicateAckedButNotDeliveredTwice(t *testing.T) {
 	aPC, bPC := newPair()
@@ -342,12 +449,12 @@ func TestReliableDeliveryPreservesSequenceOrder(t *testing.T) {
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		got := recvWithin(t, b, time.Second)
 		if got.Type != ports.MsgOutput || len(got.Payload) != 1 || got.Payload[0] != byte(i) {
 			t.Fatalf("frame %d delivered out of order: %+v", i, got)
@@ -362,7 +469,7 @@ func TestAckProcessingContinuesWhenConsumerBackpressured(t *testing.T) {
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
 
-	for i := 0; i < cap(b.in)+20; i++ {
+	for i := range cap(b.in) + 20 {
 		if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
 			t.Fatal(err)
 		}
@@ -381,6 +488,69 @@ func TestAckProcessingContinuesWhenConsumerBackpressured(t *testing.T) {
 	pending := len(a.pending)
 	a.mu.Unlock()
 	t.Fatalf("acks blocked behind undrained consumer; pending=%d", pending)
+}
+
+func newResendTestTransport(t *testing.T, maxResendPerTick int) (*Transport, *atomic.Int32) {
+	t.Helper()
+	aPC, _ := newPair()
+	codec, err := pdgram.NewCodec(key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var writes atomic.Int32
+	aPC.drop = func(_ []byte, addr net.Addr) bool {
+		if addr.String() == "b" {
+			writes.Add(1)
+			return true
+		}
+		return false
+	}
+	return &Transport{
+		pc:               aPC,
+		peer:             testAddr("b"),
+		codec:            codec,
+		sendDir:          1,
+		mtu:              pdgram.DefaultMTU,
+		pending:          make(map[uint64]*pending),
+		resendAfter:      100 * time.Millisecond,
+		maxResendAfter:   500 * time.Millisecond,
+		maxResendPerTick: maxResendPerTick,
+		clock:            realClock{},
+	}, &writes
+}
+
+func TestResendPendingCapsBurst(t *testing.T) {
+	tr, writes := newResendTestTransport(t, 2)
+	for i := range 5 {
+		tr.pending[uint64(i+1)] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}, last: time.Now().Add(-time.Second)}
+	}
+
+	tr.resendPending()
+	if got := writes.Load(); got != 2 {
+		t.Fatalf("resend writes=%d, want capped burst of 2", got)
+	}
+}
+
+func TestResendPendingUsesExponentialBackoffAndMaxDelay(t *testing.T) {
+	tr, writes := newResendTestTransport(t, 10)
+	now := time.Now()
+	tr.pending[1] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("too-soon")}, last: now.Add(-150 * time.Millisecond), attempts: 1}
+	tr.pending[2] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("ready")}, last: now.Add(-250 * time.Millisecond), attempts: 1}
+	tr.pending[3] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("capped")}, last: now.Add(-time.Second), attempts: 10}
+
+	tr.resendPending()
+	if got := writes.Load(); got != 2 {
+		t.Fatalf("resend writes=%d, want ready and capped frames only", got)
+	}
+	if attempts := tr.pending[1].attempts; attempts != 1 {
+		t.Fatalf("too-soon attempts=%d, want unchanged", attempts)
+	}
+	if attempts := tr.pending[2].attempts; attempts != 2 {
+		t.Fatalf("ready attempts=%d, want incremented", attempts)
+	}
+	if attempts := tr.pending[3].attempts; attempts != 11 {
+		t.Fatalf("capped attempts=%d, want incremented", attempts)
+	}
 }
 
 func TestProbeTimeoutAndSuccess(t *testing.T) {
@@ -421,34 +591,84 @@ func TestRecvUnblocksWhenPeerDeadAfter(t *testing.T) {
 	}
 }
 
-func TestPendingReliableQueueBounded(t *testing.T) {
+func TestPendingReliableQueueBackpressuresUntilAck(t *testing.T) {
 	aPC, bPC := newPair()
 	aPC.drop = func(_ []byte, addr net.Addr) bool { return addr.String() == "b" }
-	a, _ := NewTransport(aPC, testAddr("b"), key(), 1, 2)
+	a, _ := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{MaxPending: 1})
 	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
 
-	for i := 0; i < maxPendingReliable; i++ {
-		if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte{byte(i)}}); err != nil {
-			t.Fatalf("send %d: %v", i, err)
-		}
+	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("first")}); err != nil {
+		t.Fatal(err)
 	}
-	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("full")}); !errors.Is(err, ErrPendingFull) {
-		t.Fatalf("send past bound err=%v, want ErrPendingFull", err)
+	done := make(chan error, 1)
+	go func() { done <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("second")}) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("send returned before an ack released pending capacity: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	a.handleRecord(ackRecord(1))
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("send after ack: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("send did not resume after ack released pending capacity")
 	}
 	a.mu.Lock()
 	pending := len(a.pending)
 	a.mu.Unlock()
-	if pending > maxPendingReliable {
-		t.Fatalf("pending=%d, want <= %d", pending, maxPendingReliable)
+	if pending > 1 {
+		t.Fatalf("pending=%d, want <= 1", pending)
 	}
+}
+
+func TestPendingReliableQueueReturnsWhenLinkDegrades(t *testing.T) {
+	aPC, bPC := newPair()
+	aPC.drop = func(_ []byte, addr net.Addr) bool { return addr.String() == "b" }
+	a, _ := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{MaxPending: 1})
+	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+
+	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("first")}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("second")}) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("send returned before link degraded: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	a.setLinkState(ports.LinkStateDegraded, nil)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrPendingFull) {
+			t.Fatalf("send err=%v, want ErrPendingFull", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("send did not unblock after link degraded")
+	}
+}
+
+func ackRecord(seq uint64) []byte {
+	var b [9]byte
+	b[0] = recAck
+	binary.BigEndian.PutUint64(b[1:], seq)
+	return b[:]
 }
 
 func TestReliableRecvBufferBoundedForFarFutureSequences(t *testing.T) {
 	tr := &Transport{nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame), maxRecvBuffer: maxRecvBuffer, done: make(chan struct{})}
 	tr.deliverCond = sync.NewCond(&tr.deliverMu)
-	for i := 0; i < maxRecvBuffer+100; i++ {
+	for i := range maxRecvBuffer + 100 {
 		tr.enqueueReliable(uint64(1000+i), ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}})
 	}
 	if got := len(tr.recvBuf); got != maxRecvBuffer {
@@ -474,7 +694,7 @@ func TestReliableFullRecvBufferDoesNotAckDroppedFarFutureFrame(t *testing.T) {
 	defer func() { _ = aPC.Close() }()
 	defer func() { _ = bPC.Close() }()
 
-	for i := 0; i < maxRecvBuffer; i++ {
+	for i := range maxRecvBuffer {
 		tr.recvBuf[uint64(1000+i)] = ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}
 	}
 	tr.handleRecord(encodeData(9999, true, ports.Frame{Type: ports.MsgOutput, Payload: []byte("dropped")}))

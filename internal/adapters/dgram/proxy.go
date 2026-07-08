@@ -58,11 +58,12 @@ func (p ProxyRuntime) Run(ctx context.Context) error {
 	}
 
 	errCh := make(chan proxyCopyErr, 2)
+	retryCh := make(chan struct{}, 1)
 	startClientCopy := func() {
-		go copyProxyFrames(p.Daemon, p.Client, proxyClientRecv, proxyDaemonSend, errCh)
+		go copyProxyFrames(ctx, p.Daemon, p.Client, proxyClientRecv, proxyDaemonSend, errCh, retryCh, retryBackoff, clk, false)
 	}
 	startDaemonCopy := func() {
-		go copyProxyFrames(p.Client, p.Daemon, proxyDaemonRecv, proxyClientSend, errCh)
+		go copyProxyFrames(ctx, p.Client, p.Daemon, proxyDaemonRecv, proxyClientSend, errCh, retryCh, retryBackoff, clk, true)
 	}
 	startClientCopy()
 	startDaemonCopy()
@@ -121,6 +122,8 @@ func (p ProxyRuntime) Run(ctx context.Context) error {
 			}
 		case <-idle:
 			return ErrLinkDead
+		case <-retryCh:
+			startIdle()
 		case ce := <-errCh:
 			switch ce.kind {
 			case proxyDaemonRecv:
@@ -159,16 +162,38 @@ func (p ProxyRuntime) Run(ctx context.Context) error {
 	}
 }
 
-func copyProxyFrames(dst, src ports.Transport, recvKind, sendKind proxyCopyErrKind, errCh chan<- proxyCopyErr) {
+func copyProxyFrames(ctx context.Context, dst, src ports.Transport, recvKind, sendKind proxyCopyErrKind, errCh chan<- proxyCopyErr, retryCh chan<- struct{}, retryBackoff time.Duration, clk ports.Clock, retryRecoverable bool) {
 	for {
 		f, err := src.Recv()
 		if err != nil {
 			errCh <- proxyCopyErr{kind: recvKind, err: err}
 			return
 		}
-		if err := dst.Send(f); err != nil {
-			errCh <- proxyCopyErr{kind: sendKind, err: err}
-			return
+		retrying := false
+		for {
+			if err := dst.Send(f); err != nil {
+				if retryRecoverable && errors.Is(err, ErrPendingFull) && recoverableClientLink(dst, err) {
+					if !retrying {
+						retrying = true
+						select {
+						case retryCh <- struct{}{}:
+						default:
+						}
+					}
+					t := clk.NewTimer(retryBackoff)
+					select {
+					case <-t.C():
+						t.Stop()
+						continue
+					case <-ctx.Done():
+						t.Stop()
+						return
+					}
+				}
+				errCh <- proxyCopyErr{kind: sendKind, err: err}
+				return
+			}
+			break
 		}
 	}
 }
