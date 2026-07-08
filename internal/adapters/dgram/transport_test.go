@@ -238,16 +238,25 @@ func waitForManualTimers(t *testing.T, clk *manualClock, n int) {
 type deadlineCapturePC struct {
 	addr     net.Addr
 	deadline atomic.Value
+	done     chan struct{}
 }
 
 func (p *deadlineCapturePC) ReadFrom([]byte) (int, net.Addr, error) {
+	<-p.done
 	return 0, nil, errors.New("closed")
 }
 func (p *deadlineCapturePC) WriteTo(b []byte, _ net.Addr) (int, error) { return len(b), nil }
-func (p *deadlineCapturePC) Close() error                              { return nil }
-func (p *deadlineCapturePC) LocalAddr() net.Addr                       { return p.addr }
-func (p *deadlineCapturePC) SetDeadline(time.Time) error               { return nil }
-func (p *deadlineCapturePC) SetReadDeadline(time.Time) error           { return nil }
+func (p *deadlineCapturePC) Close() error {
+	select {
+	case <-p.done:
+	default:
+		close(p.done)
+	}
+	return nil
+}
+func (p *deadlineCapturePC) LocalAddr() net.Addr             { return p.addr }
+func (p *deadlineCapturePC) SetDeadline(time.Time) error     { return nil }
+func (p *deadlineCapturePC) SetReadDeadline(time.Time) error { return nil }
 func (p *deadlineCapturePC) SetWriteDeadline(t time.Time) error {
 	if !t.IsZero() {
 		p.deadline.Store(t)
@@ -773,7 +782,7 @@ func TestPendingAttemptsResetWhenLinkRecovers(t *testing.T) {
 
 func TestWritePacketDeadlineUsesTransportClock(t *testing.T) {
 	wantNow := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
-	pc := &deadlineCapturePC{addr: testAddr("a")}
+	pc := &deadlineCapturePC{addr: testAddr("a"), done: make(chan struct{})}
 	tr, err := NewTransportWithOptions(pc, testAddr("b"), key(), 1, 2, Options{
 		Clock:        fixedClock{now: wantNow},
 		WriteTimeout: 250 * time.Millisecond,

@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/pkg/safedir"
 )
 
 // ErrDaemonUnreachable is returned when the daemon socket never becomes
@@ -88,7 +89,7 @@ func ensureDaemon(ctx context.Context, dir string, dial dialFunc, spawn spawnFun
 // no-op release) when another process holds a fresh lock, and takes over a
 // lock older than staleLockAge (crash resilience).
 func acquireSpawnLock(dir string) (release func(), acquired bool, err error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := safedir.EnsurePrivate(dir); err != nil {
 		return nil, false, err
 	}
 	path := filepath.Join(dir, spawnLockName)

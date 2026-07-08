@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/pkg/safedir"
 )
 
 // socketFileName is the fixed name of the daemon's listening socket within
@@ -35,8 +36,8 @@ type unixListener struct {
 // unlinked and bind is retried once. A successful dial means a live daemon
 // owns the socket, and Listen returns ErrDaemonRunning.
 func Listen(dir string) (ports.Listener, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("ipc: creating socket directory: %w", err)
+	if err := safedir.EnsurePrivate(dir); err != nil {
+		return nil, fmt.Errorf("ipc: securing socket directory: %w", err)
 	}
 
 	sockPath := filepath.Join(dir, socketFileName)

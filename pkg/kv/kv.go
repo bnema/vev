@@ -11,6 +11,8 @@ import (
 	"sort"
 	"sync"
 	"syscall"
+
+	"github.com/bnema/vev/pkg/safedir"
 )
 
 // Store is an append-only WAL-backed key/value store.
@@ -29,7 +31,7 @@ type Store struct {
 // Open opens or creates a store at path, replays valid records, truncates any
 // corrupt or torn tail, and compacts if the file contains enough obsolete data.
 func Open(path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := safedir.EnsurePrivate(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
 

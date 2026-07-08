@@ -2,12 +2,18 @@ package dgram
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
+func privateDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "vev")
+}
+
 func TestProxyRegistryReuseStaleCleanupAndSupersede(t *testing.T) {
 	t.Run("reuses live matching record", func(t *testing.T) {
-		r := NewProxyRegistry(t.TempDir())
+		r := NewProxyRegistry(privateDir(t))
 		want := ProxyRecord{Session: "work", PID: os.Getpid(), Port: 61000, Key: "abc"}
 		if err := r.Publish(want); err != nil {
 			t.Fatal(err)
@@ -21,7 +27,7 @@ func TestProxyRegistryReuseStaleCleanupAndSupersede(t *testing.T) {
 		}
 	})
 	t.Run("removes stale record", func(t *testing.T) {
-		r := NewProxyRegistry(t.TempDir())
+		r := NewProxyRegistry(privateDir(t))
 		if err := r.Publish(ProxyRecord{Session: "work", PID: os.Getpid(), Port: 61000, Key: "abc"}); err != nil {
 			t.Fatal(err)
 		}
@@ -36,7 +42,7 @@ func TestProxyRegistryReuseStaleCleanupAndSupersede(t *testing.T) {
 		}
 	})
 	t.Run("supersedes without pid-based kill and cleanup is owned", func(t *testing.T) {
-		r := NewProxyRegistry(t.TempDir())
+		r := NewProxyRegistry(privateDir(t))
 		old := ProxyRecord{Session: "work", PID: os.Getpid(), Port: 61000, Key: "old"}
 		if err := r.Publish(old); err != nil {
 			t.Fatal(err)
@@ -65,7 +71,7 @@ func TestProxyRegistryReuseStaleCleanupAndSupersede(t *testing.T) {
 }
 
 func TestProxyRegistrySessionPathIsCollisionFree(t *testing.T) {
-	r := NewProxyRegistry(t.TempDir())
+	r := NewProxyRegistry(privateDir(t))
 	tests := []struct {
 		a string
 		b string

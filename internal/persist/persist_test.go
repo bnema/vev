@@ -11,6 +11,11 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
+func privateDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "vev")
+}
+
 func TestRecordCodecRoundTrip(t *testing.T) {
 	r := Record{Name: "work", Cwd: "/tmp/project", CreatedAt: 11, UpdatedAt: 22, LastUsedSeq: 33}
 	value, err := encodeRecordValue(r)
@@ -72,7 +77,7 @@ func TestNilPersisterNoOps(t *testing.T) {
 }
 
 func TestPersisterSaveTouchDeleteLoadAll(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	p, err := Open(dir)
 	require.NoError(t, err)
 
@@ -108,7 +113,7 @@ func TestDecodeAllSkipsMalformedRecords(t *testing.T) {
 }
 
 func TestLoadReadOnlyUsesReplay(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	p, err := Open(dir)
 	require.NoError(t, err)
 	require.NoError(t, p.Save(Record{Name: "work", Cwd: "/work", CreatedAt: 1, UpdatedAt: 2, LastUsedSeq: 3}))

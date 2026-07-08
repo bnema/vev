@@ -6,13 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/bnema/vev/internal/ports"
 )
 
 func TestListenAcceptRoundTrip(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "vev")
 
 	ln, err := Listen(dir)
 	if err != nil {
@@ -85,8 +86,30 @@ func TestListenMkdirsSocketDir(t *testing.T) {
 	}
 }
 
+func TestListenRejectsHostileSocketDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "socketdir")
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		t.Fatalf("mkdir hostile socket dir: %v", err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatalf("chmod hostile socket dir: %v", err)
+	}
+
+	ln, err := Listen(dir)
+	if err == nil {
+		_ = ln.Close()
+		t.Fatal("Listen() error = nil, want hostile directory rejection")
+	}
+	if !strings.Contains(err.Error(), dir) {
+		t.Fatalf("Listen() error = %q, want mention of %q", err, dir)
+	}
+}
+
 func TestListenStaleSocketCleanedUp(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "vev")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("mkdir safe socket dir: %v", err)
+	}
 	sockPath := filepath.Join(dir, "daemon.sock")
 
 	// Create a socket file with nobody listening behind it: bind, then
@@ -117,7 +140,7 @@ func TestListenStaleSocketCleanedUp(t *testing.T) {
 }
 
 func TestListenLiveDaemonRejected(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "vev")
 
 	first, err := Listen(dir)
 	if err != nil {

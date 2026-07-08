@@ -11,6 +11,11 @@ import (
 	"testing"
 )
 
+func privateDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "vev")
+}
+
 func TestParseLevelAndEnvLevel(t *testing.T) {
 	tests := []struct {
 		in   string
@@ -38,7 +43,7 @@ func TestParseLevelAndEnvLevel(t *testing.T) {
 }
 
 func TestSetupWritesJSONWithComponent(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	logger, closer, err := Setup(Config{Dir: dir, Component: Client, Level: slog.LevelDebug})
 	if err != nil {
 		t.Fatalf("Setup() error = %v", err)
@@ -143,7 +148,7 @@ func TestStartupOnlyRotation(t *testing.T) {
 }
 
 func TestCrashOutputCapturesPanicStack(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	cmd := exec.Command(os.Args[0], "-test.run=TestCrashOutputHelper")
 	cmd.Env = append(os.Environ(), "VEV_CRASH_HELPER=1", "VEV_CRASH_DIR="+dir)
 	if err := cmd.Run(); err == nil {
@@ -211,7 +216,7 @@ func TestStartupOnlyConcurrentRotationRaceIsIgnored(t *testing.T) {
 }
 
 func TestDoubleClose(t *testing.T) {
-	_, closer, err := Setup(Config{Dir: t.TempDir(), Component: Stdio, Level: slog.LevelInfo})
+	_, closer, err := Setup(Config{Dir: privateDir(t), Component: Stdio, Level: slog.LevelInfo})
 	if err != nil {
 		t.Fatalf("Setup() error = %v", err)
 	}

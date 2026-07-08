@@ -12,9 +12,14 @@ import (
 	"testing"
 )
 
+func privateDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "vev")
+}
+
 func TestStoreWriteLoadRoundTripAndSupersede(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := privateDir(t)
 	store := NewStore(dir)
 
 	if err := store.Write("alpha", []byte("first")); err != nil {
@@ -44,7 +49,7 @@ func TestStoreWriteLoadRoundTripAndSupersede(t *testing.T) {
 
 func TestStoreDelete(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := privateDir(t)
 	store := NewStore(dir)
 
 	if err := store.Write("gone", []byte("data")); err != nil {
@@ -63,7 +68,7 @@ func TestStoreDelete(t *testing.T) {
 
 func TestStoreUnsafeNameUsesDeterministicHash(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := privateDir(t)
 	store := NewStore(dir)
 	name := "../unsafe/session name"
 
@@ -120,8 +125,11 @@ func TestStoreMissingDirAndStaleTmpCleanup(t *testing.T) {
 
 func TestStoreLoadRejectsOversizedFileBeforeRead(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := privateDir(t)
 	store := NewStore(dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "ok.snap"), []byte("ok"), 0o600); err != nil {
 		t.Fatalf("write ok: %v", err)
 	}
@@ -149,8 +157,11 @@ func TestStoreLoadSkipsUnreadableFile(t *testing.T) {
 		t.Skip("permission bits do not make file unreadable on this platform/user")
 	}
 	t.Parallel()
-	dir := t.TempDir()
+	dir := privateDir(t)
 	store := NewStore(dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "ok.snap"), []byte("ok"), 0o600); err != nil {
 		t.Fatalf("write ok: %v", err)
 	}

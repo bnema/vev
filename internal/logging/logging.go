@@ -8,6 +8,8 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+
+	"github.com/bnema/vev/pkg/safedir"
 )
 
 type Component string
@@ -29,7 +31,7 @@ type Config struct {
 }
 
 func Setup(cfg Config) (*slog.Logger, io.Closer, error) {
-	if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
+	if err := safedir.EnsurePrivate(cfg.Dir); err != nil {
 		return nil, nil, err
 	}
 
