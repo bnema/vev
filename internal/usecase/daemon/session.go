@@ -660,15 +660,16 @@ func (d *Daemon) nameLiveOrStoppedLocked(name string) bool {
 }
 
 func (d *Daemon) cwdSampler(ctx context.Context) {
-	t := time.NewTicker(5 * time.Second)
+	t := d.clock.NewTimer(5 * time.Second)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-			d.refreshNamedSessionCwds()
+		case <-t.C():
 		}
+		d.refreshNamedSessionCwds()
+		t.Reset(5 * time.Second)
 	}
 }
 

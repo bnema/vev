@@ -208,6 +208,8 @@ Copy uses OSC 52 clipboard sequences when supported by your terminal.
 ## Development
 
 ```sh
+go install golang.org/x/tools/cmd/goimports@latest
+go install github.com/vektra/mockery/v2@latest
 make test   # go test ./... -race
 make lint   # goimports check, then go vet ./...
 make mocks  # regenerate mocks
