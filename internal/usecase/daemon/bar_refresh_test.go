@@ -37,6 +37,27 @@ func (r *fakeBarRunner) run(_ context.Context, _ string, ctx barScriptContext) (
 	return "", nil
 }
 
+type blockingBarRunner struct {
+	*fakeBarRunner
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingBarRunner(outs []string) *blockingBarRunner {
+	return &blockingBarRunner{fakeBarRunner: &fakeBarRunner{outs: outs}, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (r *blockingBarRunner) run(ctx context.Context, command string, barCtx barScriptContext) (string, error) {
+	r.once.Do(func() { close(r.entered) })
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	return r.fakeBarRunner.run(ctx, command, barCtx)
+}
+
 func TestBarScriptRefreshIntervalClampingTickAndLastGoodOnFailure(t *testing.T) {
 	r := &fakeBarRunner{outs: []string{"top1", "bot1", "top2", "bot2"}}
 	d := newBarRefreshTestDaemon(r, 100*time.Millisecond)
@@ -219,13 +240,19 @@ func TestBarScriptRunDoesNotRestoreClearedSessionState(t *testing.T) {
 }
 
 func TestBarScriptRunConsumesPendingAfterRunningClears(t *testing.T) {
-	r := &fakeBarRunner{outs: []string{"top1", "bottom1", "top2", "bottom2"}}
+	r := newBlockingBarRunner([]string{"top1", "bottom1", "top2", "bottom2"})
 	d := newBarRefreshTestDaemon(r, time.Second)
 	sess := newBarRefreshTestSession()
 	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
 
 	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(10, 0), true))
+	select {
+	case <-r.entered:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for first bar script run")
+	}
 	require.False(t, d.refreshBarScriptsIfDue(sess, time.Unix(11, 0), true))
+	close(r.release)
 	waitBarRefreshIdle(t, d)
 	require.Eventually(t, func() bool {
 		r.mu.Lock()
@@ -275,7 +302,7 @@ func TestBarScriptRefreshIsPerSession(t *testing.T) {
 	require.Equal(t, "bottom-b", stateB.bottomRight)
 }
 
-func newBarRefreshTestDaemon(r *fakeBarRunner, interval time.Duration) *Daemon {
+func newBarRefreshTestDaemon(r barScriptExecutor, interval time.Duration) *Daemon {
 	d := &Daemon{clock: barRefreshTestClock{}, barScripts: &barScriptState{
 		cfg:         barScriptConfig{topRight: "top", bottomRight: "bottom", interval: effectiveBarInterval(interval)},
 		runner:      r,

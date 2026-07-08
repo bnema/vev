@@ -58,6 +58,8 @@ func (p ProxyRuntime) Run(ctx context.Context) error {
 		_ = p.Client.Close()
 		_ = p.Daemon.Close()
 	}()
+	copyCtx, cancelCopies := context.WithCancel(ctx)
+	defer cancelCopies()
 
 	idleTTL := p.IdleTTL
 	if idleTTL <= 0 {
@@ -73,7 +75,7 @@ func (p ProxyRuntime) Run(ctx context.Context) error {
 	}
 
 	errCh := make(chan proxyCopyErr, 2)
-	copier := proxyCopier{ctx: ctx, errCh: errCh, retryBackoff: retryBackoff, clk: clk}
+	copier := proxyCopier{ctx: copyCtx, errCh: errCh, retryBackoff: retryBackoff, clk: clk}
 	clientToDaemon := proxyCopyDirection{src: p.Client, dst: p.Daemon, recvKind: proxyClientRecv, sendKind: proxyDaemonSend}
 	daemonToClient := proxyCopyDirection{src: p.Daemon, dst: p.Client, recvKind: proxyDaemonRecv, sendKind: proxyClientSend, retryRecoverable: true}
 	go copier.copyFrames(clientToDaemon)

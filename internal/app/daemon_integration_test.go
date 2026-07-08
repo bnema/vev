@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -35,7 +36,7 @@ func discardLog() *slog.Logger {
 // The returned served channel receives Serve's result exactly once.
 func startDaemon(t *testing.T, opts ...daemon.Option) (dir string, served <-chan error) {
 	t.Helper()
-	return startDaemonInDir(t, t.TempDir(), opts...)
+	return startDaemonInDir(t, filepath.Join(t.TempDir(), "vev"), opts...)
 }
 
 func startDaemonInDir(t *testing.T, dir string, opts ...daemon.Option) (string, <-chan error) {

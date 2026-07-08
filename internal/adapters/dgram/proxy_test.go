@@ -1,6 +1,7 @@
 package dgram
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -213,5 +214,61 @@ func TestProxyRuntimeClosedLinkEventsDoNotSpin(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for daemon EOF")
+	}
+}
+
+type retryingOfflineTransport struct {
+	closed        chan struct{}
+	firstSend     chan struct{}
+	closeOnce     sync.Once
+	firstSendOnce sync.Once
+}
+
+func newRetryingOfflineTransport() *retryingOfflineTransport {
+	return &retryingOfflineTransport{closed: make(chan struct{}), firstSend: make(chan struct{})}
+}
+
+func (t *retryingOfflineTransport) Send(ports.Frame) error {
+	t.firstSendOnce.Do(func() { close(t.firstSend) })
+	return errors.New("offline")
+}
+
+func (t *retryingOfflineTransport) Recv() (ports.Frame, error) {
+	<-t.closed
+	return ports.Frame{}, io.EOF
+}
+
+func (t *retryingOfflineTransport) Close() error {
+	t.closeOnce.Do(func() { close(t.closed) })
+	return nil
+}
+
+func (t *retryingOfflineTransport) LinkState() ports.LinkState { return ports.LinkStateOffline }
+func (t *retryingOfflineTransport) LinkEvents() <-chan ports.LinkEvent {
+	return nil
+}
+
+func TestProxyCopierStopsRetryingWhenContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	client := newRetryingOfflineTransport()
+	daemon := newFakeTransport()
+	done := make(chan struct{})
+	copier := proxyCopier{ctx: ctx, errCh: make(chan<- proxyCopyErr), retryBackoff: time.Hour, clk: realClock{}}
+	go func() {
+		copier.copyFrames(proxyCopyDirection{src: daemon, dst: client, recvKind: proxyDaemonRecv, sendKind: proxyClientSend, retryRecoverable: true})
+		close(done)
+	}()
+
+	daemon.recv <- recvResult{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("retry until cancel")}}
+	select {
+	case <-client.firstSend:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for proxy send attempt")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("retrying copier did not stop after context cancellation")
 	}
 }

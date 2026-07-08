@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/bnema/vev/pkg/safedir"
 )
 
 type ProxyRecord struct {
@@ -94,7 +96,7 @@ func (r *ProxyRegistry) RemoveOwned(rec ProxyRecord) error {
 }
 
 func (r *ProxyRegistry) withLock(fn func() error) error {
-	if err := os.MkdirAll(r.dir, 0o700); err != nil {
+	if err := safedir.EnsurePrivate(r.dir); err != nil {
 		return err
 	}
 	lock, err := os.OpenFile(filepath.Join(r.dir, ".lock"), os.O_CREATE|os.O_RDWR, 0o600)

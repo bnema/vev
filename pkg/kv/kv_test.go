@@ -8,6 +8,11 @@ import (
 	"testing"
 )
 
+func privatePath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "vev", "store.kv")
+}
+
 func closeStore(t *testing.T, s *Store) {
 	t.Helper()
 	if err := s.Close(); err != nil {
@@ -16,7 +21,7 @@ func closeStore(t *testing.T, s *Store) {
 }
 
 func TestSetGetDeleteRange(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.kv")
+	path := privatePath(t)
 	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -56,7 +61,7 @@ func TestSetGetDeleteRange(t *testing.T) {
 }
 
 func TestReopenDurability(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.kv")
+	path := privatePath(t)
 	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +85,7 @@ func TestReopenDurability(t *testing.T) {
 }
 
 func TestCompactionShrinksWithDataIntact(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.kv")
+	path := privatePath(t)
 	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -114,9 +119,12 @@ func TestCompactionShrinksWithDataIntact(t *testing.T) {
 }
 
 func TestOpenTruncatesMidRecordTail(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.kv")
+	path := privatePath(t)
 	first, _ := encodeRecord(opSet, []byte("a"), []byte("one"))
 	second, _ := encodeRecord(opSet, []byte("b"), []byte("two"))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, append(first, second[:len(second)/2]...), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -142,11 +150,14 @@ func TestOpenTruncatesMidRecordTail(t *testing.T) {
 }
 
 func TestCRCcorruptionOfLastRecordDropsIt(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.kv")
+	path := privatePath(t)
 	first, _ := encodeRecord(opSet, []byte("k"), []byte("old"))
 	second, _ := encodeRecord(opSet, []byte("k"), []byte("new"))
 	buf := append(append([]byte{}, first...), second...)
 	buf[len(first)+headerLen+payloadPrefixLen+1] ^= 0xff
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, buf, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +206,7 @@ func TestAbsentAndEmptyFile(t *testing.T) {
 }
 
 func TestTombstoneSurvivesCompaction(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.kv")
+	path := privatePath(t)
 	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -227,10 +238,13 @@ func TestTombstoneSurvivesCompaction(t *testing.T) {
 }
 
 func TestReplayStopsAtBadPayloadLengthWithoutAllocatingHugeBuffer(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.kv")
+	path := privatePath(t)
 	first, _ := encodeRecord(opSet, []byte("a"), []byte("one"))
 	header := make([]byte, headerLen)
 	binary.BigEndian.PutUint32(header[0:4], 1<<31)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, append(first, header...), 0o600); err != nil {
 		t.Fatal(err)
 	}
