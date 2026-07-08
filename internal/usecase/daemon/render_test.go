@@ -26,6 +26,12 @@ import (
 
 // --- test doubles -----------------------------------------------------------
 
+type discardTransport struct{}
+
+func (discardTransport) Send(ports.Frame) error     { return nil }
+func (discardTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (discardTransport) Close() error               { return nil }
+
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
 
@@ -430,6 +436,147 @@ func TestComposeTabFrameTwoPaneSplitBlitsDividersDimsAndTranslatesDamage(t *test
 	require.Contains(t, damage, renderer.Damage{Kind: renderer.DamageText, X: 22, Y: 0, Width: 1, Height: 1, Count: 1})
 }
 
+func TestComposeClientFrameCacheSkipsUndamagedPaneBlits(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 41, Rows: 4})
+	left := win.focusedPane()
+	right := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 4})
+	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
+	win.tree.Focus = right.id
+	win.panes[right.id] = right
+	left.screen.Write([]byte("L"))
+	right.screen.Write([]byte("R"))
+	var bars barCache
+	var composed composedFrameCache
+	sess := &session{id: "s", name: "work", tabs: []*tab{win}}
+	composeClientFrameWithLayoutCached(barState{status: sess.statusSegments()}, win, true, solveTabLayoutLocked(win), &bars, &composed)
+	left.screen.ClearDamage()
+	right.screen.ClearDamage()
+	left.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'Z'})
+	right.screen.Write([]byte("x"))
+
+	frame, damage := composeClientFrameWithLayoutCached(barState{status: sess.statusSegments()}, win, false, solveTabLayoutLocked(win), &bars, &composed)
+
+	require.Equal(t, 'L', frame.At(0, 1).Rune, "undamaged left pane should remain cached, not re-blitted")
+	require.Equal(t, 'x', frame.At(22, 1).Rune)
+	require.Contains(t, damage, renderer.Damage{Kind: renderer.DamageText, X: 22, Y: 1, Width: 1, Height: 1, Count: 1})
+}
+
+func TestPaintComposeConsumesOnlyDamageIncludedInFrame(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 20, Rows: 4})
+	p := win.focusedPane()
+	p.screen.Write([]byte("old"))
+	var bars barCache
+	var composed composedFrameCache
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments()}
+
+	_, damage := composeClientFrameWithLayoutCachedConsumeDamage(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
+	require.NotEmpty(t, damage)
+	require.Empty(t, p.screen.Damage(), "paint compose should consume damage it included in the frame")
+
+	p.screen.Write([]byte("new"))
+	require.NotEmpty(t, p.screen.Damage(), "damage produced after paint compose must remain for a later render")
+
+	_, _ = composeClientFrameWithLayoutCached(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
+	require.NotEmpty(t, p.screen.Damage(), "standalone compose helpers should remain non-consuming")
+}
+
+func TestPaintComposeClearsCollapsedPaneDamage(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
+	p1 := win.focusedPane()
+	p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 3})
+	win.tree.Root = &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(p1.id), layout.NewLeaf(p2.id)}, Expanded: p2.id}
+	win.tree.Focus = p2.id
+	win.panes[p2.id] = p2
+	p1.screen.Write([]byte("hidden"))
+	p2.screen.Write([]byte("shown"))
+	var bars barCache
+	var composed composedFrameCache
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments()}
+
+	_, _ = composeClientFrameWithLayoutCachedConsumeDamage(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
+
+	require.Empty(t, p1.screen.Damage(), "collapsed pane damage should not accumulate while paint renders stack title bars")
+	require.Empty(t, p2.screen.Damage())
+}
+
+func TestComposeClientFrameCacheFocusChangeReblitsDimmedPanes(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 41, Rows: 4})
+	left := win.focusedPane()
+	right := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 4})
+	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
+	win.panes[right.id] = right
+	left.screen.Write([]byte("L"))
+	right.screen.Write([]byte("R"))
+	theme := themeui.Theme{Known: true, TrueColor: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 10, B: 10}}
+	var bars barCache
+	var composed composedFrameCache
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments(), theme: theme}
+	win.tree.Focus = left.id
+	composeClientFrameWithLayoutCached(state, win, true, solveTabLayoutLocked(win), &bars, &composed)
+	left.screen.ClearDamage()
+	right.screen.ClearDamage()
+	leftWasFocused := composed.frame.At(0, 1).Style
+	rightWasDimmed := composed.frame.At(21, 1).Style
+
+	win.tree.Focus = right.id
+	frame, damage := composeClientFrameWithLayoutCached(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
+
+	require.Equal(t, rightWasDimmed, frame.At(0, 1).Style, "previously focused pane should be re-blitted dimmed")
+	require.Equal(t, leftWasFocused, frame.At(21, 1).Style, "newly focused pane should be re-blitted undimmed")
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+}
+
+func TestComposeClientFrameCacheLayoutChangeClearsStaleDividers(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 41, Rows: 5})
+	left := win.focusedPane()
+	right := newPane("pane-2", nil, domain.Size{Cols: 41, Rows: 5})
+	win.panes[right.id] = right
+	left.screen.Write([]byte("L"))
+	right.screen.Write([]byte("R"))
+	var bars barCache
+	var composed composedFrameCache
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments()}
+	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
+	composeClientFrameWithLayoutCached(state, win, true, solveTabLayoutLocked(win), &bars, &composed)
+	require.Equal(t, '│', composed.frame.At(20, 1).Rune)
+	left.screen.ClearDamage()
+	right.screen.ClearDamage()
+
+	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Vertical, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
+	frame, damage := composeClientFrameWithLayoutCached(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
+
+	require.NotEqual(t, '│', frame.At(20, 1).Rune, "old vertical divider must be cleared when layout changes")
+	require.Equal(t, '─', frame.At(20, 3).Rune)
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+}
+
+func BenchmarkPaintCachedSinglePaneDamage(b *testing.B) {
+	win := newTab(nil, domain.Size{Cols: 81, Rows: 24})
+	left := win.focusedPane()
+	right := newPane("pane-2", nil, domain.Size{Cols: 40, Rows: 24})
+	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
+	win.tree.Focus = right.id
+	win.panes[right.id] = right
+	left.screen.Write([]byte("left"))
+	right.screen.Write([]byte("right"))
+	sess := &session{id: "s", name: "work", tabs: []*tab{win}, active: 0}
+	ac := &attachedClient{tr: discardTransport{}, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 81, Rows: 26}}
+	ac.initOverlays()
+	sess.client = ac
+	ac.setSession(sess)
+	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d.paint(sess, ac, true)
+	left.screen.ClearDamage()
+	right.screen.ClearDamage()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		right.screen.Write([]byte("x\b"))
+		d.paint(sess, ac, false)
+	}
+}
+
 func TestComposeTabFrameStackDrawsTitleBarsAndDimsCollapsed(t *testing.T) {
 	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
 	p1 := win.focusedPane()
@@ -452,6 +599,31 @@ func TestComposeTabFrameStackDrawsTitleBarsAndDimsCollapsed(t *testing.T) {
 	require.Equal(t, 'T', frame.At(0, 2).Rune)
 	require.True(t, frame.At(0, 0).Style.HasForegroundRGB, "collapsed title bar should use dimmed chrome")
 	require.True(t, frame.At(0, 1).Style.Inverse || frame.At(0, 1).Style.HasBackgroundRGB, "focused title bar should use accent chrome")
+}
+
+func TestComposeClientFrameCacheRefreshesStackTitleBars(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
+	p1 := win.focusedPane()
+	p1.title = "one"
+	p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 3})
+	p2.title = "two"
+	p2.screen.Write([]byte("T"))
+	win.tree.Root = &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(p1.id), layout.NewLeaf(p2.id)}, Expanded: p2.id}
+	win.tree.Focus = p2.id
+	win.panes[p2.id] = p2
+	var bars barCache
+	var composed composedFrameCache
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments()}
+	composeClientFrameWithLayoutCached(state, win, true, solveTabLayoutLocked(win), &bars, &composed)
+	p1.screen.ClearDamage()
+	p2.screen.ClearDamage()
+
+	p1.title = "renamed"
+	frame, damage := composeClientFrameWithLayoutCached(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
+
+	require.Equal(t, "renamed", rowText(frame.Row(1))[:7])
+	require.NotEqual(t, []renderer.Damage{renderer.FullRedraw()}, damage, "title-only changes should not force a full layout reset")
+	require.Contains(t, damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 1, Width: 20, Height: 1})
 }
 
 func TestOverlayPaintInvalidationShowsAndRestoresBaseFrame(t *testing.T) {
@@ -522,6 +694,43 @@ func TestOverlayPaintInvalidationShowsAndRestoresBaseFrame(t *testing.T) {
 			require.NotContains(t, restored, tt.notVisible)
 		})
 	}
+}
+
+func TestOverlayPaintBypassesComposedCache(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	defer release()
+	pane := sess.tabs[0].focusedPane()
+	pane.screen.Write([]byte("live"))
+
+	d.paint(sess, ac, true)
+	_ = mustOutputData(t, sends)
+	require.True(t, ac.composed.valid)
+	require.NotContains(t, frameText(ac.composed.frame), "Rename session")
+
+	d.enterPrompt(sess, ac, " Rename session ", "work", func(string) error { return nil })
+	shown := string(mustOutputData(t, sends))
+	require.Contains(t, shown, "Rename session")
+	require.False(t, ac.composed.valid, "overlay paint must not store the modal-mutated frame in the composed cache")
+	require.NotContains(t, frameText(ac.composed.frame), "Rename session")
+
+	d.closePrompt(ac)
+	d.paint(sess, ac, false)
+	restored := string(mustOutputData(t, sends))
+	require.NotContains(t, restored, "Rename session")
+	require.True(t, ac.composed.valid)
+	cached := frameText(ac.composed.frame)
+	require.Contains(t, cached, "live")
+	require.NotContains(t, cached, "Rename session")
+}
+
+func frameText(frame renderer.Frame) string {
+	var b strings.Builder
+	for y := 0; y < frame.Height; y++ {
+		b.WriteString(rowText(frame.Row(y)))
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 func TestPaintEarlyReturnReleasesOverlayRenderLocks(t *testing.T) {

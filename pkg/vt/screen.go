@@ -81,8 +81,10 @@ type Screen struct {
 	defaultBG          renderer.RGB
 	defaultColorsKnown bool
 
-	damage    []renderer.Damage
-	escapeBuf []byte
+	damage     []renderer.Damage
+	escapeBuf  []byte
+	csiScratch []int
+	sgrScratch []int
 
 	scrollTop        int
 	scrollBottom     int
@@ -784,7 +786,7 @@ func consumeSTString(data []byte) (consumed int, partial bool) {
 
 func (s *Screen) applyCSI(params string, cmd byte) {
 	private := strings.HasPrefix(params, "?")
-	parts := parseCSIInts(params)
+	parts := s.parseCSIInts(params)
 	switch cmd {
 	case 'c':
 		switch params {
@@ -952,7 +954,7 @@ func (s *Screen) applySGR(params string) {
 		s.Style = renderer.DefaultStyle()
 		return
 	}
-	parts := parseSGRInts(params)
+	parts := s.parseSGRInts(params)
 	for i := 0; i < len(parts); i++ {
 		switch parts[i] {
 		case 0:
@@ -1309,64 +1311,122 @@ func (s *Screen) clampCursor() {
 	s.Col = clamp(s.Col, 0, s.Frame.Width-1)
 }
 
+func (s *Screen) parseCSIInts(params string) []int {
+	s.csiScratch = parseCSIIntsInto(s.csiScratch[:0], params)
+	return s.csiScratch
+}
+
 func parseCSIInts(params string) []int {
+	return parseCSIIntsInto(nil, params)
+}
+
+func parseCSIIntsInto(out []int, params string) []int {
 	if params == "" {
-		return nil
+		return out
 	}
 	params = strings.TrimPrefix(params, "?")
 	params = strings.TrimPrefix(params, ">")
-	parts := strings.Split(params, ";")
-	out := make([]int, 0, len(parts))
-	for _, p := range parts {
-		out = append(out, parseCSIInt(p))
+	start := 0
+	for i := 0; i <= len(params); i++ {
+		if i == len(params) || params[i] == ';' {
+			out = append(out, parseCSIInt(params[start:i]))
+			start = i + 1
+		}
 	}
 	return out
 }
 
+func (s *Screen) parseSGRInts(params string) []int {
+	s.sgrScratch = parseSGRIntsInto(s.sgrScratch[:0], params)
+	return s.sgrScratch
+}
+
 func parseSGRInts(params string) []int {
+	return parseSGRIntsInto(nil, params)
+}
+
+func parseSGRIntsInto(out []int, params string) []int {
 	if params == "" {
-		return nil
+		return out
 	}
-	groups := strings.Split(params, ";")
-	out := make([]int, 0, len(groups))
-	for _, group := range groups {
-		if !strings.Contains(group, ":") {
-			out = append(out, parseCSIInt(group))
-			continue
-		}
-		sub := strings.Split(group, ":")
-		code := parseCSIInt(sub[0])
-		if code != 38 && code != 48 {
-			out = append(out, code)
-			continue
-		}
-		mode := 0
-		if len(sub) > 1 {
-			mode = parseCSIInt(sub[1])
-		}
-		switch mode {
-		case 5:
-			if len(sub) < 3 {
-				continue
-			}
-			out = append(out, code, mode, parseCSIInt(sub[2]))
-		case 2:
-			// code:mode::R:G:B and code:mode:cs:R:G:B both put RGB after
-			// the colorspace slot; code:mode:R:G:B omits that slot.
-			start := 2
-			if len(sub) > 2 && (sub[2] == "" || len(sub) >= 6) {
-				start = 3
-			}
-			if len(sub) < start+3 {
-				continue
-			}
-			out = append(out, code, mode)
-			for i := 0; i < 3; i++ {
-				out = append(out, parseCSIInt(sub[start+i]))
-			}
+	start := 0
+	for i := 0; i <= len(params); i++ {
+		if i == len(params) || params[i] == ';' {
+			out = appendSGRGroup(out, params[start:i])
+			start = i + 1
 		}
 	}
 	return out
+}
+
+func appendSGRGroup(out []int, group string) []int {
+	colon := false
+	for i := 0; i < len(group); i++ {
+		if group[i] == ':' {
+			colon = true
+			break
+		}
+	}
+	if !colon {
+		return append(out, parseCSIInt(group))
+	}
+
+	parts := countSGRColonFields(group)
+	code := parseCSIInt(sgrColonField(group, 0))
+	if code != 38 && code != 48 {
+		return append(out, code)
+	}
+	mode := 0
+	if parts > 1 {
+		mode = parseCSIInt(sgrColonField(group, 1))
+	}
+	switch mode {
+	case 5:
+		if parts < 3 {
+			return out
+		}
+		out = append(out, code, mode, parseCSIInt(sgrColonField(group, 2)))
+	case 2:
+		// code:mode::R:G:B and code:mode:cs:R:G:B both put RGB after
+		// the colorspace slot; code:mode:R:G:B omits that slot.
+		start := 2
+		if parts > 2 && (sgrColonField(group, 2) == "" || parts >= 6) {
+			start = 3
+		}
+		if parts < start+3 {
+			return out
+		}
+		out = append(out, code, mode)
+		for i := 0; i < 3; i++ {
+			out = append(out, parseCSIInt(sgrColonField(group, start+i)))
+		}
+	}
+	return out
+}
+
+func countSGRColonFields(group string) int {
+	count := 1
+	for i := 0; i < len(group); i++ {
+		if group[i] == ':' {
+			count++
+		}
+	}
+	return count
+}
+
+func sgrColonField(group string, index int) string {
+	start := 0
+	field := 0
+	for i := 0; i <= len(group); i++ {
+		if i == len(group) || group[i] == ':' {
+			if field == index {
+				return group[start:i]
+			}
+			field++
+			start = i + 1
+		}
+	}
+	return ""
 }
 
 func parseCSIInt(param string) int {

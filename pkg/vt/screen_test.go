@@ -74,6 +74,63 @@ func lineText(s *Screen, y int) string {
 	return string(out)
 }
 
+func TestParseCSIInts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		params string
+		want   []int
+	}{
+		{name: "empty", params: "", want: nil},
+		{name: "single", params: "5", want: []int{5}},
+		{name: "multiple", params: "1;2;3", want: []int{1, 2, 3}},
+		{name: "leading empty token", params: ";5", want: []int{0, 5}},
+		{name: "double empty token", params: "5;;3", want: []int{5, 0, 3}},
+		{name: "trailing empty token", params: "5;", want: []int{5, 0}},
+		{name: "question prefix", params: "?25", want: []int{25}},
+		{name: "greater prefix", params: ">0;1", want: []int{0, 1}},
+		{name: "prefix order", params: "?>7", want: []int{7}},
+		{name: "junk token", params: "12x;4", want: []int{0, 4}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, parseCSIInts(tt.params))
+		})
+	}
+}
+
+func TestParseSGRInts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		params string
+		want   []int
+	}{
+		{name: "empty", params: "", want: nil},
+		{name: "single", params: "1", want: []int{1}},
+		{name: "multiple", params: "1;31", want: []int{1, 31}},
+		{name: "leading empty token", params: ";5", want: []int{0, 5}},
+		{name: "double empty token", params: "5;;3", want: []int{5, 0, 3}},
+		{name: "trailing empty token", params: "5;", want: []int{5, 0}},
+		{name: "indexed foreground colon", params: "38:5:196", want: []int{38, 5, 196}},
+		{name: "rgb foreground colon", params: "38:2:1:2:3", want: []int{38, 2, 1, 2, 3}},
+		{name: "indexed background colon", params: "48:5:10", want: []int{48, 5, 10}},
+		{name: "rgb foreground empty colorspace", params: "38:2::1:2:3", want: []int{38, 2, 1, 2, 3}},
+		{name: "rgb foreground explicit colorspace", params: "38:2:9:1:2:3", want: []int{38, 2, 1, 2, 3}},
+		{name: "non color colon group", params: "1:2:3", want: []int{1}},
+		{name: "junk token", params: "abc;31", want: []int{0, 31}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, parseSGRInts(tt.params))
+		})
+	}
+}
+
 func rowString(row []renderer.Cell) string {
 	out := make([]rune, len(row))
 	for i, cell := range row {
