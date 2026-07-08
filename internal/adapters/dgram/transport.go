@@ -191,7 +191,39 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 		return nil, err
 	}
 	opts = normalizeOptions(opts)
-	t := &Transport{pc: pc, codec: c, sendDir: sendDir, recvDir: recvDir, mtu: opts.MTU, peer: peer, pending: make(map[uint64]*pending), replay: pdgram.NewReplayWindow(), reasm: pdgram.NewReassembler(), in: make(chan ports.Frame, 32), done: make(chan struct{}), lastHeard: opts.Clock.Now(), heartbeat: opts.Heartbeat, resendAfter: opts.ResendAfter, maxResendAfter: opts.MaxResendAfter, maxResendPerTick: opts.MaxResendPerTick, writeTimeout: opts.WriteTimeout, degradedAfter: opts.DegradedAfter, probeAfter: opts.ProbeAfter, offlineAfter: opts.OfflineAfter, deadAfter: opts.DeadAfter, maxPending: opts.MaxPending, maxPendingWait: opts.MaxPendingWait, maxRecvBuffer: opts.MaxRecvBuffer, clock: opts.Clock, linkState: ports.LinkStateConnected, linkEvents: make(chan ports.LinkEvent, linkEventBufferSize), probeWait: make(map[uint64]chan struct{}), rebind: opts.RebindPacketConn, nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame)}
+	t := &Transport{
+		pc:               pc,
+		codec:            c,
+		sendDir:          sendDir,
+		recvDir:          recvDir,
+		mtu:              opts.MTU,
+		peer:             peer,
+		pending:          make(map[uint64]*pending),
+		replay:           pdgram.NewReplayWindow(),
+		reasm:            pdgram.NewReassembler(),
+		in:               make(chan ports.Frame, 32),
+		done:             make(chan struct{}),
+		lastHeard:        opts.Clock.Now(),
+		heartbeat:        opts.Heartbeat,
+		resendAfter:      opts.ResendAfter,
+		maxResendAfter:   opts.MaxResendAfter,
+		maxResendPerTick: opts.MaxResendPerTick,
+		writeTimeout:     opts.WriteTimeout,
+		degradedAfter:    opts.DegradedAfter,
+		probeAfter:       opts.ProbeAfter,
+		offlineAfter:     opts.OfflineAfter,
+		deadAfter:        opts.DeadAfter,
+		maxPending:       opts.MaxPending,
+		maxPendingWait:   opts.MaxPendingWait,
+		maxRecvBuffer:    opts.MaxRecvBuffer,
+		clock:            opts.Clock,
+		linkState:        ports.LinkStateConnected,
+		linkEvents:       make(chan ports.LinkEvent, linkEventBufferSize),
+		probeWait:        make(map[uint64]chan struct{}),
+		rebind:           opts.RebindPacketConn,
+		nextRecvSeq:      1,
+		recvBuf:          make(map[uint64]ports.Frame),
+	}
 	t.sendWake = make(chan struct{})
 	t.probeReply = make(chan uint64, probeReplyBufferSize)
 	t.deliverCond = sync.NewCond(&t.deliverMu)
