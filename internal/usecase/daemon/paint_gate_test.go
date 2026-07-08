@@ -1,21 +1,27 @@
 package daemon
 
 import (
+	"io"
 	"testing"
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/stretchr/testify/require"
 )
 
 func requireNoOutputFrame(t *testing.T, sends chan ports.Frame) {
 	t.Helper()
-	select {
-	case f := <-sends:
-		if f.Type == ports.MsgOutput {
-			t.Fatalf("unexpected output frame: %+v", f)
+	deadline := time.After(50 * time.Millisecond)
+	for {
+		select {
+		case f := <-sends:
+			if f.Type == ports.MsgOutput {
+				t.Fatalf("unexpected output frame: %+v", f)
+			}
+		case <-deadline:
+			return
 		}
-	case <-time.After(50 * time.Millisecond):
 	}
 }
 
@@ -44,13 +50,27 @@ func TestDeferredPaintFlushesOnceWhenAcksCatchUp(t *testing.T) {
 	d.paint(sess, ac, false)
 	requireNoOutputFrame(t, sends)
 
-	// Acks catch up: the deferred paint becomes flushable and emits exactly one
-	// cumulative frame (the renderer shadow only advanced on send, so the skip
-	// coalesces into this paint).
-	ac.advanceOutputAck(maxUnackedOutputStates)
-	require.True(t, ac.takeDeferredPaint(), "deferred paint must flush once acks catch up")
-	d.paint(sess, ac, false)
+	// Drive a real MsgAck through the connection loop so the flush is exercised
+	// end-to-end: UnmarshalAck → advanceOutputAck → takeDeferredPaint → paint.
+	// One ack frame, then Recv blocks until the test ends.
+	recvCh := make(chan ports.Frame, 1)
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	tr, ok := ac.transport().(*portsmocks.MockTransport)
+	require.True(t, ok, "manual session transport must be the capturing mock")
+	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		select {
+		case f := <-recvCh:
+			return f, nil
+		case <-done:
+			return ports.Frame{}, io.EOF
+		}
+	}).Maybe()
+	recvCh <- ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{AckedStateNum: maxUnackedOutputStates})}
+	go d.runConnLoop(ac)
 
+	// The cumulative flush paint must be triggered by the MsgAck handler itself
+	// (the renderer shadow only advanced on send, so the skip coalesces here).
 	awaitFrame(t, sends, ports.MsgOutput)
 	requireNoOutputFrame(t, sends)
 	ac.sendMu.Lock()
