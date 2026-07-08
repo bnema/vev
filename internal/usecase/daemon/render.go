@@ -280,6 +280,10 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 
 	ac.initOverlays()
 	ac.sendMu.Lock()
+	if ac.currentSession() != sess {
+		ac.sendMu.Unlock()
+		return
+	}
 	// Ack-gated coalescing: while the client is at least maxUnackedOutputStates
 	// behind, skip composing another diff and mark the paint deferred. The
 	// MsgOutputAck handler flushes one cumulative paint once acks catch up.
@@ -364,6 +368,13 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	p.mu.Lock()
 	desiredCursor := desiredCursorOut(p.screen, cursorContent, !cursorVisible || overlays.copyActive || overlays.copySearchModel != nil || overlays.pickerActive || overlays.paletteActive || overlays.promptActive)
 	p.mu.Unlock()
+	ac.sess.mu.Lock()
+	if ac.sess.v != sess {
+		ac.sess.mu.Unlock()
+		tb.mu.Unlock()
+		ac.sendMu.Unlock()
+		return
+	}
 	data, err := ac.rend.Draw(frame, damage)
 	var cursorTail []byte
 	if err == nil {
@@ -389,6 +400,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 			}
 		}
 	}
+	ac.sess.mu.Unlock()
 	ac.sendMu.Unlock()
 
 	if err != nil {
