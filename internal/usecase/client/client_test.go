@@ -617,6 +617,8 @@ func TestAttachForwardsResize(t *testing.T) {
 	defer in.unblock()
 
 	detachAfterResize := make(chan struct{})
+	firstRecv := make(chan struct{})
+	var firstRecvOnce sync.Once
 
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
@@ -635,6 +637,7 @@ func TestAttachForwardsResize(t *testing.T) {
 	recvCh <- recvItem{f: welcome}
 	done := make(chan struct{})
 	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		firstRecvOnce.Do(func() { close(firstRecv) })
 		select {
 		case it := <-recvCh:
 			return it.f, it.err
@@ -653,9 +656,9 @@ func TestAttachForwardsResize(t *testing.T) {
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	// Push a resize event shortly after attach begins.
+	// Push a resize event once attach begins receiving daemon frames.
 	go func() {
-		time.Sleep(20 * time.Millisecond)
+		<-firstRecv
 		resizeCh <- domain.Size{Cols: 120, Rows: 40}
 	}()
 

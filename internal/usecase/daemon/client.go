@@ -49,8 +49,9 @@ type attachedClient struct {
 	nextStateNum  uint64
 	echoAck       atomic.Uint64
 	outputAck     atomic.Uint64
-	paintDeferred bool     // guarded by sendMu; a diff paint skipped while acks lag
-	bars          barCache // only touched while sendMu is held
+	paintDeferred bool               // guarded by sendMu; a diff paint skipped while acks lag
+	bars          barCache           // only touched while sendMu is held
+	composed      composedFrameCache // only touched while sendMu is held
 	size          domain.Size
 	keys          *keys.Router
 	sess          Guarded[*session]

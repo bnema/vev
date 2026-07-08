@@ -262,6 +262,18 @@ func snapshotDir() string {
 	return filepath.Join(platform.StateDir(), "snapshots")
 }
 
+func pprofAddrIsLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // runDaemon runs the daemon in the foreground (the hidden --daemon path,
 // entered by an auto-spawned child): it sets up logging, binds the socket,
 // constructs the daemon, and serves until the last session exits or a
@@ -284,6 +296,9 @@ func runDaemon() error {
 	defer stop()
 
 	if addr := os.Getenv("VEV_PPROF_ADDR"); addr != "" {
+		if !pprofAddrIsLoopback(addr) {
+			log.Warn("pprof bound to non-loopback address; /debug/pprof is unauthenticated", "addr", addr)
+		}
 		go func() {
 			if err := http.ListenAndServe(addr, nil); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("pprof server exited", "err", err)

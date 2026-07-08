@@ -3,6 +3,11 @@ package daemon
 import "github.com/bnema/vev/internal/usecase/theme"
 
 func (d *Daemon) applyHostTheme(sess *session, ac *attachedClient, t theme.Theme, clearUnknownScheme bool) bool {
+	if ac != nil {
+		ac.sendMu.Lock()
+		defer ac.sendMu.Unlock()
+	}
+
 	sess.mu.Lock()
 	if ac != nil {
 		if sess.client != ac {
@@ -18,6 +23,7 @@ func (d *Daemon) applyHostTheme(sess *session, ac *attachedClient, t theme.Theme
 
 	if ac != nil {
 		ac.setTheme(t)
+		ac.composed.invalidate()
 	}
 	for _, tb := range tabs {
 		tb.mu.Lock()
