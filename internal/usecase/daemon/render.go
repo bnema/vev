@@ -332,14 +332,22 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		return
 	}
 	reset = ac.shouldResetOutputState(reset)
-	if reset || overlays.copyActive || overlays.pickerActive || overlays.paletteActive || overlays.promptActive {
+	overlayActive := overlays.copyActive || overlays.copySearchModel != nil || overlays.pickerActive || overlays.paletteActive || overlays.promptActive
+	if reset || overlayActive {
 		ac.rend.Reset()
 		ac.bars.Reset()
+		ac.composed.invalidate()
 	}
 	if reset || overlays.pickerActive || overlays.paletteActive || overlays.promptActive {
 		ac.lastCursor.valid = false
 	}
-	frame, damage := composeClientFrameWithLayout(bars, tb, reset, layoutSnap, &ac.bars)
+	var frame renderer.Frame
+	var damage []renderer.Damage
+	if overlayActive {
+		frame, damage = composeClientFrameWithLayoutCachedConsumeDamage(bars, tb, reset, layoutSnap, &ac.bars, nil)
+	} else {
+		frame, damage = composeClientFrameWithLayoutCachedConsumeDamage(bars, tb, reset, layoutSnap, &ac.bars, &ac.composed)
+	}
 	if overlays.copyActive {
 		frame, damage = composeCopyClientFrame(overlays.copyMode, tb, bars)
 	}
@@ -379,11 +387,6 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	var cursorTail []byte
 	if err == nil {
 		cursorTail = ac.encodeCursorTail(desiredCursor, len(data) > 0)
-	}
-	for _, pane := range tb.panesSnapshot() {
-		pane.mu.Lock()
-		pane.screen.ClearDamage()
-		pane.mu.Unlock()
 	}
 	tb.mu.Unlock()
 
@@ -500,6 +503,16 @@ func (c *barCache) Reset() {
 	c.bottom = nil
 }
 
+type composedFrameCache struct {
+	frame      renderer.Frame
+	valid      bool
+	layoutSnap tabLayoutSnapshot
+}
+
+func (c *composedFrameCache) invalidate() {
+	c.valid = false
+}
+
 func composeClientFrame(sess *session, tb *tab, full bool, rightStatus string, caches ...*barCache) (renderer.Frame, []renderer.Damage) {
 	return composeClientFrameWithState(barState{status: sess.statusSegments(), copyFeedback: rightStatus}, tb, full, caches...)
 }
@@ -513,6 +526,18 @@ func composeClientFrameWithLayout(bars barState, tb *tab, full bool, layoutSnap 
 	if len(caches) > 0 {
 		cache = caches[0]
 	}
+	return composeClientFrameWithLayoutCached(bars, tb, full, layoutSnap, cache, nil)
+}
+
+func composeClientFrameWithLayoutCached(bars barState, tb *tab, full bool, layoutSnap tabLayoutSnapshot, cache *barCache, composed *composedFrameCache) (renderer.Frame, []renderer.Damage) {
+	return composeClientFrameWithLayoutCachedOptions(bars, tb, full, layoutSnap, cache, composed, false)
+}
+
+func composeClientFrameWithLayoutCachedConsumeDamage(bars barState, tb *tab, full bool, layoutSnap tabLayoutSnapshot, cache *barCache, composed *composedFrameCache) (renderer.Frame, []renderer.Damage) {
+	return composeClientFrameWithLayoutCachedOptions(bars, tb, full, layoutSnap, cache, composed, true)
+}
+
+func composeClientFrameWithLayoutCachedOptions(bars barState, tb *tab, full bool, layoutSnap tabLayoutSnapshot, cache *barCache, composed *composedFrameCache, consumeDamage bool) (renderer.Frame, []renderer.Damage) {
 	p := tb.focusedPane()
 	styles := newThemeStyles(bars.theme)
 	if p == nil {
@@ -528,15 +553,34 @@ func composeClientFrameWithLayout(bars barState, tb *tab, full bool, layoutSnap 
 	if tb.size.Valid() {
 		width, screenRows = tb.size.Cols, tb.size.Rows
 	}
-	frame := renderer.NewFrame(width, screenRows+2)
+	cacheValid := composed != nil && composed.valid && composed.frame.Width == width && composed.frame.Height == screenRows+2
+	layoutSame := composed == nil || (cacheValid && sameTabLayoutSnapshot(composed.layoutSnap, layoutSnap))
+	var frame renderer.Frame
+	if cacheValid {
+		frame = composed.frame
+	} else {
+		frame = renderer.NewFrame(width, screenRows+2)
+		if composed != nil {
+			full = true
+		}
+	}
+	if !layoutSame {
+		full = true
+	}
+	contentArea := domain.Rect{Y: 1, Width: width, Height: screenRows}
+	if cacheValid && !layoutSame {
+		clearFrameRect(frame, contentArea)
+	}
 	topBar := frame.Row(0)
 	drawTopBarSnapshot(topBar, bars.status, bars.attentionFrame, bars.topRight, styles)
-	contentFrame, contentDamage := composeTabFrameWithLayout(tb, domain.Rect{Width: width, Height: screenRows}, bars.theme, layoutSnap)
-	for y := range screenRows {
-		copy(frame.Row(y+1), contentFrame.Row(y))
-	}
+	contentDamage := composeTabFrameIntoWithLayoutOptions(tb, frame, contentArea, bars.theme, layoutSnap, cacheValid && layoutSame, consumeDamage)
 	bottomBar := frame.Row(screenRows + 1)
 	drawStatusBarState(bottomBar, bars, styles)
+	if composed != nil {
+		composed.frame = frame
+		composed.valid = true
+		composed.layoutSnap = layoutSnap
+	}
 	if full {
 		if cache != nil {
 			cache.capture(topBar, bottomBar)
@@ -562,20 +606,30 @@ func composeTabFrame(tb *tab, area domain.Rect, theme themeui.Theme) (renderer.F
 
 func composeTabFrameWithLayout(tb *tab, area domain.Rect, theme themeui.Theme, layoutSnap tabLayoutSnapshot) (renderer.Frame, []renderer.Damage) {
 	frame := renderer.NewFrame(area.Width, area.Height)
+	damage := composeTabFrameIntoWithLayout(tb, frame, area, theme, layoutSnap, false)
+	return frame, damage
+}
+
+func composeTabFrameIntoWithLayout(tb *tab, frame renderer.Frame, area domain.Rect, theme themeui.Theme, layoutSnap tabLayoutSnapshot, cacheValid bool) []renderer.Damage {
+	return composeTabFrameIntoWithLayoutOptions(tb, frame, area, theme, layoutSnap, cacheValid, false)
+}
+
+func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area domain.Rect, theme themeui.Theme, layoutSnap tabLayoutSnapshot, cacheValid bool, consumeDamage bool) []renderer.Damage {
+	contentArea := domain.Rect{Width: area.Width, Height: area.Height}
 	root := tb.tree.Root
-	placements, ok := layoutSnap.placements, layoutSnap.ok && layoutSnap.root == root && layoutSnap.area == area
+	placements, ok := layoutSnap.placements, layoutSnap.ok && layoutSnap.root == root && layoutSnap.area == contentArea
 	if !ok {
-		placements, ok = layout.Solve(root, area)
+		placements, ok = layout.Solve(root, contentArea)
 	}
 	var fallback *pane
 	if !ok {
 		fallback = tb.focusedPane()
 		if fallback == nil {
-			return frame, nil
+			return nil
 		}
-		placements = []layout.Placement{{ID: fallback.id, Content: area}}
+		placements = []layout.Placement{{ID: fallback.id, Content: contentArea}}
 	}
-	if ok {
+	if ok && !cacheValid {
 		drawDividers(frame, root, area, themeui.DimStyle(newThemeStyles(theme).border, theme))
 	}
 	var damage []renderer.Damage
@@ -588,20 +642,62 @@ func composeTabFrameWithLayout(tb *tab, area domain.Rect, theme themeui.Theme, l
 			continue
 		}
 		focused := tb.tree.Focus == pl.ID
+		pl = offsetPlacement(pl, area.X, area.Y)
 		if pl.TitleBar.Height > 0 {
 			drawPaneTitleBar(frame, pl, p, focused, theme, "")
+			if cacheValid {
+				titleDamage := pl.TitleBar
+				titleDamage.X -= area.X
+				titleDamage.Y -= area.Y
+				damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: titleDamage.X, Y: titleDamage.Y, Width: titleDamage.Width, Height: titleDamage.Height})
+			}
 		}
 		if pl.Collapsed || pl.Content.Width <= 0 || pl.Content.Height <= 0 {
+			if consumeDamage {
+				p.mu.Lock()
+				p.screen.ClearDamage()
+				p.mu.Unlock()
+			}
 			continue
 		}
 		p.mu.Lock()
-		blitPaneFrame(frame, pl.Content, p.screen.Frame, !focused, theme)
-		for _, d := range p.screen.Damage() {
-			damage = append(damage, translatePaneDamage(d, pl.Content, area)...)
+		paneDamage := p.screen.Damage()
+		if !cacheValid || len(paneDamage) > 0 {
+			blitPaneFrame(frame, pl.Content, p.screen.Frame, !focused, theme)
+		}
+		for _, d := range paneDamage {
+			localContent := pl.Content
+			localContent.X -= area.X
+			localContent.Y -= area.Y
+			damage = append(damage, translatePaneDamage(d, localContent, contentArea)...)
+		}
+		if consumeDamage {
+			p.screen.ClearDamage()
 		}
 		p.mu.Unlock()
 	}
-	return frame, damage
+	return damage
+}
+
+func sameTabLayoutSnapshot(a, b tabLayoutSnapshot) bool {
+	return a.ok == b.ok && a.root == b.root && a.fingerprint == b.fingerprint && a.area == b.area && a.focus == b.focus
+}
+
+func offsetPlacement(pl layout.Placement, dx, dy int) layout.Placement {
+	pl.Content.X += dx
+	pl.Content.Y += dy
+	pl.TitleBar.X += dx
+	pl.TitleBar.Y += dy
+	return pl
+}
+
+func clearFrameRect(frame renderer.Frame, r domain.Rect) {
+	blank := renderer.BlankCell()
+	for y := r.Y; y < r.Y+r.Height && y < frame.Height; y++ {
+		for x := r.X; x < r.X+r.Width && x < frame.Width; x++ {
+			frame.Set(x, y, blank)
+		}
+	}
 }
 
 func blitPaneFrame(dst renderer.Frame, r domain.Rect, src renderer.Frame, dim bool, theme themeui.Theme) {

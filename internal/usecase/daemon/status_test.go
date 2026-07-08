@@ -12,6 +12,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -20,6 +21,52 @@ import (
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
+
+func TestApplyConfigThemeRepaintInvalidatesComposedFrameCache(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+	d.ApplyConfig(domain.Config{Theme: domain.ThemeLight})
+
+	win := sess.activeTab()
+	left := win.focusedPane()
+	right := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 4})
+	win.mu.Lock()
+	win.size = domain.Size{Cols: 41, Rows: 4}
+	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
+	win.tree.Focus = left.id
+	win.panes[right.id] = right
+	win.mu.Unlock()
+	left.mu.Lock()
+	left.screen.Resize(20, 4)
+	left.screen.Write([]byte("L"))
+	left.mu.Unlock()
+	right.mu.Lock()
+	right.screen.Resize(20, 4)
+	right.screen.Write([]byte("R"))
+	right.mu.Unlock()
+
+	d.paint(sess, ac, true)
+	ac.sendMu.Lock()
+	require.True(t, ac.composed.valid)
+	lightDimmedPane := ac.composed.frame.At(21, 1).Style
+	lightDivider := ac.composed.frame.At(20, 1).Style
+	ac.sendMu.Unlock()
+	left.mu.Lock()
+	left.screen.ClearDamage()
+	left.mu.Unlock()
+	right.mu.Lock()
+	right.screen.ClearDamage()
+	right.mu.Unlock()
+
+	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark})
+
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+	require.True(t, ac.composed.valid, "reset=false config repaint should rebuild the composed cache")
+	require.NotEqual(t, lightDimmedPane, ac.composed.frame.At(21, 1).Style, "dimmed pane style must not stay cached across theme reapply")
+	require.NotEqual(t, lightDivider, ac.composed.frame.At(20, 1).Style, "divider style must not stay cached across theme reapply")
+}
 
 func TestStatusCompositionGolden(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
