@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/pkg/safedir"
 )
 
 var safeNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,200}$`)
@@ -35,11 +36,8 @@ func NewStore(dir string) *Store {
 // Write atomically writes data for name. The previous snapshot remains in place
 // until the final rename succeeds.
 func (s *Store) Write(name string, data []byte) error {
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
+	if err := safedir.EnsurePrivate(s.dir); err != nil {
 		return fmt.Errorf("create snapshot dir: %w", err)
-	}
-	if err := os.Chmod(s.dir, 0o700); err != nil {
-		return fmt.Errorf("chmod snapshot dir: %w", err)
 	}
 
 	tmp, err := os.CreateTemp(s.dir, ".tmp-*")
