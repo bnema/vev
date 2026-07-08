@@ -48,6 +48,9 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 	if !d.prepareParkAttachment(sess, ac) {
 		return false
 	}
+	// Drop any deferred diff so a resumed client starts clean; resume forces a
+	// full reset repaint anyway.
+	ac.clearPaintDeferred()
 	d.mu.Lock()
 	if d.closing {
 		d.mu.Unlock()

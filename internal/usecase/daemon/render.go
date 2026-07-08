@@ -280,6 +280,18 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 
 	ac.initOverlays()
 	ac.sendMu.Lock()
+	// Ack-gated coalescing: while the client is at least maxUnackedOutputStates
+	// behind, skip composing another diff and mark the paint deferred. The
+	// MsgOutputAck handler flushes one cumulative paint once acks catch up.
+	// A reset paint is an explicit full invalidation that supersedes any queued
+	// diffs, so it bypasses the gate and clears the flag.
+	if reset {
+		ac.paintDeferred = false
+	} else if ac.outputLagAtCapLocked() {
+		ac.paintDeferred = true
+		ac.sendMu.Unlock()
+		return
+	}
 	overlays := ac.overlays.SnapshotForRender()
 	repaintAttachedClients := false
 	defer func() {

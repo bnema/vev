@@ -65,6 +65,14 @@ const defaultScrollbackRows = 10_000
 // the in-flight send. Teardown is never gated on a client draining its socket.
 const detachNotifyTimeout = time.Second
 
+// maxUnackedOutputStates caps how many output states may be in flight (sent but
+// not yet acked by the client) before paint defers rather than composing
+// another diff. It bounds the daemon's paint rate to the client's ack rate, so
+// heavy output degrades to lower fps on a slow link instead of overflowing the
+// transport. It must stay well under the UDP proxy's 32-frame client window so
+// the proxy's reliable queue never fills from painting alone.
+const maxUnackedOutputStates = 8
+
 const defaultResumeParkGrace = 15 * time.Minute
 
 // defaultSize is used when a client's Hello carries no valid dimensions.
