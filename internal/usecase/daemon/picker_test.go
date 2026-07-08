@@ -184,6 +184,106 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	awaitFrame(t, sends1, ports.MsgOutput)
 }
 
+func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	defer releasePTY1()
+	defer releasePTY2()
+	d := newTestDaemon(t, nil, stubClock{})
+	tr1, sends1 := newCapturingTransport(t)
+	tr2, _ := newCapturingTransport(t)
+	ac1 := &attachedClient{tr: tr1, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac1.initOverlays()
+	ac2 := &attachedClient{tr: tr2, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac2.initOverlays()
+	sctx1, cancel1 := context.WithCancel(d.serveCtx)
+	sctx2, cancel2 := context.WithCancel(d.serveCtx)
+	defer cancel1()
+	defer cancel2()
+	sess1 := &session{id: "s1", name: "alpha", ephemeral: true, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, client: ac1}
+	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, client: ac2}
+	ac1.setSession(sess1)
+	ac2.setSession(sess2)
+	d.sessions[sess1.id] = sess1
+	d.sessions[sess2.id] = sess2
+
+	d.firstPaint(sess1, ac1, ac1.size)
+	awaitFrame(t, sends1, ports.MsgOutput)
+	d.stealClientForTarget(sess1, ac1, sess2, picker.Target{Session: sess2.id})
+	d.firstPaint(sess2, ac1, ac1.size)
+	awaitFrame(t, sends1, ports.MsgOutput)
+	require.Same(t, sess2, ac1.currentSession())
+	for len(sends1) > 0 {
+		<-sends1
+	}
+	oldPane := sess1.tabs[0].focusedPane()
+	oldPane.screen.Write([]byte("stale-damage"))
+	require.NotEmpty(t, oldPane.screen.Damage())
+
+	d.paint(sess1, ac1, false)
+
+	require.Zero(t, len(sends1), "stale paint from old session sent a frame")
+	require.NotEmpty(t, oldPane.screen.Damage(), "stale paint from old session consumed damage")
+}
+
+func TestPickerSessionSwitchWaitsForInFlightPaintSend(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	defer releasePTY1()
+	defer releasePTY2()
+	d := newTestDaemon(t, nil, stubClock{})
+	enteredSend := make(chan struct{})
+	releaseSend := make(chan struct{})
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(ports.Frame) error {
+		close(enteredSend)
+		<-releaseSend
+		return nil
+	}).Once()
+	tr.EXPECT().Close().Return(nil).Maybe()
+	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac.initOverlays()
+	sctx1, cancel1 := context.WithCancel(d.serveCtx)
+	sctx2, cancel2 := context.WithCancel(d.serveCtx)
+	defer cancel1()
+	defer cancel2()
+	sess1 := &session{id: "s1", name: "alpha", ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, client: ac}
+	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
+	ac.setSession(sess1)
+
+	sess1.tabs[0].focusedPane().screen.Write([]byte("paint while switching"))
+	paintDone := make(chan struct{})
+	go func() {
+		d.paint(sess1, ac, false)
+		close(paintDone)
+	}()
+	<-enteredSend
+
+	switchDone := make(chan struct{})
+	go func() {
+		ac.setSession(sess2)
+		close(switchDone)
+	}()
+	select {
+	case <-switchDone:
+		t.Fatal("session switch completed while paint Send was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseSend)
+	select {
+	case <-paintDone:
+	case <-time.After(time.Second):
+		t.Fatal("paint did not finish after Send was released")
+	}
+	select {
+	case <-switchDone:
+	case <-time.After(time.Second):
+		t.Fatal("session switch did not complete after paint finished")
+	}
+	require.Same(t, sess2, ac.currentSession())
+}
+
 func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
