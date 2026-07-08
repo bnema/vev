@@ -187,6 +187,32 @@ func TestAttachOnceLinkStateEventsDriveReconnectUIStage(t *testing.T) {
 	require.True(t, result.welcomed)
 }
 
+func TestAttachOnceOfflineLinkEventReturnsReconnectableError(t *testing.T) {
+	term := newReconnectToastTerminalHarness(t)
+	defer term.closeInput()
+	tr := newReconnectToastLinkTransport()
+	tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
+
+	stages := make(chan reconnectStage, 4)
+	resultCh := make(chan attachResult, 1)
+	ms := milestones{}
+	go func() {
+		resultCh <- attachOnce(context.Background(), tr, term.term, portsmocks.NewMockClock(t), ports.IntentAttach, "main", 0, [16]byte{1}, &ms, func() error {
+			_, err := term.term.EnterRaw()
+			return err
+		}, func() {}, func(stage reconnectStage) {
+			stages <- stage
+		}, tr.LinkEvents(), true, nil, slog.New(slog.DiscardHandler))
+	}()
+
+	tr.events <- ports.LinkEvent{State: ports.LinkStateOffline}
+	require.Equal(t, reconnectStageOfflineRetrying, <-stages)
+	result := <-resultCh
+	require.ErrorIs(t, result.err, errLinkOffline)
+	require.True(t, result.welcomed)
+	require.True(t, shouldReconnect(result.err), "offline exit must be reconnectable")
+}
+
 func TestReconnectToastDrawAndClearHelpers(t *testing.T) {
 	var out bytes.Buffer
 	size := domain.Size{Cols: 80, Rows: 24}
