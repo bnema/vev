@@ -177,6 +177,7 @@ type Transport struct {
 
 type pending struct {
 	frame    ports.Frame
+	first    time.Time
 	last     time.Time
 	attempts int
 }
@@ -275,7 +276,8 @@ func (t *Transport) Send(f ports.Frame) error {
 	t.seq++
 	seq := t.seq
 	if reliable {
-		t.pending[seq] = &pending{frame: f, last: t.clock.Now()}
+		now := t.clock.Now()
+		t.pending[seq] = &pending{frame: f, first: now, last: now}
 	}
 	t.mu.Unlock()
 	if err := t.sendData(seq, reliable, f); err != nil {
@@ -624,10 +626,12 @@ func (t *Transport) resendLoop() {
 		case <-resend.C():
 			t.resendPending()
 			t.checkSilence()
+			t.checkSendStall()
 			resend.Reset(t.resendAfter)
 		case <-heartbeat.C():
 			_ = t.sendProbe(recProbe, 0)
 			t.checkSilence()
+			t.checkSendStall()
 			heartbeat.Reset(t.heartbeat)
 		case <-t.done:
 			return
@@ -732,12 +736,48 @@ func (t *Transport) checkSilence() {
 		t.closeWithError(ErrLinkDead)
 	case offlineAfter > 0 && silentFor >= offlineAfter:
 		t.setLinkState(ports.LinkStateOffline, nil)
-		t.hopPacketConnOnce()
 	case probeAfter > 0 && silentFor >= probeAfter:
 		t.setLinkState(ports.LinkStateProbing, nil)
+		t.hopPacketConnOnce()
 	case degradedAfter > 0 && silentFor >= degradedAfter:
 		t.setLinkState(ports.LinkStateDegraded, nil)
 	}
+}
+
+// checkSendStall declares the link dead when the oldest unacked reliable frame
+// has gone unacknowledged for deadAfter despite at least one retransmit. The
+// receive-silence check in checkSilence misses one-way-dead links whose receive
+// side stays fresh from peer heartbeats; this catches them at the layer that
+// owns death. first is set once when a frame is enqueued and never refreshed,
+// so acks (which delete pending entries) keep the oldest age bounded on a
+// progressing link — only a frame that is never acked crosses the threshold.
+func (t *Transport) checkSendStall() {
+	t.mu.Lock()
+	if t.closed || t.deadAfter <= 0 {
+		t.mu.Unlock()
+		return
+	}
+	deadAfter := t.deadAfter
+	now := t.clock.Now()
+	var oldest time.Time
+	var attempts int
+	found := false
+	for _, p := range t.pending {
+		if p == nil || p.first.IsZero() {
+			continue
+		}
+		if !found || p.first.Before(oldest) {
+			oldest = p.first
+			attempts = p.attempts
+			found = true
+		}
+	}
+	t.mu.Unlock()
+	if !found || attempts < 1 || now.Sub(oldest) < deadAfter {
+		return
+	}
+	t.setLinkState(ports.LinkStateDead, ErrLinkDead)
+	t.closeWithError(ErrLinkDead)
 }
 
 func (t *Transport) setLinkState(state ports.LinkState, err error) {

@@ -458,6 +458,12 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 				continue
 			}
 			drawStatusStage(stageForLinkState(ev.State))
+			if ev.State == ports.LinkStateOffline {
+				// Stop waiting for the transport to reach Dead at 60s: exit with
+				// a retryable error so Run re-dials over ssh with the resume
+				// token. Run closes this transport on the way out.
+				return welcomedResult(errLinkOffline)
+			}
 		case <-colorQueryCh:
 			if err := term.QueryColors(); err != nil {
 				log.Warn("querying terminal colors", "err", err)

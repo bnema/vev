@@ -172,7 +172,14 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 	if err != nil {
 		return nil, udpUnavailable("listen UDP", err, &stderr)
 	}
-	t, err := NewTransport(pc, peer, ready.key, 1, 2)
+	// RebindPacketConn heals NAT rebinds / stale conntrack paths by hopping to a
+	// fresh local UDP socket once the link is silent long enough to probe. The
+	// bind reuses listenUDPPacket so tests can stub it.
+	t, err := NewTransportWithOptions(pc, peer, ready.key, 1, 2, Options{
+		RebindPacketConn: func(net.PacketConn) (net.PacketConn, error) {
+			return listenUDPPacket(ctx)
+		},
+	})
 	if err != nil {
 		_ = pc.Close()
 		return nil, udpUnavailable("create UDP transport", err, &stderr)

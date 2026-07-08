@@ -49,6 +49,7 @@ type attachedClient struct {
 	nextStateNum  uint64
 	echoAck       atomic.Uint64
 	outputAck     atomic.Uint64
+	paintDeferred bool     // guarded by sendMu; a diff paint skipped while acks lag
 	bars          barCache // only touched while sendMu is held
 	size          domain.Size
 	keys          *keys.Router
@@ -223,6 +224,34 @@ func (ac *attachedClient) advanceOutputAck(state uint64) {
 			return
 		}
 	}
+}
+
+// outputLagAtCapLocked reports whether the client has at least
+// maxUnackedOutputStates output states in flight (sent but unacked). Caller
+// holds sendMu.
+func (ac *attachedClient) outputLagAtCapLocked() bool {
+	return ac.nextStateNum >= ac.outputAck.Load()+maxUnackedOutputStates
+}
+
+// takeDeferredPaint reports whether a deferred diff paint is now flushable
+// because acks have caught up, clearing the flag when it is. The caller must
+// then paint outside sendMu (paint re-acquires it).
+func (ac *attachedClient) takeDeferredPaint() bool {
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+	if ac.paintDeferred && !ac.outputLagAtCapLocked() {
+		ac.paintDeferred = false
+		return true
+	}
+	return false
+}
+
+// clearPaintDeferred drops any pending deferred-paint flag. Used on park so a
+// resumed client does not inherit a stale deferral.
+func (ac *attachedClient) clearPaintDeferred() {
+	ac.sendMu.Lock()
+	ac.paintDeferred = false
+	ac.sendMu.Unlock()
 }
 
 // send serialises a frame onto the client's transport.
@@ -492,6 +521,9 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		case ports.MsgAck:
 			if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
 				ac.advanceOutputAck(ack.AckedStateNum)
+				if ac.takeDeferredPaint() {
+					d.paint(sess, ac, false)
+				}
 			}
 		case ports.MsgPing:
 			_ = ac.send(framePong())

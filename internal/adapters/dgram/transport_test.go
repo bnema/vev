@@ -408,9 +408,9 @@ func TestPortHopPreservesPendingReliableMessages(t *testing.T) {
 	var hopped atomic.Bool
 	aPC.drop = func(_ []byte, addr net.Addr) bool { return addr.String() == "b" }
 	a, _ := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{
-		ResendAfter:  20 * time.Millisecond,
-		OfflineAfter: time.Millisecond,
-		DeadAfter:    time.Hour,
+		ResendAfter: 20 * time.Millisecond,
+		ProbeAfter:  time.Millisecond,
+		DeadAfter:   time.Hour,
 		RebindPacketConn: func(old net.PacketConn) (net.PacketConn, error) {
 			newPC := &fakePC{addr: testAddr("a2"), in: make(chan packet, 100), peers: map[string]*fakePC{"b": bPC}}
 			bPC.peers["a2"] = newPC
@@ -448,10 +448,10 @@ func TestPortHopRetriesAfterRebindFailure(t *testing.T) {
 	aPC, bPC := newPair()
 	var attempts atomic.Int32
 	a, _ := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{
-		ResendAfter:  time.Hour,
-		Heartbeat:    time.Hour,
-		OfflineAfter: time.Millisecond,
-		DeadAfter:    time.Hour,
+		ResendAfter: time.Hour,
+		Heartbeat:   time.Hour,
+		ProbeAfter:  time.Millisecond,
+		DeadAfter:   time.Hour,
 		RebindPacketConn: func(old net.PacketConn) (net.PacketConn, error) {
 			if attempts.Add(1) == 1 {
 				return nil, errors.New("temporary rebind failure")
@@ -487,7 +487,7 @@ func TestPortHopRetriesAfterRebindFailure(t *testing.T) {
 
 func TestServerWithoutRebindDoesNotHopPorts(t *testing.T) {
 	aPC, bPC := newPair()
-	a, _ := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{OfflineAfter: time.Millisecond, DeadAfter: time.Hour})
+	a, _ := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{ProbeAfter: time.Millisecond, DeadAfter: time.Hour})
 	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
@@ -1002,6 +1002,93 @@ func TestLinkStateTransitionsFromConfigurableSilence(t *testing.T) {
 				t.Fatalf("missing link event for %v", tt.want)
 			}
 		})
+	}
+}
+
+func TestSendStallDeathRequiresOldRetransmittedFrame(t *testing.T) {
+	tests := []struct {
+		name     string
+		age      time.Duration
+		attempts int
+		wantDead bool
+	}{
+		{name: "recent frame stays alive", age: time.Second, attempts: 5, wantDead: false},
+		{name: "old but never retransmitted stays alive", age: 61 * time.Second, attempts: 0, wantDead: false},
+		{name: "old retransmitted frame dies", age: 61 * time.Second, attempts: 3, wantDead: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			aPC, bPC := newPair()
+			// Drop everything a sends so the frame never gets acked, and keep the
+			// receive side fresh so only the send-stall check can declare death.
+			aPC.drop = func(_ []byte, addr net.Addr) bool { return addr.String() == "b" }
+			a, _ := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{
+				ResendAfter: time.Hour, Heartbeat: time.Hour, DeadAfter: 60 * time.Second,
+			})
+			b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
+			defer func() { _ = a.Close() }()
+			defer func() { _ = b.Close() }()
+
+			now := time.Now()
+			a.mu.Lock()
+			a.lastHeard = now
+			a.pending[1] = &pending{
+				frame:    ports.Frame{Type: ports.MsgOutput, Payload: []byte("stuck")},
+				first:    now.Add(-tt.age),
+				last:     now,
+				attempts: tt.attempts,
+			}
+			a.mu.Unlock()
+
+			a.checkSendStall()
+			if dead := a.LinkState() == ports.LinkStateDead; dead != tt.wantDead {
+				t.Fatalf("dead=%v, want %v", dead, tt.wantDead)
+			}
+			select {
+			case <-a.done:
+				if !tt.wantDead {
+					t.Fatal("transport closed without a send stall")
+				}
+			default:
+				if tt.wantDead {
+					t.Fatal("transport not closed after send stall")
+				}
+			}
+		})
+	}
+}
+
+func TestHopFiresAtProbingNotDegraded(t *testing.T) {
+	aPC, bPC := newPair()
+	var hopped atomic.Bool
+	aPC.drop = func(_ []byte, addr net.Addr) bool { return addr.String() == "b" }
+	a, _ := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{
+		DegradedAfter: time.Second, ProbeAfter: 2 * time.Second, OfflineAfter: 3 * time.Second, DeadAfter: time.Hour,
+		RebindPacketConn: func(net.PacketConn) (net.PacketConn, error) {
+			newPC := &fakePC{addr: testAddr("a2"), in: make(chan packet, 100), peers: map[string]*fakePC{"b": bPC}}
+			bPC.peers["a2"] = newPC
+			hopped.Store(true)
+			return newPC, nil
+		},
+	})
+	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+
+	a.mu.Lock()
+	a.lastHeard = time.Now().Add(-time.Second)
+	a.mu.Unlock()
+	a.checkSilence()
+	if hopped.Load() {
+		t.Fatal("socket hopped at degraded silence")
+	}
+
+	a.mu.Lock()
+	a.lastHeard = time.Now().Add(-2 * time.Second)
+	a.mu.Unlock()
+	a.checkSilence()
+	if !hopped.Load() {
+		t.Fatal("socket did not hop at probing silence")
 	}
 }
 

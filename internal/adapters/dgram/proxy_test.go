@@ -11,15 +11,13 @@ import (
 )
 
 type fakeTransport struct {
-	recv            chan recvResult
-	sent            chan ports.Frame
-	sendErr         chan error
-	sendErrDefault  error
-	sideEffectOnErr bool
-	linkState       ports.LinkState
-	linkEvents      chan ports.LinkEvent
-	closed          chan struct{}
-	closeOnce       sync.Once
+	recv       chan recvResult
+	sent       chan ports.Frame
+	sendErr    chan error
+	linkState  ports.LinkState
+	linkEvents chan ports.LinkEvent
+	closed     chan struct{}
+	closeOnce  sync.Once
 }
 
 type recvResult struct {
@@ -33,14 +31,8 @@ func newFakeTransport() *fakeTransport {
 func (f *fakeTransport) Send(fr ports.Frame) error {
 	select {
 	case err := <-f.sendErr:
-		if f.sideEffectOnErr {
-			f.sent <- fr
-		}
 		return err
 	default:
-		if f.sendErrDefault != nil {
-			return f.sendErrDefault
-		}
 	}
 	f.sent <- fr
 	return nil
@@ -85,58 +77,27 @@ func TestProxyRuntimeCopiesFramesAndDaemonEOFIsTerminal(t *testing.T) {
 	}
 }
 
-func TestProxyRuntimeRestartsRecoverableClientReceiveUntilIdleTTL(t *testing.T) {
-	client := newFakeTransport()
-	daemon := newFakeTransport()
-	client.linkState = ports.LinkStateOffline
-	client.linkEvents <- ports.LinkEvent{State: ports.LinkStateOffline}
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: 50 * time.Millisecond, RetryBackoff: time.Nanosecond}.Run(t.Context())
-	}()
-	client.recv <- recvResult{err: errors.New("temporary receive failure")}
-	client.recv <- recvResult{frame: ports.Frame{Type: ports.MsgInput, Payload: []byte("after recovery")}}
-	select {
-	case got := <-daemon.sent:
-		if got.Type != ports.MsgInput || string(got.Payload) != "after recovery" {
-			t.Fatalf("daemon got %+v, want recovered input", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for recovered frame")
-	}
-	daemon.recv <- recvResult{err: io.EOF}
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("Run err=%v, want nil", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for daemon EOF")
-	}
-}
-
 func TestProxyRuntimeRetriesRecoverableClientSendWithoutDroppingFrame(t *testing.T) {
 	tests := []struct {
-		name      string
-		state     ports.LinkState
-		linkEvent bool
+		name  string
+		state ports.LinkState
+		err   error
 	}{
-		{name: "connected pending full", state: ports.LinkStateConnected},
-		{name: "offline pending full", state: ports.LinkStateOffline, linkEvent: true},
+		{name: "connected pending full", state: ports.LinkStateConnected, err: ErrPendingFull},
+		{name: "degraded transient error", state: ports.LinkStateDegraded, err: errors.New("degraded write drop")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := newFakeTransport()
 			daemon := newFakeTransport()
+			// No link event is emitted, so the idle timer is never armed; the
+			// retry alone must recover. IdleTTL is large to make that explicit.
 			client.linkState = tt.state
-			if tt.linkEvent {
-				client.linkEvents <- ports.LinkEvent{State: tt.state}
-			}
 			errCh := make(chan error, 1)
 			go func() {
-				errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: 50 * time.Millisecond, RetryBackoff: time.Nanosecond}.Run(t.Context())
+				errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Hour, RetryBackoff: time.Nanosecond}.Run(t.Context())
 			}()
-			client.sendErr <- ErrPendingFull
+			client.sendErr <- tt.err
 			daemon.recv <- recvResult{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("preserved during outage")}}
 			select {
 			case got := <-client.sent:
@@ -159,28 +120,35 @@ func TestProxyRuntimeRetriesRecoverableClientSendWithoutDroppingFrame(t *testing
 	}
 }
 
-func TestProxyRuntimeDoesNotRetrySideEffectingClientSendError(t *testing.T) {
+// TestProxyRuntimeSurvivesPendingFullAndPreservesOrder is the congestion
+// regression: a persistently pending-full client window must not tear the proxy
+// down (the old idle TTL killed it after 30s) and every frame must arrive in
+// order. IdleTTL is a nanosecond: if a retry armed the idle timer the proxy
+// would die at once, so surviving proves retries no longer arm it.
+func TestProxyRuntimeSurvivesPendingFullAndPreservesOrder(t *testing.T) {
 	client := newFakeTransport()
 	daemon := newFakeTransport()
-	client.linkState = ports.LinkStateOffline
-	client.sideEffectOnErr = true
-	client.sendErr <- errors.New("write timed out after queuing")
+	client.linkState = ports.LinkStateConnected
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Hour, RetryBackoff: time.Nanosecond}.Run(t.Context())
+		errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Nanosecond, RetryBackoff: time.Nanosecond}.Run(t.Context())
 	}()
-	daemon.recv <- recvResult{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("maybe queued")}}
-	select {
-	case got := <-client.sent:
-		if got.Type != ports.MsgOutput || string(got.Payload) != "maybe queued" {
-			t.Fatalf("client got %+v, want side-effected output", got)
+	const frames = 4
+	for i := range frames {
+		client.sendErr <- ErrPendingFull
+		daemon.recv <- recvResult{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}}
+		select {
+		case got := <-client.sent:
+			if got.Type != ports.MsgOutput || len(got.Payload) != 1 || got.Payload[0] != byte(i) {
+				t.Fatalf("frame %d delivered out of order or dropped: %+v", i, got)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("frame %d dropped or proxy killed under pending-full", i)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for side-effected output")
 	}
 	select {
-	case got := <-client.sent:
-		t.Fatalf("side-effecting send error was retried and duplicated output: %+v", got)
+	case err := <-errCh:
+		t.Fatalf("proxy returned under sustained pending-full: %v", err)
 	case <-time.After(20 * time.Millisecond):
 	}
 	daemon.recv <- recvResult{err: io.EOF}
@@ -194,82 +162,40 @@ func TestProxyRuntimeDoesNotRetrySideEffectingClientSendError(t *testing.T) {
 	}
 }
 
-func TestProxyRuntimeErrPendingFullRetryStartsIdleTTL(t *testing.T) {
+func TestProxyRuntimeOfflineLinkEventExpiresViaIdleTTL(t *testing.T) {
 	client := newFakeTransport()
 	daemon := newFakeTransport()
 	client.linkState = ports.LinkStateOffline
-	client.sendErrDefault = ErrPendingFull
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: 20 * time.Millisecond, RetryBackoff: time.Millisecond}.Run(t.Context())
-	}()
-	daemon.recv <- recvResult{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("stalled")}}
-	select {
-	case err := <-errCh:
-		if !errors.Is(err, ErrLinkDead) {
-			t.Fatalf("Run err=%v, want ErrLinkDead", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for idle expiry from ErrPendingFull retry")
-	}
-}
-
-func TestProxyRuntimeErrPendingFullRetrySuccessStopsIdleTTL(t *testing.T) {
-	client := newFakeTransport()
-	daemon := newFakeTransport()
-	client.linkState = ports.LinkStateConnected
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: 20 * time.Millisecond, RetryBackoff: time.Nanosecond}.Run(t.Context())
-	}()
-	client.sendErr <- ErrPendingFull
-	daemon.recv <- recvResult{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("recovers")}}
-	select {
-	case got := <-client.sent:
-		if got.Type != ports.MsgOutput || string(got.Payload) != "recovers" {
-			t.Fatalf("client got %+v, want retried output", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for retried output")
-	}
-	select {
-	case err := <-errCh:
-		t.Fatalf("Run returned after successful retry before daemon EOF: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-	daemon.recv <- recvResult{err: io.EOF}
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("Run err=%v, want nil", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for daemon EOF")
-	}
-}
-
-func TestProxyRuntimeKeepsRecoverableLinkUntilIdleTTL(t *testing.T) {
-	client := newFakeTransport()
-	daemon := newFakeTransport()
-	client.linkState = ports.LinkStateOffline
-	client.linkEvents <- ports.LinkEvent{State: ports.LinkStateOffline}
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: 20 * time.Millisecond}.Run(t.Context())
 	}()
-	client.recv <- recvResult{err: errors.New("temporary receive failure")}
-	select {
-	case err := <-errCh:
-		t.Fatalf("Run returned before idle TTL: %v", err)
-	case <-time.After(5 * time.Millisecond):
-	}
+	client.linkEvents <- ports.LinkEvent{State: ports.LinkStateOffline}
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, ErrLinkDead) {
 			t.Fatalf("Run err=%v, want ErrLinkDead", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for idle expiry")
+		t.Fatal("timeout waiting for idle expiry after offline link event")
+	}
+}
+
+func TestProxyRuntimeDeadLinkEventTearsDown(t *testing.T) {
+	client := newFakeTransport()
+	daemon := newFakeTransport()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Hour}.Run(t.Context())
+	}()
+	client.linkEvents <- ports.LinkEvent{State: ports.LinkStateDead}
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrLinkDead) {
+			t.Fatalf("Run err=%v, want ErrLinkDead", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dead link event did not tear down proxy")
 	}
 }
 

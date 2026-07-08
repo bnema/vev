@@ -38,17 +38,9 @@ type proxyCopyErr struct {
 	err  error
 }
 
-type proxyRetryEvent uint8
-
-const (
-	proxyRetryStart proxyRetryEvent = iota + 1
-	proxyRetryDone
-)
-
 type proxyCopier struct {
 	ctx          context.Context
 	errCh        chan<- proxyCopyErr
-	retryEvents  chan<- proxyRetryEvent
 	retryBackoff time.Duration
 	clk          ports.Clock
 }
@@ -58,7 +50,7 @@ type proxyCopyDirection struct {
 	dst              ports.Transport
 	recvKind         proxyCopyErrKind
 	sendKind         proxyCopyErrKind
-	retryPendingFull bool
+	retryRecoverable bool
 }
 
 func (p ProxyRuntime) Run(ctx context.Context) error {
@@ -81,18 +73,11 @@ func (p ProxyRuntime) Run(ctx context.Context) error {
 	}
 
 	errCh := make(chan proxyCopyErr, 2)
-	retryEvents := make(chan proxyRetryEvent, 2)
-	copier := proxyCopier{ctx: ctx, errCh: errCh, retryEvents: retryEvents, retryBackoff: retryBackoff, clk: clk}
+	copier := proxyCopier{ctx: ctx, errCh: errCh, retryBackoff: retryBackoff, clk: clk}
 	clientToDaemon := proxyCopyDirection{src: p.Client, dst: p.Daemon, recvKind: proxyClientRecv, sendKind: proxyDaemonSend}
-	daemonToClient := proxyCopyDirection{src: p.Daemon, dst: p.Client, recvKind: proxyDaemonRecv, sendKind: proxyClientSend, retryPendingFull: true}
-	startClientCopy := func() {
-		go copier.copyFrames(clientToDaemon)
-	}
-	startDaemonCopy := func() {
-		go copier.copyFrames(daemonToClient)
-	}
-	startClientCopy()
-	startDaemonCopy()
+	daemonToClient := proxyCopyDirection{src: p.Daemon, dst: p.Client, recvKind: proxyDaemonRecv, sendKind: proxyClientSend, retryRecoverable: true}
+	go copier.copyFrames(clientToDaemon)
+	go copier.copyFrames(daemonToClient)
 
 	var linkEvents <-chan ports.LinkEvent
 	if reporter, ok := p.Client.(ports.LinkStateReporter); ok {
@@ -119,16 +104,6 @@ func (p ProxyRuntime) Run(ctx context.Context) error {
 		}
 		idle = nil
 	}
-	waitRetry := func() error {
-		t := clk.NewTimer(retryBackoff)
-		defer t.Stop()
-		select {
-		case <-t.C():
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -148,13 +123,6 @@ func (p ProxyRuntime) Run(ctx context.Context) error {
 			}
 		case <-idle:
 			return ErrLinkDead
-		case ev := <-retryEvents:
-			switch ev {
-			case proxyRetryStart:
-				startIdle()
-			case proxyRetryDone:
-				stopIdle()
-			}
 		case ce := <-errCh:
 			switch ce.kind {
 			case proxyDaemonRecv:
@@ -162,32 +130,12 @@ func (p ProxyRuntime) Run(ctx context.Context) error {
 					return nil
 				}
 				return ce.err
-			case proxyDaemonSend:
+			default:
+				// Recoverable client-side errors are retried inside the copier
+				// without dropping the frame; anything that surfaces here (a
+				// daemon send failure, or a non-recoverable client error such as
+				// a dead link) is fatal.
 				return ce.err
-			case proxyClientSend:
-				if !recoverableClientLink(p.Client, ce.err) {
-					return ce.err
-				}
-				if p.Log != nil {
-					p.Log.Info("udp proxy restarting recoverable client send path", "err", ce.err)
-				}
-				startIdle()
-				if err := waitRetry(); err != nil {
-					return err
-				}
-				startDaemonCopy()
-			case proxyClientRecv:
-				if !recoverableClientLink(p.Client, ce.err) {
-					return ce.err
-				}
-				if p.Log != nil {
-					p.Log.Info("udp proxy restarting recoverable client receive path", "err", ce.err)
-				}
-				startIdle()
-				if err := waitRetry(); err != nil {
-					return err
-				}
-				startClientCopy()
 			}
 		}
 	}
@@ -200,43 +148,28 @@ func (c proxyCopier) copyFrames(dir proxyCopyDirection) {
 			c.errCh <- proxyCopyErr{kind: dir.recvKind, err: err}
 			return
 		}
-		retrying := false
+		// Retry the same frame in place while the destination link error stays
+		// recoverable (congestion, transient path loss). The frame is never
+		// dropped — on a reliable stream a gap desynchronizes the client screen.
 		for {
-			if err := dir.dst.Send(f); err != nil {
-				if dir.retryPendingFull && errors.Is(err, ErrPendingFull) && recoverableClientLink(dir.dst, err) {
-					if !retrying {
-						retrying = true
-						if !sendProxyRetryEvent(c.ctx, c.retryEvents, proxyRetryStart) {
-							return
-						}
-					}
-					t := c.clk.NewTimer(c.retryBackoff)
-					select {
-					case <-t.C():
-						t.Stop()
-						continue
-					case <-c.ctx.Done():
-						t.Stop()
-						return
-					}
+			err := dir.dst.Send(f)
+			if err == nil {
+				break
+			}
+			if dir.retryRecoverable && recoverableClientLink(dir.dst, err) {
+				t := c.clk.NewTimer(c.retryBackoff)
+				select {
+				case <-t.C():
+					t.Stop()
+					continue
+				case <-c.ctx.Done():
+					t.Stop()
+					return
 				}
-				c.errCh <- proxyCopyErr{kind: dir.sendKind, err: err}
-				return
 			}
-			if retrying && !sendProxyRetryEvent(c.ctx, c.retryEvents, proxyRetryDone) {
-				return
-			}
-			break
+			c.errCh <- proxyCopyErr{kind: dir.sendKind, err: err}
+			return
 		}
-	}
-}
-
-func sendProxyRetryEvent(ctx context.Context, retryEvents chan<- proxyRetryEvent, ev proxyRetryEvent) bool {
-	select {
-	case retryEvents <- ev:
-		return true
-	case <-ctx.Done():
-		return false
 	}
 }
 
