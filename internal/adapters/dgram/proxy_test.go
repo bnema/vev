@@ -214,6 +214,40 @@ func TestProxyRuntimeErrPendingFullRetryStartsIdleTTL(t *testing.T) {
 	}
 }
 
+func TestProxyRuntimeErrPendingFullRetrySuccessStopsIdleTTL(t *testing.T) {
+	client := newFakeTransport()
+	daemon := newFakeTransport()
+	client.linkState = ports.LinkStateConnected
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: 20 * time.Millisecond, RetryBackoff: time.Nanosecond}.Run(t.Context())
+	}()
+	client.sendErr <- ErrPendingFull
+	daemon.recv <- recvResult{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("recovers")}}
+	select {
+	case got := <-client.sent:
+		if got.Type != ports.MsgOutput || string(got.Payload) != "recovers" {
+			t.Fatalf("client got %+v, want retried output", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for retried output")
+	}
+	select {
+	case err := <-errCh:
+		t.Fatalf("Run returned after successful retry before daemon EOF: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	daemon.recv <- recvResult{err: io.EOF}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run err=%v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for daemon EOF")
+	}
+}
+
 func TestProxyRuntimeKeepsRecoverableLinkUntilIdleTTL(t *testing.T) {
 	client := newFakeTransport()
 	daemon := newFakeTransport()

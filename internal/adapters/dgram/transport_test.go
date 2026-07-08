@@ -278,6 +278,12 @@ func TestSendWriteTimeoutBoundsBlockedPacketConn(t *testing.T) {
 		if !errors.As(err, &timeout) || !timeout.Timeout() {
 			t.Fatalf("Send err=%v, want timeout error", err)
 		}
+		tr.mu.Lock()
+		pending := len(tr.pending)
+		tr.mu.Unlock()
+		if pending != 0 {
+			t.Fatalf("pending after failed initial send=%d, want 0", pending)
+		}
 	case <-time.After(250 * time.Millisecond):
 		t.Fatal("Send blocked without honoring WriteTimeout")
 	}
@@ -615,8 +621,9 @@ func newResendTestTransport(t *testing.T, maxResendPerTick int) (*Transport, *at
 
 func TestResendPendingCapsBurst(t *testing.T) {
 	tr, writes := newResendTestTransport(t, 2)
+	now := tr.clock.Now()
 	for i := range 5 {
-		tr.pending[uint64(i+1)] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}, last: time.Now().Add(-time.Second)}
+		tr.pending[uint64(i+1)] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}, last: now.Add(-time.Second)}
 	}
 
 	tr.resendPending()
@@ -627,7 +634,7 @@ func TestResendPendingCapsBurst(t *testing.T) {
 
 func TestResendPendingUsesExponentialBackoffAndMaxDelay(t *testing.T) {
 	tr, writes := newResendTestTransport(t, 10)
-	now := time.Now()
+	now := tr.clock.Now()
 	tr.pending[1] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("too-soon")}, last: now.Add(-150 * time.Millisecond), attempts: 1}
 	tr.pending[2] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("ready")}, last: now.Add(-250 * time.Millisecond), attempts: 1}
 	tr.pending[3] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("capped")}, last: now.Add(-time.Second), attempts: 10}
@@ -818,7 +825,8 @@ func TestProbeReplyDoesNotBlockOnWriteMu(t *testing.T) {
 func TestPendingReliableQueueReturnsWhenLinkDegrades(t *testing.T) {
 	aPC, bPC := newPair()
 	aPC.drop = func(_ []byte, addr net.Addr) bool { return addr.String() == "b" }
-	a, _ := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{MaxPending: 1})
+	clk := newManualClock(time.Now())
+	a, _ := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{MaxPending: 1, MaxPendingWait: time.Hour, Clock: clk})
 	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
 	defer func() { _ = a.Close() }()
 	defer func() { _ = b.Close() }()
@@ -826,22 +834,20 @@ func TestPendingReliableQueueReturnsWhenLinkDegrades(t *testing.T) {
 	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("first")}); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
+	done := make(chan error, 2)
 	go func() { done <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("second")}) }()
-
-	select {
-	case err := <-done:
-		t.Fatalf("send returned before link degraded: %v", err)
-	case <-time.After(25 * time.Millisecond):
-	}
+	go func() { done <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("third")}) }()
+	waitForManualTimers(t, clk, 2)
 	a.setLinkState(ports.LinkStateDegraded, nil)
-	select {
-	case err := <-done:
-		if !errors.Is(err, ErrPendingFull) {
-			t.Fatalf("send err=%v, want ErrPendingFull", err)
+	for i := range 2 {
+		select {
+		case err := <-done:
+			if !errors.Is(err, ErrPendingFull) {
+				t.Fatalf("send %d err=%v, want ErrPendingFull", i, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("send %d did not unblock after link degraded", i)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("send did not unblock after link degraded")
 	}
 }
 

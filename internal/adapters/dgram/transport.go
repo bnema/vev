@@ -192,7 +192,7 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 	}
 	opts = normalizeOptions(opts)
 	t := &Transport{pc: pc, codec: c, sendDir: sendDir, recvDir: recvDir, mtu: opts.MTU, peer: peer, pending: make(map[uint64]*pending), replay: pdgram.NewReplayWindow(), reasm: pdgram.NewReassembler(), in: make(chan ports.Frame, 32), done: make(chan struct{}), lastHeard: opts.Clock.Now(), heartbeat: opts.Heartbeat, resendAfter: opts.ResendAfter, maxResendAfter: opts.MaxResendAfter, maxResendPerTick: opts.MaxResendPerTick, writeTimeout: opts.WriteTimeout, degradedAfter: opts.DegradedAfter, probeAfter: opts.ProbeAfter, offlineAfter: opts.OfflineAfter, deadAfter: opts.DeadAfter, maxPending: opts.MaxPending, maxPendingWait: opts.MaxPendingWait, maxRecvBuffer: opts.MaxRecvBuffer, clock: opts.Clock, linkState: ports.LinkStateConnected, linkEvents: make(chan ports.LinkEvent, linkEventBufferSize), probeWait: make(map[uint64]chan struct{}), rebind: opts.RebindPacketConn, nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame)}
-	t.sendWake = make(chan struct{}, 1)
+	t.sendWake = make(chan struct{})
 	t.probeReply = make(chan uint64, probeReplyBufferSize)
 	t.deliverCond = sync.NewCond(&t.deliverMu)
 	go t.readLoop(pc)
@@ -221,11 +221,12 @@ func (t *Transport) Send(f ports.Frame) error {
 			t.mu.Unlock()
 			return ErrPendingFull
 		}
+		wake := t.sendWake
 		timer := t.clock.NewTimer(remaining)
 		t.mu.Unlock()
 		select {
 		case <-timer.C():
-		case <-t.sendWake:
+		case <-wake:
 		case <-t.done:
 		}
 		timer.Stop()
@@ -245,7 +246,18 @@ func (t *Transport) Send(f ports.Frame) error {
 		t.pending[seq] = &pending{frame: f, last: t.clock.Now()}
 	}
 	t.mu.Unlock()
-	return t.sendData(seq, reliable, f)
+	if err := t.sendData(seq, reliable, f); err != nil {
+		if reliable {
+			t.mu.Lock()
+			if _, ok := t.pending[seq]; ok {
+				delete(t.pending, seq)
+				t.notifySendWaitersLocked()
+			}
+			t.mu.Unlock()
+		}
+		return err
+	}
+	return nil
 }
 
 func (t *Transport) Recv() (ports.Frame, error) {
@@ -455,7 +467,7 @@ func (t *Transport) handleRecord(p []byte) {
 		t.mu.Lock()
 		if _, ok := t.pending[seq]; ok {
 			delete(t.pending, seq)
-			t.notifySendWaiter()
+			t.notifySendWaitersLocked()
 		}
 		t.mu.Unlock()
 	case recProbe:
@@ -562,11 +574,12 @@ func (t *Transport) probeReplyLoop() {
 	}
 }
 
-func (t *Transport) notifySendWaiter() {
-	select {
-	case t.sendWake <- struct{}{}:
-	default:
+func (t *Transport) notifySendWaitersLocked() {
+	if t.sendWake == nil {
+		return
 	}
+	close(t.sendWake)
+	t.sendWake = make(chan struct{})
 }
 
 func (t *Transport) resendLoop() {
@@ -710,7 +723,7 @@ func (t *Transport) setLinkState(state ports.LinkState, err error) {
 			}
 		}
 	}
-	t.notifySendWaiter()
+	t.notifySendWaitersLocked()
 	t.mu.Unlock()
 	event := ports.LinkEvent{State: state, At: now, Err: err}
 	select {
@@ -729,7 +742,7 @@ func (t *Transport) closeWithError(err error) {
 	t.closeErr = err
 	t.probeWait = make(map[uint64]chan struct{})
 	close(t.done)
-	t.notifySendWaiter()
+	t.notifySendWaitersLocked()
 	t.mu.Unlock()
 	t.deliverMu.Lock()
 	t.deliverCond.Broadcast()
