@@ -16,11 +16,14 @@ go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc -bench=. -benchmem
 ```
 
 - Format with **goimports**.
+- Install dev tools once with `go install golang.org/x/tools/cmd/goimports@latest` and `go install github.com/vektra/mockery/v2@latest`.
 - `make test` runs `go test ./... -race`.
 - `make lint` checks `goimports -l`, then `go vet`.
 - Enable daemon pprof with `VEV_PPROF_ADDR=127.0.0.1:6060 vev --daemon`.
+- Set `VEV_LOG=debug|warn|error` to change log verbosity (default info).
 - Logs live in `$XDG_STATE_HOME/vev`, or `~/.local/state/vev` when unset.
-- Use feature worktrees under `.worktrees/<branch-name>`.
+- Use feature worktrees under `.worktrees/<branch-name>`. Remove the worktree once its branch is merged or abandoned (`git worktree remove <path>`).
+- Create vev-owned private directories with `pkg/safedir.EnsurePrivate`, not `os.MkdirAll`.
 
 ## Architecture rules
 

@@ -753,3 +753,26 @@ func TestListenUDPInRange(t *testing.T) {
 		}
 	})
 }
+
+func TestPprofAddrIsLoopback(t *testing.T) {
+	tests := []struct {
+		addr string
+		want bool
+	}{
+		{addr: "127.0.0.1:6060", want: true},
+		{addr: "localhost:6060", want: true},
+		{addr: "[::1]:6060", want: true},
+		{addr: ":6060", want: false},
+		{addr: "0.0.0.0:6060", want: false},
+		{addr: "192.168.1.5:6060", want: false},
+		{addr: "garbage", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.addr, func(t *testing.T) {
+			if got := pprofAddrIsLoopback(tt.addr); got != tt.want {
+				t.Fatalf("pprofAddrIsLoopback(%q) = %v, want %v", tt.addr, got, tt.want)
+			}
+		})
+	}
+}
