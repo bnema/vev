@@ -161,6 +161,100 @@ func (p *blockingWritePC) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
+type fixedClock struct{ now time.Time }
+
+func (c fixedClock) Now() time.Time { return c.now }
+func (c fixedClock) NewTimer(d time.Duration) ports.Timer {
+	return realTimer{t: time.NewTimer(d)}
+}
+
+type manualClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	timers chan *manualTimer
+}
+
+func newManualClock(now time.Time) *manualClock {
+	return &manualClock{now: now, timers: make(chan *manualTimer, 16)}
+}
+
+func (c *manualClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *manualClock) NewTimer(d time.Duration) ports.Timer {
+	tm := &manualTimer{c: make(chan time.Time, 1), d: d}
+	c.timers <- tm
+	return tm
+}
+
+func (c *manualClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	now := c.now
+	c.mu.Unlock()
+	for {
+		select {
+		case tm := <-c.timers:
+			tm.fire(now)
+		default:
+			return
+		}
+	}
+}
+
+type manualTimer struct {
+	c chan time.Time
+	d time.Duration
+}
+
+func (t *manualTimer) C() <-chan time.Time { return t.c }
+func (t *manualTimer) Reset(d time.Duration) bool {
+	t.d = d
+	return true
+}
+func (t *manualTimer) Stop() bool { return true }
+func (t *manualTimer) fire(now time.Time) {
+	select {
+	case t.c <- now:
+	default:
+	}
+}
+
+func waitForManualTimers(t *testing.T, clk *manualClock, n int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(clk.timers) >= n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("manual timers=%d, want at least %d", len(clk.timers), n)
+}
+
+type deadlineCapturePC struct {
+	addr     net.Addr
+	deadline atomic.Value
+}
+
+func (p *deadlineCapturePC) ReadFrom([]byte) (int, net.Addr, error) {
+	return 0, nil, errors.New("closed")
+}
+func (p *deadlineCapturePC) WriteTo(b []byte, _ net.Addr) (int, error) { return len(b), nil }
+func (p *deadlineCapturePC) Close() error                              { return nil }
+func (p *deadlineCapturePC) LocalAddr() net.Addr                       { return p.addr }
+func (p *deadlineCapturePC) SetDeadline(time.Time) error               { return nil }
+func (p *deadlineCapturePC) SetReadDeadline(time.Time) error           { return nil }
+func (p *deadlineCapturePC) SetWriteDeadline(t time.Time) error {
+	if !t.IsZero() {
+		p.deadline.Store(t)
+	}
+	return nil
+}
+
 func TestSendWriteTimeoutBoundsBlockedPacketConn(t *testing.T) {
 	pc := newBlockingWritePC()
 	tr, err := NewTransportWithOptions(pc, testAddr("peer"), key(), 1, 2, Options{
@@ -628,6 +722,99 @@ func TestPendingReliableQueueBackpressuresUntilAck(t *testing.T) {
 	}
 }
 
+func TestPendingReliableQueueReturnsErrPendingFullWhileConnected(t *testing.T) {
+	aPC, bPC := newPair()
+	aPC.drop = func(_ []byte, addr net.Addr) bool { return addr.String() == "b" }
+	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+	a, _ := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{MaxPending: 1, MaxPendingWait: 50 * time.Millisecond, Clock: clk})
+	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+
+	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("first")}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("second")}) }()
+	waitForManualTimers(t, clk, 3)
+
+	clk.advance(50 * time.Millisecond)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrPendingFull) {
+			t.Fatalf("send err=%v, want ErrPendingFull", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("send did not return after clock advanced past MaxPendingWait")
+	}
+}
+
+func TestPendingAttemptsResetWhenLinkRecovers(t *testing.T) {
+	tr, _ := newResendTestTransport(t, 10)
+	tr.linkState = ports.LinkStateDegraded
+	tr.pending[1] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("stale")}, attempts: 4}
+	tr.pending[2] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("stale")}, attempts: 7}
+
+	tr.setLinkState(ports.LinkStateConnected, nil)
+
+	for seq, p := range tr.pending {
+		if p.attempts != 0 {
+			t.Fatalf("pending[%d] attempts=%d, want reset on connected recovery", seq, p.attempts)
+		}
+	}
+}
+
+func TestWritePacketDeadlineUsesTransportClock(t *testing.T) {
+	wantNow := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	pc := &deadlineCapturePC{addr: testAddr("a")}
+	tr, err := NewTransportWithOptions(pc, testAddr("b"), key(), 1, 2, Options{
+		Clock:        fixedClock{now: wantNow},
+		WriteTimeout: 250 * time.Millisecond,
+		ResendAfter:  time.Hour,
+		Heartbeat:    time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tr.Close() }()
+
+	if err := tr.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("deadline")}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := pc.deadline.Load().(time.Time)
+	if want := wantNow.Add(250 * time.Millisecond); !got.Equal(want) {
+		t.Fatalf("write deadline=%v, want transport clock deadline %v", got, want)
+	}
+}
+
+func TestProbeReplyDoesNotBlockOnWriteMu(t *testing.T) {
+	aPC, bPC := newPair()
+	tr, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{ResendAfter: time.Hour, Heartbeat: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tr.Close() }()
+	defer func() { _ = bPC.Close() }()
+
+	tr.writeMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		for id := uint64(1); id <= probeReplyBufferSize*4; id++ {
+			tr.handleRecord(probeRecord(recProbe, id))
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		tr.writeMu.Unlock()
+		<-done
+		t.Fatal("probe reply burst blocked behind writeMu")
+	}
+	tr.writeMu.Unlock()
+}
+
 func TestPendingReliableQueueReturnsWhenLinkDegrades(t *testing.T) {
 	aPC, bPC := newPair()
 	aPC.drop = func(_ []byte, addr net.Addr) bool { return addr.String() == "b" }
@@ -662,6 +849,13 @@ func ackRecord(seq uint64) []byte {
 	var b [9]byte
 	b[0] = recAck
 	binary.BigEndian.PutUint64(b[1:], seq)
+	return b[:]
+}
+
+func probeRecord(kind byte, id uint64) []byte {
+	var b [9]byte
+	b[0] = kind
+	binary.BigEndian.PutUint64(b[1:], id)
 	return b[:]
 }
 

@@ -207,6 +207,8 @@ func recoverableClientLink(t ports.Transport, err error) bool {
 		return false
 	}
 	switch reporter.LinkState() {
+	case ports.LinkStateConnected:
+		return errors.Is(err, ErrPendingFull)
 	case ports.LinkStateDegraded, ports.LinkStateProbing, ports.LinkStateOffline:
 		return true
 	default:

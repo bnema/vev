@@ -6,7 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -31,9 +31,11 @@ const (
 	defaultOffline          = 30 * time.Second
 	defaultDead             = 60 * time.Second
 	defaultMaxPending       = 1024
+	defaultMaxPendingWait   = 50 * time.Millisecond
 	defaultMaxRecvBuf       = 1024
 	maxRecvBuffer           = defaultMaxRecvBuf
 	linkEventBufferSize     = 16
+	probeReplyBufferSize    = 16
 )
 
 var (
@@ -53,6 +55,7 @@ type Options struct {
 	OfflineAfter     time.Duration
 	DeadAfter        time.Duration
 	MaxPending       int
+	MaxPendingWait   time.Duration
 	MaxRecvBuffer    int
 	Clock            ports.Clock
 	// RebindPacketConn is an optional client-side hook used to hop the local UDP
@@ -110,6 +113,9 @@ func normalizeOptions(opts Options) Options {
 	if opts.MaxPending <= 0 {
 		opts.MaxPending = defaultMaxPending
 	}
+	if opts.MaxPendingWait <= 0 {
+		opts.MaxPendingWait = defaultMaxPendingWait
+	}
 	if opts.MaxRecvBuffer <= 0 {
 		opts.MaxRecvBuffer = defaultMaxRecvBuf
 	}
@@ -144,12 +150,14 @@ type Transport struct {
 	offlineAfter     time.Duration
 	deadAfter        time.Duration
 	maxPending       int
+	maxPendingWait   time.Duration
 	maxRecvBuffer    int
 	clock            ports.Clock
 	linkState        ports.LinkState
 	linkEvents       chan ports.LinkEvent
 	probeWait        map[uint64]chan struct{}
-	sendCond         *sync.Cond
+	sendWake         chan struct{}
+	probeReply       chan uint64
 	rebind           func(net.PacketConn) (net.PacketConn, error)
 	hoppedOffline    bool
 
@@ -183,12 +191,14 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 		return nil, err
 	}
 	opts = normalizeOptions(opts)
-	t := &Transport{pc: pc, codec: c, sendDir: sendDir, recvDir: recvDir, mtu: opts.MTU, peer: peer, pending: make(map[uint64]*pending), replay: pdgram.NewReplayWindow(), reasm: pdgram.NewReassembler(), in: make(chan ports.Frame, 32), done: make(chan struct{}), lastHeard: opts.Clock.Now(), heartbeat: opts.Heartbeat, resendAfter: opts.ResendAfter, maxResendAfter: opts.MaxResendAfter, maxResendPerTick: opts.MaxResendPerTick, writeTimeout: opts.WriteTimeout, degradedAfter: opts.DegradedAfter, probeAfter: opts.ProbeAfter, offlineAfter: opts.OfflineAfter, deadAfter: opts.DeadAfter, maxPending: opts.MaxPending, maxRecvBuffer: opts.MaxRecvBuffer, clock: opts.Clock, linkState: ports.LinkStateConnected, linkEvents: make(chan ports.LinkEvent, linkEventBufferSize), probeWait: make(map[uint64]chan struct{}), rebind: opts.RebindPacketConn, nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame)}
+	t := &Transport{pc: pc, codec: c, sendDir: sendDir, recvDir: recvDir, mtu: opts.MTU, peer: peer, pending: make(map[uint64]*pending), replay: pdgram.NewReplayWindow(), reasm: pdgram.NewReassembler(), in: make(chan ports.Frame, 32), done: make(chan struct{}), lastHeard: opts.Clock.Now(), heartbeat: opts.Heartbeat, resendAfter: opts.ResendAfter, maxResendAfter: opts.MaxResendAfter, maxResendPerTick: opts.MaxResendPerTick, writeTimeout: opts.WriteTimeout, degradedAfter: opts.DegradedAfter, probeAfter: opts.ProbeAfter, offlineAfter: opts.OfflineAfter, deadAfter: opts.DeadAfter, maxPending: opts.MaxPending, maxPendingWait: opts.MaxPendingWait, maxRecvBuffer: opts.MaxRecvBuffer, clock: opts.Clock, linkState: ports.LinkStateConnected, linkEvents: make(chan ports.LinkEvent, linkEventBufferSize), probeWait: make(map[uint64]chan struct{}), rebind: opts.RebindPacketConn, nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame)}
+	t.sendWake = make(chan struct{}, 1)
+	t.probeReply = make(chan uint64, probeReplyBufferSize)
 	t.deliverCond = sync.NewCond(&t.deliverMu)
-	t.sendCond = sync.NewCond(&t.mu)
 	go t.readLoop(pc)
 	go t.resendLoop()
 	go t.deliveryLoop()
+	go t.probeReplyLoop()
 	return t, nil
 }
 
@@ -197,12 +207,29 @@ func (t *Transport) Send(f ports.Frame) error {
 	// dropping MsgOutput can permanently desynchronize the client screen.
 	reliable := true
 	t.mu.Lock()
+	var pendingWaitStarted time.Time
 	for reliable && len(t.pending) >= t.maxPending && !t.closed {
 		if t.linkState != ports.LinkStateConnected {
 			t.mu.Unlock()
 			return ErrPendingFull
 		}
-		t.sendCond.Wait()
+		if pendingWaitStarted.IsZero() {
+			pendingWaitStarted = t.clock.Now()
+		}
+		remaining := t.maxPendingWait - t.clock.Now().Sub(pendingWaitStarted)
+		if remaining <= 0 {
+			t.mu.Unlock()
+			return ErrPendingFull
+		}
+		timer := t.clock.NewTimer(remaining)
+		t.mu.Unlock()
+		select {
+		case <-timer.C():
+		case <-t.sendWake:
+		case <-t.done:
+		}
+		timer.Stop()
+		t.mu.Lock()
 	}
 	if t.closed {
 		err := t.closeErr
@@ -360,7 +387,7 @@ func (t *Transport) writePacket(pkt []byte, peer net.Addr) error {
 	t.mu.Unlock()
 
 	if writeTimeout > 0 {
-		if err := pc.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		if err := pc.SetWriteDeadline(t.clock.Now().Add(writeTimeout)); err != nil {
 			return err
 		}
 		defer func() { _ = pc.SetWriteDeadline(time.Time{}) }()
@@ -428,16 +455,17 @@ func (t *Transport) handleRecord(p []byte) {
 		t.mu.Lock()
 		if _, ok := t.pending[seq]; ok {
 			delete(t.pending, seq)
-			if t.sendCond != nil {
-				t.sendCond.Signal()
-			}
+			t.notifySendWaiter()
 		}
 		t.mu.Unlock()
 	case recProbe:
 		if len(p) != 9 {
 			return
 		}
-		_ = t.sendProbe(recPong, binary.BigEndian.Uint64(p[1:]))
+		select {
+		case t.probeReply <- binary.BigEndian.Uint64(p[1:]):
+		default:
+		}
 	case recPong:
 		if len(p) != 9 {
 			return
@@ -523,6 +551,24 @@ func (t *Transport) deliver(f ports.Frame) {
 	}
 }
 
+func (t *Transport) probeReplyLoop() {
+	for {
+		select {
+		case id := <-t.probeReply:
+			_ = t.sendProbe(recPong, id)
+		case <-t.done:
+			return
+		}
+	}
+}
+
+func (t *Transport) notifySendWaiter() {
+	select {
+	case t.sendWake <- struct{}{}:
+	default:
+	}
+}
+
 func (t *Transport) resendLoop() {
 	resend := t.clock.NewTimer(t.resendAfter)
 	defer resend.Stop()
@@ -555,7 +601,7 @@ func (t *Transport) resendPending() {
 	for seq := range t.pending {
 		seqs = append(seqs, seq)
 	}
-	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
+	slices.Sort(seqs)
 	limit := t.maxResendPerTick
 	for _, seq := range seqs {
 		if limit <= 0 {
@@ -657,9 +703,14 @@ func (t *Transport) setLinkState(state ports.LinkState, err error) {
 		return
 	}
 	t.linkState = state
-	if t.sendCond != nil {
-		t.sendCond.Broadcast()
+	if state == ports.LinkStateConnected {
+		for _, p := range t.pending {
+			if p != nil {
+				p.attempts = 0
+			}
+		}
 	}
+	t.notifySendWaiter()
 	t.mu.Unlock()
 	event := ports.LinkEvent{State: state, At: now, Err: err}
 	select {
@@ -678,9 +729,7 @@ func (t *Transport) closeWithError(err error) {
 	t.closeErr = err
 	t.probeWait = make(map[uint64]chan struct{})
 	close(t.done)
-	if t.sendCond != nil {
-		t.sendCond.Broadcast()
-	}
+	t.notifySendWaiter()
 	t.mu.Unlock()
 	t.deliverMu.Lock()
 	t.deliverCond.Broadcast()

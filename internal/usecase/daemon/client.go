@@ -202,18 +202,10 @@ func (ac *attachedClient) nextOutputFrameLocked(b []byte, reset bool) ports.Fram
 	return frameOutputState(b, baseStateNum, ac.nextStateNum, ac.echoAck.Load())
 }
 
-// shouldResetOutputState reads nextStateNum and must only be called while
-// sendMu is held, matching nextOutputFrameLocked.
+// shouldResetOutputState honors explicit invalidations; reliable transport ack
+// lag alone must not force a full output-state repaint.
 func (ac *attachedClient) shouldResetOutputState(reset bool) bool {
-	if reset {
-		return true
-	}
-	latest := ac.nextStateNum
-	if latest == 0 {
-		return false
-	}
-	acked := ac.outputAck.Load()
-	return acked+1 < latest
+	return reset
 }
 
 func (ac *attachedClient) advanceOutputAck(state uint64) {

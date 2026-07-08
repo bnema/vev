@@ -116,32 +116,46 @@ func TestProxyRuntimeRestartsRecoverableClientReceiveUntilIdleTTL(t *testing.T) 
 }
 
 func TestProxyRuntimeRetriesRecoverableClientSendWithoutDroppingFrame(t *testing.T) {
-	client := newFakeTransport()
-	daemon := newFakeTransport()
-	client.linkState = ports.LinkStateOffline
-	client.linkEvents <- ports.LinkEvent{State: ports.LinkStateOffline}
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: 50 * time.Millisecond, RetryBackoff: time.Nanosecond}.Run(t.Context())
-	}()
-	client.sendErr <- ErrPendingFull
-	daemon.recv <- recvResult{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("preserved during outage")}}
-	select {
-	case got := <-client.sent:
-		if got.Type != ports.MsgOutput || string(got.Payload) != "preserved during outage" {
-			t.Fatalf("client got %+v, want retried output", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for recovered daemon output")
+	tests := []struct {
+		name      string
+		state     ports.LinkState
+		linkEvent bool
+	}{
+		{name: "connected pending full", state: ports.LinkStateConnected},
+		{name: "offline pending full", state: ports.LinkStateOffline, linkEvent: true},
 	}
-	daemon.recv <- recvResult{err: io.EOF}
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("Run err=%v, want nil", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for daemon EOF")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newFakeTransport()
+			daemon := newFakeTransport()
+			client.linkState = tt.state
+			if tt.linkEvent {
+				client.linkEvents <- ports.LinkEvent{State: tt.state}
+			}
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: 50 * time.Millisecond, RetryBackoff: time.Nanosecond}.Run(t.Context())
+			}()
+			client.sendErr <- ErrPendingFull
+			daemon.recv <- recvResult{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("preserved during outage")}}
+			select {
+			case got := <-client.sent:
+				if got.Type != ports.MsgOutput || string(got.Payload) != "preserved during outage" {
+					t.Fatalf("client got %+v, want retried output", got)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for recovered daemon output")
+			}
+			daemon.recv <- recvResult{err: io.EOF}
+			select {
+			case err := <-errCh:
+				if err != nil {
+					t.Fatalf("Run err=%v, want nil", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for daemon EOF")
+			}
+		})
 	}
 }
 
