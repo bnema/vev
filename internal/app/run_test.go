@@ -25,6 +25,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRunUDPProxyUsesBoundedClientMaxPending(t *testing.T) {
+	require.Equal(t, 32, udpProxyClientTransportOptions.MaxPending)
+}
+
 func TestParseArgs(t *testing.T) {
 	tests := []struct {
 		name       string

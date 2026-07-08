@@ -730,7 +730,7 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 		return err
 	}
 	defer func() { _ = daemonTr.Close() }()
-	dg, err := dgram.NewTransport(conn, nil, key, 2, 1)
+	dg, err := dgram.NewTransportWithOptions(conn, nil, key, 2, 1, udpProxyClientTransportOptions)
 	if err != nil {
 		return err
 	}
@@ -757,6 +757,8 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 	}
 	return dgram.ProxyRuntime{Client: dgramTr, Daemon: daemonTr, Log: log}.Run(ctx)
 }
+
+var udpProxyClientTransportOptions = dgram.Options{MaxPending: 32}
 
 const (
 	// envUDPPortRange configures the remote UDP proxy's listen port range so a

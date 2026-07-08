@@ -126,35 +126,35 @@ func TestResumeRebindsRotatesAndDoesNotOpenPTY(t *testing.T) {
 	require.Same(t, resumedAC, sess.client)
 }
 
-func TestOutputAckGapForcesFullStateRepaint(t *testing.T) {
+func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 	ac := &attachedClient{}
 	ac.nextStateNum = 3
 	ac.advanceOutputAck(3)
 	ac.advanceOutputAck(2)
 	ac.advanceOutputAck(4)
 	require.Equal(t, uint64(3), ac.outputAck.Load(), "stale or future ACKs must not move output state incorrectly")
+
 	ac.sendMu.Lock()
 	ac.nextStateNum = 5
 	reset := ac.shouldResetOutputState(false)
-	require.True(t, reset, "client ack gap should force dependency-free full repaint")
+	require.False(t, reset, "reliable output ack lag alone must not force dependency-free full repaint")
 
-	f := ac.nextOutputFrameLocked([]byte("full repaint"), reset)
+	f := ac.nextOutputFrameLocked([]byte("incremental while reliable backlog drains"), reset)
 	ac.sendMu.Unlock()
 	out, err := ports.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
-	require.Equal(t, uint64(0), out.BaseStateNum, "full repaint must not depend on dropped prior output states")
+	require.Equal(t, uint64(5), out.BaseStateNum, "output should remain incremental unless an explicit reset is requested")
 	require.Equal(t, uint64(6), out.NewStateNum)
 
-	ac.outputAck.Store(out.NewStateNum)
 	ac.sendMu.Lock()
-	reset = ac.shouldResetOutputState(false)
-	require.False(t, reset, "acked current state can resume incremental output")
-	incremental := ac.nextOutputFrameLocked([]byte("incremental"), reset)
+	reset = ac.shouldResetOutputState(true)
+	require.True(t, reset, "explicit reset should still force full repaint")
+	full := ac.nextOutputFrameLocked([]byte("explicit full repaint"), reset)
 	ac.sendMu.Unlock()
-	incrementalOut, err := ports.UnmarshalOutput(incremental.Payload)
+	fullOut, err := ports.UnmarshalOutput(full.Payload)
 	require.NoError(t, err)
-	require.Equal(t, uint64(6), incrementalOut.BaseStateNum)
-	require.Equal(t, uint64(7), incrementalOut.NewStateNum)
+	require.Equal(t, uint64(0), fullOut.BaseStateNum)
+	require.Equal(t, uint64(7), fullOut.NewStateNum)
 }
 
 func TestResumeClientIDMismatchDoesNotConsumeParkedToken(t *testing.T) {
