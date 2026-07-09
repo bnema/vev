@@ -9,7 +9,22 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
+const (
+	paletteRailBreakpoint = 96
+	paletteRailWidth      = 64
+)
+
 var paletteModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Commands ", Anchor: ui.AnchorBottom, BottomMargin: 1}
+
+func paletteModalFor(size domain.Size) ui.Modal {
+	modal := paletteModal
+	if size.Cols >= paletteRailBreakpoint {
+		modal.FixedWidth = paletteRailWidth
+		modal.HorizontalAnchor = ui.HorizontalAnchorRight
+		modal.RightMargin = 1
+	}
+	return modal
+}
 
 func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	d.closePalette(ac)
@@ -277,7 +292,8 @@ func (e paletteExec) OpenSessionPicker() error {
 
 func composePaletteClientFrame(model *palette.Model, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
 	styleSet := resolveThemeStyles(styles)
-	return composeModalClientFrame(base, paletteModal, styleSet, styleSet.selection, func(size domain.Size, _ ...renderer.Style) renderer.Frame {
+	modal := paletteModalFor(domain.Size{Cols: base.Width, Rows: base.Height})
+	return composeModalClientFrame(base, modal, styleSet, styleSet.selection, func(size domain.Size, _ ...renderer.Style) renderer.Frame {
 		return model.Render(size, palette.RenderStyles{Selection: styleSet.selection, Description: styleSet.paletteDesc})
 	})
 }

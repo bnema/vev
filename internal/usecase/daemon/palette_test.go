@@ -217,14 +217,27 @@ func TestPaletteCtrlNAndCtrlPNavigate(t *testing.T) {
 }
 
 func TestPaletteModalGeometry(t *testing.T) {
-	require.Equal(t, 100, paletteModal.WidthPct)
-	require.Equal(t, 11, paletteModal.FixedHeight)
-	require.Equal(t, ui.AnchorBottom, paletteModal.Anchor)
-	require.Equal(t, 1, paletteModal.BottomMargin)
-	require.Equal(t, 32, paletteModal.MinWidth)
+	tests := []struct {
+		name string
+		size domain.Size
+		want domain.Rect
+	}{
+		{name: "95 column shelf", size: domain.Size{Cols: 95, Rows: 40}, want: domain.Rect{X: 0, Y: 28, Width: 95, Height: 11}},
+		{name: "96 column rail", size: domain.Size{Cols: 96, Rows: 40}, want: domain.Rect{X: 31, Y: 28, Width: 64, Height: 11}},
+		{name: "120 column rail", size: domain.Size{Cols: 120, Rows: 40}, want: domain.Rect{X: 55, Y: 28, Width: 64, Height: 11}},
+		{name: "tiny terminal clamps", size: domain.Size{Cols: 20, Rows: 6}, want: domain.Rect{X: 0, Y: 0, Width: 20, Height: 6}},
+	}
 
-	bounds := paletteModal.Bounds(domain.Size{Cols: 120, Rows: 40})
-	require.Equal(t, domain.Rect{X: 0, Y: 28, Width: 120, Height: 11}, bounds)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			modal := paletteModalFor(tt.size)
+			require.Equal(t, tt.want, modal.Bounds(tt.size))
+			require.Equal(t, " Commands ", modal.Title)
+			require.Equal(t, 11, modal.FixedHeight)
+			require.Equal(t, ui.AnchorBottom, modal.Anchor)
+			require.Equal(t, 1, modal.BottomMargin)
+		})
+	}
 }
 
 func TestPaletteUTF8PendingCompletesFilter(t *testing.T) {
