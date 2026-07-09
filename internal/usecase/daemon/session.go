@@ -568,11 +568,6 @@ func (s *session) persistRecordLocked(updatedAt int64) persist.Record {
 }
 
 func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
-	d.mu.Lock()
-	if d.sessions[sess.id] != sess {
-		d.mu.Unlock()
-		return
-	}
 	sess.mu.Lock()
 	idx := -1
 	for i, w := range sess.tabs {
@@ -583,7 +578,6 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	}
 	if idx == -1 {
 		sess.mu.Unlock()
-		d.mu.Unlock()
 		return
 	}
 	if len(sess.tabs) == 1 {
