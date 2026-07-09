@@ -23,6 +23,8 @@ type screenState struct {
 	scrollTop    int
 	scrollBottom int
 	savedCursor  cursorState
+	originMode   bool
+	insertMode   bool
 }
 
 // maxEscapeBufferLen must stay large enough for OSC 52 clipboard payloads
@@ -98,6 +100,8 @@ type Screen struct {
 	mouseMode        int
 	mouseSGR         bool
 	bracketedPaste   bool
+	originMode       bool
+	insertMode       bool
 	colorSchemeMode  bool
 	colorSchemeLight bool
 	colorSchemeSet   bool
@@ -325,6 +329,24 @@ func (s *Screen) putPrintable(r rune) {
 		}
 	}
 
+	insertDamageX := s.Col
+	insertDamageWidth := 0
+	if s.insertMode {
+		row := s.Frame.Row(s.Row)
+		leftSplit := s.Col > 0 && row[s.Col].Continuation
+		for x := s.Frame.Width - 1; x >= s.Col+w; x-- {
+			row[x] = row[x-w]
+		}
+		for x := s.Col; x < s.Col+w; x++ {
+			row[x] = renderer.BlankCell()
+		}
+		s.repairRow(s.Row)
+		if leftSplit {
+			insertDamageX = s.Col - 1
+		}
+		insertDamageWidth = s.Frame.Width - insertDamageX
+	}
+
 	// Determine the range of cells actually modified, extending over any wide
 	// pair the write lands on so no orphaned half is left behind.
 	lo, hi := s.Col, s.Col+w-1
@@ -340,6 +362,10 @@ func (s *Screen) putPrintable(r rune) {
 	s.Frame.Set(s.Col, s.Row, renderer.Cell{Rune: r, Style: s.Style})
 	if w == 2 {
 		s.Frame.Set(s.Col+1, s.Row, renderer.Cell{Continuation: true, Style: s.Style})
+	}
+	if insertDamageWidth > 0 {
+		lo = min(lo, insertDamageX)
+		hi = max(hi, insertDamageX+insertDamageWidth-1)
 	}
 	s.record(renderer.Damage{Kind: renderer.DamageText, X: lo, Y: s.Row, Width: hi - lo + 1, Height: 1, Count: 1})
 	s.Col += w
@@ -402,26 +428,30 @@ func (s *Screen) clearRow(y, x0, x1 int) (start, width int) {
 // continuation. Used after erase/insert/delete operations that may split a pair
 // at a boundary or by shifting cells.
 func (s *Screen) repairRow(y int) {
-	if y < 0 || y >= s.Frame.Height {
+	repairFrameRow(s.Frame, y)
+}
+
+func repairFrameRow(frame renderer.Frame, y int) {
+	if y < 0 || y >= frame.Height {
 		return
 	}
-	w := s.Frame.Width
+	w := frame.Width
 	for x := range w {
-		c := s.Frame.At(x, y)
+		c := frame.At(x, y)
 		if c.Continuation {
 			if x == 0 {
-				s.Frame.Set(x, y, renderer.BlankCell())
+				frame.Set(x, y, renderer.BlankCell())
 				continue
 			}
-			left := s.Frame.At(x-1, y)
+			left := frame.At(x-1, y)
 			if left.Continuation || renderer.RuneWidth(left.Rune) != 2 {
-				s.Frame.Set(x, y, renderer.BlankCell())
+				frame.Set(x, y, renderer.BlankCell())
 			}
 			continue
 		}
 		if renderer.RuneWidth(c.Rune) == 2 {
-			if x+1 >= w || !s.Frame.At(x+1, y).Continuation {
-				s.Frame.Set(x, y, renderer.BlankCell())
+			if x+1 >= w || !frame.At(x+1, y).Continuation {
+				frame.Set(x, y, renderer.BlankCell())
 			}
 		}
 	}
@@ -877,28 +907,27 @@ func (s *Screen) applyCSI(params string, cmd byte) {
 		if len(parts) > 1 && parts[1] > 0 {
 			col = parts[1]
 		}
-		s.Row = clamp(row-1, 0, s.Frame.Height-1)
-		s.Col = clamp(col-1, 0, s.Frame.Width-1)
+		s.addressCursor(row, col)
 	case 'A':
-		s.Row = clamp(s.Row-firstPositive(parts, 1), 0, s.Frame.Height-1)
+		s.Row = clamp(s.Row-firstPositive(parts, 1), s.cursorMinRow(), s.cursorMaxRow())
 	case 'B':
-		s.Row = clamp(s.Row+firstPositive(parts, 1), 0, s.Frame.Height-1)
+		s.Row = clamp(s.Row+firstPositive(parts, 1), s.cursorMinRow(), s.cursorMaxRow())
 	case 'C':
 		s.Col = clamp(s.Col+firstPositive(parts, 1), 0, s.Frame.Width-1)
 	case 'D':
 		s.Col = clamp(s.Col-firstPositive(parts, 1), 0, s.Frame.Width-1)
 	case 'E':
-		s.Row = clamp(s.Row+firstPositive(parts, 1), 0, s.Frame.Height-1)
+		s.Row = clamp(s.Row+firstPositive(parts, 1), s.cursorMinRow(), s.cursorMaxRow())
 		s.Col = 0
 	case 'F':
-		s.Row = clamp(s.Row-firstPositive(parts, 1), 0, s.Frame.Height-1)
+		s.Row = clamp(s.Row-firstPositive(parts, 1), s.cursorMinRow(), s.cursorMaxRow())
 		s.Col = 0
 	case 'G':
 		col := firstPositive(parts, 1)
 		s.Col = clamp(col-1, 0, s.Frame.Width-1)
 	case 'd':
 		row := firstPositive(parts, 1)
-		s.Row = clamp(row-1, 0, s.Frame.Height-1)
+		s.Row = s.addressedRow(row)
 	case '@':
 		s.insertChars(firstPositive(parts, 1))
 	case 'P':
@@ -927,6 +956,36 @@ func firstPositive(parts []int, fallback int) int {
 		return fallback
 	}
 	return parts[0]
+}
+
+func (s *Screen) cursorMinRow() int {
+	if s.originMode {
+		return clamp(s.scrollTop, 0, s.Frame.Height-1)
+	}
+	return 0
+}
+
+func (s *Screen) cursorMaxRow() int {
+	if s.originMode {
+		return clamp(s.scrollBottom, 0, s.Frame.Height-1)
+	}
+	return max(s.Frame.Height-1, 0)
+}
+
+func (s *Screen) addressedRow(row int) int {
+	if s.originMode {
+		return clamp(s.scrollTop+row-1, s.cursorMinRow(), s.cursorMaxRow())
+	}
+	return clamp(row-1, 0, s.Frame.Height-1)
+}
+
+func (s *Screen) addressCursor(row, col int) {
+	s.Row = s.addressedRow(row)
+	s.Col = clamp(col-1, 0, s.Frame.Width-1)
+}
+
+func (s *Screen) homeCursor() {
+	s.addressCursor(1, 1)
 }
 
 func (s *Screen) applyCursorStyle(params string) {
@@ -1043,6 +1102,8 @@ func (s *Screen) reset() {
 	s.escapeBuf = s.escapeBuf[:0]
 	s.savedCursor = cursorState{}
 	s.alternate = nil
+	s.originMode = false
+	s.insertMode = false
 	s.cursorVisible = true
 	s.cursorStyle = 0
 	s.cursorStyleSet = false
@@ -1088,10 +1149,23 @@ func (s *Screen) resetScrollRegion() {
 
 func (s *Screen) setMode(private bool, parts []int, enabled bool) {
 	if !private {
+		for _, mode := range parts {
+			switch mode {
+			case 4:
+				s.insertMode = enabled
+			default:
+				// Other ANSI modes (for example LNM) are intentionally ignored
+				// until the screen model implements their observable behavior.
+				continue
+			}
+		}
 		return
 	}
 	for _, mode := range parts {
 		switch mode {
+		case 6:
+			s.originMode = enabled
+			s.homeCursor()
 		case 47, 1047, 1049:
 			if enabled {
 				s.enterAlternateScreen()
@@ -1132,6 +1206,8 @@ func (s *Screen) enterAlternateScreen() {
 			scrollTop:    s.scrollTop,
 			scrollBottom: s.scrollBottom,
 			savedCursor:  s.savedCursor,
+			originMode:   s.originMode,
+			insertMode:   s.insertMode,
 		}
 	}
 	s.Frame = renderer.NewFrame(s.Frame.Width, s.Frame.Height)
@@ -1154,6 +1230,8 @@ func (s *Screen) exitAlternateScreen() {
 	s.scrollTop = state.scrollTop
 	s.scrollBottom = state.scrollBottom
 	s.savedCursor = state.savedCursor
+	s.originMode = state.originMode
+	s.insertMode = state.insertMode
 	s.alternate = nil
 	s.fullRedraw()
 }
@@ -1172,6 +1250,7 @@ func resizeFrame(old renderer.Frame, newW, newH, cursorRow int, evict func([]ren
 			break
 		}
 		copy(next.Row(dy), old.Row(sy))
+		repairFrameRow(next, dy)
 	}
 	return next, shift
 }

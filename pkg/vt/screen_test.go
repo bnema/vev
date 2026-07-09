@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -63,6 +64,24 @@ func assertBlank(t *testing.T, s *Screen, x, y int) {
 	c := cellAt(s, x, y)
 	if c.Rune != ' ' || c.Continuation {
 		t.Errorf("cell(%d,%d) = {rune:%q cont:%v}, want blank space", x, y, c.Rune, c.Continuation)
+	}
+}
+
+func assertNoOrphanWideCells(t *testing.T, s *Screen) {
+	t.Helper()
+	for y := range s.Frame.Height {
+		for x := range s.Frame.Width {
+			c := cellAt(s, x, y)
+			if c.Continuation {
+				if x == 0 || cellAt(s, x-1, y).Continuation || renderer.RuneWidth(cellAt(s, x-1, y).Rune) != 2 {
+					t.Fatalf("orphan continuation at (%d,%d)", x, y)
+				}
+				continue
+			}
+			if renderer.RuneWidth(c.Rune) == 2 && (x+1 >= s.Frame.Width || !cellAt(s, x+1, y).Continuation) {
+				t.Fatalf("orphan wide head at (%d,%d) rune %q", x, y, c.Rune)
+			}
+		}
 	}
 }
 
@@ -1279,6 +1298,40 @@ func TestCSIEditingSequences(t *testing.T) {
 			},
 		},
 		{
+			name: "DECOM homes and addresses relative to scroll region",
+			run: func(t *testing.T) {
+				s := NewScreen(6, 5)
+				s.Write([]byte("\x1b[2;4r\x1b[?6h"))
+				if s.Row != 1 || s.Col != 0 {
+					t.Fatalf("DECOM set cursor = (%d,%d), want (1,0)", s.Row, s.Col)
+				}
+
+				s.Write([]byte("\x1b[2;3H"))
+				if s.Row != 2 || s.Col != 2 {
+					t.Fatalf("DECOM addressed cursor = (%d,%d), want (2,2)", s.Row, s.Col)
+				}
+				s.Write([]byte("\x1b[99;1H"))
+				if s.Row != 3 || s.Col != 0 {
+					t.Fatalf("DECOM clamped cursor = (%d,%d), want (3,0)", s.Row, s.Col)
+				}
+			},
+		},
+		{
+			name: "DECOM reset homes and restores full-frame addressing",
+			run: func(t *testing.T) {
+				s := NewScreen(6, 5)
+				s.Write([]byte("\x1b[2;4r\x1b[?6h\x1b[?6l"))
+				if s.Row != 0 || s.Col != 0 {
+					t.Fatalf("DECOM reset cursor = (%d,%d), want (0,0)", s.Row, s.Col)
+				}
+
+				s.Write([]byte("\x1b[5;6H"))
+				if s.Row != 4 || s.Col != 5 {
+					t.Fatalf("full-frame cursor = (%d,%d), want (4,5)", s.Row, s.Col)
+				}
+			},
+		},
+		{
 			name: "private alternate screen mode restores normal screen on exit",
 			run: func(t *testing.T) {
 				s := NewScreen(20, 5)
@@ -1633,6 +1686,35 @@ func TestResize(t *testing.T) {
 				s.Resize(5, 2)
 				if got := rowString(s, 1); got != "ghi  " {
 					t.Fatalf("padded row = %q", got)
+				}
+			},
+		},
+		{
+			name: "width shrink repairs truncated wide head",
+			run: func(t *testing.T) {
+				s := NewScreen(4, 1)
+				s.Write([]byte("AB界"))
+
+				s.Resize(3, 1)
+
+				assertCell(t, s, 0, 0, 'A')
+				assertCell(t, s, 1, 0, 'B')
+				assertBlank(t, s, 2, 0)
+				assertNoOrphanWideCells(t, s)
+			},
+		},
+		{
+			name: "random wide resize repairs copied rows",
+			run: func(t *testing.T) {
+				rng := rand.New(rand.NewSource(1))
+				for i := 0; i < 200; i++ {
+					s := NewScreen(8, 4)
+					s.Write([]byte("a界b好c語d"))
+					s.Row = rng.Intn(s.Frame.Height)
+
+					s.Resize(rng.Intn(8)+1, rng.Intn(4)+1)
+
+					assertNoOrphanWideCells(t, s)
 				}
 			},
 		},
@@ -2202,6 +2284,52 @@ func TestWideAndZeroWidthRunes(t *testing.T) {
 				if d[0].X != 0 || d[0].Width != 6 {
 					t.Errorf("DCH damage = {X:%d W:%d}, want {X:0 W:6}", d[0].X, d[0].Width)
 				}
+			},
+		},
+		{
+			name: "IRM inserts narrow printable cells and reset restores overwrite",
+			run: func(t *testing.T) {
+				s := NewScreen(8, 1)
+				s.Write([]byte("abcd\x1b[1;3H\x1b[4hX"))
+
+				if got := lineText(s, 0); got != "abXcd   " {
+					t.Fatalf("IRM inserted line = %q, want %q", got, "abXcd   ")
+				}
+				s.Write([]byte("\x1b[4l\x1b[1;3HY"))
+				if got := lineText(s, 0); got != "abYcd   " {
+					t.Fatalf("IRM reset overwrite line = %q, want %q", got, "abYcd   ")
+				}
+			},
+		},
+		{
+			name: "IRM inserts wide printable cells and repairs evicted wide head",
+			run: func(t *testing.T) {
+				s := NewScreen(6, 1)
+				s.Write([]byte("ab界cd"))
+				s.Write([]byte("\x1b[1;3H\x1b[4h好"))
+
+				assertCell(t, s, 0, 0, 'a')
+				assertCell(t, s, 1, 0, 'b')
+				assertCell(t, s, 2, 0, '好')
+				assertContinuation(t, s, 3, 0)
+				assertCell(t, s, 4, 0, '界')
+				assertContinuation(t, s, 5, 0)
+				assertNoOrphanWideCells(t, s)
+			},
+		},
+		{
+			name: "IRM wide insert at right edge repairs orphan",
+			run: func(t *testing.T) {
+				s := NewScreen(5, 1)
+				s.Write([]byte("abc界"))
+				s.Write([]byte("\x1b[1;2H\x1b[4h好"))
+
+				assertCell(t, s, 0, 0, 'a')
+				assertCell(t, s, 1, 0, '好')
+				assertContinuation(t, s, 2, 0)
+				assertCell(t, s, 3, 0, 'b')
+				assertCell(t, s, 4, 0, 'c')
+				assertNoOrphanWideCells(t, s)
 			},
 		},
 		{
