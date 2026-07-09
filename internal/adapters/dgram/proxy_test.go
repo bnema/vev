@@ -78,6 +78,33 @@ func TestProxyRuntimeCopiesFramesAndDaemonEOFIsTerminal(t *testing.T) {
 	}
 }
 
+func TestProxyRuntimeForwardsOutputAckCapabilityInHello(t *testing.T) {
+	client := newFakeTransport()
+	daemon := newFakeTransport()
+	errCh := make(chan error, 1)
+	go func() { errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Hour}.Run(t.Context()) }()
+	hello := ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", AckOutput: true}
+	client.recv <- recvResult{frame: ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}}
+
+	select {
+	case frame := <-daemon.sent:
+		got, err := ports.UnmarshalHello(frame.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.AckOutput {
+			t.Fatal("proxied Hello lost AckOutput capability")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for proxied Hello")
+	}
+
+	daemon.recv <- recvResult{err: io.EOF}
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run err=%v, want nil", err)
+	}
+}
+
 func TestProxyRuntimeRetriesRecoverableClientSendWithoutDroppingFrame(t *testing.T) {
 	tests := []struct {
 		name  string

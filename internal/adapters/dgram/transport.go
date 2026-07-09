@@ -240,9 +240,16 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 	return t, nil
 }
 
+// DatagramTransport marks this transport as UDP/datagram-backed for daemon
+// output-state policy selection.
+func (t *Transport) DatagramTransport() {}
+
 func (t *Transport) Send(f ports.Frame) error {
-	// Until full ACK-driven terminal state sync exists, every frame is reliable;
-	// dropping MsgOutput can permanently desynchronize the client screen.
+	// MsgOutput supersession is intentionally deferred: this reliable stream uses
+	// strict sequence delivery, so deleting an older pending output without a
+	// receive-side skip/ack signal would stall later frames behind the missing
+	// sequence. Add an explicit droppable/skip protocol before replacing pending
+	// outputs.
 	reliable := true
 	t.mu.Lock()
 	var pendingWaitStarted time.Time

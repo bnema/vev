@@ -29,6 +29,17 @@ func NewFrame(width, height int) Frame {
 	return Frame{Width: width, Height: height, Cells: cells, lineOffset: lineOffset}
 }
 
+// Clone returns an independent copy preserving logical row contents. The clone
+// uses canonical row storage so later scrolls or writes to the source frame do
+// not affect it.
+func (f Frame) Clone() Frame {
+	clone := NewFrame(f.Width, f.Height)
+	for y := range f.Height {
+		copy(clone.Row(y), f.Row(y))
+	}
+	return clone
+}
+
 func (f Frame) Validate() error {
 	if f.Width <= 0 || f.Height <= 0 {
 		return fmt.Errorf("invalid frame size %dx%d", f.Width, f.Height)
