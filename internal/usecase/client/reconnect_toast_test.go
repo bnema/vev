@@ -222,8 +222,8 @@ func TestReconnectToastDrawAndClearHelpers(t *testing.T) {
 	require.Contains(t, out.String(), reconnectToastMessage)
 	require.Contains(t, out.String(), "\x1b[0m")
 
-	require.NoError(t, clearReconnectToast(&out, size))
 	bounds := reconnectToastBounds(size)
+	require.NoError(t, clearReconnectToast(&out, bounds))
 	require.Contains(t, out.String(), strings.Repeat(" ", bounds.Width))
 }
 
@@ -235,6 +235,61 @@ func TestReconnectToastLinesClampToBounds(t *testing.T) {
 		require.LessOrEqual(t, displayWidth(line), bounds.Width)
 	}
 	require.Contains(t, strings.Join(lines, "\n"), "…")
+}
+
+func TestReconnectToastStageTransitionsClearDrawnBounds(t *testing.T) {
+	size := domain.Size{Cols: 80, Rows: 24}
+	tests := []struct {
+		name   string
+		stages []reconnectStage
+	}{
+		{
+			name:   "degraded to probing to ssh to offline",
+			stages: []reconnectStage{reconnectStageDegraded, reconnectStageProbingUDP, reconnectStageSSH, reconnectStageOfflineRetrying},
+		},
+		{
+			name:   "widest ssh to offline",
+			stages: []reconnectStage{reconnectStageSSH, reconnectStageOfflineRetrying},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			previousBounds, err := drawReconnectToastStage(&out, size, tt.stages[0])
+			require.NoError(t, err)
+
+			for _, stage := range tt.stages[1:] {
+				out.Reset()
+				require.NoError(t, clearReconnectToast(&out, previousBounds))
+				assertReconnectToastClearCoversBounds(t, out.String(), previousBounds)
+
+				out.Reset()
+				previousBounds, err = drawReconnectToastStage(&out, size, stage)
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestReconnectToastClearAfterWidestStageErasesFullBorder(t *testing.T) {
+	size := domain.Size{Cols: 80, Rows: 24}
+	var out bytes.Buffer
+	bounds, err := drawReconnectToastStage(&out, size, reconnectStageSSH)
+	require.NoError(t, err)
+	require.Greater(t, bounds.Width, reconnectToastBounds(size).Width)
+
+	out.Reset()
+	require.NoError(t, clearReconnectToast(&out, bounds))
+	assertReconnectToastClearCoversBounds(t, out.String(), bounds)
+}
+
+func assertReconnectToastClearCoversBounds(t *testing.T, output string, bounds domain.Rect) {
+	t.Helper()
+	blank := strings.Repeat(" ", bounds.Width)
+	for row := range bounds.Height {
+		require.Contains(t, output, fmt.Sprintf("\x1b[%d;%dH\x1b[0m%s", bounds.Y+row+1, bounds.X+1, blank))
+	}
 }
 
 func displayWidth(s string) int {
