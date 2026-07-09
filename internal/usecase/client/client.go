@@ -160,17 +160,17 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 	attemptName := name
 	backoff := defaultReconnectBackoff.initial
 	showingStatus := false
-	var reconnectToastSize domain.Size
+	var reconnectToastRect domain.Rect
 	statusStage := reconnectStageOfflineRetrying
 	redrawRemoteStatus := func(size domain.Size) {
 		if !rawEntered || !remote {
 			return
 		}
 		if showingStatus {
-			_ = clearReconnectToast(term.Out(), reconnectToastSize)
+			_ = clearReconnectToast(term.Out(), reconnectToastRect)
 		}
-		_ = drawReconnectToastStage(term.Out(), size, statusStage)
-		reconnectToastSize = size
+		drawnRect, _ := drawReconnectToastStage(term.Out(), size, statusStage)
+		reconnectToastRect = drawnRect
 		_ = term.Flush()
 		showingStatus = true
 	}
@@ -207,7 +207,7 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 			return
 		}
 		if remote {
-			_ = clearReconnectToast(term.Out(), reconnectToastSize)
+			_ = clearReconnectToast(term.Out(), reconnectToastRect)
 		} else {
 			_, _ = term.Out().Write([]byte(statusClear))
 		}

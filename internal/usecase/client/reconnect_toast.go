@@ -28,20 +28,20 @@ func reconnectStageMessage(stage reconnectStage) string {
 }
 
 func drawReconnectToast(out io.Writer, size domain.Size) error {
-	return drawReconnectToastStage(out, size, reconnectStageOfflineRetrying)
+	_, err := drawReconnectToastStage(out, size, reconnectStageOfflineRetrying)
+	return err
 }
 
-func drawReconnectToastStage(out io.Writer, size domain.Size, stage reconnectStage) error {
+func drawReconnectToastStage(out io.Writer, size domain.Size, stage reconnectStage) (domain.Rect, error) {
 	message := reconnectStageMessage(stage)
 	bounds := reconnectToastBoundsFor(size, message)
 	if bounds.Width <= 0 || bounds.Height <= 0 {
-		return nil
+		return domain.Rect{}, nil
 	}
-	return writeReconnectToast(out, bounds, reconnectToastLinesFor(bounds, message))
+	return bounds, writeReconnectToast(out, bounds, reconnectToastLinesFor(bounds, message))
 }
 
-func clearReconnectToast(out io.Writer, size domain.Size) error {
-	bounds := reconnectToastBounds(size)
+func clearReconnectToast(out io.Writer, bounds domain.Rect) error {
 	if bounds.Width <= 0 || bounds.Height <= 0 {
 		return nil
 	}
