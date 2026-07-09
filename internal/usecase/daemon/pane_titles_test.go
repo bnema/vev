@@ -95,18 +95,29 @@ func TestRefreshPaneTitleCachesByTTLAndRefreshesOnFocus(t *testing.T) {
 	require.Equal(t, int32(2), calls.Load(), "focus refresh should bypass TTL")
 }
 
-func TestRefreshPaneTitleFallsBackToShellBase(t *testing.T) {
+func TestRefreshPaneTitleLookupFailureKeepsProcessNameEmpty(t *testing.T) {
 	pty := portsmocks.NewMockPTY(t)
-	pty.EXPECT().ForegroundPgid().Return(0, errors.New("no foreground process")).Once()
+	pty.EXPECT().ForegroundPgid().Return(0, errors.New("no foreground process")).Twice()
 	_, sess, _, _ := newManualSessionWithPTYs(t, pty)
 	clk := portsmocks.NewMockClock(t)
 	clk.EXPECT().Now().Return(time.Time{}).Maybe()
 	d := newTestDaemon(t, nil, clk)
 	d.shell = "/usr/bin/fish"
 	d.procComm = func(int) (string, error) { return "", errors.New("unused") }
+	p := sess.activeTab().focusedPane()
 
-	title := d.refreshPaneTitle(sess, "pane-1")
+	p.mu.Lock()
+	p.screen.Write([]byte("\x1b]2;terminal\a"))
+	p.refreshTerminalTitleLocked()
+	p.mu.Unlock()
+	require.Equal(t, "terminal", d.refreshPaneDisplayTitle(sess, p, true))
+	p.mu.Lock()
+	require.Empty(t, p.title.processName, "a lookup failure must not become process state")
+	p.mu.Unlock()
 
-	require.Equal(t, "fish", title)
-	require.Equal(t, "fish", sess.activeTab().focusedPane().title.processName)
+	p.mu.Lock()
+	p.screen.Write([]byte("\x1b]2;\a"))
+	p.refreshTerminalTitleLocked()
+	p.mu.Unlock()
+	require.Equal(t, "fish", d.refreshPaneDisplayTitle(sess, p, true))
 }

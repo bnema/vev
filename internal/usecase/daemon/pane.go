@@ -48,6 +48,7 @@ func newPaneWithStableID(id layout.PaneID, stableID string, pty ports.PTY, sz do
 		dirty:      make(chan struct{}, 1),
 		flush:      make(chan struct{}, 1),
 		rect:       domain.Rect{Width: sz.Cols, Height: sz.Rows},
+		title:      paneTitleState{displayFallback: "sh"},
 	}
 }
 

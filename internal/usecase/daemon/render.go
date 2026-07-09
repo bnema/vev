@@ -664,7 +664,7 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 		focused := tb.tree.Focus == pl.ID
 		pl = offsetPlacement(pl, area.X, area.Y)
 		if pl.TitleBar.Height > 0 {
-			generation := drawPaneTitleBar(frame, pl, p, focused, theme, string(p.id))
+			generation := drawPaneTitleBar(frame, pl, p, focused, theme)
 			if cacheValid && (titleGenerations == nil || titleGenerations[pl.ID] != generation) {
 				titleDamage := pl.TitleBar
 				titleDamage.X -= area.X
@@ -737,7 +737,7 @@ func blitPaneFrame(dst renderer.Frame, r domain.Rect, src renderer.Frame, dim bo
 	}
 }
 
-func drawPaneTitleBar(frame renderer.Frame, pl layout.Placement, p *pane, focused bool, theme themeui.Theme, fallback string) uint64 {
+func drawPaneTitleBar(frame renderer.Frame, pl layout.Placement, p *pane, focused bool, theme themeui.Theme) uint64 {
 	styles := newThemeStyles(theme)
 	style := styles.border
 	if focused {
@@ -749,7 +749,7 @@ func drawPaneTitleBar(frame renderer.Frame, pl layout.Placement, p *pane, focuse
 		frame.Set(x, pl.TitleBar.Y, renderer.Cell{Rune: ' ', Style: style})
 	}
 	p.mu.Lock()
-	title := p.formattedTitleLocked(fallback)
+	title := p.displayTitleLocked()
 	generation := p.title.generation
 	p.mu.Unlock()
 	ui.DrawText(frame, pl.TitleBar.X, pl.TitleBar.Y, pl.TitleBar.X+pl.TitleBar.Width, title, style)

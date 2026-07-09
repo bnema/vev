@@ -18,6 +18,7 @@ type paneTitleState struct {
 	processNameAt    time.Time
 	processNameValid bool
 	terminalTitle    string
+	displayFallback  string
 	generation       uint64
 }
 
@@ -36,6 +37,10 @@ func formatPaneTitle(processName, terminalTitle, fallback string) string {
 
 func (p *pane) formattedTitleLocked(fallback string) string {
 	return formatPaneTitle(p.title.processName, p.title.terminalTitle, fallback)
+}
+
+func (p *pane) displayTitleLocked() string {
+	return p.formattedTitleLocked(p.title.displayFallback)
 }
 
 // refreshTerminalTitleLocked synchronizes the title retained by the VT parser.
@@ -94,13 +99,21 @@ func (d *Daemon) refreshPaneDisplayTitle(_ *session, p *pane, force bool) string
 	now := d.clock.Now()
 	p.mu.Lock()
 	if !force && p.title.processNameValid && now.Sub(p.title.processNameAt) < paneTitleCacheTTL {
-		title := p.formattedTitleLocked(fallback)
+		oldTitle := p.displayTitleLocked()
+		p.title.displayFallback = fallback
+		title := p.displayTitleLocked()
+		if oldTitle != title {
+			p.title.generation++
+		}
 		p.mu.Unlock()
 		return title
 	}
 	p.mu.Unlock()
 
-	processName := fallback
+	// A failed lookup means no process name was discovered. Keep that state
+	// distinct from the display fallback: an OSC title must then stand alone,
+	// and future floating panes can supply their command fallback at format time.
+	processName := ""
 	if d.procComm != nil && p.pty != nil {
 		if pgid, err := p.pty.ForegroundPgid(); err == nil && pgid > 0 {
 			if comm, err := d.procComm(pgid); err == nil && strings.TrimSpace(comm) != "" {
@@ -110,13 +123,15 @@ func (d *Daemon) refreshPaneDisplayTitle(_ *session, p *pane, force bool) string
 	}
 
 	p.mu.Lock()
-	if p.title.processName != processName {
-		p.title.processName = processName
-		p.title.generation++
-	}
+	oldTitle := p.displayTitleLocked()
+	p.title.processName = processName
 	p.title.processNameAt = now
 	p.title.processNameValid = true
-	title := p.formattedTitleLocked(fallback)
+	p.title.displayFallback = fallback
+	title := p.displayTitleLocked()
+	if oldTitle != title {
+		p.title.generation++
+	}
 	p.mu.Unlock()
 	return title
 }

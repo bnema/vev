@@ -661,6 +661,17 @@ func BenchmarkPaintCachedSinglePaneDamage(b *testing.B) {
 	}
 }
 
+func TestComposeTabFrameStackUsesShellFallback(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
+	p := win.focusedPane()
+	p.title.displayFallback = "fish"
+	win.tree.Root = &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(p.id)}, Expanded: p.id}
+
+	frame, _ := composeTabFrame(win, domain.Rect{Width: 20, Height: 5}, themeui.Theme{})
+
+	require.Equal(t, "fish", rowText(frame.Row(0))[:4])
+}
+
 func TestComposeTabFrameStackDrawsTitleBarsAndDimsCollapsed(t *testing.T) {
 	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
 	p1 := win.focusedPane()
