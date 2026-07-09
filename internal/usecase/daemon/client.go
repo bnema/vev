@@ -425,12 +425,7 @@ func (d *Daemon) notifiesSnapshot() []chan struct{} {
 type attachClientOptions struct {
 	clientID      [16]byte
 	resumeCapable bool
-	datagram      bool
-}
-
-func isDatagramTransport(tr ports.Transport) bool {
-	_, ok := tr.(ports.DatagramTransport)
-	return ok
+	ackOutput     bool
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, *attachedClient) {
@@ -439,7 +434,7 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 		resumeToken = d.nextResumeTokenLocked()
 	}
 	caps := renderer.Capabilities{}
-	advanceOutputOnAck := opts.datagram || isDatagramTransport(tr)
+	advanceOutputOnAck := opts.ackOutput
 	if advanceOutputOnAck {
 		caps.AdvancePolicy = renderer.AdvanceOnAck
 	}

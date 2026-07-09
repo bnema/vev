@@ -352,6 +352,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	termEnv := os.Getenv("TERM")
 	colorTerm := os.Getenv("COLORTERM")
 	trueColor := DetectTrueColor(termEnv, colorTerm)
+	_, ackOutput := transport.(ports.DatagramTransport)
 	hello := ports.Hello{
 		Version:     ports.ProtocolVersion,
 		Intent:      intent,
@@ -362,6 +363,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 		TermEnv:     termEnv,
 		Cwd:         cwd,
 		TrueColor:   trueColor,
+		AckOutput:   ackOutput,
 	}
 	if err := transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
 		return attachResult{err: fmt.Errorf("vev: sending hello: %w", err)}
