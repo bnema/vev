@@ -1135,7 +1135,7 @@ func (s *Screen) setScrollRegion(parts []int) {
 			s.resetScrollRegion()
 		}
 	}
-	s.Row, s.Col = 0, 0
+	s.homeCursor()
 }
 
 func (s *Screen) resetScrollRegion() {

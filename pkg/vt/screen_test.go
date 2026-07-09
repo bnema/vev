@@ -1317,6 +1317,25 @@ func TestCSIEditingSequences(t *testing.T) {
 			},
 		},
 		{
+			name: "DECOM already set homes DECSTBM to scroll region",
+			run: func(t *testing.T) {
+				s := NewScreen(6, 5)
+				s.Write([]byte("\x1b[?6h\x1b[2;4r"))
+				if s.Row != 1 || s.Col != 0 {
+					t.Fatalf("DECSTBM cursor with DECOM set = (%d,%d), want (1,0)", s.Row, s.Col)
+				}
+
+				s.Write([]byte("\x1b[2;3H"))
+				if s.Row != 2 || s.Col != 2 {
+					t.Fatalf("DECOM addressed cursor after DECSTBM = (%d,%d), want (2,2)", s.Row, s.Col)
+				}
+				s.Write([]byte("\x1b[99;1H"))
+				if s.Row != 3 || s.Col != 0 {
+					t.Fatalf("DECOM clamped cursor after DECSTBM = (%d,%d), want (3,0)", s.Row, s.Col)
+				}
+			},
+		},
+		{
 			name: "DECOM reset homes and restores full-frame addressing",
 			run: func(t *testing.T) {
 				s := NewScreen(6, 5)
