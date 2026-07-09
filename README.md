@@ -134,6 +134,10 @@ When the attaching client reports truecolor support, vev advertises newly spawne
 
 Applications that use terminfo can detect direct color from `xterm-direct`; applications that use the common environment convention can use `COLORTERM=truecolor` when it is present. Panes restored from a saved snapshot start conservatively before any client attaches; after attach or resume, newly spawned panes use that client's reported capability.
 
+## Terminal compatibility
+
+vev keeps a server-side VT screen for each pane. It tracks scroll regions with DECOM origin mode, ANSI insert mode, cursor-position and mode-query reports, alternate-screen state, bracketed paste, mouse tracking, synchronized updates, OSC 9/777 notifications, OSC 52 clipboard set requests, and double-width cells. Resize and edit operations repair double-width cells so CJK or emoji glyph halves are not left behind.
+
 ## Keys
 
 All bindings use Alt directly; there is no prefix key.
