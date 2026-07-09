@@ -20,22 +20,26 @@ const (
 	recProbe byte = 3
 	recPong  byte = 4
 
-	defaultMTU              = pdgram.DefaultMTU
-	defaultResend           = 250 * time.Millisecond
-	defaultMaxResendAfter   = 2 * time.Second
-	defaultMaxResendPerTick = 64
-	defaultWriteTimeout     = 250 * time.Millisecond
-	defaultHeartbeat        = 3 * time.Second
-	defaultDegraded         = 10 * time.Second
-	defaultProbe            = 20 * time.Second
-	defaultOffline          = 30 * time.Second
-	defaultDead             = 60 * time.Second
-	defaultMaxPending       = 1024
-	defaultMaxPendingWait   = 50 * time.Millisecond
-	defaultMaxRecvBuf       = 1024
-	maxRecvBuffer           = defaultMaxRecvBuf
-	linkEventBufferSize     = 16
-	probeReplyBufferSize    = 16
+	defaultMTU                  = pdgram.DefaultMTU
+	defaultResend               = 250 * time.Millisecond
+	defaultMaxResendAfter       = 2 * time.Second
+	defaultMaxResendPerTick     = 64
+	defaultWriteTimeout         = 250 * time.Millisecond
+	defaultHeartbeat            = 3 * time.Second
+	defaultDegraded             = 10 * time.Second
+	defaultProbe                = 20 * time.Second
+	defaultOffline              = 30 * time.Second
+	defaultDead                 = 60 * time.Second
+	defaultMaxPending           = 1024
+	defaultMaxPendingWait       = 50 * time.Millisecond
+	defaultMaxRecvBuf           = 1024
+	defaultOutputPaceMinDelay   = 8 * time.Millisecond
+	defaultOutputPaceMinCadence = 20 * time.Millisecond
+	defaultOutputPaceMaxDelay   = 250 * time.Millisecond
+	defaultOutputPaceBatch      = 16
+	maxRecvBuffer               = defaultMaxRecvBuf
+	linkEventBufferSize         = 16
+	probeReplyBufferSize        = 16
 )
 
 var (
@@ -163,6 +167,9 @@ type Transport struct {
 	probeReply       chan uint64
 	rebind           func(net.PacketConn) (net.PacketConn, error)
 	hoppedOffline    bool
+	outputQueue      []queuedSend
+	outputWake       chan struct{}
+	outputNext       time.Time
 
 	recvMu sync.Mutex
 	replay *pdgram.ReplayWindow
@@ -171,6 +178,9 @@ type Transport struct {
 	done   chan struct{}
 
 	writeMu sync.Mutex
+	// outboundMu orders first transmissions and paced batches. Retransmits use
+	// writeMu directly because they do not establish new sequence order.
+	outboundMu sync.Mutex
 
 	deliverMu       sync.Mutex
 	deliverCond     *sync.Cond
@@ -183,6 +193,7 @@ type pending struct {
 	frame             ports.Frame
 	first             time.Time
 	last              time.Time
+	initialInFlight   bool
 	attempts          int
 	retransmitted     bool
 	outputSkipThrough uint64
@@ -233,12 +244,14 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 		recvBuf:          make(map[uint64]ports.Frame),
 	}
 	t.sendWake = make(chan struct{})
+	t.outputWake = make(chan struct{})
 	t.probeReply = make(chan uint64, probeReplyBufferSize)
 	t.deliverCond = sync.NewCond(&t.deliverMu)
 	go t.readLoop(pc)
 	go t.resendLoop()
 	go t.deliveryLoop()
 	go t.probeReplyLoop()
+	go t.outputPaceLoop()
 	return t, nil
 }
 
@@ -248,16 +261,81 @@ func (t *Transport) DatagramTransport() {}
 
 func (t *Transport) Send(f ports.Frame) error {
 	reliable := true
-	t.mu.Lock()
-	outputSkipThrough := uint64(0)
-	if f.Type == ports.MsgOutput {
-		outputSkipThrough = t.supersedePendingOutputLocked()
+	outputSkipThrough, err := t.lockOutboundSlot(f, reliable)
+	if err != nil {
+		return err
 	}
+	defer t.outboundMu.Unlock()
+	// lockOutboundSlot returns with both outboundMu and mu held.
+
+	t.seq++
+	seq := t.seq
+	if reliable {
+		t.pending[seq] = &pending{frame: f, outputSkipThrough: outputSkipThrough}
+	}
+	if shouldPaceOutput(f) {
+		now := t.clock.Now()
+		if len(t.outputQueue) > 0 || (!t.outputNext.IsZero() && now.Before(t.outputNext)) {
+			t.outputQueue = append(t.outputQueue, queuedSend{seq: seq, reliable: reliable, frame: f, outputSkipThrough: outputSkipThrough})
+			t.notifyOutputPacerLocked()
+			t.mu.Unlock()
+			return nil
+		}
+		t.outputNext = now.Add(t.outputPaceDelayLocked())
+		t.mu.Unlock()
+		t.markPendingSent(seq, reliable)
+		if err := t.sendData(seq, reliable, f, outputSkipThrough); err != nil {
+			t.removePending(seq, reliable)
+			return err
+		}
+		t.markPendingReady(seq, reliable)
+		return nil
+	}
+	queued := t.flushQueuedOutputLocked()
+	t.mu.Unlock()
+	for i, q := range queued {
+		if err := t.sendQueuedData(q); err != nil {
+			t.removePending(seq, reliable)
+			t.removeQueuedPending(queued[i+1:])
+			return err
+		}
+	}
+	t.markPendingSent(seq, reliable)
+	if err := t.sendData(seq, reliable, f, outputSkipThrough); err != nil {
+		t.removePending(seq, reliable)
+		return err
+	}
+	t.markPendingReady(seq, reliable)
+	return nil
+}
+
+func (t *Transport) lockOutboundSlot(f ports.Frame, reliable bool) (uint64, error) {
 	var pendingWaitStarted time.Time
-	for reliable && len(t.pending) >= t.maxPending && !t.closed {
+	var outputSkipThrough uint64
+	for {
+		t.outboundMu.Lock()
+		t.mu.Lock()
+		if t.closed {
+			err := t.closeErr
+			t.mu.Unlock()
+			t.outboundMu.Unlock()
+			if err != nil {
+				return 0, err
+			}
+			return 0, errors.New("dgram: closed")
+		}
+		if f.Type == ports.MsgOutput {
+			if skipped := t.supersedePendingOutputLocked(); skipped > outputSkipThrough {
+				outputSkipThrough = skipped
+			}
+		}
+		if !reliable || len(t.pending) < t.maxPending {
+			return outputSkipThrough, nil
+		}
 		if t.linkState != ports.LinkStateConnected {
 			t.mu.Unlock()
-			return ErrPendingFull
+			t.outboundMu.Unlock()
+			return 0, ErrPendingFull
 		}
 		if pendingWaitStarted.IsZero() {
 			pendingWaitStarted = t.clock.Now()
@@ -265,46 +343,54 @@ func (t *Transport) Send(f ports.Frame) error {
 		remaining := t.maxPendingWait - t.clock.Now().Sub(pendingWaitStarted)
 		if remaining <= 0 {
 			t.mu.Unlock()
-			return ErrPendingFull
+			t.outboundMu.Unlock()
+			return 0, ErrPendingFull
 		}
 		wake := t.sendWake
 		timer := t.clock.NewTimer(remaining)
 		t.mu.Unlock()
+		t.outboundMu.Unlock()
 		select {
 		case <-timer.C():
 		case <-wake:
 		case <-t.done:
 		}
 		timer.Stop()
-		t.mu.Lock()
 	}
-	if t.closed {
-		err := t.closeErr
-		t.mu.Unlock()
-		if err != nil {
-			return err
-		}
-		return errors.New("dgram: closed")
+}
+
+func (t *Transport) removePending(seq uint64, reliable bool) {
+	if !reliable {
+		return
 	}
-	t.seq++
-	seq := t.seq
-	if reliable {
-		now := t.clock.Now()
-		t.pending[seq] = &pending{frame: f, first: now, last: now, outputSkipThrough: outputSkipThrough}
+	t.mu.Lock()
+	removed := t.removePendingLocked(seq)
+	if removed {
+		t.notifySendWaitersLocked()
 	}
 	t.mu.Unlock()
-	if err := t.sendData(seq, reliable, f, outputSkipThrough); err != nil {
-		if reliable {
-			t.mu.Lock()
-			if _, ok := t.pending[seq]; ok {
-				delete(t.pending, seq)
-				t.notifySendWaitersLocked()
-			}
-			t.mu.Unlock()
+}
+
+func (t *Transport) removeQueuedPending(queued []queuedSend) {
+	t.mu.Lock()
+	removed := false
+	for _, q := range queued {
+		if q.reliable {
+			removed = t.removePendingLocked(q.seq) || removed
 		}
-		return err
 	}
-	return nil
+	if removed {
+		t.notifySendWaitersLocked()
+	}
+	t.mu.Unlock()
+}
+
+func (t *Transport) removePendingLocked(seq uint64) bool {
+	if _, ok := t.pending[seq]; !ok {
+		return false
+	}
+	delete(t.pending, seq)
+	return true
 }
 
 func (t *Transport) supersedePendingOutputLocked() uint64 {
@@ -331,10 +417,17 @@ func (t *Transport) supersedePendingOutputLocked() uint64 {
 			delete(t.pending, seq)
 		}
 	}
+	kept := t.outputQueue[:0]
+	for _, q := range t.outputQueue {
+		if q.seq > barrier && q.seq <= newest {
+			continue
+		}
+		kept = append(kept, q)
+	}
+	t.outputQueue = kept
 	t.notifySendWaitersLocked()
 	return newest
 }
-
 func (t *Transport) Recv() (ports.Frame, error) {
 	select {
 	case f := <-t.in:
@@ -748,7 +841,7 @@ func (t *Transport) resendPending() {
 			break
 		}
 		p := t.pending[seq]
-		if p == nil || now.Sub(p.last) < t.resendDelayLocked(p) {
+		if p == nil || p.last.IsZero() || p.initialInFlight || now.Sub(p.last) < t.resendDelayLocked(p) {
 			continue
 		}
 		p.last = now
