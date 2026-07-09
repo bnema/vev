@@ -178,6 +178,9 @@ type Transport struct {
 	done   chan struct{}
 
 	writeMu sync.Mutex
+	// outboundMu orders first transmissions and paced batches. Retransmits use
+	// writeMu directly because they do not establish new sequence order.
+	outboundMu sync.Mutex
 
 	deliverMu   sync.Mutex
 	deliverCond *sync.Cond
@@ -191,12 +194,6 @@ type pending struct {
 	last          time.Time
 	attempts      int
 	retransmitted bool
-}
-
-type queuedSend struct {
-	seq      uint64
-	reliable bool
-	frame    ports.Frame
 }
 
 func NewTransport(pc net.PacketConn, peer net.Addr, key []byte, sendDir, recvDir uint32) (*Transport, error) {
@@ -259,45 +256,16 @@ func (t *Transport) Send(f ports.Frame) error {
 	// Until full ACK-driven terminal state sync exists, every frame is reliable;
 	// dropping MsgOutput can permanently desynchronize the client screen.
 	reliable := true
-	t.mu.Lock()
-	var pendingWaitStarted time.Time
-	for reliable && len(t.pending) >= t.maxPending && !t.closed {
-		if t.linkState != ports.LinkStateConnected {
-			t.mu.Unlock()
-			return ErrPendingFull
-		}
-		if pendingWaitStarted.IsZero() {
-			pendingWaitStarted = t.clock.Now()
-		}
-		remaining := t.maxPendingWait - t.clock.Now().Sub(pendingWaitStarted)
-		if remaining <= 0 {
-			t.mu.Unlock()
-			return ErrPendingFull
-		}
-		wake := t.sendWake
-		timer := t.clock.NewTimer(remaining)
-		t.mu.Unlock()
-		select {
-		case <-timer.C():
-		case <-wake:
-		case <-t.done:
-		}
-		timer.Stop()
-		t.mu.Lock()
+	if err := t.lockOutboundSlot(reliable); err != nil {
+		return err
 	}
-	if t.closed {
-		err := t.closeErr
-		t.mu.Unlock()
-		if err != nil {
-			return err
-		}
-		return errors.New("dgram: closed")
-	}
+	defer t.outboundMu.Unlock()
+	// lockOutboundSlot returns with both outboundMu and mu held.
+
 	t.seq++
 	seq := t.seq
 	if reliable {
-		now := t.clock.Now()
-		t.pending[seq] = &pending{frame: f, first: now, last: now}
+		t.pending[seq] = &pending{frame: f}
 	}
 	if shouldPaceOutput(f) {
 		now := t.clock.Now()
@@ -309,6 +277,7 @@ func (t *Transport) Send(f ports.Frame) error {
 		}
 		t.outputNext = now.Add(t.outputPaceDelayLocked())
 		t.mu.Unlock()
+		t.markPendingSent(seq, reliable)
 		if err := t.sendData(seq, reliable, f); err != nil {
 			t.removePending(seq, reliable)
 			return err
@@ -324,6 +293,7 @@ func (t *Transport) Send(f ports.Frame) error {
 			return err
 		}
 	}
+	t.markPendingSent(seq, reliable)
 	if err := t.sendData(seq, reliable, f); err != nil {
 		t.removePending(seq, reliable)
 		return err
@@ -331,96 +301,61 @@ func (t *Transport) Send(f ports.Frame) error {
 	return nil
 }
 
-func (t *Transport) flushQueuedOutputLocked() []queuedSend {
-	if len(t.outputQueue) == 0 {
-		return nil
-	}
-	queued := append([]queuedSend(nil), t.outputQueue...)
-	t.outputQueue = nil
-	return queued
-}
-
-func (t *Transport) outputPaceLoop() {
+func (t *Transport) lockOutboundSlot(reliable bool) error {
+	var pendingWaitStarted time.Time
 	for {
 		t.mu.Lock()
-		for len(t.outputQueue) == 0 && !t.closed {
-			wake := t.outputWake
-			t.mu.Unlock()
-			select {
-			case <-wake:
-			case <-t.done:
-				return
+		for reliable && len(t.pending) >= t.maxPending && !t.closed {
+			if t.linkState != ports.LinkStateConnected {
+				t.mu.Unlock()
+				return ErrPendingFull
 			}
-			t.mu.Lock()
-		}
-		if t.closed {
-			t.mu.Unlock()
-			return
-		}
-		now := t.clock.Now()
-		wait := t.outputNext.Sub(now)
-		if wait > 0 {
-			wake := t.outputWake
-			timer := t.clock.NewTimer(wait)
+			if pendingWaitStarted.IsZero() {
+				pendingWaitStarted = t.clock.Now()
+			}
+			remaining := t.maxPendingWait - t.clock.Now().Sub(pendingWaitStarted)
+			if remaining <= 0 {
+				t.mu.Unlock()
+				return ErrPendingFull
+			}
+			wake := t.sendWake
+			timer := t.clock.NewTimer(remaining)
 			t.mu.Unlock()
 			select {
 			case <-timer.C():
 			case <-wake:
 			case <-t.done:
-				timer.Stop()
-				return
 			}
 			timer.Stop()
-			continue
+			t.mu.Lock()
 		}
-		limit := min(defaultOutputPaceBatch, len(t.outputQueue))
-		batch := append([]queuedSend(nil), t.outputQueue[:limit]...)
-		copy(t.outputQueue, t.outputQueue[limit:])
-		t.outputQueue = t.outputQueue[:len(t.outputQueue)-limit]
-		t.outputNext = now.Add(t.outputPaceDelayLocked())
-		t.mu.Unlock()
-		for i, q := range batch {
-			if err := t.sendQueuedData(q); err != nil {
-				t.removeQueuedPending(batch[i+1:])
-				t.closeWithError(err)
-				return
+		if t.closed {
+			err := t.closeErr
+			t.mu.Unlock()
+			if err != nil {
+				return err
 			}
+			return errors.New("dgram: closed")
 		}
-	}
-}
+		t.mu.Unlock()
 
-func (t *Transport) notifyOutputPacerLocked() {
-	if t.outputWake == nil {
-		return
+		t.outboundMu.Lock()
+		t.mu.Lock()
+		if t.closed {
+			err := t.closeErr
+			t.mu.Unlock()
+			t.outboundMu.Unlock()
+			if err != nil {
+				return err
+			}
+			return errors.New("dgram: closed")
+		}
+		if !reliable || len(t.pending) < t.maxPending {
+			return nil
+		}
+		t.mu.Unlock()
+		t.outboundMu.Unlock()
 	}
-	close(t.outputWake)
-	t.outputWake = make(chan struct{})
-}
-
-func (t *Transport) outputPaceDelayLocked() time.Duration {
-	if t.srtt <= 0 {
-		return defaultOutputPaceMinDelay
-	}
-	d := t.srtt / 2
-	if d < defaultOutputPaceMinCadence {
-		d = defaultOutputPaceMinCadence
-	}
-	if d > defaultOutputPaceMaxDelay {
-		d = defaultOutputPaceMaxDelay
-	}
-	return d
-}
-
-func shouldPaceOutput(f ports.Frame) bool {
-	return f.Type == ports.MsgOutput
-}
-
-func (t *Transport) sendQueuedData(q queuedSend) error {
-	if err := t.sendData(q.seq, q.reliable, q.frame); err != nil {
-		t.removePending(q.seq, q.reliable)
-		return err
-	}
-	return nil
 }
 
 func (t *Transport) removePending(seq uint64, reliable bool) {
@@ -841,7 +776,7 @@ func (t *Transport) resendPending() {
 			break
 		}
 		p := t.pending[seq]
-		if p == nil || now.Sub(p.last) < t.resendDelayLocked(p) {
+		if p == nil || p.last.IsZero() || now.Sub(p.last) < t.resendDelayLocked(p) {
 			continue
 		}
 		p.last = now

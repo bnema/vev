@@ -326,7 +326,6 @@ func TestOutputFirstSendsArePacedAfterInitialDatagram(t *testing.T) {
 	if got := len(bPC.in); got != 1 {
 		t.Fatalf("immediate datagrams=%d, want only the first output sent before pacing timer", got)
 	}
-
 	waitForManualTimers(t, clk, 3)
 	clk.advance(defaultOutputPaceMinDelay)
 	eventuallyPacketCount(t, bPC, 3)
@@ -338,6 +337,20 @@ func TestOutputFirstSendsArePacedAfterInitialDatagram(t *testing.T) {
 	}
 	clk.advance(defaultOutputPaceMinDelay)
 	eventuallyPacketCount(t, bPC, 4)
+}
+
+func TestResendSkipsQueuedOutputBeforeFirstWireAttempt(t *testing.T) {
+	tr, writes := newResendTestTransport(t, 10)
+	tr.pending[1] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("queued")}}
+
+	tr.resendPending()
+
+	if got := writes.Load(); got != 0 {
+		t.Fatalf("writes=%d, want queued output excluded from resend", got)
+	}
+	if !tr.pending[1].first.IsZero() || !tr.pending[1].last.IsZero() {
+		t.Fatal("resend scan marked queued output as sent")
+	}
 }
 
 func TestOutputPaceDelayUsesSRTTHalfClamped(t *testing.T) {
@@ -365,7 +378,7 @@ func TestOutputPaceDelayUsesSRTTHalfClamped(t *testing.T) {
 	}
 }
 
-func TestOutputDoesNotOvertakeQueuedOutputWhenPaceWindowElapsed(t *testing.T) {
+func TestInputWaitsForDequeuedOutputBatch(t *testing.T) {
 	aPC, bPC := newPair()
 	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
 	a, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{Clock: clk, ResendAfter: time.Hour, Heartbeat: time.Hour})
@@ -374,32 +387,48 @@ func TestOutputDoesNotOvertakeQueuedOutputWhenPaceWindowElapsed(t *testing.T) {
 	}
 	defer func() { _ = a.Close() }()
 
-	for _, payload := range []string{"first", "second"} {
+	for _, payload := range []string{"first", "queued"} {
 		if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte(payload)}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	waitForManualTimers(t, clk, 3)
-	a.mu.Lock()
-	a.outputNext = clk.Now().Add(-time.Millisecond)
-	// Leave the pacer waiting on its captured wake channel so Send's ordering
-	// decision can be inspected before the queue is drained.
-	a.outputWake = make(chan struct{})
-	a.mu.Unlock()
-	if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("third")}); err != nil {
-		t.Fatal(err)
+	a.writeMu.Lock()
+	clk.advance(defaultOutputPaceMinDelay)
+	deadline := time.Now().Add(time.Second)
+	for {
+		a.mu.Lock()
+		dequeued := len(a.outputQueue) == 0
+		a.mu.Unlock()
+		if dequeued {
+			break
+		}
+		if time.Now().After(deadline) {
+			a.writeMu.Unlock()
+			t.Fatal("pacer did not dequeue output batch")
+		}
+		time.Sleep(time.Millisecond)
 	}
 
-	if got := len(bPC.in); got != 1 {
-		t.Fatalf("immediate datagrams=%d, want only first output sent", got)
+	done := make(chan error, 1)
+	go func() { done <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("typed")}) }()
+	select {
+	case err := <-done:
+		a.writeMu.Unlock()
+		t.Fatalf("input completed before dequeued output batch: %v", err)
+	case <-time.After(20 * time.Millisecond):
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if got := string(a.outputQueue[0].frame.Payload); got != "second" {
-		t.Fatalf("first queued output=%q, want second", got)
+	a.writeMu.Unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("input did not complete after output batch was released")
 	}
-	if got := string(a.outputQueue[1].frame.Payload); got != "third" {
-		t.Fatalf("second queued output=%q, want third", got)
+	if got := len(bPC.in); got != 3 {
+		t.Fatalf("datagrams when input completed=%d, want output batch before input", got)
 	}
 }
 
