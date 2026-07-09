@@ -59,8 +59,8 @@ type Screen struct {
 	// and blanks rows. The callback receives a stable copy of each evicted row.
 	OnLineEvicted func([]renderer.Cell)
 	// OnResponse is called synchronously from Write with reply bytes that the
-	// emulator must send back to the child process (DA, DSR, DECRQM reports).
-	// The host wires it to the PTY input. Nil disables responses.
+	// emulator must send back to the child process (DA, DSR, and ANSI/DEC mode
+	// query reports). The host wires it to the PTY input. Nil disables responses.
 	OnResponse func([]byte)
 	// OnBell is called synchronously from Write for each lone BEL (0x07)
 	// outside escape sequences. BELs that terminate an OSC never fire it.
