@@ -1036,6 +1036,8 @@ func (s *Screen) applyCursorStyle(params string) {
 	s.cursorStyleSet = true
 }
 
+const sgrUnderlineStyleMarker = -1000
+
 func (s *Screen) applySGR(params string) {
 	if params == "" {
 		s.Style = renderer.DefaultStyle()
@@ -1048,16 +1050,46 @@ func (s *Screen) applySGR(params string) {
 			s.Style = renderer.DefaultStyle()
 		case 1:
 			s.Style.Bold = true
+		case 2:
+			s.Style.Attrs |= renderer.AttrDim
 		case 3:
 			s.Style.Italic = true
+		case 4:
+			s.Style.Attrs |= renderer.AttrUnderline
+			s.Style.UnderlineStyle = renderer.UnderlineSingle
+			if i+2 < len(parts) && parts[i+1] == sgrUnderlineStyleMarker {
+				underlineStyle := sgrUnderlineStyle(parts[i+2])
+				if underlineStyle == renderer.UnderlineNone {
+					s.Style.Attrs &^= renderer.AttrUnderline
+				} else {
+					s.Style.Attrs |= renderer.AttrUnderline
+				}
+				s.Style.UnderlineStyle = underlineStyle
+				i += 2
+			}
+		case 5, 6:
+			s.Style.Attrs |= renderer.AttrBlink
 		case 7:
 			s.Style.Inverse = true
+		case 9:
+			s.Style.Attrs |= renderer.AttrStrikethrough
+		case 21:
+			s.Style.Attrs |= renderer.AttrUnderline
+			s.Style.UnderlineStyle = renderer.UnderlineDouble
 		case 22:
 			s.Style.Bold = false
+			s.Style.Attrs &^= renderer.AttrDim
 		case 23:
 			s.Style.Italic = false
+		case 24:
+			s.Style.Attrs &^= renderer.AttrUnderline
+			s.Style.UnderlineStyle = renderer.UnderlineNone
+		case 25:
+			s.Style.Attrs &^= renderer.AttrBlink
 		case 27:
 			s.Style.Inverse = false
+		case 29:
+			s.Style.Attrs &^= renderer.AttrStrikethrough
 		case 30, 31, 32, 33, 34, 35, 36, 37:
 			s.Style.Foreground = parts[i] - 30
 			s.Style.HasForegroundRGB = false
@@ -1098,6 +1130,21 @@ func (s *Screen) applySGR(params string) {
 				s.Style.BackgroundRGB = sgrRGB(parts[i+2], parts[i+3], parts[i+4])
 				i += 4
 			}
+		case 58:
+			if i+2 < len(parts) && parts[i+1] == 5 {
+				s.Style.UnderlineColor = parts[i+2]
+				s.Style.HasUnderlineColor = true
+				s.Style.HasUnderlineColorRGB = false
+				i += 2
+			} else if i+4 < len(parts) && parts[i+1] == 2 {
+				s.Style.HasUnderlineColor = false
+				s.Style.HasUnderlineColorRGB = true
+				s.Style.UnderlineColorRGB = sgrRGB(parts[i+2], parts[i+3], parts[i+4])
+				i += 4
+			}
+		case 59:
+			s.Style.HasUnderlineColor = false
+			s.Style.HasUnderlineColorRGB = false
 		}
 	}
 }
@@ -1107,6 +1154,23 @@ func sgrRGB(r, g, b int) renderer.RGB {
 		R: uint8(clamp(r, 0, 255)),
 		G: uint8(clamp(g, 0, 255)),
 		B: uint8(clamp(b, 0, 255)),
+	}
+}
+
+func sgrUnderlineStyle(param int) renderer.UnderlineStyle {
+	switch param {
+	case 0:
+		return renderer.UnderlineNone
+	case 2:
+		return renderer.UnderlineDouble
+	case 3:
+		return renderer.UnderlineCurly
+	case 4:
+		return renderer.UnderlineDotted
+	case 5:
+		return renderer.UnderlineDashed
+	default:
+		return renderer.UnderlineSingle
 	}
 }
 
@@ -1482,7 +1546,13 @@ func appendSGRGroup(out []int, group string) []int {
 
 	parts := countSGRColonFields(group)
 	code := parseCSIInt(sgrColonField(group, 0))
-	if code != 38 && code != 48 {
+	if code == 4 {
+		if parts < 2 {
+			return append(out, code)
+		}
+		return append(out, code, sgrUnderlineStyleMarker, parseCSIInt(sgrColonField(group, 1)))
+	}
+	if code != 38 && code != 48 && code != 58 {
 		return append(out, code)
 	}
 	mode := 0

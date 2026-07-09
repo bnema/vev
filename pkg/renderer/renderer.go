@@ -319,11 +319,34 @@ func writeStyle(out *bytes.Buffer, style Style) {
 	if style.Bold {
 		out.WriteString(";1")
 	}
+	if style.Attrs&AttrDim != 0 {
+		out.WriteString(";2")
+	}
 	if style.Italic {
 		out.WriteString(";3")
 	}
+	if style.Attrs&AttrUnderline != 0 {
+		switch style.UnderlineStyle {
+		case UnderlineDouble:
+			out.WriteString(";21")
+		case UnderlineCurly:
+			out.WriteString(";4:3")
+		case UnderlineDotted:
+			out.WriteString(";4:4")
+		case UnderlineDashed:
+			out.WriteString(";4:5")
+		default:
+			out.WriteString(";4")
+		}
+	}
+	if style.Attrs&AttrBlink != 0 {
+		out.WriteString(";5")
+	}
 	if style.Inverse {
 		out.WriteString(";7")
+	}
+	if style.Attrs&AttrStrikethrough != 0 {
+		out.WriteString(";9")
 	}
 	var b [16]byte
 	if style.HasForegroundRGB {
@@ -340,6 +363,14 @@ func writeStyle(out *bytes.Buffer, style Style) {
 	} else if style.Background >= 0 {
 		out.WriteString(";48;5;")
 		n := strconv.AppendInt(b[:0], int64(style.Background), 10)
+		out.Write(n)
+	}
+	if style.HasUnderlineColorRGB {
+		out.WriteString(";58;2;")
+		writeRGB(out, &b, style.UnderlineColorRGB)
+	} else if style.HasUnderlineColor {
+		out.WriteString(";58;5;")
+		n := strconv.AppendInt(b[:0], int64(style.UnderlineColor), 10)
 		out.Write(n)
 	}
 	out.WriteByte('m')

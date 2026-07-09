@@ -282,6 +282,16 @@ func TestRendererEmitsSGR(t *testing.T) {
 			damage:  []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 1, Height: 1}},
 			wantAll: []string{"\x1b[0;1;3;7m", "X"},
 		},
+		{
+			name:   "extended SGR attributes and underline color",
+			width:  1,
+			height: 1,
+			setup: func(frame Frame) {
+				frame.Set(0, 0, Cell{Rune: 'X', Style: Style{Foreground: -1, Background: -1, Attrs: AttrDim | AttrUnderline | AttrBlink | AttrStrikethrough, UnderlineStyle: UnderlineCurly, HasUnderlineColor: true, UnderlineColor: 9}})
+			},
+			damage:  []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 1, Height: 1}},
+			wantAll: []string{"\x1b[0;2;4:3;5;9;58;5;9m", "X"},
+		},
 	}
 
 	for _, tt := range tests {
