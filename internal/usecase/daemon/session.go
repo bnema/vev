@@ -84,6 +84,8 @@ type tab struct {
 	size       domain.Size
 	ctx        context.Context
 	cancel     context.CancelFunc
+	// floating is independent from the normal layout tree and pane map.
+	floating floatingSlot
 
 	// previewClient tracks the one client currently previewing this tab in the picker.
 	// v1 is last-writer-wins: multiple clients previewing the same tab are not supported.
