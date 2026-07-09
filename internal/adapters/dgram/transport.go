@@ -20,22 +20,26 @@ const (
 	recProbe byte = 3
 	recPong  byte = 4
 
-	defaultMTU              = pdgram.DefaultMTU
-	defaultResend           = 250 * time.Millisecond
-	defaultMaxResendAfter   = 2 * time.Second
-	defaultMaxResendPerTick = 64
-	defaultWriteTimeout     = 250 * time.Millisecond
-	defaultHeartbeat        = 3 * time.Second
-	defaultDegraded         = 10 * time.Second
-	defaultProbe            = 20 * time.Second
-	defaultOffline          = 30 * time.Second
-	defaultDead             = 60 * time.Second
-	defaultMaxPending       = 1024
-	defaultMaxPendingWait   = 50 * time.Millisecond
-	defaultMaxRecvBuf       = 1024
-	maxRecvBuffer           = defaultMaxRecvBuf
-	linkEventBufferSize     = 16
-	probeReplyBufferSize    = 16
+	defaultMTU                  = pdgram.DefaultMTU
+	defaultResend               = 250 * time.Millisecond
+	defaultMaxResendAfter       = 2 * time.Second
+	defaultMaxResendPerTick     = 64
+	defaultWriteTimeout         = 250 * time.Millisecond
+	defaultHeartbeat            = 3 * time.Second
+	defaultDegraded             = 10 * time.Second
+	defaultProbe                = 20 * time.Second
+	defaultOffline              = 30 * time.Second
+	defaultDead                 = 60 * time.Second
+	defaultMaxPending           = 1024
+	defaultMaxPendingWait       = 50 * time.Millisecond
+	defaultMaxRecvBuf           = 1024
+	defaultOutputPaceMinDelay   = 8 * time.Millisecond
+	defaultOutputPaceMinCadence = 20 * time.Millisecond
+	defaultOutputPaceMaxDelay   = 250 * time.Millisecond
+	defaultOutputPaceBatch      = 16
+	maxRecvBuffer               = defaultMaxRecvBuf
+	linkEventBufferSize         = 16
+	probeReplyBufferSize        = 16
 )
 
 var (
@@ -163,6 +167,9 @@ type Transport struct {
 	probeReply       chan uint64
 	rebind           func(net.PacketConn) (net.PacketConn, error)
 	hoppedOffline    bool
+	outputQueue      []queuedSend
+	outputWake       chan struct{}
+	outputNext       time.Time
 
 	recvMu sync.Mutex
 	replay *pdgram.ReplayWindow
@@ -184,6 +191,12 @@ type pending struct {
 	last          time.Time
 	attempts      int
 	retransmitted bool
+}
+
+type queuedSend struct {
+	seq      uint64
+	reliable bool
+	frame    ports.Frame
 }
 
 func NewTransport(pc net.PacketConn, peer net.Addr, key []byte, sendDir, recvDir uint32) (*Transport, error) {
@@ -231,12 +244,14 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 		recvBuf:          make(map[uint64]ports.Frame),
 	}
 	t.sendWake = make(chan struct{})
+	t.outputWake = make(chan struct{})
 	t.probeReply = make(chan uint64, probeReplyBufferSize)
 	t.deliverCond = sync.NewCond(&t.deliverMu)
 	go t.readLoop(pc)
 	go t.resendLoop()
 	go t.deliveryLoop()
 	go t.probeReplyLoop()
+	go t.outputPaceLoop()
 	return t, nil
 }
 
@@ -284,19 +299,169 @@ func (t *Transport) Send(f ports.Frame) error {
 		now := t.clock.Now()
 		t.pending[seq] = &pending{frame: f, first: now, last: now}
 	}
-	t.mu.Unlock()
-	if err := t.sendData(seq, reliable, f); err != nil {
-		if reliable {
-			t.mu.Lock()
-			if _, ok := t.pending[seq]; ok {
-				delete(t.pending, seq)
-				t.notifySendWaitersLocked()
-			}
-			t.mu.Unlock()
+	if shouldPaceOutput(f) {
+		sendNow := t.outputNext.IsZero() || !t.clock.Now().Before(t.outputNext)
+		if sendNow {
+			t.outputNext = t.clock.Now().Add(t.outputPaceDelayLocked())
 		}
+		t.mu.Unlock()
+		if !sendNow {
+			t.enqueueOutputSend(queuedSend{seq: seq, reliable: reliable, frame: f})
+			return nil
+		}
+		if err := t.sendData(seq, reliable, f); err != nil {
+			t.removePending(seq, reliable)
+			return err
+		}
+		return nil
+	}
+	queued := t.flushQueuedOutputLocked()
+	t.mu.Unlock()
+	for i, q := range queued {
+		if err := t.sendQueuedData(q); err != nil {
+			t.removePending(seq, reliable)
+			t.removeQueuedPending(queued[i+1:])
+			return err
+		}
+	}
+	if err := t.sendData(seq, reliable, f); err != nil {
+		t.removePending(seq, reliable)
 		return err
 	}
 	return nil
+}
+
+func (t *Transport) enqueueOutputSend(q queuedSend) {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return
+	}
+	t.outputQueue = append(t.outputQueue, q)
+	t.notifyOutputPacerLocked()
+	t.mu.Unlock()
+}
+
+func (t *Transport) flushQueuedOutputLocked() []queuedSend {
+	if len(t.outputQueue) == 0 {
+		return nil
+	}
+	queued := append([]queuedSend(nil), t.outputQueue...)
+	t.outputQueue = nil
+	return queued
+}
+
+func (t *Transport) outputPaceLoop() {
+	for {
+		t.mu.Lock()
+		for len(t.outputQueue) == 0 && !t.closed {
+			wake := t.outputWake
+			t.mu.Unlock()
+			select {
+			case <-wake:
+			case <-t.done:
+				return
+			}
+			t.mu.Lock()
+		}
+		if t.closed {
+			t.mu.Unlock()
+			return
+		}
+		now := t.clock.Now()
+		wait := t.outputNext.Sub(now)
+		if wait > 0 {
+			wake := t.outputWake
+			timer := t.clock.NewTimer(wait)
+			t.mu.Unlock()
+			select {
+			case <-timer.C():
+			case <-wake:
+			case <-t.done:
+				timer.Stop()
+				return
+			}
+			timer.Stop()
+			continue
+		}
+		limit := min(defaultOutputPaceBatch, len(t.outputQueue))
+		batch := append([]queuedSend(nil), t.outputQueue[:limit]...)
+		copy(t.outputQueue, t.outputQueue[limit:])
+		t.outputQueue = t.outputQueue[:len(t.outputQueue)-limit]
+		t.outputNext = now.Add(t.outputPaceDelayLocked())
+		t.mu.Unlock()
+		for _, q := range batch {
+			_ = t.sendQueuedData(q)
+		}
+	}
+}
+
+func (t *Transport) notifyOutputPacerLocked() {
+	if t.outputWake == nil {
+		return
+	}
+	close(t.outputWake)
+	t.outputWake = make(chan struct{})
+}
+
+func (t *Transport) outputPaceDelayLocked() time.Duration {
+	if t.srtt <= 0 {
+		return defaultOutputPaceMinDelay
+	}
+	d := t.srtt / 2
+	if d < defaultOutputPaceMinCadence {
+		d = defaultOutputPaceMinCadence
+	}
+	if d > defaultOutputPaceMaxDelay {
+		d = defaultOutputPaceMaxDelay
+	}
+	return d
+}
+
+func shouldPaceOutput(f ports.Frame) bool {
+	return f.Type == ports.MsgOutput
+}
+
+func (t *Transport) sendQueuedData(q queuedSend) error {
+	if err := t.sendData(q.seq, q.reliable, q.frame); err != nil {
+		t.removePending(q.seq, q.reliable)
+		return err
+	}
+	return nil
+}
+
+func (t *Transport) removePending(seq uint64, reliable bool) {
+	if !reliable {
+		return
+	}
+	t.mu.Lock()
+	removed := t.removePendingLocked(seq)
+	if removed {
+		t.notifySendWaitersLocked()
+	}
+	t.mu.Unlock()
+}
+
+func (t *Transport) removeQueuedPending(queued []queuedSend) {
+	t.mu.Lock()
+	removed := false
+	for _, q := range queued {
+		if q.reliable {
+			removed = t.removePendingLocked(q.seq) || removed
+		}
+	}
+	if removed {
+		t.notifySendWaitersLocked()
+	}
+	t.mu.Unlock()
+}
+
+func (t *Transport) removePendingLocked(seq uint64) bool {
+	if _, ok := t.pending[seq]; !ok {
+		return false
+	}
+	delete(t.pending, seq)
+	return true
 }
 
 func (t *Transport) Recv() (ports.Frame, error) {

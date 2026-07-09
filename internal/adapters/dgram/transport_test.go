@@ -185,7 +185,10 @@ func (c *manualClock) Now() time.Time {
 }
 
 func (c *manualClock) NewTimer(d time.Duration) ports.Timer {
-	tm := &manualTimer{c: make(chan time.Time, 1), d: d}
+	c.mu.Lock()
+	deadline := c.now.Add(d)
+	c.mu.Unlock()
+	tm := &manualTimer{clock: c, c: make(chan time.Time, 1), deadline: deadline, active: true}
 	c.timers <- tm
 	return tm
 }
@@ -195,32 +198,47 @@ func (c *manualClock) advance(d time.Duration) {
 	c.now = c.now.Add(d)
 	now := c.now
 	c.mu.Unlock()
-	for {
-		select {
-		case tm := <-c.timers:
-			tm.fire(now)
-		default:
-			return
+	n := len(c.timers)
+	for range n {
+		tm := <-c.timers
+		if tm.fireIfDue(now) {
+			continue
 		}
+		c.timers <- tm
 	}
 }
 
 type manualTimer struct {
-	c chan time.Time
-	d time.Duration
+	clock    *manualClock
+	c        chan time.Time
+	deadline time.Time
+	active   bool
 }
 
 func (t *manualTimer) C() <-chan time.Time { return t.c }
 func (t *manualTimer) Reset(d time.Duration) bool {
-	t.d = d
+	t.clock.mu.Lock()
+	t.deadline = t.clock.now.Add(d)
+	t.clock.mu.Unlock()
+	t.active = true
+	t.clock.timers <- t
 	return true
 }
-func (t *manualTimer) Stop() bool { return true }
-func (t *manualTimer) fire(now time.Time) {
+func (t *manualTimer) Stop() bool {
+	wasActive := t.active
+	t.active = false
+	return wasActive
+}
+func (t *manualTimer) fireIfDue(now time.Time) bool {
+	if !t.active || now.Before(t.deadline) {
+		return false
+	}
+	t.active = false
 	select {
 	case t.c <- now:
 	default:
 	}
+	return true
 }
 
 func waitForManualTimers(t *testing.T, clk *manualClock, n int) {
@@ -262,6 +280,138 @@ func (p *deadlineCapturePC) SetWriteDeadline(t time.Time) error {
 		p.deadline.Store(t)
 	}
 	return nil
+}
+
+func TestOutputFirstSendsArePacedAfterInitialDatagram(t *testing.T) {
+	aPC, bPC := newPair()
+	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+	a, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{Clock: clk, ResendAfter: time.Hour, Heartbeat: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }()
+
+	for i := range 3 {
+		if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(bPC.in); got != 1 {
+		t.Fatalf("immediate datagrams=%d, want only the first output sent before pacing timer", got)
+	}
+
+	waitForManualTimers(t, clk, 3)
+	clk.advance(defaultOutputPaceMinDelay)
+	eventuallyPacketCount(t, bPC, 3)
+	if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(bPC.in); got != 3 {
+		t.Fatalf("datagrams before second pace tick=%d, want 3", got)
+	}
+	clk.advance(defaultOutputPaceMinDelay)
+	eventuallyPacketCount(t, bPC, 4)
+}
+
+func TestOutputPaceDelayUsesSRTTHalfClamped(t *testing.T) {
+	tr, _ := newResendTestTransport(t, 10)
+	tr.srtt = time.Second
+	if got := tr.outputPaceDelayLocked(); got != defaultOutputPaceMaxDelay {
+		t.Fatalf("high-rtt output pace delay=%v, want max clamp %v", got, defaultOutputPaceMaxDelay)
+	}
+	tr.srtt = 30 * time.Millisecond
+	if got := tr.outputPaceDelayLocked(); got != defaultOutputPaceMinCadence {
+		t.Fatalf("low-rtt output pace delay=%v, want min cadence %v", got, defaultOutputPaceMinCadence)
+	}
+	tr.srtt = 80 * time.Millisecond
+	if got := tr.outputPaceDelayLocked(); got != 40*time.Millisecond {
+		t.Fatalf("mid-rtt output pace delay=%v, want srtt/2", got)
+	}
+	tr.srtt = 0
+	if got := tr.outputPaceDelayLocked(); got != defaultOutputPaceMinDelay {
+		t.Fatalf("initial output pace delay=%v, want min delay %v", got, defaultOutputPaceMinDelay)
+	}
+}
+
+func TestInputFlushFailureRemovesUnsentQueuedPendingFrames(t *testing.T) {
+	aPC, bPC := newPair()
+	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+	a, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{Clock: clk, ResendAfter: time.Hour, Heartbeat: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }()
+
+	for i := range 3 {
+		if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(bPC.in); got != 1 {
+		t.Fatalf("immediate output datagrams=%d, want 1", got)
+	}
+	if err := bPC.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("typed")}); err == nil {
+		t.Fatal("input send after peer close succeeded, want write error")
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, seq := range []uint64{2, 3, 4} {
+		if _, ok := a.pending[seq]; ok {
+			t.Fatalf("pending[%d] stranded after queued flush failure", seq)
+		}
+	}
+	if _, ok := a.pending[1]; !ok {
+		t.Fatal("pending[1] was already sent and should remain pending until ack")
+	}
+}
+
+func TestInputAndControlSendsBypassOutputPacing(t *testing.T) {
+	aPC, bPC := newPair()
+	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+	a, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{Clock: clk, ResendAfter: time.Hour, Heartbeat: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }()
+
+	if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("output")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("queued")}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(bPC.in); got != 1 {
+		t.Fatalf("immediate output datagrams=%d, want 1", got)
+	}
+	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("typed")}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(bPC.in); got != 3 {
+		t.Fatalf("datagrams after input=%d, want queued output flushed plus input immediately", got)
+	}
+	if err := a.Send(ports.Frame{Type: ports.MsgPing}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(bPC.in); got != 4 {
+		t.Fatalf("datagrams after control=%d, want control sent immediately", got)
+	}
+}
+
+func eventuallyPacketCount(t *testing.T, pc *fakePC, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(pc.in) >= want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("datagrams=%d, want at least %d", len(pc.in), want)
 }
 
 func TestSendWriteTimeoutBoundsBlockedPacketConn(t *testing.T) {
