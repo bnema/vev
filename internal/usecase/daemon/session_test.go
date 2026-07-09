@@ -799,22 +799,132 @@ func TestCreateSessionSeedsMRUFromStopped(t *testing.T) {
 
 func TestCreateRenameKillPersistenceLifecycle(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
+	p1, release1 := newBlockingPTY(t)
+	p2, release2 := newBlockingPTY(t)
+	defer release1()
+	defer release2()
+	store, state := newMockStore(t)
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
+	WithStore(store)(d)
+
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+	require.NoError(t, err)
+	require.True(t, state.has("work"))
+	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
+	require.NoError(t, d.createTab(sess, sz))
+	require.NoError(t, d.renameTab(sess, sess.tabs[1], "logs"))
+
+	require.NoError(t, d.renameSession(sess, "renamed"))
+	require.False(t, state.has("work"))
+	require.True(t, state.has("renamed"))
+	require.Equal(t, []string{"shell", "logs"}, state.record(t, "renamed").TabNames)
+
+	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, true))
+	require.False(t, state.has("renamed"))
+}
+
+func TestRenameTabPersistsForNamedSession(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, release := newBlockingPTY(t)
+	defer release()
+	store, _ := newMockStore(t)
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	WithStore(store)(d)
+
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+	require.NoError(t, err)
+	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
+
+	records, err := d.persist.LoadAll()
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, "work", records[0].Name)
+	require.Equal(t, "/tmp/work", records[0].Cwd)
+	require.Equal(t, sess.createdAt, records[0].CreatedAt)
+	require.GreaterOrEqual(t, records[0].UpdatedAt, records[0].CreatedAt)
+	require.Equal(t, []string{"shell"}, records[0].TabNames)
+}
+
+func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
+	tests := []struct {
+		name       string
+		tabNames   []string
+		closeIndex int
+		want       []string
+	}{
+		{name: "close before named tab", tabNames: []string{"shell", "", "logs"}, closeIndex: 0, want: []string{"", "logs"}},
+		{name: "close after named tab", tabNames: []string{"shell", "logs", ""}, closeIndex: 2, want: []string{"shell", "logs"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ptys := make([]ports.PTY, 3)
+			for i := range ptys {
+				p, release := newBlockingPTY(t)
+				ptys[i] = p
+				t.Cleanup(release)
+			}
+			store, _ := newMockStore(t)
+			d := newTestDaemon(t, newFactorySeq(t, ptys...), stubClock{})
+			WithStore(store)(d)
+			sz := domain.Size{Cols: 80, Rows: 24}
+
+			sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+			require.NoError(t, err)
+			require.NoError(t, d.createTab(sess, sz))
+			require.NoError(t, d.createTab(sess, sz))
+			for i, name := range tt.tabNames {
+				require.NoError(t, d.renameTab(sess, sess.tabs[i], name))
+			}
+
+			d.closeTab(sess, sess.tabs[tt.closeIndex], false)
+			records, err := d.persist.LoadAll()
+			require.NoError(t, err)
+			require.Len(t, records, 1)
+			require.Equal(t, tt.want, records[0].TabNames)
+		})
+	}
+}
+
+func TestRenameTabDoesNotPersistForEphemeralSession(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
 	p, release := newBlockingPTY(t)
 	defer release()
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(store)(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("0", true, "/tmp/work", sz, terminalEnv{})
 	require.NoError(t, err)
-	require.True(t, state.has("work"))
+	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
+	require.Equal(t, "shell", sess.tabs[0].name)
 
-	require.NoError(t, d.renameSession(sess, "renamed"))
-	require.False(t, state.has("work"))
-	require.True(t, state.has("renamed"))
+	require.False(t, state.has("0"))
+	records, err := d.persist.LoadAll()
+	require.NoError(t, err)
+	require.Empty(t, records)
+}
 
-	_ = d.killSession(sess, ports.ReasonSessionKilled, true)
-	require.False(t, state.has("renamed"))
+func TestAttachRestoresPersistedTabNames(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p1, release1 := newBlockingPTY(t)
+	p2, release2 := newBlockingPTY(t)
+	defer release1()
+	defer release2()
+	store, _ := newMockStore(t)
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
+	WithStore(store)(d)
+	require.NoError(t, d.persist.Save(persist.Record{Name: "work", Cwd: "/tmp/work", CreatedAt: 7, UpdatedAt: 8, TabNames: []string{"shell", "logs"}}))
+	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}}
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr.EXPECT().Close().Return(nil).Maybe()
+
+	sess, ac, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: sz}, tr)
+	require.NoError(t, err)
+	require.NotNil(t, ac)
+	require.Len(t, sess.tabs, 2)
+	require.Equal(t, "shell", sess.tabs[0].name)
+	require.Equal(t, "logs", sess.tabs[1].name)
 }
 
 func TestEphemeralRenamePromotesAndStoppedCollisionRejected(t *testing.T) {

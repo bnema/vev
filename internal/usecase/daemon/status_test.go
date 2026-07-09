@@ -97,6 +97,23 @@ func TestStatusCompositionGolden(t *testing.T) {
 	}
 }
 
+func TestTabDisplayName(t *testing.T) {
+	tests := []struct {
+		name  string
+		tab   *tab
+		index int
+		want  string
+	}{
+		{name: "custom name", tab: &tab{name: "logs"}, index: 3, want: "logs"},
+		{name: "numeric fallback", tab: &tab{}, index: 3, want: "4"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, tabDisplayName(tt.tab, tt.index))
+		})
+	}
+}
+
 func TestStatusCompositionUsesTruecolorTheme(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	_, sess, ac, _ := newManualSessionWithPTYs(t, p)

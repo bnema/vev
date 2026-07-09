@@ -219,6 +219,7 @@ func TestCloseFocusedLastPaneDelegatesToCloseTab(t *testing.T) {
 	otherPTY := portsmocks.NewMockPTY(t)
 	other := newTab(otherPTY, domain.Size{Cols: 41, Rows: 10})
 	sess.tabs = append(sess.tabs, other)
+	d.sessions[sess.id] = sess
 	oldPTY.EXPECT().Close().Return(nil).Once()
 
 	require.NoError(t, d.closeFocusedPane(sess, nil))

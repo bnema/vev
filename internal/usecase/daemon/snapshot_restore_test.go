@@ -44,7 +44,10 @@ func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 	})}}
 	factory := &restorePTYFactory{}
 	d := newTestDaemon(t, factory, stubClock{})
+	persistStore, persistState := newMockStore(t)
+	WithStore(persistStore)(d)
 	WithSnapshotStore(store)(d)
+	d.stopped["work"] = stoppedSession{name: "work", createdAt: 99, tabNames: []string{"logs"}}
 
 	d.restoreSnapshots(context.Background())
 
@@ -66,6 +69,8 @@ func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 	require.Len(t, restored.tabs, 1)
 	tb := restored.tabs[0]
 	restored.mu.Unlock()
+	require.Equal(t, "logs", tb.name)
+	require.Equal(t, []string{"logs"}, persistState.record(t, "work").TabNames)
 	tb.mu.Lock()
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
 	require.Equal(t, 3, tb.nextPaneID)

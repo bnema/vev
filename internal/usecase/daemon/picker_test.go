@@ -49,7 +49,7 @@ func TestPickerViewsAddsBellSuffixForAttention(t *testing.T) {
 	ctx, cancel := context.WithCancel(d.serveCtx)
 	defer cancel()
 	current := &session{id: "s1", name: "alpha", ctx: ctx, cancel: cancel, tabs: []*tab{{}, {}}}
-	ringing := &session{id: "s2", name: "beta", ctx: ctx, cancel: cancel, tabs: []*tab{{}, {}}}
+	ringing := &session{id: "s2", name: "beta", ctx: ctx, cancel: cancel, tabs: []*tab{{name: "shell"}, {name: "logs"}}}
 	ringing.mu.Lock()
 	ringing.tabs[1].attention = true
 	ringing.tabs[1].attentionAt = time.Unix(10, 0)
@@ -64,7 +64,29 @@ func TestPickerViewsAddsBellSuffixForAttention(t *testing.T) {
 	require.Equal(t, "alpha", views[0].Name)
 	require.Equal(t, []string{"1", "2"}, views[0].Tabs)
 	require.Equal(t, "beta ", views[1].Name)
-	require.Equal(t, []string{"1", "2 "}, views[1].Tabs)
+	require.Equal(t, []string{"shell", "logs "}, views[1].Tabs)
+}
+
+func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {
+	p1, release1 := newBlockingPTY(t)
+	p2, release2 := newBlockingPTY(t)
+	p3, release3 := newBlockingPTY(t)
+	defer release1()
+	defer release2()
+	defer release3()
+	d, from, ac, sends := newManualSessionWithPTYs(t, p1)
+	d.ptys = newFactorySeq(t, p2, p3)
+	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}}
+
+	d.resumeStoppedAndSwitch(from, ac, picker.Target{Name: "work", Stopped: true})
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	target := ac.currentSession()
+	require.NotNil(t, target)
+	require.Equal(t, "work", target.name)
+	require.Len(t, target.tabs, 2)
+	require.Equal(t, "shell", target.tabs[0].name)
+	require.Equal(t, "logs", target.tabs[1].name)
 }
 
 func TestPickerSameSessionNavigationSwitchAndEscClose(t *testing.T) {

@@ -299,7 +299,7 @@ func (p *deadlineCapturePC) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-func TestOutputFirstSendsArePacedAfterInitialDatagram(t *testing.T) {
+func TestOutputFirstSendIsPacedAndQueuedOutputsAreCoalesced(t *testing.T) {
 	aPC, bPC := newPair()
 	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
 	a, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{Clock: clk, ResendAfter: time.Hour, Heartbeat: time.Hour})
@@ -318,15 +318,15 @@ func TestOutputFirstSendsArePacedAfterInitialDatagram(t *testing.T) {
 	}
 	waitForManualTimers(t, clk, 3)
 	clk.advance(defaultOutputPaceMinDelay)
-	eventuallyPacketCount(t, bPC, 3)
+	eventuallyPacketCount(t, bPC, 2)
 	if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")}); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(bPC.in); got != 3 {
-		t.Fatalf("datagrams before second pace tick=%d, want 3", got)
+	if got := len(bPC.in); got != 2 {
+		t.Fatalf("datagrams before second pace tick=%d, want 2", got)
 	}
 	clk.advance(defaultOutputPaceMinDelay)
-	eventuallyPacketCount(t, bPC, 4)
+	eventuallyPacketCount(t, bPC, 3)
 }
 
 func TestResendSkipsQueuedOutputBeforeFirstWireAttempt(t *testing.T) {
@@ -470,13 +470,10 @@ func TestInputFlushFailureRemovesUnsentQueuedPendingFrames(t *testing.T) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, seq := range []uint64{2, 3, 4} {
+	for _, seq := range []uint64{1, 2, 3, 4} {
 		if _, ok := a.pending[seq]; ok {
 			t.Fatalf("pending[%d] stranded after queued flush failure", seq)
 		}
-	}
-	if _, ok := a.pending[1]; !ok {
-		t.Fatal("pending[1] was already sent and should remain pending until ack")
 	}
 }
 
@@ -685,7 +682,7 @@ func TestAuthenticatedPeerChangeUpdatesPeerAndEmitsConnected(t *testing.T) {
 		t.Fatalf("unauthenticated packet changed peer to %v", a.Peer())
 	}
 	c, _ := pdgram.NewCodec(key())
-	rec := encodeData(7, true, ports.Frame{Type: ports.MsgPing})
+	rec := encodeData(7, true, ports.Frame{Type: ports.MsgPing}, 0)
 	frags, _ := pdgram.FragmentPayload(9, rec, pdgram.DefaultMTU)
 	raw, _ := pdgram.MarshalFragment(frags[0])
 	aPC.in <- packet{c.Seal(2, 99, raw, nil), testAddr("evil")}
@@ -807,16 +804,42 @@ func TestServerWithoutRebindDoesNotHopPorts(t *testing.T) {
 
 func TestReliableReceiveBufferDoesNotDropAckedFutureFrame(t *testing.T) {
 	tr := &Transport{maxRecvBuffer: 1, nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame)}
-	_, ack, queued := tr.enqueueReliable(2, ports.Frame{Type: ports.MsgOutput, Payload: []byte("future")})
+	_, ack, queued := tr.enqueueReliable(2, ports.Frame{Type: ports.MsgOutput, Payload: []byte("future")}, 0)
 	if !ack || !queued {
 		t.Fatalf("future enqueue ack=%v queued=%v, want true/true", ack, queued)
 	}
-	_, ack, queued = tr.enqueueReliable(1, ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")})
+	_, ack, queued = tr.enqueueReliable(1, ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")}, 0)
 	if !ack || !queued {
 		t.Fatalf("next enqueue ack=%v queued=%v, want true/true", ack, queued)
 	}
 	if _, ok := tr.recvBuf[2]; !ok {
 		t.Fatal("acked future frame was dropped when next frame arrived")
+	}
+}
+
+func TestDataRecordWireEncodingOutputSkip(t *testing.T) {
+	got := encodeData(5, true, ports.Frame{Type: ports.MsgOutput, Payload: []byte("x")}, 3)
+	want := []byte{recData, 0, 0, 0, 0, 0, 0, 0, 5, 1, byte(ports.MsgOutput), 1, 0, 0, 0, 0, 0, 0, 0, 3, 'x'}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("encoded data=%v, want %v", got, want)
+	}
+	seq, reliable, frame, skip, ok := decodeData(got)
+	if !ok || seq != 5 || !reliable || frame.Type != ports.MsgOutput || string(frame.Payload) != "x" || skip != 3 {
+		t.Fatalf("decoded seq=%d reliable=%v frame=%+v skip=%d ok=%v", seq, reliable, frame, skip, ok)
+	}
+}
+
+func TestDataRecordWireDecodeRejectsTruncatedOutputSkip(t *testing.T) {
+	truncated := []byte{recData, 0, 0, 0, 0, 0, 0, 0, 5, 1, byte(ports.MsgOutput), 1, 0}
+	if _, _, _, _, ok := decodeData(truncated); ok {
+		t.Fatal("decodeData accepted truncated output skip header")
+	}
+}
+
+func TestDataRecordWireDecodeRejectsUnknownFlags(t *testing.T) {
+	withTrailingGarbage := []byte{recData, 0, 0, 0, 0, 0, 0, 0, 5, 1, byte(ports.MsgOutput), 0x80, 'x'}
+	if _, _, _, _, ok := decodeData(withTrailingGarbage); ok {
+		t.Fatal("decodeData accepted unknown data-record flags with trailing garbage")
 	}
 }
 
@@ -847,7 +870,7 @@ func TestOutputRetransmitsUntilAck(t *testing.T) {
 	}
 }
 
-func TestReliableDeliveryPreservesSequenceOrder(t *testing.T) {
+func TestReliableDeliveryPreservesInputSequenceOrder(t *testing.T) {
 	aPC, bPC := newPair()
 	a, _ := NewTransport(aPC, testAddr("b"), key(), 1, 2)
 	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
@@ -855,15 +878,48 @@ func TestReliableDeliveryPreservesSequenceOrder(t *testing.T) {
 	defer func() { _ = b.Close() }()
 
 	for i := range 100 {
-		if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
+		if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte{byte(i)}}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for i := range 100 {
 		got := recvWithin(t, b, time.Second)
-		if got.Type != ports.MsgOutput || len(got.Payload) != 1 || got.Payload[0] != byte(i) {
+		if got.Type != ports.MsgInput || len(got.Payload) != 1 || got.Payload[0] != byte(i) {
 			t.Fatalf("frame %d delivered out of order: %+v", i, got)
 		}
+	}
+}
+
+func TestOutputSupersessionSkipsDroppedOlderOutput(t *testing.T) {
+	aPC, bPC := newPair()
+	var sendAttempts atomic.Int32
+	aPC.drop = func(_ []byte, addr net.Addr) bool {
+		return addr.String() == "b" && sendAttempts.Add(1) <= 2
+	}
+	a, _ := NewTransport(aPC, testAddr("b"), key(), 1, 2)
+	b, _ := NewTransport(bPC, testAddr("a"), key(), 2, 1)
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+
+	for _, payload := range []string{"state1", "state2", "state3"} {
+		if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte(payload)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	a.mu.Lock()
+	pending := len(a.pending)
+	a.mu.Unlock()
+	if pending > 1 {
+		t.Fatalf("pending outputs=%d, want collapsed to newest", pending)
+	}
+
+	got := recvWithin(t, b, time.Second)
+	if got.Type != ports.MsgOutput || string(got.Payload) != "state3" {
+		t.Fatalf("got=%+v, want newest output after skipped predecessors", got)
+	}
+	if sendAttempts.Load() < 3 {
+		t.Fatalf("send attempts=%d, want first two output sends dropped before newest arrived", sendAttempts.Load())
 	}
 }
 
@@ -1015,7 +1071,7 @@ func TestCumulativeAckReleasesAllEarlierPendingFrames(t *testing.T) {
 func TestReliableReceiverAcksOnlyHighestContiguousSequence(t *testing.T) {
 	tr := &Transport{maxRecvBuffer: maxRecvBuffer, nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame)}
 
-	ackSeq, ack, queued := tr.enqueueReliable(3, ports.Frame{Type: ports.MsgOutput, Payload: []byte("third")})
+	ackSeq, ack, queued := tr.enqueueReliable(3, ports.Frame{Type: ports.MsgOutput, Payload: []byte("third")}, 0)
 	if !ack || !queued {
 		t.Fatalf("out-of-order enqueue ack=%v queued=%v, want true/true", ack, queued)
 	}
@@ -1023,7 +1079,7 @@ func TestReliableReceiverAcksOnlyHighestContiguousSequence(t *testing.T) {
 		t.Fatalf("out-of-order ack=%d, want highest contiguous %d", got, want)
 	}
 
-	ackSeq, ack, queued = tr.enqueueReliable(1, ports.Frame{Type: ports.MsgOutput, Payload: []byte("first")})
+	ackSeq, ack, queued = tr.enqueueReliable(1, ports.Frame{Type: ports.MsgOutput, Payload: []byte("first")}, 0)
 	if !ack || !queued {
 		t.Fatalf("first enqueue ack=%v queued=%v, want true/true", ack, queued)
 	}
@@ -1031,7 +1087,7 @@ func TestReliableReceiverAcksOnlyHighestContiguousSequence(t *testing.T) {
 		t.Fatalf("first contiguous ack=%d, want %d", got, want)
 	}
 
-	ackSeq, ack, queued = tr.enqueueReliable(2, ports.Frame{Type: ports.MsgOutput, Payload: []byte("second")})
+	ackSeq, ack, queued = tr.enqueueReliable(2, ports.Frame{Type: ports.MsgOutput, Payload: []byte("second")}, 0)
 	if !ack || !queued {
 		t.Fatalf("gap fill enqueue ack=%v queued=%v, want true/true", ack, queued)
 	}
@@ -1262,17 +1318,41 @@ func TestReliableRecvBufferBoundedForFarFutureSequences(t *testing.T) {
 	tr := &Transport{nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame), maxRecvBuffer: maxRecvBuffer, done: make(chan struct{})}
 	tr.deliverCond = sync.NewCond(&tr.deliverMu)
 	for i := range maxRecvBuffer + 100 {
-		tr.enqueueReliable(uint64(1000+i), ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}})
+		tr.enqueueReliable(uint64(1000+i), ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}, 0)
 	}
 	if got := len(tr.recvBuf); got != maxRecvBuffer {
 		t.Fatalf("recvBuf len=%d, want %d", got, maxRecvBuffer)
 	}
-	tr.enqueueReliable(1, ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")})
+	tr.enqueueReliable(1, ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")}, 0)
 	if _, ok := tr.recvBuf[1]; !ok {
 		t.Fatalf("next expected sequence was dropped when far-future buffer was full")
 	}
 	if got := len(tr.recvBuf); got > maxRecvBuffer+1 {
 		t.Fatalf("recvBuf len=%d, want <= %d", got, maxRecvBuffer+1)
+	}
+}
+
+func TestOutputSupersessionPrunesFullReceiveBuffer(t *testing.T) {
+	tr := &Transport{
+		nextRecvSeq:   1,
+		recvBuf:       map[uint64]ports.Frame{2: {Type: ports.MsgOutput, Payload: []byte("stale")}},
+		maxRecvBuffer: 1,
+		done:          make(chan struct{}),
+	}
+	tr.deliverCond = sync.NewCond(&tr.deliverMu)
+
+	ackSeq, ack, queued := tr.enqueueReliable(3, ports.Frame{Type: ports.MsgOutput, Payload: []byte("replacement")}, 2)
+	if !ack || !queued {
+		t.Fatalf("replacement ack=%v queued=%v, want true/true", ack, queued)
+	}
+	if ackSeq != 3 {
+		t.Fatalf("ack seq=%d, want 3 after skipped output", ackSeq)
+	}
+	if _, ok := tr.recvBuf[2]; ok {
+		t.Fatal("superseded output remained in full receive buffer")
+	}
+	if got := string(tr.recvBuf[3].Payload); got != "replacement" {
+		t.Fatalf("queued payload=%q, want replacement", got)
 	}
 }
 
@@ -1290,14 +1370,14 @@ func TestReliableFullRecvBufferDoesNotAckDroppedFarFutureFrame(t *testing.T) {
 	for i := range maxRecvBuffer {
 		tr.recvBuf[uint64(1000+i)] = ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}
 	}
-	tr.handleRecord(encodeData(9999, true, ports.Frame{Type: ports.MsgOutput, Payload: []byte("dropped")}))
+	tr.handleRecord(encodeData(9999, true, ports.Frame{Type: ports.MsgOutput, Payload: []byte("dropped")}, 0))
 	select {
 	case pkt := <-bPC.in:
 		t.Fatalf("unexpected ACK packet for dropped frame: %x", pkt.b)
 	case <-time.After(25 * time.Millisecond):
 	}
 
-	tr.handleRecord(encodeData(1, true, ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")}))
+	tr.handleRecord(encodeData(1, true, ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")}, 0))
 	select {
 	case <-bPC.in:
 	case <-time.After(time.Second):

@@ -23,6 +23,7 @@ type Context interface {
 	Detach() error
 	EnterVisualMode() error
 	RenameSession() error
+	RenameTab() error
 	OpenSessionPicker() error
 }
 

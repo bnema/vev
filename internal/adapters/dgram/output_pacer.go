@@ -7,9 +7,10 @@ import (
 )
 
 type queuedSend struct {
-	seq      uint64
-	reliable bool
-	frame    ports.Frame
+	seq               uint64
+	reliable          bool
+	frame             ports.Frame
+	outputSkipThrough uint64
 }
 
 func (t *Transport) flushQueuedOutputLocked() []queuedSend {
@@ -104,7 +105,7 @@ func shouldPaceOutput(f ports.Frame) bool {
 
 func (t *Transport) sendQueuedData(q queuedSend) error {
 	t.markPendingSent(q.seq, q.reliable)
-	if err := t.sendData(q.seq, q.reliable, q.frame); err != nil {
+	if err := t.sendData(q.seq, q.reliable, q.frame, q.outputSkipThrough); err != nil {
 		t.removePending(q.seq, q.reliable)
 		return err
 	}

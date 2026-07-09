@@ -26,7 +26,6 @@ package daemon
 
 import (
 	"sort"
-	"strconv"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -71,7 +70,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 		view := picker.SessionView{ID: s.id, Name: s.name, Active: s.active, Tabs: make([]string, len(s.tabs))}
 		sessionAttention := false
 		for i, tb := range s.tabs {
-			label := strconv.Itoa(i + 1)
+			label := tabDisplayName(tb, i)
 			if tb.attention {
 				label = attentionSuffix(label)
 				sessionAttention = true
@@ -425,7 +424,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	}
 	term := from.terminal
 	cwd := d.dirOrHome(stopped.cwd)
-	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.size, term)
+	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.size, term, stopped.tabNames)
 	if err != nil {
 		from.mu.Unlock()
 		d.mu.Unlock()
@@ -455,9 +454,7 @@ func (d *Daemon) killPickerTarget(target picker.Target) {
 				d.log.Warn("deleting persisted stopped session failed", "err", err, "session", target.Name)
 				return
 			}
-			if cur, ok := d.stopped[target.Name]; ok && cur == stopped {
-				delete(d.stopped, target.Name)
-			}
+			delete(d.stopped, target.Name)
 		}
 		d.mu.Unlock()
 		return
