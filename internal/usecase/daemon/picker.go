@@ -424,7 +424,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	}
 	term := from.terminal
 	cwd := d.dirOrHome(stopped.cwd)
-	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.size, term)
+	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.size, term, stopped.tabNames)
 	if err != nil {
 		from.mu.Unlock()
 		d.mu.Unlock()

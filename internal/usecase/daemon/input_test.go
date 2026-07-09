@@ -654,7 +654,7 @@ func TestRNTOpensPromptAndRenamesActiveTab(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("RNT\r"))
 	out := awaitFrame(t, sends, ports.MsgOutput)
-	require.True(t, ac.promptActive())
+	require.True(t, ac.overlays.promptActive())
 	msg, err := ports.UnmarshalOutput(out.Payload)
 	require.NoError(t, err)
 	require.Contains(t, string(msg.Data), "> 2")
@@ -662,7 +662,7 @@ func TestRNTOpensPromptAndRenamesActiveTab(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x7flogs\r"))
 	awaitFrame(t, sends, ports.MsgOutput)
 
-	require.False(t, ac.promptActive())
+	require.False(t, ac.overlays.promptActive())
 	require.Equal(t, "logs", sess.tabs[1].name)
 	require.Empty(t, sess.tabs[0].name)
 }

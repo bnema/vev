@@ -825,7 +825,7 @@ func TestRenameTabPersistsForNamedSession(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(store)(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, nil)
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
 	require.NoError(t, err)
 	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
 
@@ -862,7 +862,7 @@ func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
 			WithStore(store)(d)
 			sz := domain.Size{Cols: 80, Rows: 24}
 
-			sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, nil)
+			sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
 			require.NoError(t, err)
 			require.NoError(t, d.createTab(sess, sz))
 			require.NoError(t, d.createTab(sess, sz))
@@ -887,7 +887,7 @@ func TestRenameTabDoesNotPersistForEphemeralSession(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(store)(d)
 
-	sess, err := d.createSessionLocked("0", true, "/tmp/work", sz, nil)
+	sess, err := d.createSessionLocked("0", true, "/tmp/work", sz, terminalEnv{})
 	require.NoError(t, err)
 	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
 	require.Equal(t, "shell", sess.tabs[0].name)

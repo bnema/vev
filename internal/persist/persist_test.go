@@ -1,7 +1,6 @@
 package persist
 
 import (
-	"encoding/binary"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -18,7 +17,7 @@ func privateDir(t *testing.T) string {
 }
 
 func TestRecordCodecRoundTrip(t *testing.T) {
-	r := Record{Name: "work", Cwd: "/tmp/project", CreatedAt: 11, UpdatedAt: 22, LastUsedSeq: 33}
+	r := Record{Name: "work", Cwd: "/tmp/project", CreatedAt: 11, UpdatedAt: 22, LastUsedSeq: 33, TabNames: []string{"shell", "logs"}}
 	value, err := encodeRecordValue(r)
 	require.NoError(t, err)
 
@@ -82,7 +81,7 @@ func TestPersisterSaveTouchDeleteLoadAll(t *testing.T) {
 	p, err := Open(dir)
 	require.NoError(t, err)
 
-	require.NoError(t, p.Save(Record{Name: "b", Cwd: "/b", CreatedAt: 10, UpdatedAt: 10, LastUsedSeq: 40}))
+	require.NoError(t, p.Save(Record{Name: "b", Cwd: "/b", CreatedAt: 10, UpdatedAt: 10, LastUsedSeq: 40, TabNames: []string{"shell"}}))
 	require.NoError(t, p.Save(Record{Name: "a", Cwd: "/a", CreatedAt: 20, UpdatedAt: 20, LastUsedSeq: 50}))
 	require.NoError(t, p.Touch("b", "/b/next", 30))
 	require.NoError(t, p.TouchMRU("b", 60))
@@ -91,13 +90,13 @@ func TestPersisterSaveTouchDeleteLoadAll(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []Record{
 		{Name: "a", Cwd: "/a", CreatedAt: 20, UpdatedAt: 20, LastUsedSeq: 50},
-		{Name: "b", Cwd: "/b/next", CreatedAt: 10, UpdatedAt: 30, LastUsedSeq: 60},
+		{Name: "b", Cwd: "/b/next", CreatedAt: 10, UpdatedAt: 30, LastUsedSeq: 60, TabNames: []string{"shell"}},
 	}, records)
 
 	require.NoError(t, p.Delete("a"))
 	records, err = p.LoadAll()
 	require.NoError(t, err)
-	require.Equal(t, []Record{{Name: "b", Cwd: "/b/next", CreatedAt: 10, UpdatedAt: 30, LastUsedSeq: 60}}, records)
+	require.Equal(t, []Record{{Name: "b", Cwd: "/b/next", CreatedAt: 10, UpdatedAt: 30, LastUsedSeq: 60, TabNames: []string{"shell"}}}, records)
 	require.NoError(t, p.Close())
 }
 

@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,6 +77,7 @@ type tab struct {
 	mu sync.Mutex // guards tree, panes, nextPaneID, size, previewClient, and pane map membership
 
 	stableID   string
+	name       string
 	tree       *layout.Tree
 	panes      map[layout.PaneID]*pane
 	nextPaneID int
@@ -127,25 +129,40 @@ func (d *Daemon) touchMRU(sess *session) {
 	}
 }
 
-func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv) (*session, error) {
+func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, restoredTabNames ...[]string) (*session, error) {
 	tbSize := tabSize(sz)
-	tabStableID, paneStableID, err := d.newTabPaneStableIDs()
-	if err != nil {
-		return nil, err
+	var names []string
+	if len(restoredTabNames) > 0 {
+		names = append([]string(nil), restoredTabNames[0]...)
 	}
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
-	if err != nil {
-		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "session")
-		return nil, fmt.Errorf("daemon: spawning session %q: %w", name, err)
+	tabs := make([]*tab, 0, max(1, len(names)))
+	for i := range max(1, len(names)) {
+		tabStableID, paneStableID, err := d.newTabPaneStableIDs()
+		if err != nil {
+			closeTabs(tabs)
+			return nil, err
+		}
+		pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
+		if err != nil {
+			closeTabs(tabs)
+			d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "session")
+			return nil, fmt.Errorf("daemon: spawning session %q: %w", name, err)
+		}
+		tb := newTabWithStableID(tabStableID, paneStableID, pty, tbSize)
+		if i < len(names) {
+			tb.name = names[i]
+		}
+		tabs = append(tabs, tb)
 	}
 
 	id := domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
 	d.nextID++
 	createdAt := time.Now().UnixNano()
 
-	tb := newTabWithStableID(tabStableID, paneStableID, pty, tbSize)
 	sctx, cancel := context.WithCancel(d.serveCtx)
-	tb.ctx, tb.cancel = context.WithCancel(sctx)
+	for _, tb := range tabs {
+		tb.ctx, tb.cancel = context.WithCancel(sctx)
+	}
 	lastUsedSeq := uint64(0)
 	if !ephemeral {
 		if stopped, ok := d.stopped[name]; ok {
@@ -168,8 +185,8 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	}
 	sess.snapEligible.Store(!ephemeral && name != "")
 	if !ephemeral {
-		if err := d.persist.Save(persist.Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq}); err != nil {
-			_ = pty.Close()
+		if err := d.persist.Save(persist.Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names}); err != nil {
+			closeTabs(tabs)
 			cancel()
 			return nil, err
 		}
@@ -180,9 +197,19 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		d.touchMRU(sess)
 	}
 	d.log.Info("session created", "session", name, "id", id, "ephemeral", ephemeral)
-	d.log.Info("tab created", "session", name, "tab", 0)
-	d.startTabGoroutines(sess, tb)
+	for i, tb := range tabs {
+		d.log.Info("tab created", "session", name, "tab", i)
+		d.startTabGoroutines(sess, tb)
+	}
 	return sess, nil
+}
+
+func closeTabs(tabs []*tab) {
+	for _, tb := range tabs {
+		for _, p := range tb.panes {
+			_ = p.pty.Close()
+		}
+	}
 }
 
 func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name string) error {
@@ -284,6 +311,21 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	sess.tabs = append(sess.tabs, tb)
 	sess.active = len(sess.tabs) - 1
 	tabIndex := sess.active
+	record := sess.persistRecordLocked(time.Now().UnixNano())
+	ephemeral := sess.ephemeral
+	if !ephemeral {
+		if err := d.persist.Save(record); err != nil {
+			sess.tabs = sess.tabs[:len(sess.tabs)-1]
+			sess.active = oldActive
+			if tb.cancel != nil {
+				tb.cancel()
+			}
+			sess.mu.Unlock()
+			d.mu.Unlock()
+			_ = pty.Close()
+			return err
+		}
+	}
 	sess.mu.Unlock()
 	d.log.Info("tab created", "session", name, "tab", tabIndex)
 	d.startTabGoroutines(sess, tb)
@@ -522,7 +564,7 @@ func (s *session) persistRecordLocked(updatedAt int64) persist.Record {
 	} else {
 		tabNames = tabNames[:lastCustom+1]
 	}
-	return persist.Record{Name: s.name, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, TabNames: tabNames}
+	return persist.Record{Name: s.name, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, LastUsedSeq: s.mruAt.Load(), TabNames: tabNames}
 }
 
 func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
@@ -560,6 +602,13 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	}
 	ac := sess.client
 	name := sess.name
+	record := sess.persistRecordLocked(time.Now().UnixNano())
+	ephemeral := sess.ephemeral
+	if !ephemeral {
+		if err := d.persist.Save(record); err != nil {
+			d.log.Warn("persisting closed tab failed", "err", err, "session", name)
+		}
+	}
 	sess.mu.Unlock()
 	d.log.Info("tab closed", "session", name)
 	markSnapshotDirty(sess)
@@ -618,7 +667,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	ephemeral := sess.ephemeral
 	sess.mu.Unlock()
 	if !ephemeral {
-		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, lastUsedSeq: sess.mruAt.Load(), purging: purge}
+		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, lastUsedSeq: sess.mruAt.Load(), tabNames: tabNames, purging: purge}
 		d.stopped[stoppedName] = stopped
 	}
 	empty := len(d.sessions) == 0

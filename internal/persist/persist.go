@@ -71,14 +71,16 @@ func (p *Persister) Touch(name, cwd string, at int64) error {
 
 	createdAt := at
 	lastUsedSeq := uint64(0)
+	var tabNames []string
 	if v, ok := p.store.Get([]byte(name)); ok {
 		if r, err := decodeRecordValue(name, v); err == nil {
 			createdAt = r.CreatedAt
 			lastUsedSeq = r.LastUsedSeq
+			tabNames = r.TabNames
 		}
 	}
 
-	value, err := encodeRecordValue(Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: at, LastUsedSeq: lastUsedSeq})
+	value, err := encodeRecordValue(Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: at, LastUsedSeq: lastUsedSeq, TabNames: tabNames})
 	if err != nil {
 		return err
 	}
