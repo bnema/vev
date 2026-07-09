@@ -60,6 +60,7 @@ func TestRefreshPaneTitleUsesForegroundProcessComm(t *testing.T) {
 	}
 
 	title := d.refreshPaneTitle(sess, "pane-1")
+	require.Equal(t, "vim", title)
 
 	p := sess.activeTab().focusedPane()
 	p.mu.Lock()

@@ -649,6 +649,19 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 		}
 		placements = []layout.Placement{{ID: fallback.id, Content: contentArea}}
 	}
+	if titleGenerations != nil {
+		currentTitleBars := make(map[layout.PaneID]struct{}, len(placements))
+		for _, pl := range placements {
+			if pl.TitleBar.Height > 0 {
+				currentTitleBars[pl.ID] = struct{}{}
+			}
+		}
+		for id := range titleGenerations {
+			if _, current := currentTitleBars[id]; !current {
+				delete(titleGenerations, id)
+			}
+		}
+	}
 	if ok && !cacheValid {
 		drawDividers(frame, root, area, themeui.DimStyle(newThemeStyles(theme).border, theme))
 	}
