@@ -362,12 +362,12 @@ func TestPickerPreviewSinglePaneSnapshotsFocusedPane(t *testing.T) {
 func TestPickerPreviewMultiPaneComposesTabFrame(t *testing.T) {
 	tb := newTab(nil, domain.Size{Cols: 41, Rows: 5})
 	left := tb.focusedPane()
-	left.title = "one"
+	left.title.processName = "one"
 	left.screen.Write([]byte("L"))
 	rightTop := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 3})
-	rightTop.title = "two"
+	rightTop.title.processName = "two"
 	rightBottom := newPane("pane-3", nil, domain.Size{Cols: 20, Rows: 2})
-	rightBottom.title = "three"
+	rightBottom.title.processName = "three"
 	rightBottom.screen.Write([]byte("R"))
 
 	tb.mu.Lock()

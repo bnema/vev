@@ -664,10 +664,10 @@ func BenchmarkPaintCachedSinglePaneDamage(b *testing.B) {
 func TestComposeTabFrameStackDrawsTitleBarsAndDimsCollapsed(t *testing.T) {
 	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
 	p1 := win.focusedPane()
-	p1.title = "one"
+	p1.title.processName = "one"
 	p1.screen.ClearDamage()
 	p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 3})
-	p2.title = "two"
+	p2.title.processName = "two"
 	p2.screen.Write([]byte("T"))
 	p2.screen.ClearDamage()
 
@@ -688,9 +688,9 @@ func TestComposeTabFrameStackDrawsTitleBarsAndDimsCollapsed(t *testing.T) {
 func TestComposeClientFrameCacheRefreshesStackTitleBars(t *testing.T) {
 	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
 	p1 := win.focusedPane()
-	p1.title = "one"
+	p1.title.processName = "one"
 	p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 3})
-	p2.title = "two"
+	p2.title.processName = "two"
 	p2.screen.Write([]byte("T"))
 	win.tree.Root = &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(p1.id), layout.NewLeaf(p2.id)}, Expanded: p2.id}
 	win.tree.Focus = p2.id
@@ -702,12 +702,16 @@ func TestComposeClientFrameCacheRefreshesStackTitleBars(t *testing.T) {
 	p1.screen.ClearDamage()
 	p2.screen.ClearDamage()
 
-	p1.title = "renamed"
+	p1.title.processName = "renamed"
+	p1.title.generation++
 	frame, damage := composeClientFrameWithLayoutCached(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
 
 	require.Equal(t, "renamed", rowText(frame.Row(1))[:7])
 	require.NotEqual(t, []renderer.Damage{renderer.FullRedraw()}, damage, "title-only changes should not force a full layout reset")
 	require.Contains(t, damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 1, Width: 20, Height: 1})
+
+	_, damage = composeClientFrameWithLayoutCached(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
+	require.NotContains(t, damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 1, Width: 20, Height: 1}, "unchanged title must not redraw its row")
 }
 
 func TestOverlayPaintInvalidationShowsAndRestoresBaseFrame(t *testing.T) {

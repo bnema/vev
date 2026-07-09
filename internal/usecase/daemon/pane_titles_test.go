@@ -8,12 +8,47 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/domain"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
+func TestFormatPaneTitle(t *testing.T) {
+	tests := []struct {
+		name, process, terminal, fallback, want string
+	}{
+		{name: "process and terminal", process: "nvim", terminal: "project/main.go", fallback: "sh", want: "nvim: project/main.go"},
+		{name: "process only", process: "nvim", fallback: "sh", want: "nvim"},
+		{name: "terminal only", terminal: "project/main.go", fallback: "sh", want: "project/main.go"},
+		{name: "fallback", fallback: "fish", want: "fish"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, formatPaneTitle(tt.process, tt.terminal, tt.fallback))
+		})
+	}
+}
+
+func TestPaneTerminalTitleGenerationChangesOnlyWhenTitleChanges(t *testing.T) {
+	p := newPane("pane", nil, domain.Size{Cols: 20, Rows: 5})
+	p.mu.Lock()
+	p.screen.Write([]byte("\x1b]2;project/main.go\a"))
+	p.refreshTerminalTitleLocked()
+	first := p.title.generation
+	p.refreshTerminalTitleLocked()
+	second := p.title.generation
+	p.screen.Write([]byte("\x1b]0;other\a"))
+	p.refreshTerminalTitleLocked()
+	third := p.title.generation
+	p.mu.Unlock()
+
+	require.Equal(t, uint64(1), first)
+	require.Equal(t, first, second)
+	require.Equal(t, first+1, third)
+}
+
 func TestRefreshPaneTitleUsesForegroundProcessComm(t *testing.T) {
 	pty := portsmocks.NewMockPTY(t)
-	pty.EXPECT().ForegroundPgid().Return(1234, nil).Once()
+	pty.EXPECT().ForegroundPgid().Return(1234, nil).Twice()
 	_, sess, _, _ := newManualSessionWithPTYs(t, pty)
 	clk := portsmocks.NewMockClock(t)
 	clk.EXPECT().Now().Return(time.Time{}).Maybe()
@@ -26,8 +61,15 @@ func TestRefreshPaneTitleUsesForegroundProcessComm(t *testing.T) {
 
 	title := d.refreshPaneTitle(sess, "pane-1")
 
-	require.Equal(t, "vim", title)
-	require.Equal(t, "vim", sess.activeTab().focusedPane().title)
+	p := sess.activeTab().focusedPane()
+	p.mu.Lock()
+	p.screen.Write([]byte("\x1b]2;project/main.go\a"))
+	p.refreshTerminalTitleLocked()
+	p.mu.Unlock()
+	title = d.refreshPaneDisplayTitle(sess, p, true)
+
+	require.Equal(t, "vim: project/main.go", title)
+	require.Equal(t, "vim", p.title.processName)
 }
 
 func TestRefreshPaneTitleCachesByTTLAndRefreshesOnFocus(t *testing.T) {
@@ -66,5 +108,5 @@ func TestRefreshPaneTitleFallsBackToShellBase(t *testing.T) {
 	title := d.refreshPaneTitle(sess, "pane-1")
 
 	require.Equal(t, "fish", title)
-	require.Equal(t, "fish", sess.activeTab().focusedPane().title)
+	require.Equal(t, "fish", sess.activeTab().focusedPane().title.processName)
 }

@@ -69,6 +69,7 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 			p.mu.Lock()
 			wasSyncing := p.screen.SyncUpdateActive()
 			p.screen.Write(data)
+			p.refreshTerminalTitleLocked()
 			isSyncing := p.screen.SyncUpdateActive()
 			p.mu.Unlock()
 			markSnapshotDirty(sess)
@@ -511,9 +512,10 @@ func (c *barCache) Reset() {
 }
 
 type composedFrameCache struct {
-	frame      renderer.Frame
-	valid      bool
-	layoutSnap tabLayoutSnapshot
+	frame            renderer.Frame
+	valid            bool
+	layoutSnap       tabLayoutSnapshot
+	titleGenerations map[layout.PaneID]uint64
 }
 
 func (c *composedFrameCache) invalidate() {
@@ -580,7 +582,14 @@ func composeClientFrameWithLayoutCachedOptions(bars barState, tb *tab, full bool
 	}
 	topBar := frame.Row(0)
 	drawTopBarSnapshot(topBar, bars.status, bars.attentionFrame, bars.topRight, styles)
-	contentDamage := composeTabFrameIntoWithLayoutOptions(tb, frame, contentArea, bars.theme, layoutSnap, cacheValid && layoutSame, consumeDamage)
+	var titleGenerations map[layout.PaneID]uint64
+	if composed != nil {
+		if composed.titleGenerations == nil {
+			composed.titleGenerations = make(map[layout.PaneID]uint64)
+		}
+		titleGenerations = composed.titleGenerations
+	}
+	contentDamage := composeTabFrameIntoWithLayoutOptions(tb, frame, contentArea, bars.theme, layoutSnap, cacheValid && layoutSame, consumeDamage, titleGenerations)
 	bottomBar := frame.Row(screenRows + 1)
 	drawStatusBarState(bottomBar, bars, styles)
 	if composed != nil {
@@ -621,7 +630,11 @@ func composeTabFrameIntoWithLayout(tb *tab, frame renderer.Frame, area domain.Re
 	return composeTabFrameIntoWithLayoutOptions(tb, frame, area, theme, layoutSnap, cacheValid, false)
 }
 
-func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area domain.Rect, theme themeui.Theme, layoutSnap tabLayoutSnapshot, cacheValid bool, consumeDamage bool) []renderer.Damage {
+func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area domain.Rect, theme themeui.Theme, layoutSnap tabLayoutSnapshot, cacheValid bool, consumeDamage bool, titleCaches ...map[layout.PaneID]uint64) []renderer.Damage {
+	var titleGenerations map[layout.PaneID]uint64
+	if len(titleCaches) > 0 {
+		titleGenerations = titleCaches[0]
+	}
 	contentArea := domain.Rect{Width: area.Width, Height: area.Height}
 	root := tb.tree.Root
 	placements, ok := layoutSnap.placements, layoutSnap.ok && layoutSnap.root == root && layoutSnap.area == contentArea
@@ -651,12 +664,15 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 		focused := tb.tree.Focus == pl.ID
 		pl = offsetPlacement(pl, area.X, area.Y)
 		if pl.TitleBar.Height > 0 {
-			drawPaneTitleBar(frame, pl, p, focused, theme, "")
-			if cacheValid {
+			generation := drawPaneTitleBar(frame, pl, p, focused, theme, string(p.id))
+			if cacheValid && (titleGenerations == nil || titleGenerations[pl.ID] != generation) {
 				titleDamage := pl.TitleBar
 				titleDamage.X -= area.X
 				titleDamage.Y -= area.Y
 				damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: titleDamage.X, Y: titleDamage.Y, Width: titleDamage.Width, Height: titleDamage.Height})
+			}
+			if titleGenerations != nil {
+				titleGenerations[pl.ID] = generation
 			}
 		}
 		if pl.Collapsed || pl.Content.Width <= 0 || pl.Content.Height <= 0 {
@@ -721,7 +737,7 @@ func blitPaneFrame(dst renderer.Frame, r domain.Rect, src renderer.Frame, dim bo
 	}
 }
 
-func drawPaneTitleBar(frame renderer.Frame, pl layout.Placement, p *pane, focused bool, theme themeui.Theme, fallback string) {
+func drawPaneTitleBar(frame renderer.Frame, pl layout.Placement, p *pane, focused bool, theme themeui.Theme, fallback string) uint64 {
 	styles := newThemeStyles(theme)
 	style := styles.border
 	if focused {
@@ -733,15 +749,11 @@ func drawPaneTitleBar(frame renderer.Frame, pl layout.Placement, p *pane, focuse
 		frame.Set(x, pl.TitleBar.Y, renderer.Cell{Rune: ' ', Style: style})
 	}
 	p.mu.Lock()
-	title := p.title
+	title := p.formattedTitleLocked(fallback)
+	generation := p.title.generation
 	p.mu.Unlock()
-	if title == "" {
-		title = fallback
-	}
-	if title == "" {
-		title = string(p.id)
-	}
 	ui.DrawText(frame, pl.TitleBar.X, pl.TitleBar.Y, pl.TitleBar.X+pl.TitleBar.Width, title, style)
+	return generation
 }
 
 func drawDividers(frame renderer.Frame, n *layout.Node, r domain.Rect, style renderer.Style) {
