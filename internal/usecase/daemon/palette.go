@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"strconv"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -154,6 +156,9 @@ func (e paletteExec) RenameTab() error {
 	}
 	e.sess.mu.Lock()
 	currentName := tb.name
+	if currentName == "" {
+		currentName = strconv.Itoa(e.sess.active + 1)
+	}
 	e.sess.mu.Unlock()
 	e.d.enterPrompt(e.sess, e.ac, " Rename tab ", currentName, func(name string) error {
 		return e.d.renameTab(e.sess, tb, name)

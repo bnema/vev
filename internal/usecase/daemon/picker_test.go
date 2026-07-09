@@ -38,7 +38,7 @@ func TestPickerViewsAddsBellSuffixForAttention(t *testing.T) {
 	ctx, cancel := context.WithCancel(d.serveCtx)
 	defer cancel()
 	current := &session{id: "s1", name: "alpha", ctx: ctx, cancel: cancel, tabs: []*tab{{}, {}}}
-	ringing := &session{id: "s2", name: "beta", ctx: ctx, cancel: cancel, tabs: []*tab{{}, {}}}
+	ringing := &session{id: "s2", name: "beta", ctx: ctx, cancel: cancel, tabs: []*tab{{name: "shell"}, {name: "logs"}}}
 	ringing.mu.Lock()
 	ringing.tabs[1].attention = true
 	ringing.tabs[1].attentionAt = time.Unix(10, 0)
@@ -53,7 +53,7 @@ func TestPickerViewsAddsBellSuffixForAttention(t *testing.T) {
 	require.Equal(t, "alpha", views[0].Name)
 	require.Equal(t, []string{"1", "2"}, views[0].Tabs)
 	require.Equal(t, "beta ", views[1].Name)
-	require.Equal(t, []string{"1", "2 "}, views[1].Tabs)
+	require.Equal(t, []string{"shell", "logs "}, views[1].Tabs)
 }
 
 func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {

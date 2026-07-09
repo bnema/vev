@@ -71,7 +71,10 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 		view := picker.SessionView{ID: s.id, Name: s.name, Active: s.active, Tabs: make([]string, len(s.tabs))}
 		sessionAttention := false
 		for i, tb := range s.tabs {
-			label := strconv.Itoa(i + 1)
+			label := tb.name
+			if label == "" {
+				label = strconv.Itoa(i + 1)
+			}
 			if tb.attention {
 				label = attentionSuffix(label)
 				sessionAttention = true
