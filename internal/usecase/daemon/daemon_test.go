@@ -239,7 +239,7 @@ func newManualSessionWithPTYs(t *testing.T, ptys ...ports.PTY) (*Daemon, *sessio
 	t.Helper()
 	d := newTestDaemon(t, nil, stubClock{})
 	tr, sends := newCapturingTransport(t)
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	ac.initOverlays()
 	sctx, cancel := context.WithCancel(d.serveCtx)
 	tabs := make([]*tab, 0, len(ptys))

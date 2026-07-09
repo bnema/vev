@@ -16,7 +16,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 func TestHandleImagePushWritesFileWithExactBytesAndMode0600(t *testing.T) {
@@ -190,7 +189,7 @@ func TestPTYReaderForwardsOSC52ClipboardToAttachedClient(t *testing.T) {
 	sctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	win := newTestTabWithContext(p, sctx, cancel)
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{id: "clip", name: "clip", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
@@ -215,7 +214,7 @@ func TestPTYReaderDropsOversizedClipboardPayload(t *testing.T) {
 	sctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	win := newTestTabWithContext(p, sctx, cancel)
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{id: "clip-big", name: "clip-big", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
@@ -239,7 +238,7 @@ func TestPTYReaderDropsInvalidBase64Clipboard(t *testing.T) {
 	sctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	win := newTestTabWithContext(p, sctx, cancel)
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{id: "clip-bad", name: "clip-bad", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
@@ -274,7 +273,7 @@ func TestPTYReaderClipboardNoAttachedClientDoesNotPanic(t *testing.T) {
 func TestForwardClipboardAsyncSerializesClipboardWrites(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	tr := newBlockingClipboardTransport()
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

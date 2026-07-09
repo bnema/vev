@@ -127,19 +127,19 @@ func TestResumeRebindsRotatesAndDoesNotOpenPTY(t *testing.T) {
 }
 
 func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
-	ac := &attachedClient{}
-	ac.nextStateNum = 3
-	ac.advanceOutputAck(3)
-	ac.advanceOutputAck(2)
-	ac.advanceOutputAck(4)
-	require.Equal(t, uint64(3), ac.outputAck.Load(), "stale or future ACKs must not move output state incorrectly")
+	ac := &attachedClient{output: newOutputStateStream()}
+	ac.output.next = 3
+	ac.ackOutputState(3)
+	ac.ackOutputState(2)
+	ac.ackOutputState(4)
+	require.Equal(t, uint64(3), ac.output.acked, "stale or future ACKs must not move output state incorrectly")
 
 	ac.sendMu.Lock()
-	ac.nextStateNum = 5
-	reset := ac.shouldResetOutputState(false)
+	ac.output.next = 5
+	reset := false
 	require.False(t, reset, "reliable output ack lag alone must not force dependency-free full repaint")
 
-	f := ac.nextOutputFrameLocked([]byte("incremental while reliable backlog drains"), reset)
+	f := ac.output.frame([]byte("incremental while reliable backlog drains"), reset, 0)
 	ac.sendMu.Unlock()
 	out, err := ports.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
@@ -147,9 +147,9 @@ func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 	require.Equal(t, uint64(6), out.NewStateNum)
 
 	ac.sendMu.Lock()
-	reset = ac.shouldResetOutputState(true)
+	reset = true
 	require.True(t, reset, "explicit reset should still force full repaint")
-	full := ac.nextOutputFrameLocked([]byte("explicit full repaint"), reset)
+	full := ac.output.frame([]byte("explicit full repaint"), reset, 0)
 	ac.sendMu.Unlock()
 	fullOut, err := ports.UnmarshalOutput(full.Payload)
 	require.NoError(t, err)
@@ -170,8 +170,8 @@ func TestResumeClientIDMismatchDoesNotConsumeParkedToken(t *testing.T) {
 
 	wrongClient := helloResumeCapable(ports.IntentResume, "work", token)
 	wrongClient.ClientID = [16]byte{9, 9, 9, 9}
+	_, _, ok, err := d.resumeParked(wrongClient, &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
 	d.mu.Lock()
-	_, _, ok, err := d.resumeParkedLocked(wrongClient, &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
 	_, stillParked := d.parked[token]
 	d.mu.Unlock()
 	require.Error(t, err)
@@ -200,9 +200,7 @@ func TestResumeCloseCapturedOldTransportDoesNotCloseReboundTransport(t *testing.
 	require.True(t, d.parkAttachment(sess, ac))
 
 	newTr := &closeTrackingTransport{}
-	d.mu.Lock()
-	resumedSess, resumedAC, ok, err := d.resumeParkedLocked(helloResumeCapable(ports.IntentResume, "work", token), newTr, domain.Size{Cols: 80, Rows: 24})
-	d.mu.Unlock()
+	resumedSess, resumedAC, ok, err := d.resumeParked(helloResumeCapable(ports.IntentResume, "work", token), newTr, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Same(t, sess, resumedSess)
@@ -212,6 +210,41 @@ func TestResumeCloseCapturedOldTransportDoesNotCloseReboundTransport(t *testing.
 	require.True(t, oldTr.Closed(), "old transport is closed")
 	require.False(t, newTr.Closed(), "newly rebound transport is not closed by old cleanup")
 	require.Same(t, newTr, ac.transport())
+}
+
+func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	oldTr := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTr)
+	require.NoError(t, err)
+	ac.output.next = maxUnackedOutputStates
+	token := ac.resumeToken
+	require.True(t, sess.detachIfCurrent(ac))
+	require.True(t, d.parkAttachment(sess, ac))
+
+	newTr := &closeTrackingTransport{}
+	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, "work", token), newTr)
+	require.NoError(t, err)
+	require.Same(t, ac, resumedAC)
+	d.firstPaint(resumedSess, resumedAC, resumedAC.size)
+
+	sends := newTr.Sends()
+	require.Len(t, sends, 1)
+	first, err := ports.UnmarshalOutput(sends[0].Payload)
+	require.NoError(t, err)
+	require.Zero(t, first.BaseStateNum)
+	require.Equal(t, uint64(maxUnackedOutputStates+1), first.NewStateNum)
+	resumedAC.ackOutputState(first.NewStateNum)
+
+	resumedSess.tabs[0].focusedPane().screen.Write([]byte("A"))
+	d.paint(resumedSess, resumedAC, false)
+	sends = newTr.Sends()
+	require.Len(t, sends, 2)
+	second, err := ports.UnmarshalOutput(sends[1].Payload)
+	require.NoError(t, err)
+	require.Equal(t, first.NewStateNum, second.BaseStateNum)
 }
 
 func TestExplicitDetachDoesNotPark(t *testing.T) {
@@ -331,8 +364,8 @@ func TestKilledSessionPurgesParkedResumeToken(t *testing.T) {
 	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, true))
 	d.mu.Lock()
 	_, parked := d.parked[token]
-	_, _, ok, err := d.resumeParkedLocked(helloResumeCapable(ports.IntentResume, "work", token), &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
 	d.mu.Unlock()
+	_, _, ok, err := d.resumeParked(helloResumeCapable(ports.IntentResume, "work", token), &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
 	require.False(t, parked, "killSession purges parked token")
 	require.NoError(t, err)
 	require.False(t, ok, "killed session cannot be resumed")
@@ -355,8 +388,8 @@ func TestStaleParkedTokenCannotStealActiveAttachment(t *testing.T) {
 
 	d.mu.Lock()
 	_, parked := d.parked[token]
-	_, resumedAC, ok, err := d.resumeParkedLocked(helloResumeCapable(ports.IntentResume, "work", token), &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
 	d.mu.Unlock()
+	_, resumedAC, ok, err := d.resumeParked(helloResumeCapable(ports.IntentResume, "work", token), &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
 	require.False(t, parked, "normal attach invalidates stale parked token")
 	require.NoError(t, err)
 	require.False(t, ok)
@@ -382,10 +415,10 @@ func TestStaleClientGoneDoesNotDetachOrCloseFreshTransport(t *testing.T) {
 	require.False(t, freshTr.Closed(), "fresh resumed transport must not be closed by stale loop")
 }
 
-func TestOutputStateNumberingIsSharedAndMonotone(t *testing.T) {
+func TestRawTerminalSideEffectsAreOutputStateNeutral(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	tr := &closeTrackingTransport{}
-	ac := &attachedClient{tr: tr}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 
 	require.NoError(t, d.boundedSendOutputErr(ac, []byte("copy")))
@@ -397,8 +430,10 @@ func TestOutputStateNumberingIsSharedAndMonotone(t *testing.T) {
 	require.NoError(t, err)
 	second, err := ports.UnmarshalOutput(sends[1].Payload)
 	require.NoError(t, err)
-	require.Equal(t, uint64(1), first.NewStateNum)
-	require.Equal(t, uint64(2), second.NewStateNum)
+	require.Zero(t, first.BaseStateNum)
+	require.Zero(t, first.NewStateNum)
+	require.Zero(t, second.BaseStateNum)
+	require.Zero(t, second.NewStateNum)
 }
 
 func TestSequencedInputDoesNotPrematurelyEchoAck(t *testing.T) {
@@ -429,9 +464,7 @@ func TestResumeParkedUpdatesTerminalEnv(t *testing.T) {
 
 	resumeHello := helloResumeCapable(ports.IntentResume, "work", token)
 	resumeHello.TrueColor = true
-	d.mu.Lock()
-	_, _, ok, err := d.resumeParkedLocked(resumeHello, &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
-	d.mu.Unlock()
+	_, _, ok, err := d.resumeParked(resumeHello, &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	require.True(t, ok)
 	sess.mu.Lock()

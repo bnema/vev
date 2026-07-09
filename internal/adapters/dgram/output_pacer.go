@@ -7,19 +7,10 @@ import (
 )
 
 type queuedSend struct {
-	seq               uint64
-	reliable          bool
-	frame             ports.Frame
-	outputSkipThrough uint64
-}
-
-func (t *Transport) flushQueuedOutputLocked() []queuedSend {
-	if len(t.outputQueue) == 0 {
-		return nil
-	}
-	queued := append([]queuedSend(nil), t.outputQueue...)
-	t.outputQueue = nil
-	return queued
+	seq      uint64
+	reliable bool
+	frame    ports.Frame
+	done     chan error
 }
 
 func (t *Transport) outputPaceLoop() {
@@ -59,7 +50,16 @@ func (t *Transport) outputPaceLoop() {
 			timer.Stop()
 			continue
 		}
-		limit := min(defaultOutputPaceBatch, len(t.outputQueue))
+		limit := 0
+		budget := t.mtu
+		for limit < len(t.outputQueue) && limit < defaultOutputPaceBatch {
+			cost := len(t.outputQueue[limit].frame.Payload) + dataRecordHeaderSize
+			if limit > 0 && cost > budget {
+				break
+			}
+			limit++
+			budget -= min(cost, budget)
+		}
 		batch := append([]queuedSend(nil), t.outputQueue[:limit]...)
 		copy(t.outputQueue, t.outputQueue[limit:])
 		t.outputQueue = t.outputQueue[:len(t.outputQueue)-limit]
@@ -67,7 +67,7 @@ func (t *Transport) outputPaceLoop() {
 		t.mu.Unlock()
 		for i, q := range batch {
 			if err := t.sendQueuedData(q); err != nil {
-				t.removeQueuedPending(batch[i+1:])
+				t.removeQueuedPending(batch[i+1:], err)
 				t.closeWithError(err)
 				t.outboundMu.Unlock()
 				return
@@ -105,23 +105,25 @@ func shouldPaceOutput(f ports.Frame) bool {
 
 func (t *Transport) sendQueuedData(q queuedSend) error {
 	t.markPendingSent(q.seq, q.reliable)
-	if err := t.sendData(q.seq, q.reliable, q.frame, q.outputSkipThrough); err != nil {
+	err := t.sendData(q.seq, q.reliable, q.frame)
+	if err != nil {
 		t.removePending(q.seq, q.reliable)
-		return err
+	} else {
+		t.markPendingReady(q.seq, q.reliable)
 	}
-	t.markPendingReady(q.seq, q.reliable)
-	return nil
+	if q.done != nil {
+		q.done <- err
+		close(q.done)
+	}
+	return err
 }
 
 func (t *Transport) markPendingSent(seq uint64, reliable bool) {
 	if !reliable {
 		return
 	}
-	now := t.clock.Now()
 	t.mu.Lock()
-	if p := t.pending[seq]; p != nil && p.first.IsZero() {
-		p.first = now
-		p.last = now
+	if p := t.pending[seq]; p != nil {
 		p.initialInFlight = true
 	}
 	t.mu.Unlock()
@@ -134,6 +136,18 @@ func (t *Transport) markPendingReady(seq uint64, reliable bool) {
 	t.mu.Lock()
 	if p := t.pending[seq]; p != nil {
 		p.initialInFlight = false
+	}
+	t.mu.Unlock()
+}
+
+func (t *Transport) markPendingFinalWrite(seq uint64) {
+	now := t.clock.Now()
+	t.mu.Lock()
+	if p := t.pending[seq]; p != nil {
+		if p.first.IsZero() {
+			p.first = now
+		}
+		p.last = now
 	}
 	t.mu.Unlock()
 }

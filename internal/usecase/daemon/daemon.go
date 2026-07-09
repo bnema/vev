@@ -633,6 +633,12 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	}
 	term := terminalEnv{TrueColor: h.TrueColor}
 
+	if h.Intent == ports.IntentResume {
+		if sess, ac, ok, err := d.resumeParked(h, tr, sz); ok || err != nil {
+			return sess, ac, err
+		}
+	}
+
 	d.mu.Lock()
 	// Shutdown/create interlock: once shutdown has begun (last session removed,
 	// or shutdownAll started) no new session may be created and no attach may
@@ -644,10 +650,6 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	}
 	switch h.Intent {
 	case ports.IntentResume:
-		if sess, ac, ok, err := d.resumeParkedLocked(h, tr, sz); ok || err != nil {
-			d.mu.Unlock()
-			return sess, ac, err
-		}
 		// Resume miss/expiry falls back to normal attach semantics.
 		sess := d.findByNameLocked(h.Name)
 		if sess == nil {
@@ -665,7 +667,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, ackOutput: h.AckOutput})
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
 		sess.mu.Lock()
 		sess.terminal = term
 		sess.mu.Unlock()
@@ -681,7 +683,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, ackOutput: h.AckOutput})
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
 		sess.mu.Lock()
 		sess.terminal = term
 		sess.mu.Unlock()
@@ -708,7 +710,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, ackOutput: h.AckOutput})
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
 		sess.mu.Lock()
 		sess.terminal = term
 		sess.mu.Unlock()
@@ -733,7 +735,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, ackOutput: h.AckOutput})
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
 		sess.mu.Lock()
 		sess.terminal = term
 		sess.mu.Unlock()

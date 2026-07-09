@@ -35,34 +35,28 @@ import (
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/mouse"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 type attachedClient struct {
-	tr                 ports.Transport
-	rend               *renderer.Renderer
-	overlays           *overlayRuntime
-	clientID           [16]byte
-	resumeCapable      bool
-	resumeToken        uint64
-	parked             bool
-	nextStateNum       uint64
-	echoAck            atomic.Uint64
-	outputAck          atomic.Uint64
-	paintDeferred      bool                      // guarded by sendMu; a diff paint skipped while acks lag
-	bars               barCache                  // only touched while sendMu is held
-	composed           composedFrameCache        // only touched while sendMu is held
-	advanceOutputOnAck bool                      // renderer shadow advances after client MsgAck instead of send
-	outputFrames       map[uint64]renderer.Frame // only touched while sendMu is held; frames sent by output state
-	size               domain.Size
-	keys               *keys.Router
-	sess               Guarded[*session]
-	mouseScan          mouse.Scanner
-	themeMu            sync.Mutex
-	theme              themeui.Theme
-	clientTheme        themeui.Theme
-	lastCursor         cursorOut
-	recentNav          recentSessionNavigator
+	tr            ports.Transport
+	output        *outputStateStream
+	overlays      *overlayRuntime
+	clientID      [16]byte
+	resumeCapable bool
+	resumeToken   uint64
+	parked        bool
+	echoAck       atomic.Uint64
+	bars          barCache           // only touched while sendMu is held
+	composed      composedFrameCache // only touched while sendMu is held
+	size          domain.Size
+	keys          *keys.Router
+	sess          Guarded[*session]
+	mouseScan     mouse.Scanner
+	themeMu       sync.Mutex
+	theme         themeui.Theme
+	clientTheme   themeui.Theme
+	lastCursor    cursorOut
+	recentNav     recentSessionNavigator
 	// historyNavMu protects historyNav and historyNavTimer. When paint needs
 	// several locks, take sendMu before historyNavMu, then Daemon.mu/session.mu.
 	historyNavMu    sync.Mutex
@@ -197,90 +191,26 @@ func (ac *attachedClient) currentTransportIs(tr ports.Transport) bool {
 	return tr != nil && ac.transportIs(tr)
 }
 
-func (ac *attachedClient) nextOutputFrameLocked(b []byte, reset bool) ports.Frame {
-	ac.nextStateNum++
-	baseStateNum := ac.nextStateNum - 1
-	if reset {
-		baseStateNum = 0
-	}
-	return frameOutputState(b, baseStateNum, ac.nextStateNum, ac.echoAck.Load())
-}
-
-// shouldResetOutputState honors explicit invalidations; reliable transport ack
-// lag alone must not force a full output-state repaint.
-func (ac *attachedClient) shouldResetOutputState(reset bool) bool {
-	return reset
-}
-
-func (ac *attachedClient) advanceOutputAck(state uint64) {
+func (ac *attachedClient) ackOutputState(state uint64) {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
-	ac.advanceOutputAckLocked(state)
-}
-
-func (ac *attachedClient) advanceOutputAckLocked(state uint64) {
-	if state > ac.nextStateNum {
-		return
-	}
-	for {
-		cur := ac.outputAck.Load()
-		if state <= cur {
-			return
-		}
-		if ac.outputAck.CompareAndSwap(cur, state) {
-			return
-		}
-	}
-}
-
-func (ac *attachedClient) ackOutputState(state uint64) error {
-	ac.sendMu.Lock()
-	defer ac.sendMu.Unlock()
-	if state > ac.nextStateNum || state <= ac.outputAck.Load() {
-		return nil
-	}
-	if ac.advanceOutputOnAck {
-		frame, ok := ac.outputFrames[state]
-		if ok {
-			if err := ac.rend.Ack(frame); err != nil {
-				return err
-			}
-		}
-		for n := range ac.outputFrames {
-			if n <= state {
-				delete(ac.outputFrames, n)
-			}
-		}
-	}
-	ac.advanceOutputAckLocked(state)
-	return nil
-}
-
-// outputLagAtCapLocked reports whether the client has at least
-// maxUnackedOutputStates output states in flight (sent but unacked). Caller
-// holds sendMu.
-func (ac *attachedClient) outputLagAtCapLocked() bool {
-	return ac.nextStateNum >= ac.outputAck.Load()+maxUnackedOutputStates
+	ac.output.ack(state)
 }
 
 // takeDeferredPaint reports whether a deferred diff paint is now flushable
 // because acks have caught up, clearing the flag when it is. The caller must
 // then paint outside sendMu (paint re-acquires it).
-func (ac *attachedClient) takeDeferredPaint() bool {
+func (ac *attachedClient) takeDeferredPaint() (reset bool, ok bool) {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
-	if ac.paintDeferred && !ac.outputLagAtCapLocked() {
-		ac.paintDeferred = false
-		return true
-	}
-	return false
+	return ac.output.takeDeferred()
 }
 
 // clearPaintDeferred drops any pending deferred-paint flag. Used on park so a
 // resumed client does not inherit a stale deferral.
 func (ac *attachedClient) clearPaintDeferred() {
 	ac.sendMu.Lock()
-	ac.paintDeferred = false
+	ac.output.clearDeferred()
 	ac.sendMu.Unlock()
 }
 
@@ -327,6 +257,19 @@ func (d *Daemon) boundedSendOutputErr(ac *attachedClient, b []byte) error {
 }
 
 func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (ports.Transport, error) {
+	frame := ac.output.sideEffect(b, ac.echoAck.Load())
+	ac.sendMu.Lock()
+	tr := ac.transport()
+	if tr == nil {
+		ac.sendMu.Unlock()
+		return nil, errors.New("client transport is nil")
+	}
+	if owned, ok := tr.(ports.OwnedSynchronousTransport); ok {
+		err := owned.SendSynchronous(frame)
+		ac.sendMu.Unlock()
+		return tr, err
+	}
+	ac.sendMu.Unlock()
 	return d.boundedSendWith(func(capture func(ports.Transport)) error {
 		ac.sendMu.Lock()
 		defer ac.sendMu.Unlock()
@@ -335,14 +278,18 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 		if tr == nil {
 			return errors.New("client transport is nil")
 		}
-		return tr.Send(ac.nextOutputFrameLocked(b, false))
+		return tr.Send(frame)
 	})
 }
 
 var errSendTimedOut = errors.New("send timed out")
 
 func (d *Daemon) boundedSendWith(send func(capture func(ports.Transport)) error) (ports.Transport, error) {
-	timer := d.clock.NewTimer(detachNotifyTimeout)
+	return d.boundedSendWithTimeout(detachNotifyTimeout, send)
+}
+
+func (d *Daemon) boundedSendWithTimeout(timeout time.Duration, send func(capture func(ports.Transport)) error) (ports.Transport, error) {
+	timer := d.clock.NewTimer(timeout)
 	result := make(chan error, 1)
 	var (
 		capturedMu sync.Mutex
@@ -425,7 +372,6 @@ func (d *Daemon) notifiesSnapshot() []chan struct{} {
 type attachClientOptions struct {
 	clientID      [16]byte
 	resumeCapable bool
-	ackOutput     bool
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, *attachedClient) {
@@ -433,20 +379,13 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	if opts.resumeCapable {
 		resumeToken = d.nextResumeTokenLocked()
 	}
-	caps := renderer.Capabilities{}
-	advanceOutputOnAck := opts.ackOutput
-	if advanceOutputOnAck {
-		caps.AdvancePolicy = renderer.AdvanceOnAck
-	}
 	ac := &attachedClient{
-		tr:                 tr,
-		rend:               renderer.New(caps),
-		advanceOutputOnAck: advanceOutputOnAck,
-		outputFrames:       make(map[uint64]renderer.Frame),
-		size:               sz,
-		clientID:           opts.clientID,
-		resumeCapable:      opts.resumeCapable,
-		resumeToken:        resumeToken,
+		tr:            tr,
+		output:        newOutputStateStream(),
+		size:          sz,
+		clientID:      opts.clientID,
+		resumeCapable: opts.resumeCapable,
+		resumeToken:   resumeToken,
 	}
 	ac.initOverlays()
 	ac.setSession(sess)
@@ -558,11 +497,9 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 			return
 		case ports.MsgAck:
 			if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
-				if err := ac.ackOutputState(ack.AckedStateNum); err != nil {
-					d.log.Warn("output ack rejected", "err", err, "state", ack.AckedStateNum)
-				}
-				if ac.takeDeferredPaint() {
-					d.paint(sess, ac, false)
+				ac.ackOutputState(ack.AckedStateNum)
+				if reset, ok := ac.takeDeferredPaint(); ok {
+					d.paint(sess, ac, reset)
 				}
 			}
 		case ports.MsgPing:

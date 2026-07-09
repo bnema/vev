@@ -286,13 +286,9 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	}
 	// Ack-gated coalescing: while the client is at least maxUnackedOutputStates
 	// behind, skip composing another diff and mark the paint deferred. The
-	// MsgOutputAck handler flushes one cumulative paint once acks catch up.
-	// A reset paint is an explicit full invalidation that supersedes any queued
-	// diffs, so it bypasses the gate and clears the flag.
-	if reset {
-		ac.paintDeferred = false
-	} else if ac.outputLagAtCapLocked() {
-		ac.paintDeferred = true
+	// MsgOutputAck handler flushes one cumulative paint once acks catch up. A
+	// deferred reset stays sticky so the cumulative paint is dependency-free.
+	if ac.output.deferIfAtCapacity(reset) {
 		ac.sendMu.Unlock()
 		return
 	}
@@ -332,10 +328,8 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		ac.sendMu.Unlock()
 		return
 	}
-	reset = ac.shouldResetOutputState(reset)
 	overlayActive := overlays.copyActive || overlays.copySearchModel != nil || overlays.pickerActive || overlays.paletteActive || overlays.promptActive
 	if reset || overlayActive {
-		ac.rend.Reset()
 		ac.bars.Reset()
 		ac.composed.invalidate()
 	}
@@ -384,7 +378,11 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		ac.sendMu.Unlock()
 		return
 	}
-	data, err := ac.rend.Draw(frame, damage)
+	prepared, err := ac.output.prepare(frame, damage, reset || overlayActive)
+	var data []byte
+	if err == nil {
+		data = prepared.data
+	}
 	var cursorTail []byte
 	if err == nil {
 		cursorTail = ac.encodeCursorTail(desiredCursor, len(data) > 0)
@@ -400,13 +398,11 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 			if sendTr == nil {
 				serr = errors.New("client transport is nil")
 			} else {
-				out := ac.nextOutputFrameLocked(data, reset)
-				if ac.advanceOutputOnAck && ac.outputFrames != nil {
-					if msg, derr := ports.UnmarshalOutput(out.Payload); derr == nil {
-						ac.outputFrames[msg.NewStateNum] = frame.Clone()
-					}
+				send := sendTr.Send
+				if async, ok := sendTr.(ports.AsyncTransport); ok {
+					send = async.SendAsync
 				}
-				serr = sendTr.Send(out)
+				serr = prepared.send(data, ac.echoAck.Load(), send)
 			}
 		}
 	}

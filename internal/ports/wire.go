@@ -66,7 +66,9 @@ type Hello struct {
 	TermEnv     string
 	Cwd         string
 	TrueColor   bool
-	AckOutput   bool
+	// AckOutput is reserved for wire compatibility in protocol v13. The daemon
+	// ignores it because v13 clients cumulatively ACK output on every transport.
+	AckOutput bool
 }
 
 // Input carries raw bytes typed/pasted by the client, destined for the PTY.

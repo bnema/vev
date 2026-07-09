@@ -16,7 +16,6 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 func TestSplitPaneCreatesFocusedShellInRequestedPosition(t *testing.T) {
@@ -151,7 +150,7 @@ func TestFocusDirMovesFocusAndExitsCopyMode(t *testing.T) {
 	tb.panes["pane-1"].rect = domain.Rect{Width: 20, Height: 10}
 	tb.panes["pane-2"].rect = domain.Rect{X: 21, Width: 20, Height: 10}
 	tr, _ := newCapturingTransport(t)
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 41, Rows: 12}}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 41, Rows: 12}}
 	ac.initOverlays()
 	ac.overlays.copyMode = &scopy.Mode{}
 

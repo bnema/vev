@@ -7,6 +7,7 @@ import (
 
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,12 +32,12 @@ func TestPaintDefersWhenOutputAckLagsAtCap(t *testing.T) {
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 
 	// Client is maxUnackedOutputStates behind (outputAck stays 0).
-	ac.nextStateNum = maxUnackedOutputStates
+	ac.output.next = maxUnackedOutputStates
 	d.paint(sess, ac, false)
 
 	requireNoOutputFrame(t, sends)
 	ac.sendMu.Lock()
-	deferred := ac.paintDeferred
+	deferred := ac.output.deferred
 	ac.sendMu.Unlock()
 	require.True(t, deferred, "diff paint at ack cap must defer")
 }
@@ -46,7 +47,7 @@ func TestDeferredPaintFlushesOnceWhenAcksCatchUp(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 
-	ac.nextStateNum = maxUnackedOutputStates
+	ac.output.next = maxUnackedOutputStates
 	d.paint(sess, ac, false)
 	requireNoOutputFrame(t, sends)
 
@@ -74,25 +75,61 @@ func TestDeferredPaintFlushesOnceWhenAcksCatchUp(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 	requireNoOutputFrame(t, sends)
 	ac.sendMu.Lock()
-	deferred := ac.paintDeferred
+	deferred := ac.output.deferred
 	ac.sendMu.Unlock()
 	require.False(t, deferred, "flag must clear after the flush paint")
 }
 
-func TestResetPaintBypassesAckGate(t *testing.T) {
+func TestResetPaintCoalescesAtAckGate(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 
-	// At the cap and already deferred: a reset paint is a full invalidation that
-	// must paint anyway and clear the deferral.
-	ac.nextStateNum = maxUnackedOutputStates
-	ac.paintDeferred = true
-	d.paint(sess, ac, true)
+	// At the cap, repeated reset paints coalesce instead of growing retained
+	// state and transport queues without bound.
+	ac.output.next = maxUnackedOutputStates
+	for range 32 {
+		d.paint(sess, ac, true)
+	}
 
-	awaitFrame(t, sends, ports.MsgOutput)
+	requireNoOutputFrame(t, sends)
 	ac.sendMu.Lock()
-	deferred := ac.paintDeferred
+	deferred := ac.output.deferred
+	deferredReset := ac.output.deferredReset
+	retained := ac.output.outstanding()
 	ac.sendMu.Unlock()
-	require.False(t, deferred, "reset paint must clear the deferral")
+	require.True(t, deferred)
+	require.True(t, deferredReset)
+	require.LessOrEqual(t, retained, uint64(maxUnackedOutputStates))
+}
+
+func TestCoalescedResetFlushesLatestFrameAfterAck(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	for range maxUnackedOutputStates {
+		ac.output.frame([]byte("in flight"), false, 0)
+	}
+
+	pane := sess.tabs[0].focusedPane()
+	var latest byte
+	for i := range 32 {
+		latest = byte('a' + i%26)
+		pane.screen.Write([]byte{'\r', latest})
+		d.paint(sess, ac, true)
+	}
+	requireNoOutputFrame(t, sends)
+	require.Equal(t, uint64(maxUnackedOutputStates), ac.output.outstanding())
+
+	ac.ackOutputState(maxUnackedOutputStates)
+	reset, ok := ac.takeDeferredPaint()
+	require.True(t, ok)
+	require.True(t, reset)
+	d.paint(sess, ac, reset)
+
+	client := vt.NewScreen(80, 25)
+	out := mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	require.Zero(t, out.BaseStateNum)
+	require.Equal(t, rune(latest), client.Frame.At(0, 1).Rune)
+	require.Equal(t, uint64(1), ac.output.outstanding())
+	requireNoOutputFrame(t, sends)
 }
