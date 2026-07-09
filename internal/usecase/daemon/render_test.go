@@ -631,6 +631,23 @@ func TestComposeClientFrameCacheLayoutChangeClearsStaleDividers(t *testing.T) {
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
 }
 
+func TestComposeTabFrameCachedTitleBarsDoNotAllocate(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
+	p := win.focusedPane()
+	p.title.processName = "shell"
+	win.tree.Root = &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(p.id)}, Expanded: p.id}
+	layoutSnap := solveTabLayoutLocked(win)
+	frame := renderer.NewFrame(20, 5)
+	titleGenerations := map[layout.PaneID]uint64{p.id: p.title.generation}
+	p.screen.ClearDamage()
+
+	composeTabFrameIntoWithLayoutOptions(win, frame, domain.Rect{Width: 20, Height: 5}, themeui.Theme{}, layoutSnap, true, false, titleGenerations)
+	allocs := testing.AllocsPerRun(100, func() {
+		composeTabFrameIntoWithLayoutOptions(win, frame, domain.Rect{Width: 20, Height: 5}, themeui.Theme{}, layoutSnap, true, false, titleGenerations)
+	})
+	require.Zero(t, allocs, "valid cached title-bar renders must not allocate")
+}
+
 func BenchmarkPaintCachedSinglePaneDamage(b *testing.B) {
 	win := newTab(nil, domain.Size{Cols: 81, Rows: 24})
 	left := win.focusedPane()

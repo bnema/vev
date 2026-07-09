@@ -627,14 +627,10 @@ func composeTabFrameWithLayout(tb *tab, area domain.Rect, theme themeui.Theme, l
 }
 
 func composeTabFrameIntoWithLayout(tb *tab, frame renderer.Frame, area domain.Rect, theme themeui.Theme, layoutSnap tabLayoutSnapshot, cacheValid bool) []renderer.Damage {
-	return composeTabFrameIntoWithLayoutOptions(tb, frame, area, theme, layoutSnap, cacheValid, false)
+	return composeTabFrameIntoWithLayoutOptions(tb, frame, area, theme, layoutSnap, cacheValid, false, nil)
 }
 
-func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area domain.Rect, theme themeui.Theme, layoutSnap tabLayoutSnapshot, cacheValid bool, consumeDamage bool, titleCaches ...map[layout.PaneID]uint64) []renderer.Damage {
-	var titleGenerations map[layout.PaneID]uint64
-	if len(titleCaches) > 0 {
-		titleGenerations = titleCaches[0]
-	}
+func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area domain.Rect, theme themeui.Theme, layoutSnap tabLayoutSnapshot, cacheValid bool, consumeDamage bool, titleGenerations map[layout.PaneID]uint64) []renderer.Damage {
 	contentArea := domain.Rect{Width: area.Width, Height: area.Height}
 	root := tb.tree.Root
 	placements, ok := layoutSnap.placements, layoutSnap.ok && layoutSnap.root == root && layoutSnap.area == contentArea
@@ -649,18 +645,10 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 		}
 		placements = []layout.Placement{{ID: fallback.id, Content: contentArea}}
 	}
-	if titleGenerations != nil {
-		currentTitleBars := make(map[layout.PaneID]struct{}, len(placements))
-		for _, pl := range placements {
-			if pl.TitleBar.Height > 0 {
-				currentTitleBars[pl.ID] = struct{}{}
-			}
-		}
-		for id := range titleGenerations {
-			if _, current := currentTitleBars[id]; !current {
-				delete(titleGenerations, id)
-			}
-		}
+	// A valid cache has the same layout, so its title IDs remain valid. Reset
+	// the existing cache only when rebuilding after layout or frame churn.
+	if titleGenerations != nil && !cacheValid {
+		clear(titleGenerations)
 	}
 	if ok && !cacheValid {
 		drawDividers(frame, root, area, themeui.DimStyle(newThemeStyles(theme).border, theme))
