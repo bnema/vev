@@ -32,7 +32,7 @@ func TestNoteAttentionFlagsBackgroundTab(t *testing.T) {
 	require.False(t, sess.tabs[0].attention)
 }
 
-func TestNoteAttentionIgnoresVisibleTab(t *testing.T) {
+func TestNoteAttentionFlagsVisibleTabUntilPainted(t *testing.T) {
 	d, sess, _, _, releases := newManualTabSession(t, 1)
 	defer releases[0]()
 	sess.active = 0
@@ -41,8 +41,77 @@ func TestNoteAttentionIgnoresVisibleTab(t *testing.T) {
 
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
+	require.True(t, sess.tabs[0].attention)
+	require.False(t, sess.tabs[0].attentionAt.IsZero())
+}
+
+func TestPaintDoesNotAckActiveAttentionOnBlankPulseFrame(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
+	defer releases[0]()
+	sess.active = 0
+	d.setAttentionFrame(0)
+	d.noteAttention(sess, sess.tabs[0])
+
+	d.paint(sess, ac, true)
+	data := mustOutputData(t, sends)
+	require.NotContains(t, string(data), string(attentionGlyph))
+
+	sess.mu.Lock()
+	require.True(t, sess.tabs[0].attention)
+	sess.mu.Unlock()
+
+	d.setAttentionFrame(1)
+	d.paint(sess, ac, true)
+	data = mustOutputData(t, sends)
+	require.Contains(t, string(data), string(attentionGlyph))
+
+	sess.mu.Lock()
 	require.False(t, sess.tabs[0].attention)
-	require.True(t, sess.tabs[0].attentionAt.IsZero())
+	sess.mu.Unlock()
+}
+
+func TestPTYReaderActiveVisibleAgentNotificationRendersBellBeforeAck(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "bell", data: []byte("\a")},
+		{name: "osc notify", data: []byte("\x1b]777;notify;Claude;needs input\x1b\\")},
+		{name: "osc progress complete", data: []byte("\x1b]9;4;1;50\a\x1b]9;4;0;100\a")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pty := newScriptPTY([][]byte{tt.data})
+			d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
+			sess.active = 0
+			d.setAttentionFrame(1)
+
+			d.sessWg.Add(1)
+			go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
+
+			require.Eventually(t, func() bool {
+				sess.mu.Lock()
+				defer sess.mu.Unlock()
+				return sess.tabs[0].attention && !sess.tabs[0].attentionAt.IsZero()
+			}, 2*time.Second, 5*time.Millisecond)
+
+			d.paint(sess, ac, true)
+			data := mustOutputData(t, sends)
+			require.Contains(t, string(data), string(attentionGlyph))
+
+			sess.mu.Lock()
+			require.False(t, sess.tabs[0].attention)
+			require.True(t, sess.tabs[0].attentionAt.IsZero())
+			sess.mu.Unlock()
+
+			cleared := mustOutputData(t, sends)
+			require.NotContains(t, string(cleared), string(attentionGlyph))
+
+			_ = pty.Close()
+			d.sessWg.Wait()
+		})
+	}
 }
 
 func TestNoteAttentionFlagsDetachedActiveTab(t *testing.T) {

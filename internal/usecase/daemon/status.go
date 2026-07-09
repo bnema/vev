@@ -205,7 +205,9 @@ func (s *session) statusSegments() statusSnapshot {
 	snap := statusSnapshot{session: name, tabs: make([]statusTab, len(s.tabs))}
 	for i, tb := range s.tabs {
 		name := strconv.Itoa(i + 1)
-		snap.tabs[i] = statusTab{name: name, active: i == s.active, attention: tb.attention}
+		active := i == s.active
+		attention := tb.attention && (!active || tb.attentionVisiblePaint)
+		snap.tabs[i] = statusTab{name: name, active: active, attention: attention}
 	}
 	return snap
 }

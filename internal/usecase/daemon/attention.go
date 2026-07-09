@@ -9,8 +9,9 @@ import (
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
-// noteAttention records attention for tabs that are not currently visible to an
-// attached client. The caller must not hold tab.mu.
+// noteAttention records attention for a tab. If the tab is currently visible,
+// it is kept long enough to render one pulse before paint acknowledges it. The
+// caller must not hold tab.mu.
 func (d *Daemon) noteAttention(sess *session, tb *tab) {
 	if sess == nil || tb == nil {
 		return
@@ -23,14 +24,13 @@ func (d *Daemon) noteAttention(sess *session, tb *tab) {
 
 	sess.mu.Lock()
 	visible := sess.client != nil && sess.active >= 0 && sess.active < len(sess.tabs) && sess.tabs[sess.active] == tb
-	if visible {
-		sess.mu.Unlock()
-		return
-	}
 	if !tb.attention {
 		tb.attentionAt = now
 	}
 	tb.attention = true
+	if visible {
+		tb.attentionVisiblePaint = true
+	}
 	sess.mu.Unlock()
 
 	// Do not repaint here: this runs on the PTY reader goroutine, and paint
@@ -135,7 +135,7 @@ func (d *Daemon) repaintAllAttachedClients() {
 	}
 }
 
-func (s *session) ackAttention(tb *tab) bool {
+func (s *session) ackAttention(tb *tab, visible bool) bool {
 	if tb == nil {
 		return false
 	}
@@ -144,8 +144,12 @@ func (s *session) ackAttention(tb *tab) bool {
 	if s.active < 0 || s.active >= len(s.tabs) || s.tabs[s.active] != tb || !tb.attention {
 		return false
 	}
+	if tb.attentionVisiblePaint && !visible {
+		return false
+	}
 	tb.attention = false
 	tb.attentionAt = time.Time{}
+	tb.attentionVisiblePaint = false
 	return true
 }
 
