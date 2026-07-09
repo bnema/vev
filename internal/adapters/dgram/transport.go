@@ -64,6 +64,8 @@ type Options struct {
 	MaxPendingWait   time.Duration
 	MaxRecvBuffer    int
 	Clock            ports.Clock
+	// Observe receives bounded, asynchronous, privacy-safe link health snapshots.
+	Observe DiagnosticObserver
 	// RebindPacketConn is an optional client-side hook used to hop the local UDP
 	// socket when the peer is offline. Server/proxy transports should leave it nil.
 	RebindPacketConn func(net.PacketConn) (net.PacketConn, error)
@@ -137,41 +139,48 @@ type Transport struct {
 	sendDir, recvDir uint32
 	mtu              int
 
-	mu               sync.Mutex
-	peer             net.Addr
-	ctr              uint64
-	seq              uint64
-	probeSeq         uint64
-	pending          map[uint64]*pending
-	closed           bool
-	closeErr         error
-	lastHeard        time.Time
-	heartbeat        time.Duration
-	resendAfter      time.Duration
-	maxResendAfter   time.Duration
-	maxResendPerTick int
-	srtt             time.Duration
-	rttvar           time.Duration
-	rto              time.Duration
-	writeTimeout     time.Duration
-	degradedAfter    time.Duration
-	probeAfter       time.Duration
-	offlineAfter     time.Duration
-	deadAfter        time.Duration
-	maxPending       int
-	maxPendingWait   time.Duration
-	maxRecvBuffer    int
-	clock            ports.Clock
-	linkState        ports.LinkState
-	linkEvents       chan ports.LinkEvent
-	probeWait        map[uint64]chan struct{}
-	sendWake         chan struct{}
-	probeReply       chan uint64
-	rebind           func(net.PacketConn) (net.PacketConn, error)
-	hoppedOffline    bool
-	outputQueue      []queuedSend
-	outputWake       chan struct{}
-	outputNext       time.Time
+	mu                      sync.Mutex
+	peer                    net.Addr
+	ctr                     uint64
+	seq                     uint64
+	probeSeq                uint64
+	pending                 map[uint64]*pending
+	closed                  bool
+	closeErr                error
+	lastHeard               time.Time
+	lastAuthenticatedPacket time.Time
+	lastCompleteRecord      time.Time
+	lastACKProgress         time.Time
+	retransmits             uint64
+	reassemblyInflight      int
+	observe                 DiagnosticObserver
+	diagnosticCh            chan Diagnostic
+	heartbeat               time.Duration
+	resendAfter             time.Duration
+	maxResendAfter          time.Duration
+	maxResendPerTick        int
+	srtt                    time.Duration
+	rttvar                  time.Duration
+	rto                     time.Duration
+	writeTimeout            time.Duration
+	degradedAfter           time.Duration
+	probeAfter              time.Duration
+	offlineAfter            time.Duration
+	deadAfter               time.Duration
+	maxPending              int
+	maxPendingWait          time.Duration
+	maxRecvBuffer           int
+	clock                   ports.Clock
+	linkState               ports.LinkState
+	linkEvents              chan ports.LinkEvent
+	probeWait               map[uint64]chan struct{}
+	sendWake                chan struct{}
+	probeReply              chan uint64
+	rebind                  func(net.PacketConn) (net.PacketConn, error)
+	hoppedOffline           bool
+	outputQueue             []queuedSend
+	outputWake              chan struct{}
+	outputNext              time.Time
 
 	recvMu sync.Mutex
 	replay *pdgram.ReplayWindow
@@ -214,41 +223,49 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 	}
 	opts = normalizeOptions(opts)
 	t := &Transport{
-		pc:               pc,
-		codec:            c,
-		sendDir:          sendDir,
-		recvDir:          recvDir,
-		mtu:              opts.MTU,
-		peer:             peer,
-		pending:          make(map[uint64]*pending),
-		replay:           pdgram.NewReplayWindow(),
-		reasm:            pdgram.NewReassembler(),
-		in:               make(chan ports.Frame, 32),
-		done:             make(chan struct{}),
-		lastHeard:        opts.Clock.Now(),
-		heartbeat:        opts.Heartbeat,
-		resendAfter:      opts.ResendAfter,
-		maxResendAfter:   opts.MaxResendAfter,
-		maxResendPerTick: opts.MaxResendPerTick,
-		rto:              opts.ResendAfter,
-		writeTimeout:     opts.WriteTimeout,
-		degradedAfter:    opts.DegradedAfter,
-		probeAfter:       opts.ProbeAfter,
-		offlineAfter:     opts.OfflineAfter,
-		deadAfter:        opts.DeadAfter,
-		maxPending:       opts.MaxPending,
-		maxPendingWait:   opts.MaxPendingWait,
-		maxRecvBuffer:    opts.MaxRecvBuffer,
-		clock:            opts.Clock,
-		linkState:        ports.LinkStateConnected,
-		linkEvents:       make(chan ports.LinkEvent, linkEventBufferSize),
-		probeWait:        make(map[uint64]chan struct{}),
-		rebind:           opts.RebindPacketConn,
-		nextRecvSeq:      1,
-		recvBuf:          make(map[uint64]ports.Frame),
+		pc:                      pc,
+		codec:                   c,
+		sendDir:                 sendDir,
+		recvDir:                 recvDir,
+		mtu:                     opts.MTU,
+		peer:                    peer,
+		pending:                 make(map[uint64]*pending),
+		replay:                  pdgram.NewReplayWindow(),
+		reasm:                   pdgram.NewReassembler(),
+		in:                      make(chan ports.Frame, 32),
+		done:                    make(chan struct{}),
+		lastHeard:               opts.Clock.Now(),
+		lastAuthenticatedPacket: opts.Clock.Now(),
+		lastCompleteRecord:      opts.Clock.Now(),
+		lastACKProgress:         opts.Clock.Now(),
+		observe:                 opts.Observe,
+		heartbeat:               opts.Heartbeat,
+		resendAfter:             opts.ResendAfter,
+		maxResendAfter:          opts.MaxResendAfter,
+		maxResendPerTick:        opts.MaxResendPerTick,
+		rto:                     opts.ResendAfter,
+		writeTimeout:            opts.WriteTimeout,
+		degradedAfter:           opts.DegradedAfter,
+		probeAfter:              opts.ProbeAfter,
+		offlineAfter:            opts.OfflineAfter,
+		deadAfter:               opts.DeadAfter,
+		maxPending:              opts.MaxPending,
+		maxPendingWait:          opts.MaxPendingWait,
+		maxRecvBuffer:           opts.MaxRecvBuffer,
+		clock:                   opts.Clock,
+		linkState:               ports.LinkStateConnected,
+		linkEvents:              make(chan ports.LinkEvent, linkEventBufferSize),
+		probeWait:               make(map[uint64]chan struct{}),
+		rebind:                  opts.RebindPacketConn,
+		nextRecvSeq:             1,
+		recvBuf:                 make(map[uint64]ports.Frame),
 	}
 	t.sendWake = make(chan struct{})
 	t.outputWake = make(chan struct{})
+	if t.observe != nil {
+		t.diagnosticCh = make(chan Diagnostic, diagnosticBufferSize)
+		go t.diagnosticLoop()
+	}
 	t.probeReply = make(chan uint64, probeReplyBufferSize)
 	t.deliverCond = sync.NewCond(&t.deliverMu)
 	go t.readLoop(pc)
@@ -256,6 +273,7 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 	go t.deliveryLoop()
 	go t.probeReplyLoop()
 	go t.outputPaceLoop()
+	t.emitDiagnostic()
 	return t, nil
 }
 
@@ -666,14 +684,30 @@ func (t *Transport) readLoop(pc net.PacketConn) {
 			t.recvMu.Unlock()
 			continue
 		}
-		payload, ok, err := t.reasm.Add(frag)
+		payload, complete, err := t.reasm.Add(frag)
+		inflight := t.reasm.Inflight()
 		t.recvMu.Unlock()
-		if err != nil || !ok {
+		t.recordAuthenticatedFragment(inflight)
+		if err != nil || !complete {
 			continue
 		}
+		t.recordCompleteRecord()
 		t.updatePeerFromAuthenticated(addr)
 		t.handleRecord(payload)
 	}
+}
+
+func (t *Transport) recordAuthenticatedFragment(inflight int) {
+	t.mu.Lock()
+	t.lastAuthenticatedPacket = t.clock.Now()
+	t.reassemblyInflight = inflight
+	t.mu.Unlock()
+}
+
+func (t *Transport) recordCompleteRecord() {
+	t.mu.Lock()
+	t.lastCompleteRecord = t.clock.Now()
+	t.mu.Unlock()
 }
 
 func (t *Transport) updatePeerFromAuthenticated(addr net.Addr) {
@@ -708,9 +742,13 @@ func (t *Transport) handleRecord(p []byte) {
 			acked = true
 		}
 		if acked {
+			t.lastACKProgress = t.clock.Now()
 			t.notifySendWaitersLocked()
 		}
 		t.mu.Unlock()
+		if acked {
+			t.emitDiagnostic()
+		}
 	case recProbe:
 		if len(p) != 9 {
 			return
@@ -871,6 +909,7 @@ func (t *Transport) resendPending() {
 	}
 	slices.Sort(seqs)
 	limit := t.maxResendPerTick
+	emitDiagnostic := false
 	for _, seq := range seqs {
 		if limit <= 0 {
 			break
@@ -882,6 +921,8 @@ func (t *Transport) resendPending() {
 		p.initialInFlight = true
 		p.attempts++
 		p.retransmitted = true
+		t.retransmits++
+		emitDiagnostic = emitDiagnostic || t.retransmits%64 == 0
 		resend = append(resend, struct {
 			seq uint64
 			f   ports.Frame
@@ -889,6 +930,9 @@ func (t *Transport) resendPending() {
 		limit--
 	}
 	t.mu.Unlock()
+	if emitDiagnostic {
+		t.emitDiagnostic()
+	}
 	for _, r := range resend {
 		if err := t.sendData(r.seq, true, r.f); err == nil {
 			t.markPendingReady(r.seq, true)
@@ -1057,9 +1101,51 @@ func (t *Transport) setLinkState(state ports.LinkState, err error) {
 	}
 	t.notifySendWaitersLocked()
 	t.mu.Unlock()
+	t.emitDiagnostic()
 	event := ports.LinkEvent{State: state, At: now, Err: err}
 	select {
 	case t.linkEvents <- event:
+	default:
+	}
+}
+
+func (t *Transport) diagnosticLoop() {
+	for {
+		select {
+		case d := <-t.diagnosticCh:
+			t.observe(d)
+		case <-t.done:
+			return
+		}
+	}
+}
+
+func (t *Transport) emitDiagnostic() {
+	if t.diagnosticCh == nil {
+		return
+	}
+	now := t.clock.Now()
+	t.mu.Lock()
+	pendingBytes := 0
+	for _, p := range t.pending {
+		if p != nil {
+			pendingBytes += len(p.frame.Payload)
+		}
+	}
+	d := Diagnostic{
+		At:                       now,
+		State:                    t.linkState,
+		SinceAuthenticatedPacket: now.Sub(t.lastAuthenticatedPacket),
+		SinceCompleteRecord:      now.Sub(t.lastCompleteRecord),
+		SinceACKProgress:         now.Sub(t.lastACKProgress),
+		PendingRecords:           len(t.pending),
+		PendingBytes:             pendingBytes,
+		Retransmits:              t.retransmits,
+		ReassemblyInflight:       t.reassemblyInflight,
+	}
+	t.mu.Unlock()
+	select {
+	case t.diagnosticCh <- d:
 	default:
 	}
 }
