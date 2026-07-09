@@ -63,7 +63,7 @@ func score(cmd command.Command, query string, order int) (Match, bool) {
 	if positions, ok := subsequencePositions([]rune(codeLower), []rune(qLower)); ok {
 		return Match{Command: cmd, Positions: positions, rank: 2, span: positions[len(positions)-1] - positions[0] + 1, first: positions[0], order: order}, true
 	}
-	text := strings.ToLower(cmd.Name + " " + cmd.Desc)
+	text := strings.ToLower(cmd.Desc)
 	if positions, ok := subsequencePositions([]rune(text), []rune(qLower)); ok {
 		return Match{Command: cmd, rank: 3, span: positions[len(positions)-1] - positions[0] + 1, first: positions[0], order: order}, true
 	}

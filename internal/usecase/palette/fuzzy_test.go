@@ -19,16 +19,32 @@ func codes(matches []Match) []string {
 	return out
 }
 
-func TestFuzzyOrdersScoringTiers(t *testing.T) {
+func TestFuzzyOrdersVisibleFieldScoringTiers(t *testing.T) {
 	matches := Fuzzy([]command.Command{
-		cmd("ZQQ", "alpha beta", "name subsequence"),
+		cmd("ZQQ", "unused", "alpha beta"),
 		cmd("XAB", "unused", "subsequence code"),
 		cmd("ABX", "unused", "prefix code"),
 		cmd("AB", "unused", "exact code"),
 	}, "ab")
 
 	require.Equal(t, []string{"AB", "ABX", "XAB", "ZQQ"}, codes(matches))
-	require.Empty(t, matches[3].Positions, "name/description matches do not expose code highlight positions")
+	require.Empty(t, matches[3].Positions, "description matches do not expose code highlight positions")
+}
+
+func TestFuzzyDoesNotMatchCommandNames(t *testing.T) {
+	matches := Fuzzy([]command.Command{
+		cmd("CPY", "Create Alpha Beta", "Enter copy mode"),
+		cmd("ZQQ", "unused", "Alpha Beta tools"),
+	}, "ab")
+
+	require.Equal(t, []string{"ZQQ"}, codes(matches))
+}
+
+func TestFuzzyDescriptionMatchingIsCaseInsensitiveWithoutCodeHighlights(t *testing.T) {
+	matches := Fuzzy([]command.Command{cmd("CPY", "unused", "Enter COPY mode")}, "copy")
+
+	require.Len(t, matches, 1)
+	require.Empty(t, matches[0].Positions)
 }
 
 func TestFuzzyTieBreaksBySpanFirstThenCode(t *testing.T) {

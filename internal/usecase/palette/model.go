@@ -174,7 +174,6 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 			frame.Set(x, y+1, renderer.Cell{Rune: ' ', Style: style})
 			x++
 		}
-		x = ui.DrawText(frame, x, y+1, frame.Width, match.Command.Name+" — ", style)
 		ui.DrawText(frame, x, y+1, frame.Width, match.Command.Desc, mergePaletteDescStyle(style, desc))
 	}
 	return frame
