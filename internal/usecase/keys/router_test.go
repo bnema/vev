@@ -53,6 +53,7 @@ func TestDefaultBindingsParityRoutesBuiltInBindings(t *testing.T) {
 		want Action
 	}{
 		{name: "palette", in: []byte{ESC, ' '}, want: ActionOpenPalette},
+		{name: "floating pane", in: []byte{ESC, 'f'}, want: ActionToggleFloatingPane},
 		{name: "jump attention", in: []byte{ESC, 'a'}, want: ActionJumpAttention},
 		{name: "focus left", in: []byte{ESC, 'h'}, want: ActionFocusPaneLeft},
 		{name: "focus down", in: []byte{ESC, 'j'}, want: ActionFocusPaneDown},
@@ -235,6 +236,13 @@ func switchTabActions() []Action {
 		ActionSwitchTab4, ActionSwitchTab5, ActionSwitchTab6,
 		ActionSwitchTab7, ActionSwitchTab8, ActionSwitchTab9,
 	}
+}
+
+func TestSwitchTabActionsRemainContiguous(t *testing.T) {
+	for i, action := range switchTabActions() {
+		require.Equal(t, ActionSwitchTab1+Action(i), action)
+	}
+	require.False(t, ActionToggleFloatingPane >= ActionSwitchTab1 && ActionToggleFloatingPane <= ActionSwitchTab9)
 }
 
 func TestRouterInterceptsAltAForJumpAttention(t *testing.T) {

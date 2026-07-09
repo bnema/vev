@@ -14,6 +14,7 @@ func Registry() []Command {
 		{Slug: "split-down", Code: "SPD", Name: "Split down", Desc: "Split the focused pane downward", Run: func(ctx Context) error { return ctx.SplitDown() }},
 		{Slug: "stack-pane", Code: "STP", Name: "Stack pane", Desc: "Create a new pane in a stack", Run: func(ctx Context) error { return ctx.StackPane() }},
 		{Slug: "toggle-stack", Code: "TST", Name: "Toggle stack", Desc: "Toggle the focused pane stack", Run: func(ctx Context) error { return ctx.ToggleStack() }},
+		{Slug: "toggle-floating-pane", Code: "FLT", Name: "Toggle floating pane", Desc: "Toggle the floating pane", Run: func(ctx Context) error { return ctx.ToggleFloatingPane() }},
 		{Slug: "close-pane", Code: "CLP", Name: "Close pane", Desc: "Close the focused pane", Run: func(ctx Context) error { return ctx.ClosePane() }},
 		{Slug: "focus-pane-left", Code: "FPL", Name: "Focus pane left", Desc: "Focus the pane to the left", Run: func(ctx Context) error { return ctx.FocusPaneLeft() }},
 		{Slug: "focus-pane-right", Code: "FPR", Name: "Focus pane right", Desc: "Focus the pane to the right", Run: func(ctx Context) error { return ctx.FocusPaneRight() }},

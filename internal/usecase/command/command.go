@@ -11,6 +11,7 @@ type Context interface {
 	SplitDown() error
 	StackPane() error
 	ToggleStack() error
+	ToggleFloatingPane() error
 	ClosePane() error
 	FocusPaneLeft() error
 	FocusPaneRight() error

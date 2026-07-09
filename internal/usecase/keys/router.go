@@ -37,6 +37,7 @@ const (
 	ActionFocusPaneRight
 	ActionFocusPaneUp
 	ActionFocusPaneDown
+	ActionToggleFloatingPane
 )
 
 // Handler receives router outputs. Forward is called only for bytes that should
