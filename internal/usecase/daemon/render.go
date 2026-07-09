@@ -109,7 +109,11 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 			signal(p.dirty)
 		}
 		if err != nil {
-			d.reapPane(sess, tb, p)
+			if p.onExit != nil {
+				p.onExit()
+			} else {
+				d.reapPane(sess, tb, p)
+			}
 			return
 		}
 	}

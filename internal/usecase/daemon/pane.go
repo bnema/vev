@@ -29,6 +29,9 @@ type pane struct {
 	title      paneTitleState
 	ctx        context.Context
 	cancel     context.CancelFunc
+	// onExit is set before the reader starts and never changed. Floating panes
+	// use it to reap their independent slot without touching the layout tree.
+	onExit func()
 }
 
 func newPane(id layout.PaneID, pty ports.PTY, sz domain.Size) *pane {
