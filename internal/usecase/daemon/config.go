@@ -27,6 +27,8 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	d.bindings.Store(bindings)
 	d.codeOverrides.Store(&overrides)
 	d.restoreProcessAllowlist.Store(&allowlist)
+	floating := cfg.Floating
+	d.floatingConfig.Store(&floating)
 	d.themeMode.Store(uint32(cfg.Theme))
 	if d.barScripts != nil {
 		d.barScripts.mu.Lock()
@@ -174,6 +176,13 @@ func (d *Daemon) logConfigWarning(w domain.Warning) {
 		return
 	}
 	d.log.Warn("config warning", "msg", w.Msg)
+}
+
+func (d *Daemon) currentFloatingConfig() domain.FloatingConfig {
+	if cfg := d.floatingConfig.Load(); cfg != nil {
+		return *cfg
+	}
+	return domain.Defaults().Floating
 }
 
 func (d *Daemon) codeOverrideSnapshot() map[string]string {
