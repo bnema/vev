@@ -791,6 +791,61 @@ func TestSGR(t *testing.T) {
 			},
 		},
 		{
+			name: "SGR preserves dim underline blink and strikethrough with resets",
+			seq:  "\x1b[2;4;5;9mA\x1b[22;24;25;29mB",
+			check: func(t *testing.T, s *Screen) {
+				first := cellAt(s, 0, 0).Style
+				if first.Attrs&(renderer.AttrDim|renderer.AttrUnderline|renderer.AttrBlink|renderer.AttrStrikethrough) != renderer.AttrDim|renderer.AttrUnderline|renderer.AttrBlink|renderer.AttrStrikethrough {
+					t.Errorf("first cell attrs = %b, want dim underline blink strikethrough", first.Attrs)
+				}
+				second := cellAt(s, 1, 0).Style
+				if second.Attrs&(renderer.AttrDim|renderer.AttrUnderline|renderer.AttrBlink|renderer.AttrStrikethrough) != 0 {
+					t.Errorf("second cell attrs = %b, want resets cleared", second.Attrs)
+				}
+			},
+		},
+		{
+			name: "SGR 22 resets both bold and dim",
+			seq:  "\x1b[1;2m\x1b[22m",
+			check: func(t *testing.T, s *Screen) {
+				if s.Style.Bold || s.Style.Attrs&renderer.AttrDim != 0 {
+					t.Errorf("style after SGR 22 = bold:%v attrs:%b, want neither bold nor dim", s.Style.Bold, s.Style.Attrs)
+				}
+			},
+		},
+		{
+			name: "SGR underline style and color are preserved and reset",
+			seq:  "\x1b[4:3;58:2::255:0:0mA\x1b[59mB",
+			check: func(t *testing.T, s *Screen) {
+				first := cellAt(s, 0, 0).Style
+				if first.Attrs&renderer.AttrUnderline == 0 || first.UnderlineStyle != renderer.UnderlineCurly {
+					t.Errorf("first underline = attrs:%b style:%d, want curly underline", first.Attrs, first.UnderlineStyle)
+				}
+				want := renderer.RGB{R: 255, G: 0, B: 0}
+				if !first.HasUnderlineColorRGB || first.UnderlineColorRGB != want {
+					t.Errorf("first underline color = rgb:%v %+v, want %+v", first.HasUnderlineColorRGB, first.UnderlineColorRGB, want)
+				}
+				second := cellAt(s, 1, 0).Style
+				if second.HasUnderlineColorRGB || second.HasUnderlineColor {
+					t.Errorf("second underline color flags = indexed:%v rgb:%v, want reset", second.HasUnderlineColor, second.HasUnderlineColorRGB)
+				}
+			},
+		},
+		{
+			name: "SGR 4 colon zero clears underline",
+			seq:  "\x1b[4:3mA\x1b[4:0mB",
+			check: func(t *testing.T, s *Screen) {
+				first := cellAt(s, 0, 0).Style
+				if first.Attrs&renderer.AttrUnderline == 0 || first.UnderlineStyle != renderer.UnderlineCurly {
+					t.Errorf("first underline = attrs:%b style:%d, want curly underline", first.Attrs, first.UnderlineStyle)
+				}
+				second := cellAt(s, 1, 0).Style
+				if second.Attrs&renderer.AttrUnderline != 0 || second.UnderlineStyle != renderer.UnderlineNone {
+					t.Errorf("second underline = attrs:%b style:%d, want cleared", second.Attrs, second.UnderlineStyle)
+				}
+			},
+		},
+		{
 			name: "empty SGR params reset style",
 			seq:  "\x1b[31m\x1b[1m\x1b[m", // empty params → reset
 			check: func(t *testing.T, s *Screen) {
