@@ -26,6 +26,7 @@ func Registry() []Command {
 		{Slug: "session-picker", Code: "SSP", Name: "Session picker", Desc: "Open the session picker", Run: func(ctx Context) error { return ctx.OpenSessionPicker() }},
 		{Slug: "visual-mode", Code: "VIS", Name: "Visual mode", Desc: "Enter visual mode", Run: func(ctx Context) error { return ctx.EnterVisualMode() }},
 		{Slug: "rename-session", Code: "RNS", Name: "Rename session", Desc: "Rename the session (an ephemeral session becomes named)", Run: func(ctx Context) error { return ctx.RenameSession() }},
+		{Slug: "rename-tab", Code: "RNT", Name: "Rename tab", Desc: "Rename the current tab", Run: func(ctx Context) error { return ctx.RenameTab() }},
 		{Slug: "detach", Code: "DET", Name: "Detach", Desc: "Detach from the session", Run: func(ctx Context) error { return ctx.Detach() }},
 	}
 

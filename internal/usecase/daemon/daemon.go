@@ -31,6 +31,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -163,7 +164,17 @@ type stoppedSession struct {
 	cwd         string
 	createdAt   int64
 	lastUsedSeq uint64
+	tabNames    []string
 	purging     bool
+}
+
+func (s stoppedSession) same(other stoppedSession) bool {
+	return s.name == other.name &&
+		s.cwd == other.cwd &&
+		s.createdAt == other.createdAt &&
+		s.lastUsedSeq == other.lastUsedSeq &&
+		s.purging == other.purging &&
+		slices.Equal(s.tabNames, other.tabNames)
 }
 
 type Option func(*Daemon)
@@ -320,7 +331,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	} else {
 		var maxSeq uint64
 		for _, r := range records {
-			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, lastUsedSeq: r.LastUsedSeq}
+			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, lastUsedSeq: r.LastUsedSeq, tabNames: r.TabNames}
 			if r.LastUsedSeq > maxSeq {
 				maxSeq = r.LastUsedSeq
 			}
@@ -537,7 +548,7 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 				return
 			}
 			d.mu.Lock()
-			if cur, ok := d.stopped[k.Name]; ok && cur == stopped {
+			if cur, ok := d.stopped[k.Name]; ok && cur.same(stopped) {
 				delete(d.stopped, k.Name)
 			}
 			d.mu.Unlock()
@@ -647,7 +658,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			var err error
-			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, term)
+			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, term, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err
@@ -715,7 +726,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			var err error
-			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, term)
+			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, term, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err

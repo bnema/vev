@@ -173,6 +173,7 @@ Successful commands are promoted near the top the next time the palette opens.
 | SSP | open session picker |
 | VIS | enter visual mode |
 | RNS | rename session |
+| RNT | rename current tab |
 | DET | detach |
 
 Rename prompts are prefilled with the current session name. Empty names and names already used by another session are rejected.

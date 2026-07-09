@@ -739,6 +739,50 @@ func (_c *MockContext_RenameSession_Call) RunAndReturn(run func() error) *MockCo
 	return _c
 }
 
+// RenameTab provides a mock function for the type MockContext
+func (_mock *MockContext) RenameTab() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for RenameTab")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_RenameTab_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RenameTab'
+type MockContext_RenameTab_Call struct {
+	*mock.Call
+}
+
+// RenameTab is a helper method to define mock.On call
+func (_e *MockContext_Expecter) RenameTab() *MockContext_RenameTab_Call {
+	return &MockContext_RenameTab_Call{Call: _e.mock.On("RenameTab")}
+}
+
+func (_c *MockContext_RenameTab_Call) Run(run func()) *MockContext_RenameTab_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_RenameTab_Call) Return(err error) *MockContext_RenameTab_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_RenameTab_Call) RunAndReturn(run func() error) *MockContext_RenameTab_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // SplitDown provides a mock function for the type MockContext
 func (_mock *MockContext) SplitDown() error {
 	ret := _mock.Called()

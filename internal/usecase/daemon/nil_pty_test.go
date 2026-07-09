@@ -18,6 +18,7 @@ func TestNilPTYLifecyclePathsDoNotPanic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sess := &session{id: "s", name: "s", ctx: ctx, cancel: cancel}
+	d.sessions[sess.id] = sess
 	first := newTab(nil, domain.Size{Cols: 41, Rows: 10})
 	second := newTab(nil, domain.Size{Cols: 41, Rows: 10})
 	sess.tabs = []*tab{first, second}

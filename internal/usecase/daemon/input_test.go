@@ -641,6 +641,32 @@ func TestRNSOpensPromptAndEnterPromotesEphemeralSession(t *testing.T) {
 	require.Equal(t, "0", sess.name)
 }
 
+func TestRNTOpensPromptAndRenamesActiveTab(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 2)
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	sess.active = 1
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("RNT\r"))
+	out := awaitFrame(t, sends, ports.MsgOutput)
+	require.True(t, ac.overlays.promptActive())
+	msg, err := ports.UnmarshalOutput(out.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(msg.Data), "> 2")
+
+	d.handleInput(sess, ac, []byte("\x7flogs\r"))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	require.False(t, ac.overlays.promptActive())
+	require.Equal(t, "logs", sess.tabs[1].name)
+	require.Empty(t, sess.tabs[0].name)
+}
+
 func TestMouseWheelEntersScrollbackModeAndExitsAtBottom(t *testing.T) {
 	writes := make(chan []byte, 4)
 	p, _ := newBlockingPTYWithWrites(t, writes)

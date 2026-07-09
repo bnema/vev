@@ -256,6 +256,20 @@ func (e paletteExec) RenameSession() error {
 	return nil
 }
 
+func (e paletteExec) RenameTab() error {
+	tb := e.sess.activeTab()
+	if tb == nil {
+		return nil
+	}
+	e.sess.mu.Lock()
+	currentName := tabDisplayName(tb, e.sess.active)
+	e.sess.mu.Unlock()
+	e.d.enterPrompt(e.sess, e.ac, " Rename tab ", currentName, func(name string) error {
+		return e.d.renameTab(e.sess, tb, name)
+	})
+	return nil
+}
+
 func (e paletteExec) OpenSessionPicker() error {
 	e.d.enterPicker(e.sess, e.ac)
 	return nil
