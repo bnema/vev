@@ -86,9 +86,10 @@ type tab struct {
 	// previewClient tracks the one client currently previewing this tab in the picker.
 	// v1 is last-writer-wins: multiple clients previewing the same tab are not supported.
 	previewClient *attachedClient
-	// attention and attentionAt are guarded by the owning session.mu.
-	attention   bool
-	attentionAt time.Time
+	// attention fields are guarded by the owning session.mu.
+	attention             bool
+	attentionAt           time.Time
+	attentionVisiblePaint bool
 }
 
 // attachedClient is a client currently attached to a session's tab. rend is

@@ -308,9 +308,10 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	if overlays.previewTab != tb {
 		preview = snapshotPickerPreview(overlays.previewTab)
 	}
-	repaintAttachedClients = sess.ackAttention(tb)
 	bars := d.barStateForClient(sess, ac, overlays.copyFeedback)
 	bars.theme = ac.getTheme()
+	_, attentionVisible := pulseStyle(bars.attentionFrame)
+	repaintAttachedClients = sess.ackAttention(tb, attentionVisible)
 
 	styles := newThemeStyles(ac.getTheme())
 	tb.mu.Lock()
