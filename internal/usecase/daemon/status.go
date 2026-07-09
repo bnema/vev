@@ -141,13 +141,16 @@ func (s *session) statusSegments() statusSnapshot {
 	}
 	snap := statusSnapshot{session: name, tabs: make([]statusTab, len(s.tabs))}
 	for i, tb := range s.tabs {
-		name := tb.name
-		if name == "" {
-			name = strconv.Itoa(i + 1)
-		}
-		snap.tabs[i] = statusTab{name: name, active: i == s.active, attention: tb.attention}
+		snap.tabs[i] = statusTab{name: tabDisplayName(tb, i), active: i == s.active, attention: tb.attention}
 	}
 	return snap
+}
+
+func tabDisplayName(tb *tab, index int) string {
+	if tb.name != "" {
+		return tb.name
+	}
+	return strconv.Itoa(index + 1)
 }
 
 func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {

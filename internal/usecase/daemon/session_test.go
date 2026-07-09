@@ -701,6 +701,46 @@ func TestRenameTabPersistsForNamedSession(t *testing.T) {
 	require.Equal(t, []string{"shell"}, records[0].TabNames)
 }
 
+func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
+	tests := []struct {
+		name       string
+		tabNames   []string
+		closeIndex int
+		want       []string
+	}{
+		{name: "close before named tab", tabNames: []string{"shell", "", "logs"}, closeIndex: 0, want: []string{"", "logs"}},
+		{name: "close after named tab", tabNames: []string{"shell", "logs", ""}, closeIndex: 2, want: []string{"shell", "logs"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ptys := make([]ports.PTY, 3)
+			for i := range ptys {
+				p, release := newBlockingPTY(t)
+				ptys[i] = p
+				t.Cleanup(release)
+			}
+			store, _ := newMockStore(t)
+			d := newTestDaemon(t, newFactorySeq(t, ptys...), stubClock{})
+			WithStore(store)(d)
+			sz := domain.Size{Cols: 80, Rows: 24}
+
+			sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, nil)
+			require.NoError(t, err)
+			require.NoError(t, d.createTab(sess, sz))
+			require.NoError(t, d.createTab(sess, sz))
+			for i, name := range tt.tabNames {
+				require.NoError(t, d.renameTab(sess, sess.tabs[i], name))
+			}
+
+			d.closeTab(sess, sess.tabs[tt.closeIndex], false)
+			records, err := d.persist.LoadAll()
+			require.NoError(t, err)
+			require.Len(t, records, 1)
+			require.Equal(t, tt.want, records[0].TabNames)
+		})
+	}
+}
+
 func TestRenameTabDoesNotPersistForEphemeralSession(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	p, release := newBlockingPTY(t)

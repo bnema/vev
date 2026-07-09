@@ -27,7 +27,6 @@ package daemon
 
 import (
 	"sort"
-	"strconv"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/platform"
@@ -71,10 +70,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 		view := picker.SessionView{ID: s.id, Name: s.name, Active: s.active, Tabs: make([]string, len(s.tabs))}
 		sessionAttention := false
 		for i, tb := range s.tabs {
-			label := tb.name
-			if label == "" {
-				label = strconv.Itoa(i + 1)
-			}
+			label := tabDisplayName(tb, i)
 			if tb.attention {
 				label = attentionSuffix(label)
 				sessionAttention = true
