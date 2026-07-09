@@ -1177,6 +1177,68 @@ func TestClearAndErase(t *testing.T) {
 	}
 }
 
+func TestBackgroundColorErase(t *testing.T) {
+	tests := []struct {
+		name      string
+		width     int
+		height    int
+		seq       string
+		startX    int
+		wantStyle renderer.Style
+	}{
+		{
+			name:      "indexed background for EL",
+			width:     8,
+			height:    1,
+			seq:       "\x1b[1;31;48;5;236mX\x1b[K",
+			startX:    1,
+			wantStyle: renderer.Style{Foreground: -1, Background: 236},
+		},
+		{
+			name:   "truecolor background for full ED",
+			width:  3,
+			height: 2,
+			seq:    "abcdef\x1b[1;31;48;2;12;34;56m\x1b[2J",
+			wantStyle: renderer.Style{
+				Foreground:       -1,
+				Background:       -1,
+				HasBackgroundRGB: true,
+				BackgroundRGB:    renderer.RGB{R: 12, G: 34, B: 56},
+			},
+		},
+		{
+			name:      "default background after SGR 49",
+			width:     2,
+			height:    1,
+			seq:       "\x1b[48;2;12;34;56m\x1b[49m\x1b[K",
+			wantStyle: renderer.DefaultStyle(),
+		},
+		{
+			name:      "default background after SGR 0",
+			width:     2,
+			height:    1,
+			seq:       "\x1b[48;2;12;34;56m\x1b[0m\x1b[K",
+			wantStyle: renderer.DefaultStyle(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewScreen(tt.width, tt.height)
+			s.Write([]byte(tt.seq))
+
+			for y := range tt.height {
+				for x := tt.startX; x < tt.width; x++ {
+					cell := cellAt(s, x, y)
+					if cell.Rune != ' ' || cell.Style != tt.wantStyle {
+						t.Errorf("cell(%d,%d) = %+v, want space with style %+v", x, y, cell, tt.wantStyle)
+					}
+				}
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Cursor move
 // ---------------------------------------------------------------------------
