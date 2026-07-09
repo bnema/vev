@@ -15,17 +15,29 @@ const (
 	AnchorBottom
 )
 
+// HorizontalAnchor describes a modal's horizontal position within its base rectangle.
+type HorizontalAnchor int
+
+const (
+	// HorizontalAnchorCenter centers the modal within the base rectangle.
+	HorizontalAnchorCenter HorizontalAnchor = iota
+	// HorizontalAnchorRight positions the modal left of RightMargin columns.
+	HorizontalAnchorRight
+)
+
 // Modal describes a rectangular overlay.
 type Modal struct {
-	WidthPct     int
-	HeightPct    int
-	MinWidth     int
-	MinHeight    int
-	Title        string
-	Anchor       Anchor
-	FixedWidth   int
-	FixedHeight  int
-	BottomMargin int
+	WidthPct         int
+	HeightPct        int
+	MinWidth         int
+	MinHeight        int
+	Title            string
+	Anchor           Anchor
+	HorizontalAnchor HorizontalAnchor
+	FixedWidth       int
+	FixedHeight      int
+	BottomMargin     int
+	RightMargin      int
 }
 
 // Bounds returns the modal rectangle positioned within base and clamped to base.
@@ -52,6 +64,9 @@ func (m Modal) Bounds(base domain.Size) domain.Rect {
 	height = clamp(height, 0, base.Rows)
 
 	x := (base.Cols - width) / 2
+	if m.HorizontalAnchor == HorizontalAnchorRight {
+		x = clamp(base.Cols-m.RightMargin-width, 0, base.Cols-width)
+	}
 	y := (base.Rows - height) / 2
 	if m.Anchor == AnchorBottom {
 		y = clamp(base.Rows-m.BottomMargin-height, 0, base.Rows-height)
