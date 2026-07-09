@@ -480,7 +480,11 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	}
 	lastUsedSeq := sess.mruAt.Load()
 	if wasEphemeral || oldName != name {
-		if err := d.persist.Save(persist.Record{Name: name, Cwd: sess.cwd, CreatedAt: createdAt, UpdatedAt: time.Now().UnixNano(), LastUsedSeq: lastUsedSeq}); err != nil {
+		record := sess.persistRecordLocked(time.Now().UnixNano())
+		record.Name = name
+		record.CreatedAt = createdAt
+		record.LastUsedSeq = lastUsedSeq
+		if err := d.persist.Save(record); err != nil {
 			sess.mu.Unlock()
 			return err
 		}
@@ -568,6 +572,11 @@ func (s *session) persistRecordLocked(updatedAt int64) persist.Record {
 }
 
 func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
+	d.mu.Lock()
+	if d.sessions[sess.id] != sess {
+		d.mu.Unlock()
+		return
+	}
 	sess.mu.Lock()
 	idx := -1
 	for i, w := range sess.tabs {
@@ -578,11 +587,13 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	}
 	if idx == -1 {
 		sess.mu.Unlock()
+		d.mu.Unlock()
 		return
 	}
 	if len(sess.tabs) == 1 {
 		name := sess.name
 		sess.mu.Unlock()
+		d.mu.Unlock()
 		d.log.Info("tab closed", "session", name, "last", true)
 		_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 		return
@@ -604,6 +615,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 		}
 	}
 	sess.mu.Unlock()
+	d.mu.Unlock()
 	d.log.Info("tab closed", "session", name)
 	markSnapshotDirty(sess)
 

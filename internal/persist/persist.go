@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"sort"
+	"sync"
 
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/pkg/kv"
@@ -20,6 +21,7 @@ func StorePath(dir string) string {
 // operations no-ops, so callers can keep persistence optional.
 type Persister struct {
 	store ports.Store
+	mu    sync.Mutex
 }
 
 // Open opens the session persister under dir.
@@ -50,6 +52,8 @@ func (p *Persister) Save(r Record) error {
 	if p == nil || p.store == nil {
 		return nil
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	value, err := encodeRecordValue(r)
 	if err != nil {
 		return err
@@ -68,6 +72,8 @@ func (p *Persister) Touch(name, cwd string, at int64) error {
 	if name == "" {
 		return errEmptyName
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	createdAt := at
 	lastUsedSeq := uint64(0)
@@ -95,6 +101,8 @@ func (p *Persister) TouchMRU(name string, lastUsedSeq uint64) error {
 	if name == "" {
 		return errEmptyName
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	r := Record{Name: name, LastUsedSeq: lastUsedSeq}
 	if v, ok := p.store.Get([]byte(name)); ok {
@@ -118,6 +126,8 @@ func (p *Persister) Delete(name string) error {
 	if name == "" {
 		return errEmptyName
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if err := p.store.Delete([]byte(name)); err != nil {
 		return err
 	}
@@ -129,6 +139,8 @@ func (p *Persister) LoadAll() ([]Record, error) {
 	if p == nil || p.store == nil {
 		return nil, nil
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	data := make(map[string][]byte)
 	p.store.Range(func(k, v []byte) bool {
 		data[string(k)] = append([]byte(nil), v...)
@@ -142,6 +154,8 @@ func (p *Persister) Close() error {
 	if p == nil || p.store == nil {
 		return nil
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.store.Close()
 }
 

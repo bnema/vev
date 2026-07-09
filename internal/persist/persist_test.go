@@ -3,7 +3,9 @@ package persist
 import (
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -151,6 +153,34 @@ func TestSyncBehavior(t *testing.T) {
 	require.Equal(t, 2, state.syncs)
 }
 
+func TestPersisterSerializesReadModifyWriteWithStructuralSave(t *testing.T) {
+	store := newBlockingGetStore()
+	p := New(store)
+	require.NoError(t, p.Save(Record{Name: "work", Cwd: "/work", CreatedAt: 1, UpdatedAt: 1, TabNames: []string{"old"}}))
+	store.blockNextGet()
+
+	touchDone := make(chan error, 1)
+	go func() { touchDone <- p.TouchMRU("work", 2) }()
+	<-store.getStarted
+
+	saveDone := make(chan error, 1)
+	go func() {
+		saveDone <- p.Save(Record{Name: "work", Cwd: "/work", CreatedAt: 1, UpdatedAt: 3, LastUsedSeq: 2, TabNames: []string{"new"}})
+	}()
+	select {
+	case err := <-saveDone:
+		t.Fatalf("structural save interleaved with TouchMRU: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(store.releaseGet)
+	require.NoError(t, <-touchDone)
+	require.NoError(t, <-saveDone)
+
+	records, err := p.LoadAll()
+	require.NoError(t, err)
+	require.Equal(t, []string{"new"}, records[0].TabNames)
+}
+
 func TestSavePropagatesSetErrorWithoutSync(t *testing.T) {
 	store, state := newMockStore(t)
 	state.errSet = errors.New("set failed")
@@ -169,6 +199,68 @@ type mockStoreState struct {
 	closed  bool
 	errSet  error
 }
+
+type blockingGetStore struct {
+	mu           sync.Mutex
+	data         map[string][]byte
+	block        bool
+	getStarted   chan struct{}
+	releaseGet   chan struct{}
+	getStartOnce sync.Once
+}
+
+func newBlockingGetStore() *blockingGetStore {
+	return &blockingGetStore{data: make(map[string][]byte), getStarted: make(chan struct{}), releaseGet: make(chan struct{})}
+}
+
+func (s *blockingGetStore) blockNextGet() {
+	s.mu.Lock()
+	s.block = true
+	s.mu.Unlock()
+}
+
+func (s *blockingGetStore) Get(key []byte) ([]byte, bool) {
+	s.mu.Lock()
+	v, ok := s.data[string(key)]
+	v = append([]byte(nil), v...)
+	block := s.block
+	if block {
+		s.block = false
+	}
+	s.mu.Unlock()
+	if block {
+		s.getStartOnce.Do(func() { close(s.getStarted) })
+		<-s.releaseGet
+	}
+	return v, ok
+}
+
+func (s *blockingGetStore) Set(key, value []byte) error {
+	s.mu.Lock()
+	s.data[string(key)] = append([]byte(nil), value...)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *blockingGetStore) Delete(key []byte) error {
+	s.mu.Lock()
+	delete(s.data, string(key))
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *blockingGetStore) Range(fn func(k, v []byte) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, value := range s.data {
+		if !fn([]byte(key), append([]byte(nil), value...)) {
+			return
+		}
+	}
+}
+
+func (*blockingGetStore) Sync() error  { return nil }
+func (*blockingGetStore) Close() error { return nil }
 
 func newMockStore(t *testing.T) (*portsmocks.MockStore, *mockStoreState) {
 	t.Helper()

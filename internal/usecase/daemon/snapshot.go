@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/persist"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
@@ -78,7 +77,10 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		cancel()
 	}
 	allowlist := d.restoreProcessAllowlistSnapshot()
-	for _, tabSnap := range snap.Tabs {
+	d.mu.Lock()
+	persisted := d.stopped[snap.Name]
+	d.mu.Unlock()
+	for tabIndex, tabSnap := range snap.Tabs {
 		if err := ctx.Err(); err != nil {
 			closeOpened()
 			return err
@@ -107,6 +109,9 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 			}
 		}
 		tb := &tab{stableID: tabStableID, tree: tabSnap.Tree.Clone(), panes: make(map[layout.PaneID]*pane, len(tabSnap.Panes)), nextPaneID: int(tabSnap.NextPaneID), size: tbSize}
+		if tabIndex < len(persisted.tabNames) {
+			tb.name = persisted.tabNames[tabIndex]
+		}
 		if tb.nextPaneID <= 0 {
 			tb.nextPaneID = 1
 		}
@@ -171,8 +176,8 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		sess.mruAt.Store(stopped.lastUsedSeq)
 	}
 	d.mu.Unlock()
-	lastUsedSeq := sess.mruAt.Load()
-	if err := d.persist.Save(persist.Record{Name: snap.Name, Cwd: sess.cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq}); err != nil {
+	record := sess.persistRecordLocked(createdAt)
+	if err := d.persist.Save(record); err != nil {
 		closeOpened()
 		return err
 	}

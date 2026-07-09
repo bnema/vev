@@ -799,21 +799,27 @@ func TestCreateSessionSeedsMRUFromStopped(t *testing.T) {
 
 func TestCreateRenameKillPersistenceLifecycle(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
-	p, release := newBlockingPTY(t)
-	defer release()
+	p1, release1 := newBlockingPTY(t)
+	p2, release2 := newBlockingPTY(t)
+	defer release1()
+	defer release2()
 	store, state := newMockStore(t)
-	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
 	WithStore(store)(d)
 
 	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
 	require.NoError(t, err)
 	require.True(t, state.has("work"))
+	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
+	require.NoError(t, d.createTab(sess, sz))
+	require.NoError(t, d.renameTab(sess, sess.tabs[1], "logs"))
 
 	require.NoError(t, d.renameSession(sess, "renamed"))
 	require.False(t, state.has("work"))
 	require.True(t, state.has("renamed"))
+	require.Equal(t, []string{"shell", "logs"}, state.record(t, "renamed").TabNames)
 
-	_ = d.killSession(sess, ports.ReasonSessionKilled, true)
+	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, true))
 	require.False(t, state.has("renamed"))
 }
 
