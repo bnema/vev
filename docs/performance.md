@@ -5,7 +5,7 @@ Enable daemon pprof explicitly with `VEV_PPROF_ADDR=127.0.0.1:6060 vev --daemon`
 Run microbenchmarks with:
 
 ```sh
-go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc -bench=. -benchmem
+go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc ./internal/usecase/daemon -run '^$' -bench=. -benchmem
 ```
 
 Demo flood workloads are scripted in `scripts/bench-workloads.sh` for `yes`, `seq`, and `cat` styles for raw/tmux runs. vev does not currently support `vev new <name> -- command`, so automated vev workload command overrides are intentionally not documented. Capture bytes/frame and syscalls/frame externally (for example with `strace -c` around the client/daemon) and allocations with `-benchmem`/pprof.
@@ -24,12 +24,13 @@ strace -ff -c -o tmux-cat.strace tmux new-session -d -s perf-cat 'timeout 30s sh
 
 Record host CPU, OS/kernel, terminal emulator, vev commit, tmux version, terminal size, workload duration, raw command lines, syscall summaries, bytes written per rendered frame, and heap profiles or allocation counts before comparing.
 
-Microbenchmarks executed locally for this review using `go test ./internal/adapters/ipc -run '^$' -bench=. -benchmem`:
+Microbenchmarks executed locally for this review using `go test ./internal/adapters/ipc ./internal/usecase/daemon -run '^$' -bench=. -benchmem`:
 
 | benchmark | methodology |
 | --- | --- |
 | BenchmarkTransportSend | writes encoded frames to an in-memory discard `net.Conn`; allocations reported here are Send-side frame assembly costs. |
 | BenchmarkTransportRecvReuse | reads a pre-encoded frame from a looping in-memory reader; no `Send` call, goroutine, channel, or frame production work runs inside the measured loop, so allocations reported here are Recv-side costs only. |
+| BenchmarkPaintCachedSinglePaneDamage | writes a small damage update into one pane, paints through the daemon compose→diff→send path, and advances the output ACK each iteration so the measured loop does not hit the unacked-output bailout. |
 
 | workload | vev baseline | tmux baseline | notes |
 | --- | --- | --- | --- |
