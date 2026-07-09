@@ -300,15 +300,15 @@ func (t *Transport) Send(f ports.Frame) error {
 		t.pending[seq] = &pending{frame: f, first: now, last: now}
 	}
 	if shouldPaceOutput(f) {
-		sendNow := t.outputNext.IsZero() || !t.clock.Now().Before(t.outputNext)
-		if sendNow {
-			t.outputNext = t.clock.Now().Add(t.outputPaceDelayLocked())
-		}
-		t.mu.Unlock()
-		if !sendNow {
-			t.enqueueOutputSend(queuedSend{seq: seq, reliable: reliable, frame: f})
+		now := t.clock.Now()
+		if len(t.outputQueue) > 0 || (!t.outputNext.IsZero() && now.Before(t.outputNext)) {
+			t.outputQueue = append(t.outputQueue, queuedSend{seq: seq, reliable: reliable, frame: f})
+			t.notifyOutputPacerLocked()
+			t.mu.Unlock()
 			return nil
 		}
+		t.outputNext = now.Add(t.outputPaceDelayLocked())
+		t.mu.Unlock()
 		if err := t.sendData(seq, reliable, f); err != nil {
 			t.removePending(seq, reliable)
 			return err
@@ -329,17 +329,6 @@ func (t *Transport) Send(f ports.Frame) error {
 		return err
 	}
 	return nil
-}
-
-func (t *Transport) enqueueOutputSend(q queuedSend) {
-	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
-		return
-	}
-	t.outputQueue = append(t.outputQueue, q)
-	t.notifyOutputPacerLocked()
-	t.mu.Unlock()
 }
 
 func (t *Transport) flushQueuedOutputLocked() []queuedSend {
@@ -390,8 +379,12 @@ func (t *Transport) outputPaceLoop() {
 		t.outputQueue = t.outputQueue[:len(t.outputQueue)-limit]
 		t.outputNext = now.Add(t.outputPaceDelayLocked())
 		t.mu.Unlock()
-		for _, q := range batch {
-			_ = t.sendQueuedData(q)
+		for i, q := range batch {
+			if err := t.sendQueuedData(q); err != nil {
+				t.removeQueuedPending(batch[i+1:])
+				t.closeWithError(err)
+				return
+			}
 		}
 	}
 }
