@@ -49,6 +49,26 @@ func newReconnectToastTerminalHarness(t *testing.T) *reconnectToastTerminalHarne
 	return h
 }
 
+func newReconnectToastTerminalHarnessWithOutput(t *testing.T, out io.Writer) *reconnectToastTerminalHarness {
+	t.Helper()
+	in, inWriter := io.Pipe()
+	h := &reconnectToastTerminalHarness{
+		term:     portsmocks.NewMockTerminal(t),
+		in:       in,
+		inWriter: inWriter,
+		size:     domain.Size{Cols: 80, Rows: 24},
+		resizeCh: make(chan domain.Size),
+	}
+	h.term.EXPECT().EnterRaw().Return(func() error { return nil }, nil).Maybe()
+	h.term.EXPECT().Size().Return(h.size, nil).Maybe()
+	h.term.EXPECT().ResizeEvents().Return((<-chan domain.Size)(h.resizeCh)).Maybe()
+	h.term.EXPECT().QueryColors().Return(nil).Maybe()
+	h.term.EXPECT().In().Return(h.in).Maybe()
+	h.term.EXPECT().Out().Return(out).Maybe()
+	h.term.EXPECT().Flush().Return(nil).Maybe()
+	return h
+}
+
 func (h *reconnectToastTerminalHarness) closeInput() { _ = h.inWriter.Close() }
 
 func reconnectToastWelcome(token uint64) ports.Frame {
@@ -323,6 +343,50 @@ func TestReconnectSleepWithResizeEventsRedrawsUntilTimerFires(t *testing.T) {
 	require.Equal(t, domain.Size{Cols: 120, Rows: 40}, <-got)
 	timerCh <- time.Time{}
 	require.True(t, <-done)
+}
+
+type reconnectToastFailOnceWriter struct {
+	bytes.Buffer
+	needle string
+	failed bool
+}
+
+func (w *reconnectToastFailOnceWriter) Write(p []byte) (int, error) {
+	n, _ := w.Buffer.Write(p)
+	if !w.failed && strings.Contains(string(p), w.needle) {
+		w.failed = true
+		return n, errors.New("reconnect toast write failed")
+	}
+	return n, nil
+}
+
+func TestRemoteReconnectToastClearsFailedDrawBounds(t *testing.T) {
+	oldSleep := reconnectSleep
+	oldSleepWithResize := reconnectSleepWithResize
+	ctx, cancel := context.WithCancel(context.Background())
+	reconnectSleep = func(context.Context, ports.Clock, time.Duration) bool { return false }
+	reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Size, func(domain.Size)) bool {
+		cancel()
+		return false
+	}
+	defer func() {
+		reconnectSleep = oldSleep
+		reconnectSleepWithResize = oldSleepWithResize
+	}()
+
+	out := &reconnectToastFailOnceWriter{needle: "reconnecting through SSH"}
+	term := newReconnectToastTerminalHarnessWithOutput(t, out)
+	defer term.closeInput()
+	tr := &reconnectToastRecordingTransport{recvs: []reconnectToastRecv{
+		{frame: reconnectToastWelcome(44)},
+		{err: io.EOF},
+	}}
+	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr}}
+
+	err := Run(ctx, dialer, term.term, portsmocks.NewMockClock(t), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, out.failed)
+	assertReconnectToastClearCoversBounds(t, out.String(), reconnectToastBoundsFor(term.size, reconnectStageMessage(reconnectStageSSH)))
 }
 
 func TestRemoteReconnectToastLifecycleWithWrappedTransportError(t *testing.T) {

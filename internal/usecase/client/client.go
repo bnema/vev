@@ -169,10 +169,8 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 		if showingStatus {
 			_ = clearReconnectToast(term.Out(), reconnectToastRect)
 		}
-		drawnRect, err := drawReconnectToastStage(term.Out(), size, statusStage)
-		if err == nil {
-			reconnectToastRect = drawnRect
-		}
+		drawnRect, _ := drawReconnectToastStage(term.Out(), size, statusStage)
+		reconnectToastRect = drawnRect
 		_ = term.Flush()
 		showingStatus = true
 	}
