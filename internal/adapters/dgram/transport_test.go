@@ -1039,6 +1039,30 @@ func TestReliableRecvBufferBoundedForFarFutureSequences(t *testing.T) {
 	}
 }
 
+func TestOutputSupersessionPrunesFullReceiveBuffer(t *testing.T) {
+	tr := &Transport{
+		nextRecvSeq:   1,
+		recvBuf:       map[uint64]ports.Frame{2: {Type: ports.MsgOutput, Payload: []byte("stale")}},
+		maxRecvBuffer: 1,
+		done:          make(chan struct{}),
+	}
+	tr.deliverCond = sync.NewCond(&tr.deliverMu)
+
+	ackSeq, ack, queued := tr.enqueueReliable(3, ports.Frame{Type: ports.MsgOutput, Payload: []byte("replacement")}, 2)
+	if !ack || !queued {
+		t.Fatalf("replacement ack=%v queued=%v, want true/true", ack, queued)
+	}
+	if ackSeq != 3 {
+		t.Fatalf("ack seq=%d, want 3 after skipped output", ackSeq)
+	}
+	if _, ok := tr.recvBuf[2]; ok {
+		t.Fatal("superseded output remained in full receive buffer")
+	}
+	if got := string(tr.recvBuf[3].Payload); got != "replacement" {
+		t.Fatalf("queued payload=%q, want replacement", got)
+	}
+}
+
 func TestReliableFullRecvBufferDoesNotAckDroppedFarFutureFrame(t *testing.T) {
 	aPC, bPC := newPair()
 	codec, err := pdgram.NewCodec(key())

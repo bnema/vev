@@ -599,6 +599,12 @@ func (t *Transport) enqueueReliable(seq uint64, f ports.Frame, outputSkipThrough
 	defer t.deliverMu.Unlock()
 	if f.Type == ports.MsgOutput && outputSkipThrough > t.recvSkipThrough {
 		t.recvSkipThrough = outputSkipThrough
+		for bufferedSeq, buffered := range t.recvBuf {
+			if bufferedSeq <= outputSkipThrough && buffered.Type == ports.MsgOutput {
+				delete(t.recvBuf, bufferedSeq)
+			}
+		}
+		t.deliverCond.Signal()
 	}
 	if seq < t.nextRecvSeq {
 		return t.highestContiguousRecvLocked(), true, false
