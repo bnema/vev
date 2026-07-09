@@ -92,6 +92,97 @@ func TestParse(t *testing.T) {
 			},
 		},
 		{
+			name:  "floating settings custom values",
+			input: "floating.command = \"btop --utf-force\"\nfloating.width = 75%\nfloating.height = 60%\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Floating: domain.FloatingConfig{
+					Command: "btop --utf-force",
+					Width:   75,
+					Height:  60,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+		},
+		{
+			name:  "floating command can be empty or quoted",
+			input: "floating.command = echo ready\nfloating.command = \"\"\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Floating: domain.FloatingConfig{
+					Width:  80,
+					Height: 80,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+			wantWarnings: []domain.Warning{{Line: 2, Msg: "duplicate key \"floating.command\""}},
+		},
+		{
+			name:  "floating percentage endpoints",
+			input: "floating.width = 1%\nfloating.height = 100%\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Floating: domain.FloatingConfig{
+					Width:  1,
+					Height: 100,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+		},
+		{
+			name:  "floating invalid percentages warn and preserve defaults",
+			input: "floating.width = 80\nfloating.height = 0%\nfloating.width = 101%\nfloating.height = eighty%\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Floating: domain.FloatingConfig{
+					Width:  80,
+					Height: 80,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+			wantWarnings: []domain.Warning{
+				{Line: 1, Msg: "invalid floating.width \"80\""},
+				{Line: 2, Msg: "invalid floating.height \"0%\""},
+				{Line: 3, Msg: "duplicate key \"floating.width\""},
+				{Line: 3, Msg: "invalid floating.width \"101%\""},
+				{Line: 4, Msg: "duplicate key \"floating.height\""},
+				{Line: 4, Msg: "invalid floating.height \"eighty%\""},
+			},
+		},
+		{
+			name:  "floating duplicate keys warn and last valid value wins",
+			input: "floating.command = btop\nfloating.command = lazygit\nfloating.width = 70%\nfloating.width = 90%\nfloating.height = 60%\nfloating.height = 85%\n",
+			want: domain.Config{
+				Theme: domain.ThemeAuto,
+				Floating: domain.FloatingConfig{
+					Command: "lazygit",
+					Width:   90,
+					Height:  85,
+				},
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+			wantWarnings: []domain.Warning{
+				{Line: 2, Msg: "duplicate key \"floating.command\""},
+				{Line: 4, Msg: "duplicate key \"floating.width\""},
+				{Line: 6, Msg: "duplicate key \"floating.height\""},
+			},
+		},
+		{
+			name:  "floating malformed quoted command warns and keeps default",
+			input: "floating.command = \"bad\\q\"\n",
+			want: domain.Config{
+				Theme:          domain.ThemeAuto,
+				BindingEntries: []domain.ConfigEntry{},
+				Codes:          map[string]string{},
+			},
+			wantWarnings: []domain.Warning{{Line: 1, Msg: "invalid floating.command \"\\\"bad\\\\q\\\"\""}},
+		},
+		{
 			name:  "bar settings custom values",
 			input: "bar.top-right = custom-top\nbar.bottom-right = custom-bottom\nbar.interval = 2s\n",
 			want: domain.Config{
@@ -243,6 +334,9 @@ func TestParse(t *testing.T) {
 
 			if tt.want.Bar.Interval == 0 {
 				tt.want.Bar = domain.Defaults().Bar
+			}
+			if tt.want.Floating.Width == 0 && tt.want.Floating.Height == 0 {
+				tt.want.Floating = domain.Defaults().Floating
 			}
 			if tt.want.Snapshot.RestoreProcesses == nil && !tt.want.Snapshot.RestoreProcessesSet {
 				tt.want.Snapshot.RestoreProcesses = append([]string(nil), domain.DefaultSnapshotRestoreProcesses()...)
