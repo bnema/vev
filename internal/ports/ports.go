@@ -45,6 +45,12 @@ type Transport interface {
 	Close() error
 }
 
+// DatagramTransport marks transports with datagram/reordered/lossy delivery
+// semantics behind the framed Transport interface.
+type DatagramTransport interface {
+	DatagramTransport()
+}
+
 // Dialer establishes outbound Transport connections.
 type Dialer interface {
 	Dial(ctx context.Context) (Transport, error)

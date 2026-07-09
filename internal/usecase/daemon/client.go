@@ -39,28 +39,30 @@ import (
 )
 
 type attachedClient struct {
-	tr            ports.Transport
-	rend          *renderer.Renderer
-	overlays      *overlayRuntime
-	clientID      [16]byte
-	resumeCapable bool
-	resumeToken   uint64
-	parked        bool
-	nextStateNum  uint64
-	echoAck       atomic.Uint64
-	outputAck     atomic.Uint64
-	paintDeferred bool               // guarded by sendMu; a diff paint skipped while acks lag
-	bars          barCache           // only touched while sendMu is held
-	composed      composedFrameCache // only touched while sendMu is held
-	size          domain.Size
-	keys          *keys.Router
-	sess          Guarded[*session]
-	mouseScan     mouse.Scanner
-	themeMu       sync.Mutex
-	theme         themeui.Theme
-	clientTheme   themeui.Theme
-	lastCursor    cursorOut
-	recentNav     recentSessionNavigator
+	tr                 ports.Transport
+	rend               *renderer.Renderer
+	overlays           *overlayRuntime
+	clientID           [16]byte
+	resumeCapable      bool
+	resumeToken        uint64
+	parked             bool
+	nextStateNum       uint64
+	echoAck            atomic.Uint64
+	outputAck          atomic.Uint64
+	paintDeferred      bool                      // guarded by sendMu; a diff paint skipped while acks lag
+	bars               barCache                  // only touched while sendMu is held
+	composed           composedFrameCache        // only touched while sendMu is held
+	advanceOutputOnAck bool                      // renderer shadow advances after client MsgAck instead of send
+	outputFrames       map[uint64]renderer.Frame // only touched while sendMu is held; frames sent by output state
+	size               domain.Size
+	keys               *keys.Router
+	sess               Guarded[*session]
+	mouseScan          mouse.Scanner
+	themeMu            sync.Mutex
+	theme              themeui.Theme
+	clientTheme        themeui.Theme
+	lastCursor         cursorOut
+	recentNav          recentSessionNavigator
 	// historyNavMu protects historyNav and historyNavTimer. When paint needs
 	// several locks, take sendMu before historyNavMu, then Daemon.mu/session.mu.
 	historyNavMu    sync.Mutex
@@ -213,6 +215,10 @@ func (ac *attachedClient) shouldResetOutputState(reset bool) bool {
 func (ac *attachedClient) advanceOutputAck(state uint64) {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
+	ac.advanceOutputAckLocked(state)
+}
+
+func (ac *attachedClient) advanceOutputAckLocked(state uint64) {
 	if state > ac.nextStateNum {
 		return
 	}
@@ -225,6 +231,29 @@ func (ac *attachedClient) advanceOutputAck(state uint64) {
 			return
 		}
 	}
+}
+
+func (ac *attachedClient) ackOutputState(state uint64) error {
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+	if state > ac.nextStateNum || state <= ac.outputAck.Load() {
+		return nil
+	}
+	if ac.advanceOutputOnAck {
+		frame, ok := ac.outputFrames[state]
+		if ok {
+			if err := ac.rend.Ack(frame); err != nil {
+				return err
+			}
+		}
+		for n := range ac.outputFrames {
+			if n <= state {
+				delete(ac.outputFrames, n)
+			}
+		}
+	}
+	ac.advanceOutputAckLocked(state)
+	return nil
 }
 
 // outputLagAtCapLocked reports whether the client has at least
@@ -396,6 +425,12 @@ func (d *Daemon) notifiesSnapshot() []chan struct{} {
 type attachClientOptions struct {
 	clientID      [16]byte
 	resumeCapable bool
+	datagram      bool
+}
+
+func isDatagramTransport(tr ports.Transport) bool {
+	_, ok := tr.(ports.DatagramTransport)
+	return ok
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, *attachedClient) {
@@ -403,13 +438,20 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	if opts.resumeCapable {
 		resumeToken = d.nextResumeTokenLocked()
 	}
+	caps := renderer.Capabilities{}
+	advanceOutputOnAck := opts.datagram || isDatagramTransport(tr)
+	if advanceOutputOnAck {
+		caps.AdvancePolicy = renderer.AdvanceOnAck
+	}
 	ac := &attachedClient{
-		tr:            tr,
-		rend:          renderer.New(renderer.Capabilities{}),
-		size:          sz,
-		clientID:      opts.clientID,
-		resumeCapable: opts.resumeCapable,
-		resumeToken:   resumeToken,
+		tr:                 tr,
+		rend:               renderer.New(caps),
+		advanceOutputOnAck: advanceOutputOnAck,
+		outputFrames:       make(map[uint64]renderer.Frame),
+		size:               sz,
+		clientID:           opts.clientID,
+		resumeCapable:      opts.resumeCapable,
+		resumeToken:        resumeToken,
 	}
 	ac.initOverlays()
 	ac.setSession(sess)
@@ -521,7 +563,9 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 			return
 		case ports.MsgAck:
 			if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
-				ac.advanceOutputAck(ack.AckedStateNum)
+				if err := ac.ackOutputState(ack.AckedStateNum); err != nil {
+					d.log.Warn("output ack rejected", "err", err, "state", ack.AckedStateNum)
+				}
 				if ac.takeDeferredPaint() {
 					d.paint(sess, ac, false)
 				}

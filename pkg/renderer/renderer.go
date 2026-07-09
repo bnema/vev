@@ -219,7 +219,7 @@ func (r *Renderer) lineDirty(frame Frame, y int) bool {
 }
 
 // Ack advances an AdvanceOnAck renderer's shadow after the caller knows the
-// bytes for frame reached the terminal. It is harmless for AdvanceOnSend.
+// bytes for frame reached the terminal.
 func (r *Renderer) Ack(frame Frame) error {
 	if err := frame.Validate(); err != nil {
 		return err

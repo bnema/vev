@@ -399,7 +399,13 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 			if sendTr == nil {
 				serr = errors.New("client transport is nil")
 			} else {
-				serr = sendTr.Send(ac.nextOutputFrameLocked(data, reset))
+				out := ac.nextOutputFrameLocked(data, reset)
+				if ac.advanceOutputOnAck && ac.outputFrames != nil {
+					if msg, derr := ports.UnmarshalOutput(out.Payload); derr == nil {
+						ac.outputFrames[msg.NewStateNum] = frame.Clone()
+					}
+				}
+				serr = sendTr.Send(out)
 			}
 		}
 	}
