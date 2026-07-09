@@ -171,12 +171,11 @@ func (c fixedClock) NewTimer(d time.Duration) ports.Timer {
 type manualClock struct {
 	mu     sync.Mutex
 	now    time.Time
-	timers chan *manualTimer
-	active int
+	timers map[*manualTimer]struct{}
 }
 
 func newManualClock(now time.Time) *manualClock {
-	return &manualClock{now: now, timers: make(chan *manualTimer, 16)}
+	return &manualClock{now: now, timers: make(map[*manualTimer]struct{})}
 }
 
 func (c *manualClock) Now() time.Time {
@@ -187,11 +186,9 @@ func (c *manualClock) Now() time.Time {
 
 func (c *manualClock) NewTimer(d time.Duration) ports.Timer {
 	c.mu.Lock()
-	deadline := c.now.Add(d)
-	c.active++
+	tm := &manualTimer{clock: c, c: make(chan time.Time, 1), deadline: c.now.Add(d), active: true}
+	c.timers[tm] = struct{}{}
 	c.mu.Unlock()
-	tm := &manualTimer{clock: c, c: make(chan time.Time, 1), deadline: deadline, active: true}
-	c.timers <- tm
 	return tm
 }
 
@@ -199,14 +196,13 @@ func (c *manualClock) advance(d time.Duration) {
 	c.mu.Lock()
 	c.now = c.now.Add(d)
 	now := c.now
+	timers := make([]*manualTimer, 0, len(c.timers))
+	for tm := range c.timers {
+		timers = append(timers, tm)
+	}
 	c.mu.Unlock()
-	n := len(c.timers)
-	for range n {
-		tm := <-c.timers
-		if fired, keep := tm.fireIfDue(now); fired || !keep {
-			continue
-		}
-		c.timers <- tm
+	for _, tm := range timers {
+		tm.fireIfDue(now)
 	}
 }
 
@@ -223,13 +219,8 @@ func (t *manualTimer) Reset(d time.Duration) bool {
 	wasActive := t.active
 	t.deadline = t.clock.now.Add(d)
 	t.active = true
-	if !wasActive {
-		t.clock.active++
-	}
+	t.clock.timers[t] = struct{}{}
 	t.clock.mu.Unlock()
-	if !wasActive {
-		t.clock.timers <- t
-	}
 	return wasActive
 }
 func (t *manualTimer) Stop() bool {
@@ -237,29 +228,28 @@ func (t *manualTimer) Stop() bool {
 	defer t.clock.mu.Unlock()
 	wasActive := t.active
 	t.active = false
-	if wasActive {
-		t.clock.active--
-	}
+	delete(t.clock.timers, t)
 	return wasActive
 }
-func (t *manualTimer) fireIfDue(now time.Time) (fired bool, keep bool) {
+func (t *manualTimer) fireIfDue(now time.Time) bool {
 	t.clock.mu.Lock()
 	if !t.active {
+		delete(t.clock.timers, t)
 		t.clock.mu.Unlock()
-		return false, false
+		return false
 	}
 	if now.Before(t.deadline) {
 		t.clock.mu.Unlock()
-		return false, true
+		return false
 	}
 	t.active = false
-	t.clock.active--
+	delete(t.clock.timers, t)
 	t.clock.mu.Unlock()
 	select {
 	case t.c <- now:
 	default:
 	}
-	return true, false
+	return true
 }
 
 func waitForManualTimers(t *testing.T, clk *manualClock, n int) {
@@ -267,7 +257,7 @@ func waitForManualTimers(t *testing.T, clk *manualClock, n int) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		clk.mu.Lock()
-		active := clk.active
+		active := len(clk.timers)
 		clk.mu.Unlock()
 		if active >= n {
 			return
@@ -275,7 +265,7 @@ func waitForManualTimers(t *testing.T, clk *manualClock, n int) {
 		time.Sleep(time.Millisecond)
 	}
 	clk.mu.Lock()
-	active := clk.active
+	active := len(clk.timers)
 	clk.mu.Unlock()
 	t.Fatalf("manual timers=%d, want at least %d", active, n)
 }
@@ -350,6 +340,27 @@ func TestResendSkipsQueuedOutputBeforeFirstWireAttempt(t *testing.T) {
 	}
 	if !tr.pending[1].first.IsZero() || !tr.pending[1].last.IsZero() {
 		t.Fatal("resend scan marked queued output as sent")
+	}
+}
+
+func TestResendSkipsOutputDuringFirstWireAttempt(t *testing.T) {
+	tr, writes := newResendTestTransport(t, 10)
+	now := tr.clock.Now()
+	tr.pending[1] = &pending{
+		frame:           ports.Frame{Type: ports.MsgOutput, Payload: []byte("sending")},
+		first:           now.Add(-time.Second),
+		last:            now.Add(-time.Second),
+		initialInFlight: true,
+	}
+
+	tr.resendPending()
+	if got := writes.Load(); got != 0 {
+		t.Fatalf("writes=%d, want first wire attempt excluded from resend", got)
+	}
+	tr.pending[1].initialInFlight = false
+	tr.resendPending()
+	if got := writes.Load(); got != 1 {
+		t.Fatalf("writes=%d, want resend after first wire attempt completed", got)
 	}
 }
 

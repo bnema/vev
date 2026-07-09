@@ -108,6 +108,7 @@ func (t *Transport) sendQueuedData(q queuedSend) error {
 		t.removePending(q.seq, q.reliable)
 		return err
 	}
+	t.markPendingReady(q.seq, q.reliable)
 	return nil
 }
 
@@ -120,6 +121,18 @@ func (t *Transport) markPendingSent(seq uint64, reliable bool) {
 	if p := t.pending[seq]; p != nil && p.first.IsZero() {
 		p.first = now
 		p.last = now
+		p.initialInFlight = true
+	}
+	t.mu.Unlock()
+}
+
+func (t *Transport) markPendingReady(seq uint64, reliable bool) {
+	if !reliable {
+		return
+	}
+	t.mu.Lock()
+	if p := t.pending[seq]; p != nil {
+		p.initialInFlight = false
 	}
 	t.mu.Unlock()
 }

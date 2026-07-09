@@ -189,11 +189,12 @@ type Transport struct {
 }
 
 type pending struct {
-	frame         ports.Frame
-	first         time.Time
-	last          time.Time
-	attempts      int
-	retransmitted bool
+	frame           ports.Frame
+	first           time.Time
+	last            time.Time
+	initialInFlight bool
+	attempts        int
+	retransmitted   bool
 }
 
 func NewTransport(pc net.PacketConn, peer net.Addr, key []byte, sendDir, recvDir uint32) (*Transport, error) {
@@ -282,6 +283,7 @@ func (t *Transport) Send(f ports.Frame) error {
 			t.removePending(seq, reliable)
 			return err
 		}
+		t.markPendingReady(seq, reliable)
 		return nil
 	}
 	queued := t.flushQueuedOutputLocked()
@@ -298,6 +300,7 @@ func (t *Transport) Send(f ports.Frame) error {
 		t.removePending(seq, reliable)
 		return err
 	}
+	t.markPendingReady(seq, reliable)
 	return nil
 }
 
@@ -776,7 +779,7 @@ func (t *Transport) resendPending() {
 			break
 		}
 		p := t.pending[seq]
-		if p == nil || p.last.IsZero() || now.Sub(p.last) < t.resendDelayLocked(p) {
+		if p == nil || p.last.IsZero() || p.initialInFlight || now.Sub(p.last) < t.resendDelayLocked(p) {
 			continue
 		}
 		p.last = now
