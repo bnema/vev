@@ -352,7 +352,6 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	termEnv := os.Getenv("TERM")
 	colorTerm := os.Getenv("COLORTERM")
 	trueColor := DetectTrueColor(termEnv, colorTerm)
-	_, ackOutput := transport.(ports.DatagramTransport)
 	hello := ports.Hello{
 		Version:     ports.ProtocolVersion,
 		Intent:      intent,
@@ -363,7 +362,9 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 		TermEnv:     termEnv,
 		Cwd:         cwd,
 		TrueColor:   trueColor,
-		AckOutput:   ackOutput,
+		// Protocol v13 requires cumulative output ACKs on every transport. Keep
+		// the field asserted while it remains in the wire layout.
+		AckOutput: true,
 	}
 	if err := transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
 		return attachResult{err: fmt.Errorf("vev: sending hello: %w", err)}
@@ -412,6 +413,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	defer cancel()
 
 	sendCh := make(chan ports.Frame, sendQueueDepth)
+	ackQueue := newCumulativeAckQueue()
 	sendErrCh := make(chan error, 1)
 
 	// colorQueryCh hands an OSC 10/11 re-query request from the stdin pump to
@@ -431,7 +433,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	if remote {
 		clip = clipboard
 	}
-	go runSender(loopCtx, cancel, transport, sendCh, sendErrCh, log)
+	go runSender(loopCtx, cancel, transport, sendCh, ackQueue, sendErrCh, log)
 	go runStdin(loopCtx, cancel, term.In(), sendCh, clk, trueColor, requestColors, clip, log)
 	go runResize(loopCtx, term.ResizeEvents(), sendCh, log)
 
@@ -490,14 +492,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 					return welcomedResult(fmt.Errorf("vev: flushing terminal: %w", ferr))
 				}
 				if o.NewStateNum != 0 {
-					ack := ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{AckedStateNum: o.NewStateNum})}
-					select {
-					case sendCh <- ack:
-					case <-loopCtx.Done():
-						return welcomedResult(nil)
-					default:
-						log.Debug("dropping output ack because send queue is full", "state_num", o.NewStateNum)
-					}
+					ackQueue.offer(o.NewStateNum)
 				}
 				if !ms.firstOutput {
 					ms.firstOutput = true
@@ -552,22 +547,66 @@ func runRecv(ctx context.Context, transport ports.Transport, out chan<- recvResu
 // runSender is the sole caller of transport.Send: serialising the input and
 // resize pumps through one goroutine keeps the transport's single-writer
 // contract intact. A send failure cancels the loop and is surfaced once.
-func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, in <-chan ports.Frame, errCh chan<- error, log *slog.Logger) {
+type cumulativeAckQueue struct {
+	latest atomic.Uint64
+	wake   chan struct{}
+}
+
+func newCumulativeAckQueue() *cumulativeAckQueue {
+	return &cumulativeAckQueue{wake: make(chan struct{}, 1)}
+}
+
+func (q *cumulativeAckQueue) offer(state uint64) {
+	for {
+		current := q.latest.Load()
+		if state <= current || q.latest.CompareAndSwap(current, state) {
+			break
+		}
+	}
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, in <-chan ports.Frame, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
 	defer log.Debug("sender pump exited")
+	send := func(f ports.Frame) bool {
+		if err := transport.Send(f); err != nil {
+			select {
+			case errCh <- err:
+			default:
+			}
+			cancel()
+			return false
+		}
+		return true
+	}
+	sendAck := func() bool {
+		state := acks.latest.Swap(0)
+		return state == 0 || send(ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{AckedStateNum: state})})
+	}
 	for {
 		select {
+		case <-acks.wake:
+			if !sendAck() {
+				return
+			}
+			continue
+		default:
+		}
+		select {
+		case <-acks.wake:
+			if !sendAck() {
+				return
+			}
 		case f := <-in:
 			select {
 			case <-ctx.Done():
 				return
 			default:
 			}
-			if err := transport.Send(f); err != nil {
-				select {
-				case errCh <- err:
-				default:
-				}
-				cancel()
+			if !send(f) {
 				return
 			}
 		case <-ctx.Done():

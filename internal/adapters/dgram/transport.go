@@ -36,7 +36,9 @@ const (
 	defaultOutputPaceMinDelay   = 8 * time.Millisecond
 	defaultOutputPaceMinCadence = 20 * time.Millisecond
 	defaultOutputPaceMaxDelay   = 250 * time.Millisecond
-	defaultOutputPaceBatch      = 16
+	defaultOutputPaceBatch      = 2
+	defaultPacketPaceBudget     = 8
+	dataRecordHeaderSize        = 12
 	maxRecvBuffer               = defaultMaxRecvBuf
 	linkEventBufferSize         = 16
 	probeReplyBufferSize        = 16
@@ -177,26 +179,28 @@ type Transport struct {
 	in     chan ports.Frame
 	done   chan struct{}
 
-	writeMu sync.Mutex
+	writeMu           sync.Mutex
+	dataPaceMu        sync.Mutex
+	dataPaceRemaining int
+	dataPaceNext      time.Time
 	// outboundMu orders first transmissions and paced batches. Retransmits use
 	// writeMu directly because they do not establish new sequence order.
 	outboundMu sync.Mutex
 
-	deliverMu       sync.Mutex
-	deliverCond     *sync.Cond
-	nextRecvSeq     uint64
-	recvBuf         map[uint64]ports.Frame
-	recvSkipThrough uint64
+	deliverMu   sync.Mutex
+	deliverCond *sync.Cond
+	nextRecvSeq uint64
+	recvBuf     map[uint64]ports.Frame
 }
 
 type pending struct {
-	frame             ports.Frame
-	first             time.Time
-	last              time.Time
-	initialInFlight   bool
-	attempts          int
-	retransmitted     bool
-	outputSkipThrough uint64
+	frame           ports.Frame
+	enqueued        time.Time
+	first           time.Time
+	last            time.Time
+	initialInFlight bool
+	attempts        int
+	retransmitted   bool
 }
 
 func NewTransport(pc net.PacketConn, peer net.Addr, key []byte, sendDir, recvDir uint32) (*Transport, error) {
@@ -255,53 +259,79 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 	return t, nil
 }
 
-// DatagramTransport marks this transport as UDP/datagram-backed for daemon
-// output-state policy selection.
-func (t *Transport) DatagramTransport() {}
+func (t *Transport) Send(f ports.Frame) error { return t.send(f, false) }
 
-func (t *Transport) Send(f ports.Frame) error {
+func (t *Transport) SendAsync(f ports.Frame) error { return t.send(f, true) }
+
+// SendSynchronous owns queue reservation, fragment pacing, per-write deadlines,
+// and close cancellation. Callers must not layer a shorter preflight timer over it.
+func (t *Transport) SendSynchronous(f ports.Frame) error { return t.Send(f) }
+
+func (t *Transport) send(f ports.Frame, async bool) error {
 	reliable := true
-	outputSkipThrough, err := t.lockOutboundSlot(f, reliable)
-	if err != nil {
+	if err := t.lockOutboundSlot(reliable); err != nil {
 		return err
 	}
-	defer t.outboundMu.Unlock()
+	unlockOutbound := true
+	defer func() {
+		if unlockOutbound {
+			t.outboundMu.Unlock()
+		}
+	}()
 	// lockOutboundSlot returns with both outboundMu and mu held.
 
 	t.seq++
 	seq := t.seq
 	if reliable {
-		t.pending[seq] = &pending{frame: f, outputSkipThrough: outputSkipThrough}
+		t.pending[seq] = &pending{frame: f, enqueued: t.clock.Now()}
 	}
 	if shouldPaceOutput(f) {
 		now := t.clock.Now()
 		if len(t.outputQueue) > 0 || (!t.outputNext.IsZero() && now.Before(t.outputNext)) {
-			t.outputQueue = append(t.outputQueue, queuedSend{seq: seq, reliable: reliable, frame: f, outputSkipThrough: outputSkipThrough})
-			t.notifyOutputPacerLocked()
+			wasEmpty := len(t.outputQueue) == 0
+			var done chan error
+			if !async {
+				done = make(chan error, 1)
+			}
+			t.outputQueue = append(t.outputQueue, queuedSend{seq: seq, reliable: reliable, frame: f, done: done})
+			if wasEmpty {
+				t.notifyOutputPacerLocked()
+			}
 			t.mu.Unlock()
-			return nil
+			if done == nil {
+				return nil
+			}
+			t.outboundMu.Unlock()
+			unlockOutbound = false
+			return t.waitQueuedSend(done)
 		}
 		t.outputNext = now.Add(t.outputPaceDelayLocked())
 		t.mu.Unlock()
 		t.markPendingSent(seq, reliable)
-		if err := t.sendData(seq, reliable, f, outputSkipThrough); err != nil {
+		if err := t.sendData(seq, reliable, f); err != nil {
 			t.removePending(seq, reliable)
 			return err
 		}
 		t.markPendingReady(seq, reliable)
 		return nil
 	}
-	queued := t.flushQueuedOutputLocked()
-	t.mu.Unlock()
-	for i, q := range queued {
-		if err := t.sendQueuedData(q); err != nil {
-			t.removePending(seq, reliable)
-			t.removeQueuedPending(queued[i+1:])
-			return err
+	if len(t.outputQueue) > 0 {
+		var done chan error
+		if !async {
+			done = make(chan error, 1)
 		}
+		t.outputQueue = append(t.outputQueue, queuedSend{seq: seq, reliable: reliable, frame: f, done: done})
+		t.mu.Unlock()
+		if done == nil {
+			return nil
+		}
+		t.outboundMu.Unlock()
+		unlockOutbound = false
+		return t.waitQueuedSend(done)
 	}
+	t.mu.Unlock()
 	t.markPendingSent(seq, reliable)
-	if err := t.sendData(seq, reliable, f, outputSkipThrough); err != nil {
+	if err := t.sendData(seq, reliable, f); err != nil {
 		t.removePending(seq, reliable)
 		return err
 	}
@@ -309,9 +339,32 @@ func (t *Transport) Send(f ports.Frame) error {
 	return nil
 }
 
-func (t *Transport) lockOutboundSlot(f ports.Frame, reliable bool) (uint64, error) {
+func (t *Transport) waitQueuedSend(done <-chan error) error {
+	select {
+	case err := <-done:
+		return err
+	case <-t.done:
+		t.mu.Lock()
+		err := t.closeErr
+		t.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		return errors.New("dgram: closed")
+	}
+}
+
+func (t *Transport) closedError() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closeErr != nil {
+		return t.closeErr
+	}
+	return errors.New("dgram: closed")
+}
+
+func (t *Transport) lockOutboundSlot(reliable bool) error {
 	var pendingWaitStarted time.Time
-	var outputSkipThrough uint64
 	for {
 		t.outboundMu.Lock()
 		t.mu.Lock()
@@ -320,22 +373,17 @@ func (t *Transport) lockOutboundSlot(f ports.Frame, reliable bool) (uint64, erro
 			t.mu.Unlock()
 			t.outboundMu.Unlock()
 			if err != nil {
-				return 0, err
+				return err
 			}
-			return 0, errors.New("dgram: closed")
-		}
-		if f.Type == ports.MsgOutput {
-			if skipped := t.supersedePendingOutputLocked(); skipped > outputSkipThrough {
-				outputSkipThrough = skipped
-			}
+			return errors.New("dgram: closed")
 		}
 		if !reliable || len(t.pending) < t.maxPending {
-			return outputSkipThrough, nil
+			return nil
 		}
 		if t.linkState != ports.LinkStateConnected {
 			t.mu.Unlock()
 			t.outboundMu.Unlock()
-			return 0, ErrPendingFull
+			return ErrPendingFull
 		}
 		if pendingWaitStarted.IsZero() {
 			pendingWaitStarted = t.clock.Now()
@@ -344,7 +392,7 @@ func (t *Transport) lockOutboundSlot(f ports.Frame, reliable bool) (uint64, erro
 		if remaining <= 0 {
 			t.mu.Unlock()
 			t.outboundMu.Unlock()
-			return 0, ErrPendingFull
+			return ErrPendingFull
 		}
 		wake := t.sendWake
 		timer := t.clock.NewTimer(remaining)
@@ -371,12 +419,16 @@ func (t *Transport) removePending(seq uint64, reliable bool) {
 	t.mu.Unlock()
 }
 
-func (t *Transport) removeQueuedPending(queued []queuedSend) {
+func (t *Transport) removeQueuedPending(queued []queuedSend, err error) {
 	t.mu.Lock()
 	removed := false
 	for _, q := range queued {
 		if q.reliable {
 			removed = t.removePendingLocked(q.seq) || removed
+		}
+		if q.done != nil {
+			q.done <- err
+			close(q.done)
 		}
 	}
 	if removed {
@@ -393,41 +445,6 @@ func (t *Transport) removePendingLocked(seq uint64) bool {
 	return true
 }
 
-func (t *Transport) supersedePendingOutputLocked() uint64 {
-	var barrier uint64
-	for seq, p := range t.pending {
-		if p != nil && p.frame.Type != ports.MsgOutput && seq > barrier {
-			barrier = seq
-		}
-	}
-	var newest uint64
-	for seq, p := range t.pending {
-		if p == nil || p.frame.Type != ports.MsgOutput || seq <= barrier {
-			continue
-		}
-		if seq > newest {
-			newest = seq
-		}
-	}
-	if newest == 0 {
-		return 0
-	}
-	for seq, p := range t.pending {
-		if p != nil && p.frame.Type == ports.MsgOutput && seq > barrier && seq <= newest {
-			delete(t.pending, seq)
-		}
-	}
-	kept := t.outputQueue[:0]
-	for _, q := range t.outputQueue {
-		if q.seq > barrier && q.seq <= newest {
-			continue
-		}
-		kept = append(kept, q)
-	}
-	t.outputQueue = kept
-	t.notifySendWaitersLocked()
-	return newest
-}
 func (t *Transport) Recv() (ports.Frame, error) {
 	select {
 	case f := <-t.in:
@@ -509,28 +526,40 @@ func (t *Transport) unregisterProbe(id uint64) {
 	t.mu.Unlock()
 }
 
-func (t *Transport) sendData(seq uint64, reliable bool, f ports.Frame, outputSkipThrough uint64) error {
-	p := encodeData(seq, reliable, f, outputSkipThrough)
-	return t.sendPayload(p)
+func (t *Transport) sendData(seq uint64, reliable bool, f ports.Frame) error {
+	p := encodeData(seq, reliable, f)
+	return t.sendPayload(p, true, seq)
 }
 func (t *Transport) sendAck(seq uint64) {
 	var b [9]byte
 	b[0] = recAck
 	binary.BigEndian.PutUint64(b[1:], seq)
-	_ = t.sendPayload(b[:])
+	_ = t.sendPayload(b[:], false, 0)
 }
 func (t *Transport) sendProbe(kind byte, id uint64) error {
 	var b [9]byte
 	b[0] = kind
 	binary.BigEndian.PutUint64(b[1:], id)
-	return t.sendPayload(b[:])
+	return t.sendPayload(b[:], false, 0)
 }
-func (t *Transport) sendPayload(p []byte) error {
+func (t *Transport) sendPayload(p []byte, paced bool, pendingSeq uint64) error {
+	if paced {
+		t.dataPaceMu.Lock()
+		defer t.dataPaceMu.Unlock()
+	}
 	frags, err := pdgram.FragmentPayload(t.nextCounter(), p, t.mtu-pdgram.HeaderSize-t.codec.Overhead())
 	if err != nil {
 		return err
 	}
-	for _, f := range frags {
+	for i, f := range frags {
+		if pendingSeq != 0 && !t.pendingExists(pendingSeq) {
+			return nil
+		}
+		if paced {
+			if err := t.takeDataPaceSlot(); err != nil {
+				return err
+			}
+		}
 		raw, err := pdgram.MarshalFragment(f)
 		if err != nil {
 			return err
@@ -550,10 +579,44 @@ func (t *Transport) sendPayload(p []byte) error {
 		if peer == nil {
 			return errors.New("dgram: no peer")
 		}
+		if pendingSeq != 0 && i == len(frags)-1 {
+			t.markPendingFinalWrite(pendingSeq)
+		}
 		if err := t.writePacket(pkt, peer); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+func (t *Transport) pendingExists(seq uint64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_, ok := t.pending[seq]
+	return ok
+}
+
+func (t *Transport) takeDataPaceSlot() error {
+	now := t.clock.Now()
+	if t.dataPaceRemaining > 0 && now.Before(t.dataPaceNext) {
+		t.dataPaceRemaining--
+		return nil
+	}
+	if t.dataPaceNext.After(now) {
+		timer := t.clock.NewTimer(t.dataPaceNext.Sub(now))
+		select {
+		case <-timer.C():
+		case <-t.done:
+			timer.Stop()
+			return t.closedError()
+		}
+		timer.Stop()
+	}
+	t.mu.Lock()
+	delay := t.outputPaceDelayLocked()
+	t.mu.Unlock()
+	t.dataPaceRemaining = defaultPacketPaceBudget - 1
+	t.dataPaceNext = t.clock.Now().Add(delay)
 	return nil
 }
 
@@ -669,12 +732,12 @@ func (t *Transport) handleRecord(p []byte) {
 		}
 		t.mu.Unlock()
 	case recData:
-		seq, reliable, f, outputSkipThrough, ok := decodeData(p)
+		seq, reliable, f, ok := decodeData(p)
 		if !ok {
 			return
 		}
 		if reliable {
-			ackSeq, ack, queued := t.enqueueReliable(seq, f, outputSkipThrough)
+			ackSeq, ack, queued := t.enqueueReliable(seq, f)
 			if ack {
 				t.sendAck(ackSeq)
 			}
@@ -687,18 +750,9 @@ func (t *Transport) handleRecord(p []byte) {
 	}
 }
 
-func (t *Transport) enqueueReliable(seq uint64, f ports.Frame, outputSkipThrough uint64) (ackSeq uint64, ack bool, queued bool) {
+func (t *Transport) enqueueReliable(seq uint64, f ports.Frame) (ackSeq uint64, ack bool, queued bool) {
 	t.deliverMu.Lock()
 	defer t.deliverMu.Unlock()
-	if f.Type == ports.MsgOutput && outputSkipThrough > t.recvSkipThrough {
-		t.recvSkipThrough = outputSkipThrough
-		for bufferedSeq, buffered := range t.recvBuf {
-			if bufferedSeq <= outputSkipThrough && buffered.Type == ports.MsgOutput {
-				delete(t.recvBuf, bufferedSeq)
-			}
-		}
-		t.deliverCond.Signal()
-	}
 	if seq < t.nextRecvSeq {
 		return t.highestContiguousRecvLocked(), true, false
 	}
@@ -719,10 +773,6 @@ func (t *Transport) highestContiguousRecvLocked() uint64 {
 			seq++
 			continue
 		}
-		if seq <= t.recvSkipThrough {
-			seq++
-			continue
-		}
 		break
 	}
 	return seq - 1
@@ -738,10 +788,6 @@ func (t *Transport) deliveryLoop() {
 	for {
 		t.deliverMu.Lock()
 		f, ok := t.recvBuf[t.nextRecvSeq]
-		for !ok && t.nextRecvSeq <= t.recvSkipThrough {
-			t.nextRecvSeq++
-			f, ok = t.recvBuf[t.nextRecvSeq]
-		}
 		for !ok {
 			if t.isClosed() {
 				t.deliverMu.Unlock()
@@ -749,16 +795,6 @@ func (t *Transport) deliveryLoop() {
 			}
 			t.deliverCond.Wait()
 			f, ok = t.recvBuf[t.nextRecvSeq]
-			for !ok && t.nextRecvSeq <= t.recvSkipThrough {
-				t.nextRecvSeq++
-				f, ok = t.recvBuf[t.nextRecvSeq]
-			}
-		}
-		if t.nextRecvSeq <= t.recvSkipThrough && f.Type == ports.MsgOutput {
-			delete(t.recvBuf, t.nextRecvSeq)
-			t.nextRecvSeq++
-			t.deliverMu.Unlock()
-			continue
 		}
 		delete(t.recvBuf, t.nextRecvSeq)
 		t.nextRecvSeq++
@@ -825,9 +861,8 @@ func (t *Transport) resendLoop() {
 func (t *Transport) resendPending() {
 	now := t.clock.Now()
 	var resend []struct {
-		seq               uint64
-		f                 ports.Frame
-		outputSkipThrough uint64
+		seq uint64
+		f   ports.Frame
 	}
 	t.mu.Lock()
 	seqs := make([]uint64, 0, len(t.pending))
@@ -844,19 +879,26 @@ func (t *Transport) resendPending() {
 		if p == nil || p.last.IsZero() || p.initialInFlight || now.Sub(p.last) < t.resendDelayLocked(p) {
 			continue
 		}
-		p.last = now
+		p.initialInFlight = true
 		p.attempts++
 		p.retransmitted = true
 		resend = append(resend, struct {
-			seq               uint64
-			f                 ports.Frame
-			outputSkipThrough uint64
-		}{seq, p.frame, p.outputSkipThrough})
+			seq uint64
+			f   ports.Frame
+		}{seq, p.frame})
 		limit--
 	}
 	t.mu.Unlock()
 	for _, r := range resend {
-		_ = t.sendData(r.seq, true, r.f, r.outputSkipThrough)
+		if err := t.sendData(r.seq, true, r.f); err == nil {
+			t.markPendingReady(r.seq, true)
+		} else {
+			t.mu.Lock()
+			if p := t.pending[r.seq]; p != nil {
+				p.initialInFlight = false
+			}
+			t.mu.Unlock()
+		}
 	}
 }
 
@@ -966,7 +1008,7 @@ func (t *Transport) checkSilence() {
 // has gone unacknowledged for deadAfter despite at least one retransmit. The
 // receive-silence check in checkSilence misses one-way-dead links whose receive
 // side stays fresh from peer heartbeats; this catches them at the layer that
-// owns death. first is set once when a frame is enqueued and never refreshed,
+// owns death. enqueued is set once when a frame is accepted and never refreshed,
 // so acks (which delete pending entries) keep the oldest age bounded on a
 // progressing link — only a frame that is never acked crosses the threshold.
 func (t *Transport) checkSendStall() {
@@ -981,11 +1023,11 @@ func (t *Transport) checkSendStall() {
 	var attempts int
 	found := false
 	for _, p := range t.pending {
-		if p == nil || p.first.IsZero() {
+		if p == nil || p.enqueued.IsZero() {
 			continue
 		}
-		if !found || p.first.Before(oldest) {
-			oldest = p.first
+		if !found || p.enqueued.Before(oldest) {
+			oldest = p.enqueued
 			attempts = p.attempts
 			found = true
 		}
@@ -1030,6 +1072,13 @@ func (t *Transport) closeWithError(err error) {
 	}
 	t.closed = true
 	t.closeErr = err
+	for _, q := range t.outputQueue {
+		if q.done != nil {
+			q.done <- err
+			close(q.done)
+		}
+	}
+	t.outputQueue = nil
 	t.probeWait = make(map[uint64]chan struct{})
 	close(t.done)
 	t.notifySendWaitersLocked()
@@ -1039,41 +1088,23 @@ func (t *Transport) closeWithError(err error) {
 	t.deliverMu.Unlock()
 }
 
-func encodeData(seq uint64, reliable bool, f ports.Frame, outputSkipThrough uint64) []byte {
-	headerLen := 12
-	if outputSkipThrough > 0 {
-		headerLen = 20
-	}
-	b := make([]byte, headerLen+len(f.Payload))
+func encodeData(seq uint64, reliable bool, f ports.Frame) []byte {
+	b := make([]byte, dataRecordHeaderSize+len(f.Payload))
 	b[0] = recData
 	binary.BigEndian.PutUint64(b[1:9], seq)
 	if reliable {
 		b[9] = 1
 	}
 	b[10] = byte(f.Type)
-	if outputSkipThrough > 0 {
-		b[11] = 1
-		binary.BigEndian.PutUint64(b[12:20], outputSkipThrough)
-	}
-	copy(b[headerLen:], f.Payload)
+	copy(b[dataRecordHeaderSize:], f.Payload)
 	return b
 }
-func decodeData(b []byte) (uint64, bool, ports.Frame, uint64, bool) {
-	if len(b) < 12 || b[0] != recData {
-		return 0, false, ports.Frame{}, 0, false
+func decodeData(b []byte) (uint64, bool, ports.Frame, bool) {
+	if len(b) < dataRecordHeaderSize || b[0] != recData {
+		return 0, false, ports.Frame{}, false
 	}
-	flags := b[11]
-	if flags&^byte(1) != 0 {
-		return 0, false, ports.Frame{}, 0, false
+	if b[11] != 0 {
+		return 0, false, ports.Frame{}, false
 	}
-	headerLen := 12
-	outputSkipThrough := uint64(0)
-	if flags&1 != 0 {
-		if len(b) < 20 {
-			return 0, false, ports.Frame{}, 0, false
-		}
-		headerLen = 20
-		outputSkipThrough = binary.BigEndian.Uint64(b[12:20])
-	}
-	return binary.BigEndian.Uint64(b[1:9]), b[9] == 1, ports.Frame{Type: ports.MsgType(b[10]), Payload: append([]byte(nil), b[headerLen:]...)}, outputSkipThrough, true
+	return binary.BigEndian.Uint64(b[1:9]), b[9] == 1, ports.Frame{Type: ports.MsgType(b[10]), Payload: append([]byte(nil), b[dataRecordHeaderSize:]...)}, true
 }

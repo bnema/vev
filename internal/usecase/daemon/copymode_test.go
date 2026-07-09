@@ -25,7 +25,7 @@ import (
 
 func TestBoundedSendOutputErrTransportReturnsTransportUsedBySend(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
-	ac := &attachedClient{}
+	ac := &attachedClient{output: newOutputStateStream()}
 	ac.initOverlays()
 	replacement := &closeTrackingTransport{}
 	sendErr := errors.New("send failed")
@@ -37,6 +37,29 @@ func TestBoundedSendOutputErrTransportReturnsTransportUsedBySend(t *testing.T) {
 	require.ErrorIs(t, err, sendErr)
 	require.Same(t, failed, used)
 	require.Same(t, replacement, ac.transport())
+}
+
+func TestOwnedSynchronousSendReturnsCapturedTransportAcrossReplacement(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	replacement := &closeTrackingTransport{}
+	sendErr := errors.New("owned send failed")
+	ac := &attachedClient{output: newOutputStateStream()}
+	failed := &ownedSwapErrorTransport{ac: ac, replacement: replacement, err: sendErr, sent: make(chan ports.Frame, 1)}
+	ac.replaceTransport(failed)
+	sess := &session{name: "work", client: ac}
+	ac.setSession(sess)
+
+	used, err := d.boundedSendOutputErrTransport(ac, []byte("copy"))
+
+	require.ErrorIs(t, err, sendErr)
+	require.Same(t, failed, used)
+	require.Same(t, replacement, ac.transport())
+	out, decodeErr := ports.UnmarshalOutput((<-failed.sent).Payload)
+	require.NoError(t, decodeErr)
+	require.Equal(t, []byte("copy"), out.Data)
+	d.detachOnSendError(sess, ac, used)
+	require.Same(t, ac, sess.client)
+	require.False(t, replacement.Closed())
 }
 
 type swapErrorTransport struct {
@@ -52,6 +75,22 @@ func (t *swapErrorTransport) Send(ports.Frame) error {
 
 func (t *swapErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
 func (t *swapErrorTransport) Close() error               { return nil }
+
+type ownedSwapErrorTransport struct {
+	ac          *attachedClient
+	replacement ports.Transport
+	err         error
+	sent        chan ports.Frame
+}
+
+func (t *ownedSwapErrorTransport) Send(f ports.Frame) error { return t.SendSynchronous(f) }
+func (t *ownedSwapErrorTransport) SendSynchronous(f ports.Frame) error {
+	t.sent <- f
+	t.ac.replaceTransport(t.replacement)
+	return t.err
+}
+func (t *ownedSwapErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (t *ownedSwapErrorTransport) Close() error               { return nil }
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by

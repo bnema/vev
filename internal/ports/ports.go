@@ -45,10 +45,17 @@ type Transport interface {
 	Close() error
 }
 
-// DatagramTransport marks transports with datagram/reordered/lossy delivery
-// semantics behind the framed Transport interface.
-type DatagramTransport interface {
-	DatagramTransport()
+// AsyncTransport accepts frames for ordered background transmission. SendAsync
+// returns once the adapter owns the frame; Send retains its synchronous wire-
+// attempt contract. Daemon paint output may use this capability to pipeline.
+type AsyncTransport interface {
+	SendAsync(Frame) error
+}
+
+// OwnedSynchronousTransport owns the complete bounded synchronous operation,
+// including adapter queues, pacing, write deadlines, and close cancellation.
+type OwnedSynchronousTransport interface {
+	SendSynchronous(Frame) error
 }
 
 // Dialer establishes outbound Transport connections.

@@ -222,7 +222,7 @@ func TestSchedulerDebounceCoalesces(t *testing.T) {
 	d := New(nil, mc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	sctx, cancel := context.WithCancel(context.Background())
 	win := newTab(newScriptPTY(nil), domain.Size{Cols: 20, Rows: 5})
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{id: "s", name: "s", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
@@ -286,7 +286,7 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{id: "s", name: "s", tabs: []*tab{win}, client: ac}
 	ac.setSession(sess)
@@ -397,7 +397,7 @@ func TestRenderClearsDamageOnEmittingPaneWhenDetached(t *testing.T) {
 func TestRenderWithNilTransportDoesNotAdvanceStateCounter(t *testing.T) {
 	tb := newTab(nil, domain.Size{Cols: 10, Rows: 3})
 	sess := &session{id: "s", name: "work", tabs: []*tab{tb}, active: 0}
-	ac := &attachedClient{rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 10, Rows: 4}}
+	ac := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 10, Rows: 4}}
 	ac.initOverlays()
 	sess.client = ac
 	ac.setSession(sess)
@@ -406,7 +406,7 @@ func TestRenderWithNilTransportDoesNotAdvanceStateCounter(t *testing.T) {
 	tb.focusedPane().screen.Write([]byte("x"))
 	d.render(sess, tb, tb.focusedPane())
 
-	require.Zero(t, ac.nextStateNum)
+	require.Zero(t, ac.output.next)
 }
 
 func TestComposeTabFrameTwoPaneSplitBlitsDividersDimsAndTranslatesDamage(t *testing.T) {
@@ -560,7 +560,7 @@ func BenchmarkPaintCachedSinglePaneDamage(b *testing.B) {
 	left.screen.Write([]byte("left"))
 	right.screen.Write([]byte("right"))
 	sess := &session{id: "s", name: "work", tabs: []*tab{win}, active: 0}
-	ac := &attachedClient{tr: discardTransport{}, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 81, Rows: 26}}
+	ac := &attachedClient{tr: discardTransport{}, output: newOutputStateStream(), size: domain.Size{Cols: 81, Rows: 26}}
 	ac.initOverlays()
 	sess.client = ac
 	ac.setSession(sess)
@@ -576,7 +576,7 @@ func BenchmarkPaintCachedSinglePaneDamage(b *testing.B) {
 		d.paint(sess, ac, false)
 		// Mirror the client ACK pump so the steady state measures compose→diff→send,
 		// not the ack-gate bailout after maxUnackedOutputStates frames.
-		ac.advanceOutputAck(ac.nextStateNum)
+		ac.ackOutputState(ac.output.next)
 	}
 }
 
@@ -849,7 +849,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	}).Maybe()
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{id: "s", name: "s", tabs: []*tab{win}, client: ac}
 	ac.setSession(sess)
@@ -875,7 +875,7 @@ func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	win := newTab(p, domain.Size{Cols: 20, Rows: 5})
 	sctx, cancel := context.WithCancel(context.Background())
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{id: "e", name: "0", ephemeral: true, tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
@@ -927,7 +927,7 @@ func TestSchedulerDefersPendingDirtyTimerDuringSynchronizedUpdate(t *testing.T) 
 	win.ctx, win.cancel = sctx, cancel
 	p := win.focusedPane()
 	p.ctx, p.cancel = sctx, cancel
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
@@ -988,7 +988,7 @@ func TestPTYQueryGetsResponseWrittenBackToPTY(t *testing.T) {
 	tr, sends := newCapturingTransport(t)
 	sctx, cancel := context.WithCancel(context.Background())
 	win := newTestTabWithContext(p, sctx, cancel)
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{id: "query", name: "query", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
@@ -1094,7 +1094,7 @@ func TestSyncUpdateWatchdogAbandonedSyncRenders(t *testing.T) {
 	tr, sends := newCapturingTransport(t)
 	sctx, cancel := context.WithCancel(context.Background())
 	win := newTestTabWithContext(p, sctx, cancel)
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
@@ -1139,7 +1139,7 @@ func TestSyncUpdateWatchdogStaleGenerationNoopAfterEnd(t *testing.T) {
 	tr, sends := newCapturingTransport(t)
 	sctx, cancel := context.WithCancel(context.Background())
 	win := newTestTabWithContext(p, sctx, cancel)
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
 	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)

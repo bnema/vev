@@ -15,7 +15,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -172,9 +171,9 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	tr1, sends1 := newCapturingTransport(t)
 	tr2, sends2 := newCapturingTransport(t)
-	ac1 := &attachedClient{tr: tr1, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac1 := &attachedClient{tr: tr1, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	ac1.initOverlays()
-	ac2 := &attachedClient{tr: tr2, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac2 := &attachedClient{tr: tr2, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	ac2.initOverlays()
 	sctx1, cancel1 := context.WithCancel(d.serveCtx)
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
@@ -214,9 +213,9 @@ func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	tr1, sends1 := newCapturingTransport(t)
 	tr2, _ := newCapturingTransport(t)
-	ac1 := &attachedClient{tr: tr1, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac1 := &attachedClient{tr: tr1, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	ac1.initOverlays()
-	ac2 := &attachedClient{tr: tr2, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac2 := &attachedClient{tr: tr2, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	ac2.initOverlays()
 	sctx1, cancel1 := context.WithCancel(d.serveCtx)
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
@@ -263,7 +262,7 @@ func TestPickerSessionSwitchWaitsForInFlightPaintSend(t *testing.T) {
 		return nil
 	}).Once()
 	tr.EXPECT().Close().Return(nil).Maybe()
-	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	ac.initOverlays()
 	sctx1, cancel1 := context.WithCancel(d.serveCtx)
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
@@ -324,8 +323,8 @@ func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {
 	d := newTestDaemon(t, f, stubClock{})
 	tr1, _ := newCapturingTransport(t)
 	tr2, _ := newCapturingTransport(t)
-	ac1 := &attachedClient{tr: tr1, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
-	ac2 := &attachedClient{tr: tr2, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac1 := &attachedClient{tr: tr1, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	ac2 := &attachedClient{tr: tr2, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	sctx1, cancel1 := context.WithCancel(d.serveCtx)
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
@@ -425,9 +424,9 @@ func TestPickerLivePreviewRepaintsCrossSessionTab(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	tr1, sends1 := newCapturingTransport(t)
 	tr2, _ := newCapturingTransport(t)
-	ac1 := &attachedClient{tr: tr1, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac1 := &attachedClient{tr: tr1, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	ac1.initOverlays()
-	ac2 := &attachedClient{tr: tr2, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac2 := &attachedClient{tr: tr2, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	ac2.initOverlays()
 	sctx1, cancel1 := context.WithCancel(d.serveCtx)
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)

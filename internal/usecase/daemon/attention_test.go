@@ -169,7 +169,7 @@ func TestNoteAttentionDoesNotBlockOnWedgedOtherClient(t *testing.T) {
 		return nil
 	}).Maybe()
 	trW.EXPECT().Close().Return(nil).Maybe()
-	acW := &attachedClient{tr: trW, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	acW := &attachedClient{tr: trW, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	acW.initOverlays()
 	sctxW, cancelW := context.WithCancel(d.serveCtx)
 	t.Cleanup(cancelW)
@@ -417,7 +417,7 @@ func TestCloseRingingTabRefreshesOtherSessionBottomBar(t *testing.T) {
 	d.setAttentionFrame(1) // pulse frame 0 renders the bell glyph as blank
 
 	trB, sendsB := newCapturingTransport(t)
-	acB := &attachedClient{tr: trB, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	acB := &attachedClient{tr: trB, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	acB.initOverlays()
 	sctxB, cancelB := context.WithCancel(d.serveCtx)
 	t.Cleanup(cancelB)
