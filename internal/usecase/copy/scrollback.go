@@ -41,6 +41,21 @@ func (s *Scrollback) Append(row []renderer.Cell) {
 	s.head = (s.head + 1) % len(s.rows)
 }
 
+// Snapshot returns retained rows oldest-first.
+//
+// The returned outer slice is a copy, but row slices are shared with the
+// scrollback storage. Callers must treat the returned rows as read-only.
+func (s *Scrollback) Snapshot() [][]renderer.Cell {
+	if s.len == 0 || len(s.rows) == 0 {
+		return nil
+	}
+	rows := make([][]renderer.Cell, s.len)
+	for i := range s.len {
+		rows[i] = s.rows[(s.head+i)%len(s.rows)]
+	}
+	return rows
+}
+
 // Row returns a copy of the retained row at logical index i, oldest first.
 func (s *Scrollback) Row(i int) []renderer.Cell {
 	if i < 0 || i >= s.len || len(s.rows) == 0 {

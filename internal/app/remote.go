@@ -11,6 +11,22 @@ func parseRemoteAttachTarget(s string) (target, session string, ok bool) {
 		return "", "", false
 	}
 	afterAt := s[at+1:]
+	if strings.HasPrefix(afterAt, "[") {
+		closeBracket := strings.IndexByte(afterAt, ']')
+		if closeBracket < 0 {
+			return "", "", false
+		}
+		suffix := afterAt[closeBracket+1:]
+		switch {
+		case suffix == "":
+			return s, "", true
+		case strings.HasPrefix(suffix, ":"):
+			targetEnd := at + 1 + closeBracket + 1
+			return s[:targetEnd], suffix[1:], true
+		default:
+			return "", "", false
+		}
+	}
 	colon := strings.LastIndexByte(afterAt, ':')
 	if colon < 0 {
 		return s, "", true

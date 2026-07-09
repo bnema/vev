@@ -25,6 +25,21 @@ func init() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
+// realClock is a stdlib-backed ports.Clock for tests that exercise the stdin
+// pump end to end; the paste coalescer's flush timer runs on wall time here.
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }
+func (realClock) NewTimer(d time.Duration) ports.Timer {
+	return &realTimer{t: time.NewTimer(d)}
+}
+
+type realTimer struct{ t *time.Timer }
+
+func (r *realTimer) C() <-chan time.Time        { return r.t.C }
+func (r *realTimer) Reset(d time.Duration) bool { return r.t.Reset(d) }
+func (r *realTimer) Stop() bool                 { return r.t.Stop() }
+
 // recvItem is one scripted Recv result.
 type recvItem struct {
 	f   ports.Frame
@@ -92,6 +107,31 @@ func (r *oneShotBlockingReader) Read(p []byte) (int, error) {
 
 func (r *oneShotBlockingReader) unblock() { close(r.done) }
 
+type chunkedBlockingReader struct {
+	chunks [][]byte
+	done   chan struct{}
+	mu     sync.Mutex
+	next   int
+}
+
+func newChunkedBlockingReader(chunks ...[]byte) *chunkedBlockingReader {
+	return &chunkedBlockingReader{chunks: chunks, done: make(chan struct{})}
+}
+
+func (r *chunkedBlockingReader) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.next < len(r.chunks) {
+		chunk := r.chunks[r.next]
+		r.next++
+		return copy(p, chunk), nil
+	}
+	<-r.done
+	return 0, io.EOF
+}
+
+func (r *chunkedBlockingReader) unblock() { close(r.done) }
+
 func newHappyTerminal(t *testing.T, out *bytes.Buffer, restoreCount *atomic.Int32, resizeCh chan domain.Size) (*portsmocks.MockTerminal, *blockingReader) {
 	tm := portsmocks.NewMockTerminal(t)
 	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
@@ -111,6 +151,43 @@ func isType(typ ports.MsgType) any {
 	return mock.MatchedBy(func(f ports.Frame) bool { return f.Type == typ })
 }
 
+func TestAttachHelloIncludesTrueColor(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("COLORTERM", "truecolor")
+
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
+	defer in.unblock()
+
+	gotHello := make(chan ports.Hello, 1)
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).RunAndReturn(func(f ports.Frame) error {
+		hello, err := ports.UnmarshalHello(f.Payload)
+		require.NoError(t, err)
+		gotHello <- hello
+		return nil
+	}).Once()
+	unblock := scriptRecv(tr,
+		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	)
+	defer unblock()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
+	require.NoError(t, err)
+
+	select {
+	case hello := <-gotHello:
+		require.Equal(t, "xterm-256color", hello.TermEnv)
+		require.True(t, hello.TrueColor)
+	case <-time.After(2 * time.Second):
+		t.Fatal("hello frame was not sent")
+	}
+}
+
 func TestAttachHappyPath(t *testing.T) {
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
@@ -128,7 +205,7 @@ func TestAttachHappyPath(t *testing.T) {
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.NoError(t, err)
 	require.Equal(t, "hello world", out.String())
 	require.Equal(t, int32(1), restoreCount.Load(), "restore must run exactly once")
@@ -147,7 +224,7 @@ func TestAttachVersionMismatch(t *testing.T) {
 	).Once()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentAttach, "main")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentAttach, "main")
 	require.Error(t, err)
 	var pe *client.ProtocolError
 	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
@@ -171,7 +248,7 @@ func TestAttachRestoredOnRecvErrorMidStream(t *testing.T) {
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.Error(t, err)
 	require.Equal(t, int32(1), restoreCount.Load(), "restore must run after mid-stream Recv error")
 }
@@ -192,7 +269,7 @@ func TestAttachDaemonVanishedOnEOF(t *testing.T) {
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.Error(t, err)
 	require.ErrorIs(t, err, io.EOF)
 	require.Equal(t, int32(1), restoreCount.Load())
@@ -264,7 +341,7 @@ func TestAttachStdinOSCColorResponseSendsThemeAndPreservesInput(t *testing.T) {
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.NoError(t, err)
 	require.Equal(t, int32(1), restoreCount.Load())
 
@@ -292,6 +369,7 @@ func TestAttachStdinOSCColorResponseSendsThemeAndPreservesInput(t *testing.T) {
 }
 
 func TestAttachStdinThemeTrueColorFalseWhenCOLORTERMNotTruecolor(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
 	t.Setenv("COLORTERM", "")
 
 	var out bytes.Buffer
@@ -342,7 +420,7 @@ func TestAttachStdinThemeTrueColorFalseWhenCOLORTERMNotTruecolor(t *testing.T) {
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.NoError(t, err)
 	select {
 	case th := <-gotTheme:
@@ -402,7 +480,7 @@ func TestAttachForwardsStandaloneEscapeInput(t *testing.T) {
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.NoError(t, err)
 	select {
 	case got := <-gotInput:
@@ -461,13 +539,73 @@ func TestAttachStdinForwardsSGRMouseReportAsSingleFrame(t *testing.T) {
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.NoError(t, err)
 	select {
 	case got := <-gotInput:
 		require.Equal(t, []byte("\x1b[<0;1;1M"), got, "SGR mouse report must arrive as one intact MsgInput frame")
 	case <-time.After(2 * time.Second):
 		t.Fatal("mouse report input was not sent")
+	}
+}
+
+func TestAttachStdinCoalescesSplitBracketedPaste(t *testing.T) {
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	paste := []byte("\x1b[200~hello\nworld\x1b[201~")
+	input := newChunkedBlockingReader([]byte("\x1b[200~hello\n"), []byte("world\x1b[201~"))
+	defer input.unblock()
+
+	tm := portsmocks.NewMockTerminal(t)
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
+	tm.EXPECT().In().Return(input).Maybe()
+	tm.EXPECT().Out().Return(&out).Maybe()
+	tm.EXPECT().Flush().Return(nil).Maybe()
+	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
+
+	gotInput := make(chan []byte, 1)
+	allowDetach := make(chan struct{})
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
+		in, err := ports.UnmarshalInput(f.Payload)
+		require.NoError(t, err)
+		gotInput <- in.Data
+		close(allowDetach)
+		return nil
+	}).Once()
+	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
+	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
+	recvCh := make(chan recvItem, 1)
+	recvCh <- recvItem{f: welcome}
+	closed := make(chan struct{})
+	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		select {
+		case it := <-recvCh:
+			return it.f, it.err
+		case <-allowDetach:
+			select {
+			case <-closed:
+				return ports.Frame{}, io.EOF
+			default:
+				close(closed)
+				return detached, nil
+			}
+		case <-closed:
+			return ports.Frame{}, io.EOF
+		}
+	}).Maybe()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
+	require.NoError(t, err)
+	select {
+	case got := <-gotInput:
+		require.Equal(t, paste, got, "split bracketed paste must arrive as one intact MsgInput frame")
+	case <-time.After(2 * time.Second):
+		t.Fatal("split bracketed paste input was not sent")
 	}
 }
 
@@ -479,6 +617,8 @@ func TestAttachForwardsResize(t *testing.T) {
 	defer in.unblock()
 
 	detachAfterResize := make(chan struct{})
+	firstRecv := make(chan struct{})
+	var firstRecvOnce sync.Once
 
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
@@ -497,6 +637,7 @@ func TestAttachForwardsResize(t *testing.T) {
 	recvCh <- recvItem{f: welcome}
 	done := make(chan struct{})
 	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		firstRecvOnce.Do(func() { close(firstRecv) })
 		select {
 		case it := <-recvCh:
 			return it.f, it.err
@@ -515,13 +656,13 @@ func TestAttachForwardsResize(t *testing.T) {
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	// Push a resize event shortly after attach begins.
+	// Push a resize event once attach begins receiving daemon frames.
 	go func() {
-		time.Sleep(20 * time.Millisecond)
+		<-firstRecv
 		resizeCh <- domain.Size{Cols: 120, Rows: 40}
 	}()
 
-	err := client.Attach(context.Background(), tr, tm, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
 	require.NoError(t, err)
 	select {
 	case r := <-gotResize:
@@ -529,4 +670,180 @@ func TestAttachForwardsResize(t *testing.T) {
 	default:
 		t.Fatal("resize was not forwarded")
 	}
+}
+
+func TestRunRestoresRawModeAfterAttachError(t *testing.T) {
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
+	defer in.unblock()
+
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	boom := errors.New("connection reset")
+	unblock := scriptRecv(tr,
+		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+		recvItem{err: boom},
+	)
+	defer unblock()
+	tr.EXPECT().Close().Return(nil).Once()
+	d := portsmocks.NewMockDialer(t)
+	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
+
+	err := client.Run(context.Background(), d, tm, realClock{}, ports.IntentEphemeral, "", false, nil, slog.New(slog.DiscardHandler))
+	require.Error(t, err)
+	require.Equal(t, int32(1), restoreCount.Load(), "Run must restore raw mode after attachOnce errors")
+}
+
+func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
+	tm := portsmocks.NewMockTerminal(t)
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	// EnterRaw must NOT be called when the daemon rejects Hello before Welcome.
+
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Recv().Return(
+		frameOf(ports.MsgError, ports.MarshalErrorMsg(ports.ErrorMsg{Code: ports.ErrVersionMismatch, Text: "version mismatch"})),
+		nil,
+	).Once()
+	tr.EXPECT().Close().Return(nil).Once()
+	d := portsmocks.NewMockDialer(t)
+	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
+
+	err := client.Run(context.Background(), d, tm, realClock{}, ports.IntentAttach, "main", false, nil, slog.New(slog.DiscardHandler))
+	require.Error(t, err)
+	var pe *client.ProtocolError
+	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
+}
+
+func TestRunPhaseASingleAttempt(t *testing.T) {
+	dialErr := errors.New("dial failed")
+	d := portsmocks.NewMockDialer(t)
+	d.EXPECT().Dial(mock.Anything).Return(nil, dialErr).Once()
+	tm := portsmocks.NewMockTerminal(t)
+
+	err := client.Run(context.Background(), d, tm, realClock{}, ports.IntentEphemeral, "", false, nil, slog.New(slog.DiscardHandler))
+	require.ErrorIs(t, err, dialErr)
+}
+
+type sequenceDialer struct {
+	trs   []ports.Transport
+	errs  []error
+	calls atomic.Int32
+}
+
+func (d *sequenceDialer) Dial(context.Context) (ports.Transport, error) {
+	i := int(d.calls.Add(1)) - 1
+	if i < len(d.errs) && d.errs[i] != nil {
+		return nil, d.errs[i]
+	}
+	if i >= len(d.trs) {
+		return nil, io.EOF
+	}
+	return d.trs[i], nil
+}
+
+type recordingTransport struct {
+	recvs  []recvItem
+	sends  []ports.Frame
+	closed atomic.Int32
+}
+
+func (t *recordingTransport) Send(f ports.Frame) error {
+	t.sends = append(t.sends, f)
+	return nil
+}
+
+func (t *recordingTransport) Recv() (ports.Frame, error) {
+	if len(t.recvs) == 0 {
+		return ports.Frame{}, io.EOF
+	}
+	it := t.recvs[0]
+	t.recvs = t.recvs[1:]
+	return it.f, it.err
+}
+
+func (t *recordingTransport) Close() error {
+	t.closed.Add(1)
+	return nil
+}
+
+type runTerminal struct {
+	in           *blockingReader
+	out          bytes.Buffer
+	rawCount     atomic.Int32
+	restoreCount atomic.Int32
+	resizeCh     chan domain.Size
+}
+
+func newRunTerminal() *runTerminal {
+	return &runTerminal{in: newBlockingReader(), resizeCh: make(chan domain.Size)}
+}
+
+func (t *runTerminal) EnterRaw() (func() error, error) {
+	t.rawCount.Add(1)
+	return func() error { t.restoreCount.Add(1); return nil }, nil
+}
+func (t *runTerminal) Size() (domain.Size, error)       { return domain.Size{Cols: 80, Rows: 24}, nil }
+func (t *runTerminal) ResizeEvents() <-chan domain.Size { return t.resizeCh }
+func (t *runTerminal) QueryColors() error               { return nil }
+func (t *runTerminal) In() io.Reader                    { return t.in }
+func (t *runTerminal) Out() io.Writer                   { return &t.out }
+func (t *runTerminal) Flush() error                     { return nil }
+
+func helloFromSend(t *testing.T, tr *recordingTransport) ports.Hello {
+	t.Helper()
+	require.NotEmpty(t, tr.sends)
+	require.Equal(t, ports.MsgHello, tr.sends[0].Type)
+	h, err := ports.UnmarshalHello(tr.sends[0].Payload)
+	require.NoError(t, err)
+	return h
+}
+
+func welcomeFrame(token uint64) ports.Frame {
+	return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1", SessionName: "main", ResumeToken: token, Capabilities: ports.CapabilityResume}))
+}
+
+func TestRunReconnectsWithRotatedTokenAndSameClientID(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+	tr1 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {err: io.EOF}}}
+	tr2 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(22)}, {err: io.EOF}}}
+	tr3 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(33)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))}}}
+	d := &sequenceDialer{trs: []ports.Transport{tr1, tr2, tr3}}
+
+	err := client.Run(context.Background(), d, term, realClock{}, ports.IntentAttach, "main", false, nil, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, int32(3), d.calls.Load())
+	require.Equal(t, int32(1), term.rawCount.Load())
+	require.Equal(t, int32(1), term.restoreCount.Load())
+
+	h1 := helloFromSend(t, tr1)
+	h2 := helloFromSend(t, tr2)
+	h3 := helloFromSend(t, tr3)
+	require.Equal(t, ports.IntentAttach, h1.Intent)
+	require.Zero(t, h1.ResumeToken)
+	require.Equal(t, ports.IntentResume, h2.Intent)
+	require.Equal(t, uint64(11), h2.ResumeToken)
+	require.Equal(t, ports.IntentResume, h3.Intent)
+	require.Equal(t, uint64(22), h3.ResumeToken)
+	require.Equal(t, h1.ClientID, h2.ClientID)
+	require.Equal(t, h1.ClientID, h3.ClientID)
+	require.Contains(t, term.out.String(), "reconnecting…")
+	require.Contains(t, term.out.String(), "\x1b[2K")
+}
+
+func TestRunDoesNotRetryTerminalDetachedError(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+	tr := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonSessionKilled}))}}}
+	d := &sequenceDialer{trs: []ports.Transport{tr}}
+
+	err := client.Run(context.Background(), d, term, realClock{}, ports.IntentAttach, "main", false, nil, slog.New(slog.DiscardHandler))
+	require.Error(t, err)
+	var de *client.DetachedError
+	require.True(t, errors.As(err, &de))
+	require.Equal(t, int32(1), d.calls.Load())
+	require.Equal(t, int32(1), term.restoreCount.Load())
 }

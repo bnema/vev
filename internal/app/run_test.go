@@ -5,17 +5,34 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/snapshot"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/confirm"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
+
+func TestRunUDPProxyUsesBoundedClientMaxPending(t *testing.T) {
+	require.Equal(t, 32, udpProxyClientTransportOptions.MaxPending)
+}
+
+func TestRunUDPProxyClientDeadAfterExceedsIdleTTL(t *testing.T) {
+	require.Positive(t, udpProxyIdleTTL)
+	require.Greater(t, udpProxyClientTransportOptions.DeadAfter, udpProxyIdleTTL)
+}
 
 func TestParseArgs(t *testing.T) {
 	tests := []struct {
@@ -36,6 +53,7 @@ func TestParseArgs(t *testing.T) {
 		{name: "new empty name", args: []string{"new", ""}, wantErr: true},
 		{name: "new command override unsupported", args: []string{"new", "work", "--", "sh"}, wantErr: true},
 		{name: "attach named", args: []string{"attach", "work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work"},
+		{name: "attach preserves legacy unsafe name", args: []string{"attach", "my work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "my work"},
 		{name: "attach alias a", args: []string{"a", "work"}, wantKind: kindAttach, wantIntent: ports.IntentAttach, wantName: "work"},
 		{name: "attach remote without session uses ephemeral", args: []string{"attach", "user@example.com"}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral, wantRemote: "user@example.com"},
 		{name: "attach remote with empty session uses ephemeral", args: []string{"attach", "user@example.com:"}, wantKind: kindAttach, wantIntent: ports.IntentEphemeral, wantRemote: "user@example.com"},
@@ -45,6 +63,7 @@ func TestParseArgs(t *testing.T) {
 		{name: "ls", args: []string{"ls"}, wantKind: kindList},
 		{name: "list", args: []string{"list"}, wantKind: kindList},
 		{name: "kill named", args: []string{"kill", "work"}, wantKind: kindKill, wantName: "work"},
+		{name: "kill preserves legacy unsafe name via terminator", args: []string{"kill", "--", "my work"}, wantKind: kindKill, wantName: "my work"},
 		{name: "kill dashed name via terminator", args: []string{"kill", "--", "--all"}, wantKind: kindKill, wantName: "--all"},
 		{name: "kill all", args: []string{"kill", "--all"}, wantKind: kindKill, wantAll: true},
 		{name: "kill daemon", args: []string{"kill", "--daemon"}, wantKind: kindKill, wantDaemon: true},
@@ -56,7 +75,11 @@ func TestParseArgs(t *testing.T) {
 		{name: "daemon", args: []string{"--daemon"}, wantKind: kindDaemon},
 		{name: "stdio", args: []string{"_stdio"}, wantKind: kindStdio},
 		{name: "stdio with session", args: []string{"_stdio", "work"}, wantKind: kindStdio, wantName: "work"},
+		{name: "stdio preserves legacy unsafe name", args: []string{"_stdio", "my work"}, wantKind: kindStdio, wantName: "my work"},
 		{name: "stdio too many args", args: []string{"_stdio", "work", "extra"}, wantErr: true},
+		{name: "udp bootstrap", args: []string{"_udp-bootstrap", "work"}, wantKind: kindUDPBootstrap, wantName: "work"},
+		{name: "udp proxy", args: []string{"_udp-proxy", "work"}, wantKind: kindUDPProxy, wantName: "work"},
+		{name: "udp proxy too many args", args: []string{"_udp-proxy", "work", "extra"}, wantErr: true},
 		{name: "help", args: []string{"--help"}, wantKind: kindHelp},
 		{name: "help subcommand", args: []string{"help"}, wantKind: kindHelp},
 		{name: "version", args: []string{"--version"}, wantKind: kindVersion},
@@ -101,6 +124,13 @@ func TestParseArgs(t *testing.T) {
 	}
 }
 
+func TestParseArgsNewRejectsUnsafeSessionName(t *testing.T) {
+	_, err := parseArgs([]string{"new", "my work"})
+	if !errors.Is(err, domain.ErrInvalidSessionName) {
+		t.Fatalf("parseArgs new unsafe error = %v, want %v", err, domain.ErrInvalidSessionName)
+	}
+}
+
 func TestPrintSessionsShowsStoppedState(t *testing.T) {
 	var out bytes.Buffer
 	printSessions(&out, []ports.SessionInfo{
@@ -112,6 +142,19 @@ func TestPrintSessionsShowsStoppedState(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("printSessions output %q missing %q", got, want)
 		}
+	}
+}
+
+func TestPrintSessionsMarksEphemeral(t *testing.T) {
+	var buf bytes.Buffer
+	printSessions(&buf, []ports.SessionInfo{
+		{Name: "0", Ephemeral: true, Tabs: 1, Attached: false},
+		{Name: "work", Tabs: 2, Attached: true},
+		{Name: "old", Stopped: true},
+	})
+	out := buf.String()
+	for _, want := range []string{"0", "temporary", "work", "running", "old", "stopped"} {
+		require.Contains(t, out, want)
 	}
 }
 
@@ -174,6 +217,10 @@ func TestRunKillDeletesStoppedSessionWithoutDaemon(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close error = %v", err)
 	}
+	snapshots := snapshot.NewStore(filepath.Join(stateRoot, "vev", "snapshots"))
+	if err := snapshots.Write("stored", []byte("snapshot bytes")); err != nil {
+		t.Fatalf("snapshot Write error = %v", err)
+	}
 
 	got := captureStdout(t, func() {
 		if err := runKill(context.Background(), "stored", false, false); err != nil {
@@ -189,6 +236,13 @@ func TestRunKillDeletesStoppedSessionWithoutDaemon(t *testing.T) {
 	}
 	if len(records) != 0 {
 		t.Fatalf("records after kill = %#v, want none", records)
+	}
+	blobs, err := snapshots.Load()
+	if err != nil {
+		t.Fatalf("snapshot Load error = %v", err)
+	}
+	if len(blobs) != 0 {
+		t.Fatalf("snapshots after kill = %#v, want none", blobs)
 	}
 }
 
@@ -346,8 +400,8 @@ func TestRunLocalAttachDeclineKeepsOriginalError(t *testing.T) {
 
 func TestRunAttachRejectsNestedVEVBeforeDial(t *testing.T) {
 	called := false
-	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "outer", runAttachDeps{
-		attachLocal: func(context.Context, uint8, string) error {
+	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "outer", nil, runAttachDeps{
+		attachLocal: func(context.Context, uint8, string, *slog.Logger) error {
 			called = true
 			return nil
 		},
@@ -369,8 +423,8 @@ func TestRunAttachRejectsNestedVEVBeforeDial(t *testing.T) {
 
 func TestRunAttachNestedNewCreatesDetachedSession(t *testing.T) {
 	var gotName string
-	err := runAttachWithDeps(context.Background(), ports.IntentNew, "scratch", "", "outer", runAttachDeps{
-		attachLocal: func(context.Context, uint8, string) error {
+	err := runAttachWithDeps(context.Background(), ports.IntentNew, "scratch", "", "outer", nil, runAttachDeps{
+		attachLocal: func(context.Context, uint8, string, *slog.Logger) error {
 			t.Fatal("nested new should not attach to the session")
 			return nil
 		},
@@ -384,5 +438,346 @@ func TestRunAttachNestedNewCreatesDetachedSession(t *testing.T) {
 	}
 	if gotName != "scratch" {
 		t.Fatalf("detached name = %q, want scratch", gotName)
+	}
+}
+
+func TestDetachedLocalHelloIncludesTrueColor(t *testing.T) {
+	t.Setenv("TERM", "xterm-direct")
+	t.Setenv("COLORTERM", "")
+
+	hello := detachedLocalHello("scratch", "/tmp/work")
+
+	require.Equal(t, ports.IntentNew, hello.Intent)
+	require.Equal(t, "scratch", hello.Name)
+	require.Equal(t, "xterm-direct", hello.TermEnv)
+	require.Equal(t, "/tmp/work", hello.Cwd)
+	require.True(t, hello.TrueColor)
+}
+
+type namedDialer struct{ name string }
+
+func (d namedDialer) Dial(context.Context) (ports.Transport, error) {
+	return nil, errors.New("not used")
+}
+
+// fakeClipboardReader is a distinguishable ports.ClipboardReader used only to
+// verify identity (that runAttachWithDeps threads the *same* reader through),
+// never actually invoked in these wiring tests.
+type fakeClipboardReader struct{ ports.ClipboardReader }
+
+func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
+	tests := []struct {
+		name              string
+		selectedTransport string
+		wantMode          ports.RemoteTransportMode
+	}{
+		{name: "default remote mode is udp", selectedTransport: "", wantMode: ports.RemoteTransportUDP},
+		{name: "explicit stdio mode", selectedTransport: "stdio", wantMode: ports.RemoteTransportStdio},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotDialer string
+			var gotRemote bool
+			var gotClipboard ports.ClipboardReader
+			clip := &fakeClipboardReader{}
+			factory := portsmocks.NewMockRemoteDialerFactory(t)
+			factory.EXPECT().DialerForRemote("remote.example", "work", tt.wantMode, mock.Anything).Return(namedDialer{name: "remote"}, nil)
+
+			err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+				remoteDialerFactory:     factory,
+				selectedRemoteTransport: tt.selectedTransport,
+				clipboard:               clip,
+				runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, _ *slog.Logger) error {
+					nd, ok := d.(namedDialer)
+					if !ok {
+						t.Fatalf("dialer type = %T, want namedDialer", d)
+					}
+					gotDialer = nd.name
+					gotRemote = remote
+					gotClipboard = clipboard
+					if intent != ports.IntentAttach || name != "work" {
+						t.Fatalf("intent/name = %d/%q, want attach/work", intent, name)
+					}
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("runAttachWithDeps returned error: %v", err)
+			}
+			if gotDialer != "remote" {
+				t.Fatalf("remote dialer = %q, want remote", gotDialer)
+			}
+			if !gotRemote {
+				t.Fatal("remote attach must pass remote=true to runClient")
+			}
+			if gotClipboard != ports.ClipboardReader(clip) {
+				t.Fatalf("remote attach must thread the configured ClipboardReader through, got %#v", gotClipboard)
+			}
+		})
+	}
+}
+
+func TestRunAttachWithDepsRejectsInvalidRemoteTransportBeforeDialing(t *testing.T) {
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	runClientCalled := false
+
+	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+		remoteDialerFactory:     factory,
+		selectedRemoteTransport: "serial",
+		runClient: func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, bool, ports.ClipboardReader, *slog.Logger) error {
+			runClientCalled = true
+			return nil
+		},
+	})
+	if err == nil || err.Error() != `vev: invalid remote transport "serial" (want "udp" or "stdio")` {
+		t.Fatalf("runAttachWithDeps error = %v, want invalid transport", err)
+	}
+	if runClientCalled {
+		t.Fatal("runClient called after invalid remote transport")
+	}
+}
+
+func TestRunAttachWithDepsReturnsFactoryErrorBeforeRunClient(t *testing.T) {
+	factoryErr := errors.New("factory failed")
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportUDP, mock.Anything).Return(nil, factoryErr)
+	runClientCalled := false
+
+	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
+		remoteDialerFactory: factory,
+		runClient: func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, bool, ports.ClipboardReader, *slog.Logger) error {
+			runClientCalled = true
+			return nil
+		},
+	})
+	if !errors.Is(err, factoryErr) {
+		t.Fatalf("runAttachWithDeps error = %v, want %v", err, factoryErr)
+	}
+	if runClientCalled {
+		t.Fatal("runClient called after remote factory error")
+	}
+}
+
+func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
+	var gotDialer string
+	gotRemote := true
+	gotClipboard := ports.ClipboardReader(&fakeClipboardReader{})
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "", nil, runAttachDeps{
+		localDialer:         func() ports.Dialer { return namedDialer{name: "local"} },
+		remoteDialerFactory: factory,
+		clipboard:           &fakeClipboardReader{}, // must NOT reach runClient for a local attach
+		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, _ *slog.Logger) error {
+			nd, ok := d.(namedDialer)
+			if !ok {
+				t.Fatalf("dialer type = %T, want namedDialer", d)
+			}
+			gotDialer = nd.name
+			gotRemote = remote
+			gotClipboard = clipboard
+			if intent != ports.IntentEphemeral || name != "" {
+				t.Fatalf("intent/name = %d/%q, want ephemeral/empty", intent, name)
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("runAttachWithDeps returned error: %v", err)
+	}
+	if gotDialer != "local" {
+		t.Fatalf("local dialer = %q, want local", gotDialer)
+	}
+	if gotRemote {
+		t.Fatal("local attach must pass remote=false to runClient")
+	}
+	if gotClipboard != nil {
+		t.Fatalf("local attach must not thread a ClipboardReader through, got %#v", gotClipboard)
+	}
+}
+
+func TestRunUDPBootstrapForwardsReadinessAndExits(t *testing.T) {
+	oldTimeout := udpBootstrapTimeout
+	udpBootstrapTimeout = time.Second
+	t.Cleanup(func() { udpBootstrapTimeout = oldTimeout })
+	oldCommand := udpProxyCommand
+	var gotCmd *exec.Cmd
+	udpProxyCommand = func(context.Context, string, ...string) *exec.Cmd {
+		cmd := exec.Command("/bin/sh", "-c", "printf 'VEV-UDP 4242 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\\n'")
+		gotCmd = cmd
+		return cmd
+	}
+	t.Cleanup(func() { udpProxyCommand = oldCommand })
+
+	got := captureStdout(t, func() {
+		if err := runUDPBootstrap(context.Background(), "work"); err != nil {
+			t.Fatalf("runUDPBootstrap() error = %v", err)
+		}
+	})
+	if got != "VEV-UDP 4242 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n" {
+		t.Fatalf("readiness = %q", got)
+	}
+	if gotCmd.Stdin == nil || gotCmd.Stderr == nil {
+		t.Fatalf("proxy stdio = stdin %T stderr %T, want detached from SSH channels", gotCmd.Stdin, gotCmd.Stderr)
+	}
+	if gotCmd.Stdout == os.Stdout || gotCmd.Stderr == os.Stderr || gotCmd.Stdin == os.Stdin {
+		t.Fatalf("proxy inherited SSH stdio handles")
+	}
+}
+
+func TestRunUDPBootstrapReturnsReadinessEOF(t *testing.T) {
+	oldTimeout := udpBootstrapTimeout
+	udpBootstrapTimeout = time.Second
+	t.Cleanup(func() { udpBootstrapTimeout = oldTimeout })
+	oldCommand := udpProxyCommand
+	udpProxyCommand = func(context.Context, string, ...string) *exec.Cmd {
+		return exec.Command("/bin/sh", "-c", "exit 7")
+	}
+	t.Cleanup(func() { udpProxyCommand = oldCommand })
+
+	err := runUDPBootstrap(context.Background(), "work")
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("runUDPBootstrap() error = %v, want EOF", err)
+	}
+}
+
+func TestRunUDPBootstrapTimesOutWaitingForReadiness(t *testing.T) {
+	oldTimeout := udpBootstrapTimeout
+	udpBootstrapTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { udpBootstrapTimeout = oldTimeout })
+	oldCommand := udpProxyCommand
+	udpProxyCommand = func(context.Context, string, ...string) *exec.Cmd {
+		return exec.Command("/bin/sh", "-c", "sleep 5")
+	}
+	t.Cleanup(func() { udpProxyCommand = oldCommand })
+
+	err := runUDPBootstrap(context.Background(), "work")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runUDPBootstrap() error = %v, want deadline exceeded", err)
+	}
+}
+
+func TestParseUDPPortRange(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		want      udpPortRange
+		wantError bool
+	}{
+		{name: "empty uses default", value: "", want: udpPortRange{start: defaultUDPPortStart, end: defaultUDPPortEnd}},
+		{name: "zero is ephemeral", value: "0", want: udpPortRange{start: 0, end: 0}},
+		{name: "zero range rejected", value: "0-100", wantError: true},
+		{name: "single port", value: "61000", want: udpPortRange{start: 61000, end: 61000}},
+		{name: "range", value: "61000-61023", want: udpPortRange{start: 61000, end: 61023}},
+		{name: "range with spaces", value: " 61000 - 61023 ", want: udpPortRange{start: 61000, end: 61023}},
+		{name: "reversed range", value: "61023-61000", wantError: true},
+		{name: "non-numeric", value: "abc", wantError: true},
+		{name: "missing end", value: "61000-", wantError: true},
+		{name: "port too high", value: "70000", wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseUDPPortRange(tt.value)
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("parseUDPPortRange(%q) error = nil, want error", tt.value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseUDPPortRange(%q) error = %v", tt.value, err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseUDPPortRange(%q) = %+v, want %+v", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestListenUDPInRange(t *testing.T) {
+	// Occupy a wildcard UDP port, then assert listenUDPInRange skips it.
+	var lc net.ListenConfig
+	occupied, err := lc.ListenPacket(context.Background(), "udp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = occupied.Close() }()
+	udpPort := func(t *testing.T, conn net.PacketConn) int {
+		t.Helper()
+		addr, ok := conn.LocalAddr().(*net.UDPAddr)
+		if !ok {
+			t.Fatalf("LocalAddr() = %T, want *net.UDPAddr", conn.LocalAddr())
+		}
+		return addr.Port
+	}
+	busyPort := udpPort(t, occupied)
+
+	t.Run("skips busy port", func(t *testing.T) {
+		conn, err := listenUDPInRange(context.Background(), udpPortRange{start: busyPort, end: busyPort + 8})
+		if err != nil {
+			t.Fatalf("listenUDPInRange error = %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+		got := udpPort(t, conn)
+		if got == busyPort {
+			t.Fatalf("bound busy port %d, want a different port in range", busyPort)
+		}
+		if got < busyPort || got > busyPort+8 {
+			t.Fatalf("bound port %d outside range %d-%d", got, busyPort, busyPort+8)
+		}
+	})
+
+	t.Run("exhausted range errors", func(t *testing.T) {
+		_, err := listenUDPInRange(context.Background(), udpPortRange{start: busyPort, end: busyPort})
+		if err == nil {
+			t.Fatal("listenUDPInRange error = nil, want exhausted-range error")
+		}
+		if !strings.Contains(err.Error(), "no free UDP port in range") {
+			t.Fatalf("error = %v, want 'no free UDP port in range'", err)
+		}
+	})
+
+	t.Run("invalid direct range errors", func(t *testing.T) {
+		_, err := listenUDPInRange(context.Background(), udpPortRange{start: busyPort + 8, end: busyPort})
+		if err == nil {
+			t.Fatal("listenUDPInRange error = nil, want invalid-range error")
+		}
+		if !strings.Contains(err.Error(), "invalid UDP port range") {
+			t.Fatalf("error = %v, want 'invalid UDP port range'", err)
+		}
+	})
+
+	t.Run("ephemeral binds", func(t *testing.T) {
+		conn, err := listenUDPInRange(context.Background(), udpPortRange{start: 0, end: 0})
+		if err != nil {
+			t.Fatalf("listenUDPInRange ephemeral error = %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+		if udpPort(t, conn) == 0 {
+			t.Fatal("ephemeral bind returned port 0")
+		}
+	})
+}
+
+func TestPprofAddrIsLoopback(t *testing.T) {
+	tests := []struct {
+		addr string
+		want bool
+	}{
+		{addr: "127.0.0.1:6060", want: true},
+		{addr: "localhost:6060", want: true},
+		{addr: "[::1]:6060", want: true},
+		{addr: ":6060", want: false},
+		{addr: "0.0.0.0:6060", want: false},
+		{addr: "192.168.1.5:6060", want: false},
+		{addr: "garbage", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.addr, func(t *testing.T) {
+			if got := pprofAddrIsLoopback(tt.addr); got != tt.want {
+				t.Fatalf("pprofAddrIsLoopback(%q) = %v, want %v", tt.addr, got, tt.want)
+			}
+		})
 	}
 }

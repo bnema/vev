@@ -17,32 +17,34 @@
 //     when the parent context is cancelled (graceful shutdown notifies any
 //     attached clients with ReasonServerShutdown).
 //
-// Locking: a session's screen and per-client renderer shadow are both guarded
-// by tab.mu; the attached-client pointer by session.mu; the registry by
-// Daemon.mu. When more than one is held the order is always
-// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
-// a slow client.
+// Locking: a pane's screen/scrollback and per-client renderer shadow are
+// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
+// session.mu; the registry by Daemon.mu. When more than one is held the order
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
+// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
 package daemon
 
 import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-func frameWelcome(s *session) ports.Frame {
-	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(ports.Welcome{
-		SessionID:   string(s.id),
-		SessionName: s.name,
-		Ephemeral:   s.ephemeral,
-	})}
+func frameWelcome(s *session, ac *attachedClient) ports.Frame {
+	w := ports.Welcome{
+		SessionID:    string(s.id),
+		SessionName:  s.name,
+		Ephemeral:    s.ephemeral,
+		Capabilities: ports.CapabilityResume,
+		ResumeToken:  ac.resumeToken,
+	}
+	return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(w)}
 }
 
 func frameError(code uint16, text string) ports.Frame {
 	return ports.Frame{Type: ports.MsgError, Payload: ports.MarshalErrorMsg(ports.ErrorMsg{Code: code, Text: text})}
 }
 
-func frameOutput(b []byte) ports.Frame {
-	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{Data: b})}
+func frameOutputState(b []byte, baseState uint64, state uint64, echoAck uint64) ports.Frame {
+	return ports.Frame{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: baseState, NewStateNum: state, EchoAck: echoAck, Data: b})}
 }
 
 func frameDetached(reason uint8) ports.Frame {

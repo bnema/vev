@@ -17,22 +17,22 @@
 //     when the parent context is cancelled (graceful shutdown notifies any
 //     attached clients with ReasonServerShutdown).
 //
-// Locking: a session's screen and per-client renderer shadow are both guarded
-// by tab.mu; the attached-client pointer by session.mu; the registry by
-// Daemon.mu. When more than one is held the order is always
-// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
-// a slow client.
+// Locking: a pane's screen/scrollback and per-client renderer shadow are
+// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
+// session.mu; the registry by Daemon.mu. When more than one is held the order
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
+// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
 package daemon
 
 import (
 	"sort"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -41,11 +41,11 @@ var pickerModal = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight:
 
 func (d *Daemon) enterPicker(sess *session, ac *attachedClient) {
 	views, curTab := d.pickerViews(sess)
-	ac.pickerMu.Lock()
-	ac.picker = picker.New(views, sess.id, curTab)
-	ac.pickerPending = nil
-	ac.pickerPreview = nil
-	ac.pickerMu.Unlock()
+	ac.overlays.pickerMu.Lock()
+	ac.overlays.picker = picker.New(views, sess.id, curTab)
+	ac.overlays.pickerPending = nil
+	ac.overlays.pickerPreview = nil
+	ac.overlays.pickerMu.Unlock()
 	d.registerPreviewForSelection(ac)
 	d.paint(sess, ac, true)
 }
@@ -106,20 +106,20 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 	if sess == nil {
 		return
 	}
-	ac.pickerMu.Lock()
-	if ac.picker == nil {
-		ac.pickerPending = nil
+	ac.overlays.pickerMu.Lock()
+	if ac.overlays.picker == nil {
+		ac.overlays.pickerPending = nil
 		d.stopPickerPendingTimerLocked(ac)
-		ac.pickerMu.Unlock()
+		ac.overlays.pickerMu.Unlock()
 		return
 	}
-	if len(ac.pickerPending) > 0 {
+	if len(ac.overlays.pickerPending) > 0 {
 		d.stopPickerPendingTimerLocked(ac)
-		combined := make([]byte, 0, len(ac.pickerPending)+len(data))
-		combined = append(combined, ac.pickerPending...)
+		combined := make([]byte, 0, len(ac.overlays.pickerPending)+len(data))
+		combined = append(combined, ac.overlays.pickerPending...)
 		combined = append(combined, data...)
 		data = combined
-		ac.pickerPending = nil
+		ac.overlays.pickerPending = nil
 	}
 	changed := false
 	exit := false
@@ -127,8 +127,8 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 	for i := 0; i < len(data); i++ {
 		switch data[i] {
 		case 'x':
-			target, ok := ac.picker.Selected()
-			ac.pickerMu.Unlock()
+			target, ok := ac.overlays.picker.Selected()
+			ac.overlays.pickerMu.Unlock()
 			if ok {
 				d.killPickerTarget(target)
 			}
@@ -136,10 +136,10 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 			d.paint(sess, ac, true)
 			return
 		case 'j':
-			ac.picker.Down()
+			ac.overlays.picker.Down()
 			changed = true
 		case 'k':
-			ac.picker.Up()
+			ac.overlays.picker.Up()
 			changed = true
 		case '\r', '\n':
 			switchTarget = true
@@ -147,7 +147,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 		case 'q', 0x03, 0x1b:
 			if data[i] == 0x1b {
 				tail := data[i:]
-				consumed, ok := routePickerEscape(ac.picker, tail)
+				consumed, ok := routePickerEscape(ac.overlays.picker, tail)
 				if ok {
 					i += consumed - 1
 					changed = true
@@ -158,7 +158,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 					break
 				}
 				if isPickerEscapePrefix(tail) {
-					ac.pickerPending = append(ac.pickerPending[:0], tail...)
+					ac.overlays.pickerPending = append(ac.overlays.pickerPending[:0], tail...)
 					break
 				}
 			}
@@ -168,9 +168,9 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 	var target picker.Target
 	var ok bool
 	if switchTarget {
-		target, ok = ac.picker.Selected()
+		target, ok = ac.overlays.picker.Selected()
 	}
-	ac.pickerMu.Unlock()
+	ac.overlays.pickerMu.Unlock()
 
 	if changed {
 		d.registerPreviewForSelection(ac)
@@ -188,18 +188,18 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 }
 
 func (d *Daemon) retainPickerESCLocked(ac *attachedClient) {
-	ac.pickerPending = append(ac.pickerPending[:0], keys.ESC)
-	ac.pickerESC.retain(d.clock, keys.ESCDelay, func(timer ports.Timer) {
-		ac.pickerMu.Lock()
-		if ac.pickerESC.timer != timer || len(ac.pickerPending) != 1 || ac.pickerPending[0] != keys.ESC || ac.picker == nil {
-			ac.pickerMu.Unlock()
+	ac.overlays.pickerPending = append(ac.overlays.pickerPending[:0], keys.ESC)
+	ac.overlays.pickerESC.retain(d.clock, keys.ESCDelay, func(timer ports.Timer) {
+		ac.overlays.pickerMu.Lock()
+		if ac.overlays.pickerESC.timer != timer || len(ac.overlays.pickerPending) != 1 || ac.overlays.pickerPending[0] != keys.ESC || ac.overlays.picker == nil {
+			ac.overlays.pickerMu.Unlock()
 			return
 		}
-		ac.pickerPending = nil
-		ac.pickerESC.timer = nil
-		ac.pickerESC.done = nil
-		ac.picker = nil
-		ac.pickerMu.Unlock()
+		ac.overlays.pickerPending = nil
+		ac.overlays.pickerESC.timer = nil
+		ac.overlays.pickerESC.done = nil
+		ac.overlays.picker = nil
+		ac.overlays.pickerMu.Unlock()
 
 		d.unregisterPreview(ac)
 		if sess := ac.currentSession(); sess != nil {
@@ -209,7 +209,7 @@ func (d *Daemon) retainPickerESCLocked(ac *attachedClient) {
 }
 
 func (d *Daemon) stopPickerPendingTimerLocked(ac *attachedClient) {
-	ac.pickerESC.stop()
+	ac.overlays.pickerESC.stop()
 }
 
 func routePickerEscape(m *picker.Model, data []byte) (int, bool) {
@@ -231,26 +231,26 @@ func isPickerEscapePrefix(data []byte) bool {
 }
 
 func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
-	ac.pickerMu.Lock()
+	ac.overlays.pickerMu.Lock()
 	var target picker.Target
 	var ok bool
-	if ac.picker != nil {
-		target, ok = ac.picker.Selected()
+	if ac.overlays.picker != nil {
+		target, ok = ac.overlays.picker.Selected()
 	}
-	ac.pickerMu.Unlock()
+	ac.overlays.pickerMu.Unlock()
 
 	var next *tab
 	if ok {
 		next = d.tabByTarget(target)
 	}
 
-	ac.pickerMu.Lock()
-	old := ac.pickerPreview
-	if ac.picker == nil {
+	ac.overlays.pickerMu.Lock()
+	old := ac.overlays.pickerPreview
+	if ac.overlays.picker == nil {
 		next = nil
 	}
-	ac.pickerPreview = next
-	ac.pickerMu.Unlock()
+	ac.overlays.pickerPreview = next
+	ac.overlays.pickerMu.Unlock()
 
 	if old != nil && old != next {
 		old.mu.Lock()
@@ -264,9 +264,9 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 		next.previewClient = ac
 		next.mu.Unlock()
 
-		ac.pickerMu.Lock()
-		keep := ac.pickerPreview == next
-		ac.pickerMu.Unlock()
+		ac.overlays.pickerMu.Lock()
+		keep := ac.overlays.pickerPreview == next
+		ac.overlays.pickerMu.Unlock()
 		if !keep {
 			next.mu.Lock()
 			if next.previewClient == ac {
@@ -278,10 +278,10 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 }
 
 func (d *Daemon) unregisterPreview(ac *attachedClient) {
-	ac.pickerMu.Lock()
-	old := ac.pickerPreview
-	ac.pickerPreview = nil
-	ac.pickerMu.Unlock()
+	ac.overlays.pickerMu.Lock()
+	old := ac.overlays.pickerPreview
+	ac.overlays.pickerPreview = nil
+	ac.overlays.pickerMu.Unlock()
 
 	if old != nil {
 		old.mu.Lock()
@@ -300,12 +300,12 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 		return
 	}
 	cleared := false
-	previewer.pickerMu.Lock()
-	if previewer.pickerPreview == tb {
-		previewer.pickerPreview = nil
+	previewer.overlays.pickerMu.Lock()
+	if previewer.overlays.pickerPreview == tb {
+		previewer.overlays.pickerPreview = nil
 		cleared = true
 	}
-	previewer.pickerMu.Unlock()
+	previewer.overlays.pickerMu.Unlock()
 	tb.mu.Lock()
 	if tb.previewClient == previewer {
 		tb.previewClient = nil
@@ -319,11 +319,11 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 }
 
 func (d *Daemon) closePicker(ac *attachedClient) {
-	ac.pickerMu.Lock()
-	ac.picker = nil
-	ac.pickerPending = nil
+	ac.overlays.pickerMu.Lock()
+	ac.overlays.picker = nil
+	ac.overlays.pickerPending = nil
 	d.stopPickerPendingTimerLocked(ac)
-	ac.pickerMu.Unlock()
+	ac.overlays.pickerMu.Unlock()
 	d.unregisterPreview(ac)
 }
 
@@ -349,6 +349,7 @@ func (d *Daemon) sessionByID(id domain.SessionID) *session {
 }
 
 func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker.Target) {
+	d.clearHistoryNav(ac)
 	if target.Stopped {
 		d.resumeStoppedAndSwitch(sess, ac, target)
 		return
@@ -388,17 +389,20 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 		d.mu.Unlock()
 		return nil
 	}
+	term := from.terminal
 	from.client = nil
 	ac.setSession(nil)
 	from.mu.Unlock()
 
 	targetSess.mu.Lock()
 	old := targetSess.client
+	targetSess.terminal = term
 	targetSess.client = ac
 	if target.TabIndex >= 0 && target.TabIndex < len(targetSess.tabs) {
 		targetSess.active = target.TabIndex
 	}
 	targetSess.mu.Unlock()
+	d.touchMRU(targetSess)
 	ac.setSession(targetSess)
 	d.mu.Unlock()
 	return old
@@ -418,8 +422,9 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 		d.mu.Unlock()
 		return
 	}
-	cwd := platform.DirOrHome(stopped.cwd)
-	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.size, stopped.tabNames)
+	term := from.terminal
+	cwd := d.dirOrHome(stopped.cwd)
+	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.size, term)
 	if err != nil {
 		from.mu.Unlock()
 		d.mu.Unlock()
@@ -433,6 +438,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	targetSess.mu.Lock()
 	targetSess.client = ac
 	targetSess.mu.Unlock()
+	d.touchMRU(targetSess)
 	ac.setSession(targetSess)
 	d.mu.Unlock()
 	d.firstPaint(targetSess, ac, ac.size)
@@ -467,24 +473,19 @@ func (d *Daemon) refreshPicker(ac *attachedClient) {
 		return
 	}
 	views, curTab := d.pickerViews(sess)
-	ac.pickerMu.Lock()
-	if ac.picker != nil {
-		ac.picker = picker.New(views, sess.id, curTab)
+	ac.overlays.pickerMu.Lock()
+	if ac.overlays.picker != nil {
+		ac.overlays.picker = picker.New(views, sess.id, curTab)
 	}
-	ac.pickerMu.Unlock()
+	ac.overlays.pickerMu.Unlock()
 	d.registerPreviewForSelection(ac)
 }
 
 func composePickerClientFrame(model *picker.Model, preview picker.Preview, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
 	styleSet := resolveThemeStyles(styles)
-	inner := pickerModal.Composite(base, styleSet.border)
-	modalFrame := model.Render(domain.Size{Cols: inner.Width, Rows: inner.Height}, preview, styleSet.selection)
-	for y := range min(inner.Height, modalFrame.Height) {
-		for x := range min(inner.Width, modalFrame.Width) {
-			base.Set(inner.X+x, inner.Y+y, modalFrame.At(x, y))
-		}
-	}
-	return base, []renderer.Damage{renderer.FullRedraw()}
+	return composeModalClientFrame(base, pickerModal, styleSet, styleSet.selection, func(size domain.Size, styles ...renderer.Style) renderer.Frame {
+		return model.Render(size, preview, styles...)
+	})
 }
 
 func snapshotPickerPreview(tb *tab) picker.Preview {
@@ -497,9 +498,34 @@ func snapshotPickerPreview(tb *tab) picker.Preview {
 }
 
 func pickerPreviewFromLockedTab(tb *tab) picker.Preview {
-	rows := make([][]renderer.Cell, tb.screen.Frame.Height)
-	for y := range rows {
-		rows[y] = append([]renderer.Cell(nil), tb.screen.Frame.Row(y)...)
+	p := tb.focusedPane()
+	if p == nil {
+		return picker.Preview{}
 	}
-	return picker.Preview{Rows: rows, Width: tb.screen.Frame.Width, Height: tb.screen.Frame.Height}
+	if tb.tree == nil || tb.tree.Root == nil || tb.tree.Root.Kind == layout.Leaf {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return pickerPreviewFromLockedPane(p)
+	}
+
+	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
+	if area.Width <= 0 || area.Height <= 0 {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return pickerPreviewFromLockedPane(p)
+	}
+	frame, _ := composeTabFrame(tb, area, themeui.Theme{})
+	return pickerPreviewFromFrame(frame)
+}
+
+func pickerPreviewFromLockedPane(p *pane) picker.Preview {
+	return pickerPreviewFromFrame(p.screen.Frame)
+}
+
+func pickerPreviewFromFrame(frame renderer.Frame) picker.Preview {
+	rows := make([][]renderer.Cell, frame.Height)
+	for y := range rows {
+		rows[y] = append([]renderer.Cell(nil), frame.Row(y)...)
+	}
+	return picker.Preview{Rows: rows, Width: frame.Width, Height: frame.Height}
 }

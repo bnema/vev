@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -66,12 +67,87 @@ func assertBlank(t *testing.T, s *Screen, x, y int) {
 	}
 }
 
+func assertNoOrphanWideCells(t *testing.T, s *Screen) {
+	t.Helper()
+	for y := range s.Frame.Height {
+		for x := range s.Frame.Width {
+			c := cellAt(s, x, y)
+			if c.Continuation {
+				if x == 0 || cellAt(s, x-1, y).Continuation || renderer.RuneWidth(cellAt(s, x-1, y).Rune) != 2 {
+					t.Fatalf("orphan continuation at (%d,%d)", x, y)
+				}
+				continue
+			}
+			if renderer.RuneWidth(c.Rune) == 2 && (x+1 >= s.Frame.Width || !cellAt(s, x+1, y).Continuation) {
+				t.Fatalf("orphan wide head at (%d,%d) rune %q", x, y, c.Rune)
+			}
+		}
+	}
+}
+
 func lineText(s *Screen, y int) string {
 	out := make([]rune, s.Frame.Width)
 	for x := range s.Frame.Width {
 		out[x] = s.Frame.At(x, y).Rune
 	}
 	return string(out)
+}
+
+func TestParseCSIInts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		params string
+		want   []int
+	}{
+		{name: "empty", params: "", want: nil},
+		{name: "single", params: "5", want: []int{5}},
+		{name: "multiple", params: "1;2;3", want: []int{1, 2, 3}},
+		{name: "leading empty token", params: ";5", want: []int{0, 5}},
+		{name: "double empty token", params: "5;;3", want: []int{5, 0, 3}},
+		{name: "trailing empty token", params: "5;", want: []int{5, 0}},
+		{name: "question prefix", params: "?25", want: []int{25}},
+		{name: "greater prefix", params: ">0;1", want: []int{0, 1}},
+		{name: "prefix order", params: "?>7", want: []int{7}},
+		{name: "junk token", params: "12x;4", want: []int{0, 4}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, parseCSIInts(tt.params))
+		})
+	}
+}
+
+func TestParseSGRInts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		params string
+		want   []int
+	}{
+		{name: "empty", params: "", want: nil},
+		{name: "single", params: "1", want: []int{1}},
+		{name: "multiple", params: "1;31", want: []int{1, 31}},
+		{name: "leading empty token", params: ";5", want: []int{0, 5}},
+		{name: "double empty token", params: "5;;3", want: []int{5, 0, 3}},
+		{name: "trailing empty token", params: "5;", want: []int{5, 0}},
+		{name: "indexed foreground colon", params: "38:5:196", want: []int{38, 5, 196}},
+		{name: "rgb foreground colon", params: "38:2:1:2:3", want: []int{38, 2, 1, 2, 3}},
+		{name: "indexed background colon", params: "48:5:10", want: []int{48, 5, 10}},
+		{name: "rgb foreground empty colorspace", params: "38:2::1:2:3", want: []int{38, 2, 1, 2, 3}},
+		{name: "rgb foreground explicit colorspace", params: "38:2:9:1:2:3", want: []int{38, 2, 1, 2, 3}},
+		{name: "non color colon group", params: "1:2:3", want: []int{1}},
+		{name: "junk token", params: "abc;31", want: []int{0, 31}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, parseSGRInts(tt.params))
+		})
+	}
 }
 
 func rowString(row []renderer.Cell) string {
@@ -120,12 +196,128 @@ func TestOnNotifyOSC9(t *testing.T) {
 	require.Equal(t, "agent done", gotBody)
 }
 
+func TestOSC9ProgressTransitions(t *testing.T) {
+	tests := []struct {
+		name string
+		seqs []string
+		want []bool
+	}{
+		{
+			name: "finish fires once",
+			seqs: []string{"9;4;1;50", "9;4;0;100", "9;4;0;100"},
+			want: []bool{false},
+		},
+		{
+			name: "error fires once repeat no fire",
+			seqs: []string{"9;4;2;0", "9;4;2;50"},
+			want: []bool{true},
+		},
+		{
+			name: "indeterminate clear fires",
+			seqs: []string{"9;4;3", "9;4;0"},
+			want: []bool{false},
+		},
+		{
+			name: "paused clear fires",
+			seqs: []string{"9;4;4;80", "9;4;0;80"},
+			want: []bool{false},
+		},
+		{
+			name: "ongoing updates silent",
+			seqs: []string{"9;4;1;10", "9;4;1;50", "9;4;3;90", "9;4;4;90"},
+		},
+		{
+			name: "bare clear silent",
+			seqs: []string{"9;4;0"},
+		},
+		{
+			name: "bare progress ignored",
+			seqs: []string{"9;4"},
+		},
+		{
+			name: "unparseable ignored",
+			seqs: []string{"9;4;bogus", "9;4;99", "9;4;1", "9;4;0"},
+			want: []bool{false},
+		},
+		{
+			name: "error active clear fires error then finish",
+			seqs: []string{"9;4;2;0", "9;4;1;50", "9;4;0;100"},
+			want: []bool{true, false},
+		},
+		{
+			name: "error clear only fires error",
+			seqs: []string{"9;4;2;0", "9;4;0;100"},
+			want: []bool{true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewScreen(10, 2)
+			var got []bool
+			s.OnProgress = func(errored bool) { got = append(got, errored) }
+			for _, seq := range tt.seqs {
+				s.Write([]byte("\x1b]" + seq + "\x07"))
+			}
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestOSC9ProgressSplitAcrossWritesFiresOnce(t *testing.T) {
+	s := NewScreen(10, 2)
+	calls := 0
+	s.OnProgress = func(bool) { calls++ }
+	s.Write([]byte("\x1b]9;4;1"))
+	s.Write([]byte(";50\x07\x1b]9;4;0;100\x07"))
+	require.Equal(t, 1, calls)
+}
+
+func TestOSC9ProgressNilCallbackDoesNotPanic(t *testing.T) {
+	s := NewScreen(10, 2)
+	require.NotPanics(t, func() {
+		s.Write([]byte("\x1b]9;4;1;50\x07"))
+		s.Write([]byte("\x1b]9;4;0;100\x07"))
+		s.Write([]byte("\x1b]9;4;2;0\x07"))
+	})
+}
+
+func TestOSC9ProgressSTTerminated(t *testing.T) {
+	s := NewScreen(10, 2)
+	var got []bool
+	s.OnProgress = func(errored bool) { got = append(got, errored) }
+	s.Write([]byte("\x1b]9;4;1;50\x1b\\\x1b]9;4;0;100\x1b\\"))
+	require.Equal(t, []bool{false}, got)
+}
+
+func TestOSC9ProgressStateTrackedBeforeCallbackSet(t *testing.T) {
+	s := NewScreen(10, 2)
+	s.Write([]byte("\x1b]9;4;1;50\x07"))
+	var got []bool
+	s.OnProgress = func(errored bool) { got = append(got, errored) }
+	s.Write([]byte("\x1b]9;4;0;100\x07"))
+	require.Equal(t, []bool{false}, got)
+}
+
 func TestOnNotifyIgnoresOSC9Progress(t *testing.T) {
 	s := NewScreen(10, 2)
 	calls := 0
 	s.OnNotify = func(string, string) { calls++ }
 	s.Write([]byte("\x1b]9;4;1;50\x07"))
+	s.Write([]byte("\x1b]9;4;0;100\x07"))
+	s.Write([]byte("\x1b]9;4;2;0\x07"))
 	require.Equal(t, 0, calls)
+}
+
+func TestOnNotifyOSC940RemainsGeneric(t *testing.T) {
+	s := NewScreen(10, 2)
+	var gotTitle, gotBody string
+	calls := 0
+	s.OnNotify = func(title, body string) { gotTitle, gotBody = title, body; calls++ }
+	s.Write([]byte("\x1b]9;40;not progress\x07"))
+	require.Equal(t, 1, calls)
+	require.Equal(t, "", gotTitle)
+	require.Equal(t, "40;not progress", gotBody)
 }
 
 func TestOnNotifyOSC777STTerminated(t *testing.T) {
@@ -155,6 +347,70 @@ func TestOnNotifySplitAcrossWrites(t *testing.T) {
 	s.Write([]byte("\x1b]9;par"))
 	s.Write([]byte("tial\x07"))
 	require.Equal(t, 1, calls)
+}
+
+func TestOnClipboardBELTerminated(t *testing.T) {
+	s := NewScreen(10, 2)
+	var got string
+	calls := 0
+	s.OnClipboard = func(b64 string) { got = b64; calls++ }
+	s.Write([]byte("\x1b]52;c;aGVsbG8=\x07"))
+	require.Equal(t, 1, calls)
+	require.Equal(t, "aGVsbG8=", got)
+}
+
+func TestOnClipboardSTTerminated(t *testing.T) {
+	s := NewScreen(10, 2)
+	var got string
+	calls := 0
+	s.OnClipboard = func(b64 string) { got = b64; calls++ }
+	s.Write([]byte("\x1b]52;c;aGVsbG8=\x1b\\"))
+	require.Equal(t, 1, calls)
+	require.Equal(t, "aGVsbG8=", got)
+}
+
+func TestOnClipboardQueryIgnored(t *testing.T) {
+	s := NewScreen(10, 2)
+	calls := 0
+	s.OnClipboard = func(string) { calls++ }
+	s.Write([]byte("\x1b]52;c;?\x07"))
+	require.Equal(t, 0, calls)
+}
+
+func TestOnClipboardEmptySelection(t *testing.T) {
+	s := NewScreen(10, 2)
+	var got string
+	calls := 0
+	s.OnClipboard = func(b64 string) { got = b64; calls++ }
+	s.Write([]byte("\x1b]52;;aGVsbG8=\x07"))
+	require.Equal(t, 1, calls)
+	require.Equal(t, "aGVsbG8=", got)
+}
+
+func TestOnClipboardNilCallbackDoesNotPanic(t *testing.T) {
+	s := NewScreen(10, 2)
+	require.NotPanics(t, func() {
+		s.Write([]byte("\x1b]52;c;aGVsbG8=\x07"))
+	})
+}
+
+func TestOnClipboardSplitAcrossWrites(t *testing.T) {
+	s := NewScreen(10, 2)
+	var got string
+	calls := 0
+	s.OnClipboard = func(b64 string) { got = b64; calls++ }
+	s.Write([]byte("\x1b]52;c;aGVs"))
+	s.Write([]byte("bG8=\x07"))
+	require.Equal(t, 1, calls)
+	require.Equal(t, "aGVsbG8=", got)
+}
+
+func TestOnClipboardNoSecondSemicolonIgnored(t *testing.T) {
+	s := NewScreen(10, 2)
+	calls := 0
+	s.OnClipboard = func(string) { calls++ }
+	s.Write([]byte("\x1b]52;c\x07")) // no second ";" -> no data field
+	require.Equal(t, 0, calls)
 }
 
 // ---------------------------------------------------------------------------
@@ -520,6 +776,76 @@ func TestSGR(t *testing.T) {
 			},
 		},
 		{
+			name: "SGR 3 sets italic on style and cell, SGR 23 clears it",
+			seq:  "\x1b[3mX\x1b[23mY",
+			check: func(t *testing.T, s *Screen) {
+				if !cellAt(s, 0, 0).Style.Italic {
+					t.Errorf("first cell italic = false, want true")
+				}
+				if cellAt(s, 1, 0).Style.Italic {
+					t.Errorf("second cell italic = true, want false after SGR 23")
+				}
+				if s.Style.Italic {
+					t.Errorf("current style italic = true, want false after SGR 23")
+				}
+			},
+		},
+		{
+			name: "SGR preserves dim underline blink and strikethrough with resets",
+			seq:  "\x1b[2;4;5;9mA\x1b[22;24;25;29mB",
+			check: func(t *testing.T, s *Screen) {
+				first := cellAt(s, 0, 0).Style
+				if first.Attrs&(renderer.AttrDim|renderer.AttrUnderline|renderer.AttrBlink|renderer.AttrStrikethrough) != renderer.AttrDim|renderer.AttrUnderline|renderer.AttrBlink|renderer.AttrStrikethrough {
+					t.Errorf("first cell attrs = %b, want dim underline blink strikethrough", first.Attrs)
+				}
+				second := cellAt(s, 1, 0).Style
+				if second.Attrs&(renderer.AttrDim|renderer.AttrUnderline|renderer.AttrBlink|renderer.AttrStrikethrough) != 0 {
+					t.Errorf("second cell attrs = %b, want resets cleared", second.Attrs)
+				}
+			},
+		},
+		{
+			name: "SGR 22 resets both bold and dim",
+			seq:  "\x1b[1;2m\x1b[22m",
+			check: func(t *testing.T, s *Screen) {
+				if s.Style.Bold || s.Style.Attrs&renderer.AttrDim != 0 {
+					t.Errorf("style after SGR 22 = bold:%v attrs:%b, want neither bold nor dim", s.Style.Bold, s.Style.Attrs)
+				}
+			},
+		},
+		{
+			name: "SGR underline style and color are preserved and reset",
+			seq:  "\x1b[4:3;58:2::255:0:0mA\x1b[59mB",
+			check: func(t *testing.T, s *Screen) {
+				first := cellAt(s, 0, 0).Style
+				if first.Attrs&renderer.AttrUnderline == 0 || first.UnderlineStyle != renderer.UnderlineCurly {
+					t.Errorf("first underline = attrs:%b style:%d, want curly underline", first.Attrs, first.UnderlineStyle)
+				}
+				want := renderer.RGB{R: 255, G: 0, B: 0}
+				if !first.HasUnderlineColorRGB || first.UnderlineColorRGB != want {
+					t.Errorf("first underline color = rgb:%v %+v, want %+v", first.HasUnderlineColorRGB, first.UnderlineColorRGB, want)
+				}
+				second := cellAt(s, 1, 0).Style
+				if second.HasUnderlineColorRGB || second.HasUnderlineColor {
+					t.Errorf("second underline color flags = indexed:%v rgb:%v, want reset", second.HasUnderlineColor, second.HasUnderlineColorRGB)
+				}
+			},
+		},
+		{
+			name: "SGR 4 colon zero clears underline",
+			seq:  "\x1b[4:3mA\x1b[4:0mB",
+			check: func(t *testing.T, s *Screen) {
+				first := cellAt(s, 0, 0).Style
+				if first.Attrs&renderer.AttrUnderline == 0 || first.UnderlineStyle != renderer.UnderlineCurly {
+					t.Errorf("first underline = attrs:%b style:%d, want curly underline", first.Attrs, first.UnderlineStyle)
+				}
+				second := cellAt(s, 1, 0).Style
+				if second.Attrs&renderer.AttrUnderline != 0 || second.UnderlineStyle != renderer.UnderlineNone {
+					t.Errorf("second underline = attrs:%b style:%d, want cleared", second.Attrs, second.UnderlineStyle)
+				}
+			},
+		},
+		{
 			name: "empty SGR params reset style",
 			seq:  "\x1b[31m\x1b[1m\x1b[m", // empty params → reset
 			check: func(t *testing.T, s *Screen) {
@@ -559,12 +885,119 @@ func TestSGRTruecolor(t *testing.T) {
 			},
 		},
 		{
+			name: "SGR 38:2 sets truecolor foreground",
+			seq:  "\x1b[38:2:12:34:56mX",
+			check: func(t *testing.T, s *Screen) {
+				want := renderer.RGB{R: 12, G: 34, B: 56}
+				if !s.Style.HasForegroundRGB || s.Style.ForegroundRGB != want {
+					t.Errorf("foreground RGB = (%v, %+v), want true/%+v", s.Style.HasForegroundRGB, s.Style.ForegroundRGB, want)
+				}
+				if got := cellAt(s, 0, 0).Style.ForegroundRGB; got != want {
+					t.Errorf("cell foreground RGB = %+v, want %+v", got, want)
+				}
+			},
+		},
+		{
+			name: "SGR 38:2 empty color space sets truecolor foreground",
+			seq:  "\x1b[38:2::12:34:56mX",
+			check: func(t *testing.T, s *Screen) {
+				want := renderer.RGB{R: 12, G: 34, B: 56}
+				if !s.Style.HasForegroundRGB || s.Style.ForegroundRGB != want {
+					t.Errorf("foreground RGB = (%v, %+v), want true/%+v", s.Style.HasForegroundRGB, s.Style.ForegroundRGB, want)
+				}
+				if got := cellAt(s, 0, 0).Style.ForegroundRGB; got != want {
+					t.Errorf("cell foreground RGB = %+v, want %+v", got, want)
+				}
+			},
+		},
+		{
+			name: "SGR 38:2 color space id sets truecolor foreground",
+			seq:  "\x1b[38:2:1:12:34:56mX",
+			check: func(t *testing.T, s *Screen) {
+				want := renderer.RGB{R: 12, G: 34, B: 56}
+				if !s.Style.HasForegroundRGB || s.Style.ForegroundRGB != want {
+					t.Errorf("foreground RGB = (%v, %+v), want true/%+v", s.Style.HasForegroundRGB, s.Style.ForegroundRGB, want)
+				}
+				if got := cellAt(s, 0, 0).Style.ForegroundRGB; got != want {
+					t.Errorf("cell foreground RGB = %+v, want %+v", got, want)
+				}
+			},
+		},
+		{
+			name: "mixed semicolon and colon SGR groups",
+			seq:  "\x1b[1;38:2:10:20:30;7mX",
+			check: func(t *testing.T, s *Screen) {
+				want := renderer.RGB{R: 10, G: 20, B: 30}
+				if !s.Style.Bold || !s.Style.Inverse {
+					t.Errorf("bold/inverse = %v/%v, want true/true", s.Style.Bold, s.Style.Inverse)
+				}
+				if !s.Style.HasForegroundRGB || s.Style.ForegroundRGB != want {
+					t.Errorf("foreground RGB = (%v, %+v), want true/%+v", s.Style.HasForegroundRGB, s.Style.ForegroundRGB, want)
+				}
+			},
+		},
+		{
+			name: "truncated colon truecolor group does not consume next parameter",
+			seq:  "\x1b[38:2:1:2;31m",
+			check: func(t *testing.T, s *Screen) {
+				if s.Style.Foreground != 1 || s.Style.HasForegroundRGB {
+					t.Errorf("foreground = %d rgb:%v, want 1 false", s.Style.Foreground, s.Style.HasForegroundRGB)
+				}
+			},
+		},
+		{
 			name: "SGR 48;2 sets truecolor background",
 			seq:  "\x1b[48;2;200;100;50m",
 			check: func(t *testing.T, s *Screen) {
 				want := renderer.RGB{R: 200, G: 100, B: 50}
 				if !s.Style.HasBackgroundRGB || s.Style.BackgroundRGB != want {
 					t.Errorf("background RGB = (%v, %+v), want true/%+v", s.Style.HasBackgroundRGB, s.Style.BackgroundRGB, want)
+				}
+			},
+		},
+		{
+			name: "SGR 48:2 sets truecolor background",
+			seq:  "\x1b[48:2:200:100:50m",
+			check: func(t *testing.T, s *Screen) {
+				want := renderer.RGB{R: 200, G: 100, B: 50}
+				if !s.Style.HasBackgroundRGB || s.Style.BackgroundRGB != want {
+					t.Errorf("background RGB = (%v, %+v), want true/%+v", s.Style.HasBackgroundRGB, s.Style.BackgroundRGB, want)
+				}
+			},
+		},
+		{
+			name: "SGR 38:5 sets 256-color foreground",
+			seq:  "\x1b[38:5:82m",
+			check: func(t *testing.T, s *Screen) {
+				if s.Style.Foreground != 82 || s.Style.HasForegroundRGB {
+					t.Errorf("foreground = %d rgb:%v, want 82 false", s.Style.Foreground, s.Style.HasForegroundRGB)
+				}
+			},
+		},
+		{
+			name: "SGR 48:5 sets 256-color background",
+			seq:  "\x1b[48:5:200m",
+			check: func(t *testing.T, s *Screen) {
+				if s.Style.Background != 200 || s.Style.HasBackgroundRGB {
+					t.Errorf("background = %d rgb:%v, want 200 false", s.Style.Background, s.Style.HasBackgroundRGB)
+				}
+			},
+		},
+		{
+			name: "truncated colon foreground index group does not consume next parameter",
+			seq:  "\x1b[38:5;31m",
+			check: func(t *testing.T, s *Screen) {
+				if s.Style.Foreground != 1 || s.Style.HasForegroundRGB {
+					t.Errorf("foreground = %d rgb:%v, want 1 false", s.Style.Foreground, s.Style.HasForegroundRGB)
+				}
+			},
+		},
+		{
+			name: "truncated colon background index group does not consume next parameter",
+			seq:  "\x1b[48:5;44m",
+			check: func(t *testing.T, s *Screen) {
+				if s.Style.Background != 4 || s.Style.HasBackgroundRGB {
+					t.Errorf("background = %d rgb:%v, want 4 false", s.Style.Background, s.Style.HasBackgroundRGB)
 				}
 			},
 		},
@@ -819,6 +1252,29 @@ func TestESCSequences(t *testing.T) {
 			},
 		},
 		{
+			name: "ESC 7 / ESC 8 restore origin and insert modes",
+			run: func(t *testing.T) {
+				s := NewScreen(6, 5)
+				s.Write([]byte("\x1b[2;4r\x1b[?6h\x1b[4h\x1b7"))
+				s.Write([]byte("\x1b[?6l\x1b[4l\x1b8"))
+
+				if !s.originMode {
+					t.Fatal("origin mode was not restored")
+				}
+				if !s.insertMode {
+					t.Fatal("insert mode was not restored")
+				}
+
+				s.Write([]byte("\x1b[1;1Habcd\x1b[1;3HXY"))
+				if s.Row != 1 || s.Col != 4 {
+					t.Fatalf("cursor after restored origin and insert modes = (%d,%d), want (1,4)", s.Row, s.Col)
+				}
+				if got := lineText(s, 1); got != "abXYcd" {
+					t.Fatalf("line after restored insert mode = %q, want %q", got, "abXYcd")
+				}
+			},
+		},
+		{
 			name: "ESC D (index), ESC E (next line), ESC M (reverse index)",
 			run: func(t *testing.T) {
 				s := NewScreen(5, 3)
@@ -916,6 +1372,59 @@ func TestCSIEditingSequences(t *testing.T) {
 				}
 				if got := lineText(s, 3); got != "44444" {
 					t.Fatalf("row below region changed: %q", got)
+				}
+			},
+		},
+		{
+			name: "DECOM homes and addresses relative to scroll region",
+			run: func(t *testing.T) {
+				s := NewScreen(6, 5)
+				s.Write([]byte("\x1b[2;4r\x1b[?6h"))
+				if s.Row != 1 || s.Col != 0 {
+					t.Fatalf("DECOM set cursor = (%d,%d), want (1,0)", s.Row, s.Col)
+				}
+
+				s.Write([]byte("\x1b[2;3H"))
+				if s.Row != 2 || s.Col != 2 {
+					t.Fatalf("DECOM addressed cursor = (%d,%d), want (2,2)", s.Row, s.Col)
+				}
+				s.Write([]byte("\x1b[99;1H"))
+				if s.Row != 3 || s.Col != 0 {
+					t.Fatalf("DECOM clamped cursor = (%d,%d), want (3,0)", s.Row, s.Col)
+				}
+			},
+		},
+		{
+			name: "DECOM already set homes DECSTBM to scroll region",
+			run: func(t *testing.T) {
+				s := NewScreen(6, 5)
+				s.Write([]byte("\x1b[?6h\x1b[2;4r"))
+				if s.Row != 1 || s.Col != 0 {
+					t.Fatalf("DECSTBM cursor with DECOM set = (%d,%d), want (1,0)", s.Row, s.Col)
+				}
+
+				s.Write([]byte("\x1b[2;3H"))
+				if s.Row != 2 || s.Col != 2 {
+					t.Fatalf("DECOM addressed cursor after DECSTBM = (%d,%d), want (2,2)", s.Row, s.Col)
+				}
+				s.Write([]byte("\x1b[99;1H"))
+				if s.Row != 3 || s.Col != 0 {
+					t.Fatalf("DECOM clamped cursor after DECSTBM = (%d,%d), want (3,0)", s.Row, s.Col)
+				}
+			},
+		},
+		{
+			name: "DECOM reset homes and restores full-frame addressing",
+			run: func(t *testing.T) {
+				s := NewScreen(6, 5)
+				s.Write([]byte("\x1b[2;4r\x1b[?6h\x1b[?6l"))
+				if s.Row != 0 || s.Col != 0 {
+					t.Fatalf("DECOM reset cursor = (%d,%d), want (0,0)", s.Row, s.Col)
+				}
+
+				s.Write([]byte("\x1b[5;6H"))
+				if s.Row != 4 || s.Col != 5 {
+					t.Fatalf("full-frame cursor = (%d,%d), want (4,5)", s.Row, s.Col)
 				}
 			},
 		},
@@ -1278,6 +1787,35 @@ func TestResize(t *testing.T) {
 			},
 		},
 		{
+			name: "width shrink repairs truncated wide head",
+			run: func(t *testing.T) {
+				s := NewScreen(4, 1)
+				s.Write([]byte("AB界"))
+
+				s.Resize(3, 1)
+
+				assertCell(t, s, 0, 0, 'A')
+				assertCell(t, s, 1, 0, 'B')
+				assertBlank(t, s, 2, 0)
+				assertNoOrphanWideCells(t, s)
+			},
+		},
+		{
+			name: "random wide resize repairs copied rows",
+			run: func(t *testing.T) {
+				rng := rand.New(rand.NewSource(1))
+				for range 200 {
+					s := NewScreen(8, 4)
+					s.Write([]byte("a界b好c語d"))
+					s.Row = rng.Intn(s.Frame.Height)
+
+					s.Resize(rng.Intn(8)+1, rng.Intn(4)+1)
+
+					assertNoOrphanWideCells(t, s)
+				}
+			},
+		},
+		{
 			name: "cursor and saved cursor clamp",
 			run: func(t *testing.T) {
 				s := NewScreen(6, 4)
@@ -1352,10 +1890,10 @@ func TestResize(t *testing.T) {
 			},
 		},
 		{
-			name: "style mouse and cursor modes survive",
+			name: "style mouse cursor and bracketed paste modes survive",
 			run: func(t *testing.T) {
 				s := NewScreen(5, 2)
-				s.Write([]byte("\x1b[1m\x1b[?1000h\x1b[?1006h\x1b[?25l\x1b[3 q"))
+				s.Write([]byte("\x1b[1m\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l\x1b[3 q"))
 
 				s.Resize(6, 3)
 
@@ -1365,11 +1903,18 @@ func TestResize(t *testing.T) {
 				if mode, sgr := s.MouseMode(); mode != 1000 || !sgr {
 					t.Fatalf("mouse mode = (%d,%v), want (1000,true)", mode, sgr)
 				}
+				if !s.BracketedPasteMode() {
+					t.Fatal("bracketed paste mode was reset")
+				}
 				if s.CursorVisible() {
 					t.Fatal("cursor visibility was reset")
 				}
 				if style, ok := s.CursorStyle(); style != 3 || !ok {
 					t.Fatalf("cursor style = (%d,%v), want (3,true)", style, ok)
+				}
+				s.Write([]byte("\x1b[?2004l"))
+				if s.BracketedPasteMode() {
+					t.Fatal("bracketed paste mode remained enabled after reset")
 				}
 			},
 		},
@@ -1836,6 +2381,52 @@ func TestWideAndZeroWidthRunes(t *testing.T) {
 				if d[0].X != 0 || d[0].Width != 6 {
 					t.Errorf("DCH damage = {X:%d W:%d}, want {X:0 W:6}", d[0].X, d[0].Width)
 				}
+			},
+		},
+		{
+			name: "IRM inserts narrow printable cells and reset restores overwrite",
+			run: func(t *testing.T) {
+				s := NewScreen(8, 1)
+				s.Write([]byte("abcd\x1b[1;3H\x1b[4hX"))
+
+				if got := lineText(s, 0); got != "abXcd   " {
+					t.Fatalf("IRM inserted line = %q, want %q", got, "abXcd   ")
+				}
+				s.Write([]byte("\x1b[4l\x1b[1;3HY"))
+				if got := lineText(s, 0); got != "abYcd   " {
+					t.Fatalf("IRM reset overwrite line = %q, want %q", got, "abYcd   ")
+				}
+			},
+		},
+		{
+			name: "IRM inserts wide printable cells and repairs evicted wide head",
+			run: func(t *testing.T) {
+				s := NewScreen(6, 1)
+				s.Write([]byte("ab界cd"))
+				s.Write([]byte("\x1b[1;3H\x1b[4h好"))
+
+				assertCell(t, s, 0, 0, 'a')
+				assertCell(t, s, 1, 0, 'b')
+				assertCell(t, s, 2, 0, '好')
+				assertContinuation(t, s, 3, 0)
+				assertCell(t, s, 4, 0, '界')
+				assertContinuation(t, s, 5, 0)
+				assertNoOrphanWideCells(t, s)
+			},
+		},
+		{
+			name: "IRM wide insert at right edge repairs orphan",
+			run: func(t *testing.T) {
+				s := NewScreen(5, 1)
+				s.Write([]byte("abc界"))
+				s.Write([]byte("\x1b[1;2H\x1b[4h好"))
+
+				assertCell(t, s, 0, 0, 'a')
+				assertCell(t, s, 1, 0, '好')
+				assertContinuation(t, s, 2, 0)
+				assertCell(t, s, 3, 0, 'b')
+				assertCell(t, s, 4, 0, 'c')
+				assertNoOrphanWideCells(t, s)
 			},
 		},
 		{

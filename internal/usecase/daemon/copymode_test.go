@@ -23,8 +23,71 @@ import (
 
 // --- test doubles -----------------------------------------------------------
 
+func TestBoundedSendOutputErrTransportReturnsTransportUsedBySend(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	ac := &attachedClient{}
+	ac.initOverlays()
+	replacement := &closeTrackingTransport{}
+	sendErr := errors.New("send failed")
+	failed := &swapErrorTransport{ac: ac, replacement: replacement, err: sendErr}
+	ac.replaceTransport(failed)
+
+	used, err := d.boundedSendOutputErrTransport(ac, []byte("copy"))
+
+	require.ErrorIs(t, err, sendErr)
+	require.Same(t, failed, used)
+	require.Same(t, replacement, ac.transport())
+}
+
+type swapErrorTransport struct {
+	ac          *attachedClient
+	replacement ports.Transport
+	err         error
+}
+
+func (t *swapErrorTransport) Send(ports.Frame) error {
+	t.ac.replaceTransport(t.replacement)
+	return t.err
+}
+
+func (t *swapErrorTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (t *swapErrorTransport) Close() error               { return nil }
+
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
+
+func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	_, sess, _, _ := newManualSessionWithPTYs(t, p)
+	tb := sess.activeTab()
+	pane := tb.focusedPane()
+	pane.mu.Lock()
+	snap := scopy.NewSnapshot(pane.scrollback, pane.screen.Frame)
+	pane.mu.Unlock()
+	mode := scopy.NewMode(snap)
+	bars := barState{status: sess.statusSegments()}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			pane.mu.Lock()
+			pane.screen.Write([]byte("output\n"))
+			pane.mu.Unlock()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			tb.mu.Lock()
+			_, _ = composeCopyClientFrame(mode, tb, bars)
+			tb.mu.Unlock()
+		}
+	}()
+	wg.Wait()
+}
 
 func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 	p, release := newBlockingPTY(t)
@@ -32,9 +95,9 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 	defer release()
 	sess.name = "work"
 	tb := sess.activeTab()
-	tb.screen = vt.NewScreen(12, 3)
-	tb.screen.Write([]byte("live"))
-	snap := scopy.NewSnapshot(tb.scrollback, tb.screen.Frame)
+	tb.focusedPane().screen = vt.NewScreen(12, 3)
+	tb.focusedPane().screen.Write([]byte("live"))
+	snap := scopy.NewSnapshot(tb.focusedPane().scrollback, tb.focusedPane().screen.Frame)
 	mode := scopy.NewMode(snap)
 
 	frame, damage := composeCopyClientFrame(mode, tb, barState{status: sess.statusSegments()})
@@ -42,7 +105,7 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 	require.Equal(t, 12, frame.Width)
 	require.Equal(t, 5, frame.Height)
 	require.Equal(t, " 1          ", rowText(frame.Row(0)))
-	require.Contains(t, rowText(frame.Row(4)), "[VISUAL]")
+	require.Contains(t, rowText(frame.Row(4)), "[SCROLL]")
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
 }
 
@@ -50,14 +113,14 @@ func TestCopyModePaletteCommandEntersAndDoesNotForward(t *testing.T) {
 	writes := make(chan []byte, 1)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].scrollback = scopy.NewScrollback(4)
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("VIS\r"))
 
-	if ac.copyMode == nil {
+	if ac.overlays.copyMode == nil {
 		t.Fatal("scrollback mode not entered")
 	}
 	select {
@@ -68,8 +131,8 @@ func TestCopyModePaletteCommandEntersAndDoesNotForward(t *testing.T) {
 	out := awaitFrame(t, sends, ports.MsgOutput)
 	msg, err := ports.UnmarshalOutput(out.Payload)
 	require.NoError(t, err)
-	if got := string(msg.Data); !strings.Contains(got, "[VISUAL]") || strings.Contains(got, "[COPY]") {
-		t.Fatalf("visual mode paint = %q, want [VISUAL] without [COPY]", got)
+	if got := string(msg.Data); !strings.Contains(got, "[SCROLL]") || strings.Contains(got, "[SELECT]") || strings.Contains(got, "[COPY]") {
+		t.Fatalf("passive scrollback paint = %q, want [SCROLL] without [SELECT]/[COPY]", got)
 	}
 
 	d.handleInput(sess, ac, []byte(" "))
@@ -81,14 +144,135 @@ func TestCopyModePaletteCommandEntersAndDoesNotForward(t *testing.T) {
 	}
 }
 
+func TestCopyModeSearchModalRoutesBatchedInputAfterSlash(t *testing.T) {
+	writes := make(chan []byte, 1)
+	p, _ := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	pane := sess.tabs[0].focusedPane()
+	copy(pane.screen.Frame.Row(0), testRow("alpha"))
+	copy(pane.screen.Frame.Row(1), testRow("beta alpha"))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("/alpha\r"))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	require.Nil(t, ac.overlays.copySearch)
+	require.NotNil(t, ac.overlays.copyMode)
+	require.Equal(t, 0, ac.overlays.copyMode.Cursor)
+	select {
+	case got := <-writes:
+		t.Fatalf("batched visual search input forwarded to PTY: %q", got)
+	default:
+	}
+}
+
+func TestCopyModeSearchModalJumpsAndKeepsNavigation(t *testing.T) {
+	writes := make(chan []byte, 1)
+	p, _ := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	pane := sess.tabs[0].focusedPane()
+	copy(pane.screen.Frame.Row(0), testRow("alpha"))
+	copy(pane.screen.Frame.Row(1), testRow("beta alpha"))
+	copy(pane.screen.Frame.Row(2), testRow("gamma"))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("/"))
+	out := awaitFrame(t, sends, ports.MsgOutput)
+	msg, err := ports.UnmarshalOutput(out.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(msg.Data), "Search")
+	require.NotNil(t, ac.overlays.copySearch)
+
+	d.handleInput(sess, ac, []byte("alpha"))
+	out = awaitFrame(t, sends, ports.MsgOutput)
+	msg, err = ports.UnmarshalOutput(out.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(msg.Data), "/alpha")
+	require.Contains(t, string(msg.Data), "1:1  alpha")
+	require.Contains(t, string(msg.Data), "2:6  beta alpha")
+
+	d.handleInput(sess, ac, []byte("\r"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Nil(t, ac.overlays.copySearch)
+	require.Equal(t, 0, ac.overlays.copyMode.Cursor)
+
+	d.handleInput(sess, ac, []byte("n"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Equal(t, 1, ac.overlays.copyMode.Cursor)
+	d.handleInput(sess, ac, []byte("N"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Equal(t, 0, ac.overlays.copyMode.Cursor)
+
+	select {
+	case got := <-writes:
+		t.Fatalf("visual search input forwarded to PTY: %q", got)
+	default:
+	}
+}
+
+func TestCopyModeSearchModalSelectionPreviewsBehindModal(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	pane := sess.tabs[0].focusedPane()
+	copy(pane.screen.Frame.Row(0), testRow("alpha"))
+	copy(pane.screen.Frame.Row(1), testRow("beta alpha"))
+	copy(pane.screen.Frame.Row(2), testRow("gamma"))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	d.handleInput(sess, ac, []byte("/"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("alpha"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.NotNil(t, ac.overlays.copySearch)
+	require.Equal(t, 0, ac.overlays.copyMode.Cursor, "typing a query previews the selected first result behind the modal")
+
+	d.handleInput(sess, ac, []byte{0x0e})
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.NotNil(t, ac.overlays.copySearch)
+	require.Equal(t, 1, ac.overlays.copyMode.Cursor, "moving modal selection previews that result without Enter")
+}
+
+func TestCopyModeSearchModalCapturesMouseAndClearsOnExit(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	pane := sess.tabs[0].focusedPane()
+	pane.scrollback = scopy.NewScrollback(4)
+	pane.scrollback.Append(testRow("old alpha"))
+	copy(pane.screen.Frame.Row(0), testRow("live alpha"))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("/alpha"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.NotNil(t, ac.overlays.copySearch)
+	cursor := ac.overlays.copyMode.Cursor
+
+	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
+	require.NotNil(t, ac.overlays.copySearch)
+	require.Equal(t, cursor, ac.overlays.copyMode.Cursor)
+
+	d.handleInput(sess, ac, []byte("\x1b"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Nil(t, ac.overlays.copySearch)
+	require.NotNil(t, ac.overlays.copyMode)
+	d.handleInput(sess, ac, []byte("q"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Nil(t, ac.overlays.copySearch)
+	require.Nil(t, ac.overlays.copyMode)
+}
+
 func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 	writes := make(chan []byte, 1)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].scrollback = scopy.NewScrollback(4)
-	sess.tabs[0].scrollback.Append(testRow("old1    "))
-	sess.tabs[0].scrollback.Append(testRow("old2    "))
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].focusedPane().scrollback.Append(testRow("old1    "))
+	sess.tabs[0].focusedPane().scrollback.Append(testRow("old2    "))
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -105,7 +289,7 @@ func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 	if got, want := string(msg.Data), "\x1b]52;c;b2xkMQpvbGQy\x07"; got != want {
 		t.Fatalf("OSC52 = %q, want %q", got, want)
 	}
-	if ac.copyMode != nil {
+	if ac.overlays.copyMode != nil {
 		t.Fatal("copy mode still active after yank")
 	}
 	live := awaitFrame(t, sends, ports.MsgOutput)
@@ -168,8 +352,14 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 			return false
 		}
 		win.mu.Lock()
-		defer win.mu.Unlock()
-		return len(scopy.NewSnapshot(win.scrollback, win.screen.Frame).Rows) >= 12
+		p := win.focusedPane()
+		win.mu.Unlock()
+		if p == nil {
+			return false
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(scopy.NewSnapshot(p.scrollback, p.screen.Frame).Rows) >= 12
 	}, 2*time.Second, 5*time.Millisecond)
 
 	sess := firstSession(d)
@@ -205,14 +395,14 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 func TestCopyModeEscapeRestoresLiveFullRepaint(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].scrollback = scopy.NewScrollback(4)
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("q"))
 
-	if ac.copyMode != nil {
+	if ac.overlays.copyMode != nil {
 		t.Fatal("copy mode still active after q")
 	}
 	out := awaitFrame(t, sends, ports.MsgOutput)
@@ -239,10 +429,10 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p, _ := newBlockingPTY(t)
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-			sess.tabs[0].scrollback = scopy.NewScrollback(4)
-			sess.tabs[0].scrollback.Append(testRow("old1    "))
-			sess.tabs[0].scrollback.Append(testRow("old2    "))
-			sess.tabs[0].screen.Write([]byte("live"))
+			sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+			sess.tabs[0].focusedPane().scrollback.Append(testRow("old1    "))
+			sess.tabs[0].focusedPane().scrollback.Append(testRow("old2    "))
+			sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 			d.enterCopyMode(sess, ac)
 			awaitFrame(t, sends, ports.MsgOutput)
@@ -250,8 +440,8 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 				d.handleInput(sess, ac, input)
 			}
 
-			require.NotNil(t, ac.copyMode)
-			require.Equal(t, tc.wantCursor, ac.copyMode.Cursor)
+			require.NotNil(t, ac.overlays.copyMode)
+			require.Equal(t, tc.wantCursor, ac.overlays.copyMode.Cursor)
 		})
 	}
 }
@@ -259,10 +449,10 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 func TestCopyModeOversizedYankShowsTooLargeFeedback(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].scrollback = scopy.NewScrollback(1)
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(1)
 	longLine := strings.Repeat("x", scopy.OSC52MaxPayloadBytes+1)
-	sess.tabs[0].screen.Frame = renderer.NewFrame(len(longLine), 1)
-	copy(sess.tabs[0].screen.Frame.Row(0), testRow(longLine))
+	sess.tabs[0].focusedPane().screen.Frame = renderer.NewFrame(len(longLine), 1)
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow(longLine))
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -284,21 +474,21 @@ func TestCopyModeLoneEscapeExitsAfterDelay(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	clk := &signalClock{timers: make(chan *signalTimer, 1)}
 	d.clock = clk
-	sess.tabs[0].scrollback = scopy.NewScrollback(4)
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("\x1b"))
 	timer := <-clk.timers
-	ac.copyMu.Lock()
-	require.NotNil(t, ac.copyMode)
-	ac.copyMu.Unlock()
+	ac.overlays.copyMu.Lock()
+	require.NotNil(t, ac.overlays.copyMode)
+	ac.overlays.copyMu.Unlock()
 	timer.ch <- time.Now()
 	require.Eventually(t, func() bool {
-		ac.copyMu.Lock()
-		defer ac.copyMu.Unlock()
-		return ac.copyMode == nil
+		ac.overlays.copyMu.Lock()
+		defer ac.overlays.copyMu.Unlock()
+		return ac.overlays.copyMode == nil
 	}, time.Second, 5*time.Millisecond)
 }
 
@@ -307,8 +497,8 @@ func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	clk := &signalClock{timers: make(chan *signalTimer, 1)}
 	d.clock = clk
-	sess.tabs[0].scrollback = scopy.NewScrollback(4)
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -319,15 +509,15 @@ func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
 
 	timer.ch <- time.Now()
 	require.Never(t, func() bool {
-		ac.copyMu.Lock()
-		defer ac.copyMu.Unlock()
-		return ac.copyMode == nil
+		ac.overlays.copyMu.Lock()
+		defer ac.overlays.copyMu.Unlock()
+		return ac.overlays.copyMode == nil
 	}, 50*time.Millisecond, 5*time.Millisecond)
-	ac.copyMu.Lock()
-	require.Nil(t, ac.copyESC.timer)
-	require.Nil(t, ac.copyESC.done)
-	require.Empty(t, ac.copyPending)
-	ac.copyMu.Unlock()
+	ac.overlays.copyMu.Lock()
+	require.Nil(t, ac.overlays.copyESC.timer)
+	require.Nil(t, ac.overlays.copyESC.done)
+	require.Empty(t, ac.overlays.copyPending)
+	ac.overlays.copyMu.Unlock()
 }
 
 func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
@@ -342,14 +532,14 @@ func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p, _ := newBlockingPTY(t)
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-			sess.tabs[0].scrollback = scopy.NewScrollback(4)
-			sess.tabs[0].screen.Write([]byte("live"))
+			sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+			sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 			d.enterCopyMode(sess, ac)
 			awaitFrame(t, sends, ports.MsgOutput)
 			d.handleInput(sess, ac, tc.input)
 
-			if ac.copyMode != nil {
+			if ac.overlays.copyMode != nil {
 				t.Fatal("copy mode still active after empty yank")
 			}
 			out := awaitFrame(t, sends, ports.MsgOutput)
@@ -368,8 +558,8 @@ func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
 func TestCopyModeEnterExitConcurrentWithPaintRace(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].scrollback = scopy.NewScrollback(4)
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	done := make(chan struct{})
 	var drain sync.WaitGroup
@@ -401,7 +591,7 @@ func TestCopyModeEnterExitConcurrentWithPaintRace(t *testing.T) {
 func TestCursorTailHidesInCopyMode(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
 	data := mustOutputData(t, sends)

@@ -2,8 +2,10 @@ package sshstdio
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"testing"
@@ -13,6 +15,8 @@ import (
 )
 
 func TestBuildCommandUsesExecArgs(t *testing.T) {
+	// BuildCommand deliberately starts `ssh -- target 'vev' '_stdio' [session]`.
+	// Terminal color capability is carried in vev's Hello message, not in ssh env.
 	tests := []struct {
 		name    string
 		target  string
@@ -40,6 +44,19 @@ func TestBuildCommandUsesExecArgs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildCommandForModeUsesCanonicalSSHArgs(t *testing.T) {
+	got := BuildCommandForMode("user@example.com", "_udp-bootstrap", "work")
+	want := []string{"--", "user@example.com", "'vev' '_udp-bootstrap' 'work'"}
+	if got.Path != "ssh" {
+		t.Fatalf("Path = %q, want ssh", got.Path)
+	}
+	for i := range want {
+		if got.Args[i] != want[i] {
+			t.Fatalf("Args[%d] = %q, want %q (all args %q)", i, got.Args[i], want[i], got.Args)
+		}
 	}
 }
 
@@ -102,6 +119,84 @@ func TestTransportRejectsZeroLengthFrame(t *testing.T) {
 	}
 }
 
+func TestDialContextCanceledBeforeStart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := DialContext(ctx, "example.com", "work")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("DialContext error = %v, want context.Canceled", err)
+	}
+}
+
+func TestRecvMapsUnexpectedEOFDuringHeaderToSSHExit(t *testing.T) {
+	sshErr := errors.New("ssh exited with status 255")
+	tr := newTransport(strings.NewReader("\x00"), io.Discard, nil, func() error { return sshErr })
+
+	_, err := tr.Recv()
+	if !errors.Is(err, sshErr) {
+		t.Fatalf("Recv error = %v, want %v", err, sshErr)
+	}
+}
+
+func TestRecvReportsSSHExitWhenProcessClosesBeforeFrame(t *testing.T) {
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "echo connection refused >&2; exit 255")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("StdinPipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	waiter := newProcessWaiter(cmd, stdin, &stderr, time.Second, nil, "user@example.com", "work")
+	tr := newTransport(stdout, stdin, waiter.close, waiter.eofErr)
+
+	_, err = tr.Recv()
+	if err == nil {
+		t.Fatal("Recv error = nil, want ssh exit error")
+	}
+	for _, want := range []string{"sshstdio: ssh exited:", "connection refused"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Recv error = %q, want substring %q", err, want)
+		}
+	}
+}
+
+func TestProcessCloserLogsNonCleanExitStderr(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "echo remote failure >&2; exit 7")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("StdinPipe: %v", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logBuf, nil))
+	err = newProcessCloser(cmd, stdin, &stderr, time.Second, log, "user@example.com", "work")()
+	if err == nil {
+		t.Fatal("Close error = nil, want non-clean ssh exit")
+	}
+	entry := logBuf.String()
+	for _, want := range []string{"ssh exited non-cleanly", "remote failure", "user@example.com", "work"} {
+		if !strings.Contains(entry, want) {
+			t.Fatalf("log entry = %q, want substring %q", entry, want)
+		}
+	}
+	if strings.Contains(entry, "'vev' '_stdio'") || strings.Contains(entry, "-- user@example.com") {
+		t.Fatalf("log entry includes generated command line: %q", entry)
+	}
+}
+
 func TestProcessCloser(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -138,7 +233,7 @@ func TestProcessCloser(t *testing.T) {
 			}
 
 			started := time.Now()
-			err = newProcessCloser(tt.cmd, stdin, &stderr, tt.timeout)()
+			err = newProcessCloser(tt.cmd, stdin, &stderr, tt.timeout, nil, "", "")()
 			elapsed := time.Since(started)
 
 			if err == nil {

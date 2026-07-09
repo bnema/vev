@@ -272,6 +272,26 @@ func TestRendererEmitsSGR(t *testing.T) {
 			damage:  []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 3, Height: 1}},
 			wantAll: []string{"\x1b[0;38;2;1;2;3m", "R", "\x1b[0;38;5;82m", "I", "\x1b[0mD"},
 		},
+		{
+			name:   "bold italic inverse",
+			width:  1,
+			height: 1,
+			setup: func(frame Frame) {
+				frame.Set(0, 0, Cell{Rune: 'X', Style: Style{Bold: true, Italic: true, Inverse: true, Foreground: -1, Background: -1}})
+			},
+			damage:  []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 1, Height: 1}},
+			wantAll: []string{"\x1b[0;1;3;7m", "X"},
+		},
+		{
+			name:   "extended SGR attributes and underline color",
+			width:  1,
+			height: 1,
+			setup: func(frame Frame) {
+				frame.Set(0, 0, Cell{Rune: 'X', Style: Style{Foreground: -1, Background: -1, Attrs: AttrDim | AttrUnderline | AttrBlink | AttrStrikethrough, UnderlineStyle: UnderlineCurly, HasUnderlineColor: true, UnderlineColor: 9}})
+			},
+			damage:  []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 1, Height: 1}},
+			wantAll: []string{"\x1b[0;2;4:3;5;9;58;5;9m", "X"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -552,32 +572,81 @@ func TestReset(t *testing.T) {
 func TestFullRedraw(t *testing.T) {
 	tests := []struct {
 		name string
+		run  func(t *testing.T)
 	}{
-		{name: "forces full output even with an unchanged frame"},
+		{
+			name: "known same-size full redraw diffs against shadow",
+			run: func(t *testing.T) {
+				r := New(Capabilities{})
+				frame := NewFrame(3, 2)
+				markFrame(&frame)
+
+				if _, err := r.Draw(frame, []Damage{FullRedraw()}); err != nil {
+					t.Fatal(err)
+				}
+
+				changed := frame
+				changed.Set(0, 1, Cell{Rune: 'Z', Style: DefaultStyle()})
+				out, err := r.Draw(changed, []Damage{FullRedraw()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := string(out)
+				if strings.Contains(got, "ABC") {
+					t.Fatalf("unchanged row was re-emitted on dimension-stable FullRedraw: %q", got)
+				}
+				if !strings.Contains(got, "ZEF") {
+					t.Fatalf("changed row was not emitted on dimension-stable FullRedraw: %q", got)
+				}
+				outputEndsWith(t, out, "\x1b[0m")
+			},
+		},
+		{
+			name: "unchanged known same-size full redraw is a no-op",
+			run: func(t *testing.T) {
+				r := New(Capabilities{})
+				frame := NewFrame(3, 2)
+				markFrame(&frame)
+
+				if _, err := r.Draw(frame, []Damage{FullRedraw()}); err != nil {
+					t.Fatal(err)
+				}
+				out, err := r.Draw(frame, []Damage{FullRedraw()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(out) != 0 {
+					t.Fatalf("unchanged dimension-stable FullRedraw emitted output: %q", string(out))
+				}
+			},
+		},
+		{
+			name: "reset full redraw emits complete frame",
+			run: func(t *testing.T) {
+				r := New(Capabilities{})
+				frame := NewFrame(3, 2)
+				markFrame(&frame)
+
+				if _, err := r.Draw(frame, []Damage{FullRedraw()}); err != nil {
+					t.Fatal(err)
+				}
+				r.Reset()
+
+				out, err := r.Draw(frame, []Damage{FullRedraw()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := string(out)
+				if !strings.Contains(got, "ABC") || !strings.Contains(got, "DEF") {
+					t.Fatalf("reset FullRedraw did not emit complete frame: %q", got)
+				}
+				outputEndsWith(t, out, "\x1b[0m")
+			},
+		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r := New(Capabilities{})
-			frame := NewFrame(3, 2)
-			markFrame(&frame)
-
-			// Populate.
-			_, err := r.Draw(frame, []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 3, Height: 2}})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			// FullRedraw forces full output even with same frame.
-			out, err := r.Draw(frame, []Damage{FullRedraw()})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(out) == 0 {
-				t.Fatal("expected output for FullRedraw")
-			}
-			outputEndsWith(t, out, "\x1b[0m")
-		})
+		t.Run(tt.name, tt.run)
 	}
 }
 

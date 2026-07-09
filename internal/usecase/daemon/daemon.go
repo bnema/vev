@@ -15,14 +15,15 @@
 //     scheduler).
 //   - The daemon exits (Serve returns) when the last session is removed, or
 //     when the parent context is cancelled (graceful shutdown notifies any
-//     attached clients with ReasonServerShutdown).
+//     attached clients with ReasonServerShutdown). Client detach does not end
+//     a session: ephemeral sessions stay in memory until explicitly killed or
+//     until the daemon exits, and named sessions can also persist on disk.
 //
-// Locking: a session's screen and per-client renderer shadow are both guarded
-// by tab.mu; the attached-client pointer by session.mu; the registry by
-// Daemon.mu. When more than one is held the order is always
-// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
-// a slow client.
+// Locking: a pane's screen/scrollback and per-client renderer shadow are
+// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
+// session.mu; the registry by Daemon.mu. When more than one is held the order
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
+// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
 package daemon
 
 import (
@@ -32,12 +33,13 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
-	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/keys"
 )
 
 // Scheduler debounce bounds. Idle updates use the minimum for low latency;
@@ -63,6 +65,16 @@ const defaultScrollbackRows = 10_000
 // the in-flight send. Teardown is never gated on a client draining its socket.
 const detachNotifyTimeout = time.Second
 
+// maxUnackedOutputStates caps how many output states may be in flight (sent but
+// not yet acked by the client) before paint defers rather than composing
+// another diff. It bounds the daemon's paint rate to the client's ack rate, so
+// heavy output degrades to lower fps on a slow link instead of overflowing the
+// transport. It must stay well under the UDP proxy's 32-frame client window so
+// the proxy's reliable queue never fills from painting alone.
+const maxUnackedOutputStates = 8
+
+const defaultResumeParkGrace = 15 * time.Minute
+
 // defaultSize is used when a client's Hello carries no valid dimensions.
 var defaultSize = domain.Size{Cols: 80, Rows: 24}
 
@@ -71,6 +83,7 @@ type Daemon struct {
 	sessions map[domain.SessionID]*session
 	stopped  map[string]stoppedSession
 	nextID   uint64
+	mruSeq   atomic.Uint64
 	// closing marks that shutdown has irreversibly begun. It is set under mu,
 	// atomically with the event that makes shutdown inevitable (the registry
 	// emptying in killSession, or shutdownAll starting), and checked by route
@@ -83,20 +96,41 @@ type Daemon struct {
 	// Serve may be waiting, and WaitGroup forbids Add-from-zero concurrent
 	// with Wait.
 	notifies []chan struct{}
+	parked   map[uint64]*parkedAttachment
 
 	attnMu    sync.Mutex
 	animFrame int
 	animWake  chan struct{}
 
-	ptys           ports.PTYFactory
-	clock          ports.Clock
-	log            *slog.Logger
-	baseEnv        []string
-	shell          string
-	shellArgs      []string
-	persist        *persist.Persister
-	persistEnabled bool
-	procCwd        func(int) (string, error)
+	paletteRecentMu sync.Mutex
+	paletteRecent   []string
+
+	ptys                    ports.PTYFactory
+	clock                   ports.Clock
+	log                     *slog.Logger
+	baseEnv                 []string
+	shell                   string
+	shellArgs               []string
+	persist                 *persist.Persister
+	persistEnabled          bool
+	snaps                   ports.SnapshotStore
+	snapsEnabled            bool
+	restoreDone             chan struct{}
+	restoreOnce             sync.Once
+	procCwd                 func(int) (string, error)
+	procComm                func(int) (string, error)
+	procArgv                func(int) ([]string, error)
+	procGroupArgv           func(int, int) ([]string, error)
+	dirOrHome               func(string) string
+	bindings                atomic.Pointer[keys.Bindings]
+	codeOverrides           atomic.Pointer[map[string]string]
+	restoreProcessAllowlist atomic.Pointer[map[string]struct{}]
+	themeMode               atomic.Uint32
+	barScripts              *barScriptState
+	resumeParkGrace         time.Duration
+	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
+	// (see clipboard.go); empty means use os.TempDir().
+	tempDir string
 
 	serveCtx    context.Context
 	serveCancel context.CancelFunc
@@ -114,14 +148,22 @@ type Daemon struct {
 	connWg sync.WaitGroup // per-connection handler goroutines
 }
 
+type parkedAttachment struct {
+	sess     *session
+	ac       *attachedClient
+	timer    ports.Timer
+	done     chan struct{}
+	doneOnce sync.Once
+}
+
 // session is a single multiplexed session. It owns one or more full-screen
 
 type stoppedSession struct {
-	name      string
-	cwd       string
-	createdAt int64
-	tabNames  []string
-	purging   bool
+	name        string
+	cwd         string
+	createdAt   int64
+	lastUsedSeq uint64
+	purging     bool
 }
 
 type Option func(*Daemon)
@@ -145,12 +187,78 @@ func WithStore(store ports.Store) Option {
 	}
 }
 
+// WithSnapshotStore enables durable named session snapshots. A nil store keeps
+// the daemon in no-op snapshot mode.
+func WithSnapshotStore(store ports.SnapshotStore) Option {
+	return func(d *Daemon) {
+		d.snaps = store
+		d.snapsEnabled = store != nil
+	}
+}
+
 // WithCwdReader overrides the process cwd reader used for persistence tests.
 func WithCwdReader(fn func(int) (string, error)) Option {
 	return func(d *Daemon) {
 		if fn != nil {
 			d.procCwd = fn
 		}
+	}
+}
+
+// WithProcessInspector installs the platform process-inspection implementation.
+func WithProcessInspector(ins ports.ProcessInspector) Option {
+	return func(d *Daemon) {
+		if ins == nil {
+			return
+		}
+		d.procCwd = ins.Cwd
+		d.procComm = ins.Comm
+		d.procArgv = ins.Argv
+		d.procGroupArgv = ins.GroupArgv
+	}
+}
+
+// WithDirOrHome installs path fallback behavior from the application layer.
+func WithDirOrHome(fn func(string) string) Option {
+	return func(d *Daemon) {
+		if fn != nil {
+			d.dirOrHome = fn
+		}
+	}
+}
+
+// WithTempDir overrides the directory clipboard-image-transfer writes temp
+// files into (production default: os.TempDir()); tests use this with
+// t.TempDir() so writes are isolated and auto-cleaned.
+func WithTempDir(dir string) Option {
+	return func(d *Daemon) {
+		d.tempDir = dir
+	}
+}
+
+// WithBarScriptCommandRunner installs the shell command runner used by bar scripts.
+func WithBarScriptCommandRunner(runner ports.ShellCommandRunner) Option {
+	return func(d *Daemon) {
+		if runner != nil {
+			d.barScripts.runner = barScriptRunner{runner: runner, baseEnv: d.baseEnv}
+		}
+	}
+}
+
+// WithResumeParkGrace overrides how long detached resume-capable clients stay
+// parked for reconnection. Non-positive durations keep the default.
+func WithResumeParkGrace(grace time.Duration) Option {
+	return func(d *Daemon) {
+		if grace > 0 {
+			d.resumeParkGrace = grace
+		}
+	}
+}
+
+// WithConfig applies the initial user configuration.
+func WithConfig(cfg domain.Config) Option {
+	return func(d *Daemon) {
+		d.ApplyConfig(cfg)
 	}
 }
 
@@ -165,17 +273,27 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		shell = "/bin/sh"
 	}
 	d := &Daemon{
-		sessions: make(map[domain.SessionID]*session),
-		stopped:  make(map[string]stoppedSession),
-		ptys:     ptys,
-		clock:    clock,
-		log:      log,
-		baseEnv:  os.Environ(),
-		shell:    shell,
-		persist:  persist.New(nil),
-		procCwd:  platform.ProcessCwd,
-		done:     make(chan struct{}),
-		animWake: make(chan struct{}, 1),
+		sessions:        make(map[domain.SessionID]*session),
+		stopped:         make(map[string]stoppedSession),
+		parked:          make(map[uint64]*parkedAttachment),
+		ptys:            ptys,
+		clock:           clock,
+		log:             log,
+		baseEnv:         os.Environ(),
+		shell:           shell,
+		persist:         persist.New(nil),
+		dirOrHome:       dirOrHome,
+		done:            make(chan struct{}),
+		restoreDone:     make(chan struct{}),
+		animWake:        make(chan struct{}, 1),
+		resumeParkGrace: defaultResumeParkGrace,
+		barScripts: &barScriptState{
+			cfg:         barConfigFromDomain(domain.Defaults().Bar),
+			outputs:     make(map[domain.SessionID]barScriptOutputs),
+			lastRefresh: make(map[domain.SessionID]time.Time),
+			lastContext: make(map[domain.SessionID]barScriptContext),
+			running:     make(map[domain.SessionID]bool),
+		},
 	}
 	for _, o := range opts {
 		o(d)
@@ -183,15 +301,31 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	if d.persist == nil {
 		d.persist = persist.New(nil)
 	}
-	if d.procCwd == nil {
-		d.procCwd = platform.ProcessCwd
+	if d.dirOrHome == nil {
+		d.dirOrHome = dirOrHome
+	}
+	if d.bindings.Load() == nil {
+		d.bindings.Store(keys.DefaultBindings())
+	}
+	if d.codeOverrides.Load() == nil {
+		empty := map[string]string{}
+		d.codeOverrides.Store(&empty)
+	}
+	if d.restoreProcessAllowlist.Load() == nil {
+		allow := buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses())
+		d.restoreProcessAllowlist.Store(&allow)
 	}
 	if records, err := d.persist.LoadAll(); err != nil {
 		d.log.Warn("loading persisted sessions failed", "err", err)
 	} else {
+		var maxSeq uint64
 		for _, r := range records {
-			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, tabNames: r.TabNames}
+			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, lastUsedSeq: r.LastUsedSeq}
+			if r.LastUsedSeq > maxSeq {
+				maxSeq = r.LastUsedSeq
+			}
 		}
+		d.mruSeq.Store(maxSeq)
 	}
 	return d
 }
@@ -208,10 +342,23 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	d.sessWg.Go(func() {
 		d.attentionAnimator(d.serveCtx)
 	})
+	d.sessWg.Go(func() {
+		d.barScriptPoller(d.serveCtx)
+	})
 	if d.persistEnabled && d.procCwd != nil {
 		d.sessWg.Go(func() {
 			d.cwdSampler(d.serveCtx)
 		})
+	}
+	if d.snapsEnabled {
+		d.sessWg.Go(func() {
+			d.snapshotSaver(d.serveCtx)
+		})
+		d.sessWg.Go(func() {
+			d.restoreSnapshots(d.serveCtx)
+		})
+	} else {
+		d.closeRestoreDone()
 	}
 
 	// Break the accept loop when either the parent context is cancelled or the
@@ -227,6 +374,11 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	for {
 		tr, err := l.Accept()
 		if err != nil {
+			if d.serveCtx.Err() != nil {
+				d.log.Info("accept loop exiting", "err", err, "reason", "context canceled")
+			} else {
+				d.log.Warn("accept loop exiting", "err", err)
+			}
 			break
 		}
 		d.connWg.Go(func() {
@@ -264,9 +416,13 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 func (d *Daemon) shutdownAll(reason uint8) {
 	d.mu.Lock()
 	d.closing = true
+	for token, parked := range d.parked {
+		d.removeParkedLocked(token, parked)
+	}
 	snapshot := d.sessionsSnapshotLocked()
 	empty := len(snapshot) == 0
 	d.mu.Unlock()
+	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
 		return
@@ -293,6 +449,7 @@ func (d *Daemon) handleConn(tr ports.Transport) {
 
 	first, err := tr.Recv()
 	if err != nil {
+		d.log.Warn("connection closed before hello", "err", err)
 		_ = tr.Close()
 		return
 	}
@@ -304,6 +461,7 @@ func (d *Daemon) handleConn(tr ports.Transport) {
 	case ports.MsgHello:
 		d.handleHello(tr, first)
 	default:
+		d.log.Warn("hello rejected", "err", "expected hello", "type", first.Type)
 		_ = tr.Send(frameError(ports.ErrInternal, "expected hello"))
 		_ = tr.Close()
 	}
@@ -345,9 +503,9 @@ func (d *Daemon) handleList(tr ports.Transport) {
 	_ = tr.Send(frameSessions(infos))
 }
 
-// handleKill terminates the named session (if any), or all sessions, and
-// closes the control connection; the resulting EOF is the client's success
-// signal.
+// handleKill terminates the requested live session or stopped named session,
+// or all sessions, and closes the control connection; the resulting EOF is the
+// client's success signal.
 func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	defer func() { _ = tr.Close() }()
 
@@ -364,14 +522,24 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	d.mu.Lock()
 	target := d.findByNameLocked(k.Name)
 	if target == nil {
-		if _, ok := d.stopped[k.Name]; ok {
+		if stopped, ok := d.stopped[k.Name]; ok {
+			d.mu.Unlock()
+			if d.snapsEnabled && d.snaps != nil {
+				if err := d.snaps.Delete(k.Name); err != nil {
+					d.log.Warn("deleting stopped session snapshot failed", "err", err, "session", k.Name)
+					_ = tr.Send(frameError(ports.ErrInternal, "deleting stopped session snapshot failed"))
+					return
+				}
+			}
 			if err := d.persist.Delete(k.Name); err != nil {
-				d.mu.Unlock()
 				d.log.Warn("deleting persisted stopped session failed", "err", err, "session", k.Name)
 				_ = tr.Send(frameError(ports.ErrInternal, "deleting persisted stopped session failed"))
 				return
 			}
-			delete(d.stopped, k.Name)
+			d.mu.Lock()
+			if cur, ok := d.stopped[k.Name]; ok && cur == stopped {
+				delete(d.stopped, k.Name)
+			}
 			d.mu.Unlock()
 			return
 		}
@@ -393,14 +561,17 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 	h, err := ports.UnmarshalHello(f.Payload)
 	if err != nil {
 		if version, ok := ports.PeekHelloVersion(f.Payload); ok && version != ports.ProtocolVersion {
+			d.log.Warn("hello rejected", "err", "protocol version mismatch", "version", version, "expected", ports.ProtocolVersion)
 			_ = tr.Send(frameError(ports.ErrVersionMismatch, "protocol version mismatch"))
 		} else {
+			d.log.Warn("hello rejected", "err", err)
 			_ = tr.Send(frameError(ports.ErrInternal, "malformed hello"))
 		}
 		_ = tr.Close()
 		return
 	}
 	if h.Version != ports.ProtocolVersion {
+		d.log.Warn("hello rejected", "err", "protocol version mismatch", "version", h.Version, "expected", ports.ProtocolVersion, "intent", h.Intent, "session", h.Name)
 		_ = tr.Send(frameError(ports.ErrVersionMismatch, "protocol version mismatch"))
 		_ = tr.Close()
 		return
@@ -408,6 +579,7 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 
 	sess, ac, rerr := d.route(h, tr)
 	if rerr != nil {
+		d.log.Warn("hello rejected", "err", rerr, "intent", h.Intent, "session", h.Name)
 		if pe, ok := errors.AsType[*protoErr](rerr); ok {
 			_ = tr.Send(frameError(pe.code, pe.text))
 		} else {
@@ -417,8 +589,8 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 		return
 	}
 
-	if err := ac.send(frameWelcome(sess)); err != nil {
-		d.clientGone(sess, ac, false)
+	if err := ac.send(frameWelcome(sess, ac)); err != nil {
+		d.clientGone(sess, ac, tr, false)
 		return
 	}
 	d.firstPaint(sess, ac, h.Size)
@@ -441,6 +613,14 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	if !sz.Valid() {
 		sz = defaultSize
 	}
+	if d.snapsEnabled && (h.Intent == ports.IntentResume || h.Intent == ports.IntentAttach || h.Intent == ports.IntentNew) {
+		select {
+		case <-d.restoreDone:
+		case <-d.serveCtx.Done():
+			return nil, nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+		}
+	}
+	term := terminalEnv{TrueColor: h.TrueColor}
 
 	d.mu.Lock()
 	// Shutdown/create interlock: once shutdown has begun (last session removed,
@@ -452,14 +632,48 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 		return nil, nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
 	}
 	switch h.Intent {
+	case ports.IntentResume:
+		if sess, ac, ok, err := d.resumeParkedLocked(h, tr, sz); ok || err != nil {
+			d.mu.Unlock()
+			return sess, ac, err
+		}
+		// Resume miss/expiry falls back to normal attach semantics.
+		sess := d.findByNameLocked(h.Name)
+		if sess == nil {
+			stopped, ok := d.stopped[h.Name]
+			if !ok || stopped.purging {
+				d.mu.Unlock()
+				return nil, nil, &protoErr{ports.ErrNoSuchSession, "no such session: " + h.Name}
+			}
+			cwd := d.dirOrHome(stopped.cwd)
+			var err error
+			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, term)
+			if err != nil {
+				d.mu.Unlock()
+				return nil, nil, err
+			}
+		}
+		d.purgeParkedForSessionLocked(sess)
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
+		sess.mu.Lock()
+		sess.terminal = term
+		sess.mu.Unlock()
+		d.mu.Unlock()
+		d.detachReplacedClient(old)
+		return sess, ac, nil
+
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
-		sess, err := d.createSessionLocked(name, true, h.Cwd, sz, nil)
+		sess, err := d.createSessionLocked(name, true, h.Cwd, sz, term)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
 		}
-		ac, old := d.attachClient(sess, tr, sz)
+		d.purgeParkedForSessionLocked(sess)
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
+		sess.mu.Lock()
+		sess.terminal = term
+		sess.mu.Unlock()
 		d.mu.Unlock()
 		d.detachReplacedClient(old)
 		return sess, ac, nil
@@ -467,18 +681,26 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	case ports.IntentNew:
 		if h.Name == "" {
 			d.mu.Unlock()
-			return nil, nil, &protoErr{ports.ErrInternal, "empty session name"}
+			return nil, nil, &protoErr{ports.ErrInvalidSessionName, "empty session name"}
+		}
+		if err := domain.ValidateSessionName(h.Name); err != nil {
+			d.mu.Unlock()
+			return nil, nil, &protoErr{ports.ErrInvalidSessionName, err.Error()}
 		}
 		if d.nameLiveOrStoppedLocked(h.Name) {
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}
 		}
-		sess, err := d.createSessionLocked(h.Name, false, h.Cwd, sz, nil)
+		sess, err := d.createSessionLocked(h.Name, false, h.Cwd, sz, term)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
 		}
-		ac, old := d.attachClient(sess, tr, sz)
+		d.purgeParkedForSessionLocked(sess)
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
+		sess.mu.Lock()
+		sess.terminal = term
+		sess.mu.Unlock()
 		d.mu.Unlock()
 		d.detachReplacedClient(old)
 		return sess, ac, nil
@@ -491,15 +713,19 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 				d.mu.Unlock()
 				return nil, nil, &protoErr{ports.ErrNoSuchSession, "no such session: " + h.Name}
 			}
-			cwd := platform.DirOrHome(stopped.cwd)
+			cwd := d.dirOrHome(stopped.cwd)
 			var err error
-			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, stopped.tabNames)
+			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, term)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err
 			}
 		}
-		ac, old := d.attachClient(sess, tr, sz)
+		d.purgeParkedForSessionLocked(sess)
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
+		sess.mu.Lock()
+		sess.terminal = term
+		sess.mu.Unlock()
 		d.mu.Unlock()
 		d.detachReplacedClient(old)
 		return sess, ac, nil

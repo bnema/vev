@@ -3,8 +3,12 @@
 package keys
 
 import (
+	"bytes"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/ports"
 )
@@ -29,6 +33,10 @@ const (
 	ActionSwitchTab8
 	ActionSwitchTab9
 	ActionJumpAttention
+	ActionFocusPaneLeft
+	ActionFocusPaneRight
+	ActionFocusPaneUp
+	ActionFocusPaneDown
 )
 
 // Handler receives router outputs. Forward is called only for bytes that should
@@ -42,18 +50,22 @@ type Handler interface {
 // ESCDelay so split Alt-key sequences can still be intercepted without delaying
 // known terminal control prefixes (ESC [ and ESC O), which pass through.
 type Router struct {
-	clock ports.Clock
-	delay time.Duration
-	h     Handler
+	clock    ports.Clock
+	delay    time.Duration
+	h        Handler
+	bindings *atomic.Pointer[Bindings]
 
 	mu          sync.Mutex
 	pending     bool
+	pendingAlt  []byte
 	timer       ports.Timer
 	pendingDone chan struct{}
 }
 
-func NewRouter(clock ports.Clock, h Handler) *Router {
-	return &Router{clock: clock, delay: ESCDelay, h: h}
+// NewRouter constructs a Router. bindings may be nil, in which case
+// currentBindings falls back to defaultBindings.
+func NewRouter(clock ports.Clock, h Handler, bindings *atomic.Pointer[Bindings]) *Router {
+	return &Router{clock: clock, delay: ESCDelay, h: h, bindings: bindings}
 }
 
 // Route routes one transport read.
@@ -64,10 +76,13 @@ func (r *Router) Route(data []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.pending {
+		pendingAlt := r.pendingAlt
 		r.stopTimer()
 		r.pending = false
-		if consumed := r.routeAfterPendingESC(data); consumed > 0 {
-			data = data[consumed:]
+		r.pendingAlt = nil
+		combined := append(append([]byte(nil), pendingAlt...), data...)
+		if consumed := r.routeAfterPendingESC(combined, len(pendingAlt)); consumed > len(pendingAlt) {
+			data = data[consumed-len(pendingAlt):]
 		}
 	}
 	r.route(data)
@@ -93,17 +108,48 @@ func (r *Router) route(data []byte) {
 			r.retainESC()
 			return
 		}
+		remaining := data[i+1:]
+		if bytes.HasPrefix(data[i:], ports.BracketedPasteOpenMarker) {
+			// A bracketed paste whose closing marker is in this same frame is
+			// forwarded verbatim: pasted content bytes (including embedded
+			// ESC+letter Alt lookalikes or ESC [ 1 ; 3 A sequences) must never
+			// fire an Action mid-paste. Without a closing marker in-frame we
+			// fall through to today's per-byte routing (the '[' passes through
+			// as a control prefix); Part A keeps pastes single-frame in
+			// practice, so no cross-frame paste state is tracked here.
+			if rel := bytes.Index(data[i:], ports.BracketedPasteCloseMarker); rel >= 0 {
+				end := i + rel + len(ports.BracketedPasteCloseMarker)
+				buf = append(buf, data[i:end]...)
+				i = end
+				continue
+			}
+		}
+		if action, size, ok, partial := r.altArrowCSI(remaining); ok {
+			flush()
+			r.h.Action(action)
+			i += 1 + size
+			continue
+		} else if partial {
+			flush()
+			r.retainESC(remaining)
+			return
+		}
 		next := data[i+1]
 		if passThroughPrefix(next) {
 			buf = append(buf, ESC, next)
 			i += 2
 			continue
 		}
-		if action, ok := binding(next); ok {
+		if action, size, ok := r.binding(remaining); ok {
 			flush()
 			r.h.Action(action)
-			i += 2
+			i += 1 + size
 			continue
+		}
+		if partialUTF8Rune(remaining) {
+			flush()
+			r.retainESC(remaining)
+			return
 		}
 		buf = append(buf, ESC)
 		i++
@@ -111,22 +157,46 @@ func (r *Router) route(data []byte) {
 	flush()
 }
 
-func (r *Router) routeAfterPendingESC(data []byte) int {
+func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int) int {
+	if action, size, ok, partial := r.altArrowCSI(data); ok {
+		r.h.Action(action)
+		return size
+	} else if partial {
+		r.retainESC(data)
+		return len(data)
+	}
 	next := data[0]
+	if action, size, ok := r.binding(data); ok {
+		r.h.Action(action)
+		return size
+	}
+	if partialUTF8Rune(data) {
+		r.retainESC(data)
+		return len(data)
+	}
+	_, size := utf8.DecodeRune(data)
+	if size > 1 {
+		r.forward(append([]byte{ESC}, data[:size]...))
+		return size
+	}
+	if pendingAltLen > 0 {
+		r.forward(append([]byte{ESC}, data[:pendingAltLen]...))
+		return pendingAltLen
+	}
 	if passThroughPrefix(next) {
 		r.forward([]byte{ESC, next})
-		return 1
-	}
-	if action, ok := binding(next); ok {
-		r.h.Action(action)
 		return 1
 	}
 	r.forward([]byte{ESC})
 	return 0
 }
 
-func (r *Router) retainESC() {
+func (r *Router) retainESC(altBytes ...[]byte) {
 	r.pending = true
+	r.pendingAlt = nil
+	if len(altBytes) > 0 {
+		r.pendingAlt = append([]byte(nil), altBytes[0]...)
+	}
 	r.timer = r.clock.NewTimer(r.delay)
 	r.pendingDone = make(chan struct{})
 	go func(timer ports.Timer, done <-chan struct{}) {
@@ -139,7 +209,9 @@ func (r *Router) retainESC() {
 		defer r.mu.Unlock()
 		if r.pending && r.timer == timer {
 			r.pending = false
-			r.forward([]byte{ESC})
+			data := append([]byte{ESC}, r.pendingAlt...)
+			r.pendingAlt = nil
+			r.forward(data)
 		}
 	}(r.timer, r.pendingDone)
 }
@@ -155,6 +227,14 @@ func (r *Router) stopTimer() {
 	}
 }
 
+func partialUTF8Rune(data []byte) bool {
+	if len(data) == 0 || utf8.FullRune(data) {
+		return false
+	}
+	key, size := utf8.DecodeRune(data)
+	return key == utf8.RuneError && size == 1
+}
+
 func (r *Router) forward(data []byte) {
 	cp := append([]byte(nil), data...)
 	r.h.Forward(cp)
@@ -162,15 +242,75 @@ func (r *Router) forward(data []byte) {
 
 func passThroughPrefix(b byte) bool { return b == '[' || b == 'O' }
 
-func binding(b byte) (Action, bool) {
-	switch b {
-	case ' ':
-		return ActionOpenPalette, true
-	case '1', '2', '3', '4', '5', '6', '7', '8', '9':
-		return ActionSwitchTab1 + Action(b-'1'), true
-	case 'a':
-		return ActionJumpAttention, true
-	default:
-		return 0, false
+func (r *Router) currentBindings() *Bindings {
+	if r.bindings == nil {
+		return defaultBindings
 	}
+	bindings := r.bindings.Load()
+	if bindings == nil {
+		return defaultBindings
+	}
+	return bindings
+}
+
+func (r *Router) altArrowCSI(data []byte) (Action, int, bool, bool) {
+	const seqLen = len("[1;3A")
+	if len(data) < seqLen {
+		return 0, 0, false, hasAltArrowCSIPrefix(data)
+	}
+	seq := data[:seqLen]
+	if seq[0] != '[' || seq[1] != '1' || seq[2] != ';' || (seq[3] != '3' && seq[3] != '9') {
+		return 0, 0, false, false
+	}
+	if action, ok := r.currentBindings().actionForAltArrow(seq[4]); ok {
+		return action, seqLen, true, false
+	}
+	return 0, 0, false, false
+}
+
+func hasAltArrowCSIPrefix(data []byte) bool {
+	if len(data) == 0 || len(data) >= len("[1;3A") {
+		return false
+	}
+	return matchesPrefix(data, "[1;3") || matchesPrefix(data, "[1;9")
+}
+
+func matchesPrefix(data []byte, want string) bool {
+	if len(data) > len(want) {
+		return false
+	}
+	for i := range data {
+		if data[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Router) binding(data []byte) (Action, int, bool) {
+	return r.currentBindings().actionForAltBytes(data)
+}
+
+var topRowDigitAliases = [][]rune{
+	{'1', '&'},
+	{'2', 'é'},
+	{'3', '"'},
+	{'4', '\''},
+	{'5', '('},
+	{'6', '-', '§'},
+	{'7', 'è'},
+	{'8', '_', '!'},
+	{'9', 'ç'},
+}
+
+// topRowDigitIndex maps symbols emitted by physical top-row digit keys to
+// zero-based digit positions. It is modifier-agnostic so Alt+digit and future
+// Ctrl+digit bindings can share the same layout support.
+func topRowDigitIndex(key rune) (int, bool) {
+	for idx, aliases := range topRowDigitAliases {
+		if slices.Contains(aliases, key) {
+			return idx, true
+		}
+	}
+	return 0, false
 }

@@ -7,11 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"github.com/bnema/vev/internal/usecase/layout"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -76,6 +79,132 @@ func TestAltCForwardsToPTY(t *testing.T) {
 	releasePTY()
 }
 
+func TestBracketedMultilinePasteForwardsDelimitersAndNewlines(t *testing.T) {
+	writes := make(chan []byte, 1)
+	p, releasePTY := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	pane := sess.tabs[0].focusedPane()
+	pane.screen.Write([]byte("\x1b[?2004h"))
+	require.True(t, pane.screen.BracketedPasteMode())
+
+	paste := []byte("\x1b[200~first line\nsecond line\n\x1b[201~")
+	d.handleInput(sess, ac, paste)
+
+	require.Equal(t, paste, <-writes)
+	releasePTY()
+}
+
+func TestOverlayInputPrecedence(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan ports.Frame)
+		input []byte
+		check func(t *testing.T, ac *attachedClient, writes chan []byte)
+	}{
+		{
+			name: "prompt before palette picker copy and normal",
+			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan ports.Frame) {
+				t.Helper()
+				d.enterCopyMode(sess, ac)
+				d.enterPicker(sess, ac)
+				d.enterPalette(sess, ac)
+				d.enterPrompt(sess, ac, "Rename", "", func(string) error { return nil })
+			},
+			input: []byte("x"),
+			check: func(t *testing.T, ac *attachedClient, writes chan []byte) {
+				t.Helper()
+				require.Equal(t, "x", ac.overlays.prompt.Value())
+				require.Equal(t, "", ac.overlays.palette.Query())
+				require.True(t, ac.overlays.pickerActive())
+				require.True(t, ac.overlays.copyActive())
+				requireNoPTYWrite(t, writes)
+			},
+		},
+		{
+			name: "palette before picker copy and normal",
+			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan ports.Frame) {
+				t.Helper()
+				d.enterCopyMode(sess, ac)
+				d.enterPicker(sess, ac)
+				d.enterPalette(sess, ac)
+			},
+			input: []byte("x"),
+			check: func(t *testing.T, ac *attachedClient, writes chan []byte) {
+				t.Helper()
+				require.Equal(t, "x", ac.overlays.palette.Query())
+				require.True(t, ac.overlays.pickerActive())
+				require.True(t, ac.overlays.copyActive())
+				requireNoPTYWrite(t, writes)
+			},
+		},
+		{
+			name: "picker before copy and normal",
+			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan ports.Frame) {
+				t.Helper()
+				d.enterCopyMode(sess, ac)
+				d.enterPicker(sess, ac)
+			},
+			input: []byte("j"),
+			check: func(t *testing.T, ac *attachedClient, writes chan []byte) {
+				t.Helper()
+				target, ok := ac.overlays.picker.Selected()
+				require.True(t, ok)
+				require.Equal(t, 1, target.TabIndex)
+				require.True(t, ac.overlays.copyActive())
+				requireNoPTYWrite(t, writes)
+			},
+		},
+		{
+			name: "copy before normal",
+			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan ports.Frame) {
+				t.Helper()
+				d.enterCopyMode(sess, ac)
+			},
+			input: []byte("q"),
+			check: func(t *testing.T, ac *attachedClient, writes chan []byte) {
+				t.Helper()
+				require.False(t, ac.overlays.copyActive())
+				requireNoPTYWrite(t, writes)
+			},
+		},
+		{
+			name:  "normal keys when no overlay is active",
+			input: []byte("Z"),
+			check: func(t *testing.T, ac *attachedClient, writes chan []byte) {
+				t.Helper()
+				require.Equal(t, []byte("Z"), <-writes)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writes := make(chan []byte, 1)
+			p, releasePTY := newBlockingPTYWithWrites(t, writes)
+			p2, releasePTY2 := newBlockingPTY(t)
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p, p2)
+			defer releasePTY()
+			defer releasePTY2()
+			if tc.setup != nil {
+				tc.setup(t, d, sess, ac, sends)
+			}
+
+			d.handleInput(sess, ac, tc.input)
+
+			tc.check(t, ac, writes)
+		})
+	}
+}
+
+func requireNoPTYWrite(t *testing.T, writes chan []byte) {
+	t.Helper()
+	select {
+	case got := <-writes:
+		t.Fatalf("input forwarded to PTY: %q", got)
+	default:
+	}
+}
+
 func TestPaletteNextPreviousSwitchActiveTab(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -104,6 +233,354 @@ func TestPaletteNextPreviousSwitchActiveTab(t *testing.T) {
 
 			require.Equal(t, tc.wantIndex, activeTabIndex(sess))
 		})
+	}
+}
+
+func TestPaletteBackForwardSession(t *testing.T) {
+	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	recent := d.sessions[domain.SessionID("recent")]
+	older := d.sessions[domain.SessionID("older")]
+
+	runPaletteCommand(t, d, current, ac, "BSK")
+	require.Same(t, recent, ac.currentSession())
+
+	runPaletteCommand(t, d, recent, ac, "BSK")
+	require.Same(t, older, ac.currentSession())
+
+	runPaletteCommand(t, d, older, ac, "FSK")
+	require.Same(t, recent, ac.currentSession())
+
+	runPaletteCommand(t, d, recent, ac, "FSK")
+	require.Same(t, current, ac.currentSession())
+}
+
+func TestPaletteBackForwardSessionBoundaries(t *testing.T) {
+	t.Run("forward from current does not wrap", func(t *testing.T) {
+		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+
+		runPaletteCommand(t, d, current, ac, "FSK")
+		require.Same(t, current, ac.currentSession())
+	})
+
+	t.Run("back with no MRU does not move", func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+
+		runPaletteCommand(t, d, sess, ac, "BSK")
+		require.Same(t, sess, ac.currentSession())
+	})
+
+	t.Run("back at oldest does not wrap", func(t *testing.T) {
+		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+		older := d.sessions[domain.SessionID("older")]
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+		runPaletteCommand(t, d, ac.currentSession(), ac, "BSK")
+		require.Same(t, older, ac.currentSession())
+
+		runPaletteCommand(t, d, older, ac, "BSK")
+		require.Same(t, older, ac.currentSession())
+	})
+}
+
+func TestHistoryNavDisplay(t *testing.T) {
+	ids := []domain.SessionID{"current", "recent", "older"}
+	var h historyNavDisplay
+
+	h.set(ids, 1, 7)
+	ids[1] = "mutated"
+	require.True(t, h.active())
+	require.Equal(t, []domain.SessionID{domain.SessionID("current"), domain.SessionID("recent"), domain.SessionID("older")}, h.ids)
+	require.Equal(t, 1, h.index)
+	require.Equal(t, uint64(7), h.gen)
+
+	h.index = -1
+	require.False(t, h.active())
+	h.index = len(h.ids)
+	require.False(t, h.active())
+
+	h.clear()
+	require.False(t, h.active())
+	require.Empty(t, h.ids)
+	require.Zero(t, h.index)
+	require.Equal(t, uint64(7), h.gen)
+}
+
+func TestHistoryNavigationCommandDetectionUsesSlug(t *testing.T) {
+	require.True(t, isHistoryNavigationCommand("back-session"))
+	require.True(t, isHistoryNavigationCommand("forward-session"))
+	require.False(t, isHistoryNavigationCommand("BSK"))
+	require.False(t, isHistoryNavigationCommand("FSK"))
+	require.False(t, isHistoryNavigationCommand("next-tab"))
+}
+
+func TestHistoryNavActivation(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	recent := d.sessions[domain.SessionID("recent")]
+	older := d.sessions[domain.SessionID("older")]
+
+	runPaletteCommand(t, d, current, ac, "BSK")
+	require.Same(t, recent, ac.currentSession())
+	requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
+	require.GreaterOrEqual(t, drainOutputFrames(sends), 2)
+
+	runPaletteCommand(t, d, recent, ac, "BSK")
+	require.Same(t, older, ac.currentSession())
+	requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 2)
+
+	runPaletteCommand(t, d, older, ac, "FSK")
+	require.Same(t, recent, ac.currentSession())
+	requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
+}
+
+func TestHistoryNavBoundaryDoesNotActivate(t *testing.T) {
+	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+
+	runPaletteCommand(t, d, current, ac, "FSK")
+
+	require.Same(t, current, ac.currentSession())
+	ac.historyNavMu.Lock()
+	active := ac.historyNav.active()
+	ac.historyNavMu.Unlock()
+	require.False(t, active)
+}
+
+func TestHistoryNavTimeoutExpires(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	clock := &historyNavTestClock{timers: make(chan *historyNavTestTimer, 1)}
+	d.clock = clock
+
+	runPaletteCommand(t, d, current, ac, "BSK")
+	requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
+	timer := <-clock.timers
+	drainOutputFrames(sends)
+	timer.fire()
+
+	require.Eventually(t, func() bool {
+		ac.historyNavMu.Lock()
+		defer ac.historyNavMu.Unlock()
+		return !ac.historyNav.active()
+	}, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return drainOutputFrames(sends) > 0 }, time.Second, time.Millisecond)
+}
+
+func TestHistoryNavStaleTimerCannotClearFreshActivation(t *testing.T) {
+	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	clock := &historyNavTestClock{timers: make(chan *historyNavTestTimer, 2)}
+	d.clock = clock
+
+	runPaletteCommand(t, d, current, ac, "BSK")
+	staleTimer := <-clock.timers
+	ac.clearHistoryNav()
+	runPaletteCommand(t, d, ac.currentSession(), ac, "FSK")
+	<-clock.timers
+
+	staleTimer.fire()
+
+	require.Eventually(t, func() bool {
+		ac.historyNavMu.Lock()
+		defer ac.historyNavMu.Unlock()
+		return ac.historyNav.active() && ac.historyNav.index == 0 && ac.historyNav.gen > 1
+	}, time.Second, time.Millisecond)
+}
+
+func TestHistoryNavTimerStoppedOnDetachAndReplacement(t *testing.T) {
+	t.Run("detach stops stale timer repaint", func(t *testing.T) {
+		d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+		clock := &historyNavTestClock{timers: make(chan *historyNavTestTimer, 1)}
+		d.clock = clock
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+		timer := <-clock.timers
+		recent := ac.currentSession()
+		d.clientGone(recent, ac, ac.transport(), true)
+		drainOutputFrames(sends)
+		timer.fire()
+
+		requireNoHistoryNav(t, ac)
+		require.Never(t, func() bool { return drainOutputFrames(sends) > 0 }, 25*time.Millisecond, time.Millisecond)
+	})
+
+	t.Run("replacement stops stale timer repaint", func(t *testing.T) {
+		d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+		clock := &historyNavTestClock{timers: make(chan *historyNavTestTimer, 1)}
+		d.clock = clock
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+		timer := <-clock.timers
+		d.detachReplacedClient(ac)
+		drainOutputFrames(sends)
+		timer.fire()
+
+		requireNoHistoryNav(t, ac)
+		require.Never(t, func() bool { return drainOutputFrames(sends) > 0 }, 25*time.Millisecond, time.Millisecond)
+	})
+}
+
+func TestHistoryNavClearsOnInvalidTrailAndNonHistorySwitch(t *testing.T) {
+	t.Run("invalid frozen trail clears", func(t *testing.T) {
+		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+		requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
+		d.mu.Lock()
+		delete(d.sessions, domain.SessionID("older"))
+		d.mu.Unlock()
+
+		require.Nil(t, d.historyNavBarState(ac))
+		requireNoHistoryNav(t, ac)
+	})
+
+	t.Run("non history palette command clears frozen trail", func(t *testing.T) {
+		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+		requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
+		runPaletteCommand(t, d, ac.currentSession(), ac, "NXT")
+
+		requireNoHistoryNav(t, ac)
+	})
+}
+
+func requireHistoryNav(t *testing.T, ac *attachedClient, want []domain.SessionID, wantIndex int) {
+	t.Helper()
+	ac.historyNavMu.Lock()
+	defer ac.historyNavMu.Unlock()
+	require.True(t, ac.historyNav.active())
+	require.Equal(t, want, ac.historyNav.ids)
+	require.Equal(t, wantIndex, ac.historyNav.index)
+}
+
+func requireNoHistoryNav(t *testing.T, ac *attachedClient) {
+	t.Helper()
+	ac.historyNavMu.Lock()
+	defer ac.historyNavMu.Unlock()
+	require.False(t, ac.historyNav.active())
+}
+
+func drainOutputFrames(sends chan ports.Frame) int {
+	count := 0
+	for {
+		select {
+		case f := <-sends:
+			if f.Type == ports.MsgOutput {
+				count++
+			}
+		default:
+			return count
+		}
+	}
+}
+
+type historyNavTestClock struct {
+	timers chan *historyNavTestTimer
+}
+
+func (c *historyNavTestClock) Now() time.Time { return time.Time{} }
+
+func (c *historyNavTestClock) NewTimer(time.Duration) ports.Timer {
+	t := &historyNavTestTimer{ch: make(chan time.Time, 1)}
+	c.timers <- t
+	return t
+}
+
+type historyNavTestTimer struct {
+	ch chan time.Time
+}
+
+func (t *historyNavTestTimer) C() <-chan time.Time      { return t.ch }
+func (t *historyNavTestTimer) Reset(time.Duration) bool { return false }
+func (t *historyNavTestTimer) Stop() bool               { return true }
+func (t *historyNavTestTimer) fire()                    { t.ch <- time.Time{} }
+
+func TestPaletteBackForwardSessionStaleTrail(t *testing.T) {
+	t.Run("forward skips a killed intermediate session", func(t *testing.T) {
+		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+		recent := d.sessions[domain.SessionID("recent")]
+		older := d.sessions[domain.SessionID("older")]
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+		runPaletteCommand(t, d, recent, ac, "BSK")
+		require.Same(t, older, ac.currentSession())
+
+		d.mu.Lock()
+		delete(d.sessions, recent.id)
+		d.mu.Unlock()
+
+		runPaletteCommand(t, d, older, ac, "FSK")
+		require.Same(t, current, ac.currentSession())
+	})
+
+	t.Run("back from current refreshes newly recent sessions", func(t *testing.T) {
+		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+		p, release := newBlockingPTY(t)
+		defer release()
+		newer := &session{id: "newer", name: "newer", ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p, domain.Size{Cols: 80, Rows: 23})}}
+		newer.mruAt.Store(25)
+		d.mu.Lock()
+		d.sessions[newer.id] = newer
+		d.mu.Unlock()
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+		require.Same(t, newer, ac.currentSession())
+	})
+
+	t.Run("failed switch does not advance navigator index", func(t *testing.T) {
+		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+		current.mu.Lock()
+		current.client = nil
+		current.mu.Unlock()
+
+		runPaletteCommand(t, d, current, ac, "BSK")
+
+		require.Same(t, current, ac.currentSession())
+		require.Zero(t, ac.recentNav.index)
+	})
+}
+
+func newRecentNavigationTestSessions(t *testing.T) (*Daemon, *session, *attachedClient, chan ports.Frame, []func()) {
+	t.Helper()
+	p1, release1 := newBlockingPTY(t)
+	p2, release2 := newBlockingPTY(t)
+	p3, release3 := newBlockingPTY(t)
+	d, current, ac, sends := newManualSessionWithPTYs(t, p1)
+	current.id = "current"
+	delete(d.sessions, domain.SessionID("manual"))
+	d.sessions[current.id] = current
+	recent := &session{id: "recent", name: "recent", ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}}
+	older := &session{id: "older", name: "older", ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p3, domain.Size{Cols: 80, Rows: 23})}}
+	d.sessions[recent.id] = recent
+	d.sessions[older.id] = older
+	current.mruAt.Store(30)
+	recent.mruAt.Store(20)
+	older.mruAt.Store(10)
+	return d, current, ac, sends, []func(){release1, release2, release3}
+}
+
+func runPaletteCommand(t *testing.T, d *Daemon, sess *session, ac *attachedClient, code string) {
+	t.Helper()
+	d.handleInput(sess, ac, []byte("\x1b "))
+	d.handleInput(sess, ac, []byte(code+"\r"))
+}
+
+func releaseAll(releases []func()) {
+	for _, release := range releases {
+		release()
 	}
 }
 
@@ -154,12 +631,12 @@ func TestRNSOpensPromptAndEnterPromotesEphemeralSession(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("RNS\r"))
 	awaitFrame(t, sends, ports.MsgOutput)
-	require.True(t, ac.promptActive())
+	require.True(t, ac.overlays.promptActive())
 
 	d.handleInput(sess, ac, []byte("\r"))
 	awaitFrame(t, sends, ports.MsgOutput)
 
-	require.False(t, ac.promptActive())
+	require.False(t, ac.overlays.promptActive())
 	require.False(t, sess.ephemeral)
 	require.Equal(t, "0", sess.name)
 }
@@ -195,22 +672,22 @@ func TestMouseWheelEntersScrollbackModeAndExitsAtBottom(t *testing.T) {
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	win := sess.tabs[0]
-	win.screen.Write([]byte("live"))
+	win.focusedPane().screen.Write([]byte("live"))
 
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
 	data := mustOutputData(t, sends)
-	require.NotNil(t, ac.copyMode)
-	require.Equal(t, 19, ac.copyMode.Cursor)
-	require.Contains(t, string(data), "[VISUAL]")
+	require.NotNil(t, ac.overlays.copyMode)
+	require.Equal(t, 19, ac.overlays.copyMode.Cursor)
+	require.Contains(t, string(data), "[SCROLL]")
 
 	d.handleInput(sess, ac, []byte("\x1b[<65;1;1M"))
 	mustOutputData(t, sends)
-	require.Nil(t, ac.copyMode)
+	require.Nil(t, ac.overlays.copyMode)
 
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1Mq"))
 	mustOutputData(t, sends)
 	mustOutputData(t, sends)
-	require.Nil(t, ac.copyMode, "q after wheel in same input must be routed after copy mode is entered")
+	require.Nil(t, ac.overlays.copyMode, "q after wheel in same input must be routed after copy mode is entered")
 	select {
 	case got := <-writes:
 		t.Fatalf("mouse/copy input forwarded to PTY: %q", got)
@@ -222,14 +699,14 @@ func TestMouseAltScreenWheelMapsToArrows(t *testing.T) {
 	writes := make(chan []byte, 2)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].screen.Write([]byte("\x1b[?1049h"))
+	sess.tabs[0].focusedPane().screen.Write([]byte("\x1b[?1049h"))
 
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
 	d.handleInput(sess, ac, []byte("\x1b[<65;1;1M"))
 
 	require.Equal(t, []byte("\x1b[A\x1b[A\x1b[A"), <-writes)
 	require.Equal(t, []byte("\x1b[B\x1b[B\x1b[B"), <-writes)
-	require.Nil(t, ac.copyMode)
+	require.Nil(t, ac.overlays.copyMode)
 }
 
 func TestSGRRowOffset(t *testing.T) {
@@ -270,9 +747,9 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 		t.Fatalf("press without child mouse mode forwarded: %q", got)
 	default:
 	}
-	require.Nil(t, ac.copyMode, "press alone must not enter visual mode")
+	require.Nil(t, ac.overlays.copyMode, "press alone must not enter visual mode")
 
-	sess.tabs[0].screen.Write([]byte("\x1b[?1000h"))
+	sess.tabs[0].focusedPane().screen.Write([]byte("\x1b[?1000h"))
 	raw := []byte("\x1b[<0;2;3M")
 	d.handleInput(sess, ac, raw)
 	select {
@@ -281,7 +758,7 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 	default:
 	}
 
-	sess.tabs[0].screen.Write([]byte("\x1b[?1006h"))
+	sess.tabs[0].focusedPane().screen.Write([]byte("\x1b[?1006h"))
 	d.handleInput(sess, ac, raw)
 	require.Equal(t, []byte("\x1b[<0;2;2M"), <-writes)
 
@@ -300,13 +777,13 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 	default:
 	}
 
-	sess.tabs[0].screen.Write([]byte("\x1b[?1006l\x1b[?1000l"))
+	sess.tabs[0].focusedPane().screen.Write([]byte("\x1b[?1006l\x1b[?1000l"))
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
-	require.Nil(t, ac.copyMode, "press alone must still not enter visual mode")
+	require.Nil(t, ac.overlays.copyMode, "press alone must still not enter visual mode")
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 	mustOutputData(t, sends)
-	require.NotNil(t, ac.copyMode)
-	lo, hi, ok := ac.copyMode.SelectedBounds()
+	require.NotNil(t, ac.overlays.copyMode)
+	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
 	require.True(t, ok)
 	require.Equal(t, 0, lo)
 	require.Equal(t, 2, hi)
@@ -315,16 +792,16 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	copy(sess.tabs[0].screen.Frame.Row(0), testRow("alpha"))
-	copy(sess.tabs[0].screen.Frame.Row(1), testRow("bravo"))
-	copy(sess.tabs[0].screen.Frame.Row(2), testRow("charlie"))
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow("alpha"))
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(1), testRow("bravo"))
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(2), testRow("charlie"))
 
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;2M"))
 	mustOutputData(t, sends)
-	require.NotNil(t, ac.copyMode)
-	lo, hi, ok := ac.copyMode.SelectedBounds()
+	require.NotNil(t, ac.overlays.copyMode)
+	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
 	require.True(t, ok)
 	require.Equal(t, 0, lo)
 	require.Equal(t, 1, hi)
@@ -338,7 +815,7 @@ func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(strings.TrimPrefix(data, "\x1b]52;c;"), "\a"))
 	require.NoError(t, err)
 	require.Equal(t, "alpha\nbravo", string(decoded))
-	require.Nil(t, ac.copyMode)
+	require.Nil(t, ac.overlays.copyMode)
 
 	exitPaint := string(mustOutputData(t, sends))
 	require.NotContains(t, exitPaint, "[SELECT]")
@@ -354,11 +831,11 @@ func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 func TestMouseNormalScreenStatusRowClearsStalePressState(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	require.Equal(t, 23, sess.tabs[0].screen.Frame.Height, "fixture assumption: status row is wire row 24")
+	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
 
 	// Press on a content row establishes a (soon to be stale) anchor.
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
-	require.Nil(t, ac.copyMode)
+	require.Nil(t, ac.overlays.copyMode)
 
 	// Release lands on the status row: must still clear the press state,
 	// regardless of the row it landed on.
@@ -371,7 +848,7 @@ func TestMouseNormalScreenStatusRowClearsStalePressState(t *testing.T) {
 	// Motion onto a content row must not resurrect a stale anchor.
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 
-	require.Nil(t, ac.copyMode, "stale press state must not resurrect a selection")
+	require.Nil(t, ac.overlays.copyMode, "stale press state must not resurrect a selection")
 }
 
 // TestCopyModeStatusRowPressClearsDragState covers the copy-mode counterpart
@@ -383,10 +860,10 @@ func TestMouseNormalScreenStatusRowClearsStalePressState(t *testing.T) {
 func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	copy(sess.tabs[0].screen.Frame.Row(0), testRow("alpha"))
-	copy(sess.tabs[0].screen.Frame.Row(1), testRow("bravo"))
-	copy(sess.tabs[0].screen.Frame.Row(2), testRow("charlie"))
-	require.Equal(t, 23, sess.tabs[0].screen.Frame.Height, "fixture assumption: status row is wire row 24")
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow("alpha"))
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(1), testRow("bravo"))
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(2), testRow("charlie"))
+	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
 
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
@@ -394,8 +871,8 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	// Full drag: press row0, motion to row1 -> selection [0,1].
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;2M"))
 	mustOutputData(t, sends)
-	require.NotNil(t, ac.copyMode)
-	lo, hi, ok := ac.copyMode.SelectedBounds()
+	require.NotNil(t, ac.overlays.copyMode)
+	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
 	require.True(t, ok)
 	require.Equal(t, 0, lo)
 	require.Equal(t, 1, hi)
@@ -408,8 +885,8 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	// have cleared copyPressRowValid/copyDragging.
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 
-	require.NotNil(t, ac.copyMode)
-	lo, hi, ok = ac.copyMode.SelectedBounds()
+	require.NotNil(t, ac.overlays.copyMode)
+	lo, hi, ok = ac.overlays.copyMode.SelectedBounds()
 	require.True(t, ok)
 	require.Equal(t, 0, lo, "anchor must not have moved")
 	require.Equal(t, 1, hi, "status-row press must invalidate the drag so the motion is a no-op")
@@ -423,8 +900,8 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].scrollback = scopy.NewScrollback(50)
-	require.Equal(t, 23, sess.tabs[0].screen.Frame.Height, "fixture assumption: status row is wire row 24")
+	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(50)
+	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
 
 	// Press on a content row while scrollback is empty: the anchor is
 	// content-stable at pressTop(0)+pressRow(0) = row 0.
@@ -432,8 +909,8 @@ func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 
 	// Simulate 5 lines evicted into scrollback between the Press and the
 	// first Motion (e.g. the child kept producing output).
-	for i := 0; i < 5; i++ {
-		sess.tabs[0].scrollback.Append(testRow("evicted"))
+	for range 5 {
+		sess.tabs[0].focusedPane().scrollback.Append(testRow("evicted"))
 	}
 
 	// Motion lands on wire row 3 (0-based row 2 of the *current* screen).
@@ -442,8 +919,8 @@ func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 	// pressTop(0)+ev.Row(2) = 2.
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 
-	require.NotNil(t, ac.copyMode)
-	lo, hi, ok := ac.copyMode.SelectedBounds()
+	require.NotNil(t, ac.overlays.copyMode)
+	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
 	require.True(t, ok)
 	require.Equal(t, 0, lo, "anchor stays content-stable at the row under the pointer at press time")
 	require.Equal(t, 7, hi, "extend target must track the pointer's current content row, not a stale scrollback offset")
@@ -453,17 +930,158 @@ func TestMouseSplitReportPreservesOrder(t *testing.T) {
 	writes := make(chan []byte, 2)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].screen.Write([]byte("live"))
+	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.handleInput(sess, ac, []byte("\x1b[<64;"))
 	d.handleInput(sess, ac, []byte("1;1Mq"))
 
 	mustOutputData(t, sends)
 	mustOutputData(t, sends)
-	require.Nil(t, ac.copyMode)
+	require.Nil(t, ac.overlays.copyMode)
 	select {
 	case got := <-writes:
 		t.Fatalf("split mouse/copy bytes forwarded to PTY: %q", got)
 	default:
 	}
+}
+
+func TestMouseWheelOverUnfocusedPaneDoesNotFocusAndForwardsChildMouse(t *testing.T) {
+	p1 := portsmocks.NewMockPTY(t)
+	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2 := portsmocks.NewMockPTY(t)
+	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2.EXPECT().Write([]byte("\x1b[<64;1;1M")).Return(len("\x1b[<64;1;1M"), nil).Once()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
+	d.procComm = nil
+	tb := sess.activeTab()
+	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 5})
+	p2pane.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 41, Rows: 5}
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+	tb.tree.Focus = "pane-1"
+	tb.panes["pane-2"] = p2pane
+	tb.mu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\x1b[<64;22;2M"))
+
+	require.Equal(t, layout.PaneID("pane-1"), tb.tree.Focus)
+}
+
+func TestMouseDividerAndTitleBarDoNotForwardBogusCoordinates(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  []byte
+		root *layout.Node
+		size domain.Size
+	}{
+		{
+			name: "divider",
+			raw:  []byte("\x1b[<0;21;2M"),
+			root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}},
+			size: domain.Size{Cols: 41, Rows: 5},
+		},
+		{
+			name: "expanded title bar",
+			raw:  []byte("\x1b[<0;1;1M"),
+			root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}, Expanded: "pane-1"},
+			size: domain.Size{Cols: 20, Rows: 5},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p1 := portsmocks.NewMockPTY(t)
+			p1.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
+			p2 := portsmocks.NewMockPTY(t)
+			p2.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
+			d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
+			d.procComm = nil
+			tb := sess.activeTab()
+			tb.focusedPane().screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+			tb.mu.Lock()
+			tb.size = tc.size
+			tb.tree.Root = tc.root
+			tb.tree.Focus = "pane-1"
+			tb.panes["pane-2"] = newPane("pane-2", p2, tc.size)
+			tb.mu.Unlock()
+
+			d.handleInput(sess, ac, tc.raw)
+
+			require.Equal(t, layout.PaneID("pane-1"), tb.tree.Focus)
+		})
+	}
+}
+
+func TestCopyModeDragOutsideSplitPaneClampsToPaneContent(t *testing.T) {
+	p1 := portsmocks.NewMockPTY(t)
+	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Maybe()
+	p2 := portsmocks.NewMockPTY(t)
+	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Maybe()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
+	d.procComm = nil
+	tb := sess.activeTab()
+	for i := range 10 {
+		copy(tb.focusedPane().screen.Frame.Row(i), testRow(string(rune('a'+i))))
+	}
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 41, Rows: 10}
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+	tb.tree.Focus = "pane-1"
+	tb.panes["pane-2"] = newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 10})
+	tb.mu.Unlock()
+	d.enterCopyMode(sess, ac)
+	mustOutputData(t, sends)
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;12M"))
+	mustOutputData(t, sends)
+
+	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
+	require.True(t, ok)
+	require.Equal(t, 0, lo)
+	require.Equal(t, 9, hi)
+}
+
+func TestMouseHitTestFocusesPaneAndTranslatesSGRColumns(t *testing.T) {
+	p1 := portsmocks.NewMockPTY(t)
+	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2 := portsmocks.NewMockPTY(t)
+	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2.EXPECT().Write([]byte("\x1b[<0;1;1M")).Return(len("\x1b[<0;1;1M"), nil).Once()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
+	d.procComm = nil
+	tb := sess.activeTab()
+	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 5})
+	p2pane.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 41, Rows: 5}
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+	tb.tree.Focus = "pane-1"
+	tb.panes["pane-2"] = p2pane
+	tb.mu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;22;2M"))
+
+	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
+}
+
+func TestMouseCollapsedStackBarExpandsAndFocuses(t *testing.T) {
+	p1 := portsmocks.NewMockPTY(t)
+	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 3}).Return(nil).Maybe()
+	p2 := portsmocks.NewMockPTY(t)
+	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 3}).Return(nil).Maybe()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
+	d.procComm = nil
+	tb := sess.activeTab()
+	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 3})
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 20, Rows: 5}
+	tb.tree.Root = &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}, Expanded: "pane-1"}
+	tb.tree.Focus = "pane-1"
+	tb.panes["pane-2"] = p2pane
+	tb.mu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;6M"))
+
+	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
+	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Root.Expanded)
 }

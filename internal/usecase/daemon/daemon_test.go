@@ -42,20 +42,21 @@ type signalClock struct {
 }
 
 func (c *signalClock) Now() time.Time { return time.Time{} }
-func (c *signalClock) NewTimer(time.Duration) ports.Timer {
+func (c *signalClock) NewTimer(d time.Duration) ports.Timer {
 	if c.called != nil {
 		c.once.Do(func() { close(c.called) })
 	}
 	if c.timers == nil {
 		return stubTimer{}
 	}
-	t := &signalTimer{ch: make(chan time.Time, 1)}
+	t := &signalTimer{ch: make(chan time.Time, 1), duration: d}
 	c.timers <- t
 	return t
 }
 
 type signalTimer struct {
-	ch chan time.Time
+	ch       chan time.Time
+	duration time.Duration
 }
 
 func (t *signalTimer) C() <-chan time.Time      { return t.ch }
@@ -239,15 +240,21 @@ func newManualSessionWithPTYs(t *testing.T, ptys ...ports.PTY) (*Daemon, *sessio
 	d := newTestDaemon(t, nil, stubClock{})
 	tr, sends := newCapturingTransport(t)
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 80, Rows: 24}}
+	ac.initOverlays()
 	sctx, cancel := context.WithCancel(d.serveCtx)
 	tabs := make([]*tab, 0, len(ptys))
 	for _, p := range ptys {
 		wctx, wcancel := context.WithCancel(sctx)
-		tabs = append(tabs, &tab{pty: p, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: wctx, cancel: wcancel})
+		tb := newTab(p, domain.Size{Cols: 80, Rows: 23})
+		tb.ctx, tb.cancel = wctx, wcancel
+		for _, pane := range tb.panes {
+			pane.ctx, pane.cancel = wctx, wcancel
+		}
+		tabs = append(tabs, tb)
 	}
 	sess := &session{id: "manual", name: "work", ctx: sctx, cancel: cancel, tabs: tabs, client: ac}
 	ac.setSession(sess)
-	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac})
+	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, nil)
 	d.sessions[sess.id] = sess
 	t.Cleanup(cancel)
 	return d, sess, ac, sends
@@ -300,6 +307,10 @@ func waitGroupDone(wg *sync.WaitGroup) <-chan struct{} {
 func rowText(row []renderer.Cell) string {
 	runes := make([]rune, len(row))
 	for i, c := range row {
+		if c.Continuation {
+			runes[i] = ' '
+			continue
+		}
 		runes[i] = c.Rune
 	}
 	return string(runes)

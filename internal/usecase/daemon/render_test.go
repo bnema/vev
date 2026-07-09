@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,11 +18,19 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"github.com/bnema/vev/internal/usecase/layout"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 // --- test doubles -----------------------------------------------------------
+
+type discardTransport struct{}
+
+func (discardTransport) Send(ports.Frame) error     { return nil }
+func (discardTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (discardTransport) Close() error               { return nil }
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
@@ -32,9 +41,10 @@ func TestPTYWriteErrorIsLogged(t *testing.T) {
 	errBoom := errors.New("boom")
 	p := portsmocks.NewMockPTY(t)
 	p.EXPECT().Write([]byte("input")).Return(0, errBoom).Once()
-	win := &tab{pty: p, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}}
+	win := newTab(p, domain.Size{Cols: 80, Rows: 23})
 	sess := &session{id: "manual", name: "work", tabs: []*tab{win}}
 	ac := &attachedClient{}
+	ac.initOverlays()
 	ac.setSession(sess)
 
 	daemonKeyHandler{d: d, ac: ac}.Forward([]byte("input"))
@@ -55,8 +65,8 @@ func TestAltXClosesNonFinalTabScheduler(t *testing.T) {
 	defer releasePTY2()
 
 	d.sessWg.Add(1)
-	go d.scheduler(sess, sess.tabs[1])
-	sess.tabs[1].dirty <- struct{}{}
+	go d.scheduler(sess, sess.tabs[1], sess.tabs[1].focusedPane())
+	sess.tabs[1].focusedPane().dirty <- struct{}{}
 	<-clk.called
 
 	d.handleInput(sess, ac, []byte("\x1b2"))
@@ -81,9 +91,9 @@ func TestPTYEOFClosesNonFinalTabScheduler(t *testing.T) {
 	defer releasePTY2()
 
 	d.sessWg.Add(2)
-	go d.scheduler(sess, sess.tabs[1])
-	go d.ptyReader(sess, sess.tabs[1])
-	sess.tabs[1].dirty <- struct{}{}
+	go d.scheduler(sess, sess.tabs[1], sess.tabs[1].focusedPane())
+	go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
+	sess.tabs[1].focusedPane().dirty <- struct{}{}
 	<-clk.called
 	releasePTY2()
 
@@ -115,10 +125,10 @@ func TestPTYEOFClosesActiveNonFinalTabAndRepaintsRemaining(t *testing.T) {
 	d, sess, _, sends := newManualSessionWithPTYs(t, p1, p2)
 	defer releasePTY2()
 	sess.active = 0
-	sess.tabs[1].screen.Write([]byte("remaining"))
+	sess.tabs[1].focusedPane().screen.Write([]byte("remaining"))
 
 	d.sessWg.Add(1)
-	go d.ptyReader(sess, sess.tabs[0])
+	go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
 	releasePTY1()
 
 	require.Eventually(t, func() bool { return tabCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
@@ -141,10 +151,10 @@ func TestPTYEOFClosesInactiveNonFinalTabAndRepaintsStatus(t *testing.T) {
 	d, sess, _, sends := newManualSessionWithPTYs(t, p1, p2)
 	defer releasePTY1()
 	sess.active = 0
-	sess.tabs[0].screen.Write([]byte("active"))
+	sess.tabs[0].focusedPane().screen.Write([]byte("active"))
 
 	d.sessWg.Add(1)
-	go d.ptyReader(sess, sess.tabs[1])
+	go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
 	releasePTY2()
 
 	require.Eventually(t, func() bool { return tabCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
@@ -165,7 +175,7 @@ func TestPTYEOFFinalTabKillsSessionAndDetaches(t *testing.T) {
 	d, sess, _, sends, releases := newManualTabSession(t, 1)
 
 	d.sessWg.Add(1)
-	go d.ptyReader(sess, sess.tabs[0])
+	go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
 	releases[0]()
 
 	require.Eventually(t, func() bool { return sessionCount(d) == 0 }, 2*time.Second, 5*time.Millisecond)
@@ -211,26 +221,27 @@ func TestSchedulerDebounceCoalesces(t *testing.T) {
 
 	d := New(nil, mc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &tab{screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}}
+	win := newTab(newScriptPTY(nil), domain.Size{Cols: 20, Rows: 5})
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "s", name: "s", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 
 	win.mu.Lock()
-	win.screen.Write([]byte("hi"))
+	win.focusedPane().screen.Write([]byte("hi"))
 	win.mu.Unlock()
 
 	d.sessWg.Add(1)
-	go d.scheduler(sess, win)
+	go d.scheduler(sess, win, win.focusedPane())
 
 	// First dirty opens the debounce window.
-	win.dirty <- struct{}{}
+	win.focusedPane().dirty <- struct{}{}
 	<-newTimerCalled
 
 	// A burst of further dirties inside the window must be absorbed.
 	for range 5 {
 		select {
-		case win.dirty <- struct{}{}:
+		case win.focusedPane().dirty <- struct{}{}:
 		default:
 		}
 	}
@@ -266,9 +277,9 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 
 	win := newTab(p, domain.Size{Cols: 4, Rows: 4})
 	for y, text := range []string{"0000", "1111", "2222", "3333"} {
-		copy(win.screen.Frame.Row(y), testRow(text))
+		copy(win.focusedPane().screen.Frame.Row(y), testRow(text))
 	}
-	win.screen.Row = 3
+	win.focusedPane().screen.Row = 3
 
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Close().Return(nil).Maybe()
@@ -276,6 +287,7 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "s", name: "s", tabs: []*tab{win}, client: ac}
 	ac.setSession(sess)
 
@@ -283,16 +295,16 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 	// layout: tabSize reserves 2 chrome rows (top + bottom bar) here, not 1,
 	// so a client height of 4 (not 3) is what yields the same 2-row tab.
 	d.resize(sess, ac, domain.Size{Cols: 4, Rows: 4})
-	require.Equal(t, "2222", frameRowString(win.screen.Frame, 0))
-	require.Equal(t, "3333", frameRowString(win.screen.Frame, 1))
-	require.Equal(t, 2, win.scrollback.Len())
-	require.Equal(t, "0000", cellsString(win.scrollback.Row(0)))
-	require.Equal(t, "1111", cellsString(win.scrollback.Row(1)))
+	require.Equal(t, "2222", frameRowString(win.focusedPane().screen.Frame, 0))
+	require.Equal(t, "3333", frameRowString(win.focusedPane().screen.Frame, 1))
+	require.Equal(t, 2, win.focusedPane().scrollback.Len())
+	require.Equal(t, "0000", cellsString(win.focusedPane().scrollback.Row(0)))
+	require.Equal(t, "1111", cellsString(win.focusedPane().scrollback.Row(1)))
 
 	d.resize(sess, ac, domain.Size{Cols: 6, Rows: 6})
-	require.Equal(t, "2222  ", frameRowString(win.screen.Frame, 0))
-	require.Equal(t, "3333  ", frameRowString(win.screen.Frame, 1))
-	require.Equal(t, 2, win.scrollback.Len())
+	require.Equal(t, "2222  ", frameRowString(win.focusedPane().screen.Frame, 0))
+	require.Equal(t, "3333  ", frameRowString(win.focusedPane().screen.Frame, 1))
+	require.Equal(t, 2, win.focusedPane().scrollback.Len())
 }
 
 func frameRowString(f renderer.Frame, y int) string {
@@ -323,21 +335,461 @@ func TestOffsetDamageShiftsScreenDamageBelowTopBar(t *testing.T) {
 	}, damage)
 }
 
+func TestTranslateDamageShiftsXYAndPreservesFullRedraw(t *testing.T) {
+	damage := translateDamage([]renderer.Damage{
+		{Kind: renderer.DamageText, X: 2, Y: 3, Width: 4, Height: 1},
+		renderer.FullRedraw(),
+	}, 5, 7)
+	require.Equal(t, []renderer.Damage{
+		{Kind: renderer.DamageText, X: 7, Y: 10, Width: 4, Height: 1},
+		renderer.FullRedraw(),
+	}, damage)
+}
+
+func TestTranslatePaneDamagePreservesFullWidthScrollFastPathOnly(t *testing.T) {
+	tests := []struct {
+		name    string
+		content domain.Rect
+		area    domain.Rect
+		in      renderer.Damage
+		want    []renderer.Damage
+	}{
+		{
+			name:    "half width scroll becomes pane text damage",
+			content: domain.Rect{X: 21, Y: 0, Width: 20, Height: 4},
+			area:    domain.Rect{Width: 41, Height: 4},
+			in:      renderer.Damage{Kind: renderer.DamageScrollUp, X: 0, Y: 0, Width: 20, Height: 4, Count: 1},
+			want:    []renderer.Damage{{Kind: renderer.DamageText, X: 21, Y: 0, Width: 20, Height: 4}},
+		},
+		{
+			name:    "full width scroll keeps translated scroll damage",
+			content: domain.Rect{X: 0, Y: 5, Width: 80, Height: 10},
+			area:    domain.Rect{Width: 80, Height: 24},
+			in:      renderer.Damage{Kind: renderer.DamageScrollUp, X: 0, Y: 0, Width: 80, Height: 10, Count: 1},
+			want:    []renderer.Damage{{Kind: renderer.DamageScrollUp, X: 0, Y: 5, Width: 80, Height: 10, Count: 1}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, translatePaneDamage(tt.in, tt.content, tt.area))
+		})
+	}
+}
+
+func TestRenderClearsDamageOnEmittingPaneWhenDetached(t *testing.T) {
+	tb := newTab(nil, domain.Size{Cols: 10, Rows: 3})
+	focused := tb.focusedPane()
+	emitting := newPane("pane-2", nil, domain.Size{Cols: 10, Rows: 3})
+	tb.panes[emitting.id] = emitting
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(focused.id), layout.NewLeaf(emitting.id)}}
+	tb.tree.Focus = focused.id
+	sess := &session{id: "s", name: "work", tabs: []*tab{tb}, active: 0}
+	d := newTestDaemon(t, nil, stubClock{})
+
+	focused.screen.Write([]byte("a"))
+	emitting.screen.Write([]byte("b"))
+	d.render(sess, tb, emitting)
+
+	require.NotEmpty(t, focused.screen.Damage(), "focused pane damage should be untouched by detached render for another pane")
+	require.Empty(t, emitting.screen.Damage(), "emitting pane damage should be drained")
+}
+
+func TestRenderWithNilTransportDoesNotAdvanceStateCounter(t *testing.T) {
+	tb := newTab(nil, domain.Size{Cols: 10, Rows: 3})
+	sess := &session{id: "s", name: "work", tabs: []*tab{tb}, active: 0}
+	ac := &attachedClient{rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 10, Rows: 4}}
+	ac.initOverlays()
+	sess.client = ac
+	ac.setSession(sess)
+	d := newTestDaemon(t, nil, stubClock{})
+
+	tb.focusedPane().screen.Write([]byte("x"))
+	d.render(sess, tb, tb.focusedPane())
+
+	require.Zero(t, ac.nextStateNum)
+}
+
+func TestComposeTabFrameTwoPaneSplitBlitsDividersDimsAndTranslatesDamage(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 41, Rows: 4})
+	left := win.focusedPane()
+	left.screen.ClearDamage()
+	left.screen.Write([]byte("L"))
+	left.screen.ClearDamage()
+
+	right := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 4})
+	right.screen.Write([]byte("R"))
+	right.screen.ClearDamage()
+	right.screen.Write([]byte("x"))
+
+	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
+	win.tree.Focus = right.id
+	win.panes[right.id] = right
+
+	theme := themeui.Theme{Known: true, TrueColor: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 10, B: 10}}
+	frame, damage := composeTabFrame(win, domain.Rect{Width: 41, Height: 4}, theme)
+
+	require.Equal(t, 'L', frame.At(0, 0).Rune)
+	require.Equal(t, '│', frame.At(20, 0).Rune)
+	require.Equal(t, 'R', frame.At(21, 0).Rune)
+	require.True(t, frame.At(0, 0).Style.HasForegroundRGB, "unfocused left pane should be dimmed during blit")
+	require.False(t, left.screen.Frame.At(0, 0).Style.HasForegroundRGB, "dimming must not mutate vt.Screen")
+	require.Contains(t, damage, renderer.Damage{Kind: renderer.DamageText, X: 22, Y: 0, Width: 1, Height: 1, Count: 1})
+}
+
+func TestComposeClientFrameCacheSkipsUndamagedPaneBlits(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 41, Rows: 4})
+	left := win.focusedPane()
+	right := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 4})
+	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
+	win.tree.Focus = right.id
+	win.panes[right.id] = right
+	left.screen.Write([]byte("L"))
+	right.screen.Write([]byte("R"))
+	var bars barCache
+	var composed composedFrameCache
+	sess := &session{id: "s", name: "work", tabs: []*tab{win}}
+	composeClientFrameWithLayoutCached(barState{status: sess.statusSegments()}, win, true, solveTabLayoutLocked(win), &bars, &composed)
+	left.screen.ClearDamage()
+	right.screen.ClearDamage()
+	left.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'Z'})
+	right.screen.Write([]byte("x"))
+
+	frame, damage := composeClientFrameWithLayoutCached(barState{status: sess.statusSegments()}, win, false, solveTabLayoutLocked(win), &bars, &composed)
+
+	require.Equal(t, 'L', frame.At(0, 1).Rune, "undamaged left pane should remain cached, not re-blitted")
+	require.Equal(t, 'x', frame.At(22, 1).Rune)
+	require.Contains(t, damage, renderer.Damage{Kind: renderer.DamageText, X: 22, Y: 1, Width: 1, Height: 1, Count: 1})
+}
+
+func TestPaintComposeConsumesOnlyDamageIncludedInFrame(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 20, Rows: 4})
+	p := win.focusedPane()
+	p.screen.Write([]byte("old"))
+	var bars barCache
+	var composed composedFrameCache
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments()}
+
+	_, damage := composeClientFrameWithLayoutCachedConsumeDamage(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
+	require.NotEmpty(t, damage)
+	require.Empty(t, p.screen.Damage(), "paint compose should consume damage it included in the frame")
+
+	p.screen.Write([]byte("new"))
+	require.NotEmpty(t, p.screen.Damage(), "damage produced after paint compose must remain for a later render")
+
+	_, _ = composeClientFrameWithLayoutCached(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
+	require.NotEmpty(t, p.screen.Damage(), "standalone compose helpers should remain non-consuming")
+}
+
+func TestPaintComposeClearsCollapsedPaneDamage(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
+	p1 := win.focusedPane()
+	p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 3})
+	win.tree.Root = &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(p1.id), layout.NewLeaf(p2.id)}, Expanded: p2.id}
+	win.tree.Focus = p2.id
+	win.panes[p2.id] = p2
+	p1.screen.Write([]byte("hidden"))
+	p2.screen.Write([]byte("shown"))
+	var bars barCache
+	var composed composedFrameCache
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments()}
+
+	_, _ = composeClientFrameWithLayoutCachedConsumeDamage(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
+
+	require.Empty(t, p1.screen.Damage(), "collapsed pane damage should not accumulate while paint renders stack title bars")
+	require.Empty(t, p2.screen.Damage())
+}
+
+func TestComposeClientFrameCacheFocusChangeReblitsDimmedPanes(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 41, Rows: 4})
+	left := win.focusedPane()
+	right := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 4})
+	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
+	win.panes[right.id] = right
+	left.screen.Write([]byte("L"))
+	right.screen.Write([]byte("R"))
+	theme := themeui.Theme{Known: true, TrueColor: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 10, B: 10}}
+	var bars barCache
+	var composed composedFrameCache
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments(), theme: theme}
+	win.tree.Focus = left.id
+	composeClientFrameWithLayoutCached(state, win, true, solveTabLayoutLocked(win), &bars, &composed)
+	left.screen.ClearDamage()
+	right.screen.ClearDamage()
+	leftWasFocused := composed.frame.At(0, 1).Style
+	rightWasDimmed := composed.frame.At(21, 1).Style
+
+	win.tree.Focus = right.id
+	frame, damage := composeClientFrameWithLayoutCached(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
+
+	require.Equal(t, rightWasDimmed, frame.At(0, 1).Style, "previously focused pane should be re-blitted dimmed")
+	require.Equal(t, leftWasFocused, frame.At(21, 1).Style, "newly focused pane should be re-blitted undimmed")
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+}
+
+func TestComposeClientFrameCacheLayoutChangeClearsStaleDividers(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 41, Rows: 5})
+	left := win.focusedPane()
+	right := newPane("pane-2", nil, domain.Size{Cols: 41, Rows: 5})
+	win.panes[right.id] = right
+	left.screen.Write([]byte("L"))
+	right.screen.Write([]byte("R"))
+	var bars barCache
+	var composed composedFrameCache
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments()}
+	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
+	composeClientFrameWithLayoutCached(state, win, true, solveTabLayoutLocked(win), &bars, &composed)
+	require.Equal(t, '│', composed.frame.At(20, 1).Rune)
+	left.screen.ClearDamage()
+	right.screen.ClearDamage()
+
+	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Vertical, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
+	frame, damage := composeClientFrameWithLayoutCached(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
+
+	require.NotEqual(t, '│', frame.At(20, 1).Rune, "old vertical divider must be cleared when layout changes")
+	require.Equal(t, '─', frame.At(20, 3).Rune)
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+}
+
+func BenchmarkPaintCachedSinglePaneDamage(b *testing.B) {
+	win := newTab(nil, domain.Size{Cols: 81, Rows: 24})
+	left := win.focusedPane()
+	right := newPane("pane-2", nil, domain.Size{Cols: 40, Rows: 24})
+	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
+	win.tree.Focus = right.id
+	win.panes[right.id] = right
+	left.screen.Write([]byte("left"))
+	right.screen.Write([]byte("right"))
+	sess := &session{id: "s", name: "work", tabs: []*tab{win}, active: 0}
+	ac := &attachedClient{tr: discardTransport{}, rend: renderer.New(renderer.Capabilities{}), size: domain.Size{Cols: 81, Rows: 26}}
+	ac.initOverlays()
+	sess.client = ac
+	ac.setSession(sess)
+	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d.paint(sess, ac, true)
+	left.screen.ClearDamage()
+	right.screen.ClearDamage()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		right.screen.Write([]byte("x\b"))
+		d.paint(sess, ac, false)
+		// Mirror the client ACK pump so the steady state measures compose→diff→send,
+		// not the ack-gate bailout after maxUnackedOutputStates frames.
+		ac.advanceOutputAck(ac.nextStateNum)
+	}
+}
+
+func TestComposeTabFrameStackDrawsTitleBarsAndDimsCollapsed(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
+	p1 := win.focusedPane()
+	p1.title = "one"
+	p1.screen.ClearDamage()
+	p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 3})
+	p2.title = "two"
+	p2.screen.Write([]byte("T"))
+	p2.screen.ClearDamage()
+
+	win.tree.Root = &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(p1.id), layout.NewLeaf(p2.id)}, Expanded: p2.id}
+	win.tree.Focus = p2.id
+	win.panes[p2.id] = p2
+
+	theme := themeui.Theme{Known: true, TrueColor: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 10, B: 10}}
+	frame, _ := composeTabFrame(win, domain.Rect{Width: 20, Height: 5}, theme)
+
+	require.Equal(t, "one", rowText(frame.Row(0))[:3])
+	require.Equal(t, "two", rowText(frame.Row(1))[:3])
+	require.Equal(t, 'T', frame.At(0, 2).Rune)
+	require.True(t, frame.At(0, 0).Style.HasForegroundRGB, "collapsed title bar should use dimmed chrome")
+	require.True(t, frame.At(0, 1).Style.Inverse || frame.At(0, 1).Style.HasBackgroundRGB, "focused title bar should use accent chrome")
+}
+
+func TestComposeClientFrameCacheRefreshesStackTitleBars(t *testing.T) {
+	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
+	p1 := win.focusedPane()
+	p1.title = "one"
+	p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 3})
+	p2.title = "two"
+	p2.screen.Write([]byte("T"))
+	win.tree.Root = &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(p1.id), layout.NewLeaf(p2.id)}, Expanded: p2.id}
+	win.tree.Focus = p2.id
+	win.panes[p2.id] = p2
+	var bars barCache
+	var composed composedFrameCache
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments()}
+	composeClientFrameWithLayoutCached(state, win, true, solveTabLayoutLocked(win), &bars, &composed)
+	p1.screen.ClearDamage()
+	p2.screen.ClearDamage()
+
+	p1.title = "renamed"
+	frame, damage := composeClientFrameWithLayoutCached(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
+
+	require.Equal(t, "renamed", rowText(frame.Row(1))[:7])
+	require.NotEqual(t, []renderer.Damage{renderer.FullRedraw()}, damage, "title-only changes should not force a full layout reset")
+	require.Contains(t, damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 1, Width: 20, Height: 1})
+}
+
+func TestOverlayPaintInvalidationShowsAndRestoresBaseFrame(t *testing.T) {
+	tests := []struct {
+		name          string
+		open          func(*Daemon, *session, *attachedClient)
+		close         func(*Daemon, *session, *attachedClient)
+		visible       string
+		notVisible    string
+		wantRestored  string
+		prepareScreen func(*session)
+	}{
+		{
+			name: "prompt",
+			open: func(d *Daemon, sess *session, ac *attachedClient) {
+				d.enterPrompt(sess, ac, " Rename session ", "work", func(string) error { return nil })
+			},
+			close:      func(d *Daemon, _ *session, ac *attachedClient) { d.handlePromptInput(ac, []byte("\x1b")) },
+			visible:    "Rename session",
+			notVisible: "Rename session",
+		},
+		{
+			name:       "palette",
+			open:       func(d *Daemon, sess *session, ac *attachedClient) { d.enterPalette(sess, ac) },
+			close:      func(d *Daemon, _ *session, ac *attachedClient) { d.handlePaletteInput(ac, []byte("\x1b")) },
+			visible:    "Commands",
+			notVisible: "Commands",
+		},
+		{
+			name:       "picker",
+			open:       func(d *Daemon, sess *session, ac *attachedClient) { d.enterPicker(sess, ac) },
+			close:      func(d *Daemon, sess *session, ac *attachedClient) { d.closePicker(ac); d.paint(sess, ac, true) },
+			visible:    "Sessions",
+			notVisible: "Sessions",
+		},
+		{
+			name:  "copy mode",
+			open:  func(d *Daemon, sess *session, ac *attachedClient) { d.enterCopyMode(sess, ac) },
+			close: func(d *Daemon, _ *session, ac *attachedClient) { d.handleCopyInput(ac, []byte("q")) },
+			prepareScreen: func(sess *session) {
+				sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+			},
+			visible:      "[SCROLL]",
+			notVisible:   "[SCROLL]",
+			wantRestored: "live",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			defer release()
+			sess.tabs[0].focusedPane().screen.Write([]byte("live"))
+			if tt.prepareScreen != nil {
+				tt.prepareScreen(sess)
+			}
+			if tt.wantRestored == "" {
+				tt.wantRestored = "live"
+			}
+
+			tt.open(d, sess, ac)
+			shown := string(mustOutputData(t, sends))
+			require.Contains(t, shown, tt.visible)
+
+			tt.close(d, sess, ac)
+			restored := string(mustOutputData(t, sends))
+			require.Contains(t, restored, tt.wantRestored)
+			require.NotContains(t, restored, tt.notVisible)
+		})
+	}
+}
+
+func TestOverlayPaintBypassesComposedCache(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	defer release()
+	pane := sess.tabs[0].focusedPane()
+	pane.screen.Write([]byte("live"))
+
+	d.paint(sess, ac, true)
+	_ = mustOutputData(t, sends)
+	require.True(t, ac.composed.valid)
+	require.NotContains(t, frameText(ac.composed.frame), "Rename session")
+
+	d.enterPrompt(sess, ac, " Rename session ", "work", func(string) error { return nil })
+	shown := string(mustOutputData(t, sends))
+	require.Contains(t, shown, "Rename session")
+	require.False(t, ac.composed.valid, "overlay paint must not store the modal-mutated frame in the composed cache")
+	require.NotContains(t, frameText(ac.composed.frame), "Rename session")
+
+	d.closePrompt(ac)
+	d.paint(sess, ac, false)
+	restored := string(mustOutputData(t, sends))
+	require.NotContains(t, restored, "Rename session")
+	require.True(t, ac.composed.valid)
+	cached := frameText(ac.composed.frame)
+	require.Contains(t, cached, "live")
+	require.NotContains(t, cached, "Rename session")
+}
+
+func frameText(frame renderer.Frame) string {
+	var b strings.Builder
+	for y := 0; y < frame.Height; y++ {
+		b.WriteString(rowText(frame.Row(y)))
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func TestPaintEarlyReturnReleasesOverlayRenderLocks(t *testing.T) {
+	tests := []struct {
+		name string
+		open func(*Daemon, *session, *attachedClient)
+		try  func(*overlayRuntime) bool
+		give func(*overlayRuntime)
+	}{
+		{
+			name: "prompt",
+			open: func(d *Daemon, sess *session, ac *attachedClient) {
+				d.enterPrompt(sess, ac, " Rename session ", "work", func(string) error { return nil })
+			},
+			try:  func(rt *overlayRuntime) bool { return rt.promptMu.TryLock() },
+			give: func(rt *overlayRuntime) { rt.promptMu.Unlock() },
+		},
+		{
+			name: "palette",
+			open: func(d *Daemon, sess *session, ac *attachedClient) {
+				d.enterPalette(sess, ac)
+			},
+			try:  func(rt *overlayRuntime) bool { return rt.paletteMu.TryLock() },
+			give: func(rt *overlayRuntime) { rt.paletteMu.Unlock() },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+			defer release()
+			sess.tabs[0].tree.Focus = layout.PaneID("missing")
+
+			tt.open(d, sess, ac)
+
+			require.True(t, tt.try(ac.overlays), "overlay render lock should be released after paint returns early")
+			tt.give(ac.overlays)
+		})
+	}
+}
+
 func TestComposeClientFrameBarCacheSkipsUnchangedBars(t *testing.T) {
 	sess, win := newBarCacheTestSession()
 	var cache barCache
 
 	_, damage := composeClientFrame(sess, win, true, "", &cache)
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
-	win.screen.ClearDamage()
-	win.screen.Write([]byte("x"))
+	win.focusedPane().screen.ClearDamage()
+	win.focusedPane().screen.Write([]byte("x"))
 
 	_, damage = composeClientFrame(sess, win, false, "", &cache)
 
 	require.NotEmpty(t, damage)
 	for _, d := range damage {
 		require.NotEqual(t, 0, d.Y, "unchanged top bar should not be damaged")
-		require.NotEqual(t, win.screen.Frame.Height+1, d.Y, "unchanged bottom bar should not be damaged")
+		require.NotEqual(t, win.focusedPane().screen.Frame.Height+1, d.Y, "unchanged bottom bar should not be damaged")
 	}
 }
 
@@ -345,12 +797,12 @@ func TestComposeClientFrameBarCacheDamagesChangedBottomOnly(t *testing.T) {
 	sess, win := newBarCacheTestSession()
 	var cache barCache
 	composeClientFrame(sess, win, true, "", &cache)
-	win.screen.ClearDamage()
+	win.focusedPane().screen.ClearDamage()
 
 	sess.name = "renamed"
 	_, damage := composeClientFrame(sess, win, false, "", &cache)
 
-	require.Equal(t, []renderer.Damage{{Kind: renderer.DamageText, X: 0, Y: win.screen.Frame.Height + 1, Width: win.screen.Frame.Width, Height: 1}}, damage)
+	require.Equal(t, []renderer.Damage{{Kind: renderer.DamageText, X: 0, Y: win.focusedPane().screen.Frame.Height + 1, Width: win.focusedPane().screen.Frame.Width, Height: 1}}, damage)
 }
 
 func TestComposeClientFrameFullRedrawPrimesBarCache(t *testing.T) {
@@ -361,14 +813,14 @@ func TestComposeClientFrameFullRedrawPrimesBarCache(t *testing.T) {
 
 	_, damage := composeClientFrame(sess, win, true, "", &cache)
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
-	win.screen.ClearDamage()
+	win.focusedPane().screen.ClearDamage()
 
 	_, damage = composeClientFrame(sess, win, false, "", &cache)
 	require.Empty(t, damage)
 }
 
 func newBarCacheTestSession() (*session, *tab) {
-	win := &tab{screen: vt.NewScreen(20, 3), size: domain.Size{Cols: 20, Rows: 3}}
+	win := newTab(newScriptPTY(nil), domain.Size{Cols: 20, Rows: 3})
 	sess := &session{id: "s", name: "work", tabs: []*tab{win}}
 	return sess, win
 }
@@ -378,13 +830,13 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 
 	p := portsmocks.NewMockPTY(t)
 	var screenWidthAtResize int
-	win := &tab{screen: vt.NewScreen(80, 24), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 24}}
+	win := newTab(newScriptPTY(nil), domain.Size{Cols: 80, Rows: 24})
 	p.EXPECT().Resize(domain.Size{Cols: 100, Rows: 28}).RunAndReturn(func(sz domain.Size) error {
 		// The screen must not yet be resized when the PTY is: proves order.
-		screenWidthAtResize = win.screen.Frame.Width
+		screenWidthAtResize = win.focusedPane().screen.Frame.Width
 		return nil
 	}).Once()
-	win.pty = p
+	win.focusedPane().pty = p
 
 	var gotOutput atomic.Bool
 	tr := portsmocks.NewMockTransport(t)
@@ -398,20 +850,21 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "s", name: "s", tabs: []*tab{win}, client: ac}
 	ac.setSession(sess)
 
 	d.resize(sess, ac, newSize)
 
 	require.Equal(t, 80, screenWidthAtResize, "pty.Resize must run before screen.Resize")
-	require.Equal(t, 100, win.screen.Frame.Width, "screen resized after pty")
-	require.Equal(t, 28, win.screen.Frame.Height, "screen reserves top and bottom chrome rows")
+	require.Equal(t, 100, win.focusedPane().screen.Frame.Width, "screen resized after pty")
+	require.Equal(t, 28, win.focusedPane().screen.Frame.Height, "screen reserves top and bottom chrome rows")
 	require.True(t, gotOutput.Load(), "resize forces a full redraw output")
 }
 
 // --- reader EOF -> registry-empty shutdown ----------------------------------
 
-func TestSendErrorKillsEphemeral(t *testing.T) {
+func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 	p := portsmocks.NewMockPTY(t)
 	p.EXPECT().Close().Return(nil).Maybe()
 
@@ -420,20 +873,27 @@ func TestSendErrorKillsEphemeral(t *testing.T) {
 	tr.EXPECT().Close().Return(nil).Maybe()
 
 	d := newTestDaemon(t, nil, stubClock{})
-	win := &tab{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}}
+	win := newTab(p, domain.Size{Cols: 20, Rows: 5})
 	sctx, cancel := context.WithCancel(context.Background())
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "e", name: "0", ephemeral: true, tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 
 	win.mu.Lock()
-	win.screen.Write([]byte("x"))
+	win.focusedPane().screen.Write([]byte("x"))
 	win.mu.Unlock()
 
-	d.paint(sess, ac, true) // send fails -> detach -> ephemeral killed
+	d.paint(sess, ac, true)
 
-	require.Equal(t, 0, sessionCount(d), "ephemeral session must die when its client's send fails")
+	require.Equal(t, 1, sessionCount(d), "ephemeral session survives failed client send")
+	sess.mu.Lock()
+	require.Nil(t, sess.client)
+	sess.mu.Unlock()
+
+	_ = d.killSession(sess, ports.ReasonServerShutdown, false)
+	cancel()
 	d.waitNotifies()
 }
 
@@ -463,22 +923,26 @@ func TestSchedulerDefersPendingDirtyTimerDuringSynchronizedUpdate(t *testing.T) 
 
 	d := New(nil, mc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &tab{screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
+	win.ctx, win.cancel = sctx, cancel
+	p := win.focusedPane()
+	p.ctx, p.cancel = sctx, cancel
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 
-	win.mu.Lock()
-	win.screen.Write([]byte("before"))
-	win.mu.Unlock()
+	p.mu.Lock()
+	p.screen.Write([]byte("before"))
+	p.mu.Unlock()
 
 	d.sessWg.Add(1)
-	go d.scheduler(sess, win)
-	win.dirty <- struct{}{}
+	go d.scheduler(sess, win, p)
+	p.dirty <- struct{}{}
 
-	win.mu.Lock()
-	win.screen.Write([]byte("\x1b[?2026hafter"))
-	win.mu.Unlock()
+	p.mu.Lock()
+	p.screen.Write([]byte("\x1b[?2026hafter"))
+	p.mu.Unlock()
 	timerCh <- time.Now()
 
 	select {
@@ -488,10 +952,10 @@ func TestSchedulerDefersPendingDirtyTimerDuringSynchronizedUpdate(t *testing.T) 
 	}
 	require.Equal(t, int32(0), outputs.Load())
 
-	win.mu.Lock()
-	win.screen.Write([]byte(" done\x1b[?2026l"))
-	win.mu.Unlock()
-	win.flush <- struct{}{}
+	p.mu.Lock()
+	p.screen.Write([]byte(" done\x1b[?2026l"))
+	p.mu.Unlock()
+	p.flush <- struct{}{}
 	select {
 	case <-gotOutput:
 	case <-time.After(time.Second):
@@ -523,13 +987,14 @@ func TestPTYQueryGetsResponseWrittenBackToPTY(t *testing.T) {
 
 	tr, sends := newCapturingTransport(t)
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &tab{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "query", name: "query", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 	d.sessWg.Add(1)
-	d.ptyReader(sess, win)
+	d.ptyReader(sess, win, win.focusedPane())
 
 	select {
 	case got := <-writes:
@@ -559,19 +1024,19 @@ func TestPTYReaderSameReadSynchronizedUpdateStartEndFlushesImmediately(t *testin
 	p.EXPECT().Close().Return(nil).Maybe()
 
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &tab{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	win := newTestTabWithContext(p, sctx, cancel)
 	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	d.sessions[sess.id] = sess
 	d.sessWg.Add(1)
-	d.ptyReader(sess, win)
+	d.ptyReader(sess, win, win.focusedPane())
 
 	select {
-	case <-win.dirty:
+	case <-win.focusedPane().dirty:
 		t.Fatal("same-read synchronized update end should request flush, not dirty")
 	default:
 	}
 	select {
-	case <-win.flush:
+	case <-win.focusedPane().flush:
 	case <-time.After(time.Second):
 		t.Fatal("same-read synchronized update end did not request immediate flush")
 	}
@@ -592,19 +1057,19 @@ func TestPTYReaderDefersDirtyDuringSynchronizedUpdateAndFlushesAtEnd(t *testing.
 	p.EXPECT().Close().Return(nil).Maybe()
 
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &tab{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	win := newTestTabWithContext(p, sctx, cancel)
 	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel}
 	d.sessions[sess.id] = sess
 	d.sessWg.Add(1)
-	d.ptyReader(sess, win)
+	d.ptyReader(sess, win, win.focusedPane())
 
 	select {
-	case <-win.dirty:
+	case <-win.focusedPane().dirty:
 		t.Fatal("dirty signaled while synchronized update was active")
 	default:
 	}
 	select {
-	case <-win.flush:
+	case <-win.focusedPane().flush:
 	case <-time.After(time.Second):
 		t.Fatal("sync end did not request immediate flush")
 	}
@@ -628,22 +1093,23 @@ func TestSyncUpdateWatchdogAbandonedSyncRenders(t *testing.T) {
 
 	tr, sends := newCapturingTransport(t)
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &tab{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 	d.sessWg.Add(2)
-	go d.scheduler(sess, win)
-	go d.ptyReader(sess, win)
+	go d.scheduler(sess, win, win.focusedPane())
+	go d.ptyReader(sess, win, win.focusedPane())
 
 	timer := <-clk.timers
 	timer.ch <- time.Now()
 	awaitFrame(t, sends, ports.MsgOutput)
 
 	win.mu.Lock()
-	active := win.screen.SyncUpdateActive()
-	got := screenLineText(win.screen, 0)
+	active := win.focusedPane().screen.SyncUpdateActive()
+	got := screenLineText(win.focusedPane().screen, 0)
 	win.mu.Unlock()
 	require.False(t, active)
 	require.Contains(t, got, "abandoned")
@@ -672,14 +1138,15 @@ func TestSyncUpdateWatchdogStaleGenerationNoopAfterEnd(t *testing.T) {
 
 	tr, sends := newCapturingTransport(t)
 	sctx, cancel := context.WithCancel(context.Background())
-	win := &tab{pty: p, screen: vt.NewScreen(20, 5), dirty: make(chan struct{}, 1), flush: make(chan struct{}, 1), size: domain.Size{Cols: 20, Rows: 5}, ctx: sctx, cancel: cancel}
+	win := newTestTabWithContext(p, sctx, cancel)
 	ac := &attachedClient{tr: tr, rend: renderer.New(renderer.Capabilities{})}
+	ac.initOverlays()
 	sess := &session{id: "sync", name: "sync", tabs: []*tab{win}, ctx: sctx, cancel: cancel, client: ac}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 	d.sessWg.Add(2)
-	go d.scheduler(sess, win)
-	go d.ptyReader(sess, win)
+	go d.scheduler(sess, win, win.focusedPane())
+	go d.ptyReader(sess, win, win.focusedPane())
 
 	timer := <-clk.timers
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -693,7 +1160,7 @@ func TestSyncUpdateWatchdogStaleGenerationNoopAfterEnd(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 	win.mu.Lock()
-	active := win.screen.SyncUpdateActive()
+	active := win.focusedPane().screen.SyncUpdateActive()
 	win.mu.Unlock()
 	require.False(t, active)
 
@@ -706,21 +1173,140 @@ func TestCursorTailVisibleHideAndMoveOnly(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	win := sess.tabs[0]
-	win.screen.Write([]byte("A"))
+	win.focusedPane().screen.Write([]byte("A"))
 
 	d.paint(sess, ac, true)
 	data := mustOutputData(t, sends)
-	require.Contains(t, string(data), "\x1b[5 q")
+	require.Contains(t, string(data), "\x1b[1 q")
 	require.Contains(t, string(data), "\x1b[?25h")
 
-	win.screen.Write([]byte("\x1b[2;3H"))
+	win.focusedPane().screen.Write([]byte("\x1b[2;3H"))
 	d.paint(sess, ac, false)
 	data = mustOutputData(t, sends)
 	require.Contains(t, string(data), "\x1b[3;3H")
 	require.Contains(t, string(data), "\x1b[?25h")
 
-	win.screen.Write([]byte("\x1b[?25l"))
+	win.focusedPane().screen.Write([]byte("\x1b[?25l"))
 	d.paint(sess, ac, false)
 	data = mustOutputData(t, sends)
 	require.Contains(t, string(data), "\x1b[?25l")
+}
+
+func TestCursorTailUsesFocusedPanePlacement(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+	win := sess.tabs[0]
+	win.size = domain.Size{Cols: 80, Rows: 23}
+	left := win.focusedPane()
+	right := newPane("pane-2", nil, domain.Size{Cols: 39, Rows: 23})
+	win.panes[right.id] = right
+	win.tree = layout.NewTree(left.id)
+	require.NoError(t, win.tree.Split(left.id, layout.Right, true, right.id, domain.Rect{Width: 80, Height: 23}))
+	win.tree.Focus = right.id
+	right.screen.Write([]byte("\x1b[2;3H"))
+	placements, ok := layout.Solve(win.tree.Root, domain.Rect{Width: 80, Height: 23})
+	require.True(t, ok)
+	rightContent := placementContent(placements, right.id)
+
+	d.paint(sess, ac, true)
+	data := mustOutputData(t, sends)
+	want := cursorCSI(rightContent.Y+right.screen.CursorRow()+2, rightContent.X+right.screen.CursorCol()+1)
+	require.Contains(t, string(data), want)
+}
+
+func TestCursorTailUsesExpandedStackContentPlacement(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+	win := sess.tabs[0]
+	win.size = domain.Size{Cols: 80, Rows: 23}
+	one := win.focusedPane()
+	two := newPane("pane-2", nil, domain.Size{Cols: 80, Rows: 20})
+	three := newPane("pane-3", nil, domain.Size{Cols: 80, Rows: 20})
+	win.panes[two.id] = two
+	win.panes[three.id] = three
+	win.tree = &layout.Tree{
+		Root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{
+			layout.NewLeaf(one.id),
+			layout.NewLeaf(two.id),
+			layout.NewLeaf(three.id),
+		}, Expanded: two.id},
+		Focus: two.id,
+	}
+	two.screen.Write([]byte("\x1b[2;3H"))
+	placements, ok := layout.Solve(win.tree.Root, domain.Rect{Width: 80, Height: 23})
+	require.True(t, ok)
+	twoContent := placementContent(placements, two.id)
+	require.Greater(t, twoContent.Y, 0, "stack title bars should offset content")
+
+	d.paint(sess, ac, true)
+	data := mustOutputData(t, sends)
+	want := cursorCSI(twoContent.Y+two.screen.CursorRow()+2, twoContent.X+two.screen.CursorCol()+1)
+	require.Contains(t, string(data), want)
+}
+
+func cursorCSI(row, col int) string {
+	return "\x1b[" + strconv.Itoa(row) + ";" + strconv.Itoa(col) + "H"
+}
+
+func TestHistoryNavBottomBar(t *testing.T) {
+	styles := newThemeStyles(themeui.Theme{})
+
+	t.Run("frozen order active styling and right text", func(t *testing.T) {
+		row := make([]renderer.Cell, 40)
+		state := barState{
+			bottomRight: "script",
+			history: []historyNavSession{
+				{id: "work", name: "work"},
+				{id: "api", name: "api", active: true},
+				{id: "docs", name: "docs", ephemeral: true},
+			},
+		}
+
+		drawStatusBarState(row, state, styles)
+
+		got := cellsString(row)
+		require.Contains(t, got, " work  api  docs* ")
+		require.Contains(t, got, " script")
+		apiCol := strings.Index(got, "api")
+		require.NotEqual(t, -1, apiCol)
+		require.True(t, row[apiCol].Style.Equal(styles.accent))
+		workCol := strings.Index(got, "work")
+		require.NotEqual(t, -1, workCol)
+		require.True(t, row[workCol].Style.Equal(styles.statusBar))
+	})
+
+	t.Run("empty history falls back to normal mru", func(t *testing.T) {
+		row := make([]renderer.Cell, 30)
+		state := barState{
+			status: statusSnapshot{session: "work"},
+			mru:    []mruSession{{name: "api"}, {name: "docs"}},
+		}
+
+		drawStatusBarState(row, state, styles)
+
+		got := cellsString(row)
+		require.Contains(t, got, " work  api  docs ")
+		workCol := strings.Index(got, "work")
+		require.NotEqual(t, -1, workCol)
+		require.True(t, row[workCol].Style.Equal(styles.accent))
+	})
+
+	t.Run("narrow fitting keeps active visible in contiguous window", func(t *testing.T) {
+		row := make([]renderer.Cell, 13)
+		state := barState{history: []historyNavSession{
+			{name: "work"},
+			{name: "api"},
+			{name: "docs", active: true},
+			{name: "infra"},
+			{name: "ops"},
+		}}
+
+		drawStatusBarState(row, state, styles)
+
+		got := cellsString(row)
+		require.Contains(t, got, "docs")
+		require.NotContains(t, got, "work")
+		require.NotContains(t, got, "ops")
+		docsCol := strings.Index(got, "docs")
+		require.NotEqual(t, -1, docsCol)
+		require.True(t, row[docsCol].Style.Equal(styles.accent))
+	})
 }

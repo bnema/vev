@@ -3,6 +3,7 @@ package daemon
 import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
@@ -12,18 +13,63 @@ var paletteModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title:
 
 func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	d.closePalette(ac)
-	ac.paletteMu.Lock()
-	ac.palette = palette.NewRegistry()
-	ac.palettePending = nil
-	ac.paletteMu.Unlock()
+	ac.overlays.paletteMu.Lock()
+	ac.overlays.palette = palette.New(d.paletteCommands())
+	ac.overlays.palettePending = nil
+	ac.overlays.paletteMu.Unlock()
 	d.paint(sess, ac, true)
 }
 
 func (d *Daemon) closePalette(ac *attachedClient) {
-	ac.paletteMu.Lock()
-	ac.palette = nil
-	ac.palettePending = nil
-	ac.paletteMu.Unlock()
+	ac.overlays.paletteMu.Lock()
+	ac.overlays.palette = nil
+	ac.overlays.palettePending = nil
+	ac.overlays.paletteMu.Unlock()
+}
+
+func (d *Daemon) paletteCommands() []command.Command {
+	commands := command.Registry()
+	d.paletteRecentMu.Lock()
+	recent := append([]string(nil), d.paletteRecent...)
+	d.paletteRecentMu.Unlock()
+	overrides := d.codeOverrideSnapshot()
+
+	byCode := make(map[string]command.Command, len(commands))
+	for _, cmd := range commands {
+		cmd = commandWithOverrides(cmd, overrides)
+		byCode[cmd.Code] = cmd
+	}
+	out := make([]command.Command, 0, len(commands))
+	used := make(map[string]bool, len(recent))
+	for _, code := range recent {
+		cmd, ok := byCode[code]
+		if !ok || used[code] {
+			continue
+		}
+		out = append(out, cmd)
+		used[code] = true
+	}
+	for _, cmd := range commands {
+		cmd = commandWithOverrides(cmd, overrides)
+		if !used[cmd.Code] {
+			out = append(out, cmd)
+		}
+	}
+	return out
+}
+
+func (d *Daemon) recordPaletteUse(code string) {
+	d.paletteRecentMu.Lock()
+	defer d.paletteRecentMu.Unlock()
+
+	recent := make([]string, 0, len(d.paletteRecent)+1)
+	recent = append(recent, code)
+	for _, existing := range d.paletteRecent {
+		if existing != code {
+			recent = append(recent, existing)
+		}
+	}
+	d.paletteRecent = recent
 }
 
 func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
@@ -32,10 +78,10 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		return
 	}
 
-	ac.paletteMu.Lock()
-	if ac.palette == nil {
-		ac.palettePending = nil
-		ac.paletteMu.Unlock()
+	ac.overlays.paletteMu.Lock()
+	if ac.overlays.palette == nil {
+		ac.overlays.palettePending = nil
+		ac.overlays.paletteMu.Unlock()
 		return
 	}
 	changed := false
@@ -44,17 +90,17 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	var cmd command.Command
 	var ok bool
 
-	routeOverlayBytes(data, &ac.palettePending, overlayEvents{
+	routeOverlayBytes(data, &ac.overlays.palettePending, overlayEvents{
 		rune: func(r rune) {
-			ac.palette.Insert(r)
+			ac.overlays.palette.Insert(r)
 			changed = true
 		},
 		backspace: func() {
-			ac.palette.Backspace()
+			ac.overlays.palette.Backspace()
 			changed = true
 		},
 		enter: func() {
-			cmd, ok = ac.palette.Selected()
+			cmd, ok = ac.overlays.palette.Selected()
 			if ok {
 				run = true
 				exit = true
@@ -62,32 +108,41 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		},
 		cancel: func() { exit = true },
 		up: func() {
-			ac.palette.Up()
+			ac.overlays.palette.Up()
 			changed = true
 		},
 		down: func() {
-			ac.palette.Down()
+			ac.overlays.palette.Down()
 			changed = true
 		},
 	})
 	if exit {
-		ac.palette = nil
-		ac.palettePending = nil
+		ac.overlays.palette = nil
+		ac.overlays.palettePending = nil
 	}
-	ac.paletteMu.Unlock()
+	ac.overlays.paletteMu.Unlock()
 
 	if run && ok {
+		if !isHistoryNavigationCommand(cmd.Slug) {
+			d.clearHistoryNav(ac)
+		}
 		if err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac}); err != nil {
 			sess.mu.Lock()
 			name := sess.name
 			sess.mu.Unlock()
 			d.log.Error("palette command failed", "err", err, "session", name, "command", cmd.Code)
+		} else {
+			d.recordPaletteUse(cmd.Code)
 		}
 		return
 	}
 	if exit || changed {
 		d.paint(sess, ac, true)
 	}
+}
+
+func isHistoryNavigationCommand(slug string) bool {
+	return slug == "back-session" || slug == "forward-session"
 }
 
 type paletteExec struct {
@@ -115,6 +170,50 @@ func (e paletteExec) CloseTab() error {
 	return nil
 }
 
+func (e paletteExec) SplitRight() error {
+	return e.d.splitPane(e.sess, e.ac, layout.Right)
+}
+
+func (e paletteExec) SplitLeft() error {
+	return e.d.splitPane(e.sess, e.ac, layout.Left)
+}
+
+func (e paletteExec) SplitUp() error {
+	return e.d.splitPane(e.sess, e.ac, layout.Up)
+}
+
+func (e paletteExec) SplitDown() error {
+	return e.d.splitPane(e.sess, e.ac, layout.Down)
+}
+
+func (e paletteExec) StackPane() error {
+	return e.d.stackPane(e.sess, e.ac)
+}
+
+func (e paletteExec) ToggleStack() error {
+	return e.d.toggleStack(e.sess, e.ac)
+}
+
+func (e paletteExec) ClosePane() error {
+	return e.d.closeFocusedPane(e.sess, e.ac)
+}
+
+func (e paletteExec) FocusPaneLeft() error {
+	return e.d.focusDir(e.sess, e.ac, layout.Left)
+}
+
+func (e paletteExec) FocusPaneRight() error {
+	return e.d.focusDir(e.sess, e.ac, layout.Right)
+}
+
+func (e paletteExec) FocusPaneUp() error {
+	return e.d.focusDir(e.sess, e.ac, layout.Up)
+}
+
+func (e paletteExec) FocusPaneDown() error {
+	return e.d.focusDir(e.sess, e.ac, layout.Down)
+}
+
 func (e paletteExec) NextTab() error {
 	e.sess.switchRelative(1)
 	e.d.paint(e.sess, e.ac, true)
@@ -127,8 +226,18 @@ func (e paletteExec) PrevTab() error {
 	return nil
 }
 
+func (e paletteExec) BackSession() error {
+	e.d.navigateRecentSession(e.sess, e.ac, 1)
+	return nil
+}
+
+func (e paletteExec) ForwardSession() error {
+	e.d.navigateRecentSession(e.sess, e.ac, -1)
+	return nil
+}
+
 func (e paletteExec) Detach() error {
-	e.d.clientGone(e.sess, e.ac, true)
+	e.d.clientGone(e.sess, e.ac, e.ac.transport(), true)
 	return nil
 }
 
@@ -168,12 +277,7 @@ func (e paletteExec) OpenSessionPicker() error {
 
 func composePaletteClientFrame(model *palette.Model, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
 	styleSet := resolveThemeStyles(styles)
-	inner := paletteModal.Composite(base, styleSet.border)
-	modalFrame := model.Render(domain.Size{Cols: inner.Width, Rows: inner.Height}, styleSet.selection)
-	for y := range min(inner.Height, modalFrame.Height) {
-		for x := range min(inner.Width, modalFrame.Width) {
-			base.Set(inner.X+x, inner.Y+y, modalFrame.At(x, y))
-		}
-	}
-	return base, []renderer.Damage{renderer.FullRedraw()}
+	return composeModalClientFrame(base, paletteModal, styleSet, styleSet.selection, func(size domain.Size, _ ...renderer.Style) renderer.Frame {
+		return model.Render(size, palette.RenderStyles{Selection: styleSet.selection, Description: styleSet.paletteDesc})
+	})
 }

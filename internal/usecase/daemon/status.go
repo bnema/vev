@@ -17,26 +17,28 @@
 //     when the parent context is cancelled (graceful shutdown notifies any
 //     attached clients with ReasonServerShutdown).
 //
-// Locking: a session's screen and per-client renderer shadow are both guarded
-// by tab.mu; the attached-client pointer by session.mu; the registry by
-// Daemon.mu. When more than one is held the order is always
-// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
-// a slow client.
+// Locking: a pane's screen/scrollback and per-client renderer shadow are
+// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
+// session.mu; the registry by Daemon.mu. History-navigation display state is
+// guarded by attachedClient.historyNavMu. When more than one is held the order
+// is always attachedClient.sendMu > attachedClient.historyNavMu > Daemon.mu >
+// session.mu > tab.mu > pane.mu. The PTY reader only ever takes pane.mu, so it
+// never blocks on a slow client.
 package daemon
 
 import (
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
 const (
 	attentionGlyph     = ''
+	maxMRUSessions     = 9
 	pulseFrameCount    = 30
 	pulseFrameInterval = 120 * time.Millisecond
 )
@@ -58,7 +60,7 @@ func pulseStyle(frame int) (renderer.Style, bool) {
 	return style, true
 }
 
-func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, styles themeStyles) {
+func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, topRight string, styles themeStyles) {
 	clearStatusRow(row)
 	x := 0
 	for _, w := range status.tabs {
@@ -73,35 +75,76 @@ func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, s
 		}
 		writeStatusText(row, &x, " ", style)
 	}
+	drawRightPlainText(row, topRight, x, styles.statusBar)
 }
 
 func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles) {
 	clearStatusRow(row)
-	leftText := " " + state.status.session + " "
 	x := 0
-	writeStatusText(row, &x, leftText, styles.statusBar)
+	rightText := composeBottomRightText(state.bottomRight, state.copyFeedback)
+	if len(state.history) > 0 {
+		drawHistoryNavSessions(row, &x, state.history, rightText, state.attentionFrame, styles)
+		drawRightPlainText(row, rightText, x, styles.statusBar)
+		return
+	}
 
-	reservedLeft := len([]rune(leftText))
-	if state.copyFeedback != "" {
-		drawRightPlainText(row, state.copyFeedback, reservedLeft, styles.statusBar)
-		return
+	writeStatusText(row, &x, " "+state.status.session+" ", styles.accent)
+
+	fittedMRU := fitMRU(state.mru, len(row), x, rightText)
+	for i, sess := range fittedMRU {
+		style := mruStyle(styles.statusBar, state.theme, i, len(fittedMRU))
+		drawStatusSessionEntry(row, &x, sess.name, sess.ephemeral, sess.attention, style, state.attentionFrame)
 	}
-	rightText := state.attentionStackText(len(row), reservedLeft)
-	if rightText == "" {
-		return
+	drawRightPlainText(row, rightText, x, styles.statusBar)
+}
+
+func drawHistoryNavSessions(row []renderer.Cell, x *int, entries []historyNavSession, rightText string, attentionFrame int, styles themeStyles) {
+	for _, sess := range fitHistoryNav(entries, len(row), *x, rightText) {
+		style := styles.statusBar
+		if sess.active {
+			style = styles.accent
+		}
+		drawStatusSessionEntry(row, x, sess.name, sess.ephemeral, sess.attention, style, attentionFrame)
 	}
-	rightWidth := len([]rune(rightText)) + 1
-	x = len(row) - rightWidth
-	writeStatusText(row, &x, " ", styles.statusBar)
-	writeAttentionText(row, &x, rightText, state.attentionFrame, styles.statusBar)
+}
+
+func drawStatusSessionEntry(row []renderer.Cell, x *int, name string, ephemeral, attention bool, style renderer.Style, attentionFrame int) {
+	if ephemeral {
+		name += "*"
+	}
+	writeStatusText(row, x, " "+name, style)
+	if attention {
+		writeStatusText(row, x, " ", style)
+		writeBell(row, x, attentionFrame)
+	}
+	writeStatusText(row, x, " ", style)
+}
+
+func composeBottomRightText(scriptText, copyFeedback string) string {
+	if scriptText == "" {
+		return copyFeedback
+	}
+	if copyFeedback == "" {
+		return scriptText
+	}
+	return scriptText + " " + copyFeedback
 }
 
 func drawRightPlainText(row []renderer.Cell, text string, reservedLeft int, style renderer.Style) {
-	if len([]rune(text))+1+reservedLeft > len(row) {
+	textWidth := statusTextWidth(text)
+	if text == "" || textWidth+1+reservedLeft > len(row) {
 		return
 	}
-	x := len(row) - len([]rune(text)) - 1
+	x := len(row) - textWidth - 1
 	writeStatusText(row, &x, " "+text, style)
+}
+
+func statusTextWidth(text string) int {
+	width := 0
+	for _, r := range text {
+		width += renderer.RuneWidth(r)
+	}
+	return width
 }
 
 func clearStatusRow(row []renderer.Cell) {
@@ -112,13 +155,33 @@ func clearStatusRow(row []renderer.Cell) {
 
 type barState struct {
 	status         statusSnapshot
+	topRight       string
+	bottomRight    string
 	copyFeedback   string
-	otherAttention []string
+	mru            []mruSession
+	history        []historyNavSession
 	attentionFrame int
 	// theme is the client's terminal theme, if reported. Its zero value
 	// (Theme{}, Known: false) is a valid "no theme" default that resolves to
 	// the pre-theme fallback styles (see newThemeStyles / theme.usable).
 	theme themeui.Theme
+}
+
+type mruSession struct {
+	id        domain.SessionID
+	name      string
+	ephemeral bool
+	attention bool
+	// mruAt orders entries in barStateFor (freshest first); drawing ignores it.
+	mruAt uint64
+}
+
+type historyNavSession struct {
+	id        domain.SessionID
+	name      string
+	ephemeral bool
+	attention bool
+	active    bool
 }
 
 type statusSnapshot struct {
@@ -141,16 +204,59 @@ func (s *session) statusSegments() statusSnapshot {
 	}
 	snap := statusSnapshot{session: name, tabs: make([]statusTab, len(s.tabs))}
 	for i, tb := range s.tabs {
-		snap.tabs[i] = statusTab{name: tabDisplayName(tb, i), active: i == s.active, attention: tb.attention}
+		name := strconv.Itoa(i + 1)
+		active := i == s.active
+		attention := tb.attention && (!active || tb.attentionVisiblePaint)
+		snap.tabs[i] = statusTab{name: name, active: active, attention: attention}
 	}
 	return snap
 }
 
-func tabDisplayName(tb *tab, index int) string {
-	if tb.name != "" {
-		return tb.name
+func (d *Daemon) barStateForClient(cur *session, ac *attachedClient, copyFeedback string) barState {
+	state := d.barStateFor(cur, copyFeedback)
+	state.history = d.historyNavBarState(ac)
+	return state
+}
+
+func (d *Daemon) historyNavBarState(ac *attachedClient) []historyNavSession {
+	if d == nil || ac == nil {
+		return nil
 	}
-	return strconv.Itoa(index + 1)
+	ac.historyNavMu.Lock()
+	if !ac.historyNav.active() {
+		ac.historyNavMu.Unlock()
+		return nil
+	}
+	ids := append([]domain.SessionID(nil), ac.historyNav.ids...)
+	activeIndex := ac.historyNav.index
+	ac.historyNavMu.Unlock()
+
+	d.mu.Lock()
+	out := make([]historyNavSession, 0, len(ids))
+	valid := true
+	for i, id := range ids {
+		sess := d.sessions[id]
+		if sess == nil {
+			valid = false
+			break
+		}
+		sess.mu.Lock()
+		entry := historyNavSession{id: sess.id, name: sess.name, ephemeral: sess.ephemeral, active: i == activeIndex}
+		for _, tb := range sess.tabs {
+			if tb.attention {
+				entry.attention = true
+				break
+			}
+		}
+		sess.mu.Unlock()
+		out = append(out, entry)
+	}
+	d.mu.Unlock()
+	if !valid {
+		d.clearHistoryNav(ac)
+		return nil
+	}
+	return out
 }
 
 func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
@@ -161,72 +267,182 @@ func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 	if cur != nil {
 		state.status = cur.statusSegments()
 	}
-	if d == nil || copyFeedback != "" {
+	if d != nil {
+		state.topRight, state.bottomRight = d.barScriptSnapshot(cur)
+	}
+	if d == nil {
 		return state
 	}
-	type attentionSession struct {
-		name string
-		at   time.Time
-	}
 	d.mu.Lock()
-	attention := make([]attentionSession, 0, len(d.sessions))
+	mru := make([]mruSession, 0, len(d.sessions))
 	for _, sess := range d.sessions {
 		if sess == cur {
 			continue
 		}
+		at := sess.mruAt.Load()
 		sess.mu.Lock()
-		var oldest time.Time
-		found := false
+		entry := mruSession{id: sess.id, name: sess.name, ephemeral: sess.ephemeral, mruAt: at}
 		for _, tb := range sess.tabs {
-			if !tb.attention {
-				continue
+			if tb.attention {
+				entry.attention = true
+				break
 			}
-			if !found || tb.attentionAt.Before(oldest) {
-				oldest = tb.attentionAt
-				found = true
-			}
-		}
-		if found {
-			attention = append(attention, attentionSession{name: sess.name, at: oldest})
 		}
 		sess.mu.Unlock()
+		mru = append(mru, entry)
 	}
 	d.mu.Unlock()
-	sort.SliceStable(attention, func(i, j int) bool { return attention[i].at.Before(attention[j].at) })
-	state.otherAttention = make([]string, len(attention))
-	for i := range attention {
-		state.otherAttention[i] = attention[i].name
+	sort.SliceStable(mru, func(i, j int) bool {
+		if mru[i].mruAt == mru[j].mruAt {
+			return mru[i].name < mru[j].name
+		}
+		return mru[i].mruAt > mru[j].mruAt
+	})
+	if len(mru) > maxMRUSessions {
+		mru = mru[:maxMRUSessions]
 	}
+	state.mru = mru
 	return state
 }
 
-func (s barState) attentionStackText(width, reservedLeft int) string {
-	if len(s.otherAttention) == 0 {
-		return ""
+func fitHistoryNav(entries []historyNavSession, rowLen, leftUsed int, feedback string) []historyNavSession {
+	copyReserve := 1
+	if feedback != "" {
+		copyReserve = statusTextWidth(feedback) + 2
 	}
-	parts := make([]string, len(s.otherAttention))
-	for i, name := range s.otherAttention {
-		parts[i] = string(attentionGlyph) + " " + name
+	budget := rowLen - leftUsed - copyReserve
+	if budget <= 0 || len(entries) == 0 {
+		return nil
 	}
-	full := strings.Join(parts, "  ")
-	if len([]rune(full))+1+reservedLeft <= width {
-		return full
+	cost := func(e historyNavSession) int {
+		name := e.name
+		if e.ephemeral {
+			name += "*"
+		}
+		n := 2 + statusTextWidth(name)
+		if e.attention {
+			n += 1 + renderer.RuneWidth(attentionGlyph)
+		}
+		return n
 	}
-	collapsed := string(attentionGlyph) + " ×" + strconv.Itoa(len(s.otherAttention))
-	if len([]rune(collapsed))+1+reservedLeft <= width {
-		return collapsed
+	used := 0
+	for _, e := range entries {
+		used += cost(e)
 	}
-	return ""
+	if used <= budget {
+		return entries
+	}
+	active := 0
+	for i, e := range entries {
+		if e.active {
+			active = i
+			break
+		}
+	}
+	if cost(entries[active]) > budget {
+		return nil
+	}
+	start, end := active, active+1
+	used = cost(entries[active])
+	for {
+		expanded := false
+		if start > 0 {
+			c := cost(entries[start-1])
+			if used+c <= budget {
+				start--
+				used += c
+				expanded = true
+			}
+		}
+		if end < len(entries) {
+			c := cost(entries[end])
+			if used+c <= budget {
+				end++
+				used += c
+				expanded = true
+			}
+		}
+		if !expanded {
+			break
+		}
+	}
+	return entries[start:end]
 }
 
-func writeAttentionText(row []renderer.Cell, x *int, text string, frame int, style renderer.Style) {
-	for _, r := range text {
-		if r == attentionGlyph {
-			writeBell(row, x, frame)
-			continue
-		}
-		writeStatusText(row, x, string(r), style)
+func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSession {
+	// With no feedback, keep one blank trailing cell; with feedback, reserve
+	// its " text" width plus a one-cell gap so drawRightPlainText always fits.
+	copyReserve := 1
+	if feedback != "" {
+		copyReserve = statusTextWidth(feedback) + 2
 	}
+	physicalBudget := rowLen - leftUsed - copyReserve
+	if physicalBudget <= 0 || len(entries) == 0 {
+		return nil
+	}
+	cost := func(e mruSession) int {
+		name := e.name
+		if e.ephemeral {
+			name += "*"
+		}
+		n := 2 + statusTextWidth(name)
+		if e.attention {
+			n += 1 + renderer.RuneWidth(attentionGlyph)
+		}
+		return n
+	}
+
+	budget := physicalBudget
+	if feedback == "" {
+		budget -= mruFutureRightReserve(rowLen)
+		// Keep at least one recent session when it physically fits; the reserved
+		// right side is only a budget preference, not a reason to hide all recents.
+		if firstCost := cost(entries[0]); firstCost <= physicalBudget && budget < firstCost {
+			budget = firstCost
+		}
+	}
+	if budget <= 0 {
+		return nil
+	}
+	used := 0
+	for i, e := range entries {
+		used += cost(e)
+		if used > budget {
+			return entries[:i]
+		}
+	}
+	return entries
+}
+
+const (
+	mruReserveMinRow  = 40
+	mruReserveDivisor = 4
+	mruReserveMin     = 12
+	mruReserveMax     = 24
+)
+
+func mruFutureRightReserve(rowLen int) int {
+	if rowLen < mruReserveMinRow {
+		return 0
+	}
+	reserve := rowLen / mruReserveDivisor
+	if reserve < mruReserveMin {
+		return mruReserveMin
+	}
+	if reserve > mruReserveMax {
+		return mruReserveMax
+	}
+	return reserve
+}
+
+func mruStyle(base renderer.Style, t themeui.Theme, i, count int) renderer.Style {
+	if count <= 1 || !base.HasForegroundRGB || !base.HasBackgroundRGB || !t.HasBG {
+		return base
+	}
+	amount := (float64(i) / float64(count-1)) * 0.6
+	base.ForegroundRGB = themeui.Blend(base.ForegroundRGB, t.Background, amount)
+	base.BackgroundRGB = themeui.Blend(base.BackgroundRGB, t.Background, amount)
+	return base
 }
 
 func writeBell(row []renderer.Cell, x *int, frame int) {
@@ -240,10 +456,18 @@ func writeBell(row []renderer.Cell, x *int, frame int) {
 
 func writeStatusText(row []renderer.Cell, x *int, text string, style renderer.Style) {
 	for _, r := range text {
-		if *x >= len(row) {
+		width := renderer.RuneWidth(r)
+		if width == 0 {
+			continue
+		}
+		if *x >= len(row) || *x+width > len(row) {
 			return
 		}
 		row[*x] = renderer.Cell{Rune: r, Style: style}
 		(*x)++
+		if width == 2 {
+			row[*x] = renderer.Cell{Style: style, Continuation: true}
+			(*x)++
+		}
 	}
 }

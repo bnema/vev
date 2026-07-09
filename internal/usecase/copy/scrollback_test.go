@@ -7,8 +7,9 @@ import (
 )
 
 func row(text string) []renderer.Cell {
-	cells := make([]renderer.Cell, len(text))
-	for i, r := range text {
+	runes := []rune(text)
+	cells := make([]renderer.Cell, len(runes))
+	for i, r := range runes {
 		cells[i] = renderer.Cell{Rune: r, Style: renderer.DefaultStyle()}
 	}
 	return cells
@@ -108,5 +109,69 @@ func TestScrollbackCopiesRows(t *testing.T) {
 				t.Fatalf("stored row = %q, want copy unaffected by caller/read mutation", text)
 			}
 		})
+	}
+}
+
+func TestScrollbackSnapshot(t *testing.T) {
+	tests := []struct {
+		name     string
+		cap      int
+		append   []string
+		wantRows []string
+	}{
+		{
+			name:     "empty capacity snapshots no rows",
+			cap:      0,
+			append:   []string{"aa", "bb"},
+			wantRows: nil,
+		},
+		{
+			name:     "oldest first after ring wrap",
+			cap:      3,
+			append:   []string{"aa", "bb", "cc", "dd"},
+			wantRows: []string{"bb", "cc", "dd"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sb := NewScrollback(tt.cap)
+			for _, r := range tt.append {
+				sb.Append(row(r))
+			}
+
+			got := sb.Snapshot()
+			if len(got) != len(tt.wantRows) {
+				t.Fatalf("Snapshot() len = %d, want %d", len(got), len(tt.wantRows))
+			}
+			for i, want := range tt.wantRows {
+				if text := rowText(got[i]); text != want {
+					t.Fatalf("Snapshot()[%d] = %q, want %q", i, text, want)
+				}
+			}
+			if len(got) > 0 {
+				got[0] = row("zz")
+				if text := rowText(sb.Row(0)); text != tt.wantRows[0] {
+					t.Fatalf("Snapshot() outer slice mutation changed storage: Row(0) = %q, want %q", text, tt.wantRows[0])
+				}
+			}
+		})
+	}
+}
+
+func TestScrollbackAppendDoesNotMutateSnapshottedRows(t *testing.T) {
+	sb := NewScrollback(2)
+	sb.Append(row("aa"))
+	sb.Append(row("bb"))
+	snapshot := sb.Snapshot()
+
+	sb.Append(row("cc"))
+	sb.Append(row("dd"))
+
+	if text := rowText(snapshot[0]); text != "aa" {
+		t.Fatalf("snapshot[0] after append = %q, want original row", text)
+	}
+	if text := rowText(snapshot[1]); text != "bb" {
+		t.Fatalf("snapshot[1] after append = %q, want original row", text)
 	}
 }

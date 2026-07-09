@@ -12,8 +12,16 @@ var bufferPool = sync.Pool{
 	New: func() any { return new(bytes.Buffer) },
 }
 
+type AdvancePolicy uint8
+
+const (
+	AdvanceOnSend AdvancePolicy = iota
+	AdvanceOnAck
+)
+
 type Capabilities struct {
 	SynchronizedOutput bool
+	AdvancePolicy      AdvancePolicy
 }
 
 type Renderer struct {
@@ -36,9 +44,16 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 		return nil, err
 	}
 
-	// Unchanged frame no-op: same dimensions, shadow populated, no damage, no dirty lines.
-	if r.width == frame.Width && r.height == frame.Height && len(r.shadow) == len(frame.Cells) {
+	knownSameDimensions := r.width == frame.Width && r.height == frame.Height && len(r.shadow) == len(frame.Cells)
+
+	// Unchanged frame no-op: same dimensions, shadow populated, and either no
+	// damage or a structural redraw request that can be satisfied from the
+	// known terminal shadow.
+	if knownSameDimensions {
 		if len(damage) == 0 && !r.hasDirtyLines(frame) {
+			return nil, nil
+		}
+		if needsFull(damage) && !r.hasDirtyLines(frame) {
 			return nil, nil
 		}
 	}
@@ -55,9 +70,18 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 	// tracking and the SGR pen persist across all rects within one Draw.
 	st := newDrawState()
 
-	if r.width != frame.Width || r.height != frame.Height || len(r.shadow) != len(frame.Cells) || needsFull(damage) {
+	if !knownSameDimensions {
 		r.writeFull(buf, frame, &st)
-		r.replaceShadow(frame)
+		r.advanceShadow(frame)
+		if r.caps.SynchronizedOutput {
+			buf.WriteString(SyncEndCSI)
+		}
+		return copyBytes(buf), nil
+	}
+
+	if needsFull(damage) {
+		r.writeDamage(buf, frame, nil, nil, &st)
+		r.advanceShadow(frame)
 		if r.caps.SynchronizedOutput {
 			buf.WriteString(SyncEndCSI)
 		}
@@ -69,9 +93,11 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 		// emitScrollUp resets the SGR pen to default (matching st's initial
 		// pen) but leaves the cursor wherever the DECSTBM restore put it —
 		// terminal-dependent, so cursor tracking stays invalidated.
-		r.applyScroll(scroll)
+		if r.caps.AdvancePolicy == AdvanceOnSend {
+			r.applyScroll(scroll)
+		}
 		r.writeDamage(buf, frame, damage, &scroll, &st)
-		r.syncDamage(frame, damage, &scroll)
+		r.advanceDamage(frame, damage, &scroll)
 		if r.caps.SynchronizedOutput {
 			buf.WriteString(SyncEndCSI)
 		}
@@ -83,7 +109,7 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 	// partial damage and leaving the terminal/shadow stale.
 	if hasScrollDamage(damage) {
 		r.writeFull(buf, frame, &st)
-		r.replaceShadow(frame)
+		r.advanceShadow(frame)
 		if r.caps.SynchronizedOutput {
 			buf.WriteString(SyncEndCSI)
 		}
@@ -91,7 +117,7 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 	}
 
 	r.writeDamage(buf, frame, damage, nil, &st)
-	r.syncDamage(frame, damage, nil)
+	r.advanceDamage(frame, damage, nil)
 	if r.caps.SynchronizedOutput {
 		buf.WriteString(SyncEndCSI)
 	}
@@ -192,6 +218,30 @@ func (r *Renderer) lineDirty(frame Frame, y int) bool {
 	return false
 }
 
+// Ack advances an AdvanceOnAck renderer's shadow after the caller knows the
+// bytes for frame reached the terminal. It is harmless for AdvanceOnSend.
+func (r *Renderer) Ack(frame Frame) error {
+	if err := frame.Validate(); err != nil {
+		return err
+	}
+	r.replaceShadow(frame)
+	return nil
+}
+
+func (r *Renderer) advanceShadow(frame Frame) {
+	if r.caps.AdvancePolicy == AdvanceOnAck {
+		return
+	}
+	r.replaceShadow(frame)
+}
+
+func (r *Renderer) advanceDamage(frame Frame, damage []Damage, scroll *Damage) {
+	if r.caps.AdvancePolicy == AdvanceOnAck {
+		return
+	}
+	r.syncDamage(frame, damage, scroll)
+}
+
 func (r *Renderer) replaceShadow(frame Frame) {
 	r.width = frame.Width
 	r.height = frame.Height
@@ -269,8 +319,34 @@ func writeStyle(out *bytes.Buffer, style Style) {
 	if style.Bold {
 		out.WriteString(";1")
 	}
+	if style.Attrs&AttrDim != 0 {
+		out.WriteString(";2")
+	}
+	if style.Italic {
+		out.WriteString(";3")
+	}
+	if style.Attrs&AttrUnderline != 0 {
+		switch style.UnderlineStyle {
+		case UnderlineDouble:
+			out.WriteString(";21")
+		case UnderlineCurly:
+			out.WriteString(";4:3")
+		case UnderlineDotted:
+			out.WriteString(";4:4")
+		case UnderlineDashed:
+			out.WriteString(";4:5")
+		default:
+			out.WriteString(";4")
+		}
+	}
+	if style.Attrs&AttrBlink != 0 {
+		out.WriteString(";5")
+	}
 	if style.Inverse {
 		out.WriteString(";7")
+	}
+	if style.Attrs&AttrStrikethrough != 0 {
+		out.WriteString(";9")
 	}
 	var b [16]byte
 	if style.HasForegroundRGB {
@@ -287,6 +363,14 @@ func writeStyle(out *bytes.Buffer, style Style) {
 	} else if style.Background >= 0 {
 		out.WriteString(";48;5;")
 		n := strconv.AppendInt(b[:0], int64(style.Background), 10)
+		out.Write(n)
+	}
+	if style.HasUnderlineColorRGB {
+		out.WriteString(";58;2;")
+		writeRGB(out, &b, style.UnderlineColorRGB)
+	} else if style.HasUnderlineColor {
+		out.WriteString(";58;5;")
+		n := strconv.AppendInt(b[:0], int64(style.UnderlineColor), 10)
 		out.Write(n)
 	}
 	out.WriteByte('m')

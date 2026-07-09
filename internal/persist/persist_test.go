@@ -12,8 +12,13 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
+func privateDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "vev")
+}
+
 func TestRecordCodecRoundTrip(t *testing.T) {
-	r := Record{Name: "work", Cwd: "/tmp/project", CreatedAt: 11, UpdatedAt: 22, TabNames: []string{"shell", "logs"}}
+	r := Record{Name: "work", Cwd: "/tmp/project", CreatedAt: 11, UpdatedAt: 22, LastUsedSeq: 33}
 	value, err := encodeRecordValue(r)
 	require.NoError(t, err)
 
@@ -22,18 +27,14 @@ func TestRecordCodecRoundTrip(t *testing.T) {
 	require.Equal(t, r, got)
 }
 
-func TestRecordCodecReadsLegacyRecordWithoutTabNames(t *testing.T) {
-	cwd := "/tmp/project"
-	value := make([]byte, 4+len(cwd)+8+8)
-	binary.BigEndian.PutUint32(value[:4], uint32(len(cwd)))
-	copy(value[4:], cwd)
-	off := 4 + len(cwd)
-	binary.BigEndian.PutUint64(value[off:off+8], 11)
-	binary.BigEndian.PutUint64(value[off+8:off+16], 22)
+func TestRecordCodecOldRecordDefaultsLastUsed(t *testing.T) {
+	old := []byte{0, 0, 0, 4, '/', 't', 'm', 'p'}
+	old = append(old, 0, 0, 0, 0, 0, 0, 0, 11)
+	old = append(old, 0, 0, 0, 0, 0, 0, 0, 22)
 
-	got, err := decodeRecordValue("work", value)
+	got, err := decodeRecordValue("work", old)
 	require.NoError(t, err)
-	require.Equal(t, Record{Name: "work", Cwd: cwd, CreatedAt: 11, UpdatedAt: 22}, got)
+	require.Equal(t, Record{Name: "work", Cwd: "/tmp", CreatedAt: 11, UpdatedAt: 22}, got)
 }
 
 func TestRecordCodecRejectsMalformedData(t *testing.T) {
@@ -46,8 +47,6 @@ func TestRecordCodecRejectsMalformedData(t *testing.T) {
 		{0, 0, 0, 5, 'a'},
 		{0, 0, 0, 1, 'a', 0},
 		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255},
 	}
 	for _, value := range badValues {
 		_, err := decodeRecordValue("name", value)
@@ -79,30 +78,31 @@ func TestNilPersisterNoOps(t *testing.T) {
 }
 
 func TestPersisterSaveTouchDeleteLoadAll(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	p, err := Open(dir)
 	require.NoError(t, err)
 
-	require.NoError(t, p.Save(Record{Name: "b", Cwd: "/b", CreatedAt: 10, UpdatedAt: 10, TabNames: []string{"shell", "logs"}}))
-	require.NoError(t, p.Save(Record{Name: "a", Cwd: "/a", CreatedAt: 20, UpdatedAt: 20}))
+	require.NoError(t, p.Save(Record{Name: "b", Cwd: "/b", CreatedAt: 10, UpdatedAt: 10, LastUsedSeq: 40}))
+	require.NoError(t, p.Save(Record{Name: "a", Cwd: "/a", CreatedAt: 20, UpdatedAt: 20, LastUsedSeq: 50}))
 	require.NoError(t, p.Touch("b", "/b/next", 30))
+	require.NoError(t, p.TouchMRU("b", 60))
 
 	records, err := p.LoadAll()
 	require.NoError(t, err)
 	require.Equal(t, []Record{
-		{Name: "a", Cwd: "/a", CreatedAt: 20, UpdatedAt: 20},
-		{Name: "b", Cwd: "/b/next", CreatedAt: 10, UpdatedAt: 30, TabNames: []string{"shell", "logs"}},
+		{Name: "a", Cwd: "/a", CreatedAt: 20, UpdatedAt: 20, LastUsedSeq: 50},
+		{Name: "b", Cwd: "/b/next", CreatedAt: 10, UpdatedAt: 30, LastUsedSeq: 60},
 	}, records)
 
 	require.NoError(t, p.Delete("a"))
 	records, err = p.LoadAll()
 	require.NoError(t, err)
-	require.Equal(t, []Record{{Name: "b", Cwd: "/b/next", CreatedAt: 10, UpdatedAt: 30, TabNames: []string{"shell", "logs"}}}, records)
+	require.Equal(t, []Record{{Name: "b", Cwd: "/b/next", CreatedAt: 10, UpdatedAt: 30, LastUsedSeq: 60}}, records)
 	require.NoError(t, p.Close())
 }
 
 func TestDecodeAllSkipsMalformedRecords(t *testing.T) {
-	good, err := encodeRecordValue(Record{Name: "good", Cwd: "/ok", CreatedAt: 1, UpdatedAt: 2})
+	good, err := encodeRecordValue(Record{Name: "good", Cwd: "/ok", CreatedAt: 1, UpdatedAt: 2, LastUsedSeq: 3})
 	require.NoError(t, err)
 
 	records, err := decodeAll(map[string][]byte{
@@ -110,19 +110,19 @@ func TestDecodeAllSkipsMalformedRecords(t *testing.T) {
 		"good": good,
 	})
 	require.NoError(t, err)
-	require.Equal(t, []Record{{Name: "good", Cwd: "/ok", CreatedAt: 1, UpdatedAt: 2}}, records)
+	require.Equal(t, []Record{{Name: "good", Cwd: "/ok", CreatedAt: 1, UpdatedAt: 2, LastUsedSeq: 3}}, records)
 }
 
 func TestLoadReadOnlyUsesReplay(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	p, err := Open(dir)
 	require.NoError(t, err)
-	require.NoError(t, p.Save(Record{Name: "work", Cwd: "/work", CreatedAt: 1, UpdatedAt: 2}))
+	require.NoError(t, p.Save(Record{Name: "work", Cwd: "/work", CreatedAt: 1, UpdatedAt: 2, LastUsedSeq: 3}))
 	require.NoError(t, p.Close())
 
 	records, err := LoadReadOnly(dir)
 	require.NoError(t, err)
-	require.Equal(t, []Record{{Name: "work", Cwd: "/work", CreatedAt: 1, UpdatedAt: 2}}, records)
+	require.Equal(t, []Record{{Name: "work", Cwd: "/work", CreatedAt: 1, UpdatedAt: 2, LastUsedSeq: 3}}, records)
 
 	// Missing stores replay as empty rather than creating the WAL.
 	missing := filepath.Join(t.TempDir(), "missing")
@@ -141,6 +141,10 @@ func TestSyncBehavior(t *testing.T) {
 
 	require.NoError(t, p.Touch("work", "/work/next", 2))
 	require.Equal(t, 2, state.sets)
+	require.Equal(t, 1, state.syncs)
+
+	require.NoError(t, p.TouchMRU("work", 3))
+	require.Equal(t, 3, state.sets)
 	require.Equal(t, 1, state.syncs)
 
 	require.NoError(t, p.Delete("work"))

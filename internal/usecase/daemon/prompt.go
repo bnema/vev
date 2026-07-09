@@ -3,7 +3,6 @@ package daemon
 import (
 	"strings"
 
-	"github.com/bnema/vev/internal/domain"
 	promptui "github.com/bnema/vev/internal/usecase/prompt"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
@@ -15,20 +14,20 @@ func promptModalFor(title string) ui.Modal {
 
 func (d *Daemon) enterPrompt(sess *session, ac *attachedClient, title, initial string, submit func(string) error) {
 	d.closePrompt(ac)
-	ac.promptMu.Lock()
-	ac.prompt = promptui.New(title, initial)
-	ac.promptSubmit = submit
-	ac.promptPending = nil
-	ac.promptMu.Unlock()
+	ac.overlays.promptMu.Lock()
+	ac.overlays.prompt = promptui.New(title, initial)
+	ac.overlays.promptSubmit = submit
+	ac.overlays.promptPending = nil
+	ac.overlays.promptMu.Unlock()
 	d.paint(sess, ac, true)
 }
 
 func (d *Daemon) closePrompt(ac *attachedClient) {
-	ac.promptMu.Lock()
-	ac.prompt = nil
-	ac.promptSubmit = nil
-	ac.promptPending = nil
-	ac.promptMu.Unlock()
+	ac.overlays.promptMu.Lock()
+	ac.overlays.prompt = nil
+	ac.overlays.promptSubmit = nil
+	ac.overlays.promptPending = nil
+	ac.overlays.promptMu.Unlock()
 }
 
 func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte) {
@@ -37,44 +36,46 @@ func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte) {
 		return
 	}
 
-	ac.promptMu.Lock()
-	if ac.prompt == nil {
-		ac.promptPending = nil
-		ac.promptMu.Unlock()
+	ac.overlays.promptMu.Lock()
+	if ac.overlays.prompt == nil {
+		ac.overlays.promptPending = nil
+		ac.overlays.promptMu.Unlock()
 		return
 	}
 
 	changed := false
 	exit := false
 	var submit func(string) error
+	var submittedPrompt *promptui.Model
 	var value string
 
-	routeOverlayBytes(data, &ac.promptPending, overlayEvents{
+	routeOverlayBytes(data, &ac.overlays.promptPending, overlayEvents{
 		rune: func(r rune) {
-			ac.prompt.Insert(r)
+			ac.overlays.prompt.Insert(r)
 			changed = true
 		},
 		backspace: func() {
-			ac.prompt.Backspace()
+			ac.overlays.prompt.Backspace()
 			changed = true
 		},
 		enter: func() {
-			submit = ac.promptSubmit
-			value = strings.TrimSpace(ac.prompt.Value())
+			submit = ac.overlays.promptSubmit
+			submittedPrompt = ac.overlays.prompt
+			value = strings.TrimSpace(ac.overlays.prompt.Value())
 		},
 		cancel: func() { exit = true },
 		up:     func() {},
 		down:   func() {},
 	})
-	ac.promptMu.Unlock()
+	ac.overlays.promptMu.Unlock()
 
 	if submit != nil {
 		if err := submit(value); err != nil {
-			ac.promptMu.Lock()
-			if ac.prompt != nil {
-				ac.prompt.SetError(err.Error())
+			ac.overlays.promptMu.Lock()
+			if ac.overlays.prompt == submittedPrompt {
+				ac.overlays.prompt.SetError(err.Error())
 			}
-			ac.promptMu.Unlock()
+			ac.overlays.promptMu.Unlock()
 			d.paint(sess, ac, true)
 			return
 		}
@@ -96,12 +97,5 @@ func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte) {
 
 func composePromptClientFrame(model *promptui.Model, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
 	styleSet := resolveThemeStyles(styles)
-	inner := promptModalFor(model.Title()).Composite(base, styleSet.border)
-	modalFrame := model.Render(domain.Size{Cols: inner.Width, Rows: inner.Height}, styleSet.accent)
-	for y := range min(inner.Height, modalFrame.Height) {
-		for x := range min(inner.Width, modalFrame.Width) {
-			base.Set(inner.X+x, inner.Y+y, modalFrame.At(x, y))
-		}
-	}
-	return base, []renderer.Damage{renderer.FullRedraw()}
+	return composeModalClientFrame(base, promptModalFor(model.Title()), styleSet, styleSet.accent, model.Render)
 }

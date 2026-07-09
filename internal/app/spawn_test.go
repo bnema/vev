@@ -20,7 +20,7 @@ var errDialFailed = errors.New("dial failed")
 var fastBackoff = backoffConfig{initial: time.Millisecond, max: 5 * time.Millisecond, total: 100 * time.Millisecond}
 
 func TestAcquireSpawnLockSingleWinnerUnderRace(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "vev")
 	const racers = 16
 
 	var wins atomic.Int32
@@ -62,7 +62,10 @@ func TestAcquireSpawnLockSingleWinnerUnderRace(t *testing.T) {
 }
 
 func TestAcquireSpawnLockTakesOverStaleLock(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "vev")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("seeding socket dir: %v", err)
+	}
 	lockPath := filepath.Join(dir, spawnLockName)
 	if err := os.Mkdir(lockPath, 0o700); err != nil {
 		t.Fatalf("seeding lock: %v", err)
@@ -126,7 +129,7 @@ func TestRetryDialContextCancelled(t *testing.T) {
 }
 
 func TestEnsureDaemonSpawnsThenDials(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "vev")
 	want := portsmocks.NewMockTransport(t)
 	var dialCalls, spawnCalls atomic.Int32
 	dial := func(string) (ports.Transport, error) {
@@ -180,7 +183,7 @@ func TestEnsureDaemonSpawnFailure(t *testing.T) {
 	dial := func(string) (ports.Transport, error) { return nil, errDialFailed }
 	spawn := func() error { return spawnErr }
 
-	_, err := ensureDaemon(context.Background(), t.TempDir(), dial, spawn, fastBackoff)
+	_, err := ensureDaemon(context.Background(), filepath.Join(t.TempDir(), "vev"), dial, spawn, fastBackoff)
 	if !errors.Is(err, spawnErr) {
 		t.Fatalf("ensureDaemon error = %v, want wrapped %v", err, spawnErr)
 	}

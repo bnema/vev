@@ -2,6 +2,7 @@ package theme
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
@@ -48,7 +49,7 @@ func TestScannerExtractsBELAndSTColors(t *testing.T) {
 			kind int
 			rgb  renderer.RGB
 		}{kind: kind, rgb: rgb})
-	}, func(b []byte) { out.Write(b) })
+	}, func(light bool) {}, func(b []byte) { out.Write(b) })
 
 	if out.String() != "abc" {
 		t.Fatalf("passthrough=%q want %q", out.String(), "abc")
@@ -71,8 +72,8 @@ func TestScannerHandlesSplitSequences(t *testing.T) {
 	onColor := func(kind int, rgb renderer.RGB) { got = append(got, rgb) }
 	onBytes := func(b []byte) { out.Write(b) }
 
-	s.Scan([]byte("x\x1b]10;#12"), onColor, onBytes)
-	s.Scan([]byte("3456\x07y"), onColor, onBytes)
+	s.Scan([]byte("x\x1b]10;#12"), onColor, func(light bool) {}, onBytes)
+	s.Scan([]byte("3456\x07y"), onColor, func(light bool) {}, onBytes)
 
 	if out.String() != "xy" {
 		t.Fatalf("passthrough=%q want xy", out.String())
@@ -82,12 +83,75 @@ func TestScannerHandlesSplitSequences(t *testing.T) {
 	}
 }
 
+func TestScannerHandlesSplitSchemeNotifications(t *testing.T) {
+	tests := []struct {
+		name        string
+		chunks      []string
+		wantOut     string
+		wantSchemes []bool
+	}{
+		{
+			name:        "split dark then complete light",
+			chunks:      []string{"a\x1b[?997", ";1nb\x1b[?997;2nc"},
+			wantOut:     "abc",
+			wantSchemes: []bool{false, true},
+		},
+		{
+			name:        "split light",
+			chunks:      []string{"x\x1b[?997;", "2ny"},
+			wantOut:     "xy",
+			wantSchemes: []bool{true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var s Scanner
+			var schemes []bool
+			var out bytes.Buffer
+
+			for _, chunk := range tt.chunks {
+				s.Scan([]byte(chunk), func(kind int, rgb renderer.RGB) {}, func(light bool) { schemes = append(schemes, light) }, func(b []byte) { out.Write(b) })
+			}
+
+			if out.String() != tt.wantOut {
+				t.Fatalf("passthrough=%q want %q", out.String(), tt.wantOut)
+			}
+			if !reflect.DeepEqual(schemes, tt.wantSchemes) {
+				t.Fatalf("schemes=%v want %v", schemes, tt.wantSchemes)
+			}
+		})
+	}
+}
+
+func TestScannerForwardsBareCSIIntroducerImmediately(t *testing.T) {
+	var s Scanner
+	var out bytes.Buffer
+	schemes := 0
+
+	s.Scan([]byte("a\x1b["), func(kind int, rgb renderer.RGB) {}, func(light bool) { schemes++ }, func(b []byte) { out.Write(b) })
+
+	if out.String() != "a\x1b[" {
+		t.Fatalf("passthrough=%q want %q", out.String(), "a\x1b[")
+	}
+	if schemes != 0 {
+		t.Fatalf("schemes=%d want 0", schemes)
+	}
+
+	out.Reset()
+	s.Scan([]byte("A"), func(kind int, rgb renderer.RGB) {}, func(light bool) { schemes++ }, func(b []byte) { out.Write(b) })
+
+	if out.String() != "A" {
+		t.Fatalf("follow-up passthrough=%q want %q (no stale state)", out.String(), "A")
+	}
+}
+
 func TestScannerForwardsInterleavedGarbageInOrder(t *testing.T) {
 	var s Scanner
 	var out bytes.Buffer
 	colors := 0
 
-	s.Scan([]byte("ab\x1b]12;#112233\x07cd\x1b]10;nope\x07ef"), func(kind int, rgb renderer.RGB) { colors++ }, func(b []byte) { out.Write(b) })
+	s.Scan([]byte("ab\x1b]12;#112233\x07cd\x1b]10;nope\x07ef"), func(kind int, rgb renderer.RGB) { colors++ }, func(light bool) {}, func(b []byte) { out.Write(b) })
 
 	if colors != 0 {
 		t.Fatalf("colors=%d want 0", colors)
@@ -103,7 +167,7 @@ func TestScannerForwardsStandaloneEscapeImmediately(t *testing.T) {
 	var out bytes.Buffer
 	colors := 0
 
-	s.Scan([]byte("\x1b"), func(kind int, rgb renderer.RGB) { colors++ }, func(b []byte) { out.Write(b) })
+	s.Scan([]byte("\x1b"), func(kind int, rgb renderer.RGB) { colors++ }, func(light bool) {}, func(b []byte) { out.Write(b) })
 
 	if colors != 0 {
 		t.Fatalf("colors=%d want 0", colors)
@@ -119,7 +183,7 @@ func TestScannerDoesNotSplitSGRMouseReport(t *testing.T) {
 	colors := 0
 
 	in := []byte("\x1b[<0;1;1M")
-	s.Scan(in, func(kind int, rgb renderer.RGB) { colors++ }, func(b []byte) {
+	s.Scan(in, func(kind int, rgb renderer.RGB) { colors++ }, func(light bool) {}, func(b []byte) {
 		chunks = append(chunks, append([]byte(nil), b...))
 	})
 
@@ -139,7 +203,7 @@ func TestScannerDoesNotSplitArrowKey(t *testing.T) {
 	var chunks [][]byte
 
 	in := []byte("\x1b[A")
-	s.Scan(in, func(kind int, rgb renderer.RGB) {}, func(b []byte) {
+	s.Scan(in, func(kind int, rgb renderer.RGB) {}, func(light bool) {}, func(b []byte) {
 		chunks = append(chunks, append([]byte(nil), b...))
 	})
 
@@ -164,7 +228,7 @@ func TestScannerKeepsMouseReportContiguousAroundColorResponse(t *testing.T) {
 			kind int
 			rgb  renderer.RGB
 		}{kind: kind, rgb: rgb})
-	}, func(b []byte) {
+	}, func(light bool) {}, func(b []byte) {
 		chunks = append(chunks, append([]byte(nil), b...))
 	})
 
@@ -189,11 +253,97 @@ func TestScannerFlushesOverflowingPartialQueue(t *testing.T) {
 	var s Scanner
 	var out bytes.Buffer
 
-	s.Scan(append([]byte("\x1b]10;"), bytes.Repeat([]byte("a"), 70)...), func(kind int, rgb renderer.RGB) {}, func(b []byte) { out.Write(b) })
-	s.Scan([]byte("Z"), func(kind int, rgb renderer.RGB) {}, func(b []byte) { out.Write(b) })
+	s.Scan(append([]byte("\x1b]10;"), bytes.Repeat([]byte("a"), 70)...), func(kind int, rgb renderer.RGB) {}, func(light bool) {}, func(b []byte) { out.Write(b) })
+	s.Scan([]byte("Z"), func(kind int, rgb renderer.RGB) {}, func(light bool) {}, func(b []byte) { out.Write(b) })
 
 	if out.Len() == 0 || !bytes.Contains(out.Bytes(), []byte("\x1b]10;")) || !bytes.HasSuffix(out.Bytes(), []byte("Z")) {
 		t.Fatalf("overflow passthrough=%q", out.String())
+	}
+}
+
+func TestDimStyle(t *testing.T) {
+	theme := Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 20, B: 30}, HasFG: true, HasBG: true, Known: true, TrueColor: true}
+	tests := []struct {
+		name string
+		in   renderer.Style
+		want renderer.Style
+	}{
+		{
+			name: "default foreground and background dim to theme colors",
+			in:   renderer.DefaultStyle(),
+			want: renderer.Style{
+				Foreground:       -1,
+				Background:       -1,
+				HasForegroundRGB: true,
+				ForegroundRGB:    Blend(theme.Foreground, theme.Background, 0.35),
+				HasBackgroundRGB: true,
+				BackgroundRGB:    theme.Background,
+			},
+		},
+		{
+			name: "indexed foreground is mapped before dimming",
+			in:   renderer.Style{Foreground: 196, Background: -1},
+			want: renderer.Style{
+				Foreground:       196,
+				Background:       -1,
+				HasForegroundRGB: true,
+				ForegroundRGB:    Blend(renderer.RGB{R: 255, G: 0, B: 0}, theme.Background, 0.35),
+				HasBackgroundRGB: true,
+				BackgroundRGB:    theme.Background,
+			},
+		},
+		{
+			name: "indexed foregrounds remain distinct",
+			in:   renderer.Style{Foreground: 46, Background: -1},
+			want: renderer.Style{
+				Foreground:       46,
+				Background:       -1,
+				HasForegroundRGB: true,
+				ForegroundRGB:    Blend(renderer.RGB{R: 0, G: 255, B: 0}, theme.Background, 0.35),
+				HasBackgroundRGB: true,
+				BackgroundRGB:    theme.Background,
+			},
+		},
+		{
+			name: "indexed background is mapped before dimming",
+			in:   renderer.Style{Foreground: -1, Background: 21},
+			want: renderer.Style{
+				Foreground:       -1,
+				Background:       21,
+				HasForegroundRGB: true,
+				ForegroundRGB:    Blend(theme.Foreground, theme.Background, 0.35),
+				HasBackgroundRGB: true,
+				BackgroundRGB:    Blend(renderer.RGB{R: 0, G: 0, B: 255}, theme.Background, 0.35),
+			},
+		},
+		{
+			name: "rgb foreground and background are dimmed",
+			in: renderer.Style{
+				Foreground:       -1,
+				Background:       -1,
+				HasForegroundRGB: true,
+				ForegroundRGB:    renderer.RGB{R: 100, G: 50, B: 25},
+				HasBackgroundRGB: true,
+				BackgroundRGB:    renderer.RGB{R: 20, G: 100, B: 180},
+			},
+			want: renderer.Style{
+				Foreground:       -1,
+				Background:       -1,
+				HasForegroundRGB: true,
+				ForegroundRGB:    Blend(renderer.RGB{R: 100, G: 50, B: 25}, theme.Background, 0.35),
+				HasBackgroundRGB: true,
+				BackgroundRGB:    Blend(renderer.RGB{R: 20, G: 100, B: 180}, theme.Background, 0.35),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DimStyle(tt.in, theme)
+			if !got.Equal(tt.want) {
+				t.Fatalf("DimStyle()=%+v want %+v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -204,6 +354,9 @@ func TestStyleHelpersFallbackAndThemed(t *testing.T) {
 	}
 	if got := BorderStyle(Theme{Known: true}); !got.Equal(renderer.DefaultStyle()) {
 		t.Fatalf("border fallback=%+v", got)
+	}
+	if got := MutedTextStyle(unknown); !got.Equal(renderer.DefaultStyle()) {
+		t.Fatalf("muted fallback=%+v", got)
 	}
 	inverse := renderer.DefaultStyle()
 	inverse.Inverse = true
@@ -229,5 +382,9 @@ func TestStyleHelpersFallbackAndThemed(t *testing.T) {
 	border := BorderStyle(theme)
 	if !border.HasForegroundRGB || border.ForegroundRGB != (renderer.RGB{R: 124, G: 128, B: 132}) {
 		t.Fatalf("border themed=%+v", border)
+	}
+	muted := MutedTextStyle(theme)
+	if !muted.HasForegroundRGB || muted.ForegroundRGB != (renderer.RGB{R: 115, G: 119, B: 124}) {
+		t.Fatalf("muted themed=%+v", muted)
 	}
 }

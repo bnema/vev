@@ -3,8 +3,8 @@ package ports
 import "testing"
 
 func TestProtocolVersion(t *testing.T) {
-	if ProtocolVersion != 4 {
-		t.Fatalf("ProtocolVersion = %d, want 4", ProtocolVersion)
+	if ProtocolVersion != 10 {
+		t.Fatalf("ProtocolVersion = %d, want 10", ProtocolVersion)
 	}
 }
 
@@ -21,6 +21,8 @@ func TestMsgTypeUnique(t *testing.T) {
 		{"MsgList", MsgList},
 		{"MsgKill", MsgKill},
 		{"MsgTheme", MsgTheme},
+		{"MsgAck", MsgAck},
+		{"MsgImagePush", MsgImagePush},
 		{"MsgWelcome", MsgWelcome},
 		{"MsgError", MsgError},
 		{"MsgOutput", MsgOutput},

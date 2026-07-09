@@ -9,10 +9,12 @@ import (
 )
 
 type cursorState struct {
-	row   int
-	col   int
-	style renderer.Style
-	saved bool
+	row        int
+	col        int
+	style      renderer.Style
+	originMode bool
+	insertMode bool
+	saved      bool
 }
 
 type screenState struct {
@@ -23,9 +25,30 @@ type screenState struct {
 	scrollTop    int
 	scrollBottom int
 	savedCursor  cursorState
+	originMode   bool
+	insertMode   bool
 }
 
-const maxEscapeBufferLen = 4096
+// maxEscapeBufferLen must stay large enough for OSC 52 clipboard payloads
+// forwarded by internal/usecase/copy.OSC52MaxPayloadBytes after base64
+// expansion plus the OSC wrapper. pkg/vt cannot import internal/usecase/copy,
+// so keep this value in sync if that payload cap changes.
+const maxEscapeBufferLen = 128 * 1024
+
+const (
+	// ColorSchemeReportDark is the DEC 2031 dark-scheme report.
+	ColorSchemeReportDark = "\x1b[?997;1n"
+	// ColorSchemeReportLight is the DEC 2031 light-scheme report.
+	ColorSchemeReportLight = "\x1b[?997;2n"
+)
+
+const (
+	progressStateClear = iota
+	progressStateNormal
+	progressStateError
+	progressStateIndeterminate
+	progressStatePaused
+)
 
 type Screen struct {
 	Frame renderer.Frame
@@ -36,8 +59,8 @@ type Screen struct {
 	// and blanks rows. The callback receives a stable copy of each evicted row.
 	OnLineEvicted func([]renderer.Cell)
 	// OnResponse is called synchronously from Write with reply bytes that the
-	// emulator must send back to the child process (DA, DSR, DECRQM reports).
-	// The host wires it to the PTY input. Nil disables responses.
+	// emulator must send back to the child process (DA, DSR, and ANSI/DEC mode
+	// query reports). The host wires it to the PTY input. Nil disables responses.
 	OnResponse func([]byte)
 	// OnBell is called synchronously from Write for each lone BEL (0x07)
 	// outside escape sequences. BELs that terminate an OSC never fire it.
@@ -45,26 +68,45 @@ type Screen struct {
 	OnBell func()
 	// OnNotify is called synchronously from Write for explicit terminal
 	// notifications: OSC 9 (body only) and OSC 777 "notify" (title;body).
-	// All other OSC payloads remain discarded. Nil disables it.
+	// Other non-clipboard OSC payloads remain discarded. Nil disables it.
 	OnNotify func(title, body string)
+	// OnProgress is called synchronously from Write for OSC 9;4 progress
+	// transitions that request attention: active progress cleared or first entry
+	// into error state. Nil disables progress reporting.
+	OnProgress func(errored bool)
+	// OnClipboard is called synchronously from Write for a complete OSC 52
+	// clipboard set request from the child. The OSC 52 selection field is
+	// accepted but ignored; the callback receives only the raw base64 payload.
+	// Clipboard queries (data == "?") and malformed payloads are ignored and
+	// never invoke it. Nil disables it.
+	OnClipboard func(b64 string)
 
 	defaultFG          renderer.RGB
 	defaultBG          renderer.RGB
 	defaultColorsKnown bool
 
-	damage    []renderer.Damage
-	escapeBuf []byte
+	damage     []renderer.Damage
+	escapeBuf  []byte
+	csiScratch []int
+	sgrScratch []int
 
 	scrollTop        int
 	scrollBottom     int
 	savedCursor      cursorState
 	alternate        *screenState
 	syncUpdateActive bool
+	progressState    int
 	cursorVisible    bool
 	cursorStyle      int
 	cursorStyleSet   bool
 	mouseMode        int
 	mouseSGR         bool
+	bracketedPaste   bool
+	originMode       bool
+	insertMode       bool
+	colorSchemeMode  bool
+	colorSchemeLight bool
+	colorSchemeSet   bool
 }
 
 func NewScreen(width, height int) *Screen {
@@ -127,6 +169,31 @@ func (s *Screen) ClearDamage()              { s.damage = s.damage[:0] }
 // SyncUpdateActive reports whether DEC private mode 2026 (synchronized update)
 // is currently enabled by the child process.
 func (s *Screen) SyncUpdateActive() bool { return s.syncUpdateActive }
+
+// BracketedPasteMode reports whether DEC private mode 2004 is currently enabled
+// by the child process.
+func (s *Screen) BracketedPasteMode() bool { return s.bracketedPaste }
+
+// ColorSchemeMode reports whether DEC private mode 2031 is currently enabled.
+func (s *Screen) ColorSchemeMode() bool { return s.colorSchemeMode }
+
+// SetColorScheme updates the host color scheme and notifies subscribed child apps.
+func (s *Screen) SetColorScheme(light bool) {
+	if s.colorSchemeSet && s.colorSchemeLight == light {
+		return
+	}
+	s.colorSchemeSet = true
+	s.colorSchemeLight = light
+	if s.colorSchemeMode {
+		s.respond(s.colorSchemeReport())
+	}
+}
+
+// ClearColorScheme marks the host color scheme as unknown. Future child color
+// scheme queries are silent until SetColorScheme supplies a known value again.
+func (s *Screen) ClearColorScheme() {
+	s.colorSchemeSet = false
+}
 
 // ForceSyncEnd forcibly leaves DEC private mode 2026 (synchronized update).
 // Hosts use this as a safety valve if a child enters synchronized update mode
@@ -264,6 +331,24 @@ func (s *Screen) putPrintable(r rune) {
 		}
 	}
 
+	insertDamageX := s.Col
+	insertDamageWidth := 0
+	if s.insertMode {
+		row := s.Frame.Row(s.Row)
+		leftSplit := s.Col > 0 && row[s.Col].Continuation
+		for x := s.Frame.Width - 1; x >= s.Col+w; x-- {
+			row[x] = row[x-w]
+		}
+		for x := s.Col; x < s.Col+w; x++ {
+			row[x] = renderer.BlankCell()
+		}
+		s.repairRow(s.Row)
+		if leftSplit {
+			insertDamageX = s.Col - 1
+		}
+		insertDamageWidth = s.Frame.Width - insertDamageX
+	}
+
 	// Determine the range of cells actually modified, extending over any wide
 	// pair the write lands on so no orphaned half is left behind.
 	lo, hi := s.Col, s.Col+w-1
@@ -279,6 +364,10 @@ func (s *Screen) putPrintable(r rune) {
 	s.Frame.Set(s.Col, s.Row, renderer.Cell{Rune: r, Style: s.Style})
 	if w == 2 {
 		s.Frame.Set(s.Col+1, s.Row, renderer.Cell{Continuation: true, Style: s.Style})
+	}
+	if insertDamageWidth > 0 {
+		lo = min(lo, insertDamageX)
+		hi = max(hi, insertDamageX+insertDamageWidth-1)
 	}
 	s.record(renderer.Damage{Kind: renderer.DamageText, X: lo, Y: s.Row, Width: hi - lo + 1, Height: 1, Count: 1})
 	s.Col += w
@@ -341,26 +430,30 @@ func (s *Screen) clearRow(y, x0, x1 int) (start, width int) {
 // continuation. Used after erase/insert/delete operations that may split a pair
 // at a boundary or by shifting cells.
 func (s *Screen) repairRow(y int) {
-	if y < 0 || y >= s.Frame.Height {
+	repairFrameRow(s.Frame, y)
+}
+
+func repairFrameRow(frame renderer.Frame, y int) {
+	if y < 0 || y >= frame.Height {
 		return
 	}
-	w := s.Frame.Width
+	w := frame.Width
 	for x := range w {
-		c := s.Frame.At(x, y)
+		c := frame.At(x, y)
 		if c.Continuation {
 			if x == 0 {
-				s.Frame.Set(x, y, renderer.BlankCell())
+				frame.Set(x, y, renderer.BlankCell())
 				continue
 			}
-			left := s.Frame.At(x-1, y)
+			left := frame.At(x-1, y)
 			if left.Continuation || renderer.RuneWidth(left.Rune) != 2 {
-				s.Frame.Set(x, y, renderer.BlankCell())
+				frame.Set(x, y, renderer.BlankCell())
 			}
 			continue
 		}
 		if renderer.RuneWidth(c.Rune) == 2 {
-			if x+1 >= w || !s.Frame.At(x+1, y).Continuation {
-				s.Frame.Set(x, y, renderer.BlankCell())
+			if x+1 >= w || !frame.At(x+1, y).Continuation {
+				frame.Set(x, y, renderer.BlankCell())
 			}
 		}
 	}
@@ -450,6 +543,16 @@ func (s *Screen) respond(b []byte) {
 	if s.OnResponse != nil {
 		s.OnResponse(b)
 	}
+}
+
+func (s *Screen) colorSchemeReport() []byte {
+	if !s.colorSchemeSet {
+		return nil
+	}
+	if s.colorSchemeLight {
+		return []byte(ColorSchemeReportLight)
+	}
+	return []byte(ColorSchemeReportDark)
 }
 
 func (s *Screen) scrollDownRegion(top, bottom, n int) {
@@ -620,18 +723,24 @@ func appendOSCColorComponent(dst []byte, c uint8) []byte {
 }
 
 // handleOSC inspects a complete OSC payload (between "ESC ]" and its
-// terminator). Only notification sequences are acted on; titles, clipboard
-// and every other OSC are still discarded.
+// terminator). Notification sequences (OSC 9, OSC 777 "notify") and clipboard
+// set requests (OSC 52) are acted on; titles and every other OSC are still
+// discarded.
 func (s *Screen) handleOSC(payload []byte) {
-	if s.OnNotify == nil {
+	if len(payload) >= len("52;") && payload[0] == '5' && payload[1] == '2' && payload[2] == ';' {
+		s.handleOSC52(string(payload[len("52;"):]))
 		return
 	}
 	p := string(payload)
+	if p == "9;4" || strings.HasPrefix(p, "9;4;") {
+		s.handleProgress(p[len("9;4"):])
+		return
+	}
+	if s.OnNotify == nil {
+		return
+	}
 	switch {
 	case strings.HasPrefix(p, "9;"):
-		if strings.HasPrefix(p, "9;4;") {
-			return
-		}
 		s.OnNotify("", p[len("9;"):])
 	case strings.HasPrefix(p, "777;"):
 		parts := strings.SplitN(p[len("777;"):], ";", 3)
@@ -649,6 +758,55 @@ func (s *Screen) handleOSC(payload []byte) {
 	}
 }
 
+func (s *Screen) handleProgress(rest string) {
+	rest = strings.TrimPrefix(rest, ";")
+	if rest == "" {
+		return
+	}
+	token, _, _ := strings.Cut(rest, ";")
+	state, err := strconv.Atoi(token)
+	if err != nil {
+		return
+	}
+	switch state {
+	case progressStateNormal, progressStateIndeterminate, progressStatePaused:
+		s.progressState = state
+	case progressStateClear:
+		previous := s.progressState
+		s.progressState = state
+		if previous == progressStateNormal || previous == progressStateIndeterminate || previous == progressStatePaused {
+			if s.OnProgress != nil {
+				s.OnProgress(false)
+			}
+		}
+	case progressStateError:
+		previous := s.progressState
+		s.progressState = state
+		if previous != progressStateError {
+			if s.OnProgress != nil {
+				s.OnProgress(true)
+			}
+		}
+	}
+}
+
+// handleOSC52 parses the "<selection>;<data>" remainder of an OSC 52
+// clipboard payload (selection may be empty; split on the first ";"). A
+// clipboard query (data == "?") is always ignored — vev never answers
+// clipboard queries. A payload with no second ";" is malformed and ignored.
+func (s *Screen) handleOSC52(rest string) {
+	_, data, ok := strings.Cut(rest, ";")
+	if !ok {
+		return
+	}
+	if data == "?" {
+		return
+	}
+	if s.OnClipboard != nil {
+		s.OnClipboard(data)
+	}
+}
+
 func consumeSTString(data []byte) (consumed int, partial bool) {
 	for i := 2; i < len(data); i++ {
 		if data[i] == 0x1b && i+1 < len(data) && data[i+1] == '\\' {
@@ -660,7 +818,7 @@ func consumeSTString(data []byte) (consumed int, partial bool) {
 
 func (s *Screen) applyCSI(params string, cmd byte) {
 	private := strings.HasPrefix(params, "?")
-	parts := parseCSIInts(params)
+	parts := s.parseCSIInts(params)
 	switch cmd {
 	case 'c':
 		switch params {
@@ -675,33 +833,39 @@ func (s *Screen) applyCSI(params string, cmd byte) {
 			if !private {
 				s.respond([]byte("\x1b[0n"))
 			}
+		case 996:
+			if private {
+				if report := s.colorSchemeReport(); report != nil {
+					s.respond(report)
+				}
+			}
 		case 6:
 			resp := make([]byte, 0, 16)
 			resp = append(resp, "\x1b["...)
 			if private {
 				resp = append(resp, '?')
 			}
-			resp = strconv.AppendInt(resp, int64(s.Row+1), 10)
+			resp = strconv.AppendInt(resp, int64(s.cursorReportRow()), 10)
 			resp = append(resp, ';')
 			resp = strconv.AppendInt(resp, int64(s.Col+1), 10)
 			resp = append(resp, 'R')
 			s.respond(resp)
 		}
 	case 'p':
-		if private && strings.HasSuffix(params, "$") {
-			mode, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(params, "?"), "$"))
+		if modeText, ok := strings.CutSuffix(params, "$"); ok {
+			if private {
+				modeText = strings.TrimPrefix(modeText, "?")
+			}
+			mode, err := strconv.Atoi(modeText)
 			if err != nil {
 				return
 			}
-			state := 0
-			if mode == 2026 {
-				state = 2
-				if s.syncUpdateActive {
-					state = 1
-				}
-			}
+			state := s.modeReportState(private, mode)
 			resp := make([]byte, 0, 16)
-			resp = append(resp, "\x1b[?"...)
+			resp = append(resp, "\x1b["...)
+			if private {
+				resp = append(resp, '?')
+			}
 			resp = strconv.AppendInt(resp, int64(mode), 10)
 			resp = append(resp, ';')
 			resp = strconv.AppendInt(resp, int64(state), 10)
@@ -739,28 +903,27 @@ func (s *Screen) applyCSI(params string, cmd byte) {
 		if len(parts) > 1 && parts[1] > 0 {
 			col = parts[1]
 		}
-		s.Row = clamp(row-1, 0, s.Frame.Height-1)
-		s.Col = clamp(col-1, 0, s.Frame.Width-1)
+		s.addressCursor(row, col)
 	case 'A':
-		s.Row = clamp(s.Row-firstPositive(parts, 1), 0, s.Frame.Height-1)
+		s.Row = clamp(s.Row-firstPositive(parts, 1), s.cursorMinRow(), s.cursorMaxRow())
 	case 'B':
-		s.Row = clamp(s.Row+firstPositive(parts, 1), 0, s.Frame.Height-1)
+		s.Row = clamp(s.Row+firstPositive(parts, 1), s.cursorMinRow(), s.cursorMaxRow())
 	case 'C':
 		s.Col = clamp(s.Col+firstPositive(parts, 1), 0, s.Frame.Width-1)
 	case 'D':
 		s.Col = clamp(s.Col-firstPositive(parts, 1), 0, s.Frame.Width-1)
 	case 'E':
-		s.Row = clamp(s.Row+firstPositive(parts, 1), 0, s.Frame.Height-1)
+		s.Row = clamp(s.Row+firstPositive(parts, 1), s.cursorMinRow(), s.cursorMaxRow())
 		s.Col = 0
 	case 'F':
-		s.Row = clamp(s.Row-firstPositive(parts, 1), 0, s.Frame.Height-1)
+		s.Row = clamp(s.Row-firstPositive(parts, 1), s.cursorMinRow(), s.cursorMaxRow())
 		s.Col = 0
 	case 'G':
 		col := firstPositive(parts, 1)
 		s.Col = clamp(col-1, 0, s.Frame.Width-1)
 	case 'd':
 		row := firstPositive(parts, 1)
-		s.Row = clamp(row-1, 0, s.Frame.Height-1)
+		s.Row = s.addressedRow(row)
 	case '@':
 		s.insertChars(firstPositive(parts, 1))
 	case 'P':
@@ -791,6 +954,68 @@ func firstPositive(parts []int, fallback int) int {
 	return parts[0]
 }
 
+func (s *Screen) cursorReportRow() int {
+	if s.originMode {
+		return clamp(s.Row, s.cursorMinRow(), s.cursorMaxRow()) - s.cursorMinRow() + 1
+	}
+	return s.Row + 1
+}
+
+func (s *Screen) modeReportState(private bool, mode int) int {
+	if private {
+		switch mode {
+		case 6:
+			return boolModeReportState(s.originMode)
+		case 2026:
+			return boolModeReportState(s.syncUpdateActive)
+		case 2031:
+			return boolModeReportState(s.colorSchemeMode)
+		}
+		return 0
+	}
+	if mode == 4 {
+		return boolModeReportState(s.insertMode)
+	}
+	return 0
+}
+
+func boolModeReportState(enabled bool) int {
+	if enabled {
+		return 1
+	}
+	return 2
+}
+
+func (s *Screen) cursorMinRow() int {
+	if s.originMode {
+		return clamp(s.scrollTop, 0, s.Frame.Height-1)
+	}
+	return 0
+}
+
+func (s *Screen) cursorMaxRow() int {
+	if s.originMode {
+		return clamp(s.scrollBottom, 0, s.Frame.Height-1)
+	}
+	return max(s.Frame.Height-1, 0)
+}
+
+func (s *Screen) addressedRow(row int) int {
+	if s.originMode {
+		return clamp(s.scrollTop+row-1, s.cursorMinRow(), s.cursorMaxRow())
+	}
+	return clamp(row-1, 0, s.Frame.Height-1)
+}
+
+func (s *Screen) addressCursor(row, col int) {
+	s.Row = s.addressedRow(row)
+	s.Col = clamp(col-1, 0, s.Frame.Width-1)
+}
+
+func (s *Screen) homeCursor() {
+	s.addressCursor(1, 1)
+}
+
 func (s *Screen) applyCursorStyle(params string) {
 	if strings.HasPrefix(params, ">") || !strings.HasSuffix(params, " ") {
 		return
@@ -811,24 +1036,60 @@ func (s *Screen) applyCursorStyle(params string) {
 	s.cursorStyleSet = true
 }
 
+const sgrUnderlineStyleMarker = -1000
+
 func (s *Screen) applySGR(params string) {
 	if params == "" {
 		s.Style = renderer.DefaultStyle()
 		return
 	}
-	parts := parseCSIInts(params)
+	parts := s.parseSGRInts(params)
 	for i := 0; i < len(parts); i++ {
 		switch parts[i] {
 		case 0:
 			s.Style = renderer.DefaultStyle()
 		case 1:
 			s.Style.Bold = true
+		case 2:
+			s.Style.Attrs |= renderer.AttrDim
+		case 3:
+			s.Style.Italic = true
+		case 4:
+			s.Style.Attrs |= renderer.AttrUnderline
+			s.Style.UnderlineStyle = renderer.UnderlineSingle
+			if i+2 < len(parts) && parts[i+1] == sgrUnderlineStyleMarker {
+				underlineStyle := sgrUnderlineStyle(parts[i+2])
+				if underlineStyle == renderer.UnderlineNone {
+					s.Style.Attrs &^= renderer.AttrUnderline
+				} else {
+					s.Style.Attrs |= renderer.AttrUnderline
+				}
+				s.Style.UnderlineStyle = underlineStyle
+				i += 2
+			}
+		case 5, 6:
+			s.Style.Attrs |= renderer.AttrBlink
 		case 7:
 			s.Style.Inverse = true
+		case 9:
+			s.Style.Attrs |= renderer.AttrStrikethrough
+		case 21:
+			s.Style.Attrs |= renderer.AttrUnderline
+			s.Style.UnderlineStyle = renderer.UnderlineDouble
 		case 22:
 			s.Style.Bold = false
+			s.Style.Attrs &^= renderer.AttrDim
+		case 23:
+			s.Style.Italic = false
+		case 24:
+			s.Style.Attrs &^= renderer.AttrUnderline
+			s.Style.UnderlineStyle = renderer.UnderlineNone
+		case 25:
+			s.Style.Attrs &^= renderer.AttrBlink
 		case 27:
 			s.Style.Inverse = false
+		case 29:
+			s.Style.Attrs &^= renderer.AttrStrikethrough
 		case 30, 31, 32, 33, 34, 35, 36, 37:
 			s.Style.Foreground = parts[i] - 30
 			s.Style.HasForegroundRGB = false
@@ -869,6 +1130,21 @@ func (s *Screen) applySGR(params string) {
 				s.Style.BackgroundRGB = sgrRGB(parts[i+2], parts[i+3], parts[i+4])
 				i += 4
 			}
+		case 58:
+			if i+2 < len(parts) && parts[i+1] == 5 {
+				s.Style.UnderlineColor = parts[i+2]
+				s.Style.HasUnderlineColor = true
+				s.Style.HasUnderlineColorRGB = false
+				i += 2
+			} else if i+4 < len(parts) && parts[i+1] == 2 {
+				s.Style.HasUnderlineColor = false
+				s.Style.HasUnderlineColorRGB = true
+				s.Style.UnderlineColorRGB = sgrRGB(parts[i+2], parts[i+3], parts[i+4])
+				i += 4
+			}
+		case 59:
+			s.Style.HasUnderlineColor = false
+			s.Style.HasUnderlineColorRGB = false
 		}
 	}
 }
@@ -881,8 +1157,25 @@ func sgrRGB(r, g, b int) renderer.RGB {
 	}
 }
 
+func sgrUnderlineStyle(param int) renderer.UnderlineStyle {
+	switch param {
+	case 0:
+		return renderer.UnderlineNone
+	case 2:
+		return renderer.UnderlineDouble
+	case 3:
+		return renderer.UnderlineCurly
+	case 4:
+		return renderer.UnderlineDotted
+	case 5:
+		return renderer.UnderlineDashed
+	default:
+		return renderer.UnderlineSingle
+	}
+}
+
 func (s *Screen) saveCursor() {
-	s.savedCursor = cursorState{row: s.Row, col: s.Col, style: s.Style, saved: true}
+	s.savedCursor = cursorState{row: s.Row, col: s.Col, style: s.Style, originMode: s.originMode, insertMode: s.insertMode, saved: true}
 }
 
 func (s *Screen) restoreCursor() {
@@ -892,6 +1185,8 @@ func (s *Screen) restoreCursor() {
 	s.Row = clamp(s.savedCursor.row, 0, s.Frame.Height-1)
 	s.Col = clamp(s.savedCursor.col, 0, s.Frame.Width-1)
 	s.Style = s.savedCursor.style
+	s.originMode = s.savedCursor.originMode
+	s.insertMode = s.savedCursor.insertMode
 }
 
 func (s *Screen) reset() {
@@ -901,11 +1196,15 @@ func (s *Screen) reset() {
 	s.escapeBuf = s.escapeBuf[:0]
 	s.savedCursor = cursorState{}
 	s.alternate = nil
+	s.originMode = false
+	s.insertMode = false
 	s.cursorVisible = true
 	s.cursorStyle = 0
 	s.cursorStyleSet = false
 	s.mouseMode = 0
 	s.mouseSGR = false
+	s.bracketedPaste = false
+	s.colorSchemeMode = false
 	s.resetScrollRegion()
 	s.fullRedraw()
 }
@@ -930,7 +1229,7 @@ func (s *Screen) setScrollRegion(parts []int) {
 			s.resetScrollRegion()
 		}
 	}
-	s.Row, s.Col = 0, 0
+	s.homeCursor()
 }
 
 func (s *Screen) resetScrollRegion() {
@@ -944,10 +1243,23 @@ func (s *Screen) resetScrollRegion() {
 
 func (s *Screen) setMode(private bool, parts []int, enabled bool) {
 	if !private {
+		for _, mode := range parts {
+			switch mode {
+			case 4:
+				s.insertMode = enabled
+			default:
+				// Other ANSI modes (for example LNM) are intentionally ignored
+				// until the screen model implements their observable behavior.
+				continue
+			}
+		}
 		return
 	}
 	for _, mode := range parts {
 		switch mode {
+		case 6:
+			s.originMode = enabled
+			s.homeCursor()
 		case 47, 1047, 1049:
 			if enabled {
 				s.enterAlternateScreen()
@@ -956,6 +1268,8 @@ func (s *Screen) setMode(private bool, parts []int, enabled bool) {
 			}
 		case 2026:
 			s.syncUpdateActive = enabled
+		case 2031:
+			s.colorSchemeMode = enabled
 		case 25:
 			s.cursorVisible = enabled
 		case 1000, 1002, 1003:
@@ -966,7 +1280,9 @@ func (s *Screen) setMode(private bool, parts []int, enabled bool) {
 			}
 		case 1006:
 			s.mouseSGR = enabled
-		case 1, 1004, 1005, 2004:
+		case 2004:
+			s.bracketedPaste = enabled
+		case 1, 1004, 1005:
 			// Trackable terminal modes that do not directly affect the current
 			// cell model yet. Consuming them prevents mode bytes from leaking.
 			continue
@@ -984,6 +1300,8 @@ func (s *Screen) enterAlternateScreen() {
 			scrollTop:    s.scrollTop,
 			scrollBottom: s.scrollBottom,
 			savedCursor:  s.savedCursor,
+			originMode:   s.originMode,
+			insertMode:   s.insertMode,
 		}
 	}
 	s.Frame = renderer.NewFrame(s.Frame.Width, s.Frame.Height)
@@ -1006,6 +1324,8 @@ func (s *Screen) exitAlternateScreen() {
 	s.scrollTop = state.scrollTop
 	s.scrollBottom = state.scrollBottom
 	s.savedCursor = state.savedCursor
+	s.originMode = state.originMode
+	s.insertMode = state.insertMode
 	s.alternate = nil
 	s.fullRedraw()
 }
@@ -1014,16 +1334,17 @@ func resizeFrame(old renderer.Frame, newW, newH, cursorRow int, evict func([]ren
 	next := renderer.NewFrame(newW, newH)
 	shift := clamp(cursorRow-(newH-1), 0, max(old.Height-newH, 0))
 	if evict != nil {
-		for y := 0; y < shift; y++ {
+		for y := range shift {
 			evict(old.Row(y))
 		}
 	}
-	for dy := 0; dy < newH; dy++ {
+	for dy := range newH {
 		sy := dy + shift
 		if sy >= old.Height {
 			break
 		}
 		copy(next.Row(dy), old.Row(sy))
+		repairFrameRow(next, dy)
 	}
 	return next, shift
 }
@@ -1118,7 +1439,7 @@ func (s *Screen) clearScreenMode(mode int) {
 	s.clampCursor()
 	switch mode {
 	case 1:
-		for y := 0; y <= s.Row && y < s.Frame.Height; y++ {
+		for y := range min(s.Row+1, s.Frame.Height) {
 			end := s.Frame.Width
 			if y == s.Row {
 				end = min(s.Col+1, s.Frame.Width)
@@ -1163,27 +1484,139 @@ func (s *Screen) clampCursor() {
 	s.Col = clamp(s.Col, 0, s.Frame.Width-1)
 }
 
+func (s *Screen) parseCSIInts(params string) []int {
+	s.csiScratch = parseCSIIntsInto(s.csiScratch[:0], params)
+	return s.csiScratch
+}
+
 func parseCSIInts(params string) []int {
+	return parseCSIIntsInto(nil, params)
+}
+
+func parseCSIIntsInto(out []int, params string) []int {
 	if params == "" {
-		return nil
+		return out
 	}
 	params = strings.TrimPrefix(params, "?")
 	params = strings.TrimPrefix(params, ">")
-	parts := strings.Split(params, ";")
-	out := make([]int, 0, len(parts))
-	for _, p := range parts {
-		if p == "" {
-			out = append(out, 0)
-			continue
+	start := 0
+	for i := 0; i <= len(params); i++ {
+		if i == len(params) || params[i] == ';' {
+			out = append(out, parseCSIInt(params[start:i]))
+			start = i + 1
 		}
-		v, err := strconv.Atoi(p)
-		if err != nil {
-			out = append(out, 0)
-			continue
-		}
-		out = append(out, v)
 	}
 	return out
+}
+
+func (s *Screen) parseSGRInts(params string) []int {
+	s.sgrScratch = parseSGRIntsInto(s.sgrScratch[:0], params)
+	return s.sgrScratch
+}
+
+func parseSGRInts(params string) []int {
+	return parseSGRIntsInto(nil, params)
+}
+
+func parseSGRIntsInto(out []int, params string) []int {
+	if params == "" {
+		return out
+	}
+	start := 0
+	for i := 0; i <= len(params); i++ {
+		if i == len(params) || params[i] == ';' {
+			out = appendSGRGroup(out, params[start:i])
+			start = i + 1
+		}
+	}
+	return out
+}
+
+func appendSGRGroup(out []int, group string) []int {
+	colon := false
+	for i := 0; i < len(group); i++ {
+		if group[i] == ':' {
+			colon = true
+			break
+		}
+	}
+	if !colon {
+		return append(out, parseCSIInt(group))
+	}
+
+	parts := countSGRColonFields(group)
+	code := parseCSIInt(sgrColonField(group, 0))
+	if code == 4 {
+		if parts < 2 {
+			return append(out, code)
+		}
+		return append(out, code, sgrUnderlineStyleMarker, parseCSIInt(sgrColonField(group, 1)))
+	}
+	if code != 38 && code != 48 && code != 58 {
+		return append(out, code)
+	}
+	mode := 0
+	if parts > 1 {
+		mode = parseCSIInt(sgrColonField(group, 1))
+	}
+	switch mode {
+	case 5:
+		if parts < 3 {
+			return out
+		}
+		out = append(out, code, mode, parseCSIInt(sgrColonField(group, 2)))
+	case 2:
+		// code:mode::R:G:B and code:mode:cs:R:G:B both put RGB after
+		// the colorspace slot; code:mode:R:G:B omits that slot.
+		start := 2
+		if parts > 2 && (sgrColonField(group, 2) == "" || parts >= 6) {
+			start = 3
+		}
+		if parts < start+3 {
+			return out
+		}
+		out = append(out, code, mode)
+		for i := range 3 {
+			out = append(out, parseCSIInt(sgrColonField(group, start+i)))
+		}
+	}
+	return out
+}
+
+func countSGRColonFields(group string) int {
+	count := 1
+	for i := 0; i < len(group); i++ {
+		if group[i] == ':' {
+			count++
+		}
+	}
+	return count
+}
+
+func sgrColonField(group string, index int) string {
+	start := 0
+	field := 0
+	for i := 0; i <= len(group); i++ {
+		if i == len(group) || group[i] == ':' {
+			if field == index {
+				return group[start:i]
+			}
+			field++
+			start = i + 1
+		}
+	}
+	return ""
+}
+
+func parseCSIInt(param string) int {
+	if param == "" {
+		return 0
+	}
+	v, err := strconv.Atoi(param)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 func clamp(v, lo, hi int) int {

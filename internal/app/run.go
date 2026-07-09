@@ -5,25 +5,40 @@
 package app
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/clipboard"
 	"github.com/bnema/vev/internal/adapters/clock"
+	"github.com/bnema/vev/internal/adapters/config"
+	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/pty"
+	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
+	"github.com/bnema/vev/internal/adapters/shellcmd"
+	snapshotadapter "github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/logging"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
@@ -42,6 +57,8 @@ const (
 	kindKill
 	kindDaemon
 	kindStdio
+	kindUDPBootstrap
+	kindUDPProxy
 	kindHelp
 	kindVersion
 )
@@ -72,11 +89,11 @@ const usageText = `vev — a terminal multiplexer
 usage:
   vev                 attach to (or create) an ephemeral session
   vev new <name>      create and attach to a named session
-  vev attach <name>   attach to an existing named session (alias: a)
+  vev attach <name>   attach to an existing session (alias: a)
   vev attach user@host[:session]
                       attach through SSH to a remote vev daemon
   vev ls              list sessions
-  vev kill <name>     kill a named session
+  vev kill <name>     kill a session
   vev kill --all      kill all sessions and stop the daemon
   vev kill --daemon   stop the active vev daemon
   vev --help          show this help
@@ -116,12 +133,33 @@ func parseArgs(args []string) (command, error) {
 			cmd.name = args[1]
 		}
 		return cmd, nil
+	case "_udp-bootstrap":
+		if len(args) > 2 {
+			return command{}, usagef("`_udp-bootstrap` accepts at most one session name")
+		}
+		cmd := command{kind: kindUDPBootstrap}
+		if len(args) == 2 {
+			cmd.name = args[1]
+		}
+		return cmd, nil
+	case "_udp-proxy":
+		if len(args) > 2 {
+			return command{}, usagef("`_udp-proxy` accepts at most one session name")
+		}
+		cmd := command{kind: kindUDPProxy}
+		if len(args) == 2 {
+			cmd.name = args[1]
+		}
+		return cmd, nil
 	case "new":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`new` requires a session name")
 		}
 		if len(args) > 2 {
 			return command{}, usagef("`new` does not support command overrides")
+		}
+		if err := domain.ValidateSessionName(args[1]); err != nil {
+			return command{}, err
 		}
 		return command{kind: kindAttach, intent: ports.IntentNew, name: args[1]}, nil
 	case "attach", "a":
@@ -185,6 +223,10 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runDaemon()
 	case kindStdio:
 		return runStdio(ctx)
+	case kindUDPBootstrap:
+		return runUDPBootstrap(ctx, cmd.name)
+	case kindUDPProxy:
+		return runUDPProxy(ctx, cmd.name, os.Stdout)
 	case kindList:
 		return runList(ctx)
 	case kindKill:
@@ -196,19 +238,56 @@ func dispatch(ctx context.Context, cmd command) error {
 	}
 }
 
+func configureLogging(component logging.Component, rotateAtRuntime bool) (*slog.Logger, io.Closer, error) {
+	return logging.Setup(logging.Config{
+		Dir:             platform.StateDir(),
+		Component:       component,
+		Level:           logging.EnvLevel(),
+		MaxBytes:        logging.DefaultMaxBytes,
+		RotateAtRuntime: rotateAtRuntime,
+	})
+}
+
+func logConfigWarnings(log *slog.Logger, warnings []domain.Warning) {
+	for _, warning := range warnings {
+		if warning.Line > 0 {
+			log.Warn("config warning", "line", warning.Line, "msg", warning.Msg)
+			continue
+		}
+		log.Warn("config warning", "msg", warning.Msg)
+	}
+}
+
+func snapshotDir() string {
+	return filepath.Join(platform.StateDir(), "snapshots")
+}
+
+func pprofAddrIsLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // runDaemon runs the daemon in the foreground (the hidden --daemon path,
 // entered by an auto-spawned child): it sets up logging, binds the socket,
 // constructs the daemon, and serves until the last session exits or a
 // termination signal arrives (graceful shutdown notifies attached clients).
 func runDaemon() error {
-	logFile, err := setupLogging()
+	log, logCloser, err := configureLogging(logging.Daemon, true)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = logFile.Close() }()
+	defer func() { _ = logCloser.Close() }()
 
 	ln, err := ipc.Listen(ipc.SocketDir())
 	if err != nil {
+		log.Error("daemon listen failed", "socket_dir", ipc.SocketDir(), "err", err)
 		return fmt.Errorf("vev: daemon listen: %w", err)
 	}
 	defer func() { _ = ln.Close() }()
@@ -217,27 +296,54 @@ func runDaemon() error {
 	defer stop()
 
 	if addr := os.Getenv("VEV_PPROF_ADDR"); addr != "" {
+		if !pprofAddrIsLoopback(addr) {
+			log.Warn("pprof bound to non-loopback address; /debug/pprof is unauthenticated", "addr", addr)
+		}
 		go func() {
 			if err := http.ListenAndServe(addr, nil); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				slog.Error("pprof server exited", "err", err)
+				log.Error("pprof server exited", "err", err)
 			}
 		}()
-		slog.Info("pprof enabled", "addr", addr)
+		log.Info("pprof enabled", "addr", addr)
 	}
 
-	slog.Info("daemon starting", "socket", ln.Addr())
+	log.Info("daemon starting", "socket", ln.Addr())
 	daemonOpts := []daemon.Option(nil)
-	if store, err := kv.Open(persist.StorePath(platform.StateDir())); err != nil {
-		slog.Warn("opening session store failed; persistence disabled", "err", err)
+	configPath := platform.ConfigPath()
+	cfg, warnings, err := config.Load(configPath)
+	if err != nil {
+		log.Warn("loading config failed; using defaults", "path", configPath, "err", err)
+		cfg = domain.Defaults()
+	}
+	logConfigWarnings(log, warnings)
+	daemonOpts = append(daemonOpts, daemon.WithConfig(cfg))
+	daemonOpts = append(daemonOpts, daemon.WithBarScriptCommandRunner(shellcmd.New()))
+	daemonOpts = append(daemonOpts, daemon.WithProcessInspector(platform.NewProcessInspector()), daemon.WithDirOrHome(platform.DirOrHome))
+	daemonOpts = append(daemonOpts, daemon.WithSnapshotStore(snapshotadapter.NewStore(snapshotDir())))
+	storePath := persist.StorePath(platform.StateDir())
+	if store, err := kv.Open(storePath); err != nil {
+		log.Warn("opening session store failed; persistence disabled", "path", storePath, "err", err)
 	} else {
+		log.Info("session persistence enabled", "path", storePath)
 		daemonOpts = append(daemonOpts, daemon.WithStore(store))
 	}
-	d := daemon.New(pty.NewFactory(), clock.New(), slog.Default(), daemonOpts...)
+	clk := clock.New()
+	d := daemon.New(pty.NewFactory(), clk, log, daemonOpts...)
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
+	go func() {
+		if err := config.Watch(watchCtx, clk, configPath, func(cfg domain.Config, warnings []domain.Warning) {
+			logConfigWarnings(log, warnings)
+			d.ApplyConfig(cfg)
+		}); err != nil && !errors.Is(err, context.Canceled) {
+			log.Warn("config watcher stopped", "path", configPath, "err", err)
+		}
+	}()
 	if err := d.Serve(ctx, ln); err != nil {
-		slog.Error("daemon exited", "err", err)
+		log.Error("daemon exited", "err", err)
 		return err
 	}
-	slog.Info("daemon exited cleanly")
+	log.Info("daemon exited cleanly")
 	return nil
 }
 
@@ -245,24 +351,56 @@ func runDaemon() error {
 // attach loop. Logging goes to the shared file: the client must never write
 // to the console while the terminal is raw.
 func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) error {
-	logFile, err := setupLogging()
+	log, logCloser, err := configureLogging(logging.Client, false)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = logFile.Close() }()
+	defer func() { _ = logCloser.Close() }()
 
-	return runAttachWithDeps(ctx, intent, name, remoteTarget, os.Getenv("VEV"), runAttachDeps{
-		attachLocal:    attachLocalDaemon,
-		createDetached: createDetachedLocalSession,
+	return runAttachWithDeps(ctx, intent, name, remoteTarget, os.Getenv("VEV"), log, runAttachDeps{
+		localDialer:             defaultLocalDialer,
+		remoteDialerFactory:     defaultRemoteDialerFactory(),
+		selectedRemoteTransport: os.Getenv(envRemoteTransport),
+		runClient:               client.Run,
+		createDetached:          createDetachedLocalSession,
+		clipboard:               clipboard.New(),
 	})
 }
 
-type runAttachDeps struct {
-	attachLocal    func(context.Context, uint8, string) error
-	createDetached func(context.Context, string) error
+const envRemoteTransport = "VEV_REMOTE_TRANSPORT"
+
+func defaultLocalDialer() ports.Dialer { return localDaemonDialer{dir: ipc.SocketDir()} }
+
+func defaultRemoteDialerFactory() ports.RemoteDialerFactory {
+	return remoteadapter.NewDialerFactory()
 }
 
-func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, deps runAttachDeps) error {
+type runAttachDeps struct {
+	attachLocal             func(context.Context, uint8, string, *slog.Logger) error // compatibility hook for focused tests
+	localDialer             func() ports.Dialer
+	remoteDialerFactory     ports.RemoteDialerFactory
+	selectedRemoteTransport string
+	runClient               func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, bool, ports.ClipboardReader, *slog.Logger) error
+	createDetached          func(context.Context, string) error
+	// clipboard reads a clipboard image on a remote attach's Ctrl+V (see
+	// docs/superpowers/specs/2026-07-04-clipboard-image-transfer-design.md).
+	// Only used for the remote-dialer branch below; local attaches never
+	// intercept Ctrl+V regardless of this field.
+	clipboard ports.ClipboardReader
+}
+
+func remoteTransportModeFromEnv(value string) (ports.RemoteTransportMode, error) {
+	switch value {
+	case "", string(ports.RemoteTransportUDP):
+		return ports.RemoteTransportUDP, nil
+	case string(ports.RemoteTransportStdio):
+		return ports.RemoteTransportStdio, nil
+	default:
+		return "", fmt.Errorf("vev: invalid remote transport %q (want %q or %q)", value, ports.RemoteTransportUDP, ports.RemoteTransportStdio)
+	}
+}
+
+func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
 	if activeSession != "" {
 		if remoteTarget == "" && intent == ports.IntentNew {
 			return deps.createDetached(ctx, name)
@@ -270,18 +408,47 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		return errors.New("vev: sessions should be nested with care; unset VEV to force")
 	}
 
+	runClient := deps.runClient
+	if runClient == nil {
+		runClient = client.Run
+	}
 	if remoteTarget != "" {
-		transport, err := sshstdio.Dial(remoteTarget, name)
+		mode, err := remoteTransportModeFromEnv(deps.selectedRemoteTransport)
 		if err != nil {
 			return err
 		}
-		// client.Attach owns and closes transport.
-		return client.Attach(ctx, transport, term.New(), intent, name)
+		factory := deps.remoteDialerFactory
+		if factory == nil {
+			factory = defaultRemoteDialerFactory()
+		}
+		if log != nil {
+			log.Info("attaching to remote session", "target", remoteTarget, "name", name, "transport", string(mode))
+		}
+		dialer, err := factory.DialerForRemote(remoteTarget, name, mode, log)
+		if err != nil {
+			return err
+		}
+		return runClient(ctx, dialer, term.New(), clock.New(), intent, name, true, deps.clipboard, log)
 	}
 
+	attachLocal := deps.attachLocal
+	if attachLocal == nil {
+		localDialer := deps.localDialer
+		if localDialer == nil {
+			localDialer = defaultLocalDialer
+		}
+		attachLocal = func(ctx context.Context, intent uint8, name string, log *slog.Logger) error {
+			if log != nil {
+				log.Info("attaching to local session", "intent", intent, "name", name)
+			}
+			return runClient(ctx, localDialer(), term.New(), clock.New(), intent, name, false, nil, log)
+		}
+	}
 	return runLocalAttachWithRecovery(ctx, intent, name, attachRecoveryDeps{
-		confirmer:       confirm.NewConfirmer(os.Stdin, os.Stderr),
-		attach:          deps.attachLocal,
+		confirmer: confirm.NewConfirmer(os.Stdin, os.Stderr),
+		attach: func(ctx context.Context, intent uint8, name string) error {
+			return attachLocal(ctx, intent, name, log)
+		},
 		killDaemon:      requestDaemonStop,
 		settleAfterKill: waitForDaemonStop,
 	})
@@ -332,13 +499,23 @@ func isDaemonVersionDrift(err error) bool {
 	return protocolErr.Code == ports.ErrVersionMismatch || protocolErr.Text == legacyMalformedHelloSignal
 }
 
-func attachLocalDaemon(ctx context.Context, intent uint8, name string) error {
-	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
-	if err != nil {
-		return err
+type localDaemonDialer struct{ dir string }
+
+func (d localDaemonDialer) Dial(ctx context.Context) (ports.Transport, error) {
+	return ensureDaemon(ctx, d.dir, realDial, realSpawn, defaultBackoff)
+}
+
+func detachedLocalHello(name, cwd string) ports.Hello {
+	termEnv := os.Getenv("TERM")
+	return ports.Hello{
+		Version:   ports.ProtocolVersion,
+		Intent:    ports.IntentNew,
+		Name:      name,
+		Size:      domain.Size{Cols: 80, Rows: 24},
+		TermEnv:   termEnv,
+		Cwd:       cwd,
+		TrueColor: client.DetectTrueColor(termEnv, os.Getenv("COLORTERM")),
 	}
-	// client.Attach owns and closes transport.
-	return client.Attach(ctx, transport, term.New(), intent, name)
 }
 
 func createDetachedLocalSession(ctx context.Context, name string) error {
@@ -352,14 +529,7 @@ func createDetachedLocalSession(ctx context.Context, name string) error {
 	if err != nil {
 		cwd = ""
 	}
-	hello := ports.Hello{
-		Version: ports.ProtocolVersion,
-		Intent:  ports.IntentNew,
-		Name:    name,
-		Size:    domain.Size{Cols: 80, Rows: 24},
-		TermEnv: os.Getenv("TERM"),
-		Cwd:     cwd,
-	}
+	hello := detachedLocalHello(name, cwd)
 	if err := transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
 		return fmt.Errorf("vev: creating detached session: %w", err)
 	}
@@ -452,6 +622,13 @@ func requestDaemonStop(ctx context.Context) error {
 // connects to the per-user daemon (auto-spawning it if needed) and proxies the
 // framed protocol between process stdio and the daemon socket.
 func runStdio(ctx context.Context) error {
+	log, logCloser, err := configureLogging(logging.Stdio, false)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = logCloser.Close() }()
+	log.Debug("stdio proxy starting")
+
 	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
 	if err != nil {
 		return err
@@ -459,36 +636,254 @@ func runStdio(ctx context.Context) error {
 	defer func() { _ = transport.Close() }()
 
 	stdio := sshstdio.NewTransport(os.Stdin, os.Stdout, nil)
-	return proxyTransports(ctx, stdio, transport)
+	return proxyTransports(ctx, stdio, transport, log)
 }
 
-func proxyTransports(ctx context.Context, a, b ports.Transport) error {
-	errCh := make(chan error, 2)
-	copyFrames := func(dst, src ports.Transport) {
-		for {
-			f, err := src.Recv()
-			if err != nil {
-				errCh <- err
-				return
-			}
-			if err := dst.Send(f); err != nil {
-				errCh <- err
-				return
-			}
-		}
+var (
+	udpBootstrapTimeout = 5 * time.Second
+	udpProxyCommand     = func(ctx context.Context, exe string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, exe, args...)
 	}
-	go copyFrames(b, a)
-	go copyFrames(a, b)
+)
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errCh:
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
+// runUDPBootstrap starts a detached _udp-proxy, forwards its single readiness
+// line, and exits so SSH stdio can close without owning the UDP proxy lifetime.
+func runUDPBootstrap(ctx context.Context, session string) error {
+	// Always start a fresh proxy for a bootstrap request. A client attach begins
+	// with MsgHello, which must reach the daemon handshake path; reusing an
+	// already-running proxy would forward that Hello into the daemon connection's
+	// post-handshake runConnLoop, where it is intentionally ignored. The new
+	// proxy publishes itself and retires any older registry entry once ready.
+	r, w, err := os.Pipe()
+	if err != nil {
 		return err
 	}
+	defer func() { _ = r.Close() }()
+
+	exe, err := os.Executable()
+	if err != nil {
+		_ = w.Close()
+		return err
+	}
+	args := []string{"_udp-proxy"}
+	if session != "" {
+		args = append(args, session)
+	}
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		_ = w.Close()
+		return err
+	}
+	defer func() { _ = devNull.Close() }()
+
+	cmd := udpProxyCommand(ctx, exe, args...)
+	// _udp-proxy writes diagnostics through configureLogging(logging.Stdio, false);
+	// stdio is detached here so the bootstrap SSH channel can close.
+	cmd.Stdin = devNull
+	cmd.Stdout = w
+	cmd.Stderr = devNull
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		_ = w.Close()
+		return err
+	}
+	_ = w.Close()
+
+	readyCtx, cancel := context.WithTimeout(ctx, udpBootstrapTimeout)
+	defer cancel()
+	lineCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		line, err := bufio.NewReader(r).ReadString('\n')
+		if err != nil {
+			errCh <- err
+			return
+		}
+		lineCh <- line
+	}()
+	select {
+	case line := <-lineCh:
+		if err := cmd.Process.Release(); err != nil {
+			return err
+		}
+		_, err := fmt.Fprint(os.Stdout, line)
+		return err
+	case err := <-errCh:
+		_ = cmd.Wait()
+		return err
+	case <-readyCtx.Done():
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("vev: udp bootstrap readiness: %w", readyCtx.Err())
+	}
+}
+
+// runUDPProxy is the detached long-lived remote-side datagram proxy.
+func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
+	log, logCloser, err := configureLogging(logging.Stdio, false)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = logCloser.Close() }()
+	log.Debug("udp proxy starting", "session", session)
+
+	portRange, err := parseUDPPortRange(os.Getenv(envUDPPortRange))
+	if err != nil {
+		return err
+	}
+	conn, err := listenUDPInRange(ctx, portRange)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return err
+	}
+	daemonTr, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = daemonTr.Close() }()
+	dg, err := dgram.NewTransportWithOptions(conn, nil, key, 2, 1, udpProxyClientTransportOptions)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dg.Close() }()
+
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return errors.New("vev: udp proxy did not get a UDP address")
+	}
+	keyText := base64.StdEncoding.EncodeToString(key)
+	registry := dgram.NewProxyRegistry(filepath.Join(ipc.SocketDir(), "udp-proxies"))
+	record := dgram.ProxyRecord{Session: session, PID: os.Getpid(), Port: addr.Port, Key: keyText}
+	if err := registry.Publish(record); err != nil {
+		return err
+	}
+	defer func() { _ = registry.RemoveOwned(record) }()
+	if _, err := fmt.Fprintf(ready, "VEV-UDP %d %s\n", addr.Port, keyText); err != nil {
+		return err
+	}
+
+	var dgramTr ports.Transport = dg
+	if session != "" {
+		dgramTr = preHelloNameTransport{Transport: dg, session: session}
+	}
+	return dgram.ProxyRuntime{Client: dgramTr, Daemon: daemonTr, Log: log, IdleTTL: udpProxyIdleTTL}.Run(ctx)
+}
+
+const udpProxyIdleTTL = 15 * time.Minute
+
+var udpProxyClientTransportOptions = dgram.Options{
+	MaxPending: 32,
+	DeadAfter:  2 * udpProxyIdleTTL,
+}
+
+const (
+	// envUDPPortRange configures the remote UDP proxy's listen port range so a
+	// host firewall can allow a known range instead of a random ephemeral port.
+	// Format: "START-END" (inclusive), a single "PORT", or "0" for a random
+	// ephemeral port. Unset uses the default range below.
+	envUDPPortRange     = "VEV_UDP_PORT_RANGE"
+	defaultUDPPortStart = 61000
+	defaultUDPPortEnd   = 61023
+)
+
+// udpPortRange is an inclusive [start, end] UDP port range. start == 0 means a
+// random ephemeral port (the old ":0" behavior).
+type udpPortRange struct {
+	start int
+	end   int
+}
+
+// parseUDPPortRange parses VEV_UDP_PORT_RANGE. Empty -> default range. "0" ->
+// ephemeral. "N" -> single port N. "A-B" -> inclusive range. Ports must be in
+// 1..65535 (or 0 for ephemeral) and end must be >= start.
+func parseUDPPortRange(value string) (udpPortRange, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return udpPortRange{start: defaultUDPPortStart, end: defaultUDPPortEnd}, nil
+	}
+	startStr, endStr, hasRange := strings.Cut(value, "-")
+	start, err := parseUDPPort(startStr)
+	if err != nil {
+		return udpPortRange{}, fmt.Errorf("invalid %s %q: %w", envUDPPortRange, value, err)
+	}
+	if start == 0 {
+		if hasRange {
+			return udpPortRange{}, fmt.Errorf("invalid %s %q: port 0 (ephemeral) cannot be combined with a range", envUDPPortRange, value)
+		}
+		return udpPortRange{start: 0, end: 0}, nil
+	}
+	end := start
+	if hasRange {
+		end, err = parseUDPPort(endStr)
+		if err != nil {
+			return udpPortRange{}, fmt.Errorf("invalid %s %q: %w", envUDPPortRange, value, err)
+		}
+	}
+	if end < start {
+		return udpPortRange{}, fmt.Errorf("invalid %s %q: end %d before start %d", envUDPPortRange, value, end, start)
+	}
+	return udpPortRange{start: start, end: end}, nil
+}
+
+func parseUDPPort(s string) (int, error) {
+	p, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0, fmt.Errorf("port %q is not a number", strings.TrimSpace(s))
+	}
+	if p < 0 || p > 65535 {
+		return 0, fmt.Errorf("port %d out of range 0-65535", p)
+	}
+	return p, nil
+}
+
+// listenUDPInRange binds a UDP packet conn on the first free port in the range,
+// skipping busy ports. A zero-start range binds a random ephemeral port.
+func listenUDPInRange(ctx context.Context, r udpPortRange) (net.PacketConn, error) {
+	var lc net.ListenConfig
+	if r.start == 0 {
+		return lc.ListenPacket(ctx, "udp", ":0")
+	}
+	if r.start < 0 || r.end < r.start {
+		return nil, fmt.Errorf("invalid UDP port range %d-%d", r.start, r.end)
+	}
+	var lastErr error
+	for port := r.start; port <= r.end; port++ {
+		conn, err := lc.ListenPacket(ctx, "udp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("no free UDP port in range %d-%d: %w", r.start, r.end, lastErr)
+}
+
+type preHelloNameTransport struct {
+	ports.Transport
+	session string
+}
+
+func (t preHelloNameTransport) Recv() (ports.Frame, error) {
+	f, err := t.Transport.Recv()
+	if err != nil || f.Type != ports.MsgHello || t.session == "" {
+		return f, err
+	}
+	h, err := ports.UnmarshalHello(f.Payload)
+	if err != nil {
+		return f, nil
+	}
+	if h.Name == "" {
+		h.Name = t.session
+		f.Payload = ports.MarshalHello(h)
+	}
+	return f, nil
+}
+
+func proxyTransports(ctx context.Context, a, b ports.Transport, log *slog.Logger) error {
+	return dgram.ProxyRuntime{Client: a, Daemon: b, Log: log}.Run(ctx)
 }
 
 // runList prints the daemon's session listing. With no daemon running, it
@@ -546,7 +941,10 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 		if s.Stopped {
 			state = "stopped"
 			tabs = "-"
-		} else if s.Attached {
+		} else if s.Ephemeral {
+			state = "temporary"
+		}
+		if s.Attached {
 			attached = "yes"
 		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", s.Name, state, tabs, attached)
@@ -589,6 +987,10 @@ func runKill(_ context.Context, name string, all, daemon bool) error {
 			}
 			if closeErr := p.Close(); closeErr != nil {
 				return fmt.Errorf("vev: closing stored sessions: %w", closeErr)
+			}
+			snapshots := snapshotadapter.NewStore(snapshotDir())
+			if deleteErr := snapshots.Delete(name); deleteErr != nil {
+				return fmt.Errorf("vev: deleting session snapshot: %w", deleteErr)
 			}
 			printKillSuccess(name, all, daemon)
 			return nil

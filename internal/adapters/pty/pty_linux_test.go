@@ -98,6 +98,20 @@ func TestOpen_EchoRoundtrip(t *testing.T) {
 	require.NoError(t, p.Close())
 }
 
+func TestForegroundPgid(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping pty integration test in -short mode")
+	}
+	f := newFactory()
+	p, err := f.Open("sh", []string{"-c", "sleep 2"}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = p.Close() })
+
+	pgid, err := p.ForegroundPgid()
+	require.NoError(t, err)
+	require.Greater(t, pgid, 0)
+}
+
 func TestResize_SttySize(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pty integration test in -short mode")

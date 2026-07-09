@@ -3,6 +3,7 @@ package copy
 import (
 	"encoding/base64"
 	"strings"
+	"unicode"
 
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -40,11 +41,21 @@ func NewSnapshot(sb *Scrollback, screen renderer.Frame) Snapshot {
 }
 
 // Mode stores per-client scrollback viewport and line-selection state.
+type SearchMatch struct {
+	Row   int
+	Start int
+	End   int
+	Text  string
+}
+
 type Mode struct {
 	ViewportTop int
 	Cursor      int
 	Anchor      int
 	Selecting   bool
+	SearchQuery string
+	Searches    []SearchMatch
+	SearchIndex int
 }
 
 func NewMode(s Snapshot) *Mode {
@@ -59,6 +70,109 @@ func (m *Mode) Move(s Snapshot, delta int) { m.SetCursor(s, m.Cursor+delta) }
 func (m *Mode) Page(s Snapshot, pages int) { m.SetCursor(s, m.Cursor+pages*max(s.Height, 1)) }
 func (m *Mode) Top(s Snapshot)             { m.SetCursor(s, 0) }
 func (m *Mode) Bottom(s Snapshot)          { m.SetCursor(s, len(s.Rows)-1) }
+
+func FindMatches(s Snapshot, query string) []SearchMatch {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil
+	}
+	needle := lowerRunes(query)
+	matches := make([]SearchMatch, 0)
+	for row, cells := range s.Rows {
+		haystack, cellIndexes := searchableCells(cells)
+		var text string
+		for start := 0; start+len(needle) <= len(haystack); {
+			if !sameRunes(haystack[start:start+len(needle)], needle) {
+				start++
+				continue
+			}
+			if text == "" {
+				text = rowString(cells)
+			}
+			end := start + len(needle)
+			cellEnd := len(cells)
+			if end < len(cellIndexes) {
+				cellEnd = cellIndexes[end]
+			}
+			matches = append(matches, SearchMatch{Row: row, Start: cellIndexes[start], End: cellEnd, Text: text})
+			start += len(needle)
+		}
+	}
+	return matches
+}
+
+func searchableCells(cells []renderer.Cell) ([]rune, []int) {
+	runes := make([]rune, 0, len(cells))
+	cellIndexes := make([]int, 0, len(cells))
+	for x, cell := range cells {
+		if cell.Continuation {
+			continue
+		}
+		r := cell.Rune
+		if r == 0 {
+			r = ' '
+		}
+		runes = append(runes, unicode.ToLower(r))
+		cellIndexes = append(cellIndexes, x)
+	}
+	return runes, cellIndexes
+}
+
+func lowerRunes(s string) []rune {
+	runes := []rune(s)
+	for i, r := range runes {
+		runes[i] = unicode.ToLower(r)
+	}
+	return runes
+}
+
+func sameRunes(a, b []rune) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *Mode) Search(s Snapshot, query string) bool {
+	return m.SetSearchMatches(s, query, FindMatches(s, query), 0)
+}
+
+func (m *Mode) SetSearchMatches(s Snapshot, query string, matches []SearchMatch, index int) bool {
+	if len(matches) == 0 {
+		m.SearchQuery = strings.TrimSpace(query)
+		m.Searches = nil
+		m.SearchIndex = -1
+		return false
+	}
+	m.SearchQuery = strings.TrimSpace(query)
+	m.Searches = append(m.Searches[:0], matches...)
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(matches) {
+		index = len(matches) - 1
+	}
+	m.SearchIndex = index
+	m.SetCursor(s, matches[index].Row)
+	return true
+}
+
+func (m *Mode) NextSearchMatch(s Snapshot, delta int) bool {
+	if len(m.Searches) == 0 || delta == 0 {
+		return false
+	}
+	m.SearchIndex = (m.SearchIndex + delta) % len(m.Searches)
+	if m.SearchIndex < 0 {
+		m.SearchIndex += len(m.Searches)
+	}
+	m.SetCursor(s, m.Searches[m.SearchIndex].Row)
+	return true
+}
 
 // SetCursor moves the visual cursor to row, clamping it to the snapshot and
 // scrolling the viewport just enough to keep it visible.
@@ -159,6 +273,11 @@ func (m *Mode) Render(s Snapshot, styles ...renderer.Style) renderer.Frame {
 				applySelectionStyle(&row[x].Style, selectionStyle, hasSelectionStyle)
 			}
 		}
+		if match, ok := m.currentSearchMatchForRow(src); ok {
+			for x := match.Start; x < match.End && x < len(row); x++ {
+				applySelectionStyle(&row[x].Style, selectionStyle, hasSelectionStyle)
+			}
+		}
 		if src == m.Cursor && !lineSelected && len(row) > 0 {
 			applySelectionStyle(&row[0].Style, selectionStyle, hasSelectionStyle)
 		}
@@ -169,6 +288,14 @@ func (m *Mode) Render(s Snapshot, styles ...renderer.Style) renderer.Frame {
 	}
 	drawCopyStatus(frame.Row(s.Height), m, len(s.Rows), style)
 	return frame
+}
+
+func (m *Mode) currentSearchMatchForRow(row int) (SearchMatch, bool) {
+	if m.SearchIndex < 0 || m.SearchIndex >= len(m.Searches) {
+		return SearchMatch{}, false
+	}
+	match := m.Searches[m.SearchIndex]
+	return match, match.Row == row
 }
 
 func optionalStyle(styles []renderer.Style, idx int) (renderer.Style, bool) {
@@ -211,7 +338,7 @@ func drawCopyStatus(row []renderer.Cell, m *Mode, total int, style renderer.Styl
 	for i := range row {
 		row[i] = renderer.BlankCell()
 	}
-	text := " [VISUAL] "
+	text := " [SCROLL] "
 	if m.Selecting {
 		text = " [SELECT] "
 	}
@@ -219,6 +346,12 @@ func drawCopyStatus(row []renderer.Cell, m *Mode, total int, style renderer.Styl
 		text += strconvItoa(m.Cursor+1) + "/" + strconvItoa(total) + " "
 	} else {
 		text += "0/0 "
+	}
+	if m.SearchQuery != "" {
+		if len(m.Searches) > 0 && m.SearchIndex >= 0 && m.SearchIndex < len(m.Searches) {
+			text += strconvItoa(m.SearchIndex+1) + "/" + strconvItoa(len(m.Searches)) + " "
+		}
+		text += "/" + m.SearchQuery + " "
 	}
 	for i, r := range text {
 		if i >= len(row) {
@@ -237,6 +370,18 @@ func OSC52(text string) [][]byte {
 	}
 	encoded := base64.StdEncoding.EncodeToString([]byte(text))
 	return [][]byte{[]byte("\x1b]52;c;" + encoded + "\x07")}
+}
+
+// OSC52FromBase64 builds the normalized OSC 52 sequence to forward a
+// clipboard set request that a pane app already emitted as base64. It
+// returns nil if b64 is not valid base64 or its decoded length exceeds
+// OSC52MaxPayloadBytes — callers must drop the request silently in that case.
+func OSC52FromBase64(b64 string) []byte {
+	decoded, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(decoded) > OSC52MaxPayloadBytes {
+		return nil
+	}
+	return []byte("\x1b]52;c;" + b64 + "\x07")
 }
 
 func strconvItoa(n int) string {

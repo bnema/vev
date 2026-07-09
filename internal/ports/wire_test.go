@@ -60,26 +60,30 @@ func TestHelloGoldenAndRoundTrip(t *testing.T) {
 		{
 			name: "typical",
 			msg: Hello{
-				Version: 1,
-				Intent:  IntentNew,
-				Name:    "w0",
-				Size:    domain.Size{Cols: 80, Rows: 24},
-				TermEnv: "xterm-256color",
-				Cwd:     "/tmp/project",
+				Version:     1,
+				Intent:      IntentNew,
+				ClientID:    [16]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
+				ResumeToken: 0x0102030405060708,
+				Name:        "w0",
+				Size:        domain.Size{Cols: 80, Rows: 24},
+				TermEnv:     "xterm-256color",
+				Cwd:         "/tmp/project",
+				TrueColor:   true,
 			},
-			want: []byte{0x00, 0x01, 0x01, 0x00, 0x02, 0x77, 0x30, 0x00, 0x50, 0x00, 0x18, 0x00, 0x0e, 0x78, 0x74, 0x65, 0x72, 0x6d, 0x2d, 0x32, 0x35, 0x36, 0x63, 0x6f, 0x6c, 0x6f, 0x72, 0x00, 0x0c, 0x2f, 0x74, 0x6d, 0x70, 0x2f, 0x70, 0x72, 0x6f, 0x6a, 0x65, 0x63, 0x74},
+			want: []byte{0x00, 0x01, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0x02, 0x77, 0x30, 0x00, 0x50, 0x00, 0x18, 0x00, 0x0e, 0x78, 0x74, 0x65, 0x72, 0x6d, 0x2d, 0x32, 0x35, 0x36, 0x63, 0x6f, 0x6c, 0x6f, 0x72, 0x00, 0x0c, 0x2f, 0x74, 0x6d, 0x70, 0x2f, 0x70, 0x72, 0x6f, 0x6a, 0x65, 0x63, 0x74, 0x01},
 		},
 		{
 			name: "empty strings",
 			msg: Hello{
-				Version: 1,
-				Intent:  IntentEphemeral,
-				Name:    "",
-				Size:    domain.Size{Cols: 0, Rows: 0},
-				TermEnv: "",
-				Cwd:     "",
+				Version:   1,
+				Intent:    IntentEphemeral,
+				Name:      "",
+				Size:      domain.Size{Cols: 0, Rows: 0},
+				TermEnv:   "",
+				Cwd:       "",
+				TrueColor: false,
 			},
-			want: []byte{0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want: []byte{0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 		},
 	}
 
@@ -96,6 +100,10 @@ func TestHelloGoldenAndRoundTrip(t *testing.T) {
 			if !reflect.DeepEqual(back, tt.msg) {
 				t.Fatalf("round trip = %#v, want %#v", back, tt.msg)
 			}
+			peek, ok := PeekHelloVersion(got)
+			if !ok || peek != tt.msg.Version {
+				t.Fatalf("PeekHelloVersion() = %d, %v; want %d, true", peek, ok, tt.msg.Version)
+			}
 		})
 	}
 
@@ -110,8 +118,8 @@ func TestInputGoldenAndRoundTrip(t *testing.T) {
 		msg  Input
 		want []byte
 	}{
-		{name: "data", msg: Input{Data: []byte("hi")}, want: []byte{0x68, 0x69}},
-		{name: "empty", msg: Input{Data: nil}, want: []byte{}},
+		{name: "data", msg: Input{InputSeq: 0x0102030405060708, Data: []byte("hi")}, want: []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x68, 0x69}},
+		{name: "empty", msg: Input{InputSeq: 0, Data: nil}, want: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
 	}
 
 	for _, tt := range tests {
@@ -130,14 +138,42 @@ func TestInputGoldenAndRoundTrip(t *testing.T) {
 		})
 	}
 
-	// Input is rest-of-payload: any byte sequence, including a truncated
-	// one, is a valid (if empty or partial) Data value. No error path
-	// exists to exercise beyond "never panics".
-	mustNotPanic(t, func() {
-		if _, err := UnmarshalInput([]byte{0x01}); err != nil {
-			t.Fatalf("UnmarshalInput() unexpected error = %v", err)
-		}
-	})
+	full := MarshalInput(tests[0].msg)
+	assertAllPrefixesFail(t, full[:8], UnmarshalInput)
+}
+
+func TestImagePushGoldenAndRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  ImagePush
+		want []byte
+	}{
+		{
+			name: "png data",
+			msg:  ImagePush{InputSeq: 7, Mime: "image/png", Data: []byte{0x01, 0x02, 0x03}},
+			want: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x09, 0x69, 0x6d, 0x61, 0x67, 0x65, 0x2f, 0x70, 0x6e, 0x67, 0x01, 0x02, 0x03},
+		},
+		{name: "empty", msg: ImagePush{}, want: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MarshalImagePush(tt.msg)
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("MarshalImagePush() = %#v, want %#v", got, tt.want)
+			}
+			back, err := UnmarshalImagePush(got)
+			if err != nil {
+				t.Fatalf("UnmarshalImagePush() error = %v", err)
+			}
+			if !reflect.DeepEqual(back, tt.msg) {
+				t.Fatalf("round trip = %#v, want %#v", back, tt.msg)
+			}
+		})
+	}
+
+	full := MarshalImagePush(tests[0].msg)
+	assertAllPrefixesFail(t, full[:19], UnmarshalImagePush)
 }
 
 func TestThemeGoldenAndRoundTrip(t *testing.T) {
@@ -147,15 +183,23 @@ func TestThemeGoldenAndRoundTrip(t *testing.T) {
 		want []byte
 	}{
 		{
-			name: "foreground background truecolor",
+			name: "foreground background truecolor dark scheme",
 			msg: Theme{
 				HasForeground: true,
 				Foreground:    renderer.RGB{R: 1, G: 2, B: 3},
 				HasBackground: true,
 				Background:    renderer.RGB{R: 4, G: 5, B: 6},
 				TrueColor:     true,
+				SchemeKnown:   true,
 			},
-			want: []byte{0x07, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+			want: []byte{0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+		},
+		{
+			name: "light scheme bit without known is preserved",
+			msg: Theme{
+				Light: true,
+			},
+			want: []byte{0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 		},
 		{
 			name: "foreground only no truecolor",
@@ -267,13 +311,13 @@ func TestWelcomeGoldenAndRoundTrip(t *testing.T) {
 	}{
 		{
 			name: "ephemeral",
-			msg:  Welcome{SessionID: "sess-1", SessionName: "main", Ephemeral: true},
-			want: []byte{0x00, 0x06, 0x73, 0x65, 0x73, 0x73, 0x2d, 0x31, 0x00, 0x04, 0x6d, 0x61, 0x69, 0x6e, 0x01},
+			msg:  Welcome{SessionID: "sess-1", SessionName: "main", Ephemeral: true, ResumeToken: 0x0102030405060708, Capabilities: CapabilityResume | CapabilityPredict},
+			want: []byte{0x00, 0x06, 0x73, 0x65, 0x73, 0x73, 0x2d, 0x31, 0x00, 0x04, 0x6d, 0x61, 0x69, 0x6e, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0x00, 0x00, 0x05},
 		},
 		{
 			name: "non-ephemeral empty name",
 			msg:  Welcome{SessionID: "abc", SessionName: "", Ephemeral: false},
-			want: []byte{0x00, 0x03, 0x61, 0x62, 0x63, 0x00, 0x00, 0x00},
+			want: []byte{0x00, 0x03, 0x61, 0x62, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 		},
 	}
 
@@ -319,8 +363,8 @@ func TestErrorMsgGoldenAndRoundTrip(t *testing.T) {
 }
 
 func TestOutputGoldenAndRoundTrip(t *testing.T) {
-	msg := Output{Data: []byte("hello\n")}
-	want := []byte{0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x0a}
+	msg := Output{BaseStateNum: 1, NewStateNum: 2, EchoAck: 3, Data: []byte("hello\n")}
+	want := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x0a}
 
 	got := MarshalOutput(msg)
 	if !bytes.Equal(got, want) {
@@ -333,6 +377,28 @@ func TestOutputGoldenAndRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(back, msg) {
 		t.Fatalf("round trip = %#v, want %#v", back, msg)
 	}
+
+	assertAllPrefixesFail(t, got[:24], UnmarshalOutput)
+}
+
+func TestAckGoldenAndRoundTrip(t *testing.T) {
+	msg := Ack{AckedStateNum: 0x0102030405060708}
+	want := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+
+	got := MarshalAck(msg)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("MarshalAck() = %#v, want %#v", got, want)
+	}
+	back, err := UnmarshalAck(got)
+	if err != nil {
+		t.Fatalf("UnmarshalAck() error = %v", err)
+	}
+	if back != msg {
+		t.Fatalf("round trip = %#v, want %#v", back, msg)
+	}
+
+	assertAllPrefixesFail(t, got, UnmarshalAck)
+	assertTrailingGarbageFails(t, got, UnmarshalAck)
 }
 
 func TestDetachedGoldenAndRoundTrip(t *testing.T) {
@@ -469,21 +535,24 @@ func TestMsgTypeConstantsDistinct(t *testing.T) {
 			IntentEphemeral: "IntentEphemeral",
 			IntentNew:       "IntentNew",
 			IntentAttach:    "IntentAttach",
+			IntentResume:    "IntentResume",
 		}
-		if len(vals) != 3 {
-			t.Fatalf("expected 3 distinct intent values, got %d", len(vals))
+		if len(vals) != 4 {
+			t.Fatalf("expected 4 distinct intent values, got %d", len(vals))
 		}
 	})
 
 	t.Run("error codes", func(t *testing.T) {
 		vals := map[uint16]string{
-			ErrVersionMismatch: "ErrVersionMismatch",
-			ErrNoSuchSession:   "ErrNoSuchSession",
-			ErrNameTaken:       "ErrNameTaken",
-			ErrInternal:        "ErrInternal",
+			ErrVersionMismatch:    "ErrVersionMismatch",
+			ErrNoSuchSession:      "ErrNoSuchSession",
+			ErrNameTaken:          "ErrNameTaken",
+			ErrServerShutdown:     "ErrServerShutdown",
+			ErrInvalidSessionName: "ErrInvalidSessionName",
+			ErrInternal:           "ErrInternal",
 		}
-		if len(vals) != 4 {
-			t.Fatalf("expected 4 distinct error codes, got %d", len(vals))
+		if len(vals) != 6 {
+			t.Fatalf("expected 6 distinct error codes, got %d", len(vals))
 		}
 	})
 

@@ -5,8 +5,21 @@ type Context interface {
 	CreateTab() error
 	CreateSession() error
 	CloseTab() error
+	SplitRight() error
+	SplitLeft() error
+	SplitUp() error
+	SplitDown() error
+	StackPane() error
+	ToggleStack() error
+	ClosePane() error
+	FocusPaneLeft() error
+	FocusPaneRight() error
+	FocusPaneUp() error
+	FocusPaneDown() error
 	NextTab() error
 	PrevTab() error
+	BackSession() error
+	ForwardSession() error
 	Detach() error
 	EnterVisualMode() error
 	RenameSession() error
@@ -16,6 +29,6 @@ type Context interface {
 
 // Command describes an executable command.
 type Command struct {
-	Code, Name, Desc string
-	Run              func(Context) error
+	Slug, Code, Name, Desc string
+	Run                    func(Context) error
 }

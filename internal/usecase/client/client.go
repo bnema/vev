@@ -9,12 +9,15 @@ package client
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -80,6 +83,18 @@ func (m milestones) missing() []string {
 	return out
 }
 
+// processClientID identifies this client process across links. It is kept in
+// memory only; a fresh process gets a fresh ID.
+var processClientID = newClientID()
+
+func newClientID() [16]byte {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		panic("crypto/rand failed generating client ID: " + err.Error())
+	}
+	return id
+}
+
 // stdinBufSize is the read buffer for the terminal input pump.
 const stdinBufSize = 4096
 
@@ -87,81 +102,306 @@ const stdinBufSize = 4096
 // goroutine, decoupling the input/resize pumps from transport back-pressure.
 const sendQueueDepth = 64
 
-// Attach connects an already-dialed transport to the controlling terminal
-// and runs the attach loop until the session detaches, the daemon
-// disappears, or the context is cancelled.
-//
-// It owns transport for its lifetime and closes it before returning. The
-// terminal is put into raw mode after a successful Welcome and restored on
-// every exit path — normal return, error, or panic.
-func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal, intent uint8, name string) (retErr error) {
-	log := slog.Default().With("component", "client")
-	ms := milestones{dialed: true} // transport arrives already connected
+var reconnectSleep = sleepReconnect
+var reconnectSleepWithResize = sleepReconnectWithResizeEvents
 
-	// Runs last: a single structured diagnostic on failure, to the log file
-	// (never the terminal). Console output while raw is forbidden.
+const (
+	statusReconnect = "\r\x1b[2Kreconnecting…"
+	statusClear     = "\r\x1b[2K"
+)
+
+// Run connects via dialer and runs the attach client. It owns the terminal
+// lifecycle above attach attempts so raw mode remains active while a live
+// client process redials a lost link.
+//
+// remote and clipboard together gate the clipboard-image-transfer feature
+// (docs/superpowers/specs/2026-07-04-clipboard-image-transfer-design.md):
+// Ctrl+V is only intercepted on a remote attach (remote true) with a
+// ClipboardReader configured (clipboard non-nil) — local attaches forward
+// 0x16 untouched so the locally running agent's own clipboard handling
+// applies.
+func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) (retErr error) {
+	if log == nil {
+		log = slog.Default()
+	}
+	ms := milestones{}
+
 	defer func() {
 		if retErr != nil {
 			log.Error("attach ended with error", "err", retErr, "missing_milestones", ms.missing())
 		}
 	}()
 
-	// Attach owns the transport: close it on every exit path.
-	defer func() { _ = transport.Close() }()
+	var restore func() error
+	rawEntered := false
+	defer func() {
+		if rawEntered {
+			if rerr := restore(); rerr != nil && retErr == nil {
+				retErr = fmt.Errorf("vev: restoring terminal: %w", rerr)
+			}
+		}
+	}()
+	enterRaw := func() error {
+		if rawEntered {
+			return nil
+		}
+		var err error
+		restore, err = term.EnterRaw()
+		if err != nil {
+			return fmt.Errorf("vev: entering raw mode: %w", err)
+		}
+		rawEntered = true
+		ms.rawEntered = true
+		return nil
+	}
 
+	resumeToken := uint64(0)
+	attemptIntent := intent
+	attemptName := name
+	backoff := defaultReconnectBackoff.initial
+	showingStatus := false
+	var reconnectToastRect domain.Rect
+	statusStage := reconnectStageOfflineRetrying
+	redrawRemoteStatus := func(size domain.Size) {
+		if !rawEntered || !remote {
+			return
+		}
+		if showingStatus {
+			_ = clearReconnectToast(term.Out(), reconnectToastRect)
+		}
+		drawnRect, _ := drawReconnectToastStage(term.Out(), size, statusStage)
+		reconnectToastRect = drawnRect
+		_ = term.Flush()
+		showingStatus = true
+	}
+	var drawStatus func()
+	drawStatusStage := func(stage reconnectStage) {
+		statusStage = stage
+		if showingStatus && remote {
+			size, err := term.Size()
+			if err == nil {
+				redrawRemoteStatus(size)
+			}
+			return
+		}
+		drawStatus()
+	}
+	drawStatus = func() {
+		if !rawEntered || showingStatus {
+			return
+		}
+		if remote {
+			size, err := term.Size()
+			if err != nil {
+				return
+			}
+			redrawRemoteStatus(size)
+		} else {
+			_, _ = term.Out().Write([]byte(statusReconnect))
+			_ = term.Flush()
+			showingStatus = true
+		}
+	}
+	clearStatus := func() {
+		if !showingStatus {
+			return
+		}
+		if remote {
+			_ = clearReconnectToast(term.Out(), reconnectToastRect)
+		} else {
+			_, _ = term.Out().Write([]byte(statusClear))
+		}
+		_ = term.Flush()
+		showingStatus = false
+	}
+	sleepWhileReconnecting := func(d time.Duration) bool {
+		if remote && showingStatus {
+			return reconnectSleepWithResize(ctx, clk, d, term.ResizeEvents(), redrawRemoteStatus)
+		}
+		return reconnectSleep(ctx, clk, d)
+	}
+
+	for {
+		transport, err := dialer.Dial(ctx)
+		if err != nil {
+			if resumeToken == 0 || ctx.Err() != nil {
+				clearStatus()
+				return err
+			}
+			log.Warn("reconnect dial failed", "err", err, "backoff", backoff)
+			drawStatus()
+			if !sleepWhileReconnecting(backoff) {
+				clearStatus()
+				return ctx.Err()
+			}
+			backoff = nextReconnectBackoff(backoff, defaultReconnectBackoff.max)
+			attemptIntent = ports.IntentResume
+			continue
+		}
+		ms.dialed = true
+
+		var linkEvents <-chan ports.LinkEvent
+		if reporter, ok := transport.(ports.LinkStateReporter); ok {
+			linkEvents = reporter.LinkEvents()
+		}
+		result := attachOnce(ctx, transport, term, clk, attemptIntent, attemptName, resumeToken, processClientID, &ms, enterRaw, clearStatus, drawStatusStage, linkEvents, remote, clipboard, log)
+		if result.welcomed {
+			backoff = defaultReconnectBackoff.initial
+		}
+		_ = transport.Close()
+		if result.resumeToken != 0 {
+			resumeToken = result.resumeToken
+		}
+		if result.sessionName != "" {
+			attemptName = result.sessionName
+		}
+		if result.err == nil {
+			clearStatus()
+			return nil
+		}
+		if !shouldReconnect(result.err) || resumeToken == 0 || ctx.Err() != nil {
+			clearStatus()
+			return result.err
+		}
+		log.Warn("reconnecting after attach error", "err", result.err, "backoff", backoff)
+		drawStatusStage(reconnectStageSSH)
+		if !sleepWhileReconnecting(backoff) {
+			clearStatus()
+			return ctx.Err()
+		}
+		backoff = nextReconnectBackoff(backoff, defaultReconnectBackoff.max)
+		attemptIntent = ports.IntentResume
+	}
+}
+
+func sleepReconnect(ctx context.Context, clk ports.Clock, d time.Duration) bool {
+	t := clk.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C():
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time.Duration, resizeEvents <-chan domain.Size, onResize func(domain.Size)) bool {
+	t := clk.NewTimer(d)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C():
+			return true
+		case <-ctx.Done():
+			return false
+		case size, ok := <-resizeEvents:
+			if !ok {
+				resizeEvents = nil
+				continue
+			}
+			if onResize != nil {
+				onResize(size)
+			}
+		}
+	}
+}
+
+// Attach connects an already-dialed transport to the controlling terminal
+// and runs the attach loop until the session detaches, the daemon
+// disappears, or the context is cancelled.
+//
+// It is kept as a compatibility wrapper for callers that still own dialing.
+func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string) error {
+	return Run(ctx, singleTransportDialer{transport: transport}, term, clk, intent, name, false, nil, slog.Default())
+}
+
+type singleTransportDialer struct{ transport ports.Transport }
+
+func (d singleTransportDialer) Dial(context.Context) (ports.Transport, error) {
+	return d.transport, nil
+}
+
+type attachResult struct {
+	resumeToken uint64
+	sessionName string
+	welcomed    bool
+	err         error
+}
+
+// DetectTrueColor reports whether TERM/COLORTERM advertise direct color support.
+func DetectTrueColor(termEnv, colorTerm string) bool {
+	switch strings.ToLower(strings.TrimSpace(colorTerm)) {
+	case "truecolor", "24bit":
+		return true
+	}
+
+	termEnv = strings.ToLower(strings.TrimSpace(termEnv))
+	return termEnv == "xterm-direct" || strings.HasSuffix(termEnv, "-direct")
+}
+
+func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func(), drawStatusStage func(reconnectStage), linkEvents <-chan ports.LinkEvent, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) attachResult {
 	// 1. Handshake: send Hello with our size and TERM.
 	size, err := term.Size()
 	if err != nil {
-		return fmt.Errorf("vev: reading terminal size: %w", err)
+		return attachResult{err: fmt.Errorf("vev: reading terminal size: %w", err)}
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = ""
 	}
-	colorTerm := strings.ToLower(os.Getenv("COLORTERM"))
-	trueColor := colorTerm == "truecolor" || colorTerm == "24bit"
+	termEnv := os.Getenv("TERM")
+	colorTerm := os.Getenv("COLORTERM")
+	trueColor := DetectTrueColor(termEnv, colorTerm)
 	hello := ports.Hello{
-		Version: ports.ProtocolVersion,
-		Intent:  intent,
-		Name:    name,
-		Size:    size,
-		TermEnv: os.Getenv("TERM"),
-		Cwd:     cwd,
+		Version:     ports.ProtocolVersion,
+		Intent:      intent,
+		ClientID:    clientID,
+		ResumeToken: resumeToken,
+		Name:        name,
+		Size:        size,
+		TermEnv:     termEnv,
+		Cwd:         cwd,
+		TrueColor:   trueColor,
 	}
 	if err := transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
-		return fmt.Errorf("vev: sending hello: %w", err)
+		return attachResult{err: fmt.Errorf("vev: sending hello: %w", err)}
 	}
 	ms.helloSent = true
 
 	// 2. Await Welcome or a typed rejection.
 	reply, err := transport.Recv()
 	if err != nil {
-		return fmt.Errorf("vev: awaiting welcome: %w", err)
+		return attachResult{err: fmt.Errorf("vev: awaiting welcome: %w", err)}
+	}
+	result := func(welcomed bool, err error) attachResult {
+		return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: welcomed, err: err}
 	}
 	switch reply.Type {
 	case ports.MsgWelcome:
+		welcome, derr := ports.UnmarshalWelcome(reply.Payload)
+		if derr != nil {
+			return result(false, fmt.Errorf("vev: decoding welcome: %w", derr))
+		}
+		resumeToken = welcome.ResumeToken
+		name = welcome.SessionName
 		ms.welcomed = true
+		log.Debug("welcomed by daemon", "resume_token_present", resumeToken != 0)
 	case ports.MsgError:
 		em, derr := ports.UnmarshalErrorMsg(reply.Payload)
 		if derr != nil {
-			return fmt.Errorf("vev: decoding error reply: %w", derr)
+			return result(false, fmt.Errorf("vev: decoding error reply: %w", derr))
 		}
-		return &ProtocolError{Code: em.Code, Text: em.Text}
+		return result(false, &ProtocolError{Code: em.Code, Text: em.Text})
 	default:
-		return fmt.Errorf("vev: unexpected reply type %d before welcome", reply.Type)
+		return result(false, fmt.Errorf("vev: unexpected reply type %d before welcome", reply.Type))
 	}
+	welcomedResult := func(err error) attachResult { return result(true, err) }
 
-	// 3. Enter raw mode; restore on every subsequent exit path.
-	restore, err := term.EnterRaw()
-	if err != nil {
-		return fmt.Errorf("vev: entering raw mode: %w", err)
+	// 3. Enter raw mode after Welcome; Run owns restoration.
+	if err := enterRaw(); err != nil {
+		return welcomedResult(err)
 	}
-	ms.rawEntered = true
-	defer func() {
-		if rerr := restore(); rerr != nil && retErr == nil {
-			retErr = fmt.Errorf("vev: restoring terminal: %w", rerr)
-		}
-	}()
+	clearStatus()
 
 	// 4. Derive a cancellable context so the pumps always unwind when the
 	// loop returns. cancel runs first (LIFO): it signals the pumps; the
@@ -172,13 +412,30 @@ func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal,
 	sendCh := make(chan ports.Frame, sendQueueDepth)
 	sendErrCh := make(chan error, 1)
 
-	go runSender(loopCtx, cancel, transport, sendCh, sendErrCh)
-	go runStdin(loopCtx, cancel, term.In(), sendCh, trueColor)
-	go runResize(loopCtx, term.ResizeEvents(), sendCh)
+	// colorQueryCh hands an OSC 10/11 re-query request from the stdin pump to
+	// the main loop, which is the only goroutine allowed to touch term.Out()/
+	// term.Flush(); QueryColors writes through the same batched writer, so
+	// calling it directly from the stdin pump would race the main loop's
+	// output writes.
+	colorQueryCh := make(chan struct{}, 1)
+	requestColors := func() {
+		select {
+		case colorQueryCh <- struct{}{}:
+		default:
+		}
+	}
+
+	var clip ports.ClipboardReader
+	if remote {
+		clip = clipboard
+	}
+	go runSender(loopCtx, cancel, transport, sendCh, sendErrCh, log)
+	go runStdin(loopCtx, cancel, term.In(), sendCh, clk, trueColor, requestColors, clip, log)
+	go runResize(loopCtx, term.ResizeEvents(), sendCh, log)
 
 	// 5. Output/main loop: the only goroutine that touches the terminal.
 	recvCh := make(chan recvResult, 1)
-	go runRecv(loopCtx, transport, recvCh)
+	go runRecv(loopCtx, transport, recvCh, log)
 
 	for {
 		select {
@@ -187,37 +444,75 @@ func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal,
 			// context was cancelled. A queued sender error takes priority.
 			select {
 			case serr := <-sendErrCh:
-				return fmt.Errorf("vev: sending to daemon: %w", serr)
+				return welcomedResult(fmt.Errorf("vev: sending to daemon: %w", serr))
 			default:
-				return nil
+				return welcomedResult(nil)
+			}
+		case ev, ok := <-linkEvents:
+			if !ok {
+				linkEvents = nil
+				continue
+			}
+			if ev.State == ports.LinkStateConnected {
+				clearStatus()
+				continue
+			}
+			drawStatusStage(stageForLinkState(ev.State))
+			if ev.State == ports.LinkStateOffline {
+				// Stop waiting for the transport to reach Dead at 60s: exit with
+				// a retryable error so Run re-dials over ssh with the resume
+				// token. Run closes this transport on the way out.
+				return welcomedResult(errLinkOffline)
+			}
+		case <-colorQueryCh:
+			if err := term.QueryColors(); err != nil {
+				log.Warn("querying terminal colors", "err", err)
 			}
 		case r := <-recvCh:
 			if r.err != nil {
 				if errors.Is(r.err, io.EOF) {
-					return fmt.Errorf("vev: daemon vanished (missing: %v): %w", ms.missing(), r.err)
+					return welcomedResult(fmt.Errorf("vev: daemon vanished (missing: %v): %w", ms.missing(), r.err))
 				}
-				return fmt.Errorf("vev: receiving from daemon: %w", r.err)
+				return welcomedResult(fmt.Errorf("vev: receiving from daemon: %w", r.err))
 			}
 			switch r.frame.Type {
 			case ports.MsgOutput:
 				o, derr := ports.UnmarshalOutput(r.frame.Payload)
 				if derr != nil {
-					return fmt.Errorf("vev: decoding output: %w", derr)
+					return welcomedResult(fmt.Errorf("vev: decoding output: %w", derr))
 				}
 				if _, werr := term.Out().Write(o.Data); werr != nil {
-					return fmt.Errorf("vev: writing terminal output: %w", werr)
+					return welcomedResult(fmt.Errorf("vev: writing terminal output: %w", werr))
 				}
 				if ferr := term.Flush(); ferr != nil {
-					return fmt.Errorf("vev: flushing terminal: %w", ferr)
+					return welcomedResult(fmt.Errorf("vev: flushing terminal: %w", ferr))
 				}
-				ms.firstOutput = true
+				if o.NewStateNum != 0 {
+					ack := ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{AckedStateNum: o.NewStateNum})}
+					select {
+					case sendCh <- ack:
+					case <-loopCtx.Done():
+						return welcomedResult(nil)
+					default:
+						log.Debug("dropping output ack because send queue is full", "state_num", o.NewStateNum)
+					}
+				}
+				if !ms.firstOutput {
+					ms.firstOutput = true
+					log.Debug("received first output")
+				}
 			case ports.MsgDetached:
 				d, derr := ports.UnmarshalDetached(r.frame.Payload)
 				if derr != nil {
-					return fmt.Errorf("vev: decoding detached: %w", derr)
+					return welcomedResult(fmt.Errorf("vev: decoding detached: %w", derr))
 				}
 				ms.detached = true
-				return detachedResult(d.Reason)
+				if d.Reason == ports.ReasonDetach {
+					log.Info("detached cleanly", "reason", d.Reason)
+				} else {
+					log.Warn("detached by daemon", "reason", d.Reason)
+				}
+				return welcomedResult(detachedResult(d.Reason))
 			case ports.MsgPong:
 				// Liveness reply; nothing to do.
 			default:
@@ -237,7 +532,8 @@ type recvResult struct {
 
 // runRecv reads frames until an error, forwarding each to the main loop.
 // It exits on the first error or when the loop context is cancelled.
-func runRecv(ctx context.Context, transport ports.Transport, out chan<- recvResult) {
+func runRecv(ctx context.Context, transport ports.Transport, out chan<- recvResult, log *slog.Logger) {
+	defer log.Debug("receive pump exited")
 	for {
 		f, err := transport.Recv()
 		select {
@@ -254,7 +550,8 @@ func runRecv(ctx context.Context, transport ports.Transport, out chan<- recvResu
 // runSender is the sole caller of transport.Send: serialising the input and
 // resize pumps through one goroutine keeps the transport's single-writer
 // contract intact. A send failure cancels the loop and is surfaced once.
-func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, in <-chan ports.Frame, errCh chan<- error) {
+func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.Transport, in <-chan ports.Frame, errCh chan<- error, log *slog.Logger) {
+	defer log.Debug("sender pump exited")
 	for {
 		select {
 		case f := <-in:
@@ -287,22 +584,59 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 // exits. That is harmless here — Attach has already returned and restored
 // the terminal — and matches the standard pattern for stdin pumps; a
 // closable stdin duplicate could lift it later if ever needed.
-func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame, trueColor bool) {
+func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame, clk ports.Clock, trueColor bool, requestColors func(), clipboard ports.ClipboardReader, log *slog.Logger) {
+	defer log.Debug("stdin pump exited")
 	buf := make([]byte, stdinBufSize)
 	var scanner theme.Scanner
+	var inputSeq uint64
 	current := ports.Theme{TrueColor: trueColor}
-	send := func(frame ports.Frame) bool {
+	var sendOK atomic.Bool
+	sendOK.Store(true)
+	send := func(frame ports.Frame) {
 		select {
 		case out <- frame:
-			return true
 		case <-ctx.Done():
-			return false
+			sendOK.Store(false)
 		}
 	}
+	// The coalescer reframes a bracketed paste split across reads into one
+	// MsgInput frame, so a marker boundary can never leave a lone ESC on the
+	// wire. Its emit runs one MsgInput per call, keeping the inputSeq contract.
+	coalescer := newPasteCoalescer(clk, func(data []byte) {
+		if len(data) == 0 {
+			return
+		}
+		copyData := append([]byte(nil), data...)
+		inputSeq++
+		send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{InputSeq: inputSeq, Data: copyData})})
+	})
+	defer coalescer.Close()
+
+	// On a remote attach with a ClipboardReader configured, splice in the
+	// clipboard interceptor ahead of the coalescer so a bare Ctrl+V (0x16)
+	// becomes a clipboard image push instead of reaching the coalescer (and
+	// from there the remote pane) as an ordinary keystroke.
+	sink := coalescer.Scan
+	if clipboard != nil {
+		ci := &clipboardIntercept{
+			coalescer: coalescer,
+			reader:    clipboard,
+			log:       log,
+			sendImage: func(mime string, data []byte) {
+				inputSeq++
+				send(ports.Frame{Type: ports.MsgImagePush, Payload: ports.MarshalImagePush(ports.ImagePush{InputSeq: inputSeq, Mime: mime, Data: data})})
+			},
+			next: coalescer.Scan,
+		}
+		sink = ci.Scan
+	}
+
 	for {
 		n, rerr := in.Read(buf)
 		if n > 0 {
-			ok := true
+			sendTheme := func() {
+				send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(current)})
+			}
 			scanner.Scan(buf[:n], func(kind int, rgb renderer.RGB) {
 				switch kind {
 				case 10:
@@ -314,15 +648,16 @@ func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out 
 				default:
 					return
 				}
-				ok = send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(current)})
-			}, func(data []byte) {
-				if len(data) == 0 || !ok {
-					return
+				sendTheme()
+			}, func(light bool) {
+				current.SchemeKnown = true
+				current.Light = light
+				if requestColors != nil {
+					requestColors()
 				}
-				copyData := append([]byte(nil), data...)
-				ok = send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: copyData})})
-			})
-			if !ok {
+				sendTheme()
+			}, sink)
+			if !sendOK.Load() {
 				return
 			}
 		}
@@ -341,7 +676,8 @@ func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out 
 // runResize forwards coalesced terminal resize events to the daemon. It
 // tolerates an already-closed resize channel (which the terminal adapter
 // hands back when restore ran before ResizeEvents was first called).
-func runResize(ctx context.Context, events <-chan domain.Size, out chan<- ports.Frame) {
+func runResize(ctx context.Context, events <-chan domain.Size, out chan<- ports.Frame, log *slog.Logger) {
+	defer log.Debug("resize pump exited")
 	for {
 		select {
 		case sz, ok := <-events:

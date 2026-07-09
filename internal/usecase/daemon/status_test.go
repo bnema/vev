@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -10,15 +12,61 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 // --- test doubles -----------------------------------------------------------
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
+
+func TestApplyConfigThemeRepaintInvalidatesComposedFrameCache(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+	d.ApplyConfig(domain.Config{Theme: domain.ThemeLight})
+
+	win := sess.activeTab()
+	left := win.focusedPane()
+	right := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 4})
+	win.mu.Lock()
+	win.size = domain.Size{Cols: 41, Rows: 4}
+	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
+	win.tree.Focus = left.id
+	win.panes[right.id] = right
+	win.mu.Unlock()
+	left.mu.Lock()
+	left.screen.Resize(20, 4)
+	left.screen.Write([]byte("L"))
+	left.mu.Unlock()
+	right.mu.Lock()
+	right.screen.Resize(20, 4)
+	right.screen.Write([]byte("R"))
+	right.mu.Unlock()
+
+	d.paint(sess, ac, true)
+	ac.sendMu.Lock()
+	require.True(t, ac.composed.valid)
+	lightDimmedPane := ac.composed.frame.At(21, 1).Style
+	lightDivider := ac.composed.frame.At(20, 1).Style
+	ac.sendMu.Unlock()
+	left.mu.Lock()
+	left.screen.ClearDamage()
+	left.mu.Unlock()
+	right.mu.Lock()
+	right.screen.ClearDamage()
+	right.mu.Unlock()
+
+	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark})
+
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+	require.True(t, ac.composed.valid, "reset=false config repaint should rebuild the composed cache")
+	require.NotEqual(t, lightDimmedPane, ac.composed.frame.At(21, 1).Style, "dimmed pane style must not stay cached across theme reapply")
+	require.NotEqual(t, lightDivider, ac.composed.frame.At(20, 1).Style, "divider style must not stay cached across theme reapply")
+}
 
 func TestStatusCompositionGolden(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
@@ -30,9 +78,9 @@ func TestStatusCompositionGolden(t *testing.T) {
 	sess.name = "work"
 
 	win := sess.activeTab()
-	win.screen = vt.NewScreen(12, 2)
+	win.focusedPane().screen.Resize(12, 2)
 	win.size = domain.Size{Cols: 12, Rows: 2}
-	win.screen.Write([]byte("hello"))
+	win.focusedPane().screen.Write([]byte("hello"))
 
 	frame, damage := composeClientFrame(sess, win, true, "")
 
@@ -71,7 +119,7 @@ func TestStatusCompositionUsesTruecolorTheme(t *testing.T) {
 	_, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	defer release()
 	win := sess.activeTab()
-	win.screen = vt.NewScreen(12, 2)
+	win.focusedPane().screen.Resize(12, 2)
 	win.size = domain.Size{Cols: 12, Rows: 2}
 	ac.setTheme(themeui.Theme{
 		Foreground: renderer.RGB{R: 220, G: 220, B: 220},
@@ -96,18 +144,193 @@ func TestStatusApplyThemeStoresClientAndPropagatesScreens(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p1, p2)
 	defer releasePTY1()
 	defer releasePTY2()
-	msg := ports.Theme{HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3}, HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6}}
+	msg := ports.Theme{HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3}, HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6}, SchemeKnown: true, Light: true}
 
 	d.applyTheme(sess, ac, msg)
 
 	require.Equal(t, renderer.RGB{R: 1, G: 2, B: 3}, ac.getTheme().Foreground)
+	require.True(t, ac.getTheme().SchemeKnown)
+	require.True(t, ac.getTheme().Light)
+	assertSessionDefaultColors(t, sess, renderer.RGB{R: 1, G: 2, B: 3}, renderer.RGB{R: 4, G: 5, B: 6})
+	assertSessionColorScheme(t, sess, true)
+}
+
+func TestApplyThemeForcedBuiltinThemePropagatesToChromeAndPanes(t *testing.T) {
+	tests := []struct {
+		name string
+		mode domain.ThemeMode
+		want themeui.Theme
+	}{
+		{name: "dark", mode: domain.ThemeDark, want: themeui.BuiltinDark},
+		{name: "light", mode: domain.ThemeLight, want: themeui.BuiltinLight},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p1, releasePTY1 := newBlockingPTY(t)
+			p2, releasePTY2 := newBlockingPTY(t)
+			d, sess, ac, _ := newManualSessionWithPTYs(t, p1, p2)
+			defer releasePTY1()
+			defer releasePTY2()
+			d.ApplyConfig(domain.Config{Theme: tc.mode})
+
+			d.applyTheme(sess, ac, ports.Theme{
+				HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
+				HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
+				TrueColor: true, SchemeKnown: true, Light: !tc.want.Light,
+			})
+
+			require.Equal(t, tc.want, ac.getTheme())
+			assertSessionDefaultColors(t, sess, tc.want.Foreground, tc.want.Background)
+			assertSessionColorScheme(t, sess, tc.want.Light)
+		})
+	}
+}
+
+func TestAttachClientAppliesForcedThemeBeforeMsgTheme(t *testing.T) {
+	tests := []struct {
+		name string
+		mode domain.ThemeMode
+		want themeui.Theme
+	}{
+		{name: "dark", mode: domain.ThemeDark, want: themeui.BuiltinDark},
+		{name: "light", mode: domain.ThemeLight, want: themeui.BuiltinLight},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, releasePTY := newBlockingPTY(t)
+			d, sess, _, _ := newManualSessionWithPTYs(t, p)
+			defer releasePTY()
+			d.ApplyConfig(domain.Config{Theme: tc.mode})
+			for _, tb := range sess.tabs {
+				tb.mu.Lock()
+				panes := tb.panesSnapshot()
+				tb.mu.Unlock()
+				for _, p := range panes {
+					p.mu.Lock()
+					p.screen.SetDefaultColors(renderer.RGB{R: 1, G: 2, B: 3}, renderer.RGB{R: 4, G: 5, B: 6}, true)
+					p.mu.Unlock()
+				}
+			}
+			tr, _ := newCapturingTransport(t)
+
+			ac, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+
+			require.Equal(t, tc.want, ac.getTheme())
+			assertSessionDefaultColors(t, sess, tc.want.Foreground, tc.want.Background)
+			assertSessionColorScheme(t, sess, tc.want.Light)
+		})
+	}
+}
+
+func TestAutoThemeDetachClearsPaneColorScheme(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+	d.ApplyConfig(domain.Config{Theme: domain.ThemeAuto})
+	d.applyTheme(sess, ac, ports.Theme{
+		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
+		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
+		TrueColor: true, SchemeKnown: true, Light: true,
+	})
+	assertSessionColorScheme(t, sess, true)
+
+	d.clientGone(sess, ac, ac.transport(), true)
+
+	assertSessionColorSchemeUnknown(t, sess)
+}
+
+func TestAttachClientClearsStaleColorSchemeOnReplacement(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+	d.ApplyConfig(domain.Config{Theme: domain.ThemeAuto})
+	d.applyTheme(sess, ac, ports.Theme{
+		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
+		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
+		TrueColor: true, SchemeKnown: true, Light: true,
+	})
+	assertSessionColorScheme(t, sess, true)
+
+	tr, _ := newCapturingTransport(t)
+	d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+
+	assertSessionColorSchemeUnknown(t, sess)
+}
+
+func TestForcedThemeDetachPreservesBuiltinOnPanes(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark})
+	d.applyTheme(sess, ac, ports.Theme{
+		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
+		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
+		TrueColor: true, SchemeKnown: true, Light: true,
+	})
+
+	d.clientGone(sess, ac, ac.transport(), true)
+
+	assertSessionDefaultColors(t, sess, themeui.BuiltinDark.Foreground, themeui.BuiltinDark.Background)
+	assertSessionColorScheme(t, sess, false)
+}
+
+func TestApplyThemeAutoUnknownDoesNotClobberPaneColorScheme(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+
+	d.applyTheme(sess, ac, ports.Theme{
+		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
+		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
+		TrueColor: true, SchemeKnown: true, Light: true,
+	})
+	d.applyTheme(sess, ac, ports.Theme{
+		HasForeground: true, Foreground: renderer.RGB{R: 7, G: 8, B: 9},
+		HasBackground: true, Background: renderer.RGB{R: 10, G: 11, B: 12},
+		TrueColor: true,
+	})
+
+	assertSessionDefaultColors(t, sess, renderer.RGB{R: 7, G: 8, B: 9}, renderer.RGB{R: 10, G: 11, B: 12})
+	assertSessionColorScheme(t, sess, true)
+}
+
+func assertSessionDefaultColors(t *testing.T, sess *session, fg, bg renderer.RGB) {
+	t.Helper()
 	for _, tb := range sess.tabs {
 		var got []byte
-		tb.screen.OnResponse = func(b []byte) { got = append(got, b...) }
-		tb.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
-		require.True(t, strings.Contains(string(got), "rgb:0101/0202/0303"), string(got))
-		require.True(t, strings.Contains(string(got), "rgb:0404/0505/0606"), string(got))
+		tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+		tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+		require.True(t, strings.Contains(string(got), formatOSCColor(fg)), string(got))
+		require.True(t, strings.Contains(string(got), formatOSCColor(bg)), string(got))
 	}
+}
+
+func assertSessionColorScheme(t *testing.T, sess *session, light bool) {
+	t.Helper()
+	want := "\x1b[?997;1n"
+	if light {
+		want = "\x1b[?997;2n"
+	}
+	for _, tb := range sess.tabs {
+		var got []byte
+		tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+		tb.focusedPane().screen.Write([]byte("\x1b[?996n"))
+		require.Equal(t, want, string(got))
+	}
+}
+
+func assertSessionColorSchemeUnknown(t *testing.T, sess *session) {
+	t.Helper()
+	for _, tb := range sess.tabs {
+		var got []byte
+		tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+		tb.focusedPane().screen.Write([]byte("\x1b[?996n"))
+		require.Empty(t, got)
+	}
+}
+
+func formatOSCColor(rgb renderer.RGB) string {
+	return fmt.Sprintf("rgb:%02x%02x/%02x%02x/%02x%02x", rgb.R, rgb.R, rgb.G, rgb.G, rgb.B, rgb.B)
 }
 
 func TestAttachClientClearsStaleScreenDefaultColors(t *testing.T) {
@@ -120,12 +343,12 @@ func TestAttachClientClearsStaleScreenDefaultColors(t *testing.T) {
 	})
 	tr, _ := newCapturingTransport(t)
 
-	d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24})
+	d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 
 	var got []byte
 	tb := sess.activeTab()
-	tb.screen.OnResponse = func(b []byte) { got = append(got, b...) }
-	tb.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.Empty(t, got)
 }
 
@@ -141,15 +364,15 @@ func TestClientGoneResetsScreenDefaultColors(t *testing.T) {
 	// Sanity: the tab answers OSC 10/11 while ac is attached.
 	tb := sess.activeTab()
 	var before []byte
-	tb.screen.OnResponse = func(b []byte) { before = append(before, b...) }
-	tb.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	tb.focusedPane().screen.OnResponse = func(b []byte) { before = append(before, b...) }
+	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.NotEmpty(t, before)
 
-	d.clientGone(sess, ac, true)
+	d.clientGone(sess, ac, ac.transport(), true)
 
 	var got []byte
-	tb.screen.OnResponse = func(b []byte) { got = append(got, b...) }
-	tb.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.Empty(t, got, "OSC 10/11 queries must be swallowed once the client that reported these colors is gone")
 }
 
@@ -169,7 +392,7 @@ func TestClientGoneResetDoesNotClobberNewlyAttachedClient(t *testing.T) {
 	require.True(t, sess.detachIfCurrent(ac))
 
 	tr, _ := newCapturingTransport(t)
-	newAC, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24})
+	newAC, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 	d.applyTheme(sess, newAC, ports.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 20, G: 21, B: 22},
 		HasBackground: true, Background: renderer.RGB{R: 23, G: 24, B: 25},
@@ -181,8 +404,8 @@ func TestClientGoneResetDoesNotClobberNewlyAttachedClient(t *testing.T) {
 
 	tb := sess.activeTab()
 	var got []byte
-	tb.screen.OnResponse = func(b []byte) { got = append(got, b...) }
-	tb.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.NotEmpty(t, got, "a newer client's screen default colors must survive a stale detach's reset")
 }
 
@@ -195,13 +418,32 @@ func TestDetachOnSendErrorResetsScreenDefaultColors(t *testing.T) {
 		HasBackground: true, Background: renderer.RGB{R: 10, G: 11, B: 12},
 	})
 
-	d.detachOnSendError(sess, ac)
+	d.detachOnSendError(sess, ac, ac.transport())
 
 	tb := sess.activeTab()
 	var got []byte
-	tb.screen.OnResponse = func(b []byte) { got = append(got, b...) }
-	tb.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.Empty(t, got, "OSC 10/11 queries must be swallowed once the client that reported these colors is gone")
+}
+
+func TestDetachOnSendErrorParkPreservesScreenDefaultColors(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	defer release()
+	ac.resumeCapable = true
+	d.applyTheme(sess, ac, ports.Theme{
+		HasForeground: true, Foreground: renderer.RGB{R: 7, G: 8, B: 9},
+		HasBackground: true, Background: renderer.RGB{R: 10, G: 11, B: 12},
+	})
+
+	d.detachOnSendError(sess, ac, ac.transport())
+
+	tb := sess.activeTab()
+	var got []byte
+	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	require.NotEmpty(t, got, "parked clients resume the same attachment, so screen default colors must be preserved")
 }
 
 func TestApplyThemeIgnoresReplacedClient(t *testing.T) {
@@ -209,7 +451,7 @@ func TestApplyThemeIgnoresReplacedClient(t *testing.T) {
 	d, sess, old, _ := newManualSessionWithPTYs(t, p)
 	defer release()
 	tr, _ := newCapturingTransport(t)
-	d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24})
+	d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 
 	d.applyTheme(sess, old, ports.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
@@ -218,8 +460,8 @@ func TestApplyThemeIgnoresReplacedClient(t *testing.T) {
 
 	var got []byte
 	tb := sess.activeTab()
-	tb.screen.OnResponse = func(b []byte) { got = append(got, b...) }
-	tb.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
+	tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
 	require.Empty(t, got)
 }
 
@@ -230,7 +472,7 @@ func TestStatusMarksEphemeralSession(t *testing.T) {
 	sess.name = "0"
 	sess.ephemeral = true
 	win := sess.activeTab()
-	win.screen = vt.NewScreen(12, 2)
+	win.focusedPane().screen.Resize(12, 2)
 	win.size = domain.Size{Cols: 12, Rows: 2}
 
 	frame, _ := composeClientFrame(sess, win, true, "")
@@ -239,13 +481,59 @@ func TestStatusMarksEphemeralSession(t *testing.T) {
 	require.Equal(t, " 0*         ", rowText(frame.Row(3)))
 }
 
+func TestTopBarRightAnchor(t *testing.T) {
+	tests := []struct {
+		name             string
+		width            int
+		status           statusSnapshot
+		topRight         string
+		want             string
+		continuationCell int
+	}{
+		{
+			name:     "renders flush right when fully fits",
+			width:    20,
+			status:   statusSnapshot{tabs: []statusTab{{name: "1", active: true}}},
+			topRight: "14:32",
+			want:     " 1             14:32",
+		},
+		{
+			name:     "hides on overlap",
+			width:    10,
+			status:   statusSnapshot{tabs: []statusTab{{name: "1"}, {name: "2"}}},
+			topRight: "12345",
+			want:     " 1  2     ",
+		},
+		{
+			name:             "uses display width",
+			width:            12,
+			status:           statusSnapshot{tabs: []statusTab{{name: "1", active: true}}},
+			topRight:         "界a",
+			want:             " 1       界 a",
+			continuationCell: 10,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := make([]renderer.Cell, tt.width)
+
+			drawTopBarSnapshot(row, tt.status, 0, tt.topRight, resolveThemeStyles(nil))
+
+			require.Equal(t, tt.want, rowText(row))
+			if tt.continuationCell > 0 {
+				require.True(t, row[tt.continuationCell].Continuation)
+			}
+		})
+	}
+}
+
 func TestStatusCopyFeedbackRendersOnlyWhenFullyFits(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	_, sess, _, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
 	sess.name = "work"
 	win := sess.activeTab()
-	win.screen = vt.NewScreen(30, 2)
+	win.focusedPane().screen.Resize(30, 2)
 	win.size = domain.Size{Cols: 30, Rows: 2}
 
 	frame, _ := composeClientFrame(sess, win, true, "ok")
@@ -282,7 +570,7 @@ func TestTopBarRendersAttentionBell(t *testing.T) {
 	defer releasePTY1()
 	defer releasePTY2()
 	win := sess.activeTab()
-	win.screen = vt.NewScreen(18, 2)
+	win.focusedPane().screen.Resize(18, 2)
 	win.size = domain.Size{Cols: 18, Rows: 2}
 	sess.mu.Lock()
 	sess.tabs[1].attention = true
@@ -301,61 +589,304 @@ func TestTopBarRendersAttentionBell(t *testing.T) {
 	t.Fatalf("attention glyph not rendered in top bar: %q", rowText(frame.Row(0)))
 }
 
-func TestStatusBarRendersOtherAttentionOldestFirstAndCollapses(t *testing.T) {
+func TestBarStateForMRUFreshestFirstCapCurrentExcludedAndAttention(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
 	sess.name = "current"
-	base := time.Unix(100, 0)
-	newAttendedSession := func(id, name string, at time.Time) *session {
-		tb := &tab{attention: true, attentionAt: at}
-		return &session{id: domain.SessionID(id), name: name, tabs: []*tab{tb}}
+	sess.mruAt.Store(100)
+	for i := range 10 {
+		other := &session{id: domain.SessionID("s" + strconv.Itoa(i)), name: "s" + strconv.Itoa(i), tabs: []*tab{{attention: i == 8}}}
+		other.mruAt.Store(uint64(i + 1))
+		d.sessions[other.id] = other
 	}
-	d.sessions["old"] = newAttendedSession("old", "old", base)
-	d.sessions["new"] = newAttendedSession("new", "new", base.Add(time.Minute))
 
 	state := d.barStateFor(sess, "")
-	state.attentionFrame = 1
-	require.Equal(t, []string{"old", "new"}, state.otherAttention)
 
-	styles := resolveThemeStyles(nil)
-	wide := make([]renderer.Cell, 24)
-	drawStatusBarState(wide, state, styles)
-	require.Equal(t, " current     old   new", rowText(wide))
-
-	narrow := make([]renderer.Cell, 14)
-	drawStatusBarState(narrow, state, styles)
-	require.Equal(t, " current   ×2", rowText(narrow))
-
-	drawStatusBarState(narrow, barState{status: state.status, copyFeedback: "ok", otherAttention: state.otherAttention}, styles)
-	require.Equal(t, " current    ok", rowText(narrow))
+	require.Len(t, state.mru, 9)
+	require.Equal(t, "s9", state.mru[0].name)
+	require.Equal(t, "s1", state.mru[8].name)
+	for _, got := range state.mru {
+		require.NotEqual(t, "current", got.name)
+	}
+	require.True(t, state.mru[1].attention, "s8 attention should be carried into MRU state")
 }
 
-func TestBarStateForIncludesZeroTimeAttention(t *testing.T) {
+func TestBarStateForMRUZeroTimesUseDeterministicNameOrder(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
 	defer releasePTY()
-	d.sessions["zero"] = &session{id: "zero", name: "zero", tabs: []*tab{{attention: true}}}
+	for _, name := range []string{"bravo", "alpha", "charlie"} {
+		d.sessions[domain.SessionID(name)] = &session{id: domain.SessionID(name), name: name, tabs: []*tab{{}}}
+	}
 
 	state := d.barStateFor(sess, "")
 
-	require.Equal(t, []string{"zero"}, state.otherAttention)
+	require.GreaterOrEqual(t, len(state.mru), 3)
+	require.Equal(t, []string{"alpha", "bravo", "charlie"}, []string{state.mru[0].name, state.mru[1].name, state.mru[2].name})
 }
 
-func TestBarStateForExcludesCurrentSession(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	defer releasePTY()
-	sess.name = "current"
-	sess.mu.Lock()
-	sess.tabs[0].attention = true
-	sess.tabs[0].attentionAt = time.Unix(1, 0)
-	sess.mu.Unlock()
-	d.sessions["other"] = &session{id: "other", name: "other", tabs: []*tab{{attention: true, attentionAt: time.Unix(2, 0)}}}
+func TestBarStateForMRURestoredStoppedSessionsUsePersistedOrder(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p1, releasePTY1 := newBlockingPTY(t)
+	defer releasePTY1()
+	p2, releasePTY2 := newBlockingPTY(t)
+	defer releasePTY2()
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
+	d.stopped["alpha"] = stoppedSession{name: "alpha", cwd: "/tmp/alpha", createdAt: 1, lastUsedSeq: 30}
+	d.stopped["zeta"] = stoppedSession{name: "zeta", cwd: "/tmp/zeta", createdAt: 1, lastUsedSeq: 20}
+	d.mruSeq.Store(30)
+	cur := &session{id: "cur", name: "current", tabs: []*tab{{}}}
+	d.sessions[cur.id] = cur
 
-	state := d.barStateFor(sess, "")
+	_, err := d.createSessionLocked("zeta", false, "/tmp/zeta", sz, terminalEnv{})
+	require.NoError(t, err)
+	_, err = d.createSessionLocked("alpha", false, "/tmp/alpha", sz, terminalEnv{})
+	require.NoError(t, err)
 
-	require.Equal(t, []string{"other"}, state.otherAttention)
+	state := d.barStateFor(cur, "")
+	require.GreaterOrEqual(t, len(state.mru), 2)
+	require.Equal(t, []string{"alpha", "zeta"}, []string{state.mru[0].name, state.mru[1].name})
+}
+
+func TestStatusBarRendersMRUNamesEphemeralAndInlineBell(t *testing.T) {
+	state := barState{
+		status:         statusSnapshot{session: "cur"},
+		attentionFrame: 1,
+		mru: []mruSession{
+			{name: "fresh"},
+			{name: "tmp", ephemeral: true, attention: true},
+		},
+	}
+	row := make([]renderer.Cell, 24)
+
+	drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+	require.Equal(t, " cur  fresh  tmp*      ", rowText(row))
+	for _, c := range row {
+		if c.Rune == attentionGlyph {
+			require.True(t, c.Style.Bold)
+			return
+		}
+	}
+	t.Fatalf("inline bell not rendered: %q", rowText(row))
+}
+
+func TestStatusBarCurrentSessionUsesAccentStyle(t *testing.T) {
+	theme := themeui.Theme{Foreground: renderer.RGB{R: 220, G: 220, B: 220}, Background: renderer.RGB{R: 10, G: 10, B: 10}, HasFG: true, HasBG: true, TrueColor: true, Known: true}
+	styles := newThemeStyles(theme)
+	row := make([]renderer.Cell, 16)
+
+	drawStatusBarState(row, barState{status: statusSnapshot{session: "cur"}, theme: theme}, styles)
+
+	for _, idx := range []int{0, 1, 2, 3, 4} {
+		require.True(t, row[idx].Style.Equal(styles.accent), "cell %d should use accent style", idx)
+	}
+	require.NotEqual(t, styles.statusBar.BackgroundRGB, styles.accent.BackgroundRGB)
+}
+
+func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
+	theme := themeui.Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 20, G: 20, B: 20}, HasFG: true, HasBG: true, TrueColor: true, Known: true}
+	styles := newThemeStyles(theme)
+	state := barState{status: statusSnapshot{session: "c"}, theme: theme, mru: []mruSession{{name: "a"}, {name: "b"}, {name: "c"}}}
+	row := make([]renderer.Cell, 16)
+
+	drawStatusBarState(row, state, styles)
+
+	firstFG := row[4].Style.ForegroundRGB.R
+	secondFG := row[7].Style.ForegroundRGB.R
+	thirdFG := row[10].Style.ForegroundRGB.R
+	require.Equal(t, styles.statusBar.ForegroundRGB.R, firstFG)
+	require.Greater(t, firstFG, secondFG)
+	require.Greater(t, secondFG, thirdFG)
+
+	firstBG := row[4].Style.BackgroundRGB.R
+	secondBG := row[7].Style.BackgroundRGB.R
+	thirdBG := row[10].Style.BackgroundRGB.R
+	require.Equal(t, styles.statusBar.BackgroundRGB.R, firstBG)
+	require.Greater(t, firstBG, secondBG)
+	require.Greater(t, secondBG, thirdBG)
+
+	plain := mruStyle(renderer.DefaultStyle(), themeui.Theme{}, 1, 3)
+	require.False(t, plain.HasForegroundRGB)
+	require.False(t, plain.HasBackgroundRGB)
+}
+
+func TestStatusBarNarrowRowsDropWholeOldestMRUEntries(t *testing.T) {
+	state := barState{status: statusSnapshot{session: "cur"}, mru: []mruSession{{name: "fresh"}, {name: "middle"}, {name: "old"}}}
+	row := make([]renderer.Cell, 21)
+
+	drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+	text := rowText(row)
+	require.Contains(t, text, "fresh")
+	require.Contains(t, text, "middle")
+	require.NotContains(t, text, "old")
+}
+
+func TestStatusBarMRUWidthAwareBudget(t *testing.T) {
+	mru := make([]mruSession, 0, maxMRUSessions)
+	for i := 1; i <= maxMRUSessions; i++ {
+		mru = append(mru, mruSession{name: "recent" + strconv.Itoa(i)})
+	}
+	state := barState{status: statusSnapshot{session: "cur"}, mru: mru}
+
+	tests := []struct {
+		name       string
+		cols       int
+		wantShown  []string
+		wantHidden []string
+	}{
+		{
+			name:       "narrow keeps first recent when it physically fits",
+			cols:       15,
+			wantShown:  []string{"cur", "recent1"},
+			wantHidden: []string{"recent2"},
+		},
+		{
+			name:       "medium reserves right-side room instead of filling all recents",
+			cols:       80,
+			wantShown:  []string{"recent1", "recent6"},
+			wantHidden: []string{"recent7", "recent9"},
+		},
+		{
+			name:       "wide shows more recents while still keeping a right-side reserve",
+			cols:       120,
+			wantShown:  []string{"recent1", "recent9"},
+			wantHidden: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := make([]renderer.Cell, tt.cols)
+
+			drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+			text := rowText(row)
+			for _, want := range tt.wantShown {
+				require.Contains(t, text, want)
+			}
+			for _, hidden := range tt.wantHidden {
+				require.NotContains(t, text, hidden)
+			}
+		})
+	}
+}
+
+func TestStatusBarBottomRightAndMRUFitting(t *testing.T) {
+	tests := []struct {
+		name              string
+		width             int
+		state             barState
+		want              string
+		wantContains      []string
+		wantNotContains   []string
+		wantSuffix        string
+		continuationCells []int
+	}{
+		{
+			name:         "script text and copy feedback",
+			width:        32,
+			state:        barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", copyFeedback: "copied", mru: []mruSession{{name: "a"}}},
+			wantContains: []string{" a"},
+			wantSuffix:   " main ↑3 * copied",
+		},
+		{
+			name:            "hide on overlap",
+			width:           16,
+			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", copyFeedback: "copied", mru: []mruSession{{name: "fresh"}}},
+			want:            " cur            ",
+			wantNotContains: []string{"main", "copied"},
+		},
+		{
+			name:  "empty script keeps copy feedback behavior",
+			width: 12,
+			state: barState{status: statusSnapshot{session: "cur"}, bottomRight: "", copyFeedback: "copied", mru: []mruSession{{name: "fresh"}}},
+			want:  " cur  copied",
+		},
+		{
+			name:            "mru whole entry fitting with script text",
+			width:           24,
+			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "git", mru: []mruSession{{name: "fresh"}, {name: "middle"}, {name: "old"}}},
+			wantContains:    []string{" fresh"},
+			wantNotContains: []string{"middle"},
+			wantSuffix:      " git",
+		},
+		{
+			name:              "mru fitting reserves wide right anchor width",
+			width:             12,
+			state:             barState{status: statusSnapshot{session: "cur"}, bottomRight: "界界", mru: []mruSession{{name: "a"}}},
+			wantNotContains:   []string{" a "},
+			wantSuffix:        " 界 界 ",
+			continuationCells: []int{9, 11},
+		},
+		{
+			name:            "mru fitting counts wide session names",
+			width:           20,
+			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "git", mru: []mruSession{{name: "界"}, {name: "界"}, {name: "b"}}},
+			wantContains:    []string{" 界 "},
+			wantNotContains: []string{" b "},
+			wantSuffix:      " git",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := make([]renderer.Cell, tt.width)
+
+			drawStatusBarState(row, tt.state, resolveThemeStyles(nil))
+
+			text := rowText(row)
+			if tt.want != "" {
+				require.Equal(t, tt.want, text)
+			}
+			for _, want := range tt.wantContains {
+				require.Contains(t, text, want)
+			}
+			for _, hidden := range tt.wantNotContains {
+				require.NotContains(t, text, hidden)
+			}
+			if tt.wantSuffix != "" {
+				require.True(t, strings.HasSuffix(text, tt.wantSuffix), text)
+			}
+			for _, cell := range tt.continuationCells {
+				require.True(t, row[cell].Continuation)
+			}
+		})
+	}
+}
+
+func TestStatusBarCopyFeedbackFullyRenderedAlongsideMRU(t *testing.T) {
+	state := barState{status: statusSnapshot{session: "cur"}, copyFeedback: "copied", mru: []mruSession{{name: "a"}, {name: "b"}, {name: "c"}}}
+	row := make([]renderer.Cell, 20)
+
+	drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+	text := rowText(row)
+	require.Contains(t, text, " a")
+	require.Contains(t, text, " b")
+	require.Contains(t, text, " c")
+	require.True(t, strings.HasSuffix(text, " copied"), text)
+}
+
+func TestStatusBarCopyFeedbackBoundaryWidths(t *testing.T) {
+	state := barState{status: statusSnapshot{session: "cur"}, copyFeedback: "copied", mru: []mruSession{{name: "fresh"}}}
+	tests := []struct {
+		name string
+		cols int
+		want string
+	}{
+		{name: "just wide enough for feedback after dropping MRU", cols: 12, want: " cur  copied"},
+		{name: "too narrow drops feedback instead of clipping", cols: 11, want: " cur       "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := make([]renderer.Cell, tt.cols)
+
+			drawStatusBarState(row, state, resolveThemeStyles(nil))
+
+			require.Equal(t, tt.want, rowText(row))
+		})
+	}
 }
 
 func TestStatusRepaintsOnCreateSwitchAndResize(t *testing.T) {

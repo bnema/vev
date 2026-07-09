@@ -4,9 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,7 +19,7 @@ func TestEnterPromptRendersTitleAndPrefill(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(msg.Data), "Rename session")
 	require.Contains(t, string(msg.Data), "> 0")
-	require.True(t, ac.promptActive())
+	require.True(t, ac.overlays.promptActive())
 }
 
 func TestPromptSubmitRenamesAndPromotesSession(t *testing.T) {
@@ -36,7 +34,7 @@ func TestPromptSubmitRenamesAndPromotesSession(t *testing.T) {
 	d.handlePromptInput(ac, []byte("work\r"))
 	repaint := awaitFrame(t, sends, ports.MsgOutput)
 
-	require.False(t, ac.promptActive())
+	require.False(t, ac.overlays.promptActive())
 	require.Equal(t, "0work", sess.name)
 	require.False(t, sess.ephemeral)
 	out, err := ports.UnmarshalOutput(repaint.Payload)
@@ -53,14 +51,14 @@ func TestPromptSubmitErrorKeepsPromptOpen(t *testing.T) {
 	defer release2()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	d.sessions["other"] = &session{id: "other", name: "taken", ctx: ctx, cancel: cancel, tabs: []*tab{{pty: p2, screen: vt.NewScreen(80, 23), dirty: make(chan struct{}, 1), size: domain.Size{Cols: 80, Rows: 23}, ctx: ctx, cancel: cancel}}}
+	d.sessions["other"] = &session{id: "other", name: "taken", ctx: ctx, cancel: cancel, tabs: []*tab{newTestTabWithContext(p2, ctx, cancel)}}
 
 	d.enterPrompt(sess, ac, " Rename session ", "", func(name string) error { return d.renameSession(sess, name) })
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handlePromptInput(ac, []byte("taken\r"))
 	repaint := awaitFrame(t, sends, ports.MsgOutput)
 
-	require.True(t, ac.promptActive())
+	require.True(t, ac.overlays.promptActive())
 	require.NotEqual(t, "taken", sess.name)
 	out, err := ports.UnmarshalOutput(repaint.Payload)
 	require.NoError(t, err)
@@ -78,7 +76,7 @@ func TestPromptEscapeCancelsWithoutRename(t *testing.T) {
 	d.handlePromptInput(ac, []byte("new\x1b"))
 	awaitFrame(t, sends, ports.MsgOutput)
 
-	require.False(t, ac.promptActive())
+	require.False(t, ac.overlays.promptActive())
 	require.Equal(t, oldName, sess.name)
 }
 
@@ -94,8 +92,8 @@ func TestPaletteRNSOpensRenamePrompt(t *testing.T) {
 	d.handlePaletteInput(ac, []byte("RNS\r"))
 	out := awaitFrame(t, sends, ports.MsgOutput)
 
-	require.False(t, ac.paletteActive())
-	require.True(t, ac.promptActive())
+	require.False(t, ac.overlays.paletteActive())
+	require.True(t, ac.overlays.promptActive())
 	msg, err := ports.UnmarshalOutput(out.Payload)
 	require.NoError(t, err)
 	require.Contains(t, string(msg.Data), "Rename session")

@@ -17,21 +17,24 @@
 //     when the parent context is cancelled (graceful shutdown notifies any
 //     attached clients with ReasonServerShutdown).
 //
-// Locking: a session's screen and per-client renderer shadow are both guarded
-// by tab.mu; the attached-client pointer by session.mu; the registry by
-// Daemon.mu. When more than one is held the order is always
-// Daemon.mu > session.mu, and (for the transport) attachedClient.sendMu >
-// tab.mu — the PTY reader only ever takes tab.mu, so it never blocks on
-// a slow client.
+// Locking: a pane's screen/scrollback and per-client renderer shadow are
+// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
+// session.mu; the registry by Daemon.mu. When more than one is held the order
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
+// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
 package daemon
 
 import (
 	"bytes"
+	"errors"
 	"strconv"
 	"time"
 
-	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -43,56 +46,69 @@ func signal(ch chan struct{}) {
 	}
 }
 
-func (d *Daemon) ptyReader(sess *session, tb *tab) {
+func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 	defer d.sessWg.Done()
+	if p == nil {
+		return
+	}
 	buf := make([]byte, ptyReadBufSize)
 	var resp []byte
+	var clipboards []string
 	attentionCh := make(chan struct{}, 1)
-	tb.mu.Lock()
-	tb.screen.OnResponse = func(b []byte) { resp = append(resp, b...) }
-	tb.screen.OnBell = func() { signal(attentionCh) }
-	tb.screen.OnNotify = func(string, string) { signal(attentionCh) }
-	tb.mu.Unlock()
+	p.mu.Lock()
+	p.screen.OnResponse = func(b []byte) { resp = append(resp, b...) }
+	p.screen.OnBell = func() { signal(attentionCh) }
+	p.screen.OnNotify = func(string, string) { signal(attentionCh) }
+	p.screen.OnProgress = func(bool) { signal(attentionCh) }
+	p.screen.OnClipboard = func(b64 string) { clipboards = append(clipboards, b64) }
+	p.mu.Unlock()
 	for {
-		n, err := tb.pty.Read(buf)
+		n, err := p.pty.Read(buf)
 		if n > 0 {
 			data := buf[:n]
-			tb.mu.Lock()
-			wasSyncing := tb.screen.SyncUpdateActive()
-			tb.screen.Write(data)
-			isSyncing := tb.screen.SyncUpdateActive()
-			tb.mu.Unlock()
+			p.mu.Lock()
+			wasSyncing := p.screen.SyncUpdateActive()
+			p.screen.Write(data)
+			isSyncing := p.screen.SyncUpdateActive()
+			p.mu.Unlock()
+			markSnapshotDirty(sess)
 			select {
 			case <-attentionCh:
 				d.noteAttention(sess, tb)
 			default:
 			}
+			if len(clipboards) > 0 {
+				for _, b64 := range clipboards {
+					d.forwardClipboardAsync(sess, b64)
+				}
+				clipboards = clipboards[:0]
+			}
 			if len(resp) > 0 {
-				if _, writeErr := tb.pty.Write(resp); writeErr != nil {
+				if _, writeErr := p.pty.Write(resp); writeErr != nil {
 					d.log.Warn("pty response write failed", "err", writeErr, "session", sess.name)
 				}
 				resp = resp[:0]
 			}
 			if wasSyncing != isSyncing {
-				tb.mu.Lock()
-				tb.syncGen++
-				gen := tb.syncGen
-				tb.mu.Unlock()
+				p.mu.Lock()
+				p.syncGen++
+				gen := p.syncGen
+				p.mu.Unlock()
 				if isSyncing {
-					go d.syncWatchdog(tb, gen)
+					go d.syncWatchdog(p, gen)
 				}
 			}
 			if (wasSyncing && !isSyncing) || (!isSyncing && syncUpdateEndIn(data)) {
-				signal(tb.flush)
+				signal(p.flush)
 				continue
 			}
 			if isSyncing {
 				continue
 			}
-			signal(tb.dirty)
+			signal(p.dirty)
 		}
 		if err != nil {
-			d.closeTab(sess, tb, true)
+			d.reapPane(sess, tb, p)
 			return
 		}
 	}
@@ -101,8 +117,11 @@ func (d *Daemon) ptyReader(sess *session, tb *tab) {
 // scheduler debounces dirty signals. The first dirty opens a short tab;
 // sustained floods progressively widen that tab, while isolated updates
 // return to the minimum delay for interactive latency.
-func (d *Daemon) scheduler(sess *session, tb *tab) {
+func (d *Daemon) scheduler(sess *session, tb *tab, p *pane) {
 	defer d.sessWg.Done()
+	if p == nil {
+		return
+	}
 	delay := minDebounceInterval
 	lastRender := d.clock.Now()
 outer:
@@ -110,13 +129,13 @@ outer:
 		select {
 		case <-sess.ctx.Done():
 			return
-		case <-tabDone(tb):
+		case <-paneDone(p):
 			return
-		case <-tb.flush:
-			d.render(sess, tb)
+		case <-p.flush:
+			d.render(sess, tb, p)
 			lastRender = d.clock.Now()
 			continue
-		case <-tb.dirty:
+		case <-p.dirty:
 			if d.clock.Now().Sub(lastRender) >= maxDebounceInterval {
 				delay = minDebounceInterval
 			}
@@ -130,27 +149,27 @@ outer:
 			case <-sess.ctx.Done():
 				timer.Stop()
 				return
-			case <-tabDone(tb):
+			case <-paneDone(p):
 				timer.Stop()
 				return
-			case <-tb.flush:
+			case <-p.flush:
 				if !timer.Stop() {
 					select {
 					case <-timer.C():
 					default:
 					}
 				}
-				d.render(sess, tb)
+				d.render(sess, tb, p)
 				lastRender = d.clock.Now()
 				continue outer
-			case <-tb.dirty:
+			case <-p.dirty:
 				coalesced++
 			case <-timer.C():
 				break absorb
 			}
 		}
 		delay = nextDebounceDelay(delay, coalesced)
-		d.render(sess, tb)
+		d.render(sess, tb, p)
 		lastRender = d.clock.Now()
 	}
 }
@@ -169,30 +188,23 @@ func nextDebounceDelay(delay time.Duration, coalesced int) time.Duration {
 	return delay
 }
 
-func (d *Daemon) syncWatchdog(tb *tab, gen uint64) {
+func (d *Daemon) syncWatchdog(p *pane, gen uint64) {
 	timer := d.clock.NewTimer(maxSyncUpdateDuration)
 	select {
-	case <-tabDone(tb):
+	case <-paneDone(p):
 		timer.Stop()
 		return
 	case <-timer.C():
 	}
 
-	tb.mu.Lock()
-	if tb.syncGen != gen || !tb.screen.SyncUpdateActive() {
-		tb.mu.Unlock()
+	p.mu.Lock()
+	if p.syncGen != gen || !p.screen.SyncUpdateActive() {
+		p.mu.Unlock()
 		return
 	}
-	tb.screen.ForceSyncEnd()
-	tb.mu.Unlock()
-	signal(tb.flush)
-}
-
-func tabDone(tb *tab) <-chan struct{} {
-	if tb.ctx == nil {
-		return nil
-	}
-	return tb.ctx.Done()
+	p.screen.ForceSyncEnd()
+	p.mu.Unlock()
+	signal(p.flush)
 }
 
 func syncUpdateEndIn(data []byte) bool {
@@ -201,17 +213,19 @@ func syncUpdateEndIn(data []byte) bool {
 
 // render paints the current client, or (when detached) just clears accumulated
 // damage so it never grows unbounded while headless.
-func (d *Daemon) render(sess *session, tb *tab) {
-	tb.mu.Lock()
-	if tb.screen.SyncUpdateActive() {
-		tb.mu.Unlock()
-		return
-	}
-	tb.mu.Unlock()
-
+func (d *Daemon) render(sess *session, tb *tab, p *pane) {
 	tb.mu.Lock()
 	previewer := tb.previewClient
 	tb.mu.Unlock()
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	if p.screen.SyncUpdateActive() {
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
 
 	sess.mu.Lock()
 	ac := sess.client
@@ -226,111 +240,171 @@ func (d *Daemon) render(sess *session, tb *tab) {
 			d.paint(sess, ac, false)
 			return
 		}
-		tb.mu.Lock()
-		tb.screen.ClearDamage()
-		tb.mu.Unlock()
+		p.mu.Lock()
+		p.screen.ClearDamage()
+		p.mu.Unlock()
 		return
 	}
 
 	if ac == nil || !active {
-		tb.mu.Lock()
-		tb.screen.ClearDamage()
-		tb.mu.Unlock()
+		p.mu.Lock()
+		p.screen.ClearDamage()
+		p.mu.Unlock()
 		return
 	}
+	d.refreshBarScriptsIfDue(sess, d.clock.Now(), false)
 	d.paint(sess, ac, false)
 }
 
 // paint draws the composed client frame (active tab plus status bar) and
 // sends the resulting bytes. The renderer shadow is reset on explicit invalidations
 // such as switch/create/close/rename/resize so the repaint is complete.
+func titleBarPaneIDs(placements []layout.Placement, ok bool) []layout.PaneID {
+	if !ok {
+		return nil
+	}
+	ids := make([]layout.PaneID, 0, len(placements))
+	for _, pl := range placements {
+		if pl.TitleBar.Height > 0 {
+			ids = append(ids, pl.ID)
+		}
+	}
+	return ids
+}
+
 func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	tb := sess.activeTab()
 	if tb == nil {
 		return
 	}
 
+	ac.initOverlays()
 	ac.sendMu.Lock()
-	ac.copyMu.Lock()
-	copyActive := ac.copyMode != nil
-	var copyMode *scopy.Mode
-	if ac.copyMode != nil {
-		copyModeValue := *ac.copyMode
-		copyMode = &copyModeValue
+	if ac.currentSession() != sess {
+		ac.sendMu.Unlock()
+		return
 	}
-	copyFeedback := ac.copyFeedback
-	if copyFeedback != "" && !copyActive {
-		ac.copyFeedback = ""
+	// Ack-gated coalescing: while the client is at least maxUnackedOutputStates
+	// behind, skip composing another diff and mark the paint deferred. The
+	// MsgOutputAck handler flushes one cumulative paint once acks catch up.
+	// A reset paint is an explicit full invalidation that supersedes any queued
+	// diffs, so it bypasses the gate and clears the flag.
+	if reset {
+		ac.paintDeferred = false
+	} else if ac.outputLagAtCapLocked() {
+		ac.paintDeferred = true
+		ac.sendMu.Unlock()
+		return
 	}
-	ac.copyMu.Unlock()
-	ac.pickerMu.Lock()
-	pickerActive := ac.picker != nil
-	pickerModel := ac.picker.Clone()
-	previewTab := ac.pickerPreview
-	ac.pickerMu.Unlock()
-	preview := snapshotPickerPreview(previewTab)
-	ac.paletteMu.Lock()
-	paletteModel := ac.palette
-	paletteActive := paletteModel != nil
-	if !paletteActive {
-		ac.paletteMu.Unlock()
+	overlays := ac.overlays.SnapshotForRender()
+	repaintAttachedClients := false
+	defer func() {
+		if repaintAttachedClients {
+			d.repaintAllAttachedClients()
+		}
+	}()
+	defer overlays.Unlock()
+	preview := snapshotPickerPreview(nil)
+	if overlays.previewTab != tb {
+		preview = snapshotPickerPreview(overlays.previewTab)
 	}
-	ac.promptMu.Lock()
-	promptModel := ac.prompt
-	promptActive := promptModel != nil
-	if !promptActive {
-		ac.promptMu.Unlock()
-	}
-	if sess.ackAttention(tb) {
-		defer d.repaintAllAttachedClients()
-	}
-	bars := d.barStateFor(sess, copyFeedback)
+	bars := d.barStateForClient(sess, ac, overlays.copyFeedback)
 	bars.theme = ac.getTheme()
+	_, attentionVisible := pulseStyle(bars.attentionFrame)
+	repaintAttachedClients = sess.ackAttention(tb, attentionVisible)
 
 	styles := newThemeStyles(ac.getTheme())
+	tb.mu.Lock()
+	layoutSnap := solveTabLayoutLocked(tb)
+	titleIDs := titleBarPaneIDs(layoutSnap.placements, layoutSnap.ok)
+	tb.mu.Unlock()
+	for _, id := range titleIDs {
+		d.refreshPaneTitle(sess, id)
+	}
 
 	tb.mu.Lock()
-	if reset || copyActive || pickerActive || paletteActive || promptActive {
+	if !layoutSnap.matchesLocked(tb) {
+		layoutSnap = solveTabLayoutLocked(tb)
+	}
+	p := tb.focusedPane()
+	if p == nil {
+		tb.mu.Unlock()
+		ac.sendMu.Unlock()
+		return
+	}
+	reset = ac.shouldResetOutputState(reset)
+	overlayActive := overlays.copyActive || overlays.copySearchModel != nil || overlays.pickerActive || overlays.paletteActive || overlays.promptActive
+	if reset || overlayActive {
 		ac.rend.Reset()
 		ac.bars.Reset()
+		ac.composed.invalidate()
 	}
-	if reset || pickerActive || paletteActive || promptActive {
+	if reset || overlays.pickerActive || overlays.paletteActive || overlays.promptActive {
 		ac.lastCursor.valid = false
 	}
-	frame, damage := composeClientFrameWithState(bars, tb, reset, &ac.bars)
-	if copyActive {
-		frame, damage = composeCopyClientFrame(copyMode, tb, bars)
+	var frame renderer.Frame
+	var damage []renderer.Damage
+	if overlayActive {
+		frame, damage = composeClientFrameWithLayoutCachedConsumeDamage(bars, tb, reset, layoutSnap, &ac.bars, nil)
+	} else {
+		frame, damage = composeClientFrameWithLayoutCachedConsumeDamage(bars, tb, reset, layoutSnap, &ac.bars, &ac.composed)
 	}
-	if pickerActive {
-		if previewTab == tb {
-			preview = pickerPreviewFromLockedTab(tb)
+	if overlays.copyActive {
+		frame, damage = composeCopyClientFrame(overlays.copyMode, tb, bars)
+	}
+	if overlays.copySearchModel != nil {
+		frame, damage = composeCopySearchClientFrame(overlays.copySearchModel, frame, styles)
+	}
+	if overlays.pickerActive {
+		if overlays.previewTab == tb {
+			if layoutSnap.ok && tb.tree != nil && tb.tree.Root != nil && tb.tree.Root.Kind != layout.Leaf {
+				previewFrame, _ := composeTabFrameWithLayout(tb, layoutSnap.area, themeui.Theme{}, layoutSnap)
+				preview = pickerPreviewFromFrame(previewFrame)
+			} else {
+				preview = pickerPreviewFromLockedTab(tb)
+			}
 		}
-		frame, damage = composePickerClientFrame(pickerModel, preview, frame, styles)
+		frame, damage = composePickerClientFrame(overlays.pickerModel, preview, frame, styles)
 	}
-	if paletteActive {
-		frame, damage = composePaletteClientFrame(paletteModel, frame, styles)
-		ac.paletteMu.Unlock()
+	if overlays.paletteActive {
+		frame, damage = composePaletteClientFrame(overlays.paletteModel, frame, styles)
 	}
-	if promptActive {
-		frame, damage = composePromptClientFrame(promptModel, frame, styles)
-		ac.promptMu.Unlock()
+	if overlays.promptActive {
+		frame, damage = composePromptClientFrame(overlays.promptModel, frame, styles)
 	}
-	desiredCursor := desiredCursorOut(tb.screen, copyActive || pickerActive || paletteActive || promptActive)
+	overlays.Unlock()
+	cursorContent, cursorVisible := focusedPaneContentRect(layoutSnap, p.id)
+	p.mu.Lock()
+	desiredCursor := desiredCursorOut(p.screen, cursorContent, !cursorVisible || overlays.copyActive || overlays.copySearchModel != nil || overlays.pickerActive || overlays.paletteActive || overlays.promptActive)
+	p.mu.Unlock()
+	ac.sess.mu.Lock()
+	if ac.sess.v != sess {
+		ac.sess.mu.Unlock()
+		tb.mu.Unlock()
+		ac.sendMu.Unlock()
+		return
+	}
 	data, err := ac.rend.Draw(frame, damage)
 	var cursorTail []byte
 	if err == nil {
 		cursorTail = ac.encodeCursorTail(desiredCursor, len(data) > 0)
 	}
-	tb.screen.ClearDamage()
 	tb.mu.Unlock()
 
 	var serr error
+	var sendTr ports.Transport
 	if err == nil {
 		data = append(data, cursorTail...)
 		if len(data) > 0 {
-			serr = ac.tr.Send(frameOutput(data))
+			sendTr = ac.transport()
+			if sendTr == nil {
+				serr = errors.New("client transport is nil")
+			} else {
+				serr = sendTr.Send(ac.nextOutputFrameLocked(data, reset))
+			}
 		}
 	}
+	ac.sess.mu.Unlock()
 	ac.sendMu.Unlock()
 
 	if err != nil {
@@ -338,21 +412,33 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		return
 	}
 	if serr != nil {
-		d.detachOnSendError(sess, ac)
+		d.detachOnSendError(sess, ac, sendTr)
 	}
 }
 
+func focusedPaneContentRect(layoutSnap tabLayoutSnapshot, id layout.PaneID) (domain.Rect, bool) {
+	if !layoutSnap.ok {
+		return layoutSnap.area, layoutSnap.area.Width > 0 && layoutSnap.area.Height > 0
+	}
+	for _, pl := range layoutSnap.placements {
+		if pl.ID == id && !pl.Collapsed && pl.Content.Width > 0 && pl.Content.Height > 0 {
+			return pl.Content, true
+		}
+	}
+	return domain.Rect{}, false
+}
+
 // desiredCursorOut computes the terminal cursor state that should be shown to
-// the client for the current tab and overlay mode.
-func desiredCursorOut(s *vt.Screen, copyActive bool) cursorOut {
-	if copyActive || !s.CursorVisible() {
+// the client for the current pane placement and overlay mode.
+func desiredCursorOut(s *vt.Screen, content domain.Rect, hide bool) cursorOut {
+	if hide || !s.CursorVisible() {
 		return cursorOut{hidden: true}
 	}
 	style, ok := s.CursorStyle()
 	if !ok {
-		style = 5
+		style = 1
 	}
-	return cursorOut{row: s.CursorRow() + 1, col: s.CursorCol(), style: style, hasStyle: true}
+	return cursorOut{row: content.Y + s.CursorRow() + 1, col: content.X + s.CursorCol(), style: style, hasStyle: true}
 }
 
 func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte {
@@ -382,20 +468,22 @@ func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte
 }
 
 type themeStyles struct {
-	statusBar  renderer.Style
-	accent     renderer.Style
-	border     renderer.Style
-	selection  renderer.Style
-	copyStatus renderer.Style
+	statusBar   renderer.Style
+	accent      renderer.Style
+	border      renderer.Style
+	selection   renderer.Style
+	copyStatus  renderer.Style
+	paletteDesc renderer.Style
 }
 
 func newThemeStyles(t themeui.Theme) themeStyles {
 	return themeStyles{
-		statusBar:  themeui.StatusBarStyle(t),
-		accent:     themeui.AccentStyle(t),
-		border:     themeui.BorderStyle(t),
-		selection:  themeui.SelectionStyle(t),
-		copyStatus: themeui.SelectionStyle(t),
+		statusBar:   themeui.StatusBarStyle(t),
+		accent:      themeui.AccentStyle(t),
+		border:      themeui.BorderStyle(t),
+		selection:   themeui.SelectionStyle(t),
+		copyStatus:  themeui.SelectionStyle(t),
+		paletteDesc: themeui.MutedTextStyle(t),
 	}
 }
 
@@ -416,32 +504,91 @@ func (c *barCache) Reset() {
 	c.bottom = nil
 }
 
+type composedFrameCache struct {
+	frame      renderer.Frame
+	valid      bool
+	layoutSnap tabLayoutSnapshot
+}
+
+func (c *composedFrameCache) invalidate() {
+	c.valid = false
+}
+
 func composeClientFrame(sess *session, tb *tab, full bool, rightStatus string, caches ...*barCache) (renderer.Frame, []renderer.Damage) {
 	return composeClientFrameWithState(barState{status: sess.statusSegments(), copyFeedback: rightStatus}, tb, full, caches...)
 }
 
 func composeClientFrameWithState(bars barState, tb *tab, full bool, caches ...*barCache) (renderer.Frame, []renderer.Damage) {
+	return composeClientFrameWithLayout(bars, tb, full, solveTabLayoutLocked(tb), caches...)
+}
+
+func composeClientFrameWithLayout(bars barState, tb *tab, full bool, layoutSnap tabLayoutSnapshot, caches ...*barCache) (renderer.Frame, []renderer.Damage) {
 	var cache *barCache
 	if len(caches) > 0 {
 		cache = caches[0]
 	}
+	return composeClientFrameWithLayoutCached(bars, tb, full, layoutSnap, cache, nil)
+}
+
+func composeClientFrameWithLayoutCached(bars barState, tb *tab, full bool, layoutSnap tabLayoutSnapshot, cache *barCache, composed *composedFrameCache) (renderer.Frame, []renderer.Damage) {
+	return composeClientFrameWithLayoutCachedOptions(bars, tb, full, layoutSnap, cache, composed, false)
+}
+
+func composeClientFrameWithLayoutCachedConsumeDamage(bars barState, tb *tab, full bool, layoutSnap tabLayoutSnapshot, cache *barCache, composed *composedFrameCache) (renderer.Frame, []renderer.Damage) {
+	return composeClientFrameWithLayoutCachedOptions(bars, tb, full, layoutSnap, cache, composed, true)
+}
+
+func composeClientFrameWithLayoutCachedOptions(bars barState, tb *tab, full bool, layoutSnap tabLayoutSnapshot, cache *barCache, composed *composedFrameCache, consumeDamage bool) (renderer.Frame, []renderer.Damage) {
+	p := tb.focusedPane()
 	styles := newThemeStyles(bars.theme)
-	width, screenRows := tb.screen.Frame.Width, tb.screen.Frame.Height
-	frame := renderer.NewFrame(width, screenRows+2)
-	topBar := frame.Row(0)
-	drawTopBarSnapshot(topBar, bars.status, bars.attentionFrame, styles)
-	for y := range screenRows {
-		copy(frame.Row(y+1), tb.screen.Frame.Row(y))
+	if p == nil {
+		width, screenRows := tb.size.Cols, tb.size.Rows
+		if width <= 0 || screenRows <= 0 {
+			return renderer.NewFrame(0, 0), nil
+		}
+		return renderer.NewFrame(width, screenRows+2), nil
 	}
+	p.mu.Lock()
+	width, screenRows := p.screen.Frame.Width, p.screen.Frame.Height
+	p.mu.Unlock()
+	if tb.size.Valid() {
+		width, screenRows = tb.size.Cols, tb.size.Rows
+	}
+	cacheValid := composed != nil && composed.valid && composed.frame.Width == width && composed.frame.Height == screenRows+2
+	layoutSame := composed == nil || (cacheValid && sameTabLayoutSnapshot(composed.layoutSnap, layoutSnap))
+	var frame renderer.Frame
+	if cacheValid {
+		frame = composed.frame
+	} else {
+		frame = renderer.NewFrame(width, screenRows+2)
+		if composed != nil {
+			full = true
+		}
+	}
+	if !layoutSame {
+		full = true
+	}
+	contentArea := domain.Rect{Y: 1, Width: width, Height: screenRows}
+	if cacheValid && !layoutSame {
+		clearFrameRect(frame, contentArea)
+	}
+	topBar := frame.Row(0)
+	drawTopBarSnapshot(topBar, bars.status, bars.attentionFrame, bars.topRight, styles)
+	contentDamage := composeTabFrameIntoWithLayoutOptions(tb, frame, contentArea, bars.theme, layoutSnap, cacheValid && layoutSame, consumeDamage)
 	bottomBar := frame.Row(screenRows + 1)
 	drawStatusBarState(bottomBar, bars, styles)
+	if composed != nil {
+		composed.frame = frame
+		composed.valid = true
+		composed.layoutSnap = layoutSnap
+	}
 	if full {
 		if cache != nil {
 			cache.capture(topBar, bottomBar)
 		}
 		return frame, []renderer.Damage{renderer.FullRedraw()}
 	}
-	damage := offsetDamage(tb.screen.Damage())
+	damage := translateDamage(contentDamage, 0, 1)
 	if cache == nil || !sameCells(cache.top, topBar) {
 		damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 0, Width: width, Height: 1})
 	}
@@ -452,6 +599,187 @@ func composeClientFrameWithState(bars barState, tb *tab, full bool, caches ...*b
 		cache.capture(topBar, bottomBar)
 	}
 	return frame, damage
+}
+
+func composeTabFrame(tb *tab, area domain.Rect, theme themeui.Theme) (renderer.Frame, []renderer.Damage) {
+	return composeTabFrameWithLayout(tb, area, theme, tabLayoutSnapshot{})
+}
+
+func composeTabFrameWithLayout(tb *tab, area domain.Rect, theme themeui.Theme, layoutSnap tabLayoutSnapshot) (renderer.Frame, []renderer.Damage) {
+	frame := renderer.NewFrame(area.Width, area.Height)
+	damage := composeTabFrameIntoWithLayout(tb, frame, area, theme, layoutSnap, false)
+	return frame, damage
+}
+
+func composeTabFrameIntoWithLayout(tb *tab, frame renderer.Frame, area domain.Rect, theme themeui.Theme, layoutSnap tabLayoutSnapshot, cacheValid bool) []renderer.Damage {
+	return composeTabFrameIntoWithLayoutOptions(tb, frame, area, theme, layoutSnap, cacheValid, false)
+}
+
+func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area domain.Rect, theme themeui.Theme, layoutSnap tabLayoutSnapshot, cacheValid bool, consumeDamage bool) []renderer.Damage {
+	contentArea := domain.Rect{Width: area.Width, Height: area.Height}
+	root := tb.tree.Root
+	placements, ok := layoutSnap.placements, layoutSnap.ok && layoutSnap.root == root && layoutSnap.area == contentArea
+	if !ok {
+		placements, ok = layout.Solve(root, contentArea)
+	}
+	var fallback *pane
+	if !ok {
+		fallback = tb.focusedPane()
+		if fallback == nil {
+			return nil
+		}
+		placements = []layout.Placement{{ID: fallback.id, Content: contentArea}}
+	}
+	if ok && !cacheValid {
+		drawDividers(frame, root, area, themeui.DimStyle(newThemeStyles(theme).border, theme))
+	}
+	var damage []renderer.Damage
+	for _, pl := range placements {
+		p := tb.panes[pl.ID]
+		if p == nil && fallback != nil && pl.ID == fallback.id {
+			p = fallback
+		}
+		if p == nil {
+			continue
+		}
+		focused := tb.tree.Focus == pl.ID
+		pl = offsetPlacement(pl, area.X, area.Y)
+		if pl.TitleBar.Height > 0 {
+			drawPaneTitleBar(frame, pl, p, focused, theme, "")
+			if cacheValid {
+				titleDamage := pl.TitleBar
+				titleDamage.X -= area.X
+				titleDamage.Y -= area.Y
+				damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: titleDamage.X, Y: titleDamage.Y, Width: titleDamage.Width, Height: titleDamage.Height})
+			}
+		}
+		if pl.Collapsed || pl.Content.Width <= 0 || pl.Content.Height <= 0 {
+			if consumeDamage {
+				p.mu.Lock()
+				p.screen.ClearDamage()
+				p.mu.Unlock()
+			}
+			continue
+		}
+		p.mu.Lock()
+		paneDamage := p.screen.Damage()
+		if !cacheValid || len(paneDamage) > 0 {
+			blitPaneFrame(frame, pl.Content, p.screen.Frame, !focused, theme)
+		}
+		for _, d := range paneDamage {
+			localContent := pl.Content
+			localContent.X -= area.X
+			localContent.Y -= area.Y
+			damage = append(damage, translatePaneDamage(d, localContent, contentArea)...)
+		}
+		if consumeDamage {
+			p.screen.ClearDamage()
+		}
+		p.mu.Unlock()
+	}
+	return damage
+}
+
+func sameTabLayoutSnapshot(a, b tabLayoutSnapshot) bool {
+	return a.ok == b.ok && a.root == b.root && a.fingerprint == b.fingerprint && a.area == b.area && a.focus == b.focus
+}
+
+func offsetPlacement(pl layout.Placement, dx, dy int) layout.Placement {
+	pl.Content.X += dx
+	pl.Content.Y += dy
+	pl.TitleBar.X += dx
+	pl.TitleBar.Y += dy
+	return pl
+}
+
+func clearFrameRect(frame renderer.Frame, r domain.Rect) {
+	blank := renderer.BlankCell()
+	for y := r.Y; y < r.Y+r.Height && y < frame.Height; y++ {
+		for x := r.X; x < r.X+r.Width && x < frame.Width; x++ {
+			frame.Set(x, y, blank)
+		}
+	}
+}
+
+func blitPaneFrame(dst renderer.Frame, r domain.Rect, src renderer.Frame, dim bool, theme themeui.Theme) {
+	rows := min(r.Height, src.Height)
+	cols := min(r.Width, src.Width)
+	for y := range rows {
+		for x := range cols {
+			cell := src.At(x, y)
+			if dim {
+				cell.Style = themeui.DimStyle(cell.Style, theme)
+			}
+			dst.Set(r.X+x, r.Y+y, cell)
+		}
+	}
+}
+
+func drawPaneTitleBar(frame renderer.Frame, pl layout.Placement, p *pane, focused bool, theme themeui.Theme, fallback string) {
+	styles := newThemeStyles(theme)
+	style := styles.border
+	if focused {
+		style = styles.statusBar
+	} else {
+		style = themeui.DimStyle(style, theme)
+	}
+	for x := pl.TitleBar.X; x < pl.TitleBar.X+pl.TitleBar.Width && x < frame.Width; x++ {
+		frame.Set(x, pl.TitleBar.Y, renderer.Cell{Rune: ' ', Style: style})
+	}
+	p.mu.Lock()
+	title := p.title
+	p.mu.Unlock()
+	if title == "" {
+		title = fallback
+	}
+	if title == "" {
+		title = string(p.id)
+	}
+	ui.DrawText(frame, pl.TitleBar.X, pl.TitleBar.Y, pl.TitleBar.X+pl.TitleBar.Width, title, style)
+}
+
+func drawDividers(frame renderer.Frame, n *layout.Node, r domain.Rect, style renderer.Style) {
+	if n == nil || n.Kind != layout.Split || len(n.Children) <= 1 {
+		return
+	}
+	count := len(n.Children)
+	if n.Dir == layout.Horizontal {
+		usable := r.Width - (count - 1)
+		base, rem := usable/count, usable%count
+		x := r.X
+		for i, child := range n.Children {
+			w := base
+			if i < rem {
+				w++
+			}
+			drawDividers(frame, child, domain.Rect{X: x, Y: r.Y, Width: w, Height: r.Height}, style)
+			x += w
+			if i < count-1 {
+				for y := r.Y; y < r.Y+r.Height; y++ {
+					frame.Set(x, y, renderer.Cell{Rune: '│', Style: style})
+				}
+				x++
+			}
+		}
+		return
+	}
+	usable := r.Height - (count - 1)
+	base, rem := usable/count, usable%count
+	y := r.Y
+	for i, child := range n.Children {
+		h := base
+		if i < rem {
+			h++
+		}
+		drawDividers(frame, child, domain.Rect{X: r.X, Y: y, Width: r.Width, Height: h}, style)
+		y += h
+		if i < count-1 {
+			for x := r.X; x < r.X+r.Width; x++ {
+				frame.Set(x, y, renderer.Cell{Rune: '─', Style: style})
+			}
+			y++
+		}
+	}
 }
 
 func (c *barCache) capture(top, bottom []renderer.Cell) {
@@ -482,12 +810,29 @@ func sameCells(a, b []renderer.Cell) bool {
 }
 
 func offsetDamage(in []renderer.Damage) []renderer.Damage {
+	return translateDamage(in, 0, 1)
+}
+
+func translateDamage(in []renderer.Damage, dx, dy int) []renderer.Damage {
 	out := make([]renderer.Damage, len(in))
 	for i, d := range in {
 		out[i] = d
 		if d.Kind != renderer.DamageFullRedraw {
-			out[i].Y++
+			out[i].X += dx
+			out[i].Y += dy
 		}
 	}
 	return out
+}
+
+func translatePaneDamage(d renderer.Damage, content domain.Rect, area domain.Rect) []renderer.Damage {
+	if d.Kind == renderer.DamageFullRedraw {
+		return []renderer.Damage{d}
+	}
+	if d.Kind == renderer.DamageScrollUp && (content.X != 0 || content.Width != area.Width) {
+		return []renderer.Damage{{Kind: renderer.DamageText, X: content.X, Y: content.Y, Width: content.Width, Height: content.Height}}
+	}
+	d.X += content.X
+	d.Y += content.Y
+	return []renderer.Damage{d}
 }
