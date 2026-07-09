@@ -1506,7 +1506,7 @@ func appendSGRGroup(out []int, group string) []int {
 			return out
 		}
 		out = append(out, code, mode)
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			out = append(out, parseCSIInt(sgrColonField(group, start+i)))
 		}
 	}

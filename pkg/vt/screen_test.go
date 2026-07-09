@@ -1749,7 +1749,7 @@ func TestResize(t *testing.T) {
 			name: "random wide resize repairs copied rows",
 			run: func(t *testing.T) {
 				rng := rand.New(rand.NewSource(1))
-				for i := 0; i < 200; i++ {
+				for range 200 {
 					s := NewScreen(8, 4)
 					s.Write([]byte("a界b好c語d"))
 					s.Row = rng.Intn(s.Frame.Height)
