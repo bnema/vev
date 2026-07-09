@@ -338,7 +338,7 @@ func drawCopyStatus(row []renderer.Cell, m *Mode, total int, style renderer.Styl
 	for i := range row {
 		row[i] = renderer.BlankCell()
 	}
-	text := " [VISUAL] "
+	text := " [SCROLL] "
 	if m.Selecting {
 		text = " [SELECT] "
 	}

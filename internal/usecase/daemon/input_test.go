@@ -652,7 +652,7 @@ func TestMouseWheelEntersScrollbackModeAndExitsAtBottom(t *testing.T) {
 	data := mustOutputData(t, sends)
 	require.NotNil(t, ac.overlays.copyMode)
 	require.Equal(t, 19, ac.overlays.copyMode.Cursor)
-	require.Contains(t, string(data), "[VISUAL]")
+	require.Contains(t, string(data), "[SCROLL]")
 
 	d.handleInput(sess, ac, []byte("\x1b[<65;1;1M"))
 	mustOutputData(t, sends)

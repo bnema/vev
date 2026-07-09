@@ -669,8 +669,8 @@ func TestOverlayPaintInvalidationShowsAndRestoresBaseFrame(t *testing.T) {
 			prepareScreen: func(sess *session) {
 				sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
 			},
-			visible:      "[VISUAL]",
-			notVisible:   "[VISUAL]",
+			visible:      "[SCROLL]",
+			notVisible:   "[SCROLL]",
 			wantRestored: "live",
 		},
 	}
