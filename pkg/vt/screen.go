@@ -394,6 +394,17 @@ func (s *Screen) clearWidePairAt(x, y int) {
 	}
 }
 
+func (s *Screen) eraseCell() renderer.Cell {
+	style := renderer.DefaultStyle()
+	if s.Style.HasBackgroundRGB {
+		style.HasBackgroundRGB = true
+		style.BackgroundRGB = s.Style.BackgroundRGB
+	} else {
+		style.Background = s.Style.Background
+	}
+	return renderer.Cell{Rune: ' ', Style: style}
+}
+
 // clearRow blanks cells [x0,x1) on row y, extending the range to swallow either
 // half of a wide pair that straddles a boundary so no orphan half is left. It
 // returns the actual modified span [start, start+width).
@@ -419,8 +430,9 @@ func (s *Screen) clearRow(y, x0, x1 int) (start, width int) {
 	if x1 < s.Frame.Width && s.Frame.At(x1, y).Continuation {
 		x1++
 	}
+	blank := s.eraseCell()
 	for x := x0; x < x1; x++ {
-		s.Frame.Set(x, y, renderer.BlankCell())
+		s.Frame.Set(x, y, blank)
 	}
 	return x0, x1 - x0
 }
@@ -1448,8 +1460,9 @@ func (s *Screen) clearScreenMode(mode int) {
 		}
 		s.record(renderer.Damage{Kind: renderer.DamageClear, X: 0, Y: 0, Width: s.Frame.Width, Height: min(s.Row+1, s.Frame.Height), Count: 1})
 	case 2, 3:
+		blank := s.eraseCell()
 		for i := range s.Frame.Cells {
-			s.Frame.Cells[i] = renderer.BlankCell()
+			s.Frame.Cells[i] = blank
 		}
 		s.record(renderer.Damage{Kind: renderer.DamageClear, X: 0, Y: 0, Width: s.Frame.Width, Height: s.Frame.Height, Count: 1})
 	default:
