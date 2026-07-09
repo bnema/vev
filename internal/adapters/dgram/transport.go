@@ -144,6 +144,9 @@ type Transport struct {
 	resendAfter      time.Duration
 	maxResendAfter   time.Duration
 	maxResendPerTick int
+	srtt             time.Duration
+	rttvar           time.Duration
+	rto              time.Duration
 	writeTimeout     time.Duration
 	degradedAfter    time.Duration
 	probeAfter       time.Duration
@@ -176,10 +179,11 @@ type Transport struct {
 }
 
 type pending struct {
-	frame    ports.Frame
-	first    time.Time
-	last     time.Time
-	attempts int
+	frame         ports.Frame
+	first         time.Time
+	last          time.Time
+	attempts      int
+	retransmitted bool
 }
 
 func NewTransport(pc net.PacketConn, peer net.Addr, key []byte, sendDir, recvDir uint32) (*Transport, error) {
@@ -209,6 +213,7 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 		resendAfter:      opts.ResendAfter,
 		maxResendAfter:   opts.MaxResendAfter,
 		maxResendPerTick: opts.MaxResendPerTick,
+		rto:              opts.ResendAfter,
 		writeTimeout:     opts.WriteTimeout,
 		degradedAfter:    opts.DegradedAfter,
 		probeAfter:       opts.ProbeAfter,
@@ -499,8 +504,18 @@ func (t *Transport) handleRecord(p []byte) {
 		}
 		seq := binary.BigEndian.Uint64(p[1:])
 		t.mu.Lock()
-		if _, ok := t.pending[seq]; ok {
-			delete(t.pending, seq)
+		acked := false
+		for pendingSeq, p := range t.pending {
+			if pendingSeq > seq {
+				continue
+			}
+			if pendingSeq == seq && p != nil && !p.retransmitted {
+				t.updateRTTLocked(t.clock.Now().Sub(p.first))
+			}
+			delete(t.pending, pendingSeq)
+			acked = true
+		}
+		if acked {
 			t.notifySendWaitersLocked()
 		}
 		t.mu.Unlock()
@@ -530,9 +545,9 @@ func (t *Transport) handleRecord(p []byte) {
 			return
 		}
 		if reliable {
-			ack, queued := t.enqueueReliable(seq, f)
+			ackSeq, ack, queued := t.enqueueReliable(seq, f)
 			if ack {
-				t.sendAck(seq)
+				t.sendAck(ackSeq)
 			}
 			if queued {
 				t.signalDelivery()
@@ -543,20 +558,31 @@ func (t *Transport) handleRecord(p []byte) {
 	}
 }
 
-func (t *Transport) enqueueReliable(seq uint64, f ports.Frame) (ack bool, queued bool) {
+func (t *Transport) enqueueReliable(seq uint64, f ports.Frame) (ackSeq uint64, ack bool, queued bool) {
 	t.deliverMu.Lock()
 	defer t.deliverMu.Unlock()
 	if seq < t.nextRecvSeq {
-		return true, false
+		return t.highestContiguousRecvLocked(), true, false
 	}
 	if _, exists := t.recvBuf[seq]; exists {
-		return true, false
+		return t.highestContiguousRecvLocked(), true, false
 	}
 	if len(t.recvBuf) >= t.maxRecvBuffer && seq != t.nextRecvSeq {
-		return false, false
+		return 0, false, false
 	}
 	t.recvBuf[seq] = f
-	return true, true
+	return t.highestContiguousRecvLocked(), true, true
+}
+
+func (t *Transport) highestContiguousRecvLocked() uint64 {
+	seq := t.nextRecvSeq
+	for {
+		if _, ok := t.recvBuf[seq]; !ok {
+			break
+		}
+		seq++
+	}
+	return seq - 1
 }
 
 func (t *Transport) signalDelivery() {
@@ -662,6 +688,7 @@ func (t *Transport) resendPending() {
 		}
 		p.last = now
 		p.attempts++
+		p.retransmitted = true
 		resend = append(resend, struct {
 			seq uint64
 			f   ports.Frame
@@ -675,7 +702,10 @@ func (t *Transport) resendPending() {
 }
 
 func (t *Transport) resendDelayLocked(p *pending) time.Duration {
-	d := t.resendAfter
+	d := t.rto
+	if d <= 0 {
+		d = t.resendAfter
+	}
 	for i := 0; i < p.attempts && d < t.maxResendAfter; i++ {
 		d *= 2
 		if d > t.maxResendAfter {
@@ -683,6 +713,35 @@ func (t *Transport) resendDelayLocked(p *pending) time.Duration {
 		}
 	}
 	return d
+}
+
+func (t *Transport) updateRTTLocked(sample time.Duration) {
+	if sample <= 0 {
+		return
+	}
+	if t.srtt <= 0 {
+		t.srtt = sample
+		t.rttvar = sample / 2
+	} else {
+		delta := t.srtt - sample
+		if delta < 0 {
+			delta = -delta
+		}
+		t.rttvar = (3*t.rttvar + delta) / 4
+		t.srtt = (7*t.srtt + sample) / 8
+	}
+	variation := 4 * t.rttvar
+	if variation < time.Millisecond {
+		variation = time.Millisecond
+	}
+	rto := t.srtt + variation
+	if rto < t.resendAfter {
+		rto = t.resendAfter
+	}
+	if rto > t.maxResendAfter {
+		rto = t.maxResendAfter
+	}
+	t.rto = rto
 }
 
 func (t *Transport) hopPacketConnOnce() {

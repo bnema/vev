@@ -511,11 +511,11 @@ func TestServerWithoutRebindDoesNotHopPorts(t *testing.T) {
 
 func TestReliableReceiveBufferDoesNotDropAckedFutureFrame(t *testing.T) {
 	tr := &Transport{maxRecvBuffer: 1, nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame)}
-	ack, queued := tr.enqueueReliable(2, ports.Frame{Type: ports.MsgOutput, Payload: []byte("future")})
+	_, ack, queued := tr.enqueueReliable(2, ports.Frame{Type: ports.MsgOutput, Payload: []byte("future")})
 	if !ack || !queued {
 		t.Fatalf("future enqueue ack=%v queued=%v, want true/true", ack, queued)
 	}
-	ack, queued = tr.enqueueReliable(1, ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")})
+	_, ack, queued = tr.enqueueReliable(1, ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")})
 	if !ack || !queued {
 		t.Fatalf("next enqueue ack=%v queued=%v, want true/true", ack, queued)
 	}
@@ -624,6 +624,7 @@ func newResendTestTransport(t *testing.T, maxResendPerTick int) (*Transport, *at
 		resendAfter:      100 * time.Millisecond,
 		maxResendAfter:   500 * time.Millisecond,
 		maxResendPerTick: maxResendPerTick,
+		rto:              100 * time.Millisecond,
 		clock:            realClock{},
 	}, &writes
 }
@@ -698,6 +699,93 @@ func TestRecvUnblocksWhenPeerDeadAfter(t *testing.T) {
 	_, err := recvErrWithin(t, a, time.Second)
 	if !errors.Is(err, ErrLinkDead) {
 		t.Fatalf("Recv err=%v, want ErrLinkDead", err)
+	}
+}
+
+func TestCumulativeAckReleasesAllEarlierPendingFrames(t *testing.T) {
+	tr, _ := newResendTestTransport(t, 10)
+	now := tr.clock.Now()
+	for seq := uint64(1); seq <= 3; seq++ {
+		tr.pending[seq] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(seq)}}, first: now, last: now}
+	}
+
+	tr.handleRecord(ackRecord(3))
+
+	if got := len(tr.pending); got != 0 {
+		t.Fatalf("pending after cumulative ack=%d, want 0", got)
+	}
+}
+
+func TestReliableReceiverAcksOnlyHighestContiguousSequence(t *testing.T) {
+	tr := &Transport{maxRecvBuffer: maxRecvBuffer, nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame)}
+
+	ackSeq, ack, queued := tr.enqueueReliable(3, ports.Frame{Type: ports.MsgOutput, Payload: []byte("third")})
+	if !ack || !queued {
+		t.Fatalf("out-of-order enqueue ack=%v queued=%v, want true/true", ack, queued)
+	}
+	if got, want := ackSeq, uint64(0); got != want {
+		t.Fatalf("out-of-order ack=%d, want highest contiguous %d", got, want)
+	}
+
+	ackSeq, ack, queued = tr.enqueueReliable(1, ports.Frame{Type: ports.MsgOutput, Payload: []byte("first")})
+	if !ack || !queued {
+		t.Fatalf("first enqueue ack=%v queued=%v, want true/true", ack, queued)
+	}
+	if got, want := ackSeq, uint64(1); got != want {
+		t.Fatalf("first contiguous ack=%d, want %d", got, want)
+	}
+
+	ackSeq, ack, queued = tr.enqueueReliable(2, ports.Frame{Type: ports.MsgOutput, Payload: []byte("second")})
+	if !ack || !queued {
+		t.Fatalf("gap fill enqueue ack=%v queued=%v, want true/true", ack, queued)
+	}
+	if got, want := ackSeq, uint64(3); got != want {
+		t.Fatalf("filled gap ack=%d, want %d", got, want)
+	}
+}
+
+func TestRTTEstimatorUpdatesRTOFromAckSample(t *testing.T) {
+	clk := fixedClock{now: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	tr, writes := newResendTestTransport(t, 10)
+	tr.clock = clk
+	tr.resendAfter = 100 * time.Millisecond
+	tr.maxResendAfter = time.Second
+	tr.rto = tr.resendAfter
+	tr.pending[1] = &pending{frame: ports.Frame{Type: ports.MsgOutput}, first: clk.now.Add(-200 * time.Millisecond), last: clk.now.Add(-200 * time.Millisecond)}
+
+	tr.handleRecord(ackRecord(1))
+
+	if tr.rto <= tr.resendAfter {
+		t.Fatalf("rto=%v, want above initial resend after RTT sample", tr.rto)
+	}
+	tr.pending[2] = &pending{frame: ports.Frame{Type: ports.MsgOutput}, first: clk.now, last: clk.now.Add(-(tr.rto - time.Millisecond))}
+	tr.resendPending()
+	if got := writes.Load(); got != 0 {
+		t.Fatalf("writes before rto=%d, want 0", got)
+	}
+	tr.pending[2].last = clk.now.Add(-tr.rto)
+	tr.resendPending()
+	if got := writes.Load(); got != 1 {
+		t.Fatalf("writes at rto=%d, want 1", got)
+	}
+}
+
+func TestRTTEstimatorIgnoresRetransmittedFramesAfterRecovery(t *testing.T) {
+	clk := fixedClock{now: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	tr, _ := newResendTestTransport(t, 10)
+	tr.clock = clk
+	tr.resendAfter = 100 * time.Millisecond
+	tr.maxResendAfter = time.Second
+	tr.rto = tr.resendAfter
+	tr.pending[1] = &pending{frame: ports.Frame{Type: ports.MsgOutput}, first: clk.now.Add(-200 * time.Millisecond), last: clk.now.Add(-tr.resendAfter)}
+	tr.resendPending()
+	tr.linkState = ports.LinkStateOffline
+
+	tr.setLinkState(ports.LinkStateConnected, nil)
+	tr.handleRecord(ackRecord(1))
+
+	if tr.rto != tr.resendAfter || tr.srtt != 0 || tr.rttvar != 0 {
+		t.Fatalf("rtt sampled retransmitted frame after recovery: rto=%v srtt=%v rttvar=%v", tr.rto, tr.srtt, tr.rttvar)
 	}
 }
 
