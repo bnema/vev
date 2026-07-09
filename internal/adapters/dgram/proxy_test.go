@@ -182,21 +182,186 @@ func TestProxyRuntimeOfflineLinkEventExpiresViaIdleTTL(t *testing.T) {
 	}
 }
 
-func TestProxyRuntimeDeadLinkEventTearsDown(t *testing.T) {
+type proxyManualClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	timers chan *proxyManualTimer
+}
+
+func newProxyManualClock(now time.Time) *proxyManualClock {
+	return &proxyManualClock{now: now, timers: make(chan *proxyManualTimer, 4)}
+}
+
+func (c *proxyManualClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *proxyManualClock) NewTimer(d time.Duration) ports.Timer {
+	tm := &proxyManualTimer{c: make(chan time.Time, 1), d: d}
+	c.timers <- tm
+	return tm
+}
+
+func (c *proxyManualClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	now := c.now
+	c.mu.Unlock()
+	for {
+		select {
+		case tm := <-c.timers:
+			if tm.duration() <= d {
+				tm.fire(now)
+			} else {
+				c.timers <- tm
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+type proxyManualTimer struct {
+	mu sync.Mutex
+	c  chan time.Time
+	d  time.Duration
+}
+
+func (t *proxyManualTimer) C() <-chan time.Time { return t.c }
+func (t *proxyManualTimer) Reset(d time.Duration) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.d = d
+	return true
+}
+func (t *proxyManualTimer) Stop() bool { return true }
+func (t *proxyManualTimer) duration() time.Duration {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.d
+}
+func (t *proxyManualTimer) fire(now time.Time) {
+	select {
+	case t.c <- now:
+	default:
+	}
+}
+
+func waitForProxyManualTimers(t *testing.T, clk *proxyManualClock, n int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(clk.timers) >= n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("manual timers=%d, want at least %d", len(clk.timers), n)
+}
+
+func TestProxyRuntimeClientDeadWaitsForIdleTTL(t *testing.T) {
 	client := newFakeTransport()
 	daemon := newFakeTransport()
+	clk := newProxyManualClock(time.Unix(0, 0))
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Hour}.Run(t.Context())
+		errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Minute, Clock: clk}.Run(t.Context())
 	}()
+
 	client.linkEvents <- ports.LinkEvent{State: ports.LinkStateDead}
+	waitForProxyManualTimers(t, clk, 1)
+	select {
+	case err := <-errCh:
+		t.Fatalf("Run returned before IdleTTL after client LinkStateDead: %v", err)
+	default:
+	}
+
+	clk.advance(time.Minute)
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, ErrLinkDead) {
 			t.Fatalf("Run err=%v, want ErrLinkDead", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("dead link event did not tear down proxy")
+		t.Fatal("timeout waiting for idle expiry after client LinkStateDead")
+	}
+}
+
+func TestProxyRuntimeClientRecvDeadWaitsForIdleTTL(t *testing.T) {
+	client := newFakeTransport()
+	daemon := newFakeTransport()
+	clk := newProxyManualClock(time.Unix(0, 0))
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Minute, Clock: clk}.Run(t.Context())
+	}()
+
+	client.recv <- recvResult{err: ErrLinkDead}
+	waitForProxyManualTimers(t, clk, 1)
+	select {
+	case err := <-errCh:
+		t.Fatalf("Run returned before IdleTTL after client Recv ErrLinkDead: %v", err)
+	default:
+	}
+
+	clk.advance(time.Minute)
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrLinkDead) {
+			t.Fatalf("Run err=%v, want ErrLinkDead", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for idle expiry after client Recv ErrLinkDead")
+	}
+}
+
+func TestProxyRuntimeClientSendDeadWaitsForIdleTTL(t *testing.T) {
+	client := newFakeTransport()
+	daemon := newFakeTransport()
+	clk := newProxyManualClock(time.Unix(0, 0))
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Minute, Clock: clk}.Run(t.Context())
+	}()
+
+	client.sendErr <- ErrLinkDead
+	daemon.recv <- recvResult{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("client is gone")}}
+	waitForProxyManualTimers(t, clk, 1)
+	select {
+	case err := <-errCh:
+		t.Fatalf("Run returned before IdleTTL after client Send ErrLinkDead: %v", err)
+	default:
+	}
+
+	clk.advance(time.Minute)
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrLinkDead) {
+			t.Fatalf("Run err=%v, want ErrLinkDead", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for idle expiry after client Send ErrLinkDead")
+	}
+}
+
+func TestProxyRuntimeDaemonRecvDeadTearsDown(t *testing.T) {
+	client := newFakeTransport()
+	daemon := newFakeTransport()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Hour}.Run(t.Context())
+	}()
+	daemon.recv <- recvResult{err: ErrLinkDead}
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrLinkDead) {
+			t.Fatalf("Run err=%v, want ErrLinkDead", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("daemon recv dead did not tear down proxy")
 	}
 }
 

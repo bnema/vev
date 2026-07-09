@@ -93,6 +93,9 @@ func (p ProxyRuntime) Run(ctx context.Context) error {
 		}
 	}()
 	startIdle := func() {
+		if idle != nil {
+			return
+		}
 		if timer == nil {
 			timer = clk.NewTimer(idleTTL)
 		} else {
@@ -116,12 +119,10 @@ func (p ProxyRuntime) Run(ctx context.Context) error {
 				continue
 			}
 			switch ev.State {
-			case ports.LinkStateDegraded, ports.LinkStateProbing, ports.LinkStateOffline:
+			case ports.LinkStateDegraded, ports.LinkStateProbing, ports.LinkStateOffline, ports.LinkStateDead:
 				startIdle()
 			case ports.LinkStateConnected:
 				stopIdle()
-			case ports.LinkStateDead:
-				return ErrLinkDead
 			}
 		case <-idle:
 			return ErrLinkDead
@@ -132,11 +133,17 @@ func (p ProxyRuntime) Run(ctx context.Context) error {
 					return nil
 				}
 				return ce.err
+			case proxyClientRecv, proxyClientSend:
+				if errors.Is(ce.err, ErrLinkDead) {
+					startIdle()
+					continue
+				}
+				return ce.err
 			default:
 				// Recoverable client-side errors are retried inside the copier
 				// without dropping the frame; anything that surfaces here (a
-				// daemon send failure, or a non-recoverable client error such as
-				// a dead link) is fatal.
+				// daemon send failure, or a non-recoverable client send failure)
+				// is fatal.
 				return ce.err
 			}
 		}

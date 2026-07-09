@@ -29,6 +29,11 @@ func TestRunUDPProxyUsesBoundedClientMaxPending(t *testing.T) {
 	require.Equal(t, 32, udpProxyClientTransportOptions.MaxPending)
 }
 
+func TestRunUDPProxyClientDeadAfterExceedsIdleTTL(t *testing.T) {
+	require.Positive(t, udpProxyIdleTTL)
+	require.Greater(t, udpProxyClientTransportOptions.DeadAfter, udpProxyIdleTTL)
+}
+
 func TestParseArgs(t *testing.T) {
 	tests := []struct {
 		name       string
