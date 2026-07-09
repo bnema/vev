@@ -1197,6 +1197,29 @@ func TestESCSequences(t *testing.T) {
 			},
 		},
 		{
+			name: "ESC 7 / ESC 8 restore origin and insert modes",
+			run: func(t *testing.T) {
+				s := NewScreen(6, 5)
+				s.Write([]byte("\x1b[2;4r\x1b[?6h\x1b[4h\x1b7"))
+				s.Write([]byte("\x1b[?6l\x1b[4l\x1b8"))
+
+				if !s.originMode {
+					t.Fatal("origin mode was not restored")
+				}
+				if !s.insertMode {
+					t.Fatal("insert mode was not restored")
+				}
+
+				s.Write([]byte("\x1b[1;1Habcd\x1b[1;3HXY"))
+				if s.Row != 1 || s.Col != 4 {
+					t.Fatalf("cursor after restored origin and insert modes = (%d,%d), want (1,4)", s.Row, s.Col)
+				}
+				if got := lineText(s, 1); got != "abXYcd" {
+					t.Fatalf("line after restored insert mode = %q, want %q", got, "abXYcd")
+				}
+			},
+		},
+		{
 			name: "ESC D (index), ESC E (next line), ESC M (reverse index)",
 			run: func(t *testing.T) {
 				s := NewScreen(5, 3)

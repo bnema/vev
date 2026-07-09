@@ -9,10 +9,12 @@ import (
 )
 
 type cursorState struct {
-	row   int
-	col   int
-	style renderer.Style
-	saved bool
+	row        int
+	col        int
+	style      renderer.Style
+	originMode bool
+	insertMode bool
+	saved      bool
 }
 
 type screenState struct {
@@ -843,33 +845,27 @@ func (s *Screen) applyCSI(params string, cmd byte) {
 			if private {
 				resp = append(resp, '?')
 			}
-			resp = strconv.AppendInt(resp, int64(s.Row+1), 10)
+			resp = strconv.AppendInt(resp, int64(s.cursorReportRow()), 10)
 			resp = append(resp, ';')
 			resp = strconv.AppendInt(resp, int64(s.Col+1), 10)
 			resp = append(resp, 'R')
 			s.respond(resp)
 		}
 	case 'p':
-		if private && strings.HasSuffix(params, "$") {
-			mode, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(params, "?"), "$"))
+		if modeText, ok := strings.CutSuffix(params, "$"); ok {
+			if private {
+				modeText = strings.TrimPrefix(modeText, "?")
+			}
+			mode, err := strconv.Atoi(modeText)
 			if err != nil {
 				return
 			}
-			state := 0
-			switch mode {
-			case 2026:
-				state = 2
-				if s.syncUpdateActive {
-					state = 1
-				}
-			case 2031:
-				state = 2
-				if s.colorSchemeMode {
-					state = 1
-				}
-			}
+			state := s.modeReportState(private, mode)
 			resp := make([]byte, 0, 16)
-			resp = append(resp, "\x1b[?"...)
+			resp = append(resp, "\x1b["...)
+			if private {
+				resp = append(resp, '?')
+			}
 			resp = strconv.AppendInt(resp, int64(mode), 10)
 			resp = append(resp, ';')
 			resp = strconv.AppendInt(resp, int64(state), 10)
@@ -956,6 +952,38 @@ func firstPositive(parts []int, fallback int) int {
 		return fallback
 	}
 	return parts[0]
+}
+
+func (s *Screen) cursorReportRow() int {
+	if s.originMode {
+		return clamp(s.Row, s.cursorMinRow(), s.cursorMaxRow()) - s.cursorMinRow() + 1
+	}
+	return s.Row + 1
+}
+
+func (s *Screen) modeReportState(private bool, mode int) int {
+	if private {
+		switch mode {
+		case 6:
+			return boolModeReportState(s.originMode)
+		case 2026:
+			return boolModeReportState(s.syncUpdateActive)
+		case 2031:
+			return boolModeReportState(s.colorSchemeMode)
+		}
+		return 0
+	}
+	if mode == 4 {
+		return boolModeReportState(s.insertMode)
+	}
+	return 0
+}
+
+func boolModeReportState(enabled bool) int {
+	if enabled {
+		return 1
+	}
+	return 2
 }
 
 func (s *Screen) cursorMinRow() int {
@@ -1083,7 +1111,7 @@ func sgrRGB(r, g, b int) renderer.RGB {
 }
 
 func (s *Screen) saveCursor() {
-	s.savedCursor = cursorState{row: s.Row, col: s.Col, style: s.Style, saved: true}
+	s.savedCursor = cursorState{row: s.Row, col: s.Col, style: s.Style, originMode: s.originMode, insertMode: s.insertMode, saved: true}
 }
 
 func (s *Screen) restoreCursor() {
@@ -1093,6 +1121,8 @@ func (s *Screen) restoreCursor() {
 	s.Row = clamp(s.savedCursor.row, 0, s.Frame.Height-1)
 	s.Col = clamp(s.savedCursor.col, 0, s.Frame.Width-1)
 	s.Style = s.savedCursor.style
+	s.originMode = s.savedCursor.originMode
+	s.insertMode = s.savedCursor.insertMode
 }
 
 func (s *Screen) reset() {
