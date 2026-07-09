@@ -22,7 +22,58 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 )
+
+func TestPaletteBackdropKeepsSimultaneousPickerCrisp(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	ac.setTheme(backdropTheme())
+	client := vt.NewScreen(80, 25)
+	pane := sess.tabs[0].focusedPane()
+	pane.screen.Write([]byte("X"))
+
+	d.enterPicker(sess, ac)
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	pickerTitle := client.Frame.At(36, 2)
+	require.Equal(t, 'S', pickerTitle.Rune, "fixture must address the picker title")
+	undimmedPane := client.Frame.At(0, 1)
+
+	d.enterPalette(sess, ac)
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	require.Equal(t, pickerTitle, client.Frame.At(36, 2), "picker composed with palette must remain crisp")
+	require.Equal(t, themeui.DimStyle(undimmedPane.Style, backdropTheme()), client.Frame.At(0, 1).Style, "pane content outside overlays must use the theme dim style")
+}
+
+func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	ac.setTheme(backdropTheme())
+	client := vt.NewScreen(80, 25)
+	pane := sess.tabs[0].focusedPane()
+	pane.screen.Write([]byte("X"))
+	d.paint(sess, ac, true)
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	undimmed := client.Frame.At(0, 1)
+	topBar := client.Frame.At(0, 0)
+	bottomBar := client.Frame.At(0, 24)
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	dimmed := client.Frame.At(0, 1)
+	require.Equal(t, 'X', dimmed.Rune)
+	require.Equal(t, themeui.DimStyle(undimmed.Style, backdropTheme()), dimmed.Style, "open palette must use the theme dim style")
+	require.Equal(t, topBar, client.Frame.At(0, 0), "top chrome remains crisp")
+	require.Equal(t, bottomBar, client.Frame.At(0, 24), "bottom chrome remains crisp")
+
+	d.handleInput(sess, ac, []byte("\x1b"))
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	require.Equal(t, undimmed, client.Frame.At(0, 1), "full redraw restores pane rune and style")
+	require.Equal(t, topBar, client.Frame.At(0, 0))
+	require.Equal(t, bottomBar, client.Frame.At(0, 24))
+}
 
 // --- test doubles -----------------------------------------------------------
 
