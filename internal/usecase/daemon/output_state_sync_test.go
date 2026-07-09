@@ -28,17 +28,22 @@ func (t *datagramTestTransport) Recv() (ports.Frame, error) {
 	}
 	return f, nil
 }
-func (t *datagramTestTransport) Close() error       { t.once.Do(func() { close(t.recv) }); return nil }
-func (t *datagramTestTransport) DatagramTransport() {}
+func (t *datagramTestTransport) Close() error { t.once.Do(func() { close(t.recv) }); return nil }
 
 func TestDatagramAttachAdvancesRendererOnlyOnAck(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
-	d, sess, old, _ := newManualSessionWithPTYs(t, p)
+	d, sess, _, _ := newManualSessionWithPTYs(t, p)
 	tr := newDatagramTestTransport()
-	ac, replaced := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{datagram: true})
-	require.Same(t, old, replaced)
-	defer d.detachReplacedClient(replaced)
+	routed, ac, err := d.route(ports.Hello{
+		Version:   ports.ProtocolVersion,
+		Intent:    ports.IntentAttach,
+		Name:      sess.name,
+		Size:      domain.Size{Cols: 80, Rows: 24},
+		AckOutput: true,
+	}, tr)
+	require.NoError(t, err)
+	require.Same(t, sess, routed)
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 	d.paint(sess, ac, false)

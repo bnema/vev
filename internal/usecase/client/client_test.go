@@ -151,6 +151,10 @@ func isType(typ ports.MsgType) any {
 	return mock.MatchedBy(func(f ports.Frame) bool { return f.Type == typ })
 }
 
+type datagramMarkedTransport struct{ ports.Transport }
+
+func (datagramMarkedTransport) DatagramTransport() {}
+
 func TestAttachHelloIncludesTrueColor(t *testing.T) {
 	t.Setenv("TERM", "xterm-256color")
 	t.Setenv("COLORTERM", "truecolor")
@@ -176,13 +180,14 @@ func TestAttachHelloIncludesTrueColor(t *testing.T) {
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, "")
+	err := client.Attach(context.Background(), datagramMarkedTransport{Transport: tr}, tm, realClock{}, ports.IntentEphemeral, "")
 	require.NoError(t, err)
 
 	select {
 	case hello := <-gotHello:
 		require.Equal(t, "xterm-256color", hello.TermEnv)
 		require.True(t, hello.TrueColor)
+		require.True(t, hello.AckOutput)
 	case <-time.After(2 * time.Second):
 		t.Fatal("hello frame was not sent")
 	}
