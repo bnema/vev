@@ -105,7 +105,7 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 	require.Equal(t, 12, frame.Width)
 	require.Equal(t, 5, frame.Height)
 	require.Equal(t, " 1          ", rowText(frame.Row(0)))
-	require.Contains(t, rowText(frame.Row(4)), "[VISUAL]")
+	require.Contains(t, rowText(frame.Row(4)), "[SCROLL]")
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
 }
 
@@ -131,8 +131,8 @@ func TestCopyModePaletteCommandEntersAndDoesNotForward(t *testing.T) {
 	out := awaitFrame(t, sends, ports.MsgOutput)
 	msg, err := ports.UnmarshalOutput(out.Payload)
 	require.NoError(t, err)
-	if got := string(msg.Data); !strings.Contains(got, "[VISUAL]") || strings.Contains(got, "[COPY]") {
-		t.Fatalf("visual mode paint = %q, want [VISUAL] without [COPY]", got)
+	if got := string(msg.Data); !strings.Contains(got, "[SCROLL]") || strings.Contains(got, "[SELECT]") || strings.Contains(got, "[COPY]") {
+		t.Fatalf("passive scrollback paint = %q, want [SCROLL] without [SELECT]/[COPY]", got)
 	}
 
 	d.handleInput(sess, ac, []byte(" "))

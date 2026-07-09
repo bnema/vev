@@ -194,9 +194,9 @@ Tabs hold pane layouts. Panes can be split left/right/up/down, stacked, focused 
 
 The top bar shows numbered tabs. The bottom bar shows the active session followed by recent sessions, fading toward older entries. Ephemeral sessions are marked with `*`, for example `0*`.
 
-## Visual mode and copy
+## Scrollback mode and copy
 
-Visual mode freezes a view over history while the program keeps running underneath. Enter it with the `VIS` palette command or by scrolling up with the mouse wheel.
+Scrollback mode freezes a view over history while the program keeps running underneath. Enter it with the `VIS` palette command or by scrolling up with the mouse wheel. Passive browsing is labeled `[SCROLL]`; selecting lines changes the status to `[SELECT]`. Scrolling back to the bottom exits to the live pane.
 
 | Key | Action |
 |---|---|
@@ -207,7 +207,7 @@ Visual mode freezes a view over history while the program keeps running undernea
 | y or Enter | copy selection and exit |
 | q, Esc, Ctrl-C | exit without copying |
 
-Copy uses OSC 52 clipboard sequences when supported by your terminal.
+Copy uses OSC 52 clipboard sequences when supported by your terminal. After a successful copy, the bottom bar briefly shows `copied N chars to clipboard`.
 
 ## Development
 

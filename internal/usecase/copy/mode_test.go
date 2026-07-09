@@ -213,14 +213,14 @@ func TestScrollbackModeStatusDistinguishesPassiveAndVisual(t *testing.T) {
 	m := NewMode(s)
 
 	frame := m.Render(s)
-	if got := frameText(frame.Row(s.Height)); !strings.Contains(got, "[VISUAL]") || !strings.Contains(got, "3/3") || strings.Contains(got, "[SCROLL]") || strings.Contains(got, "[SELECT]") {
-		t.Fatalf("passive status = %q, want [VISUAL] with N/M and no scroll/select label", got)
+	if got := frameText(frame.Row(s.Height)); !strings.Contains(got, "[SCROLL]") || !strings.Contains(got, "3/3") || strings.Contains(got, "[VISUAL]") || strings.Contains(got, "[SELECT]") {
+		t.Fatalf("passive status = %q, want [SCROLL] with N/M and no visual/select label", got)
 	}
 
 	m.ToggleSelection()
 	frame = m.Render(s)
-	if got := frameText(frame.Row(s.Height)); !strings.Contains(got, "[SELECT]") || !strings.Contains(got, "3/3") || strings.Contains(got, "[VISUAL]") {
-		t.Fatalf("selection status = %q, want [SELECT] with N/M and no [VISUAL]", got)
+	if got := frameText(frame.Row(s.Height)); !strings.Contains(got, "[SELECT]") || !strings.Contains(got, "3/3") || strings.Contains(got, "[SCROLL]") || strings.Contains(got, "[VISUAL]") {
+		t.Fatalf("selection status = %q, want [SELECT] with N/M and no passive label", got)
 	}
 }
 
