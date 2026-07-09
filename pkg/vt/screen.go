@@ -84,6 +84,7 @@ type Screen struct {
 	defaultFG          renderer.RGB
 	defaultBG          renderer.RGB
 	defaultColorsKnown bool
+	terminalTitle      string
 
 	damage     []renderer.Damage
 	escapeBuf  []byte
@@ -217,6 +218,9 @@ func (s *Screen) CursorVisible() bool {
 func (s *Screen) CursorStyle() (int, bool) { return s.cursorStyle, s.cursorStyleSet }
 func (s *Screen) MouseMode() (int, bool)   { return s.mouseMode, s.mouseSGR }
 func (s *Screen) AltScreenActive() bool    { return s.alternate != nil }
+
+// TerminalTitle returns the latest title set by OSC 0 or OSC 2.
+func (s *Screen) TerminalTitle() string { return s.terminalTitle }
 
 func (s *Screen) Write(data []byte) {
 	if len(s.escapeBuf) > 0 {
@@ -735,15 +739,19 @@ func appendOSCColorComponent(dst []byte, c uint8) []byte {
 }
 
 // handleOSC inspects a complete OSC payload (between "ESC ]" and its
-// terminator). Notification sequences (OSC 9, OSC 777 "notify") and clipboard
-// set requests (OSC 52) are acted on; titles and every other OSC are still
-// discarded.
+// terminator). Terminal titles, notification sequences (OSC 9, OSC 777
+// "notify"), and clipboard set requests (OSC 52) are acted on; every other OSC
+// is discarded.
 func (s *Screen) handleOSC(payload []byte) {
 	if len(payload) >= len("52;") && payload[0] == '5' && payload[1] == '2' && payload[2] == ';' {
 		s.handleOSC52(string(payload[len("52;"):]))
 		return
 	}
 	p := string(payload)
+	if selector, title, ok := strings.Cut(p, ";"); ok && (selector == "0" || selector == "2") {
+		s.terminalTitle = title
+		return
+	}
 	if p == "9;4" || strings.HasPrefix(p, "9;4;") {
 		s.handleProgress(p[len("9;4"):])
 		return
