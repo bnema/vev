@@ -574,6 +574,9 @@ func BenchmarkPaintCachedSinglePaneDamage(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		right.screen.Write([]byte("x\b"))
 		d.paint(sess, ac, false)
+		// Mirror the client ACK pump so the steady state measures compose→diff→send,
+		// not the ack-gate bailout after maxUnackedOutputStates frames.
+		ac.advanceOutputAck(ac.nextStateNum)
 	}
 }
 

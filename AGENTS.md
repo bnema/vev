@@ -12,7 +12,7 @@ make test
 go test ./internal/usecase/daemon -race -run TestName
 make lint
 make mocks
-go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc -bench=. -benchmem
+go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc ./internal/usecase/daemon -run '^$' -bench=. -benchmem
 ```
 
 - Format with **goimports**.
