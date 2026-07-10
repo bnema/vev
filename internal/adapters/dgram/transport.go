@@ -47,6 +47,7 @@ const (
 var (
 	ErrPendingFull = errors.New("dgram: pending reliable queue full")
 	ErrLinkDead    = errors.New("dgram: link dead")
+	errControlFull = errors.New("dgram: control queue full")
 )
 
 type Options struct {
@@ -183,6 +184,7 @@ type Transport struct {
 	sendWake               chan struct{}
 	control                chan controlRecord
 	ackWake                chan struct{}
+	ackSend                chan uint64
 	controlMu              sync.Mutex
 	ackSeq                 uint64
 	ackQueued              bool
@@ -191,6 +193,8 @@ type Transport struct {
 	outputQueue            []queuedSend
 	outputWake             chan struct{}
 	outputNext             time.Time
+	retransmitWork         chan []retransmitRecord
+	writeDeadlines         *writeDeadlineState
 
 	recvMu sync.Mutex
 	replay *pdgram.ReplayWindow
@@ -222,6 +226,62 @@ type pending struct {
 	initialInFlight bool
 	attempts        int
 	retransmitted   bool
+}
+
+type retransmitRecord struct {
+	seq uint64
+	f   ports.Frame
+}
+
+type writeDeadlineState struct {
+	mu        sync.Mutex
+	pc        net.PacketConn
+	nextID    uint64
+	deadlines map[uint64]time.Time
+}
+
+func newWriteDeadlineState(pc net.PacketConn) *writeDeadlineState {
+	return &writeDeadlineState{pc: pc, deadlines: make(map[uint64]time.Time)}
+}
+
+func (s *writeDeadlineState) begin(deadline time.Time) (func(), error) {
+	s.mu.Lock()
+	s.nextID++
+	id := s.nextID
+	s.deadlines[id] = deadline
+	if err := s.applyLocked(); err != nil {
+		delete(s.deadlines, id)
+		s.mu.Unlock()
+		return nil, err
+	}
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		delete(s.deadlines, id)
+		_ = s.applyLocked()
+		s.mu.Unlock()
+	}, nil
+}
+
+func (s *writeDeadlineState) applyLocked() error {
+	var earliest time.Time
+	for _, deadline := range s.deadlines {
+		if earliest.IsZero() || deadline.Before(earliest) {
+			earliest = deadline
+		}
+	}
+	return s.pc.SetWriteDeadline(earliest)
+}
+
+func (s *writeDeadlineState) expire(now time.Time) {
+	s.mu.Lock()
+	for id, deadline := range s.deadlines {
+		if !deadline.After(now) {
+			delete(s.deadlines, id)
+		}
+	}
+	_ = s.applyLocked()
+	s.mu.Unlock()
 }
 
 func NewTransport(pc net.PacketConn, peer net.Addr, key []byte, sendDir, recvDir uint32) (*Transport, error) {
@@ -275,17 +335,24 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 	t.sendWake = make(chan struct{})
 	t.control = make(chan controlRecord, controlQueueSize)
 	t.ackWake = make(chan struct{}, 1)
+	t.ackSend = make(chan uint64, 1)
 	t.outputWake = make(chan struct{})
+	t.writeDeadlines = newWriteDeadlineState(pc)
+	// One queued batch bounds retransmit work while its sole sender is paced.
+	t.retransmitWork = make(chan []retransmitRecord, 1)
 	if t.observe != nil {
 		t.diagnosticCh = make(chan Diagnostic, diagnosticBufferSize)
 		go t.diagnosticLoop()
 	}
 	t.deliverCond = sync.NewCond(&t.deliverMu)
 	go t.readLoop(pc)
-	go t.resendLoop()
+	go t.retransmitLoop()
 	go t.heartbeatLoop()
+	go t.healthLoop()
+	go t.retransmitSenderLoop()
 	go t.deliveryLoop()
 	go t.controlLoop()
+	go t.ackSendLoop()
 	go t.outputPaceLoop()
 	t.emitDiagnostic()
 	return t, nil
@@ -517,22 +584,30 @@ func (t *Transport) Probe(ctx context.Context) error {
 		return err
 	}
 	defer t.unregisterProbe(id)
-	if err := t.sendProbe(recProbe, id); err != nil {
-		return err
+	sendResult := make(chan error, 1)
+	if !t.queueControlRecord(controlRecord{kind: recProbe, id: id, result: sendResult}) {
+		return errControlFull
 	}
-	select {
-	case <-ch:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.done:
-		t.mu.Lock()
-		err := t.closeErr
-		t.mu.Unlock()
-		if err != nil {
-			return err
+	for {
+		select {
+		case err := <-sendResult:
+			if err != nil {
+				return err
+			}
+			sendResult = nil
+		case <-ch:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.done:
+			t.mu.Lock()
+			err := t.closeErr
+			t.mu.Unlock()
+			if err != nil {
+				return err
+			}
+			return errors.New("dgram: closed")
 		}
-		return errors.New("dgram: closed")
 	}
 }
 
@@ -567,12 +642,6 @@ func (t *Transport) sendAck(seq uint64) {
 	b[0] = recAck
 	binary.BigEndian.PutUint64(b[1:], seq)
 	_ = t.sendPayload(b[:], false, 0)
-}
-func (t *Transport) sendProbe(kind byte, id uint64) error {
-	var b [9]byte
-	b[0] = kind
-	binary.BigEndian.PutUint64(b[1:], id)
-	return t.sendPayload(b[:], false, 0)
 }
 func (t *Transport) sendPayload(p []byte, paced bool, pendingSeq uint64) error {
 	if paced {
@@ -665,16 +734,35 @@ func (t *Transport) writePacket(pkt []byte, peer net.Addr) error {
 	t.mu.Lock()
 	pc := t.pc
 	writeTimeout := t.writeTimeout
+	writeDeadlines := t.writeDeadlines
 	t.mu.Unlock()
 
-	if writeTimeout > 0 {
-		if err := pc.SetWriteDeadline(t.clock.Now().Add(writeTimeout)); err != nil {
+	return t.writeDatagram(pc, peer, pkt, writeDeadlines, writeTimeout)
+}
+
+func (t *Transport) writeDatagram(pc net.PacketConn, peer net.Addr, pkt []byte, deadlines *writeDeadlineState, timeout time.Duration) error {
+	if timeout <= 0 {
+		_, err := pc.WriteTo(pkt, peer)
+		return err
+	}
+	ownDeadline := t.clock.Now().Add(timeout)
+	finish, err := deadlines.begin(ownDeadline)
+	if err != nil {
+		return err
+	}
+	defer finish()
+	for {
+		_, err = pc.WriteTo(pkt, peer)
+		if err == nil {
+			return nil
+		}
+		var timeoutErr interface{ Timeout() bool }
+		now := t.clock.Now()
+		if !errors.As(err, &timeoutErr) || !timeoutErr.Timeout() || !now.Before(ownDeadline) {
 			return err
 		}
-		defer func() { _ = pc.SetWriteDeadline(time.Time{}) }()
+		deadlines.expire(now)
 	}
-	_, err := pc.WriteTo(pkt, peer)
-	return err
 }
 
 func (t *Transport) nextCounter() uint64 { t.mu.Lock(); defer t.mu.Unlock(); t.ctr++; return t.ctr }
@@ -889,16 +977,52 @@ func (t *Transport) notifySendWaitersLocked() {
 	t.sendWake = make(chan struct{})
 }
 
-func (t *Transport) resendLoop() {
+func (t *Transport) retransmitLoop() {
 	resend := t.clock.NewTimer(t.resendAfter)
 	defer resend.Stop()
 	for {
 		select {
 		case <-resend.C():
-			t.resendPending()
+			t.queueRetransmits()
+			resend.Reset(t.resendAfter)
+		case <-t.done:
+			return
+		}
+	}
+}
+
+// healthLoop owns link-health timing so bulk retransmission cannot delay state
+// transitions or socket hopping.
+func (t *Transport) healthLoop() {
+	health := t.clock.NewTimer(t.resendAfter)
+	defer health.Stop()
+	for {
+		select {
+		case <-health.C():
 			t.checkSilence()
 			t.checkSendStall()
-			resend.Reset(t.resendAfter)
+			health.Reset(t.resendAfter)
+		case <-t.done:
+			return
+		}
+	}
+}
+
+func (t *Transport) retransmitSenderLoop() {
+	for {
+		select {
+		case batch := <-t.retransmitWork:
+			for _, r := range batch {
+				if err := t.sendData(r.seq, true, r.f); err == nil {
+					t.markPendingReady(r.seq, true)
+				} else {
+					t.mu.Lock()
+					if p := t.pending[r.seq]; p != nil {
+						p.initialInFlight = false
+					}
+					t.mu.Unlock()
+				}
+			}
 		case <-t.done:
 			return
 		}
@@ -919,13 +1043,36 @@ func (t *Transport) heartbeatLoop() {
 	}
 }
 
-func (t *Transport) resendPending() {
-	now := t.clock.Now()
-	var resend []struct {
-		seq uint64
-		f   ports.Frame
+func (t *Transport) queueRetransmits() {
+	// Do not mark records in-flight while the one-slot sender queue is full.
+	// There is one producer and the sender only consumes, so capacity cannot be
+	// lost after this check.
+	if len(t.retransmitWork) == cap(t.retransmitWork) {
+		return
 	}
+
+	now := t.clock.Now()
 	t.mu.Lock()
+	resend, emitDiagnostic := t.selectRetransmitsLocked(now)
+	t.mu.Unlock()
+
+	if len(resend) > 0 {
+		select {
+		case t.retransmitWork <- resend:
+		case <-t.done:
+			return
+		}
+	}
+	if emitDiagnostic {
+		t.emitDiagnostic()
+	}
+}
+
+// selectRetransmitsLocked deterministically reserves one bounded retransmit
+// turn. The caller must hold t.mu and performs all pacing and writes after
+// releasing it.
+func (t *Transport) selectRetransmitsLocked(now time.Time) ([]retransmitRecord, bool) {
+	resend := make([]retransmitRecord, 0, t.maxResendPerTick)
 	seqs := make([]uint64, 0, len(t.pending))
 	for seq := range t.pending {
 		seqs = append(seqs, seq)
@@ -946,16 +1093,19 @@ func (t *Transport) resendPending() {
 		p.retransmitted = true
 		t.retransmits++
 		emitDiagnostic = emitDiagnostic || t.retransmits%64 == 0
-		resend = append(resend, struct {
-			seq uint64
-			f   ports.Frame
-		}{seq, p.frame})
+		resend = append(resend, retransmitRecord{seq: seq, f: p.frame})
 		limit--
 	}
+	return resend, emitDiagnostic
+}
+
+// resendPending remains a synchronous test hook for retransmission selection
+// unit tests. Production timer paths use queueRetransmits and the sole sender.
+func (t *Transport) resendPending() {
+	now := t.clock.Now()
+	t.mu.Lock()
+	resend, _ := t.selectRetransmitsLocked(now)
 	t.mu.Unlock()
-	if emitDiagnostic {
-		t.emitDiagnostic()
-	}
 	for _, r := range resend {
 		if err := t.sendData(r.seq, true, r.f); err == nil {
 			t.markPendingReady(r.seq, true)
@@ -1038,6 +1188,7 @@ func (t *Transport) hopPacketConnOnce() {
 		return
 	}
 	t.pc = pc
+	t.writeDeadlines = newWriteDeadlineState(pc)
 	t.mu.Unlock()
 	go t.readLoop(pc)
 	_ = old.Close()

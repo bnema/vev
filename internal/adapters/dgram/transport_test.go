@@ -258,7 +258,7 @@ func TestOutputFirstSendIsPacedAndQueuedOutputsAreBatched(t *testing.T) {
 	if got := len(bPC.in); got != 1 {
 		t.Fatalf("immediate datagrams=%d, want only the first output sent before pacing timer", got)
 	}
-	waitForManualTimers(t, clk, 3)
+	waitForManualTimers(t, clk, 4)
 	clk.advance(defaultOutputPaceMinDelay)
 	eventuallyPacketCount(t, bPC, 3)
 	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")}); err != nil {
@@ -289,7 +289,7 @@ func TestOutputPacingSendsAtMostOneOversizedFramePerTick(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	waitForManualTimers(t, clk, 3)
+	waitForManualTimers(t, clk, 4)
 	previousPackets := len(aPC.in)
 	for tick := 0; tick < 128; tick++ {
 		clk.advance(defaultOutputPaceMaxDelay)
@@ -486,7 +486,7 @@ func TestInputWaitsForDequeuedOutputBatch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	waitForManualTimers(t, clk, 3)
+	waitForManualTimers(t, clk, 4)
 	a.writeMu.Lock()
 	clk.advance(defaultOutputPaceMinDelay)
 	deadline := time.Now().Add(time.Second)
@@ -554,7 +554,7 @@ func TestPacedControlQueueFailureClosesTransport(t *testing.T) {
 		defer a.mu.Unlock()
 		return len(a.outputQueue) == 2
 	})
-	waitForManualTimers(t, clk, 3)
+	waitForManualTimers(t, clk, 4)
 	clk.advance(defaultOutputPaceMinDelay)
 	if err := <-inputDone; err == nil {
 		t.Fatal("queued control send succeeded after paced wire failure")
@@ -636,7 +636,7 @@ func TestOutputPaceFailureClosesTransportWithWriteError(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	waitForManualTimers(t, clk, 3)
+	waitForManualTimers(t, clk, 4)
 	if err := bPC.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -675,7 +675,7 @@ func TestInputAndControlRemainOrderedInBoundedPacedQueue(t *testing.T) {
 	if got := len(bPC.in); got != 1 {
 		t.Fatalf("datagrams after input=%d, want prerequisites and input still paced", got)
 	}
-	waitForManualTimers(t, clk, 3)
+	waitForManualTimers(t, clk, 4)
 	clk.advance(defaultOutputPaceMinDelay)
 	eventuallyPacketCount(t, bPC, 3)
 	if err := <-inputDone; err != nil {
@@ -1419,7 +1419,7 @@ func TestPendingReliableQueueReturnsErrPendingFullWhileConnected(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("second")}) }()
-	waitForManualTimers(t, clk, 3)
+	waitForManualTimers(t, clk, 4)
 
 	clk.advance(50 * time.Millisecond)
 	select {

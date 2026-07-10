@@ -308,7 +308,7 @@ func TestTransportFloodClassification(t *testing.T) {
 		}
 	})
 
-	t.Run("fresh output and large retransmits synchronously delay heartbeat health work", func(t *testing.T) {
+	t.Run("control stays responsive while fresh output and large retransmits contend", func(t *testing.T) {
 		clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
 		aPC, bPC := newPair()
 		inspect, err := pdgram.NewCodec(key())
@@ -380,7 +380,7 @@ func TestTransportFloodClassification(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer closeFloodTransports(a, b)
-		for range 4 { // Both transports install resend and heartbeat timers.
+		for range 6 { // Both transports install retransmit, health, and heartbeat timers.
 			awaitSignal(t, clk.timerCreated, "transport timer creation")
 		}
 
@@ -399,12 +399,11 @@ func TestTransportFloodClassification(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		for range 2 {
-			awaitSignal(t, acksDropped, "dropped cumulative ACK")
-		}
+		awaitSignal(t, clk.timerCreated, "ACK coalescing timer creation")
+		clk.advance(maxACKDelay)
+		awaitSignal(t, acksDropped, "dropped cumulative ACK")
 
-		clk.advance(10 * time.Millisecond)
-		awaitSignal(t, retransmitBlocked, "retransmit pacing barrier") // resendPending is synchronously inside writePacket.
+		awaitSignal(t, retransmitBlocked, "retransmit pacing barrier")
 		if got := floodState(a).retransmits; got < 2 {
 			t.Fatalf("retransmits=%d, want both overdue large records selected", got)
 		}
@@ -433,18 +432,17 @@ func TestTransportFloodClassification(t *testing.T) {
 		default:
 		}
 
-		clk.advance(time.Millisecond)
-		select {
-		case <-probeSent:
-			t.Fatal("heartbeat probe ran while fresh and retransmitted large output contended")
-		default:
-		}
+		awaitSignal(t, probeSent, "heartbeat probe during output contention")
 
 		close(releaseRetransmit)
 		if err := awaitResult(t, freshReturned, "fresh output completion"); err != nil {
 			t.Fatal(err)
 		}
-		awaitSignal(t, probeSent, "heartbeat probe")
+		eventually(t, time.Second, func() bool {
+			writesMu.Lock()
+			defer writesMu.Unlock()
+			return writes[1] >= 2 && writes[2] >= 2
+		})
 		writesMu.Lock()
 		defer writesMu.Unlock()
 		if writes[1] < 2 || writes[2] < 2 || writes[3] == 0 {
