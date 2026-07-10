@@ -31,7 +31,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
-	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/internal/usecase/visualsearch"
@@ -40,22 +39,24 @@ import (
 
 var copySearchModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Search ", Anchor: ui.AnchorBottom, BottomMargin: 1}
 
+func copyTargetPane(rt *overlayRuntime) *pane {
+	if rt == nil {
+		return nil
+	}
+	rt.copyMu.Lock()
+	defer rt.copyMu.Unlock()
+	return rt.copyPane
+}
+
 func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 	rt := ac.overlays
-	tb := sess.activeTab()
-	if tb == nil {
-		return
-	}
-
-	tb.mu.Lock()
-	p := tb.focusedPane()
-	tb.mu.Unlock()
+	p := copyTargetPane(rt)
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
 	rt.copyMu.Lock()
-	if rt.copyMode == nil {
+	if rt.copyMode == nil || rt.copyPane != p {
 		rt.copyMu.Unlock()
 		p.mu.Unlock()
 		return
@@ -86,7 +87,8 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 		return
 	}
 	tb.mu.Lock()
-	p := tb.focusedPane()
+	p := tb.terminalTargetLocked()
+	floatingSource := tb.floating.state == floatingVisible && tb.floating.pane == p
 	tb.mu.Unlock()
 	if p == nil {
 		return
@@ -96,12 +98,21 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	p.mu.Unlock()
 	rt.copyMu.Lock()
 	rt.copyMode = scopy.NewMode(snap)
+	rt.copyPane = p
 	rt.copySearch = nil
 	rt.copySearchPending = nil
 	rt.copyPressRowValid = false
 	rt.copyDragging = false
 	rt.normalMousePressValid = false
 	rt.copyMu.Unlock()
+	if floatingSource {
+		tb.mu.Lock()
+		stillVisible := tb.floating.state == floatingVisible && tb.floating.pane == p
+		tb.mu.Unlock()
+		if !stillVisible {
+			rt.clearCopyModeForPane(p)
+		}
+	}
 	d.paint(sess, ac, true)
 }
 
@@ -110,14 +121,7 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
 	if ev.Button != mouse.Left {
 		return
 	}
-	tb := sess.activeTab()
-	if tb == nil {
-		return
-	}
-
-	tb.mu.Lock()
-	p := tb.focusedPane()
-	tb.mu.Unlock()
+	p := copyTargetPane(rt)
 	if p == nil {
 		return
 	}
@@ -133,7 +137,7 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
 		return
 	}
 	rt.copyMu.Lock()
-	if rt.copyMode == nil {
+	if rt.copyMode == nil || rt.copyPane != p {
 		rt.copyMu.Unlock()
 		p.mu.Unlock()
 		return
@@ -175,20 +179,13 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	if sess == nil {
 		return
 	}
-	tb := sess.activeTab()
-	if tb == nil {
-		return
-	}
-
-	tb.mu.Lock()
-	p := tb.focusedPane()
-	tb.mu.Unlock()
+	p := copyTargetPane(rt)
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
 	rt.copyMu.Lock()
-	if rt.copyMode == nil {
+	if rt.copyMode == nil || rt.copyPane != p {
 		rt.copyPending = nil
 		d.stopCopyPendingTimerLocked(ac)
 		rt.copyMu.Unlock()
@@ -420,36 +417,27 @@ func composeCopySearchClientFrame(model *visualsearch.Model, base renderer.Frame
 	return composeModalClientFrame(base, copySearchModal, styleSet, styleSet.selection, model.Render)
 }
 
-func composeCopyClientFrame(mode *scopy.Mode, tb *tab, bars barState) (renderer.Frame, []renderer.Damage) {
-	styles := newThemeStyles(bars.theme)
-	p := tb.focusedPane()
-	if p == nil {
-		return renderer.NewFrame(0, 0), nil
+func composeCopyClientFrame(mode *scopy.Mode, p *pane, target domain.Rect, frame renderer.Frame, bars barState) (renderer.Frame, []renderer.Damage) {
+	if mode == nil || p == nil || target.Width <= 0 || target.Height <= 0 || frame.Width <= 0 || frame.Height <= 0 {
+		return frame, nil
 	}
+	styles := newThemeStyles(bars.theme)
 	p.mu.Lock()
-	paneFrame := p.screen.Frame
-	paneWidth, paneRows := paneFrame.Width, paneFrame.Height
-	snap := scopy.NewSnapshot(p.scrollback, paneFrame)
+	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
 	p.mu.Unlock()
 	copyFrame := mode.Render(snap, styles.copyStatus, styles.selection)
-	pl, ok := focusedPlacementLocked(tb)
-	if !ok {
-		pl = layout.Placement{Content: domain.Rect{Width: paneWidth, Height: paneRows}}
+	bodyRows := max(copyFrame.Height-1, 0)
+	for y := 0; y < target.Height && y < bodyRows && target.Y+y < frame.Height-1; y++ {
+		dstX := max(target.X, 0)
+		srcX := max(-target.X, 0)
+		width := min(target.Width-srcX, copyFrame.Width-srcX)
+		width = min(width, frame.Width-dstX)
+		if width > 0 && target.Y+y >= 0 {
+			copy(frame.Row(target.Y + y)[dstX:dstX+width], copyFrame.Row(y)[srcX:srcX+width])
+		}
 	}
-	width, screenRows := paneWidth, paneRows
-	if len(tb.panes) > 1 && tb.size.Valid() {
-		width, screenRows = tb.size.Cols, tb.size.Rows
-	}
-	frame := renderer.NewFrame(width, screenRows+2)
-	drawTopBarSnapshot(frame.Row(0), bars.status, bars.attentionFrame, bars.topRight, styles)
-	base, _ := composeTabFrame(tb, domain.Rect{Width: width, Height: screenRows}, bars.theme)
-	for y := range screenRows {
-		copy(frame.Row(y+1), base.Row(y))
-	}
-	for y := 0; y < pl.Content.Height && y < copyFrame.Height-1; y++ {
-		copy(frame.Row(pl.Content.Y + 1 + y)[pl.Content.X:pl.Content.X+min(pl.Content.Width, copyFrame.Width)], copyFrame.Row(y)[:min(pl.Content.Width, copyFrame.Width)])
-	}
-	statusY := screenRows + 1
-	copy(frame.Row(statusY), copyFrame.Row(copyFrame.Height - 1)[:min(width, copyFrame.Width)])
+	statusY := frame.Height - 1
+	clear(frame.Row(statusY))
+	copy(frame.Row(statusY), copyFrame.Row(copyFrame.Height - 1)[:min(frame.Width, copyFrame.Width)])
 	return frame, []renderer.Damage{renderer.FullRedraw()}
 }

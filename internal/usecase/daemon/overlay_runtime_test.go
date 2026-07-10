@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/domain"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	promptui "github.com/bnema/vev/internal/usecase/prompt"
 	"github.com/bnema/vev/internal/usecase/visualsearch"
@@ -142,4 +143,26 @@ func TestOverlayRuntimeHandleInputInactive(t *testing.T) {
 	ac.initOverlays()
 
 	require.False(t, ac.overlays.HandleInput(&Daemon{}, []byte("x")))
+}
+
+func TestOverlayRuntimeSnapshotCarriesCopyPaneAndClearReleasesIt(t *testing.T) {
+	ac := &attachedClient{}
+	ac.initOverlays()
+	p := newPane("floating", nil, domain.Size{Cols: 4, Rows: 2})
+	snap := scopy.Snapshot{Rows: [][]renderer.Cell{testRow("row")}, Width: 4, Height: 2}
+
+	ac.overlays.copyMu.Lock()
+	ac.overlays.copyMode = scopy.NewMode(snap)
+	ac.overlays.copyPane = p
+	ac.overlays.copyMu.Unlock()
+
+	renderSnap := ac.overlays.SnapshotForRender()
+	require.Same(t, p, renderSnap.copyPane)
+	renderSnap.Unlock()
+
+	ac.overlays.copyMu.Lock()
+	ac.overlays.clearCopyModeLocked()
+	require.Nil(t, ac.overlays.copyPane)
+	require.Nil(t, ac.overlays.copyMode)
+	ac.overlays.copyMu.Unlock()
 }

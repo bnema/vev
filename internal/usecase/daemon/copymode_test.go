@@ -17,6 +17,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -107,6 +108,9 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	mode := scopy.NewMode(snap)
 	bars := barState{status: sess.statusSegments()}
 
+	base := renderer.NewFrame(80, 25)
+	target := domain.Rect{X: 0, Y: 1, Width: 80, Height: 23}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -120,9 +124,7 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 200 {
-			tb.mu.Lock()
-			_, _ = composeCopyClientFrame(mode, tb, bars)
-			tb.mu.Unlock()
+			_, _ = composeCopyClientFrame(mode, pane, target, base, bars)
 		}
 	}()
 	wg.Wait()
@@ -139,12 +141,15 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 	snap := scopy.NewSnapshot(tb.focusedPane().scrollback, tb.focusedPane().screen.Frame)
 	mode := scopy.NewMode(snap)
 
-	frame, damage := composeCopyClientFrame(mode, tb, barState{status: sess.statusSegments()})
+	bars := barState{status: sess.statusSegments()}
+	base, _ := composeClientFrameWithState(bars, tb, true)
+	frame, damage := composeCopyClientFrame(mode, tb.focusedPane(), domain.Rect{X: 0, Y: 1, Width: 12, Height: 3}, base, bars)
 
-	require.Equal(t, 12, frame.Width)
-	require.Equal(t, 5, frame.Height)
-	require.Equal(t, " 1          ", rowText(frame.Row(0)))
-	require.Contains(t, rowText(frame.Row(4)), "[SCROLL]")
+	require.Equal(t, 80, frame.Width)
+	require.Equal(t, 25, frame.Height)
+	require.Equal(t, " 1", strings.TrimRight(rowText(frame.Row(0)), " "))
+	require.Contains(t, rowText(frame.Row(1)), "live")
+	require.Contains(t, rowText(frame.Row(24)), "[SCROLL]")
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
 }
 
@@ -635,4 +640,153 @@ func TestCursorTailHidesInCopyMode(t *testing.T) {
 	d.enterCopyMode(sess, ac)
 	data := mustOutputData(t, sends)
 	require.Contains(t, string(data), "\x1b[?25l")
+}
+
+func installFloatingCopyFixture(t *testing.T, d *Daemon, sess *session, size domain.Size) *pane {
+	t.Helper()
+	floatingPTY, releaseFloating := newBlockingPTY(t)
+	t.Cleanup(releaseFloating)
+	fp := newPane("floating", floatingPTY, size)
+	installTestFloating(sess.activeTab(), fp, true)
+	return fp
+}
+
+func TestCopyModeCapturesSourceAndRetainsItAcrossFocusMove(t *testing.T) {
+	cases := []struct {
+		name        string
+		useFloating bool
+		wantText    string
+	}{
+		{name: "floating source", useFloating: true, wantText: "flt-old\nflt-live"},
+		{name: "normal source", useFloating: false, wantText: "one-old\none-live"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			normalWrites := make(chan []byte, 1)
+			normal, releaseNormal := newBlockingPTYWithWrites(t, normalWrites)
+			defer releaseNormal()
+			d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
+			tb := sess.activeTab()
+			second := newPane("pane-2", nil, domain.Size{Cols: 40, Rows: 5})
+			tb.mu.Lock()
+			tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+			tb.panes["pane-2"] = second
+			tb.mu.Unlock()
+			main := tb.focusedPane()
+			var want *pane
+			if tc.useFloating {
+				want = installFloatingCopyFixture(t, d, sess, domain.Size{Cols: 20, Rows: 3})
+				want.scrollback.Append(testRow("flt-old"))
+				want.screen.Write([]byte("flt-live"))
+			} else {
+				want = main
+				want.scrollback.Append(testRow("one-old"))
+				want.screen.Write([]byte("one-live"))
+			}
+
+			d.enterCopyMode(sess, ac)
+			awaitFrame(t, sends, ports.MsgOutput)
+			ac.overlays.copyMu.Lock()
+			captured := ac.overlays.copyPane
+			ac.overlays.copyMu.Unlock()
+			require.Same(t, want, captured)
+
+			tb.mu.Lock()
+			focusPlacementLocked(tb, "pane-2")
+			tb.mu.Unlock()
+
+			d.handleInput(sess, ac, []byte{'g', ' ', 'j', 'y'})
+			out := awaitFrame(t, sends, ports.MsgOutput)
+			msg, err := ports.UnmarshalOutput(out.Payload)
+			require.NoError(t, err)
+			wantOSC := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(tc.wantText)) + "\x07"
+			require.Equal(t, wantOSC, string(msg.Data))
+			require.Nil(t, ac.overlays.copyMode)
+			select {
+			case got := <-normalWrites:
+				t.Fatalf("copy-mode input forwarded to normal PTY: %q", got)
+			default:
+			}
+		})
+	}
+}
+
+func TestFloatingCopyModeWheelUsesCapturedSnapshot(t *testing.T) {
+	normal, releaseNormal := newBlockingPTY(t)
+	defer releaseNormal()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
+	fp := installFloatingCopyFixture(t, d, sess, domain.Size{Cols: 20, Rows: 3})
+	for i := range 30 {
+		fp.scrollback.Append(testRow(fmt.Sprintf("old-%02d", i)))
+	}
+	fp.screen.Write([]byte("live"))
+	fp.mu.Lock()
+	total := len(scopy.NewSnapshot(fp.scrollback, fp.screen.Frame).Rows)
+	fp.mu.Unlock()
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Equal(t, total-1, ac.overlays.copyMode.Cursor)
+
+	d.copyWheel(sess, ac, -3)
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Equal(t, total-4, ac.overlays.copyMode.Cursor)
+
+	d.copyWheel(sess, ac, 3)
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Nil(t, ac.overlays.copyMode, "wheel down reaching the captured bottom exits copy mode")
+}
+
+func TestFloatingCopyModeMouseSelectsFloatingRows(t *testing.T) {
+	normal, releaseNormal := newBlockingPTY(t)
+	defer releaseNormal()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
+	fp := installFloatingCopyFixture(t, d, sess, domain.Size{Cols: 20, Rows: 3})
+	for i := range 5 {
+		fp.scrollback.Append(testRow(fmt.Sprintf("old-%d", i)))
+	}
+	fp.screen.Write([]byte("live"))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	viewportTop := ac.overlays.copyMode.ViewportTop
+	inner := calculateFloatingGeometry(domain.Rect{Width: 80, Height: 23}, d.currentFloatingConfig()).Inner
+
+	press := fmt.Sprintf("\x1b[<0;%d;%dM", inner.X+3, inner.Y+2)
+	d.handleInput(sess, ac, []byte(press))
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Equal(t, viewportTop+1, ac.overlays.copyMode.Cursor)
+
+	motion := fmt.Sprintf("\x1b[<32;%d;%dM", inner.X+3, inner.Y+3)
+	d.handleInput(sess, ac, []byte(motion))
+	awaitFrame(t, sends, ports.MsgOutput)
+	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
+	require.True(t, ok)
+	require.Equal(t, viewportTop+1, lo)
+	require.Equal(t, viewportTop+2, hi)
+}
+
+func TestFloatingExitClearsCopyModeBeforeRepaint(t *testing.T) {
+	normal, releaseNormal := newBlockingPTY(t)
+	defer releaseNormal()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
+	tb := sess.activeTab()
+	fp := installFloatingCopyFixture(t, d, sess, domain.Size{Cols: 20, Rows: 3})
+	fp.screen.Write([]byte("flt-live"))
+
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	tb.mu.Lock()
+	generation := tb.floating.generation
+	tb.mu.Unlock()
+
+	d.reapFloating(sess, tb, fp, generation)
+
+	ac.overlays.copyMu.Lock()
+	require.Nil(t, ac.overlays.copyMode)
+	require.Nil(t, ac.overlays.copyPane)
+	ac.overlays.copyMu.Unlock()
+	data := mustOutputData(t, sends)
+	require.NotContains(t, string(data), "[SCROLL]")
+	require.NotContains(t, string(data), "flt-live")
 }

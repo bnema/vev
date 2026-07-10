@@ -74,6 +74,27 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 		if rt.copySearchActive() {
 			return
 		}
+		copyPane := copyTargetPane(rt)
+		tb.mu.Lock()
+		floatingPane, geometry, floatingVisible := tb.visibleFloatingSnapshotLocked(d.currentFloatingConfig())
+		floatingCopy := floatingVisible && copyPane == floatingPane
+		tb.mu.Unlock()
+		if floatingCopy {
+			contentRow := ev.Row - 1
+			if !pointInRect(ev.Col, contentRow, geometry.Inner) {
+				return
+			}
+			ev = translateMouseEvent(ev, geometry.Inner.X, geometry.Inner.Y)
+			switch ev.Button {
+			case mouse.Left:
+				d.copyMouse(sess, ac, ev)
+			case mouse.WheelUp:
+				d.copyWheel(sess, ac, -3)
+			case mouse.WheelDown:
+				d.copyWheel(sess, ac, 3)
+			}
+			return
+		}
 		if ev.Button == mouse.Left {
 			contentRow := ev.Row - 1
 			tb.mu.Lock()

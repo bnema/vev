@@ -275,6 +275,30 @@ func (d *Daemon) render(sess *session, tb *tab, p *pane) {
 // paint draws the composed client frame (active tab plus status bar) and
 // sends the resulting bytes. The renderer shadow is reset on explicit invalidations
 // such as switch/create/close/rename/resize so the repaint is complete.
+// copyTargetRectLocked maps a captured copy source into the already-composed
+// client frame. The caller holds tb.mu, preserving the layout/floating
+// snapshot while the rectangle is chosen.
+func copyTargetRectLocked(tb *tab, layoutSnap tabLayoutSnapshot, contentArea domain.Rect, p, floating *pane, hasFloating bool, cfg domain.FloatingConfig) domain.Rect {
+	if p == nil {
+		return domain.Rect{}
+	}
+	if hasFloating && p == floating {
+		return calculateFloatingGeometry(contentArea, cfg).Inner
+	}
+	for _, placement := range layoutSnap.placements {
+		if placement.ID == p.id && !placement.Collapsed {
+			r := placement.Content
+			r.X += contentArea.X
+			r.Y += contentArea.Y
+			return r
+		}
+	}
+	p.mu.Lock()
+	width, height := p.screen.Frame.Width, p.screen.Frame.Height
+	p.mu.Unlock()
+	return domain.Rect{X: contentArea.X, Y: contentArea.Y, Width: min(width, contentArea.Width), Height: min(height, contentArea.Height)}
+}
+
 func titleBarPaneIDs(placements []layout.Placement, ok bool) []layout.PaneID {
 	if !ok {
 		return nil
@@ -367,18 +391,23 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	} else {
 		frame, damage = composeClientFrameWithLayoutCachedConsumeDamage(bars, tb, reset, layoutSnap, &ac.bars, &ac.composed)
 	}
-	if overlays.copyActive {
-		frame, damage = composeCopyClientFrame(overlays.copyMode, tb, bars)
-	}
 	contentArea := domain.Rect{Y: 1, Width: frame.Width, Height: max(0, frame.Height-2)}
-	// Palette dimming belongs below both the popup and the palette itself.
-	// The floating backdrop is canonical and deliberately only dims pane
-	// contents, leaving normal chrome and the popup crisp.
-	if overlays.paletteActive && !hasFloating {
-		(overlayBackdrop{DimPaneContents: true}).apply(frame, contentArea, layoutSnap, bars.theme)
-	}
 	if hasFloating {
 		frame, damage = composeFloatingFrame(frame, damage, floating, tb.floating.generation, contentArea, d.currentFloatingConfig(), layoutSnap, bars.theme, &ac.composed, reset || overlayActive)
+	}
+	if overlays.copyActive {
+		copyPane := overlays.copyPane
+		if copyPane == nil {
+			copyPane = p
+		}
+		copyTarget := copyTargetRectLocked(tb, layoutSnap, contentArea, copyPane, floating, hasFloating, d.currentFloatingConfig())
+		frame, damage = composeCopyClientFrame(overlays.copyMode, copyPane, copyTarget, frame, bars)
+	}
+	// A palette above normal/copy content dims that composed content. When a
+	// floating pane is present its own backdrop already dims normal pane
+	// contents; applying the palette backdrop here would also dim the popup.
+	if overlays.paletteActive && !hasFloating {
+		(overlayBackdrop{DimPaneContents: true}).apply(frame, contentArea, layoutSnap, bars.theme)
 	}
 	if overlays.copySearchModel != nil {
 		frame, damage = composeCopySearchClientFrame(overlays.copySearchModel, frame, styles)

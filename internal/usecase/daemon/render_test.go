@@ -1423,3 +1423,78 @@ func TestHistoryNavBottomBar(t *testing.T) {
 		require.True(t, row[docsCol].Style.Equal(styles.accent))
 	})
 }
+
+func TestComposeCopyClientFrameOverlaysBaseAtTarget(t *testing.T) {
+	base := renderer.NewFrame(20, 8)
+	for y := range base.Height {
+		for x := range base.Width {
+			base.Set(x, y, renderer.Cell{Rune: '#', Style: renderer.DefaultStyle()})
+		}
+	}
+	p := newPane("floating", nil, domain.Size{Cols: 18, Rows: 2})
+	p.screen.Write([]byte("ab\r\ncd"))
+	mode := scopy.NewMode(scopy.NewSnapshot(p.scrollback, p.screen.Frame))
+	target := domain.Rect{X: 2, Y: 3, Width: 18, Height: 2}
+
+	frame, damage := composeCopyClientFrame(mode, p, target, base, barState{})
+
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+	require.Equal(t, "##ab                ", rowText(frame.Row(3)))
+	require.Equal(t, "##cd                ", rowText(frame.Row(4)))
+	require.Equal(t, strings.Repeat("#", 20), rowText(frame.Row(2)))
+	require.Equal(t, strings.Repeat("#", 20), rowText(frame.Row(5)))
+	require.Equal(t, strings.Repeat("#", 20), rowText(frame.Row(6)))
+	status := rowText(frame.Row(7))
+	require.Contains(t, status, "[SCROLL]")
+	require.NotContains(t, status, "#")
+}
+
+func TestCopyTargetRectLocked(t *testing.T) {
+	tb := newTab(nil, domain.Size{Cols: 80, Rows: 23})
+	cfg := domain.Defaults().Floating
+	contentArea := domain.Rect{Y: 1, Width: 80, Height: 23}
+	fp := newPane("floating", nil, domain.Size{Cols: 10, Rows: 4})
+	stray := newPane("stray", nil, domain.Size{Cols: 10, Rows: 4})
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	layoutSnap := solveTabLayoutLocked(tb)
+	main := tb.focusedPane()
+
+	cases := []struct {
+		name        string
+		pane        *pane
+		floating    *pane
+		hasFloating bool
+		want        domain.Rect
+	}{
+		{name: "floating source targets popup inner", pane: fp, floating: fp, hasFloating: true, want: calculateFloatingGeometry(contentArea, cfg).Inner},
+		{name: "normal source targets solved placement", pane: main, want: domain.Rect{X: 0, Y: 1, Width: 80, Height: 23}},
+		{name: "unplaced source falls back to pane frame", pane: stray, want: domain.Rect{X: 0, Y: 1, Width: 10, Height: 4}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, copyTargetRectLocked(tb, layoutSnap, contentArea, tc.pane, tc.floating, tc.hasFloating, cfg))
+		})
+	}
+}
+
+func TestPaintComposesCopyBodyAboveFloating(t *testing.T) {
+	normal, releaseNormal := newBlockingPTY(t)
+	floatingPTY, releaseFloating := newBlockingPTY(t)
+	defer releaseNormal()
+	defer releaseFloating()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
+	fp := newPane("floating", floatingPTY, domain.Size{Cols: 20, Rows: 3})
+	fp.scrollback.Append(testRow("flt-old"))
+	fp.screen.Write([]byte("flt-live"))
+	installTestFloating(sess.activeTab(), fp, true)
+
+	d.enterCopyMode(sess, ac)
+	data := mustOutputData(t, sends)
+	require.Contains(t, string(data), "[SCROLL]")
+	require.Contains(t, string(data), "\x1b[?25l")
+
+	d.handleInput(sess, ac, []byte("g"))
+	data = mustOutputData(t, sends)
+	require.Contains(t, string(data), "lt-old", "copy viewport of the captured floating pane must compose above the popup")
+}

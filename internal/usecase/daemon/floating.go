@@ -357,13 +357,12 @@ func (d *Daemon) reapFloating(sess *session, tb *tab, p *pane, generation uint64
 		return
 	}
 	closeFloatingPane(p)
-	if visible {
-		sess.mu.Lock()
-		ac := sess.client
-		sess.mu.Unlock()
-		if ac != nil {
-			d.paint(sess, ac, true)
-		}
+	sess.mu.Lock()
+	ac := sess.client
+	sess.mu.Unlock()
+	copyCleared := ac != nil && ac.overlays.clearCopyModeForPane(p)
+	if ac != nil && (visible || copyCleared) {
+		d.paint(sess, ac, true)
 	}
 }
 
