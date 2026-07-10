@@ -125,6 +125,20 @@ func (tb *tab) terminalTargetLocked() *pane {
 	return tb.focusedPane()
 }
 
+// visibleFloatingSnapshotLocked captures the visible popup and its current
+// geometry under the tab lock, so input cannot mix a pane from one state with
+// coordinates from another. The caller must hold tb.mu.
+func (tb *tab) visibleFloatingSnapshotLocked(cfg domain.FloatingConfig) (*pane, floatingGeometry, bool) {
+	if tb == nil || tb.floating.state != floatingVisible || tb.floating.pane == nil {
+		return nil, floatingGeometry{}, false
+	}
+	geometry := calculateFloatingGeometry(domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}, cfg)
+	if geometry.Inner.Width <= 0 || geometry.Inner.Height <= 0 {
+		return nil, floatingGeometry{}, false
+	}
+	return tb.floating.pane, geometry, true
+}
+
 // ensureFloatingWarm starts the background prewarm exactly once for a tab.
 func (d *Daemon) ensureFloatingWarm(sess *session, tb *tab) {
 	if d == nil || sess == nil || tb == nil || d.ptys == nil {

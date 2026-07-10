@@ -120,6 +120,17 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 
 	tb.mu.Lock()
 	contentRow := ev.Row - 1
+	floating, floatingGeometry, floatingVisible := tb.visibleFloatingSnapshotLocked(d.currentFloatingConfig())
+	if floatingVisible {
+		if !pointInRect(ev.Col, contentRow, floatingGeometry.Inner) {
+			tb.mu.Unlock()
+			return
+		}
+		tb.mu.Unlock()
+		ev = translateMouseEvent(ev, floatingGeometry.Inner.X, floatingGeometry.Inner.Y)
+		d.handleTerminalMouse(sess, ac, floating, ev, true, true)
+		return
+	}
 	pl, hit := hitTestPlacementLocked(tb, ev.Col, contentRow)
 	multi := len(tb.panes) > 1
 	focusedID := layout.PaneID("")
@@ -177,6 +188,14 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 			return
 		}
 	}
+	d.handleTerminalMouse(sess, ac, p, ev, translated, hoveredFocused)
+}
+
+func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane, ev mouse.Event, translated, hoveredFocused bool) {
+	if p == nil {
+		return
+	}
+	rt := ac.overlays
 	p.mu.Lock()
 	childRows := p.screen.Frame.Height
 	mouseMode, mouseSGR := p.screen.MouseMode()
@@ -285,7 +304,9 @@ func (d *Daemon) writeToPane(sess *session, p *pane, data []byte) {
 	if _, err := p.pty.Write(data); err != nil {
 		name := ""
 		if sess != nil {
+			sess.mu.Lock()
 			name = sess.name
+			sess.mu.Unlock()
 		}
 		d.log.Error("pty write failed", "err", err, "session", name)
 	}
@@ -348,7 +369,7 @@ func (h daemonKeyHandler) Forward(data []byte) {
 		return
 	}
 	tb.mu.Lock()
-	p := tb.focusedPane()
+	p := tb.terminalTargetLocked()
 	tb.mu.Unlock()
 	h.d.writeToPane(sess, p, data)
 }

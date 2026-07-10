@@ -13,10 +13,29 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 )
+
+func TestInjectClipboardPathTargetsVisibleFloatingPane(t *testing.T) {
+	normalWrites := make(chan []byte, 1)
+	floatingWrites := make(chan []byte, 1)
+	normal, releaseNormal := newBlockingPTYWithWrites(t, normalWrites)
+	floatingPTY, releaseFloating := newBlockingPTYWithWrites(t, floatingWrites)
+	defer releaseNormal()
+	defer releaseFloating()
+	d, sess, _, _ := newManualSessionWithPTYs(t, normal)
+	floating := newPane("floating", floatingPTY, domain.Size{Cols: 20, Rows: 5})
+	floating.screen.Write([]byte("\x1b[?2004h"))
+	installTestFloating(sess.activeTab(), floating, true)
+
+	d.injectClipboardPath(sess, "/tmp/image.png")
+
+	requirePTYWrite(t, floatingWrites, []byte("\x1b[200~/tmp/image.png\x1b[201~"))
+	requireNoPTYWrite(t, normalWrites)
+}
 
 func TestHandleImagePushWritesFileWithExactBytesAndMode0600(t *testing.T) {
 	writes := make(chan []byte, 1)
