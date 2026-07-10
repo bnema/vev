@@ -1447,6 +1447,7 @@ func TestComposeCopyClientFrameOverlaysBaseAtTarget(t *testing.T) {
 	status := rowText(frame.Row(7))
 	require.Contains(t, status, "[SCROLL]")
 	require.NotContains(t, status, "#")
+	require.Equal(t, renderer.BlankCell(), frame.At(19, 7), "status filler must be blank cells, not zero cells")
 }
 
 func TestCopyTargetRectLocked(t *testing.T) {

@@ -437,7 +437,11 @@ func composeCopyClientFrame(mode *scopy.Mode, p *pane, target domain.Rect, frame
 		}
 	}
 	statusY := frame.Height - 1
-	clear(frame.Row(statusY))
+	statusRow := frame.Row(statusY)
+	blank := renderer.BlankCell()
+	for x := range statusRow {
+		statusRow[x] = blank
+	}
 	copy(frame.Row(statusY), copyFrame.Row(copyFrame.Height - 1)[:min(frame.Width, copyFrame.Width)])
 	return frame, []renderer.Damage{renderer.FullRedraw()}
 }

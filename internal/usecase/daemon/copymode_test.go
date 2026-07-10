@@ -752,12 +752,14 @@ func TestFloatingCopyModeMouseSelectsFloatingRows(t *testing.T) {
 	viewportTop := ac.overlays.copyMode.ViewportTop
 	inner := calculateFloatingGeometry(domain.Rect{Width: 80, Height: 23}, d.currentFloatingConfig()).Inner
 
-	press := fmt.Sprintf("\x1b[<0;%d;%dM", inner.X+3, inner.Y+2)
+	// Copy body row k renders at wire row inner.Y+k+2 (top bar + content
+	// offset); clicking a row must select exactly that row.
+	press := fmt.Sprintf("\x1b[<0;%d;%dM", inner.X+3, inner.Y+3)
 	d.handleInput(sess, ac, []byte(press))
 	awaitFrame(t, sends, ports.MsgOutput)
 	require.Equal(t, viewportTop+1, ac.overlays.copyMode.Cursor)
 
-	motion := fmt.Sprintf("\x1b[<32;%d;%dM", inner.X+3, inner.Y+3)
+	motion := fmt.Sprintf("\x1b[<32;%d;%dM", inner.X+3, inner.Y+4)
 	d.handleInput(sess, ac, []byte(motion))
 	awaitFrame(t, sends, ports.MsgOutput)
 	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
@@ -789,4 +791,27 @@ func TestFloatingExitClearsCopyModeBeforeRepaint(t *testing.T) {
 	data := mustOutputData(t, sends)
 	require.NotContains(t, string(data), "[SCROLL]")
 	require.NotContains(t, string(data), "flt-live")
+}
+
+func TestMouseDragCopyEntryCapturesSourceForYank(t *testing.T) {
+	pty, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
+	pane := sess.tabs[0].focusedPane()
+	copy(pane.screen.Frame.Row(0), testRow("alpha"))
+	copy(pane.screen.Frame.Row(1), testRow("bravo"))
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;2M"))
+	mustOutputData(t, sends)
+	require.NotNil(t, ac.overlays.copyMode)
+	ac.overlays.copyMu.Lock()
+	captured := ac.overlays.copyPane
+	ac.overlays.copyMu.Unlock()
+	require.Same(t, pane, captured, "drag entry must capture the copy source pane")
+
+	d.handleInput(sess, ac, []byte("y"))
+	out := awaitFrame(t, sends, ports.MsgOutput)
+	msg, err := ports.UnmarshalOutput(out.Payload)
+	require.NoError(t, err)
+	want := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte("alpha\nbravo")) + "\x07"
+	require.Equal(t, want, string(msg.Data))
 }

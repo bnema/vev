@@ -84,6 +84,9 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 			if !pointInRect(ev.Col, contentRow, geometry.Inner) {
 				return
 			}
+			// Match the multi-pane translation: hand copyMouse a zero-based
+			// popup row so a click selects exactly the row under the pointer.
+			ev.Row = contentRow
 			ev = translateMouseEvent(ev, geometry.Inner.X, geometry.Inner.Y)
 			switch ev.Button {
 			case mouse.Left:
@@ -276,6 +279,7 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 			mode.StartSelectionAt(snap, pressTop+pressRow)
 			mode.ExtendTo(snap, len(snap.Rows)-snap.Height+ev.Row)
 			rt.copyMode = mode
+			rt.copyPane = p
 			rt.copyPressRow = pressTop + pressRow
 			rt.copyPressRowValid = true
 			rt.copyDragging = true
