@@ -62,6 +62,22 @@ func TestAltDigitSwitchesBetweenThreeTabs(t *testing.T) {
 	require.Eventually(t, func() bool { return len(writes3) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, []byte("C"), <-writes3)
 
+	d.mu.Lock()
+	var sess *session
+	for _, candidate := range d.sessions {
+		sess = candidate
+		break
+	}
+	d.mu.Unlock()
+	require.NotNil(t, sess)
+	sess.mu.Lock()
+	tabs := append([]*tab(nil), sess.tabs...)
+	sess.mu.Unlock()
+	require.Len(t, tabs, 3)
+	for _, tb := range tabs {
+		requireFloatingInitialized(t, tb)
+	}
+
 	releaseConn()
 	releasePTY1()
 	releasePTY2()
@@ -79,6 +95,13 @@ func TestAltCForwardsToPTY(t *testing.T) {
 
 	require.Equal(t, []byte("\x1bc"), <-writes)
 	releasePTY()
+}
+
+func requireFloatingInitialized(t *testing.T, tb *tab) {
+	t.Helper()
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	require.NotEqual(t, floatingUninitialized, tb.floating.state)
 }
 
 func installTestFloating(tb *tab, p *pane, visible bool) {
@@ -165,6 +188,27 @@ func TestFloatingStaysTerminalTargetAfterDirectionalFocus(t *testing.T) {
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
 	daemonKeyHandler{d: d, ac: ac}.Forward([]byte("x"))
 	requirePTYWrite(t, floatingWrites, []byte("x"))
+}
+
+func TestFloatingVisibilityRemainsIndependentAcrossTabSwitches(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+	first := sess.activeTab()
+	second := newTab(nil, first.size)
+	installTestFloating(first, newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), true)
+	installTestFloating(second, newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), false)
+	sess.mu.Lock()
+	sess.tabs = append(sess.tabs, second)
+	sess.mu.Unlock()
+
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab2)
+	second.mu.Lock()
+	require.Equal(t, floatingHidden, second.floating.state)
+	second.mu.Unlock()
+
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab1)
+	first.mu.Lock()
+	require.Equal(t, floatingVisible, first.floating.state)
+	first.mu.Unlock()
 }
 
 func TestFloatingMouseTranslatesSGRToInnerCoordinates(t *testing.T) {

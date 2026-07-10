@@ -90,6 +90,10 @@ func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {
 
 func TestPickerSameSessionNavigationSwitchAndEscClose(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
+	sess.mu.Lock()
+	sess.client = ac
+	sess.mu.Unlock()
+	d.ptys = newBlockingOpenFactory(t, d)
 	defer func() {
 		for _, release := range releases {
 			release()
@@ -103,6 +107,7 @@ func TestPickerSameSessionNavigationSwitchAndEscClose(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\r"))
 
 	require.Equal(t, 1, activeTabIndex(sess))
+	requireFloatingInitialized(t, sess.activeTab())
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.enterPicker(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)

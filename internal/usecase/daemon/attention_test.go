@@ -440,6 +440,10 @@ func TestCloseRingingTabRefreshesOtherSessionBottomBar(t *testing.T) {
 
 func TestAltAJumpAttentionSelectsOldestLocalTab(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 3)
+	sess.mu.Lock()
+	sess.client = ac
+	sess.mu.Unlock()
+	d.ptys = newBlockingOpenFactory(t, d)
 	defer releases[0]()
 	defer releases[1]()
 	defer releases[2]()
@@ -454,6 +458,7 @@ func TestAltAJumpAttentionSelectsOldestLocalTab(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1ba"))
 
 	require.Equal(t, 2, activeTabIndex(sess))
+	requireFloatingInitialized(t, sess.activeTab())
 	_ = mustOutputData(t, sends)
 }
 

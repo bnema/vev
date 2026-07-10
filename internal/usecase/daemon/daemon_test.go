@@ -125,6 +125,28 @@ func (*quietPTY) Resize(domain.Size) error     { return nil }
 func (*quietPTY) Pid() int                     { return 0 }
 func (*quietPTY) ForegroundPgid() (int, error) { return 0, nil }
 
+// blockingOpenFactory keeps activation tests deterministically in Warming
+// without starting pane reader/scheduler goroutines.
+type blockingOpenFactory struct {
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingOpenFactory(t *testing.T, d *Daemon) *blockingOpenFactory {
+	t.Helper()
+	f := &blockingOpenFactory{release: make(chan struct{})}
+	t.Cleanup(func() {
+		f.once.Do(func() { close(f.release) })
+		d.sessWg.Wait()
+	})
+	return f
+}
+
+func (f *blockingOpenFactory) Open(string, []string, []string, string, domain.Size) (ports.PTY, error) {
+	<-f.release
+	return nil, io.ErrClosedPipe
+}
+
 // newFactory keeps the supplied fixture for normal panes. Floating prewarms
 // have a distinct (smaller) geometry and receive independent quiet PTYs, so
 // they cannot consume test output or add post-test mock calls.

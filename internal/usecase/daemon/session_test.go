@@ -67,6 +67,7 @@ func TestRoutePropagatesHelloCwdAndTabsInheritIt(t *testing.T) {
 
 	require.NoError(t, d.createTab(sess, sz))
 	require.Equal(t, []string{"/tmp/work", "/tmp/work"}, dirs)
+	requireFloatingInitialized(t, sess.activeTab())
 	_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 	releaseFirst()
 	releaseSecond()
@@ -907,6 +908,29 @@ func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
 			require.Equal(t, tt.want, records[0].TabNames)
 		})
 	}
+}
+
+func TestCloseActiveTabActivatesDestinationFloatingPane(t *testing.T) {
+	d, sess, ac, _, releases := newManualTabSession(t, 2)
+	sess.mu.Lock()
+	sess.client = ac
+	sess.mu.Unlock()
+	d.ptys = newBlockingOpenFactory(t, d)
+	defer releases[0]()
+	defer releases[1]()
+	sess.mu.Lock()
+	first, closing := sess.tabs[0], sess.tabs[1]
+	sess.active = 1
+	sess.mu.Unlock()
+	first.mu.Lock()
+	stale := first.takeFloatingLocked()
+	first.mu.Unlock()
+	closeFloatingPane(stale)
+
+	d.closeTab(sess, closing, false)
+
+	require.Same(t, first, sess.activeTab())
+	requireFloatingInitialized(t, first)
 }
 
 func TestRenameTabDoesNotPersistForEphemeralSession(t *testing.T) {

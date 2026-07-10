@@ -18,6 +18,10 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	p1, release1 := newBlockingPTY(t)
 	p2, release2 := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p1, p2)
+	sess.mu.Lock()
+	sess.client = ac
+	sess.mu.Unlock()
+	d.ptys = newBlockingOpenFactory(t, d)
 	defer release1()
 	defer release2()
 
@@ -31,12 +35,31 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	d.handleInput(sess, ac, []byte("NXT\r"))
 	require.False(t, ac.overlays.paletteActive())
 	require.Equal(t, 1, activeTabIndex(sess))
+	requireFloatingInitialized(t, sess.activeTab())
 	awaitFrame(t, sends, ports.MsgOutput)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("\x1b"))
 	require.False(t, ac.overlays.paletteActive())
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteFLTExecutesFloatingToggle(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	tb := sess.activeTab()
+	installTestFloating(tb, newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), false)
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("FLT\r"))
+
+	require.False(t, ac.overlays.paletteActive())
+	tb.mu.Lock()
+	require.Equal(t, floatingVisible, tb.floating.state)
+	tb.mu.Unlock()
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
@@ -81,6 +104,9 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 
 func TestPaletteReopensWithSuccessfulCommandFirst(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
+	sess.mu.Lock()
+	sess.client = ac
+	sess.mu.Unlock()
 	defer releases[0]()
 	defer releases[1]()
 
