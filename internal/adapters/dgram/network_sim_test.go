@@ -54,6 +54,7 @@ type simulatedLink struct {
 	queue      []scheduledPacket
 	queueBytes int
 	next       time.Time
+	dropped    int
 }
 
 func newSimulatedLink(clock interface{ Now() time.Time }, policy packetPolicy) *simulatedLink {
@@ -71,6 +72,7 @@ func (l *simulatedLink) enqueue(p *fakePC, peer *fakePC, b []byte) bool {
 		return l.deliverLocked(peer, packet{b: append([]byte(nil), b...), addr: p.addr})
 	}
 	if l.policy.MaxQueueBytes <= 0 || l.queueBytes+len(b) > l.policy.MaxQueueBytes {
+		l.dropped++
 		return false
 	}
 	due := meta.At.Add(l.policy.Delay)
@@ -105,6 +107,12 @@ func (l *simulatedLink) queuedBytes() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.queueBytes
+}
+
+func (l *simulatedLink) droppedPackets() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.dropped
 }
 
 func (l *simulatedLink) deliverLocked(peer *fakePC, q packet) bool {
@@ -281,8 +289,8 @@ func TestTransportFloodClassification(t *testing.T) {
 		if len(dropped) != floodRecordCount {
 			t.Fatalf("flood state = %+v, dropped records=%d, want exactly one fragment from each of %d records", state, len(dropped), floodRecordCount)
 		}
-		if state.packetAge != 0 || state.recordAge != time.Nanosecond || state.ackAge != time.Nanosecond {
-			t.Fatalf("flood state = %+v, want packet contact only after %d output records of %d MTUs", state, floodRecordCount, floodRecordMTUs)
+		if state.packetAge > initialPacingRTT || state.recordAge <= 0 || state.ackAge <= 0 {
+			t.Fatalf("flood state = %+v, want fresh packet contact without record or ACK progress", state)
 		}
 		if !clk.Now().After(start) {
 			t.Fatal("real authenticated fragments did not update contact")
@@ -291,34 +299,90 @@ func TestTransportFloodClassification(t *testing.T) {
 
 	t.Run("bounded byte queue advances and releases on fake clock", func(t *testing.T) {
 		clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
-		limit := 2 * 128
+		const mtu = 128
+		limit := dataBurstPackets * mtu
 		link := newSimulatedLink(clk, packetPolicy{Delay: time.Second, MaxQueueBytes: limit, BytesPerSecond: 128})
 		aPC, bPC := newFloodPair(link)
-		const mtu = 128
-		a, b := newFloodTransports(t, aPC, bPC, clk, mtu)
+		bPC.link = nil // ACKs are unconstrained; this case isolates outbound congestion.
+		opts := Options{
+			Clock: clk, MTU: mtu, ResendAfter: time.Hour, Heartbeat: time.Hour,
+			DegradedAfter: time.Hour, ProbeAfter: time.Hour, OfflineAfter: time.Hour, DeadAfter: time.Hour,
+		}
+		a, err := NewTransportWithOptions(aPC, bPC.addr, key(), 1, 2, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := NewTransportWithOptions(bPC, aPC.addr, key(), 2, 1, opts)
+		if err != nil {
+			_ = a.Close()
+			t.Fatal(err)
+		}
 		defer closeFloodTransports(a, b)
 		contacted := make(chan struct{}, 1)
 		b.mu.Lock()
-		b.afterAuthenticatedPacket = func() { contacted <- struct{}{} }
-		b.mu.Unlock()
-		a.mu.Lock()
-		a.rto = time.Hour // Keep the fake-clock queue case about bandwidth, not retries.
-		a.mu.Unlock()
-		sendFloodOutputs(t, a, floodRecordCount, mtu)
-		state := floodState(a, b, link)
-		if state.queuedBytes <= 0 || state.queuedBytes > limit {
-			t.Fatalf("flood state = %+v, want queued bytes in 1..%d", state, limit)
+		b.afterAuthenticatedPacket = func() {
+			select {
+			case contacted <- struct{}{}:
+			default:
+			}
 		}
-		clk.advance(10 * time.Second)
+		b.mu.Unlock()
+		maxFragmentData := mtu - pdgram.HeaderSize - a.codec.Overhead()
+		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 4*maxFragmentData)}); err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, time.Second, func() bool { return link.queuedBytes() == limit })
+		clk.advance(initialPacingRTT)
+		time.Sleep(time.Millisecond)
+		state := floodState(a, b, link)
+		if state.queuedBytes != limit || link.droppedPackets() == 0 {
+			t.Fatalf("flood state = %+v drops=%d, want bounded queue overflow at %d bytes", state, link.droppedPackets(), limit)
+		}
+		clk.advance(time.Second)
 		link.flush(bPC)
 		awaitSignal(t, contacted, "queued authenticated fragment")
-		state = floodState(a, b, link)
-		if state.queuedBytes != 0 {
-			t.Fatalf("flood state = %+v, want empty queue after fake-clock release", state)
+		for link.queuedBytes() > 0 {
+			clk.advance(time.Second)
+			link.flush(bPC)
 		}
-		if state.packetAge != 0 || state.recordAge != 10*time.Second || state.ackAge != 10*time.Second {
-			t.Fatalf("flood state = %+v, want delayed packet contact without record or ACK progress", state)
+		if age := floodState(a, b, link).packetAge; age >= a.probeAfter {
+			t.Fatalf("authenticated contact age=%v, want below probe threshold %v", age, a.probeAfter)
 		}
+		eventually(t, time.Second, func() bool {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			p := a.pending[1]
+			return p != nil && !p.initialInFlight && !p.last.IsZero()
+		})
+
+		a.mu.Lock()
+		beforeLoss := a.congestion.cwndBytes
+		a.rto = time.Millisecond
+		a.mu.Unlock()
+		aPC.link = nil // The transient bottleneck clears before the paced retry.
+		clk.advance(2 * time.Millisecond)
+		a.queueRetransmits()
+		eventually(t, time.Second, func() bool {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			return a.congestion.cwndBytes < beforeLoss
+		})
+		for range 16 {
+			clk.advance(time.Second)
+			link.flush(bPC)
+			clk.advance(maxACKDelay)
+			time.Sleep(time.Millisecond)
+			a.mu.Lock()
+			drained := len(a.pending) == 0
+			a.mu.Unlock()
+			if drained {
+				return
+			}
+		}
+		a.mu.Lock()
+		pending := a.pending[1]
+		a.mu.Unlock()
+		t.Fatalf("pending records did not drain after paced retransmission: %+v pending=%+v drops=%d", floodState(a, b, link), pending, link.droppedPackets())
 	})
 
 	t.Run("control stays responsive while fresh output and large retransmits contend", func(t *testing.T) {
@@ -350,8 +414,6 @@ func TestTransportFloodClassification(t *testing.T) {
 		releaseRetransmit := make(chan struct{})
 		lastRetransmitted := make(chan struct{}, 1)
 		probeSent := make(chan struct{}, 1)
-		freshAtPace := make(chan struct{})
-		allowFreshPace := make(chan struct{})
 		freshReturned := make(chan error, 1)
 		writes := make(map[uint64]int)
 		var writesMu sync.Mutex
@@ -406,6 +468,9 @@ func TestTransportFloodClassification(t *testing.T) {
 		for range 6 { // Both transports install retransmit, health, and heartbeat timers.
 			awaitSignal(t, clk.timerCreated, "transport timer creation")
 		}
+		a.mu.Lock()
+		a.rto = time.Hour
+		a.mu.Unlock()
 
 		// Fresh, fragmented output records become overdue while their real
 		// cumulative ACKs are lost. Disabling pacing intentionally forces overload
@@ -414,48 +479,60 @@ func TestTransportFloodClassification(t *testing.T) {
 		awaitSignal(t, clk.timerCreated, "ACK coalescing timer creation")
 		clk.advance(maxACKDelay)
 		awaitSignal(t, acksDropped, "dropped cumulative ACK")
+		a.mu.Lock()
+		a.rto = 10 * time.Millisecond
+		a.mu.Unlock()
+		a.queueRetransmits()
+		a.mu.Lock()
+		a.rto = time.Hour
+		a.mu.Unlock()
+		clk.advance(initialPacingRTT)
 
 		awaitSignal(t, retransmitBlocked, "retransmit pacing barrier")
 		if state := floodState(a, b, nil); state.retransmits < floodRecordCount {
 			t.Fatalf("flood state = %+v, want all %d overdue records selected", state, floodRecordCount)
 		}
-
-		// Start a third large output at this same fake-clock instant. The pacing
-		// barrier proves its real Send reaches the shared pacing gate while the
-		// retransmit owns it inside WriteTo.
-		a.mu.Lock()
-		a.outputNext = time.Time{}
-		a.beforeDataPace = func() {
-			close(freshAtPace)
-			awaitSignal(t, allowFreshPace, "fresh pacing release")
+		select {
+		case <-probeSent:
+		default:
 		}
-		a.mu.Unlock()
+
+		// A fresh record queues behind the sole data sender while control traffic
+		// remains independent of congestion tokens and the blocked data write.
 		go func() {
 			freshReturned <- a.Send(ports.Frame{Type: ports.MsgOutput, Payload: floodOutputPayload(floodRecordCount, 128)})
 		}()
-		awaitSignal(t, freshAtPace, "fresh output pacing barrier")
-		a.mu.Lock()
-		a.beforeDataPace = nil
-		a.mu.Unlock()
-		close(allowFreshPace)
 		select {
 		case err := <-freshReturned:
 			t.Fatalf("fresh output completed while retransmit held pacing: %v", err)
 		default:
 		}
 
+		clk.advance(11 * time.Millisecond)
 		awaitSignal(t, probeSent, "heartbeat probe during output contention")
 
 		close(releaseRetransmit)
-		if err := awaitResult(t, freshReturned, "fresh output completion"); err != nil {
-			t.Fatal(err)
+		for range 1024 {
+			clk.advance(initialPacingRTT)
+			time.Sleep(time.Millisecond)
+			select {
+			case err := <-freshReturned:
+				if err != nil {
+					t.Fatal(err)
+				}
+				awaitSignal(t, lastRetransmitted, "last overdue record retransmission")
+				writesMu.Lock()
+				defer writesMu.Unlock()
+				if writes[1] < 2 || writes[floodRecordCount] < 2 || writes[floodRecordCount+1] == 0 {
+					t.Fatalf("flood state = %+v, writes=%v, want fresh large traffic and retransmissions across %d overdue records", floodState(a, b, nil), writes, floodRecordCount)
+				}
+				return
+			default:
+			}
 		}
-		awaitSignal(t, lastRetransmitted, "last overdue record retransmission")
 		writesMu.Lock()
 		defer writesMu.Unlock()
-		if writes[1] < 2 || writes[floodRecordCount] < 2 || writes[floodRecordCount+1] == 0 {
-			t.Fatalf("flood state = %+v, writes=%v, want fresh large traffic and retransmissions across %d overdue records", floodState(a, b, nil), writes, floodRecordCount)
-		}
+		t.Fatalf("fresh output did not complete after paced retransmissions: writes=%v state=%+v", writes, floodState(a, b, nil))
 	})
 }
 
@@ -510,23 +587,37 @@ func TestFloodOutputPayloadIsIncrementalStateBearingOutput(t *testing.T) {
 
 func sendFloodOutputs(t *testing.T, sender *Transport, count, mtu int) {
 	t.Helper()
-	sender.dataPaceMu.Lock()
-	sender.dataPaceRemaining = count * floodRecordMTUs * 4
-	sender.dataPaceNext = sender.clock.Now().Add(time.Hour)
-	sender.dataPaceMu.Unlock()
 	for state := range count {
-		sender.mu.Lock()
-		sender.outputNext = time.Time{}
-		sender.mu.Unlock()
-		if err := sender.Send(ports.Frame{Type: ports.MsgOutput, Payload: floodOutputPayload(state, mtu)}); err != nil {
+		if err := sender.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: floodOutputPayload(state, mtu)}); err != nil {
 			t.Fatal(err)
 		}
 	}
+	clk, ok := sender.clock.(*manualClock)
+	if !ok {
+		return
+	}
+	for range count * floodRecordMTUs * 2 {
+		clk.advance(initialPacingRTT)
+		time.Sleep(time.Millisecond)
+		sender.mu.Lock()
+		complete := len(sender.outputQueue) == 0 && len(sender.dataSend) == 0
+		for _, p := range sender.pending {
+			complete = complete && !p.initialInFlight && !p.last.IsZero()
+		}
+		sender.mu.Unlock()
+		if complete {
+			return
+		}
+	}
+	t.Fatal("flood output pacing did not drain")
 }
 
 func newFloodTransports(t *testing.T, aPC, bPC *fakePC, clk *manualClock, mtu int) (*Transport, *Transport) {
 	t.Helper()
-	opts := Options{Clock: clk, MTU: mtu, ResendAfter: 10 * time.Millisecond, Heartbeat: time.Hour}
+	opts := Options{
+		Clock: clk, MTU: mtu, ResendAfter: time.Hour, Heartbeat: time.Hour,
+		DegradedAfter: time.Hour, ProbeAfter: time.Hour, OfflineAfter: time.Hour, DeadAfter: time.Hour,
+	}
 	a, err := NewTransportWithOptions(aPC, bPC.addr, key(), 1, 2, opts)
 	if err != nil {
 		t.Fatal(err)

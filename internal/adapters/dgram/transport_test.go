@@ -213,6 +213,148 @@ func waitForManualTimers(t *testing.T, clk *manualClock, n int) {
 	t.Fatalf("manual timers=%d, want at least %d", active, n)
 }
 
+func TestCongestionControllerBoundsAndIntegerGrowth(t *testing.T) {
+	const mtu = 1200
+	c := newCongestionController(mtu)
+	if got, want := c.cwndBytes, initialCongestionPackets*mtu; got != want {
+		t.Fatalf("initial cwnd=%d, want %d", got, want)
+	}
+	if got, want := c.burstBytes(), dataBurstPackets*mtu; got != want {
+		t.Fatalf("initial burst=%d, want %d", got, want)
+	}
+	if got, want := c.bytesPerSecond(), initialCongestionPackets*mtu*int(time.Second/initialPacingRTT); got != want {
+		t.Fatalf("initial pacing rate=%d, want %d", got, want)
+	}
+
+	c.onLoss()
+	if got, want := c.cwndBytes, initialCongestionPackets*mtu/2; got != want {
+		t.Fatalf("cwnd after first loss=%d, want %d", got, want)
+	}
+	c.cwndBytes = 3 * mtu
+	c.onLoss()
+	if got, want := c.cwndBytes, minimumCongestionPackets*mtu; got != want {
+		t.Fatalf("minimum cwnd=%d, want %d", got, want)
+	}
+
+	c.cwndBytes = 10 * mtu
+	c.onACK(1)
+	if got, want := c.cwndBytes, 10*mtu+1; got != want {
+		t.Fatalf("minimum additive increase cwnd=%d, want %d", got, want)
+	}
+	c.onACK(10 * mtu)
+	if got, want := c.cwndBytes, 10*mtu+1+(mtu*10*mtu)/(10*mtu+1); got != want {
+		t.Fatalf("integer additive increase cwnd=%d, want %d", got, want)
+	}
+	c.cwndBytes = maximumCongestionBytes
+	c.onACK(maximumCongestionBytes)
+	if got := c.cwndBytes; got != maximumCongestionBytes {
+		t.Fatalf("maximum cwnd=%d, want %d", got, maximumCongestionBytes)
+	}
+
+	c.onRTT(500 * time.Microsecond)
+	if got, want := c.bytesPerSecond(), maximumCongestionBytes*1000; got != want {
+		t.Fatalf("sub-millisecond pacing rate=%d, want %d", got, want)
+	}
+}
+
+func TestBytePacerUsesBurstThenFakeClockRate(t *testing.T) {
+	const mtu = 1200
+	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+	c := newCongestionController(mtu)
+	p := bytePacer{clk: clk}
+	done := make(chan struct{})
+	limits := func() (int, int) { return c.bytesPerSecond(), c.burstBytes() }
+
+	for range dataBurstPackets {
+		if err := p.wait(done, mtu, limits); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wait := make(chan error, 1)
+	go func() { wait <- p.wait(done, mtu, limits) }()
+	awaitSignal(t, clk.timerCreated, "byte pacer timer")
+	clk.advance(24 * time.Millisecond)
+	select {
+	case err := <-wait:
+		t.Fatalf("third MTU released early: %v", err)
+	default:
+	}
+	clk.advance(time.Millisecond)
+	if err := awaitResult(t, wait, "third paced MTU"); err != nil {
+		t.Fatal(err)
+	}
+
+	c.onLoss()
+	next := make(chan error, 1)
+	go func() { next <- p.wait(done, mtu, limits) }()
+	awaitSignal(t, clk.timerCreated, "reduced-cwnd byte pacer timer")
+	clk.advance(49 * time.Millisecond)
+	select {
+	case err := <-next:
+		t.Fatalf("reduced cwnd did not lengthen wait: %v", err)
+	default:
+	}
+	clk.advance(time.Millisecond)
+	if err := awaitResult(t, next, "reduced-cwnd paced MTU"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBytePacerCancellation(t *testing.T) {
+	const mtu = 1200
+	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+	p := bytePacer{clk: clk}
+	done := make(chan struct{})
+	limits := func() (int, int) { return mtu, mtu }
+	if err := p.wait(done, mtu, limits); err != nil {
+		t.Fatal(err)
+	}
+	wait := make(chan error, 1)
+	go func() { wait <- p.wait(done, mtu, limits) }()
+	awaitSignal(t, clk.timerCreated, "cancelled byte pacer timer")
+	close(done)
+	if err := awaitResult(t, wait, "byte pacer cancellation"); !errors.Is(err, errPacerClosed) {
+		t.Fatalf("cancellation error=%v, want %v", err, errPacerClosed)
+	}
+}
+
+func BenchmarkCongestionControllerACK(b *testing.B) {
+	c := newCongestionController(defaultMTU)
+	b.ReportAllocs()
+	for b.Loop() {
+		c.onACK(defaultMTU)
+		if c.cwndBytes == c.maxBytes {
+			c = newCongestionController(defaultMTU)
+		}
+	}
+}
+
+func TestSendAsyncTransfersFragmentedRecordToBytePacedSender(t *testing.T) {
+	const mtu = 128
+	aPC, bPC := newPair()
+	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+	a, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{
+		Clock: clk, MTU: mtu, ResendAfter: time.Hour, Heartbeat: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }()
+
+	maxFragmentData := mtu - pdgram.HeaderSize - a.codec.Overhead()
+	frame := ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 2*maxFragmentData)}
+	if err := a.SendAsync(frame); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyPacketCount(t, bPC, dataBurstPackets)
+	if got := len(bPC.in); got != dataBurstPackets {
+		t.Fatalf("immediate datagrams=%d, want %d MTU burst", got, dataBurstPackets)
+	}
+	awaitSignal(t, clk.timerCreated, "shared data sender pacing timer")
+	clk.advance(initialPacingRTT)
+	eventuallyPacketCount(t, bPC, 3)
+}
+
 type deadlineCapturePC struct {
 	addr     net.Addr
 	deadline atomic.Value
@@ -242,7 +384,7 @@ func (p *deadlineCapturePC) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-func TestOutputFirstSendIsPacedAndQueuedOutputsAreBatched(t *testing.T) {
+func TestSmallOutputsShareInitialByteBurst(t *testing.T) {
 	aPC, bPC := newPair()
 	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
 	a, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{Clock: clk, ResendAfter: time.Hour, Heartbeat: time.Hour})
@@ -256,19 +398,10 @@ func TestOutputFirstSendIsPacedAndQueuedOutputsAreBatched(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := len(bPC.in); got != 1 {
-		t.Fatalf("immediate datagrams=%d, want only the first output sent before pacing timer", got)
-	}
-	waitForManualTimers(t, clk, 4)
-	clk.advance(defaultOutputPaceMinDelay)
 	eventuallyPacketCount(t, bPC, 3)
 	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")}); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(bPC.in); got != 3 {
-		t.Fatalf("datagrams before second pace tick=%d, want 3", got)
-	}
-	clk.advance(defaultOutputPaceMinDelay)
 	eventuallyPacketCount(t, bPC, 4)
 }
 
@@ -293,11 +426,11 @@ func TestOutputPacingSendsAtMostOneOversizedFramePerTick(t *testing.T) {
 	waitForManualTimers(t, clk, 4)
 	previousPackets := len(aPC.in)
 	for tick := 0; tick < 128; tick++ {
-		clk.advance(defaultOutputPaceMaxDelay)
+		clk.advance(initialPacingRTT)
 		time.Sleep(time.Millisecond)
 		packets := len(aPC.in)
-		if delta := packets - previousPackets; delta > defaultPacketPaceBudget {
-			t.Fatalf("tick %d emitted %d packets, budget %d", tick, delta, defaultPacketPaceBudget)
+		if delta := packets - previousPackets; delta > initialCongestionPackets {
+			t.Fatalf("tick %d emitted %d packets, cwnd packets %d", tick, delta, initialCongestionPackets)
 		}
 		previousPackets = packets
 		a.mu.Lock()
@@ -323,7 +456,7 @@ func TestPacedInitialSendTimestampsFinalFragmentCompletion(t *testing.T) {
 	defer func() { _ = a.Close() }()
 	large := ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 24*a.mtu)}
 	done := make(chan error, 1)
-	go func() { done <- a.SendAsync(large) }()
+	go func() { done <- a.Send(large) }()
 	start := clk.Now()
 	for tick := 0; tick < 128; tick++ {
 		a.mu.Lock()
@@ -333,7 +466,7 @@ func TestPacedInitialSendTimestampsFinalFragmentCompletion(t *testing.T) {
 			t.Fatal("pending last timestamp set before final fragment")
 		}
 		a.mu.Unlock()
-		clk.advance(defaultOutputPaceMaxDelay)
+		clk.advance(initialPacingRTT)
 		time.Sleep(time.Millisecond)
 		select {
 		case err := <-done:
@@ -343,7 +476,7 @@ func TestPacedInitialSendTimestampsFinalFragmentCompletion(t *testing.T) {
 			a.mu.Lock()
 			completed := a.pending[1].last
 			a.mu.Unlock()
-			if elapsed := completed.Sub(start); elapsed <= defaultOutputPaceMaxDelay {
+			if elapsed := completed.Sub(start); elapsed <= initialPacingRTT {
 				t.Fatalf("large send completed too early after %v", elapsed)
 			}
 			before := len(aPC.in)
@@ -396,7 +529,7 @@ func TestOwnedSynchronousMaxSideEffectCompletesThroughConcurrentPacedWork(t *tes
 	go func() { done <- a.SendSynchronous(sideEffect) }()
 
 	for tick := 0; tick < 512; tick++ {
-		clk.advance(defaultOutputPaceMaxDelay)
+		clk.advance(initialPacingRTT)
 		time.Sleep(time.Millisecond)
 		select {
 		case err := <-done:
@@ -448,31 +581,6 @@ func TestResendSkipsOutputDuringFirstWireAttempt(t *testing.T) {
 	}
 }
 
-func TestOutputPaceDelayUsesSRTTHalfClamped(t *testing.T) {
-	tr, _ := newResendTestTransport(t, 10)
-	tests := []struct {
-		name string
-		srtt time.Duration
-		want time.Duration
-	}{
-		{name: "high rtt clamps to max", srtt: time.Second, want: defaultOutputPaceMaxDelay},
-		{name: "low rtt clamps to min cadence", srtt: 30 * time.Millisecond, want: defaultOutputPaceMinCadence},
-		{name: "mid rtt uses half", srtt: 80 * time.Millisecond, want: 40 * time.Millisecond},
-		{name: "initial rtt uses min delay", want: defaultOutputPaceMinDelay},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tr.mu.Lock()
-			tr.srtt = tt.srtt
-			got := tr.outputPaceDelayLocked()
-			tr.mu.Unlock()
-			if got != tt.want {
-				t.Fatalf("output pace delay=%v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestInputWaitsForDequeuedOutputBatch(t *testing.T) {
 	aPC, bPC := newPair()
 	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
@@ -482,29 +590,12 @@ func TestInputWaitsForDequeuedOutputBatch(t *testing.T) {
 	}
 	defer func() { _ = a.Close() }()
 
+	a.writeMu.Lock()
 	for _, payload := range []string{"first", "queued"} {
 		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte(payload)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	waitForManualTimers(t, clk, 4)
-	a.writeMu.Lock()
-	clk.advance(defaultOutputPaceMinDelay)
-	deadline := time.Now().Add(time.Second)
-	for {
-		a.mu.Lock()
-		dequeued := len(a.outputQueue) == 0
-		a.mu.Unlock()
-		if dequeued {
-			break
-		}
-		if time.Now().After(deadline) {
-			a.writeMu.Unlock()
-			t.Fatal("pacer did not dequeue output batch")
-		}
-		time.Sleep(time.Millisecond)
-	}
-
 	done := make(chan error, 1)
 	go func() { done <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("typed")}) }()
 	select {
@@ -536,29 +627,13 @@ func TestPacedControlQueueFailureClosesTransport(t *testing.T) {
 	}
 	defer func() { _ = a.Close() }()
 
-	for i := range 3 {
-		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got := len(bPC.in); got != 1 {
-		t.Fatalf("immediate output datagrams=%d, want 1", got)
-	}
 	if err := bPC.Close(); err != nil {
 		t.Fatal(err)
 	}
-
 	inputDone := make(chan error, 1)
 	go func() { inputDone <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("typed")}) }()
-	eventually(t, time.Second, func() bool {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		return len(a.outputQueue) == 2
-	})
-	waitForManualTimers(t, clk, 4)
-	clk.advance(defaultOutputPaceMinDelay)
 	if err := <-inputDone; err == nil {
-		t.Fatal("queued control send succeeded after paced wire failure")
+		t.Fatal("data send succeeded after paced wire failure")
 	}
 	select {
 	case <-a.done:
@@ -602,10 +677,7 @@ func TestCloseUnblocksQueuedSynchronousFrames(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("prime")}); err != nil {
-				t.Fatal(err)
-			}
-			if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("queued")}); err != nil {
+			if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 3*a.mtu)}); err != nil {
 				t.Fatal(err)
 			}
 			done := make(chan error, 1)
@@ -613,7 +685,7 @@ func TestCloseUnblocksQueuedSynchronousFrames(t *testing.T) {
 			eventually(t, time.Second, func() bool {
 				a.mu.Lock()
 				defer a.mu.Unlock()
-				return len(a.outputQueue) == 2
+				return len(a.pending) == 2
 			})
 			_ = a.Close()
 			if err := <-done; err == nil {
@@ -632,16 +704,12 @@ func TestOutputPaceFailureClosesTransportWithWriteError(t *testing.T) {
 	}
 	defer func() { _ = a.Close() }()
 
-	for i := range 2 {
-		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	waitForManualTimers(t, clk, 4)
 	if err := bPC.Close(); err != nil {
 		t.Fatal(err)
 	}
-	clk.advance(defaultOutputPaceMinDelay)
+	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("fails")}); err != nil {
+		t.Fatal(err)
+	}
 
 	select {
 	case <-a.done:
@@ -668,16 +736,9 @@ func TestInputAndControlRemainOrderedInBoundedPacedQueue(t *testing.T) {
 	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("queued")}); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(bPC.in); got != 1 {
-		t.Fatalf("immediate output datagrams=%d, want 1", got)
-	}
+	eventuallyPacketCount(t, bPC, 2)
 	inputDone := make(chan error, 1)
 	go func() { inputDone <- a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("typed")}) }()
-	if got := len(bPC.in); got != 1 {
-		t.Fatalf("datagrams after input=%d, want prerequisites and input still paced", got)
-	}
-	waitForManualTimers(t, clk, 4)
-	clk.advance(defaultOutputPaceMinDelay)
 	eventuallyPacketCount(t, bPC, 3)
 	if err := <-inputDone; err != nil {
 		t.Fatal(err)
@@ -685,20 +746,8 @@ func TestInputAndControlRemainOrderedInBoundedPacedQueue(t *testing.T) {
 	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("queued-before-control")}); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(bPC.in); got != 3 {
-		t.Fatalf("datagrams before control=%d, want queued output still paced", got)
-	}
 	controlDone := make(chan error, 1)
 	go func() { controlDone <- a.Send(ports.Frame{Type: ports.MsgPing}) }()
-	eventually(t, time.Second, func() bool {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		return len(a.outputQueue) == 2
-	})
-	if got := len(bPC.in); got != 3 {
-		t.Fatalf("datagrams after control=%d, want ordered paced queue", got)
-	}
-	clk.advance(defaultOutputPaceMinDelay)
 	eventuallyPacketCount(t, bPC, 5)
 	if err := <-controlDone; err != nil {
 		t.Fatal(err)
@@ -1179,6 +1228,11 @@ func TestImmediateLoopbackAckSamplesStampedFinalWrite(t *testing.T) {
 	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("state")}); err != nil {
 		t.Fatal(err)
 	}
+	eventually(t, time.Second, func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.srtt > 0
+	})
 	a.mu.Lock()
 	srtt, rto := a.srtt, a.rto
 	a.mu.Unlock()
@@ -1293,6 +1347,8 @@ func newResendTestTransport(t *testing.T, maxResendPerTick int) (*Transport, *at
 		maxResendPerTick: maxResendPerTick,
 		rto:              100 * time.Millisecond,
 		clock:            realClock{},
+		congestion:       newCongestionController(pdgram.DefaultMTU),
+		done:             make(chan struct{}),
 	}, &writes
 }
 
@@ -1326,11 +1382,11 @@ func TestOversizedRetransmitHonorsPacketBudget(t *testing.T) {
 
 	previous := int32(0)
 	for tick := 0; tick < 128; tick++ {
-		clk.advance(defaultOutputPaceMaxDelay)
+		clk.advance(initialPacingRTT)
 		time.Sleep(time.Millisecond)
 		current := writes.Load()
-		if delta := current - previous; delta > defaultPacketPaceBudget {
-			t.Fatalf("tick %d retransmitted %d packets, budget %d", tick, delta, defaultPacketPaceBudget)
+		if delta := current - previous; delta > dataBurstPackets {
+			t.Fatalf("tick %d retransmitted %d packets, burst %d", tick, delta, dataBurstPackets)
 		}
 		previous = current
 		select {

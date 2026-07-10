@@ -20,28 +20,23 @@ const (
 	recProbe byte = 3
 	recPong  byte = 4
 
-	defaultMTU                  = pdgram.DefaultMTU
-	defaultResend               = 250 * time.Millisecond
-	defaultMaxResendAfter       = 2 * time.Second
-	defaultMaxResendPerTick     = 64
-	defaultWriteTimeout         = 250 * time.Millisecond
-	defaultHeartbeat            = 3 * time.Second
-	defaultDegraded             = 10 * time.Second
-	defaultProbe                = 20 * time.Second
-	defaultOffline              = 30 * time.Second
-	defaultDead                 = 60 * time.Second
-	defaultMaxPending           = 1024
-	defaultMaxPendingWait       = 50 * time.Millisecond
-	defaultMaxRecvBuf           = 1024
-	defaultOutputPaceMinDelay   = 8 * time.Millisecond
-	defaultOutputPaceMinCadence = 20 * time.Millisecond
-	defaultOutputPaceMaxDelay   = 250 * time.Millisecond
-	defaultOutputPaceBatch      = 2
-	defaultPacketPaceBudget     = 8
-	dataRecordHeaderSize        = 12
-	maxRecvBuffer               = defaultMaxRecvBuf
-	linkEventBufferSize         = 16
-	probeReplyBufferSize        = controlQueueSize // legacy test burst bound
+	defaultMTU              = pdgram.DefaultMTU
+	defaultResend           = 250 * time.Millisecond
+	defaultMaxResendAfter   = 2 * time.Second
+	defaultMaxResendPerTick = 64
+	defaultWriteTimeout     = 250 * time.Millisecond
+	defaultHeartbeat        = 3 * time.Second
+	defaultDegraded         = 10 * time.Second
+	defaultProbe            = 20 * time.Second
+	defaultOffline          = 30 * time.Second
+	defaultDead             = 60 * time.Second
+	defaultMaxPending       = 1024
+	defaultMaxPendingWait   = 50 * time.Millisecond
+	defaultMaxRecvBuf       = 1024
+	dataRecordHeaderSize    = 12
+	maxRecvBuffer           = defaultMaxRecvBuf
+	linkEventBufferSize     = 16
+	probeReplyBufferSize    = controlQueueSize // legacy test burst bound
 )
 
 var (
@@ -188,6 +183,7 @@ type Transport struct {
 	maxPendingWait       time.Duration
 	maxRecvBuffer        int
 	clock                ports.Clock
+	congestion           congestionController
 	linkState            ports.LinkState
 	linkStateGeneration  uint64
 	linkEvents           chan ports.LinkEvent
@@ -205,7 +201,7 @@ type Transport struct {
 	hopGeneration        uint64
 	outputQueue          []queuedSend
 	outputWake           chan struct{}
-	outputNext           time.Time
+	dataSend             chan dataSendJob
 	retransmitWork       chan []retransmitRecord
 	writeDeadlines       *writeDeadlineState
 
@@ -215,10 +211,7 @@ type Transport struct {
 	in     chan ports.Frame
 	done   chan struct{}
 
-	writeMu           sync.Mutex
-	dataPaceMu        sync.Mutex
-	dataPaceRemaining int
-	dataPaceNext      time.Time
+	writeMu sync.Mutex
 	// beforeDataPace is a test synchronization hook. It is read under mu.
 	beforeDataPace func()
 	// outboundMu orders first transmissions and paced batches. Retransmits use
@@ -239,6 +232,7 @@ type pending struct {
 	initialInFlight bool
 	attempts        int
 	retransmitted   bool
+	wireBytes       int
 }
 
 type retransmitRecord struct {
@@ -338,6 +332,7 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 		maxPendingWait:          opts.MaxPendingWait,
 		maxRecvBuffer:           opts.MaxRecvBuffer,
 		clock:                   opts.Clock,
+		congestion:              newCongestionController(opts.MTU),
 		linkState:               ports.LinkStateConnected,
 		linkEvents:              make(chan ports.LinkEvent, linkEventBufferSize),
 		probeWait:               make(map[uint64]chan struct{}),
@@ -350,6 +345,7 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 	t.ackWake = make(chan struct{}, 1)
 	t.ackSend = make(chan uint64, 1)
 	t.outputWake = make(chan struct{})
+	t.dataSend = make(chan dataSendJob, opts.MaxPending)
 	t.writeDeadlines = newWriteDeadlineState(pc)
 	// One queued batch bounds retransmit work while its sole sender is paced.
 	t.retransmitWork = make(chan []retransmitRecord, 1)
@@ -362,7 +358,7 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 	go t.retransmitLoop()
 	go t.heartbeatLoop()
 	go t.healthLoop()
-	go t.retransmitSenderLoop()
+	go t.dataSendLoop()
 	go t.deliveryLoop()
 	go t.controlLoop()
 	go t.ackSendLoop()
@@ -399,60 +395,47 @@ func (t *Transport) send(f ports.Frame, async bool) error {
 		if len(t.pending) == 0 {
 			t.health.pendingStarted(now)
 		}
-		t.pending[seq] = &pending{frame: f, enqueued: now}
+		t.pending[seq] = &pending{frame: f, enqueued: now, wireBytes: dataRecordHeaderSize + len(f.Payload)}
 	}
-	if shouldPaceOutput(f) {
-		now := t.clock.Now()
-		if len(t.outputQueue) > 0 || (!t.outputNext.IsZero() && now.Before(t.outputNext)) {
-			wasEmpty := len(t.outputQueue) == 0
-			var done chan error
-			if !async {
-				done = make(chan error, 1)
-			}
-			t.outputQueue = append(t.outputQueue, queuedSend{seq: seq, reliable: reliable, frame: f, done: done})
-			if wasEmpty {
-				t.notifyOutputPacerLocked()
-			}
-			t.mu.Unlock()
-			if done == nil {
-				return nil
-			}
-			t.outboundMu.Unlock()
-			unlockOutbound = false
-			return t.waitQueuedSend(done)
-		}
-		t.outputNext = now.Add(t.outputPaceDelayLocked())
-		t.mu.Unlock()
-		t.markPendingSent(seq, reliable)
-		if err := t.sendData(seq, reliable, f); err != nil {
-			t.removePending(seq, reliable)
-			return err
-		}
-		t.markPendingReady(seq, reliable)
-		return nil
+	var done chan error
+	if !async {
+		done = make(chan error, 1)
 	}
-	if len(t.outputQueue) > 0 {
-		var done chan error
-		if !async {
-			done = make(chan error, 1)
+	job := dataSendJob{seq: seq, reliable: reliable, frame: f, done: done}
+	if shouldPaceOutput(f) || len(t.outputQueue) > 0 {
+		wasEmpty := len(t.outputQueue) == 0
+		t.outputQueue = append(t.outputQueue, queuedSend(job))
+		if wasEmpty {
+			t.notifyOutputPacerLocked()
 		}
-		t.outputQueue = append(t.outputQueue, queuedSend{seq: seq, reliable: reliable, frame: f, done: done})
 		t.mu.Unlock()
-		if done == nil {
-			return nil
-		}
 		t.outboundMu.Unlock()
 		unlockOutbound = false
+		if async {
+			return nil
+		}
 		return t.waitQueuedSend(done)
 	}
 	t.mu.Unlock()
-	t.markPendingSent(seq, reliable)
-	if err := t.sendData(seq, reliable, f); err != nil {
+	if err := t.queueDataJob(job); err != nil {
 		t.removePending(seq, reliable)
 		return err
 	}
-	t.markPendingReady(seq, reliable)
-	return nil
+	t.outboundMu.Unlock()
+	unlockOutbound = false
+	if async {
+		return nil
+	}
+	return t.waitQueuedSend(done)
+}
+
+func (t *Transport) queueDataJob(job dataSendJob) error {
+	select {
+	case t.dataSend <- job:
+		return nil
+	case <-t.done:
+		return t.closedError()
+	}
 }
 
 func (t *Transport) waitQueuedSend(done <-chan error) error {
@@ -653,40 +636,18 @@ func (t *Transport) unregisterProbe(id uint64) {
 	t.mu.Unlock()
 }
 
-func (t *Transport) sendData(seq uint64, reliable bool, f ports.Frame) error {
-	p := encodeData(seq, reliable, f)
-	return t.sendPayload(p, true, seq)
-}
 func (t *Transport) sendAck(seq uint64) {
 	var b [9]byte
 	b[0] = recAck
 	binary.BigEndian.PutUint64(b[1:], seq)
-	_ = t.sendPayload(b[:], false, 0)
+	_ = t.sendPayload(b[:])
 }
-func (t *Transport) sendPayload(p []byte, paced bool, pendingSeq uint64) error {
-	if paced {
-		t.mu.Lock()
-		beforeDataPace := t.beforeDataPace
-		t.mu.Unlock()
-		if beforeDataPace != nil {
-			beforeDataPace()
-		}
-		t.dataPaceMu.Lock()
-		defer t.dataPaceMu.Unlock()
-	}
+func (t *Transport) sendPayload(p []byte) error {
 	frags, err := pdgram.FragmentPayload(t.nextCounter(), p, t.mtu-pdgram.HeaderSize-t.codec.Overhead())
 	if err != nil {
 		return err
 	}
-	for i, f := range frags {
-		if pendingSeq != 0 && !t.pendingExists(pendingSeq) {
-			return nil
-		}
-		if paced {
-			if err := t.takeDataPaceSlot(); err != nil {
-				return err
-			}
-		}
+	for _, f := range frags {
 		raw, err := pdgram.MarshalFragment(f)
 		if err != nil {
 			return err
@@ -706,9 +667,6 @@ func (t *Transport) sendPayload(p []byte, paced bool, pendingSeq uint64) error {
 		if peer == nil {
 			return errors.New("dgram: no peer")
 		}
-		if pendingSeq != 0 && i == len(frags)-1 {
-			t.markPendingFinalWrite(pendingSeq)
-		}
 		if err := t.writePacket(pkt, peer); err != nil {
 			return err
 		}
@@ -721,30 +679,6 @@ func (t *Transport) pendingExists(seq uint64) bool {
 	defer t.mu.Unlock()
 	_, ok := t.pending[seq]
 	return ok
-}
-
-func (t *Transport) takeDataPaceSlot() error {
-	now := t.clock.Now()
-	if t.dataPaceRemaining > 0 && now.Before(t.dataPaceNext) {
-		t.dataPaceRemaining--
-		return nil
-	}
-	if t.dataPaceNext.After(now) {
-		timer := t.clock.NewTimer(t.dataPaceNext.Sub(now))
-		select {
-		case <-timer.C():
-		case <-t.done:
-			timer.Stop()
-			return t.closedError()
-		}
-		timer.Stop()
-	}
-	t.mu.Lock()
-	delay := t.outputPaceDelayLocked()
-	t.mu.Unlock()
-	t.dataPaceRemaining = defaultPacketPaceBudget - 1
-	t.dataPaceNext = t.clock.Now().Add(delay)
-	return nil
 }
 
 func (t *Transport) writePacket(pkt []byte, peer net.Addr) error {
@@ -878,6 +812,7 @@ func (t *Transport) handleRecord(p []byte) {
 		seq := binary.BigEndian.Uint64(p[1:])
 		t.mu.Lock()
 		acked := false
+		ackedBytes := 0
 		for pendingSeq, p := range t.pending {
 			if pendingSeq > seq {
 				continue
@@ -885,10 +820,14 @@ func (t *Transport) handleRecord(p []byte) {
 			if pendingSeq == seq && p != nil && !p.retransmitted {
 				t.updateRTTLocked(t.clock.Now().Sub(p.first))
 			}
+			if p != nil {
+				ackedBytes += p.wireBytes
+			}
 			delete(t.pending, pendingSeq)
 			acked = true
 		}
 		if acked {
+			t.congestion.onACK(ackedBytes)
 			now := t.clock.Now()
 			t.health.ackProgress(now)
 			if len(t.pending) == 0 {
@@ -1042,25 +981,102 @@ func (t *Transport) healthLoop() {
 	}
 }
 
-func (t *Transport) retransmitSenderLoop() {
+func (t *Transport) dataSendLoop() {
+	pacer := bytePacer{clk: t.clock}
 	for {
 		select {
+		case job := <-t.dataSend:
+			t.runDataSendJob(&pacer, job, true)
 		case batch := <-t.retransmitWork:
 			for _, r := range batch {
-				if err := t.sendData(r.seq, true, r.f); err == nil {
-					t.markPendingReady(r.seq, true)
-				} else {
-					t.mu.Lock()
-					if p := t.pending[r.seq]; p != nil {
-						p.initialInFlight = false
-					}
-					t.mu.Unlock()
-				}
+				t.runDataSendJob(&pacer, dataSendJob{seq: r.seq, reliable: true, frame: r.f}, false)
 			}
 		case <-t.done:
 			return
 		}
 	}
+}
+
+func (t *Transport) runDataSendJob(pacer *bytePacer, job dataSendJob, initial bool) {
+	if initial {
+		t.markPendingSent(job.seq, job.reliable)
+	}
+	err := t.writeDataJob(pacer, job)
+	if err != nil {
+		if initial {
+			t.removePending(job.seq, job.reliable)
+		} else {
+			t.markPendingReady(job.seq, job.reliable)
+		}
+		if !errors.Is(err, errPacerClosed) {
+			t.closeWithError(err)
+		}
+	} else {
+		t.markPendingReady(job.seq, job.reliable)
+	}
+	if job.done != nil {
+		if errors.Is(err, errPacerClosed) {
+			err = t.closedError()
+		}
+		job.done <- err
+		close(job.done)
+	}
+}
+
+func (t *Transport) writeDataJob(pacer *bytePacer, job dataSendJob) error {
+	payload := encodeData(job.seq, job.reliable, job.frame)
+	frags, err := pdgram.FragmentPayload(t.nextCounter(), payload, t.mtu-pdgram.HeaderSize-t.codec.Overhead())
+	if err != nil {
+		return err
+	}
+	t.mu.Lock()
+	beforeDataPace := t.beforeDataPace
+	t.mu.Unlock()
+	if beforeDataPace != nil {
+		beforeDataPace()
+	}
+	limits := func() (int, int) {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return t.congestion.bytesPerSecond(), t.congestion.burstBytes()
+	}
+	for i, frag := range frags {
+		if job.reliable && !t.pendingExists(job.seq) {
+			return nil
+		}
+		raw, err := pdgram.MarshalFragment(frag)
+		if err != nil {
+			return err
+		}
+		pkt := t.codec.Seal(t.sendDir, t.nextCounter(), raw, nil)
+		if err := pacer.wait(t.done, len(pkt), limits); err != nil {
+			return err
+		}
+		if job.reliable && !t.pendingExists(job.seq) {
+			return nil
+		}
+		t.mu.Lock()
+		peer := t.peer
+		closed := t.closed
+		closeErr := t.closeErr
+		t.mu.Unlock()
+		if closed {
+			if closeErr != nil {
+				return closeErr
+			}
+			return net.ErrClosed
+		}
+		if peer == nil {
+			return errors.New("dgram: no peer")
+		}
+		if i == len(frags)-1 {
+			t.markPendingFinalWrite(job.seq)
+		}
+		if err := t.writePacket(pkt, peer); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (t *Transport) heartbeatLoop() {
@@ -1125,6 +1141,7 @@ func (t *Transport) selectRetransmitsLocked(now time.Time) ([]retransmitRecord, 
 		p.initialInFlight = true
 		p.attempts++
 		p.retransmitted = true
+		t.congestion.onLoss()
 		t.retransmits++
 		emitDiagnostic = emitDiagnostic || t.retransmits%64 == 0
 		resend = append(resend, retransmitRecord{seq: seq, f: p.frame})
@@ -1133,15 +1150,24 @@ func (t *Transport) selectRetransmitsLocked(now time.Time) ([]retransmitRecord, 
 	return resend, emitDiagnostic
 }
 
-// resendPending remains a synchronous test hook for retransmission selection
-// unit tests. Production timer paths use queueRetransmits and the sole sender.
+// resendPending remains a test hook for retransmission selection. Constructed
+// transports transfer its batch to the sole data sender; small unit fixtures
+// without transport goroutines execute the selected writes inline.
 func (t *Transport) resendPending() {
 	now := t.clock.Now()
 	t.mu.Lock()
 	resend, _ := t.selectRetransmitsLocked(now)
 	t.mu.Unlock()
+	if t.retransmitWork != nil {
+		select {
+		case t.retransmitWork <- resend:
+		case <-t.done:
+		}
+		return
+	}
+	pacer := bytePacer{clk: t.clock}
 	for _, r := range resend {
-		if err := t.sendData(r.seq, true, r.f); err == nil {
+		if err := t.writeDataJob(&pacer, dataSendJob{seq: r.seq, reliable: true, frame: r.f}); err == nil {
 			t.markPendingReady(r.seq, true)
 		} else {
 			t.mu.Lock()
@@ -1194,6 +1220,7 @@ func (t *Transport) updateRTTLocked(sample time.Duration) {
 		rto = t.maxResendAfter
 	}
 	t.rto = rto
+	t.congestion.onRTT(t.srtt)
 }
 
 func (t *Transport) hopPacketConnOnce(generation uint64) {
