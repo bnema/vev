@@ -55,6 +55,7 @@ type session struct {
 	cancel context.CancelFunc
 
 	mu                     sync.Mutex // guards tabs, active, client, clipFiles, and clipboard queue state
+	themeMu                sync.Mutex
 	tabs                   []*tab
 	active                 int
 	client                 *attachedClient

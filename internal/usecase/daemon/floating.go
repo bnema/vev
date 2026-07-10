@@ -339,6 +339,7 @@ func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uin
 		closeFloatingPane(p)
 		return
 	}
+	d.reapplyThemeSession(sess)
 	d.startPaneGoroutines(sess, tb, p)
 	if visible {
 		d.resizeActiveFloating(tb)

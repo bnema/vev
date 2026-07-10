@@ -155,6 +155,31 @@ func TestStatusApplyThemeStoresClientAndPropagatesScreens(t *testing.T) {
 	assertSessionColorScheme(t, sess, true)
 }
 
+func TestApplyThemePropagatesToFloatingPane(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	tb := sess.activeTab()
+	floating := newPane("floating", nil, domain.Size{Cols: 20, Rows: 5})
+	installTestFloating(tb, floating, true)
+	clientTheme := ports.Theme{
+		HasForeground: true,
+		Foreground:    renderer.RGB{R: 1, G: 2, B: 3},
+		HasBackground: true,
+		Background:    renderer.RGB{R: 4, G: 5, B: 6},
+		SchemeKnown:   true,
+		Light:         true,
+	}
+
+	d.applyTheme(sess, ac, clientTheme)
+	assertPaneDefaultColors(t, floating, clientTheme.Foreground, clientTheme.Background)
+	assertPaneColorScheme(t, floating, true)
+
+	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark})
+	assertPaneDefaultColors(t, floating, themeui.BuiltinDark.Foreground, themeui.BuiltinDark.Background)
+	assertPaneColorScheme(t, floating, false)
+}
+
 func TestApplyThemeForcedBuiltinThemePropagatesToChromeAndPanes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -297,26 +322,36 @@ func TestApplyThemeAutoUnknownDoesNotClobberPaneColorScheme(t *testing.T) {
 func assertSessionDefaultColors(t *testing.T, sess *session, fg, bg renderer.RGB) {
 	t.Helper()
 	for _, tb := range sess.tabs {
-		var got []byte
-		tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
-		tb.focusedPane().screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
-		require.True(t, strings.Contains(string(got), formatOSCColor(fg)), string(got))
-		require.True(t, strings.Contains(string(got), formatOSCColor(bg)), string(got))
+		assertPaneDefaultColors(t, tb.focusedPane(), fg, bg)
 	}
 }
 
+func assertPaneDefaultColors(t *testing.T, p *pane, fg, bg renderer.RGB) {
+	t.Helper()
+	var got []byte
+	p.screen.OnResponse = func(b []byte) { got = append(got, b...) }
+	p.screen.Write([]byte("\x1b]10;?\a\x1b]11;?\a"))
+	require.True(t, strings.Contains(string(got), formatOSCColor(fg)), string(got))
+	require.True(t, strings.Contains(string(got), formatOSCColor(bg)), string(got))
+}
+
 func assertSessionColorScheme(t *testing.T, sess *session, light bool) {
+	t.Helper()
+	for _, tb := range sess.tabs {
+		assertPaneColorScheme(t, tb.focusedPane(), light)
+	}
+}
+
+func assertPaneColorScheme(t *testing.T, p *pane, light bool) {
 	t.Helper()
 	want := "\x1b[?997;1n"
 	if light {
 		want = "\x1b[?997;2n"
 	}
-	for _, tb := range sess.tabs {
-		var got []byte
-		tb.focusedPane().screen.OnResponse = func(b []byte) { got = append(got, b...) }
-		tb.focusedPane().screen.Write([]byte("\x1b[?996n"))
-		require.Equal(t, want, string(got))
-	}
+	var got []byte
+	p.screen.OnResponse = func(b []byte) { got = append(got, b...) }
+	p.screen.Write([]byte("\x1b[?996n"))
+	require.Equal(t, want, string(got))
 }
 
 func assertSessionColorSchemeUnknown(t *testing.T, sess *session) {

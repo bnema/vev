@@ -7,7 +7,12 @@ func (d *Daemon) applyHostTheme(sess *session, ac *attachedClient, t theme.Theme
 		ac.sendMu.Lock()
 		defer ac.sendMu.Unlock()
 	}
+	sess.themeMu.Lock()
+	defer sess.themeMu.Unlock()
+	return d.applyHostThemeLocked(sess, ac, t, clearUnknownScheme)
+}
 
+func (d *Daemon) applyHostThemeLocked(sess *session, ac *attachedClient, t theme.Theme, clearUnknownScheme bool) bool {
 	sess.mu.Lock()
 	if ac != nil {
 		if sess.client != ac {
@@ -28,6 +33,9 @@ func (d *Daemon) applyHostTheme(sess *session, ac *attachedClient, t theme.Theme
 	for _, tb := range tabs {
 		tb.mu.Lock()
 		panes := tb.panesSnapshot()
+		if floating := tb.floating.pane; floating != nil {
+			panes = append(panes, floating)
+		}
 		tb.mu.Unlock()
 		for _, p := range panes {
 			p.mu.Lock()

@@ -232,13 +232,21 @@ func (d *Daemon) reapplyThemeAllSessions() {
 	d.mu.Unlock()
 
 	for _, sess := range sessions {
-		sess.mu.Lock()
-		ac := sess.client
-		sess.mu.Unlock()
-		var clientTheme theme.Theme
-		if ac != nil {
-			clientTheme = ac.getClientTheme()
-		}
-		d.applyHostTheme(sess, ac, d.effectiveTheme(clientTheme), ac == nil)
+		d.reapplyThemeSession(sess)
 	}
+}
+
+func (d *Daemon) reapplyThemeSession(sess *session) {
+	sess.mu.Lock()
+	ac := sess.client
+	sess.mu.Unlock()
+	if ac == nil {
+		d.applyHostTheme(sess, nil, d.effectiveTheme(theme.Theme{}), true)
+		return
+	}
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+	sess.themeMu.Lock()
+	defer sess.themeMu.Unlock()
+	d.applyHostThemeLocked(sess, ac, d.effectiveTheme(ac.getClientTheme()), false)
 }

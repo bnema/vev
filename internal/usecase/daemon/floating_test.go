@@ -17,6 +17,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/layout"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
 
 func TestFloatingSlotTransitions(t *testing.T) {
@@ -134,7 +135,7 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 	tb := newTabWithStableID("t_stable", "p_normal", newBlockingPanePTY(t), domain.Size{Cols: 100, Rows: 40})
 	tb.ctx, tb.cancel = context.WithCancel(t.Context())
 	sess := &session{name: "work", cwd: cwd, tabs: []*tab{tb}, ctx: t.Context()}
-	d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Command: "btop --utf", Width: 50, Height: 50}})
+	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark, Floating: domain.FloatingConfig{Command: "btop --utf", Width: 50, Height: 50}})
 	d.ensureFloatingWarm(sess, tb)
 	// Open has started while this goroutine owns tab.mu: an external factory
 	// call under that lock would deadlock this channel-controlled test.
@@ -145,13 +146,19 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 		t.Fatal("floating Open waited for tab.mu")
 	}
 	tb.mu.Unlock()
-	d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Command: "later", Width: 90, Height: 90}})
+	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark, Floating: domain.FloatingConfig{Command: "later", Width: 90, Height: 90}})
 	close(allowOpen)
 	select {
 	case <-readerStarted: // install started exactly one reader after the async Open
 	case <-time.After(time.Second):
 		t.Fatal("floating pane was not installed")
 	}
+	tb.mu.Lock()
+	floating := tb.floating.pane
+	tb.mu.Unlock()
+	require.NotNil(t, floating)
+	assertPaneDefaultColors(t, floating, themeui.BuiltinDark.Foreground, themeui.BuiltinDark.Background)
+	assertPaneColorScheme(t, floating, false)
 	require.Equal(t, "/bin/custom-shell", gotCommand)
 	require.Equal(t, []string{"-lc", "btop --utf"}, gotArgs)
 	require.Equal(t, cwd, gotDir)
