@@ -22,8 +22,6 @@ import (
 func TestFloatingSlotTransitions(t *testing.T) {
 	first := &pane{}
 	second := &pane{}
-	launch := domain.FloatingConfig{Command: "top", Width: 80, Height: 80}
-
 	tests := []struct {
 		name string
 		run  func(t *testing.T, tb *tab)
@@ -32,12 +30,12 @@ func TestFloatingSlotTransitions(t *testing.T) {
 			name: "warming double toggle retains hidden completion",
 			run: func(t *testing.T, tb *tab) {
 				tb.mu.Lock()
-				generation := tb.beginFloatingWarmLocked(launch, false)
-				start, gotGeneration := tb.toggleFloatingLocked(launch)
+				generation := tb.beginFloatingWarmLocked(false)
+				start, gotGeneration := tb.toggleFloatingLocked()
 				if start || gotGeneration != generation || !tb.floating.desiredVisible {
 					t.Fatalf("first warming toggle = start %v, generation %d, desired %v", start, gotGeneration, tb.floating.desiredVisible)
 				}
-				start, gotGeneration = tb.toggleFloatingLocked(launch)
+				start, gotGeneration = tb.toggleFloatingLocked()
 				if start || gotGeneration != generation || tb.floating.desiredVisible {
 					t.Fatalf("second warming toggle = start %v, generation %d, desired %v", start, gotGeneration, tb.floating.desiredVisible)
 				}
@@ -51,15 +49,15 @@ func TestFloatingSlotTransitions(t *testing.T) {
 			name: "open and hide retain same pane",
 			run: func(t *testing.T, tb *tab) {
 				tb.mu.Lock()
-				generation := tb.beginFloatingWarmLocked(launch, false)
+				generation := tb.beginFloatingWarmLocked(false)
 				if !tb.installFloatingLocked(first, generation) {
 					t.Fatal("install failed")
 				}
-				start, _ := tb.toggleFloatingLocked(launch)
+				start, _ := tb.toggleFloatingLocked()
 				if start || tb.floating.state != floatingVisible || tb.floating.pane != first {
 					t.Fatal("hidden open did not retain pane")
 				}
-				tb.toggleFloatingLocked(launch)
+				tb.toggleFloatingLocked()
 				if tb.floating.state != floatingHidden || tb.floating.pane != first {
 					t.Fatal("visible hide did not retain pane")
 				}
@@ -70,7 +68,7 @@ func TestFloatingSlotTransitions(t *testing.T) {
 			name: "current launch failure clears desired visibility",
 			run: func(t *testing.T, tb *tab) {
 				tb.mu.Lock()
-				generation := tb.beginFloatingWarmLocked(launch, true)
+				generation := tb.beginFloatingWarmLocked(true)
 				if !tb.failFloatingLocked(generation) || tb.floating.state != floatingUninitialized || tb.floating.desiredVisible || tb.floating.pane != nil {
 					t.Fatal("current launch failure did not clear slot")
 				}
@@ -81,14 +79,14 @@ func TestFloatingSlotTransitions(t *testing.T) {
 			name: "current exit clears and stale completion is ignored",
 			run: func(t *testing.T, tb *tab) {
 				tb.mu.Lock()
-				generation := tb.beginFloatingWarmLocked(launch, true)
+				generation := tb.beginFloatingWarmLocked(true)
 				if !tb.installFloatingLocked(first, generation) {
 					t.Fatal("install failed")
 				}
 				if !tb.clearFloatingLocked(first, generation) || tb.floating.state != floatingUninitialized || tb.floating.pane != nil {
 					t.Fatal("current exit did not clear slot")
 				}
-				newGeneration := tb.beginFloatingWarmLocked(launch, true)
+				newGeneration := tb.beginFloatingWarmLocked(true)
 				if tb.installFloatingLocked(second, generation) {
 					t.Fatal("stale completion installed")
 				}
@@ -266,11 +264,11 @@ func TestFloatingLifecycleStaleSuccessAndOldExitCannotReplaceCurrentSlot(t *test
 	first := &pane{}
 	second := &pane{}
 	tb.mu.Lock()
-	g1 := tb.beginFloatingWarmLocked(domain.FloatingConfig{}, true)
+	g1 := tb.beginFloatingWarmLocked(true)
 	require.True(t, tb.installFloatingLocked(first, g1))
 	g2 := tb.clearFloatingLocked(first, g1)
 	require.True(t, g2)
-	generation := tb.beginFloatingWarmLocked(domain.FloatingConfig{}, true)
+	generation := tb.beginFloatingWarmLocked(true)
 	require.True(t, tb.installFloatingLocked(second, generation))
 	tb.mu.Unlock()
 	d.reapFloating(sess, tb, first, g1)
@@ -284,7 +282,7 @@ func TestFloatingReapAndTeardownCloseMatchingPaneOnce(t *testing.T) {
 	tb := newFloatingTestTab(t)
 	p := newPane(layout.PaneID("floating"), pty, domain.Size{Cols: 10, Rows: 10})
 	tb.mu.Lock()
-	g := tb.beginFloatingWarmLocked(domain.FloatingConfig{}, true)
+	g := tb.beginFloatingWarmLocked(true)
 	require.True(t, tb.installFloatingLocked(p, g))
 	tb.mu.Unlock()
 	d := newTestDaemon(t, nil, stubClock{})
@@ -298,7 +296,7 @@ func TestFloatingTeardownClosesInstalledPaneOnce(t *testing.T) {
 	tb := newFloatingTestTab(t)
 	p := newPane(layout.PaneID("floating"), pty, domain.Size{Cols: 10, Rows: 10})
 	tb.mu.Lock()
-	g := tb.beginFloatingWarmLocked(domain.FloatingConfig{}, false)
+	g := tb.beginFloatingWarmLocked(false)
 	require.True(t, tb.installFloatingLocked(p, g))
 	tb.mu.Unlock()
 	d := newTestDaemon(t, nil, stubClock{})
@@ -328,7 +326,7 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 			return 0, io.EOF
 		}).Once()
 		floating := newPane(layout.PaneID("floating"), floatingPTY, domain.Size{Cols: 20, Rows: 8})
-		generation := tb.beginFloatingWarmLocked(domain.FloatingConfig{}, state == floatingVisible)
+		generation := tb.beginFloatingWarmLocked(state == floatingVisible)
 		require.True(t, tb.installFloatingLocked(floating, generation))
 		if state == floatingHidden {
 			require.Equal(t, floatingHidden, tb.floating.state)
@@ -395,7 +393,7 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 		generation := tb.floating.generation
 		require.True(t, tb.clearFloatingLocked(stale, generation))
 		current := newPane(layout.PaneID("replacement"), newBlockingPanePTY(t), domain.Size{Cols: 20, Rows: 8})
-		currentGeneration := tb.beginFloatingWarmLocked(domain.FloatingConfig{}, true)
+		currentGeneration := tb.beginFloatingWarmLocked(true)
 		require.True(t, tb.installFloatingLocked(current, currentGeneration))
 		tb.mu.Unlock()
 		exit()
@@ -530,7 +528,7 @@ func TestFloatingToggleUsesVisibleTarget(t *testing.T) {
 	tb := newFloatingTestTab(t)
 	sess := &session{tabs: []*tab{tb}, ctx: t.Context()}
 	tb.mu.Lock()
-	g := tb.beginFloatingWarmLocked(domain.FloatingConfig{}, false)
+	g := tb.beginFloatingWarmLocked(false)
 	floating := &pane{}
 	require.True(t, tb.installFloatingLocked(floating, g))
 	tb.mu.Unlock()

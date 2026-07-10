@@ -29,32 +29,30 @@ type floatingSlot struct {
 	pane           *pane
 	desiredVisible bool
 	generation     uint64
-	launch         domain.FloatingConfig
 }
 
 // beginFloatingWarmLocked starts a single background launch. The caller must
 // hold tb.mu and must only call it for an uninitialized slot.
-func (tb *tab) beginFloatingWarmLocked(launch domain.FloatingConfig, desiredVisible bool) uint64 {
+func (tb *tab) beginFloatingWarmLocked(desiredVisible bool) uint64 {
 	if tb == nil || tb.floating.state != floatingUninitialized {
 		return 0
 	}
 	tb.floating.generation++
 	tb.floating.state = floatingWarming
 	tb.floating.desiredVisible = desiredVisible
-	tb.floating.launch = launch
 	return tb.floating.generation
 }
 
 // toggleFloatingLocked applies the user action. Its result says whether a new
 // PTY launch is required and returns the generation associated with that launch
 // or current slot.
-func (tb *tab) toggleFloatingLocked(launch domain.FloatingConfig) (bool, uint64) {
+func (tb *tab) toggleFloatingLocked() (bool, uint64) {
 	if tb == nil {
 		return false, 0
 	}
 	switch tb.floating.state {
 	case floatingUninitialized:
-		generation := tb.beginFloatingWarmLocked(launch, true)
+		generation := tb.beginFloatingWarmLocked(true)
 		return generation != 0, generation
 	case floatingWarming:
 		tb.floating.desiredVisible = !tb.floating.desiredVisible
@@ -90,7 +88,6 @@ func (tb *tab) failFloatingLocked(generation uint64) bool {
 	tb.floating.state = floatingUninitialized
 	tb.floating.pane = nil
 	tb.floating.desiredVisible = false
-	tb.floating.launch = domain.FloatingConfig{}
 	return true
 }
 
@@ -116,7 +113,6 @@ func (tb *tab) takeFloatingLocked() *pane {
 	tb.floating.state = floatingUninitialized
 	tb.floating.pane = nil
 	tb.floating.desiredVisible = false
-	tb.floating.launch = domain.FloatingConfig{}
 	return p
 }
 
@@ -172,7 +168,7 @@ func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 	}
 	cfg := d.currentFloatingConfig()
 	tb.mu.Lock()
-	start, generation := tb.toggleFloatingLocked(cfg)
+	start, generation := tb.toggleFloatingLocked()
 	visible := tb.floating.desiredVisible
 	tb.mu.Unlock()
 	if start {
@@ -189,28 +185,53 @@ func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 func (d *Daemon) startFloating(sess *session, tb *tab, visible bool) {
 	cfg := d.currentFloatingConfig()
 	tb.mu.Lock()
-	generation := tb.beginFloatingWarmLocked(cfg, visible)
+	generation := tb.beginFloatingWarmLocked(visible)
 	tb.mu.Unlock()
 	if generation != 0 {
 		d.launchFloating(sess, tb, cfg, generation, visible)
 	}
 }
 
-// launchFloating snapshots all launch inputs before starting the potentially
-// blocking factory call. In particular, no PTY operation occurs while tb.mu is
-// held, and config reloads cannot affect this launch.
+// floatingLaunchSpec is an immutable snapshot of one launch. It is built
+// before the worker starts so config reloads cannot affect that launch.
+type floatingLaunchSpec struct {
+	sessionName  string
+	cwd          string
+	size         domain.Size
+	paneStableID string
+	env          []string
+	command      string
+	args         []string
+	fallback     string
+	parentCtx    context.Context
+	userOpen     bool
+}
+
+// launchFloating snapshots launch inputs, then accounts for a worker through
+// Open, pane initialization, publication, and reader/scheduler startup.
 func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfig, generation uint64, userOpen bool) {
+	spec, err := d.newFloatingLaunchSpec(sess, tb, cfg, userOpen)
+	if err != nil {
+		d.failFloatingLaunch(tb, generation, userOpen, spec.sessionName, err)
+		return
+	}
+	// Count the launch before its goroutine starts. It remains counted through
+	// install, including the reader/scheduler Adds, so shutdown cannot return
+	// before a late Open completion has either been rejected or fully joined.
+	d.sessWg.Go(func() { d.openAndInstallFloating(sess, tb, spec, generation) })
+}
+
+func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.FloatingConfig, userOpen bool) (floatingLaunchSpec, error) {
 	sess.mu.Lock()
-	name, cwd, term := sess.name, sess.cwd, sess.terminal
+	name, cwd, term, sessCtx := sess.name, sess.cwd, sess.terminal, sess.ctx
 	sess.mu.Unlock()
 	tb.mu.Lock()
-	sz := floatingInnerSize(tb.size, cfg)
+	size := floatingInnerSize(tb.size, cfg)
 	focused := tb.focusedPane()
-	tabStableID := tb.stableID
-	tabCtx := tb.ctx
+	tabStableID, tabCtx := tb.stableID, tb.ctx
 	tb.mu.Unlock()
-	if !sz.Valid() {
-		sz = domain.Size{Cols: 1, Rows: 1}
+	if !size.Valid() {
+		size = domain.Size{Cols: 1, Rows: 1}
 	}
 	if focused != nil && d.procCwd != nil && focused.pty != nil {
 		if live, err := d.procCwd(focused.pty.Pid()); err == nil && live != "" {
@@ -222,39 +243,47 @@ func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfi
 	}
 	paneStableID, err := newStableID("p")
 	if err != nil {
-		d.failFloatingLaunch(tb, generation, userOpen, name, err)
-		return
+		return floatingLaunchSpec{sessionName: name}, err
 	}
-	env := d.childEnv(name, tabStableID, paneStableID, term)
+	if tabCtx == nil {
+		tabCtx = sessCtx
+	}
+	if tabCtx == nil {
+		tabCtx = context.Background()
+	}
 	command, args := d.shell, append([]string(nil), d.shellArgs...)
 	if cfg.Command != "" {
 		args = []string{"-lc", cfg.Command}
 	}
-	fallback := floatingCommandFallback(cfg.Command, d.shell)
-	// Count the launch before its goroutine starts. It remains counted through
-	// install, including the reader/scheduler Adds, so shutdown cannot return
-	// before a late Open completion has either been rejected or fully joined.
-	d.sessWg.Go(func() {
-		pty, openErr := d.ptys.Open(command, args, env, cwd, sz)
-		if openErr != nil {
-			d.failFloatingLaunch(tb, generation, userOpen, name, openErr)
-			return
-		}
-		p := newPaneWithStableID(layout.PaneID("floating"), paneStableID, pty, sz)
-		p.title.displayFallback = fallback
-		paneCtx := tabCtx
-		if paneCtx == nil {
-			paneCtx = sess.ctx
-		}
-		if paneCtx == nil {
-			paneCtx = context.Background()
-		}
-		p.ctx, p.cancel = context.WithCancel(paneCtx)
-		// The reader may run as soon as install returns; make its exit policy
-		// immutable before publishing the pane to the slot.
-		p.onExit = func() { d.reapFloating(sess, tb, p, generation) }
-		d.installFloating(sess, tb, p, generation)
-	})
+	return floatingLaunchSpec{
+		sessionName:  name,
+		cwd:          cwd,
+		size:         size,
+		paneStableID: paneStableID,
+		env:          d.childEnv(name, tabStableID, paneStableID, term),
+		command:      command,
+		args:         args,
+		fallback:     floatingCommandFallback(cfg.Command, d.shell),
+		parentCtx:    tabCtx,
+		userOpen:     userOpen,
+	}, nil
+}
+
+// openAndInstallFloating runs entirely in the launch worker. No PTY operation
+// occurs under tb.mu; the pane is fully initialized before publication.
+func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLaunchSpec, generation uint64) {
+	pty, err := d.ptys.Open(spec.command, spec.args, spec.env, spec.cwd, spec.size)
+	if err != nil {
+		d.failFloatingLaunch(tb, generation, spec.userOpen, spec.sessionName, err)
+		return
+	}
+	p := newPaneWithStableID(layout.PaneID("floating"), spec.paneStableID, pty, spec.size)
+	p.title.displayFallback = spec.fallback
+	p.ctx, p.cancel = context.WithCancel(spec.parentCtx)
+	// The reader may run as soon as install returns; make its exit policy
+	// immutable before publishing the pane to the slot.
+	p.onExit = func() { d.reapFloating(sess, tb, p, generation) }
+	d.installFloating(sess, tb, p, generation)
 }
 
 func (d *Daemon) failFloatingLaunch(tb *tab, generation uint64, userOpen bool, sessionName string, err error) {

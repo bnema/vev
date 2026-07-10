@@ -72,7 +72,7 @@ func TestSnapshotCaptureExcludesFloatingRuntime(t *testing.T) {
 	floatingPTY, _ := newBlockingPTY(t)
 	floating := newPane(layout.PaneID("floating"), floatingPTY, domain.Size{Cols: 20, Rows: 8})
 	tb.mu.Lock()
-	generation := tb.beginFloatingWarmLocked(domain.FloatingConfig{Command: "top"}, false)
+	generation := tb.beginFloatingWarmLocked(false)
 	require.True(t, tb.installFloatingLocked(floating, generation))
 	tb.mu.Unlock()
 
