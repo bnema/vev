@@ -46,6 +46,10 @@ type recvItem struct {
 	err error
 }
 
+type markedDatagramTransport struct{ ports.Transport }
+
+func (markedDatagramTransport) DatagramTransport() {}
+
 // scriptRecv wires a MockTransport's Recv to yield the given items in order,
 // then block forever (simulating a live but idle connection). It returns a
 // cleanup that unblocks the parked reader.
@@ -183,10 +187,34 @@ func TestAttachHelloIncludesTrueColor(t *testing.T) {
 	case hello := <-gotHello:
 		require.Equal(t, "xterm-256color", hello.TermEnv)
 		require.True(t, hello.TrueColor)
-		require.True(t, hello.AckOutput)
+		require.Equal(t, uint8(8), hello.MaxOutputInFlight)
 	case <-time.After(2 * time.Second):
 		t.Fatal("hello frame was not sent")
 	}
+}
+
+func TestAttachHelloRequestsSingleOutputForDatagramTransport(t *testing.T) {
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
+	defer in.unblock()
+
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).RunAndReturn(func(f ports.Frame) error {
+		hello, err := ports.UnmarshalHello(f.Payload)
+		require.NoError(t, err)
+		require.Equal(t, uint8(1), hello.MaxOutputInFlight)
+		return nil
+	}).Once()
+	unblock := scriptRecv(tr,
+		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	)
+	defer unblock()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	require.NoError(t, client.Attach(context.Background(), markedDatagramTransport{tr}, tm, realClock{}, ports.IntentEphemeral, ""))
 }
 
 func TestAttachHappyPath(t *testing.T) {

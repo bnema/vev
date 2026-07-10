@@ -71,11 +71,11 @@ func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
 	tr := newDatagramTestTransport()
 	routed, ac, err := d.route(ports.Hello{
-		Version:   ports.ProtocolVersion,
-		Intent:    ports.IntentAttach,
-		Name:      sess.name,
-		Size:      domain.Size{Cols: 80, Rows: 24},
-		AckOutput: true,
+		Version:           ports.ProtocolVersion,
+		Intent:            ports.IntentAttach,
+		Name:              sess.name,
+		Size:              domain.Size{Cols: 80, Rows: 24},
+		MaxOutputInFlight: 8,
 	}, tr)
 	require.NoError(t, err)
 	require.Same(t, sess, routed)
@@ -126,11 +126,11 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
 	tr := newDatagramTestTransport()
 	_, ac, err := d.route(ports.Hello{
-		Version:   ports.ProtocolVersion,
-		Intent:    ports.IntentAttach,
-		Name:      sess.name,
-		Size:      domain.Size{Cols: 80, Rows: 24},
-		AckOutput: true,
+		Version:           ports.ProtocolVersion,
+		Intent:            ports.IntentAttach,
+		Name:              sess.name,
+		Size:              domain.Size{Cols: 80, Rows: 24},
+		MaxOutputInFlight: 8,
 	}, tr)
 	require.NoError(t, err)
 
@@ -267,4 +267,56 @@ func TestFailedPaintSendRollsBackOutputState(t *testing.T) {
 
 	require.Zero(t, ac.output.next)
 	require.Zero(t, ac.output.acked)
+}
+
+func TestDatagramWindowOneCoalescesPaintsUntilMsgAck(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	d, sess, _, _ := newManualSessionWithPTYs(t, p)
+	tr := newDatagramTestTransport()
+	_, ac, err := d.route(ports.Hello{
+		Version:           ports.ProtocolVersion,
+		Intent:            ports.IntentAttach,
+		Name:              sess.name,
+		Size:              domain.Size{Cols: 80, Rows: 24},
+		MaxOutputInFlight: 1,
+	}, tr)
+	require.NoError(t, err)
+
+	pane := sess.tabs[0].focusedPane()
+	pane.screen.Write([]byte("A"))
+	d.paint(sess, ac, false)
+	first := awaitFrame(t, tr.sends, ports.MsgOutput)
+	firstOutput, err := ports.UnmarshalOutput(first.Payload)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), firstOutput.NewStateNum)
+	for range 100 {
+		pane.screen.Write([]byte("x"))
+		d.paint(sess, ac, false)
+	}
+	pane.screen.Write([]byte("LATEST"))
+	d.paint(sess, ac, false)
+	requireNoOutputFrame(t, tr.sends)
+	require.Equal(t, uint64(1), ac.output.outstanding(), "only one state-bearing datagram output may be unacknowledged")
+
+	// Side-effect output is control-like: it must pass while the state window is
+	// full without consuming another state number.
+	require.NoError(t, d.boundedSendOutputErr(ac, []byte("side-effect")))
+	sideEffect := awaitFrame(t, tr.sends, ports.MsgOutput)
+	sideEffectOutput, err := ports.UnmarshalOutput(sideEffect.Payload)
+	require.NoError(t, err)
+	require.Zero(t, sideEffectOutput.BaseStateNum)
+	require.Zero(t, sideEffectOutput.NewStateNum)
+	require.Equal(t, uint64(1), ac.output.outstanding())
+
+	tr.recv <- ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{AckedStateNum: firstOutput.NewStateNum})}
+	require.NoError(t, tr.Close())
+	d.runConnLoop(ac)
+	second := awaitFrame(t, tr.sends, ports.MsgOutput)
+	secondOutput, err := ports.UnmarshalOutput(second.Payload)
+	require.NoError(t, err)
+	require.Equal(t, firstOutput.NewStateNum, secondOutput.BaseStateNum)
+	require.Equal(t, uint64(2), secondOutput.NewStateNum)
+	require.Contains(t, string(secondOutput.Data), "LATEST", "cumulative ACK must release the latest coalesced state")
+	require.Equal(t, uint64(1), ac.output.outstanding())
 }

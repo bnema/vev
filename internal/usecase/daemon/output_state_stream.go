@@ -14,16 +14,22 @@ import (
 //
 // Callers serialize access with attachedClient.sendMu.
 type outputStateStream struct {
-	renderer      *renderer.Renderer
-	next          uint64
-	acked         uint64
-	deferred      bool
-	deferredReset bool
+	renderer       *renderer.Renderer
+	next           uint64
+	acked          uint64
+	deferred       bool
+	deferredReset  bool
+	maxOutstanding uint64
 }
 
-func newOutputStateStream() *outputStateStream {
+func newOutputStateStream(windowSize ...uint8) *outputStateStream {
+	window := uint8(maxUnackedOutputStates)
+	if len(windowSize) > 0 {
+		window = normalizeOutputWindow(windowSize[0])
+	}
 	return &outputStateStream{
-		renderer: renderer.New(renderer.Capabilities{}),
+		renderer:       renderer.New(renderer.Capabilities{}),
+		maxOutstanding: uint64(window),
 	}
 }
 
@@ -87,7 +93,7 @@ func (s *outputStateStream) rebase() {
 }
 
 func (s *outputStateStream) atCapacity() bool {
-	return s.outstanding() >= maxUnackedOutputStates
+	return s.outstanding() >= s.maxOutstanding
 }
 
 func (s *outputStateStream) deferIfAtCapacity(reset bool) bool {

@@ -191,6 +191,10 @@ type assembly struct {
 }
 
 func NewReassembler() *Reassembler { return &Reassembler{inflight: make(map[uint64]*assembly)} }
+
+// Inflight returns the number of incomplete records currently being reassembled.
+func (r *Reassembler) Inflight() int { return len(r.inflight) }
+
 func (r *Reassembler) Add(f Fragment) ([]byte, bool, error) {
 	if f.Count == 0 || int(f.Count) > maxFragmentCount || f.Index >= f.Count {
 		return nil, false, ErrFragment

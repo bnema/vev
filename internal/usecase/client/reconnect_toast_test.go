@@ -179,26 +179,38 @@ func reconnectToastHelloFromSend(t *testing.T, tr *reconnectToastRecordingTransp
 	return hello
 }
 
-func TestAttachOnceLinkStateEventsDriveReconnectUIStage(t *testing.T) {
+func TestReconnectToastDegradedClearsModalAndProbingIsVisible(t *testing.T) {
 	term := newReconnectToastTerminalHarness(t)
 	defer term.closeInput()
 	tr := newReconnectToastLinkTransport()
 	tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
 
 	stages := make(chan reconnectStage, 4)
+	clears := make(chan struct{}, 4)
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
 	go func() {
 		resultCh <- attachOnce(context.Background(), tr, term.term, portsmocks.NewMockClock(t), ports.IntentAttach, "main", 0, [16]byte{1}, &ms, func() error {
 			_, err := term.term.EnterRaw()
 			return err
-		}, func() {}, func(stage reconnectStage) {
+		}, func() { clears <- struct{}{} }, func(stage reconnectStage) {
 			stages <- stage
 		}, tr.LinkEvents(), true, nil, slog.New(slog.DiscardHandler))
 	}()
 
+	require.Eventually(t, func() bool { return len(clears) == 1 }, time.Second, time.Millisecond)
+	<-clears // Welcome clears any stale status from an earlier attempt.
 	tr.events <- ports.LinkEvent{State: ports.LinkStateDegraded}
-	require.Equal(t, reconnectStageDegraded, <-stages)
+	select {
+	case <-clears:
+	case <-time.After(time.Second):
+		t.Fatal("degraded link did not clear stale reconnect modal")
+	}
+	select {
+	case stage := <-stages:
+		t.Fatalf("degraded link drew modal stage %v", stage)
+	case <-time.After(25 * time.Millisecond):
+	}
 	tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
 	require.Equal(t, reconnectStageProbingUDP, <-stages)
 	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)}

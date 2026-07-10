@@ -3,7 +3,9 @@ package dgram
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -78,30 +80,49 @@ func TestProxyRuntimeCopiesFramesAndDaemonEOFIsTerminal(t *testing.T) {
 	}
 }
 
-func TestProxyRuntimeForwardsOutputAckCapabilityInHello(t *testing.T) {
-	client := newFakeTransport()
-	daemon := newFakeTransport()
-	errCh := make(chan error, 1)
-	go func() { errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Hour}.Run(t.Context()) }()
-	hello := ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", AckOutput: true}
-	client.recv <- recvResult{frame: ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}}
+func TestProxyRuntimeClampsDatagramHelloOutputWindowAndPreservesControl(t *testing.T) {
+	for _, requested := range []uint8{0, 1, 8} {
+		t.Run(fmt.Sprintf("requested_%d", requested), func(t *testing.T) {
+			client := newFakeTransport()
+			daemon := newFakeTransport()
+			errCh := make(chan error, 1)
+			go func() { errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Hour}.Run(t.Context()) }()
+			hello := ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", MaxOutputInFlight: requested}
+			client.recv <- recvResult{frame: ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}}
 
-	select {
-	case frame := <-daemon.sent:
-		got, err := ports.UnmarshalHello(frame.Payload)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !got.AckOutput {
-			t.Fatal("proxied Hello lost AckOutput capability")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for proxied Hello")
-	}
+			select {
+			case frame := <-daemon.sent:
+				got, err := ports.UnmarshalHello(frame.Payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.MaxOutputInFlight != 1 {
+					t.Fatalf("proxied output window=%d, want datagram-safe 1", got.MaxOutputInFlight)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for proxied Hello")
+			}
 
-	daemon.recv <- recvResult{err: io.EOF}
-	if err := <-errCh; err != nil {
-		t.Fatalf("Run err=%v, want nil", err)
+			input := ports.Frame{Type: ports.MsgInput, Payload: []byte("still flowing")}
+			ack := ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{AckedStateNum: 7})}
+			client.recv <- recvResult{frame: input}
+			client.recv <- recvResult{frame: ack}
+			for _, want := range []ports.Frame{input, ack} {
+				select {
+				case got := <-daemon.sent:
+					if !reflect.DeepEqual(got, want) {
+						t.Fatalf("proxied control frame=%+v, want %+v", got, want)
+					}
+				case <-time.After(time.Second):
+					t.Fatalf("timeout waiting for proxied %v", want.Type)
+				}
+			}
+
+			daemon.recv <- recvResult{err: io.EOF}
+			if err := <-errCh; err != nil {
+				t.Fatalf("Run err=%v, want nil", err)
+			}
+		})
 	}
 }
 
@@ -463,4 +484,35 @@ func TestProxyCopierStopsRetryingWhenContextCanceled(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("retrying copier did not stop after context cancellation")
 	}
+}
+
+func TestClampDatagramHelloOutputWindowPreservesProtocolValidation(t *testing.T) {
+	t.Run("malformed payload remains malformed", func(t *testing.T) {
+		payload := append(ports.MarshalHello(ports.Hello{Version: ports.ProtocolVersion, MaxOutputInFlight: 8}), 0xff)
+		frame := ports.Frame{Type: ports.MsgHello, Payload: payload}
+		got := clampDatagramHelloOutputWindow(frame)
+		if !reflect.DeepEqual(got, frame) {
+			t.Fatalf("malformed Hello changed: got %#v, want %#v", got, frame)
+		}
+		if _, err := ports.UnmarshalHello(got.Payload); err == nil {
+			t.Fatal("malformed Hello became decodable")
+		}
+	})
+
+	t.Run("mismatched version remains mismatched", func(t *testing.T) {
+		wantVersion := ports.ProtocolVersion + 1
+		frame := ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(ports.Hello{
+			Version: wantVersion, MaxOutputInFlight: 8,
+		})}
+		got, err := ports.UnmarshalHello(clampDatagramHelloOutputWindow(frame).Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Version != wantVersion {
+			t.Fatalf("version=%d, want unchanged mismatch %d", got.Version, wantVersion)
+		}
+		if got.MaxOutputInFlight != 1 {
+			t.Fatalf("output window=%d, want 1", got.MaxOutputInFlight)
+		}
+	})
 }

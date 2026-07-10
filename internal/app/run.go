@@ -745,7 +745,9 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 		return err
 	}
 	defer func() { _ = daemonTr.Close() }()
-	dg, err := dgram.NewTransportWithOptions(conn, nil, key, 2, 1, udpProxyClientTransportOptions)
+	udpOptions := udpProxyClientTransportOptions
+	udpOptions.Observe = dgram.DiagnosticLogObserver(log)
+	dg, err := dgram.NewTransportWithOptions(conn, nil, key, 2, 1, udpOptions)
 	if err != nil {
 		return err
 	}

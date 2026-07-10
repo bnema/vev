@@ -74,6 +74,15 @@ const detachNotifyTimeout = time.Second
 // the proxy's reliable queue never fills from painting alone.
 const maxUnackedOutputStates = 8
 
+// normalizeOutputWindow bounds the untrusted Hello value. Zero deliberately
+// means the legacy/default window, so malformed or absent values remain safe.
+func normalizeOutputWindow(window uint8) uint8 {
+	if window == 0 || window > maxUnackedOutputStates {
+		return maxUnackedOutputStates
+	}
+	return window
+}
+
 const defaultResumeParkGrace = 15 * time.Minute
 
 // defaultSize is used when a client's Hello carries no valid dimensions.
@@ -667,7 +676,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
 		sess.mu.Lock()
 		sess.terminal = term
 		sess.mu.Unlock()
@@ -683,7 +692,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
 		sess.mu.Lock()
 		sess.terminal = term
 		sess.mu.Unlock()
@@ -710,7 +719,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
 		sess.mu.Lock()
 		sess.terminal = term
 		sess.mu.Unlock()
@@ -735,7 +744,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true})
+		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
 		sess.mu.Lock()
 		sess.terminal = term
 		sess.mu.Unlock()

@@ -45,6 +45,13 @@ type Transport interface {
 	Close() error
 }
 
+// DatagramTransport marks transports backed by a datagram link. It lets
+// usecases negotiate a conservative output window without importing adapters.
+type DatagramTransport interface {
+	Transport
+	DatagramTransport()
+}
+
 // AsyncTransport accepts frames for ordered background transmission. SendAsync
 // returns once the adapter owns the frame; Send retains its synchronous wire-
 // attempt contract. Daemon paint output may use this capability to pipeline.

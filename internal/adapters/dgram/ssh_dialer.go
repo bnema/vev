@@ -176,6 +176,7 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 	// fresh local UDP socket once the link is silent long enough to probe. The
 	// bind reuses listenUDPPacket so tests can stub it.
 	t, err := NewTransportWithOptions(pc, peer, ready.key, 1, 2, Options{
+		Observe: DiagnosticLogObserver(d.Log),
 		RebindPacketConn: func(net.PacketConn) (net.PacketConn, error) {
 			return listenUDPPacket(ctx)
 		},

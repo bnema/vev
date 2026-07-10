@@ -3,13 +3,25 @@ package ports
 import "time"
 
 // LinkState reports best-effort transport health without changing Transport.
+// Implementations may distinguish authenticated path contact from useful
+// stream progress when classifying the link.
 type LinkState int
 
 const (
+	// LinkStateConnected means a complete record or meaningful acknowledgement
+	// progress was observed recently.
 	LinkStateConnected LinkState = iota
+	// LinkStateDegraded means authenticated packets still reach the path, but
+	// complete records and acknowledgement progress have stalled.
 	LinkStateDegraded
+	// LinkStateProbing means packet contact is silent or pending data has made no
+	// round-trip progress long enough for path recovery to begin.
 	LinkStateProbing
+	// LinkStateOffline means authenticated packet contact has been absent long
+	// enough for the client to resume over its fallback transport.
 	LinkStateOffline
+	// LinkStateDead means prolonged authenticated-packet silence has made the
+	// transport terminal.
 	LinkStateDead
 )
 
