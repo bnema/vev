@@ -161,6 +161,53 @@ func TestCumulativeACKCoalescesForBoundedDelay(t *testing.T) {
 	}
 }
 
+func TestACKDeadlineDispatchesWhileAdvisoryWriteIsBlocked(t *testing.T) {
+	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+	aPC, bPC := newPair()
+	a, err := NewTransportWithOptions(aPC, bPC.addr, key(), 1, 2, Options{
+		Clock: clk, ResendAfter: time.Hour, Heartbeat: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }()
+	for range 3 {
+		awaitSignal(t, clk.timerCreated, "transport timer creation")
+	}
+
+	probeStarted := make(chan struct{}, 1)
+	ackStarted := make(chan struct{}, 1)
+	releaseProbe := make(chan struct{})
+	defer close(releaseProbe)
+	aPC.drop = func(pkt []byte, _ net.Addr) bool {
+		_, raw, err := a.codec.Open(pkt, a.sendDir, nil, nil)
+		if err != nil {
+			return true
+		}
+		frag, err := pdgram.UnmarshalFragment(raw)
+		if err != nil || frag.Count != 1 || len(frag.Data) != 9 {
+			return true
+		}
+		switch frag.Data[0] {
+		case recProbe:
+			probeStarted <- struct{}{}
+			<-releaseProbe
+		case recAck:
+			ackStarted <- struct{}{}
+		}
+		return true
+	}
+
+	if !a.queueControl(recProbe, 1) {
+		t.Fatal("probe control queue unexpectedly full")
+	}
+	awaitSignal(t, probeStarted, "blocked advisory probe write")
+	a.queueACK(1)
+	awaitSignal(t, clk.timerCreated, "ACK coalescing timer creation")
+	clk.advance(maxACKDelay)
+	awaitSignal(t, ackStarted, "ACK write while advisory probe remains blocked")
+}
+
 func TestProbeDoesNotBlockOnDataWriter(t *testing.T) {
 	aPC, bPC := newPair()
 	a, err := NewTransportWithOptions(aPC, bPC.addr, key(), 1, 2, Options{

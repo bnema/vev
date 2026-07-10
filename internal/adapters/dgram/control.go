@@ -67,6 +67,24 @@ func (t *Transport) takeACK() (uint64, bool) {
 }
 
 func (t *Transport) controlLoop() {
+	go t.ackScheduleLoop()
+	for {
+		select {
+		case record := <-t.control:
+			err := t.sendControl(record.kind, record.id)
+			if record.result != nil {
+				select {
+				case record.result <- err:
+				default:
+				}
+			}
+		case <-t.done:
+			return
+		}
+	}
+}
+
+func (t *Transport) ackScheduleLoop() {
 	var ackTimer ports.Timer
 	var ackTimerC <-chan time.Time
 	defer func() {
@@ -118,14 +136,6 @@ func (t *Transport) controlLoop() {
 		}
 
 		select {
-		case record := <-t.control:
-			err := t.sendControl(record.kind, record.id)
-			if record.result != nil {
-				select {
-				case record.result <- err:
-				default:
-				}
-			}
 		case <-t.ackWake:
 			scheduleACK()
 		case <-ackTimerC:
