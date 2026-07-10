@@ -790,24 +790,32 @@ func (t *Transport) readLoop(pc net.PacketConn) {
 		frag, err := pdgram.UnmarshalFragment(pt)
 		if err != nil {
 			t.recvMu.Unlock()
-			t.mu.Lock()
-			afterMalformed := t.afterMalformedFragment
-			t.mu.Unlock()
-			if afterMalformed != nil {
-				afterMalformed()
-			}
+			t.notifyMalformedFragment()
 			continue
 		}
 		payload, complete, err := t.reasm.Add(frag)
 		inflight := t.reasm.Inflight()
 		t.recvMu.Unlock()
+		if err != nil {
+			t.notifyMalformedFragment()
+			continue
+		}
 		t.recordAuthenticatedFragment(inflight)
-		if err != nil || !complete {
+		if !complete {
 			continue
 		}
 		t.recordCompleteRecord()
 		t.updatePeerFromAuthenticated(addr)
 		t.handleRecord(payload)
+	}
+}
+
+func (t *Transport) notifyMalformedFragment() {
+	t.mu.Lock()
+	afterMalformed := t.afterMalformedFragment
+	t.mu.Unlock()
+	if afterMalformed != nil {
+		afterMalformed()
 	}
 }
 

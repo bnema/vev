@@ -137,8 +137,9 @@ type fakePC struct {
 func newPair() (*fakePC, *fakePC) { return newPairWithLink(nil) }
 
 func newPairWithLink(link *simulatedLink) (*fakePC, *fakePC) {
-	a := &fakePC{addr: testAddr("a"), in: make(chan packet, 100), read: make(chan struct{}, 100), peers: map[string]*fakePC{}, link: link}
-	b := &fakePC{addr: testAddr("b"), in: make(chan packet, 100), read: make(chan struct{}, 100), peers: map[string]*fakePC{}, link: link}
+	const queuePackets = floodRecordCount * floodRecordMTUs * 2
+	a := &fakePC{addr: testAddr("a"), in: make(chan packet, queuePackets), read: make(chan struct{}, queuePackets), peers: map[string]*fakePC{}, link: link}
+	b := &fakePC{addr: testAddr("b"), in: make(chan packet, queuePackets), read: make(chan struct{}, queuePackets), peers: map[string]*fakePC{}, link: link}
 	a.peers["b"] = b
 	b.peers["a"] = a
 	return a, b
@@ -206,6 +207,11 @@ func key() []byte { return bytes.Repeat([]byte{1}, pdgram.KeySize) }
 
 const fixtureWaitTimeout = time.Second
 
+const (
+	floodRecordCount = 32
+	floodRecordMTUs  = 24
+)
+
 // awaitSignal gives fixture barriers a diagnostic deadline. The deadline is a
 // hang guard only; tests advance behavior with the manual clock and barriers.
 func awaitSignal(t *testing.T, ch <-chan struct{}, context string) {
@@ -252,26 +258,30 @@ func TestTransportFloodClassification(t *testing.T) {
 			dropped[frag.Seq] = true
 			return true
 		}
-		a, b := newFloodTransports(t, aPC, bPC, clk, 128)
+		const mtu = 128
+		a, b := newFloodTransports(t, aPC, bPC, clk, mtu)
 		defer closeFloodTransports(a, b)
-		contacted := make(chan struct{}, 2)
+		contacted := make(chan struct{}, 1)
 		b.mu.Lock()
-		b.afterAuthenticatedPacket = func() { contacted <- struct{}{} }
+		b.afterAuthenticatedPacket = func() {
+			select {
+			case contacted <- struct{}{}:
+			default:
+			}
+		}
 		b.mu.Unlock()
 		start := clk.Now()
 		clk.advance(time.Nanosecond)
-		for range 2 {
-			if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: make([]byte, 200)}); err != nil {
-				t.Fatal(err)
-			}
-		}
+		sendFloodOutputs(t, a, floodRecordCount, mtu)
 		awaitSignal(t, contacted, "first authenticated fragment")
-		awaitSignal(t, contacted, "second authenticated fragment")
-		state := floodState(b)
-		if !state.packet || state.record || floodState(a).ack {
-			t.Fatalf("contact=%v complete=%v ack=%v, want contact only", state.packet, state.record, floodState(a).ack)
+		state := floodState(a, b, nil)
+		if len(dropped) != floodRecordCount {
+			t.Fatalf("flood state = %+v, dropped records=%d, want exactly one fragment from each of %d records", state, len(dropped), floodRecordCount)
 		}
-		if !floodState(b).packet || !clk.Now().After(start) {
+		if state.packetAge != 0 || state.recordAge != time.Nanosecond || state.ackAge != time.Nanosecond {
+			t.Fatalf("flood state = %+v, want packet contact only after %d output records of %d MTUs", state, floodRecordCount, floodRecordMTUs)
+		}
+		if !clk.Now().After(start) {
 			t.Fatal("real authenticated fragments did not update contact")
 		}
 	})
@@ -281,7 +291,8 @@ func TestTransportFloodClassification(t *testing.T) {
 		limit := 2 * 128
 		link := newSimulatedLink(clk, packetPolicy{Delay: time.Second, MaxQueueBytes: limit, BytesPerSecond: 128})
 		aPC, bPC := newPairWithLink(link)
-		a, b := newFloodTransports(t, aPC, bPC, clk, 128)
+		const mtu = 128
+		a, b := newFloodTransports(t, aPC, bPC, clk, mtu)
 		defer closeFloodTransports(a, b)
 		contacted := make(chan struct{}, 1)
 		b.mu.Lock()
@@ -290,21 +301,20 @@ func TestTransportFloodClassification(t *testing.T) {
 		a.mu.Lock()
 		a.rto = time.Hour // Keep the fake-clock queue case about bandwidth, not retries.
 		a.mu.Unlock()
-		if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: make([]byte, 200)}); err != nil {
-			t.Fatal(err)
-		}
-		queued := link.queuedBytes()
-		if queued <= 0 || queued > limit {
-			t.Fatalf("queued bytes=%d, want 1..%d", queued, limit)
+		sendFloodOutputs(t, a, floodRecordCount, mtu)
+		state := floodState(a, b, link)
+		if state.queuedBytes <= 0 || state.queuedBytes > limit {
+			t.Fatalf("flood state = %+v, want queued bytes in 1..%d", state, limit)
 		}
 		clk.advance(10 * time.Second)
 		link.flush(bPC)
 		awaitSignal(t, contacted, "queued authenticated fragment")
-		if got := link.queuedBytes(); got != 0 {
-			t.Fatalf("queued bytes after fake-clock release=%d, want 0", got)
+		state = floodState(a, b, link)
+		if state.queuedBytes != 0 {
+			t.Fatalf("flood state = %+v, want empty queue after fake-clock release", state)
 		}
-		if floodState(b).record || floodState(a).ack {
-			t.Fatal("dropped queued fragment produced false record or ACK progress")
+		if state.packetAge != 0 || state.recordAge != 10*time.Second || state.ackAge != 10*time.Second {
+			t.Fatalf("flood state = %+v, want delayed packet contact without record or ACK progress", state)
 		}
 	})
 
@@ -316,7 +326,7 @@ func TestTransportFloodClassification(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		acksDropped := make(chan struct{}, 2)
+		acksDropped := make(chan struct{}, floodRecordCount)
 		bPC.drop = func(pkt []byte, _ net.Addr) bool {
 			_, raw, err := inspect.Open(pkt, 2, nil, nil)
 			if err != nil {
@@ -326,12 +336,16 @@ func TestTransportFloodClassification(t *testing.T) {
 			if err != nil || frag.Count != 1 || len(frag.Data) != 9 || frag.Data[0] != recAck {
 				return false
 			}
-			acksDropped <- struct{}{}
+			select {
+			case acksDropped <- struct{}{}:
+			default:
+			}
 			return true
 		}
 
 		retransmitBlocked := make(chan struct{}, 1)
 		releaseRetransmit := make(chan struct{})
+		lastRetransmitted := make(chan struct{}, 1)
 		probeSent := make(chan struct{}, 1)
 		freshAtPace := make(chan struct{})
 		allowFreshPace := make(chan struct{})
@@ -363,8 +377,14 @@ func TestTransportFloodClassification(t *testing.T) {
 			secondWrite := writes[seq] == 2
 			writesMu.Unlock()
 			if secondWrite {
-				retransmitBlocked <- struct{}{}
+				select {
+				case retransmitBlocked <- struct{}{}:
+				default:
+				}
 				awaitSignal(t, releaseRetransmit, "retransmit release")
+				if seq == floodRecordCount {
+					lastRetransmitted <- struct{}{}
+				}
 			}
 			return false
 		}
@@ -384,28 +404,17 @@ func TestTransportFloodClassification(t *testing.T) {
 			awaitSignal(t, clk.timerCreated, "transport timer creation")
 		}
 
-		// Two fresh, fragmented output records become overdue while their real
+		// Fresh, fragmented output records become overdue while their real
 		// cumulative ACKs are lost. Disable only test pacing so the fixture can
 		// isolate resend-loop serialization rather than pacing delay.
-		a.dataPaceMu.Lock()
-		a.dataPaceRemaining = 100
-		a.dataPaceNext = clk.Now().Add(time.Hour)
-		a.dataPaceMu.Unlock()
-		for range 2 {
-			a.mu.Lock()
-			a.outputNext = time.Time{}
-			a.mu.Unlock()
-			if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 500)}); err != nil {
-				t.Fatal(err)
-			}
-		}
+		sendFloodOutputs(t, a, floodRecordCount, 128)
 		awaitSignal(t, clk.timerCreated, "ACK coalescing timer creation")
 		clk.advance(maxACKDelay)
 		awaitSignal(t, acksDropped, "dropped cumulative ACK")
 
 		awaitSignal(t, retransmitBlocked, "retransmit pacing barrier")
-		if got := floodState(a).retransmits; got < 2 {
-			t.Fatalf("retransmits=%d, want both overdue large records selected", got)
+		if state := floodState(a, b, nil); state.retransmits < floodRecordCount {
+			t.Fatalf("flood state = %+v, want all %d overdue records selected", state, floodRecordCount)
 		}
 
 		// Start a third large output at this same fake-clock instant. The pacing
@@ -419,7 +428,7 @@ func TestTransportFloodClassification(t *testing.T) {
 		}
 		a.mu.Unlock()
 		go func() {
-			freshReturned <- a.Send(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 500)})
+			freshReturned <- a.Send(ports.Frame{Type: ports.MsgOutput, Payload: floodPayload(128)})
 		}()
 		awaitSignal(t, freshAtPace, "fresh output pacing barrier")
 		a.mu.Lock()
@@ -438,33 +447,53 @@ func TestTransportFloodClassification(t *testing.T) {
 		if err := awaitResult(t, freshReturned, "fresh output completion"); err != nil {
 			t.Fatal(err)
 		}
-		eventually(t, time.Second, func() bool {
-			writesMu.Lock()
-			defer writesMu.Unlock()
-			return writes[1] >= 2 && writes[2] >= 2
-		})
+		awaitSignal(t, lastRetransmitted, "last overdue record retransmission")
 		writesMu.Lock()
 		defer writesMu.Unlock()
-		if writes[1] < 2 || writes[2] < 2 || writes[3] == 0 {
-			t.Fatalf("writes=%v, want fresh large traffic and retransmissions for both overdue records", writes)
+		if writes[1] < 2 || writes[floodRecordCount] < 2 || writes[floodRecordCount+1] == 0 {
+			t.Fatalf("flood state = %+v, writes=%v, want fresh large traffic and retransmissions across %d overdue records", floodState(a, b, nil), writes, floodRecordCount)
 		}
 	})
 }
 
 type floodTransportState struct {
-	packet, record, ack bool
-	retransmits         uint64
+	packetAge, recordAge, ackAge time.Duration
+	queuedBytes                  int
+	retransmits                  uint64
 }
 
-func floodState(t *Transport) floodTransportState {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	now := t.clock.Now()
-	return floodTransportState{
-		packet:      t.lastAuthenticatedPacket.Equal(now),
-		record:      t.lastCompleteRecord.Equal(now),
-		ack:         t.lastACKProgress.Equal(now),
-		retransmits: t.retransmits,
+func floodState(sender, receiver *Transport, link *simulatedLink) floodTransportState {
+	now := sender.clock.Now()
+	receiver.mu.Lock()
+	packetAge := now.Sub(receiver.lastAuthenticatedPacket)
+	recordAge := now.Sub(receiver.lastCompleteRecord)
+	receiver.mu.Unlock()
+	sender.mu.Lock()
+	ackAge := now.Sub(sender.lastACKProgress)
+	retransmits := sender.retransmits
+	sender.mu.Unlock()
+	queuedBytes := 0
+	if link != nil {
+		queuedBytes = link.queuedBytes()
+	}
+	return floodTransportState{packetAge: packetAge, recordAge: recordAge, ackAge: ackAge, queuedBytes: queuedBytes, retransmits: retransmits}
+}
+
+func floodPayload(mtu int) []byte { return make([]byte, floodRecordMTUs*mtu) }
+
+func sendFloodOutputs(t *testing.T, sender *Transport, count, mtu int) {
+	t.Helper()
+	sender.dataPaceMu.Lock()
+	sender.dataPaceRemaining = count * floodRecordMTUs * 4
+	sender.dataPaceNext = sender.clock.Now().Add(time.Hour)
+	sender.dataPaceMu.Unlock()
+	for range count {
+		sender.mu.Lock()
+		sender.outputNext = time.Time{}
+		sender.mu.Unlock()
+		if err := sender.Send(ports.Frame{Type: ports.MsgOutput, Payload: floodPayload(mtu)}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -514,5 +543,48 @@ func TestMalformedAuthenticatedFragmentDoesNotCountAsContact(t *testing.T) {
 	b.mu.Unlock()
 	if gotPacket != startPacket || gotRecord != startRecord {
 		t.Fatal("malformed authenticated plaintext counted as packet contact")
+	}
+}
+
+func TestInconsistentAuthenticatedFragmentDoesNotCountAsContact(t *testing.T) {
+	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+	aPC, bPC := newPair()
+	a, b := newFloodTransports(t, aPC, bPC, clk, 128)
+	defer closeFloodTransports(a, b)
+	codec, err := pdgram.NewCodec(key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan struct{}, 1)
+	rejected := make(chan struct{}, 1)
+	b.mu.Lock()
+	b.afterAuthenticatedPacket = func() { accepted <- struct{}{} }
+	b.afterMalformedFragment = func() { rejected <- struct{}{} }
+	b.mu.Unlock()
+
+	writeFragment := func(counter uint64, frag pdgram.Fragment) {
+		t.Helper()
+		raw, err := pdgram.MarshalFragment(frag)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := aPC.WriteTo(codec.Seal(1, counter, raw, nil), bPC.addr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFragment(999, pdgram.Fragment{Seq: 42, Index: 0, Count: 2, Data: []byte("first")})
+	awaitSignal(t, accepted, "accepted incomplete fragment")
+	b.mu.Lock()
+	lastContact := b.lastAuthenticatedPacket
+	b.mu.Unlock()
+
+	clk.advance(time.Second)
+	writeFragment(1000, pdgram.Fragment{Seq: 42, Index: 1, Count: 3, Data: []byte("inconsistent")})
+	awaitSignal(t, rejected, "inconsistent fragment rejection")
+	b.mu.Lock()
+	gotContact := b.lastAuthenticatedPacket
+	b.mu.Unlock()
+	if gotContact != lastContact {
+		t.Fatalf("rejected inconsistent fragment refreshed contact from %v to %v", lastContact, gotContact)
 	}
 }
