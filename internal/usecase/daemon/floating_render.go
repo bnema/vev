@@ -167,19 +167,32 @@ func (d *Daemon) resizeFloatingPane(p *pane, inner domain.Rect) bool {
 	return true
 }
 
-// resizeActiveFloating updates only a visible floating pane. Hidden panes
-// retain their remembered geometry until they are shown again.
+// resizeInstalledFloating updates an installed floating pane, including a
+// retained hidden pane when its tab becomes active.
+func (d *Daemon) resizeInstalledFloating(tb *tab) bool {
+	if d == nil || tb == nil {
+		return false
+	}
+	tb.mu.Lock()
+	p := tb.floating.pane
+	content := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
+	tb.mu.Unlock()
+	if p == nil {
+		return false
+	}
+	return d.resizeFloatingPane(p, calculateFloatingGeometry(content, d.currentFloatingConfig()).Inner)
+}
+
+// resizeActiveFloating updates a visible floating pane during a client resize.
 func (d *Daemon) resizeActiveFloating(tb *tab) bool {
 	if d == nil || tb == nil {
 		return false
 	}
 	tb.mu.Lock()
 	visible := tb.floating.state == floatingVisible
-	p := tb.floating.pane
-	content := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
 	tb.mu.Unlock()
-	if !visible || p == nil {
+	if !visible {
 		return false
 	}
-	return d.resizeFloatingPane(p, calculateFloatingGeometry(content, d.currentFloatingConfig()).Inner)
+	return d.resizeInstalledFloating(tb)
 }

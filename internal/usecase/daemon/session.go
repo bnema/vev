@@ -332,6 +332,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	d.log.Info("tab created", "session", name, "tab", tabIndex)
 	d.startTabGoroutines(sess, tb)
 	d.mu.Unlock()
+	d.activateTab(sess, tb)
 	markSnapshotDirty(sess)
 	return nil
 }
@@ -610,12 +611,14 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 		return
 	}
 	ringing := tb.attention
+	wasActive := idx == sess.active
 	sess.tabs = append(sess.tabs[:idx], sess.tabs[idx+1:]...)
 	if sess.active >= len(sess.tabs) {
 		sess.active = len(sess.tabs) - 1
 	} else if idx < sess.active {
 		sess.active--
 	}
+	destination := sess.tabs[sess.active]
 	ac := sess.client
 	name := sess.name
 	record := sess.persistRecordLocked(time.Now().UnixNano())
@@ -635,6 +638,9 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 		tb.cancel()
 	}
 	tb.closeAllPanes()
+	if wasActive {
+		d.activateTab(sess, destination)
+	}
 	if repaint && ac != nil {
 		d.paint(sess, ac, true)
 	}

@@ -230,15 +230,23 @@ func (e paletteExec) FocusPaneDown() error {
 }
 
 func (e paletteExec) NextTab() error {
-	e.sess.switchRelative(1)
+	if e.sess.switchRelative(1) {
+		e.d.activateTab(e.sess, e.sess.activeTab())
+	}
 	e.d.paint(e.sess, e.ac, true)
 	return nil
 }
 
 func (e paletteExec) PrevTab() error {
-	e.sess.switchRelative(-1)
+	if e.sess.switchRelative(-1) {
+		e.d.activateTab(e.sess, e.sess.activeTab())
+	}
 	e.d.paint(e.sess, e.ac, true)
 	return nil
+}
+
+func (e paletteExec) ToggleFloatingPane() error {
+	return e.d.toggleFloating(e.sess, e.ac)
 }
 
 func (e paletteExec) BackSession() error {

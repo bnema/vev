@@ -360,7 +360,9 @@ func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker
 		return
 	}
 	if targetSess == sess {
-		sess.switchTab(target.TabIndex)
+		if sess.switchTab(target.TabIndex) {
+			d.activateTab(sess, sess.activeTab())
+		}
 		d.paint(sess, ac, true)
 		return
 	}

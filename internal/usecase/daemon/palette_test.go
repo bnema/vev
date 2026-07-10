@@ -46,9 +46,7 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
 	defer release1()
 	defer release2()
-	ptys := portsmocks.NewMockPTYFactory(t)
-	ptys.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(p2, nil).Once()
-	d.ptys = ptys
+	d.ptys = newFactorySeq(t, p2)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -112,12 +110,12 @@ func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
 	for i, cmd := range commands {
 		codes[i] = cmd.Code
 	}
-	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "CLP", "FPL", "FPR", "FPU", "FPD", "PVT", "BSK", "FSK", "VIS", "RNS", "RNT", "DET"}, codes)
+	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "PVT", "BSK", "FSK", "VIS", "RNS", "RNT", "DET"}, codes)
 }
 
 func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
 	d := &Daemon{}
-	codes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "FSK", "SSP", "VIS", "RNS", "RNT", "DET"}
+	codes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "FSK", "SSP", "VIS", "RNS", "RNT", "DET"}
 
 	var wg sync.WaitGroup
 	for range 50 {

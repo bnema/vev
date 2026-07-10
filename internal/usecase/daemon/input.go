@@ -363,6 +363,10 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 		h.d.enterPalette(sess, h.ac)
 	case keys.ActionJumpAttention:
 		h.d.jumpAttention(sess, h.ac)
+	case keys.ActionToggleFloatingPane:
+		if err := h.d.toggleFloating(sess, h.ac); err != nil {
+			h.d.log.Warn("toggle floating pane failed", "err", err)
+		}
 	case keys.ActionFocusPaneLeft:
 		_ = h.d.focusDir(sess, h.ac, layout.Left)
 	case keys.ActionFocusPaneRight:
@@ -376,6 +380,7 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:
 		idx := int(action - keys.ActionSwitchTab1)
 		if sess.switchTab(idx) {
+			h.d.activateTab(sess, sess.activeTab())
 			h.d.paint(sess, h.ac, true)
 		}
 	}

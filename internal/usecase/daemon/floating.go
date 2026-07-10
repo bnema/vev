@@ -133,6 +133,26 @@ func (d *Daemon) ensureFloatingWarm(sess *session, tb *tab) {
 	d.startFloating(sess, tb, false)
 }
 
+// activateTab performs the work associated with making a tab the destination.
+// It is deliberately idempotent: every tab transition can use this single
+// hook, while inactive restored tabs remain cold until actually selected.
+func (d *Daemon) activateTab(sess *session, tb *tab) {
+	if d == nil || sess == nil || tb == nil {
+		return
+	}
+	// A headless session has no actual terminal destination. Deferring warmup
+	// until firstPaint keeps restored tabs cold and avoids launching children
+	// merely because a tab was manipulated during teardown.
+	sess.mu.Lock()
+	attached := sess.client != nil
+	sess.mu.Unlock()
+	if !attached {
+		return
+	}
+	d.ensureFloatingWarm(sess, tb)
+	d.resizeInstalledFloating(tb)
+}
+
 // toggleFloating changes only this tab's slot. Opening an uninitialized slot
 // launches asynchronously; installed slots are retained when hidden.
 func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
@@ -151,7 +171,10 @@ func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 	visible := tb.floating.state == floatingVisible
 	tb.mu.Unlock()
 	if start {
-		d.launchFloating(sess, tb, cfg, generation, visible)
+		d.launchFloating(sess, tb, cfg, generation, true)
+		if ac != nil {
+			d.paint(sess, ac, true)
+		}
 		return nil
 	}
 	if visible {

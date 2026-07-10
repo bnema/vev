@@ -315,11 +315,14 @@ func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {
 	var openedEnv []string
 	f := portsmocks.NewMockPTYFactory(t)
 	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+		func(_ string, _ []string, env []string, _ string, sz domain.Size) (ports.PTY, error) {
+			if sz != (domain.Size{Cols: 80, Rows: 22}) {
+				return newQuietPTY(), nil
+			}
 			openedEnv = append([]string(nil), env...)
 			return p3, nil
 		},
-	).Once()
+	).Maybe()
 	d := newTestDaemon(t, f, stubClock{})
 	tr1, _ := newCapturingTransport(t)
 	tr2, _ := newCapturingTransport(t)
@@ -532,7 +535,8 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 	defer release2()
 	var opens [][]string
 	f := portsmocks.NewMockPTYFactory(t)
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
 		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
 			opens = append(opens, append([]string(nil), env...))
 			if len(opens) == 1 {
@@ -541,6 +545,10 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 			return p2, nil
 		},
 	).Twice()
+	floating := newQuietPTY()
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
+		return got != normalSize && got.Valid()
+	})).Return(floating, nil).Once()
 	d := newTestDaemon(t, f, stubClock{})
 	d.stopped["old"] = stoppedSession{name: "old", cwd: t.TempDir(), createdAt: 1}
 	tr := portsmocks.NewMockTransport(t)
@@ -552,10 +560,19 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 	got := ac.sess.Get()
 	require.NotNil(t, got)
 	got.mu.Lock()
-	defer got.mu.Unlock()
 	require.True(t, got.terminal.TrueColor)
+	got.mu.Unlock()
 	require.Len(t, opens, 2)
 	require.Contains(t, opens[1], "TERM=xterm-direct")
 	require.Contains(t, opens[1], "COLORTERM=truecolor")
 	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
+	_ = d.killSession(got, ports.ReasonSessionKilled, false)
+	release1()
+	release2()
+	d.sessWg.Wait()
+	select {
+	case <-floating.done:
+	default:
+		t.Fatal("floating prewarm PTY was not closed")
+	}
 }

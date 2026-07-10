@@ -442,10 +442,12 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 
 	if clientSize.Valid() && wsz != tabSize(clientSize) {
 		d.resize(sess, ac, clientSize)
+		d.activateTab(sess, sess.activeTab())
 		return
 	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
 	d.paint(sess, ac, true)
+	d.activateTab(sess, tb)
 }
 
 // runConnLoop is the per-connection input router: it pumps client messages
