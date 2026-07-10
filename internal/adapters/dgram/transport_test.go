@@ -329,6 +329,48 @@ func BenchmarkCongestionControllerACK(b *testing.B) {
 	}
 }
 
+func TestPendingWireBytesMatchSealedDatagrams(t *testing.T) {
+	const mtu = 128
+	aPC, bPC := newPair()
+	a, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{
+		MTU: mtu, ResendAfter: time.Hour, Heartbeat: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }()
+
+	maxFragmentData := mtu - pdgram.HeaderSize - a.codec.Overhead() - 16
+	frame := ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, maxFragmentData-dataRecordHeaderSize+1)}
+	if err := a.Send(frame); err != nil {
+		t.Fatal(err)
+	}
+
+	want := 0
+	for len(bPC.in) > 0 {
+		want += len((<-bPC.in).b)
+	}
+	a.mu.Lock()
+	got := a.pending[1].wireBytes
+	initialCwnd := a.congestion.cwndBytes
+	a.mu.Unlock()
+	if got != want {
+		t.Fatalf("pending wire bytes=%d, want sealed datagram bytes=%d", got, want)
+	}
+
+	ack := make([]byte, 9)
+	ack[0] = recAck
+	binary.BigEndian.PutUint64(ack[1:], 1)
+	a.handleRecord(ack)
+	a.mu.Lock()
+	gotCwnd := a.congestion.cwndBytes
+	a.mu.Unlock()
+	wantCwnd := initialCwnd + max(1, mtu*want/initialCwnd)
+	if gotCwnd != wantCwnd {
+		t.Fatalf("cwnd after ACK=%d, want %d from %d acknowledged sealed bytes", gotCwnd, wantCwnd, want)
+	}
+}
+
 func TestSendAsyncTransfersFragmentedRecordToBytePacedSender(t *testing.T) {
 	const mtu = 128
 	aPC, bPC := newPair()

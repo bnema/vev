@@ -306,7 +306,7 @@ func TestTransportFloodClassification(t *testing.T) {
 		}
 	})
 
-	t.Run("bounded byte queue advances and releases on fake clock", func(t *testing.T) {
+	t.Run("bandwidth_queue", func(t *testing.T) {
 		clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
 		const (
 			mtu             = 128
@@ -333,7 +333,7 @@ func TestTransportFloodClassification(t *testing.T) {
 		reverse := newSimulatedLink(clk, packetPolicy{
 			Delay:          oneWayDelay,
 			MaxQueueBytes:  queueLimit,
-			BytesPerSecond: 10 * bandwidth,
+			BytesPerSecond: bandwidth,
 		})
 		aPC, bPC := newFloodPair(nil)
 		aPC.link = forward

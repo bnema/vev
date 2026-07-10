@@ -395,7 +395,7 @@ func (t *Transport) send(f ports.Frame, async bool) error {
 		if len(t.pending) == 0 {
 			t.health.pendingStarted(now)
 		}
-		t.pending[seq] = &pending{frame: f, enqueued: now, wireBytes: dataRecordHeaderSize + len(f.Payload)}
+		t.pending[seq] = &pending{frame: f, enqueued: now}
 	}
 	var done chan error
 	if !async {
@@ -1035,20 +1035,33 @@ func (t *Transport) writeDataJob(pacer *bytePacer, job dataSendJob) error {
 	if beforeDataPace != nil {
 		beforeDataPace()
 	}
-	limits := func() (int, int) {
-		t.mu.Lock()
-		defer t.mu.Unlock()
-		return t.congestion.bytesPerSecond(), t.congestion.burstBytes()
-	}
-	for i, frag := range frags {
-		if job.reliable && !t.pendingExists(job.seq) {
-			return nil
-		}
+	packets := make([][]byte, 0, len(frags))
+	wireBytes := 0
+	for _, frag := range frags {
 		raw, err := pdgram.MarshalFragment(frag)
 		if err != nil {
 			return err
 		}
 		pkt := t.codec.Seal(t.sendDir, t.nextCounter(), raw, nil)
+		packets = append(packets, pkt)
+		wireBytes += len(pkt)
+	}
+	if job.reliable {
+		t.mu.Lock()
+		if pending := t.pending[job.seq]; pending != nil {
+			pending.wireBytes = wireBytes
+		}
+		t.mu.Unlock()
+	}
+	limits := func() (int, int) {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return t.congestion.bytesPerSecond(), t.congestion.burstBytes()
+	}
+	for i, pkt := range packets {
+		if job.reliable && !t.pendingExists(job.seq) {
+			return nil
+		}
 		if err := pacer.wait(t.done, len(pkt), limits); err != nil {
 			return err
 		}
