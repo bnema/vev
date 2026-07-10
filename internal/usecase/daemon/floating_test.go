@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -211,6 +212,110 @@ func TestFloatingTeardownClosesInstalledPaneOnce(t *testing.T) {
 	d.teardownFloating(tb)
 	d.teardownFloating(tb)
 	pty.AssertNumberOfCalls(t, "Close", 1)
+}
+
+func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
+	newCase := func(t *testing.T, state floatingState) (*Daemon, *session, *attachedClient, chan ports.Frame, *tab, *pane, func()) {
+		t.Helper()
+		normalPTY, releaseNormal := newBlockingPTY(t)
+		d, sess, ac, sends := newManualSessionWithPTYs(t, normalPTY)
+		tb := sess.activeTab()
+		require.NotNil(t, tb)
+		tb.mu.Lock()
+		normal := tb.focusedPane()
+		normal.mu.Lock()
+		normal.screen.Write([]byte("underlying-cell"))
+		normal.mu.Unlock()
+
+		floatingPTY := portsmocks.NewMockPTY(t)
+		releaseEOF := make(chan struct{})
+		floatingPTY.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) {
+			<-releaseEOF
+			return 0, io.EOF
+		}).Once()
+		floating := newPane(layout.PaneID("floating"), floatingPTY, domain.Size{Cols: 20, Rows: 8})
+		generation := tb.beginFloatingWarmLocked(domain.FloatingConfig{}, state == floatingVisible)
+		require.True(t, tb.installFloatingLocked(floating, generation))
+		if state == floatingHidden {
+			require.Equal(t, floatingHidden, tb.floating.state)
+		}
+		tb.mu.Unlock()
+
+		// Establish a renderer shadow first. The EOF repaint must reset it and
+		// redraw the underlying cell rather than depending on popup damage.
+		d.paint(sess, ac, true)
+		baseline := awaitFrame(t, sends, ports.MsgOutput)
+		baselineOutput, err := ports.UnmarshalOutput(baseline.Payload)
+		require.NoError(t, err)
+		require.Contains(t, string(baselineOutput.Data), "underlying-cell")
+
+		reaped := make(chan struct{})
+		floating.onExit = func() {
+			d.reapFloating(sess, tb, floating, generation)
+			close(reaped)
+		}
+		d.sessWg.Add(1)
+		go d.ptyReader(sess, tb, floating)
+		return d, sess, ac, sends, tb, floating, func() {
+			close(releaseEOF)
+			<-reaped
+			d.sessWg.Wait()
+			releaseNormal()
+		}
+	}
+
+	t.Run("visible matching EOF clears and fully repaints underlying content", func(t *testing.T) {
+		_, _, _, sends, tb, floating, exit := newCase(t, floatingVisible)
+		exit()
+
+		tb.mu.Lock()
+		require.Equal(t, floatingUninitialized, tb.floating.state)
+		require.Nil(t, tb.floating.pane)
+		tb.mu.Unlock()
+		repaint := awaitFrame(t, sends, ports.MsgOutput)
+		output, err := ports.UnmarshalOutput(repaint.Payload)
+		require.NoError(t, err)
+		require.Zero(t, output.BaseStateNum, "visible EOF must force a dependency-free full repaint")
+		require.Contains(t, string(output.Data), "underlying-cell", "repaint must restore cells previously covered by the popup")
+		require.NotNil(t, floating)
+	})
+
+	t.Run("hidden matching EOF clears without repaint", func(t *testing.T) {
+		_, _, _, sends, tb, _, exit := newCase(t, floatingHidden)
+		exit()
+
+		tb.mu.Lock()
+		require.Equal(t, floatingUninitialized, tb.floating.state)
+		require.Nil(t, tb.floating.pane)
+		tb.mu.Unlock()
+		select {
+		case frame := <-sends:
+			t.Fatalf("hidden EOF unexpectedly repainted: %#v", frame)
+		default:
+		}
+	})
+
+	t.Run("stale EOF is ignored without repaint", func(t *testing.T) {
+		_, _, _, sends, tb, stale, exit := newCase(t, floatingHidden)
+		tb.mu.Lock()
+		generation := tb.floating.generation
+		require.True(t, tb.clearFloatingLocked(stale, generation))
+		current := newPane(layout.PaneID("replacement"), newBlockingPanePTY(t), domain.Size{Cols: 20, Rows: 8})
+		currentGeneration := tb.beginFloatingWarmLocked(domain.FloatingConfig{}, true)
+		require.True(t, tb.installFloatingLocked(current, currentGeneration))
+		tb.mu.Unlock()
+		exit()
+
+		tb.mu.Lock()
+		require.Same(t, current, tb.floating.pane)
+		require.Equal(t, floatingVisible, tb.floating.state)
+		tb.mu.Unlock()
+		select {
+		case frame := <-sends:
+			t.Fatalf("stale EOF unexpectedly repainted: %#v", frame)
+		default:
+		}
+	})
 }
 
 func newFloatingTestTab(t *testing.T) *tab {
