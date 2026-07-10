@@ -1474,7 +1474,7 @@ func TestCopyTargetRectLocked(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, copyTargetRectLocked(tb, layoutSnap, contentArea, tc.pane, tc.floating, tc.hasFloating, cfg))
+			require.Equal(t, tc.want, copyTargetRectLocked(layoutSnap, contentArea, tc.pane, tc.floating, tc.hasFloating, cfg))
 		})
 	}
 }

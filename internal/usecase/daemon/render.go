@@ -278,7 +278,7 @@ func (d *Daemon) render(sess *session, tb *tab, p *pane) {
 // copyTargetRectLocked maps a captured copy source into the already-composed
 // client frame. The caller holds tb.mu, preserving the layout/floating
 // snapshot while the rectangle is chosen.
-func copyTargetRectLocked(tb *tab, layoutSnap tabLayoutSnapshot, contentArea domain.Rect, p, floating *pane, hasFloating bool, cfg domain.FloatingConfig) domain.Rect {
+func copyTargetRectLocked(layoutSnap tabLayoutSnapshot, contentArea domain.Rect, p, floating *pane, hasFloating bool, cfg domain.FloatingConfig) domain.Rect {
 	if p == nil {
 		return domain.Rect{}
 	}
@@ -400,7 +400,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		if copyPane == nil {
 			copyPane = p
 		}
-		copyTarget := copyTargetRectLocked(tb, layoutSnap, contentArea, copyPane, floating, hasFloating, d.currentFloatingConfig())
+		copyTarget := copyTargetRectLocked(layoutSnap, contentArea, copyPane, floating, hasFloating, d.currentFloatingConfig())
 		frame, damage = composeCopyClientFrame(overlays.copyMode, copyPane, copyTarget, frame, bars)
 	}
 	// A palette above normal/copy content dims that composed content. When a

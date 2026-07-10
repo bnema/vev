@@ -642,7 +642,7 @@ func TestCursorTailHidesInCopyMode(t *testing.T) {
 	require.Contains(t, string(data), "\x1b[?25l")
 }
 
-func installFloatingCopyFixture(t *testing.T, d *Daemon, sess *session, size domain.Size) *pane {
+func installFloatingCopyFixture(t *testing.T, sess *session, size domain.Size) *pane {
 	t.Helper()
 	floatingPTY, releaseFloating := newBlockingPTY(t)
 	t.Cleanup(releaseFloating)
@@ -675,7 +675,7 @@ func TestCopyModeCapturesSourceAndRetainsItAcrossFocusMove(t *testing.T) {
 			main := tb.focusedPane()
 			var want *pane
 			if tc.useFloating {
-				want = installFloatingCopyFixture(t, d, sess, domain.Size{Cols: 20, Rows: 3})
+				want = installFloatingCopyFixture(t, sess, domain.Size{Cols: 20, Rows: 3})
 				want.scrollback.Append(testRow("flt-old"))
 				want.screen.Write([]byte("flt-live"))
 			} else {
@@ -715,7 +715,7 @@ func TestFloatingCopyModeWheelUsesCapturedSnapshot(t *testing.T) {
 	normal, releaseNormal := newBlockingPTY(t)
 	defer releaseNormal()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
-	fp := installFloatingCopyFixture(t, d, sess, domain.Size{Cols: 20, Rows: 3})
+	fp := installFloatingCopyFixture(t, sess, domain.Size{Cols: 20, Rows: 3})
 	for i := range 30 {
 		fp.scrollback.Append(testRow(fmt.Sprintf("old-%02d", i)))
 	}
@@ -741,7 +741,7 @@ func TestFloatingCopyModeMouseSelectsFloatingRows(t *testing.T) {
 	normal, releaseNormal := newBlockingPTY(t)
 	defer releaseNormal()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
-	fp := installFloatingCopyFixture(t, d, sess, domain.Size{Cols: 20, Rows: 3})
+	fp := installFloatingCopyFixture(t, sess, domain.Size{Cols: 20, Rows: 3})
 	for i := range 5 {
 		fp.scrollback.Append(testRow(fmt.Sprintf("old-%d", i)))
 	}
@@ -773,7 +773,7 @@ func TestFloatingExitClearsCopyModeBeforeRepaint(t *testing.T) {
 	defer releaseNormal()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
 	tb := sess.activeTab()
-	fp := installFloatingCopyFixture(t, d, sess, domain.Size{Cols: 20, Rows: 3})
+	fp := installFloatingCopyFixture(t, sess, domain.Size{Cols: 20, Rows: 3})
 	fp.screen.Write([]byte("flt-live"))
 
 	d.enterCopyMode(sess, ac)
