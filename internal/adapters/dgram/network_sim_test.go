@@ -502,11 +502,15 @@ func TestMalformedAuthenticatedFragmentDoesNotCountAsContact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	malformedRejected := make(chan struct{}, 1)
+	b.mu.Lock()
+	b.afterMalformedFragment = func() { malformedRejected <- struct{}{} }
+	b.mu.Unlock()
 	clk.advance(time.Second)
 	if _, err := aPC.WriteTo(codec.Seal(1, 999, []byte("not a fragment"), nil), bPC.addr); err != nil {
 		t.Fatal(err)
 	}
-	awaitSignal(t, bPC.read, "malformed datagram read")
+	awaitSignal(t, malformedRejected, "malformed fragment rejection")
 	b.mu.Lock()
 	gotPacket, gotRecord := b.lastAuthenticatedPacket, b.lastCompleteRecord
 	b.mu.Unlock()

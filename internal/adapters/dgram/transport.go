@@ -156,34 +156,37 @@ type Transport struct {
 	// afterAuthenticatedPacket is a test synchronization hook. It runs after
 	// authenticated-contact state has been committed.
 	afterAuthenticatedPacket func()
-	observe                  DiagnosticObserver
-	diagnosticCh             chan Diagnostic
-	heartbeat                time.Duration
-	resendAfter              time.Duration
-	maxResendAfter           time.Duration
-	maxResendPerTick         int
-	srtt                     time.Duration
-	rttvar                   time.Duration
-	rto                      time.Duration
-	writeTimeout             time.Duration
-	degradedAfter            time.Duration
-	probeAfter               time.Duration
-	offlineAfter             time.Duration
-	deadAfter                time.Duration
-	maxPending               int
-	maxPendingWait           time.Duration
-	maxRecvBuffer            int
-	clock                    ports.Clock
-	linkState                ports.LinkState
-	linkEvents               chan ports.LinkEvent
-	probeWait                map[uint64]chan struct{}
-	sendWake                 chan struct{}
-	probeReply               chan uint64
-	rebind                   func(net.PacketConn) (net.PacketConn, error)
-	hoppedOffline            bool
-	outputQueue              []queuedSend
-	outputWake               chan struct{}
-	outputNext               time.Time
+	// afterMalformedFragment is a test synchronization hook. It runs after an
+	// authenticated datagram has been rejected as an invalid fragment.
+	afterMalformedFragment func()
+	observe                DiagnosticObserver
+	diagnosticCh           chan Diagnostic
+	heartbeat              time.Duration
+	resendAfter            time.Duration
+	maxResendAfter         time.Duration
+	maxResendPerTick       int
+	srtt                   time.Duration
+	rttvar                 time.Duration
+	rto                    time.Duration
+	writeTimeout           time.Duration
+	degradedAfter          time.Duration
+	probeAfter             time.Duration
+	offlineAfter           time.Duration
+	deadAfter              time.Duration
+	maxPending             int
+	maxPendingWait         time.Duration
+	maxRecvBuffer          int
+	clock                  ports.Clock
+	linkState              ports.LinkState
+	linkEvents             chan ports.LinkEvent
+	probeWait              map[uint64]chan struct{}
+	sendWake               chan struct{}
+	probeReply             chan uint64
+	rebind                 func(net.PacketConn) (net.PacketConn, error)
+	hoppedOffline          bool
+	outputQueue            []queuedSend
+	outputWake             chan struct{}
+	outputNext             time.Time
 
 	recvMu sync.Mutex
 	replay *pdgram.ReplayWindow
@@ -693,6 +696,12 @@ func (t *Transport) readLoop(pc net.PacketConn) {
 		frag, err := pdgram.UnmarshalFragment(pt)
 		if err != nil {
 			t.recvMu.Unlock()
+			t.mu.Lock()
+			afterMalformed := t.afterMalformedFragment
+			t.mu.Unlock()
+			if afterMalformed != nil {
+				afterMalformed()
+			}
 			continue
 		}
 		payload, complete, err := t.reasm.Add(frag)
