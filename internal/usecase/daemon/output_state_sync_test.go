@@ -294,7 +294,20 @@ func TestDatagramWindowOneCoalescesPaintsUntilMsgAck(t *testing.T) {
 		pane.screen.Write([]byte("x"))
 		d.paint(sess, ac, false)
 	}
+	pane.screen.Write([]byte("LATEST"))
+	d.paint(sess, ac, false)
 	requireNoOutputFrame(t, tr.sends)
+	require.Equal(t, uint64(1), ac.output.outstanding(), "only one state-bearing datagram output may be unacknowledged")
+
+	// Side-effect output is control-like: it must pass while the state window is
+	// full without consuming another state number.
+	require.NoError(t, d.boundedSendOutputErr(ac, []byte("side-effect")))
+	sideEffect := awaitFrame(t, tr.sends, ports.MsgOutput)
+	sideEffectOutput, err := ports.UnmarshalOutput(sideEffect.Payload)
+	require.NoError(t, err)
+	require.Zero(t, sideEffectOutput.BaseStateNum)
+	require.Zero(t, sideEffectOutput.NewStateNum)
+	require.Equal(t, uint64(1), ac.output.outstanding())
 
 	tr.recv <- ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{AckedStateNum: firstOutput.NewStateNum})}
 	require.NoError(t, tr.Close())
@@ -304,4 +317,6 @@ func TestDatagramWindowOneCoalescesPaintsUntilMsgAck(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, firstOutput.NewStateNum, secondOutput.BaseStateNum)
 	require.Equal(t, uint64(2), secondOutput.NewStateNum)
+	require.Contains(t, string(secondOutput.Data), "LATEST", "cumulative ACK must release the latest coalesced state")
+	require.Equal(t, uint64(1), ac.output.outstanding())
 }

@@ -51,6 +51,7 @@ type proxyCopyDirection struct {
 	recvKind         proxyCopyErrKind
 	sendKind         proxyCopyErrKind
 	retryRecoverable bool
+	transform        func(ports.Frame) ports.Frame
 }
 
 func (p ProxyRuntime) Run(ctx context.Context) error {
@@ -76,7 +77,11 @@ func (p ProxyRuntime) Run(ctx context.Context) error {
 
 	errCh := make(chan proxyCopyErr, 2)
 	copier := proxyCopier{ctx: copyCtx, errCh: errCh, retryBackoff: retryBackoff, clk: clk}
-	clientToDaemon := proxyCopyDirection{src: p.Client, dst: p.Daemon, recvKind: proxyClientRecv, sendKind: proxyDaemonSend}
+	clientToDaemon := proxyCopyDirection{
+		src: p.Client, dst: p.Daemon,
+		recvKind: proxyClientRecv, sendKind: proxyDaemonSend,
+		transform: clampDatagramHelloOutputWindow,
+	}
 	daemonToClient := proxyCopyDirection{src: p.Daemon, dst: p.Client, recvKind: proxyDaemonRecv, sendKind: proxyClientSend, retryRecoverable: true}
 	go copier.copyFrames(clientToDaemon)
 	go copier.copyFrames(daemonToClient)
@@ -157,6 +162,9 @@ func (c proxyCopier) copyFrames(dir proxyCopyDirection) {
 			c.errCh <- proxyCopyErr{kind: dir.recvKind, err: err}
 			return
 		}
+		if dir.transform != nil {
+			f = dir.transform(f)
+		}
 		// Retry the same frame in place while the destination link error stays
 		// recoverable (congestion, transient path loss). The frame is never
 		// dropped — on a reliable stream a gap desynchronizes the client screen.
@@ -198,4 +206,20 @@ func recoverableClientLink(t ports.Transport, err error) bool {
 	default:
 		return false
 	}
+}
+
+// clampDatagramHelloOutputWindow enforces the datagram-safe state window at
+// the adapter boundary. Invalid Hello payloads pass through unchanged so the
+// daemon remains the single authority for strict decoding and version checks.
+func clampDatagramHelloOutputWindow(f ports.Frame) ports.Frame {
+	if f.Type != ports.MsgHello {
+		return f
+	}
+	hello, err := ports.UnmarshalHello(f.Payload)
+	if err != nil {
+		return f
+	}
+	hello.MaxOutputInFlight = 1
+	f.Payload = ports.MarshalHello(hello)
+	return f
 }
