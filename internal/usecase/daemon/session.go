@@ -409,7 +409,10 @@ func (d *Daemon) startTabGoroutines(sess *session, tb *tab) {
 
 func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 	if p != nil {
-		d.log.Info("pane created", "session", sess.name, "pane", p.id)
+		sess.mu.Lock()
+		name := sess.name
+		sess.mu.Unlock()
+		d.log.Info("pane created", "session", name, "pane", p.id)
 	}
 	d.sessWg.Add(2)
 	go d.ptyReader(sess, tb, p)

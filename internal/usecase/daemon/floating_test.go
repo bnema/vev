@@ -523,6 +523,61 @@ func TestFloatingLaunchFailureCapturesSessionNameBeforeConcurrentRename(t *testi
 	require.True(t, strings.Contains(logs.String(), "session=captured"), logs.String())
 }
 
+func TestFloatingInstallLogsSessionNameSafelyDuringRename(t *testing.T) {
+	floatingPTY, _ := newBlockingPTY(t)
+	factory := portsmocks.NewMockPTYFactory(t)
+	opened := make(chan struct{})
+	allowOpen := make(chan struct{})
+	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(string, []string, []string, string, domain.Size) (ports.PTY, error) {
+			close(opened)
+			<-allowOpen
+			return floatingPTY, nil
+		}).Once()
+	var logs bytes.Buffer
+	handled := make(chan struct{})
+	d := newTestDaemon(t, factory, stubClock{})
+	d.log = slog.New(floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
+	tb := newFloatingTestTab(t)
+	sess := &session{name: "captured", tabs: []*tab{tb}, ctx: t.Context()}
+
+	d.startFloating(sess, tb, false)
+	<-opened
+	renamed := make(chan struct{})
+	stopRename := make(chan struct{})
+	renameDone := make(chan struct{})
+	go func() {
+		defer close(renameDone)
+		sess.mu.Lock()
+		sess.name = "renamed"
+		sess.mu.Unlock()
+		close(renamed)
+		for {
+			select {
+			case <-stopRename:
+				return
+			default:
+			}
+			sess.mu.Lock()
+			sess.name = "renamed"
+			sess.mu.Unlock()
+		}
+	}()
+	<-renamed
+	close(allowOpen)
+	select {
+	case <-handled:
+	case <-time.After(time.Second):
+		t.Fatal("installed floating pane was not logged")
+	}
+	close(stopRename)
+	<-renameDone
+	require.Contains(t, logs.String(), "session=renamed", logs.String())
+
+	d.teardownFloating(tb)
+	d.sessWg.Wait()
+}
+
 func TestFloatingToggleUsesVisibleTarget(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	tb := newFloatingTestTab(t)
