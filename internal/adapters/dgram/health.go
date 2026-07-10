@@ -12,6 +12,7 @@ type healthTracker struct {
 	lastPacket   time.Time
 	lastRecord   time.Time
 	lastProgress time.Time
+	pendingSince time.Time
 	generation   uint64
 }
 
@@ -34,6 +35,16 @@ func (h *healthTracker) ackProgress(now time.Time) {
 	h.generation++
 }
 
+func (h *healthTracker) pendingStarted(now time.Time) {
+	h.pendingSince = now
+	h.generation++
+}
+
+func (h *healthTracker) pendingCleared() {
+	h.pendingSince = time.Time{}
+	h.generation++
+}
+
 func (h healthTracker) decide(now time.Time, hasPending bool, degradedAfter, probeAfter, offlineAfter, deadAfter time.Duration) (ports.LinkState, bool, bool) {
 	packetAge := now.Sub(h.lastPacket)
 	switch {
@@ -50,8 +61,14 @@ func (h healthTracker) decide(now time.Time, hasPending bool, degradedAfter, pro
 		qualityAt = h.lastProgress
 	}
 	qualityAge := now.Sub(qualityAt)
-	if hasPending && probeAfter > 0 && qualityAge >= probeAfter {
-		return ports.LinkStateProbing, true, false
+	if hasPending && probeAfter > 0 {
+		pendingBaseline := h.pendingSince
+		if pendingBaseline.IsZero() || h.lastProgress.After(pendingBaseline) {
+			pendingBaseline = h.lastProgress
+		}
+		if now.Sub(pendingBaseline) >= probeAfter {
+			return ports.LinkStateProbing, true, false
+		}
 	}
 	if degradedAfter > 0 && qualityAge >= degradedAfter {
 		return ports.LinkStateDegraded, false, false

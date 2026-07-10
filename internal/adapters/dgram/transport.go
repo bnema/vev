@@ -395,7 +395,11 @@ func (t *Transport) send(f ports.Frame, async bool) error {
 	t.seq++
 	seq := t.seq
 	if reliable {
-		t.pending[seq] = &pending{frame: f, enqueued: t.clock.Now()}
+		now := t.clock.Now()
+		if len(t.pending) == 0 {
+			t.health.pendingStarted(now)
+		}
+		t.pending[seq] = &pending{frame: f, enqueued: now}
 	}
 	if shouldPaceOutput(f) {
 		now := t.clock.Now()
@@ -554,6 +558,9 @@ func (t *Transport) removePendingLocked(seq uint64) bool {
 		return false
 	}
 	delete(t.pending, seq)
+	if len(t.pending) == 0 {
+		t.health.pendingCleared()
+	}
 	return true
 }
 
@@ -838,6 +845,7 @@ func (t *Transport) readLoop(pc net.PacketConn) {
 		}
 		t.recordCompleteRecord()
 		t.handleRecord(payload)
+		t.checkSilence()
 	}
 }
 
@@ -856,7 +864,6 @@ func (t *Transport) recordCompleteRecord() {
 	t.health.completeRecord(now)
 	t.lastCompleteRecord = now
 	t.mu.Unlock()
-	t.setLinkState(ports.LinkStateConnected, nil)
 }
 
 func (t *Transport) handleRecord(p []byte) {
@@ -884,6 +891,9 @@ func (t *Transport) handleRecord(p []byte) {
 		if acked {
 			now := t.clock.Now()
 			t.health.ackProgress(now)
+			if len(t.pending) == 0 {
+				t.health.pendingCleared()
+			}
 			t.lastACKProgress = now
 			t.notifySendWaitersLocked()
 		}

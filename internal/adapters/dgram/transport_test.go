@@ -1843,7 +1843,8 @@ func TestLinkHealthSeparatesPacketContactFromUsefulProgress(t *testing.T) {
 		{name: "packet silence probes and hops", packetAge: threshold(20), recordAge: threshold(20), ackAge: threshold(20), wantState: ports.LinkStateProbing, wantHop: true},
 		{name: "packet silence becomes offline", packetAge: threshold(30), recordAge: threshold(30), ackAge: threshold(30), wantState: ports.LinkStateOffline},
 		{name: "packet silence becomes dead", packetAge: threshold(60), recordAge: threshold(60), ackAge: threshold(60), wantState: ports.LinkStateDead, wantDead: true},
-		{name: "complete record restores connected", packetAge: 0, recordAge: 0, ackAge: threshold(30), hasPending: true, wantState: ports.LinkStateConnected},
+		{name: "complete record cannot mask pending stall", packetAge: 0, recordAge: 0, ackAge: threshold(30), hasPending: true, wantState: ports.LinkStateProbing, wantHop: true},
+		{name: "complete record restores connected without pending data", packetAge: 0, recordAge: 0, ackAge: threshold(30), wantState: ports.LinkStateConnected},
 		{name: "ack progress restores connected", packetAge: 0, recordAge: threshold(30), ackAge: 0, hasPending: true, wantState: ports.LinkStateConnected},
 	}
 
@@ -1892,6 +1893,83 @@ func TestLinkHealthPendingStallWithFreshContactProbesOnceWithoutDying(t *testing
 	select {
 	case <-a.done:
 		t.Fatal("fresh authenticated contact must prevent pending-stall death")
+	default:
+	}
+}
+
+func TestLinkHealthHeartbeatControlCannotMaskPendingACKStall(t *testing.T) {
+	aPC, bPC := newPair()
+	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+	var hops atomic.Int32
+	tr, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{
+		Clock: clk, ResendAfter: time.Hour, Heartbeat: time.Hour,
+		RebindPacketConn: func(net.PacketConn) (net.PacketConn, error) {
+			attempt := hops.Add(1)
+			return &fakePC{addr: testAddr(fmt.Sprintf("a%d", attempt+1)), in: make(chan packet, 100), peers: map[string]*fakePC{"b": bPC}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tr.Close() }()
+	defer func() { _ = bPC.Close() }()
+	if err := tr.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("unacked")}); err != nil {
+		t.Fatal(err)
+	}
+
+	codec, err := pdgram.NewCodec(key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticated := make(chan struct{}, 32)
+	tr.mu.Lock()
+	tr.afterAuthenticatedPacket = func() { authenticated <- struct{}{} }
+	tr.mu.Unlock()
+	var counter uint64
+	sendHeartbeatPong := func() {
+		t.Helper()
+		counter++
+		frag := pdgram.Fragment{Seq: counter, Index: 0, Count: 1, Data: probeRecord(recPong, counter)}
+		raw, marshalErr := pdgram.MarshalFragment(frag)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		tr.mu.Lock()
+		pc := tr.pc.(*fakePC)
+		tr.mu.Unlock()
+		pc.in <- packet{b: codec.Seal(2, counter, raw, nil), addr: testAddr("b")}
+		select {
+		case <-authenticated:
+		case <-time.After(time.Second):
+			t.Fatal("heartbeat pong was not authenticated")
+		}
+	}
+
+	for elapsed := 3 * time.Second; elapsed <= 66*time.Second; elapsed += 3 * time.Second {
+		clk.advance(3 * time.Second)
+		sendHeartbeatPong()
+		eventually(t, time.Second, func() bool {
+			tr.mu.Lock()
+			defer tr.mu.Unlock()
+			return tr.health.lastRecord.Equal(clk.Now())
+		})
+		if elapsed >= 20*time.Second {
+			eventually(t, time.Second, func() bool {
+				tr.mu.Lock()
+				defer tr.mu.Unlock()
+				return tr.pc != aPC
+			})
+		}
+	}
+	if got := tr.LinkState(); got != ports.LinkStateProbing {
+		t.Fatalf("state=%v, want probing despite fresh heartbeat control traffic", got)
+	}
+	if got := hops.Load(); got != 1 {
+		t.Fatalf("socket hops=%d, want one pending round-trip recovery hop", got)
+	}
+	select {
+	case <-tr.done:
+		t.Fatal("fresh authenticated control contact must prevent offline/dead closure")
 	default:
 	}
 }
