@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/ports"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 )
 
@@ -28,7 +29,6 @@ type packetMeta struct {
 	Bytes      int
 	At         time.Time
 	QueueBytes int
-	Retransmit bool
 }
 
 // packetPolicy makes loss and constrained links explicit in transport tests.
@@ -196,132 +196,199 @@ func (p *fakePC) SetWriteDeadline(time.Time) error { return nil }
 
 func key() []byte { return bytes.Repeat([]byte{1}, pdgram.KeySize) }
 
-type floodMetrics struct {
-	packetContact   int
-	completedRecord int
-	ackProgress     int
-	queueBytes      int
-	retransmits     int
-}
-
-// TestTransportFloodClassification documents the three distinct symptoms that
-// used to be conflated as a healthy UDP link: authenticated datagrams arriving,
-// complete records arriving, and ACKs retiring sender work.
+// TestTransportFloodClassification drives authenticated datagrams through real
+// transports. The metrics are transport state, not simulator bookkeeping.
 func TestTransportFloodClassification(t *testing.T) {
-	const records = 32
-	payload := make([]byte, 24*pdgram.DefaultMTU)
-	fragments, err := pdgram.FragmentPayload(1, payload, pdgram.DefaultMTU)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(fragments) < 24 {
-		t.Fatalf("fragments=%d, want at least 24", len(fragments))
-	}
-	packets := make([][]byte, len(fragments))
-	for i, fragment := range fragments {
-		packets[i], err = pdgram.MarshalFragment(fragment)
+	t.Run("one real fragment per large record loss contacts without completing", func(t *testing.T) {
+		clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+		aPC, bPC := newPair()
+		inspect, err := pdgram.NewCodec(key())
 		if err != nil {
 			t.Fatal(err)
 		}
-	}
+		dropped := map[uint64]bool{}
+		aPC.drop = func(pkt []byte, _ net.Addr) bool {
+			_, raw, err := inspect.Open(pkt, 1, nil, nil)
+			if err != nil {
+				return false
+			}
+			frag, err := pdgram.UnmarshalFragment(raw)
+			if err != nil || frag.Index != frag.Count-1 || dropped[frag.Seq] {
+				return false
+			}
+			dropped[frag.Seq] = true
+			return true
+		}
+		a, b := newFloodTransports(t, aPC, bPC, clk, 128)
+		defer closeFloodTransports(a, b)
+		start := clk.Now()
+		clk.advance(time.Nanosecond)
+		for range 2 {
+			if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: make([]byte, 200)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		floodEventually(t, func() bool { return floodState(b).packet && len(dropped) == 2 })
+		state := floodState(b)
+		if !state.packet || state.record || floodState(a).ack {
+			t.Fatalf("contact=%v complete=%v ack=%v, want contact only", state.packet, state.record, floodState(a).ack)
+		}
+		if !floodState(b).packet || !clk.Now().After(start) {
+			t.Fatal("real authenticated fragments did not update contact")
+		}
+	})
 
-	tests := []struct {
-		name  string
-		run   func(*manualClock) floodMetrics
-		check func(*testing.T, floodMetrics)
-	}{
-		{
-			name: "one fragment per record loss has packet contact without record or ACK progress",
-			run: func(clk *manualClock) floodMetrics {
-				attempt := 0
-				link := newSimulatedLink(clk, packetPolicy{Drop: func(packetMeta) bool {
-					drop := attempt%len(fragments) == len(fragments)-1
-					attempt++
-					return drop
-				}})
-				a, b := newPairWithLink(link)
-				m := floodMetrics{}
-				for range records {
-					delivered := 0
-					for _, fragment := range packets {
-						_, _ = a.WriteTo(fragment, b.addr)
-						select {
-						case <-b.in:
-							delivered++
-							m.packetContact++
-						default:
-						}
-					}
-					if delivered == len(fragments) {
-						m.completedRecord++
-						m.ackProgress++
-					}
-				}
-				return m
-			},
-			check: func(t *testing.T, m floodMetrics) {
-				t.Helper()
-				if m.packetContact == 0 || m.completedRecord != 0 || m.ackProgress != 0 {
-					t.Fatalf("metrics=%+v, want packet contact only", m)
-				}
-			},
-		},
-		{
-			name: "bounded bandwidth queue has no false progress and stays bounded",
-			run: func(clk *manualClock) floodMetrics {
-				limit := 2 * pdgram.DefaultMTU
-				link := newSimulatedLink(clk, packetPolicy{Delay: time.Second, MaxQueueBytes: limit, BytesPerSecond: pdgram.DefaultMTU})
-				a, b := newPairWithLink(link)
-				for range records {
-					for _, fragment := range packets {
-						_, _ = a.WriteTo(fragment, b.addr)
-					}
-				}
-				return floodMetrics{queueBytes: link.queuedBytes()}
-			},
-			check: func(t *testing.T, m floodMetrics) {
-				t.Helper()
-				if m.packetContact != 0 || m.completedRecord != 0 || m.ackProgress != 0 || m.queueBytes <= 0 || m.queueBytes > 2*pdgram.DefaultMTU {
-					t.Fatalf("metrics=%+v, want bounded queued bytes without progress", m)
-				}
-			},
-		},
-		{
-			name: "retransmit storm has record progress but no ACK progress",
-			run: func(clk *manualClock) floodMetrics {
-				link := newSimulatedLink(clk, packetPolicy{})
-				a, b := newPairWithLink(link)
-				m := floodMetrics{}
-				for range records {
-					for attempt := 0; attempt < 3; attempt++ {
-						for _, fragment := range packets {
-							_, _ = a.WriteTo(fragment, b.addr)
-							<-b.in
-							m.packetContact++
-						}
-						if attempt == 0 {
-							m.completedRecord++
-						} else {
-							m.retransmits++
-						}
+	t.Run("bounded byte queue advances and releases on fake clock", func(t *testing.T) {
+		clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+		limit := 2 * 128
+		link := newSimulatedLink(clk, packetPolicy{Delay: time.Second, MaxQueueBytes: limit, BytesPerSecond: 128})
+		aPC, bPC := newPairWithLink(link)
+		a, b := newFloodTransports(t, aPC, bPC, clk, 128)
+		defer closeFloodTransports(a, b)
+		a.mu.Lock()
+		a.rto = time.Hour // Keep the fake-clock queue case about bandwidth, not retries.
+		a.mu.Unlock()
+		if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: make([]byte, 200)}); err != nil {
+			t.Fatal(err)
+		}
+		queued := link.queuedBytes()
+		if queued <= 0 || queued > limit {
+			t.Fatalf("queued bytes=%d, want 1..%d", queued, limit)
+		}
+		clk.advance(10 * time.Second)
+		link.flush(bPC)
+		floodEventually(t, func() bool { return floodState(b).packet })
+		if got := link.queuedBytes(); got != 0 {
+			t.Fatalf("queued bytes after fake-clock release=%d, want 0", got)
+		}
+		if floodState(b).record || floodState(a).ack {
+			t.Fatal("dropped queued fragment produced false record or ACK progress")
+		}
+	})
+
+	t.Run("real cumulative ACK loss schedules duplicate retransmits", func(t *testing.T) {
+		clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+		aPC, bPC := newPair()
+		inspect, err := pdgram.NewCodec(key())
+		if err != nil {
+			t.Fatal(err)
+		}
+		bPC.drop = func(pkt []byte, _ net.Addr) bool {
+			_, raw, err := inspect.Open(pkt, 2, nil, nil)
+			if err != nil {
+				return false
+			}
+			frag, err := pdgram.UnmarshalFragment(raw)
+			return err == nil && frag.Count == 1 && len(frag.Data) == 9 && frag.Data[0] == recAck
+		}
+		seen := map[uint64]int{}
+		var seenMu sync.Mutex
+		aPC.drop = func(pkt []byte, _ net.Addr) bool {
+			_, raw, err := inspect.Open(pkt, 1, nil, nil)
+			if err == nil {
+				frag, err := pdgram.UnmarshalFragment(raw)
+				if err == nil && frag.Count == 1 {
+					seq, _, _, ok := decodeData(frag.Data)
+					if ok {
+						seenMu.Lock()
+						seen[seq]++
+						seenMu.Unlock()
 					}
 				}
-				// ACK packets are intentionally lost in this scenario.
-				return m
-			},
-			check: func(t *testing.T, m floodMetrics) {
-				t.Helper()
-				if m.packetContact == 0 || m.completedRecord != records || m.ackProgress != 0 || m.retransmits == 0 {
-					t.Fatalf("metrics=%+v, want record contact with retransmit-only pressure", m)
-				}
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
-			metrics := tt.run(clk)
-			tt.check(t, metrics)
+			}
+			return false
+		}
+		a, b := newFloodTransports(t, aPC, bPC, clk, 128)
+		defer closeFloodTransports(a, b)
+		clk.advance(time.Nanosecond)
+		if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("retry")}); err != nil {
+			t.Fatal(err)
+		}
+		floodEventually(t, func() bool { return floodState(b).record })
+		waitForManualTimers(t, clk, 4)
+		clk.advance(10 * time.Millisecond)
+		floodEventually(t, func() bool {
+			seenMu.Lock()
+			defer seenMu.Unlock()
+			return seen[1] >= 2
 		})
+		state := floodState(a)
+		if state.ack || state.retransmits == 0 {
+			t.Fatalf("ack=%v retransmits=%d, want lost ACK and scheduled retry", state.ack, state.retransmits)
+		}
+	})
+}
+
+type floodTransportState struct {
+	packet, record, ack bool
+	retransmits         uint64
+}
+
+func floodState(t *Transport) floodTransportState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.clock.Now()
+	return floodTransportState{
+		packet:      t.lastAuthenticatedPacket.Equal(now),
+		record:      t.lastCompleteRecord.Equal(now),
+		ack:         t.lastACKProgress.Equal(now),
+		retransmits: t.retransmits,
+	}
+}
+
+func newFloodTransports(t *testing.T, aPC, bPC *fakePC, clk *manualClock, mtu int) (*Transport, *Transport) {
+	t.Helper()
+	opts := Options{Clock: clk, MTU: mtu, ResendAfter: 10 * time.Millisecond, Heartbeat: time.Hour}
+	a, err := NewTransportWithOptions(aPC, bPC.addr, key(), 1, 2, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewTransportWithOptions(bPC, aPC.addr, key(), 2, 1, opts)
+	if err != nil {
+		_ = a.Close()
+		t.Fatal(err)
+	}
+	return a, b
+}
+
+func closeFloodTransports(a, b *Transport) {
+	_ = a.Close()
+	_ = b.Close()
+}
+
+func floodEventually(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("condition was not met")
+}
+
+func TestMalformedAuthenticatedFragmentDoesNotCountAsContact(t *testing.T) {
+	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+	aPC, bPC := newPair()
+	a, b := newFloodTransports(t, aPC, bPC, clk, 128)
+	defer closeFloodTransports(a, b)
+	b.mu.Lock()
+	startPacket, startRecord := b.lastAuthenticatedPacket, b.lastCompleteRecord
+	b.mu.Unlock()
+	codec, err := pdgram.NewCodec(key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk.advance(time.Second)
+	if _, err := aPC.WriteTo(codec.Seal(1, 999, []byte("not a fragment"), nil), bPC.addr); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	b.mu.Lock()
+	gotPacket, gotRecord := b.lastAuthenticatedPacket, b.lastCompleteRecord
+	b.mu.Unlock()
+	if gotPacket != startPacket || gotRecord != startRecord {
+		t.Fatal("malformed authenticated plaintext counted as packet contact")
 	}
 }
