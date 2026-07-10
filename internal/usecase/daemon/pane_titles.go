@@ -43,6 +43,18 @@ func (p *pane) displayTitleLocked() string {
 	return p.formattedTitleLocked(p.title.displayFallback)
 }
 
+// setDisplayFallback updates the fallback owned by a pane. It must not damage
+// cached composition unless that fallback changes the displayed title.
+func (p *pane) setDisplayFallback(fallback string) {
+	p.mu.Lock()
+	oldTitle := p.displayTitleLocked()
+	p.title.displayFallback = fallback
+	if oldTitle != p.displayTitleLocked() {
+		p.title.generation++
+	}
+	p.mu.Unlock()
+}
+
 // refreshTerminalTitleLocked synchronizes the title retained by the VT parser.
 // It must be called while p.mu is held, including by ptyReader around Write.
 func (p *pane) refreshTerminalTitleLocked() {
@@ -85,6 +97,7 @@ func (d *Daemon) refreshPaneTitleCached(sess *session, id layout.PaneID, force b
 	if p == nil {
 		return fallback
 	}
+	p.setDisplayFallback(fallback)
 	return d.refreshPaneDisplayTitle(sess, p, force)
 }
 
@@ -92,19 +105,13 @@ func (d *Daemon) refreshPaneTitleCached(sess *session, id layout.PaneID, force b
 // display title. It deliberately releases pane.mu before querying the PTY so
 // callers that already render under pane locking cannot recurse on that lock.
 func (d *Daemon) refreshPaneDisplayTitle(_ *session, p *pane, force bool) string {
-	fallback := d.paneTitleFallback()
 	if p == nil {
-		return fallback
+		return d.paneTitleFallback()
 	}
 	now := d.clock.Now()
 	p.mu.Lock()
 	if !force && p.title.processNameValid && now.Sub(p.title.processNameAt) < paneTitleCacheTTL {
-		oldTitle := p.displayTitleLocked()
-		p.title.displayFallback = fallback
 		title := p.displayTitleLocked()
-		if oldTitle != title {
-			p.title.generation++
-		}
 		p.mu.Unlock()
 		return title
 	}
@@ -127,7 +134,6 @@ func (d *Daemon) refreshPaneDisplayTitle(_ *session, p *pane, force bool) string
 	p.title.processName = processName
 	p.title.processNameAt = now
 	p.title.processNameValid = true
-	p.title.displayFallback = fallback
 	title := p.displayTitleLocked()
 	if oldTitle != title {
 		p.title.generation++

@@ -63,6 +63,25 @@ func TestComposeFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testing.T) {
 	require.Equal(t, 1, damage[0].Height)
 }
 
+func TestComposeFloatingFrameRendersPaneOwnedCommandFallback(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.shell = "/usr/bin/fish"
+	p := newPane("floating", nil, domain.Size{Cols: 6, Rows: 3})
+	p.title.displayFallback = floatingCommandFallback("btop --utf", d.shell)
+	require.Equal(t, "btop", d.refreshPaneDisplayTitle(nil, p, true))
+
+	base := renderer.NewFrame(40, 12)
+	content := domain.Rect{Y: 1, Width: 40, Height: 10}
+	cfg := domain.FloatingConfig{Width: 80, Height: 80}
+	frame, _ := composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, false)
+	geometry := calculateFloatingGeometry(content, cfg)
+	var gotTitle strings.Builder
+	for x := geometry.Bounds.X + 2; x < geometry.Bounds.X+geometry.Bounds.Width-2; x++ {
+		gotTitle.WriteRune(frame.At(x, geometry.Bounds.Y).Rune)
+	}
+	require.Equal(t, "btop", strings.TrimRight(gotTitle.String(), "─"))
+}
+
 func TestComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 	p := newPane("floating", nil, domain.Size{Cols: 80, Rows: 24})
 	base := renderer.NewFrame(80, 24)
