@@ -125,29 +125,6 @@ func (tb *tab) terminalTargetLocked() *pane {
 	return tb.focusedPane()
 }
 
-// floatingInnerSize returns the terminal area inside a percentage-sized popup.
-// For each axis, a popup with at least three cells spends one cell on each
-// border; smaller popups omit that axis's border. A valid tab always yields a
-// valid PTY size.
-func floatingInnerSize(tabSize domain.Size, cfg domain.FloatingConfig) domain.Size {
-	if !tabSize.Valid() {
-		return domain.Size{}
-	}
-	return domain.Size{
-		Cols: floatingInnerAxis(tabSize.Cols, cfg.Width),
-		Rows: floatingInnerAxis(tabSize.Rows, cfg.Height),
-	}
-}
-
-func floatingInnerAxis(available, percent int) int {
-	percent = min(max(percent, 1), 100)
-	bounds := min(max(available*percent/100, 1), available)
-	if bounds >= 3 {
-		return bounds - 2
-	}
-	return bounds
-}
-
 // ensureFloatingWarm starts the background prewarm exactly once for a tab.
 func (d *Daemon) ensureFloatingWarm(sess *session, tb *tab) {
 	if d == nil || sess == nil || tb == nil || d.ptys == nil {

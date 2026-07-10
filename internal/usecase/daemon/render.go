@@ -219,9 +219,6 @@ func syncUpdateEndIn(data []byte) bool {
 // render paints the current client, or (when detached) just clears accumulated
 // damage so it never grows unbounded while headless.
 func (d *Daemon) render(sess *session, tb *tab, p *pane) {
-	tb.mu.Lock()
-	previewer := tb.previewClient
-	tb.mu.Unlock()
 	if p == nil {
 		return
 	}
@@ -231,6 +228,20 @@ func (d *Daemon) render(sess *session, tb *tab, p *pane) {
 		return
 	}
 	p.mu.Unlock()
+
+	// A retained floating pane continues to drain its PTY while hidden. Its
+	// scheduler must not route through picker preview (or the active client),
+	// but it must consume damage so a long-hidden command cannot retain it.
+	tb.mu.Lock()
+	hiddenFloating := tb.floating.pane == p && tb.floating.state != floatingVisible
+	previewer := tb.previewClient
+	tb.mu.Unlock()
+	if hiddenFloating {
+		p.mu.Lock()
+		p.screen.ClearDamage()
+		p.mu.Unlock()
+		return
+	}
 
 	sess.mu.Lock()
 	ac := sess.client
@@ -252,18 +263,6 @@ func (d *Daemon) render(sess *session, tb *tab, p *pane) {
 	}
 
 	if ac == nil || !active {
-		p.mu.Lock()
-		p.screen.ClearDamage()
-		p.mu.Unlock()
-		return
-	}
-	// A retained floating pane continues to drain its PTY while hidden. Do
-	// not let its scheduler repaint the normal tab, but consume its damage so
-	// a long-hidden command cannot retain an unbounded dirty region.
-	tb.mu.Lock()
-	hiddenFloating := tb.floating.pane == p && tb.floating.state != floatingVisible
-	tb.mu.Unlock()
-	if hiddenFloating {
 		p.mu.Lock()
 		p.screen.ClearDamage()
 		p.mu.Unlock()

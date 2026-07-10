@@ -35,6 +35,25 @@ func TestCalculateFloatingGeometry(t *testing.T) {
 	}
 }
 
+func TestFloatingAxisGeometryEndpointsAndTinyBorders(t *testing.T) {
+	tests := []struct {
+		name               string
+		available, percent int
+		want               floatingAxisGeometry
+	}{
+		{name: "one percent", available: 100, percent: 1, want: floatingAxisGeometry{BoundsSize: 1, InnerSize: 1}},
+		{name: "full size reserves borders", available: 100, percent: 100, want: floatingAxisGeometry{BoundsSize: 100, InnerSize: 98, BorderOffset: 1}},
+		{name: "two cells omits borders", available: 2, percent: 100, want: floatingAxisGeometry{BoundsSize: 2, InnerSize: 2}},
+		{name: "three cells leaves one inner cell", available: 3, percent: 100, want: floatingAxisGeometry{BoundsSize: 3, InnerSize: 1, BorderOffset: 1}},
+		{name: "percentage clamps", available: 10, percent: 101, want: floatingAxisGeometry{BoundsSize: 10, InnerSize: 8, BorderOffset: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, calculateFloatingAxisGeometry(tt.available, tt.percent))
+		})
+	}
+}
+
 func TestComposeFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testing.T) {
 	p := newPane("floating", nil, domain.Size{Cols: 6, Rows: 3})
 	p.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'F'})
@@ -119,6 +138,74 @@ func TestDrawFloatingBorderOmitsTinyAxes(t *testing.T) {
 	for _, cell := range frame.Cells {
 		require.Equal(t, renderer.BlankCell().Rune, cell.Rune)
 	}
+}
+
+func TestRenderHiddenFloatingSkipsPreviewAndActiveClientAndClearsDamage(t *testing.T) {
+	normalPTY, releaseNormal := newBlockingPTY(t)
+	defer releaseNormal()
+	d, sess, _, activeSends := newManualSessionWithPTYs(t, normalPTY)
+	previewTransport, previewSends := newCapturingTransport(t)
+	preview := &attachedClient{tr: previewTransport, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	preview.initOverlays()
+	preview.setSession(sess)
+
+	tb := sess.activeTab()
+	floating := newPane("floating", nil, domain.Size{Cols: 20, Rows: 8})
+	floating.screen.Write([]byte("hidden output"))
+	tb.mu.Lock()
+	generation := tb.beginFloatingWarmLocked(false)
+	require.True(t, tb.installFloatingLocked(floating, generation))
+	tb.previewClient = preview
+	tb.mu.Unlock()
+
+	d.render(sess, tb, floating)
+
+	floating.mu.Lock()
+	require.Empty(t, floating.screen.Damage())
+	floating.mu.Unlock()
+	select {
+	case frame := <-previewSends:
+		t.Fatalf("hidden floating output painted picker preview: %#v", frame)
+	default:
+	}
+	select {
+	case frame := <-activeSends:
+		t.Fatalf("hidden floating output painted active client: %#v", frame)
+	default:
+	}
+}
+
+func BenchmarkComposeFloatingFrameCached(b *testing.B) {
+	p := newPane("floating", nil, domain.Size{Cols: 62, Rows: 18})
+	p.title.displayFallback = "float"
+	base := renderer.NewFrame(80, 24)
+	content := domain.Rect{Y: 1, Width: 80, Height: 22}
+	cfg := domain.FloatingConfig{Width: 80, Height: 80}
+	cache := &composedFrameCache{}
+	composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	p.screen.ClearDamage()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	}
+}
+
+func TestComposeFloatingFrameCachedDoesNotAllocate(t *testing.T) {
+	p := newPane("floating", nil, domain.Size{Cols: 62, Rows: 18})
+	p.title.displayFallback = "float"
+	base := renderer.NewFrame(80, 24)
+	content := domain.Rect{Y: 1, Width: 80, Height: 22}
+	cfg := domain.FloatingConfig{Width: 80, Height: 80}
+	cache := &composedFrameCache{}
+	composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	p.screen.ClearDamage()
+
+	allocs := testing.AllocsPerRun(100, func() {
+		composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	})
+	require.Zero(t, allocs, "cached floating composition must not allocate without damage or title changes")
 }
 
 func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {

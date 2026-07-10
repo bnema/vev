@@ -14,33 +14,49 @@ type floatingGeometry struct {
 	Inner  domain.Rect
 }
 
-// calculateFloatingGeometry centers a percentage-sized popup in content. Its
-// terminal area deliberately uses floatingInnerSize so launch and rendering
-// always share the same border and percentage rules.
+// floatingAxisGeometry is the canonical percentage and border calculation for
+// one popup axis. Popups smaller than three cells spend no cells on borders.
+type floatingAxisGeometry struct {
+	BoundsSize   int
+	InnerSize    int
+	BorderOffset int
+}
+
+func calculateFloatingAxisGeometry(available, percent int) floatingAxisGeometry {
+	percent = min(max(percent, 1), 100)
+	bounds := min(max(available*percent/100, 1), available)
+	axis := floatingAxisGeometry{BoundsSize: bounds, InnerSize: bounds}
+	if bounds >= 3 {
+		axis.InnerSize -= 2
+		axis.BorderOffset = 1
+	}
+	return axis
+}
+
+// calculateFloatingGeometry centers a percentage-sized popup in content.
+// Launch sizing derives from Inner too, so rendering and PTY geometry share
+// the same per-axis percentage and tiny-border rules.
 func calculateFloatingGeometry(content domain.Rect, cfg domain.FloatingConfig) floatingGeometry {
 	if content.Width <= 0 || content.Height <= 0 {
 		return floatingGeometry{}
 	}
+	x := calculateFloatingAxisGeometry(content.Width, cfg.Width)
+	y := calculateFloatingAxisGeometry(content.Height, cfg.Height)
 	bounds := domain.Rect{
-		Width:  floatingBoundsAxis(content.Width, cfg.Width),
-		Height: floatingBoundsAxis(content.Height, cfg.Height),
+		X:      content.X + (content.Width-x.BoundsSize)/2,
+		Y:      content.Y + (content.Height-y.BoundsSize)/2,
+		Width:  x.BoundsSize,
+		Height: y.BoundsSize,
 	}
-	bounds.X = content.X + (content.Width-bounds.Width)/2
-	bounds.Y = content.Y + (content.Height-bounds.Height)/2
-	innerSize := floatingInnerSize(domain.Size{Cols: bounds.Width, Rows: bounds.Height}, domain.FloatingConfig{Width: 100, Height: 100})
-	inner := domain.Rect{X: bounds.X, Y: bounds.Y, Width: innerSize.Cols, Height: innerSize.Rows}
-	if bounds.Width >= 3 {
-		inner.X++
+	return floatingGeometry{
+		Bounds: bounds,
+		Inner: domain.Rect{
+			X:      bounds.X + x.BorderOffset,
+			Y:      bounds.Y + y.BorderOffset,
+			Width:  x.InnerSize,
+			Height: y.InnerSize,
+		},
 	}
-	if bounds.Height >= 3 {
-		inner.Y++
-	}
-	return floatingGeometry{Bounds: bounds, Inner: inner}
-}
-
-func floatingBoundsAxis(available, percent int) int {
-	percent = min(max(percent, 1), 100)
-	return min(max(available*percent/100, 1), available)
 }
 
 // composeFloatingFrame applies the popup to a copy of the normal composed

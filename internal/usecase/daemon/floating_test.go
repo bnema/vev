@@ -592,25 +592,3 @@ func TestFloatingToggleUsesVisibleTarget(t *testing.T) {
 	require.Same(t, floating, tb.terminalTargetLocked())
 	tb.mu.Unlock()
 }
-
-func TestFloatingInnerSize(t *testing.T) {
-	tests := []struct {
-		name string
-		tab  domain.Size
-		cfg  domain.FloatingConfig
-		want domain.Size
-	}{
-		{name: "one percent", tab: domain.Size{Cols: 100, Rows: 100}, cfg: domain.FloatingConfig{Width: 1, Height: 1}, want: domain.Size{Cols: 1, Rows: 1}},
-		{name: "full size reserves borders", tab: domain.Size{Cols: 100, Rows: 80}, cfg: domain.FloatingConfig{Width: 100, Height: 100}, want: domain.Size{Cols: 98, Rows: 78}},
-		{name: "tiny tab omits borders", tab: domain.Size{Cols: 2, Rows: 1}, cfg: domain.FloatingConfig{Width: 100, Height: 100}, want: domain.Size{Cols: 2, Rows: 1}},
-		{name: "three cells leaves one inner cell", tab: domain.Size{Cols: 3, Rows: 3}, cfg: domain.FloatingConfig{Width: 100, Height: 100}, want: domain.Size{Cols: 1, Rows: 1}},
-		{name: "invalid tab has no pty size", tab: domain.Size{}, cfg: domain.FloatingConfig{Width: 80, Height: 80}, want: domain.Size{}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := floatingInnerSize(tt.tab, tt.cfg); got != tt.want {
-				t.Fatalf("floatingInnerSize(%+v, %+v) = %+v, want %+v", tt.tab, tt.cfg, got, tt.want)
-			}
-		})
-	}
-}
