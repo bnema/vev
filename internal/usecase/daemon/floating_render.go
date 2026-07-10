@@ -62,18 +62,25 @@ func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *
 	(overlayBackdrop{DimPaneContents: true}).apply(frame, content, layoutSnap, theme)
 	geometry := calculateFloatingGeometry(content, cfg)
 
+	popupChanged := cache == nil || cache.floating != p || cache.floatingGeneration != generation
+
+	// The PTY reader mutates both the frame and its damage under p.mu. Keep
+	// every read of them, including the blit, in the same critical section.
+	// In particular, Frame is not safe to retain as an alias after unlocking.
 	p.mu.Lock()
 	title := p.displayTitleLocked()
 	titleGeneration := p.title.generation
-	screen := p.screen.Frame
 	screenDamage := p.screen.Damage()
+	blitPaneFrame(frame, geometry.Inner, p.screen.Frame, false, theme)
+	damage := append([]renderer.Damage(nil), baseDamage...)
+	for _, d := range screenDamage {
+		damage = append(damage, translatePaneDamage(d, geometry.Inner, content)...)
+	}
 	p.screen.ClearDamage()
 	p.mu.Unlock()
 
-	popupChanged := cache == nil || cache.floating != p || cache.floatingGeneration != generation
 	titleChanged := popupChanged || cache == nil || cache.floatingTitleGeneration != titleGeneration
 	drawFloatingBorder(frame, geometry.Bounds, title, newThemeStyles(theme).border)
-	blitPaneFrame(frame, geometry.Inner, screen, false, theme)
 	if cache != nil {
 		cache.floating = p
 		cache.floatingGeneration = generation
@@ -81,10 +88,6 @@ func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *
 	}
 	if full || popupChanged {
 		return frame, []renderer.Damage{renderer.FullRedraw()}
-	}
-	damage := append([]renderer.Damage(nil), baseDamage...)
-	for _, d := range screenDamage {
-		damage = append(damage, translatePaneDamage(d, geometry.Inner, content)...)
 	}
 	if titleChanged && geometry.Bounds.Height >= 3 {
 		damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: geometry.Bounds.X, Y: geometry.Bounds.Y, Width: geometry.Bounds.Width, Height: 1})

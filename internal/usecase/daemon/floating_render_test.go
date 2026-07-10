@@ -63,6 +63,37 @@ func TestComposeFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testing.T) {
 	require.Equal(t, 1, damage[0].Height)
 }
 
+func TestComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
+	p := newPane("floating", nil, domain.Size{Cols: 80, Rows: 24})
+	base := renderer.NewFrame(80, 24)
+	content := domain.Rect{Width: 80, Height: 24}
+	cfg := domain.FloatingConfig{Width: 100, Height: 100}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 500 {
+			// This is the same pane lock used by ptyReader around Screen.Write.
+			p.mu.Lock()
+			p.screen.Write([]byte("\x1b[Hreader"))
+			p.mu.Unlock()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		cache := &composedFrameCache{}
+		for range 500 {
+			composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+		}
+	}()
+	close(start)
+	wg.Wait()
+}
+
 func TestDrawFloatingBorderOmitsTinyAxes(t *testing.T) {
 	frame := renderer.NewFrame(2, 1)
 	drawFloatingBorder(frame, domain.Rect{Width: 2, Height: 1}, "title", renderer.Style{})
