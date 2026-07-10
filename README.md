@@ -49,8 +49,14 @@ vev reads `$XDG_CONFIG_HOME/vev/config`, or `~/.config/vev/config` when `XDG_CON
 # Theme: auto follows the client; dark/light force built-in palettes.
 theme = auto
 
+# One prewarmed floating terminal per tab. An empty command uses the normal shell.
+floating.command =
+floating.width = 80%
+floating.height = 80%
+
 # Rebindable actions. Leave a line out to keep its built-in binding.
 open-palette = alt+space
+toggle-floating-pane = alt+f
 jump-attention = alt+a
 focus-pane-left = alt+h
 focus-pane-right = alt+l
@@ -97,6 +103,7 @@ code.back-session = BSK
 code.forward-session = FSK
 code.session-picker = SSP
 code.visual-mode = VIS
+code.toggle-floating-pane = FLT
 code.rename-session = RNS
 code.detach = DET
 ```
@@ -104,6 +111,8 @@ code.detach = DET
 Configuring an action replaces all of its built-in aliases. In the example above, the focus-pane lines keep Alt+h/j/k/l but not the Alt+Arrow aliases; omit those lines to keep all built-ins.
 
 Key specs support `alt+<char>`, `alt+space`, and `alt+left/right/up/down`; digit key specs support `alt+1` through `alt+9`, not `alt+0`. `jump-attention` first opens the oldest attention tab in the current session; if none exists, it opens the oldest attention tab in another session. Invalid entries are logged as warnings and skipped where possible; duplicate config keys use the last value, binding conflicts keep the later action's defaults, and command-code conflicts drop the conflicting override.
+
+`floating.width` and `floating.height` require exact percentages from `1%` through `100%`; invalid values log a warning and retain the `80%` default. Reloaded floating settings apply to future floating processes only. Running processes, visibility, terminal screens, and scrollback remain unchanged, and only the configuration—not floating runtime state—is restored after a daemon restart.
 
 ### Bar right anchors
 
@@ -145,6 +154,7 @@ All bindings use Alt directly; there is no prefix key.
 | Key | Action |
 |---|---|
 | Alt+Space | open the command palette |
+| Alt+f | show or hide the current tab's floating terminal |
 | Alt+1 .. Alt+9 | switch to tab by number |
 | Alt+h/j/k/l | focus pane left/down/up/right |
 | Alt+Arrow | focus pane by direction |
@@ -172,6 +182,7 @@ Successful commands are promoted near the top the next time the palette opens.
 | BSK / FSK | move back / forward through recent sessions |
 | SSP | open session picker |
 | VIS | enter visual mode |
+| FLT | show or hide the current tab's floating terminal |
 | RNS | rename session |
 | RNT | rename current tab |
 | DET | detach |
@@ -192,6 +203,10 @@ Open it with `SSP` in the palette. It lists sessions and tabs, previews the sele
 ## Panes and tabs
 
 Tabs hold pane layouts. Panes can be split left/right/up/down, stacked, focused by direction, and closed from the command palette. Clicking a pane focuses it.
+
+Each tab also owns one independent floating terminal. It prewarms asynchronously on the tab's first visit, opens centered at the configured percentage of the pane-content area, and dims normal pane content while leaving status bars and popup chrome crisp. Hiding it retains the process, screen, and scrollback; switching tabs restores each tab's own visible or hidden state. Process exit clears the slot so the next open recreates it. The title combines the foreground process and OSC terminal title as `ProcessName: ProcessTerminalTitle`, falling back to either available title and then the configured command or shell.
+
+While visible, the floating terminal receives ordinary input, bracketed paste, mouse input, clipboard-path injection, and scrollback/copy mode. Global vev bindings remain active, and a bare Esc is passed to the floating application. `Alt+f` and `FLT` toggle visibility; there is no separate floating-pane close command.
 
 The top bar shows numbered tabs. The bottom bar shows the active session followed by recent sessions, fading toward older entries. Ephemeral sessions are marked with `*`, for example `0*`.
 
