@@ -83,7 +83,7 @@ func TestProxyRuntimeForwardsOutputAckCapabilityInHello(t *testing.T) {
 	daemon := newFakeTransport()
 	errCh := make(chan error, 1)
 	go func() { errCh <- ProxyRuntime{Client: client, Daemon: daemon, IdleTTL: time.Hour}.Run(t.Context()) }()
-	hello := ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", AckOutput: true}
+	hello := ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", MaxOutputInFlight: 8}
 	client.recv <- recvResult{frame: ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}}
 
 	select {
@@ -92,8 +92,8 @@ func TestProxyRuntimeForwardsOutputAckCapabilityInHello(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !got.AckOutput {
-			t.Fatal("proxied Hello lost AckOutput capability")
+		if got.MaxOutputInFlight != 8 {
+			t.Fatal("proxied Hello lost output window")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for proxied Hello")

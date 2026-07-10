@@ -66,9 +66,9 @@ type Hello struct {
 	TermEnv     string
 	Cwd         string
 	TrueColor   bool
-	// AckOutput is reserved for wire compatibility in protocol v13. The daemon
-	// ignores it because v13 clients cumulatively ACK output on every transport.
-	AckOutput bool
+	// MaxOutputInFlight is the requested maximum number of unacknowledged
+	// state-bearing output frames.
+	MaxOutputInFlight uint8
 }
 
 // Input carries raw bytes typed/pasted by the client, destined for the PTY.
@@ -312,11 +312,7 @@ func MarshalHello(h Hello) []byte {
 	} else {
 		w.putUint8(0)
 	}
-	if h.AckOutput {
-		w.putUint8(1)
-	} else {
-		w.putUint8(0)
-	}
+	w.putUint8(h.MaxOutputInFlight)
 	return w.b
 }
 
@@ -363,11 +359,9 @@ func UnmarshalHello(b []byte) (Hello, error) {
 		return Hello{}, err
 	}
 	h.TrueColor = trueColor != 0
-	ackOutput, err := r.getUint8()
-	if err != nil {
+	if h.MaxOutputInFlight, err = r.getUint8(); err != nil {
 		return Hello{}, err
 	}
-	h.AckOutput = ackOutput != 0
 	if err := r.done(); err != nil {
 		return Hello{}, err
 	}

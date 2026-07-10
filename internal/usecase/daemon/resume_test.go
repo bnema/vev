@@ -471,3 +471,35 @@ func TestResumeParkedUpdatesTerminalEnv(t *testing.T) {
 	defer sess.mu.Unlock()
 	require.True(t, sess.terminal.TrueColor)
 }
+
+func TestResumeRenegotiatesOutputWindowOnReusedStream(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	firstHello := helloResumeCapable(ports.IntentNew, "work", 0)
+	firstHello.MaxOutputInFlight = 8
+	sess, ac, err := d.route(firstHello, &closeTrackingTransport{})
+	require.NoError(t, err)
+	require.Equal(t, uint64(8), ac.output.maxOutstanding)
+	stream := ac.output
+	token := ac.resumeToken
+	require.True(t, sess.detachIfCurrent(ac))
+	require.True(t, d.parkAttachment(sess, ac))
+
+	resumeOne := helloResumeCapable(ports.IntentResume, "work", token)
+	resumeOne.MaxOutputInFlight = 1
+	_, resumed, err := d.route(resumeOne, &closeTrackingTransport{})
+	require.NoError(t, err)
+	require.Same(t, stream, resumed.output)
+	require.Equal(t, uint64(1), resumed.output.maxOutstanding)
+
+	token = resumed.resumeToken
+	require.True(t, sess.detachIfCurrent(resumed))
+	require.True(t, d.parkAttachment(sess, resumed))
+	resumeEight := helloResumeCapable(ports.IntentResume, "work", token)
+	resumeEight.MaxOutputInFlight = 8
+	_, resumed, err = d.route(resumeEight, &closeTrackingTransport{})
+	require.NoError(t, err)
+	require.Same(t, stream, resumed.output)
+	require.Equal(t, uint64(8), resumed.output.maxOutstanding)
+}

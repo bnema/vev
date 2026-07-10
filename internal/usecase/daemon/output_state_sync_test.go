@@ -71,11 +71,11 @@ func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
 	tr := newDatagramTestTransport()
 	routed, ac, err := d.route(ports.Hello{
-		Version:   ports.ProtocolVersion,
-		Intent:    ports.IntentAttach,
-		Name:      sess.name,
-		Size:      domain.Size{Cols: 80, Rows: 24},
-		AckOutput: true,
+		Version:           ports.ProtocolVersion,
+		Intent:            ports.IntentAttach,
+		Name:              sess.name,
+		Size:              domain.Size{Cols: 80, Rows: 24},
+		MaxOutputInFlight: 8,
 	}, tr)
 	require.NoError(t, err)
 	require.Same(t, sess, routed)
@@ -126,11 +126,11 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)
 	tr := newDatagramTestTransport()
 	_, ac, err := d.route(ports.Hello{
-		Version:   ports.ProtocolVersion,
-		Intent:    ports.IntentAttach,
-		Name:      sess.name,
-		Size:      domain.Size{Cols: 80, Rows: 24},
-		AckOutput: true,
+		Version:           ports.ProtocolVersion,
+		Intent:            ports.IntentAttach,
+		Name:              sess.name,
+		Size:              domain.Size{Cols: 80, Rows: 24},
+		MaxOutputInFlight: 8,
 	}, tr)
 	require.NoError(t, err)
 

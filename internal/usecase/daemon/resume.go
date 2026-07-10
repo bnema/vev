@@ -175,6 +175,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	// abandoned transport's output chain before binding the replacement so the
 	// mandatory first paint cannot be blocked by ACKs that died with the link.
 	ac.output.rebase()
+	ac.output.maxOutstanding = uint64(normalizeOutputWindow(h.MaxOutputInFlight))
 	ac.replaceTransport(tr)
 	ac.size = sz
 	ac.resumeToken = d.nextResumeTokenLocked()

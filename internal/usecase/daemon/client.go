@@ -370,8 +370,9 @@ func (d *Daemon) notifiesSnapshot() []chan struct{} {
 }
 
 type attachClientOptions struct {
-	clientID      [16]byte
-	resumeCapable bool
+	clientID          [16]byte
+	resumeCapable     bool
+	maxOutputInFlight uint8
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, *attachedClient) {
@@ -381,7 +382,7 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	}
 	ac := &attachedClient{
 		tr:            tr,
-		output:        newOutputStateStream(),
+		output:        newOutputStateStream(opts.maxOutputInFlight),
 		size:          sz,
 		clientID:      opts.clientID,
 		resumeCapable: opts.resumeCapable,

@@ -129,6 +129,8 @@ func normalizeOptions(opts Options) Options {
 	return opts
 }
 
+var _ ports.DatagramTransport = (*Transport)(nil)
+
 type Transport struct {
 	pc               net.PacketConn
 	codec            *pdgram.Codec
@@ -1514,3 +1516,6 @@ func decodeData(b []byte) (uint64, bool, ports.Frame, bool) {
 	}
 	return binary.BigEndian.Uint64(b[1:9]), b[9] == 1, ports.Frame{Type: ports.MsgType(b[10]), Payload: append([]byte(nil), b[dataRecordHeaderSize:]...)}, true
 }
+
+// DatagramTransport marks Transport as a UDP-style datagram transport.
+func (*Transport) DatagramTransport() {}

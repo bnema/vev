@@ -123,3 +123,46 @@ func drawOutputState(t *testing.T, stream *outputStateStream, frame renderer.Fra
 	}
 	return stream.frame(data, reset, echoAck), true, nil
 }
+
+func TestOutputStateStreamWindowOneCoalescesUntilCumulativeAck(t *testing.T) {
+	stream := newOutputStateStream(1)
+	stream.frame([]byte("first"), true, 0)
+	for range 100 {
+		require.True(t, stream.deferIfAtCapacity(false))
+	}
+	require.Equal(t, uint64(1), stream.outstanding())
+
+	// A stale ACK cannot release the coalesced paint; the cumulative ACK for
+	// the actually sent state does.
+	stream.ack(0)
+	_, ok := stream.takeDeferred()
+	require.False(t, ok)
+	stream.ack(1)
+	reset, ok := stream.takeDeferred()
+	require.True(t, ok)
+	require.False(t, reset)
+	stream.frame([]byte("latest"), reset, 0)
+	require.Equal(t, uint64(1), stream.outstanding())
+
+	sideEffect := stream.sideEffect([]byte("reliable"), 0)
+	output, err := ports.UnmarshalOutput(sideEffect.Payload)
+	require.NoError(t, err)
+	require.Zero(t, output.BaseStateNum)
+	require.Zero(t, output.NewStateNum)
+	require.Equal(t, uint64(2), stream.next)
+}
+
+func TestOutputStateStreamDefaultsAndNormalizesWindow(t *testing.T) {
+	require.Equal(t, uint64(8), newOutputStateStream().maxOutstanding)
+	require.Equal(t, uint64(8), newOutputStateStream(0).maxOutstanding)
+	require.Equal(t, uint64(8), newOutputStateStream(9).maxOutstanding)
+	require.Equal(t, uint64(1), newOutputStateStream(1).maxOutstanding)
+}
+
+func TestNormalizeOutputWindow(t *testing.T) {
+	for _, tt := range []struct {
+		input, want uint8
+	}{{0, 8}, {1, 1}, {8, 8}, {9, 8}, {255, 8}} {
+		require.Equal(t, tt.want, normalizeOutputWindow(tt.input))
+	}
+}

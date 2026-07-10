@@ -339,6 +339,13 @@ func DetectTrueColor(termEnv, colorTerm string) bool {
 	return termEnv == "xterm-direct" || strings.HasSuffix(termEnv, "-direct")
 }
 
+func requestedOutputWindow(transport ports.Transport) uint8 {
+	if _, ok := transport.(ports.DatagramTransport); ok {
+		return 1
+	}
+	return 8
+}
+
 func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func(), drawStatusStage func(reconnectStage), linkEvents <-chan ports.LinkEvent, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) attachResult {
 	// 1. Handshake: send Hello with our size and TERM.
 	size, err := term.Size()
@@ -353,18 +360,16 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	colorTerm := os.Getenv("COLORTERM")
 	trueColor := DetectTrueColor(termEnv, colorTerm)
 	hello := ports.Hello{
-		Version:     ports.ProtocolVersion,
-		Intent:      intent,
-		ClientID:    clientID,
-		ResumeToken: resumeToken,
-		Name:        name,
-		Size:        size,
-		TermEnv:     termEnv,
-		Cwd:         cwd,
-		TrueColor:   trueColor,
-		// Protocol v13 requires cumulative output ACKs on every transport. Keep
-		// the field asserted while it remains in the wire layout.
-		AckOutput: true,
+		Version:           ports.ProtocolVersion,
+		Intent:            intent,
+		ClientID:          clientID,
+		ResumeToken:       resumeToken,
+		Name:              name,
+		Size:              size,
+		TermEnv:           termEnv,
+		Cwd:               cwd,
+		TrueColor:         trueColor,
+		MaxOutputInFlight: requestedOutputWindow(transport),
 	}
 	if err := transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
 		return attachResult{err: fmt.Errorf("vev: sending hello: %w", err)}
