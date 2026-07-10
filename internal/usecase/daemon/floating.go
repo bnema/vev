@@ -101,12 +101,23 @@ func (tb *tab) clearFloatingLocked(p *pane, generation uint64) bool {
 		(tb.floating.state != floatingHidden && tb.floating.state != floatingVisible) {
 		return false
 	}
+	tb.takeFloatingLocked()
+	return true
+}
+
+// takeFloatingLocked invalidates the slot and detaches its installed pane. The
+// caller must hold tb.mu and must close the returned pane after unlocking.
+func (tb *tab) takeFloatingLocked() *pane {
+	if tb == nil {
+		return nil
+	}
+	p := tb.floating.pane
 	tb.floating.generation++
 	tb.floating.state = floatingUninitialized
 	tb.floating.pane = nil
 	tb.floating.desiredVisible = false
 	tb.floating.launch = domain.FloatingConfig{}
-	return true
+	return p
 }
 
 // terminalTargetLocked chooses the visible floating terminal ahead of the
@@ -220,7 +231,10 @@ func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfi
 		args = []string{"-lc", cfg.Command}
 	}
 	fallback := floatingCommandFallback(cfg.Command, d.shell)
-	go func() {
+	// Count the launch before its goroutine starts. It remains counted through
+	// install, including the reader/scheduler Adds, so shutdown cannot return
+	// before a late Open completion has either been rejected or fully joined.
+	d.sessWg.Go(func() {
 		pty, openErr := d.ptys.Open(command, args, env, cwd, sz)
 		if openErr != nil {
 			d.failFloatingLaunch(tb, generation, userOpen, name, openErr)
@@ -228,15 +242,19 @@ func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfi
 		}
 		p := newPaneWithStableID(layout.PaneID("floating"), paneStableID, pty, sz)
 		p.title.displayFallback = fallback
-		if tabCtx == nil {
-			tabCtx = sess.ctx
+		paneCtx := tabCtx
+		if paneCtx == nil {
+			paneCtx = sess.ctx
 		}
-		if tabCtx == nil {
-			tabCtx = context.Background()
+		if paneCtx == nil {
+			paneCtx = context.Background()
 		}
-		p.ctx, p.cancel = context.WithCancel(tabCtx)
+		p.ctx, p.cancel = context.WithCancel(paneCtx)
+		// The reader may run as soon as install returns; make its exit policy
+		// immutable before publishing the pane to the slot.
+		p.onExit = func() { d.reapFloating(sess, tb, p, generation) }
 		d.installFloating(sess, tb, p, generation)
-	}()
+	})
 }
 
 func (d *Daemon) failFloatingLaunch(tb *tab, generation uint64, userOpen bool, sessionName string, err error) {
@@ -263,7 +281,6 @@ func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uin
 		closeFloatingPane(p)
 		return
 	}
-	p.onExit = func() { d.reapFloating(sess, tb, p, generation) }
 	d.startPaneGoroutines(sess, tb, p)
 	if visible {
 		sess.mu.Lock()
@@ -302,12 +319,7 @@ func (d *Daemon) teardownFloating(tb *tab) {
 		return
 	}
 	tb.mu.Lock()
-	p := tb.floating.pane
-	tb.floating.generation++
-	tb.floating.state = floatingUninitialized
-	tb.floating.pane = nil
-	tb.floating.desiredVisible = false
-	tb.floating.launch = domain.FloatingConfig{}
+	p := tb.takeFloatingLocked()
 	tb.mu.Unlock()
 	closeFloatingPane(p)
 }

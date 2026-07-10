@@ -160,6 +160,80 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 	require.Equal(t, domain.Size{Cols: 48, Rows: 18}, gotSize)
 	d.teardownFloating(tb)
 	unblock()
+	d.sessWg.Wait()
+}
+
+func TestFloatingLaunchOwnershipJoinsShutdown(t *testing.T) {
+	floatingPTY := portsmocks.NewMockPTY(t)
+	readerStarted := make(chan struct{})
+	readerRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseReader := func() { releaseOnce.Do(func() { close(readerRelease) }) }
+	var closeCount int
+	floatingPTY.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) {
+		close(readerStarted)
+		<-readerRelease
+		return 0, io.EOF
+	}).Once()
+	floatingPTY.EXPECT().Close().RunAndReturn(func() error {
+		closeCount++
+		releaseReader()
+		return nil
+	}).Once()
+	factory := portsmocks.NewMockPTYFactory(t)
+	opened := make(chan struct{})
+	releaseOpen := make(chan struct{})
+	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(string, []string, []string, string, domain.Size) (ports.PTY, error) {
+			close(opened)
+			<-releaseOpen
+			return floatingPTY, nil
+		}).Once()
+	d := newTestDaemon(t, factory, stubClock{})
+	tb := newFloatingTestTab(t)
+	sessCtx, cancel := context.WithCancel(t.Context())
+	sess := &session{id: "floating-ownership", name: "work", tabs: []*tab{tb}, ctx: sessCtx, cancel: cancel}
+	d.mu.Lock()
+	d.sessions[sess.id] = sess
+	d.mu.Unlock()
+
+	// Keep a known worker alive while the waiter starts. Releasing it after
+	// Open is blocked deterministically exposes an uncounted launch worker.
+	d.sessWg.Add(1)
+	joined := waitGroupDone(&d.sessWg)
+	d.startFloating(sess, tb, true)
+	select {
+	case <-opened:
+	case <-time.After(time.Second):
+		t.Fatal("floating Open did not start")
+	}
+	d.sessWg.Done()
+	// Waiting while Open is blocked must retain the launch worker. Otherwise
+	// daemon shutdown can finish and a late install can Add reader goroutines.
+	launchUnaccounted := false
+	select {
+	case <-joined:
+		launchUnaccounted = true
+	case <-time.After(time.Second):
+	}
+	close(releaseOpen)
+	select {
+	case <-readerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("floating reader did not start")
+	}
+	require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
+	select {
+	case <-waitGroupDone(&d.sessWg):
+	case <-time.After(time.Second):
+		t.Fatal("floating launch, reader, and scheduler did not join")
+	}
+	tb.mu.Lock()
+	require.Nil(t, tb.floating.pane, "shutdown leaked an installed floating pane")
+	require.Equal(t, floatingUninitialized, tb.floating.state)
+	tb.mu.Unlock()
+	require.False(t, launchUnaccounted, "blocked floating launch was not accounted by sessWg")
+	require.Equal(t, 1, closeCount, "floating PTY must close exactly once")
 }
 
 func TestFloatingLifecycleStaleSuccessAndOldExitCannotReplaceCurrentSlot(t *testing.T) {
@@ -187,6 +261,7 @@ func TestFloatingLifecycleStaleSuccessAndOldExitCannotReplaceCurrentSlot(t *test
 	case <-time.After(time.Second):
 		t.Fatal("stale completion did not close its PTY")
 	}
+	d.sessWg.Wait()
 
 	first := &pane{}
 	second := &pane{}
@@ -389,6 +464,7 @@ func TestFloatingLaunchUsesLiveOrValidatedSessionCwd(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("floating PTY was not opened")
 			}
+			d.sessWg.Wait()
 		})
 	}
 }
@@ -445,6 +521,7 @@ func TestFloatingLaunchFailureCapturesSessionNameBeforeConcurrentRename(t *testi
 	}
 	close(stopRename)
 	<-renameDone
+	d.sessWg.Wait()
 	require.True(t, strings.Contains(logs.String(), "session=captured"), logs.String())
 }
 

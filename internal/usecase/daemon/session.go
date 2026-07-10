@@ -373,14 +373,9 @@ func (tb *tab) panesSnapshot() []*pane {
 func (tb *tab) closeAllPanes() {
 	tb.mu.Lock()
 	panes := tb.panesSnapshot()
-	floating := tb.floating.pane
 	// Invalidate before cancellation so a concurrently unblocked floating
 	// reader cannot reap a subsequently reused slot.
-	tb.floating.generation++
-	tb.floating.state = floatingUninitialized
-	tb.floating.pane = nil
-	tb.floating.desiredVisible = false
-	tb.floating.launch = domain.FloatingConfig{}
+	floating := tb.takeFloatingLocked()
 	tb.mu.Unlock()
 	if floating != nil {
 		panes = append(panes, floating)
