@@ -593,6 +593,9 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 		d.applyLayoutLocked(tb)
 		tb.mu.Unlock()
 	}
+	// Only the shown tab's floating terminal tracks the client size. This is
+	// outside tab.mu so its PTY resize cannot block tab state.
+	d.resizeActiveFloating(sess.activeTab())
 	markSnapshotDirty(sess)
 	if ac != nil {
 		d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)

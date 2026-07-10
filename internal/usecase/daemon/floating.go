@@ -175,6 +175,9 @@ func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 		d.launchFloating(sess, tb, cfg, generation, visible)
 		return nil
 	}
+	if visible {
+		d.resizeActiveFloating(tb)
+	}
 	if ac != nil {
 		d.paint(sess, ac, true)
 	}
@@ -198,6 +201,7 @@ type floatingLaunchSpec struct {
 	sessionName  string
 	cwd          string
 	size         domain.Size
+	innerRect    domain.Rect
 	paneStableID string
 	env          []string
 	command      string
@@ -226,13 +230,15 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 	name, cwd, term, sessCtx := sess.name, sess.cwd, sess.terminal, sess.ctx
 	sess.mu.Unlock()
 	tb.mu.Lock()
-	size := floatingInnerSize(tb.size, cfg)
+	inner := calculateFloatingGeometry(domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}, cfg).Inner
+	size := rectSize(inner)
+	if !size.Valid() {
+		inner = domain.Rect{Width: 1, Height: 1}
+		size = rectSize(inner)
+	}
 	focused := tb.focusedPane()
 	tabStableID, tabCtx := tb.stableID, tb.ctx
 	tb.mu.Unlock()
-	if !size.Valid() {
-		size = domain.Size{Cols: 1, Rows: 1}
-	}
 	if focused != nil && d.procCwd != nil && focused.pty != nil {
 		if live, err := d.procCwd(focused.pty.Pid()); err == nil && live != "" {
 			cwd = live
@@ -259,6 +265,7 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 		sessionName:  name,
 		cwd:          cwd,
 		size:         size,
+		innerRect:    inner,
 		paneStableID: paneStableID,
 		env:          d.childEnv(name, tabStableID, paneStableID, term),
 		command:      command,
@@ -278,6 +285,7 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 		return
 	}
 	p := newPaneWithStableID(layout.PaneID("floating"), spec.paneStableID, pty, spec.size)
+	p.rect = spec.innerRect
 	p.title.displayFallback = spec.fallback
 	p.ctx, p.cancel = context.WithCancel(spec.parentCtx)
 	// The reader may run as soon as install returns; make its exit policy
@@ -312,6 +320,7 @@ func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uin
 	}
 	d.startPaneGoroutines(sess, tb, p)
 	if visible {
+		d.resizeActiveFloating(tb)
 		sess.mu.Lock()
 		ac := sess.client
 		sess.mu.Unlock()

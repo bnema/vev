@@ -20,6 +20,7 @@ type pane struct {
 	stableID          string
 	pty               ports.PTY
 	mu                sync.Mutex // guards screen, scrollback, syncGen, rect, and title
+	resizeMu          sync.Mutex // serializes PTY resizes without holding mu
 	screen            *vt.Screen
 	scrollback        *scopy.Scrollback
 	dirty             chan struct{}
