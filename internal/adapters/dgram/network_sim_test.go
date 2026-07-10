@@ -387,13 +387,18 @@ func TestTransportFloodClassification(t *testing.T) {
 		}
 		defer closeFloodTransports(a, b)
 		waitForManualTimers(t, clk, 6)
+		for range 6 {
+			awaitSignal(t, clk.timerCreated, "initial transport timer creation")
+		}
 		var contacted atomic.Bool
-		processed := make(chan struct{})
+		// All fixture hooks are lossy notifications: transport read/control loops
+		// must never wait for the test goroutine to be scheduled.
+		processed := make(chan struct{}, 256)
 		primerWritten := make(chan struct{}, 1)
-		primerACKScheduled := make(chan struct{}, 1)
 		primerAcknowledged := make(chan struct{}, 1)
-		ackQueued := make(chan struct{}, 128)
+		ackWakeAccepted := make(chan struct{}, 128)
 		ackScheduled := make(chan struct{}, 128)
+		ackDispatched := make(chan struct{}, 128)
 		ackWritten := make(chan struct{}, 128)
 		aPC.replaceAfterWrite(func() {
 			select {
@@ -412,22 +417,39 @@ func TestTransportFloodClassification(t *testing.T) {
 			}
 		})
 		a.mu.Lock()
-		a.afterPacketProcessed = func() { processed <- struct{}{} }
+		a.afterPacketProcessed = func() {
+			select {
+			case processed <- struct{}{}:
+			default:
+			}
+		}
 		a.mu.Unlock()
 		b.mu.Lock()
 		b.afterAuthenticatedPacket = func() { contacted.Store(true) }
-		b.afterPacketProcessed = func() { processed <- struct{}{} }
-		b.afterACKScheduled = func() {
+		b.afterPacketProcessed = func() {
 			select {
-			case primerACKScheduled <- struct{}{}:
+			case processed <- struct{}{}:
 			default:
 			}
+		}
+		b.afterACKWakeAccepted = func() {
+			select {
+			case ackWakeAccepted <- struct{}{}:
+			default:
+			}
+		}
+		b.afterACKScheduled = func() {
 			select {
 			case ackScheduled <- struct{}{}:
 			default:
 			}
 		}
-		b.afterACKQueued = func() { ackQueued <- struct{}{} }
+		b.afterACKDispatched = func() {
+			select {
+			case ackDispatched <- struct{}{}:
+			default:
+			}
+		}
 		b.mu.Unlock()
 		primer := ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("primer")})
 		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: primer}); err != nil {
@@ -443,7 +465,8 @@ func TestTransportFloodClassification(t *testing.T) {
 				awaitingPrimerACK = false
 			}
 			if flushAndAwait(t, forward, bPC, processed) > 0 {
-				awaitSignal(t, primerACKScheduled, "primer ACK scheduling")
+				awaitSignal(t, ackWakeAccepted, "primer accepted ACK wake")
+				awaitSignal(t, ackScheduled, "primer ACK scheduling")
 				awaitingPrimerACK = true
 			}
 			flushAndAwait(t, reverse, aPC, processed)
@@ -457,15 +480,46 @@ func TestTransportFloodClassification(t *testing.T) {
 		if !primerDrained {
 			t.Fatal("clean RTT primer did not drain")
 		}
-		<-ackQueued
-		<-ackScheduled
 		a.mu.Lock()
 		initialCwnd := a.congestion.cwndBytes
 		a.mu.Unlock()
+		timerWork := make(chan struct{}, 128)
 		dataPaceStarted := make(chan struct{}, 128)
-		dataWritten := make(chan struct{}, 1)
+		dataPaceWait := make(chan time.Time, 128)
+		dataJobDone := make(chan struct{}, 128)
+		dataWritten := make(chan struct{}, 128)
+		notifyTimerWork := func() {
+			select {
+			case timerWork <- struct{}{}:
+			default:
+			}
+		}
+		for _, tr := range []*Transport{a, b} {
+			tr.mu.Lock()
+			tr.afterRetransmitTimer = notifyTimerWork
+			tr.afterHealthTimer = notifyTimerWork
+			tr.afterHeartbeatTimer = notifyTimerWork
+			tr.mu.Unlock()
+		}
 		a.mu.Lock()
-		a.beforeDataPace = func() { dataPaceStarted <- struct{}{} }
+		a.beforeDataPace = func() {
+			select {
+			case dataPaceStarted <- struct{}{}:
+			default:
+			}
+		}
+		a.afterDataPaceWait = func(deadline time.Time) {
+			select {
+			case dataPaceWait <- deadline:
+			default:
+			}
+		}
+		a.afterDataJob = func() {
+			select {
+			case dataJobDone <- struct{}{}:
+			default:
+			}
+		}
 		a.mu.Unlock()
 		aPC.addAfterWrite(func() {
 			select {
@@ -485,9 +539,10 @@ func TestTransportFloodClassification(t *testing.T) {
 		}
 		awaitSignal(t, dataPaceStarted, "output pacing")
 		awaitSignal(t, dataWritten, "first paced output write")
+		nextPace := awaitResult(t, dataPaceWait, "data pacing deadline")
 
 		var maxContactAge time.Duration
-		pendingACKWrites := 0
+		awaitingACKWrite := false
 		lossReducedCwnd := false
 		latestState := uint64(0)
 		probed := false
@@ -495,21 +550,45 @@ func TestTransportFloodClassification(t *testing.T) {
 		probeWho := ""
 		for range 2000 {
 			clk.advance(25 * time.Millisecond)
-			for range pendingACKWrites {
-				awaitSignal(t, ackWritten, "cumulative ACK write")
-			}
-			pendingACKWrites = 0
-			flushAndAwait(t, forward, bPC, processed)
-			for {
-				select {
-				case <-ackQueued:
-					awaitSignal(t, ackScheduled, "cumulative ACK scheduling")
-					pendingACKWrites++
-				default:
-					goto ackRecordsDrained
+			elapsed := clk.Now().Sub(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+			if elapsed%opts.ResendAfter == 0 {
+				// Both peers complete retransmit and health work before this
+				// advance may be followed by another manual-clock step.
+				for range 4 {
+					awaitSignal(t, timerWork, "retransmit or health timer work")
 				}
 			}
-		ackRecordsDrained:
+			if elapsed%opts.Heartbeat == 0 {
+				for range 2 {
+					awaitSignal(t, timerWork, "heartbeat timer work")
+				}
+			}
+			// A manual-clock advance is not a scheduler yield. When it fires the
+			// data pacer, wait until the write reaches its next deterministic
+			// deadline (or its job completes) before advancing again.
+			if !nextPace.IsZero() && !nextPace.After(clk.Now()) {
+				awaitSignal(t, dataWritten, "paced data write")
+				select {
+				case nextPace = <-dataPaceWait:
+				case <-dataJobDone:
+					// A completed job may be awaiting an ACK or retransmit timer;
+					// neither has a data-pacer deadline to await yet.
+					nextPace = time.Time{}
+				}
+			}
+			if awaitingACKWrite {
+				awaitSignal(t, ackDispatched, "cumulative ACK dispatch")
+				awaitSignal(t, ackWritten, "cumulative ACK write")
+				awaitingACKWrite = false
+			}
+			if flushAndAwait(t, forward, bPC, processed) > 0 {
+				select {
+				case <-ackWakeAccepted:
+					awaitSignal(t, ackScheduled, "cumulative ACK scheduling")
+					awaitingACKWrite = true
+				default:
+				}
+			}
 			flushAndAwait(t, reverse, aPC, processed)
 			a.mu.Lock()
 			queuedOutput := len(a.outputQueue) > 0

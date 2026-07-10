@@ -38,13 +38,13 @@ func (t *Transport) queueACK(seq uint64) {
 	}
 	select {
 	case t.ackWake <- struct{}{}:
+		t.mu.Lock()
+		hook := t.afterACKWakeAccepted
+		t.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
 	default:
-	}
-	t.mu.Lock()
-	afterACKQueued := t.afterACKQueued
-	t.mu.Unlock()
-	if afterACKQueued != nil {
-		afterACKQueued()
 	}
 }
 
@@ -108,10 +108,10 @@ func (t *Transport) ackScheduleLoop() {
 			ackTimerC = ackTimer.C()
 		}
 		t.mu.Lock()
-		afterACKScheduled := t.afterACKScheduled
+		hook := t.afterACKScheduled
 		t.mu.Unlock()
-		if afterACKScheduled != nil {
-			afterACKScheduled()
+		if hook != nil {
+			hook()
 		}
 	}
 	dispatchACK := func() {
@@ -121,6 +121,12 @@ func (t *Transport) ackScheduleLoop() {
 		}
 		select {
 		case t.ackSend <- seq:
+			t.mu.Lock()
+			hook := t.afterACKDispatched
+			t.mu.Unlock()
+			if hook != nil {
+				hook()
+			}
 		default:
 			// Preserve the cumulative maximum until the bounded ACK sender has
 			// capacity again.

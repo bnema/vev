@@ -216,15 +216,24 @@ type Transport struct {
 	writeMu sync.Mutex
 	// beforeDataPace is a test synchronization hook. It is read under mu.
 	beforeDataPace func()
+	// afterDataPaceWait observes a data pacer's next manual-clock deadline.
+	// Test observers must be non-blocking.
+	afterDataPaceWait func(time.Time)
+	// afterDataJob observes completion of a data or retransmit send job. Test
+	// observers must be non-blocking.
+	afterDataJob func()
+	// Timer hooks are test-only completion notifications. Observers must be
+	// non-blocking so timer loops never depend on test scheduling.
+	afterRetransmitTimer func()
+	afterHealthTimer     func()
+	afterHeartbeatTimer  func()
 	// afterPacketProcessed is a test synchronization hook called after an
 	// authenticated packet has been fully processed. It is read under mu.
 	afterPacketProcessed func()
-	// afterACKScheduled is a test synchronization hook called after the ACK
-	// scheduler handles a wake. It is read under mu.
-	afterACKScheduled func()
-	// afterACKQueued is a test synchronization hook called after an ACK is
-	// queued. It is read under mu.
-	afterACKQueued func()
+	// ACK hooks are test-only and observers must be non-blocking.
+	afterACKWakeAccepted func()
+	afterACKScheduled    func()
+	afterACKDispatched   func()
 	// outboundMu orders first transmissions and paced batches. Retransmits use
 	// writeMu directly because they do not establish new sequence order.
 	outboundMu sync.Mutex
@@ -982,6 +991,7 @@ func (t *Transport) retransmitLoop() {
 		case <-resend.C():
 			t.queueRetransmits()
 			resend.Reset(t.resendAfter)
+			t.notifyTimerHook(func() func() { return t.afterRetransmitTimer })
 		case <-t.done:
 			return
 		}
@@ -998,6 +1008,7 @@ func (t *Transport) healthLoop() {
 		case <-health.C():
 			t.checkSilence()
 			health.Reset(t.resendAfter)
+			t.notifyTimerHook(func() func() { return t.afterHealthTimer })
 		case <-t.done:
 			return
 		}
@@ -1005,7 +1016,14 @@ func (t *Transport) healthLoop() {
 }
 
 func (t *Transport) dataSendLoop() {
-	pacer := bytePacer{clk: t.clock}
+	pacer := bytePacer{clk: t.clock, afterTimer: func(deadline time.Time) {
+		t.mu.Lock()
+		hook := t.afterDataPaceWait
+		t.mu.Unlock()
+		if hook != nil {
+			hook(deadline)
+		}
+	}}
 	for {
 		select {
 		case job := <-t.dataSend:
@@ -1034,6 +1052,12 @@ func (t *Transport) runDataSendJob(pacer *bytePacer, job dataSendJob, initial bo
 		}
 	} else {
 		t.markPendingReady(job.seq, job.reliable)
+	}
+	t.mu.Lock()
+	afterDataJob := t.afterDataJob
+	t.mu.Unlock()
+	if afterDataJob != nil {
+		afterDataJob()
 	}
 	if job.done != nil {
 		if errors.Is(err, errPacerClosed) {
@@ -1120,6 +1144,14 @@ func (t *Transport) writeDataJob(pacer *bytePacer, job dataSendJob, onFirstWrite
 }
 
 func (t *Transport) runRetransmitBatch(pacer *bytePacer, batch []retransmitRecord) {
+	defer func() {
+		t.mu.Lock()
+		hook := t.afterDataJob
+		t.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+	}()
 	lossApplied := false
 	onFirstWrite := func() {
 		if lossApplied {
@@ -1150,9 +1182,19 @@ func (t *Transport) heartbeatLoop() {
 		case <-heartbeat.C():
 			t.queueControl(recProbe, 0)
 			heartbeat.Reset(t.heartbeat)
+			t.notifyTimerHook(func() func() { return t.afterHeartbeatTimer })
 		case <-t.done:
 			return
 		}
+	}
+}
+
+func (t *Transport) notifyTimerHook(get func() func()) {
+	t.mu.Lock()
+	hook := get()
+	t.mu.Unlock()
+	if hook != nil {
+		hook()
 	}
 }
 

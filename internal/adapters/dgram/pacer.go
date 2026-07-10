@@ -14,9 +14,10 @@ var errPacerClosed = errors.New("dgram: pacer closed")
 type paceLimits func() (bytesPerSecond int, burstBytes int)
 
 type bytePacer struct {
-	clk    ports.Clock
-	tokens int64
-	last   time.Time
+	clk        ports.Clock
+	tokens     int64
+	last       time.Time
+	afterTimer func(time.Time)
 }
 
 func (p *bytePacer) wait(done <-chan struct{}, n int, limits paceLimits) error {
@@ -52,6 +53,9 @@ func (p *bytePacer) wait(done <-chan struct{}, n int, limits paceLimits) error {
 		deficit := int64(n) - p.tokens
 		wait := time.Duration(mulDivCeilSaturating(deficit, int64(time.Second), int64(rate)))
 		timer := p.clk.NewTimer(wait)
+		if p.afterTimer != nil {
+			p.afterTimer(now.Add(wait))
+		}
 		select {
 		case <-timer.C():
 			timer.Stop()
