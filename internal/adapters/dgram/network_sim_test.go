@@ -428,7 +428,7 @@ func TestTransportFloodClassification(t *testing.T) {
 		}
 		a.mu.Unlock()
 		go func() {
-			freshReturned <- a.Send(ports.Frame{Type: ports.MsgOutput, Payload: floodPayload(128)})
+			freshReturned <- a.Send(ports.Frame{Type: ports.MsgOutput, Payload: floodOutputPayload(floodRecordCount, 128)})
 		}()
 		awaitSignal(t, freshAtPace, "fresh output pacing barrier")
 		a.mu.Lock()
@@ -479,7 +479,31 @@ func floodState(sender, receiver *Transport, link *simulatedLink) floodTransport
 	return floodTransportState{packetAge: packetAge, recordAge: recordAge, ackAge: ackAge, queuedBytes: queuedBytes, retransmits: retransmits}
 }
 
-func floodPayload(mtu int) []byte { return make([]byte, floodRecordMTUs*mtu) }
+func floodOutputPayload(baseState, mtu int) []byte {
+	return ports.MarshalOutput(ports.Output{
+		BaseStateNum: uint64(baseState),
+		NewStateNum:  uint64(baseState + 1),
+		Data:         make([]byte, floodRecordMTUs*mtu),
+	})
+}
+
+func TestFloodOutputPayloadIsIncrementalStateBearingOutput(t *testing.T) {
+	const mtu = 128
+	for state := range floodRecordCount {
+		payload := floodOutputPayload(state, mtu)
+		output, err := ports.UnmarshalOutput(payload)
+		if err != nil {
+			t.Fatalf("state %d: %v", state, err)
+		}
+		if output.BaseStateNum != uint64(state) || output.NewStateNum != uint64(state+1) {
+			t.Fatalf("output state = %d -> %d, want %d -> %d", output.BaseStateNum, output.NewStateNum, state, state+1)
+		}
+		minimumBytes := floodRecordMTUs * mtu
+		if len(output.Data) < minimumBytes || len(payload) < minimumBytes {
+			t.Fatalf("state %d: data bytes=%d encoded bytes=%d, want each at least %d", state, len(output.Data), len(payload), minimumBytes)
+		}
+	}
+}
 
 func sendFloodOutputs(t *testing.T, sender *Transport, count, mtu int) {
 	t.Helper()
@@ -487,11 +511,11 @@ func sendFloodOutputs(t *testing.T, sender *Transport, count, mtu int) {
 	sender.dataPaceRemaining = count * floodRecordMTUs * 4
 	sender.dataPaceNext = sender.clock.Now().Add(time.Hour)
 	sender.dataPaceMu.Unlock()
-	for range count {
+	for state := range count {
 		sender.mu.Lock()
 		sender.outputNext = time.Time{}
 		sender.mu.Unlock()
-		if err := sender.Send(ports.Frame{Type: ports.MsgOutput, Payload: floodPayload(mtu)}); err != nil {
+		if err := sender.Send(ports.Frame{Type: ports.MsgOutput, Payload: floodOutputPayload(state, mtu)}); err != nil {
 			t.Fatal(err)
 		}
 	}
