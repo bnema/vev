@@ -790,9 +790,10 @@ func TestReliableDuplicateAckedButNotDeliveredTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := recvWithin(t, b, time.Second)
-	if got.Type != ports.MsgInput || string(got.Payload) != "typed" || !droppedAck.Load() {
-		t.Fatalf("got=%+v droppedAck=%v", got, droppedAck.Load())
+	if got.Type != ports.MsgInput || string(got.Payload) != "typed" {
+		t.Fatalf("got=%+v", got)
 	}
+	eventually(t, time.Second, droppedAck.Load)
 	if got, ok := recvMaybe(b, 3*defaultResend); ok {
 		t.Fatalf("duplicate reliable frame delivered: %+v", got)
 	}

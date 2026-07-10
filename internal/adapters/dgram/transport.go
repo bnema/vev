@@ -41,7 +41,7 @@ const (
 	dataRecordHeaderSize        = 12
 	maxRecvBuffer               = defaultMaxRecvBuf
 	linkEventBufferSize         = 16
-	probeReplyBufferSize        = 16
+	probeReplyBufferSize        = controlQueueSize // legacy test burst bound
 )
 
 var (
@@ -181,7 +181,11 @@ type Transport struct {
 	linkEvents             chan ports.LinkEvent
 	probeWait              map[uint64]chan struct{}
 	sendWake               chan struct{}
-	probeReply             chan uint64
+	control                chan controlRecord
+	ackWake                chan struct{}
+	controlMu              sync.Mutex
+	ackSeq                 uint64
+	ackQueued              bool
 	rebind                 func(net.PacketConn) (net.PacketConn, error)
 	hoppedOffline          bool
 	outputQueue            []queuedSend
@@ -269,17 +273,19 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 		recvBuf:                 make(map[uint64]ports.Frame),
 	}
 	t.sendWake = make(chan struct{})
+	t.control = make(chan controlRecord, controlQueueSize)
+	t.ackWake = make(chan struct{}, 1)
 	t.outputWake = make(chan struct{})
 	if t.observe != nil {
 		t.diagnosticCh = make(chan Diagnostic, diagnosticBufferSize)
 		go t.diagnosticLoop()
 	}
-	t.probeReply = make(chan uint64, probeReplyBufferSize)
 	t.deliverCond = sync.NewCond(&t.deliverMu)
 	go t.readLoop(pc)
 	go t.resendLoop()
+	go t.heartbeatLoop()
 	go t.deliveryLoop()
-	go t.probeReplyLoop()
+	go t.controlLoop()
 	go t.outputPaceLoop()
 	t.emitDiagnostic()
 	return t, nil
@@ -777,10 +783,7 @@ func (t *Transport) handleRecord(p []byte) {
 		if len(p) != 9 {
 			return
 		}
-		select {
-		case t.probeReply <- binary.BigEndian.Uint64(p[1:]):
-		default:
-		}
+		t.queueControl(recPong, binary.BigEndian.Uint64(p[1:]))
 	case recPong:
 		if len(p) != 9 {
 			return
@@ -801,7 +804,7 @@ func (t *Transport) handleRecord(p []byte) {
 		if reliable {
 			ackSeq, ack, queued := t.enqueueReliable(seq, f)
 			if ack {
-				t.sendAck(ackSeq)
+				t.queueACK(ackSeq)
 			}
 			if queued {
 				t.signalDelivery()
@@ -878,17 +881,6 @@ func (t *Transport) deliver(f ports.Frame) {
 	}
 }
 
-func (t *Transport) probeReplyLoop() {
-	for {
-		select {
-		case id := <-t.probeReply:
-			_ = t.sendProbe(recPong, id)
-		case <-t.done:
-			return
-		}
-	}
-}
-
 func (t *Transport) notifySendWaitersLocked() {
 	if t.sendWake == nil {
 		return
@@ -900,8 +892,6 @@ func (t *Transport) notifySendWaitersLocked() {
 func (t *Transport) resendLoop() {
 	resend := t.clock.NewTimer(t.resendAfter)
 	defer resend.Stop()
-	heartbeat := t.clock.NewTimer(t.heartbeat)
-	defer heartbeat.Stop()
 	for {
 		select {
 		case <-resend.C():
@@ -909,10 +899,19 @@ func (t *Transport) resendLoop() {
 			t.checkSilence()
 			t.checkSendStall()
 			resend.Reset(t.resendAfter)
+		case <-t.done:
+			return
+		}
+	}
+}
+
+func (t *Transport) heartbeatLoop() {
+	heartbeat := t.clock.NewTimer(t.heartbeat)
+	defer heartbeat.Stop()
+	for {
+		select {
 		case <-heartbeat.C():
-			_ = t.sendProbe(recProbe, 0)
-			t.checkSilence()
-			t.checkSendStall()
+			t.queueControl(recProbe, 0)
 			heartbeat.Reset(t.heartbeat)
 		case <-t.done:
 			return
