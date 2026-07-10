@@ -795,8 +795,20 @@ func (t *Transport) readLoop(pc net.PacketConn) {
 		}
 		payload, complete, err := t.reasm.Add(frag)
 		inflight := t.reasm.Inflight()
+		// Keep the diagnostic mirror ordered with reassembly mutations. Rebind can
+		// overlap old and new read loops, so recvMu must remain held through commit.
+		t.mu.Lock()
+		t.reassemblyInflight = inflight
+		var afterAuthenticated func()
+		if err == nil {
+			t.lastAuthenticatedPacket = t.clock.Now()
+			afterAuthenticated = t.afterAuthenticatedPacket
+		}
+		t.mu.Unlock()
 		t.recvMu.Unlock()
-		t.recordFragmentResult(inflight, err == nil)
+		if afterAuthenticated != nil {
+			afterAuthenticated()
+		}
 		if err != nil {
 			t.notifyMalformedFragment()
 			continue
@@ -816,21 +828,6 @@ func (t *Transport) notifyMalformedFragment() {
 	t.mu.Unlock()
 	if afterMalformed != nil {
 		afterMalformed()
-	}
-}
-
-func (t *Transport) recordFragmentResult(inflight int, accepted bool) {
-	t.mu.Lock()
-	t.reassemblyInflight = inflight
-	if !accepted {
-		t.mu.Unlock()
-		return
-	}
-	t.lastAuthenticatedPacket = t.clock.Now()
-	after := t.afterAuthenticatedPacket
-	t.mu.Unlock()
-	if after != nil {
-		after()
 	}
 }
 
@@ -1310,6 +1307,14 @@ func (t *Transport) emitDiagnostic() {
 	if t.diagnosticCh == nil {
 		return
 	}
+	d := t.diagnosticSnapshot()
+	select {
+	case t.diagnosticCh <- d:
+	default:
+	}
+}
+
+func (t *Transport) diagnosticSnapshot() Diagnostic {
 	t.mu.Lock()
 	now := t.clock.Now()
 	lastAuthenticatedPacket := t.lastAuthenticatedPacket
@@ -1327,7 +1332,7 @@ func (t *Transport) emitDiagnostic() {
 	reassemblyInflight := t.reassemblyInflight
 	t.mu.Unlock()
 
-	d := Diagnostic{
+	return Diagnostic{
 		At:                       now,
 		State:                    state,
 		SinceAuthenticatedPacket: diagnosticAge(now, lastAuthenticatedPacket),
@@ -1337,10 +1342,6 @@ func (t *Transport) emitDiagnostic() {
 		PendingBytes:             pendingBytes,
 		Retransmits:              retransmits,
 		ReassemblyInflight:       reassemblyInflight,
-	}
-	select {
-	case t.diagnosticCh <- d:
-	default:
 	}
 }
 

@@ -622,9 +622,7 @@ func TestInconsistentAuthenticatedFragmentDoesNotCountAsContact(t *testing.T) {
 	if gotInflight != 0 {
 		t.Fatalf("reassembly inflight after rejected inconsistent fragment=%d, want 0", gotInflight)
 	}
-	b.diagnosticCh = make(chan Diagnostic, 1)
-	b.emitDiagnostic()
-	diagnostic := awaitResult(t, b.diagnosticCh, "diagnostic snapshot after inconsistent fragment")
+	diagnostic := b.diagnosticSnapshot()
 	if diagnostic.ReassemblyInflight != 0 {
 		t.Fatalf("diagnostic reassembly inflight after rejected inconsistent fragment=%d, want 0", diagnostic.ReassemblyInflight)
 	}
