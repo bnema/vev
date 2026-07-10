@@ -140,15 +140,19 @@ type Transport struct {
 	sendDir, recvDir uint32
 	mtu              int
 
-	mu                      sync.Mutex
-	peer                    net.Addr
-	ctr                     uint64
-	seq                     uint64
-	probeSeq                uint64
-	pending                 map[uint64]*pending
-	closed                  bool
-	closeErr                error
-	lastHeard               time.Time
+	mu             sync.Mutex
+	peer           net.Addr
+	ctr            uint64
+	seq            uint64
+	probeSeq       uint64
+	pending        map[uint64]*pending
+	closed         bool
+	closeErr       error
+	health         healthTracker
+	peerCounter    uint64
+	peerCounterSet bool
+	// These mirrors preserve the established diagnostic snapshot fields while
+	// health owns link-state decisions.
 	lastAuthenticatedPacket time.Time
 	lastCompleteRecord      time.Time
 	lastACKProgress         time.Time
@@ -306,7 +310,7 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 		reasm:                   pdgram.NewReassembler(),
 		in:                      make(chan ports.Frame, 32),
 		done:                    make(chan struct{}),
-		lastHeard:               opts.Clock.Now(),
+		health:                  newHealthTracker(opts.Clock.Now()),
 		lastAuthenticatedPacket: opts.Clock.Now(),
 		lastCompleteRecord:      opts.Clock.Now(),
 		lastACKProgress:         opts.Clock.Now(),
@@ -782,7 +786,7 @@ func (t *Transport) readLoop(pc net.PacketConn) {
 			return
 		}
 		t.recvMu.Lock()
-		_, pt, err := t.codec.Open(append([]byte(nil), buf[:n]...), t.recvDir, nil, t.replay)
+		counter, pt, err := t.codec.Open(append([]byte(nil), buf[:n]...), t.recvDir, nil, t.replay)
 		if err != nil {
 			t.recvMu.Unlock()
 			continue
@@ -801,7 +805,14 @@ func (t *Transport) readLoop(pc net.PacketConn) {
 		t.reassemblyInflight = inflight
 		var afterAuthenticated func()
 		if err == nil {
-			t.lastAuthenticatedPacket = t.clock.Now()
+			now := t.clock.Now()
+			t.health.authenticatedPacket(now)
+			t.lastAuthenticatedPacket = now
+			if !t.peerCounterSet || counter > t.peerCounter {
+				t.peer = addr
+				t.peerCounter = counter
+				t.peerCounterSet = true
+			}
 			afterAuthenticated = t.afterAuthenticatedPacket
 		}
 		t.mu.Unlock()
@@ -817,7 +828,6 @@ func (t *Transport) readLoop(pc net.PacketConn) {
 			continue
 		}
 		t.recordCompleteRecord()
-		t.updatePeerFromAuthenticated(addr)
 		t.handleRecord(payload)
 	}
 }
@@ -833,15 +843,9 @@ func (t *Transport) notifyMalformedFragment() {
 
 func (t *Transport) recordCompleteRecord() {
 	t.mu.Lock()
-	t.lastCompleteRecord = t.clock.Now()
-	t.mu.Unlock()
-}
-
-func (t *Transport) updatePeerFromAuthenticated(addr net.Addr) {
-	t.mu.Lock()
-	t.peer = addr
-	t.lastHeard = t.clock.Now()
-	t.hoppedOffline = false
+	now := t.clock.Now()
+	t.health.completeRecord(now)
+	t.lastCompleteRecord = now
 	t.mu.Unlock()
 	t.setLinkState(ports.LinkStateConnected, nil)
 }
@@ -869,11 +873,14 @@ func (t *Transport) handleRecord(p []byte) {
 			acked = true
 		}
 		if acked {
-			t.lastACKProgress = t.clock.Now()
+			now := t.clock.Now()
+			t.health.ackProgress(now)
+			t.lastACKProgress = now
 			t.notifySendWaitersLocked()
 		}
 		t.mu.Unlock()
 		if acked {
+			t.setLinkState(ports.LinkStateConnected, nil)
 			t.emitDiagnostic()
 		}
 	case recProbe:
@@ -1009,7 +1016,6 @@ func (t *Transport) healthLoop() {
 		select {
 		case <-health.C():
 			t.checkSilence()
-			t.checkSendStall()
 			health.Reset(t.resendAfter)
 		case <-t.done:
 			return
@@ -1205,66 +1211,22 @@ func (t *Transport) hopPacketConnOnce() {
 
 func (t *Transport) checkSilence() {
 	t.mu.Lock()
-	last := t.lastHeard
 	closed := t.closed
-	degradedAfter := t.degradedAfter
-	probeAfter := t.probeAfter
-	offlineAfter := t.offlineAfter
-	deadAfter := t.deadAfter
 	now := t.clock.Now()
+	state, hop, dead := t.health.decide(now, len(t.pending) > 0, t.degradedAfter, t.probeAfter, t.offlineAfter, t.deadAfter)
 	t.mu.Unlock()
 	if closed {
 		return
 	}
-	silentFor := now.Sub(last)
-	switch {
-	case deadAfter > 0 && silentFor >= deadAfter:
-		t.setLinkState(ports.LinkStateDead, ErrLinkDead)
+	if dead {
+		t.setLinkState(state, ErrLinkDead)
 		t.closeWithError(ErrLinkDead)
-	case offlineAfter > 0 && silentFor >= offlineAfter:
-		t.setLinkState(ports.LinkStateOffline, nil)
-	case probeAfter > 0 && silentFor >= probeAfter:
-		t.setLinkState(ports.LinkStateProbing, nil)
+		return
+	}
+	t.setLinkState(state, nil)
+	if hop {
 		t.hopPacketConnOnce()
-	case degradedAfter > 0 && silentFor >= degradedAfter:
-		t.setLinkState(ports.LinkStateDegraded, nil)
 	}
-}
-
-// checkSendStall declares the link dead when the oldest unacked reliable frame
-// has gone unacknowledged for deadAfter despite at least one retransmit. The
-// receive-silence check in checkSilence misses one-way-dead links whose receive
-// side stays fresh from peer heartbeats; this catches them at the layer that
-// owns death. enqueued is set once when a frame is accepted and never refreshed,
-// so acks (which delete pending entries) keep the oldest age bounded on a
-// progressing link — only a frame that is never acked crosses the threshold.
-func (t *Transport) checkSendStall() {
-	t.mu.Lock()
-	if t.closed || t.deadAfter <= 0 {
-		t.mu.Unlock()
-		return
-	}
-	deadAfter := t.deadAfter
-	now := t.clock.Now()
-	var oldest time.Time
-	var attempts int
-	found := false
-	for _, p := range t.pending {
-		if p == nil || p.enqueued.IsZero() {
-			continue
-		}
-		if !found || p.enqueued.Before(oldest) {
-			oldest = p.enqueued
-			attempts = p.attempts
-			found = true
-		}
-	}
-	t.mu.Unlock()
-	if !found || attempts < 1 || now.Sub(oldest) < deadAfter {
-		return
-	}
-	t.setLinkState(ports.LinkStateDead, ErrLinkDead)
-	t.closeWithError(ErrLinkDead)
 }
 
 func (t *Transport) setLinkState(state ports.LinkState, err error) {
@@ -1276,6 +1238,7 @@ func (t *Transport) setLinkState(state ports.LinkState, err error) {
 	}
 	t.linkState = state
 	if state == ports.LinkStateConnected {
+		t.hoppedOffline = false
 		for _, p := range t.pending {
 			if p != nil {
 				p.attempts = 0

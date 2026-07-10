@@ -461,6 +461,11 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 				clearStatus()
 				continue
 			}
+			if ev.State == ports.LinkStateDegraded {
+				log.Warn("UDP link degraded")
+				clearStatus()
+				continue
+			}
 			drawStatusStage(stageForLinkState(ev.State))
 			if ev.State == ports.LinkStateOffline {
 				// Stop waiting for the transport to reach Dead at 60s: exit with
