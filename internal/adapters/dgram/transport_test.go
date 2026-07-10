@@ -1920,6 +1920,111 @@ func TestLinkHealthOnlyAckProgressThatRemovesPendingRestoresConnected(t *testing
 	}
 }
 
+func TestLinkHealthFreshProgressInvalidatesStaleDecision(t *testing.T) {
+	tests := []struct {
+		name      string
+		staleAge  time.Duration
+		freshen   func(*Transport)
+		wantState ports.LinkState
+	}{
+		{
+			name:     "fresh packet contact prevents stale dead close",
+			staleAge: time.Minute,
+			freshen: func(tr *Transport) {
+				tr.mu.Lock()
+				now := tr.clock.Now()
+				tr.health.authenticatedPacket(now)
+				tr.lastAuthenticatedPacket = now
+				tr.mu.Unlock()
+			},
+			wantState: ports.LinkStateDegraded,
+		},
+		{
+			name:     "complete record prevents stale probing state and hop",
+			staleAge: 20 * time.Second,
+			freshen: func(tr *Transport) {
+				tr.mu.Lock()
+				now := tr.clock.Now()
+				tr.health.authenticatedPacket(now)
+				tr.health.completeRecord(now)
+				tr.lastAuthenticatedPacket = now
+				tr.lastCompleteRecord = now
+				tr.mu.Unlock()
+				tr.setLinkState(ports.LinkStateConnected, nil)
+			},
+			wantState: ports.LinkStateConnected,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			aPC, bPC := newPair()
+			var hops atomic.Int32
+			tr, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{
+				ResendAfter: time.Hour,
+				Heartbeat:   time.Hour,
+				RebindPacketConn: func(net.PacketConn) (net.PacketConn, error) {
+					hops.Add(1)
+					return &fakePC{addr: testAddr("a2"), in: make(chan packet, 100), peers: map[string]*fakePC{"b": bPC}}, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tr.Close() }()
+			defer func() { _ = bPC.Close() }()
+
+			now := tr.clock.Now()
+			tr.mu.Lock()
+			staleAt := now.Add(-tt.staleAge)
+			tr.health = healthTracker{lastPacket: staleAt, lastRecord: staleAt, lastProgress: staleAt}
+			decisionReady := make(chan struct{})
+			resume := make(chan struct{})
+			tr.afterHealthDecision = func() {
+				close(decisionReady)
+				<-resume
+			}
+			tr.mu.Unlock()
+
+			done := make(chan struct{})
+			go func() {
+				tr.checkSilence()
+				close(done)
+			}()
+			select {
+			case <-decisionReady:
+			case <-time.After(time.Second):
+				t.Fatal("health decision hook was not reached")
+			}
+			tt.freshen(tr)
+			close(resume)
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("health check did not finish")
+			}
+
+			if got := tr.LinkState(); got != tt.wantState {
+				t.Fatalf("state=%v, want %v after fresh health evidence", got, tt.wantState)
+			}
+			if got := hops.Load(); got != 0 {
+				t.Fatalf("socket hops=%d, want none after recovery", got)
+			}
+			for len(tr.linkEvents) > 0 {
+				ev := <-tr.linkEvents
+				if ev.State == ports.LinkStateDead || ev.State == ports.LinkStateProbing {
+					t.Fatalf("stale link event emitted after recovery: %v", ev.State)
+				}
+			}
+			select {
+			case <-tr.done:
+				t.Fatal("transport closed from stale health decision")
+			default:
+			}
+		})
+	}
+}
+
 func TestHopFiresAtProbingNotDegraded(t *testing.T) {
 	aPC, bPC := newPair()
 	var hopped atomic.Bool

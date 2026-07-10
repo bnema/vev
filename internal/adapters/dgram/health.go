@@ -12,17 +12,27 @@ type healthTracker struct {
 	lastPacket   time.Time
 	lastRecord   time.Time
 	lastProgress time.Time
+	generation   uint64
 }
 
 func newHealthTracker(now time.Time) healthTracker {
 	return healthTracker{lastPacket: now, lastRecord: now, lastProgress: now}
 }
 
-func (h *healthTracker) authenticatedPacket(now time.Time) { h.lastPacket = now }
+func (h *healthTracker) authenticatedPacket(now time.Time) {
+	h.lastPacket = now
+	h.generation++
+}
 
-func (h *healthTracker) completeRecord(now time.Time) { h.lastRecord = now }
+func (h *healthTracker) completeRecord(now time.Time) {
+	h.lastRecord = now
+	h.generation++
+}
 
-func (h *healthTracker) ackProgress(now time.Time) { h.lastProgress = now }
+func (h *healthTracker) ackProgress(now time.Time) {
+	h.lastProgress = now
+	h.generation++
+}
 
 func (h healthTracker) decide(now time.Time, hasPending bool, degradedAfter, probeAfter, offlineAfter, deadAfter time.Duration) (ports.LinkState, bool, bool) {
 	packetAge := now.Sub(h.lastPacket)
