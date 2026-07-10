@@ -343,12 +343,12 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	} else {
 		frame, damage = composeClientFrameWithLayoutCachedConsumeDamage(bars, tb, reset, layoutSnap, &ac.bars, &ac.composed)
 	}
+	if overlays.copyActive {
+		frame, damage = composeCopyClientFrame(overlays.copyMode, tb, bars)
+	}
 	if overlays.paletteActive {
 		contentArea := domain.Rect{Y: 1, Width: frame.Width, Height: max(0, frame.Height-2)}
 		(overlayBackdrop{DimPaneContents: true}).apply(frame, contentArea, layoutSnap, bars.theme)
-	}
-	if overlays.copyActive {
-		frame, damage = composeCopyClientFrame(overlays.copyMode, tb, bars)
 	}
 	if overlays.copySearchModel != nil {
 		frame, damage = composeCopySearchClientFrame(overlays.copySearchModel, frame, styles)

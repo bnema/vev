@@ -25,6 +25,36 @@ import (
 	"github.com/bnema/vev/pkg/vt"
 )
 
+func TestPaletteBackdropDimsSimultaneousCopyMode(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	theme := backdropTheme()
+	ac.setTheme(theme)
+	client := vt.NewScreen(80, 25)
+	pane := sess.tabs[0].focusedPane()
+	pane.screen.Write([]byte("\x1b[38;2;180;90;30mX"))
+
+	d.enterCopyMode(sess, ac)
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	undimmed := client.Frame.At(0, 1)
+	require.Equal(t, 'X', undimmed.Rune, "fixture must address copy-mode pane content")
+	copyBar := append([]renderer.Cell(nil), client.Frame.Row(client.Frame.Height-1)...)
+	require.Contains(t, rowText(copyBar), "[SCROLL]", "fixture must capture the copy status bar")
+
+	d.enterPalette(sess, ac)
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	dimmed := client.Frame.At(0, 1)
+	require.Equal(t, undimmed.Rune, dimmed.Rune, "palette backdrop must preserve copy content")
+	require.Equal(t, themeui.DimStyle(undimmed.Style, theme), dimmed.Style, "palette backdrop must dim the composed copy frame")
+	require.Equal(t, copyBar, client.Frame.Row(client.Frame.Height-1), "copy status bar must remain crisp")
+	paletteVisible := false
+	for y := range client.Frame.Height {
+		paletteVisible = paletteVisible || strings.Contains(rowText(client.Frame.Row(y)), "Commands")
+	}
+	require.True(t, paletteVisible, "palette must remain composed above copy mode")
+}
+
 func TestPaletteBackdropKeepsSimultaneousPickerCrisp(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
