@@ -121,6 +121,45 @@ func TestDrawFloatingBorderOmitsTinyAxes(t *testing.T) {
 	}
 }
 
+func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Width: 50, Height: 50}})
+	tb := newTab(nil, domain.Size{Cols: 80, Rows: 24})
+	sess := &session{tabs: []*tab{tb}}
+
+	initial := calculateFloatingGeometry(domain.Rect{Width: 80, Height: 24}, d.currentFloatingConfig()).Inner
+	current := calculateFloatingGeometry(domain.Rect{Width: 100, Height: 40}, d.currentFloatingConfig()).Inner
+	pty := &resizePTY{errs: []error{errors.New("first show fails"), nil}}
+	floating := newPane("floating", pty, rectSize(initial))
+	floating.rect = initial
+
+	// Prewarming installs a hidden pane at the initial geometry.
+	tb.mu.Lock()
+	generation := tb.beginFloatingWarmLocked(false)
+	require.True(t, tb.installFloatingLocked(floating, generation))
+	require.Equal(t, floatingHidden, tb.floating.state)
+	require.False(t, tb.floating.desiredVisible)
+	tb.mu.Unlock()
+	// A client resize changes tab geometry but must leave the hidden PTY alone.
+	d.resize(sess, nil, domain.Size{Cols: 100, Rows: 42})
+	require.Empty(t, pty.sizes())
+
+	// Showing attempts the current size before paint. A failed resize leaves the
+	// old screen and rect untouched, so a later hide/show can retry.
+	require.NoError(t, d.toggleFloating(sess, nil))
+	require.Equal(t, []domain.Size{rectSize(current)}, pty.sizes())
+	require.Equal(t, initial, floating.rect)
+	require.Equal(t, initial.Width, floating.screen.Frame.Width)
+	require.Equal(t, initial.Height, floating.screen.Frame.Height)
+
+	require.NoError(t, d.toggleFloating(sess, nil)) // hide
+	require.NoError(t, d.toggleFloating(sess, nil)) // retry show
+	require.Equal(t, []domain.Size{rectSize(current), rectSize(current)}, pty.sizes())
+	require.Equal(t, current, floating.rect)
+	require.Equal(t, current.Width, floating.screen.Frame.Width)
+	require.Equal(t, current.Height, floating.screen.Frame.Height)
+}
+
 func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 	t.Run("failure preserves state", func(t *testing.T) {
 		pty := &resizePTY{err: errors.New("nope")}
@@ -157,6 +196,7 @@ type resizePTY struct {
 	mu      sync.Mutex
 	resizes []domain.Size
 	err     error
+	errs    []error
 	entered chan struct{}
 	release chan struct{}
 }
@@ -165,12 +205,16 @@ func (p *resizePTY) Resize(sz domain.Size) error {
 	p.mu.Lock()
 	p.resizes = append(p.resizes, sz)
 	n := len(p.resizes)
+	err := p.err
+	if n <= len(p.errs) {
+		err = p.errs[n-1]
+	}
 	p.mu.Unlock()
 	if n == 1 && p.entered != nil {
 		close(p.entered)
 		<-p.release
 	}
-	return p.err
+	return err
 }
 func (p *resizePTY) calls() int { p.mu.Lock(); defer p.mu.Unlock(); return len(p.resizes) }
 func (p *resizePTY) sizes() []domain.Size {

@@ -584,7 +584,7 @@ func TestFloatingToggleUsesVisibleTarget(t *testing.T) {
 	sess := &session{tabs: []*tab{tb}, ctx: t.Context()}
 	tb.mu.Lock()
 	g := tb.beginFloatingWarmLocked(false)
-	floating := &pane{}
+	floating := newPane(layout.PaneID("floating"), nil, domain.Size{Cols: 20, Rows: 8})
 	require.True(t, tb.installFloatingLocked(floating, g))
 	tb.mu.Unlock()
 	require.NoError(t, d.toggleFloating(sess, nil))
