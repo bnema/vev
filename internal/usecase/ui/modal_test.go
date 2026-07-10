@@ -51,6 +51,39 @@ func TestModalBounds(t *testing.T) {
 			want: domain.Rect{X: 35, Y: 14, Width: 30, Height: 12},
 		},
 		{
+			name: "right anchor honors right margin",
+			base: domain.Size{Cols: 100, Rows: 40},
+			m: Modal{
+				FixedWidth:       30,
+				FixedHeight:      12,
+				HorizontalAnchor: HorizontalAnchorRight,
+				RightMargin:      3,
+			},
+			want: domain.Rect{X: 67, Y: 14, Width: 30, Height: 12},
+		},
+		{
+			name: "right margin clamps to screen",
+			base: domain.Size{Cols: 20, Rows: 10},
+			m: Modal{
+				FixedWidth:       8,
+				FixedHeight:      4,
+				HorizontalAnchor: HorizontalAnchorRight,
+				RightMargin:      20,
+			},
+			want: domain.Rect{X: 0, Y: 3, Width: 8, Height: 4},
+		},
+		{
+			name: "right anchored fixed dimensions clamp on small terminal",
+			base: domain.Size{Cols: 10, Rows: 4},
+			m: Modal{
+				FixedWidth:       30,
+				FixedHeight:      12,
+				HorizontalAnchor: HorizontalAnchorRight,
+				RightMargin:      3,
+			},
+			want: domain.Rect{X: 0, Y: 0, Width: 10, Height: 4},
+		},
+		{
 			name: "fixed dimensions clamp on small terminal",
 			base: domain.Size{Cols: 10, Rows: 4},
 			m:    Modal{FixedWidth: 30, FixedHeight: 12, Anchor: AnchorBottom, BottomMargin: 2},

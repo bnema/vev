@@ -1,6 +1,7 @@
 package palette
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -66,7 +67,7 @@ func TestModelMatchesDeepCopiesPositions(t *testing.T) {
 	require.Equal(t, []int{0}, fresh[0].Positions)
 }
 
-func TestRenderDrawsInputCaretSelectedLineAndCodeHighlight(t *testing.T) {
+func TestRenderDrawsOnlyCodeAndDescriptionWithStyles(t *testing.T) {
 	m := New([]command.Command{
 		cmd("CPY", "Copy", "Enter copy mode"),
 		cmd("CNT", "New", "Create tab"),
@@ -81,15 +82,38 @@ func TestRenderDrawsInputCaretSelectedLineAndCodeHighlight(t *testing.T) {
 	require.Equal(t, 'y', frame.At(3, 0).Rune)
 	require.True(t, frame.At(4, 0).Style.Inverse, "caret is reverse-video after query")
 
-	require.Equal(t, 'C', frame.At(0, 1).Rune)
-	require.Equal(t, 'P', frame.At(1, 1).Rune)
-	require.Equal(t, 'Y', frame.At(2, 1).Rune)
+	require.Equal(t, "CPY Enter copy mode         ", frameRow(frame, 1))
+	require.NotContains(t, frameRow(frame, 1), "Copy")
+	require.NotContains(t, frameRow(frame, 1), "—")
 	require.True(t, frame.At(0, 1).Style.Inverse, "selected line is inverse")
 	require.True(t, frame.At(5, 1).Style.Inverse, "selected line padding/text remains inverse")
 	require.True(t, frame.At(0, 1).Style.Bold, "command code C is bold")
 	require.True(t, frame.At(1, 1).Style.Bold, "command code P is bold")
 	require.True(t, frame.At(2, 1).Style.Bold, "command code Y is bold")
-	require.True(t, frame.At(13, 1).Style.Italic, "description is italic")
+	require.True(t, frame.At(4, 1).Style.Italic, "description is italic")
+}
+
+func TestRenderSafelyClipsVisibleFieldsAtNarrowWidths(t *testing.T) {
+	m := New([]command.Command{cmd("CPY", "Copy", "Enter copy mode")})
+	want := []rune("CPY Enter copy mode")
+
+	for _, cols := range []int{0, 1, 3, 4, 7} {
+		t.Run(fmt.Sprintf("cols_%d", cols), func(t *testing.T) {
+			frame := m.Render(domain.Size{Cols: cols, Rows: 2}, DefaultRenderStyles())
+			require.Equal(t, cols, frame.Width)
+			if cols > 0 {
+				require.Equal(t, want[:min(cols, len(want))], []rune(frameRow(frame, 1)))
+			}
+		})
+	}
+}
+
+func frameRow(frame renderer.Frame, y int) string {
+	row := make([]rune, frame.Width)
+	for x := range frame.Width {
+		row[x] = frame.At(x, y).Rune
+	}
+	return string(row)
 }
 
 func TestRenderUsesConfiguredStyles(t *testing.T) {
@@ -128,7 +152,7 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 				styles.Description = muted
 				return styles
 			},
-			x: 13,
+			x: 4,
 			assert: func(t *testing.T, style renderer.Style) {
 				require.True(t, style.Italic)
 				require.True(t, style.HasForegroundRGB)
@@ -143,7 +167,7 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 				styles.Description.Italic = false
 				return styles
 			},
-			x: 13,
+			x: 4,
 			assert: func(t *testing.T, style renderer.Style) {
 				require.False(t, style.Italic)
 			},
