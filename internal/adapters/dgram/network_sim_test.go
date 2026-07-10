@@ -127,6 +127,7 @@ type fakePC struct {
 	mu         sync.Mutex
 	closed     bool
 	in         chan packet
+	read       chan struct{}
 	peers      map[string]*fakePC
 	drop       func([]byte, net.Addr) bool
 	afterWrite func()
@@ -136,8 +137,8 @@ type fakePC struct {
 func newPair() (*fakePC, *fakePC) { return newPairWithLink(nil) }
 
 func newPairWithLink(link *simulatedLink) (*fakePC, *fakePC) {
-	a := &fakePC{addr: testAddr("a"), in: make(chan packet, 100), peers: map[string]*fakePC{}, link: link}
-	b := &fakePC{addr: testAddr("b"), in: make(chan packet, 100), peers: map[string]*fakePC{}, link: link}
+	a := &fakePC{addr: testAddr("a"), in: make(chan packet, 100), read: make(chan struct{}, 100), peers: map[string]*fakePC{}, link: link}
+	b := &fakePC{addr: testAddr("b"), in: make(chan packet, 100), read: make(chan struct{}, 100), peers: map[string]*fakePC{}, link: link}
 	a.peers["b"] = b
 	b.peers["a"] = a
 	return a, b
@@ -148,6 +149,10 @@ func (p *fakePC) ReadFrom(b []byte) (int, net.Addr, error) {
 		return 0, nil, errors.New("closed")
 	}
 	copy(b, q.b)
+	select {
+	case p.read <- struct{}{}:
+	default:
+	}
 	return len(q.b), q.addr, nil
 }
 func (p *fakePC) WriteTo(b []byte, addr net.Addr) (int, error) {
@@ -172,7 +177,10 @@ func (p *fakePC) WriteTo(b []byte, addr net.Addr) (int, error) {
 			peer.mu.Unlock()
 			return 0, errors.New("peer closed")
 		}
-		peer.in <- packet{append([]byte(nil), b...), p.addr}
+		select {
+		case peer.in <- packet{append([]byte(nil), b...), p.addr}:
+		default:
+		}
 		peer.mu.Unlock()
 	}
 	if p.afterWrite != nil {
@@ -195,6 +203,31 @@ func (p *fakePC) SetReadDeadline(time.Time) error  { return nil }
 func (p *fakePC) SetWriteDeadline(time.Time) error { return nil }
 
 func key() []byte { return bytes.Repeat([]byte{1}, pdgram.KeySize) }
+
+const fixtureWaitTimeout = time.Second
+
+// awaitSignal gives fixture barriers a diagnostic deadline. The deadline is a
+// hang guard only; tests advance behavior with the manual clock and barriers.
+func awaitSignal(t *testing.T, ch <-chan struct{}, context string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(fixtureWaitTimeout):
+		t.Fatalf("timed out waiting for %s", context)
+	}
+}
+
+func awaitResult[T any](t *testing.T, ch <-chan T, context string) T {
+	t.Helper()
+	select {
+	case result := <-ch:
+		return result
+	case <-time.After(fixtureWaitTimeout):
+		t.Fatalf("timed out waiting for %s", context)
+		var zero T
+		return zero
+	}
+}
 
 // TestTransportFloodClassification drives authenticated datagrams through real
 // transports. The metrics are transport state, not simulator bookkeeping.
@@ -221,6 +254,10 @@ func TestTransportFloodClassification(t *testing.T) {
 		}
 		a, b := newFloodTransports(t, aPC, bPC, clk, 128)
 		defer closeFloodTransports(a, b)
+		contacted := make(chan struct{}, 2)
+		b.mu.Lock()
+		b.afterAuthenticatedPacket = func() { contacted <- struct{}{} }
+		b.mu.Unlock()
 		start := clk.Now()
 		clk.advance(time.Nanosecond)
 		for range 2 {
@@ -228,7 +265,8 @@ func TestTransportFloodClassification(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		floodEventually(t, func() bool { return floodState(b).packet && len(dropped) == 2 })
+		awaitSignal(t, contacted, "first authenticated fragment")
+		awaitSignal(t, contacted, "second authenticated fragment")
 		state := floodState(b)
 		if !state.packet || state.record || floodState(a).ack {
 			t.Fatalf("contact=%v complete=%v ack=%v, want contact only", state.packet, state.record, floodState(a).ack)
@@ -245,6 +283,10 @@ func TestTransportFloodClassification(t *testing.T) {
 		aPC, bPC := newPairWithLink(link)
 		a, b := newFloodTransports(t, aPC, bPC, clk, 128)
 		defer closeFloodTransports(a, b)
+		contacted := make(chan struct{}, 1)
+		b.mu.Lock()
+		b.afterAuthenticatedPacket = func() { contacted <- struct{}{} }
+		b.mu.Unlock()
 		a.mu.Lock()
 		a.rto = time.Hour // Keep the fake-clock queue case about bandwidth, not retries.
 		a.mu.Unlock()
@@ -257,7 +299,7 @@ func TestTransportFloodClassification(t *testing.T) {
 		}
 		clk.advance(10 * time.Second)
 		link.flush(bPC)
-		floodEventually(t, func() bool { return floodState(b).packet })
+		awaitSignal(t, contacted, "queued authenticated fragment")
 		if got := link.queuedBytes(); got != 0 {
 			t.Fatalf("queued bytes after fake-clock release=%d, want 0", got)
 		}
@@ -322,7 +364,7 @@ func TestTransportFloodClassification(t *testing.T) {
 			writesMu.Unlock()
 			if secondWrite {
 				retransmitBlocked <- struct{}{}
-				<-releaseRetransmit
+				awaitSignal(t, releaseRetransmit, "retransmit release")
 			}
 			return false
 		}
@@ -339,7 +381,7 @@ func TestTransportFloodClassification(t *testing.T) {
 		}
 		defer closeFloodTransports(a, b)
 		for range 4 { // Both transports install resend and heartbeat timers.
-			<-clk.timerCreated
+			awaitSignal(t, clk.timerCreated, "transport timer creation")
 		}
 
 		// Two fresh, fragmented output records become overdue while their real
@@ -358,11 +400,11 @@ func TestTransportFloodClassification(t *testing.T) {
 			}
 		}
 		for range 2 {
-			<-acksDropped
+			awaitSignal(t, acksDropped, "dropped cumulative ACK")
 		}
 
 		clk.advance(10 * time.Millisecond)
-		<-retransmitBlocked // resendPending is synchronously inside writePacket.
+		awaitSignal(t, retransmitBlocked, "retransmit pacing barrier") // resendPending is synchronously inside writePacket.
 		if got := floodState(a).retransmits; got < 2 {
 			t.Fatalf("retransmits=%d, want both overdue large records selected", got)
 		}
@@ -374,13 +416,13 @@ func TestTransportFloodClassification(t *testing.T) {
 		a.outputNext = time.Time{}
 		a.beforeDataPace = func() {
 			close(freshAtPace)
-			<-allowFreshPace
+			awaitSignal(t, allowFreshPace, "fresh pacing release")
 		}
 		a.mu.Unlock()
 		go func() {
 			freshReturned <- a.Send(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 500)})
 		}()
-		<-freshAtPace
+		awaitSignal(t, freshAtPace, "fresh output pacing barrier")
 		a.mu.Lock()
 		a.beforeDataPace = nil
 		a.mu.Unlock()
@@ -399,10 +441,10 @@ func TestTransportFloodClassification(t *testing.T) {
 		}
 
 		close(releaseRetransmit)
-		if err := <-freshReturned; err != nil {
+		if err := awaitResult(t, freshReturned, "fresh output completion"); err != nil {
 			t.Fatal(err)
 		}
-		<-probeSent
+		awaitSignal(t, probeSent, "heartbeat probe")
 		writesMu.Lock()
 		defer writesMu.Unlock()
 		if writes[1] < 2 || writes[2] < 2 || writes[3] == 0 {
@@ -448,18 +490,6 @@ func closeFloodTransports(a, b *Transport) {
 	_ = b.Close()
 }
 
-func floodEventually(t *testing.T, condition func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if condition() {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("condition was not met")
-}
-
 func TestMalformedAuthenticatedFragmentDoesNotCountAsContact(t *testing.T) {
 	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
 	aPC, bPC := newPair()
@@ -476,7 +506,7 @@ func TestMalformedAuthenticatedFragmentDoesNotCountAsContact(t *testing.T) {
 	if _, err := aPC.WriteTo(codec.Seal(1, 999, []byte("not a fragment"), nil), bPC.addr); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(10 * time.Millisecond)
+	awaitSignal(t, bPC.read, "malformed datagram read")
 	b.mu.Lock()
 	gotPacket, gotRecord := b.lastAuthenticatedPacket, b.lastCompleteRecord
 	b.mu.Unlock()

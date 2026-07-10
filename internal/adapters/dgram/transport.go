@@ -153,34 +153,37 @@ type Transport struct {
 	lastACKProgress         time.Time
 	retransmits             uint64
 	reassemblyInflight      int
-	observe                 DiagnosticObserver
-	diagnosticCh            chan Diagnostic
-	heartbeat               time.Duration
-	resendAfter             time.Duration
-	maxResendAfter          time.Duration
-	maxResendPerTick        int
-	srtt                    time.Duration
-	rttvar                  time.Duration
-	rto                     time.Duration
-	writeTimeout            time.Duration
-	degradedAfter           time.Duration
-	probeAfter              time.Duration
-	offlineAfter            time.Duration
-	deadAfter               time.Duration
-	maxPending              int
-	maxPendingWait          time.Duration
-	maxRecvBuffer           int
-	clock                   ports.Clock
-	linkState               ports.LinkState
-	linkEvents              chan ports.LinkEvent
-	probeWait               map[uint64]chan struct{}
-	sendWake                chan struct{}
-	probeReply              chan uint64
-	rebind                  func(net.PacketConn) (net.PacketConn, error)
-	hoppedOffline           bool
-	outputQueue             []queuedSend
-	outputWake              chan struct{}
-	outputNext              time.Time
+	// afterAuthenticatedPacket is a test synchronization hook. It runs after
+	// authenticated-contact state has been committed.
+	afterAuthenticatedPacket func()
+	observe                  DiagnosticObserver
+	diagnosticCh             chan Diagnostic
+	heartbeat                time.Duration
+	resendAfter              time.Duration
+	maxResendAfter           time.Duration
+	maxResendPerTick         int
+	srtt                     time.Duration
+	rttvar                   time.Duration
+	rto                      time.Duration
+	writeTimeout             time.Duration
+	degradedAfter            time.Duration
+	probeAfter               time.Duration
+	offlineAfter             time.Duration
+	deadAfter                time.Duration
+	maxPending               int
+	maxPendingWait           time.Duration
+	maxRecvBuffer            int
+	clock                    ports.Clock
+	linkState                ports.LinkState
+	linkEvents               chan ports.LinkEvent
+	probeWait                map[uint64]chan struct{}
+	sendWake                 chan struct{}
+	probeReply               chan uint64
+	rebind                   func(net.PacketConn) (net.PacketConn, error)
+	hoppedOffline            bool
+	outputQueue              []queuedSend
+	outputWake               chan struct{}
+	outputNext               time.Time
 
 	recvMu sync.Mutex
 	replay *pdgram.ReplayWindow
@@ -709,7 +712,11 @@ func (t *Transport) recordAuthenticatedFragment(inflight int) {
 	t.mu.Lock()
 	t.lastAuthenticatedPacket = t.clock.Now()
 	t.reassemblyInflight = inflight
+	after := t.afterAuthenticatedPacket
 	t.mu.Unlock()
+	if after != nil {
+		after()
+	}
 }
 
 func (t *Transport) recordCompleteRecord() {
@@ -1132,30 +1139,45 @@ func (t *Transport) emitDiagnostic() {
 	if t.diagnosticCh == nil {
 		return
 	}
-	now := t.clock.Now()
 	t.mu.Lock()
+	now := t.clock.Now()
+	lastAuthenticatedPacket := t.lastAuthenticatedPacket
+	lastCompleteRecord := t.lastCompleteRecord
+	lastACKProgress := t.lastACKProgress
 	pendingBytes := 0
 	for _, p := range t.pending {
 		if p != nil {
 			pendingBytes += len(p.frame.Payload)
 		}
 	}
+	state := t.linkState
+	pendingRecords := len(t.pending)
+	retransmits := t.retransmits
+	reassemblyInflight := t.reassemblyInflight
+	t.mu.Unlock()
+
 	d := Diagnostic{
 		At:                       now,
-		State:                    t.linkState,
-		SinceAuthenticatedPacket: now.Sub(t.lastAuthenticatedPacket),
-		SinceCompleteRecord:      now.Sub(t.lastCompleteRecord),
-		SinceACKProgress:         now.Sub(t.lastACKProgress),
-		PendingRecords:           len(t.pending),
+		State:                    state,
+		SinceAuthenticatedPacket: diagnosticAge(now, lastAuthenticatedPacket),
+		SinceCompleteRecord:      diagnosticAge(now, lastCompleteRecord),
+		SinceACKProgress:         diagnosticAge(now, lastACKProgress),
+		PendingRecords:           pendingRecords,
 		PendingBytes:             pendingBytes,
-		Retransmits:              t.retransmits,
-		ReassemblyInflight:       t.reassemblyInflight,
+		Retransmits:              retransmits,
+		ReassemblyInflight:       reassemblyInflight,
 	}
-	t.mu.Unlock()
 	select {
 	case t.diagnosticCh <- d:
 	default:
 	}
+}
+
+func diagnosticAge(now, then time.Time) time.Duration {
+	if then.After(now) {
+		return 0
+	}
+	return now.Sub(then)
 }
 
 func (t *Transport) closeWithError(err error) {
