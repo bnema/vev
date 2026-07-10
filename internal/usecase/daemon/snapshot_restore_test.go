@@ -105,6 +105,32 @@ func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 	require.Contains(t, factory.opens[1].env, "VEV=session=work,tab="+tabStableID+",pane="+pane2StableID)
 }
 
+func TestRestoreSnapshotsLeavesFloatingUninitializedAndInactiveTabsCold(t *testing.T) {
+	store := &restoreSnapshotStore{blobs: []ports.SnapshotBlob{{Name: "work", Data: mustSnapshotBytes(t, snapcodec.Session{
+		Name: "work", Active: 0, Tabs: []snapcodec.Tab{
+			{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/one"}}},
+			{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/two"}}},
+		},
+	})}}}
+	d := newTestDaemon(t, &restorePTYFactory{}, stubClock{})
+	WithSnapshotStore(store)(d)
+	d.restoreSnapshots(context.Background())
+	d.mu.Lock()
+	restored := d.findByNameLocked("work")
+	d.mu.Unlock()
+	require.NotNil(t, restored)
+	restored.mu.Lock()
+	tabs := append([]*tab(nil), restored.tabs...)
+	restored.mu.Unlock()
+	require.Len(t, tabs, 2)
+	for _, tb := range tabs {
+		tb.mu.Lock()
+		require.Equal(t, floatingUninitialized, tb.floating.state)
+		require.Nil(t, tb.floating.pane)
+		tb.mu.Unlock()
+	}
+}
+
 func processRestoreTestStore(t *testing.T, name string, proc *snapcodec.Process) *restoreSnapshotStore {
 	t.Helper()
 	return &restoreSnapshotStore{blobs: []ports.SnapshotBlob{{Name: name, Data: mustSnapshotBytes(t, snapcodec.Session{

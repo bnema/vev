@@ -63,6 +63,30 @@ func TestSnapshotSaverWritesDirtyNamedSessionsOnly(t *testing.T) {
 	}
 }
 
+func TestSnapshotCaptureExcludesFloatingRuntime(t *testing.T) {
+	store := portsmocks.NewMockSnapshotStore(t)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	WithSnapshotStore(store)(d)
+	sess := newSnapshotTestSession(t, "work", false, "/fallback")
+	tb := sess.tabs[0]
+	floatingPTY, _ := newBlockingPTY(t)
+	floating := newPane(layout.PaneID("floating"), floatingPTY, domain.Size{Cols: 20, Rows: 8})
+	tb.mu.Lock()
+	generation := tb.beginFloatingWarmLocked(domain.FloatingConfig{Command: "top"}, false)
+	require.True(t, tb.installFloatingLocked(floating, generation))
+	tb.mu.Unlock()
+
+	store.EXPECT().Write("work", mock.Anything).RunAndReturn(func(_ string, data []byte) error {
+		snap, err := snapcodec.Unmarshal(data)
+		require.NoError(t, err)
+		require.Len(t, snap.Tabs, 1)
+		require.Len(t, snap.Tabs[0].Panes, 1, "floating runtime must not be persisted")
+		require.Equal(t, layout.PaneID("pane-1"), snap.Tabs[0].Panes[0].ID)
+		return nil
+	}).Once()
+	require.True(t, d.captureSession(sess))
+}
+
 func TestSnapshotCaptureStoresForegroundProcessMetadata(t *testing.T) {
 	store := portsmocks.NewMockSnapshotStore(t)
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})

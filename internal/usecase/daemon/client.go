@@ -398,6 +398,9 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", name, "resume", opts.resumeCapable)
 	d.applyHostTheme(sess, ac, d.effectiveTheme(themeui.Theme{}), true)
+	// A restored inactive tab remains cold; the attached active tab starts its
+	// independent popup prewarm asynchronously.
+	d.ensureFloatingWarm(sess, sess.activeTab())
 	return ac, old
 }
 
