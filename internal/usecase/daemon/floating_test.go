@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -129,9 +132,10 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 		}).Once()
 	d := newTestDaemon(t, factory, stubClock{})
 	d.shell = "/bin/custom-shell"
+	cwd := t.TempDir()
 	tb := newTabWithStableID("t_stable", "p_normal", newBlockingPanePTY(t), domain.Size{Cols: 100, Rows: 40})
 	tb.ctx, tb.cancel = context.WithCancel(t.Context())
-	sess := &session{name: "work", cwd: "/captured", tabs: []*tab{tb}, ctx: t.Context()}
+	sess := &session{name: "work", cwd: cwd, tabs: []*tab{tb}, ctx: t.Context()}
 	d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Command: "btop --utf", Width: 50, Height: 50}})
 	d.ensureFloatingWarm(sess, tb)
 	// Open has started while this goroutine owns tab.mu: an external factory
@@ -152,7 +156,7 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 	}
 	require.Equal(t, "/bin/custom-shell", gotCommand)
 	require.Equal(t, []string{"-lc", "btop --utf"}, gotArgs)
-	require.Equal(t, "/captured", gotDir)
+	require.Equal(t, cwd, gotDir)
 	require.Equal(t, domain.Size{Cols: 48, Rows: 18}, gotSize)
 	d.teardownFloating(tb)
 	unblock()
@@ -200,6 +204,20 @@ func TestFloatingLifecycleStaleSuccessAndOldExitCannotReplaceCurrentSlot(t *test
 	tb.mu.Unlock()
 }
 
+func TestFloatingReapAndTeardownCloseMatchingPaneOnce(t *testing.T) {
+	pty, _ := newBlockingPTY(t)
+	tb := newFloatingTestTab(t)
+	p := newPane(layout.PaneID("floating"), pty, domain.Size{Cols: 10, Rows: 10})
+	tb.mu.Lock()
+	g := tb.beginFloatingWarmLocked(domain.FloatingConfig{}, true)
+	require.True(t, tb.installFloatingLocked(p, g))
+	tb.mu.Unlock()
+	d := newTestDaemon(t, nil, stubClock{})
+	d.reapFloating(&session{}, tb, p, g)
+	d.teardownFloating(tb)
+	pty.AssertNumberOfCalls(t, "Close", 1)
+}
+
 func TestFloatingTeardownClosesInstalledPaneOnce(t *testing.T) {
 	pty, _ := newBlockingPTY(t)
 	tb := newFloatingTestTab(t)
@@ -228,6 +246,7 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 		normal.mu.Unlock()
 
 		floatingPTY := portsmocks.NewMockPTY(t)
+		floatingPTY.EXPECT().Close().Return(nil).Maybe()
 		releaseEOF := make(chan struct{})
 		floatingPTY.EXPECT().Read(mock.Anything).RunAndReturn(func([]byte) (int, error) {
 			<-releaseEOF
@@ -329,6 +348,104 @@ func newBlockingPanePTY(t *testing.T) *portsmocks.MockPTY {
 	t.Helper()
 	p, _ := newBlockingPTY(t)
 	return p
+}
+
+func TestFloatingLaunchUsesLiveOrValidatedSessionCwd(t *testing.T) {
+	tests := []struct {
+		name       string
+		sessionCwd string
+		liveCwd    string
+		wantCwd    string
+	}{
+		{name: "valid session cwd", sessionCwd: "/valid", wantCwd: "/valid"},
+		{name: "invalid session cwd falls home", sessionCwd: "/invalid", wantCwd: "/home/test"},
+		{name: "live focused cwd", sessionCwd: "/invalid", liveCwd: "/live", wantCwd: "/live"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			factory := portsmocks.NewMockPTYFactory(t)
+			opened := make(chan string, 1)
+			factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+				func(_ string, _ []string, _ []string, cwd string, _ domain.Size) (ports.PTY, error) {
+					opened <- cwd
+					return nil, io.ErrUnexpectedEOF
+				}).Once()
+			d := newTestDaemon(t, factory, stubClock{})
+			d.dirOrHome = func(cwd string) string {
+				if cwd == "/invalid" {
+					return "/home/test"
+				}
+				return cwd
+			}
+			if tt.liveCwd != "" {
+				d.procCwd = func(int) (string, error) { return tt.liveCwd, nil }
+			}
+			tb := newFloatingTestTab(t)
+			sess := &session{name: "work", cwd: tt.sessionCwd, tabs: []*tab{tb}, ctx: t.Context()}
+			d.startFloating(sess, tb, false)
+			select {
+			case got := <-opened:
+				require.Equal(t, tt.wantCwd, got)
+			case <-time.After(time.Second):
+				t.Fatal("floating PTY was not opened")
+			}
+		})
+	}
+}
+
+type floatingLogHandler struct {
+	slog.Handler
+	handled chan struct{}
+}
+
+func (h floatingLogHandler) Handle(ctx context.Context, r slog.Record) error {
+	err := h.Handler.Handle(ctx, r)
+	close(h.handled)
+	return err
+}
+
+func TestFloatingLaunchFailureCapturesSessionNameBeforeConcurrentRename(t *testing.T) {
+	factory := portsmocks.NewMockPTYFactory(t)
+	opened := make(chan struct{})
+	release := make(chan struct{})
+	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(string, []string, []string, string, domain.Size) (ports.PTY, error) {
+			close(opened)
+			<-release
+			return nil, io.ErrUnexpectedEOF
+		}).Once()
+	var logs bytes.Buffer
+	handled := make(chan struct{})
+	d := newTestDaemon(t, factory, stubClock{})
+	d.log = slog.New(floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
+	tb := newFloatingTestTab(t)
+	sess := &session{name: "captured", tabs: []*tab{tb}, ctx: t.Context()}
+	d.startFloating(sess, tb, false)
+	<-opened
+	stopRename := make(chan struct{})
+	renameDone := make(chan struct{})
+	go func() {
+		defer close(renameDone)
+		for {
+			select {
+			case <-stopRename:
+				return
+			default:
+			}
+			sess.mu.Lock()
+			sess.name = "renamed"
+			sess.mu.Unlock()
+		}
+	}()
+	close(release)
+	select {
+	case <-handled:
+	case <-time.After(time.Second):
+		t.Fatal("floating launch failure was not logged")
+	}
+	close(stopRename)
+	<-renameDone
+	require.True(t, strings.Contains(logs.String(), "session=captured"), logs.String())
 }
 
 func TestFloatingToggleUsesVisibleTarget(t *testing.T) {

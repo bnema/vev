@@ -16,19 +16,20 @@ import (
 // attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
 // The PTY reader takes only pane.mu, so child output never waits on client IO.
 type pane struct {
-	id         layout.PaneID
-	stableID   string
-	pty        ports.PTY
-	mu         sync.Mutex // guards screen, scrollback, syncGen, rect, and title
-	screen     *vt.Screen
-	scrollback *scopy.Scrollback
-	dirty      chan struct{}
-	flush      chan struct{}
-	syncGen    uint64
-	rect       domain.Rect
-	title      paneTitleState
-	ctx        context.Context
-	cancel     context.CancelFunc
+	id                layout.PaneID
+	stableID          string
+	pty               ports.PTY
+	mu                sync.Mutex // guards screen, scrollback, syncGen, rect, and title
+	screen            *vt.Screen
+	scrollback        *scopy.Scrollback
+	dirty             chan struct{}
+	flush             chan struct{}
+	syncGen           uint64
+	rect              domain.Rect
+	title             paneTitleState
+	ctx               context.Context
+	cancel            context.CancelFunc
+	floatingCloseOnce sync.Once // used only by floating lifecycle teardown paths
 	// onExit is set before the reader starts and never changed. Floating panes
 	// use it to reap their independent slot without touching the layout tree.
 	onExit func()

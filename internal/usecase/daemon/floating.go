@@ -206,12 +206,12 @@ func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfi
 			cwd = live
 		}
 	}
-	if cwd == "" && d.dirOrHome != nil {
-		cwd = d.dirOrHome("")
+	if d.dirOrHome != nil {
+		cwd = d.dirOrHome(cwd)
 	}
 	paneStableID, err := newStableID("p")
 	if err != nil {
-		d.failFloatingLaunch(sess, tb, generation, userOpen, err)
+		d.failFloatingLaunch(tb, generation, userOpen, name, err)
 		return
 	}
 	env := d.childEnv(name, tabStableID, paneStableID, term)
@@ -223,7 +223,7 @@ func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfi
 	go func() {
 		pty, openErr := d.ptys.Open(command, args, env, cwd, sz)
 		if openErr != nil {
-			d.failFloatingLaunch(sess, tb, generation, userOpen, openErr)
+			d.failFloatingLaunch(tb, generation, userOpen, name, openErr)
 			return
 		}
 		p := newPaneWithStableID(layout.PaneID("floating"), paneStableID, pty, sz)
@@ -239,7 +239,7 @@ func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfi
 	}()
 }
 
-func (d *Daemon) failFloatingLaunch(sess *session, tb *tab, generation uint64, userOpen bool, err error) {
+func (d *Daemon) failFloatingLaunch(tb *tab, generation uint64, userOpen bool, sessionName string, err error) {
 	tb.mu.Lock()
 	current := tb.failFloatingLocked(generation)
 	tb.mu.Unlock()
@@ -248,7 +248,7 @@ func (d *Daemon) failFloatingLaunch(sess *session, tb *tab, generation uint64, u
 		if userOpen {
 			kind = "user-open"
 		}
-		d.log.Warn("floating pty spawn failed", "err", err, "session", sess.name, "kind", kind)
+		d.log.Warn("floating pty spawn failed", "err", err, "session", sessionName, "kind", kind)
 	}
 }
 
@@ -260,10 +260,7 @@ func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uin
 	visible := installed && tb.floating.state == floatingVisible
 	tb.mu.Unlock()
 	if !installed {
-		if p.cancel != nil {
-			p.cancel()
-		}
-		_ = p.pty.Close()
+		closeFloatingPane(p)
 		return
 	}
 	p.onExit = func() { d.reapFloating(sess, tb, p, generation) }
@@ -288,9 +285,7 @@ func (d *Daemon) reapFloating(sess *session, tb *tab, p *pane, generation uint64
 	if !cleared {
 		return
 	}
-	if p.cancel != nil {
-		p.cancel()
-	}
+	closeFloatingPane(p)
 	if visible {
 		sess.mu.Lock()
 		ac := sess.client
@@ -314,14 +309,23 @@ func (d *Daemon) teardownFloating(tb *tab) {
 	tb.floating.desiredVisible = false
 	tb.floating.launch = domain.FloatingConfig{}
 	tb.mu.Unlock()
-	if p != nil {
+	closeFloatingPane(p)
+}
+
+// closeFloatingPane releases a floating runtime at most once. It is called
+// only after a generation/identity check has detached the pane from its slot.
+func closeFloatingPane(p *pane) {
+	if p == nil {
+		return
+	}
+	p.floatingCloseOnce.Do(func() {
 		if p.cancel != nil {
 			p.cancel()
 		}
 		if p.pty != nil {
 			_ = p.pty.Close()
 		}
-	}
+	})
 }
 
 func floatingCommandFallback(command, shell string) string {
