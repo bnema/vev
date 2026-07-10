@@ -2,6 +2,8 @@ package dgram
 
 import (
 	"errors"
+	"math"
+	"math/bits"
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
@@ -36,7 +38,8 @@ func (p *bytePacer) wait(done <-chan struct{}, n int, limits paceLimits) error {
 		} else {
 			elapsed := now.Sub(p.last)
 			if elapsed > 0 {
-				p.tokens += int64(elapsed) * int64(rate) / int64(time.Second)
+				capacity := int64(burst) - p.tokens
+				p.tokens += mulDivFloorSaturating(int64(elapsed), int64(rate), int64(time.Second), capacity)
 				p.last = now
 			}
 			p.tokens = min(p.tokens, int64(burst))
@@ -47,7 +50,7 @@ func (p *bytePacer) wait(done <-chan struct{}, n int, limits paceLimits) error {
 		}
 
 		deficit := int64(n) - p.tokens
-		wait := time.Duration((deficit*int64(time.Second) + int64(rate) - 1) / int64(rate))
+		wait := time.Duration(mulDivCeilSaturating(deficit, int64(time.Second), int64(rate)))
 		timer := p.clk.NewTimer(wait)
 		select {
 		case <-timer.C():
@@ -57,4 +60,28 @@ func (p *bytePacer) wait(done <-chan struct{}, n int, limits paceLimits) error {
 			return errPacerClosed
 		}
 	}
+}
+
+func mulDivFloorSaturating(a, b, divisor, limit int64) int64 {
+	if a <= 0 || b <= 0 || limit <= 0 {
+		return 0
+	}
+	hi, lo := bits.Mul64(uint64(a), uint64(b))
+	if hi >= uint64(divisor) {
+		return limit
+	}
+	quotient, _ := bits.Div64(hi, lo, uint64(divisor))
+	return min(int64(min(quotient, uint64(math.MaxInt64))), limit)
+}
+
+func mulDivCeilSaturating(a, b, divisor int64) int64 {
+	hi, lo := bits.Mul64(uint64(a), uint64(b))
+	if hi >= uint64(divisor) {
+		return math.MaxInt64
+	}
+	quotient, remainder := bits.Div64(hi, lo, uint64(divisor))
+	if remainder != 0 {
+		quotient++
+	}
+	return int64(min(quotient, uint64(math.MaxInt64)))
 }

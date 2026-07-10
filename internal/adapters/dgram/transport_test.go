@@ -300,6 +300,36 @@ func TestBytePacerUsesBurstThenFakeClockRate(t *testing.T) {
 	}
 }
 
+func TestBytePacerMaximumRateRefillsAfterMultiSecondFakeClockJump(t *testing.T) {
+	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+	p := bytePacer{clk: clk}
+	done := make(chan struct{})
+	burst := int(^uint(0) >> 1)
+	limits := func() (int, int) { return burst, burst }
+
+	if err := p.wait(done, burst, limits); err != nil {
+		t.Fatal(err)
+	}
+	clk.advance(3 * time.Second)
+	if err := p.wait(done, burst, limits); err != nil {
+		t.Fatal(err)
+	}
+
+	wait := make(chan error, 1)
+	go func() { wait <- p.wait(done, burst, limits) }()
+	awaitSignal(t, clk.timerCreated, "maximum-rate byte pacer timer")
+	clk.advance(time.Second - time.Nanosecond)
+	select {
+	case err := <-wait:
+		t.Fatalf("maximum-rate burst released early: %v", err)
+	default:
+	}
+	clk.advance(time.Nanosecond)
+	if err := awaitResult(t, wait, "maximum-rate burst"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBytePacerCancellation(t *testing.T) {
 	const mtu = 1200
 	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
@@ -1404,6 +1434,60 @@ func TestResendPendingCapsBurst(t *testing.T) {
 	tr.resendPending()
 	if got := writes.Load(); got != 2 {
 		t.Fatalf("resend writes=%d, want capped burst of 2", got)
+	}
+}
+
+func TestRetransmitBatchReducesCongestionWindowOnce(t *testing.T) {
+	tr, writes := newResendTestTransport(t, 10)
+	now := tr.clock.Now()
+	for seq := uint64(1); seq <= 3; seq++ {
+		tr.pending[seq] = &pending{
+			frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(seq)}},
+			last:  now.Add(-time.Second),
+		}
+	}
+	initialCwnd := tr.congestion.cwndBytes
+
+	tr.resendPending()
+
+	if got := writes.Load(); got != 3 {
+		t.Fatalf("retransmit writes=%d, want 3", got)
+	}
+	if got, want := tr.congestion.cwndBytes, initialCwnd/2; got != want {
+		t.Fatalf("cwnd after one retransmit batch=%d, want %d", got, want)
+	}
+}
+
+func TestACKBeforeQueuedRetransmitDoesNotReduceCongestionWindow(t *testing.T) {
+	tr, writes := newResendTestTransport(t, 1)
+	now := tr.clock.Now()
+	tr.pending[1] = &pending{
+		frame:     ports.Frame{Type: ports.MsgOutput, Payload: []byte("acked")},
+		first:     now.Add(-time.Second),
+		last:      now.Add(-time.Second),
+		wireBytes: tr.mtu,
+	}
+	initialCwnd := tr.congestion.cwndBytes
+	tr.mu.Lock()
+	batch, _ := tr.selectRetransmitsLocked(now)
+	tr.mu.Unlock()
+	if len(batch) != 1 {
+		t.Fatalf("selected retransmits=%d, want 1", len(batch))
+	}
+	tr.handleRecord(ackRecord(1))
+	cwndAfterACK := initialCwnd + max(1, tr.mtu*tr.mtu/initialCwnd)
+	counterAfterACK := tr.ctr
+
+	tr.runRetransmitBatch(&bytePacer{clk: tr.clock}, batch)
+
+	if got := tr.ctr; got != counterAfterACK {
+		t.Fatalf("packet counter after ACK=%d, want unchanged %d", got, counterAfterACK)
+	}
+	if got := writes.Load(); got != 0 {
+		t.Fatalf("writes after ACK=%d, want 0", got)
+	}
+	if got := tr.congestion.cwndBytes; got != cwndAfterACK {
+		t.Fatalf("cwnd after ACK race=%d, want ACK-only growth %d", got, cwndAfterACK)
 	}
 }
 

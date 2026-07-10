@@ -988,9 +988,7 @@ func (t *Transport) dataSendLoop() {
 		case job := <-t.dataSend:
 			t.runDataSendJob(&pacer, job, true)
 		case batch := <-t.retransmitWork:
-			for _, r := range batch {
-				t.runDataSendJob(&pacer, dataSendJob{seq: r.seq, reliable: true, frame: r.f}, false)
-			}
+			t.runRetransmitBatch(&pacer, batch)
 		case <-t.done:
 			return
 		}
@@ -1001,7 +999,7 @@ func (t *Transport) runDataSendJob(pacer *bytePacer, job dataSendJob, initial bo
 	if initial {
 		t.markPendingSent(job.seq, job.reliable)
 	}
-	err := t.writeDataJob(pacer, job)
+	_, err := t.writeDataJob(pacer, job, nil)
 	if err != nil {
 		if initial {
 			t.removePending(job.seq, job.reliable)
@@ -1023,11 +1021,14 @@ func (t *Transport) runDataSendJob(pacer *bytePacer, job dataSendJob, initial bo
 	}
 }
 
-func (t *Transport) writeDataJob(pacer *bytePacer, job dataSendJob) error {
+func (t *Transport) writeDataJob(pacer *bytePacer, job dataSendJob, onFirstWrite func()) (bool, error) {
+	if job.reliable && !t.pendingExists(job.seq) {
+		return false, nil
+	}
 	payload := encodeData(job.seq, job.reliable, job.frame)
 	frags, err := pdgram.FragmentPayload(t.nextCounter(), payload, t.mtu-pdgram.HeaderSize-t.codec.Overhead())
 	if err != nil {
-		return err
+		return false, err
 	}
 	t.mu.Lock()
 	beforeDataPace := t.beforeDataPace
@@ -1035,38 +1036,35 @@ func (t *Transport) writeDataJob(pacer *bytePacer, job dataSendJob) error {
 	if beforeDataPace != nil {
 		beforeDataPace()
 	}
-	packets := make([][]byte, 0, len(frags))
-	wireBytes := 0
-	for _, frag := range frags {
-		raw, err := pdgram.MarshalFragment(frag)
-		if err != nil {
-			return err
-		}
-		pkt := t.codec.Seal(t.sendDir, t.nextCounter(), raw, nil)
-		packets = append(packets, pkt)
-		wireBytes += len(pkt)
-	}
-	if job.reliable {
-		t.mu.Lock()
-		if pending := t.pending[job.seq]; pending != nil {
-			pending.wireBytes = wireBytes
-		}
-		t.mu.Unlock()
-	}
 	limits := func() (int, int) {
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		return t.congestion.bytesPerSecond(), t.congestion.burstBytes()
 	}
-	for i, pkt := range packets {
+	emitted := false
+	wireBytes := 0
+	for i, frag := range frags {
 		if job.reliable && !t.pendingExists(job.seq) {
-			return nil
+			return emitted, nil
+		}
+		raw, err := pdgram.MarshalFragment(frag)
+		if err != nil {
+			return emitted, err
+		}
+		pkt := t.codec.Seal(t.sendDir, t.nextCounter(), raw, nil)
+		wireBytes += len(pkt)
+		if job.reliable {
+			t.mu.Lock()
+			if pending := t.pending[job.seq]; pending != nil && pending.wireBytes < wireBytes {
+				pending.wireBytes = wireBytes
+			}
+			t.mu.Unlock()
 		}
 		if err := pacer.wait(t.done, len(pkt), limits); err != nil {
-			return err
+			return emitted, err
 		}
 		if job.reliable && !t.pendingExists(job.seq) {
-			return nil
+			return emitted, nil
 		}
 		t.mu.Lock()
 		peer := t.peer
@@ -1075,21 +1073,50 @@ func (t *Transport) writeDataJob(pacer *bytePacer, job dataSendJob) error {
 		t.mu.Unlock()
 		if closed {
 			if closeErr != nil {
-				return closeErr
+				return emitted, closeErr
 			}
-			return net.ErrClosed
+			return emitted, net.ErrClosed
 		}
 		if peer == nil {
-			return errors.New("dgram: no peer")
+			return emitted, errors.New("dgram: no peer")
 		}
 		if i == len(frags)-1 {
 			t.markPendingFinalWrite(job.seq)
 		}
 		if err := t.writePacket(pkt, peer); err != nil {
-			return err
+			return emitted, err
+		}
+		if !emitted {
+			emitted = true
+			if onFirstWrite != nil {
+				onFirstWrite()
+			}
 		}
 	}
-	return nil
+	return emitted, nil
+}
+
+func (t *Transport) runRetransmitBatch(pacer *bytePacer, batch []retransmitRecord) {
+	lossApplied := false
+	onFirstWrite := func() {
+		if lossApplied {
+			return
+		}
+		t.mu.Lock()
+		t.congestion.onLoss()
+		t.mu.Unlock()
+		lossApplied = true
+	}
+	for _, r := range batch {
+		job := dataSendJob{seq: r.seq, reliable: true, frame: r.f}
+		_, err := t.writeDataJob(pacer, job, onFirstWrite)
+		if err == nil {
+			t.markPendingReady(r.seq, true)
+			continue
+		}
+		t.markPendingReady(r.seq, true)
+		return
+	}
 }
 
 func (t *Transport) heartbeatLoop() {
@@ -1154,7 +1181,6 @@ func (t *Transport) selectRetransmitsLocked(now time.Time) ([]retransmitRecord, 
 		p.initialInFlight = true
 		p.attempts++
 		p.retransmitted = true
-		t.congestion.onLoss()
 		t.retransmits++
 		emitDiagnostic = emitDiagnostic || t.retransmits%64 == 0
 		resend = append(resend, retransmitRecord{seq: seq, f: p.frame})
@@ -1179,17 +1205,7 @@ func (t *Transport) resendPending() {
 		return
 	}
 	pacer := bytePacer{clk: t.clock}
-	for _, r := range resend {
-		if err := t.writeDataJob(&pacer, dataSendJob{seq: r.seq, reliable: true, frame: r.f}); err == nil {
-			t.markPendingReady(r.seq, true)
-		} else {
-			t.mu.Lock()
-			if p := t.pending[r.seq]; p != nil {
-				p.initialInFlight = false
-			}
-			t.mu.Unlock()
-		}
-	}
+	t.runRetransmitBatch(&pacer, resend)
 }
 
 func (t *Transport) resendDelayLocked(p *pending) time.Duration {
