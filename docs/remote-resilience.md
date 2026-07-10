@@ -15,14 +15,20 @@ Resilience work uses these user-facing states:
 
 | State | Meaning |
 | --- | --- |
-| `connected` | authenticated UDP traffic is flowing |
-| `degraded` | traffic is delayed or incomplete, but recovery is still expected |
-| `probing` | vev is trying alternate UDP paths before using SSH again |
+| `connected` | a complete record or meaningful ACK progress is recent |
+| `degraded` | authenticated UDP packets still arrive, but complete-record or ACK progress is delayed |
+| `probing` | authenticated UDP packet contact is absent, so vev probes for path recovery |
 | `resuming` | a replacement transport is attaching to the same session |
-| `offline` | no path currently works, but retries continue |
+| `offline` | authenticated UDP contact remains absent and vev resumes over SSH stdio |
 | `expired` | the session or recovery window is no longer available |
 
-When a terminal is in raw mode, recovery messages should appear as vev status text rather than as bytes written into the remote program's output stream.
+When a terminal is in raw mode, recovery messages appear as vev status text rather than as bytes written into the remote program's output stream.
+
+`VEV_REMOTE_TRANSPORT=stdio` is the SSH-stdio fallback: it keeps the session inside authenticated SSH when UDP is blocked or unavailable. It remains available while UDP recovery is attempted.
+
+## UDP transport health diagnostics
+
+At debug logging, UDP transport-health lines report only state, elapsed progress ages, and bounded transport counters; they do not include payloads, addresses, keys, or identities. For a real remote attempt, `scripts/debug-remote-attach.sh --udp-health user@host` stores redacted transport-health lines and Linux `ss -u -m` socket-memory counters, then prints the exact collected file paths.
 
 ## Manual checks
 

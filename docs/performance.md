@@ -24,6 +24,10 @@ strace -ff -c -o tmux-cat.strace tmux new-session -d -s perf-cat 'timeout 30s sh
 
 Record host CPU, OS/kernel, terminal emulator, vev commit, tmux version, terminal size, workload duration, raw command lines, syscall summaries, bytes written per rendered frame, and heap profiles or allocation counts before comparing.
 
+## UDP mobile congestion behavior
+
+The datagram transport uses one shared congestion-responsive byte pacer for initial sends and retransmits. Retransmissions therefore consume the same byte budget as new data instead of bypassing congestion feedback. Datagram clients use a one-state output window: the cumulative ACK releases that state, and newer repaint state coalesces while it remains unacknowledged rather than retaining an unbounded queue.
+
 Microbenchmarks executed locally for this review using `go test ./internal/adapters/ipc ./internal/usecase/daemon -run '^$' -bench=. -benchmem`:
 
 | benchmark | methodology |
