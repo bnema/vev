@@ -112,9 +112,14 @@ func TestRestoreSnapshotsLeavesFloatingUninitializedAndInactiveTabsCold(t *testi
 			{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/two"}}},
 		},
 	})}}}
-	d := newTestDaemon(t, &restorePTYFactory{}, stubClock{})
+	factory := &restorePTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Command: "btop", Width: 80, Height: 80}})
 	WithSnapshotStore(store)(d)
 	d.restoreSnapshots(context.Background())
+	// Only the persisted normal panes may be restored. Floating runtimes are
+	// deliberately excluded and must wait for a Phase-5 activation path.
+	require.Len(t, factory.opens, 2)
 	d.mu.Lock()
 	restored := d.findByNameLocked("work")
 	d.mu.Unlock()
