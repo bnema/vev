@@ -49,21 +49,22 @@ func ParseKeySpec(spec string) (KeySpec, error) {
 }
 
 var actionNames = map[Action]string{
-	ActionOpenPalette:    "open-palette",
-	ActionJumpAttention:  "jump-attention",
-	ActionFocusPaneLeft:  "focus-pane-left",
-	ActionFocusPaneRight: "focus-pane-right",
-	ActionFocusPaneUp:    "focus-pane-up",
-	ActionFocusPaneDown:  "focus-pane-down",
-	ActionSwitchTab1:     "switch-tab-1",
-	ActionSwitchTab2:     "switch-tab-2",
-	ActionSwitchTab3:     "switch-tab-3",
-	ActionSwitchTab4:     "switch-tab-4",
-	ActionSwitchTab5:     "switch-tab-5",
-	ActionSwitchTab6:     "switch-tab-6",
-	ActionSwitchTab7:     "switch-tab-7",
-	ActionSwitchTab8:     "switch-tab-8",
-	ActionSwitchTab9:     "switch-tab-9",
+	ActionOpenPalette:        "open-palette",
+	ActionToggleFloatingPane: "toggle-floating-pane",
+	ActionJumpAttention:      "jump-attention",
+	ActionFocusPaneLeft:      "focus-pane-left",
+	ActionFocusPaneRight:     "focus-pane-right",
+	ActionFocusPaneUp:        "focus-pane-up",
+	ActionFocusPaneDown:      "focus-pane-down",
+	ActionSwitchTab1:         "switch-tab-1",
+	ActionSwitchTab2:         "switch-tab-2",
+	ActionSwitchTab3:         "switch-tab-3",
+	ActionSwitchTab4:         "switch-tab-4",
+	ActionSwitchTab5:         "switch-tab-5",
+	ActionSwitchTab6:         "switch-tab-6",
+	ActionSwitchTab7:         "switch-tab-7",
+	ActionSwitchTab8:         "switch-tab-8",
+	ActionSwitchTab9:         "switch-tab-9",
 }
 
 var actionsByName = func() map[string]Action {

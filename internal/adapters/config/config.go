@@ -18,7 +18,10 @@ import (
 
 const pollInterval = 2 * time.Second
 
-var processNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
+var (
+	processNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
+	percentagePattern  = regexp.MustCompile(`^[0-9]{1,3}%$`)
+)
 
 // Parse reads vev's flat action = value config format. Duplicate action keys
 // are accepted with a warning; the last value wins while first-seen action order
@@ -27,6 +30,7 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	cfg := domain.Defaults()
 	var warnings []domain.Warning
 	seenBindingKeys := make(map[string]bool)
+	seenFloatingKeys := make(map[string]bool)
 
 	scanner := bufio.NewScanner(r)
 	lineNo := 0
@@ -86,6 +90,30 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				interval = domain.MinBarInterval
 			}
 			cfg.Bar.Interval = interval
+		case key == "floating.command":
+			warnings = warnDuplicateFloatingKey(warnings, seenFloatingKeys, key, lineNo)
+			command, ok := parseBarCommand(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid floating.command %q", value)})
+				continue
+			}
+			cfg.Floating.Command = command
+		case key == "floating.width":
+			warnings = warnDuplicateFloatingKey(warnings, seenFloatingKeys, key, lineNo)
+			width, ok := parsePercentage(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid floating.width %q", value)})
+				continue
+			}
+			cfg.Floating.Width = width
+		case key == "floating.height":
+			warnings = warnDuplicateFloatingKey(warnings, seenFloatingKeys, key, lineNo)
+			height, ok := parsePercentage(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid floating.height %q", value)})
+				continue
+			}
+			cfg.Floating.Height = height
 		case strings.HasPrefix(key, "code."):
 			codeKey := strings.TrimPrefix(key, "code.")
 			if codeKey == "" {
@@ -189,6 +217,14 @@ func fileStamp(path string) (stamp, error) {
 	return stamp{modTime: st.ModTime(), size: st.Size(), exists: true}, nil
 }
 
+func warnDuplicateFloatingKey(warnings []domain.Warning, seen map[string]bool, key string, lineNo int) []domain.Warning {
+	if seen[key] {
+		warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("duplicate key %q", key)})
+	}
+	seen[key] = true
+	return warnings
+}
+
 func updateBindingEntry(entries []domain.ConfigEntry, key, value string) {
 	for i := range entries {
 		if entries[i].Key == key {
@@ -222,6 +258,14 @@ func parseProcessList(value string, lineNo int) ([]string, []domain.Warning) {
 		out = append(out, item)
 	}
 	return out, warnings
+}
+
+func parsePercentage(value string) (int, bool) {
+	if !percentagePattern.MatchString(value) {
+		return 0, false
+	}
+	percentage, err := strconv.Atoi(strings.TrimSuffix(value, "%"))
+	return percentage, err == nil && percentage >= 1 && percentage <= 100
 }
 
 func parseBarCommand(value string) (string, bool) {

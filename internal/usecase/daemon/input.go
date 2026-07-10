@@ -74,6 +74,30 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 		if rt.copySearchActive() {
 			return
 		}
+		copyPane := copyTargetPane(rt)
+		tb.mu.Lock()
+		floatingPane, geometry, floatingVisible := tb.visibleFloatingSnapshotLocked(d.currentFloatingConfig())
+		floatingCopy := floatingVisible && copyPane == floatingPane
+		tb.mu.Unlock()
+		if floatingCopy {
+			contentRow := ev.Row - 1
+			if !pointInRect(ev.Col, contentRow, geometry.Inner) {
+				return
+			}
+			// Match the multi-pane translation: hand copyMouse a zero-based
+			// popup row so a click selects exactly the row under the pointer.
+			ev.Row = contentRow
+			ev = translateMouseEvent(ev, geometry.Inner.X, geometry.Inner.Y)
+			switch ev.Button {
+			case mouse.Left:
+				d.copyMouse(sess, ac, ev)
+			case mouse.WheelUp:
+				d.copyWheel(sess, ac, -3)
+			case mouse.WheelDown:
+				d.copyWheel(sess, ac, 3)
+			}
+			return
+		}
 		if ev.Button == mouse.Left {
 			contentRow := ev.Row - 1
 			tb.mu.Lock()
@@ -120,6 +144,17 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 
 	tb.mu.Lock()
 	contentRow := ev.Row - 1
+	floating, floatingGeometry, floatingVisible := tb.visibleFloatingSnapshotLocked(d.currentFloatingConfig())
+	if floatingVisible {
+		if !pointInRect(ev.Col, contentRow, floatingGeometry.Inner) {
+			tb.mu.Unlock()
+			return
+		}
+		tb.mu.Unlock()
+		ev = translateMouseEvent(ev, floatingGeometry.Inner.X, floatingGeometry.Inner.Y)
+		d.handleTerminalMouse(sess, ac, floating, ev, true, true)
+		return
+	}
 	pl, hit := hitTestPlacementLocked(tb, ev.Col, contentRow)
 	multi := len(tb.panes) > 1
 	focusedID := layout.PaneID("")
@@ -177,6 +212,14 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 			return
 		}
 	}
+	d.handleTerminalMouse(sess, ac, p, ev, translated, hoveredFocused)
+}
+
+func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane, ev mouse.Event, translated, hoveredFocused bool) {
+	if p == nil {
+		return
+	}
+	rt := ac.overlays
 	p.mu.Lock()
 	childRows := p.screen.Frame.Height
 	mouseMode, mouseSGR := p.screen.MouseMode()
@@ -236,6 +279,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 			mode.StartSelectionAt(snap, pressTop+pressRow)
 			mode.ExtendTo(snap, len(snap.Rows)-snap.Height+ev.Row)
 			rt.copyMode = mode
+			rt.copyPane = p
 			rt.copyPressRow = pressTop + pressRow
 			rt.copyPressRowValid = true
 			rt.copyDragging = true
@@ -285,7 +329,9 @@ func (d *Daemon) writeToPane(sess *session, p *pane, data []byte) {
 	if _, err := p.pty.Write(data); err != nil {
 		name := ""
 		if sess != nil {
+			sess.mu.Lock()
 			name = sess.name
+			sess.mu.Unlock()
 		}
 		d.log.Error("pty write failed", "err", err, "session", name)
 	}
@@ -348,7 +394,7 @@ func (h daemonKeyHandler) Forward(data []byte) {
 		return
 	}
 	tb.mu.Lock()
-	p := tb.focusedPane()
+	p := tb.terminalTargetLocked()
 	tb.mu.Unlock()
 	h.d.writeToPane(sess, p, data)
 }
@@ -363,6 +409,10 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 		h.d.enterPalette(sess, h.ac)
 	case keys.ActionJumpAttention:
 		h.d.jumpAttention(sess, h.ac)
+	case keys.ActionToggleFloatingPane:
+		if err := h.d.toggleFloating(sess, h.ac); err != nil {
+			h.d.log.Warn("toggle floating pane failed", "err", err)
+		}
 	case keys.ActionFocusPaneLeft:
 		_ = h.d.focusDir(sess, h.ac, layout.Left)
 	case keys.ActionFocusPaneRight:
@@ -376,6 +426,7 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:
 		idx := int(action - keys.ActionSwitchTab1)
 		if sess.switchTab(idx) {
+			h.d.activateTab(sess, sess.activeTab())
 			h.d.paint(sess, h.ac, true)
 		}
 	}

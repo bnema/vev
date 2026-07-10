@@ -91,7 +91,7 @@ func (d *Daemon) injectClipboardPath(sess *session, path string) {
 		return
 	}
 	tb.mu.Lock()
-	p := tb.focusedPane()
+	p := tb.terminalTargetLocked()
 	tb.mu.Unlock()
 	if p == nil {
 		return

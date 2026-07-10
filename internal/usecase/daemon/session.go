@@ -55,6 +55,7 @@ type session struct {
 	cancel context.CancelFunc
 
 	mu                     sync.Mutex // guards tabs, active, client, clipFiles, and clipboard queue state
+	themeMu                sync.Mutex
 	tabs                   []*tab
 	active                 int
 	client                 *attachedClient
@@ -74,7 +75,7 @@ type session struct {
 
 // tab is a pane layout container; pane owns PTY/screen/scrollback/render scheduling state.
 type tab struct {
-	mu sync.Mutex // guards tree, panes, nextPaneID, size, previewClient, and pane map membership
+	mu sync.Mutex // guards tree, panes, floating, nextPaneID, size, previewClient, and pane map membership
 
 	stableID   string
 	name       string
@@ -84,6 +85,8 @@ type tab struct {
 	size       domain.Size
 	ctx        context.Context
 	cancel     context.CancelFunc
+	// floating is independent from the normal layout tree and pane map.
+	floating floatingSlot
 
 	// previewClient tracks the one client currently previewing this tab in the picker.
 	// v1 is last-writer-wins: multiple clients previewing the same tab are not supported.
@@ -330,6 +333,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	d.log.Info("tab created", "session", name, "tab", tabIndex)
 	d.startTabGoroutines(sess, tb)
 	d.mu.Unlock()
+	d.activateTab(sess, tb)
 	markSnapshotDirty(sess)
 	return nil
 }
@@ -371,7 +375,13 @@ func (tb *tab) panesSnapshot() []*pane {
 func (tb *tab) closeAllPanes() {
 	tb.mu.Lock()
 	panes := tb.panesSnapshot()
+	// Invalidate before cancellation so a concurrently unblocked floating
+	// reader cannot reap a subsequently reused slot.
+	floating := tb.takeFloatingLocked()
 	tb.mu.Unlock()
+	if floating != nil {
+		panes = append(panes, floating)
+	}
 	for _, p := range panes {
 		if p.cancel != nil {
 			p.cancel()
@@ -401,7 +411,10 @@ func (d *Daemon) startTabGoroutines(sess *session, tb *tab) {
 
 func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 	if p != nil {
-		d.log.Info("pane created", "session", sess.name, "pane", p.id)
+		sess.mu.Lock()
+		name := sess.name
+		sess.mu.Unlock()
+		d.log.Info("pane created", "session", name, "pane", p.id)
 	}
 	d.sessWg.Add(2)
 	go d.ptyReader(sess, tb, p)
@@ -599,12 +612,14 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 		return
 	}
 	ringing := tb.attention
+	wasActive := idx == sess.active
 	sess.tabs = append(sess.tabs[:idx], sess.tabs[idx+1:]...)
 	if sess.active >= len(sess.tabs) {
 		sess.active = len(sess.tabs) - 1
 	} else if idx < sess.active {
 		sess.active--
 	}
+	destination := sess.tabs[sess.active]
 	ac := sess.client
 	name := sess.name
 	record := sess.persistRecordLocked(time.Now().UnixNano())
@@ -623,7 +638,11 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	if tb.cancel != nil {
 		tb.cancel()
 	}
+	d.teardownFloating(tb, ac)
 	tb.closeAllPanes()
+	if wasActive {
+		d.activateTab(sess, destination)
+	}
 	if repaint && ac != nil {
 		d.paint(sess, ac, true)
 	}
@@ -723,6 +742,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	sess.mu.Unlock()
 	for _, tb := range tabs {
 		d.clearDestroyedTabPreview(tb)
+		d.teardownFloating(tb, ac)
 		tb.closeAllPanes()
 	}
 	for _, path := range clipFiles {

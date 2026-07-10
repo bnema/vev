@@ -18,6 +18,10 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	p1, release1 := newBlockingPTY(t)
 	p2, release2 := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p1, p2)
+	sess.mu.Lock()
+	sess.client = ac
+	sess.mu.Unlock()
+	d.ptys = newBlockingOpenFactory(t, d)
 	defer release1()
 	defer release2()
 
@@ -31,6 +35,7 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	d.handleInput(sess, ac, []byte("NXT\r"))
 	require.False(t, ac.overlays.paletteActive())
 	require.Equal(t, 1, activeTabIndex(sess))
+	requireFloatingInitialized(t, sess.activeTab())
 	awaitFrame(t, sends, ports.MsgOutput)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
@@ -40,15 +45,31 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
+func TestPaletteFLTExecutesFloatingToggle(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	tb := sess.activeTab()
+	installTestFloating(tb, newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), false)
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("FLT\r"))
+
+	require.False(t, ac.overlays.paletteActive())
+	tb.mu.Lock()
+	require.Equal(t, floatingVisible, tb.floating.state)
+	tb.mu.Unlock()
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
 func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	p1, release1 := newBlockingPTY(t)
 	p2, release2 := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
 	defer release1()
 	defer release2()
-	ptys := portsmocks.NewMockPTYFactory(t)
-	ptys.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(p2, nil).Once()
-	d.ptys = ptys
+	d.ptys = newFactorySeq(t, p2)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -83,6 +104,9 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 
 func TestPaletteReopensWithSuccessfulCommandFirst(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
+	sess.mu.Lock()
+	sess.client = ac
+	sess.mu.Unlock()
 	defer releases[0]()
 	defer releases[1]()
 
@@ -112,12 +136,12 @@ func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
 	for i, cmd := range commands {
 		codes[i] = cmd.Code
 	}
-	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "CLP", "FPL", "FPR", "FPU", "FPD", "PVT", "BSK", "FSK", "VIS", "RNS", "RNT", "DET"}, codes)
+	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "PVT", "BSK", "FSK", "VIS", "RNS", "RNT", "DET"}, codes)
 }
 
 func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
 	d := &Daemon{}
-	codes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "FSK", "SSP", "VIS", "RNS", "RNT", "DET"}
+	codes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "FSK", "SSP", "VIS", "RNS", "RNT", "DET"}
 
 	var wg sync.WaitGroup
 	for range 50 {

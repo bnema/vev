@@ -64,6 +64,7 @@ func TestActionNamesAreCanonical(t *testing.T) {
 		name string
 	}{
 		{ActionOpenPalette, "open-palette"},
+		{ActionToggleFloatingPane, "toggle-floating-pane"},
 		{ActionJumpAttention, "jump-attention"},
 		{ActionFocusPaneLeft, "focus-pane-left"},
 		{ActionFocusPaneRight, "focus-pane-right"},
@@ -96,14 +97,17 @@ func TestActionNamesAreCanonical(t *testing.T) {
 
 func TestBuildBindingsAppliesOverrides(t *testing.T) {
 	bindings, warnings := BuildBindings(map[string]string{
-		"open-palette":    "alt+o",
-		"focus-pane-left": "alt+left",
-		"switch-tab-2":    "alt+2",
+		"open-palette":         "alt+o",
+		"toggle-floating-pane": "alt+g",
+		"focus-pane-left":      "alt+left",
+		"switch-tab-2":         "alt+2",
 	})
 	require.Empty(t, warnings)
 
 	assertAltRuneAction(t, bindings, 'o', ActionOpenPalette)
 	assertAltRuneUnbound(t, bindings, ' ')
+	assertAltRuneAction(t, bindings, 'g', ActionToggleFloatingPane)
+	assertAltRuneUnbound(t, bindings, 'f')
 	assertAltArrowAction(t, bindings, 'D', ActionFocusPaneLeft)
 	assertAltRuneUnbound(t, bindings, 'h')
 	assertAltRuneAction(t, bindings, '2', ActionSwitchTab2)

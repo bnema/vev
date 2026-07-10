@@ -30,6 +30,7 @@ type overlayRuntime struct {
 
 	copyMu                sync.Mutex
 	copyMode              *scopy.Mode
+	copyPane              *pane
 	copyPending           []byte
 	copyESC               pendingByteTimer
 	copySearch            *visualsearch.Model
@@ -101,8 +102,22 @@ func (rt *overlayRuntime) copySearchActive() bool {
 
 func (rt *overlayRuntime) clearCopyModeLocked() {
 	rt.copyMode = nil
+	rt.copyPane = nil
 	rt.copySearch = nil
 	rt.copySearchPending = nil
+}
+
+func (rt *overlayRuntime) clearCopyModeForPane(p *pane) bool {
+	if rt == nil || p == nil {
+		return false
+	}
+	rt.copyMu.Lock()
+	defer rt.copyMu.Unlock()
+	if rt.copyMode == nil || rt.copyPane != p {
+		return false
+	}
+	rt.clearCopyModeLocked()
+	return true
 }
 
 func (rt *overlayRuntime) HandleInput(d *Daemon, data []byte) bool {
@@ -134,6 +149,7 @@ type overlayRenderSnapshot struct {
 
 	copyActive      bool
 	copyMode        *scopy.Mode
+	copyPane        *pane
 	copySearchModel *visualsearch.Model
 	copyFeedback    string
 
@@ -164,6 +180,7 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 
 	rt.copyMu.Lock()
 	snap.copyActive = rt.copyMode != nil
+	snap.copyPane = rt.copyPane
 	if rt.copyMode != nil {
 		copyModeValue := *rt.copyMode
 		copyModeValue.Searches = append([]scopy.SearchMatch(nil), rt.copyMode.Searches...)

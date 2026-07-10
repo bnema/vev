@@ -1,0 +1,444 @@
+package daemon
+
+import (
+	"errors"
+	"io"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/bnema/vev/internal/domain"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"github.com/bnema/vev/pkg/renderer"
+)
+
+func TestCalculateFloatingGeometry(t *testing.T) {
+	tests := []struct {
+		name    string
+		content domain.Rect
+		cfg     domain.FloatingConfig
+		want    floatingGeometry
+	}{
+		{"eighty percent centered", domain.Rect{X: 3, Y: 1, Width: 101, Height: 51}, domain.FloatingConfig{Width: 80, Height: 80}, floatingGeometry{Bounds: domain.Rect{X: 13, Y: 6, Width: 80, Height: 40}, Inner: domain.Rect{X: 14, Y: 7, Width: 78, Height: 38}}},
+		{"one percent clamps to one", domain.Rect{Y: 1, Width: 100, Height: 20}, domain.FloatingConfig{Width: 1, Height: 1}, floatingGeometry{Bounds: domain.Rect{X: 49, Y: 10, Width: 1, Height: 1}, Inner: domain.Rect{X: 49, Y: 10, Width: 1, Height: 1}}},
+		{"full size", domain.Rect{Y: 1, Width: 100, Height: 20}, domain.FloatingConfig{Width: 100, Height: 100}, floatingGeometry{Bounds: domain.Rect{Y: 1, Width: 100, Height: 20}, Inner: domain.Rect{X: 1, Y: 2, Width: 98, Height: 18}}},
+		{"tiny axes omit borders", domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}, domain.FloatingConfig{Width: 100, Height: 100}, floatingGeometry{Bounds: domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}, Inner: domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}}},
+		{"percent clamps", domain.Rect{Width: 10, Height: 10}, domain.FloatingConfig{Width: 101, Height: -1}, floatingGeometry{Bounds: domain.Rect{Width: 10, Height: 1, Y: 4}, Inner: domain.Rect{X: 1, Width: 8, Y: 4, Height: 1}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, calculateFloatingGeometry(tt.content, tt.cfg))
+		})
+	}
+}
+
+func TestFloatingAxisGeometryEndpointsAndTinyBorders(t *testing.T) {
+	tests := []struct {
+		name               string
+		available, percent int
+		want               floatingAxisGeometry
+	}{
+		{name: "one percent", available: 100, percent: 1, want: floatingAxisGeometry{BoundsSize: 1, InnerSize: 1}},
+		{name: "full size reserves borders", available: 100, percent: 100, want: floatingAxisGeometry{BoundsSize: 100, InnerSize: 98, BorderOffset: 1}},
+		{name: "two cells omits borders", available: 2, percent: 100, want: floatingAxisGeometry{BoundsSize: 2, InnerSize: 2}},
+		{name: "three cells leaves one inner cell", available: 3, percent: 100, want: floatingAxisGeometry{BoundsSize: 3, InnerSize: 1, BorderOffset: 1}},
+		{name: "percentage clamps", available: 10, percent: 101, want: floatingAxisGeometry{BoundsSize: 10, InnerSize: 8, BorderOffset: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, calculateFloatingAxisGeometry(tt.available, tt.percent))
+		})
+	}
+}
+
+func TestComposeFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testing.T) {
+	p := newPane("floating", nil, domain.Size{Cols: 6, Rows: 3})
+	p.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'F'})
+	p.title.processName, p.title.terminalTitle, p.title.generation = "nvim", "project/main.go", 1
+	base := renderer.NewFrame(40, 12)
+	base.Set(2, 2, renderer.Cell{Rune: 'B'})
+	content := domain.Rect{Y: 1, Width: 40, Height: 10}
+	cache := &composedFrameCache{}
+	frame, _ := composeFloatingFrame(base, nil, p, 1, content, domain.FloatingConfig{Width: 80, Height: 80}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	require.Equal(t, 'B', base.At(2, 2).Rune, "backdrop must only touch the composed destination")
+	geometry := calculateFloatingGeometry(content, domain.FloatingConfig{Width: 80, Height: 80})
+	require.Equal(t, '┌', frame.At(geometry.Bounds.X, geometry.Bounds.Y).Rune)
+	require.Equal(t, 'F', frame.At(geometry.Inner.X, geometry.Inner.Y).Rune)
+	var gotTitle strings.Builder
+	for x := geometry.Bounds.X + 2; x < geometry.Bounds.X+geometry.Bounds.Width-2; x++ {
+		gotTitle.WriteRune(frame.At(x, geometry.Bounds.Y).Rune)
+	}
+	require.Equal(t, "nvim: project/main.go", strings.TrimRight(gotTitle.String(), "─"))
+
+	p.mu.Lock()
+	p.title.generation++
+	p.mu.Unlock()
+	_, damage := composeFloatingFrame(base, nil, p, 1, content, domain.FloatingConfig{Width: 80, Height: 80}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	require.Len(t, damage, 1)
+	require.Equal(t, geometry.Bounds.Y, damage[0].Y)
+	require.Equal(t, 1, damage[0].Height)
+}
+
+func TestComposeFloatingFrameGeometryChangesInvalidateCache(t *testing.T) {
+	initial := floatingGeometry{
+		Bounds: domain.Rect{X: 4, Y: 2, Width: 8, Height: 5},
+		Inner:  domain.Rect{X: 5, Y: 3, Width: 6, Height: 3},
+	}
+	tests := []struct {
+		name string
+		next floatingGeometry
+	}{
+		{
+			name: "position change",
+			next: floatingGeometry{Bounds: domain.Rect{X: 12, Y: 4, Width: 8, Height: 5}, Inner: domain.Rect{X: 13, Y: 5, Width: 6, Height: 3}},
+		},
+		{
+			name: "bounds change with same inner size",
+			next: floatingGeometry{Bounds: domain.Rect{X: 10, Y: 2, Width: 10, Height: 7}, Inner: domain.Rect{X: 12, Y: 4, Width: 6, Height: 3}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newPane("floating", nil, domain.Size{Cols: 6, Rows: 3})
+			p.rect, p.popupGeometry = initial.Inner, initial
+			cache := &composedFrameCache{}
+			base := renderer.NewFrame(30, 12)
+			content := domain.Rect{Y: 1, Width: 30, Height: 10}
+			_, damage := composeFloatingFrame(base, nil, p, 1, content, domain.FloatingConfig{}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+			require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+
+			p.mu.Lock()
+			p.rect, p.popupGeometry = tt.next.Inner, tt.next
+			p.mu.Unlock()
+			_, damage = composeFloatingFrame(base, nil, p, 1, content, domain.FloatingConfig{}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+			require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+			require.Equal(t, tt.next, cache.floatingGeometry)
+		})
+	}
+}
+
+func TestResizeFloatingPaneCommitsSameSizeGeometryWithoutPTYResize(t *testing.T) {
+	initial := floatingGeometry{
+		Bounds: domain.Rect{X: 1, Y: 1, Width: 8, Height: 5},
+		Inner:  domain.Rect{X: 2, Y: 2, Width: 6, Height: 3},
+	}
+	tests := []struct {
+		name string
+		next floatingGeometry
+	}{
+		{
+			name: "position change",
+			next: floatingGeometry{Bounds: domain.Rect{X: 9, Y: 4, Width: 8, Height: 5}, Inner: domain.Rect{X: 10, Y: 5, Width: 6, Height: 3}},
+		},
+		{
+			name: "bounds change",
+			next: floatingGeometry{Bounds: domain.Rect{X: 3, Y: 1, Width: 10, Height: 7}, Inner: domain.Rect{X: 5, Y: 3, Width: 6, Height: 3}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pty := &resizePTY{}
+			p := newPane("floating", pty, rectSize(initial.Inner))
+			p.rect, p.popupGeometry = initial.Inner, initial
+			d := newTestDaemon(t, nil, stubClock{})
+
+			require.True(t, d.resizeFloatingPane(p, tt.next))
+			require.Empty(t, pty.sizes(), "same-size geometry must not resize the PTY")
+			require.Equal(t, tt.next.Inner, p.rect)
+			require.Equal(t, tt.next, p.popupGeometry)
+			require.Equal(t, 6, p.screen.Frame.Width)
+			require.Equal(t, 3, p.screen.Frame.Height)
+		})
+	}
+}
+
+func TestComposeFloatingFrameRendersPaneOwnedCommandFallback(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.shell = "/usr/bin/fish"
+	p := newPane("floating", nil, domain.Size{Cols: 6, Rows: 3})
+	p.title.displayFallback = floatingCommandFallback("btop --utf", d.shell)
+	require.Equal(t, "btop", d.refreshPaneDisplayTitle(nil, p, true))
+
+	base := renderer.NewFrame(40, 12)
+	content := domain.Rect{Y: 1, Width: 40, Height: 10}
+	cfg := domain.FloatingConfig{Width: 80, Height: 80}
+	frame, _ := composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, false)
+	geometry := calculateFloatingGeometry(content, cfg)
+	var gotTitle strings.Builder
+	for x := geometry.Bounds.X + 2; x < geometry.Bounds.X+geometry.Bounds.Width-2; x++ {
+		gotTitle.WriteRune(frame.At(x, geometry.Bounds.Y).Rune)
+	}
+	require.Equal(t, "btop", strings.TrimRight(gotTitle.String(), "─"))
+}
+
+func TestComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
+	p := newPane("floating", nil, domain.Size{Cols: 80, Rows: 24})
+	base := renderer.NewFrame(80, 24)
+	content := domain.Rect{Width: 80, Height: 24}
+	cfg := domain.FloatingConfig{Width: 100, Height: 100}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 500 {
+			// This is the same pane lock used by ptyReader around Screen.Write.
+			p.mu.Lock()
+			p.screen.Write([]byte("\x1b[Hreader"))
+			p.mu.Unlock()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		cache := &composedFrameCache{}
+		for range 500 {
+			composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+		}
+	}()
+	close(start)
+	wg.Wait()
+}
+
+func TestDrawFloatingBorderOmitsTinyAxes(t *testing.T) {
+	frame := renderer.NewFrame(2, 1)
+	drawFloatingBorder(frame, domain.Rect{Width: 2, Height: 1}, "title", renderer.Style{})
+	for _, cell := range frame.Cells {
+		require.Equal(t, renderer.BlankCell().Rune, cell.Rune)
+	}
+}
+
+func TestRenderHiddenFloatingSkipsPreviewAndActiveClientAndClearsDamage(t *testing.T) {
+	normalPTY, releaseNormal := newBlockingPTY(t)
+	defer releaseNormal()
+	d, sess, _, activeSends := newManualSessionWithPTYs(t, normalPTY)
+	previewTransport, previewSends := newCapturingTransport(t)
+	preview := &attachedClient{tr: previewTransport, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	preview.initOverlays()
+	preview.setSession(sess)
+
+	tb := sess.activeTab()
+	floating := newPane("floating", nil, domain.Size{Cols: 20, Rows: 8})
+	floating.screen.Write([]byte("hidden output"))
+	tb.mu.Lock()
+	generation := tb.beginFloatingWarmLocked(false)
+	require.True(t, tb.installFloatingLocked(floating, generation))
+	tb.previewClient = preview
+	tb.mu.Unlock()
+
+	d.render(sess, tb, floating)
+
+	floating.mu.Lock()
+	require.Empty(t, floating.screen.Damage())
+	floating.mu.Unlock()
+	select {
+	case frame := <-previewSends:
+		t.Fatalf("hidden floating output painted picker preview: %#v", frame)
+	default:
+	}
+	select {
+	case frame := <-activeSends:
+		t.Fatalf("hidden floating output painted active client: %#v", frame)
+	default:
+	}
+}
+
+func BenchmarkComposeFloatingFrameCached(b *testing.B) {
+	p := newPane("floating", nil, domain.Size{Cols: 62, Rows: 18})
+	p.title.displayFallback = "float"
+	base := renderer.NewFrame(80, 24)
+	content := domain.Rect{Y: 1, Width: 80, Height: 22}
+	cfg := domain.FloatingConfig{Width: 80, Height: 80}
+	cache := &composedFrameCache{}
+	composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	p.screen.ClearDamage()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	}
+}
+
+func TestComposeFloatingFrameCachedDoesNotAllocate(t *testing.T) {
+	p := newPane("floating", nil, domain.Size{Cols: 62, Rows: 18})
+	p.title.displayFallback = "float"
+	base := renderer.NewFrame(80, 24)
+	content := domain.Rect{Y: 1, Width: 80, Height: 22}
+	cfg := domain.FloatingConfig{Width: 80, Height: 80}
+	cache := &composedFrameCache{}
+	composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	p.screen.ClearDamage()
+
+	allocs := testing.AllocsPerRun(100, func() {
+		composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	})
+	require.Zero(t, allocs, "cached floating composition must not allocate without damage or title changes")
+}
+
+func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Width: 50, Height: 50}})
+	tb := newTab(nil, domain.Size{Cols: 80, Rows: 24})
+	sess := &session{tabs: []*tab{tb}}
+
+	initialGeometry := calculateFloatingGeometry(domain.Rect{Width: 80, Height: 24}, d.currentFloatingConfig())
+	currentGeometry := calculateFloatingGeometry(domain.Rect{Width: 100, Height: 40}, d.currentFloatingConfig())
+	initial := initialGeometry.Inner
+	current := currentGeometry.Inner
+	pty := &resizePTY{errs: []error{errors.New("first show fails"), nil}}
+	floating := newPane("floating", pty, rectSize(initial))
+	floating.rect = initial
+	floating.popupGeometry = initialGeometry
+
+	// Prewarming installs a hidden pane at the initial geometry.
+	tb.mu.Lock()
+	generation := tb.beginFloatingWarmLocked(false)
+	require.True(t, tb.installFloatingLocked(floating, generation))
+	require.Equal(t, floatingHidden, tb.floating.state)
+	require.False(t, tb.floating.desiredVisible)
+	tb.mu.Unlock()
+	// A client resize changes tab geometry but must leave the hidden PTY alone.
+	d.resize(sess, nil, domain.Size{Cols: 100, Rows: 42})
+	require.Empty(t, pty.sizes())
+
+	// Showing attempts the current size before paint. A failed resize leaves the
+	// old screen and rect untouched, so a later hide/show can retry.
+	require.NoError(t, d.toggleFloating(sess, nil))
+	require.Equal(t, []domain.Size{rectSize(current)}, pty.sizes())
+	require.Equal(t, initial, floating.rect)
+	require.Equal(t, initial.Width, floating.screen.Frame.Width)
+	require.Equal(t, initial.Height, floating.screen.Frame.Height)
+	require.Equal(t, initialGeometry, floating.popupGeometry)
+
+	require.NoError(t, d.toggleFloating(sess, nil)) // hide
+	require.NoError(t, d.toggleFloating(sess, nil)) // retry show
+	require.Equal(t, []domain.Size{rectSize(current), rectSize(current)}, pty.sizes())
+	require.Equal(t, current, floating.rect)
+	require.Equal(t, current.Width, floating.screen.Frame.Width)
+	require.Equal(t, current.Height, floating.screen.Frame.Height)
+	require.Equal(t, currentGeometry, floating.popupGeometry)
+}
+
+func TestFailedFloatingResizeKeepsCommittedRenderAndInputGeometry(t *testing.T) {
+	cfg := domain.FloatingConfig{Width: 50, Height: 50}
+	oldContent := domain.Rect{Y: 1, Width: 80, Height: 24}
+	newContent := domain.Rect{Y: 1, Width: 100, Height: 40}
+	oldGeometry := calculateFloatingGeometry(oldContent, cfg)
+	newGeometry := calculateFloatingGeometry(newContent, cfg)
+	pty := &resizePTY{err: errors.New("resize failed")}
+	p := newPane("floating", pty, rectSize(oldGeometry.Inner))
+	p.rect = oldGeometry.Inner
+	p.popupGeometry = oldGeometry
+	tb := newTab(nil, domain.Size{Cols: newContent.Width, Rows: newContent.Height})
+	installTestFloating(tb, p, true)
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: cfg})
+
+	require.False(t, d.resizeFloatingPane(p, newGeometry))
+	tb.mu.Lock()
+	_, inputGeometry, visible := tb.visibleFloatingSnapshotLocked(cfg)
+	copyRect := copyTargetRectLocked(tabLayoutSnapshot{}, newContent, p, p, true, cfg)
+	tb.mu.Unlock()
+	require.True(t, visible)
+	require.Equal(t, oldGeometry, inputGeometry)
+	require.Equal(t, oldGeometry.Inner, copyRect)
+
+	base := renderer.NewFrame(newContent.Width, newContent.Height+2)
+	frame, _ := composeFloatingFrame(base, nil, p, 1, newContent, cfg, tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, true)
+	require.Equal(t, '┌', frame.At(oldGeometry.Bounds.X, oldGeometry.Bounds.Y).Rune)
+	if newGeometry.Bounds.X != oldGeometry.Bounds.X || newGeometry.Bounds.Y != oldGeometry.Bounds.Y {
+		require.NotEqual(t, '┌', frame.At(newGeometry.Bounds.X, newGeometry.Bounds.Y).Rune)
+	}
+}
+
+func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
+	t.Run("failure preserves state", func(t *testing.T) {
+		pty := &resizePTY{err: errors.New("nope")}
+		p := newPane("floating", pty, domain.Size{Cols: 5, Rows: 4})
+		p.rect = domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}
+		d := newTestDaemon(t, nil, stubClock{})
+		requested := floatingGeometry{Bounds: domain.Rect{X: 1, Y: 1, Width: 11, Height: 9}, Inner: domain.Rect{X: 2, Y: 2, Width: 9, Height: 7}}
+		require.False(t, d.resizeFloatingPane(p, requested))
+		require.Equal(t, domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}, p.rect)
+		require.Equal(t, floatingGeometry{}, p.popupGeometry)
+		require.Equal(t, 5, p.screen.Frame.Width)
+		require.Equal(t, 4, p.screen.Frame.Height)
+	})
+
+	t.Run("competing resizes serialize", func(t *testing.T) {
+		pty := &resizePTY{entered: make(chan struct{}), release: make(chan struct{})}
+		p := newPane("floating", pty, domain.Size{Cols: 2, Rows: 2})
+		d := newTestDaemon(t, nil, stubClock{})
+		first := floatingGeometry{Bounds: domain.Rect{Width: 6, Height: 5}, Inner: domain.Rect{X: 1, Y: 1, Width: 4, Height: 3}}
+		second := floatingGeometry{Bounds: domain.Rect{Width: 10, Height: 8}, Inner: domain.Rect{X: 1, Y: 1, Width: 8, Height: 6}}
+		done1 := make(chan bool, 1)
+		done2 := make(chan bool, 1)
+		secondStarted := make(chan struct{})
+		go func() { done1 <- d.resizeFloatingPane(p, first) }()
+		<-pty.entered
+		go func() {
+			close(secondStarted)
+			done2 <- d.resizeFloatingPane(p, second)
+		}()
+		<-secondStarted
+		close(pty.release)
+		require.True(t, <-done1)
+		require.True(t, <-done2)
+		require.Equal(t, second.Inner, p.rect)
+		require.Equal(t, second, p.popupGeometry)
+		require.Equal(t, 1, pty.maxConcurrentCalls())
+		require.Equal(t, []domain.Size{{Cols: 4, Rows: 3}, {Cols: 8, Rows: 6}}, pty.sizes())
+	})
+}
+
+type resizePTY struct {
+	mu            sync.Mutex
+	resizes       []domain.Size
+	err           error
+	errs          []error
+	entered       chan struct{}
+	release       chan struct{}
+	activeCalls   int
+	maxConcurrent int
+}
+
+func (p *resizePTY) Resize(sz domain.Size) error {
+	p.mu.Lock()
+	p.resizes = append(p.resizes, sz)
+	p.activeCalls++
+	p.maxConcurrent = max(p.maxConcurrent, p.activeCalls)
+	n := len(p.resizes)
+	err := p.err
+	if n <= len(p.errs) {
+		err = p.errs[n-1]
+	}
+	p.mu.Unlock()
+	if n == 1 && p.entered != nil {
+		close(p.entered)
+		<-p.release
+	}
+	p.mu.Lock()
+	p.activeCalls--
+	p.mu.Unlock()
+	return err
+}
+func (p *resizePTY) maxConcurrentCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.maxConcurrent
+}
+func (p *resizePTY) sizes() []domain.Size {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]domain.Size(nil), p.resizes...)
+}
+func (*resizePTY) Read([]byte) (int, error)     { return 0, io.EOF }
+func (*resizePTY) Write(b []byte) (int, error)  { return len(b), nil }
+func (*resizePTY) Close() error                 { return nil }
+func (*resizePTY) Pid() int                     { return 0 }
+func (*resizePTY) ForegroundPgid() (int, error) { return 0, nil }

@@ -47,6 +47,13 @@ type BarConfig struct {
 	Interval    time.Duration
 }
 
+// FloatingConfig contains launch and sizing settings for per-tab floating panes.
+type FloatingConfig struct {
+	Command string
+	Width   int
+	Height  int
+}
+
 // Config is the user-editable vev configuration after parsing. Unknown binding
 // keys are preserved here (in BindingEntries, in file order) so the usecase
 // layer can decide which actions it understands.
@@ -56,6 +63,7 @@ type Config struct {
 	BindingEntries []ConfigEntry
 	Codes          map[string]string
 	Snapshot       SnapshotConfig
+	Floating       FloatingConfig
 }
 
 // Warning describes a non-fatal config problem. Parsers and reloaders should
@@ -78,6 +86,10 @@ func Defaults() Config {
 		Codes:          map[string]string{},
 		Snapshot: SnapshotConfig{
 			RestoreProcesses: DefaultSnapshotRestoreProcesses(),
+		},
+		Floating: FloatingConfig{
+			Width:  80,
+			Height: 80,
 		},
 	}
 }

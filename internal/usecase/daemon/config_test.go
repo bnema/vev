@@ -49,6 +49,24 @@ func TestApplyConfigHotReloadSwapsBindingsAndCodes(t *testing.T) {
 	require.Equal(t, "NT", cmd.Code)
 }
 
+func TestApplyConfigPublishesImmutableFloatingSnapshot(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	require.Equal(t, domain.Defaults().Floating, d.currentFloatingConfig())
+
+	firstConfig := domain.Defaults()
+	firstConfig.Floating = domain.FloatingConfig{Command: "btop", Width: 70, Height: 60}
+	d.ApplyConfig(firstConfig)
+	first := d.currentFloatingConfig()
+
+	secondConfig := domain.Defaults()
+	secondConfig.Floating = domain.FloatingConfig{Command: "lazygit", Width: 90, Height: 85}
+	d.ApplyConfig(secondConfig)
+	second := d.currentFloatingConfig()
+
+	require.Equal(t, domain.FloatingConfig{Command: "btop", Width: 70, Height: 60}, first)
+	require.Equal(t, domain.FloatingConfig{Command: "lazygit", Width: 90, Height: 85}, second)
+}
+
 func TestApplyConfigSnapshotRestoreProcesses(t *testing.T) {
 	tests := []struct {
 		name  string

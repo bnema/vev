@@ -27,6 +27,8 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	d.bindings.Store(bindings)
 	d.codeOverrides.Store(&overrides)
 	d.restoreProcessAllowlist.Store(&allowlist)
+	floating := cfg.Floating
+	d.floatingConfig.Store(&floating)
 	d.themeMode.Store(uint32(cfg.Theme))
 	if d.barScripts != nil {
 		d.barScripts.mu.Lock()
@@ -176,6 +178,13 @@ func (d *Daemon) logConfigWarning(w domain.Warning) {
 	d.log.Warn("config warning", "msg", w.Msg)
 }
 
+func (d *Daemon) currentFloatingConfig() domain.FloatingConfig {
+	if cfg := d.floatingConfig.Load(); cfg != nil {
+		return *cfg
+	}
+	return domain.Defaults().Floating
+}
+
 func (d *Daemon) codeOverrideSnapshot() map[string]string {
 	overrides := d.codeOverrides.Load()
 	if overrides == nil {
@@ -223,13 +232,21 @@ func (d *Daemon) reapplyThemeAllSessions() {
 	d.mu.Unlock()
 
 	for _, sess := range sessions {
-		sess.mu.Lock()
-		ac := sess.client
-		sess.mu.Unlock()
-		var clientTheme theme.Theme
-		if ac != nil {
-			clientTheme = ac.getClientTheme()
-		}
-		d.applyHostTheme(sess, ac, d.effectiveTheme(clientTheme), ac == nil)
+		d.reapplyThemeSession(sess)
 	}
+}
+
+func (d *Daemon) reapplyThemeSession(sess *session) {
+	sess.mu.Lock()
+	ac := sess.client
+	sess.mu.Unlock()
+	if ac == nil {
+		d.applyHostTheme(sess, nil, d.effectiveTheme(theme.Theme{}), true)
+		return
+	}
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+	sess.themeMu.Lock()
+	defer sess.themeMu.Unlock()
+	d.applyHostThemeLocked(sess, ac, d.effectiveTheme(ac.getClientTheme()), false)
 }

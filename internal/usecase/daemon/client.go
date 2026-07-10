@@ -443,10 +443,12 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 
 	if clientSize.Valid() && wsz != tabSize(clientSize) {
 		d.resize(sess, ac, clientSize)
+		d.activateTab(sess, sess.activeTab())
 		return
 	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
 	d.paint(sess, ac, true)
+	d.activateTab(sess, tb)
 }
 
 // runConnLoop is the per-connection input router: it pumps client messages
@@ -594,6 +596,9 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 		d.applyLayoutLocked(tb)
 		tb.mu.Unlock()
 	}
+	// Only the shown tab's floating terminal tracks the client size. This is
+	// outside tab.mu so its PTY resize cannot block tab state.
+	d.resizeActiveFloating(sess.activeTab())
 	markSnapshotDirty(sess)
 	if ac != nil {
 		d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)

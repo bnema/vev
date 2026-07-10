@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
@@ -60,6 +62,22 @@ func TestAltDigitSwitchesBetweenThreeTabs(t *testing.T) {
 	require.Eventually(t, func() bool { return len(writes3) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, []byte("C"), <-writes3)
 
+	d.mu.Lock()
+	var sess *session
+	for _, candidate := range d.sessions {
+		sess = candidate
+		break
+	}
+	d.mu.Unlock()
+	require.NotNil(t, sess)
+	sess.mu.Lock()
+	tabs := append([]*tab(nil), sess.tabs...)
+	sess.mu.Unlock()
+	require.Len(t, tabs, 3)
+	for _, tb := range tabs {
+		requireFloatingInitialized(t, tb)
+	}
+
 	releaseConn()
 	releasePTY1()
 	releasePTY2()
@@ -77,6 +95,157 @@ func TestAltCForwardsToPTY(t *testing.T) {
 
 	require.Equal(t, []byte("\x1bc"), <-writes)
 	releasePTY()
+}
+
+func requireFloatingInitialized(t *testing.T, tb *tab) {
+	t.Helper()
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	require.NotEqual(t, floatingUninitialized, tb.floating.state)
+}
+
+func installTestFloating(tb *tab, p *pane, visible bool) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	tb.floating.pane = p
+	tb.floating.generation++
+	if visible {
+		tb.floating.state = floatingVisible
+	} else {
+		tb.floating.state = floatingHidden
+	}
+}
+
+func TestFloatingKeyboardRoutesVisibleAndHiddenInput(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		visible bool
+		input   []byte
+	}{
+		{name: "visible ordinary bytes", visible: true, input: []byte("hello")},
+		{name: "visible escape", visible: true, input: []byte("\x1b")},
+		{name: "hidden ordinary bytes", visible: false, input: []byte("hello")},
+		{name: "hidden escape", visible: false, input: []byte("\x1b")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			normalWrites := make(chan []byte, 1)
+			floatingWrites := make(chan []byte, 1)
+			normal, releaseNormal := newBlockingPTYWithWrites(t, normalWrites)
+			floating, releaseFloating := newBlockingPTYWithWrites(t, floatingWrites)
+			defer releaseNormal()
+			defer releaseFloating()
+			d, sess, ac, _ := newManualSessionWithPTYs(t, normal)
+			installTestFloating(sess.activeTab(), newPane("floating", floating, domain.Size{Cols: 20, Rows: 5}), tc.visible)
+
+			daemonKeyHandler{d: d, ac: ac}.Forward(tc.input)
+			if tc.visible {
+				requirePTYWrite(t, floatingWrites, tc.input)
+				requireNoPTYWrite(t, normalWrites)
+			} else {
+				requirePTYWrite(t, normalWrites, tc.input)
+				requireNoPTYWrite(t, floatingWrites)
+			}
+		})
+	}
+}
+
+func TestFloatingBracketedPasteAndGlobalActions(t *testing.T) {
+	normalWrites := make(chan []byte, 1)
+	floatingWrites := make(chan []byte, 1)
+	normal, releaseNormal := newBlockingPTYWithWrites(t, normalWrites)
+	floating, releaseFloating := newBlockingPTYWithWrites(t, floatingWrites)
+	defer releaseNormal()
+	defer releaseFloating()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, normal)
+	installTestFloating(sess.activeTab(), newPane("floating", floating, domain.Size{Cols: 20, Rows: 5}), true)
+
+	paste := []byte("\x1b[200~paste\x1bf\x1b[201~")
+	d.handleInput(sess, ac, paste)
+	requirePTYWrite(t, floatingWrites, paste)
+	d.handleInput(sess, ac, []byte("\x1b "))
+	require.True(t, ac.overlays.paletteActive(), "global palette action must still intercept")
+	requireNoPTYWrite(t, normalWrites)
+}
+
+func TestFloatingStaysTerminalTargetAfterDirectionalFocus(t *testing.T) {
+	writes := make(chan []byte, 1)
+	floatingWrites := make(chan []byte, 1)
+	normal, releaseNormal := newBlockingPTYWithWrites(t, writes)
+	floating, releaseFloating := newBlockingPTYWithWrites(t, floatingWrites)
+	defer releaseNormal()
+	defer releaseFloating()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, normal)
+	tb := sess.activeTab()
+	second := newPane("pane-2", nil, domain.Size{Cols: 40, Rows: 5})
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 81, Rows: 5}
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+	tb.panes["pane-2"] = second
+	tb.mu.Unlock()
+	installTestFloating(tb, newPane("floating", floating, domain.Size{Cols: 20, Rows: 5}), true)
+
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneRight)
+	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
+	daemonKeyHandler{d: d, ac: ac}.Forward([]byte("x"))
+	requirePTYWrite(t, floatingWrites, []byte("x"))
+}
+
+func TestFloatingVisibilityRemainsIndependentAcrossTabSwitches(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+	first := sess.activeTab()
+	second := newTab(nil, first.size)
+	installTestFloating(first, newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), true)
+	installTestFloating(second, newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), false)
+	sess.mu.Lock()
+	sess.tabs = append(sess.tabs, second)
+	sess.mu.Unlock()
+
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab2)
+	second.mu.Lock()
+	require.Equal(t, floatingHidden, second.floating.state)
+	second.mu.Unlock()
+
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab1)
+	first.mu.Lock()
+	require.Equal(t, floatingVisible, first.floating.state)
+	first.mu.Unlock()
+}
+
+func TestFloatingMouseTranslatesSGRToInnerCoordinates(t *testing.T) {
+	normal := portsmocks.NewMockPTY(t)
+	floatingPTY := portsmocks.NewMockPTY(t)
+	floatingPTY.EXPECT().Write([]byte("\x1b[<0;1;1M")).Return(len("\x1b[<0;1;1M"), nil).Once()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, normal)
+	tb := sess.activeTab()
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 100, Rows: 20}
+	tb.mu.Unlock()
+	floating := newPane("floating", floatingPTY, domain.Size{Cols: 78, Rows: 14})
+	floating.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	installTestFloating(tb, floating, true)
+	geometry := calculateFloatingGeometry(domain.Rect{Width: 100, Height: 20}, d.currentFloatingConfig())
+	raw := []byte(fmt.Sprintf("\x1b[<0;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+2))
+
+	d.handleInput(sess, ac, raw)
+}
+
+func TestFloatingMouseIgnoresBorderAndOutside(t *testing.T) {
+	normal := portsmocks.NewMockPTY(t)
+	floatingPTY := portsmocks.NewMockPTY(t)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, normal)
+	tb := sess.activeTab()
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 100, Rows: 20}
+	tb.mu.Unlock()
+	floating := newPane("floating", floatingPTY, domain.Size{Cols: 78, Rows: 14})
+	floating.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	installTestFloating(tb, floating, true)
+	geometry := calculateFloatingGeometry(domain.Rect{Width: 100, Height: 20}, d.currentFloatingConfig())
+
+	border := []byte(fmt.Sprintf("\x1b[<0;%d;%dM", geometry.Bounds.X+1, geometry.Bounds.Y+2))
+	outside := []byte("\x1b[<0;1;2M")
+	d.handleInput(sess, ac, border)
+	d.handleInput(sess, ac, outside)
 }
 
 func TestBracketedMultilinePasteForwardsDelimitersAndNewlines(t *testing.T) {
@@ -193,6 +362,16 @@ func TestOverlayInputPrecedence(t *testing.T) {
 
 			tc.check(t, ac, writes)
 		})
+	}
+}
+
+func requirePTYWrite(t *testing.T, writes chan []byte, want []byte) {
+	t.Helper()
+	select {
+	case got := <-writes:
+		require.Equal(t, want, got)
+	case <-time.After(time.Second):
+		t.Fatalf("PTY did not receive %q", want)
 	}
 }
 

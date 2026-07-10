@@ -7,7 +7,7 @@ import (
 
 func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
 	commands := Registry()
-	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "FSK", "SSP", "VIS", "RNS", "RNT", "DET"}
+	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "FSK", "SSP", "VIS", "RNS", "RNT", "DET"}
 
 	if len(commands) != len(wantCodes) {
 		t.Fatalf("Registry() returned %d commands, want %d", len(commands), len(wantCodes))
@@ -34,6 +34,16 @@ func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
 			t.Errorf("Registry()[%d].Slug = %q, duplicate slug", i, cmd.Slug)
 		}
 		seenSlugs[cmd.Slug] = true
+	}
+}
+
+func TestRegistryIncludesFloatingPaneToggle(t *testing.T) {
+	cmd, ok := ByCode("FLT")
+	if !ok {
+		t.Fatal("ByCode(\"FLT\") ok = false, want true")
+	}
+	if cmd.Slug != "toggle-floating-pane" || cmd.Code != "FLT" || cmd.Name != "Toggle floating pane" {
+		t.Fatalf("floating command = %#v, want toggle-floating-pane/FLT/Toggle floating pane", cmd)
 	}
 }
 
@@ -67,6 +77,7 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 		{code: "SPD", expect: func(ctx *MockContext) { ctx.EXPECT().SplitDown().Return(nil).Once() }},
 		{code: "STP", expect: func(ctx *MockContext) { ctx.EXPECT().StackPane().Return(nil).Once() }},
 		{code: "TST", expect: func(ctx *MockContext) { ctx.EXPECT().ToggleStack().Return(nil).Once() }},
+		{code: "FLT", expect: func(ctx *MockContext) { ctx.EXPECT().ToggleFloatingPane().Return(nil).Once() }},
 		{code: "CLP", expect: func(ctx *MockContext) { ctx.EXPECT().ClosePane().Return(nil).Once() }},
 		{code: "FPL", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneLeft().Return(nil).Once() }},
 		{code: "FPR", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneRight().Return(nil).Once() }},

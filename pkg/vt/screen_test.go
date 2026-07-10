@@ -185,6 +185,70 @@ func TestBELWithoutCallbackIsDiscarded(t *testing.T) {
 	require.Equal(t, "ab", strings.TrimRight(rowString(s.Frame.Row(0)), " "))
 }
 
+func TestTerminalTitleRetainsOSC0AndOSC2(t *testing.T) {
+	tests := []struct {
+		name string
+		seq  string
+		want string
+	}{
+		{name: "OSC 0 BEL terminated", seq: "\x1b]0;zero title\x07", want: "zero title"},
+		{name: "OSC 0 ST terminated", seq: "\x1b]0;zero title\x1b\\", want: "zero title"},
+		{name: "OSC 2 BEL terminated", seq: "\x1b]2;two title\x07", want: "two title"},
+		{name: "OSC 2 ST terminated", seq: "\x1b]2;two title\x1b\\", want: "two title"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewScreen(10, 2)
+			bells := 0
+			s.OnBell = func() { bells++ }
+			s.ClearDamage()
+
+			s.Write([]byte(tt.seq))
+
+			require.Equal(t, tt.want, s.TerminalTitle())
+			require.Equal(t, 0, bells)
+			require.Empty(t, s.Damage())
+			require.Equal(t, strings.Repeat(" ", s.Frame.Width), rowString(s.Frame.Row(0)))
+		})
+	}
+}
+
+func TestTerminalTitleHandlesSplitWritesReplacementAndClear(t *testing.T) {
+	s := NewScreen(10, 2)
+
+	s.Write([]byte("\x1b]0;split"))
+	s.Write([]byte(" title\x1b"))
+	require.Empty(t, s.TerminalTitle())
+	s.Write([]byte("\\"))
+	require.Equal(t, "split title", s.TerminalTitle())
+
+	s.Write([]byte("\x1b]2;replacement\x07"))
+	require.Equal(t, "replacement", s.TerminalTitle())
+
+	s.Write([]byte("\x1b]0;\x07"))
+	require.Empty(t, s.TerminalTitle())
+}
+
+func TestTerminalTitleIgnoresUnrelatedAndOversizedOSC(t *testing.T) {
+	s := NewScreen(10, 2)
+	s.Write([]byte("\x1b]0;retained\x07"))
+
+	for _, seq := range []string{
+		"\x1b]1;icon title\x07",
+		"\x1b]20;not selector two\x1b\\",
+		"\x1b]777;other;x;y\x07",
+	} {
+		s.Write([]byte(seq))
+		require.Equal(t, "retained", s.TerminalTitle())
+	}
+
+	payload := strings.Repeat("x", maxEscapeBufferLen+1)
+	s.Write([]byte("\x1b]2;" + payload))
+	require.Equal(t, "retained", s.TerminalTitle())
+	require.Empty(t, s.escapeBuf)
+}
+
 func TestOnNotifyOSC9(t *testing.T) {
 	s := NewScreen(10, 2)
 	var gotTitle, gotBody string

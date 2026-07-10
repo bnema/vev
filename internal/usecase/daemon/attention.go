@@ -48,6 +48,7 @@ func (d *Daemon) jumpAttention(sess *session, ac *attachedClient) {
 	}
 	if idx, ok := oldestAttentionTab(sess); ok {
 		if sess.switchTab(idx) {
+			d.activateTab(sess, sess.activeTab())
 			d.paint(sess, ac, true)
 		}
 		return

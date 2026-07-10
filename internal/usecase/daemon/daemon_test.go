@@ -105,10 +105,66 @@ func newBlockingPTYWithWrites(t *testing.T, writes chan<- []byte) (*portsmocks.M
 	return p, unblock
 }
 
+// quietPTY is an independently closable PTY for background floating prewarms.
+// It intentionally has no testify expectations: tests using the factories below
+// are asserting their regular panes, not incidental asynchronous prewarms.
+type quietPTY struct{ done chan struct{} }
+
+func newQuietPTY() *quietPTY                  { return &quietPTY{done: make(chan struct{})} }
+func (p *quietPTY) Read([]byte) (int, error)  { <-p.done; return 0, io.EOF }
+func (*quietPTY) Write(b []byte) (int, error) { return len(b), nil }
+func (p *quietPTY) Close() error {
+	select {
+	case <-p.done:
+	default:
+		close(p.done)
+	}
+	return nil
+}
+func (*quietPTY) Resize(domain.Size) error     { return nil }
+func (*quietPTY) Pid() int                     { return 0 }
+func (*quietPTY) ForegroundPgid() (int, error) { return 0, nil }
+
+// blockingOpenFactory keeps activation tests deterministically in Warming
+// without starting pane reader/scheduler goroutines.
+type blockingOpenFactory struct {
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingOpenFactory(t *testing.T, d *Daemon) *blockingOpenFactory {
+	t.Helper()
+	f := &blockingOpenFactory{release: make(chan struct{})}
+	t.Cleanup(func() {
+		f.once.Do(func() { close(f.release) })
+		d.sessWg.Wait()
+	})
+	return f
+}
+
+func (f *blockingOpenFactory) Open(string, []string, []string, string, domain.Size) (ports.PTY, error) {
+	<-f.release
+	return nil, io.ErrClosedPipe
+}
+
+// newFactory keeps the supplied fixture for normal panes. Floating prewarms
+// have a distinct (smaller) geometry and receive independent quiet PTYs, so
+// they cannot consume test output or add post-test mock calls.
 func newFactory(t *testing.T, p ports.PTY) *portsmocks.MockPTYFactory {
 	t.Helper()
 	f := portsmocks.NewMockPTYFactory(t)
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(p, nil).Maybe()
+	var normal domain.Size
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ string, _ []string, _ []string, _ string, sz domain.Size) (ports.PTY, error) {
+			if !normal.Valid() {
+				normal = sz
+			}
+			if sz == normal {
+				return p, nil
+			}
+			return newQuietPTY(), nil
+		},
+	).Maybe()
 	return f
 }
 
@@ -116,13 +172,20 @@ func newFactorySeq(t *testing.T, ptys ...ports.PTY) *portsmocks.MockPTYFactory {
 	t.Helper()
 	f := portsmocks.NewMockPTYFactory(t)
 	var mu sync.Mutex
+	var normal domain.Size
 	next := 0
 	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(string, []string, []string, string, domain.Size) (ports.PTY, error) {
+		func(_ string, _ []string, _ []string, _ string, sz domain.Size) (ports.PTY, error) {
 			mu.Lock()
 			defer mu.Unlock()
+			if !normal.Valid() {
+				normal = sz
+			}
+			if sz != normal {
+				return newQuietPTY(), nil
+			}
 			if next >= len(ptys) {
-				t.Fatalf("unexpected PTY open #%d", next+1)
+				return newQuietPTY(), nil
 			}
 			p := ptys[next]
 			next++

@@ -135,6 +135,7 @@ type Daemon struct {
 	bindings                atomic.Pointer[keys.Bindings]
 	codeOverrides           atomic.Pointer[map[string]string]
 	restoreProcessAllowlist atomic.Pointer[map[string]struct{}]
+	floatingConfig          atomic.Pointer[domain.FloatingConfig]
 	themeMode               atomic.Uint32
 	barScripts              *barScriptState
 	resumeParkGrace         time.Duration
@@ -315,6 +316,8 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 			running:     make(map[domain.SessionID]bool),
 		},
 	}
+	defaultFloating := domain.Defaults().Floating
+	d.floatingConfig.Store(&defaultFloating)
 	for _, o := range opts {
 		o(d)
 	}
