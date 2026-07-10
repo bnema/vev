@@ -796,11 +796,11 @@ func (t *Transport) readLoop(pc net.PacketConn) {
 		payload, complete, err := t.reasm.Add(frag)
 		inflight := t.reasm.Inflight()
 		t.recvMu.Unlock()
+		t.recordFragmentResult(inflight, err == nil)
 		if err != nil {
 			t.notifyMalformedFragment()
 			continue
 		}
-		t.recordAuthenticatedFragment(inflight)
 		if !complete {
 			continue
 		}
@@ -819,10 +819,14 @@ func (t *Transport) notifyMalformedFragment() {
 	}
 }
 
-func (t *Transport) recordAuthenticatedFragment(inflight int) {
+func (t *Transport) recordFragmentResult(inflight int, accepted bool) {
 	t.mu.Lock()
-	t.lastAuthenticatedPacket = t.clock.Now()
 	t.reassemblyInflight = inflight
+	if !accepted {
+		t.mu.Unlock()
+		return
+	}
+	t.lastAuthenticatedPacket = t.clock.Now()
 	after := t.afterAuthenticatedPacket
 	t.mu.Unlock()
 	if after != nil {

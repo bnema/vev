@@ -134,10 +134,13 @@ type fakePC struct {
 	link       *simulatedLink
 }
 
-func newPair() (*fakePC, *fakePC) { return newPairWithLink(nil) }
+func newPair() (*fakePC, *fakePC) { return newPairWithCapacity(nil, 100) }
 
-func newPairWithLink(link *simulatedLink) (*fakePC, *fakePC) {
-	const queuePackets = floodRecordCount * floodRecordMTUs * 2
+func newFloodPair(link *simulatedLink) (*fakePC, *fakePC) {
+	return newPairWithCapacity(link, floodRecordCount*floodRecordMTUs*2)
+}
+
+func newPairWithCapacity(link *simulatedLink, queuePackets int) (*fakePC, *fakePC) {
 	a := &fakePC{addr: testAddr("a"), in: make(chan packet, queuePackets), read: make(chan struct{}, queuePackets), peers: map[string]*fakePC{}, link: link}
 	b := &fakePC{addr: testAddr("b"), in: make(chan packet, queuePackets), read: make(chan struct{}, queuePackets), peers: map[string]*fakePC{}, link: link}
 	a.peers["b"] = b
@@ -240,7 +243,7 @@ func awaitResult[T any](t *testing.T, ch <-chan T, context string) T {
 func TestTransportFloodClassification(t *testing.T) {
 	t.Run("one real fragment per large record loss contacts without completing", func(t *testing.T) {
 		clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
-		aPC, bPC := newPair()
+		aPC, bPC := newFloodPair(nil)
 		inspect, err := pdgram.NewCodec(key())
 		if err != nil {
 			t.Fatal(err)
@@ -290,7 +293,7 @@ func TestTransportFloodClassification(t *testing.T) {
 		clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
 		limit := 2 * 128
 		link := newSimulatedLink(clk, packetPolicy{Delay: time.Second, MaxQueueBytes: limit, BytesPerSecond: 128})
-		aPC, bPC := newPairWithLink(link)
+		aPC, bPC := newFloodPair(link)
 		const mtu = 128
 		a, b := newFloodTransports(t, aPC, bPC, clk, mtu)
 		defer closeFloodTransports(a, b)
@@ -320,7 +323,7 @@ func TestTransportFloodClassification(t *testing.T) {
 
 	t.Run("control stays responsive while fresh output and large retransmits contend", func(t *testing.T) {
 		clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
-		aPC, bPC := newPair()
+		aPC, bPC := newFloodPair(nil)
 		inspect, err := pdgram.NewCodec(key())
 		if err != nil {
 			t.Fatal(err)
@@ -405,8 +408,8 @@ func TestTransportFloodClassification(t *testing.T) {
 		}
 
 		// Fresh, fragmented output records become overdue while their real
-		// cumulative ACKs are lost. Disable only test pacing so the fixture can
-		// isolate resend-loop serialization rather than pacing delay.
+		// cumulative ACKs are lost. Disabling pacing intentionally forces overload
+		// to classify contention; it does not claim production pacing creates it.
 		sendFloodOutputs(t, a, floodRecordCount, 128)
 		awaitSignal(t, clk.timerCreated, "ACK coalescing timer creation")
 		clk.advance(maxACKDelay)
@@ -600,15 +603,29 @@ func TestInconsistentAuthenticatedFragmentDoesNotCountAsContact(t *testing.T) {
 	awaitSignal(t, accepted, "accepted incomplete fragment")
 	b.mu.Lock()
 	lastContact := b.lastAuthenticatedPacket
+	acceptedInflight := b.reassemblyInflight
 	b.mu.Unlock()
+	if acceptedInflight != 1 {
+		t.Fatalf("reassembly inflight after accepted fragment=%d, want 1", acceptedInflight)
+	}
 
 	clk.advance(time.Second)
 	writeFragment(1000, pdgram.Fragment{Seq: 42, Index: 1, Count: 3, Data: []byte("inconsistent")})
 	awaitSignal(t, rejected, "inconsistent fragment rejection")
 	b.mu.Lock()
 	gotContact := b.lastAuthenticatedPacket
+	gotInflight := b.reassemblyInflight
 	b.mu.Unlock()
 	if gotContact != lastContact {
 		t.Fatalf("rejected inconsistent fragment refreshed contact from %v to %v", lastContact, gotContact)
+	}
+	if gotInflight != 0 {
+		t.Fatalf("reassembly inflight after rejected inconsistent fragment=%d, want 0", gotInflight)
+	}
+	b.diagnosticCh = make(chan Diagnostic, 1)
+	b.emitDiagnostic()
+	diagnostic := awaitResult(t, b.diagnosticCh, "diagnostic snapshot after inconsistent fragment")
+	if diagnostic.ReassemblyInflight != 0 {
+		t.Fatalf("diagnostic reassembly inflight after rejected inconsistent fragment=%d, want 0", diagnostic.ReassemblyInflight)
 	}
 }
