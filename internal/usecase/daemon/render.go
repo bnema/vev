@@ -593,6 +593,7 @@ type composedFrameCache struct {
 	floating                *pane
 	floatingFrame           renderer.Frame
 	floatingGeneration      uint64
+	floatingGeometry        floatingGeometry
 	floatingTitleGeneration uint64
 }
 
@@ -600,6 +601,7 @@ func (c *composedFrameCache) invalidate() {
 	c.valid = false
 	c.floating = nil
 	c.floatingGeneration = 0
+	c.floatingGeometry = floatingGeometry{}
 	c.floatingTitleGeneration = 0
 }
 

@@ -92,8 +92,6 @@ func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *
 	(overlayBackdrop{DimPaneContents: true}).apply(frame, content, layoutSnap, theme)
 	desiredGeometry := calculateFloatingGeometry(content, cfg)
 
-	popupChanged := cache == nil || cache.floating != p || cache.floatingGeneration != generation
-
 	// The PTY reader mutates both the frame and its damage under p.mu. Keep
 	// every read of them, including the blit, in the same critical section.
 	// In particular, Frame is not safe to retain as an alias after unlocking.
@@ -110,11 +108,16 @@ func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *
 	p.screen.ClearDamage()
 	p.mu.Unlock()
 
+	// The committed geometry, rather than the requested config geometry, is
+	// what was actually rendered. Track it so movement (including a same-size
+	// resize) cannot reuse a cached popup at its former position.
+	popupChanged := cache == nil || cache.floating != p || cache.floatingGeneration != generation || cache.floatingGeometry != geometry
 	titleChanged := popupChanged || cache == nil || cache.floatingTitleGeneration != titleGeneration
 	drawFloatingBorder(frame, geometry.Bounds, title, newThemeStyles(theme).border)
 	if cache != nil {
 		cache.floating = p
 		cache.floatingGeneration = generation
+		cache.floatingGeometry = geometry
 		cache.floatingTitleGeneration = titleGeneration
 	}
 	if full || popupChanged {
@@ -167,7 +170,13 @@ func (d *Daemon) resizeFloatingPane(p *pane, geometry floatingGeometry) bool {
 	old := p.rect
 	pty := p.pty
 	p.mu.Unlock()
-	if old == inner {
+	if old.Width == inner.Width && old.Height == inner.Height {
+		// Position and outer bounds can change while the terminal dimensions do
+		// not. Commit that geometry without needlessly resetting the PTY/screen.
+		p.mu.Lock()
+		p.rect = inner
+		p.popupGeometry = geometry
+		p.mu.Unlock()
 		return true
 	}
 	if pty != nil {

@@ -81,6 +81,79 @@ func TestComposeFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testing.T) {
 	require.Equal(t, 1, damage[0].Height)
 }
 
+func TestComposeFloatingFrameGeometryChangesInvalidateCache(t *testing.T) {
+	initial := floatingGeometry{
+		Bounds: domain.Rect{X: 4, Y: 2, Width: 8, Height: 5},
+		Inner:  domain.Rect{X: 5, Y: 3, Width: 6, Height: 3},
+	}
+	tests := []struct {
+		name string
+		next floatingGeometry
+	}{
+		{
+			name: "position change",
+			next: floatingGeometry{Bounds: domain.Rect{X: 12, Y: 4, Width: 8, Height: 5}, Inner: domain.Rect{X: 13, Y: 5, Width: 6, Height: 3}},
+		},
+		{
+			name: "bounds change with same inner size",
+			next: floatingGeometry{Bounds: domain.Rect{X: 10, Y: 2, Width: 10, Height: 7}, Inner: domain.Rect{X: 12, Y: 4, Width: 6, Height: 3}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newPane("floating", nil, domain.Size{Cols: 6, Rows: 3})
+			p.rect, p.popupGeometry = initial.Inner, initial
+			cache := &composedFrameCache{}
+			base := renderer.NewFrame(30, 12)
+			content := domain.Rect{Y: 1, Width: 30, Height: 10}
+			_, damage := composeFloatingFrame(base, nil, p, 1, content, domain.FloatingConfig{}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+			require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+
+			p.mu.Lock()
+			p.rect, p.popupGeometry = tt.next.Inner, tt.next
+			p.mu.Unlock()
+			_, damage = composeFloatingFrame(base, nil, p, 1, content, domain.FloatingConfig{}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+			require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+			require.Equal(t, tt.next, cache.floatingGeometry)
+		})
+	}
+}
+
+func TestResizeFloatingPaneCommitsSameSizeGeometryWithoutPTYResize(t *testing.T) {
+	initial := floatingGeometry{
+		Bounds: domain.Rect{X: 1, Y: 1, Width: 8, Height: 5},
+		Inner:  domain.Rect{X: 2, Y: 2, Width: 6, Height: 3},
+	}
+	tests := []struct {
+		name string
+		next floatingGeometry
+	}{
+		{
+			name: "position change",
+			next: floatingGeometry{Bounds: domain.Rect{X: 9, Y: 4, Width: 8, Height: 5}, Inner: domain.Rect{X: 10, Y: 5, Width: 6, Height: 3}},
+		},
+		{
+			name: "bounds change",
+			next: floatingGeometry{Bounds: domain.Rect{X: 3, Y: 1, Width: 10, Height: 7}, Inner: domain.Rect{X: 5, Y: 3, Width: 6, Height: 3}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pty := &resizePTY{}
+			p := newPane("floating", pty, rectSize(initial.Inner))
+			p.rect, p.popupGeometry = initial.Inner, initial
+			d := newTestDaemon(t, nil, stubClock{})
+
+			require.True(t, d.resizeFloatingPane(p, tt.next))
+			require.Empty(t, pty.sizes(), "same-size geometry must not resize the PTY")
+			require.Equal(t, tt.next.Inner, p.rect)
+			require.Equal(t, tt.next, p.popupGeometry)
+			require.Equal(t, 6, p.screen.Frame.Width)
+			require.Equal(t, 3, p.screen.Frame.Height)
+		})
+	}
+}
+
 func TestComposeFloatingFrameRendersPaneOwnedCommandFallback(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	d.shell = "/usr/bin/fish"
@@ -292,6 +365,7 @@ func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 		requested := floatingGeometry{Bounds: domain.Rect{X: 1, Y: 1, Width: 11, Height: 9}, Inner: domain.Rect{X: 2, Y: 2, Width: 9, Height: 7}}
 		require.False(t, d.resizeFloatingPane(p, requested))
 		require.Equal(t, domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}, p.rect)
+		require.Equal(t, floatingGeometry{}, p.popupGeometry)
 		require.Equal(t, 5, p.screen.Frame.Width)
 		require.Equal(t, 4, p.screen.Frame.Height)
 	})
