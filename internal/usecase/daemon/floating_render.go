@@ -1,6 +1,11 @@
 package daemon
 
-import "github.com/bnema/vev/internal/domain"
+import (
+	"github.com/bnema/vev/internal/domain"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"github.com/bnema/vev/internal/usecase/ui"
+	"github.com/bnema/vev/pkg/renderer"
+)
 
 // floatingGeometry describes a popup's outer frame and terminal content area.
 // Bounds and Inner are both relative to the supplied content rectangle.
@@ -36,6 +41,82 @@ func calculateFloatingGeometry(content domain.Rect, cfg domain.FloatingConfig) f
 func floatingBoundsAxis(available, percent int) int {
 	percent = min(max(percent, 1), 100)
 	return min(max(available*percent/100, 1), available)
+}
+
+// composeFloatingFrame applies the popup to a copy of the normal composed
+// destination. In particular it never writes the VT screen frame: that frame
+// is shared with the PTY reader and is the source for future renders.
+func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *pane, generation uint64, content domain.Rect, cfg domain.FloatingConfig, layoutSnap tabLayoutSnapshot, theme themeui.Theme, cache *composedFrameCache, full bool) (renderer.Frame, []renderer.Damage) {
+	var frame renderer.Frame
+	if cache != nil && cache.floatingFrame.Width == base.Width && cache.floatingFrame.Height == base.Height {
+		frame = cache.floatingFrame
+		for y := 0; y < base.Height; y++ {
+			copy(frame.Row(y), base.Row(y))
+		}
+	} else {
+		frame = base.Clone()
+		if cache != nil {
+			cache.floatingFrame = frame
+		}
+	}
+	(overlayBackdrop{DimPaneContents: true}).apply(frame, content, layoutSnap, theme)
+	geometry := calculateFloatingGeometry(content, cfg)
+
+	p.mu.Lock()
+	title := p.displayTitleLocked()
+	titleGeneration := p.title.generation
+	screen := p.screen.Frame
+	screenDamage := p.screen.Damage()
+	p.screen.ClearDamage()
+	p.mu.Unlock()
+
+	popupChanged := cache == nil || cache.floating != p || cache.floatingGeneration != generation
+	titleChanged := popupChanged || cache == nil || cache.floatingTitleGeneration != titleGeneration
+	drawFloatingBorder(frame, geometry.Bounds, title, newThemeStyles(theme).border)
+	blitPaneFrame(frame, geometry.Inner, screen, false, theme)
+	if cache != nil {
+		cache.floating = p
+		cache.floatingGeneration = generation
+		cache.floatingTitleGeneration = titleGeneration
+	}
+	if full || popupChanged {
+		return frame, []renderer.Damage{renderer.FullRedraw()}
+	}
+	damage := append([]renderer.Damage(nil), baseDamage...)
+	for _, d := range screenDamage {
+		damage = append(damage, translatePaneDamage(d, geometry.Inner, content)...)
+	}
+	if titleChanged && geometry.Bounds.Height >= 3 {
+		damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: geometry.Bounds.X, Y: geometry.Bounds.Y, Width: geometry.Bounds.Width, Height: 1})
+	}
+	return frame, damage
+}
+
+func drawFloatingBorder(frame renderer.Frame, bounds domain.Rect, title string, style renderer.Style) {
+	if bounds.Width <= 0 || bounds.Height <= 0 {
+		return
+	}
+	// Each axis omits its borders independently for tiny popups, matching
+	// floatingInnerSize and leaving every cell available to the terminal.
+	if bounds.Height >= 3 {
+		for x := bounds.X; x < bounds.X+bounds.Width; x++ {
+			frame.Set(x, bounds.Y, renderer.Cell{Rune: '─', Style: style})
+			frame.Set(x, bounds.Y+bounds.Height-1, renderer.Cell{Rune: '─', Style: style})
+		}
+	}
+	if bounds.Width >= 3 {
+		for y := bounds.Y; y < bounds.Y+bounds.Height; y++ {
+			frame.Set(bounds.X, y, renderer.Cell{Rune: '│', Style: style})
+			frame.Set(bounds.X+bounds.Width-1, y, renderer.Cell{Rune: '│', Style: style})
+		}
+	}
+	if bounds.Width >= 3 && bounds.Height >= 3 {
+		frame.Set(bounds.X, bounds.Y, renderer.Cell{Rune: '┌', Style: style})
+		frame.Set(bounds.X+bounds.Width-1, bounds.Y, renderer.Cell{Rune: '┐', Style: style})
+		frame.Set(bounds.X, bounds.Y+bounds.Height-1, renderer.Cell{Rune: '└', Style: style})
+		frame.Set(bounds.X+bounds.Width-1, bounds.Y+bounds.Height-1, renderer.Cell{Rune: '┘', Style: style})
+		ui.DrawText(frame, bounds.X+2, bounds.Y, bounds.X+bounds.Width-2, title, style)
+	}
 }
 
 // resizeFloatingPane serializes PTY resizes for a floating pane. PTY.Resize

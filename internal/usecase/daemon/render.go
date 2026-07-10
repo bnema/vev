@@ -257,6 +257,18 @@ func (d *Daemon) render(sess *session, tb *tab, p *pane) {
 		p.mu.Unlock()
 		return
 	}
+	// A retained floating pane continues to drain its PTY while hidden. Do
+	// not let its scheduler repaint the normal tab, but consume its damage so
+	// a long-hidden command cannot retain an unbounded dirty region.
+	tb.mu.Lock()
+	hiddenFloating := tb.floating.pane == p && tb.floating.state != floatingVisible
+	tb.mu.Unlock()
+	if hiddenFloating {
+		p.mu.Lock()
+		p.screen.ClearDamage()
+		p.mu.Unlock()
+		return
+	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), false)
 	d.paint(sess, ac, false)
 }
@@ -318,9 +330,14 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	tb.mu.Lock()
 	layoutSnap := solveTabLayoutLocked(tb)
 	titleIDs := titleBarPaneIDs(layoutSnap.placements, layoutSnap.ok)
+	floating := tb.floating.pane
+	hasFloating := tb.floating.state == floatingVisible && floating != nil
 	tb.mu.Unlock()
 	for _, id := range titleIDs {
 		d.refreshPaneTitle(sess, id)
+	}
+	if hasFloating {
+		d.refreshPaneDisplayTitle(sess, floating, false)
 	}
 
 	tb.mu.Lock()
@@ -333,6 +350,9 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		ac.sendMu.Unlock()
 		return
 	}
+	// Recheck the slot after refreshing its title outside the tab lock.
+	floating = tb.floating.pane
+	hasFloating = tb.floating.state == floatingVisible && floating != nil
 	overlayActive := overlays.copyActive || overlays.copySearchModel != nil || overlays.pickerActive || overlays.paletteActive || overlays.promptActive
 	if reset || overlayActive {
 		ac.bars.Reset()
@@ -351,9 +371,15 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	if overlays.copyActive {
 		frame, damage = composeCopyClientFrame(overlays.copyMode, tb, bars)
 	}
-	if overlays.paletteActive {
-		contentArea := domain.Rect{Y: 1, Width: frame.Width, Height: max(0, frame.Height-2)}
+	contentArea := domain.Rect{Y: 1, Width: frame.Width, Height: max(0, frame.Height-2)}
+	// Palette dimming belongs below both the popup and the palette itself.
+	// The floating backdrop is canonical and deliberately only dims pane
+	// contents, leaving normal chrome and the popup crisp.
+	if overlays.paletteActive && !hasFloating {
 		(overlayBackdrop{DimPaneContents: true}).apply(frame, contentArea, layoutSnap, bars.theme)
+	}
+	if hasFloating {
+		frame, damage = composeFloatingFrame(frame, damage, floating, tb.floating.generation, contentArea, d.currentFloatingConfig(), layoutSnap, bars.theme, &ac.composed, reset || overlayActive)
 	}
 	if overlays.copySearchModel != nil {
 		frame, damage = composeCopySearchClientFrame(overlays.copySearchModel, frame, styles)
@@ -376,10 +402,16 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		frame, damage = composePromptClientFrame(overlays.promptModel, frame, styles)
 	}
 	overlays.Unlock()
+	cursorPane := p
 	cursorContent, cursorVisible := focusedPaneContentRect(layoutSnap, p.id)
-	p.mu.Lock()
-	desiredCursor := desiredCursorOut(p.screen, cursorContent, !cursorVisible || overlays.copyActive || overlays.copySearchModel != nil || overlays.pickerActive || overlays.paletteActive || overlays.promptActive)
-	p.mu.Unlock()
+	if hasFloating {
+		cursorPane = floating
+		geometry := calculateFloatingGeometry(contentArea, d.currentFloatingConfig())
+		cursorContent, cursorVisible = geometry.Inner, geometry.Inner.Width > 0 && geometry.Inner.Height > 0
+	}
+	cursorPane.mu.Lock()
+	desiredCursor := desiredCursorOut(cursorPane.screen, cursorContent, !cursorVisible || overlays.copyActive || overlays.copySearchModel != nil || overlays.pickerActive || overlays.paletteActive || overlays.promptActive)
+	cursorPane.mu.Unlock()
 	ac.sess.mu.Lock()
 	if ac.sess.v != sess {
 		ac.sess.mu.Unlock()
@@ -516,14 +548,21 @@ func (c *barCache) Reset() {
 }
 
 type composedFrameCache struct {
-	frame            renderer.Frame
-	valid            bool
-	layoutSnap       tabLayoutSnapshot
-	titleGenerations map[layout.PaneID]uint64
+	frame                   renderer.Frame
+	valid                   bool
+	layoutSnap              tabLayoutSnapshot
+	titleGenerations        map[layout.PaneID]uint64
+	floating                *pane
+	floatingFrame           renderer.Frame
+	floatingGeneration      uint64
+	floatingTitleGeneration uint64
 }
 
 func (c *composedFrameCache) invalidate() {
 	c.valid = false
+	c.floating = nil
+	c.floatingGeneration = 0
+	c.floatingTitleGeneration = 0
 }
 
 func composeClientFrame(sess *session, tb *tab, full bool, rightStatus string, caches ...*barCache) (renderer.Frame, []renderer.Damage) {

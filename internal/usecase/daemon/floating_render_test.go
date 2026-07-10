@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"github.com/bnema/vev/pkg/renderer"
 )
 
 func TestCalculateFloatingGeometry(t *testing.T) {
@@ -29,6 +32,42 @@ func TestCalculateFloatingGeometry(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.want, calculateFloatingGeometry(tt.content, tt.cfg))
 		})
+	}
+}
+
+func TestComposeFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testing.T) {
+	p := newPane("floating", nil, domain.Size{Cols: 6, Rows: 3})
+	p.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'F'})
+	p.title.processName, p.title.terminalTitle, p.title.generation = "nvim", "project/main.go", 1
+	base := renderer.NewFrame(40, 12)
+	base.Set(2, 2, renderer.Cell{Rune: 'B'})
+	content := domain.Rect{Y: 1, Width: 40, Height: 10}
+	cache := &composedFrameCache{}
+	frame, _ := composeFloatingFrame(base, nil, p, 1, content, domain.FloatingConfig{Width: 80, Height: 80}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	require.Equal(t, 'B', base.At(2, 2).Rune, "backdrop must only touch the composed destination")
+	geometry := calculateFloatingGeometry(content, domain.FloatingConfig{Width: 80, Height: 80})
+	require.Equal(t, '┌', frame.At(geometry.Bounds.X, geometry.Bounds.Y).Rune)
+	require.Equal(t, 'F', frame.At(geometry.Inner.X, geometry.Inner.Y).Rune)
+	var gotTitle strings.Builder
+	for x := geometry.Bounds.X + 2; x < geometry.Bounds.X+geometry.Bounds.Width-2; x++ {
+		gotTitle.WriteRune(frame.At(x, geometry.Bounds.Y).Rune)
+	}
+	require.Equal(t, "nvim: project/main.go", strings.TrimRight(gotTitle.String(), "─"))
+
+	p.mu.Lock()
+	p.title.generation++
+	p.mu.Unlock()
+	_, damage := composeFloatingFrame(base, nil, p, 1, content, domain.FloatingConfig{Width: 80, Height: 80}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	require.Len(t, damage, 1)
+	require.Equal(t, geometry.Bounds.Y, damage[0].Y)
+	require.Equal(t, 1, damage[0].Height)
+}
+
+func TestDrawFloatingBorderOmitsTinyAxes(t *testing.T) {
+	frame := renderer.NewFrame(2, 1)
+	drawFloatingBorder(frame, domain.Rect{Width: 2, Height: 1}, "title", renderer.Style{})
+	for _, cell := range frame.Cells {
+		require.Equal(t, renderer.BlankCell().Rune, cell.Rune)
 	}
 }
 
