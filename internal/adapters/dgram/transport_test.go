@@ -2117,8 +2117,12 @@ func TestLinkHealthHeartbeatControlCannotMaskPendingACKStall(t *testing.T) {
 			t.Fatal(marshalErr)
 		}
 		tr.mu.Lock()
-		pc := tr.pc.(*fakePC)
+		actual := tr.pc
+		pc, ok := actual.(*fakePC)
 		tr.mu.Unlock()
+		if !ok {
+			t.Fatalf("transport packet conn = %T, want *fakePC", actual)
+		}
 		pc.in <- packet{b: codec.Seal(2, counter, raw, nil), addr: testAddr("b")}
 		select {
 		case <-authenticated:

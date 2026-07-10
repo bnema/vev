@@ -35,7 +35,7 @@ func (t *Transport) outputPaceLoop() {
 		copy(t.outputQueue, t.outputQueue[1:])
 		t.outputQueue = t.outputQueue[:len(t.outputQueue)-1]
 		t.mu.Unlock()
-		if err := t.queueDataJob(dataSendJob(q)); err != nil {
+		if err := t.queueDataJob(q); err != nil {
 			t.removeQueuedPending([]queuedSend{q}, err)
 			t.outboundMu.Unlock()
 			return

@@ -22,10 +22,10 @@ type outputStateStream struct {
 	maxOutstanding uint64
 }
 
-func newOutputStateStream(max ...uint8) *outputStateStream {
+func newOutputStateStream(windowSize ...uint8) *outputStateStream {
 	window := uint8(maxUnackedOutputStates)
-	if len(max) > 0 {
-		window = normalizeOutputWindow(max[0])
+	if len(windowSize) > 0 {
+		window = normalizeOutputWindow(windowSize[0])
 	}
 	return &outputStateStream{
 		renderer:       renderer.New(renderer.Capabilities{}),

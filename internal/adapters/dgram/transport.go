@@ -216,6 +216,15 @@ type Transport struct {
 	writeMu sync.Mutex
 	// beforeDataPace is a test synchronization hook. It is read under mu.
 	beforeDataPace func()
+	// afterPacketProcessed is a test synchronization hook called after an
+	// authenticated packet has been fully processed. It is read under mu.
+	afterPacketProcessed func()
+	// afterACKScheduled is a test synchronization hook called after the ACK
+	// scheduler handles a wake. It is read under mu.
+	afterACKScheduled func()
+	// afterACKQueued is a test synchronization hook called after an ACK is
+	// queued. It is read under mu.
+	afterACKQueued func()
 	// outboundMu orders first transmissions and paced batches. Retransmits use
 	// writeMu directly because they do not establish new sequence order.
 	outboundMu sync.Mutex
@@ -774,14 +783,26 @@ func (t *Transport) readLoop(pc net.PacketConn) {
 		}
 		if err != nil {
 			t.notifyMalformedFragment()
+			t.notifyPacketProcessed()
 			continue
 		}
 		if !complete {
+			t.notifyPacketProcessed()
 			continue
 		}
 		t.recordCompleteRecord()
 		t.handleRecord(payload)
 		t.checkSilence()
+		t.notifyPacketProcessed()
+	}
+}
+
+func (t *Transport) notifyPacketProcessed() {
+	t.mu.Lock()
+	afterPacketProcessed := t.afterPacketProcessed
+	t.mu.Unlock()
+	if afterPacketProcessed != nil {
+		afterPacketProcessed()
 	}
 }
 
@@ -1266,13 +1287,17 @@ func (t *Transport) hopPacketConnOnce(generation uint64) {
 	t.hopGeneration = generation
 	t.mu.Unlock()
 	pc, err := rebind(old)
+
+	// Serialize the swap with writes. writePacket takes writeMu before mu, so
+	// preserve that order here while retiring old.
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	t.mu.Lock()
 	if err != nil {
-		t.mu.Lock()
 		t.rollbackHopLocked(generation)
 		t.mu.Unlock()
 		return
 	}
-	t.mu.Lock()
 	if t.closed || t.pc != old || t.health.generation != generation || t.linkState != ports.LinkStateProbing {
 		t.rollbackHopLocked(generation)
 		t.mu.Unlock()

@@ -40,6 +40,12 @@ func (t *Transport) queueACK(seq uint64) {
 	case t.ackWake <- struct{}{}:
 	default:
 	}
+	t.mu.Lock()
+	afterACKQueued := t.afterACKQueued
+	t.mu.Unlock()
+	if afterACKQueued != nil {
+		afterACKQueued()
+	}
 }
 
 // queueControl is deliberately lossy when the bounded control queue is full:
@@ -93,15 +99,20 @@ func (t *Transport) ackScheduleLoop() {
 		}
 	}()
 	scheduleACK := func() {
-		if ackTimerC != nil {
-			return
+		if ackTimerC == nil {
+			if ackTimer == nil {
+				ackTimer = t.clock.NewTimer(maxACKDelay)
+			} else {
+				ackTimer.Reset(maxACKDelay)
+			}
+			ackTimerC = ackTimer.C()
 		}
-		if ackTimer == nil {
-			ackTimer = t.clock.NewTimer(maxACKDelay)
-		} else {
-			ackTimer.Reset(maxACKDelay)
+		t.mu.Lock()
+		afterACKScheduled := t.afterACKScheduled
+		t.mu.Unlock()
+		if afterACKScheduled != nil {
+			afterACKScheduled()
 		}
-		ackTimerC = ackTimer.C()
 	}
 	dispatchACK := func() {
 		seq, ok := t.takeACK()

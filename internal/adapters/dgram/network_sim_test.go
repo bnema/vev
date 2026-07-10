@@ -94,16 +94,20 @@ func (l *simulatedLink) enqueue(p *fakePC, peer *fakePC, b []byte) bool {
 	return true
 }
 
-func (l *simulatedLink) flush(peer *fakePC) {
+func (l *simulatedLink) flush(peer *fakePC) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.clock.Now()
+	delivered := 0
 	for len(l.queue) > 0 && !l.queue[0].due.After(now) {
 		q := l.queue[0]
 		l.queue = l.queue[1:]
 		l.queueBytes -= len(q.b)
-		l.deliverLocked(peer, q.packet)
+		if l.deliverLocked(peer, q.packet) {
+			delivered++
+		}
 	}
+	return delivered
 }
 
 func (l *simulatedLink) queuedBytes() int {
@@ -179,6 +183,7 @@ func (p *fakePC) ReadFrom(b []byte) (int, net.Addr, error) {
 func (p *fakePC) WriteTo(b []byte, addr net.Addr) (int, error) {
 	p.mu.Lock()
 	closed := p.closed
+	afterWrite := p.afterWrite
 	p.mu.Unlock()
 	if closed {
 		return 0, errors.New("closed")
@@ -204,11 +209,29 @@ func (p *fakePC) WriteTo(b []byte, addr net.Addr) (int, error) {
 		}
 		peer.mu.Unlock()
 	}
-	if p.afterWrite != nil {
-		p.afterWrite()
+	if afterWrite != nil {
+		afterWrite()
 	}
 	return len(b), nil
 }
+func (p *fakePC) replaceAfterWrite(afterWrite func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.afterWrite = afterWrite
+}
+
+func (p *fakePC) addAfterWrite(afterWrite func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	previous := p.afterWrite
+	p.afterWrite = func() {
+		if previous != nil {
+			previous()
+		}
+		afterWrite()
+	}
+}
+
 func (p *fakePC) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -253,6 +276,15 @@ func awaitResult[T any](t *testing.T, ch <-chan T, context string) T {
 		var zero T
 		return zero
 	}
+}
+
+func flushAndAwait(t *testing.T, link *simulatedLink, peer *fakePC, processed <-chan struct{}) int {
+	t.Helper()
+	delivered := link.flush(peer)
+	for range delivered {
+		awaitSignal(t, processed, "flushed packet processing")
+	}
+	return delivered
 }
 
 // TestTransportFloodClassification drives authenticated datagrams through real
@@ -356,19 +388,65 @@ func TestTransportFloodClassification(t *testing.T) {
 		defer closeFloodTransports(a, b)
 		waitForManualTimers(t, clk, 6)
 		var contacted atomic.Bool
+		processed := make(chan struct{})
+		primerWritten := make(chan struct{}, 1)
+		primerACKScheduled := make(chan struct{}, 1)
+		primerAcknowledged := make(chan struct{}, 1)
+		ackQueued := make(chan struct{}, 128)
+		ackScheduled := make(chan struct{}, 128)
+		ackWritten := make(chan struct{}, 128)
+		aPC.replaceAfterWrite(func() {
+			select {
+			case primerWritten <- struct{}{}:
+			default:
+			}
+		})
+		bPC.replaceAfterWrite(func() {
+			select {
+			case primerAcknowledged <- struct{}{}:
+			default:
+			}
+			select {
+			case ackWritten <- struct{}{}:
+			default:
+			}
+		})
+		a.mu.Lock()
+		a.afterPacketProcessed = func() { processed <- struct{}{} }
+		a.mu.Unlock()
 		b.mu.Lock()
 		b.afterAuthenticatedPacket = func() { contacted.Store(true) }
+		b.afterPacketProcessed = func() { processed <- struct{}{} }
+		b.afterACKScheduled = func() {
+			select {
+			case primerACKScheduled <- struct{}{}:
+			default:
+			}
+			select {
+			case ackScheduled <- struct{}{}:
+			default:
+			}
+		}
+		b.afterACKQueued = func() { ackQueued <- struct{}{} }
 		b.mu.Unlock()
 		primer := ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("primer")})
 		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: primer}); err != nil {
 			t.Fatal(err)
 		}
+		awaitSignal(t, primerWritten, "primer write")
 		primerDrained := false
+		awaitingPrimerACK := false
 		for range 40 {
 			clk.advance(25 * time.Millisecond)
-			forward.flush(bPC)
-			reverse.flush(aPC)
-			time.Sleep(100 * time.Microsecond)
+			if awaitingPrimerACK {
+				awaitSignal(t, primerAcknowledged, "primer ACK write")
+				awaitingPrimerACK = false
+			}
+			if flushAndAwait(t, forward, bPC, processed) > 0 {
+				awaitSignal(t, primerACKScheduled, "primer ACK scheduling")
+				awaitingPrimerACK = true
+			}
+			flushAndAwait(t, reverse, aPC, processed)
 			a.mu.Lock()
 			primerDrained = len(a.pending) == 0
 			a.mu.Unlock()
@@ -379,9 +457,22 @@ func TestTransportFloodClassification(t *testing.T) {
 		if !primerDrained {
 			t.Fatal("clean RTT primer did not drain")
 		}
+		<-ackQueued
+		<-ackScheduled
 		a.mu.Lock()
 		initialCwnd := a.congestion.cwndBytes
 		a.mu.Unlock()
+		dataPaceStarted := make(chan struct{}, 128)
+		dataWritten := make(chan struct{}, 1)
+		a.mu.Lock()
+		a.beforeDataPace = func() { dataPaceStarted <- struct{}{} }
+		a.mu.Unlock()
+		aPC.addAfterWrite(func() {
+			select {
+			case dataWritten <- struct{}{}:
+			default:
+			}
+		})
 		for state := 1; state < outputCount; state++ {
 			payload := ports.MarshalOutput(ports.Output{
 				BaseStateNum: uint64(state),
@@ -392,8 +483,11 @@ func TestTransportFloodClassification(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		awaitSignal(t, dataPaceStarted, "output pacing")
+		awaitSignal(t, dataWritten, "first paced output write")
 
 		var maxContactAge time.Duration
+		pendingACKWrites := 0
 		lossReducedCwnd := false
 		latestState := uint64(0)
 		probed := false
@@ -401,9 +495,28 @@ func TestTransportFloodClassification(t *testing.T) {
 		probeWho := ""
 		for range 2000 {
 			clk.advance(25 * time.Millisecond)
-			forward.flush(bPC)
-			reverse.flush(aPC)
-			time.Sleep(100 * time.Microsecond)
+			for range pendingACKWrites {
+				awaitSignal(t, ackWritten, "cumulative ACK write")
+			}
+			pendingACKWrites = 0
+			flushAndAwait(t, forward, bPC, processed)
+			for {
+				select {
+				case <-ackQueued:
+					awaitSignal(t, ackScheduled, "cumulative ACK scheduling")
+					pendingACKWrites++
+				default:
+					goto ackRecordsDrained
+				}
+			}
+		ackRecordsDrained:
+			flushAndAwait(t, reverse, aPC, processed)
+			a.mu.Lock()
+			queuedOutput := len(a.outputQueue) > 0
+			a.mu.Unlock()
+			if queuedOutput {
+				awaitSignal(t, dataPaceStarted, "output pacing")
+			}
 
 			if forward.queuedBytes() > queueLimit || reverse.queuedBytes() > queueLimit {
 				t.Fatalf("queue exceeded bound: forward=%d reverse=%d limit=%d", forward.queuedBytes(), reverse.queuedBytes(), queueLimit)
