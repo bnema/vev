@@ -102,13 +102,18 @@ func (c fixedClock) NewTimer(d time.Duration) ports.Timer {
 }
 
 type manualClock struct {
-	mu     sync.Mutex
-	now    time.Time
-	timers map[*manualTimer]struct{}
+	mu           sync.Mutex
+	now          time.Time
+	timers       map[*manualTimer]struct{}
+	timerCreated chan struct{}
 }
 
 func newManualClock(now time.Time) *manualClock {
-	return &manualClock{now: now, timers: make(map[*manualTimer]struct{})}
+	return &manualClock{
+		now:          now,
+		timers:       make(map[*manualTimer]struct{}),
+		timerCreated: make(chan struct{}, 64),
+	}
 }
 
 func (c *manualClock) Now() time.Time {
@@ -122,6 +127,10 @@ func (c *manualClock) NewTimer(d time.Duration) ports.Timer {
 	tm := &manualTimer{clock: c, c: make(chan time.Time, 1), deadline: c.now.Add(d), active: true}
 	c.timers[tm] = struct{}{}
 	c.mu.Unlock()
+	select {
+	case c.timerCreated <- struct{}{}:
+	default:
+	}
 	return tm
 }
 

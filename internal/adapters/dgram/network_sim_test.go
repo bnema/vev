@@ -266,55 +266,116 @@ func TestTransportFloodClassification(t *testing.T) {
 		}
 	})
 
-	t.Run("real cumulative ACK loss schedules duplicate retransmits", func(t *testing.T) {
+	t.Run("large retransmits synchronously delay heartbeat health work", func(t *testing.T) {
 		clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
 		aPC, bPC := newPair()
 		inspect, err := pdgram.NewCodec(key())
 		if err != nil {
 			t.Fatal(err)
 		}
+
+		acksDropped := make(chan struct{}, 2)
 		bPC.drop = func(pkt []byte, _ net.Addr) bool {
 			_, raw, err := inspect.Open(pkt, 2, nil, nil)
 			if err != nil {
 				return false
 			}
 			frag, err := pdgram.UnmarshalFragment(raw)
-			return err == nil && frag.Count == 1 && len(frag.Data) == 9 && frag.Data[0] == recAck
+			if err != nil || frag.Count != 1 || len(frag.Data) != 9 || frag.Data[0] != recAck {
+				return false
+			}
+			acksDropped <- struct{}{}
+			return true
 		}
-		seen := map[uint64]int{}
-		var seenMu sync.Mutex
+
+		retransmitBlocked := make(chan struct{}, 1)
+		releaseRetransmit := make(chan struct{})
+		probeSent := make(chan struct{}, 1)
+		writes := make(map[uint64]int)
+		var writesMu sync.Mutex
 		aPC.drop = func(pkt []byte, _ net.Addr) bool {
 			_, raw, err := inspect.Open(pkt, 1, nil, nil)
-			if err == nil {
-				frag, err := pdgram.UnmarshalFragment(raw)
-				if err == nil && frag.Count == 1 {
-					seq, _, _, ok := decodeData(frag.Data)
-					if ok {
-						seenMu.Lock()
-						seen[seq]++
-						seenMu.Unlock()
-					}
-				}
+			if err != nil {
+				return false
+			}
+			frag, err := pdgram.UnmarshalFragment(raw)
+			if err != nil {
+				return false
+			}
+			if frag.Count == 1 && len(frag.Data) == 9 && frag.Data[0] == recProbe {
+				probeSent <- struct{}{}
+				return false
+			}
+			if frag.Index != 0 {
+				return false
+			}
+			seq, _, _, ok := decodeData(frag.Data)
+			if !ok {
+				return false
+			}
+			writesMu.Lock()
+			writes[seq]++
+			secondWrite := writes[seq] == 2
+			writesMu.Unlock()
+			if secondWrite {
+				retransmitBlocked <- struct{}{}
+				<-releaseRetransmit
 			}
 			return false
 		}
-		a, b := newFloodTransports(t, aPC, bPC, clk, 128)
-		defer closeFloodTransports(a, b)
-		clk.advance(time.Nanosecond)
-		if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("retry")}); err != nil {
+
+		opts := Options{Clock: clk, MTU: 128, ResendAfter: 10 * time.Millisecond, Heartbeat: 11 * time.Millisecond}
+		a, err := NewTransportWithOptions(aPC, bPC.addr, key(), 1, 2, opts)
+		if err != nil {
 			t.Fatal(err)
 		}
-		floodEventually(t, func() bool { return floodState(b).record })
-		waitForManualTimers(t, clk, 4)
+		b, err := NewTransportWithOptions(bPC, aPC.addr, key(), 2, 1, opts)
+		if err != nil {
+			_ = a.Close()
+			t.Fatal(err)
+		}
+		defer closeFloodTransports(a, b)
+		for range 4 { // Both transports install resend and heartbeat timers.
+			<-clk.timerCreated
+		}
+
+		// Two fresh, fragmented output records become overdue while their real
+		// cumulative ACKs are lost. Disable only test pacing so the fixture can
+		// isolate resend-loop serialization rather than pacing delay.
+		a.dataPaceMu.Lock()
+		a.dataPaceRemaining = 100
+		a.dataPaceNext = clk.Now().Add(time.Hour)
+		a.dataPaceMu.Unlock()
+		for range 2 {
+			a.mu.Lock()
+			a.outputNext = time.Time{}
+			a.mu.Unlock()
+			if err := a.Send(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 500)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for range 2 {
+			<-acksDropped
+		}
+
 		clk.advance(10 * time.Millisecond)
-		floodEventually(t, func() bool {
-			seenMu.Lock()
-			defer seenMu.Unlock()
-			return seen[1] >= 2
-		})
-		state := floodState(a)
-		if state.ack || state.retransmits == 0 {
-			t.Fatalf("ack=%v retransmits=%d, want lost ACK and scheduled retry", state.ack, state.retransmits)
+		<-retransmitBlocked // resendPending is synchronously inside writePacket.
+		clk.advance(time.Millisecond)
+		select {
+		case <-probeSent:
+			t.Fatal("heartbeat probe ran while a large retransmission held the resend loop")
+		default:
+		}
+		if got := floodState(a).retransmits; got < 2 {
+			t.Fatalf("retransmits=%d, want both overdue large records selected", got)
+		}
+
+		close(releaseRetransmit)
+		<-probeSent
+		writesMu.Lock()
+		defer writesMu.Unlock()
+		if writes[1] < 2 || writes[2] < 2 {
+			t.Fatalf("writes=%v, want fresh large traffic and retransmissions for both records", writes)
 		}
 	})
 }
