@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,6 +56,7 @@ type simulatedLink struct {
 	queueBytes int
 	next       time.Time
 	dropped    int
+	maxDelay   time.Duration
 }
 
 func newSimulatedLink(clock interface{ Now() time.Time }, policy packetPolicy) *simulatedLink {
@@ -86,6 +88,7 @@ func (l *simulatedLink) enqueue(p *fakePC, peer *fakePC, b []byte) bool {
 		}
 		l.next = due.Add(time.Duration(ns))
 	}
+	l.maxDelay = max(l.maxDelay, due.Sub(meta.At))
 	l.queue = append(l.queue, scheduledPacket{packet: packet{b: append([]byte(nil), b...), addr: p.addr}, due: due})
 	l.queueBytes += len(b)
 	return true
@@ -113,6 +116,12 @@ func (l *simulatedLink) droppedPackets() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.dropped
+}
+
+func (l *simulatedLink) maximumQueueDelay() time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.maxDelay
 }
 
 func (l *simulatedLink) deliverLocked(peer *fakePC, q packet) bool {
@@ -299,14 +308,41 @@ func TestTransportFloodClassification(t *testing.T) {
 
 	t.Run("bounded byte queue advances and releases on fake clock", func(t *testing.T) {
 		clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
-		const mtu = 128
-		limit := dataBurstPackets * mtu
-		link := newSimulatedLink(clk, packetPolicy{Delay: time.Second, MaxQueueBytes: limit, BytesPerSecond: 128})
-		aPC, bPC := newFloodPair(link)
-		bPC.link = nil // ACKs are unconstrained; this case isolates outbound congestion.
+		const (
+			mtu             = 128
+			oneWayDelay     = 50 * time.Millisecond
+			bandwidth       = 16 * mtu
+			queueLimit      = 4 * mtu
+			outputCount     = 3
+			outputDataBytes = 6 * mtu
+		)
+		var attempts, deterministicDrops atomic.Int64
+		forward := newSimulatedLink(clk, packetPolicy{
+			Delay:          oneWayDelay,
+			MaxQueueBytes:  queueLimit,
+			BytesPerSecond: bandwidth,
+			Drop: func(packetMeta) bool {
+				attempt := attempts.Add(1)
+				if attempt%20 != 0 {
+					return false
+				}
+				deterministicDrops.Add(1)
+				return true
+			},
+		})
+		reverse := newSimulatedLink(clk, packetPolicy{
+			Delay:          oneWayDelay,
+			MaxQueueBytes:  queueLimit,
+			BytesPerSecond: 10 * bandwidth,
+		})
+		aPC, bPC := newFloodPair(nil)
+		aPC.link = forward
+		bPC.link = reverse
+		const probeAfter = defaultProbe
 		opts := Options{
-			Clock: clk, MTU: mtu, ResendAfter: time.Hour, Heartbeat: time.Hour,
-			DegradedAfter: time.Hour, ProbeAfter: time.Hour, OfflineAfter: time.Hour, DeadAfter: time.Hour,
+			Clock: clk, MTU: mtu, ResendAfter: 200 * time.Millisecond, MaxResendAfter: 800 * time.Millisecond,
+			Heartbeat: 500 * time.Millisecond, DegradedAfter: defaultDegraded,
+			ProbeAfter: probeAfter, OfflineAfter: defaultOffline, DeadAfter: defaultDead,
 		}
 		a, err := NewTransportWithOptions(aPC, bPC.addr, key(), 1, 2, opts)
 		if err != nil {
@@ -318,71 +354,134 @@ func TestTransportFloodClassification(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer closeFloodTransports(a, b)
-		contacted := make(chan struct{}, 1)
+		waitForManualTimers(t, clk, 6)
+		var contacted atomic.Bool
 		b.mu.Lock()
-		b.afterAuthenticatedPacket = func() {
-			select {
-			case contacted <- struct{}{}:
-			default:
-			}
-		}
+		b.afterAuthenticatedPacket = func() { contacted.Store(true) }
 		b.mu.Unlock()
-		maxFragmentData := mtu - pdgram.HeaderSize - a.codec.Overhead()
-		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 4*maxFragmentData)}); err != nil {
+		primer := ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("primer")})
+		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: primer}); err != nil {
 			t.Fatal(err)
 		}
-		eventually(t, time.Second, func() bool { return link.queuedBytes() == limit })
-		clk.advance(initialPacingRTT)
-		time.Sleep(time.Millisecond)
-		state := floodState(a, b, link)
-		if state.queuedBytes != limit || link.droppedPackets() == 0 {
-			t.Fatalf("flood state = %+v drops=%d, want bounded queue overflow at %d bytes", state, link.droppedPackets(), limit)
-		}
-		clk.advance(time.Second)
-		link.flush(bPC)
-		awaitSignal(t, contacted, "queued authenticated fragment")
-		for link.queuedBytes() > 0 {
-			clk.advance(time.Second)
-			link.flush(bPC)
-		}
-		if age := floodState(a, b, link).packetAge; age >= a.probeAfter {
-			t.Fatalf("authenticated contact age=%v, want below probe threshold %v", age, a.probeAfter)
-		}
-		eventually(t, time.Second, func() bool {
+		primerDrained := false
+		for range 40 {
+			clk.advance(25 * time.Millisecond)
+			forward.flush(bPC)
+			reverse.flush(aPC)
+			time.Sleep(100 * time.Microsecond)
 			a.mu.Lock()
-			defer a.mu.Unlock()
-			p := a.pending[1]
-			return p != nil && !p.initialInFlight && !p.last.IsZero()
-		})
-
-		a.mu.Lock()
-		beforeLoss := a.congestion.cwndBytes
-		a.rto = time.Millisecond
-		a.mu.Unlock()
-		aPC.link = nil // The transient bottleneck clears before the paced retry.
-		clk.advance(2 * time.Millisecond)
-		a.queueRetransmits()
-		eventually(t, time.Second, func() bool {
-			a.mu.Lock()
-			defer a.mu.Unlock()
-			return a.congestion.cwndBytes < beforeLoss
-		})
-		for range 16 {
-			clk.advance(time.Second)
-			link.flush(bPC)
-			clk.advance(maxACKDelay)
-			time.Sleep(time.Millisecond)
-			a.mu.Lock()
-			drained := len(a.pending) == 0
+			primerDrained = len(a.pending) == 0
 			a.mu.Unlock()
-			if drained {
-				return
+			if primerDrained {
+				break
 			}
 		}
+		if !primerDrained {
+			t.Fatal("clean RTT primer did not drain")
+		}
 		a.mu.Lock()
-		pending := a.pending[1]
+		initialCwnd := a.congestion.cwndBytes
 		a.mu.Unlock()
-		t.Fatalf("pending records did not drain after paced retransmission: %+v pending=%+v drops=%d", floodState(a, b, link), pending, link.droppedPackets())
+		for state := 1; state < outputCount; state++ {
+			payload := ports.MarshalOutput(ports.Output{
+				BaseStateNum: uint64(state),
+				NewStateNum:  uint64(state + 1),
+				Data:         bytes.Repeat([]byte{byte(state + 1)}, outputDataBytes),
+			})
+			if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: payload}); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		var maxContactAge time.Duration
+		lossReducedCwnd := false
+		latestState := uint64(0)
+		probed := false
+		var probeAt time.Duration
+		probeWho := ""
+		for range 2000 {
+			clk.advance(25 * time.Millisecond)
+			forward.flush(bPC)
+			reverse.flush(aPC)
+			time.Sleep(100 * time.Microsecond)
+
+			if forward.queuedBytes() > queueLimit || reverse.queuedBytes() > queueLimit {
+				t.Fatalf("queue exceeded bound: forward=%d reverse=%d limit=%d", forward.queuedBytes(), reverse.queuedBytes(), queueLimit)
+			}
+			if contacted.Load() {
+				b.mu.Lock()
+				age := clk.Now().Sub(b.lastAuthenticatedPacket)
+				b.mu.Unlock()
+				maxContactAge = max(maxContactAge, age)
+			}
+			for i, tr := range []*Transport{a, b} {
+				if tr.LinkState() == ports.LinkStateProbing {
+					if !probed {
+						probeAt = clk.Now().Sub(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+						probeWho = []string{"sender", "receiver"}[i]
+					}
+					probed = true
+				}
+				select {
+				case event := <-tr.LinkEvents():
+					if event.State == ports.LinkStateProbing && !probed {
+						probeAt = event.At.Sub(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+						probeWho = []string{"sender", "receiver"}[i]
+					}
+					probed = probed || event.State == ports.LinkStateProbing
+				default:
+				}
+			}
+			for {
+				select {
+				case frame := <-b.in:
+					output, err := ports.UnmarshalOutput(frame.Payload)
+					if err != nil {
+						t.Fatal(err)
+					}
+					latestState = max(latestState, output.NewStateNum)
+				default:
+					goto drainedOutput
+				}
+			}
+		drainedOutput:
+			a.mu.Lock()
+			pending := len(a.pending)
+			lossReducedCwnd = lossReducedCwnd || a.congestion.cwndBytes < initialCwnd
+			a.mu.Unlock()
+			if pending == 0 && latestState == outputCount && forward.queuedBytes() == 0 && reverse.queuedBytes() == 0 {
+				break
+			}
+		}
+
+		a.mu.Lock()
+		pending := len(a.pending)
+		srtt := a.srtt
+		a.mu.Unlock()
+		if got, want := deterministicDrops.Load(), attempts.Load()/20; got == 0 || got != want {
+			t.Fatalf("deterministic loss=%d/%d, want exactly one in twenty attempts (%d)", got, attempts.Load(), want)
+		}
+		if forward.droppedPackets() == 0 {
+			t.Fatal("bounded bandwidth queue never overflowed")
+		}
+		if delay := max(forward.maximumQueueDelay(), reverse.maximumQueueDelay()); delay < 2*oneWayDelay || delay >= probeAfter {
+			t.Fatalf("maximum queue delay=%v, want in [%v,%v)", delay, 2*oneWayDelay, probeAfter)
+		}
+		if srtt < 2*oneWayDelay || srtt >= probeAfter {
+			t.Fatalf("smoothed RTT=%v, want in [%v,%v)", srtt, 2*oneWayDelay, probeAfter)
+		}
+		if !contacted.Load() || maxContactAge >= probeAfter {
+			t.Fatalf("authenticated contact=%v maximum age=%v, want fresh below %v", contacted.Load(), maxContactAge, probeAfter)
+		}
+		if probed {
+			t.Fatalf("healthy lossy transfer entered probing: %s at %v pending=%d latest=%d attempts=%d loss=%d overflow=%d", probeWho, probeAt, pending, latestState, attempts.Load(), deterministicDrops.Load(), forward.droppedPackets())
+		}
+		if !lossReducedCwnd {
+			t.Fatal("deterministic loss did not reduce congestion window")
+		}
+		if pending != 0 || latestState != outputCount {
+			t.Fatalf("convergence pending=%d latest state=%d, want 0 and %d", pending, latestState, outputCount)
+		}
 	})
 
 	t.Run("control stays responsive while fresh output and large retransmits contend", func(t *testing.T) {
