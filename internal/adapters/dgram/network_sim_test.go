@@ -266,7 +266,7 @@ func TestTransportFloodClassification(t *testing.T) {
 		}
 	})
 
-	t.Run("large retransmits synchronously delay heartbeat health work", func(t *testing.T) {
+	t.Run("fresh output and large retransmits synchronously delay heartbeat health work", func(t *testing.T) {
 		clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
 		aPC, bPC := newPair()
 		inspect, err := pdgram.NewCodec(key())
@@ -291,6 +291,9 @@ func TestTransportFloodClassification(t *testing.T) {
 		retransmitBlocked := make(chan struct{}, 1)
 		releaseRetransmit := make(chan struct{})
 		probeSent := make(chan struct{}, 1)
+		freshAtPace := make(chan struct{})
+		allowFreshPace := make(chan struct{})
+		freshReturned := make(chan error, 1)
 		writes := make(map[uint64]int)
 		var writesMu sync.Mutex
 		aPC.drop = func(pkt []byte, _ net.Addr) bool {
@@ -360,22 +363,50 @@ func TestTransportFloodClassification(t *testing.T) {
 
 		clk.advance(10 * time.Millisecond)
 		<-retransmitBlocked // resendPending is synchronously inside writePacket.
-		clk.advance(time.Millisecond)
-		select {
-		case <-probeSent:
-			t.Fatal("heartbeat probe ran while a large retransmission held the resend loop")
-		default:
-		}
 		if got := floodState(a).retransmits; got < 2 {
 			t.Fatalf("retransmits=%d, want both overdue large records selected", got)
 		}
 
+		// Start a third large output at this same fake-clock instant. The pacing
+		// barrier proves its real Send reaches the shared pacing gate while the
+		// retransmit owns it inside WriteTo.
+		a.mu.Lock()
+		a.outputNext = time.Time{}
+		a.beforeDataPace = func() {
+			close(freshAtPace)
+			<-allowFreshPace
+		}
+		a.mu.Unlock()
+		go func() {
+			freshReturned <- a.Send(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 500)})
+		}()
+		<-freshAtPace
+		a.mu.Lock()
+		a.beforeDataPace = nil
+		a.mu.Unlock()
+		close(allowFreshPace)
+		select {
+		case err := <-freshReturned:
+			t.Fatalf("fresh output completed while retransmit held pacing: %v", err)
+		default:
+		}
+
+		clk.advance(time.Millisecond)
+		select {
+		case <-probeSent:
+			t.Fatal("heartbeat probe ran while fresh and retransmitted large output contended")
+		default:
+		}
+
 		close(releaseRetransmit)
+		if err := <-freshReturned; err != nil {
+			t.Fatal(err)
+		}
 		<-probeSent
 		writesMu.Lock()
 		defer writesMu.Unlock()
-		if writes[1] < 2 || writes[2] < 2 {
-			t.Fatalf("writes=%v, want fresh large traffic and retransmissions for both records", writes)
+		if writes[1] < 2 || writes[2] < 2 || writes[3] == 0 {
+			t.Fatalf("writes=%v, want fresh large traffic and retransmissions for both overdue records", writes)
 		}
 	})
 }

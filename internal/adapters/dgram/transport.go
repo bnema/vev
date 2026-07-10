@@ -192,6 +192,8 @@ type Transport struct {
 	dataPaceMu        sync.Mutex
 	dataPaceRemaining int
 	dataPaceNext      time.Time
+	// beforeDataPace is a test synchronization hook. It is read under mu.
+	beforeDataPace func()
 	// outboundMu orders first transmissions and paced batches. Retransmits use
 	// writeMu directly because they do not establish new sequence order.
 	outboundMu sync.Mutex
@@ -562,6 +564,12 @@ func (t *Transport) sendProbe(kind byte, id uint64) error {
 }
 func (t *Transport) sendPayload(p []byte, paced bool, pendingSeq uint64) error {
 	if paced {
+		t.mu.Lock()
+		beforeDataPace := t.beforeDataPace
+		t.mu.Unlock()
+		if beforeDataPace != nil {
+			beforeDataPace()
+		}
 		t.dataPaceMu.Lock()
 		defer t.dataPaceMu.Unlock()
 	}
