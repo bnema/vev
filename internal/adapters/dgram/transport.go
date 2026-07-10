@@ -167,41 +167,47 @@ type Transport struct {
 	// afterHealthDecision is a test synchronization hook. It runs after a health
 	// snapshot is taken and before that decision is conditionally committed.
 	afterHealthDecision func()
-	observe             DiagnosticObserver
-	diagnosticCh        chan Diagnostic
-	heartbeat           time.Duration
-	resendAfter         time.Duration
-	maxResendAfter      time.Duration
-	maxResendPerTick    int
-	srtt                time.Duration
-	rttvar              time.Duration
-	rto                 time.Duration
-	writeTimeout        time.Duration
-	degradedAfter       time.Duration
-	probeAfter          time.Duration
-	offlineAfter        time.Duration
-	deadAfter           time.Duration
-	maxPending          int
-	maxPendingWait      time.Duration
-	maxRecvBuffer       int
-	clock               ports.Clock
-	linkState           ports.LinkState
-	linkEvents          chan ports.LinkEvent
-	probeWait           map[uint64]chan struct{}
-	sendWake            chan struct{}
-	control             chan controlRecord
-	ackWake             chan struct{}
-	ackSend             chan uint64
-	controlMu           sync.Mutex
-	ackSeq              uint64
-	ackQueued           bool
-	rebind              func(net.PacketConn) (net.PacketConn, error)
-	hoppedOffline       bool
-	outputQueue         []queuedSend
-	outputWake          chan struct{}
-	outputNext          time.Time
-	retransmitWork      chan []retransmitRecord
-	writeDeadlines      *writeDeadlineState
+	// afterLinkStateCommit is a test synchronization hook. It runs after state
+	// mutation and before ordered event publication.
+	afterLinkStateCommit func(ports.LinkState)
+	observe              DiagnosticObserver
+	diagnosticCh         chan Diagnostic
+	heartbeat            time.Duration
+	resendAfter          time.Duration
+	maxResendAfter       time.Duration
+	maxResendPerTick     int
+	srtt                 time.Duration
+	rttvar               time.Duration
+	rto                  time.Duration
+	writeTimeout         time.Duration
+	degradedAfter        time.Duration
+	probeAfter           time.Duration
+	offlineAfter         time.Duration
+	deadAfter            time.Duration
+	maxPending           int
+	maxPendingWait       time.Duration
+	maxRecvBuffer        int
+	clock                ports.Clock
+	linkState            ports.LinkState
+	linkStateGeneration  uint64
+	linkEvents           chan ports.LinkEvent
+	linkEventMu          sync.Mutex
+	probeWait            map[uint64]chan struct{}
+	sendWake             chan struct{}
+	control              chan controlRecord
+	ackWake              chan struct{}
+	ackSend              chan uint64
+	controlMu            sync.Mutex
+	ackSeq               uint64
+	ackQueued            bool
+	rebind               func(net.PacketConn) (net.PacketConn, error)
+	hoppedOffline        bool
+	hopGeneration        uint64
+	outputQueue          []queuedSend
+	outputWake           chan struct{}
+	outputNext           time.Time
+	retransmitWork       chan []retransmitRecord
+	writeDeadlines       *writeDeadlineState
 
 	recvMu sync.Mutex
 	replay *pdgram.ReplayWindow
@@ -1189,18 +1195,18 @@ func (t *Transport) hopPacketConnOnce(generation uint64) {
 	old := t.pc
 	rebind := t.rebind
 	t.hoppedOffline = true
+	t.hopGeneration = generation
 	t.mu.Unlock()
 	pc, err := rebind(old)
 	if err != nil {
 		t.mu.Lock()
-		if t.pc == old && t.health.generation == generation && t.linkState == ports.LinkStateProbing {
-			t.hoppedOffline = false
-		}
+		t.rollbackHopLocked(generation)
 		t.mu.Unlock()
 		return
 	}
 	t.mu.Lock()
 	if t.closed || t.pc != old || t.health.generation != generation || t.linkState != ports.LinkStateProbing {
+		t.rollbackHopLocked(generation)
 		t.mu.Unlock()
 		_ = pc.Close()
 		return
@@ -1210,6 +1216,13 @@ func (t *Transport) hopPacketConnOnce(generation uint64) {
 	t.mu.Unlock()
 	go t.readLoop(pc)
 	_ = old.Close()
+}
+
+func (t *Transport) rollbackHopLocked(generation uint64) {
+	if t.hoppedOffline && t.hopGeneration == generation {
+		t.hoppedOffline = false
+		t.hopGeneration = 0
+	}
 }
 
 func (t *Transport) checkSilence() {
@@ -1242,7 +1255,8 @@ func (t *Transport) checkSilence() {
 			t.mu.Unlock()
 			continue
 		}
-		changed := t.setLinkStateLocked(state)
+		changed, stateGeneration := t.setLinkStateLocked(state)
+		afterStateCommit := t.afterLinkStateCommit
 		closed := false
 		if dead {
 			closed = t.closeWithErrorLocked(ErrLinkDead)
@@ -1250,11 +1264,14 @@ func (t *Transport) checkSilence() {
 		t.mu.Unlock()
 
 		if changed {
+			if afterStateCommit != nil {
+				afterStateCommit(state)
+			}
 			var linkErr error
 			if dead {
 				linkErr = ErrLinkDead
 			}
-			t.publishLinkState(state, now, linkErr)
+			t.publishLinkState(state, now, linkErr, stateGeneration)
 		}
 		if closed {
 			t.broadcastClosed()
@@ -1270,20 +1287,26 @@ func (t *Transport) checkSilence() {
 func (t *Transport) setLinkState(state ports.LinkState, err error) {
 	now := t.clock.Now()
 	t.mu.Lock()
-	changed := t.setLinkStateLocked(state)
+	changed, stateGeneration := t.setLinkStateLocked(state)
+	afterStateCommit := t.afterLinkStateCommit
 	t.mu.Unlock()
 	if changed {
-		t.publishLinkState(state, now, err)
+		if afterStateCommit != nil {
+			afterStateCommit(state)
+		}
+		t.publishLinkState(state, now, err, stateGeneration)
 	}
 }
 
-func (t *Transport) setLinkStateLocked(state ports.LinkState) bool {
+func (t *Transport) setLinkStateLocked(state ports.LinkState) (bool, uint64) {
 	if t.linkState == state {
-		return false
+		return false, t.linkStateGeneration
 	}
 	t.linkState = state
+	t.linkStateGeneration++
 	if state == ports.LinkStateConnected {
 		t.hoppedOffline = false
+		t.hopGeneration = 0
 		for _, p := range t.pending {
 			if p != nil {
 				p.attempts = 0
@@ -1291,16 +1314,24 @@ func (t *Transport) setLinkStateLocked(state ports.LinkState) bool {
 		}
 	}
 	t.notifySendWaitersLocked()
-	return true
+	return true, t.linkStateGeneration
 }
 
-func (t *Transport) publishLinkState(state ports.LinkState, now time.Time, err error) {
-	t.emitDiagnostic()
+func (t *Transport) publishLinkState(state ports.LinkState, now time.Time, err error, generation uint64) {
+	t.linkEventMu.Lock()
+	defer t.linkEventMu.Unlock()
+	t.mu.Lock()
+	if t.linkState != state || t.linkStateGeneration != generation {
+		t.mu.Unlock()
+		return
+	}
 	event := ports.LinkEvent{State: state, At: now, Err: err}
 	select {
 	case t.linkEvents <- event:
 	default:
 	}
+	t.mu.Unlock()
+	t.emitDiagnostic()
 }
 
 func (t *Transport) diagnosticLoop() {

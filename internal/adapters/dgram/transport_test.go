@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -2022,6 +2023,138 @@ func TestLinkHealthFreshProgressInvalidatesStaleDecision(t *testing.T) {
 			default:
 			}
 		})
+	}
+}
+
+func TestLinkHealthStaleRebindRestoresFutureHopAllowance(t *testing.T) {
+	aPC, bPC := newPair()
+	clk := newManualClock(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC))
+	rebindStarted := make(chan struct{})
+	resumeRebind := make(chan struct{})
+	var rebinds atomic.Int32
+	tr, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{
+		Clock: clk, ResendAfter: time.Hour, Heartbeat: time.Hour,
+		RebindPacketConn: func(net.PacketConn) (net.PacketConn, error) {
+			attempt := rebinds.Add(1)
+			pc := &fakePC{addr: testAddr(fmt.Sprintf("a%d", attempt+1)), in: make(chan packet, 100), peers: map[string]*fakePC{"b": bPC}}
+			if attempt == 1 {
+				close(rebindStarted)
+				<-resumeRebind
+			}
+			return pc, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tr.Close() }()
+	defer func() { _ = bPC.Close() }()
+
+	tr.mu.Lock()
+	staleAt := clk.Now().Add(-20 * time.Second)
+	tr.health = healthTracker{lastPacket: staleAt, lastRecord: staleAt, lastProgress: staleAt}
+	tr.mu.Unlock()
+	firstDone := make(chan struct{})
+	go func() {
+		tr.checkSilence()
+		close(firstDone)
+	}()
+	select {
+	case <-rebindStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first rebind did not start")
+	}
+
+	tr.mu.Lock()
+	now := clk.Now()
+	tr.health.authenticatedPacket(now)
+	tr.lastAuthenticatedPacket = now
+	tr.mu.Unlock()
+	close(resumeRebind)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("stale rebind did not finish")
+	}
+	tr.mu.Lock()
+	latched := tr.hoppedOffline
+	pcAfterStale := tr.pc
+	tr.mu.Unlock()
+	if latched {
+		t.Fatal("stale rebind consumed the future hop allowance")
+	}
+	if pcAfterStale != aPC {
+		t.Fatal("stale rebind replaced the active packet conn")
+	}
+
+	clk.advance(20 * time.Second)
+	tr.checkSilence()
+	tr.mu.Lock()
+	pcAfterRetry := tr.pc
+	tr.mu.Unlock()
+	if got := rebinds.Load(); got != 2 {
+		t.Fatalf("rebind attempts=%d, want a later eligible retry", got)
+	}
+	if pcAfterRetry == aPC {
+		t.Fatal("later stale interval did not hop the packet conn")
+	}
+}
+
+func TestLinkHealthStateEventsCannotPublishAfterNewerRecovery(t *testing.T) {
+	aPC, bPC := newPair()
+	tr, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{ResendAfter: time.Hour, Heartbeat: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tr.Close() }()
+	defer func() { _ = bPC.Close() }()
+
+	probingCommitted := make(chan struct{})
+	resumeProbing := make(chan struct{})
+	tr.mu.Lock()
+	tr.linkState = ports.LinkStateDegraded
+	tr.afterLinkStateCommit = func(state ports.LinkState) {
+		if state != ports.LinkStateProbing {
+			return
+		}
+		close(probingCommitted)
+		<-resumeProbing
+	}
+	tr.mu.Unlock()
+
+	probingDone := make(chan struct{})
+	go func() {
+		tr.setLinkState(ports.LinkStateProbing, nil)
+		close(probingDone)
+	}()
+	select {
+	case <-probingCommitted:
+	case <-time.After(time.Second):
+		t.Fatal("probing commit hook was not reached")
+	}
+	tr.setLinkState(ports.LinkStateConnected, nil)
+	close(resumeProbing)
+	select {
+	case <-probingDone:
+	case <-time.After(time.Second):
+		t.Fatal("probing publisher did not finish")
+	}
+
+	if got := tr.LinkState(); got != ports.LinkStateConnected {
+		t.Fatalf("state=%v, want connected", got)
+	}
+	select {
+	case ev := <-tr.LinkEvents():
+		if ev.State != ports.LinkStateConnected {
+			t.Fatalf("first event=%v, want connected", ev.State)
+		}
+	default:
+		t.Fatal("missing connected recovery event")
+	}
+	select {
+	case ev := <-tr.LinkEvents():
+		t.Fatalf("stale event published after recovery: %v", ev.State)
+	default:
 	}
 }
 
