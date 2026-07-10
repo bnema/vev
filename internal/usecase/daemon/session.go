@@ -75,7 +75,7 @@ type session struct {
 
 // tab is a pane layout container; pane owns PTY/screen/scrollback/render scheduling state.
 type tab struct {
-	mu sync.Mutex // guards tree, panes, nextPaneID, size, previewClient, and pane map membership
+	mu sync.Mutex // guards tree, panes, floating, nextPaneID, size, previewClient, and pane map membership
 
 	stableID   string
 	name       string
@@ -638,6 +638,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	if tb.cancel != nil {
 		tb.cancel()
 	}
+	d.teardownFloating(tb, ac)
 	tb.closeAllPanes()
 	if wasActive {
 		d.activateTab(sess, destination)
@@ -741,6 +742,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	sess.mu.Unlock()
 	for _, tb := range tabs {
 		d.clearDestroyedTabPreview(tb)
+		d.teardownFloating(tb, ac)
 		tb.closeAllPanes()
 	}
 	for _, path := range clipFiles {

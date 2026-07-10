@@ -16,9 +16,34 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
+
+type gatedFloatingOpen struct {
+	command string
+	args    []string
+	dir     string
+	size    domain.Size
+}
+
+func newGatedOpenFactory(t *testing.T, result ports.PTY, openErr error) (*portsmocks.MockPTYFactory, <-chan gatedFloatingOpen, func()) {
+	t.Helper()
+	factory := portsmocks.NewMockPTYFactory(t)
+	opened := make(chan gatedFloatingOpen, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseOpen := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseOpen)
+	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(command string, args, _ []string, dir string, size domain.Size) (ports.PTY, error) {
+			opened <- gatedFloatingOpen{command: command, args: append([]string(nil), args...), dir: dir, size: size}
+			<-release
+			return result, openErr
+		}).Once()
+	return factory, opened, releaseOpen
+}
 
 func TestFloatingSlotTransitions(t *testing.T) {
 	first := &pane{}
@@ -116,19 +141,7 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 		return 0, context.Canceled
 	}).Once()
 	pty.EXPECT().Close().RunAndReturn(func() error { unblock(); return nil }).Once()
-	factory := portsmocks.NewMockPTYFactory(t)
-	opened := make(chan struct{})
-	allowOpen := make(chan struct{})
-	var gotCommand, gotDir string
-	var gotArgs []string
-	var gotSize domain.Size
-	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(command string, args, _ []string, dir string, size domain.Size) (ports.PTY, error) {
-			gotCommand, gotArgs, gotDir, gotSize = command, append([]string(nil), args...), dir, size
-			close(opened)
-			<-allowOpen
-			return pty, nil
-		}).Once()
+	factory, opened, allowOpen := newGatedOpenFactory(t, pty, nil)
 	d := newTestDaemon(t, factory, stubClock{})
 	d.shell = "/bin/custom-shell"
 	cwd := t.TempDir()
@@ -140,14 +153,15 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 	// Open has started while this goroutine owns tab.mu: an external factory
 	// call under that lock would deadlock this channel-controlled test.
 	tb.mu.Lock()
+	var openCall gatedFloatingOpen
 	select {
-	case <-opened:
+	case openCall = <-opened:
 	case <-time.After(time.Second):
 		t.Fatal("floating Open waited for tab.mu")
 	}
 	tb.mu.Unlock()
 	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark, Floating: domain.FloatingConfig{Command: "later", Width: 90, Height: 90}})
-	close(allowOpen)
+	allowOpen()
 	select {
 	case <-readerStarted: // install started exactly one reader after the async Open
 	case <-time.After(time.Second):
@@ -159,11 +173,11 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 	require.NotNil(t, floating)
 	assertPaneDefaultColors(t, floating, themeui.BuiltinDark.Foreground, themeui.BuiltinDark.Background)
 	assertPaneColorScheme(t, floating, false)
-	require.Equal(t, "/bin/custom-shell", gotCommand)
-	require.Equal(t, []string{"-lc", "btop --utf"}, gotArgs)
-	require.Equal(t, cwd, gotDir)
-	require.Equal(t, domain.Size{Cols: 48, Rows: 18}, gotSize)
-	d.teardownFloating(tb)
+	require.Equal(t, "/bin/custom-shell", openCall.command)
+	require.Equal(t, []string{"-lc", "btop --utf"}, openCall.args)
+	require.Equal(t, cwd, openCall.dir)
+	require.Equal(t, domain.Size{Cols: 48, Rows: 18}, openCall.size)
+	d.teardownFloating(tb, nil)
 	unblock()
 	d.sessWg.Wait()
 }
@@ -185,15 +199,7 @@ func TestFloatingLaunchOwnershipJoinsShutdown(t *testing.T) {
 		releaseReader()
 		return nil
 	}).Once()
-	factory := portsmocks.NewMockPTYFactory(t)
-	opened := make(chan struct{})
-	releaseOpen := make(chan struct{})
-	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(string, []string, []string, string, domain.Size) (ports.PTY, error) {
-			close(opened)
-			<-releaseOpen
-			return floatingPTY, nil
-		}).Once()
+	factory, opened, releaseOpen := newGatedOpenFactory(t, floatingPTY, nil)
 	d := newTestDaemon(t, factory, stubClock{})
 	tb := newFloatingTestTab(t)
 	sessCtx, cancel := context.WithCancel(t.Context())
@@ -221,7 +227,7 @@ func TestFloatingLaunchOwnershipJoinsShutdown(t *testing.T) {
 		launchUnaccounted = true
 	case <-time.After(time.Second):
 	}
-	close(releaseOpen)
+	releaseOpen()
 	select {
 	case <-readerStarted:
 	case <-time.After(time.Second):
@@ -245,22 +251,14 @@ func TestFloatingLifecycleStaleSuccessAndOldExitCannotReplaceCurrentSlot(t *test
 	pty := portsmocks.NewMockPTY(t)
 	closed := make(chan struct{})
 	pty.EXPECT().Close().RunAndReturn(func() error { close(closed); return nil }).Once()
-	factory := portsmocks.NewMockPTYFactory(t)
-	opened := make(chan struct{})
-	allowOpen := make(chan struct{})
-	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(string, []string, []string, string, domain.Size) (ports.PTY, error) {
-			close(opened)
-			<-allowOpen
-			return pty, nil
-		}).Once()
+	factory, opened, allowOpen := newGatedOpenFactory(t, pty, nil)
 	d := newTestDaemon(t, factory, stubClock{})
 	tb := newFloatingTestTab(t)
 	sess := &session{name: "work", tabs: []*tab{tb}, ctx: t.Context()}
 	d.ensureFloatingWarm(sess, tb)
 	<-opened
-	d.teardownFloating(tb) // invalidate before the delayed Open returns
-	close(allowOpen)
+	d.teardownFloating(tb, nil) // invalidate before the delayed Open returns
+	allowOpen()
 	select {
 	case <-closed:
 	case <-time.After(time.Second):
@@ -294,7 +292,7 @@ func TestFloatingReapAndTeardownCloseMatchingPaneOnce(t *testing.T) {
 	tb.mu.Unlock()
 	d := newTestDaemon(t, nil, stubClock{})
 	d.reapFloating(&session{}, tb, p, g)
-	d.teardownFloating(tb)
+	d.teardownFloating(tb, nil)
 	pty.AssertNumberOfCalls(t, "Close", 1)
 }
 
@@ -307,9 +305,33 @@ func TestFloatingTeardownClosesInstalledPaneOnce(t *testing.T) {
 	require.True(t, tb.installFloatingLocked(p, g))
 	tb.mu.Unlock()
 	d := newTestDaemon(t, nil, stubClock{})
-	d.teardownFloating(tb)
-	d.teardownFloating(tb)
+	d.teardownFloating(tb, nil)
+	d.teardownFloating(tb, nil)
 	pty.AssertNumberOfCalls(t, "Close", 1)
+}
+
+func TestFloatingTeardownClearsCapturedCopyMode(t *testing.T) {
+	pty, _ := newBlockingPTY(t)
+	tb := newFloatingTestTab(t)
+	p := newPane(layout.PaneID("floating"), pty, domain.Size{Cols: 10, Rows: 10})
+	tb.mu.Lock()
+	generation := tb.beginFloatingWarmLocked(true)
+	require.True(t, tb.installFloatingLocked(p, generation))
+	tb.mu.Unlock()
+	ac := &attachedClient{}
+	ac.initOverlays()
+	ac.overlays.copyMu.Lock()
+	ac.overlays.copyMode = &scopy.Mode{}
+	ac.overlays.copyPane = p
+	ac.overlays.copyMu.Unlock()
+	d := newTestDaemon(t, nil, stubClock{})
+
+	d.teardownFloating(tb, ac)
+
+	require.False(t, ac.overlays.copyActive())
+	ac.overlays.copyMu.Lock()
+	require.Nil(t, ac.overlays.copyPane)
+	ac.overlays.copyMu.Unlock()
 }
 
 func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
@@ -486,15 +508,7 @@ func (h floatingLogHandler) Handle(ctx context.Context, r slog.Record) error {
 }
 
 func TestFloatingLaunchFailureCapturesSessionNameBeforeConcurrentRename(t *testing.T) {
-	factory := portsmocks.NewMockPTYFactory(t)
-	opened := make(chan struct{})
-	release := make(chan struct{})
-	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(string, []string, []string, string, domain.Size) (ports.PTY, error) {
-			close(opened)
-			<-release
-			return nil, io.ErrUnexpectedEOF
-		}).Once()
+	factory, opened, release := newGatedOpenFactory(t, nil, io.ErrUnexpectedEOF)
 	var logs bytes.Buffer
 	handled := make(chan struct{})
 	d := newTestDaemon(t, factory, stubClock{})
@@ -518,7 +532,7 @@ func TestFloatingLaunchFailureCapturesSessionNameBeforeConcurrentRename(t *testi
 			sess.mu.Unlock()
 		}
 	}()
-	close(release)
+	release()
 	select {
 	case <-handled:
 	case <-time.After(time.Second):
@@ -532,15 +546,7 @@ func TestFloatingLaunchFailureCapturesSessionNameBeforeConcurrentRename(t *testi
 
 func TestFloatingInstallLogsSessionNameSafelyDuringRename(t *testing.T) {
 	floatingPTY, _ := newBlockingPTY(t)
-	factory := portsmocks.NewMockPTYFactory(t)
-	opened := make(chan struct{})
-	allowOpen := make(chan struct{})
-	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(string, []string, []string, string, domain.Size) (ports.PTY, error) {
-			close(opened)
-			<-allowOpen
-			return floatingPTY, nil
-		}).Once()
+	factory, opened, allowOpen := newGatedOpenFactory(t, floatingPTY, nil)
 	var logs bytes.Buffer
 	handled := make(chan struct{})
 	d := newTestDaemon(t, factory, stubClock{})
@@ -571,7 +577,7 @@ func TestFloatingInstallLogsSessionNameSafelyDuringRename(t *testing.T) {
 		}
 	}()
 	<-renamed
-	close(allowOpen)
+	allowOpen()
 	select {
 	case <-handled:
 	case <-time.After(time.Second):
@@ -581,7 +587,7 @@ func TestFloatingInstallLogsSessionNameSafelyDuringRename(t *testing.T) {
 	<-renameDone
 	require.Contains(t, logs.String(), "session=renamed", logs.String())
 
-	d.teardownFloating(tb)
+	d.teardownFloating(tb, nil)
 	d.sessWg.Wait()
 }
 

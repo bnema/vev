@@ -373,13 +373,16 @@ func (d *Daemon) reapFloating(sess *session, tb *tab, p *pane, generation uint64
 }
 
 // teardownFloating invalidates first, then releases resources outside tb.mu.
-func (d *Daemon) teardownFloating(tb *tab) {
+func (d *Daemon) teardownFloating(tb *tab, ac *attachedClient) {
 	if tb == nil {
 		return
 	}
 	tb.mu.Lock()
 	p := tb.takeFloatingLocked()
 	tb.mu.Unlock()
+	if ac != nil {
+		ac.overlays.clearCopyModeForPane(p)
+	}
 	closeFloatingPane(p)
 }
 
