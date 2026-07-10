@@ -6,7 +6,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -214,11 +213,14 @@ func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {
 	tb := newTab(nil, domain.Size{Cols: 80, Rows: 24})
 	sess := &session{tabs: []*tab{tb}}
 
-	initial := calculateFloatingGeometry(domain.Rect{Width: 80, Height: 24}, d.currentFloatingConfig()).Inner
-	current := calculateFloatingGeometry(domain.Rect{Width: 100, Height: 40}, d.currentFloatingConfig()).Inner
+	initialGeometry := calculateFloatingGeometry(domain.Rect{Width: 80, Height: 24}, d.currentFloatingConfig())
+	currentGeometry := calculateFloatingGeometry(domain.Rect{Width: 100, Height: 40}, d.currentFloatingConfig())
+	initial := initialGeometry.Inner
+	current := currentGeometry.Inner
 	pty := &resizePTY{errs: []error{errors.New("first show fails"), nil}}
 	floating := newPane("floating", pty, rectSize(initial))
 	floating.rect = initial
+	floating.popupGeometry = initialGeometry
 
 	// Prewarming installs a hidden pane at the initial geometry.
 	tb.mu.Lock()
@@ -238,6 +240,7 @@ func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {
 	require.Equal(t, initial, floating.rect)
 	require.Equal(t, initial.Width, floating.screen.Frame.Width)
 	require.Equal(t, initial.Height, floating.screen.Frame.Height)
+	require.Equal(t, initialGeometry, floating.popupGeometry)
 
 	require.NoError(t, d.toggleFloating(sess, nil)) // hide
 	require.NoError(t, d.toggleFloating(sess, nil)) // retry show
@@ -245,6 +248,39 @@ func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {
 	require.Equal(t, current, floating.rect)
 	require.Equal(t, current.Width, floating.screen.Frame.Width)
 	require.Equal(t, current.Height, floating.screen.Frame.Height)
+	require.Equal(t, currentGeometry, floating.popupGeometry)
+}
+
+func TestFailedFloatingResizeKeepsCommittedRenderAndInputGeometry(t *testing.T) {
+	cfg := domain.FloatingConfig{Width: 50, Height: 50}
+	oldContent := domain.Rect{Y: 1, Width: 80, Height: 24}
+	newContent := domain.Rect{Y: 1, Width: 100, Height: 40}
+	oldGeometry := calculateFloatingGeometry(oldContent, cfg)
+	newGeometry := calculateFloatingGeometry(newContent, cfg)
+	pty := &resizePTY{err: errors.New("resize failed")}
+	p := newPane("floating", pty, rectSize(oldGeometry.Inner))
+	p.rect = oldGeometry.Inner
+	p.popupGeometry = oldGeometry
+	tb := newTab(nil, domain.Size{Cols: newContent.Width, Rows: newContent.Height})
+	installTestFloating(tb, p, true)
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: cfg})
+
+	require.False(t, d.resizeFloatingPane(p, newGeometry))
+	tb.mu.Lock()
+	_, inputGeometry, visible := tb.visibleFloatingSnapshotLocked(cfg)
+	copyRect := copyTargetRectLocked(tabLayoutSnapshot{}, newContent, p, p, true, cfg)
+	tb.mu.Unlock()
+	require.True(t, visible)
+	require.Equal(t, oldGeometry, inputGeometry)
+	require.Equal(t, oldGeometry.Inner, copyRect)
+
+	base := renderer.NewFrame(newContent.Width, newContent.Height+2)
+	frame, _ := composeFloatingFrame(base, nil, p, 1, newContent, cfg, tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, true)
+	require.Equal(t, '┌', frame.At(oldGeometry.Bounds.X, oldGeometry.Bounds.Y).Rune)
+	if newGeometry.Bounds.X != oldGeometry.Bounds.X || newGeometry.Bounds.Y != oldGeometry.Bounds.Y {
+		require.NotEqual(t, '┌', frame.At(newGeometry.Bounds.X, newGeometry.Bounds.Y).Rune)
+	}
 }
 
 func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
@@ -253,7 +289,8 @@ func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 		p := newPane("floating", pty, domain.Size{Cols: 5, Rows: 4})
 		p.rect = domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}
 		d := newTestDaemon(t, nil, stubClock{})
-		require.False(t, d.resizeFloatingPane(p, domain.Rect{X: 2, Y: 2, Width: 9, Height: 7}))
+		requested := floatingGeometry{Bounds: domain.Rect{X: 1, Y: 1, Width: 11, Height: 9}, Inner: domain.Rect{X: 2, Y: 2, Width: 9, Height: 7}}
+		require.False(t, d.resizeFloatingPane(p, requested))
 		require.Equal(t, domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}, p.rect)
 		require.Equal(t, 5, p.screen.Frame.Width)
 		require.Equal(t, 4, p.screen.Frame.Height)
@@ -263,34 +300,44 @@ func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 		pty := &resizePTY{entered: make(chan struct{}), release: make(chan struct{})}
 		p := newPane("floating", pty, domain.Size{Cols: 2, Rows: 2})
 		d := newTestDaemon(t, nil, stubClock{})
-		first := domain.Rect{Width: 4, Height: 3}
-		second := domain.Rect{Width: 8, Height: 6}
+		first := floatingGeometry{Bounds: domain.Rect{Width: 6, Height: 5}, Inner: domain.Rect{X: 1, Y: 1, Width: 4, Height: 3}}
+		second := floatingGeometry{Bounds: domain.Rect{Width: 10, Height: 8}, Inner: domain.Rect{X: 1, Y: 1, Width: 8, Height: 6}}
 		done1 := make(chan bool, 1)
 		done2 := make(chan bool, 1)
+		secondStarted := make(chan struct{})
 		go func() { done1 <- d.resizeFloatingPane(p, first) }()
 		<-pty.entered
-		go func() { done2 <- d.resizeFloatingPane(p, second) }()
-		require.Never(t, func() bool { return pty.calls() > 1 }, 30*time.Millisecond, time.Millisecond)
+		go func() {
+			close(secondStarted)
+			done2 <- d.resizeFloatingPane(p, second)
+		}()
+		<-secondStarted
 		close(pty.release)
 		require.True(t, <-done1)
 		require.True(t, <-done2)
-		require.Equal(t, second, p.rect)
+		require.Equal(t, second.Inner, p.rect)
+		require.Equal(t, second, p.popupGeometry)
+		require.Equal(t, 1, pty.maxConcurrentCalls())
 		require.Equal(t, []domain.Size{{Cols: 4, Rows: 3}, {Cols: 8, Rows: 6}}, pty.sizes())
 	})
 }
 
 type resizePTY struct {
-	mu      sync.Mutex
-	resizes []domain.Size
-	err     error
-	errs    []error
-	entered chan struct{}
-	release chan struct{}
+	mu            sync.Mutex
+	resizes       []domain.Size
+	err           error
+	errs          []error
+	entered       chan struct{}
+	release       chan struct{}
+	activeCalls   int
+	maxConcurrent int
 }
 
 func (p *resizePTY) Resize(sz domain.Size) error {
 	p.mu.Lock()
 	p.resizes = append(p.resizes, sz)
+	p.activeCalls++
+	p.maxConcurrent = max(p.maxConcurrent, p.activeCalls)
 	n := len(p.resizes)
 	err := p.err
 	if n <= len(p.errs) {
@@ -301,9 +348,16 @@ func (p *resizePTY) Resize(sz domain.Size) error {
 		close(p.entered)
 		<-p.release
 	}
+	p.mu.Lock()
+	p.activeCalls--
+	p.mu.Unlock()
 	return err
 }
-func (p *resizePTY) calls() int { p.mu.Lock(); defer p.mu.Unlock(); return len(p.resizes) }
+func (p *resizePTY) maxConcurrentCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.maxConcurrent
+}
 func (p *resizePTY) sizes() []domain.Size {
 	p.mu.Lock()
 	defer p.mu.Unlock()

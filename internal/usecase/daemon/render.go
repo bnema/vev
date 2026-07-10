@@ -283,7 +283,11 @@ func copyTargetRectLocked(layoutSnap tabLayoutSnapshot, contentArea domain.Rect,
 		return domain.Rect{}
 	}
 	if hasFloating && p == floating {
-		return calculateFloatingGeometry(contentArea, cfg).Inner
+		desired := calculateFloatingGeometry(contentArea, cfg)
+		p.mu.Lock()
+		geometry := p.committedFloatingGeometryLocked(desired)
+		p.mu.Unlock()
+		return geometry.Inner
 	}
 	for _, placement := range layoutSnap.placements {
 		if placement.ID == p.id && !placement.Collapsed {
@@ -373,9 +377,12 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		ac.sendMu.Unlock()
 		return
 	}
-	// Recheck the slot after refreshing its title outside the tab lock.
+	// Recheck the slot after refreshing its title outside the tab lock. One
+	// paint uses one immutable floating config snapshot across composition,
+	// copy targeting, and cursor placement.
 	floating = tb.floating.pane
 	hasFloating = tb.floating.state == floatingVisible && floating != nil
+	floatingCfg := d.currentFloatingConfig()
 	overlayActive := overlays.copyActive || overlays.copySearchModel != nil || overlays.pickerActive || overlays.paletteActive || overlays.promptActive
 	if reset || overlayActive {
 		ac.bars.Reset()
@@ -393,14 +400,14 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	}
 	contentArea := domain.Rect{Y: 1, Width: frame.Width, Height: max(0, frame.Height-2)}
 	if hasFloating {
-		frame, damage = composeFloatingFrame(frame, damage, floating, tb.floating.generation, contentArea, d.currentFloatingConfig(), layoutSnap, bars.theme, &ac.composed, reset || overlayActive)
+		frame, damage = composeFloatingFrame(frame, damage, floating, tb.floating.generation, contentArea, floatingCfg, layoutSnap, bars.theme, &ac.composed, reset || overlayActive)
 	}
 	if overlays.copyActive {
 		copyPane := overlays.copyPane
 		if copyPane == nil {
 			copyPane = p
 		}
-		copyTarget := copyTargetRectLocked(layoutSnap, contentArea, copyPane, floating, hasFloating, d.currentFloatingConfig())
+		copyTarget := copyTargetRectLocked(layoutSnap, contentArea, copyPane, floating, hasFloating, floatingCfg)
 		frame, damage = composeCopyClientFrame(overlays.copyMode, copyPane, copyTarget, frame, bars)
 	}
 	// A palette above normal/copy content dims that composed content. When a
@@ -434,10 +441,13 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	cursorContent, cursorVisible := focusedPaneContentRect(layoutSnap, p.id)
 	if hasFloating {
 		cursorPane = floating
-		geometry := calculateFloatingGeometry(contentArea, d.currentFloatingConfig())
-		cursorContent, cursorVisible = geometry.Inner, geometry.Inner.Width > 0 && geometry.Inner.Height > 0
 	}
 	cursorPane.mu.Lock()
+	if hasFloating {
+		desiredGeometry := calculateFloatingGeometry(contentArea, floatingCfg)
+		geometry := floating.committedFloatingGeometryLocked(desiredGeometry)
+		cursorContent, cursorVisible = geometry.Inner, geometry.Inner.Width > 0 && geometry.Inner.Height > 0
+	}
 	desiredCursor := desiredCursorOut(cursorPane.screen, cursorContent, !cursorVisible || overlays.copyActive || overlays.copySearchModel != nil || overlays.pickerActive || overlays.paletteActive || overlays.promptActive)
 	cursorPane.mu.Unlock()
 	ac.sess.mu.Lock()

@@ -14,6 +14,20 @@ type floatingGeometry struct {
 	Inner  domain.Rect
 }
 
+func (g floatingGeometry) valid() bool {
+	return g.Bounds.Width > 0 && g.Bounds.Height > 0 && g.Inner.Width > 0 && g.Inner.Height > 0
+}
+
+// committedFloatingGeometryLocked returns the geometry whose PTY resize was
+// last committed. Newly constructed test panes fall back to the requested
+// geometry until their first resize. The caller holds p.mu.
+func (p *pane) committedFloatingGeometryLocked(fallback floatingGeometry) floatingGeometry {
+	if p.popupGeometry.valid() {
+		return p.popupGeometry
+	}
+	return fallback
+}
+
 // floatingAxisGeometry is the canonical percentage and border calculation for
 // one popup axis. Popups smaller than three cells spend no cells on borders.
 type floatingAxisGeometry struct {
@@ -76,7 +90,7 @@ func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *
 		}
 	}
 	(overlayBackdrop{DimPaneContents: true}).apply(frame, content, layoutSnap, theme)
-	geometry := calculateFloatingGeometry(content, cfg)
+	desiredGeometry := calculateFloatingGeometry(content, cfg)
 
 	popupChanged := cache == nil || cache.floating != p || cache.floatingGeneration != generation
 
@@ -84,6 +98,7 @@ func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *
 	// every read of them, including the blit, in the same critical section.
 	// In particular, Frame is not safe to retain as an alias after unlocking.
 	p.mu.Lock()
+	geometry := p.committedFloatingGeometryLocked(desiredGeometry)
 	title := p.displayTitleLocked()
 	titleGeneration := p.title.generation
 	screenDamage := p.screen.Damage()
@@ -140,8 +155,9 @@ func drawFloatingBorder(frame renderer.Frame, bounds domain.Rect, title string, 
 
 // resizeFloatingPane serializes PTY resizes for a floating pane. PTY.Resize
 // is intentionally outside pane.mu; failed resizes do not publish any state.
-func (d *Daemon) resizeFloatingPane(p *pane, inner domain.Rect) bool {
-	if p == nil || inner.Width <= 0 || inner.Height <= 0 {
+func (d *Daemon) resizeFloatingPane(p *pane, geometry floatingGeometry) bool {
+	inner := geometry.Inner
+	if p == nil || !geometry.valid() {
 		return false
 	}
 	p.resizeMu.Lock()
@@ -163,6 +179,7 @@ func (d *Daemon) resizeFloatingPane(p *pane, inner domain.Rect) bool {
 	p.mu.Lock()
 	p.screen.Resize(inner.Width, inner.Height)
 	p.rect = inner
+	p.popupGeometry = geometry
 	p.mu.Unlock()
 	return true
 }
@@ -180,7 +197,7 @@ func (d *Daemon) resizeInstalledFloating(tb *tab) bool {
 	if p == nil {
 		return false
 	}
-	return d.resizeFloatingPane(p, calculateFloatingGeometry(content, d.currentFloatingConfig()).Inner)
+	return d.resizeFloatingPane(p, calculateFloatingGeometry(content, d.currentFloatingConfig()))
 }
 
 // resizeActiveFloating updates a visible floating pane during a client resize.

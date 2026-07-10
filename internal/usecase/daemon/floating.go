@@ -132,11 +132,15 @@ func (tb *tab) visibleFloatingSnapshotLocked(cfg domain.FloatingConfig) (*pane, 
 	if tb == nil || tb.floating.state != floatingVisible || tb.floating.pane == nil {
 		return nil, floatingGeometry{}, false
 	}
-	geometry := calculateFloatingGeometry(domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}, cfg)
+	p := tb.floating.pane
+	desired := calculateFloatingGeometry(domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}, cfg)
+	p.mu.Lock()
+	geometry := p.committedFloatingGeometryLocked(desired)
+	p.mu.Unlock()
 	if geometry.Inner.Width <= 0 || geometry.Inner.Height <= 0 {
 		return nil, floatingGeometry{}, false
 	}
-	return tb.floating.pane, geometry, true
+	return p, geometry, true
 }
 
 // ensureFloatingWarm starts the background prewarm exactly once for a tab.
@@ -217,7 +221,7 @@ type floatingLaunchSpec struct {
 	sessionName  string
 	cwd          string
 	size         domain.Size
-	innerRect    domain.Rect
+	geometry     floatingGeometry
 	paneStableID string
 	env          []string
 	command      string
@@ -246,11 +250,11 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 	name, cwd, term, sessCtx := sess.name, sess.cwd, sess.terminal, sess.ctx
 	sess.mu.Unlock()
 	tb.mu.Lock()
-	inner := calculateFloatingGeometry(domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}, cfg).Inner
-	size := rectSize(inner)
+	geometry := calculateFloatingGeometry(domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}, cfg)
+	size := rectSize(geometry.Inner)
 	if !size.Valid() {
-		inner = domain.Rect{Width: 1, Height: 1}
-		size = rectSize(inner)
+		geometry = floatingGeometry{Bounds: domain.Rect{Width: 1, Height: 1}, Inner: domain.Rect{Width: 1, Height: 1}}
+		size = rectSize(geometry.Inner)
 	}
 	focused := tb.focusedPane()
 	tabStableID, tabCtx := tb.stableID, tb.ctx
@@ -281,7 +285,7 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 		sessionName:  name,
 		cwd:          cwd,
 		size:         size,
-		innerRect:    inner,
+		geometry:     geometry,
 		paneStableID: paneStableID,
 		env:          d.childEnv(name, tabStableID, paneStableID, term),
 		command:      command,
@@ -301,7 +305,8 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 		return
 	}
 	p := newPaneWithStableID(layout.PaneID("floating"), spec.paneStableID, pty, spec.size)
-	p.rect = spec.innerRect
+	p.rect = spec.geometry.Inner
+	p.popupGeometry = spec.geometry
 	p.title.displayFallback = spec.fallback
 	p.ctx, p.cancel = context.WithCancel(spec.parentCtx)
 	// The reader may run as soon as install returns; make its exit policy

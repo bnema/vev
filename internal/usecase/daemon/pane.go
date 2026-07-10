@@ -27,6 +27,7 @@ type pane struct {
 	flush             chan struct{}
 	syncGen           uint64
 	rect              domain.Rect
+	popupGeometry     floatingGeometry // last geometry committed after a successful floating resize
 	title             paneTitleState
 	ctx               context.Context
 	cancel            context.CancelFunc
