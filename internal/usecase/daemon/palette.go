@@ -134,16 +134,29 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		down:   func() { ac.overlays.palette.Down(); changed = true },
 		cancel: func() { cancel = true },
 		enter: func() {
-			cmd, _ = ac.overlays.palette.Selected()
-			action, valid := palette.ParseAction([]command.Command{cmd}, ac.overlays.palette.Query())
-			if !valid {
+			var selected bool
+			cmd, selected = ac.overlays.palette.Selected()
+			if !selected {
 				ac.overlays.paletteFeedback = "invalid command arguments"
 				ac.overlays.palette.SetFeedback(ac.overlays.paletteFeedback)
 				changed = true
 				return
 			}
-			args = action.Args
 			rawQuery = ac.overlays.palette.Query()
+			// JRS is contextual: it is executable only from its exact token so
+			// fuzzy selection can never turn an unrelated query into a jump.
+			// Static commands retain normal palette behavior and run the selected
+			// fuzzy match.
+			if cmd.Code == "JRS" {
+				action, valid := palette.ParseAction([]command.Command{cmd}, rawQuery)
+				if !valid {
+					ac.overlays.paletteFeedback = "invalid command arguments"
+					ac.overlays.palette.SetFeedback(ac.overlays.paletteFeedback)
+					changed = true
+					return
+				}
+				args = action.Args
+			}
 			recent = append([]recentSession(nil), ac.overlays.paletteRecent...)
 			generation = ac.overlays.paletteGeneration
 			execute = true
@@ -179,18 +192,25 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	// by a newly-ranked session, so MRU changes cannot shift a requested rank.
 	if cmd.Code == "JRS" {
 		rank, err := command.ParsePositiveDecimal(args)
-		if err != nil || rank > len(recent) || d.sessionByID(recent[rank-1].id) == nil {
+		if err != nil {
 			d.paletteFailure(ac, generation, rawQuery, "requested recent session is unavailable")
 			d.paint(sess, ac, true)
 			return
 		}
-		// Publication remains generation-safe; close only if this is still the
-		// same exact palette interaction and raw argument token.
-		if !d.closeExecutedPalette(ac, generation, rawQuery) {
+		// The captured ID is handed off atomically. A target can disappear after
+		// the validation above, so closing is contingent on the committed switch.
+		exec := paletteExec{d: d, sess: sess, ac: ac, recent: recent}
+		if err := exec.JumpRecentSession(rank); err != nil {
+			d.paletteFailure(ac, generation, rawQuery, "requested recent session is unavailable")
+			d.paint(sess, ac, true)
 			return
 		}
-		d.switchToTarget(sess, ac, picker.Target{Session: recent[rank-1].id, TabIndex: -1})
-		d.recordPaletteUse(cmd.Code)
+		// Publication remains generation-safe; do not let stale work close a
+		// newer palette interaction.
+		if d.closeExecutedPalette(ac, generation, rawQuery) {
+			d.recordPaletteUse(cmd.Code)
+			d.paint(ac.currentSession(), ac, true)
+		}
 		return
 	}
 	if !d.closeExecutedPalette(ac, generation, rawQuery) {
@@ -381,7 +401,12 @@ func (e paletteExec) JumpRecentSession(rank int) error {
 	if e.d.sessionByID(target.id) == nil {
 		return command.ErrInvalidArguments
 	}
-	e.d.switchToTarget(e.sess, e.ac, picker.Target{Session: target.id, TabIndex: -1})
+	if e.d.beforeRecentSessionHandoff != nil {
+		e.d.beforeRecentSessionHandoff()
+	}
+	if !e.d.switchToTarget(e.sess, e.ac, picker.Target{Session: target.id, TabIndex: -1}) {
+		return command.ErrInvalidArguments
+	}
 	return nil
 }
 

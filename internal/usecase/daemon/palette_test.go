@@ -70,6 +70,102 @@ func TestPaletteJRSActivatesOnlyExactContextualHint(t *testing.T) {
 	ac.overlays.paletteMu.Unlock()
 }
 
+func TestPaletteFuzzySelectedStaticCommandExecutes(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 2)
+	defer releases[0]()
+	defer releases[1]()
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("next\r"))
+
+	require.False(t, ac.overlays.paletteActive())
+	require.Equal(t, 1, activeTabIndex(sess))
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteJRSUsesCapturedRankAfterMRUChanges(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	captured := d.sessions[domain.SessionID("recent")]
+	d.handleInput(current, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	// Reordering live MRU after opening must not shift rank 1 from its capture.
+	d.sessions[domain.SessionID("older")].mruAt.Store(100)
+	d.handleInput(current, ac, []byte("JRS 1\r"))
+
+	require.Same(t, captured, ac.currentSession())
+	require.False(t, ac.overlays.paletteActive())
+	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteJRSDisplacedTargetKeepsInteractionOpen(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	target := &session{id: "captured", name: "captured"}
+	d.sessions[target.id] = target
+
+	validated := make(chan struct{})
+	releaseHandoff := make(chan struct{})
+	d.beforeRecentSessionHandoff = func() {
+		close(validated)
+		<-releaseHandoff
+	}
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	go d.handleInput(sess, ac, []byte("JRS 1\r"))
+	<-validated
+	d.mu.Lock()
+	delete(d.sessions, target.id)
+	d.mu.Unlock()
+	close(releaseHandoff)
+
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.True(t, ac.overlays.paletteActive())
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, "JRS 1", ac.overlays.palette.Query())
+	require.Equal(t, "requested recent session is unavailable", ac.overlays.paletteFeedback)
+	ac.overlays.paletteMu.Unlock()
+}
+
+func TestPaletteJRSOutOfRangeKeepsPaletteOpenWithoutClamping(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+
+	d.handleInput(current, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(current, ac, []byte("JRS 3\r"))
+
+	require.Same(t, current, ac.currentSession())
+	require.True(t, ac.overlays.paletteActive())
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, "JRS 3", ac.overlays.palette.Query())
+	require.Equal(t, "requested recent session is unavailable", ac.overlays.paletteFeedback)
+	ac.overlays.paletteMu.Unlock()
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteFailureDoesNotOverwriteNewerInteraction(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+
+	d.enterPalette(sess, ac)
+	ac.overlays.paletteMu.Lock()
+	staleGeneration := ac.overlays.paletteGeneration
+	ac.overlays.paletteMu.Unlock()
+	d.enterPalette(sess, ac)
+	d.paletteFailure(ac, staleGeneration, "JRS 1", "stale failure")
+
+	ac.overlays.paletteMu.Lock()
+	require.Empty(t, ac.overlays.paletteFeedback)
+	ac.overlays.paletteMu.Unlock()
+	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
 func TestPaletteFLTExecutesFloatingToggle(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
