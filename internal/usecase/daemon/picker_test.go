@@ -580,6 +580,9 @@ func TestPickerResizeRecomposesModal(t *testing.T) {
 	d.enterPicker(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.resize(sess, ac, domain.Size{Cols: 100, Rows: 30})
+	// Picker recomposition is the relevant event here; do not depend on a real
+	// resize-idle timer in this synchronous rendering test.
+	d.paint(sess, ac, false)
 
 	out := awaitFrame(t, sends, ports.MsgOutput)
 	msg, err := ports.UnmarshalOutput(out.Payload)

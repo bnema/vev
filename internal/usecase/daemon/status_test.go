@@ -1067,7 +1067,8 @@ func TestStatusBarCopyFeedbackBoundaryWidths(t *testing.T) {
 func TestStatusRepaintsOnCreateSwitchAndResize(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
-	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2), clock)
 	tr, sends, releaseConn := newConn(t,
 		mustHello(ports.IntentNew, "work", domain.Size{Cols: 20, Rows: 5}),
 		frameInput([]byte("\x1b ")),
@@ -1083,6 +1084,9 @@ func TestStatusRepaintsOnCreateSwitchAndResize(t *testing.T) {
 	palette := awaitFrame(t, sends, ports.MsgOutput)
 	created := awaitFrame(t, sends, ports.MsgOutput)
 	switched := awaitFrame(t, sends, ports.MsgOutput)
+	// The resize frame is intentionally idle-coalesced; fire its fake-clock
+	// deadline rather than relying on the old synchronous behavior.
+	(<-clock.timers).ch <- time.Time{}
 	resized := awaitFrame(t, sends, ports.MsgOutput)
 
 	_ = palette
