@@ -386,7 +386,11 @@ func (c *renderCoordinator) noteSyncEnd(p *pane, gen uint64) {
 		c.pendingUrgent = true
 	}
 	c.mu.Unlock()
-	c.fireCurrent(false)
+	// A batch that was already non-renderable never closed the aggregate gate;
+	// its late end must not bypass an unrelated output deadline.
+	if wasRenderable {
+		c.fireCurrent(false)
+	}
 }
 
 // noteSyncPaneRemoved releases a pane watchdog when pane lifecycle ends.
