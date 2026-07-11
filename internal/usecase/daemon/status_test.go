@@ -860,6 +860,40 @@ func TestStatusBarCurrentSessionUsesAccentStyle(t *testing.T) {
 	require.NotEqual(t, styles.statusBar.BackgroundRGB, styles.accent.BackgroundRGB)
 }
 
+func TestStatusBarContextualRanksPreserveOriginalRanksAndSelectedAccent(t *testing.T) {
+	styles := resolveThemeStyles(nil)
+	row := make([]renderer.Cell, 18)
+	state := barState{
+		status: statusSnapshot{session: "cur"},
+		rankedRecent: []rankedRecent{
+			{rank: 1, name: "wide界"},
+			{rank: 2, name: "two", selected: true},
+			{rank: 3, name: "three"},
+		},
+	}
+
+	drawStatusBarState(row, state, styles)
+	text := rowText(row)
+	require.Contains(t, text, "1:wide界")
+	require.NotContains(t, text, "2:two") // whole entries fit; no partial rank/name.
+	require.NotContains(t, text, "3:three")
+	// A rank that does fit is accent-colored and its prefix is bold.
+	row = make([]renderer.Cell, 28)
+	drawStatusBarState(row, state, styles)
+	require.Contains(t, rowText(row), "2:two")
+	found := false
+	for _, cell := range row {
+		if cell.Rune == '2' {
+			found = true
+			require.True(t, cell.Style.Bold)
+			require.Equal(t, styles.accent.Foreground, cell.Style.Foreground)
+			require.Equal(t, styles.accent.Background, cell.Style.Background)
+			break
+		}
+	}
+	require.True(t, found)
+}
+
 func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
 	theme := themeui.Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 20, G: 20, B: 20}, HasFG: true, HasBG: true, TrueColor: true, Known: true}
 	styles := newThemeStyles(theme)

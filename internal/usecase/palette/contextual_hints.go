@@ -14,9 +14,10 @@ type RecentSessionHint struct {
 
 // ContextualHints is immutable contextual palette guidance.
 type ContextualHints struct {
-	Kind     command.ContextHint
-	Recent   []RecentSessionHint
-	Feedback string
+	Kind         command.ContextHint
+	Recent       []RecentSessionHint
+	SelectedRank int
+	Feedback     string
 }
 
 // BuildRecentSessionHints produces guidance without consulting live daemon state.
@@ -38,6 +39,7 @@ func BuildRecentSessionHints(names []string, args []string) ContextualHints {
 	} else if rank > len(names) {
 		h.Feedback = fmt.Sprintf("rank %d is unavailable", rank)
 	} else {
+		h.SelectedRank = rank
 		h.Feedback = fmt.Sprintf("jump to recent session %d", rank)
 	}
 	return h

@@ -408,7 +408,7 @@ func TestComposePaletteClientFrameUsesConfiguredPosition(t *testing.T) {
 		{name: "bottom right", cfg: domain.PaletteConfig{Anchor: domain.AnchorBottomRight, AnchorSet: true}, at: domain.Rect{X: 55, Y: 28}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			frame, _ := composePaletteClientFrame(model, base, tt.cfg)
+			frame, _ := composePaletteClientFrame(model, base, tt.cfg, "")
 			require.Equal(t, '┌', frame.At(tt.at.X, tt.at.Y).Rune)
 		})
 	}

@@ -121,13 +121,11 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		rune: func(r rune) {
 			ac.overlays.palette.Insert(r)
 			ac.overlays.paletteFeedback = ""
-			ac.overlays.palette.SetFeedback("")
 			changed = true
 		},
 		backspace: func() {
 			ac.overlays.palette.Backspace()
 			ac.overlays.paletteFeedback = ""
-			ac.overlays.palette.SetFeedback("")
 			changed = true
 		},
 		up:     func() { ac.overlays.palette.Up(); changed = true },
@@ -138,7 +136,6 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 			cmd, selected = ac.overlays.palette.Selected()
 			if !selected {
 				ac.overlays.paletteFeedback = "invalid command arguments"
-				ac.overlays.palette.SetFeedback(ac.overlays.paletteFeedback)
 				changed = true
 				return
 			}
@@ -151,7 +148,6 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 				action, valid := palette.ParseAction([]command.Command{cmd}, rawQuery)
 				if !valid {
 					ac.overlays.paletteFeedback = "invalid command arguments"
-					ac.overlays.palette.SetFeedback(ac.overlays.paletteFeedback)
 					changed = true
 					return
 				}
@@ -167,10 +163,8 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		if ok && active.Code == "JRS" {
 			hints := recentSessionHints(ac.overlays.paletteRecent, paletteArgs(ac.overlays.palette.Query(), active))
 			ac.overlays.paletteHints = hints
-			ac.overlays.palette.SetFeedback(hints.Feedback)
 		} else {
 			ac.overlays.paletteHints = palette.ContextualHints{}
-			ac.overlays.palette.SetFeedback("")
 		}
 	}
 	if cancel {
@@ -247,7 +241,11 @@ func (d *Daemon) paletteFailure(ac *attachedClient, generation uint64, rawQuery,
 		return
 	}
 	ac.overlays.paletteFeedback = feedback
-	ac.overlays.palette.SetFeedback(feedback)
+	// Rendering consumes the immutable contextual hint snapshot, not Model's
+	// feedback state. Preserve ranks while making stale-target feedback visible.
+	if ac.overlays.paletteHints.Kind == command.ContextHintRecentSessions {
+		ac.overlays.paletteHints.Feedback = feedback
+	}
 }
 func (d *Daemon) closeExecutedPalette(ac *attachedClient, generation uint64, rawQuery string) bool {
 	ac.overlays.paletteMu.Lock()
@@ -410,10 +408,10 @@ func (e paletteExec) JumpRecentSession(rank int) error {
 	return nil
 }
 
-func composePaletteClientFrame(model *palette.Model, base renderer.Frame, cfg domain.PaletteConfig, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
+func composePaletteClientFrame(model *palette.Model, base renderer.Frame, cfg domain.PaletteConfig, guidance string, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
 	styleSet := resolveThemeStyles(styles)
 	modal := paletteModalFor(domain.Size{Cols: base.Width, Rows: base.Height}, cfg)
 	return composeModalClientFrame(base, modal, styleSet, styleSet.selection, func(size domain.Size, _ ...renderer.Style) renderer.Frame {
-		return model.Render(size, palette.RenderStyles{Selection: styleSet.selection, Description: styleSet.paletteDesc})
+		return model.Render(size, palette.RenderOptions{Styles: palette.RenderStyles{Selection: styleSet.selection, Description: styleSet.paletteDesc}, Guidance: guidance})
 	})
 }

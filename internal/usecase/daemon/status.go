@@ -29,6 +29,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/bnema/vev/internal/usecase/command"
+	"github.com/bnema/vev/internal/usecase/palette"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
@@ -82,12 +84,46 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles)
 	x := 0
 	rightText := composeBottomRightText(state.bottomRight, state.copyFeedback)
 	writeStatusText(row, &x, " "+state.status.session+" ", styles.accent)
-	fittedMRU := fitMRU(state.mru, len(row), x, rightText)
-	for i, sess := range fittedMRU {
-		style := mruStyle(styles.statusBar, state.theme, i, len(fittedMRU))
-		drawStatusSessionEntry(row, &x, sess.name, sess.ephemeral, sess.attention, style, state.attentionFrame)
+	if state.rankedRecent != nil {
+		for _, sess := range fitRankedRecent(state.rankedRecent, len(row), x, rightText) {
+			style := styles.statusBar // contextual ranks deliberately do not fade.
+			if sess.selected {
+				style = styles.accent
+			}
+			drawRankedStatusSessionEntry(row, &x, sess, style, state.attentionFrame)
+		}
+	} else {
+		fittedMRU := fitMRU(state.mru, len(row), x, rightText)
+		for i, sess := range fittedMRU {
+			style := mruStyle(styles.statusBar, state.theme, i, len(fittedMRU))
+			drawStatusSessionEntry(row, &x, sess.name, sess.ephemeral, sess.attention, style, state.attentionFrame)
+		}
 	}
 	drawRightPlainText(row, rightText, x, styles.statusBar)
+}
+
+type rankedRecent struct {
+	rank      int
+	name      string
+	ephemeral bool
+	attention bool
+	selected  bool
+}
+
+func drawRankedStatusSessionEntry(row []renderer.Cell, x *int, sess rankedRecent, style renderer.Style, attentionFrame int) {
+	prefixStyle := style
+	prefixStyle.Bold = true
+	writeStatusText(row, x, " "+strconv.Itoa(sess.rank)+":", prefixStyle)
+	name := sess.name
+	if sess.ephemeral {
+		name += "*"
+	}
+	writeStatusText(row, x, name, style)
+	if sess.attention {
+		writeStatusText(row, x, " ", style)
+		writeBell(row, x, attentionFrame)
+	}
+	writeStatusText(row, x, " ", style)
 }
 
 func drawStatusSessionEntry(row []renderer.Cell, x *int, name string, ephemeral, attention bool, style renderer.Style, attentionFrame int) {
@@ -141,6 +177,7 @@ type barState struct {
 	bottomRight    string
 	copyFeedback   string
 	mru            []recentSession
+	rankedRecent   []rankedRecent
 	attentionFrame int
 	// theme is the client's terminal theme, if reported. Its zero value
 	// (Theme{}, Known: false) is a valid "no theme" default that resolves to
@@ -182,6 +219,24 @@ func tabDisplayName(tb *tab, index int) string {
 		return tb.name
 	}
 	return strconv.Itoa(index + 1)
+}
+
+func rankedRecentForHints(hints *palette.ContextualHints, recent []recentSession) []rankedRecent {
+	if hints == nil || hints.Kind != command.ContextHintRecentSessions {
+		return nil
+	}
+	entries := make([]rankedRecent, 0, len(hints.Recent))
+	for i, hint := range hints.Recent {
+		entry := rankedRecent{rank: hint.Rank, name: hint.Name, selected: hint.Rank == hints.SelectedRank}
+		// recent was copied with the hint under paletteMu, so this only enriches
+		// the render snapshot and never performs a live domain lookup.
+		if i < len(recent) {
+			entry.ephemeral = recent[i].ephemeral
+			entry.attention = recent[i].attention
+		}
+		entries = append(entries, entry)
+	}
+	return entries
 }
 
 func (d *Daemon) barStateForClient(cur *session, _ *attachedClient, copyFeedback string) barState {
@@ -270,6 +325,36 @@ func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []string {
 		remainingTabs--
 	}
 	return labels
+}
+
+func fitRankedRecent(entries []rankedRecent, rowLen, leftUsed int, feedback string) []rankedRecent {
+	reserve := 1
+	if feedback != "" {
+		reserve = statusTextWidth(feedback) + 2
+	}
+	budget := rowLen - leftUsed - reserve
+	if budget <= 0 {
+		return nil
+	}
+	cost := func(e rankedRecent) int {
+		name := e.name
+		if e.ephemeral {
+			name += "*"
+		}
+		width := 2 + statusTextWidth(strconv.Itoa(e.rank)+":") + statusTextWidth(name)
+		if e.attention {
+			width += 1 + renderer.RuneWidth(attentionGlyph)
+		}
+		return width
+	}
+	used := 0
+	for i, entry := range entries {
+		if used+cost(entry) > budget {
+			return entries[:i] // whole entries only; ranks remain their original MRU ranks.
+		}
+		used += cost(entry)
+	}
+	return entries
 }
 
 func fitMRU(entries []recentSession, rowLen, leftUsed int, feedback string) []recentSession {

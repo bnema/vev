@@ -168,6 +168,10 @@ type overlayRenderSnapshot struct {
 
 	paletteActive bool
 	paletteModel  *palette.Model
+	// paletteHints is a copy captured under paletteMu. Rendering must use this
+	// immutable interaction snapshot rather than consult live session state.
+	paletteHints  *palette.ContextualHints
+	paletteRecent []recentSession
 	paletteLocked bool
 
 	promptActive bool
@@ -212,6 +216,12 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 	rt.paletteMu.Lock()
 	snap.paletteModel = rt.palette
 	snap.paletteActive = snap.paletteModel != nil
+	if snap.paletteActive {
+		hints := rt.paletteHints
+		hints.Recent = append([]palette.RecentSessionHint(nil), hints.Recent...)
+		snap.paletteHints = &hints
+		snap.paletteRecent = append([]recentSession(nil), rt.paletteRecent...)
+	}
 	if snap.paletteActive {
 		snap.paletteLocked = true
 	} else {

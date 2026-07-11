@@ -12,13 +12,20 @@ type RenderStyles struct {
 	Description renderer.Style
 }
 
+// RenderOptions contains presentation supplied by the daemon for one render.
+// Guidance is substituted only into the exact contextual command row; it never
+// adds rows or changes fuzzy matching geometry.
+type RenderOptions struct {
+	Styles   RenderStyles
+	Guidance string
+}
+
 type Model struct {
 	commands []command.Command
 	input    ui.TextInput
 	matches  []Match
 	selected int
 	scroll   int
-	feedback string
 }
 
 func New(commands []command.Command) *Model {
@@ -54,12 +61,6 @@ func (m *Model) Backspace() {
 	}
 }
 
-// SetFeedback sets interaction-local guidance shown below the query.
-func (m *Model) SetFeedback(feedback string) {
-	if m != nil {
-		m.feedback = feedback
-	}
-}
 func (m *Model) Query() string {
 	if m == nil {
 		return ""
@@ -142,7 +143,8 @@ func (m *Model) clamp() {
 	}
 }
 
-func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
+func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
+	styles := opts.Styles
 	frame := renderer.NewFrame(max(inner.Cols, 0), max(inner.Rows, 0))
 	if frame.Width == 0 || frame.Height == 0 {
 		return frame
@@ -157,10 +159,6 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 	}
 	ui.DrawInputLine(frame, 0, "> ", m.Query(), base, selection)
 	start := 1
-	if m.feedback != "" && frame.Height > 1 {
-		ui.DrawText(frame, 0, 1, frame.Width, m.feedback, desc)
-		start++
-	}
 	visible := frame.Height - start
 	if visible <= 0 {
 		return frame
@@ -212,7 +210,13 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 			frame.Set(x, y+start, renderer.Cell{Rune: ' ', Style: style})
 			x++
 		}
-		ui.DrawText(frame, x, y+start, frame.Width, match.Command.Desc, mergePaletteDescStyle(style, desc))
+		description := match.Command.Desc
+		if opts.Guidance != "" && match.Command.ContextHint != command.ContextHintNone && m.Query() != "" {
+			if active, ok := m.ArgumentCommand(); ok && active.Code == match.Command.Code {
+				description = opts.Guidance
+			}
+		}
+		ui.DrawText(frame, x, y+start, frame.Width, description, mergePaletteDescStyle(style, desc))
 	}
 	return frame
 }

@@ -74,7 +74,7 @@ func TestRenderDrawsOnlyCodeAndDescriptionWithStyles(t *testing.T) {
 	})
 	m.Insert('c')
 	m.Insert('y')
-	frame := m.Render(domain.Size{Cols: 28, Rows: 3}, DefaultRenderStyles())
+	frame := m.Render(domain.Size{Cols: 28, Rows: 3}, RenderOptions{Styles: DefaultRenderStyles()})
 
 	require.Equal(t, '>', frame.At(0, 0).Rune)
 	require.Equal(t, ' ', frame.At(1, 0).Rune)
@@ -99,7 +99,7 @@ func TestRenderSafelyClipsVisibleFieldsAtNarrowWidths(t *testing.T) {
 
 	for _, cols := range []int{0, 1, 3, 4, 7} {
 		t.Run(fmt.Sprintf("cols_%d", cols), func(t *testing.T) {
-			frame := m.Render(domain.Size{Cols: cols, Rows: 2}, DefaultRenderStyles())
+			frame := m.Render(domain.Size{Cols: cols, Rows: 2}, RenderOptions{Styles: DefaultRenderStyles()})
 			require.Equal(t, cols, frame.Width)
 			if cols > 0 {
 				require.Equal(t, want[:min(cols, len(want))], []rune(frameRow(frame, 1)))
@@ -179,19 +179,24 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 			m := New([]command.Command{cmd("CPY", "Copy", "Enter copy mode")})
 			m.Insert('c')
 			m.Insert('y')
-			frame := m.Render(domain.Size{Cols: 28, Rows: 3}, tt.styles())
+			frame := m.Render(domain.Size{Cols: 28, Rows: 3}, RenderOptions{Styles: tt.styles()})
 
 			tt.assert(t, frame.At(tt.x, 1).Style)
 		})
 	}
 }
 
-func TestRenderPreservesFeedbackAboveCommandRows(t *testing.T) {
-	m := New([]command.Command{cmd("JRS", "Jump", "Jump to recent session")})
-	m.SetFeedback("rank 1")
+func TestRenderGuidanceReplacesOnlyExactContextualRow(t *testing.T) {
+	jrs := cmd("JRS", "Jump", "Jump to recent session")
+	jrs.Arguments = command.ArgumentsRequired
+	jrs.ContextHint = command.ContextHintRecentSessions
+	m := New([]command.Command{jrs})
+	for _, r := range "JRS 1" {
+		m.Insert(r)
+	}
 
-	frame := m.Render(domain.Size{Cols: 28, Rows: 4}, DefaultRenderStyles())
-	if got := frameRow(frame, 1); got[:6] != "rank 1" {
-		t.Fatalf("feedback row = %q, want prefix %q", got, "rank 1")
+	frame := m.Render(domain.Size{Cols: 28, Rows: 4}, RenderOptions{Styles: DefaultRenderStyles(), Guidance: "jump to recent session 1"})
+	if got := frameRow(frame, 1); got != "JRS jump to recent session 1" {
+		t.Fatalf("command row = %q, want contextual guidance without a feedback row", got)
 	}
 }

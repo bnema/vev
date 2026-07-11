@@ -369,6 +369,9 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 	}
 	d.refreshSessionFocusedTitles(sess)
 	bars := d.barStateForClient(sess, ac, overlays.copyFeedback)
+	// Contextual ranks are completely captured under paletteMu. Do not consult
+	// the domain while composing: an interaction's MRU ordering is immutable.
+	bars.rankedRecent = rankedRecentForHints(overlays.paletteHints, overlays.paletteRecent)
 	bars.theme = ac.getTheme()
 	_, attentionVisible := pulseStyle(bars.attentionFrame)
 	repaintAttachedClients = sess.ackAttention(tb, attentionVisible)
@@ -454,7 +457,11 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 		frame, damage = composePickerClientFrame(overlays.pickerModel, preview, frame, styles)
 	}
 	if overlays.paletteActive {
-		frame, damage = composePaletteClientFrame(overlays.paletteModel, frame, paletteCfg, styles)
+		guidance := ""
+		if overlays.paletteHints != nil {
+			guidance = overlays.paletteHints.Feedback
+		}
+		frame, damage = composePaletteClientFrame(overlays.paletteModel, frame, paletteCfg, guidance, styles)
 	}
 	if overlays.promptActive {
 		frame, damage = composePromptClientFrame(overlays.promptModel, frame, styles)
