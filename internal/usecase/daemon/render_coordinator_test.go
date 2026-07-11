@@ -649,6 +649,31 @@ func TestRenderCoordinatorSynchronizedOutput(t *testing.T) {
 		requireNoWake(t, h.wakes)
 	})
 
+	t.Run("watchdog retains gate while force closes the VT batch", func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		h.rc.noteSyncBegin(nil, 1, func() {
+			close(entered)
+			<-release
+		})
+		watchdogs := h.armedTimers(t)
+		require.NotEmpty(t, watchdogs)
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
+		watchdogs[0].ch <- time.Time{}
+		<-entered
+
+		// A concurrent deadline/fire sees the retained batch gate and cannot
+		// publish the partial VT state while force is blocked.
+		h.rc.fireCurrent(false)
+		requireNoWake(t, h.wakes)
+		close(release)
+		w := awaitWake(t, h.wakes)
+		require.True(t, w.watchdog)
+		require.True(t, w.urgent)
+		requireNoWake(t, h.wakes)
+	})
+
 	t.Run("stale watchdog generation cannot wake a completed batch", func(t *testing.T) {
 		h := newCoordinatorHarness(t)
 		h.syncActive.Store(true)
