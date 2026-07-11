@@ -56,6 +56,32 @@ func (s *Scrollback) Snapshot() [][]renderer.Cell {
 	return rows
 }
 
+// HistoryView is a frozen oldest-first view of scrollback rows.
+//
+// Its rows share cell slices with the scrollback at the time View is called.
+// Callers must treat rows returned by Row as read-only.
+type HistoryView struct {
+	rows [][]renderer.Cell
+}
+
+// View returns a frozen scrollback view. Appending to the scrollback cannot
+// alter the view because Append replaces ring slots rather than mutating rows.
+func (s *Scrollback) View() HistoryView {
+	return HistoryView{rows: s.Snapshot()}
+}
+
+// Len returns the number of rows in the view.
+func (v HistoryView) Len() int { return len(v.rows) }
+
+// Row returns the row at logical index i, oldest first, or nil when i is out
+// of range. Returned rows are shared with the view and must be read-only.
+func (v HistoryView) Row(i int) []renderer.Cell {
+	if i < 0 || i >= len(v.rows) {
+		return nil
+	}
+	return v.rows[i]
+}
+
 // Row returns a copy of the retained row at logical index i, oldest first.
 func (s *Scrollback) Row(i int) []renderer.Cell {
 	if i < 0 || i >= s.len || len(s.rows) == 0 {

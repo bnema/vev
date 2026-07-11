@@ -175,3 +175,37 @@ func TestScrollbackAppendDoesNotMutateSnapshottedRows(t *testing.T) {
 		t.Fatalf("snapshot[1] after append = %q, want original row", text)
 	}
 }
+
+func TestScrollbackViewSurvivesCompleteRingOverwrite(t *testing.T) {
+	sb := NewScrollback(2)
+	sb.Append(row("aa"))
+	sb.Append(row("bb"))
+	view := sb.View()
+	if &view.Row(0)[0] != &sb.rows[0][0] {
+		t.Fatal("View() deep-copied cells, want shared row storage")
+	}
+
+	sb.Append(row("cc"))
+	sb.Append(row("dd"))
+
+	if got := view.Len(); got != 2 {
+		t.Fatalf("View().Len() = %d, want 2", got)
+	}
+	for i, want := range []string{"aa", "bb"} {
+		if got := rowText(view.Row(i)); got != want {
+			t.Fatalf("View().Row(%d) = %q, want %q", i, got, want)
+		}
+	}
+}
+
+func TestHistoryViewRowBounds(t *testing.T) {
+	sb := NewScrollback(1)
+	sb.Append(row("aa"))
+	view := sb.View()
+
+	for _, i := range []int{-1, 1} {
+		if got := view.Row(i); got != nil {
+			t.Errorf("View().Row(%d) = %v, want nil", i, got)
+		}
+	}
+}
