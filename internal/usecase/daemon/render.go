@@ -288,7 +288,13 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 	}
 
 	ac.sendMu.Lock()
-	if ac.currentSession() != sess {
+	// sendMu is the attachment ownership boundary. Check the session's
+	// published identity while holding it so a deadline captured before an
+	// attach/replace cannot emit on either the old or new output chain.
+	sess.mu.Lock()
+	owned := sess.client == ac
+	sess.mu.Unlock()
+	if !owned || ac.currentSession() != sess {
 		ac.sendMu.Unlock()
 		return
 	}

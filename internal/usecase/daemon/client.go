@@ -385,11 +385,12 @@ func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient) 
 		rc = newRenderCoordinator(renderCoordinatorOptions{
 			clock: d.clock,
 			wake: func(w renderWake) {
-				sess.mu.Lock()
-				attached := sess.client
-				sess.mu.Unlock()
-				if attached != nil {
-					d.paint(sess, attached, w.reset)
+				// w.attachment was validated and captured under the coordinator
+				// lock. Never reread sess.client here: attach publishes that field
+				// before it replaces the coordinator, so doing so can paint the
+				// new connection before Welcome.
+				if w.attachment != nil {
+					d.paint(sess, w.attachment, w.reset)
 				}
 			},
 			ackReady: func() bool {

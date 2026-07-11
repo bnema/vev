@@ -54,6 +54,10 @@ type renderWake struct {
 	reset     bool
 	urgent    bool
 	coalesced int
+	// attachment is snapshotted under coordinator ownership. The wake
+	// consumer must compose only for this exact client, never by rereading
+	// session.client after an attach publication.
+	attachment *attachedClient
 	// watchdog marks a flush forced by the synchronized-output watchdog.
 	watchdog bool
 }
@@ -510,7 +514,11 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 // captured by old become stale.
 func (c *renderCoordinator) noteReplace(old, replacement *attachedClient) {
 	c.mu.Lock()
-	if c.attachment == old {
+	// A coordinator may be installed while replacing a legacy attachment
+	// which predated coordinator ownership. In that case nil has no pending
+	// identity to invalidate, and the replacement becomes the first bound
+	// attachment atomically with this lifecycle transition.
+	if c.attachment == old || c.attachment == nil {
 		c.attachment = replacement
 		c.pending = false
 		c.ackDeferred = false
@@ -647,7 +655,7 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 		c.mu.Unlock()
 		return
 	}
-	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog}
+	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog, attachment: c.attachment}
 	if !ready {
 		if deadline {
 			c.ackDeferred = true

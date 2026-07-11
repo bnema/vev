@@ -354,7 +354,10 @@ resize:
 		select {
 		case epoch := <-resizeDone:
 			require.Equal(t, uint64(1), epoch)
-			require.Equal(t, renderWake{coalesced: 1}, awaitWake(t, wakes))
+			wake := awaitWake(t, wakes)
+			require.Same(t, owner, wake.attachment)
+			wake.attachment = nil
+			require.Equal(t, renderWake{coalesced: 1}, wake)
 			for range 4096 {
 				select {
 				case <-fireDone:
@@ -737,14 +740,24 @@ func TestRenderCoordinatorPreviewWakesDoNotWaitForTargetAck(t *testing.T) {
 			require.Len(t, timers, 1)
 			timers[0].ch <- time.Time{}
 
-			require.Equal(t, renderWake{coalesced: 1}, awaitWake(t, h.previews),
+			preview := awaitWake(t, h.previews)
+			if tc.attach {
+				require.NotNil(t, preview.attachment)
+			}
+			preview.attachment = nil
+			require.Equal(t, renderWake{coalesced: 1}, preview,
 				"the viewer preview must receive target output without target ACK capacity")
 			requireNoWake(t, h.wakes)
 			requireNoWake(t, h.previews)
 
 			h.ackReady.Store(true)
 			h.rc.notifyAck()
-			require.Equal(t, renderWake{coalesced: 1}, awaitWake(t, h.wakes),
+			wake := awaitWake(t, h.wakes)
+			if tc.attach {
+				require.NotNil(t, wake.attachment)
+			}
+			wake.attachment = nil
+			require.Equal(t, renderWake{coalesced: 1}, wake,
 				"the target primary frame remains pending for its own ACK")
 			requireNoWake(t, h.previews)
 		})

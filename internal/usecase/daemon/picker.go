@@ -407,6 +407,12 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 	ac.recordPreviousSession(from)
 	d.mu.Unlock()
 	d.handoffCoordinator(from, targetSess, old, ac)
+	if old != nil && old != ac {
+		// Displacement is a detach lifecycle transition too. Cancel the
+		// attachment-owned PR #71 timer only after releasing daemon/session
+		// locks, preserving sendMu > daemon/session lock ordering.
+		old.cancelResizePaint()
+	}
 	return old
 }
 
