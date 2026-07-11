@@ -397,7 +397,8 @@ func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 		sess.mu.Unlock()
 		d.log.Info("pane created", "session", name, "pane", p.id)
 	}
-	d.sessWg.Add(2)
+	// Scheduler ownership was removed; this launch creates exactly one reader.
+	d.sessWg.Add(1)
 	go d.ptyReader(sess, tb, p)
 }
 

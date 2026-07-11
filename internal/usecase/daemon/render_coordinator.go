@@ -115,16 +115,49 @@ type renderCoordinator struct {
 	resize  resizeRequestMetadata
 	metrics renderCoordinatorBurstMetrics
 	// generation invalidates callbacks from superseded deadline/watchdog timers.
-	generation     uint64
-	armed          bool
-	syncGeneration uint64
-	syncWatchdog   func()
+	// Each worker also owns an explicit cancellation channel: fake timers may
+	// expose a nil or never-firing C channel, so Stop alone cannot release a
+	// worker waiting in select.
+	generation       uint64
+	armed            bool
+	normalTimer      ports.Timer
+	normalCancel     chan struct{}
+	normalWorkerDone chan struct{}
+	syncGeneration   uint64
+	syncWatchdog     func()
+	syncTimer        ports.Timer
+	syncCancel       chan struct{}
+	syncWorkerDone   chan struct{}
 }
 
 // newRenderCoordinator constructs a coordinator bound to opts. It starts no
 // goroutine; deadline scheduling is armed lazily by invalidate.
 func newRenderCoordinator(opts renderCoordinatorOptions) *renderCoordinator {
 	return &renderCoordinator{opts: opts}
+}
+
+// cancelNormalTimerLocked and cancelSyncTimerLocked release timer workers even
+// when a test clock supplies an inert channel. Caller holds c.mu.
+func (c *renderCoordinator) cancelNormalTimerLocked() {
+	if c.normalTimer != nil {
+		c.normalTimer.Stop()
+		c.normalTimer = nil
+	}
+	if c.normalCancel != nil {
+		close(c.normalCancel)
+		c.normalCancel = nil
+	}
+}
+
+func (c *renderCoordinator) cancelSyncTimerLocked() {
+	if c.syncTimer != nil {
+		c.syncTimer.Stop()
+		c.syncTimer = nil
+	}
+	if c.syncCancel != nil {
+		close(c.syncCancel)
+		c.syncCancel = nil
+	}
 }
 
 // invalidate publishes one producer state transition. Consecutive
@@ -149,6 +182,7 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 	arm := !wasPending || (!wasUrgent && c.pendingUrgent)
 	if arm {
 		c.generation++
+		c.cancelNormalTimerLocked()
 	}
 	gen := c.generation
 	delay := minOutputRenderDeadline
@@ -157,12 +191,23 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 	}
 	clock := c.opts.clock
 	c.armed = c.armed || arm
-	c.mu.Unlock()
 	if !arm || clock == nil {
+		c.mu.Unlock()
 		return
 	}
 	timer := clock.NewTimer(delay)
-	go func() { <-timer.C(); c.fire(gen, false) }()
+	cancel := make(chan struct{})
+	done := make(chan struct{})
+	c.normalTimer, c.normalCancel, c.normalWorkerDone = timer, cancel, done
+	c.mu.Unlock()
+	go func() {
+		defer close(done)
+		select {
+		case <-timer.C():
+			c.fire(gen, false)
+		case <-cancel:
+		}
+	}()
 	// Give fake-clock callbacks a chance to block on C before the test
 	// advances it; real clocks are unaffected.
 	runtime.Gosched()
@@ -186,25 +231,36 @@ func (c *renderCoordinator) noteSyncBegin(gen uint64, force ...func()) {
 		c.mu.Unlock()
 		return
 	}
+	c.cancelSyncTimerLocked()
 	c.syncGeneration = gen
 	c.syncWatchdog = nil
 	if len(force) != 0 {
 		c.syncWatchdog = force[0]
 	}
 	clock := c.opts.clock
-	c.mu.Unlock()
 	if clock == nil {
+		c.mu.Unlock()
 		return
 	}
 	timer := clock.NewTimer(maxSyncUpdateDuration)
+	cancel := make(chan struct{})
+	done := make(chan struct{})
+	c.syncTimer, c.syncCancel, c.syncWorkerDone = timer, cancel, done
+	c.mu.Unlock()
 	go func() {
-		<-timer.C()
+		defer close(done)
+		select {
+		case <-timer.C():
+		case <-cancel:
+			return
+		}
 		c.mu.Lock()
 		valid := !c.torndown && c.syncGeneration == gen
 		force := c.syncWatchdog
 		if valid {
 			c.syncGeneration = 0
 			c.syncWatchdog = nil
+			c.cancelSyncTimerLocked()
 		}
 		c.mu.Unlock()
 		if valid {
@@ -226,6 +282,7 @@ func (c *renderCoordinator) noteSyncEnd(gen uint64) {
 	}
 	c.syncGeneration = 0
 	c.syncWatchdog = nil
+	c.cancelSyncTimerLocked()
 	c.mu.Unlock()
 	c.fireCurrent(false)
 }
@@ -257,6 +314,9 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 		c.attachment = nil
 		c.pending = false
 		c.generation++
+		c.armed = false
+		c.cancelNormalTimerLocked()
+		c.cancelSyncTimerLocked()
 	}
 	c.mu.Unlock()
 }
@@ -269,6 +329,9 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient) {
 		c.attachment = replacement
 		c.pending = false
 		c.generation++
+		c.armed = false
+		c.cancelNormalTimerLocked()
+		c.cancelSyncTimerLocked()
 	}
 	c.mu.Unlock()
 }
@@ -283,6 +346,9 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	c.attachment = nil
 	c.pending = false
 	c.generation++
+	c.armed = false
+	c.cancelNormalTimerLocked()
+	c.cancelSyncTimerLocked()
 	c.mu.Unlock()
 }
 

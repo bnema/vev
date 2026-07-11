@@ -182,7 +182,6 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 		return
 	}
 
-	ac.initOverlays()
 	ac.sendMu.Lock()
 	if ac.currentSession() != sess {
 		ac.sendMu.Unlock()
@@ -192,6 +191,10 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 		ac.sendMu.Unlock()
 		return
 	}
+	// Composition owns attachment sendMu; initialize its lazy overlay state
+	// under that same ownership so concurrent fallback paints cannot observe a
+	// partially published runtime.
+	ac.initOverlays()
 	if ac.resizePaintPending {
 		ac.resizePaint.stop()
 		ac.resizePaintPending = false

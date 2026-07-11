@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -637,6 +638,113 @@ func TestProducerInvalidationInventory(t *testing.T) {
 }
 
 // --- retained PR #71 resize dispatch ----------------------------------------------
+
+func TestConcurrentPaintInitializesOverlayUnderSendOwnership(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	// Exercise the original seam: two fallback paints reach lazy initialization
+	// together before either can compose.
+	ac.overlays = nil
+	ac.overlayOnce = sync.Once{}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for range 2 {
+		go func() {
+			defer wg.Done()
+			<-start
+			d.paint(sess, ac, true)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	require.NotNil(t, ac.overlays)
+}
+
+func TestStartPaneGoroutinesAccountsForOneReader(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	d, sess, _, _ := newManualSessionWithPTYs(t, p)
+	tb := sess.activeTab()
+	require.NotNil(t, tb)
+	d.startPaneGoroutines(sess, tb, tb.focusedPane())
+	release()
+	select {
+	case <-waitGroupDone(&d.sessWg):
+	case <-time.After(time.Second):
+		t.Fatal("one reader must balance exactly one WaitGroup count")
+	}
+}
+
+// inertTimer deliberately has a nil C channel. It verifies coordinator
+// lifecycle paths do not strand workers behind fake clocks that never fire.
+type inertTimer struct{ stopped atomic.Bool }
+
+func (t *inertTimer) C() <-chan time.Time      { return nil }
+func (t *inertTimer) Reset(time.Duration) bool { return false }
+func (t *inertTimer) Stop() bool               { t.stopped.Store(true); return true }
+
+type inertClock struct{ timers chan *inertTimer }
+
+func (c *inertClock) Now() time.Time { return time.Time{} }
+func (c *inertClock) NewTimer(time.Duration) ports.Timer {
+	t := &inertTimer{}
+	c.timers <- t
+	return t
+}
+
+func requireWorkerExit(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	for range 4096 {
+		select {
+		case <-done:
+			return
+		default:
+			runtime.Gosched()
+		}
+	}
+	t.Fatal("cancelled coordinator timer worker did not exit")
+}
+
+func TestRenderCoordinatorStopsInertTimerWorkers(t *testing.T) {
+	lifecycle := []struct {
+		name string
+		end  func(*renderCoordinator, *attachedClient)
+	}{
+		{"detach", func(rc *renderCoordinator, ac *attachedClient) { rc.noteDetach(ac) }},
+		{"park", func(rc *renderCoordinator, ac *attachedClient) { rc.notePark(ac) }},
+		{"teardown", func(rc *renderCoordinator, _ *attachedClient) { rc.noteSessionTeardown() }},
+	}
+	for _, tc := range lifecycle {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := &inertClock{timers: make(chan *inertTimer, 2)}
+			rc := newRenderCoordinator(renderCoordinatorOptions{clock: clk})
+			ac := &attachedClient{}
+			rc.attach(ac)
+			rc.invalidate(renderInvalidation{class: invalidateOutput})
+			normal := <-clk.timers
+			rc.mu.Lock()
+			normalDone := rc.normalWorkerDone
+			rc.mu.Unlock()
+			tc.end(rc, ac)
+			require.True(t, normal.stopped.Load(), "normal timer must be stopped")
+			requireWorkerExit(t, normalDone)
+
+			// Use a fresh coordinator because detach/teardown intentionally makes
+			// an attachment ineligible for a new synchronized batch.
+			rc = newRenderCoordinator(renderCoordinatorOptions{clock: clk})
+			rc.attach(ac)
+			rc.noteSyncBegin(1)
+			syncTimer := <-clk.timers
+			rc.mu.Lock()
+			syncDone := rc.syncWorkerDone
+			rc.mu.Unlock()
+			tc.end(rc, ac)
+			require.True(t, syncTimer.stopped.Load(), "sync watchdog must be stopped")
+			requireWorkerExit(t, syncDone)
+		})
+	}
+}
 
 func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
 	newResizeFixture := func(t *testing.T) (*Daemon, *session, *attachedClient, chan ports.Frame, *signalClock, chan renderInvalidation) {

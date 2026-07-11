@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -385,11 +386,45 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 	p.EXPECT().Close().RunAndReturn(func() error { closeOnce.Do(func() { close(readDone) }); return nil }).Maybe()
 	p.EXPECT().Pid().Return(4242).Maybe()
 
-	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	// Rendering is coordinator-driven: advance a controllable clock through the
+	// retained resize timer and its resulting coordinator wake rather than
+	// relying on wall-clock debounce delivery.
+	clk := &signalClock{timers: make(chan *signalTimer, 16)}
+	d := newTestDaemon(t, newFactory(t, p), clk)
 	tr, sends, releaseConn := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 16, Rows: 5}))
+	advanceRender := func() {
+		for range 4096 {
+			select {
+			case timer := <-clk.timers:
+				timer.ch <- time.Time{}
+				return
+			default:
+				runtime.Gosched()
+			}
+		}
+		t.Fatal("coordinator did not arm a controllable render timer")
+	}
+	awaitControlledOutput := func() ports.Frame {
+		for range 4096 {
+			select {
+			case frame := <-sends:
+				if frame.Type == ports.MsgOutput {
+					return frame
+				}
+				t.Fatalf("unexpected frame type %d while advancing render clock", frame.Type)
+			case timer := <-clk.timers:
+				timer.ch <- time.Time{}
+			default:
+				runtime.Gosched()
+			}
+		}
+		t.Fatal("controllable timers did not produce an output frame")
+		return ports.Frame{}
+	}
 	var hg sync.WaitGroup
 	hg.Go(func() { d.handleConn(tr) })
 	awaitFrame(t, sends, ports.MsgWelcome)
+	advanceRender() // initial coordinator invalidation
 	awaitFrame(t, sends, ports.MsgOutput)
 
 	for i := range 12 {
@@ -420,9 +455,9 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 	ac := sess.client
 	require.NotNil(t, ac)
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitControlledOutput()
 	d.handleInput(sess, ac, []byte("VIS\r"))
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitControlledOutput()
 	d.handleInput(sess, ac, []byte{'g', ' ', 'G', 'y'})
 
 	var payload string
