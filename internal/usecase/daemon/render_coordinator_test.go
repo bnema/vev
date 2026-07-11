@@ -313,6 +313,64 @@ func TestRenderCoordinatorUrgentDeadlineCannotBeExtended(t *testing.T) {
 
 // --- ACK gating ----------------------------------------------------------------
 
+func TestRenderCoordinatorAckDoesNotBypassAnUnexpiredDeadline(t *testing.T) {
+	h := newCoordinatorHarness(t)
+	h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+	timer := awaitCoordinatorScheduledTimer(t, h.clk)
+	require.GreaterOrEqual(t, timer.duration, minOutputRenderDeadline)
+
+	// An unrelated ACK must not turn a normal output deadline into an
+	// immediate wake or cancel its timer.
+	h.rc.notifyAck()
+	requireNoWake(t, h.wakes)
+	timer.mock.AssertNotCalled(t, "Stop")
+
+	timer.ch <- time.Time{}
+	awaitWake(t, h.wakes)
+	requireNoWake(t, h.wakes)
+}
+
+func TestRenderCoordinatorAckFlushesOnlyExpiredAckDeferredWork(t *testing.T) {
+	t.Run("expired deadline flushes exactly once after readiness", func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		h.ackReady.Store(false)
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true, producer: "render.go"})
+		timer := awaitCoordinatorScheduledTimer(t, h.clk)
+		timer.ch <- time.Time{}
+		requireNoWake(t, h.wakes)
+
+		// Repeated ACKs while capacity remains unavailable are no-ops.
+		h.rc.notifyAck()
+		requireNoWake(t, h.wakes)
+		h.ackReady.Store(true)
+		h.rc.notifyAck()
+		w := awaitWake(t, h.wakes)
+		require.True(t, w.reset)
+		requireNoWake(t, h.wakes)
+		h.rc.notifyAck()
+		requireNoWake(t, h.wakes)
+	})
+
+	t.Run("lifecycle clears deferred work and urgent explicit fires stay immediate", func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		h.ackReady.Store(false)
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
+		timer := awaitCoordinatorScheduledTimer(t, h.clk)
+		timer.ch <- time.Time{}
+		requireNoWake(t, h.wakes)
+		h.rc.noteSessionTeardown()
+		h.ackReady.Store(true)
+		h.rc.notifyAck()
+		requireNoWake(t, h.wakes)
+
+		immediate := newCoordinatorHarness(t)
+		immediate.rc.invalidate(renderInvalidation{class: invalidateUrgent})
+		immediate.rc.fireCurrent(false)
+		w := awaitWake(t, immediate.wakes)
+		require.True(t, w.urgent)
+	})
+}
+
 func TestRenderCoordinatorAckGateBlocksCompositionUntilAck(t *testing.T) {
 	h := newCoordinatorHarness(t)
 	h.ackReady.Store(false)
