@@ -156,7 +156,7 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 
 	require.Equal(t, 80, frame.Width)
 	require.Equal(t, 25, frame.Height)
-	require.Equal(t, " 1", strings.TrimRight(rowText(frame.Row(0)), " "))
+	require.Equal(t, " 1 (sh)", strings.TrimRight(rowText(frame.Row(0)), " "))
 	require.Contains(t, rowText(frame.Row(1)), "live")
 	require.Contains(t, rowText(frame.Row(24)), "[SCROLL]")
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)

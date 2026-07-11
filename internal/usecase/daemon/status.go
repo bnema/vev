@@ -33,6 +33,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -63,12 +64,13 @@ func pulseStyle(frame int) (renderer.Style, bool) {
 func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, topRight string, styles themeStyles) {
 	clearStatusRow(row)
 	x := 0
-	for _, w := range status.tabs {
+	labels := fitTabLabels(status.tabs, len(row), topRight)
+	for i, w := range status.tabs {
 		style := styles.statusBar
 		if w.active {
 			style = styles.accent
 		}
-		writeStatusText(row, &x, " "+w.name, style)
+		writeStatusText(row, &x, " "+labels[i], style)
 		if w.attention {
 			writeStatusText(row, &x, " ", style)
 			writeBell(row, &x, frame)
@@ -190,7 +192,8 @@ type statusSnapshot struct {
 }
 
 type statusTab struct {
-	name      string
+	name      string // tab display name (degradation target)
+	paneTitle string // formatPaneTitle output of the focused pane
 	active    bool
 	attention bool
 }
@@ -207,7 +210,7 @@ func (s *session) statusSegments() statusSnapshot {
 		name := tabDisplayName(tb, i)
 		active := i == s.active
 		attention := tb.attention && (!active || tb.attentionVisiblePaint)
-		snap.tabs[i] = statusTab{name: name, active: active, attention: attention}
+		snap.tabs[i] = statusTab{name: name, paneTitle: tb.focusedPaneTitleLocked(), active: active, attention: attention}
 	}
 	return snap
 }
@@ -374,6 +377,75 @@ func fitHistoryNav(entries []historyNavSession, rowLen, leftUsed int, feedback s
 		}
 	}
 	return entries[start:end]
+}
+
+// fitTabLabels returns, per tab, the text drawn between its surrounding
+// spaces (attention glyph handled by the caller), guaranteeing all tabs fit.
+func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []string {
+	reserve := 1
+	if rightText != "" {
+		reserve = statusTextWidth(rightText) + 2
+	}
+	budget := rowLen - reserve
+
+	full := make([]string, len(tabs))
+	overhead := make([]int, len(tabs))
+	widths := make([]int, len(tabs))
+	total := 0
+	for i, t := range tabs {
+		full[i] = composeTabTitle(t.name, t.paneTitle)
+		o := 2
+		if t.attention {
+			o += 1 + renderer.RuneWidth(attentionGlyph)
+		}
+		overhead[i] = o
+		widths[i] = statusTextWidth(full[i])
+		total += o + widths[i]
+	}
+	labels := make([]string, len(tabs))
+	if total <= budget {
+		copy(labels, full)
+		return labels
+	}
+
+	// Overflow: greedy water-filling in ascending width order (shortest tabs
+	// first) so unused budget from short tabs flows to longer ones, while
+	// output order (labels indexed by original tab index) stays stable.
+	order := make([]int, len(tabs))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		return widths[order[a]] < widths[order[b]]
+	})
+
+	remaining := budget
+	remainingTabs := len(tabs)
+	for _, i := range order {
+		share := remaining / remainingTabs
+		textBudget := share - overhead[i]
+		switch {
+		case textBudget <= 0:
+			labels[i] = ""
+		case widths[i] <= textBudget:
+			labels[i] = full[i]
+		case textBudget >= statusTextWidth(tabs[i].name)+4:
+			labels[i] = ui.TruncateText(full[i], textBudget)
+		default:
+			labels[i] = ui.TruncateText(tabs[i].name, textBudget)
+		}
+		consumed := overhead[i]
+		if tb := textBudget; tb > 0 {
+			if widths[i] < tb {
+				consumed += widths[i]
+			} else {
+				consumed += tb
+			}
+		}
+		remaining -= consumed
+		remainingTabs--
+	}
+	return labels
 }
 
 func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSession {

@@ -97,6 +97,110 @@ func TestStatusCompositionGolden(t *testing.T) {
 	}
 }
 
+func TestStatusSegmentsIncludesFocusedPaneTitle(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	_, sess, _, _ := newManualSessionWithPTYs(t, p1, p2)
+	defer releasePTY1()
+	defer releasePTY2()
+
+	sess.tabs[1].name = "logs"
+
+	pane0 := sess.tabs[0].focusedPane()
+	pane0.mu.Lock()
+	pane0.title.processName = "vim"
+	pane0.title.processNameValid = true
+	pane0.mu.Unlock()
+
+	pane1 := sess.tabs[1].focusedPane()
+	pane1.mu.Lock()
+	pane1.title.terminalTitle = "build output"
+	pane1.mu.Unlock()
+
+	snap := sess.statusSegments()
+
+	require.Len(t, snap.tabs, 2)
+	require.Equal(t, "1", snap.tabs[0].name)
+	require.Equal(t, "vim", snap.tabs[0].paneTitle)
+	require.Equal(t, "logs", snap.tabs[1].name)
+	require.Equal(t, "build output", snap.tabs[1].paneTitle)
+}
+
+func TestFitTabLabels(t *testing.T) {
+	tests := []struct {
+		name      string
+		tabs      []statusTab
+		rowLen    int
+		rightText string
+		want      []string
+	}{
+		{
+			name:   "no tabs",
+			tabs:   nil,
+			rowLen: 10,
+			want:   []string{},
+		},
+		{
+			name:   "everything fits stays untruncated",
+			tabs:   []statusTab{{name: "one"}, {name: "two", paneTitle: "shell"}},
+			rowLen: 40,
+			want:   []string{"one", "two (shell)"},
+		},
+		{
+			name: "overflow redistributes budget: short tab stays full, long tab gets ellipsis",
+			tabs: []statusTab{
+				{name: "a"},
+				{name: "ed", paneTitle: "verylongtitle"},
+			},
+			rowLen: 20,
+			want:   []string{"a", "ed (verylongt…"},
+		},
+		{
+			name:   "tight budget degrades to a truncated tab name only",
+			tabs:   []statusTab{{name: "editor", paneTitle: "some pane title text"}},
+			rowLen: 7,
+			want:   []string{"edi…"},
+		},
+		{
+			name:      "non-empty rightText shrinks the budget",
+			tabs:      []statusTab{{name: "aaaaaaaaaa"}},
+			rowLen:    20,
+			rightText: "0123456789",
+			want:      []string{"aaaaa…"},
+		},
+		{
+			name:   "single tab wider than the whole row collapses to empty",
+			tabs:   []statusTab{{name: "reallyverylongtabname"}},
+			rowLen: 3,
+			want:   []string{""},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := fitTabLabels(tt.tabs, tt.rowLen, tt.rightText)
+
+			require.Equal(t, tt.want, got)
+
+			reserve := 1
+			if tt.rightText != "" {
+				reserve = statusTextWidth(tt.rightText) + 2
+			}
+			budget := tt.rowLen - reserve
+			drawn := 0
+			for i, tb := range tt.tabs {
+				overhead := 2
+				if tb.attention {
+					overhead += 1 + renderer.RuneWidth(attentionGlyph)
+				}
+				drawn += overhead + statusTextWidth(got[i])
+			}
+			if budget > 0 {
+				require.LessOrEqual(t, drawn, budget, "drawn width must not exceed the derived budget")
+			}
+		})
+	}
+}
+
 func TestTabDisplayName(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -512,7 +616,7 @@ func TestStatusMarksEphemeralSession(t *testing.T) {
 
 	frame, _ := composeClientFrame(sess, win, true, "")
 
-	require.Equal(t, " 1          ", rowText(frame.Row(0)))
+	require.Equal(t, " 1 (sh)     ", rowText(frame.Row(0)))
 	require.Equal(t, " 0*         ", rowText(frame.Row(3)))
 }
 
@@ -533,11 +637,15 @@ func TestTopBarRightAnchor(t *testing.T) {
 			want:     " 1             14:32",
 		},
 		{
-			name:     "hides on overlap",
+			// The tab budget reserves room for topRight up front (fitTabLabels),
+			// so tab labels shrink to nothing before the right-anchored text is
+			// dropped; unlike the bottom bar's MRU, top-bar tabs never hide
+			// entirely, so topRight still renders once tabs are squeezed out.
+			name:     "squeezes tabs empty to keep topRight visible",
 			width:    10,
 			status:   statusSnapshot{tabs: []statusTab{{name: "1"}, {name: "2"}}},
 			topRight: "12345",
-			want:     " 1  2     ",
+			want:     "     12345",
 		},
 		{
 			name:             "uses display width",
@@ -614,7 +722,9 @@ func TestTopBarRendersAttentionBell(t *testing.T) {
 
 	frame, _ := composeClientFrameWithState(barState{status: sess.statusSegments(), attentionFrame: 1}, win, true)
 
-	require.Contains(t, rowText(frame.Row(0)), "2 ")
+	// Tab 2's label is enriched with its focused pane's title ("sh", the
+	// default shell fallback) and truncated to fit alongside the bell.
+	require.Contains(t, rowText(frame.Row(0)), "2 (s")
 	for _, c := range frame.Row(0) {
 		if c.Rune == attentionGlyph {
 			require.True(t, c.Style.Bold)
