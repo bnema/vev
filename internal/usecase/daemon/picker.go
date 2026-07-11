@@ -222,21 +222,65 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	if ac.overlays.picker != nil {
 		target, ok = ac.overlays.picker.Selected()
 	}
-	var next *tab
-	if ok {
-		next = d.tabByTarget(target)
+	previous := ac.overlays.pickerPreviewSession
+	ac.overlays.pickerPreviewSession = nil
+	ac.overlays.pickerPreview = nil
+	ac.overlays.pickerMu.Unlock()
+	if previous != nil {
+		if rc := previous.renderCoordinator(); rc != nil {
+			rc.teardownPreviewFor(ac)
+		}
 	}
+	if !ok {
+		return
+	}
+	next := d.tabByTarget(target)
+	targetSess := d.sessionByID(target.Session)
+	if next == nil || targetSess == nil {
+		return
+	}
+	ac.overlays.pickerMu.Lock()
+	// Selection may have changed while the target was resolved.
 	if ac.overlays.picker == nil {
-		next = nil
+		ac.overlays.pickerMu.Unlock()
+		return
 	}
 	ac.overlays.pickerPreview = next
+	ac.overlays.pickerPreviewSession = targetSess
 	ac.overlays.pickerMu.Unlock()
+	// A same-session preview is already invalidated by its own coordinator.
+	// Cross-session previews subscribe to the target's producer wake instead
+	// of starting a direct paint/timer path.
+	if targetSess == ac.currentSession() {
+		return
+	}
+	rc := d.attachCoordinator(targetSess, nil, nil)
+	rc.subscribePreviewFor(ac, func(renderWake) {
+		ac.overlays.pickerMu.Lock()
+		valid := ac.overlays.pickerPreviewSession == targetSess
+		ac.overlays.pickerMu.Unlock()
+		if valid {
+			if owner := ac.currentSession(); owner != nil {
+				d.invalidateRender(owner, ac, false, "picker preview")
+			}
+		}
+	})
 }
 
 func (d *Daemon) unregisterPreview(ac *attachedClient) {
+	if ac == nil || ac.overlays == nil {
+		return
+	}
 	ac.overlays.pickerMu.Lock()
+	previous := ac.overlays.pickerPreviewSession
+	ac.overlays.pickerPreviewSession = nil
 	ac.overlays.pickerPreview = nil
 	ac.overlays.pickerMu.Unlock()
+	if previous != nil {
+		if rc := previous.renderCoordinator(); rc != nil {
+			rc.teardownPreviewFor(ac)
+		}
+	}
 }
 
 // clearDestroyedTabPreview clears coordinator-owned picker state for clients
@@ -261,11 +305,9 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 		}
 		ac.overlays.pickerMu.Lock()
 		cleared := ac.overlays.pickerPreview == tb
-		if cleared {
-			ac.overlays.pickerPreview = nil
-		}
 		ac.overlays.pickerMu.Unlock()
 		if cleared {
+			d.unregisterPreview(ac)
 			if sess := ac.currentSession(); sess != nil {
 				d.invalidateRender(sess, ac, true, "picker.go")
 			}
@@ -364,6 +406,17 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 	ac.setSession(targetSess)
 	ac.recordPreviousSession(from)
 	d.mu.Unlock()
+	// Both session coordinators must observe the ownership transfer before
+	// stale readers/timers can publish into either session.
+	if rc := from.renderCoordinator(); rc != nil {
+		rc.noteDetach(ac)
+	}
+	// Output states from the prior session cannot be acknowledged against the
+	// destination's full first frame.
+	ac.sendMu.Lock()
+	ac.output.rebase()
+	ac.sendMu.Unlock()
+	d.attachCoordinator(targetSess, old, ac)
 	return old
 }
 
@@ -402,6 +455,13 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	ac.setSession(targetSess)
 	ac.recordPreviousSession(from)
 	d.mu.Unlock()
+	if rc := from.renderCoordinator(); rc != nil {
+		rc.noteDetach(ac)
+	}
+	ac.sendMu.Lock()
+	ac.output.rebase()
+	ac.sendMu.Unlock()
+	d.attachCoordinator(targetSess, nil, ac)
 	d.firstPaint(targetSess, ac, ac.size)
 	return true
 }

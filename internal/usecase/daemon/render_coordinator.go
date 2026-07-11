@@ -103,9 +103,11 @@ type renderCoordinator struct {
 	pendingUrgent bool
 	coalesced     int
 
-	// previewWake receives the same coalesced wakes while a preview
-	// subscription is installed.
-	previewWake func(renderWake)
+	// previewWake receives the same coalesced wakes for the legacy single
+	// subscriber. previewWakes tracks picker subscriptions by viewer, so one
+	// inactive session cannot replace another viewer's live preview.
+	previewWake  func(renderWake)
+	previewWakes map[*attachedClient]func(renderWake)
 
 	// attachment is the currently bound client identity; callbacks from any
 	// other identity are stale and must not mutate coordinator state.
@@ -208,6 +210,13 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 		case <-cancel:
 		}
 	}()
+	// A nil timer channel is an inert test clock, not a schedulable deadline.
+	// Complete through the coordinator so manual daemon fixtures retain their
+	// deterministic synchronous contract without a direct paint fallback.
+	if timer.C() == nil {
+		c.fire(gen, false)
+		return
+	}
 	// Give fake-clock callbacks a chance to block on C before the test
 	// advances it; real clocks are unaffected.
 	runtime.Gosched()
@@ -294,8 +303,31 @@ func (c *renderCoordinator) subscribePreview(fn func(renderWake)) {
 	c.mu.Unlock()
 }
 
-// teardownPreview removes the preview subscription.
+// teardownPreview removes the legacy preview subscription.
 func (c *renderCoordinator) teardownPreview() { c.mu.Lock(); c.previewWake = nil; c.mu.Unlock() }
+
+// subscribePreviewFor installs the dynamic picker observer owned by viewer.
+// The owner key makes target changes, detach, and session teardown precise.
+func (c *renderCoordinator) subscribePreviewFor(viewer *attachedClient, fn func(renderWake)) {
+	if viewer == nil || fn == nil {
+		return
+	}
+	c.mu.Lock()
+	if !c.torndown {
+		if c.previewWakes == nil {
+			c.previewWakes = make(map[*attachedClient]func(renderWake))
+		}
+		c.previewWakes[viewer] = fn
+	}
+	c.mu.Unlock()
+}
+
+// teardownPreviewFor removes only viewer's dynamic picker observer.
+func (c *renderCoordinator) teardownPreviewFor(viewer *attachedClient) {
+	c.mu.Lock()
+	delete(c.previewWakes, viewer)
+	c.mu.Unlock()
+}
 
 // attach binds ac as the coordinator's current attachment identity.
 func (c *renderCoordinator) attach(ac *attachedClient) {
@@ -344,6 +376,8 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	c.mu.Lock()
 	c.torndown = true
 	c.attachment = nil
+	c.previewWake = nil
+	c.previewWakes = nil
 	c.pending = false
 	c.generation++
 	c.armed = false
@@ -438,11 +472,18 @@ func (c *renderCoordinator) fire(gen uint64, watchdog bool) {
 	c.cancelNormalTimerLocked()
 	c.pending, c.pendingReset, c.pendingUrgent, c.coalesced, c.armed = false, false, false, 0, false
 	wake, preview := c.opts.wake, c.previewWake
+	previews := make([]func(renderWake), 0, len(c.previewWakes))
+	for _, fn := range c.previewWakes {
+		previews = append(previews, fn)
+	}
 	c.mu.Unlock()
 	if wake != nil {
 		wake(w)
 	}
 	if preview != nil {
 		preview(w)
+	}
+	for _, fn := range previews {
+		fn(w)
 	}
 }

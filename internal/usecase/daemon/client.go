@@ -355,43 +355,52 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	sess.client = ac
 	name := sess.name
 	sess.mu.Unlock()
-	// A session has exactly one coordinator; replacement changes only its
-	// attachment identity and the private transitional compositor target.
+	d.attachCoordinator(sess, old, ac)
+	d.touchMRU(sess)
+	d.log.Info("client attached", "session", name, "resume", opts.resumeCapable)
+	d.applyHostTheme(sess, ac, d.effectiveTheme(themeui.Theme{}), true)
+	return ac, old
+}
+
+// attachCoordinator is the sole direct attachment handoff. It creates at
+// most one coordinator for sess and changes its identity before any caller
+// can publish resize or render state for the new client.
+func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient) *renderCoordinator {
+	sess.mu.Lock()
 	rc := sess.renderCoordinator()
 	if rc == nil {
 		rc = newRenderCoordinator(renderCoordinatorOptions{
 			clock: d.clock,
 			wake: func(w renderWake) {
 				sess.mu.Lock()
-				current := sess.client
+				attached := sess.client
 				sess.mu.Unlock()
-				if current != nil {
-					d.paint(sess, current, w.reset)
+				if attached != nil {
+					d.paint(sess, attached, w.reset)
 				}
 			},
 			ackReady: func() bool {
 				sess.mu.Lock()
-				current := sess.client
+				attached := sess.client
 				sess.mu.Unlock()
-				if current == nil {
+				if attached == nil {
 					return false
 				}
-				current.sendMu.Lock()
-				ready := !current.output.atCapacity()
-				current.sendMu.Unlock()
+				attached.sendMu.Lock()
+				ready := !attached.output.atCapacity()
+				attached.sendMu.Unlock()
 				return ready
 			},
 		})
 		sess.installRenderCoordinator(rc)
 	}
+	sess.mu.Unlock()
 	if old != nil {
-		rc.noteReplace(old, ac)
+		rc.noteReplace(old, current)
+	} else if current != nil {
+		rc.attach(current)
 	}
-	rc.attach(ac)
-	d.touchMRU(sess)
-	d.log.Info("client attached", "session", name, "resume", opts.resumeCapable)
-	d.applyHostTheme(sess, ac, d.effectiveTheme(themeui.Theme{}), true)
-	return ac, old
+	return rc
 }
 
 // resetScreenDefaultColors clears the known default foreground/background
