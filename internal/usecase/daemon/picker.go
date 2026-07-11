@@ -70,7 +70,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 		view := picker.SessionView{ID: s.id, Name: s.name, Active: s.active, Tabs: make([]string, len(s.tabs))}
 		sessionAttention := false
 		for i, tb := range s.tabs {
-			label := tabDisplayName(tb, i)
+			label := composeTabTitle(tabDisplayName(tb, i), tb.focusedPaneTitleLocked())
 			if tb.attention {
 				label = attentionSuffix(label)
 				sessionAttention = true

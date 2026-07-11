@@ -143,6 +143,17 @@ func TestRenderListScrollsSelectionIntoView(t *testing.T) {
 	require.True(t, frame.At(0, 3).Style.Inverse)
 }
 
+func TestRenderListTruncatesLabelWithEllipsis(t *testing.T) {
+	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []string{"a-really-long-focused-pane-tab-label"}, Active: 0}}, "s1", 0)
+
+	frame := m.Render(domain.Size{Cols: 45, Rows: 5}, Preview{})
+
+	layout := ChooseLayout(domain.Size{Cols: 45, Rows: 5})
+	require.Equal(t, 16, layout.List.Width, "test assumes a narrow list column")
+	require.Equal(t, '…', frame.At(layout.List.Width-1, 1).Rune, "truncated label should end with an ellipsis at the list edge")
+	require.Equal(t, ' ', frame.At(layout.List.Width, 1).Rune, "nothing should be drawn past the list width")
+}
+
 func TestRenderListOnlyDoesNotDrawPreview(t *testing.T) {
 	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []string{"tab"}, Active: 0}}, "s1", 0)
 	preview := Preview{Width: 1, Height: 1, Rows: [][]renderer.Cell{{cell('x')}}}
