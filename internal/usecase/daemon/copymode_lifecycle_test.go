@@ -65,6 +65,23 @@ func TestCopyModeLifecycleClosePaneClearsRecoveredClientState(t *testing.T) {
 	require.Nil(t, copyTargetPane(ac.overlays))
 }
 
+func TestCopyModeLifecycleCloseOnlyPaneInTabClearsRecoveredClientState(t *testing.T) {
+	d, sess, ac, _, releases := newManualTabSession(t, 2)
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	tb := sess.activeTab()
+	p := tb.focusedPane()
+	d.enterCopyMode(sess, ac)
+	require.True(t, ac.overlays.copyActive())
+
+	require.NoError(t, d.closePane(sess, tb, p.id, nil, false))
+	require.False(t, ac.overlays.copyActive())
+	require.Nil(t, copyTargetPane(ac.overlays))
+}
+
 func TestCopyModeLifecycleRejectsPublicationForInactiveOrRemovedPane(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

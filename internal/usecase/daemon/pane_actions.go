@@ -226,6 +226,11 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	if tb == nil {
 		return layout.ErrNotFound
 	}
+	if ac == nil {
+		sess.mu.Lock()
+		ac = sess.client
+		sess.mu.Unlock()
+	}
 	tb.mu.Lock()
 	p := tb.panes[id]
 	if p == nil || tb.tree == nil || !layout.ContainsLeaf(tb.tree.Root, id) {
@@ -234,11 +239,6 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	}
 	if len(layout.LeafIDs(tb.tree.Root)) <= 1 {
 		tb.mu.Unlock()
-		if ac == nil {
-			sess.mu.Lock()
-			ac = sess.client
-			sess.mu.Unlock()
-		}
 		if ac != nil {
 			ac.overlays.clearCopyModeForPane(p)
 		}
@@ -253,13 +253,6 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	d.applyLayoutLocked(tb)
 	tb.mu.Unlock()
 
-	// A reap/normal close can be called without the client argument. Recover
-	// the attached client after releasing tab.mu so copyMu never overlaps it.
-	if ac == nil {
-		sess.mu.Lock()
-		ac = sess.client
-		sess.mu.Unlock()
-	}
 	if ac != nil {
 		ac.overlays.clearCopyModeForPane(p)
 	}
