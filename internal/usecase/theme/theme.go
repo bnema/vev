@@ -337,6 +337,42 @@ func MutedTextStyle(t Theme) renderer.Style {
 	return style
 }
 
+// mutedVariantBlend is the fraction MutedVariantStyle blends a style's own
+// foreground toward its own background, subtler than MutedTextStyle's 0.45
+// (which blends the theme's global fg/bg instead of a style's own colors).
+const mutedVariantBlend = 0.4
+
+// EmphasisStyle returns base with bold applied when the client theme supports
+// styled output; otherwise base is returned unchanged.
+func EmphasisStyle(base renderer.Style, t Theme) renderer.Style {
+	if !usable(t) {
+		return base
+	}
+	out := base
+	out.Bold = true
+	return out
+}
+
+// MutedVariantStyle fades base's foreground toward its background when both
+// are RGB and the client theme supports styled output; otherwise base is
+// returned unchanged. When base has an RGB foreground but no RGB background,
+// it fades toward t.Background instead.
+func MutedVariantStyle(base renderer.Style, t Theme) renderer.Style {
+	if !usable(t) || !base.HasForegroundRGB {
+		return base
+	}
+	bg := base.BackgroundRGB
+	if !base.HasBackgroundRGB {
+		if !t.HasBG {
+			return base
+		}
+		bg = t.Background
+	}
+	out := base
+	out.ForegroundRGB = Blend(base.ForegroundRGB, bg, mutedVariantBlend)
+	return out
+}
+
 func DimStyle(style renderer.Style, t Theme) renderer.Style {
 	if !usable(t) {
 		return style

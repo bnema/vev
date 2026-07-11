@@ -20,8 +20,8 @@
 // Locking: a pane's screen/scrollback and per-client renderer shadow are
 // guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
 // session.mu; the registry by Daemon.mu. When more than one is held the order
-// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu. The PTY reader only ever takes pane.mu, so it
-// never blocks on a slow client.
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
+// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
 package daemon
 
 import (
@@ -37,26 +37,40 @@ import (
 )
 
 const (
-	attentionGlyph     = ''
 	maxMRUSessions     = 9
 	pulseFrameCount    = 30
 	pulseFrameInterval = 120 * time.Millisecond
 )
 
-func pulseStyle(frame int) (renderer.Style, bool) {
-	f := frame % pulseFrameCount
-	if f == 0 {
-		return renderer.DefaultStyle(), false
+// pulseVisible reports whether the attention bell glyph is showing (as
+// opposed to its blank beat) at frame.
+func pulseVisible(frame int) bool {
+	return frame%pulseFrameCount != 0
+}
+
+// pulseStyle returns the style for the attention bell glyph at frame, built
+// on top of base so the bell always keeps the caller's background (the tab's
+// accent/statusBar, or a faded MRU entry's blended colors) instead of
+// punching a default-background hole in a themed bar. On the invisible beat
+// it returns (base, false) unchanged.
+func pulseStyle(frame int, base renderer.Style) (renderer.Style, bool) {
+	if !pulseVisible(frame) {
+		return base, false
 	}
+	f := frame % pulseFrameCount
 	peak := pulseFrameCount / 2
 	distance := f - peak
 	if distance < 0 {
 		distance = -distance
 	}
 	intensity := 1 - float64(distance)/float64(peak)
-	style := renderer.DefaultStyle()
+	style := base
 	style.Bold = true
-	style.Foreground = 244 + int(intensity*11)
+	if base.HasForegroundRGB && base.HasBackgroundRGB {
+		style.ForegroundRGB = themeui.Blend(base.BackgroundRGB, base.ForegroundRGB, intensity)
+	} else {
+		style.Foreground = 244 + int(intensity*11)
+	}
 	return style, true
 }
 
@@ -65,16 +79,22 @@ func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, t
 	x := 0
 	labels := fitTabLabels(status.tabs, len(row), topRight)
 	for i, w := range status.tabs {
-		style := styles.statusBar
+		baseStyle := styles.statusBar
+		nameStyle := styles.tabName
+		titleStyle := styles.tabTitle
 		if w.active {
-			style = styles.accent
+			baseStyle = styles.accent
+			nameStyle = styles.tabNameActive
+			titleStyle = styles.tabTitleActive
 		}
-		writeStatusText(row, &x, " "+labels[i], style)
+		label := labels[i]
+		writeStatusText(row, &x, " "+label.text[:label.nameLen], nameStyle)
 		if w.attention {
-			writeStatusText(row, &x, " ", style)
-			writeBell(row, &x, frame)
+			writeStatusText(row, &x, " ", baseStyle)
+			writeBell(row, &x, frame, baseStyle)
 		}
-		writeStatusText(row, &x, " ", style)
+		writeStatusText(row, &x, label.text[label.nameLen:], titleStyle)
+		writeStatusText(row, &x, " ", baseStyle)
 	}
 	drawRightPlainText(row, topRight, x, styles.statusBar)
 }
@@ -121,7 +141,7 @@ func drawRankedStatusSessionEntry(row []renderer.Cell, x *int, sess rankedRecent
 	writeStatusText(row, x, name, style)
 	if sess.attention {
 		writeStatusText(row, x, " ", style)
-		writeBell(row, x, attentionFrame)
+		writeBell(row, x, attentionFrame, style)
 	}
 	writeStatusText(row, x, " ", style)
 }
@@ -133,7 +153,7 @@ func drawStatusSessionEntry(row []renderer.Cell, x *int, name string, ephemeral,
 	writeStatusText(row, x, " "+name, style)
 	if attention {
 		writeStatusText(row, x, " ", style)
-		writeBell(row, x, attentionFrame)
+		writeBell(row, x, attentionFrame, style)
 	}
 	writeStatusText(row, x, " ", style)
 }
@@ -285,9 +305,18 @@ func (d *Daemon) barStateBase(cur *session, copyFeedback string) barState {
 	return state
 }
 
+// fittedTabLabel is one tab's drawable label; text[:nameLen] is the tab-name
+// segment, text[nameLen:] the pane-title segment (possibly empty). nameLen is
+// always a byte offset landing on a rune boundary, since it is derived from
+// the byte length of the (possibly truncated) name prefix.
+type fittedTabLabel struct {
+	text    string
+	nameLen int
+}
+
 // fitTabLabels returns, per tab, the text drawn between its surrounding
 // spaces (attention glyph handled by the caller), guaranteeing all tabs fit.
-func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []string {
+func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []fittedTabLabel {
 	reserve := 1
 	if rightText != "" {
 		reserve = statusTextWidth(rightText) + 2
@@ -302,15 +331,17 @@ func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []string {
 		full[i] = composeTabTitle(t.name, t.paneTitle)
 		o := 2
 		if t.attention {
-			o += 1 + renderer.RuneWidth(attentionGlyph)
+			o += 1 + renderer.RuneWidth(ui.AttentionGlyph)
 		}
 		overhead[i] = o
 		widths[i] = statusTextWidth(full[i])
 		total += o + widths[i]
 	}
-	labels := make([]string, len(tabs))
+	labels := make([]fittedTabLabel, len(tabs))
 	if total <= budget {
-		copy(labels, full)
+		for i, t := range tabs {
+			labels[i] = fittedTabLabel{text: full[i], nameLen: len(t.name)}
+		}
 		return labels
 	}
 
@@ -332,13 +363,14 @@ func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []string {
 		textBudget := share - overhead[i]
 		switch {
 		case textBudget <= 0:
-			labels[i] = ""
+			labels[i] = fittedTabLabel{}
 		case widths[i] <= textBudget:
-			labels[i] = full[i]
+			labels[i] = fittedTabLabel{text: full[i], nameLen: len(tabs[i].name)}
 		case textBudget >= statusTextWidth(tabs[i].name)+4:
-			labels[i] = ui.TruncateText(full[i], textBudget)
+			labels[i] = fittedTabLabel{text: ui.TruncateText(full[i], textBudget), nameLen: len(tabs[i].name)}
 		default:
-			labels[i] = ui.TruncateText(tabs[i].name, textBudget)
+			text := ui.TruncateText(tabs[i].name, textBudget)
+			labels[i] = fittedTabLabel{text: text, nameLen: len(text)}
 		}
 		consumed := overhead[i] + min(widths[i], max(textBudget, 0))
 		remaining -= consumed
@@ -363,7 +395,7 @@ func fitRankedRecent(entries []rankedRecent, rowLen, leftUsed int, feedback stri
 		}
 		width := 2 + statusTextWidth(strconv.Itoa(e.rank)+":") + statusTextWidth(name)
 		if e.attention {
-			width += 1 + renderer.RuneWidth(attentionGlyph)
+			width += 1 + renderer.RuneWidth(ui.AttentionGlyph)
 		}
 		return width
 	}
@@ -395,7 +427,7 @@ func fitMRU(entries []recentSession, rowLen, leftUsed int, feedback string) []re
 		}
 		n := 2 + statusTextWidth(name)
 		if e.attention {
-			n += 1 + renderer.RuneWidth(attentionGlyph)
+			n += 1 + renderer.RuneWidth(ui.AttentionGlyph)
 		}
 		return n
 	}
@@ -453,13 +485,16 @@ func mruStyle(base renderer.Style, t themeui.Theme, i, count int) renderer.Style
 	return base
 }
 
-func writeBell(row []renderer.Cell, x *int, frame int) {
-	style, visible := pulseStyle(frame)
+// writeBell draws the attention glyph on its visible beat, or a plain cell in
+// base's style on its blank beat, so the bell never leaves a bare
+// default-background hole in a themed bar.
+func writeBell(row []renderer.Cell, x *int, frame int, base renderer.Style) {
+	style, visible := pulseStyle(frame, base)
 	if !visible {
-		writeStatusText(row, x, " ", renderer.DefaultStyle())
+		writeStatusText(row, x, " ", base)
 		return
 	}
-	writeStatusText(row, x, string(attentionGlyph), style)
+	writeStatusText(row, x, string(ui.AttentionGlyph), style)
 }
 
 func writeStatusText(row []renderer.Cell, x *int, text string, style renderer.Style) {

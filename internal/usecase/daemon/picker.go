@@ -72,15 +72,18 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 	curTab := 0
 	for _, s := range sessions {
 		s.mu.Lock()
-		view := picker.SessionView{ID: s.id, Name: s.name, Active: s.active, Tabs: make([]string, len(s.tabs))}
+		view := picker.SessionView{ID: s.id, Name: s.name, Active: s.active, Tabs: make([]picker.TabEntry, len(s.tabs))}
 		sessionAttention := false
 		for i, tb := range s.tabs {
-			label := composeTabTitle(tabDisplayName(tb, i), tb.focusedPaneTitle(includeTerminalTitle))
+			name := tabDisplayName(tb, i)
+			view.Tabs[i] = picker.TabEntry{
+				Name:      name,
+				Detail:    tabTitleDetail(name, tb.focusedPaneTitle(includeTerminalTitle)),
+				Attention: tb.attention,
+			}
 			if tb.attention {
-				label = attentionSuffix(label)
 				sessionAttention = true
 			}
-			view.Tabs[i] = label
 		}
 		if sessionAttention {
 			view.Name = attentionSuffix(view.Name)
@@ -95,7 +98,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 		views = append(views, picker.SessionView{
 			ID:      domain.SessionID("stopped:" + s.name),
 			Name:    s.name,
-			Tabs:    []string{""},
+			Tabs:    []picker.TabEntry{{}},
 			Stopped: true,
 		})
 	}
@@ -103,7 +106,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 }
 
 func attentionSuffix(label string) string {
-	return label + " " + string(attentionGlyph)
+	return label + " " + string(ui.AttentionGlyph)
 }
 
 func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
@@ -496,8 +499,16 @@ func (d *Daemon) refreshPicker(ac *attachedClient) {
 
 func composePickerClientFrame(model *picker.Model, preview picker.Preview, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
 	styleSet := resolveThemeStyles(styles)
-	return composeModalClientFrame(base, pickerModal, styleSet, styleSet.selection, func(size domain.Size, styles ...renderer.Style) renderer.Frame {
-		return model.Render(size, preview, styles...)
+	renderStyles := picker.RenderStyles{
+		Selection:      styleSet.selection,
+		SelectionName:  styleSet.pickerSelectionName,
+		SelectionMuted: styleSet.pickerSelectionMuted,
+		Name:           styleSet.pickerName,
+		Detail:         styleSet.paletteDesc,
+		Base:           renderer.DefaultStyle(),
+	}
+	return composeModalClientFrame(base, pickerModal, styleSet, styleSet.selection, func(size domain.Size, _ ...renderer.Style) renderer.Frame {
+		return model.Render(size, preview, renderStyles)
 	})
 }
 

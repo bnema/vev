@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -54,7 +55,7 @@ func TestPaintDoesNotAckActiveAttentionOnBlankPulseFrame(t *testing.T) {
 
 	d.paint(sess, ac, true)
 	data := mustOutputData(t, sends)
-	require.NotContains(t, string(data), string(attentionGlyph))
+	require.NotContains(t, string(data), string(ui.AttentionGlyph))
 
 	sess.mu.Lock()
 	require.True(t, sess.tabs[0].attention)
@@ -63,7 +64,7 @@ func TestPaintDoesNotAckActiveAttentionOnBlankPulseFrame(t *testing.T) {
 	d.setAttentionFrame(1)
 	d.paint(sess, ac, true)
 	data = mustOutputData(t, sends)
-	require.Contains(t, string(data), string(attentionGlyph))
+	require.Contains(t, string(data), string(ui.AttentionGlyph))
 
 	sess.mu.Lock()
 	require.False(t, sess.tabs[0].attention)
@@ -98,7 +99,7 @@ func TestPTYReaderActiveVisibleAgentNotificationRendersBellBeforeAck(t *testing.
 
 			d.paint(sess, ac, true)
 			data := mustOutputData(t, sends)
-			require.Contains(t, string(data), string(attentionGlyph))
+			require.Contains(t, string(data), string(ui.AttentionGlyph))
 
 			sess.mu.Lock()
 			require.False(t, sess.tabs[0].attention)
@@ -106,7 +107,7 @@ func TestPTYReaderActiveVisibleAgentNotificationRendersBellBeforeAck(t *testing.
 			sess.mu.Unlock()
 
 			cleared := mustOutputData(t, sends)
-			require.NotContains(t, string(cleared), string(attentionGlyph))
+			require.NotContains(t, string(cleared), string(ui.AttentionGlyph))
 
 			_ = pty.Close()
 			d.sessWg.Wait()
@@ -429,13 +430,13 @@ func TestCloseRingingTabRefreshesOtherSessionBottomBar(t *testing.T) {
 
 	d.paint(sessB, acB, true)
 	before := mustOutputData(t, sendsB)
-	require.Contains(t, string(before), string(attentionGlyph))
+	require.Contains(t, string(before), string(ui.AttentionGlyph))
 
 	d.closeTab(sessA, ringing, true)
 	_ = mustOutputData(t, sendsA)
 
 	after := mustOutputData(t, sendsB)
-	require.NotContains(t, string(after), string(attentionGlyph))
+	require.NotContains(t, string(after), string(ui.AttentionGlyph))
 }
 
 func TestAltAJumpAttentionSelectsOldestLocalTab(t *testing.T) {
