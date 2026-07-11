@@ -389,8 +389,8 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 	// Rendering is coordinator-driven: advance a controllable clock through the
 	// retained resize timer and its resulting coordinator wake rather than
 	// relying on wall-clock debounce delivery.
-	clk := &signalClock{timers: make(chan *signalTimer, 16)}
-	d := newTestDaemon(t, newFactory(t, p), clk)
+	clk := newCoordinatorMockClock(t, 16)
+	d := newTestDaemon(t, newFactory(t, p), clk.clock)
 	tr, sends, releaseConn := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 16, Rows: 5}))
 	advanceRender := func() {
 		for range 4096 {

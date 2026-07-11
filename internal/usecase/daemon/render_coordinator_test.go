@@ -45,7 +45,9 @@ func newCoordinatorMockClock(t *testing.T, capacity int) *coordinatorMockClock {
 	clk.clock.EXPECT().NewTimer(mock.MatchedBy(func(d time.Duration) bool {
 		return d == urgentRenderDeadline ||
 			(d >= minOutputRenderDeadline && d <= maxOutputRenderDeadline) ||
-			d == maxSyncUpdateDuration
+			d == maxSyncUpdateDuration ||
+			d == time.Second ||
+			d == 15*time.Minute
 	})).RunAndReturn(func(d time.Duration) ports.Timer {
 		timer := &coordinatorMockTimer{
 			mock:     portsmocks.NewMockTimer(t),

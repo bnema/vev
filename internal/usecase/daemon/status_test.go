@@ -1312,8 +1312,8 @@ func TestStatusBarCopyFeedbackBoundaryWidths(t *testing.T) {
 func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
-	clock := &signalClock{timers: make(chan *signalTimer, 64)}
-	d := newTestDaemon(t, newFactorySeq(t, p1, p2), clock)
+	clock := newCoordinatorMockClock(t, 64)
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2), clock.clock)
 	tr, sends, releaseConn := newConn(t,
 		mustHello(ports.IntentNew, "work", domain.Size{Cols: 20, Rows: 5}),
 		frameInput([]byte("\x1b ")),
