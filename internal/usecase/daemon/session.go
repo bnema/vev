@@ -648,7 +648,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 		d.activateTab(sess, destination)
 	}
 	if repaint && ac != nil {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "session.go")
 	}
 	if ringing {
 		d.repaintAllAttachedClients()

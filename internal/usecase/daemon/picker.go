@@ -47,7 +47,7 @@ func (d *Daemon) enterPicker(sess *session, ac *attachedClient) {
 	ac.overlays.pickerPreview = nil
 	ac.overlays.pickerMu.Unlock()
 	d.registerPreviewForSelection(ac)
-	d.paint(sess, ac, true)
+	d.invalidateRender(sess, ac, true, "picker.go")
 }
 
 func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
@@ -141,7 +141,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 				d.killPickerTarget(target)
 			}
 			d.refreshPicker(ac)
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "picker.go")
 			return
 		case 'j':
 			ac.overlays.picker.Down()
@@ -191,7 +191,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 		return
 	}
 	if exit || changed {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "picker.go")
 	}
 }
 
@@ -211,7 +211,7 @@ func (d *Daemon) retainPickerESCLocked(ac *attachedClient) {
 
 		d.unregisterPreview(ac)
 		if sess := ac.currentSession(); sess != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "picker.go")
 		}
 	})
 }
@@ -321,7 +321,7 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 	tb.mu.Unlock()
 	if cleared {
 		if sess := previewer.currentSession(); sess != nil {
-			d.paint(sess, previewer, true)
+			d.invalidateRender(sess, previewer, true, "picker.go")
 		}
 	}
 }
@@ -362,19 +362,19 @@ func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker
 	}
 	targetSess := d.sessionByID(target.Session)
 	if targetSess == nil {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "picker.go")
 		return false
 	}
 	if targetSess == sess {
 		if sess.switchTab(target.TabIndex) {
 			d.activateTab(sess, sess.activeTab())
 		}
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "picker.go")
 		return true
 	}
 	old := d.stealClientForTarget(sess, ac, targetSess, target)
 	if ac.currentSession() != targetSess {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "picker.go")
 		return false
 	}
 	if old != nil && old != ac {
@@ -425,7 +425,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	stopped, ok := d.stopped[target.Name]
 	if !ok || stopped.purging {
 		d.mu.Unlock()
-		d.paint(from, ac, true)
+		d.invalidateRender(from, ac, true, "picker.go")
 		return false
 	}
 	from.mu.Lock()
@@ -441,7 +441,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 		from.mu.Unlock()
 		d.mu.Unlock()
 		d.log.Warn("resuming stopped session failed", "err", err, "session", target.Name)
-		d.paint(from, ac, true)
+		d.invalidateRender(from, ac, true, "picker.go")
 		return false
 	}
 	from.client = nil

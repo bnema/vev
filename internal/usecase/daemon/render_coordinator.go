@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"runtime"
 	"sync"
 	"time"
 
@@ -102,6 +103,10 @@ type renderCoordinator struct {
 	torndown   bool
 
 	resize resizeRequestMetadata
+	// generation invalidates callbacks from superseded deadline/watchdog timers.
+	generation     uint64
+	armed          bool
+	syncGeneration uint64
 }
 
 // newRenderCoordinator constructs a coordinator bound to opts. It starts no
@@ -113,53 +118,217 @@ func newRenderCoordinator(opts renderCoordinatorOptions) *renderCoordinator {
 // invalidate publishes one producer state transition. Consecutive
 // invalidations coalesce under a single armed deadline; the latest state and
 // the stickiest reset win.
-func (c *renderCoordinator) invalidate(renderInvalidation) {}
+func (c *renderCoordinator) invalidate(inv renderInvalidation) {
+	c.mu.Lock()
+	if c.torndown {
+		c.mu.Unlock()
+		return
+	}
+	if c.opts.onInvalidate != nil {
+		c.opts.onInvalidate(inv)
+	}
+	wasPending, wasUrgent := c.pending, c.pendingUrgent
+	c.pending = true
+	c.pendingReset = c.pendingReset || inv.reset
+	c.pendingUrgent = c.pendingUrgent || inv.class == invalidateUrgent
+	c.coalesced++
+	// Cap one normal deadline; an urgent transition may supersede it.
+	arm := !wasPending || (!wasUrgent && c.pendingUrgent)
+	if arm {
+		c.generation++
+	}
+	gen := c.generation
+	delay := minOutputRenderDeadline
+	if c.pendingUrgent {
+		delay = urgentRenderDeadline
+	}
+	clock := c.opts.clock
+	c.armed = c.armed || arm
+	c.mu.Unlock()
+	if !arm || clock == nil {
+		return
+	}
+	timer := clock.NewTimer(delay)
+	go func() { <-timer.C(); c.fire(gen, false) }()
+	// Give fake-clock callbacks a chance to block on C before the test
+	// advances it; real clocks are unaffected.
+	runtime.Gosched()
+}
 
 // notifyAck reports that the client acknowledged an output state, releasing
 // at most one deferred wake.
-func (c *renderCoordinator) notifyAck() {}
+func (c *renderCoordinator) notifyAck() {
+	c.mu.Lock()
+	gen := c.generation
+	c.mu.Unlock()
+	c.fire(gen, false)
+}
 
 // noteSyncBegin records that a synchronized-output batch opened for gen and
 // arms the completion watchdog.
-func (c *renderCoordinator) noteSyncBegin(uint64) {}
+func (c *renderCoordinator) noteSyncBegin(gen uint64) {
+	c.mu.Lock()
+	if c.torndown {
+		c.mu.Unlock()
+		return
+	}
+	c.syncGeneration = gen
+	clock := c.opts.clock
+	c.mu.Unlock()
+	if clock == nil {
+		return
+	}
+	timer := clock.NewTimer(maxSyncUpdateDuration)
+	go func() {
+		<-timer.C()
+		c.mu.Lock()
+		valid := !c.torndown && c.syncGeneration == gen
+		c.mu.Unlock()
+		if valid {
+			c.fireCurrent(true)
+		}
+	}()
+}
 
 // noteSyncEnd records that the batch for gen completed, flushing pending
 // state in one wake.
-func (c *renderCoordinator) noteSyncEnd(uint64) {}
+func (c *renderCoordinator) noteSyncEnd(gen uint64) {
+	c.mu.Lock()
+	if c.syncGeneration != gen {
+		c.mu.Unlock()
+		return
+	}
+	c.syncGeneration = 0
+	c.mu.Unlock()
+	c.fireCurrent(false)
+}
 
 // subscribePreview installs fn as the preview observer for coalesced wakes.
-func (c *renderCoordinator) subscribePreview(func(renderWake)) {}
+func (c *renderCoordinator) subscribePreview(fn func(renderWake)) {
+	c.mu.Lock()
+	c.previewWake = fn
+	c.mu.Unlock()
+}
 
 // teardownPreview removes the preview subscription.
-func (c *renderCoordinator) teardownPreview() {}
+func (c *renderCoordinator) teardownPreview() { c.mu.Lock(); c.previewWake = nil; c.mu.Unlock() }
 
 // attach binds ac as the coordinator's current attachment identity.
-func (c *renderCoordinator) attach(*attachedClient) {}
+func (c *renderCoordinator) attach(ac *attachedClient) {
+	c.mu.Lock()
+	if !c.torndown {
+		c.attachment = ac
+	}
+	c.mu.Unlock()
+}
 
 // noteDetach invalidates pending wakes and stale callbacks for a detaching
 // attachment.
-func (c *renderCoordinator) noteDetach(*attachedClient) {}
+func (c *renderCoordinator) noteDetach(ac *attachedClient) {
+	c.mu.Lock()
+	if c.attachment == ac {
+		c.attachment = nil
+		c.pending = false
+		c.generation++
+	}
+	c.mu.Unlock()
+}
 
 // noteReplace hands the coordinator from old to replacement; callbacks
 // captured by old become stale.
-func (c *renderCoordinator) noteReplace(old, replacement *attachedClient) {}
+func (c *renderCoordinator) noteReplace(old, replacement *attachedClient) {
+	c.mu.Lock()
+	if c.attachment == old {
+		c.attachment = replacement
+		c.pending = false
+		c.generation++
+	}
+	c.mu.Unlock()
+}
 
 // notePark invalidates pending wakes when the attachment parks for resume.
-func (c *renderCoordinator) notePark(*attachedClient) {}
+func (c *renderCoordinator) notePark(ac *attachedClient) { c.noteDetach(ac) }
 
 // noteSessionTeardown terminally invalidates the coordinator.
-func (c *renderCoordinator) noteSessionTeardown() {}
+func (c *renderCoordinator) noteSessionTeardown() {
+	c.mu.Lock()
+	c.torndown = true
+	c.attachment = nil
+	c.pending = false
+	c.generation++
+	c.mu.Unlock()
+}
 
 // recordResizeRequest records the latest requested geometry and source before
 // the request delegates to the retained PR #71 attachment path. It returns
 // the strictly monotonically increased epoch, or 0 when the source is stale.
-func (c *renderCoordinator) recordResizeRequest(domain.Size, *attachedClient) uint64 { return 0 }
+func (c *renderCoordinator) recordResizeRequest(size domain.Size, source *attachedClient) uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.torndown || c.attachment != source {
+		return 0
+	}
+	c.resize.epoch++
+	c.resize.size = size
+	c.resize.source = source
+	return c.resize.epoch
+}
 
 // resizeSnapshot returns a locked copy of the latest resize metadata.
-func (c *renderCoordinator) resizeSnapshot() resizeRequestMetadata { return resizeRequestMetadata{} }
+func (c *renderCoordinator) resizeSnapshot() resizeRequestMetadata {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resize
+}
 
 // renderCoordinator returns the coordinator installed for this session.
 func (s *session) renderCoordinator() *renderCoordinator { return s.coordinator.Load() }
 
 // installRenderCoordinator publishes rc as the session's coordinator.
 func (s *session) installRenderCoordinator(rc *renderCoordinator) { s.coordinator.Store(rc) }
+
+func (c *renderCoordinator) fireCurrent(watchdog bool) {
+	c.mu.Lock()
+	gen := c.generation
+	c.mu.Unlock()
+	c.fire(gen, watchdog)
+}
+
+// invalidateRender is the sole producer fan-in. In tests and transitional
+// headless paths without an attached coordinator it retains the old private
+// compositor; attached sessions always schedule through their coordinator.
+func (d *Daemon) invalidateRender(sess *session, ac *attachedClient, reset bool, producer string) {
+	if sess != nil {
+		if rc := sess.renderCoordinator(); rc != nil {
+			rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer})
+			return
+		}
+	}
+	d.paint(sess, ac, reset)
+}
+
+func (c *renderCoordinator) fire(gen uint64, watchdog bool) {
+	c.mu.Lock()
+	if c.torndown || !c.pending || (!watchdog && gen != c.generation) {
+		c.mu.Unlock()
+		return
+	}
+	if !watchdog && c.opts.syncActive != nil && c.opts.syncActive() {
+		c.mu.Unlock()
+		return
+	}
+	if c.opts.ackReady != nil && !c.opts.ackReady() {
+		c.mu.Unlock()
+		return
+	}
+	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog}
+	c.pending, c.pendingReset, c.pendingUrgent, c.coalesced, c.armed = false, false, false, 0, false
+	wake, preview := c.opts.wake, c.previewWake
+	c.mu.Unlock()
+	if wake != nil {
+		wake(w)
+	}
+	if preview != nil {
+		preview(w)
+	}
+}

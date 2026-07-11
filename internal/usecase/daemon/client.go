@@ -396,6 +396,22 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	sess.client = ac
 	name := sess.name
 	sess.mu.Unlock()
+	// A session has exactly one coordinator; replacement changes only its
+	// attachment identity and the private transitional compositor target.
+	rc := sess.renderCoordinator()
+	if rc == nil {
+		rc = newRenderCoordinator(renderCoordinatorOptions{
+			clock:      d.clock,
+			wake:       func(w renderWake) { d.paint(sess, ac, w.reset) },
+			ackReady:   func() bool { return true },
+			syncActive: func() bool { return false },
+		})
+		sess.installRenderCoordinator(rc)
+	}
+	if old != nil {
+		rc.noteReplace(old, ac)
+	}
+	rc.attach(ac)
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", name, "resume", opts.resumeCapable)
 	d.applyHostTheme(sess, ac, d.effectiveTheme(themeui.Theme{}), true)
@@ -449,7 +465,7 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 		d.resizeForFirstPaint(sess, ac, clientSize)
 	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
-	d.paint(sess, ac, true)
+	d.invalidateRender(sess, ac, true, "client.go")
 	d.activateTab(sess, tb)
 }
 
@@ -504,7 +520,7 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 			if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
 				ac.ackOutputState(ack.AckedStateNum)
 				if reset, ok := ac.takeDeferredPaint(); ok {
-					d.paint(sess, ac, reset)
+					d.invalidateRender(sess, ac, reset, "client.go")
 				}
 			}
 		case ports.MsgPing:
@@ -526,6 +542,9 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 		return // already displaced by a newer client; nothing to do
 	}
 	ac.cancelResizePaint()
+	if rc := sess.renderCoordinator(); rc != nil {
+		rc.noteDetach(ac)
+	}
 	d.unregisterPreview(ac)
 	sess.mu.Lock()
 	ephemeral := sess.ephemeral
@@ -576,7 +595,7 @@ func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) 
 	if !d.applyHostTheme(sess, ac, t, false) {
 		return
 	}
-	d.paint(sess, ac, true)
+	d.invalidateRender(sess, ac, true, "client.go")
 }
 
 func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
@@ -603,6 +622,10 @@ func (d *Daemon) resizeWithPaint(sess *session, ac *attachedClient, sz domain.Si
 			return
 		}
 		ac.size = sz
+		if rc := sess.renderCoordinator(); rc != nil {
+			rc.attach(ac)
+			rc.recordResizeRequest(sz, ac)
+		}
 	}
 	tbSize := tabSize(sz)
 

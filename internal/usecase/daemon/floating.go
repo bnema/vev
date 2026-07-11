@@ -192,7 +192,7 @@ func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 	if start {
 		d.launchFloating(sess, tb, cfg, generation, true)
 		if ac != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "floating.go")
 		}
 		return nil
 	}
@@ -200,7 +200,7 @@ func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 		d.resizeActiveFloating(tb)
 	}
 	if ac != nil {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "floating.go")
 	}
 	return nil
 }
@@ -348,7 +348,7 @@ func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uin
 		ac := sess.client
 		sess.mu.Unlock()
 		if ac != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "floating.go")
 		}
 	}
 }
@@ -369,7 +369,7 @@ func (d *Daemon) reapFloating(sess *session, tb *tab, p *pane, generation uint64
 	sess.mu.Unlock()
 	copyCleared := ac != nil && ac.overlays.clearCopyModeForPane(p)
 	if ac != nil && (visible || copyCleared) {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "floating.go")
 	}
 }
 

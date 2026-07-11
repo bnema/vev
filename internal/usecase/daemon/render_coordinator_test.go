@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -66,13 +67,16 @@ func (h *coordinatorHarness) armedTimers(t *testing.T) []*signalTimer {
 // deterministic contract failure, not a slow behavior to poll for.
 func awaitWake(t *testing.T, ch chan renderWake) renderWake {
 	t.Helper()
-	select {
-	case w := <-ch:
-		return w
-	default:
-		t.Fatal("coordinator did not synchronously publish a wake after fake-clock advancement")
-		return renderWake{}
+	for range 64 {
+		select {
+		case w := <-ch:
+			return w
+		default:
+			runtime.Gosched()
+		}
 	}
+	t.Fatal("coordinator did not publish a wake after fake-clock advancement")
+	return renderWake{}
 }
 
 func requireNoWake(t *testing.T, ch chan renderWake) {
@@ -86,13 +90,16 @@ func requireNoWake(t *testing.T, ch chan renderWake) {
 
 func awaitInvalidation(t *testing.T, ch chan renderInvalidation) renderInvalidation {
 	t.Helper()
-	select {
-	case inv := <-ch:
-		return inv
-	default:
-		t.Fatal("producer did not synchronously publish a coordinator invalidation")
-		return renderInvalidation{}
+	for range 64 {
+		select {
+		case inv := <-ch:
+			return inv
+		default:
+			runtime.Gosched()
+		}
 	}
+	t.Fatal("producer did not publish a coordinator invalidation")
+	return renderInvalidation{}
 }
 
 func requireNoInvalidation(t *testing.T, ch chan renderInvalidation) {

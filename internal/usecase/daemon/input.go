@@ -118,7 +118,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 					if target.ID != oldFocus {
 						d.refreshPaneTitleOnFocus(sess, target.ID)
 					}
-					d.paint(sess, ac, true)
+					d.invalidateRender(sess, ac, true, "input.go")
 					return
 				}
 			}
@@ -174,7 +174,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 			d.exitCopyMode(ac)
 			d.refreshPaneTitleOnFocus(sess, pl.ID)
 		}
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "input.go")
 		return
 	}
 	var p *pane
@@ -195,7 +195,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 		if isMouseFocusPress(ev) && pl.ID != oldFocus {
 			d.exitCopyMode(ac)
 			d.refreshPaneTitleOnFocus(sess, pl.ID)
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "input.go")
 		}
 		if multi {
 			ev = translateMouseEvent(ev, pl.Content.X, pl.Content.Y)
@@ -290,7 +290,7 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 				rt.copyDragging = true
 			}
 			rt.copyMu.Unlock()
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "input.go")
 		case mouse.Release:
 			rt.copyMu.Lock()
 			rt.normalMousePressValid = false
@@ -432,7 +432,7 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 		idx := int(action - keys.ActionSwitchTab1)
 		if sess.switchTab(idx) {
 			h.d.activateTab(sess, sess.activeTab())
-			h.d.paint(sess, h.ac, true)
+			h.d.invalidateRender(sess, h.ac, true, "input.go")
 		}
 	}
 }

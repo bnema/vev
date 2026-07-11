@@ -23,7 +23,7 @@ func (d *Daemon) spawnPaneOp(
 ) error {
 	if d.ptys == nil {
 		if ac != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "pane_actions.go")
 		}
 		return nil
 	}
@@ -99,7 +99,7 @@ func (d *Daemon) spawnPaneOp(
 	d.startPaneGoroutines(sess, tb, p)
 	markSnapshotDirty(sess)
 	if ac != nil {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "pane_actions.go")
 	}
 	return nil
 }
@@ -167,7 +167,7 @@ func (d *Daemon) stackPane(sess *session, ac *attachedClient) error {
 func (d *Daemon) toggleStack(sess *session, ac *attachedClient) error {
 	if d.ptys == nil {
 		if ac != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "pane_actions.go")
 		}
 		return nil
 	}
@@ -188,7 +188,7 @@ func (d *Daemon) toggleStack(sess *session, ac *attachedClient) error {
 	if err == nil {
 		markSnapshotDirty(sess)
 		if ac != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "pane_actions.go")
 		}
 	}
 	return err
@@ -197,7 +197,7 @@ func (d *Daemon) toggleStack(sess *session, ac *attachedClient) error {
 func (d *Daemon) closeFocusedPane(sess *session, ac *attachedClient) error {
 	if d.ptys == nil {
 		if ac != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "pane_actions.go")
 		}
 		return nil
 	}
@@ -267,7 +267,7 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	markSnapshotDirty(sess)
 	if repaint {
 		if ac != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "pane_actions.go")
 		}
 	}
 	return nil
@@ -305,7 +305,7 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 				d.refreshPaneTitleOnFocus(sess, newFocus)
 			}
 		}
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "pane_actions.go")
 	}
 	if errors.Is(err, layout.ErrNoPane) {
 		return nil

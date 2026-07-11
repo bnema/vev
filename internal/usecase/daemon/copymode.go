@@ -62,7 +62,7 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 	if delta > 0 && rt.copyMode.AtBottom(*document) {
 		rt.clearCopyModeLocked()
 		rt.copyMu.Unlock()
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "copymode.go")
 		return
 	}
 	rt.copyMode.Move(*document, delta)
@@ -72,7 +72,7 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 	}
 	rt.copyMu.Unlock()
 
-	d.paint(sess, ac, true)
+	d.invalidateRender(sess, ac, true, "copymode.go")
 }
 
 func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
@@ -94,7 +94,7 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	if !d.publishCopyMode(sess, ac, tb, p, document, nil) {
 		return
 	}
-	d.paint(sess, ac, true)
+	d.invalidateRender(sess, ac, true, "copymode.go")
 }
 
 // publishCopyMode installs a non-renderable candidate, validates its captured
@@ -190,7 +190,7 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
 	rt.copyMu.Unlock()
 
 	if changed {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "copymode.go")
 	}
 }
 
@@ -220,7 +220,7 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		changed, closeSearch, accepted := d.routeCopySearchInputLocked(rt, *document, data)
 		rt.copyMu.Unlock()
 		if changed || closeSearch || accepted {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "copymode.go")
 		}
 		return
 	}
@@ -309,11 +309,11 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		rt.copyMu.Unlock()
 	}
 	if exit {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "copymode.go")
 		return
 	}
 	if changed {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "copymode.go")
 	}
 }
 
@@ -386,7 +386,7 @@ func (d *Daemon) retainCopyESCLocked(ac *attachedClient) {
 		rt.copyMu.Unlock()
 
 		if sess := ac.currentSession(); sess != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "copymode.go")
 		}
 	})
 }

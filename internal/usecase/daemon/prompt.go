@@ -20,7 +20,7 @@ func (d *Daemon) enterPrompt(sess *session, ac *attachedClient, title, initial s
 	ac.overlays.promptSubmit = submit
 	ac.overlays.promptPending = nil
 	ac.overlays.promptMu.Unlock()
-	d.paint(sess, ac, true)
+	d.invalidateRender(sess, ac, true, "prompt.go")
 }
 
 func (d *Daemon) closePrompt(ac *attachedClient) {
@@ -77,22 +77,22 @@ func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte) {
 				ac.overlays.prompt.SetError(err.Error())
 			}
 			ac.overlays.promptMu.Unlock()
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "prompt.go")
 			return
 		}
 		d.closePrompt(ac)
 		if current := ac.currentSession(); current != nil {
-			d.paint(current, ac, true)
+			d.invalidateRender(current, ac, true, "prompt.go")
 		}
 		return
 	}
 	if exit {
 		d.closePrompt(ac)
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "prompt.go")
 		return
 	}
 	if changed {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "prompt.go")
 	}
 }
 

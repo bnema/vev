@@ -250,10 +250,10 @@ func (d *Daemon) render(sess *session, tb *tab, p *pane) {
 
 	if previewer != nil {
 		if previewSess := previewer.currentSession(); previewSess != nil {
-			d.paint(previewSess, previewer, false)
+			d.invalidateRender(previewSess, previewer, false, "render.go")
 		}
 		if ac != nil && active && ac != previewer {
-			d.paint(sess, ac, false)
+			d.invalidateRender(sess, ac, false, "render.go")
 			return
 		}
 		p.mu.Lock()
@@ -269,7 +269,7 @@ func (d *Daemon) render(sess *session, tb *tab, p *pane) {
 		return
 	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), false)
-	d.paint(sess, ac, false)
+	d.invalidateRender(sess, ac, false, "render.go")
 }
 
 // paint draws the composed client frame (active tab plus status bar) and
@@ -318,8 +318,23 @@ func (d *Daemon) scheduleResizePaintLocked(sess *session, ac *attachedClient) {
 	generation := ac.resizePaintGeneration
 	ac.resizePaintPending = true
 	ac.resizePaint.retain(d.clock, maxDebounceInterval, func(ports.Timer) {
-		d.paintForResizeGeneration(sess, ac, true, generation)
+		d.invalidateForResizeGeneration(sess, ac, generation)
 	})
+}
+
+// invalidateForResizeGeneration preserves PR #71's attachment-owned timer,
+// generation rejection, and cancellation while transferring only its eventual
+// render request to the coordinator.
+func (d *Daemon) invalidateForResizeGeneration(sess *session, ac *attachedClient, generation uint64) {
+	ac.sendMu.Lock()
+	if ac.currentSession() != sess || !ac.resizePaintPending || ac.resizePaintGeneration != generation {
+		ac.sendMu.Unlock()
+		return
+	}
+	ac.resizePaint.stop()
+	ac.resizePaintPending = false
+	ac.sendMu.Unlock()
+	d.invalidateRender(sess, ac, true, "render.go")
 }
 
 func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
