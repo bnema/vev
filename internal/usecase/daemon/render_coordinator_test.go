@@ -9,20 +9,72 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
 // --- coordinator harness ------------------------------------------------------
 
-// coordinatorHarness wires one coordinator to a fake clock and recording
-// hooks. Every assertion is channel- or counter-based; nothing sleeps.
+// coordinatorMockClock uses generated mocks while retaining deterministic timer
+// channels and recorded deadlines for coordinator scheduling assertions.
+type coordinatorMockClock struct {
+	clock  *portsmocks.MockClock
+	timers chan *coordinatorMockTimer
+	inert  bool
+}
+
+type coordinatorMockTimer struct {
+	mock     *portsmocks.MockTimer
+	ch       chan time.Time
+	duration time.Duration
+}
+
+func newCoordinatorMockClock(t *testing.T, capacity int) *coordinatorMockClock {
+	t.Helper()
+	clk := &coordinatorMockClock{
+		clock:  portsmocks.NewMockClock(t),
+		timers: make(chan *coordinatorMockTimer, capacity),
+	}
+	clk.clock.EXPECT().Now().Return(time.Time{}).Maybe()
+	clk.clock.EXPECT().NewTimer(mock.MatchedBy(func(d time.Duration) bool {
+		return d == urgentRenderDeadline ||
+			(d >= minOutputRenderDeadline && d <= maxOutputRenderDeadline) ||
+			d == maxSyncUpdateDuration
+	})).RunAndReturn(func(d time.Duration) ports.Timer {
+		timer := &coordinatorMockTimer{
+			mock:     portsmocks.NewMockTimer(t),
+			duration: d,
+		}
+		if !clk.inert {
+			timer.ch = make(chan time.Time, 1)
+		}
+		// A normal deadline reads C both in its worker and in the inert-clock
+		// guard; a watchdog reads it in its worker. The generated expectation
+		// makes every channel access observable without a hand-written Timer.
+		timer.mock.EXPECT().C().Maybe().Return((<-chan time.Time)(timer.ch))
+		timer.mock.EXPECT().Stop().Maybe().Return(true)
+		clk.timers <- timer
+		return timer.mock
+	}).Maybe()
+	return clk
+}
+
+func newInertCoordinatorMockClock(t *testing.T, capacity int) *coordinatorMockClock {
+	clk := newCoordinatorMockClock(t, capacity)
+	clk.inert = true
+	return clk
+}
+
+// coordinatorHarness wires one coordinator to generated clock/timer mocks and
+// recording hooks. Every assertion is channel- or counter-based; nothing sleeps.
 type coordinatorHarness struct {
-	clk        *signalClock
+	clk        *coordinatorMockClock
 	wakes      chan renderWake
 	previews   chan renderWake
 	ackReady   atomic.Bool
@@ -33,13 +85,13 @@ type coordinatorHarness struct {
 func newCoordinatorHarness(t *testing.T) *coordinatorHarness {
 	t.Helper()
 	h := &coordinatorHarness{
-		clk:      &signalClock{timers: make(chan *signalTimer, 16)},
+		clk:      newCoordinatorMockClock(t, 16),
 		wakes:    make(chan renderWake, 16),
 		previews: make(chan renderWake, 16),
 	}
 	h.ackReady.Store(true)
 	h.rc = newRenderCoordinator(renderCoordinatorOptions{
-		clock:      h.clk,
+		clock:      h.clk.clock,
 		wake:       func(w renderWake) { h.wakes <- w },
 		ackReady:   func() bool { return h.ackReady.Load() },
 		syncActive: func() bool { return h.syncActive.Load() },
@@ -50,9 +102,9 @@ func newCoordinatorHarness(t *testing.T) *coordinatorHarness {
 // armedTimers drains every deadline armed so far. Arming happens
 // synchronously inside the coordinator call, so a non-blocking drain is
 // deterministic.
-func (h *coordinatorHarness) armedTimers(t *testing.T) []*signalTimer {
+func (h *coordinatorHarness) armedTimers(t *testing.T) []*coordinatorMockTimer {
 	t.Helper()
-	var timers []*signalTimer
+	var timers []*coordinatorMockTimer
 	for {
 		select {
 		case tm := <-h.clk.timers:
@@ -112,7 +164,7 @@ func requireNoInvalidation(t *testing.T, ch chan renderInvalidation) {
 	}
 }
 
-func awaitScheduledTimer(t *testing.T, clk *signalClock) *signalTimer {
+func awaitCoordinatorScheduledTimer(t *testing.T, clk *coordinatorMockClock) *coordinatorMockTimer {
 	t.Helper()
 	select {
 	case tm := <-clk.timers:
@@ -639,10 +691,10 @@ func TestProducerInvalidations(t *testing.T) {
 			file: "render.go",
 			name: "retained resize dispatch",
 			run: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
-				clk := &signalClock{timers: make(chan *signalTimer, 2)}
-				d.clock = clk
+				clk := newCoordinatorMockClock(t, 2)
+				d.clock = clk.clock
 				d.resize(sess, ac, domain.Size{Cols: 100, Rows: 26})
-				awaitScheduledTimer(t, clk).ch <- time.Time{}
+				awaitCoordinatorScheduledTimer(t, clk).ch <- time.Time{}
 			},
 		},
 		{
@@ -747,23 +799,6 @@ func TestStartPaneGoroutinesAccountsForOneReader(t *testing.T) {
 	}
 }
 
-// inertTimer deliberately has a nil C channel. It verifies coordinator
-// lifecycle paths do not strand workers behind fake clocks that never fire.
-type inertTimer struct{ stopped atomic.Bool }
-
-func (t *inertTimer) C() <-chan time.Time      { return nil }
-func (t *inertTimer) Reset(time.Duration) bool { return false }
-func (t *inertTimer) Stop() bool               { t.stopped.Store(true); return true }
-
-type inertClock struct{ timers chan *inertTimer }
-
-func (c *inertClock) Now() time.Time { return time.Time{} }
-func (c *inertClock) NewTimer(time.Duration) ports.Timer {
-	t := &inertTimer{}
-	c.timers <- t
-	return t
-}
-
 func requireWorkerExit(t *testing.T, done <-chan struct{}) {
 	t.Helper()
 	for range 4096 {
@@ -788,8 +823,8 @@ func TestRenderCoordinatorStopsInertTimerWorkers(t *testing.T) {
 	}
 	for _, tc := range lifecycle {
 		t.Run(tc.name, func(t *testing.T) {
-			clk := &inertClock{timers: make(chan *inertTimer, 2)}
-			rc := newRenderCoordinator(renderCoordinatorOptions{clock: clk})
+			clk := newInertCoordinatorMockClock(t, 2)
+			rc := newRenderCoordinator(renderCoordinatorOptions{clock: clk.clock})
 			ac := &attachedClient{}
 			rc.attach(ac)
 			rc.invalidate(renderInvalidation{class: invalidateOutput})
@@ -798,12 +833,12 @@ func TestRenderCoordinatorStopsInertTimerWorkers(t *testing.T) {
 			normalDone := rc.normalWorkerDone
 			rc.mu.Unlock()
 			tc.end(rc, ac)
-			require.True(t, normal.stopped.Load(), "normal timer must be stopped")
+			normal.mock.AssertNumberOfCalls(t, "Stop", 1)
 			requireWorkerExit(t, normalDone)
 
 			// Use a fresh coordinator because detach/teardown intentionally makes
 			// an attachment ineligible for a new synchronized batch.
-			rc = newRenderCoordinator(renderCoordinatorOptions{clock: clk})
+			rc = newRenderCoordinator(renderCoordinatorOptions{clock: clk.clock})
 			rc.attach(ac)
 			rc.noteSyncBegin(1)
 			syncTimer := <-clk.timers
@@ -811,23 +846,23 @@ func TestRenderCoordinatorStopsInertTimerWorkers(t *testing.T) {
 			syncDone := rc.syncWorkerDone
 			rc.mu.Unlock()
 			tc.end(rc, ac)
-			require.True(t, syncTimer.stopped.Load(), "sync watchdog must be stopped")
+			syncTimer.mock.AssertNumberOfCalls(t, "Stop", 1)
 			requireWorkerExit(t, syncDone)
 		})
 	}
 }
 
 func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
-	newResizeFixture := func(t *testing.T) (*Daemon, *session, *attachedClient, chan ports.Frame, *signalClock, chan renderInvalidation) {
+	newResizeFixture := func(t *testing.T) (*Daemon, *session, *attachedClient, chan ports.Frame, *coordinatorMockClock, chan renderInvalidation) {
 		t.Helper()
 		p, releasePTY := newBlockingPTY(t)
 		t.Cleanup(releasePTY)
 		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-		clk := &signalClock{timers: make(chan *signalTimer, 4)}
-		d.clock = clk
+		clk := newCoordinatorMockClock(t, 4)
+		d.clock = clk.clock
 		invs := make(chan renderInvalidation, 4)
 		sess.installRenderCoordinator(newRenderCoordinator(renderCoordinatorOptions{
-			clock:        clk,
+			clock:        clk.clock,
 			wake:         func(renderWake) {},
 			onInvalidate: func(inv renderInvalidation) { invs <- inv },
 		}))
@@ -838,7 +873,7 @@ func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
 		d, sess, ac, sends, clk, invs := newResizeFixture(t)
 
 		d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
-		timer := awaitScheduledTimer(t, clk)
+		timer := awaitCoordinatorScheduledTimer(t, clk)
 		require.GreaterOrEqual(t, timer.duration, minOutputRenderDeadline)
 		require.LessOrEqual(t, timer.duration, maxOutputRenderDeadline)
 		ac.sendMu.Lock()
@@ -865,9 +900,9 @@ func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
 		d, sess, ac, sends, clk, invs := newResizeFixture(t)
 
 		d.resize(sess, ac, domain.Size{Cols: 100, Rows: 24})
-		first := awaitScheduledTimer(t, clk)
+		first := awaitCoordinatorScheduledTimer(t, clk)
 		d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
-		latest := awaitScheduledTimer(t, clk)
+		latest := awaitCoordinatorScheduledTimer(t, clk)
 		require.Equal(t, uint64(2), sess.renderCoordinator().resizeSnapshot().epoch,
 			"every resize request must advance the coordinator epoch")
 
@@ -887,7 +922,7 @@ func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
 		d, sess, ac, sends, clk, invs := newResizeFixture(t)
 
 		d.resize(sess, ac, domain.Size{Cols: 90, Rows: 30})
-		timer := awaitScheduledTimer(t, clk)
+		timer := awaitCoordinatorScheduledTimer(t, clk)
 		ac.cancelResizePaint()
 
 		timer.ch <- time.Time{}

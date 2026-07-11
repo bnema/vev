@@ -221,9 +221,9 @@ func TestPTYReaderSameReadSynchronizedOutputUsesUrgentCoordinatorDeadline(t *tes
 	tb := newTestTabWithContext(p, sctx, cancel)
 	sess := &session{id: "sync-urgent", name: "sync-urgent", tabs: []*tab{tb}, ctx: sctx, cancel: cancel}
 	invs := make(chan renderInvalidation, 1)
-	clock := &signalClock{timers: make(chan *signalTimer, 2)}
+	clock := newCoordinatorMockClock(t, 2)
 	sess.installRenderCoordinator(newRenderCoordinator(renderCoordinatorOptions{
-		clock:        clock,
+		clock:        clock.clock,
 		onInvalidate: func(inv renderInvalidation) { invs <- inv },
 	}))
 	d.sessions[sess.id] = sess
@@ -232,7 +232,7 @@ func TestPTYReaderSameReadSynchronizedOutputUsesUrgentCoordinatorDeadline(t *tes
 
 	inv := awaitInvalidation(t, invs)
 	require.Equal(t, invalidateUrgent, inv.class, "a complete same-read synchronized batch must flush urgently")
-	timer := awaitScheduledTimer(t, clock)
+	timer := awaitCoordinatorScheduledTimer(t, clock)
 	require.Equal(t, urgentRenderDeadline, timer.duration)
 }
 
