@@ -19,9 +19,12 @@ type overlayRuntime struct {
 	pickerPending []byte
 	pickerESC     pendingByteTimer
 
-	paletteMu      sync.Mutex
-	palette        *palette.Model
-	palettePending []byte
+	paletteMu         sync.Mutex
+	palette           *palette.Model
+	paletteRecent     []recentSession // immutable for this palette interaction
+	paletteGeneration uint64
+	paletteHints      palette.ContextualHints
+	palettePending    []byte
 
 	promptMu      sync.Mutex
 	prompt        *promptui.Model
@@ -164,6 +167,10 @@ type overlayRenderSnapshot struct {
 
 	paletteActive bool
 	paletteModel  *palette.Model
+	// paletteHints is a copy captured under paletteMu. Rendering must use this
+	// immutable interaction snapshot rather than consult live session state.
+	paletteHints  *palette.ContextualHints
+	paletteRecent []recentSession
 	paletteLocked bool
 
 	promptActive bool
@@ -209,6 +216,10 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 	snap.paletteModel = rt.palette
 	snap.paletteActive = snap.paletteModel != nil
 	if snap.paletteActive {
+		hints := rt.paletteHints
+		hints.Recent = append([]palette.RecentSessionHint(nil), hints.Recent...)
+		snap.paletteHints = &hints
+		snap.paletteRecent = append([]recentSession(nil), rt.paletteRecent...)
 		snap.paletteLocked = true
 	} else {
 		rt.paletteMu.Unlock()

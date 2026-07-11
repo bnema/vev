@@ -114,6 +114,9 @@ type Daemon struct {
 
 	paletteRecentMu sync.Mutex
 	paletteRecent   []string
+	// beforeRecentSessionHandoff is a deterministic test seam for the narrow
+	// interval between JRS validation and its committed hand-off.
+	beforeRecentSessionHandoff func()
 
 	ptys                    ports.PTYFactory
 	clock                   ports.Clock

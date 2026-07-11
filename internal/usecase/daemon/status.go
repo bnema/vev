@@ -19,11 +19,9 @@
 //
 // Locking: a pane's screen/scrollback and per-client renderer shadow are
 // guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
-// session.mu; the registry by Daemon.mu. History-navigation display state is
-// guarded by attachedClient.historyNavMu. When more than one is held the order
-// is always attachedClient.sendMu > attachedClient.historyNavMu > Daemon.mu >
-// session.mu > tab.mu > pane.mu. The PTY reader only ever takes pane.mu, so it
-// never blocks on a slow client.
+// session.mu; the registry by Daemon.mu. When more than one is held the order
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
+// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
 package daemon
 
 import (
@@ -31,7 +29,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/command"
+	"github.com/bnema/vev/internal/usecase/palette"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
@@ -104,30 +103,47 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles)
 	clearStatusRow(row)
 	x := 0
 	rightText := composeBottomRightText(state.bottomRight, state.copyFeedback)
-	if len(state.history) > 0 {
-		drawHistoryNavSessions(row, &x, state.history, rightText, state.attentionFrame, styles)
-		drawRightPlainText(row, rightText, x, styles.statusBar)
-		return
-	}
-
 	writeStatusText(row, &x, " "+state.status.session+" ", styles.accent)
-
-	fittedMRU := fitMRU(state.mru, len(row), x, rightText)
-	for i, sess := range fittedMRU {
-		style := mruStyle(styles.statusBar, state.theme, i, len(fittedMRU))
-		drawStatusSessionEntry(row, &x, sess.name, sess.ephemeral, sess.attention, style, state.attentionFrame)
+	if state.rankedRecent != nil {
+		for _, sess := range fitRankedRecent(state.rankedRecent, len(row), x, rightText) {
+			style := styles.statusBar // contextual ranks deliberately do not fade.
+			if sess.selected {
+				style = styles.accent
+			}
+			drawRankedStatusSessionEntry(row, &x, sess, style, state.attentionFrame)
+		}
+	} else {
+		fittedMRU := fitMRU(state.mru, len(row), x, rightText)
+		for i, sess := range fittedMRU {
+			style := mruStyle(styles.statusBar, state.theme, i, len(fittedMRU))
+			drawStatusSessionEntry(row, &x, sess.name, sess.ephemeral, sess.attention, style, state.attentionFrame)
+		}
 	}
 	drawRightPlainText(row, rightText, x, styles.statusBar)
 }
 
-func drawHistoryNavSessions(row []renderer.Cell, x *int, entries []historyNavSession, rightText string, attentionFrame int, styles themeStyles) {
-	for _, sess := range fitHistoryNav(entries, len(row), *x, rightText) {
-		style := styles.statusBar
-		if sess.active {
-			style = styles.accent
-		}
-		drawStatusSessionEntry(row, x, sess.name, sess.ephemeral, sess.attention, style, attentionFrame)
+type rankedRecent struct {
+	rank      int
+	name      string
+	ephemeral bool
+	attention bool
+	selected  bool
+}
+
+func drawRankedStatusSessionEntry(row []renderer.Cell, x *int, sess rankedRecent, style renderer.Style, attentionFrame int) {
+	prefixStyle := style
+	prefixStyle.Bold = true
+	writeStatusText(row, x, " "+strconv.Itoa(sess.rank)+":", prefixStyle)
+	name := sess.name
+	if sess.ephemeral {
+		name += "*"
 	}
+	writeStatusText(row, x, name, style)
+	if sess.attention {
+		writeStatusText(row, x, " ", style)
+		writeBell(row, x, attentionFrame, style)
+	}
+	writeStatusText(row, x, " ", style)
 }
 
 func drawStatusSessionEntry(row []renderer.Cell, x *int, name string, ephemeral, attention bool, style renderer.Style, attentionFrame int) {
@@ -180,30 +196,13 @@ type barState struct {
 	topRight       string
 	bottomRight    string
 	copyFeedback   string
-	mru            []mruSession
-	history        []historyNavSession
+	mru            []recentSession
+	rankedRecent   []rankedRecent
 	attentionFrame int
 	// theme is the client's terminal theme, if reported. Its zero value
 	// (Theme{}, Known: false) is a valid "no theme" default that resolves to
 	// the pre-theme fallback styles (see newThemeStyles / theme.usable).
 	theme themeui.Theme
-}
-
-type mruSession struct {
-	id        domain.SessionID
-	name      string
-	ephemeral bool
-	attention bool
-	// mruAt orders entries in barStateFor (freshest first); drawing ignores it.
-	mruAt uint64
-}
-
-type historyNavSession struct {
-	id        domain.SessionID
-	name      string
-	ephemeral bool
-	attention bool
-	active    bool
 }
 
 type statusSnapshot struct {
@@ -242,54 +241,51 @@ func tabDisplayName(tb *tab, index int) string {
 	return strconv.Itoa(index + 1)
 }
 
-func (d *Daemon) barStateForClient(cur *session, ac *attachedClient, copyFeedback string) barState {
-	state := d.barStateFor(cur, copyFeedback)
-	state.history = d.historyNavBarState(ac)
+func rankedRecentForHints(hints *palette.ContextualHints, recent []recentSession) []rankedRecent {
+	if hints == nil || hints.Kind != command.ContextHintRecentSessions {
+		return nil
+	}
+	entries := make([]rankedRecent, 0, len(hints.Recent))
+	for i, hint := range hints.Recent {
+		entry := rankedRecent{rank: hint.Rank, name: hint.Name, selected: hint.Rank == hints.SelectedRank}
+		// recent was copied with the hint under paletteMu, so this only enriches
+		// the render snapshot and never performs a live domain lookup.
+		if i < len(recent) {
+			entry.ephemeral = recent[i].ephemeral
+			entry.attention = recent[i].attention
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+// barStateForPaletteHints selects snapshot-only contextual composition when a
+// palette interaction has captured recent-session hints. Normal palette state
+// continues to use the canonical, live MRU list.
+func (d *Daemon) barStateForPaletteHints(cur *session, copyFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
+	ranked := rankedRecentForHints(hints, recent)
+	if ranked != nil {
+		return d.barStateForContextual(cur, copyFeedback, ranked)
+	}
+	return d.barStateFor(cur, copyFeedback)
+}
+
+// barStateForContextual composes ranks captured for the palette interaction.
+// It deliberately does not call recentSessions: live MRU changes must not
+// affect contextual rendering, and palette rendering must not acquire d.mu.
+func (d *Daemon) barStateForContextual(cur *session, copyFeedback string, ranked []rankedRecent) barState {
+	state := d.barStateBase(cur, copyFeedback)
+	state.rankedRecent = ranked
 	return state
 }
 
-func (d *Daemon) historyNavBarState(ac *attachedClient) []historyNavSession {
-	if d == nil || ac == nil {
-		return nil
-	}
-	ac.historyNavMu.Lock()
-	if !ac.historyNav.active() {
-		ac.historyNavMu.Unlock()
-		return nil
-	}
-	ids := append([]domain.SessionID(nil), ac.historyNav.ids...)
-	activeIndex := ac.historyNav.index
-	ac.historyNavMu.Unlock()
-
-	d.mu.Lock()
-	out := make([]historyNavSession, 0, len(ids))
-	valid := true
-	for i, id := range ids {
-		sess := d.sessions[id]
-		if sess == nil {
-			valid = false
-			break
-		}
-		sess.mu.Lock()
-		entry := historyNavSession{id: sess.id, name: sess.name, ephemeral: sess.ephemeral, active: i == activeIndex}
-		for _, tb := range sess.tabs {
-			if tb.attention {
-				entry.attention = true
-				break
-			}
-		}
-		sess.mu.Unlock()
-		out = append(out, entry)
-	}
-	d.mu.Unlock()
-	if !valid {
-		d.clearHistoryNav(ac)
-		return nil
-	}
-	return out
+func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
+	state := d.barStateBase(cur, copyFeedback)
+	state.mru = d.recentSessions(cur)
+	return state
 }
 
-func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
+func (d *Daemon) barStateBase(cur *session, copyFeedback string) barState {
 	state := barState{copyFeedback: copyFeedback}
 	if d != nil {
 		state.attentionFrame = d.attentionFrame()
@@ -304,103 +300,7 @@ func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 	if d != nil {
 		state.topRight, state.bottomRight = d.barScriptSnapshot(cur)
 	}
-	if d == nil {
-		return state
-	}
-	d.mu.Lock()
-	mru := make([]mruSession, 0, len(d.sessions))
-	for _, sess := range d.sessions {
-		if sess == cur {
-			continue
-		}
-		at := sess.mruAt.Load()
-		sess.mu.Lock()
-		entry := mruSession{id: sess.id, name: sess.name, ephemeral: sess.ephemeral, mruAt: at}
-		for _, tb := range sess.tabs {
-			if tb.attention {
-				entry.attention = true
-				break
-			}
-		}
-		sess.mu.Unlock()
-		mru = append(mru, entry)
-	}
-	d.mu.Unlock()
-	sort.SliceStable(mru, func(i, j int) bool {
-		if mru[i].mruAt == mru[j].mruAt {
-			return mru[i].name < mru[j].name
-		}
-		return mru[i].mruAt > mru[j].mruAt
-	})
-	if len(mru) > maxMRUSessions {
-		mru = mru[:maxMRUSessions]
-	}
-	state.mru = mru
 	return state
-}
-
-func fitHistoryNav(entries []historyNavSession, rowLen, leftUsed int, feedback string) []historyNavSession {
-	copyReserve := 1
-	if feedback != "" {
-		copyReserve = statusTextWidth(feedback) + 2
-	}
-	budget := rowLen - leftUsed - copyReserve
-	if budget <= 0 || len(entries) == 0 {
-		return nil
-	}
-	cost := func(e historyNavSession) int {
-		name := e.name
-		if e.ephemeral {
-			name += "*"
-		}
-		n := 2 + statusTextWidth(name)
-		if e.attention {
-			n += 1 + renderer.RuneWidth(ui.AttentionGlyph)
-		}
-		return n
-	}
-	used := 0
-	for _, e := range entries {
-		used += cost(e)
-	}
-	if used <= budget {
-		return entries
-	}
-	active := 0
-	for i, e := range entries {
-		if e.active {
-			active = i
-			break
-		}
-	}
-	if cost(entries[active]) > budget {
-		return nil
-	}
-	start, end := active, active+1
-	used = cost(entries[active])
-	for {
-		expanded := false
-		if start > 0 {
-			c := cost(entries[start-1])
-			if used+c <= budget {
-				start--
-				used += c
-				expanded = true
-			}
-		}
-		if end < len(entries) {
-			c := cost(entries[end])
-			if used+c <= budget {
-				end++
-				used += c
-				expanded = true
-			}
-		}
-		if !expanded {
-			break
-		}
-	}
-	return entries[start:end]
 }
 
 // fittedTabLabel is one tab's drawable label; text[:nameLen] is the tab-name
@@ -477,7 +377,37 @@ func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []fittedTabLab
 	return labels
 }
 
-func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSession {
+func fitRankedRecent(entries []rankedRecent, rowLen, leftUsed int, feedback string) []rankedRecent {
+	reserve := 1
+	if feedback != "" {
+		reserve = statusTextWidth(feedback) + 2
+	}
+	budget := rowLen - leftUsed - reserve
+	if budget <= 0 {
+		return nil
+	}
+	cost := func(e rankedRecent) int {
+		name := e.name
+		if e.ephemeral {
+			name += "*"
+		}
+		width := 2 + statusTextWidth(strconv.Itoa(e.rank)+":") + statusTextWidth(name)
+		if e.attention {
+			width += 1 + renderer.RuneWidth(ui.AttentionGlyph)
+		}
+		return width
+	}
+	used := 0
+	for i, entry := range entries {
+		if used+cost(entry) > budget {
+			return entries[:i] // whole entries only; ranks remain their original MRU ranks.
+		}
+		used += cost(entry)
+	}
+	return entries
+}
+
+func fitMRU(entries []recentSession, rowLen, leftUsed int, feedback string) []recentSession {
 	// With no feedback, keep one blank trailing cell; with feedback, reserve
 	// its " text" width plus a one-cell gap so drawRightPlainText always fits.
 	copyReserve := 1
@@ -488,7 +418,7 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 	if physicalBudget <= 0 || len(entries) == 0 {
 		return nil
 	}
-	cost := func(e mruSession) int {
+	cost := func(e recentSession) int {
 		name := e.name
 		if e.ephemeral {
 			name += "*"

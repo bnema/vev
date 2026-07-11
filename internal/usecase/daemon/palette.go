@@ -5,6 +5,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
+	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -30,19 +31,26 @@ func paletteModalFor(size domain.Size, cfg domain.PaletteConfig) ui.Modal {
 }
 
 func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
-	d.closePalette(ac)
+	// Capture daemon/session state before taking paletteMu: lock ordering forbids
+	// holding an overlay lock while inspecting live sessions.
+	recent := d.recentSessions(sess)
+	commands := d.paletteCommands()
 	ac.overlays.paletteMu.Lock()
-	ac.overlays.palette = palette.New(d.paletteCommands())
+	ac.overlays.paletteGeneration++
+	ac.overlays.palette = palette.New(commands)
+	ac.overlays.paletteRecent = recent
+	ac.overlays.paletteHints = palette.ContextualHints{}
 	ac.overlays.palettePending = nil
 	ac.overlays.paletteMu.Unlock()
 	d.paint(sess, ac, true)
 }
 
-func (d *Daemon) closePalette(ac *attachedClient) {
-	ac.overlays.paletteMu.Lock()
-	ac.overlays.palette = nil
-	ac.overlays.palettePending = nil
-	ac.overlays.paletteMu.Unlock()
+func recentSessionHints(recent []recentSession, args []string) palette.ContextualHints {
+	names := make([]string, len(recent))
+	for i, entry := range recent {
+		names[i] = entry.name
+	}
+	return palette.BuildRecentSessionHints(names, args)
 }
 
 func (d *Daemon) paletteCommands() []command.Command {
@@ -95,6 +103,12 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	if sess == nil {
 		return
 	}
+	var cmd command.Command
+	var args []string
+	var recent []recentSession
+	var generation uint64
+	var rawQuery string
+	changed, cancel, execute := false, false, false
 
 	ac.overlays.paletteMu.Lock()
 	if ac.overlays.palette == nil {
@@ -102,12 +116,6 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		ac.overlays.paletteMu.Unlock()
 		return
 	}
-	changed := false
-	exit := false
-	run := false
-	var cmd command.Command
-	var ok bool
-
 	routeOverlayBytes(data, &ac.overlays.palettePending, overlayEvents{
 		rune: func(r rune) {
 			ac.overlays.palette.Insert(r)
@@ -117,56 +125,137 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 			ac.overlays.palette.Backspace()
 			changed = true
 		},
+		up:     func() { ac.overlays.palette.Up(); changed = true },
+		down:   func() { ac.overlays.palette.Down(); changed = true },
+		cancel: func() { cancel = true },
 		enter: func() {
-			cmd, ok = ac.overlays.palette.Selected()
-			if ok {
-				run = true
-				exit = true
+			var selected bool
+			cmd, selected = ac.overlays.palette.Selected()
+			if !selected {
+				changed = true
+				return
 			}
-		},
-		cancel: func() { exit = true },
-		up: func() {
-			ac.overlays.palette.Up()
-			changed = true
-		},
-		down: func() {
-			ac.overlays.palette.Down()
-			changed = true
+			rawQuery = ac.overlays.palette.Query()
+			// JRS is contextual: it is executable only from its exact token so
+			// fuzzy selection can never turn an unrelated query into a jump.
+			// Static commands retain normal palette behavior and run the selected
+			// fuzzy match.
+			if cmd.Slug == "jump-recent-session" {
+				action, valid := palette.ParseAction([]command.Command{cmd}, rawQuery)
+				if !valid {
+					changed = true
+					return
+				}
+				args = action.Args
+				recent = append([]recentSession(nil), ac.overlays.paletteRecent...)
+			}
+			generation = ac.overlays.paletteGeneration
+			execute = true
 		},
 	})
-	if exit {
-		ac.overlays.palette = nil
-		ac.overlays.palettePending = nil
+	if changed {
+		active, ok := ac.overlays.palette.ArgumentCommand()
+		if ok && active.Slug == "jump-recent-session" {
+			hints := recentSessionHints(ac.overlays.paletteRecent, paletteArgs(ac.overlays.palette.Query(), active))
+			ac.overlays.paletteHints = hints
+		} else {
+			ac.overlays.paletteHints = palette.ContextualHints{}
+		}
+	}
+	if cancel {
+		ac.clearPaletteLocked()
 	}
 	ac.overlays.paletteMu.Unlock()
-
-	if run && ok {
-		if !isHistoryNavigationCommand(cmd.Slug) {
-			d.clearHistoryNav(ac)
-		}
-		if err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac}); err != nil {
-			sess.mu.Lock()
-			name := sess.name
-			sess.mu.Unlock()
-			d.log.Error("palette command failed", "err", err, "session", name, "command", cmd.Code)
-		} else {
-			d.recordPaletteUse(cmd.Code)
+	if cancel {
+		d.paint(sess, ac, true)
+		return
+	}
+	if !execute {
+		if changed {
+			d.paint(sess, ac, true)
 		}
 		return
 	}
-	if exit || changed {
-		d.paint(sess, ac, true)
+
+	// Revalidate live target without paletteMu. A captured ID is never replaced
+	// by a newly-ranked session, so MRU changes cannot shift a requested rank.
+	if cmd.Slug == "jump-recent-session" {
+		rank, err := command.ParsePositiveDecimal(args)
+		if err != nil {
+			ac.paletteFailure(generation, rawQuery, "rank must be one positive decimal")
+			d.paint(sess, ac, true)
+			return
+		}
+		// The captured ID is handed off atomically. A target can disappear after
+		// the validation above, so closing is contingent on the committed switch.
+		exec := paletteExec{d: d, sess: sess, ac: ac, recent: recent}
+		if err := exec.JumpRecentSession(rank); err != nil {
+			ac.paletteFailure(generation, rawQuery, "requested recent session is unavailable")
+			d.paint(sess, ac, true)
+			return
+		}
+		// Publication remains generation-safe; do not let stale work close a
+		// newer palette interaction.
+		if ac.closeExecutedPalette(generation, rawQuery) {
+			d.recordPaletteUse(cmd.Code)
+			d.paint(ac.currentSession(), ac, true)
+		}
+		return
+	}
+	if !ac.closeExecutedPalette(generation, rawQuery) {
+		return
+	}
+	if err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac}, args); err != nil {
+		d.log.Error("palette command failed", "err", err, "command", cmd.Code)
+	} else {
+		d.recordPaletteUse(cmd.Code)
 	}
 }
 
-func isHistoryNavigationCommand(slug string) bool {
-	return slug == "back-session" || slug == "forward-session"
+func paletteArgs(query string, cmd command.Command) []string {
+	action, ok := palette.ParseAction([]command.Command{cmd}, query)
+	if !ok {
+		return nil
+	}
+	return action.Args
+}
+
+func (ac *attachedClient) clearPaletteLocked() {
+	ac.overlays.paletteGeneration++
+	ac.overlays.palette = nil
+	ac.overlays.paletteRecent = nil
+	ac.overlays.paletteHints = palette.ContextualHints{}
+	ac.overlays.palettePending = nil
+}
+
+func (ac *attachedClient) paletteFailure(generation uint64, rawQuery, feedback string) {
+	ac.overlays.paletteMu.Lock()
+	defer ac.overlays.paletteMu.Unlock()
+	if ac.overlays.palette == nil || ac.overlays.paletteGeneration != generation || ac.overlays.palette.Query() != rawQuery {
+		return
+	}
+	// Rendering consumes the immutable contextual hint snapshot; preserve ranks
+	// while making stale-target feedback visible.
+	if ac.overlays.paletteHints.Kind == command.ContextHintRecentSessions {
+		ac.overlays.paletteHints.Feedback = feedback
+	}
+}
+
+func (ac *attachedClient) closeExecutedPalette(generation uint64, rawQuery string) bool {
+	ac.overlays.paletteMu.Lock()
+	defer ac.overlays.paletteMu.Unlock()
+	if ac.overlays.palette == nil || ac.overlays.paletteGeneration != generation || ac.overlays.palette.Query() != rawQuery {
+		return false
+	}
+	ac.clearPaletteLocked()
+	return true
 }
 
 type paletteExec struct {
-	d    *Daemon
-	sess *session
-	ac   *attachedClient
+	d      *Daemon
+	sess   *session
+	ac     *attachedClient
+	recent []recentSession
 }
 
 func (e paletteExec) CreateTab() error {
@@ -253,12 +342,7 @@ func (e paletteExec) ToggleFloatingPane() error {
 }
 
 func (e paletteExec) BackSession() error {
-	e.d.navigateRecentSession(e.sess, e.ac, 1)
-	return nil
-}
-
-func (e paletteExec) ForwardSession() error {
-	e.d.navigateRecentSession(e.sess, e.ac, -1)
+	e.d.backSession(e.sess, e.ac)
 	return nil
 }
 
@@ -301,10 +385,27 @@ func (e paletteExec) OpenSessionPicker() error {
 	return nil
 }
 
-func composePaletteClientFrame(model *palette.Model, base renderer.Frame, cfg domain.PaletteConfig, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
+func (e paletteExec) JumpRecentSession(rank int) error {
+	if rank < 1 || rank > len(e.recent) {
+		return command.ErrInvalidArguments
+	}
+	target := e.recent[rank-1]
+	if e.d.sessionByID(target.id) == nil {
+		return command.ErrInvalidArguments
+	}
+	if e.d.beforeRecentSessionHandoff != nil {
+		e.d.beforeRecentSessionHandoff()
+	}
+	if !e.d.switchToTarget(e.sess, e.ac, picker.Target{Session: target.id, TabIndex: -1}) {
+		return command.ErrInvalidArguments
+	}
+	return nil
+}
+
+func composePaletteClientFrame(model *palette.Model, base renderer.Frame, cfg domain.PaletteConfig, guidance string, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
 	styleSet := resolveThemeStyles(styles)
 	modal := paletteModalFor(domain.Size{Cols: base.Width, Rows: base.Height}, cfg)
 	return composeModalClientFrame(base, modal, styleSet, styleSet.selection, func(size domain.Size, _ ...renderer.Style) renderer.Frame {
-		return model.Render(size, palette.RenderStyles{Selection: styleSet.selection, Description: styleSet.paletteDesc})
+		return model.Render(size, palette.RenderOptions{Styles: palette.RenderStyles{Selection: styleSet.selection, Description: styleSet.paletteDesc}, Guidance: guidance})
 	})
 }

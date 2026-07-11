@@ -261,8 +261,10 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	newSess.mu.Lock()
 	newSess.client = ac
 	newSess.mu.Unlock()
+
 	d.touchMRU(newSess)
 	ac.setSession(newSess)
+	ac.recordPreviousSession(from)
 	d.log.Info("client attached", "session", newSess.name, "resume", ac.resumeCapable)
 	d.mu.Unlock()
 
@@ -732,6 +734,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	if ac != nil {
 		ac.cancelResizePaint()
 		d.unregisterPreview(ac)
+		ac.clearPreviousSession()
 		ac.setSession(nil)
 	}
 

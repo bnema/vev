@@ -108,7 +108,7 @@ code.focus-pane-down = FPD
 code.next-tab = NXT
 code.previous-tab = PVT
 code.back-session = BSK
-code.forward-session = FSK
+code.jump-recent-session = JRS
 code.session-picker = SSP
 code.visual-mode = VIS
 code.toggle-floating-pane = FLT
@@ -180,7 +180,7 @@ Some terminals encode Alt+Space as a non-breaking space instead of `ESC Space`; 
 
 Open the palette with Alt+Space. Type a command code or fuzzy-match the label/description. Use Up/Down or Ctrl-N/Ctrl-P to move, Enter to run, and Esc/Ctrl-C to close.
 
-Successful commands are promoted near the top the next time the palette opens.
+Successful commands are promoted near the top the next time the palette opens. `BSK` toggles back to your previously active session. Typing `JRS` lists recent sessions by number in the status bar, and `JRS N` jumps to number N; the numbers are captured when you start typing, so a busy MRU list never shifts under you. An invalid or stale number leaves the palette open.
 
 | Code | Action |
 |---|---|
@@ -193,7 +193,8 @@ Successful commands are promoted near the top the next time the palette opens.
 | CLP | close focused pane |
 | FPL / FPR / FPU / FPD | focus pane left / right / up / down |
 | NXT / PVT | switch to next / previous tab |
-| BSK / FSK | move back / forward through recent sessions |
+| BSK | toggle the previously active session |
+| JRS N | jump directly to recent session rank N |
 | SSP | open session picker |
 | VIS | enter visual mode |
 | FLT | show or hide the current tab's floating terminal |

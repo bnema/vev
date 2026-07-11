@@ -519,46 +519,53 @@ func (_c *MockContext_FocusPaneUp_Call) RunAndReturn(run func() error) *MockCont
 	return _c
 }
 
-// ForwardSession provides a mock function for the type MockContext
-func (_mock *MockContext) ForwardSession() error {
-	ret := _mock.Called()
+// JumpRecentSession provides a mock function for the type MockContext
+func (_mock *MockContext) JumpRecentSession(rank int) error {
+	ret := _mock.Called(rank)
 
 	if len(ret) == 0 {
-		panic("no return value specified for ForwardSession")
+		panic("no return value specified for JumpRecentSession")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func() error); ok {
-		r0 = returnFunc()
+	if returnFunc, ok := ret.Get(0).(func(int) error); ok {
+		r0 = returnFunc(rank)
 	} else {
 		r0 = ret.Error(0)
 	}
 	return r0
 }
 
-// MockContext_ForwardSession_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ForwardSession'
-type MockContext_ForwardSession_Call struct {
+// MockContext_JumpRecentSession_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'JumpRecentSession'
+type MockContext_JumpRecentSession_Call struct {
 	*mock.Call
 }
 
-// ForwardSession is a helper method to define mock.On call
-func (_e *MockContext_Expecter) ForwardSession() *MockContext_ForwardSession_Call {
-	return &MockContext_ForwardSession_Call{Call: _e.mock.On("ForwardSession")}
+// JumpRecentSession is a helper method to define mock.On call
+//   - rank int
+func (_e *MockContext_Expecter) JumpRecentSession(rank any) *MockContext_JumpRecentSession_Call {
+	return &MockContext_JumpRecentSession_Call{Call: _e.mock.On("JumpRecentSession", rank)}
 }
 
-func (_c *MockContext_ForwardSession_Call) Run(run func()) *MockContext_ForwardSession_Call {
+func (_c *MockContext_JumpRecentSession_Call) Run(run func(rank int)) *MockContext_JumpRecentSession_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run()
+		var arg0 int
+		if args[0] != nil {
+			arg0 = args[0].(int)
+		}
+		run(
+			arg0,
+		)
 	})
 	return _c
 }
 
-func (_c *MockContext_ForwardSession_Call) Return(err error) *MockContext_ForwardSession_Call {
+func (_c *MockContext_JumpRecentSession_Call) Return(err error) *MockContext_JumpRecentSession_Call {
 	_c.Call.Return(err)
 	return _c
 }
 
-func (_c *MockContext_ForwardSession_Call) RunAndReturn(run func() error) *MockContext_ForwardSession_Call {
+func (_c *MockContext_JumpRecentSession_Call) RunAndReturn(run func(rank int) error) *MockContext_JumpRecentSession_Call {
 	_c.Call.Return(run)
 	return _c
 }

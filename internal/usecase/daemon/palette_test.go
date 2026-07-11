@@ -11,6 +11,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
@@ -44,6 +45,187 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 	d.handleInput(sess, ac, []byte("\x1b"))
 	require.False(t, ac.overlays.paletteActive())
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteJRSActivatesOnlyExactContextualHint(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("JRS"))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, command.ContextHintRecentSessions, ac.overlays.paletteHints.Kind)
+	require.Equal(t, "no recent sessions", ac.overlays.paletteHints.Feedback)
+	ac.overlays.paletteMu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\b\b\bRNS"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, command.ContextHintNone, ac.overlays.paletteHints.Kind)
+	ac.overlays.paletteMu.Unlock()
+}
+
+func TestPaletteJRSUsesEffectiveOverrideOnly(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	d.ApplyConfig(domain.Config{Codes: map[string]string{"jump-recent-session": "RJS"}})
+
+	d.handleInput(current, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(current, ac, []byte("RJS"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, command.ContextHintRecentSessions, ac.overlays.paletteHints.Kind)
+	ac.overlays.paletteMu.Unlock()
+	d.handleInput(current, ac, []byte(" 1\r"))
+
+	require.Same(t, d.sessions[domain.SessionID("recent")], ac.currentSession())
+	require.False(t, ac.overlays.paletteActive())
+	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	d.handleInput(ac.currentSession(), ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(ac.currentSession(), ac, []byte("JRS"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, command.ContextHintNone, ac.overlays.paletteHints.Kind)
+	ac.overlays.paletteMu.Unlock()
+	require.Same(t, d.sessions[domain.SessionID("recent")], ac.currentSession())
+	d.handleInput(ac.currentSession(), ac, []byte("\r"))
+	require.True(t, ac.overlays.paletteActive(), "literal JRS must not execute an overridden jump command")
+}
+
+func TestPaletteFuzzySelectedStaticCommandExecutes(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 2)
+	defer releases[0]()
+	defer releases[1]()
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("next\r"))
+
+	require.False(t, ac.overlays.paletteActive())
+	require.Equal(t, 1, activeTabIndex(sess))
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteJRSUsesCapturedRankAfterMRUChanges(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	captured := d.sessions[domain.SessionID("recent")]
+	d.handleInput(current, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	// Reordering live MRU after opening must not shift rank 1 from its capture.
+	d.sessions[domain.SessionID("older")].mruAt.Store(100)
+	d.handleInput(current, ac, []byte("JRS 1\r"))
+
+	require.Same(t, captured, ac.currentSession())
+	require.False(t, ac.overlays.paletteActive())
+	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteJRSThenBSKReversesJump(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+
+	d.handleInput(current, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(current, ac, []byte("JRS 1\r"))
+	require.Same(t, d.sessions[domain.SessionID("recent")], ac.currentSession())
+	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	runPaletteCommand(t, d, ac.currentSession(), ac, "BSK")
+	require.Same(t, current, ac.currentSession())
+}
+
+func TestPaletteJRSDisplacedTargetKeepsInteractionOpen(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	target := &session{id: "captured", name: "captured"}
+	d.sessions[target.id] = target
+
+	validated := make(chan struct{})
+	releaseHandoff := make(chan struct{})
+	d.beforeRecentSessionHandoff = func() {
+		close(validated)
+		<-releaseHandoff
+	}
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	go d.handleInput(sess, ac, []byte("JRS 1\r"))
+	<-validated
+	d.mu.Lock()
+	delete(d.sessions, target.id)
+	d.mu.Unlock()
+	close(releaseHandoff)
+
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.True(t, ac.overlays.paletteActive())
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, "JRS 1", ac.overlays.palette.Query())
+	require.Equal(t, "requested recent session is unavailable", ac.overlays.paletteHints.Feedback)
+	ac.overlays.paletteMu.Unlock()
+}
+
+func TestPaletteJRSOutOfRangeKeepsPaletteOpenWithoutClamping(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+
+	d.handleInput(current, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(current, ac, []byte("JRS 3\r"))
+
+	require.Same(t, current, ac.currentSession())
+	require.True(t, ac.overlays.paletteActive())
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, "JRS 3", ac.overlays.palette.Query())
+	require.Equal(t, "requested recent session is unavailable", ac.overlays.paletteHints.Feedback)
+	ac.overlays.paletteMu.Unlock()
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteJRSMalformedRankFeedback(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+
+	d.handleInput(current, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(current, ac, []byte("JRS 0\r"))
+
+	require.Same(t, current, ac.currentSession())
+	require.True(t, ac.overlays.paletteActive())
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, "JRS 0", ac.overlays.palette.Query())
+	require.Equal(t, "rank must be one positive decimal", ac.overlays.paletteHints.Feedback)
+	ac.overlays.paletteMu.Unlock()
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteFailureDoesNotOverwriteNewerInteraction(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+
+	d.enterPalette(sess, ac)
+	ac.overlays.paletteMu.Lock()
+	staleGeneration := ac.overlays.paletteGeneration
+	ac.overlays.paletteMu.Unlock()
+	d.enterPalette(sess, ac)
+	ac.paletteFailure(staleGeneration, "JRS 1", "stale failure")
+
+	ac.overlays.paletteMu.Lock()
+	require.Empty(t, ac.overlays.paletteHints.Feedback)
+	ac.overlays.paletteMu.Unlock()
+	awaitFrame(t, sends, ports.MsgOutput)
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
@@ -138,12 +320,12 @@ func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
 	for i, cmd := range commands {
 		codes[i] = cmd.Code
 	}
-	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "PVT", "BSK", "FSK", "VIS", "RNS", "RNT", "DET"}, codes)
+	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "PVT", "BSK", "JRS", "VIS", "RNS", "RNT", "DET"}, codes)
 }
 
 func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
 	d := &Daemon{}
-	codes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "FSK", "SSP", "VIS", "RNS", "RNT", "DET"}
+	codes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "SSP", "VIS", "RNS", "RNT", "DET"}
 
 	var wg sync.WaitGroup
 	for range 50 {
@@ -159,7 +341,7 @@ func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
 	wg.Wait()
 
 	commands := d.paletteCommands()
-	require.Len(t, commands, len(codes))
+	require.Len(t, commands, len(command.Registry()))
 	seen := map[string]bool{}
 	for _, cmd := range commands {
 		require.False(t, seen[cmd.Code], "duplicate command %s", cmd.Code)
@@ -289,7 +471,7 @@ func TestComposePaletteClientFrameUsesConfiguredPosition(t *testing.T) {
 		{name: "bottom right", cfg: domain.PaletteConfig{Anchor: domain.AnchorBottomRight, AnchorSet: true}, at: domain.Rect{X: 55, Y: 28}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			frame, _ := composePaletteClientFrame(model, base, tt.cfg)
+			frame, _ := composePaletteClientFrame(model, base, tt.cfg, "")
 			require.Equal(t, '┌', frame.At(tt.at.X, tt.at.Y).Rune)
 		})
 	}

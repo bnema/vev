@@ -12,6 +12,14 @@ type RenderStyles struct {
 	Description renderer.Style
 }
 
+// RenderOptions contains presentation supplied by the daemon for one render.
+// Guidance is substituted only into the exact contextual command row; it never
+// adds rows or changes fuzzy matching geometry.
+type RenderOptions struct {
+	Styles   RenderStyles
+	Guidance string
+}
+
 type Model struct {
 	commands []command.Command
 	input    ui.TextInput
@@ -52,6 +60,7 @@ func (m *Model) Backspace() {
 		m.refresh()
 	}
 }
+
 func (m *Model) Query() string {
 	if m == nil {
 		return ""
@@ -76,6 +85,15 @@ func (m *Model) Selected() (command.Command, bool) {
 	}
 	return m.matches[m.selected].Command, true
 }
+
+// ArgumentCommand returns the exact argument-taking command being entered.
+func (m *Model) ArgumentCommand() (command.Command, bool) {
+	if m == nil {
+		return command.Command{}, false
+	}
+	return ArgumentCommand(m.commands, m.Query())
+}
+
 func (m *Model) Matches() []Match {
 	if m == nil {
 		return nil
@@ -88,7 +106,24 @@ func (m *Model) Matches() []Match {
 	return out
 }
 
-func (m *Model) refresh() { m.matches = Fuzzy(m.commands, m.input.Value()); m.clamp() }
+func (m *Model) refresh() {
+	m.matches = Fuzzy(m.commands, m.input.Value())
+	// Once an argument-taking token is exact, retain its row while its
+	// arguments make ordinary fuzzy matching inapplicable.
+	if cmd, ok := ArgumentCommand(m.commands, m.input.Value()); ok {
+		found := false
+		for _, match := range m.matches {
+			if match.Command.Code == cmd.Code {
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.matches = append([]Match{{Command: cmd}}, m.matches...)
+		}
+	}
+	m.clamp()
+}
 func (m *Model) clamp() {
 	if len(m.matches) == 0 {
 		m.selected = -1
@@ -109,7 +144,8 @@ func (m *Model) clamp() {
 	}
 }
 
-func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
+func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
+	styles := opts.Styles
 	frame := renderer.NewFrame(max(inner.Cols, 0), max(inner.Rows, 0))
 	if frame.Width == 0 || frame.Height == 0 {
 		return frame
@@ -123,7 +159,8 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 		return frame
 	}
 	ui.DrawInputLine(frame, 0, "> ", m.Query(), base, selection)
-	visible := frame.Height - 1
+	start := 1
+	visible := frame.Height - start
 	if visible <= 0 {
 		return frame
 	}
@@ -142,6 +179,7 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 			codeWidth = len([]rune(match.Command.Code))
 		}
 	}
+	activeCmd, activeOK := m.ArgumentCommand()
 	for y := range visible {
 		idx := m.scroll + y
 		if idx >= len(m.matches) {
@@ -152,7 +190,7 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 		if idx == m.selected {
 			style = selection
 		}
-		ui.FillRect(frame, domain.Rect{Y: y + 1, Width: frame.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
+		ui.FillRect(frame, domain.Rect{Y: y + start, Width: frame.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
 		x := 0
 		highlight := map[int]bool{}
 		for _, p := range match.Positions {
@@ -166,15 +204,19 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 				cellStyle.Bold = true
 			}
 			if x < frame.Width {
-				frame.Set(x, y+1, renderer.Cell{Rune: r, Style: cellStyle})
+				frame.Set(x, y+start, renderer.Cell{Rune: r, Style: cellStyle})
 			}
 			x++
 		}
 		for x < codeWidth+1 && x < frame.Width {
-			frame.Set(x, y+1, renderer.Cell{Rune: ' ', Style: style})
+			frame.Set(x, y+start, renderer.Cell{Rune: ' ', Style: style})
 			x++
 		}
-		ui.DrawText(frame, x, y+1, frame.Width, match.Command.Desc, mergePaletteDescStyle(style, desc))
+		description := match.Command.Desc
+		if opts.Guidance != "" && activeOK && match.Command.ContextHint != command.ContextHintNone && activeCmd.Code == match.Command.Code {
+			description = opts.Guidance
+		}
+		ui.DrawText(frame, x, y+start, frame.Width, description, mergePaletteDescStyle(style, desc))
 	}
 	return frame
 }

@@ -356,35 +356,35 @@ func (d *Daemon) sessionByID(id domain.SessionID) *session {
 	return d.sessions[id]
 }
 
-func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker.Target) {
-	d.clearHistoryNav(ac)
+func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker.Target) bool {
 	if target.Stopped {
-		d.resumeStoppedAndSwitch(sess, ac, target)
-		return
+		return d.resumeStoppedAndSwitch(sess, ac, target)
 	}
 	targetSess := d.sessionByID(target.Session)
 	if targetSess == nil {
 		d.paint(sess, ac, true)
-		return
+		return false
 	}
 	if targetSess == sess {
 		if sess.switchTab(target.TabIndex) {
 			d.activateTab(sess, sess.activeTab())
 		}
 		d.paint(sess, ac, true)
-		return
+		return true
 	}
 	old := d.stealClientForTarget(sess, ac, targetSess, target)
 	if ac.currentSession() != targetSess {
 		d.paint(sess, ac, true)
-		return
+		return false
 	}
 	if old != nil && old != ac {
 		d.unregisterPreview(old)
+		old.clearPreviousSession()
 		old.setSession(nil)
 		d.notifyDetachedAsync(old, ports.ReasonDetach)
 	}
 	d.firstPaint(targetSess, ac, ac.size)
+	return true
 }
 
 func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetSess *session, target picker.Target) *attachedClient {
@@ -412,25 +412,27 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 		targetSess.active = target.TabIndex
 	}
 	targetSess.mu.Unlock()
+
 	d.touchMRU(targetSess)
 	ac.setSession(targetSess)
+	ac.recordPreviousSession(from)
 	d.mu.Unlock()
 	return old
 }
 
-func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, target picker.Target) {
+func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, target picker.Target) bool {
 	d.mu.Lock()
 	stopped, ok := d.stopped[target.Name]
 	if !ok || stopped.purging {
 		d.mu.Unlock()
 		d.paint(from, ac, true)
-		return
+		return false
 	}
 	from.mu.Lock()
 	if from.client != ac {
 		from.mu.Unlock()
 		d.mu.Unlock()
-		return
+		return false
 	}
 	term := from.terminal
 	cwd := d.dirOrHome(stopped.cwd)
@@ -440,7 +442,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 		d.mu.Unlock()
 		d.log.Warn("resuming stopped session failed", "err", err, "session", target.Name)
 		d.paint(from, ac, true)
-		return
+		return false
 	}
 	from.client = nil
 	ac.setSession(nil)
@@ -448,10 +450,13 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	targetSess.mu.Lock()
 	targetSess.client = ac
 	targetSess.mu.Unlock()
+
 	d.touchMRU(targetSess)
 	ac.setSession(targetSess)
+	ac.recordPreviousSession(from)
 	d.mu.Unlock()
 	d.firstPaint(targetSess, ac, ac.size)
+	return true
 }
 
 func (d *Daemon) killPickerTarget(target picker.Target) {

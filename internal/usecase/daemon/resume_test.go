@@ -322,6 +322,73 @@ func TestParkExpiryAndShutdownCleanup(t *testing.T) {
 	require.Zero(t, parked)
 }
 
+func TestLiveParkAndResumeRetainsPreviousSession(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	tr, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
+	require.NoError(t, err)
+
+	previous := &session{id: "previous"}
+	ac.previousSession.Set(previous)
+	d.clientGone(sess, ac, ac.transport(), false)
+
+	token := ac.resumeToken
+	d.mu.Lock()
+	parked := d.parked[token]
+	d.mu.Unlock()
+	require.NotNil(t, parked)
+	require.Same(t, previous, ac.previousSession.Get(), "a live parked attachment keeps its toggle")
+
+	tr2, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
+	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, "work", token), tr2)
+	require.NoError(t, err)
+	require.Same(t, sess, resumedSess)
+	require.Same(t, ac, resumedAC)
+	require.Same(t, previous, resumedAC.previousSession.Get(), "resume keeps the live attachment toggle")
+}
+
+func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		discard func(*Daemon, uint64, *parkedAttachment)
+	}{
+		{
+			name: "expiry",
+			discard: func(d *Daemon, token uint64, parked *parkedAttachment) {
+				d.removeParkedLocked(token, parked)
+			},
+		},
+		{
+			name: "session purge",
+			discard: func(d *Daemon, _ uint64, parked *parkedAttachment) {
+				d.purgeParkedForSessionLocked(parked.sess)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pty, release := newBlockingPTY(t)
+			defer release()
+			d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+			tr, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
+			sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
+			require.NoError(t, err)
+
+			ac.previousSession.Set(&session{id: "previous"})
+			d.clientGone(sess, ac, ac.transport(), false)
+
+			d.mu.Lock()
+			parked := d.parked[ac.resumeToken]
+			require.NotNil(t, parked)
+			tc.discard(d, ac.resumeToken, parked)
+			d.mu.Unlock()
+
+			require.Nil(t, ac.previousSession.Get())
+		})
+	}
+}
+
 func TestEphemeralParkExpiryKeepsSession(t *testing.T) {
 	clk := &signalClock{timers: make(chan *signalTimer, 8)}
 	pty, release := newBlockingPTY(t)

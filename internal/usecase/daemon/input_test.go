@@ -17,6 +17,7 @@ import (
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/usecase/picker"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -415,321 +416,133 @@ func TestPaletteNextPreviousSwitchActiveTab(t *testing.T) {
 	}
 }
 
-func TestPaletteBackForwardSession(t *testing.T) {
+func TestPaletteBackSessionTogglesPreviousSession(t *testing.T) {
 	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
 	recent := d.sessions[domain.SessionID("recent")]
-	older := d.sessions[domain.SessionID("older")]
 
-	runPaletteCommand(t, d, current, ac, "BSK")
-	require.Same(t, recent, ac.currentSession())
-
-	runPaletteCommand(t, d, recent, ac, "BSK")
-	require.Same(t, older, ac.currentSession())
-
-	runPaletteCommand(t, d, older, ac, "FSK")
-	require.Same(t, recent, ac.currentSession())
-
-	runPaletteCommand(t, d, recent, ac, "FSK")
-	require.Same(t, current, ac.currentSession())
-}
-
-func TestPaletteBackForwardSessionBoundaries(t *testing.T) {
-	t.Run("forward from current does not wrap", func(t *testing.T) {
-		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-		defer releaseAll(releases)
-
-		runPaletteCommand(t, d, current, ac, "FSK")
-		require.Same(t, current, ac.currentSession())
-	})
-
-	t.Run("back with no MRU does not move", func(t *testing.T) {
-		p, release := newBlockingPTY(t)
-		defer release()
-		d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-
-		runPaletteCommand(t, d, sess, ac, "BSK")
-		require.Same(t, sess, ac.currentSession())
-	})
-
-	t.Run("back at oldest does not wrap", func(t *testing.T) {
-		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-		defer releaseAll(releases)
-		older := d.sessions[domain.SessionID("older")]
-
-		runPaletteCommand(t, d, current, ac, "BSK")
+	// Picker-style successful transition records its origin.
+	d.switchToTarget(current, ac, picker.Target{Session: recent.id, TabIndex: -1})
+	for _, sess := range []*session{current, recent, current} {
 		runPaletteCommand(t, d, ac.currentSession(), ac, "BSK")
-		require.Same(t, older, ac.currentSession())
-
-		runPaletteCommand(t, d, older, ac, "BSK")
-		require.Same(t, older, ac.currentSession())
-	})
-}
-
-func TestHistoryNavDisplay(t *testing.T) {
-	ids := []domain.SessionID{"current", "recent", "older"}
-	var h historyNavDisplay
-
-	h.set(ids, 1, 7)
-	ids[1] = "mutated"
-	require.True(t, h.active())
-	require.Equal(t, []domain.SessionID{domain.SessionID("current"), domain.SessionID("recent"), domain.SessionID("older")}, h.ids)
-	require.Equal(t, 1, h.index)
-	require.Equal(t, uint64(7), h.gen)
-
-	h.index = -1
-	require.False(t, h.active())
-	h.index = len(h.ids)
-	require.False(t, h.active())
-
-	h.clear()
-	require.False(t, h.active())
-	require.Empty(t, h.ids)
-	require.Zero(t, h.index)
-	require.Equal(t, uint64(7), h.gen)
-}
-
-func TestHistoryNavigationCommandDetectionUsesSlug(t *testing.T) {
-	require.True(t, isHistoryNavigationCommand("back-session"))
-	require.True(t, isHistoryNavigationCommand("forward-session"))
-	require.False(t, isHistoryNavigationCommand("BSK"))
-	require.False(t, isHistoryNavigationCommand("FSK"))
-	require.False(t, isHistoryNavigationCommand("next-tab"))
-}
-
-func TestHistoryNavActivation(t *testing.T) {
-	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
-	defer releaseAll(releases)
-	recent := d.sessions[domain.SessionID("recent")]
-	older := d.sessions[domain.SessionID("older")]
-
-	runPaletteCommand(t, d, current, ac, "BSK")
-	require.Same(t, recent, ac.currentSession())
-	requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
-	require.GreaterOrEqual(t, drainOutputFrames(sends), 2)
-
-	runPaletteCommand(t, d, recent, ac, "BSK")
-	require.Same(t, older, ac.currentSession())
-	requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 2)
-
-	runPaletteCommand(t, d, older, ac, "FSK")
-	require.Same(t, recent, ac.currentSession())
-	requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
-}
-
-func TestHistoryNavBoundaryDoesNotActivate(t *testing.T) {
-	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-	defer releaseAll(releases)
-
-	runPaletteCommand(t, d, current, ac, "FSK")
-
-	require.Same(t, current, ac.currentSession())
-	ac.historyNavMu.Lock()
-	active := ac.historyNav.active()
-	ac.historyNavMu.Unlock()
-	require.False(t, active)
-}
-
-func TestHistoryNavTimeoutExpires(t *testing.T) {
-	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
-	defer releaseAll(releases)
-	clock := &historyNavTestClock{timers: make(chan *historyNavTestTimer, 1)}
-	d.clock = clock
-
-	runPaletteCommand(t, d, current, ac, "BSK")
-	requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
-	timer := <-clock.timers
-	drainOutputFrames(sends)
-	timer.fire()
-
-	require.Eventually(t, func() bool {
-		ac.historyNavMu.Lock()
-		defer ac.historyNavMu.Unlock()
-		return !ac.historyNav.active()
-	}, time.Second, time.Millisecond)
-	require.Eventually(t, func() bool { return drainOutputFrames(sends) > 0 }, time.Second, time.Millisecond)
-}
-
-func TestHistoryNavStaleTimerCannotClearFreshActivation(t *testing.T) {
-	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-	defer releaseAll(releases)
-	clock := &historyNavTestClock{timers: make(chan *historyNavTestTimer, 2)}
-	d.clock = clock
-
-	runPaletteCommand(t, d, current, ac, "BSK")
-	staleTimer := <-clock.timers
-	ac.clearHistoryNav()
-	runPaletteCommand(t, d, ac.currentSession(), ac, "FSK")
-	<-clock.timers
-
-	staleTimer.fire()
-
-	require.Eventually(t, func() bool {
-		ac.historyNavMu.Lock()
-		defer ac.historyNavMu.Unlock()
-		return ac.historyNav.active() && ac.historyNav.index == 0 && ac.historyNav.gen > 1
-	}, time.Second, time.Millisecond)
-}
-
-func TestHistoryNavTimerStoppedOnDetachAndReplacement(t *testing.T) {
-	t.Run("detach stops stale timer repaint", func(t *testing.T) {
-		d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
-		defer releaseAll(releases)
-		clock := &historyNavTestClock{timers: make(chan *historyNavTestTimer, 1)}
-		d.clock = clock
-
-		runPaletteCommand(t, d, current, ac, "BSK")
-		timer := <-clock.timers
-		recent := ac.currentSession()
-		d.clientGone(recent, ac, ac.transport(), true)
-		drainOutputFrames(sends)
-		timer.fire()
-
-		requireNoHistoryNav(t, ac)
-		require.Never(t, func() bool { return drainOutputFrames(sends) > 0 }, 25*time.Millisecond, time.Millisecond)
-	})
-
-	t.Run("replacement stops stale timer repaint", func(t *testing.T) {
-		d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
-		defer releaseAll(releases)
-		clock := &historyNavTestClock{timers: make(chan *historyNavTestTimer, 1)}
-		d.clock = clock
-
-		runPaletteCommand(t, d, current, ac, "BSK")
-		timer := <-clock.timers
-		d.detachReplacedClient(ac)
-		drainOutputFrames(sends)
-		timer.fire()
-
-		requireNoHistoryNav(t, ac)
-		require.Never(t, func() bool { return drainOutputFrames(sends) > 0 }, 25*time.Millisecond, time.Millisecond)
-	})
-}
-
-func TestHistoryNavClearsOnInvalidTrailAndNonHistorySwitch(t *testing.T) {
-	t.Run("invalid frozen trail clears", func(t *testing.T) {
-		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-		defer releaseAll(releases)
-
-		runPaletteCommand(t, d, current, ac, "BSK")
-		requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
-		d.mu.Lock()
-		delete(d.sessions, domain.SessionID("older"))
-		d.mu.Unlock()
-
-		require.Nil(t, d.historyNavBarState(ac))
-		requireNoHistoryNav(t, ac)
-	})
-
-	t.Run("non history palette command clears frozen trail", func(t *testing.T) {
-		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-		defer releaseAll(releases)
-
-		runPaletteCommand(t, d, current, ac, "BSK")
-		requireHistoryNav(t, ac, []domain.SessionID{"current", "recent", "older"}, 1)
-		runPaletteCommand(t, d, ac.currentSession(), ac, "NXT")
-
-		requireNoHistoryNav(t, ac)
-	})
-}
-
-func requireHistoryNav(t *testing.T, ac *attachedClient, want []domain.SessionID, wantIndex int) {
-	t.Helper()
-	ac.historyNavMu.Lock()
-	defer ac.historyNavMu.Unlock()
-	require.True(t, ac.historyNav.active())
-	require.Equal(t, want, ac.historyNav.ids)
-	require.Equal(t, wantIndex, ac.historyNav.index)
-}
-
-func requireNoHistoryNav(t *testing.T, ac *attachedClient) {
-	t.Helper()
-	ac.historyNavMu.Lock()
-	defer ac.historyNavMu.Unlock()
-	require.False(t, ac.historyNav.active())
-}
-
-func drainOutputFrames(sends chan ports.Frame) int {
-	count := 0
-	for {
-		select {
-		case f := <-sends:
-			if f.Type == ports.MsgOutput {
-				count++
-			}
-		default:
-			return count
-		}
+		require.Same(t, sess, ac.currentSession())
 	}
 }
 
-type historyNavTestClock struct {
-	timers chan *historyNavTestTimer
+func TestPaletteBackSessionDoesNotMoveWithoutValidTarget(t *testing.T) {
+	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	for _, tc := range []struct {
+		name    string
+		prepare func()
+	}{
+		{name: "no target", prepare: func() {}},
+		{name: "stale target", prepare: func() { ac.previousSession.Set(&session{id: "gone"}) }},
+		{name: "same session", prepare: func() { ac.previousSession.Set(current) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ac.clearPreviousSession()
+			tc.prepare()
+			runPaletteCommand(t, d, current, ac, "BSK")
+			require.Same(t, current, ac.currentSession())
+			if tc.name != "no target" {
+				require.Nil(t, ac.previousSession.Get(), "invalid target must not remain toggleable")
+			}
+		})
+	}
 }
 
-func (c *historyNavTestClock) Now() time.Time { return time.Time{} }
+func TestStaleBackSessionClearPreservesConcurrentTarget(t *testing.T) {
+	ac := &attachedClient{}
+	stale := &session{id: "stale"}
+	updated := &session{id: "updated"}
+	ac.previousSession.Set(stale)
 
-func (c *historyNavTestClock) NewTimer(time.Duration) ports.Timer {
-	t := &historyNavTestTimer{ch: make(chan time.Time, 1)}
-	c.timers <- t
-	return t
+	// Model a completed hand-off between observing a stale target and clearing
+	// it. The conditional clear must not erase the newer toggle destination.
+	ac.previousSession.Set(updated)
+	ac.clearPreviousSessionIf(stale)
+
+	require.Same(t, updated, ac.previousSession.Get())
 }
 
-type historyNavTestTimer struct {
-	ch chan time.Time
+func TestSwitchSourcePreviousSessionContracts(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		target      func(*session, *session) picker.Target
+		wantCurrent string
+		wantPrev    string
+	}{
+		{
+			name: "picker cross-session switch records origin",
+			target: func(_ *session, recent *session) picker.Target {
+				return picker.Target{Session: recent.id, TabIndex: -1}
+			},
+			wantCurrent: "recent",
+			wantPrev:    "current",
+		},
+		{
+			name: "attention cross-session switch records origin",
+			target: func(_ *session, recent *session) picker.Target {
+				return picker.Target{Session: recent.id, TabIndex: 0}
+			},
+			wantCurrent: "recent",
+			wantPrev:    "current",
+		},
+		{
+			name: "same-session tab switch does not record",
+			target: func(current *session, _ *session) picker.Target {
+				return picker.Target{Session: current.id, TabIndex: 0}
+			},
+			wantCurrent: "current",
+			wantPrev:    "",
+		},
+		{
+			name: "missing target does not record",
+			target: func(_ *session, _ *session) picker.Target {
+				return picker.Target{Session: "missing", TabIndex: -1}
+			},
+			wantCurrent: "current",
+			wantPrev:    "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+			defer releaseAll(releases)
+			recent := d.sessions[domain.SessionID("recent")]
+
+			d.switchToTarget(current, ac, tc.target(current, recent))
+			require.Equal(t, domain.SessionID(tc.wantCurrent), ac.currentSession().id)
+			if tc.wantPrev == "" {
+				require.Nil(t, ac.previousSession.Get())
+				return
+			}
+			require.Equal(t, domain.SessionID(tc.wantPrev), ac.previousSession.Get().id)
+		})
+	}
 }
 
-func (t *historyNavTestTimer) C() <-chan time.Time      { return t.ch }
-func (t *historyNavTestTimer) Reset(time.Duration) bool { return false }
-func (t *historyNavTestTimer) Stop() bool               { return true }
-func (t *historyNavTestTimer) fire()                    { t.ch <- time.Time{} }
+func TestTerminalTeardownClearsPreviousSession(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		teardown func(*Daemon, *session, *attachedClient)
+	}{
+		{name: "explicit detach", teardown: func(d *Daemon, sess *session, ac *attachedClient) { d.clientGone(sess, ac, ac.transport(), true) }},
+		{name: "non-park send error fallback", teardown: func(d *Daemon, sess *session, ac *attachedClient) { d.detachOnSendError(sess, ac, ac.transport()) }},
+		{name: "killed attached session", teardown: func(d *Daemon, sess *session, _ *attachedClient) {
+			require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+			defer releaseAll(releases)
 
-func TestPaletteBackForwardSessionStaleTrail(t *testing.T) {
-	t.Run("forward skips a killed intermediate session", func(t *testing.T) {
-		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-		defer releaseAll(releases)
-		recent := d.sessions[domain.SessionID("recent")]
-		older := d.sessions[domain.SessionID("older")]
+			ac.previousSession.Set(d.sessions[domain.SessionID("recent")])
+			tc.teardown(d, current, ac)
 
-		runPaletteCommand(t, d, current, ac, "BSK")
-		runPaletteCommand(t, d, recent, ac, "BSK")
-		require.Same(t, older, ac.currentSession())
-
-		d.mu.Lock()
-		delete(d.sessions, recent.id)
-		d.mu.Unlock()
-
-		runPaletteCommand(t, d, older, ac, "FSK")
-		require.Same(t, current, ac.currentSession())
-	})
-
-	t.Run("back from current refreshes newly recent sessions", func(t *testing.T) {
-		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-		defer releaseAll(releases)
-		p, release := newBlockingPTY(t)
-		defer release()
-		newer := &session{id: "newer", name: "newer", ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p, domain.Size{Cols: 80, Rows: 23})}}
-		newer.mruAt.Store(25)
-		d.mu.Lock()
-		d.sessions[newer.id] = newer
-		d.mu.Unlock()
-
-		runPaletteCommand(t, d, current, ac, "BSK")
-		require.Same(t, newer, ac.currentSession())
-	})
-
-	t.Run("failed switch does not advance navigator index", func(t *testing.T) {
-		d, current, ac, _, releases := newRecentNavigationTestSessions(t)
-		defer releaseAll(releases)
-		current.mu.Lock()
-		current.client = nil
-		current.mu.Unlock()
-
-		runPaletteCommand(t, d, current, ac, "BSK")
-
-		require.Same(t, current, ac.currentSession())
-		require.Zero(t, ac.recentNav.index)
-	})
+			require.Nil(t, ac.previousSession.Get())
+		})
+	}
 }
 
 func newRecentNavigationTestSessions(t *testing.T) (*Daemon, *session, *attachedClient, chan ports.Frame, []func()) {
