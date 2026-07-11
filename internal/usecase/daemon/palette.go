@@ -40,7 +40,6 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	ac.overlays.palette = palette.New(commands)
 	ac.overlays.paletteRecent = recent
 	ac.overlays.paletteHints = palette.ContextualHints{}
-	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
 	ac.overlays.paletteMu.Unlock()
 	d.paint(sess, ac, true)
@@ -120,12 +119,10 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	routeOverlayBytes(data, &ac.overlays.palettePending, overlayEvents{
 		rune: func(r rune) {
 			ac.overlays.palette.Insert(r)
-			ac.overlays.paletteFeedback = ""
 			changed = true
 		},
 		backspace: func() {
 			ac.overlays.palette.Backspace()
-			ac.overlays.paletteFeedback = ""
 			changed = true
 		},
 		up:     func() { ac.overlays.palette.Up(); changed = true },
@@ -135,7 +132,6 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 			var selected bool
 			cmd, selected = ac.overlays.palette.Selected()
 			if !selected {
-				ac.overlays.paletteFeedback = "invalid command arguments"
 				changed = true
 				return
 			}
@@ -147,13 +143,12 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 			if cmd.Slug == "jump-recent-session" {
 				action, valid := palette.ParseAction([]command.Command{cmd}, rawQuery)
 				if !valid {
-					ac.overlays.paletteFeedback = "invalid command arguments"
 					changed = true
 					return
 				}
 				args = action.Args
+				recent = append([]recentSession(nil), ac.overlays.paletteRecent...)
 			}
-			recent = append([]recentSession(nil), ac.overlays.paletteRecent...)
 			generation = ac.overlays.paletteGeneration
 			execute = true
 		},
@@ -168,7 +163,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		}
 	}
 	if cancel {
-		d.clearPaletteLocked(ac)
+		ac.clearPaletteLocked()
 	}
 	ac.overlays.paletteMu.Unlock()
 	if cancel {
@@ -187,7 +182,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	if cmd.Slug == "jump-recent-session" {
 		rank, err := command.ParsePositiveDecimal(args)
 		if err != nil {
-			d.paletteFailure(ac, generation, rawQuery, "requested recent session is unavailable")
+			ac.paletteFailure(generation, rawQuery, "rank must be one positive decimal")
 			d.paint(sess, ac, true)
 			return
 		}
@@ -195,22 +190,22 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		// the validation above, so closing is contingent on the committed switch.
 		exec := paletteExec{d: d, sess: sess, ac: ac, recent: recent}
 		if err := exec.JumpRecentSession(rank); err != nil {
-			d.paletteFailure(ac, generation, rawQuery, "requested recent session is unavailable")
+			ac.paletteFailure(generation, rawQuery, "requested recent session is unavailable")
 			d.paint(sess, ac, true)
 			return
 		}
 		// Publication remains generation-safe; do not let stale work close a
 		// newer palette interaction.
-		if d.closeExecutedPalette(ac, generation, rawQuery) {
+		if ac.closeExecutedPalette(generation, rawQuery) {
 			d.recordPaletteUse(cmd.Code)
 			d.paint(ac.currentSession(), ac, true)
 		}
 		return
 	}
-	if !d.closeExecutedPalette(ac, generation, rawQuery) {
+	if !ac.closeExecutedPalette(generation, rawQuery) {
 		return
 	}
-	if err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac, recent: recent}, args); err != nil {
+	if err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac}, args); err != nil {
 		d.log.Error("palette command failed", "err", err, "command", cmd.Code)
 	} else {
 		d.recordPaletteUse(cmd.Code)
@@ -225,35 +220,34 @@ func paletteArgs(query string, cmd command.Command) []string {
 	return action.Args
 }
 
-func (d *Daemon) clearPaletteLocked(ac *attachedClient) {
+func (ac *attachedClient) clearPaletteLocked() {
 	ac.overlays.paletteGeneration++
 	ac.overlays.palette = nil
 	ac.overlays.paletteRecent = nil
 	ac.overlays.paletteHints = palette.ContextualHints{}
-	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
 }
 
-func (d *Daemon) paletteFailure(ac *attachedClient, generation uint64, rawQuery, feedback string) {
+func (ac *attachedClient) paletteFailure(generation uint64, rawQuery, feedback string) {
 	ac.overlays.paletteMu.Lock()
 	defer ac.overlays.paletteMu.Unlock()
 	if ac.overlays.palette == nil || ac.overlays.paletteGeneration != generation || ac.overlays.palette.Query() != rawQuery {
 		return
 	}
-	ac.overlays.paletteFeedback = feedback
-	// Rendering consumes the immutable contextual hint snapshot, not Model's
-	// feedback state. Preserve ranks while making stale-target feedback visible.
+	// Rendering consumes the immutable contextual hint snapshot; preserve ranks
+	// while making stale-target feedback visible.
 	if ac.overlays.paletteHints.Kind == command.ContextHintRecentSessions {
 		ac.overlays.paletteHints.Feedback = feedback
 	}
 }
-func (d *Daemon) closeExecutedPalette(ac *attachedClient, generation uint64, rawQuery string) bool {
+
+func (ac *attachedClient) closeExecutedPalette(generation uint64, rawQuery string) bool {
 	ac.overlays.paletteMu.Lock()
 	defer ac.overlays.paletteMu.Unlock()
 	if ac.overlays.palette == nil || ac.overlays.paletteGeneration != generation || ac.overlays.palette.Query() != rawQuery {
 		return false
 	}
-	d.clearPaletteLocked(ac)
+	ac.clearPaletteLocked()
 	return true
 }
 

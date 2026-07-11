@@ -24,7 +24,6 @@ type overlayRuntime struct {
 	paletteRecent     []recentSession // immutable for this palette interaction
 	paletteGeneration uint64
 	paletteHints      palette.ContextualHints
-	paletteFeedback   string
 	palettePending    []byte
 
 	promptMu      sync.Mutex
@@ -221,8 +220,6 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 		hints.Recent = append([]palette.RecentSessionHint(nil), hints.Recent...)
 		snap.paletteHints = &hints
 		snap.paletteRecent = append([]recentSession(nil), rt.paletteRecent...)
-	}
-	if snap.paletteActive {
 		snap.paletteLocked = true
 	} else {
 		rt.paletteMu.Unlock()

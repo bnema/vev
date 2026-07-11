@@ -66,7 +66,7 @@ func TestPaletteJRSActivatesOnlyExactContextualHint(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\b\b\bRNS"))
 	awaitFrame(t, sends, ports.MsgOutput)
 	ac.overlays.paletteMu.Lock()
-	require.Equal(t, command.ContextHint(0), ac.overlays.paletteHints.Kind)
+	require.Equal(t, command.ContextHintNone, ac.overlays.paletteHints.Kind)
 	ac.overlays.paletteMu.Unlock()
 }
 
@@ -94,7 +94,7 @@ func TestPaletteJRSUsesEffectiveOverrideOnly(t *testing.T) {
 	d.handleInput(ac.currentSession(), ac, []byte("JRS"))
 	awaitFrame(t, sends, ports.MsgOutput)
 	ac.overlays.paletteMu.Lock()
-	require.Equal(t, command.ContextHint(0), ac.overlays.paletteHints.Kind)
+	require.Equal(t, command.ContextHintNone, ac.overlays.paletteHints.Kind)
 	ac.overlays.paletteMu.Unlock()
 	require.Same(t, d.sessions[domain.SessionID("recent")], ac.currentSession())
 	d.handleInput(ac.currentSession(), ac, []byte("\r"))
@@ -172,7 +172,7 @@ func TestPaletteJRSDisplacedTargetKeepsInteractionOpen(t *testing.T) {
 	require.True(t, ac.overlays.paletteActive())
 	ac.overlays.paletteMu.Lock()
 	require.Equal(t, "JRS 1", ac.overlays.palette.Query())
-	require.Equal(t, "requested recent session is unavailable", ac.overlays.paletteFeedback)
+	require.Equal(t, "requested recent session is unavailable", ac.overlays.paletteHints.Feedback)
 	ac.overlays.paletteMu.Unlock()
 }
 
@@ -188,7 +188,24 @@ func TestPaletteJRSOutOfRangeKeepsPaletteOpenWithoutClamping(t *testing.T) {
 	require.True(t, ac.overlays.paletteActive())
 	ac.overlays.paletteMu.Lock()
 	require.Equal(t, "JRS 3", ac.overlays.palette.Query())
-	require.Equal(t, "requested recent session is unavailable", ac.overlays.paletteFeedback)
+	require.Equal(t, "requested recent session is unavailable", ac.overlays.paletteHints.Feedback)
+	ac.overlays.paletteMu.Unlock()
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteJRSMalformedRankFeedback(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+
+	d.handleInput(current, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(current, ac, []byte("JRS 0\r"))
+
+	require.Same(t, current, ac.currentSession())
+	require.True(t, ac.overlays.paletteActive())
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, "JRS 0", ac.overlays.palette.Query())
+	require.Equal(t, "rank must be one positive decimal", ac.overlays.paletteHints.Feedback)
 	ac.overlays.paletteMu.Unlock()
 	awaitFrame(t, sends, ports.MsgOutput)
 }
@@ -203,10 +220,10 @@ func TestPaletteFailureDoesNotOverwriteNewerInteraction(t *testing.T) {
 	staleGeneration := ac.overlays.paletteGeneration
 	ac.overlays.paletteMu.Unlock()
 	d.enterPalette(sess, ac)
-	d.paletteFailure(ac, staleGeneration, "JRS 1", "stale failure")
+	ac.paletteFailure(staleGeneration, "JRS 1", "stale failure")
 
 	ac.overlays.paletteMu.Lock()
-	require.Empty(t, ac.overlays.paletteFeedback)
+	require.Empty(t, ac.overlays.paletteHints.Feedback)
 	ac.overlays.paletteMu.Unlock()
 	awaitFrame(t, sends, ports.MsgOutput)
 	awaitFrame(t, sends, ports.MsgOutput)
