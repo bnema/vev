@@ -125,6 +125,7 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 		n, err := p.pty.Read(buf)
 		if n > 0 {
 			data := buf[:n]
+			rc := sess.renderCoordinator()
 			p.mu.Lock()
 			wasSyncing := p.screen.SyncUpdateActive()
 			p.screen.Write(data)
@@ -132,12 +133,28 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 			isSyncing := p.screen.SyncUpdateActive()
 			completeSyncRead := !wasSyncing && !isSyncing && completedSynchronizedUpdate(data)
 			var syncGen uint64
+			syncEnded := false
 			if wasSyncing != isSyncing {
 				if isSyncing {
 					syncGen = sess.syncGen.Add(1)
 					p.syncGen = syncGen
+					// Publish the gate while the authoritative screen mutation is
+					// still protected. A concurrent deadline therefore cannot
+					// compose this partial DEC 2026 payload.
+					if rc != nil {
+						rc.noteSyncBeginWithRenderability(p, syncGen, func() bool {
+							return d.paneRenderable(sess, tb, p)
+						}, func() {
+							p.mu.Lock()
+							if p.syncGen == syncGen && p.screen.SyncUpdateActive() {
+								p.screen.ForceSyncEnd()
+							}
+							p.mu.Unlock()
+						})
+					}
 				} else {
 					syncGen = p.syncGen
+					syncEnded = rc != nil && rc.removeSyncEnd(p, syncGen, true)
 				}
 			}
 			p.mu.Unlock()
@@ -160,26 +177,18 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 				}
 				resp = resp[:0]
 			}
-			if rc := sess.renderCoordinator(); rc != nil {
+			if rc != nil {
 				if wasSyncing != isSyncing {
-					gen := syncGen
 					if isSyncing {
-						rc.noteSyncBeginWithRenderability(p, gen, func() bool {
-							return d.paneRenderable(sess, tb, p)
-						}, func() {
-							p.mu.Lock()
-							if p.syncGen == gen && p.screen.SyncUpdateActive() {
-								p.screen.ForceSyncEnd()
-							}
-							p.mu.Unlock()
-						})
 						// The accumulated synchronized batch is the pending render only
 						// while this pane can currently reach a composition target.
 						if renderable {
 							rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
 						}
-					} else {
-						rc.noteSyncEnd(p, gen)
+					} else if syncEnded && renderable {
+						// State removal happened under pane.mu; only the external wake is
+						// deferred until after unlock to preserve lock order.
+						rc.fireCurrent(false)
 					}
 				}
 				if completeSyncRead && renderable {

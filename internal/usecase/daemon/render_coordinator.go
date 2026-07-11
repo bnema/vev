@@ -84,6 +84,9 @@ type renderCoordinatorOptions struct {
 	syncActive func() bool
 	// onInvalidate observes every published invalidation (test-visible hook).
 	onInvalidate func(renderInvalidation)
+	// afterSyncGateEvaluated is a package-private deterministic test seam. It
+	// runs unlocked after visibility predicates and before registry validation.
+	afterSyncGateEvaluated func()
 }
 
 // renderCoordinator fans in producer invalidations for one attached session.
@@ -120,6 +123,9 @@ type renderCoordinator struct {
 	// ackDeferred records that an expired deadline or watchdog was blocked by
 	// output-window capacity. ACK notifications may flush only this state.
 	ackDeferred bool
+	// deadlineDue closes the handoff between a timer worker receiving its tick
+	// and fire observing unavailable ACK capacity.
+	deadlineDue bool
 	coalesced   int
 	// outputPressure carries recent bulk-burst pressure between completed
 	// batches. It selects a bounded 8–16ms deadline without letting a busy
@@ -151,6 +157,10 @@ type renderCoordinator struct {
 	// syncBatches is keyed by the stable pane owner. Each pane owns an
 	// independent watchdog; composition remains gated until every batch ends.
 	syncBatches map[*pane]*syncBatch
+	// syncRegistryVersion changes for every batch identity mutation. fire
+	// snapshots it before evaluating visibility and retries if a producer
+	// publishes or completes a batch during that unlocked evaluation.
+	syncRegistryVersion uint64
 }
 
 // newRenderCoordinator constructs a coordinator bound to opts. It starts no
@@ -198,6 +208,7 @@ func (c *renderCoordinator) cancelSyncTimersLocked() {
 	for pane, batch := range c.syncBatches {
 		cancelSyncBatchLocked(batch)
 		delete(c.syncBatches, pane)
+		c.syncRegistryVersion++
 	}
 }
 
@@ -215,6 +226,7 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 	wasPending, wasUrgent, wasPreviewPending := c.pending, c.pendingUrgent, c.pendingPreview
 	if !wasPending {
 		c.ackDeferred = false
+		c.deadlineDue = false
 	}
 	c.pending = true
 	c.pendingReset = c.pendingReset || inv.reset
@@ -269,6 +281,7 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 		defer close(done)
 		select {
 		case <-timerC:
+			c.markDeadlineDue(gen)
 			c.fire(gen, false, true)
 		case <-cancel:
 		}
@@ -283,7 +296,7 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 // normal or urgent deadline.
 func (c *renderCoordinator) notifyAck() {
 	c.mu.Lock()
-	if !c.ackDeferred || !c.pending {
+	if (!c.ackDeferred && !c.deadlineDue) || !c.pending {
 		c.mu.Unlock()
 		return
 	}
@@ -294,6 +307,16 @@ func (c *renderCoordinator) notifyAck() {
 
 // noteSyncBegin records a synchronized-output batch for its stable pane and
 // arms that pane's watchdog. Overlapping pane batches are independent.
+// markDeadlineDue records a received timer tick before the worker probes ACK
+// readiness, so a concurrent ACK cannot miss an already-expired deadline.
+func (c *renderCoordinator) markDeadlineDue(gen uint64) {
+	c.mu.Lock()
+	if c.fireValidLocked(gen, false) {
+		c.deadlineDue = true
+	}
+	c.mu.Unlock()
+}
+
 func (c *renderCoordinator) noteSyncBegin(p *pane, gen uint64, force ...func()) {
 	var renderable func() bool
 	if c.opts.syncRenderable != nil {
@@ -321,6 +344,7 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 		batch.force = force[0]
 	}
 	c.syncBatches[p] = batch
+	c.syncRegistryVersion++
 	clock := c.opts.clock
 	if clock == nil {
 		c.mu.Unlock()
@@ -343,6 +367,7 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 		valid := !c.torndown && current == batch && current.generation == gen
 		if valid {
 			delete(c.syncBatches, p)
+			c.syncRegistryVersion++
 			cancelSyncBatchLocked(batch)
 			if len(c.syncBatches) == 0 && c.pending {
 				c.pendingUrgent = true
@@ -362,8 +387,7 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 // noteSyncEnd records completion for exactly one pane batch. It only flushes
 // after the aggregate gate opens.
 func (c *renderCoordinator) noteSyncEnd(p *pane, gen uint64) {
-	// Visibility may acquire session/tab locks, so sample it before c.mu and
-	// then verify the batch identity under c.mu.
+	// Visibility may acquire session/tab locks, so evaluate it outside c.mu.
 	c.mu.Lock()
 	batch := c.syncBatches[p]
 	if batch == nil || batch.generation != gen {
@@ -373,24 +397,29 @@ func (c *renderCoordinator) noteSyncEnd(p *pane, gen uint64) {
 	renderable := batch.renderable
 	c.mu.Unlock()
 	wasRenderable := renderable == nil || renderable()
-
-	c.mu.Lock()
-	batch = c.syncBatches[p]
-	if batch == nil || batch.generation != gen {
-		c.mu.Unlock()
-		return
-	}
-	delete(c.syncBatches, p)
-	cancelSyncBatchLocked(batch)
-	if wasRenderable && len(c.syncBatches) == 0 && c.pending {
-		c.pendingUrgent = true
-	}
-	c.mu.Unlock()
-	// A batch that was already non-renderable never closed the aggregate gate;
-	// its late end must not bypass an unrelated output deadline.
-	if wasRenderable {
+	if c.removeSyncEnd(p, gen, wasRenderable) {
 		c.fireCurrent(false)
 	}
+}
+
+// removeSyncEnd removes a batch without invoking a predicate or callback. PTY
+// processing calls it while pane.mu is still held, so a deadline can never
+// compose the post-Write partial screen between mutation and publication.
+// The caller must invoke fireCurrent only after releasing pane.mu.
+func (c *renderCoordinator) removeSyncEnd(p *pane, gen uint64, renderable bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	batch := c.syncBatches[p]
+	if batch == nil || batch.generation != gen {
+		return false
+	}
+	delete(c.syncBatches, p)
+	c.syncRegistryVersion++
+	cancelSyncBatchLocked(batch)
+	if renderable && len(c.syncBatches) == 0 && c.pending {
+		c.pendingUrgent = true
+	}
+	return renderable
 }
 
 // noteSyncPaneRemoved releases a pane watchdog when pane lifecycle ends.
@@ -398,6 +427,7 @@ func (c *renderCoordinator) noteSyncPaneRemoved(p *pane) {
 	c.mu.Lock()
 	if batch := c.syncBatches[p]; batch != nil {
 		delete(c.syncBatches, p)
+		c.syncRegistryVersion++
 		cancelSyncBatchLocked(batch)
 	}
 	c.mu.Unlock()
@@ -585,24 +615,20 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 	}
 	ackReady := c.opts.ackReady
 	c.mu.Unlock()
-	if !c.syncGateOpen() {
-		return
-	}
-
 	ready := ackReady == nil || ackReady()
 
-	// The callback can detach, replace, start a synchronized batch, or publish
-	// newer work. Revalidate every consumption precondition after it returns.
+	// The readiness callback can detach, replace, or publish a sync batch.
+	// syncGateOpenLocked retries predicate evaluation on every registry change
+	// and returns holding c.mu, so pending consumption has no intervening gap.
 	c.mu.Lock()
 	if !c.fireValidLocked(gen, watchdog) {
 		c.mu.Unlock()
 		return
 	}
-	c.mu.Unlock()
-	if !c.syncGateOpen() {
+	if !c.syncGateOpenLocked() {
+		c.mu.Unlock()
 		return
 	}
-	c.mu.Lock()
 	if !c.fireValidLocked(gen, watchdog) {
 		c.mu.Unlock()
 		return
@@ -631,7 +657,7 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 		}
 	}
 	c.cancelNormalTimerLocked()
-	c.pending, c.pendingReset, c.pendingUrgent, c.ackDeferred, c.coalesced, c.armed = false, false, false, false, 0, false
+	c.pending, c.pendingReset, c.pendingUrgent, c.ackDeferred, c.deadlineDue, c.coalesced, c.armed = false, false, false, false, false, 0, false
 	wake := c.opts.wake
 	c.mu.Unlock()
 	if wake != nil {
@@ -646,12 +672,15 @@ func (c *renderCoordinator) fireValidLocked(gen uint64, watchdog bool) bool {
 
 // syncGateOpen evaluates pane visibility without c.mu, then reacquires and
 // validates the complete batch identity set before accepting that result.
-func (c *renderCoordinator) syncGateOpen() bool {
+// syncGateOpen evaluates visibility outside c.mu and returns with c.mu held
+// only when the registry version still matches the snapshot. The caller must
+// consume pending state before unlocking, eliminating the gate-to-consume gap.
+func (c *renderCoordinator) syncGateOpenLocked() bool {
 	for {
-		c.mu.Lock()
-		batches := make(map[*pane]*syncBatch, len(c.syncBatches))
-		for p, batch := range c.syncBatches {
-			batches[p] = batch
+		version := c.syncRegistryVersion
+		batches := make([]*syncBatch, 0, len(c.syncBatches))
+		for _, batch := range c.syncBatches {
+			batches = append(batches, batch)
 		}
 		c.mu.Unlock()
 
@@ -662,19 +691,12 @@ func (c *renderCoordinator) syncGateOpen() bool {
 				break
 			}
 		}
+		if hook := c.opts.afterSyncGateEvaluated; hook != nil {
+			hook()
+		}
 
 		c.mu.Lock()
-		unchanged := len(batches) == len(c.syncBatches)
-		if unchanged {
-			for p, batch := range batches {
-				if c.syncBatches[p] != batch || c.syncBatches[p].generation != batch.generation {
-					unchanged = false
-					break
-				}
-			}
-		}
-		c.mu.Unlock()
-		if unchanged {
+		if version == c.syncRegistryVersion {
 			return !gated
 		}
 	}
