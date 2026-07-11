@@ -18,6 +18,7 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -95,6 +96,14 @@ func (t *ownedSwapErrorTransport) Close() error               { return nil }
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
+
+func TestCopySearchModalGeometry(t *testing.T) {
+	base := domain.Size{Cols: 100, Rows: 40}
+
+	require.Equal(t, domain.Rect{X: 0, Y: 28, Width: 100, Height: 11}, copySearchModal.Bounds(base))
+	require.Equal(t, domain.AnchorBottom, copySearchModal.Anchor)
+	require.Equal(t, ui.Margins{Bottom: 1}, copySearchModal.Margins)
+}
 
 func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	p, release := newBlockingPTY(t)

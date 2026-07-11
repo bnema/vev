@@ -245,6 +245,11 @@ func TestAttachOnceOfflineLinkEventReturnsReconnectableError(t *testing.T) {
 	require.True(t, shouldReconnect(result.err), "offline exit must be reconnectable")
 }
 
+func TestReconnectToastBoundsUseCenterAnchor(t *testing.T) {
+	bounds := reconnectToastBounds(domain.Size{Cols: 80, Rows: 24})
+	require.Equal(t, domain.Rect{X: 29, Y: 10, Width: 22, Height: 3}, bounds)
+}
+
 func TestReconnectToastDrawAndClearHelpers(t *testing.T) {
 	var out bytes.Buffer
 	size := domain.Size{Cols: 80, Rows: 24}

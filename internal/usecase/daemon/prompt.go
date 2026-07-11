@@ -3,13 +3,14 @@ package daemon
 import (
 	"strings"
 
+	"github.com/bnema/vev/internal/domain"
 	promptui "github.com/bnema/vev/internal/usecase/prompt"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
 func promptModalFor(title string) ui.Modal {
-	return ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 4, Title: title, Anchor: ui.AnchorBottom, BottomMargin: 1}
+	return ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 4, Title: title, Anchor: domain.AnchorBottom, Margins: ui.Margins{Bottom: 1}}
 }
 
 func (d *Daemon) enterPrompt(sess *session, ac *attachedClient, title, initial string, submit func(string) error) {

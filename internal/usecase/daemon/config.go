@@ -29,6 +29,8 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	d.restoreProcessAllowlist.Store(&allowlist)
 	floating := cfg.Floating
 	d.floatingConfig.Store(&floating)
+	palette := cfg.Palette
+	d.paletteConfig.Store(&palette)
 	d.themeMode.Store(uint32(cfg.Theme))
 	if d.barScripts != nil {
 		d.barScripts.mu.Lock()
@@ -176,6 +178,13 @@ func (d *Daemon) logConfigWarning(w domain.Warning) {
 		return
 	}
 	d.log.Warn("config warning", "msg", w.Msg)
+}
+
+func (d *Daemon) currentPaletteConfig() domain.PaletteConfig {
+	if cfg := d.paletteConfig.Load(); cfg != nil {
+		return *cfg
+	}
+	return domain.Defaults().Palette
 }
 
 func (d *Daemon) currentFloatingConfig() domain.FloatingConfig {

@@ -37,7 +37,7 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-var copySearchModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Search ", Anchor: ui.AnchorBottom, BottomMargin: 1}
+var copySearchModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Search ", Anchor: domain.AnchorBottom, Margins: ui.Margins{Bottom: 1}}
 
 func copyTargetPane(rt *overlayRuntime) *pane {
 	if rt == nil {

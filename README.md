@@ -49,6 +49,10 @@ vev reads `$XDG_CONFIG_HOME/vev/config`, or `~/.config/vev/config` when `XDG_CON
 # Theme: auto follows the client; dark/light force built-in palettes.
 theme = auto
 
+# Palette placement: auto, center, top-left, top, top-right, left, right,
+# bottom-left, bottom, or bottom-right.
+palette.anchor = auto
+
 # One prewarmed floating terminal per tab. An empty command uses the normal shell.
 floating.command =
 floating.width = 80%
@@ -113,6 +117,10 @@ Configuring an action replaces all of its built-in aliases. In the example above
 Key specs support `alt+<char>`, `alt+space`, and `alt+left/right/up/down`; digit key specs support `alt+1` through `alt+9`, not `alt+0`. `jump-attention` first opens the oldest attention tab in the current session; if none exists, it opens the oldest attention tab in another session. Invalid entries are logged as warnings and skipped where possible; duplicate config keys use the last value, binding conflicts keep the later action's defaults, and command-code conflicts drop the conflicting override.
 
 `floating.command` runs through the normal shell; leave it empty to launch that shell directly. `floating.width` and `floating.height` require exact percentages from `1%` through `100%`; invalid values log a warning and leave the last accepted value (or the `80%` default) intact. Reloading does not relaunch or immediately alter an installed floating terminal: a changed command is used on its next launch, while changed dimensions take effect when that terminal is next shown or resized. Only configuration—not floating runtime state—is restored after a daemon restart; restored tabs stay cold until first visited.
+
+### Command palette anchoring
+
+`palette.anchor` accepts `auto` or the nine anchors `center`, `top-left`, `top`, `top-right`, `left`, `right`, `bottom-left`, `bottom`, and `bottom-right`. Values are trimmed and case-insensitive. The default is `auto`: palettes use the bottom shelf when the terminal is narrower than 96 columns, and a 64-column bottom-right rail at 96 columns or wider. An explicit anchor changes placement only; palette query and selection are preserved. Invalid values are warned about and leave the last valid value unchanged, as do duplicate entries until a valid replacement is supplied (the last valid value wins). Configuration reload applies a changed anchor live and repositions an open palette without resetting its query or selection.
 
 ### Bar right anchors
 
