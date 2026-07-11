@@ -599,6 +599,28 @@ func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
 	}
 }
 
+func TestHandleCopyInputUsesImmutableSnapshotWithoutPaneLock(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	pane := sess.activeTab().focusedPane()
+	pane.screen.Write([]byte("live"))
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	pane.mu.Lock()
+	defer pane.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		d.handleCopyInput(ac, []byte("x"))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("immutable copy input waited for the live pane lock")
+	}
+}
+
 func TestCopyModeEnterExitConcurrentWithPaintRace(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)

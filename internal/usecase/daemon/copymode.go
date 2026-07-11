@@ -50,27 +50,15 @@ func copyTargetPane(rt *overlayRuntime) *pane {
 
 func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 	rt := ac.overlays
-	p := copyTargetPane(rt)
-	if p == nil {
-		return
-	}
-	p.mu.Lock()
 	rt.copyMu.Lock()
-	if rt.copyMode == nil || rt.copyPane != p {
+	if rt.copyMode == nil || rt.copyPane == nil || rt.copySnapshot == nil {
 		rt.copyMu.Unlock()
-		p.mu.Unlock()
-		return
-	}
-	if rt.copySnapshot == nil {
-		rt.copyMu.Unlock()
-		p.mu.Unlock()
 		return
 	}
 	document := rt.copySnapshot
 	if delta > 0 && rt.copyMode.AtBottom(*document) {
 		rt.clearCopyModeLocked()
 		rt.copyMu.Unlock()
-		p.mu.Unlock()
 		d.paint(sess, ac, true)
 		return
 	}
@@ -80,7 +68,6 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 		rt.clearCopyModeLocked()
 	}
 	rt.copyMu.Unlock()
-	p.mu.Unlock()
 
 	d.paint(sess, ac, true)
 }
@@ -98,8 +85,11 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	if p == nil {
 		return
 	}
+	// Capture the live pane under pane.mu; all subsequent copy interaction uses
+	// the immutable document while holding only copyMu.
 	p.mu.Lock()
 	document := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+	p.mu.Unlock()
 	rt.copyMu.Lock()
 	rt.copyMode = scopy.NewMode(document)
 	rt.copySnapshot = &document
@@ -110,7 +100,6 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	rt.copyDragging = false
 	rt.normalMousePressValid = false
 	rt.copyMu.Unlock()
-	p.mu.Unlock()
 	if floatingSource {
 		tb.mu.Lock()
 		stillVisible := tb.floating.state == floatingVisible && tb.floating.pane == p
@@ -127,33 +116,20 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
 	if ev.Button != mouse.Left {
 		return
 	}
-	p := copyTargetPane(rt)
-	if p == nil {
-		return
-	}
-	p.mu.Lock()
-	if ev.Row >= p.screen.Frame.Height {
-		if ev.Type == mouse.Press {
-			rt.copyMu.Lock()
-			rt.copyPressRowValid = false
-			rt.copyDragging = false
-			rt.copyMu.Unlock()
-		}
-		p.mu.Unlock()
-		return
-	}
 	rt.copyMu.Lock()
-	if rt.copyMode == nil || rt.copyPane != p {
+	if rt.copyMode == nil || rt.copyPane == nil || rt.copySnapshot == nil {
 		rt.copyMu.Unlock()
-		p.mu.Unlock()
-		return
-	}
-	if rt.copySnapshot == nil {
-		rt.copyMu.Unlock()
-		p.mu.Unlock()
 		return
 	}
 	document := rt.copySnapshot
+	if ev.Row >= document.Height {
+		if ev.Type == mouse.Press {
+			rt.copyPressRowValid = false
+			rt.copyDragging = false
+		}
+		rt.copyMu.Unlock()
+		return
+	}
 	absRow := rt.copyMode.ViewportTop + ev.Row
 	changed := false
 	switch ev.Type {
@@ -177,7 +153,6 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
 		// Button release intentionally has no visual effect.
 	}
 	rt.copyMu.Unlock()
-	p.mu.Unlock()
 
 	if changed {
 		d.paint(sess, ac, true)
@@ -190,17 +165,11 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	if sess == nil {
 		return
 	}
-	p := copyTargetPane(rt)
-	if p == nil {
-		return
-	}
-	p.mu.Lock()
 	rt.copyMu.Lock()
-	if rt.copyMode == nil || rt.copyPane != p {
+	if rt.copyMode == nil || rt.copyPane == nil || rt.copySnapshot == nil {
 		rt.copyPending = nil
 		d.stopCopyPendingTimerLocked(ac)
 		rt.copyMu.Unlock()
-		p.mu.Unlock()
 		return
 	}
 	if len(rt.copyPending) > 0 {
@@ -211,16 +180,10 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		data = combined
 		rt.copyPending = nil
 	}
-	if rt.copySnapshot == nil {
-		rt.copyMu.Unlock()
-		p.mu.Unlock()
-		return
-	}
 	document := rt.copySnapshot
 	if rt.copySearch != nil {
 		changed, closeSearch, accepted := d.routeCopySearchInputLocked(rt, *document, data)
 		rt.copyMu.Unlock()
-		p.mu.Unlock()
 		if changed || closeSearch || accepted {
 			d.paint(sess, ac, true)
 		}
@@ -292,7 +255,6 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		rt.clearCopyModeLocked()
 	}
 	rt.copyMu.Unlock()
-	p.mu.Unlock()
 
 	if copyOut && text != "" {
 		chunks := scopy.OSC52(text)

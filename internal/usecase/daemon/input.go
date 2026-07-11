@@ -270,8 +270,10 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 				return
 			}
 
+			// The immutable snapshot is the only live-pane access needed for drag entry.
 			p.mu.Lock()
 			document := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+			p.mu.Unlock()
 			rt.copyMu.Lock()
 			mode := scopy.NewMode(document)
 			mode.StartSelectionAt(document, pressTop+pressRow)
@@ -284,7 +286,6 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 			rt.copyDragging = true
 			rt.normalMousePressValid = false
 			rt.copyMu.Unlock()
-			p.mu.Unlock()
 			d.paint(sess, ac, true)
 		case mouse.Release:
 			rt.copyMu.Lock()
