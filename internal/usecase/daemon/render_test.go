@@ -648,36 +648,6 @@ func TestComposeTabFrameCachedTitleBarsDoNotAllocate(t *testing.T) {
 	require.Zero(t, allocs, "valid cached title-bar renders must not allocate")
 }
 
-func BenchmarkPaintCachedSinglePaneDamage(b *testing.B) {
-	win := newTab(nil, domain.Size{Cols: 81, Rows: 24})
-	left := win.focusedPane()
-	right := newPane("pane-2", nil, domain.Size{Cols: 40, Rows: 24})
-	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
-	win.tree.Focus = right.id
-	win.panes[right.id] = right
-	left.screen.Write([]byte("left"))
-	right.screen.Write([]byte("right"))
-	sess := &session{id: "s", name: "work", tabs: []*tab{win}, active: 0}
-	ac := &attachedClient{tr: discardTransport{}, output: newOutputStateStream(), size: domain.Size{Cols: 81, Rows: 26}}
-	ac.initOverlays()
-	sess.client = ac
-	ac.setSession(sess)
-	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	d.paint(sess, ac, true)
-	left.screen.ClearDamage()
-	right.screen.ClearDamage()
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		right.screen.Write([]byte("x\b"))
-		d.paint(sess, ac, false)
-		// Mirror the client ACK pump so the steady state measures compose→diff→send,
-		// not the ack-gate bailout after maxUnackedOutputStates frames.
-		ac.ackOutputState(ac.output.next)
-	}
-}
-
 func TestComposeTabFrameStackUsesShellFallback(t *testing.T) {
 	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
 	p := win.focusedPane()

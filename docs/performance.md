@@ -1,43 +1,70 @@
 # Performance methodology (M5)
 
-Enable daemon pprof explicitly with `VEV_PPROF_ADDR=127.0.0.1:6060 vev --daemon` (or by exporting the variable before launching clients). When unset, no debug HTTP server is started.
+This baseline measures in-process daemon work only. It deliberately does **not**
+measure coordinator behavior, chunk encoding, compression, GC tuning, or real
+network latency. Output and snapshot metrics count encoded output bytes and
+frames produced by the daemon; they are useful proxies for local rendering and
+IPC payload work, not measurements of a Unix socket, SSH, or UDP transport.
+Real Unix-socket, SSH, and UDP impairment/latency benchmarks are deferred.
 
-Run microbenchmarks with:
+## Large-history daemon baseline
+
+Run the full daemon matrix once when establishing a baseline:
+
+```sh
+go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1x -benchmem
+```
+
+For repeatable comparison of the focused control workload, run three one-second
+samples (pin CPU/governor and record the host when comparing runs):
+
+```sh
+go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistoryLivePaint/1tab-1pane-control$' -benchtime=1s -count=3 -benchmem
+```
+
+The matrix exercises live paint, snapshot capture, copy-mode entry, copy search,
+and resize at `120x40` client geometry. Each pane is populated with 10,000
+full-width deterministic history rows containing a stable `needle-<tab>-<row>`
+prefix and patterned text. The layouts are:
+
+- 1 tab x 1 pane (control)
+- 1 tab x 4 panes
+- 4 tabs x 1 pane
+- 4 tabs x 4 panes
+- 8 tabs x 1 pane
+
+The fixture starts no PTY readers, schedulers, clocks, or transports. It primes
+the renderer shadow before timing; live paint then alternates fixed writes. The
+reported `outputbytes/op`, `framepayloadbytes/op`, and `outputframes/op` values
+are encoded in-process output proxies. `snapshotbytes/op` is the serialized
+in-process snapshot size. They must not be presented as network throughput or
+latency.
+
+Capture a pre-change result outside the repository, including Go and kernel
+context:
+
+```sh
+{
+  date -Is
+  go version
+  uname -a
+  git rev-parse HEAD
+  go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1x -benchmem
+  go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistoryLivePaint/1tab-1pane-control$' -benchtime=1s -count=3 -benchmem
+} > /tmp/vev-history-before.txt 2>&1
+```
+
+## Lower-level smoke baseline
+
+Use this command to check renderer, VT, IPC, and daemon microbenchmarks without
+claiming an end-to-end transport result:
 
 ```sh
 go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc ./internal/usecase/daemon -run '^$' -bench=. -benchmem
 ```
 
-Demo flood workloads are scripted in `scripts/bench-workloads.sh` for `yes`, `seq`, and `cat` styles for raw/tmux runs. vev does not currently support `vev new <name> -- command`, so automated vev workload command overrides are intentionally not documented. Capture bytes/frame and syscalls/frame externally (for example with `strace -c` around the client/daemon) and allocations with `-benchmem`/pprof.
-
-## Local baseline status
-
-Full end-to-end vev-vs-tmux workload baselines are deferred/waived for this non-interactive branch because they require an interactive terminal/daemon pair, external tracing tools around both processes, and (for automated vev flood workloads) future command override support. Until that exists, only start the daemon/client normally and do not claim a scripted vev flood command. tmux/raw comparison commands remain useful for shaping workloads:
+Enable daemon pprof explicitly when collecting a daemon profile:
 
 ```sh
-VEV_PPROF_ADDR=127.0.0.1:6060 strace -ff -c -o vev-daemon.strace vev --daemon
-strace -ff -c -o vev-client.strace vev new perf-manual
-strace -ff -c -o tmux-yes.strace tmux new-session -d -s perf-yes 'timeout 30s yes'
-strace -ff -c -o tmux-seq.strace tmux new-session -d -s perf-seq 'timeout 30s sh -c "while :; do seq 1 10000; done"'
-strace -ff -c -o tmux-cat.strace tmux new-session -d -s perf-cat 'timeout 30s sh -c "while :; do cat /path/to/sample.txt; done"'
+VEV_PPROF_ADDR=127.0.0.1:6060 vev --daemon
 ```
-
-Record host CPU, OS/kernel, terminal emulator, vev commit, tmux version, terminal size, workload duration, raw command lines, syscall summaries, bytes written per rendered frame, and heap profiles or allocation counts before comparing.
-
-## UDP mobile congestion behavior
-
-The datagram transport uses one shared congestion-responsive byte pacer for initial sends and retransmits. Retransmissions therefore consume the same byte budget as new data instead of bypassing congestion feedback. Datagram clients use a one-state output window: the cumulative ACK releases that state, and newer repaint state coalesces while it remains unacknowledged rather than retaining an unbounded queue.
-
-Microbenchmarks executed locally for this review using `go test ./internal/adapters/ipc ./internal/usecase/daemon -run '^$' -bench=. -benchmem`:
-
-| benchmark | methodology |
-| --- | --- |
-| BenchmarkTransportSend | writes encoded frames to an in-memory discard `net.Conn`; allocations reported here are Send-side frame assembly costs. |
-| BenchmarkTransportRecvReuse | reads a pre-encoded frame from a looping in-memory reader; no `Send` call, goroutine, channel, or frame production work runs inside the measured loop, so allocations reported here are Recv-side costs only. |
-| BenchmarkPaintCachedSinglePaneDamage | writes a small damage update into one pane, paints through the daemon compose→diff→send path, and advances the output ACK each iteration so the measured loop does not hit the unacked-output bailout. |
-
-| workload | vev baseline | tmux baseline | notes |
-| --- | --- | --- | --- |
-| yes | not run in this non-interactive review environment | not run in this non-interactive review environment | use same terminal size and duration |
-| seq | not run in this non-interactive review environment | not run in this non-interactive review environment | use same terminal size and duration |
-| cat | not run in this non-interactive review environment | not run in this non-interactive review environment | use same input file, terminal size, and duration |

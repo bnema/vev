@@ -36,6 +36,83 @@ func TestPerformanceFixtureCounters(t *testing.T) {
 	require.True(t, fixture.resized())
 }
 
+func TestPerformanceFixtureLargeHistoryTopology(t *testing.T) {
+	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: 4, panes: 4, historyRows: 10_000})
+
+	require.Len(t, fixture.sess.tabs, 4)
+	for _, tb := range fixture.sess.tabs {
+		require.Len(t, tb.panes, 4)
+		for _, p := range tb.panes {
+			require.Equal(t, 10_000, p.scrollback.Len())
+		}
+	}
+}
+
+func BenchmarkDaemonHistoryLivePaint(b *testing.B) {
+	benchmarkDaemonLargeHistory(b, "live-paint", func(f *performanceFixture) { f.paintLive() })
+}
+func BenchmarkDaemonHistorySnapshotCapture(b *testing.B) {
+	benchmarkDaemonLargeHistory(b, "snapshot-capture", func(f *performanceFixture) { f.captureSnapshot() })
+}
+func BenchmarkDaemonHistoryCopyEnter(b *testing.B) {
+	benchmarkDaemonLargeHistory(b, "copy-enter", func(f *performanceFixture) { f.d.enterCopyMode(f.sess, f.ac) })
+}
+func BenchmarkDaemonHistoryCopySearch(b *testing.B) {
+	benchmarkDaemonLargeHistory(b, "copy-search", func(f *performanceFixture) { f.d.handleInput(f.sess, f.ac, []byte("/needle\r")) })
+}
+func BenchmarkDaemonHistoryResize(b *testing.B) {
+	benchmarkDaemonLargeHistory(b, "resize", func(f *performanceFixture) { f.resize() })
+}
+
+func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*performanceFixture)) {
+	b.Helper()
+	for _, topology := range []struct {
+		name        string
+		tabs, panes int
+	}{
+		{name: "1tab-1pane-control", tabs: 1, panes: 1},
+		{name: "1tab-4panes", tabs: 1, panes: 4},
+		{name: "4tabs-1pane", tabs: 4, panes: 1},
+		{name: "4tabs-4panes", tabs: 4, panes: 4},
+		{name: "8tabs-1pane", tabs: 8, panes: 1},
+	} {
+		b.Run(topology.name, func(b *testing.B) {
+			fixture := newPerformanceFixture(b, performanceConfig{
+				size: domain.Size{Cols: 120, Rows: 40}, tabs: topology.tabs, panes: topology.panes, historyRows: 10_000,
+			})
+			if workload == "copy-search" {
+				fixture.d.enterCopyMode(fixture.sess, fixture.ac)
+			}
+			b.ReportAllocs()
+			fixture.resetMetrics()
+			b.ResetTimer()
+			for b.Loop() {
+				run(fixture)
+				fixture.ac.ackOutputState(fixture.ac.output.next)
+			}
+			b.StopTimer()
+			metrics := fixture.metrics()
+			if workload == "live-paint" && metrics.outputFrames != uint64(b.N) {
+				b.Fatalf("live paint emitted %d frames for %d operations", metrics.outputFrames, b.N)
+			}
+			benchmarkReportMetrics(b, metrics, b.N, 10_000)
+		})
+	}
+}
+
+func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations, historyRows int) {
+	b.Helper()
+	if operations == 0 {
+		return
+	}
+	perOperation := float64(operations)
+	b.ReportMetric(float64(metrics.outputFrames)/perOperation, "outputframes/op")
+	b.ReportMetric(float64(metrics.outputBytes)/perOperation, "outputbytes/op")
+	b.ReportMetric(float64(metrics.outputPayloadBytes)/perOperation, "framepayloadbytes/op")
+	b.ReportMetric(float64(metrics.snapshotBytes)/perOperation, "snapshotbytes/op")
+	b.ReportMetric(float64(historyRows), "historyrows/pane")
+}
+
 func TestPerformanceFixturePaintLiveUsesPrecomputedAlternatingWrites(t *testing.T) {
 	fixture := newPerformanceFixture(t, performanceConfig{})
 
@@ -54,7 +131,10 @@ func TestPerformanceFixturePaintLiveUsesPrecomputedAlternatingWrites(t *testing.
 // performanceConfig intentionally describes only an in-process daemon shape:
 // no PTY readers, schedulers, clocks, or transports are started by this fixture.
 type performanceConfig struct {
-	size domain.Size
+	size        domain.Size
+	tabs        int
+	panes       int
+	historyRows int
 }
 
 type performanceMetrics struct {
@@ -83,7 +163,17 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 	if !config.size.Valid() {
 		config.size = domain.Size{Cols: 80, Rows: 24}
 	}
-	d, sess, ac, _ := newManualSessionWithPTYs(t, nil, nil)
+	if config.tabs == 0 {
+		config.tabs = 1
+	}
+	if config.panes == 0 {
+		config.panes = 2
+	}
+	if config.historyRows == 0 {
+		config.historyRows = 1
+	}
+	ptys := make([]ports.PTY, config.tabs)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, ptys...)
 	output := &countingOutputTransport{}
 	ac.tr = output
 	ac.size = config.size
@@ -102,7 +192,7 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 	}
 	WithSnapshotStore(fixture.snaps)(d)
 	for tabIndex, tb := range sess.tabs {
-		fixture.configureTab(tb, tabIndex, tabSize(config.size))
+		fixture.configureTab(tb, tabIndex, config.panes, config.historyRows, tabSize(config.size))
 	}
 	fixture.activePane = fixture.findActivePane()
 
@@ -113,28 +203,29 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 	return fixture
 }
 
-func (f *performanceFixture) configureTab(tb *tab, tabIndex int, size domain.Size) {
+func (f *performanceFixture) configureTab(tb *tab, tabIndex, paneCount, historyRows int, size domain.Size) {
 	f.t.Helper()
 	tb.mu.Lock()
+	defer tb.mu.Unlock()
 	tb.size = size
 	left := tb.focusedPane()
-	rightID := layout.PaneID(fmt.Sprintf("pane-%d-right", tabIndex+1))
-	right := newPane(rightID, nil, size)
-	tb.panes[rightID] = right
-	require.NoError(f.t, tb.tree.Split(left.id, layout.Right, true, rightID, domain.Rect{Width: size.Cols, Height: size.Rows}))
+	for paneIndex := 1; paneIndex < paneCount; paneIndex++ {
+		id := layout.PaneID(fmt.Sprintf("pane-%d-%d", tabIndex+1, paneIndex+1))
+		tb.panes[id] = newPane(id, nil, size)
+		require.NoError(f.t, tb.tree.Split(left.id, layout.Right, true, id, domain.Rect{Width: size.Cols, Height: size.Rows}))
+	}
 	placements, ok := layout.Solve(tb.tree.Root, domain.Rect{Width: size.Cols, Height: size.Rows})
 	require.True(f.t, ok, "performance fixture layout must be solvable")
-	require.Len(f.t, placements, 2)
+	require.Len(f.t, placements, paneCount)
 	f.d.applyLayoutLocked(tb)
 	for _, p := range tb.panes {
 		p.mu.Lock()
-		width, height := p.screen.Frame.Width, p.screen.Frame.Height
-		for row := range max(height-1, 1) {
+		width := p.screen.Frame.Width
+		for row := 0; p.scrollback.Len() < historyRows; row++ {
 			p.screen.Write([]byte(performanceFullWidthRow(width, tabIndex, row) + "\r\n"))
 		}
 		p.mu.Unlock()
 	}
-	tb.mu.Unlock()
 }
 
 // performanceFullWidthRow produces stable, full-width visible content without
