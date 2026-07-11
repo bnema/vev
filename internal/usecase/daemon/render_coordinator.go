@@ -113,7 +113,10 @@ type renderCoordinator struct {
 	// viewers may consume a coalesced target snapshot while that target is
 	// still ACK-blocked.
 	pendingPreview bool
-	coalesced      int
+	// ackDeferred records that an expired deadline or watchdog was blocked by
+	// output-window capacity. ACK notifications may flush only this state.
+	ackDeferred bool
+	coalesced   int
 	// outputPressure carries recent bulk-burst pressure between completed
 	// batches. It selects a bounded 8–16ms deadline without letting a busy
 	// batch perpetually reset its own timer.
@@ -205,6 +208,9 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 	}
 	c.metrics.invalidations.Add(1)
 	wasPending, wasUrgent, wasPreviewPending := c.pending, c.pendingUrgent, c.pendingPreview
+	if !wasPending {
+		c.ackDeferred = false
+	}
 	c.pending = true
 	c.pendingReset = c.pendingReset || inv.reset
 	c.pendingUrgent = c.pendingUrgent || inv.class == invalidateUrgent
@@ -238,7 +244,7 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 	if timerC == nil {
 		c.mu.Unlock()
 		timer.Stop()
-		c.fire(gen, false)
+		c.fire(gen, false, true)
 		return
 	}
 	cancel := make(chan struct{})
@@ -249,7 +255,7 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 		defer close(done)
 		select {
 		case <-timerC:
-			c.fire(gen, false)
+			c.fire(gen, false, true)
 		case <-cancel:
 		}
 	}()
@@ -259,12 +265,17 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 }
 
 // notifyAck reports that the client acknowledged an output state, releasing
-// at most one deferred wake.
+// at most one deadline/watchdog-deferred wake. It never bypasses an unexpired
+// normal or urgent deadline.
 func (c *renderCoordinator) notifyAck() {
 	c.mu.Lock()
+	if !c.ackDeferred || !c.pending {
+		c.mu.Unlock()
+		return
+	}
 	gen := c.generation
 	c.mu.Unlock()
-	c.fire(gen, false)
+	c.fire(gen, false, false)
 }
 
 // noteSyncBegin records a synchronized-output batch for its stable pane and
@@ -401,6 +412,7 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 	if c.attachment == ac {
 		c.attachment = nil
 		c.pending = false
+		c.ackDeferred = false
 		c.pendingPreview = false
 		c.generation++
 		c.armed = false
@@ -417,6 +429,7 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient) {
 	if c.attachment == old {
 		c.attachment = replacement
 		c.pending = false
+		c.ackDeferred = false
 		c.pendingPreview = false
 		c.generation++
 		c.armed = false
@@ -437,6 +450,7 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	c.previewWake = nil
 	c.previewWakes = nil
 	c.pending = false
+	c.ackDeferred = false
 	c.pendingPreview = false
 	c.generation++
 	c.armed = false
@@ -487,7 +501,7 @@ func (c *renderCoordinator) fireCurrent(watchdog bool) {
 	c.mu.Lock()
 	gen := c.generation
 	c.mu.Unlock()
-	c.fire(gen, watchdog)
+	c.fire(gen, watchdog, watchdog)
 }
 
 // invalidateRender is the sole producer fan-in. In tests and transitional
@@ -521,7 +535,7 @@ func (d *Daemon) invalidateRenderNow(sess *session, ac *attachedClient, reset bo
 	}
 }
 
-func (c *renderCoordinator) fire(gen uint64, watchdog bool) {
+func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 	c.mu.Lock()
 	if c.torndown || !c.pending || (!watchdog && gen != c.generation) {
 		c.mu.Unlock()
@@ -534,6 +548,9 @@ func (c *renderCoordinator) fire(gen uint64, watchdog bool) {
 	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog}
 	preview, previews := c.takePendingPreviewsLocked()
 	if c.opts.ackReady != nil && !c.opts.ackReady() {
+		if deadline {
+			c.ackDeferred = true
+		}
 		c.mu.Unlock()
 		c.notifyPreviews(w, preview, previews)
 		return
@@ -551,7 +568,7 @@ func (c *renderCoordinator) fire(gen uint64, watchdog bool) {
 		}
 	}
 	c.cancelNormalTimerLocked()
-	c.pending, c.pendingReset, c.pendingUrgent, c.coalesced, c.armed = false, false, false, 0, false
+	c.pending, c.pendingReset, c.pendingUrgent, c.ackDeferred, c.coalesced, c.armed = false, false, false, false, 0, false
 	wake := c.opts.wake
 	c.mu.Unlock()
 	if wake != nil {
