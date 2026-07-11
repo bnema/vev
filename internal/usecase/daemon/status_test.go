@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -162,19 +163,19 @@ func TestFitTabLabels(t *testing.T) {
 		tabs      []statusTab
 		rowLen    int
 		rightText string
-		want      []string
+		want      []fittedTabLabel
 	}{
 		{
 			name:   "no tabs",
 			tabs:   nil,
 			rowLen: 10,
-			want:   []string{},
+			want:   []fittedTabLabel{},
 		},
 		{
 			name:   "everything fits stays untruncated",
 			tabs:   []statusTab{{name: "one"}, {name: "two", paneTitle: "shell"}},
 			rowLen: 40,
-			want:   []string{"one", "two (shell)"},
+			want:   []fittedTabLabel{{text: "one", nameLen: len("one")}, {text: "two (shell)", nameLen: len("two")}},
 		},
 		{
 			name: "overflow redistributes budget: short tab stays full, long tab gets ellipsis",
@@ -183,26 +184,26 @@ func TestFitTabLabels(t *testing.T) {
 				{name: "ed", paneTitle: "verylongtitle"},
 			},
 			rowLen: 20,
-			want:   []string{"a", "ed (verylongt…"},
+			want:   []fittedTabLabel{{text: "a", nameLen: len("a")}, {text: "ed (verylongt…", nameLen: len("ed")}},
 		},
 		{
 			name:   "tight budget degrades to a truncated tab name only",
 			tabs:   []statusTab{{name: "editor", paneTitle: "some pane title text"}},
 			rowLen: 7,
-			want:   []string{"edi…"},
+			want:   []fittedTabLabel{{text: "edi…", nameLen: len("edi…")}},
 		},
 		{
 			name:      "non-empty rightText shrinks the budget",
 			tabs:      []statusTab{{name: "aaaaaaaaaa"}},
 			rowLen:    20,
 			rightText: "0123456789",
-			want:      []string{"aaaaa…"},
+			want:      []fittedTabLabel{{text: "aaaaa…", nameLen: len("aaaaa…")}},
 		},
 		{
 			name:   "single tab wider than the whole row collapses to empty",
 			tabs:   []statusTab{{name: "reallyverylongtabname"}},
 			rowLen: 3,
-			want:   []string{""},
+			want:   []fittedTabLabel{{}},
 		},
 	}
 	for _, tt := range tests {
@@ -222,13 +223,105 @@ func TestFitTabLabels(t *testing.T) {
 				if tb.attention {
 					overhead += 1 + renderer.RuneWidth(attentionGlyph)
 				}
-				drawn += overhead + statusTextWidth(got[i])
+				drawn += overhead + statusTextWidth(got[i].text)
+				require.LessOrEqual(t, got[i].nameLen, len(got[i].text), "nameLen must not exceed the label's byte length")
+				if got[i].nameLen < len(got[i].text) {
+					require.True(t, utf8.RuneStart(got[i].text[got[i].nameLen]), "nameLen must land on a rune boundary")
+				}
 			}
 			if budget > 0 {
 				require.LessOrEqual(t, drawn, budget, "drawn width must not exceed the derived budget")
 			}
 		})
 	}
+}
+
+func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
+	tabs := []statusTab{
+		{name: "api", paneTitle: "shell"},
+		{name: "logs", active: true, attention: true},
+	}
+	status := statusSnapshot{tabs: tabs}
+	const rowLen = 40
+
+	t.Run("truecolor theme bolds names and mutes titles", func(t *testing.T) {
+		theme := themeui.Theme{
+			Foreground: renderer.RGB{R: 200, G: 200, B: 200},
+			Background: renderer.RGB{R: 10, G: 20, B: 30},
+			HasFG:      true,
+			HasBG:      true,
+			Known:      true,
+			TrueColor:  true,
+		}
+		styles := newThemeStyles(theme)
+		require.False(t, styles.tabTitle.Equal(styles.statusBar), "sanity: muted title style must differ from the base style on a truecolor theme")
+		require.False(t, styles.tabTitleActive.Equal(styles.accent), "sanity: muted active-title style must differ from the base accent style")
+
+		row := make([]renderer.Cell, rowLen)
+		drawTopBarSnapshot(row, status, 0, "", styles)
+
+		labels := fitTabLabels(tabs, rowLen, "")
+		x := 0
+
+		// tab 0: inactive, "api" bold, " (shell)" muted, trailing space plain.
+		nameEnd := x + 1 + labels[0].nameLen
+		for i := x; i < nameEnd; i++ {
+			require.True(t, row[i].Style.Bold, "cell %d: name segment must be bold", i)
+			require.True(t, row[i].Style.Equal(styles.tabName), "cell %d: name segment style mismatch", i)
+		}
+		titleLen := len(labels[0].text) - labels[0].nameLen
+		titleEnd := nameEnd + titleLen
+		for i := nameEnd; i < titleEnd; i++ {
+			require.False(t, row[i].Style.Bold, "cell %d: title segment must not be bold", i)
+			require.True(t, row[i].Style.Equal(styles.tabTitle), "cell %d: title segment style mismatch", i)
+		}
+		x = titleEnd
+		require.True(t, row[x].Style.Equal(styles.statusBar), "cell %d: trailing space must keep the base style", x)
+		x++
+
+		// tab 1: active, "logs" bold, no title, attention space + bell + trailing space.
+		nameEnd = x + 1 + labels[1].nameLen
+		for i := x; i < nameEnd; i++ {
+			require.True(t, row[i].Style.Bold, "cell %d: active name segment must be bold", i)
+			require.True(t, row[i].Style.Equal(styles.tabNameActive), "cell %d: active name segment style mismatch", i)
+		}
+		require.Equal(t, len(labels[1].text), labels[1].nameLen, "tab 1 has no pane title, so its whole label is the name segment")
+		x = nameEnd
+		require.True(t, row[x].Style.Equal(styles.accent), "cell %d: attention leading space must keep the active base style", x)
+		x += 2 // skip the leading space (checked above) and the bell glyph itself, which pulseStyle owns
+		require.True(t, row[x].Style.Equal(styles.accent), "cell %d: trailing space must keep the active base style", x)
+	})
+
+	t.Run("non-usable theme matches the pre-change fallback styles", func(t *testing.T) {
+		styles := resolveThemeStyles(nil)
+		require.True(t, styles.tabName.Equal(styles.statusBar))
+		require.True(t, styles.tabTitle.Equal(styles.statusBar))
+		require.True(t, styles.tabNameActive.Equal(styles.accent))
+		require.True(t, styles.tabTitleActive.Equal(styles.accent))
+
+		row := make([]renderer.Cell, rowLen)
+		drawTopBarSnapshot(row, status, 0, "", styles)
+
+		// " api (shell) " (tab 0, incl. trailing space) + " logs" + attention
+		// space + blank bell (frame 0 is not visible) + trailing space, then
+		// blank padding to rowLen: byte-for-byte what the pre-change renderer
+		// produced, since every new style field collapses to statusBar/accent.
+		const tab0 = " api (shell) "
+		const tab1 = " logs   "
+		require.Equal(t, tab0+tab1+strings.Repeat(" ", rowLen-len(tab0)-len(tab1)), rowText(row))
+
+		for i, c := range row[:len(tab0)] {
+			require.True(t, c.Style.Equal(styles.statusBar), "cell %d should use the plain base style", i)
+		}
+		activeStart := len(tab0)
+		bellCell := activeStart + len(" logs") + 1 // pulseStyle-owned, not asserted here
+		for i := activeStart; i < activeStart+len(tab1); i++ {
+			if i == bellCell {
+				continue
+			}
+			require.True(t, row[i].Style.Equal(styles.accent), "cell %d should use the plain accent style", i)
+		}
+	})
 }
 
 func TestTabDisplayName(t *testing.T) {

@@ -388,3 +388,101 @@ func TestStyleHelpersFallbackAndThemed(t *testing.T) {
 		t.Fatalf("muted themed=%+v", muted)
 	}
 }
+
+func TestEmphasisStyle(t *testing.T) {
+	usableTheme := Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 20, B: 30}, HasFG: true, HasBG: true, Known: true, TrueColor: true}
+	base := renderer.Style{HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 1, G: 2, B: 3}}
+
+	tests := []struct {
+		name  string
+		theme Theme
+		base  renderer.Style
+		want  renderer.Style
+	}{
+		{
+			name:  "usable theme applies bold",
+			theme: usableTheme,
+			base:  base,
+			want:  renderer.Style{HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 1, G: 2, B: 3}, Bold: true},
+		},
+		{
+			name:  "unknown theme returns base unchanged",
+			theme: Theme{},
+			base:  base,
+			want:  base,
+		},
+		{
+			name:  "theme missing truecolor returns base unchanged",
+			theme: Theme{Foreground: usableTheme.Foreground, Background: usableTheme.Background, HasFG: true, HasBG: true, Known: true},
+			base:  base,
+			want:  base,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := EmphasisStyle(tt.base, tt.theme); !got.Equal(tt.want) {
+				t.Fatalf("EmphasisStyle()=%+v want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMutedVariantStyle(t *testing.T) {
+	usableTheme := Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 20, B: 30}, HasFG: true, HasBG: true, Known: true, TrueColor: true}
+	rgbBase := renderer.Style{
+		HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 100, G: 100, B: 100},
+		HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{R: 0, G: 0, B: 0},
+	}
+	fgOnlyBase := renderer.Style{HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 100, G: 100, B: 100}}
+	noRGBBase := renderer.DefaultStyle()
+
+	tests := []struct {
+		name  string
+		base  renderer.Style
+		theme Theme
+		want  renderer.Style
+	}{
+		{
+			name:  "usable theme blends fg toward own bg",
+			base:  rgbBase,
+			theme: usableTheme,
+			want: renderer.Style{
+				HasForegroundRGB: true, ForegroundRGB: Blend(renderer.RGB{R: 100, G: 100, B: 100}, renderer.RGB{R: 0, G: 0, B: 0}, mutedVariantBlend),
+				HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{R: 0, G: 0, B: 0},
+			},
+		},
+		{
+			name:  "non-usable theme returns base unchanged",
+			base:  rgbBase,
+			theme: Theme{},
+			want:  rgbBase,
+		},
+		{
+			name:  "base without RGB background falls back to theme background",
+			base:  fgOnlyBase,
+			theme: usableTheme,
+			want: renderer.Style{
+				HasForegroundRGB: true, ForegroundRGB: Blend(renderer.RGB{R: 100, G: 100, B: 100}, usableTheme.Background, mutedVariantBlend),
+			},
+		},
+		{
+			name:  "base without RGB background and theme without background returns base unchanged",
+			base:  fgOnlyBase,
+			theme: Theme{Known: true, TrueColor: true, HasFG: true},
+			want:  fgOnlyBase,
+		},
+		{
+			name:  "base without RGB foreground returns base unchanged",
+			base:  noRGBBase,
+			theme: usableTheme,
+			want:  noRGBBase,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := MutedVariantStyle(tt.base, tt.theme); !got.Equal(tt.want) {
+				t.Fatalf("MutedVariantStyle()=%+v want %+v", got, tt.want)
+			}
+		})
+	}
+}

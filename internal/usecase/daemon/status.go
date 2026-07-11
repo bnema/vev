@@ -66,16 +66,22 @@ func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, t
 	x := 0
 	labels := fitTabLabels(status.tabs, len(row), topRight)
 	for i, w := range status.tabs {
-		style := styles.statusBar
+		baseStyle := styles.statusBar
+		nameStyle := styles.tabName
+		titleStyle := styles.tabTitle
 		if w.active {
-			style = styles.accent
+			baseStyle = styles.accent
+			nameStyle = styles.tabNameActive
+			titleStyle = styles.tabTitleActive
 		}
-		writeStatusText(row, &x, " "+labels[i], style)
+		label := labels[i]
+		writeStatusText(row, &x, " "+label.text[:label.nameLen], nameStyle)
+		writeStatusText(row, &x, label.text[label.nameLen:], titleStyle)
 		if w.attention {
-			writeStatusText(row, &x, " ", style)
+			writeStatusText(row, &x, " ", baseStyle)
 			writeBell(row, &x, frame)
 		}
-		writeStatusText(row, &x, " ", style)
+		writeStatusText(row, &x, " ", baseStyle)
 	}
 	drawRightPlainText(row, topRight, x, styles.statusBar)
 }
@@ -383,9 +389,18 @@ func fitHistoryNav(entries []historyNavSession, rowLen, leftUsed int, feedback s
 	return entries[start:end]
 }
 
+// fittedTabLabel is one tab's drawable label; text[:nameLen] is the tab-name
+// segment, text[nameLen:] the pane-title segment (possibly empty). nameLen is
+// always a byte offset landing on a rune boundary, since it is derived from
+// the byte length of the (possibly truncated) name prefix.
+type fittedTabLabel struct {
+	text    string
+	nameLen int
+}
+
 // fitTabLabels returns, per tab, the text drawn between its surrounding
 // spaces (attention glyph handled by the caller), guaranteeing all tabs fit.
-func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []string {
+func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []fittedTabLabel {
 	reserve := 1
 	if rightText != "" {
 		reserve = statusTextWidth(rightText) + 2
@@ -406,9 +421,11 @@ func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []string {
 		widths[i] = statusTextWidth(full[i])
 		total += o + widths[i]
 	}
-	labels := make([]string, len(tabs))
+	labels := make([]fittedTabLabel, len(tabs))
 	if total <= budget {
-		copy(labels, full)
+		for i, t := range tabs {
+			labels[i] = fittedTabLabel{text: full[i], nameLen: len(t.name)}
+		}
 		return labels
 	}
 
@@ -430,13 +447,14 @@ func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []string {
 		textBudget := share - overhead[i]
 		switch {
 		case textBudget <= 0:
-			labels[i] = ""
+			labels[i] = fittedTabLabel{}
 		case widths[i] <= textBudget:
-			labels[i] = full[i]
+			labels[i] = fittedTabLabel{text: full[i], nameLen: len(tabs[i].name)}
 		case textBudget >= statusTextWidth(tabs[i].name)+4:
-			labels[i] = ui.TruncateText(full[i], textBudget)
+			labels[i] = fittedTabLabel{text: ui.TruncateText(full[i], textBudget), nameLen: len(tabs[i].name)}
 		default:
-			labels[i] = ui.TruncateText(tabs[i].name, textBudget)
+			text := ui.TruncateText(tabs[i].name, textBudget)
+			labels[i] = fittedTabLabel{text: text, nameLen: len(text)}
 		}
 		consumed := overhead[i] + min(widths[i], max(textBudget, 0))
 		remaining -= consumed

@@ -10,8 +10,8 @@ import (
 
 func TestNewFlattensAndSelectsCurrentTab(t *testing.T) {
 	m := New([]SessionView{
-		{ID: "s1", Name: "one", Tabs: []string{"shell", "logs"}, Active: 0},
-		{ID: "s2", Name: "two", Tabs: []string{"api"}, Active: 0},
+		{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "shell"}, {Name: "logs"}}, Active: 0},
+		{ID: "s2", Name: "two", Tabs: []TabEntry{{Name: "api"}}, Active: 0},
 	}, "s1", 1)
 
 	got, ok := m.Selected()
@@ -25,12 +25,12 @@ func TestNewFlattensAndSelectsCurrentTab(t *testing.T) {
 }
 
 func TestNewFallsBackToActiveThenFirstLeaf(t *testing.T) {
-	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []string{"shell", "logs"}, Active: 1}}, "missing", 0)
+	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "shell"}, {Name: "logs"}}, Active: 1}}, "missing", 0)
 	got, ok := m.Selected()
 	require.True(t, ok)
 	require.Equal(t, Target{Session: "s1", TabIndex: 1}, got)
 
-	m = New([]SessionView{{ID: "s1", Name: "one", Tabs: []string{"shell"}, Active: 4}}, "missing", 0)
+	m = New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "shell"}}, Active: 4}}, "missing", 0)
 	got, ok = m.Selected()
 	require.True(t, ok)
 	require.Equal(t, Target{Session: "s1", TabIndex: 0}, got)
@@ -38,8 +38,8 @@ func TestNewFallsBackToActiveThenFirstLeaf(t *testing.T) {
 
 func TestUpDownSkipsHeadersClampsAndCrossesSessions(t *testing.T) {
 	m := New([]SessionView{
-		{ID: "s1", Name: "one", Tabs: []string{"a", "b"}, Active: 0},
-		{ID: "s2", Name: "two", Tabs: []string{"c"}, Active: 0},
+		{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "a"}, {Name: "b"}}, Active: 0},
+		{ID: "s2", Name: "two", Tabs: []TabEntry{{Name: "c"}}, Active: 0},
 	}, "s1", 0)
 
 	m.Up()
@@ -92,8 +92,8 @@ func TestChooseLayoutBoundaries(t *testing.T) {
 
 func TestSelectedMapping(t *testing.T) {
 	m := New([]SessionView{
-		{ID: "alpha", Name: "alpha", Tabs: []string{"one"}, Active: 0},
-		{ID: "beta", Name: "beta", Tabs: []string{"two", "three"}, Active: 0},
+		{ID: "alpha", Name: "alpha", Tabs: []TabEntry{{Name: "one"}}, Active: 0},
+		{ID: "beta", Name: "beta", Tabs: []TabEntry{{Name: "two"}, {Name: "three"}}, Active: 0},
 	}, "beta", 1)
 
 	got, ok := m.Selected()
@@ -102,7 +102,7 @@ func TestSelectedMapping(t *testing.T) {
 }
 
 func TestStoppedSessionSelectableAndRendered(t *testing.T) {
-	m := New([]SessionView{{ID: "stopped:work", Name: "work", Tabs: []string{""}, Stopped: true}}, "", 0)
+	m := New([]SessionView{{ID: "stopped:work", Name: "work", Tabs: []TabEntry{{Name: ""}}, Stopped: true}}, "", 0)
 	got, ok := m.Selected()
 	require.True(t, ok)
 	require.Equal(t, Target{Session: "stopped:work", Name: "work", TabIndex: 0, Stopped: true}, got)
@@ -112,7 +112,7 @@ func TestStoppedSessionSelectableAndRendered(t *testing.T) {
 }
 
 func TestRenderPreviewClipsPadsDropsWideRuneAndInvertsSelection(t *testing.T) {
-	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []string{"tab"}, Active: 0}}, "s1", 0)
+	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "tab"}}, Active: 0}}, "s1", 0)
 	preview := Preview{
 		Width:  24,
 		Height: 1,
@@ -132,7 +132,7 @@ func TestRenderPreviewClipsPadsDropsWideRuneAndInvertsSelection(t *testing.T) {
 }
 
 func TestRenderListScrollsSelectionIntoView(t *testing.T) {
-	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []string{"a", "b", "c", "d", "e", "f"}, Active: 0}}, "s1", 0)
+	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "a"}, {Name: "b"}, {Name: "c"}, {Name: "d"}, {Name: "e"}, {Name: "f"}}, Active: 0}}, "s1", 0)
 	for range 5 {
 		m.Down()
 	}
@@ -144,7 +144,7 @@ func TestRenderListScrollsSelectionIntoView(t *testing.T) {
 }
 
 func TestRenderListTruncatesLabelWithEllipsis(t *testing.T) {
-	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []string{"a-really-long-focused-pane-tab-label"}, Active: 0}}, "s1", 0)
+	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "a-really-long-focused-pane-tab-label"}}, Active: 0}}, "s1", 0)
 
 	frame := m.Render(domain.Size{Cols: 45, Rows: 5}, Preview{})
 
@@ -155,13 +155,85 @@ func TestRenderListTruncatesLabelWithEllipsis(t *testing.T) {
 }
 
 func TestRenderListOnlyDoesNotDrawPreview(t *testing.T) {
-	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []string{"tab"}, Active: 0}}, "s1", 0)
+	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "tab"}}, Active: 0}}, "s1", 0)
 	preview := Preview{Width: 1, Height: 1, Rows: [][]renderer.Cell{{cell('x')}}}
 
 	frame := m.Render(domain.Size{Cols: 23, Rows: 11}, preview)
 	require.Equal(t, 'o', frame.At(0, 0).Rune)
 	require.Equal(t, ' ', frame.At(0, 1).Rune)
 	require.NotEqual(t, 'x', frame.At(0, 0).Rune)
+}
+
+func TestRenderListDrawsNameAndDetailSegmentsWithDistinctStyles(t *testing.T) {
+	nameStyle := renderer.Style{Bold: true}
+	detailStyle := renderer.Style{Italic: true}
+	baseStyle := renderer.DefaultStyle()
+	selectionStyle := renderer.Style{Inverse: true}
+	selectionNameStyle := renderer.Style{Inverse: true, Bold: true}
+	selectionMutedStyle := renderer.Style{Inverse: true, Italic: true}
+	styles := RenderStyles{
+		Selection: selectionStyle, SelectionName: selectionNameStyle, SelectionMuted: selectionMutedStyle,
+		Name: nameStyle, Detail: detailStyle, Base: baseStyle,
+	}
+
+	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{
+		{Name: "alpha", Detail: " (running)"},
+		{Name: "beta", Detail: " (idle)", Attention: true},
+	}, Active: 0}}, "s1", 0)
+
+	frame := m.Render(domain.Size{Cols: 30, Rows: 5}, Preview{}, styles)
+
+	// Row 1 is the selected tab ("alpha"): name uses SelectionName, detail uses SelectionMuted.
+	require.Equal(t, 'a', frame.At(2, 1).Rune)
+	require.True(t, frame.At(2, 1).Style.Equal(selectionNameStyle), "selected name segment style")
+	require.Equal(t, ' ', frame.At(7, 1).Rune)
+	require.True(t, frame.At(7, 1).Style.Equal(selectionMutedStyle), "selected detail segment style")
+	require.Equal(t, '(', frame.At(8, 1).Rune)
+	require.True(t, frame.At(8, 1).Style.Equal(selectionMutedStyle), "selected detail segment style")
+
+	// Row 2 is the non-selected tab ("beta"): name uses Name, detail uses
+	// Detail, and the attention marker after the detail uses the row's base
+	// style (not muted).
+	require.Equal(t, 'b', frame.At(2, 2).Rune)
+	require.True(t, frame.At(2, 2).Style.Equal(nameStyle), "name segment style")
+	require.Equal(t, ' ', frame.At(6, 2).Rune)
+	require.True(t, frame.At(6, 2).Style.Equal(detailStyle), "detail segment style")
+	require.Equal(t, '(', frame.At(7, 2).Rune)
+	require.True(t, frame.At(7, 2).Style.Equal(detailStyle), "detail segment style")
+	require.Equal(t, ' ', frame.At(13, 2).Rune, "attention marker leading space")
+	require.True(t, frame.At(13, 2).Style.Equal(baseStyle), "attention marker uses the base style, not muted")
+	require.Equal(t, rune(attentionGlyph), frame.At(14, 2).Rune)
+	require.True(t, frame.At(14, 2).Style.Equal(baseStyle), "attention marker uses the base style, not muted")
+}
+
+func TestRenderListTruncatesDetailBeforeName(t *testing.T) {
+	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{
+		{Name: "short-name", Detail: " (a very long detail text)"},
+	}, Active: 0}}, "s1", 0)
+
+	frame := m.Render(domain.Size{Cols: 45, Rows: 5}, Preview{})
+	layout := ChooseLayout(domain.Size{Cols: 45, Rows: 5})
+	require.Equal(t, 16, layout.List.Width, "test assumes a narrow list column")
+
+	want := "  short-name (a…"
+	for i, r := range want {
+		require.Equal(t, r, frame.At(i, 1).Rune, "cell %d", i)
+	}
+	require.Equal(t, '…', frame.At(layout.List.Width-1, 1).Rune, "detail is ellipsized to fit, the intact name is not touched")
+	require.Equal(t, ' ', frame.At(layout.List.Width, 1).Rune, "nothing drawn past the list width")
+}
+
+func TestRenderListTruncatesNameWhenAloneExceedsWidth(t *testing.T) {
+	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{
+		{Name: "a-really-long-focused-pane-tab-label", Detail: " (detail)"},
+	}, Active: 0}}, "s1", 0)
+
+	frame := m.Render(domain.Size{Cols: 45, Rows: 5}, Preview{})
+	layout := ChooseLayout(domain.Size{Cols: 45, Rows: 5})
+	require.Equal(t, 16, layout.List.Width, "test assumes a narrow list column")
+
+	require.Equal(t, '…', frame.At(layout.List.Width-1, 1).Rune, "the name segment itself is ellipsized once it alone exceeds the width")
+	require.Equal(t, ' ', frame.At(layout.List.Width, 1).Rune, "nothing drawn past the list width, detail gets no room at all")
 }
 
 func cell(r rune) renderer.Cell {

@@ -72,10 +72,18 @@ func (p *pane) refreshTerminalTitleLocked() {
 // composeTabTitle renders "name (paneTitle)". An empty paneTitle, or one equal
 // to the tab name, collapses to just the name.
 func composeTabTitle(tabName, paneTitle string) string {
+	return tabName + tabTitleDetail(tabName, paneTitle)
+}
+
+// tabTitleDetail returns the parenthesized " (paneTitle)" suffix for
+// tabName/paneTitle, or "" when paneTitle is empty or equals tabName. This is
+// the single place the name/detail composition rule lives; composeTabTitle
+// and the picker's TabEntry.Detail both build on it.
+func tabTitleDetail(tabName, paneTitle string) string {
 	if paneTitle == "" || paneTitle == tabName {
-		return tabName
+		return ""
 	}
-	return tabName + " (" + paneTitle + ")"
+	return " (" + paneTitle + ")"
 }
 
 // focusedPaneTitle returns the focused pane's display title for tab labels.
