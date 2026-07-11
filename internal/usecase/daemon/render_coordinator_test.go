@@ -207,6 +207,56 @@ func TestRenderCoordinatorCoalescesWakesUnderOneDeadline(t *testing.T) {
 	}
 }
 
+func TestRenderCoordinatorAdaptsOutputDeadlineAfterBurstAndDecays(t *testing.T) {
+	h := newCoordinatorHarness(t)
+
+	// A burst establishes pressure without extending its already-armed first
+	// deadline; the following output deadline grows to the 16ms ceiling.
+	for range 9 {
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+	}
+	burst := h.armedTimers(t)
+	require.Len(t, burst, 1)
+	require.Equal(t, minOutputRenderDeadline, burst[0].duration)
+	burst[0].ch <- time.Time{}
+	awaitWake(t, h.wakes)
+
+	h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+	atCap := h.armedTimers(t)
+	require.Len(t, atCap, 1)
+	require.Equal(t, maxOutputRenderDeadline, atCap[0].duration,
+		"burst pressure must be capped at the 16ms output deadline")
+	atCap[0].ch <- time.Time{}
+	awaitWake(t, h.wakes)
+
+	// Quiet singleton batches decay pressure toward the 8ms floor.
+	var previous = maxOutputRenderDeadline
+	for range 8 {
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+		timers := h.armedTimers(t)
+		require.Len(t, timers, 1)
+		require.LessOrEqual(t, timers[0].duration, previous)
+		require.GreaterOrEqual(t, timers[0].duration, minOutputRenderDeadline)
+		previous = timers[0].duration
+		timers[0].ch <- time.Time{}
+		awaitWake(t, h.wakes)
+	}
+	require.Equal(t, minOutputRenderDeadline, previous)
+}
+
+func TestRenderCoordinatorUrgentDeadlineCannotBeExtended(t *testing.T) {
+	h := newCoordinatorHarness(t)
+	h.rc.invalidate(renderInvalidation{class: invalidateOutput})
+	h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
+	for range 32 {
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
+		h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
+	}
+	timers := h.armedTimers(t)
+	require.Len(t, timers, 2, "only the urgent promotion may replace the output timer")
+	require.Equal(t, urgentRenderDeadline, timers[len(timers)-1].duration)
+}
+
 // --- ACK gating ----------------------------------------------------------------
 
 func TestRenderCoordinatorAckGateBlocksCompositionUntilAck(t *testing.T) {
