@@ -81,6 +81,30 @@ func TestToastManagerDurationDismissAndClear(t *testing.T) {
 	})
 }
 
+func TestTruncateText(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		maxWidth int
+		want     string
+	}{
+		{"no truncation needed", "hello", 10, "hello"},
+		{"truncation with ellipsis", "hello world", 8, "hello w…"},
+		{"maxWidth zero", "hello", 0, ""},
+		// The ellipsis itself is one cell wide, so any non-positive maxWidth is
+		// also "smaller than the ellipsis" and collapses to the same empty result.
+		{"maxWidth smaller than ellipsis", "hello world", -1, ""},
+		{"wide runes", "日本語のテキスト", 5, "日本…"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := TruncateText(tt.text, tt.maxWidth); got != tt.want {
+				t.Fatalf("TruncateText(%q, %d) = %q, want %q", tt.text, tt.maxWidth, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestToastBoundsAnchorsMarginsAndTinyFrames(t *testing.T) {
 	message := "Reconnection attempts…"
 	width := textWidth(message) + 4

@@ -223,6 +223,9 @@ func drawToast(frame renderer.Frame, toast Toast, styles ToastStyles) {
 	DrawText(frame, textLeft, textY, textRight, truncateText(toast.Message, textRight-textLeft), styles.Text)
 }
 
+// TruncateText clips text to maxWidth cells, appending an ellipsis when cut.
+func TruncateText(text string, maxWidth int) string { return truncateText(text, maxWidth) }
+
 func truncateText(text string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return ""
