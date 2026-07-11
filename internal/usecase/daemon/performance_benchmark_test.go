@@ -36,6 +36,21 @@ func TestPerformanceFixtureCounters(t *testing.T) {
 	require.True(t, fixture.resized())
 }
 
+func TestPerformanceFixturePaintLiveUsesPrecomputedAlternatingWrites(t *testing.T) {
+	fixture := newPerformanceFixture(t, performanceConfig{})
+
+	require.NotNil(t, fixture.activePane)
+	require.Equal(t, [][]byte{
+		[]byte("\x1b[1;1HA\x1b[2;2HA"),
+		[]byte("\x1b[1;1HB\x1b[2;2HB"),
+	}, fixture.liveWrites)
+
+	for range 4 {
+		fixture.paintLive()
+	}
+	require.Equal(t, uint64(4), fixture.metrics().outputFrames)
+}
+
 // performanceConfig intentionally describes only an in-process daemon shape:
 // no PTY readers, schedulers, clocks, or transports are started by this fixture.
 type performanceConfig struct {
@@ -57,6 +72,8 @@ type performanceFixture struct {
 	ac          *attachedClient
 	output      *countingOutputTransport
 	snaps       *countingSnapshotStore
+	activePane  *pane
+	liveWrites  [][]byte
 	paints      int
 	resizedSize domain.Size
 }
@@ -74,11 +91,20 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 	sess.ephemeral = false
 	sess.snapEligible.Store(true)
 
-	fixture := &performanceFixture{t: t, d: d, sess: sess, ac: ac, output: output, snaps: &countingSnapshotStore{}}
+	fixture := &performanceFixture{
+		t:          t,
+		d:          d,
+		sess:       sess,
+		ac:         ac,
+		output:     output,
+		snaps:      &countingSnapshotStore{},
+		liveWrites: [][]byte{[]byte("\x1b[1;1HA\x1b[2;2HA"), []byte("\x1b[1;1HB\x1b[2;2HB")},
+	}
 	WithSnapshotStore(fixture.snaps)(d)
 	for tabIndex, tb := range sess.tabs {
 		fixture.configureTab(tb, tabIndex, tabSize(config.size))
 	}
+	fixture.activePane = fixture.findActivePane()
 
 	// Prime the real renderer shadow before measurements. Subsequent paints use
 	// actual production diffs rather than the initial full frame.
@@ -123,7 +149,7 @@ func performanceFullWidthRow(width, tabIndex, row int) string {
 	return string(out)
 }
 
-func (f *performanceFixture) activePane() *pane {
+func (f *performanceFixture) findActivePane() *pane {
 	f.t.Helper()
 	tb := f.sess.activeTab()
 	require.NotNil(f.t, tb)
@@ -133,14 +159,9 @@ func (f *performanceFixture) activePane() *pane {
 }
 
 func (f *performanceFixture) paintLive() {
-	f.t.Helper()
-	p := f.activePane()
-	x, y := 1, 1
-	if f.paints%2 == 1 {
-		x, y = 2, 2
-	}
+	p := f.activePane
 	p.mu.Lock()
-	p.screen.Write([]byte(fmt.Sprintf("\x1b[%d;%dH%c", y, x, 'A'+rune(f.paints))))
+	p.screen.Write(f.liveWrites[f.paints%len(f.liveWrites)])
 	p.mu.Unlock()
 	f.d.paint(f.sess, f.ac, false)
 	f.paints++
