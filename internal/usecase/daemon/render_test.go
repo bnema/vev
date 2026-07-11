@@ -178,7 +178,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		d, sess, ac, sends := newManualSessionWithPTYs(t, activePTY, inactivePTY)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		d.attachCoordinator(sess, nil, ac)
+		d.attachCoordinator(sess, nil, ac, true)
 
 		d.sessWg.Add(1)
 		go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
@@ -213,7 +213,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		d, sess, ac, sends := newManualSessionWithPTYs(t, oldPTY, newPTY, parkedPTY)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		d.attachCoordinator(sess, nil, ac)
+		d.attachCoordinator(sess, nil, ac, true)
 
 		d.sessWg.Add(2)
 		go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())

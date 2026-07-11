@@ -378,6 +378,7 @@ func TestDatagramWindowOneCoalescesPaintsUntilMsgAck(t *testing.T) {
 		MaxOutputInFlight: 1,
 	}, tr)
 	require.NoError(t, err)
+	require.True(t, sess.renderCoordinator().markAttachmentReady(ac))
 
 	pane := sess.tabs[0].focusedPane()
 	pane.screen.Write([]byte("A"))

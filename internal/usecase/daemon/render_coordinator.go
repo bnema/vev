@@ -151,6 +151,9 @@ type renderCoordinator struct {
 	// attachmentEpoch distinguishes consecutive bindings of the same client
 	// object (notably park/resume, which replaces its transport in place).
 	attachmentEpoch uint64
+	// attachmentReady is true only after Welcome succeeded for this exact
+	// attachment incarnation. Internal cross-session handoffs bind ready.
+	attachmentReady bool
 	// detached rejects invalidations after detach/park until a new attachment.
 	detached bool
 	torndown bool
@@ -551,19 +554,41 @@ func (c *renderCoordinator) advanceAttachmentEpochLocked(clients ...*attachedCli
 	for _, ac := range clients {
 		if ac != nil {
 			ac.coordinatorEpoch.Store(c.attachmentEpoch)
+			ac.coordinatorReadyEpoch.Store(0)
 		}
 	}
 }
 
-// attach binds ac as the coordinator's current attachment identity.
-func (c *renderCoordinator) attach(ac *attachedClient) {
+// attach binds an already-handshaken internal attachment. Route/resume use
+// attachWithReadiness(..., false) until their Welcome frame is accepted.
+func (c *renderCoordinator) attach(ac *attachedClient) { c.attachWithReadiness(ac, true) }
+
+func (c *renderCoordinator) attachWithReadiness(ac *attachedClient, ready bool) {
 	c.mu.Lock()
-	if !c.torndown {
+	if !c.torndown && c.attachment != ac {
 		c.advanceAttachmentEpochLocked(ac)
 		c.attachment = ac
 		c.detached = false
+		c.attachmentReady = ready
+		if ready && ac != nil {
+			ac.coordinatorReadyEpoch.Store(c.attachmentEpoch)
+		}
 	}
 	c.mu.Unlock()
+}
+
+// markAttachmentReady completes the transport handshake for exactly the
+// current attachment incarnation. A stale Welcome can never revive a parked,
+// replaced, or detached attachment.
+func (c *renderCoordinator) markAttachmentReady(ac *attachedClient) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.torndown || c.detached || c.attachment != ac || ac == nil || ac.coordinatorEpoch.Load() != c.attachmentEpoch {
+		return false
+	}
+	c.attachmentReady = true
+	ac.coordinatorReadyEpoch.Store(c.attachmentEpoch)
+	return true
 }
 
 // wakeCurrent validates a dispatched wake without entering sendMu. The paint
@@ -572,7 +597,7 @@ func (c *renderCoordinator) attach(ac *attachedClient) {
 func (c *renderCoordinator) wakeCurrent(w renderWake) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return !c.torndown && !c.detached && c.attachment == w.attachment && c.attachmentEpoch == w.attachmentEpoch
+	return !c.torndown && !c.detached && c.attachmentReady && c.attachment == w.attachment && c.attachmentEpoch == w.attachmentEpoch
 }
 
 // noteDetach invalidates pending wakes and stale callbacks for a detaching
@@ -584,6 +609,7 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 	if c.attachment == ac {
 		c.advanceAttachmentEpochLocked(ac)
 		c.attachment = nil
+		c.attachmentReady = false
 		c.detached = true
 		c.pending = false
 		c.ackDeferred = false
@@ -600,7 +626,11 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 
 // noteReplace hands the coordinator from old to replacement; callbacks
 // captured by old become stale.
-func (c *renderCoordinator) noteReplace(old, replacement *attachedClient) {
+func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readiness ...bool) {
+	ready := true
+	if len(readiness) != 0 {
+		ready = readiness[0]
+	}
 	c.mu.Lock()
 	// A coordinator may be installed while replacing a legacy attachment
 	// which predated coordinator ownership. In that case nil has no pending
@@ -611,6 +641,10 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient) {
 	if c.attachment == old || c.attachment == nil {
 		c.advanceAttachmentEpochLocked(old, replacement)
 		c.attachment = replacement
+		c.attachmentReady = ready
+		if ready && replacement != nil {
+			replacement.coordinatorReadyEpoch.Store(c.attachmentEpoch)
+		}
 		c.detached = false
 		c.pending = false
 		c.ackDeferred = false
@@ -634,6 +668,7 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	c.torndown = true
 	c.advanceAttachmentEpochLocked(c.attachment)
 	c.attachment = nil
+	c.attachmentReady = false
 	c.previewWake = nil
 	c.previewWakes = nil
 	c.pending = false
@@ -757,8 +792,8 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 		attachmentEpoch = c.attachmentEpoch
 	}
 	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog, attachment: c.attachment, attachmentEpoch: attachmentEpoch}
-	if !ready {
-		if deadline {
+	if !ready || (c.attachment != nil && !c.attachmentReady) {
+		if !ready && deadline {
 			c.ackDeferred = true
 		}
 		preview, previews := c.takePendingPreviewsLocked()

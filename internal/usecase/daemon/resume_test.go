@@ -228,6 +228,7 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, "work", token), newTr)
 	require.NoError(t, err)
 	require.Same(t, ac, resumedAC)
+	require.True(t, resumedSess.renderCoordinator().markAttachmentReady(resumedAC))
 	d.firstPaint(resumedSess, resumedAC, resumedAC.size)
 
 	sends := newTr.Sends()

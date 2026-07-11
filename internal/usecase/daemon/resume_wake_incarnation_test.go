@@ -24,6 +24,7 @@ func TestParkedResumeRejectsDispatchedWakeFromPriorAttachment(t *testing.T) {
 	token := ac.resumeToken
 	rc := sess.renderCoordinator()
 	require.NotNil(t, rc)
+	require.True(t, rc.markAttachmentReady(ac))
 
 	// Pause after dispatch but before the coordinator's normal wake callback
 	// reaches paint/sendMu. This is the precise stale-wake window.
@@ -58,8 +59,10 @@ func TestParkedResumeRejectsDispatchedWakeFromPriorAttachment(t *testing.T) {
 	ac.sendMu.Unlock()
 	require.False(t, staleWakeComposed, "a stale wake must not mutate the resumed attachment shadow")
 
-	// The new attachment incarnation still accepts its normal required paint.
+	// The new attachment incarnation accepts the required paint only after its
+	// replacement transport has completed Welcome.
 	rc.opts.wake = originalWake
+	require.True(t, rc.markAttachmentReady(ac))
 	d.firstPaint(sess, ac, ac.size)
 	require.NotEmpty(t, newTransport.Sends())
 }

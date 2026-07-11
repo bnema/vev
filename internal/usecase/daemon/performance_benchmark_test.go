@@ -292,7 +292,7 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 	// The fixture uses the production coordinator. stubClock's inert timer is
 	// completed synchronously by the coordinator, keeping benchmark operations
 	// deterministic while retaining their real invalidation path.
-	d.attachCoordinator(sess, nil, ac)
+	d.attachCoordinator(sess, nil, ac, true)
 
 	// Prime the real renderer shadow before measurements. Subsequent paints use
 	// actual production diffs rather than the initial full frame.

@@ -598,6 +598,12 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 		d.clientGone(sess, ac, tr, false)
 		return
 	}
+	if rc := sess.renderCoordinator(); rc == nil || !rc.markAttachmentReady(ac) {
+		// The attachment was displaced or detached while Welcome was in flight;
+		// never let this stale handshake emit an Output frame.
+		d.clientGone(sess, ac, tr, false)
+		return
+	}
 	d.firstPaint(sess, ac, h.Size)
 	d.runConnLoop(ac)
 	_ = tr.Close()

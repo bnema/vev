@@ -254,7 +254,7 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	if targetSess == ac.currentSession() {
 		return
 	}
-	rc := d.attachCoordinator(targetSess, nil, nil)
+	rc := d.attachCoordinator(targetSess, nil, nil, false)
 	rc.subscribePreviewFor(ac, func(renderWake) {
 		ac.overlays.pickerMu.Lock()
 		valid := ac.overlays.pickerPreviewSession == targetSess

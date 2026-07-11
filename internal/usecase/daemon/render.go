@@ -300,7 +300,7 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 	sess.mu.Lock()
 	owned := sess.client == ac
 	sess.mu.Unlock()
-	if !owned || ac.currentSession() != sess || (attachmentEpoch != 0 && ac.coordinatorEpoch.Load() != attachmentEpoch) {
+	if !owned || ac.currentSession() != sess || (attachmentEpoch != 0 && (ac.coordinatorEpoch.Load() != attachmentEpoch || ac.coordinatorReadyEpoch.Load() != attachmentEpoch)) {
 		ac.sendMu.Unlock()
 		return
 	}

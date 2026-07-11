@@ -26,7 +26,10 @@ type attachedClient struct {
 	// coordinatorEpoch is published atomically by renderCoordinator lifecycle
 	// transitions. A wake verifies it again after acquiring sendMu, so a parked
 	// attachment reused by resume cannot carry an old wake to its new transport.
-	coordinatorEpoch      atomic.Uint64
+	coordinatorEpoch atomic.Uint64
+	// coordinatorReadyEpoch is non-zero only after Welcome completed for this
+	// exact coordinator incarnation. paint rechecks it under sendMu.
+	coordinatorReadyEpoch atomic.Uint64
 	echoAck               atomic.Uint64
 	bars                  barCache           // only touched while sendMu is held
 	composed              composedFrameCache // only touched while sendMu is held
@@ -361,7 +364,7 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	old := sess.client
 	name := sess.name
 	sess.mu.Unlock()
-	d.attachCoordinator(sess, old, ac)
+	d.attachCoordinator(sess, old, ac, false)
 	sess.mu.Lock()
 	sess.client = ac
 	sess.mu.Unlock()
@@ -381,13 +384,13 @@ func (d *Daemon) handoffCoordinator(from, target *session, old, current *attache
 	current.sendMu.Lock()
 	current.output.rebase()
 	current.sendMu.Unlock()
-	d.attachCoordinator(target, old, current)
+	d.attachCoordinator(target, old, current, true)
 }
 
 // attachCoordinator is the sole direct attachment handoff. It creates at
 // most one coordinator for sess and changes its identity before any caller
 // can publish resize or render state for the new client.
-func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient) *renderCoordinator {
+func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient, ready bool) *renderCoordinator {
 	sess.mu.Lock()
 	rc := sess.renderCoordinator()
 	if rc == nil {
@@ -419,9 +422,9 @@ func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient) 
 	}
 	sess.mu.Unlock()
 	if old != nil {
-		rc.noteReplace(old, current)
+		rc.noteReplace(old, current, ready)
 	} else if current != nil {
-		rc.attach(current)
+		rc.attachWithReadiness(current, ready)
 	}
 	return rc
 }
