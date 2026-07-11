@@ -59,6 +59,24 @@ context:
 } > /tmp/vev-history-before.txt 2>&1
 ```
 
+## Immutable document allocation gate
+
+The copy-mode document retains an immutable view of existing scrollback rows and
+clones only the visible frame. Visual-search models share that document; cloning
+a model copies only its mutable input and match state. Check those two paths at
+10,000 history rows with:
+
+```sh
+go test ./internal/usecase/copy ./internal/usecase/visualsearch -run '^$' -bench '^(BenchmarkNewSnapshot10KRows|BenchmarkVisualSearchClone10KRows)$' -benchtime=1s -count=5 -benchmem
+```
+
+Treat `allocs/op` and `B/op` as allocation gates: compare the complete repeated
+output with the accepted baseline before merging, and investigate any increase.
+This scope does not yet include an incremental/full-text search index: queries
+still scan the immutable document and produce a fresh match list. Coordinator
+behavior, chunk encoding, compression, GC tuning, and real Unix-socket, SSH, or
+UDP impairment/latency remain out of scope.
+
 ## Lower-level smoke baseline
 
 Use this command to check renderer, VT, IPC, and daemon microbenchmarks without

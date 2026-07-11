@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var benchmarkSnapshotSink Snapshot
+
 func snapshot(lines []string, height int) Snapshot {
 	rows := make([][]renderer.Cell, len(lines))
 	for i, line := range lines {
@@ -473,6 +475,29 @@ func TestOSC52FromBase64(t *testing.T) {
 				t.Fatalf("OSC52FromBase64(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func BenchmarkNewSnapshot10KRows(b *testing.B) {
+	const (
+		width       = 120
+		height      = 40
+		historyRows = 10_000
+	)
+
+	scrollback := NewScrollback(historyRows)
+	for range historyRows {
+		scrollback.Append(row(strings.Repeat("x", width)))
+	}
+	screen := renderer.NewFrame(width, height)
+	for y := range height {
+		copy(screen.Row(y), row(strings.Repeat("s", width)))
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		benchmarkSnapshotSink = NewSnapshot(scrollback, screen)
 	}
 }
 

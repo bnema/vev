@@ -11,6 +11,8 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
+var benchmarkModelSink *Model
+
 func testSnapshot(lines ...string) scopy.Snapshot {
 	rows := make([][]renderer.Cell, len(lines))
 	for i, line := range lines {
@@ -103,6 +105,22 @@ func TestVisualSearchRenderShowsInputAndLineResults(t *testing.T) {
 	require.Contains(t, text, "/alpha")
 	require.Contains(t, text, "1:1  alpha")
 	require.Contains(t, text, "2:6  beta alpha")
+}
+
+func BenchmarkVisualSearchClone10KRows(b *testing.B) {
+	const historyRows = 10_000
+
+	lines := make([]string, historyRows)
+	for i := range lines {
+		lines[i] = "immutable history row"
+	}
+	model := New(testSnapshot(lines...))
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		benchmarkModelSink = model.Clone()
+	}
 }
 
 func rowText(row []renderer.Cell) string {
