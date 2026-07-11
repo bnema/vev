@@ -312,6 +312,27 @@ func TestRenderCoordinatorPreviewSubscription(t *testing.T) {
 
 // --- lifecycle and stale callbacks -----------------------------------------------
 
+func TestRenderCoordinatorPreviewSubscriptionsAreIndependent(t *testing.T) {
+	h := newCoordinatorHarness(t)
+	one, two := &attachedClient{}, &attachedClient{}
+	first, second := make(chan renderWake, 1), make(chan renderWake, 1)
+	h.rc.subscribePreviewFor(one, func(w renderWake) { first <- w })
+	h.rc.subscribePreviewFor(two, func(w renderWake) { second <- w })
+	h.rc.attach(&attachedClient{})
+	h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "preview"})
+	last := h.armedTimers(t)
+	last[len(last)-1].ch <- time.Time{}
+	awaitWake(t, first)
+	awaitWake(t, second)
+
+	h.rc.teardownPreviewFor(one)
+	h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "preview"})
+	last = h.armedTimers(t)
+	last[len(last)-1].ch <- time.Time{}
+	requireNoWake(t, first)
+	awaitWake(t, second)
+}
+
 func TestRenderCoordinatorLifecycleDropsStaleWakes(t *testing.T) {
 	cases := []struct {
 		name     string
