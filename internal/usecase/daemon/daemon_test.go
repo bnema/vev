@@ -63,7 +63,7 @@ func (t *signalTimer) C() <-chan time.Time      { return t.ch }
 func (t *signalTimer) Reset(time.Duration) bool { return false }
 func (t *signalTimer) Stop() bool               { return true }
 
-func newTestDaemon(t *testing.T, ptys ports.PTYFactory, clk ports.Clock) *Daemon {
+func newTestDaemon(t testing.TB, ptys ports.PTYFactory, clk ports.Clock) *Daemon {
 	t.Helper()
 	d := New(ptys, clk, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
