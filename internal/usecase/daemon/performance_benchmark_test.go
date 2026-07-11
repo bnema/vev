@@ -36,6 +36,16 @@ func TestPerformanceFixtureCounters(t *testing.T) {
 	require.True(t, fixture.resized())
 }
 
+func TestPerformanceFixtureResizeAlternatesRealDimensions(t *testing.T) {
+	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}})
+
+	for _, want := range []domain.Size{{Cols: 100, Rows: 30}, {Cols: 120, Rows: 40}} {
+		fixture.resize()
+		require.Equal(t, want, fixture.ac.size)
+		require.True(t, fixture.resized())
+	}
+}
+
 func TestPerformanceFixtureLargeHistoryTopology(t *testing.T) {
 	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: 4, panes: 4, historyRows: 10_000})
 
@@ -95,6 +105,9 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 			if workload == "live-paint" && metrics.outputFrames != uint64(b.N) {
 				b.Fatalf("live paint emitted %d frames for %d operations", metrics.outputFrames, b.N)
 			}
+			if workload == "snapshot-capture" && metrics.snapshotWrites != uint64(b.N) {
+				b.Fatalf("snapshot capture wrote %d snapshots for %d operations", metrics.snapshotWrites, b.N)
+			}
 			benchmarkReportMetrics(b, metrics, b.N, 10_000)
 		})
 	}
@@ -109,6 +122,7 @@ func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations
 	b.ReportMetric(float64(metrics.outputFrames)/perOperation, "outputframes/op")
 	b.ReportMetric(float64(metrics.outputBytes)/perOperation, "outputbytes/op")
 	b.ReportMetric(float64(metrics.outputPayloadBytes)/perOperation, "framepayloadbytes/op")
+	b.ReportMetric(float64(metrics.snapshotWrites)/perOperation, "snapshotwrites/op")
 	b.ReportMetric(float64(metrics.snapshotBytes)/perOperation, "snapshotbytes/op")
 	b.ReportMetric(float64(historyRows), "historyrows/pane")
 }
@@ -155,6 +169,8 @@ type performanceFixture struct {
 	activePane  *pane
 	liveWrites  [][]byte
 	paints      int
+	resizeSizes [2]domain.Size
+	resizes     int
 	resizedSize domain.Size
 }
 
@@ -182,13 +198,14 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 	sess.snapEligible.Store(true)
 
 	fixture := &performanceFixture{
-		t:          t,
-		d:          d,
-		sess:       sess,
-		ac:         ac,
-		output:     output,
-		snaps:      &countingSnapshotStore{},
-		liveWrites: [][]byte{[]byte("\x1b[1;1HA\x1b[2;2HA"), []byte("\x1b[1;1HB\x1b[2;2HB")},
+		t:           t,
+		d:           d,
+		sess:        sess,
+		ac:          ac,
+		output:      output,
+		snaps:       &countingSnapshotStore{},
+		liveWrites:  [][]byte{[]byte("\x1b[1;1HA\x1b[2;2HA"), []byte("\x1b[1;1HB\x1b[2;2HB")},
+		resizeSizes: [2]domain.Size{{Cols: 100, Rows: 30}, config.size},
 	}
 	WithSnapshotStore(fixture.snaps)(d)
 	for tabIndex, tb := range sess.tabs {
@@ -279,7 +296,8 @@ func (f *performanceFixture) searchMatches() int {
 }
 
 func (f *performanceFixture) resize() {
-	f.resizedSize = domain.Size{Cols: 100, Rows: 30}
+	f.resizedSize = f.resizeSizes[f.resizes%len(f.resizeSizes)]
+	f.resizes++
 	f.d.resize(f.sess, f.ac, f.resizedSize)
 }
 

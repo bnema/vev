@@ -107,12 +107,6 @@ func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
 
 // --- test doubles -----------------------------------------------------------
 
-type discardTransport struct{}
-
-func (discardTransport) Send(ports.Frame) error     { return nil }
-func (discardTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
-func (discardTransport) Close() error               { return nil }
-
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
 
