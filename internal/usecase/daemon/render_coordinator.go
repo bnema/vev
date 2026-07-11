@@ -203,9 +203,7 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 		c.mu.Unlock()
 		return
 	}
-	if c.opts.onInvalidate != nil {
-		c.opts.onInvalidate(inv)
-	}
+	onInvalidate := c.opts.onInvalidate
 	c.metrics.invalidations.Add(1)
 	wasPending, wasUrgent, wasPreviewPending := c.pending, c.pendingUrgent, c.pendingPreview
 	if !wasPending {
@@ -235,6 +233,9 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 	c.armed = c.armed || arm
 	if !arm || clock == nil {
 		c.mu.Unlock()
+		if onInvalidate != nil {
+			onInvalidate(inv)
+		}
 		return
 	}
 	timer := clock.NewTimer(delay)
@@ -243,6 +244,9 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 	// synchronously before allocating a worker or its coordination channels.
 	if timerC == nil {
 		c.mu.Unlock()
+		if onInvalidate != nil {
+			onInvalidate(inv)
+		}
 		timer.Stop()
 		c.fire(gen, false, true)
 		return
@@ -251,6 +255,9 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 	done := make(chan struct{})
 	c.normalTimer, c.normalCancel, c.normalWorkerDone = timer, cancel, done
 	c.mu.Unlock()
+	if onInvalidate != nil {
+		onInvalidate(inv)
+	}
 	go func() {
 		defer close(done)
 		select {
@@ -536,25 +543,36 @@ func (d *Daemon) invalidateRenderNow(sess *session, ac *attachedClient, reset bo
 }
 
 func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
+	// Readiness probes enter the attachment send path, which may in turn read
+	// coordinator metadata. Never hold c.mu across that external callback.
 	c.mu.Lock()
-	if c.torndown || !c.pending || (!watchdog && gen != c.generation) {
+	if !c.fireValidLocked(gen, watchdog) {
 		c.mu.Unlock()
 		return
 	}
-	if len(c.syncBatches) != 0 {
+	ackReady := c.opts.ackReady
+	c.mu.Unlock()
+
+	ready := ackReady == nil || ackReady()
+
+	// The callback can detach, replace, start a synchronized batch, or publish
+	// newer work. Revalidate every consumption precondition after it returns.
+	c.mu.Lock()
+	if !c.fireValidLocked(gen, watchdog) {
 		c.mu.Unlock()
 		return
 	}
 	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog}
-	preview, previews := c.takePendingPreviewsLocked()
-	if c.opts.ackReady != nil && !c.opts.ackReady() {
+	if !ready {
 		if deadline {
 			c.ackDeferred = true
 		}
+		preview, previews := c.takePendingPreviewsLocked()
 		c.mu.Unlock()
 		c.notifyPreviews(w, preview, previews)
 		return
 	}
+	preview, previews := c.takePendingPreviewsLocked()
 	c.metrics.wakes.Add(1)
 	c.metrics.coalesced.Add(uint64(w.coalesced))
 	if !w.urgent {
@@ -575,6 +593,10 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 		wake(w)
 	}
 	c.notifyPreviews(w, preview, previews)
+}
+
+func (c *renderCoordinator) fireValidLocked(gen uint64, watchdog bool) bool {
+	return !c.torndown && c.pending && (watchdog || gen == c.generation) && len(c.syncBatches) == 0
 }
 
 // takePendingPreviewsLocked snapshots and consumes the preview delivery for

@@ -354,12 +354,16 @@ resize:
 		select {
 		case epoch := <-resizeDone:
 			require.Equal(t, uint64(1), epoch)
-			select {
-			case <-fireDone:
-			case <-wakes:
-				t.Fatal("fire did not return after wake")
+			require.Equal(t, renderWake{coalesced: 1}, awaitWake(t, wakes))
+			for range 4096 {
+				select {
+				case <-fireDone:
+					return
+				default:
+					runtime.Gosched()
+				}
 			}
-			return
+			t.Fatal("fire did not return after wake")
 		default:
 			runtime.Gosched()
 		}
