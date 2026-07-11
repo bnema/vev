@@ -286,7 +286,7 @@ func listSessions(t *testing.T, d *Daemon) ports.Sessions {
 	return sessions
 }
 
-func newCapturingTransport(t *testing.T) (*portsmocks.MockTransport, chan ports.Frame) {
+func newCapturingTransport(t testing.TB) (*portsmocks.MockTransport, chan ports.Frame) {
 	t.Helper()
 	tr := portsmocks.NewMockTransport(t)
 	sends := make(chan ports.Frame, 64)
@@ -298,7 +298,7 @@ func newCapturingTransport(t *testing.T) (*portsmocks.MockTransport, chan ports.
 	return tr, sends
 }
 
-func newManualSessionWithPTYs(t *testing.T, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan ports.Frame) {
+func newManualSessionWithPTYs(t testing.TB, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan ports.Frame) {
 	t.Helper()
 	d := newTestDaemon(t, nil, stubClock{})
 	tr, sends := newCapturingTransport(t)
