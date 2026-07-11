@@ -145,7 +145,9 @@ type renderCoordinator struct {
 	// attachment is the currently bound client identity; callbacks from any
 	// other identity are stale and must not mutate coordinator state.
 	attachment *attachedClient
-	torndown   bool
+	// detached rejects invalidations after detach/park until a new attachment.
+	detached bool
+	torndown bool
 
 	resize  resizeRequestMetadata
 	metrics renderCoordinatorBurstMetrics
@@ -173,16 +175,21 @@ func newRenderCoordinator(opts renderCoordinatorOptions) *renderCoordinator {
 	return &renderCoordinator{opts: opts}
 }
 
-// cancelNormalTimerLocked and cancelSyncTimerLocked release timer workers even
-// when a test clock supplies an inert channel. Caller holds c.mu.
-func (c *renderCoordinator) cancelNormalTimerLocked() {
-	if c.normalTimer != nil {
-		c.normalTimer.Stop()
-		c.normalTimer = nil
-	}
+// detachNormalTimerLocked releases coordinator ownership. The caller must stop
+// the returned timer after dropping c.mu: Timer methods are external callbacks.
+func (c *renderCoordinator) detachNormalTimerLocked() ports.Timer {
+	timer := c.normalTimer
+	c.normalTimer = nil
 	if c.normalCancel != nil {
 		close(c.normalCancel)
 		c.normalCancel = nil
+	}
+	return timer
+}
+
+func stopTimer(timer ports.Timer) {
+	if timer != nil {
+		timer.Stop()
 	}
 }
 
@@ -197,22 +204,29 @@ type syncBatch struct {
 	done       chan struct{}
 }
 
-func cancelSyncBatchLocked(batch *syncBatch) {
-	if batch.timer != nil {
-		batch.timer.Stop()
-		batch.timer = nil
-	}
+func detachSyncBatchLocked(batch *syncBatch) ports.Timer {
+	timer := batch.timer
+	batch.timer = nil
 	if batch.cancel != nil {
 		close(batch.cancel)
 		batch.cancel = nil
 	}
+	return timer
 }
 
-func (c *renderCoordinator) cancelSyncTimersLocked() {
+func (c *renderCoordinator) detachSyncTimersLocked() []ports.Timer {
+	timers := make([]ports.Timer, 0, len(c.syncBatches))
 	for pane, batch := range c.syncBatches {
-		cancelSyncBatchLocked(batch)
+		timers = append(timers, detachSyncBatchLocked(batch))
 		delete(c.syncBatches, pane)
 		c.syncRegistryVersion++
+	}
+	return timers
+}
+
+func stopTimers(timers []ports.Timer) {
+	for _, timer := range timers {
+		stopTimer(timer)
 	}
 }
 
@@ -221,7 +235,7 @@ func (c *renderCoordinator) cancelSyncTimersLocked() {
 // the stickiest reset win.
 func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 	c.mu.Lock()
-	if c.torndown {
+	if c.torndown || c.detached {
 		c.mu.Unlock()
 		return
 	}
@@ -237,49 +251,48 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 	c.pendingUrgent = c.pendingUrgent || inv.class == invalidateUrgent
 	c.pendingPreview = c.pendingPreview || c.previewWake != nil || len(c.previewWakes) != 0
 	c.coalesced++
-	// Cap one normal deadline for each primary or preview batch. Once a
-	// preview has been delivered while the target is ACK-blocked, a later
-	// target transition needs its own deadline even though the primary remains
-	// pending.
 	arm := !wasPending || (!wasUrgent && c.pendingUrgent) || (!wasPreviewPending && c.pendingPreview)
+	var old ports.Timer
 	if arm {
 		c.generation++
-		c.cancelNormalTimerLocked()
+		old = c.detachNormalTimerLocked()
 	}
 	gen := c.generation
 	delay := minOutputRenderDeadline + time.Duration(c.outputPressure)*time.Millisecond
 	if c.pendingUrgent {
-		// Urgent state always supersedes bulk pressure and is never extended.
 		delay = urgentRenderDeadline
 	}
 	clock := c.opts.clock
 	c.armed = c.armed || arm
-	if !arm || clock == nil {
-		c.mu.Unlock()
-		if onInvalidate != nil {
-			onInvalidate(inv)
-		}
-		return
-	}
-	timer := clock.NewTimer(delay)
-	timerC := timer.C()
-	// A nil timer channel is inert, so it cannot need cancellation. Complete
-	// synchronously before allocating a worker or its coordination channels.
-	if timerC == nil {
-		c.mu.Unlock()
-		if onInvalidate != nil {
-			onInvalidate(inv)
-		}
-		timer.Stop()
-		c.fire(gen, false, true)
-		return
-	}
-	cancel := make(chan struct{})
-	done := make(chan struct{})
-	c.normalTimer, c.normalCancel, c.normalWorkerDone = timer, cancel, done
 	c.mu.Unlock()
+	stopTimer(old)
 	if onInvalidate != nil {
 		onInvalidate(inv)
+	}
+	if !arm || clock == nil {
+		return
+	}
+
+	// NewTimer and C may re-enter the coordinator. Publish only if this
+	// generation is still the reserved deadline after those external calls.
+	timer := clock.NewTimer(delay)
+	timerC := timer.C()
+	cancel := make(chan struct{})
+	done := make(chan struct{})
+	c.mu.Lock()
+	valid := !c.torndown && c.pending && c.generation == gen && c.normalTimer == nil
+	if valid && timerC != nil {
+		c.normalTimer, c.normalCancel, c.normalWorkerDone = timer, cancel, done
+	}
+	c.mu.Unlock()
+	if !valid {
+		stopTimer(timer)
+		return
+	}
+	if timerC == nil {
+		stopTimer(timer)
+		c.fire(gen, false, true)
+		return
 	}
 	go func() {
 		defer close(done)
@@ -290,8 +303,6 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 		case <-cancel:
 		}
 	}()
-	// Give fake-clock callbacks a chance to block on C before the test
-	// advances it; real clocks are unaffected.
 	runtime.Gosched()
 }
 
@@ -340,8 +351,9 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 	if c.syncBatches == nil {
 		c.syncBatches = make(map[*pane]*syncBatch)
 	}
-	if old := c.syncBatches[p]; old != nil {
-		cancelSyncBatchLocked(old)
+	var old ports.Timer
+	if previous := c.syncBatches[p]; previous != nil {
+		old = detachSyncBatchLocked(previous)
 	}
 	batch := &syncBatch{generation: gen, renderable: renderable}
 	if len(force) != 0 {
@@ -350,19 +362,32 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 	c.syncBatches[p] = batch
 	c.syncRegistryVersion++
 	clock := c.opts.clock
+	c.mu.Unlock()
+	stopTimer(old)
 	if clock == nil {
-		c.mu.Unlock()
 		return
 	}
-	batch.timer = clock.NewTimer(maxSyncUpdateDuration)
-	batch.cancel = make(chan struct{})
-	batch.done = make(chan struct{})
-	timer, cancel, done := batch.timer, batch.cancel, batch.done
+
+	// Both timer operations are external. A reentrant callback may replace or
+	// remove batch; identity validation below rejects this stale timer.
+	timer := clock.NewTimer(maxSyncUpdateDuration)
+	timerC := timer.C()
+	cancel := make(chan struct{})
+	done := make(chan struct{})
+	c.mu.Lock()
+	valid := !c.torndown && c.syncBatches[p] == batch && batch.generation == gen
+	if valid {
+		batch.timer, batch.cancel, batch.done = timer, cancel, done
+	}
 	c.mu.Unlock()
+	if !valid {
+		stopTimer(timer)
+		return
+	}
 	go func() {
 		defer close(done)
 		select {
-		case <-timer.C():
+		case <-timerC:
 		case <-cancel:
 			return
 		}
@@ -386,16 +411,18 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 		c.mu.Lock()
 		current = c.syncBatches[p]
 		valid = !c.torndown && current == batch && current.generation == gen
+		var stopped ports.Timer
 		if valid {
 			delete(c.syncBatches, p)
 			c.syncRegistryVersion++
-			cancelSyncBatchLocked(batch)
+			stopped = detachSyncBatchLocked(batch)
 			if len(c.syncBatches) == 0 && c.pending {
 				c.pendingUrgent = true
 			}
 		}
 		c.mu.Unlock()
 		if valid {
+			stopTimer(stopped)
 			// Reevaluate the aggregate gate only after forcing this pane.
 			c.fireCurrent(true)
 		}
@@ -426,29 +453,33 @@ func (c *renderCoordinator) noteSyncEnd(p *pane, gen uint64) {
 // The caller must invoke fireCurrent only after releasing pane.mu.
 func (c *renderCoordinator) removeSyncEnd(p *pane, gen uint64, renderable bool) bool {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	batch := c.syncBatches[p]
 	if batch == nil || batch.generation != gen {
+		c.mu.Unlock()
 		return false
 	}
 	delete(c.syncBatches, p)
 	c.syncRegistryVersion++
-	cancelSyncBatchLocked(batch)
+	timer := detachSyncBatchLocked(batch)
 	if renderable && len(c.syncBatches) == 0 && c.pending {
 		c.pendingUrgent = true
 	}
+	c.mu.Unlock()
+	stopTimer(timer)
 	return renderable
 }
 
 // noteSyncPaneRemoved releases a pane watchdog when pane lifecycle ends.
 func (c *renderCoordinator) noteSyncPaneRemoved(p *pane) {
 	c.mu.Lock()
+	var timer ports.Timer
 	if batch := c.syncBatches[p]; batch != nil {
 		delete(c.syncBatches, p)
 		c.syncRegistryVersion++
-		cancelSyncBatchLocked(batch)
+		timer = detachSyncBatchLocked(batch)
 	}
 	c.mu.Unlock()
+	stopTimer(timer)
 }
 
 // subscribePreview installs fn as the preview observer for coalesced wakes.
@@ -489,6 +520,7 @@ func (c *renderCoordinator) attach(ac *attachedClient) {
 	c.mu.Lock()
 	if !c.torndown {
 		c.attachment = ac
+		c.detached = false
 	}
 	c.mu.Unlock()
 }
@@ -497,17 +529,22 @@ func (c *renderCoordinator) attach(ac *attachedClient) {
 // attachment.
 func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 	c.mu.Lock()
+	var timer ports.Timer
+	var timers []ports.Timer
 	if c.attachment == ac {
 		c.attachment = nil
+		c.detached = true
 		c.pending = false
 		c.ackDeferred = false
 		c.pendingPreview = false
 		c.generation++
 		c.armed = false
-		c.cancelNormalTimerLocked()
-		c.cancelSyncTimersLocked()
+		timer = c.detachNormalTimerLocked()
+		timers = c.detachSyncTimersLocked()
 	}
 	c.mu.Unlock()
+	stopTimer(timer)
+	stopTimers(timers)
 }
 
 // noteReplace hands the coordinator from old to replacement; callbacks
@@ -518,17 +555,22 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient) {
 	// which predated coordinator ownership. In that case nil has no pending
 	// identity to invalidate, and the replacement becomes the first bound
 	// attachment atomically with this lifecycle transition.
+	var timer ports.Timer
+	var timers []ports.Timer
 	if c.attachment == old || c.attachment == nil {
 		c.attachment = replacement
+		c.detached = false
 		c.pending = false
 		c.ackDeferred = false
 		c.pendingPreview = false
 		c.generation++
 		c.armed = false
-		c.cancelNormalTimerLocked()
-		c.cancelSyncTimersLocked()
+		timer = c.detachNormalTimerLocked()
+		timers = c.detachSyncTimersLocked()
 	}
 	c.mu.Unlock()
+	stopTimer(timer)
+	stopTimers(timers)
 }
 
 // notePark invalidates pending wakes when the attachment parks for resume.
@@ -546,9 +588,11 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	c.pendingPreview = false
 	c.generation++
 	c.armed = false
-	c.cancelNormalTimerLocked()
-	c.cancelSyncTimersLocked()
+	timer := c.detachNormalTimerLocked()
+	timers := c.detachSyncTimersLocked()
 	c.mu.Unlock()
+	stopTimer(timer)
+	stopTimers(timers)
 }
 
 // recordResizeRequest records the latest requested geometry and source before
@@ -678,10 +722,11 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 			c.outputPressure--
 		}
 	}
-	c.cancelNormalTimerLocked()
+	timer := c.detachNormalTimerLocked()
 	c.pending, c.pendingReset, c.pendingUrgent, c.ackDeferred, c.deadlineDue, c.coalesced, c.armed = false, false, false, false, false, 0, false
 	wake := c.opts.wake
 	c.mu.Unlock()
+	stopTimer(timer)
 	if wake != nil {
 		wake(w)
 	}
