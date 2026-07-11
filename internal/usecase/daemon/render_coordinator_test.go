@@ -798,6 +798,54 @@ func TestRenderCoordinatorPreviewWakesDoNotWaitForTargetAck(t *testing.T) {
 	}
 }
 
+func TestRenderCoordinatorDetachedTargetPublishesPreviewOnlyInvalidations(t *testing.T) {
+	h := newCoordinatorHarness(t)
+	target, viewer := &attachedClient{}, &attachedClient{}
+	h.ackReady.Store(false)
+	h.rc.attach(target)
+	h.rc.subscribePreviewFor(viewer, func(w renderWake) { h.previews <- w })
+	h.rc.noteDetach(target)
+
+	// A detached target only accepts PTY/session-owned invalidations. The old
+	// attachment remains stale and must not revive its render path.
+	h.rc.invalidateForAttachment(target, renderInvalidation{class: invalidateOutput, producer: "stale attachment"})
+	require.Empty(t, h.armedTimers(t))
+
+	for _, producer := range []string{"first PTY output", "second PTY output"} {
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: producer})
+		timers := h.armedTimers(t)
+		require.Len(t, timers, 1)
+		timers[0].ch <- time.Time{}
+		preview := awaitWake(t, h.previews)
+		preview.attachment = nil
+		preview.attachmentEpoch = 0
+		require.Equal(t, renderWake{coalesced: 1}, preview)
+		requireNoWake(t, h.wakes)
+
+		h.rc.mu.Lock()
+		require.False(t, h.rc.pending)
+		require.False(t, h.rc.pendingPreview)
+		require.False(t, h.rc.ackDeferred)
+		require.False(t, h.rc.deadlineDue)
+		require.Zero(t, h.rc.coalesced)
+		require.True(t, h.rc.detached)
+		require.Nil(t, h.rc.attachment)
+		h.rc.mu.Unlock()
+	}
+
+	// A later attach retains the normal first-paint reset path.
+	replacement := &attachedClient{}
+	h.ackReady.Store(true)
+	h.rc.attach(replacement)
+	h.rc.invalidateForAttachment(replacement, renderInvalidation{class: invalidateUrgent, reset: true, producer: "first paint"})
+	timers := h.armedTimers(t)
+	require.Len(t, timers, 1)
+	timers[0].ch <- time.Time{}
+	wake := awaitWake(t, h.wakes)
+	require.True(t, wake.reset)
+	require.Same(t, replacement, wake.attachment)
+}
+
 func TestRenderCoordinatorPreviewLifecycleDropsStaleTargetWakes(t *testing.T) {
 	cases := []struct {
 		name       string
