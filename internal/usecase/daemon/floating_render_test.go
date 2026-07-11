@@ -78,7 +78,7 @@ func TestComposeFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testing.T) {
 	base.Set(2, 2, renderer.Cell{Rune: 'B'})
 	content := domain.Rect{Y: 1, Width: 40, Height: 10}
 	cache := &composedFrameCache{}
-	frame, _ := composeFloatingFrame(base, nil, p, 1, content, domain.FloatingConfig{Width: 80, Height: 80}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	frame, _, _ := composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, domain.FloatingConfig{Width: 80, Height: 80}), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	require.Equal(t, 'B', base.At(2, 2).Rune, "backdrop must only touch the composed destination")
 	geometry := calculateFloatingGeometry(content, domain.FloatingConfig{Width: 80, Height: 80})
 	require.Equal(t, '┌', frame.At(geometry.Bounds.X, geometry.Bounds.Y).Rune)
@@ -92,7 +92,7 @@ func TestComposeFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testing.T) {
 	p.mu.Lock()
 	p.title.generation++
 	p.mu.Unlock()
-	_, damage := composeFloatingFrame(base, nil, p, 1, content, domain.FloatingConfig{Width: 80, Height: 80}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	_, damage, _ := composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, domain.FloatingConfig{Width: 80, Height: 80}), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	require.Len(t, damage, 1)
 	require.Equal(t, geometry.Bounds.Y, damage[0].Y)
 	require.Equal(t, 1, damage[0].Height)
@@ -123,15 +123,15 @@ func TestComposeFloatingFrameGeometryChangesInvalidateCache(t *testing.T) {
 			cache := &composedFrameCache{}
 			base := renderer.NewFrame(30, 12)
 			content := domain.Rect{Y: 1, Width: 30, Height: 10}
-			_, damage := composeFloatingFrame(base, nil, p, 1, content, domain.FloatingConfig{}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+			_, damage, _ := composeFloatingFrame(base, nil, p, 1, content, floatingGeometry{}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 			require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
 
 			p.mu.Lock()
 			p.rect, p.popupGeometry = tt.next.Inner, tt.next
 			p.mu.Unlock()
-			_, damage = composeFloatingFrame(base, nil, p, 1, content, domain.FloatingConfig{}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+			_, damage, _ = composeFloatingFrame(base, nil, p, 1, content, floatingGeometry{}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 			require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
-			require.Equal(t, tt.next, cache.floatingGeometry)
+			require.Equal(t, tt.next.translate(content.X, content.Y), cache.floatingGeometry)
 		})
 	}
 }
@@ -181,7 +181,7 @@ func TestComposeFloatingFrameRendersPaneOwnedCommandFallback(t *testing.T) {
 	base := renderer.NewFrame(40, 12)
 	content := domain.Rect{Y: 1, Width: 40, Height: 10}
 	cfg := domain.FloatingConfig{Width: 80, Height: 80}
-	frame, _ := composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, false)
+	frame, _, _ := composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, false)
 	geometry := calculateFloatingGeometry(content, cfg)
 	var gotTitle strings.Builder
 	for x := geometry.Bounds.X + 2; x < geometry.Bounds.X+geometry.Bounds.Width-2; x++ {
@@ -214,7 +214,7 @@ func TestComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 		<-start
 		cache := &composedFrameCache{}
 		for range 500 {
-			composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+			composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 		}
 	}()
 	close(start)
@@ -271,13 +271,13 @@ func BenchmarkComposeFloatingFrameCached(b *testing.B) {
 	content := domain.Rect{Y: 1, Width: 80, Height: 22}
 	cfg := domain.FloatingConfig{Width: 80, Height: 80}
 	cache := &composedFrameCache{}
-	composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	p.screen.ClearDamage()
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+		composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	}
 }
 
@@ -288,11 +288,11 @@ func TestComposeFloatingFrameCachedDoesNotAllocate(t *testing.T) {
 	content := domain.Rect{Y: 1, Width: 80, Height: 22}
 	cfg := domain.FloatingConfig{Width: 80, Height: 80}
 	cache := &composedFrameCache{}
-	composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	p.screen.ClearDamage()
 
 	allocs := testing.AllocsPerRun(100, func() {
-		composeFloatingFrame(base, nil, p, 1, content, cfg, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+		composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	})
 	require.Zero(t, allocs, "cached floating composition must not allocate without damage or title changes")
 }
@@ -345,8 +345,8 @@ func TestFailedFloatingResizeKeepsCommittedRenderAndInputGeometry(t *testing.T) 
 	cfg := domain.FloatingConfig{Width: 50, Height: 50}
 	oldContent := domain.Rect{Y: 1, Width: 80, Height: 24}
 	newContent := domain.Rect{Y: 1, Width: 100, Height: 40}
-	oldGeometry := calculateFloatingGeometry(oldContent, cfg)
-	newGeometry := calculateFloatingGeometry(newContent, cfg)
+	oldGeometry := calculateFloatingGeometry(domain.Rect{Width: oldContent.Width, Height: oldContent.Height}, cfg)
+	newGeometry := calculateFloatingGeometry(domain.Rect{Width: newContent.Width, Height: newContent.Height}, cfg)
 	pty := &resizePTY{err: errors.New("resize failed")}
 	p := newPane("floating", pty, rectSize(oldGeometry.Inner))
 	p.rect = oldGeometry.Inner
@@ -359,17 +359,19 @@ func TestFailedFloatingResizeKeepsCommittedRenderAndInputGeometry(t *testing.T) 
 	require.False(t, d.resizeFloatingPane(p, newGeometry))
 	tb.mu.Lock()
 	_, inputGeometry, visible := tb.visibleFloatingSnapshotLocked(cfg)
-	copyRect := copyTargetRectLocked(tabLayoutSnapshot{}, newContent, p, p, true, cfg)
+	copyRect := copyTargetRectLocked(tabLayoutSnapshot{}, newContent, p, p, true, oldGeometry.translate(newContent.X, newContent.Y))
 	tb.mu.Unlock()
 	require.True(t, visible)
 	require.Equal(t, oldGeometry, inputGeometry)
-	require.Equal(t, oldGeometry.Inner, copyRect)
+	require.Equal(t, oldGeometry.translate(newContent.X, newContent.Y).Inner, copyRect)
 
 	base := renderer.NewFrame(newContent.Width, newContent.Height+2)
-	frame, _ := composeFloatingFrame(base, nil, p, 1, newContent, cfg, tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, true)
-	require.Equal(t, '┌', frame.At(oldGeometry.Bounds.X, oldGeometry.Bounds.Y).Rune)
-	if newGeometry.Bounds.X != oldGeometry.Bounds.X || newGeometry.Bounds.Y != oldGeometry.Bounds.Y {
-		require.NotEqual(t, '┌', frame.At(newGeometry.Bounds.X, newGeometry.Bounds.Y).Rune)
+	frame, _, _ := composeFloatingFrame(base, nil, p, 1, newContent, calculateFloatingGeometry(domain.Rect{Width: newContent.Width, Height: newContent.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, true)
+	oldFrameGeometry := oldGeometry.translate(newContent.X, newContent.Y)
+	newFrameGeometry := newGeometry.translate(newContent.X, newContent.Y)
+	require.Equal(t, '┌', frame.At(oldFrameGeometry.Bounds.X, oldFrameGeometry.Bounds.Y).Rune)
+	if newFrameGeometry.Bounds.X != oldFrameGeometry.Bounds.X || newFrameGeometry.Bounds.Y != oldFrameGeometry.Bounds.Y {
+		require.NotEqual(t, '┌', frame.At(newFrameGeometry.Bounds.X, newFrameGeometry.Bounds.Y).Rune)
 	}
 }
 

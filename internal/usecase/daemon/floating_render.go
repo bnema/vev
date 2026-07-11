@@ -86,7 +86,7 @@ func calculateFloatingGeometry(content domain.Rect, cfg domain.FloatingConfig) f
 // composeFloatingFrame applies the popup to a copy of the normal composed
 // destination. In particular it never writes the VT screen frame: that frame
 // is shared with the PTY reader and is the source for future renders.
-func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *pane, generation uint64, content domain.Rect, cfg domain.FloatingConfig, layoutSnap tabLayoutSnapshot, theme themeui.Theme, cache *composedFrameCache, full bool) (renderer.Frame, []renderer.Damage) {
+func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *pane, generation uint64, content domain.Rect, desired floatingGeometry, layoutSnap tabLayoutSnapshot, theme themeui.Theme, cache *composedFrameCache, full bool) (renderer.Frame, []renderer.Damage, floatingGeometry) {
 	var frame renderer.Frame
 	if cache != nil && cache.floatingFrame.Width == base.Width && cache.floatingFrame.Height == base.Height {
 		frame = cache.floatingFrame
@@ -100,13 +100,13 @@ func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *
 		}
 	}
 	(overlayBackdrop{DimPaneContents: true}).apply(frame, content, layoutSnap, theme)
-	desiredGeometry := calculateFloatingGeometry(content, cfg)
-
 	// The PTY reader mutates both the frame and its damage under p.mu. Keep
 	// every read of them, including the blit, in the same critical section.
 	// In particular, Frame is not safe to retain as an alias after unlocking.
 	p.mu.Lock()
-	geometry := p.committedFloatingGeometryLocked(desiredGeometry)
+	// Committed popup geometry is content-relative; translate it exactly once
+	// while holding the same lock that protects the committed state and frame.
+	geometry := p.committedFloatingGeometryLocked(desired).translate(content.X, content.Y)
 	title := p.displayTitleLocked()
 	titleGeneration := p.title.generation
 	screenDamage := p.screen.Damage()
@@ -131,12 +131,12 @@ func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *
 		cache.floatingTitleGeneration = titleGeneration
 	}
 	if full || popupChanged {
-		return frame, []renderer.Damage{renderer.FullRedraw()}
+		return frame, []renderer.Damage{renderer.FullRedraw()}, geometry
 	}
 	if titleChanged && geometry.Bounds.Height >= 3 {
 		damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: geometry.Bounds.X, Y: geometry.Bounds.Y, Width: geometry.Bounds.Width, Height: 1})
 	}
-	return frame, damage
+	return frame, damage, geometry
 }
 
 func drawFloatingBorder(frame renderer.Frame, bounds domain.Rect, title string, style renderer.Style) {
