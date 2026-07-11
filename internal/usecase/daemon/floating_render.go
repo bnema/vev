@@ -8,7 +8,8 @@ import (
 )
 
 // floatingGeometry describes a popup's outer frame and terminal content area.
-// Bounds and Inner are both relative to the supplied content rectangle.
+// Committed geometry is tab-content-relative; Bounds and Inner are both relative
+// to the supplied content rectangle.
 type floatingGeometry struct {
 	Bounds domain.Rect
 	Inner  domain.Rect
@@ -16,6 +17,14 @@ type floatingGeometry struct {
 
 func (g floatingGeometry) valid() bool {
 	return g.Bounds.Width > 0 && g.Bounds.Height > 0 && g.Inner.Width > 0 && g.Inner.Height > 0
+}
+
+func (g floatingGeometry) translate(dx, dy int) floatingGeometry {
+	g.Bounds.X += dx
+	g.Bounds.Y += dy
+	g.Inner.X += dx
+	g.Inner.Y += dy
+	return g
 }
 
 // committedFloatingGeometryLocked returns the geometry whose PTY resize was
@@ -47,8 +56,9 @@ func calculateFloatingAxisGeometry(available, percent int) floatingAxisGeometry 
 	return axis
 }
 
-// calculateFloatingGeometry centers a percentage-sized popup in content.
-// Launch sizing derives from Inner too, so rendering and PTY geometry share
+// calculateFloatingGeometry returns coordinates in the supplied rectangle's
+// space and centers a percentage-sized popup in content. Launch sizing derives
+// from Inner too, so rendering and PTY geometry share
 // the same per-axis percentage and tiny-border rules.
 func calculateFloatingGeometry(content domain.Rect, cfg domain.FloatingConfig) floatingGeometry {
 	if content.Width <= 0 || content.Height <= 0 {

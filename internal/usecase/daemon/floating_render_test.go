@@ -14,6 +14,23 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
+func TestFloatingGeometryTranslate(t *testing.T) {
+	geometry := floatingGeometry{
+		Bounds: domain.Rect{X: 3, Y: 5, Width: 10, Height: 8},
+		Inner:  domain.Rect{X: 4, Y: 6, Width: 8, Height: 6},
+	}
+
+	translated := geometry.translate(11, 13)
+	require.Equal(t, floatingGeometry{
+		Bounds: domain.Rect{X: 14, Y: 18, Width: 10, Height: 8},
+		Inner:  domain.Rect{X: 15, Y: 19, Width: 8, Height: 6},
+	}, translated)
+	require.Equal(t, floatingGeometry{
+		Bounds: domain.Rect{X: 3, Y: 5, Width: 10, Height: 8},
+		Inner:  domain.Rect{X: 4, Y: 6, Width: 8, Height: 6},
+	}, geometry)
+}
+
 func TestCalculateFloatingGeometry(t *testing.T) {
 	tests := []struct {
 		name    string
