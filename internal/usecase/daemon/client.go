@@ -637,6 +637,9 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed por
 	}
 	if sess.detachIfCurrent(ac) {
 		ac.cancelResizePaint()
+		if rc := sess.renderCoordinator(); rc != nil {
+			rc.noteDetach(ac)
+		}
 		d.unregisterPreview(ac)
 		if d.parkAttachment(sess, ac) {
 			_ = ac.closeCapturedTransport(failed)

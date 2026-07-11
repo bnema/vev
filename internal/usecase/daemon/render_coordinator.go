@@ -118,6 +118,7 @@ type renderCoordinator struct {
 	generation     uint64
 	armed          bool
 	syncGeneration uint64
+	syncWatchdog   func()
 }
 
 // newRenderCoordinator constructs a coordinator bound to opts. It starts no
@@ -177,14 +178,19 @@ func (c *renderCoordinator) notifyAck() {
 }
 
 // noteSyncBegin records that a synchronized-output batch opened for gen and
-// arms the completion watchdog.
-func (c *renderCoordinator) noteSyncBegin(gen uint64) {
+// arms the completion watchdog. force is supplied by the pane owner so the
+// coordinator can end a wedged VT batch before it composes the pending state.
+func (c *renderCoordinator) noteSyncBegin(gen uint64, force ...func()) {
 	c.mu.Lock()
 	if c.torndown {
 		c.mu.Unlock()
 		return
 	}
 	c.syncGeneration = gen
+	c.syncWatchdog = nil
+	if len(force) != 0 {
+		c.syncWatchdog = force[0]
+	}
 	clock := c.opts.clock
 	c.mu.Unlock()
 	if clock == nil {
@@ -195,8 +201,16 @@ func (c *renderCoordinator) noteSyncBegin(gen uint64) {
 		<-timer.C()
 		c.mu.Lock()
 		valid := !c.torndown && c.syncGeneration == gen
+		force := c.syncWatchdog
+		if valid {
+			c.syncGeneration = 0
+			c.syncWatchdog = nil
+		}
 		c.mu.Unlock()
 		if valid {
+			if force != nil {
+				force()
+			}
 			c.fireCurrent(true)
 		}
 	}()
@@ -211,6 +225,7 @@ func (c *renderCoordinator) noteSyncEnd(gen uint64) {
 		return
 	}
 	c.syncGeneration = 0
+	c.syncWatchdog = nil
 	c.mu.Unlock()
 	c.fireCurrent(false)
 }
@@ -293,11 +308,6 @@ func (c *renderCoordinator) resizeSnapshot() resizeRequestMetadata {
 	return c.resize
 }
 
-// burstMetrics returns an observational snapshot for benchmark reporting.
-func (c *renderCoordinator) burstMetrics() (invalidations, wakes, coalesced uint64) {
-	return c.metrics.invalidations.Load(), c.metrics.wakes.Load(), c.metrics.coalesced.Load()
-}
-
 // renderCoordinator returns the coordinator installed for this session.
 func (s *session) renderCoordinator() *renderCoordinator { return s.coordinator.Load() }
 
@@ -332,7 +342,7 @@ func (c *renderCoordinator) fire(gen uint64, watchdog bool) {
 		c.mu.Unlock()
 		return
 	}
-	if !watchdog && c.opts.syncActive != nil && c.opts.syncActive() {
+	if !watchdog && c.syncGeneration != 0 {
 		c.mu.Unlock()
 		return
 	}

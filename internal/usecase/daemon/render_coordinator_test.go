@@ -255,15 +255,17 @@ func TestRenderCoordinatorSynchronizedOutput(t *testing.T) {
 		requireNoWake(t, h.wakes)
 	})
 
-	t.Run("watchdog forces a flush for a wedged batch", func(t *testing.T) {
+	t.Run("watchdog ends a wedged batch before it flushes", func(t *testing.T) {
 		h := newCoordinatorHarness(t)
 		h.syncActive.Store(true)
-		h.rc.noteSyncBegin(7)
+		forced := make(chan struct{}, 1)
+		h.rc.noteSyncBegin(7, func() { forced <- struct{}{} })
 		watchdogs := h.armedTimers(t)
 		require.NotEmpty(t, watchdogs, "sync begin must arm the completion watchdog")
 		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
 
 		watchdogs[0].ch <- time.Time{}
+		<-forced
 		w := awaitWake(t, h.wakes)
 		require.True(t, w.watchdog, "a wedged synchronized batch must be force-flushed by the watchdog")
 		requireNoWake(t, h.wakes)

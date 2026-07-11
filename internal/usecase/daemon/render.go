@@ -46,6 +46,15 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 			p.screen.Write(data)
 			p.refreshTerminalTitleLocked()
 			isSyncing := p.screen.SyncUpdateActive()
+			var syncGen uint64
+			if wasSyncing != isSyncing {
+				if isSyncing {
+					syncGen = sess.syncGen.Add(1)
+					p.syncGen = syncGen
+				} else {
+					syncGen = p.syncGen
+				}
+			}
 			p.mu.Unlock()
 			markSnapshotDirty(sess)
 			select {
@@ -67,17 +76,22 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 			}
 			if rc := sess.renderCoordinator(); rc != nil {
 				if wasSyncing != isSyncing {
-					p.mu.Lock()
-					p.syncGen++
-					gen := p.syncGen
-					p.mu.Unlock()
+					gen := syncGen
 					if isSyncing {
-						rc.noteSyncBegin(gen)
+						rc.noteSyncBegin(gen, func() {
+							p.mu.Lock()
+							if p.syncGen == gen && p.screen.SyncUpdateActive() {
+								p.screen.ForceSyncEnd()
+							}
+							p.mu.Unlock()
+						})
+						// The accumulated synchronized batch is the pending render.
+						rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
 					} else {
 						rc.noteSyncEnd(gen)
 					}
 				}
-				if !isSyncing {
+				if !isSyncing && wasSyncing == isSyncing {
 					rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
 				}
 			}

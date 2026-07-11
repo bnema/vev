@@ -44,6 +44,9 @@ type session struct {
 	mruAt                  atomic.Uint64
 	snapDirty              atomic.Bool
 	snapEligible           atomic.Bool
+	// syncGen makes synchronized-output watchdog generations unique across all
+	// panes in this session.
+	syncGen atomic.Uint64
 	// coordinator fans in this session's producer render invalidations.
 	coordinator atomic.Pointer[renderCoordinator]
 	// clipFiles records clipboard-image-transfer temp file paths (see
@@ -706,6 +709,9 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	ac := sess.client
 	sess.client = nil
 	sess.mu.Unlock()
+	if rc := sess.renderCoordinator(); rc != nil {
+		rc.noteSessionTeardown()
+	}
 	if ac != nil {
 		ac.cancelResizePaint()
 		d.unregisterPreview(ac)
