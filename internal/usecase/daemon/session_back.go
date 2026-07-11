@@ -10,6 +10,11 @@ func (d *Daemon) backSession(current *session, ac *attachedClient) {
 	}
 	target := ac.previousSession.Get()
 	if target == nil || target == current || d.sessionByID(target.id) != target {
+		ac.previousSession.With(func(previous **session) {
+			if *previous == target {
+				*previous = nil
+			}
+		})
 		d.paint(current, ac, true)
 		return
 	}

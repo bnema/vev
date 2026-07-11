@@ -644,6 +644,7 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed por
 			return
 		}
 		d.resetScreenDefaultColors(sess)
+		ac.clearPreviousSession()
 		_ = ac.closeCapturedTransport(failed)
 		d.log.Warn("detached client after send error", "session", sess.name)
 	}

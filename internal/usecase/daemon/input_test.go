@@ -445,6 +445,31 @@ func TestPaletteBackSessionDoesNotMoveWithoutValidTarget(t *testing.T) {
 			tc.prepare()
 			runPaletteCommand(t, d, current, ac, "BSK")
 			require.Same(t, current, ac.currentSession())
+			if tc.name != "no target" {
+				require.Nil(t, ac.previousSession.Get(), "invalid target must not remain toggleable")
+			}
+		})
+	}
+}
+
+func TestTerminalTeardownClearsPreviousSession(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		teardown func(*Daemon, *session, *attachedClient)
+	}{
+		{name: "send error", teardown: func(d *Daemon, sess *session, ac *attachedClient) { d.detachOnSendError(sess, ac, ac.transport()) }},
+		{name: "session kill", teardown: func(d *Daemon, sess *session, _ *attachedClient) {
+			require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+			defer releaseAll(releases)
+
+			ac.previousSession.Set(d.sessions[domain.SessionID("recent")])
+			tc.teardown(d, current, ac)
+
+			require.Nil(t, ac.previousSession.Get())
 		})
 	}
 }
