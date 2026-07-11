@@ -350,21 +350,26 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	ac.initOverlays()
 	ac.setSession(sess)
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, &d.bindings)
+	// Daemon attachment callers hold d.mu, serialising this preparation with
+	// other publications. Bind coordinator ownership before sess.client becomes
+	// visible: an old deadline can then never target this new output chain.
 	sess.mu.Lock()
 	old := sess.client
-	sess.client = ac
 	name := sess.name
 	sess.mu.Unlock()
 	d.attachCoordinator(sess, old, ac)
+	sess.mu.Lock()
+	sess.client = ac
+	sess.mu.Unlock()
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", name, "resume", opts.resumeCapable)
 	d.applyHostTheme(sess, ac, d.effectiveTheme(themeui.Theme{}), true)
 	return ac, old
 }
 
-// handoffCoordinator completes a cross-session ownership transfer before the
-// destination's first paint. It invalidates source callbacks, rebases the
-// attachment's output dependency chain, then installs the destination owner.
+// handoffCoordinator prepares a cross-session ownership transfer before the
+// destination publishes sess.client. It never takes daemon/session locks while
+// taking sendMu, avoiding a d.mu/sendMu cycle with transport callbacks.
 func (d *Daemon) handoffCoordinator(from, target *session, old, current *attachedClient) {
 	if rc := from.renderCoordinator(); rc != nil {
 		rc.noteDetach(current)

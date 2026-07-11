@@ -237,19 +237,18 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	ac.setSession(nil)
 	from.mu.Unlock()
 
+	// Prepare source invalidation, output rebase, and destination coordinator
+	// identity before publishing the destination attachment.
+	d.handoffCoordinator(from, newSess, nil, ac)
+	ac.setSession(newSess)
 	newSess.mu.Lock()
 	newSess.client = ac
 	newSess.mu.Unlock()
 
 	d.touchMRU(newSess)
-	ac.setSession(newSess)
 	ac.recordPreviousSession(from)
 	d.log.Info("client attached", "session", newSess.name, "resume", ac.resumeCapable)
 	d.mu.Unlock()
-
-	// Match every other cross-session path: source callbacks are stale and
-	// destination ownership is installed before its first full frame.
-	d.handoffCoordinator(from, newSess, nil, ac)
 	d.firstPaint(newSess, ac, sz)
 	return nil
 }

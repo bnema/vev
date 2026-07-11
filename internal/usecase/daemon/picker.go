@@ -396,17 +396,21 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 	targetSess.mu.Lock()
 	old := targetSess.client
 	targetSess.terminal = term
-	targetSess.client = ac
 	if target.TabIndex >= 0 && target.TabIndex < len(targetSess.tabs) {
 		targetSess.active = target.TabIndex
 	}
 	targetSess.mu.Unlock()
 
-	d.touchMRU(targetSess)
+	// Do not expose targetSess.client until the target coordinator has claimed
+	// this attachment and the output dependency chain has been rebased.
+	d.handoffCoordinator(from, targetSess, old, ac)
 	ac.setSession(targetSess)
+	targetSess.mu.Lock()
+	targetSess.client = ac
+	targetSess.mu.Unlock()
+	d.touchMRU(targetSess)
 	ac.recordPreviousSession(from)
 	d.mu.Unlock()
-	d.handoffCoordinator(from, targetSess, old, ac)
 	if old != nil && old != ac {
 		// Displacement is a detach lifecycle transition too. Cancel the
 		// attachment-owned PR #71 timer only after releasing daemon/session
@@ -443,15 +447,15 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	from.client = nil
 	ac.setSession(nil)
 	from.mu.Unlock()
+
+	d.handoffCoordinator(from, targetSess, nil, ac)
+	ac.setSession(targetSess)
 	targetSess.mu.Lock()
 	targetSess.client = ac
 	targetSess.mu.Unlock()
-
 	d.touchMRU(targetSess)
-	ac.setSession(targetSess)
 	ac.recordPreviousSession(from)
 	d.mu.Unlock()
-	d.handoffCoordinator(from, targetSess, nil, ac)
 	d.firstPaint(targetSess, ac, ac.size)
 	return true
 }

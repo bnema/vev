@@ -230,12 +230,22 @@ func stopTimers(timers []ports.Timer) {
 	}
 }
 
-// invalidate publishes one producer state transition. Consecutive
-// invalidations coalesce under a single armed deadline; the latest state and
-// the stickiest reset win.
+// invalidate publishes a coordinator-owned producer transition. Callers that
+// carry an attachment identity must use invalidateForAttachment instead.
 func (c *renderCoordinator) invalidate(inv renderInvalidation) {
+	c.invalidateForAttachment(nil, inv)
+}
+
+// invalidateForAttachment publishes only while source is still the bound
+// attachment. This check shares c.mu with replacement, making a stale
+// attachment's timer callback unable to enqueue work for its replacement.
+// A nil source represents an internal pane/session invalidation.
+func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv renderInvalidation) {
 	c.mu.Lock()
-	if c.torndown || c.detached {
+	// An unbound coordinator is the manual/headless harness state; there is no
+	// published production attachment to protect there. Once an attachment has
+	// been bound (or detached), identity must match exactly.
+	if c.torndown || c.detached || (source != nil && c.attachment != nil && c.attachment != source) {
 		c.mu.Unlock()
 		return
 	}
@@ -646,7 +656,7 @@ func (c *renderCoordinator) fireCurrent(watchdog bool) {
 func (d *Daemon) invalidateRender(sess *session, ac *attachedClient, reset bool, producer string) {
 	if sess != nil {
 		if rc := sess.renderCoordinator(); rc != nil {
-			rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer})
+			rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer})
 			return
 		}
 	}
@@ -661,7 +671,7 @@ func (d *Daemon) invalidateRender(sess *session, ac *attachedClient, reset bool,
 func (d *Daemon) invalidateRenderNow(sess *session, ac *attachedClient, reset bool, producer string) {
 	if sess != nil {
 		if rc := sess.renderCoordinator(); rc != nil {
-			rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer})
+			rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer})
 			rc.fireCurrent(false)
 			return
 		}
