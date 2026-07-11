@@ -39,7 +39,7 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	ac.overlays.paletteGeneration++
 	ac.overlays.palette = palette.New(commands)
 	ac.overlays.paletteRecent = recent
-	ac.overlays.paletteHints = recentSessionHints(recent, nil)
+	ac.overlays.paletteHints = palette.ContextualHints{}
 	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
 	ac.overlays.paletteMu.Unlock()
@@ -150,7 +150,15 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		},
 	})
 	if changed {
-		ac.overlays.paletteHints = recentSessionHints(ac.overlays.paletteRecent, paletteArgs(ac.overlays.palette.Query(), cmd))
+		active, ok := ac.overlays.palette.ArgumentCommand()
+		if ok && active.Code == "JRS" {
+			hints := recentSessionHints(ac.overlays.paletteRecent, paletteArgs(ac.overlays.palette.Query(), active))
+			ac.overlays.paletteHints = hints
+			ac.overlays.palette.SetFeedback(hints.Feedback)
+		} else {
+			ac.overlays.paletteHints = palette.ContextualHints{}
+			ac.overlays.palette.SetFeedback("")
+		}
 	}
 	if cancel {
 		d.clearPaletteLocked(ac)

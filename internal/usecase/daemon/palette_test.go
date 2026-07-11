@@ -48,6 +48,28 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
+func TestPaletteJRSActivatesOnlyExactContextualHint(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("JRS"))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, command.ContextHintRecentSessions, ac.overlays.paletteHints.Kind)
+	require.Equal(t, "no recent sessions", ac.overlays.paletteHints.Feedback)
+	ac.overlays.paletteMu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\b\b\bRNS"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, command.ContextHint(0), ac.overlays.paletteHints.Kind)
+	ac.overlays.paletteMu.Unlock()
+}
+
 func TestPaletteFLTExecutesFloatingToggle(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()

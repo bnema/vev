@@ -84,6 +84,14 @@ func (m *Model) Selected() (command.Command, bool) {
 	}
 	return m.matches[m.selected].Command, true
 }
+
+// ArgumentCommand returns the exact argument-taking command being entered.
+func (m *Model) ArgumentCommand() (command.Command, bool) {
+	if m == nil {
+		return command.Command{}, false
+	}
+	return ArgumentCommand(m.commands, m.Query())
+}
 func (m *Model) Matches() []Match {
 	if m == nil {
 		return nil
@@ -201,7 +209,7 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 			x++
 		}
 		for x < codeWidth+1 && x < frame.Width {
-			frame.Set(x, y+1, renderer.Cell{Rune: ' ', Style: style})
+			frame.Set(x, y+start, renderer.Cell{Rune: ' ', Style: style})
 			x++
 		}
 		ui.DrawText(frame, x, y+start, frame.Width, match.Command.Desc, mergePaletteDescStyle(style, desc))

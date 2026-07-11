@@ -185,3 +185,13 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderPreservesFeedbackAboveCommandRows(t *testing.T) {
+	m := New([]command.Command{cmd("JRS", "Jump", "Jump to recent session")})
+	m.SetFeedback("rank 1")
+
+	frame := m.Render(domain.Size{Cols: 28, Rows: 4}, DefaultRenderStyles())
+	if got := frameRow(frame, 1); got[:6] != "rank 1" {
+		t.Fatalf("feedback row = %q, want prefix %q", got, "rank 1")
+	}
+}
