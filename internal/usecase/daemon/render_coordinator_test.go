@@ -313,6 +313,60 @@ func TestRenderCoordinatorUrgentDeadlineCannotBeExtended(t *testing.T) {
 
 // --- ACK gating ----------------------------------------------------------------
 
+func TestRenderCoordinatorAckReadinessReentersWithoutBlockingResize(t *testing.T) {
+	owner := &attachedClient{}
+	wakes := make(chan renderWake, 1)
+	ackEntered := make(chan struct{})
+	resizeDone := make(chan uint64, 1)
+	fireDone := make(chan struct{})
+
+	var rc *renderCoordinator
+	rc = newRenderCoordinator(renderCoordinatorOptions{
+		ackReady: func() bool {
+			close(ackEntered)
+			// The readiness probe models the output send path reading coordinator
+			// metadata after sendMu is held. It must never run under c.mu.
+			_ = rc.resizeSnapshot()
+			return true
+		},
+		wake: func(w renderWake) { wakes <- w },
+	})
+	rc.attach(owner)
+	rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+
+	go func() {
+		rc.fire(1, false, true)
+		close(fireDone)
+	}()
+	for range 4096 {
+		select {
+		case <-ackEntered:
+			goto resize
+		default:
+			runtime.Gosched()
+		}
+	}
+	t.Fatal("ack readiness was not evaluated")
+
+resize:
+	go func() { resizeDone <- rc.recordResizeRequest(domain.Size{Cols: 120, Rows: 40}, owner) }()
+	for range 4096 {
+		select {
+		case epoch := <-resizeDone:
+			require.Equal(t, uint64(1), epoch)
+			select {
+			case <-fireDone:
+			case <-wakes:
+				t.Fatal("fire did not return after wake")
+			}
+			return
+		default:
+			runtime.Gosched()
+		}
+	}
+	t.Fatal("ack readiness re-entry blocked resize metadata")
+}
+
 func TestRenderCoordinatorAckDoesNotBypassAnUnexpiredDeadline(t *testing.T) {
 	h := newCoordinatorHarness(t)
 	h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
