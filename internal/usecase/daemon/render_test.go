@@ -243,6 +243,123 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 	})
 }
 
+func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *testing.T) {
+	t.Run("detached target completes cross-session preview without later PTY output", func(t *testing.T) {
+		pty, steps, processed := newChannelPTY(t)
+		d, target, targetClient, _ := newManualSessionWithPTYs(t, pty)
+		clock := newCoordinatorMockClock(t, 8)
+		d.clock = clock.clock
+		rc := d.attachCoordinator(target, nil, targetClient, true)
+
+		// A viewer in a different session is previewing the headless target.
+		viewer := &attachedClient{}
+		viewer.initOverlays()
+		viewer.overlays.pickerMu.Lock()
+		viewer.overlays.pickerPreview = target.tabs[0]
+		viewer.overlays.pickerMu.Unlock()
+		d.sessions["viewer"] = &session{id: "viewer", client: viewer}
+		previews := make(chan renderWake, 2)
+		rc.subscribePreviewFor(viewer, func(w renderWake) { previews <- w })
+
+		d.sessWg.Add(1)
+		go d.ptyReader(target, target.tabs[0], target.tabs[0].focusedPane())
+		steps <- channelPTYStep{data: []byte("\x1b[?2026hpending")}
+		awaitPTYReadProcessed(t, processed)
+		drainCoordinatorTimers(clock) // detach must clear the pending output work.
+
+		target.mu.Lock()
+		target.client = nil
+		target.mu.Unlock()
+		rc.noteDetach(targetClient)
+		steps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
+		awaitPTYReadProcessed(t, processed)
+
+		fireCoordinatorTimer(t, drainCoordinatorTimers(clock), urgentRenderDeadline)
+		wake := <-previews
+		require.True(t, wake.urgent)
+		require.Equal(t, 1, wake.coalesced)
+		select {
+		case duplicate := <-previews:
+			t.Fatalf("sync completion must publish exactly one preview wake: %#v", duplicate)
+		default:
+		}
+
+		steps <- channelPTYStep{err: io.EOF}
+		d.sessWg.Wait()
+	})
+
+	t.Run("replacement receives one complete reset frame without later PTY output", func(t *testing.T) {
+		pty, steps, processed := newChannelPTY(t)
+		d, target, oldClient, _ := newManualSessionWithPTYs(t, pty)
+		clock := newCoordinatorMockClock(t, 8)
+		d.clock = clock.clock
+		rc := d.attachCoordinator(target, nil, oldClient, true)
+
+		wakes := make(chan renderWake, 2)
+		rc.opts.wake = func(w renderWake) { wakes <- w }
+		d.sessWg.Add(1)
+		go d.ptyReader(target, target.tabs[0], target.tabs[0].focusedPane())
+		steps <- channelPTYStep{data: []byte("\x1b[?2026hpending")}
+		awaitPTYReadProcessed(t, processed)
+		drainCoordinatorTimers(clock)
+
+		replacement := &attachedClient{output: newOutputStateStream()}
+		rc.noteReplace(oldClient, replacement, true)
+		target.mu.Lock()
+		target.client = replacement
+		target.mu.Unlock()
+		// The replacement's initial full paint remains gated by the batch. Its
+		// reset must survive completion and coalesce with the completion wake.
+		rc.invalidateForAttachment(replacement, renderInvalidation{class: invalidateUrgent, reset: true, producer: "replacement first paint"})
+		replacementTimers := drainCoordinatorTimers(clock)
+		steps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
+		awaitPTYReadProcessed(t, processed)
+		requireNoWake(t, wakes)
+
+		fireCoordinatorTimer(t, replacementTimers, urgentRenderDeadline)
+		wake := <-wakes
+		require.True(t, wake.urgent)
+		require.True(t, wake.reset, "the replacement's cleared batch must repaint a complete frame")
+		require.Equal(t, 2, wake.coalesced, "completion must coalesce with the replacement reset")
+		require.Same(t, replacement, wake.attachment)
+		select {
+		case duplicate := <-wakes:
+			t.Fatalf("sync completion must publish exactly one replacement wake: %#v", duplicate)
+		default:
+		}
+
+		steps <- channelPTYStep{err: io.EOF}
+		d.sessWg.Wait()
+	})
+
+	t.Run("headless pane without a preview stays quiet on completion", func(t *testing.T) {
+		pty, steps, processed := newChannelPTY(t)
+		d, target, client, _ := newManualSessionWithPTYs(t, pty)
+		clock := newCoordinatorMockClock(t, 8)
+		d.clock = clock.clock
+		rc := d.attachCoordinator(target, nil, client, true)
+		wakes := make(chan renderWake, 1)
+		rc.opts.wake = func(w renderWake) { wakes <- w }
+		target.mu.Lock()
+		target.client = nil
+		target.mu.Unlock()
+		rc.noteDetach(client)
+
+		d.sessWg.Add(1)
+		go d.ptyReader(target, target.tabs[0], target.tabs[0].focusedPane())
+		steps <- channelPTYStep{data: []byte("\x1b[?2026hpending")}
+		awaitPTYReadProcessed(t, processed)
+		drainCoordinatorTimers(clock)
+		steps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
+		awaitPTYReadProcessed(t, processed)
+		require.Empty(t, drainCoordinatorTimers(clock))
+		requireNoWake(t, wakes)
+
+		steps <- channelPTYStep{err: io.EOF}
+		d.sessWg.Wait()
+	})
+}
+
 func TestClearNonRenderablePaneDamage(t *testing.T) {
 	newFixture := func(t *testing.T) (*Daemon, *session, *tab, *pane, chan ports.Frame) {
 		t.Helper()
