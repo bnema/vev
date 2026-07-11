@@ -276,10 +276,10 @@ func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv 
 	c.armed = c.armed || arm
 	c.mu.Unlock()
 	stopTimer(old)
-	if onInvalidate != nil {
-		onInvalidate(inv)
-	}
 	if !arm || clock == nil {
+		if onInvalidate != nil {
+			onInvalidate(inv)
+		}
 		return
 	}
 
@@ -297,11 +297,17 @@ func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv 
 	c.mu.Unlock()
 	if !valid {
 		stopTimer(timer)
+		if onInvalidate != nil {
+			onInvalidate(inv)
+		}
 		return
 	}
 	if timerC == nil {
 		stopTimer(timer)
 		c.fire(gen, false, true)
+		if onInvalidate != nil {
+			onInvalidate(inv)
+		}
 		return
 	}
 	go func() {
@@ -313,6 +319,12 @@ func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv 
 		case <-cancel:
 		}
 	}()
+	// Test-visible observation follows deadline publication, so a producer
+	// callback cannot observe a successful invalidation before its timer owns
+	// a worker (and race tests cannot finish while a mock expectation remains).
+	if onInvalidate != nil {
+		onInvalidate(inv)
+	}
 	runtime.Gosched()
 }
 
