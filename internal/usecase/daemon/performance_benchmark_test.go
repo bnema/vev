@@ -51,6 +51,10 @@ func TestPerformanceFixtureCounters(t *testing.T) {
 	require.Equal(t, uint64(2), metrics.outputFrames)
 	require.Positive(t, metrics.outputBytes)
 	require.Positive(t, metrics.outputPayloadBytes)
+	require.Equal(t, uint64(2), metrics.coordinatorInvalidations)
+	require.Equal(t, uint64(2), metrics.coordinatorWakes)
+	require.Equal(t, uint64(2), metrics.coordinatorCoalesced)
+	require.Positive(t, metrics.coordinatorInvalidations, "coordinator metric ratios require a nonzero denominator")
 
 	fixture.captureSnapshot()
 	metrics = fixture.metrics()
@@ -86,6 +90,35 @@ func TestPerformanceFixtureLargeHistoryTopology(t *testing.T) {
 	}
 }
 
+func TestPerformanceFixtureCoordinatorMetricsForCanonicalTopologies(t *testing.T) {
+	for _, topology := range daemonHistoryTopologies {
+		t.Run(topology.name, func(t *testing.T) {
+			fixture := newPerformanceFixture(t, performanceConfig{
+				size: domain.Size{Cols: 120, Rows: 40}, tabs: topology.tabs, panes: topology.panes, historyRows: 10_000,
+			})
+			fixture.paintLive()
+			metrics := fixture.metrics()
+			require.Equal(t, uint64(1), metrics.coordinatorInvalidations)
+			require.Equal(t, uint64(1), metrics.coordinatorWakes)
+			require.Equal(t, uint64(1), metrics.coordinatorCoalesced)
+			require.Positive(t, metrics.coordinatorInvalidations, "coalescing ratio denominator")
+		})
+	}
+}
+
+type daemonHistoryTopology struct {
+	name        string
+	tabs, panes int
+}
+
+var daemonHistoryTopologies = []daemonHistoryTopology{
+	{name: "1tab-1pane-control", tabs: 1, panes: 1},
+	{name: "1tab-4panes", tabs: 1, panes: 4},
+	{name: "4tabs-1pane", tabs: 4, panes: 1},
+	{name: "4tabs-4panes", tabs: 4, panes: 4},
+	{name: "8tabs-1pane", tabs: 8, panes: 1},
+}
+
 func BenchmarkDaemonHistoryLivePaint(b *testing.B) {
 	benchmarkDaemonLargeHistory(b, "live-paint", func(f *performanceFixture) { f.paintLive() })
 }
@@ -104,16 +137,7 @@ func BenchmarkDaemonHistoryResize(b *testing.B) {
 
 func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*performanceFixture)) {
 	b.Helper()
-	for _, topology := range []struct {
-		name        string
-		tabs, panes int
-	}{
-		{name: "1tab-1pane-control", tabs: 1, panes: 1},
-		{name: "1tab-4panes", tabs: 1, panes: 4},
-		{name: "4tabs-1pane", tabs: 4, panes: 1},
-		{name: "4tabs-4panes", tabs: 4, panes: 4},
-		{name: "8tabs-1pane", tabs: 8, panes: 1},
-	} {
+	for _, topology := range daemonHistoryTopologies {
 		b.Run(topology.name, func(b *testing.B) {
 			fixture := newPerformanceFixture(b, performanceConfig{
 				size: domain.Size{Cols: 120, Rows: 40}, tabs: topology.tabs, panes: topology.panes, historyRows: 10_000,
@@ -164,6 +188,14 @@ func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations
 	b.ReportMetric(float64(metrics.outputPayloadBytes)/perOperation, "framepayloadbytes/op")
 	b.ReportMetric(float64(metrics.snapshotWrites)/perOperation, "snapshotwrites/op")
 	b.ReportMetric(float64(metrics.snapshotBytes)/perOperation, "snapshotbytes/op")
+	b.ReportMetric(float64(metrics.coordinatorInvalidations)/perOperation, "coordinatorinvalidations/op")
+	b.ReportMetric(float64(metrics.coordinatorWakes)/perOperation, "coordinatorwakes/op")
+	b.ReportMetric(float64(metrics.coordinatorCoalesced)/perOperation, "coordinatorcoalesced/op")
+	if metrics.coordinatorInvalidations > 0 {
+		b.ReportMetric(float64(metrics.coordinatorCoalesced)/float64(metrics.coordinatorInvalidations), "coordinatorcoalescingratio")
+	} else {
+		b.ReportMetric(0, "coordinatorcoalescingratio")
+	}
 	b.ReportMetric(float64(historyRows), "historyrows/pane")
 }
 
@@ -192,26 +224,30 @@ type performanceConfig struct {
 }
 
 type performanceMetrics struct {
-	outputFrames       uint64
-	outputBytes        uint64
-	outputPayloadBytes uint64
-	snapshotWrites     uint64
-	snapshotBytes      uint64
+	outputFrames             uint64
+	outputBytes              uint64
+	outputPayloadBytes       uint64
+	snapshotWrites           uint64
+	snapshotBytes            uint64
+	coordinatorInvalidations uint64
+	coordinatorWakes         uint64
+	coordinatorCoalesced     uint64
 }
 
 type performanceFixture struct {
-	t           testing.TB
-	d           *Daemon
-	sess        *session
-	ac          *attachedClient
-	output      *countingOutputTransport
-	snaps       *countingSnapshotStore
-	activePane  *pane
-	liveWrites  [][]byte
-	paints      int
-	resizeSizes [2]domain.Size
-	resizes     int
-	resizedSize domain.Size
+	t                   testing.TB
+	d                   *Daemon
+	sess                *session
+	ac                  *attachedClient
+	output              *countingOutputTransport
+	snaps               *countingSnapshotStore
+	activePane          *pane
+	liveWrites          [][]byte
+	paints              int
+	resizeSizes         [2]domain.Size
+	resizes             int
+	resizedSize         domain.Size
+	coordinatorBaseline renderCoordinatorBurstMetricsSnapshot
 }
 
 func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceFixture {
@@ -252,6 +288,11 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 		fixture.configureTab(tb, tabIndex, config.panes, config.historyRows, tabSize(config.size))
 	}
 	fixture.activePane = fixture.findActivePane()
+
+	// The fixture uses the production coordinator. stubClock's inert timer is
+	// completed synchronously by the coordinator, keeping benchmark operations
+	// deterministic while retaining their real invalidation path.
+	d.attachCoordinator(sess, nil, ac)
 
 	// Prime the real renderer shadow before measurements. Subsequent paints use
 	// actual production diffs rather than the initial full frame.
@@ -311,7 +352,11 @@ func (f *performanceFixture) paintLive() {
 	p.mu.Lock()
 	p.screen.Write(f.liveWrites[f.paints%len(f.liveWrites)])
 	p.mu.Unlock()
-	f.d.paint(f.sess, f.ac, false)
+	if rc := f.sess.renderCoordinator(); rc != nil {
+		rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "performance_benchmark_test.go"})
+	} else {
+		f.d.paint(f.sess, f.ac, false)
+	}
 	f.paints++
 }
 
@@ -359,15 +404,25 @@ func (f *performanceFixture) resized() bool {
 func (f *performanceFixture) resetMetrics() {
 	f.output.reset()
 	f.snaps.reset()
+	if rc := f.sess.renderCoordinator(); rc != nil {
+		f.coordinatorBaseline = rc.burstMetricsSnapshot()
+	}
 }
 
 func (f *performanceFixture) metrics() performanceMetrics {
 	output := f.output.metrics()
 	snapshots := f.snaps.metrics()
-	return performanceMetrics{
+	metrics := performanceMetrics{
 		outputFrames: output.frames, outputBytes: output.bytes, outputPayloadBytes: output.payloadBytes,
 		snapshotWrites: snapshots.writes, snapshotBytes: snapshots.bytes,
 	}
+	if rc := f.sess.renderCoordinator(); rc != nil {
+		coordinator := rc.burstMetricsSnapshot()
+		metrics.coordinatorInvalidations = coordinator.invalidations - f.coordinatorBaseline.invalidations
+		metrics.coordinatorWakes = coordinator.wakes - f.coordinatorBaseline.wakes
+		metrics.coordinatorCoalesced = coordinator.coalesced - f.coordinatorBaseline.coalesced
+	}
+	return metrics
 }
 
 const outputPayloadHeaderBytes = 24
