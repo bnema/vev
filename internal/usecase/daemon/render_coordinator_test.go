@@ -388,6 +388,7 @@ resize:
 			wake := awaitWake(t, wakes)
 			require.Same(t, owner, wake.attachment)
 			wake.attachment = nil
+			wake.attachmentEpoch = 0
 			require.Equal(t, renderWake{coalesced: 1}, wake)
 			for range 4096 {
 				select {
@@ -776,6 +777,7 @@ func TestRenderCoordinatorPreviewWakesDoNotWaitForTargetAck(t *testing.T) {
 				require.NotNil(t, preview.attachment)
 			}
 			preview.attachment = nil
+			preview.attachmentEpoch = 0
 			require.Equal(t, renderWake{coalesced: 1}, preview,
 				"the viewer preview must receive target output without target ACK capacity")
 			requireNoWake(t, h.wakes)
@@ -788,6 +790,7 @@ func TestRenderCoordinatorPreviewWakesDoNotWaitForTargetAck(t *testing.T) {
 				require.NotNil(t, wake.attachment)
 			}
 			wake.attachment = nil
+			wake.attachmentEpoch = 0
 			require.Equal(t, renderWake{coalesced: 1}, wake,
 				"the target primary frame remains pending for its own ACK")
 			requireNoWake(t, h.previews)

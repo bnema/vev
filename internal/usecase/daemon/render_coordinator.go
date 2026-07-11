@@ -60,6 +60,9 @@ type renderWake struct {
 	attachment *attachedClient
 	// watchdog marks a flush forced by the synchronized-output watchdog.
 	watchdog bool
+	// attachmentEpoch is captured with attachment and must still be current
+	// before this wake may compose or send.
+	attachmentEpoch uint64
 }
 
 // resizeRequestMetadata is the coordinator-owned latest requested resize
@@ -145,6 +148,9 @@ type renderCoordinator struct {
 	// attachment is the currently bound client identity; callbacks from any
 	// other identity are stale and must not mutate coordinator state.
 	attachment *attachedClient
+	// attachmentEpoch distinguishes consecutive bindings of the same client
+	// object (notably park/resume, which replaces its transport in place).
+	attachmentEpoch uint64
 	// detached rejects invalidations after detach/park until a new attachment.
 	detached bool
 	torndown bool
@@ -537,14 +543,36 @@ func (c *renderCoordinator) teardownPreviewFor(viewer *attachedClient) {
 	c.mu.Unlock()
 }
 
+// advanceAttachmentEpochLocked invalidates every previously dispatched wake.
+// It mirrors the epoch onto the client so paint can recheck ownership after it
+// acquires sendMu without taking c.mu and creating a lock cycle.
+func (c *renderCoordinator) advanceAttachmentEpochLocked(clients ...*attachedClient) {
+	c.attachmentEpoch++
+	for _, ac := range clients {
+		if ac != nil {
+			ac.coordinatorEpoch.Store(c.attachmentEpoch)
+		}
+	}
+}
+
 // attach binds ac as the coordinator's current attachment identity.
 func (c *renderCoordinator) attach(ac *attachedClient) {
 	c.mu.Lock()
 	if !c.torndown {
+		c.advanceAttachmentEpochLocked(ac)
 		c.attachment = ac
 		c.detached = false
 	}
 	c.mu.Unlock()
+}
+
+// wakeCurrent validates a dispatched wake without entering sendMu. The paint
+// path repeats the epoch check after taking sendMu, closing the remaining
+// lifecycle handoff window without holding c.mu across composition.
+func (c *renderCoordinator) wakeCurrent(w renderWake) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.torndown && !c.detached && c.attachment == w.attachment && c.attachmentEpoch == w.attachmentEpoch
 }
 
 // noteDetach invalidates pending wakes and stale callbacks for a detaching
@@ -554,6 +582,7 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 	var timer ports.Timer
 	var timers []ports.Timer
 	if c.attachment == ac {
+		c.advanceAttachmentEpochLocked(ac)
 		c.attachment = nil
 		c.detached = true
 		c.pending = false
@@ -580,6 +609,7 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient) {
 	var timer ports.Timer
 	var timers []ports.Timer
 	if c.attachment == old || c.attachment == nil {
+		c.advanceAttachmentEpochLocked(old, replacement)
 		c.attachment = replacement
 		c.detached = false
 		c.pending = false
@@ -602,6 +632,7 @@ func (c *renderCoordinator) notePark(ac *attachedClient) { c.noteDetach(ac) }
 func (c *renderCoordinator) noteSessionTeardown() {
 	c.mu.Lock()
 	c.torndown = true
+	c.advanceAttachmentEpochLocked(c.attachment)
 	c.attachment = nil
 	c.previewWake = nil
 	c.previewWakes = nil
@@ -721,7 +752,11 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 		c.mu.Unlock()
 		return
 	}
-	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog, attachment: c.attachment}
+	attachmentEpoch := uint64(0)
+	if c.attachment != nil {
+		attachmentEpoch = c.attachmentEpoch
+	}
+	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog, attachment: c.attachment, attachmentEpoch: attachmentEpoch}
 	if !ready {
 		if deadline {
 			c.ackDeferred = true

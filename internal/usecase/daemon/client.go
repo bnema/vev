@@ -15,14 +15,18 @@ import (
 )
 
 type attachedClient struct {
-	tr                    ports.Transport
-	output                *outputStateStream
-	overlays              *overlayRuntime
-	overlayOnce           sync.Once
-	clientID              [16]byte
-	resumeCapable         bool
-	resumeToken           uint64
-	parked                bool
+	tr            ports.Transport
+	output        *outputStateStream
+	overlays      *overlayRuntime
+	overlayOnce   sync.Once
+	clientID      [16]byte
+	resumeCapable bool
+	resumeToken   uint64
+	parked        bool
+	// coordinatorEpoch is published atomically by renderCoordinator lifecycle
+	// transitions. A wake verifies it again after acquiring sendMu, so a parked
+	// attachment reused by resume cannot carry an old wake to its new transport.
+	coordinatorEpoch      atomic.Uint64
 	echoAck               atomic.Uint64
 	bars                  barCache           // only touched while sendMu is held
 	composed              composedFrameCache // only touched while sendMu is held
@@ -390,12 +394,12 @@ func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient) 
 		rc = newRenderCoordinator(renderCoordinatorOptions{
 			clock: d.clock,
 			wake: func(w renderWake) {
-				// w.attachment was validated and captured under the coordinator
-				// lock. Never reread sess.client here: attach publishes that field
-				// before it replaces the coordinator, so doing so can paint the
-				// new connection before Welcome.
-				if w.attachment != nil {
-					d.paint(sess, w.attachment, w.reset)
+				// Never reread sess.client here: a wake is bound to both its
+				// attachment and its coordinator incarnation. The second check in
+				// paint occurs under sendMu, closing a park/resume race after this
+				// unlocked coordinator validation.
+				if w.attachment != nil && rc.wakeCurrent(w) {
+					d.paintCoordinatorWake(sess, w)
 				}
 			},
 			ackReady: func() bool {

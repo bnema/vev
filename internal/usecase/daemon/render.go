@@ -278,10 +278,16 @@ func (d *Daemon) invalidateForResizeGeneration(sess *session, ac *attachedClient
 }
 
 func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
-	d.paintForResizeGeneration(sess, ac, reset, 0)
+	d.paintForResizeGeneration(sess, ac, reset, 0, 0)
 }
 
-func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, reset bool, resizeGeneration uint64) {
+// paintCoordinatorWake composes a coordinator wake only for its captured
+// attachment incarnation. The epoch is checked after sendMu is acquired.
+func (d *Daemon) paintCoordinatorWake(sess *session, w renderWake) {
+	d.paintForResizeGeneration(sess, w.attachment, w.reset, 0, w.attachmentEpoch)
+}
+
+func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, reset bool, resizeGeneration, attachmentEpoch uint64) {
 	tb := sess.activeTab()
 	if tb == nil {
 		return
@@ -294,7 +300,7 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 	sess.mu.Lock()
 	owned := sess.client == ac
 	sess.mu.Unlock()
-	if !owned || ac.currentSession() != sess {
+	if !owned || ac.currentSession() != sess || (attachmentEpoch != 0 && ac.coordinatorEpoch.Load() != attachmentEpoch) {
 		ac.sendMu.Unlock()
 		return
 	}
