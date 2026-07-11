@@ -30,45 +30,48 @@ func signal(ch chan struct{}) {
 	}
 }
 
+// paneRenderable reports dynamic composition visibility. Callers must not
+// hold coordinator locks: this acquires daemon/session/tab/pane-adjacent locks.
+func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
+	if sess == nil || tb == nil || p == nil {
+		return false
+	}
+	preview := d.tabIsPickerPreview(tb)
+	sess.mu.Lock()
+	active := sess.active >= 0 && sess.active < len(sess.tabs) && sess.tabs[sess.active] == tb
+	attached := sess.client != nil
+	sess.mu.Unlock()
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.floating.pane == p {
+		return active && attached && tb.floating.state == floatingVisible
+	}
+	if !((active && attached) || preview) {
+		return false
+	}
+	placements, ok := solvedPlacementsLocked(tb)
+	if !ok {
+		return false
+	}
+	for _, placement := range placements {
+		if placement.ID == p.id && !placement.Collapsed && placement.Content.Width > 0 && placement.Content.Height > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // clearNonRenderablePaneDamage is the single transitional S1 owner for VT
 // damage that cannot reach a composition target. S2 replaces this visibility
 // decision with pipeline ownership; do not paint or mutate renderer shadows
 // here.
 func (d *Daemon) clearNonRenderablePaneDamage(sess *session, tb *tab, p *pane) bool {
-	if sess == nil || tb == nil || p == nil {
-		return false
-	}
-
-	// A picker may render an otherwise headless/inactive target tab into its
-	// attached owner's preview. Keep that source damage until the target
-	// coordinator has supplied the preview wake.
-	preview := d.tabIsPickerPreview(tb)
-
-	sess.mu.Lock()
-	active := sess.active >= 0 && sess.active < len(sess.tabs) && sess.tabs[sess.active] == tb
-	attached := sess.client != nil
-	sess.mu.Unlock()
-
-	tb.mu.Lock()
-	renderable := false
-	if tb.floating.pane == p {
-		renderable = active && attached && tb.floating.state == floatingVisible
-	} else if (active && attached) || preview {
-		if placements, ok := solvedPlacementsLocked(tb); ok {
-			for _, placement := range placements {
-				if placement.ID == p.id && !placement.Collapsed && placement.Content.Width > 0 && placement.Content.Height > 0 {
-					renderable = true
-					break
-				}
-			}
-		}
-	}
-	if !renderable {
+	renderable := d.paneRenderable(sess, tb, p)
+	if !renderable && p != nil {
 		p.mu.Lock()
 		p.screen.ClearDamage()
 		p.mu.Unlock()
 	}
-	tb.mu.Unlock()
 	return renderable
 }
 
@@ -157,29 +160,34 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 				}
 				resp = resp[:0]
 			}
-			if rc := sess.renderCoordinator(); renderable && rc != nil {
+			if rc := sess.renderCoordinator(); rc != nil {
 				if wasSyncing != isSyncing {
 					gen := syncGen
 					if isSyncing {
-						rc.noteSyncBegin(p, gen, func() {
+						rc.noteSyncBeginWithRenderability(p, gen, func() bool {
+							return d.paneRenderable(sess, tb, p)
+						}, func() {
 							p.mu.Lock()
 							if p.syncGen == gen && p.screen.SyncUpdateActive() {
 								p.screen.ForceSyncEnd()
 							}
 							p.mu.Unlock()
 						})
-						// The accumulated synchronized batch is the pending render.
-						rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+						// The accumulated synchronized batch is the pending render only
+						// while this pane can currently reach a composition target.
+						if renderable {
+							rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+						}
 					} else {
 						rc.noteSyncEnd(p, gen)
 					}
 				}
-				if completeSyncRead {
+				if completeSyncRead && renderable {
 					// The entire batch completed in this read. Its final screen state
 					// is ready now, so bypass the bulk debounce without arming a
 					// watchdog for a batch that no longer exists.
 					rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
-				} else if !isSyncing && wasSyncing == isSyncing {
+				} else if renderable && !isSyncing && wasSyncing == isSyncing {
 					rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
 				}
 			}

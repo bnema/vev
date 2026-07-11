@@ -76,7 +76,11 @@ type renderCoordinatorOptions struct {
 	// ackReady reports whether the attachment may compose another output
 	// state (the outputStateStream window has capacity).
 	ackReady func() bool
-	// syncActive reports whether a synchronized-output batch is open.
+	// syncRenderable reports whether a pane's synchronized batch currently
+	// contributes to the attached composition. It must not acquire c.mu.
+	syncRenderable func(*pane) bool
+	// syncActive is retained for existing test harness construction; per-pane
+	// lifecycle and syncRenderable are the coordinator gate.
 	syncActive func() bool
 	// onInvalidate observes every published invalidation (test-visible hook).
 	onInvalidate func(renderInvalidation)
@@ -170,6 +174,9 @@ func (c *renderCoordinator) cancelNormalTimerLocked() {
 
 type syncBatch struct {
 	generation uint64
+	// renderable is evaluated outside c.mu: tab/session visibility locks may be
+	// acquired by this predicate.
+	renderable func() bool
 	force      func()
 	timer      ports.Timer
 	cancel     chan struct{}
@@ -288,6 +295,16 @@ func (c *renderCoordinator) notifyAck() {
 // noteSyncBegin records a synchronized-output batch for its stable pane and
 // arms that pane's watchdog. Overlapping pane batches are independent.
 func (c *renderCoordinator) noteSyncBegin(p *pane, gen uint64, force ...func()) {
+	var renderable func() bool
+	if c.opts.syncRenderable != nil {
+		renderable = func() bool { return c.opts.syncRenderable(p) }
+	}
+	c.noteSyncBeginWithRenderability(p, gen, renderable, force...)
+}
+
+// noteSyncBeginWithRenderability records lifecycle unconditionally while the
+// supplied predicate decides dynamically whether this batch gates composition.
+func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, renderable func() bool, force ...func()) {
 	c.mu.Lock()
 	if c.torndown {
 		c.mu.Unlock()
@@ -299,7 +316,7 @@ func (c *renderCoordinator) noteSyncBegin(p *pane, gen uint64, force ...func()) 
 	if old := c.syncBatches[p]; old != nil {
 		cancelSyncBatchLocked(old)
 	}
-	batch := &syncBatch{generation: gen}
+	batch := &syncBatch{generation: gen, renderable: renderable}
 	if len(force) != 0 {
 		batch.force = force[0]
 	}
@@ -345,15 +362,27 @@ func (c *renderCoordinator) noteSyncBegin(p *pane, gen uint64, force ...func()) 
 // noteSyncEnd records completion for exactly one pane batch. It only flushes
 // after the aggregate gate opens.
 func (c *renderCoordinator) noteSyncEnd(p *pane, gen uint64) {
+	// Visibility may acquire session/tab locks, so sample it before c.mu and
+	// then verify the batch identity under c.mu.
 	c.mu.Lock()
 	batch := c.syncBatches[p]
 	if batch == nil || batch.generation != gen {
 		c.mu.Unlock()
 		return
 	}
+	renderable := batch.renderable
+	c.mu.Unlock()
+	wasRenderable := renderable == nil || renderable()
+
+	c.mu.Lock()
+	batch = c.syncBatches[p]
+	if batch == nil || batch.generation != gen {
+		c.mu.Unlock()
+		return
+	}
 	delete(c.syncBatches, p)
 	cancelSyncBatchLocked(batch)
-	if len(c.syncBatches) == 0 && c.pending {
+	if wasRenderable && len(c.syncBatches) == 0 && c.pending {
 		c.pendingUrgent = true
 	}
 	c.mu.Unlock()
@@ -552,11 +581,23 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 	}
 	ackReady := c.opts.ackReady
 	c.mu.Unlock()
+	if !c.syncGateOpen() {
+		return
+	}
 
 	ready := ackReady == nil || ackReady()
 
 	// The callback can detach, replace, start a synchronized batch, or publish
 	// newer work. Revalidate every consumption precondition after it returns.
+	c.mu.Lock()
+	if !c.fireValidLocked(gen, watchdog) {
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Unlock()
+	if !c.syncGateOpen() {
+		return
+	}
 	c.mu.Lock()
 	if !c.fireValidLocked(gen, watchdog) {
 		c.mu.Unlock()
@@ -596,7 +637,43 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 }
 
 func (c *renderCoordinator) fireValidLocked(gen uint64, watchdog bool) bool {
-	return !c.torndown && c.pending && (watchdog || gen == c.generation) && len(c.syncBatches) == 0
+	return !c.torndown && c.pending && (watchdog || gen == c.generation)
+}
+
+// syncGateOpen evaluates pane visibility without c.mu, then reacquires and
+// validates the complete batch identity set before accepting that result.
+func (c *renderCoordinator) syncGateOpen() bool {
+	for {
+		c.mu.Lock()
+		batches := make(map[*pane]*syncBatch, len(c.syncBatches))
+		for p, batch := range c.syncBatches {
+			batches[p] = batch
+		}
+		c.mu.Unlock()
+
+		gated := false
+		for _, batch := range batches {
+			if batch.renderable == nil || batch.renderable() {
+				gated = true
+				break
+			}
+		}
+
+		c.mu.Lock()
+		unchanged := len(batches) == len(c.syncBatches)
+		if unchanged {
+			for p, batch := range batches {
+				if c.syncBatches[p] != batch || c.syncBatches[p].generation != batch.generation {
+					unchanged = false
+					break
+				}
+			}
+		}
+		c.mu.Unlock()
+		if unchanged {
+			return !gated
+		}
+	}
 }
 
 // takePendingPreviewsLocked snapshots and consumes the preview delivery for
