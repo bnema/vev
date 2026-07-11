@@ -42,3 +42,41 @@ func TestNewSnapshotFromRowsOwnsCallerRows(t *testing.T) {
 		t.Fatalf("Row(0) = %q, want deep-owned caller row", got)
 	}
 }
+
+// This scaling gate deliberately compares equal row counts rather than an
+// absolute budget, which varies between Go releases. A full history-row clone
+// grows with row width; the immutable HistoryView allocation does not.
+func TestNewSnapshotAllocationIsWidthIndependent(t *testing.T) {
+	narrow := benchmarkNewSnapshotBytes(16)
+	wide := benchmarkNewSnapshotBytes(512)
+	assertWidthIndependentAllocations(t, "NewSnapshot", narrow, wide)
+}
+
+func benchmarkNewSnapshotBytes(width int) int64 {
+	const historyRows = 256
+
+	scrollback := NewScrollback(historyRows)
+	for range historyRows {
+		scrollback.Append(make([]renderer.Cell, width))
+	}
+	// Keep visible-frame work constant so the comparison isolates history rows.
+	screen := renderer.NewFrame(8, 4)
+	result := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			benchmarkSnapshotSink = NewSnapshot(scrollback, screen)
+		}
+	})
+	return result.AllocedBytesPerOp()
+}
+
+func assertWidthIndependentAllocations(t *testing.T, operation string, narrow, wide int64) {
+	t.Helper()
+	// Two times permits allocator noise while decisively rejecting a cell-row
+	// copy, whose allocation grows by 32x for the widths above.
+	const conservativeWidthTolerance = 2
+	if wide > narrow*conservativeWidthTolerance {
+		t.Fatalf("%s B/op scaled with row width: narrow=%d wide=%d (limit=%d)", operation, narrow, wide, narrow*conservativeWidthTolerance)
+	}
+}

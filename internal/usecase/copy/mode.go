@@ -2,6 +2,7 @@ package copy
 
 import (
 	"encoding/base64"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -106,7 +107,7 @@ func FindMatches(s Snapshot, query string) []SearchMatch {
 		haystack, cellIndexes := searchableCells(cells)
 		var text string
 		for start := 0; start+len(needle) <= len(haystack); {
-			if !sameRunes(haystack[start:start+len(needle)], needle) {
+			if !slices.Equal(haystack[start:start+len(needle)], needle) {
 				start++
 				continue
 			}
@@ -148,18 +149,6 @@ func lowerRunes(s string) []rune {
 		runes[i] = unicode.ToLower(r)
 	}
 	return runes
-}
-
-func sameRunes(a, b []rune) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func (m *Mode) Search(s Snapshot, query string) bool {

@@ -18,7 +18,10 @@ go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -be
 
 For before/after comparison, collect repeated samples for the **full matrix**
 (all workloads and topologies), pinning CPU/governor and recording the host.
-The fixed duration and count make the output suitable for `benchstat`:
+The benchmark harness must be committed and present in **both** measured
+revisions: collect the baseline after the harness is introduced but before the
+optimization, then collect the optimized revision with that same harness. The
+fixed duration and count make the output suitable for `benchstat`:
 
 ```sh
 go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1s -count=5 -benchmem > /tmp/vev-history-after.txt
@@ -72,8 +75,12 @@ go test ./internal/usecase/copy ./internal/usecase/visualsearch -run '^$' -bench
 
 Treat `allocs/op` and `B/op` as allocation gates: compare the complete repeated
 output with the accepted baseline before merging, and investigate any increase.
-This scope does not yet include an incremental/full-text search index: queries
-still scan the immutable document and produce a fresh match list. Coordinator
+The automated scaling gates also compare equal row/match counts at narrow and
+wide row widths; `B/op` may grow by at most 2x, a conservative relative
+allowance that catches full cell-row copies without depending on an absolute
+Go-version-specific budget. This scope does not yet include an
+incremental/full-text search index: queries still scan the immutable document
+and produce a fresh match list. Coordinator
 behavior, chunk encoding, compression, GC tuning, and real Unix-socket, SSH, or
 UDP impairment/latency remain out of scope.
 

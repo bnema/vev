@@ -107,6 +107,49 @@ func TestVisualSearchRenderShowsInputAndLineResults(t *testing.T) {
 	require.Contains(t, text, "2:6  beta alpha")
 }
 
+func TestVisualSearchCloneAllocationIsWidthIndependent(t *testing.T) {
+	narrow := benchmarkVisualSearchCloneBytes(16)
+	wide := benchmarkVisualSearchCloneBytes(512)
+	assertWidthIndependentCloneAllocations(t, narrow, wide)
+}
+
+// The comparison holds row and match counts equal. Model.Clone must copy only
+// mutable UI/match state, so a document-row clone is observable as width-scaled
+// B/op without relying on a Go-version-specific absolute allocation budget.
+func benchmarkVisualSearchCloneBytes(width int) int64 {
+	const rows = 256
+
+	line := strings.Repeat("x", width-7) + "needle"
+	lines := make([]string, rows)
+	for i := range lines {
+		lines[i] = line
+	}
+	model := New(testSnapshot(lines...))
+	for _, r := range "needle" {
+		model.Insert(r)
+	}
+	if got := len(model.Matches()); got != rows {
+		panic("visual-search allocation gate requires one match per row")
+	}
+
+	result := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			benchmarkModelSink = model.Clone()
+		}
+	})
+	return result.AllocedBytesPerOp()
+}
+
+func assertWidthIndependentCloneAllocations(t *testing.T, narrow, wide int64) {
+	t.Helper()
+	const conservativeWidthTolerance = 2
+	if wide > narrow*conservativeWidthTolerance {
+		t.Fatalf("VisualSearch Model.Clone B/op scaled with row width: narrow=%d wide=%d (limit=%d)", narrow, wide, narrow*conservativeWidthTolerance)
+	}
+}
+
 func BenchmarkVisualSearchClone10KRows(b *testing.B) {
 	const historyRows = 10_000
 
@@ -115,6 +158,12 @@ func BenchmarkVisualSearchClone10KRows(b *testing.B) {
 		lines[i] = "immutable history row"
 	}
 	model := New(testSnapshot(lines...))
+	for _, r := range "history" {
+		model.Insert(r)
+	}
+	if got := len(model.Matches()); got != historyRows {
+		b.Fatalf("representative query matches = %d, want %d", got, historyRows)
+	}
 
 	b.ReportAllocs()
 	b.ResetTimer()
