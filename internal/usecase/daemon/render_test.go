@@ -1419,10 +1419,11 @@ func TestComposeCopyClientFrameOverlaysBaseAtTarget(t *testing.T) {
 	}
 	p := newPane("floating", nil, domain.Size{Cols: 18, Rows: 2})
 	p.screen.Write([]byte("ab\r\ncd"))
-	mode := scopy.NewMode(scopy.NewSnapshot(p.scrollback, p.screen.Frame))
+	document := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+	mode := scopy.NewMode(document)
 	target := domain.Rect{X: 2, Y: 3, Width: 18, Height: 2}
 
-	frame, damage := composeCopyClientFrame(mode, p, target, base, barState{})
+	frame, damage := composeCopyClientFrame(mode, &document, target, base, barState{})
 
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
 	require.Equal(t, "##ab                ", rowText(frame.Row(3)))

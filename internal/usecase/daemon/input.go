@@ -271,20 +271,20 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 			}
 
 			p.mu.Lock()
-			snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
-			p.mu.Unlock()
-
+			document := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
 			rt.copyMu.Lock()
-			mode := scopy.NewMode(snap)
-			mode.StartSelectionAt(snap, pressTop+pressRow)
-			mode.ExtendTo(snap, snap.Len()-snap.Height+ev.Row)
+			mode := scopy.NewMode(document)
+			mode.StartSelectionAt(document, pressTop+pressRow)
+			mode.ExtendTo(document, document.Len()-document.Height+ev.Row)
 			rt.copyMode = mode
+			rt.copySnapshot = &document
 			rt.copyPane = p
 			rt.copyPressRow = pressTop + pressRow
 			rt.copyPressRowValid = true
 			rt.copyDragging = true
 			rt.normalMousePressValid = false
 			rt.copyMu.Unlock()
+			p.mu.Unlock()
 			d.paint(sess, ac, true)
 		case mouse.Release:
 			rt.copyMu.Lock()

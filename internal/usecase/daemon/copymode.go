@@ -61,16 +61,21 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 		p.mu.Unlock()
 		return
 	}
-	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
-	if delta > 0 && rt.copyMode.AtBottom(snap) {
+	if rt.copySnapshot == nil {
+		rt.copyMu.Unlock()
+		p.mu.Unlock()
+		return
+	}
+	document := rt.copySnapshot
+	if delta > 0 && rt.copyMode.AtBottom(*document) {
 		rt.clearCopyModeLocked()
 		rt.copyMu.Unlock()
 		p.mu.Unlock()
 		d.paint(sess, ac, true)
 		return
 	}
-	rt.copyMode.Move(snap, delta)
-	exit := delta > 0 && rt.copyMode.AtBottom(snap)
+	rt.copyMode.Move(*document, delta)
+	exit := delta > 0 && rt.copyMode.AtBottom(*document)
 	if exit {
 		rt.clearCopyModeLocked()
 	}
@@ -94,10 +99,10 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 		return
 	}
 	p.mu.Lock()
-	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
-	p.mu.Unlock()
+	document := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
 	rt.copyMu.Lock()
-	rt.copyMode = scopy.NewMode(snap)
+	rt.copyMode = scopy.NewMode(document)
+	rt.copySnapshot = &document
 	rt.copyPane = p
 	rt.copySearch = nil
 	rt.copySearchPending = nil
@@ -105,6 +110,7 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	rt.copyDragging = false
 	rt.normalMousePressValid = false
 	rt.copyMu.Unlock()
+	p.mu.Unlock()
 	if floatingSource {
 		tb.mu.Lock()
 		stillVisible := tb.floating.state == floatingVisible && tb.floating.pane == p
@@ -142,12 +148,17 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
 		p.mu.Unlock()
 		return
 	}
-	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+	if rt.copySnapshot == nil {
+		rt.copyMu.Unlock()
+		p.mu.Unlock()
+		return
+	}
+	document := rt.copySnapshot
 	absRow := rt.copyMode.ViewportTop + ev.Row
 	changed := false
 	switch ev.Type {
 	case mouse.Press:
-		rt.copyMode.SetCursor(snap, absRow)
+		rt.copyMode.SetCursor(*document, absRow)
 		rt.copyPressRow = rt.copyMode.Cursor
 		rt.copyPressRowValid = true
 		rt.copyDragging = false
@@ -157,10 +168,10 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
 			break
 		}
 		if !rt.copyDragging {
-			rt.copyMode.StartSelectionAt(snap, rt.copyPressRow)
+			rt.copyMode.StartSelectionAt(*document, rt.copyPressRow)
 			rt.copyDragging = true
 		}
-		rt.copyMode.ExtendTo(snap, absRow)
+		rt.copyMode.ExtendTo(*document, absRow)
 		changed = true
 	case mouse.Release:
 		// Button release intentionally has no visual effect.
@@ -200,9 +211,14 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		data = combined
 		rt.copyPending = nil
 	}
-	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+	if rt.copySnapshot == nil {
+		rt.copyMu.Unlock()
+		p.mu.Unlock()
+		return
+	}
+	document := rt.copySnapshot
 	if rt.copySearch != nil {
-		changed, closeSearch, accepted := d.routeCopySearchInputLocked(rt, snap, data)
+		changed, closeSearch, accepted := d.routeCopySearchInputLocked(rt, *document, data)
 		rt.copyMu.Unlock()
 		p.mu.Unlock()
 		if changed || closeSearch || accepted {
@@ -216,40 +232,40 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	for i := 0; i < len(data); i++ {
 		switch data[i] {
 		case 'j':
-			rt.copyMode.Move(snap, 1)
+			rt.copyMode.Move(*document, 1)
 			changed = true
 		case 'k':
-			rt.copyMode.Move(snap, -1)
+			rt.copyMode.Move(*document, -1)
 			changed = true
 		case 'g':
-			rt.copyMode.Top(snap)
+			rt.copyMode.Top(*document)
 			changed = true
 		case 'G':
-			rt.copyMode.Bottom(snap)
+			rt.copyMode.Bottom(*document)
 			changed = true
 		case ' ', 'v':
 			rt.copyMode.ToggleSelection()
 			changed = true
 		case '/':
-			rt.copySearch = visualsearch.New(snap)
+			rt.copySearch = visualsearch.New(*document)
 			rt.copySearchPending = nil
 			changed = true
 			if i+1 < len(data) {
-				searchChanged, _, accepted := d.routeCopySearchInputLocked(rt, snap, data[i+1:])
+				searchChanged, _, accepted := d.routeCopySearchInputLocked(rt, *document, data[i+1:])
 				changed = changed || searchChanged || accepted
 			}
 			i = len(data)
 		case 'n':
-			changed = rt.copyMode.NextSearchMatch(snap, 1) || changed
+			changed = rt.copyMode.NextSearchMatch(*document, 1) || changed
 		case 'N':
-			changed = rt.copyMode.NextSearchMatch(snap, -1) || changed
+			changed = rt.copyMode.NextSearchMatch(*document, -1) || changed
 		case '\r', '\n', 'y':
 			copyOut = true
 			exit = true
 		case 'q', 0x03, 0x1b:
 			if data[i] == 0x1b {
 				tail := data[i:]
-				consumed, ok := routeCopyEscape(rt.copyMode, snap, tail)
+				consumed, ok := routeCopyEscape(rt.copyMode, *document, tail)
 				if ok {
 					i += consumed - 1
 					changed = true
@@ -269,7 +285,7 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	}
 	text := ""
 	if copyOut {
-		text = rt.copyMode.SelectedText(snap)
+		text = rt.copyMode.SelectedText(*document)
 	}
 	if exit {
 		d.stopCopyPendingTimerLocked(ac)
@@ -417,15 +433,12 @@ func composeCopySearchClientFrame(model *visualsearch.Model, base renderer.Frame
 	return composeModalClientFrame(base, copySearchModal, styleSet, styleSet.selection, model.Render)
 }
 
-func composeCopyClientFrame(mode *scopy.Mode, p *pane, target domain.Rect, frame renderer.Frame, bars barState) (renderer.Frame, []renderer.Damage) {
-	if mode == nil || p == nil || target.Width <= 0 || target.Height <= 0 || frame.Width <= 0 || frame.Height <= 0 {
+func composeCopyClientFrame(mode *scopy.Mode, document *scopy.Snapshot, target domain.Rect, frame renderer.Frame, bars barState) (renderer.Frame, []renderer.Damage) {
+	if mode == nil || document == nil || target.Width <= 0 || target.Height <= 0 || frame.Width <= 0 || frame.Height <= 0 {
 		return frame, nil
 	}
 	styles := newThemeStyles(bars.theme)
-	p.mu.Lock()
-	snap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
-	p.mu.Unlock()
-	copyFrame := mode.Render(snap, styles.copyStatus, styles.selection)
+	copyFrame := mode.Render(*document, styles.copyStatus, styles.selection)
 	bodyRows := max(copyFrame.Height-1, 0)
 	for y := 0; y < target.Height && y < bodyRows && target.Y+y < frame.Height-1; y++ {
 		dstX := max(target.X, 0)

@@ -124,7 +124,7 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 200 {
-			_, _ = composeCopyClientFrame(mode, pane, target, base, bars)
+			_, _ = composeCopyClientFrame(mode, &snap, target, base, bars)
 		}
 	}()
 	wg.Wait()
@@ -143,7 +143,7 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 
 	bars := barState{status: sess.statusSegments()}
 	base, _ := composeClientFrameWithState(bars, tb, true)
-	frame, damage := composeCopyClientFrame(mode, tb.focusedPane(), domain.Rect{X: 0, Y: 1, Width: 12, Height: 3}, base, bars)
+	frame, damage := composeCopyClientFrame(mode, &snap, domain.Rect{X: 0, Y: 1, Width: 12, Height: 3}, base, bars)
 
 	require.Equal(t, 80, frame.Width)
 	require.Equal(t, 25, frame.Height)
