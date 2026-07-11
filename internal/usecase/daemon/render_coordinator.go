@@ -3,6 +3,7 @@ package daemon
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -82,6 +83,15 @@ type renderCoordinatorOptions struct {
 }
 
 // renderCoordinator fans in producer invalidations for one attached session.
+// renderCoordinatorBurstMetrics is deliberately observational. It permits
+// benchmark/pprof callers to measure producer bursts without influencing
+// scheduling or transport policy.
+type renderCoordinatorBurstMetrics struct {
+	invalidations atomic.Uint64
+	wakes         atomic.Uint64
+	coalesced     atomic.Uint64
+}
+
 type renderCoordinator struct {
 	mu   sync.Mutex
 	opts renderCoordinatorOptions
@@ -102,7 +112,8 @@ type renderCoordinator struct {
 	attachment *attachedClient
 	torndown   bool
 
-	resize resizeRequestMetadata
+	resize  resizeRequestMetadata
+	metrics renderCoordinatorBurstMetrics
 	// generation invalidates callbacks from superseded deadline/watchdog timers.
 	generation     uint64
 	armed          bool
@@ -127,6 +138,7 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 	if c.opts.onInvalidate != nil {
 		c.opts.onInvalidate(inv)
 	}
+	c.metrics.invalidations.Add(1)
 	wasPending, wasUrgent := c.pending, c.pendingUrgent
 	c.pending = true
 	c.pendingReset = c.pendingReset || inv.reset
@@ -281,6 +293,11 @@ func (c *renderCoordinator) resizeSnapshot() resizeRequestMetadata {
 	return c.resize
 }
 
+// burstMetrics returns an observational snapshot for benchmark reporting.
+func (c *renderCoordinator) burstMetrics() (invalidations, wakes, coalesced uint64) {
+	return c.metrics.invalidations.Load(), c.metrics.wakes.Load(), c.metrics.coalesced.Load()
+}
+
 // renderCoordinator returns the coordinator installed for this session.
 func (s *session) renderCoordinator() *renderCoordinator { return s.coordinator.Load() }
 
@@ -322,6 +339,8 @@ func (c *renderCoordinator) fire(gen uint64, watchdog bool) {
 		return
 	}
 	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog}
+	c.metrics.wakes.Add(1)
+	c.metrics.coalesced.Add(uint64(w.coalesced))
 	c.pending, c.pendingReset, c.pendingUrgent, c.coalesced, c.armed = false, false, false, 0, false
 	wake, preview := c.opts.wake, c.previewWake
 	c.mu.Unlock()

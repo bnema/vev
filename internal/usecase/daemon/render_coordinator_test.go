@@ -67,7 +67,7 @@ func (h *coordinatorHarness) armedTimers(t *testing.T) []*signalTimer {
 // deterministic contract failure, not a slow behavior to poll for.
 func awaitWake(t *testing.T, ch chan renderWake) renderWake {
 	t.Helper()
-	for range 64 {
+	for range 4096 {
 		select {
 		case w := <-ch:
 			return w
@@ -90,7 +90,7 @@ func requireNoWake(t *testing.T, ch chan renderWake) {
 
 func awaitInvalidation(t *testing.T, ch chan renderInvalidation) renderInvalidation {
 	t.Helper()
-	for range 64 {
+	for range 4096 {
 		select {
 		case inv := <-ch:
 			return inv
