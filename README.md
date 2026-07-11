@@ -199,7 +199,7 @@ Rename prompts are prefilled with the current session name. Empty names and name
 
 ## Session picker
 
-Open it with `SSP` in the palette. It lists sessions and tabs, previews the selected target when space allows, and marks stopped sessions.
+Open it with `SSP` in the palette. It lists sessions and tabs — tab entries use the same `name (title)` form as the top bar, ellipsized to the list width — previews the selected target when space allows, and marks stopped sessions.
 
 | Key | Action |
 |---|---|
@@ -216,7 +216,7 @@ Each tab also owns one independent floating terminal. It prewarms asynchronously
 
 While visible, the floating terminal receives ordinary input, bracketed paste, mouse input, clipboard-path injection, and scrollback/copy mode. Global vev bindings remain active, and a bare Esc is passed to the floating application. `Alt+f` and `FLT` toggle visibility; there is no separate floating-pane close command.
 
-The top bar shows numbered tabs. The bottom bar shows the active session followed by recent sessions, fading toward older entries. Ephemeral sessions are marked with `*`, for example `0*`.
+The top bar shows each tab as `name (title)`, where the name is the tab's rename or number and the title is the focused pane's `ProcessName: ProcessTerminalTitle`. Labels share the row width: when everything fits they render in full, otherwise unused space flows from short tabs to long ones and long labels are ellipsized, degrading to the bare tab name when space runs out. The bottom bar shows the active session followed by recent sessions, fading toward older entries. Ephemeral sessions are marked with `*`, for example `0*`.
 
 ## Scrollback mode and copy
 
