@@ -321,7 +321,9 @@ func (d *Daemon) invalidateRender(sess *session, ac *attachedClient, reset bool,
 			return
 		}
 	}
-	d.paint(sess, ac, reset)
+	if ac != nil {
+		d.paint(sess, ac, reset)
+	}
 }
 
 func (c *renderCoordinator) fire(gen uint64, watchdog bool) {

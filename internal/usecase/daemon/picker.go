@@ -1,27 +1,4 @@
-// Package daemon holds vev's server-side session multiplexer use case: the
-// accept loop, the ephemeral/named session registry, the per-tab PTY reader
-// and VT screen, and the per-client debounced render scheduler.
-//
-// Concurrency model (sessions own one or more PTY-backed tabs):
-//
-//   - Serve runs the accept loop. Each accepted connection is handled by its
-//     own goroutine (handleConn): it reads the first frame and routes it to a
-//     session create/attach, a list, or a kill.
-//   - Per session there are exactly two long-lived goroutines: the PTY reader
-//     (drains child output into the VT screen and pokes a cap-1 dirty channel)
-//     and the render scheduler (debounces dirties and paints the attached
-//     client). Both are tied to the session context and unwind when the
-//     session is killed (pty.Close unblocks the reader; ctx cancel stops the
-//     scheduler).
-//   - The daemon exits (Serve returns) when the last session is removed, or
-//     when the parent context is cancelled (graceful shutdown notifies any
-//     attached clients with ReasonServerShutdown).
-//
-// Locking: a pane's screen/scrollback and per-client renderer shadow are
-// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
-// session.mu; the registry by Daemon.mu. When more than one is held the order
-// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
-// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
+// Package daemon holds vev's server-side session multiplexer use case.
 package daemon
 
 import (
@@ -245,83 +222,53 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	if ac.overlays.picker != nil {
 		target, ok = ac.overlays.picker.Selected()
 	}
-	ac.overlays.pickerMu.Unlock()
-
 	var next *tab
 	if ok {
 		next = d.tabByTarget(target)
 	}
-
-	ac.overlays.pickerMu.Lock()
-	old := ac.overlays.pickerPreview
 	if ac.overlays.picker == nil {
 		next = nil
 	}
 	ac.overlays.pickerPreview = next
 	ac.overlays.pickerMu.Unlock()
-
-	if old != nil && old != next {
-		old.mu.Lock()
-		if old.previewClient == ac {
-			old.previewClient = nil
-		}
-		old.mu.Unlock()
-	}
-	if next != nil {
-		next.mu.Lock()
-		next.previewClient = ac
-		next.mu.Unlock()
-
-		ac.overlays.pickerMu.Lock()
-		keep := ac.overlays.pickerPreview == next
-		ac.overlays.pickerMu.Unlock()
-		if !keep {
-			next.mu.Lock()
-			if next.previewClient == ac {
-				next.previewClient = nil
-			}
-			next.mu.Unlock()
-		}
-	}
 }
 
 func (d *Daemon) unregisterPreview(ac *attachedClient) {
 	ac.overlays.pickerMu.Lock()
-	old := ac.overlays.pickerPreview
 	ac.overlays.pickerPreview = nil
 	ac.overlays.pickerMu.Unlock()
-
-	if old != nil {
-		old.mu.Lock()
-		if old.previewClient == ac {
-			old.previewClient = nil
-		}
-		old.mu.Unlock()
-	}
 }
 
+// clearDestroyedTabPreview clears coordinator-owned picker state for clients
+// that were previewing a removed tab. Tabs do not route render ownership.
 func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
-	tb.mu.Lock()
-	previewer := tb.previewClient
-	tb.mu.Unlock()
-	if previewer == nil {
+	if d == nil || d.sessions == nil {
 		return
 	}
-	cleared := false
-	previewer.overlays.pickerMu.Lock()
-	if previewer.overlays.pickerPreview == tb {
-		previewer.overlays.pickerPreview = nil
-		cleared = true
+	d.mu.Lock()
+	var clients []*attachedClient
+	for _, sess := range d.sessions {
+		sess.mu.Lock()
+		if sess.client != nil {
+			clients = append(clients, sess.client)
+		}
+		sess.mu.Unlock()
 	}
-	previewer.overlays.pickerMu.Unlock()
-	tb.mu.Lock()
-	if tb.previewClient == previewer {
-		tb.previewClient = nil
-	}
-	tb.mu.Unlock()
-	if cleared {
-		if sess := previewer.currentSession(); sess != nil {
-			d.invalidateRender(sess, previewer, true, "picker.go")
+	d.mu.Unlock()
+	for _, ac := range clients {
+		if ac == nil || ac.overlays == nil {
+			continue
+		}
+		ac.overlays.pickerMu.Lock()
+		cleared := ac.overlays.pickerPreview == tb
+		if cleared {
+			ac.overlays.pickerPreview = nil
+		}
+		ac.overlays.pickerMu.Unlock()
+		if cleared {
+			if sess := ac.currentSession(); sess != nil {
+				d.invalidateRender(sess, ac, true, "picker.go")
+			}
 		}
 	}
 }

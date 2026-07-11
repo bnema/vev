@@ -52,7 +52,6 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 	// deferred diff and any resize-idle callback before registering its grace
 	// timer; resume performs a fresh full paint.
 	ac.cancelResizePaint()
-	ac.clearPaintDeferred()
 	d.mu.Lock()
 	if d.closing {
 		d.mu.Unlock()

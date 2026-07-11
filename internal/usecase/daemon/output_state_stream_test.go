@@ -68,53 +68,6 @@ func TestOutputStateStreamRepeatedUnackedScrollRemainsClientCorrect(t *testing.T
 	}
 }
 
-func TestOutputStateStreamAckProgressionReleasesDeferredPaint(t *testing.T) {
-	stream := newOutputStateStream()
-	for range maxUnackedOutputStates {
-		stream.frame([]byte("output"), false, 0)
-	}
-	require.True(t, stream.deferIfAtCapacity(false))
-	_, ok := stream.takeDeferred()
-	require.False(t, ok)
-	stream.ack(maxUnackedOutputStates - 1)
-	reset, ok := stream.takeDeferred()
-	require.True(t, ok)
-	require.False(t, reset)
-	require.Equal(t, uint64(1), stream.outstanding())
-
-	// Stale and future ACKs do not move the cumulative acknowledgement.
-	stream.ack(maxUnackedOutputStates - 2)
-	stream.ack(maxUnackedOutputStates + 1)
-	require.Equal(t, uint64(maxUnackedOutputStates-1), stream.acked)
-}
-
-func TestOutputStateStreamResetIsDependencyFreeAndClearsDeferral(t *testing.T) {
-	stream := newOutputStateStream()
-	for range maxUnackedOutputStates {
-		stream.frame([]byte("output"), false, 0)
-	}
-	require.True(t, stream.deferIfAtCapacity(false))
-	for range 32 {
-		require.True(t, stream.deferIfAtCapacity(true), "reset paints must coalesce while the stream is at capacity")
-	}
-	require.Equal(t, uint64(maxUnackedOutputStates), stream.outstanding())
-	stream.ack(maxUnackedOutputStates)
-	reset, ok := stream.takeDeferred()
-	require.True(t, ok)
-	require.True(t, reset, "a coalesced reset must flush as a dependency-free repaint")
-
-	frame := renderer.NewFrame(2, 1)
-	fillOutputStateRows(frame, []string{"ok"})
-	outFrame, ok, err := drawOutputState(t, stream, frame, nil, true, 0)
-	require.NoError(t, err)
-	require.True(t, ok)
-	out, err := ports.UnmarshalOutput(outFrame.Payload)
-	require.NoError(t, err)
-	require.Zero(t, out.BaseStateNum)
-	_, ok = stream.takeDeferred()
-	require.False(t, ok)
-}
-
 func drawOutputState(t *testing.T, stream *outputStateStream, frame renderer.Frame, damage []renderer.Damage, reset bool, echoAck uint64) (ports.Frame, bool, error) {
 	t.Helper()
 	data, err := stream.render(frame, damage, reset)
@@ -122,34 +75,6 @@ func drawOutputState(t *testing.T, stream *outputStateStream, frame renderer.Fra
 		return ports.Frame{}, false, err
 	}
 	return stream.frame(data, reset, echoAck), true, nil
-}
-
-func TestOutputStateStreamWindowOneCoalescesUntilCumulativeAck(t *testing.T) {
-	stream := newOutputStateStream(1)
-	stream.frame([]byte("first"), true, 0)
-	for range 100 {
-		require.True(t, stream.deferIfAtCapacity(false))
-	}
-	require.Equal(t, uint64(1), stream.outstanding())
-
-	// A stale ACK cannot release the coalesced paint; the cumulative ACK for
-	// the actually sent state does.
-	stream.ack(0)
-	_, ok := stream.takeDeferred()
-	require.False(t, ok)
-	stream.ack(1)
-	reset, ok := stream.takeDeferred()
-	require.True(t, ok)
-	require.False(t, reset)
-	stream.frame([]byte("latest"), reset, 0)
-	require.Equal(t, uint64(1), stream.outstanding())
-
-	sideEffect := stream.sideEffect([]byte("reliable"), 0)
-	output, err := ports.UnmarshalOutput(sideEffect.Payload)
-	require.NoError(t, err)
-	require.Zero(t, output.BaseStateNum)
-	require.Zero(t, output.NewStateNum)
-	require.Equal(t, uint64(2), stream.next)
 }
 
 func TestOutputStateStreamDefaultsAndNormalizesWindow(t *testing.T) {

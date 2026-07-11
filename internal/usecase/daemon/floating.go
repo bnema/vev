@@ -233,7 +233,7 @@ type floatingLaunchSpec struct {
 }
 
 // launchFloating snapshots launch inputs, then accounts for a worker through
-// Open, pane initialization, publication, and reader/scheduler startup.
+// Open, pane initialization, publication, and reader/coordinator startup.
 func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfig, generation uint64, userOpen bool) {
 	spec, err := d.newFloatingLaunchSpec(sess, tb, cfg, userOpen)
 	if err != nil {
@@ -241,7 +241,7 @@ func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfi
 		return
 	}
 	// Count the launch before its goroutine starts. It remains counted through
-	// install, including the reader/scheduler Adds, so shutdown cannot return
+	// install, including the reader/coordinator Adds, so shutdown cannot return
 	// before a late Open completion has either been rejected or fully joined.
 	d.sessWg.Go(func() { d.openAndInstallFloating(sess, tb, spec, generation) })
 }

@@ -306,12 +306,10 @@ func (d *Daemon) pokeSessionRender(sess *session) {
 	if sess == nil {
 		return
 	}
-	if tb := sess.activeTab(); tb != nil {
-		tb.mu.Lock()
-		p := tb.focusedPane()
-		tb.mu.Unlock()
-		if p != nil {
-			signal(p.dirty)
-		}
+	sess.mu.Lock()
+	ac := sess.client
+	sess.mu.Unlock()
+	if ac != nil {
+		d.invalidateRender(sess, ac, false, "bar_refresh.go")
 	}
 }

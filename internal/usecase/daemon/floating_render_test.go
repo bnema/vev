@@ -268,41 +268,6 @@ func TestDrawFloatingBorderOmitsTinyAxes(t *testing.T) {
 	}
 }
 
-func TestRenderHiddenFloatingSkipsPreviewAndActiveClientAndClearsDamage(t *testing.T) {
-	normalPTY, releaseNormal := newBlockingPTY(t)
-	defer releaseNormal()
-	d, sess, _, activeSends := newManualSessionWithPTYs(t, normalPTY)
-	previewTransport, previewSends := newCapturingTransport(t)
-	preview := &attachedClient{tr: previewTransport, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
-	preview.initOverlays()
-	preview.setSession(sess)
-
-	tb := sess.activeTab()
-	floating := newPane("floating", nil, domain.Size{Cols: 20, Rows: 8})
-	floating.screen.Write([]byte("hidden output"))
-	tb.mu.Lock()
-	generation := tb.beginFloatingWarmLocked(false)
-	require.True(t, tb.installFloatingLocked(floating, generation))
-	tb.previewClient = preview
-	tb.mu.Unlock()
-
-	d.render(sess, tb, floating)
-
-	floating.mu.Lock()
-	require.Empty(t, floating.screen.Damage())
-	floating.mu.Unlock()
-	select {
-	case frame := <-previewSends:
-		t.Fatalf("hidden floating output painted picker preview: %#v", frame)
-	default:
-	}
-	select {
-	case frame := <-activeSends:
-		t.Fatalf("hidden floating output painted active client: %#v", frame)
-	default:
-	}
-}
-
 func BenchmarkComposeFloatingFrameCached(b *testing.B) {
 	p := newPane("floating", nil, domain.Size{Cols: 62, Rows: 18})
 	p.title.displayFallback = "float"

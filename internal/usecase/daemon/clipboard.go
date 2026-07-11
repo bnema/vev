@@ -1,6 +1,6 @@
 // Package daemon holds vev's server-side session multiplexer use case: the
 // accept loop, the ephemeral/named session registry, the per-tab PTY reader
-// and VT screen, and the per-client debounced render scheduler.
+// and VT screen, and the per-client debounced render coordinator.
 package daemon
 
 import (

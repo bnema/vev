@@ -1,27 +1,4 @@
-// Package daemon holds vev's server-side session multiplexer use case: the
-// accept loop, the ephemeral/named session registry, the per-tab PTY reader
-// and VT screen, and the per-client debounced render scheduler.
-//
-// Concurrency model (sessions own one or more PTY-backed tabs):
-//
-//   - Serve runs the accept loop. Each accepted connection is handled by its
-//     own goroutine (handleConn): it reads the first frame and routes it to a
-//     session create/attach, a list, or a kill.
-//   - Per session there are exactly two long-lived goroutines: the PTY reader
-//     (drains child output into the VT screen and pokes a cap-1 dirty channel)
-//     and the render scheduler (debounces dirties and paints the attached
-//     client). Both are tied to the session context and unwind when the
-//     session is killed (pty.Close unblocks the reader; ctx cancel stops the
-//     scheduler).
-//   - The daemon exits (Serve returns) when the last session is removed, or
-//     when the parent context is cancelled (graceful shutdown notifies any
-//     attached clients with ReasonServerShutdown).
-//
-// Locking: a pane's screen/scrollback and per-client renderer shadow are
-// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
-// session.mu; the registry by Daemon.mu. When more than one is held the order
-// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
-// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
+// Package daemon holds vev's server-side session multiplexer use case.
 package daemon
 
 import (
@@ -195,23 +172,6 @@ func (ac *attachedClient) ackOutputState(state uint64) {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 	ac.output.ack(state)
-}
-
-// takeDeferredPaint reports whether a deferred diff paint is now flushable
-// because acks have caught up, clearing the flag when it is. The caller must
-// then paint outside sendMu (paint re-acquires it).
-func (ac *attachedClient) takeDeferredPaint() (reset bool, ok bool) {
-	ac.sendMu.Lock()
-	defer ac.sendMu.Unlock()
-	return ac.output.takeDeferred()
-}
-
-// clearPaintDeferred drops any pending deferred-paint flag. Used on park so a
-// resumed client does not inherit a stale deferral.
-func (ac *attachedClient) clearPaintDeferred() {
-	ac.sendMu.Lock()
-	ac.output.clearDeferred()
-	ac.sendMu.Unlock()
 }
 
 // send serialises a frame onto the client's transport.
@@ -401,10 +361,27 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	rc := sess.renderCoordinator()
 	if rc == nil {
 		rc = newRenderCoordinator(renderCoordinatorOptions{
-			clock:      d.clock,
-			wake:       func(w renderWake) { d.paint(sess, ac, w.reset) },
-			ackReady:   func() bool { return true },
-			syncActive: func() bool { return false },
+			clock: d.clock,
+			wake: func(w renderWake) {
+				sess.mu.Lock()
+				current := sess.client
+				sess.mu.Unlock()
+				if current != nil {
+					d.paint(sess, current, w.reset)
+				}
+			},
+			ackReady: func() bool {
+				sess.mu.Lock()
+				current := sess.client
+				sess.mu.Unlock()
+				if current == nil {
+					return false
+				}
+				current.sendMu.Lock()
+				ready := !current.output.atCapacity()
+				current.sendMu.Unlock()
+				return ready
+			},
 		})
 		sess.installRenderCoordinator(rc)
 	}
@@ -519,8 +496,8 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		case ports.MsgAck:
 			if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
 				ac.ackOutputState(ack.AckedStateNum)
-				if reset, ok := ac.takeDeferredPaint(); ok {
-					d.invalidateRender(sess, ac, reset, "client.go")
+				if rc := sess.renderCoordinator(); rc != nil {
+					rc.notifyAck()
 				}
 			}
 		case ports.MsgPing:
