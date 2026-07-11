@@ -30,6 +30,78 @@ func signal(ch chan struct{}) {
 	}
 }
 
+// clearNonRenderablePaneDamage is the single transitional S1 owner for VT
+// damage that cannot reach a composition target. S2 replaces this visibility
+// decision with pipeline ownership; do not paint or mutate renderer shadows
+// here.
+func (d *Daemon) clearNonRenderablePaneDamage(sess *session, tb *tab, p *pane) bool {
+	if sess == nil || tb == nil || p == nil {
+		return false
+	}
+
+	// A picker may render an otherwise headless/inactive target tab into its
+	// attached owner's preview. Keep that source damage until the target
+	// coordinator has supplied the preview wake.
+	preview := d.tabIsPickerPreview(tb)
+
+	sess.mu.Lock()
+	active := sess.active >= 0 && sess.active < len(sess.tabs) && sess.tabs[sess.active] == tb
+	attached := sess.client != nil
+	sess.mu.Unlock()
+
+	tb.mu.Lock()
+	renderable := false
+	if tb.floating.pane == p {
+		renderable = active && attached && tb.floating.state == floatingVisible
+	} else if (active && attached) || preview {
+		if placements, ok := solvedPlacementsLocked(tb); ok {
+			for _, placement := range placements {
+				if placement.ID == p.id && !placement.Collapsed && placement.Content.Width > 0 && placement.Content.Height > 0 {
+					renderable = true
+					break
+				}
+			}
+		}
+	}
+	if !renderable {
+		p.mu.Lock()
+		p.screen.ClearDamage()
+		p.mu.Unlock()
+	}
+	tb.mu.Unlock()
+	return renderable
+}
+
+// tabIsPickerPreview reports whether any attached client currently composes
+// tb as a picker preview. It snapshots daemon ownership before taking overlay
+// locks, preserving the Daemon -> session -> tab -> pane lock order.
+func (d *Daemon) tabIsPickerPreview(tb *tab) bool {
+	if d == nil || tb == nil {
+		return false
+	}
+	d.mu.Lock()
+	sessions := make([]*session, 0, len(d.sessions))
+	for _, sess := range d.sessions {
+		sessions = append(sessions, sess)
+	}
+	d.mu.Unlock()
+	for _, sess := range sessions {
+		sess.mu.Lock()
+		ac := sess.client
+		sess.mu.Unlock()
+		if ac == nil || ac.overlays == nil {
+			continue
+		}
+		ac.overlays.pickerMu.Lock()
+		preview := ac.overlays.pickerPreview == tb
+		ac.overlays.pickerMu.Unlock()
+		if preview {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 	defer d.sessWg.Done()
 	if p == nil {
@@ -66,6 +138,7 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 				}
 			}
 			p.mu.Unlock()
+			renderable := d.clearNonRenderablePaneDamage(sess, tb, p)
 			markSnapshotDirty(sess)
 			select {
 			case <-attentionCh:
@@ -84,7 +157,7 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 				}
 				resp = resp[:0]
 			}
-			if rc := sess.renderCoordinator(); rc != nil {
+			if rc := sess.renderCoordinator(); renderable && rc != nil {
 				if wasSyncing != isSyncing {
 					gen := syncGen
 					if isSyncing {

@@ -133,12 +133,9 @@ func TestClearNonRenderablePaneDamage(t *testing.T) {
 				require.NotSame(t, other, tb)
 			}},
 			{name: "collapsed", setup: func(_ *Daemon, _ *session, tb *tab, p *pane) {
-				collapsed := newPane("collapsed", nil, domain.Size{Cols: 80, Rows: 23})
-				tb.panes[collapsed.id] = collapsed
-				tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(p.id), layout.NewLeaf(collapsed.id)}, Expanded: p.id}, Focus: p.id}
-				// Exercise the non-expanded pane rather than the original visible one.
-				p.id = collapsed.id
-				tb.panes[collapsed.id] = p
+				// The expanded leaf is deliberately absent from panes: p is the
+				// inactive stack leaf whose content is not composited.
+				tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf("visible"), layout.NewLeaf(p.id)}, Expanded: "visible"}, Focus: "visible"}
 			}},
 			{name: "hidden floating", setup: func(_ *Daemon, _ *session, tb *tab, p *pane) {
 				tb.floating = floatingSlot{state: floatingHidden, pane: p, generation: 1}
