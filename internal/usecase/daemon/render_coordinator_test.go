@@ -570,6 +570,47 @@ func TestRenderCoordinatorSyncGateFollowsDynamicRenderability(t *testing.T) {
 	})
 }
 
+func TestRenderCoordinatorSyncGateRetriesWhenBatchPublishesDuringPredicate(t *testing.T) {
+	h := newCoordinatorHarness(t)
+	first, second := &pane{}, &pane{}
+	gateEvaluated := make(chan struct{})
+	releaseGate := make(chan struct{})
+	var hookOnce sync.Once
+	h.rc.opts.afterSyncGateEvaluated = func() {
+		hookOnce.Do(func() {
+			close(gateEvaluated)
+			<-releaseGate
+		})
+	}
+	h.rc.noteSyncBeginWithRenderability(first, 1, func() bool { return false })
+	h.rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "test"})
+
+	fireDone := make(chan struct{})
+	go func() {
+		h.rc.fireCurrent(false)
+		close(fireDone)
+	}()
+	<-gateEvaluated
+	// This publication is deliberately between an open predicate result and
+	// pending consumption. A stale gate result must be rejected and retried.
+	h.rc.noteSyncBeginWithRenderability(second, 2, func() bool { return true })
+	close(releaseGate)
+	for range 4096 {
+		select {
+		case <-fireDone:
+			goto fired
+		default:
+			runtime.Gosched()
+		}
+	}
+	t.Fatal("fire did not finish after retrying the registry snapshot")
+
+fired:
+	requireNoWake(t, h.wakes)
+	h.rc.noteSyncEnd(second, 2)
+	require.Equal(t, renderWake{urgent: true, coalesced: 1}, awaitWake(t, h.wakes))
+}
+
 func TestRenderCoordinatorSynchronizedOutput(t *testing.T) {
 	t.Run("completion flushes pending state in one wake", func(t *testing.T) {
 		h := newCoordinatorHarness(t)
