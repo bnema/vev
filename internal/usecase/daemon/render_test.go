@@ -110,6 +110,76 @@ func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
 
+func TestClearNonRenderablePaneDamage(t *testing.T) {
+	newFixture := func(t *testing.T) (*Daemon, *session, *tab, *pane, chan ports.Frame) {
+		t.Helper()
+		p, release := newBlockingPTY(t)
+		t.Cleanup(release)
+		d, sess, _, sends := newManualSessionWithPTYs(t, p)
+		tb := sess.tabs[0]
+		return d, sess, tb, tb.focusedPane(), sends
+	}
+
+	t.Run("clears headless, inactive, collapsed, and hidden panes without output", func(t *testing.T) {
+		for _, tt := range []struct {
+			name  string
+			setup func(*Daemon, *session, *tab, *pane)
+		}{
+			{name: "headless", setup: func(_ *Daemon, sess *session, _ *tab, _ *pane) { sess.client = nil }},
+			{name: "inactive tab", setup: func(_ *Daemon, sess *session, tb *tab, _ *pane) {
+				other := newTab(nil, domain.Size{Cols: 80, Rows: 23})
+				sess.tabs = append([]*tab{other}, sess.tabs...)
+				sess.active = 0
+				require.NotSame(t, other, tb)
+			}},
+			{name: "collapsed", setup: func(_ *Daemon, _ *session, tb *tab, p *pane) {
+				collapsed := newPane("collapsed", nil, domain.Size{Cols: 80, Rows: 23})
+				tb.panes[collapsed.id] = collapsed
+				tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(p.id), layout.NewLeaf(collapsed.id)}, Expanded: p.id}, Focus: p.id}
+				// Exercise the non-expanded pane rather than the original visible one.
+				p.id = collapsed.id
+				tb.panes[collapsed.id] = p
+			}},
+			{name: "hidden floating", setup: func(_ *Daemon, _ *session, tb *tab, p *pane) {
+				tb.floating = floatingSlot{state: floatingHidden, pane: p, generation: 1}
+				delete(tb.panes, p.id)
+			}},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				d, sess, tb, p, sends := newFixture(t)
+				tt.setup(d, sess, tb, p)
+				p.screen.Write([]byte("damage"))
+				d.clearNonRenderablePaneDamage(sess, tb, p)
+				require.Empty(t, p.screen.Damage())
+				select {
+				case frame := <-sends:
+					t.Fatalf("non-renderable output must not compose or send: %#v", frame)
+				default:
+				}
+			})
+		}
+	})
+
+	t.Run("retains active and picker-preview pane damage", func(t *testing.T) {
+		d, sess, tb, p, _ := newFixture(t)
+		p.screen.Write([]byte("active"))
+		d.clearNonRenderablePaneDamage(sess, tb, p)
+		require.NotEmpty(t, p.screen.Damage(), "active pane damage belongs to coordinator composition")
+		p.screen.ClearDamage()
+
+		sess.client = nil
+		viewer := &attachedClient{}
+		viewer.initOverlays()
+		viewer.overlays.pickerMu.Lock()
+		viewer.overlays.pickerPreview = tb
+		viewer.overlays.pickerMu.Unlock()
+		d.sessions["viewer"] = &session{id: "viewer", client: viewer}
+		p.screen.Write([]byte("preview"))
+		d.clearNonRenderablePaneDamage(sess, tb, p)
+		require.NotEmpty(t, p.screen.Damage(), "picker preview damage must remain for coordinator composition")
+	})
+}
+
 func TestPTYWriteErrorIsLogged(t *testing.T) {
 	var logs bytes.Buffer
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(&logs, nil)))
