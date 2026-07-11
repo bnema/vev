@@ -416,6 +416,70 @@ func TestRenderCoordinatorPreviewSubscription(t *testing.T) {
 
 // --- lifecycle and stale callbacks -----------------------------------------------
 
+func TestRenderCoordinatorPreviewWakesDoNotWaitForTargetAck(t *testing.T) {
+	cases := []struct {
+		name   string
+		attach bool
+	}{
+		{name: "attached cross-session target blocked on ack", attach: true},
+		{name: "headless cross-session target blocked on ack"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			h.ackReady.Store(false)
+			if tc.attach {
+				h.rc.attach(&attachedClient{})
+			}
+			viewer := &attachedClient{}
+			h.rc.subscribePreviewFor(viewer, func(w renderWake) { h.previews <- w })
+
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "target output"})
+			timers := h.armedTimers(t)
+			require.Len(t, timers, 1)
+			timers[0].ch <- time.Time{}
+
+			require.Equal(t, renderWake{coalesced: 1}, awaitWake(t, h.previews),
+				"the viewer preview must receive target output without target ACK capacity")
+			requireNoWake(t, h.wakes)
+			requireNoWake(t, h.previews)
+
+			h.ackReady.Store(true)
+			h.rc.notifyAck()
+			require.Equal(t, renderWake{coalesced: 1}, awaitWake(t, h.wakes),
+				"the target primary frame remains pending for its own ACK")
+			requireNoWake(t, h.previews)
+		})
+	}
+}
+
+func TestRenderCoordinatorPreviewLifecycleDropsStaleTargetWakes(t *testing.T) {
+	cases := []struct {
+		name       string
+		transition func(*renderCoordinator, *attachedClient, *attachedClient)
+	}{
+		{"target detach", func(rc *renderCoordinator, target, _ *attachedClient) { rc.noteDetach(target) }},
+		{"target replacement", func(rc *renderCoordinator, target, replacement *attachedClient) { rc.noteReplace(target, replacement) }},
+		{"target teardown", func(rc *renderCoordinator, _ *attachedClient, _ *attachedClient) { rc.noteSessionTeardown() }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			target, replacement, viewer := &attachedClient{}, &attachedClient{}, &attachedClient{}
+			h.rc.attach(target)
+			h.rc.subscribePreviewFor(viewer, func(w renderWake) { h.previews <- w })
+			h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "target output"})
+			stale := h.armedTimers(t)
+			require.Len(t, stale, 1)
+
+			tc.transition(h.rc, target, replacement)
+			stale[0].ch <- time.Time{}
+			requireNoWake(t, h.wakes)
+			requireNoWake(t, h.previews)
+		})
+	}
+}
+
 func TestRenderCoordinatorPreviewSubscriptionsAreIndependent(t *testing.T) {
 	h := newCoordinatorHarness(t)
 	one, two := &attachedClient{}, &attachedClient{}
