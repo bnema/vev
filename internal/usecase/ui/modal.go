@@ -5,47 +5,21 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-// Anchor describes where a modal is positioned within its base rectangle.
-type Anchor int
-
-const (
-	// AnchorCenter centers the modal within the base rectangle.
-	AnchorCenter Anchor = iota
-	// AnchorBottom positions the modal at the bottom above BottomMargin rows.
-	AnchorBottom
-)
-
-// HorizontalAnchor describes a modal's horizontal position within its base rectangle.
-type HorizontalAnchor int
-
-const (
-	// HorizontalAnchorCenter centers the modal within the base rectangle.
-	HorizontalAnchorCenter HorizontalAnchor = iota
-	// HorizontalAnchorRight positions the modal left of RightMargin columns.
-	HorizontalAnchorRight
-)
-
 // Modal describes a rectangular overlay.
 type Modal struct {
-	WidthPct         int
-	HeightPct        int
-	MinWidth         int
-	MinHeight        int
-	Title            string
-	Anchor           Anchor
-	HorizontalAnchor HorizontalAnchor
-	FixedWidth       int
-	FixedHeight      int
-	BottomMargin     int
-	RightMargin      int
+	WidthPct    int
+	HeightPct   int
+	MinWidth    int
+	MinHeight   int
+	Title       string
+	Anchor      domain.Anchor
+	Margins     Margins
+	FixedWidth  int
+	FixedHeight int
 }
 
 // Bounds returns the modal rectangle positioned within base and clamped to base.
 func (m Modal) Bounds(base domain.Size) domain.Rect {
-	if base.Cols <= 0 || base.Rows <= 0 {
-		return domain.Rect{}
-	}
-
 	width := percentOf(base.Cols, m.WidthPct)
 	height := percentOf(base.Rows, m.HeightPct)
 	if m.FixedWidth > 0 {
@@ -60,24 +34,7 @@ func (m Modal) Bounds(base domain.Size) domain.Rect {
 	if height < m.MinHeight {
 		height = m.MinHeight
 	}
-	width = clamp(width, 0, base.Cols)
-	height = clamp(height, 0, base.Rows)
-
-	x := (base.Cols - width) / 2
-	if m.HorizontalAnchor == HorizontalAnchorRight {
-		x = clamp(base.Cols-m.RightMargin-width, 0, base.Cols-width)
-	}
-	y := (base.Rows - height) / 2
-	if m.Anchor == AnchorBottom {
-		y = clamp(base.Rows-m.BottomMargin-height, 0, base.Rows-height)
-	}
-
-	return domain.Rect{
-		X:      x,
-		Y:      y,
-		Width:  width,
-		Height: height,
-	}
+	return Place(base, domain.Size{Cols: width, Rows: height}, m.Anchor, m.Margins)
 }
 
 // Inner returns the modal content rectangle after removing a one-cell border.
@@ -191,16 +148,6 @@ func percentOf(n, pct int) int {
 		return n
 	}
 	return n * pct / 100
-}
-
-func clamp(n, low, high int) int {
-	if n < low {
-		return low
-	}
-	if n > high {
-		return high
-	}
-	return n
 }
 
 func textWidth(text string) int {

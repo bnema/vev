@@ -14,14 +14,14 @@ const (
 	paletteRailWidth      = 64
 )
 
-var paletteModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Commands ", Anchor: ui.AnchorBottom, BottomMargin: 1}
+var paletteModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Commands ", Anchor: domain.AnchorBottom, Margins: ui.Margins{Bottom: 1}}
 
 func paletteModalFor(size domain.Size) ui.Modal {
 	modal := paletteModal
 	if size.Cols >= paletteRailBreakpoint {
 		modal.FixedWidth = paletteRailWidth
-		modal.HorizontalAnchor = ui.HorizontalAnchorRight
-		modal.RightMargin = 1
+		modal.Anchor = domain.AnchorBottomRight
+		modal.Margins.Right = 1
 	}
 	return modal
 }
