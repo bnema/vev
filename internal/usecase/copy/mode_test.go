@@ -225,8 +225,7 @@ func TestScrollbackModeStatusDistinguishesPassiveAndVisual(t *testing.T) {
 }
 
 func TestCopyModeSelectionPayloadAndInverse(t *testing.T) {
-	s := snapshot([]string{"alpha   ", "beta    ", "gamma   "}, 2)
-	s = NewSnapshotFromRows([][]renderer.Cell{row("alpha   "), inverseRow("beta    "), row("gamma   ")}, 16, 2)
+	s := NewSnapshotFromRows([][]renderer.Cell{row("alpha   "), inverseRow("beta    "), row("gamma   ")}, 16, 2)
 	m := &Mode{ViewportTop: 0, Cursor: 0, Anchor: 0, Selecting: true}
 	m.Move(s, 1)
 
