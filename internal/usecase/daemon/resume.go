@@ -96,6 +96,7 @@ func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 // has verified d.parked[token] still points at parked when that matters.
 func (d *Daemon) removeParkedLocked(token uint64, parked *parkedAttachment) {
 	delete(d.parked, token)
+	parked.ac.clearPreviousSession()
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
 	if parked.timer != nil {
