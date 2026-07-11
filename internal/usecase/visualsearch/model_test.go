@@ -45,18 +45,36 @@ func TestVisualSearchModelFiltersAndSelectsLineMatches(t *testing.T) {
 	require.Equal(t, matches[1], selected)
 }
 
-func TestVisualSearchCloneDoesNotAliasInput(t *testing.T) {
+func TestVisualSearchNewSnapshotOwnsSourceRows(t *testing.T) {
+	rows := [][]renderer.Cell{{{Rune: 'a'}, {Rune: 'l'}, {Rune: 'p'}, {Rune: 'h'}, {Rune: 'a'}}}
+	m := New(scopy.NewSnapshotFromRows(rows, 40, 1))
+
+	rows[0][0].Rune = 'z'
+	for _, r := range "alpha" {
+		m.Insert(r)
+	}
+
+	matches := m.Matches()
+	require.Len(t, matches, 1)
+	require.Equal(t, "alpha", matches[0].Text)
+}
+
+func TestVisualSearchCloneSharesDocumentAndKeepsUIStateIndependent(t *testing.T) {
 	m := New(testSnapshot("alpha", "beta alpha"))
 	for _, r := range "alpha" {
 		m.Insert(r)
 	}
 	clone := m.Clone()
 
+	require.Same(t, &m.snapshot.Row(0)[0], &clone.snapshot.Row(0)[0])
+	clone.Down()
 	clone.Insert('z')
 
 	require.Equal(t, "alpha", m.Query())
-	require.Equal(t, "alphaz", clone.Query())
+	require.Equal(t, 0, m.SelectedIndex())
 	require.Len(t, m.Matches(), 2)
+	require.Equal(t, "alphaz", clone.Query())
+	require.Equal(t, -1, clone.SelectedIndex())
 	require.Len(t, clone.Matches(), 0)
 }
 
