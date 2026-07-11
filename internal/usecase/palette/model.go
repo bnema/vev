@@ -88,7 +88,24 @@ func (m *Model) Matches() []Match {
 	return out
 }
 
-func (m *Model) refresh() { m.matches = Fuzzy(m.commands, m.input.Value()); m.clamp() }
+func (m *Model) refresh() {
+	m.matches = Fuzzy(m.commands, m.input.Value())
+	// Once an argument-taking token is exact, retain its row while its
+	// arguments make ordinary fuzzy matching inapplicable.
+	if cmd, ok := ArgumentCommand(m.commands, m.input.Value()); ok {
+		found := false
+		for _, match := range m.matches {
+			if match.Command.Code == cmd.Code {
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.matches = append([]Match{{Command: cmd}}, m.matches...)
+		}
+	}
+	m.clamp()
+}
 func (m *Model) clamp() {
 	if len(m.matches) == 0 {
 		m.selected = -1

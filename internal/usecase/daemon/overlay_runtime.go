@@ -21,6 +21,7 @@ type overlayRuntime struct {
 
 	paletteMu      sync.Mutex
 	palette        *palette.Model
+	paletteRecent  []recentSession
 	palettePending []byte
 
 	promptMu      sync.Mutex

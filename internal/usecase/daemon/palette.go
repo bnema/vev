@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"strconv"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
+	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -33,6 +36,7 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	d.closePalette(ac)
 	ac.overlays.paletteMu.Lock()
 	ac.overlays.palette = palette.New(d.paletteCommands())
+	ac.overlays.paletteRecent = d.recentSessions(sess)
 	ac.overlays.palettePending = nil
 	ac.overlays.paletteMu.Unlock()
 	d.paint(sess, ac, true)
@@ -41,6 +45,7 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 func (d *Daemon) closePalette(ac *attachedClient) {
 	ac.overlays.paletteMu.Lock()
 	ac.overlays.palette = nil
+	ac.overlays.paletteRecent = nil
 	ac.overlays.palettePending = nil
 	ac.overlays.paletteMu.Unlock()
 }
@@ -106,6 +111,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	exit := false
 	run := false
 	var cmd command.Command
+	var recent []recentSession
 	var ok bool
 
 	routeOverlayBytes(data, &ac.overlays.palettePending, overlayEvents{
@@ -119,7 +125,15 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		},
 		enter: func() {
 			cmd, ok = ac.overlays.palette.Selected()
+			recent = append([]recentSession(nil), ac.overlays.paletteRecent...)
 			if ok {
+				if cmd.Arguments == command.ArgumentsRequired {
+					action, valid := palette.ParseAction([]command.Command{cmd}, ac.overlays.palette.Query())
+					if !valid || (cmd.Code == "JRS" && !d.validRecentSessionAction(recent, action.Args)) {
+						ok = false
+						return
+					}
+				}
 				run = true
 				exit = true
 			}
@@ -141,7 +155,11 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	ac.overlays.paletteMu.Unlock()
 
 	if run && ok {
-		if err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac}); err != nil {
+		action := palette.Action{Command: cmd}
+		if parsed, valid := palette.ParseAction([]command.Command{cmd}, ac.overlays.palette.Query()); valid {
+			action = parsed
+		}
+		if err := action.Command.Run(paletteExec{d: d, sess: sess, ac: ac, recent: recent}, action.Args); err != nil {
 			sess.mu.Lock()
 			name := sess.name
 			sess.mu.Unlock()
@@ -156,10 +174,22 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	}
 }
 
+func (d *Daemon) validRecentSessionAction(recent []recentSession, args []string) bool {
+	if len(args) != 1 {
+		return false
+	}
+	rank, err := strconv.Atoi(args[0])
+	if err != nil || rank < 1 || rank > len(recent) {
+		return false
+	}
+	return d.sessionByID(recent[rank-1].id) != nil
+}
+
 type paletteExec struct {
-	d    *Daemon
-	sess *session
-	ac   *attachedClient
+	d      *Daemon
+	sess   *session
+	ac     *attachedClient
+	recent []recentSession
 }
 
 func (e paletteExec) CreateTab() error {
@@ -286,6 +316,24 @@ func (e paletteExec) RenameTab() error {
 
 func (e paletteExec) OpenSessionPicker() error {
 	e.d.enterPicker(e.sess, e.ac)
+	return nil
+}
+
+func (e paletteExec) JumpRecentSession(args []string) error {
+	if len(args) != 1 {
+		return nil
+	}
+	rank, err := strconv.Atoi(args[0])
+	if err != nil || rank < 1 || rank > len(e.recent) {
+		return nil
+	}
+	// The snapshot is value-only; resolve the ID at execution so a removed
+	// target is never resurrected through a retained session pointer.
+	target := e.recent[rank-1]
+	if e.d.sessionByID(target.id) == nil {
+		return nil
+	}
+	e.d.switchToTarget(e.sess, e.ac, picker.Target{Session: target.id, TabIndex: -1})
 	return nil
 }
 

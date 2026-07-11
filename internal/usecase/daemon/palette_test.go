@@ -11,6 +11,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
@@ -138,7 +139,7 @@ func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
 	for i, cmd := range commands {
 		codes[i] = cmd.Code
 	}
-	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "PVT", "BSK", "VIS", "RNS", "RNT", "DET"}, codes)
+	require.Equal(t, []string{"SSP", "NXT", "CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "PVT", "BSK", "JRS", "VIS", "RNS", "RNT", "DET"}, codes)
 }
 
 func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
@@ -159,7 +160,7 @@ func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
 	wg.Wait()
 
 	commands := d.paletteCommands()
-	require.Len(t, commands, len(codes))
+	require.Len(t, commands, len(command.Registry()))
 	seen := map[string]bool{}
 	for _, cmd := range commands {
 		require.False(t, seen[cmd.Code], "duplicate command %s", cmd.Code)

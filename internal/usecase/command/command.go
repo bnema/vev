@@ -25,10 +25,29 @@ type Context interface {
 	RenameSession() error
 	RenameTab() error
 	OpenSessionPicker() error
+	JumpRecentSession(args []string) error
 }
+
+// Arguments declares whether a command accepts palette arguments.
+type Arguments uint8
+
+const (
+	ArgumentsNone Arguments = iota
+	ArgumentsRequired
+)
+
+// ContextHint describes optional contextual data needed to execute a command.
+type ContextHint uint8
+
+const (
+	ContextHintNone ContextHint = iota
+	ContextHintRecentSessions
+)
 
 // Command describes an executable command.
 type Command struct {
 	Slug, Code, Name, Desc string
-	Run                    func(Context) error
+	Arguments              Arguments
+	ContextHint            ContextHint
+	Run                    func(Context, []string) error
 }

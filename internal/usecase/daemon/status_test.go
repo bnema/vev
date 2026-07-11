@@ -828,7 +828,7 @@ func TestStatusBarRendersMRUNamesEphemeralAndInlineBell(t *testing.T) {
 	state := barState{
 		status:         statusSnapshot{session: "cur"},
 		attentionFrame: 1,
-		mru: []mruSession{
+		mru: []recentSession{
 			{name: "fresh"},
 			{name: "tmp", ephemeral: true, attention: true},
 		},
@@ -863,7 +863,7 @@ func TestStatusBarCurrentSessionUsesAccentStyle(t *testing.T) {
 func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
 	theme := themeui.Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 20, G: 20, B: 20}, HasFG: true, HasBG: true, TrueColor: true, Known: true}
 	styles := newThemeStyles(theme)
-	state := barState{status: statusSnapshot{session: "c"}, theme: theme, mru: []mruSession{{name: "a"}, {name: "b"}, {name: "c"}}}
+	state := barState{status: statusSnapshot{session: "c"}, theme: theme, mru: []recentSession{{name: "a"}, {name: "b"}, {name: "c"}}}
 	row := make([]renderer.Cell, 16)
 
 	drawStatusBarState(row, state, styles)
@@ -888,7 +888,7 @@ func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
 }
 
 func TestStatusBarNarrowRowsDropWholeOldestMRUEntries(t *testing.T) {
-	state := barState{status: statusSnapshot{session: "cur"}, mru: []mruSession{{name: "fresh"}, {name: "middle"}, {name: "old"}}}
+	state := barState{status: statusSnapshot{session: "cur"}, mru: []recentSession{{name: "fresh"}, {name: "middle"}, {name: "old"}}}
 	row := make([]renderer.Cell, 21)
 
 	drawStatusBarState(row, state, resolveThemeStyles(nil))
@@ -900,9 +900,9 @@ func TestStatusBarNarrowRowsDropWholeOldestMRUEntries(t *testing.T) {
 }
 
 func TestStatusBarMRUWidthAwareBudget(t *testing.T) {
-	mru := make([]mruSession, 0, maxMRUSessions)
+	mru := make([]recentSession, 0, maxMRUSessions)
 	for i := 1; i <= maxMRUSessions; i++ {
-		mru = append(mru, mruSession{name: "recent" + strconv.Itoa(i)})
+		mru = append(mru, recentSession{name: "recent" + strconv.Itoa(i)})
 	}
 	state := barState{status: statusSnapshot{session: "cur"}, mru: mru}
 
@@ -962,27 +962,27 @@ func TestStatusBarBottomRightAndMRUFitting(t *testing.T) {
 		{
 			name:         "script text and copy feedback",
 			width:        32,
-			state:        barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", copyFeedback: "copied", mru: []mruSession{{name: "a"}}},
+			state:        barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", copyFeedback: "copied", mru: []recentSession{{name: "a"}}},
 			wantContains: []string{" a"},
 			wantSuffix:   " main ↑3 * copied",
 		},
 		{
 			name:            "hide on overlap",
 			width:           16,
-			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", copyFeedback: "copied", mru: []mruSession{{name: "fresh"}}},
+			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", copyFeedback: "copied", mru: []recentSession{{name: "fresh"}}},
 			want:            " cur            ",
 			wantNotContains: []string{"main", "copied"},
 		},
 		{
 			name:  "empty script keeps copy feedback behavior",
 			width: 12,
-			state: barState{status: statusSnapshot{session: "cur"}, bottomRight: "", copyFeedback: "copied", mru: []mruSession{{name: "fresh"}}},
+			state: barState{status: statusSnapshot{session: "cur"}, bottomRight: "", copyFeedback: "copied", mru: []recentSession{{name: "fresh"}}},
 			want:  " cur  copied",
 		},
 		{
 			name:            "mru whole entry fitting with script text",
 			width:           24,
-			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "git", mru: []mruSession{{name: "fresh"}, {name: "middle"}, {name: "old"}}},
+			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "git", mru: []recentSession{{name: "fresh"}, {name: "middle"}, {name: "old"}}},
 			wantContains:    []string{" fresh"},
 			wantNotContains: []string{"middle"},
 			wantSuffix:      " git",
@@ -990,7 +990,7 @@ func TestStatusBarBottomRightAndMRUFitting(t *testing.T) {
 		{
 			name:              "mru fitting reserves wide right anchor width",
 			width:             12,
-			state:             barState{status: statusSnapshot{session: "cur"}, bottomRight: "界界", mru: []mruSession{{name: "a"}}},
+			state:             barState{status: statusSnapshot{session: "cur"}, bottomRight: "界界", mru: []recentSession{{name: "a"}}},
 			wantNotContains:   []string{" a "},
 			wantSuffix:        " 界 界 ",
 			continuationCells: []int{9, 11},
@@ -998,7 +998,7 @@ func TestStatusBarBottomRightAndMRUFitting(t *testing.T) {
 		{
 			name:            "mru fitting counts wide session names",
 			width:           20,
-			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "git", mru: []mruSession{{name: "界"}, {name: "界"}, {name: "b"}}},
+			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "git", mru: []recentSession{{name: "界"}, {name: "界"}, {name: "b"}}},
 			wantContains:    []string{" 界 "},
 			wantNotContains: []string{" b "},
 			wantSuffix:      " git",
@@ -1031,7 +1031,7 @@ func TestStatusBarBottomRightAndMRUFitting(t *testing.T) {
 }
 
 func TestStatusBarCopyFeedbackFullyRenderedAlongsideMRU(t *testing.T) {
-	state := barState{status: statusSnapshot{session: "cur"}, copyFeedback: "copied", mru: []mruSession{{name: "a"}, {name: "b"}, {name: "c"}}}
+	state := barState{status: statusSnapshot{session: "cur"}, copyFeedback: "copied", mru: []recentSession{{name: "a"}, {name: "b"}, {name: "c"}}}
 	row := make([]renderer.Cell, 20)
 
 	drawStatusBarState(row, state, resolveThemeStyles(nil))
@@ -1044,7 +1044,7 @@ func TestStatusBarCopyFeedbackFullyRenderedAlongsideMRU(t *testing.T) {
 }
 
 func TestStatusBarCopyFeedbackBoundaryWidths(t *testing.T) {
-	state := barState{status: statusSnapshot{session: "cur"}, copyFeedback: "copied", mru: []mruSession{{name: "fresh"}}}
+	state := barState{status: statusSnapshot{session: "cur"}, copyFeedback: "copied", mru: []recentSession{{name: "fresh"}}}
 	tests := []struct {
 		name string
 		cols int

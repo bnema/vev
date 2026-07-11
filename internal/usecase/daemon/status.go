@@ -29,7 +29,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
@@ -141,21 +140,12 @@ type barState struct {
 	topRight       string
 	bottomRight    string
 	copyFeedback   string
-	mru            []mruSession
+	mru            []recentSession
 	attentionFrame int
 	// theme is the client's terminal theme, if reported. Its zero value
 	// (Theme{}, Known: false) is a valid "no theme" default that resolves to
 	// the pre-theme fallback styles (see newThemeStyles / theme.usable).
 	theme themeui.Theme
-}
-
-type mruSession struct {
-	id        domain.SessionID
-	name      string
-	ephemeral bool
-	attention bool
-	// mruAt orders entries in barStateFor (freshest first); drawing ignores it.
-	mruAt uint64
 }
 
 type statusSnapshot struct {
@@ -216,35 +206,7 @@ func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 	if d == nil {
 		return state
 	}
-	d.mu.Lock()
-	mru := make([]mruSession, 0, len(d.sessions))
-	for _, sess := range d.sessions {
-		if sess == cur {
-			continue
-		}
-		at := sess.mruAt.Load()
-		sess.mu.Lock()
-		entry := mruSession{id: sess.id, name: sess.name, ephemeral: sess.ephemeral, mruAt: at}
-		for _, tb := range sess.tabs {
-			if tb.attention {
-				entry.attention = true
-				break
-			}
-		}
-		sess.mu.Unlock()
-		mru = append(mru, entry)
-	}
-	d.mu.Unlock()
-	sort.SliceStable(mru, func(i, j int) bool {
-		if mru[i].mruAt == mru[j].mruAt {
-			return mru[i].name < mru[j].name
-		}
-		return mru[i].mruAt > mru[j].mruAt
-	})
-	if len(mru) > maxMRUSessions {
-		mru = mru[:maxMRUSessions]
-	}
-	state.mru = mru
+	state.mru = d.recentSessions(cur)
 	return state
 }
 
@@ -310,7 +272,7 @@ func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []string {
 	return labels
 }
 
-func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSession {
+func fitMRU(entries []recentSession, rowLen, leftUsed int, feedback string) []recentSession {
 	// With no feedback, keep one blank trailing cell; with feedback, reserve
 	// its " text" width plus a one-cell gap so drawRightPlainText always fits.
 	copyReserve := 1
@@ -321,7 +283,7 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 	if physicalBudget <= 0 || len(entries) == 0 {
 		return nil
 	}
-	cost := func(e mruSession) int {
+	cost := func(e recentSession) int {
 		name := e.name
 		if e.ephemeral {
 			name += "*"
