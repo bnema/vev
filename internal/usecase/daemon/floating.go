@@ -162,9 +162,10 @@ func (d *Daemon) activateTab(sess *session, tb *tab) {
 	// until firstPaint keeps restored tabs cold and avoids launching children
 	// merely because a tab was manipulated during teardown.
 	sess.mu.Lock()
-	attached := sess.client != nil
+	ac := sess.client
 	sess.mu.Unlock()
-	if !attached {
+	d.exitCopyMode(ac)
+	if ac == nil {
 		return
 	}
 	d.ensureFloatingWarm(sess, tb)

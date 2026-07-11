@@ -73,14 +73,12 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 }
 
 func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
-	rt := ac.overlays
 	tb := sess.activeTab()
 	if tb == nil {
 		return
 	}
 	tb.mu.Lock()
 	p := tb.terminalTargetLocked()
-	floatingSource := tb.floating.state == floatingVisible && tb.floating.pane == p
 	tb.mu.Unlock()
 	if p == nil {
 		return
@@ -90,8 +88,27 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	p.mu.Lock()
 	document := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
 	p.mu.Unlock()
+	if !d.publishCopyMode(sess, ac, tb, p, document, nil) {
+		return
+	}
+	d.paint(sess, ac, true)
+}
+
+// publishCopyMode publishes an immutable copy document, then validates the
+// captured target without overlapping copyMu with session or tab locks. A tab
+// transition or pane close may race capture; retaining copy state in either
+// case would let an old document render or be yanked.
+func (d *Daemon) publishCopyMode(sess *session, ac *attachedClient, tb *tab, p *pane, document scopy.Snapshot, prepare func(*scopy.Mode)) bool {
+	if sess == nil || ac == nil || tb == nil || p == nil {
+		return false
+	}
+	mode := scopy.NewMode(document)
+	if prepare != nil {
+		prepare(mode)
+	}
+	rt := ac.overlays
 	rt.copyMu.Lock()
-	rt.copyMode = scopy.NewMode(document)
+	rt.copyMode = mode
 	rt.copySnapshot = &document
 	rt.copyPane = p
 	rt.copySearch = nil
@@ -100,15 +117,23 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	rt.copyDragging = false
 	rt.normalMousePressValid = false
 	rt.copyMu.Unlock()
-	if floatingSource {
+
+	active := sess.activeTab()
+	valid := active == tb
+	if valid {
 		tb.mu.Lock()
-		stillVisible := tb.floating.state == floatingVisible && tb.floating.pane == p
+		valid = tb.panes[p.id] == p || (tb.floating.state == floatingVisible && tb.floating.pane == p)
 		tb.mu.Unlock()
-		if !stillVisible {
-			rt.clearCopyModeForPane(p)
-		}
 	}
-	d.paint(sess, ac, true)
+	if valid {
+		return true
+	}
+	rt.copyMu.Lock()
+	if rt.copyMode == mode && rt.copyPane == p {
+		rt.clearCopyModeLocked()
+	}
+	rt.copyMu.Unlock()
+	return false
 }
 
 func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {

@@ -578,6 +578,7 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	if !sz.Valid() {
 		return
 	}
+	d.exitCopyMode(ac)
 	tbSize := tabSize(sz)
 	if ac != nil {
 		ac.size = sz

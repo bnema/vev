@@ -274,17 +274,21 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 			p.mu.Lock()
 			document := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
 			p.mu.Unlock()
+			tb := sess.activeTab()
+			if !d.publishCopyMode(sess, ac, tb, p, document, func(mode *scopy.Mode) {
+				mode.StartSelectionAt(document, pressTop+pressRow)
+				mode.ExtendTo(document, document.Len()-document.Height+ev.Row)
+			}) {
+				return
+			}
 			rt.copyMu.Lock()
-			mode := scopy.NewMode(document)
-			mode.StartSelectionAt(document, pressTop+pressRow)
-			mode.ExtendTo(document, document.Len()-document.Height+ev.Row)
-			rt.copyMode = mode
-			rt.copySnapshot = &document
-			rt.copyPane = p
-			rt.copyPressRow = pressTop + pressRow
-			rt.copyPressRowValid = true
-			rt.copyDragging = true
-			rt.normalMousePressValid = false
+			// Publication is revalidated before this state is installed, and no
+			// lifecycle lock is held while copyMu is taken.
+			if rt.copyPane == p && rt.copySnapshot != nil && rt.copyMode != nil {
+				rt.copyPressRow = pressTop + pressRow
+				rt.copyPressRowValid = true
+				rt.copyDragging = true
+			}
 			rt.copyMu.Unlock()
 			d.paint(sess, ac, true)
 		case mouse.Release:

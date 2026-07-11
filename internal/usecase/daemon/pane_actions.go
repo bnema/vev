@@ -234,6 +234,14 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	}
 	if len(layout.LeafIDs(tb.tree.Root)) <= 1 {
 		tb.mu.Unlock()
+		if ac == nil {
+			sess.mu.Lock()
+			ac = sess.client
+			sess.mu.Unlock()
+		}
+		if ac != nil {
+			ac.overlays.clearCopyModeForPane(p)
+		}
 		d.closeTab(sess, tb, repaint)
 		return nil
 	}
@@ -245,6 +253,17 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	d.applyLayoutLocked(tb)
 	tb.mu.Unlock()
 
+	// A reap/normal close can be called without the client argument. Recover
+	// the attached client after releasing tab.mu so copyMu never overlaps it.
+	if ac == nil {
+		sess.mu.Lock()
+		ac = sess.client
+		sess.mu.Unlock()
+	}
+	if ac != nil {
+		ac.overlays.clearCopyModeForPane(p)
+	}
+
 	if p.cancel != nil {
 		p.cancel()
 	}
@@ -254,11 +273,6 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	d.log.Info("pane closed", "session", sess.name, "pane", id)
 	markSnapshotDirty(sess)
 	if repaint {
-		if ac == nil {
-			sess.mu.Lock()
-			ac = sess.client
-			sess.mu.Unlock()
-		}
 		if ac != nil {
 			d.paint(sess, ac, true)
 		}
