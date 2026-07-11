@@ -123,12 +123,10 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 			}
 			b.ReportAllocs()
 			fixture.resetMetrics()
-			b.ResetTimer()
 			for b.Loop() {
 				run(fixture)
 				fixture.ac.ackOutputState(fixture.ac.output.next)
 			}
-			b.StopTimer()
 			metrics := fixture.metrics()
 			if payload := fixture.output.lastPayload(); payload != nil {
 				if _, err := ports.UnmarshalOutput(payload); err != nil {

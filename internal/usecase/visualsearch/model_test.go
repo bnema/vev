@@ -108,6 +108,9 @@ func TestVisualSearchRenderShowsInputAndLineResults(t *testing.T) {
 }
 
 func TestVisualSearchCloneAllocationIsWidthIndependent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping benchmark-driven allocation gate in short mode")
+	}
 	narrow := benchmarkVisualSearchCloneBytes(16)
 	wide := benchmarkVisualSearchCloneBytes(512)
 	assertWidthIndependentCloneAllocations(t, narrow, wide)

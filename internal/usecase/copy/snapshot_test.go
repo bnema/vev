@@ -47,6 +47,9 @@ func TestNewSnapshotFromRowsOwnsCallerRows(t *testing.T) {
 // absolute budget, which varies between Go releases. A full history-row clone
 // grows with row width; the immutable HistoryView allocation does not.
 func TestNewSnapshotAllocationIsWidthIndependent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping benchmark-driven allocation gate in short mode")
+	}
 	narrow := benchmarkNewSnapshotBytes(16)
 	wide := benchmarkNewSnapshotBytes(512)
 	assertWidthIndependentAllocations(t, "NewSnapshot", narrow, wide)
