@@ -59,12 +59,9 @@ type attachedClient struct {
 	theme                 themeui.Theme
 	clientTheme           themeui.Theme
 	lastCursor            cursorOut
-	recentNav             recentSessionNavigator
-	// historyNavMu protects historyNav and historyNavTimer. When paint needs
-	// several locks, take sendMu before historyNavMu, then Daemon.mu/session.mu.
-	historyNavMu    sync.Mutex
-	historyNav      historyNavDisplay
-	historyNavTimer pendingByteTimer
+	// previousSession is guarded independently. It is retained through temporary
+	// setSession(nil) hand-offs and cleared only on terminal teardown.
+	previousSession Guarded[*session]
 	linkMu          sync.Mutex
 	sendMu          sync.Mutex
 }
@@ -125,22 +122,12 @@ func (ac *attachedClient) initOverlays() {
 
 func (ac *attachedClient) currentSession() *session { return ac.sess.Get() }
 
-func (ac *attachedClient) setSession(sess *session) {
-	if sess == nil {
-		ac.clearHistoryNav()
-	}
-	ac.sess.Set(sess)
-}
+func (ac *attachedClient) setSession(sess *session) { ac.sess.Set(sess) }
 
-func (ac *attachedClient) clearHistoryNav() {
-	if ac == nil {
-		return
+func (ac *attachedClient) clearPreviousSession() {
+	if ac != nil {
+		ac.previousSession.Set(nil)
 	}
-	ac.historyNavMu.Lock()
-	ac.historyNav.gen++
-	ac.historyNavTimer.stop()
-	ac.historyNav.clear()
-	ac.historyNavMu.Unlock()
 }
 
 func (ac *attachedClient) getTheme() themeui.Theme {
@@ -435,7 +422,9 @@ func (d *Daemon) detachReplacedClient(old *attachedClient) {
 		return
 	}
 	old.cancelResizePaint()
+
 	d.unregisterPreview(old)
+	old.clearPreviousSession()
 	old.setSession(nil)
 	d.log.Info("client displaced")
 	// Async + bounded: a dead or wedged old client must not stall the new
@@ -554,7 +543,9 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 		d.log.Info("client parked", "session", sess.name)
 		return
 	}
+
 	d.resetScreenDefaultColors(sess)
+	ac.clearPreviousSession()
 	if explicit {
 		// Synchronous so the ack is delivered before the transport closes
 		// (the client is actively awaiting it), but deadline-bounded so a

@@ -354,7 +354,6 @@ func (d *Daemon) sessionByID(id domain.SessionID) *session {
 }
 
 func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker.Target) {
-	d.clearHistoryNav(ac)
 	if target.Stopped {
 		d.resumeStoppedAndSwitch(sess, ac, target)
 		return
@@ -377,7 +376,9 @@ func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker
 		return
 	}
 	if old != nil && old != ac {
+
 		d.unregisterPreview(old)
+		old.clearPreviousSession()
 		old.setSession(nil)
 		d.notifyDetachedAsync(old, ports.ReasonDetach)
 	}
@@ -409,8 +410,10 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 		targetSess.active = target.TabIndex
 	}
 	targetSess.mu.Unlock()
+
 	d.touchMRU(targetSess)
 	ac.setSession(targetSess)
+	ac.recordPreviousSession(from)
 	d.mu.Unlock()
 	return old
 }
@@ -445,8 +448,10 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	targetSess.mu.Lock()
 	targetSess.client = ac
 	targetSess.mu.Unlock()
+
 	d.touchMRU(targetSess)
 	ac.setSession(targetSess)
+	ac.recordPreviousSession(from)
 	d.mu.Unlock()
 	d.firstPaint(targetSess, ac, ac.size)
 }

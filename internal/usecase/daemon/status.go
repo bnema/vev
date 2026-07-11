@@ -19,10 +19,8 @@
 //
 // Locking: a pane's screen/scrollback and per-client renderer shadow are
 // guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
-// session.mu; the registry by Daemon.mu. History-navigation display state is
-// guarded by attachedClient.historyNavMu. When more than one is held the order
-// is always attachedClient.sendMu > attachedClient.historyNavMu > Daemon.mu >
-// session.mu > tab.mu > pane.mu. The PTY reader only ever takes pane.mu, so it
+// session.mu; the registry by Daemon.mu. When more than one is held the order
+// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu. The PTY reader only ever takes pane.mu, so it
 // never blocks on a slow client.
 package daemon
 
@@ -84,30 +82,13 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles)
 	clearStatusRow(row)
 	x := 0
 	rightText := composeBottomRightText(state.bottomRight, state.copyFeedback)
-	if len(state.history) > 0 {
-		drawHistoryNavSessions(row, &x, state.history, rightText, state.attentionFrame, styles)
-		drawRightPlainText(row, rightText, x, styles.statusBar)
-		return
-	}
-
 	writeStatusText(row, &x, " "+state.status.session+" ", styles.accent)
-
 	fittedMRU := fitMRU(state.mru, len(row), x, rightText)
 	for i, sess := range fittedMRU {
 		style := mruStyle(styles.statusBar, state.theme, i, len(fittedMRU))
 		drawStatusSessionEntry(row, &x, sess.name, sess.ephemeral, sess.attention, style, state.attentionFrame)
 	}
 	drawRightPlainText(row, rightText, x, styles.statusBar)
-}
-
-func drawHistoryNavSessions(row []renderer.Cell, x *int, entries []historyNavSession, rightText string, attentionFrame int, styles themeStyles) {
-	for _, sess := range fitHistoryNav(entries, len(row), *x, rightText) {
-		style := styles.statusBar
-		if sess.active {
-			style = styles.accent
-		}
-		drawStatusSessionEntry(row, x, sess.name, sess.ephemeral, sess.attention, style, attentionFrame)
-	}
 }
 
 func drawStatusSessionEntry(row []renderer.Cell, x *int, name string, ephemeral, attention bool, style renderer.Style, attentionFrame int) {
@@ -161,7 +142,6 @@ type barState struct {
 	bottomRight    string
 	copyFeedback   string
 	mru            []mruSession
-	history        []historyNavSession
 	attentionFrame int
 	// theme is the client's terminal theme, if reported. Its zero value
 	// (Theme{}, Known: false) is a valid "no theme" default that resolves to
@@ -176,14 +156,6 @@ type mruSession struct {
 	attention bool
 	// mruAt orders entries in barStateFor (freshest first); drawing ignores it.
 	mruAt uint64
-}
-
-type historyNavSession struct {
-	id        domain.SessionID
-	name      string
-	ephemeral bool
-	attention bool
-	active    bool
 }
 
 type statusSnapshot struct {
@@ -222,51 +194,8 @@ func tabDisplayName(tb *tab, index int) string {
 	return strconv.Itoa(index + 1)
 }
 
-func (d *Daemon) barStateForClient(cur *session, ac *attachedClient, copyFeedback string) barState {
-	state := d.barStateFor(cur, copyFeedback)
-	state.history = d.historyNavBarState(ac)
-	return state
-}
-
-func (d *Daemon) historyNavBarState(ac *attachedClient) []historyNavSession {
-	if d == nil || ac == nil {
-		return nil
-	}
-	ac.historyNavMu.Lock()
-	if !ac.historyNav.active() {
-		ac.historyNavMu.Unlock()
-		return nil
-	}
-	ids := append([]domain.SessionID(nil), ac.historyNav.ids...)
-	activeIndex := ac.historyNav.index
-	ac.historyNavMu.Unlock()
-
-	d.mu.Lock()
-	out := make([]historyNavSession, 0, len(ids))
-	valid := true
-	for i, id := range ids {
-		sess := d.sessions[id]
-		if sess == nil {
-			valid = false
-			break
-		}
-		sess.mu.Lock()
-		entry := historyNavSession{id: sess.id, name: sess.name, ephemeral: sess.ephemeral, active: i == activeIndex}
-		for _, tb := range sess.tabs {
-			if tb.attention {
-				entry.attention = true
-				break
-			}
-		}
-		sess.mu.Unlock()
-		out = append(out, entry)
-	}
-	d.mu.Unlock()
-	if !valid {
-		d.clearHistoryNav(ac)
-		return nil
-	}
-	return out
+func (d *Daemon) barStateForClient(cur *session, _ *attachedClient, copyFeedback string) barState {
+	return d.barStateFor(cur, copyFeedback)
 }
 
 func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
@@ -317,70 +246,6 @@ func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 	}
 	state.mru = mru
 	return state
-}
-
-func fitHistoryNav(entries []historyNavSession, rowLen, leftUsed int, feedback string) []historyNavSession {
-	copyReserve := 1
-	if feedback != "" {
-		copyReserve = statusTextWidth(feedback) + 2
-	}
-	budget := rowLen - leftUsed - copyReserve
-	if budget <= 0 || len(entries) == 0 {
-		return nil
-	}
-	cost := func(e historyNavSession) int {
-		name := e.name
-		if e.ephemeral {
-			name += "*"
-		}
-		n := 2 + statusTextWidth(name)
-		if e.attention {
-			n += 1 + renderer.RuneWidth(attentionGlyph)
-		}
-		return n
-	}
-	used := 0
-	for _, e := range entries {
-		used += cost(e)
-	}
-	if used <= budget {
-		return entries
-	}
-	active := 0
-	for i, e := range entries {
-		if e.active {
-			active = i
-			break
-		}
-	}
-	if cost(entries[active]) > budget {
-		return nil
-	}
-	start, end := active, active+1
-	used = cost(entries[active])
-	for {
-		expanded := false
-		if start > 0 {
-			c := cost(entries[start-1])
-			if used+c <= budget {
-				start--
-				used += c
-				expanded = true
-			}
-		}
-		if end < len(entries) {
-			c := cost(entries[end])
-			if used+c <= budget {
-				end++
-				used += c
-				expanded = true
-			}
-		}
-		if !expanded {
-			break
-		}
-	}
-	return entries[start:end]
 }
 
 // fitTabLabels returns, per tab, the text drawn between its surrounding

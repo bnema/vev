@@ -20,7 +20,6 @@ type Context interface {
 	NextTab() error
 	PrevTab() error
 	BackSession() error
-	ForwardSession() error
 	Detach() error
 	EnterVisualMode() error
 	RenameSession() error
