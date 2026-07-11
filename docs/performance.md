@@ -9,17 +9,20 @@ Real Unix-socket, SSH, and UDP impairment/latency benchmarks are deferred.
 
 ## Large-history daemon baseline
 
-Run the full daemon matrix once when establishing a baseline:
+Use a single iteration only as a smoke check; it is not suitable for drawing
+performance conclusions:
 
 ```sh
 go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1x -benchmem
 ```
 
-For repeatable comparison of the focused control workload, run three one-second
-samples (pin CPU/governor and record the host when comparing runs):
+For before/after comparison, collect repeated samples for the **full matrix**
+(all workloads and topologies), pinning CPU/governor and recording the host.
+The fixed duration and count make the output suitable for `benchstat`:
 
 ```sh
-go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistoryLivePaint/1tab-1pane-control$' -benchtime=1s -count=3 -benchmem
+go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1s -count=5 -benchmem > /tmp/vev-history-after.txt
+benchstat /tmp/vev-history-before.txt /tmp/vev-history-after.txt
 ```
 
 The matrix exercises live paint, snapshot capture, copy-mode entry, copy search,
@@ -49,8 +52,10 @@ context:
   go version
   uname -a
   git rev-parse HEAD
+  # Smoke only; do not use this result for comparisons.
   go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1x -benchmem
-  go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistoryLivePaint/1tab-1pane-control$' -benchtime=1s -count=3 -benchmem
+  # Repeated full matrix for every workload/topology used in conclusions.
+  go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1s -count=5 -benchmem
 } > /tmp/vev-history-before.txt 2>&1
 ```
 

@@ -14,6 +14,34 @@ import (
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
+func TestCountingSnapshotStoreWriteCountsAndRetainsOpaquePayload(t *testing.T) {
+	store := &countingSnapshotStore{}
+	payload := []byte{0xff, 0x00, 0xfe}
+
+	require.NoError(t, store.Write("session", payload))
+	require.Equal(t, countingSnapshotMetrics{writes: 1, bytes: uint64(len(payload))}, store.metrics())
+	require.Equal(t, payload, store.lastPayload())
+
+	payload[0] = 0x01
+	require.Equal(t, payload, store.lastPayload(), "the counting sink must retain the payload slice header, not copy it")
+}
+
+func TestCountingOutputTransportCountsOpaquePayloadAndRejectsShortPayload(t *testing.T) {
+	transport := &countingOutputTransport{}
+
+	err := transport.Send(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 23)})
+	require.Error(t, err)
+	require.Equal(t, countingOutputMetrics{}, transport.metrics())
+
+	payload := append(make([]byte, 24), 0xff, 0x00, 0xfe)
+	require.NoError(t, transport.Send(ports.Frame{Type: ports.MsgOutput, Payload: payload}))
+	require.Equal(t, countingOutputMetrics{frames: 1, bytes: 3, payloadBytes: uint64(len(payload))}, transport.metrics())
+	require.Equal(t, payload, transport.lastPayload())
+
+	payload[24] = 0x01
+	require.Equal(t, payload, transport.lastPayload(), "the counting transport must retain the payload slice header, not copy it")
+}
+
 func TestPerformanceFixtureCounters(t *testing.T) {
 	fixture := newPerformanceFixture(t, performanceConfig{})
 
@@ -102,6 +130,20 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 			}
 			b.StopTimer()
 			metrics := fixture.metrics()
+			if payload := fixture.output.lastPayload(); payload != nil {
+				if _, err := ports.UnmarshalOutput(payload); err != nil {
+					b.Fatalf("decode last output: %v", err)
+				}
+			}
+			if workload == "snapshot-capture" {
+				payload := fixture.snaps.lastPayload()
+				if payload == nil {
+					b.Fatal("snapshot capture retained no snapshot payload")
+				}
+				if _, err := snapcodec.Unmarshal(payload); err != nil {
+					b.Fatalf("decode last snapshot: %v", err)
+				}
+			}
 			if workload == "live-paint" && metrics.outputFrames != uint64(b.N) {
 				b.Fatalf("live paint emitted %d frames for %d operations", metrics.outputFrames, b.N)
 			}
@@ -330,25 +372,28 @@ func (f *performanceFixture) metrics() performanceMetrics {
 	}
 }
 
+const outputPayloadHeaderBytes = 24
+
 type countingOutputMetrics struct{ frames, bytes, payloadBytes uint64 }
 
 type countingOutputTransport struct {
 	mu sync.Mutex
 	countingOutputMetrics
+	last []byte
 }
 
 func (t *countingOutputTransport) Send(frame ports.Frame) error {
 	if frame.Type != ports.MsgOutput {
 		return nil
 	}
-	output, err := ports.UnmarshalOutput(frame.Payload)
-	if err != nil {
-		return err
+	if len(frame.Payload) < outputPayloadHeaderBytes {
+		return fmt.Errorf("output payload is %d bytes, want at least %d", len(frame.Payload), outputPayloadHeaderBytes)
 	}
 	t.mu.Lock()
 	t.frames++
-	t.bytes += uint64(len(output.Data))
+	t.bytes += uint64(len(frame.Payload) - outputPayloadHeaderBytes)
 	t.payloadBytes += uint64(len(frame.Payload))
+	t.last = frame.Payload
 	t.mu.Unlock()
 	return nil
 }
@@ -357,6 +402,7 @@ func (*countingOutputTransport) Close() error               { return nil }
 func (t *countingOutputTransport) reset() {
 	t.mu.Lock()
 	t.countingOutputMetrics = countingOutputMetrics{}
+	t.last = nil
 	t.mu.Unlock()
 }
 func (t *countingOutputTransport) metrics() countingOutputMetrics {
@@ -364,20 +410,24 @@ func (t *countingOutputTransport) metrics() countingOutputMetrics {
 	defer t.mu.Unlock()
 	return t.countingOutputMetrics
 }
+func (t *countingOutputTransport) lastPayload() []byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.last
+}
 
 type countingSnapshotMetrics struct{ writes, bytes uint64 }
 type countingSnapshotStore struct {
 	mu sync.Mutex
 	countingSnapshotMetrics
+	last []byte
 }
 
 func (s *countingSnapshotStore) Write(_ string, data []byte) error {
-	if _, err := snapcodec.Unmarshal(data); err != nil {
-		return err
-	}
 	s.mu.Lock()
 	s.writes++
 	s.bytes += uint64(len(data))
+	s.last = data
 	s.mu.Unlock()
 	return nil
 }
@@ -386,10 +436,16 @@ func (*countingSnapshotStore) Delete(string) error                 { return nil 
 func (s *countingSnapshotStore) reset() {
 	s.mu.Lock()
 	s.countingSnapshotMetrics = countingSnapshotMetrics{}
+	s.last = nil
 	s.mu.Unlock()
 }
 func (s *countingSnapshotStore) metrics() countingSnapshotMetrics {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.countingSnapshotMetrics
+}
+func (s *countingSnapshotStore) lastPayload() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.last
 }
