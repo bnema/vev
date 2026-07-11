@@ -814,7 +814,31 @@ func requireWorkerExit(t *testing.T, done <-chan struct{}) {
 	t.Fatal("cancelled coordinator timer worker did not exit")
 }
 
-func TestRenderCoordinatorStopsInertTimerWorkers(t *testing.T) {
+func TestRenderCoordinatorInertTimerFiresSynchronouslyWithoutWorker(t *testing.T) {
+	clock := portsmocks.NewMockClock(t)
+	timer := portsmocks.NewMockTimer(t)
+	clock.EXPECT().NewTimer(minOutputRenderDeadline).Return(timer).Once()
+	timer.EXPECT().C().Return((<-chan time.Time)(nil)).Once()
+	timer.EXPECT().Stop().Return(true).Once()
+
+	wakes := make(chan renderWake, 1)
+	rc := newRenderCoordinator(renderCoordinatorOptions{
+		clock:    clock,
+		ackReady: func() bool { return true },
+		wake:     func(w renderWake) { wakes <- w },
+	})
+	rc.invalidate(renderInvalidation{class: invalidateOutput})
+
+	require.Equal(t, renderWake{coalesced: 1}, <-wakes)
+	require.Equal(t, renderCoordinatorBurstMetricsSnapshot{invalidations: 1, wakes: 1, coalesced: 1}, rc.burstMetricsSnapshot())
+	rc.mu.Lock()
+	require.Nil(t, rc.normalTimer)
+	require.Nil(t, rc.normalCancel)
+	require.Nil(t, rc.normalWorkerDone)
+	rc.mu.Unlock()
+}
+
+func TestRenderCoordinatorStopsInertSyncTimerWorkers(t *testing.T) {
 	lifecycle := []struct {
 		name string
 		end  func(*renderCoordinator, *attachedClient)
@@ -828,19 +852,6 @@ func TestRenderCoordinatorStopsInertTimerWorkers(t *testing.T) {
 			clk := newInertCoordinatorMockClock(t, 2)
 			rc := newRenderCoordinator(renderCoordinatorOptions{clock: clk.clock})
 			ac := &attachedClient{}
-			rc.attach(ac)
-			rc.invalidate(renderInvalidation{class: invalidateOutput})
-			normal := <-clk.timers
-			rc.mu.Lock()
-			normalDone := rc.normalWorkerDone
-			rc.mu.Unlock()
-			tc.end(rc, ac)
-			normal.mock.AssertNumberOfCalls(t, "Stop", 1)
-			requireWorkerExit(t, normalDone)
-
-			// Use a fresh coordinator because detach/teardown intentionally makes
-			// an attachment ineligible for a new synchronized batch.
-			rc = newRenderCoordinator(renderCoordinatorOptions{clock: clk.clock})
 			rc.attach(ac)
 			rc.noteSyncBegin(1)
 			syncTimer := <-clk.timers

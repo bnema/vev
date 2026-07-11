@@ -211,6 +211,15 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 		return
 	}
 	timer := clock.NewTimer(delay)
+	timerC := timer.C()
+	// A nil timer channel is inert, so it cannot need cancellation. Complete
+	// synchronously before allocating a worker or its coordination channels.
+	if timerC == nil {
+		c.mu.Unlock()
+		timer.Stop()
+		c.fire(gen, false)
+		return
+	}
 	cancel := make(chan struct{})
 	done := make(chan struct{})
 	c.normalTimer, c.normalCancel, c.normalWorkerDone = timer, cancel, done
@@ -218,18 +227,11 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 	go func() {
 		defer close(done)
 		select {
-		case <-timer.C():
+		case <-timerC:
 			c.fire(gen, false)
 		case <-cancel:
 		}
 	}()
-	// A nil timer channel is an inert test clock, not a schedulable deadline.
-	// Complete through the coordinator so manual daemon fixtures retain their
-	// deterministic synchronous contract without a direct paint fallback.
-	if timer.C() == nil {
-		c.fire(gen, false)
-		return
-	}
 	// Give fake-clock callbacks a chance to block on C before the test
 	// advances it; real clocks are unaffected.
 	runtime.Gosched()
