@@ -312,7 +312,21 @@ func titleBarPaneIDs(placements []layout.Placement, ok bool) []layout.PaneID {
 	return ids
 }
 
+func (d *Daemon) scheduleResizePaintLocked(sess *session, ac *attachedClient) {
+	ac.resizePaint.stop()
+	ac.resizePaintGeneration++
+	generation := ac.resizePaintGeneration
+	ac.resizePaintPending = true
+	ac.resizePaint.retain(d.clock, maxDebounceInterval, func(ports.Timer) {
+		d.paintForResizeGeneration(sess, ac, true, generation)
+	})
+}
+
 func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
+	d.paintForResizeGeneration(sess, ac, reset, 0)
+}
+
+func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, reset bool, resizeGeneration uint64) {
 	tb := sess.activeTab()
 	if tb == nil {
 		return
@@ -323,6 +337,15 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	if ac.currentSession() != sess {
 		ac.sendMu.Unlock()
 		return
+	}
+	if resizeGeneration != 0 && (!ac.resizePaintPending || ac.resizePaintGeneration != resizeGeneration) {
+		ac.sendMu.Unlock()
+		return
+	}
+	if ac.resizePaintPending {
+		ac.resizePaint.stop()
+		ac.resizePaintPending = false
+		reset = true
 	}
 	// Ack-gated coalescing: while the client is at least maxUnackedOutputStates
 	// behind, skip composing another diff and mark the paint deferred. The

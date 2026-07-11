@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -267,6 +268,101 @@ func TestFailedPaintSendRollsBackOutputState(t *testing.T) {
 
 	require.Zero(t, ac.output.next)
 	require.Zero(t, ac.output.acked)
+}
+
+func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		window uint64
+	}{
+		{name: "datagram window", window: 1},
+		{name: "stream window", window: maxUnackedOutputStates},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, releasePTY := newBlockingPTY(t)
+			defer releasePTY()
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			ac.output.maxOutstanding = tc.window
+			pane := sess.activeTab().focusedPane()
+
+			pane.screen.Write([]byte(strings.Repeat("A", 79)))
+			d.paint(sess, ac, true)
+			client := vt.NewScreen(80, 24)
+			initial := mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+			ac.ackOutputState(initial.NewStateNum)
+
+			// The child can redraw the newly exposed columns while the resize
+			// output is being prepared. The first visible grown frame must contain
+			// that redraw, regardless of the negotiated output window.
+			d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
+			pane.screen.Write([]byte("\x1b[1;81H" + strings.Repeat("B", 40)))
+			d.paint(sess, ac, false)
+
+			client.Resize(120, 24)
+			mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+			require.Equal(t, 'B', client.Frame.At(100, 1).Rune,
+				"first grown frame exposed stale pre-SIGWINCH pane content")
+			requireNoOutputFrame(t, sends)
+		})
+	}
+}
+
+func TestResizeWithoutPTYOutputFlushesOneFullFrameAtDeadline(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	clk := &signalClock{timers: make(chan *signalTimer, 1)}
+	d.clock = clk
+
+	d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
+	var timer *signalTimer
+	select {
+	case timer = <-clk.timers:
+	case <-time.After(time.Second):
+		t.Fatal("resize did not schedule a bounded paint")
+	}
+	requireNoOutputFrame(t, sends)
+
+	timer.ch <- time.Now()
+	frame := awaitFrame(t, sends, ports.MsgOutput)
+	client := vt.NewScreen(120, 24)
+	out := mustApplyOutput(t, client, frame)
+	require.Zero(t, out.BaseStateNum)
+	require.Contains(t, screenLineText(client, 0), "1")
+	require.Contains(t, screenLineText(client, 23), "work")
+	require.Equal(t, domain.Size{Cols: 120, Rows: 24}, ac.size)
+	requireNoOutputFrame(t, sends)
+}
+
+func TestResizeBurstFlushesOnlyLatestGeometry(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	clk := &signalClock{timers: make(chan *signalTimer, 2)}
+	d.clock = clk
+
+	d.resize(sess, ac, domain.Size{Cols: 100, Rows: 24})
+	var first *signalTimer
+	select {
+	case first = <-clk.timers:
+	case <-time.After(time.Second):
+		t.Fatal("first resize did not schedule a bounded paint")
+	}
+	d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
+	var latest *signalTimer
+	select {
+	case latest = <-clk.timers:
+	case <-time.After(time.Second):
+		t.Fatal("latest resize did not replace the bounded paint")
+	}
+
+	first.ch <- time.Now()
+	requireNoOutputFrame(t, sends)
+	latest.ch <- time.Now()
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.Equal(t, domain.Size{Cols: 120, Rows: 24}, ac.size)
+	require.Equal(t, 120, sess.activeTab().focusedPane().screen.Frame.Width)
+	requireNoOutputFrame(t, sends)
 }
 
 func TestDatagramWindowOneCoalescesPaintsUntilMsgAck(t *testing.T) {

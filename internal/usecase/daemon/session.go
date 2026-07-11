@@ -730,6 +730,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	sess.client = nil
 	sess.mu.Unlock()
 	if ac != nil {
+		ac.cancelResizePaint()
 		d.unregisterPreview(ac)
 		ac.setSession(nil)
 	}

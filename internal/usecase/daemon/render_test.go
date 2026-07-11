@@ -932,6 +932,9 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	ac.setSession(sess)
 
 	d.resize(sess, ac, newSize)
+	// This test verifies resize ordering, not the idle fallback. Consume the
+	// pending resize paint deterministically under the non-firing stub clock.
+	d.paint(sess, ac, false)
 
 	require.Equal(t, 80, screenWidthAtResize, "pty.Resize must run before screen.Resize")
 	require.Equal(t, 100, win.focusedPane().screen.Frame.Width, "screen resized after pty")

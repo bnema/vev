@@ -38,25 +38,28 @@ import (
 )
 
 type attachedClient struct {
-	tr            ports.Transport
-	output        *outputStateStream
-	overlays      *overlayRuntime
-	clientID      [16]byte
-	resumeCapable bool
-	resumeToken   uint64
-	parked        bool
-	echoAck       atomic.Uint64
-	bars          barCache           // only touched while sendMu is held
-	composed      composedFrameCache // only touched while sendMu is held
-	size          domain.Size
-	keys          *keys.Router
-	sess          Guarded[*session]
-	mouseScan     mouse.Scanner
-	themeMu       sync.Mutex
-	theme         themeui.Theme
-	clientTheme   themeui.Theme
-	lastCursor    cursorOut
-	recentNav     recentSessionNavigator
+	tr                    ports.Transport
+	output                *outputStateStream
+	overlays              *overlayRuntime
+	clientID              [16]byte
+	resumeCapable         bool
+	resumeToken           uint64
+	parked                bool
+	echoAck               atomic.Uint64
+	bars                  barCache           // only touched while sendMu is held
+	composed              composedFrameCache // only touched while sendMu is held
+	resizePaint           pendingByteTimer   // guarded by sendMu
+	resizePaintGeneration uint64             // guarded by sendMu
+	resizePaintPending    bool               // guarded by sendMu
+	size                  domain.Size
+	keys                  *keys.Router
+	sess                  Guarded[*session]
+	mouseScan             mouse.Scanner
+	themeMu               sync.Mutex
+	theme                 themeui.Theme
+	clientTheme           themeui.Theme
+	lastCursor            cursorOut
+	recentNav             recentSessionNavigator
 	// historyNavMu protects historyNav and historyNavTimer. When paint needs
 	// several locks, take sendMu before historyNavMu, then Daemon.mu/session.mu.
 	historyNavMu    sync.Mutex
@@ -102,6 +105,16 @@ func (p *pendingByteTimer) stop() {
 		close(p.done)
 		p.done = nil
 	}
+}
+
+// cancelResizePaint invalidates callbacks before detaching or replacing an
+// attachment. It deliberately takes sendMu before any session/daemon lock.
+func (ac *attachedClient) cancelResizePaint() {
+	ac.sendMu.Lock()
+	ac.resizePaintGeneration++
+	ac.resizePaintPending = false
+	ac.resizePaint.stop()
+	ac.sendMu.Unlock()
 }
 
 func (ac *attachedClient) initOverlays() {
@@ -421,6 +434,7 @@ func (d *Daemon) detachReplacedClient(old *attachedClient) {
 	if old == nil {
 		return
 	}
+	old.cancelResizePaint()
 	d.unregisterPreview(old)
 	old.setSession(nil)
 	d.log.Info("client displaced")
@@ -430,8 +444,9 @@ func (d *Daemon) detachReplacedClient(old *attachedClient) {
 }
 
 // firstPaint guarantees the freshly attached client sees the full screen: if
-// the tab size differs from the client's it resizes first (which paints a
-// full redraw), otherwise it forces a full paint against the fresh renderer.
+// the tab size differs from the client's it resizes first, then immediately
+// emits a full redraw. Attach must not wait for the resize-idle fallback
+// timer.
 func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain.Size) {
 	tb := sess.activeTab()
 	if tb == nil {
@@ -442,9 +457,7 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 	tb.mu.Unlock()
 
 	if clientSize.Valid() && wsz != tabSize(clientSize) {
-		d.resize(sess, ac, clientSize)
-		d.activateTab(sess, sess.activeTab())
-		return
+		d.resizeForFirstPaint(sess, ac, clientSize)
 	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
 	d.paint(sess, ac, true)
@@ -523,6 +536,7 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 	if !sess.detachIfCurrent(ac) {
 		return // already displaced by a newer client; nothing to do
 	}
+	ac.cancelResizePaint()
 	d.unregisterPreview(ac)
 	sess.mu.Lock()
 	ephemeral := sess.ephemeral
@@ -575,14 +589,31 @@ func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) 
 }
 
 func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
+	d.resizeWithPaint(sess, ac, sz, true)
+}
+
+// resizeForFirstPaint applies attach geometry without installing an idle timer:
+// firstPaint immediately emits the required full frame itself.
+func (d *Daemon) resizeForFirstPaint(sess *session, ac *attachedClient, sz domain.Size) {
+	d.resizeWithPaint(sess, ac, sz, false)
+}
+
+func (d *Daemon) resizeWithPaint(sess *session, ac *attachedClient, sz domain.Size, schedulePaint bool) {
 	if !sz.Valid() {
 		return
 	}
 	d.exitCopyMode(ac)
-	tbSize := tabSize(sz)
 	if ac != nil {
+		// Suspend emission until every pane has adopted this geometry and the
+		// bounded resize paint is armed. PTY readers remain independent.
+		ac.sendMu.Lock()
+		defer ac.sendMu.Unlock()
+		if ac.currentSession() != sess {
+			return
+		}
 		ac.size = sz
 	}
+	tbSize := tabSize(sz)
 
 	sess.mu.Lock()
 	tabs := append([]*tab(nil), sess.tabs...)
@@ -601,9 +632,9 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	// outside tab.mu so its PTY resize cannot block tab state.
 	d.resizeActiveFloating(sess.activeTab())
 	markSnapshotDirty(sess)
-	if ac != nil {
+	if ac != nil && schedulePaint {
 		d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
-		d.paint(sess, ac, true)
+		d.scheduleResizePaintLocked(sess, ac)
 	}
 }
 
@@ -614,6 +645,7 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed por
 		return
 	}
 	if sess.detachIfCurrent(ac) {
+		ac.cancelResizePaint()
 		d.unregisterPreview(ac)
 		if d.parkAttachment(sess, ac) {
 			_ = ac.closeCapturedTransport(failed)
