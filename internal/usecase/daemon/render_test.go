@@ -160,13 +160,23 @@ func drainCoordinatorTimers(clock *coordinatorMockClock) []*coordinatorMockTimer
 	}
 }
 
-func fireCoordinatorTimer(t *testing.T, timers []*coordinatorMockTimer, duration time.Duration) {
+func fireCoordinatorTimer(t *testing.T, rc *renderCoordinator, timers []*coordinatorMockTimer, duration time.Duration) {
 	t.Helper()
 	for _, timer := range timers {
-		if timer.duration == duration {
-			timer.ch <- time.Time{}
-			return
+		if timer.duration != duration {
+			continue
 		}
+		var done <-chan struct{}
+		rc.mu.Lock()
+		if rc.normalTimer == timer.mock {
+			done = rc.normalWorkerDone
+		}
+		rc.mu.Unlock()
+		timer.ch <- time.Time{}
+		if done != nil {
+			<-done
+		}
+		return
 	}
 	t.Fatalf("coordinator did not arm %s timer", duration)
 }
@@ -178,7 +188,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		d, sess, ac, sends := newManualSessionWithPTYs(t, activePTY, inactivePTY)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		d.attachCoordinator(sess, nil, ac, true)
+		rc := d.attachCoordinator(sess, nil, ac, true)
 
 		d.sessWg.Add(1)
 		go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
@@ -189,12 +199,12 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		sess.active = 1
 		sess.mu.Unlock()
 		d.invalidateRender(sess, ac, true, "sync activation")
-		fireCoordinatorTimer(t, drainCoordinatorTimers(clock), urgentRenderDeadline)
+		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
 		requireNoCoordinatorOutputFrame(t, sends)
 
 		inactiveSteps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
 		awaitPTYReadProcessed(t, inactiveProcessed)
-		fireCoordinatorTimer(t, drainCoordinatorTimers(clock), urgentRenderDeadline)
+		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
 		frame := awaitOutputFrameWithoutSleep(t, sends)
 		output, err := ports.UnmarshalOutput(frame.Payload)
 		require.NoError(t, err)
@@ -214,7 +224,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		d, sess, ac, sends := newManualSessionWithPTYs(t, oldPTY, newPTY, parkedPTY)
 		clock := newCoordinatorMockClock(t, 8)
 		d.clock = clock.clock
-		d.attachCoordinator(sess, nil, ac, true)
+		rc := d.attachCoordinator(sess, nil, ac, true)
 
 		d.sessWg.Add(2)
 		go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
@@ -227,7 +237,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		sess.mu.Unlock()
 		newSteps <- channelPTYStep{data: []byte("newly active")}
 		awaitPTYReadProcessed(t, newProcessed)
-		fireCoordinatorTimer(t, drainCoordinatorTimers(clock), minOutputRenderDeadline)
+		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
 		frame := awaitOutputFrameWithoutSleep(t, sends)
 		output, err := ports.UnmarshalOutput(frame.Payload)
 		require.NoError(t, err)
@@ -275,7 +285,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		steps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
 		awaitPTYReadProcessed(t, processed)
 
-		fireCoordinatorTimer(t, drainCoordinatorTimers(clock), urgentRenderDeadline)
+		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
 		wake := <-previews
 		require.True(t, wake.urgent)
 		require.Equal(t, 2, wake.coalesced, "completion retains coordinator coalescing across the cleared attachment work")
@@ -317,7 +327,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		awaitPTYReadProcessed(t, processed)
 		requireNoWake(t, wakes)
 
-		fireCoordinatorTimer(t, replacementTimers, urgentRenderDeadline)
+		fireCoordinatorTimer(t, rc, replacementTimers, urgentRenderDeadline)
 		wake := <-wakes
 		require.True(t, wake.urgent)
 		require.True(t, wake.reset, "the replacement's cleared batch must repaint a complete frame")
