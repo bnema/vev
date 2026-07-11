@@ -144,7 +144,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 			// fuzzy selection can never turn an unrelated query into a jump.
 			// Static commands retain normal palette behavior and run the selected
 			// fuzzy match.
-			if cmd.Code == "JRS" {
+			if cmd.Slug == "jump-recent-session" {
 				action, valid := palette.ParseAction([]command.Command{cmd}, rawQuery)
 				if !valid {
 					ac.overlays.paletteFeedback = "invalid command arguments"
@@ -160,7 +160,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	})
 	if changed {
 		active, ok := ac.overlays.palette.ArgumentCommand()
-		if ok && active.Code == "JRS" {
+		if ok && active.Slug == "jump-recent-session" {
 			hints := recentSessionHints(ac.overlays.paletteRecent, paletteArgs(ac.overlays.palette.Query(), active))
 			ac.overlays.paletteHints = hints
 		} else {
@@ -184,7 +184,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 
 	// Revalidate live target without paletteMu. A captured ID is never replaced
 	// by a newly-ranked session, so MRU changes cannot shift a requested rank.
-	if cmd.Code == "JRS" {
+	if cmd.Slug == "jump-recent-session" {
 		rank, err := command.ParsePositiveDecimal(args)
 		if err != nil {
 			d.paletteFailure(ac, generation, rawQuery, "requested recent session is unavailable")

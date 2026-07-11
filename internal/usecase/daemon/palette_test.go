@@ -70,6 +70,37 @@ func TestPaletteJRSActivatesOnlyExactContextualHint(t *testing.T) {
 	ac.overlays.paletteMu.Unlock()
 }
 
+func TestPaletteJRSUsesEffectiveOverrideOnly(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	d.ApplyConfig(domain.Config{Codes: map[string]string{"jump-recent-session": "RJS"}})
+
+	d.handleInput(current, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(current, ac, []byte("RJS"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, command.ContextHintRecentSessions, ac.overlays.paletteHints.Kind)
+	ac.overlays.paletteMu.Unlock()
+	d.handleInput(current, ac, []byte(" 1\r"))
+
+	require.Same(t, d.sessions[domain.SessionID("recent")], ac.currentSession())
+	require.False(t, ac.overlays.paletteActive())
+	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	d.handleInput(ac.currentSession(), ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(ac.currentSession(), ac, []byte("JRS"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, command.ContextHint(0), ac.overlays.paletteHints.Kind)
+	ac.overlays.paletteMu.Unlock()
+	require.Same(t, d.sessions[domain.SessionID("recent")], ac.currentSession())
+	d.handleInput(ac.currentSession(), ac, []byte("\r"))
+	require.True(t, ac.overlays.paletteActive(), "literal JRS must not execute an overridden jump command")
+}
+
 func TestPaletteFuzzySelectedStaticCommandExecutes(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 2)
 	defer releases[0]()
@@ -98,6 +129,21 @@ func TestPaletteJRSUsesCapturedRankAfterMRUChanges(t *testing.T) {
 	require.False(t, ac.overlays.paletteActive())
 	awaitFrame(t, sends, ports.MsgOutput)
 	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteJRSThenBSKReversesJump(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+
+	d.handleInput(current, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(current, ac, []byte("JRS 1\r"))
+	require.Same(t, d.sessions[domain.SessionID("recent")], ac.currentSession())
+	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	runPaletteCommand(t, d, ac.currentSession(), ac, "BSK")
+	require.Same(t, current, ac.currentSession())
 }
 
 func TestPaletteJRSDisplacedTargetKeepsInteractionOpen(t *testing.T) {
