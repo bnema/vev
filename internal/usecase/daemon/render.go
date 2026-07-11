@@ -604,7 +604,7 @@ func (c *composedFrameCache) invalidate() {
 }
 
 func composeClientFrame(sess *session, tb *tab, full bool, rightStatus string, caches ...*barCache) (renderer.Frame, []renderer.Damage) {
-	return composeClientFrameWithState(barState{status: sess.statusSegments(), copyFeedback: rightStatus}, tb, full, caches...)
+	return composeClientFrameWithState(barState{status: sess.statusSegments(true), copyFeedback: rightStatus}, tb, full, caches...)
 }
 
 func composeClientFrameWithState(bars barState, tb *tab, full bool, caches ...*barCache) (renderer.Frame, []renderer.Damage) {

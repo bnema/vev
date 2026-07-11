@@ -78,9 +78,11 @@ func composeTabTitle(tabName, paneTitle string) string {
 	return tabName + " (" + paneTitle + ")"
 }
 
-// focusedPaneTitleLocked returns the focused pane's display title. Caller must
-// hold the owning session.mu (so tb.mu then pane.mu obey lock order).
-func (tb *tab) focusedPaneTitleLocked() string {
+// focusedPaneTitle returns the focused pane's display title for tab labels.
+// Caller must hold the owning session.mu (tb.mu then pane.mu obey lock order).
+// When includeTerminalTitle is false the OSC title is omitted; the process
+// name (or fallback) still shows.
+func (tb *tab) focusedPaneTitle(includeTerminalTitle bool) string {
 	tb.mu.Lock()
 	p := tb.focusedPane()
 	tb.mu.Unlock()
@@ -89,7 +91,10 @@ func (tb *tab) focusedPaneTitleLocked() string {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.displayTitleLocked()
+	if includeTerminalTitle {
+		return p.displayTitleLocked()
+	}
+	return formatPaneTitle(p.title.processName, "", p.title.displayFallback)
 }
 
 // refreshSessionFocusedTitles opportunistically refreshes the process-name half

@@ -67,6 +67,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 		d.refreshSessionFocusedTitles(s)
 	}
 
+	includeTerminalTitle := d.currentTabsConfig().TerminalTitle
 	views := make([]picker.SessionView, 0, len(sessions)+len(stopped))
 	curTab := 0
 	for _, s := range sessions {
@@ -74,7 +75,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 		view := picker.SessionView{ID: s.id, Name: s.name, Active: s.active, Tabs: make([]string, len(s.tabs))}
 		sessionAttention := false
 		for i, tb := range s.tabs {
-			label := composeTabTitle(tabDisplayName(tb, i), tb.focusedPaneTitleLocked())
+			label := composeTabTitle(tabDisplayName(tb, i), tb.focusedPaneTitle(includeTerminalTitle))
 			if tb.attention {
 				label = attentionSuffix(label)
 				sessionAttention = true

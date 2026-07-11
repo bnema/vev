@@ -529,13 +529,13 @@ func TestComposeClientFrameCacheSkipsUndamagedPaneBlits(t *testing.T) {
 	var bars barCache
 	var composed composedFrameCache
 	sess := &session{id: "s", name: "work", tabs: []*tab{win}}
-	composeClientFrameWithLayoutCached(barState{status: sess.statusSegments()}, win, true, solveTabLayoutLocked(win), &bars, &composed)
+	composeClientFrameWithLayoutCached(barState{status: sess.statusSegments(true)}, win, true, solveTabLayoutLocked(win), &bars, &composed)
 	left.screen.ClearDamage()
 	right.screen.ClearDamage()
 	left.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'Z'})
 	right.screen.Write([]byte("x"))
 
-	frame, damage := composeClientFrameWithLayoutCached(barState{status: sess.statusSegments()}, win, false, solveTabLayoutLocked(win), &bars, &composed)
+	frame, damage := composeClientFrameWithLayoutCached(barState{status: sess.statusSegments(true)}, win, false, solveTabLayoutLocked(win), &bars, &composed)
 
 	require.Equal(t, 'L', frame.At(0, 1).Rune, "undamaged left pane should remain cached, not re-blitted")
 	require.Equal(t, 'x', frame.At(22, 1).Rune)
@@ -548,7 +548,7 @@ func TestPaintComposeConsumesOnlyDamageIncludedInFrame(t *testing.T) {
 	p.screen.Write([]byte("old"))
 	var bars barCache
 	var composed composedFrameCache
-	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments()}
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments(true)}
 
 	_, damage := composeClientFrameWithLayoutCachedConsumeDamage(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
 	require.NotEmpty(t, damage)
@@ -572,7 +572,7 @@ func TestPaintComposeClearsCollapsedPaneDamage(t *testing.T) {
 	p2.screen.Write([]byte("shown"))
 	var bars barCache
 	var composed composedFrameCache
-	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments()}
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments(true)}
 
 	_, _ = composeClientFrameWithLayoutCachedConsumeDamage(state, win, false, solveTabLayoutLocked(win), &bars, &composed)
 
@@ -591,7 +591,7 @@ func TestComposeClientFrameCacheFocusChangeReblitsDimmedPanes(t *testing.T) {
 	theme := themeui.Theme{Known: true, TrueColor: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 10, B: 10}}
 	var bars barCache
 	var composed composedFrameCache
-	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments(), theme: theme}
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments(true), theme: theme}
 	win.tree.Focus = left.id
 	composeClientFrameWithLayoutCached(state, win, true, solveTabLayoutLocked(win), &bars, &composed)
 	left.screen.ClearDamage()
@@ -616,7 +616,7 @@ func TestComposeClientFrameCacheLayoutChangeClearsStaleDividers(t *testing.T) {
 	right.screen.Write([]byte("R"))
 	var bars barCache
 	var composed composedFrameCache
-	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments()}
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments(true)}
 	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
 	composeClientFrameWithLayoutCached(state, win, true, solveTabLayoutLocked(win), &bars, &composed)
 	require.Equal(t, '│', composed.frame.At(20, 1).Rune)
@@ -725,7 +725,7 @@ func TestComposeClientFrameCacheRefreshesStackTitleBars(t *testing.T) {
 	win.panes[p2.id] = p2
 	var bars barCache
 	var composed composedFrameCache
-	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments()}
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments(true)}
 	composeClientFrameWithLayoutCached(state, win, true, solveTabLayoutLocked(win), &bars, &composed)
 	p1.screen.ClearDamage()
 	p2.screen.ClearDamage()

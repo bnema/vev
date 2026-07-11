@@ -198,7 +198,7 @@ type statusTab struct {
 	attention bool
 }
 
-func (s *session) statusSegments() statusSnapshot {
+func (s *session) statusSegments(includeTerminalTitle bool) statusSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	name := s.name
@@ -210,7 +210,7 @@ func (s *session) statusSegments() statusSnapshot {
 		name := tabDisplayName(tb, i)
 		active := i == s.active
 		attention := tb.attention && (!active || tb.attentionVisiblePaint)
-		snap.tabs[i] = statusTab{name: name, paneTitle: tb.focusedPaneTitleLocked(), active: active, attention: attention}
+		snap.tabs[i] = statusTab{name: name, paneTitle: tb.focusedPaneTitle(includeTerminalTitle), active: active, attention: attention}
 	}
 	return snap
 }
@@ -275,7 +275,11 @@ func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 		state.attentionFrame = d.attentionFrame()
 	}
 	if cur != nil {
-		state.status = cur.statusSegments()
+		includeTerminalTitle := true
+		if d != nil {
+			includeTerminalTitle = d.currentTabsConfig().TerminalTitle
+		}
+		state.status = cur.statusSegments(includeTerminalTitle)
 	}
 	if d != nil {
 		state.topRight, state.bottomRight = d.barScriptSnapshot(cur)

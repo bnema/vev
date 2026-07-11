@@ -31,6 +31,8 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	d.floatingConfig.Store(&floating)
 	palette := cfg.Palette
 	d.paletteConfig.Store(&palette)
+	tabs := cfg.Tabs
+	d.tabsConfig.Store(&tabs)
 	d.themeMode.Store(uint32(cfg.Theme))
 	if d.barScripts != nil {
 		d.barScripts.mu.Lock()
@@ -185,6 +187,13 @@ func (d *Daemon) currentPaletteConfig() domain.PaletteConfig {
 		return *cfg
 	}
 	return domain.Defaults().Palette
+}
+
+func (d *Daemon) currentTabsConfig() domain.TabsConfig {
+	if cfg := d.tabsConfig.Load(); cfg != nil {
+		return *cfg
+	}
+	return domain.Defaults().Tabs
 }
 
 func (d *Daemon) currentFloatingConfig() domain.FloatingConfig {

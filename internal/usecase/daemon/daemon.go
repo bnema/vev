@@ -137,6 +137,7 @@ type Daemon struct {
 	restoreProcessAllowlist atomic.Pointer[map[string]struct{}]
 	floatingConfig          atomic.Pointer[domain.FloatingConfig]
 	paletteConfig           atomic.Pointer[domain.PaletteConfig]
+	tabsConfig              atomic.Pointer[domain.TabsConfig]
 	themeMode               atomic.Uint32
 	barScripts              *barScriptState
 	resumeParkGrace         time.Duration

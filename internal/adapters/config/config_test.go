@@ -338,6 +338,9 @@ func TestParse(t *testing.T) {
 			if tt.want.Floating.Width == 0 && tt.want.Floating.Height == 0 {
 				tt.want.Floating = domain.Defaults().Floating
 			}
+			if !tt.want.Tabs.TerminalTitle {
+				tt.want.Tabs = domain.Defaults().Tabs
+			}
 			if tt.want.Snapshot.RestoreProcesses == nil && !tt.want.Snapshot.RestoreProcessesSet {
 				tt.want.Snapshot.RestoreProcesses = append([]string(nil), domain.DefaultSnapshotRestoreProcesses()...)
 			}
@@ -347,6 +350,58 @@ func TestParse(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("Parse() config = %#v, want %#v", got, tt.want)
+			}
+			if !reflect.DeepEqual(warnings, tt.wantWarnings) {
+				t.Fatalf("Parse() warnings = %#v, want %#v", warnings, tt.wantWarnings)
+			}
+		})
+	}
+}
+
+func TestParseTabsTerminalTitle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		input        string
+		want         bool
+		wantWarnings []domain.Warning
+	}{
+		{
+			name:  "on enables terminal title",
+			input: "tabs.terminal-title = on\n",
+			want:  true,
+		},
+		{
+			name:  "off disables terminal title",
+			input: "tabs.terminal-title = off\n",
+			want:  false,
+		},
+		{
+			name:  "invalid value warns and keeps default",
+			input: "tabs.terminal-title = maybe\n",
+			want:  true,
+			wantWarnings: []domain.Warning{
+				{Line: 1, Msg: "invalid tabs.terminal-title \"maybe\""},
+			},
+		},
+		{
+			name:  "absent key keeps default",
+			input: "theme = dark\n",
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, warnings, err := Parse(strings.NewReader(tt.input))
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			if got.Tabs.TerminalTitle != tt.want {
+				t.Fatalf("Parse() Tabs.TerminalTitle = %v, want %v", got.Tabs.TerminalTitle, tt.want)
 			}
 			if !reflect.DeepEqual(warnings, tt.wantWarnings) {
 				t.Fatalf("Parse() warnings = %#v, want %#v", warnings, tt.wantWarnings)

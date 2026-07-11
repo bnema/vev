@@ -58,6 +58,10 @@ floating.command =
 floating.width = 80%
 floating.height = 80%
 
+# Include the focused pane's OSC terminal title in tab labels (top bar and
+# session picker). The process name always shows; off keeps only that.
+tabs.terminal-title = on
+
 # Rebindable actions. Leave a line out to keep its built-in binding.
 open-palette = alt+space
 toggle-floating-pane = alt+f
@@ -117,6 +121,8 @@ Configuring an action replaces all of its built-in aliases. In the example above
 Key specs support `alt+<char>`, `alt+space`, and `alt+left/right/up/down`; digit key specs support `alt+1` through `alt+9`, not `alt+0`. `jump-attention` first opens the oldest attention tab in the current session; if none exists, it opens the oldest attention tab in another session. Invalid entries are logged as warnings and skipped where possible; duplicate config keys use the last value, binding conflicts keep the later action's defaults, and command-code conflicts drop the conflicting override.
 
 `floating.command` runs through the normal shell; leave it empty to launch that shell directly. `floating.width` and `floating.height` require exact percentages from `1%` through `100%`; invalid values log a warning and leave the last accepted value (or the `80%` default) intact. Reloading does not relaunch or immediately alter an installed floating terminal: a changed command is used on its next launch, while changed dimensions take effect when that terminal is next shown or resized. Only configuration—not floating runtime state—is restored after a daemon restart; restored tabs stay cold until first visited.
+
+`tabs.terminal-title` accepts `on` or `off` and defaults to `on`; invalid values log a warning and keep the last accepted value. Reload applies a changed value live.
 
 ### Command palette anchoring
 
@@ -216,7 +222,7 @@ Each tab also owns one independent floating terminal. It prewarms asynchronously
 
 While visible, the floating terminal receives ordinary input, bracketed paste, mouse input, clipboard-path injection, and scrollback/copy mode. Global vev bindings remain active, and a bare Esc is passed to the floating application. `Alt+f` and `FLT` toggle visibility; there is no separate floating-pane close command.
 
-The top bar shows each tab as `name (title)`, where the name is the tab's rename or number and the title is the focused pane's `ProcessName: ProcessTerminalTitle`. Labels share the row width: when everything fits they render in full, otherwise unused space flows from short tabs to long ones and long labels are ellipsized, degrading to the bare tab name when space runs out. The bottom bar shows the active session followed by recent sessions, fading toward older entries. Ephemeral sessions are marked with `*`, for example `0*`.
+The top bar shows each tab as `name (title)`, where the name is the tab's rename or number and the title is the focused pane's `ProcessName: ProcessTerminalTitle`. Set `tabs.terminal-title = off` to drop the `ProcessTerminalTitle` half from tab labels (top bar and session picker) and show only the process name; floating and stacked pane title bars are unaffected. Labels share the row width: when everything fits they render in full, otherwise unused space flows from short tabs to long ones and long labels are ellipsized, degrading to the bare tab name when space runs out. The bottom bar shows the active session followed by recent sessions, fading toward older entries. Ephemeral sessions are marked with `*`, for example `0*`.
 
 ## Scrollback mode and copy
 

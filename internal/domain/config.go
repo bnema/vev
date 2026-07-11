@@ -61,6 +61,13 @@ type FloatingConfig struct {
 	Height  int
 }
 
+// TabsConfig contains tab label display settings.
+type TabsConfig struct {
+	// TerminalTitle includes the focused pane's OSC terminal title in tab
+	// labels (top bar and session picker). The process name always shows.
+	TerminalTitle bool
+}
+
 // Config is the user-editable vev configuration after parsing. Unknown binding
 // keys are preserved here (in BindingEntries, in file order) so the usecase
 // layer can decide which actions it understands.
@@ -72,6 +79,7 @@ type Config struct {
 	Snapshot       SnapshotConfig
 	Palette        PaletteConfig
 	Floating       FloatingConfig
+	Tabs           TabsConfig
 }
 
 // Warning describes a non-fatal config problem. Parsers and reloaders should
@@ -98,6 +106,9 @@ func Defaults() Config {
 		Floating: FloatingConfig{
 			Width:  80,
 			Height: 80,
+		},
+		Tabs: TabsConfig{
+			TerminalTitle: true,
 		},
 	}
 }

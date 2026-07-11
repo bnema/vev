@@ -117,13 +117,43 @@ func TestStatusSegmentsIncludesFocusedPaneTitle(t *testing.T) {
 	pane1.title.terminalTitle = "build output"
 	pane1.mu.Unlock()
 
-	snap := sess.statusSegments()
+	snap := sess.statusSegments(true)
 
 	require.Len(t, snap.tabs, 2)
 	require.Equal(t, "1", snap.tabs[0].name)
 	require.Equal(t, "vim", snap.tabs[0].paneTitle)
 	require.Equal(t, "logs", snap.tabs[1].name)
 	require.Equal(t, "build output", snap.tabs[1].paneTitle)
+}
+
+func TestStatusSegmentsOmitsTerminalTitleWhenDisabled(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	_, sess, _, _ := newManualSessionWithPTYs(t, p1, p2)
+	defer releasePTY1()
+	defer releasePTY2()
+
+	sess.tabs[1].name = "logs"
+
+	pane0 := sess.tabs[0].focusedPane()
+	pane0.mu.Lock()
+	pane0.title.processName = "vim"
+	pane0.title.processNameValid = true
+	pane0.title.terminalTitle = "server.go — vev"
+	pane0.mu.Unlock()
+
+	pane1 := sess.tabs[1].focusedPane()
+	pane1.mu.Lock()
+	pane1.title.terminalTitle = "build output"
+	pane1.mu.Unlock()
+
+	snap := sess.statusSegments(false)
+
+	require.Len(t, snap.tabs, 2)
+	require.Equal(t, "1", snap.tabs[0].name)
+	require.Equal(t, "vim", snap.tabs[0].paneTitle, "OSC title must be omitted while process name still shows")
+	require.Equal(t, "logs", snap.tabs[1].name)
+	require.Equal(t, "sh", snap.tabs[1].paneTitle, "no process name and terminal title disabled falls back to the shell fallback")
 }
 
 func TestFitTabLabels(t *testing.T) {
@@ -234,7 +264,7 @@ func TestStatusCompositionUsesTruecolorTheme(t *testing.T) {
 		Known:      true,
 	})
 
-	bars := barState{status: sess.statusSegments(), theme: ac.getTheme()}
+	bars := barState{status: sess.statusSegments(true), theme: ac.getTheme()}
 	frame, damage := composeClientFrameWithState(bars, win, true)
 	out, err := renderer.New(renderer.Capabilities{}).Draw(frame, damage)
 
@@ -720,7 +750,7 @@ func TestTopBarRendersAttentionBell(t *testing.T) {
 	sess.tabs[1].attentionAt = time.Unix(10, 0)
 	sess.mu.Unlock()
 
-	frame, _ := composeClientFrameWithState(barState{status: sess.statusSegments(), attentionFrame: 1}, win, true)
+	frame, _ := composeClientFrameWithState(barState{status: sess.statusSegments(true), attentionFrame: 1}, win, true)
 
 	// Tab 2's label is enriched with its focused pane's title ("sh", the
 	// default shell fallback) and truncated to fit alongside the bell.

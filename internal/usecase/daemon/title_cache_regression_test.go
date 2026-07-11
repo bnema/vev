@@ -15,7 +15,7 @@ func TestComposeClientFrameCachePrunesTitleGenerationsAfterLayoutChurn(t *testin
 	first := win.focusedPane()
 	var bars barCache
 	var composed composedFrameCache
-	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments()}
+	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments(true)}
 
 	for i := 0; i < 8; i++ {
 		id := layout.PaneID(fmt.Sprintf("pane-%d", i+2))
