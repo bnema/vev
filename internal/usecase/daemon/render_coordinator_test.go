@@ -532,6 +532,44 @@ func TestRenderCoordinatorConcurrentSynchronizedPaneBatches(t *testing.T) {
 	})
 }
 
+func TestRenderCoordinatorSyncGateFollowsDynamicRenderability(t *testing.T) {
+	t.Run("inactive batch that becomes active gates activation output until end", func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		var visible atomic.Bool
+		p := &pane{}
+		h.rc.noteSyncBeginWithRenderability(p, 1, visible.Load)
+		visible.Store(true)
+		h.rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "activation"})
+		for _, timer := range h.armedTimers(t) {
+			timer.ch <- time.Time{}
+		}
+		requireNoWake(t, h.wakes)
+
+		h.rc.noteSyncEnd(p, 1)
+		w := awaitWake(t, h.wakes)
+		require.True(t, w.urgent)
+		requireNoWake(t, h.wakes)
+	})
+
+	t.Run("hidden batch does not stall newly active output or wake on late end", func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		var visible atomic.Bool
+		visible.Store(true)
+		p := &pane{}
+		h.rc.noteSyncBeginWithRenderability(p, 1, visible.Load)
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "batch"})
+		visible.Store(false)
+		h.rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "new-active-tab"})
+		timers := h.armedTimers(t)
+		require.NotEmpty(t, timers)
+		timers[len(timers)-1].ch <- time.Time{}
+		w := awaitWake(t, h.wakes)
+		require.False(t, w.watchdog)
+		h.rc.noteSyncEnd(p, 1)
+		requireNoWake(t, h.wakes)
+	})
+}
+
 func TestRenderCoordinatorSynchronizedOutput(t *testing.T) {
 	t.Run("completion flushes pending state in one wake", func(t *testing.T) {
 		h := newCoordinatorHarness(t)
