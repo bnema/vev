@@ -18,6 +18,7 @@ type attachedClient struct {
 	tr                    ports.Transport
 	output                *outputStateStream
 	overlays              *overlayRuntime
+	overlayOnce           sync.Once
 	clientID              [16]byte
 	resumeCapable         bool
 	resumeToken           uint64
@@ -92,9 +93,7 @@ func (ac *attachedClient) cancelResizePaint() {
 }
 
 func (ac *attachedClient) initOverlays() {
-	if ac.overlays == nil {
-		ac.overlays = newOverlayRuntime(ac)
-	}
+	ac.overlayOnce.Do(func() { ac.overlays = newOverlayRuntime(ac) })
 }
 
 func (ac *attachedClient) currentSession() *session { return ac.sess.Get() }
