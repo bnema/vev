@@ -93,6 +93,7 @@ func (m *Model) ArgumentCommand() (command.Command, bool) {
 	}
 	return ArgumentCommand(m.commands, m.Query())
 }
+
 func (m *Model) Matches() []Match {
 	if m == nil {
 		return nil
@@ -178,6 +179,7 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 			codeWidth = len([]rune(match.Command.Code))
 		}
 	}
+	activeCmd, activeOK := m.ArgumentCommand()
 	for y := range visible {
 		idx := m.scroll + y
 		if idx >= len(m.matches) {
@@ -211,10 +213,8 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 			x++
 		}
 		description := match.Command.Desc
-		if opts.Guidance != "" && match.Command.ContextHint != command.ContextHintNone && m.Query() != "" {
-			if active, ok := m.ArgumentCommand(); ok && active.Code == match.Command.Code {
-				description = opts.Guidance
-			}
+		if opts.Guidance != "" && activeOK && match.Command.ContextHint != command.ContextHintNone && activeCmd.Code == match.Command.Code {
+			description = opts.Guidance
 		}
 		ui.DrawText(frame, x, y+start, frame.Width, description, mergePaletteDescStyle(style, desc))
 	}

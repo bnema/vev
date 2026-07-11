@@ -180,7 +180,7 @@ Some terminals encode Alt+Space as a non-breaking space instead of `ESC Space`; 
 
 Open the palette with Alt+Space. Type a command code or fuzzy-match the label/description. Use Up/Down or Ctrl-N/Ctrl-P to move, Enter to run, and Esc/Ctrl-C to close.
 
-Successful commands are promoted near the top the next time the palette opens. `BSK` toggles only this client's previously active session. Type an exact `JRS` token to show the current interaction's immutable recent-session ranks; `JRS N` jumps to rank N. Invalid or stale ranks leave the palette open.
+Successful commands are promoted near the top the next time the palette opens. `BSK` toggles back to your previously active session. Typing `JRS` lists recent sessions by number in the status bar, and `JRS N` jumps to number N; the numbers are captured when you start typing, so a busy MRU list never shifts under you. An invalid or stale number leaves the palette open.
 
 | Code | Action |
 |---|---|

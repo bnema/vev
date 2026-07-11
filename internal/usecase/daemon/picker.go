@@ -378,7 +378,6 @@ func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker
 		return false
 	}
 	if old != nil && old != ac {
-
 		d.unregisterPreview(old)
 		old.clearPreviousSession()
 		old.setSession(nil)

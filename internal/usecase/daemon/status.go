@@ -281,9 +281,7 @@ func (d *Daemon) barStateForContextual(cur *session, copyFeedback string, ranked
 
 func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 	state := d.barStateBase(cur, copyFeedback)
-	if d != nil {
-		state.mru = d.recentSessions(cur)
-	}
+	state.mru = d.recentSessions(cur)
 	return state
 }
 
