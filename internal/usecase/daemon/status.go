@@ -434,14 +434,7 @@ func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []string {
 		default:
 			labels[i] = ui.TruncateText(tabs[i].name, textBudget)
 		}
-		consumed := overhead[i]
-		if tb := textBudget; tb > 0 {
-			if widths[i] < tb {
-				consumed += widths[i]
-			} else {
-				consumed += tb
-			}
-		}
+		consumed := overhead[i] + min(widths[i], max(textBudget, 0))
 		remaining -= consumed
 		remainingTabs--
 	}
