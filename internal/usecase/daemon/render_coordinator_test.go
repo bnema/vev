@@ -338,6 +338,57 @@ func TestRenderCoordinatorAckGateBlocksCompositionUntilAck(t *testing.T) {
 
 // --- synchronized output ---------------------------------------------------------
 
+func TestRenderCoordinatorConcurrentSynchronizedPaneBatches(t *testing.T) {
+	t.Run("end orders, watchdogs, and stale callbacks are isolated per pane", func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		firstForced, secondForced := make(chan struct{}, 1), make(chan struct{}, 1)
+
+		// Distinct generations model distinct panes. The coordinator must retain
+		// both batches rather than letting the later begin replace the first.
+		h.rc.noteSyncBegin(11, func() { firstForced <- struct{}{} })
+		firstWatchdog := h.armedTimers(t)[0]
+		h.rc.noteSyncBegin(22, func() { secondForced <- struct{}{} })
+		secondWatchdog := h.armedTimers(t)[0]
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+
+		// Completing either pane leaves the aggregate gate closed.
+		h.rc.noteSyncEnd(11)
+		requireNoWake(t, h.wakes)
+		// A stale callback for the completed pane must not force it or wake.
+		firstWatchdog.ch <- time.Time{}
+		select {
+		case <-firstForced:
+			t.Fatal("stale watchdog forced a completed pane")
+		default:
+		}
+		requireNoWake(t, h.wakes)
+
+		// The remaining pane's watchdog forces only its own batch, then the
+		// aggregate completion produces exactly one urgent wake.
+		secondWatchdog.ch <- time.Time{}
+		<-secondForced
+		w := awaitWake(t, h.wakes)
+		require.True(t, w.watchdog)
+		requireNoWake(t, h.wakes)
+	})
+
+	t.Run("later pane can end first without releasing an earlier pane", func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		firstForced := make(chan struct{}, 1)
+		h.rc.noteSyncBegin(11, func() { firstForced <- struct{}{} })
+		firstWatchdog := h.armedTimers(t)[0]
+		h.rc.noteSyncBegin(22)
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+
+		h.rc.noteSyncEnd(22)
+		requireNoWake(t, h.wakes)
+		firstWatchdog.ch <- time.Time{}
+		<-firstForced
+		require.True(t, awaitWake(t, h.wakes).watchdog)
+		requireNoWake(t, h.wakes)
+	})
+}
+
 func TestRenderCoordinatorSynchronizedOutput(t *testing.T) {
 	t.Run("completion flushes pending state in one wake", func(t *testing.T) {
 		h := newCoordinatorHarness(t)
