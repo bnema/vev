@@ -370,7 +370,7 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 	d.refreshSessionFocusedTitles(sess)
 	bars := d.barStateForClient(sess, ac, overlays.copyFeedback)
 	bars.theme = ac.getTheme()
-	_, attentionVisible := pulseStyle(bars.attentionFrame)
+	attentionVisible := pulseVisible(bars.attentionFrame)
 	repaintAttachedClients = sess.ackAttention(tb, attentionVisible)
 
 	styles := newThemeStyles(ac.getTheme())
@@ -576,16 +576,42 @@ type themeStyles struct {
 	selection   renderer.Style
 	copyStatus  renderer.Style
 	paletteDesc renderer.Style
+
+	// Top bar tab label segments: name (bold) and parenthesized pane-title
+	// (muted), one pair per base style. No-ops to statusBar/accent on
+	// non-truecolor themes.
+	tabName        renderer.Style
+	tabNameActive  renderer.Style
+	tabTitle       renderer.Style
+	tabTitleActive renderer.Style
+
+	// Session picker row segments. Detail reuses paletteDesc (both are
+	// themeui.MutedTextStyle(t)); pickerName/pickerSelection* are picker-only.
+	pickerName           renderer.Style
+	pickerSelectionName  renderer.Style
+	pickerSelectionMuted renderer.Style
 }
 
 func newThemeStyles(t themeui.Theme) themeStyles {
+	statusBar := themeui.StatusBarStyle(t)
+	accent := themeui.AccentStyle(t)
+	selection := themeui.SelectionStyle(t)
 	return themeStyles{
-		statusBar:   themeui.StatusBarStyle(t),
-		accent:      themeui.AccentStyle(t),
+		statusBar:   statusBar,
+		accent:      accent,
 		border:      themeui.BorderStyle(t),
-		selection:   themeui.SelectionStyle(t),
-		copyStatus:  themeui.SelectionStyle(t),
+		selection:   selection,
+		copyStatus:  selection,
 		paletteDesc: themeui.MutedTextStyle(t),
+
+		tabName:        themeui.EmphasisStyle(statusBar, t),
+		tabNameActive:  themeui.EmphasisStyle(accent, t),
+		tabTitle:       themeui.MutedVariantStyle(statusBar, t),
+		tabTitleActive: themeui.MutedVariantStyle(accent, t),
+
+		pickerName:           themeui.EmphasisStyle(renderer.DefaultStyle(), t),
+		pickerSelectionName:  themeui.EmphasisStyle(selection, t),
+		pickerSelectionMuted: themeui.MutedVariantStyle(selection, t),
 	}
 }
 

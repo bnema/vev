@@ -17,9 +17,36 @@ const (
 type SessionView struct {
 	ID      domain.SessionID
 	Name    string
-	Tabs    []string
+	Tabs    []TabEntry
 	Active  int
 	Stopped bool
+}
+
+// TabEntry is one tab row; Name is drawn emphasized, Detail muted.
+type TabEntry struct {
+	Name      string // tab display name
+	Detail    string // " (paneTitle)" or "", drawn muted
+	Attention bool   // draw the attention marker right after Name, before Detail
+}
+
+// RenderStyles are the styles Render uses to draw list rows. The zero value
+// (all renderer.Style{}) is never used directly; Render falls back to
+// defaultRenderStyles when no RenderStyles is supplied, mirroring the styling
+// of a non-truecolor client.
+type RenderStyles struct {
+	Selection      renderer.Style // selected row fill + suffixes
+	SelectionName  renderer.Style // selected row name segment
+	SelectionMuted renderer.Style // selected row detail segment
+	Name           renderer.Style // non-selected name segment
+	Detail         renderer.Style // non-selected detail segment
+	Base           renderer.Style // non-selected fill + suffixes
+}
+
+func defaultRenderStyles() RenderStyles {
+	selection := renderer.DefaultStyle()
+	selection.Inverse = true
+	base := renderer.DefaultStyle()
+	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Base: base}
 }
 
 type Target struct {
@@ -46,30 +73,34 @@ type Model struct {
 }
 
 type row struct {
-	header   bool
-	label    string
-	session  domain.SessionID
-	name     string
-	tabIndex int
-	stopped  bool
+	header    bool
+	dispName  string // display name segment; bold on truecolor
+	detail    string // " (paneTitle)" segment, muted; "" for headers
+	attention bool   // draw the attention marker right after the name, before detail; tab rows only
+	session   domain.SessionID
+	// targetName is the stopped-session lookup name threaded into Target;
+	// distinct from dispName, which is what gets drawn.
+	targetName string
+	tabIndex   int
+	stopped    bool
 }
 
 func New(sessions []SessionView, cur domain.SessionID, curTab int) *Model {
 	m := &Model{selected: -1}
 	activeSelection := -1
 	for _, session := range sessions {
-		name := ""
+		targetName := ""
 		if session.Stopped {
-			name = session.Name
+			targetName = session.Name
 		}
-		m.rows = append(m.rows, row{header: true, label: session.Name, session: session.ID, name: name, tabIndex: -1, stopped: session.Stopped})
+		m.rows = append(m.rows, row{header: true, dispName: session.Name, session: session.ID, targetName: targetName, tabIndex: -1, stopped: session.Stopped})
 		active := session.Active
 		if active < 0 || active >= len(session.Tabs) {
 			active = 0
 		}
 		for i, tab := range session.Tabs {
 			idx := len(m.rows)
-			m.rows = append(m.rows, row{label: tab, session: session.ID, name: name, tabIndex: i, stopped: session.Stopped})
+			m.rows = append(m.rows, row{dispName: tab.Name, detail: tab.Detail, attention: tab.Attention, session: session.ID, targetName: targetName, tabIndex: i, stopped: session.Stopped})
 			if session.ID == cur && i == curTab {
 				m.selected = idx
 			}
@@ -131,7 +162,7 @@ func (m *Model) Selected() (Target, bool) {
 	if r.header {
 		return Target{}, false
 	}
-	return Target{Session: r.session, Name: r.name, TabIndex: r.tabIndex, Stopped: r.stopped}, true
+	return Target{Session: r.session, Name: r.targetName, TabIndex: r.tabIndex, Stopped: r.stopped}, true
 }
 
 func (m *Model) Clone() *Model {
@@ -143,15 +174,14 @@ func (m *Model) Clone() *Model {
 	return &clone
 }
 
-func (m *Model) Render(inner domain.Size, preview Preview, selectedStyle ...renderer.Style) renderer.Frame {
+func (m *Model) Render(inner domain.Size, preview Preview, styles ...RenderStyles) renderer.Frame {
 	frame := renderer.NewFrame(max(inner.Cols, 0), max(inner.Rows, 0))
 	layout := ChooseLayout(inner)
-	selection := renderer.DefaultStyle()
-	selection.Inverse = true
-	if len(selectedStyle) > 0 {
-		selection = selectedStyle[0]
+	styleSet := defaultRenderStyles()
+	if len(styles) > 0 {
+		styleSet = styles[0]
 	}
-	m.renderList(frame, layout.List, selection)
+	m.renderList(frame, layout.List, styleSet)
 	blitPreview(frame, layout.Preview, preview)
 	return frame
 }
@@ -181,32 +211,50 @@ func (m *Model) firstLeaf() int {
 	return -1
 }
 
-func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, selection renderer.Style) {
+// renderList draws each visible row as up to three segments: a name segment
+// (bold when styles came from a truecolor theme), a base-styled attention
+// marker right after the name, and a muted detail segment (tab rows only) —
+// or a base-styled "(stopped)" suffix for stopped session headers. A tight
+// width ellipsizes the detail segment before eating into the name.
+func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles RenderStyles) {
 	if m == nil || rect.Width <= 0 || rect.Height <= 0 {
 		return
 	}
 	visible := min(rect.Height, frame.Height-rect.Y)
 	offset := m.scrollOffset(visible)
+	clipX := rect.X + rect.Width
 	for y := range visible {
 		idx := offset + y
 		if idx >= len(m.rows) {
 			break
 		}
 		r := m.rows[idx]
-		style := renderer.DefaultStyle()
+		base, nameStyle, detailStyle := styles.Base, styles.Name, styles.Detail
 		if idx == m.selected {
-			style = selection
+			base, nameStyle, detailStyle = styles.Selection, styles.SelectionName, styles.SelectionMuted
 		}
-		label := r.label
-		if r.header && r.stopped {
-			label += " (stopped)"
-		}
+		ui.FillRect(frame, domain.Rect{X: rect.X, Y: rect.Y + y, Width: rect.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: base})
+
+		name := r.dispName
 		if !r.header {
-			label = "  " + label
+			name = "  " + name
 		}
-		label = ui.TruncateText(label, rect.Width)
-		ui.FillRect(frame, domain.Rect{X: rect.X, Y: rect.Y + y, Width: rect.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
-		ui.DrawText(frame, rect.X, rect.Y+y, rect.X+rect.Width, label, style)
+		name = ui.TruncateText(name, rect.Width)
+		x := ui.DrawText(frame, rect.X, rect.Y+y, clipX, name, nameStyle)
+
+		if r.header {
+			if r.stopped {
+				ui.DrawText(frame, x, rect.Y+y, clipX, " (stopped)", base)
+			}
+			continue
+		}
+
+		if r.attention {
+			x = ui.DrawText(frame, x, rect.Y+y, clipX, " "+string(ui.AttentionGlyph), base)
+		}
+
+		detail := ui.TruncateText(r.detail, clipX-x)
+		ui.DrawText(frame, x, rect.Y+y, clipX, detail, detailStyle)
 	}
 }
 

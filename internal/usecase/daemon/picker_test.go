@@ -61,9 +61,9 @@ func TestPickerViewsAddsBellSuffixForAttention(t *testing.T) {
 	require.Equal(t, 0, curTab)
 	require.Len(t, views, 2)
 	require.Equal(t, "alpha", views[0].Name)
-	require.Equal(t, []string{"1", "2"}, views[0].Tabs)
+	require.Equal(t, []picker.TabEntry{{Name: "1"}, {Name: "2"}}, views[0].Tabs)
 	require.Equal(t, "beta ", views[1].Name)
-	require.Equal(t, []string{"shell", "logs "}, views[1].Tabs)
+	require.Equal(t, []picker.TabEntry{{Name: "shell"}, {Name: "logs", Attention: true}}, views[1].Tabs)
 }
 
 func TestPickerViewsComposesFocusedPaneTitleWithAttentionSuffix(t *testing.T) {
@@ -88,7 +88,7 @@ func TestPickerViewsComposesFocusedPaneTitleWithAttentionSuffix(t *testing.T) {
 	views, _ := d.pickerViews(sess)
 
 	require.Len(t, views, 1)
-	require.Equal(t, []string{"1 (vim)", attentionSuffix("logs (sh)")}, views[0].Tabs)
+	require.Equal(t, []picker.TabEntry{{Name: "1", Detail: " (vim)"}, {Name: "logs", Detail: " (sh)", Attention: true}}, views[0].Tabs)
 }
 
 func TestPickerViewsOmitsTerminalTitleWhenTabsConfigDisabled(t *testing.T) {
@@ -112,7 +112,7 @@ func TestPickerViewsOmitsTerminalTitleWhenTabsConfigDisabled(t *testing.T) {
 	views, _ := d.pickerViews(sess)
 
 	require.Len(t, views, 1)
-	require.Equal(t, []string{"1 (vim)", "logs (sh)"}, views[0].Tabs)
+	require.Equal(t, []picker.TabEntry{{Name: "1", Detail: " (vim)"}, {Name: "logs", Detail: " (sh)"}}, views[0].Tabs)
 }
 
 func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {
