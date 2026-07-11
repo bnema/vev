@@ -26,7 +26,7 @@ type SessionView struct {
 type TabEntry struct {
 	Name      string // tab display name
 	Detail    string // " (paneTitle)" or "", drawn muted
-	Attention bool   // draw the attention marker after Detail
+	Attention bool   // draw the attention marker right after Name, before Detail
 }
 
 // RenderStyles are the styles Render uses to draw list rows. The zero value
@@ -48,11 +48,6 @@ func defaultRenderStyles() RenderStyles {
 	base := renderer.DefaultStyle()
 	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Base: base}
 }
-
-// attentionGlyph mirrors the bell icon internal/usecase/daemon draws beside
-// tab/session labels with a pending attention event. Duplicated here since
-// picker cannot import daemon.
-const attentionGlyph = ''
 
 type Target struct {
 	Session  domain.SessionID
@@ -81,7 +76,7 @@ type row struct {
 	header    bool
 	dispName  string // display name segment; bold on truecolor
 	detail    string // " (paneTitle)" segment, muted; "" for headers
-	attention bool   // draw the attention marker after detail; tab rows only
+	attention bool   // draw the attention marker right after the name, before detail; tab rows only
 	session   domain.SessionID
 	// targetName is the stopped-session lookup name threaded into Target;
 	// distinct from dispName, which is what gets drawn.
@@ -255,7 +250,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		}
 
 		if r.attention {
-			x = ui.DrawText(frame, x, rect.Y+y, clipX, " "+string(attentionGlyph), base)
+			x = ui.DrawText(frame, x, rect.Y+y, clipX, " "+string(ui.AttentionGlyph), base)
 		}
 
 		detail := ui.TruncateText(r.detail, clipX-x)

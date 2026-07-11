@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/stretchr/testify/require"
 )
@@ -198,7 +199,7 @@ func TestRenderListDrawsNameAndDetailSegmentsWithDistinctStyles(t *testing.T) {
 	require.True(t, frame.At(2, 2).Style.Equal(nameStyle), "name segment style")
 	require.Equal(t, ' ', frame.At(6, 2).Rune, "attention marker leading space")
 	require.True(t, frame.At(6, 2).Style.Equal(baseStyle), "attention marker uses the base style, not muted")
-	require.Equal(t, rune(attentionGlyph), frame.At(7, 2).Rune)
+	require.Equal(t, rune(ui.AttentionGlyph), frame.At(7, 2).Rune)
 	require.True(t, frame.At(7, 2).Style.Equal(baseStyle), "attention marker uses the base style, not muted")
 	require.Equal(t, ' ', frame.At(8, 2).Rune)
 	require.True(t, frame.At(8, 2).Style.Equal(detailStyle), "detail segment style")

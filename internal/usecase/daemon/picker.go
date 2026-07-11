@@ -106,7 +106,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 }
 
 func attentionSuffix(label string) string {
-	return label + " " + string(attentionGlyph)
+	return label + " " + string(ui.AttentionGlyph)
 }
 
 func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {

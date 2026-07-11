@@ -38,7 +38,6 @@ import (
 )
 
 const (
-	attentionGlyph     = ''
 	maxMRUSessions     = 9
 	pulseFrameCount    = 30
 	pulseFrameInterval = 120 * time.Millisecond
@@ -356,7 +355,7 @@ func fitHistoryNav(entries []historyNavSession, rowLen, leftUsed int, feedback s
 		}
 		n := 2 + statusTextWidth(name)
 		if e.attention {
-			n += 1 + renderer.RuneWidth(attentionGlyph)
+			n += 1 + renderer.RuneWidth(ui.AttentionGlyph)
 		}
 		return n
 	}
@@ -430,7 +429,7 @@ func fitTabLabels(tabs []statusTab, rowLen int, rightText string) []fittedTabLab
 		full[i] = composeTabTitle(t.name, t.paneTitle)
 		o := 2
 		if t.attention {
-			o += 1 + renderer.RuneWidth(attentionGlyph)
+			o += 1 + renderer.RuneWidth(ui.AttentionGlyph)
 		}
 		overhead[i] = o
 		widths[i] = statusTextWidth(full[i])
@@ -496,7 +495,7 @@ func fitMRU(entries []mruSession, rowLen, leftUsed int, feedback string) []mruSe
 		}
 		n := 2 + statusTextWidth(name)
 		if e.attention {
-			n += 1 + renderer.RuneWidth(attentionGlyph)
+			n += 1 + renderer.RuneWidth(ui.AttentionGlyph)
 		}
 		return n
 	}
@@ -563,7 +562,7 @@ func writeBell(row []renderer.Cell, x *int, frame int, base renderer.Style) {
 		writeStatusText(row, x, " ", base)
 		return
 	}
-	writeStatusText(row, x, string(attentionGlyph), style)
+	writeStatusText(row, x, string(ui.AttentionGlyph), style)
 }
 
 func writeStatusText(row []renderer.Cell, x *int, text string, style renderer.Style) {

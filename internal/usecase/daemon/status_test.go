@@ -15,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -221,7 +222,7 @@ func TestFitTabLabels(t *testing.T) {
 			for i, tb := range tt.tabs {
 				overhead := 2
 				if tb.attention {
-					overhead += 1 + renderer.RuneWidth(attentionGlyph)
+					overhead += 1 + renderer.RuneWidth(ui.AttentionGlyph)
 				}
 				drawn += overhead + statusTextWidth(got[i].text)
 				require.LessOrEqual(t, got[i].nameLen, len(got[i].text), "nameLen must not exceed the label's byte length")
@@ -329,10 +330,10 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 		// background as its tab's base style.
 		visibleRow := make([]renderer.Cell, rowLen)
 		drawTopBarSnapshot(visibleRow, status, 1, "", styles)
-		require.Equal(t, rune(attentionGlyph), visibleRow[tab1Bell].Rune)
+		require.Equal(t, rune(ui.AttentionGlyph), visibleRow[tab1Bell].Rune)
 		require.True(t, visibleRow[tab1Bell].Style.HasBackgroundRGB)
 		require.Equal(t, styles.accent.BackgroundRGB, visibleRow[tab1Bell].Style.BackgroundRGB, "tab 1's visible bell must keep the active base background")
-		require.Equal(t, rune(attentionGlyph), visibleRow[tab2Bell].Rune)
+		require.Equal(t, rune(ui.AttentionGlyph), visibleRow[tab2Bell].Rune)
 		require.True(t, visibleRow[tab2Bell].Style.HasBackgroundRGB)
 		require.Equal(t, styles.statusBar.BackgroundRGB, visibleRow[tab2Bell].Style.BackgroundRGB, "tab 2's visible bell must keep the plain base background")
 	})
@@ -860,7 +861,7 @@ func TestStatusCopyFeedbackRendersOnlyWhenFullyFits(t *testing.T) {
 }
 
 func TestAttentionConstants(t *testing.T) {
-	require.Equal(t, '', attentionGlyph)
+	require.Equal(t, '', ui.AttentionGlyph)
 	require.Equal(t, 30, pulseFrameCount)
 	require.Equal(t, 120*time.Millisecond, pulseFrameInterval)
 }
@@ -924,9 +925,9 @@ func TestTopBarRendersAttentionBell(t *testing.T) {
 	// Tab 2's label is enriched with its focused pane's title ("sh", the
 	// default shell fallback) and truncated to fit alongside the bell. The
 	// bell sits right after the name, before the (title) segment.
-	require.Contains(t, rowText(frame.Row(0)), "2 "+string(attentionGlyph)+" (s")
+	require.Contains(t, rowText(frame.Row(0)), "2 "+string(ui.AttentionGlyph)+" (s")
 	for _, c := range frame.Row(0) {
-		if c.Rune == attentionGlyph {
+		if c.Rune == ui.AttentionGlyph {
 			require.True(t, c.Style.Bold)
 			return
 		}
@@ -1009,7 +1010,7 @@ func TestStatusBarRendersMRUNamesEphemeralAndInlineBell(t *testing.T) {
 
 	require.Equal(t, " cur  fresh  tmp*      ", rowText(row))
 	for _, c := range row {
-		if c.Rune == attentionGlyph {
+		if c.Rune == ui.AttentionGlyph {
 			require.True(t, c.Style.Bold)
 			return
 		}
