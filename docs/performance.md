@@ -1,43 +1,103 @@
 # Performance methodology (M5)
 
-Enable daemon pprof explicitly with `VEV_PPROF_ADDR=127.0.0.1:6060 vev --daemon` (or by exporting the variable before launching clients). When unset, no debug HTTP server is started.
+This baseline measures in-process daemon work only. It deliberately does **not**
+measure coordinator behavior, chunk encoding, compression, GC tuning, or real
+network latency. Output metrics count frames and encoded output data produced
+by the daemon; snapshot writes and serialized bytes are local snapshot-store
+proxies. These metrics approximate local rendering, IPC payload, and persistence
+work, not a Unix socket, SSH, or UDP transport. Real transport impairment and
+latency benchmarks are deferred.
 
-Run microbenchmarks with:
+## Large-history daemon baseline
+
+Use a single iteration only as a smoke check; it is not suitable for drawing
+performance conclusions:
 
 ```sh
-go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc ./internal/usecase/daemon -run '^$' -bench=. -benchmem
+go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1x -benchmem
 ```
 
-Demo flood workloads are scripted in `scripts/bench-workloads.sh` for `yes`, `seq`, and `cat` styles for raw/tmux runs. vev does not currently support `vev new <name> -- command`, so automated vev workload command overrides are intentionally not documented. Capture bytes/frame and syscalls/frame externally (for example with `strace -c` around the client/daemon) and allocations with `-benchmem`/pprof.
-
-## Local baseline status
-
-Full end-to-end vev-vs-tmux workload baselines are deferred/waived for this non-interactive branch because they require an interactive terminal/daemon pair, external tracing tools around both processes, and (for automated vev flood workloads) future command override support. Until that exists, only start the daemon/client normally and do not claim a scripted vev flood command. tmux/raw comparison commands remain useful for shaping workloads:
+For before/after comparison, collect repeated samples for the **full matrix**
+(all workloads and topologies), pinning CPU/governor and recording the host.
+The benchmark harness must be committed and present in **both** measured
+revisions: collect the baseline after the harness is introduced but before the
+optimization, then collect the optimized revision with that same harness. The
+fixed duration and count make the output suitable for `benchstat`:
 
 ```sh
-VEV_PPROF_ADDR=127.0.0.1:6060 strace -ff -c -o vev-daemon.strace vev --daemon
-strace -ff -c -o vev-client.strace vev new perf-manual
-strace -ff -c -o tmux-yes.strace tmux new-session -d -s perf-yes 'timeout 30s yes'
-strace -ff -c -o tmux-seq.strace tmux new-session -d -s perf-seq 'timeout 30s sh -c "while :; do seq 1 10000; done"'
-strace -ff -c -o tmux-cat.strace tmux new-session -d -s perf-cat 'timeout 30s sh -c "while :; do cat /path/to/sample.txt; done"'
+go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1s -count=5 -benchmem > /tmp/vev-history-after.txt
+benchstat /tmp/vev-history-before.txt /tmp/vev-history-after.txt
 ```
 
-Record host CPU, OS/kernel, terminal emulator, vev commit, tmux version, terminal size, workload duration, raw command lines, syscall summaries, bytes written per rendered frame, and heap profiles or allocation counts before comparing.
+The matrix exercises live paint, snapshot capture, copy-mode entry, copy search,
+and resize at `120x40` client geometry. Each pane is populated with 10,000
+full-width deterministic history rows containing a stable `needle-<tab>-<row>`
+prefix and patterned text. The layouts are:
 
-## UDP mobile congestion behavior
+- 1 tab x 1 pane (control)
+- 1 tab x 4 panes
+- 4 tabs x 1 pane
+- 4 tabs x 4 panes
+- 8 tabs x 1 pane
 
-The datagram transport uses one shared congestion-responsive byte pacer for initial sends and retransmits. Retransmissions therefore consume the same byte budget as new data instead of bypassing congestion feedback. Datagram clients use a one-state output window: the cumulative ACK releases that state, and newer repaint state coalesces while it remains unacknowledged rather than retaining an unbounded queue.
+The fixture starts no PTY readers, schedulers, clocks, or transports. It primes
+the renderer shadow before timing; live paint then alternates fixed writes. The
+reported `outputframes/op` value counts output messages. `outputbytes/op`
+counts their encoded terminal data and excludes the 24-byte output header;
+`framepayloadbytes/op` counts the complete output payload including that header.
+`snapshotwrites/op` and `snapshotbytes/op` are local snapshot-store writes and
+serialized bytes. They must not be presented as network throughput or latency.
 
-Microbenchmarks executed locally for this review using `go test ./internal/adapters/ipc ./internal/usecase/daemon -run '^$' -bench=. -benchmem`:
+Capture a pre-change result outside the repository, including Go and kernel
+context:
 
-| benchmark | methodology |
-| --- | --- |
-| BenchmarkTransportSend | writes encoded frames to an in-memory discard `net.Conn`; allocations reported here are Send-side frame assembly costs. |
-| BenchmarkTransportRecvReuse | reads a pre-encoded frame from a looping in-memory reader; no `Send` call, goroutine, channel, or frame production work runs inside the measured loop, so allocations reported here are Recv-side costs only. |
-| BenchmarkPaintCachedSinglePaneDamage | writes a small damage update into one pane, paints through the daemon compose→diff→send path, and advances the output ACK each iteration so the measured loop does not hit the unacked-output bailout. |
+```sh
+{
+  date -Is
+  go version
+  uname -a
+  git rev-parse HEAD
+  # Smoke only; do not use this result for comparisons.
+  go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1x -benchmem
+  # Repeated full matrix for every workload/topology used in conclusions.
+  go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1s -count=5 -benchmem
+} > /tmp/vev-history-before.txt 2>&1
+```
 
-| workload | vev baseline | tmux baseline | notes |
-| --- | --- | --- | --- |
-| yes | not run in this non-interactive review environment | not run in this non-interactive review environment | use same terminal size and duration |
-| seq | not run in this non-interactive review environment | not run in this non-interactive review environment | use same terminal size and duration |
-| cat | not run in this non-interactive review environment | not run in this non-interactive review environment | use same input file, terminal size, and duration |
+## Immutable document allocation gate
+
+The copy-mode document retains an immutable view of existing scrollback rows and
+clones only the visible frame. Visual-search models share that document; cloning
+a model copies only its mutable input and match state. Check those two paths at
+10,000 history rows with:
+
+```sh
+go test ./internal/usecase/copy ./internal/usecase/visualsearch -run '^$' -bench '^(BenchmarkNewSnapshot10KRows|BenchmarkVisualSearchClone10KRows)$' -benchtime=1s -count=5 -benchmem
+```
+
+Treat `allocs/op` and `B/op` as allocation gates: compare the complete repeated
+output with the accepted baseline before merging, and investigate any increase.
+The automated scaling gates also compare equal row/match counts at narrow and
+wide row widths; `B/op` may grow by at most 2x, a conservative relative
+allowance that catches full cell-row copies without depending on an absolute
+Go-version-specific budget. This scope does not yet include an
+incremental/full-text search index: queries still scan the immutable document
+and produce a fresh match list. Coordinator
+behavior, chunk encoding, compression, GC tuning, and real Unix-socket, SSH, or
+UDP impairment/latency remain out of scope.
+
+## Lower-level smoke baseline
+
+Use this command to check renderer, VT, IPC, and daemon microbenchmarks without
+claiming an end-to-end transport result:
+
+```sh
+go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc -run '^$' -bench=. -benchmem
+go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkComposeFloatingFrameCached$' -benchmem
+```
+
+Enable daemon pprof explicitly when collecting a daemon profile:
+
+```sh
+VEV_PPROF_ADDR=127.0.0.1:6060 vev --daemon
+```

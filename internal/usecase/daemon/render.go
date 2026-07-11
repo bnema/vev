@@ -407,7 +407,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 			copyPane = p
 		}
 		copyTarget := copyTargetRectLocked(layoutSnap, contentArea, copyPane, floating, hasFloating, floatingFrameGeometry)
-		frame, damage = composeCopyClientFrame(overlays.copyMode, copyPane, copyTarget, frame, bars)
+		frame, damage = composeCopyClientFrame(overlays.copyMode, overlays.copySnapshot, copyTarget, frame, bars)
 	}
 	// A palette above normal/copy content dims that composed content. When a
 	// floating pane is present its own backdrop already dims normal pane

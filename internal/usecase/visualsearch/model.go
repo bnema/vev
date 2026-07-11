@@ -18,7 +18,7 @@ type Model struct {
 }
 
 func New(snapshot scopy.Snapshot) *Model {
-	m := &Model{snapshot: cloneSnapshot(snapshot), selected: -1}
+	m := &Model{snapshot: snapshot, selected: -1}
 	m.refresh()
 	return m
 }
@@ -28,7 +28,6 @@ func (m *Model) Clone() *Model {
 		return nil
 	}
 	clone := *m
-	clone.snapshot = cloneSnapshot(m.snapshot)
 	clone.input.SetValue(m.input.Value())
 	clone.matches = append([]scopy.SearchMatch(nil), m.matches...)
 	return &clone
@@ -36,9 +35,9 @@ func (m *Model) Clone() *Model {
 
 func (m *Model) Snapshot() scopy.Snapshot {
 	if m == nil {
-		return scopy.Snapshot{}
+		return scopy.NewSnapshotFromRows(nil, 0, 0)
 	}
-	return cloneSnapshot(m.snapshot)
+	return m.snapshot
 }
 
 func (m *Model) Insert(r rune) {
@@ -144,15 +143,6 @@ func (m *Model) ensureVisible(visible int) {
 	if m.selected >= m.scroll+visible {
 		m.scroll = m.selected - visible + 1
 	}
-}
-
-func cloneSnapshot(s scopy.Snapshot) scopy.Snapshot {
-	clone := s
-	clone.Rows = make([][]renderer.Cell, len(s.Rows))
-	for i, row := range s.Rows {
-		clone.Rows[i] = append([]renderer.Cell(nil), row...)
-	}
-	return clone
 }
 
 func (m *Model) Render(inner domain.Size, selectedStyle ...renderer.Style) renderer.Frame {

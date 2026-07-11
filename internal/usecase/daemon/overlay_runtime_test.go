@@ -113,7 +113,7 @@ func TestOverlayRuntimeHandleInputPrecedence(t *testing.T) {
 func TestOverlayRuntimeSnapshotDoesNotAliasCopySearchState(t *testing.T) {
 	ac := &attachedClient{}
 	ac.initOverlays()
-	snap := scopy.Snapshot{Rows: [][]renderer.Cell{testRow("alpha"), testRow("beta alpha")}, Width: 16, Height: 2}
+	snap := scopy.NewSnapshotFromRows([][]renderer.Cell{testRow("alpha"), testRow("beta alpha")}, 16, 2)
 	mode := scopy.NewMode(snap)
 	require.True(t, mode.Search(snap, "alpha"))
 	search := visualsearch.New(snap)
@@ -145,24 +145,46 @@ func TestOverlayRuntimeHandleInputInactive(t *testing.T) {
 	require.False(t, ac.overlays.HandleInput(&Daemon{}, []byte("x")))
 }
 
-func TestOverlayRuntimeSnapshotCarriesCopyPaneAndClearReleasesIt(t *testing.T) {
+func TestOverlayRuntimeSnapshotCarriesCopyDocumentAndClearReleasesIt(t *testing.T) {
 	ac := &attachedClient{}
 	ac.initOverlays()
 	p := newPane("floating", nil, domain.Size{Cols: 4, Rows: 2})
-	snap := scopy.Snapshot{Rows: [][]renderer.Cell{testRow("row")}, Width: 4, Height: 2}
+	document := scopy.NewSnapshotFromRows([][]renderer.Cell{testRow("row")}, 4, 2)
 
 	ac.overlays.copyMu.Lock()
-	ac.overlays.copyMode = scopy.NewMode(snap)
+	ac.overlays.copyMode = scopy.NewMode(document)
 	ac.overlays.copyPane = p
+	ac.overlays.copySnapshot = &document
 	ac.overlays.copyMu.Unlock()
 
 	renderSnap := ac.overlays.SnapshotForRender()
 	require.Same(t, p, renderSnap.copyPane)
+	require.Same(t, &document, renderSnap.copySnapshot)
 	renderSnap.Unlock()
 
 	ac.overlays.copyMu.Lock()
 	ac.overlays.clearCopyModeLocked()
 	require.Nil(t, ac.overlays.copyPane)
 	require.Nil(t, ac.overlays.copyMode)
+	require.Nil(t, ac.overlays.copySnapshot)
 	ac.overlays.copyMu.Unlock()
+}
+
+func TestOverlayRuntimeCopyDocumentSurvivesRingOverwrite(t *testing.T) {
+	ac := &attachedClient{}
+	ac.initOverlays()
+	history := scopy.NewScrollback(1)
+	history.Append(testRow("before"))
+	document := scopy.NewSnapshot(history, renderer.NewFrame(6, 1))
+
+	ac.overlays.copyMu.Lock()
+	ac.overlays.copyMode = scopy.NewMode(document)
+	ac.overlays.copySnapshot = &document
+	ac.overlays.copyMu.Unlock()
+
+	history.Append(testRow("after"))
+	renderSnap := ac.overlays.SnapshotForRender()
+	defer renderSnap.Unlock()
+	require.Same(t, &document, renderSnap.copySnapshot)
+	require.Equal(t, "before", rowText(renderSnap.copySnapshot.Row(0)))
 }

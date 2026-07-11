@@ -36,7 +36,7 @@ func TestNewTabInitializesScrollback(t *testing.T) {
 			if got := win.focusedPane().scrollback.Len(); got != tt.wantLen {
 				t.Fatalf("scrollback len = %d, want %d", got, tt.wantLen)
 			}
-			row := win.focusedPane().scrollback.Row(0)
+			row := win.focusedPane().scrollback.View().Row(0)
 			runes := make([]rune, len(row))
 			for i, c := range row {
 				runes[i] = c.Rune

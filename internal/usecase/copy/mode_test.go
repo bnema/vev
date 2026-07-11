@@ -10,12 +10,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var benchmarkSnapshotSink Snapshot
+
 func snapshot(lines []string, height int) Snapshot {
 	rows := make([][]renderer.Cell, len(lines))
 	for i, line := range lines {
 		rows[i] = row(line)
 	}
-	return Snapshot{Rows: rows, Width: 16, Height: height}
+	return NewSnapshotFromRows(rows, 16, height)
 }
 
 func inverseRow(text string) []renderer.Cell {
@@ -225,8 +227,7 @@ func TestScrollbackModeStatusDistinguishesPassiveAndVisual(t *testing.T) {
 }
 
 func TestCopyModeSelectionPayloadAndInverse(t *testing.T) {
-	s := snapshot([]string{"alpha   ", "beta    ", "gamma   "}, 2)
-	s.Rows[1] = inverseRow("beta    ")
+	s := NewSnapshotFromRows([][]renderer.Cell{row("alpha   "), inverseRow("beta    "), row("gamma   ")}, 16, 2)
 	m := &Mode{ViewportTop: 0, Cursor: 0, Anchor: 0, Selecting: true}
 	m.Move(s, 1)
 
@@ -274,7 +275,7 @@ func TestCopyModeSelectionFallbackKeepsAlreadyInverseCellInverse(t *testing.T) {
 	// flip it back to non-inverse and hide the highlight.
 	rows := [][]renderer.Cell{row("alpha   "), row("beta    ")}
 	rows[0][0].Style.Inverse = true
-	s := Snapshot{Rows: rows, Width: 16, Height: 2}
+	s := NewSnapshotFromRows(rows, 16, 2)
 	m := &Mode{ViewportTop: 0, Cursor: 0, Anchor: 0, Selecting: true}
 
 	frame := m.Render(s)
@@ -365,7 +366,7 @@ func TestCopyModeSearchUsesDisplayCellOffsetsForWideRows(t *testing.T) {
 		{Rune: 'h'},
 		{Rune: 'a'},
 	}
-	s := Snapshot{Rows: [][]renderer.Cell{row}, Width: 8, Height: 1}
+	s := NewSnapshotFromRows([][]renderer.Cell{row}, 8, 1)
 
 	wideMatches := FindMatches(s, "界")
 	require.Len(t, wideMatches, 1)
@@ -474,6 +475,29 @@ func TestOSC52FromBase64(t *testing.T) {
 				t.Fatalf("OSC52FromBase64(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func BenchmarkNewSnapshot10KRows(b *testing.B) {
+	const (
+		width       = 120
+		height      = 40
+		historyRows = 10_000
+	)
+
+	scrollback := NewScrollback(historyRows)
+	for range historyRows {
+		scrollback.Append(row(strings.Repeat("x", width)))
+	}
+	screen := renderer.NewFrame(width, height)
+	for y := range height {
+		copy(screen.Row(y), row(strings.Repeat("s", width)))
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		benchmarkSnapshotSink = NewSnapshot(scrollback, screen)
 	}
 }
 

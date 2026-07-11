@@ -82,7 +82,7 @@ func TestScrollbackRing(t *testing.T) {
 				t.Fatalf("Len() = %d, want %d", got, tt.wantLen)
 			}
 			for i, want := range tt.wantRows {
-				if got := rowText(sb.Row(i)); got != want {
+				if got := rowText(sb.View().Row(i)); got != want {
 					t.Fatalf("Row(%d) = %q, want %q", i, got, want)
 				}
 			}
@@ -103,10 +103,8 @@ func TestScrollbackCopiesRows(t *testing.T) {
 			sb.Append(r)
 			r[0].Rune = 'z'
 
-			got := sb.Row(0)
-			got[1].Rune = 'y'
-			if text := rowText(sb.Row(0)); text != "ab" {
-				t.Fatalf("stored row = %q, want copy unaffected by caller/read mutation", text)
+			if text := rowText(sb.View().Row(0)); text != "ab" {
+				t.Fatalf("stored row = %q, want copy unaffected by caller mutation", text)
 			}
 		})
 	}
@@ -151,7 +149,7 @@ func TestScrollbackSnapshot(t *testing.T) {
 			}
 			if len(got) > 0 {
 				got[0] = row("zz")
-				if text := rowText(sb.Row(0)); text != tt.wantRows[0] {
+				if text := rowText(sb.View().Row(0)); text != tt.wantRows[0] {
 					t.Fatalf("Snapshot() outer slice mutation changed storage: Row(0) = %q, want %q", text, tt.wantRows[0])
 				}
 			}
@@ -173,5 +171,39 @@ func TestScrollbackAppendDoesNotMutateSnapshottedRows(t *testing.T) {
 	}
 	if text := rowText(snapshot[1]); text != "bb" {
 		t.Fatalf("snapshot[1] after append = %q, want original row", text)
+	}
+}
+
+func TestScrollbackViewSurvivesCompleteRingOverwrite(t *testing.T) {
+	sb := NewScrollback(2)
+	sb.Append(row("aa"))
+	sb.Append(row("bb"))
+	view := sb.View()
+	if &view.Row(0)[0] != &sb.rows[0][0] {
+		t.Fatal("View() deep-copied cells, want shared row storage")
+	}
+
+	sb.Append(row("cc"))
+	sb.Append(row("dd"))
+
+	if got := view.Len(); got != 2 {
+		t.Fatalf("View().Len() = %d, want 2", got)
+	}
+	for i, want := range []string{"aa", "bb"} {
+		if got := rowText(view.Row(i)); got != want {
+			t.Fatalf("View().Row(%d) = %q, want %q", i, got, want)
+		}
+	}
+}
+
+func TestHistoryViewRowBounds(t *testing.T) {
+	sb := NewScrollback(1)
+	sb.Append(row("aa"))
+	view := sb.View()
+
+	for _, i := range []int{-1, 1} {
+		if got := view.Row(i); got != nil {
+			t.Errorf("View().Row(%d) = %v, want nil", i, got)
+		}
 	}
 }

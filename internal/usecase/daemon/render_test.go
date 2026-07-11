@@ -107,12 +107,6 @@ func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
 
 // --- test doubles -----------------------------------------------------------
 
-type discardTransport struct{}
-
-func (discardTransport) Send(ports.Frame) error     { return nil }
-func (discardTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
-func (discardTransport) Close() error               { return nil }
-
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
 
@@ -379,8 +373,8 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 	require.Equal(t, "2222", frameRowString(win.focusedPane().screen.Frame, 0))
 	require.Equal(t, "3333", frameRowString(win.focusedPane().screen.Frame, 1))
 	require.Equal(t, 2, win.focusedPane().scrollback.Len())
-	require.Equal(t, "0000", cellsString(win.focusedPane().scrollback.Row(0)))
-	require.Equal(t, "1111", cellsString(win.focusedPane().scrollback.Row(1)))
+	require.Equal(t, "0000", cellsString(win.focusedPane().scrollback.View().Row(0)))
+	require.Equal(t, "1111", cellsString(win.focusedPane().scrollback.View().Row(1)))
 
 	d.resize(sess, ac, domain.Size{Cols: 6, Rows: 6})
 	require.Equal(t, "2222  ", frameRowString(win.focusedPane().screen.Frame, 0))
@@ -646,36 +640,6 @@ func TestComposeTabFrameCachedTitleBarsDoNotAllocate(t *testing.T) {
 		composeTabFrameIntoWithLayoutOptions(win, frame, domain.Rect{Width: 20, Height: 5}, themeui.Theme{}, layoutSnap, true, false, titleGenerations)
 	})
 	require.Zero(t, allocs, "valid cached title-bar renders must not allocate")
-}
-
-func BenchmarkPaintCachedSinglePaneDamage(b *testing.B) {
-	win := newTab(nil, domain.Size{Cols: 81, Rows: 24})
-	left := win.focusedPane()
-	right := newPane("pane-2", nil, domain.Size{Cols: 40, Rows: 24})
-	win.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(left.id), layout.NewLeaf(right.id)}}
-	win.tree.Focus = right.id
-	win.panes[right.id] = right
-	left.screen.Write([]byte("left"))
-	right.screen.Write([]byte("right"))
-	sess := &session{id: "s", name: "work", tabs: []*tab{win}, active: 0}
-	ac := &attachedClient{tr: discardTransport{}, output: newOutputStateStream(), size: domain.Size{Cols: 81, Rows: 26}}
-	ac.initOverlays()
-	sess.client = ac
-	ac.setSession(sess)
-	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	d.paint(sess, ac, true)
-	left.screen.ClearDamage()
-	right.screen.ClearDamage()
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		right.screen.Write([]byte("x\b"))
-		d.paint(sess, ac, false)
-		// Mirror the client ACK pump so the steady state measures compose→diff→send,
-		// not the ack-gate bailout after maxUnackedOutputStates frames.
-		ac.ackOutputState(ac.output.next)
-	}
 }
 
 func TestComposeTabFrameStackUsesShellFallback(t *testing.T) {
@@ -1455,10 +1419,11 @@ func TestComposeCopyClientFrameOverlaysBaseAtTarget(t *testing.T) {
 	}
 	p := newPane("floating", nil, domain.Size{Cols: 18, Rows: 2})
 	p.screen.Write([]byte("ab\r\ncd"))
-	mode := scopy.NewMode(scopy.NewSnapshot(p.scrollback, p.screen.Frame))
+	document := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+	mode := scopy.NewMode(document)
 	target := domain.Rect{X: 2, Y: 3, Width: 18, Height: 2}
 
-	frame, damage := composeCopyClientFrame(mode, p, target, base, barState{})
+	frame, damage := composeCopyClientFrame(mode, &document, target, base, barState{})
 
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
 	require.Equal(t, "##ab                ", rowText(frame.Row(3)))

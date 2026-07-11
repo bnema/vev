@@ -133,7 +133,7 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 200 {
-			_, _ = composeCopyClientFrame(mode, pane, target, base, bars)
+			_, _ = composeCopyClientFrame(mode, &snap, target, base, bars)
 		}
 	}()
 	wg.Wait()
@@ -152,7 +152,7 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 
 	bars := barState{status: sess.statusSegments()}
 	base, _ := composeClientFrameWithState(bars, tb, true)
-	frame, damage := composeCopyClientFrame(mode, tb.focusedPane(), domain.Rect{X: 0, Y: 1, Width: 12, Height: 3}, base, bars)
+	frame, damage := composeCopyClientFrame(mode, &snap, domain.Rect{X: 0, Y: 1, Width: 12, Height: 3}, base, bars)
 
 	require.Equal(t, 80, frame.Width)
 	require.Equal(t, 25, frame.Height)
@@ -412,7 +412,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		return len(scopy.NewSnapshot(p.scrollback, p.screen.Frame).Rows) >= 12
+		return scopy.NewSnapshot(p.scrollback, p.screen.Frame).Len() >= 12
 	}, 2*time.Second, 5*time.Millisecond)
 
 	sess := firstSession(d)
@@ -546,7 +546,8 @@ func TestCopyModeLoneEscapeExitsAfterDelay(t *testing.T) {
 }
 
 func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
-	p, _ := newBlockingPTY(t)
+	p, release := newBlockingPTY(t)
+	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	clk := &signalClock{timers: make(chan *signalTimer, 1)}
 	d.clock = clk
@@ -559,6 +560,14 @@ func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
 	timer := <-clk.timers
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
+
+	ac.overlays.copyMu.Lock()
+	require.Nil(t, ac.overlays.copyESC.timer)
+	require.Nil(t, ac.overlays.copyESC.done)
+	require.Empty(t, ac.overlays.copyPending)
+	ac.overlays.copyMu.Unlock()
+	d.handleInput(sess, ac, []byte("x"))
+	require.True(t, ac.overlays.copyActive(), "pending input from the replaced mode affected the new mode")
 
 	timer.ch <- time.Now()
 	require.Never(t, func() bool {
@@ -605,6 +614,29 @@ func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
 				t.Fatalf("empty yank repaint = %q, want live full repaint", string(msg.Data))
 			}
 		})
+	}
+}
+
+func TestHandleCopyInputUsesImmutableSnapshotWithoutPaneLock(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	pane := sess.activeTab().focusedPane()
+	pane.screen.Write([]byte("live"))
+	d.enterCopyMode(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	pane.mu.Lock()
+	defer pane.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		d.handleCopyInput(ac, []byte("x"))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("immutable copy input waited for the live pane lock")
 	}
 }
 
@@ -730,7 +762,7 @@ func TestFloatingCopyModeWheelUsesCapturedSnapshot(t *testing.T) {
 	}
 	fp.screen.Write([]byte("live"))
 	fp.mu.Lock()
-	total := len(scopy.NewSnapshot(fp.scrollback, fp.screen.Frame).Rows)
+	total := scopy.NewSnapshot(fp.scrollback, fp.screen.Frame).Len()
 	fp.mu.Unlock()
 
 	d.enterCopyMode(sess, ac)
