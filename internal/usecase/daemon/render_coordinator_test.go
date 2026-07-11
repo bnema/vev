@@ -101,7 +101,8 @@ func TestRenderCoordinatorTimerCallbacksReenterCoordinator(t *testing.T) {
 	rc.invalidate(renderInvalidation{class: invalidateOutput}) // normal arm
 	rc.invalidate(renderInvalidation{class: invalidateUrgent}) // urgent promotion
 	rc.noteSyncBegin(nil, 1)                                   // sync arm
-	rc.noteDetach(ac)                                          // cancel and stop
+	rc.noteDetach(ac)                                          // cancel normal deadline only
+	rc.noteSyncPaneRemoved(nil)                                // pane destruction cancels sync watchdog
 }
 
 // coordinatorHarness wires one coordinator to generated clock/timer mocks and
@@ -1330,31 +1331,98 @@ func TestRenderCoordinatorInertTimerFiresSynchronouslyWithoutWorker(t *testing.T
 	rc.mu.Unlock()
 }
 
-func TestRenderCoordinatorStopsInertSyncTimerWorkers(t *testing.T) {
-	lifecycle := []struct {
-		name string
-		end  func(*renderCoordinator, *attachedClient)
-	}{
-		{"detach", func(rc *renderCoordinator, ac *attachedClient) { rc.noteDetach(ac) }},
-		{"park", func(rc *renderCoordinator, ac *attachedClient) { rc.notePark(ac) }},
-		{"teardown", func(rc *renderCoordinator, _ *attachedClient) { rc.noteSessionTeardown() }},
-	}
-	for _, tc := range lifecycle {
-		t.Run(tc.name, func(t *testing.T) {
-			clk := newInertCoordinatorMockClock(t, 2)
-			rc := newRenderCoordinator(renderCoordinatorOptions{clock: clk.clock})
-			ac := &attachedClient{}
-			rc.attach(ac)
-			rc.noteSyncBegin(nil, 1)
-			syncTimer := <-clk.timers
-			rc.mu.Lock()
-			syncDone := rc.syncBatches[nil].done
-			rc.mu.Unlock()
-			tc.end(rc, ac)
-			syncTimer.mock.AssertNumberOfCalls(t, "Stop", 1)
-			requireWorkerExit(t, syncDone)
-		})
-	}
+func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
+	t.Run("detach and park retain a gated headless preview until complete", func(t *testing.T) {
+		for _, transition := range []struct {
+			name string
+			run  func(*renderCoordinator, *attachedClient)
+		}{
+			{"detach", func(rc *renderCoordinator, ac *attachedClient) { rc.noteDetach(ac) }},
+			{"park", func(rc *renderCoordinator, ac *attachedClient) { rc.notePark(ac) }},
+		} {
+			t.Run(transition.name, func(t *testing.T) {
+				h := newCoordinatorHarness(t)
+				target, viewer, p := &attachedClient{}, &attachedClient{}, &pane{}
+				h.rc.attach(target)
+				h.rc.subscribePreviewFor(viewer, func(w renderWake) { h.previews <- w })
+				h.rc.noteSyncBegin(p, 1)
+				watchdog := h.armedTimers(t)[0]
+				transition.run(h.rc, target)
+
+				// PTY-owned output remains visible to picker observers while the
+				// target attachment is parked. Its deadline must retain the sync gate.
+				h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "complete preview"})
+				timers := h.armedTimers(t)
+				require.Len(t, timers, 1)
+				timers[0].ch <- time.Time{}
+				requireNoWake(t, h.previews)
+
+				h.rc.mu.Lock()
+				require.Same(t, h.rc.syncBatches[p].timer, watchdog.mock)
+				h.rc.mu.Unlock()
+				h.rc.noteSyncEnd(p, 1)
+				preview := awaitWake(t, h.previews)
+				preview.attachment = nil
+				preview.attachmentEpoch = 0
+				require.Equal(t, renderWake{urgent: true, coalesced: 1}, preview)
+				requireNoWake(t, h.previews)
+				requireNoWake(t, h.wakes)
+			})
+		}
+	})
+
+	t.Run("replacement first paint waits for active batch and rejects stale owner", func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		old, replacement, p := &attachedClient{}, &attachedClient{}, &pane{}
+		h.rc.attach(old)
+		h.rc.noteSyncBegin(p, 1)
+		watchdog := h.armedTimers(t)[0]
+		h.rc.noteReplace(old, replacement, false)
+		require.False(t, h.rc.markAttachmentReady(old), "old attachment Welcome is stale")
+		require.True(t, h.rc.markAttachmentReady(replacement))
+
+		h.rc.invalidateForAttachment(old, renderInvalidation{class: invalidateUrgent, producer: "stale old attachment"})
+		require.Empty(t, h.armedTimers(t))
+		h.rc.invalidateForAttachment(replacement, renderInvalidation{class: invalidateUrgent, reset: true, producer: "replacement first paint"})
+		timers := h.armedTimers(t)
+		require.Len(t, timers, 1)
+		timers[0].ch <- time.Time{}
+		requireNoWake(t, h.wakes)
+
+		h.rc.mu.Lock()
+		require.Same(t, h.rc.syncBatches[p].timer, watchdog.mock)
+		h.rc.mu.Unlock()
+		h.rc.noteSyncEnd(p, 1)
+		wake := awaitWake(t, h.wakes)
+		require.True(t, wake.reset)
+		require.True(t, wake.urgent)
+		require.Same(t, replacement, wake.attachment)
+		requireNoWake(t, h.wakes)
+	})
+
+	t.Run("pane removal and session teardown cancel sync workers", func(t *testing.T) {
+		for _, lifecycle := range []struct {
+			name string
+			end  func(*renderCoordinator, *pane)
+		}{
+			{"pane removal", func(rc *renderCoordinator, p *pane) { rc.noteSyncPaneRemoved(p) }},
+			{"session teardown", func(rc *renderCoordinator, _ *pane) { rc.noteSessionTeardown() }},
+		} {
+			t.Run(lifecycle.name, func(t *testing.T) {
+				clk := newInertCoordinatorMockClock(t, 2)
+				rc := newRenderCoordinator(renderCoordinatorOptions{clock: clk.clock})
+				p := &pane{}
+				rc.noteSyncBegin(p, 1)
+				syncTimer := <-clk.timers
+				rc.mu.Lock()
+				syncDone := rc.syncBatches[p].done
+				rc.mu.Unlock()
+				lifecycle.end(rc, p)
+				syncTimer.mock.AssertNumberOfCalls(t, "Stop", 1)
+				requireWorkerExit(t, syncDone)
+			})
+		}
+	})
 }
 
 func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
