@@ -81,12 +81,3 @@ func (v HistoryView) Row(i int) []renderer.Cell {
 	}
 	return v.rows[i]
 }
-
-// Row returns a copy of the retained row at logical index i, oldest first.
-func (s *Scrollback) Row(i int) []renderer.Cell {
-	if i < 0 || i >= s.len || len(s.rows) == 0 {
-		return nil
-	}
-	row := s.rows[(s.head+i)%len(s.rows)]
-	return append([]renderer.Cell(nil), row...)
-}

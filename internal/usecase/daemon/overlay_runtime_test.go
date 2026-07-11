@@ -113,7 +113,7 @@ func TestOverlayRuntimeHandleInputPrecedence(t *testing.T) {
 func TestOverlayRuntimeSnapshotDoesNotAliasCopySearchState(t *testing.T) {
 	ac := &attachedClient{}
 	ac.initOverlays()
-	snap := scopy.Snapshot{Rows: [][]renderer.Cell{testRow("alpha"), testRow("beta alpha")}, Width: 16, Height: 2}
+	snap := scopy.NewSnapshotFromRows([][]renderer.Cell{testRow("alpha"), testRow("beta alpha")}, 16, 2)
 	mode := scopy.NewMode(snap)
 	require.True(t, mode.Search(snap, "alpha"))
 	search := visualsearch.New(snap)
@@ -149,7 +149,7 @@ func TestOverlayRuntimeSnapshotCarriesCopyPaneAndClearReleasesIt(t *testing.T) {
 	ac := &attachedClient{}
 	ac.initOverlays()
 	p := newPane("floating", nil, domain.Size{Cols: 4, Rows: 2})
-	snap := scopy.Snapshot{Rows: [][]renderer.Cell{testRow("row")}, Width: 4, Height: 2}
+	snap := scopy.NewSnapshotFromRows([][]renderer.Cell{testRow("row")}, 4, 2)
 
 	ac.overlays.copyMu.Lock()
 	ac.overlays.copyMode = scopy.NewMode(snap)

@@ -403,7 +403,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		return len(scopy.NewSnapshot(p.scrollback, p.screen.Frame).Rows) >= 12
+		return scopy.NewSnapshot(p.scrollback, p.screen.Frame).Len() >= 12
 	}, 2*time.Second, 5*time.Millisecond)
 
 	sess := firstSession(d)
@@ -721,7 +721,7 @@ func TestFloatingCopyModeWheelUsesCapturedSnapshot(t *testing.T) {
 	}
 	fp.screen.Write([]byte("live"))
 	fp.mu.Lock()
-	total := len(scopy.NewSnapshot(fp.scrollback, fp.screen.Frame).Rows)
+	total := scopy.NewSnapshot(fp.scrollback, fp.screen.Frame).Len()
 	fp.mu.Unlock()
 
 	d.enterCopyMode(sess, ac)

@@ -277,7 +277,7 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 			rt.copyMu.Lock()
 			mode := scopy.NewMode(snap)
 			mode.StartSelectionAt(snap, pressTop+pressRow)
-			mode.ExtendTo(snap, len(snap.Rows)-snap.Height+ev.Row)
+			mode.ExtendTo(snap, snap.Len()-snap.Height+ev.Row)
 			rt.copyMode = mode
 			rt.copyPane = p
 			rt.copyPressRow = pressTop + pressRow

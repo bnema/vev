@@ -15,29 +15,52 @@ import (
 // specific continuation protocol is supported.
 const OSC52MaxPayloadBytes = 75_000
 
-// Snapshot is the scrollback-mode document: scrollback followed by the live screen.
+// Snapshot is the immutable scrollback-mode document: history followed by the
+// visible screen. History rows are immutable by Scrollback's append contract;
+// the visible frame is cloned once when the snapshot is constructed.
 type Snapshot struct {
-	Rows   [][]renderer.Cell
-	Width  int
-	Height int
+	history HistoryView
+	screen  renderer.Frame
+	Width   int
+	Height  int
 }
 
-// NewSnapshot copies rows from scrollback and then the live screen frame.
+// NewSnapshot freezes the current scrollback view and clones the visible screen.
 func NewSnapshot(sb *Scrollback, screen renderer.Frame) Snapshot {
-	scrollRows := 0
+	var history HistoryView
 	if sb != nil {
-		scrollRows = sb.Len()
+		history = sb.View()
 	}
-	rows := make([][]renderer.Cell, 0, scrollRows+screen.Height)
-	if sb != nil {
-		for i := range sb.Len() {
-			rows = append(rows, sb.Row(i))
-		}
+	return Snapshot{history: history, screen: screen.Clone(), Width: screen.Width, Height: screen.Height}
+}
+
+// NewSnapshotFromRows constructs a snapshot that owns explicit caller rows.
+// It is intended for callers that already have a complete document rather than
+// a scrollback and visible frame.
+func NewSnapshotFromRows(rows [][]renderer.Cell, width, height int) Snapshot {
+	owned := make([][]renderer.Cell, len(rows))
+	for i, row := range rows {
+		owned[i] = append([]renderer.Cell(nil), row...)
 	}
-	for y := range screen.Height {
-		rows = append(rows, append([]renderer.Cell(nil), screen.Row(y)...))
+	return Snapshot{history: HistoryView{rows: owned}, Width: width, Height: height}
+}
+
+// Len returns the number of document rows.
+func (s Snapshot) Len() int { return s.history.Len() + s.screen.Height }
+
+// Row returns document row i, or nil when i is out of range.
+func (s Snapshot) Row(i int) []renderer.Cell {
+	if i < 0 {
+		return nil
 	}
-	return Snapshot{Rows: rows, Width: screen.Width, Height: screen.Height}
+	if i < s.history.Len() {
+		return s.history.Row(i)
+	}
+	i -= s.history.Len()
+	if i >= s.screen.Height {
+		return nil
+	}
+	return s.screen.Row(i)
 }
 
 // Mode stores per-client scrollback viewport and line-selection state.
@@ -60,8 +83,8 @@ type Mode struct {
 
 func NewMode(s Snapshot) *Mode {
 	m := &Mode{Anchor: -1}
-	m.ViewportTop = max(len(s.Rows)-s.Height, 0)
-	m.Cursor = max(len(s.Rows)-1, 0)
+	m.ViewportTop = max(s.Len()-s.Height, 0)
+	m.Cursor = max(s.Len()-1, 0)
 	m.clamp(s)
 	return m
 }
@@ -69,7 +92,7 @@ func NewMode(s Snapshot) *Mode {
 func (m *Mode) Move(s Snapshot, delta int) { m.SetCursor(s, m.Cursor+delta) }
 func (m *Mode) Page(s Snapshot, pages int) { m.SetCursor(s, m.Cursor+pages*max(s.Height, 1)) }
 func (m *Mode) Top(s Snapshot)             { m.SetCursor(s, 0) }
-func (m *Mode) Bottom(s Snapshot)          { m.SetCursor(s, len(s.Rows)-1) }
+func (m *Mode) Bottom(s Snapshot)          { m.SetCursor(s, s.Len()-1) }
 
 func FindMatches(s Snapshot, query string) []SearchMatch {
 	query = strings.TrimSpace(query)
@@ -78,7 +101,8 @@ func FindMatches(s Snapshot, query string) []SearchMatch {
 	}
 	needle := lowerRunes(query)
 	matches := make([]SearchMatch, 0)
-	for row, cells := range s.Rows {
+	for row := range s.Len() {
+		cells := s.Row(row)
 		haystack, cellIndexes := searchableCells(cells)
 		var text string
 		for start := 0; start+len(needle) <= len(haystack); {
@@ -190,7 +214,7 @@ func (m *Mode) StartSelectionAt(s Snapshot, row int) {
 func (m *Mode) ExtendTo(s Snapshot, row int) { m.SetCursor(s, row) }
 
 func (m *Mode) AtBottom(s Snapshot) bool {
-	total := len(s.Rows)
+	total := s.Len()
 	if total == 0 {
 		return m.Cursor == 0 && m.ViewportTop == 0
 	}
@@ -220,7 +244,7 @@ func (m *Mode) setCursor(s Snapshot, cursor int) {
 }
 
 func (m *Mode) clamp(s Snapshot) {
-	total := len(s.Rows)
+	total := s.Len()
 	if total == 0 {
 		m.Cursor, m.ViewportTop = 0, 0
 		return
@@ -243,14 +267,14 @@ func (m *Mode) SelectedBounds() (int, int, bool) {
 
 func (m *Mode) SelectedText(s Snapshot) string {
 	lo, hi, ok := m.SelectedBounds()
-	if !ok || len(s.Rows) == 0 {
+	if !ok || s.Len() == 0 {
 		return ""
 	}
 	lo = max(lo, 0)
-	hi = min(hi, len(s.Rows)-1)
+	hi = min(hi, s.Len()-1)
 	lines := make([]string, 0, hi-lo+1)
 	for i := lo; i <= hi; i++ {
-		lines = append(lines, rowString(s.Rows[i]))
+		lines = append(lines, rowString(s.Row(i)))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -262,11 +286,11 @@ func (m *Mode) Render(s Snapshot, styles ...renderer.Style) renderer.Frame {
 	selectionStyle, hasSelectionStyle := optionalStyle(styles, 1)
 	for y := range s.Height {
 		src := m.ViewportTop + y
-		if src >= len(s.Rows) {
+		if src >= s.Len() {
 			break
 		}
 		row := frame.Row(y)
-		copy(row, s.Rows[src])
+		copy(row, s.Row(src))
 		lineSelected := selected && src >= lo && src <= hi
 		if lineSelected {
 			for x := range row {
@@ -286,7 +310,7 @@ func (m *Mode) Render(s Snapshot, styles ...renderer.Style) renderer.Frame {
 	if len(styles) > 0 {
 		style = styles[0]
 	}
-	drawCopyStatus(frame.Row(s.Height), m, len(s.Rows), style)
+	drawCopyStatus(frame.Row(s.Height), m, s.Len(), style)
 	return frame
 }
 

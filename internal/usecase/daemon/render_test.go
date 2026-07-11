@@ -373,8 +373,8 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 	require.Equal(t, "2222", frameRowString(win.focusedPane().screen.Frame, 0))
 	require.Equal(t, "3333", frameRowString(win.focusedPane().screen.Frame, 1))
 	require.Equal(t, 2, win.focusedPane().scrollback.Len())
-	require.Equal(t, "0000", cellsString(win.focusedPane().scrollback.Row(0)))
-	require.Equal(t, "1111", cellsString(win.focusedPane().scrollback.Row(1)))
+	require.Equal(t, "0000", cellsString(win.focusedPane().scrollback.View().Row(0)))
+	require.Equal(t, "1111", cellsString(win.focusedPane().scrollback.View().Row(1)))
 
 	d.resize(sess, ac, domain.Size{Cols: 6, Rows: 6})
 	require.Equal(t, "2222  ", frameRowString(win.focusedPane().screen.Frame, 0))

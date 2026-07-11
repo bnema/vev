@@ -77,12 +77,12 @@ func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 	p := tb.panes["pane-2"]
 	tb.mu.Unlock()
 	p.mu.Lock()
-	require.Equal(t, "old2", rowText(p.scrollback.Row(0)))
+	require.Equal(t, "old2", rowText(p.scrollback.View().Row(0)))
 	require.Equal(t, 1, p.scrollback.Len())
 	require.Equal(t, "vis2", rowText(p.screen.PrimaryVisibleRows()[0][:4]))
 	copySnap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
-	require.Equal(t, "old2", rowText(copySnap.Rows[0][:4]))
-	require.Equal(t, "vis2", rowText(copySnap.Rows[1][:4]))
+	require.Equal(t, "old2", rowText(copySnap.Row(0)[:4]))
+	require.Equal(t, "vis2", rowText(copySnap.Row(1)[:4]))
 	p.mu.Unlock()
 
 	tb.mu.Lock()

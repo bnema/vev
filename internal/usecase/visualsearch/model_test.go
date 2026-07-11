@@ -20,7 +20,7 @@ func testSnapshot(lines ...string) scopy.Snapshot {
 			rows[i][x] = renderer.Cell{Rune: r}
 		}
 	}
-	return scopy.Snapshot{Rows: rows, Width: 40, Height: 4}
+	return scopy.NewSnapshotFromRows(rows, 40, 4)
 }
 
 func TestVisualSearchModelFiltersAndSelectsLineMatches(t *testing.T) {

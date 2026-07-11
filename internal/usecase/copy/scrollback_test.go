@@ -82,7 +82,7 @@ func TestScrollbackRing(t *testing.T) {
 				t.Fatalf("Len() = %d, want %d", got, tt.wantLen)
 			}
 			for i, want := range tt.wantRows {
-				if got := rowText(sb.Row(i)); got != want {
+				if got := rowText(sb.View().Row(i)); got != want {
 					t.Fatalf("Row(%d) = %q, want %q", i, got, want)
 				}
 			}
@@ -103,10 +103,8 @@ func TestScrollbackCopiesRows(t *testing.T) {
 			sb.Append(r)
 			r[0].Rune = 'z'
 
-			got := sb.Row(0)
-			got[1].Rune = 'y'
-			if text := rowText(sb.Row(0)); text != "ab" {
-				t.Fatalf("stored row = %q, want copy unaffected by caller/read mutation", text)
+			if text := rowText(sb.View().Row(0)); text != "ab" {
+				t.Fatalf("stored row = %q, want copy unaffected by caller mutation", text)
 			}
 		})
 	}
@@ -151,7 +149,7 @@ func TestScrollbackSnapshot(t *testing.T) {
 			}
 			if len(got) > 0 {
 				got[0] = row("zz")
-				if text := rowText(sb.Row(0)); text != tt.wantRows[0] {
+				if text := rowText(sb.View().Row(0)); text != tt.wantRows[0] {
 					t.Fatalf("Snapshot() outer slice mutation changed storage: Row(0) = %q, want %q", text, tt.wantRows[0])
 				}
 			}

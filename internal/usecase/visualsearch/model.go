@@ -36,7 +36,7 @@ func (m *Model) Clone() *Model {
 
 func (m *Model) Snapshot() scopy.Snapshot {
 	if m == nil {
-		return scopy.Snapshot{}
+		return scopy.NewSnapshotFromRows(nil, 0, 0)
 	}
 	return cloneSnapshot(m.snapshot)
 }
@@ -147,12 +147,11 @@ func (m *Model) ensureVisible(visible int) {
 }
 
 func cloneSnapshot(s scopy.Snapshot) scopy.Snapshot {
-	clone := s
-	clone.Rows = make([][]renderer.Cell, len(s.Rows))
-	for i, row := range s.Rows {
-		clone.Rows[i] = append([]renderer.Cell(nil), row...)
+	rows := make([][]renderer.Cell, s.Len())
+	for i := range rows {
+		rows[i] = s.Row(i)
 	}
-	return clone
+	return scopy.NewSnapshotFromRows(rows, s.Width, s.Height)
 }
 
 func (m *Model) Render(inner domain.Size, selectedStyle ...renderer.Style) renderer.Frame {
