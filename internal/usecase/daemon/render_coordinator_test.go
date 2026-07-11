@@ -1315,11 +1315,13 @@ func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
 		clk := newCoordinatorMockClock(t, 4)
 		d.clock = clk.clock
 		invs := make(chan renderInvalidation, 4)
-		sess.installRenderCoordinator(newRenderCoordinator(renderCoordinatorOptions{
+		rc := newRenderCoordinator(renderCoordinatorOptions{
 			clock:        clk.clock,
 			wake:         func(renderWake) {},
 			onInvalidate: func(inv renderInvalidation) { invs <- inv },
-		}))
+		})
+		rc.attach(ac)
+		sess.installRenderCoordinator(rc)
 		return d, sess, ac, sends, clk, invs
 	}
 
