@@ -1,8 +1,6 @@
 package daemon
 
 import (
-	"strconv"
-
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -33,21 +31,27 @@ func paletteModalFor(size domain.Size, cfg domain.PaletteConfig) ui.Modal {
 }
 
 func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
-	d.closePalette(ac)
+	// Capture daemon/session state before taking paletteMu: lock ordering forbids
+	// holding an overlay lock while inspecting live sessions.
+	recent := d.recentSessions(sess)
+	commands := d.paletteCommands()
 	ac.overlays.paletteMu.Lock()
-	ac.overlays.palette = palette.New(d.paletteCommands())
-	ac.overlays.paletteRecent = d.recentSessions(sess)
+	ac.overlays.paletteGeneration++
+	ac.overlays.palette = palette.New(commands)
+	ac.overlays.paletteRecent = recent
+	ac.overlays.paletteHints = recentSessionHints(recent, nil)
+	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
 	ac.overlays.paletteMu.Unlock()
 	d.paint(sess, ac, true)
 }
 
-func (d *Daemon) closePalette(ac *attachedClient) {
-	ac.overlays.paletteMu.Lock()
-	ac.overlays.palette = nil
-	ac.overlays.paletteRecent = nil
-	ac.overlays.palettePending = nil
-	ac.overlays.paletteMu.Unlock()
+func recentSessionHints(recent []recentSession, args []string) palette.ContextualHints {
+	names := make([]string, len(recent))
+	for i, entry := range recent {
+		names[i] = entry.name
+	}
+	return palette.BuildRecentSessionHints(names, args)
 }
 
 func (d *Daemon) paletteCommands() []command.Command {
@@ -100,6 +104,12 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	if sess == nil {
 		return
 	}
+	var cmd command.Command
+	var args []string
+	var recent []recentSession
+	var generation uint64
+	var rawQuery string
+	changed, cancel, execute := false, false, false
 
 	ac.overlays.paletteMu.Lock()
 	if ac.overlays.palette == nil {
@@ -107,82 +117,118 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		ac.overlays.paletteMu.Unlock()
 		return
 	}
-	changed := false
-	exit := false
-	run := false
-	var cmd command.Command
-	var recent []recentSession
-	var ok bool
-
 	routeOverlayBytes(data, &ac.overlays.palettePending, overlayEvents{
 		rune: func(r rune) {
 			ac.overlays.palette.Insert(r)
+			ac.overlays.paletteFeedback = ""
+			ac.overlays.palette.SetFeedback("")
 			changed = true
 		},
 		backspace: func() {
 			ac.overlays.palette.Backspace()
+			ac.overlays.paletteFeedback = ""
+			ac.overlays.palette.SetFeedback("")
 			changed = true
 		},
+		up:     func() { ac.overlays.palette.Up(); changed = true },
+		down:   func() { ac.overlays.palette.Down(); changed = true },
+		cancel: func() { cancel = true },
 		enter: func() {
-			cmd, ok = ac.overlays.palette.Selected()
-			recent = append([]recentSession(nil), ac.overlays.paletteRecent...)
-			if ok {
-				if cmd.Arguments == command.ArgumentsRequired {
-					action, valid := palette.ParseAction([]command.Command{cmd}, ac.overlays.palette.Query())
-					if !valid || (cmd.Code == "JRS" && !d.validRecentSessionAction(recent, action.Args)) {
-						ok = false
-						return
-					}
-				}
-				run = true
-				exit = true
+			cmd, _ = ac.overlays.palette.Selected()
+			action, valid := palette.ParseAction([]command.Command{cmd}, ac.overlays.palette.Query())
+			if !valid {
+				ac.overlays.paletteFeedback = "invalid command arguments"
+				ac.overlays.palette.SetFeedback(ac.overlays.paletteFeedback)
+				changed = true
+				return
 			}
-		},
-		cancel: func() { exit = true },
-		up: func() {
-			ac.overlays.palette.Up()
-			changed = true
-		},
-		down: func() {
-			ac.overlays.palette.Down()
-			changed = true
+			args = action.Args
+			rawQuery = ac.overlays.palette.Query()
+			recent = append([]recentSession(nil), ac.overlays.paletteRecent...)
+			generation = ac.overlays.paletteGeneration
+			execute = true
 		},
 	})
-	if exit {
-		ac.overlays.palette = nil
-		ac.overlays.palettePending = nil
+	if changed {
+		ac.overlays.paletteHints = recentSessionHints(ac.overlays.paletteRecent, paletteArgs(ac.overlays.palette.Query(), cmd))
+	}
+	if cancel {
+		d.clearPaletteLocked(ac)
 	}
 	ac.overlays.paletteMu.Unlock()
-
-	if run && ok {
-		action := palette.Action{Command: cmd}
-		if parsed, valid := palette.ParseAction([]command.Command{cmd}, ac.overlays.palette.Query()); valid {
-			action = parsed
-		}
-		if err := action.Command.Run(paletteExec{d: d, sess: sess, ac: ac, recent: recent}, action.Args); err != nil {
-			sess.mu.Lock()
-			name := sess.name
-			sess.mu.Unlock()
-			d.log.Error("palette command failed", "err", err, "session", name, "command", cmd.Code)
-		} else {
-			d.recordPaletteUse(cmd.Code)
+	if cancel {
+		d.paint(sess, ac, true)
+		return
+	}
+	if !execute {
+		if changed {
+			d.paint(sess, ac, true)
 		}
 		return
 	}
-	if exit || changed {
-		d.paint(sess, ac, true)
+
+	// Revalidate live target without paletteMu. A captured ID is never replaced
+	// by a newly-ranked session, so MRU changes cannot shift a requested rank.
+	if cmd.Code == "JRS" {
+		rank, err := command.ParsePositiveDecimal(args)
+		if err != nil || rank > len(recent) || d.sessionByID(recent[rank-1].id) == nil {
+			d.paletteFailure(ac, generation, rawQuery, "requested recent session is unavailable")
+			d.paint(sess, ac, true)
+			return
+		}
+		// Publication remains generation-safe; close only if this is still the
+		// same exact palette interaction and raw argument token.
+		if !d.closeExecutedPalette(ac, generation, rawQuery) {
+			return
+		}
+		d.switchToTarget(sess, ac, picker.Target{Session: recent[rank-1].id, TabIndex: -1})
+		d.recordPaletteUse(cmd.Code)
+		return
+	}
+	if !d.closeExecutedPalette(ac, generation, rawQuery) {
+		return
+	}
+	if err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac, recent: recent}, args); err != nil {
+		d.log.Error("palette command failed", "err", err, "command", cmd.Code)
+	} else {
+		d.recordPaletteUse(cmd.Code)
 	}
 }
 
-func (d *Daemon) validRecentSessionAction(recent []recentSession, args []string) bool {
-	if len(args) != 1 {
+func paletteArgs(query string, cmd command.Command) []string {
+	action, ok := palette.ParseAction([]command.Command{cmd}, query)
+	if !ok {
+		return nil
+	}
+	return action.Args
+}
+
+func (d *Daemon) clearPaletteLocked(ac *attachedClient) {
+	ac.overlays.paletteGeneration++
+	ac.overlays.palette = nil
+	ac.overlays.paletteRecent = nil
+	ac.overlays.paletteHints = palette.ContextualHints{}
+	ac.overlays.paletteFeedback = ""
+	ac.overlays.palettePending = nil
+}
+
+func (d *Daemon) paletteFailure(ac *attachedClient, generation uint64, rawQuery, feedback string) {
+	ac.overlays.paletteMu.Lock()
+	defer ac.overlays.paletteMu.Unlock()
+	if ac.overlays.palette == nil || ac.overlays.paletteGeneration != generation || ac.overlays.palette.Query() != rawQuery {
+		return
+	}
+	ac.overlays.paletteFeedback = feedback
+	ac.overlays.palette.SetFeedback(feedback)
+}
+func (d *Daemon) closeExecutedPalette(ac *attachedClient, generation uint64, rawQuery string) bool {
+	ac.overlays.paletteMu.Lock()
+	defer ac.overlays.paletteMu.Unlock()
+	if ac.overlays.palette == nil || ac.overlays.paletteGeneration != generation || ac.overlays.palette.Query() != rawQuery {
 		return false
 	}
-	rank, err := strconv.Atoi(args[0])
-	if err != nil || rank < 1 || rank > len(recent) {
-		return false
-	}
-	return d.sessionByID(recent[rank-1].id) != nil
+	d.clearPaletteLocked(ac)
+	return true
 }
 
 type paletteExec struct {
@@ -319,19 +365,13 @@ func (e paletteExec) OpenSessionPicker() error {
 	return nil
 }
 
-func (e paletteExec) JumpRecentSession(args []string) error {
-	if len(args) != 1 {
-		return nil
+func (e paletteExec) JumpRecentSession(rank int) error {
+	if rank < 1 || rank > len(e.recent) {
+		return command.ErrInvalidArguments
 	}
-	rank, err := strconv.Atoi(args[0])
-	if err != nil || rank < 1 || rank > len(e.recent) {
-		return nil
-	}
-	// The snapshot is value-only; resolve the ID at execution so a removed
-	// target is never resurrected through a retained session pointer.
 	target := e.recent[rank-1]
 	if e.d.sessionByID(target.id) == nil {
-		return nil
+		return command.ErrInvalidArguments
 	}
 	e.d.switchToTarget(e.sess, e.ac, picker.Target{Session: target.id, TabIndex: -1})
 	return nil

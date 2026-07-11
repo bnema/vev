@@ -520,16 +520,16 @@ func (_c *MockContext_FocusPaneUp_Call) RunAndReturn(run func() error) *MockCont
 }
 
 // JumpRecentSession provides a mock function for the type MockContext
-func (_mock *MockContext) JumpRecentSession(args []string) error {
-	ret := _mock.Called(args)
+func (_mock *MockContext) JumpRecentSession(rank int) error {
+	ret := _mock.Called(rank)
 
 	if len(ret) == 0 {
 		panic("no return value specified for JumpRecentSession")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func([]string) error); ok {
-		r0 = returnFunc(args)
+	if returnFunc, ok := ret.Get(0).(func(int) error); ok {
+		r0 = returnFunc(rank)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -542,16 +542,16 @@ type MockContext_JumpRecentSession_Call struct {
 }
 
 // JumpRecentSession is a helper method to define mock.On call
-//   - args []string
-func (_e *MockContext_Expecter) JumpRecentSession(args any) *MockContext_JumpRecentSession_Call {
-	return &MockContext_JumpRecentSession_Call{Call: _e.mock.On("JumpRecentSession", args)}
+//   - rank int
+func (_e *MockContext_Expecter) JumpRecentSession(rank any) *MockContext_JumpRecentSession_Call {
+	return &MockContext_JumpRecentSession_Call{Call: _e.mock.On("JumpRecentSession", rank)}
 }
 
-func (_c *MockContext_JumpRecentSession_Call) Run(run func(args []string)) *MockContext_JumpRecentSession_Call {
+func (_c *MockContext_JumpRecentSession_Call) Run(run func(rank int)) *MockContext_JumpRecentSession_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 []string
+		var arg0 int
 		if args[0] != nil {
-			arg0 = args[0].([]string)
+			arg0 = args[0].(int)
 		}
 		run(
 			arg0,
@@ -565,7 +565,7 @@ func (_c *MockContext_JumpRecentSession_Call) Return(err error) *MockContext_Jum
 	return _c
 }
 
-func (_c *MockContext_JumpRecentSession_Call) RunAndReturn(run func(args []string) error) *MockContext_JumpRecentSession_Call {
+func (_c *MockContext_JumpRecentSession_Call) RunAndReturn(run func(rank int) error) *MockContext_JumpRecentSession_Call {
 	_c.Call.Return(run)
 	return _c
 }

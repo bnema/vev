@@ -23,7 +23,13 @@ func Registry() []Command {
 		{Slug: "next-tab", Code: "NXT", Name: "Next tab", Desc: "Switch to the next tab", Run: func(ctx Context, _ []string) error { return ctx.NextTab() }},
 		{Slug: "previous-tab", Code: "PVT", Name: "Previous tab", Desc: "Switch to the previous tab", Run: func(ctx Context, _ []string) error { return ctx.PrevTab() }},
 		{Slug: "back-session", Code: "BSK", Name: "Previous session", Desc: "Toggle the previously active session", Run: func(ctx Context, _ []string) error { return ctx.BackSession() }},
-		{Slug: "jump-recent-session", Code: "JRS", Name: "Jump to recent session", Desc: "Jump to a recent session by rank", Arguments: ArgumentsRequired, ContextHint: ContextHintRecentSessions, Run: func(ctx Context, args []string) error { return ctx.JumpRecentSession(args) }},
+		{Slug: "jump-recent-session", Code: "JRS", Name: "Jump to recent session", Desc: "Jump to a recent session by rank", Arguments: ArgumentsRequired, ContextHint: ContextHintRecentSessions, Run: func(ctx Context, args []string) error {
+			rank, err := ParsePositiveDecimal(args)
+			if err != nil {
+				return err
+			}
+			return ctx.JumpRecentSession(rank)
+		}},
 		{Slug: "session-picker", Code: "SSP", Name: "Session picker", Desc: "Open the session picker", Run: func(ctx Context, _ []string) error { return ctx.OpenSessionPicker() }},
 		{Slug: "visual-mode", Code: "VIS", Name: "Visual mode", Desc: "Enter visual mode", Run: func(ctx Context, _ []string) error { return ctx.EnterVisualMode() }},
 		{Slug: "rename-session", Code: "RNS", Name: "Rename session", Desc: "Rename the session (an ephemeral session becomes named)", Run: func(ctx Context, _ []string) error { return ctx.RenameSession() }},

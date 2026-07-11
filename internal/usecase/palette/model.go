@@ -18,6 +18,7 @@ type Model struct {
 	matches  []Match
 	selected int
 	scroll   int
+	feedback string
 }
 
 func New(commands []command.Command) *Model {
@@ -50,6 +51,13 @@ func (m *Model) Backspace() {
 		m.selected = 0
 		m.scroll = 0
 		m.refresh()
+	}
+}
+
+// SetFeedback sets interaction-local guidance shown below the query.
+func (m *Model) SetFeedback(feedback string) {
+	if m != nil {
+		m.feedback = feedback
 	}
 }
 func (m *Model) Query() string {
@@ -140,7 +148,12 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 		return frame
 	}
 	ui.DrawInputLine(frame, 0, "> ", m.Query(), base, selection)
-	visible := frame.Height - 1
+	start := 1
+	if m.feedback != "" && frame.Height > 1 {
+		ui.DrawText(frame, 0, 1, frame.Width, m.feedback, desc)
+		start++
+	}
+	visible := frame.Height - start
 	if visible <= 0 {
 		return frame
 	}
@@ -169,7 +182,7 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 		if idx == m.selected {
 			style = selection
 		}
-		ui.FillRect(frame, domain.Rect{Y: y + 1, Width: frame.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
+		ui.FillRect(frame, domain.Rect{Y: y + start, Width: frame.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
 		x := 0
 		highlight := map[int]bool{}
 		for _, p := range match.Positions {
@@ -183,7 +196,7 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 				cellStyle.Bold = true
 			}
 			if x < frame.Width {
-				frame.Set(x, y+1, renderer.Cell{Rune: r, Style: cellStyle})
+				frame.Set(x, y+start, renderer.Cell{Rune: r, Style: cellStyle})
 			}
 			x++
 		}
@@ -191,7 +204,7 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 			frame.Set(x, y+1, renderer.Cell{Rune: ' ', Style: style})
 			x++
 		}
-		ui.DrawText(frame, x, y+1, frame.Width, match.Command.Desc, mergePaletteDescStyle(style, desc))
+		ui.DrawText(frame, x, y+start, frame.Width, match.Command.Desc, mergePaletteDescStyle(style, desc))
 	}
 	return frame
 }

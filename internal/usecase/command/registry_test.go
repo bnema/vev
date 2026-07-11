@@ -86,7 +86,7 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 		{code: "NXT", expect: func(ctx *MockContext) { ctx.EXPECT().NextTab().Return(nil).Once() }},
 		{code: "PVT", expect: func(ctx *MockContext) { ctx.EXPECT().PrevTab().Return(nil).Once() }},
 		{code: "BSK", expect: func(ctx *MockContext) { ctx.EXPECT().BackSession().Return(nil).Once() }},
-		{code: "JRS", expect: func(ctx *MockContext) { ctx.EXPECT().JumpRecentSession([]string(nil)).Return(nil).Once() }},
+		{code: "JRS", expect: func(ctx *MockContext) { ctx.EXPECT().JumpRecentSession(1).Return(nil).Once() }},
 		{code: "SSP", expect: func(ctx *MockContext) { ctx.EXPECT().OpenSessionPicker().Return(nil).Once() }},
 		{code: "VIS", expect: func(ctx *MockContext) { ctx.EXPECT().EnterVisualMode().Return(nil).Once() }},
 		{code: "RNS", expect: func(ctx *MockContext) { ctx.EXPECT().RenameSession().Return(nil).Once() }},
@@ -103,7 +103,11 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 
 			ctx := NewMockContext(t)
 			tt.expect(ctx)
-			if err := cmd.Run(ctx, nil); err != nil {
+			args := []string(nil)
+			if tt.code == "JRS" {
+				args = []string{"1"}
+			}
+			if err := cmd.Run(ctx, args); err != nil {
 				t.Fatalf("Run() error = %v, want nil", err)
 			}
 		})

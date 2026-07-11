@@ -19,10 +19,13 @@ type overlayRuntime struct {
 	pickerPending []byte
 	pickerESC     pendingByteTimer
 
-	paletteMu      sync.Mutex
-	palette        *palette.Model
-	paletteRecent  []recentSession
-	palettePending []byte
+	paletteMu         sync.Mutex
+	palette           *palette.Model
+	paletteRecent     []recentSession // immutable for this palette interaction
+	paletteGeneration uint64
+	paletteHints      palette.ContextualHints
+	paletteFeedback   string
+	palettePending    []byte
 
 	promptMu      sync.Mutex
 	prompt        *promptui.Model
