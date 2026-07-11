@@ -8,8 +8,10 @@ import (
 )
 
 // floatingGeometry describes a popup's outer frame and terminal content area.
-// Committed geometry is tab-content-relative and origin-zero; Bounds and Inner
-// are both relative to tab content.
+// Bounds and Inner always share the same coordinate space. Committed pane
+// geometry is origin-zero and tab-content-relative; composeFloatingFrame
+// translates both fields and returns/caches frame-absolute geometry. Callers
+// must not translate a composed or cached value again.
 type floatingGeometry struct {
 	Bounds domain.Rect
 	Inner  domain.Rect

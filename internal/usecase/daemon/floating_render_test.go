@@ -309,14 +309,15 @@ func BenchmarkComposeFloatingFrameCached(b *testing.B) {
 	base := renderer.NewFrame(80, 24)
 	content := domain.Rect{Y: 1, Width: 80, Height: 22}
 	cfg := domain.FloatingConfig{Width: 80, Height: 80}
+	desired := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg)
 	cache := &composedFrameCache{}
-	composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	composeFloatingFrame(base, nil, p, 1, content, desired, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	p.screen.ClearDamage()
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+		composeFloatingFrame(base, nil, p, 1, content, desired, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	}
 }
 
@@ -326,12 +327,13 @@ func TestComposeFloatingFrameCachedDoesNotAllocate(t *testing.T) {
 	base := renderer.NewFrame(80, 24)
 	content := domain.Rect{Y: 1, Width: 80, Height: 22}
 	cfg := domain.FloatingConfig{Width: 80, Height: 80}
+	desired := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg)
 	cache := &composedFrameCache{}
-	composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	composeFloatingFrame(base, nil, p, 1, content, desired, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	p.screen.ClearDamage()
 
 	allocs := testing.AllocsPerRun(100, func() {
-		composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+		composeFloatingFrame(base, nil, p, 1, content, desired, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	})
 	require.Zero(t, allocs, "cached floating composition must not allocate without damage or title changes")
 }
