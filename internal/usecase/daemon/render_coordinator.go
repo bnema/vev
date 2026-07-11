@@ -252,9 +252,11 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv renderInvalidation) {
 	c.mu.Lock()
 	// An unbound coordinator is the manual/headless harness state; there is no
-	// published production attachment to protect there. Once an attachment has
-	// been bound (or detached), identity must match exactly.
-	if c.torndown || c.detached || (source != nil && c.attachment != nil && c.attachment != source) {
+	// published production attachment to protect there. A parked target may
+	// still publish its own PTY/session mutations to picker observers, but no
+	// attachment-owned callback may revive that target's render path.
+	detachedPreviewOnly := c.detached && source == nil && (c.previewWake != nil || len(c.previewWakes) != 0)
+	if c.torndown || (c.detached && !detachedPreviewOnly) || (source != nil && c.attachment != nil && c.attachment != source) {
 		c.mu.Unlock()
 		return
 	}
@@ -797,7 +799,11 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 		attachmentEpoch = c.attachmentEpoch
 	}
 	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog, attachment: c.attachment, attachmentEpoch: attachmentEpoch}
-	if !ready || (c.attachment != nil && !c.attachmentReady) {
+	// A detached target has no primary transport or ACK window. Its pending
+	// state belongs exclusively to picker previews and must be consumed after
+	// notification rather than accumulating ackDeferred forever.
+	headlessPreviewOnly := c.detached && c.attachment == nil
+	if !headlessPreviewOnly && (!ready || (c.attachment != nil && !c.attachmentReady)) {
 		if !ready && deadline {
 			c.ackDeferred = true
 		}
@@ -824,7 +830,7 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 	wake := c.opts.wake
 	c.mu.Unlock()
 	stopTimer(timer)
-	if wake != nil {
+	if wake != nil && !headlessPreviewOnly {
 		wake(w)
 	}
 	c.notifyPreviews(w, preview, previews)
