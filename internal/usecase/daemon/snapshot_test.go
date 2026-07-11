@@ -223,7 +223,7 @@ func TestPTYReaderSameReadSynchronizedOutputUsesUrgentCoordinatorDeadline(t *tes
 	invs := make(chan renderInvalidation, 1)
 	clock := &signalClock{timers: make(chan *signalTimer, 2)}
 	sess.installRenderCoordinator(newRenderCoordinator(renderCoordinatorOptions{
-		clock: clock,
+		clock:        clock,
 		onInvalidate: func(inv renderInvalidation) { invs <- inv },
 	}))
 	d.sessions[sess.id] = sess

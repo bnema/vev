@@ -102,6 +102,10 @@ type renderCoordinator struct {
 	pendingReset  bool
 	pendingUrgent bool
 	coalesced     int
+	// outputPressure carries recent bulk-burst pressure between completed
+	// batches. It selects a bounded 8–16ms deadline without letting a busy
+	// batch perpetually reset its own timer.
+	outputPressure int
 
 	// previewWake receives the same coalesced wakes for the legacy single
 	// subscriber. previewWakes tracks picker subscriptions by viewer, so one
@@ -187,8 +191,9 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 		c.cancelNormalTimerLocked()
 	}
 	gen := c.generation
-	delay := minOutputRenderDeadline
+	delay := minOutputRenderDeadline + time.Duration(c.outputPressure)*time.Millisecond
 	if c.pendingUrgent {
+		// Urgent state always supersedes bulk pressure and is never extended.
 		delay = urgentRenderDeadline
 	}
 	clock := c.opts.clock
@@ -469,6 +474,16 @@ func (c *renderCoordinator) fire(gen uint64, watchdog bool) {
 	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog}
 	c.metrics.wakes.Add(1)
 	c.metrics.coalesced.Add(uint64(w.coalesced))
+	if !w.urgent {
+		if w.coalesced > 1 {
+			c.outputPressure += w.coalesced - 1
+			if c.outputPressure > int((maxOutputRenderDeadline-minOutputRenderDeadline)/time.Millisecond) {
+				c.outputPressure = int((maxOutputRenderDeadline - minOutputRenderDeadline) / time.Millisecond)
+			}
+		} else if c.outputPressure > 0 {
+			c.outputPressure--
+		}
+	}
 	c.cancelNormalTimerLocked()
 	c.pending, c.pendingReset, c.pendingUrgent, c.coalesced, c.armed = false, false, false, 0, false
 	wake, preview := c.opts.wake, c.previewWake

@@ -2,6 +2,7 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
 	"strconv"
 
@@ -13,6 +14,14 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
+
+// completedSynchronizedUpdate reports a full DEC 2026 batch contained in one
+// PTY read. The VT's final state is inactive in this case, so it cannot be
+// inferred from before/after SyncUpdateActive alone.
+func completedSynchronizedUpdate(data []byte) bool {
+	_, tail, found := bytes.Cut(data, []byte(renderer.SyncStartCSI))
+	return found && bytes.Contains(tail, []byte(renderer.SyncEndCSI))
+}
 
 func signal(ch chan struct{}) {
 	select {
@@ -46,6 +55,7 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 			p.screen.Write(data)
 			p.refreshTerminalTitleLocked()
 			isSyncing := p.screen.SyncUpdateActive()
+			completeSyncRead := !wasSyncing && !isSyncing && completedSynchronizedUpdate(data)
 			var syncGen uint64
 			if wasSyncing != isSyncing {
 				if isSyncing {
@@ -91,7 +101,12 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 						rc.noteSyncEnd(gen)
 					}
 				}
-				if !isSyncing && wasSyncing == isSyncing {
+				if completeSyncRead {
+					// The entire batch completed in this read. Its final screen state
+					// is ready now, so bypass the bulk debounce without arming a
+					// watchdog for a batch that no longer exists.
+					rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
+				} else if !isSyncing && wasSyncing == isSyncing {
 					rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
 				}
 			}
