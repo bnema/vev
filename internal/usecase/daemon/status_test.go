@@ -12,7 +12,9 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/usecase/palette"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -762,6 +764,44 @@ func TestTopBarRendersAttentionBell(t *testing.T) {
 		}
 	}
 	t.Fatalf("attention glyph not rendered in top bar: %q", rowText(frame.Row(0)))
+}
+
+func TestBarStateForContextualRecentUsesSnapshotAndNormalUsesLiveMRU(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, sess, _, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+	live := &session{id: "live", name: "live", tabs: []*tab{{}}}
+	live.mruAt.Store(1)
+	d.sessions[live.id] = live
+
+	hints := palette.ContextualHints{
+		Kind:         command.ContextHintRecentSessions,
+		SelectedRank: 1,
+		Recent:       []palette.RecentSessionHint{{Rank: 1, Name: "captured"}},
+	}
+	// Hold the registry lock: a call to recentSessions would block here. The
+	// contextual snapshot must still compose because it has no live MRU lookup.
+	var contextual barState
+	done := make(chan struct{})
+	d.mu.Lock()
+	go func() {
+		contextual = d.barStateForPaletteHints(sess, "", &hints, []recentSession{{name: "captured", ephemeral: true, attention: true}})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		d.mu.Unlock()
+		t.Fatal("contextual composition consulted the live session registry")
+	}
+	d.mu.Unlock()
+
+	require.Empty(t, contextual.mru, "contextual composition must not read the live MRU")
+	require.Equal(t, []rankedRecent{{rank: 1, name: "captured", ephemeral: true, attention: true, selected: true}}, contextual.rankedRecent)
+
+	normal := d.barStateFor(sess, "")
+	require.Len(t, normal.mru, 1)
+	require.Equal(t, "live", normal.mru[0].name, "normal composition retains canonical live MRU")
 }
 
 func TestBarStateForMRUFreshestFirstCapCurrentExcludedAndAttention(t *testing.T) {

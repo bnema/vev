@@ -239,11 +239,35 @@ func rankedRecentForHints(hints *palette.ContextualHints, recent []recentSession
 	return entries
 }
 
-func (d *Daemon) barStateForClient(cur *session, _ *attachedClient, copyFeedback string) barState {
+// barStateForPaletteHints selects snapshot-only contextual composition when a
+// palette interaction has captured recent-session hints. Normal palette state
+// continues to use the canonical, live MRU list.
+func (d *Daemon) barStateForPaletteHints(cur *session, copyFeedback string, hints *palette.ContextualHints, recent []recentSession) barState {
+	ranked := rankedRecentForHints(hints, recent)
+	if ranked != nil {
+		return d.barStateForContextual(cur, copyFeedback, ranked)
+	}
 	return d.barStateFor(cur, copyFeedback)
 }
 
+// barStateForContextual composes ranks captured for the palette interaction.
+// It deliberately does not call recentSessions: live MRU changes must not
+// affect contextual rendering, and palette rendering must not acquire d.mu.
+func (d *Daemon) barStateForContextual(cur *session, copyFeedback string, ranked []rankedRecent) barState {
+	state := d.barStateBase(cur, copyFeedback)
+	state.rankedRecent = ranked
+	return state
+}
+
 func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
+	state := d.barStateBase(cur, copyFeedback)
+	if d != nil {
+		state.mru = d.recentSessions(cur)
+	}
+	return state
+}
+
+func (d *Daemon) barStateBase(cur *session, copyFeedback string) barState {
 	state := barState{copyFeedback: copyFeedback}
 	if d != nil {
 		state.attentionFrame = d.attentionFrame()
@@ -258,10 +282,6 @@ func (d *Daemon) barStateFor(cur *session, copyFeedback string) barState {
 	if d != nil {
 		state.topRight, state.bottomRight = d.barScriptSnapshot(cur)
 	}
-	if d == nil {
-		return state
-	}
-	state.mru = d.recentSessions(cur)
 	return state
 }
 
