@@ -67,6 +67,8 @@ type session struct {
 	mruAt                  atomic.Uint64
 	snapDirty              atomic.Bool
 	snapEligible           atomic.Bool
+	// coordinator fans in this session's producer render invalidations.
+	coordinator atomic.Pointer[renderCoordinator]
 	// clipFiles records clipboard-image-transfer temp file paths (see
 	// clipboard.go) written for this session, removed best-effort in
 	// killSession.
