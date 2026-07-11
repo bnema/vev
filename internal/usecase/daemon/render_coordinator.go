@@ -109,7 +109,11 @@ type renderCoordinator struct {
 	pending       bool
 	pendingReset  bool
 	pendingUrgent bool
-	coalesced     int
+	// pendingPreview is accounted separately from the target primary wake:
+	// viewers may consume a coalesced target snapshot while that target is
+	// still ACK-blocked.
+	pendingPreview bool
+	coalesced      int
 	// outputPressure carries recent bulk-burst pressure between completed
 	// batches. It selects a bounded 8–16ms deadline without letting a busy
 	// batch perpetually reset its own timer.
@@ -187,13 +191,17 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 		c.opts.onInvalidate(inv)
 	}
 	c.metrics.invalidations.Add(1)
-	wasPending, wasUrgent := c.pending, c.pendingUrgent
+	wasPending, wasUrgent, wasPreviewPending := c.pending, c.pendingUrgent, c.pendingPreview
 	c.pending = true
 	c.pendingReset = c.pendingReset || inv.reset
 	c.pendingUrgent = c.pendingUrgent || inv.class == invalidateUrgent
+	c.pendingPreview = c.pendingPreview || c.previewWake != nil || len(c.previewWakes) != 0
 	c.coalesced++
-	// Cap one normal deadline; an urgent transition may supersede it.
-	arm := !wasPending || (!wasUrgent && c.pendingUrgent)
+	// Cap one normal deadline for each primary or preview batch. Once a
+	// preview has been delivered while the target is ACK-blocked, a later
+	// target transition needs its own deadline even though the primary remains
+	// pending.
+	arm := !wasPending || (!wasUrgent && c.pendingUrgent) || (!wasPreviewPending && c.pendingPreview)
 	if arm {
 		c.generation++
 		c.cancelNormalTimerLocked()
@@ -360,6 +368,7 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 	if c.attachment == ac {
 		c.attachment = nil
 		c.pending = false
+		c.pendingPreview = false
 		c.generation++
 		c.armed = false
 		c.cancelNormalTimerLocked()
@@ -375,6 +384,7 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient) {
 	if c.attachment == old {
 		c.attachment = replacement
 		c.pending = false
+		c.pendingPreview = false
 		c.generation++
 		c.armed = false
 		c.cancelNormalTimerLocked()
@@ -394,6 +404,7 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	c.previewWake = nil
 	c.previewWakes = nil
 	c.pending = false
+	c.pendingPreview = false
 	c.generation++
 	c.armed = false
 	c.cancelNormalTimerLocked()
@@ -487,11 +498,13 @@ func (c *renderCoordinator) fire(gen uint64, watchdog bool) {
 		c.mu.Unlock()
 		return
 	}
+	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog}
+	preview, previews := c.takePendingPreviewsLocked()
 	if c.opts.ackReady != nil && !c.opts.ackReady() {
 		c.mu.Unlock()
+		c.notifyPreviews(w, preview, previews)
 		return
 	}
-	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog}
 	c.metrics.wakes.Add(1)
 	c.metrics.coalesced.Add(uint64(w.coalesced))
 	if !w.urgent {
@@ -506,15 +519,29 @@ func (c *renderCoordinator) fire(gen uint64, watchdog bool) {
 	}
 	c.cancelNormalTimerLocked()
 	c.pending, c.pendingReset, c.pendingUrgent, c.coalesced, c.armed = false, false, false, 0, false
-	wake, preview := c.opts.wake, c.previewWake
-	previews := make([]func(renderWake), 0, len(c.previewWakes))
-	for _, fn := range c.previewWakes {
-		previews = append(previews, fn)
-	}
+	wake := c.opts.wake
 	c.mu.Unlock()
 	if wake != nil {
 		wake(w)
 	}
+	c.notifyPreviews(w, preview, previews)
+}
+
+// takePendingPreviewsLocked snapshots and consumes the preview delivery for
+// this target generation. Unlike the target primary, this is never ACK-gated.
+func (c *renderCoordinator) takePendingPreviewsLocked() (func(renderWake), []func(renderWake)) {
+	if !c.pendingPreview {
+		return nil, nil
+	}
+	c.pendingPreview = false
+	previews := make([]func(renderWake), 0, len(c.previewWakes))
+	for _, fn := range c.previewWakes {
+		previews = append(previews, fn)
+	}
+	return c.previewWake, previews
+}
+
+func (c *renderCoordinator) notifyPreviews(w renderWake, preview func(renderWake), previews []func(renderWake)) {
 	if preview != nil {
 		preview(w)
 	}
