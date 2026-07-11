@@ -65,6 +65,53 @@ func (p *pane) refreshTerminalTitleLocked() {
 	}
 }
 
+// composeTabTitle renders "name (paneTitle)". An empty paneTitle, or one equal
+// to the tab name, collapses to just the name.
+func composeTabTitle(tabName, paneTitle string) string {
+	if paneTitle == "" || paneTitle == tabName {
+		return tabName
+	}
+	return tabName + " (" + paneTitle + ")"
+}
+
+// focusedPaneTitleLocked returns the focused pane's display title. Caller must
+// hold the owning session.mu (so tb.mu then pane.mu obey lock order).
+func (tb *tab) focusedPaneTitleLocked() string {
+	tb.mu.Lock()
+	p := tb.focusedPane()
+	tb.mu.Unlock()
+	if p == nil {
+		return ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.displayTitleLocked()
+}
+
+// refreshSessionFocusedTitles opportunistically refreshes the process-name half
+// of every tab's focused pane. Snapshot panes under locks, then refresh with no
+// lock held (refreshPaneDisplayTitle re-enters p.mu itself). TTL-throttled.
+func (d *Daemon) refreshSessionFocusedTitles(sess *session) {
+	if sess == nil {
+		return
+	}
+	fallback := d.paneTitleFallback()
+	sess.mu.Lock()
+	panes := make([]*pane, 0, len(sess.tabs))
+	for _, tb := range sess.tabs {
+		tb.mu.Lock()
+		if p := tb.focusedPane(); p != nil {
+			panes = append(panes, p)
+		}
+		tb.mu.Unlock()
+	}
+	sess.mu.Unlock()
+	for _, p := range panes {
+		p.setDisplayFallback(fallback)
+		d.refreshPaneDisplayTitle(sess, p, false)
+	}
+}
+
 func (d *Daemon) paneTitleFallback() string {
 	fallback := filepath.Base(d.shell)
 	if fallback == "." || fallback == string(filepath.Separator) || fallback == "" {

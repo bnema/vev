@@ -28,6 +28,22 @@ func TestFormatPaneTitle(t *testing.T) {
 	}
 }
 
+func TestComposeTabTitle(t *testing.T) {
+	tests := []struct {
+		name, tabName, paneTitle, want string
+	}{
+		{name: "name and title", tabName: "api", paneTitle: "nvim: server.go — vev", want: "api (nvim: server.go — vev)"},
+		{name: "empty pane title", tabName: "api", paneTitle: "", want: "api"},
+		{name: "pane title equals name", tabName: "api", paneTitle: "api", want: "api"},
+		{name: "unnamed tab style", tabName: "1", paneTitle: "zsh", want: "1 (zsh)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, composeTabTitle(tt.tabName, tt.paneTitle))
+		})
+	}
+}
+
 func TestPaneTerminalTitleGenerationChangesOnlyWhenTitleChanges(t *testing.T) {
 	p := newPane("pane", nil, domain.Size{Cols: 20, Rows: 5})
 	p.mu.Lock()
