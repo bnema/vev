@@ -73,6 +73,37 @@ func newInertCoordinatorMockClock(t *testing.T, capacity int) *coordinatorMockCl
 	return clk
 }
 
+// TestRenderCoordinatorTimerCallbacksReenterCoordinator is deliberately a
+// deadlock regression: every external timer method synchronously reads
+// coordinator metadata. Before two-phase timer ownership this blocked while
+// c.mu was held during normal arming, urgent replacement, sync arming, and
+// detach cancellation.
+func TestRenderCoordinatorTimerCallbacksReenterCoordinator(t *testing.T) {
+	clock := portsmocks.NewMockClock(t)
+	var rc *renderCoordinator
+	clock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(time.Duration) ports.Timer {
+		timer := portsmocks.NewMockTimer(t)
+		ch := make(chan time.Time)
+		timer.EXPECT().C().Run(func() {
+			_ = rc.resizeSnapshot()
+			_ = rc.burstMetricsSnapshot()
+		}).Return((<-chan time.Time)(ch)).Once()
+		timer.EXPECT().Stop().Run(func() {
+			_ = rc.resizeSnapshot()
+			_ = rc.burstMetricsSnapshot()
+		}).Return(true).Once()
+		return timer
+	}).Times(3)
+	rc = newRenderCoordinator(renderCoordinatorOptions{clock: clock})
+	ac := &attachedClient{}
+	rc.attach(ac)
+
+	rc.invalidate(renderInvalidation{class: invalidateOutput}) // normal arm
+	rc.invalidate(renderInvalidation{class: invalidateUrgent}) // urgent promotion
+	rc.noteSyncBegin(nil, 1)                                   // sync arm
+	rc.noteDetach(ac)                                          // cancel and stop
+}
+
 // coordinatorHarness wires one coordinator to generated clock/timer mocks and
 // recording hooks. Every assertion is channel- or counter-based; nothing sleeps.
 type coordinatorHarness struct {
