@@ -47,6 +47,13 @@ type BarConfig struct {
 	Interval    time.Duration
 }
 
+// PaletteConfig contains palette placement settings. A false AnchorSet uses the
+// adaptive automatic placement.
+type PaletteConfig struct {
+	Anchor    Anchor
+	AnchorSet bool
+}
+
 // FloatingConfig contains launch and sizing settings for per-tab floating panes.
 type FloatingConfig struct {
 	Command string
@@ -63,6 +70,7 @@ type Config struct {
 	BindingEntries []ConfigEntry
 	Codes          map[string]string
 	Snapshot       SnapshotConfig
+	Palette        PaletteConfig
 	Floating       FloatingConfig
 }
 
