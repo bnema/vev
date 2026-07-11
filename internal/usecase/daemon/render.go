@@ -161,7 +161,7 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 				if wasSyncing != isSyncing {
 					gen := syncGen
 					if isSyncing {
-						rc.noteSyncBegin(gen, func() {
+						rc.noteSyncBegin(p, gen, func() {
 							p.mu.Lock()
 							if p.syncGen == gen && p.screen.SyncUpdateActive() {
 								p.screen.ForceSyncEnd()
@@ -171,7 +171,7 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 						// The accumulated synchronized batch is the pending render.
 						rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
 					} else {
-						rc.noteSyncEnd(gen)
+						rc.noteSyncEnd(p, gen)
 					}
 				}
 				if completeSyncRead {

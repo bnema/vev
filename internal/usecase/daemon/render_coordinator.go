@@ -141,11 +141,9 @@ type renderCoordinator struct {
 	normalTimer      ports.Timer
 	normalCancel     chan struct{}
 	normalWorkerDone chan struct{}
-	syncGeneration   uint64
-	syncWatchdog     func()
-	syncTimer        ports.Timer
-	syncCancel       chan struct{}
-	syncWorkerDone   chan struct{}
+	// syncBatches is keyed by the stable pane owner. Each pane owns an
+	// independent watchdog; composition remains gated until every batch ends.
+	syncBatches map[*pane]*syncBatch
 }
 
 // newRenderCoordinator constructs a coordinator bound to opts. It starts no
@@ -167,14 +165,29 @@ func (c *renderCoordinator) cancelNormalTimerLocked() {
 	}
 }
 
-func (c *renderCoordinator) cancelSyncTimerLocked() {
-	if c.syncTimer != nil {
-		c.syncTimer.Stop()
-		c.syncTimer = nil
+type syncBatch struct {
+	generation uint64
+	force      func()
+	timer      ports.Timer
+	cancel     chan struct{}
+	done       chan struct{}
+}
+
+func cancelSyncBatchLocked(batch *syncBatch) {
+	if batch.timer != nil {
+		batch.timer.Stop()
+		batch.timer = nil
 	}
-	if c.syncCancel != nil {
-		close(c.syncCancel)
-		c.syncCancel = nil
+	if batch.cancel != nil {
+		close(batch.cancel)
+		batch.cancel = nil
+	}
+}
+
+func (c *renderCoordinator) cancelSyncTimersLocked() {
+	for pane, batch := range c.syncBatches {
+		cancelSyncBatchLocked(batch)
+		delete(c.syncBatches, pane)
 	}
 }
 
@@ -254,30 +267,34 @@ func (c *renderCoordinator) notifyAck() {
 	c.fire(gen, false)
 }
 
-// noteSyncBegin records that a synchronized-output batch opened for gen and
-// arms the completion watchdog. force is supplied by the pane owner so the
-// coordinator can end a wedged VT batch before it composes the pending state.
-func (c *renderCoordinator) noteSyncBegin(gen uint64, force ...func()) {
+// noteSyncBegin records a synchronized-output batch for its stable pane and
+// arms that pane's watchdog. Overlapping pane batches are independent.
+func (c *renderCoordinator) noteSyncBegin(p *pane, gen uint64, force ...func()) {
 	c.mu.Lock()
 	if c.torndown {
 		c.mu.Unlock()
 		return
 	}
-	c.cancelSyncTimerLocked()
-	c.syncGeneration = gen
-	c.syncWatchdog = nil
-	if len(force) != 0 {
-		c.syncWatchdog = force[0]
+	if c.syncBatches == nil {
+		c.syncBatches = make(map[*pane]*syncBatch)
 	}
+	if old := c.syncBatches[p]; old != nil {
+		cancelSyncBatchLocked(old)
+	}
+	batch := &syncBatch{generation: gen}
+	if len(force) != 0 {
+		batch.force = force[0]
+	}
+	c.syncBatches[p] = batch
 	clock := c.opts.clock
 	if clock == nil {
 		c.mu.Unlock()
 		return
 	}
-	timer := clock.NewTimer(maxSyncUpdateDuration)
-	cancel := make(chan struct{})
-	done := make(chan struct{})
-	c.syncTimer, c.syncCancel, c.syncWorkerDone = timer, cancel, done
+	batch.timer = clock.NewTimer(maxSyncUpdateDuration)
+	batch.cancel = make(chan struct{})
+	batch.done = make(chan struct{})
+	timer, cancel, done := batch.timer, batch.cancel, batch.done
 	c.mu.Unlock()
 	go func() {
 		defer close(done)
@@ -287,36 +304,52 @@ func (c *renderCoordinator) noteSyncBegin(gen uint64, force ...func()) {
 			return
 		}
 		c.mu.Lock()
-		valid := !c.torndown && c.syncGeneration == gen
-		force := c.syncWatchdog
+		current := c.syncBatches[p]
+		valid := !c.torndown && current == batch && current.generation == gen
 		if valid {
-			c.syncGeneration = 0
-			c.syncWatchdog = nil
-			c.cancelSyncTimerLocked()
+			delete(c.syncBatches, p)
+			cancelSyncBatchLocked(batch)
+			if len(c.syncBatches) == 0 && c.pending {
+				c.pendingUrgent = true
+			}
 		}
 		c.mu.Unlock()
 		if valid {
-			if force != nil {
-				force()
+			if batch.force != nil {
+				batch.force()
 			}
+			// Reevaluate the aggregate gate only after forcing this pane.
 			c.fireCurrent(true)
 		}
 	}()
 }
 
-// noteSyncEnd records that the batch for gen completed, flushing pending
-// state in one wake.
-func (c *renderCoordinator) noteSyncEnd(gen uint64) {
+// noteSyncEnd records completion for exactly one pane batch. It only flushes
+// after the aggregate gate opens.
+func (c *renderCoordinator) noteSyncEnd(p *pane, gen uint64) {
 	c.mu.Lock()
-	if c.syncGeneration != gen {
+	batch := c.syncBatches[p]
+	if batch == nil || batch.generation != gen {
 		c.mu.Unlock()
 		return
 	}
-	c.syncGeneration = 0
-	c.syncWatchdog = nil
-	c.cancelSyncTimerLocked()
+	delete(c.syncBatches, p)
+	cancelSyncBatchLocked(batch)
+	if len(c.syncBatches) == 0 && c.pending {
+		c.pendingUrgent = true
+	}
 	c.mu.Unlock()
 	c.fireCurrent(false)
+}
+
+// noteSyncPaneRemoved releases a pane watchdog when pane lifecycle ends.
+func (c *renderCoordinator) noteSyncPaneRemoved(p *pane) {
+	c.mu.Lock()
+	if batch := c.syncBatches[p]; batch != nil {
+		delete(c.syncBatches, p)
+		cancelSyncBatchLocked(batch)
+	}
+	c.mu.Unlock()
 }
 
 // subscribePreview installs fn as the preview observer for coalesced wakes.
@@ -372,7 +405,7 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 		c.generation++
 		c.armed = false
 		c.cancelNormalTimerLocked()
-		c.cancelSyncTimerLocked()
+		c.cancelSyncTimersLocked()
 	}
 	c.mu.Unlock()
 }
@@ -388,7 +421,7 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient) {
 		c.generation++
 		c.armed = false
 		c.cancelNormalTimerLocked()
-		c.cancelSyncTimerLocked()
+		c.cancelSyncTimersLocked()
 	}
 	c.mu.Unlock()
 }
@@ -408,7 +441,7 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	c.generation++
 	c.armed = false
 	c.cancelNormalTimerLocked()
-	c.cancelSyncTimerLocked()
+	c.cancelSyncTimersLocked()
 	c.mu.Unlock()
 }
 
@@ -494,7 +527,7 @@ func (c *renderCoordinator) fire(gen uint64, watchdog bool) {
 		c.mu.Unlock()
 		return
 	}
-	if !watchdog && c.syncGeneration != 0 {
+	if len(c.syncBatches) != 0 {
 		c.mu.Unlock()
 		return
 	}

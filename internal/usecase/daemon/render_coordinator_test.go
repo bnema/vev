@@ -342,17 +342,17 @@ func TestRenderCoordinatorConcurrentSynchronizedPaneBatches(t *testing.T) {
 	t.Run("end orders, watchdogs, and stale callbacks are isolated per pane", func(t *testing.T) {
 		h := newCoordinatorHarness(t)
 		firstForced, secondForced := make(chan struct{}, 1), make(chan struct{}, 1)
+		firstPane, secondPane := &pane{}, &pane{}
 
-		// Distinct generations model distinct panes. The coordinator must retain
-		// both batches rather than letting the later begin replace the first.
-		h.rc.noteSyncBegin(11, func() { firstForced <- struct{}{} })
+		// Distinct stable pane owners must remain independent.
+		h.rc.noteSyncBegin(firstPane, 11, func() { firstForced <- struct{}{} })
 		firstWatchdog := h.armedTimers(t)[0]
-		h.rc.noteSyncBegin(22, func() { secondForced <- struct{}{} })
+		h.rc.noteSyncBegin(secondPane, 22, func() { secondForced <- struct{}{} })
 		secondWatchdog := h.armedTimers(t)[0]
 		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
 
 		// Completing either pane leaves the aggregate gate closed.
-		h.rc.noteSyncEnd(11)
+		h.rc.noteSyncEnd(firstPane, 11)
 		requireNoWake(t, h.wakes)
 		// A stale callback for the completed pane must not force it or wake.
 		firstWatchdog.ch <- time.Time{}
@@ -369,23 +369,50 @@ func TestRenderCoordinatorConcurrentSynchronizedPaneBatches(t *testing.T) {
 		<-secondForced
 		w := awaitWake(t, h.wakes)
 		require.True(t, w.watchdog)
+		require.True(t, w.urgent, "aggregate completion must wake urgently")
 		requireNoWake(t, h.wakes)
 	})
 
 	t.Run("later pane can end first without releasing an earlier pane", func(t *testing.T) {
 		h := newCoordinatorHarness(t)
 		firstForced := make(chan struct{}, 1)
-		h.rc.noteSyncBegin(11, func() { firstForced <- struct{}{} })
+		firstPane, secondPane := &pane{}, &pane{}
+		h.rc.noteSyncBegin(firstPane, 11, func() { firstForced <- struct{}{} })
 		firstWatchdog := h.armedTimers(t)[0]
-		h.rc.noteSyncBegin(22)
+		h.rc.noteSyncBegin(secondPane, 22)
 		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
 
-		h.rc.noteSyncEnd(22)
+		h.rc.noteSyncEnd(secondPane, 22)
 		requireNoWake(t, h.wakes)
 		firstWatchdog.ch <- time.Time{}
 		<-firstForced
-		require.True(t, awaitWake(t, h.wakes).watchdog)
+		w := awaitWake(t, h.wakes)
+		require.True(t, w.watchdog)
+		require.True(t, w.urgent, "final pane completion must wake urgently")
 		requireNoWake(t, h.wakes)
+	})
+
+	t.Run("pane removal cancels only that pane watchdog", func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		firstPane, secondPane := &pane{}, &pane{}
+		firstForced, secondForced := make(chan struct{}, 1), make(chan struct{}, 1)
+		h.rc.noteSyncBegin(firstPane, 11, func() { firstForced <- struct{}{} })
+		firstWatchdog := h.armedTimers(t)[0]
+		h.rc.noteSyncBegin(secondPane, 22, func() { secondForced <- struct{}{} })
+		secondWatchdog := h.armedTimers(t)[0]
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+
+		h.rc.noteSyncPaneRemoved(firstPane)
+		firstWatchdog.ch <- time.Time{}
+		select {
+		case <-firstForced:
+			t.Fatal("removed pane watchdog forced output")
+		default:
+		}
+		requireNoWake(t, h.wakes)
+		secondWatchdog.ch <- time.Time{}
+		<-secondForced
+		require.True(t, awaitWake(t, h.wakes).watchdog)
 	})
 }
 
@@ -393,7 +420,7 @@ func TestRenderCoordinatorSynchronizedOutput(t *testing.T) {
 	t.Run("completion flushes pending state in one wake", func(t *testing.T) {
 		h := newCoordinatorHarness(t)
 		h.syncActive.Store(true)
-		h.rc.noteSyncBegin(1)
+		h.rc.noteSyncBegin(nil, 1)
 		watchdogs := h.armedTimers(t)
 		require.NotEmpty(t, watchdogs, "sync begin must arm the completion watchdog")
 		require.Equal(t, maxSyncUpdateDuration, watchdogs[len(watchdogs)-1].duration)
@@ -405,7 +432,7 @@ func TestRenderCoordinatorSynchronizedOutput(t *testing.T) {
 		requireNoWake(t, h.wakes)
 
 		h.syncActive.Store(false)
-		h.rc.noteSyncEnd(1)
+		h.rc.noteSyncEnd(nil, 1)
 		w := awaitWake(t, h.wakes)
 		require.True(t, w.reset)
 		requireNoWake(t, h.wakes)
@@ -415,7 +442,7 @@ func TestRenderCoordinatorSynchronizedOutput(t *testing.T) {
 		h := newCoordinatorHarness(t)
 		h.syncActive.Store(true)
 		forced := make(chan struct{}, 1)
-		h.rc.noteSyncBegin(7, func() { forced <- struct{}{} })
+		h.rc.noteSyncBegin(nil, 7, func() { forced <- struct{}{} })
 		watchdogs := h.armedTimers(t)
 		require.NotEmpty(t, watchdogs, "sync begin must arm the completion watchdog")
 		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
@@ -430,11 +457,11 @@ func TestRenderCoordinatorSynchronizedOutput(t *testing.T) {
 	t.Run("stale watchdog generation cannot wake a completed batch", func(t *testing.T) {
 		h := newCoordinatorHarness(t)
 		h.syncActive.Store(true)
-		h.rc.noteSyncBegin(1)
+		h.rc.noteSyncBegin(nil, 1)
 		watchdogs := h.armedTimers(t)
 		require.NotEmpty(t, watchdogs, "sync begin must arm the completion watchdog")
 		h.syncActive.Store(false)
-		h.rc.noteSyncEnd(1)
+		h.rc.noteSyncEnd(nil, 1)
 
 		watchdogs[0].ch <- time.Time{}
 		requireNoWake(t, h.wakes)
@@ -968,10 +995,10 @@ func TestRenderCoordinatorStopsInertSyncTimerWorkers(t *testing.T) {
 			rc := newRenderCoordinator(renderCoordinatorOptions{clock: clk.clock})
 			ac := &attachedClient{}
 			rc.attach(ac)
-			rc.noteSyncBegin(1)
+			rc.noteSyncBegin(nil, 1)
 			syncTimer := <-clk.timers
 			rc.mu.Lock()
-			syncDone := rc.syncWorkerDone
+			syncDone := rc.syncBatches[nil].done
 			rc.mu.Unlock()
 			tc.end(rc, ac)
 			syncTimer.mock.AssertNumberOfCalls(t, "Stop", 1)

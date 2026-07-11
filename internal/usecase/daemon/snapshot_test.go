@@ -219,7 +219,7 @@ func TestPTYReaderSameReadSynchronizedOutputUsesUrgentCoordinatorDeadline(t *tes
 	sctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	tb := newTestTabWithContext(p, sctx, cancel)
-	sess := &session{id: "sync-urgent", name: "sync-urgent", tabs: []*tab{tb}, ctx: sctx, cancel: cancel}
+	sess := &session{id: "sync-urgent", name: "sync-urgent", tabs: []*tab{tb}, client: &attachedClient{}, ctx: sctx, cancel: cancel}
 	invs := make(chan renderInvalidation, 1)
 	clock := newCoordinatorMockClock(t, 2)
 	sess.installRenderCoordinator(newRenderCoordinator(renderCoordinatorOptions{

@@ -620,6 +620,14 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 		tb.cancel()
 	}
 	d.teardownFloating(tb, ac)
+	if rc := sess.renderCoordinator(); rc != nil {
+		tb.mu.Lock()
+		panes := tb.panesSnapshot()
+		tb.mu.Unlock()
+		for _, p := range panes {
+			rc.noteSyncPaneRemoved(p)
+		}
+	}
 	tb.closeAllPanes()
 	if wasActive {
 		d.activateTab(sess, destination)

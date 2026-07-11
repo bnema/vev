@@ -257,6 +257,9 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 		ac.overlays.clearCopyModeForPane(p)
 	}
 
+	if rc := sess.renderCoordinator(); rc != nil {
+		rc.noteSyncPaneRemoved(p)
+	}
 	if p.cancel != nil {
 		p.cancel()
 	}
