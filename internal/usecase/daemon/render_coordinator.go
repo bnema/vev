@@ -607,7 +607,6 @@ func (c *renderCoordinator) wakeCurrent(w renderWake) bool {
 func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 	c.mu.Lock()
 	var timer ports.Timer
-	var timers []ports.Timer
 	if c.attachment == ac {
 		c.advanceAttachmentEpochLocked(ac)
 		c.attachment = nil
@@ -619,11 +618,9 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 		c.generation++
 		c.armed = false
 		timer = c.detachNormalTimerLocked()
-		timers = c.detachSyncTimersLocked()
 	}
 	c.mu.Unlock()
 	stopTimer(timer)
-	stopTimers(timers)
 }
 
 // noteReplace hands the coordinator from old to replacement; callbacks
@@ -639,7 +636,6 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 	// identity to invalidate, and the replacement becomes the first bound
 	// attachment atomically with this lifecycle transition.
 	var timer ports.Timer
-	var timers []ports.Timer
 	if c.attachment == old || c.attachment == nil {
 		c.advanceAttachmentEpochLocked(old, replacement)
 		c.attachment = replacement
@@ -654,11 +650,9 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 		c.generation++
 		c.armed = false
 		timer = c.detachNormalTimerLocked()
-		timers = c.detachSyncTimersLocked()
 	}
 	c.mu.Unlock()
 	stopTimer(timer)
-	stopTimers(timers)
 }
 
 // notePark invalidates pending wakes when the attachment parks for resume.
