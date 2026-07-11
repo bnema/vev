@@ -31,6 +31,45 @@ func TestFloatingGeometryTranslate(t *testing.T) {
 	}, geometry)
 }
 
+func TestFloatingFrameGeometryPreservesBorderRules(t *testing.T) {
+	const frameX, frameY = 7, 3
+	tests := []struct {
+		name                  string
+		content               domain.Rect
+		cfg                   domain.FloatingConfig
+		tinyWidth, tinyHeight bool
+	}{
+		{name: "normal", content: domain.Rect{Width: 80, Height: 24}, cfg: domain.FloatingConfig{Width: 80, Height: 75}},
+		{name: "tiny width omits horizontal borders", content: domain.Rect{Width: 2, Height: 20}, cfg: domain.FloatingConfig{Width: 100, Height: 100}, tinyWidth: true},
+		{name: "tiny height omits vertical borders", content: domain.Rect{Width: 20, Height: 2}, cfg: domain.FloatingConfig{Width: 100, Height: 100}, tinyHeight: true},
+		{name: "full size", content: domain.Rect{Width: 80, Height: 24}, cfg: domain.FloatingConfig{Width: 100, Height: 100}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			contentGeometry := calculateFloatingGeometry(tt.content, tt.cfg)
+			frameGeometry := contentGeometry.translate(frameX, frameY)
+
+			require.Equal(t, contentGeometry.Bounds.X+frameX, frameGeometry.Bounds.X)
+			require.Equal(t, contentGeometry.Bounds.Y+frameY, frameGeometry.Bounds.Y)
+			require.Equal(t, contentGeometry.Inner.X+frameX, frameGeometry.Inner.X)
+			require.Equal(t, contentGeometry.Inner.Y+frameY, frameGeometry.Inner.Y)
+			require.Equal(t, contentGeometry.Bounds.Width, frameGeometry.Bounds.Width)
+			require.Equal(t, contentGeometry.Bounds.Height, frameGeometry.Bounds.Height)
+			require.Equal(t, contentGeometry.Inner.Width, frameGeometry.Inner.Width)
+			require.Equal(t, contentGeometry.Inner.Height, frameGeometry.Inner.Height)
+
+			if tt.tinyWidth {
+				require.Equal(t, frameGeometry.Bounds.X, frameGeometry.Inner.X)
+				require.Equal(t, frameGeometry.Bounds.Width, frameGeometry.Inner.Width)
+			}
+			if tt.tinyHeight {
+				require.Equal(t, frameGeometry.Bounds.Y, frameGeometry.Inner.Y)
+				require.Equal(t, frameGeometry.Bounds.Height, frameGeometry.Inner.Height)
+			}
+		})
+	}
+}
+
 func TestCalculateFloatingGeometry(t *testing.T) {
 	tests := []struct {
 		name    string
