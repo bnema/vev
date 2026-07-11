@@ -406,17 +406,7 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 	ac.setSession(targetSess)
 	ac.recordPreviousSession(from)
 	d.mu.Unlock()
-	// Both session coordinators must observe the ownership transfer before
-	// stale readers/timers can publish into either session.
-	if rc := from.renderCoordinator(); rc != nil {
-		rc.noteDetach(ac)
-	}
-	// Output states from the prior session cannot be acknowledged against the
-	// destination's full first frame.
-	ac.sendMu.Lock()
-	ac.output.rebase()
-	ac.sendMu.Unlock()
-	d.attachCoordinator(targetSess, old, ac)
+	d.handoffCoordinator(from, targetSess, old, ac)
 	return old
 }
 
@@ -455,13 +445,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	ac.setSession(targetSess)
 	ac.recordPreviousSession(from)
 	d.mu.Unlock()
-	if rc := from.renderCoordinator(); rc != nil {
-		rc.noteDetach(ac)
-	}
-	ac.sendMu.Lock()
-	ac.output.rebase()
-	ac.sendMu.Unlock()
-	d.attachCoordinator(targetSess, nil, ac)
+	d.handoffCoordinator(from, targetSess, nil, ac)
 	d.firstPaint(targetSess, ac, ac.size)
 	return true
 }

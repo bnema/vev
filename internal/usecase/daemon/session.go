@@ -247,6 +247,9 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	d.log.Info("client attached", "session", newSess.name, "resume", ac.resumeCapable)
 	d.mu.Unlock()
 
+	// Match every other cross-session path: source callbacks are stale and
+	// destination ownership is installed before its first full frame.
+	d.handoffCoordinator(from, newSess, nil, ac)
 	d.firstPaint(newSess, ac, sz)
 	return nil
 }

@@ -362,9 +362,26 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 		case <-cancel:
 			return
 		}
+		// Keep the batch registered while force runs. A concurrent render must
+		// continue to observe the synchronized-output gate until the VT has
+		// authoritatively closed the batch.
 		c.mu.Lock()
 		current := c.syncBatches[p]
 		valid := !c.torndown && current == batch && current.generation == gen
+		c.mu.Unlock()
+		if !valid {
+			return
+		}
+		if batch.force != nil {
+			batch.force()
+		}
+
+		// force may synchronously end this batch, replace it with a newer
+		// generation, or tear down the coordinator. Remove only the exact
+		// snapshot that expired, then publish one urgent completion wake.
+		c.mu.Lock()
+		current = c.syncBatches[p]
+		valid = !c.torndown && current == batch && current.generation == gen
 		if valid {
 			delete(c.syncBatches, p)
 			c.syncRegistryVersion++
@@ -375,9 +392,6 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 		}
 		c.mu.Unlock()
 		if valid {
-			if batch.force != nil {
-				batch.force()
-			}
 			// Reevaluate the aggregate gate only after forcing this pane.
 			c.fireCurrent(true)
 		}

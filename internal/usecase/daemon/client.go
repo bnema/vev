@@ -362,6 +362,19 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	return ac, old
 }
 
+// handoffCoordinator completes a cross-session ownership transfer before the
+// destination's first paint. It invalidates source callbacks, rebases the
+// attachment's output dependency chain, then installs the destination owner.
+func (d *Daemon) handoffCoordinator(from, target *session, old, current *attachedClient) {
+	if rc := from.renderCoordinator(); rc != nil {
+		rc.noteDetach(current)
+	}
+	current.sendMu.Lock()
+	current.output.rebase()
+	current.sendMu.Unlock()
+	d.attachCoordinator(target, old, current)
+}
+
 // attachCoordinator is the sole direct attachment handoff. It creates at
 // most one coordinator for sess and changes its identity before any caller
 // can publish resize or render state for the new client.
