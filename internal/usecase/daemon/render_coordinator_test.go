@@ -1176,6 +1176,41 @@ func requireWorkerExit(t *testing.T, done <-chan struct{}) {
 	t.Fatal("cancelled coordinator timer worker did not exit")
 }
 
+func TestCoordinatorDeadlineCannotPaintPublishedReplacementBeforeOwnershipInstall(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	d, sess, owner, ownerSends := newManualSessionWithPTYs(t, p)
+	replacementTransport, replacementSends := newCapturingTransport(t)
+	replacement := &attachedClient{tr: replacementTransport, output: newOutputStateStream(), size: owner.size}
+	replacement.initOverlays()
+	replacement.setSession(sess)
+
+	clock := newCoordinatorMockClock(t, 2)
+	d.clock = clock.clock
+	rc := newRenderCoordinator(renderCoordinatorOptions{
+		clock: clock.clock,
+		wake: func(w renderWake) {
+			// This is the production ownership boundary: composition must use
+			// the coordinator's captured attachment, never sess.client.
+			d.paint(sess, w.attachment, w.reset)
+		},
+		ackReady: func() bool { return true },
+	})
+	rc.attach(owner)
+	sess.installRenderCoordinator(rc)
+	rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true})
+	timer := awaitCoordinatorScheduledTimer(t, clock)
+
+	// Model attachClient's publication window exactly: sess.client is new,
+	// but coordinator replacement has not yet invalidated the old deadline.
+	sess.mu.Lock()
+	sess.client = replacement
+	sess.mu.Unlock()
+	timer.ch <- time.Time{}
+	requireNoCoordinatorOutputFrame(t, replacementSends)
+	requireNoCoordinatorOutputFrame(t, ownerSends)
+}
+
 func TestRenderCoordinatorInertTimerFiresSynchronouslyWithoutWorker(t *testing.T) {
 	clock := portsmocks.NewMockClock(t)
 	timer := portsmocks.NewMockTimer(t)

@@ -258,6 +258,42 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	awaitFrame(t, sends1, ports.MsgOutput)
 }
 
+func TestPickerDisplacementCancelsOldResizePaint(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	defer releasePTY1()
+	defer releasePTY2()
+	clock := &signalClock{timers: make(chan *signalTimer, 2)}
+	d := newTestDaemon(t, nil, clock)
+	tr1, _ := newCapturingTransport(t)
+	tr2, _ := newCapturingTransport(t)
+	ac1 := &attachedClient{tr: tr1, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	ac2 := &attachedClient{tr: tr2, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	sctx1, cancel1 := context.WithCancel(d.serveCtx)
+	sctx2, cancel2 := context.WithCancel(d.serveCtx)
+	defer cancel1()
+	defer cancel2()
+	sess1 := &session{id: "s1", name: "alpha", ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, client: ac1}
+	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, client: ac2}
+	ac1.setSession(sess1)
+	ac2.setSession(sess2)
+	d.sessions[sess1.id], d.sessions[sess2.id] = sess1, sess2
+
+	d.resize(sess2, ac2, domain.Size{Cols: 100, Rows: 24})
+	timer := <-clock.timers
+	ac2.sendMu.Lock()
+	before := ac2.resizePaintGeneration
+	require.True(t, ac2.resizePaintPending)
+	ac2.sendMu.Unlock()
+
+	require.Same(t, ac2, d.stealClientForTarget(sess1, ac1, sess2, picker.Target{Session: sess2.id}))
+	ac2.sendMu.Lock()
+	require.False(t, ac2.resizePaintPending)
+	require.Equal(t, before+1, ac2.resizePaintGeneration)
+	ac2.sendMu.Unlock()
+	timer.ch <- time.Time{}
+}
+
 func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
