@@ -110,6 +110,139 @@ func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
 
+// channelPTY drives ptyReader through generated PTY mocks. A processed token is
+// published only when ptyReader asks for its next read, which proves the
+// preceding chunk completed its parser and coordinator path without sleeping.
+type channelPTYStep struct {
+	data []byte
+	err  error
+}
+
+func newChannelPTY(t *testing.T) (*portsmocks.MockPTY, chan<- channelPTYStep, <-chan struct{}) {
+	t.Helper()
+	pty := portsmocks.NewMockPTY(t)
+	steps := make(chan channelPTYStep)
+	processed := make(chan struct{}, 8)
+	read := false
+	pty.EXPECT().Read(mock.Anything).RunAndReturn(func(buf []byte) (int, error) {
+		if read {
+			processed <- struct{}{}
+		}
+		read = true
+		step := <-steps
+		return copy(buf, step.data), step.err
+	}).Maybe()
+	pty.EXPECT().Close().Return(nil).Maybe()
+	return pty, steps, processed
+}
+
+func awaitPTYReadProcessed(t *testing.T, processed <-chan struct{}) {
+	t.Helper()
+	<-processed
+}
+
+func awaitOutputFrameWithoutSleep(t *testing.T, sends <-chan ports.Frame) ports.Frame {
+	t.Helper()
+	frame := <-sends
+	require.Equal(t, ports.MsgOutput, frame.Type)
+	return frame
+}
+
+func drainCoordinatorTimers(clock *coordinatorMockClock) []*coordinatorMockTimer {
+	var timers []*coordinatorMockTimer
+	for {
+		select {
+		case timer := <-clock.timers:
+			timers = append(timers, timer)
+		default:
+			return timers
+		}
+	}
+}
+
+func fireCoordinatorTimer(t *testing.T, timers []*coordinatorMockTimer, duration time.Duration) {
+	t.Helper()
+	for _, timer := range timers {
+		if timer.duration == duration {
+			timer.ch <- time.Time{}
+			return
+		}
+	}
+	t.Fatalf("coordinator did not arm %s timer", duration)
+}
+
+func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
+	t.Run("inactive synchronized pane activates only after complete urgent frame", func(t *testing.T) {
+		inactivePTY, inactiveSteps, inactiveProcessed := newChannelPTY(t)
+		activePTY, _, _ := newChannelPTY(t)
+		d, sess, ac, sends := newManualSessionWithPTYs(t, activePTY, inactivePTY)
+		clock := newCoordinatorMockClock(t, 8)
+		d.clock = clock.clock
+		d.attachCoordinator(sess, nil, ac)
+
+		d.sessWg.Add(1)
+		go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
+		inactiveSteps <- channelPTYStep{data: []byte("\x1b[?2026hpartial")}
+		awaitPTYReadProcessed(t, inactiveProcessed)
+
+		sess.mu.Lock()
+		sess.active = 1
+		sess.mu.Unlock()
+		d.invalidateRender(sess, ac, true, "sync activation")
+		fireCoordinatorTimer(t, drainCoordinatorTimers(clock), urgentRenderDeadline)
+		requireNoCoordinatorOutputFrame(t, sends)
+
+		inactiveSteps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
+		awaitPTYReadProcessed(t, inactiveProcessed)
+		frame := awaitOutputFrameWithoutSleep(t, sends)
+		output, err := ports.UnmarshalOutput(frame.Payload)
+		require.NoError(t, err)
+		require.Contains(t, string(output.Data), "partial complete")
+		requireNoCoordinatorOutputFrame(t, sends)
+
+		inactiveSteps <- channelPTYStep{err: io.EOF}
+		d.sessWg.Wait()
+	})
+
+	t.Run("hidden synchronized pane cannot stall newly active output or flush late", func(t *testing.T) {
+		oldPTY, oldSteps, oldProcessed := newChannelPTY(t)
+		newPTY, newSteps, newProcessed := newChannelPTY(t)
+		parkedPTY, _, _ := newChannelPTY(t)
+		// Keep one unopened tab so reader EOF cleanup cannot tear down the
+		// session and introduce unrelated detach-notification timers.
+		d, sess, ac, sends := newManualSessionWithPTYs(t, oldPTY, newPTY, parkedPTY)
+		clock := newCoordinatorMockClock(t, 8)
+		d.clock = clock.clock
+		d.attachCoordinator(sess, nil, ac)
+
+		d.sessWg.Add(2)
+		go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
+		go d.ptyReader(sess, sess.tabs[1], sess.tabs[1].focusedPane())
+		oldSteps <- channelPTYStep{data: []byte("\x1b[?2026hold partial")}
+		awaitPTYReadProcessed(t, oldProcessed)
+
+		sess.mu.Lock()
+		sess.active = 1
+		sess.mu.Unlock()
+		newSteps <- channelPTYStep{data: []byte("newly active")}
+		awaitPTYReadProcessed(t, newProcessed)
+		fireCoordinatorTimer(t, drainCoordinatorTimers(clock), minOutputRenderDeadline)
+		frame := awaitOutputFrameWithoutSleep(t, sends)
+		output, err := ports.UnmarshalOutput(frame.Payload)
+		require.NoError(t, err)
+		require.Contains(t, string(output.Data), "newly active")
+		require.NotContains(t, string(output.Data), "old partial")
+
+		oldSteps <- channelPTYStep{data: []byte("\x1b[?2026l")}
+		awaitPTYReadProcessed(t, oldProcessed)
+		requireNoCoordinatorOutputFrame(t, sends)
+
+		oldSteps <- channelPTYStep{err: io.EOF}
+		newSteps <- channelPTYStep{err: io.EOF}
+		d.sessWg.Wait()
+	})
+}
+
 func TestClearNonRenderablePaneDamage(t *testing.T) {
 	newFixture := func(t *testing.T) (*Daemon, *session, *tab, *pane, chan ports.Frame) {
 		t.Helper()
