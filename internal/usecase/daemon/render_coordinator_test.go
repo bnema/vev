@@ -61,13 +61,16 @@ func (h *coordinatorHarness) armedTimers(t *testing.T) []*signalTimer {
 	}
 }
 
+// Coordinator calls and fake-clock advancement are synchronous test steps.
+// These helpers deliberately never wait on wall time: a missing event is a
+// deterministic contract failure, not a slow behavior to poll for.
 func awaitWake(t *testing.T, ch chan renderWake) renderWake {
 	t.Helper()
 	select {
 	case w := <-ch:
 		return w
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for a coordinator wake")
+	default:
+		t.Fatal("coordinator did not synchronously publish a wake after fake-clock advancement")
 		return renderWake{}
 	}
 }
@@ -77,7 +80,7 @@ func requireNoWake(t *testing.T, ch chan renderWake) {
 	select {
 	case w := <-ch:
 		t.Fatalf("unexpected coordinator wake: %+v", w)
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 }
 
@@ -86,8 +89,8 @@ func awaitInvalidation(t *testing.T, ch chan renderInvalidation) renderInvalidat
 	select {
 	case inv := <-ch:
 		return inv
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for a coordinator invalidation")
+	default:
+		t.Fatal("producer did not synchronously publish a coordinator invalidation")
 		return renderInvalidation{}
 	}
 }
@@ -97,7 +100,7 @@ func requireNoInvalidation(t *testing.T, ch chan renderInvalidation) {
 	select {
 	case inv := <-ch:
 		t.Fatalf("unexpected coordinator invalidation: %+v", inv)
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 }
 
@@ -106,9 +109,18 @@ func awaitScheduledTimer(t *testing.T, clk *signalClock) *signalTimer {
 	select {
 	case tm := <-clk.timers:
 		return tm
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for a scheduled timer")
+	default:
+		t.Fatal("coordinator did not synchronously arm a fake-clock timer")
 		return nil
+	}
+}
+
+func requireNoCoordinatorOutputFrame(t *testing.T, sends chan ports.Frame) {
+	t.Helper()
+	select {
+	case frame := <-sends:
+		t.Fatalf("unexpected output frame: %+v", frame)
+	default:
 	}
 }
 
@@ -387,32 +399,58 @@ func TestRenderCoordinatorResizeMetadata(t *testing.T) {
 			},
 		},
 		{
-			name: "a displaced attachment cannot overwrite current metadata",
+			name: "stale resize callbacks preserve latest metadata through lifecycle transitions",
 			run: func(t *testing.T, rc *renderCoordinator, owner, replacement *attachedClient) {
-				require.Equal(t, uint64(1), rc.recordResizeRequest(sz(120, 40), owner))
-				rc.noteReplace(owner, replacement)
-				rc.attach(replacement)
+				type lifecycleCase struct {
+					name       string
+					installNew bool
+				}
+				for _, tc := range []lifecycleCase{
+					{name: "detach"},
+					{name: "park"},
+					{name: "session teardown"},
+					{name: "replacement", installNew: true},
+				} {
+					t.Run(tc.name, func(t *testing.T) {
+						h := newCoordinatorHarness(t)
+						staleOwner := &attachedClient{}
+						freshOwner := &attachedClient{}
+						h.rc.attach(staleOwner)
+						require.Equal(t, uint64(1), h.rc.recordResizeRequest(sz(120, 40), staleOwner))
 
-				require.Zero(t, rc.recordResizeRequest(sz(80, 20), owner),
-					"a stale attachment must not advance the resize epoch")
-				snap := rc.resizeSnapshot()
-				require.Equal(t, sz(120, 40), snap.size)
-				require.Equal(t, uint64(1), snap.epoch)
+						// This models a retained PR #71 callback which captured the old
+						// attachment before lifecycle ownership changed.
+						staleCallback := func() uint64 {
+							return h.rc.recordResizeRequest(sz(80, 20), staleOwner)
+						}
 
-				require.Equal(t, uint64(2), rc.recordResizeRequest(sz(100, 50), replacement))
-				snap = rc.resizeSnapshot()
-				require.Equal(t, sz(100, 50), snap.size)
-				require.Same(t, replacement, snap.source)
-			},
-		},
-		{
-			name: "detach cannot erase committed metadata",
-			run: func(t *testing.T, rc *renderCoordinator, owner, _ *attachedClient) {
-				require.Equal(t, uint64(1), rc.recordResizeRequest(sz(120, 40), owner))
-				rc.noteDetach(owner)
-				snap := rc.resizeSnapshot()
-				require.Equal(t, sz(120, 40), snap.size)
-				require.Equal(t, uint64(1), snap.epoch)
+						switch tc.name {
+						case "detach":
+							h.rc.noteDetach(staleOwner)
+						case "park":
+							h.rc.notePark(staleOwner)
+						case "session teardown":
+							h.rc.noteSessionTeardown()
+						case "replacement":
+							h.rc.noteReplace(staleOwner, freshOwner)
+							h.rc.attach(freshOwner)
+							require.Equal(t, uint64(2), h.rc.recordResizeRequest(sz(100, 50), freshOwner))
+						}
+
+						require.Zero(t, staleCallback(), "stale callback must not advance the resize epoch")
+						snap := h.rc.resizeSnapshot()
+						if tc.installNew {
+							require.Equal(t, sz(100, 50), snap.size)
+							require.Equal(t, uint64(2), snap.epoch)
+							require.Same(t, freshOwner, snap.source)
+							return
+						}
+						require.Equal(t, sz(120, 40), snap.size)
+						require.Equal(t, uint64(1), snap.epoch)
+						require.Same(t, staleOwner, snap.source,
+							"the stale callback must not replace the recorded attachment identity")
+					})
+				}
 			},
 		},
 	}
@@ -573,7 +611,7 @@ func TestProducerInvalidations(t *testing.T) {
 
 			awaitInvalidation(t, invs)
 			requireNoInvalidation(t, invs)
-			requireNoOutputFrame(t, sends)
+			requireNoCoordinatorOutputFrame(t, sends)
 		})
 	}
 }
@@ -626,13 +664,13 @@ func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
 			"the coordinator must record the latest requested resize before delegating")
 		require.Same(t, ac, snap.source)
 		require.Equal(t, uint64(1), snap.epoch)
-		requireNoOutputFrame(t, sends)
+		requireNoCoordinatorOutputFrame(t, sends)
 
 		timer.ch <- time.Time{}
 		inv := awaitInvalidation(t, invs)
 		require.True(t, inv.reset, "the resize dispatch must request a full-redraw invalidation")
 		requireNoInvalidation(t, invs)
-		requireNoOutputFrame(t, sends)
+		requireNoCoordinatorOutputFrame(t, sends)
 	})
 
 	t.Run("stale generations stay rejected", func(t *testing.T) {
@@ -647,13 +685,13 @@ func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
 
 		first.ch <- time.Time{}
 		requireNoInvalidation(t, invs)
-		requireNoOutputFrame(t, sends)
+		requireNoCoordinatorOutputFrame(t, sends)
 
 		latest.ch <- time.Time{}
 		inv := awaitInvalidation(t, invs)
 		require.True(t, inv.reset)
 		requireNoInvalidation(t, invs)
-		requireNoOutputFrame(t, sends)
+		requireNoCoordinatorOutputFrame(t, sends)
 		require.Equal(t, domain.Size{Cols: 120, Rows: 24}, sess.renderCoordinator().resizeSnapshot().size)
 	})
 
@@ -666,6 +704,6 @@ func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
 
 		timer.ch <- time.Time{}
 		requireNoInvalidation(t, invs)
-		requireNoOutputFrame(t, sends)
+		requireNoCoordinatorOutputFrame(t, sends)
 	})
 }
