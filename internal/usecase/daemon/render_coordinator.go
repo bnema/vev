@@ -272,7 +272,10 @@ func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv 
 	c.pendingUrgent = c.pendingUrgent || inv.class == invalidateUrgent
 	c.pendingPreview = c.pendingPreview || c.previewWake != nil || len(c.previewWakes) != 0
 	c.coalesced++
-	arm := !wasPending || (!wasUrgent && c.pendingUrgent) || (!wasPreviewPending && c.pendingPreview)
+	// A deadline may have expired while synchronized output still gated the
+	// pending work. Completion republishes urgently and must reserve a fresh
+	// deadline rather than leaving that already-fired timer as the only arm.
+	arm := !wasPending || (!wasUrgent && c.pendingUrgent) || (!wasPreviewPending && c.pendingPreview) || c.deadlineDue
 	var old ports.Timer
 	if arm {
 		c.generation++

@@ -194,6 +194,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 
 		inactiveSteps <- channelPTYStep{data: []byte(" complete\x1b[?2026l")}
 		awaitPTYReadProcessed(t, inactiveProcessed)
+		fireCoordinatorTimer(t, drainCoordinatorTimers(clock), urgentRenderDeadline)
 		frame := awaitOutputFrameWithoutSleep(t, sends)
 		output, err := ports.UnmarshalOutput(frame.Payload)
 		require.NoError(t, err)
@@ -277,7 +278,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		fireCoordinatorTimer(t, drainCoordinatorTimers(clock), urgentRenderDeadline)
 		wake := <-previews
 		require.True(t, wake.urgent)
-		require.Equal(t, 1, wake.coalesced)
+		require.Equal(t, 2, wake.coalesced, "completion retains coordinator coalescing across the cleared attachment work")
 		select {
 		case duplicate := <-previews:
 			t.Fatalf("sync completion must publish exactly one preview wake: %#v", duplicate)
@@ -320,7 +321,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		wake := <-wakes
 		require.True(t, wake.urgent)
 		require.True(t, wake.reset, "the replacement's cleared batch must repaint a complete frame")
-		require.Equal(t, 2, wake.coalesced, "completion must coalesce with the replacement reset")
+		require.Equal(t, 3, wake.coalesced, "completion must retain the replacement reset and coordinator coalescing")
 		require.Same(t, replacement, wake.attachment)
 		select {
 		case duplicate := <-wakes:

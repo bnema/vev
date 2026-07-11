@@ -657,9 +657,14 @@ func TestRenderCoordinatorSynchronizedOutput(t *testing.T) {
 		require.Equal(t, maxSyncUpdateDuration, watchdogs[len(watchdogs)-1].duration)
 
 		h.rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true})
-		for _, timer := range h.armedTimers(t) {
-			timer.ch <- time.Time{}
-		}
+		timers := h.armedTimers(t)
+		require.Len(t, timers, 1)
+		h.rc.mu.Lock()
+		normalWorkerDone := h.rc.normalWorkerDone
+		h.rc.mu.Unlock()
+		require.NotNil(t, normalWorkerDone)
+		timers[0].ch <- time.Time{}
+		requireWorkerExit(t, normalWorkerDone)
 		requireNoWake(t, h.wakes)
 
 		h.syncActive.Store(false)
@@ -1354,7 +1359,12 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 				h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "complete preview"})
 				timers := h.armedTimers(t)
 				require.Len(t, timers, 1)
+				h.rc.mu.Lock()
+				normalWorkerDone := h.rc.normalWorkerDone
+				h.rc.mu.Unlock()
+				require.NotNil(t, normalWorkerDone)
 				timers[0].ch <- time.Time{}
+				requireWorkerExit(t, normalWorkerDone)
 				requireNoWake(t, h.previews)
 
 				h.rc.mu.Lock()
@@ -1386,7 +1396,12 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 		h.rc.invalidateForAttachment(replacement, renderInvalidation{class: invalidateUrgent, reset: true, producer: "replacement first paint"})
 		timers := h.armedTimers(t)
 		require.Len(t, timers, 1)
+		h.rc.mu.Lock()
+		normalWorkerDone := h.rc.normalWorkerDone
+		h.rc.mu.Unlock()
+		require.NotNil(t, normalWorkerDone)
 		timers[0].ch <- time.Time{}
+		requireWorkerExit(t, normalWorkerDone)
 		requireNoWake(t, h.wakes)
 
 		h.rc.mu.Lock()

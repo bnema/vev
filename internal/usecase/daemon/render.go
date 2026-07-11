@@ -186,9 +186,11 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 							rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
 						}
 					} else if syncEnded && renderable {
-						// State removal happened under pane.mu; only the external wake is
-						// deferred until after unlock to preserve lock order.
-						rc.fireCurrent(false)
+						// State removal happened under pane.mu. Publish a new urgent
+						// completion after unlock: detach/replace may have cleared the
+						// pending batch work, so fireCurrent alone could not wake a
+						// headless picker preview or replacement attachment.
+						rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
 					}
 				}
 				if completeSyncRead && renderable {
