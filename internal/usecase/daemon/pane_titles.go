@@ -47,6 +47,10 @@ func (p *pane) displayTitleLocked() string {
 // cached composition unless that fallback changes the displayed title.
 func (p *pane) setDisplayFallback(fallback string) {
 	p.mu.Lock()
+	if p.title.displayFallback == fallback {
+		p.mu.Unlock()
+		return
+	}
 	oldTitle := p.displayTitleLocked()
 	p.title.displayFallback = fallback
 	if oldTitle != p.displayTitleLocked() {
@@ -62,6 +66,58 @@ func (p *pane) refreshTerminalTitleLocked() {
 	if p.title.terminalTitle != title {
 		p.title.terminalTitle = title
 		p.title.generation++
+	}
+}
+
+// composeTabTitle renders "name (paneTitle)". An empty paneTitle, or one equal
+// to the tab name, collapses to just the name.
+func composeTabTitle(tabName, paneTitle string) string {
+	if paneTitle == "" || paneTitle == tabName {
+		return tabName
+	}
+	return tabName + " (" + paneTitle + ")"
+}
+
+// focusedPaneTitle returns the focused pane's display title for tab labels.
+// Caller must hold the owning session.mu (tb.mu then pane.mu obey lock order).
+// When includeTerminalTitle is false the OSC title is omitted; the process
+// name (or fallback) still shows.
+func (tb *tab) focusedPaneTitle(includeTerminalTitle bool) string {
+	tb.mu.Lock()
+	p := tb.focusedPane()
+	tb.mu.Unlock()
+	if p == nil {
+		return ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if includeTerminalTitle {
+		return p.displayTitleLocked()
+	}
+	return formatPaneTitle(p.title.processName, "", p.title.displayFallback)
+}
+
+// refreshSessionFocusedTitles opportunistically refreshes the process-name half
+// of every tab's focused pane. Snapshot panes under locks, then refresh with no
+// lock held (refreshPaneDisplayTitle re-enters p.mu itself). TTL-throttled.
+func (d *Daemon) refreshSessionFocusedTitles(sess *session) {
+	if sess == nil {
+		return
+	}
+	fallback := d.paneTitleFallback()
+	sess.mu.Lock()
+	panes := make([]*pane, 0, len(sess.tabs))
+	for _, tb := range sess.tabs {
+		tb.mu.Lock()
+		if p := tb.focusedPane(); p != nil {
+			panes = append(panes, p)
+		}
+		tb.mu.Unlock()
+	}
+	sess.mu.Unlock()
+	for _, p := range panes {
+		p.setDisplayFallback(fallback)
+		d.refreshPaneDisplayTitle(sess, p, false)
 	}
 }
 

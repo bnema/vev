@@ -222,8 +222,11 @@ func TestIntegration_CommandPaletteCreatesTab(t *testing.T) {
 	awaitText(t, p, sz, "Commands")
 
 	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("CNT\r")})}))
-	text := awaitScreenText(t, p, sz, " 1  2 ")
-	require.Contains(t, text, " 1  2 ")
+	// Tab labels are enriched with the focused pane's title; with no process
+	// inspector wired in this test, that title falls back to the shell's
+	// basename ("sh").
+	text := awaitScreenText(t, p, sz, " 1 (sh)  2 (sh) ")
+	require.Contains(t, text, " 1 (sh)  2 (sh) ")
 }
 
 func TestIntegration_CommandPaletteRenamesEphemeralSession(t *testing.T) {

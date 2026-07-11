@@ -115,7 +115,7 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	snap := scopy.NewSnapshot(pane.scrollback, pane.screen.Frame)
 	pane.mu.Unlock()
 	mode := scopy.NewMode(snap)
-	bars := barState{status: sess.statusSegments()}
+	bars := barState{status: sess.statusSegments(true)}
 
 	base := renderer.NewFrame(80, 25)
 	target := domain.Rect{X: 0, Y: 1, Width: 80, Height: 23}
@@ -150,13 +150,13 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 	snap := scopy.NewSnapshot(tb.focusedPane().scrollback, tb.focusedPane().screen.Frame)
 	mode := scopy.NewMode(snap)
 
-	bars := barState{status: sess.statusSegments()}
+	bars := barState{status: sess.statusSegments(true)}
 	base, _ := composeClientFrameWithState(bars, tb, true)
 	frame, damage := composeCopyClientFrame(mode, &snap, domain.Rect{X: 0, Y: 1, Width: 12, Height: 3}, base, bars)
 
 	require.Equal(t, 80, frame.Width)
 	require.Equal(t, 25, frame.Height)
-	require.Equal(t, " 1", strings.TrimRight(rowText(frame.Row(0)), " "))
+	require.Equal(t, " 1 (sh)", strings.TrimRight(rowText(frame.Row(0)), " "))
 	require.Contains(t, rowText(frame.Row(1)), "live")
 	require.Contains(t, rowText(frame.Row(24)), "[SCROLL]")
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)

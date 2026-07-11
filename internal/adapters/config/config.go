@@ -32,6 +32,7 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	seenBindingKeys := make(map[string]bool)
 	seenFloatingKeys := make(map[string]bool)
 	seenPaletteKeys := make(map[string]bool)
+	seenTabsKeys := make(map[string]bool)
 
 	scanner := bufio.NewScanner(r)
 	lineNo := 0
@@ -103,6 +104,14 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				continue
 			}
 			cfg.Palette = domain.PaletteConfig{Anchor: anchor, AnchorSet: true}
+		case key == "tabs.terminal-title":
+			warnings = warnDuplicateKey(warnings, seenTabsKeys, key, lineNo)
+			on, ok := parseOnOff(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid tabs.terminal-title %q", value)})
+				continue
+			}
+			cfg.Tabs.TerminalTitle = on
 		case key == "floating.command":
 			warnings = warnDuplicateKey(warnings, seenFloatingKeys, key, lineNo)
 			command, ok := parseBarCommand(value)
@@ -279,6 +288,17 @@ func parsePercentage(value string) (int, bool) {
 	}
 	percentage, err := strconv.Atoi(strings.TrimSuffix(value, "%"))
 	return percentage, err == nil && percentage >= 1 && percentage <= 100
+}
+
+func parseOnOff(value string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "on":
+		return true, true
+	case "off":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func parseBarCommand(value string) (string, bool) {

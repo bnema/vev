@@ -63,6 +63,11 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].name < sessions[j].name })
 	sort.Slice(stopped, func(i, j int) bool { return stopped[i].name < stopped[j].name })
 
+	for _, s := range sessions {
+		d.refreshSessionFocusedTitles(s)
+	}
+
+	includeTerminalTitle := d.currentTabsConfig().TerminalTitle
 	views := make([]picker.SessionView, 0, len(sessions)+len(stopped))
 	curTab := 0
 	for _, s := range sessions {
@@ -70,7 +75,7 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 		view := picker.SessionView{ID: s.id, Name: s.name, Active: s.active, Tabs: make([]string, len(s.tabs))}
 		sessionAttention := false
 		for i, tb := range s.tabs {
-			label := tabDisplayName(tb, i)
+			label := composeTabTitle(tabDisplayName(tb, i), tb.focusedPaneTitle(includeTerminalTitle))
 			if tb.attention {
 				label = attentionSuffix(label)
 				sessionAttention = true

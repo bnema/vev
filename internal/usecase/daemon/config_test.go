@@ -119,6 +119,24 @@ func TestApplyConfigPublishesImmutableFloatingSnapshot(t *testing.T) {
 	require.Equal(t, domain.FloatingConfig{Command: "lazygit", Width: 90, Height: 85}, second)
 }
 
+func TestApplyConfigPublishesImmutableTabsSnapshot(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	require.Equal(t, domain.Defaults().Tabs, d.currentTabsConfig())
+
+	firstConfig := domain.Defaults()
+	firstConfig.Tabs = domain.TabsConfig{TerminalTitle: false}
+	d.ApplyConfig(firstConfig)
+	first := d.currentTabsConfig()
+
+	secondConfig := domain.Defaults()
+	secondConfig.Tabs = domain.TabsConfig{TerminalTitle: true}
+	d.ApplyConfig(secondConfig)
+	second := d.currentTabsConfig()
+
+	require.Equal(t, domain.TabsConfig{TerminalTitle: false}, first)
+	require.Equal(t, domain.TabsConfig{TerminalTitle: true}, second)
+}
+
 func TestApplyConfigSnapshotRestoreProcesses(t *testing.T) {
 	tests := []struct {
 		name  string

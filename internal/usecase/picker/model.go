@@ -204,6 +204,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, selection ren
 		if !r.header {
 			label = "  " + label
 		}
+		label = ui.TruncateText(label, rect.Width)
 		ui.FillRect(frame, domain.Rect{X: rect.X, Y: rect.Y + y, Width: rect.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
 		ui.DrawText(frame, rect.X, rect.Y+y, rect.X+rect.Width, label, style)
 	}

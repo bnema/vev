@@ -66,6 +66,55 @@ func TestPickerViewsAddsBellSuffixForAttention(t *testing.T) {
 	require.Equal(t, []string{"shell", "logs "}, views[1].Tabs)
 }
 
+func TestPickerViewsComposesFocusedPaneTitleWithAttentionSuffix(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	defer releasePTY1()
+	defer releasePTY2()
+	d, sess, _, _ := newManualSessionWithPTYs(t, p1, p2)
+	d.shell = "/bin/sh"
+	sess.tabs[1].name = "logs"
+
+	pane0 := sess.tabs[0].focusedPane()
+	pane0.mu.Lock()
+	pane0.title.processName = "vim"
+	pane0.title.processNameValid = true
+	pane0.mu.Unlock()
+
+	sess.mu.Lock()
+	sess.tabs[1].attention = true
+	sess.mu.Unlock()
+
+	views, _ := d.pickerViews(sess)
+
+	require.Len(t, views, 1)
+	require.Equal(t, []string{"1 (vim)", attentionSuffix("logs (sh)")}, views[0].Tabs)
+}
+
+func TestPickerViewsOmitsTerminalTitleWhenTabsConfigDisabled(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	defer releasePTY1()
+	defer releasePTY2()
+	d, sess, _, _ := newManualSessionWithPTYs(t, p1, p2)
+	d.shell = "/bin/sh"
+	sess.tabs[1].name = "logs"
+
+	pane0 := sess.tabs[0].focusedPane()
+	pane0.mu.Lock()
+	pane0.title.processName = "vim"
+	pane0.title.processNameValid = true
+	pane0.title.terminalTitle = "server.go — vev"
+	pane0.mu.Unlock()
+
+	d.ApplyConfig(domain.Config{Tabs: domain.TabsConfig{TerminalTitle: false}})
+
+	views, _ := d.pickerViews(sess)
+
+	require.Len(t, views, 1)
+	require.Equal(t, []string{"1 (vim)", "logs (sh)"}, views[0].Tabs)
+}
+
 func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {
 	p1, release1 := newBlockingPTY(t)
 	p2, release2 := newBlockingPTY(t)
