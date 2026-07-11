@@ -466,6 +466,45 @@ func TestStaleBackSessionClearPreservesConcurrentTarget(t *testing.T) {
 	require.Same(t, updated, ac.previousSession.Get())
 }
 
+// backSession's invalid-target fallback is a render producer: it must publish
+// exactly one coordinator invalidation instead of composing directly, while
+// the valid-target hand-off (TestPaletteBackSessionTogglesPreviousSession) and
+// the guarded stale clear (TestStaleBackSessionClearPreservesConcurrentTarget)
+// keep their PR #73 behavior unchanged.
+func TestBackSessionInvalidTargetsFallBackThroughOneInvalidation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(current *session, ac *attachedClient)
+	}{
+		{name: "no previous target", prepare: func(*session, *attachedClient) {}},
+		{name: "stale previous target", prepare: func(_ *session, ac *attachedClient) {
+			ac.previousSession.Set(&session{id: "gone"})
+		}},
+		{name: "previous target equals current", prepare: func(current *session, ac *attachedClient) {
+			ac.previousSession.Set(current)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+			defer releaseAll(releases)
+			invs := make(chan renderInvalidation, 4)
+			current.installRenderCoordinator(newRenderCoordinator(renderCoordinatorOptions{
+				clock:        d.clock,
+				wake:         func(renderWake) {},
+				onInvalidate: func(inv renderInvalidation) { invs <- inv },
+			}))
+			tc.prepare(current, ac)
+
+			d.backSession(current, ac)
+
+			require.Same(t, current, ac.currentSession(), "an invalid target must not move the attachment")
+			awaitInvalidation(t, invs)
+			requireNoInvalidation(t, invs)
+			requireNoOutputFrame(t, sends)
+		})
+	}
+}
+
 func TestSwitchSourcePreviousSessionContracts(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
