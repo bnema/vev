@@ -259,10 +259,9 @@ func TestPaletteModalGeometry(t *testing.T) {
 			require.Equal(t, " Commands ", modal.Title)
 			require.Equal(t, 11, modal.FixedHeight)
 			wantAnchor := domain.AnchorBottom
-			wantMargins := ui.Margins{Bottom: 1}
+			wantMargins := ui.Margins{Top: 1, Right: 1, Bottom: 1, Left: 1}
 			if tt.size.Cols >= paletteRailBreakpoint {
 				wantAnchor = domain.AnchorBottomRight
-				wantMargins.Right = 1
 			}
 			require.Equal(t, wantAnchor, modal.Anchor)
 			require.Equal(t, wantMargins, modal.Margins)

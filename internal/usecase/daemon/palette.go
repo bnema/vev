@@ -14,7 +14,7 @@ const (
 	paletteRailWidth      = 64
 )
 
-var paletteModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Commands ", Anchor: domain.AnchorBottom, Margins: ui.Margins{Bottom: 1}}
+var paletteModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Commands ", Anchor: domain.AnchorBottom, Margins: ui.Margins{Top: 1, Right: 1, Bottom: 1, Left: 1}}
 
 func paletteModalFor(size domain.Size) ui.Modal {
 	modal := paletteModal

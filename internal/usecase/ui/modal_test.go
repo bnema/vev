@@ -95,6 +95,17 @@ func TestModalBounds(t *testing.T) {
 			m:    Modal{FixedWidth: 8, FixedHeight: 4, Anchor: domain.AnchorBottom, Margins: Margins{Bottom: 20}},
 			want: domain.Rect{X: 6, Y: 0, Width: 8, Height: 4},
 		},
+		{
+			name: "bottom right anchor honors combined margins",
+			base: domain.Size{Cols: 100, Rows: 40},
+			m: Modal{
+				FixedWidth:  30,
+				FixedHeight: 12,
+				Anchor:      domain.AnchorBottomRight,
+				Margins:     Margins{Bottom: 3, Right: 5},
+			},
+			want: domain.Rect{X: 65, Y: 25, Width: 30, Height: 12},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

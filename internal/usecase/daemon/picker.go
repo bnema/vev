@@ -37,7 +37,7 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-var pickerModal = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight: 8, Title: " Sessions "}
+var pickerModal = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight: 8, Title: " Sessions ", Anchor: domain.AnchorCenter, Margins: ui.Margins{}}
 
 func (d *Daemon) enterPicker(sess *session, ac *attachedClient) {
 	views, curTab := d.pickerViews(sess)

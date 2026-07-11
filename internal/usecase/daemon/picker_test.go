@@ -516,6 +516,13 @@ func TestPickerOpenCloseNavigationConcurrentWithRenderRace(t *testing.T) {
 	drain.Wait()
 }
 
+func TestPickerModalGeometry(t *testing.T) {
+	base := domain.Size{Cols: 100, Rows: 40}
+
+	require.Equal(t, domain.Rect{X: 10, Y: 4, Width: 80, Height: 32}, pickerModal.Bounds(base))
+	require.Equal(t, domain.AnchorCenter, pickerModal.Anchor)
+}
+
 func TestPickerResizeRecomposesModal(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
