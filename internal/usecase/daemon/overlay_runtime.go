@@ -30,6 +30,7 @@ type overlayRuntime struct {
 
 	copyMu                sync.Mutex
 	copyMode              *scopy.Mode
+	copyCandidate         *scopy.Mode
 	copySnapshot          *scopy.Snapshot
 	copyPane              *pane
 	copyPending           []byte
@@ -103,6 +104,7 @@ func (rt *overlayRuntime) copySearchActive() bool {
 
 func (rt *overlayRuntime) clearCopyModeLocked() {
 	rt.copyMode = nil
+	rt.copyCandidate = nil
 	rt.copySnapshot = nil
 	rt.copyPane = nil
 	rt.copySearch = nil
@@ -115,7 +117,7 @@ func (rt *overlayRuntime) clearCopyModeForPane(p *pane) bool {
 	}
 	rt.copyMu.Lock()
 	defer rt.copyMu.Unlock()
-	if rt.copyMode == nil || rt.copyPane != p {
+	if rt.copyPane != p || (rt.copyMode == nil && rt.copyCandidate == nil) {
 		return false
 	}
 	rt.clearCopyModeLocked()

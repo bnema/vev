@@ -546,7 +546,8 @@ func TestCopyModeLoneEscapeExitsAfterDelay(t *testing.T) {
 }
 
 func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
-	p, _ := newBlockingPTY(t)
+	p, release := newBlockingPTY(t)
+	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	clk := &signalClock{timers: make(chan *signalTimer, 1)}
 	d.clock = clk
@@ -559,6 +560,14 @@ func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
 	timer := <-clk.timers
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
+
+	ac.overlays.copyMu.Lock()
+	require.Nil(t, ac.overlays.copyESC.timer)
+	require.Nil(t, ac.overlays.copyESC.done)
+	require.Empty(t, ac.overlays.copyPending)
+	ac.overlays.copyMu.Unlock()
+	d.handleInput(sess, ac, []byte("x"))
+	require.True(t, ac.overlays.copyActive(), "pending input from the replaced mode affected the new mode")
 
 	timer.ch <- time.Now()
 	require.Never(t, func() bool {
@@ -609,7 +618,8 @@ func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
 }
 
 func TestHandleCopyInputUsesImmutableSnapshotWithoutPaneLock(t *testing.T) {
-	p, _ := newBlockingPTY(t)
+	p, release := newBlockingPTY(t)
+	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	pane := sess.activeTab().focusedPane()
 	pane.screen.Write([]byte("live"))

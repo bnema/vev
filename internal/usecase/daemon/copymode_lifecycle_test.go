@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
@@ -78,6 +80,49 @@ func TestCopyModeLifecycleCloseOnlyPaneInTabClearsRecoveredClientState(t *testin
 	require.True(t, ac.overlays.copyActive())
 
 	require.NoError(t, d.closePane(sess, tb, p.id, nil, false))
+	require.False(t, ac.overlays.copyActive())
+	require.Nil(t, copyTargetPane(ac.overlays))
+}
+
+func TestCopyModeLifecycleDoesNotRenderCandidateBeforeValidation(t *testing.T) {
+	d, sess, ac, _, releases := newManualTabSession(t, 2)
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	tb := sess.activeTab()
+	p := tb.focusedPane()
+	p.mu.Lock()
+	document := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+	p.mu.Unlock()
+
+	// Hold session validation after publication and make the captured target
+	// stale. A render snapshot taken in this window must not expose the
+	// candidate document.
+	sess.mu.Lock()
+	sess.active = 1
+	result := make(chan bool, 1)
+	go func() {
+		result <- d.publishCopyMode(sess, ac, tb, p, document, nil)
+	}()
+	published := assert.Eventually(t, func() bool {
+		ac.overlays.copyMu.Lock()
+		defer ac.overlays.copyMu.Unlock()
+		return ac.overlays.copyPane == p && ac.overlays.copySnapshot != nil
+	}, time.Second, time.Millisecond)
+	if !published {
+		sess.mu.Unlock()
+		<-result
+		return
+	}
+	renderSnapshot := ac.overlays.SnapshotForRender()
+	candidateWasRenderable := renderSnapshot.copyActive
+	renderSnapshot.Unlock()
+	sess.mu.Unlock()
+
+	require.False(t, <-result)
+	require.False(t, candidateWasRenderable)
 	require.False(t, ac.overlays.copyActive())
 	require.Nil(t, copyTargetPane(ac.overlays))
 }
