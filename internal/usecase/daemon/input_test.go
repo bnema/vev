@@ -452,13 +452,84 @@ func TestPaletteBackSessionDoesNotMoveWithoutValidTarget(t *testing.T) {
 	}
 }
 
+func TestStaleBackSessionClearPreservesConcurrentTarget(t *testing.T) {
+	ac := &attachedClient{}
+	stale := &session{id: "stale"}
+	updated := &session{id: "updated"}
+	ac.previousSession.Set(stale)
+
+	// Model a completed hand-off between observing a stale target and clearing
+	// it. The conditional clear must not erase the newer toggle destination.
+	ac.previousSession.Set(updated)
+	ac.clearPreviousSessionIf(stale)
+
+	require.Same(t, updated, ac.previousSession.Get())
+}
+
+func TestSwitchSourcePreviousSessionContracts(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		target      func(*session, *session) picker.Target
+		wantCurrent string
+		wantPrev    string
+	}{
+		{
+			name: "picker cross-session switch records origin",
+			target: func(_ *session, recent *session) picker.Target {
+				return picker.Target{Session: recent.id, TabIndex: -1}
+			},
+			wantCurrent: "recent",
+			wantPrev:    "current",
+		},
+		{
+			name: "attention cross-session switch records origin",
+			target: func(_ *session, recent *session) picker.Target {
+				return picker.Target{Session: recent.id, TabIndex: 0}
+			},
+			wantCurrent: "recent",
+			wantPrev:    "current",
+		},
+		{
+			name: "same-session tab switch does not record",
+			target: func(current *session, _ *session) picker.Target {
+				return picker.Target{Session: current.id, TabIndex: 0}
+			},
+			wantCurrent: "current",
+			wantPrev:    "",
+		},
+		{
+			name: "missing target does not record",
+			target: func(_ *session, _ *session) picker.Target {
+				return picker.Target{Session: "missing", TabIndex: -1}
+			},
+			wantCurrent: "current",
+			wantPrev:    "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+			defer releaseAll(releases)
+			recent := d.sessions[domain.SessionID("recent")]
+
+			d.switchToTarget(current, ac, tc.target(current, recent))
+			require.Equal(t, domain.SessionID(tc.wantCurrent), ac.currentSession().id)
+			if tc.wantPrev == "" {
+				require.Nil(t, ac.previousSession.Get())
+				return
+			}
+			require.Equal(t, domain.SessionID(tc.wantPrev), ac.previousSession.Get().id)
+		})
+	}
+}
+
 func TestTerminalTeardownClearsPreviousSession(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		teardown func(*Daemon, *session, *attachedClient)
 	}{
-		{name: "send error", teardown: func(d *Daemon, sess *session, ac *attachedClient) { d.detachOnSendError(sess, ac, ac.transport()) }},
-		{name: "session kill", teardown: func(d *Daemon, sess *session, _ *attachedClient) {
+		{name: "explicit detach", teardown: func(d *Daemon, sess *session, ac *attachedClient) { d.clientGone(sess, ac, ac.transport(), true) }},
+		{name: "non-park send error fallback", teardown: func(d *Daemon, sess *session, ac *attachedClient) { d.detachOnSendError(sess, ac, ac.transport()) }},
+		{name: "killed attached session", teardown: func(d *Daemon, sess *session, _ *attachedClient) {
 			require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
 		}},
 	} {

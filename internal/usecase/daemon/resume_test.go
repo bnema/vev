@@ -322,6 +322,33 @@ func TestParkExpiryAndShutdownCleanup(t *testing.T) {
 	require.Zero(t, parked)
 }
 
+func TestLiveParkAndResumeRetainsPreviousSession(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	tr, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), tr)
+	require.NoError(t, err)
+
+	previous := &session{id: "previous"}
+	ac.previousSession.Set(previous)
+	d.clientGone(sess, ac, ac.transport(), false)
+
+	token := ac.resumeToken
+	d.mu.Lock()
+	parked := d.parked[token]
+	d.mu.Unlock()
+	require.NotNil(t, parked)
+	require.Same(t, previous, ac.previousSession.Get(), "a live parked attachment keeps its toggle")
+
+	tr2, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
+	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, "work", token), tr2)
+	require.NoError(t, err)
+	require.Same(t, sess, resumedSess)
+	require.Same(t, ac, resumedAC)
+	require.Same(t, previous, resumedAC.previousSession.Get(), "resume keeps the live attachment toggle")
+}
+
 func TestDiscardingParkedAttachmentClearsPreviousSession(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

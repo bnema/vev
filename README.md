@@ -108,7 +108,6 @@ code.focus-pane-down = FPD
 code.next-tab = NXT
 code.previous-tab = PVT
 code.back-session = BSK
-code.forward-session = FSK
 code.session-picker = SSP
 code.visual-mode = VIS
 code.toggle-floating-pane = FLT
@@ -193,7 +192,7 @@ Successful commands are promoted near the top the next time the palette opens.
 | CLP | close focused pane |
 | FPL / FPR / FPU / FPD | focus pane left / right / up / down |
 | NXT / PVT | switch to next / previous tab |
-| BSK / FSK | move back / forward through recent sessions |
+| BSK | toggle the previously active session |
 | SSP | open session picker |
 | VIS | enter visual mode |
 | FLT | show or hide the current tab's floating terminal |
