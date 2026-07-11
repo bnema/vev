@@ -370,7 +370,7 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 	d.refreshSessionFocusedTitles(sess)
 	bars := d.barStateForClient(sess, ac, overlays.copyFeedback)
 	bars.theme = ac.getTheme()
-	_, attentionVisible := pulseStyle(bars.attentionFrame)
+	attentionVisible := pulseVisible(bars.attentionFrame)
 	repaintAttachedClients = sess.ackAttention(tb, attentionVisible)
 
 	styles := newThemeStyles(ac.getTheme())

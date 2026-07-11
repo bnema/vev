@@ -217,9 +217,10 @@ func (m *Model) firstLeaf() int {
 }
 
 // renderList draws each visible row as up to three segments: a name segment
-// (bold when styles came from a truecolor theme), a muted detail segment
-// (tab rows only), and a base-styled attention marker or "(stopped)" suffix.
-// A tight width ellipsizes the detail segment before eating into the name.
+// (bold when styles came from a truecolor theme), a base-styled attention
+// marker right after the name, and a muted detail segment (tab rows only) —
+// or a base-styled "(stopped)" suffix for stopped session headers. A tight
+// width ellipsizes the detail segment before eating into the name.
 func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles RenderStyles) {
 	if m == nil || rect.Width <= 0 || rect.Height <= 0 {
 		return
@@ -253,12 +254,12 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 			continue
 		}
 
-		detail := ui.TruncateText(r.detail, clipX-x)
-		x = ui.DrawText(frame, x, rect.Y+y, clipX, detail, detailStyle)
-
 		if r.attention {
-			ui.DrawText(frame, x, rect.Y+y, clipX, " "+string(attentionGlyph), base)
+			x = ui.DrawText(frame, x, rect.Y+y, clipX, " "+string(attentionGlyph), base)
 		}
+
+		detail := ui.TruncateText(r.detail, clipX-x)
+		ui.DrawText(frame, x, rect.Y+y, clipX, detail, detailStyle)
 	}
 }
 

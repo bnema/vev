@@ -44,20 +44,35 @@ const (
 	pulseFrameInterval = 120 * time.Millisecond
 )
 
-func pulseStyle(frame int) (renderer.Style, bool) {
-	f := frame % pulseFrameCount
-	if f == 0 {
-		return renderer.DefaultStyle(), false
+// pulseVisible reports whether the attention bell glyph is showing (as
+// opposed to its blank beat) at frame.
+func pulseVisible(frame int) bool {
+	return frame%pulseFrameCount != 0
+}
+
+// pulseStyle returns the style for the attention bell glyph at frame, built
+// on top of base so the bell always keeps the caller's background (the tab's
+// accent/statusBar, or a faded MRU entry's blended colors) instead of
+// punching a default-background hole in a themed bar. On the invisible beat
+// it returns (base, false) unchanged.
+func pulseStyle(frame int, base renderer.Style) (renderer.Style, bool) {
+	if !pulseVisible(frame) {
+		return base, false
 	}
+	f := frame % pulseFrameCount
 	peak := pulseFrameCount / 2
 	distance := f - peak
 	if distance < 0 {
 		distance = -distance
 	}
 	intensity := 1 - float64(distance)/float64(peak)
-	style := renderer.DefaultStyle()
+	style := base
 	style.Bold = true
-	style.Foreground = 244 + int(intensity*11)
+	if base.HasForegroundRGB && base.HasBackgroundRGB {
+		style.ForegroundRGB = themeui.Blend(base.BackgroundRGB, base.ForegroundRGB, intensity)
+	} else {
+		style.Foreground = 244 + int(intensity*11)
+	}
 	return style, true
 }
 
@@ -76,11 +91,11 @@ func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, t
 		}
 		label := labels[i]
 		writeStatusText(row, &x, " "+label.text[:label.nameLen], nameStyle)
-		writeStatusText(row, &x, label.text[label.nameLen:], titleStyle)
 		if w.attention {
 			writeStatusText(row, &x, " ", baseStyle)
-			writeBell(row, &x, frame)
+			writeBell(row, &x, frame, baseStyle)
 		}
+		writeStatusText(row, &x, label.text[label.nameLen:], titleStyle)
 		writeStatusText(row, &x, " ", baseStyle)
 	}
 	drawRightPlainText(row, topRight, x, styles.statusBar)
@@ -123,7 +138,7 @@ func drawStatusSessionEntry(row []renderer.Cell, x *int, name string, ephemeral,
 	writeStatusText(row, x, " "+name, style)
 	if attention {
 		writeStatusText(row, x, " ", style)
-		writeBell(row, x, attentionFrame)
+		writeBell(row, x, attentionFrame, style)
 	}
 	writeStatusText(row, x, " ", style)
 }
@@ -539,10 +554,13 @@ func mruStyle(base renderer.Style, t themeui.Theme, i, count int) renderer.Style
 	return base
 }
 
-func writeBell(row []renderer.Cell, x *int, frame int) {
-	style, visible := pulseStyle(frame)
+// writeBell draws the attention glyph on its visible beat, or a plain cell in
+// base's style on its blank beat, so the bell never leaves a bare
+// default-background hole in a themed bar.
+func writeBell(row []renderer.Cell, x *int, frame int, base renderer.Style) {
+	style, visible := pulseStyle(frame, base)
 	if !visible {
-		writeStatusText(row, x, " ", renderer.DefaultStyle())
+		writeStatusText(row, x, " ", base)
 		return
 	}
 	writeStatusText(row, x, string(attentionGlyph), style)

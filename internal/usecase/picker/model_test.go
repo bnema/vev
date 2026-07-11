@@ -191,19 +191,19 @@ func TestRenderListDrawsNameAndDetailSegmentsWithDistinctStyles(t *testing.T) {
 	require.Equal(t, '(', frame.At(8, 1).Rune)
 	require.True(t, frame.At(8, 1).Style.Equal(selectionMutedStyle), "selected detail segment style")
 
-	// Row 2 is the non-selected tab ("beta"): name uses Name, detail uses
-	// Detail, and the attention marker after the detail uses the row's base
-	// style (not muted).
+	// Row 2 is the non-selected tab ("beta"): name uses Name, then the
+	// attention marker (right after the name, before detail) uses the row's
+	// base style (not muted), then detail uses Detail.
 	require.Equal(t, 'b', frame.At(2, 2).Rune)
 	require.True(t, frame.At(2, 2).Style.Equal(nameStyle), "name segment style")
-	require.Equal(t, ' ', frame.At(6, 2).Rune)
-	require.True(t, frame.At(6, 2).Style.Equal(detailStyle), "detail segment style")
-	require.Equal(t, '(', frame.At(7, 2).Rune)
-	require.True(t, frame.At(7, 2).Style.Equal(detailStyle), "detail segment style")
-	require.Equal(t, ' ', frame.At(13, 2).Rune, "attention marker leading space")
-	require.True(t, frame.At(13, 2).Style.Equal(baseStyle), "attention marker uses the base style, not muted")
-	require.Equal(t, rune(attentionGlyph), frame.At(14, 2).Rune)
-	require.True(t, frame.At(14, 2).Style.Equal(baseStyle), "attention marker uses the base style, not muted")
+	require.Equal(t, ' ', frame.At(6, 2).Rune, "attention marker leading space")
+	require.True(t, frame.At(6, 2).Style.Equal(baseStyle), "attention marker uses the base style, not muted")
+	require.Equal(t, rune(attentionGlyph), frame.At(7, 2).Rune)
+	require.True(t, frame.At(7, 2).Style.Equal(baseStyle), "attention marker uses the base style, not muted")
+	require.Equal(t, ' ', frame.At(8, 2).Rune)
+	require.True(t, frame.At(8, 2).Style.Equal(detailStyle), "detail segment style")
+	require.Equal(t, '(', frame.At(9, 2).Rune)
+	require.True(t, frame.At(9, 2).Style.Equal(detailStyle), "detail segment style")
 }
 
 func TestRenderListTruncatesDetailBeforeName(t *testing.T) {

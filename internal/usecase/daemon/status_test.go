@@ -240,11 +240,12 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 	tabs := []statusTab{
 		{name: "api", paneTitle: "shell"},
 		{name: "logs", active: true, attention: true},
+		{name: "err", paneTitle: "build failed", attention: true},
 	}
 	status := statusSnapshot{tabs: tabs}
-	const rowLen = 40
+	const rowLen = 60
 
-	t.Run("truecolor theme bolds names and mutes titles", func(t *testing.T) {
+	t.Run("truecolor theme bolds names, mutes titles, and the bell keeps the base background", func(t *testing.T) {
 		theme := themeui.Theme{
 			Foreground: renderer.RGB{R: 200, G: 200, B: 200},
 			Background: renderer.RGB{R: 10, G: 20, B: 30},
@@ -257,29 +258,36 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 		require.False(t, styles.tabTitle.Equal(styles.statusBar), "sanity: muted title style must differ from the base style on a truecolor theme")
 		require.False(t, styles.tabTitleActive.Equal(styles.accent), "sanity: muted active-title style must differ from the base accent style")
 
+		labels := fitTabLabels(tabs, rowLen, "")
+
+		// Frame 0 is the bell's blank beat: the attention space and the blank
+		// bell cell must both be exactly the tab's base style (not
+		// renderer.DefaultStyle(), which would punch a hole in a themed bar).
+		// This also pins down segment order: name, then (if attention)
+		// space+bell, then title, then the trailing space.
 		row := make([]renderer.Cell, rowLen)
 		drawTopBarSnapshot(row, status, 0, "", styles)
-
-		labels := fitTabLabels(tabs, rowLen, "")
 		x := 0
 
-		// tab 0: inactive, "api" bold, " (shell)" muted, trailing space plain.
+		// tab 0: inactive, no attention: name, title, trailing space.
 		nameEnd := x + 1 + labels[0].nameLen
 		for i := x; i < nameEnd; i++ {
 			require.True(t, row[i].Style.Bold, "cell %d: name segment must be bold", i)
 			require.True(t, row[i].Style.Equal(styles.tabName), "cell %d: name segment style mismatch", i)
 		}
+		x = nameEnd
 		titleLen := len(labels[0].text) - labels[0].nameLen
-		titleEnd := nameEnd + titleLen
-		for i := nameEnd; i < titleEnd; i++ {
+		titleEnd := x + titleLen
+		for i := x; i < titleEnd; i++ {
 			require.False(t, row[i].Style.Bold, "cell %d: title segment must not be bold", i)
 			require.True(t, row[i].Style.Equal(styles.tabTitle), "cell %d: title segment style mismatch", i)
 		}
 		x = titleEnd
-		require.True(t, row[x].Style.Equal(styles.statusBar), "cell %d: trailing space must keep the base style", x)
+		require.True(t, row[x].Style.Equal(styles.statusBar), "cell %d: tab 0 trailing space must keep the base style", x)
 		x++
 
-		// tab 1: active, "logs" bold, no title, attention space + bell + trailing space.
+		// tab 1: active, attention, no title: name, attention space+bell (both
+		// base style at frame 0), trailing space.
 		nameEnd = x + 1 + labels[1].nameLen
 		for i := x; i < nameEnd; i++ {
 			require.True(t, row[i].Style.Bold, "cell %d: active name segment must be bold", i)
@@ -287,9 +295,46 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 		}
 		require.Equal(t, len(labels[1].text), labels[1].nameLen, "tab 1 has no pane title, so its whole label is the name segment")
 		x = nameEnd
-		require.True(t, row[x].Style.Equal(styles.accent), "cell %d: attention leading space must keep the active base style", x)
-		x += 2 // skip the leading space (checked above) and the bell glyph itself, which pulseStyle owns
-		require.True(t, row[x].Style.Equal(styles.accent), "cell %d: trailing space must keep the active base style", x)
+		require.True(t, row[x].Style.Equal(styles.accent), "cell %d: tab 1 attention leading space must keep the active base style", x)
+		x++
+		tab1Bell := x
+		require.True(t, row[x].Style.Equal(styles.accent), "cell %d: tab 1 blank bell must keep the active base style, not DefaultStyle", x)
+		x++
+		require.True(t, row[x].Style.Equal(styles.accent), "cell %d: tab 1 trailing space must keep the active base style", x)
+		x++
+
+		// tab 2: inactive, attention, with title: name, attention space+bell
+		// (both base style at frame 0), title, trailing space.
+		nameEnd = x + 1 + labels[2].nameLen
+		for i := x; i < nameEnd; i++ {
+			require.True(t, row[i].Style.Bold, "cell %d: tab 2 name segment must be bold", i)
+			require.True(t, row[i].Style.Equal(styles.tabName), "cell %d: tab 2 name segment style mismatch", i)
+		}
+		x = nameEnd
+		require.True(t, row[x].Style.Equal(styles.statusBar), "cell %d: tab 2 attention leading space must keep the base style", x)
+		x++
+		tab2Bell := x
+		require.True(t, row[x].Style.Equal(styles.statusBar), "cell %d: tab 2 blank bell must keep the base style, not DefaultStyle", x)
+		x++
+		titleLen = len(labels[2].text) - labels[2].nameLen
+		titleEnd = x + titleLen
+		for i := x; i < titleEnd; i++ {
+			require.False(t, row[i].Style.Bold, "cell %d: tab 2 title segment must not be bold", i)
+			require.True(t, row[i].Style.Equal(styles.tabTitle), "cell %d: tab 2 title segment style mismatch", i)
+		}
+		x = titleEnd
+		require.True(t, row[x].Style.Equal(styles.statusBar), "cell %d: tab 2 trailing space must keep the base style", x)
+
+		// On a visible pulse frame, the bell glyph itself must keep the same
+		// background as its tab's base style.
+		visibleRow := make([]renderer.Cell, rowLen)
+		drawTopBarSnapshot(visibleRow, status, 1, "", styles)
+		require.Equal(t, rune(attentionGlyph), visibleRow[tab1Bell].Rune)
+		require.True(t, visibleRow[tab1Bell].Style.HasBackgroundRGB)
+		require.Equal(t, styles.accent.BackgroundRGB, visibleRow[tab1Bell].Style.BackgroundRGB, "tab 1's visible bell must keep the active base background")
+		require.Equal(t, rune(attentionGlyph), visibleRow[tab2Bell].Rune)
+		require.True(t, visibleRow[tab2Bell].Style.HasBackgroundRGB)
+		require.Equal(t, styles.statusBar.BackgroundRGB, visibleRow[tab2Bell].Style.BackgroundRGB, "tab 2's visible bell must keep the plain base background")
 	})
 
 	t.Run("non-usable theme matches the pre-change fallback styles", func(t *testing.T) {
@@ -302,24 +347,26 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 		row := make([]renderer.Cell, rowLen)
 		drawTopBarSnapshot(row, status, 0, "", styles)
 
-		// " api (shell) " (tab 0, incl. trailing space) + " logs" + attention
-		// space + blank bell (frame 0 is not visible) + trailing space, then
-		// blank padding to rowLen: byte-for-byte what the pre-change renderer
+		// " api (shell) " (tab 0) + " logs  " (tab 1: name, attention
+		// space+blank bell, trailing space) + " err  (build failed) " (tab 2:
+		// name, attention space+blank bell, title, trailing space), then blank
+		// padding to rowLen: byte-for-byte what the pre-change renderer
 		// produced, since every new style field collapses to statusBar/accent.
 		const tab0 = " api (shell) "
 		const tab1 = " logs   "
-		require.Equal(t, tab0+tab1+strings.Repeat(" ", rowLen-len(tab0)-len(tab1)), rowText(row))
+		const tab2 = " err   (build failed) "
+		require.Equal(t, tab0+tab1+tab2+strings.Repeat(" ", rowLen-len(tab0)-len(tab1)-len(tab2)), rowText(row))
 
 		for i, c := range row[:len(tab0)] {
 			require.True(t, c.Style.Equal(styles.statusBar), "cell %d should use the plain base style", i)
 		}
-		activeStart := len(tab0)
-		bellCell := activeStart + len(" logs") + 1 // pulseStyle-owned, not asserted here
-		for i := activeStart; i < activeStart+len(tab1); i++ {
-			if i == bellCell {
-				continue
-			}
-			require.True(t, row[i].Style.Equal(styles.accent), "cell %d should use the plain accent style", i)
+		tab1Start := len(tab0)
+		for i := tab1Start; i < tab1Start+len(tab1); i++ {
+			require.True(t, row[i].Style.Equal(styles.accent), "cell %d should use the plain accent style, including the blank bell cell", i)
+		}
+		tab2Start := tab1Start + len(tab1)
+		for i := tab2Start; i < tab2Start+len(tab2); i++ {
+			require.True(t, row[i].Style.Equal(styles.statusBar), "cell %d should use the plain base style, including the blank bell cell", i)
 		}
 	})
 }
@@ -818,15 +865,44 @@ func TestAttentionConstants(t *testing.T) {
 	require.Equal(t, 120*time.Millisecond, pulseFrameInterval)
 }
 
-func TestPulseStyleHidesAtFrameZeroAndRamps(t *testing.T) {
-	_, visible := pulseStyle(0)
-	require.False(t, visible)
+func TestPulseStyleFadesFromBaseAndHidesAtFrameZero(t *testing.T) {
+	rgbBase := renderer.Style{
+		HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 200, G: 200, B: 200},
+		HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{R: 10, G: 20, B: 30},
+	}
+	indexedBase := renderer.Style{Foreground: -1, Background: -1, Inverse: true}
 
-	low, visible := pulseStyle(1)
-	require.True(t, visible)
-	peak, visible := pulseStyle(pulseFrameCount / 2)
-	require.True(t, visible)
-	require.Greater(t, peak.Foreground, low.Foreground)
+	t.Run("invisible frame returns base unchanged", func(t *testing.T) {
+		for _, base := range []renderer.Style{rgbBase, indexedBase} {
+			style, visible := pulseStyle(0, base)
+			require.False(t, visible)
+			require.True(t, style.Equal(base))
+		}
+	})
+
+	t.Run("rgb base blends the glyph foreground from the base background to its foreground, keeping the base background", func(t *testing.T) {
+		low, visible := pulseStyle(1, rgbBase)
+		require.True(t, visible)
+		require.True(t, low.Bold)
+		require.True(t, low.HasBackgroundRGB)
+		require.Equal(t, rgbBase.BackgroundRGB, low.BackgroundRGB, "bell keeps the caller's background so it never punches a hole in a themed bar")
+
+		peak, visible := pulseStyle(pulseFrameCount/2, rgbBase)
+		require.True(t, visible)
+		require.Equal(t, rgbBase.ForegroundRGB, peak.ForegroundRGB, "peak intensity reaches the base foreground exactly")
+		require.NotEqual(t, low.ForegroundRGB, peak.ForegroundRGB, "the glyph should ramp, not jump straight to full intensity")
+	})
+
+	t.Run("non-RGB base falls back to the indexed grey ramp and preserves other base attributes", func(t *testing.T) {
+		low, visible := pulseStyle(1, indexedBase)
+		require.True(t, visible)
+		require.True(t, low.Bold)
+		require.True(t, low.Inverse, "non-color base attributes like inverse must survive")
+
+		peak, visible := pulseStyle(pulseFrameCount/2, indexedBase)
+		require.True(t, visible)
+		require.Greater(t, peak.Foreground, low.Foreground)
+	})
 }
 
 func TestTopBarRendersAttentionBell(t *testing.T) {
@@ -846,8 +922,9 @@ func TestTopBarRendersAttentionBell(t *testing.T) {
 	frame, _ := composeClientFrameWithState(barState{status: sess.statusSegments(true), attentionFrame: 1}, win, true)
 
 	// Tab 2's label is enriched with its focused pane's title ("sh", the
-	// default shell fallback) and truncated to fit alongside the bell.
-	require.Contains(t, rowText(frame.Row(0)), "2 (s")
+	// default shell fallback) and truncated to fit alongside the bell. The
+	// bell sits right after the name, before the (title) segment.
+	require.Contains(t, rowText(frame.Row(0)), "2 "+string(attentionGlyph)+" (s")
 	for _, c := range frame.Row(0) {
 		if c.Rune == attentionGlyph {
 			require.True(t, c.Style.Bold)
