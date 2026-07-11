@@ -750,7 +750,7 @@ func TestFloatingCopyModeMouseSelectsFloatingRows(t *testing.T) {
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
 	viewportTop := ac.overlays.copyMode.ViewportTop
-	inner := calculateFloatingGeometry(domain.Rect{Width: 80, Height: 23}, d.currentFloatingConfig()).Inner
+	inner := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 23}, d.currentFloatingConfig()).Inner
 
 	// Copy body row k renders at wire row inner.Y+k+2 (top bar + content
 	// offset); clicking a row must select exactly that row.

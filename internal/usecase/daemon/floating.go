@@ -133,7 +133,7 @@ func (tb *tab) visibleFloatingSnapshotLocked(cfg domain.FloatingConfig) (*pane, 
 		return nil, floatingGeometry{}, false
 	}
 	p := tb.floating.pane
-	desired := calculateFloatingGeometry(domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}, cfg)
+	desired := calculateContentFloatingGeometry(domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows}, cfg)
 	p.mu.Lock()
 	geometry := p.committedFloatingGeometryLocked(desired)
 	p.mu.Unlock()
@@ -250,7 +250,7 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 	name, cwd, term, sessCtx := sess.name, sess.cwd, sess.terminal, sess.ctx
 	sess.mu.Unlock()
 	tb.mu.Lock()
-	geometry := calculateFloatingGeometry(domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}, cfg)
+	geometry := calculateContentFloatingGeometry(domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows}, cfg)
 	size := rectSize(geometry.Inner)
 	if !size.Valid() {
 		geometry = floatingGeometry{Bounds: domain.Rect{Width: 1, Height: 1}, Inner: domain.Rect{Width: 1, Height: 1}}

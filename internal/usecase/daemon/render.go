@@ -278,16 +278,12 @@ func (d *Daemon) render(sess *session, tb *tab, p *pane) {
 // copyTargetRectLocked maps a captured copy source into the already-composed
 // client frame. The caller holds tb.mu, preserving the layout/floating
 // snapshot while the rectangle is chosen.
-func copyTargetRectLocked(layoutSnap tabLayoutSnapshot, contentArea domain.Rect, p, floating *pane, hasFloating bool, cfg domain.FloatingConfig) domain.Rect {
+func copyTargetRectLocked(layoutSnap tabLayoutSnapshot, contentArea domain.Rect, p, floating *pane, hasFloating bool, floatingFrameGeometry floatingGeometry) domain.Rect {
 	if p == nil {
 		return domain.Rect{}
 	}
 	if hasFloating && p == floating {
-		desired := calculateFloatingGeometry(contentArea, cfg)
-		p.mu.Lock()
-		geometry := p.committedFloatingGeometryLocked(desired)
-		p.mu.Unlock()
-		return geometry.Inner
+		return floatingFrameGeometry.Inner
 	}
 	for _, placement := range layoutSnap.placements {
 		if placement.ID == p.id && !placement.Collapsed {
@@ -399,15 +395,17 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		frame, damage = composeClientFrameWithLayoutCachedConsumeDamage(bars, tb, reset, layoutSnap, &ac.bars, &ac.composed)
 	}
 	contentArea := domain.Rect{Y: 1, Width: frame.Width, Height: max(0, frame.Height-2)}
+	floatingFrameGeometry := floatingGeometry{}
 	if hasFloating {
-		frame, damage = composeFloatingFrame(frame, damage, floating, tb.floating.generation, contentArea, floatingCfg, layoutSnap, bars.theme, &ac.composed, reset || overlayActive)
+		desiredFloatingGeometry := calculateContentFloatingGeometry(domain.Size{Cols: contentArea.Width, Rows: contentArea.Height}, floatingCfg)
+		frame, damage, floatingFrameGeometry = composeFloatingFrame(frame, damage, floating, tb.floating.generation, contentArea, desiredFloatingGeometry, layoutSnap, bars.theme, &ac.composed, reset || overlayActive)
 	}
 	if overlays.copyActive {
 		copyPane := overlays.copyPane
 		if copyPane == nil {
 			copyPane = p
 		}
-		copyTarget := copyTargetRectLocked(layoutSnap, contentArea, copyPane, floating, hasFloating, floatingCfg)
+		copyTarget := copyTargetRectLocked(layoutSnap, contentArea, copyPane, floating, hasFloating, floatingFrameGeometry)
 		frame, damage = composeCopyClientFrame(overlays.copyMode, copyPane, copyTarget, frame, bars)
 	}
 	// A palette above normal/copy content dims that composed content. When a
@@ -439,15 +437,13 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	overlays.Unlock()
 	cursorPane := p
 	cursorContent, cursorVisible := focusedPaneContentRect(layoutSnap, p.id)
+	cursorContent.X += contentArea.X
+	cursorContent.Y += contentArea.Y
 	if hasFloating {
 		cursorPane = floating
+		cursorContent, cursorVisible = floatingFrameGeometry.Inner, floatingFrameGeometry.Inner.Width > 0 && floatingFrameGeometry.Inner.Height > 0
 	}
 	cursorPane.mu.Lock()
-	if hasFloating {
-		desiredGeometry := calculateFloatingGeometry(contentArea, floatingCfg)
-		geometry := floating.committedFloatingGeometryLocked(desiredGeometry)
-		cursorContent, cursorVisible = geometry.Inner, geometry.Inner.Width > 0 && geometry.Inner.Height > 0
-	}
 	desiredCursor := desiredCursorOut(cursorPane.screen, cursorContent, !cursorVisible || overlays.copyActive || overlays.copySearchModel != nil || overlays.pickerActive || overlays.paletteActive || overlays.promptActive)
 	cursorPane.mu.Unlock()
 	ac.sess.mu.Lock()
@@ -519,7 +515,7 @@ func desiredCursorOut(s *vt.Screen, content domain.Rect, hide bool) cursorOut {
 	if !ok {
 		style = 1
 	}
-	return cursorOut{row: content.Y + s.CursorRow() + 1, col: content.X + s.CursorCol(), style: style, hasStyle: true}
+	return cursorOut{row: content.Y + s.CursorRow(), col: content.X + s.CursorCol(), style: style, hasStyle: true}
 }
 
 func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte {

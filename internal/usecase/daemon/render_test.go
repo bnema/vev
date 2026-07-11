@@ -1305,6 +1305,28 @@ func TestCursorTailVisibleHideAndMoveOnly(t *testing.T) {
 	require.Contains(t, string(data), "\x1b[?25l")
 }
 
+func TestPaintAlignsFloatingCursorWithCommittedGeometry(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	contentArea := domain.Rect{Y: 1, Width: 80, Height: 23}
+	cfg := d.currentFloatingConfig()
+	committed := calculateContentFloatingGeometry(domain.Size{Cols: contentArea.Width, Rows: contentArea.Height}, cfg)
+	floating := newPane("floating", nil, rectSize(committed.Inner))
+	floating.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'F'})
+	floating.popupGeometry = committed
+	installTestFloating(sess.activeTab(), floating, true)
+
+	d.paint(sess, ac, true)
+	data := mustOutputData(t, sends)
+	want := committed.translate(contentArea.X, contentArea.Y)
+	require.Contains(t, string(data), cursorCSI(want.Inner.Y+1, 1))
+	require.Contains(t, string(data), "F")
+	require.Equal(t, want.Inner.Y, ac.lastCursor.row)
+	require.Equal(t, want.Inner.X, ac.lastCursor.col)
+	require.Contains(t, string(data), cursorCSI(want.Inner.Y+1, want.Inner.X+1))
+}
+
 func TestCursorTailUsesFocusedPanePlacement(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
 	win := sess.tabs[0]
@@ -1460,6 +1482,8 @@ func TestCopyTargetRectLocked(t *testing.T) {
 	defer tb.mu.Unlock()
 	layoutSnap := solveTabLayoutLocked(tb)
 	main := tb.focusedPane()
+	fp.popupGeometry = calculateContentFloatingGeometry(domain.Size{Cols: contentArea.Width, Rows: contentArea.Height}, cfg)
+	floatingFrameGeometry := fp.popupGeometry.translate(contentArea.X, contentArea.Y)
 
 	cases := []struct {
 		name        string
@@ -1468,13 +1492,17 @@ func TestCopyTargetRectLocked(t *testing.T) {
 		hasFloating bool
 		want        domain.Rect
 	}{
-		{name: "floating source targets popup inner", pane: fp, floating: fp, hasFloating: true, want: calculateFloatingGeometry(contentArea, cfg).Inner},
+		{name: "floating source targets committed frame-absolute popup inner", pane: fp, floating: fp, hasFloating: true, want: calculateContentFloatingGeometry(domain.Size{Cols: contentArea.Width, Rows: contentArea.Height}, cfg).translate(contentArea.X, contentArea.Y).Inner},
 		{name: "normal source targets solved placement", pane: main, want: domain.Rect{X: 0, Y: 1, Width: 80, Height: 23}},
 		{name: "unplaced source falls back to pane frame", pane: stray, want: domain.Rect{X: 0, Y: 1, Width: 10, Height: 4}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, copyTargetRectLocked(layoutSnap, contentArea, tc.pane, tc.floating, tc.hasFloating, cfg))
+			got := copyTargetRectLocked(layoutSnap, contentArea, tc.pane, tc.floating, tc.hasFloating, floatingFrameGeometry)
+			require.Equal(t, tc.want, got)
+			if tc.hasFloating {
+				require.NotEqual(t, fp.popupGeometry.Inner, got, "content-relative geometry must not target the client frame directly")
+			}
 		})
 	}
 }

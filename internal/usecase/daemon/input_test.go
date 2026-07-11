@@ -223,7 +223,7 @@ func TestFloatingMouseTranslatesSGRToInnerCoordinates(t *testing.T) {
 	floating := newPane("floating", floatingPTY, domain.Size{Cols: 78, Rows: 14})
 	floating.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
 	installTestFloating(tb, floating, true)
-	geometry := calculateFloatingGeometry(domain.Rect{Width: 100, Height: 20}, d.currentFloatingConfig())
+	geometry := calculateContentFloatingGeometry(domain.Size{Cols: 100, Rows: 20}, d.currentFloatingConfig())
 	raw := []byte(fmt.Sprintf("\x1b[<0;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+2))
 
 	d.handleInput(sess, ac, raw)
@@ -240,7 +240,7 @@ func TestFloatingMouseIgnoresBorderAndOutside(t *testing.T) {
 	floating := newPane("floating", floatingPTY, domain.Size{Cols: 78, Rows: 14})
 	floating.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
 	installTestFloating(tb, floating, true)
-	geometry := calculateFloatingGeometry(domain.Rect{Width: 100, Height: 20}, d.currentFloatingConfig())
+	geometry := calculateContentFloatingGeometry(domain.Size{Cols: 100, Rows: 20}, d.currentFloatingConfig())
 
 	border := []byte(fmt.Sprintf("\x1b[<0;%d;%dM", geometry.Bounds.X+1, geometry.Bounds.Y+2))
 	outside := []byte("\x1b[<0;1;2M")

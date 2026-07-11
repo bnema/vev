@@ -8,7 +8,10 @@ import (
 )
 
 // floatingGeometry describes a popup's outer frame and terminal content area.
-// Bounds and Inner are both relative to the supplied content rectangle.
+// Bounds and Inner always share the same coordinate space. Committed pane
+// geometry is origin-zero and tab-content-relative; composeFloatingFrame
+// translates both fields and returns/caches frame-absolute geometry. Callers
+// must not translate a composed or cached value again.
 type floatingGeometry struct {
 	Bounds domain.Rect
 	Inner  domain.Rect
@@ -16,6 +19,14 @@ type floatingGeometry struct {
 
 func (g floatingGeometry) valid() bool {
 	return g.Bounds.Width > 0 && g.Bounds.Height > 0 && g.Inner.Width > 0 && g.Inner.Height > 0
+}
+
+func (g floatingGeometry) translate(dx, dy int) floatingGeometry {
+	g.Bounds.X += dx
+	g.Bounds.Y += dy
+	g.Inner.X += dx
+	g.Inner.Y += dy
+	return g
 }
 
 // committedFloatingGeometryLocked returns the geometry whose PTY resize was
@@ -47,18 +58,19 @@ func calculateFloatingAxisGeometry(available, percent int) floatingAxisGeometry 
 	return axis
 }
 
-// calculateFloatingGeometry centers a percentage-sized popup in content.
-// Launch sizing derives from Inner too, so rendering and PTY geometry share
-// the same per-axis percentage and tiny-border rules.
-func calculateFloatingGeometry(content domain.Rect, cfg domain.FloatingConfig) floatingGeometry {
-	if content.Width <= 0 || content.Height <= 0 {
+// calculateContentFloatingGeometry returns origin-zero, tab-content-relative
+// coordinates for a percentage-sized popup. Launch sizing derives from Inner
+// too, so rendering and PTY geometry share the same per-axis percentage and
+// tiny-border rules.
+func calculateContentFloatingGeometry(content domain.Size, cfg domain.FloatingConfig) floatingGeometry {
+	if !content.Valid() {
 		return floatingGeometry{}
 	}
-	x := calculateFloatingAxisGeometry(content.Width, cfg.Width)
-	y := calculateFloatingAxisGeometry(content.Height, cfg.Height)
+	x := calculateFloatingAxisGeometry(content.Cols, cfg.Width)
+	y := calculateFloatingAxisGeometry(content.Rows, cfg.Height)
 	bounds := domain.Rect{
-		X:      content.X + (content.Width-x.BoundsSize)/2,
-		Y:      content.Y + (content.Height-y.BoundsSize)/2,
+		X:      (content.Cols - x.BoundsSize) / 2,
+		Y:      (content.Rows - y.BoundsSize) / 2,
 		Width:  x.BoundsSize,
 		Height: y.BoundsSize,
 	}
@@ -76,7 +88,7 @@ func calculateFloatingGeometry(content domain.Rect, cfg domain.FloatingConfig) f
 // composeFloatingFrame applies the popup to a copy of the normal composed
 // destination. In particular it never writes the VT screen frame: that frame
 // is shared with the PTY reader and is the source for future renders.
-func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *pane, generation uint64, content domain.Rect, cfg domain.FloatingConfig, layoutSnap tabLayoutSnapshot, theme themeui.Theme, cache *composedFrameCache, full bool) (renderer.Frame, []renderer.Damage) {
+func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *pane, generation uint64, content domain.Rect, desired floatingGeometry, layoutSnap tabLayoutSnapshot, theme themeui.Theme, cache *composedFrameCache, full bool) (renderer.Frame, []renderer.Damage, floatingGeometry) {
 	var frame renderer.Frame
 	if cache != nil && cache.floatingFrame.Width == base.Width && cache.floatingFrame.Height == base.Height {
 		frame = cache.floatingFrame
@@ -90,13 +102,13 @@ func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *
 		}
 	}
 	(overlayBackdrop{DimPaneContents: true}).apply(frame, content, layoutSnap, theme)
-	desiredGeometry := calculateFloatingGeometry(content, cfg)
-
 	// The PTY reader mutates both the frame and its damage under p.mu. Keep
 	// every read of them, including the blit, in the same critical section.
 	// In particular, Frame is not safe to retain as an alias after unlocking.
 	p.mu.Lock()
-	geometry := p.committedFloatingGeometryLocked(desiredGeometry)
+	// Committed popup geometry is content-relative; translate it exactly once
+	// while holding the same lock that protects the committed state and frame.
+	geometry := p.committedFloatingGeometryLocked(desired).translate(content.X, content.Y)
 	title := p.displayTitleLocked()
 	titleGeneration := p.title.generation
 	screenDamage := p.screen.Damage()
@@ -121,12 +133,12 @@ func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *
 		cache.floatingTitleGeneration = titleGeneration
 	}
 	if full || popupChanged {
-		return frame, []renderer.Damage{renderer.FullRedraw()}
+		return frame, []renderer.Damage{renderer.FullRedraw()}, geometry
 	}
 	if titleChanged && geometry.Bounds.Height >= 3 {
 		damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: geometry.Bounds.X, Y: geometry.Bounds.Y, Width: geometry.Bounds.Width, Height: 1})
 	}
-	return frame, damage
+	return frame, damage, geometry
 }
 
 func drawFloatingBorder(frame renderer.Frame, bounds domain.Rect, title string, style renderer.Style) {
@@ -201,12 +213,12 @@ func (d *Daemon) resizeInstalledFloating(tb *tab) bool {
 	}
 	tb.mu.Lock()
 	p := tb.floating.pane
-	content := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
+	content := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows}
 	tb.mu.Unlock()
 	if p == nil {
 		return false
 	}
-	return d.resizeFloatingPane(p, calculateFloatingGeometry(content, d.currentFloatingConfig()))
+	return d.resizeFloatingPane(p, calculateContentFloatingGeometry(content, d.currentFloatingConfig()))
 }
 
 // resizeActiveFloating updates a visible floating pane during a client resize.
