@@ -14,14 +14,17 @@ const (
 	paletteRailWidth      = 64
 )
 
-var paletteModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Commands ", Anchor: ui.AnchorBottom, BottomMargin: 1}
+var paletteModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Commands ", Anchor: domain.AnchorBottom, Margins: ui.Margins{Top: 1, Right: 1, Bottom: 1, Left: 1}}
 
-func paletteModalFor(size domain.Size) ui.Modal {
+func paletteModalFor(size domain.Size, cfg domain.PaletteConfig) ui.Modal {
 	modal := paletteModal
 	if size.Cols >= paletteRailBreakpoint {
 		modal.FixedWidth = paletteRailWidth
-		modal.HorizontalAnchor = ui.HorizontalAnchorRight
-		modal.RightMargin = 1
+	}
+	if cfg.AnchorSet {
+		modal.Anchor = cfg.Anchor
+	} else if size.Cols >= paletteRailBreakpoint {
+		modal.Anchor = domain.AnchorBottomRight
 	}
 	return modal
 }
@@ -298,9 +301,9 @@ func (e paletteExec) OpenSessionPicker() error {
 	return nil
 }
 
-func composePaletteClientFrame(model *palette.Model, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
+func composePaletteClientFrame(model *palette.Model, base renderer.Frame, cfg domain.PaletteConfig, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
 	styleSet := resolveThemeStyles(styles)
-	modal := paletteModalFor(domain.Size{Cols: base.Width, Rows: base.Height})
+	modal := paletteModalFor(domain.Size{Cols: base.Width, Rows: base.Height}, cfg)
 	return composeModalClientFrame(base, modal, styleSet, styleSet.selection, func(size domain.Size, _ ...renderer.Style) renderer.Frame {
 		return model.Render(size, palette.RenderStyles{Selection: styleSet.selection, Description: styleSet.paletteDesc})
 	})

@@ -350,6 +350,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	repaintAttachedClients = sess.ackAttention(tb, attentionVisible)
 
 	styles := newThemeStyles(ac.getTheme())
+	paletteCfg := d.currentPaletteConfig()
 	tb.mu.Lock()
 	layoutSnap := solveTabLayoutLocked(tb)
 	titleIDs := titleBarPaneIDs(layoutSnap.placements, layoutSnap.ok)
@@ -429,7 +430,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 		frame, damage = composePickerClientFrame(overlays.pickerModel, preview, frame, styles)
 	}
 	if overlays.paletteActive {
-		frame, damage = composePaletteClientFrame(overlays.paletteModel, frame, styles)
+		frame, damage = composePaletteClientFrame(overlays.paletteModel, frame, paletteCfg, styles)
 	}
 	if overlays.promptActive {
 		frame, damage = composePromptClientFrame(overlays.promptModel, frame, styles)

@@ -4,9 +4,16 @@ import (
 	"context"
 	"testing"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPromptModalGeometry(t *testing.T) {
+	base := domain.Size{Cols: 100, Rows: 40}
+
+	require.Equal(t, domain.Rect{X: 0, Y: 35, Width: 100, Height: 4}, promptModalFor(" Prompt ").Bounds(base))
+}
 
 func TestEnterPromptRendersTitleAndPrefill(t *testing.T) {
 	p, release := newBlockingPTY(t)

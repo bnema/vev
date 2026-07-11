@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
 )
 
@@ -47,6 +48,57 @@ func TestApplyConfigHotReloadSwapsBindingsAndCodes(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "new-tab", cmd.Slug)
 	require.Equal(t, "NT", cmd.Code)
+}
+
+func TestApplyConfigPublishesImmutablePaletteSnapshot(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	require.Equal(t, domain.Defaults().Palette, d.currentPaletteConfig())
+
+	firstConfig := domain.Defaults()
+	firstConfig.Palette = domain.PaletteConfig{Anchor: domain.AnchorTopLeft, AnchorSet: true}
+	d.ApplyConfig(firstConfig)
+	first := d.currentPaletteConfig()
+
+	secondConfig := domain.Defaults()
+	secondConfig.Palette = domain.PaletteConfig{Anchor: domain.AnchorBottomRight, AnchorSet: true}
+	d.ApplyConfig(secondConfig)
+	second := d.currentPaletteConfig()
+
+	require.Equal(t, domain.PaletteConfig{Anchor: domain.AnchorTopLeft, AnchorSet: true}, first)
+	require.Equal(t, domain.PaletteConfig{Anchor: domain.AnchorBottomRight, AnchorSet: true}, second)
+}
+
+func TestApplyConfigRepaintsActivePaletteWithoutReplacingModel(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	d.enterPalette(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handlePaletteInput(ac, []byte("new"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handlePaletteInput(ac, []byte{0x0e})
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	ac.overlays.paletteMu.Lock()
+	model := ac.overlays.palette
+	query := model.Query()
+	selected, ok := model.Selected()
+	ac.overlays.paletteMu.Unlock()
+	require.True(t, ok)
+
+	cfg := domain.Defaults()
+	cfg.Palette = domain.PaletteConfig{Anchor: domain.AnchorTopLeft, AnchorSet: true}
+	d.ApplyConfig(cfg)
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	ac.overlays.paletteMu.Lock()
+	defer ac.overlays.paletteMu.Unlock()
+	require.Same(t, model, ac.overlays.palette)
+	require.Equal(t, query, ac.overlays.palette.Query())
+	selectedAfter, ok := ac.overlays.palette.Selected()
+	require.True(t, ok)
+	require.Equal(t, selected.Slug, selectedAfter.Slug)
+	require.Equal(t, selected.Code, selectedAfter.Code)
 }
 
 func TestApplyConfigPublishesImmutableFloatingSnapshot(t *testing.T) {
