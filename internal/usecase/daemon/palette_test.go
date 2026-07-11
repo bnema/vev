@@ -11,7 +11,9 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/ui"
+	"github.com/bnema/vev/pkg/renderer"
 )
 
 func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
@@ -241,30 +243,62 @@ func TestPaletteCtrlNAndCtrlPNavigate(t *testing.T) {
 }
 
 func TestPaletteModalGeometry(t *testing.T) {
+	auto := domain.PaletteConfig{}
 	tests := []struct {
 		name string
 		size domain.Size
+		cfg  domain.PaletteConfig
 		want domain.Rect
 	}{
-		{name: "95 column shelf", size: domain.Size{Cols: 95, Rows: 40}, want: domain.Rect{X: 0, Y: 28, Width: 95, Height: 11}},
-		{name: "96 column rail", size: domain.Size{Cols: 96, Rows: 40}, want: domain.Rect{X: 31, Y: 28, Width: 64, Height: 11}},
-		{name: "120 column rail", size: domain.Size{Cols: 120, Rows: 40}, want: domain.Rect{X: 55, Y: 28, Width: 64, Height: 11}},
-		{name: "tiny terminal clamps", size: domain.Size{Cols: 20, Rows: 6}, want: domain.Rect{X: 0, Y: 0, Width: 20, Height: 6}},
+		{name: "auto 95 column shelf", size: domain.Size{Cols: 95, Rows: 40}, cfg: auto, want: domain.Rect{X: 0, Y: 28, Width: 95, Height: 11}},
+		{name: "auto 96 column rail", size: domain.Size{Cols: 96, Rows: 40}, cfg: auto, want: domain.Rect{X: 31, Y: 28, Width: 64, Height: 11}},
+		{name: "auto 120 column rail", size: domain.Size{Cols: 120, Rows: 40}, cfg: auto, want: domain.Rect{X: 55, Y: 28, Width: 64, Height: 11}},
+		{name: "auto tiny terminal clamps", size: domain.Size{Cols: 20, Rows: 6}, cfg: auto, want: domain.Rect{X: 0, Y: 0, Width: 20, Height: 6}},
+	}
+	for _, anchor := range []domain.Anchor{domain.AnchorTopLeft, domain.AnchorTop, domain.AnchorTopRight, domain.AnchorLeft, domain.AnchorCenter, domain.AnchorRight, domain.AnchorBottomLeft, domain.AnchorBottom, domain.AnchorBottomRight} {
+		wantX := map[domain.Anchor]int{domain.AnchorTopLeft: 1, domain.AnchorTop: 28, domain.AnchorTopRight: 55, domain.AnchorLeft: 1, domain.AnchorCenter: 28, domain.AnchorRight: 55, domain.AnchorBottomLeft: 1, domain.AnchorBottom: 28, domain.AnchorBottomRight: 55}[anchor]
+		wantY := map[domain.Anchor]int{domain.AnchorTopLeft: 1, domain.AnchorTop: 1, domain.AnchorTopRight: 1, domain.AnchorLeft: 14, domain.AnchorCenter: 14, domain.AnchorRight: 14, domain.AnchorBottomLeft: 28, domain.AnchorBottom: 28, domain.AnchorBottomRight: 28}[anchor]
+		tests = append(tests, struct {
+			name string
+			size domain.Size
+			cfg  domain.PaletteConfig
+			want domain.Rect
+		}{name: anchor.String(), size: domain.Size{Cols: 120, Rows: 40}, cfg: domain.PaletteConfig{Anchor: anchor, AnchorSet: true}, want: domain.Rect{X: wantX, Y: wantY, Width: 64, Height: 11}})
+	}
+	for _, anchor := range []domain.Anchor{domain.AnchorLeft, domain.AnchorCenter, domain.AnchorRight} {
+		tests = append(tests, struct {
+			name string
+			size domain.Size
+			cfg  domain.PaletteConfig
+			want domain.Rect
+		}{name: "narrow " + anchor.String(), size: domain.Size{Cols: 95, Rows: 40}, cfg: domain.PaletteConfig{Anchor: anchor, AnchorSet: true}, want: domain.Rect{X: 0, Y: 14, Width: 95, Height: 11}})
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			modal := paletteModalFor(tt.size)
+			modal := paletteModalFor(tt.size, tt.cfg)
 			require.Equal(t, tt.want, modal.Bounds(tt.size))
 			require.Equal(t, " Commands ", modal.Title)
 			require.Equal(t, 11, modal.FixedHeight)
-			wantAnchor := domain.AnchorBottom
-			wantMargins := ui.Margins{Top: 1, Right: 1, Bottom: 1, Left: 1}
-			if tt.size.Cols >= paletteRailBreakpoint {
-				wantAnchor = domain.AnchorBottomRight
-			}
-			require.Equal(t, wantAnchor, modal.Anchor)
-			require.Equal(t, wantMargins, modal.Margins)
+			require.Equal(t, ui.Margins{Top: 1, Right: 1, Bottom: 1, Left: 1}, modal.Margins)
+		})
+	}
+}
+
+func TestComposePaletteClientFrameUsesConfiguredPosition(t *testing.T) {
+	model := palette.New(nil)
+	base := renderer.NewFrame(120, 40)
+	for _, tt := range []struct {
+		name string
+		cfg  domain.PaletteConfig
+		at   domain.Rect
+	}{
+		{name: "top left", cfg: domain.PaletteConfig{Anchor: domain.AnchorTopLeft, AnchorSet: true}, at: domain.Rect{X: 1, Y: 1}},
+		{name: "bottom right", cfg: domain.PaletteConfig{Anchor: domain.AnchorBottomRight, AnchorSet: true}, at: domain.Rect{X: 55, Y: 28}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			frame, _ := composePaletteClientFrame(model, base, tt.cfg)
+			require.Equal(t, '┌', frame.At(tt.at.X, tt.at.Y).Rune)
 		})
 	}
 }
