@@ -63,6 +63,10 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].name < sessions[j].name })
 	sort.Slice(stopped, func(i, j int) bool { return stopped[i].name < stopped[j].name })
 
+	for _, s := range sessions {
+		d.refreshSessionFocusedTitles(s)
+	}
+
 	views := make([]picker.SessionView, 0, len(sessions)+len(stopped))
 	curTab := 0
 	for _, s := range sessions {

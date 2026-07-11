@@ -72,6 +72,7 @@ func TestPickerViewsComposesFocusedPaneTitleWithAttentionSuffix(t *testing.T) {
 	defer releasePTY1()
 	defer releasePTY2()
 	d, sess, _, _ := newManualSessionWithPTYs(t, p1, p2)
+	d.shell = "/bin/sh"
 	sess.tabs[1].name = "logs"
 
 	pane0 := sess.tabs[0].focusedPane()

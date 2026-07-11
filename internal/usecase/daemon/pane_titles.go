@@ -47,6 +47,10 @@ func (p *pane) displayTitleLocked() string {
 // cached composition unless that fallback changes the displayed title.
 func (p *pane) setDisplayFallback(fallback string) {
 	p.mu.Lock()
+	if p.title.displayFallback == fallback {
+		p.mu.Unlock()
+		return
+	}
 	oldTitle := p.displayTitleLocked()
 	p.title.displayFallback = fallback
 	if oldTitle != p.displayTitleLocked() {
