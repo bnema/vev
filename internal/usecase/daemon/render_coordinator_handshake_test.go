@@ -1,11 +1,28 @@
 package daemon
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// awaitHandshakeWorker observes the worker completion channel rather than a
+// scheduler-dependent no-wake window. The generated mock timer's channel is
+// the only event that advances it.
+func awaitHandshakeWorker(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	for range 1_000_000 {
+		select {
+		case <-done:
+			return
+		default:
+			runtime.Gosched()
+		}
+	}
+	t.Fatal("coordinator deadline worker did not complete")
+}
 
 // Fresh producer state may arrive after route has published an attachment but
 // before the transport has accepted Welcome. It must remain pending until the
@@ -13,12 +30,16 @@ import (
 func TestRenderCoordinatorFreshWakeWaitsForWelcome(t *testing.T) {
 	h := newCoordinatorHarness(t)
 	ac := &attachedClient{}
-	h.rc.attach(ac)
+	h.rc.attachWithReadiness(ac, false)
 
 	h.rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true, producer: "pty"})
-	timers := h.armedTimers(t)
-	require.Len(t, timers, 1)
-	timers[0].ch <- time.Time{}
+	timer := awaitCoordinatorScheduledTimer(t, h.clk)
+	h.rc.mu.Lock()
+	workerDone := h.rc.normalWorkerDone
+	h.rc.mu.Unlock()
+	require.NotNil(t, workerDone)
+	timer.ch <- time.Time{}
+	requireWorkerExit(t, workerDone)
 	requireNoWake(t, h.wakes)
 
 	require.True(t, h.rc.markAttachmentReady(ac))
@@ -36,15 +57,19 @@ func TestRenderCoordinatorFreshWakeWaitsForWelcome(t *testing.T) {
 func TestRenderCoordinatorParkedResumeRequiresNewWelcome(t *testing.T) {
 	h := newCoordinatorHarness(t)
 	ac := &attachedClient{}
-	h.rc.attach(ac)
+	h.rc.attachWithReadiness(ac, false)
 	require.True(t, h.rc.markAttachmentReady(ac))
 	h.rc.notePark(ac)
-	h.rc.attach(ac)
+	h.rc.attachWithReadiness(ac, false)
 
 	h.rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "session"})
-	timers := h.armedTimers(t)
-	require.Len(t, timers, 1)
-	timers[0].ch <- time.Time{}
+	timer := awaitCoordinatorScheduledTimer(t, h.clk)
+	h.rc.mu.Lock()
+	workerDone := h.rc.normalWorkerDone
+	h.rc.mu.Unlock()
+	require.NotNil(t, workerDone)
+	timer.ch <- time.Time{}
+	requireWorkerExit(t, workerDone)
 	requireNoWake(t, h.wakes)
 
 	require.True(t, h.rc.markAttachmentReady(ac))

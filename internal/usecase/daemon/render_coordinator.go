@@ -767,9 +767,14 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 		c.mu.Unlock()
 		return
 	}
+	// Welcome holds attachment.sendMu while its transport Send is in flight.
+	// Do not probe ACK capacity through that lock before this incarnation is
+	// ready: a deadline that expires during the handshake must complete and
+	// leave work pending, rather than wedging behind Welcome.
+	handshakePending := c.attachment != nil && !c.attachmentReady
 	ackReady := c.opts.ackReady
 	c.mu.Unlock()
-	ready := ackReady == nil || ackReady()
+	ready := !handshakePending && (ackReady == nil || ackReady())
 
 	// The readiness callback can detach, replace, or publish a sync batch.
 	// syncGateOpenLocked retries predicate evaluation on every registry change

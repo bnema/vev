@@ -77,6 +77,63 @@ func TestNamedLinkLossParks(t *testing.T) {
 	require.True(t, parked, "named resume-capable link loss is parked")
 }
 
+func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
+	pty, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	clock := newCoordinatorMockClock(t, 4)
+	d := newTestDaemon(t, newFactorySeq(t, pty), clock.clock)
+	oldTransport := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "resume-welcome-gate", 0), oldTransport)
+	require.NoError(t, err)
+	token := ac.resumeToken
+	d.clientGone(sess, ac, oldTransport, false)
+
+	tr := newWelcomeBlockingTransport(t)
+	done := make(chan struct{})
+	resumeHello := helloResumeCapable(ports.IntentResume, sess.name, token)
+	go func() {
+		d.handleHello(tr.tr, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(resumeHello)})
+		close(done)
+	}()
+
+	<-tr.welcomeEntered
+	welcome := <-tr.sends
+	require.Equal(t, ports.MsgWelcome, welcome.Type)
+	sess.mu.Lock()
+	resumed := sess.client
+	sess.mu.Unlock()
+	require.Same(t, ac, resumed)
+
+	d.invalidateRender(sess, resumed, true, "resume-welcome-gate-test")
+	timer := awaitCoordinatorScheduledTimer(t, clock)
+	for {
+		select {
+		case timer = <-clock.timers:
+		default:
+			goto currentDeadline
+		}
+	}
+
+currentDeadline:
+	rc := sess.renderCoordinator()
+	rc.mu.Lock()
+	workerDone := rc.normalWorkerDone
+	rc.mu.Unlock()
+	require.NotNil(t, workerDone)
+	timer.ch <- time.Time{}
+	awaitHandshakeWorker(t, workerDone)
+	requireNoCoordinatorOutputFrame(t, tr.sends)
+
+	close(tr.releaseWelcome)
+	output := awaitFrame(t, tr.sends, ports.MsgOutput)
+	first, err := ports.UnmarshalOutput(output.Payload)
+	require.NoError(t, err)
+	require.Zero(t, first.BaseStateNum)
+	tr.finish()
+	<-done
+	requireNoCoordinatorOutputFrame(t, tr.sends)
+}
+
 func TestEphemeralLinkLossParksAndResumes(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
