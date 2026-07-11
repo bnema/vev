@@ -11,7 +11,7 @@ var ErrInvalidArguments = errors.New("invalid command arguments")
 // ParsePositiveDecimal accepts exactly one base-10 positive decimal value.
 // It deliberately rejects signs, whitespace, zero, and non-canonical forms.
 func ParsePositiveDecimal(args []string) (int, error) {
-	if len(args) != 1 || args[0] == "" {
+	if len(args) != 1 || args[0] == "" || (len(args[0]) > 1 && args[0][0] == '0') {
 		return 0, ErrInvalidArguments
 	}
 	for _, r := range args[0] {

@@ -13,6 +13,12 @@ func TestParsePositiveDecimal(t *testing.T) {
 		invalid bool
 	}{
 		{"one", []string{"1"}, 1, false},
+		{"multi-digit", []string{"42"}, 42, false},
+		{"overflow", []string{"999999999999999999999999999999999999"}, 0, true},
+		{"leading zero", []string{"01"}, 0, true},
+		{"multiple leading zeros", []string{"0001"}, 0, true},
+		{"all zeros", []string{"00"}, 0, true},
+		{"leading zero on multi-digit value", []string{"010"}, 0, true},
 		{"zero", []string{"0"}, 0, true},
 		{"negative", []string{"-1"}, 0, true},
 		{"extra", []string{"1", "2"}, 0, true},
