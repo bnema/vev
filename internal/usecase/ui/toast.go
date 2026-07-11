@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"strconv"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -14,22 +13,11 @@ const (
 	defaultToastMaxWidth = 60
 )
 
-// ToastAnchor describes where a toast is positioned within a frame.
-type ToastAnchor int
-
-const (
-	ToastTopLeft ToastAnchor = iota
-	ToastTopRight
-	ToastBottomLeft
-	ToastBottomRight
-	ToastCenter
-)
-
 // Toast describes a transient message rendered over a frame.
 type Toast struct {
 	ID            string
 	Message       string
-	Anchor        ToastAnchor
+	Anchor        domain.Anchor
 	Duration      time.Duration
 	DimBackground bool
 	MinWidth      int
@@ -76,8 +64,8 @@ func (m *ToastManager) Show(now time.Time, toast Toast) {
 	m.active[id] = ActiveToast{Toast: toast, ShownAt: now}
 }
 
-func toastAnchorID(anchor ToastAnchor) string {
-	return "anchor:" + strconv.Itoa(int(anchor))
+func toastAnchorID(anchor domain.Anchor) string {
+	return "anchor:" + anchor.String()
 }
 
 // Dismiss removes a toast by ID.
@@ -136,32 +124,12 @@ func ToastBounds(base domain.Size, toast Toast) domain.Rect {
 	height := 1 + toast.PaddingY*2 + borderHeight
 	height = clamp(height, 0, base.Rows)
 
-	x := 0
-	y := 0
-	switch toast.Anchor {
-	case ToastTopLeft:
-		x = defaultToastMargin
-		y = defaultToastMargin
-	case ToastTopRight:
-		x = base.Cols - defaultToastMargin - width
-		y = defaultToastMargin
-	case ToastBottomLeft:
-		x = defaultToastMargin
-		y = base.Rows - defaultToastMargin - height
-	case ToastBottomRight:
-		x = base.Cols - defaultToastMargin - width
-		y = base.Rows - defaultToastMargin - height
-	case ToastCenter:
-		x = (base.Cols - width) / 2
-		y = (base.Rows - height) / 2
-	}
-
-	return domain.Rect{
-		X:      clamp(x, 0, max(0, base.Cols-width)),
-		Y:      clamp(y, 0, max(0, base.Rows-height)),
-		Width:  width,
-		Height: height,
-	}
+	return Place(base, domain.Size{Cols: width, Rows: height}, toast.Anchor, Margins{
+		Top:    defaultToastMargin,
+		Right:  defaultToastMargin,
+		Bottom: defaultToastMargin,
+		Left:   defaultToastMargin,
+	})
 }
 
 // CompositeToasts draws the latest toast per anchor over frame.
@@ -196,14 +164,24 @@ func CompositeToasts(frame renderer.Frame, toasts []ActiveToast, styles ToastSty
 }
 
 func latestToastsByAnchor(toasts []ActiveToast) []ActiveToast {
-	byAnchor := make(map[ToastAnchor]ActiveToast)
+	byAnchor := make(map[domain.Anchor]ActiveToast)
 	for _, toast := range toasts {
 		current, ok := byAnchor[toast.Anchor]
 		if !ok || toast.ShownAt.After(current.ShownAt) || toast.ShownAt.Equal(current.ShownAt) {
 			byAnchor[toast.Anchor] = toast
 		}
 	}
-	anchors := []ToastAnchor{ToastTopLeft, ToastTopRight, ToastBottomLeft, ToastBottomRight, ToastCenter}
+	anchors := []domain.Anchor{
+		domain.AnchorTopLeft,
+		domain.AnchorTopRight,
+		domain.AnchorBottomLeft,
+		domain.AnchorBottomRight,
+		domain.AnchorCenter,
+		domain.AnchorTop,
+		domain.AnchorLeft,
+		domain.AnchorRight,
+		domain.AnchorBottom,
+	}
 	visible := make([]ActiveToast, 0, len(byAnchor))
 	for _, anchor := range anchors {
 		if toast, ok := byAnchor[anchor]; ok {

@@ -54,13 +54,19 @@ func TestToastManagerDurationDismissAndClear(t *testing.T) {
 		}
 	})
 
-	t.Run("empty IDs replace per anchor", func(t *testing.T) {
-		m := NewToastManager()
-		m.Show(now, Toast{Message: "first", Anchor: ToastCenter})
-		m.Show(now.Add(time.Second), Toast{Message: "second", Anchor: ToastCenter})
-		active := m.Active(now.Add(time.Second))
-		if len(active) != 1 || active[0].Message != "second" {
-			t.Fatalf("Active() after same-anchor replacement = %+v, want only second toast", active)
+	t.Run("empty IDs use named anchors and replace per anchor", func(t *testing.T) {
+		anchors := []domain.Anchor{
+			domain.AnchorCenter, domain.AnchorTopLeft, domain.AnchorTop, domain.AnchorTopRight,
+			domain.AnchorLeft, domain.AnchorRight, domain.AnchorBottomLeft, domain.AnchorBottom, domain.AnchorBottomRight,
+		}
+		for _, anchor := range anchors {
+			m := NewToastManager()
+			m.Show(now, Toast{Message: "first", Anchor: anchor})
+			m.Show(now.Add(time.Second), Toast{Message: "second", Anchor: anchor})
+			active := m.Active(now.Add(time.Second))
+			if len(active) != 1 || active[0].Message != "second" || active[0].ID != "anchor:"+anchor.String() {
+				t.Fatalf("Active() for %s = %+v, want named replacement", anchor, active)
+			}
 		}
 	})
 
@@ -83,64 +89,29 @@ func TestToastBoundsAnchorsMarginsAndTinyFrames(t *testing.T) {
 	}
 
 	tests := []struct {
-		name string
-		base domain.Size
-		make func() Toast
-		want domain.Rect
+		name  string
+		base  domain.Size
+		toast Toast
+		want  domain.Rect
 	}{
-		{
-			name: "center",
-			base: domain.Size{Cols: 80, Rows: 24},
-			make: func() Toast { return Toast{Message: "Reconnection attempts…", Anchor: ToastCenter} },
-			want: domain.Rect{X: 27, Y: 10, Width: 26, Height: 3},
-		},
-		{
-			name: "top left has two cell margins",
-			base: domain.Size{Cols: 80, Rows: 24},
-			make: func() Toast { return Toast{Message: "Reconnection attempts…", Anchor: ToastTopLeft} },
-			want: domain.Rect{X: 2, Y: 2, Width: 26, Height: 3},
-		},
-		{
-			name: "top right has two cell margins",
-			base: domain.Size{Cols: 80, Rows: 24},
-			make: func() Toast { return Toast{Message: "Reconnection attempts…", Anchor: ToastTopRight} },
-			want: domain.Rect{X: 52, Y: 2, Width: 26, Height: 3},
-		},
-		{
-			name: "bottom left has two cell margins",
-			base: domain.Size{Cols: 80, Rows: 24},
-			make: func() Toast { return Toast{Message: "Reconnection attempts…", Anchor: ToastBottomLeft} },
-			want: domain.Rect{X: 2, Y: 19, Width: 26, Height: 3},
-		},
-		{
-			name: "bottom right has two cell margins",
-			base: domain.Size{Cols: 80, Rows: 24},
-			make: func() Toast { return Toast{Message: "Reconnection attempts…", Anchor: ToastBottomRight} },
-			want: domain.Rect{X: 52, Y: 19, Width: 26, Height: 3},
-		},
-		{
-			name: "zero frame",
-			base: domain.Size{},
-			make: func() Toast { return Toast{Message: "tiny", Anchor: ToastCenter} },
-			want: domain.Rect{},
-		},
-		{
-			name: "one by one clamps",
-			base: domain.Size{Cols: 1, Rows: 1},
-			make: func() Toast { return Toast{Message: "tiny", Anchor: ToastCenter} },
-			want: domain.Rect{X: 0, Y: 0, Width: 1, Height: 1},
-		},
-		{
-			name: "narrow frame clamps width and margin",
-			base: domain.Size{Cols: 8, Rows: 2},
-			make: func() Toast { return Toast{Message: "long message", Anchor: ToastBottomRight} },
-			want: domain.Rect{X: 0, Y: 0, Width: 8, Height: 2},
-		},
+		{"top left", domain.Size{Cols: 80, Rows: 24}, Toast{Message: message, Anchor: domain.AnchorTopLeft}, domain.Rect{X: 2, Y: 2, Width: 26, Height: 3}},
+		{"top", domain.Size{Cols: 80, Rows: 24}, Toast{Message: message, Anchor: domain.AnchorTop}, domain.Rect{X: 27, Y: 2, Width: 26, Height: 3}},
+		{"top right", domain.Size{Cols: 80, Rows: 24}, Toast{Message: message, Anchor: domain.AnchorTopRight}, domain.Rect{X: 52, Y: 2, Width: 26, Height: 3}},
+		{"left", domain.Size{Cols: 80, Rows: 24}, Toast{Message: message, Anchor: domain.AnchorLeft}, domain.Rect{X: 2, Y: 10, Width: 26, Height: 3}},
+		{"center", domain.Size{Cols: 80, Rows: 24}, Toast{Message: message, Anchor: domain.AnchorCenter}, domain.Rect{X: 27, Y: 10, Width: 26, Height: 3}},
+		{"right", domain.Size{Cols: 80, Rows: 24}, Toast{Message: message, Anchor: domain.AnchorRight}, domain.Rect{X: 52, Y: 10, Width: 26, Height: 3}},
+		{"bottom left", domain.Size{Cols: 80, Rows: 24}, Toast{Message: message, Anchor: domain.AnchorBottomLeft}, domain.Rect{X: 2, Y: 19, Width: 26, Height: 3}},
+		{"bottom", domain.Size{Cols: 80, Rows: 24}, Toast{Message: message, Anchor: domain.AnchorBottom}, domain.Rect{X: 27, Y: 19, Width: 26, Height: 3}},
+		{"bottom right", domain.Size{Cols: 80, Rows: 24}, Toast{Message: message, Anchor: domain.AnchorBottomRight}, domain.Rect{X: 52, Y: 19, Width: 26, Height: 3}},
+		{"omitted anchor centers", domain.Size{Cols: 80, Rows: 24}, Toast{Message: message}, domain.Rect{X: 27, Y: 10, Width: 26, Height: 3}},
+		{"zero frame", domain.Size{}, Toast{Message: "tiny"}, domain.Rect{}},
+		{"one by one clamps", domain.Size{Cols: 1, Rows: 1}, Toast{Message: "tiny"}, domain.Rect{Width: 1, Height: 1}},
+		{"narrow frame clamps width and margin", domain.Size{Cols: 8, Rows: 2}, Toast{Message: "long message", Anchor: domain.AnchorBottomRight}, domain.Rect{Width: 8, Height: 2}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ToastBounds(tt.base, tt.make()); got != tt.want {
+			if got := ToastBounds(tt.base, tt.toast); got != tt.want {
 				t.Fatalf("ToastBounds() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -155,8 +126,8 @@ func TestCompositeToastsDrawsBorderedToastAndTruncates(t *testing.T) {
 		exterior := renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()}
 		FillRect(f, domain.Rect{Width: 20, Height: 7}, exterior)
 
-		CompositeToasts(f, []ActiveToast{{Toast: Toast{ID: "center", Message: "Hi", Anchor: ToastCenter}}}, styles, nil)
-		bounds := ToastBounds(domain.Size{Cols: 20, Rows: 7}, Toast{Message: "Hi", Anchor: ToastCenter})
+		CompositeToasts(f, []ActiveToast{{Toast: Toast{ID: "center", Message: "Hi", Anchor: domain.AnchorCenter}}}, styles, nil)
+		bounds := ToastBounds(domain.Size{Cols: 20, Rows: 7}, Toast{Message: "Hi", Anchor: domain.AnchorCenter})
 		if bounds != (domain.Rect{X: 7, Y: 2, Width: 6, Height: 3}) {
 			t.Fatalf("bounds = %+v, want centered 6x3 box", bounds)
 		}
@@ -174,7 +145,7 @@ func TestCompositeToastsDrawsBorderedToastAndTruncates(t *testing.T) {
 
 	t.Run("narrow toast truncates with ellipsis", func(t *testing.T) {
 		f := renderer.NewFrame(8, 3)
-		CompositeToasts(f, []ActiveToast{{Toast: Toast{ID: "narrow", Message: "abcdef", Anchor: ToastCenter, MaxWidth: 8}}}, styles, nil)
+		CompositeToasts(f, []ActiveToast{{Toast: Toast{ID: "narrow", Message: "abcdef", Anchor: domain.AnchorCenter, MaxWidth: 8}}}, styles, nil)
 		assertRune(t, f, 0, 0, '┌')
 		assertRune(t, f, 7, 0, '┐')
 		assertRune(t, f, 2, 1, 'a')
@@ -190,9 +161,9 @@ func TestCompositeToastsLatestToastPerAnchor(t *testing.T) {
 	styles := ToastStyles{Text: renderer.Style{Foreground: 3, Background: -1}, Box: renderer.Style{Foreground: 4, Background: -1}}
 
 	CompositeToasts(f, []ActiveToast{
-		{Toast: Toast{ID: "old", Message: "Old", Anchor: ToastTopLeft}, ShownAt: now},
-		{Toast: Toast{ID: "new", Message: "New", Anchor: ToastTopLeft}, ShownAt: now.Add(time.Second)},
-		{Toast: Toast{ID: "center", Message: "Mid", Anchor: ToastCenter}, ShownAt: now},
+		{Toast: Toast{ID: "old", Message: "Old", Anchor: domain.AnchorTopLeft}, ShownAt: now},
+		{Toast: Toast{ID: "new", Message: "New", Anchor: domain.AnchorTopLeft}, ShownAt: now.Add(time.Second)},
+		{Toast: Toast{ID: "center", Message: "Mid", Anchor: domain.AnchorCenter}, ShownAt: now},
 	}, styles, nil)
 
 	assertRune(t, f, 4, 3, 'N')
@@ -207,6 +178,33 @@ func TestCompositeToastsLatestToastPerAnchor(t *testing.T) {
 	}
 }
 
+func TestLatestToastsByAnchorTieAndOrder(t *testing.T) {
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	anchors := []domain.Anchor{
+		domain.AnchorTopLeft, domain.AnchorTopRight, domain.AnchorBottomLeft,
+		domain.AnchorBottomRight, domain.AnchorCenter, domain.AnchorTop,
+		domain.AnchorLeft, domain.AnchorRight, domain.AnchorBottom,
+	}
+	toasts := make([]ActiveToast, 0, len(anchors)+1)
+	for _, anchor := range anchors {
+		toasts = append(toasts, ActiveToast{Toast: Toast{ID: anchor.String(), Anchor: anchor}, ShownAt: now})
+	}
+	toasts = append(toasts, ActiveToast{Toast: Toast{ID: "later-input", Anchor: domain.AnchorTopLeft}, ShownAt: now})
+
+	visible := latestToastsByAnchor(toasts)
+	if len(visible) != len(anchors) {
+		t.Fatalf("latestToastsByAnchor() count = %d, want %d", len(visible), len(anchors))
+	}
+	for i, anchor := range anchors {
+		if visible[i].Anchor != anchor {
+			t.Fatalf("visible[%d].Anchor = %s, want %s", i, visible[i].Anchor, anchor)
+		}
+	}
+	if visible[0].ID != "later-input" {
+		t.Fatalf("equal-time tie selected %q, want later input", visible[0].ID)
+	}
+}
+
 func TestCompositeToastsDimsBackgroundWithoutClearingContent(t *testing.T) {
 	f := renderer.NewFrame(14, 5)
 	baseStyle := renderer.Style{Foreground: 1, Background: 2}
@@ -218,7 +216,7 @@ func TestCompositeToastsDimsBackgroundWithoutClearingContent(t *testing.T) {
 	}
 	styles := ToastStyles{Text: renderer.Style{Foreground: 3, Background: -1}, Box: renderer.Style{Bold: true, Foreground: 4, Background: -1}}
 
-	CompositeToasts(f, []ActiveToast{{Toast: Toast{ID: "dim", Message: "Hi", Anchor: ToastCenter, DimBackground: true}}}, styles, func(renderer.Style) renderer.Style {
+	CompositeToasts(f, []ActiveToast{{Toast: Toast{ID: "dim", Message: "Hi", Anchor: domain.AnchorCenter, DimBackground: true}}}, styles, func(renderer.Style) renderer.Style {
 		return dimStyle
 	})
 
@@ -229,7 +227,7 @@ func TestCompositeToastsDimsBackgroundWithoutClearingContent(t *testing.T) {
 	if !outside.Style.Equal(dimStyle) {
 		t.Fatalf("outside style = %+v, want dimmed %+v", outside.Style, dimStyle)
 	}
-	bounds := ToastBounds(domain.Size{Cols: 14, Rows: 5}, Toast{Message: "Hi", Anchor: ToastCenter})
+	bounds := ToastBounds(domain.Size{Cols: 14, Rows: 5}, Toast{Message: "Hi", Anchor: domain.AnchorCenter})
 	boxCell := f.At(bounds.X, bounds.Y)
 	if boxCell.Rune != '┌' || !boxCell.Style.Equal(styles.Box) {
 		t.Fatalf("box cell = %+v, want toast box style", boxCell)
@@ -245,7 +243,7 @@ func TestCompositeToastsHandlesTinyFrames(t *testing.T) {
 	for _, size := range []domain.Size{{}, {Cols: 1, Rows: 1}, {Cols: 2, Rows: 1}, {Cols: 1, Rows: 2}} {
 		t.Run(fmt.Sprintf("%dx%d", size.Cols, size.Rows), func(t *testing.T) {
 			f := renderer.NewFrame(size.Cols, size.Rows)
-			CompositeToasts(f, []ActiveToast{{Toast: Toast{Message: "abcdef", Anchor: ToastCenter}}}, styles, nil)
+			CompositeToasts(f, []ActiveToast{{Toast: Toast{Message: "abcdef", Anchor: domain.AnchorCenter}}}, styles, nil)
 		})
 	}
 }

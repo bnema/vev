@@ -58,7 +58,7 @@ func reconnectToastBounds(size domain.Size) domain.Rect {
 }
 
 func reconnectToastBoundsFor(size domain.Size, message string) domain.Rect {
-	return ui.ToastBounds(size, ui.Toast{Message: message, Anchor: ui.ToastCenter})
+	return ui.ToastBounds(size, ui.Toast{Message: message, Anchor: domain.AnchorCenter})
 }
 
 func reconnectToastLines(bounds domain.Rect) []string {
@@ -70,7 +70,7 @@ func reconnectToastLinesFor(bounds domain.Rect, message string) []string {
 		return nil
 	}
 	frame := renderer.NewFrame(bounds.Width, bounds.Height)
-	ui.CompositeToasts(frame, []ui.ActiveToast{{Toast: ui.Toast{Message: message, Anchor: ui.ToastCenter}}}, ui.ToastStyles{
+	ui.CompositeToasts(frame, []ui.ActiveToast{{Toast: ui.Toast{Message: message, Anchor: domain.AnchorCenter}}}, ui.ToastStyles{
 		Text: renderer.DefaultStyle(),
 		Box:  renderer.DefaultStyle(),
 	}, nil)
