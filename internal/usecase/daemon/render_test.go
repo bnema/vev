@@ -1311,7 +1311,7 @@ func TestPaintAlignsFloatingCursorWithCommittedGeometry(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	contentArea := domain.Rect{Y: 1, Width: 80, Height: 23}
 	cfg := d.currentFloatingConfig()
-	committed := calculateFloatingGeometry(domain.Rect{Width: contentArea.Width, Height: contentArea.Height}, cfg)
+	committed := calculateContentFloatingGeometry(domain.Size{Cols: contentArea.Width, Rows: contentArea.Height}, cfg)
 	floating := newPane("floating", nil, rectSize(committed.Inner))
 	floating.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'F'})
 	floating.popupGeometry = committed
@@ -1482,7 +1482,7 @@ func TestCopyTargetRectLocked(t *testing.T) {
 	defer tb.mu.Unlock()
 	layoutSnap := solveTabLayoutLocked(tb)
 	main := tb.focusedPane()
-	fp.popupGeometry = calculateFloatingGeometry(domain.Rect{Width: contentArea.Width, Height: contentArea.Height}, cfg)
+	fp.popupGeometry = calculateContentFloatingGeometry(domain.Size{Cols: contentArea.Width, Rows: contentArea.Height}, cfg)
 	floatingFrameGeometry := fp.popupGeometry.translate(contentArea.X, contentArea.Y)
 
 	cases := []struct {
@@ -1492,7 +1492,7 @@ func TestCopyTargetRectLocked(t *testing.T) {
 		hasFloating bool
 		want        domain.Rect
 	}{
-		{name: "floating source targets committed frame-absolute popup inner", pane: fp, floating: fp, hasFloating: true, want: calculateFloatingGeometry(domain.Rect{Width: contentArea.Width, Height: contentArea.Height}, cfg).translate(contentArea.X, contentArea.Y).Inner},
+		{name: "floating source targets committed frame-absolute popup inner", pane: fp, floating: fp, hasFloating: true, want: calculateContentFloatingGeometry(domain.Size{Cols: contentArea.Width, Rows: contentArea.Height}, cfg).translate(contentArea.X, contentArea.Y).Inner},
 		{name: "normal source targets solved placement", pane: main, want: domain.Rect{X: 0, Y: 1, Width: 80, Height: 23}},
 		{name: "unplaced source falls back to pane frame", pane: stray, want: domain.Rect{X: 0, Y: 1, Width: 10, Height: 4}},
 	}

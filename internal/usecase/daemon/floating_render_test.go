@@ -35,18 +35,18 @@ func TestFloatingFrameGeometryPreservesBorderRules(t *testing.T) {
 	const frameX, frameY = 7, 3
 	tests := []struct {
 		name                  string
-		content               domain.Rect
+		content               domain.Size
 		cfg                   domain.FloatingConfig
 		tinyWidth, tinyHeight bool
 	}{
-		{name: "normal", content: domain.Rect{Width: 80, Height: 24}, cfg: domain.FloatingConfig{Width: 80, Height: 75}},
-		{name: "tiny width omits horizontal borders", content: domain.Rect{Width: 2, Height: 20}, cfg: domain.FloatingConfig{Width: 100, Height: 100}, tinyWidth: true},
-		{name: "tiny height omits vertical borders", content: domain.Rect{Width: 20, Height: 2}, cfg: domain.FloatingConfig{Width: 100, Height: 100}, tinyHeight: true},
-		{name: "full size", content: domain.Rect{Width: 80, Height: 24}, cfg: domain.FloatingConfig{Width: 100, Height: 100}},
+		{name: "normal", content: domain.Size{Cols: 80, Rows: 24}, cfg: domain.FloatingConfig{Width: 80, Height: 75}},
+		{name: "tiny width omits horizontal borders", content: domain.Size{Cols: 2, Rows: 20}, cfg: domain.FloatingConfig{Width: 100, Height: 100}, tinyWidth: true},
+		{name: "tiny height omits vertical borders", content: domain.Size{Cols: 20, Rows: 2}, cfg: domain.FloatingConfig{Width: 100, Height: 100}, tinyHeight: true},
+		{name: "full size", content: domain.Size{Cols: 80, Rows: 24}, cfg: domain.FloatingConfig{Width: 100, Height: 100}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			contentGeometry := calculateFloatingGeometry(tt.content, tt.cfg)
+			contentGeometry := calculateContentFloatingGeometry(tt.content, tt.cfg)
 			frameGeometry := contentGeometry.translate(frameX, frameY)
 
 			require.Equal(t, contentGeometry.Bounds.X+frameX, frameGeometry.Bounds.X)
@@ -73,19 +73,19 @@ func TestFloatingFrameGeometryPreservesBorderRules(t *testing.T) {
 func TestCalculateFloatingGeometry(t *testing.T) {
 	tests := []struct {
 		name    string
-		content domain.Rect
+		content domain.Size
 		cfg     domain.FloatingConfig
 		want    floatingGeometry
 	}{
-		{"eighty percent centered", domain.Rect{X: 3, Y: 1, Width: 101, Height: 51}, domain.FloatingConfig{Width: 80, Height: 80}, floatingGeometry{Bounds: domain.Rect{X: 13, Y: 6, Width: 80, Height: 40}, Inner: domain.Rect{X: 14, Y: 7, Width: 78, Height: 38}}},
-		{"one percent clamps to one", domain.Rect{Y: 1, Width: 100, Height: 20}, domain.FloatingConfig{Width: 1, Height: 1}, floatingGeometry{Bounds: domain.Rect{X: 49, Y: 10, Width: 1, Height: 1}, Inner: domain.Rect{X: 49, Y: 10, Width: 1, Height: 1}}},
-		{"full size", domain.Rect{Y: 1, Width: 100, Height: 20}, domain.FloatingConfig{Width: 100, Height: 100}, floatingGeometry{Bounds: domain.Rect{Y: 1, Width: 100, Height: 20}, Inner: domain.Rect{X: 1, Y: 2, Width: 98, Height: 18}}},
-		{"tiny axes omit borders", domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}, domain.FloatingConfig{Width: 100, Height: 100}, floatingGeometry{Bounds: domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}, Inner: domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}}},
-		{"percent clamps", domain.Rect{Width: 10, Height: 10}, domain.FloatingConfig{Width: 101, Height: -1}, floatingGeometry{Bounds: domain.Rect{Width: 10, Height: 1, Y: 4}, Inner: domain.Rect{X: 1, Width: 8, Y: 4, Height: 1}}},
+		{"eighty percent centered", domain.Size{Cols: 101, Rows: 51}, domain.FloatingConfig{Width: 80, Height: 80}, floatingGeometry{Bounds: domain.Rect{X: 10, Y: 5, Width: 80, Height: 40}, Inner: domain.Rect{X: 11, Y: 6, Width: 78, Height: 38}}},
+		{"one percent clamps to one", domain.Size{Cols: 100, Rows: 20}, domain.FloatingConfig{Width: 1, Height: 1}, floatingGeometry{Bounds: domain.Rect{X: 49, Y: 9, Width: 1, Height: 1}, Inner: domain.Rect{X: 49, Y: 9, Width: 1, Height: 1}}},
+		{"full size", domain.Size{Cols: 100, Rows: 20}, domain.FloatingConfig{Width: 100, Height: 100}, floatingGeometry{Bounds: domain.Rect{Width: 100, Height: 20}, Inner: domain.Rect{X: 1, Y: 1, Width: 98, Height: 18}}},
+		{"tiny axes omit borders", domain.Size{Cols: 2, Rows: 1}, domain.FloatingConfig{Width: 100, Height: 100}, floatingGeometry{Bounds: domain.Rect{Width: 2, Height: 1}, Inner: domain.Rect{Width: 2, Height: 1}}},
+		{"percent clamps", domain.Size{Cols: 10, Rows: 10}, domain.FloatingConfig{Width: 101, Height: -1}, floatingGeometry{Bounds: domain.Rect{Width: 10, Height: 1, Y: 4}, Inner: domain.Rect{X: 1, Width: 8, Y: 4, Height: 1}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, calculateFloatingGeometry(tt.content, tt.cfg))
+			require.Equal(t, tt.want, calculateContentFloatingGeometry(tt.content, tt.cfg))
 		})
 	}
 }
@@ -117,9 +117,9 @@ func TestComposeFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testing.T) {
 	base.Set(2, 2, renderer.Cell{Rune: 'B'})
 	content := domain.Rect{Y: 1, Width: 40, Height: 10}
 	cache := &composedFrameCache{}
-	frame, _, _ := composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, domain.FloatingConfig{Width: 80, Height: 80}), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	frame, _, _ := composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, domain.FloatingConfig{Width: 80, Height: 80}), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	require.Equal(t, 'B', base.At(2, 2).Rune, "backdrop must only touch the composed destination")
-	geometry := calculateFloatingGeometry(content, domain.FloatingConfig{Width: 80, Height: 80})
+	geometry := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, domain.FloatingConfig{Width: 80, Height: 80}).translate(content.X, content.Y)
 	require.Equal(t, '┌', frame.At(geometry.Bounds.X, geometry.Bounds.Y).Rune)
 	require.Equal(t, 'F', frame.At(geometry.Inner.X, geometry.Inner.Y).Rune)
 	var gotTitle strings.Builder
@@ -131,7 +131,7 @@ func TestComposeFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testing.T) {
 	p.mu.Lock()
 	p.title.generation++
 	p.mu.Unlock()
-	_, damage, _ := composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, domain.FloatingConfig{Width: 80, Height: 80}), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	_, damage, _ := composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, domain.FloatingConfig{Width: 80, Height: 80}), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	require.Len(t, damage, 1)
 	require.Equal(t, geometry.Bounds.Y, damage[0].Y)
 	require.Equal(t, 1, damage[0].Height)
@@ -220,8 +220,8 @@ func TestComposeFloatingFrameRendersPaneOwnedCommandFallback(t *testing.T) {
 	base := renderer.NewFrame(40, 12)
 	content := domain.Rect{Y: 1, Width: 40, Height: 10}
 	cfg := domain.FloatingConfig{Width: 80, Height: 80}
-	frame, _, _ := composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, false)
-	geometry := calculateFloatingGeometry(content, cfg)
+	frame, _, _ := composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, false)
+	geometry := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg).translate(content.X, content.Y)
 	var gotTitle strings.Builder
 	for x := geometry.Bounds.X + 2; x < geometry.Bounds.X+geometry.Bounds.Width-2; x++ {
 		gotTitle.WriteRune(frame.At(x, geometry.Bounds.Y).Rune)
@@ -253,7 +253,7 @@ func TestComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 		<-start
 		cache := &composedFrameCache{}
 		for range 500 {
-			composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+			composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 		}
 	}()
 	close(start)
@@ -310,13 +310,13 @@ func BenchmarkComposeFloatingFrameCached(b *testing.B) {
 	content := domain.Rect{Y: 1, Width: 80, Height: 22}
 	cfg := domain.FloatingConfig{Width: 80, Height: 80}
 	cache := &composedFrameCache{}
-	composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	p.screen.ClearDamage()
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+		composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	}
 }
 
@@ -327,11 +327,11 @@ func TestComposeFloatingFrameCachedDoesNotAllocate(t *testing.T) {
 	content := domain.Rect{Y: 1, Width: 80, Height: 22}
 	cfg := domain.FloatingConfig{Width: 80, Height: 80}
 	cache := &composedFrameCache{}
-	composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	p.screen.ClearDamage()
 
 	allocs := testing.AllocsPerRun(100, func() {
-		composeFloatingFrame(base, nil, p, 1, content, calculateFloatingGeometry(domain.Rect{Width: content.Width, Height: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+		composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
 	})
 	require.Zero(t, allocs, "cached floating composition must not allocate without damage or title changes")
 }
@@ -342,8 +342,8 @@ func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {
 	tb := newTab(nil, domain.Size{Cols: 80, Rows: 24})
 	sess := &session{tabs: []*tab{tb}}
 
-	initialGeometry := calculateFloatingGeometry(domain.Rect{Width: 80, Height: 24}, d.currentFloatingConfig())
-	currentGeometry := calculateFloatingGeometry(domain.Rect{Width: 100, Height: 40}, d.currentFloatingConfig())
+	initialGeometry := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 24}, d.currentFloatingConfig())
+	currentGeometry := calculateContentFloatingGeometry(domain.Size{Cols: 100, Rows: 40}, d.currentFloatingConfig())
 	initial := initialGeometry.Inner
 	current := currentGeometry.Inner
 	pty := &resizePTY{errs: []error{errors.New("first show fails"), nil}}
@@ -384,8 +384,8 @@ func TestFailedFloatingResizeKeepsCommittedRenderAndInputGeometry(t *testing.T) 
 	cfg := domain.FloatingConfig{Width: 50, Height: 50}
 	oldContent := domain.Rect{Y: 1, Width: 80, Height: 24}
 	newContent := domain.Rect{Y: 1, Width: 100, Height: 40}
-	oldGeometry := calculateFloatingGeometry(domain.Rect{Width: oldContent.Width, Height: oldContent.Height}, cfg)
-	newGeometry := calculateFloatingGeometry(domain.Rect{Width: newContent.Width, Height: newContent.Height}, cfg)
+	oldGeometry := calculateContentFloatingGeometry(domain.Size{Cols: oldContent.Width, Rows: oldContent.Height}, cfg)
+	newGeometry := calculateContentFloatingGeometry(domain.Size{Cols: newContent.Width, Rows: newContent.Height}, cfg)
 	pty := &resizePTY{err: errors.New("resize failed")}
 	p := newPane("floating", pty, rectSize(oldGeometry.Inner))
 	p.rect = oldGeometry.Inner
@@ -405,7 +405,7 @@ func TestFailedFloatingResizeKeepsCommittedRenderAndInputGeometry(t *testing.T) 
 	require.Equal(t, oldGeometry.translate(newContent.X, newContent.Y).Inner, copyRect)
 
 	base := renderer.NewFrame(newContent.Width, newContent.Height+2)
-	frame, _, _ := composeFloatingFrame(base, nil, p, 1, newContent, calculateFloatingGeometry(domain.Rect{Width: newContent.Width, Height: newContent.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, true)
+	frame, _, _ := composeFloatingFrame(base, nil, p, 1, newContent, calculateContentFloatingGeometry(domain.Size{Cols: newContent.Width, Rows: newContent.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, true)
 	oldFrameGeometry := oldGeometry.translate(newContent.X, newContent.Y)
 	newFrameGeometry := newGeometry.translate(newContent.X, newContent.Y)
 	require.Equal(t, '┌', frame.At(oldFrameGeometry.Bounds.X, oldFrameGeometry.Bounds.Y).Rune)

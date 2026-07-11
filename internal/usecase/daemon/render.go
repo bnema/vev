@@ -397,7 +397,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
 	contentArea := domain.Rect{Y: 1, Width: frame.Width, Height: max(0, frame.Height-2)}
 	floatingFrameGeometry := floatingGeometry{}
 	if hasFloating {
-		desiredFloatingGeometry := calculateFloatingGeometry(domain.Rect{Width: contentArea.Width, Height: contentArea.Height}, floatingCfg)
+		desiredFloatingGeometry := calculateContentFloatingGeometry(domain.Size{Cols: contentArea.Width, Rows: contentArea.Height}, floatingCfg)
 		frame, damage, floatingFrameGeometry = composeFloatingFrame(frame, damage, floating, tb.floating.generation, contentArea, desiredFloatingGeometry, layoutSnap, bars.theme, &ac.composed, reset || overlayActive)
 	}
 	if overlays.copyActive {

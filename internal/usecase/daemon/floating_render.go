@@ -8,8 +8,8 @@ import (
 )
 
 // floatingGeometry describes a popup's outer frame and terminal content area.
-// Committed geometry is tab-content-relative; Bounds and Inner are both relative
-// to the supplied content rectangle.
+// Committed geometry is tab-content-relative and origin-zero; Bounds and Inner
+// are both relative to tab content.
 type floatingGeometry struct {
 	Bounds domain.Rect
 	Inner  domain.Rect
@@ -56,19 +56,19 @@ func calculateFloatingAxisGeometry(available, percent int) floatingAxisGeometry 
 	return axis
 }
 
-// calculateFloatingGeometry returns coordinates in the supplied rectangle's
-// space and centers a percentage-sized popup in content. Launch sizing derives
-// from Inner too, so rendering and PTY geometry share
-// the same per-axis percentage and tiny-border rules.
-func calculateFloatingGeometry(content domain.Rect, cfg domain.FloatingConfig) floatingGeometry {
-	if content.Width <= 0 || content.Height <= 0 {
+// calculateContentFloatingGeometry returns origin-zero, tab-content-relative
+// coordinates for a percentage-sized popup. Launch sizing derives from Inner
+// too, so rendering and PTY geometry share the same per-axis percentage and
+// tiny-border rules.
+func calculateContentFloatingGeometry(content domain.Size, cfg domain.FloatingConfig) floatingGeometry {
+	if !content.Valid() {
 		return floatingGeometry{}
 	}
-	x := calculateFloatingAxisGeometry(content.Width, cfg.Width)
-	y := calculateFloatingAxisGeometry(content.Height, cfg.Height)
+	x := calculateFloatingAxisGeometry(content.Cols, cfg.Width)
+	y := calculateFloatingAxisGeometry(content.Rows, cfg.Height)
 	bounds := domain.Rect{
-		X:      content.X + (content.Width-x.BoundsSize)/2,
-		Y:      content.Y + (content.Height-y.BoundsSize)/2,
+		X:      (content.Cols - x.BoundsSize) / 2,
+		Y:      (content.Rows - y.BoundsSize) / 2,
 		Width:  x.BoundsSize,
 		Height: y.BoundsSize,
 	}
@@ -211,12 +211,12 @@ func (d *Daemon) resizeInstalledFloating(tb *tab) bool {
 	}
 	tb.mu.Lock()
 	p := tb.floating.pane
-	content := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
+	content := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows}
 	tb.mu.Unlock()
 	if p == nil {
 		return false
 	}
-	return d.resizeFloatingPane(p, calculateFloatingGeometry(content, d.currentFloatingConfig()))
+	return d.resizeFloatingPane(p, calculateContentFloatingGeometry(content, d.currentFloatingConfig()))
 }
 
 // resizeActiveFloating updates a visible floating pane during a client resize.
