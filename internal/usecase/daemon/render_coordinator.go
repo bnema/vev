@@ -402,6 +402,22 @@ func (d *Daemon) invalidateRender(sess *session, ac *attachedClient, reset bool,
 	}
 }
 
+// invalidateRenderNow publishes through the coordinator but immediately
+// flushes the wake when the client can accept state. Attach uses this path so
+// the required first full frame never depends on a debounce timer.
+func (d *Daemon) invalidateRenderNow(sess *session, ac *attachedClient, reset bool, producer string) {
+	if sess != nil {
+		if rc := sess.renderCoordinator(); rc != nil {
+			rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: reset, producer: producer})
+			rc.fireCurrent(false)
+			return
+		}
+	}
+	if ac != nil {
+		d.paint(sess, ac, reset)
+	}
+}
+
 func (c *renderCoordinator) fire(gen uint64, watchdog bool) {
 	c.mu.Lock()
 	if c.torndown || !c.pending || (!watchdog && gen != c.generation) {
@@ -419,6 +435,7 @@ func (c *renderCoordinator) fire(gen uint64, watchdog bool) {
 	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog}
 	c.metrics.wakes.Add(1)
 	c.metrics.coalesced.Add(uint64(w.coalesced))
+	c.cancelNormalTimerLocked()
 	c.pending, c.pendingReset, c.pendingUrgent, c.coalesced, c.armed = false, false, false, 0, false
 	wake, preview := c.opts.wake, c.previewWake
 	c.mu.Unlock()

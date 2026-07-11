@@ -388,10 +388,10 @@ func TestDatagramWindowOneCoalescesPaintsUntilMsgAck(t *testing.T) {
 	require.Equal(t, uint64(1), firstOutput.NewStateNum)
 	for range 100 {
 		pane.screen.Write([]byte("x"))
-		d.paint(sess, ac, false)
+		d.invalidateRender(sess, ac, false, "output_state_sync_test.go")
 	}
 	pane.screen.Write([]byte("LATEST"))
-	d.paint(sess, ac, false)
+	d.invalidateRender(sess, ac, false, "output_state_sync_test.go")
 	requireNoOutputFrame(t, tr.sends)
 	require.Equal(t, uint64(1), ac.output.outstanding(), "only one state-bearing datagram output may be unacknowledged")
 

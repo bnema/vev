@@ -1309,10 +1309,10 @@ func TestStatusBarCopyFeedbackBoundaryWidths(t *testing.T) {
 	}
 }
 
-func TestStatusRepaintsOnCreateSwitchAndResize(t *testing.T) {
+func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	clock := &signalClock{timers: make(chan *signalTimer, 64)}
 	d := newTestDaemon(t, newFactorySeq(t, p1, p2), clock)
 	tr, sends, releaseConn := newConn(t,
 		mustHello(ports.IntentNew, "work", domain.Size{Cols: 20, Rows: 5}),
@@ -1326,16 +1326,25 @@ func TestStatusRepaintsOnCreateSwitchAndResize(t *testing.T) {
 	hg.Go(func() { d.handleConn(tr) })
 	awaitFrame(t, sends, ports.MsgWelcome)
 	first := awaitFrame(t, sends, ports.MsgOutput)
-	palette := awaitFrame(t, sends, ports.MsgOutput)
-	created := awaitFrame(t, sends, ports.MsgOutput)
-	switched := awaitFrame(t, sends, ports.MsgOutput)
-	// The resize frame is intentionally idle-coalesced; fire its fake-clock
-	// deadline rather than relying on the old synchronous behavior.
-	(<-clock.timers).ch <- time.Time{}
-	resized := awaitFrame(t, sends, ports.MsgOutput)
+	require.Eventually(t, func() bool {
+		sessions := listSessions(t, d)
+		return len(sessions.Sessions) == 1 && sessions.Sessions[0].Tabs == 2
+	}, 2*time.Second, time.Millisecond)
 
-	_ = palette
-	for _, f := range []ports.Frame{first, created, switched, resized} {
+	// The queued create, switch, and resize transitions may collapse into one
+	// latest-state wake. Advance every retained PR #71/coordinator deadline
+	// until that coalesced output is observable.
+	var resized ports.Frame
+	for resized.Type != ports.MsgOutput {
+		select {
+		case f := <-sends:
+			resized = f
+		case timer := <-clock.timers:
+			timer.ch <- time.Time{}
+		}
+	}
+
+	for _, f := range []ports.Frame{first, resized} {
 		out, err := ports.UnmarshalOutput(f.Payload)
 		require.NoError(t, err)
 		require.Contains(t, string(out.Data), "work")

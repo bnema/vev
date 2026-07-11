@@ -441,7 +441,7 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 		d.resizeForFirstPaint(sess, ac, clientSize)
 	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
-	d.invalidateRender(sess, ac, true, "client.go")
+	d.invalidateRenderNow(sess, ac, true, "client.go")
 	d.activateTab(sess, tb)
 }
 
