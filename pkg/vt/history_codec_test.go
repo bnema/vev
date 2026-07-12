@@ -205,6 +205,7 @@ func historyPayloadWithDimensions(rowCount, width int) []byte {
 		data = binary.BigEndian.AppendUint32(data, uint32(chunkRows))
 		for range chunkRows {
 			data = binary.BigEndian.AppendUint32(data, uint32(width))
+			//nolint:makezero // The header prefix is retained while zeroed cell records are appended.
 			data = append(data, make([]byte, width*historyCellBytes)...)
 		}
 		rowCount -= chunkRows

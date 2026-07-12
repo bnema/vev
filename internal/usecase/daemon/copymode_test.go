@@ -166,7 +166,7 @@ func TestCopyModePaletteCommandEntersAndDoesNotForward(t *testing.T) {
 	writes := make(chan []byte, 1)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].focusedPane().history = newTestHistory(4)
+	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 4})
 	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.handleInput(sess, ac, []byte("\x1b "))
@@ -293,7 +293,7 @@ func TestCopyModeSearchModalCapturesMouseAndClearsOnExit(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	pane := sess.tabs[0].focusedPane()
-	pane.history = newTestHistory(4)
+	installTestHistory(pane, vt.HistoryConfig{MaxRows: 4})
 	pane.history.Append(testRow("old alpha"))
 	copy(pane.screen.Frame.Row(0), testRow("live alpha"))
 
@@ -322,7 +322,7 @@ func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 	writes := make(chan []byte, 1)
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].focusedPane().history = newTestHistory(4)
+	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 4})
 	sess.tabs[0].focusedPane().history.Append(testRow("old1    "))
 	sess.tabs[0].focusedPane().history.Append(testRow("old2    "))
 	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
@@ -481,7 +481,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 func TestCopyModeEscapeRestoresLiveFullRepaint(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].focusedPane().history = newTestHistory(4)
+	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 4})
 	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
@@ -515,7 +515,7 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p, _ := newBlockingPTY(t)
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-			sess.tabs[0].focusedPane().history = newTestHistory(4)
+			installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 4})
 			sess.tabs[0].focusedPane().history.Append(testRow("old1    "))
 			sess.tabs[0].focusedPane().history.Append(testRow("old2    "))
 			sess.tabs[0].focusedPane().screen.Write([]byte("live"))
@@ -535,7 +535,7 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 func TestCopyModeOversizedYankShowsTooLargeFeedback(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].focusedPane().history = newTestHistory(1)
+	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 1})
 	longLine := strings.Repeat("x", scopy.OSC52MaxPayloadBytes+1)
 	sess.tabs[0].focusedPane().screen.Frame = renderer.NewFrame(len(longLine), 1)
 	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow(longLine))
@@ -560,7 +560,7 @@ func TestCopyModeLoneEscapeExitsAfterDelay(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	clk := &signalClock{timers: make(chan *signalTimer, 1)}
 	d.clock = clk
-	sess.tabs[0].focusedPane().history = newTestHistory(4)
+	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 4})
 	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
@@ -584,7 +584,7 @@ func TestCopyModePendingEscapeDoesNotCloseNewMode(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	clk := &signalClock{timers: make(chan *signalTimer, 1)}
 	d.clock = clk
-	sess.tabs[0].focusedPane().history = newTestHistory(4)
+	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 4})
 	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
@@ -627,7 +627,7 @@ func TestCopyModeEmptyYankDoesNotClearClipboard(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p, _ := newBlockingPTY(t)
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-			sess.tabs[0].focusedPane().history = newTestHistory(4)
+			installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 4})
 			sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 			d.enterCopyMode(sess, ac)
@@ -676,7 +676,7 @@ func TestHandleCopyInputUsesImmutableSnapshotWithoutPaneLock(t *testing.T) {
 func TestCopyModeEnterExitConcurrentWithPaintRace(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].focusedPane().history = newTestHistory(4)
+	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 4})
 	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	done := make(chan struct{})

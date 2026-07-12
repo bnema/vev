@@ -574,9 +574,8 @@ func validateActive(active uint16, tabCount int) error {
 	return nil
 }
 
-// preflightSession first validates the full structural and aggregate resource
-// shape without materializing strings, maps, or reference lists. Only once
-// that pass has accepted global budgets does it allocate to check references.
+// validateTree checks that every pane reference in the layout tree resolves
+// to a pane declared by the enclosing tab.
 func validateTree(t *layout.Tree, ids map[layout.PaneID]struct{}) error {
 	if t == nil || t.Root == nil {
 		return nil

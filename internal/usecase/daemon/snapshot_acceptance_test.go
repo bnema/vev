@@ -100,9 +100,9 @@ func TestSnapshotCaptureRetainsImmutableValuesAfterTailMutationAndEviction(t *te
 	}
 	sess := newSnapshotTestSession(t, "frozen", false, "/work")
 	pane := sess.tabs[0].panes["pane-1"]
-	pane.history = vt.NewHistory(vt.HistoryConfig{MaxRows: 2, ChunkRows: 1})
+	pane.screen = vt.NewScreenWithHistory(8, 3, vt.HistoryConfig{MaxRows: 2, ChunkRows: 1})
+	pane.history = pane.screen.History()
 	pane.history.Append([]renderer.Cell{{Rune: 'o'}, {Rune: 'l'}, {Rune: 'd'}})
-	pane.screen = vt.NewScreen(8, 3)
 	pane.screen.Write([]byte("before"))
 
 	require.True(t, d.captureSession(sess))
@@ -127,11 +127,11 @@ func TestSnapshotCaptureRetainsImmutableValuesAfterTailMutationAndEviction(t *te
 func TestDaemonHistoryEvictionLeavesCopyAndSearchSnapshotsUsable(t *testing.T) {
 	sess := newSnapshotTestSession(t, "copy-lifetime", false, "/work")
 	pane := sess.tabs[0].panes["pane-1"]
-	pane.history = vt.NewHistory(vt.HistoryConfig{MaxRows: 2, ChunkRows: 1})
+	pane.screen = vt.NewScreenWithHistory(8, 1, vt.HistoryConfig{MaxRows: 2, ChunkRows: 1})
+	pane.history = pane.screen.History()
 	for _, text := range []string{"first", "second"} {
 		pane.history.Append(cells(text))
 	}
-	pane.screen = vt.NewScreen(8, 1)
 	pane.screen.Write([]byte("screen"))
 
 	document := scopy.NewSnapshot(pane.history, pane.screen.Frame)

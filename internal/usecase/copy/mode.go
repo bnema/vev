@@ -38,7 +38,8 @@ func NewSnapshot(historySource *vt.History, screen renderer.Frame) Snapshot {
 
 // NewSnapshotFromRows constructs a snapshot that owns explicit caller rows.
 // It is intended for callers that already have a complete document rather than
-// a scrollback and visible frame.
+// a scrollback and visible frame. Height is viewport geometry, not a request to
+// append blank document rows.
 func NewSnapshotFromRows(rows [][]renderer.Cell, width, height int) Snapshot {
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: len(rows), ChunkRows: 256})
 	for _, row := range rows {

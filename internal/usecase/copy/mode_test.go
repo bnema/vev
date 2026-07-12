@@ -539,6 +539,17 @@ func TestNewSnapshotFromRowsOwnsCallerRows(t *testing.T) {
 	require.Equal(t, "one", rowText(document.Row(0)))
 }
 
+func TestNewSnapshotFromRowsKeepsDocumentAndViewportDimensionsIndependent(t *testing.T) {
+	document := NewSnapshotFromRows([][]renderer.Cell{row("one"), row("two")}, 7, 5)
+
+	require.Equal(t, 2, document.Len())
+	require.Equal(t, 7, document.Width)
+	require.Equal(t, 5, document.Height)
+	require.Equal(t, "one", rowText(document.Row(0)))
+	require.Equal(t, "two", rowText(document.Row(1)))
+	require.Nil(t, document.Row(2))
+}
+
 // This scaling gate deliberately compares equal row counts rather than an
 // absolute budget, which varies between Go releases. A HistoryView shares
 // sealed chunks, so its allocation must not grow with history-row width.

@@ -17,6 +17,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -930,7 +931,7 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].focusedPane().history = newTestHistory(50)
+	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 50})
 	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
 
 	// Press on a content row while scrollback is empty: the anchor is

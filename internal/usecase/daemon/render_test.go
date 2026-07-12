@@ -911,7 +911,7 @@ func TestOverlayPaintInvalidationShowsAndRestoresBaseFrame(t *testing.T) {
 			open:  func(d *Daemon, sess *session, ac *attachedClient) { d.enterCopyMode(sess, ac) },
 			close: func(d *Daemon, _ *session, ac *attachedClient) { d.handleCopyInput(ac, []byte("q")) },
 			prepareScreen: func(sess *session) {
-				sess.tabs[0].focusedPane().history = newTestHistory(4)
+				installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 4})
 			},
 			visible:      "[SCROLL]",
 			notVisible:   "[SCROLL]",
@@ -923,10 +923,10 @@ func TestOverlayPaintInvalidationShowsAndRestoresBaseFrame(t *testing.T) {
 			p, release := newBlockingPTY(t)
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 			defer release()
-			sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 			if tt.prepareScreen != nil {
 				tt.prepareScreen(sess)
 			}
+			sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 			if tt.wantRestored == "" {
 				tt.wantRestored = "live"
 			}
