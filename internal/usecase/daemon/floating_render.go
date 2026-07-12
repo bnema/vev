@@ -147,6 +147,28 @@ func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *
 	return frame, damage, geometry
 }
 
+func composeCapturedFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, floating capturedFloatingRenderState, content domain.Rect, layoutSnap capturedTabLayout, theme themeui.Theme, cache composeCacheInput, full bool) (renderer.Frame, []renderer.Damage) {
+	frame := base.Clone()
+	legacyLayout := tabLayoutSnapshot{placements: layoutSnap.placements, area: layoutSnap.area, focus: layoutSnap.focus, ok: layoutSnap.valid}
+	(overlayBackdrop{DimPaneContents: true}).apply(frame, content, legacyLayout, theme)
+	geometry := floating.geometry.translate(content.X, content.Y)
+	blitPaneFrame(frame, geometry.Inner, floating.pane.frame, false, theme)
+	damage := append([]renderer.Damage(nil), baseDamage...)
+	for _, d := range floating.pane.damage {
+		damage = append(damage, translatePaneDamage(d, geometry.Inner, content)...)
+	}
+	popupChanged := !cache.valid || cache.floatingGeneration != floating.generation || cache.floatingGeometry != geometry
+	titleChanged := popupChanged || cache.floatingTitleGeneration != floating.titleGeneration
+	drawFloatingBorder(frame, geometry.Bounds, floating.title, newThemeStyles(theme).border)
+	if full || popupChanged {
+		return frame, []renderer.Damage{renderer.FullRedraw()}
+	}
+	if titleChanged && geometry.Bounds.Height >= 3 {
+		damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: geometry.Bounds.X, Y: geometry.Bounds.Y, Width: geometry.Bounds.Width, Height: 1})
+	}
+	return frame, damage
+}
+
 func drawFloatingBorder(frame renderer.Frame, bounds domain.Rect, title string, style renderer.Style) {
 	if bounds.Width <= 0 || bounds.Height <= 0 {
 		return

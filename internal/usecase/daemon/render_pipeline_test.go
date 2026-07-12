@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/stretchr/testify/require"
 )
@@ -90,4 +91,27 @@ func TestPaintACKBlockedDoesNotDestructivelyCapture(t *testing.T) {
 		t.Fatalf("ACK-blocked paint sent %#v", frame)
 	default:
 	}
+}
+
+func TestComposeFrameUsesCapturedValuesAfterOwnersMutate(t *testing.T) {
+	state := &capturedRenderState{
+		layout: capturedTabLayout{area: domain.Rect{Width: 4, Height: 1}, valid: true},
+		panes: []capturedPaneRenderState{{
+			id: "p", frame: func() renderer.Frame {
+				f := renderer.NewFrame(4, 1)
+				for i, r := range "old " {
+					f.Set(i, 0, renderer.Cell{Rune: r, Style: renderer.DefaultStyle()})
+				}
+				return f
+			}(), placement: layout.Placement{ID: "p", Content: domain.Rect{Width: 4, Height: 1}}, focused: true,
+			damage: []renderer.Damage{renderer.FullRedraw()},
+		}},
+		bars:   barState{},
+		cursor: capturedCursorInputs{visible: true, renderable: true, content: domain.Rect{Width: 4, Height: 1}},
+	}
+	cache := composeCacheInput{}
+	out := composeFrame(*state, cache)
+	state.panes[0].frame.Set(0, 0, renderer.Cell{Rune: 'X', Style: renderer.DefaultStyle()})
+	require.Equal(t, "old ", rowText(out.frame.Row(1)))
+	require.False(t, out.cursor.hidden)
 }

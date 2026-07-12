@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"github.com/bnema/vev/internal/domain"
+	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -38,6 +40,7 @@ type capturedRenderState struct {
 }
 
 type capturedTabLayout struct {
+	root        *layout.Node
 	area        domain.Rect
 	focus       layout.PaneID
 	placements  []layout.Placement
@@ -68,9 +71,22 @@ type capturedFloatingRenderState struct {
 
 type capturedOverlayRenderState struct {
 	copyActive, copySearchActive, pickerActive, paletteActive, promptActive bool
+	copyMode                                                                *scopy.Mode
+	copySnapshot                                                            *scopy.Snapshot
+	copyPaneID                                                              layout.PaneID
 	copyTarget                                                              domain.Rect
 	copyFeedback                                                            string
 	paletteGuidance                                                         string
+	copySearch, picker, palette, prompt                                     capturedModal
+}
+
+type capturedModal struct {
+	modal ui.Modal
+	inner renderer.Frame
+}
+
+func (o capturedOverlayRenderState) active() bool {
+	return o.copyActive || o.copySearchActive || o.pickerActive || o.paletteActive || o.promptActive
 }
 
 type capturedCursorInputs struct {
@@ -136,7 +152,7 @@ func uncertainDamage(damage []renderer.Damage, width, height int) bool {
 // Callers hold attachment sendMu; this function then follows session -> tab ->
 // pane lock order. ACK-blocked primary capture returns before touching VT
 // damage. Preview mode is always non-destructive.
-func captureRenderState(sess *session, ac *attachedClient, bars barState, overlays capturedOverlayRenderState, preview picker.Preview, reset bool, mode damageCaptureMode) (*capturedRenderState, bool) {
+func captureRenderState(sess *session, ac *attachedClient, bars barState, overlays capturedOverlayRenderState, preview picker.Preview, floatingCfg domain.FloatingConfig, reset bool, mode damageCaptureMode) (*capturedRenderState, bool) {
 	if sess == nil || ac == nil || (mode == damageCaptureConsume && ac.output != nil && ac.output.atCapacity()) {
 		return nil, false
 	}
@@ -160,7 +176,12 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 	state := &capturedRenderState{
 		attachment: ac, attachmentEpoch: epoch, reset: reset, bars: bars, theme: bars.theme,
 		overlays: overlays, preview: preview,
-		layout:             capturedTabLayout{area: layoutSnap.area, focus: layoutSnap.focus, placements: append([]layout.Placement(nil), layoutSnap.placements...), fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
+		layout: capturedTabLayout{root: func() *layout.Node {
+			if tb.tree == nil {
+				return nil
+			}
+			return tb.tree.Clone().Root
+		}(), area: layoutSnap.area, focus: layoutSnap.focus, placements: append([]layout.Placement(nil), layoutSnap.placements...), fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
 		floatingGeneration: tb.floating.generation,
 	}
 	state.tabGeneration = uint64(len(layoutSnap.fingerprint))
@@ -191,7 +212,7 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 	if tb.floating.state == floatingVisible && tb.floating.pane != nil {
 		p := tb.floating.pane
 		p.mu.Lock()
-		geometry := p.committedFloatingGeometryLocked(calculateContentFloatingGeometry(domain.Size{Cols: layoutSnap.area.Width, Rows: layoutSnap.area.Height}, domain.FloatingConfig{Width: 100, Height: 100}))
+		geometry := p.committedFloatingGeometryLocked(calculateContentFloatingGeometry(domain.Size{Cols: layoutSnap.area.Width, Rows: layoutSnap.area.Height}, floatingCfg))
 		captured := capturePaneRenderStateLocked(p, geometry.Inner, mode)
 		state.floating = capturedFloatingRenderState{visible: true, pane: captured, geometry: geometry, title: captured.title, generation: tb.floating.generation, titleGeneration: captured.titleGeneration}
 		state.cursor = captureCursorInputsLocked(p, geometry.Inner, overlays)

@@ -3,8 +3,6 @@ package daemon
 
 import (
 	"bytes"
-	"errors"
-	"strconv"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -12,7 +10,6 @@ import (
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
-	"github.com/bnema/vev/pkg/vt"
 )
 
 // completedSynchronizedUpdate reports a full DEC 2026 batch contained in one
@@ -332,8 +329,10 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 	attentionVisible := pulseVisible(bars.attentionFrame)
 	repaintAttachedClients = sess.ackAttention(tb, attentionVisible)
 
-	styles := newThemeStyles(ac.getTheme())
 	paletteCfg := d.currentPaletteConfig()
+	floatingCfg := d.currentFloatingConfig()
+	// Title refresh may inspect process state, so it remains before the capture
+	// boundary and outside tab/pane ownership locks.
 	tb.mu.Lock()
 	layoutSnap := solveTabLayoutLocked(tb)
 	titleIDs := titleBarPaneIDs(layoutSnap.placements, layoutSnap.ok)
@@ -347,189 +346,25 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 		d.refreshPaneDisplayTitle(sess, floating, false)
 	}
 
-	tb.mu.Lock()
-	if !layoutSnap.matchesLocked(tb) {
-		layoutSnap = solveTabLayoutLocked(tb)
+	capturedOverlays := capturedOverlayRenderState{
+		copyActive: overlays.copyActive, copySearchActive: overlays.copySearchModel != nil,
+		pickerActive: overlays.pickerActive, paletteActive: overlays.paletteActive, promptActive: overlays.promptActive,
+		copyFeedback: overlays.copyFeedback,
 	}
-	p := tb.focusedPane()
-	if p == nil {
-		tb.mu.Unlock()
-		ac.sendMu.Unlock()
-		return
-	}
-	// Recheck the slot after refreshing its title outside the tab lock. One
-	// paint uses one immutable floating config snapshot across composition,
-	// copy targeting, and cursor placement.
-	floating = tb.floating.pane
-	hasFloating = tb.floating.state == floatingVisible && floating != nil
-	floatingCfg := d.currentFloatingConfig()
-	overlayActive := overlays.copyActive || overlays.copySearchModel != nil || overlays.pickerActive || overlays.paletteActive || overlays.promptActive
-	if reset || overlayActive {
-		ac.bars.Reset()
-		ac.composed.invalidate()
-	}
-	if reset || overlays.pickerActive || overlays.paletteActive || overlays.promptActive {
-		ac.lastCursor.valid = false
-	}
-	var frame renderer.Frame
-	var damage []renderer.Damage
-	if overlayActive {
-		frame, damage = composeClientFrameWithLayoutCachedConsumeDamage(bars, tb, reset, layoutSnap, &ac.bars, nil)
-	} else {
-		frame, damage = composeClientFrameWithLayoutCachedConsumeDamage(bars, tb, reset, layoutSnap, &ac.bars, &ac.composed)
-	}
-	contentArea := domain.Rect{Y: 1, Width: frame.Width, Height: max(0, frame.Height-2)}
-	floatingFrameGeometry := floatingGeometry{}
-	if hasFloating {
-		desiredFloatingGeometry := calculateContentFloatingGeometry(domain.Size{Cols: contentArea.Width, Rows: contentArea.Height}, floatingCfg)
-		frame, damage, floatingFrameGeometry = composeFloatingFrame(frame, damage, floating, tb.floating.generation, contentArea, desiredFloatingGeometry, layoutSnap, bars.theme, &ac.composed, reset || overlayActive)
-	}
-	if overlays.copyActive {
-		copyPane := overlays.copyPane
-		if copyPane == nil {
-			copyPane = p
-		}
-		copyTarget := copyTargetRectLocked(layoutSnap, contentArea, copyPane, floating, hasFloating, floatingFrameGeometry)
-		frame, damage = composeCopyClientFrame(overlays.copyMode, overlays.copySnapshot, copyTarget, frame, bars)
-	}
-	// A palette above normal/copy content dims that composed content. When a
-	// floating pane is present its own backdrop already dims normal pane
-	// contents; applying the palette backdrop here would also dim the popup.
-	if overlays.paletteActive && !hasFloating {
-		(overlayBackdrop{DimPaneContents: true}).apply(frame, contentArea, layoutSnap, bars.theme)
-	}
-	if overlays.copySearchModel != nil {
-		frame, damage = composeCopySearchClientFrame(overlays.copySearchModel, frame, styles)
-	}
-	if overlays.pickerActive {
-		if overlays.previewTab == tb {
-			if layoutSnap.ok && tb.tree != nil && tb.tree.Root != nil && tb.tree.Root.Kind != layout.Leaf {
-				previewFrame, _ := composeTabFrameWithLayout(tb, layoutSnap.area, themeui.Theme{}, layoutSnap)
-				preview = pickerPreviewFromFrame(previewFrame)
-			} else {
-				preview = pickerPreviewFromLockedTab(tb)
-			}
-		}
-		frame, damage = composePickerClientFrame(overlays.pickerModel, preview, frame, styles)
-	}
-	if overlays.paletteActive {
-		guidance := ""
-		if overlays.paletteHints != nil {
-			guidance = overlays.paletteHints.Feedback
-		}
-		frame, damage = composePaletteClientFrame(overlays.paletteModel, frame, paletteCfg, guidance, styles)
-	}
-	if overlays.promptActive {
-		frame, damage = composePromptClientFrame(overlays.promptModel, frame, styles)
-	}
-	overlays.Unlock()
-	cursorPane := p
-	cursorContent, cursorVisible := focusedPaneContentRect(layoutSnap, p.id)
-	cursorContent.X += contentArea.X
-	cursorContent.Y += contentArea.Y
-	if hasFloating {
-		cursorPane = floating
-		cursorContent, cursorVisible = floatingFrameGeometry.Inner, floatingFrameGeometry.Inner.Width > 0 && floatingFrameGeometry.Inner.Height > 0
-	}
-	cursorPane.mu.Lock()
-	desiredCursor := desiredCursorOut(cursorPane.screen, cursorContent, !cursorVisible || overlays.copyActive || overlays.copySearchModel != nil || overlays.pickerActive || overlays.paletteActive || overlays.promptActive)
-	cursorPane.mu.Unlock()
-	ac.sess.mu.Lock()
-	if ac.sess.v != sess {
-		ac.sess.mu.Unlock()
-		tb.mu.Unlock()
-		ac.sendMu.Unlock()
-		return
-	}
-	prepared, err := ac.output.prepare(frame, damage, reset || overlayActive)
-	var data []byte
-	if err == nil {
-		data = prepared.data
-	}
-	var cursorTail []byte
-	if err == nil {
-		cursorTail = ac.encodeCursorTail(desiredCursor, len(data) > 0)
-	}
-	tb.mu.Unlock()
-
-	var serr error
-	var sendTr ports.Transport
-	if err == nil {
-		data = append(data, cursorTail...)
-		if len(data) > 0 {
-			sendTr = ac.transport()
-			if sendTr == nil {
-				serr = errors.New("client transport is nil")
-			} else {
-				send := sendTr.Send
-				if async, ok := sendTr.(ports.AsyncTransport); ok {
-					send = async.SendAsync
-				}
-				serr = prepared.send(data, ac.echoAck.Load(), send)
-			}
-		}
-	}
-	ac.sess.mu.Unlock()
-	ac.sendMu.Unlock()
-
-	if err != nil {
-		d.log.Error("render draw failed", "err", err, "session", sess.name)
-		return
-	}
-	if serr != nil {
-		d.detachOnSendError(sess, ac, sendTr)
-	}
-}
-
-func focusedPaneContentRect(layoutSnap tabLayoutSnapshot, id layout.PaneID) (domain.Rect, bool) {
-	if !layoutSnap.ok {
-		return layoutSnap.area, layoutSnap.area.Width > 0 && layoutSnap.area.Height > 0
-	}
-	for _, pl := range layoutSnap.placements {
-		if pl.ID == id && !pl.Collapsed && pl.Content.Width > 0 && pl.Content.Height > 0 {
-			return pl.Content, true
-		}
-	}
-	return domain.Rect{}, false
-}
-
-// desiredCursorOut computes the terminal cursor state that should be shown to
-// the client for the current pane placement and overlay mode.
-func desiredCursorOut(s *vt.Screen, content domain.Rect, hide bool) cursorOut {
-	if hide || !s.CursorVisible() {
-		return cursorOut{hidden: true}
-	}
-	style, ok := s.CursorStyle()
+	state, ok := captureRenderState(sess, ac, bars, capturedOverlays, preview, floatingCfg, reset, damageCaptureConsume)
 	if !ok {
-		style = 1
+		ac.sendMu.Unlock()
+		return
 	}
-	return cursorOut{row: content.Y + s.CursorRow(), col: content.X + s.CursorCol(), style: style, hasStyle: true}
-}
-
-func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte {
-	changed := force || !ac.lastCursor.valid || ac.lastCursor.hidden != desired.hidden || ac.lastCursor.row != desired.row || ac.lastCursor.col != desired.col || ac.lastCursor.style != desired.style || ac.lastCursor.hasStyle != desired.hasStyle
-	if !changed {
-		return nil
+	if overlays.pickerActive && overlays.previewTab == tb {
+		previewState := *state
+		previewState.overlays = capturedOverlayRenderState{}
+		previewState.reset = true
+		state.preview = pickerPreviewFromFrame(composeFrame(previewState, composeCacheInput{}).frame)
 	}
-	prev := ac.lastCursor
-	ac.lastCursor = desired
-	ac.lastCursor.valid = true
-	if desired.hidden {
-		return []byte("\x1b[?25l")
-	}
-	var b []byte
-	b = append(b, "\x1b["...)
-	b = strconv.AppendInt(b, int64(desired.row+1), 10)
-	b = append(b, ';')
-	b = strconv.AppendInt(b, int64(desired.col+1), 10)
-	b = append(b, 'H')
-	if !prev.valid || prev.hidden || prev.style != desired.style || prev.hasStyle != desired.hasStyle {
-		b = append(b, "\x1b["...)
-		b = strconv.AppendInt(b, int64(desired.style), 10)
-		b = append(b, " q"...)
-	}
-	b = append(b, "\x1b[?25h"...)
-	return b
+	captureOverlayLayers(state, overlays, paletteCfg)
+	composed := composeFrame(*state, ac.pipelineCache)
+	d.emitFrame(sess, ac, state, composed)
 }
 
 type themeStyles struct {
