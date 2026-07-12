@@ -348,14 +348,14 @@ func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {
 	d.resize(sess, nil, domain.Size{Cols: 100, Rows: 42})
 	require.Empty(t, pty.sizes())
 
-	// Showing attempts the current size before paint. A failed resize leaves the
-	// old screen and rect untouched, so a later hide/show can retry.
+	// Showing attempts the current size before paint. A failed resize retains
+	// the old screen, but commits the new popup rect so capture clips/pads it.
 	require.NoError(t, d.toggleFloating(sess, nil))
 	require.Equal(t, []domain.Size{rectSize(current)}, pty.sizes())
-	require.Equal(t, initial, floating.rect)
+	require.Equal(t, current, floating.rect)
 	require.Equal(t, initial.Width, floating.screen.Frame.Width)
 	require.Equal(t, initial.Height, floating.screen.Frame.Height)
-	require.Equal(t, initialGeometry, floating.popupGeometry)
+	require.Equal(t, currentGeometry, floating.popupGeometry)
 
 	require.NoError(t, d.toggleFloating(sess, nil)) // hide
 	require.NoError(t, d.toggleFloating(sess, nil)) // retry show

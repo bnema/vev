@@ -165,7 +165,13 @@ type renderCoordinator struct {
 	resizeTimer  ports.Timer
 	resizeCancel chan struct{}
 	resizeGen    uint64
-	metrics      renderCoordinatorBurstMetrics
+	// retry is a separate, latest-committed-epoch retry lane. It is cancelled
+	// with resize requests and attachment lifecycle changes; callbacks also
+	// validate their epoch before touching a pane.
+	retryTimer  ports.Timer
+	retryCancel chan struct{}
+	retryGen    uint64
+	metrics     renderCoordinatorBurstMetrics
 	// generation invalidates callbacks from superseded deadline/watchdog timers.
 	// Each worker also owns an explicit cancellation channel: fake timers may
 	// expose a nil or never-firing C channel, so Stop alone cannot release a
@@ -615,7 +621,7 @@ func (c *renderCoordinator) wakeCurrent(w renderWake) bool {
 // attachment.
 func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 	c.mu.Lock()
-	var timer, resizeTimer ports.Timer
+	var timer, resizeTimer, retryTimer ports.Timer
 	if c.attachment == ac {
 		c.advanceAttachmentEpochLocked(ac)
 		c.attachment = nil
@@ -635,10 +641,17 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 			c.resizeCancel = nil
 		}
 		resizeTimer, c.resizeTimer = c.resizeTimer, nil
+		if c.retryCancel != nil {
+			close(c.retryCancel)
+			c.retryCancel = nil
+		}
+		retryTimer, c.retryTimer = c.retryTimer, nil
+		c.retryGen++
 	}
 	c.mu.Unlock()
 	stopTimer(timer)
 	stopTimer(resizeTimer)
+	stopTimer(retryTimer)
 }
 
 // noteReplace hands the coordinator from old to replacement; callbacks
@@ -653,7 +666,7 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 	// which predated coordinator ownership. In that case nil has no pending
 	// identity to invalidate, and the replacement becomes the first bound
 	// attachment atomically with this lifecycle transition.
-	var timer, resizeTimer ports.Timer
+	var timer, resizeTimer, retryTimer ports.Timer
 	if c.attachment == old || c.attachment == nil {
 		c.advanceAttachmentEpochLocked(old, replacement)
 		c.attachment = replacement
@@ -676,10 +689,17 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 			c.resizeCancel = nil
 		}
 		resizeTimer, c.resizeTimer = c.resizeTimer, nil
+		if c.retryCancel != nil {
+			close(c.retryCancel)
+			c.retryCancel = nil
+		}
+		retryTimer, c.retryTimer = c.retryTimer, nil
+		c.retryGen++
 	}
 	c.mu.Unlock()
 	stopTimer(timer)
 	stopTimer(resizeTimer)
+	stopTimer(retryTimer)
 }
 
 // notePark invalidates pending wakes when the attachment parks for resume.
@@ -701,6 +721,13 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	}
 	resizeTimer := c.resizeTimer
 	c.resizeTimer = nil
+	if c.retryCancel != nil {
+		close(c.retryCancel)
+		c.retryCancel = nil
+	}
+	retryTimer := c.retryTimer
+	c.retryTimer = nil
+	c.retryGen++
 	c.ackDeferred = false
 	c.pendingPreview = false
 	c.generation++
@@ -710,6 +737,7 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	c.mu.Unlock()
 	stopTimer(timer)
 	stopTimer(resizeTimer)
+	stopTimer(retryTimer)
 	stopTimers(timers)
 }
 
@@ -718,14 +746,26 @@ func (c *renderCoordinator) noteSessionTeardown() {
 // the strictly monotonically increased epoch, or 0 when the source is stale.
 func (c *renderCoordinator) recordResizeRequest(size domain.Size, source *attachedClient) uint64 {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.torndown || c.attachment != source {
+		c.mu.Unlock()
 		return 0
 	}
+	// An intervening request supersedes any failed-pane retry, even if a fake
+	// timer delivers a stopped callback afterwards.
+	if c.retryCancel != nil {
+		close(c.retryCancel)
+		c.retryCancel = nil
+	}
+	retryTimer := c.retryTimer
+	c.retryTimer = nil
+	c.retryGen++
 	c.resize.epoch++
 	c.resize.size = size
 	c.resize.source = source
-	return c.resize.epoch
+	epoch := c.resize.epoch
+	c.mu.Unlock()
+	stopTimer(retryTimer)
+	return epoch
 }
 
 // scheduleResize records a latest-wins request and runs apply after the bounded
@@ -802,6 +842,74 @@ func (c *renderCoordinator) resizeCurrent(epoch uint64, source *attachedClient, 
 		c.resize.committed = epoch
 	}
 	return true
+}
+
+// scheduleResizeRetry serializes failed-pane retries through the injected
+// clock. Only a retry for the most recently committed epoch can run.
+func (c *renderCoordinator) scheduleResizeRetry(epoch uint64, source *attachedClient, run func()) {
+	c.mu.Lock()
+	if c.torndown || c.attachment != source || c.resize.source != source || c.resize.epoch != epoch || c.resize.committed != epoch {
+		c.mu.Unlock()
+		return
+	}
+	old := c.retryTimer
+	if c.retryCancel != nil {
+		close(c.retryCancel)
+	}
+	c.retryGen++
+	gen := c.retryGen
+	cancel := make(chan struct{})
+	c.retryCancel, c.retryTimer = cancel, nil
+	clock := c.opts.clock
+	c.mu.Unlock()
+	stopTimer(old)
+	if clock == nil {
+		run()
+		return
+	}
+	timer := clock.NewTimer(minOutputRenderDeadline)
+	timerC := timer.C()
+	if timerC == nil {
+		// A nil timer channel is the deterministic disabled-clock contract used
+		// by headless tests; do not spin retries synchronously.
+		stopTimer(timer)
+		return
+	}
+	c.mu.Lock()
+	valid := !c.torndown && c.retryGen == gen && c.resize.epoch == epoch && c.resize.committed == epoch && c.resize.source == source
+	if valid {
+		c.retryTimer = timer
+	}
+	c.mu.Unlock()
+	if !valid {
+		stopTimer(timer)
+		return
+	}
+	go func() {
+		select {
+		case <-timerC:
+		case <-cancel:
+			return
+		}
+		c.mu.Lock()
+		valid := !c.torndown && c.retryGen == gen && c.attachment == source && c.resize.source == source && c.resize.epoch == epoch && c.resize.committed == epoch
+		if valid {
+			c.retryTimer = nil
+			c.retryCancel = nil
+		}
+		c.mu.Unlock()
+		if valid {
+			run()
+		}
+	}()
+}
+
+// retryCurrent is stricter than resizeCurrent: retries may only repair the
+// newest geometry that has already been published.
+func (c *renderCoordinator) retryCurrent(epoch uint64, source *attachedClient) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.torndown && c.attachment == source && c.resize.source == source && c.resize.epoch == epoch && c.resize.committed == epoch
 }
 
 // resizeSnapshot returns a locked copy of the latest resize metadata.

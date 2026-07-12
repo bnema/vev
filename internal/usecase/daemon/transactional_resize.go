@@ -13,6 +13,7 @@ type resizeMember struct {
 	rect       domain.Rect
 	floating   floatingGeometry
 	isFloating bool
+	retry      bool
 	ok         bool
 }
 
@@ -43,6 +44,8 @@ func (d *Daemon) prepareResize(sess *session, size domain.Size) resizePlan {
 				}
 			}
 		}
+		// Hidden retained popups enter this same primitive when shown; only a
+		// visible popup participates in an unrelated client resize.
 		if i == active && tb.floating.state == floatingVisible && tb.floating.pane != nil {
 			g := calculateContentFloatingGeometry(tabSize(size), d.currentFloatingConfig())
 			if g.valid() {
@@ -65,8 +68,9 @@ func (d *Daemon) applyResize(plan *resizePlan, current ...func() bool) bool {
 		m.pane.resizeMu.Lock()
 		m.pane.mu.Lock()
 		old, pty := m.pane.rect, m.pane.pty
+		screenSize := domain.Size{Cols: m.pane.screen.Frame.Width, Rows: m.pane.screen.Frame.Height}
 		m.pane.mu.Unlock()
-		if old.Width == m.rect.Width && old.Height == m.rect.Height {
+		if !m.retry && old.Width == m.rect.Width && old.Height == m.rect.Height && screenSize == rectSize(m.rect) {
 			m.ok = true
 		} else if pty == nil {
 			m.ok = true
@@ -90,13 +94,9 @@ func (d *Daemon) commitResize(sess *session, ac *attachedClient, plan resizePlan
 		tb.mu.Unlock()
 	}
 	for _, m := range plan.members {
-		// A failed floating resize must retain the committed popup geometry: it
-		// controls both its frame and mouse/copy hit testing. Normal layout still
-		// publishes its solved rectangle, while retaining its old screen until a
-		// successful PTY resize.
-		if m.isFloating && !m.ok {
-			continue
-		}
+		// Layout geometry always publishes together. Failed members deliberately
+		// retain their old VT screen; capture clips that screen to this new rect
+		// and pads the uncovered cells with normal blanks.
 		m.pane.mu.Lock()
 		m.pane.rect = m.rect
 		if m.isFloating {
@@ -136,10 +136,55 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, epoch u
 		return
 	}
 	d.commitResize(sess, ac, plan)
+	failed := make([]resizeMember, 0, len(plan.members))
+	for _, member := range plan.members {
+		if !member.ok {
+			failed = append(failed, member)
+		}
+	}
+	if len(failed) != 0 {
+		rc.scheduleResizeRetry(epoch, ac, func() { d.retryResizeMembers(sess, ac, epoch, failed) })
+	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
 	// A successful transaction publishes exactly one full S2 frame. The
 	// coordinator is the only emission route and stale epochs never reach it.
 	rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: true, producer: "transactional_resize.go"})
+}
+
+// retryResizeMembers retries only members which failed the committed epoch.
+// It never republishes geometry: an intervening resize owns that publication.
+func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, epoch uint64, members []resizeMember) {
+	rc := sess.renderCoordinator()
+	if rc == nil || !rc.retryCurrent(epoch, ac) {
+		return
+	}
+	plan := resizePlan{members: append([]resizeMember(nil), members...)}
+	for i := range plan.members {
+		plan.members[i].retry = true
+	}
+	if !d.applyResize(&plan, func() bool { return rc.retryCurrent(epoch, ac) }) || !rc.retryCurrent(epoch, ac) {
+		return
+	}
+	failed := make([]resizeMember, 0, len(plan.members))
+	succeeded := false
+	for _, member := range plan.members {
+		if !member.ok {
+			failed = append(failed, member)
+			continue
+		}
+		member.pane.mu.Lock()
+		// The rect is the already committed layout target. Resize VT only now,
+		// then force a reset so renderer shadow cannot retain padded cells.
+		member.pane.screen.Resize(member.rect.Width, member.rect.Height)
+		member.pane.mu.Unlock()
+		succeeded = true
+	}
+	if len(failed) != 0 {
+		rc.scheduleResizeRetry(epoch, ac, func() { d.retryResizeMembers(sess, ac, epoch, failed) })
+	}
+	if succeeded {
+		rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: true, producer: "transactional_resize.go"})
+	}
 }
 
 func (d *Daemon) requestTransactionalResize(sess *session, ac *attachedClient, size domain.Size, immediate bool) {
