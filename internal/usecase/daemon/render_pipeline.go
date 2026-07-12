@@ -25,6 +25,7 @@ type composeCacheInput struct {
 	floatingGeometry        floatingGeometry
 	floatingTitleGeneration uint64
 	bars                    barCache
+	theme                   themeui.Theme
 }
 
 type composedRenderFrame struct {
@@ -42,7 +43,14 @@ func composeFrame(state capturedRenderState, in composeCacheInput) composedRende
 	if width <= 0 || rows < 0 {
 		return composedRenderFrame{frame: renderer.NewFrame(0, 0), cursor: cursorOut{hidden: true}, reset: state.reset}
 	}
-	frame := renderer.NewFrame(width, rows+2)
+	// The attachment-owned cache is safe to reuse while sendMu serializes this
+	// transaction. It contains only prior composed cells, never VT-owned cells.
+	// Reusing it avoids cloning a client-sized frame on every incremental paint.
+	canReuseFrame := in.frame.Width == width && in.frame.Height == rows+2 && in.layoutFingerprint == state.layout.fingerprint
+	frame := in.frame
+	if !canReuseFrame {
+		frame = renderer.NewFrame(width, rows+2)
+	}
 	styles := newThemeStyles(state.theme)
 	drawTopBarSnapshot(frame.Row(0), state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
 	drawStatusBarState(frame.Row(rows+1), state.bars, styles)
@@ -51,7 +59,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput) composedRende
 		drawDividers(frame, state.layout.root, content, themeui.DimStyle(styles.border, state.theme))
 	}
 
-	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint
+	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme
 	titles := make(map[layout.PaneID]uint64, len(state.panes))
 	var damage []renderer.Damage
 	for _, pane := range state.panes {
@@ -63,7 +71,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput) composedRende
 			}
 			titles[pane.id] = pane.titleGeneration
 		}
-		if !pl.Collapsed && pl.Content.Width > 0 && pl.Content.Height > 0 {
+		if !pl.Collapsed && pl.Content.Width > 0 && pl.Content.Height > 0 && (full || len(pane.damage) > 0) {
 			blitPaneFrame(frame, pl.Content, pane.frame, !pane.focused, state.theme)
 		}
 		for _, d := range pane.damage {
@@ -86,15 +94,23 @@ func composeFrame(state capturedRenderState, in composeCacheInput) composedRende
 			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: rows + 1, Width: width, Height: 1})
 		}
 	}
-	baseFrame := frame.Clone()
+	var baseFrame renderer.Frame
+	if state.overlays.active() {
+		// Overlay composition mutates the visible frame but must never publish it
+		// as the unadorned cache.
+		baseFrame = frame.Clone()
+	}
 	frame, damage = composeCapturedOverlays(state, frame, damage, content)
+	if !state.overlays.active() {
+		baseFrame = frame
+	}
 	if full || state.overlays.active() {
 		damage = []renderer.Damage{renderer.FullRedraw()}
 	}
 	cursorInputs := state.cursor
 	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || state.overlays.active()
 	cursor := desiredCapturedCursor(cursorInputs)
-	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, titleGenerations: titles, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration}
+	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, titleGenerations: titles, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration}
 	outCache.bars.capture(baseFrame.Row(0), baseFrame.Row(rows+1))
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }

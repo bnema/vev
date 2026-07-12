@@ -74,7 +74,6 @@ type capturedOverlayRenderState struct {
 	copyMode                                                                *scopy.Mode
 	copySnapshot                                                            *scopy.Snapshot
 	copyPaneID                                                              layout.PaneID
-	copyTarget                                                              domain.Rect
 	copyFeedback                                                            string
 	paletteGuidance                                                         string
 	copySearch, picker, palette, prompt                                     capturedModal
@@ -110,11 +109,17 @@ func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, mode damageC
 
 	width := min(max(visible.Width, 0), p.screen.Frame.Width)
 	height := min(max(visible.Height, 0), p.screen.Frame.Height)
+	needsFrame := len(damage.Damage) > 0
 	if out.frame.Width != width || out.frame.Height != height {
 		out.frame = renderer.NewFrame(width, height)
+		needsFrame = true
 	}
-	for y := range height {
-		copy(out.frame.Row(y), p.screen.Frame.Row(y)[:width])
+	// A retained attachment snapshot is already an immutable copy of this
+	// pane. With no VT damage, retain it rather than copying inactive panes.
+	if needsFrame {
+		for y := range height {
+			copy(out.frame.Row(y), p.screen.Frame.Row(y)[:width])
+		}
 	}
 
 	if uncertainDamage(damage.Damage, p.screen.Frame.Width, p.screen.Frame.Height) {
@@ -195,7 +200,10 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 			visible = domain.Rect{}
 		}
 		p.mu.Lock()
-		captured := capturePaneRenderStateLocked(p, visible, mode)
+		if ac.captureFrames == nil {
+			ac.captureFrames = make(map[layout.PaneID]capturedPaneRenderState)
+		}
+		captured := capturePaneRenderStateLockedInto(p, visible, mode, ac.captureFrames[p.id])
 		captured.placement = placement
 		captured.focused = placement.ID == layoutSnap.focus
 		if captured.focused {
@@ -207,13 +215,18 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 			translated = append(translated, translatePaneDamage(damage, placement.Content, layoutSnap.area)...)
 		}
 		captured.damage = translated
+		ac.captureFrames[captured.id] = captured
 		state.panes = append(state.panes, captured)
 	}
 	if tb.floating.state == floatingVisible && tb.floating.pane != nil {
 		p := tb.floating.pane
 		p.mu.Lock()
 		geometry := p.committedFloatingGeometryLocked(calculateContentFloatingGeometry(domain.Size{Cols: layoutSnap.area.Width, Rows: layoutSnap.area.Height}, floatingCfg))
-		captured := capturePaneRenderStateLocked(p, geometry.Inner, mode)
+		if ac.captureFrames == nil {
+			ac.captureFrames = make(map[layout.PaneID]capturedPaneRenderState)
+		}
+		captured := capturePaneRenderStateLockedInto(p, geometry.Inner, mode, ac.captureFrames[p.id])
+		ac.captureFrames[captured.id] = captured
 		state.floating = capturedFloatingRenderState{visible: true, pane: captured, geometry: geometry, title: captured.title, generation: tb.floating.generation, titleGeneration: captured.titleGeneration}
 		state.cursor = captureCursorInputsLocked(p, geometry.Inner, overlays)
 		p.mu.Unlock()

@@ -6,7 +6,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	promptui "github.com/bnema/vev/internal/usecase/prompt"
 	"github.com/bnema/vev/internal/usecase/ui"
-	"github.com/bnema/vev/pkg/renderer"
 )
 
 func promptModalFor(title string) ui.Modal {
@@ -94,9 +93,4 @@ func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte) {
 	if changed {
 		d.invalidateRender(sess, ac, true, "prompt.go")
 	}
-}
-
-func composePromptClientFrame(model *promptui.Model, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
-	styleSet := resolveThemeStyles(styles)
-	return composeModalClientFrame(base, promptModalFor(model.Title()), styleSet, styleSet.accent, model.Render)
 }

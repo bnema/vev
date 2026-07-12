@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
@@ -35,10 +36,11 @@ type attachedClient struct {
 	// exact coordinator incarnation. paint rechecks it under sendMu.
 	coordinatorReadyEpoch atomic.Uint64
 	echoAck               atomic.Uint64
-	pipelineCache         composeCacheInput // only touched while sendMu is held
-	resizePaint           pendingByteTimer  // guarded by sendMu
-	resizePaintGeneration uint64            // guarded by sendMu
-	resizePaintPending    bool              // guarded by sendMu
+	pipelineCache         composeCacheInput                         // only touched while sendMu is held
+	captureFrames         map[layout.PaneID]capturedPaneRenderState // only touched while sendMu is held
+	resizePaint           pendingByteTimer                          // guarded by sendMu
+	resizePaintGeneration uint64                                    // guarded by sendMu
+	resizePaintPending    bool                                      // guarded by sendMu
 	size                  domain.Size
 	keys                  *keys.Router
 	sess                  Guarded[*session]
