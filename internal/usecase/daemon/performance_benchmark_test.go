@@ -539,10 +539,21 @@ func TestCopyEnterAllocationBudget(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: tt.tabs, panes: tt.panes, historyRows: 10_000})
-			allocs := testing.AllocsPerRun(20, func() {
+			run := func() {
 				fixture.d.enterCopyMode(fixture.sess, fixture.ac)
 				fixture.ac.ackOutputState(fixture.ac.output.next)
-			})
+			}
+
+			// Always exercise and validate copy entry. The race detector adds
+			// instrumentation allocations which are not reported by the parent
+			// benchmark, so its allocation count cannot represent this budget.
+			run()
+			require.True(t, fixture.copyModeActive(), "copy entry must install a history-backed mode")
+			if !copyEnterAllocationBudgetEnabled {
+				return
+			}
+
+			allocs := testing.AllocsPerRun(20, run)
 			require.LessOrEqual(t, allocs, float64(tt.max), "copy enter must stay within 10%% of the parent allocation baseline")
 		})
 	}
@@ -867,6 +878,12 @@ func (f *performanceFixture) searchMatches() int {
 		return 0
 	}
 	return len(f.ac.overlays.copyMode.Searches)
+}
+
+func (f *performanceFixture) copyModeActive() bool {
+	f.ac.overlays.copyMu.Lock()
+	defer f.ac.overlays.copyMu.Unlock()
+	return f.ac.overlays.copyMode != nil && f.ac.overlays.copySnapshot != nil && f.ac.overlays.copySnapshot.Len() >= 10_000
 }
 
 func (f *performanceFixture) resize() {
