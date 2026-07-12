@@ -374,6 +374,24 @@ func TestFindMatchesKeepsRuneAndCellIndexesAlignedWhenLowercasing(t *testing.T) 
 	require.Equal(t, 2, matches[0].End)
 }
 
+func TestFindMatchesDoesNotCopyEveryHistoryRow(t *testing.T) {
+	const rows = 100
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: rows, ChunkRows: 10})
+	for range rows {
+		history.Append(row(strings.Repeat("x", 120)))
+	}
+	s := NewSnapshot(history, renderer.NewFrame(120, 1))
+
+	allocs := testing.AllocsPerRun(10, func() {
+		if matches := FindMatches(s, "missing"); len(matches) != 0 {
+			t.Fatalf("unexpected matches: %d", len(matches))
+		}
+	})
+	if allocs >= 250 {
+		t.Fatalf("FindMatches allocations = %.0f, want < 250 (no row copy per history row)", allocs)
+	}
+}
+
 func TestCopyModeSearchUsesDisplayCellOffsetsForWideRows(t *testing.T) {
 	row := []renderer.Cell{
 		{Rune: '界'},

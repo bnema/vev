@@ -298,23 +298,33 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 func benchmarkDaemonCopyOperation(b *testing.B, fixture *performanceFixture, workload string, run func(*performanceFixture)) {
 	b.Helper()
 	b.ReportAllocs()
+	if workload == "copy-search" {
+		fixture.d.enterCopyMode(fixture.sess, fixture.ac)
+		fixture.ac.ackOutputState(fixture.ac.output.next)
+		b.ResetTimer()
+		for range b.N {
+			run(fixture)
+			fixture.ac.ackOutputState(fixture.ac.output.next)
+		}
+		b.StopTimer()
+		if fixture.searchMatches() == 0 {
+			b.Fatal("copy search produced no deterministic matches")
+		}
+		b.ReportMetric(1, "copyoperations/op")
+		return
+	}
+
 	b.ResetTimer()
 	operations := 0
 	for range b.N {
 		b.StopTimer()
 		fixture.d.exitCopyMode(fixture.ac)
-		if workload == "copy-search" {
-			fixture.d.enterCopyMode(fixture.sess, fixture.ac)
-		}
 		fixture.ac.ackOutputState(fixture.ac.output.next)
 		b.StartTimer()
 		run(fixture)
 		b.StopTimer()
-		if workload == "copy-enter" && !fixture.copyModeActive() {
+		if !fixture.copyModeActive() {
 			b.Fatal("copy enter did not install a copy mode")
-		}
-		if workload == "copy-search" && fixture.searchMatches() == 0 {
-			b.Fatal("copy search produced no deterministic matches")
 		}
 		operations++
 	}

@@ -65,6 +65,27 @@ func (s Snapshot) Row(i int) []renderer.Cell {
 	return s.screen.Row(i)
 }
 
+func (s Snapshot) rangeRows(yield func(int, []renderer.Cell) bool) {
+	rowIndex := 0
+	stopped := false
+	s.history.Range(func(row []renderer.Cell) bool {
+		if !yield(rowIndex, row) {
+			stopped = true
+			return false
+		}
+		rowIndex++
+		return true
+	})
+	if stopped {
+		return
+	}
+	for y := range s.screen.Height {
+		if !yield(rowIndex+y, s.screen.Row(y)) {
+			return
+		}
+	}
+}
+
 // Mode stores per-client scrollback viewport and line-selection state.
 type SearchMatch struct {
 	Row   int
@@ -103,8 +124,7 @@ func FindMatches(s Snapshot, query string) []SearchMatch {
 	}
 	needle := lowerRunes(query)
 	matches := make([]SearchMatch, 0)
-	for row := range s.Len() {
-		cells := s.Row(row)
+	s.rangeRows(func(row int, cells []renderer.Cell) bool {
 		haystack, cellIndexes := searchableCells(cells)
 		var text string
 		for start := 0; start+len(needle) <= len(haystack); {
@@ -123,7 +143,8 @@ func FindMatches(s Snapshot, query string) []SearchMatch {
 			matches = append(matches, SearchMatch{Row: row, Start: cellIndexes[start], End: cellEnd, Text: text})
 			start += len(needle)
 		}
-	}
+		return true
+	})
 	return matches
 }
 

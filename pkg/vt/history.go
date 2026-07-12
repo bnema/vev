@@ -129,6 +129,18 @@ func (v HistoryView) Chunk(i int) *HistoryChunk {
 	return v.chunks[i]
 }
 
+// Range calls yield for each row in oldest-first order. The row is borrowed
+// immutable storage: yield must not mutate or retain it after returning.
+func (v HistoryView) Range(yield func([]renderer.Cell) bool) {
+	for _, chunk := range v.chunks {
+		for _, row := range chunk.rows {
+			if !yield(row) {
+				return
+			}
+		}
+	}
+}
+
 // Row returns a copy of the row at i, or nil when i is out of range.
 func (v HistoryView) Row(i int) []renderer.Cell {
 	if i < 0 {
