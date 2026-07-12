@@ -16,13 +16,16 @@ const (
 	historyCellBytes    = 41
 	maxHistoryChunkRows = 256
 
-	// Preserve ten-thousand-row histories while bounding untrusted snapshot
-	// payloads. The cell limit permits an average width of 100 cells per row.
-	maxHistoryDecodeChunks = 10_000
-	maxHistoryDecodeRows   = 10_000
-	maxHistoryDecodeCells  = 1_000_000
-	maxHistoryDecodeStyles = maxHistoryDecodeCells
-	maxHistoryDecodedBytes = 64 << 20
+	// The daemon retains 10,000 history rows. Support a 20% row margin and
+	// 160-cell rows, which leaves headroom above the representative 10k×120
+	// terminal while bounding snapshot allocation.
+	maxHistoryChunks   = 12_000
+	maxHistoryRows     = 12_000
+	maxHistoryRowCells = 160
+	maxHistoryCells    = maxHistoryRows * maxHistoryRowCells
+
+	maxHistoryDecodeStyles = maxHistoryCells
+	maxHistoryDecodedBytes = maxHistoryCells * historyCellBytes
 )
 
 var errInvalidHistory = errors.New("invalid history payload")
@@ -30,9 +33,27 @@ var errInvalidHistory = errors.New("invalid history payload")
 // MarshalHistory encodes a HistoryView in a deterministic, self-contained
 // format. It preserves chunk boundaries as well as every Cell and Style field.
 func MarshalHistory(view HistoryView) ([]byte, error) {
-	if view.rows < 0 || view.rows != historyViewRowCount(view) || uint64(len(view.chunks)) > math.MaxUint32 {
+	if view.rows < 0 || view.rows != historyViewRowCount(view) || uint64(len(view.chunks)) > math.MaxUint32 || uint64(len(view.chunks)) > maxHistoryChunks {
 		return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
 	}
+	stats := historyDecodeStats{}
+	for _, chunk := range view.chunks {
+		if chunk == nil || len(chunk.rows) == 0 || len(chunk.rows) > maxHistoryChunkRows ||
+			!addHistoryDecodeBudget(&stats.rows, uint64(len(chunk.rows)), maxHistoryRows) {
+			return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
+		}
+		for _, row := range chunk.rows {
+			cellCount := uint64(len(row))
+			cellBytes, ok := historyCellByteCount(cellCount)
+			if cellCount > maxHistoryRowCells || !ok ||
+				!addHistoryDecodeBudget(&stats.cells, cellCount, maxHistoryCells) ||
+				!addHistoryDecodeBudget(&stats.styles, cellCount, maxHistoryDecodeStyles) ||
+				!addHistoryDecodeBudget(&stats.bytes, cellBytes, maxHistoryDecodedBytes) {
+				return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
+			}
+		}
+	}
+
 	out := make([]byte, 0, 9)
 	out = append(out, historyMagic...)
 	out = append(out, historyVersion)
@@ -141,7 +162,7 @@ func UnmarshalHistory(data []byte) (HistoryView, error) {
 		rows := make([][]renderer.Cell, 0, rowCount)
 		for range rowCount {
 			cellCount, ok := p.uint32()
-			if !ok || uint64(cellCount) > uint64(len(p.data))/historyCellBytes || uint64(cellCount) > uint64(math.MaxInt) {
+			if !ok || uint64(cellCount) > maxHistoryRowCells || uint64(cellCount) > uint64(len(p.data))/historyCellBytes || uint64(cellCount) > uint64(math.MaxInt) {
 				return HistoryView{}, fmt.Errorf("unmarshal history: %w", errInvalidHistory)
 			}
 			row := make([]renderer.Cell, cellCount)
@@ -176,22 +197,22 @@ type historyDecodeStats struct {
 func preflightHistory(data []byte) (historyDecodeStats, bool) {
 	p := historyParser{data: data}
 	chunkCount, ok := p.uint32()
-	if !ok || uint64(chunkCount) > maxHistoryDecodeChunks || uint64(chunkCount) > uint64(len(p.data))/4 {
+	if !ok || uint64(chunkCount) > maxHistoryChunks || uint64(chunkCount) > uint64(len(p.data))/4 {
 		return historyDecodeStats{}, false
 	}
 	stats := historyDecodeStats{chunks: uint64(chunkCount)}
 	for range chunkCount {
 		rowCount, ok := p.uint32()
-		if !ok || rowCount == 0 || rowCount > maxHistoryChunkRows || uint64(rowCount) > uint64(len(p.data))/4 || !addHistoryDecodeBudget(&stats.rows, uint64(rowCount), maxHistoryDecodeRows) {
+		if !ok || rowCount == 0 || rowCount > maxHistoryChunkRows || uint64(rowCount) > uint64(len(p.data))/4 || !addHistoryDecodeBudget(&stats.rows, uint64(rowCount), maxHistoryRows) {
 			return historyDecodeStats{}, false
 		}
 		for range rowCount {
 			cellCount, ok := p.uint32()
-			if !ok || uint64(cellCount) > uint64(len(p.data))/historyCellBytes {
+			cellBytes, validCellBytes := historyCellByteCount(uint64(cellCount))
+			if !ok || uint64(cellCount) > maxHistoryRowCells || !validCellBytes || uint64(cellCount) > uint64(len(p.data))/historyCellBytes {
 				return historyDecodeStats{}, false
 			}
-			cellBytes := uint64(cellCount) * historyCellBytes
-			if !addHistoryDecodeBudget(&stats.cells, uint64(cellCount), maxHistoryDecodeCells) ||
+			if !addHistoryDecodeBudget(&stats.cells, uint64(cellCount), maxHistoryCells) ||
 				!addHistoryDecodeBudget(&stats.styles, uint64(cellCount), maxHistoryDecodeStyles) ||
 				!addHistoryDecodeBudget(&stats.bytes, cellBytes, maxHistoryDecodedBytes) {
 				return historyDecodeStats{}, false
@@ -200,6 +221,13 @@ func preflightHistory(data []byte) (historyDecodeStats, bool) {
 		}
 	}
 	return stats, len(p.data) == 0
+}
+
+func historyCellByteCount(cellCount uint64) (uint64, bool) {
+	if cellCount > math.MaxUint64/historyCellBytes {
+		return 0, false
+	}
+	return cellCount * historyCellBytes, true
 }
 
 func addHistoryDecodeBudget(total *uint64, amount, limit uint64) bool {

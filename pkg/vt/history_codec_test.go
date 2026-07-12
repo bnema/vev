@@ -98,14 +98,72 @@ func TestChunkCodecRejectsTruncatedAndTrailingPayloads(t *testing.T) {
 	}
 }
 
+func TestChunkCodecSupportsRepresentativeHistory(t *testing.T) {
+	const (
+		rows  = 10_000
+		width = 120
+	)
+
+	encoded, err := MarshalHistory(historyViewWithDimensions(rows, width))
+	if err != nil {
+		t.Fatalf("marshal representative history: %v", err)
+	}
+	decoded, err := UnmarshalHistory(encoded)
+	if err != nil {
+		t.Fatalf("unmarshal representative history: %v", err)
+	}
+	if got := decoded.Len(); got != rows {
+		t.Fatalf("decoded rows = %d, want %d", got, rows)
+	}
+	for _, rowIndex := range []int{0, rows - 1} {
+		if got := len(decoded.Row(rowIndex)); got != width {
+			t.Fatalf("decoded row %d width = %d, want %d", rowIndex, got, width)
+		}
+	}
+}
+
+func TestChunkCodecRejectsDimensionsBeyondSupportedLimits(t *testing.T) {
+	const (
+		supportedRows  = 12_000
+		supportedWidth = 160
+	)
+	tests := []struct {
+		name string
+		view HistoryView
+		data []byte
+	}{
+		{
+			name: "too many rows",
+			view: historyViewWithDimensions(supportedRows+1, 0),
+			data: historyPayloadWithDimensions(supportedRows+1, 0),
+		},
+		{
+			name: "too many cells in a row",
+			view: historyViewWithDimensions(1, supportedWidth+1),
+			data: historyPayloadWithDimensions(1, supportedWidth+1),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := MarshalHistory(tt.view); err == nil {
+				t.Fatal("marshal accepted dimensions beyond the supported limits")
+			}
+			if _, err := UnmarshalHistory(tt.data); err == nil {
+				t.Fatal("unmarshal accepted dimensions beyond the supported limits")
+			}
+		})
+	}
+}
+
 func TestChunkCodecRejectsHostileChunkAndRowDeclarations(t *testing.T) {
 	tests := []struct {
 		name       string
 		chunkCount int
 		rowCount   int
 	}{
-		{name: "more than ten thousand chunks", chunkCount: 10_001, rowCount: 1},
-		{name: "more than ten thousand rows", chunkCount: 40, rowCount: maxHistoryChunkRows},
+		{name: "more than twelve thousand chunks", chunkCount: 12_001, rowCount: 1},
+		{name: "more than twelve thousand rows", chunkCount: 47, rowCount: maxHistoryChunkRows},
 	}
 
 	for _, tt := range tests {
@@ -115,6 +173,43 @@ func TestChunkCodecRejectsHostileChunkAndRowDeclarations(t *testing.T) {
 			}
 		})
 	}
+}
+
+func historyViewWithDimensions(rowCount, width int) HistoryView {
+	totalRows := rowCount
+	row := make([]renderer.Cell, width)
+	for i := range row {
+		row[i].Rune = 'x'
+	}
+	chunks := make([]*HistoryChunk, 0, (rowCount+maxHistoryChunkRows-1)/maxHistoryChunkRows)
+	for rowCount > 0 {
+		chunkRows := min(rowCount, maxHistoryChunkRows)
+		rows := make([][]renderer.Cell, chunkRows)
+		for i := range rows {
+			rows[i] = row
+		}
+		chunks = append(chunks, &HistoryChunk{rows: rows})
+		rowCount -= chunkRows
+	}
+	return HistoryView{chunks: chunks, rows: totalRows}
+}
+
+func historyPayloadWithDimensions(rowCount, width int) []byte {
+	data := make([]byte, 9)
+	copy(data, historyMagic)
+	data[4] = historyVersion
+	chunkCount := (rowCount + maxHistoryChunkRows - 1) / maxHistoryChunkRows
+	binary.BigEndian.PutUint32(data[5:], uint32(chunkCount))
+	for rowCount > 0 {
+		chunkRows := min(rowCount, maxHistoryChunkRows)
+		data = binary.BigEndian.AppendUint32(data, uint32(chunkRows))
+		for range chunkRows {
+			data = binary.BigEndian.AppendUint32(data, uint32(width))
+			data = append(data, make([]byte, width*historyCellBytes)...)
+		}
+		rowCount -= chunkRows
+	}
+	return data
 }
 
 func hostileHistoryDeclarations(chunkCount, rowCount int) []byte {
