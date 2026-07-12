@@ -238,7 +238,7 @@ func TestLivePaintAllocationBudget(t *testing.T) {
 				fixture.paintLive()
 				fixture.ac.ackOutputState(fixture.ac.output.next)
 			})
-			require.LessOrEqual(t, allocs, float64(54), "live paint must retain bar cache cell storage across warm paints")
+			require.LessOrEqual(t, allocs, float64(38), "live paint must reuse attachment-owned render scratch across warm paints")
 		})
 	}
 }
