@@ -164,7 +164,11 @@ type renderCoordinator struct {
 	// resize burst coalescing and is cancelled by the same lifecycle changes.
 	resizeTimer  ports.Timer
 	resizeCancel chan struct{}
-	resizeGen    uint64
+	// resizeDone closes after the latest timer callback has either been
+	// rejected or completed its transaction. It provides a completion edge
+	// without polling scheduler state.
+	resizeDone chan struct{}
+	resizeGen  uint64
 	// retry is a separate, latest-committed-epoch retry lane. It is cancelled
 	// with resize requests and attachment lifecycle changes; callbacks also
 	// validate their epoch before touching a pane.
@@ -783,13 +787,16 @@ func (c *renderCoordinator) scheduleResize(size domain.Size, source *attachedCli
 	c.resizeGen++
 	gen := c.resizeGen
 	cancel := make(chan struct{})
+	done := make(chan struct{})
 	c.resizeCancel = cancel
+	c.resizeDone = done
 	clock := c.opts.clock
 	c.resizeTimer = nil
 	c.mu.Unlock()
 	stopTimer(old)
 	if clock == nil {
 		run(epoch)
+		close(done)
 		return epoch
 	}
 	timer := clock.NewTimer(minOutputRenderDeadline)
@@ -797,17 +804,20 @@ func (c *renderCoordinator) scheduleResize(size domain.Size, source *attachedCli
 	if timerC == nil {
 		stopTimer(timer)
 		run(epoch)
+		close(done)
 		return epoch
 	}
 	c.mu.Lock()
 	if c.resizeGen != gen || c.torndown {
 		c.mu.Unlock()
 		stopTimer(timer)
+		close(done)
 		return epoch
 	}
 	c.resizeTimer = timer
 	c.mu.Unlock()
 	go func() {
+		defer close(done)
 		select {
 		case <-timerC:
 		case <-cancel:
@@ -910,6 +920,14 @@ func (c *renderCoordinator) retryCurrent(epoch uint64, source *attachedClient) b
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return !c.torndown && c.attachment == source && c.resize.source == source && c.resize.epoch == epoch && c.resize.committed == epoch
+}
+
+// resizeCallbackDone returns the completion edge for the latest scheduled
+// resize callback. A nil result means no resize deadline is pending.
+func (c *renderCoordinator) resizeCallbackDone() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resizeDone
 }
 
 // resizeSnapshot returns a locked copy of the latest resize metadata.

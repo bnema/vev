@@ -16,7 +16,7 @@ func TestCoordinatorRejectsStaleAttachmentInvalidationAfterReplacement(t *testin
 	rc.attach(old)
 	rc.noteReplace(old, replacement)
 
-	// This models a PR #71 resize callback that passed its sendMu generation
+	// This models a stale resize callback that passed its sendMu generation
 	// check immediately before a replacement was published.
 	rc.invalidateForAttachment(old, renderInvalidation{producer: "stale resize"})
 	require.Empty(t, invalidations)

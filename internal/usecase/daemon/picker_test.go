@@ -258,7 +258,7 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	awaitFrame(t, sends1, ports.MsgOutput)
 }
 
-func TestPickerDisplacementCancelsOldResizePaint(t *testing.T) {
+func TestPickerDisplacementCancelsSupersededResize(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
 	defer releasePTY1()

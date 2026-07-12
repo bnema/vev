@@ -43,6 +43,14 @@ func (d *Daemon) prepareResize(sess *session, size domain.Size) resizePlan {
 						}
 					}
 				}
+			} else if tb.tree.Root.Kind == layout.Leaf {
+				// A single pane remains a valid PTY target even when a tiny client
+				// is below the interactive layout minimum. Keeping it live avoids
+				// stale screen dimensions (and lost scrollback) until the client
+				// grows back into a solvable layout.
+				if p := tb.panes[tb.tree.Root.Leaf]; p != nil {
+					plan.members = append(plan.members, resizeMember{session: sess, tab: tb, pane: p, rect: area})
+				}
 			}
 		}
 		// Hidden retained popups enter this same primitive when shown; only a

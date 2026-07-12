@@ -306,6 +306,20 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 // openAndInstallFloating runs entirely in the launch worker. No PTY operation
 // occurs under tb.mu; the pane is fully initialized before publication.
 func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLaunchSpec, generation uint64) {
+	// Launch workers are allowed to outlive the action that queued them, but
+	// never session teardown. Check both cancellation and daemon ownership
+	// immediately before the irreversible external Open.
+	select {
+	case <-spec.parentCtx.Done():
+		return
+	default:
+	}
+	d.mu.Lock()
+	live := !d.closing && d.sessions[sess.id] == sess
+	d.mu.Unlock()
+	if !live {
+		return
+	}
 	pty, err := d.ptys.Open(spec.command, spec.args, spec.env, spec.cwd, spec.size)
 	if err != nil {
 		d.failFloatingLaunch(tb, generation, spec.userOpen, spec.sessionName, err)
