@@ -1332,6 +1332,29 @@ func TestCoordinatorDeadlineCannotPaintPublishedReplacementBeforeOwnershipInstal
 	requireNoCoordinatorOutputFrame(t, ownerSends)
 }
 
+func TestRenderCoordinatorClearResizeTimerKeepsNewerTimer(t *testing.T) {
+	rc := newRenderCoordinator(renderCoordinatorOptions{})
+	newer := &portsmocks.MockTimer{}
+
+	rc.mu.Lock()
+	rc.resizeGen = 2
+	rc.resizeTimer = newer
+	rc.resizeCancel = make(chan struct{})
+	rc.mu.Unlock()
+
+	rc.clearResizeTimer(1)
+	rc.mu.Lock()
+	require.Same(t, newer, rc.resizeTimer)
+	require.NotNil(t, rc.resizeCancel)
+	rc.mu.Unlock()
+
+	rc.clearResizeTimer(2)
+	rc.mu.Lock()
+	require.Nil(t, rc.resizeTimer)
+	require.Nil(t, rc.resizeCancel)
+	rc.mu.Unlock()
+}
+
 func TestRenderCoordinatorInertTimerFiresSynchronouslyWithoutWorker(t *testing.T) {
 	clock := portsmocks.NewMockClock(t)
 	timer := portsmocks.NewMockTimer(t)

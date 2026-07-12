@@ -825,16 +825,25 @@ func (c *renderCoordinator) scheduleResize(size domain.Size, source *attachedCli
 		}
 		c.mu.Lock()
 		valid := !c.torndown && c.resizeGen == gen && c.resize.epoch == epoch && c.resize.source == source
-		c.resizeTimer = nil
-		if c.resizeGen == gen {
-			c.resizeCancel = nil
-		}
 		c.mu.Unlock()
+		c.clearResizeTimer(gen)
 		if valid {
 			run(epoch)
 		}
 	}()
 	return epoch
+}
+
+// clearResizeTimer releases timer ownership only for the matching resize generation.
+// A stale callback must not clear a newer request's timer or cancellation channel.
+func (c *renderCoordinator) clearResizeTimer(gen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.resizeGen != gen {
+		return
+	}
+	c.resizeTimer = nil
+	c.resizeCancel = nil
 }
 
 // resizeCurrent verifies that an apply/commit attempt still owns the newest
