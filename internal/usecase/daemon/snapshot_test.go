@@ -44,14 +44,17 @@ func TestSnapshotEncodeWorkerDefersMarshalUntilAfterCapture(t *testing.T) {
 	require.True(t, d.scheduleSnapshot(sess))
 	<-entered
 
-	paneUnlocked := make(chan struct{})
+	paneLocked := make(chan struct{})
+	releasePane := make(chan struct{})
 	go func() {
 		p := sess.tabs[0].panes["pane-1"]
 		p.mu.Lock()
+		close(paneLocked)
+		<-releasePane
 		p.mu.Unlock()
-		close(paneUnlocked)
 	}()
-	<-paneUnlocked
+	<-paneLocked
+	close(releasePane)
 	close(release)
 	<-store.writes
 }
@@ -111,13 +114,16 @@ func exerciseBlockedSnapshotWorker(t *testing.T, blockEncode bool) {
 	require.True(t, d.scheduleSnapshot(sess))
 	<-store.entered
 
-	paneUnlocked := make(chan struct{})
+	paneLocked := make(chan struct{})
+	releasePane := make(chan struct{})
 	go func() {
 		p.mu.Lock()
+		close(paneLocked)
+		<-releasePane
 		p.mu.Unlock()
-		close(paneUnlocked)
 	}()
-	<-paneUnlocked
+	<-paneLocked
+	close(releasePane)
 
 	reader := portsmocks.NewMockPTY(t)
 	var reads atomic.Int32
@@ -144,6 +150,46 @@ func exerciseBlockedSnapshotWorker(t *testing.T, blockEncode bool) {
 	store.unblock()
 	awaitSnapshotIdle(t, sess)
 	require.True(t, sess.snapDirty.Load(), "PTY output published while blocked must remain retryable")
+}
+
+func TestStopSnapshotEncodeWorkerDoesNotWaitForUncancellableWrite(t *testing.T) {
+	store := newNeverReturningSnapshotStore()
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	WithSnapshotStore(store)(d)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	d.startSnapshotEncodeWorker(ctx)
+
+	sess := newSnapshotTestSession(t, "stuck-write", false, "/work")
+	require.True(t, d.captureSession(sess))
+	<-store.entered
+
+	stopped := make(chan struct{})
+	go func() {
+		d.stopSnapshotEncodeWorker()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot worker shutdown waited for uncancellable Write")
+	}
+	awaitSnapshotIdle(t, sess)
+	require.True(t, sess.snapDirty.Load(), "an abandoned write must remain retryable")
+	require.NotPanics(t, func() { require.False(t, d.scheduleSnapshot(sess)) })
+}
+
+func TestRejectedSnapshotCaptureLeavesSessionRetryable(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	WithSnapshotStore(&channelSnapshotStore{writes: make(chan []byte, 1)})(d)
+	sess := newSnapshotTestSession(t, "rejected", false, "/work")
+	sess.name = ""
+	sess.snapEligible.Store(true)
+
+	markSnapshotDirty(sess)
+	require.False(t, d.scheduleSnapshot(sess))
+	awaitSnapshotIdle(t, sess)
+	require.True(t, sess.snapDirty.Load())
 }
 
 func TestStoppedSnapshotWorkerLeavesCaptureRetryable(t *testing.T) {
@@ -757,6 +803,24 @@ func (s *gatedSnapshotStore) Write(_ string, _ []byte) error {
 }
 func (*gatedSnapshotStore) Load() ([]ports.SnapshotBlob, error) { return nil, nil }
 func (*gatedSnapshotStore) Delete(string) error                 { return nil }
+
+type neverReturningSnapshotStore struct {
+	entered chan struct{}
+	once    sync.Once
+	block   chan struct{}
+}
+
+func newNeverReturningSnapshotStore() *neverReturningSnapshotStore {
+	return &neverReturningSnapshotStore{entered: make(chan struct{}), block: make(chan struct{})}
+}
+
+func (s *neverReturningSnapshotStore) Write(string, []byte) error {
+	s.once.Do(func() { close(s.entered) })
+	<-s.block
+	return nil
+}
+func (*neverReturningSnapshotStore) Load() ([]ports.SnapshotBlob, error) { return nil, nil }
+func (*neverReturningSnapshotStore) Delete(string) error                 { return nil }
 
 type channelSnapshotStore struct {
 	writes chan []byte

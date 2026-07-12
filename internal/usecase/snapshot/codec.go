@@ -17,7 +17,6 @@ var (
 	ErrBadCRC        = errors.New("snapshot: bad crc")
 	ErrShortPayload  = errors.New("snapshot: payload too short")
 	ErrTrailingBytes = errors.New("snapshot: trailing bytes")
-	ErrStyleOOB      = errors.New("snapshot: style index out of range")
 	ErrUnknownPane   = errors.New("snapshot: tree references unknown pane")
 	ErrInvalidData   = errors.New("snapshot: invalid data")
 )

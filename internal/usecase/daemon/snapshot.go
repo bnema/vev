@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -24,6 +25,7 @@ type snapshotCapture struct {
 	createdAt  uint64
 	active     uint16
 	tabs       []snapshotCaptureTab
+	finishOnce sync.Once
 }
 
 type snapshotCaptureTab struct {
@@ -245,24 +247,19 @@ func markSnapshotDirty(sess *session) {
 }
 
 func restorePaneTerminal(p *pane, snap snapcodec.Pane) error {
+	if len(snap.Tail) == 0 {
+		return fmt.Errorf("snapshot history: missing tail blob")
+	}
+	if len(snap.Visible) == 0 {
+		return fmt.Errorf("snapshot visible: missing visible blob")
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	// Unmarshal requires both blobs. The empty fallback only supports direct
-	// in-process construction used by restore callers; it is unreachable for a
-	// durable snapshot because the v3 manifest rejects missing blobs.
-	tail := snap.Tail
-	if len(tail) == 0 {
-		tail, _ = vt.MarshalEmptyHistoryTail()
-	}
-	visible := snap.Visible
-	if len(visible) == 0 {
-		visible, _ = vt.MarshalVisible(p.screen.PrimaryVisibleFrame())
-	}
-	history, err := vt.HistoryFromBlobs(vt.HistoryConfig{MaxRows: defaultScrollbackRows}, snap.SealedChunks, tail)
+	history, err := vt.HistoryFromBlobs(vt.HistoryConfig{MaxRows: defaultScrollbackRows}, snap.SealedChunks, snap.Tail)
 	if err != nil {
 		return fmt.Errorf("snapshot history: %w", err)
 	}
-	if err := p.screen.RestorePrimaryVisible(visible); err != nil {
+	if err := p.screen.RestorePrimaryVisible(snap.Visible); err != nil {
 		return fmt.Errorf("snapshot visible: %w", err)
 	}
 	p.history = history
@@ -305,7 +302,7 @@ func (d *Daemon) scheduleSnapshot(sess *session) bool {
 
 	capture, ok := d.captureSnapshotState(sess, generation)
 	if !ok {
-		d.finishSnapshotCapture(sess, generation, false)
+		d.finishSnapshotCapture(capture, false)
 		return false
 	}
 	if d.enqueueSnapshotCapture(capture) {
@@ -313,14 +310,14 @@ func (d *Daemon) scheduleSnapshot(sess *session) bool {
 	}
 	// Coalesce under saturation or shutdown: the latest state stays dirty and
 	// will be captured on a later tick once an active worker has room.
-	d.finishSnapshotCapture(sess, generation, false)
+	d.finishSnapshotCapture(capture, false)
 	return false
 }
 
 // enqueueSnapshotCapture serializes worker shutdown with the non-blocking
 // queue send. The queue is deliberately never closed: producers can race
 // shutdown without risking a send-on-closed panic.
-func (d *Daemon) enqueueSnapshotCapture(capture snapshotCapture) bool {
+func (d *Daemon) enqueueSnapshotCapture(capture *snapshotCapture) bool {
 	d.snapshotWorkerMu.Lock()
 	defer d.snapshotWorkerMu.Unlock()
 	if d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
@@ -337,9 +334,9 @@ func (d *Daemon) enqueueSnapshotCapture(capture snapshotCapture) bool {
 // captureSession rotates history tails and clones visible frames while holding
 // each pane lock. The returned capture contains only immutable state; encoding
 // and persistence are deliberately deferred to snapshotEncodeWorker.
-func (d *Daemon) captureSnapshotState(sess *session, generation uint64) (snapshotCapture, bool) {
+func (d *Daemon) captureSnapshotState(sess *session, generation uint64) (*snapshotCapture, bool) {
 	sess.mu.Lock()
-	capture := snapshotCapture{
+	capture := &snapshotCapture{
 		session:    sess,
 		generation: generation,
 		name:       sess.name,
@@ -351,7 +348,7 @@ func (d *Daemon) captureSnapshotState(sess *session, generation uint64) (snapsho
 	tabs := append([]*tab(nil), sess.tabs...)
 	sess.mu.Unlock()
 	if ephemeral || capture.name == "" {
-		return snapshotCapture{}, false
+		return capture, false
 	}
 
 	capture.tabs = make([]snapshotCaptureTab, 0, len(tabs))
@@ -409,7 +406,7 @@ func (d *Daemon) captureSession(sess *session) bool {
 	return d.scheduleSnapshot(sess)
 }
 
-func (d *Daemon) encodeSnapshotCapture(capture snapshotCapture) ([]byte, error) {
+func (d *Daemon) encodeSnapshotCapture(capture *snapshotCapture) ([]byte, error) {
 	snap := snapcodec.Session{Name: capture.name, CreatedAt: capture.createdAt, Active: capture.active, Tabs: make([]snapcodec.Tab, 0, len(capture.tabs))}
 	for _, tabCapture := range capture.tabs {
 		tabSnap := snapcodec.Tab{
@@ -435,15 +432,20 @@ func (d *Daemon) encodeSnapshotCapture(capture snapshotCapture) ([]byte, error) 
 	return d.snapshotMarshal(snap)
 }
 
-func (d *Daemon) finishSnapshotCapture(sess *session, generation uint64, succeeded bool) {
-	sess.snapshotMu.Lock()
-	sess.snapshotPending = false
-	if succeeded && sess.snapshotGeneration == generation {
-		sess.snapDirty.Store(false)
-	} else if !succeeded {
-		sess.snapDirty.Store(true)
+func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool) {
+	if capture == nil {
+		return
 	}
-	sess.snapshotMu.Unlock()
+	capture.finishOnce.Do(func() {
+		capture.session.snapshotMu.Lock()
+		capture.session.snapshotPending = false
+		if succeeded && capture.session.snapshotGeneration == capture.generation {
+			capture.session.snapDirty.Store(false)
+		} else if !succeeded {
+			capture.session.snapDirty.Store(true)
+		}
+		capture.session.snapshotMu.Unlock()
+	})
 }
 
 func (d *Daemon) startSnapshotEncodeWorker(ctx context.Context) {
@@ -456,9 +458,12 @@ func (d *Daemon) startSnapshotEncodeWorker(ctx context.Context) {
 		return
 	}
 	workerCtx, cancel := context.WithCancel(ctx)
+	d.snapshotWorkerID++
+	workerID := d.snapshotWorkerID
 	d.snapshotWorkerCtx = workerCtx
 	d.snapshotWorkerCancel = cancel
 	d.snapshotWorkerDone = make(chan struct{})
+	d.snapshotWorkerInFlight = nil
 	done := d.snapshotWorkerDone
 	d.snapshotWorkerMu.Unlock()
 	go func() {
@@ -469,21 +474,40 @@ func (d *Daemon) startSnapshotEncodeWorker(ctx context.Context) {
 				return
 			case capture := <-d.snapshotJobs:
 				// A queued capture must not begin persistence after shutdown.
-				if workerCtx.Err() != nil {
-					d.finishSnapshotCapture(capture.session, capture.generation, false)
+				if workerCtx.Err() != nil || !d.setSnapshotWorkerInFlight(workerID, capture) {
+					d.finishSnapshotCapture(capture, false)
 					return
 				}
 				data, err := d.encodeSnapshotCapture(capture)
-				if err == nil {
+				if err == nil && workerCtx.Err() == nil {
 					err = d.snaps.Write(capture.name, data)
 				}
-				if err != nil {
+				d.clearSnapshotWorkerInFlight(workerID, capture)
+				if err != nil && workerCtx.Err() == nil {
 					d.log.Warn("writing session snapshot failed", "err", err, "session", capture.name)
 				}
-				d.finishSnapshotCapture(capture.session, capture.generation, err == nil)
+				d.finishSnapshotCapture(capture, err == nil && workerCtx.Err() == nil)
 			}
 		}
 	}()
+}
+
+func (d *Daemon) setSnapshotWorkerInFlight(workerID uint64, capture *snapshotCapture) bool {
+	d.snapshotWorkerMu.Lock()
+	defer d.snapshotWorkerMu.Unlock()
+	if d.snapshotWorkerID != workerID || d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
+		return false
+	}
+	d.snapshotWorkerInFlight = capture
+	return true
+}
+
+func (d *Daemon) clearSnapshotWorkerInFlight(workerID uint64, capture *snapshotCapture) {
+	d.snapshotWorkerMu.Lock()
+	defer d.snapshotWorkerMu.Unlock()
+	if d.snapshotWorkerID == workerID && d.snapshotWorkerInFlight == capture {
+		d.snapshotWorkerInFlight = nil
+	}
 }
 
 func (d *Daemon) stopSnapshotEncodeWorker() {
@@ -491,23 +515,31 @@ func (d *Daemon) stopSnapshotEncodeWorker() {
 		return
 	}
 	d.snapshotWorkerMu.Lock()
-	defer d.snapshotWorkerMu.Unlock()
-	cancel, done := d.snapshotWorkerCancel, d.snapshotWorkerDone
+	cancel := d.snapshotWorkerCancel
 	if cancel == nil {
+		d.snapshotWorkerMu.Unlock()
 		return
 	}
-	// Keep workerMu held until the old worker has exited and its queue has been
-	// drained, so a concurrent restart cannot consume a stale capture.
+	// The queue stays open, so producers can safely race teardown. Detach an
+	// in-flight uncancellable Write instead of waiting for it; the process owns
+	// that goroutine until the store returns.
+	inFlight := d.snapshotWorkerInFlight
 	d.snapshotWorkerCtx = nil
 	d.snapshotWorkerCancel = nil
 	d.snapshotWorkerDone = nil
+	d.snapshotWorkerInFlight = nil
 	cancel()
-	<-done
+	queued := make([]*snapshotCapture, 0, len(d.snapshotJobs))
 	for {
 		select {
 		case capture := <-d.snapshotJobs:
-			d.finishSnapshotCapture(capture.session, capture.generation, false)
+			queued = append(queued, capture)
 		default:
+			d.snapshotWorkerMu.Unlock()
+			d.finishSnapshotCapture(inFlight, false)
+			for _, capture := range queued {
+				d.finishSnapshotCapture(capture, false)
+			}
 			return
 		}
 	}

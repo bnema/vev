@@ -103,11 +103,13 @@ type Daemon struct {
 	snaps                   ports.SnapshotStore
 	snapsEnabled            bool
 	snapshotMarshal         func(snapcodec.Session) ([]byte, error)
-	snapshotJobs            chan snapshotCapture
+	snapshotJobs            chan *snapshotCapture
 	snapshotWorkerMu        sync.Mutex
+	snapshotWorkerID        uint64
 	snapshotWorkerCtx       context.Context
 	snapshotWorkerCancel    context.CancelFunc
 	snapshotWorkerDone      chan struct{}
+	snapshotWorkerInFlight  *snapshotCapture
 	restoreDone             chan struct{}
 	restoreOnce             sync.Once
 	procCwd                 func(int) (string, error)
@@ -293,7 +295,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		restoreDone:     make(chan struct{}),
 		animWake:        make(chan struct{}, 1),
 		snapshotMarshal: snapcodec.Marshal,
-		snapshotJobs:    make(chan snapshotCapture, snapshotQueueCapacity),
+		snapshotJobs:    make(chan *snapshotCapture, snapshotQueueCapacity),
 		resumeParkGrace: defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),

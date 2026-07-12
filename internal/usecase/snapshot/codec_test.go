@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
@@ -24,7 +25,12 @@ func TestV3SnapshotRoundTripPreservesExactTerminalData(t *testing.T) {
 	rgb.UnderlineStyle, rgb.HasUnderlineColorRGB, rgb.UnderlineColorRGB = renderer.UnderlineDashed, true, renderer.RGB{R: 7, G: 8, B: 9}
 	sealed, tail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'I', Style: indexed}, {Rune: '好', Style: rgb}, {Continuation: true, Style: rgb}}})
 	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'V', Style: rgb}, {Rune: '界', Style: indexed}, {Continuation: true, Style: indexed}}})
-	want := Session{Name: "v3 exact", Tabs: []Tab{{Focus: "p", Tree: layout.NewTree("p"), Panes: []Pane{{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible}}}}}
+	sealed2, tail2 := historyBlobs(t, [][]renderer.Cell{{{Rune: 'S', Style: rgb}}, {{Rune: '2', Style: indexed}}})
+	visible2 := visibleBlob(t, [][]renderer.Cell{{{Rune: 'P', Style: indexed}, {Rune: '2', Style: rgb}}})
+	want := Session{Name: "v3 exact", Tabs: []Tab{{Focus: "p", Tree: &layout.Tree{Focus: "p", Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("p"), layout.NewLeaf("p2")}}}, Panes: []Pane{
+		{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible},
+		{ID: "p2", SealedChunks: sealed2, Tail: tail2, Visible: visible2},
+	}}}}
 	encoded, err := Marshal(want)
 	if err != nil {
 		t.Fatal(err)
@@ -34,8 +40,25 @@ func TestV3SnapshotRoundTripPreservesExactTerminalData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Tabs) != 1 || len(got.Tabs[0].Panes) != 1 || got.Tabs[0].Panes[0].ID != "p" {
+	if len(got.Tabs) != 1 || len(got.Tabs[0].Panes) != 2 || got.Tabs[0].Panes[0].ID != "p" || got.Tabs[0].Panes[1].ID != "p2" {
 		t.Fatalf("manifest round trip = %#v", got)
+	}
+	for i, wantPane := range want.Tabs[0].Panes {
+		gotPane := got.Tabs[0].Panes[i]
+		if len(gotPane.SealedChunks) != len(wantPane.SealedChunks) {
+			t.Fatalf("pane %q sealed chunks = %d, want %d", wantPane.ID, len(gotPane.SealedChunks), len(wantPane.SealedChunks))
+		}
+		for j := range wantPane.SealedChunks {
+			if !bytes.Equal(gotPane.SealedChunks[j], wantPane.SealedChunks[j]) {
+				t.Fatalf("pane %q sealed chunk %d changed during round trip", wantPane.ID, j)
+			}
+		}
+		if !bytes.Equal(gotPane.Tail, wantPane.Tail) {
+			t.Fatalf("pane %q tail changed during round trip", wantPane.ID)
+		}
+		if !bytes.Equal(gotPane.Visible, wantPane.Visible) {
+			t.Fatalf("pane %q visible blob changed during round trip", wantPane.ID)
+		}
 	}
 	if _, err := vt.HistoryFromBlobs(vt.HistoryConfig{MaxRows: 8, ChunkRows: 2}, got.Tabs[0].Panes[0].SealedChunks, got.Tabs[0].Panes[0].Tail); err != nil {
 		t.Fatalf("history decode: %v", err)

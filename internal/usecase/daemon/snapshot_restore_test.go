@@ -38,6 +38,27 @@ func terminalPane(t *testing.T, id, stableID, cwd string, historyRows, visibleRo
 	return snapcodec.Pane{ID: layout.PaneID(id), StableID: stableID, Cwd: cwd, SealedChunks: sealed, Tail: tail, Visible: visible}
 }
 
+func TestRestorePaneTerminalRejectsMissingOrMalformedCanonicalBlobs(t *testing.T) {
+	valid := terminalPane(t, "pane", "p", "/work", nil, nil)
+	tests := []struct {
+		name   string
+		mutate func(*snapcodec.Pane)
+	}{
+		{name: "missing tail", mutate: func(p *snapcodec.Pane) { p.Tail = nil }},
+		{name: "missing visible", mutate: func(p *snapcodec.Pane) { p.Visible = nil }},
+		{name: "malformed tail", mutate: func(p *snapcodec.Pane) { p.Tail = []byte("bad") }},
+		{name: "malformed visible", mutate: func(p *snapcodec.Pane) { p.Visible = []byte("bad") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snap := valid
+			tt.mutate(&snap)
+			p := newPane("pane", newRestorePTY(), domain.Size{Cols: 40, Rows: 24})
+			require.Error(t, restorePaneTerminal(p, snap))
+		})
+	}
+}
+
 func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 	store := &restoreSnapshotStore{}
 	store.blobs = []ports.SnapshotBlob{{Name: "work", Data: mustSnapshotBytes(t, snapcodec.Session{
@@ -126,8 +147,8 @@ func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 func TestRestoreSnapshotsLeavesFloatingUninitializedAndInactiveTabsCold(t *testing.T) {
 	store := &restoreSnapshotStore{blobs: []ports.SnapshotBlob{{Name: "work", Data: mustSnapshotBytes(t, snapcodec.Session{
 		Name: "work", Active: 0, Tabs: []snapcodec.Tab{
-			{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/one"}}},
-			{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/two"}}},
+			{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{emptyTerminalPane(t, "pane-1", "/one")}},
+			{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{emptyTerminalPane(t, "pane-1", "/two")}},
 		},
 	})}}}
 	factory := &restorePTYFactory{}
@@ -156,17 +177,15 @@ func TestRestoreSnapshotsLeavesFloatingUninitializedAndInactiveTabsCold(t *testi
 
 func processRestoreTestStore(t *testing.T, name string, proc *snapcodec.Process) *restoreSnapshotStore {
 	t.Helper()
+	pane := emptyTerminalPane(t, "pane-1", "/tmp")
+	pane.Process = proc
 	return &restoreSnapshotStore{blobs: []ports.SnapshotBlob{{Name: name, Data: mustSnapshotBytes(t, snapcodec.Session{
 		Name: name,
 		Tabs: []snapcodec.Tab{{
-			Cols: 80,
-			Rows: 24,
-			Tree: layout.NewTree("pane-1"),
-			Panes: []snapcodec.Pane{{
-				ID:      "pane-1",
-				Cwd:     "/tmp",
-				Process: proc,
-			}},
+			Cols:  80,
+			Rows:  24,
+			Tree:  layout.NewTree("pane-1"),
+			Panes: []snapcodec.Pane{pane},
 		}},
 	})}}}
 }
@@ -203,20 +222,17 @@ func TestRestoreSnapshotsProcessRestoreCommands(t *testing.T) {
 						Cols: 80,
 						Rows: 24,
 						Tree: layout.NewTree("pane-1"),
-						Panes: []snapcodec.Pane{{
-							ID:      "pane-1",
-							Cwd:     "/one",
-							Process: lessProc,
-						}},
+						Panes: func() []snapcodec.Pane {
+							pane := emptyTerminalPane(t, "pane-1", "/one")
+							pane.Process = lessProc
+							return []snapcodec.Pane{pane}
+						}(),
 					},
 					{
-						Cols: 80,
-						Rows: 24,
-						Tree: layout.NewTree("pane-1"),
-						Panes: []snapcodec.Pane{{
-							ID:  "pane-1",
-							Cwd: "/two",
-						}},
+						Cols:  80,
+						Rows:  24,
+						Tree:  layout.NewTree("pane-1"),
+						Panes: []snapcodec.Pane{emptyTerminalPane(t, "pane-1", "/two")},
 					},
 				},
 			})}}},
@@ -264,7 +280,9 @@ func TestRestoreSnapshotsProcessCommandWriteFailureIsNonFatal(t *testing.T) {
 	d := newTestDaemon(t, factory, stubClock{})
 	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"pi"}}})
 
-	require.NoError(t, d.restoreSession(context.Background(), snapcodec.Session{Name: "agent", Tabs: []snapcodec.Tab{{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/tmp", Process: proc}}}}}))
+	pane := emptyTerminalPane(t, "pane-1", "/tmp")
+	pane.Process = proc
+	require.NoError(t, d.restoreSession(context.Background(), snapcodec.Session{Name: "agent", Tabs: []snapcodec.Tab{{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{pane}}}}))
 	require.Len(t, factory.opens, 1)
 	require.Equal(t, []string{"pi --resume abc123\n"}, factory.opens[0].pty.writes)
 }
@@ -276,7 +294,7 @@ func TestRestoreSessionPassesRestoreContextToPTYOpen(t *testing.T) {
 	defer cancel()
 
 	require.NoError(t, d.restoreSession(ctx, snapcodec.Session{Name: "restore-context", Tabs: []snapcodec.Tab{{
-		Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/tmp"}},
+		Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{emptyTerminalPane(t, "pane-1", "/tmp")},
 	}}}))
 	require.Len(t, factory.opens, 1)
 	require.Same(t, ctx, factory.opens[0].ctx)
@@ -291,7 +309,11 @@ func TestRestoreSnapshotsOpensCollapsedStackPanesWithValidPTYSize(t *testing.T) 
 			Tree: &layout.Tree{Focus: "b", Root: &layout.Node{Kind: layout.Stack, Expanded: "b", Children: []*layout.Node{
 				layout.NewLeaf("a"), layout.NewLeaf("b"), layout.NewLeaf("c"),
 			}}},
-			Panes: []snapcodec.Pane{{ID: "a", Cwd: "/a"}, {ID: "b", Cwd: "/b"}, {ID: "c", Cwd: "/c"}},
+			Panes: []snapcodec.Pane{
+				emptyTerminalPane(t, "a", "/a"),
+				emptyTerminalPane(t, "b", "/b"),
+				emptyTerminalPane(t, "c", "/c"),
+			},
 		}},
 	})}}}
 	factory := &restorePTYFactory{}
@@ -321,7 +343,16 @@ func TestRestoreSnapshotsOpensCollapsedStackPanesWithValidPTYSize(t *testing.T) 
 }
 
 func TestRestoreSnapshotsSkipsLiveCorruptAndEmpty(t *testing.T) {
-	valid := mustSnapshotBytes(t, snapcodec.Session{Name: "live", CreatedAt: 1, Tabs: []snapcodec.Tab{{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/ok"}}}}})
+	valid := mustSnapshotBytes(t, snapcodec.Session{
+		Name:      "live",
+		CreatedAt: 1,
+		Tabs: []snapcodec.Tab{{
+			Cols:  80,
+			Rows:  24,
+			Tree:  layout.NewTree("pane-1"),
+			Panes: []snapcodec.Pane{emptyTerminalPane(t, "pane-1", "/ok")},
+		}},
+	})
 	badVersion := append([]byte(nil), valid...)
 	binary.BigEndian.PutUint16(badVersion[4:6], 1)
 	tests := []struct {
@@ -358,7 +389,7 @@ func TestRestoreSnapshotsSkipsCreatedAtOverflow(t *testing.T) {
 			Cols:  80,
 			Rows:  24,
 			Tree:  layout.NewTree("pane-1"),
-			Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/bad"}},
+			Panes: []snapcodec.Pane{emptyTerminalPane(t, "pane-1", "/bad")},
 		}},
 	})}}}
 	factory := &restorePTYFactory{}
@@ -384,7 +415,15 @@ func TestNamedRouteWaitsForRestoreBarrier(t *testing.T) {
 		loadFn: func() ([]ports.SnapshotBlob, error) {
 			close(loaded)
 			<-releaseLoad
-			return []ports.SnapshotBlob{{Name: "work", Data: mustSnapshotBytes(t, snapcodec.Session{Name: "work", Tabs: []snapcodec.Tab{{Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/restored"}}}}})}}, nil
+			return []ports.SnapshotBlob{{Name: "work", Data: mustSnapshotBytes(t, snapcodec.Session{
+				Name: "work",
+				Tabs: []snapcodec.Tab{{
+					Cols:  80,
+					Rows:  24,
+					Tree:  layout.NewTree("pane-1"),
+					Panes: []snapcodec.Pane{emptyTerminalPane(t, "pane-1", "/restored")},
+				}},
+			})}}, nil
 		},
 	}
 	factory := &restorePTYFactory{}
@@ -433,23 +472,13 @@ func TestNamedRouteRestoreBarrierReturnsShutdown(t *testing.T) {
 	require.Equal(t, ports.ErrServerShutdown, perr.code)
 }
 
+func emptyTerminalPane(t *testing.T, id, cwd string) snapcodec.Pane {
+	t.Helper()
+	return terminalPane(t, id, "", cwd, nil, nil)
+}
+
 func mustSnapshotBytes(t *testing.T, s snapcodec.Session) []byte {
 	t.Helper()
-	for ti := range s.Tabs {
-		for pi := range s.Tabs[ti].Panes {
-			p := &s.Tabs[ti].Panes[pi]
-			if len(p.Tail) != 0 {
-				continue
-			}
-			h := vt.NewHistory(vt.HistoryConfig{MaxRows: defaultScrollbackRows})
-			sealed, tail, err := vt.MarshalSealedHistory(h.SealAndView())
-			require.NoError(t, err)
-			frame := renderer.NewFrame(int(s.Tabs[ti].Cols), int(s.Tabs[ti].Rows))
-			visible, err := vt.MarshalVisible(frame)
-			require.NoError(t, err)
-			p.SealedChunks, p.Tail, p.Visible = sealed, tail, visible
-		}
-	}
 	b, err := snapcodec.Marshal(s)
 	require.NoError(t, err)
 	return b
