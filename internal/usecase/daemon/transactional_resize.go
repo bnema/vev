@@ -56,8 +56,11 @@ func (d *Daemon) prepareResize(sess *session, size domain.Size) resizePlan {
 
 // applyResize deliberately holds only a pane's resizeMu around its PTY call;
 // no daemon, session, tab, or pane lock crosses the external boundary.
-func (d *Daemon) applyResize(plan *resizePlan) {
+func (d *Daemon) applyResize(plan *resizePlan, current ...func() bool) bool {
 	for i := range plan.members {
+		if len(current) != 0 && !current[0]() {
+			return false
+		}
 		m := &plan.members[i]
 		m.pane.resizeMu.Lock()
 		m.pane.mu.Lock()
@@ -74,6 +77,7 @@ func (d *Daemon) applyResize(plan *resizePlan) {
 		}
 		m.pane.resizeMu.Unlock()
 	}
+	return true
 }
 
 func (d *Daemon) commitResize(sess *session, ac *attachedClient, plan resizePlan) {
@@ -118,7 +122,9 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, epoch u
 	if !rc.resizeCurrent(epoch, ac, false) {
 		return
 	}
-	d.applyResize(&plan)
+	if !d.applyResize(&plan, func() bool { return rc.resizeCurrent(epoch, ac, false) }) {
+		return
+	}
 	if !rc.resizeCurrent(epoch, ac, true) {
 		return
 	}

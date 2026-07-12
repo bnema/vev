@@ -753,7 +753,8 @@ func (c *renderCoordinator) scheduleResize(size domain.Size, source *attachedCli
 		return epoch
 	}
 	timer := clock.NewTimer(minOutputRenderDeadline)
-	if timer.C() == nil {
+	timerC := timer.C()
+	if timerC == nil {
 		stopTimer(timer)
 		run(epoch)
 		return epoch
@@ -768,7 +769,7 @@ func (c *renderCoordinator) scheduleResize(size domain.Size, source *attachedCli
 	c.mu.Unlock()
 	go func() {
 		select {
-		case <-timer.C():
+		case <-timerC:
 		case <-cancel:
 			return
 		}
@@ -795,6 +796,9 @@ func (c *renderCoordinator) resizeCurrent(epoch uint64, source *attachedClient, 
 		return false
 	}
 	if commit {
+		if c.resize.committed >= epoch {
+			return false
+		}
 		c.resize.committed = epoch
 	}
 	return true

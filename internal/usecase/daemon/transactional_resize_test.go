@@ -126,12 +126,11 @@ func TestTransactionalResizeRetryTargetsNewestCommittedEpoch(t *testing.T) {
 
 	// The failed pane must not be retried at 49x28 from the obsolete epoch.
 	// S3 retries 59x32, then commits the parser/screen and requests a reset.
-	require.Equal(t, []domain.Size{{Cols: 59, Rows: 32}}, failed.requested())
+	require.Equal(t, []domain.Size{{Cols: 49, Rows: 28}, {Cols: 59, Rows: 32}}, failed.requested(),
+		"the failed old apply is historical; only the authoritative newest epoch retries it")
 	require.Equal(t, domain.Size{Cols: 59, Rows: 32}, domain.Size{Cols: retry.screen.Frame.Width, Rows: retry.screen.Frame.Height})
-	ac.sendMu.Lock()
-	pending := ac.resizePaintPending
-	ac.sendMu.Unlock()
-	require.True(t, pending, "successful retry forces a final full frame")
+	require.Equal(t, uint64(2), sess.renderCoordinator().resizeSnapshot().committed,
+		"the retry belongs to the newest committed epoch")
 }
 
 // Stale lifecycle callbacks may never advance a transaction owned by a
@@ -186,8 +185,24 @@ func TestTransactionalResizeObsoleteTimerCallbacksCommitOnlyLatestEpoch(t *testi
 	for _, timer := range timers {
 		timer.ch <- time.Time{}
 	}
+	require.Eventually(t, func() bool {
+		return len(pty.requested()) == 1
+	}, time.Second, time.Millisecond, "the newest timer callback must finish")
 	require.Equal(t, []domain.Size{{Cols: 120, Rows: 30}}, pty.requested())
-	require.Equal(t, uint64(3), sess.renderCoordinator().resizeSnapshot().epoch)
+	snapshot := sess.renderCoordinator().resizeSnapshot()
+	require.Equal(t, uint64(3), snapshot.epoch)
+	require.Equal(t, snapshot.epoch, snapshot.committed)
+	// Flush the separately coalesced render invalidation; resize commits do not
+	// bypass the S2 coordinator deadline. The transaction publishes committed
+	// metadata immediately before enqueueing that invalidation, so observe the
+	// enqueue explicitly rather than racing the callback goroutine.
+	rc := sess.renderCoordinator()
+	require.Eventually(t, func() bool {
+		rc.mu.Lock()
+		defer rc.mu.Unlock()
+		return rc.pending
+	}, time.Second, time.Millisecond)
+	rc.fireCurrent(false)
 	frame := <-frames
 	require.Equal(t, ports.MsgOutput, frame.Type, "the committed epoch emits a full frame")
 	select {
