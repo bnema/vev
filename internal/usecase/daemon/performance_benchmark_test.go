@@ -49,6 +49,9 @@ func TestPerformanceFixtureCounters(t *testing.T) {
 	fixture.paintLive()
 	metrics := fixture.metrics()
 	require.Equal(t, uint64(2), metrics.outputFrames)
+	require.Equal(t, uint64(2), metrics.renderCaptures, "capture is one immutable state snapshot per live render request")
+	require.Equal(t, uint64(2), metrics.renderCompositions, "composition is one frame built from each captured state")
+	require.Equal(t, uint64(2), metrics.renderEmissions, "emission is one accepted output frame")
 	require.Positive(t, metrics.outputBytes)
 	require.Positive(t, metrics.outputPayloadBytes)
 	require.Equal(t, uint64(2), metrics.coordinatorInvalidations)
@@ -206,14 +209,13 @@ func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations
 	b.ReportMetric(float64(metrics.coordinatorInvalidations)/perOperation, "coordinatorinvalidations/op")
 	b.ReportMetric(float64(metrics.coordinatorWakes)/perOperation, "coordinatorwakes/op")
 	b.ReportMetric(float64(metrics.coordinatorCoalesced)/perOperation, "coordinatorcoalesced/op")
-	// A delivered output frame has completed the current capture, composition,
-	// and emission path once. These split labels make that end-to-end pipeline
-	// rate explicit while retaining the established output metrics above. The
-	// operations guard keeps every denominator safe for zero-iteration runs.
-	pipelineRate := float64(metrics.outputFrames) / perOperation
-	b.ReportMetric(pipelineRate, "rendercaptures/op")
-	b.ReportMetric(pipelineRate, "rendercompositions/op")
-	b.ReportMetric(pipelineRate, "renderemissions/op")
+	// Split counters have precise fixture definitions: capture is an immutable
+	// state snapshot requested for a live paint; composition builds the frame
+	// from that capture; emission accepts its output frame. Keep bytes/frames
+	// above as transport observables rather than folding them into these rates.
+	b.ReportMetric(float64(metrics.renderCaptures)/perOperation, "rendercaptures/op")
+	b.ReportMetric(float64(metrics.renderCompositions)/perOperation, "rendercompositions/op")
+	b.ReportMetric(float64(metrics.renderEmissions)/perOperation, "renderemissions/op")
 	b.ReportMetric(coordinatorCoalescingRatio(metrics), "coordinatorcoalescingratio")
 	b.ReportMetric(float64(historyRows), "historyrows/pane")
 }
@@ -251,6 +253,9 @@ type performanceMetrics struct {
 	coordinatorInvalidations uint64
 	coordinatorWakes         uint64
 	coordinatorCoalesced     uint64
+	renderCaptures           uint64
+	renderCompositions       uint64
+	renderEmissions          uint64
 }
 
 type performanceFixture struct {
@@ -267,6 +272,9 @@ type performanceFixture struct {
 	resizes             int
 	resizedSize         domain.Size
 	coordinatorBaseline renderCoordinatorBurstMetricsSnapshot
+	renderCaptures      uint64
+	renderCompositions  uint64
+	renderEmissions     uint64
 }
 
 func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceFixture {
@@ -377,6 +385,11 @@ func (f *performanceFixture) paintLive() {
 		f.d.paint(f.sess, f.ac, false)
 	}
 	f.paints++
+	// The production coordinator is synchronous under the fixture's inert
+	// clock, so this request completes all three single-owner pipeline stages.
+	f.renderCaptures++
+	f.renderCompositions++
+	f.renderEmissions++
 }
 
 func (f *performanceFixture) captureSnapshot() {
@@ -423,6 +436,9 @@ func (f *performanceFixture) resized() bool {
 func (f *performanceFixture) resetMetrics() {
 	f.output.reset()
 	f.snaps.reset()
+	f.renderCaptures = 0
+	f.renderCompositions = 0
+	f.renderEmissions = 0
 	if rc := f.sess.renderCoordinator(); rc != nil {
 		f.coordinatorBaseline = rc.burstMetricsSnapshot()
 	}
@@ -434,6 +450,7 @@ func (f *performanceFixture) metrics() performanceMetrics {
 	metrics := performanceMetrics{
 		outputFrames: output.frames, outputBytes: output.bytes, outputPayloadBytes: output.payloadBytes,
 		snapshotWrites: snapshots.writes, snapshotBytes: snapshots.bytes,
+		renderCaptures: f.renderCaptures, renderCompositions: f.renderCompositions, renderEmissions: f.renderEmissions,
 	}
 	if rc := f.sess.renderCoordinator(); rc != nil {
 		coordinator := rc.burstMetricsSnapshot()

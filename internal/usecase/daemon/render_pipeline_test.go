@@ -1,18 +1,64 @@
 package daemon
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
 )
+
+// scriptedReplayTransport is intentionally a ports.Transport only: replay
+// assertions must not depend on any adapter's framing implementation.
+type scriptedReplayTransport struct {
+	t      *testing.T
+	frames []ports.Frame
+	next   int
+}
+
+func (s *scriptedReplayTransport) Send(got ports.Frame) error {
+	s.t.Helper()
+	if s.next >= len(s.frames) {
+		s.t.Errorf("unexpected frame %#v", got)
+		return nil
+	}
+	want := s.frames[s.next]
+	s.next++
+	require.Equal(s.t, want.Type, got.Type)
+	require.Equal(s.t, want.Payload, got.Payload)
+	return nil
+}
+func (*scriptedReplayTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (*scriptedReplayTransport) Close() error               { return nil }
+
+func TestTransportReplayFinalShadowAndTerminalBytes(t *testing.T) {
+	frames := []ports.Frame{
+		{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("\\x1b[2J\\x1b[Hone\\r\\ntwo")})},
+		{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 1, NewStateNum: 2, EchoAck: 7, Data: []byte("\\x1b[2;1HTWO")})},
+	}
+	transport := &scriptedReplayTransport{t: t, frames: frames}
+	terminal := vt.NewScreen(8, 3)
+	var transcript []byte
+	for _, frame := range frames {
+		require.NoError(t, transport.Send(frame))
+		output, err := ports.UnmarshalOutput(frame.Payload)
+		require.NoError(t, err)
+		require.Equal(t, frame.Payload, ports.MarshalOutput(output), "output payload must remain byte exact")
+		transcript = append(transcript, output.Data...)
+		terminal.Write(output.Data)
+	}
+	require.Equal(t, len(frames), transport.next)
+	require.Equal(t, "\\x1b[2J\\x1b[Hone\\r\\ntwo\\x1b[2;1HTWO", string(transcript))
+	require.Equal(t, []string{"one     ", "TWO     ", "        "}, frameRows(terminal.Frame), "terminal replay is the final renderer shadow")
+}
 
 func TestCapturePaneRenderStateOwnsVisibleFrameAndConsumesDamage(t *testing.T) {
 	p := newPane("p", nil, domain.Size{Cols: 8, Rows: 2})
