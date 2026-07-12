@@ -95,6 +95,7 @@ type Daemon struct {
 	ptys                    ports.PTYFactory
 	clock                   ports.Clock
 	log                     *slog.Logger
+	runtimeObserver         ports.RuntimeObserver
 	baseEnv                 []string
 	shell                   string
 	shellArgs               []string
@@ -177,6 +178,12 @@ func (s stoppedSession) same(other stoppedSession) bool {
 }
 
 type Option func(*Daemon)
+
+// WithRuntimeObserver enables opt-in process-local marks. It takes no clock:
+// the concrete observer is the sole timestamp owner.
+func WithRuntimeObserver(observer ports.RuntimeObserver) Option {
+	return func(d *Daemon) { d.runtimeObserver = observer }
+}
 
 // WithShell overrides the command (and its args) each session spawns. The
 // default is $SHELL (or /bin/sh) with no arguments; tests use this to run a

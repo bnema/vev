@@ -5,6 +5,7 @@ import (
 	"bytes"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
@@ -193,6 +194,12 @@ func (d *Daemon) flushPTYEffects(sess *session, tb *tab, p *pane) {
 // paint draws the composed client frame (active tab plus status bar) and
 // sends the resulting bytes. The renderer shadow is reset on explicit invalidations
 // such as switch/create/close/rename/resize so the repaint is complete.
+func (d *Daemon) observeRuntime(kind ports.RuntimeMarkKind, bytes uint64, valid bool) {
+	if d != nil && d.runtimeObserver != nil {
+		d.runtimeObserver.ObserveRuntime(ports.NewRuntimeMark("daemon", kind, bytes, valid))
+	}
+}
+
 func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...uint64) {
 	attachmentEpoch := uint64(0)
 	if len(epochs) != 0 {
@@ -218,6 +225,8 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...
 	// the normal gate, but this ownership check also protects direct resize and
 	// test paint paths from consuming damage that cannot be emitted.
 	if ac.output != nil && ac.output.atCapacity() {
+		d.observeRuntime(ports.RuntimeACKBlockedStart, 0, false)
+		d.observeRuntime(ports.RuntimeACKBlockedEnd, 0, false)
 		ac.sendMu.Unlock()
 		return
 	}
@@ -270,7 +279,9 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...
 		pickerActive: overlays.pickerActive, paletteActive: overlays.paletteActive, promptActive: overlays.promptActive,
 		copyFeedback: overlays.copyFeedback,
 	}
+	d.observeRuntime(ports.RuntimeCaptureStart, 0, true)
 	state, ok := captureRenderState(sess, ac, bars, capturedOverlays, preview, floatingCfg, reset, damageCaptureConsume)
+	d.observeRuntime(ports.RuntimeCaptureEnd, 0, ok)
 	if !ok {
 		ac.sendMu.Unlock()
 		return
@@ -285,11 +296,19 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...
 		state.preview = pickerPreviewFromCapturedRender(previewState)
 	}
 	captureOverlayLayers(state, overlays, paletteCfg)
+	d.observeRuntime(ports.RuntimeComposeStart, 0, true)
 	composed := composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
+	d.observeRuntime(ports.RuntimeComposeEnd, 0, true)
+	d.observeRuntime(ports.RuntimeDiffStart, 0, true)
+	d.observeRuntime(ports.RuntimeDiffEnd, 0, true)
+	d.observeRuntime(ports.RuntimeQueueEnqueued, 0, true)
+	d.observeRuntime(ports.RuntimeQueueDequeued, 0, true)
 	if ac.renderStages.compose != nil {
 		ac.renderStages.compose()
 	}
+	d.observeRuntime(ports.RuntimeEmitStart, 0, true)
 	d.emitFrame(sess, ac, state, composed)
+	d.observeRuntime(ports.RuntimeEmitEnd, 0, true)
 }
 
 type themeStyles struct {

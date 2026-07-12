@@ -35,8 +35,17 @@ var ErrFrameTooLarge = errors.New("ipc: frame exceeds maximum length")
 // goroutine and a single writer goroutine); it is not safe for concurrent
 // calls to Send from multiple goroutines, nor Recv from multiple
 // goroutines.
+type Option func(*unixTransport)
+
+// WithRuntimeObserver enables process-local transport marks. It accepts no
+// clock: timestamp ownership belongs to the configured observer.
+func WithRuntimeObserver(observer ports.RuntimeObserver) Option {
+	return func(t *unixTransport) { t.observer = observer }
+}
+
 type unixTransport struct {
-	conn net.Conn
+	conn     net.Conn
+	observer ports.RuntimeObserver
 
 	// readBuf is reused across Recv calls (grow-once strategy): it grows
 	// to fit the largest frame seen so far and is never shrunk. The Frame
@@ -47,16 +56,24 @@ type unixTransport struct {
 
 // NewTransport wraps conn as a ports.Transport speaking vev's framed
 // binary protocol.
-func NewTransport(conn net.Conn) ports.Transport {
-	return &unixTransport{conn: conn}
+func NewTransport(conn net.Conn, opts ...Option) ports.Transport {
+	t := &unixTransport{conn: conn}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(t)
+		}
+	}
+	return t
 }
 
 // Send writes f as a single frame: a 4-byte big-endian length (covering
 // the type byte and payload), the type byte, then the payload — assembled
 // into one buffer and written with a single Write call.
 func (t *unixTransport) Send(f ports.Frame) error {
+	t.observe(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)), true)
 	n := 1 + len(f.Payload) // type + payload
 	if n > maxFrameLen {
+		t.observe(ports.RuntimeAdapterSendEnd, uint64(len(f.Payload)), false)
 		return ErrFrameTooLarge
 	}
 
@@ -66,6 +83,7 @@ func (t *unixTransport) Send(f ports.Frame) error {
 	copy(buf[frameHeaderLen+1:], f.Payload)
 
 	_, err := t.conn.Write(buf)
+	t.observe(ports.RuntimeAdapterSendEnd, uint64(len(f.Payload)), err == nil)
 	return err
 }
 
@@ -73,16 +91,20 @@ func (t *unixTransport) Send(f ports.Frame) error {
 // (type byte + payload). It blocks until a full frame arrives, the
 // connection is closed (io.EOF), or an error occurs.
 func (t *unixTransport) Recv() (ports.Frame, error) {
+	t.observe(ports.RuntimeAdapterReceiveStart, 0, true)
 	var hdr [frameHeaderLen]byte
 	if _, err := io.ReadFull(t.conn, hdr[:]); err != nil {
+		t.observe(ports.RuntimeAdapterReceiveEnd, 0, false)
 		return ports.Frame{}, err
 	}
 
 	n := binary.BigEndian.Uint32(hdr[:])
 	if n == 0 {
+		t.observe(ports.RuntimeAdapterReceiveEnd, 0, false)
 		return ports.Frame{}, ErrZeroLengthFrame
 	}
 	if n > maxFrameLen {
+		t.observe(ports.RuntimeAdapterReceiveEnd, 0, false)
 		return ports.Frame{}, ErrFrameTooLarge
 	}
 
@@ -92,6 +114,7 @@ func (t *unixTransport) Recv() (ports.Frame, error) {
 		t.readBuf = t.readBuf[:n]
 	}
 	if _, err := io.ReadFull(t.conn, t.readBuf); err != nil {
+		t.observe(ports.RuntimeAdapterReceiveEnd, 0, false)
 		return ports.Frame{}, err
 	}
 
@@ -100,7 +123,14 @@ func (t *unixTransport) Recv() (ports.Frame, error) {
 		payload = make([]byte, n-1)
 		copy(payload, t.readBuf[1:])
 	}
+	t.observe(ports.RuntimeAdapterReceiveEnd, uint64(len(payload)), true)
 	return ports.Frame{Type: ports.MsgType(t.readBuf[0]), Payload: payload}, nil
+}
+
+func (t *unixTransport) observe(kind ports.RuntimeMarkKind, bytes uint64, valid bool) {
+	if t.observer != nil {
+		t.observer.ObserveRuntime(ports.NewRuntimeMark("ipc", kind, bytes, valid))
+	}
 }
 
 // Close closes the underlying connection.

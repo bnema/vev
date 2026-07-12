@@ -31,6 +31,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/config"
 	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/adapters/pty"
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/adapters/shellcmd"
@@ -238,6 +239,17 @@ func dispatch(ctx context.Context, cmd command) error {
 	}
 }
 
+// performanceTrace creates one serialized timestamp owner for this process.
+// An empty trace environment leaves all production behavior and wire bytes
+// unchanged.
+func performanceTrace(clk ports.Clock) (ports.RuntimeObserver, io.Closer, error) {
+	path, processID := os.Getenv("VEV_PERF_TRACE"), os.Getenv("VEV_PERF_PROCESS_ID")
+	if path == "" {
+		return nil, nil, nil
+	}
+	return observability.NewJSONL(path, clk, processID)
+}
+
 func configureLogging(component logging.Component, rotateAtRuntime bool) (*slog.Logger, io.Closer, error) {
 	return logging.Setup(logging.Config{
 		Dir:             platform.StateDir(),
@@ -308,7 +320,18 @@ func runDaemon() error {
 	}
 
 	log.Info("daemon starting", "socket", ln.Addr())
+	clk := clock.New()
+	observer, observerCloser, err := performanceTrace(clk)
+	if err != nil {
+		return fmt.Errorf("vev: performance trace: %w", err)
+	}
+	if observerCloser != nil {
+		defer func() { _ = observerCloser.Close() }()
+	}
 	daemonOpts := []daemon.Option(nil)
+	if observer != nil {
+		daemonOpts = append(daemonOpts, daemon.WithRuntimeObserver(observer))
+	}
 	configPath := platform.ConfigPath()
 	cfg, warnings, err := config.Load(configPath)
 	if err != nil {
@@ -327,7 +350,6 @@ func runDaemon() error {
 		log.Info("session persistence enabled", "path", storePath)
 		daemonOpts = append(daemonOpts, daemon.WithStore(store))
 	}
-	clk := clock.New()
 	d := daemon.New(pty.NewFactory(), clk, log, daemonOpts...)
 	watchCtx, stopWatch := context.WithCancel(ctx)
 	defer stopWatch()
@@ -357,13 +379,23 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) err
 	}
 	defer func() { _ = logCloser.Close() }()
 
+	clk := clock.New()
+	observer, observerCloser, err := performanceTrace(clk)
+	if err != nil {
+		return fmt.Errorf("vev: performance trace: %w", err)
+	}
+	if observerCloser != nil {
+		defer func() { _ = observerCloser.Close() }()
+	}
 	return runAttachWithDeps(ctx, intent, name, remoteTarget, os.Getenv("VEV"), log, runAttachDeps{
 		localDialer:             defaultLocalDialer,
 		remoteDialerFactory:     defaultRemoteDialerFactory(),
 		selectedRemoteTransport: os.Getenv(envRemoteTransport),
-		runClient:               client.Run,
-		createDetached:          createDetachedLocalSession,
-		clipboard:               clipboard.New(),
+		runClient: func(ctx context.Context, dialer ports.Dialer, terminal ports.Terminal, behaviorClock ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) error {
+			return client.RunWithRuntimeObserver(ctx, dialer, terminal, behaviorClock, intent, name, remote, clipboard, log, observer)
+		},
+		createDetached: createDetachedLocalSession,
+		clipboard:      clipboard.New(),
 	})
 }
 
@@ -635,7 +667,15 @@ func runStdio(ctx context.Context) error {
 	}
 	defer func() { _ = transport.Close() }()
 
-	stdio := sshstdio.NewTransport(os.Stdin, os.Stdout, nil)
+	clk := clock.New()
+	observer, observerCloser, err := performanceTrace(clk)
+	if err != nil {
+		return fmt.Errorf("vev: performance trace: %w", err)
+	}
+	if observerCloser != nil {
+		defer func() { _ = observerCloser.Close() }()
+	}
+	stdio := sshstdio.NewTransport(os.Stdin, os.Stdout, nil, sshstdio.WithRuntimeObserver(observer))
 	return proxyTransports(ctx, stdio, transport, log)
 }
 
@@ -747,7 +787,14 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 	defer func() { _ = daemonTr.Close() }()
 	udpOptions := udpProxyClientTransportOptions
 	udpOptions.Observe = dgram.DiagnosticLogObserver(log)
-	dg, err := dgram.NewTransportWithOptions(conn, nil, key, 2, 1, udpOptions)
+	observer, observerCloser, err := performanceTrace(clock.New())
+	if err != nil {
+		return fmt.Errorf("vev: performance trace: %w", err)
+	}
+	if observerCloser != nil {
+		defer func() { _ = observerCloser.Close() }()
+	}
+	dg, err := dgram.NewTransportWithOptions(conn, nil, key, 2, 1, udpOptions, dgram.WithRuntimeObserver(observer))
 	if err != nil {
 		return err
 	}

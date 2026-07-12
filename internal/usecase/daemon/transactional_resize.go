@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
@@ -161,6 +162,7 @@ func (d *Daemon) commitResize(sess *session, ac *attachedClient, plan resizePlan
 		ac.sendMu.Unlock()
 	}
 	markSnapshotDirty(sess)
+	d.observeRuntime(ports.RuntimeResizeCommitted, 0, true)
 }
 
 func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, epoch uint64) {
@@ -243,6 +245,7 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, epoch uin
 }
 
 func (d *Daemon) requestTransactionalResize(sess *session, ac *attachedClient, size domain.Size, immediate bool) {
+	d.observeRuntime(ports.RuntimeResizeRequested, 0, sess != nil && size.Valid())
 	if sess == nil || !size.Valid() {
 		return
 	}

@@ -34,9 +34,23 @@ var (
 type closeFunc func() error
 type eofErrFunc func() error
 
+type Option func(*transport)
+
+// WithRuntimeObserver enables process-local transport marks; it deliberately
+// takes only an observer so a carriage adapter never owns trace time.
+func WithRuntimeObserver(observer ports.RuntimeObserver) Option {
+	return func(t *transport) { t.observer = observer }
+}
+
 // NewTransport wraps separate reader/writer streams as a framed Transport.
-func NewTransport(r io.Reader, w io.Writer, closeFn closeFunc) ports.Transport {
-	return newTransport(r, w, closeFn, nil)
+func NewTransport(r io.Reader, w io.Writer, closeFn closeFunc, opts ...Option) ports.Transport {
+	t := newTransport(r, w, closeFn, nil).(*transport)
+	for _, opt := range opts {
+		if opt != nil {
+			opt(t)
+		}
+	}
+	return t
 }
 
 func newTransport(r io.Reader, w io.Writer, closeFn closeFunc, eofErr eofErrFunc) ports.Transport {
@@ -47,18 +61,21 @@ func newTransport(r io.Reader, w io.Writer, closeFn closeFunc, eofErr eofErrFunc
 }
 
 type transport struct {
-	r      io.Reader
-	w      io.Writer
-	close  closeFunc
-	eofErr eofErrFunc
+	r        io.Reader
+	w        io.Writer
+	close    closeFunc
+	eofErr   eofErrFunc
+	observer ports.RuntimeObserver
 
 	mu      sync.Mutex
 	readBuf []byte
 }
 
 func (t *transport) Send(f ports.Frame) error {
+	t.observe(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)), true)
 	n := 1 + len(f.Payload)
 	if n > maxFrameLen {
+		t.observe(ports.RuntimeAdapterSendEnd, uint64(len(f.Payload)), false)
 		return ErrFrameTooLarge
 	}
 
@@ -70,20 +87,26 @@ func (t *transport) Send(f ports.Frame) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	_, err := t.w.Write(buf)
+	t.observe(ports.RuntimeAdapterSendEnd, uint64(len(f.Payload)), err == nil)
 	return err
 }
 
 func (t *transport) Recv() (ports.Frame, error) {
+	t.observe(ports.RuntimeAdapterReceiveStart, 0, true)
 	var hdr [frameHeaderLen]byte
 	if _, err := io.ReadFull(t.r, hdr[:]); err != nil {
-		return ports.Frame{}, t.mapEOFError(err)
+		err = t.mapEOFError(err)
+		t.observe(ports.RuntimeAdapterReceiveEnd, 0, false)
+		return ports.Frame{}, err
 	}
 
 	n := binary.BigEndian.Uint32(hdr[:])
 	if n == 0 {
+		t.observe(ports.RuntimeAdapterReceiveEnd, 0, false)
 		return ports.Frame{}, ErrZeroLengthFrame
 	}
 	if n > maxFrameLen {
+		t.observe(ports.RuntimeAdapterReceiveEnd, 0, false)
 		return ports.Frame{}, ErrFrameTooLarge
 	}
 
@@ -93,11 +116,20 @@ func (t *transport) Recv() (ports.Frame, error) {
 		t.readBuf = t.readBuf[:n]
 	}
 	if _, err := io.ReadFull(t.r, t.readBuf); err != nil {
-		return ports.Frame{}, t.mapEOFError(err)
+		err = t.mapEOFError(err)
+		t.observe(ports.RuntimeAdapterReceiveEnd, 0, false)
+		return ports.Frame{}, err
 	}
 
 	payload := append([]byte(nil), t.readBuf[1:]...)
+	t.observe(ports.RuntimeAdapterReceiveEnd, uint64(len(payload)), true)
 	return ports.Frame{Type: ports.MsgType(t.readBuf[0]), Payload: payload}, nil
+}
+
+func (t *transport) observe(kind ports.RuntimeMarkKind, bytes uint64, valid bool) {
+	if t.observer != nil {
+		t.observer.ObserveRuntime(ports.NewRuntimeMark("sshstdio", kind, bytes, valid))
+	}
 }
 
 func (t *transport) mapEOFError(err error) error {
