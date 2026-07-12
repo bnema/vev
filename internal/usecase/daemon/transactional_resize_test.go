@@ -5,11 +5,14 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/usecase/visualsearch"
 )
 
 // transactionalResizePTY is deliberately channel-scripted: a test can stop a
@@ -104,24 +107,94 @@ func TestTransactionalResizePartialFailureCommitsOnlySuccessfulPTYState(t *testi
 	require.NotEqual(t, oldFailedRect, second.rect, "failed PTY rectangle still follows the committed layout")
 }
 
+// S3 acceptance: a failed member is retried only for the newest committed
+// epoch. An intervening request supersedes the old retry, and a successful
+// retry must resize its VT before the forced full-frame emission.
+func TestTransactionalResizeRetryTargetsNewestCommittedEpoch(t *testing.T) {
+	ok := &transactionalResizePTY{}
+	failed := &transactionalResizePTY{errs: []error{errors.New("first epoch fails"), nil}}
+	d, sess, ac, _ := newManualSessionWithPTYs(t, ok)
+	tb := sess.activeTab()
+	retry := newPane("retry", failed, domain.Size{Cols: 80, Rows: 23})
+	tb.mu.Lock()
+	tb.panes[retry.id] = retry
+	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("retry")}}, Focus: "pane-1"}
+	tb.mu.Unlock()
+
+	d.resize(sess, ac, domain.Size{Cols: 100, Rows: 30}) // failed epoch
+	d.resize(sess, ac, domain.Size{Cols: 120, Rows: 34}) // supersedes it
+
+	// The failed pane must not be retried at 49x28 from the obsolete epoch.
+	// S3 retries 59x32, then commits the parser/screen and requests a reset.
+	require.Equal(t, []domain.Size{{Cols: 59, Rows: 32}}, failed.requested())
+	require.Equal(t, domain.Size{Cols: 59, Rows: 32}, domain.Size{Cols: retry.screen.Frame.Width, Rows: retry.screen.Frame.Height})
+	ac.sendMu.Lock()
+	pending := ac.resizePaintPending
+	ac.sendMu.Unlock()
+	require.True(t, pending, "successful retry forces a final full frame")
+}
+
 // Stale lifecycle callbacks may never advance a transaction owned by a
 // replacement attachment. The coordinator test clock drives callbacks through
 // channels elsewhere in this package; this ownership assertion is deliberately
 // synchronous so it cannot hide a race behind a sleep.
 func TestTransactionalResizeEpochLifecycleAndRetryContract(t *testing.T) {
-	rc := newRenderCoordinator(renderCoordinatorOptions{})
-	old, replacement := &attachedClient{}, &attachedClient{}
-	rc.attach(old)
-	require.Equal(t, uint64(1), rc.recordResizeRequest(domain.Size{Cols: 90, Rows: 24}, old))
-	require.Equal(t, uint64(2), rc.recordResizeRequest(domain.Size{Cols: 100, Rows: 26}, old))
-	require.Equal(t, uint64(3), rc.recordResizeRequest(domain.Size{Cols: 120, Rows: 30}, old))
-	rc.noteReplace(old, replacement)
-	rc.attach(replacement)
-	require.Zero(t, rc.recordResizeRequest(domain.Size{Cols: 20, Rows: 5}, old),
-		"obsolete attach/replace/detach/park/resume callbacks cannot publish")
-	snap := rc.resizeSnapshot()
-	require.Equal(t, uint64(3), snap.epoch)
-	require.Equal(t, domain.Size{Cols: 120, Rows: 30}, snap.size)
+	// Each closure is a callback captured before its lifecycle transition.  The
+	// coordinator must reject it, rather than merely coalescing its paint.
+	for _, transition := range []struct {
+		name string
+		run  func(*renderCoordinator, *attachedClient, *attachedClient)
+	}{
+		{"replace", func(rc *renderCoordinator, old, next *attachedClient) { rc.noteReplace(old, next) }},
+		{"detach", func(rc *renderCoordinator, old, _ *attachedClient) { rc.noteDetach(old) }},
+		{"park", func(rc *renderCoordinator, old, _ *attachedClient) { rc.notePark(old) }},
+		{"resume", func(rc *renderCoordinator, old, next *attachedClient) { rc.notePark(old); rc.attach(next) }},
+	} {
+		t.Run(transition.name, func(t *testing.T) {
+			rc := newRenderCoordinator(renderCoordinatorOptions{})
+			old, next := &attachedClient{}, &attachedClient{}
+			rc.attach(old)
+			require.Equal(t, uint64(1), rc.recordResizeRequest(domain.Size{Cols: 90, Rows: 24}, old))
+			stale := func() uint64 { return rc.recordResizeRequest(domain.Size{Cols: 20, Rows: 5}, old) }
+			transition.run(rc, old, next)
+			require.Zero(t, stale(), "a stale %s callback must not publish", transition.name)
+		})
+	}
+}
+
+// S3 acceptance: three callbacks can be delivered even after their timers were
+// stopped.  Only the newest prepared epoch may apply, commit, and emit one full
+// frame. coordinatorMockClock is a generated MockClock/MockTimer harness; its
+// channels make callback order explicit and do not use wall-clock waits.
+func TestTransactionalResizeObsoleteTimerCallbacksCommitOnlyLatestEpoch(t *testing.T) {
+	clock := newCoordinatorMockClock(t, 8)
+	pty := &transactionalResizePTY{}
+	d, sess, ac, frames := newManualSessionWithPTYs(t, pty)
+	d.clock = clock.clock
+
+	for _, size := range []domain.Size{{Cols: 90, Rows: 24}, {Cols: 100, Rows: 28}, {Cols: 120, Rows: 32}} {
+		d.resize(sess, ac, size)
+	}
+	// Current PR #71 applies each resize before its debounce callback. S3 must
+	// leave this empty until the final callback's prepare/apply/commit epoch.
+	require.Empty(t, pty.requested(), "obsolete requests must not resize the PTY")
+
+	var timers []*coordinatorMockTimer
+	for len(timers) < 3 {
+		timers = append(timers, <-clock.timers)
+	}
+	for _, timer := range timers {
+		timer.ch <- time.Time{}
+	}
+	require.Equal(t, []domain.Size{{Cols: 120, Rows: 30}}, pty.requested())
+	require.Equal(t, uint64(3), sess.renderCoordinator().resizeSnapshot().epoch)
+	frame := <-frames
+	require.Equal(t, ports.MsgOutput, frame.Type, "the committed epoch emits a full frame")
+	select {
+	case extra := <-frames:
+		t.Fatalf("obsolete epoch emitted an additional frame: %#v", extra)
+	default:
+	}
 }
 
 // Entering copy mode is invalidated at transaction prepare time, while a
@@ -129,21 +202,35 @@ func TestTransactionalResizeEpochLifecycleAndRetryContract(t *testing.T) {
 // composition. Channels, rather than a delay, make the publication boundary
 // deterministic.
 func TestTransactionalResizeFloatingMouseCopyAndSearchContract(t *testing.T) {
-	entered, release := make(chan struct{}), make(chan struct{})
-	pty := &transactionalResizePTY{onResize: func() { close(entered); <-release }}
-	d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
-	tb := sess.activeTab()
-	p := tb.focusedPane()
-	old := p.rect
-	d.enterCopyMode(sess, ac)
-	done := make(chan struct{})
-	go func() {
-		d.resize(sess, ac, domain.Size{Cols: 100, Rows: 30})
-		close(done)
-	}()
-	<-entered
-	require.False(t, ac.overlays.copyActive(), "prepare invalidates copy mode and visual search")
-	require.Equal(t, old, p.rect, "mouse uses the old committed geometry before publication")
-	close(release)
-	<-done
+	for _, tc := range []struct {
+		name string
+		errs []error
+	}{
+		{name: "success"},
+		{name: "partial failure", errs: []error{errors.New("resize failed")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			pty := &transactionalResizePTY{errs: tc.errs, onResize: func() { close(entered); <-release }}
+			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+			tb := sess.activeTab()
+			p := tb.focusedPane()
+			old := p.rect
+			d.enterCopyMode(sess, ac)
+			ac.overlays.copyMu.Lock()
+			ac.overlays.copySearch = &visualsearch.Model{}
+			ac.overlays.copyMu.Unlock()
+			done := make(chan struct{})
+			go func() {
+				d.resize(sess, ac, domain.Size{Cols: 100, Rows: 30})
+				close(done)
+			}()
+			<-entered
+			require.False(t, ac.overlays.copyActive(), "prepare invalidates copy mode")
+			require.False(t, ac.overlays.copySearchActive(), "prepare invalidates visual search")
+			require.Equal(t, old, p.rect, "mouse uses old committed geometry before publication")
+			close(release)
+			<-done
+		})
+	}
 }
