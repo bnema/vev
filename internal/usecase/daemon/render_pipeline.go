@@ -86,13 +86,16 @@ func composeFrame(state capturedRenderState, in composeCacheInput) composedRende
 			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: rows + 1, Width: width, Height: 1})
 		}
 	}
+	baseFrame := frame.Clone()
 	frame, damage = composeCapturedOverlays(state, frame, damage, content)
 	if full || state.overlays.active() {
 		damage = []renderer.Damage{renderer.FullRedraw()}
 	}
-	cursor := desiredCapturedCursor(state.cursor)
-	outCache := composeCacheInput{valid: true, frame: frame.Clone(), layoutFingerprint: state.layout.fingerprint, titleGenerations: titles, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration}
-	outCache.bars.capture(frame.Row(0), frame.Row(rows+1))
+	cursorInputs := state.cursor
+	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || state.overlays.active()
+	cursor := desiredCapturedCursor(cursorInputs)
+	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, titleGenerations: titles, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration}
+	outCache.bars.capture(baseFrame.Row(0), baseFrame.Row(rows+1))
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }
 
@@ -270,12 +273,6 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 	}
 	if sendErr == nil {
 		ac.pipelineCache = composed.cache
-		if state.overlays.active() {
-			ac.composed.invalidate()
-		} else {
-			ac.composed.frame = composed.frame.Clone()
-			ac.composed.valid = true
-		}
 	}
 	ac.sess.mu.Unlock()
 	ac.sendMu.Unlock()

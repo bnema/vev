@@ -31,12 +31,10 @@ type attachedClient struct {
 	// exact coordinator incarnation. paint rechecks it under sendMu.
 	coordinatorReadyEpoch atomic.Uint64
 	echoAck               atomic.Uint64
-	bars                  barCache           // only touched while sendMu is held
-	composed              composedFrameCache // test-only legacy composition cache
-	pipelineCache         composeCacheInput  // only touched while sendMu is held
-	resizePaint           pendingByteTimer   // guarded by sendMu
-	resizePaintGeneration uint64             // guarded by sendMu
-	resizePaintPending    bool               // guarded by sendMu
+	pipelineCache         composeCacheInput // only touched while sendMu is held
+	resizePaint           pendingByteTimer  // guarded by sendMu
+	resizePaintGeneration uint64            // guarded by sendMu
+	resizePaintPending    bool              // guarded by sendMu
 	size                  domain.Size
 	keys                  *keys.Router
 	sess                  Guarded[*session]

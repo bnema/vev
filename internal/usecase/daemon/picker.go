@@ -9,7 +9,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -517,29 +516,54 @@ func snapshotPickerPreview(tb *tab) picker.Preview {
 		return picker.Preview{}
 	}
 	tb.mu.Lock()
-	defer tb.mu.Unlock()
-	return pickerPreviewFromLockedTab(tb)
+	layoutSnap := solveTabLayoutLocked(tb)
+	if !layoutSnap.ok {
+		p := tb.focusedPane()
+		if p == nil {
+			tb.mu.Unlock()
+			return picker.Preview{}
+		}
+		p.mu.Lock()
+		preview := pickerPreviewFromLockedPane(p)
+		p.mu.Unlock()
+		tb.mu.Unlock()
+		return preview
+	}
+	state := capturedRenderState{layout: capturedTabLayout{
+		root: tb.tree.Clone().Root, area: layoutSnap.area, focus: layoutSnap.focus,
+		placements:  append([]layout.Placement(nil), layoutSnap.placements...),
+		fingerprint: layoutSnap.fingerprint, valid: true,
+	}}
+	for _, placement := range layoutSnap.placements {
+		p := tb.panes[placement.ID]
+		if p == nil {
+			continue
+		}
+		visible := placement.Content
+		if placement.Collapsed {
+			visible = domain.Rect{}
+		}
+		p.mu.Lock()
+		captured := capturePaneRenderStateLocked(p, visible, damageCapturePreview)
+		p.mu.Unlock()
+		captured.placement = placement
+		captured.focused = placement.ID == layoutSnap.focus
+		state.panes = append(state.panes, captured)
+	}
+	tb.mu.Unlock()
+	return pickerPreviewFromCapturedRender(state)
 }
 
-func pickerPreviewFromLockedTab(tb *tab) picker.Preview {
-	p := tb.focusedPane()
-	if p == nil {
-		return picker.Preview{}
+func pickerPreviewFromCapturedRender(state capturedRenderState) picker.Preview {
+	composed := composeFrame(state, composeCacheInput{}).frame
+	if composed.Height < 2 {
+		return pickerPreviewFromFrame(composed)
 	}
-	if tb.tree == nil || tb.tree.Root == nil || tb.tree.Root.Kind == layout.Leaf {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		return pickerPreviewFromLockedPane(p)
+	rows := make([][]renderer.Cell, composed.Height-2)
+	for y := range rows {
+		rows[y] = append([]renderer.Cell(nil), composed.Row(y+1)...)
 	}
-
-	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
-	if area.Width <= 0 || area.Height <= 0 {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		return pickerPreviewFromLockedPane(p)
-	}
-	frame, _ := composeTabFrame(tb, area, themeui.Theme{})
-	return pickerPreviewFromFrame(frame)
+	return picker.Preview{Rows: rows, Width: composed.Width, Height: len(rows)}
 }
 
 func pickerPreviewFromLockedPane(p *pane) picker.Preview {
