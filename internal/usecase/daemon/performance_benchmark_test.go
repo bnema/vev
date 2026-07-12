@@ -238,7 +238,7 @@ func TestLivePaintAllocationBudget(t *testing.T) {
 				fixture.paintLive()
 				fixture.ac.ackOutputState(fixture.ac.output.next)
 			})
-			require.LessOrEqual(t, allocs, float64(60), "live paint must reuse bounded attachment-owned visible-frame buffers")
+			require.LessOrEqual(t, allocs, float64(53), "live paint must retain bar cache cell storage across warm paints")
 		})
 	}
 }
