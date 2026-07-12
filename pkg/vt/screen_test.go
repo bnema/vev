@@ -2060,7 +2060,7 @@ func TestDamageSaturationBoundsPendingRecords(t *testing.T) {
 	s.ClearDamage()
 
 	for i := range 1_100 {
-		s.record(renderer.Damage{Kind: renderer.DamageText, X: i % 2, Y: (i / 2) % 2, Width: 1, Height: 1, Count: 1})
+		s.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: i % 2, Width: 1, Height: 1, Count: 1})
 	}
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, s.Damage())
 
