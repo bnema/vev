@@ -22,6 +22,7 @@ type transactionalResizePTY struct {
 	sizes    []domain.Size
 	errs     []error
 	onResize func()
+	onWrite  func([]byte)
 }
 
 func (p *transactionalResizePTY) Resize(size domain.Size) error {
@@ -39,8 +40,16 @@ func (p *transactionalResizePTY) Resize(size domain.Size) error {
 	}
 	return err
 }
-func (*transactionalResizePTY) Read([]byte) (int, error)     { return 0, io.EOF }
-func (*transactionalResizePTY) Write(b []byte) (int, error)  { return len(b), nil }
+func (*transactionalResizePTY) Read([]byte) (int, error) { return 0, io.EOF }
+func (p *transactionalResizePTY) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	hook := p.onWrite
+	p.mu.Unlock()
+	if hook != nil {
+		hook(append([]byte(nil), b...))
+	}
+	return len(b), nil
+}
 func (*transactionalResizePTY) Close() error                 { return nil }
 func (*transactionalResizePTY) Pid() int                     { return 0 }
 func (*transactionalResizePTY) ForegroundPgid() (int, error) { return 0, nil }
@@ -48,6 +57,124 @@ func (p *transactionalResizePTY) requested() []domain.Size {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]domain.Size(nil), p.sizes...)
+}
+
+// resizeReaderPTY is a deterministic child: Resize releases its redraw only
+// after the daemon has installed resizeApplying, and waits until ptyReader has
+// accepted that read. It deliberately has no timing dependency.
+type resizeReaderPTY struct {
+	redraw    []byte
+	reads     chan []byte
+	accepted  chan struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
+	mu        sync.Mutex
+	applying  func() bool
+	delivered bool
+}
+
+func newResizeReaderPTY(redraw []byte) *resizeReaderPTY {
+	return &resizeReaderPTY{redraw: redraw, reads: make(chan []byte), accepted: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (p *resizeReaderPTY) Resize(domain.Size) error {
+	p.reads <- p.redraw
+	<-p.accepted
+	// A second, empty read cannot begin until ptyReader has processed the
+	// redraw from the first read. This is a channel rendezvous, not a timing
+	// assumption, and proves the redraw entered resizePending before Resize
+	// returns to replay it.
+	p.reads <- nil
+	<-p.accepted
+	p.mu.Lock()
+	p.delivered = p.applying != nil && p.applying()
+	p.mu.Unlock()
+	return nil
+}
+func (p *resizeReaderPTY) Read(dst []byte) (int, error) {
+	select {
+	case data := <-p.reads:
+		n := copy(dst, data)
+		p.accepted <- struct{}{}
+		return n, nil
+	case <-p.closed:
+		return 0, io.EOF
+	}
+}
+func (*resizeReaderPTY) Write(b []byte) (int, error)  { return len(b), nil }
+func (*resizeReaderPTY) Pid() int                     { return 0 }
+func (*resizeReaderPTY) ForegroundPgid() (int, error) { return 0, nil }
+func (p *resizeReaderPTY) Close() error               { p.close(); return nil }
+func (p *resizeReaderPTY) close()                     { p.closeOnce.Do(func() { close(p.closed) }) }
+func (p *resizeReaderPTY) deliveredWhileApplying() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.delivered
+}
+
+func TestReplayResizePendingBuffersSuccessFailureAndBatchOrder(t *testing.T) {
+	t.Run("success resizes then replays", func(t *testing.T) {
+		pty := &transactionalResizePTY{}
+		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+		tb, p := sess.activeTab(), sess.activeTab().focusedPane()
+		p.resizeApplying = true
+		p.resizePending = []byte("A\x1b[1;81HB")
+		d.replayResizePending(sess, tb, p, true, domain.Rect{Width: 120, Height: 23})
+		require.Equal(t, 120, p.screen.Frame.Width)
+		require.Equal(t, 'B', p.screen.Frame.At(80, 0).Rune)
+		require.False(t, p.resizeApplying)
+	})
+	t.Run("failure retains old parser width", func(t *testing.T) {
+		pty := &transactionalResizePTY{}
+		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+		tb, p := sess.activeTab(), sess.activeTab().focusedPane()
+		p.resizeApplying = true
+		p.resizePending = []byte("\x1b[1;81HB")
+		d.replayResizePending(sess, tb, p, false, domain.Rect{Width: 120, Height: 23})
+		require.Equal(t, 80, p.screen.Frame.Width)
+		require.Equal(t, 'B', p.screen.Frame.At(79, 0).Rune)
+	})
+	t.Run("batches retain read order", func(t *testing.T) {
+		pty := &transactionalResizePTY{}
+		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+		tb, p := sess.activeTab(), sess.activeTab().focusedPane()
+		p.screen.OnResponse = func([]byte) { p.ptyResponses = append(p.ptyResponses, 'r') }
+		pty.onWrite = func([]byte) {
+			p.mu.Lock()
+			p.resizePending = append(p.resizePending, 'B')
+			p.mu.Unlock()
+		}
+		p.resizeApplying = true
+		p.resizePending = []byte("A\x1b[6n")
+		d.replayResizePending(sess, tb, p, true, domain.Rect{Width: 80, Height: 23})
+		require.Equal(t, "AB", screenLineText(p.screen, 0)[:2])
+	})
+}
+
+func TestProcessPTYDataRetainsCallbacksDuringResizeReplay(t *testing.T) {
+	responses := make(chan []byte, 1)
+	pty := &transactionalResizePTY{onWrite: func(b []byte) { responses <- b }}
+	d, sess, _, sends := newManualSessionWithPTYs(t, pty)
+	tb, p := sess.activeTab(), sess.activeTab().focusedPane()
+	p.screen.OnResponse = func(b []byte) { p.ptyResponses = append(p.ptyResponses, b...) }
+	p.screen.OnBell = func() { p.ptyAttention = true }
+	p.screen.OnClipboard = func(b64 string) { p.ptyClipboards = append(p.ptyClipboards, b64) }
+	p.resizeApplying = true
+	p.resizePending = []byte("\x1b]2;resized\a\a\x1b]52;c;YQ==\a\x1b[6n")
+	d.replayResizePending(sess, tb, p, true, domain.Rect{Width: 80, Height: 23})
+
+	p.mu.Lock()
+	title := p.title.terminalTitle
+	p.mu.Unlock()
+	require.Equal(t, "resized", title)
+	require.True(t, tb.attention)
+	require.NotEmpty(t, <-responses, "DSR response must be flushed back to the child")
+	// DSR is flushed back to the child and OSC 52 is forwarded through the
+	// normal asynchronous client path, proving replay uses processPTYData.
+	frame := awaitFrame(t, sends, ports.MsgOutput)
+	out, err := ports.UnmarshalOutput(frame.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(out.Data), "\x1b]52;c;YQ==\a")
 }
 
 // S3 acceptance: prepare may inspect layout under its locks, but apply must

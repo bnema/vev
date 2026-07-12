@@ -8,14 +8,15 @@ import (
 // resizeMember is an unpublished layout decision.  Prepare only reads guarded
 // state; apply performs the external PTY call; commit is the sole publisher.
 type resizeMember struct {
-	session    *session
-	tab        *tab
-	pane       *pane
-	rect       domain.Rect
-	floating   floatingGeometry
-	isFloating bool
-	retry      bool
-	ok         bool
+	session       *session
+	tab           *tab
+	pane          *pane
+	rect          domain.Rect
+	floating      floatingGeometry
+	isFloating    bool
+	retry         bool
+	ok            bool
+	screenResized bool
 }
 
 type resizePlan struct {
@@ -93,6 +94,7 @@ func (d *Daemon) applyResize(plan *resizePlan, current ...func() bool) bool {
 		} else {
 			m.ok = true
 			d.replayResizePending(m.session, m.tab, m.pane, true, m.rect)
+			m.screenResized = true
 		}
 		m.pane.resizeMu.Unlock()
 	}
@@ -148,7 +150,7 @@ func (d *Daemon) commitResize(sess *session, ac *attachedClient, plan resizePlan
 		if m.isFloating {
 			m.pane.popupGeometry = m.floating
 		}
-		if m.ok {
+		if m.ok && !m.screenResized {
 			m.pane.screen.Resize(m.rect.Width, m.rect.Height)
 		}
 		m.pane.mu.Unlock()
@@ -223,9 +225,12 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, epoch uin
 			continue
 		}
 		member.pane.mu.Lock()
-		// The rect is the already committed layout target. Resize VT only now,
-		// then force a reset so renderer shadow cannot retain padded cells.
-		member.pane.screen.Resize(member.rect.Width, member.rect.Height)
+		// The rect is the already committed layout target. A successful apply
+		// already resized before replaying buffered bytes; PTY-less members still
+		// need their VT resized here. Force a reset below in either case.
+		if !member.screenResized {
+			member.pane.screen.Resize(member.rect.Width, member.rect.Height)
+		}
 		member.pane.mu.Unlock()
 		succeeded = true
 	}
