@@ -210,15 +210,16 @@ type terminalOutput interface {
 }
 
 type cliProcess struct {
-	cmd          *exec.Cmd
-	pty          io.ReadWriteCloser
-	output       terminalOutput
-	chunks       chan []byte
-	done         chan struct{}
-	closed       sync.Once
-	waitErr      chan error
-	waitTimeout  func() <-chan time.Time
-	forceCleanup func()
+	cmd           *exec.Cmd
+	pty           io.ReadWriteCloser
+	output        terminalOutput
+	chunks        chan []byte
+	done          chan struct{}
+	closed        sync.Once
+	waitErr       chan error
+	waitTimeout   func() <-chan time.Time
+	forceCleanup  func()
+	terminalReady bool
 }
 
 func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProcess, error) {
@@ -413,17 +414,27 @@ func (p *cliProcess) Warmup(input []byte) error {
 	if p.pty == nil || len(input) == 0 {
 		return nil
 	}
+	// A client cannot write application output until it has received Welcome and
+	// entered raw mode. Require that observable output before submitting any
+	// warmup input, so the PTY's line discipline cannot echo it locally.
+	if !p.terminalReady {
+		if err := p.waitForTerminalReady(); err != nil {
+			return err
+		}
+		p.terminalReady = true
+	}
 	if _, err := p.pty.Write(input); err != nil {
 		return err
 	}
 	// Do not begin measured input until the public client has rendered a real
 	// shell response to warmup input. This is intentionally not a measurement.
-	return p.waitForTerminalMarker(inputMarker(input))
+	return p.waitForTerminalMarker(inputMarker(input), input)
 }
 
 // Measure records a boundary only after the harness-owned terminal output file
-// has accepted data and Sync has reported a successful flush. The marker is
-// injected through the real client PTY, never fabricated by the harness.
+// has accepted application output and Sync has reported a successful flush.
+// The marker is injected through the real client PTY, never fabricated by the
+// harness. PTY local echo is discarded and cannot satisfy this boundary.
 func (p *cliProcess) Measure(input []byte, injected, flushed func() error) error {
 	if p.pty == nil {
 		return errors.New("measured process has no terminal PTY")
@@ -435,7 +446,7 @@ func (p *cliProcess) Measure(input []byte, injected, flushed func() error) error
 	if err := injected(); err != nil {
 		return err
 	}
-	if err := p.waitForTerminalMarker(inputMarker(input)); err != nil {
+	if err := p.waitForTerminalMarker(inputMarker(input), input); err != nil {
 		return err
 	}
 	if err := p.output.Sync(); err != nil {
@@ -444,26 +455,98 @@ func (p *cliProcess) Measure(input []byte, injected, flushed func() error) error
 	return flushed()
 }
 
-func (p *cliProcess) waitForTerminalMarker(marker []byte) error {
+// waitForTerminalReady waits for public client output produced before any
+// harness input. The client enters raw mode before its output loop can render
+// this initial prompt/state, so this is an observable readiness boundary.
+func (p *cliProcess) waitForTerminalReady() error {
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case chunk, ok := <-p.chunks:
+			if !ok {
+				return errors.New("client terminal closed before readiness output")
+			}
+			if len(chunk) == 0 {
+				continue
+			}
+			if err := p.output.Sync(); err != nil {
+				return fmt.Errorf("flush terminal readiness output: %w", err)
+			}
+			return nil
+		case err := <-p.waitErr:
+			// Keep the exit result available to Close, which owns reaping.
+			p.waitErr <- err
+			if err == nil {
+				return errors.New("client exited before readiness output")
+			}
+			return fmt.Errorf("client exited before readiness output: %w", err)
+		case <-timer.C:
+			return errors.New("timed out waiting for client readiness output")
+		}
+	}
+}
+
+func (p *cliProcess) waitForTerminalMarker(marker, input []byte) error {
 	var received []byte
+	echo := newPTYLocalEcho(input)
 	timer := time.NewTimer(10 * time.Second)
 	defer timer.Stop()
 	for !bytes.Contains(received, marker) {
 		select {
 		case chunk, ok := <-p.chunks:
 			if !ok {
-				return errors.New("client terminal closed before terminal output")
+				return errors.New("client terminal closed before application output")
 			}
-			received = append(received, chunk...)
+			received = append(received, echo.applicationOutput(chunk)...)
 		case err := <-p.waitErr:
 			// Keep the exit result available to Close, which owns reaping.
 			p.waitErr <- err
 			if err == nil {
-				return errors.New("client exited before terminal output")
+				return errors.New("client exited before application output")
 			}
-			return fmt.Errorf("client exited before terminal output: %w", err)
+			return fmt.Errorf("client exited before application output: %w", err)
 		case <-timer.C:
-			return errors.New("timed out waiting for terminal output")
+			return errors.New("timed out waiting for application terminal output")
+		}
+	}
+	return nil
+}
+
+// ptyLocalEcho removes the one ordered input echo that a not-yet-raw slave PTY
+// can produce. It normalizes NL to the conventional ONLCR echo spelling; any
+// divergence is retained as application output. The line discipline emits the
+// echo before the child can read and respond to the same write.
+type ptyLocalEcho struct {
+	expected []byte
+	matched  int
+	done     bool
+}
+
+func newPTYLocalEcho(input []byte) *ptyLocalEcho {
+	expected := make([]byte, 0, len(input))
+	for _, b := range input {
+		if b == '\n' {
+			expected = append(expected, '\r')
+		}
+		expected = append(expected, b)
+	}
+	return &ptyLocalEcho{expected: expected}
+}
+
+func (e *ptyLocalEcho) applicationOutput(chunk []byte) []byte {
+	if e.done || len(e.expected) == 0 {
+		return chunk
+	}
+	for i, b := range chunk {
+		if b != e.expected[e.matched] {
+			e.done = true
+			return append([]byte(nil), chunk[i:]...)
+		}
+		e.matched++
+		if e.matched == len(e.expected) {
+			e.done = true
+			return append([]byte(nil), chunk[i+1:]...)
 		}
 	}
 	return nil
@@ -1073,9 +1156,9 @@ func mergeProcessTraces(mappings []processMapping) ([]span, error) {
 				_ = f.Close()
 				return nil, err
 			}
-			if r.ProcessID != m.ProcessID {
+			if r.ProcessID != m.ProcessID || r.Scenario != m.Scenario || r.Run != uint64(m.Run) {
 				_ = f.Close()
-				return nil, errors.New("trace record process_id does not match manifest")
+				return nil, errors.New("trace record identity does not match manifest")
 			}
 			if r.Scenario == "" || r.Run == 0 || r.Component == "" || r.Sequence == 0 || r.RequestID == 0 || r.Epoch == 0 {
 				_ = f.Close()

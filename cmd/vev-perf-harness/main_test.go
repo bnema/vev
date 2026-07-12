@@ -157,6 +157,21 @@ func (p *fakePTY) Write(b []byte) (int, error) {
 }
 func (*fakePTY) Close() error { return nil }
 
+type stagedPTY struct {
+	allow  <-chan struct{}
+	writes chan []byte
+}
+
+func (*stagedPTY) Read([]byte) (int, error) { return 0, os.ErrClosed }
+func (p *stagedPTY) Write(b []byte) (int, error) {
+	if p.allow != nil {
+		<-p.allow
+	}
+	p.writes <- append([]byte(nil), b...)
+	return len(b), nil
+}
+func (*stagedPTY) Close() error { return nil }
+
 type fakeOutput struct {
 	bytes.Buffer
 	syncs int
@@ -218,11 +233,59 @@ func TestHarnessDoesNotInheritNestedSession(t *testing.T) {
 	}
 }
 
-func TestCLIProcessOwnsPTYInjectionAndSuccessfulFlushBoundary(t *testing.T) {
+func TestCLIProcessWarmupWaitsForDelayedTerminalReadiness(t *testing.T) {
+	allowWrite := make(chan struct{})
+	pty, output := &stagedPTY{allow: allowWrite, writes: make(chan []byte, 1)}, &fakeOutput{}
+	p := &cliProcess{pty: pty, output: output, chunks: make(chan []byte)}
+	input := workloadInput(scenario{ID: "s"}, 1, "warmup")
+	done := make(chan error, 1)
+	go func() { done <- p.Warmup(input) }()
+
+	// This is public client output from the initial application prompt/state,
+	// emitted only after the client has entered raw mode. A premature PTY write
+	// blocks on allowWrite and therefore cannot consume this delayed readiness.
+	go func() {
+		p.chunks <- []byte("shell prompt$ ")
+		close(allowWrite)
+	}()
+	select {
+	case got := <-pty.writes:
+		if !bytes.Equal(got, input) {
+			t.Fatalf("warmup write=%q want %q", got, input)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("warmup did not wait for and then proceed from client readiness")
+	}
+	go func() { p.chunks <- append([]byte("application "), inputMarker(input)...); close(p.chunks) }()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if output.syncs != 1 {
+		t.Fatalf("readiness output was not flushed: syncs=%d", output.syncs)
+	}
+}
+
+func TestCLIProcessRejectsPTYLocalEchoAsFlushEvidence(t *testing.T) {
 	pty, output := &fakePTY{}, &fakeOutput{}
 	p := &cliProcess{pty: pty, output: output, chunks: make(chan []byte, 1)}
 	input := workloadInput(scenario{ID: "s"}, 1, "measured-1")
-	p.chunks <- append([]byte("terminal "), inputMarker(input)...)
+	p.chunks <- newPTYLocalEcho(input).expected
+	close(p.chunks)
+	flushed := false
+	if err := p.Measure(input, func() error { return nil }, func() error { flushed = true; return nil }); err == nil {
+		t.Fatal("local PTY echo satisfied terminal flush boundary")
+	}
+	if flushed || output.syncs != 0 {
+		t.Fatalf("local echo stamped a flush: flushed=%t syncs=%d", flushed, output.syncs)
+	}
+}
+
+func TestCLIProcessPairsApplicationOutputWithSuccessfulFlush(t *testing.T) {
+	pty, output := &fakePTY{}, &fakeOutput{}
+	p := &cliProcess{pty: pty, output: output, chunks: make(chan []byte, 1)}
+	input := workloadInput(scenario{ID: "s"}, 1, "measured-1")
+	echo := newPTYLocalEcho(input).expected
+	p.chunks <- append(append([]byte(nil), echo...), append([]byte("application "), inputMarker(input)...)...)
 	order := []string{}
 	if err := p.Measure(input, func() error { order = append(order, "injected"); return nil }, func() error { order = append(order, "flushed"); return nil }); err != nil {
 		t.Fatal(err)
@@ -630,7 +693,14 @@ func TestHarnessRejectsCrossProcessAndBadTraceSpans(t *testing.T) {
 	base := func(kind string, tick int64) traceRecord {
 		return traceRecord{ProcessID: "one", Component: "daemon", Scenario: "s", Run: 1, Sequence: 1, RequestID: 1, Epoch: 1, Kind: kind, Tick: tick}
 	}
-	for _, records := range [][]traceRecord{{base("diff_end", 1)}, {base("diff_start", 2), base("diff_end", 1)}, {base("diff_start", 1)}, {func() traceRecord { r := base("diff_start", 1); r.ProcessID = "other"; return r }()}} {
+	for _, records := range [][]traceRecord{
+		{base("diff_end", 1)},
+		{base("diff_start", 2), base("diff_end", 1)},
+		{base("diff_start", 1)},
+		{func() traceRecord { r := base("diff_start", 1); r.ProcessID = "other"; return r }()},
+		{func() traceRecord { r := base("diff_start", 1); r.Scenario = "other-scenario"; return r }()},
+		{func() traceRecord { r := base("diff_start", 1); r.Run = 2; return r }()},
+	} {
 		if _, err := mergeProcessTraces([]processMapping{write(t, records...)}); err == nil {
 			t.Fatalf("invalid trace accepted: %+v", records)
 		}
