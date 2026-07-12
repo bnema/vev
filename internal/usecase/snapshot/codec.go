@@ -22,13 +22,17 @@ var (
 )
 
 const (
-	magic              = "VEVS"
-	version            = uint16(3)
-	maxDecodedBodySize = 256 << 20
-	maxSnapshotBlobs   = 1 << 16
-	maxSnapshotBytes   = 256 << 20
-	maxSnapshotRows    = 1 << 20
-	maxSnapshotCells   = 16 << 20
+	magic                = "VEVS"
+	version              = uint16(3)
+	maxDecodedBodySize   = 256 << 20
+	maxSnapshotBlobs     = 1 << 16
+	maxSnapshotBytes     = 256 << 20
+	maxSnapshotRows      = 1 << 20
+	maxSnapshotCells     = 16 << 20
+	maxSnapshotTreeNodes = 1 << 15
+	// 256 MiB accommodates a full 10k-row history at practical terminal widths
+	// while bounding hostile manifests before decoded slices are allocated.
+	maxSnapshotDecodedAllocation = 256 << 20
 )
 
 // Marshal encodes the strict v3, flags-zero durable envelope.
@@ -574,8 +578,9 @@ func preflightSession(body []byte) error {
 	}
 	var totals vt.DecodeStats
 	blobs := uint64(0)
+	budget := preflightBudget{}
 	for range tabs {
-		if err := preflightTab(&r, &totals, &blobs); err != nil {
+		if err := preflightTab(&r, &totals, &blobs, &budget); err != nil {
 			return fmt.Errorf("preflight tab: %w", err)
 		}
 	}
@@ -600,7 +605,38 @@ func skipString(r *payloadReader) error {
 	return nil
 }
 
-func preflightTab(r *payloadReader, totals *vt.DecodeStats, blobs *uint64) error {
+type preflightBudget struct {
+	nodes uint64
+	alloc uint64
+}
+
+func (b *preflightBudget) addAllocation(amount uint64) bool {
+	if amount > maxSnapshotDecodedAllocation-b.alloc {
+		return false
+	}
+	b.alloc += amount
+	return true
+}
+
+func (b *preflightBudget) addProduct(count, size uint64) bool {
+	if count != 0 && size > math.MaxUint64/count {
+		return false
+	}
+	return b.addAllocation(count * size)
+}
+
+func (b *preflightBudget) addNode() bool {
+	if b.nodes >= maxSnapshotTreeNodes || !b.addAllocation(128) {
+		return false
+	}
+	b.nodes++
+	return true
+}
+
+func preflightTab(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, budget *preflightBudget) error {
+	if !budget.addAllocation(256) {
+		return fmt.Errorf("%w: decoded allocation budget", ErrInvalidData)
+	}
 	if err := skipString(r); err != nil {
 		return err
 	}
@@ -616,7 +652,7 @@ func preflightTab(r *payloadReader, totals *vt.DecodeStats, blobs *uint64) error
 	if err := skipString(r); err != nil {
 		return err
 	}
-	if err := preflightNode(r, 0); err != nil {
+	if err := preflightNode(r, 0, budget); err != nil {
 		return err
 	}
 	panes, err := r.getUint16()
@@ -626,17 +662,21 @@ func preflightTab(r *payloadReader, totals *vt.DecodeStats, blobs *uint64) error
 	if uint64(panes) > uint64(len(r.b))/2 {
 		return ErrShortPayload
 	}
+	ids := make(map[layout.PaneID]struct{})
 	for range panes {
-		if err := preflightPane(r, totals, blobs); err != nil {
+		if err := preflightPane(r, totals, blobs, ids, budget); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func preflightNode(r *payloadReader, depth int) error {
+func preflightNode(r *payloadReader, depth int, budget *preflightBudget) error {
 	if depth > 64 {
 		return fmt.Errorf("%w: tree depth", ErrInvalidData)
+	}
+	if !budget.addNode() {
+		return fmt.Errorf("%w: tree node or decoded allocation budget", ErrInvalidData)
 	}
 	kind, err := r.getUint8()
 	if err != nil {
@@ -666,17 +706,29 @@ func preflightNode(r *payloadReader, depth int) error {
 		return ErrShortPayload
 	}
 	for range children {
-		if err := preflightNode(r, depth+1); err != nil {
+		if err := preflightNode(r, depth+1, budget); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func preflightPane(r *payloadReader, totals *vt.DecodeStats, blobs *uint64) error {
-	if err := skipString(r); err != nil {
+func preflightPane(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, ids map[layout.PaneID]struct{}, budget *preflightBudget) error {
+	if !budget.addAllocation(256) {
+		return fmt.Errorf("%w: decoded allocation budget", ErrInvalidData)
+	}
+	id, err := r.getString()
+	if err != nil {
 		return err
 	}
+	if id == "" {
+		return fmt.Errorf("%w: empty pane ID", ErrInvalidData)
+	}
+	paneID := layout.PaneID(id)
+	if _, exists := ids[paneID]; exists {
+		return fmt.Errorf("%w: duplicate pane ID", ErrInvalidData)
+	}
+	ids[paneID] = struct{}{}
 	if err := skipString(r); err != nil {
 		return err
 	}
@@ -691,29 +743,43 @@ func preflightPane(r *payloadReader, totals *vt.DecodeStats, blobs *uint64) erro
 		return fmt.Errorf("%w: sealed chunks", ErrInvalidData)
 	}
 	for range n {
-		if err := preflightBlob(r, totals, blobs, true); err != nil {
+		stats, err := preflightBlob(r, totals, blobs, true, budget)
+		if err != nil {
 			return err
 		}
+		if stats.Chunks != 1 || stats.Rows == 0 {
+			return fmt.Errorf("%w: sealed blob role", ErrInvalidData)
+		}
 	}
-	if err := preflightBlob(r, totals, blobs, true); err != nil {
+	tail, err := preflightBlob(r, totals, blobs, true, budget)
+	if err != nil {
 		return err
 	}
-	if err := preflightBlob(r, totals, blobs, false); err != nil {
+	if tail.Chunks != 0 || tail.Rows != 0 || tail.Cells != 0 {
+		return fmt.Errorf("%w: tail blob role", ErrInvalidData)
+	}
+	visible, err := preflightBlob(r, totals, blobs, false, budget)
+	if err != nil {
 		return err
+	}
+	// PreflightVisibleBlob above validates width×height and exact payload
+	// cardinality. A visible terminal frame itself must also be nonempty.
+	if visible.Rows == 0 || visible.Cells == 0 {
+		return fmt.Errorf("%w: visible geometry", ErrInvalidData)
 	}
 	return preflightProcess(r)
 }
 
-func preflightBlob(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, history bool) error {
+func preflightBlob(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, history bool, budget *preflightBudget) (vt.DecodeStats, error) {
 	n, err := r.getUint32()
 	if err != nil {
-		return err
+		return vt.DecodeStats{}, err
 	}
 	if n == 0 || uint64(n) > uint64(len(r.b)) || uint64(n) > maxSnapshotBytes {
-		return fmt.Errorf("%w: VT blob length", ErrInvalidData)
+		return vt.DecodeStats{}, fmt.Errorf("%w: VT blob length", ErrInvalidData)
 	}
 	if *blobs >= maxSnapshotBlobs {
-		return fmt.Errorf("%w: too many VT blobs", ErrInvalidData)
+		return vt.DecodeStats{}, fmt.Errorf("%w: too many VT blobs", ErrInvalidData)
 	}
 	blob := r.b[:n]
 	r.b = r.b[n:]
@@ -724,13 +790,16 @@ func preflightBlob(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, hist
 		stats, err = vt.PreflightVisibleBlob(blob)
 	}
 	if err != nil {
-		return fmt.Errorf("%w: VT blob", ErrInvalidData)
+		return vt.DecodeStats{}, fmt.Errorf("%w: VT blob", ErrInvalidData)
 	}
 	if !totals.Add(stats) {
-		return fmt.Errorf("%w: VT budget overflow", ErrInvalidData)
+		return vt.DecodeStats{}, fmt.Errorf("%w: VT budget overflow", ErrInvalidData)
+	}
+	if !budget.addAllocation(uint64(n)) || !budget.addProduct(stats.Chunks, 64) || !budget.addProduct(stats.Rows, 32) || !budget.addProduct(stats.Cells, 64) {
+		return vt.DecodeStats{}, fmt.Errorf("%w: decoded allocation budget", ErrInvalidData)
 	}
 	*blobs++
-	return nil
+	return stats, nil
 }
 
 func preflightProcess(r *payloadReader) error {

@@ -109,6 +109,8 @@ type Daemon struct {
 	snapshotWorkerCtx       context.Context
 	snapshotWorkerCancel    context.CancelFunc
 	snapshotWorkerDone      chan struct{}
+	snapshotWorkerFlush     chan struct{}
+	snapshotWorkerClosing   bool
 	snapshotWorkerInFlight  *snapshotCapture
 	restoreDone             chan struct{}
 	restoreOnce             sync.Once

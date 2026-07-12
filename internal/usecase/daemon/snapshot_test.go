@@ -19,6 +19,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 func TestSnapshotEncodeWorkerDefersMarshalUntilAfterCapture(t *testing.T) {
@@ -152,9 +153,55 @@ func exerciseBlockedSnapshotWorker(t *testing.T, blockEncode bool) {
 	require.True(t, sess.snapDirty.Load(), "PTY output published while blocked must remain retryable")
 }
 
+func TestFinalSnapshotFlushPersistsNewestNamedSessionBeforeWorkerTeardown(t *testing.T) {
+	clock := newFinalFlushClock()
+	store := &channelSnapshotStore{writes: make(chan []byte, 1)}
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
+	WithSnapshotStore(store)(d)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	d.startSnapshotEncodeWorker(ctx)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	d.snapshotMarshal = func(s snapcodec.Session) ([]byte, error) {
+		close(entered)
+		<-release
+		return snapcodec.Marshal(s)
+	}
+	sess := newSnapshotTestSession(t, "final", false, "/work")
+	pty := sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+	pty.EXPECT().Close().Return(nil).Once()
+	sess.tabs[0].panes["pane-1"].screen.Write([]byte("\rnewest"))
+	d.sessions[sess.id] = sess
+
+	require.NoError(t, d.killSession(sess, 0, false))
+	<-entered
+	stopped := make(chan struct{})
+	go func() {
+		d.stopSnapshotEncodeWorker()
+		close(stopped)
+	}()
+	close(release)
+	<-stopped
+	awaitSnapshotIdle(t, sess)
+
+	select {
+	case data := <-store.writes:
+		snap, err := snapcodec.Unmarshal(data)
+		require.NoError(t, err)
+		frame, err := vt.UnmarshalVisible(snap.Tabs[0].Panes[0].Visible)
+		require.NoError(t, err)
+		require.Contains(t, rowText(frame.Row(0)), "newest")
+	default:
+		t.Fatal("final snapshot was dropped during worker teardown")
+	}
+}
+
 func TestStopSnapshotEncodeWorkerDoesNotWaitForUncancellableWrite(t *testing.T) {
 	store := newNeverReturningSnapshotStore()
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	clock := newFinalFlushClock()
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	WithSnapshotStore(store)(d)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -169,11 +216,9 @@ func TestStopSnapshotEncodeWorkerDoesNotWaitForUncancellableWrite(t *testing.T) 
 		d.stopSnapshotEncodeWorker()
 		close(stopped)
 	}()
-	select {
-	case <-stopped:
-	case <-time.After(time.Second):
-		t.Fatal("snapshot worker shutdown waited for uncancellable Write")
-	}
+	timer := <-clock.timers
+	timer.ch <- time.Time{}
+	<-stopped
 	awaitSnapshotIdle(t, sess)
 	require.True(t, sess.snapDirty.Load(), "an abandoned write must remain retryable")
 	require.NotPanics(t, func() { require.False(t, d.scheduleSnapshot(sess)) })
@@ -868,6 +913,19 @@ func (c *manualSnapshotClock) fireNext(t *testing.T) {
 		case <-time.After(time.Millisecond):
 		}
 	}
+}
+
+type finalFlushClock struct{ timers chan *manualSnapshotTimer }
+
+func newFinalFlushClock() *finalFlushClock {
+	return &finalFlushClock{timers: make(chan *manualSnapshotTimer, 1)}
+}
+
+func (c *finalFlushClock) Now() time.Time { return time.Unix(0, 0) }
+func (c *finalFlushClock) NewTimer(time.Duration) ports.Timer {
+	t := &manualSnapshotTimer{ch: make(chan time.Time, 1)}
+	c.timers <- t
+	return t
 }
 
 type manualSnapshotTimer struct{ ch chan time.Time }

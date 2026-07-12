@@ -59,6 +59,21 @@ func TestRestorePaneTerminalRejectsMissingOrMalformedCanonicalBlobs(t *testing.T
 	}
 }
 
+func TestRestoreSessionClosesOpenedPTYWhenTerminalRestoreFails(t *testing.T) {
+	factory := &restorePTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	pane := emptyTerminalPane(t, "pane-1", "/tmp")
+	pane.Tail = []byte("malformed")
+
+	err := d.restoreSession(context.Background(), snapcodec.Session{Name: "bad", Tabs: []snapcodec.Tab{{
+		Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{pane},
+	}}})
+
+	require.Error(t, err)
+	require.Len(t, factory.opens, 1)
+	require.Equal(t, 1, factory.opens[0].pty.closeCount())
+}
+
 func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 	store := &restoreSnapshotStore{}
 	store.blobs = []ports.SnapshotBlob{{Name: "work", Data: mustSnapshotBytes(t, snapcodec.Session{
@@ -532,6 +547,7 @@ func (f *restorePTYFactory) Open(ctx context.Context, _ string, _ []string, env 
 type restorePTY struct {
 	mu       sync.Mutex
 	writes   []string
+	closes   int
 	writeErr error
 	done     chan struct{}
 	once     sync.Once
@@ -551,7 +567,18 @@ func (p *restorePTY) Write(b []byte) (int, error) {
 	}
 	return len(b), nil
 }
-func (p *restorePTY) Close() error                 { p.once.Do(func() { close(p.done) }); return nil }
+func (p *restorePTY) Close() error {
+	p.mu.Lock()
+	p.closes++
+	p.mu.Unlock()
+	p.once.Do(func() { close(p.done) })
+	return nil
+}
+func (p *restorePTY) closeCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closes
+}
 func (p *restorePTY) Resize(domain.Size) error     { return nil }
 func (p *restorePTY) Pid() int                     { return 0 }
 func (p *restorePTY) ForegroundPgid() (int, error) { return 0, nil }

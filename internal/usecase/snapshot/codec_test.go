@@ -125,6 +125,24 @@ func TestUnmarshalRejectsEveryV3PrefixAndTrailingGarbage(t *testing.T) {
 	reject(t, append(encoded, 0), ErrTrailingBytes)
 }
 
+func TestUnmarshalRejectsEmptyAndDuplicatePaneIDsDuringPreflight(t *testing.T) {
+	sealed, tail := historyBlobs(t, nil)
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+	for _, tc := range []struct {
+		name  string
+		panes []Pane
+	}{
+		{name: "empty", panes: []Pane{{ID: "", Tail: tail, Visible: visible}}},
+		{name: "duplicate", panes: []Pane{{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible}, {ID: "p", Tail: tail, Visible: visible}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := Marshal(Session{Name: "s", Tabs: []Tab{{Panes: tc.panes}}})
+			requireNoError(t, err)
+			reject(t, data, ErrInvalidData)
+		})
+	}
+}
+
 func TestUnmarshalRejectsInvalidTreeReference(t *testing.T) {
 	sealed, tail := historyBlobs(t, nil)
 	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
@@ -134,6 +152,33 @@ func TestUnmarshalRejectsInvalidTreeReference(t *testing.T) {
 	}
 	if _, err := Unmarshal(encoded); !errors.Is(err, ErrUnknownPane) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestUnmarshalRejectsNonCanonicalBlobRolesDuringPreflight(t *testing.T) {
+	sealed, tail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'a'}}, {{Rune: 'b'}}, {{Rune: 'c'}}})
+	if len(sealed) == 0 {
+		t.Fatal("expected a sealed chunk")
+	}
+	multiChunk := append([]byte(nil), sealed[0][:5]...)
+	multiChunk = binary.BigEndian.AppendUint32(multiChunk, 2)
+	multiChunk = append(multiChunk, sealed[0][9:]...)
+	multiChunk = append(multiChunk, sealed[0][9:]...)
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+	emptyVisible := visibleBlob(t, nil)
+	for _, tc := range []struct {
+		name string
+		tab  Tab
+	}{
+		{name: "sealed multi-chunk", tab: Tab{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", SealedChunks: [][]byte{multiChunk}, Tail: tail, Visible: visible}}}},
+		{name: "nonempty tail", tab: Tab{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", Tail: sealed[0], Visible: visible}}}},
+		{name: "empty visible geometry", tab: Tab{Panes: []Pane{{ID: "p", Tail: tail, Visible: emptyVisible}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := Marshal(Session{Name: "s", Tabs: []Tab{tc.tab}})
+			requireNoError(t, err)
+			reject(t, data, ErrInvalidData)
+		})
 	}
 }
 
@@ -236,6 +281,20 @@ func TestUnmarshalRejectsProcessWithoutArgv(t *testing.T) {
 	}
 }
 
+func TestPreflightBudgetRejectsAggregateDecodedAllocation(t *testing.T) {
+	budget := preflightBudget{alloc: maxSnapshotDecodedAllocation - 1}
+	if budget.addProduct(1, 2) {
+		t.Fatal("allocation budget accepted an over-limit aggregate")
+	}
+}
+
+func TestPreflightRejectsBroadTreeBeforeSecondPassAllocation(t *testing.T) {
+	body := v3WideTreeManifest(32_769)
+	if err := preflightSession(body); !errors.Is(err, ErrInvalidData) {
+		t.Fatalf("preflightSession() error = %v, want %v", err, ErrInvalidData)
+	}
+}
+
 func TestUnmarshalRejectsAggregateOpaqueBlobDeclarations(t *testing.T) {
 	body := v3Manifest(math.MaxUint32, nil, nil, math.MaxUint32, nil, math.MaxUint32, nil)
 	reject(t, v3Envelope(version, 0, body), ErrInvalidData)
@@ -318,6 +377,27 @@ func v3EnvelopeWithLength(v, flags uint16, body []byte, length uint32) []byte {
 }
 
 // v3Manifest creates just enough session/tab/pane framing for hostile declarations.
+// v3WideTreeManifest declares a broad but compact tree without allocating a
+// matching layout.Node graph. It exercises preflight's manifest budget.
+func v3WideTreeManifest(children uint16) []byte {
+	var b []byte
+	putS := func(s string) { b = binary.BigEndian.AppendUint16(b, uint16(len(s))); b = append(b, s...) }
+	putS("s")
+	b = append(b, make([]byte, 8+2)...)
+	b = binary.BigEndian.AppendUint16(b, 1)
+	putS("")
+	b = append(b, make([]byte, 2+2+8)...)
+	putS("")
+	b = append(b, 1, byte(layout.Horizontal)) // split node
+	b = binary.BigEndian.AppendUint16(b, children)
+	for range children {
+		b = append(b, 0) // leaf
+		putS("")
+	}
+	b = binary.BigEndian.AppendUint16(b, 0) // panes
+	return b
+}
+
 func v3Manifest(sealed uint32, sealedLens []uint32, sealedData []byte, tailLen uint32, tailData []byte, visibleLen uint32, visibleData []byte) []byte {
 	var b []byte
 	putS := func(s string) { b = binary.BigEndian.AppendUint16(b, uint16(len(s))); b = append(b, s...) }

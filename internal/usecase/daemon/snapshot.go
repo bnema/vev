@@ -47,7 +47,10 @@ type snapshotCapturePane struct {
 	process  *snapcodec.Process
 }
 
-const snapshotInterval = 30 * time.Second
+const (
+	snapshotInterval          = 30 * time.Second
+	snapshotFinalFlushTimeout = time.Second
+)
 
 func (d *Daemon) closeRestoreDone() {
 	d.restoreOnce.Do(func() { close(d.restoreDone) })
@@ -183,6 +186,9 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 			p.ctx, p.cancel = context.WithCancel(tb.ctx)
 			p.rect = contentRect
 			if err := restorePaneTerminal(p, paneSnap); err != nil {
+				// p is not in tb.panes yet, so closeOpened cannot reach it.
+				p.cancel()
+				_ = pty.Close()
 				closeOpened()
 				return err
 			}
@@ -320,7 +326,7 @@ func (d *Daemon) scheduleSnapshot(sess *session) bool {
 func (d *Daemon) enqueueSnapshotCapture(capture *snapshotCapture) bool {
 	d.snapshotWorkerMu.Lock()
 	defer d.snapshotWorkerMu.Unlock()
-	if d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
+	if d.snapshotWorkerClosing || d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
 		return false
 	}
 	select {
@@ -457,36 +463,61 @@ func (d *Daemon) startSnapshotEncodeWorker(ctx context.Context) {
 		d.snapshotWorkerMu.Unlock()
 		return
 	}
-	workerCtx, cancel := context.WithCancel(ctx)
+	// Shutdown owns the worker lifetime so it can flush captures after Serve
+	// cancels its parent context. The worker is always stopped explicitly.
+	workerCtx, cancel := context.WithCancel(context.Background())
 	d.snapshotWorkerID++
 	workerID := d.snapshotWorkerID
 	d.snapshotWorkerCtx = workerCtx
 	d.snapshotWorkerCancel = cancel
 	d.snapshotWorkerDone = make(chan struct{})
+	d.snapshotWorkerFlush = make(chan struct{})
+	d.snapshotWorkerClosing = false
 	d.snapshotWorkerInFlight = nil
 	done := d.snapshotWorkerDone
+	flush := d.snapshotWorkerFlush
 	d.snapshotWorkerMu.Unlock()
 	go func() {
 		defer close(done)
+		write := func(capture *snapshotCapture) bool {
+			if workerCtx.Err() != nil || !d.setSnapshotWorkerInFlight(workerID, capture) {
+				d.finishSnapshotCapture(capture, false)
+				return false
+			}
+			data, err := d.encodeSnapshotCapture(capture)
+			if err == nil && workerCtx.Err() == nil {
+				err = d.snaps.Write(capture.name, data)
+			}
+			d.clearSnapshotWorkerInFlight(workerID, capture)
+			if err != nil && workerCtx.Err() == nil {
+				d.log.Warn("writing session snapshot failed", "err", err, "session", capture.name)
+			}
+			d.finishSnapshotCapture(capture, err == nil && workerCtx.Err() == nil)
+			return workerCtx.Err() == nil
+		}
+		flushQueued := func() {
+			for {
+				select {
+				case capture := <-d.snapshotJobs:
+					if !write(capture) {
+						return
+					}
+				default:
+					return
+				}
+			}
+		}
 		for {
 			select {
 			case <-workerCtx.Done():
 				return
+			case <-flush:
+				flushQueued()
+				return
 			case capture := <-d.snapshotJobs:
-				// A queued capture must not begin persistence after shutdown.
-				if workerCtx.Err() != nil || !d.setSnapshotWorkerInFlight(workerID, capture) {
-					d.finishSnapshotCapture(capture, false)
+				if !write(capture) {
 					return
 				}
-				data, err := d.encodeSnapshotCapture(capture)
-				if err == nil && workerCtx.Err() == nil {
-					err = d.snaps.Write(capture.name, data)
-				}
-				d.clearSnapshotWorkerInFlight(workerID, capture)
-				if err != nil && workerCtx.Err() == nil {
-					d.log.Warn("writing session snapshot failed", "err", err, "session", capture.name)
-				}
-				d.finishSnapshotCapture(capture, err == nil && workerCtx.Err() == nil)
 			}
 		}
 	}()
@@ -516,19 +547,39 @@ func (d *Daemon) stopSnapshotEncodeWorker() {
 	}
 	d.snapshotWorkerMu.Lock()
 	cancel := d.snapshotWorkerCancel
-	if cancel == nil {
+	if cancel == nil || d.snapshotWorkerClosing {
 		d.snapshotWorkerMu.Unlock()
 		return
 	}
-	// The queue stays open, so producers can safely race teardown. Detach an
-	// in-flight uncancellable Write instead of waiting for it; the process owns
-	// that goroutine until the store returns.
+	// Stop accepting producers, then let the single worker drain its bounded
+	// queue. A non-context-aware store may still block indefinitely, so the
+	// injected clock bounds how long teardown waits before detaching it.
+	d.snapshotWorkerClosing = true
+	flush := d.snapshotWorkerFlush
+	done := d.snapshotWorkerDone
+	close(flush)
+	timer := d.clock.NewTimer(snapshotFinalFlushTimeout)
+	d.snapshotWorkerMu.Unlock()
+
+	select {
+	case <-done:
+		timer.Stop()
+		d.finishStoppedSnapshotWorker(false)
+	case <-timer.C():
+		cancel()
+		d.finishStoppedSnapshotWorker(true)
+	}
+}
+
+func (d *Daemon) finishStoppedSnapshotWorker(abandoned bool) {
+	d.snapshotWorkerMu.Lock()
 	inFlight := d.snapshotWorkerInFlight
 	d.snapshotWorkerCtx = nil
 	d.snapshotWorkerCancel = nil
 	d.snapshotWorkerDone = nil
+	d.snapshotWorkerFlush = nil
+	d.snapshotWorkerClosing = false
 	d.snapshotWorkerInFlight = nil
-	cancel()
 	queued := make([]*snapshotCapture, 0, len(d.snapshotJobs))
 	for {
 		select {
@@ -536,7 +587,9 @@ func (d *Daemon) stopSnapshotEncodeWorker() {
 			queued = append(queued, capture)
 		default:
 			d.snapshotWorkerMu.Unlock()
-			d.finishSnapshotCapture(inFlight, false)
+			if abandoned {
+				d.finishSnapshotCapture(inFlight, false)
+			}
 			for _, capture := range queued {
 				d.finishSnapshotCapture(capture, false)
 			}
