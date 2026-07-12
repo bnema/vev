@@ -8,6 +8,7 @@ import (
 // resizeMember is an unpublished layout decision.  Prepare only reads guarded
 // state; apply performs the external PTY call; commit is the sole publisher.
 type resizeMember struct {
+	session    *session
 	tab        *tab
 	pane       *pane
 	rect       domain.Rect
@@ -38,7 +39,7 @@ func (d *Daemon) prepareResize(sess *session, size domain.Size) resizePlan {
 				for _, pl := range placements {
 					if !pl.Collapsed && pl.Content.Width > 0 && pl.Content.Height > 0 {
 						if p := tb.panes[pl.ID]; p != nil {
-							plan.members = append(plan.members, resizeMember{tab: tb, pane: p, rect: pl.Content})
+							plan.members = append(plan.members, resizeMember{session: sess, tab: tb, pane: p, rect: pl.Content})
 						}
 					}
 				}
@@ -49,7 +50,7 @@ func (d *Daemon) prepareResize(sess *session, size domain.Size) resizePlan {
 		if i == active && tb.floating.state == floatingVisible && tb.floating.pane != nil {
 			g := calculateContentFloatingGeometry(tabSize(size), d.currentFloatingConfig())
 			if g.valid() {
-				plan.members = append(plan.members, resizeMember{tab: tb, pane: tb.floating.pane, rect: g.Inner, floating: g, isFloating: true})
+				plan.members = append(plan.members, resizeMember{session: sess, tab: tb, pane: tb.floating.pane, rect: g.Inner, floating: g, isFloating: true})
 			}
 		}
 		tb.mu.Unlock()
@@ -69,19 +70,56 @@ func (d *Daemon) applyResize(plan *resizePlan, current ...func() bool) bool {
 		m.pane.mu.Lock()
 		old, pty := m.pane.rect, m.pane.pty
 		screenSize := domain.Size{Cols: m.pane.screen.Frame.Width, Rows: m.pane.screen.Frame.Height}
+		needsApply := m.retry || old.Width != m.rect.Width || old.Height != m.rect.Height || screenSize != rectSize(m.rect)
+		if needsApply && pty != nil {
+			// Publish this gate before the external call. ptyReader keeps draining
+			// but does not parse bytes at the stale width while Resize is in flight.
+			m.pane.resizeApplying = true
+		}
 		m.pane.mu.Unlock()
-		if !m.retry && old.Width == m.rect.Width && old.Height == m.rect.Height && screenSize == rectSize(m.rect) {
-			m.ok = true
-		} else if pty == nil {
+		if !needsApply || pty == nil {
 			m.ok = true
 		} else if err := pty.Resize(rectSize(m.rect)); err != nil {
 			d.log.Warn("pty resize failed", "err", err)
+			d.replayResizePending(m.session, m.tab, m.pane, false, m.rect)
 		} else {
 			m.ok = true
+			d.replayResizePending(m.session, m.tab, m.pane, true, m.rect)
 		}
 		m.pane.resizeMu.Unlock()
 	}
 	return true
+}
+
+// replayResizePending completes a pane's apply epoch. It keeps the gate set
+// while each buffered batch goes through the normal VT path, so reads arriving
+// during replay join the same ordered stream. Failure deliberately omits the
+// Screen.Resize, parsing every byte at the old dimensions.
+func (d *Daemon) replayResizePending(sess *session, tb *tab, p *pane, resized bool, size domain.Rect) {
+	first := true
+	for {
+		p.mu.Lock()
+		if first && resized {
+			p.screen.Resize(size.Width, size.Height)
+		}
+		first = false
+		data := append([]byte(nil), p.resizePending...)
+		p.resizePending = p.resizePending[:0]
+		if len(data) == 0 {
+			p.resizeApplying = false
+			p.mu.Unlock()
+			return
+		}
+		p.mu.Unlock()
+		if sess == nil {
+			p.mu.Lock()
+			p.screen.Write(data)
+			p.refreshTerminalTitleLocked()
+			p.mu.Unlock()
+			continue
+		}
+		d.processPTYData(sess, tb, p, data, false)
+	}
 }
 
 func (d *Daemon) commitResize(sess *session, ac *attachedClient, plan resizePlan) {
@@ -149,6 +187,10 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, epoch u
 	// A successful transaction publishes exactly one full S2 frame. The
 	// coordinator is the only emission route and stale epochs never reach it.
 	rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: true, producer: "transactional_resize.go"})
+	// The resize debounce has already elapsed. Consume this sticky reset now;
+	// fire preserves ACK and synchronized-output gates rather than scheduling a
+	// second urgent deadline.
+	rc.fireCurrent(false)
 }
 
 // retryResizeMembers retries only members which failed the committed epoch.

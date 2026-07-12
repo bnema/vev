@@ -1447,7 +1447,7 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 	})
 }
 
-func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
+func TestRenderCoordinatorResizeEpochDispatch(t *testing.T) {
 	newResizeFixture := func(t *testing.T) (*Daemon, *session, *attachedClient, chan ports.Frame, *coordinatorMockClock, chan renderInvalidation) {
 		t.Helper()
 		p, releasePTY := newBlockingPTY(t)

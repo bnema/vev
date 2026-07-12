@@ -67,8 +67,8 @@ type renderWake struct {
 
 // resizeRequestMetadata is the coordinator-owned latest requested resize
 // state: S3's transaction entry point reads it through resizeSnapshot. It is
-// metadata ownership only — S1/S2 dispatch stays with the retained PR #71
-// attachment timer path.
+// metadata ownership only — S1/S2 dispatch stays with the coordinator
+// epoch timer path.
 type resizeRequestMetadata struct {
 	size      domain.Size
 	source    *attachedClient
@@ -742,7 +742,7 @@ func (c *renderCoordinator) noteSessionTeardown() {
 }
 
 // recordResizeRequest records the latest requested geometry and source before
-// the request delegates to the retained PR #71 attachment path. It returns
+// the request delegates to the coordinator epoch path. It returns
 // the strictly monotonically increased epoch, or 0 when the source is stale.
 func (c *renderCoordinator) recordResizeRequest(size domain.Size, source *attachedClient) uint64 {
 	c.mu.Lock()

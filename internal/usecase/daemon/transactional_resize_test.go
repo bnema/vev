@@ -174,8 +174,8 @@ func TestTransactionalResizeObsoleteTimerCallbacksCommitOnlyLatestEpoch(t *testi
 	for _, size := range []domain.Size{{Cols: 90, Rows: 24}, {Cols: 100, Rows: 28}, {Cols: 120, Rows: 32}} {
 		d.resize(sess, ac, size)
 	}
-	// Current PR #71 applies each resize before its debounce callback. S3 must
-	// leave this empty until the final callback's prepare/apply/commit epoch.
+	// Epoch scheduling leaves PTY geometry untouched until the final
+	// prepare/apply/commit callback.
 	require.Empty(t, pty.requested(), "obsolete requests must not resize the PTY")
 
 	var timers []*coordinatorMockTimer
@@ -192,17 +192,8 @@ func TestTransactionalResizeObsoleteTimerCallbacksCommitOnlyLatestEpoch(t *testi
 	snapshot := sess.renderCoordinator().resizeSnapshot()
 	require.Equal(t, uint64(3), snapshot.epoch)
 	require.Equal(t, snapshot.epoch, snapshot.committed)
-	// Flush the separately coalesced render invalidation; resize commits do not
-	// bypass the S2 coordinator deadline. The transaction publishes committed
-	// metadata immediately before enqueueing that invalidation, so observe the
-	// enqueue explicitly rather than racing the callback goroutine.
-	rc := sess.renderCoordinator()
-	require.Eventually(t, func() bool {
-		rc.mu.Lock()
-		defer rc.mu.Unlock()
-		return rc.pending
-	}, time.Second, time.Millisecond)
-	rc.fireCurrent(false)
+	// The resize deadline is the only debounce: commit fires its sticky reset
+	// through S2 immediately (subject to ACK/sync gates).
 	frame := <-frames
 	require.Equal(t, ports.MsgOutput, frame.Type, "the committed epoch emits a full frame")
 	select {

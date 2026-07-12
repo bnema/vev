@@ -16,15 +16,23 @@ import (
 // attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
 // The PTY reader takes only pane.mu, so child output never waits on client IO.
 type pane struct {
-	id                layout.PaneID
-	stableID          string
-	pty               ports.PTY
-	mu                sync.Mutex // guards screen, scrollback, syncGen, rect, and title
-	resizeMu          sync.Mutex // serializes PTY resizes without holding mu
-	screen            *vt.Screen
-	scrollback        *scopy.Scrollback
-	syncGen           uint64
-	rect              domain.Rect
+	id         layout.PaneID
+	stableID   string
+	pty        ports.PTY
+	mu         sync.Mutex // guards screen, scrollback, syncGen, rect, and title
+	resizeMu   sync.Mutex // serializes PTY resizes without holding mu
+	screen     *vt.Screen
+	scrollback *scopy.Scrollback
+	syncGen    uint64
+	rect       domain.Rect
+	// resizeApplying gates VT parsing across PTY.Resize. The reader continues
+	// draining into resizePending so output is replayed against the target (or
+	// retained old) screen only after apply resolves.
+	resizeApplying    bool
+	resizePending     []byte
+	ptyResponses      []byte
+	ptyClipboards     []string
+	ptyAttention      bool
 	popupGeometry     floatingGeometry // last geometry committed after a successful floating resize
 	title             paneTitleState
 	ctx               context.Context

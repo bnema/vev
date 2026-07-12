@@ -18,13 +18,6 @@ func completedSynchronizedUpdate(data []byte) bool {
 	return found && bytes.Contains(tail, []byte(renderer.SyncEndCSI))
 }
 
-func signal(ch chan struct{}) {
-	select {
-	case ch <- struct{}{}:
-	default:
-	}
-}
-
 // paneRenderable reports dynamic composition visibility. Callers must not
 // hold coordinator locks: this acquires daemon/session/tab/pane-adjacent locks.
 func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
@@ -92,97 +85,17 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 		return
 	}
 	buf := make([]byte, ptyReadBufSize)
-	var resp []byte
-	var clipboards []string
-	attentionCh := make(chan struct{}, 1)
 	p.mu.Lock()
-	p.screen.OnResponse = func(b []byte) { resp = append(resp, b...) }
-	p.screen.OnBell = func() { signal(attentionCh) }
-	p.screen.OnNotify = func(string, string) { signal(attentionCh) }
-	p.screen.OnProgress = func(bool) { signal(attentionCh) }
-	p.screen.OnClipboard = func(b64 string) { clipboards = append(clipboards, b64) }
+	p.screen.OnResponse = func(b []byte) { p.ptyResponses = append(p.ptyResponses, b...) }
+	p.screen.OnBell = func() { p.ptyAttention = true }
+	p.screen.OnNotify = func(string, string) { p.ptyAttention = true }
+	p.screen.OnProgress = func(bool) { p.ptyAttention = true }
+	p.screen.OnClipboard = func(b64 string) { p.ptyClipboards = append(p.ptyClipboards, b64) }
 	p.mu.Unlock()
 	for {
 		n, err := p.pty.Read(buf)
 		if n > 0 {
-			data := buf[:n]
-			rc := sess.renderCoordinator()
-			p.mu.Lock()
-			wasSyncing := p.screen.SyncUpdateActive()
-			p.screen.Write(data)
-			p.refreshTerminalTitleLocked()
-			isSyncing := p.screen.SyncUpdateActive()
-			completeSyncRead := !wasSyncing && !isSyncing && completedSynchronizedUpdate(data)
-			var syncGen uint64
-			syncEnded := false
-			if wasSyncing != isSyncing {
-				if isSyncing {
-					syncGen = sess.syncGen.Add(1)
-					p.syncGen = syncGen
-					// Publish the gate while the authoritative screen mutation is
-					// still protected. A concurrent deadline therefore cannot
-					// compose this partial DEC 2026 payload.
-					if rc != nil {
-						rc.noteSyncBeginWithRenderability(p, syncGen, func() bool {
-							return d.paneRenderable(sess, tb, p)
-						}, func() {
-							p.mu.Lock()
-							if p.syncGen == syncGen && p.screen.SyncUpdateActive() {
-								p.screen.ForceSyncEnd()
-							}
-							p.mu.Unlock()
-						})
-					}
-				} else {
-					syncGen = p.syncGen
-					syncEnded = rc != nil && rc.removeSyncEnd(p, syncGen, true)
-				}
-			}
-			p.mu.Unlock()
-			renderable := d.paneRenderable(sess, tb, p)
-			markSnapshotDirty(sess)
-			select {
-			case <-attentionCh:
-				d.noteAttention(sess, tb)
-			default:
-			}
-			if len(clipboards) > 0 {
-				for _, b64 := range clipboards {
-					d.forwardClipboardAsync(sess, b64)
-				}
-				clipboards = clipboards[:0]
-			}
-			if len(resp) > 0 {
-				if _, writeErr := p.pty.Write(resp); writeErr != nil {
-					d.log.Warn("pty response write failed", "err", writeErr, "session", sess.name)
-				}
-				resp = resp[:0]
-			}
-			if rc != nil {
-				if wasSyncing != isSyncing {
-					if isSyncing {
-						// The accumulated synchronized batch is the pending render only
-						// while this pane can currently reach a composition target.
-						if renderable {
-							rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
-						}
-					} else if syncEnded && renderable {
-						// State removal happened under pane.mu. Publish a new urgent
-						// completion after unlock: detach/replace may have cleared the
-						// pending batch work, so fireCurrent alone could not wake a
-						// headless picker preview or replacement attachment.
-						rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
-					}
-				}
-				if completeSyncRead && renderable {
-					// The entire batch completed in this read. Its final screen state
-					// is ready now, so bypass the bulk debounce without arming a
-					// watchdog for a batch that no longer exists.
-					rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
-				} else if renderable && !isSyncing && wasSyncing == isSyncing {
-					rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
-				}
-			}
+			d.processPTYData(sess, tb, p, buf[:n], true)
 		}
 		if err != nil {
 			if p.onExit != nil {
@@ -191,6 +104,88 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 				d.reapPane(sess, tb, p)
 			}
 			return
+		}
+	}
+}
+
+// processPTYData is the sole VT parsing path. While a resize apply owns the
+// pane, reader calls append exact bytes and returns immediately; it never waits
+// for PTY.Resize or loses a short read.
+func (d *Daemon) processPTYData(sess *session, tb *tab, p *pane, data []byte, bufferDuringApply bool) {
+	rc := sess.renderCoordinator()
+	p.mu.Lock()
+	if bufferDuringApply && p.resizeApplying {
+		p.resizePending = append(p.resizePending, data...)
+		p.mu.Unlock()
+		return
+	}
+	wasSyncing := p.screen.SyncUpdateActive()
+	p.screen.Write(data)
+	p.refreshTerminalTitleLocked()
+	isSyncing := p.screen.SyncUpdateActive()
+	completeSyncRead := !wasSyncing && !isSyncing && completedSynchronizedUpdate(data)
+	var syncGen uint64
+	syncEnded := false
+	if wasSyncing != isSyncing {
+		if isSyncing {
+			syncGen = sess.syncGen.Add(1)
+			p.syncGen = syncGen
+			if rc != nil {
+				rc.noteSyncBeginWithRenderability(p, syncGen, func() bool { return d.paneRenderable(sess, tb, p) }, func() {
+					p.mu.Lock()
+					if p.syncGen == syncGen && p.screen.SyncUpdateActive() {
+						p.screen.ForceSyncEnd()
+					}
+					p.mu.Unlock()
+				})
+			}
+		} else {
+			syncGen = p.syncGen
+			syncEnded = rc != nil && rc.removeSyncEnd(p, syncGen, true)
+		}
+	}
+	p.mu.Unlock()
+	renderable := d.paneRenderable(sess, tb, p)
+	markSnapshotDirty(sess)
+	d.flushPTYEffects(sess, tb, p)
+	if rc != nil {
+		if wasSyncing != isSyncing {
+			if isSyncing {
+				if renderable {
+					rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+				}
+			} else if syncEnded && renderable {
+				rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
+			}
+		}
+		if completeSyncRead && renderable {
+			rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
+		} else if renderable && !isSyncing && wasSyncing == isSyncing {
+			rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+		}
+	}
+}
+
+// flushPTYEffects preserves the normal response/title/attention/clipboard
+// behavior for both direct reads and resize-buffer replay.
+func (d *Daemon) flushPTYEffects(sess *session, tb *tab, p *pane) {
+	p.mu.Lock()
+	attention := p.ptyAttention
+	p.ptyAttention = false
+	responses := append([]byte(nil), p.ptyResponses...)
+	p.ptyResponses = p.ptyResponses[:0]
+	clipboards := append([]string(nil), p.ptyClipboards...)
+	p.ptyClipboards = p.ptyClipboards[:0]
+	p.mu.Unlock()
+	if attention {
+		d.noteAttention(sess, tb)
+	}
+	for _, b64 := range clipboards {
+		d.forwardClipboardAsync(sess, b64)
+	}
+	if len(responses) > 0 {
+		if _, err := p.pty.Write(responses); err != nil {
+			d.log.Warn("pty response write failed", "err", err, "session", sess.name)
 		}
 	}
 }
