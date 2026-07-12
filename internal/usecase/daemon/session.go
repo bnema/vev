@@ -50,6 +50,7 @@ type session struct {
 	snapshotMu         sync.Mutex
 	snapshotGeneration uint64
 	snapshotPending    bool
+	snapshotChanged    chan struct{}
 	// syncGen makes synchronized-output watchdog generations unique across all
 	// panes in this session.
 	syncGen atomic.Uint64

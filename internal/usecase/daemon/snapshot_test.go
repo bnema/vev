@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -286,6 +285,31 @@ func TestSnapshotQueueSaturationLeavesCaptureRetryable(t *testing.T) {
 	require.True(t, d.scheduleSnapshot(third))
 	<-store.writes
 	awaitSnapshotClean(t, third)
+}
+
+func TestSnapshotCompletionSignalsWaiters(t *testing.T) {
+	store := &channelSnapshotStore{writes: make(chan []byte, 1)}
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	WithSnapshotStore(store)(d)
+	startSnapshotEncodeWorker(t, d)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	d.snapshotMarshal = func(s snapcodec.Session) ([]byte, error) {
+		close(entered)
+		<-release
+		return snapcodec.Marshal(s)
+	}
+	sess := newSnapshotTestSession(t, "completion", false, "/work")
+	require.True(t, d.captureSession(sess))
+	<-entered
+
+	sess.snapshotMu.Lock()
+	changed := sess.snapshotChangeLocked()
+	sess.snapshotMu.Unlock()
+	close(release)
+	<-changed
+	awaitSnapshotClean(t, sess)
 }
 
 func TestSnapshotSuccessDoesNotClearNewerGeneration(t *testing.T) {
@@ -794,27 +818,30 @@ func newSnapshotTestSession(t *testing.T, name string, ephemeral bool, cwd strin
 
 func awaitSnapshotIdle(t *testing.T, sess *session) {
 	t.Helper()
-	for range 4096 {
+	for {
 		sess.snapshotMu.Lock()
 		pending := sess.snapshotPending
+		changed := sess.snapshotChangeLocked()
 		sess.snapshotMu.Unlock()
 		if !pending {
 			return
 		}
-		runtime.Gosched()
+		<-changed
 	}
-	t.Fatal("snapshot worker did not become idle")
 }
 
 func awaitSnapshotClean(t *testing.T, sess *session) {
 	t.Helper()
-	for range 4096 {
-		if !sess.snapDirty.Load() {
+	for {
+		sess.snapshotMu.Lock()
+		clean := !sess.snapDirty.Load()
+		changed := sess.snapshotChangeLocked()
+		sess.snapshotMu.Unlock()
+		if clean {
 			return
 		}
-		runtime.Gosched()
+		<-changed
 	}
-	t.Fatal("snapshot worker did not finish")
 }
 
 func startSnapshotEncodeWorker(t *testing.T, d *Daemon) {

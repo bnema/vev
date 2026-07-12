@@ -253,7 +253,24 @@ func markSnapshotDirty(sess *session) {
 	sess.snapshotMu.Lock()
 	sess.snapshotGeneration++
 	sess.snapDirty.Store(true)
+	sess.signalSnapshotChangedLocked()
 	sess.snapshotMu.Unlock()
+}
+
+// snapshotChangeLocked returns a channel closed by the next snapshot state
+// transition. snapshotMu must be held.
+func (sess *session) snapshotChangeLocked() chan struct{} {
+	if sess.snapshotChanged == nil {
+		sess.snapshotChanged = make(chan struct{})
+	}
+	return sess.snapshotChanged
+}
+
+// signalSnapshotChangedLocked wakes waiters after a snapshot state transition.
+// snapshotMu must be held.
+func (sess *session) signalSnapshotChangedLocked() {
+	close(sess.snapshotChangeLocked())
+	sess.snapshotChanged = make(chan struct{})
 }
 
 func restorePaneTerminal(p *pane, snap snapcodec.Pane) error {
@@ -308,6 +325,7 @@ func (d *Daemon) scheduleSnapshot(sess *session) bool {
 	}
 	generation := sess.snapshotGeneration
 	sess.snapshotPending = true
+	sess.signalSnapshotChangedLocked()
 	sess.snapshotMu.Unlock()
 
 	capture, ok := d.captureSnapshotState(sess, generation)
@@ -454,6 +472,7 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 		} else if !succeeded {
 			capture.session.snapDirty.Store(true)
 		}
+		capture.session.signalSnapshotChangedLocked()
 		capture.session.snapshotMu.Unlock()
 	})
 }
