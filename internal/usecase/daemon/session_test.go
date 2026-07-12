@@ -34,8 +34,8 @@ func TestRoutePropagatesHelloCwdAndTabsInheritIt(t *testing.T) {
 	f := portsmocks.NewMockPTYFactory(t)
 	var dirs []string
 	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(_ string, _ []string, _ []string, dir string, _ domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, _ []string, dir string, _ domain.Size) (ports.PTY, error) {
 			dirs = append(dirs, dir)
 			if len(dirs) == 1 {
 				return first, nil
@@ -44,7 +44,7 @@ func TestRoutePropagatesHelloCwdAndTabsInheritIt(t *testing.T) {
 		},
 	).Twice()
 	floating := newQuietPTY()
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
 		return got != normalSize && got.Valid()
 	})).Return(floating, nil).Maybe()
 
@@ -210,13 +210,13 @@ func TestCreateTabClosesPTYIfSessionKilledDuringOpen(t *testing.T) {
 
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: 80, Rows: 22}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).Return(p1, nil).Once()
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).Return(p1, nil).Once()
 	floating := newQuietPTY()
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
 		return got != normalSize && got.Valid()
 	})).Return(floating, nil).Maybe()
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(string, []string, []string, string, domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
+		func(context.Context, string, []string, []string, string, domain.Size) (ports.PTY, error) {
 			close(opened)
 			<-releaseOpen
 			return p2, nil
@@ -516,8 +516,8 @@ func TestHelloRacingShutdownIsRejected(t *testing.T) {
 	preShutdownFloatingOpen := make(chan struct{}, 1)
 	var opensAfterShutdown atomic.Int32
 	d := newTestDaemon(t, f, stubClock{})
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ string, _ []string, _ []string, _ string, size domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, _ []string, _ string, size domain.Size) (ports.PTY, error) {
 			select {
 			case <-d.done:
 				opensAfterShutdown.Add(1)
@@ -1113,8 +1113,8 @@ func TestNewSessionAssignsStableIDsAndChildEnv(t *testing.T) {
 
 	var gotEnv []string
 	f := portsmocks.NewMockPTYFactory(t)
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
 			gotEnv = append([]string(nil), env...)
 			return p, nil
 		},
@@ -1266,8 +1266,8 @@ func TestAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 	var opens [][]string
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
 			opens = append(opens, append([]string(nil), env...))
 			if len(opens) == 1 {
 				return p1, nil
@@ -1276,7 +1276,7 @@ func TestAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 		},
 	).Twice()
 	floating := newQuietPTY()
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
 		return got != normalSize && got.Valid()
 	})).Return(floating, nil).Maybe()
 
@@ -1311,8 +1311,8 @@ func TestLiveAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 	var opens [][]string
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
 			opens = append(opens, append([]string(nil), env...))
 			if len(opens) == 1 {
 				return p1, nil
@@ -1321,7 +1321,7 @@ func TestLiveAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 		},
 	).Twice()
 	floating := newQuietPTY()
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
 		return got != normalSize && got.Valid()
 	})).Return(floating, nil).Maybe()
 
@@ -1358,8 +1358,8 @@ func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
 	var opens [][]string
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
 			opens = append(opens, append([]string(nil), env...))
 			if len(opens) == 1 {
 				return p1, nil
@@ -1368,7 +1368,7 @@ func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
 		},
 	).Twice()
 	floating := newQuietPTY()
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
 		return got != normalSize && got.Valid()
 	})).Return(floating, nil).Maybe()
 	d := newTestDaemon(t, f, stubClock{})

@@ -141,7 +141,7 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 					return fmt.Errorf("snapshot: generating pane identity: %w", err)
 				}
 			}
-			pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(snap.Name, tabStableID, paneStableID, restoreTerm), paneSnap.Cwd, contentSize)
+			pty, err := d.ptys.Open(d.serveCtx, d.shell, d.shellArgs, d.childEnv(snap.Name, tabStableID, paneStableID, restoreTerm), paneSnap.Cwd, contentSize)
 			if err != nil {
 				closeOpened()
 				return err

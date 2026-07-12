@@ -131,7 +131,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 			closeTabs(tabs)
 			return nil, err
 		}
-		pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
+		pty, err := d.ptys.Open(d.serveCtx, d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
 		if err != nil {
 			closeTabs(tabs)
 			d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "session")
@@ -272,7 +272,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	if err != nil {
 		return err
 	}
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
+	pty, err := d.ptys.Open(d.serveCtx, d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
 	if err != nil {
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "tab")
 		return fmt.Errorf("daemon: spawning tab for session %q: %w", name, err)
@@ -674,14 +674,9 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 			d.captureSession(sess)
 		}
 	}
-	// Serialize removal of the final session with the last transition into a
-	// floating Open. This establishes whether an Open is pre-shutdown work or
-	// is rejected, without holding d.mu across the external call.
-	d.floatingLaunchGate.Lock()
 	d.mu.Lock()
 	if _, ok := d.sessions[sess.id]; !ok {
 		d.mu.Unlock()
-		d.floatingLaunchGate.Unlock()
 		return nil
 	}
 	delete(d.sessions, sess.id)
@@ -706,7 +701,6 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 		d.closing = true
 	}
 	d.mu.Unlock()
-	d.floatingLaunchGate.Unlock()
 	d.log.Info("session closed", "session", stoppedName, "id", sess.id, "ephemeral", ephemeral, "purge", purge, "reason", reason)
 
 	purgeErr := snapshotDeleteErr
@@ -743,9 +737,9 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	}
 
 	// Prevent queued launches from entering Open, then cancel the parent
-	// context. In-flight Opens are joined below so a late result is always
-	// closed before teardown returns.
-	floatingLaunches := sess.stopFloatingLaunches()
+	// context. The launch worker owns any late PTY result and closes it rather
+	// than publishing it into the torn-down tab.
+	sess.stopFloatingLaunches()
 	sess.cancel()
 	sess.mu.Lock()
 	tabs := append([]*tab(nil), sess.tabs...)
@@ -756,9 +750,6 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 		d.clearDestroyedTabPreview(tb)
 		d.teardownFloating(tb, ac)
 		tb.closeAllPanes()
-	}
-	for _, launchDone := range floatingLaunches {
-		<-launchDone
 	}
 	for _, path := range clipFiles {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {

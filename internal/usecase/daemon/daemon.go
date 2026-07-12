@@ -22,7 +22,6 @@ import (
 // sustained floods step toward the maximum to reduce frame/syscall pressure.
 const (
 	minDebounceInterval   = 2 * time.Millisecond
-	maxDebounceInterval   = 16 * time.Millisecond
 	maxSyncUpdateDuration = 500 * time.Millisecond
 )
 
@@ -74,10 +73,6 @@ type Daemon struct {
 	// under the same mutex — so a Hello racing shutdown can never insert a new
 	// session that nobody would tear down.
 	closing bool
-	// floatingLaunchGate serializes the irreversible shutdown decision with the
-	// final transition into PTYFactory.Open. It is intentionally not d.mu: no
-	// daemon, session, or tab lock is held while an external Open can block.
-	floatingLaunchGate sync.Mutex
 	// notifies holds one completion channel per in-flight async Detached
 	// notification (guarded by mu, pruned on insert). Channels rather than a
 	// WaitGroup: notifications are spawned from arbitrary goroutines while
@@ -423,10 +418,6 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 // inserted after the snapshot: route rejects once closing is set, and both run
 // under d.mu. killSession (which relocks) runs after the lock is released.
 func (d *Daemon) shutdownAll(reason uint8) {
-	// Take the launch gate before publishing closing. A launch either entered
-	// Open before this point (and is subsequently reaped), or observes closing
-	// and never starts an external child.
-	d.floatingLaunchGate.Lock()
 	d.mu.Lock()
 	d.closing = true
 	for token, parked := range d.parked {
@@ -435,7 +426,6 @@ func (d *Daemon) shutdownAll(reason uint8) {
 	snapshot := d.sessionsSnapshotLocked()
 	empty := len(snapshot) == 0
 	d.mu.Unlock()
-	d.floatingLaunchGate.Unlock()
 	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })

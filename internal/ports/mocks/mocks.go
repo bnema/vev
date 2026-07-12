@@ -499,8 +499,8 @@ func (_m *MockPTYFactory) EXPECT() *MockPTYFactory_Expecter {
 }
 
 // Open provides a mock function for the type MockPTYFactory
-func (_mock *MockPTYFactory) Open(cmd string, args []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
-	ret := _mock.Called(cmd, args, env, dir, sz)
+func (_mock *MockPTYFactory) Open(ctx context.Context, cmd string, args []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
+	ret := _mock.Called(ctx, cmd, args, env, dir, sz)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Open")
@@ -508,18 +508,18 @@ func (_mock *MockPTYFactory) Open(cmd string, args []string, env []string, dir s
 
 	var r0 ports.PTY
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(string, []string, []string, string, domain.Size) (ports.PTY, error)); ok {
-		return returnFunc(cmd, args, env, dir, sz)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, []string, []string, string, domain.Size) (ports.PTY, error)); ok {
+		return returnFunc(ctx, cmd, args, env, dir, sz)
 	}
-	if returnFunc, ok := ret.Get(0).(func(string, []string, []string, string, domain.Size) ports.PTY); ok {
-		r0 = returnFunc(cmd, args, env, dir, sz)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, []string, []string, string, domain.Size) ports.PTY); ok {
+		r0 = returnFunc(ctx, cmd, args, env, dir, sz)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(ports.PTY)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(string, []string, []string, string, domain.Size) error); ok {
-		r1 = returnFunc(cmd, args, env, dir, sz)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, []string, []string, string, domain.Size) error); ok {
+		r1 = returnFunc(ctx, cmd, args, env, dir, sz)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -532,36 +532,41 @@ type MockPTYFactory_Open_Call struct {
 }
 
 // Open is a helper method to define mock.On call
+//   - ctx context.Context
 //   - cmd string
 //   - args []string
 //   - env []string
 //   - dir string
 //   - sz domain.Size
-func (_e *MockPTYFactory_Expecter) Open(cmd any, args any, env any, dir any, sz any) *MockPTYFactory_Open_Call {
-	return &MockPTYFactory_Open_Call{Call: _e.mock.On("Open", cmd, args, env, dir, sz)}
+func (_e *MockPTYFactory_Expecter) Open(ctx any, cmd any, args any, env any, dir any, sz any) *MockPTYFactory_Open_Call {
+	return &MockPTYFactory_Open_Call{Call: _e.mock.On("Open", ctx, cmd, args, env, dir, sz)}
 }
 
-func (_c *MockPTYFactory_Open_Call) Run(run func(cmd string, args []string, env []string, dir string, sz domain.Size)) *MockPTYFactory_Open_Call {
+func (_c *MockPTYFactory_Open_Call) Run(run func(ctx context.Context, cmd string, args []string, env []string, dir string, sz domain.Size)) *MockPTYFactory_Open_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 string
+		var arg0 context.Context
 		if args[0] != nil {
-			arg0 = args[0].(string)
+			arg0 = args[0].(context.Context)
 		}
-		var arg1 []string
+		var arg1 string
 		if args[1] != nil {
-			arg1 = args[1].([]string)
+			arg1 = args[1].(string)
 		}
 		var arg2 []string
 		if args[2] != nil {
 			arg2 = args[2].([]string)
 		}
-		var arg3 string
+		var arg3 []string
 		if args[3] != nil {
-			arg3 = args[3].(string)
+			arg3 = args[3].([]string)
 		}
-		var arg4 domain.Size
+		var arg4 string
 		if args[4] != nil {
-			arg4 = args[4].(domain.Size)
+			arg4 = args[4].(string)
+		}
+		var arg5 domain.Size
+		if args[5] != nil {
+			arg5 = args[5].(domain.Size)
 		}
 		run(
 			arg0,
@@ -569,6 +574,7 @@ func (_c *MockPTYFactory_Open_Call) Run(run func(cmd string, args []string, env 
 			arg2,
 			arg3,
 			arg4,
+			arg5,
 		)
 	})
 	return _c
@@ -579,7 +585,7 @@ func (_c *MockPTYFactory_Open_Call) Return(pTY ports.PTY, err error) *MockPTYFac
 	return _c
 }
 
-func (_c *MockPTYFactory_Open_Call) RunAndReturn(run func(cmd string, args []string, env []string, dir string, sz domain.Size) (ports.PTY, error)) *MockPTYFactory_Open_Call {
+func (_c *MockPTYFactory_Open_Call) RunAndReturn(run func(ctx context.Context, cmd string, args []string, env []string, dir string, sz domain.Size) (ports.PTY, error)) *MockPTYFactory_Open_Call {
 	_c.Call.Return(run)
 	return _c
 }

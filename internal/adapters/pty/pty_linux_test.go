@@ -4,6 +4,7 @@ package pty_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -53,7 +54,7 @@ func TestOpen_ChildOutputToEOF(t *testing.T) {
 		t.Skip("skipping pty integration test in -short mode")
 	}
 	f := newFactory()
-	p, err := f.Open("sh", []string{"-c", "printf hello"}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
+	p, err := f.Open(context.Background(), "sh", []string{"-c", "printf hello"}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = p.Close() })
 
@@ -70,7 +71,7 @@ func TestOpen_EchoRoundtrip(t *testing.T) {
 		t.Skip("skipping pty integration test in -short mode")
 	}
 	f := newFactory()
-	p, err := f.Open("cat", nil, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
+	p, err := f.Open(context.Background(), "cat", nil, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = p.Close() })
 
@@ -103,7 +104,7 @@ func TestForegroundPgid(t *testing.T) {
 		t.Skip("skipping pty integration test in -short mode")
 	}
 	f := newFactory()
-	p, err := f.Open("sh", []string{"-c", "sleep 2"}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
+	p, err := f.Open(context.Background(), "sh", []string{"-c", "sleep 2"}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = p.Close() })
 
@@ -141,7 +142,7 @@ func TestResize_SttySize(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newFactory()
-			p, err := f.Open("sh", []string{"-c", tt.script}, os.Environ(), "", tt.initial)
+			p, err := f.Open(context.Background(), "sh", []string{"-c", tt.script}, os.Environ(), "", tt.initial)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = p.Close() })
 
@@ -160,7 +161,7 @@ func TestClose_ReapsChildNoZombie(t *testing.T) {
 		t.Skip("skipping pty integration test in -short mode")
 	}
 	f := newFactory()
-	p, err := f.Open("sh", []string{"-c", "sleep 30"}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
+	p, err := f.Open(context.Background(), "sh", []string{"-c", "sleep 30"}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 
 	pid := p.Pid()
@@ -191,7 +192,7 @@ func TestClose_TerminatesLongRunningChild(t *testing.T) {
 		t.Skip("skipping pty integration test in -short mode")
 	}
 	f := newFactory()
-	p, err := f.Open("sh", []string{"-c", "sleep 60"}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
+	p, err := f.Open(context.Background(), "sh", []string{"-c", "sleep 60"}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	pid := p.Pid()
 
@@ -212,7 +213,7 @@ func TestResize_DeliversSIGWINCH(t *testing.T) {
 	// deliver SIGWINCH to the foreground process group.
 	script := `trap 'echo GOTWINCH; exit 0' WINCH; echo READY; i=0; while [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done`
 	f := newFactory()
-	p, err := f.Open("sh", []string{"-c", script}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
+	p, err := f.Open(context.Background(), "sh", []string{"-c", script}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = p.Close() })
 

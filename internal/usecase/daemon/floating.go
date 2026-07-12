@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
@@ -246,18 +245,6 @@ func (sess *session) registerFloatingLaunch() (*floatingLaunch, bool) {
 	return launch, true
 }
 
-// openFloating runs fn while only the dedicated launch-ownership lock is
-// held. It deliberately does not hold sess.mu, tb.mu, or d.mu across Open.
-func (sess *session) openFloating(fn func() (ports.PTY, error)) (ports.PTY, error, bool) {
-	sess.floatingLaunchMu.Lock()
-	defer sess.floatingLaunchMu.Unlock()
-	if sess.floatingLaunchStopping {
-		return nil, nil, false
-	}
-	pty, err := fn()
-	return pty, err, true
-}
-
 func (sess *session) finishFloatingLaunch(launch *floatingLaunch) {
 	sess.floatingLaunchMu.Lock()
 	delete(sess.floatingLaunches, launch)
@@ -265,15 +252,10 @@ func (sess *session) finishFloatingLaunch(launch *floatingLaunch) {
 	sess.floatingLaunchMu.Unlock()
 }
 
-func (sess *session) stopFloatingLaunches() []<-chan struct{} {
+func (sess *session) stopFloatingLaunches() {
 	sess.floatingLaunchMu.Lock()
 	sess.floatingLaunchStopping = true
-	done := make([]<-chan struct{}, 0, len(sess.floatingLaunches))
-	for launch := range sess.floatingLaunches {
-		done = append(done, launch.done)
-	}
 	sess.floatingLaunchMu.Unlock()
-	return done
 }
 
 type floatingLaunchSpec struct {
@@ -366,33 +348,19 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 // openAndInstallFloating runs entirely in the launch worker. No PTY operation
 // occurs under tb.mu; the pane is fully initialized before publication.
 func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLaunchSpec, generation uint64, launch *floatingLaunch) {
-	// The gate makes the final ownership check and external Open one shutdown
-	// epoch: shutdown cannot become irreversible between them. Neither d.mu,
-	// sess.mu, nor tb.mu is held while the factory can block.
-	d.floatingLaunchGate.Lock()
-	select {
-	case <-spec.parentCtx.Done():
-		d.floatingLaunchGate.Unlock()
-		return
-	default:
-	}
-	d.mu.Lock()
-	// Unit-scoped launch paths may use a session without registering it in the
-	// daemon map. Production sessions have an ID and must still be owned by
-	// the map until teardown removes them.
-	live := !d.closing && (sess.id == "" || d.sessions[sess.id] == sess)
-	d.mu.Unlock()
-	if !live {
-		d.floatingLaunchGate.Unlock()
+	// Open is context-aware and is intentionally called without any daemon,
+	// session, tab, or launch-ownership lock. Cancellation makes teardown
+	// bounded even if the adapter is waiting to create the child.
+	if err := spec.parentCtx.Err(); err != nil {
 		return
 	}
-	pty, err, opened := sess.openFloating(func() (ports.PTY, error) {
-		return d.ptys.Open(spec.command, spec.args, spec.env, spec.cwd, spec.size)
-	})
-	d.floatingLaunchGate.Unlock()
-	if !opened {
-		return
-	}
+	openCtx, cancelOpen := context.WithCancel(spec.parentCtx)
+	stopSessionCancel := context.AfterFunc(sess.ctx, cancelOpen)
+	defer func() {
+		stopSessionCancel()
+		cancelOpen()
+	}()
+	pty, err := d.ptys.Open(openCtx, spec.command, spec.args, spec.env, spec.cwd, spec.size)
 	if err != nil {
 		d.failFloatingLaunch(tb, generation, spec.userOpen, spec.sessionName, err)
 		return

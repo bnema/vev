@@ -39,7 +39,7 @@ func TestSplitPaneCreatesFocusedShellInRequestedPosition(t *testing.T) {
 			newPTY := portsmocks.NewMockPTY(t)
 			oldPTY.EXPECT().Resize(rectSize(tt.wantOld)).Return(nil).Once()
 			newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
-			factory.EXPECT().Open("/bin/sh", []string(nil), mock.Anything, "/work", rectSize(tt.wantNew)).Return(newPTY, nil).Once()
+			factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", rectSize(tt.wantNew)).Return(newPTY, nil).Once()
 
 			require.NoError(t, d.splitPane(sess, nil, tt.dir))
 
@@ -68,7 +68,7 @@ func TestSplitPaneRightFromStackSplitsWholeStack(t *testing.T) {
 	newPTY := portsmocks.NewMockPTY(t)
 	stackPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 2}).Return(nil).Once()
 	newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
-	factory.EXPECT().Open("/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 4}).Return(newPTY, nil).Once()
+	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 4}).Return(newPTY, nil).Once()
 
 	require.NoError(t, d.splitPane(sess, nil, layout.Right))
 
@@ -84,7 +84,7 @@ func TestSplitPaneRightFromStackSplitsWholeStack(t *testing.T) {
 
 func TestSplitPaneOpenErrorRollsBackTreeAndPaneMap(t *testing.T) {
 	d, sess, _, factory := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
-	factory.EXPECT().Open("/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).Return(nil, errors.New("open failed")).Once()
+	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).Return(nil, errors.New("open failed")).Once()
 
 	tb := sess.activeTab()
 	tb.mu.Lock()
@@ -231,7 +231,7 @@ func TestStackPaneCreatesStackAndToggleRestoresSplit(t *testing.T) {
 	d, sess, oldPTY, factory := newSplitTestDaemon(t, domain.Size{Cols: 20, Rows: 5})
 	newPTY := portsmocks.NewMockPTY(t)
 	newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
-	factory.EXPECT().Open("/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 3}).Return(newPTY, nil).Once()
+	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 3}).Return(newPTY, nil).Once()
 
 	require.NoError(t, d.stackPane(sess, nil))
 	tb := sess.activeTab()
@@ -251,7 +251,7 @@ func TestStackFocusWalkExpandsAndOverflowRefuses(t *testing.T) {
 	d, sess, oldPTY, factory := newSplitTestDaemon(t, domain.Size{Cols: 20, Rows: 3})
 	newPTY := portsmocks.NewMockPTY(t)
 	newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
-	factory.EXPECT().Open("/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 1}).Return(newPTY, nil).Once()
+	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 1}).Return(newPTY, nil).Once()
 	require.NoError(t, d.stackPane(sess, nil))
 	oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 1}).Return(nil).Once()
 
@@ -261,7 +261,7 @@ func TestStackFocusWalkExpandsAndOverflowRefuses(t *testing.T) {
 	require.Equal(t, layout.PaneID("pane-1"), tb.tree.Focus)
 	require.Equal(t, layout.PaneID("pane-1"), tb.tree.Root.Expanded)
 	thirdPTY := portsmocks.NewMockPTY(t)
-	factory.EXPECT().Open("/bin/sh", []string(nil), mock.Anything, "/work", mock.Anything).Return(thirdPTY, nil).Maybe()
+	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", mock.Anything).Return(thirdPTY, nil).Maybe()
 	require.ErrorIs(t, d.stackPane(sess, nil), layout.ErrTooSmall)
 	require.Len(t, tb.panes, 2)
 }
@@ -291,7 +291,7 @@ func TestCloseOriginalPaneLeavesSurvivorFunctional(t *testing.T) {
 	defer releaseNew()
 	oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Once()
 	newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
-	factory.EXPECT().Open("/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).Return(newPTY, nil).Once()
+	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).Return(newPTY, nil).Once()
 
 	require.NoError(t, d.splitPane(sess, nil, layout.Right))
 	tb := sess.activeTab()
@@ -350,8 +350,8 @@ func TestSplitPaneInheritsTerminalEnv(t *testing.T) {
 			oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Once()
 			newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
 			var gotEnv []string
-			factory.EXPECT().Open("/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).RunAndReturn(
-				func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+			factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).RunAndReturn(
+				func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
 					gotEnv = append([]string(nil), env...)
 					return newPTY, nil
 				},

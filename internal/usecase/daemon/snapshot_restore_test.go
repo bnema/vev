@@ -444,7 +444,7 @@ type restorePTYOpen struct {
 	pty  *restorePTY
 }
 
-func (f *restorePTYFactory) Open(_ string, _ []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
+func (f *restorePTYFactory) Open(_ context.Context, _ string, _ []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	pty := newRestorePTY()

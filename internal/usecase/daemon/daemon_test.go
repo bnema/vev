@@ -142,7 +142,7 @@ func newBlockingOpenFactory(t *testing.T, d *Daemon) *blockingOpenFactory {
 	return f
 }
 
-func (f *blockingOpenFactory) Open(string, []string, []string, string, domain.Size) (ports.PTY, error) {
+func (f *blockingOpenFactory) Open(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
 	<-f.release
 	return nil, io.ErrClosedPipe
 }
@@ -154,8 +154,8 @@ func newFactory(t *testing.T, p ports.PTY) *portsmocks.MockPTYFactory {
 	t.Helper()
 	f := portsmocks.NewMockPTYFactory(t)
 	var normal domain.Size
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ string, _ []string, _ []string, _ string, sz domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, _ []string, _ string, sz domain.Size) (ports.PTY, error) {
 			if !normal.Valid() {
 				normal = sz
 			}
@@ -174,8 +174,8 @@ func newFactorySeq(t *testing.T, ptys ...ports.PTY) *portsmocks.MockPTYFactory {
 	var mu sync.Mutex
 	var normal domain.Size
 	next := 0
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ string, _ []string, _ []string, _ string, sz domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, _ []string, _ string, sz domain.Size) (ports.PTY, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			if !normal.Valid() {
