@@ -208,7 +208,8 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 		if pl.Collapsed || pl.Content.Width <= 0 || pl.Content.Height <= 0 {
 			if consumeDamage {
 				p.mu.Lock()
-				_ = capturePaneRenderStateLocked(p, domain.Rect{}, mode)
+				captured := capturePaneRenderStateLocked(p, domain.Rect{}, mode)
+				p.screen.AcknowledgeDamage(captured.damageGeneration)
 				p.mu.Unlock()
 			}
 			continue
@@ -218,6 +219,7 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 		if consumeDamage {
 			p.mu.Lock()
 			captured := capturePaneRenderStateLocked(p, pl.Content, mode)
+			p.screen.AcknowledgeDamage(captured.damageGeneration)
 			p.mu.Unlock()
 			paneFrame, paneDamage = captured.frame, captured.damage
 		} else {

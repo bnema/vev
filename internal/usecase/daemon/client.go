@@ -54,6 +54,7 @@ type attachedClient struct {
 	theme                 themeui.Theme
 	clientTheme           themeui.Theme
 	lastCursor            cursorOut
+	renderStages          renderStageHooks // invoked at real pipeline boundaries while sendMu is held
 	// previousSession is guarded independently. It is retained through temporary
 	// setSession(nil) hand-offs and cleared only on terminal teardown.
 	previousSession Guarded[*session]

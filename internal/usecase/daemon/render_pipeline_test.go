@@ -60,7 +60,7 @@ func TestTransportReplayFinalShadowAndTerminalBytes(t *testing.T) {
 	require.Equal(t, []string{"one     ", "TWO     ", "        "}, frameRows(terminal.Frame), "terminal replay is the final renderer shadow")
 }
 
-func TestCapturePaneRenderStateOwnsVisibleFrameAndConsumesDamage(t *testing.T) {
+func TestCapturePaneRenderStateOwnsVisibleFrameWithoutConsumingDamage(t *testing.T) {
 	p := newPane("p", nil, domain.Size{Cols: 8, Rows: 2})
 	p.screen.ClearDamage()
 	p.screen.Write([]byte("old"))
@@ -71,7 +71,7 @@ func TestCapturePaneRenderStateOwnsVisibleFrameAndConsumesDamage(t *testing.T) {
 
 	require.Equal(t, 3, captured.frame.Width)
 	require.Equal(t, 1, captured.frame.Height)
-	require.Empty(t, p.screen.Damage())
+	require.NotEmpty(t, p.screen.Damage(), "capture is only a transactional snapshot")
 	p.mu.Lock()
 	p.screen.Write([]byte("new"))
 	p.mu.Unlock()
@@ -114,7 +114,7 @@ func TestCapturePaneRenderStateCollapsedConsumesBoundedly(t *testing.T) {
 
 	require.Zero(t, captured.frame.Width)
 	require.Zero(t, captured.frame.Height)
-	require.Empty(t, p.screen.Damage(), "capture owner cleans pending hidden-pane damage")
+	require.NotEmpty(t, p.screen.Damage(), "capture keeps hidden-pane damage pending until emission commits")
 }
 
 func TestPaintACKBlockedDoesNotDestructivelyCapture(t *testing.T) {

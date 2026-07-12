@@ -36,6 +36,12 @@ type renderCaptureScratch struct {
 	titleIDs   []layout.PaneID
 	treeNodes  []layout.Node
 	treeUsed   int
+	receipts   []damageReceipt
+}
+
+type damageReceipt struct {
+	pane       *pane
+	generation uint64
 }
 
 type capturedRenderState struct {
@@ -52,6 +58,7 @@ type capturedRenderState struct {
 	cursor             capturedCursorInputs
 	tabGeneration      uint64
 	floatingGeneration uint64
+	receipts           []damageReceipt // private capture receipts; compose must not inspect these
 }
 
 type capturedTabLayout struct {
@@ -116,7 +123,7 @@ func capturePaneRenderStateLocked(p *pane, visible domain.Rect, mode damageCaptu
 	return capturePaneRenderStateLockedInto(p, visible, mode, capturedPaneRenderState{})
 }
 
-func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, mode damageCaptureMode, out capturedPaneRenderState) capturedPaneRenderState {
+func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, _ damageCaptureMode, out capturedPaneRenderState) capturedPaneRenderState {
 	out.id, out.title, out.titleGeneration = p.id, p.displayTitleLocked(), p.title.generation
 	damage := p.screen.CaptureDamage()
 	out.damageGeneration = damage.Generation
@@ -142,11 +149,8 @@ func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, mode damageC
 	} else {
 		out.damage = append(out.damage[:0], damage.Damage...)
 	}
-	if mode == damageCaptureConsume {
-		if !p.screen.AcknowledgeDamage(damage.Generation) {
-			out.damage = []renderer.Damage{renderer.FullRedraw()}
-		}
-	}
+	// Consumption is transactional: capture only snapshots damage. emitFrame
+	// acknowledges this generation after preparation and transport success.
 	return out
 }
 
@@ -213,6 +217,7 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 		overlays: overlays, preview: preview,
 		layout:             capturedTabLayout{root: root, area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
 		floatingGeneration: tb.floating.generation,
+		receipts:           scratch.receipts[:0],
 	}
 	state.panes = scratch.panes[:0]
 	state.tabGeneration = uint64(len(layoutSnap.fingerprint))
@@ -230,6 +235,9 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 			ac.captureFrames = make(map[layout.PaneID]capturedPaneRenderState)
 		}
 		captured := capturePaneRenderStateLockedInto(p, visible, mode, ac.captureFrames[p.id])
+		if mode == damageCaptureConsume {
+			state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
+		}
 		captured.placement, captured.focused = placement, placement.ID == layoutSnap.focus
 		if captured.focused {
 			state.cursor = captureCursorInputsLocked(p, placement.Content, overlays)
@@ -252,11 +260,24 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 			ac.captureFrames = make(map[layout.PaneID]capturedPaneRenderState)
 		}
 		captured := capturePaneRenderStateLockedInto(p, geometry.Inner, mode, ac.captureFrames[p.id])
+		if mode == damageCaptureConsume {
+			seen := false
+			for _, receipt := range state.receipts {
+				if receipt.pane == p {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
+			}
+		}
 		ac.captureFrames[captured.id] = captured
 		state.floating = capturedFloatingRenderState{visible: true, pane: captured, geometry: geometry, title: captured.title, generation: tb.floating.generation, titleGeneration: captured.titleGeneration}
 		state.cursor = captureCursorInputsLocked(p, geometry.Inner, overlays)
 		p.mu.Unlock()
 	}
+	scratch.receipts = state.receipts
 	return state, true
 }
 

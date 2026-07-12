@@ -16,6 +16,17 @@ import (
 
 // composeCacheInput is an attachment-local value snapshot. composeFrame never
 // retains or accesses the attachment that owns it.
+// renderStageHooks are optional observability hooks. They are invoked only at
+// completed production boundaries: capture and compose after their result is
+// available, and emit after prepare plus transport success (including a
+// successful no-byte emission). Failed attempts count for capture/compose but
+// never for emit.
+type renderStageHooks struct {
+	capture func()
+	compose func()
+	emit    func()
+}
+
 type composeCacheInput struct {
 	valid                   bool
 	frame                   renderer.Frame
@@ -255,6 +266,22 @@ func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte
 	return b
 }
 
+// commitDamageReceipts acknowledges only snapshots that reached the client.
+// sendMu serializes attachment transactions; panes are locked individually so
+// no pane lock is held while another is acquired. A stale generation is
+// intentionally acknowledged too: Screen conservatively leaves FullRedraw for
+// the next transaction.
+func commitDamageReceipts(receipts []damageReceipt) {
+	for _, receipt := range receipts {
+		if receipt.pane == nil {
+			continue
+		}
+		receipt.pane.mu.Lock()
+		receipt.pane.screen.AcknowledgeDamage(receipt.generation)
+		receipt.pane.mu.Unlock()
+	}
+}
+
 // emitFrame is the sole side-effecting half of the pipeline. The caller holds
 // sendMu for the complete capture/compose/emit transaction.
 func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRenderState, composed composedRenderFrame) bool {
@@ -302,11 +329,21 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 	}
 	if sendErr == nil {
 		// Publish only after output preparation and transport emission both
-		// succeed. Swap the old committed cache back as the next compose target.
+		// succeed. Receipt acknowledgement follows after releasing the attachment
+		// session guard, while sendMu still owns this transaction.
 		ac.pipelineScratch = ac.pipelineCache
 		ac.pipelineCache = composed.cache
 	}
 	ac.sess.mu.Unlock()
+	if sendErr == nil {
+		// A successful no-byte emission also commits: its renderer shadow still
+		// represents the captured frame. Lock panes only under sendMu and with no
+		// session guard held.
+		commitDamageReceipts(state.receipts)
+		if ac.renderStages.emit != nil {
+			ac.renderStages.emit()
+		}
+	}
 	ac.sendMu.Unlock()
 	if sendErr != nil {
 		d.detachOnSendError(sess, ac, sendTr)

@@ -342,6 +342,11 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 	// The fixture uses the production coordinator. stubClock's inert timer is
 	// completed synchronously by the coordinator, keeping benchmark operations
 	// deterministic while retaining their real invalidation path.
+	ac.renderStages = renderStageHooks{
+		capture: func() { fixture.renderCaptures++ },
+		compose: func() { fixture.renderCompositions++ },
+		emit:    func() { fixture.renderEmissions++ },
+	}
 	d.attachCoordinator(sess, nil, ac, true)
 
 	// Prime the real renderer shadow before measurements. Subsequent paints use
@@ -408,11 +413,6 @@ func (f *performanceFixture) paintLive() {
 		f.d.paint(f.sess, f.ac, false)
 	}
 	f.paints++
-	// The production coordinator is synchronous under the fixture's inert
-	// clock, so this request completes all three single-owner pipeline stages.
-	f.renderCaptures++
-	f.renderCompositions++
-	f.renderEmissions++
 }
 
 func (f *performanceFixture) captureSnapshot() {

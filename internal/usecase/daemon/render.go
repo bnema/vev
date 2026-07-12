@@ -321,6 +321,9 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 		ac.sendMu.Unlock()
 		return
 	}
+	if ac.renderStages.capture != nil {
+		ac.renderStages.capture()
+	}
 	if overlays.pickerActive && overlays.previewTab == tb {
 		previewState := *state
 		previewState.overlays = capturedOverlayRenderState{}
@@ -329,6 +332,9 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 	}
 	captureOverlayLayers(state, overlays, paletteCfg)
 	composed := composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
+	if ac.renderStages.compose != nil {
+		ac.renderStages.compose()
+	}
 	d.emitFrame(sess, ac, state, composed)
 }
 
