@@ -328,7 +328,7 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 		state.preview = pickerPreviewFromCapturedRender(previewState)
 	}
 	captureOverlayLayers(state, overlays, paletteCfg)
-	composed := composeFrame(*state, ac.pipelineCache)
+	composed := composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
 	d.emitFrame(sess, ac, state, composed)
 }
 

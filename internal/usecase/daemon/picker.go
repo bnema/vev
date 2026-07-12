@@ -540,7 +540,7 @@ func snapshotPickerPreview(tb *tab) picker.Preview {
 }
 
 func pickerPreviewFromCapturedRender(state capturedRenderState) picker.Preview {
-	composed := composeFrame(state, composeCacheInput{}).frame
+	composed := composeFrame(state, composeCacheInput{}, composeCacheInput{}).frame
 	if composed.Height < 2 {
 		return pickerPreviewFromFrame(composed)
 	}

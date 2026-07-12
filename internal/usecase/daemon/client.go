@@ -36,7 +36,11 @@ type attachedClient struct {
 	// exact coordinator incarnation. paint rechecks it under sendMu.
 	coordinatorReadyEpoch atomic.Uint64
 	echoAck               atomic.Uint64
-	pipelineCache         composeCacheInput                         // only touched while sendMu is held
+	// pipelineCache is the last successfully emitted composition. pipelineScratch
+	// is its attachment-owned alternate buffer; both are only touched under
+	// sendMu and must never share mutable backing storage.
+	pipelineCache         composeCacheInput
+	pipelineScratch       composeCacheInput
 	renderScratch         renderCaptureScratch                      // only touched while sendMu is held
 	captureFrames         map[layout.PaneID]capturedPaneRenderState // only touched while sendMu is held
 	resizePaint           pendingByteTimer                          // guarded by sendMu

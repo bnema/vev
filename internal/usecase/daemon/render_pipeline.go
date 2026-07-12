@@ -38,19 +38,28 @@ type composedRenderFrame struct {
 }
 
 // composeFrame is pure with respect to daemon ownership: it consumes only the
-// capture and an attachment-local cache value, and returns a replacement cache.
-func composeFrame(state capturedRenderState, in composeCacheInput) composedRenderFrame {
+// capture, the last committed cache, and an independent attachment-owned
+// scratch cache. It returns a replacement cache without mutating committed.
+func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...composeCacheInput) composedRenderFrame {
+	scratch := composeCacheInput{}
+	if len(scratchIn) > 0 {
+		scratch = scratchIn[0]
+	}
 	width, rows := state.layout.area.Width, state.layout.area.Height
 	if width <= 0 || rows < 0 {
 		return composedRenderFrame{frame: renderer.NewFrame(0, 0), cursor: cursorOut{hidden: true}, reset: state.reset}
 	}
-	// The attachment-owned cache is safe to reuse while sendMu serializes this
-	// transaction. It contains only prior composed cells, never VT-owned cells.
-	// Reusing it avoids cloning a client-sized frame on every incremental paint.
-	canReuseFrame := in.frame.Width == width && in.frame.Height == rows+2 && in.layoutFingerprint == state.layout.fingerprint
-	frame := in.frame
+	// Compose into the alternate attachment-owned buffer. The committed frame is
+	// copied before incremental drawing so prepare/send failures cannot change it.
+	canReuseFrame := scratch.frame.Width == width && scratch.frame.Height == rows+2
+	frame := scratch.frame
 	if !canReuseFrame {
 		frame = renderer.NewFrame(width, rows+2)
+	}
+	if in.frame.Width == width && in.frame.Height == rows+2 {
+		for y := 0; y < frame.Height; y++ {
+			copy(frame.Row(y), in.frame.Row(y))
+		}
 	}
 	styles := newThemeStyles(state.theme)
 	drawTopBarSnapshot(frame.Row(0), state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
@@ -61,11 +70,11 @@ func composeFrame(state capturedRenderState, in composeCacheInput) composedRende
 	}
 
 	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme
-	titles := in.titleGenerations
+	titles := scratch.titleGenerations
 	if titles == nil {
 		titles = make(map[layout.PaneID]uint64, len(state.panes))
 	}
-	damage := in.damage[:0]
+	damage := scratch.damage[:0]
 	for _, pane := range state.panes {
 		pl := offsetPlacement(pane.placement, 0, 1)
 		if pl.TitleBar.Height > 0 {
@@ -114,7 +123,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput) composedRende
 	cursorInputs := state.cursor
 	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || state.overlays.active()
 	cursor := desiredCapturedCursor(cursorInputs)
-	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, titleGenerations: titles, damage: damage, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: in.bars}
+	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, titleGenerations: titles, damage: damage, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
 	outCache.bars.capture(baseFrame.Row(0), baseFrame.Row(rows+1))
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }
@@ -292,6 +301,9 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 		}
 	}
 	if sendErr == nil {
+		// Publish only after output preparation and transport emission both
+		// succeed. Swap the old committed cache back as the next compose target.
+		ac.pipelineScratch = ac.pipelineCache
 		ac.pipelineCache = composed.cache
 	}
 	ac.sess.mu.Unlock()
