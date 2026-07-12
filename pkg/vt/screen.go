@@ -85,6 +85,8 @@ type Screen struct {
 	// never invoke it. Nil disables it.
 	OnClipboard func(b64 string)
 
+	history *History
+
 	defaultFG          renderer.RGB
 	defaultBG          renderer.RGB
 	defaultColorsKnown bool
@@ -128,15 +130,23 @@ func NewScreen(width, height int) *Screen {
 	return s
 }
 
+// NewScreenWithHistory creates a screen that records rows evicted from its
+// primary screen into bounded immutable terminal history.
+func NewScreenWithHistory(width, height int, config HistoryConfig) *Screen {
+	s := NewScreen(width, height)
+	s.history = NewHistory(config)
+	return s
+}
+
+// History returns this screen's terminal history, or nil when history was not
+// configured with NewScreenWithHistory.
+func (s *Screen) History() *History { return s.history }
+
 func (s *Screen) Resize(width, height int) {
 	if width == s.Frame.Width && height == s.Frame.Height {
 		return
 	}
-	evict := func(row []renderer.Cell) {
-		if s.OnLineEvicted != nil {
-			s.OnLineEvicted(append([]renderer.Cell(nil), row...))
-		}
-	}
+	evict := s.recordEvicted
 
 	if s.alternate != nil {
 		var shift int
@@ -580,11 +590,20 @@ func (s *Screen) scrollUpRegion(top, bottom, n int) {
 }
 
 func (s *Screen) emitLineEvicted(top, n int) {
-	if s.OnLineEvicted == nil || s.alternate != nil {
+	if s.alternate != nil {
 		return
 	}
 	for y := top; y < top+n; y++ {
-		s.OnLineEvicted(append([]renderer.Cell(nil), s.Frame.Row(y)...))
+		s.recordEvicted(s.Frame.Row(y))
+	}
+}
+
+func (s *Screen) recordEvicted(row []renderer.Cell) {
+	if s.history != nil {
+		s.history.Append(row)
+	}
+	if s.OnLineEvicted != nil {
+		s.OnLineEvicted(append([]renderer.Cell(nil), row...))
 	}
 }
 
