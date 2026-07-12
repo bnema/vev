@@ -70,9 +70,10 @@ type renderWake struct {
 // metadata ownership only — S1/S2 dispatch stays with the retained PR #71
 // attachment timer path.
 type resizeRequestMetadata struct {
-	size   domain.Size
-	source *attachedClient
-	epoch  uint64
+	size      domain.Size
+	source    *attachedClient
+	epoch     uint64 // latest requested epoch
+	committed uint64 // latest published epoch
 }
 
 // renderCoordinatorOptions wires one coordinator instance.
@@ -158,8 +159,13 @@ type renderCoordinator struct {
 	detached bool
 	torndown bool
 
-	resize  resizeRequestMetadata
-	metrics renderCoordinatorBurstMetrics
+	resize resizeRequestMetadata
+	// resizeTimer is independent from render invalidation deadlines. It owns
+	// resize burst coalescing and is cancelled by the same lifecycle changes.
+	resizeTimer  ports.Timer
+	resizeCancel chan struct{}
+	resizeGen    uint64
+	metrics      renderCoordinatorBurstMetrics
 	// generation invalidates callbacks from superseded deadline/watchdog timers.
 	// Each worker also owns an explicit cancellation channel: fake timers may
 	// expose a nil or never-firing C channel, so Stop alone cannot release a
@@ -609,7 +615,7 @@ func (c *renderCoordinator) wakeCurrent(w renderWake) bool {
 // attachment.
 func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 	c.mu.Lock()
-	var timer ports.Timer
+	var timer, resizeTimer ports.Timer
 	if c.attachment == ac {
 		c.advanceAttachmentEpochLocked(ac)
 		c.attachment = nil
@@ -624,9 +630,15 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 		c.generation++
 		c.armed = false
 		timer = c.detachNormalTimerLocked()
+		if c.resizeCancel != nil {
+			close(c.resizeCancel)
+			c.resizeCancel = nil
+		}
+		resizeTimer, c.resizeTimer = c.resizeTimer, nil
 	}
 	c.mu.Unlock()
 	stopTimer(timer)
+	stopTimer(resizeTimer)
 }
 
 // noteReplace hands the coordinator from old to replacement; callbacks
@@ -641,7 +653,7 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 	// which predated coordinator ownership. In that case nil has no pending
 	// identity to invalidate, and the replacement becomes the first bound
 	// attachment atomically with this lifecycle transition.
-	var timer ports.Timer
+	var timer, resizeTimer ports.Timer
 	if c.attachment == old || c.attachment == nil {
 		c.advanceAttachmentEpochLocked(old, replacement)
 		c.attachment = replacement
@@ -659,9 +671,15 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 		c.generation++
 		c.armed = false
 		timer = c.detachNormalTimerLocked()
+		if c.resizeCancel != nil {
+			close(c.resizeCancel)
+			c.resizeCancel = nil
+		}
+		resizeTimer, c.resizeTimer = c.resizeTimer, nil
 	}
 	c.mu.Unlock()
 	stopTimer(timer)
+	stopTimer(resizeTimer)
 }
 
 // notePark invalidates pending wakes when the attachment parks for resume.
@@ -677,6 +695,12 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	c.previewWake = nil
 	c.previewWakes = nil
 	c.pending = false
+	if c.resizeCancel != nil {
+		close(c.resizeCancel)
+		c.resizeCancel = nil
+	}
+	resizeTimer := c.resizeTimer
+	c.resizeTimer = nil
 	c.ackDeferred = false
 	c.pendingPreview = false
 	c.generation++
@@ -685,6 +709,7 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	timers := c.detachSyncTimersLocked()
 	c.mu.Unlock()
 	stopTimer(timer)
+	stopTimer(resizeTimer)
 	stopTimers(timers)
 }
 
@@ -701,6 +726,78 @@ func (c *renderCoordinator) recordResizeRequest(size domain.Size, source *attach
 	c.resize.size = size
 	c.resize.source = source
 	return c.resize.epoch
+}
+
+// scheduleResize records a latest-wins request and runs apply after the bounded
+// bulk window. The callback never runs with c.mu held.
+func (c *renderCoordinator) scheduleResize(size domain.Size, source *attachedClient, run func(uint64)) uint64 {
+	epoch := c.recordResizeRequest(size, source)
+	if epoch == 0 {
+		return 0
+	}
+	c.mu.Lock()
+	old := c.resizeTimer
+	if c.resizeCancel != nil {
+		close(c.resizeCancel)
+	}
+	c.resizeGen++
+	gen := c.resizeGen
+	cancel := make(chan struct{})
+	c.resizeCancel = cancel
+	clock := c.opts.clock
+	c.resizeTimer = nil
+	c.mu.Unlock()
+	stopTimer(old)
+	if clock == nil {
+		run(epoch)
+		return epoch
+	}
+	timer := clock.NewTimer(minOutputRenderDeadline)
+	if timer.C() == nil {
+		stopTimer(timer)
+		run(epoch)
+		return epoch
+	}
+	c.mu.Lock()
+	if c.resizeGen != gen || c.torndown {
+		c.mu.Unlock()
+		stopTimer(timer)
+		return epoch
+	}
+	c.resizeTimer = timer
+	c.mu.Unlock()
+	go func() {
+		select {
+		case <-timer.C():
+		case <-cancel:
+			return
+		}
+		c.mu.Lock()
+		valid := !c.torndown && c.resizeGen == gen && c.resize.epoch == epoch && c.resize.source == source
+		c.resizeTimer = nil
+		if c.resizeGen == gen {
+			c.resizeCancel = nil
+		}
+		c.mu.Unlock()
+		if valid {
+			run(epoch)
+		}
+	}()
+	return epoch
+}
+
+// resizeCurrent verifies that an apply/commit attempt still owns the newest
+// request. commit also advances the separately observable committed epoch.
+func (c *renderCoordinator) resizeCurrent(epoch uint64, source *attachedClient, commit bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.torndown || c.attachment != source || c.resize.source != source || c.resize.epoch != epoch {
+		return false
+	}
+	if commit {
+		c.resize.committed = epoch
+	}
+	return true
 }
 
 // resizeSnapshot returns a locked copy of the latest resize metadata.

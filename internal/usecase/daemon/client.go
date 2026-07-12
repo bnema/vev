@@ -621,57 +621,13 @@ func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) 
 }
 
 func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
-	d.resizeWithPaint(sess, ac, sz, true)
+	d.requestTransactionalResize(sess, ac, sz, false)
 }
 
-// resizeForFirstPaint applies attach geometry without installing an idle timer:
-// firstPaint immediately emits the required full frame itself.
+// resizeForFirstPaint retains attach's synchronous geometry guarantee. The
+// firstPaint caller emits its full frame immediately after this commit.
 func (d *Daemon) resizeForFirstPaint(sess *session, ac *attachedClient, sz domain.Size) {
-	d.resizeWithPaint(sess, ac, sz, false)
-}
-
-func (d *Daemon) resizeWithPaint(sess *session, ac *attachedClient, sz domain.Size, schedulePaint bool) {
-	if !sz.Valid() {
-		return
-	}
-	d.exitCopyMode(ac)
-	if ac != nil {
-		// Suspend emission until every pane has adopted this geometry and the
-		// bounded resize paint is armed. PTY readers remain independent.
-		ac.sendMu.Lock()
-		defer ac.sendMu.Unlock()
-		if ac.currentSession() != sess {
-			return
-		}
-		ac.size = sz
-		if rc := sess.renderCoordinator(); rc != nil {
-			rc.attach(ac)
-			rc.recordResizeRequest(sz, ac)
-		}
-	}
-	tbSize := tabSize(sz)
-
-	sess.mu.Lock()
-	tabs := append([]*tab(nil), sess.tabs...)
-	sess.mu.Unlock()
-	if len(tabs) == 0 {
-		return
-	}
-
-	for _, tb := range tabs {
-		tb.mu.Lock()
-		tb.size = tbSize
-		d.applyLayoutLocked(tb)
-		tb.mu.Unlock()
-	}
-	// Only the shown tab's floating terminal tracks the client size. This is
-	// outside tab.mu so its PTY resize cannot block tab state.
-	d.resizeActiveFloating(sess.activeTab())
-	markSnapshotDirty(sess)
-	if ac != nil && schedulePaint {
-		d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
-		d.scheduleResizePaintLocked(sess, ac)
-	}
+	d.requestTransactionalResize(sess, ac, sz, true)
 }
 
 // detachOnSendError drops a client whose transport failed, leaving the session
