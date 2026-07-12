@@ -49,7 +49,8 @@ counts their encoded terminal data and excludes the 24-byte output header;
 serialized bytes. `coordinatorinvalidations/op`, `coordinatorwakes/op`, and
 `coordinatorcoalesced/op` respectively count scheduling requests, delivered
 wakes, and requests coalesced into those wakes; `coordinatorcoalescingratio`
-is their coalesced-to-invalidation ratio. They must not be presented as network
+is the average number of coalesced invalidations delivered per wake. They must
+not be presented as network
 throughput or latency.
 
 Capture a pre-change result outside the repository, including Go and kernel

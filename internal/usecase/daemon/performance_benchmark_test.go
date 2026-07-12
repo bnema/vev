@@ -185,6 +185,13 @@ func TestCoordinatorCoalescingRatioReportsInvalidationsPerWake(t *testing.T) {
 	require.Zero(t, coordinatorCoalescingRatio(performanceMetrics{}))
 }
 
+func coordinatorCoalescingRatio(metrics performanceMetrics) float64 {
+	if metrics.coordinatorWakes == 0 {
+		return 0
+	}
+	return float64(metrics.coordinatorCoalesced) / float64(metrics.coordinatorWakes)
+}
+
 func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations, historyRows int) {
 	b.Helper()
 	if operations == 0 {
