@@ -460,18 +460,9 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 	// Exercise the real producer fan-in after publication. The deadline worker
 	// has completed before asserting the gate, so this is not a timing race.
 	d.invalidateRender(sess, ac, true, "welcome-gate-test")
-	timer := awaitCoordinatorScheduledTimer(t, clock)
-	// attach-time theme setup may have armed an older bulk timer. The fresh
+	// Attach-time theme setup may have armed an older bulk timer. The fresh
 	// urgent producer replaces it, so advance the newest published deadline.
-	for {
-		select {
-		case timer = <-clock.timers:
-		default:
-			goto currentDeadline
-		}
-	}
-
-currentDeadline:
+	timer := awaitLatestCoordinatorTimer(t, clock)
 	rc := sess.renderCoordinator()
 	rc.mu.Lock()
 	workerDone := rc.normalWorkerDone

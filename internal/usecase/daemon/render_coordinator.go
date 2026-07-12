@@ -616,8 +616,11 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 		c.attachmentReady = false
 		c.detached = true
 		c.pending = false
+		c.pendingReset = false
+		c.pendingUrgent = false
 		c.ackDeferred = false
 		c.pendingPreview = false
+		c.coalesced = 0
 		c.generation++
 		c.armed = false
 		timer = c.detachNormalTimerLocked()
@@ -648,8 +651,11 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 		}
 		c.detached = false
 		c.pending = false
+		c.pendingReset = false
+		c.pendingUrgent = false
 		c.ackDeferred = false
 		c.pendingPreview = false
+		c.coalesced = 0
 		c.generation++
 		c.armed = false
 		timer = c.detachNormalTimerLocked()

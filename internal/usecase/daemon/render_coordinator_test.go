@@ -209,6 +209,18 @@ func awaitCoordinatorScheduledTimer(t *testing.T, clk *coordinatorMockClock) *co
 	}
 }
 
+func awaitLatestCoordinatorTimer(t *testing.T, clk *coordinatorMockClock) *coordinatorMockTimer {
+	t.Helper()
+	timer := awaitCoordinatorScheduledTimer(t, clk)
+	for {
+		select {
+		case timer = <-clk.timers:
+		default:
+			return timer
+		}
+	}
+}
+
 func requireNoCoordinatorOutputFrame(t *testing.T, sends chan ports.Frame) {
 	t.Helper()
 	select {

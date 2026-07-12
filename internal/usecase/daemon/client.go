@@ -1,4 +1,8 @@
 // Package daemon holds vev's server-side session multiplexer use case.
+//
+// Lock ordering: never acquire sendMu or session/daemon locks while holding a
+// pane lock. Coordinator callbacks and timer methods run without coordinator.mu;
+// see the lock-specific comments on attachedClient and renderCoordinator.
 package daemon
 
 import (

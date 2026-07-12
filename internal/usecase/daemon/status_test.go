@@ -1335,12 +1335,19 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 	// latest-state wake. Advance every retained PR #71/coordinator deadline
 	// until that coalesced output is observable.
 	var resized ports.Frame
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
 	for resized.Type != ports.MsgOutput {
 		select {
 		case f := <-sends:
+			if f.Type != ports.MsgOutput {
+				t.Fatalf("unexpected frame type %d while awaiting resized output", f.Type)
+			}
 			resized = f
 		case timer := <-clock.timers:
 			timer.ch <- time.Time{}
+		case <-deadline.C:
+			t.Fatal("timed out awaiting resized output frame")
 		}
 	}
 

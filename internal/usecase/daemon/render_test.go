@@ -288,7 +288,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
 		wake := <-previews
 		require.True(t, wake.urgent)
-		require.Equal(t, 2, wake.coalesced, "completion retains coordinator coalescing across the cleared attachment work")
+		require.Equal(t, 1, wake.coalesced, "completion starts a fresh headless preview batch after detach")
 		select {
 		case duplicate := <-previews:
 			t.Fatalf("sync completion must publish exactly one preview wake: %#v", duplicate)
@@ -331,7 +331,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		wake := <-wakes
 		require.True(t, wake.urgent)
 		require.True(t, wake.reset, "the replacement's cleared batch must repaint a complete frame")
-		require.Equal(t, 3, wake.coalesced, "completion must retain the replacement reset and coordinator coalescing")
+		require.Equal(t, 2, wake.coalesced, "completion coalesces only with the replacement's fresh reset batch")
 		require.Same(t, replacement, wake.attachment)
 		select {
 		case duplicate := <-wakes:
