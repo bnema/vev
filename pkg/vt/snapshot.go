@@ -99,6 +99,19 @@ func HistoryFromBlobs(config HistoryConfig, sealed [][]byte, tail []byte) (*Hist
 	return h, nil
 }
 
+// NewScreenWithRestoredHistory constructs a screen that owns history restored
+// directly from canonical blobs. Call RestorePrimaryVisible to install a
+// persisted primary frame before making the screen live.
+func NewScreenWithRestoredHistory(width, height int, config HistoryConfig, sealed [][]byte, tail []byte) (*Screen, error) {
+	history, err := HistoryFromBlobs(config, sealed, tail)
+	if err != nil {
+		return nil, err
+	}
+	screen := NewScreenWithHistory(width, height, config)
+	screen.history = history
+	return screen, nil
+}
+
 // MarshalVisible encodes the exact visible primary frame, including every
 // blank, row width, and terminal cell attribute.
 func MarshalVisible(frame renderer.Frame) ([]byte, error) {

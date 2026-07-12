@@ -6,6 +6,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"math"
+	"strconv"
 	"testing"
 
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -69,6 +70,43 @@ func TestV3SnapshotRoundTripPreservesExactTerminalData(t *testing.T) {
 	}
 	if !frame.Row(0)[0].Equal(renderer.Cell{Rune: 'V', Style: rgb}) || !frame.Row(0)[2].Continuation {
 		t.Fatalf("visible terminal data lost: %#v", frame.Row(0))
+	}
+}
+
+func TestActiveTabReferenceMustBeExact(t *testing.T) {
+	validTab := Tab{}
+	for _, tc := range []struct {
+		name  string
+		s     Session
+		valid bool
+	}{
+		{name: "zero tabs active zero", s: Session{Active: 0}, valid: true},
+		{name: "zero tabs active nonzero", s: Session{Active: 1}},
+		{name: "nonempty tabs active in range", s: Session{Active: 0, Tabs: []Tab{validTab}}, valid: true},
+		{name: "nonempty tabs active past end", s: Session{Active: 1, Tabs: []Tab{validTab}}},
+	} {
+		t.Run("marshal "+tc.name, func(t *testing.T) {
+			_, err := Marshal(tc.s)
+			if tc.valid {
+				requireNoError(t, err)
+				return
+			}
+			if !errors.Is(err, ErrInvalidData) {
+				t.Fatalf("Marshal() error = %v, want %v", err, ErrInvalidData)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "zero tabs active nonzero", data: v3ActiveManifest(1, 0)},
+		{name: "nonempty tabs active past end", data: v3ActiveManifest(1, 1)},
+	} {
+		t.Run("unmarshal "+tc.name, func(t *testing.T) {
+			reject(t, v3Envelope(version, 0, tc.data), ErrInvalidData)
+		})
 	}
 }
 
@@ -281,6 +319,36 @@ func TestUnmarshalRejectsProcessWithoutArgv(t *testing.T) {
 	}
 }
 
+func TestUnmarshalGlobalBudgetRejectionDoesNotAllocatePerPane(t *testing.T) {
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 256, ChunkRows: 256})
+	for range 256 {
+		history.Append([]renderer.Cell{{Rune: 'x'}})
+	}
+	sealed, tail, err := vt.MarshalSealedHistory(history.SealAndView())
+	requireNoError(t, err)
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+
+	const paneCount = maxSnapshotRows/256 + 1
+	tabs := make([]Tab, paneCount)
+	for i := range tabs {
+		tabs[i] = Tab{Panes: []Pane{{ID: layout.PaneID(strconv.Itoa(i)), SealedChunks: sealed, Tail: tail, Visible: visible}}}
+	}
+	data, err := Marshal(Session{Name: "over-budget", Tabs: tabs})
+	requireNoError(t, err)
+
+	allocs := testing.AllocsPerRun(3, func() {
+		_, err := Unmarshal(data)
+		if !errors.Is(err, ErrInvalidData) {
+			panic(err)
+		}
+	})
+	// The error and testing harness may allocate a small fixed amount. Rejecting
+	// before semantic maps/slices are built must not scale with paneCount.
+	if allocs > 8 {
+		t.Fatalf("Unmarshal() allocations = %f, want fixed overhead only", allocs)
+	}
+}
+
 func TestPreflightBudgetRejectsAggregateDecodedAllocation(t *testing.T) {
 	budget := preflightBudget{alloc: maxSnapshotDecodedAllocation - 1}
 	if budget.addProduct(1, 2) {
@@ -374,6 +442,23 @@ func v3EnvelopeWithLength(v, flags uint16, body []byte, length uint32) []byte {
 	binary.BigEndian.PutUint32(out[12:16], crc32.ChecksumIEEE(body))
 	copy(out[16:], body)
 	return out
+}
+
+func v3ActiveManifest(active, tabs uint16) []byte {
+	var b []byte
+	putS := func(s string) { b = binary.BigEndian.AppendUint16(b, uint16(len(s))); b = append(b, s...) }
+	putS("s")
+	b = append(b, make([]byte, 8)...)
+	b = binary.BigEndian.AppendUint16(b, active)
+	b = binary.BigEndian.AppendUint16(b, tabs)
+	for range tabs {
+		putS("")
+		b = append(b, make([]byte, 2+2+8)...)
+		putS("")
+		b = append(b, 3) // nil root
+		b = binary.BigEndian.AppendUint16(b, 0)
+	}
+	return b
 }
 
 // v3Manifest creates just enough session/tab/pane framing for hostile declarations.

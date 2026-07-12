@@ -14,8 +14,14 @@ func TestNewTabInitializesScrollback(t *testing.T) {
 		wantRow string
 	}{
 		{
-			name:    "tab owns scrollback wired to vt eviction callback",
+			name:    "primary evictions enter screen owned history",
 			write:   []byte("AAAA\r\nBBBB\r\nCCCC\r\n"),
+			wantLen: 1,
+			wantRow: "AAAA",
+		},
+		{
+			name:    "alternate screen evictions do not enter pane history",
+			write:   []byte("AAAA\r\nBBBB\r\nCCCC\r\n\x1b[?1049h1111\r\n2222\r\n3333\r\n4444\x1b[?1049l"),
 			wantLen: 1,
 			wantRow: "AAAA",
 		},
@@ -26,6 +32,9 @@ func TestNewTabInitializesScrollback(t *testing.T) {
 			win := newTab(nil, domain.Size{Cols: 4, Rows: 3})
 			if win.focusedPane().history == nil {
 				t.Fatal("scrollback is nil")
+			}
+			if win.focusedPane().history != win.focusedPane().screen.History() {
+				t.Fatal("pane history is not owned by its screen")
 			}
 			if win.focusedPane().history.Cap() != defaultScrollbackRows {
 				t.Fatalf("scrollback cap = %d, want %d", win.focusedPane().history.Cap(), defaultScrollbackRows)

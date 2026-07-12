@@ -59,6 +59,18 @@ func TestRestorePaneTerminalRejectsMissingOrMalformedCanonicalBlobs(t *testing.T
 	}
 }
 
+func TestRestoreSessionRejectsInvalidActiveTab(t *testing.T) {
+	factory := &restorePTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+
+	err := d.restoreSession(context.Background(), snapcodec.Session{Name: "bad-active", Active: 1, Tabs: []snapcodec.Tab{{
+		Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{emptyTerminalPane(t, "pane-1", "/tmp")},
+	}}})
+
+	require.Error(t, err)
+	require.Empty(t, factory.opens)
+}
+
 func TestRestoreSessionClosesOpenedPTYWhenTerminalRestoreFails(t *testing.T) {
 	factory := &restorePTYFactory{}
 	d := newTestDaemon(t, factory, stubClock{})
@@ -131,6 +143,7 @@ func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 	p := tb.panes["pane-2"]
 	tb.mu.Unlock()
 	p.mu.Lock()
+	require.Same(t, p.screen.History(), p.history)
 	require.Equal(t, "old2", rowText(p.history.View().Row(0)))
 	require.Equal(t, 1, p.history.Len())
 	require.Equal(t, "vis2", rowText(p.screen.PrimaryVisibleRows()[0][:4]))

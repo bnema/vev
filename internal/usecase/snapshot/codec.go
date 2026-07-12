@@ -228,14 +228,17 @@ func (r *payloadReader) done() error {
 }
 
 func writeSession(w *payloadWriter, s Session) error {
+	if len(s.Tabs) > math.MaxUint16 {
+		return fmt.Errorf("%w: too many tabs", ErrInvalidData)
+	}
+	if err := validateActive(s.Active, len(s.Tabs)); err != nil {
+		return err
+	}
 	if err := w.putString(s.Name); err != nil {
 		return err
 	}
 	w.putUint64(s.CreatedAt)
 	w.putUint16(s.Active)
-	if len(s.Tabs) > math.MaxUint16 {
-		return fmt.Errorf("%w: too many tabs", ErrInvalidData)
-	}
 	w.putUint16(uint16(len(s.Tabs)))
 	for _, t := range s.Tabs {
 		if err := writeTab(w, t); err != nil {
@@ -260,6 +263,9 @@ func readSession(r *payloadReader) (Session, error) {
 	}
 	nt, err := r.getUint16()
 	if err != nil {
+		return Session{}, err
+	}
+	if err := validateActive(active, int(nt)); err != nil {
 		return Session{}, err
 	}
 	s := Session{Name: name, CreatedAt: created, Active: active, Tabs: make([]Tab, nt)}
@@ -556,9 +562,30 @@ func readProcess(r *payloadReader) (*Process, error) {
 	return &Process{Argv: argv, Strategy: strategy, Opts: ProcessOpts{AgentSessionID: agentSessionID}}, nil
 }
 
-// preflightSession walks framing and opaque VT blobs without constructing a
-// Session. All count-derived allocation happens only in the second pass.
+func validateActive(active uint16, tabCount int) error {
+	if tabCount == 0 {
+		if active == 0 {
+			return nil
+		}
+		return fmt.Errorf("%w: active tab", ErrInvalidData)
+	}
+	if int(active) >= tabCount {
+		return fmt.Errorf("%w: active tab", ErrInvalidData)
+	}
+	return nil
+}
+
+// preflightSession first validates the full structural and aggregate resource
+// shape without materializing strings, maps, or reference lists. Only once
+// that pass has accepted global budgets does it allocate to check references.
 func preflightSession(body []byte) error {
+	if err := preflightSessionStructure(body); err != nil {
+		return err
+	}
+	return preflightSessionReferences(body)
+}
+
+func preflightSessionStructure(body []byte) error {
 	r := payloadReader{b: body}
 	if err := skipString(&r); err != nil {
 		return err
@@ -566,21 +593,26 @@ func preflightSession(body []byte) error {
 	if _, err := r.getUint64(); err != nil {
 		return err
 	}
-	if _, err := r.getUint16(); err != nil {
+	active, err := r.getUint16()
+	if err != nil {
 		return err
 	}
 	tabs, err := r.getUint16()
 	if err != nil {
 		return err
 	}
+	if err := validateActive(active, int(tabs)); err != nil {
+		return err
+	}
 	if uint64(tabs) > uint64(len(r.b))/2 {
 		return ErrShortPayload
 	}
+
 	var totals vt.DecodeStats
 	blobs := uint64(0)
 	budget := preflightBudget{}
 	for range tabs {
-		if err := preflightTab(&r, &totals, &blobs, &budget); err != nil {
+		if err := preflightTabStructure(&r, &totals, &blobs, &budget); err != nil {
 			return fmt.Errorf("preflight tab: %w", err)
 		}
 	}
@@ -633,7 +665,7 @@ func (b *preflightBudget) addNode() bool {
 	return true
 }
 
-func preflightTab(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, budget *preflightBudget) error {
+func preflightTabStructure(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, budget *preflightBudget) error {
 	if !budget.addAllocation(256) {
 		return fmt.Errorf("%w: decoded allocation budget", ErrInvalidData)
 	}
@@ -649,12 +681,10 @@ func preflightTab(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, budge
 	if _, err := r.getUint64(); err != nil {
 		return err
 	}
-	focus, err := r.getString()
-	if err != nil {
+	if err := skipString(r); err != nil {
 		return err
 	}
-	references := preflightTreeReferences{}
-	if err := preflightNode(r, 0, budget, &references); err != nil {
+	if err := preflightNodeStructure(r, 0, true, budget); err != nil {
 		return err
 	}
 	panes, err := r.getUint16()
@@ -664,34 +694,15 @@ func preflightTab(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, budge
 	if uint64(panes) > uint64(len(r.b))/2 {
 		return ErrShortPayload
 	}
-	ids := make(map[layout.PaneID]struct{})
 	for range panes {
-		if err := preflightPane(r, totals, blobs, ids, budget); err != nil {
+		if err := preflightPaneStructure(r, totals, blobs, budget); err != nil {
 			return err
 		}
 	}
-	if focus != "" {
-		references.ids = append(references.ids, layout.PaneID(focus))
-	}
-	for _, id := range references.ids {
-		if _, ok := ids[id]; !ok {
-			return ErrUnknownPane
-		}
-	}
 	return nil
 }
 
-type preflightTreeReferences struct{ ids []layout.PaneID }
-
-func (r *preflightTreeReferences) add(id layout.PaneID, budget *preflightBudget) error {
-	if !budget.addAllocation(32) {
-		return fmt.Errorf("%w: decoded allocation budget", ErrInvalidData)
-	}
-	r.ids = append(r.ids, id)
-	return nil
-}
-
-func preflightNode(r *payloadReader, depth int, budget *preflightBudget, references *preflightTreeReferences) error {
+func preflightNodeStructure(r *payloadReader, depth int, root bool, budget *preflightBudget) error {
 	if depth > 64 {
 		return fmt.Errorf("%w: tree depth", ErrInvalidData)
 	}
@@ -704,26 +715,23 @@ func preflightNode(r *payloadReader, depth int, budget *preflightBudget, referen
 	}
 	switch kind {
 	case 0:
-		leaf, err := r.getString()
+		return skipString(r)
+	case 1:
+		dir, err := r.getUint8()
 		if err != nil {
 			return err
 		}
-		return references.add(layout.PaneID(leaf), budget)
-	case 1:
-		if _, err := r.getUint8(); err != nil {
-			return err
+		if layout.SplitDir(dir) != layout.Horizontal && layout.SplitDir(dir) != layout.Vertical {
+			return fmt.Errorf("%w: split dir", ErrInvalidData)
 		}
 	case 2:
-		expanded, err := r.getString()
-		if err != nil {
+		if err := skipString(r); err != nil {
 			return err
 		}
-		if expanded != "" {
-			if err := references.add(layout.PaneID(expanded), budget); err != nil {
-				return err
-			}
-		}
 	case 3:
+		if !root {
+			return fmt.Errorf("%w: nil child node", ErrInvalidData)
+		}
 		return nil
 	default:
 		return fmt.Errorf("%w: node kind", ErrInvalidData)
@@ -736,29 +744,20 @@ func preflightNode(r *payloadReader, depth int, budget *preflightBudget, referen
 		return ErrShortPayload
 	}
 	for range children {
-		if err := preflightNode(r, depth+1, budget, references); err != nil {
+		if err := preflightNodeStructure(r, depth+1, false, budget); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func preflightPane(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, ids map[layout.PaneID]struct{}, budget *preflightBudget) error {
+func preflightPaneStructure(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, budget *preflightBudget) error {
 	if !budget.addAllocation(256) {
 		return fmt.Errorf("%w: decoded allocation budget", ErrInvalidData)
 	}
-	id, err := r.getString()
-	if err != nil {
+	if err := skipString(r); err != nil {
 		return err
 	}
-	if id == "" {
-		return fmt.Errorf("%w: empty pane ID", ErrInvalidData)
-	}
-	paneID := layout.PaneID(id)
-	if _, exists := ids[paneID]; exists {
-		return fmt.Errorf("%w: duplicate pane ID", ErrInvalidData)
-	}
-	ids[paneID] = struct{}{}
 	if err := skipString(r); err != nil {
 		return err
 	}
@@ -792,8 +791,6 @@ func preflightPane(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, ids 
 	if err != nil {
 		return err
 	}
-	// PreflightVisibleBlob above validates width×height and exact payload
-	// cardinality. A visible terminal frame itself must also be nonempty.
 	if visible.Rows == 0 || visible.Cells == 0 {
 		return fmt.Errorf("%w: visible geometry", ErrInvalidData)
 	}
@@ -859,6 +856,166 @@ func preflightProcess(r *payloadReader) error {
 		return err
 	}
 	return skipString(r)
+}
+
+// preflightSessionReferences validates duplicate, empty, and dangling pane
+// references only after the structural pass has admitted the complete payload.
+func preflightSessionReferences(body []byte) error {
+	r := payloadReader{b: body}
+	if err := skipString(&r); err != nil {
+		return err
+	}
+	if _, err := r.getUint64(); err != nil {
+		return err
+	}
+	if _, err := r.getUint16(); err != nil {
+		return err
+	}
+	tabs, err := r.getUint16()
+	if err != nil {
+		return err
+	}
+	for range tabs {
+		if err := preflightTabReferences(&r); err != nil {
+			return fmt.Errorf("preflight tab references: %w", err)
+		}
+	}
+	return r.done()
+}
+
+func preflightTabReferences(r *payloadReader) error {
+	if err := skipString(r); err != nil {
+		return err
+	}
+	if _, err := r.getUint16(); err != nil {
+		return err
+	}
+	if _, err := r.getUint16(); err != nil {
+		return err
+	}
+	if _, err := r.getUint64(); err != nil {
+		return err
+	}
+	focus, err := r.getString()
+	if err != nil {
+		return err
+	}
+	references := preflightTreeReferences{}
+	if err := preflightNodeReferences(r, &references); err != nil {
+		return err
+	}
+	panes, err := r.getUint16()
+	if err != nil {
+		return err
+	}
+	ids := make(map[layout.PaneID]struct{}, panes)
+	for range panes {
+		id, err := r.getString()
+		if err != nil {
+			return err
+		}
+		if id == "" {
+			return fmt.Errorf("%w: empty pane ID", ErrInvalidData)
+		}
+		paneID := layout.PaneID(id)
+		if _, exists := ids[paneID]; exists {
+			return fmt.Errorf("%w: duplicate pane ID", ErrInvalidData)
+		}
+		ids[paneID] = struct{}{}
+		if err := skipString(r); err != nil {
+			return err
+		}
+		if err := skipString(r); err != nil {
+			return err
+		}
+		n, err := r.getUint32()
+		if err != nil {
+			return err
+		}
+		for range n {
+			if err := skipBlob(r); err != nil {
+				return err
+			}
+		}
+		if err := skipBlob(r); err != nil {
+			return err
+		}
+		if err := skipBlob(r); err != nil {
+			return err
+		}
+		if err := preflightProcess(r); err != nil {
+			return err
+		}
+	}
+	if focus != "" {
+		references.ids = append(references.ids, layout.PaneID(focus))
+	}
+	for _, id := range references.ids {
+		if _, ok := ids[id]; !ok {
+			return ErrUnknownPane
+		}
+	}
+	return nil
+}
+
+func skipBlob(r *payloadReader) error {
+	n, err := r.getUint32()
+	if err != nil {
+		return err
+	}
+	if uint64(n) > uint64(len(r.b)) {
+		return ErrShortPayload
+	}
+	r.b = r.b[n:]
+	return nil
+}
+
+type preflightTreeReferences struct{ ids []layout.PaneID }
+
+func (r *preflightTreeReferences) add(id layout.PaneID) {
+	r.ids = append(r.ids, id)
+}
+
+func preflightNodeReferences(r *payloadReader, references *preflightTreeReferences) error {
+	kind, err := r.getUint8()
+	if err != nil {
+		return err
+	}
+	switch kind {
+	case 0:
+		leaf, err := r.getString()
+		if err != nil {
+			return err
+		}
+		references.add(layout.PaneID(leaf))
+		return nil
+	case 1:
+		if _, err := r.getUint8(); err != nil {
+			return err
+		}
+	case 2:
+		expanded, err := r.getString()
+		if err != nil {
+			return err
+		}
+		if expanded != "" {
+			references.add(layout.PaneID(expanded))
+		}
+	case 3:
+		return nil
+	default:
+		return fmt.Errorf("%w: node kind", ErrInvalidData)
+	}
+	children, err := r.getUint16()
+	if err != nil {
+		return err
+	}
+	for range children {
+		if err := preflightNodeReferences(r, references); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateTree(t *layout.Tree, ids map[layout.PaneID]struct{}) error {

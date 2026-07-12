@@ -87,6 +87,13 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if len(snap.Tabs) == 0 {
+		if snap.Active != 0 {
+			return fmt.Errorf("snapshot: active tab out of range")
+		}
+	} else if int(snap.Active) >= len(snap.Tabs) {
+		return fmt.Errorf("snapshot: active tab out of range")
+	}
 	if snap.Name == "" {
 		return fmt.Errorf("snapshot: empty session name")
 	}
@@ -206,9 +213,6 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 	}
 	createdAt := int64(snap.CreatedAt)
 	sess := &session{name: snap.Name, ctx: sctx, cancel: cancel, tabs: opened, active: int(snap.Active), terminal: restoreTerm, createdAt: createdAt}
-	if sess.active < 0 || sess.active >= len(sess.tabs) {
-		sess.active = 0
-	}
 	sess.snapEligible.Store(true)
 	if len(snap.Tabs) > 0 && len(snap.Tabs[0].Panes) > 0 {
 		sess.cwd = snap.Tabs[0].Panes[0].Cwd
@@ -261,15 +265,15 @@ func restorePaneTerminal(p *pane, snap snapcodec.Pane) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	history, err := vt.HistoryFromBlobs(vt.HistoryConfig{MaxRows: defaultScrollbackRows}, snap.SealedChunks, snap.Tail)
+	screen, err := vt.NewScreenWithRestoredHistory(p.screen.Frame.Width, p.screen.Frame.Height, vt.HistoryConfig{MaxRows: defaultScrollbackRows}, snap.SealedChunks, snap.Tail)
 	if err != nil {
 		return fmt.Errorf("snapshot history: %w", err)
 	}
-	if err := p.screen.RestorePrimaryVisible(snap.Visible); err != nil {
+	if err := screen.RestorePrimaryVisible(snap.Visible); err != nil {
 		return fmt.Errorf("snapshot visible: %w", err)
 	}
-	p.history = history
-	p.screen.OnLineEvicted = history.Append
+	p.screen = screen
+	p.history = screen.History()
 	return nil
 }
 
