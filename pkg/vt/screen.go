@@ -35,6 +35,10 @@ type screenState struct {
 // so keep this value in sync if that payload cap changes.
 const maxEscapeBufferLen = 128 * 1024
 
+// maxPendingDamage bounds metadata retained while no render transaction can
+// acknowledge a screen. Saturation falls back to one exact full redraw.
+const maxPendingDamage = 1024
+
 const (
 	// ColorSchemeReportDark is the DEC 2031 dark-scheme report.
 	ColorSchemeReportDark = "\x1b[?997;1n"
@@ -86,10 +90,12 @@ type Screen struct {
 	defaultColorsKnown bool
 	terminalTitle      string
 
-	damage     []renderer.Damage
-	escapeBuf  []byte
-	csiScratch []int
-	sgrScratch []int
+	damage           []renderer.Damage
+	damageGeneration uint64
+	damageSaturated  bool
+	escapeBuf        []byte
+	csiScratch       []int
+	sgrScratch       []int
 
 	scrollTop        int
 	scrollBottom     int
@@ -112,10 +118,11 @@ type Screen struct {
 
 func NewScreen(width, height int) *Screen {
 	s := &Screen{
-		Frame:         renderer.NewFrame(width, height),
-		Style:         renderer.DefaultStyle(),
-		damage:        []renderer.Damage{renderer.FullRedraw()},
-		cursorVisible: true,
+		Frame:            renderer.NewFrame(width, height),
+		Style:            renderer.DefaultStyle(),
+		damage:           []renderer.Damage{renderer.FullRedraw()},
+		damageGeneration: 1,
+		cursorVisible:    true,
 	}
 	s.resetScrollRegion()
 	return s
@@ -162,10 +169,36 @@ func (s *Screen) Resize(width, height int) {
 	s.fullRedraw()
 }
 
+// DamageCapture is an immutable copy of pending damage at one screen generation.
+type DamageCapture struct {
+	Damage     []renderer.Damage
+	Generation uint64
+}
+
 // Damage returns the current damage list. The caller must not modify the
 // returned slice; ClearDamage must be called after the damage is consumed.
 func (s *Screen) Damage() []renderer.Damage { return s.damage }
-func (s *Screen) ClearDamage()              { s.damage = s.damage[:0] }
+func (s *Screen) ClearDamage() {
+	s.damage = s.damage[:0]
+	s.damageSaturated = false
+}
+
+// CaptureDamage snapshots pending damage without consuming it.
+func (s *Screen) CaptureDamage() DamageCapture {
+	return DamageCapture{Damage: append([]renderer.Damage(nil), s.damage...), Generation: s.damageGeneration}
+}
+
+// AcknowledgeDamage consumes a capture only if no screen mutation occurred
+// since it was taken. A stale acknowledgement conservatively requests a full
+// redraw, ensuring intervening writes remain visible to the next capture.
+func (s *Screen) AcknowledgeDamage(generation uint64) bool {
+	if generation != s.damageGeneration {
+		s.fullRedraw()
+		return false
+	}
+	s.ClearDamage()
+	return true
+}
 
 // SyncUpdateActive reports whether DEC private mode 2026 (synchronized update)
 // is currently enabled by the child process.
@@ -599,6 +632,15 @@ func (s *Screen) normalizedRegion(top, bottom int) (int, int, bool) {
 }
 
 func (s *Screen) record(d renderer.Damage) {
+	s.damageGeneration++
+	if s.damageSaturated {
+		return
+	}
+	if len(s.damage) >= maxPendingDamage {
+		s.damage = []renderer.Damage{renderer.FullRedraw()}
+		s.damageSaturated = true
+		return
+	}
 	// Replace FullRedraw with the first concrete damage item.
 	if len(s.damage) == 1 && s.damage[0].Kind == renderer.DamageFullRedraw {
 		s.damage[0] = d
@@ -616,6 +658,7 @@ func (s *Screen) record(d renderer.Damage) {
 }
 
 func (s *Screen) fullRedraw() {
+	s.damageGeneration++
 	s.damage = []renderer.Damage{renderer.FullRedraw()}
 }
 

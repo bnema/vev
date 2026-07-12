@@ -371,7 +371,10 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 	})
 }
 
-func TestClearNonRenderablePaneDamage(t *testing.T) {
+// S2 keeps damage pending until the owning render capture consumes it. In
+// particular, a pane becoming invisible must not let a PTY reader erase data
+// that a later attachment or picker preview needs to render.
+func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 	newFixture := func(t *testing.T) (*Daemon, *session, *tab, *pane, chan ports.Frame) {
 		t.Helper()
 		p, release := newBlockingPTY(t)
@@ -381,7 +384,7 @@ func TestClearNonRenderablePaneDamage(t *testing.T) {
 		return d, sess, tb, tb.focusedPane(), sends
 	}
 
-	t.Run("clears headless, inactive, collapsed, and hidden panes without output", func(t *testing.T) {
+	t.Run("headless, inactive, collapsed, and hidden panes retain damage without output", func(t *testing.T) {
 		for _, tt := range []struct {
 			name  string
 			setup func(*Daemon, *session, *tab, *pane)
@@ -407,8 +410,8 @@ func TestClearNonRenderablePaneDamage(t *testing.T) {
 				d, sess, tb, p, sends := newFixture(t)
 				tt.setup(d, sess, tb, p)
 				p.screen.Write([]byte("damage"))
-				d.clearNonRenderablePaneDamage(sess, tb, p)
-				require.Empty(t, p.screen.Damage())
+				_ = d.paneRenderable(sess, tb, p)
+				require.NotEmpty(t, p.screen.Damage(), "only render capture may consume VT damage")
 				select {
 				case frame := <-sends:
 					t.Fatalf("non-renderable output must not compose or send: %#v", frame)
@@ -421,7 +424,7 @@ func TestClearNonRenderablePaneDamage(t *testing.T) {
 	t.Run("retains active and picker-preview pane damage", func(t *testing.T) {
 		d, sess, tb, p, _ := newFixture(t)
 		p.screen.Write([]byte("active"))
-		d.clearNonRenderablePaneDamage(sess, tb, p)
+		_ = d.paneRenderable(sess, tb, p)
 		require.NotEmpty(t, p.screen.Damage(), "active pane damage belongs to coordinator composition")
 		p.screen.ClearDamage()
 
@@ -433,7 +436,7 @@ func TestClearNonRenderablePaneDamage(t *testing.T) {
 		viewer.overlays.pickerMu.Unlock()
 		d.sessions["viewer"] = &session{id: "viewer", client: viewer}
 		p.screen.Write([]byte("preview"))
-		d.clearNonRenderablePaneDamage(sess, tb, p)
+		_ = d.paneRenderable(sess, tb, p)
 		require.NotEmpty(t, p.screen.Damage(), "picker preview damage must remain for coordinator composition")
 	})
 }
@@ -949,21 +952,21 @@ func TestOverlayPaintBypassesComposedCache(t *testing.T) {
 
 	d.paint(sess, ac, true)
 	_ = mustOutputData(t, sends)
-	require.True(t, ac.composed.valid)
-	require.NotContains(t, frameText(ac.composed.frame), "Rename session")
+	require.True(t, ac.pipelineCache.valid)
+	require.NotContains(t, frameText(ac.pipelineCache.frame), "Rename session")
 
 	d.enterPrompt(sess, ac, " Rename session ", "work", func(string) error { return nil })
 	shown := string(mustOutputData(t, sends))
 	require.Contains(t, shown, "Rename session")
-	require.False(t, ac.composed.valid, "overlay paint must not store the modal-mutated frame in the composed cache")
-	require.NotContains(t, frameText(ac.composed.frame), "Rename session")
+	require.False(t, ac.pipelineCache.valid, "overlay paint must not store the modal-mutated frame in the composed cache")
+	require.NotContains(t, frameText(ac.pipelineCache.frame), "Rename session")
 
 	d.closePrompt(ac)
 	d.paint(sess, ac, false)
 	restored := string(mustOutputData(t, sends))
 	require.NotContains(t, restored, "Rename session")
-	require.True(t, ac.composed.valid)
-	cached := frameText(ac.composed.frame)
+	require.True(t, ac.pipelineCache.valid)
+	cached := frameText(ac.pipelineCache.frame)
 	require.Contains(t, cached, "live")
 	require.NotContains(t, cached, "Rename session")
 }

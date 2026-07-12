@@ -49,6 +49,9 @@ func TestPerformanceFixtureCounters(t *testing.T) {
 	fixture.paintLive()
 	metrics := fixture.metrics()
 	require.Equal(t, uint64(2), metrics.outputFrames)
+	require.Equal(t, uint64(2), metrics.renderCaptures, "capture is one immutable state snapshot per live render request")
+	require.Equal(t, uint64(2), metrics.renderCompositions, "composition is one frame built from each captured state")
+	require.Equal(t, uint64(2), metrics.renderEmissions, "emission is one accepted output frame")
 	require.Positive(t, metrics.outputBytes)
 	require.Positive(t, metrics.outputPayloadBytes)
 	require.Equal(t, uint64(2), metrics.coordinatorInvalidations)
@@ -66,6 +69,27 @@ func TestPerformanceFixtureCounters(t *testing.T) {
 
 	fixture.resize()
 	require.True(t, fixture.resized())
+}
+
+func TestRenderStageHooksCountProductionBoundariesOnFailedSend(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+	d.paint(sess, ac, true)
+	<-sends
+	var captures, compositions, emissions int
+	ac.renderStages = renderStageHooks{
+		capture: func() { captures++ },
+		compose: func() { compositions++ },
+		emit:    func() { emissions++ },
+	}
+	ac.replaceTransport(cacheFailTransport{})
+	p := sess.tabs[0].focusedPane()
+	p.mu.Lock()
+	p.screen.Write([]byte("hook"))
+	p.mu.Unlock()
+	d.paint(sess, ac, false)
+	require.Equal(t, 1, captures, "a completed capture counts even when its emission fails")
+	require.Equal(t, 1, compositions, "a completed composition counts even when its emission fails")
+	require.Zero(t, emissions, "emit counts only prepare and transport success")
 }
 
 func TestPerformanceFixtureResizeAlternatesRealDimensions(t *testing.T) {
@@ -206,8 +230,38 @@ func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations
 	b.ReportMetric(float64(metrics.coordinatorInvalidations)/perOperation, "coordinatorinvalidations/op")
 	b.ReportMetric(float64(metrics.coordinatorWakes)/perOperation, "coordinatorwakes/op")
 	b.ReportMetric(float64(metrics.coordinatorCoalesced)/perOperation, "coordinatorcoalesced/op")
+	// Split counters have precise fixture definitions: capture is an immutable
+	// state snapshot requested for a live paint; composition builds the frame
+	// from that capture; emission accepts its output frame. Keep bytes/frames
+	// above as transport observables rather than folding them into these rates.
+	b.ReportMetric(float64(metrics.renderCaptures)/perOperation, "rendercaptures/op")
+	b.ReportMetric(float64(metrics.renderCompositions)/perOperation, "rendercompositions/op")
+	b.ReportMetric(float64(metrics.renderEmissions)/perOperation, "renderemissions/op")
 	b.ReportMetric(coordinatorCoalescingRatio(metrics), "coordinatorcoalescingratio")
 	b.ReportMetric(float64(historyRows), "historyrows/pane")
+}
+
+// Root-cause hypothesis (verified by this guard before the fix): S2 allocates
+// one visible VT-frame copy during capture plus a new composed frame and its
+// base-frame clone for every live paint. Those client-sized copies, rather
+// than history, account for the ~1 MiB/op regression in the pinned benchmark.
+func TestLivePaintAllocationBudget(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		panes int
+	}{
+		{name: "1tab-1pane", panes: 1},
+		{name: "1tab-4panes", panes: 4},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: tt.panes, historyRows: 10_000})
+			allocs := testing.AllocsPerRun(20, func() {
+				fixture.paintLive()
+				fixture.ac.ackOutputState(fixture.ac.output.next)
+			})
+			require.LessOrEqual(t, allocs, float64(38), "live paint must reuse attachment-owned render scratch across warm paints")
+		})
+	}
 }
 
 func TestPerformanceFixturePaintLiveUsesPrecomputedAlternatingWrites(t *testing.T) {
@@ -243,6 +297,9 @@ type performanceMetrics struct {
 	coordinatorInvalidations uint64
 	coordinatorWakes         uint64
 	coordinatorCoalesced     uint64
+	renderCaptures           uint64
+	renderCompositions       uint64
+	renderEmissions          uint64
 }
 
 type performanceFixture struct {
@@ -259,6 +316,9 @@ type performanceFixture struct {
 	resizes             int
 	resizedSize         domain.Size
 	coordinatorBaseline renderCoordinatorBurstMetricsSnapshot
+	renderCaptures      uint64
+	renderCompositions  uint64
+	renderEmissions     uint64
 }
 
 func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceFixture {
@@ -303,6 +363,11 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 	// The fixture uses the production coordinator. stubClock's inert timer is
 	// completed synchronously by the coordinator, keeping benchmark operations
 	// deterministic while retaining their real invalidation path.
+	ac.renderStages = renderStageHooks{
+		capture: func() { fixture.renderCaptures++ },
+		compose: func() { fixture.renderCompositions++ },
+		emit:    func() { fixture.renderEmissions++ },
+	}
 	d.attachCoordinator(sess, nil, ac, true)
 
 	// Prime the real renderer shadow before measurements. Subsequent paints use
@@ -415,6 +480,9 @@ func (f *performanceFixture) resized() bool {
 func (f *performanceFixture) resetMetrics() {
 	f.output.reset()
 	f.snaps.reset()
+	f.renderCaptures = 0
+	f.renderCompositions = 0
+	f.renderEmissions = 0
 	if rc := f.sess.renderCoordinator(); rc != nil {
 		f.coordinatorBaseline = rc.burstMetricsSnapshot()
 	}
@@ -426,6 +494,7 @@ func (f *performanceFixture) metrics() performanceMetrics {
 	metrics := performanceMetrics{
 		outputFrames: output.frames, outputBytes: output.bytes, outputPayloadBytes: output.payloadBytes,
 		snapshotWrites: snapshots.writes, snapshotBytes: snapshots.bytes,
+		renderCaptures: f.renderCaptures, renderCompositions: f.renderCompositions, renderEmissions: f.renderEmissions,
 	}
 	if rc := f.sess.renderCoordinator(); rc != nil {
 		coordinator := rc.burstMetricsSnapshot()

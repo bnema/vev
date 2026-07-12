@@ -52,9 +52,9 @@ func TestApplyConfigThemeRepaintInvalidatesComposedFrameCache(t *testing.T) {
 
 	d.paint(sess, ac, true)
 	ac.sendMu.Lock()
-	require.True(t, ac.composed.valid)
-	lightDimmedPane := ac.composed.frame.At(21, 1).Style
-	lightDivider := ac.composed.frame.At(20, 1).Style
+	require.True(t, ac.pipelineCache.valid)
+	lightDimmedPane := ac.pipelineCache.frame.At(21, 1).Style
+	lightDivider := ac.pipelineCache.frame.At(20, 1).Style
 	ac.sendMu.Unlock()
 	left.mu.Lock()
 	left.screen.ClearDamage()
@@ -67,9 +67,9 @@ func TestApplyConfigThemeRepaintInvalidatesComposedFrameCache(t *testing.T) {
 
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
-	require.True(t, ac.composed.valid, "reset=false config repaint should rebuild the composed cache")
-	require.NotEqual(t, lightDimmedPane, ac.composed.frame.At(21, 1).Style, "dimmed pane style must not stay cached across theme reapply")
-	require.NotEqual(t, lightDivider, ac.composed.frame.At(20, 1).Style, "divider style must not stay cached across theme reapply")
+	require.True(t, ac.pipelineCache.valid, "reset=false config repaint should rebuild the composed cache")
+	require.NotEqual(t, lightDimmedPane, ac.pipelineCache.frame.At(21, 1).Style, "dimmed pane style must not stay cached across theme reapply")
+	require.NotEqual(t, lightDivider, ac.pipelineCache.frame.At(20, 1).Style, "divider style must not stay cached across theme reapply")
 }
 
 func TestStatusCompositionGolden(t *testing.T) {

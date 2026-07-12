@@ -402,11 +402,6 @@ func isCopyEscapePrefix(data []byte) bool {
 		len(data) == 3 && data[0] == 0x1b && data[1] == '[' && (data[2] == '5' || data[2] == '6')
 }
 
-func composeCopySearchClientFrame(model *visualsearch.Model, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
-	styleSet := resolveThemeStyles(styles)
-	return composeModalClientFrame(base, copySearchModal, styleSet, styleSet.selection, model.Render)
-}
-
 func composeCopyClientFrame(mode *scopy.Mode, document *scopy.Snapshot, target domain.Rect, frame renderer.Frame, bars barState) (renderer.Frame, []renderer.Damage) {
 	if mode == nil || document == nil || target.Width <= 0 || target.Height <= 0 || frame.Width <= 0 || frame.Height <= 0 {
 		return frame, nil

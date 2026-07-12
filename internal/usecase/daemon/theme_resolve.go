@@ -28,7 +28,6 @@ func (d *Daemon) applyHostThemeLocked(sess *session, ac *attachedClient, t theme
 
 	if ac != nil {
 		ac.setTheme(t)
-		ac.composed.invalidate()
 	}
 	for _, tb := range tabs {
 		tb.mu.Lock()

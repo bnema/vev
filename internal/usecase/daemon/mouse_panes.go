@@ -64,10 +64,6 @@ func solveTabLayoutLocked(tb *tab) tabLayoutSnapshot {
 	return tabLayoutSnapshot{root: tb.tree.Root, fingerprint: layoutFingerprint(tb.tree.Root), area: area, focus: tb.tree.Focus, placements: placements, ok: ok}
 }
 
-func (snap tabLayoutSnapshot) matchesLocked(tb *tab) bool {
-	return snap.ok && tb != nil && tb.tree != nil && tb.tree.Root == snap.root && tb.tree.Focus == snap.focus && tb.size.Cols == snap.area.Width && tb.size.Rows == snap.area.Height && snap.fingerprint == layoutFingerprint(tb.tree.Root)
-}
-
 func layoutFingerprint(root *layout.Node) string {
 	var b strings.Builder
 	writeLayoutFingerprint(&b, root)

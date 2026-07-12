@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
@@ -35,11 +36,16 @@ type attachedClient struct {
 	// exact coordinator incarnation. paint rechecks it under sendMu.
 	coordinatorReadyEpoch atomic.Uint64
 	echoAck               atomic.Uint64
-	bars                  barCache           // only touched while sendMu is held
-	composed              composedFrameCache // only touched while sendMu is held
-	resizePaint           pendingByteTimer   // guarded by sendMu
-	resizePaintGeneration uint64             // guarded by sendMu
-	resizePaintPending    bool               // guarded by sendMu
+	// pipelineCache is the last successfully emitted composition. pipelineScratch
+	// is its attachment-owned alternate buffer; both are only touched under
+	// sendMu and must never share mutable backing storage.
+	pipelineCache         composeCacheInput
+	pipelineScratch       composeCacheInput
+	renderScratch         renderCaptureScratch                      // only touched while sendMu is held
+	captureFrames         map[layout.PaneID]capturedPaneRenderState // only touched while sendMu is held
+	resizePaint           pendingByteTimer                          // guarded by sendMu
+	resizePaintGeneration uint64                                    // guarded by sendMu
+	resizePaintPending    bool                                      // guarded by sendMu
 	size                  domain.Size
 	keys                  *keys.Router
 	sess                  Guarded[*session]
@@ -48,6 +54,7 @@ type attachedClient struct {
 	theme                 themeui.Theme
 	clientTheme           themeui.Theme
 	lastCursor            cursorOut
+	renderStages          renderStageHooks // invoked at real pipeline boundaries while sendMu is held
 	// previousSession is guarded independently. It is retained through temporary
 	// setSession(nil) hand-offs and cleared only on terminal teardown.
 	previousSession Guarded[*session]

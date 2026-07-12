@@ -55,7 +55,7 @@ func TestParkedResumeRejectsDispatchedWakeFromPriorAttachment(t *testing.T) {
 	<-wakeDone
 	require.Empty(t, newTransport.Sends(), "a stale pre-resume wake must not emit Output before Welcome")
 	ac.sendMu.Lock()
-	staleWakeComposed := ac.composed.valid
+	staleWakeComposed := ac.pipelineCache.valid
 	ac.sendMu.Unlock()
 	require.False(t, staleWakeComposed, "a stale wake must not mutate the resumed attachment shadow")
 
