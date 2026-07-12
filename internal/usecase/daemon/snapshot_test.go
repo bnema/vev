@@ -434,7 +434,7 @@ func newSnapshotTestSession(t *testing.T, name string, ephemeral bool, cwd strin
 	tb := newTab(pty, domain.Size{Cols: 8, Rows: 3})
 	p := tb.panes["pane-1"]
 	p.screen.Write([]byte("hello"))
-	p.scrollback.Append([]renderer.Cell{{Rune: 'h'}, {Rune: 'i'}})
+	p.history.Append([]renderer.Cell{{Rune: 'h'}, {Rune: 'i'}})
 	sess := &session{
 		id:        domain.SessionID("sess-" + name),
 		name:      name,

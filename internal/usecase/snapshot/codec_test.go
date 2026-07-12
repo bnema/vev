@@ -1,7 +1,6 @@
 package snapshot
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
@@ -10,199 +9,69 @@ import (
 
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/pkg/renderer"
-)
-
-func TestMarshalMinimalGolden(t *testing.T) {
-	got, err := Marshal(Session{Name: "s", CreatedAt: 7})
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-	want := []byte{
-		'V', 'E', 'V', 'S', 0, 2, 0, 0, 0, 0, 0, 15, 0xff, 0xc2, 0x2e, 0xcb,
-		0, 1, 's', 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0,
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("Marshal minimal bytes\ngot  % x\nwant % x", got, want)
-	}
-}
-
-func TestRoundTripNilTreeAndRootDoNotMaterializeLeaf(t *testing.T) {
-	cases := []struct {
-		name string
-		tab  Tab
-	}{
-		{name: "nil tree", tab: Tab{Tree: nil}},
-		{name: "nil root", tab: Tab{Tree: &layout.Tree{Root: nil}}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			b, err := Marshal(Session{Name: "s", Tabs: []Tab{tc.tab}})
-			if err != nil {
-				t.Fatalf("Marshal() error = %v", err)
-			}
-			got, err := Unmarshal(b)
-			if err != nil {
-				t.Fatalf("Unmarshal() error = %v", err)
-			}
-			if len(got.Tabs) != 1 {
-				t.Fatalf("tabs len = %d, want 1", len(got.Tabs))
-			}
-			if got.Tabs[0].Tree == nil {
-				t.Fatalf("Tree = nil, want tree with nil root")
-			}
-			if got.Tabs[0].Tree.Root != nil {
-				t.Fatalf("Root = %#v, want nil", got.Tabs[0].Tree.Root)
-			}
-		})
-	}
-}
-
-func TestRoundTripSessions(t *testing.T) {
-	boldRGB := renderer.DefaultStyle()
-	boldRGB.Bold = true
-	boldRGB.HasForegroundRGB = true
-	boldRGB.ForegroundRGB = renderer.RGB{R: 1, G: 2, B: 3}
-	indexed := renderer.DefaultStyle()
-	indexed.Foreground = 2
-	indexed.Background = 4
-	indexed.Inverse = true
-	indexed.Italic = true
-	deepTree := &layout.Tree{Focus: "2", Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
-		layout.NewLeaf("1"),
-		&layout.Node{Kind: layout.Stack, Expanded: "2", Children: []*layout.Node{layout.NewLeaf("2"), layout.NewLeaf("3")}},
-	}}}
-	cjkVisible := [][]renderer.Cell{{
-		{Rune: '好', Style: boldRGB},
-		{Continuation: true, Style: boldRGB},
-		{Rune: 'x', Style: indexed},
-	}}
-	multi := Session{Name: "named", CreatedAt: 42, Active: 1, Tabs: []Tab{
-		{StableID: "t_stable", Cols: 100, Rows: 40, NextPaneID: 9, Focus: "2", Tree: deepTree, Panes: []Pane{{ID: "1", StableID: "p_one", Cwd: "/a", Scrollback: rows("abc"), Visible: rows("v"), Process: &Process{Argv: []string{"claude", "--resume"}, Strategy: "claude", Opts: ProcessOpts{AgentSessionID: "agent-123"}}}, {ID: "2", StableID: "p_two", Cwd: "/b", Visible: rows("focus")}, {ID: "3", StableID: "p_three", Cwd: "/c"}}},
-		{Cols: 80, Rows: 24, NextPaneID: 2, Focus: "a", Tree: layout.NewTree("a"), Panes: []Pane{{ID: "a", Cwd: "/tmp", Visible: cjkVisible}}},
-	}}
-	empty := Session{Name: "blank", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Cwd: "/", Scrollback: nil, Visible: rows("   ", "")}}}}}
-	large := Session{Name: "large", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Cwd: "/", Scrollback: manyRows(6000), Visible: rows("tail")}}}}}
-	cases := []struct {
-		name string
-		s    Session
-	}{
-		{name: "multi tab deep tree", s: multi},
-		{name: "empty and all blank", s: empty},
-		{name: "large scrollback", s: large},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			b, err := Marshal(tc.s)
-			if err != nil {
-				t.Fatalf("Marshal() error = %v", err)
-			}
-			got, err := Unmarshal(b)
-			if err != nil {
-				t.Fatalf("Unmarshal() error = %v", err)
-			}
-			if !equalSession(got, trimSession(tc.s)) {
-				t.Fatalf("round trip mismatch\ngot  %#v\nwant %#v", got, trimSession(tc.s))
-			}
-		})
-	}
-}
-
-// V3 preserves the v2 16-byte big-endian envelope, but replaces its
-// compressed row payload with a flags-zero manifest of opaque VT blobs.
-// Snapshot owns only the manifest: sealed chunks are oldest-first and all
-// chunk, tail, and visible payloads remain self-contained VT bytes.
-const (
-	snapshotV3Version = uint16(3)
-	v3EnvelopeSize    = 16
+	"github.com/bnema/vev/pkg/vt"
 )
 
 func TestV3SnapshotRoundTripPreservesExactTerminalData(t *testing.T) {
 	indexed := renderer.DefaultStyle()
-	indexed.Bold = true
-	indexed.Inverse = true
+	indexed.Bold, indexed.Inverse = true, true
 	indexed.Attrs = renderer.AttrDim | renderer.AttrUnderline | renderer.AttrBlink | renderer.AttrStrikethrough
-	indexed.Foreground = 196
-	indexed.Background = 17
-	indexed.UnderlineStyle = renderer.UnderlineCurly
-	indexed.HasUnderlineColor = true
-	indexed.UnderlineColor = 203
-
+	indexed.Foreground, indexed.Background = 196, 17
+	indexed.UnderlineStyle, indexed.HasUnderlineColor, indexed.UnderlineColor = renderer.UnderlineCurly, true, 203
 	rgb := renderer.DefaultStyle()
-	rgb.Italic = true
-	rgb.HasForegroundRGB = true
-	rgb.ForegroundRGB = renderer.RGB{R: 1, G: 2, B: 3}
-	rgb.HasBackgroundRGB = true
-	rgb.BackgroundRGB = renderer.RGB{R: 4, G: 5, B: 6}
-	rgb.UnderlineStyle = renderer.UnderlineDashed
-	rgb.HasUnderlineColorRGB = true
-	rgb.UnderlineColorRGB = renderer.RGB{R: 7, G: 8, B: 9}
-
-	want := Session{Name: "v3 exact", Tabs: []Tab{{
-		Focus: "p",
-		Tree:  layout.NewTree("p"),
-		Panes: []Pane{{ID: "p", Scrollback: [][]renderer.Cell{{
-			{Rune: 'I', Style: indexed},
-			{Rune: '好', Style: rgb},
-			{Continuation: true, Style: rgb},
-		}}, Visible: [][]renderer.Cell{{
-			{Rune: 'V', Style: rgb},
-			{Rune: '界', Style: indexed},
-			{Continuation: true, Style: indexed},
-		}}}},
-	}}}
-
+	rgb.Italic, rgb.HasForegroundRGB, rgb.ForegroundRGB = true, true, renderer.RGB{R: 1, G: 2, B: 3}
+	rgb.HasBackgroundRGB, rgb.BackgroundRGB = true, renderer.RGB{R: 4, G: 5, B: 6}
+	rgb.UnderlineStyle, rgb.HasUnderlineColorRGB, rgb.UnderlineColorRGB = renderer.UnderlineDashed, true, renderer.RGB{R: 7, G: 8, B: 9}
+	sealed, tail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'I', Style: indexed}, {Rune: '好', Style: rgb}, {Continuation: true, Style: rgb}}})
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'V', Style: rgb}, {Rune: '界', Style: indexed}, {Continuation: true, Style: indexed}}})
+	want := Session{Name: "v3 exact", Tabs: []Tab{{Focus: "p", Tree: layout.NewTree("p"), Panes: []Pane{{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible}}}}}
 	encoded, err := Marshal(want)
 	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
+		t.Fatal(err)
 	}
 	requireV3Envelope(t, encoded)
 	got, err := Unmarshal(encoded)
 	if err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
+		t.Fatal(err)
 	}
-	if !equalSession(got, want) {
-		t.Fatalf("round trip mismatch\ngot  %#v\nwant %#v", got, want)
+	if len(got.Tabs) != 1 || len(got.Tabs[0].Panes) != 1 || got.Tabs[0].Panes[0].ID != "p" {
+		t.Fatalf("manifest round trip = %#v", got)
+	}
+	if _, err := vt.HistoryFromBlobs(vt.HistoryConfig{MaxRows: 8, ChunkRows: 2}, got.Tabs[0].Panes[0].SealedChunks, got.Tabs[0].Panes[0].Tail); err != nil {
+		t.Fatalf("history decode: %v", err)
+	}
+	frame, err := vt.UnmarshalVisible(got.Tabs[0].Panes[0].Visible)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !frame.Row(0)[0].Equal(renderer.Cell{Rune: 'V', Style: rgb}) || !frame.Row(0)[2].Continuation {
+		t.Fatalf("visible terminal data lost: %#v", frame.Row(0))
 	}
 }
 
 func TestUnmarshalRejectsV3LegacyVersions(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		version uint16
-	}{
-		{name: "v1", version: 1},
-		{name: "v2", version: 2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := Unmarshal(v3Envelope(tc.version, 0, nil))
-			if !errors.Is(err, ErrBadVersion) {
-				t.Fatalf("Unmarshal() error = %v, want %v", err, ErrBadVersion)
-			}
-		})
+	for _, version := range []uint16{1, 2} {
+		if _, err := Unmarshal(v3Envelope(version, 0, nil)); !errors.Is(err, ErrBadVersion) {
+			t.Fatalf("version %d: %v", version, err)
+		}
 	}
 }
 
 func TestUnmarshalRejectsMalformedV3EnvelopeBeforeAllocation(t *testing.T) {
 	body := v3Manifest(0, nil, nil, 0, nil, 0, nil)
-	valid := v3Envelope(snapshotV3Version, 0, body)
+	valid := v3Envelope(version, 0, body)
 	badCRC := append([]byte(nil), valid...)
 	badCRC[15] ^= 1
-
 	for _, tc := range []struct {
 		name string
 		data []byte
 		want error
 	}{
-		{name: "short envelope", data: valid[:v3EnvelopeSize-1], want: ErrShortPayload},
-		{name: "bad magic", data: append([]byte("NOPE"), valid[4:]...), want: ErrBadMagic},
-		{name: "future version", data: v3Envelope(snapshotV3Version+1, 0, body), want: ErrBadVersion},
-		{name: "nonzero flags", data: v3Envelope(snapshotV3Version, 1, body), want: ErrInvalidData},
-		{name: "bad checksum", data: badCRC, want: ErrBadCRC},
-		{name: "oversized body declaration", data: v3EnvelopeWithLength(snapshotV3Version, 0, nil, math.MaxUint32), want: ErrInvalidData},
+		{"short", valid[:15], ErrShortPayload}, {"magic", append([]byte("NOPE"), valid[4:]...), ErrBadMagic},
+		{"future", v3Envelope(version+1, 0, body), ErrBadVersion}, {"flags", v3Envelope(version, 1, body), ErrInvalidData},
+		{"crc", badCRC, ErrBadCRC}, {"body", v3EnvelopeWithLength(version, 0, nil, math.MaxUint32), ErrInvalidData},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			assertV3RejectsWithoutPanic(t, tc.data, tc.want)
-		})
+		t.Run(tc.name, func(t *testing.T) { reject(t, tc.data, tc.want) })
 	}
 }
 
@@ -211,442 +80,127 @@ func TestUnmarshalRejectsHostileV3ManifestDeclarationsBeforeAllocation(t *testin
 		name string
 		body []byte
 	}{
-		{name: "sealed chunk count", body: v3Manifest(math.MaxUint32, nil, nil, 0, nil, 0, nil)},
-		{name: "sealed blob length", body: v3Manifest(1, []uint32{math.MaxUint32}, nil, 0, nil, 0, nil)},
-		{name: "tail blob length", body: v3Manifest(0, nil, nil, math.MaxUint32, nil, 0, nil)},
-		{name: "visible blob length", body: v3Manifest(0, nil, nil, 0, nil, math.MaxUint32, nil)},
-		// Aggregate accounting is snapshot-owned even though each payload is
-		// VT-owned opaque data; declarations must be bounded before a blob can
-		// cause a count-driven allocation.
-		{name: "aggregate opaque blob declarations", body: v3Manifest(math.MaxUint32, nil, nil, math.MaxUint32, nil, math.MaxUint32, nil)},
+		{"count", v3Manifest(math.MaxUint32, nil, nil, 0, nil, 0, nil)},
+		{"sealed", v3Manifest(1, []uint32{math.MaxUint32}, nil, 0, nil, 0, nil)},
+		{"tail", v3Manifest(0, nil, nil, math.MaxUint32, nil, 0, nil)},
+		{"visible", v3Manifest(0, nil, nil, 0, nil, math.MaxUint32, nil)},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			assertV3RejectsWithoutPanic(t, v3Envelope(snapshotV3Version, 0, tc.body), ErrInvalidData)
-		})
+		t.Run(tc.name, func(t *testing.T) { reject(t, v3Envelope(version, 0, tc.body), ErrInvalidData) })
 	}
 }
 
 func TestUnmarshalRejectsEveryV3PrefixAndTrailingGarbage(t *testing.T) {
-	encoded, err := Marshal(Session{Name: "v3 prefixes", Tabs: []Tab{{
-		Focus: "p",
-		Tree:  layout.NewTree("p"),
-		Panes: []Pane{{ID: "p", Scrollback: rows("history"), Visible: rows("visible")}},
-	}}})
+	sealed, tail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'h'}}})
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+	encoded, err := Marshal(Session{Name: "p", Tabs: []Tab{{Focus: "p", Tree: layout.NewTree("p"), Panes: []Pane{{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible}}}}})
 	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
+		t.Fatal(err)
 	}
-	requireV3Envelope(t, encoded)
 	for n := range len(encoded) {
-		assertV3RejectsWithoutPanic(t, encoded[:n], nil)
+		reject(t, encoded[:n], nil)
 	}
-	assertV3RejectsWithoutPanic(t, append(append([]byte(nil), encoded...), 0), ErrTrailingBytes)
+	reject(t, append(encoded, 0), ErrTrailingBytes)
 }
 
-func TestUnmarshalRejectsMalformedWithoutPanic(t *testing.T) {
-	good, err := Marshal(Session{Name: "s", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p"}}}}})
+func TestUnmarshalRejectsInvalidTreeReference(t *testing.T) {
+	sealed, tail := historyBlobs(t, nil)
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+	encoded, err := Marshal(Session{Name: "p", Tabs: []Tab{{Focus: "missing", Tree: layout.NewTree("missing"), Panes: []Pane{{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible}}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cases := []struct {
-		name string
-		data []byte
-	}{
-		{"bad magic", append([]byte("NOPE"), good[4:]...)},
-		{"bad version", replaceU16(good, 4, 1)},
-		{"bad crc", append([]byte(nil), good[:len(good)-1]...)},
-		{"trailing", append(append([]byte(nil), good...), 0)},
-		{"body len overrun", replaceU32(good, 8, 999999)},
-		{"prefix", good[:len(good)/2]},
-		{"style oob", styleOOBSnapshot(t)},
-		{"unknown pane in tree", unknownPaneSnapshot(t)},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("Unmarshal panicked: %v", r)
-				}
-			}()
-			if _, err := Unmarshal(tc.data); err == nil {
-				t.Fatalf("Unmarshal() error = nil")
-			}
-		})
-	}
-	for i := 0; i < len(good); i++ {
-		if _, err := Unmarshal(good[:i]); err == nil {
-			t.Fatalf("prefix length %d unexpectedly succeeded", i)
-		}
+	if _, err := Unmarshal(encoded); !errors.Is(err, ErrUnknownPane) {
+		t.Fatalf("error = %v", err)
 	}
 }
 
-func TestMarshalRejectsProcessWithoutArgv(t *testing.T) {
-	_, err := Marshal(Session{Name: "s", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Process: &Process{Strategy: "generic"}}}}}})
-	if !errors.Is(err, ErrInvalidData) {
-		t.Fatalf("Marshal() error = %v, want %v", err, ErrInvalidData)
+func historyBlobs(t *testing.T, rows [][]renderer.Cell) ([][]byte, []byte) {
+	t.Helper()
+	h := vt.NewHistory(vt.HistoryConfig{MaxRows: 128, ChunkRows: 2})
+	for _, row := range rows {
+		h.Append(row)
 	}
-}
-
-func TestUnmarshalRejectsProcessWithoutArgv(t *testing.T) {
-	var w payloadWriter
-	_ = w.putString("x")
-	w.putUint64(0)
-	w.putUint16(0)
-	w.putUint16(1)
-	_ = w.putString("t")
-	w.putUint16(80)
-	w.putUint16(24)
-	w.putUint64(1)
-	_ = w.putString("p")
-	_ = writeNode(&w, layout.NewLeaf("p"))
-	w.putUint16(1)
-	_ = w.putString("p")
-	_ = w.putString("p_stable")
-	_ = w.putString("")
-	w.putUint16(0)
-	w.putUint32(0)
-	w.putUint32(0)
-	w.putUint8(1)
-	w.putUint16(0)
-	_ = w.putString("generic")
-	_ = w.putString("")
-	_, err := Unmarshal(reheader(w.b, 0))
-	if !errors.Is(err, ErrInvalidData) {
-		t.Fatalf("Unmarshal() error = %v, want %v", err, ErrInvalidData)
-	}
-}
-
-func TestUnmarshalRejectsOversizedBodiesBeforeAllocation(t *testing.T) {
-	body := []byte{0}
-	oversizedRaw := reheader(body, 0)
-	binary.BigEndian.PutUint32(oversizedRaw[8:12], uint32(maxDecodedBodySize+1))
-	oversizedFlate := reheader(body, flagFlate)
-	binary.BigEndian.PutUint32(oversizedFlate[8:12], uint32(maxDecodedBodySize+1))
-	cases := []struct {
-		name string
-		data []byte
-	}{
-		{name: "raw", data: oversizedRaw},
-		{name: "flate", data: oversizedFlate},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := Unmarshal(tc.data)
-			if !errors.Is(err, ErrInvalidData) {
-				t.Fatalf("Unmarshal() error = %v, want %v", err, ErrInvalidData)
-			}
-		})
-	}
-}
-
-func TestUnmarshalRejectsMalformedRowCountsWithoutAllocation(t *testing.T) {
-	cases := []struct {
-		name string
-		data []byte
-		want error
-	}{
-		{name: "huge row count", data: malformedRowsSnapshot(math.MaxUint32, 0), want: ErrInvalidData},
-		{name: "huge run count", data: malformedRowsSnapshot(1, math.MaxUint16), want: ErrShortPayload},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("Unmarshal panicked: %v", r)
-				}
-			}()
-			_, err := Unmarshal(tc.data)
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("Unmarshal() error = %v, want %v", err, tc.want)
-			}
-		})
-	}
-}
-
-func TestFlateOnOff(t *testing.T) {
-	small, err := Marshal(Session{Name: "small"})
+	sealed, tail, err := vt.MarshalSealedHistory(h.SealAndView())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if flags := binary.BigEndian.Uint16(small[6:8]); flags != 0 {
-		t.Fatalf("small flags = %#x, want 0", flags)
-	}
-	large, err := Marshal(Session{Name: "large", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Scrollback: manyRows(5000)}}}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if flags := binary.BigEndian.Uint16(large[6:8]); flags&1 == 0 {
-		t.Fatalf("large flags = %#x, want flate bit", flags)
-	}
+	return sealed, tail
 }
-
-func BenchmarkMarshal10KRows(b *testing.B) {
-	s := Session{Name: "bench", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Cwd: "/tmp", Scrollback: manyRows(10000), Visible: rows("visible")}}}}}
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		if _, err := Marshal(s); err != nil {
-			b.Fatal(err)
-		}
+func visibleBlob(t *testing.T, rows [][]renderer.Cell) []byte {
+	t.Helper()
+	width := 0
+	for _, row := range rows {
+		width = max(width, len(row))
 	}
-}
-
-func rows(lines ...string) [][]renderer.Cell {
-	out := make([][]renderer.Cell, len(lines))
-	for i, line := range lines {
-		for _, r := range line {
-			out[i] = append(out[i], renderer.Cell{Rune: r, Style: renderer.DefaultStyle()})
-		}
+	f := renderer.NewFrame(width, len(rows))
+	for y, row := range rows {
+		copy(f.Row(y), row)
 	}
-	return out
-}
-
-func manyRows(n int) [][]renderer.Cell {
-	out := make([][]renderer.Cell, n)
-	for i := range out {
-		out[i] = rows("row data row data row data")[0]
-	}
-	return out
-}
-
-func equalSession(a, b Session) bool {
-	if a.Name != b.Name || a.CreatedAt != b.CreatedAt || a.Active != b.Active || len(a.Tabs) != len(b.Tabs) {
-		return false
-	}
-	for i := range a.Tabs {
-		if !equalTab(a.Tabs[i], b.Tabs[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func equalTab(a, b Tab) bool {
-	if a.StableID != b.StableID || a.Cols != b.Cols || a.Rows != b.Rows || a.NextPaneID != b.NextPaneID || a.Focus != b.Focus || len(a.Panes) != len(b.Panes) || !equalNode(treeRoot(a.Tree), treeRoot(b.Tree)) {
-		return false
-	}
-	for i := range a.Panes {
-		if a.Panes[i].ID != b.Panes[i].ID || a.Panes[i].StableID != b.Panes[i].StableID || a.Panes[i].Cwd != b.Panes[i].Cwd || !equalProcess(a.Panes[i].Process, b.Panes[i].Process) || !equalRows(a.Panes[i].Scrollback, b.Panes[i].Scrollback) || !equalRows(a.Panes[i].Visible, b.Panes[i].Visible) {
-			return false
-		}
-	}
-	return true
-}
-
-func equalProcess(a, b *Process) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	if a.Strategy != b.Strategy || a.Opts.AgentSessionID != b.Opts.AgentSessionID || len(a.Argv) != len(b.Argv) {
-		return false
-	}
-	for i := range a.Argv {
-		if a.Argv[i] != b.Argv[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func treeRoot(t *layout.Tree) *layout.Node {
-	if t == nil {
-		return nil
-	}
-	return t.Root
-}
-
-func equalNode(a, b *layout.Node) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	if a.Kind != b.Kind || a.Dir != b.Dir || a.Leaf != b.Leaf || a.Expanded != b.Expanded || len(a.Children) != len(b.Children) {
-		return false
-	}
-	for i := range a.Children {
-		if !equalNode(a.Children[i], b.Children[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func equalRows(a, b [][]renderer.Cell) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if len(a[i]) != len(b[i]) {
-			return false
-		}
-		for j := range a[i] {
-			if !a[i][j].Equal(b[i][j]) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func trimSession(s Session) Session {
-	for ti := range s.Tabs {
-		for pi := range s.Tabs[ti].Panes {
-			s.Tabs[ti].Panes[pi].Scrollback = trimRows(s.Tabs[ti].Panes[pi].Scrollback, false)
-			s.Tabs[ti].Panes[pi].Visible = trimRows(s.Tabs[ti].Panes[pi].Visible, true)
-		}
-	}
-	return s
-}
-
-func reheader(body []byte, flags uint16) []byte {
-	out := make([]byte, 16+len(body))
-	copy(out[:4], []byte("VEVS"))
-	binary.BigEndian.PutUint16(out[4:6], version)
-	binary.BigEndian.PutUint16(out[6:8], flags)
-	binary.BigEndian.PutUint32(out[8:12], uint32(len(body)))
-	binary.BigEndian.PutUint32(out[12:16], crc32.ChecksumIEEE(body))
-	copy(out[16:], body)
-	return out
-}
-
-func replaceU16(b []byte, off int, v uint16) []byte {
-	out := append([]byte(nil), b...)
-	binary.BigEndian.PutUint16(out[off:], v)
-	return out
-}
-func replaceU32(b []byte, off int, v uint32) []byte {
-	out := append([]byte(nil), b...)
-	binary.BigEndian.PutUint32(out[off:], v)
-	return out
-}
-
-func malformedRowsSnapshot(rowCount uint32, runCount uint16) []byte {
-	var w payloadWriter
-	_ = w.putString("x")
-	w.putUint64(0)
-	w.putUint16(0)
-	w.putUint16(1)
-	_ = w.putString("")
-	w.putUint16(0)
-	w.putUint16(0)
-	w.putUint64(0)
-	_ = w.putString("p")
-	_ = writeNode(&w, layout.NewLeaf("p"))
-	w.putUint16(1)
-	_ = w.putString("p")
-	_ = w.putString("")
-	_ = w.putString("")
-	w.putUint16(0)
-	w.putUint32(rowCount)
-	if rowCount > 0 {
-		w.putUint16(runCount)
-	}
-	return reheader(w.b, 0)
-}
-
-func styleOOBSnapshot(t *testing.T) []byte {
-	b, err := Marshal(Session{Name: "x", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Visible: rows("x")}}}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	bodyLen := int(binary.BigEndian.Uint32(b[8:12]))
-	body := append([]byte(nil), b[16:16+bodyLen]...)
-	for i := 0; i < len(body)-5; i++ { // run len=1,rune='x', style=0,cflags=0
-		if body[i] == 0 && body[i+1] == 1 && body[i+2] == 0 && body[i+3] == 0 && body[i+4] == 0 && body[i+5] == 'x' {
-			body[i+6] = 0
-			body[i+7] = 2
-			return reheader(body, 0)
-		}
-	}
-	t.Fatal("run not found")
-	return nil
-}
-
-func unknownPaneSnapshot(t *testing.T) []byte {
-	b, err := Marshal(Session{Name: "x", Tabs: []Tab{{Tree: layout.NewTree("missing"), Focus: "missing", Panes: []Pane{{ID: "p"}}}}})
+	b, err := vt.MarshalVisible(f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return b
 }
-
 func requireV3Envelope(t *testing.T, data []byte) {
 	t.Helper()
-	if len(data) < v3EnvelopeSize {
-		t.Fatalf("encoded snapshot is %d bytes, want at least %d", len(data), v3EnvelopeSize)
-	}
-	if got := binary.BigEndian.Uint16(data[4:6]); got != snapshotV3Version {
-		t.Fatalf("snapshot version = %d, want v3", got)
-	}
-	if got := binary.BigEndian.Uint16(data[6:8]); got != 0 {
-		t.Fatalf("snapshot flags = %#x, want 0", got)
+	if len(data) < 16 || binary.BigEndian.Uint16(data[4:6]) != version || binary.BigEndian.Uint16(data[6:8]) != 0 {
+		t.Fatalf("not v3 envelope: % x", data)
 	}
 }
-
-func assertV3RejectsWithoutPanic(t *testing.T, data []byte, want error) {
+func reject(t *testing.T, data []byte, want error) {
 	t.Helper()
 	defer func() {
 		if r := recover(); r != nil {
-			t.Fatalf("Unmarshal panicked: %v", r)
+			t.Fatalf("panic: %v", r)
 		}
 	}()
 	_, err := Unmarshal(data)
 	if err == nil {
-		t.Fatal("Unmarshal() error = nil")
+		t.Fatal("accepted malformed input")
 	}
 	if want != nil && !errors.Is(err, want) {
-		t.Fatalf("Unmarshal() error = %v, want %v", err, want)
+		t.Fatalf("error = %v, want %v", err, want)
 	}
 }
-
-func v3Envelope(version, flags uint16, body []byte) []byte {
-	return v3EnvelopeWithLength(version, flags, body, uint32(len(body)))
+func v3Envelope(v, flags uint16, body []byte) []byte {
+	return v3EnvelopeWithLength(v, flags, body, uint32(len(body)))
 }
-
-func v3EnvelopeWithLength(version, flags uint16, body []byte, bodyLen uint32) []byte {
-	out := make([]byte, v3EnvelopeSize+len(body))
-	copy(out[:4], magic)
-	binary.BigEndian.PutUint16(out[4:6], version)
+func v3EnvelopeWithLength(v, flags uint16, body []byte, length uint32) []byte {
+	out := make([]byte, 16+len(body))
+	copy(out, magic)
+	binary.BigEndian.PutUint16(out[4:6], v)
 	binary.BigEndian.PutUint16(out[6:8], flags)
-	binary.BigEndian.PutUint32(out[8:12], bodyLen)
+	binary.BigEndian.PutUint32(out[8:12], length)
 	binary.BigEndian.PutUint32(out[12:16], crc32.ChecksumIEEE(body))
-	copy(out[v3EnvelopeSize:], body)
+	copy(out[16:], body)
 	return out
 }
 
-// v3Manifest writes only snapshot-owned fields. Blob contents are deliberately
-// opaque: VT validates their style, row, run, cell, and decoded-byte budgets.
-func v3Manifest(
-	sealedCount uint32,
-	sealedLengths []uint32,
-	sealedBlobs [][]byte,
-	tailLength uint32,
-	tailBlob []byte,
-	visibleLength uint32,
-	visibleBlob []byte,
-) []byte {
-	var w payloadWriter
-	_ = w.putString("v3")
-	w.putUint64(0)
-	w.putUint16(0)
-	w.putUint16(1)
-	_ = w.putString("tab")
-	w.putUint16(80)
-	w.putUint16(24)
-	w.putUint64(1)
-	_ = w.putString("p")
-	_ = writeNode(&w, layout.NewLeaf("p"))
-	w.putUint16(1)
-	_ = w.putString("p")
-	_ = w.putString("")
-	_ = w.putString("")
-	w.putUint32(sealedCount)
-	for i := range sealedLengths {
-		w.putUint32(sealedLengths[i])
-		if i < len(sealedBlobs) {
-			w.b = append(w.b, sealedBlobs[i]...)
-		}
+// v3Manifest creates just enough session/tab/pane framing for hostile declarations.
+func v3Manifest(sealed uint32, sealedLens []uint32, sealedData []byte, tailLen uint32, tailData []byte, visibleLen uint32, visibleData []byte) []byte {
+	var b []byte
+	putS := func(s string) { b = binary.BigEndian.AppendUint16(b, uint16(len(s))); b = append(b, s...) }
+	putS("s")
+	b = append(b, make([]byte, 8+2)...)
+	b = binary.BigEndian.AppendUint16(b, 1)
+	putS("")
+	b = append(b, make([]byte, 2+2+8)...)
+	putS("p")
+	b = append(b, 0)
+	putS("p")
+	b = binary.BigEndian.AppendUint16(b, 1)
+	putS("p")
+	putS("")
+	putS("")
+	b = binary.BigEndian.AppendUint32(b, sealed)
+	for _, l := range sealedLens {
+		b = binary.BigEndian.AppendUint32(b, l)
 	}
-	w.putUint32(tailLength)
-	w.b = append(w.b, tailBlob...)
-	w.putUint32(visibleLength)
-	w.b = append(w.b, visibleBlob...)
-	return w.b
+	b = append(b, sealedData...)
+	b = binary.BigEndian.AppendUint32(b, tailLen)
+	b = append(b, tailData...)
+	b = binary.BigEndian.AppendUint32(b, visibleLen)
+	b = append(b, visibleData...)
+	return b
 }

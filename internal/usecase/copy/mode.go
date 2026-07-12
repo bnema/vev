@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 // OSC52MaxPayloadBytes caps clipboard payloads while vev intentionally emits
@@ -17,20 +18,20 @@ import (
 const OSC52MaxPayloadBytes = 75_000
 
 // Snapshot is the immutable scrollback-mode document: history followed by the
-// visible screen. History rows are immutable by Scrollback's append contract;
-// the visible frame is cloned once when the snapshot is constructed.
+// visible screen. VT HistoryView retains immutable chunks; the visible frame is
+// cloned once when the snapshot is constructed.
 type Snapshot struct {
-	history HistoryView
+	history vt.HistoryView
 	screen  renderer.Frame
 	Width   int
 	Height  int
 }
 
-// NewSnapshot freezes the current scrollback view and clones the visible screen.
-func NewSnapshot(sb *Scrollback, screen renderer.Frame) Snapshot {
-	var history HistoryView
-	if sb != nil {
-		history = sb.View()
+// NewSnapshot freezes the current VT history view and clones the visible screen.
+func NewSnapshot(historySource *vt.History, screen renderer.Frame) Snapshot {
+	var history vt.HistoryView
+	if historySource != nil {
+		history = historySource.View()
 	}
 	return Snapshot{history: history, screen: screen.Clone(), Width: screen.Width, Height: screen.Height}
 }
@@ -39,11 +40,11 @@ func NewSnapshot(sb *Scrollback, screen renderer.Frame) Snapshot {
 // It is intended for callers that already have a complete document rather than
 // a scrollback and visible frame.
 func NewSnapshotFromRows(rows [][]renderer.Cell, width, height int) Snapshot {
-	owned := make([][]renderer.Cell, len(rows))
-	for i, row := range rows {
-		owned[i] = append([]renderer.Cell(nil), row...)
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: len(rows), ChunkRows: 256})
+	for _, row := range rows {
+		history.Append(row)
 	}
-	return Snapshot{history: HistoryView{rows: owned}, Width: width, Height: height}
+	return Snapshot{history: history.SealAndView(), Width: width, Height: height}
 }
 
 // Len returns the number of document rows.

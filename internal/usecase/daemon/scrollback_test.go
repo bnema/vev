@@ -24,19 +24,19 @@ func TestNewTabInitializesScrollback(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			win := newTab(nil, domain.Size{Cols: 4, Rows: 3})
-			if win.focusedPane().scrollback == nil {
+			if win.focusedPane().history == nil {
 				t.Fatal("scrollback is nil")
 			}
-			if win.focusedPane().scrollback.Cap() != defaultScrollbackRows {
-				t.Fatalf("scrollback cap = %d, want %d", win.focusedPane().scrollback.Cap(), defaultScrollbackRows)
+			if win.focusedPane().history.Cap() != defaultScrollbackRows {
+				t.Fatalf("scrollback cap = %d, want %d", win.focusedPane().history.Cap(), defaultScrollbackRows)
 			}
 
 			win.focusedPane().screen.Write(tt.write)
 
-			if got := win.focusedPane().scrollback.Len(); got != tt.wantLen {
+			if got := win.focusedPane().history.Len(); got != tt.wantLen {
 				t.Fatalf("scrollback len = %d, want %d", got, tt.wantLen)
 			}
-			row := win.focusedPane().scrollback.View().Row(0)
+			row := win.focusedPane().history.View().Row(0)
 			runes := make([]rune, len(row))
 			for i, c := range row {
 				runes[i] = c.Rune

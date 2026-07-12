@@ -1,17 +1,14 @@
 package snapshot
 
 import (
-	"bytes"
-	"compress/flate"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
-	"io"
 	"math"
 
 	"github.com/bnema/vev/internal/usecase/layout"
-	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 var (
@@ -27,53 +24,34 @@ var (
 
 const (
 	magic              = "VEVS"
-	version            = uint16(2)
-	flagFlate          = uint16(1 << 0)
-	flateCutoff        = 4 << 10
+	version            = uint16(3)
 	maxDecodedBodySize = 256 << 20
-	maxDecodedRows     = 1 << 20
-	maxDecodedRuns     = 16 << 20
-	maxDecodedCells    = 16 << 20
+	maxSnapshotBlobs   = 1 << 16
+	maxSnapshotBytes   = 256 << 20
+	maxSnapshotRows    = 1 << 20
+	maxSnapshotCells   = 16 << 20
 )
 
-// Marshal encodes a v2 durable snapshot.
+// Marshal encodes the strict v3, flags-zero durable envelope.
 func Marshal(s Session) ([]byte, error) {
 	var w payloadWriter
 	if err := writeSession(&w, s); err != nil {
 		return nil, err
 	}
-	body := w.b
-	flags := uint16(0)
-	if len(body) > flateCutoff {
-		var compressed bytes.Buffer
-		fw, err := flate.NewWriter(&compressed, flate.DefaultCompression)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := fw.Write(body); err != nil {
-			_ = fw.Close()
-			return nil, err
-		}
-		if err := fw.Close(); err != nil {
-			return nil, err
-		}
-		body = compressed.Bytes()
-		flags |= flagFlate
-	}
-	if len(body) > math.MaxUint32 {
+	if len(w.b) > maxDecodedBodySize || len(w.b) > math.MaxUint32 {
 		return nil, fmt.Errorf("%w: body too large", ErrInvalidData)
 	}
-	out := make([]byte, 16+len(body))
+	out := make([]byte, 16+len(w.b))
 	copy(out[:4], magic)
 	binary.BigEndian.PutUint16(out[4:6], version)
-	binary.BigEndian.PutUint16(out[6:8], flags)
-	binary.BigEndian.PutUint32(out[8:12], uint32(len(body)))
-	binary.BigEndian.PutUint32(out[12:16], crc32.ChecksumIEEE(body))
-	copy(out[16:], body)
+	binary.BigEndian.PutUint32(out[8:12], uint32(len(w.b)))
+	binary.BigEndian.PutUint32(out[12:16], crc32.ChecksumIEEE(w.b))
+	copy(out[16:], w.b)
 	return out, nil
 }
 
-// Unmarshal decodes a strict v2 durable snapshot.
+// Unmarshal validates the complete manifest and all VT blobs without
+// allocations first, then decodes the already preflighted data.
 func Unmarshal(b []byte) (Session, error) {
 	if len(b) < 16 {
 		return Session{}, ErrShortPayload
@@ -84,38 +62,25 @@ func Unmarshal(b []byte) (Session, error) {
 	if binary.BigEndian.Uint16(b[4:6]) != version {
 		return Session{}, ErrBadVersion
 	}
-	flags := binary.BigEndian.Uint16(b[6:8])
-	if flags&^flagFlate != 0 {
-		return Session{}, fmt.Errorf("%w: unknown flags", ErrInvalidData)
+	if binary.BigEndian.Uint16(b[6:8]) != 0 {
+		return Session{}, fmt.Errorf("%w: flags", ErrInvalidData)
 	}
-	bodyLen := int(binary.BigEndian.Uint32(b[8:12]))
+	bodyLen := binary.BigEndian.Uint32(b[8:12])
 	if bodyLen > maxDecodedBodySize {
 		return Session{}, fmt.Errorf("%w: body too large", ErrInvalidData)
 	}
-	if len(b) < 16+bodyLen {
+	if uint64(len(b)) < 16+uint64(bodyLen) {
 		return Session{}, ErrShortPayload
 	}
-	if len(b) != 16+bodyLen {
+	if uint64(len(b)) != 16+uint64(bodyLen) {
 		return Session{}, ErrTrailingBytes
 	}
 	body := b[16:]
 	if crc32.ChecksumIEEE(body) != binary.BigEndian.Uint32(b[12:16]) {
 		return Session{}, ErrBadCRC
 	}
-	if flags&flagFlate != 0 {
-		fr := flate.NewReader(bytes.NewReader(body))
-		decompressed, err := io.ReadAll(io.LimitReader(fr, maxDecodedBodySize+1))
-		cerr := fr.Close()
-		if err != nil {
-			return Session{}, err
-		}
-		if cerr != nil {
-			return Session{}, cerr
-		}
-		if len(decompressed) > maxDecodedBodySize {
-			return Session{}, fmt.Errorf("%w: decompressed body too large", ErrInvalidData)
-		}
-		body = decompressed
+	if err := preflightSession(body); err != nil {
+		return Session{}, err
 	}
 	r := payloadReader{b: body}
 	s, err := readSession(&r)
@@ -239,6 +204,18 @@ func (r *payloadReader) getStrings() ([]string, error) {
 		out[i] = s
 	}
 	return out, nil
+}
+func (r *payloadReader) getBlob() ([]byte, error) {
+	n, err := r.getUint32()
+	if err != nil {
+		return nil, err
+	}
+	if uint64(n) > uint64(len(r.b)) {
+		return nil, ErrShortPayload
+	}
+	blob := append([]byte(nil), r.b[:n]...)
+	r.b = r.b[n:]
+	return blob, nil
 }
 func (r *payloadReader) done() error {
 	if len(r.b) != 0 {
@@ -464,24 +441,27 @@ func writePane(w *payloadWriter, p Pane) error {
 	if err := w.putString(p.Cwd); err != nil {
 		return err
 	}
-	styles := styleTable(p)
-	if len(styles) > math.MaxUint16 {
-		return fmt.Errorf("%w: too many styles", ErrInvalidData)
+	if len(p.SealedChunks) > maxSnapshotBlobs {
+		return fmt.Errorf("%w: too many sealed chunks", ErrInvalidData)
 	}
-	w.putUint16(uint16(len(styles)))
-	for _, s := range styles {
-		writeStyle(w, s)
+	w.putUint32(uint32(len(p.SealedChunks)))
+	for _, blob := range p.SealedChunks {
+		if len(blob) == 0 || len(blob) > math.MaxUint32 {
+			return fmt.Errorf("%w: sealed chunk length", ErrInvalidData)
+		}
+		w.putUint32(uint32(len(blob)))
+		w.b = append(w.b, blob...)
 	}
-	idx := make(map[renderer.Style]uint16, len(styles))
-	for i, s := range styles {
-		idx[s] = uint16(i)
+	if len(p.Tail) == 0 || len(p.Tail) > math.MaxUint32 {
+		return fmt.Errorf("%w: tail length", ErrInvalidData)
 	}
-	if err := writeRows(w, p.Scrollback, idx, false); err != nil {
-		return err
+	w.putUint32(uint32(len(p.Tail)))
+	w.b = append(w.b, p.Tail...)
+	if len(p.Visible) == 0 || len(p.Visible) > math.MaxUint32 {
+		return fmt.Errorf("%w: visible length", ErrInvalidData)
 	}
-	if err := writeRows(w, p.Visible, idx, true); err != nil {
-		return err
-	}
+	w.putUint32(uint32(len(p.Visible)))
+	w.b = append(w.b, p.Visible...)
 	return writeProcess(w, p.Process)
 }
 
@@ -498,24 +478,24 @@ func readPane(r *payloadReader) (Pane, error) {
 	if err != nil {
 		return Pane{}, err
 	}
-	ns, err := r.getUint16()
+	n, err := r.getUint32()
 	if err != nil {
 		return Pane{}, err
 	}
-	styles := make([]renderer.Style, ns)
-	for i := range styles {
-		s, err := readStyle(r)
-		if err != nil {
+	if n > maxSnapshotBlobs || uint64(n) > uint64(len(r.b))/4 {
+		return Pane{}, fmt.Errorf("%w: sealed chunks", ErrInvalidData)
+	}
+	sealed := make([][]byte, n)
+	for i := range sealed {
+		if sealed[i], err = r.getBlob(); err != nil {
 			return Pane{}, err
 		}
-		styles[i] = s
 	}
-	budget := rowBudget{cells: maxDecodedCells, runs: maxDecodedRuns}
-	sb, err := readRows(r, styles, &budget)
+	tail, err := r.getBlob()
 	if err != nil {
 		return Pane{}, err
 	}
-	vis, err := readRows(r, styles, &budget)
+	visible, err := r.getBlob()
 	if err != nil {
 		return Pane{}, err
 	}
@@ -523,7 +503,7 @@ func readPane(r *payloadReader) (Pane, error) {
 	if err != nil {
 		return Pane{}, err
 	}
-	return Pane{ID: layout.PaneID(id), StableID: stableID, Cwd: cwd, Scrollback: sb, Visible: vis, Process: proc}, nil
+	return Pane{ID: layout.PaneID(id), StableID: stableID, Cwd: cwd, SealedChunks: sealed, Tail: tail, Visible: visible, Process: proc}, nil
 }
 
 func writeProcess(w *payloadWriter, p *Process) error {
@@ -573,236 +553,214 @@ func readProcess(r *payloadReader) (*Process, error) {
 	return &Process{Argv: argv, Strategy: strategy, Opts: ProcessOpts{AgentSessionID: agentSessionID}}, nil
 }
 
-func writeRows(w *payloadWriter, rows [][]renderer.Cell, idx map[renderer.Style]uint16, trimBlankRows bool) error {
-	clean := trimRows(rows, trimBlankRows)
-	if len(clean) > math.MaxUint32 {
-		return fmt.Errorf("%w: too many rows", ErrInvalidData)
+// preflightSession walks framing and opaque VT blobs without constructing a
+// Session. All count-derived allocation happens only in the second pass.
+func preflightSession(body []byte) error {
+	r := payloadReader{b: body}
+	if err := skipString(&r); err != nil {
+		return err
 	}
-	w.putUint32(uint32(len(clean)))
-	for _, row := range clean {
-		runs := makeRuns(row)
-		if len(runs) > math.MaxUint16 {
-			return fmt.Errorf("%w: too many runs", ErrInvalidData)
+	if _, err := r.getUint64(); err != nil {
+		return err
+	}
+	if _, err := r.getUint16(); err != nil {
+		return err
+	}
+	tabs, err := r.getUint16()
+	if err != nil {
+		return err
+	}
+	if uint64(tabs) > uint64(len(r.b))/2 {
+		return ErrShortPayload
+	}
+	var totals vt.DecodeStats
+	blobs := uint64(0)
+	for range tabs {
+		if err := preflightTab(&r, &totals, &blobs); err != nil {
+			return fmt.Errorf("preflight tab: %w", err)
 		}
-		w.putUint16(uint16(len(runs)))
-		for _, run := range runs {
-			w.putUint16(uint16(run.len))
-			w.putUint32(uint32(run.cell.Rune))
-			w.putUint16(idx[run.cell.Style])
-			var flags uint8
-			if run.cell.Continuation {
-				flags |= 1
-			}
-			w.putUint8(flags)
+	}
+	if err := r.done(); err != nil {
+		return err
+	}
+	if totals.Rows > maxSnapshotRows || totals.Cells > maxSnapshotCells || totals.Bytes > maxSnapshotBytes {
+		return fmt.Errorf("%w: global VT budget", ErrInvalidData)
+	}
+	return nil
+}
+
+func skipString(r *payloadReader) error {
+	n, err := r.getUint16()
+	if err != nil {
+		return err
+	}
+	if uint64(n) > uint64(len(r.b)) {
+		return ErrShortPayload
+	}
+	r.b = r.b[n:]
+	return nil
+}
+
+func preflightTab(r *payloadReader, totals *vt.DecodeStats, blobs *uint64) error {
+	if err := skipString(r); err != nil {
+		return err
+	}
+	if _, err := r.getUint16(); err != nil {
+		return err
+	}
+	if _, err := r.getUint16(); err != nil {
+		return err
+	}
+	if _, err := r.getUint64(); err != nil {
+		return err
+	}
+	if err := skipString(r); err != nil {
+		return err
+	}
+	if err := preflightNode(r, 0); err != nil {
+		return err
+	}
+	panes, err := r.getUint16()
+	if err != nil {
+		return err
+	}
+	if uint64(panes) > uint64(len(r.b))/2 {
+		return ErrShortPayload
+	}
+	for range panes {
+		if err := preflightPane(r, totals, blobs); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-type rowBudget struct {
-	cells int
-	runs  int
+func preflightNode(r *payloadReader, depth int) error {
+	if depth > 64 {
+		return fmt.Errorf("%w: tree depth", ErrInvalidData)
+	}
+	kind, err := r.getUint8()
+	if err != nil {
+		return err
+	}
+	switch kind {
+	case 0:
+		return skipString(r)
+	case 1:
+		if _, err := r.getUint8(); err != nil {
+			return err
+		}
+	case 2:
+		if err := skipString(r); err != nil {
+			return err
+		}
+	case 3:
+		return nil
+	default:
+		return fmt.Errorf("%w: node kind", ErrInvalidData)
+	}
+	children, err := r.getUint16()
+	if err != nil {
+		return err
+	}
+	if uint64(children) > uint64(len(r.b)) {
+		return ErrShortPayload
+	}
+	for range children {
+		if err := preflightNode(r, depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func readRows(r *payloadReader, styles []renderer.Style, budget *rowBudget) ([][]renderer.Cell, error) {
+func preflightPane(r *payloadReader, totals *vt.DecodeStats, blobs *uint64) error {
+	if err := skipString(r); err != nil {
+		return err
+	}
+	if err := skipString(r); err != nil {
+		return err
+	}
+	if err := skipString(r); err != nil {
+		return err
+	}
 	n, err := r.getUint32()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if n > maxDecodedRows {
-		return nil, fmt.Errorf("%w: too many rows", ErrInvalidData)
+	if n > maxSnapshotBlobs || uint64(n) > uint64(len(r.b))/4 {
+		return fmt.Errorf("%w: sealed chunks", ErrInvalidData)
 	}
-	if uint64(n) > uint64(len(r.b))/2 {
-		return nil, ErrShortPayload
-	}
-	rows := make([][]renderer.Cell, int(n))
-	for i := range rows {
-		nr, err := r.getUint16()
-		if err != nil {
-			return nil, err
-		}
-		if budget != nil {
-			if int(nr) > budget.runs {
-				return nil, fmt.Errorf("%w: too many runs", ErrInvalidData)
-			}
-			budget.runs -= int(nr)
-		}
-		if uint64(nr) > uint64(len(r.b))/9 {
-			return nil, ErrShortPayload
-		}
-		rowCells := 0
-		for j := 0; j < int(nr); j++ {
-			ln, err := r.getUint16()
-			if err != nil {
-				return nil, err
-			}
-			rn, err := r.getUint32()
-			if err != nil {
-				return nil, err
-			}
-			si, err := r.getUint16()
-			if err != nil {
-				return nil, err
-			}
-			flags, err := r.getUint8()
-			if err != nil {
-				return nil, err
-			}
-			if int(si) >= len(styles) {
-				return nil, ErrStyleOOB
-			}
-			if flags&^1 != 0 {
-				return nil, fmt.Errorf("%w: unknown cell flags", ErrInvalidData)
-			}
-			if budget != nil {
-				if int(ln) > budget.cells {
-					return nil, fmt.Errorf("%w: too many cells", ErrInvalidData)
-				}
-				budget.cells -= int(ln)
-			}
-			cell := renderer.Cell{Rune: rune(rn), Style: styles[si], Continuation: flags&1 != 0}
-			rowCells += int(ln)
-			rows[i] = append(rows[i], make([]renderer.Cell, int(ln))...)
-			for k := len(rows[i]) - int(ln); k < len(rows[i]); k++ {
-				rows[i][k] = cell
-			}
-		}
-		if rowCells == 0 {
-			rows[i] = nil
+	for range n {
+		if err := preflightBlob(r, totals, blobs, true); err != nil {
+			return err
 		}
 	}
-	return rows, nil
+	if err := preflightBlob(r, totals, blobs, true); err != nil {
+		return err
+	}
+	if err := preflightBlob(r, totals, blobs, false); err != nil {
+		return err
+	}
+	return preflightProcess(r)
 }
 
-type cellRun struct {
-	len  int
-	cell renderer.Cell
+func preflightBlob(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, history bool) error {
+	n, err := r.getUint32()
+	if err != nil {
+		return err
+	}
+	if n == 0 || uint64(n) > uint64(len(r.b)) || uint64(n) > maxSnapshotBytes {
+		return fmt.Errorf("%w: VT blob length", ErrInvalidData)
+	}
+	if *blobs >= maxSnapshotBlobs {
+		return fmt.Errorf("%w: too many VT blobs", ErrInvalidData)
+	}
+	blob := r.b[:n]
+	r.b = r.b[n:]
+	var stats vt.DecodeStats
+	if history {
+		stats, err = vt.PreflightHistoryBlob(blob)
+	} else {
+		stats, err = vt.PreflightVisibleBlob(blob)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: VT blob", ErrInvalidData)
+	}
+	if !totals.Add(stats) {
+		return fmt.Errorf("%w: VT budget overflow", ErrInvalidData)
+	}
+	*blobs++
+	return nil
 }
 
-func makeRuns(row []renderer.Cell) []cellRun {
-	if len(row) == 0 {
+func preflightProcess(r *payloadReader) error {
+	present, err := r.getUint8()
+	if err != nil {
+		return err
+	}
+	if present == 0 {
 		return nil
 	}
-	runs := []cellRun{{len: 1, cell: row[0]}}
-	for _, c := range row[1:] {
-		last := &runs[len(runs)-1]
-		if last.cell.Equal(c) && last.len < math.MaxUint16 {
-			last.len++
-		} else {
-			runs = append(runs, cellRun{len: 1, cell: c})
+	if present != 1 {
+		return fmt.Errorf("%w: process presence", ErrInvalidData)
+	}
+	n, err := r.getUint16()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: process argv empty", ErrInvalidData)
+	}
+	for range n {
+		if err := skipString(r); err != nil {
+			return err
 		}
 	}
-	return runs
-}
-
-func trimRows(rows [][]renderer.Cell, trimBlankRows bool) [][]renderer.Cell {
-	out := make([][]renderer.Cell, len(rows))
-	for i, row := range rows {
-		out[i] = trimTrailingBlankCells(row)
+	if err := skipString(r); err != nil {
+		return err
 	}
-	if trimBlankRows {
-		for len(out) > 0 && len(out[len(out)-1]) == 0 {
-			out = out[:len(out)-1]
-		}
-	}
-	return out
-}
-
-func trimTrailingBlankCells(row []renderer.Cell) []renderer.Cell {
-	end := len(row)
-	for end > 0 && isBlank(row[end-1]) {
-		end--
-	}
-	return append([]renderer.Cell(nil), row[:end]...)
-}
-func isBlank(c renderer.Cell) bool {
-	return !c.Continuation && c.Rune == ' ' && c.Style.Equal(renderer.DefaultStyle())
-}
-
-func styleTable(p Pane) []renderer.Style {
-	seen := map[renderer.Style]bool{}
-	var styles []renderer.Style
-	addRows := func(rows [][]renderer.Cell, trimBlankRows bool) {
-		for _, row := range trimRows(rows, trimBlankRows) {
-			for _, c := range row {
-				if !seen[c.Style] {
-					seen[c.Style] = true
-					styles = append(styles, c.Style)
-				}
-			}
-		}
-	}
-	addRows(p.Scrollback, false)
-	addRows(p.Visible, true)
-	return styles
-}
-
-func writeStyle(w *payloadWriter, s renderer.Style) {
-	var flags uint8
-	if s.Bold {
-		flags |= 1
-	}
-	if s.Inverse {
-		flags |= 2
-	}
-	if s.HasForegroundRGB {
-		flags |= 4
-	}
-	if s.HasBackgroundRGB {
-		flags |= 8
-	}
-	if s.Italic {
-		flags |= 16
-	}
-	w.putUint8(flags)
-	w.putUint32(uint32(int32(s.Foreground)))
-	w.putUint32(uint32(int32(s.Background)))
-	w.putUint8(s.ForegroundRGB.R)
-	w.putUint8(s.ForegroundRGB.G)
-	w.putUint8(s.ForegroundRGB.B)
-	w.putUint8(s.BackgroundRGB.R)
-	w.putUint8(s.BackgroundRGB.G)
-	w.putUint8(s.BackgroundRGB.B)
-}
-
-func readStyle(r *payloadReader) (renderer.Style, error) {
-	flags, err := r.getUint8()
-	if err != nil {
-		return renderer.Style{}, err
-	}
-	fg, err := r.getUint32()
-	if err != nil {
-		return renderer.Style{}, err
-	}
-	bg, err := r.getUint32()
-	if err != nil {
-		return renderer.Style{}, err
-	}
-	fr, err := r.getUint8()
-	if err != nil {
-		return renderer.Style{}, err
-	}
-	fgc, err := r.getUint8()
-	if err != nil {
-		return renderer.Style{}, err
-	}
-	fb, err := r.getUint8()
-	if err != nil {
-		return renderer.Style{}, err
-	}
-	br, err := r.getUint8()
-	if err != nil {
-		return renderer.Style{}, err
-	}
-	bgc, err := r.getUint8()
-	if err != nil {
-		return renderer.Style{}, err
-	}
-	bb, err := r.getUint8()
-	if err != nil {
-		return renderer.Style{}, err
-	}
-	return renderer.Style{Bold: flags&1 != 0, Italic: flags&16 != 0, Inverse: flags&2 != 0, HasForegroundRGB: flags&4 != 0, HasBackgroundRGB: flags&8 != 0, Foreground: int(int32(fg)), Background: int(int32(bg)), ForegroundRGB: renderer.RGB{R: fr, G: fgc, B: fb}, BackgroundRGB: renderer.RGB{R: br, G: bgc, B: bb}}, nil
+	return skipString(r)
 }
 
 func validateTree(t *layout.Tree, ids map[layout.PaneID]struct{}) error {

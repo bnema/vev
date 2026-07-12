@@ -7,10 +7,21 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
 )
 
 var benchmarkSnapshotSink Snapshot
+
+func row(text string) []renderer.Cell {
+	result := make([]renderer.Cell, 0, len([]rune(text)))
+	for _, r := range text {
+		result = append(result, renderer.Cell{Rune: r, Style: renderer.DefaultStyle()})
+	}
+	return result
+}
+
+func newHistory(rows int) *vt.History { return vt.NewHistory(vt.HistoryConfig{MaxRows: rows}) }
 
 func snapshot(lines []string, height int) Snapshot {
 	rows := make([][]renderer.Cell, len(lines))
@@ -485,7 +496,7 @@ func BenchmarkNewSnapshot10KRows(b *testing.B) {
 		historyRows = 10_000
 	)
 
-	scrollback := NewScrollback(historyRows)
+	scrollback := newHistory(historyRows)
 	for range historyRows {
 		scrollback.Append(row(strings.Repeat("x", width)))
 	}

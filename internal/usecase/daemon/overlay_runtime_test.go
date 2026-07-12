@@ -173,7 +173,7 @@ func TestOverlayRuntimeSnapshotCarriesCopyDocumentAndClearReleasesIt(t *testing.
 func TestOverlayRuntimeCopyDocumentSurvivesRingOverwrite(t *testing.T) {
 	ac := &attachedClient{}
 	ac.initOverlays()
-	history := scopy.NewScrollback(1)
+	history := newTestHistory(1)
 	history.Append(testRow("before"))
 	document := scopy.NewSnapshot(history, renderer.NewFrame(6, 1))
 

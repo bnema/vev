@@ -76,6 +76,15 @@ func (h *History) evict() {
 	}
 }
 
+// SealAndView rotates the mutable tail into an immutable chunk, then captures
+// the sealed chunks by identity. Callers must synchronize access to History.
+func (h *History) SealAndView() HistoryView {
+	if h != nil {
+		h.sealTail()
+	}
+	return h.View()
+}
+
 // View captures the current history. Sealed chunks are shared by identity; a
 // partially-filled tail is copied into a new immutable chunk for this view.
 func (h *History) View() HistoryView {
@@ -91,6 +100,22 @@ func (h *History) View() HistoryView {
 		chunks = append(chunks, &HistoryChunk{rows: rows})
 	}
 	return HistoryView{chunks: chunks, rows: h.rows}
+}
+
+// Len returns the currently retained history row count.
+func (h *History) Len() int {
+	if h == nil {
+		return 0
+	}
+	return h.rows
+}
+
+// Cap returns the configured bounded row capacity.
+func (h *History) Cap() int {
+	if h == nil {
+		return 0
+	}
+	return h.maxRows
 }
 
 func (v HistoryView) Len() int        { return v.rows }

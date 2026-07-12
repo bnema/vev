@@ -18,7 +18,25 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 )
+
+func terminalPane(t *testing.T, id, stableID, cwd string, historyRows, visibleRows [][]renderer.Cell) snapcodec.Pane {
+	t.Helper()
+	h := vt.NewHistory(vt.HistoryConfig{MaxRows: defaultScrollbackRows})
+	for _, row := range historyRows {
+		h.Append(row)
+	}
+	sealed, tail, err := vt.MarshalSealedHistory(h.SealAndView())
+	require.NoError(t, err)
+	frame := renderer.NewFrame(40, 24)
+	for y, row := range visibleRows {
+		copy(frame.Row(y), row)
+	}
+	visible, err := vt.MarshalVisible(frame)
+	require.NoError(t, err)
+	return snapcodec.Pane{ID: layout.PaneID(id), StableID: stableID, Cwd: cwd, SealedChunks: sealed, Tail: tail, Visible: visible}
+}
 
 func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 	store := &restoreSnapshotStore{}
@@ -37,8 +55,8 @@ func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 				layout.NewLeaf("pane-2"),
 			}}},
 			Panes: []snapcodec.Pane{
-				{ID: "pane-1", StableID: "p_saved_1", Cwd: "/one", Scrollback: [][]renderer.Cell{cells("old1")}, Visible: [][]renderer.Cell{cells("vis1")}},
-				{ID: "pane-2", StableID: "p_saved_2", Cwd: "/two", Scrollback: [][]renderer.Cell{cells("old2")}, Visible: [][]renderer.Cell{cells("vis2")}},
+				terminalPane(t, "pane-1", "p_saved_1", "/one", [][]renderer.Cell{cells("old1")}, [][]renderer.Cell{cells("vis1")}),
+				terminalPane(t, "pane-2", "p_saved_2", "/two", [][]renderer.Cell{cells("old2")}, [][]renderer.Cell{cells("vis2")}),
 			},
 		}},
 	})}}
@@ -77,10 +95,10 @@ func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 	p := tb.panes["pane-2"]
 	tb.mu.Unlock()
 	p.mu.Lock()
-	require.Equal(t, "old2", rowText(p.scrollback.View().Row(0)))
-	require.Equal(t, 1, p.scrollback.Len())
+	require.Equal(t, "old2", rowText(p.history.View().Row(0)))
+	require.Equal(t, 1, p.history.Len())
 	require.Equal(t, "vis2", rowText(p.screen.PrimaryVisibleRows()[0][:4]))
-	copySnap := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+	copySnap := scopy.NewSnapshot(p.history, p.screen.Frame)
 	require.Equal(t, "old2", rowText(copySnap.Row(0)[:4]))
 	require.Equal(t, "vis2", rowText(copySnap.Row(1)[:4]))
 	p.mu.Unlock()
@@ -417,6 +435,21 @@ func TestNamedRouteRestoreBarrierReturnsShutdown(t *testing.T) {
 
 func mustSnapshotBytes(t *testing.T, s snapcodec.Session) []byte {
 	t.Helper()
+	for ti := range s.Tabs {
+		for pi := range s.Tabs[ti].Panes {
+			p := &s.Tabs[ti].Panes[pi]
+			if len(p.Tail) != 0 {
+				continue
+			}
+			h := vt.NewHistory(vt.HistoryConfig{MaxRows: defaultScrollbackRows})
+			sealed, tail, err := vt.MarshalSealedHistory(h.SealAndView())
+			require.NoError(t, err)
+			frame := renderer.NewFrame(int(s.Tabs[ti].Cols), int(s.Tabs[ti].Rows))
+			visible, err := vt.MarshalVisible(frame)
+			require.NoError(t, err)
+			p.SealedChunks, p.Tail, p.Visible = sealed, tail, visible
+		}
+	}
 	b, err := snapcodec.Marshal(s)
 	require.NoError(t, err)
 	return b

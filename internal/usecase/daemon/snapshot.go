@@ -7,10 +7,8 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
-	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
 
@@ -149,7 +147,10 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 			p := newPaneWithStableID(paneSnap.ID, paneStableID, pty, contentSize)
 			p.ctx, p.cancel = context.WithCancel(tb.ctx)
 			p.rect = contentRect
-			seedPaneRows(p, paneSnap.Scrollback, paneSnap.Visible)
+			if err := restorePaneTerminal(p, paneSnap); err != nil {
+				closeOpened()
+				return err
+			}
 			if restoreCommand != "" {
 				if _, err := pty.Write([]byte(restoreCommand + "\n")); err != nil {
 					d.log.Warn("writing snapshot restore command failed", "err", err, "session", snap.Name, "pane", paneSnap.ID)
@@ -209,28 +210,30 @@ func markSnapshotDirty(sess *session) {
 	}
 }
 
-func seedPaneRows(p *pane, scrollback, visible [][]renderer.Cell) {
+func restorePaneTerminal(p *pane, snap snapcodec.Pane) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.scrollback = scopy.NewScrollback(defaultScrollbackRows)
-	for _, row := range scrollback {
-		p.scrollback.Append(row)
+	// Unmarshal requires both blobs. The empty fallback only supports direct
+	// in-process construction used by restore callers; it is unreachable for a
+	// durable snapshot because the v3 manifest rejects missing blobs.
+	tail := snap.Tail
+	if len(tail) == 0 {
+		tail, _ = vt.MarshalEmptyHistoryTail()
 	}
-	if len(visible) > 0 {
-		p.screen = vt.NewScreen(p.screen.Frame.Width, p.screen.Frame.Height)
-		for y, row := range visible {
-			if y >= p.screen.Frame.Height {
-				break
-			}
-			for x, cell := range row {
-				if x >= p.screen.Frame.Width {
-					break
-				}
-				p.screen.Frame.Set(x, y, cell)
-			}
-		}
+	visible := snap.Visible
+	if len(visible) == 0 {
+		visible, _ = vt.MarshalVisible(p.screen.PrimaryVisibleFrame())
 	}
-	p.screen.OnLineEvicted = p.scrollback.Append
+	history, err := vt.HistoryFromBlobs(vt.HistoryConfig{MaxRows: defaultScrollbackRows}, snap.SealedChunks, tail)
+	if err != nil {
+		return fmt.Errorf("snapshot history: %w", err)
+	}
+	if err := p.screen.RestorePrimaryVisible(visible); err != nil {
+		return fmt.Errorf("snapshot visible: %w", err)
+	}
+	p.history = history
+	p.screen.OnLineEvicted = history.Append
+	return nil
 }
 
 func restorePTYSize(contentRect domain.Rect, tabSize domain.Size) domain.Size {
@@ -296,13 +299,19 @@ func (d *Daemon) captureSession(sess *session) bool {
 			if pty != nil {
 				pid = pty.Pid()
 			}
-			paneSnap := snapcodec.Pane{
-				ID:         p.id,
-				StableID:   p.stableID,
-				Scrollback: cloneRows(p.scrollback.Snapshot()),
-				Visible:    cloneRows(p.screen.PrimaryVisibleRows()),
-			}
+			historyView := p.history.SealAndView()
+			visibleFrame := p.screen.PrimaryVisibleFrame()
+			paneID, paneStableID := p.id, p.stableID
 			p.mu.Unlock()
+			// Sealed VT chunks are immutable and visibleFrame is the one required
+			// screen clone, so both encoders run after pane.mu is released.
+			sealed, tail, historyErr := vt.MarshalSealedHistory(historyView)
+			visible, visibleErr := vt.MarshalVisible(visibleFrame)
+			if historyErr != nil || visibleErr != nil {
+				d.log.Warn("capturing terminal snapshot failed", "session", name, "pane", paneID, "history_err", historyErr, "visible_err", visibleErr)
+				return false
+			}
+			paneSnap := snapcodec.Pane{ID: paneID, StableID: paneStableID, SealedChunks: sealed, Tail: tail, Visible: visible}
 			paneSnap.Cwd = fallbackCwd
 			if d.procCwd != nil && pid > 0 {
 				if cwd, err := d.procCwd(pid); err == nil && cwd != "" {
@@ -376,17 +385,6 @@ func (d *Daemon) snapshotSaver(ctx context.Context) {
 		}
 		t.Reset(snapshotInterval)
 	}
-}
-
-func cloneRows(rows [][]renderer.Cell) [][]renderer.Cell {
-	if len(rows) == 0 {
-		return nil
-	}
-	out := make([][]renderer.Cell, len(rows))
-	for i, row := range rows {
-		out[i] = append([]renderer.Cell(nil), row...)
-	}
-	return out
 }
 
 func pruneTreeToPanes(n *layout.Node, panes map[layout.PaneID]struct{}) bool {

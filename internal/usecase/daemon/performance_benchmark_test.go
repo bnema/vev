@@ -145,7 +145,7 @@ func TestPerformanceFixtureLargeHistoryTopology(t *testing.T) {
 	for _, tb := range fixture.sess.tabs {
 		require.Len(t, tb.panes, 4)
 		for _, p := range tb.panes {
-			require.Equal(t, 10_000, p.scrollback.Len())
+			require.Equal(t, 10_000, p.history.Len())
 		}
 	}
 }
@@ -550,7 +550,7 @@ func (f *performanceFixture) configureTab(tb *tab, tabIndex, paneCount, historyR
 	for _, p := range tb.panes {
 		p.mu.Lock()
 		width := p.screen.Frame.Width
-		for row := 0; p.scrollback.Len() < historyRows; row++ {
+		for row := 0; p.history.Len() < historyRows; row++ {
 			p.screen.Write([]byte(performanceFullWidthRow(width, tabIndex, row) + "\r\n"))
 		}
 		p.mu.Unlock()
