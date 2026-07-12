@@ -8,30 +8,46 @@ import (
 
 func TestHistoryOrdersSealedChunksAndEvictsAtCapacity(t *testing.T) {
 	tests := []struct {
-		name string
-		rows []string
-		want []string
+		name      string
+		maxRows   int
+		chunkRows int
+		rows      []string
+		want      []string
 	}{
 		{
-			name: "oldest chunks are evicted before newer chunks",
-			rows: []string{"aaaa", "bbbb", "cccc", "dddd", "eeee", "ffff"},
-			want: []string{"cccc", "dddd", "eeee", "ffff"},
+			name:      "oldest chunks are evicted before newer chunks",
+			maxRows:   4,
+			chunkRows: 2,
+			rows:      []string{"aaaa", "bbbb", "cccc", "dddd", "eeee", "ffff"},
+			want:      []string{"cccc", "dddd", "eeee", "ffff"},
 		},
 		{
-			name: "rows preserve append order across chunk boundaries",
-			rows: []string{"0000", "1111", "2222", "3333"},
-			want: []string{"0000", "1111", "2222", "3333"},
+			name:      "nonmultiple capacity evicts a whole oldest immutable chunk",
+			maxRows:   5,
+			chunkRows: 2,
+			rows:      []string{"0000", "1111", "2222", "3333", "4444", "5555"},
+			want:      []string{"2222", "3333", "4444", "5555"},
+		},
+		{
+			name:      "rows preserve append order across chunk boundaries",
+			maxRows:   4,
+			chunkRows: 2,
+			rows:      []string{"0000", "1111", "2222", "3333"},
+			want:      []string{"0000", "1111", "2222", "3333"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			history := NewHistory(HistoryConfig{MaxRows: 4, ChunkRows: 2})
+			history := NewHistory(HistoryConfig{MaxRows: tt.maxRows, ChunkRows: tt.chunkRows})
 			for _, text := range tt.rows {
 				history.Append(historyRow(text))
 			}
 
 			view := history.View()
+			if got := view.Len(); got > tt.maxRows {
+				t.Fatalf("retained row count = %d, exceeds capacity %d", got, tt.maxRows)
+			}
 			if got := historyViewTexts(view); !equalStrings(got, tt.want) {
 				t.Fatalf("view rows = %#v, want %#v", got, tt.want)
 			}
