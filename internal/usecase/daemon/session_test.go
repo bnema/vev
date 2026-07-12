@@ -21,6 +21,11 @@ import (
 )
 
 // --- test doubles -----------------------------------------------------------
+func expectFloatingPrewarmOpen(factory *portsmocks.MockPTYFactory, normalSize domain.Size, floating ports.PTY) {
+	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
+		return got != normalSize && got.Valid()
+	})).Return(floating, nil).Maybe()
+}
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
@@ -44,9 +49,7 @@ func TestRoutePropagatesHelloCwdAndTabsInheritIt(t *testing.T) {
 		},
 	).Twice()
 	floating := newQuietPTY()
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
-		return got != normalSize && got.Valid()
-	})).Return(floating, nil).Maybe()
+	expectFloatingPrewarmOpen(f, normalSize, floating)
 
 	d := newTestDaemon(t, f, stubClock{})
 	tr := portsmocks.NewMockTransport(t)
@@ -199,7 +202,7 @@ func TestCreateTabClosesPTYIfSessionKilledDuringOpen(t *testing.T) {
 	p1, release1 := newBlockingPTY(t)
 	defer release1()
 	p2 := portsmocks.NewMockPTY(t)
-	opened := make(chan struct{})
+	openCtx := make(chan context.Context, 1)
 	releaseOpen := make(chan struct{})
 	closed := make(chan struct{})
 	p2.EXPECT().Close().RunAndReturn(func() error {
@@ -212,13 +215,14 @@ func TestCreateTabClosesPTYIfSessionKilledDuringOpen(t *testing.T) {
 	normalSize := domain.Size{Cols: 80, Rows: 22}
 	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).Return(p1, nil).Once()
 	floating := newQuietPTY()
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
-		return got != normalSize && got.Valid()
-	})).Return(floating, nil).Maybe()
+	expectFloatingPrewarmOpen(f, normalSize, floating)
 	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(context.Context, string, []string, []string, string, domain.Size) (ports.PTY, error) {
-			close(opened)
-			<-releaseOpen
+		func(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
+			openCtx <- ctx
+			select {
+			case <-ctx.Done():
+			case <-releaseOpen:
+			}
 			return p2, nil
 		},
 	).Once()
@@ -234,10 +238,20 @@ func TestCreateTabClosesPTYIfSessionKilledDuringOpen(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- d.createTab(sess, domain.Size{Cols: 80, Rows: 24}) }()
-	<-opened
+	ctx := <-openCtx
 	_ = d.killSession(sess, ports.ReasonSessionKilled, false)
+
+	cancelled := true
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		cancelled = false
+	}
 	close(releaseOpen)
 
+	if !cancelled {
+		t.Error("killSession did not cancel the context passed to PTYFactory.Open")
+	}
 	require.Error(t, <-errCh)
 	select {
 	case <-closed:
@@ -1276,9 +1290,7 @@ func TestAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 		},
 	).Twice()
 	floating := newQuietPTY()
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
-		return got != normalSize && got.Valid()
-	})).Return(floating, nil).Maybe()
+	expectFloatingPrewarmOpen(f, normalSize, floating)
 
 	d := newTestDaemon(t, f, stubClock{})
 	d.baseEnv = []string{"KEEP=1", "COLORTERM=old"}
@@ -1321,9 +1333,7 @@ func TestLiveAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 		},
 	).Twice()
 	floating := newQuietPTY()
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
-		return got != normalSize && got.Valid()
-	})).Return(floating, nil).Maybe()
+	expectFloatingPrewarmOpen(f, normalSize, floating)
 
 	d := newTestDaemon(t, f, stubClock{})
 	tr1 := portsmocks.NewMockTransport(t)
@@ -1368,9 +1378,7 @@ func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
 		},
 	).Twice()
 	floating := newQuietPTY()
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
-		return got != normalSize && got.Valid()
-	})).Return(floating, nil).Maybe()
+	expectFloatingPrewarmOpen(f, normalSize, floating)
 	d := newTestDaemon(t, f, stubClock{})
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
