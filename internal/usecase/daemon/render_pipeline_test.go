@@ -41,8 +41,8 @@ func (*scriptedReplayTransport) Close() error               { return nil }
 
 func TestTransportReplayFinalShadowAndTerminalBytes(t *testing.T) {
 	frames := []ports.Frame{
-		{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("\\x1b[2J\\x1b[Hone\\r\\ntwo")})},
-		{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 1, NewStateNum: 2, EchoAck: 7, Data: []byte("\\x1b[2;1HTWO")})},
+		{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("\x1b[2J\x1b[Hone\r\ntwo")})},
+		{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 1, NewStateNum: 2, EchoAck: 7, Data: []byte("\x1b[2;1HTWO")})},
 	}
 	transport := &scriptedReplayTransport{t: t, frames: frames}
 	terminal := vt.NewScreen(8, 3)
@@ -56,7 +56,7 @@ func TestTransportReplayFinalShadowAndTerminalBytes(t *testing.T) {
 		terminal.Write(output.Data)
 	}
 	require.Equal(t, len(frames), transport.next)
-	require.Equal(t, "\\x1b[2J\\x1b[Hone\\r\\ntwo\\x1b[2;1HTWO", string(transcript))
+	require.Equal(t, "\x1b[2J\x1b[Hone\r\ntwo\x1b[2;1HTWO", string(transcript))
 	require.Equal(t, []string{"one     ", "TWO     ", "        "}, frameRows(terminal.Frame), "terminal replay is the final renderer shadow")
 }
 
