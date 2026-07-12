@@ -34,7 +34,7 @@ func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
 	if tb.floating.pane == p {
 		return active && attached && tb.floating.state == floatingVisible
 	}
-	if !((active && attached) || preview) {
+	if (!active || !attached) && !preview {
 		return false
 	}
 	placements, ok := solvedPlacementsLocked(tb)
