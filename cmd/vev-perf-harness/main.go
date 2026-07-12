@@ -193,13 +193,15 @@ type terminalOutput interface {
 }
 
 type cliProcess struct {
-	cmd     *exec.Cmd
-	pty     io.ReadWriteCloser
-	output  terminalOutput
-	chunks  chan []byte
-	done    chan struct{}
-	closed  sync.Once
-	waitErr chan error
+	cmd          *exec.Cmd
+	pty          io.ReadWriteCloser
+	output       terminalOutput
+	chunks       chan []byte
+	done         chan struct{}
+	closed       sync.Once
+	waitErr      chan error
+	waitTimeout  func() <-chan time.Time
+	forceCleanup func()
 }
 
 func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProcess, error) {
@@ -456,30 +458,45 @@ func (p *cliProcess) Close() error {
 		if p.done != nil {
 			close(p.done)
 		}
-		if p.cmd != nil && p.cmd.Process != nil {
-			// The client is a session/process-group leader; terminate its ssh
-			// seam/_stdio descendants as well as the terminal client itself.
-			_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGTERM)
-		}
+		// Closing the client PTY causes its stdin pump to detach, then close the
+		// transport and wait for its adapter receive end mark. Do this before a
+		// signal so process-local spans are complete in the trace.
 		if p.pty != nil {
 			_ = p.pty.Close()
-		}
-		if p.output != nil {
-			result = p.output.Close()
 		}
 		if p.waitErr != nil {
 			select {
 			case <-p.waitErr:
-				// SIGTERM is the harness's normal deterministic cleanup path.
-			case <-time.After(2 * time.Second):
-				if p.cmd != nil && p.cmd.Process != nil {
-					_ = p.cmd.Process.Kill()
-				}
+				// The client exited through its normal detach path.
+			case <-p.closeDeadline():
+				p.forceProcessGroupCleanup()
 				<-p.waitErr
 			}
 		}
+		if p.output != nil {
+			result = p.output.Close()
+		}
 	})
 	return result
+}
+
+func (p *cliProcess) closeDeadline() <-chan time.Time {
+	if p.waitTimeout != nil {
+		return p.waitTimeout()
+	}
+	return time.After(2 * time.Second)
+}
+
+func (p *cliProcess) forceProcessGroupCleanup() {
+	if p.forceCleanup != nil {
+		p.forceCleanup()
+		return
+	}
+	if p.cmd != nil && p.cmd.Process != nil {
+		// The client is a session/process-group leader; forced cleanup must
+		// include its ssh seam/_stdio descendants.
+		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGTERM)
+	}
 }
 
 // openPTY is the small Linux PTY boundary needed to drive the public terminal

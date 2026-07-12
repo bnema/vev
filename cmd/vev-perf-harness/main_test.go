@@ -158,6 +158,52 @@ type fakeOutput struct {
 func (o *fakeOutput) Sync() error { o.syncs++; return nil }
 func (*fakeOutput) Close() error  { return nil }
 
+type orderedPTY struct{ close func() }
+
+func (*orderedPTY) Read([]byte) (int, error)    { return 0, os.ErrClosed }
+func (*orderedPTY) Write(b []byte) (int, error) { return len(b), nil }
+func (p *orderedPTY) Close() error {
+	p.close()
+	return nil
+}
+
+type orderedOutput struct{ close func() }
+
+func (*orderedOutput) Write(b []byte) (int, error) { return len(b), nil }
+func (*orderedOutput) Sync() error                 { return nil }
+func (o *orderedOutput) Close() error {
+	o.close()
+	return nil
+}
+
+func TestCLIProcessCloseGracefulDetachCompletesSpanBeforeForcedCleanup(t *testing.T) {
+	var order []string
+	waitErr := make(chan error, 1)
+	timeout := make(chan time.Time)
+	p := &cliProcess{
+		pty: &orderedPTY{close: func() {
+			order = append(order, "pty_closed")
+			// The graceful client detach has closed its transport and emitted its
+			// adapter receive-end mark before cmd.Wait reports completion.
+			order = append(order, "adapter_receive_end")
+			waitErr <- nil
+		}},
+		output:      &orderedOutput{close: func() { order = append(order, "output_closed") }},
+		waitErr:     waitErr,
+		waitTimeout: func() <-chan time.Time { return timeout },
+		forceCleanup: func() {
+			order = append(order, "forced_process_group_cleanup")
+		},
+	}
+
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !equalStrings(order, []string{"pty_closed", "adapter_receive_end", "output_closed"}) {
+		t.Fatalf("cleanup order=%q", order)
+	}
+}
+
 func TestHarnessDoesNotInheritNestedSession(t *testing.T) {
 	env := withoutEnv([]string{"VEV=session=old", "PATH=/bin", "VEV_PERF_TRACE=old"}, "VEV")
 	if !equalStrings(env, []string{"PATH=/bin", "VEV_PERF_TRACE=old"}) {
