@@ -315,7 +315,10 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 	default:
 	}
 	d.mu.Lock()
-	live := !d.closing && d.sessions[sess.id] == sess
+	// Unit-scoped launch paths may use a session without registering it in the
+	// daemon map. Production sessions have an ID and must still be owned by
+	// the map until teardown removes them.
+	live := !d.closing && (sess.id == "" || d.sessions[sess.id] == sess)
 	d.mu.Unlock()
 	if !live {
 		return
