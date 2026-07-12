@@ -5,6 +5,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -92,14 +93,49 @@ func TestRenderStageHooksCountProductionBoundariesOnFailedSend(t *testing.T) {
 	require.Zero(t, emissions, "emit counts only prepare and transport success")
 }
 
-func TestPerformanceFixtureResizeAlternatesRealDimensions(t *testing.T) {
-	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}})
+func TestPerformanceFixtureResize(t *testing.T) {
+	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 80, Rows: 24}})
+	sequence := []domain.Size{{Cols: 100, Rows: 30}, {Cols: 120, Rows: 40}, {Cols: 160, Rows: 50}, {Cols: 80, Rows: 24}}
 
-	for _, want := range []domain.Size{{Cols: 100, Rows: 30}, {Cols: 120, Rows: 40}} {
-		fixture.resize()
+	for _, want := range sequence {
+		fixture.resizeTo(want)
 		require.Equal(t, want, fixture.ac.size)
 		require.True(t, fixture.resized())
 	}
+	metrics := fixture.metrics()
+	require.Equal(t, uint64(len(sequence)), metrics.resizeRequests)
+	require.Equal(t, uint64(len(sequence)), metrics.resizeCommits)
+	require.Equal(t, uint64(len(sequence)), metrics.outputFrames, "one full frame per accepted epoch")
+	require.Zero(t, metrics.skippedEpochs)
+	require.Zero(t, metrics.ptyFailures)
+	require.Zero(t, metrics.frameGapEpochs)
+	require.NotZero(t, metrics.resizeCommitNanos)
+	require.Equal(t, []domain.Size{{Cols: 50, Rows: 28}, {Cols: 60, Rows: 38}, {Cols: 80, Rows: 48}, {Cols: 40, Rows: 22}}, fixture.pty.requested())
+}
+
+func TestTransactionalResizeMetricDefinitionsAreZeroSafe(t *testing.T) {
+	metrics := performanceMetrics{}
+	require.Zero(t, coordinatorCoalescingRatio(metrics))
+	require.Zero(t, metrics.skippedEpochs, "no accepted request means no skipped epoch")
+	require.Zero(t, metrics.frameGapEpochs, "no committed epoch means no frame gap")
+}
+
+func TestTransactionalResizeMetrics(t *testing.T) {
+	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 80, Rows: 24}, ptyErrors: []error{fmt.Errorf("scripted failure"), nil}})
+	fixture.resizeTo(domain.Size{Cols: 100, Rows: 30})
+	// The fixture deliberately invokes the coordinator's committed retry path:
+	// a retry never republishes geometry and its reset produces one extra frame.
+	fixture.retryLatest()
+
+	metrics := fixture.metrics()
+	require.Equal(t, uint64(1), metrics.resizeRequests)
+	require.Equal(t, uint64(1), metrics.resizeCommits)
+	require.Equal(t, uint64(1), metrics.ptyFailures)
+	require.Equal(t, uint64(1), metrics.ptyRetries)
+	require.Equal(t, uint64(2), metrics.outputFrames, "commit plus successful full-reset retry")
+	require.Zero(t, metrics.frameGapEpochs, "every committed epoch emitted its required frame")
+	require.Equal(t, []domain.Size{{Cols: 50, Rows: 28}, {Cols: 50, Rows: 28}}, fixture.pty.requested())
+	require.Equal(t, domain.Size{Cols: 100, Rows: 30}, fixture.ac.size)
 }
 
 func TestPerformanceFixtureLargeHistoryTopology(t *testing.T) {
@@ -155,8 +191,29 @@ func BenchmarkDaemonHistoryCopyEnter(b *testing.B) {
 func BenchmarkDaemonHistoryCopySearch(b *testing.B) {
 	benchmarkDaemonLargeHistory(b, "copy-search", func(f *performanceFixture) { f.d.handleInput(f.sess, f.ac, []byte("/needle\r")) })
 }
-func BenchmarkDaemonHistoryResize(b *testing.B) {
-	benchmarkDaemonLargeHistory(b, "resize", func(f *performanceFixture) { f.resize() })
+
+// BenchmarkDaemonHistoryResizeSweep alternates deterministic grow/shrink
+// geometry. Metrics are fixture counters; no benchmark result depends on wall
+// time or scheduler delivery.
+func BenchmarkDaemonHistoryResizeSweep(b *testing.B) {
+	sequence := []domain.Size{{Cols: 80, Rows: 24}, {Cols: 100, Rows: 30}, {Cols: 120, Rows: 40}, {Cols: 160, Rows: 50}, {Cols: 120, Rows: 40}, {Cols: 100, Rows: 30}}
+	benchmarkDaemonLargeHistory(b, "resize-sweep", func(f *performanceFixture) {
+		f.resizeTo(sequence[f.resizes%len(sequence)])
+	})
+}
+
+// BenchmarkDaemonHistoryResizeRetry measures one deterministic failed apply
+// followed by its successful full-reset retry for each operation.
+func BenchmarkDaemonHistoryResizeRetry(b *testing.B) {
+	benchmarkDaemonLargeHistory(b, "resize-retry", func(f *performanceFixture) {
+		f.pty.setErrors([]error{fmt.Errorf("scripted resize failure"), nil})
+		size := domain.Size{Cols: 100, Rows: 30}
+		if f.resizes%2 != 0 {
+			size = domain.Size{Cols: 120, Rows: 40}
+		}
+		f.resizeTo(size)
+		f.retryLatest()
+	})
 }
 
 func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*performanceFixture)) {
@@ -237,6 +294,16 @@ func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations
 	b.ReportMetric(float64(metrics.renderCaptures)/perOperation, "rendercaptures/op")
 	b.ReportMetric(float64(metrics.renderCompositions)/perOperation, "rendercompositions/op")
 	b.ReportMetric(float64(metrics.renderEmissions)/perOperation, "renderemissions/op")
+	// resizecommitns is the injected-clock elapsed time from accepted request
+	// to committed epoch. The remaining values are counter deltas: skipped is
+	// accepted minus committed (never negative), framegap is committed epochs
+	// lacking their required output frame (never negative), and retries/failures
+	// are PTY Resize outcomes. All divisions are guarded above.
+	b.ReportMetric(float64(metrics.resizeCommitNanos)/perOperation, "resizecommitns/op")
+	b.ReportMetric(float64(metrics.skippedEpochs)/perOperation, "skippedepochs/op")
+	b.ReportMetric(float64(metrics.ptyFailures)/perOperation, "ptyfailures/op")
+	b.ReportMetric(float64(metrics.ptyRetries)/perOperation, "ptyretries/op")
+	b.ReportMetric(float64(metrics.frameGapEpochs)/perOperation, "framegapepochs/op")
 	b.ReportMetric(coordinatorCoalescingRatio(metrics), "coordinatorcoalescingratio")
 	b.ReportMetric(float64(historyRows), "historyrows/pane")
 }
@@ -286,6 +353,7 @@ type performanceConfig struct {
 	tabs        int
 	panes       int
 	historyRows int
+	ptyErrors   []error
 }
 
 type performanceMetrics struct {
@@ -300,6 +368,78 @@ type performanceMetrics struct {
 	renderCaptures           uint64
 	renderCompositions       uint64
 	renderEmissions          uint64
+	resizeRequests           uint64
+	resizeCommits            uint64
+	resizeCommitNanos        uint64
+	skippedEpochs            uint64
+	ptyFailures              uint64
+	ptyRetries               uint64
+	frameGapEpochs           uint64
+}
+
+// performanceClock makes transition latency a reproducible counter rather
+// than a wall-clock observation. A nil timer channel deliberately executes
+// coordinator work synchronously.
+type performanceClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *performanceClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(time.Microsecond)
+	return c.now
+}
+func (*performanceClock) NewTimer(time.Duration) ports.Timer { return performanceTimer{} }
+
+type performanceTimer struct{}
+
+func (performanceTimer) C() <-chan time.Time      { return nil }
+func (performanceTimer) Reset(time.Duration) bool { return true }
+func (performanceTimer) Stop() bool               { return true }
+
+// scriptedPerformancePTY records every requested terminal size and returns a
+// caller-provided error script. It has no reads or scheduling side effects.
+type scriptedPerformancePTY struct {
+	mu    sync.Mutex
+	sizes []domain.Size
+	errs  []error
+	fails uint64
+}
+
+func (p *scriptedPerformancePTY) Resize(size domain.Size) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sizes = append(p.sizes, size)
+	index := len(p.sizes) - 1
+	if index < len(p.errs) && p.errs[index] != nil {
+		p.fails++
+		return p.errs[index]
+	}
+	return nil
+}
+func (*scriptedPerformancePTY) Read([]byte) (int, error)     { return 0, io.EOF }
+func (*scriptedPerformancePTY) Write(b []byte) (int, error)  { return len(b), nil }
+func (*scriptedPerformancePTY) Close() error                 { return nil }
+func (*scriptedPerformancePTY) Pid() int                     { return 0 }
+func (*scriptedPerformancePTY) ForegroundPgid() (int, error) { return 0, nil }
+func (p *scriptedPerformancePTY) requested() []domain.Size {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]domain.Size(nil), p.sizes...)
+}
+func (p *scriptedPerformancePTY) metrics() (uint64, uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.fails, uint64(len(p.sizes))
+}
+func (p *scriptedPerformancePTY) setErrors(errs []error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.errs = append([]error(nil), errs...)
+	p.sizes = nil
+	p.fails = 0
 }
 
 type performanceFixture struct {
@@ -315,6 +455,13 @@ type performanceFixture struct {
 	resizeSizes         [2]domain.Size
 	resizes             int
 	resizedSize         domain.Size
+	pty                 *scriptedPerformancePTY
+	clock               *performanceClock
+	resizeRequests      uint64
+	resizeCommits       uint64
+	resizeCommitNanos   uint64
+	ptyFailures         uint64
+	ptyRetries          uint64
 	coordinatorBaseline renderCoordinatorBurstMetricsSnapshot
 	renderCaptures      uint64
 	renderCompositions  uint64
@@ -335,8 +482,12 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 	if config.historyRows == 0 {
 		config.historyRows = 1
 	}
+	pty := &scriptedPerformancePTY{}
 	ptys := make([]ports.PTY, config.tabs)
+	ptys[0] = pty
 	d, sess, ac, _ := newManualSessionWithPTYs(t, ptys...)
+	clock := &performanceClock{}
+	d.clock = clock
 	output := &countingOutputTransport{}
 	ac.tr = output
 	ac.size = config.size
@@ -351,6 +502,8 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 		ac:          ac,
 		output:      output,
 		snaps:       &countingSnapshotStore{},
+		pty:         pty,
+		clock:       clock,
 		liveWrites:  [][]byte{[]byte("\x1b[1;1HA\x1b[2;2HA"), []byte("\x1b[1;1HB\x1b[2;2HB")},
 		resizeSizes: [2]domain.Size{{Cols: 100, Rows: 30}, config.size},
 	}
@@ -359,10 +512,12 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 		fixture.configureTab(tb, tabIndex, config.panes, config.historyRows, tabSize(config.size))
 	}
 	fixture.activePane = fixture.findActivePane()
+	// Fixture construction may solve the initial layout; benchmark scripts begin
+	// after that setup work and therefore have an empty call history.
+	pty.setErrors(config.ptyErrors)
 
-	// The fixture uses the production coordinator. stubClock's inert timer is
-	// completed synchronously by the coordinator, keeping benchmark operations
-	// deterministic while retaining their real invalidation path.
+	// The fixture uses the production coordinator. performanceClock's nil timer
+	// channel completes the coordinator path synchronously and deterministically.
 	ac.renderStages = renderStageHooks{
 		capture: func() { fixture.renderCaptures++ },
 		compose: func() { fixture.renderCompositions++ },
@@ -457,9 +612,41 @@ func (f *performanceFixture) searchMatches() int {
 }
 
 func (f *performanceFixture) resize() {
-	f.resizedSize = f.resizeSizes[f.resizes%len(f.resizeSizes)]
+	f.resizeTo(f.resizeSizes[f.resizes%len(f.resizeSizes)])
+}
+
+func (f *performanceFixture) resizeTo(size domain.Size) {
+	f.resizedSize = size
 	f.resizes++
-	f.d.resize(f.sess, f.ac, f.resizedSize)
+	before := f.sess.renderCoordinator().resizeSnapshot()
+	start := f.clock.Now()
+	failuresBefore, callsBefore := f.pty.metrics()
+	f.d.resize(f.sess, f.ac, size)
+	after := f.sess.renderCoordinator().resizeSnapshot()
+	if after.epoch > before.epoch {
+		f.resizeRequests += after.epoch - before.epoch
+	}
+	if after.committed > before.committed {
+		f.resizeCommits += after.committed - before.committed
+		f.resizeCommitNanos += uint64(f.clock.Now().Sub(start).Nanoseconds())
+	}
+	failuresAfter, callsAfter := f.pty.metrics()
+	f.ptyFailures += failuresAfter - failuresBefore
+	if callsAfter > callsBefore+1 {
+		f.ptyRetries += callsAfter - callsBefore - 1
+	}
+}
+
+func (f *performanceFixture) retryLatest() {
+	epoch := f.sess.renderCoordinator().resizeSnapshot().committed
+	plan := f.d.prepareResize(f.sess, f.ac.size)
+	failuresBefore, callsBefore := f.pty.metrics()
+	f.d.retryResizeMembers(f.sess, f.ac, epoch, plan.members)
+	failuresAfter, callsAfter := f.pty.metrics()
+	f.ptyFailures += failuresAfter - failuresBefore
+	if callsAfter > callsBefore {
+		f.ptyRetries += callsAfter - callsBefore
+	}
 }
 
 func (f *performanceFixture) resized() bool {
@@ -483,6 +670,11 @@ func (f *performanceFixture) resetMetrics() {
 	f.renderCaptures = 0
 	f.renderCompositions = 0
 	f.renderEmissions = 0
+	f.resizeRequests = 0
+	f.resizeCommits = 0
+	f.resizeCommitNanos = 0
+	f.ptyFailures = 0
+	f.ptyRetries = 0
 	if rc := f.sess.renderCoordinator(); rc != nil {
 		f.coordinatorBaseline = rc.burstMetricsSnapshot()
 	}
@@ -495,6 +687,14 @@ func (f *performanceFixture) metrics() performanceMetrics {
 		outputFrames: output.frames, outputBytes: output.bytes, outputPayloadBytes: output.payloadBytes,
 		snapshotWrites: snapshots.writes, snapshotBytes: snapshots.bytes,
 		renderCaptures: f.renderCaptures, renderCompositions: f.renderCompositions, renderEmissions: f.renderEmissions,
+		resizeRequests: f.resizeRequests, resizeCommits: f.resizeCommits, resizeCommitNanos: f.resizeCommitNanos,
+		ptyFailures: f.ptyFailures, ptyRetries: f.ptyRetries,
+	}
+	if metrics.resizeRequests > metrics.resizeCommits {
+		metrics.skippedEpochs = metrics.resizeRequests - metrics.resizeCommits
+	}
+	if metrics.resizeCommits > metrics.outputFrames {
+		metrics.frameGapEpochs = metrics.resizeCommits - metrics.outputFrames
 	}
 	if rc := f.sess.renderCoordinator(); rc != nil {
 		coordinator := rc.burstMetricsSnapshot()

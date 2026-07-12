@@ -8,6 +8,7 @@ package pty
 // x/sys/unix plus the standard library.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -38,7 +39,10 @@ func NewFactory() *Factory { return &Factory{} }
 // verbatim (nil means inherit the current process environment); the caller
 // decides TERM and friends. sz sets the terminal window size before the child
 // starts, so the child observes the correct dimensions on its first query.
-func (Factory) Open(command string, args []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
+func (Factory) Open(ctx context.Context, command string, args []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	masterFd, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("pty: open /dev/ptmx: %w", err)
@@ -79,7 +83,7 @@ func (Factory) Open(command string, args []string, env []string, dir string, sz 
 		}
 	}
 
-	cmd := exec.Command(command, args...)
+	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Env = env
 	cmd.Dir = platform.DirOrHome(dir)
 	cmd.Stdin = slave

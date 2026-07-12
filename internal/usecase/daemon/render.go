@@ -5,7 +5,6 @@ import (
 	"bytes"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
@@ -17,13 +16,6 @@ import (
 func completedSynchronizedUpdate(data []byte) bool {
 	_, tail, found := bytes.Cut(data, []byte(renderer.SyncStartCSI))
 	return found && bytes.Contains(tail, []byte(renderer.SyncEndCSI))
-}
-
-func signal(ch chan struct{}) {
-	select {
-	case ch <- struct{}{}:
-	default:
-	}
 }
 
 // paneRenderable reports dynamic composition visibility. Callers must not
@@ -42,7 +34,7 @@ func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
 	if tb.floating.pane == p {
 		return active && attached && tb.floating.state == floatingVisible
 	}
-	if !((active && attached) || preview) {
+	if (!active || !attached) && !preview {
 		return false
 	}
 	placements, ok := solvedPlacementsLocked(tb)
@@ -93,97 +85,17 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 		return
 	}
 	buf := make([]byte, ptyReadBufSize)
-	var resp []byte
-	var clipboards []string
-	attentionCh := make(chan struct{}, 1)
 	p.mu.Lock()
-	p.screen.OnResponse = func(b []byte) { resp = append(resp, b...) }
-	p.screen.OnBell = func() { signal(attentionCh) }
-	p.screen.OnNotify = func(string, string) { signal(attentionCh) }
-	p.screen.OnProgress = func(bool) { signal(attentionCh) }
-	p.screen.OnClipboard = func(b64 string) { clipboards = append(clipboards, b64) }
+	p.screen.OnResponse = func(b []byte) { p.ptyResponses = append(p.ptyResponses, b...) }
+	p.screen.OnBell = func() { p.ptyAttention = true }
+	p.screen.OnNotify = func(string, string) { p.ptyAttention = true }
+	p.screen.OnProgress = func(bool) { p.ptyAttention = true }
+	p.screen.OnClipboard = func(b64 string) { p.ptyClipboards = append(p.ptyClipboards, b64) }
 	p.mu.Unlock()
 	for {
 		n, err := p.pty.Read(buf)
 		if n > 0 {
-			data := buf[:n]
-			rc := sess.renderCoordinator()
-			p.mu.Lock()
-			wasSyncing := p.screen.SyncUpdateActive()
-			p.screen.Write(data)
-			p.refreshTerminalTitleLocked()
-			isSyncing := p.screen.SyncUpdateActive()
-			completeSyncRead := !wasSyncing && !isSyncing && completedSynchronizedUpdate(data)
-			var syncGen uint64
-			syncEnded := false
-			if wasSyncing != isSyncing {
-				if isSyncing {
-					syncGen = sess.syncGen.Add(1)
-					p.syncGen = syncGen
-					// Publish the gate while the authoritative screen mutation is
-					// still protected. A concurrent deadline therefore cannot
-					// compose this partial DEC 2026 payload.
-					if rc != nil {
-						rc.noteSyncBeginWithRenderability(p, syncGen, func() bool {
-							return d.paneRenderable(sess, tb, p)
-						}, func() {
-							p.mu.Lock()
-							if p.syncGen == syncGen && p.screen.SyncUpdateActive() {
-								p.screen.ForceSyncEnd()
-							}
-							p.mu.Unlock()
-						})
-					}
-				} else {
-					syncGen = p.syncGen
-					syncEnded = rc != nil && rc.removeSyncEnd(p, syncGen, true)
-				}
-			}
-			p.mu.Unlock()
-			renderable := d.paneRenderable(sess, tb, p)
-			markSnapshotDirty(sess)
-			select {
-			case <-attentionCh:
-				d.noteAttention(sess, tb)
-			default:
-			}
-			if len(clipboards) > 0 {
-				for _, b64 := range clipboards {
-					d.forwardClipboardAsync(sess, b64)
-				}
-				clipboards = clipboards[:0]
-			}
-			if len(resp) > 0 {
-				if _, writeErr := p.pty.Write(resp); writeErr != nil {
-					d.log.Warn("pty response write failed", "err", writeErr, "session", sess.name)
-				}
-				resp = resp[:0]
-			}
-			if rc != nil {
-				if wasSyncing != isSyncing {
-					if isSyncing {
-						// The accumulated synchronized batch is the pending render only
-						// while this pane can currently reach a composition target.
-						if renderable {
-							rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
-						}
-					} else if syncEnded && renderable {
-						// State removal happened under pane.mu. Publish a new urgent
-						// completion after unlock: detach/replace may have cleared the
-						// pending batch work, so fireCurrent alone could not wake a
-						// headless picker preview or replacement attachment.
-						rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
-					}
-				}
-				if completeSyncRead && renderable {
-					// The entire batch completed in this read. Its final screen state
-					// is ready now, so bypass the bulk debounce without arming a
-					// watchdog for a batch that no longer exists.
-					rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
-				} else if renderable && !isSyncing && wasSyncing == isSyncing {
-					rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
-				}
-			}
+			d.processPTYData(sess, tb, p, buf[:n], true)
 		}
 		if err != nil {
 			if p.onExit != nil {
@@ -196,45 +108,96 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 	}
 }
 
+// processPTYData is the sole VT parsing path. While a resize apply owns the
+// pane, reader calls append exact bytes and returns immediately; it never waits
+// for PTY.Resize or loses a short read.
+func (d *Daemon) processPTYData(sess *session, tb *tab, p *pane, data []byte, bufferDuringApply bool) {
+	rc := sess.renderCoordinator()
+	p.mu.Lock()
+	if bufferDuringApply && p.resizeApplying {
+		p.resizePending = append(p.resizePending, data...)
+		p.mu.Unlock()
+		return
+	}
+	wasSyncing := p.screen.SyncUpdateActive()
+	p.screen.Write(data)
+	p.refreshTerminalTitleLocked()
+	isSyncing := p.screen.SyncUpdateActive()
+	completeSyncRead := !wasSyncing && !isSyncing && completedSynchronizedUpdate(data)
+	var syncGen uint64
+	syncEnded := false
+	if wasSyncing != isSyncing {
+		if isSyncing {
+			syncGen = sess.syncGen.Add(1)
+			p.syncGen = syncGen
+			if rc != nil {
+				rc.noteSyncBeginWithRenderability(p, syncGen, func() bool { return d.paneRenderable(sess, tb, p) }, func() {
+					p.mu.Lock()
+					if p.syncGen == syncGen && p.screen.SyncUpdateActive() {
+						p.screen.ForceSyncEnd()
+					}
+					p.mu.Unlock()
+				})
+			}
+		} else {
+			syncGen = p.syncGen
+			syncEnded = rc != nil && rc.removeSyncEnd(p, syncGen, true)
+		}
+	}
+	p.mu.Unlock()
+	renderable := d.paneRenderable(sess, tb, p)
+	markSnapshotDirty(sess)
+	d.flushPTYEffects(sess, tb, p)
+	if rc != nil {
+		if wasSyncing != isSyncing {
+			if isSyncing {
+				if renderable {
+					rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+				}
+			} else if syncEnded && renderable {
+				rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
+			}
+		}
+		if completeSyncRead && renderable {
+			rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
+		} else if renderable && !isSyncing && wasSyncing == isSyncing {
+			rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+		}
+	}
+}
+
+// flushPTYEffects preserves the normal response/title/attention/clipboard
+// behavior for both direct reads and resize-buffer replay.
+func (d *Daemon) flushPTYEffects(sess *session, tb *tab, p *pane) {
+	p.mu.Lock()
+	attention := p.ptyAttention
+	p.ptyAttention = false
+	responses := append([]byte(nil), p.ptyResponses...)
+	p.ptyResponses = p.ptyResponses[:0]
+	clipboards := append([]string(nil), p.ptyClipboards...)
+	p.ptyClipboards = p.ptyClipboards[:0]
+	p.mu.Unlock()
+	if attention {
+		d.noteAttention(sess, tb)
+	}
+	for _, b64 := range clipboards {
+		d.forwardClipboardAsync(sess, b64)
+	}
+	if len(responses) > 0 {
+		if _, err := p.pty.Write(responses); err != nil {
+			d.log.Warn("pty response write failed", "err", err, "session", sess.name)
+		}
+	}
+}
+
 // paint draws the composed client frame (active tab plus status bar) and
 // sends the resulting bytes. The renderer shadow is reset on explicit invalidations
 // such as switch/create/close/rename/resize so the repaint is complete.
-func (d *Daemon) scheduleResizePaintLocked(sess *session, ac *attachedClient) {
-	ac.resizePaint.stop()
-	ac.resizePaintGeneration++
-	generation := ac.resizePaintGeneration
-	ac.resizePaintPending = true
-	ac.resizePaint.retain(d.clock, maxDebounceInterval, func(ports.Timer) {
-		d.invalidateForResizeGeneration(sess, ac, generation)
-	})
-}
-
-// invalidateForResizeGeneration preserves PR #71's attachment-owned timer,
-// generation rejection, and cancellation while transferring only its eventual
-// render request to the coordinator.
-func (d *Daemon) invalidateForResizeGeneration(sess *session, ac *attachedClient, generation uint64) {
-	ac.sendMu.Lock()
-	if ac.currentSession() != sess || !ac.resizePaintPending || ac.resizePaintGeneration != generation {
-		ac.sendMu.Unlock()
-		return
+func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...uint64) {
+	attachmentEpoch := uint64(0)
+	if len(epochs) != 0 {
+		attachmentEpoch = epochs[0]
 	}
-	ac.resizePaint.stop()
-	ac.resizePaintPending = false
-	ac.sendMu.Unlock()
-	d.invalidateRender(sess, ac, true, "render.go")
-}
-
-func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
-	d.paintForResizeGeneration(sess, ac, reset, 0, 0)
-}
-
-// paintCoordinatorWake composes a coordinator wake only for its captured
-// attachment incarnation. The epoch is checked after sendMu is acquired.
-func (d *Daemon) paintCoordinatorWake(sess *session, w renderWake) {
-	d.paintForResizeGeneration(sess, w.attachment, w.reset, 0, w.attachmentEpoch)
-}
-
-func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, reset bool, resizeGeneration, attachmentEpoch uint64) {
 	tb := sess.activeTab()
 	if tb == nil {
 		return
@@ -258,19 +221,10 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 		ac.sendMu.Unlock()
 		return
 	}
-	if resizeGeneration != 0 && (!ac.resizePaintPending || ac.resizePaintGeneration != resizeGeneration) {
-		ac.sendMu.Unlock()
-		return
-	}
 	// Composition owns attachment sendMu; initialize its lazy overlay state
 	// under that same ownership so concurrent fallback paints cannot observe a
 	// partially published runtime.
 	ac.initOverlays()
-	if ac.resizePaintPending {
-		ac.resizePaint.stop()
-		ac.resizePaintPending = false
-		reset = true
-	}
 	overlays := ac.overlays.SnapshotForRender()
 	repaintAttachedClients := false
 	defer func() {

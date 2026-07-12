@@ -198,6 +198,15 @@ func requireNoInvalidation(t *testing.T, ch chan renderInvalidation) {
 	}
 }
 
+func awaitResizeCallback(t *testing.T, rc *renderCoordinator) {
+	t.Helper()
+	done := rc.resizeCallbackDone()
+	if done == nil {
+		t.Fatal("coordinator did not publish a resize callback completion")
+	}
+	<-done
+}
+
 func awaitCoordinatorScheduledTimer(t *testing.T, clk *coordinatorMockClock) *coordinatorMockTimer {
 	t.Helper()
 	select {
@@ -989,13 +998,8 @@ func TestRenderCoordinatorResizeMetadata(t *testing.T) {
 				require.Same(t, owner, snap.source)
 				require.Equal(t, uint64(3), snap.epoch)
 
-				// Metadata ownership is independent of the retained PR #71
-				// attachment dispatch state.
-				owner.sendMu.Lock()
-				generation, pending := owner.resizePaintGeneration, owner.resizePaintPending
-				owner.sendMu.Unlock()
-				require.Zero(t, generation, "recording metadata must not touch the PR #71 generation")
-				require.False(t, pending, "recording metadata must not arm the PR #71 dispatch")
+				// Resize state is exclusively coordinator-owned.
+				require.Zero(t, snap.committed)
 			},
 		},
 		{
@@ -1028,7 +1032,7 @@ func TestRenderCoordinatorResizeMetadata(t *testing.T) {
 						h.rc.attach(staleOwner)
 						require.Equal(t, uint64(1), h.rc.recordResizeRequest(sz(120, 40), staleOwner))
 
-						// This models a retained PR #71 callback which captured the old
+						// This models a stale callback which captured the old
 						// attachment before lifecycle ownership changed.
 						staleCallback := func() uint64 {
 							return h.rc.recordResizeRequest(sz(80, 20), staleOwner)
@@ -1169,9 +1173,13 @@ func TestProducerInvalidations(t *testing.T) {
 			name: "retained resize dispatch",
 			run: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
 				clk := newCoordinatorMockClock(t, 2)
-				d.clock = clk.clock
+				// The coordinator owns deadline time; install the deterministic
+				// clock on the already-attached coordinator rather than changing
+				// Daemon's construction-time clock afterwards.
+				sess.renderCoordinator().opts.clock = clk.clock
 				d.resize(sess, ac, domain.Size{Cols: 100, Rows: 26})
 				awaitCoordinatorScheduledTimer(t, clk).ch <- time.Time{}
+				awaitResizeCallback(t, sess.renderCoordinator())
 			},
 		},
 		{
@@ -1237,7 +1245,7 @@ func TestProducerInvalidationInventory(t *testing.T) {
 	}
 }
 
-// --- retained PR #71 resize dispatch ----------------------------------------------
+// --- coordinator resize dispatch ----------------------------------------------
 
 func TestConcurrentPaintInitializesOverlayUnderSendOwnership(t *testing.T) {
 	p, release := newBlockingPTY(t)
@@ -1322,6 +1330,29 @@ func TestCoordinatorDeadlineCannotPaintPublishedReplacementBeforeOwnershipInstal
 	timer.ch <- time.Time{}
 	requireNoCoordinatorOutputFrame(t, replacementSends)
 	requireNoCoordinatorOutputFrame(t, ownerSends)
+}
+
+func TestRenderCoordinatorClearResizeTimerKeepsNewerTimer(t *testing.T) {
+	rc := newRenderCoordinator(renderCoordinatorOptions{})
+	newer := &portsmocks.MockTimer{}
+
+	rc.mu.Lock()
+	rc.resizeGen = 2
+	rc.resizeTimer = newer
+	rc.resizeCancel = make(chan struct{})
+	rc.mu.Unlock()
+
+	rc.clearResizeTimer(1)
+	rc.mu.Lock()
+	require.Same(t, newer, rc.resizeTimer)
+	require.NotNil(t, rc.resizeCancel)
+	rc.mu.Unlock()
+
+	rc.clearResizeTimer(2)
+	rc.mu.Lock()
+	require.Nil(t, rc.resizeTimer)
+	require.Nil(t, rc.resizeCancel)
+	rc.mu.Unlock()
 }
 
 func TestRenderCoordinatorInertTimerFiresSynchronouslyWithoutWorker(t *testing.T) {
@@ -1452,7 +1483,7 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 	})
 }
 
-func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
+func TestRenderCoordinatorResizeEpochDispatch(t *testing.T) {
 	newResizeFixture := func(t *testing.T) (*Daemon, *session, *attachedClient, chan ports.Frame, *coordinatorMockClock, chan renderInvalidation) {
 		t.Helper()
 		p, releasePTY := newBlockingPTY(t)
@@ -1478,12 +1509,6 @@ func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
 		timer := awaitCoordinatorScheduledTimer(t, clk)
 		require.GreaterOrEqual(t, timer.duration, minOutputRenderDeadline)
 		require.LessOrEqual(t, timer.duration, maxOutputRenderDeadline)
-		ac.sendMu.Lock()
-		generation, pending := ac.resizePaintGeneration, ac.resizePaintPending
-		ac.sendMu.Unlock()
-		require.Equal(t, uint64(1), generation, "PR #71 generation ownership must stay with the attachment")
-		require.True(t, pending, "PR #71 pending dispatch must remain armed")
-
 		snap := sess.renderCoordinator().resizeSnapshot()
 		require.Equal(t, domain.Size{Cols: 120, Rows: 24}, snap.size,
 			"the coordinator must record the latest requested resize before delegating")
@@ -1492,6 +1517,7 @@ func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
 		requireNoCoordinatorOutputFrame(t, sends)
 
 		timer.ch <- time.Time{}
+		awaitResizeCallback(t, sess.renderCoordinator())
 		inv := awaitInvalidation(t, invs)
 		require.True(t, inv.reset, "the resize dispatch must request a full-redraw invalidation")
 		requireNoInvalidation(t, invs)
@@ -1513,6 +1539,7 @@ func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
 		requireNoCoordinatorOutputFrame(t, sends)
 
 		latest.ch <- time.Time{}
+		awaitResizeCallback(t, sess.renderCoordinator())
 		inv := awaitInvalidation(t, invs)
 		require.True(t, inv.reset)
 		requireNoInvalidation(t, invs)
@@ -1525,7 +1552,7 @@ func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
 
 		d.resize(sess, ac, domain.Size{Cols: 90, Rows: 30})
 		timer := awaitCoordinatorScheduledTimer(t, clk)
-		ac.cancelResizePaint()
+		sess.renderCoordinator().noteDetach(ac)
 
 		timer.ch <- time.Time{}
 		requireNoInvalidation(t, invs)

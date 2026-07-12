@@ -53,6 +53,13 @@ type session struct {
 	// clipboard.go) written for this session, removed best-effort in
 	// killSession.
 	clipFiles []string
+
+	// floatingLaunchMu is ownership synchronization for external floating
+	// launches. It is separate from mu so PTYFactory.Open never holds a
+	// session, tab, or daemon architecture lock.
+	floatingLaunchMu       sync.Mutex
+	floatingLaunchStopping bool
+	floatingLaunches       map[*floatingLaunch]struct{}
 }
 
 // tab is a pane layout container; pane owns PTY/screen/scrollback/render scheduling state.
@@ -124,7 +131,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 			closeTabs(tabs)
 			return nil, err
 		}
-		pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
+		pty, err := d.ptys.Open(d.serveCtx, d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
 		if err != nil {
 			closeTabs(tabs)
 			d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "session")
@@ -265,7 +272,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	if err != nil {
 		return err
 	}
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
+	pty, err := d.ptys.Open(sess.ctx, d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
 	if err != nil {
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "tab")
 		return fmt.Errorf("daemon: spawning tab for session %q: %w", name, err)
@@ -724,12 +731,15 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 		rc.noteSessionTeardown()
 	}
 	if ac != nil {
-		ac.cancelResizePaint()
 		d.unregisterPreview(ac)
 		ac.clearPreviousSession()
 		ac.setSession(nil)
 	}
 
+	// Prevent queued launches from entering Open, then cancel the parent
+	// context. The launch worker owns any late PTY result and closes it rather
+	// than publishing it into the torn-down tab.
+	sess.stopFloatingLaunches()
 	sess.cancel()
 	sess.mu.Lock()
 	tabs := append([]*tab(nil), sess.tabs...)

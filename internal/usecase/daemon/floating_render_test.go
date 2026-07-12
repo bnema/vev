@@ -14,6 +14,25 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
+// applyFloatingResizePlanForTest exercises the transactional apply primitive.
+func applyFloatingResizePlanForTest(d *Daemon, p *pane, geometry floatingGeometry) bool {
+	if p == nil || !geometry.valid() {
+		return false
+	}
+	plan := resizePlan{members: []resizeMember{{pane: p, rect: geometry.Inner, floating: geometry, isFloating: true}}}
+	d.applyResize(&plan)
+	member := plan.members[0]
+	if !member.ok {
+		return false
+	}
+	p.mu.Lock()
+	p.rect = geometry.Inner
+	p.popupGeometry = geometry
+	p.screen.Resize(geometry.Inner.Width, geometry.Inner.Height)
+	p.mu.Unlock()
+	return true
+}
+
 func TestFloatingGeometryTranslate(t *testing.T) {
 	geometry := floatingGeometry{
 		Bounds: domain.Rect{X: 3, Y: 5, Width: 10, Height: 8},
@@ -200,7 +219,7 @@ func TestResizeFloatingPaneCommitsSameSizeGeometryWithoutPTYResize(t *testing.T)
 			p.rect, p.popupGeometry = initial.Inner, initial
 			d := newTestDaemon(t, nil, stubClock{})
 
-			require.True(t, d.resizeFloatingPane(p, tt.next))
+			require.True(t, applyFloatingResizePlanForTest(d, p, tt.next))
 			require.Empty(t, pty.sizes(), "same-size geometry must not resize the PTY")
 			require.Equal(t, tt.next.Inner, p.rect)
 			require.Equal(t, tt.next, p.popupGeometry)
@@ -329,14 +348,14 @@ func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {
 	d.resize(sess, nil, domain.Size{Cols: 100, Rows: 42})
 	require.Empty(t, pty.sizes())
 
-	// Showing attempts the current size before paint. A failed resize leaves the
-	// old screen and rect untouched, so a later hide/show can retry.
+	// Showing attempts the current size before paint. A failed resize retains
+	// the old screen, but commits the new popup rect so capture clips/pads it.
 	require.NoError(t, d.toggleFloating(sess, nil))
 	require.Equal(t, []domain.Size{rectSize(current)}, pty.sizes())
-	require.Equal(t, initial, floating.rect)
+	require.Equal(t, current, floating.rect)
 	require.Equal(t, initial.Width, floating.screen.Frame.Width)
 	require.Equal(t, initial.Height, floating.screen.Frame.Height)
-	require.Equal(t, initialGeometry, floating.popupGeometry)
+	require.Equal(t, currentGeometry, floating.popupGeometry)
 
 	require.NoError(t, d.toggleFloating(sess, nil)) // hide
 	require.NoError(t, d.toggleFloating(sess, nil)) // retry show
@@ -362,7 +381,7 @@ func TestFailedFloatingResizeKeepsCommittedRenderAndInputGeometry(t *testing.T) 
 	d := newTestDaemon(t, nil, stubClock{})
 	d.ApplyConfig(domain.Config{Floating: cfg})
 
-	require.False(t, d.resizeFloatingPane(p, newGeometry))
+	require.False(t, applyFloatingResizePlanForTest(d, p, newGeometry))
 	tb.mu.Lock()
 	_, inputGeometry, visible := tb.visibleFloatingSnapshotLocked(cfg)
 	copyRect := copyTargetRectLocked(tabLayoutSnapshot{}, newContent, p, p, true, oldGeometry.translate(newContent.X, newContent.Y))
@@ -388,7 +407,7 @@ func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 		p.rect = domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}
 		d := newTestDaemon(t, nil, stubClock{})
 		requested := floatingGeometry{Bounds: domain.Rect{X: 1, Y: 1, Width: 11, Height: 9}, Inner: domain.Rect{X: 2, Y: 2, Width: 9, Height: 7}}
-		require.False(t, d.resizeFloatingPane(p, requested))
+		require.False(t, applyFloatingResizePlanForTest(d, p, requested))
 		require.Equal(t, domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}, p.rect)
 		require.Equal(t, floatingGeometry{}, p.popupGeometry)
 		require.Equal(t, 5, p.screen.Frame.Width)
@@ -404,11 +423,11 @@ func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 		done1 := make(chan bool, 1)
 		done2 := make(chan bool, 1)
 		secondStarted := make(chan struct{})
-		go func() { done1 <- d.resizeFloatingPane(p, first) }()
+		go func() { done1 <- applyFloatingResizePlanForTest(d, p, first) }()
 		<-pty.entered
 		go func() {
 			close(secondStarted)
-			done2 <- d.resizeFloatingPane(p, second)
+			done2 <- applyFloatingResizePlanForTest(d, p, second)
 		}()
 		<-secondStarted
 		close(pty.release)

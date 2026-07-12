@@ -24,7 +24,9 @@ type PTY interface {
 
 // PTYFactory creates PTYs by spawning a command attached to a new pseudo-terminal.
 type PTYFactory interface {
-	Open(cmd string, args []string, env []string, dir string, sz domain.Size) (PTY, error)
+	// Open creates a PTY while honoring ctx cancellation. Implementations must
+	// return promptly once ctx is cancelled and must not leave a child running.
+	Open(ctx context.Context, cmd string, args []string, env []string, dir string, sz domain.Size) (PTY, error)
 }
 
 // Terminal is the CLIENT-side controlling terminal.

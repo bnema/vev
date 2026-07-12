@@ -67,12 +67,13 @@ type renderWake struct {
 
 // resizeRequestMetadata is the coordinator-owned latest requested resize
 // state: S3's transaction entry point reads it through resizeSnapshot. It is
-// metadata ownership only — S1/S2 dispatch stays with the retained PR #71
-// attachment timer path.
+// metadata ownership only — S1/S2 dispatch stays with the coordinator
+// epoch timer path.
 type resizeRequestMetadata struct {
-	size   domain.Size
-	source *attachedClient
-	epoch  uint64
+	size      domain.Size
+	source    *attachedClient
+	epoch     uint64 // latest requested epoch
+	committed uint64 // latest published epoch
 }
 
 // renderCoordinatorOptions wires one coordinator instance.
@@ -158,8 +159,23 @@ type renderCoordinator struct {
 	detached bool
 	torndown bool
 
-	resize  resizeRequestMetadata
-	metrics renderCoordinatorBurstMetrics
+	resize resizeRequestMetadata
+	// resizeTimer is independent from render invalidation deadlines. It owns
+	// resize burst coalescing and is cancelled by the same lifecycle changes.
+	resizeTimer  ports.Timer
+	resizeCancel chan struct{}
+	// resizeDone closes after the latest timer callback has either been
+	// rejected or completed its transaction. It provides a completion edge
+	// without polling scheduler state.
+	resizeDone chan struct{}
+	resizeGen  uint64
+	// retry is a separate, latest-committed-epoch retry lane. It is cancelled
+	// with resize requests and attachment lifecycle changes; callbacks also
+	// validate their epoch before touching a pane.
+	retryTimer  ports.Timer
+	retryCancel chan struct{}
+	retryGen    uint64
+	metrics     renderCoordinatorBurstMetrics
 	// generation invalidates callbacks from superseded deadline/watchdog timers.
 	// Each worker also owns an explicit cancellation channel: fake timers may
 	// expose a nil or never-firing C channel, so Stop alone cannot release a
@@ -609,7 +625,7 @@ func (c *renderCoordinator) wakeCurrent(w renderWake) bool {
 // attachment.
 func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 	c.mu.Lock()
-	var timer ports.Timer
+	var timer, resizeTimer, retryTimer ports.Timer
 	if c.attachment == ac {
 		c.advanceAttachmentEpochLocked(ac)
 		c.attachment = nil
@@ -624,9 +640,22 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 		c.generation++
 		c.armed = false
 		timer = c.detachNormalTimerLocked()
+		if c.resizeCancel != nil {
+			close(c.resizeCancel)
+			c.resizeCancel = nil
+		}
+		resizeTimer, c.resizeTimer = c.resizeTimer, nil
+		if c.retryCancel != nil {
+			close(c.retryCancel)
+			c.retryCancel = nil
+		}
+		retryTimer, c.retryTimer = c.retryTimer, nil
+		c.retryGen++
 	}
 	c.mu.Unlock()
 	stopTimer(timer)
+	stopTimer(resizeTimer)
+	stopTimer(retryTimer)
 }
 
 // noteReplace hands the coordinator from old to replacement; callbacks
@@ -641,7 +670,7 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 	// which predated coordinator ownership. In that case nil has no pending
 	// identity to invalidate, and the replacement becomes the first bound
 	// attachment atomically with this lifecycle transition.
-	var timer ports.Timer
+	var timer, resizeTimer, retryTimer ports.Timer
 	if c.attachment == old || c.attachment == nil {
 		c.advanceAttachmentEpochLocked(old, replacement)
 		c.attachment = replacement
@@ -659,9 +688,22 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 		c.generation++
 		c.armed = false
 		timer = c.detachNormalTimerLocked()
+		if c.resizeCancel != nil {
+			close(c.resizeCancel)
+			c.resizeCancel = nil
+		}
+		resizeTimer, c.resizeTimer = c.resizeTimer, nil
+		if c.retryCancel != nil {
+			close(c.retryCancel)
+			c.retryCancel = nil
+		}
+		retryTimer, c.retryTimer = c.retryTimer, nil
+		c.retryGen++
 	}
 	c.mu.Unlock()
 	stopTimer(timer)
+	stopTimer(resizeTimer)
+	stopTimer(retryTimer)
 }
 
 // notePark invalidates pending wakes when the attachment parks for resume.
@@ -677,6 +719,19 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	c.previewWake = nil
 	c.previewWakes = nil
 	c.pending = false
+	if c.resizeCancel != nil {
+		close(c.resizeCancel)
+		c.resizeCancel = nil
+	}
+	resizeTimer := c.resizeTimer
+	c.resizeTimer = nil
+	if c.retryCancel != nil {
+		close(c.retryCancel)
+		c.retryCancel = nil
+	}
+	retryTimer := c.retryTimer
+	c.retryTimer = nil
+	c.retryGen++
 	c.ackDeferred = false
 	c.pendingPreview = false
 	c.generation++
@@ -685,22 +740,203 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	timers := c.detachSyncTimersLocked()
 	c.mu.Unlock()
 	stopTimer(timer)
+	stopTimer(resizeTimer)
+	stopTimer(retryTimer)
 	stopTimers(timers)
 }
 
 // recordResizeRequest records the latest requested geometry and source before
-// the request delegates to the retained PR #71 attachment path. It returns
+// the request delegates to the coordinator epoch path. It returns
 // the strictly monotonically increased epoch, or 0 when the source is stale.
 func (c *renderCoordinator) recordResizeRequest(size domain.Size, source *attachedClient) uint64 {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.torndown || c.attachment != source {
+		c.mu.Unlock()
 		return 0
 	}
+	// An intervening request supersedes any failed-pane retry, even if a fake
+	// timer delivers a stopped callback afterwards.
+	if c.retryCancel != nil {
+		close(c.retryCancel)
+		c.retryCancel = nil
+	}
+	retryTimer := c.retryTimer
+	c.retryTimer = nil
+	c.retryGen++
 	c.resize.epoch++
 	c.resize.size = size
 	c.resize.source = source
-	return c.resize.epoch
+	epoch := c.resize.epoch
+	c.mu.Unlock()
+	stopTimer(retryTimer)
+	return epoch
+}
+
+// scheduleResize records a latest-wins request and runs apply after the bounded
+// bulk window. The callback never runs with c.mu held.
+func (c *renderCoordinator) scheduleResize(size domain.Size, source *attachedClient, run func(uint64)) uint64 {
+	epoch := c.recordResizeRequest(size, source)
+	if epoch == 0 {
+		return 0
+	}
+	c.mu.Lock()
+	old := c.resizeTimer
+	if c.resizeCancel != nil {
+		close(c.resizeCancel)
+	}
+	c.resizeGen++
+	gen := c.resizeGen
+	cancel := make(chan struct{})
+	done := make(chan struct{})
+	c.resizeCancel = cancel
+	c.resizeDone = done
+	clock := c.opts.clock
+	c.resizeTimer = nil
+	c.mu.Unlock()
+	stopTimer(old)
+	if clock == nil {
+		run(epoch)
+		close(done)
+		return epoch
+	}
+	timer := clock.NewTimer(minOutputRenderDeadline)
+	timerC := timer.C()
+	if timerC == nil {
+		stopTimer(timer)
+		run(epoch)
+		close(done)
+		return epoch
+	}
+	c.mu.Lock()
+	if c.resizeGen != gen || c.torndown {
+		c.mu.Unlock()
+		stopTimer(timer)
+		close(done)
+		return epoch
+	}
+	c.resizeTimer = timer
+	c.mu.Unlock()
+	go func() {
+		defer close(done)
+		select {
+		case <-timerC:
+		case <-cancel:
+			return
+		}
+		c.mu.Lock()
+		valid := !c.torndown && c.resizeGen == gen && c.resize.epoch == epoch && c.resize.source == source
+		c.mu.Unlock()
+		c.clearResizeTimer(gen)
+		if valid {
+			run(epoch)
+		}
+	}()
+	return epoch
+}
+
+// clearResizeTimer releases timer ownership only for the matching resize generation.
+// A stale callback must not clear a newer request's timer or cancellation channel.
+func (c *renderCoordinator) clearResizeTimer(gen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.resizeGen != gen {
+		return
+	}
+	c.resizeTimer = nil
+	c.resizeCancel = nil
+}
+
+// resizeCurrent verifies that an apply/commit attempt still owns the newest
+// request. commit also advances the separately observable committed epoch.
+func (c *renderCoordinator) resizeCurrent(epoch uint64, source *attachedClient, commit bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.torndown || c.attachment != source || c.resize.source != source || c.resize.epoch != epoch {
+		return false
+	}
+	if commit {
+		if c.resize.committed >= epoch {
+			return false
+		}
+		c.resize.committed = epoch
+	}
+	return true
+}
+
+// scheduleResizeRetry serializes failed-pane retries through the injected
+// clock. Only a retry for the most recently committed epoch can run.
+func (c *renderCoordinator) scheduleResizeRetry(epoch uint64, source *attachedClient, run func()) {
+	c.mu.Lock()
+	if c.torndown || c.attachment != source || c.resize.source != source || c.resize.epoch != epoch || c.resize.committed != epoch {
+		c.mu.Unlock()
+		return
+	}
+	old := c.retryTimer
+	if c.retryCancel != nil {
+		close(c.retryCancel)
+	}
+	c.retryGen++
+	gen := c.retryGen
+	cancel := make(chan struct{})
+	c.retryCancel, c.retryTimer = cancel, nil
+	clock := c.opts.clock
+	c.mu.Unlock()
+	stopTimer(old)
+	if clock == nil {
+		run()
+		return
+	}
+	timer := clock.NewTimer(minOutputRenderDeadline)
+	timerC := timer.C()
+	if timerC == nil {
+		// A nil timer channel is the deterministic disabled-clock contract used
+		// by headless tests; do not spin retries synchronously.
+		stopTimer(timer)
+		return
+	}
+	c.mu.Lock()
+	valid := !c.torndown && c.retryGen == gen && c.resize.epoch == epoch && c.resize.committed == epoch && c.resize.source == source
+	if valid {
+		c.retryTimer = timer
+	}
+	c.mu.Unlock()
+	if !valid {
+		stopTimer(timer)
+		return
+	}
+	go func() {
+		select {
+		case <-timerC:
+		case <-cancel:
+			return
+		}
+		c.mu.Lock()
+		valid := !c.torndown && c.retryGen == gen && c.attachment == source && c.resize.source == source && c.resize.epoch == epoch && c.resize.committed == epoch
+		if valid {
+			c.retryTimer = nil
+			c.retryCancel = nil
+		}
+		c.mu.Unlock()
+		if valid {
+			run()
+		}
+	}()
+}
+
+// retryCurrent is stricter than resizeCurrent: retries may only repair the
+// newest geometry that has already been published.
+func (c *renderCoordinator) retryCurrent(epoch uint64, source *attachedClient) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.torndown && c.attachment == source && c.resize.source == source && c.resize.epoch == epoch && c.resize.committed == epoch
+}
+
+// resizeCallbackDone returns the completion edge for the latest scheduled
+// resize callback. A nil result means no resize deadline is pending.
+func (c *renderCoordinator) resizeCallbackDone() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resizeDone
 }
 
 // resizeSnapshot returns a locked copy of the latest resize metadata.
@@ -744,7 +980,7 @@ func (d *Daemon) invalidateRender(sess *session, ac *attachedClient, reset bool,
 		}
 	}
 	if ac != nil {
-		d.paint(sess, ac, reset)
+		d.paint(sess, ac, reset, 0)
 	}
 }
 
@@ -760,7 +996,7 @@ func (d *Daemon) invalidateRenderNow(sess *session, ac *attachedClient, reset bo
 		}
 	}
 	if ac != nil {
-		d.paint(sess, ac, reset)
+		d.paint(sess, ac, reset, 0)
 	}
 }
 

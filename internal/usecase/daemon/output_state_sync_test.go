@@ -279,30 +279,49 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 		{name: "stream window", window: maxUnackedOutputStates},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p, releasePTY := newBlockingPTY(t)
-			defer releasePTY()
+			// resizeReaderPTY delivers the child's SIGWINCH redraw through the
+			// actual ptyReader. Its Resize callback does not return until Read has
+			// accepted the bytes, at which point resizeApplying is still true.
+			p := newResizeReaderPTY([]byte("\x1b[1;81H" + strings.Repeat("B", 40)))
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 			ac.output.maxOutstanding = tc.window
 			pane := sess.activeTab().focusedPane()
-
+			p.applying = func() bool {
+				pane.mu.Lock()
+				defer pane.mu.Unlock()
+				return pane.resizeApplying
+			}
 			pane.screen.Write([]byte(strings.Repeat("A", 79)))
 			d.paint(sess, ac, true)
 			client := vt.NewScreen(80, 24)
 			initial := mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
 			ac.ackOutputState(initial.NewStateNum)
 
-			// The child can redraw the newly exposed columns while the resize
-			// output is being prepared. The first visible grown frame must contain
-			// that redraw, regardless of the negotiated output window.
+			d.sessWg.Add(1)
+			pane.onExit = func() {}
+			go d.ptyReader(sess, sess.activeTab(), pane)
+			defer func() { p.close(); d.sessWg.Wait() }()
+
+			// The resize deadline drives coordinator prepare/apply/commit. No test
+			// writes the grown columns directly.
+			clock := &signalClock{timers: make(chan *signalTimer, 2)}
+			d.clock = clock
 			d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
-			pane.screen.Write([]byte("\x1b[1;81H" + strings.Repeat("B", 40)))
-			d.paint(sess, ac, false)
+			timer := <-clock.timers
+			timer.ch <- time.Time{}
+			awaitResizeCallback(t, sess.renderCoordinator())
+			require.True(t, p.deliveredWhileApplying(), "redraw must arrive while PTY.Resize owns the apply gate")
+			require.Equal(t, 'B', pane.screen.Frame.At(100, 0).Rune, "replay must parse the redraw before commit")
 
 			client.Resize(120, 24)
 			mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
 			require.Equal(t, 'B', client.Frame.At(100, 1).Rune,
 				"first grown frame exposed stale pre-SIGWINCH pane content")
-			requireNoOutputFrame(t, sends)
+			select {
+			case extra := <-sends:
+				t.Fatalf("resize emitted more than one frame: %#v", extra)
+			default:
+			}
 		})
 	}
 }

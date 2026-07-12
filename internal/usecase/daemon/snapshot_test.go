@@ -385,7 +385,7 @@ func TestSnapshotSaverCapturesLayoutOnlyDirtySave(t *testing.T) {
 	newPTY.EXPECT().Write(mock.Anything).Return(0, errors.New("unused")).Maybe()
 	newPTY.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
 	newPTY.EXPECT().ForegroundPgid().Return(0, nil).Maybe()
-	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).Return(newPTY, nil).Once()
+	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).Return(newPTY, nil).Once()
 
 	require.NoError(t, d.splitPane(sess, nil, layout.Right))
 	require.True(t, sess.snapDirty.Load())

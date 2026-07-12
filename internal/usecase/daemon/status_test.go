@@ -1332,7 +1332,7 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 	}, 2*time.Second, time.Millisecond)
 
 	// The queued create, switch, and resize transitions may collapse into one
-	// latest-state wake. Advance every retained PR #71/coordinator deadline
+	// latest-state wake. Advance every retained coordinator deadline
 	// until that coalesced output is observable.
 	var resized ports.Frame
 	deadline := time.NewTimer(2 * time.Second)

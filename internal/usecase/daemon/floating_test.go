@@ -36,8 +36,8 @@ func newGatedOpenFactory(t *testing.T, result ports.PTY, openErr error) (*portsm
 	var releaseOnce sync.Once
 	releaseOpen := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(releaseOpen)
-	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(command string, args, _ []string, dir string, size domain.Size) (ports.PTY, error) {
+	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, command string, args, _ []string, dir string, size domain.Size) (ports.PTY, error) {
 			opened <- gatedFloatingOpen{command: command, args: append([]string(nil), args...), dir: dir, size: size}
 			<-release
 			return result, openErr
@@ -467,8 +467,8 @@ func TestFloatingLaunchUsesLiveOrValidatedSessionCwd(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			factory := portsmocks.NewMockPTYFactory(t)
 			opened := make(chan string, 1)
-			factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-				func(_ string, _ []string, _ []string, cwd string, _ domain.Size) (ports.PTY, error) {
+			factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+				func(_ context.Context, _ string, _ []string, _ []string, cwd string, _ domain.Size) (ports.PTY, error) {
 					opened <- cwd
 					return nil, io.ErrUnexpectedEOF
 				}).Once()

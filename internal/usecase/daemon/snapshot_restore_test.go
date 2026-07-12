@@ -251,6 +251,19 @@ func TestRestoreSnapshotsProcessCommandWriteFailureIsNonFatal(t *testing.T) {
 	require.Equal(t, []string{"pi --resume abc123\n"}, factory.opens[0].pty.writes)
 }
 
+func TestRestoreSessionPassesRestoreContextToPTYOpen(t *testing.T) {
+	factory := &restorePTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	require.NoError(t, d.restoreSession(ctx, snapcodec.Session{Name: "restore-context", Tabs: []snapcodec.Tab{{
+		Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{{ID: "pane-1", Cwd: "/tmp"}},
+	}}}))
+	require.Len(t, factory.opens, 1)
+	require.Same(t, ctx, factory.opens[0].ctx)
+}
+
 func TestRestoreSnapshotsOpensCollapsedStackPanesWithValidPTYSize(t *testing.T) {
 	store := &restoreSnapshotStore{blobs: []ports.SnapshotBlob{{Name: "stacked", Data: mustSnapshotBytes(t, snapcodec.Session{
 		Name: "stacked",
@@ -438,18 +451,19 @@ type restorePTYFactory struct {
 }
 
 type restorePTYOpen struct {
+	ctx  context.Context
 	dir  string
 	size domain.Size
 	env  []string
 	pty  *restorePTY
 }
 
-func (f *restorePTYFactory) Open(_ string, _ []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
+func (f *restorePTYFactory) Open(ctx context.Context, _ string, _ []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	pty := newRestorePTY()
 	pty.writeErr = f.writeErr
-	f.opens = append(f.opens, restorePTYOpen{dir: dir, size: sz, env: append([]string(nil), env...), pty: pty})
+	f.opens = append(f.opens, restorePTYOpen{ctx: ctx, dir: dir, size: sz, env: append([]string(nil), env...), pty: pty})
 	return pty, nil
 }
 

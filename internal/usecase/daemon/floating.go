@@ -169,7 +169,13 @@ func (d *Daemon) activateTab(sess *session, tb *tab) {
 		return
 	}
 	d.ensureFloatingWarm(sess, tb)
-	d.resizeInstalledFloating(tb)
+	tb.mu.Lock()
+	hasFloating := tb.floating.pane != nil
+	size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
+	tb.mu.Unlock()
+	if hasFloating {
+		d.requestTransactionalResize(sess, ac, size, true)
+	}
 }
 
 // toggleFloating changes only this tab's slot. Opening an uninitialized slot
@@ -197,10 +203,10 @@ func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 		return nil
 	}
 	if visible {
-		d.resizeActiveFloating(tb)
-	}
-	if ac != nil {
-		d.invalidateRender(sess, ac, true, "floating.go")
+		tb.mu.Lock()
+		size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
+		tb.mu.Unlock()
+		d.requestTransactionalResize(sess, ac, size, true)
 	}
 	return nil
 }
@@ -218,6 +224,40 @@ func (d *Daemon) startFloating(sess *session, tb *tab, visible bool) {
 
 // floatingLaunchSpec is an immutable snapshot of one launch. It is built
 // before the worker starts so config reloads cannot affect that launch.
+// floatingLaunch owns one worker from queueing through installation or stale
+// result cleanup. Its done channel lets session teardown reap an in-flight
+// Open before returning.
+type floatingLaunch struct {
+	done chan struct{}
+}
+
+func (sess *session) registerFloatingLaunch() (*floatingLaunch, bool) {
+	launch := &floatingLaunch{done: make(chan struct{})}
+	sess.floatingLaunchMu.Lock()
+	defer sess.floatingLaunchMu.Unlock()
+	if sess.floatingLaunchStopping {
+		return nil, false
+	}
+	if sess.floatingLaunches == nil {
+		sess.floatingLaunches = make(map[*floatingLaunch]struct{})
+	}
+	sess.floatingLaunches[launch] = struct{}{}
+	return launch, true
+}
+
+func (sess *session) finishFloatingLaunch(launch *floatingLaunch) {
+	sess.floatingLaunchMu.Lock()
+	delete(sess.floatingLaunches, launch)
+	close(launch.done)
+	sess.floatingLaunchMu.Unlock()
+}
+
+func (sess *session) stopFloatingLaunches() {
+	sess.floatingLaunchMu.Lock()
+	sess.floatingLaunchStopping = true
+	sess.floatingLaunchMu.Unlock()
+}
+
 type floatingLaunchSpec struct {
 	sessionName  string
 	cwd          string
@@ -240,10 +280,18 @@ func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfi
 		d.failFloatingLaunch(tb, generation, userOpen, spec.sessionName, err)
 		return
 	}
+	launch, ok := sess.registerFloatingLaunch()
+	if !ok {
+		d.failFloatingLaunch(tb, generation, userOpen, spec.sessionName, context.Canceled)
+		return
+	}
 	// Count the launch before its goroutine starts. It remains counted through
 	// install, including the reader/coordinator Adds, so shutdown cannot return
 	// before a late Open completion has either been rejected or fully joined.
-	d.sessWg.Go(func() { d.openAndInstallFloating(sess, tb, spec, generation) })
+	d.sessWg.Go(func() {
+		defer sess.finishFloatingLaunch(launch)
+		d.openAndInstallFloating(sess, tb, spec, generation, launch)
+	})
 }
 
 func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.FloatingConfig, userOpen bool) (floatingLaunchSpec, error) {
@@ -299,8 +347,20 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 
 // openAndInstallFloating runs entirely in the launch worker. No PTY operation
 // occurs under tb.mu; the pane is fully initialized before publication.
-func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLaunchSpec, generation uint64) {
-	pty, err := d.ptys.Open(spec.command, spec.args, spec.env, spec.cwd, spec.size)
+func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLaunchSpec, generation uint64, launch *floatingLaunch) {
+	// Open is context-aware and is intentionally called without any daemon,
+	// session, tab, or launch-ownership lock. Cancellation makes teardown
+	// bounded even if the adapter is waiting to create the child.
+	if err := spec.parentCtx.Err(); err != nil {
+		return
+	}
+	openCtx, cancelOpen := context.WithCancel(spec.parentCtx)
+	stopSessionCancel := context.AfterFunc(sess.ctx, cancelOpen)
+	defer func() {
+		stopSessionCancel()
+		cancelOpen()
+	}()
+	pty, err := d.ptys.Open(openCtx, spec.command, spec.args, spec.env, spec.cwd, spec.size)
 	if err != nil {
 		d.failFloatingLaunch(tb, generation, spec.userOpen, spec.sessionName, err)
 		return
@@ -343,13 +403,13 @@ func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uin
 	d.reapplyThemeSession(sess)
 	d.startPaneGoroutines(sess, tb, p)
 	if visible {
-		d.resizeActiveFloating(tb)
 		sess.mu.Lock()
 		ac := sess.client
 		sess.mu.Unlock()
-		if ac != nil {
-			d.invalidateRender(sess, ac, true, "floating.go")
-		}
+		tb.mu.Lock()
+		size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
+		tb.mu.Unlock()
+		d.requestTransactionalResize(sess, ac, size, true)
 	}
 }
 

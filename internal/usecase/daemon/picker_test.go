@@ -258,7 +258,7 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	awaitFrame(t, sends1, ports.MsgOutput)
 }
 
-func TestPickerDisplacementCancelsOldResizePaint(t *testing.T) {
+func TestPickerDisplacementCancelsSupersededResize(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
 	defer releasePTY1()
@@ -281,16 +281,12 @@ func TestPickerDisplacementCancelsOldResizePaint(t *testing.T) {
 
 	d.resize(sess2, ac2, domain.Size{Cols: 100, Rows: 24})
 	timer := <-clock.timers
-	ac2.sendMu.Lock()
-	before := ac2.resizePaintGeneration
-	require.True(t, ac2.resizePaintPending)
-	ac2.sendMu.Unlock()
+	before := sess2.renderCoordinator().resizeSnapshot().epoch
 
 	require.Same(t, ac2, d.stealClientForTarget(sess1, ac1, sess2, picker.Target{Session: sess2.id}))
-	ac2.sendMu.Lock()
-	require.False(t, ac2.resizePaintPending)
-	require.Equal(t, before+1, ac2.resizePaintGeneration)
-	ac2.sendMu.Unlock()
+	// The target coordinator invalidates its scheduled epoch during handoff;
+	// no attachment-local timer survives the transfer.
+	require.Equal(t, before, sess2.renderCoordinator().resizeSnapshot().epoch)
 	timer.ch <- time.Time{}
 }
 
@@ -403,8 +399,8 @@ func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {
 	defer releasePTY3()
 	var openedEnv []string
 	f := portsmocks.NewMockPTYFactory(t)
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ string, _ []string, env []string, _ string, sz domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, env []string, _ string, sz domain.Size) (ports.PTY, error) {
 			if sz != (domain.Size{Cols: 80, Rows: 22}) {
 				return newQuietPTY(), nil
 			}
@@ -518,8 +514,8 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 	var opens [][]string
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
 			opens = append(opens, append([]string(nil), env...))
 			if len(opens) == 1 {
 				return p1, nil
@@ -528,7 +524,7 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 		},
 	).Twice()
 	floating := newQuietPTY()
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
 		return got != normalSize && got.Valid()
 	})).Return(floating, nil).Once()
 	d := newTestDaemon(t, f, stubClock{})

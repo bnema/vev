@@ -22,7 +22,6 @@ import (
 // sustained floods step toward the maximum to reduce frame/syscall pressure.
 const (
 	minDebounceInterval   = 2 * time.Millisecond
-	maxDebounceInterval   = 16 * time.Millisecond
 	maxSyncUpdateDuration = 500 * time.Millisecond
 )
 
