@@ -107,6 +107,141 @@ func TestRoundTripSessions(t *testing.T) {
 	}
 }
 
+// V3 preserves the v2 16-byte big-endian envelope, but replaces its
+// compressed row payload with a flags-zero manifest of opaque VT blobs.
+// Snapshot owns only the manifest: sealed chunks are oldest-first and all
+// chunk, tail, and visible payloads remain self-contained VT bytes.
+const (
+	snapshotV3Version = uint16(3)
+	v3EnvelopeSize    = 16
+)
+
+func TestV3SnapshotRoundTripPreservesExactTerminalData(t *testing.T) {
+	indexed := renderer.DefaultStyle()
+	indexed.Bold = true
+	indexed.Inverse = true
+	indexed.Attrs = renderer.AttrDim | renderer.AttrUnderline | renderer.AttrBlink | renderer.AttrStrikethrough
+	indexed.Foreground = 196
+	indexed.Background = 17
+	indexed.UnderlineStyle = renderer.UnderlineCurly
+	indexed.HasUnderlineColor = true
+	indexed.UnderlineColor = 203
+
+	rgb := renderer.DefaultStyle()
+	rgb.Italic = true
+	rgb.HasForegroundRGB = true
+	rgb.ForegroundRGB = renderer.RGB{R: 1, G: 2, B: 3}
+	rgb.HasBackgroundRGB = true
+	rgb.BackgroundRGB = renderer.RGB{R: 4, G: 5, B: 6}
+	rgb.UnderlineStyle = renderer.UnderlineDashed
+	rgb.HasUnderlineColorRGB = true
+	rgb.UnderlineColorRGB = renderer.RGB{R: 7, G: 8, B: 9}
+
+	want := Session{Name: "v3 exact", Tabs: []Tab{{
+		Focus: "p",
+		Tree:  layout.NewTree("p"),
+		Panes: []Pane{{ID: "p", Scrollback: [][]renderer.Cell{{
+			{Rune: 'I', Style: indexed},
+			{Rune: '好', Style: rgb},
+			{Continuation: true, Style: rgb},
+		}}, Visible: [][]renderer.Cell{{
+			{Rune: 'V', Style: rgb},
+			{Rune: '界', Style: indexed},
+			{Continuation: true, Style: indexed},
+		}}}},
+	}}}
+
+	encoded, err := Marshal(want)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	requireV3Envelope(t, encoded)
+	got, err := Unmarshal(encoded)
+	if err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if !equalSession(got, want) {
+		t.Fatalf("round trip mismatch\ngot  %#v\nwant %#v", got, want)
+	}
+}
+
+func TestUnmarshalRejectsV3LegacyVersions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version uint16
+	}{
+		{name: "v1", version: 1},
+		{name: "v2", version: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Unmarshal(v3Envelope(tc.version, 0, nil))
+			if !errors.Is(err, ErrBadVersion) {
+				t.Fatalf("Unmarshal() error = %v, want %v", err, ErrBadVersion)
+			}
+		})
+	}
+}
+
+func TestUnmarshalRejectsMalformedV3EnvelopeBeforeAllocation(t *testing.T) {
+	body := v3Manifest(0, nil, nil, 0, nil, 0, nil)
+	valid := v3Envelope(snapshotV3Version, 0, body)
+	badCRC := append([]byte(nil), valid...)
+	badCRC[15] ^= 1
+
+	for _, tc := range []struct {
+		name string
+		data []byte
+		want error
+	}{
+		{name: "short envelope", data: valid[:v3EnvelopeSize-1], want: ErrShortPayload},
+		{name: "bad magic", data: append([]byte("NOPE"), valid[4:]...), want: ErrBadMagic},
+		{name: "future version", data: v3Envelope(snapshotV3Version+1, 0, body), want: ErrBadVersion},
+		{name: "nonzero flags", data: v3Envelope(snapshotV3Version, 1, body), want: ErrInvalidData},
+		{name: "bad checksum", data: badCRC, want: ErrBadCRC},
+		{name: "oversized body declaration", data: v3EnvelopeWithLength(snapshotV3Version, 0, nil, math.MaxUint32), want: ErrInvalidData},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertV3RejectsWithoutPanic(t, tc.data, tc.want)
+		})
+	}
+}
+
+func TestUnmarshalRejectsHostileV3ManifestDeclarationsBeforeAllocation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{name: "sealed chunk count", body: v3Manifest(math.MaxUint32, nil, nil, 0, nil, 0, nil)},
+		{name: "sealed blob length", body: v3Manifest(1, []uint32{math.MaxUint32}, nil, 0, nil, 0, nil)},
+		{name: "tail blob length", body: v3Manifest(0, nil, nil, math.MaxUint32, nil, 0, nil)},
+		{name: "visible blob length", body: v3Manifest(0, nil, nil, 0, nil, math.MaxUint32, nil)},
+		// Aggregate accounting is snapshot-owned even though each payload is
+		// VT-owned opaque data; declarations must be bounded before a blob can
+		// cause a count-driven allocation.
+		{name: "aggregate opaque blob declarations", body: v3Manifest(math.MaxUint32, nil, nil, math.MaxUint32, nil, math.MaxUint32, nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertV3RejectsWithoutPanic(t, v3Envelope(snapshotV3Version, 0, tc.body), ErrInvalidData)
+		})
+	}
+}
+
+func TestUnmarshalRejectsEveryV3PrefixAndTrailingGarbage(t *testing.T) {
+	encoded, err := Marshal(Session{Name: "v3 prefixes", Tabs: []Tab{{
+		Focus: "p",
+		Tree:  layout.NewTree("p"),
+		Panes: []Pane{{ID: "p", Scrollback: rows("history"), Visible: rows("visible")}},
+	}}})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	requireV3Envelope(t, encoded)
+	for n := range len(encoded) {
+		assertV3RejectsWithoutPanic(t, encoded[:n], nil)
+	}
+	assertV3RejectsWithoutPanic(t, append(append([]byte(nil), encoded...), 0), ErrTrailingBytes)
+}
+
 func TestUnmarshalRejectsMalformedWithoutPanic(t *testing.T) {
 	good, err := Marshal(Session{Name: "s", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p"}}}}})
 	if err != nil {
@@ -430,4 +565,88 @@ func unknownPaneSnapshot(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func requireV3Envelope(t *testing.T, data []byte) {
+	t.Helper()
+	if len(data) < v3EnvelopeSize {
+		t.Fatalf("encoded snapshot is %d bytes, want at least %d", len(data), v3EnvelopeSize)
+	}
+	if got := binary.BigEndian.Uint16(data[4:6]); got != snapshotV3Version {
+		t.Fatalf("snapshot version = %d, want v3", got)
+	}
+	if got := binary.BigEndian.Uint16(data[6:8]); got != 0 {
+		t.Fatalf("snapshot flags = %#x, want 0", got)
+	}
+}
+
+func assertV3RejectsWithoutPanic(t *testing.T, data []byte, want error) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Unmarshal panicked: %v", r)
+		}
+	}()
+	_, err := Unmarshal(data)
+	if err == nil {
+		t.Fatal("Unmarshal() error = nil")
+	}
+	if want != nil && !errors.Is(err, want) {
+		t.Fatalf("Unmarshal() error = %v, want %v", err, want)
+	}
+}
+
+func v3Envelope(version, flags uint16, body []byte) []byte {
+	return v3EnvelopeWithLength(version, flags, body, uint32(len(body)))
+}
+
+func v3EnvelopeWithLength(version, flags uint16, body []byte, bodyLen uint32) []byte {
+	out := make([]byte, v3EnvelopeSize+len(body))
+	copy(out[:4], magic)
+	binary.BigEndian.PutUint16(out[4:6], version)
+	binary.BigEndian.PutUint16(out[6:8], flags)
+	binary.BigEndian.PutUint32(out[8:12], bodyLen)
+	binary.BigEndian.PutUint32(out[12:16], crc32.ChecksumIEEE(body))
+	copy(out[v3EnvelopeSize:], body)
+	return out
+}
+
+// v3Manifest writes only snapshot-owned fields. Blob contents are deliberately
+// opaque: VT validates their style, row, run, cell, and decoded-byte budgets.
+func v3Manifest(
+	sealedCount uint32,
+	sealedLengths []uint32,
+	sealedBlobs [][]byte,
+	tailLength uint32,
+	tailBlob []byte,
+	visibleLength uint32,
+	visibleBlob []byte,
+) []byte {
+	var w payloadWriter
+	_ = w.putString("v3")
+	w.putUint64(0)
+	w.putUint16(0)
+	w.putUint16(1)
+	_ = w.putString("tab")
+	w.putUint16(80)
+	w.putUint16(24)
+	w.putUint64(1)
+	_ = w.putString("p")
+	_ = writeNode(&w, layout.NewLeaf("p"))
+	w.putUint16(1)
+	_ = w.putString("p")
+	_ = w.putString("")
+	_ = w.putString("")
+	w.putUint32(sealedCount)
+	for i := range sealedLengths {
+		w.putUint32(sealedLengths[i])
+		if i < len(sealedBlobs) {
+			w.b = append(w.b, sealedBlobs[i]...)
+		}
+	}
+	w.putUint32(tailLength)
+	w.b = append(w.b, tailBlob...)
+	w.putUint32(visibleLength)
+	w.b = append(w.b, visibleBlob...)
+	return w.b
 }
