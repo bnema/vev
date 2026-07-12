@@ -17,10 +17,12 @@ func (c *fakeClock) Now() int64        { c.tick += 10; return c.tick }
 func (*fakeClock) Sleep(time.Duration) {}
 
 type fakeProcess struct {
-	fail     bool
-	warmups  [][]byte
-	measures [][]byte
-	closed   bool
+	fail       bool
+	measureErr error
+	closeErr   error
+	warmups    [][]byte
+	measures   [][]byte
+	closed     bool
 }
 
 func (p *fakeProcess) Warmup(input []byte) error {
@@ -29,6 +31,9 @@ func (p *fakeProcess) Warmup(input []byte) error {
 }
 func (p *fakeProcess) Measure(input []byte, injected, flush func() error) error {
 	p.measures = append(p.measures, append([]byte(nil), input...))
+	if p.measureErr != nil {
+		return p.measureErr
+	}
 	if p.fail {
 		return errors.New("measure failure")
 	}
@@ -37,13 +42,15 @@ func (p *fakeProcess) Measure(input []byte, injected, flush func() error) error 
 	}
 	return flush()
 }
-func (p *fakeProcess) Close() error { p.closed = true; return nil }
+func (p *fakeProcess) Close() error { p.closed = true; return p.closeErr }
 
 type fakeLauncher struct {
 	mappings        []processMapping
 	args            [][]string
 	commands        []roleCommand
 	process         []*fakeProcess
+	measureErr      map[string]error
+	closeErr        map[string]error
 	manifestPresent bool
 }
 
@@ -53,7 +60,7 @@ func (l *fakeLauncher) Launch(m processMapping, command roleCommand) (launchedPr
 	l.commands = append(l.commands, command)
 	_, e := os.Stat(filepath.Join(filepath.Dir(m.TracePath), "manifest.json"))
 	l.manifestPresent = e == nil
-	p := &fakeProcess{}
+	p := &fakeProcess{measureErr: l.measureErr[m.Role], closeErr: l.closeErr[m.Role]}
 	l.process = append(l.process, p)
 	return p, nil
 }
@@ -377,6 +384,35 @@ func TestHarnessRejectsInvalidBoundaryPairs(t *testing.T) {
 	}
 }
 
+func TestHarnessPreservesWorkloadAndCleanupErrors(t *testing.T) {
+	dir := t.TempDir()
+	raw, err := os.OpenFile(filepath.Join(dir, "raw.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	primary := errors.New("primary workload failure")
+	cleanup := errors.New("daemon cleanup failure")
+	launcher := &fakeLauncher{
+		measureErr: map[string]error{"client": primary},
+		closeErr:   map[string]error{"daemon": cleanup},
+	}
+	h := defaultHarness()
+	h.clock, h.launcher = &fakeClock{}, launcher
+	_, err = h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}, manifest{}, scenario{ID: "errors", Roles: []string{"daemon", "client"}}, 1, raw)
+	if !errors.Is(err, primary) || !errors.Is(err, cleanup) {
+		t.Fatalf("workload and cleanup errors were not both preserved: %v", err)
+	}
+	if got, want := err.Error(), primary.Error()+"\n"+cleanup.Error(); got != want {
+		t.Fatalf("error ordering=%q want %q", got, want)
+	}
+	for i, p := range launcher.process {
+		if !p.closed {
+			t.Fatalf("role %s was not closed", launcher.mappings[i].Role)
+		}
+	}
+}
+
 func TestHarnessCleansRunDirectoryOnProcessFailure(t *testing.T) {
 	dir := t.TempDir()
 	raw, err := os.OpenFile(filepath.Join(dir, "raw-harness.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -460,6 +496,76 @@ func (l *traceLauncher) Launch(m processMapping, command roleCommand) (launchedP
 	}
 	return p, nil
 }
+
+type closeTraceProcess struct {
+	*fakeProcess
+	traceEnd func() error
+}
+
+func (p *closeTraceProcess) Close() error {
+	p.closed = true
+	return errors.Join(p.closeErr, p.traceEnd())
+}
+
+type closeTraceLauncher struct{ fakeLauncher }
+
+func (l *closeTraceLauncher) Launch(m processMapping, command roleCommand) (launchedProcess, error) {
+	p, err := l.fakeLauncher.Launch(m, command)
+	if err != nil {
+		return nil, err
+	}
+	start := traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: 1, RequestID: 1, Epoch: 1, Kind: "adapter_receive_start", Tick: 10}
+	if err := appendTraceRecord(m.TracePath, start); err != nil {
+		return nil, err
+	}
+	return &closeTraceProcess{fakeProcess: p.(*fakeProcess), traceEnd: func() error {
+		return appendTraceRecord(m.TracePath, traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: 1, RequestID: 1, Epoch: 1, Kind: "adapter_receive_end", Tick: 20})
+	}}, nil
+}
+
+func appendTraceRecord(path string, record traceRecord) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	b, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(append(b, '\n'))
+	return err
+}
+
+func TestHarnessClosesRolesBeforeMergingReceiveSpans(t *testing.T) {
+	dir := t.TempDir()
+	raw, err := os.OpenFile(filepath.Join(dir, "raw.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	launcher := &closeTraceLauncher{}
+	h := defaultHarness()
+	h.clock, h.launcher = &fakeClock{}, launcher
+	result, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}, manifest{}, scenario{ID: "receive-cleanup", Roles: []string{"daemon", "client"}}, 1, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Spans) != 2 {
+		t.Fatalf("post-cleanup receive spans=%+v", result.Spans)
+	}
+	for _, s := range result.Spans {
+		if s.Name != "adapter_receive_duration" || len(s.Samples) != 1 || s.Samples[0] != 10 {
+			t.Fatalf("unmatched or wrong receive span: %+v", s)
+		}
+	}
+	for i, p := range launcher.process {
+		if !p.closed {
+			t.Fatalf("role %s was not closed before trace merge", launcher.mappings[i].Role)
+		}
+	}
+}
+
 func TestHarnessWritesRequiredEvidenceWithSufficientSpans(t *testing.T) {
 	base, err := readManifest(filepath.Join("..", "..", "testdata", "perf", "manifest.json"))
 	if err != nil {

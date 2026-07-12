@@ -147,6 +147,23 @@ type launcher interface {
 	Launch(processMapping, roleCommand) (launchedProcess, error)
 }
 
+type launchedRole struct {
+	mapping processMapping
+	process launchedProcess
+}
+
+// closeLaunchedRoles closes every role in reverse launch order. errors.Join
+// retains every cleanup failure in that stable order.
+func closeLaunchedRoles(processes []launchedRole) error {
+	var failures []error
+	for i := len(processes) - 1; i >= 0; i-- {
+		if err := processes[i].process.Close(); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}
+
 // cliLauncher is deliberately limited to executing the supplied public vev
 // binary. Scenario orchestration never reaches into an in-process daemon.
 type cliLauncher struct {
@@ -794,17 +811,25 @@ func (h *harness) runOne(o options, mat manifest, s scenario, run int, raw io.Wr
 	if h.launcher == nil {
 		h.launcher = &cliLauncher{bin: o.vevBin}
 	}
-	type launchedRole struct {
-		mapping processMapping
-		process launchedProcess
-	}
 	processes := make([]launchedRole, 0, len(maps))
-	defer func() {
+	closed := false
+	closeRoles := func() error {
+		if closed {
+			return nil
+		}
+		closed = true
 		// Clients own SSH-stdio descendants; close them before the deferred UDP
 		// peer and daemon so no role survives a failed or completed run.
-		for i := len(processes) - 1; i >= 0; i-- {
-			if e := processes[i].process.Close(); err == nil && e != nil {
-				err = e
+		return closeLaunchedRoles(processes)
+	}
+	defer func() {
+		if cleanupErr := closeRoles(); cleanupErr != nil {
+			if err == nil {
+				err = cleanupErr
+			} else {
+				// Keep the primary workload failure first while retaining every
+				// cleanup failure in reverse launch order.
+				err = errors.Join(err, cleanupErr)
 			}
 		}
 	}()
@@ -856,6 +881,11 @@ func (h *harness) runOne(o options, mat manifest, s scenario, run int, raw io.Wr
 	samples, e := pairedSamples(marks)
 	if e != nil {
 		return res, e
+	}
+	// Process teardown can unblock a receive and cause its failed end mark to
+	// be serialized. Merge only the complete, post-cleanup per-process traces.
+	if cleanupErr := closeRoles(); cleanupErr != nil {
+		return res, cleanupErr
 	}
 	spans, e := mergeProcessTraces(maps)
 	if e != nil {
