@@ -71,6 +71,27 @@ func TestPerformanceFixtureCounters(t *testing.T) {
 	require.True(t, fixture.resized())
 }
 
+func TestRenderStageHooksCountProductionBoundariesOnFailedSend(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+	d.paint(sess, ac, true)
+	<-sends
+	var captures, compositions, emissions int
+	ac.renderStages = renderStageHooks{
+		capture: func() { captures++ },
+		compose: func() { compositions++ },
+		emit:    func() { emissions++ },
+	}
+	ac.replaceTransport(cacheFailTransport{})
+	p := sess.tabs[0].focusedPane()
+	p.mu.Lock()
+	p.screen.Write([]byte("hook"))
+	p.mu.Unlock()
+	d.paint(sess, ac, false)
+	require.Equal(t, 1, captures, "a completed capture counts even when its emission fails")
+	require.Equal(t, 1, compositions, "a completed composition counts even when its emission fails")
+	require.Zero(t, emissions, "emit counts only prepare and transport success")
+}
+
 func TestPerformanceFixtureResizeAlternatesRealDimensions(t *testing.T) {
 	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}})
 
