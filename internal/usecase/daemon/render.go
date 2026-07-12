@@ -292,6 +292,13 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 		ac.sendMu.Unlock()
 		return
 	}
+	// Capacity is checked before any destructive capture. The coordinator is
+	// the normal gate, but this ownership check also protects direct resize and
+	// test paint paths from consuming damage that cannot be emitted.
+	if ac.output != nil && ac.output.atCapacity() {
+		ac.sendMu.Unlock()
+		return
+	}
 	if resizeGeneration != 0 && (!ac.resizePaintPending || ac.resizePaintGeneration != resizeGeneration) {
 		ac.sendMu.Unlock()
 		return
@@ -598,6 +605,7 @@ type composedFrameCache struct {
 	floatingGeneration      uint64
 	floatingGeometry        floatingGeometry
 	floatingTitleGeneration uint64
+	floatingCaptured        capturedPaneRenderState
 }
 
 func (c *composedFrameCache) invalidate() {
@@ -762,18 +770,42 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 				titleGenerations[pl.ID] = generation
 			}
 		}
+		mode := damageCapturePreview
+		if consumeDamage {
+			mode = damageCaptureConsume
+		}
 		if pl.Collapsed || pl.Content.Width <= 0 || pl.Content.Height <= 0 {
 			if consumeDamage {
 				p.mu.Lock()
-				p.screen.ClearDamage()
+				_ = capturePaneRenderStateLocked(p, domain.Rect{}, mode)
 				p.mu.Unlock()
 			}
 			continue
 		}
-		p.mu.Lock()
-		paneDamage := p.screen.Damage()
+		var paneFrame renderer.Frame
+		var paneDamage []renderer.Damage
+		if consumeDamage {
+			p.mu.Lock()
+			captured := capturePaneRenderStateLocked(p, pl.Content, mode)
+			p.mu.Unlock()
+			paneFrame, paneDamage = captured.frame, captured.damage
+		} else {
+			p.mu.Lock()
+			paneDamage = p.screen.Damage()
+			if !cacheValid || len(paneDamage) > 0 {
+				blitPaneFrame(frame, pl.Content, p.screen.Frame, !focused, theme)
+			}
+			for _, d := range paneDamage {
+				localContent := pl.Content
+				localContent.X -= area.X
+				localContent.Y -= area.Y
+				damage = append(damage, translatePaneDamage(d, localContent, contentArea)...)
+			}
+			p.mu.Unlock()
+			continue
+		}
 		if !cacheValid || len(paneDamage) > 0 {
-			blitPaneFrame(frame, pl.Content, p.screen.Frame, !focused, theme)
+			blitPaneFrame(frame, pl.Content, paneFrame, !focused, theme)
 		}
 		for _, d := range paneDamage {
 			localContent := pl.Content
@@ -781,10 +813,6 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 			localContent.Y -= area.Y
 			damage = append(damage, translatePaneDamage(d, localContent, contentArea)...)
 		}
-		if consumeDamage {
-			p.screen.ClearDamage()
-		}
-		p.mu.Unlock()
 	}
 	return damage
 }

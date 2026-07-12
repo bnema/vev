@@ -3284,3 +3284,36 @@ func TestScreenAltScreenActiveAccessor(t *testing.T) {
 		t.Fatal("alt screen should be inactive after exit")
 	}
 }
+
+func TestDamageCaptureAcknowledgementPreservesConcurrentWrite(t *testing.T) {
+	s := NewScreen(8, 2)
+	s.ClearDamage()
+	s.Write([]byte("a"))
+
+	captured := s.CaptureDamage()
+	require.NotEmpty(t, captured.Damage)
+	s.Write([]byte("b"))
+
+	require.False(t, s.AcknowledgeDamage(captured.Generation))
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, s.Damage(), "stale acknowledgement must retain later writes conservatively")
+}
+
+func TestDamageCaptureAcknowledgementClearsMatchingGeneration(t *testing.T) {
+	s := NewScreen(8, 2)
+	s.ClearDamage()
+	s.Write([]byte("a"))
+
+	captured := s.CaptureDamage()
+	require.True(t, s.AcknowledgeDamage(captured.Generation))
+	require.Empty(t, s.Damage())
+}
+
+func TestDamageCaptureOwnsDamageSlice(t *testing.T) {
+	s := NewScreen(8, 2)
+	s.ClearDamage()
+	s.Write([]byte("a"))
+
+	captured := s.CaptureDamage()
+	s.ClearDamage()
+	require.NotEmpty(t, captured.Damage, "captured damage must not alias mutable screen storage")
+}

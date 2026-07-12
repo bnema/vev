@@ -109,16 +109,22 @@ func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *
 	// Committed popup geometry is content-relative; translate it exactly once
 	// while holding the same lock that protects the committed state and frame.
 	geometry := p.committedFloatingGeometryLocked(desired).translate(content.X, content.Y)
-	title := p.displayTitleLocked()
-	titleGeneration := p.title.generation
-	screenDamage := p.screen.Damage()
-	blitPaneFrame(frame, geometry.Inner, p.screen.Frame, false, theme)
+	previousCapture := capturedPaneRenderState{}
+	if cache != nil {
+		previousCapture = cache.floatingCaptured
+	}
+	captured := capturePaneRenderStateLockedInto(p, geometry.Inner, damageCaptureConsume, previousCapture)
+	if cache != nil {
+		cache.floatingCaptured = captured
+	}
+	p.mu.Unlock()
+	title := captured.title
+	titleGeneration := captured.titleGeneration
+	blitPaneFrame(frame, geometry.Inner, captured.frame, false, theme)
 	damage := append([]renderer.Damage(nil), baseDamage...)
-	for _, d := range screenDamage {
+	for _, d := range captured.damage {
 		damage = append(damage, translatePaneDamage(d, geometry.Inner, content)...)
 	}
-	p.screen.ClearDamage()
-	p.mu.Unlock()
 
 	// The committed geometry, rather than the requested config geometry, is
 	// what was actually rendered. Track it so movement (including a same-size
