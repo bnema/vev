@@ -206,6 +206,14 @@ func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations
 	b.ReportMetric(float64(metrics.coordinatorInvalidations)/perOperation, "coordinatorinvalidations/op")
 	b.ReportMetric(float64(metrics.coordinatorWakes)/perOperation, "coordinatorwakes/op")
 	b.ReportMetric(float64(metrics.coordinatorCoalesced)/perOperation, "coordinatorcoalesced/op")
+	// A delivered output frame has completed the current capture, composition,
+	// and emission path once. These split labels make that end-to-end pipeline
+	// rate explicit while retaining the established output metrics above. The
+	// operations guard keeps every denominator safe for zero-iteration runs.
+	pipelineRate := float64(metrics.outputFrames) / perOperation
+	b.ReportMetric(pipelineRate, "rendercaptures/op")
+	b.ReportMetric(pipelineRate, "rendercompositions/op")
+	b.ReportMetric(pipelineRate, "renderemissions/op")
 	b.ReportMetric(coordinatorCoalescingRatio(metrics), "coordinatorcoalescingratio")
 	b.ReportMetric(float64(historyRows), "historyrows/pane")
 }
