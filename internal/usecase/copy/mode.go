@@ -27,11 +27,13 @@ type Snapshot struct {
 	Height  int
 }
 
-// NewSnapshot freezes the current VT history view and clones the visible screen.
+// NewSnapshot seals the current VT history tail, then freezes that immutable
+// view and clones the visible screen. Sealing prevents repeated copy entry from
+// cloning every row in a partial tail.
 func NewSnapshot(historySource *vt.History, screen renderer.Frame) Snapshot {
 	var history vt.HistoryView
 	if historySource != nil {
-		history = historySource.View()
+		history = historySource.SealAndView()
 	}
 	return Snapshot{history: history, screen: screen.Clone(), Width: screen.Width, Height: screen.Height}
 }
@@ -57,7 +59,7 @@ func (s Snapshot) Row(i int) []renderer.Cell {
 		return nil
 	}
 	if i < s.history.Len() {
-		return s.history.Row(i)
+		return s.history.BorrowedRow(i)
 	}
 	i -= s.history.Len()
 	if i >= s.screen.Height {

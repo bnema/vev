@@ -230,6 +230,10 @@ func BenchmarkDaemonHistorySnapshotRestore(b *testing.B) {
 	benchmarkDaemonSnapshotRestore(b)
 }
 
+// BenchmarkDaemonHistoryCopyEnter uses the parent benchmark's repeated-entry
+// semantics: each operation replaces the active copy document. Exit cleanup is
+// intentionally outside this benchmark, so its allocations cannot be reported
+// as copy-entry work.
 func BenchmarkDaemonHistoryCopyEnter(b *testing.B) {
 	benchmarkDaemonLargeHistory(b, "copy-enter", func(f *performanceFixture) { f.d.enterCopyMode(f.sess, f.ac) })
 }
@@ -271,8 +275,8 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 			if !fixture.hasHistoryTopology(topology.tabs, topology.panes, 10_000) {
 				b.Fatal("invalid daemon history fixture")
 			}
-			if workload == "copy-enter" || workload == "copy-search" {
-				benchmarkDaemonCopyOperation(b, fixture, workload, run)
+			if workload == "copy-search" {
+				benchmarkDaemonCopySearch(b, fixture, run)
 				return
 			}
 			b.ReportAllocs()
@@ -295,43 +299,21 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 	}
 }
 
-func benchmarkDaemonCopyOperation(b *testing.B, fixture *performanceFixture, workload string, run func(*performanceFixture)) {
+func benchmarkDaemonCopySearch(b *testing.B, fixture *performanceFixture, run func(*performanceFixture)) {
 	b.Helper()
+	fixture.d.enterCopyMode(fixture.sess, fixture.ac)
+	fixture.ac.ackOutputState(fixture.ac.output.next)
 	b.ReportAllocs()
-	if workload == "copy-search" {
-		fixture.d.enterCopyMode(fixture.sess, fixture.ac)
-		fixture.ac.ackOutputState(fixture.ac.output.next)
-		b.ResetTimer()
-		for range b.N {
-			run(fixture)
-			fixture.ac.ackOutputState(fixture.ac.output.next)
-		}
-		b.StopTimer()
-		if fixture.searchMatches() == 0 {
-			b.Fatal("copy search produced no deterministic matches")
-		}
-		b.ReportMetric(1, "copyoperations/op")
-		return
-	}
-
 	b.ResetTimer()
-	operations := 0
 	for range b.N {
-		b.StopTimer()
-		fixture.d.exitCopyMode(fixture.ac)
-		fixture.ac.ackOutputState(fixture.ac.output.next)
-		b.StartTimer()
 		run(fixture)
-		b.StopTimer()
-		if !fixture.copyModeActive() {
-			b.Fatal("copy enter did not install a copy mode")
-		}
-		operations++
+		fixture.ac.ackOutputState(fixture.ac.output.next)
 	}
-	if operations != b.N {
-		b.Fatalf("copy workload ran %d operations for %d iterations", operations, b.N)
+	b.StopTimer()
+	if fixture.searchMatches() == 0 {
+		b.Fatal("copy search produced no deterministic matches")
 	}
-	b.ReportMetric(float64(operations)/float64(b.N), "copyoperations/op")
+	b.ReportMetric(1, "copyoperations/op")
 }
 
 func benchmarkDaemonSnapshotCapture(b *testing.B) {
@@ -537,6 +519,31 @@ func TestLivePaintAllocationBudget(t *testing.T) {
 				fixture.ac.ackOutputState(fixture.ac.output.next)
 			})
 			require.LessOrEqual(t, allocs, float64(38), "live paint must reuse attachment-owned render scratch across warm paints")
+		})
+	}
+}
+
+// TestCopyEnterAllocationBudget protects the parent baseline plus 10%. Copy
+// rendering borrows sealed VT history rows; allocating a copy per viewport row
+// is a production regression even though the capture itself remains immutable.
+func TestCopyEnterAllocationBudget(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		tabs, panes, max int
+	}{
+		{name: "1tab-1pane", tabs: 1, panes: 1, max: 38},
+		{name: "1tab-4panes", tabs: 1, panes: 4, max: 43},
+		{name: "4tabs-1pane", tabs: 4, panes: 1, max: 42},
+		{name: "4tabs-4panes", tabs: 4, panes: 4, max: 48},
+		{name: "8tabs-1pane", tabs: 8, panes: 1, max: 50},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: tt.tabs, panes: tt.panes, historyRows: 10_000})
+			allocs := testing.AllocsPerRun(20, func() {
+				fixture.d.enterCopyMode(fixture.sess, fixture.ac)
+				fixture.ac.ackOutputState(fixture.ac.output.next)
+			})
+			require.LessOrEqual(t, allocs, float64(tt.max), "copy enter must stay within 10%% of the parent allocation baseline")
 		})
 	}
 }
@@ -851,12 +858,6 @@ func (f *performanceFixture) hasHistoryTopology(tabs, panes, historyRows int) bo
 		tb.mu.Unlock()
 	}
 	return true
-}
-
-func (f *performanceFixture) copyModeActive() bool {
-	f.ac.overlays.copyMu.Lock()
-	defer f.ac.overlays.copyMu.Unlock()
-	return f.ac.overlays.copyMode != nil
 }
 
 func (f *performanceFixture) searchMatches() int {

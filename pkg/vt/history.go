@@ -143,12 +143,19 @@ func (v HistoryView) Range(yield func([]renderer.Cell) bool) {
 
 // Row returns a copy of the row at i, or nil when i is out of range.
 func (v HistoryView) Row(i int) []renderer.Cell {
+	return append([]renderer.Cell(nil), v.BorrowedRow(i)...)
+}
+
+// BorrowedRow returns immutable storage for the row at i, or nil when i is out
+// of range. The caller must not mutate or retain the result after it no longer
+// retains v. Consumers that need ownership should use Row instead.
+func (v HistoryView) BorrowedRow(i int) []renderer.Cell {
 	if i < 0 {
 		return nil
 	}
 	for _, chunk := range v.chunks {
 		if i < len(chunk.rows) {
-			return append([]renderer.Cell(nil), chunk.rows[i]...)
+			return chunk.rows[i]
 		}
 		i -= len(chunk.rows)
 	}
