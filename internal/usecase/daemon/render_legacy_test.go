@@ -47,14 +47,6 @@ type composedFrameCache struct {
 	floatingCaptured        capturedPaneRenderState
 }
 
-func (c *composedFrameCache) invalidate() {
-	c.valid = false
-	c.floating = nil
-	c.floatingGeneration = 0
-	c.floatingGeometry = floatingGeometry{}
-	c.floatingTitleGeneration = 0
-}
-
 func composeClientFrame(sess *session, tb *tab, full bool, rightStatus string, caches ...*barCache) (renderer.Frame, []renderer.Damage) {
 	return composeClientFrameWithState(barState{status: sess.statusSegments(true), copyFeedback: rightStatus}, tb, full, caches...)
 }

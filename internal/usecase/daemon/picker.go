@@ -496,21 +496,6 @@ func (d *Daemon) refreshPicker(ac *attachedClient) {
 	d.registerPreviewForSelection(ac)
 }
 
-func composePickerClientFrame(model *picker.Model, preview picker.Preview, base renderer.Frame, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
-	styleSet := resolveThemeStyles(styles)
-	renderStyles := picker.RenderStyles{
-		Selection:      styleSet.selection,
-		SelectionName:  styleSet.pickerSelectionName,
-		SelectionMuted: styleSet.pickerSelectionMuted,
-		Name:           styleSet.pickerName,
-		Detail:         styleSet.paletteDesc,
-		Base:           renderer.DefaultStyle(),
-	}
-	return composeModalClientFrame(base, pickerModal, styleSet, styleSet.selection, func(size domain.Size, _ ...renderer.Style) renderer.Frame {
-		return model.Render(size, preview, renderStyles)
-	})
-}
-
 func snapshotPickerPreview(tb *tab) picker.Preview {
 	if tb == nil {
 		return picker.Preview{}
