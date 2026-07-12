@@ -248,7 +248,7 @@ func (sess *session) registerFloatingLaunch() (*floatingLaunch, bool) {
 
 // openFloating runs fn while only the dedicated launch-ownership lock is
 // held. It deliberately does not hold sess.mu, tb.mu, or d.mu across Open.
-func (sess *session) openFloating(launch *floatingLaunch, fn func() (ports.PTY, error)) (ports.PTY, error, bool) {
+func (sess *session) openFloating(fn func() (ports.PTY, error)) (ports.PTY, error, bool) {
 	sess.floatingLaunchMu.Lock()
 	defer sess.floatingLaunchMu.Unlock()
 	if sess.floatingLaunchStopping {
@@ -386,7 +386,7 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 		d.floatingLaunchGate.Unlock()
 		return
 	}
-	pty, err, opened := sess.openFloating(launch, func() (ports.PTY, error) {
+	pty, err, opened := sess.openFloating(func() (ports.PTY, error) {
 		return d.ptys.Open(spec.command, spec.args, spec.env, spec.cwd, spec.size)
 	})
 	d.floatingLaunchGate.Unlock()
