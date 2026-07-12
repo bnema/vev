@@ -1,29 +1,4 @@
-// Package daemon holds vev's server-side session multiplexer use case: the
-// accept loop, the ephemeral/named session registry, the per-tab PTY reader
-// and VT screen, and the per-client debounced render scheduler.
-//
-// Concurrency model (sessions own one or more PTY-backed tabs):
-//
-//   - Serve runs the accept loop. Each accepted connection is handled by its
-//     own goroutine (handleConn): it reads the first frame and routes it to a
-//     session create/attach, a list, or a kill.
-//   - Per session there are exactly two long-lived goroutines: the PTY reader
-//     (drains child output into the VT screen and pokes a cap-1 dirty channel)
-//     and the render scheduler (debounces dirties and paints the attached
-//     client). Both are tied to the session context and unwind when the
-//     session is killed (pty.Close unblocks the reader; ctx cancel stops the
-//     scheduler).
-//   - The daemon exits (Serve returns) when the last session is removed, or
-//     when the parent context is cancelled (graceful shutdown notifies any
-//     attached clients with ReasonServerShutdown). Client detach does not end
-//     a session: ephemeral sessions stay in memory until explicitly killed or
-//     until the daemon exits, and named sessions can also persist on disk.
-//
-// Locking: a pane's screen/scrollback and per-client renderer shadow are
-// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
-// session.mu; the registry by Daemon.mu. When more than one is held the order
-// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
-// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
+// Package daemon holds vev's server-side session multiplexer use case.
 package daemon
 
 import (
@@ -48,7 +23,6 @@ import (
 const (
 	minDebounceInterval   = 2 * time.Millisecond
 	maxDebounceInterval   = 16 * time.Millisecond
-	debounceStep          = 2 * time.Millisecond
 	maxSyncUpdateDuration = 500 * time.Millisecond
 )
 
@@ -160,7 +134,7 @@ type Daemon struct {
 	done     chan struct{}
 	doneOnce sync.Once
 
-	sessWg sync.WaitGroup // PTY reader + scheduler goroutines
+	sessWg sync.WaitGroup // PTY reader goroutines
 	connWg sync.WaitGroup // per-connection handler goroutines
 }
 
@@ -425,7 +399,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	// remaining parked connections, so graceful notices are never raced by the
 	// force-close. Finally drain the conn handlers, run one defensive sweep in
 	// case any ordering ever leaves a session behind, and join the session
-	// goroutines (readers unblock via pty.Close, schedulers via ctx cancel).
+	// goroutines (readers unblock via pty.Close, coordinators via ctx cancel).
 	d.shutdownAll(ports.ReasonServerShutdown)
 	d.waitNotifies()
 	d.hardCancel()
@@ -621,6 +595,12 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 	}
 
 	if err := ac.send(frameWelcome(sess, ac)); err != nil {
+		d.clientGone(sess, ac, tr, false)
+		return
+	}
+	if rc := sess.renderCoordinator(); rc == nil || !rc.markAttachmentReady(ac) {
+		// The attachment was displaced or detached while Welcome was in flight;
+		// never let this stale handshake emit an Output frame.
 		d.clientGone(sess, ac, tr, false)
 		return
 	}

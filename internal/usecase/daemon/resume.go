@@ -48,11 +48,10 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 	if !d.prepareParkAttachment(sess, ac) {
 		return false
 	}
-	// A parked attachment has no valid visible destination. Retire both the
-	// deferred diff and any resize-idle callback before registering its grace
-	// timer; resume performs a fresh full paint.
+	// A parked attachment has no valid visible destination. Cancel its
+	// resize-idle callback before registering the grace timer; resume performs
+	// a fresh full paint.
 	ac.cancelResizePaint()
-	ac.clearPaintDeferred()
 	d.mu.Lock()
 	if d.closing {
 		d.mu.Unlock()
@@ -188,6 +187,7 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	sess.client = ac
 	sess.terminal = terminalEnv{TrueColor: h.TrueColor}
 	sess.mu.Unlock()
+	d.attachCoordinator(sess, nil, ac, false)
 	d.touchMRU(sess)
 	d.log.Info("client resumed", "session", sess.name)
 	return sess, ac, true, nil

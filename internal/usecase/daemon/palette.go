@@ -42,7 +42,7 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	ac.overlays.paletteHints = palette.ContextualHints{}
 	ac.overlays.palettePending = nil
 	ac.overlays.paletteMu.Unlock()
-	d.paint(sess, ac, true)
+	d.invalidateRender(sess, ac, true, "palette.go")
 }
 
 func recentSessionHints(recent []recentSession, args []string) palette.ContextualHints {
@@ -167,12 +167,12 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	}
 	ac.overlays.paletteMu.Unlock()
 	if cancel {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "palette.go")
 		return
 	}
 	if !execute {
 		if changed {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "palette.go")
 		}
 		return
 	}
@@ -183,7 +183,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		rank, err := command.ParsePositiveDecimal(args)
 		if err != nil {
 			ac.paletteFailure(generation, rawQuery, "rank must be one positive decimal")
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "palette.go")
 			return
 		}
 		// The captured ID is handed off atomically. A target can disappear after
@@ -191,14 +191,14 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		exec := paletteExec{d: d, sess: sess, ac: ac, recent: recent}
 		if err := exec.JumpRecentSession(rank); err != nil {
 			ac.paletteFailure(generation, rawQuery, "requested recent session is unavailable")
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "palette.go")
 			return
 		}
 		// Publication remains generation-safe; do not let stale work close a
 		// newer palette interaction.
 		if ac.closeExecutedPalette(generation, rawQuery) {
 			d.recordPaletteUse(cmd.Code)
-			d.paint(ac.currentSession(), ac, true)
+			d.invalidateRender(ac.currentSession(), ac, true, "palette.go")
 		}
 		return
 	}
@@ -259,7 +259,7 @@ type paletteExec struct {
 }
 
 func (e paletteExec) CreateTab() error {
-	defer e.d.paint(e.sess, e.ac, true)
+	defer e.d.invalidateRender(e.sess, e.ac, true, "palette.go")
 	return e.d.createTab(e.sess, e.ac.size)
 }
 
@@ -325,7 +325,7 @@ func (e paletteExec) NextTab() error {
 	if e.sess.switchRelative(1) {
 		e.d.activateTab(e.sess, e.sess.activeTab())
 	}
-	e.d.paint(e.sess, e.ac, true)
+	e.d.invalidateRender(e.sess, e.ac, true, "palette.go")
 	return nil
 }
 
@@ -333,7 +333,7 @@ func (e paletteExec) PrevTab() error {
 	if e.sess.switchRelative(-1) {
 		e.d.activateTab(e.sess, e.sess.activeTab())
 	}
-	e.d.paint(e.sess, e.ac, true)
+	e.d.invalidateRender(e.sess, e.ac, true, "palette.go")
 	return nil
 }
 

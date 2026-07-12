@@ -1,27 +1,8 @@
-// Package daemon holds vev's server-side session multiplexer use case: the
-// accept loop, the ephemeral/named session registry, the per-tab PTY reader
-// and VT screen, and the per-client debounced render scheduler.
+// Package daemon holds vev's server-side session multiplexer use case.
 //
-// Concurrency model (sessions own one or more PTY-backed tabs):
-//
-//   - Serve runs the accept loop. Each accepted connection is handled by its
-//     own goroutine (handleConn): it reads the first frame and routes it to a
-//     session create/attach, a list, or a kill.
-//   - Per session there are exactly two long-lived goroutines: the PTY reader
-//     (drains child output into the VT screen and pokes a cap-1 dirty channel)
-//     and the render scheduler (debounces dirties and paints the attached
-//     client). Both are tied to the session context and unwind when the
-//     session is killed (pty.Close unblocks the reader; ctx cancel stops the
-//     scheduler).
-//   - The daemon exits (Serve returns) when the last session is removed, or
-//     when the parent context is cancelled (graceful shutdown notifies any
-//     attached clients with ReasonServerShutdown).
-//
-// Locking: a pane's screen/scrollback and per-client renderer shadow are
-// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
-// session.mu; the registry by Daemon.mu. When more than one is held the order
-// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
-// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
+// Lock ordering: never acquire sendMu or session/daemon locks while holding a
+// pane lock. Coordinator callbacks and timer methods run without coordinator.mu;
+// see the lock-specific comments on attachedClient and renderCoordinator.
 package daemon
 
 import (
@@ -38,13 +19,21 @@ import (
 )
 
 type attachedClient struct {
-	tr                    ports.Transport
-	output                *outputStateStream
-	overlays              *overlayRuntime
-	clientID              [16]byte
-	resumeCapable         bool
-	resumeToken           uint64
-	parked                bool
+	tr            ports.Transport
+	output        *outputStateStream
+	overlays      *overlayRuntime
+	overlayOnce   sync.Once
+	clientID      [16]byte
+	resumeCapable bool
+	resumeToken   uint64
+	parked        bool
+	// coordinatorEpoch is published atomically by renderCoordinator lifecycle
+	// transitions. A wake verifies it again after acquiring sendMu, so a parked
+	// attachment reused by resume cannot carry an old wake to its new transport.
+	coordinatorEpoch atomic.Uint64
+	// coordinatorReadyEpoch is non-zero only after Welcome completed for this
+	// exact coordinator incarnation. paint rechecks it under sendMu.
+	coordinatorReadyEpoch atomic.Uint64
 	echoAck               atomic.Uint64
 	bars                  barCache           // only touched while sendMu is held
 	composed              composedFrameCache // only touched while sendMu is held
@@ -115,9 +104,7 @@ func (ac *attachedClient) cancelResizePaint() {
 }
 
 func (ac *attachedClient) initOverlays() {
-	if ac.overlays == nil {
-		ac.overlays = newOverlayRuntime(ac)
-	}
+	ac.overlayOnce.Do(func() { ac.overlays = newOverlayRuntime(ac) })
 }
 
 func (ac *attachedClient) currentSession() *session { return ac.sess.Get() }
@@ -195,23 +182,6 @@ func (ac *attachedClient) ackOutputState(state uint64) {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 	ac.output.ack(state)
-}
-
-// takeDeferredPaint reports whether a deferred diff paint is now flushable
-// because acks have caught up, clearing the flag when it is. The caller must
-// then paint outside sendMu (paint re-acquires it).
-func (ac *attachedClient) takeDeferredPaint() (reset bool, ok bool) {
-	ac.sendMu.Lock()
-	defer ac.sendMu.Unlock()
-	return ac.output.takeDeferred()
-}
-
-// clearPaintDeferred drops any pending deferred-paint flag. Used on park so a
-// resumed client does not inherit a stale deferral.
-func (ac *attachedClient) clearPaintDeferred() {
-	ac.sendMu.Lock()
-	ac.output.clearDeferred()
-	ac.sendMu.Unlock()
 }
 
 // send serialises a frame onto the client's transport.
@@ -391,15 +361,76 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	ac.initOverlays()
 	ac.setSession(sess)
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, &d.bindings)
+	// Daemon attachment callers hold d.mu, serialising this preparation with
+	// other publications. Bind coordinator ownership before sess.client becomes
+	// visible: an old deadline can then never target this new output chain.
 	sess.mu.Lock()
 	old := sess.client
-	sess.client = ac
 	name := sess.name
+	sess.mu.Unlock()
+	d.attachCoordinator(sess, old, ac, false)
+	sess.mu.Lock()
+	sess.client = ac
 	sess.mu.Unlock()
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", name, "resume", opts.resumeCapable)
 	d.applyHostTheme(sess, ac, d.effectiveTheme(themeui.Theme{}), true)
 	return ac, old
+}
+
+// handoffCoordinator prepares a cross-session ownership transfer before the
+// destination publishes sess.client. It never takes daemon/session locks while
+// taking sendMu, avoiding a d.mu/sendMu cycle with transport callbacks.
+func (d *Daemon) handoffCoordinator(from, target *session, old, current *attachedClient) {
+	if rc := from.renderCoordinator(); rc != nil {
+		rc.noteDetach(current)
+	}
+	current.sendMu.Lock()
+	current.output.rebase()
+	current.sendMu.Unlock()
+	d.attachCoordinator(target, old, current, true)
+}
+
+// attachCoordinator is the sole direct attachment handoff. It creates at
+// most one coordinator for sess and changes its identity before any caller
+// can publish resize or render state for the new client.
+func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient, ready bool) *renderCoordinator {
+	sess.mu.Lock()
+	rc := sess.renderCoordinator()
+	if rc == nil {
+		rc = newRenderCoordinator(renderCoordinatorOptions{
+			clock: d.clock,
+			wake: func(w renderWake) {
+				// Never reread sess.client here: a wake is bound to both its
+				// attachment and its coordinator incarnation. The second check in
+				// paint occurs under sendMu, closing a park/resume race after this
+				// unlocked coordinator validation.
+				if w.attachment != nil && rc.wakeCurrent(w) {
+					d.paintCoordinatorWake(sess, w)
+				}
+			},
+			ackReady: func() bool {
+				sess.mu.Lock()
+				attached := sess.client
+				sess.mu.Unlock()
+				if attached == nil {
+					return false
+				}
+				attached.sendMu.Lock()
+				ready := !attached.output.atCapacity()
+				attached.sendMu.Unlock()
+				return ready
+			},
+		})
+		sess.installRenderCoordinator(rc)
+	}
+	sess.mu.Unlock()
+	if old != nil {
+		rc.noteReplace(old, current, ready)
+	} else if current != nil {
+		rc.attachWithReadiness(current, ready)
+	}
+	return rc
 }
 
 // resetScreenDefaultColors clears the known default foreground/background
@@ -449,7 +480,7 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 		d.resizeForFirstPaint(sess, ac, clientSize)
 	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
-	d.paint(sess, ac, true)
+	d.invalidateRenderNow(sess, ac, true, "client.go")
 	d.activateTab(sess, tb)
 }
 
@@ -503,8 +534,8 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 		case ports.MsgAck:
 			if ack, derr := ports.UnmarshalAck(f.Payload); derr == nil {
 				ac.ackOutputState(ack.AckedStateNum)
-				if reset, ok := ac.takeDeferredPaint(); ok {
-					d.paint(sess, ac, reset)
+				if rc := sess.renderCoordinator(); rc != nil {
+					rc.notifyAck()
 				}
 			}
 		case ports.MsgPing:
@@ -526,6 +557,9 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 		return // already displaced by a newer client; nothing to do
 	}
 	ac.cancelResizePaint()
+	if rc := sess.renderCoordinator(); rc != nil {
+		rc.noteDetach(ac)
+	}
 	d.unregisterPreview(ac)
 	sess.mu.Lock()
 	ephemeral := sess.ephemeral
@@ -576,7 +610,7 @@ func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) 
 	if !d.applyHostTheme(sess, ac, t, false) {
 		return
 	}
-	d.paint(sess, ac, true)
+	d.invalidateRender(sess, ac, true, "client.go")
 }
 
 func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
@@ -603,6 +637,10 @@ func (d *Daemon) resizeWithPaint(sess *session, ac *attachedClient, sz domain.Si
 			return
 		}
 		ac.size = sz
+		if rc := sess.renderCoordinator(); rc != nil {
+			rc.attach(ac)
+			rc.recordResizeRequest(sz, ac)
+		}
 	}
 	tbSize := tabSize(sz)
 
@@ -637,6 +675,9 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed por
 	}
 	if sess.detachIfCurrent(ac) {
 		ac.cancelResizePaint()
+		if rc := sess.renderCoordinator(); rc != nil {
+			rc.noteDetach(ac)
+		}
 		d.unregisterPreview(ac)
 		if d.parkAttachment(sess, ac) {
 			_ = ac.closeCapturedTransport(failed)

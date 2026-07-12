@@ -1,8 +1,8 @@
 # Performance methodology (M5)
 
-This baseline measures in-process daemon work only. It deliberately does **not**
-measure coordinator behavior, chunk encoding, compression, GC tuning, or real
-network latency. Output metrics count frames and encoded output data produced
+This baseline measures in-process daemon work only. It includes coordinator-enabled
+fixture scheduling metrics, but deliberately does **not** measure chunk
+encoding, compression, GC tuning, or real network latency. Output metrics count frames and encoded output data produced
 by the daemon; snapshot writes and serialized bytes are local snapshot-store
 proxies. These metrics approximate local rendering, IPC payload, and persistence
 work, not a Unix socket, SSH, or UDP transport. Real transport impairment and
@@ -40,13 +40,18 @@ prefix and patterned text. The layouts are:
 - 4 tabs x 4 panes
 - 8 tabs x 1 pane
 
-The fixture starts no PTY readers, schedulers, clocks, or transports. It primes
-the renderer shadow before timing; live paint then alternates fixed writes. The
-reported `outputframes/op` value counts output messages. `outputbytes/op`
+The fixture starts no PTY readers or transports. It primes the renderer shadow
+before timing; live paint then alternates fixed writes through the coordinator.
+The reported `outputframes/op` value counts output messages. `outputbytes/op`
 counts their encoded terminal data and excludes the 24-byte output header;
 `framepayloadbytes/op` counts the complete output payload including that header.
 `snapshotwrites/op` and `snapshotbytes/op` are local snapshot-store writes and
-serialized bytes. They must not be presented as network throughput or latency.
+serialized bytes. `coordinatorinvalidations/op`, `coordinatorwakes/op`, and
+`coordinatorcoalesced/op` respectively count scheduling requests, delivered
+wakes, and requests coalesced into those wakes; `coordinatorcoalescingratio`
+is the average number of coalesced invalidations delivered per wake. They must
+not be presented as network
+throughput or latency.
 
 Capture a pre-change result outside the repository, including Go and kernel
 context:
@@ -82,9 +87,8 @@ wide row widths; `B/op` may grow by at most 2x, a conservative relative
 allowance that catches full cell-row copies without depending on an absolute
 Go-version-specific budget. This scope does not yet include an
 incremental/full-text search index: queries still scan the immutable document
-and produce a fresh match list. Coordinator
-behavior, chunk encoding, compression, GC tuning, and real Unix-socket, SSH, or
-UDP impairment/latency remain out of scope.
+and produce a fresh match list. Chunk encoding, compression, GC tuning, and real Unix-socket, SSH, or UDP
+impairment/latency remain out of scope.
 
 ## Lower-level smoke baseline
 

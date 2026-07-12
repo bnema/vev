@@ -1354,9 +1354,30 @@ func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
 	tr.EXPECT().Close().Return(nil).Maybe()
 	sess, ac, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work", Size: sz, TrueColor: true}, tr)
 	require.NoError(t, err)
+	// The source coordinator is deliberately made pending so the switch must
+	// invalidate it rather than letting its stale callback render for ac.
+	sourceCoordinator := sess.renderCoordinator()
+	require.NotNil(t, sourceCoordinator)
+	sourceCoordinator.invalidate(renderInvalidation{class: invalidateOutput})
+	ac.sendMu.Lock()
+	ac.output.next = 3
+	ac.output.acked = 1
+	ac.sendMu.Unlock()
+
 	require.NoError(t, d.createSessionAndSwitch(sess, ac, "next"))
 	got := ac.sess.Get()
 	require.NotNil(t, got)
+	sourceCoordinator.mu.Lock()
+	require.Nil(t, sourceCoordinator.attachment, "source callbacks must be stale after handoff")
+	sourceCoordinator.mu.Unlock()
+	destinationCoordinator := got.renderCoordinator()
+	require.NotNil(t, destinationCoordinator, "destination coordinator precedes first paint")
+	destinationCoordinator.mu.Lock()
+	require.Same(t, ac, destinationCoordinator.attachment)
+	destinationCoordinator.mu.Unlock()
+	ac.sendMu.Lock()
+	require.Equal(t, uint64(1), ac.output.next-ac.output.acked, "only the destination first paint may follow the rebase")
+	ac.sendMu.Unlock()
 	got.mu.Lock()
 	require.True(t, got.terminal.TrueColor)
 	got.mu.Unlock()

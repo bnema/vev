@@ -11,7 +11,7 @@ func (d *Daemon) backSession(current *session, ac *attachedClient) {
 	target := ac.previousSession.Get()
 	if target == nil || target == current || d.sessionByID(target.id) != target {
 		ac.clearPreviousSessionIf(target)
-		d.paint(current, ac, true)
+		d.invalidateRender(current, ac, true, "session_back.go")
 		return
 	}
 	d.switchToTarget(current, ac, picker.Target{Session: target.id, TabIndex: -1})

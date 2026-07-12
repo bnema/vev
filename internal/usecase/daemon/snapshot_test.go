@@ -213,6 +213,29 @@ func TestPTYReaderSynchronizedUpdateFlushMarksSnapshotDirty(t *testing.T) {
 	require.True(t, sess.snapDirty.Load())
 }
 
+func TestPTYReaderSameReadSynchronizedOutputUsesUrgentCoordinatorDeadline(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	p := chunkReadPTY(t, []byte("\x1b[?2026hcomplete batch\x1b[?2026l"))
+	sctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tb := newTestTabWithContext(p, sctx, cancel)
+	sess := &session{id: "sync-urgent", name: "sync-urgent", tabs: []*tab{tb}, client: &attachedClient{}, ctx: sctx, cancel: cancel}
+	invs := make(chan renderInvalidation, 1)
+	clock := newCoordinatorMockClock(t, 2)
+	sess.installRenderCoordinator(newRenderCoordinator(renderCoordinatorOptions{
+		clock:        clock.clock,
+		onInvalidate: func(inv renderInvalidation) { invs <- inv },
+	}))
+	d.sessions[sess.id] = sess
+	d.sessWg.Add(1)
+	d.ptyReader(sess, tb, tb.focusedPane())
+
+	inv := awaitInvalidation(t, invs)
+	require.Equal(t, invalidateUrgent, inv.class, "a complete same-read synchronized batch must flush urgently")
+	timer := awaitCoordinatorScheduledTimer(t, clock)
+	require.Equal(t, urgentRenderDeadline, timer.duration)
+}
+
 func TestSnapshotSaverKeepsDirtyWhenWriteFails(t *testing.T) {
 	clock := newManualSnapshotClock()
 	store := portsmocks.NewMockSnapshotStore(t)

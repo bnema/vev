@@ -1,27 +1,4 @@
-// Package daemon holds vev's server-side session multiplexer use case: the
-// accept loop, the ephemeral/named session registry, the per-tab PTY reader
-// and VT screen, and the per-client debounced render scheduler.
-//
-// Concurrency model (sessions own one or more PTY-backed tabs):
-//
-//   - Serve runs the accept loop. Each accepted connection is handled by its
-//     own goroutine (handleConn): it reads the first frame and routes it to a
-//     session create/attach, a list, or a kill.
-//   - Per session there are exactly two long-lived goroutines: the PTY reader
-//     (drains child output into the VT screen and pokes a cap-1 dirty channel)
-//     and the render scheduler (debounces dirties and paints the attached
-//     client). Both are tied to the session context and unwind when the
-//     session is killed (pty.Close unblocks the reader; ctx cancel stops the
-//     scheduler).
-//   - The daemon exits (Serve returns) when the last session is removed, or
-//     when the parent context is cancelled (graceful shutdown notifies any
-//     attached clients with ReasonServerShutdown).
-//
-// Locking: a pane's screen/scrollback and per-client renderer shadow are
-// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
-// session.mu; the registry by Daemon.mu. When more than one is held the order
-// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
-// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
+// Package daemon holds vev's server-side session multiplexer use case.
 package daemon
 
 import (
@@ -62,7 +39,7 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 	if delta > 0 && rt.copyMode.AtBottom(*document) {
 		rt.clearCopyModeLocked()
 		rt.copyMu.Unlock()
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "copymode.go")
 		return
 	}
 	rt.copyMode.Move(*document, delta)
@@ -72,7 +49,7 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 	}
 	rt.copyMu.Unlock()
 
-	d.paint(sess, ac, true)
+	d.invalidateRender(sess, ac, true, "copymode.go")
 }
 
 func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
@@ -94,7 +71,7 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	if !d.publishCopyMode(sess, ac, tb, p, document, nil) {
 		return
 	}
-	d.paint(sess, ac, true)
+	d.invalidateRender(sess, ac, true, "copymode.go")
 }
 
 // publishCopyMode installs a non-renderable candidate, validates its captured
@@ -190,7 +167,7 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
 	rt.copyMu.Unlock()
 
 	if changed {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "copymode.go")
 	}
 }
 
@@ -220,7 +197,7 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		changed, closeSearch, accepted := d.routeCopySearchInputLocked(rt, *document, data)
 		rt.copyMu.Unlock()
 		if changed || closeSearch || accepted {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "copymode.go")
 		}
 		return
 	}
@@ -309,11 +286,11 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		rt.copyMu.Unlock()
 	}
 	if exit {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "copymode.go")
 		return
 	}
 	if changed {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "copymode.go")
 	}
 }
 
@@ -386,7 +363,7 @@ func (d *Daemon) retainCopyESCLocked(ac *attachedClient) {
 		rt.copyMu.Unlock()
 
 		if sess := ac.currentSession(); sess != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "copymode.go")
 		}
 	})
 }

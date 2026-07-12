@@ -1,34 +1,10 @@
-// Package daemon holds vev's server-side session multiplexer use case: the
-// accept loop, the ephemeral/named session registry, the per-tab PTY reader
-// and VT screen, and the per-client debounced render scheduler.
-//
-// Concurrency model (sessions own one or more PTY-backed tabs):
-//
-//   - Serve runs the accept loop. Each accepted connection is handled by its
-//     own goroutine (handleConn): it reads the first frame and routes it to a
-//     session create/attach, a list, or a kill.
-//   - Per session there are exactly two long-lived goroutines: the PTY reader
-//     (drains child output into the VT screen and pokes a cap-1 dirty channel)
-//     and the render scheduler (debounces dirties and paints the attached
-//     client). Both are tied to the session context and unwind when the
-//     session is killed (pty.Close unblocks the reader; ctx cancel stops the
-//     scheduler).
-//   - The daemon exits (Serve returns) when the last session is removed, or
-//     when the parent context is cancelled (graceful shutdown notifies any
-//     attached clients with ReasonServerShutdown).
-//
-// Locking: a pane's screen/scrollback and per-client renderer shadow are
-// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
-// session.mu; the registry by Daemon.mu. When more than one is held the order
-// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
-// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
+// Package daemon holds vev's server-side session multiplexer use case.
 package daemon
 
 import (
 	"bytes"
 	"errors"
 	"strconv"
-	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -39,11 +15,94 @@ import (
 	"github.com/bnema/vev/pkg/vt"
 )
 
+// completedSynchronizedUpdate reports a full DEC 2026 batch contained in one
+// PTY read. The VT's final state is inactive in this case, so it cannot be
+// inferred from before/after SyncUpdateActive alone.
+func completedSynchronizedUpdate(data []byte) bool {
+	_, tail, found := bytes.Cut(data, []byte(renderer.SyncStartCSI))
+	return found && bytes.Contains(tail, []byte(renderer.SyncEndCSI))
+}
+
 func signal(ch chan struct{}) {
 	select {
 	case ch <- struct{}{}:
 	default:
 	}
+}
+
+// paneRenderable reports dynamic composition visibility. Callers must not
+// hold coordinator locks: this acquires daemon/session/tab/pane-adjacent locks.
+func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
+	if sess == nil || tb == nil || p == nil {
+		return false
+	}
+	preview := d.tabIsPickerPreview(tb)
+	sess.mu.Lock()
+	active := sess.active >= 0 && sess.active < len(sess.tabs) && sess.tabs[sess.active] == tb
+	attached := sess.client != nil
+	sess.mu.Unlock()
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	if tb.floating.pane == p {
+		return active && attached && tb.floating.state == floatingVisible
+	}
+	if !((active && attached) || preview) {
+		return false
+	}
+	placements, ok := solvedPlacementsLocked(tb)
+	if !ok {
+		return false
+	}
+	for _, placement := range placements {
+		if placement.ID == p.id && !placement.Collapsed && placement.Content.Width > 0 && placement.Content.Height > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// clearNonRenderablePaneDamage is the single transitional S1 owner for VT
+// damage that cannot reach a composition target. S2 replaces this visibility
+// decision with pipeline ownership; do not paint or mutate renderer shadows
+// here.
+func (d *Daemon) clearNonRenderablePaneDamage(sess *session, tb *tab, p *pane) bool {
+	renderable := d.paneRenderable(sess, tb, p)
+	if !renderable && p != nil {
+		p.mu.Lock()
+		p.screen.ClearDamage()
+		p.mu.Unlock()
+	}
+	return renderable
+}
+
+// tabIsPickerPreview reports whether any attached client currently composes
+// tb as a picker preview. It snapshots daemon ownership before taking overlay
+// locks, preserving the Daemon -> session -> tab -> pane lock order.
+func (d *Daemon) tabIsPickerPreview(tb *tab) bool {
+	if d == nil || tb == nil {
+		return false
+	}
+	d.mu.Lock()
+	sessions := make([]*session, 0, len(d.sessions))
+	for _, sess := range d.sessions {
+		sessions = append(sessions, sess)
+	}
+	d.mu.Unlock()
+	for _, sess := range sessions {
+		sess.mu.Lock()
+		ac := sess.client
+		sess.mu.Unlock()
+		if ac == nil || ac.overlays == nil {
+			continue
+		}
+		ac.overlays.pickerMu.Lock()
+		preview := ac.overlays.pickerPreview == tb
+		ac.overlays.pickerMu.Unlock()
+		if preview {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
@@ -66,12 +125,40 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 		n, err := p.pty.Read(buf)
 		if n > 0 {
 			data := buf[:n]
+			rc := sess.renderCoordinator()
 			p.mu.Lock()
 			wasSyncing := p.screen.SyncUpdateActive()
 			p.screen.Write(data)
 			p.refreshTerminalTitleLocked()
 			isSyncing := p.screen.SyncUpdateActive()
+			completeSyncRead := !wasSyncing && !isSyncing && completedSynchronizedUpdate(data)
+			var syncGen uint64
+			syncEnded := false
+			if wasSyncing != isSyncing {
+				if isSyncing {
+					syncGen = sess.syncGen.Add(1)
+					p.syncGen = syncGen
+					// Publish the gate while the authoritative screen mutation is
+					// still protected. A concurrent deadline therefore cannot
+					// compose this partial DEC 2026 payload.
+					if rc != nil {
+						rc.noteSyncBeginWithRenderability(p, syncGen, func() bool {
+							return d.paneRenderable(sess, tb, p)
+						}, func() {
+							p.mu.Lock()
+							if p.syncGen == syncGen && p.screen.SyncUpdateActive() {
+								p.screen.ForceSyncEnd()
+							}
+							p.mu.Unlock()
+						})
+					}
+				} else {
+					syncGen = p.syncGen
+					syncEnded = rc != nil && rc.removeSyncEnd(p, syncGen, true)
+				}
+			}
 			p.mu.Unlock()
+			renderable := d.clearNonRenderablePaneDamage(sess, tb, p)
 			markSnapshotDirty(sess)
 			select {
 			case <-attentionCh:
@@ -90,23 +177,31 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 				}
 				resp = resp[:0]
 			}
-			if wasSyncing != isSyncing {
-				p.mu.Lock()
-				p.syncGen++
-				gen := p.syncGen
-				p.mu.Unlock()
-				if isSyncing {
-					go d.syncWatchdog(p, gen)
+			if rc != nil {
+				if wasSyncing != isSyncing {
+					if isSyncing {
+						// The accumulated synchronized batch is the pending render only
+						// while this pane can currently reach a composition target.
+						if renderable {
+							rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
+						}
+					} else if syncEnded && renderable {
+						// State removal happened under pane.mu. Publish a new urgent
+						// completion after unlock: detach/replace may have cleared the
+						// pending batch work, so fireCurrent alone could not wake a
+						// headless picker preview or replacement attachment.
+						rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
+					}
+				}
+				if completeSyncRead && renderable {
+					// The entire batch completed in this read. Its final screen state
+					// is ready now, so bypass the bulk debounce without arming a
+					// watchdog for a batch that no longer exists.
+					rc.invalidate(renderInvalidation{class: invalidateUrgent, producer: "render.go"})
+				} else if renderable && !isSyncing && wasSyncing == isSyncing {
+					rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "render.go"})
 				}
 			}
-			if (wasSyncing && !isSyncing) || (!isSyncing && syncUpdateEndIn(data)) {
-				signal(p.flush)
-				continue
-			}
-			if isSyncing {
-				continue
-			}
-			signal(p.dirty)
 		}
 		if err != nil {
 			if p.onExit != nil {
@@ -117,159 +212,6 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 			return
 		}
 	}
-}
-
-// scheduler debounces dirty signals. The first dirty opens a short tab;
-// sustained floods progressively widen that tab, while isolated updates
-// return to the minimum delay for interactive latency.
-func (d *Daemon) scheduler(sess *session, tb *tab, p *pane) {
-	defer d.sessWg.Done()
-	if p == nil {
-		return
-	}
-	delay := minDebounceInterval
-	lastRender := d.clock.Now()
-outer:
-	for {
-		select {
-		case <-sess.ctx.Done():
-			return
-		case <-paneDone(p):
-			return
-		case <-p.flush:
-			d.render(sess, tb, p)
-			lastRender = d.clock.Now()
-			continue
-		case <-p.dirty:
-			if d.clock.Now().Sub(lastRender) >= maxDebounceInterval {
-				delay = minDebounceInterval
-			}
-		}
-
-		coalesced := 0
-		timer := d.clock.NewTimer(delay)
-	absorb:
-		for {
-			select {
-			case <-sess.ctx.Done():
-				timer.Stop()
-				return
-			case <-paneDone(p):
-				timer.Stop()
-				return
-			case <-p.flush:
-				if !timer.Stop() {
-					select {
-					case <-timer.C():
-					default:
-					}
-				}
-				d.render(sess, tb, p)
-				lastRender = d.clock.Now()
-				continue outer
-			case <-p.dirty:
-				coalesced++
-			case <-timer.C():
-				break absorb
-			}
-		}
-		delay = nextDebounceDelay(delay, coalesced)
-		d.render(sess, tb, p)
-		lastRender = d.clock.Now()
-	}
-}
-
-func nextDebounceDelay(delay time.Duration, coalesced int) time.Duration {
-	if coalesced == 0 {
-		return minDebounceInterval
-	}
-	if delay >= maxDebounceInterval {
-		return maxDebounceInterval
-	}
-	delay += debounceStep
-	if delay > maxDebounceInterval {
-		return maxDebounceInterval
-	}
-	return delay
-}
-
-func (d *Daemon) syncWatchdog(p *pane, gen uint64) {
-	timer := d.clock.NewTimer(maxSyncUpdateDuration)
-	select {
-	case <-paneDone(p):
-		timer.Stop()
-		return
-	case <-timer.C():
-	}
-
-	p.mu.Lock()
-	if p.syncGen != gen || !p.screen.SyncUpdateActive() {
-		p.mu.Unlock()
-		return
-	}
-	p.screen.ForceSyncEnd()
-	p.mu.Unlock()
-	signal(p.flush)
-}
-
-func syncUpdateEndIn(data []byte) bool {
-	return bytes.Contains(data, []byte("\x1b[?2026l"))
-}
-
-// render paints the current client, or (when detached) just clears accumulated
-// damage so it never grows unbounded while headless.
-func (d *Daemon) render(sess *session, tb *tab, p *pane) {
-	if p == nil {
-		return
-	}
-	p.mu.Lock()
-	if p.screen.SyncUpdateActive() {
-		p.mu.Unlock()
-		return
-	}
-	p.mu.Unlock()
-
-	// A retained floating pane continues to drain its PTY while hidden. Its
-	// scheduler must not route through picker preview (or the active client),
-	// but it must consume damage so a long-hidden command cannot retain it.
-	tb.mu.Lock()
-	hiddenFloating := tb.floating.pane == p && tb.floating.state != floatingVisible
-	previewer := tb.previewClient
-	tb.mu.Unlock()
-	if hiddenFloating {
-		p.mu.Lock()
-		p.screen.ClearDamage()
-		p.mu.Unlock()
-		return
-	}
-
-	sess.mu.Lock()
-	ac := sess.client
-	active := sess.active >= 0 && sess.active < len(sess.tabs) && sess.tabs[sess.active] == tb
-	sess.mu.Unlock()
-
-	if previewer != nil {
-		if previewSess := previewer.currentSession(); previewSess != nil {
-			d.paint(previewSess, previewer, false)
-		}
-		if ac != nil && active && ac != previewer {
-			d.paint(sess, ac, false)
-			return
-		}
-		p.mu.Lock()
-		p.screen.ClearDamage()
-		p.mu.Unlock()
-		return
-	}
-
-	if ac == nil || !active {
-		p.mu.Lock()
-		p.screen.ClearDamage()
-		p.mu.Unlock()
-		return
-	}
-	d.refreshBarScriptsIfDue(sess, d.clock.Now(), false)
-	d.paint(sess, ac, false)
 }
 
 // paint draws the composed client frame (active tab plus status bar) and
@@ -318,23 +260,49 @@ func (d *Daemon) scheduleResizePaintLocked(sess *session, ac *attachedClient) {
 	generation := ac.resizePaintGeneration
 	ac.resizePaintPending = true
 	ac.resizePaint.retain(d.clock, maxDebounceInterval, func(ports.Timer) {
-		d.paintForResizeGeneration(sess, ac, true, generation)
+		d.invalidateForResizeGeneration(sess, ac, generation)
 	})
 }
 
-func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
-	d.paintForResizeGeneration(sess, ac, reset, 0)
+// invalidateForResizeGeneration preserves PR #71's attachment-owned timer,
+// generation rejection, and cancellation while transferring only its eventual
+// render request to the coordinator.
+func (d *Daemon) invalidateForResizeGeneration(sess *session, ac *attachedClient, generation uint64) {
+	ac.sendMu.Lock()
+	if ac.currentSession() != sess || !ac.resizePaintPending || ac.resizePaintGeneration != generation {
+		ac.sendMu.Unlock()
+		return
+	}
+	ac.resizePaint.stop()
+	ac.resizePaintPending = false
+	ac.sendMu.Unlock()
+	d.invalidateRender(sess, ac, true, "render.go")
 }
 
-func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, reset bool, resizeGeneration uint64) {
+func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
+	d.paintForResizeGeneration(sess, ac, reset, 0, 0)
+}
+
+// paintCoordinatorWake composes a coordinator wake only for its captured
+// attachment incarnation. The epoch is checked after sendMu is acquired.
+func (d *Daemon) paintCoordinatorWake(sess *session, w renderWake) {
+	d.paintForResizeGeneration(sess, w.attachment, w.reset, 0, w.attachmentEpoch)
+}
+
+func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, reset bool, resizeGeneration, attachmentEpoch uint64) {
 	tb := sess.activeTab()
 	if tb == nil {
 		return
 	}
 
-	ac.initOverlays()
 	ac.sendMu.Lock()
-	if ac.currentSession() != sess {
+	// sendMu is the attachment ownership boundary. Check the session's
+	// published identity while holding it so a deadline captured before an
+	// attach/replace cannot emit on either the old or new output chain.
+	sess.mu.Lock()
+	owned := sess.client == ac
+	sess.mu.Unlock()
+	if !owned || ac.currentSession() != sess || (attachmentEpoch != 0 && (ac.coordinatorEpoch.Load() != attachmentEpoch || ac.coordinatorReadyEpoch.Load() != attachmentEpoch)) {
 		ac.sendMu.Unlock()
 		return
 	}
@@ -342,18 +310,14 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 		ac.sendMu.Unlock()
 		return
 	}
+	// Composition owns attachment sendMu; initialize its lazy overlay state
+	// under that same ownership so concurrent fallback paints cannot observe a
+	// partially published runtime.
+	ac.initOverlays()
 	if ac.resizePaintPending {
 		ac.resizePaint.stop()
 		ac.resizePaintPending = false
 		reset = true
-	}
-	// Ack-gated coalescing: while the client is at least maxUnackedOutputStates
-	// behind, skip composing another diff and mark the paint deferred. The
-	// MsgOutputAck handler flushes one cumulative paint once acks catch up. A
-	// deferred reset stays sticky so the cumulative paint is dependency-free.
-	if ac.output.deferIfAtCapacity(reset) {
-		ac.sendMu.Unlock()
-		return
 	}
 	overlays := ac.overlays.SnapshotForRender()
 	repaintAttachedClients := false

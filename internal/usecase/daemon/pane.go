@@ -11,7 +11,7 @@ import (
 	"github.com/bnema/vev/pkg/vt"
 )
 
-// pane owns one PTY, its terminal screen state, and render scheduling channels.
+// pane owns one PTY and its terminal screen state.
 // Lock order when multiple locks are held is:
 // attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
 // The PTY reader takes only pane.mu, so child output never waits on client IO.
@@ -23,8 +23,6 @@ type pane struct {
 	resizeMu          sync.Mutex // serializes PTY resizes without holding mu
 	screen            *vt.Screen
 	scrollback        *scopy.Scrollback
-	dirty             chan struct{}
-	flush             chan struct{}
 	syncGen           uint64
 	rect              domain.Rect
 	popupGeometry     floatingGeometry // last geometry committed after a successful floating resize
@@ -51,16 +49,7 @@ func newPaneWithStableID(id layout.PaneID, stableID string, pty ports.PTY, sz do
 		pty:        pty,
 		screen:     screen,
 		scrollback: sb,
-		dirty:      make(chan struct{}, 1),
-		flush:      make(chan struct{}, 1),
 		rect:       domain.Rect{Width: sz.Cols, Height: sz.Rows},
 		title:      paneTitleState{displayFallback: "sh"},
 	}
-}
-
-func paneDone(p *pane) <-chan struct{} {
-	if p.ctx == nil {
-		return nil
-	}
-	return p.ctx.Done()
 }

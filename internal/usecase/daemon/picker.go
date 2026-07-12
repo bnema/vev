@@ -1,27 +1,4 @@
-// Package daemon holds vev's server-side session multiplexer use case: the
-// accept loop, the ephemeral/named session registry, the per-tab PTY reader
-// and VT screen, and the per-client debounced render scheduler.
-//
-// Concurrency model (sessions own one or more PTY-backed tabs):
-//
-//   - Serve runs the accept loop. Each accepted connection is handled by its
-//     own goroutine (handleConn): it reads the first frame and routes it to a
-//     session create/attach, a list, or a kill.
-//   - Per session there are exactly two long-lived goroutines: the PTY reader
-//     (drains child output into the VT screen and pokes a cap-1 dirty channel)
-//     and the render scheduler (debounces dirties and paints the attached
-//     client). Both are tied to the session context and unwind when the
-//     session is killed (pty.Close unblocks the reader; ctx cancel stops the
-//     scheduler).
-//   - The daemon exits (Serve returns) when the last session is removed, or
-//     when the parent context is cancelled (graceful shutdown notifies any
-//     attached clients with ReasonServerShutdown).
-//
-// Locking: a pane's screen/scrollback and per-client renderer shadow are
-// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
-// session.mu; the registry by Daemon.mu. When more than one is held the order
-// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
-// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
+// Package daemon holds vev's server-side session multiplexer use case.
 package daemon
 
 import (
@@ -47,7 +24,7 @@ func (d *Daemon) enterPicker(sess *session, ac *attachedClient) {
 	ac.overlays.pickerPreview = nil
 	ac.overlays.pickerMu.Unlock()
 	d.registerPreviewForSelection(ac)
-	d.paint(sess, ac, true)
+	d.invalidateRender(sess, ac, true, "picker.go")
 }
 
 func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
@@ -141,7 +118,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 				d.killPickerTarget(target)
 			}
 			d.refreshPicker(ac)
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "picker.go")
 			return
 		case 'j':
 			ac.overlays.picker.Down()
@@ -191,7 +168,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 		return
 	}
 	if exit || changed {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "picker.go")
 	}
 }
 
@@ -211,7 +188,7 @@ func (d *Daemon) retainPickerESCLocked(ac *attachedClient) {
 
 		d.unregisterPreview(ac)
 		if sess := ac.currentSession(); sess != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "picker.go")
 		}
 	})
 }
@@ -245,83 +222,95 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	if ac.overlays.picker != nil {
 		target, ok = ac.overlays.picker.Selected()
 	}
+	previous := ac.overlays.pickerPreviewSession
+	ac.overlays.pickerPreviewSession = nil
+	ac.overlays.pickerPreview = nil
 	ac.overlays.pickerMu.Unlock()
-
-	var next *tab
-	if ok {
-		next = d.tabByTarget(target)
+	if previous != nil {
+		if rc := previous.renderCoordinator(); rc != nil {
+			rc.teardownPreviewFor(ac)
+		}
 	}
-
+	if !ok {
+		return
+	}
+	next := d.tabByTarget(target)
+	targetSess := d.sessionByID(target.Session)
+	if next == nil || targetSess == nil {
+		return
+	}
 	ac.overlays.pickerMu.Lock()
-	old := ac.overlays.pickerPreview
+	// Selection may have changed while the target was resolved.
 	if ac.overlays.picker == nil {
-		next = nil
+		ac.overlays.pickerMu.Unlock()
+		return
 	}
 	ac.overlays.pickerPreview = next
+	ac.overlays.pickerPreviewSession = targetSess
 	ac.overlays.pickerMu.Unlock()
-
-	if old != nil && old != next {
-		old.mu.Lock()
-		if old.previewClient == ac {
-			old.previewClient = nil
-		}
-		old.mu.Unlock()
+	// A same-session preview is already invalidated by its own coordinator.
+	// Cross-session previews subscribe to the target's producer wake instead
+	// of starting a direct paint/timer path.
+	if targetSess == ac.currentSession() {
+		return
 	}
-	if next != nil {
-		next.mu.Lock()
-		next.previewClient = ac
-		next.mu.Unlock()
-
+	rc := d.attachCoordinator(targetSess, nil, nil, false)
+	rc.subscribePreviewFor(ac, func(renderWake) {
 		ac.overlays.pickerMu.Lock()
-		keep := ac.overlays.pickerPreview == next
+		valid := ac.overlays.pickerPreviewSession == targetSess
 		ac.overlays.pickerMu.Unlock()
-		if !keep {
-			next.mu.Lock()
-			if next.previewClient == ac {
-				next.previewClient = nil
+		if valid {
+			if owner := ac.currentSession(); owner != nil {
+				d.invalidateRender(owner, ac, false, "picker preview")
 			}
-			next.mu.Unlock()
 		}
-	}
+	})
 }
 
 func (d *Daemon) unregisterPreview(ac *attachedClient) {
+	if ac == nil || ac.overlays == nil {
+		return
+	}
 	ac.overlays.pickerMu.Lock()
-	old := ac.overlays.pickerPreview
+	previous := ac.overlays.pickerPreviewSession
+	ac.overlays.pickerPreviewSession = nil
 	ac.overlays.pickerPreview = nil
 	ac.overlays.pickerMu.Unlock()
-
-	if old != nil {
-		old.mu.Lock()
-		if old.previewClient == ac {
-			old.previewClient = nil
+	if previous != nil {
+		if rc := previous.renderCoordinator(); rc != nil {
+			rc.teardownPreviewFor(ac)
 		}
-		old.mu.Unlock()
 	}
 }
 
+// clearDestroyedTabPreview clears coordinator-owned picker state for clients
+// that were previewing a removed tab. Tabs do not route render ownership.
 func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
-	tb.mu.Lock()
-	previewer := tb.previewClient
-	tb.mu.Unlock()
-	if previewer == nil {
+	if d == nil || d.sessions == nil {
 		return
 	}
-	cleared := false
-	previewer.overlays.pickerMu.Lock()
-	if previewer.overlays.pickerPreview == tb {
-		previewer.overlays.pickerPreview = nil
-		cleared = true
+	d.mu.Lock()
+	var clients []*attachedClient
+	for _, sess := range d.sessions {
+		sess.mu.Lock()
+		if sess.client != nil {
+			clients = append(clients, sess.client)
+		}
+		sess.mu.Unlock()
 	}
-	previewer.overlays.pickerMu.Unlock()
-	tb.mu.Lock()
-	if tb.previewClient == previewer {
-		tb.previewClient = nil
-	}
-	tb.mu.Unlock()
-	if cleared {
-		if sess := previewer.currentSession(); sess != nil {
-			d.paint(sess, previewer, true)
+	d.mu.Unlock()
+	for _, ac := range clients {
+		if ac == nil || ac.overlays == nil {
+			continue
+		}
+		ac.overlays.pickerMu.Lock()
+		cleared := ac.overlays.pickerPreview == tb
+		ac.overlays.pickerMu.Unlock()
+		if cleared {
+			d.unregisterPreview(ac)
+			if sess := ac.currentSession(); sess != nil {
+				d.invalidateRender(sess, ac, true, "picker.go")
+			}
 		}
 	}
 }
@@ -362,19 +351,19 @@ func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker
 	}
 	targetSess := d.sessionByID(target.Session)
 	if targetSess == nil {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "picker.go")
 		return false
 	}
 	if targetSess == sess {
 		if sess.switchTab(target.TabIndex) {
 			d.activateTab(sess, sess.activeTab())
 		}
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "picker.go")
 		return true
 	}
 	old := d.stealClientForTarget(sess, ac, targetSess, target)
 	if ac.currentSession() != targetSess {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "picker.go")
 		return false
 	}
 	if old != nil && old != ac {
@@ -407,16 +396,27 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 	targetSess.mu.Lock()
 	old := targetSess.client
 	targetSess.terminal = term
-	targetSess.client = ac
 	if target.TabIndex >= 0 && target.TabIndex < len(targetSess.tabs) {
 		targetSess.active = target.TabIndex
 	}
 	targetSess.mu.Unlock()
 
-	d.touchMRU(targetSess)
+	// Do not expose targetSess.client until the target coordinator has claimed
+	// this attachment and the output dependency chain has been rebased.
+	d.handoffCoordinator(from, targetSess, old, ac)
 	ac.setSession(targetSess)
+	targetSess.mu.Lock()
+	targetSess.client = ac
+	targetSess.mu.Unlock()
+	d.touchMRU(targetSess)
 	ac.recordPreviousSession(from)
 	d.mu.Unlock()
+	if old != nil && old != ac {
+		// Displacement is a detach lifecycle transition too. Cancel the
+		// attachment-owned PR #71 timer only after releasing daemon/session
+		// locks, preserving sendMu > daemon/session lock ordering.
+		old.cancelResizePaint()
+	}
 	return old
 }
 
@@ -425,7 +425,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	stopped, ok := d.stopped[target.Name]
 	if !ok || stopped.purging {
 		d.mu.Unlock()
-		d.paint(from, ac, true)
+		d.invalidateRender(from, ac, true, "picker.go")
 		return false
 	}
 	from.mu.Lock()
@@ -441,18 +441,19 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 		from.mu.Unlock()
 		d.mu.Unlock()
 		d.log.Warn("resuming stopped session failed", "err", err, "session", target.Name)
-		d.paint(from, ac, true)
+		d.invalidateRender(from, ac, true, "picker.go")
 		return false
 	}
 	from.client = nil
 	ac.setSession(nil)
 	from.mu.Unlock()
+
+	d.handoffCoordinator(from, targetSess, nil, ac)
+	ac.setSession(targetSess)
 	targetSess.mu.Lock()
 	targetSess.client = ac
 	targetSess.mu.Unlock()
-
 	d.touchMRU(targetSess)
-	ac.setSession(targetSess)
 	ac.recordPreviousSession(from)
 	d.mu.Unlock()
 	d.firstPaint(targetSess, ac, ac.size)
