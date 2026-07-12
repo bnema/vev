@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
+	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
 // Scheduler debounce bounds. Idle updates use the minimum for low latency;
@@ -101,6 +102,12 @@ type Daemon struct {
 	persistEnabled          bool
 	snaps                   ports.SnapshotStore
 	snapsEnabled            bool
+	snapshotMarshal         func(snapcodec.Session) ([]byte, error)
+	snapshotJobs            chan snapshotCapture
+	snapshotWorkerMu        sync.Mutex
+	snapshotWorkerCtx       context.Context
+	snapshotWorkerCancel    context.CancelFunc
+	snapshotWorkerDone      chan struct{}
 	restoreDone             chan struct{}
 	restoreOnce             sync.Once
 	procCwd                 func(int) (string, error)
@@ -285,6 +292,8 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		done:            make(chan struct{}),
 		restoreDone:     make(chan struct{}),
 		animWake:        make(chan struct{}, 1),
+		snapshotMarshal: snapcodec.Marshal,
+		snapshotJobs:    make(chan snapshotCapture, snapshotQueueCapacity),
 		resumeParkGrace: defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
@@ -355,6 +364,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 		})
 	}
 	if d.snapsEnabled {
+		d.startSnapshotEncodeWorker(d.serveCtx)
 		d.sessWg.Go(func() {
 			d.snapshotSaver(d.serveCtx)
 		})
@@ -403,6 +413,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	d.waitNotifies()
 	d.hardCancel()
 	d.serveCancel()
+	d.stopSnapshotEncodeWorker()
 	d.connWg.Wait()
 	d.shutdownAll(ports.ReasonServerShutdown)
 	d.sessWg.Wait()

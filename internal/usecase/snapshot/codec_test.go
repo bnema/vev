@@ -114,6 +114,123 @@ func TestUnmarshalRejectsInvalidTreeReference(t *testing.T) {
 	}
 }
 
+func TestUnmarshalRejectsMalformedTerminalBlobWithoutPanic(t *testing.T) {
+	tail := mustHistoryTail(t)
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+	// The visible cell's underline-style byte is outside the renderer enum.
+	visible[13+29] = 0xff
+	body := v3Manifest(0, nil, nil, uint32(len(tail)), tail, uint32(len(visible)), visible)
+	reject(t, v3Envelope(version, 0, body), ErrInvalidData)
+}
+
+func TestRoundTripNilTreeAndRootDoNotMaterializeLeaf(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tab  Tab
+	}{
+		{name: "nil tree", tab: Tab{Tree: nil}},
+		{name: "nil root", tab: Tab{Tree: &layout.Tree{Root: nil}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := Marshal(Session{Name: "s", Tabs: []Tab{tc.tab}})
+			requireNoError(t, err)
+			got, err := Unmarshal(data)
+			requireNoError(t, err)
+			if got.Tabs[0].Tree == nil || got.Tabs[0].Tree.Root != nil {
+				t.Fatalf("tree = %#v, want nonnil tree with nil root", got.Tabs[0].Tree)
+			}
+		})
+	}
+}
+
+func TestRoundTripSessionMetadataAndProcess(t *testing.T) {
+	sealed, tail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'h'}}, {{Rune: 'i'}}})
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+	want := Session{Name: "named", CreatedAt: 42, Active: 1, Tabs: []Tab{
+		{
+			StableID: "t1", Cols: 100, Rows: 40, NextPaneID: 9, Focus: "2",
+			Tree: &layout.Tree{Focus: "2", Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
+				layout.NewLeaf("1"), layout.NewLeaf("2"),
+			}}},
+			Panes: []Pane{
+				{ID: "1", StableID: "p1", Cwd: "/one", SealedChunks: sealed, Tail: tail, Visible: visible, Process: &Process{Argv: []string{"pi", "--resume"}, Strategy: "pi", Opts: ProcessOpts{AgentSessionID: "agent-123"}}},
+				{ID: "2", StableID: "p2", Cwd: "/two", SealedChunks: sealed, Tail: tail, Visible: visible},
+			},
+		},
+		{StableID: "t2", Cols: 80, Rows: 24, NextPaneID: 2, Focus: "a", Tree: layout.NewTree("a"), Panes: []Pane{{ID: "a", Cwd: "/tmp", SealedChunks: sealed, Tail: tail, Visible: visible}}},
+	}}
+	data, err := Marshal(want)
+	requireNoError(t, err)
+	got, err := Unmarshal(data)
+	requireNoError(t, err)
+	if got.Name != want.Name || got.CreatedAt != want.CreatedAt || got.Active != want.Active || len(got.Tabs) != 2 {
+		t.Fatalf("session metadata round trip = %#v", got)
+	}
+	pane := got.Tabs[0].Panes[0]
+	if pane.ID != "1" || pane.StableID != "p1" || pane.Cwd != "/one" || pane.Process == nil || pane.Process.Opts.AgentSessionID != "agent-123" || got.Tabs[0].Tree.Root.Kind != layout.Split {
+		t.Fatalf("pane metadata round trip = %#v", pane)
+	}
+}
+
+func TestMarshalRejectsProcessWithoutArgv(t *testing.T) {
+	_, err := Marshal(Session{Name: "s", Tabs: []Tab{
+		{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Process: &Process{Strategy: "generic"}}}},
+	}})
+	if !errors.Is(err, ErrInvalidData) {
+		t.Fatalf("Marshal() error = %v, want %v", err, ErrInvalidData)
+	}
+}
+
+func TestUnmarshalRejectsProcessWithoutArgv(t *testing.T) {
+	tail := mustHistoryTail(t)
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+	var w payloadWriter
+	_ = w.putString("s")
+	w.putUint64(0)
+	w.putUint16(0)
+	w.putUint16(1)
+	_ = w.putString("t")
+	w.putUint16(80)
+	w.putUint16(24)
+	w.putUint64(1)
+	_ = w.putString("p")
+	_ = writeNode(&w, layout.NewLeaf("p"))
+	w.putUint16(1)
+	_ = w.putString("p")
+	_ = w.putString("")
+	_ = w.putString("")
+	w.putUint32(0)
+	w.putUint32(uint32(len(tail)))
+	w.b = append(w.b, tail...)
+	w.putUint32(uint32(len(visible)))
+	w.b = append(w.b, visible...)
+	w.putUint8(1)
+	w.putUint16(0) // argv count
+	_ = w.putString("generic")
+	_ = w.putString("")
+	if _, err := Unmarshal(v3Envelope(version, 0, w.b)); !errors.Is(err, ErrInvalidData) {
+		t.Fatalf("Unmarshal() error = %v, want %v", err, ErrInvalidData)
+	}
+}
+
+func TestUnmarshalRejectsAggregateOpaqueBlobDeclarations(t *testing.T) {
+	body := v3Manifest(math.MaxUint32, nil, nil, math.MaxUint32, nil, math.MaxUint32, nil)
+	reject(t, v3Envelope(version, 0, body), ErrInvalidData)
+}
+
+func mustHistoryTail(t *testing.T) []byte {
+	t.Helper()
+	_, tail := historyBlobs(t, nil)
+	return tail
+}
+
+func requireNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func historyBlobs(t *testing.T, rows [][]renderer.Cell) ([][]byte, []byte) {
 	t.Helper()
 	h := vt.NewHistory(vt.HistoryConfig{MaxRows: 128, ChunkRows: 2})

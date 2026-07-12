@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -501,13 +503,19 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 		sess:        sess,
 		ac:          ac,
 		output:      output,
-		snaps:       &countingSnapshotStore{},
+		snaps:       &countingSnapshotStore{done: make(chan struct{}, 1)},
 		pty:         pty,
 		clock:       clock,
 		liveWrites:  [][]byte{[]byte("\x1b[1;1HA\x1b[2;2HA"), []byte("\x1b[1;1HB\x1b[2;2HB")},
 		resizeSizes: [2]domain.Size{{Cols: 100, Rows: 30}, config.size},
 	}
 	WithSnapshotStore(fixture.snaps)(d)
+	snapshotCtx, cancelSnapshotWorker := context.WithCancel(context.Background())
+	d.startSnapshotEncodeWorker(snapshotCtx)
+	t.Cleanup(func() {
+		cancelSnapshotWorker()
+		d.stopSnapshotEncodeWorker()
+	})
 	for tabIndex, tb := range sess.tabs {
 		fixture.configureTab(tb, tabIndex, config.panes, config.historyRows, tabSize(config.size))
 	}
@@ -594,6 +602,17 @@ func (f *performanceFixture) paintLive() {
 func (f *performanceFixture) captureSnapshot() {
 	f.t.Helper()
 	require.True(f.t, f.d.captureSession(f.sess))
+	<-f.snaps.done
+	for range 4096 {
+		f.sess.snapshotMu.Lock()
+		pending := f.sess.snapshotPending
+		f.sess.snapshotMu.Unlock()
+		if !pending {
+			return
+		}
+		runtime.Gosched()
+	}
+	f.t.Fatal("snapshot worker did not finish performance capture")
 }
 
 func (f *performanceFixture) enterCopySearch() {
@@ -754,6 +773,7 @@ type countingSnapshotStore struct {
 	mu sync.Mutex
 	countingSnapshotMetrics
 	last []byte
+	done chan struct{}
 }
 
 func (s *countingSnapshotStore) Write(_ string, data []byte) error {
@@ -762,6 +782,9 @@ func (s *countingSnapshotStore) Write(_ string, data []byte) error {
 	s.bytes += uint64(len(data))
 	s.last = data
 	s.mu.Unlock()
+	if s.done != nil {
+		s.done <- struct{}{}
+	}
 	return nil
 }
 func (*countingSnapshotStore) Load() ([]ports.SnapshotBlob, error) { return nil, nil }
