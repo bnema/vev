@@ -90,6 +90,13 @@ func (d *Daemon) commitResize(sess *session, ac *attachedClient, plan resizePlan
 		tb.mu.Unlock()
 	}
 	for _, m := range plan.members {
+		// A failed floating resize must retain the committed popup geometry: it
+		// controls both its frame and mouse/copy hit testing. Normal layout still
+		// publishes its solved rectangle, while retaining its old screen until a
+		// successful PTY resize.
+		if m.isFloating && !m.ok {
+			continue
+		}
 		m.pane.mu.Lock()
 		m.pane.rect = m.rect
 		if m.isFloating {

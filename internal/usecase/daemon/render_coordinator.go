@@ -845,7 +845,7 @@ func (d *Daemon) invalidateRender(sess *session, ac *attachedClient, reset bool,
 		}
 	}
 	if ac != nil {
-		d.paint(sess, ac, reset)
+		d.paint(sess, ac, reset, 0)
 	}
 }
 
@@ -861,7 +861,7 @@ func (d *Daemon) invalidateRenderNow(sess *session, ac *attachedClient, reset bo
 		}
 	}
 	if ac != nil {
-		d.paint(sess, ac, reset)
+		d.paint(sess, ac, reset, 0)
 	}
 }
 

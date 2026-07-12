@@ -5,7 +5,6 @@ import (
 	"bytes"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
@@ -199,42 +198,11 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 // paint draws the composed client frame (active tab plus status bar) and
 // sends the resulting bytes. The renderer shadow is reset on explicit invalidations
 // such as switch/create/close/rename/resize so the repaint is complete.
-func (d *Daemon) scheduleResizePaintLocked(sess *session, ac *attachedClient) {
-	ac.resizePaint.stop()
-	ac.resizePaintGeneration++
-	generation := ac.resizePaintGeneration
-	ac.resizePaintPending = true
-	ac.resizePaint.retain(d.clock, maxDebounceInterval, func(ports.Timer) {
-		d.invalidateForResizeGeneration(sess, ac, generation)
-	})
-}
-
-// invalidateForResizeGeneration preserves PR #71's attachment-owned timer,
-// generation rejection, and cancellation while transferring only its eventual
-// render request to the coordinator.
-func (d *Daemon) invalidateForResizeGeneration(sess *session, ac *attachedClient, generation uint64) {
-	ac.sendMu.Lock()
-	if ac.currentSession() != sess || !ac.resizePaintPending || ac.resizePaintGeneration != generation {
-		ac.sendMu.Unlock()
-		return
+func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...uint64) {
+	attachmentEpoch := uint64(0)
+	if len(epochs) != 0 {
+		attachmentEpoch = epochs[0]
 	}
-	ac.resizePaint.stop()
-	ac.resizePaintPending = false
-	ac.sendMu.Unlock()
-	d.invalidateRender(sess, ac, true, "render.go")
-}
-
-func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool) {
-	d.paintForResizeGeneration(sess, ac, reset, 0, 0)
-}
-
-// paintCoordinatorWake composes a coordinator wake only for its captured
-// attachment incarnation. The epoch is checked after sendMu is acquired.
-func (d *Daemon) paintCoordinatorWake(sess *session, w renderWake) {
-	d.paintForResizeGeneration(sess, w.attachment, w.reset, 0, w.attachmentEpoch)
-}
-
-func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, reset bool, resizeGeneration, attachmentEpoch uint64) {
 	tb := sess.activeTab()
 	if tb == nil {
 		return
@@ -258,19 +226,10 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 		ac.sendMu.Unlock()
 		return
 	}
-	if resizeGeneration != 0 && (!ac.resizePaintPending || ac.resizePaintGeneration != resizeGeneration) {
-		ac.sendMu.Unlock()
-		return
-	}
 	// Composition owns attachment sendMu; initialize its lazy overlay state
 	// under that same ownership so concurrent fallback paints cannot observe a
 	// partially published runtime.
 	ac.initOverlays()
-	if ac.resizePaintPending {
-		ac.resizePaint.stop()
-		ac.resizePaintPending = false
-		reset = true
-	}
 	overlays := ac.overlays.SnapshotForRender()
 	repaintAttachedClients := false
 	defer func() {

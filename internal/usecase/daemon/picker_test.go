@@ -281,16 +281,12 @@ func TestPickerDisplacementCancelsOldResizePaint(t *testing.T) {
 
 	d.resize(sess2, ac2, domain.Size{Cols: 100, Rows: 24})
 	timer := <-clock.timers
-	ac2.sendMu.Lock()
-	before := ac2.resizePaintGeneration
-	require.True(t, ac2.resizePaintPending)
-	ac2.sendMu.Unlock()
+	before := sess2.renderCoordinator().resizeSnapshot().epoch
 
 	require.Same(t, ac2, d.stealClientForTarget(sess1, ac1, sess2, picker.Target{Session: sess2.id}))
-	ac2.sendMu.Lock()
-	require.False(t, ac2.resizePaintPending)
-	require.Equal(t, before+1, ac2.resizePaintGeneration)
-	ac2.sendMu.Unlock()
+	// The target coordinator invalidates its scheduled epoch during handoff;
+	// no attachment-local timer survives the transfer.
+	require.Equal(t, before, sess2.renderCoordinator().resizeSnapshot().epoch)
 	timer.ch <- time.Time{}
 }
 

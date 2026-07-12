@@ -111,7 +111,7 @@ func (d *Daemon) applyLayoutLocked(tb *tab) {
 	placements, ok := layout.Solve(tb.tree.Root, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
 	if !ok {
 		for _, p := range tb.panes {
-			d.resizePane(p, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
+			d.applyPaneResize(p, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
 		}
 		return
 	}
@@ -120,12 +120,12 @@ func (d *Daemon) applyLayoutLocked(tb *tab) {
 			continue
 		}
 		if p := tb.panes[pl.ID]; p != nil {
-			d.resizePane(p, pl.Content)
+			d.applyPaneResize(p, pl.Content)
 		}
 	}
 }
 
-func (d *Daemon) resizePane(p *pane, r domain.Rect) {
+func (d *Daemon) applyPaneResize(p *pane, r domain.Rect) {
 	if p == nil {
 		return
 	}

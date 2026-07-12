@@ -169,7 +169,13 @@ func (d *Daemon) activateTab(sess *session, tb *tab) {
 		return
 	}
 	d.ensureFloatingWarm(sess, tb)
-	d.resizeInstalledFloating(tb)
+	tb.mu.Lock()
+	hasFloating := tb.floating.pane != nil
+	size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
+	tb.mu.Unlock()
+	if hasFloating {
+		d.requestTransactionalResize(sess, ac, size, true)
+	}
 }
 
 // toggleFloating changes only this tab's slot. Opening an uninitialized slot
@@ -197,10 +203,10 @@ func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 		return nil
 	}
 	if visible {
-		d.resizeActiveFloating(tb)
-	}
-	if ac != nil {
-		d.invalidateRender(sess, ac, true, "floating.go")
+		tb.mu.Lock()
+		size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
+		tb.mu.Unlock()
+		d.requestTransactionalResize(sess, ac, size, true)
 	}
 	return nil
 }
@@ -343,13 +349,13 @@ func (d *Daemon) installFloating(sess *session, tb *tab, p *pane, generation uin
 	d.reapplyThemeSession(sess)
 	d.startPaneGoroutines(sess, tb, p)
 	if visible {
-		d.resizeActiveFloating(tb)
 		sess.mu.Lock()
 		ac := sess.client
 		sess.mu.Unlock()
-		if ac != nil {
-			d.invalidateRender(sess, ac, true, "floating.go")
-		}
+		tb.mu.Lock()
+		size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
+		tb.mu.Unlock()
+		d.requestTransactionalResize(sess, ac, size, true)
 	}
 }
 

@@ -724,7 +724,6 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 		rc.noteSessionTeardown()
 	}
 	if ac != nil {
-		ac.cancelResizePaint()
 		d.unregisterPreview(ac)
 		ac.clearPreviousSession()
 		ac.setSession(nil)

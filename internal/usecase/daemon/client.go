@@ -39,22 +39,19 @@ type attachedClient struct {
 	// pipelineCache is the last successfully emitted composition. pipelineScratch
 	// is its attachment-owned alternate buffer; both are only touched under
 	// sendMu and must never share mutable backing storage.
-	pipelineCache         composeCacheInput
-	pipelineScratch       composeCacheInput
-	renderScratch         renderCaptureScratch                      // only touched while sendMu is held
-	captureFrames         map[layout.PaneID]capturedPaneRenderState // only touched while sendMu is held
-	resizePaint           pendingByteTimer                          // guarded by sendMu
-	resizePaintGeneration uint64                                    // guarded by sendMu
-	resizePaintPending    bool                                      // guarded by sendMu
-	size                  domain.Size
-	keys                  *keys.Router
-	sess                  Guarded[*session]
-	mouseScan             mouse.Scanner
-	themeMu               sync.Mutex
-	theme                 themeui.Theme
-	clientTheme           themeui.Theme
-	lastCursor            cursorOut
-	renderStages          renderStageHooks // invoked at real pipeline boundaries while sendMu is held
+	pipelineCache   composeCacheInput
+	pipelineScratch composeCacheInput
+	renderScratch   renderCaptureScratch                      // only touched while sendMu is held
+	captureFrames   map[layout.PaneID]capturedPaneRenderState // only touched while sendMu is held
+	size            domain.Size
+	keys            *keys.Router
+	sess            Guarded[*session]
+	mouseScan       mouse.Scanner
+	themeMu         sync.Mutex
+	theme           themeui.Theme
+	clientTheme     themeui.Theme
+	lastCursor      cursorOut
+	renderStages    renderStageHooks // invoked at real pipeline boundaries while sendMu is held
 	// previousSession is guarded independently. It is retained through temporary
 	// setSession(nil) hand-offs and cleared only on terminal teardown.
 	previousSession Guarded[*session]
@@ -71,6 +68,8 @@ type cursorOut struct {
 	hasStyle bool
 }
 
+// pendingByteTimer is retained for overlay input timers. Resize timing belongs
+// exclusively to renderCoordinator.
 type pendingByteTimer struct {
 	timer ports.Timer
 	done  chan struct{}
@@ -98,16 +97,6 @@ func (p *pendingByteTimer) stop() {
 		close(p.done)
 		p.done = nil
 	}
-}
-
-// cancelResizePaint invalidates callbacks before detaching or replacing an
-// attachment. It deliberately takes sendMu before any session/daemon lock.
-func (ac *attachedClient) cancelResizePaint() {
-	ac.sendMu.Lock()
-	ac.resizePaintGeneration++
-	ac.resizePaintPending = false
-	ac.resizePaint.stop()
-	ac.sendMu.Unlock()
 }
 
 func (ac *attachedClient) initOverlays() {
@@ -413,7 +402,7 @@ func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient, 
 				// paint occurs under sendMu, closing a park/resume race after this
 				// unlocked coordinator validation.
 				if w.attachment != nil && rc.wakeCurrent(w) {
-					d.paintCoordinatorWake(sess, w)
+					d.paint(sess, w.attachment, w.reset, w.attachmentEpoch)
 				}
 			},
 			ackReady: func() bool {
@@ -459,8 +448,6 @@ func (d *Daemon) detachReplacedClient(old *attachedClient) {
 	if old == nil {
 		return
 	}
-	old.cancelResizePaint()
-
 	d.unregisterPreview(old)
 	old.clearPreviousSession()
 	old.setSession(nil)
@@ -487,8 +474,10 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 		d.resizeForFirstPaint(sess, ac, clientSize)
 	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
-	d.invalidateRenderNow(sess, ac, true, "client.go")
+	// Activation can synchronously resize a retained floating pane through the
+	// same transaction. Fold its invalidation into this mandatory Welcome frame.
 	d.activateTab(sess, tb)
+	d.invalidateRenderNow(sess, ac, true, "client.go")
 }
 
 // runConnLoop is the per-connection input router: it pumps client messages
@@ -563,7 +552,6 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 	if !sess.detachIfCurrent(ac) {
 		return // already displaced by a newer client; nothing to do
 	}
-	ac.cancelResizePaint()
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)
 	}
@@ -637,7 +625,6 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed por
 		return
 	}
 	if sess.detachIfCurrent(ac) {
-		ac.cancelResizePaint()
 		if rc := sess.renderCoordinator(); rc != nil {
 			rc.noteDetach(ac)
 		}

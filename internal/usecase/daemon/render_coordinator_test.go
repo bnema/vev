@@ -989,13 +989,8 @@ func TestRenderCoordinatorResizeMetadata(t *testing.T) {
 				require.Same(t, owner, snap.source)
 				require.Equal(t, uint64(3), snap.epoch)
 
-				// Metadata ownership is independent of the retained PR #71
-				// attachment dispatch state.
-				owner.sendMu.Lock()
-				generation, pending := owner.resizePaintGeneration, owner.resizePaintPending
-				owner.sendMu.Unlock()
-				require.Zero(t, generation, "recording metadata must not touch the PR #71 generation")
-				require.False(t, pending, "recording metadata must not arm the PR #71 dispatch")
+				// Resize state is exclusively coordinator-owned.
+				require.Zero(t, snap.committed)
 			},
 		},
 		{
@@ -1478,12 +1473,6 @@ func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
 		timer := awaitCoordinatorScheduledTimer(t, clk)
 		require.GreaterOrEqual(t, timer.duration, minOutputRenderDeadline)
 		require.LessOrEqual(t, timer.duration, maxOutputRenderDeadline)
-		ac.sendMu.Lock()
-		generation, pending := ac.resizePaintGeneration, ac.resizePaintPending
-		ac.sendMu.Unlock()
-		require.Equal(t, uint64(1), generation, "PR #71 generation ownership must stay with the attachment")
-		require.True(t, pending, "PR #71 pending dispatch must remain armed")
-
 		snap := sess.renderCoordinator().resizeSnapshot()
 		require.Equal(t, domain.Size{Cols: 120, Rows: 24}, snap.size,
 			"the coordinator must record the latest requested resize before delegating")
@@ -1525,7 +1514,7 @@ func TestRenderCoordinatorRetainsPR71ResizeDispatch(t *testing.T) {
 
 		d.resize(sess, ac, domain.Size{Cols: 90, Rows: 30})
 		timer := awaitCoordinatorScheduledTimer(t, clk)
-		ac.cancelResizePaint()
+		sess.renderCoordinator().noteDetach(ac)
 
 		timer.ch <- time.Time{}
 		requireNoInvalidation(t, invs)
