@@ -33,6 +33,7 @@ type composeCacheInput struct {
 	layoutFingerprint       string
 	titleGenerations        map[layout.PaneID]uint64
 	damage                  []renderer.Damage
+	floatingVisible         bool
 	floatingGeneration      uint64
 	floatingGeometry        floatingGeometry
 	floatingTitleGeneration uint64
@@ -80,7 +81,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		drawDividers(frame, state.layout.root, content, themeui.DimStyle(styles.border, state.theme))
 	}
 
-	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme
+	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme || in.floatingVisible != state.floating.visible
 	titles := scratch.titleGenerations
 	if titles == nil {
 		titles = make(map[layout.PaneID]uint64, len(state.panes))
@@ -105,9 +106,12 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 			damage = append(damage, d)
 		}
 	}
+	// Keep the committed cache unadorned: floating composition clones this
+	// base, so closing or moving a popup cannot retain dimmed/bordered cells.
+	baseFrame := frame
 	if state.floating.visible {
 		var floatingDamage []renderer.Damage
-		frame, floatingDamage = composeCapturedFloatingFrame(frame, damage, state.floating, content, state.layout, state.theme, in, full || state.overlays.active())
+		frame, floatingDamage = composeCapturedFloatingFrame(baseFrame, damage, state.floating, content, state.layout, state.theme, in, full || state.overlays.active())
 		damage = floatingDamage
 	}
 	if !full {
@@ -118,15 +122,13 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: rows + 1, Width: width, Height: 1})
 		}
 	}
-	var baseFrame renderer.Frame
 	if state.overlays.active() {
-		// Overlay composition mutates the visible frame but must never publish it
-		// as the unadorned cache.
-		baseFrame = frame.Clone()
-	}
-	frame, damage = composeCapturedOverlays(state, frame, damage, content)
-	if !state.overlays.active() {
-		baseFrame = frame
+		// Without a floating frame, overlay composition would otherwise mutate
+		// the base cache in place. Floating composition already owns a clone.
+		if !state.floating.visible {
+			baseFrame = frame.Clone()
+		}
+		frame, damage = composeCapturedOverlays(state, frame, damage, content)
 	}
 	if full || state.overlays.active() {
 		damage = []renderer.Damage{renderer.FullRedraw()}
@@ -134,7 +136,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	cursorInputs := state.cursor
 	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || state.overlays.active()
 	cursor := desiredCapturedCursor(cursorInputs)
-	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, titleGenerations: titles, damage: damage, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
+	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, titleGenerations: titles, damage: damage, floatingVisible: state.floating.visible, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
 	outCache.bars.capture(baseFrame.Row(0), baseFrame.Row(rows+1))
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }

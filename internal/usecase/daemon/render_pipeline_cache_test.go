@@ -73,6 +73,19 @@ func TestPipelineCachePublishesOnlyAfterEmission(t *testing.T) {
 	}
 }
 
+func TestComposeFrameClearsFloatingFrameWhenItCloses(t *testing.T) {
+	visible := cacheState("base", 1)
+	committed := composeFrame(visible, composeCacheInput{})
+
+	hidden := visible
+	hidden.floating = capturedFloatingRenderState{}
+	hidden.panes[0].damage = nil
+	result := composeFrame(hidden, committed.cache, committed.cache)
+
+	require.Equal(t, 's', result.frame.Row(1)[2].Rune)
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, result.damage)
+}
+
 func cacheState(title string, generation uint64) capturedRenderState {
 	pane := renderer.NewFrame(6, 1)
 	for x, r := range title[:min(len(title), 6)] {
