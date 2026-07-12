@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
@@ -95,6 +96,39 @@ func TestChunkCodecRejectsTruncatedAndTrailingPayloads(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestChunkCodecRejectsHostileChunkAndRowDeclarations(t *testing.T) {
+	tests := []struct {
+		name       string
+		chunkCount int
+		rowCount   int
+	}{
+		{name: "more than ten thousand chunks", chunkCount: 10_001, rowCount: 1},
+		{name: "more than ten thousand rows", chunkCount: 40, rowCount: maxHistoryChunkRows},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := UnmarshalHistory(hostileHistoryDeclarations(tt.chunkCount, tt.rowCount)); err == nil {
+				t.Fatal("unmarshal accepted resource-exhausting history declarations")
+			}
+		})
+	}
+}
+
+func hostileHistoryDeclarations(chunkCount, rowCount int) []byte {
+	data := make([]byte, 9, 9+chunkCount*(4+rowCount*4))
+	copy(data, historyMagic)
+	data[4] = historyVersion
+	binary.BigEndian.PutUint32(data[5:], uint32(chunkCount))
+	for range chunkCount {
+		data = binary.BigEndian.AppendUint32(data, uint32(rowCount))
+		for range rowCount {
+			data = binary.BigEndian.AppendUint32(data, 0)
+		}
+	}
+	return data
 }
 
 func assertHistoryRowsEqual(t *testing.T, view HistoryView, want [][]renderer.Cell) {
