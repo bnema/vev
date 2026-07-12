@@ -47,6 +47,11 @@
       "kind": "udp"
     },
     {
+      "id": "udp_loss_0pct",
+      "kind": "udp",
+      "loss_percent": 0
+    },
+    {
       "id": "udp_25ms",
       "kind": "udp",
       "rtt_ms": 25
@@ -2397,6 +2402,402 @@
       "topology": "8x1",
       "workload": "attach_restore_tab_switch",
       "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-idle-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "idle",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-active_output-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "active_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-all_output-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "all_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-inactive_output-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "inactive_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-interactive_flood-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "interactive_flood",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-copy_search-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "copy_search",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-resize_sweep-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "resize_sweep",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-snapshot_output_resize-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-attach_restore_tab_switch-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-idle-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "idle",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-active_output-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "active_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-all_output-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "all_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-inactive_output-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "inactive_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-interactive_flood-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "interactive_flood",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-copy_search-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "copy_search",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-resize_sweep-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "resize_sweep",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-snapshot_output_resize-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-attach_restore_tab_switch-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-idle-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "idle",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-active_output-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "active_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-all_output-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "all_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-inactive_output-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "inactive_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-interactive_flood-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "interactive_flood",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-copy_search-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "copy_search",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-resize_sweep-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "resize_sweep",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-snapshot_output_resize-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-attach_restore_tab_switch-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-idle-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "idle",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-active_output-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "active_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-all_output-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "all_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-inactive_output-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "inactive_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-interactive_flood-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "interactive_flood",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-copy_search-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "copy_search",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-resize_sweep-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "resize_sweep",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-snapshot_output_resize-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-attach_restore_tab_switch-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_loss_0pct",
       "roles": [
         "daemon",
         "client",

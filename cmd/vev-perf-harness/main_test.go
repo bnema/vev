@@ -42,13 +42,15 @@ func (p *fakeProcess) Close() error { p.closed = true; return nil }
 type fakeLauncher struct {
 	mappings        []processMapping
 	args            [][]string
+	commands        []roleCommand
 	process         []*fakeProcess
 	manifestPresent bool
 }
 
-func (l *fakeLauncher) Launch(m processMapping, args []string) (launchedProcess, error) {
+func (l *fakeLauncher) Launch(m processMapping, command roleCommand) (launchedProcess, error) {
 	l.mappings = append(l.mappings, m)
-	l.args = append(l.args, append([]string(nil), args...))
+	l.args = append(l.args, append([]string(nil), command.Args...))
+	l.commands = append(l.commands, command)
 	_, e := os.Stat(filepath.Join(filepath.Dir(m.TracePath), "manifest.json"))
 	l.manifestPresent = e == nil
 	p := &fakeProcess{}
@@ -82,7 +84,7 @@ func TestHarnessManifestCoversCanonicalMatrix(t *testing.T) {
 	if err := validateManifest(m); err != nil {
 		t.Fatal(err)
 	}
-	if len(m.Scenarios) != 4*9*6 {
+	if len(m.Scenarios) != 4*9*7 {
 		t.Fatalf("scenarios=%d", len(m.Scenarios))
 	}
 	m.Scenarios = m.Scenarios[:len(m.Scenarios)-1]
@@ -188,15 +190,127 @@ func TestHarnessUsesPublicRoleCommandsAndPTYWorkloads(t *testing.T) {
 		{"udp_peer", []string{"_udp-proxy", "perf-s-001"}},
 	} {
 		t.Run(tc.role, func(t *testing.T) {
-			got := roleArgs(scenario{ID: "s"}, processMapping{Role: tc.role, Run: 1})
-			if !equalStrings(got, tc.want) {
-				t.Fatalf("args=%q want %q", got, tc.want)
+			got := roleArgs(scenario{ID: "s", Transport: "local"}, processMapping{Role: tc.role, Run: 1})
+			if !equalStrings(got.Args, tc.want) {
+				t.Fatalf("args=%q want %q", got.Args, tc.want)
 			}
 		})
 	}
 	input := string(workloadInput(scenario{ID: "s", Workload: "interactive_flood"}, 1, "measured-1"))
 	if string(inputMarker([]byte(input))) != "__VEV_HARNESS_s_r1_measured-1__" || !bytes.Contains([]byte(input), []byte("while [ $i -lt 128 ]")) || !strings.HasSuffix(input, "printf '__VEV_HARNESS_s_r1_measured-1__\\n'\n") {
 		t.Fatalf("workload is not real PTY shell input with an observable marker: %q", input)
+	}
+}
+
+func TestHarnessRoutesEveryRemoteFixtureThroughItsDeclaredPeer(t *testing.T) {
+	cases := []struct {
+		name      string
+		transport transport
+		peer      string
+		wantRTT   int
+		wantLoss  int
+	}{
+		{"ssh", transport{ID: "ssh_stdio", Kind: "ssh_stdio"}, "ssh_stdio_peer", 0, 0},
+		{"udp baseline", transport{ID: "udp_baseline", Kind: "udp"}, "udp_peer", 0, 0},
+		{"udp 25ms", transport{ID: "udp_25ms", Kind: "udp", RTTMS: 25}, "udp_peer", 25, 0},
+		{"udp 100ms", transport{ID: "udp_100ms", Kind: "udp", RTTMS: 100}, "udp_peer", 100, 0},
+		{"udp loss zero", transport{ID: "udp_loss_0pct", Kind: "udp", LossPercent: 0}, "udp_peer", 0, 0},
+		{"udp loss", transport{ID: "udp_loss_1pct", Kind: "udp", LossPercent: 1}, "udp_peer", 0, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := scenario{ID: "route", Transport: tc.transport.ID}
+			client := routeRoleArgs(s, processMapping{Role: "client", Run: 2}, tc.transport)
+			peer := routeRoleArgs(s, processMapping{Role: tc.peer, Run: 2}, tc.transport)
+			if !equalStrings(client.Args, []string{"attach", "harness@127.0.0.1:perf-route-002"}) {
+				t.Fatalf("client did not use public remote attach: %q", client.Args)
+			}
+			if tc.peer == "ssh_stdio_peer" && !equalStrings(peer.Args, []string{"_stdio", "perf-route-002"}) {
+				t.Fatalf("ssh peer command=%q", peer.Args)
+			}
+			if tc.peer == "udp_peer" && !equalStrings(peer.Args, []string{"_udp-proxy", "perf-route-002"}) {
+				t.Fatalf("udp peer command=%q", peer.Args)
+			}
+			if peer.Transport.RTTMS != tc.wantRTT || peer.Transport.LossPercent != tc.wantLoss {
+				t.Fatalf("peer lost manifest network settings: %+v", peer.Transport)
+			}
+		})
+	}
+}
+
+func TestHarnessFakeRunnerRoutesClientToPeerAndCleansEveryRole(t *testing.T) {
+	for _, tc := range []struct {
+		name, transport, peer, peerCommand string
+	}{
+		{"ssh", "ssh_stdio", "ssh_stdio_peer", "_stdio"},
+		{"udp baseline", "udp_baseline", "udp_peer", "_udp-proxy"},
+		{"udp 25ms", "udp_25ms", "udp_peer", "_udp-proxy"},
+		{"udp 100ms", "udp_100ms", "udp_peer", "_udp-proxy"},
+		{"udp loss zero", "udp_loss_0pct", "udp_peer", "_udp-proxy"},
+		{"udp loss", "udp_loss_1pct", "udp_peer", "_udp-proxy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			raw, err := os.OpenFile(filepath.Join(dir, "raw.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer raw.Close()
+			l := &fakeLauncher{}
+			h := defaultHarness()
+			h.clock, h.launcher = &fakeClock{}, l
+			s := scenario{ID: "routed", Transport: tc.transport, Roles: []string{"daemon", "client", tc.peer}}
+			if _, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}, manifest{}, s, 1, raw); err != nil {
+				t.Fatal(err)
+			}
+			if len(l.mappings) != 3 || l.mappings[1].Role != tc.peer || l.mappings[2].Role != "client" {
+				t.Fatalf("dependency launch order=%+v", l.mappings)
+			}
+			if l.commands[1].Args[0] != tc.peerCommand || l.commands[2].Args[0] != "attach" {
+				t.Fatalf("commands do not connect client through declared peer: %+v", l.commands)
+			}
+			for i, p := range l.process {
+				if !p.closed {
+					t.Fatalf("role %s was not cleaned up", l.mappings[i].Role)
+				}
+			}
+		})
+	}
+}
+
+func TestCLITransportSeamOwnsExclusivePeerTraceAndCleanup(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	l := &cliLauncher{bin: "/bin/true"}
+	m := processMapping{ProcessID: "udp-peer", TracePath: filepath.Join(dir, "udp.jsonl"), Role: "udp_peer"}
+	if err := os.WriteFile(m.TracePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := l.preparePeer(m, roleCommand{Args: []string{"_udp-proxy", "work"}, Transport: transport{ID: "udp_25ms", Kind: "udp", RTTMS: 25}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shim, err := os.ReadFile(filepath.Join(dir, "ssh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(shim)
+	for _, want := range []string{"_udp-proxy", m.TracePath, m.ProcessID, "VEV_PERF_UDP_RTT_MS=\"25\"", "udp-peer.pid"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("seam does not retain %q:\n%s", want, text)
+		}
+	}
+	// A nonexistent pid is already-cleaned-up; Close must treat it as such.
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	l.mu.Lock()
+	route := l.peers[dir]
+	l.mu.Unlock()
+	if route.mapping.TracePath != m.TracePath || route.mapping.ProcessID != m.ProcessID || route.command.Transport.RTTMS != 25 {
+		t.Fatalf("peer route is not exclusively correlated: %+v", route)
 	}
 }
 
@@ -240,8 +354,8 @@ func TestHarnessCleansRunDirectoryOnProcessFailure(t *testing.T) {
 
 type failingLauncher struct{ *fakeLauncher }
 
-func (l *failingLauncher) Launch(m processMapping, args []string) (launchedProcess, error) {
-	p, err := l.fakeLauncher.Launch(m, args)
+func (l *failingLauncher) Launch(m processMapping, command roleCommand) (launchedProcess, error) {
+	p, err := l.fakeLauncher.Launch(m, command)
 	if err != nil {
 		return nil, err
 	}
@@ -280,8 +394,8 @@ func TestHarnessRawRecordsAreDeterministicJSONL(t *testing.T) {
 
 type traceLauncher struct{ fakeLauncher }
 
-func (l *traceLauncher) Launch(m processMapping, args []string) (launchedProcess, error) {
-	p, err := l.fakeLauncher.Launch(m, args)
+func (l *traceLauncher) Launch(m processMapping, command roleCommand) (launchedProcess, error) {
+	p, err := l.fakeLauncher.Launch(m, command)
 	if err != nil {
 		return nil, err
 	}

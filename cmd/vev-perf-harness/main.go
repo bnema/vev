@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -133,13 +134,57 @@ type launchedProcess interface {
 	Measure([]byte, func() error, func() error) error
 	Close() error
 }
+
+// roleCommand contains only argv accepted by app.parseArgs. Transport routing
+// metadata configures the harness's public-command seam; it is never passed as
+// an unrecognised vev flag.
+type roleCommand struct {
+	Args      []string
+	Transport transport
+}
+
 type launcher interface {
-	Launch(processMapping, []string) (launchedProcess, error)
+	Launch(processMapping, roleCommand) (launchedProcess, error)
 }
 
 // cliLauncher is deliberately limited to executing the supplied public vev
 // binary. Scenario orchestration never reaches into an in-process daemon.
-type cliLauncher struct{ bin string }
+type cliLauncher struct {
+	bin   string
+	mu    sync.Mutex
+	peers map[string]peerRoute
+}
+
+type peerRoute struct {
+	mapping processMapping
+	command roleCommand
+	pidPath string
+}
+
+type preparedPeer struct{ route peerRoute }
+
+func (p preparedPeer) Warmup([]byte) error                              { return nil }
+func (p preparedPeer) Measure([]byte, func() error, func() error) error { return nil }
+func (p preparedPeer) Close() error {
+	if p.route.pidPath == "" {
+		return nil
+	}
+	b, err := os.ReadFile(p.route.pidPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return fmt.Errorf("invalid owned peer pid: %q", b)
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
 
 type terminalOutput interface {
 	io.Writer
@@ -157,8 +202,8 @@ type cliProcess struct {
 	waitErr chan error
 }
 
-func (l cliLauncher) Launch(m processMapping, args []string) (launchedProcess, error) {
-	if len(args) == 0 {
+func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProcess, error) {
+	if len(role.Args) == 0 {
 		return nil, errors.New("public CLI role has no arguments")
 	}
 	if info, err := os.Stat(l.bin); err != nil {
@@ -166,14 +211,30 @@ func (l cliLauncher) Launch(m processMapping, args []string) (launchedProcess, e
 	} else if info.IsDir() {
 		return nil, fmt.Errorf("public CLI binary %q is a directory", l.bin)
 	}
-	cmd := exec.Command(l.bin, args...)
-	cmd.Env = append(withoutEnv(os.Environ(), "VEV"), "VEV_PERF_TRACE="+m.TracePath, "VEV_PERF_PROCESS_ID="+m.ProcessID,
-		"XDG_RUNTIME_DIR="+filepath.Join(filepath.Dir(m.TracePath), "runtime"),
-		"XDG_STATE_HOME="+filepath.Join(filepath.Dir(m.TracePath), "state"), "TERM=xterm-256color")
-	if err := safedir.EnsurePrivate(filepath.Join(filepath.Dir(m.TracePath), "runtime")); err != nil {
+	if m.Role == "ssh_stdio_peer" || m.Role == "udp_peer" {
+		return l.preparePeer(m, role)
+	}
+	cmd := exec.Command(l.bin, role.Args...)
+	runDir := filepath.Dir(m.TracePath)
+	cmd.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_REMOTE_TRANSPORT"), "VEV_PERF_TRACE="+m.TracePath, "VEV_PERF_PROCESS_ID="+m.ProcessID,
+		"XDG_RUNTIME_DIR="+filepath.Join(runDir, "runtime"),
+		"XDG_STATE_HOME="+filepath.Join(runDir, "state"), "TERM=xterm-256color")
+	if m.Role == "client" {
+		l.mu.Lock()
+		peer, routed := l.peers[runDir]
+		l.mu.Unlock()
+		if routed {
+			mode, err := remoteMode(peer.command.Transport)
+			if err != nil {
+				return nil, err
+			}
+			cmd.Env = append(cmd.Env, "PATH="+runDir+":"+os.Getenv("PATH"), "VEV_REMOTE_TRANSPORT="+mode)
+		}
+	}
+	if err := safedir.EnsurePrivate(filepath.Join(runDir, "runtime")); err != nil {
 		return nil, err
 	}
-	if err := safedir.EnsurePrivate(filepath.Join(filepath.Dir(m.TracePath), "state")); err != nil {
+	if err := safedir.EnsurePrivate(filepath.Join(runDir, "state")); err != nil {
 		return nil, err
 	}
 	p := &cliProcess{cmd: cmd, waitErr: make(chan error, 1)}
@@ -214,6 +275,82 @@ func (l cliLauncher) Launch(m processMapping, args []string) (launchedProcess, e
 	}
 	go func() { p.waitErr <- cmd.Wait() }()
 	return p, nil
+}
+
+// preparePeer installs a per-run ssh command seam. The ordinary public client
+// still executes its documented remote attach command; its ssh child invokes
+// only the parsed public _stdio or _udp-proxy command. This makes the peer
+// carrying client traffic the declared, exclusively traced role rather than a
+// separately launched but unused process.
+func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedProcess, error) {
+	runDir := filepath.Dir(m.TracePath)
+	if err := safedir.EnsurePrivate(runDir); err != nil {
+		return nil, err
+	}
+	if err := safedir.EnsurePrivate(filepath.Join(runDir, "runtime")); err != nil {
+		return nil, err
+	}
+	if err := safedir.EnsurePrivate(filepath.Join(runDir, "state")); err != nil {
+		return nil, err
+	}
+	if len(role.Args) != 2 || (role.Args[0] != "_stdio" && role.Args[0] != "_udp-proxy") {
+		return nil, fmt.Errorf("unsupported public peer command %q", role.Args)
+	}
+	route := peerRoute{mapping: m, command: role}
+	if m.Role == "udp_peer" {
+		route.pidPath = filepath.Join(runDir, "udp-peer.pid")
+	}
+	shim := filepath.Join(runDir, "ssh")
+	ready := filepath.Join(runDir, "udp-peer.ready")
+	stderr := filepath.Join(runDir, "udp-peer.stderr")
+	// The bootstrap protocol requires the SSH command to exit after forwarding
+	// the readiness line. The long-lived proxy is owned by pidPath and receives
+	// the role's unique trace identity, never the bootstrap/client identity.
+	body := fmt.Sprintf(`#!/bin/sh
+set -eu
+case "$*" in
+  *"_stdio"*)
+    exec env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _stdio %[6]q
+    ;;
+  *"_udp-bootstrap"*)
+    rm -f %[7]q %[8]q
+    env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color VEV_PERF_UDP_RTT_MS=%[9]q VEV_PERF_UDP_LOSS_PERCENT=%[10]q %[5]q _udp-proxy %[6]q >%[7]q 2>%[8]q &
+    peer=$!
+    printf '%%s\\n' "$peer" > %[11]q
+    i=0
+    while [ ! -s %[7]q ] && [ "$i" -lt 1000 ]; do sleep 0.01; i=$((i+1)); done
+    test -s %[7]q
+    head -n 1 %[7]q
+    exit 0
+    ;;
+  *) echo 'vev harness ssh seam rejected non-vev command' >&2; exit 64 ;;
+esac
+`, m.TracePath, m.ProcessID, filepath.Join(runDir, "runtime"), filepath.Join(runDir, "state"), l.bin, role.Args[1], ready, stderr, strconv.Itoa(role.Transport.RTTMS), strconv.Itoa(role.Transport.LossPercent), route.pidPath)
+	if err := os.WriteFile(shim, []byte(body), 0o700); err != nil {
+		return nil, err
+	}
+	l.mu.Lock()
+	if l.peers == nil {
+		l.peers = make(map[string]peerRoute)
+	}
+	if _, exists := l.peers[runDir]; exists {
+		l.mu.Unlock()
+		return nil, fmt.Errorf("duplicate transport peer for %s", runDir)
+	}
+	l.peers[runDir] = route
+	l.mu.Unlock()
+	return preparedPeer{route: route}, nil
+}
+
+func remoteMode(t transport) (string, error) {
+	switch t.Kind {
+	case "ssh_stdio":
+		return "stdio", nil
+	case "udp":
+		return "udp", nil
+	default:
+		return "", fmt.Errorf("transport %q cannot route through a remote peer", t.ID)
+	}
 }
 
 func withoutEnv(env []string, names ...string) []string {
@@ -320,7 +457,9 @@ func (p *cliProcess) Close() error {
 			close(p.done)
 		}
 		if p.cmd != nil && p.cmd.Process != nil {
-			_ = p.cmd.Process.Signal(syscall.SIGTERM)
+			// The client is a session/process-group leader; terminate its ssh
+			// seam/_stdio descendants as well as the terminal client itself.
+			_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGTERM)
 		}
 		if p.pty != nil {
 			_ = p.pty.Close()
@@ -512,9 +651,12 @@ func validateManifest(m manifest) error {
 		if t.ID == "" {
 			return errors.New("transport missing id")
 		}
+		if err := validateTransportFixture(t); err != nil {
+			return err
+		}
 		trans[t.ID] = true
 	}
-	for _, v := range []string{"local", "ssh_stdio", "udp_baseline", "udp_25ms", "udp_100ms", "udp_loss_1pct"} {
+	for _, v := range []string{"local", "ssh_stdio", "udp_baseline", "udp_25ms", "udp_100ms", "udp_loss_0pct", "udp_loss_1pct"} {
 		if !trans[v] {
 			return fmt.Errorf("missing canonical transport %s", v)
 		}
@@ -535,6 +677,9 @@ func validateManifest(m manifest) error {
 		if s.InapplicableReason != "" && len(s.Roles) != 0 {
 			return fmt.Errorf("inapplicable scenario %s must not launch roles", s.ID)
 		}
+		if s.InapplicableReason == "" && !equalRoleSet(s.Roles, requiredRoles(s.Transport)) {
+			return fmt.Errorf("scenario %s roles do not route transport %s", s.ID, s.Transport)
+		}
 		covered[s.Topology+"\x00"+s.Workload+"\x00"+s.Transport] = true
 	}
 	for topologyID := range tops {
@@ -549,6 +694,50 @@ func validateManifest(m manifest) error {
 	}
 	return nil
 }
+func requiredRoles(transportID string) []string {
+	switch transportID {
+	case "local":
+		return []string{"daemon", "client"}
+	case "ssh_stdio":
+		return []string{"daemon", "client", "ssh_stdio_peer"}
+	default:
+		return []string{"daemon", "client", "udp_peer"}
+	}
+}
+
+func equalRoleSet(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	seen := make(map[string]bool, len(got))
+	for _, role := range got {
+		seen[role] = true
+	}
+	for _, role := range want {
+		if !seen[role] {
+			return false
+		}
+	}
+	return true
+}
+
+func validateTransportFixture(t transport) error {
+	want := map[string]transport{
+		"local":         {ID: "local", Kind: "local"},
+		"ssh_stdio":     {ID: "ssh_stdio", Kind: "ssh_stdio"},
+		"udp_baseline":  {ID: "udp_baseline", Kind: "udp"},
+		"udp_25ms":      {ID: "udp_25ms", Kind: "udp", RTTMS: 25},
+		"udp_100ms":     {ID: "udp_100ms", Kind: "udp", RTTMS: 100},
+		"udp_loss_0pct": {ID: "udp_loss_0pct", Kind: "udp", LossPercent: 0},
+		"udp_loss_1pct": {ID: "udp_loss_1pct", Kind: "udp", LossPercent: 1},
+	}
+	w, ok := want[t.ID]
+	if !ok || t.Kind != w.Kind || t.RTTMS != w.RTTMS || t.LossPercent != w.LossPercent {
+		return fmt.Errorf("invalid canonical transport fixture %+v", t)
+	}
+	return nil
+}
+
 func set(v []string) map[string]bool {
 	r := map[string]bool{}
 	for _, x := range v {
@@ -556,7 +745,7 @@ func set(v []string) map[string]bool {
 	}
 	return r
 }
-func (h *harness) runOne(o options, _ manifest, s scenario, run int, raw io.Writer) (res runResult, err error) {
+func (h *harness) runOne(o options, mat manifest, s scenario, run int, raw io.Writer) (res runResult, err error) {
 	dir := filepath.Join(o.out, fmt.Sprintf("%s-run-%03d", safeName(s.ID), run))
 	if err = h.mkdir(dir); err != nil {
 		return res, err
@@ -586,28 +775,38 @@ func (h *harness) runOne(o options, _ manifest, s scenario, run int, raw io.Writ
 		return res, err
 	}
 	if h.launcher == nil {
-		h.launcher = cliLauncher{o.vevBin}
+		h.launcher = &cliLauncher{bin: o.vevBin}
 	}
-	processes := make([]launchedProcess, 0, len(maps))
+	type launchedRole struct {
+		mapping processMapping
+		process launchedProcess
+	}
+	processes := make([]launchedRole, 0, len(maps))
 	defer func() {
-		for _, p := range processes {
-			if e := p.Close(); err == nil && e != nil {
+		// Clients own SSH-stdio descendants; close them before the deferred UDP
+		// peer and daemon so no role survives a failed or completed run.
+		for i := len(processes) - 1; i >= 0; i-- {
+			if e := processes[i].process.Close(); err == nil && e != nil {
 				err = e
 			}
 		}
 	}()
-	for _, pm := range maps {
-		p, e := h.launcher.Launch(pm, roleArgs(s, pm))
+	selectedTransport, e := manifestTransport(mat, s.Transport)
+	if e != nil {
+		return res, e
+	}
+	for _, pm := range launchOrder(maps) {
+		p, e := h.launcher.Launch(pm, routeRoleArgs(s, pm, selectedTransport))
 		if e != nil {
 			return res, e
 		}
-		processes = append(processes, p)
+		processes = append(processes, launchedRole{mapping: pm, process: p})
 	}
-	for i, p := range processes {
-		if maps[i].Role != "client" {
+	for _, p := range processes {
+		if p.mapping.Role != "client" {
 			continue
 		}
-		if err = p.Warmup(workloadInput(s, run, "warmup")); err != nil {
+		if err = p.process.Warmup(workloadInput(s, run, "warmup")); err != nil {
 			return res, err
 		}
 	}
@@ -616,8 +815,8 @@ func (h *harness) runOne(o options, _ manifest, s scenario, run int, raw io.Writ
 	h.clock.Sleep(o.warmup)
 	marks := []harnessMark{}
 	seq := uint64(0)
-	for i, p := range processes {
-		if maps[i].Role != "client" {
+	for _, p := range processes {
+		if p.mapping.Role != "client" {
 			continue
 		}
 		seq++
@@ -630,7 +829,7 @@ func (h *harness) runOne(o options, _ manifest, s scenario, run int, raw io.Writ
 			marks = append(marks, harnessMark{s.ID, run, sequence, "terminal_flushed", h.clock.Now(), true})
 			return nil
 		}
-		if err = p.Measure(workloadInput(s, run, fmt.Sprintf("measured-%d", sequence)), injected, flushed); err != nil {
+		if err = p.process.Measure(workloadInput(s, run, fmt.Sprintf("measured-%d", sequence)), injected, flushed); err != nil {
 			return res, err
 		}
 	}
@@ -654,22 +853,78 @@ func (h *harness) runOne(o options, _ manifest, s scenario, run int, raw io.Writ
 	return runResult{Spans: spans, Scenario: s.ID, Run: run, Samples: len(samples), EndToEnd: samples, Processes: maps}, nil
 }
 
-func roleArgs(s scenario, m processMapping) []string {
+func roleArgs(s scenario, m processMapping) roleCommand {
+	return routeRoleArgs(s, m, scenarioTransport(s))
+}
+
+func routeRoleArgs(s scenario, m processMapping, selected transport) roleCommand {
 	session := "perf-" + safeName(s.ID) + fmt.Sprintf("-%03d", m.Run)
+	remote := []string{"attach", "harness@127.0.0.1:" + session}
 	switch m.Role {
 	case "daemon":
-		return []string{"--daemon"}
+		return roleCommand{Args: []string{"--daemon"}}
 	case "client":
-		// The client is intentionally driven through its documented interactive
-		// CLI. Transport peers below are independently launched public roles.
-		return []string{"new", session}
+		switch s.Transport {
+		case "local":
+			return roleCommand{Args: []string{"new", session}}
+		case "ssh_stdio", "udp_baseline", "udp_25ms", "udp_100ms", "udp_loss_0pct", "udp_loss_1pct":
+			return roleCommand{Args: remote}
+		}
 	case "ssh_stdio_peer":
-		return []string{"_stdio", session}
+		return roleCommand{Args: []string{"_stdio", session}, Transport: transport{ID: s.Transport, Kind: "ssh_stdio"}}
 	case "udp_peer":
-		return []string{"_udp-proxy", session}
-	default:
-		return nil
+		return roleCommand{Args: []string{"_udp-proxy", session}, Transport: selected}
 	}
+	return roleCommand{}
+}
+
+func manifestTransport(m manifest, id string) (transport, error) {
+	for _, t := range m.Transports {
+		if t.ID == id {
+			return t, nil
+		}
+	}
+	// Focused unit tests may call runOne with a minimal manifest; production
+	// already validates every scenario reference before this point.
+	if m.Schema == 0 {
+		return scenarioTransport(scenario{Transport: id}), nil
+	}
+	return transport{}, fmt.Errorf("scenario references missing transport %q", id)
+}
+
+func scenarioTransport(s scenario) transport {
+	switch s.Transport {
+	case "udp_baseline":
+		return transport{ID: s.Transport, Kind: "udp"}
+	case "udp_25ms":
+		return transport{ID: s.Transport, Kind: "udp", RTTMS: 25}
+	case "udp_100ms":
+		return transport{ID: s.Transport, Kind: "udp", RTTMS: 100}
+	case "udp_loss_0pct":
+		return transport{ID: s.Transport, Kind: "udp", LossPercent: 0}
+	case "udp_loss_1pct":
+		return transport{ID: s.Transport, Kind: "udp", LossPercent: 1}
+	default:
+		return transport{ID: s.Transport}
+	}
+}
+
+func launchOrder(mappings []processMapping) []processMapping {
+	out := append([]processMapping(nil), mappings...)
+	priority := func(role string) int {
+		switch role {
+		case "daemon":
+			return 0
+		case "ssh_stdio_peer", "udp_peer":
+			return 1
+		case "client":
+			return 2
+		default:
+			return 3
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return priority(out[i].Role) < priority(out[j].Role) })
+	return out
 }
 
 // workloadInput is shell input delivered through the client PTY. It avoids any
