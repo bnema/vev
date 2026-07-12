@@ -35,6 +35,10 @@ type screenState struct {
 // so keep this value in sync if that payload cap changes.
 const maxEscapeBufferLen = 128 * 1024
 
+// maxPendingDamage bounds metadata retained while no render transaction can
+// acknowledge a screen. Saturation falls back to one exact full redraw.
+const maxPendingDamage = 1024
+
 const (
 	// ColorSchemeReportDark is the DEC 2031 dark-scheme report.
 	ColorSchemeReportDark = "\x1b[?997;1n"
@@ -88,6 +92,7 @@ type Screen struct {
 
 	damage           []renderer.Damage
 	damageGeneration uint64
+	damageSaturated  bool
 	escapeBuf        []byte
 	csiScratch       []int
 	sgrScratch       []int
@@ -173,7 +178,10 @@ type DamageCapture struct {
 // Damage returns the current damage list. The caller must not modify the
 // returned slice; ClearDamage must be called after the damage is consumed.
 func (s *Screen) Damage() []renderer.Damage { return s.damage }
-func (s *Screen) ClearDamage()              { s.damage = s.damage[:0] }
+func (s *Screen) ClearDamage() {
+	s.damage = s.damage[:0]
+	s.damageSaturated = false
+}
 
 // CaptureDamage snapshots pending damage without consuming it.
 func (s *Screen) CaptureDamage() DamageCapture {
@@ -625,6 +633,14 @@ func (s *Screen) normalizedRegion(top, bottom int) (int, int, bool) {
 
 func (s *Screen) record(d renderer.Damage) {
 	s.damageGeneration++
+	if s.damageSaturated {
+		return
+	}
+	if len(s.damage) >= maxPendingDamage {
+		s.damage = []renderer.Damage{renderer.FullRedraw()}
+		s.damageSaturated = true
+		return
+	}
 	// Replace FullRedraw with the first concrete damage item.
 	if len(s.damage) == 1 && s.damage[0].Kind == renderer.DamageFullRedraw {
 		s.damage[0] = d

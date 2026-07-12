@@ -2055,6 +2055,24 @@ func TestResize(t *testing.T) {
 // ClearDamage
 // ---------------------------------------------------------------------------
 
+func TestDamageSaturationBoundsPendingRecords(t *testing.T) {
+	s := NewScreen(2, 2)
+	s.ClearDamage()
+
+	for i := range 1_100 {
+		s.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: i % 2, Width: 1, Height: 1, Count: 1})
+	}
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, s.Damage())
+
+	// Saturation is sticky until the render owner acknowledges or clears it.
+	s.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 0, Width: 1, Height: 1, Count: 1})
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, s.Damage())
+
+	s.ClearDamage()
+	s.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 0, Width: 1, Height: 1, Count: 1})
+	require.Equal(t, []renderer.Damage{{Kind: renderer.DamageText, X: 0, Y: 0, Width: 1, Height: 1, Count: 1}}, s.Damage())
+}
+
 func TestClearDamage(t *testing.T) {
 	tests := []struct {
 		name string
