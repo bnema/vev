@@ -113,6 +113,13 @@ func TestPerformanceFixtureResize(t *testing.T) {
 	require.Equal(t, []domain.Size{{Cols: 50, Rows: 28}, {Cols: 60, Rows: 38}, {Cols: 80, Rows: 48}, {Cols: 40, Rows: 22}}, fixture.pty.requested())
 }
 
+func TestTransactionalResizeMetricDefinitionsAreZeroSafe(t *testing.T) {
+	metrics := performanceMetrics{}
+	require.Zero(t, coordinatorCoalescingRatio(metrics))
+	require.Zero(t, metrics.skippedEpochs, "no accepted request means no skipped epoch")
+	require.Zero(t, metrics.frameGapEpochs, "no committed epoch means no frame gap")
+}
+
 func TestTransactionalResizeMetrics(t *testing.T) {
 	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 80, Rows: 24}, ptyErrors: []error{fmt.Errorf("scripted failure"), nil}})
 	fixture.resizeTo(domain.Size{Cols: 100, Rows: 30})
