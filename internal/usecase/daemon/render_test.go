@@ -371,7 +371,10 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 	})
 }
 
-func TestClearNonRenderablePaneDamage(t *testing.T) {
+// S2 keeps damage pending until the owning render capture consumes it. In
+// particular, a pane becoming invisible must not let a PTY reader erase data
+// that a later attachment or picker preview needs to render.
+func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 	newFixture := func(t *testing.T) (*Daemon, *session, *tab, *pane, chan ports.Frame) {
 		t.Helper()
 		p, release := newBlockingPTY(t)
@@ -381,7 +384,7 @@ func TestClearNonRenderablePaneDamage(t *testing.T) {
 		return d, sess, tb, tb.focusedPane(), sends
 	}
 
-	t.Run("clears headless, inactive, collapsed, and hidden panes without output", func(t *testing.T) {
+	t.Run("headless, inactive, collapsed, and hidden panes retain damage without output", func(t *testing.T) {
 		for _, tt := range []struct {
 			name  string
 			setup func(*Daemon, *session, *tab, *pane)
@@ -408,7 +411,7 @@ func TestClearNonRenderablePaneDamage(t *testing.T) {
 				tt.setup(d, sess, tb, p)
 				p.screen.Write([]byte("damage"))
 				d.clearNonRenderablePaneDamage(sess, tb, p)
-				require.Empty(t, p.screen.Damage())
+				require.NotEmpty(t, p.screen.Damage(), "only render capture may consume VT damage")
 				select {
 				case frame := <-sends:
 					t.Fatalf("non-renderable output must not compose or send: %#v", frame)
