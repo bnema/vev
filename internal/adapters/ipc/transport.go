@@ -70,10 +70,10 @@ func NewTransport(conn net.Conn, opts ...Option) ports.Transport {
 // the type byte and payload), the type byte, then the payload — assembled
 // into one buffer and written with a single Write call.
 func (t *unixTransport) Send(f ports.Frame) error {
-	t.observe(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)), true)
+	end := t.beginOperation(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)))
 	n := 1 + len(f.Payload) // type + payload
 	if n > maxFrameLen {
-		t.observe(ports.RuntimeAdapterSendEnd, uint64(len(f.Payload)), false)
+		end(false)
 		return ErrFrameTooLarge
 	}
 
@@ -83,7 +83,7 @@ func (t *unixTransport) Send(f ports.Frame) error {
 	copy(buf[frameHeaderLen+1:], f.Payload)
 
 	_, err := t.conn.Write(buf)
-	t.observe(ports.RuntimeAdapterSendEnd, uint64(len(f.Payload)), err == nil)
+	end(err == nil)
 	return err
 }
 
@@ -91,20 +91,20 @@ func (t *unixTransport) Send(f ports.Frame) error {
 // (type byte + payload). It blocks until a full frame arrives, the
 // connection is closed (io.EOF), or an error occurs.
 func (t *unixTransport) Recv() (ports.Frame, error) {
-	t.observe(ports.RuntimeAdapterReceiveStart, 0, true)
+	end := t.beginOperation(ports.RuntimeAdapterReceiveStart, 0)
 	var hdr [frameHeaderLen]byte
 	if _, err := io.ReadFull(t.conn, hdr[:]); err != nil {
-		t.observe(ports.RuntimeAdapterReceiveEnd, 0, false)
+		end(false)
 		return ports.Frame{}, err
 	}
 
 	n := binary.BigEndian.Uint32(hdr[:])
 	if n == 0 {
-		t.observe(ports.RuntimeAdapterReceiveEnd, 0, false)
+		end(false)
 		return ports.Frame{}, ErrZeroLengthFrame
 	}
 	if n > maxFrameLen {
-		t.observe(ports.RuntimeAdapterReceiveEnd, 0, false)
+		end(false)
 		return ports.Frame{}, ErrFrameTooLarge
 	}
 
@@ -114,7 +114,7 @@ func (t *unixTransport) Recv() (ports.Frame, error) {
 		t.readBuf = t.readBuf[:n]
 	}
 	if _, err := io.ReadFull(t.conn, t.readBuf); err != nil {
-		t.observe(ports.RuntimeAdapterReceiveEnd, 0, false)
+		end(false)
 		return ports.Frame{}, err
 	}
 
@@ -123,13 +123,22 @@ func (t *unixTransport) Recv() (ports.Frame, error) {
 		payload = make([]byte, n-1)
 		copy(payload, t.readBuf[1:])
 	}
-	t.observe(ports.RuntimeAdapterReceiveEnd, uint64(len(payload)), true)
+	end(true)
 	return ports.Frame{Type: ports.MsgType(t.readBuf[0]), Payload: payload}, nil
 }
 
-func (t *unixTransport) observe(kind ports.RuntimeMarkKind, bytes uint64, valid bool) {
-	if t.observer != nil {
-		t.observer.ObserveRuntime(ports.NewRuntimeMark("ipc", kind, bytes, valid))
+func (t *unixTransport) beginOperation(start ports.RuntimeMarkKind, bytes uint64) func(bool) {
+	if t.observer == nil {
+		return func(bool) {}
+	}
+	correlation := ports.NewRuntimeCorrelation()
+	t.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("ipc", correlation, start, bytes, true))
+	end := ports.RuntimeAdapterSendEnd
+	if start == ports.RuntimeAdapterReceiveStart {
+		end = ports.RuntimeAdapterReceiveEnd
+	}
+	return func(valid bool) {
+		t.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("ipc", correlation, end, bytes, valid))
 	}
 }
 

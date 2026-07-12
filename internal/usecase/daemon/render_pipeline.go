@@ -306,7 +306,9 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 		ac.sendMu.Unlock()
 		return false
 	}
+	endDiff := d.runtimeSpan(ports.RuntimeDiffStart, ports.RuntimeDiffEnd, 0)
 	prepared, err := ac.output.prepare(composed.frame, composed.damage, composed.reset)
+	endDiff(0, err == nil)
 	if err != nil {
 		ac.sess.mu.Unlock()
 		ac.sendMu.Unlock()
@@ -319,6 +321,7 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 	var sendErr error
 	if len(data) > 0 {
 		sendTr = ac.transport()
+		endEmit := d.runtimeSpan(ports.RuntimeEmitStart, ports.RuntimeEmitEnd, uint64(len(data)))
 		if sendTr == nil {
 			sendErr = errors.New("client transport is nil")
 		} else {
@@ -328,6 +331,7 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 			}
 			sendErr = prepared.send(data, ac.echoAck.Load(), send)
 		}
+		endEmit(uint64(len(data)), sendErr == nil)
 	}
 	if sendErr == nil {
 		// Publish only after output preparation and transport emission both

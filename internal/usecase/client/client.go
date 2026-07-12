@@ -513,10 +513,6 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 				log.Warn("querying terminal colors", "err", err)
 			}
 		case r := <-recvCh:
-			if observer != nil {
-				observer.ObserveRuntime(ports.NewRuntimeMark("client", ports.RuntimeAdapterReceiveStart, uint64(len(r.frame.Payload)), r.err == nil))
-				observer.ObserveRuntime(ports.NewRuntimeMark("client", ports.RuntimeAdapterReceiveEnd, uint64(len(r.frame.Payload)), r.err == nil))
-			}
 			if r.err != nil {
 				if errors.Is(r.err, io.EOF) {
 					return welcomedResult(fmt.Errorf("vev: daemon vanished (missing: %v): %w", ms.missing(), r.err))

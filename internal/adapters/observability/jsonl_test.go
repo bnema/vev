@@ -73,6 +73,19 @@ func TestTransportObservabilityJSONLRejectsInvalidRequiredFields(t *testing.T) {
 	}
 }
 
+func TestTransportObservabilityJSONLWriteErrorSurfacesOnClose(t *testing.T) {
+	// /dev/full accepts Open but rejects every write, exercising the concrete
+	// observer lifecycle without changing the one-way RuntimeObserver port.
+	observer, closer, err := NewJSONL("/dev/full", fixedRuntimeClock{now: time.Unix(0, 1)}, "p")
+	if err != nil {
+		t.Skipf("/dev/full unavailable: %v", err)
+	}
+	observer.ObserveRuntime(validRuntimeMark(ports.RuntimeEmitStart))
+	if err := closer.Close(); err == nil {
+		t.Fatal("Close() error = nil, want surfaced JSONL write error")
+	}
+}
+
 func TestTransportObservabilitySameProcessSpanClockDomains(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

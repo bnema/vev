@@ -78,7 +78,8 @@ type resizeRequestMetadata struct {
 
 // renderCoordinatorOptions wires one coordinator instance.
 type renderCoordinatorOptions struct {
-	clock ports.Clock
+	clock    ports.Clock
+	observer ports.RuntimeObserver
 	// wake is the transitional composition target.
 	wake func(renderWake)
 	// ackReady reports whether the attachment may compose another output
@@ -124,6 +125,10 @@ type renderCoordinator struct {
 	pending       bool
 	pendingReset  bool
 	pendingUrgent bool
+	// queueMarked spans the coordinator's actual pending interval, from first
+	// enqueue until fire consumes the coalesced work.
+	queueMarked      bool
+	queueCorrelation ports.RuntimeCorrelation
 	// pendingPreview is accounted separately from the target primary wake:
 	// viewers may consume a coalesced target snapshot while that target is
 	// still ACK-blocked.
@@ -131,6 +136,10 @@ type renderCoordinator struct {
 	// ackDeferred records that an expired deadline or watchdog was blocked by
 	// output-window capacity. ACK notifications may flush only this state.
 	ackDeferred bool
+	// ackBlocked retains one correlation from the first rejected ACK-capacity
+	// probe until notifyAck releases that exact blocked interval.
+	ackBlocked     bool
+	ackCorrelation ports.RuntimeCorrelation
 	// deadlineDue closes the handoff between a timer worker receiving its tick
 	// and fire observing unavailable ACK capacity.
 	deadlineDue bool
@@ -279,9 +288,17 @@ func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv 
 	onInvalidate := c.opts.onInvalidate
 	c.metrics.invalidations.Add(1)
 	wasPending, wasUrgent, wasPreviewPending := c.pending, c.pendingUrgent, c.pendingPreview
+	queueStart := false
+	var queueCorrelation ports.RuntimeCorrelation
 	if !wasPending {
 		c.ackDeferred = false
 		c.deadlineDue = false
+		if c.opts.observer != nil {
+			c.queueMarked = true
+			c.queueCorrelation = ports.NewRuntimeCorrelation()
+			queueCorrelation = c.queueCorrelation
+			queueStart = true
+		}
 	}
 	c.pending = true
 	c.pendingReset = c.pendingReset || inv.reset
@@ -304,7 +321,11 @@ func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv 
 	}
 	clock := c.opts.clock
 	c.armed = c.armed || arm
+	observer := c.opts.observer
 	c.mu.Unlock()
+	if queueStart && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueEnqueued, 0, true))
+	}
 	stopTimer(old)
 	if !arm || clock == nil {
 		if onInvalidate != nil {
@@ -368,7 +389,12 @@ func (c *renderCoordinator) notifyAck() {
 		return
 	}
 	gen := c.generation
+	observer, correlation, blocked := c.opts.observer, c.ackCorrelation, c.ackBlocked
+	c.ackBlocked = false
 	c.mu.Unlock()
+	if blocked && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", correlation, ports.RuntimeACKBlockedEnd, 0, true))
+	}
 	c.fire(gen, false, false)
 }
 
@@ -652,10 +678,19 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 		retryTimer, c.retryTimer = c.retryTimer, nil
 		c.retryGen++
 	}
+	observer, queueCorrelation, queueMarked := c.opts.observer, c.queueCorrelation, c.queueMarked
+	ackCorrelation, ackBlocked := c.ackCorrelation, c.ackBlocked
+	c.queueMarked, c.ackBlocked = false, false
 	c.mu.Unlock()
 	stopTimer(timer)
 	stopTimer(resizeTimer)
 	stopTimer(retryTimer)
+	if queueMarked && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, false))
+	}
+	if ackBlocked && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", ackCorrelation, ports.RuntimeACKBlockedEnd, 0, false))
+	}
 }
 
 // noteReplace hands the coordinator from old to replacement; callbacks
@@ -700,10 +735,19 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 		retryTimer, c.retryTimer = c.retryTimer, nil
 		c.retryGen++
 	}
+	observer, queueCorrelation, queueMarked := c.opts.observer, c.queueCorrelation, c.queueMarked
+	ackCorrelation, ackBlocked := c.ackCorrelation, c.ackBlocked
+	c.queueMarked, c.ackBlocked = false, false
 	c.mu.Unlock()
 	stopTimer(timer)
 	stopTimer(resizeTimer)
 	stopTimer(retryTimer)
+	if queueMarked && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, false))
+	}
+	if ackBlocked && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", ackCorrelation, ports.RuntimeACKBlockedEnd, 0, false))
+	}
 }
 
 // notePark invalidates pending wakes when the attachment parks for resume.
@@ -738,7 +782,16 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	c.armed = false
 	timer := c.detachNormalTimerLocked()
 	timers := c.detachSyncTimersLocked()
+	observer, queueCorrelation, queueMarked := c.opts.observer, c.queueCorrelation, c.queueMarked
+	ackCorrelation, ackBlocked := c.ackCorrelation, c.ackBlocked
+	c.queueMarked, c.ackBlocked = false, false
 	c.mu.Unlock()
+	if queueMarked && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, false))
+	}
+	if ackBlocked && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", ackCorrelation, ports.RuntimeACKBlockedEnd, 0, false))
+	}
 	stopTimer(timer)
 	stopTimer(resizeTimer)
 	stopTimer(retryTimer)
@@ -1045,6 +1098,11 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 	if !headlessPreviewOnly && (!ready || (c.attachment != nil && !c.attachmentReady)) {
 		if !ready && deadline {
 			c.ackDeferred = true
+			if !c.ackBlocked && c.opts.observer != nil {
+				c.ackCorrelation = ports.NewRuntimeCorrelation()
+				c.ackBlocked = true
+				c.opts.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", c.ackCorrelation, ports.RuntimeACKBlockedStart, 0, true))
+			}
 		}
 		preview, previews := c.takePendingPreviewsLocked()
 		c.mu.Unlock()
@@ -1066,9 +1124,14 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 	}
 	timer := c.detachNormalTimerLocked()
 	c.pending, c.pendingReset, c.pendingUrgent, c.ackDeferred, c.deadlineDue, c.coalesced, c.armed = false, false, false, false, false, 0, false
+	observer, queueCorrelation, queueMarked := c.opts.observer, c.queueCorrelation, c.queueMarked
+	c.queueMarked = false
 	wake := c.opts.wake
 	c.mu.Unlock()
 	stopTimer(timer)
+	if queueMarked && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, true))
+	}
 	if wake != nil && !headlessPreviewOnly {
 		wake(w)
 	}

@@ -297,7 +297,16 @@ func runDaemon() error {
 	}
 	defer func() { _ = logCloser.Close() }()
 
-	ln, err := ipc.Listen(ipc.SocketDir())
+	clk := clock.New()
+	observer, observerCloser, err := performanceTrace(clk)
+	if err != nil {
+		return fmt.Errorf("vev: performance trace: %w", err)
+	}
+	if observerCloser != nil {
+		defer func() { _ = observerCloser.Close() }()
+	}
+	// Every accepted local connection shares this process's serialized sink.
+	ln, err := ipc.Listen(ipc.SocketDir(), ipc.WithRuntimeObserver(observer))
 	if err != nil {
 		log.Error("daemon listen failed", "socket_dir", ipc.SocketDir(), "err", err)
 		return fmt.Errorf("vev: daemon listen: %w", err)
@@ -320,14 +329,6 @@ func runDaemon() error {
 	}
 
 	log.Info("daemon starting", "socket", ln.Addr())
-	clk := clock.New()
-	observer, observerCloser, err := performanceTrace(clk)
-	if err != nil {
-		return fmt.Errorf("vev: performance trace: %w", err)
-	}
-	if observerCloser != nil {
-		defer func() { _ = observerCloser.Close() }()
-	}
 	daemonOpts := []daemon.Option(nil)
 	if observer != nil {
 		daemonOpts = append(daemonOpts, daemon.WithRuntimeObserver(observer))
@@ -388,8 +389,10 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) err
 		defer func() { _ = observerCloser.Close() }()
 	}
 	return runAttachWithDeps(ctx, intent, name, remoteTarget, os.Getenv("VEV"), log, runAttachDeps{
-		localDialer:             defaultLocalDialer,
-		remoteDialerFactory:     defaultRemoteDialerFactory(),
+		localDialer: func() ports.Dialer {
+			return localDaemonDialer{dir: ipc.SocketDir(), observer: observer}
+		},
+		remoteDialerFactory:     remoteadapter.NewDialerFactoryWithRuntimeObserver(observer),
 		selectedRemoteTransport: os.Getenv(envRemoteTransport),
 		runClient: func(ctx context.Context, dialer ports.Dialer, terminal ports.Terminal, behaviorClock ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) error {
 			return client.RunWithRuntimeObserver(ctx, dialer, terminal, behaviorClock, intent, name, remote, clipboard, log, observer)
@@ -531,10 +534,19 @@ func isDaemonVersionDrift(err error) bool {
 	return protocolErr.Code == ports.ErrVersionMismatch || protocolErr.Text == legacyMalformedHelloSignal
 }
 
-type localDaemonDialer struct{ dir string }
+type localDaemonDialer struct {
+	dir      string
+	observer ports.RuntimeObserver
+}
 
 func (d localDaemonDialer) Dial(ctx context.Context) (ports.Transport, error) {
-	return ensureDaemon(ctx, d.dir, realDial, realSpawn, defaultBackoff)
+	dial := realDial
+	if d.observer != nil {
+		dial = func(dir string) (ports.Transport, error) {
+			return ipc.Dial(dir, ipc.WithRuntimeObserver(d.observer))
+		}
+	}
+	return ensureDaemon(ctx, d.dir, dial, realSpawn, defaultBackoff)
 }
 
 func detachedLocalHello(name, cwd string) ports.Hello {
@@ -661,12 +673,6 @@ func runStdio(ctx context.Context) error {
 	defer func() { _ = logCloser.Close() }()
 	log.Debug("stdio proxy starting")
 
-	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = transport.Close() }()
-
 	clk := clock.New()
 	observer, observerCloser, err := performanceTrace(clk)
 	if err != nil {
@@ -675,6 +681,13 @@ func runStdio(ctx context.Context) error {
 	if observerCloser != nil {
 		defer func() { _ = observerCloser.Close() }()
 	}
+	transport, err := ensureDaemon(ctx, ipc.SocketDir(), func(dir string) (ports.Transport, error) {
+		return ipc.Dial(dir, ipc.WithRuntimeObserver(observer))
+	}, realSpawn, defaultBackoff)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = transport.Close() }()
 	stdio := sshstdio.NewTransport(os.Stdin, os.Stdout, nil, sshstdio.WithRuntimeObserver(observer))
 	return proxyTransports(ctx, stdio, transport, log)
 }

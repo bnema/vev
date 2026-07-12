@@ -38,7 +38,9 @@ func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "unchanged-by-observer", out.String(), "observer must not alter terminal bytes")
 	require.Equal(t, int32(1), restores.Load())
-	observer.requireOrdered(t, ports.RuntimeAdapterReceiveStart, ports.RuntimeAdapterReceiveEnd, ports.RuntimeTerminalFlushed)
+	// Carriage spans belong only to concrete adapters. The client owns the
+	// post-successful-flush terminal boundary, before its ACK is queued.
+	observer.requireOrdered(t, ports.RuntimeTerminalFlushed)
 }
 
 type clientRuntimeObserver struct {

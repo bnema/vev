@@ -25,6 +25,7 @@ var ErrDaemonRunning = errors.New("ipc: a daemon is already listening on this so
 type unixListener struct {
 	ln   *net.UnixListener
 	addr string
+	opts []Option
 }
 
 // Listen creates the socket directory (0700) if needed and starts
@@ -35,7 +36,7 @@ type unixListener struct {
 // the previous owner died without cleaning up, so the stale socket file is
 // unlinked and bind is retried once. A successful dial means a live daemon
 // owns the socket, and Listen returns ErrDaemonRunning.
-func Listen(dir string) (ports.Listener, error) {
+func Listen(dir string, opts ...Option) (ports.Listener, error) {
 	if err := safedir.EnsurePrivate(dir); err != nil {
 		return nil, fmt.Errorf("ipc: securing socket directory: %w", err)
 	}
@@ -69,7 +70,7 @@ func Listen(dir string) (ports.Listener, error) {
 		return nil, fmt.Errorf("ipc: chmod %s: %w", sockPath, err)
 	}
 
-	return &unixListener{ln: ln, addr: sockPath}, nil
+	return &unixListener{ln: ln, addr: sockPath, opts: opts}, nil
 }
 
 // bindUnix binds and listens on sockPath.
@@ -104,7 +105,7 @@ func (l *unixListener) Accept() (ports.Transport, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewTransport(conn), nil
+	return NewTransport(conn, l.opts...), nil
 }
 
 // Close stops accepting connections. The underlying net.UnixListener

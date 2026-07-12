@@ -31,6 +31,7 @@ type jsonl struct {
 	clock     ports.Clock
 	processID string
 	closed    bool
+	err       error
 }
 
 type record struct {
@@ -70,9 +71,18 @@ func (j *jsonl) ObserveRuntime(mark ports.RuntimeMark) {
 	r := record{Schema: mark.Schema, ProcessID: mark.ProcessID, Component: mark.Component, Scenario: mark.Scenario, Run: mark.Run, Sequence: mark.Sequence, RequestID: mark.RequestID, Epoch: mark.Epoch, Kind: mark.Kind, Tick: j.clock.Now().UnixNano(), Bytes: mark.Bytes, Fragments: mark.Fragments, Retransmits: mark.Retransmits, Pending: mark.Pending, AckRTTNanos: mark.AckRTTNanos, Valid: mark.Valid}
 	encoded, err := json.Marshal(r)
 	if err != nil {
+		j.recordError(err)
 		return
 	}
-	_, _ = j.file.Write(append(encoded, '\n'))
+	if _, err := j.file.Write(append(encoded, '\n')); err != nil {
+		j.recordError(err)
+	}
+}
+
+func (j *jsonl) recordError(err error) {
+	if err != nil && j.err == nil {
+		j.err = err
+	}
 }
 
 func (j *jsonl) Close() error {
@@ -82,5 +92,9 @@ func (j *jsonl) Close() error {
 		return nil
 	}
 	j.closed = true
-	return j.file.Close()
+	closeErr := j.file.Close()
+	if j.err != nil {
+		return j.err
+	}
+	return closeErr
 }

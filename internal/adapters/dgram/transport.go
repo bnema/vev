@@ -402,16 +402,16 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 }
 
 func (t *Transport) Send(f ports.Frame) error {
-	t.observeRuntime(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)), true)
+	end := t.beginRuntimeOperation(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)))
 	err := t.send(f, false)
-	t.observeRuntime(ports.RuntimeAdapterSendEnd, uint64(len(f.Payload)), err == nil)
+	end(err == nil)
 	return err
 }
 
 func (t *Transport) SendAsync(f ports.Frame) error {
-	t.observeRuntime(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)), true)
+	end := t.beginRuntimeOperation(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)))
 	err := t.send(f, true)
-	t.observeRuntime(ports.RuntimeAdapterSendEnd, uint64(len(f.Payload)), err == nil)
+	end(err == nil)
 	return err
 }
 
@@ -592,21 +592,21 @@ func (t *Transport) removePendingLocked(seq uint64) bool {
 }
 
 func (t *Transport) Recv() (ports.Frame, error) {
-	t.observeRuntime(ports.RuntimeAdapterReceiveStart, 0, true)
+	end := t.beginRuntimeOperation(ports.RuntimeAdapterReceiveStart, 0)
 	select {
 	case f := <-t.in:
-		t.observeRuntime(ports.RuntimeAdapterReceiveEnd, uint64(len(f.Payload)), true)
+		end(true)
 		return f, nil
 	case <-t.done:
 		t.mu.Lock()
 		err := t.closeErr
 		t.mu.Unlock()
 		if err != nil {
-			t.observeRuntime(ports.RuntimeAdapterReceiveEnd, 0, false)
+			end(false)
 			return ports.Frame{}, err
 		}
 		err = errors.New("dgram: closed")
-		t.observeRuntime(ports.RuntimeAdapterReceiveEnd, 0, false)
+		end(false)
 		return ports.Frame{}, err
 	}
 }
@@ -1614,9 +1614,18 @@ func decodeData(b []byte) (uint64, bool, ports.Frame, bool) {
 }
 
 // DatagramTransport marks Transport as a UDP-style datagram transport.
-func (t *Transport) observeRuntime(kind ports.RuntimeMarkKind, bytes uint64, valid bool) {
-	if t.runtimeObserver != nil {
-		t.runtimeObserver.ObserveRuntime(ports.NewRuntimeMark("dgram", kind, bytes, valid))
+func (t *Transport) beginRuntimeOperation(start ports.RuntimeMarkKind, bytes uint64) func(bool) {
+	if t.runtimeObserver == nil {
+		return func(bool) {}
+	}
+	correlation := ports.NewRuntimeCorrelation()
+	t.runtimeObserver.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("dgram", correlation, start, bytes, true))
+	end := ports.RuntimeAdapterSendEnd
+	if start == ports.RuntimeAdapterReceiveStart {
+		end = ports.RuntimeAdapterReceiveEnd
+	}
+	return func(valid bool) {
+		t.runtimeObserver.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("dgram", correlation, end, bytes, valid))
 	}
 }
 

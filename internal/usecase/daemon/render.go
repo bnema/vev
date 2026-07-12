@@ -200,6 +200,19 @@ func (d *Daemon) observeRuntime(kind ports.RuntimeMarkKind, bytes uint64, valid 
 	}
 }
 
+// runtimeSpan emits endpoints for one real operation. The correlation is
+// allocated once before work begins and reused even when the operation fails.
+func (d *Daemon) runtimeSpan(start, end ports.RuntimeMarkKind, bytes uint64) func(uint64, bool) {
+	if d == nil || d.runtimeObserver == nil {
+		return func(uint64, bool) {}
+	}
+	correlation := ports.NewRuntimeCorrelation()
+	d.runtimeObserver.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", correlation, start, bytes, true))
+	return func(endBytes uint64, valid bool) {
+		d.runtimeObserver.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", correlation, end, endBytes, valid))
+	}
+}
+
 func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...uint64) {
 	attachmentEpoch := uint64(0)
 	if len(epochs) != 0 {
@@ -225,8 +238,8 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...
 	// the normal gate, but this ownership check also protects direct resize and
 	// test paint paths from consuming damage that cannot be emitted.
 	if ac.output != nil && ac.output.atCapacity() {
-		d.observeRuntime(ports.RuntimeACKBlockedStart, 0, false)
-		d.observeRuntime(ports.RuntimeACKBlockedEnd, 0, false)
+		// The coordinator owns the blocked interval; this guard only protects
+		// direct test/resize paint calls from destructive capture.
 		ac.sendMu.Unlock()
 		return
 	}
@@ -279,9 +292,9 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...
 		pickerActive: overlays.pickerActive, paletteActive: overlays.paletteActive, promptActive: overlays.promptActive,
 		copyFeedback: overlays.copyFeedback,
 	}
-	d.observeRuntime(ports.RuntimeCaptureStart, 0, true)
+	endCapture := d.runtimeSpan(ports.RuntimeCaptureStart, ports.RuntimeCaptureEnd, 0)
 	state, ok := captureRenderState(sess, ac, bars, capturedOverlays, preview, floatingCfg, reset, damageCaptureConsume)
-	d.observeRuntime(ports.RuntimeCaptureEnd, 0, ok)
+	endCapture(0, ok)
 	if !ok {
 		ac.sendMu.Unlock()
 		return
@@ -296,19 +309,13 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...
 		state.preview = pickerPreviewFromCapturedRender(previewState)
 	}
 	captureOverlayLayers(state, overlays, paletteCfg)
-	d.observeRuntime(ports.RuntimeComposeStart, 0, true)
+	endCompose := d.runtimeSpan(ports.RuntimeComposeStart, ports.RuntimeComposeEnd, 0)
 	composed := composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
-	d.observeRuntime(ports.RuntimeComposeEnd, 0, true)
-	d.observeRuntime(ports.RuntimeDiffStart, 0, true)
-	d.observeRuntime(ports.RuntimeDiffEnd, 0, true)
-	d.observeRuntime(ports.RuntimeQueueEnqueued, 0, true)
-	d.observeRuntime(ports.RuntimeQueueDequeued, 0, true)
+	endCompose(0, true)
 	if ac.renderStages.compose != nil {
 		ac.renderStages.compose()
 	}
-	d.observeRuntime(ports.RuntimeEmitStart, 0, true)
 	d.emitFrame(sess, ac, state, composed)
-	d.observeRuntime(ports.RuntimeEmitEnd, 0, true)
 }
 
 type themeStyles struct {

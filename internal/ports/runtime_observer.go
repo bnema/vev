@@ -1,5 +1,7 @@
 package ports
 
+import "sync/atomic"
+
 // RuntimeMarkSchema is the version of the process-local performance trace.
 const RuntimeMarkSchema uint16 = 1
 
@@ -75,8 +77,31 @@ func RuntimeMarkValid(mark RuntimeMark) bool {
 	}
 }
 
-// NewRuntimeMark returns a timestamp-free mark for lightweight opt-in hooks.
-// Callers that need a span pass the same correlation fields to both endpoints.
+// RuntimeCorrelation identifies one attempted operation. It is deliberately
+// copied to both endpoints of a span; process ID remains owned by the sink.
+type RuntimeCorrelation struct {
+	Scenario                        string
+	Run, Sequence, RequestID, Epoch uint64
+}
+
+var runtimeMarkSequence atomic.Uint64
+
+// NewRuntimeCorrelation makes a unique, process-local operation identity.
+// Components with a domain request/epoch should use those values directly via
+// NewRuntimeMarkWithCorrelation instead of inventing a second identity.
+func NewRuntimeCorrelation() RuntimeCorrelation {
+	sequence := runtimeMarkSequence.Add(1)
+	return RuntimeCorrelation{Scenario: "runtime", Run: 1, Sequence: sequence, RequestID: sequence, Epoch: sequence}
+}
+
+// NewRuntimeMarkWithCorrelation returns a timestamp-free mark carrying the
+// supplied operation identity. Start/end callers must reuse correlation.
+func NewRuntimeMarkWithCorrelation(component string, correlation RuntimeCorrelation, kind RuntimeMarkKind, bytes uint64, valid bool) RuntimeMark {
+	return RuntimeMark{Schema: RuntimeMarkSchema, Component: component, Scenario: correlation.Scenario, Run: correlation.Run, Sequence: correlation.Sequence, RequestID: correlation.RequestID, Epoch: correlation.Epoch, Kind: kind, Bytes: bytes, Valid: valid}
+}
+
+// NewRuntimeMark is retained for one-shot marks. Unlike the old helper it
+// never returns constant correlation IDs.
 func NewRuntimeMark(component string, kind RuntimeMarkKind, bytes uint64, valid bool) RuntimeMark {
-	return RuntimeMark{Schema: RuntimeMarkSchema, Component: component, Scenario: "runtime", Run: 1, Sequence: 1, RequestID: 1, Epoch: 1, Kind: kind, Bytes: bytes, Valid: valid}
+	return NewRuntimeMarkWithCorrelation(component, NewRuntimeCorrelation(), kind, bytes, valid)
 }
