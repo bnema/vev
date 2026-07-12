@@ -220,6 +220,29 @@ func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations
 	b.ReportMetric(float64(historyRows), "historyrows/pane")
 }
 
+// Root-cause hypothesis (verified by this guard before the fix): S2 allocates
+// one visible VT-frame copy during capture plus a new composed frame and its
+// base-frame clone for every live paint. Those client-sized copies, rather
+// than history, account for the ~1 MiB/op regression in the pinned benchmark.
+func TestLivePaintAllocationBudget(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		panes int
+	}{
+		{name: "1tab-1pane", panes: 1},
+		{name: "1tab-4panes", panes: 4},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: tt.panes, historyRows: 10_000})
+			allocs := testing.AllocsPerRun(20, func() {
+				fixture.paintLive()
+				fixture.ac.ackOutputState(fixture.ac.output.next)
+			})
+			require.LessOrEqual(t, allocs, float64(60), "live paint must reuse bounded attachment-owned visible-frame buffers")
+		})
+	}
+}
+
 func TestPerformanceFixturePaintLiveUsesPrecomputedAlternatingWrites(t *testing.T) {
 	fixture := newPerformanceFixture(t, performanceConfig{})
 
