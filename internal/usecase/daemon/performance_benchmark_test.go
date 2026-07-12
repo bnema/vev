@@ -177,6 +177,14 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 	}
 }
 
+func TestCoordinatorCoalescingRatioReportsInvalidationsPerWake(t *testing.T) {
+	require.Equal(t, float64(3), coordinatorCoalescingRatio(performanceMetrics{
+		coordinatorWakes:     1,
+		coordinatorCoalesced: 3,
+	}))
+	require.Zero(t, coordinatorCoalescingRatio(performanceMetrics{}))
+}
+
 func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations, historyRows int) {
 	b.Helper()
 	if operations == 0 {
@@ -191,11 +199,7 @@ func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations
 	b.ReportMetric(float64(metrics.coordinatorInvalidations)/perOperation, "coordinatorinvalidations/op")
 	b.ReportMetric(float64(metrics.coordinatorWakes)/perOperation, "coordinatorwakes/op")
 	b.ReportMetric(float64(metrics.coordinatorCoalesced)/perOperation, "coordinatorcoalesced/op")
-	if metrics.coordinatorInvalidations > 0 {
-		b.ReportMetric(float64(metrics.coordinatorCoalesced)/float64(metrics.coordinatorInvalidations), "coordinatorcoalescingratio")
-	} else {
-		b.ReportMetric(0, "coordinatorcoalescingratio")
-	}
+	b.ReportMetric(coordinatorCoalescingRatio(metrics), "coordinatorcoalescingratio")
 	b.ReportMetric(float64(historyRows), "historyrows/pane")
 }
 

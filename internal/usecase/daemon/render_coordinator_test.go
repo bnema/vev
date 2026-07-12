@@ -900,6 +900,39 @@ func TestRenderCoordinatorPreviewSubscriptionsAreIndependent(t *testing.T) {
 	awaitWake(t, second)
 }
 
+func TestRenderCoordinatorAttachmentLifecycleDropsStaleInvalidationState(t *testing.T) {
+	cases := []struct {
+		name       string
+		transition func(*renderCoordinator, *attachedClient, *attachedClient)
+	}{
+		{"detach and attach", func(rc *renderCoordinator, old, replacement *attachedClient) {
+			rc.noteDetach(old)
+			rc.attach(replacement)
+		}},
+		{"replace", func(rc *renderCoordinator, old, replacement *attachedClient) {
+			rc.noteReplace(old, replacement)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			old, replacement := &attachedClient{}, &attachedClient{}
+			h.rc.attach(old)
+			h.rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "stale"})
+			tc.transition(h.rc, old, replacement)
+
+			h.rc.invalidateForAttachment(replacement, renderInvalidation{class: invalidateOutput, producer: "fresh"})
+			timers := h.armedTimers(t)
+			require.NotEmpty(t, timers)
+			timers[len(timers)-1].ch <- time.Time{}
+			wake := awaitWake(t, h.wakes)
+			require.False(t, wake.reset)
+			require.False(t, wake.urgent)
+			require.Equal(t, 1, wake.coalesced)
+		})
+	}
+}
+
 func TestRenderCoordinatorLifecycleDropsStaleWakes(t *testing.T) {
 	cases := []struct {
 		name     string
