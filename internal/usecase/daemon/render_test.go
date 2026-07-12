@@ -410,7 +410,7 @@ func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 				d, sess, tb, p, sends := newFixture(t)
 				tt.setup(d, sess, tb, p)
 				p.screen.Write([]byte("damage"))
-				d.clearNonRenderablePaneDamage(sess, tb, p)
+				_ = d.paneRenderable(sess, tb, p)
 				require.NotEmpty(t, p.screen.Damage(), "only render capture may consume VT damage")
 				select {
 				case frame := <-sends:
@@ -424,7 +424,7 @@ func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 	t.Run("retains active and picker-preview pane damage", func(t *testing.T) {
 		d, sess, tb, p, _ := newFixture(t)
 		p.screen.Write([]byte("active"))
-		d.clearNonRenderablePaneDamage(sess, tb, p)
+		_ = d.paneRenderable(sess, tb, p)
 		require.NotEmpty(t, p.screen.Damage(), "active pane damage belongs to coordinator composition")
 		p.screen.ClearDamage()
 
@@ -436,7 +436,7 @@ func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 		viewer.overlays.pickerMu.Unlock()
 		d.sessions["viewer"] = &session{id: "viewer", client: viewer}
 		p.screen.Write([]byte("preview"))
-		d.clearNonRenderablePaneDamage(sess, tb, p)
+		_ = d.paneRenderable(sess, tb, p)
 		require.NotEmpty(t, p.screen.Damage(), "picker preview damage must remain for coordinator composition")
 	})
 }

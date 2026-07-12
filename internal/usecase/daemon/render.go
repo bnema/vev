@@ -61,20 +61,6 @@ func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
 	return false
 }
 
-// clearNonRenderablePaneDamage is the single transitional S1 owner for VT
-// damage that cannot reach a composition target. S2 replaces this visibility
-// decision with pipeline ownership; do not paint or mutate renderer shadows
-// here.
-func (d *Daemon) clearNonRenderablePaneDamage(sess *session, tb *tab, p *pane) bool {
-	renderable := d.paneRenderable(sess, tb, p)
-	if !renderable && p != nil {
-		p.mu.Lock()
-		p.screen.ClearDamage()
-		p.mu.Unlock()
-	}
-	return renderable
-}
-
 // tabIsPickerPreview reports whether any attached client currently composes
 // tb as a picker preview. It snapshots daemon ownership before taking overlay
 // locks, preserving the Daemon -> session -> tab -> pane lock order.
@@ -158,7 +144,7 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 				}
 			}
 			p.mu.Unlock()
-			renderable := d.clearNonRenderablePaneDamage(sess, tb, p)
+			renderable := d.paneRenderable(sess, tb, p)
 			markSnapshotDirty(sess)
 			select {
 			case <-attentionCh:
