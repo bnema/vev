@@ -649,10 +649,12 @@ func preflightTab(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, budge
 	if _, err := r.getUint64(); err != nil {
 		return err
 	}
-	if err := skipString(r); err != nil {
+	focus, err := r.getString()
+	if err != nil {
 		return err
 	}
-	if err := preflightNode(r, 0, budget); err != nil {
+	references := preflightTreeReferences{}
+	if err := preflightNode(r, 0, budget, &references); err != nil {
 		return err
 	}
 	panes, err := r.getUint16()
@@ -668,10 +670,28 @@ func preflightTab(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, budge
 			return err
 		}
 	}
+	if focus != "" {
+		references.ids = append(references.ids, layout.PaneID(focus))
+	}
+	for _, id := range references.ids {
+		if _, ok := ids[id]; !ok {
+			return ErrUnknownPane
+		}
+	}
 	return nil
 }
 
-func preflightNode(r *payloadReader, depth int, budget *preflightBudget) error {
+type preflightTreeReferences struct{ ids []layout.PaneID }
+
+func (r *preflightTreeReferences) add(id layout.PaneID, budget *preflightBudget) error {
+	if !budget.addAllocation(32) {
+		return fmt.Errorf("%w: decoded allocation budget", ErrInvalidData)
+	}
+	r.ids = append(r.ids, id)
+	return nil
+}
+
+func preflightNode(r *payloadReader, depth int, budget *preflightBudget, references *preflightTreeReferences) error {
 	if depth > 64 {
 		return fmt.Errorf("%w: tree depth", ErrInvalidData)
 	}
@@ -684,14 +704,24 @@ func preflightNode(r *payloadReader, depth int, budget *preflightBudget) error {
 	}
 	switch kind {
 	case 0:
-		return skipString(r)
+		leaf, err := r.getString()
+		if err != nil {
+			return err
+		}
+		return references.add(layout.PaneID(leaf), budget)
 	case 1:
 		if _, err := r.getUint8(); err != nil {
 			return err
 		}
 	case 2:
-		if err := skipString(r); err != nil {
+		expanded, err := r.getString()
+		if err != nil {
 			return err
+		}
+		if expanded != "" {
+			if err := references.add(layout.PaneID(expanded), budget); err != nil {
+				return err
+			}
 		}
 	case 3:
 		return nil
@@ -706,7 +736,7 @@ func preflightNode(r *payloadReader, depth int, budget *preflightBudget) error {
 		return ErrShortPayload
 	}
 	for range children {
-		if err := preflightNode(r, depth+1, budget); err != nil {
+		if err := preflightNode(r, depth+1, budget, references); err != nil {
 			return err
 		}
 	}
