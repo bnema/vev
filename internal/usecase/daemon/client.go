@@ -37,6 +37,7 @@ type attachedClient struct {
 	coordinatorReadyEpoch atomic.Uint64
 	echoAck               atomic.Uint64
 	pipelineCache         composeCacheInput                         // only touched while sendMu is held
+	renderScratch         renderCaptureScratch                      // only touched while sendMu is held
 	captureFrames         map[layout.PaneID]capturedPaneRenderState // only touched while sendMu is held
 	resizePaint           pendingByteTimer                          // guarded by sendMu
 	resizePaintGeneration uint64                                    // guarded by sendMu

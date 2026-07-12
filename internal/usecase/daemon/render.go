@@ -309,8 +309,11 @@ func (d *Daemon) paintForResizeGeneration(sess *session, ac *attachedClient, res
 	// Title refresh may inspect process state, so it remains before the capture
 	// boundary and outside tab/pane ownership locks.
 	tb.mu.Lock()
-	layoutSnap := solveTabLayoutLocked(tb)
-	titleIDs := titleBarPaneIDs(layoutSnap.placements, layoutSnap.ok)
+	titleIDs := ac.renderScratch.titleIDs[:0]
+	if tb.tree != nil {
+		titleIDs = appendStackPaneIDs(titleIDs, tb.tree.Root)
+	}
+	ac.renderScratch.titleIDs = titleIDs
 	floating := tb.floating.pane
 	hasFloating := tb.floating.state == floatingVisible && floating != nil
 	tb.mu.Unlock()

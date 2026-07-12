@@ -21,6 +21,7 @@ type composeCacheInput struct {
 	frame                   renderer.Frame
 	layoutFingerprint       string
 	titleGenerations        map[layout.PaneID]uint64
+	damage                  []renderer.Damage
 	floatingGeneration      uint64
 	floatingGeometry        floatingGeometry
 	floatingTitleGeneration uint64
@@ -60,8 +61,11 @@ func composeFrame(state capturedRenderState, in composeCacheInput) composedRende
 	}
 
 	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme
-	titles := make(map[layout.PaneID]uint64, len(state.panes))
-	var damage []renderer.Damage
+	titles := in.titleGenerations
+	if titles == nil {
+		titles = make(map[layout.PaneID]uint64, len(state.panes))
+	}
+	damage := in.damage[:0]
 	for _, pane := range state.panes {
 		pl := offsetPlacement(pane.placement, 0, 1)
 		if pl.TitleBar.Height > 0 {
@@ -110,7 +114,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput) composedRende
 	cursorInputs := state.cursor
 	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || state.overlays.active()
 	cursor := desiredCapturedCursor(cursorInputs)
-	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, titleGenerations: titles, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: in.bars}
+	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, titleGenerations: titles, damage: damage, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: in.bars}
 	outCache.bars.capture(baseFrame.Row(0), baseFrame.Row(rows+1))
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }

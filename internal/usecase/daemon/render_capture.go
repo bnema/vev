@@ -23,6 +23,21 @@ const (
 // capturedRenderState is the immutable hand-off from authoritative daemon
 // state to composition. Every field is a value or an owned bounded copy; the
 // composer must not retain or consult session, tab, pane, or overlay owners.
+// renderCaptureScratch owns bounded snapshots for one attachment. The complete
+// capture/compose/emit transaction holds that attachment's sendMu, so these
+// buffers cannot be observed or reused before emission completes.
+type renderCaptureScratch struct {
+	state      capturedRenderState
+	panes      []capturedPaneRenderState
+	placements []layout.Placement
+	statusTabs []statusTab
+	mru        []recentSession
+	ranked     []rankedRecent
+	titleIDs   []layout.PaneID
+	treeNodes  []layout.Node
+	treeUsed   int
+}
+
 type capturedRenderState struct {
 	attachment         *attachedClient // identity only; never dereferenced by composition
 	attachmentEpoch    uint64
@@ -170,25 +185,36 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 	epoch := ac.coordinatorEpoch.Load()
 	sess.mu.Unlock()
 
-	bars.status.tabs = append([]statusTab(nil), bars.status.tabs...)
-	bars.mru = append([]recentSession(nil), bars.mru...)
-	bars.rankedRecent = append([]rankedRecent(nil), bars.rankedRecent...)
-	preview = clonePickerPreview(preview)
+	scratch := &ac.renderScratch
+	scratch.statusTabs = append(scratch.statusTabs[:0], bars.status.tabs...)
+	bars.status.tabs = scratch.statusTabs
+	scratch.mru = append(scratch.mru[:0], bars.mru...)
+	bars.mru = scratch.mru
+	scratch.ranked = append(scratch.ranked[:0], bars.rankedRecent...)
+	bars.rankedRecent = scratch.ranked
+	if len(preview.Rows) > 0 {
+		preview = clonePickerPreview(preview)
+	} else {
+		preview = picker.Preview{Width: preview.Width, Height: preview.Height}
+	}
 
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	layoutSnap := solveTabLayoutLocked(tb)
-	state := &capturedRenderState{
+	scratch.placements = append(scratch.placements[:0], layoutSnap.placements...)
+	scratch.treeUsed = 0
+	var root *layout.Node
+	if tb.tree != nil {
+		root = cloneLayoutNodeIntoScratch(tb.tree.Root, scratch)
+	}
+	state := &scratch.state
+	*state = capturedRenderState{
 		attachment: ac, attachmentEpoch: epoch, reset: reset, bars: bars, theme: bars.theme,
 		overlays: overlays, preview: preview,
-		layout: capturedTabLayout{root: func() *layout.Node {
-			if tb.tree == nil {
-				return nil
-			}
-			return tb.tree.Clone().Root
-		}(), area: layoutSnap.area, focus: layoutSnap.focus, placements: append([]layout.Placement(nil), layoutSnap.placements...), fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
+		layout:             capturedTabLayout{root: root, area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
 		floatingGeneration: tb.floating.generation,
 	}
+	state.panes = scratch.panes[:0]
 	state.tabGeneration = uint64(len(layoutSnap.fingerprint))
 	for _, placement := range layoutSnap.placements {
 		p := tb.panes[placement.ID]
@@ -204,20 +230,20 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 			ac.captureFrames = make(map[layout.PaneID]capturedPaneRenderState)
 		}
 		captured := capturePaneRenderStateLockedInto(p, visible, mode, ac.captureFrames[p.id])
-		captured.placement = placement
-		captured.focused = placement.ID == layoutSnap.focus
+		captured.placement, captured.focused = placement, placement.ID == layoutSnap.focus
 		if captured.focused {
 			state.cursor = captureCursorInputsLocked(p, placement.Content, overlays)
 		}
 		p.mu.Unlock()
-		translated := make([]renderer.Damage, 0, len(captured.damage))
+		translated := captured.rawDamage[:0]
 		for _, damage := range captured.damage {
 			translated = append(translated, translatePaneDamage(damage, placement.Content, layoutSnap.area)...)
 		}
-		captured.damage = translated
+		captured.rawDamage, captured.damage = captured.damage, translated
 		ac.captureFrames[captured.id] = captured
 		state.panes = append(state.panes, captured)
 	}
+	scratch.panes = state.panes
 	if tb.floating.state == floatingVisible && tb.floating.pane != nil {
 		p := tb.floating.pane
 		p.mu.Lock()
@@ -234,6 +260,25 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 	return state, true
 }
 
+func cloneLayoutNodeIntoScratch(src *layout.Node, scratch *renderCaptureScratch) *layout.Node {
+	if src == nil {
+		return nil
+	}
+	if scratch.treeUsed == len(scratch.treeNodes) {
+		scratch.treeNodes = append(scratch.treeNodes, layout.Node{})
+	}
+	index := scratch.treeUsed
+	scratch.treeUsed++
+	dst := &scratch.treeNodes[index]
+	children := dst.Children[:0]
+	*dst = *src
+	dst.Children = children
+	for _, child := range src.Children {
+		dst.Children = append(dst.Children, cloneLayoutNodeIntoScratch(child, scratch))
+	}
+	return dst
+}
+
 func captureCursorInputsLocked(p *pane, content domain.Rect, overlays capturedOverlayRenderState) capturedCursorInputs {
 	style, hasStyle := p.screen.CursorStyle()
 	hidden := overlays.copyActive || overlays.copySearchActive || overlays.pickerActive || overlays.paletteActive || overlays.promptActive
@@ -246,4 +291,24 @@ func clonePickerPreview(in picker.Preview) picker.Preview {
 		out.Rows[i] = append([]renderer.Cell(nil), in.Rows[i]...)
 	}
 	return out
+}
+
+// appendStackPaneIDs returns exactly the panes whose solved placement can own a
+// stack title bar. The caller holds tab.mu, and dst is attachment scratch.
+func appendStackPaneIDs(dst []layout.PaneID, node *layout.Node) []layout.PaneID {
+	if node == nil {
+		return dst
+	}
+	if node.Kind == layout.Stack {
+		for _, child := range node.Children {
+			if child != nil && child.Kind == layout.Leaf {
+				dst = append(dst, child.Leaf)
+			}
+		}
+		return dst
+	}
+	for _, child := range node.Children {
+		dst = appendStackPaneIDs(dst, child)
+	}
+	return dst
 }
