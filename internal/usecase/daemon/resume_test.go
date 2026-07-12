@@ -105,16 +105,7 @@ func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
 	require.Same(t, ac, resumed)
 
 	d.invalidateRender(sess, resumed, true, "resume-welcome-gate-test")
-	timer := awaitCoordinatorScheduledTimer(t, clock)
-	for {
-		select {
-		case timer = <-clock.timers:
-		default:
-			goto currentDeadline
-		}
-	}
-
-currentDeadline:
+	timer := awaitLatestCoordinatorTimer(t, clock)
 	rc := sess.renderCoordinator()
 	rc.mu.Lock()
 	workerDone := rc.normalWorkerDone

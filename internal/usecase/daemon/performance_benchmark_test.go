@@ -54,7 +54,7 @@ func TestPerformanceFixtureCounters(t *testing.T) {
 	require.Equal(t, uint64(2), metrics.coordinatorInvalidations)
 	require.Equal(t, uint64(2), metrics.coordinatorWakes)
 	require.Equal(t, uint64(2), metrics.coordinatorCoalesced)
-	require.Positive(t, metrics.coordinatorInvalidations, "coordinator metric ratios require a nonzero denominator")
+	require.Positive(t, metrics.coordinatorWakes, "coordinator metric ratios require a nonzero denominator")
 
 	fixture.captureSnapshot()
 	metrics = fixture.metrics()
@@ -101,7 +101,7 @@ func TestPerformanceFixtureCoordinatorMetricsForCanonicalTopologies(t *testing.T
 			require.Equal(t, uint64(1), metrics.coordinatorInvalidations)
 			require.Equal(t, uint64(1), metrics.coordinatorWakes)
 			require.Equal(t, uint64(1), metrics.coordinatorCoalesced)
-			require.Positive(t, metrics.coordinatorInvalidations, "coalescing ratio denominator")
+			require.Positive(t, metrics.coordinatorWakes, "coalescing ratio denominator")
 		})
 	}
 }

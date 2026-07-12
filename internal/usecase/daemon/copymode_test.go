@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -393,19 +392,19 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), clk.clock)
 	tr, sends, releaseConn := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 16, Rows: 5}))
 	advanceRender := func() {
-		for range 4096 {
-			select {
-			case timer := <-clk.timers:
-				timer.ch <- time.Time{}
-				return
-			default:
-				runtime.Gosched()
-			}
+		deadline := time.NewTimer(2 * time.Second)
+		defer deadline.Stop()
+		select {
+		case timer := <-clk.timers:
+			timer.ch <- time.Time{}
+		case <-deadline.C:
+			t.Fatal("coordinator did not arm a controllable render timer")
 		}
-		t.Fatal("coordinator did not arm a controllable render timer")
 	}
 	awaitControlledOutput := func() ports.Frame {
-		for range 4096 {
+		deadline := time.NewTimer(2 * time.Second)
+		defer deadline.Stop()
+		for {
 			select {
 			case frame := <-sends:
 				if frame.Type == ports.MsgOutput {
@@ -414,12 +413,11 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 				t.Fatalf("unexpected frame type %d while advancing render clock", frame.Type)
 			case timer := <-clk.timers:
 				timer.ch <- time.Time{}
-			default:
-				runtime.Gosched()
+			case <-deadline.C:
+				t.Fatal("controllable timers did not produce an output frame")
+				return ports.Frame{}
 			}
 		}
-		t.Fatal("controllable timers did not produce an output frame")
-		return ports.Frame{}
 	}
 	var hg sync.WaitGroup
 	hg.Go(func() { d.handleConn(tr) })
