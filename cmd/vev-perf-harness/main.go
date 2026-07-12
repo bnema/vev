@@ -167,15 +167,17 @@ func closeLaunchedRoles(processes []launchedRole) error {
 // cliLauncher is deliberately limited to executing the supplied public vev
 // binary. Scenario orchestration never reaches into an in-process daemon.
 type cliLauncher struct {
-	bin   string
-	mu    sync.Mutex
-	peers map[string]peerRoute
+	bin          string
+	netemFactory udpNetemFactory
+	mu           sync.Mutex
+	peers        map[string]peerRoute
 }
 
 type peerRoute struct {
 	mapping processMapping
 	command roleCommand
 	pidPath string
+	netem   udpNetem
 }
 
 type preparedPeer struct{ route peerRoute }
@@ -183,24 +185,26 @@ type preparedPeer struct{ route peerRoute }
 func (p preparedPeer) Warmup([]byte) error                              { return nil }
 func (p preparedPeer) Measure([]byte, func() error, func() error) error { return nil }
 func (p preparedPeer) Close() error {
-	if p.route.pidPath == "" {
-		return nil
+	var errs []error
+	if p.route.pidPath != "" {
+		b, err := os.ReadFile(p.route.pidPath)
+		if err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(b)))
+			if parseErr != nil || pid <= 0 {
+				errs = append(errs, fmt.Errorf("invalid owned peer pid: %q", b))
+			} else if killErr := syscall.Kill(pid, syscall.SIGTERM); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+				errs = append(errs, killErr)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
 	}
-	b, err := os.ReadFile(p.route.pidPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+	if p.route.netem != nil {
+		if err := p.route.netem.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	if err != nil {
-		return err
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || pid <= 0 {
-		return fmt.Errorf("invalid owned peer pid: %q", b)
-	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 type terminalOutput interface {
@@ -319,9 +323,27 @@ func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedP
 	route := peerRoute{mapping: m, command: role}
 	if m.Role == "udp_peer" {
 		route.pidPath = filepath.Join(runDir, "udp-peer.pid")
+		factory := l.netemFactory
+		if factory == nil {
+			factory = newUDPNetem
+		}
+		netem, err := factory(udpNetemConfig{
+			RTT:         time.Duration(role.Transport.RTTMS) * time.Millisecond,
+			LossPercent: role.Transport.LossPercent,
+			TargetPath:  filepath.Join(runDir, "udp-peer.target"),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("start harness UDP netem: %w", err)
+		}
+		route.netem = netem
 	}
 	shim := filepath.Join(runDir, "ssh")
 	ready := filepath.Join(runDir, "udp-peer.ready")
+	target := filepath.Join(runDir, "udp-peer.target")
+	netemPort := 0
+	if route.netem != nil {
+		netemPort = route.netem.Port()
+	}
 	stderr := filepath.Join(runDir, "udp-peer.stderr")
 	// The bootstrap protocol requires the SSH command to exit after forwarding
 	// the readiness line. The long-lived proxy is owned by pidPath and receives
@@ -333,20 +355,28 @@ case "$*" in
     exec env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _stdio %[6]q
     ;;
   *"_udp-bootstrap"*)
-    rm -f %[7]q %[8]q
-    env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color VEV_PERF_UDP_RTT_MS=%[9]q VEV_PERF_UDP_LOSS_PERCENT=%[10]q %[5]q _udp-proxy %[6]q >%[7]q 2>%[8]q &
+    rm -f %[7]q %[8]q %[9]q
+    env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _udp-proxy %[6]q >%[7]q 2>%[8]q &
     peer=$!
-    printf '%%s\\n' "$peer" > %[11]q
+    printf '%%s\n' "$peer" > %[11]q
     i=0
     while [ ! -s %[7]q ] && [ "$i" -lt 1000 ]; do sleep 0.01; i=$((i+1)); done
     test -s %[7]q
-    head -n 1 %[7]q
+    line=$(head -n 1 %[7]q)
+    printf '%%s\n' "$line" > %[9]q
+    set -- $line
+    test "$1" = VEV-UDP
+    test -n "$3"
+    printf 'VEV-UDP %%s %%s\n' %[10]d "$3"
     exit 0
     ;;
   *) echo 'vev harness ssh seam rejected non-vev command' >&2; exit 64 ;;
 esac
-`, m.TracePath, m.ProcessID, filepath.Join(runDir, "runtime"), filepath.Join(runDir, "state"), l.bin, role.Args[1], ready, stderr, strconv.Itoa(role.Transport.RTTMS), strconv.Itoa(role.Transport.LossPercent), route.pidPath)
+`, m.TracePath, m.ProcessID, filepath.Join(runDir, "runtime"), filepath.Join(runDir, "state"), l.bin, role.Args[1], ready, stderr, target, netemPort, route.pidPath)
 	if err := os.WriteFile(shim, []byte(body), 0o700); err != nil {
+		if route.netem != nil {
+			_ = route.netem.Close()
+		}
 		return nil, err
 	}
 	l.mu.Lock()
@@ -355,6 +385,9 @@ esac
 	}
 	if _, exists := l.peers[runDir]; exists {
 		l.mu.Unlock()
+		if route.netem != nil {
+			_ = route.netem.Close()
+		}
 		return nil, fmt.Errorf("duplicate transport peer for %s", runDir)
 	}
 	l.peers[runDir] = route

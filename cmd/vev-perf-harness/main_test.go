@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,14 @@ type fakeClock struct{ tick int64 }
 
 func (c *fakeClock) Now() int64        { c.tick += 10; return c.tick }
 func (*fakeClock) Sleep(time.Duration) {}
+
+type fakeUDPNetem struct {
+	port   int
+	closed bool
+}
+
+func (n *fakeUDPNetem) Port() int    { return n.port }
+func (n *fakeUDPNetem) Close() error { n.closed = true; return nil }
 
 type fakeProcess struct {
 	fail       bool
@@ -395,38 +405,131 @@ func TestHarnessFakeRunnerRoutesClientToPeerAndCleansEveryRole(t *testing.T) {
 }
 
 func TestCLITransportSeamOwnsExclusivePeerTraceAndCleanup(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
+	fixtures := []struct {
+		name string
+		tr   transport
+		rtt  time.Duration
+		loss int
+	}{
+		{"baseline", transport{ID: "udp_baseline", Kind: "udp"}, 0, 0},
+		{"25ms", transport{ID: "udp_25ms", Kind: "udp", RTTMS: 25}, 25 * time.Millisecond, 0},
+		{"100ms", transport{ID: "udp_100ms", Kind: "udp", RTTMS: 100}, 100 * time.Millisecond, 0},
+		{"loss0", transport{ID: "udp_loss_0pct", Kind: "udp"}, 0, 0},
+		{"loss1", transport{ID: "udp_loss_1pct", Kind: "udp", LossPercent: 1}, 0, 1},
 	}
-	l := &cliLauncher{bin: "/bin/true"}
-	m := processMapping{ProcessID: "udp-peer", TracePath: filepath.Join(dir, "udp.jsonl"), Role: "udp_peer"}
-	if err := os.WriteFile(m.TracePath, nil, 0o600); err != nil {
-		t.Fatal(err)
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Chmod(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			var configs []udpNetemConfig
+			netem := &fakeUDPNetem{port: 45678}
+			l := &cliLauncher{bin: "/bin/true", netemFactory: func(c udpNetemConfig) (udpNetem, error) {
+				configs = append(configs, c)
+				return netem, nil
+			}}
+			m := processMapping{ProcessID: "udp-peer", TracePath: filepath.Join(dir, "udp.jsonl"), Role: "udp_peer"}
+			if err := os.WriteFile(m.TracePath, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			p, err := l.preparePeer(m, roleCommand{Args: []string{"_udp-proxy", "work"}, Transport: tc.tr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(configs) != 1 || configs[0].RTT != tc.rtt || configs[0].LossPercent != tc.loss || configs[0].TargetPath != filepath.Join(dir, "udp-peer.target") {
+				t.Fatalf("fixture did not reach netem seam: %+v", configs)
+			}
+			shim, err := os.ReadFile(filepath.Join(dir, "ssh"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(shim)
+			for _, want := range []string{"_udp-proxy", m.TracePath, m.ProcessID, "udp-peer.target", "VEV-UDP %s %s\\n' 45678", "udp-peer.pid"} {
+				if !strings.Contains(text, want) {
+					t.Errorf("seam does not retain %q:\n%s", want, text)
+				}
+			}
+			if strings.Contains(text, "VEV_PERF_UDP_") {
+				t.Fatalf("ignored vev UDP environment was used instead of netem: %s", text)
+			}
+			// A nonexistent pid is already-cleaned-up; Close must still close the
+			// harness-owned emulator.
+			if err := p.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if !netem.closed {
+				t.Fatal("harness netem was not cleaned up")
+			}
+		})
 	}
-	p, err := l.preparePeer(m, roleCommand{Args: []string{"_udp-proxy", "work"}, Transport: transport{ID: "udp_25ms", Kind: "udp", RTTMS: 25}})
-	if err != nil {
-		t.Fatal(err)
+}
+
+func TestUDPNetemExecutesRTTAndLossFixtures(t *testing.T) {
+	fixtures := []struct {
+		name string
+		rtt  time.Duration
+		loss int
+		sent int
+		want int
+	}{
+		{"25ms RTT", 25 * time.Millisecond, 0, 1, 1},
+		{"100ms RTT", 100 * time.Millisecond, 0, 1, 1},
+		{"zero loss", 0, 0, 10, 10},
+		{"one percent loss", 0, 1, 100, 99},
 	}
-	shim, err := os.ReadFile(filepath.Join(dir, "ssh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(shim)
-	for _, want := range []string{"_udp-proxy", m.TracePath, m.ProcessID, "VEV_PERF_UDP_RTT_MS=\"25\"", "udp-peer.pid"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("seam does not retain %q:\n%s", want, text)
-		}
-	}
-	// A nonexistent pid is already-cleaned-up; Close must treat it as such.
-	if err := p.Close(); err != nil {
-		t.Fatal(err)
-	}
-	l.mu.Lock()
-	route := l.peers[dir]
-	l.mu.Unlock()
-	if route.mapping.TracePath != m.TracePath || route.mapping.ProcessID != m.ProcessID || route.command.Transport.RTTMS != 25 {
-		t.Fatalf("peer route is not exclusively correlated: %+v", route)
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			target, err := net.ListenPacket("udp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer target.Close()
+			path := filepath.Join(t.TempDir(), "target")
+			if err := os.WriteFile(path, []byte("VEV-UDP "+strconv.Itoa(target.LocalAddr().(*net.UDPAddr).Port)+" key\\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			netem, err := newUDPNetem(udpNetemConfig{RTT: tc.rtt, LossPercent: tc.loss, TargetPath: path})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer netem.Close()
+			client, err := net.ListenPacket("udp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			started := time.Now()
+			for i := 0; i < tc.sent; i++ {
+				if _, err := client.WriteTo([]byte{byte(i)}, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: netem.Port()}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := target.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			got := 0
+			buf := make([]byte, 32)
+			for got < tc.want {
+				if _, _, err := target.ReadFrom(buf); err != nil {
+					t.Fatalf("received %d packets, want %d: %v", got, tc.want, err)
+				}
+				got++
+			}
+			if tc.rtt > 0 {
+				if elapsed := time.Since(started); elapsed < tc.rtt/2 {
+					t.Fatalf("one-way netem delay=%s, want at least %s", elapsed, tc.rtt/2)
+				}
+			}
+			// Keep the deadline short: extra carriage would prove the exact 1%%
+			// loss cycle was not enforced.
+			if err := target.SetReadDeadline(time.Now().Add(20 * time.Millisecond)); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := target.ReadFrom(buf); tc.want != tc.sent && err == nil {
+				t.Fatalf("received more than %d packets with %d%% loss", tc.want, tc.loss)
+			}
+		})
 	}
 }
 
