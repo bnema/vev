@@ -1,15 +1,123 @@
 package dgram
 
 import (
+	"encoding/json"
+	"errors"
+	"net"
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/ports"
 )
+
+func TestTransportObservabilityDgramFailedCloseEndsReceiveAndSend(t *testing.T) {
+	behaviorClock := newManualClock(time.Unix(0, 417))
+	link := newSimulatedLink(behaviorClock, packetPolicy{})
+	aPC, _ := newPairWithCapacity(link, 64)
+	closeErr := errors.New("packet connection close failed")
+	tracePath := t.TempDir() + "/dgram-close.jsonl"
+	observer, closer, err := observability.NewJSONL(tracePath, dgramObserverClock{now: time.Unix(0, 521)}, "dgram-process")
+	if err != nil {
+		t.Fatalf("NewJSONL() error = %v", err)
+	}
+	receiveStarted := make(chan struct{})
+	signalingObserver := &dgramStartObserver{RuntimeObserver: observer, receiveStarted: receiveStarted}
+	transport, err := NewTransportWithOptions(&dgramCloseFailPC{fakePC: aPC, err: closeErr}, testAddr("b"), key(), 1, 2, Options{Clock: behaviorClock, ResendAfter: time.Hour, Heartbeat: time.Hour}, WithRuntimeObserver(signalingObserver))
+	if err != nil {
+		t.Fatalf("NewTransportWithOptions() error = %v", err)
+	}
+	if err := transport.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("write failure")}); err == nil {
+		t.Fatal("Send() error = nil on packet write failure")
+	}
+	recvDone := make(chan error, 1)
+	go func() { _, err := transport.Recv(); recvDone <- err }()
+	<-receiveStarted
+	if err := transport.Close(); !errors.Is(err, closeErr) {
+		t.Fatalf("Close() error = %v, want %v", err, closeErr)
+	}
+	if err := <-recvDone; err == nil {
+		t.Fatal("Recv() error = nil after failed Close()")
+	}
+	if err := closer.Close(); err != nil {
+		t.Fatalf("trace Close() error = %v", err)
+	}
+	assertDgramFailedSpanPairs(t, tracePath)
+}
+
+type dgramStartObserver struct {
+	ports.RuntimeObserver
+	receiveStarted chan struct{}
+	once           sync.Once
+}
+
+func (o *dgramStartObserver) ObserveRuntime(mark ports.RuntimeMark) {
+	if mark.Kind == ports.RuntimeAdapterReceiveStart {
+		o.once.Do(func() { close(o.receiveStarted) })
+	}
+	o.RuntimeObserver.ObserveRuntime(mark)
+}
+
+type dgramCloseFailPC struct {
+	*fakePC
+	err error
+}
+
+func (p *dgramCloseFailPC) WriteTo([]byte, net.Addr) (int, error) {
+	return 0, errors.New("packet write failed")
+}
+
+func (p *dgramCloseFailPC) Close() error {
+	_ = p.fakePC.Close()
+	return p.err
+}
+
+func assertDgramFailedSpanPairs(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(trace): %v", err)
+	}
+	type mark struct {
+		ProcessID string `json:"process_id"`
+		Scenario  string `json:"scenario"`
+		Run       uint64 `json:"run"`
+		Sequence  uint64 `json:"sequence"`
+		RequestID uint64 `json:"request_id"`
+		Epoch     uint64 `json:"epoch"`
+		Kind      string `json:"kind"`
+		Valid     bool   `json:"valid"`
+	}
+	type spanKey struct {
+		processID, scenario             string
+		run, sequence, requestID, epoch uint64
+	}
+	starts := make(map[spanKey]mark)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var m mark
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("Unmarshal(trace): %v", err)
+		}
+		key := spanKey{m.ProcessID, m.Scenario, m.Run, m.Sequence, m.RequestID, m.Epoch}
+		switch m.Kind {
+		case "adapter_receive_start", "adapter_send_start":
+			starts[key] = m
+		case "adapter_receive_end", "adapter_send_end":
+			start, ok := starts[key]
+			if !ok || strings.TrimSuffix(start.Kind, "_start") != strings.TrimSuffix(m.Kind, "_end") || m.Valid {
+				t.Fatalf("unmatched or valid failed end: start=%#v end=%#v", start, m)
+			}
+			delete(starts, key)
+		}
+	}
+	if len(starts) != 0 {
+		t.Fatalf("unmatched adapter starts: %#v", starts)
+	}
+}
 
 func TestTransportObservabilityDgramKeepsBehaviorClockSeparate(t *testing.T) {
 	behaviorClock := newManualClock(time.Unix(0, 401))

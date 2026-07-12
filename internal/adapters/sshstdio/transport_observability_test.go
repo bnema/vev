@@ -2,14 +2,123 @@ package sshstdio
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/ports"
 )
+
+func TestTransportObservabilitySSHStdioEOFEndsReceive(t *testing.T) {
+	tracePath := t.TempDir() + "/ssh-eof.jsonl"
+	observer, closer, err := observability.NewJSONL(tracePath, sshRuntimeClock{now: time.Unix(0, 309)}, "ssh-process")
+	if err != nil {
+		t.Fatalf("NewJSONL() error = %v", err)
+	}
+	if _, err := NewTransport(bytes.NewReader(nil), &bytes.Buffer{}, nil, WithRuntimeObserver(observer)).Recv(); err == nil {
+		t.Fatal("Recv() error = nil at EOF")
+	}
+	if err := closer.Close(); err != nil {
+		t.Fatalf("trace Close() error = %v", err)
+	}
+	assertSSHReceiveFailurePair(t, tracePath)
+}
+
+func TestTransportObservabilitySSHStdioCloseEndsBlockedReceive(t *testing.T) {
+	tracePath := t.TempDir() + "/ssh-close.jsonl"
+	observer, closer, err := observability.NewJSONL(tracePath, sshRuntimeClock{now: time.Unix(0, 311)}, "ssh-process")
+	if err != nil {
+		t.Fatalf("NewJSONL() error = %v", err)
+	}
+	reader := &sshShutdownReader{entered: make(chan struct{}), done: make(chan struct{})}
+	shutdownErr := errors.New("ssh shutdown failed")
+	transport := NewTransport(reader, &bytes.Buffer{}, func() error { return shutdownErr }, WithRuntimeObserver(observer))
+	recvDone := make(chan error, 1)
+	go func() { _, err := transport.Recv(); recvDone <- err }()
+	<-reader.entered
+	if err := transport.Close(); !errors.Is(err, shutdownErr) {
+		t.Fatalf("Close() error = %v, want %v", err, shutdownErr)
+	}
+	if err := <-recvDone; err == nil {
+		t.Fatal("Recv() error = nil after Close()")
+	}
+	if err := closer.Close(); err != nil {
+		t.Fatalf("trace Close() error = %v", err)
+	}
+	assertSSHReceiveFailurePair(t, tracePath)
+}
+
+type sshShutdownReader struct {
+	entered chan struct{}
+	done    chan struct{}
+	once    sync.Once
+}
+
+func (r *sshShutdownReader) Read([]byte) (int, error) {
+	r.once.Do(func() { close(r.entered) })
+	<-r.done
+	return 0, errors.New("reader closed")
+}
+
+func (r *sshShutdownReader) Close() error {
+	r.once.Do(func() { close(r.entered) })
+	close(r.done)
+	return nil
+}
+
+func assertSSHReceiveFailurePair(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(trace): %v", err)
+	}
+	var starts, ends []struct {
+		ProcessID string `json:"process_id"`
+		Scenario  string `json:"scenario"`
+		Run       uint64 `json:"run"`
+		Sequence  uint64 `json:"sequence"`
+		RequestID uint64 `json:"request_id"`
+		Epoch     uint64 `json:"epoch"`
+		Kind      string `json:"kind"`
+		Valid     bool   `json:"valid"`
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var mark struct {
+			ProcessID string `json:"process_id"`
+			Scenario  string `json:"scenario"`
+			Run       uint64 `json:"run"`
+			Sequence  uint64 `json:"sequence"`
+			RequestID uint64 `json:"request_id"`
+			Epoch     uint64 `json:"epoch"`
+			Kind      string `json:"kind"`
+			Valid     bool   `json:"valid"`
+		}
+		if err := json.Unmarshal([]byte(line), &mark); err != nil {
+			t.Fatalf("Unmarshal(trace): %v", err)
+		}
+		switch mark.Kind {
+		case "adapter_receive_start":
+			starts = append(starts, mark)
+		case "adapter_receive_end":
+			ends = append(ends, mark)
+		}
+	}
+	if len(starts) != 1 || len(ends) != 1 {
+		t.Fatalf("receive spans start=%d end=%d, want exactly one pair", len(starts), len(ends))
+	}
+	start, end := starts[0], ends[0]
+	if start.ProcessID != end.ProcessID || start.Scenario != end.Scenario || start.Run != end.Run || start.Sequence != end.Sequence || start.RequestID != end.RequestID || start.Epoch != end.Epoch {
+		t.Fatalf("mismatched receive correlation: start=%+v end=%+v", start, end)
+	}
+	if !start.Valid || end.Valid {
+		t.Fatalf("receive validity start=%t end=%t, want true/false", start.Valid, end.Valid)
+	}
+}
 
 func TestTransportObservabilitySSHStdioPreservesCarriage(t *testing.T) {
 	tracePath := t.TempDir() + "/ssh.jsonl"

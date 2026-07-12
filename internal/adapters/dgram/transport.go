@@ -177,6 +177,10 @@ type Transport struct {
 	afterLinkStateCommit func(ports.LinkState)
 	observe              DiagnosticObserver
 	runtimeObserver      ports.RuntimeObserver
+	operationMu          sync.Mutex
+	operationCount       int
+	closing              bool
+	operationsDone       chan struct{}
 	diagnosticCh         chan Diagnostic
 	heartbeat            time.Duration
 	resendAfter          time.Duration
@@ -611,11 +615,16 @@ func (t *Transport) Recv() (ports.Frame, error) {
 	}
 }
 func (t *Transport) Close() error {
+	done := t.beginShutdown()
 	t.closeWithError(errors.New("dgram: closed"))
 	t.mu.Lock()
 	pc := t.pc
 	t.mu.Unlock()
-	return pc.Close()
+	err := pc.Close()
+	if done != nil {
+		<-done
+	}
+	return err
 }
 
 func (t *Transport) Peer() net.Addr { t.mu.Lock(); defer t.mu.Unlock(); return t.peer }
@@ -1618,6 +1627,9 @@ func (t *Transport) beginRuntimeOperation(start ports.RuntimeMarkKind, bytes uin
 	if t.runtimeObserver == nil {
 		return func(bool) {}
 	}
+	if !t.beginObservedOperation() {
+		return func(bool) {}
+	}
 	correlation := ports.NewRuntimeCorrelation()
 	t.runtimeObserver.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("dgram", correlation, start, bytes, true))
 	end := ports.RuntimeAdapterSendEnd
@@ -1625,8 +1637,41 @@ func (t *Transport) beginRuntimeOperation(start ports.RuntimeMarkKind, bytes uin
 		end = ports.RuntimeAdapterReceiveEnd
 	}
 	return func(valid bool) {
+		defer t.finishObservedOperation()
 		t.runtimeObserver.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("dgram", correlation, end, bytes, valid))
 	}
+}
+
+func (t *Transport) beginObservedOperation() bool {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	if t.closing {
+		return false
+	}
+	if t.operationCount == 0 {
+		t.operationsDone = make(chan struct{})
+	}
+	t.operationCount++
+	return true
+}
+
+func (t *Transport) finishObservedOperation() {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	t.operationCount--
+	if t.operationCount == 0 {
+		close(t.operationsDone)
+	}
+}
+
+func (t *Transport) beginShutdown() <-chan struct{} {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	t.closing = true
+	if t.operationCount == 0 {
+		return nil
+	}
+	return t.operationsDone
 }
 
 func (*Transport) DatagramTransport() {}

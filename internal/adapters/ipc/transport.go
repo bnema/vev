@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 
 	"github.com/bnema/vev/internal/ports"
 )
@@ -44,8 +45,12 @@ func WithRuntimeObserver(observer ports.RuntimeObserver) Option {
 }
 
 type unixTransport struct {
-	conn     net.Conn
-	observer ports.RuntimeObserver
+	conn           net.Conn
+	observer       ports.RuntimeObserver
+	operationMu    sync.Mutex
+	operationCount int
+	closing        bool
+	operationsDone chan struct{}
 
 	// readBuf is reused across Recv calls (grow-once strategy): it grows
 	// to fit the largest frame seen so far and is never shrunk. The Frame
@@ -131,6 +136,9 @@ func (t *unixTransport) beginOperation(start ports.RuntimeMarkKind, bytes uint64
 	if t.observer == nil {
 		return func(bool) {}
 	}
+	if !t.beginObservedOperation() {
+		return func(bool) {}
+	}
 	correlation := ports.NewRuntimeCorrelation()
 	t.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("ipc", correlation, start, bytes, true))
 	end := ports.RuntimeAdapterSendEnd
@@ -138,11 +146,50 @@ func (t *unixTransport) beginOperation(start ports.RuntimeMarkKind, bytes uint64
 		end = ports.RuntimeAdapterReceiveEnd
 	}
 	return func(valid bool) {
+		defer t.finishObservedOperation()
 		t.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("ipc", correlation, end, bytes, valid))
 	}
 }
 
-// Close closes the underlying connection.
+func (t *unixTransport) beginObservedOperation() bool {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	if t.closing {
+		return false
+	}
+	if t.operationCount == 0 {
+		t.operationsDone = make(chan struct{})
+	}
+	t.operationCount++
+	return true
+}
+
+func (t *unixTransport) finishObservedOperation() {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	t.operationCount--
+	if t.operationCount == 0 {
+		close(t.operationsDone)
+	}
+}
+
+func (t *unixTransport) beginShutdown() <-chan struct{} {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	t.closing = true
+	if t.operationCount == 0 {
+		return nil
+	}
+	return t.operationsDone
+}
+
+// Close closes the underlying connection and waits for any interrupted
+// carriage operation to write its matching failed end mark.
 func (t *unixTransport) Close() error {
-	return t.conn.Close()
+	done := t.beginShutdown()
+	err := t.conn.Close()
+	if done != nil {
+		<-done
+	}
+	return err
 }

@@ -61,11 +61,15 @@ func newTransport(r io.Reader, w io.Writer, closeFn closeFunc, eofErr eofErrFunc
 }
 
 type transport struct {
-	r        io.Reader
-	w        io.Writer
-	close    closeFunc
-	eofErr   eofErrFunc
-	observer ports.RuntimeObserver
+	r              io.Reader
+	w              io.Writer
+	close          closeFunc
+	eofErr         eofErrFunc
+	observer       ports.RuntimeObserver
+	operationMu    sync.Mutex
+	operationCount int
+	closing        bool
+	operationsDone chan struct{}
 
 	mu      sync.Mutex
 	readBuf []byte
@@ -130,6 +134,9 @@ func (t *transport) beginOperation(start ports.RuntimeMarkKind, bytes uint64) fu
 	if t.observer == nil {
 		return func(bool) {}
 	}
+	if !t.beginObservedOperation() {
+		return func(bool) {}
+	}
 	correlation := ports.NewRuntimeCorrelation()
 	t.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("sshstdio", correlation, start, bytes, true))
 	end := ports.RuntimeAdapterSendEnd
@@ -137,6 +144,7 @@ func (t *transport) beginOperation(start ports.RuntimeMarkKind, bytes uint64) fu
 		end = ports.RuntimeAdapterReceiveEnd
 	}
 	return func(valid bool) {
+		defer t.finishObservedOperation()
 		t.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("sshstdio", correlation, end, bytes, valid))
 	}
 }
@@ -151,7 +159,56 @@ func (t *transport) mapEOFError(err error) error {
 	return err
 }
 
-func (t *transport) Close() error { return t.close() }
+func (t *transport) Close() error {
+	done := t.beginShutdown()
+	// Closing the reader first releases a Recv blocked in io.ReadFull even if
+	// the subprocess shutdown callback reports an error. This lets Recv emit
+	// its failed end mark before the process observer is closed.
+	var readErr error
+	if r, ok := t.r.(io.Closer); ok {
+		readErr = r.Close()
+	}
+	closeErr := t.close()
+	if done != nil {
+		<-done
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return readErr
+}
+
+func (t *transport) beginObservedOperation() bool {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	if t.closing {
+		return false
+	}
+	if t.operationCount == 0 {
+		t.operationsDone = make(chan struct{})
+	}
+	t.operationCount++
+	return true
+}
+
+func (t *transport) finishObservedOperation() {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	t.operationCount--
+	if t.operationCount == 0 {
+		close(t.operationsDone)
+	}
+}
+
+func (t *transport) beginShutdown() <-chan struct{} {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	t.closing = true
+	if t.operationCount == 0 {
+		return nil
+	}
+	return t.operationsDone
+}
 
 type processWaiter struct {
 	cmd     *exec.Cmd
