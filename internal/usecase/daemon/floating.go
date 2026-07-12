@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
@@ -224,6 +225,57 @@ func (d *Daemon) startFloating(sess *session, tb *tab, visible bool) {
 
 // floatingLaunchSpec is an immutable snapshot of one launch. It is built
 // before the worker starts so config reloads cannot affect that launch.
+// floatingLaunch owns one worker from queueing through installation or stale
+// result cleanup. Its done channel lets session teardown reap an in-flight
+// Open before returning.
+type floatingLaunch struct {
+	done chan struct{}
+}
+
+func (sess *session) registerFloatingLaunch() (*floatingLaunch, bool) {
+	launch := &floatingLaunch{done: make(chan struct{})}
+	sess.floatingLaunchMu.Lock()
+	defer sess.floatingLaunchMu.Unlock()
+	if sess.floatingLaunchStopping {
+		return nil, false
+	}
+	if sess.floatingLaunches == nil {
+		sess.floatingLaunches = make(map[*floatingLaunch]struct{})
+	}
+	sess.floatingLaunches[launch] = struct{}{}
+	return launch, true
+}
+
+// openFloating runs fn while only the dedicated launch-ownership lock is
+// held. It deliberately does not hold sess.mu, tb.mu, or d.mu across Open.
+func (sess *session) openFloating(launch *floatingLaunch, fn func() (ports.PTY, error)) (ports.PTY, error, bool) {
+	sess.floatingLaunchMu.Lock()
+	defer sess.floatingLaunchMu.Unlock()
+	if sess.floatingLaunchStopping {
+		return nil, nil, false
+	}
+	pty, err := fn()
+	return pty, err, true
+}
+
+func (sess *session) finishFloatingLaunch(launch *floatingLaunch) {
+	sess.floatingLaunchMu.Lock()
+	delete(sess.floatingLaunches, launch)
+	close(launch.done)
+	sess.floatingLaunchMu.Unlock()
+}
+
+func (sess *session) stopFloatingLaunches() []<-chan struct{} {
+	sess.floatingLaunchMu.Lock()
+	sess.floatingLaunchStopping = true
+	done := make([]<-chan struct{}, 0, len(sess.floatingLaunches))
+	for launch := range sess.floatingLaunches {
+		done = append(done, launch.done)
+	}
+	sess.floatingLaunchMu.Unlock()
+	return done
+}
+
 type floatingLaunchSpec struct {
 	sessionName  string
 	cwd          string
@@ -246,10 +298,18 @@ func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfi
 		d.failFloatingLaunch(tb, generation, userOpen, spec.sessionName, err)
 		return
 	}
+	launch, ok := sess.registerFloatingLaunch()
+	if !ok {
+		d.failFloatingLaunch(tb, generation, userOpen, spec.sessionName, context.Canceled)
+		return
+	}
 	// Count the launch before its goroutine starts. It remains counted through
 	// install, including the reader/coordinator Adds, so shutdown cannot return
 	// before a late Open completion has either been rejected or fully joined.
-	d.sessWg.Go(func() { d.openAndInstallFloating(sess, tb, spec, generation) })
+	d.sessWg.Go(func() {
+		defer sess.finishFloatingLaunch(launch)
+		d.openAndInstallFloating(sess, tb, spec, generation, launch)
+	})
 }
 
 func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.FloatingConfig, userOpen bool) (floatingLaunchSpec, error) {
@@ -305,12 +365,14 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 
 // openAndInstallFloating runs entirely in the launch worker. No PTY operation
 // occurs under tb.mu; the pane is fully initialized before publication.
-func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLaunchSpec, generation uint64) {
-	// Launch workers are allowed to outlive the action that queued them, but
-	// never session teardown. Check both cancellation and daemon ownership
-	// immediately before the irreversible external Open.
+func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLaunchSpec, generation uint64, launch *floatingLaunch) {
+	// The gate makes the final ownership check and external Open one shutdown
+	// epoch: shutdown cannot become irreversible between them. Neither d.mu,
+	// sess.mu, nor tb.mu is held while the factory can block.
+	d.floatingLaunchGate.Lock()
 	select {
 	case <-spec.parentCtx.Done():
+		d.floatingLaunchGate.Unlock()
 		return
 	default:
 	}
@@ -321,9 +383,16 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 	live := !d.closing && (sess.id == "" || d.sessions[sess.id] == sess)
 	d.mu.Unlock()
 	if !live {
+		d.floatingLaunchGate.Unlock()
 		return
 	}
-	pty, err := d.ptys.Open(spec.command, spec.args, spec.env, spec.cwd, spec.size)
+	pty, err, opened := sess.openFloating(launch, func() (ports.PTY, error) {
+		return d.ptys.Open(spec.command, spec.args, spec.env, spec.cwd, spec.size)
+	})
+	d.floatingLaunchGate.Unlock()
+	if !opened {
+		return
+	}
 	if err != nil {
 		d.failFloatingLaunch(tb, generation, spec.userOpen, spec.sessionName, err)
 		return

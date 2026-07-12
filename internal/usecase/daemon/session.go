@@ -53,6 +53,13 @@ type session struct {
 	// clipboard.go) written for this session, removed best-effort in
 	// killSession.
 	clipFiles []string
+
+	// floatingLaunchMu is ownership synchronization for external floating
+	// launches. It is separate from mu so PTYFactory.Open never holds a
+	// session, tab, or daemon architecture lock.
+	floatingLaunchMu       sync.Mutex
+	floatingLaunchStopping bool
+	floatingLaunches       map[*floatingLaunch]struct{}
 }
 
 // tab is a pane layout container; pane owns PTY/screen/scrollback/render scheduling state.
@@ -667,9 +674,14 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 			d.captureSession(sess)
 		}
 	}
+	// Serialize removal of the final session with the last transition into a
+	// floating Open. This establishes whether an Open is pre-shutdown work or
+	// is rejected, without holding d.mu across the external call.
+	d.floatingLaunchGate.Lock()
 	d.mu.Lock()
 	if _, ok := d.sessions[sess.id]; !ok {
 		d.mu.Unlock()
+		d.floatingLaunchGate.Unlock()
 		return nil
 	}
 	delete(d.sessions, sess.id)
@@ -694,6 +706,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 		d.closing = true
 	}
 	d.mu.Unlock()
+	d.floatingLaunchGate.Unlock()
 	d.log.Info("session closed", "session", stoppedName, "id", sess.id, "ephemeral", ephemeral, "purge", purge, "reason", reason)
 
 	purgeErr := snapshotDeleteErr
@@ -729,6 +742,10 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 		ac.setSession(nil)
 	}
 
+	// Prevent queued launches from entering Open, then cancel the parent
+	// context. In-flight Opens are joined below so a late result is always
+	// closed before teardown returns.
+	floatingLaunches := sess.stopFloatingLaunches()
 	sess.cancel()
 	sess.mu.Lock()
 	tabs := append([]*tab(nil), sess.tabs...)
@@ -739,6 +756,9 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 		d.clearDestroyedTabPreview(tb)
 		d.teardownFloating(tb, ac)
 		tb.closeAllPanes()
+	}
+	for _, launchDone := range floatingLaunches {
+		<-launchDone
 	}
 	for _, path := range clipFiles {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
