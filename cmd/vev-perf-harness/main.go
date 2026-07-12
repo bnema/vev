@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -14,9 +15,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bnema/vev/pkg/safedir"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -125,28 +129,253 @@ func (c systemClock) Now() int64          { return time.Since(c.start).Nanosecon
 func (systemClock) Sleep(d time.Duration) { time.Sleep(d) }
 
 type launchedProcess interface {
-	Warmup(time.Duration) error
-	Measure(time.Duration, func()) error
+	Warmup([]byte) error
+	Measure([]byte, func() error, func() error) error
 	Close() error
 }
 type launcher interface {
 	Launch(processMapping, []string) (launchedProcess, error)
 }
-type cliLauncher struct{ bin string }
-type cliProcess struct{ cmd *exec.Cmd }
 
-// The default launcher intentionally invokes only the documented public binary.
-// Scenario drivers are passed as arguments from a manifest only after a future
-// public driver contract exists; this measurement slice never reaches internals.
-func (l cliLauncher) Launch(_ processMapping, _ []string) (launchedProcess, error) {
-	if _, err := os.Stat(l.bin); err != nil {
+// cliLauncher is deliberately limited to executing the supplied public vev
+// binary. Scenario orchestration never reaches into an in-process daemon.
+type cliLauncher struct{ bin string }
+
+type terminalOutput interface {
+	io.Writer
+	Sync() error
+	Close() error
+}
+
+type cliProcess struct {
+	cmd     *exec.Cmd
+	pty     io.ReadWriteCloser
+	output  terminalOutput
+	chunks  chan []byte
+	done    chan struct{}
+	closed  sync.Once
+	waitErr chan error
+}
+
+func (l cliLauncher) Launch(m processMapping, args []string) (launchedProcess, error) {
+	if len(args) == 0 {
+		return nil, errors.New("public CLI role has no arguments")
+	}
+	if info, err := os.Stat(l.bin); err != nil {
+		return nil, err
+	} else if info.IsDir() {
+		return nil, fmt.Errorf("public CLI binary %q is a directory", l.bin)
+	}
+	cmd := exec.Command(l.bin, args...)
+	cmd.Env = append(withoutEnv(os.Environ(), "VEV"), "VEV_PERF_TRACE="+m.TracePath, "VEV_PERF_PROCESS_ID="+m.ProcessID,
+		"XDG_RUNTIME_DIR="+filepath.Join(filepath.Dir(m.TracePath), "runtime"),
+		"XDG_STATE_HOME="+filepath.Join(filepath.Dir(m.TracePath), "state"), "TERM=xterm-256color")
+	if err := safedir.EnsurePrivate(filepath.Join(filepath.Dir(m.TracePath), "runtime")); err != nil {
 		return nil, err
 	}
-	return cliProcess{}, nil
+	if err := safedir.EnsurePrivate(filepath.Join(filepath.Dir(m.TracePath), "state")); err != nil {
+		return nil, err
+	}
+	p := &cliProcess{cmd: cmd, waitErr: make(chan error, 1)}
+	if m.Role == "client" {
+		master, slave, err := openPTY()
+		if err != nil {
+			return nil, err
+		}
+		output, err := os.OpenFile(filepath.Join(filepath.Dir(m.TracePath), "terminal-output"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+		if err != nil {
+			_ = master.Close()
+			_ = slave.Close()
+			return nil, err
+		}
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+		// Ctty is the child descriptor number after Start remaps slave to stdin.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+		if err := cmd.Start(); err != nil {
+			_ = output.Close()
+			_ = master.Close()
+			_ = slave.Close()
+			return nil, err
+		}
+		_ = slave.Close()
+		p.pty, p.output, p.chunks, p.done = master, output, make(chan []byte, 32), make(chan struct{})
+		go p.copyTerminal()
+	} else {
+		devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+		if err != nil {
+			return nil, err
+		}
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = devNull, devNull, devNull
+		if err := cmd.Start(); err != nil {
+			_ = devNull.Close()
+			return nil, err
+		}
+		_ = devNull.Close()
+	}
+	go func() { p.waitErr <- cmd.Wait() }()
+	return p, nil
 }
-func (cliProcess) Warmup(time.Duration) error                  { return nil }
-func (cliProcess) Measure(_ time.Duration, flush func()) error { flush(); return nil }
-func (cliProcess) Close() error                                { return nil }
+
+func withoutEnv(env []string, names ...string) []string {
+	remove := make(map[string]bool, len(names))
+	for _, name := range names {
+		remove[name] = true
+	}
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		if !remove[name] {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func (p *cliProcess) copyTerminal() {
+	defer close(p.chunks)
+	buf := make([]byte, 4096)
+	for {
+		n, err := p.pty.Read(buf)
+		if n > 0 {
+			chunk := append([]byte(nil), buf[:n]...)
+			if _, writeErr := p.output.Write(chunk); writeErr != nil {
+				return
+			}
+			select {
+			case p.chunks <- chunk:
+			case <-p.done:
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (p *cliProcess) Warmup(input []byte) error {
+	if p.pty == nil || len(input) == 0 {
+		return nil
+	}
+	if _, err := p.pty.Write(input); err != nil {
+		return err
+	}
+	// Do not begin measured input until the public client has rendered a real
+	// shell response to warmup input. This is intentionally not a measurement.
+	return p.waitForTerminalMarker(inputMarker(input))
+}
+
+// Measure records a boundary only after the harness-owned terminal output file
+// has accepted data and Sync has reported a successful flush. The marker is
+// injected through the real client PTY, never fabricated by the harness.
+func (p *cliProcess) Measure(input []byte, injected, flushed func() error) error {
+	if p.pty == nil {
+		return errors.New("measured process has no terminal PTY")
+	}
+	if _, err := p.pty.Write(input); err != nil {
+		return err
+	}
+	// The injected callback runs only after the owned PTY accepts the bytes.
+	if err := injected(); err != nil {
+		return err
+	}
+	if err := p.waitForTerminalMarker(inputMarker(input)); err != nil {
+		return err
+	}
+	if err := p.output.Sync(); err != nil {
+		return fmt.Errorf("flush terminal output: %w", err)
+	}
+	return flushed()
+}
+
+func (p *cliProcess) waitForTerminalMarker(marker []byte) error {
+	var received []byte
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	for !bytes.Contains(received, marker) {
+		select {
+		case chunk, ok := <-p.chunks:
+			if !ok {
+				return errors.New("client terminal closed before terminal output")
+			}
+			received = append(received, chunk...)
+		case err := <-p.waitErr:
+			// Keep the exit result available to Close, which owns reaping.
+			p.waitErr <- err
+			if err == nil {
+				return errors.New("client exited before terminal output")
+			}
+			return fmt.Errorf("client exited before terminal output: %w", err)
+		case <-timer.C:
+			return errors.New("timed out waiting for terminal output")
+		}
+	}
+	return nil
+}
+
+func (p *cliProcess) Close() error {
+	var result error
+	p.closed.Do(func() {
+		if p.done != nil {
+			close(p.done)
+		}
+		if p.cmd != nil && p.cmd.Process != nil {
+			_ = p.cmd.Process.Signal(syscall.SIGTERM)
+		}
+		if p.pty != nil {
+			_ = p.pty.Close()
+		}
+		if p.output != nil {
+			result = p.output.Close()
+		}
+		if p.waitErr != nil {
+			select {
+			case <-p.waitErr:
+				// SIGTERM is the harness's normal deterministic cleanup path.
+			case <-time.After(2 * time.Second):
+				if p.cmd != nil && p.cmd.Process != nil {
+					_ = p.cmd.Process.Kill()
+				}
+				<-p.waitErr
+			}
+		}
+	})
+	return result
+}
+
+// openPTY is the small Linux PTY boundary needed to drive the public terminal
+// client. No daemon or adapter implementation is imported by this command.
+func openPTY() (*os.File, *os.File, error) {
+	masterFD, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	closeMaster := func(err error) (*os.File, *os.File, error) { _ = unix.Close(masterFD); return nil, nil, err }
+	number, err := unix.IoctlGetInt(masterFD, unix.TIOCGPTN)
+	if err != nil {
+		return closeMaster(err)
+	}
+	if err := unix.IoctlSetPointerInt(masterFD, unix.TIOCSPTLCK, 0); err != nil {
+		return closeMaster(err)
+	}
+	slaveFD, err := unix.Open(fmt.Sprintf("/dev/pts/%d", number), unix.O_RDWR|unix.O_NOCTTY, 0)
+	if err != nil {
+		return closeMaster(err)
+	}
+	return os.NewFile(uintptr(masterFD), "vev-client-master"), os.NewFile(uintptr(slaveFD), "vev-client-slave"), nil
+}
+
+func inputMarker(input []byte) []byte {
+	start := bytes.Index(input, []byte("__VEV_HARNESS_"))
+	if start < 0 {
+		return input
+	}
+	end := bytes.Index(input[start:], []byte(`\n`))
+	if end < 0 {
+		return input[start:]
+	}
+	return input[start : start+end]
+}
 
 type harness struct {
 	clock     clock
@@ -368,31 +597,46 @@ func (h *harness) runOne(o options, _ manifest, s scenario, run int, raw io.Writ
 		}
 	}()
 	for _, pm := range maps {
-		p, e := h.launcher.Launch(pm, nil)
+		p, e := h.launcher.Launch(pm, roleArgs(s, pm))
 		if e != nil {
 			return res, e
 		}
 		processes = append(processes, p)
 	}
-	for _, p := range processes {
-		if err = p.Warmup(o.warmup); err != nil {
+	for i, p := range processes {
+		if maps[i].Role != "client" {
+			continue
+		}
+		if err = p.Warmup(workloadInput(s, run, "warmup")); err != nil {
 			return res, err
 		}
 	}
+	// The harness clock, rather than a process clock, owns the explicit warmup
+	// interval. Fake clocks make this path instant in unit tests.
+	h.clock.Sleep(o.warmup)
 	marks := []harnessMark{}
 	seq := uint64(0)
-	flush := func() {
+	for i, p := range processes {
+		if maps[i].Role != "client" {
+			continue
+		}
 		seq++
-		start := h.clock.Now()
-		marks = append(marks, harnessMark{s.ID, run, seq, "input_injected", start, true})
-		end := h.clock.Now()
-		marks = append(marks, harnessMark{s.ID, run, seq, "terminal_flushed", end, true})
-	}
-	for _, p := range processes {
-		if err = p.Measure(o.duration, flush); err != nil {
+		sequence := seq
+		injected := func() error {
+			marks = append(marks, harnessMark{s.ID, run, sequence, "input_injected", h.clock.Now(), true})
+			return nil
+		}
+		flushed := func() error {
+			marks = append(marks, harnessMark{s.ID, run, sequence, "terminal_flushed", h.clock.Now(), true})
+			return nil
+		}
+		if err = p.Measure(workloadInput(s, run, fmt.Sprintf("measured-%d", sequence)), injected, flushed); err != nil {
 			return res, err
 		}
 	}
+	// A measured run is never shorter than the requested duration in the
+	// production clock domain. The terminal boundary stays inside that interval.
+	h.clock.Sleep(o.duration)
 	samples, e := pairedSamples(marks)
 	if e != nil {
 		return res, e
@@ -409,6 +653,47 @@ func (h *harness) runOne(o options, _ manifest, s scenario, run int, raw io.Writ
 	success = true
 	return runResult{Spans: spans, Scenario: s.ID, Run: run, Samples: len(samples), EndToEnd: samples, Processes: maps}, nil
 }
+
+func roleArgs(s scenario, m processMapping) []string {
+	session := "perf-" + safeName(s.ID) + fmt.Sprintf("-%03d", m.Run)
+	switch m.Role {
+	case "daemon":
+		return []string{"--daemon"}
+	case "client":
+		// The client is intentionally driven through its documented interactive
+		// CLI. Transport peers below are independently launched public roles.
+		return []string{"new", session}
+	case "ssh_stdio_peer":
+		return []string{"_stdio", session}
+	case "udp_peer":
+		return []string{"_udp-proxy", session}
+	default:
+		return nil
+	}
+}
+
+// workloadInput is shell input delivered through the client PTY. It avoids any
+// private daemon API and makes every topology/workload/transport manifest row
+// execute a real terminal workload. The marker is the output boundary awaited
+// by cliProcess; it is not a synthetic timestamp.
+func workloadInput(s scenario, run int, phase string) []byte {
+	marker := fmt.Sprintf("__VEV_HARNESS_%s_r%d_%s__", safeName(s.ID), run, safeName(phase))
+	body := "printf 'vev perf %s\\n'"
+	switch s.Workload {
+	case "active_output", "all_output", "inactive_output", "interactive_flood":
+		body = "i=0; while [ $i -lt 128 ]; do printf 'vev perf output %s\\n'; i=$((i+1)); done"
+	case "resize_sweep":
+		body = "printf 'vev perf resize-sweep %s\\n'"
+	case "copy_search":
+		body = "printf 'vev perf copy-search %s\\n'"
+	case "snapshot_output_resize":
+		body = "printf 'vev perf snapshot-output-resize %s\\n'"
+	case "attach_restore_tab_switch":
+		body = "printf 'vev perf attach-restore-tab-switch %s\\n'"
+	}
+	return []byte(fmt.Sprintf(body+"; printf '%s\\n'\n", s.ID, marker))
+}
+
 func pairedSamples(marks []harnessMark) ([]int64, error) {
 	starts := map[uint64]int64{}
 	var out []int64
@@ -505,13 +790,20 @@ func mergeProcessTraces(mappings []processMapping) ([]span, error) {
 			return nil, err
 		}
 		_ = f.Close()
+		// Spans may overlap: an end for an older operation can legitimately be
+		// serialized after a newer operation's start. New correlation IDs still
+		// must be allocated monotonically within the process.
 		lastSequence := uint64(0)
+		seenSequences := map[uint64]bool{}
 		starts := map[string]traceRecord{}
 		for _, r := range records {
-			if r.Sequence < lastSequence {
-				return nil, errors.New("nonmonotonic same-process sequence")
+			if !seenSequences[r.Sequence] {
+				if r.Sequence < lastSequence {
+					return nil, errors.New("nonmonotonic same-process sequence")
+				}
+				seenSequences[r.Sequence] = true
+				lastSequence = r.Sequence
 			}
-			lastSequence = r.Sequence
 			for _, pair := range spanPairs {
 				key := fmt.Sprintf("%s/%s/%d/%d/%d/%d", r.ProcessID, m.Scenario, m.Run, r.Sequence, r.RequestID, r.Epoch)
 				if r.Kind == pair.start {

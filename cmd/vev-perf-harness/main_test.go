@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,30 +18,37 @@ func (*fakeClock) Sleep(time.Duration) {}
 
 type fakeProcess struct {
 	fail     bool
-	warmups  []time.Duration
-	measures []time.Duration
+	warmups  [][]byte
+	measures [][]byte
 	closed   bool
 }
 
-func (p *fakeProcess) Warmup(d time.Duration) error { p.warmups = append(p.warmups, d); return nil }
-func (p *fakeProcess) Measure(d time.Duration, flush func()) error {
-	p.measures = append(p.measures, d)
+func (p *fakeProcess) Warmup(input []byte) error {
+	p.warmups = append(p.warmups, append([]byte(nil), input...))
+	return nil
+}
+func (p *fakeProcess) Measure(input []byte, injected, flush func() error) error {
+	p.measures = append(p.measures, append([]byte(nil), input...))
 	if p.fail {
 		return errors.New("measure failure")
 	}
-	flush()
-	return nil
+	if err := injected(); err != nil {
+		return err
+	}
+	return flush()
 }
 func (p *fakeProcess) Close() error { p.closed = true; return nil }
 
 type fakeLauncher struct {
 	mappings        []processMapping
+	args            [][]string
 	process         []*fakeProcess
 	manifestPresent bool
 }
 
-func (l *fakeLauncher) Launch(m processMapping, _ []string) (launchedProcess, error) {
+func (l *fakeLauncher) Launch(m processMapping, args []string) (launchedProcess, error) {
 	l.mappings = append(l.mappings, m)
+	l.args = append(l.args, append([]string(nil), args...))
 	_, e := os.Stat(filepath.Join(filepath.Dir(m.TracePath), "manifest.json"))
 	l.manifestPresent = e == nil
 	p := &fakeProcess{}
@@ -102,7 +110,7 @@ func TestHarnessCreatesExclusiveTraceManifestAndEvidence(t *testing.T) {
 	if !launcher.manifestPresent {
 		t.Fatal("launched before complete run manifest")
 	}
-	if len(r.EndToEnd) != 2 || r.Samples != 2 {
+	if len(r.EndToEnd) != 1 || r.Samples != 1 {
 		t.Fatalf("samples=%+v", r)
 	}
 	seen := map[string]bool{}
@@ -126,8 +134,69 @@ func TestHarnessCreatesExclusiveTraceManifestAndEvidence(t *testing.T) {
 	if len(got.Processes) != 2 {
 		t.Fatalf("manifest=%+v", got)
 	}
-	if len(launcher.process) != 2 || !launcher.process[0].closed || launcher.process[0].warmups[0] != time.Second || launcher.process[0].measures[0] != minimumDuration {
+	if len(launcher.process) != 2 || !launcher.process[0].closed || len(launcher.process[0].warmups) != 0 || len(launcher.process[1].warmups) != 1 || len(launcher.process[1].measures) != 1 {
 		t.Fatalf("process lifecycle not recorded: %+v", launcher.process)
+	}
+}
+
+type fakePTY struct{ writes [][]byte }
+
+func (p *fakePTY) Read([]byte) (int, error) { return 0, os.ErrClosed }
+func (p *fakePTY) Write(b []byte) (int, error) {
+	p.writes = append(p.writes, append([]byte(nil), b...))
+	return len(b), nil
+}
+func (*fakePTY) Close() error { return nil }
+
+type fakeOutput struct {
+	bytes.Buffer
+	syncs int
+}
+
+func (o *fakeOutput) Sync() error { o.syncs++; return nil }
+func (*fakeOutput) Close() error  { return nil }
+
+func TestHarnessDoesNotInheritNestedSession(t *testing.T) {
+	env := withoutEnv([]string{"VEV=session=old", "PATH=/bin", "VEV_PERF_TRACE=old"}, "VEV")
+	if !equalStrings(env, []string{"PATH=/bin", "VEV_PERF_TRACE=old"}) {
+		t.Fatalf("environment=%q", env)
+	}
+}
+
+func TestCLIProcessOwnsPTYInjectionAndSuccessfulFlushBoundary(t *testing.T) {
+	pty, output := &fakePTY{}, &fakeOutput{}
+	p := &cliProcess{pty: pty, output: output, chunks: make(chan []byte, 1)}
+	input := workloadInput(scenario{ID: "s"}, 1, "measured-1")
+	p.chunks <- append([]byte("terminal "), inputMarker(input)...)
+	order := []string{}
+	if err := p.Measure(input, func() error { order = append(order, "injected"); return nil }, func() error { order = append(order, "flushed"); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(pty.writes) != 1 || output.syncs != 1 || !equalStrings(order, []string{"injected", "flushed"}) {
+		t.Fatalf("writes=%q syncs=%d boundary order=%q", pty.writes, output.syncs, order)
+	}
+}
+
+func TestHarnessUsesPublicRoleCommandsAndPTYWorkloads(t *testing.T) {
+	for _, tc := range []struct {
+		role string
+		want []string
+	}{
+		{"daemon", []string{"--daemon"}},
+		{"client", []string{"new", "perf-s-001"}},
+		{"ssh_stdio_peer", []string{"_stdio", "perf-s-001"}},
+		{"udp_peer", []string{"_udp-proxy", "perf-s-001"}},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			got := roleArgs(scenario{ID: "s"}, processMapping{Role: tc.role, Run: 1})
+			if !equalStrings(got, tc.want) {
+				t.Fatalf("args=%q want %q", got, tc.want)
+			}
+		})
+	}
+	input := string(workloadInput(scenario{ID: "s", Workload: "interactive_flood"}, 1, "measured-1"))
+	if string(inputMarker([]byte(input))) != "__VEV_HARNESS_s_r1_measured-1__" || !bytes.Contains([]byte(input), []byte("while [ $i -lt 128 ]")) || !strings.HasSuffix(input, "printf '__VEV_HARNESS_s_r1_measured-1__\\n'\n") {
+		t.Fatalf("workload is not real PTY shell input with an observable marker: %q", input)
 	}
 }
 
@@ -146,6 +215,52 @@ func TestHarnessRejectsInvalidBoundaryPairs(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0] != 4 {
 		t.Fatalf("got %v %v", got, err)
 	}
+}
+
+func TestHarnessCleansRunDirectoryOnProcessFailure(t *testing.T) {
+	dir := t.TempDir()
+	raw, err := os.OpenFile(filepath.Join(dir, "raw-harness.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	launcher := &fakeLauncher{}
+	h := defaultHarness()
+	h.clock = &fakeClock{}
+	// The client is the second role and fails after the daemon has started.
+	h.launcher = &failingLauncher{fakeLauncher: launcher}
+	o := options{vevBin: "ignored", out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}
+	if _, err := h.runOne(o, manifest{}, scenario{ID: "cleanup", Roles: []string{"daemon", "client"}}, 1, raw); err == nil {
+		t.Fatal("failed process accepted")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cleanup-run-001")); !os.IsNotExist(err) {
+		t.Fatalf("failed run directory remains: %v", err)
+	}
+}
+
+type failingLauncher struct{ *fakeLauncher }
+
+func (l *failingLauncher) Launch(m processMapping, args []string) (launchedProcess, error) {
+	p, err := l.fakeLauncher.Launch(m, args)
+	if err != nil {
+		return nil, err
+	}
+	if m.Role == "client" {
+		p.(*fakeProcess).fail = true
+	}
+	return p, nil
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestHarnessRawRecordsAreDeterministicJSONL(t *testing.T) {
@@ -222,7 +337,7 @@ func TestHarnessWritesRequiredEvidenceWithSufficientSpans(t *testing.T) {
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.EndToEnd.Count != 20 || got.Repetitions != 10 || len(got.Spans) == 0 {
+	if got.EndToEnd.Count != 10 || got.Repetitions != 10 || len(got.Spans) == 0 {
 		t.Fatalf("summary=%+v", got)
 	}
 	for _, s := range got.Spans {
