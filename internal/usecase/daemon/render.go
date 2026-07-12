@@ -199,19 +199,6 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 // paint draws the composed client frame (active tab plus status bar) and
 // sends the resulting bytes. The renderer shadow is reset on explicit invalidations
 // such as switch/create/close/rename/resize so the repaint is complete.
-func titleBarPaneIDs(placements []layout.Placement, ok bool) []layout.PaneID {
-	if !ok {
-		return nil
-	}
-	ids := make([]layout.PaneID, 0, len(placements))
-	for _, pl := range placements {
-		if pl.TitleBar.Height > 0 {
-			ids = append(ids, pl.ID)
-		}
-	}
-	return ids
-}
-
 func (d *Daemon) scheduleResizePaintLocked(sess *session, ac *attachedClient) {
 	ac.resizePaint.stop()
 	ac.resizePaintGeneration++
