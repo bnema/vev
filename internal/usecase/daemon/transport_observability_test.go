@@ -253,3 +253,74 @@ func TestTransportObservabilityBlockedCoordinatorObserverReleasesLock(t *testing
 	close(observer.release)
 	awaitDaemonObserver(t, fired, "ACK fire completion")
 }
+
+type ackSpanInterleavingObserver struct {
+	mu           sync.Mutex
+	marks        []ports.RuntimeMark
+	startEntered chan struct{}
+	releaseStart chan struct{}
+}
+
+func newACKSpanInterleavingObserver() *ackSpanInterleavingObserver {
+	return &ackSpanInterleavingObserver{startEntered: make(chan struct{}), releaseStart: make(chan struct{})}
+}
+
+func (o *ackSpanInterleavingObserver) ObserveRuntime(mark ports.RuntimeMark) {
+	if mark.Kind == ports.RuntimeACKBlockedStart {
+		close(o.startEntered)
+		<-o.releaseStart
+	}
+	o.mu.Lock()
+	o.marks = append(o.marks, mark)
+	o.mu.Unlock()
+}
+
+func (o *ackSpanInterleavingObserver) snapshot() []ports.RuntimeMark {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]ports.RuntimeMark(nil), o.marks...)
+}
+
+// An ACK can consume deferred work while the start mark is still waiting on
+// observer I/O. The End must wait for that Start publication, but the ACK
+// itself must not wait for either observer call.
+func TestTransportObservabilityACKBlockedStartPublishesBeforeEnd(t *testing.T) {
+	observer := newACKSpanInterleavingObserver()
+	ready := false
+	rc := newRenderCoordinator(renderCoordinatorOptions{
+		observer: observer,
+		ackReady: func() bool { return ready },
+	})
+	rc.mu.Lock()
+	rc.pending = true
+	gen := rc.generation
+	rc.mu.Unlock()
+
+	fireDone := make(chan struct{})
+	go func() {
+		rc.fire(gen, false, true)
+		close(fireDone)
+	}()
+	awaitDaemonObserver(t, observer.startEntered, "ACK-blocked start observer")
+
+	ready = true
+	ackDone := make(chan struct{})
+	go func() {
+		rc.notifyAck()
+		close(ackDone)
+	}()
+	awaitDaemonObserver(t, ackDone, "nonblocking ACK progress")
+	if marks := observer.snapshot(); len(marks) != 0 {
+		t.Fatalf("ACK-blocked end published before its blocked start: %#v", marks)
+	}
+
+	close(observer.releaseStart)
+	awaitDaemonObserver(t, fireDone, "ACK-blocked start completion")
+	marks := observer.snapshot()
+	if len(marks) != 2 || marks[0].Kind != ports.RuntimeACKBlockedStart || marks[1].Kind != ports.RuntimeACKBlockedEnd {
+		t.Fatalf("ACK-blocked marks = %#v, want one ordered start/end pair", marks)
+	}
+	if marks[0].Sequence != marks[1].Sequence || marks[0].RequestID != marks[1].RequestID || marks[0].Epoch != marks[1].Epoch {
+		t.Fatalf("ACK-blocked span correlation changed: start=%+v end=%+v", marks[0], marks[1])
+	}
+}
