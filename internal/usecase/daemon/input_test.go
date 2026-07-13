@@ -87,6 +87,77 @@ func TestAltDigitSwitchesBetweenThreeTabs(t *testing.T) {
 	d.sessWg.Wait()
 }
 
+func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, nil, nil)
+	source := sess.tabs[0].focusedPane()
+	target := sess.tabs[1].focusedPane()
+	require.Equal(t, source.id, target.id, "tabs deliberately reuse pane-1")
+
+	source.mu.Lock()
+	source.screen.Write([]byte("source"))
+	source.mu.Unlock()
+	d.paint(sess, ac, true)
+	first := <-sends
+	firstOutput, err := ports.UnmarshalOutput(first.Payload)
+	require.NoError(t, err)
+	terminal := vt.NewScreen(ac.size.Cols, ac.size.Rows)
+	terminal.Write(firstOutput.Data)
+
+	// A clean pane relies on the attachment capture cache for its retained
+	// snapshot. Both tabs deliberately use the tab-local default pane ID.
+	target.mu.Lock()
+	target.screen.ClearDamage()
+	target.mu.Unlock()
+	// Use the real key action: it requests the mandatory complete repaint for
+	// the first target-tab frame.
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab2)
+	require.Equal(t, 1, activeTabIndex(sess))
+
+	second := <-sends
+	secondOutput, err := ports.UnmarshalOutput(second.Payload)
+	require.NoError(t, err)
+	require.Zero(t, secondOutput.BaseStateNum, "tab switch must emit the complete target frame first")
+	terminal.Write(secondOutput.Data)
+	require.NotContains(t, strings.Join(frameRows(terminal.Frame), "\n"), "source", "the first target-tab frame must not retain source pane cells")
+}
+
+func TestClosePanePrunesAttachedCaptureFrameAndKeepsSurvivor(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+	tb := sess.tabs[0]
+	survivor := tb.panes["pane-1"]
+	closed := newPane("pane-2", nil, domain.Size{Cols: 40, Rows: 23})
+	tb.mu.Lock()
+	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
+	tb.panes[closed.id] = closed
+	tb.mu.Unlock()
+
+	cachedSurvivor := capturedPaneRenderState{title: "survivor"}
+	ac.captureFrames = map[*pane]capturedPaneRenderState{
+		survivor: cachedSurvivor,
+		closed:   {title: "closed"},
+	}
+
+	require.NoError(t, d.closePane(sess, tb, closed.id, ac, false))
+	require.NotContains(t, ac.captureFrames, closed, "closed pane must not remain strongly retained by its attachment")
+	require.Equal(t, cachedSurvivor, ac.captureFrames[survivor], "surviving pane keeps its incremental capture")
+}
+
+func TestCloseTabPrunesAttachedCaptureFrames(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, nil, nil)
+	closedTab, survivorTab := sess.tabs[0], sess.tabs[1]
+	closed := closedTab.panes["pane-1"]
+	survivor := survivorTab.panes["pane-1"]
+	cachedSurvivor := capturedPaneRenderState{title: "survivor"}
+	ac.captureFrames = map[*pane]capturedPaneRenderState{
+		closed:   {title: "closed"},
+		survivor: cachedSurvivor,
+	}
+
+	d.closeTab(sess, closedTab, false)
+	require.NotContains(t, ac.captureFrames, closed, "closed tab panes must not remain strongly retained by its attachment")
+	require.Equal(t, cachedSurvivor, ac.captureFrames[survivor], "surviving tab pane keeps its incremental capture")
+}
+
 func TestAltCForwardsToPTY(t *testing.T) {
 	writes := make(chan []byte, 2)
 	p, releasePTY := newBlockingPTYWithWrites(t, writes)

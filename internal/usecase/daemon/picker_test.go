@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -214,6 +216,47 @@ func TestPickerLoneEscapeExitsAfterDelay(t *testing.T) {
 	require.True(t, ac.overlays.pickerActive())
 	timer.ch <- time.Now()
 	require.Eventually(t, func() bool { return !ac.overlays.pickerActive() }, time.Second, 5*time.Millisecond)
+}
+
+func TestBackSessionFirstResetDoesNotReuseSamePaneIDCapture(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	defer releasePTY1()
+	defer releasePTY2()
+	d, source, ac, sends := newManualSessionWithPTYs(t, p1)
+	source.id, source.name = "source", "source"
+	delete(d.sessions, domain.SessionID("manual"))
+	d.sessions[source.id] = source
+	target := &session{
+		id: "target", name: "target", ctx: source.ctx, cancel: func() {},
+		tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 22})},
+	}
+	d.sessions[target.id] = target
+
+	sourcePane := source.tabs[0].focusedPane()
+	targetPane := target.tabs[0].focusedPane()
+	require.Equal(t, layout.PaneID("pane-1"), sourcePane.id, "source uses reusable pane-1")
+	require.Equal(t, sourcePane.id, targetPane.id, "target deliberately reuses pane-1")
+	sourcePane.screen.Write([]byte("SOURCE"))
+	client := vt.NewScreen(80, 25)
+	d.firstPaint(source, ac, ac.size)
+	sourceOutput := mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	ac.ackOutputState(sourceOutput.NewStateNum)
+
+	targetPane.screen.Write([]byte("TARGET"))
+	targetPane.screen.ClearDamage() // TARGET is already rendered and has no pending VT damage.
+	require.Empty(t, targetPane.screen.Damage(), "target deliberately has no pending VT damage")
+	ac.previousSession.Set(target)
+
+	// Exercise the user-facing previous-session route, which delegates to the
+	// real switchToTarget hand-off and immediately emits its required reset.
+	d.backSession(source, ac)
+	firstReset := awaitFrame(t, sends, ports.MsgOutput)
+	out := mustApplyOutput(t, client, firstReset)
+	require.Zero(t, out.BaseStateNum, "the first target frame must be the reset, not an eventual repair")
+	frame := strings.Join(frameRows(client.Frame), "\n")
+	require.NotContains(t, frame, "SOURCE", "first target reset must not reuse source capture")
+	require.Contains(t, frame, "TARGET", "first target reset must immediately show clean target VT state")
 }
 
 func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {

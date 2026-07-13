@@ -55,6 +55,43 @@ func TestPaletteBackdropDimsSimultaneousCopyMode(t *testing.T) {
 	require.True(t, paletteVisible, "palette must remain composed above copy mode")
 }
 
+func TestFirstPaintRetainedFloatingPaneEmitsOneReset(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		clientSize domain.Size
+	}{
+		{name: "matching outer size", clientSize: domain.Size{Cols: 80, Rows: 25}},
+		{name: "different outer size", clientSize: domain.Size{Cols: 100, Rows: 40}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pty, releasePTY := newBlockingPTY(t)
+			defer releasePTY()
+			d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
+			ac.sendMu.Lock()
+			ac.size = tc.clientSize
+			ac.sendMu.Unlock()
+
+			// A retained visible popup still needs activation warmup. When the
+			// outer terminal also changes, its completed transaction must cover
+			// that popup rather than emitting a second reset-producing frame.
+			floating := newPane(layout.PaneID("floating"), nil, domain.Size{Cols: 20, Rows: 8})
+			installTestFloating(sess.activeTab(), floating, true)
+
+			d.firstPaint(sess, ac, tc.clientSize)
+
+			frame := awaitFrame(t, sends, ports.MsgOutput)
+			output, err := ports.UnmarshalOutput(frame.Payload)
+			require.NoError(t, err)
+			require.Zero(t, output.BaseStateNum, "first paint must be a mandatory reset")
+			select {
+			case extra := <-sends:
+				t.Fatalf("first paint emitted duplicate frame after floating activation resize: %#v", extra)
+			default:
+			}
+		})
+	}
+}
+
 func TestPaletteBackdropKeepsSimultaneousPickerCrisp(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
@@ -252,6 +289,103 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		newSteps <- channelPTYStep{err: io.EOF}
 		d.sessWg.Wait()
 	})
+}
+
+func TestPTYReaderRestoresPrimaryScreenImmediatelyAfterDEC1049Exit(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		window        uint64
+		exitBeforeACK bool
+		exitSuffix    string
+		overlay       bool
+	}{
+		{name: "datagram output window (1): exit waits for ACK", window: 1},
+		{name: "datagram output window (1): exit and prompt arrive before ACK", window: 1, exitBeforeACK: true, exitSuffix: "PROMPT> "},
+		{name: "local default output window (8): exit waits for ACK", window: maxUnackedOutputStates},
+		{name: "local default output window (8): exit and prompt arrive before ACK", window: maxUnackedOutputStates, exitBeforeACK: true, exitSuffix: "PROMPT> "},
+		{name: "local default output window (8): palette overlay with bars", window: maxUnackedOutputStates, overlay: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pty, steps, processed := newChannelPTY(t)
+			d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
+			// Datagram clients use a one-frame window; local clients retain the
+			// default eight-frame window. Both ACK orderings stay deterministic.
+			ac.output.maxOutstanding = tc.window
+			clock := newCoordinatorMockClock(t, 8)
+			d.clock = clock.clock
+			rc := d.attachCoordinator(sess, nil, ac, true)
+			client := vt.NewScreen(80, 25)
+			pane := sess.tabs[0].focusedPane()
+
+			d.sessWg.Add(1)
+			go d.ptyReader(sess, sess.tabs[0], pane)
+			t.Cleanup(func() {
+				steps <- channelPTYStep{err: io.EOF}
+				d.sessWg.Wait()
+			})
+
+			replay := func(data []byte, deadline time.Duration) ports.Output {
+				t.Helper()
+				steps <- channelPTYStep{data: data}
+				awaitPTYReadProcessed(t, processed)
+				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), deadline)
+				return mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
+			}
+			acknowledge := func(out ports.Output) {
+				ac.ackOutputState(out.NewStateNum)
+				rc.notifyAck()
+			}
+
+			if tc.overlay {
+				d.enterPalette(sess, ac)
+				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
+				acknowledge(mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends)))
+			}
+			acknowledge(replay([]byte("PRIMARY"), minOutputRenderDeadline))
+			primary := client.Frame.Clone()
+
+			// The reported PTY stream is deliberately split into enter, body, and
+			// exit reads. MATRIX distinguishes alternate cells in the replayed
+			// terminal model from all primary, chrome, and overlay cells.
+			acknowledge(replay([]byte("\x1b[?1049h"), minOutputRenderDeadline))
+			alternate := replay([]byte(strings.Repeat("MATRIX", 300)), minOutputRenderDeadline)
+			pane.mu.Lock()
+			require.Contains(t, strings.Join(frameRows(pane.screen.Frame), "\n"), "MATRIX", "fixture must make alternate cells visible to the production renderer")
+			pane.mu.Unlock()
+
+			exitData := []byte("\x1b[?1049l" + tc.exitSuffix)
+			var exit ports.Output
+			if tc.exitBeforeACK {
+				steps <- channelPTYStep{data: exitData}
+				awaitPTYReadProcessed(t, processed)
+				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
+				if tc.window == 1 {
+					requireNoCoordinatorOutputFrame(t, sends)
+					acknowledge(alternate)
+					exit = mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
+				} else {
+					exit = mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
+					require.Equal(t, alternate.NewStateNum, exit.BaseStateNum,
+						"local exit must be rendered before the alternate-frame ACK")
+					acknowledge(alternate)
+				}
+			} else {
+				acknowledge(alternate)
+				steps <- channelPTYStep{data: exitData}
+				awaitPTYReadProcessed(t, processed)
+				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
+				exit = mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
+			}
+			require.NotEmpty(t, exit.Data, "the first post-exit output must actively remove alternate cells")
+			rendered := strings.Join(frameRows(client.Frame), "\n")
+			require.NotContains(t, rendered, "MATRIX", "the first post-exit frame must not retain alternate cells")
+			if tc.exitSuffix == "" {
+				require.Equal(t, frameRows(primary), frameRows(client.Frame), "the first post-exit output must restore the primary screen")
+			} else {
+				require.Contains(t, rendered, tc.exitSuffix, "bytes immediately after DEC 1049 exit must appear in the first post-exit frame")
+			}
+		})
+	}
 }
 
 func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *testing.T) {

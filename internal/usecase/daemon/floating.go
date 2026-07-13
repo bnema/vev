@@ -154,9 +154,15 @@ func (d *Daemon) ensureFloatingWarm(sess *session, tb *tab) {
 // activateTab performs the work associated with making a tab the destination.
 // It is deliberately idempotent: every tab transition can use this single
 // hook, while inactive restored tabs remain cold until actually selected.
-func (d *Daemon) activateTab(sess *session, tb *tab) {
+func (d *Daemon) activateTab(sess *session, tb *tab) bool {
+	return d.activateTabAfterResize(sess, tb, false)
+}
+
+// activateTabAfterResize retains tab activation's warmup work while avoiding a
+// second resize when a synchronous outer resize request was already accepted.
+func (d *Daemon) activateTabAfterResize(sess *session, tb *tab, outerResizeAccepted bool) bool {
 	if d == nil || sess == nil || tb == nil {
-		return
+		return false
 	}
 	// A headless session has no actual terminal destination. Deferring warmup
 	// until firstPaint keeps restored tabs cold and avoids launching children
@@ -166,16 +172,20 @@ func (d *Daemon) activateTab(sess *session, tb *tab) {
 	sess.mu.Unlock()
 	d.exitCopyMode(ac)
 	if ac == nil {
-		return
+		return false
 	}
 	d.ensureFloatingWarm(sess, tb)
+	if outerResizeAccepted {
+		return false
+	}
 	tb.mu.Lock()
 	hasFloating := tb.floating.pane != nil
 	size := domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows + 2}
 	tb.mu.Unlock()
 	if hasFloating {
-		d.requestTransactionalResize(sess, ac, size, true)
+		return d.requestTransactionalResize(sess, ac, size, true)
 	}
+	return false
 }
 
 // toggleFloating changes only this tab's slot. Opening an uninitialized slot
@@ -427,6 +437,9 @@ func (d *Daemon) reapFloating(sess *session, tb *tab, p *pane, generation uint64
 	sess.mu.Lock()
 	ac := sess.client
 	sess.mu.Unlock()
+	if ac != nil {
+		ac.pruneCaptureFrames(p)
+	}
 	copyCleared := ac != nil && ac.overlays.clearCopyModeForPane(p)
 	if ac != nil && (visible || copyCleared) {
 		d.invalidateRender(sess, ac, true, "floating.go")
@@ -443,6 +456,7 @@ func (d *Daemon) teardownFloating(tb *tab, ac *attachedClient) {
 	tb.mu.Unlock()
 	if ac != nil {
 		ac.overlays.clearCopyModeForPane(p)
+		ac.pruneCaptureFrames(p)
 	}
 	closeFloatingPane(p)
 }

@@ -92,12 +92,13 @@ type Screen struct {
 	defaultColorsKnown bool
 	terminalTitle      string
 
-	damage           []renderer.Damage
-	damageGeneration uint64
-	damageSaturated  bool
-	escapeBuf        []byte
-	csiScratch       []int
-	sgrScratch       []int
+	damage                 []renderer.Damage
+	damageGeneration       uint64
+	damageSaturated        bool
+	damageFullRedrawSticky bool
+	escapeBuf              []byte
+	csiScratch             []int
+	sgrScratch             []int
 
 	scrollTop        int
 	scrollBottom     int
@@ -191,6 +192,7 @@ func (s *Screen) Damage() []renderer.Damage { return s.damage }
 func (s *Screen) ClearDamage() {
 	s.damage = s.damage[:0]
 	s.damageSaturated = false
+	s.damageFullRedrawSticky = false
 }
 
 // CaptureDamage snapshots pending damage without consuming it.
@@ -652,7 +654,7 @@ func (s *Screen) normalizedRegion(top, bottom int) (int, int, bool) {
 
 func (s *Screen) record(d renderer.Damage) {
 	s.damageGeneration++
-	if s.damageSaturated {
+	if s.damageSaturated || s.damageFullRedrawSticky {
 		return
 	}
 	if len(s.damage) >= maxPendingDamage {
@@ -679,6 +681,10 @@ func (s *Screen) record(d renderer.Damage) {
 func (s *Screen) fullRedraw() {
 	s.damageGeneration++
 	s.damage = []renderer.Damage{renderer.FullRedraw()}
+	// A structural frame replacement (such as DEC 1049 exit) cannot be
+	// represented by the following text damage alone. Retain the redraw until
+	// the render owner acknowledges this screen generation.
+	s.damageFullRedrawSticky = true
 }
 
 func (s *Screen) consumeEscape(data []byte) (consumed int, partial bool) {

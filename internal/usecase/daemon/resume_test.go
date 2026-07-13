@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 type closeTrackingTransport struct {
@@ -294,6 +297,60 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 	second, err := ports.UnmarshalOutput(sends[1].Payload)
 	require.NoError(t, err)
 	require.Equal(t, first.NewStateNum, second.BaseStateNum)
+}
+
+func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	oldTransport := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTransport)
+	require.NoError(t, err)
+
+	tb := sess.tabs[0]
+	survivor := tb.panes["pane-1"]
+	closed := newPane("pane-2", nil, domain.Size{Cols: 40, Rows: 23})
+	tb.mu.Lock()
+	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-1"}
+	tb.panes[closed.id] = closed
+	d.applyLayoutLocked(tb)
+	tb.mu.Unlock()
+	survivor.screen.Write([]byte("survivor"))
+	closed.screen.Write([]byte("closed"))
+	d.paint(sess, ac, true)
+
+	ac.sendMu.Lock()
+	require.Contains(t, ac.captureFrames, closed, "fixture must render and capture the pane before parking")
+	ac.sendMu.Unlock()
+	token := ac.resumeToken
+	require.True(t, sess.detachIfCurrent(ac))
+	require.True(t, d.parkAttachment(sess, ac))
+
+	// Headless close cannot find the parked attachment through sess.client.
+	// Its capture must already have been released before the attachment parked.
+	require.NoError(t, d.closePane(sess, tb, closed.id, nil, false))
+	ac.sendMu.Lock()
+	require.NotContains(t, ac.captureFrames, closed, "parked attachment must not retain a pane closed while headless")
+	ac.sendMu.Unlock()
+
+	newTransport := &closeTrackingTransport{}
+	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, sess.name, token), newTransport)
+	require.NoError(t, err)
+	require.Same(t, sess, resumedSess)
+	require.Same(t, ac, resumedAC)
+	require.True(t, resumedSess.renderCoordinator().markAttachmentReady(resumedAC))
+	d.firstPaint(resumedSess, resumedAC, resumedAC.size)
+
+	sends := newTransport.Sends()
+	require.Len(t, sends, 1)
+	output, err := ports.UnmarshalOutput(sends[0].Payload)
+	require.NoError(t, err)
+	require.Zero(t, output.BaseStateNum, "resume must start with a complete frame")
+	terminal := vt.NewScreen(resumedAC.size.Cols, resumedAC.size.Rows)
+	terminal.Write(output.Data)
+	contents := strings.Join(frameRows(terminal.Frame), "\n")
+	require.Contains(t, contents, "survivor", "resume first paint must contain current headless content")
+	require.NotContains(t, contents, "closed", "resume first paint must not contain closed pane content")
 }
 
 func TestExplicitDetachDoesNotPark(t *testing.T) {

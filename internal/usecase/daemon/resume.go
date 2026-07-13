@@ -48,6 +48,11 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 	if !d.prepareParkAttachment(sess, ac) {
 		return false
 	}
+	// A parked attachment has no session owner. Release pane snapshots before
+	// publishing it in the daemon registry so headless pane/session teardown
+	// cannot leave closed panes retained through its capture cache. This must
+	// remain outside d.mu: sendMu is ordered before the daemon lock.
+	ac.clearCaptureFrames()
 	d.mu.Lock()
 	if d.closing {
 		d.mu.Unlock()
