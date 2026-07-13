@@ -200,16 +200,22 @@ func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 	}
 	cfg := d.currentFloatingConfig()
 	tb.mu.Lock()
+	wasVisible := tb.floating.state == floatingVisible
 	start, generation := tb.toggleFloatingLocked()
 	// desiredVisible is meaningful only while a launch is warming. Installed
 	// slots derive their resize and paint work from the resulting slot state.
 	visible := tb.floating.state == floatingVisible
+	hidden := wasVisible && tb.floating.state == floatingHidden
 	tb.mu.Unlock()
 	if start {
 		d.launchFloating(sess, tb, cfg, generation, true)
 		if ac != nil {
 			d.invalidateRender(sess, ac, true, "floating.go")
 		}
+		return nil
+	}
+	if hidden {
+		d.invalidateRender(sess, ac, true, "floating.go")
 		return nil
 	}
 	if visible {
@@ -300,7 +306,7 @@ func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfi
 	// before a late Open completion has either been rejected or fully joined.
 	d.sessWg.Go(func() {
 		defer sess.finishFloatingLaunch(launch)
-		d.openAndInstallFloating(sess, tb, spec, generation, launch)
+		d.openAndInstallFloating(sess, tb, spec, generation)
 	})
 }
 
@@ -357,7 +363,7 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 
 // openAndInstallFloating runs entirely in the launch worker. No PTY operation
 // occurs under tb.mu; the pane is fully initialized before publication.
-func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLaunchSpec, generation uint64, launch *floatingLaunch) {
+func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLaunchSpec, generation uint64) {
 	// Open is context-aware and is intentionally called without any daemon,
 	// session, tab, or launch-ownership lock. Cancellation makes teardown
 	// bounded even if the adapter is waiting to create the child.
@@ -366,9 +372,12 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 	}
 	openCtx, cancelOpen := context.WithCancel(spec.parentCtx)
 	stopSessionCancel := context.AfterFunc(sess.ctx, cancelOpen)
+	ownedByPane := false
 	defer func() {
-		stopSessionCancel()
-		cancelOpen()
+		if !ownedByPane {
+			stopSessionCancel()
+			cancelOpen()
+		}
 	}()
 	pty, err := d.ptys.Open(openCtx, spec.command, spec.args, spec.env, spec.cwd, spec.size)
 	if err != nil {
@@ -379,7 +388,14 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 	p.rect = spec.geometry.Inner
 	p.popupGeometry = spec.geometry
 	p.title.displayFallback = spec.fallback
-	p.ctx, p.cancel = context.WithCancel(spec.parentCtx)
+	// CommandContext owns the child through openCtx, so retain both this context
+	// and its cancellation until the installed pane is reaped or torn down.
+	p.ctx = openCtx
+	p.cancel = func() {
+		stopSessionCancel()
+		cancelOpen()
+	}
+	ownedByPane = true
 	// The reader may run as soon as install returns; make its exit policy
 	// immutable before publishing the pane to the slot.
 	p.onExit = func() { d.reapFloating(sess, tb, p, generation) }
