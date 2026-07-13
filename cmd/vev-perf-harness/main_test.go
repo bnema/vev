@@ -16,8 +16,10 @@ import (
 
 type fakeClock struct{ tick int64 }
 
-func (c *fakeClock) Now() int64        { c.tick += 10; return c.tick }
-func (*fakeClock) Sleep(time.Duration) {}
+func (c *fakeClock) Now() int64 { c.tick += 10; return c.tick }
+func (c *fakeClock) Sleep(d time.Duration) {
+	c.tick += d.Nanoseconds()
+}
 
 type fakeUDPNetem struct {
 	port   int
@@ -74,6 +76,27 @@ func (l *fakeLauncher) Launch(m processMapping, command roleCommand) (launchedPr
 	p := &fakeProcess{measureErr: l.measureErr[m.Role], closeErr: l.closeErr[m.Role]}
 	l.process = append(l.process, p)
 	return p, nil
+}
+
+type lateFlushProcess struct{ clock *fakeClock }
+
+func (*lateFlushProcess) Warmup([]byte) error { return nil }
+func (p *lateFlushProcess) Measure(_ []byte, injected, flushed func() error) error {
+	if err := injected(); err != nil {
+		return err
+	}
+	p.clock.tick += minimumDuration.Nanoseconds()
+	return flushed()
+}
+func (*lateFlushProcess) Close() error { return nil }
+
+type insufficientEventLauncher struct{ clock *fakeClock }
+
+func (l insufficientEventLauncher) Launch(m processMapping, _ roleCommand) (launchedProcess, error) {
+	if m.Role == "client" {
+		return &lateFlushProcess{clock: l.clock}, nil
+	}
+	return &fakeProcess{}, nil
 }
 
 func TestCLIProcessCloseIsBoundedWhenPublicRoleDoesNotExit(t *testing.T) {
@@ -138,7 +161,7 @@ func TestHarnessCanonicalLocalSmokeRealRoles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Samples != 1 || len(result.Processes) != 2 {
+	if result.Samples < minimumInIntervalEventSamples || len(result.Processes) != 2 {
 		t.Fatalf("canonical local smoke result=%+v", result)
 	}
 }
@@ -241,7 +264,7 @@ func TestHarnessCreatesExclusiveTraceManifestAndEvidence(t *testing.T) {
 	if !launcher.manifestPresent {
 		t.Fatal("launched before complete run manifest")
 	}
-	if len(r.EndToEnd) != 1 || r.Samples != 1 {
+	if len(r.EndToEnd) < minimumInIntervalEventSamples || r.Samples < minimumInIntervalEventSamples {
 		t.Fatalf("samples=%+v", r)
 	}
 	seen := map[string]bool{}
@@ -265,7 +288,7 @@ func TestHarnessCreatesExclusiveTraceManifestAndEvidence(t *testing.T) {
 	if len(got.Processes) != 2 {
 		t.Fatalf("manifest=%+v", got)
 	}
-	if len(launcher.process) != 2 || !launcher.process[0].closed || len(launcher.process[0].warmups) != 0 || len(launcher.process[1].warmups) != 1 || len(launcher.process[1].measures) != 1 {
+	if len(launcher.process) != 2 || !launcher.process[0].closed || len(launcher.process[0].warmups) != 0 || len(launcher.process[1].warmups) != 1 || len(launcher.process[1].measures) < minimumInIntervalEventSamples {
 		t.Fatalf("process lifecycle not recorded: %+v", launcher.process)
 	}
 }
@@ -676,6 +699,115 @@ func TestHarnessRejectsInvalidBoundaryPairs(t *testing.T) {
 	}
 }
 
+func TestHarnessCollectsOnlyCompleteMeasuredIntervalEvents(t *testing.T) {
+	interval := measuredInterval{Start: 100, End: 200}
+	marks := []harnessMark{
+		{Sequence: 1, Kind: "input_injected", Tick: 10, Valid: true},
+		{Sequence: 1, Kind: "terminal_flushed", Tick: 20, Valid: true}, // warmup
+		{Sequence: 2, Kind: "input_injected", Tick: 100, Valid: true},
+		{Sequence: 2, Kind: "terminal_flushed", Tick: 120, Valid: true},
+		{Sequence: 3, Kind: "input_injected", Tick: 150, Valid: true},
+		{Sequence: 3, Kind: "terminal_flushed", Tick: 201, Valid: true}, // exits interval
+		{Sequence: 4, Kind: "input_injected", Tick: 99, Valid: true},
+		{Sequence: 4, Kind: "terminal_flushed", Tick: 110, Valid: true}, // enters interval
+	}
+	events, err := measuredEventSamples(marks, interval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Sequence != 2 || events[0].Latency != 20 {
+		t.Fatalf("measured events=%+v, want only complete sequence 2", events)
+	}
+}
+
+func TestHarnessRejectsInsufficientMeasuredEventSamples(t *testing.T) {
+	marks := make([]harnessMark, 0, 2*(minimumInIntervalEventSamples-1))
+	for i := 0; i < minimumInIntervalEventSamples-1; i++ {
+		marks = append(marks,
+			harnessMark{Sequence: uint64(i + 1), Kind: "input_injected", Tick: int64(i * 100), Valid: true},
+			harnessMark{Sequence: uint64(i + 1), Kind: "terminal_flushed", Tick: int64(i*100 + 10), Valid: true},
+		)
+	}
+	events, err := measuredEventSamples(marks, measuredInterval{Start: 0, End: int64(minimumInIntervalEventSamples * 100)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := requireMinimumEventSamples(events); err == nil {
+		t.Fatal("insufficient measured event samples accepted")
+	}
+}
+
+func TestHarnessRunRejectsStraddlingEventsAsInsufficient(t *testing.T) {
+	dir := t.TempDir()
+	raw, err := os.OpenFile(filepath.Join(dir, "raw.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	clock := &fakeClock{}
+	h := defaultHarness()
+	h.clock, h.launcher = clock, insufficientEventLauncher{clock: clock}
+	_, err = h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "late", Roles: []string{"daemon", "client"}}, 1, raw)
+	if err == nil || !strings.Contains(err.Error(), "insufficient in-interval event samples") {
+		t.Fatalf("straddling run error=%v, want insufficient in-interval sample rejection", err)
+	}
+}
+
+func TestHarnessCalculatesEventCadenceAndMaxGapFromRawPairs(t *testing.T) {
+	events := []eventSample{
+		{Sequence: 1, Injected: 100, Flushed: 110, Latency: 10},
+		{Sequence: 2, Injected: 130, Flushed: 140, Latency: 10},
+		{Sequence: 3, Injected: 180, Flushed: 190, Latency: 10},
+	}
+	cadence, maxGap := eventCadence(events)
+	if cadence.Count != 2 || cadence.P50 != 30 || cadence.P95 != 30 || cadence.P99 != 30 || maxGap != 50 {
+		t.Fatalf("cadence=%+v maxGap=%d", cadence, maxGap)
+	}
+}
+
+func TestHarnessAggregatesRawEventsSeparatelyFromRunDispersion(t *testing.T) {
+	first := append([]int64(nil), make([]int64, minimumInIntervalEventSamples+5)...)
+	for i := range first {
+		first[i] = 1
+	}
+	second := []int64{100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 1_000, 1_000}
+	all, _, _, runP50s := aggregateEventResults([]runResult{
+		{EndToEnd: first, Event: distribution{P50: 1}},
+		{EndToEnd: second, Event: distribution{P50: 100}},
+	})
+	if got, dispersion := percentiles(all), percentiles(runP50s); got.Count != 30 || got.P99 != 1_000 || dispersion.Count != 2 || dispersion.P99 != 1 {
+		t.Fatalf("event aggregation=%+v run dispersion=%+v", got, dispersion)
+	}
+}
+
+func TestHarnessSchedulesMeasuredEventsAcrossFullInterval(t *testing.T) {
+	dir := t.TempDir()
+	raw, err := os.OpenFile(filepath.Join(dir, "raw.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	h := defaultHarness()
+	h.clock, h.launcher = &fakeClock{}, &fakeLauncher{}
+	result, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "schedule", Roles: []string{"daemon", "client"}}, 1, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Samples < minimumInIntervalEventSamples || result.Cadence.Count != result.Samples-1 || result.MaxGap <= 0 {
+		t.Fatalf("result did not include repeated measured events: %+v", result)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	records, err := readJSONL(filepath.Join(dir, "raw.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != result.Samples*2 {
+		t.Fatalf("raw records=%d, want %d complete measured boundaries", len(records), result.Samples*2)
+	}
+}
+
 func TestHarnessPreservesWorkloadAndCleanupErrors(t *testing.T) {
 	dir := t.TempDir()
 	raw, err := os.OpenFile(filepath.Join(dir, "raw.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -895,7 +1027,7 @@ func TestHarnessWritesRequiredEvidenceWithSufficientSpans(t *testing.T) {
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.EndToEnd.Count != 10 || got.Repetitions != 10 || len(got.Spans) == 0 {
+	if got.EndToEnd.Count < 10*minimumInIntervalEventSamples || got.Repetitions != 10 || got.RunP50Dispersion.Count != 10 || got.Cadence.Count == 0 || got.MaxGap == 0 || len(got.Spans) == 0 {
 		t.Fatalf("summary=%+v", got)
 	}
 	for _, s := range got.Spans {

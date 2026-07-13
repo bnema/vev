@@ -25,8 +25,10 @@ import (
 )
 
 const (
-	minimumDuration    = 30 * time.Second
-	minimumRepetitions = 10
+	minimumDuration               = 30 * time.Second
+	minimumRepetitions            = 10
+	minimumInIntervalEventSamples = 10
+	measuredEventCadence          = time.Second
 )
 
 type options struct {
@@ -85,27 +87,48 @@ type harnessMark struct {
 	Tick     int64  `json:"tick"`
 	Valid    bool   `json:"valid"`
 }
+
+// measuredInterval belongs solely to the harness clock domain. A paired event
+// is eligible only when both owned boundaries fall inside this interval.
+type measuredInterval struct {
+	Start int64
+	End   int64
+}
+
+type eventSample struct {
+	Sequence uint64 `json:"sequence"`
+	Injected int64  `json:"injected_tick"`
+	Flushed  int64  `json:"flushed_tick"`
+	Latency  int64  `json:"latency_nanos"`
+}
 type span struct {
 	Component, Name string
 	Samples         []int64
 }
 type runResult struct {
-	Spans     []span           `json:"process_local_spans"`
-	Scenario  string           `json:"scenario"`
-	Run       int              `json:"run"`
-	Samples   int              `json:"samples"`
-	EndToEnd  []int64          `json:"end_to_end_nanos"`
-	Processes []processMapping `json:"processes"`
+	Spans          []span           `json:"process_local_spans"`
+	Scenario       string           `json:"scenario"`
+	Run            int              `json:"run"`
+	Samples        int              `json:"samples"`
+	EndToEnd       []int64          `json:"end_to_end_nanos"`
+	Event          distribution     `json:"event_end_to_end"`
+	Cadence        distribution     `json:"event_cadence_nanos"`
+	CadenceSamples []int64          `json:"-"`
+	MaxGap         int64            `json:"event_max_gap_nanos"`
+	Processes      []processMapping `json:"processes"`
 }
 type summary struct {
-	Schema      uint16        `json:"schema"`
-	GitSHA      string        `json:"git_sha"`
-	Warmup      string        `json:"warmup"`
-	Duration    string        `json:"duration"`
-	Repetitions int           `json:"repetitions"`
-	EndToEnd    distribution  `json:"harness_end_to_end"`
-	Spans       []spanSummary `json:"process_local_spans"`
-	Runs        int           `json:"runs"`
+	Schema           uint16        `json:"schema"`
+	GitSHA           string        `json:"git_sha"`
+	Warmup           string        `json:"warmup"`
+	Duration         string        `json:"duration"`
+	Repetitions      int           `json:"repetitions"`
+	EndToEnd         distribution  `json:"harness_end_to_end"`
+	Cadence          distribution  `json:"harness_event_cadence_nanos"`
+	MaxGap           int64         `json:"harness_event_max_gap_nanos"`
+	RunP50Dispersion distribution  `json:"run_p50_dispersion"`
+	Spans            []spanSummary `json:"process_local_spans"`
+	Runs             int           `json:"runs"`
 }
 type distribution struct {
 	Count int   `json:"count"`
@@ -768,7 +791,6 @@ func run(args []string, h *harness) error {
 	}
 	defer raw.Close()
 	results := make([]runResult, 0, len(m.Scenarios)*opt.repetitions)
-	var all []int64
 	var localSpans []span
 	scenarios := m.Scenarios
 	if h.selectScenarios != nil {
@@ -784,18 +806,33 @@ func run(args []string, h *harness) error {
 				return fmt.Errorf("scenario %s run %d: %w", s.ID, r, err)
 			}
 			results = append(results, rr)
-			all = append(all, rr.EndToEnd...)
 			localSpans = append(localSpans, rr.Spans...)
 		}
 	}
+	all, cadence, maxGap, runP50s := aggregateEventResults(results)
 	if len(all) == 0 {
 		return errors.New("no measured harness input/flush pairs")
 	}
 	if err := writeJSON(filepath.Join(opt.out, "runs.json"), results); err != nil {
 		return err
 	}
-	return writeJSON(filepath.Join(opt.out, "summary.json"), summary{Schema: 1, GitSHA: h.gitSHA(), Warmup: opt.warmup.String(), Duration: opt.duration.String(), Repetitions: opt.repetitions, EndToEnd: percentiles(all), Spans: summarizeSpans(localSpans), Runs: len(results)})
+	return writeJSON(filepath.Join(opt.out, "summary.json"), summary{Schema: 1, GitSHA: h.gitSHA(), Warmup: opt.warmup.String(), Duration: opt.duration.String(), Repetitions: opt.repetitions, EndToEnd: percentiles(all), Cadence: percentiles(cadence), MaxGap: maxGap, RunP50Dispersion: percentiles(runP50s), Spans: summarizeSpans(localSpans), Runs: len(results)})
 }
+
+// aggregateEventResults deliberately preserves raw event latencies for
+// end-to-end percentiles. Per-run p50s are a separate dispersion series.
+func aggregateEventResults(results []runResult) (all, cadence []int64, maxGap int64, runP50s []int64) {
+	for _, result := range results {
+		all = append(all, result.EndToEnd...)
+		cadence = append(cadence, result.CadenceSamples...)
+		runP50s = append(runP50s, result.Event.P50)
+		if result.MaxGap > maxGap {
+			maxGap = result.MaxGap
+		}
+	}
+	return all, cadence, maxGap, runP50s
+}
+
 func parseOptions(args []string) (options, error) {
 	var o options
 	fs := flag.NewFlagSet("vev-perf-harness", flag.ContinueOnError)
@@ -1036,35 +1073,57 @@ func (h *harness) runOne(o options, mat manifest, s scenario, run int, raw io.Wr
 		}
 	}
 	// The harness clock, rather than a process clock, owns the explicit warmup
-	// interval. Fake clocks make this path instant in unit tests.
+	// and measured intervals. Warmup boundaries are intentionally never added to
+	// marks, and each measured event must complete before interval.End to count.
 	h.clock.Sleep(o.warmup)
+	interval := measuredInterval{Start: h.clock.Now()}
+	interval.End = interval.Start + o.duration.Nanoseconds()
 	marks := []harnessMark{}
 	seq := uint64(0)
-	for _, p := range processes {
-		if p.mapping.Role != "client" {
-			continue
+	nextInjection := interval.Start
+	for {
+		now := h.clock.Now()
+		if now < nextInjection {
+			h.clock.Sleep(time.Duration(nextInjection - now))
+			now = h.clock.Now()
 		}
-		seq++
-		sequence := seq
-		injected := func() error {
-			marks = append(marks, harnessMark{s.ID, run, sequence, "input_injected", h.clock.Now(), true})
-			return nil
+		if now >= interval.End {
+			break
 		}
-		flushed := func() error {
-			marks = append(marks, harnessMark{s.ID, run, sequence, "terminal_flushed", h.clock.Now(), true})
-			return nil
+		for _, p := range processes {
+			if p.mapping.Role != "client" {
+				continue
+			}
+			seq++
+			sequence := seq
+			injected := func() error {
+				marks = append(marks, harnessMark{s.ID, run, sequence, "input_injected", h.clock.Now(), true})
+				return nil
+			}
+			flushed := func() error {
+				marks = append(marks, harnessMark{s.ID, run, sequence, "terminal_flushed", h.clock.Now(), true})
+				return nil
+			}
+			if err = p.process.Measure(workloadInput(s, run, fmt.Sprintf("measured-%d", sequence)), injected, flushed); err != nil {
+				return res, err
+			}
 		}
-		if err = p.process.Measure(workloadInput(s, run, fmt.Sprintf("measured-%d", sequence)), injected, flushed); err != nil {
-			return res, err
-		}
+		// Cap injection rate rather than bursting events after a slow terminal
+		// flush. Any resulting spacing is retained as raw cadence evidence.
+		nextInjection = h.clock.Now() + measuredEventCadence.Nanoseconds()
 	}
-	// A measured run is never shorter than the requested duration in the
-	// production clock domain. The terminal boundary stays inside that interval.
-	h.clock.Sleep(o.duration)
-	samples, e := pairedSamples(marks)
+	if now := h.clock.Now(); now < interval.End {
+		h.clock.Sleep(time.Duration(interval.End - now))
+	}
+	events, e := measuredEventSamples(marks, interval)
 	if e != nil {
 		return res, e
 	}
+	if err := requireMinimumEventSamples(events); err != nil {
+		return res, err
+	}
+	samples := eventLatencies(events)
+	cadenceSamples, maxGap := eventCadenceSamples(events)
 	// Process teardown can unblock a receive and cause its failed end mark to
 	// be serialized. Merge only the complete, post-cleanup per-process traces.
 	if cleanupErr := closeRoles(); cleanupErr != nil {
@@ -1074,13 +1133,20 @@ func (h *harness) runOne(o options, mat manifest, s scenario, run int, raw io.Wr
 	if e != nil {
 		return res, e
 	}
+	inInterval := make(map[uint64]bool, len(events))
+	for _, event := range events {
+		inInterval[event.Sequence] = true
+	}
 	for _, m := range marks {
+		if !inInterval[m.Sequence] {
+			continue
+		}
 		if _, e := fmt.Fprintf(raw, "%s\n", mustJSON(m)); e != nil {
 			return res, e
 		}
 	}
 	success = true
-	return runResult{Spans: spans, Scenario: s.ID, Run: run, Samples: len(samples), EndToEnd: samples, Processes: maps}, nil
+	return runResult{Spans: spans, Scenario: s.ID, Run: run, Samples: len(samples), EndToEnd: samples, Event: percentiles(samples), Cadence: percentiles(cadenceSamples), CadenceSamples: cadenceSamples, MaxGap: maxGap, Processes: maps}, nil
 }
 
 func roleArgs(s scenario, m processMapping) roleCommand {
@@ -1177,6 +1243,92 @@ func workloadInput(s scenario, run int, phase string) []byte {
 		body = "printf 'vev perf attach-restore-tab-switch %s\\n'"
 	}
 	return []byte(fmt.Sprintf(body+"; printf '%s\\n'\n", s.ID, marker))
+}
+
+// measuredEventSamples validates every owned pair, then retains only events
+// whose injection and successful terminal flush are both in the interval.
+// Straddling pairs remain raw diagnostic facts but are never percentile input.
+func measuredEventSamples(marks []harnessMark, interval measuredInterval) ([]eventSample, error) {
+	if interval.End < interval.Start {
+		return nil, errors.New("negative measured interval")
+	}
+	starts := map[uint64]int64{}
+	events := make([]eventSample, 0, len(marks)/2)
+	for _, m := range marks {
+		if !m.Valid {
+			return nil, errors.New("invalid harness boundary")
+		}
+		switch m.Kind {
+		case "input_injected":
+			if _, exists := starts[m.Sequence]; exists {
+				return nil, errors.New("duplicate input boundary")
+			}
+			starts[m.Sequence] = m.Tick
+		case "terminal_flushed":
+			start, ok := starts[m.Sequence]
+			if !ok {
+				return nil, errors.New("terminal flush without input pair")
+			}
+			if m.Tick < start {
+				return nil, errors.New("negative harness duration")
+			}
+			delete(starts, m.Sequence)
+			if start >= interval.Start && m.Tick <= interval.End {
+				events = append(events, eventSample{Sequence: m.Sequence, Injected: start, Flushed: m.Tick, Latency: m.Tick - start})
+			}
+		default:
+			return nil, errors.New("unknown harness mark")
+		}
+	}
+	if len(starts) != 0 {
+		return nil, errors.New("missing terminal flush pair")
+	}
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].Injected == events[j].Injected {
+			return events[i].Sequence < events[j].Sequence
+		}
+		return events[i].Injected < events[j].Injected
+	})
+	return events, nil
+}
+
+func requireMinimumEventSamples(events []eventSample) error {
+	if len(events) < minimumInIntervalEventSamples {
+		return fmt.Errorf("insufficient in-interval event samples: got %d, need at least %d", len(events), minimumInIntervalEventSamples)
+	}
+	return nil
+}
+
+func eventLatencies(events []eventSample) []int64 {
+	out := make([]int64, len(events))
+	for i, event := range events {
+		out[i] = event.Latency
+	}
+	return out
+}
+
+func eventCadenceSamples(events []eventSample) ([]int64, int64) {
+	if len(events) < 2 {
+		return nil, 0
+	}
+	gaps := make([]int64, 0, len(events)-1)
+	var maxGap int64
+	for i := 1; i < len(events); i++ {
+		gap := events[i].Injected - events[i-1].Injected
+		gaps = append(gaps, gap)
+		if gap > maxGap {
+			maxGap = gap
+		}
+	}
+	return gaps, maxGap
+}
+
+func eventCadence(events []eventSample) (distribution, int64) {
+	gaps, maxGap := eventCadenceSamples(events)
+	if len(gaps) == 0 {
+		return distribution{}, maxGap
+	}
+	return percentiles(gaps), maxGap
 }
 
 func pairedSamples(marks []harnessMark) ([]int64, error) {
