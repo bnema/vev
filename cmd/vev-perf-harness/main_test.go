@@ -1271,8 +1271,8 @@ func TestHarnessRejectsMissingManifestRoleTrace(t *testing.T) {
 		{ProcessID: "daemon", ClockDomain: "daemon", TracePath: missing, Role: "daemon", Scenario: "s", Run: 1},
 		{ProcessID: "client", ClockDomain: "client", TracePath: client, Role: "client", Scenario: "s", Run: 1},
 	})
-	if !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("missing daemon trace error = %v, want not exist", err)
+	if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "daemon role") {
+		t.Fatalf("missing daemon trace error = %v, want daemon role not-exist error", err)
 	}
 }
 

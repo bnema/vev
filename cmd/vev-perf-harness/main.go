@@ -1530,7 +1530,7 @@ func mergeProcessTraces(mappings []processMapping) ([]span, error) {
 	for _, m := range mappings {
 		f, err := os.Open(m.TracePath)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("open manifest trace for %s role: %w", m.Role, err)
 		}
 		var records []traceRecord
 		scan := bufio.NewScanner(f)
