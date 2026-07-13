@@ -143,9 +143,8 @@ type traceRecord struct {
 	Tick      int64  `json:"tick"`
 	Valid     bool   `json:"valid"`
 }
-type spanPair struct{ start, end, name string }
 
-var spanPairs = []spanPair{{"capture_start", "capture_end", "capture_duration"}, {"compose_start", "compose_end", "compose_duration"}, {"diff_start", "diff_end", "diff_duration"}, {"queue_enqueued", "queue_dequeued", "queue_wait"}, {"ack_blocked_start", "ack_blocked_end", "ack_blocked_interval"}, {"emit_start", "emit_end", "emit_duration"}, {"adapter_send_start", "adapter_send_end", "adapter_send_duration"}, {"adapter_receive_start", "adapter_receive_end", "adapter_receive_duration"}}
+type spanPair struct{ start, end, name string }
 
 // mergeProcessTraces permits only records from one manifest process in a span.
 // In particular, the correlation key includes process_id before ticks are read.
@@ -238,6 +237,7 @@ func mergeProcessTraces(mappings []processMapping) ([]span, error) {
 	}
 	return out, nil
 }
+
 func summarizeSpans(all []span) []spanSummary {
 	grouped := map[string]*span{}
 	for _, s := range all {
@@ -270,6 +270,7 @@ func percentiles(samples []int64) distribution {
 	at := func(p int) int64 { return v[(len(v)-1)*p/100] }
 	return distribution{len(v), at(50), at(95), at(99), v[len(v)-1]}
 }
+
 func writeJSON(path string, v any) error {
 	f, e := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if e != nil {
@@ -279,7 +280,9 @@ func writeJSON(path string, v any) error {
 	e = json.NewEncoder(f).Encode(v)
 	return e
 }
+
 func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
+
 func safeName(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
@@ -288,6 +291,7 @@ func safeName(s string) string {
 		return '-'
 	}, s)
 }
+
 func readJSONL(path string) ([]map[string]json.RawMessage, error) {
 	f, e := os.Open(path)
 	if e != nil {

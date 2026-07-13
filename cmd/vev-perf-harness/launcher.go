@@ -16,136 +16,8 @@ import (
 	"time"
 
 	"github.com/bnema/vev/pkg/safedir"
+	"golang.org/x/sys/unix"
 )
-
-const (
-	minimumDuration               = 30 * time.Second
-	minimumRepetitions            = 10
-	minimumInIntervalEventSamples = 10
-	measuredEventCadence          = time.Second
-)
-
-type options struct {
-	vevBin, manifest, out string
-	scenario              string
-	warmup, duration      time.Duration
-	repetitions           int
-}
-
-type manifest struct {
-	Schema     uint16      `json:"schema"`
-	Topologies []topology  `json:"topologies"`
-	Workloads  []string    `json:"workloads"`
-	Transports []transport `json:"transports"`
-	Scenarios  []scenario  `json:"scenarios"`
-}
-type topology struct {
-	ID          string `json:"id"`
-	Geometry    string `json:"geometry"`
-	RowsPerPane int    `json:"rows_per_pane"`
-}
-type transport struct {
-	ID          string `json:"id"`
-	Kind        string `json:"kind"`
-	RTTMS       int    `json:"rtt_ms,omitempty"`
-	LossPercent int    `json:"loss_percent,omitempty"`
-}
-type scenario struct {
-	ID                 string   `json:"id"`
-	Topology           string   `json:"topology"`
-	Workload           string   `json:"workload"`
-	Transport          string   `json:"transport"`
-	Roles              []string `json:"roles"`
-	InapplicableReason string   `json:"inapplicable_reason,omitempty"`
-}
-
-type processMapping struct {
-	ProcessID   string `json:"process_id"`
-	ClockDomain string `json:"clock_domain"`
-	TracePath   string `json:"trace_path"`
-	Role        string `json:"role"`
-	Scenario    string `json:"scenario"`
-	Run         int    `json:"run"`
-	Identity    string `json:"identity"`
-}
-
-type runManifest struct {
-	Scenario  string           `json:"scenario"`
-	Run       int              `json:"run"`
-	Processes []processMapping `json:"processes"`
-}
-type harnessMark struct {
-	Scenario string `json:"scenario"`
-	Run      int    `json:"run"`
-	Sequence uint64 `json:"sequence"`
-	Kind     string `json:"kind"`
-	Tick     int64  `json:"tick"`
-	Valid    bool   `json:"valid"`
-}
-
-// measuredInterval belongs solely to the harness clock domain. A paired event
-// is eligible only when both owned boundaries fall inside this interval.
-type measuredInterval struct {
-	Start int64
-	End   int64
-}
-
-type eventSample struct {
-	Sequence uint64 `json:"sequence"`
-	Injected int64  `json:"injected_tick"`
-	Flushed  int64  `json:"flushed_tick"`
-	Latency  int64  `json:"latency_nanos"`
-}
-type span struct {
-	Component, Name string
-	Samples         []int64
-}
-type runResult struct {
-	Spans          []span           `json:"process_local_spans"`
-	Scenario       string           `json:"scenario"`
-	Run            int              `json:"run"`
-	Samples        int              `json:"samples"`
-	EndToEnd       []int64          `json:"end_to_end_nanos"`
-	Event          distribution     `json:"event_end_to_end"`
-	Cadence        distribution     `json:"event_cadence_nanos"`
-	CadenceSamples []int64          `json:"-"`
-	MaxGap         int64            `json:"event_max_gap_nanos"`
-	Processes      []processMapping `json:"processes"`
-}
-type summary struct {
-	Schema           uint16        `json:"schema"`
-	GitSHA           string        `json:"git_sha"`
-	Warmup           string        `json:"warmup"`
-	Duration         string        `json:"duration"`
-	Repetitions      int           `json:"repetitions"`
-	EndToEnd         distribution  `json:"harness_end_to_end"`
-	Cadence          distribution  `json:"harness_event_cadence_nanos"`
-	MaxGap           int64         `json:"harness_event_max_gap_nanos"`
-	RunP50Dispersion distribution  `json:"run_p50_dispersion"`
-	Spans            []spanSummary `json:"process_local_spans"`
-	Runs             int           `json:"runs"`
-}
-type distribution struct {
-	Count int   `json:"count"`
-	P50   int64 `json:"p50"`
-	P95   int64 `json:"p95"`
-	P99   int64 `json:"p99"`
-	Max   int64 `json:"max"`
-}
-type spanSummary struct {
-	Component    string       `json:"component"`
-	Name         string       `json:"name"`
-	Distribution distribution `json:"distribution"`
-}
-
-type clock interface {
-	Now() int64
-	Sleep(time.Duration)
-}
-type systemClock struct{ start time.Time }
-
-func (c systemClock) Now() int64          { return time.Since(c.start).Nanoseconds() }
-func (systemClock) Sleep(d time.Duration) { time.Sleep(d) }
 
 type launchedProcess interface {
 	Warmup([]byte) error
@@ -204,8 +76,10 @@ type preparedPeer struct {
 	cleanupRuntime func() error
 }
 
-func (p preparedPeer) Warmup([]byte) error                              { return nil }
+func (p preparedPeer) Warmup([]byte) error { return nil }
+
 func (p preparedPeer) Measure([]byte, func() error, func() error) error { return nil }
+
 func (p preparedPeer) Close() error {
 	var errs []error
 	if p.route.pidPath != "" {
@@ -725,17 +599,6 @@ type ptyLocalEcho struct {
 	done     bool
 }
 
-func newPTYLocalEcho(input []byte) *ptyLocalEcho {
-	expected := make([]byte, 0, len(input))
-	for _, b := range input {
-		if b == '\n' {
-			expected = append(expected, '\r')
-		}
-		expected = append(expected, b)
-	}
-	return &ptyLocalEcho{expected: expected}
-}
-
 func (e *ptyLocalEcho) applicationOutput(chunk []byte) []byte {
 	if e.done || len(e.expected) == 0 {
 		return chunk
@@ -752,4 +615,138 @@ func (e *ptyLocalEcho) applicationOutput(chunk []byte) []byte {
 		}
 	}
 	return nil
+}
+
+func (p *cliProcess) Close() error {
+	var result error
+	p.closed.Do(func() {
+		if p.done != nil {
+			close(p.done)
+		}
+		// A public terminal client owns a shell session. Ask that shell to exit
+		// before closing the PTY so its transport can finish its receive span;
+		// this avoids turning ordinary harness teardown into an aborted trace.
+		exited := false
+		if p.shutdown != nil && p.waitErr != nil {
+			select {
+			case <-p.waitErr:
+				exited = true
+			default:
+				// The client may have just ended the last session and raced this
+				// best-effort public shutdown. The normal bounded reaping path below
+				// remains authoritative in that case.
+				_ = p.shutdown()
+			}
+		}
+		if p.pty != nil && p.waitErr != nil {
+			_, _ = p.pty.Write([]byte("exit\n"))
+			select {
+			case <-p.waitErr:
+				exited = true
+			case <-p.closeDeadline():
+			}
+		}
+		if p.pty != nil {
+			_ = p.pty.Close()
+		}
+		if p.waitErr != nil && !exited {
+			select {
+			case <-p.waitErr:
+			case <-p.closeDeadline():
+				// Teardown is deliberately bounded: a stuck public CLI or child
+				// must not hold a local harness run indefinitely.
+				p.forceProcessGroupCleanup()
+				select {
+				case <-p.waitErr:
+				case <-p.closeDeadline():
+					p.forceProcessGroupKill()
+					select {
+					case <-p.waitErr:
+					case <-p.closeDeadline():
+						result = errors.New("timed out reaping public CLI process")
+					}
+				}
+			}
+		}
+		if p.output != nil {
+			if err := p.output.Close(); result == nil {
+				result = err
+			}
+		}
+		if p.cleanupRuntime != nil {
+			if err := p.cleanupRuntime(); result == nil {
+				result = err
+			}
+		}
+	})
+	return result
+}
+
+func (p *cliProcess) closeDeadline() <-chan time.Time {
+	if p.waitTimeout != nil {
+		return p.waitTimeout()
+	}
+	if p.shutdown != nil {
+		// A public kill asks the daemon to finish bounded detached notices and
+		// close blocked carriage before it exits; do not turn that graceful
+		// protocol into a SIGKILL at the two-second client deadline.
+		return time.After(5 * time.Second)
+	}
+	return time.After(2 * time.Second)
+}
+
+func (p *cliProcess) forceProcessGroupCleanup() {
+	if p.forceCleanup != nil {
+		p.forceCleanup()
+		return
+	}
+	if p.cmd != nil && p.cmd.Process != nil {
+		// The client is a session/process-group leader; forced cleanup must
+		// include its ssh seam/_stdio descendants.
+		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGTERM)
+	}
+}
+
+func (p *cliProcess) forceProcessGroupKill() {
+	if p.forceKill != nil {
+		p.forceKill()
+		return
+	}
+	if p.cmd != nil && p.cmd.Process != nil {
+		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
+	}
+}
+
+// openPTY is the small Linux PTY boundary needed to drive the public terminal
+// client. No daemon or adapter implementation is imported by this command.
+func openPTY() (*os.File, *os.File, error) {
+	masterFD, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	closeMaster := func(err error) (*os.File, *os.File, error) { _ = unix.Close(masterFD); return nil, nil, err }
+	number, err := unix.IoctlGetInt(masterFD, unix.TIOCGPTN)
+	if err != nil {
+		return closeMaster(err)
+	}
+	if err := unix.IoctlSetPointerInt(masterFD, unix.TIOCSPTLCK, 0); err != nil {
+		return closeMaster(err)
+	}
+	slaveFD, err := unix.Open(fmt.Sprintf("/dev/pts/%d", number), unix.O_RDWR|unix.O_NOCTTY, 0)
+	if err != nil {
+		return closeMaster(err)
+	}
+	return os.NewFile(uintptr(masterFD), "vev-client-master"), os.NewFile(uintptr(slaveFD), "vev-client-slave"), nil
+}
+
+func inputMarker(input []byte) []byte {
+	start := bytes.Index(input, []byte("__VEV_HARNESS_"))
+	if start < 0 {
+		return input
+	}
+	end := bytes.Index(input[start:], []byte(`\n`))
+	if end < 0 {
+		return input[start:]
+	}
+	return input[start : start+end]
 }
