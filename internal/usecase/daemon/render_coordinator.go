@@ -265,16 +265,24 @@ func (c *renderCoordinator) invalidate(inv renderInvalidation) {
 // attachment. This check shares c.mu with replacement, making a stale
 // attachment's timer callback unable to enqueue work for its replacement.
 // A nil source represents an internal pane/session invalidation.
-func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv renderInvalidation) {
+func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv renderInvalidation) bool {
+	return c.invalidateForAttachmentAtResizeEpoch(source, 0, inv)
+}
+
+// invalidateForAttachmentAtResizeEpoch additionally requires epoch to remain
+// current when nonzero, so a completed resize cannot publish after a newer
+// request supersedes it.
+func (c *renderCoordinator) invalidateForAttachmentAtResizeEpoch(source *attachedClient, epoch uint64, inv renderInvalidation) bool {
 	c.mu.Lock()
 	// An unbound coordinator is the manual/headless harness state; there is no
 	// published production attachment to protect there. A parked target may
 	// still publish its own PTY/session mutations to picker observers, but no
 	// attachment-owned callback may revive that target's render path.
 	detachedPreviewOnly := c.detached && source == nil && (c.previewWake != nil || len(c.previewWakes) != 0)
-	if c.torndown || (c.detached && !detachedPreviewOnly) || (source != nil && c.attachment != nil && c.attachment != source) {
+	if c.torndown || (c.detached && !detachedPreviewOnly) || (source != nil && c.attachment != nil && c.attachment != source) ||
+		(epoch != 0 && (c.resize.epoch != epoch || c.resize.source != source)) {
 		c.mu.Unlock()
-		return
+		return false
 	}
 	onInvalidate := c.opts.onInvalidate
 	c.metrics.invalidations.Add(1)
@@ -310,7 +318,7 @@ func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv 
 		if onInvalidate != nil {
 			onInvalidate(inv)
 		}
-		return
+		return true
 	}
 
 	// NewTimer and C may re-enter the coordinator. Publish only if this
@@ -330,7 +338,7 @@ func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv 
 		if onInvalidate != nil {
 			onInvalidate(inv)
 		}
-		return
+		return true
 	}
 	if timerC == nil {
 		stopTimer(timer)
@@ -338,7 +346,7 @@ func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv 
 		if onInvalidate != nil {
 			onInvalidate(inv)
 		}
-		return
+		return true
 	}
 	go func() {
 		defer close(done)
@@ -356,6 +364,7 @@ func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv 
 		onInvalidate(inv)
 	}
 	runtime.Gosched()
+	return true
 }
 
 // notifyAck reports that the client acknowledged an output state, releasing

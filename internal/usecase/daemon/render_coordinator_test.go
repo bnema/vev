@@ -1559,14 +1559,55 @@ func TestRenderCoordinatorResizeEpochDispatch(t *testing.T) {
 		requireNoCoordinatorOutputFrame(t, sends)
 	})
 
-	t.Run("async request reports coordinator schedule acceptance", func(t *testing.T) {
-		d, sess, ac, _, clk, _ := newResizeFixture(t)
+	t.Run("request reports immediate completion and async schedule acceptance", func(t *testing.T) {
+		t.Run("immediate reset invalidation", func(t *testing.T) {
+			d, sess, ac, _, _, invs := newResizeFixture(t)
 
-		require.True(t, d.requestTransactionalResize(sess, ac, domain.Size{Cols: 120, Rows: 24}, false))
-		awaitCoordinatorScheduledTimer(t, clk)
+			require.True(t, d.requestTransactionalResize(sess, ac, domain.Size{Cols: 120, Rows: 24}, true))
+			inv := awaitInvalidation(t, invs)
+			require.True(t, inv.reset)
+		})
 
-		// A torn-down coordinator cannot accept a stale attachment's schedule.
-		sess.renderCoordinator().noteSessionTeardown()
-		require.False(t, d.requestTransactionalResize(sess, ac, domain.Size{Cols: 140, Rows: 30}, false))
+		t.Run("superseded immediate transaction", func(t *testing.T) {
+			resizeStarted := make(chan struct{})
+			releaseResize := make(chan struct{})
+			pty := &transactionalResizePTY{onResize: func() {
+				close(resizeStarted)
+				<-releaseResize
+			}}
+			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+			clk := newCoordinatorMockClock(t, 2)
+			d.clock = clk.clock
+			invs := make(chan renderInvalidation, 1)
+			rc := newRenderCoordinator(renderCoordinatorOptions{
+				clock:        clk.clock,
+				wake:         func(renderWake) {},
+				onInvalidate: func(inv renderInvalidation) { invs <- inv },
+			})
+			rc.attach(ac)
+			sess.installRenderCoordinator(rc)
+
+			result := make(chan bool, 1)
+			go func() {
+				result <- d.requestTransactionalResize(sess, ac, domain.Size{Cols: 120, Rows: 24}, true)
+			}()
+			<-resizeStarted
+			require.NotZero(t, rc.recordResizeRequest(domain.Size{Cols: 140, Rows: 30}, ac))
+			close(releaseResize)
+
+			require.False(t, <-result)
+			requireNoInvalidation(t, invs)
+		})
+
+		t.Run("async schedule and teardown rejection", func(t *testing.T) {
+			d, sess, ac, _, clk, _ := newResizeFixture(t)
+
+			require.True(t, d.requestTransactionalResize(sess, ac, domain.Size{Cols: 120, Rows: 24}, false))
+			awaitCoordinatorScheduledTimer(t, clk)
+
+			// A torn-down coordinator cannot accept a stale attachment's schedule.
+			sess.renderCoordinator().noteSessionTeardown()
+			require.False(t, d.requestTransactionalResize(sess, ac, domain.Size{Cols: 140, Rows: 30}, false))
+		})
 	})
 }
