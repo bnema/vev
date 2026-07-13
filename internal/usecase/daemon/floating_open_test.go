@@ -54,12 +54,19 @@ func (p *contextAwareFloatingPTY) Close() error {
 type contextAwareFloatingFactory struct {
 	pty    *contextAwareFloatingPTY
 	opened chan context.Context
+	err    error
+	onOpen func()
 }
 
 func (f *contextAwareFloatingFactory) Open(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
-	f.pty.ctx = ctx
+	if f.pty != nil {
+		f.pty.ctx = ctx
+	}
 	f.opened <- ctx
-	return f.pty, nil
+	if f.onOpen != nil {
+		f.onOpen()
+	}
+	return f.pty, f.err
 }
 
 func TestFloatingSuccessfulOpenTransfersContextOwnershipToPane(t *testing.T) {
@@ -109,7 +116,7 @@ func TestFloatingSuccessfulOpenTransfersContextOwnershipToPane(t *testing.T) {
 				geometry:     floatingGeometry{Inner: domain.Rect{Width: 20, Height: 8}},
 				paneStableID: "p_floating",
 				parentCtx:    tabCtx,
-			}, generation, nil)
+			}, generation)
 
 			openCtx := <-factory.opened
 			require.NoError(t, openCtx.Err(), "the PTY context must outlive the launch worker")
@@ -143,6 +150,69 @@ func TestFloatingSuccessfulOpenTransfersContextOwnershipToPane(t *testing.T) {
 			}
 			d.sessWg.Wait()
 			require.Equal(t, 1, pty.closeCount, "floating PTY must close exactly once")
+		})
+	}
+}
+
+func TestFloatingFailedAndStaleOpenCancelContext(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*tab, *contextAwareFloatingFactory)
+	}{
+		{
+			name: "failed Open",
+			setup: func(_ *tab, factory *contextAwareFloatingFactory) {
+				factory.err = context.Canceled
+			},
+		},
+		{
+			name: "stale install",
+			setup: func(tb *tab, factory *contextAwareFloatingFactory) {
+				factory.onOpen = func() {
+					tb.mu.Lock()
+					tb.takeFloatingLocked()
+					tb.mu.Unlock()
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pty := newContextAwareFloatingPTY()
+			factory := &contextAwareFloatingFactory{pty: pty, opened: make(chan context.Context, 1)}
+			d := newTestDaemon(t, factory, stubClock{})
+			tb := newFloatingTestTab(t)
+			sess := &session{name: "work", tabs: []*tab{tb}, ctx: t.Context()}
+			tb.mu.Lock()
+			generation := tb.beginFloatingWarmLocked(true)
+			tb.mu.Unlock()
+			tt.setup(tb, factory)
+
+			d.openAndInstallFloating(sess, tb, floatingLaunchSpec{
+				sessionName:  "work",
+				size:         domain.Size{Cols: 20, Rows: 8},
+				geometry:     floatingGeometry{Inner: domain.Rect{Width: 20, Height: 8}},
+				paneStableID: "p_floating",
+				parentCtx:    tb.ctx,
+			}, generation)
+
+			openCtx := <-factory.opened
+			select {
+			case <-openCtx.Done():
+			case <-time.After(time.Second):
+				t.Fatal("failed or stale floating Open retained its context")
+			}
+			tb.mu.Lock()
+			require.Nil(t, tb.floating.pane)
+			tb.mu.Unlock()
+			if tt.name == "stale install" {
+				select {
+				case <-pty.closed:
+				case <-time.After(time.Second):
+					t.Fatal("stale floating PTY was not closed")
+				}
+				require.Equal(t, 1, pty.closeCount)
+			}
 		})
 	}
 }
