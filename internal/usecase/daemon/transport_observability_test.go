@@ -3,6 +3,7 @@ package daemon
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -219,6 +220,67 @@ func TestTransportObservabilityACKBlockedSpansEndExactlyOnce(t *testing.T) {
 				t.Fatalf("ACK-blocked span correlation changed: start=%+v end=%+v", starts[0], ends[0])
 			}
 		})
+	}
+}
+
+// A raw observer supplied through daemon configuration is serialized by the
+// daemon. Once Start has been published, a blocked End must not delay the ACK
+// that consumes deferred work and delivers its wake.
+func TestTransportObservabilityBlockedACKEndDoesNotDelayNotifyAck(t *testing.T) {
+	observer := &blockingACKEndObserver{
+		startObserved: make(chan struct{}),
+		endEntered:    make(chan struct{}),
+		releaseEnd:    make(chan struct{}),
+	}
+	d := New(nil, nil, nil, WithRuntimeObserver(observer))
+	wakes := make(chan renderWake, 1)
+	var ready atomic.Bool
+	rc := newRenderCoordinator(renderCoordinatorOptions{
+		observer: d.runtimeObserver,
+		ackReady: ready.Load,
+		wake:     func(w renderWake) { wakes <- w },
+	})
+	rc.attach(&attachedClient{})
+	rc.invalidate(renderInvalidation{class: invalidateOutput})
+
+	// Enter the ACK-blocked state and wait until Start has reached the injected
+	// observer. End is the only deliberately blocked call in this test.
+	rc.fire(rc.generation, false, true)
+	awaitDaemonObserver(t, observer.startObserved, "ACK-blocked start observer")
+
+	ready.Store(true)
+	ackDone := make(chan struct{})
+	go func() {
+		rc.notifyAck()
+		close(ackDone)
+	}()
+	awaitDaemonObserver(t, observer.endEntered, "blocked ACK-blocked end observer")
+	awaitDaemonObserver(t, ackDone, "nonblocking ACK progress")
+	awaitWake(t, wakes)
+	rc.mu.Lock()
+	pending := rc.pending
+	rc.mu.Unlock()
+	if pending {
+		t.Fatal("notifyAck left consumed ACK-deferred work pending")
+	}
+
+	close(observer.releaseEnd)
+	d.closeRuntimeObserver()
+}
+
+type blockingACKEndObserver struct {
+	startObserved chan struct{}
+	endEntered    chan struct{}
+	releaseEnd    chan struct{}
+}
+
+func (o *blockingACKEndObserver) ObserveRuntime(mark ports.RuntimeMark) {
+	switch mark.Kind {
+	case ports.RuntimeACKBlockedStart:
+		close(o.startObserved)
+	case ports.RuntimeACKBlockedEnd:
+		close(o.endEntered)
+		<-o.releaseEnd
 	}
 }
 

@@ -145,9 +145,13 @@ func RunWithRuntimeObserver(ctx context.Context, dialer ports.Dialer, term ports
 }
 
 func run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observer ports.RuntimeObserver) (retErr error) {
-	if observer != nil {
-		reporter := ports.NewSerializedRuntimeObserver(observer, runtimeObserverQueueDepth)
-		defer reporter.Close()
+	if reporter, owned := ports.EnsureSerializedRuntimeObserver(observer, runtimeObserverQueueDepth); reporter != nil {
+		if owned {
+			defer func() {
+				reporter.Flush()
+				reporter.Close()
+			}()
+		}
 		observer = reporter
 	}
 	if log == nil {

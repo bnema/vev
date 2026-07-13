@@ -29,7 +29,13 @@ func TestPerformanceTraceUsesHarnessProcessMapping(t *testing.T) {
 	if observer == nil || closer == nil {
 		t.Fatal("performance trace was not configured")
 	}
+	if _, ok := observer.(ports.SerializedRuntimeObserver); !ok {
+		t.Fatalf("performance trace observer = %T, want serialized owner", observer)
+	}
 	observer.ObserveRuntime(ports.RuntimeMark{Schema: ports.RuntimeMarkSchema, Component: "daemon", Scenario: "runtime", Run: 1, Kind: ports.RuntimeEmitEnd, Valid: true})
+	if err := closer.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := closer.Close(); err != nil {
 		t.Fatal(err)
 	}

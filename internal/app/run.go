@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -270,7 +271,39 @@ func performanceTrace(clk ports.Clock) (ports.RuntimeObserver, io.Closer, error)
 		_ = closer.Close()
 		return nil, nil, err
 	}
-	return observer, closer, nil
+	reporter := ports.NewSerializedRuntimeObserver(observer, runtimeTraceQueueDepth)
+	return reporter, &runtimeTraceCloser{reporter: reporter, closer: closer}, nil
+}
+
+// runtimeTraceQueueDepth bounds all process-local trace producer handoffs.
+// A full queue emits the serialized diagnostic gap rather than delaying a
+// terminal, transport, or ACK progress path.
+const runtimeTraceQueueDepth = 256
+
+// runtimeTraceCloser owns the two-stage trace shutdown: drain the reporter
+// before closing the concrete timestamp/file owner. sync.Once makes every
+// deferred and explicit close path safe without closing shared workers twice.
+type runtimeTraceCloser struct {
+	reporter ports.SerializedRuntimeObserver
+	closer   io.Closer
+	once     sync.Once
+	err      error
+}
+
+func (c *runtimeTraceCloser) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.once.Do(func() {
+		if c.reporter != nil {
+			c.reporter.Flush()
+			c.reporter.Close()
+		}
+		if c.closer != nil {
+			c.err = c.closer.Close()
+		}
+	})
+	return c.err
 }
 
 func configureLogging(component logging.Component, rotateAtRuntime bool) (*slog.Logger, io.Closer, error) {

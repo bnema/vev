@@ -65,6 +65,15 @@ func TestSerializedRuntimeObserverFlushesInOrderAndCloses(t *testing.T) {
 	}
 }
 
+func TestEnsureSerializedRuntimeObserverReusesExistingOwner(t *testing.T) {
+	existing := NewSerializedRuntimeObserver(runtimeObserverFunc(func(RuntimeMark) {}), 1)
+	reporter, owned := EnsureSerializedRuntimeObserver(existing, 1)
+	if owned || reporter != existing {
+		t.Fatalf("EnsureSerializedRuntimeObserver() = (%T, %t), want existing unowned reporter", reporter, owned)
+	}
+	existing.Close()
+}
+
 func TestSerializedRuntimeObserverReportsBoundedQueueLoss(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})

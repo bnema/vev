@@ -88,6 +88,21 @@ func NewSerializedRuntimeObserver(observer RuntimeObserver, capacity int) Serial
 	return o
 }
 
+// EnsureSerializedRuntimeObserver returns observer's existing serialized
+// owner when it has one. Otherwise it creates an owned worker. Callers close
+// the result only when owned is true, preventing nested workers and duplicate
+// lifecycle ownership when application wiring already serialized the process
+// observer.
+func EnsureSerializedRuntimeObserver(observer RuntimeObserver, capacity int) (serialized SerializedRuntimeObserver, owned bool) {
+	if observer == nil {
+		return nil, false
+	}
+	if serialized, ok := observer.(SerializedRuntimeObserver); ok {
+		return serialized, false
+	}
+	return NewSerializedRuntimeObserver(observer, capacity), true
+}
+
 type serializedRuntimeObserver struct {
 	observer RuntimeObserver
 	capacity int
