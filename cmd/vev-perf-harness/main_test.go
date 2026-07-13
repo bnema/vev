@@ -1036,6 +1036,34 @@ func TestHarnessWritesRequiredEvidenceWithSufficientSpans(t *testing.T) {
 		}
 	}
 }
+
+// boundedLocalConcurrentTrace is an excerpt from the second run of the
+// bounded local public-CLI smoke. Receive sequence 3 is in flight while the
+// same process serializes sequence 4; shared-process records therefore cannot
+// have a global sequence ordering requirement.
+const boundedLocalConcurrentTrace = `{"schema":1,"process_id":"1x4-idle-local-r002-client-02","component":"ipc","scenario":"1x4-idle-local","run":2,"sequence":3,"request_id":3,"epoch":3,"kind":"adapter_receive_start","tick":1783902621495284782,"bytes":0,"fragments":0,"retransmits":0,"pending":0,"ack_rtt_nanos":0,"valid":true}
+{"schema":1,"process_id":"1x4-idle-local-r002-client-02","component":"ipc","scenario":"1x4-idle-local","run":2,"sequence":4,"request_id":4,"epoch":4,"kind":"adapter_send_start","tick":1783902621495364552,"bytes":96,"fragments":0,"retransmits":0,"pending":0,"ack_rtt_nanos":0,"valid":true}
+{"schema":1,"process_id":"1x4-idle-local-r002-client-02","component":"ipc","scenario":"1x4-idle-local","run":2,"sequence":4,"request_id":4,"epoch":4,"kind":"adapter_send_end","tick":1783902621495386452,"bytes":96,"fragments":0,"retransmits":0,"pending":0,"ack_rtt_nanos":0,"valid":true}
+{"schema":1,"process_id":"1x4-idle-local-r002-client-02","component":"ipc","scenario":"1x4-idle-local","run":2,"sequence":3,"request_id":3,"epoch":3,"kind":"adapter_receive_end","tick":1783902621495463332,"bytes":0,"fragments":0,"retransmits":0,"pending":0,"ack_rtt_nanos":0,"valid":true}
+`
+
+func TestHarnessAcceptsConcurrentProductionTraceInterleaving(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "local-client.jsonl")
+	if err := os.WriteFile(path, []byte(boundedLocalConcurrentTrace), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spans, err := mergeProcessTraces([]processMapping{{
+		ProcessID: "1x4-idle-local-r002-client-02", ClockDomain: "1x4-idle-local-r002-client-02", TracePath: path,
+		Scenario: "1x4-idle-local", Run: 2,
+	}})
+	if err != nil {
+		t.Fatalf("valid concurrent production trace rejected: %v", err)
+	}
+	if len(spans) != 2 || spans[0].Component != "ipc" || spans[0].Name != "adapter_send_duration" || spans[0].Samples[0] != 21900 || spans[1].Component != "ipc" || spans[1].Name != "adapter_receive_duration" || spans[1].Samples[0] != 178550 {
+		t.Fatalf("spans=%+v", spans)
+	}
+}
+
 func TestHarnessRejectsCrossProcessAndBadTraceSpans(t *testing.T) {
 	write := func(t *testing.T, records ...traceRecord) processMapping {
 		t.Helper()
@@ -1058,6 +1086,8 @@ func TestHarnessRejectsCrossProcessAndBadTraceSpans(t *testing.T) {
 		{base("diff_end", 1)},
 		{base("diff_start", 2), base("diff_end", 1)},
 		{base("diff_start", 1)},
+		{base("diff_start", 1), base("diff_start", 2)},
+		{base("diff_start", 1), func() traceRecord { r := base("diff_end", 2); r.Component = "ipc"; return r }()},
 		{func() traceRecord { r := base("diff_start", 1); r.ProcessID = "other"; return r }()},
 		{func() traceRecord { r := base("diff_start", 1); r.Scenario = "other-scenario"; return r }()},
 		{func() traceRecord { r := base("diff_start", 1); r.Run = 2; return r }()},

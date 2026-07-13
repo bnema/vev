@@ -1427,22 +1427,16 @@ func mergeProcessTraces(mappings []processMapping) ([]span, error) {
 			return nil, err
 		}
 		_ = f.Close()
-		// Spans may overlap: an end for an older operation can legitimately be
-		// serialized after a newer operation's start. New correlation IDs still
-		// must be allocated monotonically within the process.
-		lastSequence := uint64(0)
-		seenSequences := map[uint64]bool{}
+		// A process shares one observer across concurrent components. Correlation
+		// IDs are allocated before a goroutine reaches its first mark, so a later
+		// ID can be serialized before an earlier one. Their first appearance is
+		// consequently not an ordering contract. Only marks in the same component
+		// and exact correlation domain may pair, and each pair's ticks must retain
+		// its own start-before-end ordering.
 		starts := map[string]traceRecord{}
 		for _, r := range records {
-			if !seenSequences[r.Sequence] {
-				if r.Sequence < lastSequence {
-					return nil, errors.New("nonmonotonic same-process sequence")
-				}
-				seenSequences[r.Sequence] = true
-				lastSequence = r.Sequence
-			}
 			for _, pair := range spanPairs {
-				key := fmt.Sprintf("%s/%s/%d/%d/%d/%d", r.ProcessID, m.Scenario, m.Run, r.Sequence, r.RequestID, r.Epoch)
+				key := fmt.Sprintf("%s/%s/%s/%d/%d/%d/%d", r.ProcessID, r.Component, m.Scenario, m.Run, r.Sequence, r.RequestID, r.Epoch)
 				if r.Kind == pair.start {
 					k := pair.name + "/" + key
 					if _, exists := starts[k]; exists {
