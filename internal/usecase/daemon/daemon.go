@@ -373,7 +373,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 		})
 	}
 	if d.snapsEnabled {
-		d.startSnapshotEncodeWorker(d.serveCtx)
+		d.startSnapshotEncodeWorker()
 		d.sessWg.Go(func() {
 			d.snapshotSaver(d.serveCtx)
 		})

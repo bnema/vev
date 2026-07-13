@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"runtime"
@@ -736,12 +735,8 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 		resizeSizes: [2]domain.Size{{Cols: 100, Rows: 30}, config.size},
 	}
 	WithSnapshotStore(fixture.snaps)(d)
-	snapshotCtx, cancelSnapshotWorker := context.WithCancel(context.Background())
-	d.startSnapshotEncodeWorker(snapshotCtx)
-	t.Cleanup(func() {
-		cancelSnapshotWorker()
-		d.stopSnapshotEncodeWorker()
-	})
+	d.startSnapshotEncodeWorker()
+	t.Cleanup(d.stopSnapshotEncodeWorker)
 	for tabIndex, tb := range sess.tabs {
 		fixture.configureTab(tb, tabIndex, config.panes, config.historyRows, tabSize(config.size))
 	}

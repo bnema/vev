@@ -610,9 +610,9 @@ func BenchmarkNewSnapshot10KRows(b *testing.B) {
 		historyRows = 10_000
 	)
 
-	scrollback := newHistory(historyRows)
+	history := newHistory(historyRows)
 	for range historyRows {
-		scrollback.Append(row(strings.Repeat("x", width)))
+		history.Append(row(strings.Repeat("x", width)))
 	}
 	screen := renderer.NewFrame(width, height)
 	for y := range height {
@@ -622,7 +622,7 @@ func BenchmarkNewSnapshot10KRows(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		benchmarkSnapshotSink = NewSnapshot(scrollback, screen)
+		benchmarkSnapshotSink = NewSnapshot(history, screen)
 	}
 }
 

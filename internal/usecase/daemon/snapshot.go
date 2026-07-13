@@ -504,8 +504,8 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 	})
 }
 
-func (d *Daemon) startSnapshotEncodeWorker(ctx context.Context) {
-	if d == nil || ctx.Err() != nil {
+func (d *Daemon) startSnapshotEncodeWorker() {
+	if d == nil {
 		return
 	}
 	d.snapshotWorkerMu.Lock()

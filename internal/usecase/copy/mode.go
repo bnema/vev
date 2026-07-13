@@ -53,7 +53,8 @@ func NewSnapshotFromRows(rows [][]renderer.Cell, width, height int) Snapshot {
 // Len returns the number of document rows.
 func (s Snapshot) Len() int { return s.history.Len() + s.screen.Height }
 
-// Row returns document row i, or nil when i is out of range.
+// Row returns document row i, or nil when i is out of range. History rows
+// borrow immutable history storage and must be treated as read-only.
 func (s Snapshot) Row(i int) []renderer.Cell {
 	if i < 0 {
 		return nil
