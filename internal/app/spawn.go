@@ -32,7 +32,7 @@ const staleLockAge = 10 * time.Second
 
 // dialFunc dials the daemon socket in dir. Injected so tests can drive the
 // spawn/backoff logic without a real socket.
-type dialFunc func(dir string) (ports.Transport, error)
+type dialFunc func(ctx context.Context, dir string) (ports.Transport, error)
 
 // spawnFunc launches a detached daemon process. Injected so tests never
 // re-exec a real binary.
@@ -58,7 +58,10 @@ var defaultBackoff = backoffConfig{
 // spawner via an mkdir lock (losers simply wait), then retry-dials with
 // backoff until the socket is live or the budget expires.
 func ensureDaemon(ctx context.Context, dir string, dial dialFunc, spawn spawnFunc, cfg backoffConfig) (ports.Transport, error) {
-	if t, err := dial(dir); err == nil {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if t, err := dial(ctx, dir); err == nil {
 		slog.Debug("daemon already reachable", "socket_dir", dir)
 		return t, nil
 	}
@@ -73,6 +76,9 @@ func ensureDaemon(ctx context.Context, dir string, dial dialFunc, spawn spawnFun
 		// rather than spawning a second daemon.
 		defer release()
 		slog.Info("spawning daemon", "socket_dir", dir)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if err := spawn(); err != nil {
 			slog.Error("daemon spawn failed", "err", err)
 			return nil, fmt.Errorf("vev: spawning daemon: %w", err)
@@ -120,7 +126,10 @@ func retryDial(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig
 	deadline := time.Now().Add(cfg.total)
 	backoff := cfg.initial
 	for {
-		if t, err := dial(dir); err == nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if t, err := dial(ctx, dir); err == nil {
 			return t, nil
 		}
 		if !time.Now().Before(deadline) {
@@ -139,8 +148,8 @@ func retryDial(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig
 }
 
 // realDial is the production dialer.
-func realDial(dir string) (ports.Transport, error) {
-	return ipc.Dial(dir)
+func realDial(ctx context.Context, dir string) (ports.Transport, error) {
+	return ipc.DialContext(ctx, dir)
 }
 
 // realSpawn re-execs this binary as a detached daemon: a new session

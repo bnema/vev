@@ -78,7 +78,8 @@ type resizeRequestMetadata struct {
 
 // renderCoordinatorOptions wires one coordinator instance.
 type renderCoordinatorOptions struct {
-	clock ports.Clock
+	clock    ports.Clock
+	observer ports.RuntimeObserver
 	// wake is the transitional composition target.
 	wake func(renderWake)
 	// ackReady reports whether the attachment may compose another output
@@ -107,6 +108,56 @@ type renderCoordinatorBurstMetrics struct {
 	coalesced     atomic.Uint64
 }
 
+// ackBlockedSpan hands an ACK-blocked endpoint pair between coordinator
+// transitions without holding c.mu while the observer runs. A consuming ACK
+// may arrive while Start is blocked in observer I/O; finish records that
+// closure and publishStart emits it only after Start has returned.
+type ackBlockedSpan struct {
+	observer    ports.RuntimeObserver
+	correlation ports.RuntimeCorrelation
+
+	mu             sync.Mutex
+	startPublished bool
+	finished       bool
+	endPending     bool
+	endValid       bool
+}
+
+func newACKBlockedSpan(observer ports.RuntimeObserver) *ackBlockedSpan {
+	return &ackBlockedSpan{observer: observer, correlation: ports.NewRuntimeCorrelation()}
+}
+
+func (s *ackBlockedSpan) publishStart() {
+	s.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", s.correlation, ports.RuntimeACKBlockedStart, 0, true))
+
+	s.mu.Lock()
+	s.startPublished = true
+	endPending, endValid := s.endPending, s.endValid
+	s.endPending = false
+	s.mu.Unlock()
+	if endPending {
+		s.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", s.correlation, ports.RuntimeACKBlockedEnd, 0, endValid))
+	}
+}
+
+// finish closes a span at most once. It never invokes the observer before the
+// blocked start has completed publication.
+func (s *ackBlockedSpan) finish(valid bool) {
+	s.mu.Lock()
+	if s.finished {
+		s.mu.Unlock()
+		return
+	}
+	s.finished = true
+	if !s.startPublished {
+		s.endPending, s.endValid = true, valid
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+	s.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", s.correlation, ports.RuntimeACKBlockedEnd, 0, valid))
+}
+
 // renderCoordinatorBurstMetricsSnapshot is an immutable, internal view for
 // benchmark reporting. Scheduling only writes the atomic counters above.
 type renderCoordinatorBurstMetricsSnapshot struct {
@@ -124,6 +175,10 @@ type renderCoordinator struct {
 	pending       bool
 	pendingReset  bool
 	pendingUrgent bool
+	// queueMarked spans the coordinator's actual pending interval, from first
+	// enqueue until fire consumes the coalesced work.
+	queueMarked      bool
+	queueCorrelation ports.RuntimeCorrelation
 	// pendingPreview is accounted separately from the target primary wake:
 	// viewers may consume a coalesced target snapshot while that target is
 	// still ACK-blocked.
@@ -131,6 +186,9 @@ type renderCoordinator struct {
 	// ackDeferred records that an expired deadline or watchdog was blocked by
 	// output-window capacity. ACK notifications may flush only this state.
 	ackDeferred bool
+	// ackBlocked retains the first rejected ACK-capacity probe until the
+	// matching consume or lifecycle closure releases that exact interval.
+	ackBlocked *ackBlockedSpan
 	// deadlineDue closes the handoff between a timer worker receiving its tick
 	// and fire observing unavailable ACK capacity.
 	deadlineDue bool
@@ -287,9 +345,17 @@ func (c *renderCoordinator) invalidateForAttachmentAtResizeEpoch(source *attache
 	onInvalidate := c.opts.onInvalidate
 	c.metrics.invalidations.Add(1)
 	wasPending, wasUrgent, wasPreviewPending := c.pending, c.pendingUrgent, c.pendingPreview
+	queueStart := false
+	var queueCorrelation ports.RuntimeCorrelation
 	if !wasPending {
 		c.ackDeferred = false
 		c.deadlineDue = false
+		if c.opts.observer != nil {
+			c.queueMarked = true
+			c.queueCorrelation = ports.NewRuntimeCorrelation()
+			queueCorrelation = c.queueCorrelation
+			queueStart = true
+		}
 	}
 	c.pending = true
 	c.pendingReset = c.pendingReset || inv.reset
@@ -312,7 +378,11 @@ func (c *renderCoordinator) invalidateForAttachmentAtResizeEpoch(source *attache
 	}
 	clock := c.opts.clock
 	c.armed = c.armed || arm
+	observer := c.opts.observer
 	c.mu.Unlock()
+	if queueStart && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueEnqueued, 0, true))
+	}
 	stopTimer(old)
 	if !arm || clock == nil {
 		if onInvalidate != nil {
@@ -377,7 +447,12 @@ func (c *renderCoordinator) notifyAck() {
 		return
 	}
 	gen := c.generation
+	blocked := c.ackBlocked
+	c.ackBlocked = nil
 	c.mu.Unlock()
+	if blocked != nil {
+		blocked.finish(true)
+	}
 	c.fire(gen, false, false)
 }
 
@@ -635,6 +710,10 @@ func (c *renderCoordinator) wakeCurrent(w renderWake) bool {
 func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 	c.mu.Lock()
 	var timer, resizeTimer, retryTimer ports.Timer
+	var observer ports.RuntimeObserver
+	var queueCorrelation ports.RuntimeCorrelation
+	var queueMarked bool
+	var ackBlocked *ackBlockedSpan
 	if c.attachment == ac {
 		c.advanceAttachmentEpochLocked(ac)
 		c.attachment = nil
@@ -660,11 +739,20 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 		}
 		retryTimer, c.retryTimer = c.retryTimer, nil
 		c.retryGen++
+		observer, queueCorrelation, queueMarked = c.opts.observer, c.queueCorrelation, c.queueMarked
+		ackBlocked = c.ackBlocked
+		c.queueMarked, c.ackBlocked = false, nil
 	}
 	c.mu.Unlock()
 	stopTimer(timer)
 	stopTimer(resizeTimer)
 	stopTimer(retryTimer)
+	if queueMarked && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, false))
+	}
+	if ackBlocked != nil {
+		ackBlocked.finish(false)
+	}
 }
 
 // noteReplace hands the coordinator from old to replacement; callbacks
@@ -675,6 +763,10 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 		ready = readiness[0]
 	}
 	c.mu.Lock()
+	var observer ports.RuntimeObserver
+	var queueCorrelation ports.RuntimeCorrelation
+	var queueMarked bool
+	var ackBlocked *ackBlockedSpan
 	// A coordinator may be installed while replacing a legacy attachment
 	// which predated coordinator ownership. In that case nil has no pending
 	// identity to invalidate, and the replacement becomes the first bound
@@ -708,11 +800,20 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 		}
 		retryTimer, c.retryTimer = c.retryTimer, nil
 		c.retryGen++
+		observer, queueCorrelation, queueMarked = c.opts.observer, c.queueCorrelation, c.queueMarked
+		ackBlocked = c.ackBlocked
+		c.queueMarked, c.ackBlocked = false, nil
 	}
 	c.mu.Unlock()
 	stopTimer(timer)
 	stopTimer(resizeTimer)
 	stopTimer(retryTimer)
+	if queueMarked && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, false))
+	}
+	if ackBlocked != nil {
+		ackBlocked.finish(false)
+	}
 }
 
 // notePark invalidates pending wakes when the attachment parks for resume.
@@ -747,7 +848,16 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	c.armed = false
 	timer := c.detachNormalTimerLocked()
 	timers := c.detachSyncTimersLocked()
+	observer, queueCorrelation, queueMarked := c.opts.observer, c.queueCorrelation, c.queueMarked
+	ackBlocked := c.ackBlocked
+	c.queueMarked, c.ackBlocked = false, nil
 	c.mu.Unlock()
+	if queueMarked && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, false))
+	}
+	if ackBlocked != nil {
+		ackBlocked.finish(false)
+	}
 	stopTimer(timer)
 	stopTimer(resizeTimer)
 	stopTimer(retryTimer)
@@ -1052,11 +1162,22 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 	// notification rather than accumulating ackDeferred forever.
 	headlessPreviewOnly := c.detached && c.attachment == nil
 	if !headlessPreviewOnly && (!ready || (c.attachment != nil && !c.attachmentReady)) {
+		var ackStart *ackBlockedSpan
 		if !ready && deadline {
 			c.ackDeferred = true
+			if c.ackBlocked == nil && c.opts.observer != nil {
+				// Install the span while coordinator state is owned. Its Start
+				// publication runs unlocked, and its own handoff defers End until
+				// that call has returned.
+				ackStart = newACKBlockedSpan(c.opts.observer)
+				c.ackBlocked = ackStart
+			}
 		}
 		preview, previews := c.takePendingPreviewsLocked()
 		c.mu.Unlock()
+		if ackStart != nil {
+			ackStart.publishStart()
+		}
 		c.notifyPreviews(w, preview, previews)
 		return
 	}
@@ -1075,9 +1196,18 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 	}
 	timer := c.detachNormalTimerLocked()
 	c.pending, c.pendingReset, c.pendingUrgent, c.ackDeferred, c.deadlineDue, c.coalesced, c.armed = false, false, false, false, false, 0, false
+	observer, queueCorrelation, queueMarked := c.opts.observer, c.queueCorrelation, c.queueMarked
+	ackBlocked := c.ackBlocked
+	c.queueMarked, c.ackBlocked = false, nil
 	wake := c.opts.wake
 	c.mu.Unlock()
 	stopTimer(timer)
+	if queueMarked && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, true))
+	}
+	if ackBlocked != nil {
+		ackBlocked.finish(true)
+	}
 	if wake != nil && !headlessPreviewOnly {
 		wake(w)
 	}

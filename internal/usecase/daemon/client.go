@@ -424,7 +424,8 @@ func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient, 
 	rc := sess.renderCoordinator()
 	if rc == nil {
 		rc = newRenderCoordinator(renderCoordinatorOptions{
-			clock: d.clock,
+			clock:    d.clock,
+			observer: d.runtimeObserver,
 			wake: func(w renderWake) {
 				// Never reread sess.client here: a wake is bound to both its
 				// attachment and its coordinator incarnation. The second check in

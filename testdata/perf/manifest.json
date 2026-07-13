@@ -1,0 +1,2808 @@
+{
+  "schema": 1,
+  "topologies": [
+    {
+      "id": "1x4",
+      "geometry": "120x40",
+      "rows_per_pane": 10000
+    },
+    {
+      "id": "4x1",
+      "geometry": "120x40",
+      "rows_per_pane": 10000
+    },
+    {
+      "id": "4x4",
+      "geometry": "120x40",
+      "rows_per_pane": 10000
+    },
+    {
+      "id": "8x1",
+      "geometry": "120x40",
+      "rows_per_pane": 10000
+    }
+  ],
+  "workloads": [
+    "idle",
+    "active_output",
+    "all_output",
+    "inactive_output",
+    "interactive_flood",
+    "copy_search",
+    "resize_sweep",
+    "snapshot_output_resize",
+    "attach_restore_tab_switch"
+  ],
+  "transports": [
+    {
+      "id": "local",
+      "kind": "local"
+    },
+    {
+      "id": "ssh_stdio",
+      "kind": "ssh_stdio"
+    },
+    {
+      "id": "udp_baseline",
+      "kind": "udp"
+    },
+    {
+      "id": "udp_loss_0pct",
+      "kind": "udp",
+      "loss_percent": 0
+    },
+    {
+      "id": "udp_25ms",
+      "kind": "udp",
+      "rtt_ms": 25
+    },
+    {
+      "id": "udp_100ms",
+      "kind": "udp",
+      "rtt_ms": 100
+    },
+    {
+      "id": "udp_loss_1pct",
+      "kind": "udp",
+      "loss_percent": 1
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "1x4-idle-local",
+      "topology": "1x4",
+      "workload": "idle",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "1x4-idle-ssh_stdio",
+      "topology": "1x4",
+      "workload": "idle",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "1x4-idle-udp_baseline",
+      "topology": "1x4",
+      "workload": "idle",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-idle-udp_25ms",
+      "topology": "1x4",
+      "workload": "idle",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-idle-udp_100ms",
+      "topology": "1x4",
+      "workload": "idle",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-idle-udp_loss_1pct",
+      "topology": "1x4",
+      "workload": "idle",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-active_output-local",
+      "topology": "1x4",
+      "workload": "active_output",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "1x4-active_output-ssh_stdio",
+      "topology": "1x4",
+      "workload": "active_output",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "1x4-active_output-udp_baseline",
+      "topology": "1x4",
+      "workload": "active_output",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-active_output-udp_25ms",
+      "topology": "1x4",
+      "workload": "active_output",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-active_output-udp_100ms",
+      "topology": "1x4",
+      "workload": "active_output",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-active_output-udp_loss_1pct",
+      "topology": "1x4",
+      "workload": "active_output",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-all_output-local",
+      "topology": "1x4",
+      "workload": "all_output",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "1x4-all_output-ssh_stdio",
+      "topology": "1x4",
+      "workload": "all_output",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "1x4-all_output-udp_baseline",
+      "topology": "1x4",
+      "workload": "all_output",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-all_output-udp_25ms",
+      "topology": "1x4",
+      "workload": "all_output",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-all_output-udp_100ms",
+      "topology": "1x4",
+      "workload": "all_output",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-all_output-udp_loss_1pct",
+      "topology": "1x4",
+      "workload": "all_output",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-inactive_output-local",
+      "topology": "1x4",
+      "workload": "inactive_output",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "1x4-inactive_output-ssh_stdio",
+      "topology": "1x4",
+      "workload": "inactive_output",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "1x4-inactive_output-udp_baseline",
+      "topology": "1x4",
+      "workload": "inactive_output",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-inactive_output-udp_25ms",
+      "topology": "1x4",
+      "workload": "inactive_output",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-inactive_output-udp_100ms",
+      "topology": "1x4",
+      "workload": "inactive_output",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-inactive_output-udp_loss_1pct",
+      "topology": "1x4",
+      "workload": "inactive_output",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-interactive_flood-local",
+      "topology": "1x4",
+      "workload": "interactive_flood",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "1x4-interactive_flood-ssh_stdio",
+      "topology": "1x4",
+      "workload": "interactive_flood",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "1x4-interactive_flood-udp_baseline",
+      "topology": "1x4",
+      "workload": "interactive_flood",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-interactive_flood-udp_25ms",
+      "topology": "1x4",
+      "workload": "interactive_flood",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-interactive_flood-udp_100ms",
+      "topology": "1x4",
+      "workload": "interactive_flood",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-interactive_flood-udp_loss_1pct",
+      "topology": "1x4",
+      "workload": "interactive_flood",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-copy_search-local",
+      "topology": "1x4",
+      "workload": "copy_search",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "1x4-copy_search-ssh_stdio",
+      "topology": "1x4",
+      "workload": "copy_search",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "1x4-copy_search-udp_baseline",
+      "topology": "1x4",
+      "workload": "copy_search",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-copy_search-udp_25ms",
+      "topology": "1x4",
+      "workload": "copy_search",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-copy_search-udp_100ms",
+      "topology": "1x4",
+      "workload": "copy_search",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-copy_search-udp_loss_1pct",
+      "topology": "1x4",
+      "workload": "copy_search",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-resize_sweep-local",
+      "topology": "1x4",
+      "workload": "resize_sweep",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "1x4-resize_sweep-ssh_stdio",
+      "topology": "1x4",
+      "workload": "resize_sweep",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "1x4-resize_sweep-udp_baseline",
+      "topology": "1x4",
+      "workload": "resize_sweep",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-resize_sweep-udp_25ms",
+      "topology": "1x4",
+      "workload": "resize_sweep",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-resize_sweep-udp_100ms",
+      "topology": "1x4",
+      "workload": "resize_sweep",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-resize_sweep-udp_loss_1pct",
+      "topology": "1x4",
+      "workload": "resize_sweep",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-snapshot_output_resize-local",
+      "topology": "1x4",
+      "workload": "snapshot_output_resize",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "1x4-snapshot_output_resize-ssh_stdio",
+      "topology": "1x4",
+      "workload": "snapshot_output_resize",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "1x4-snapshot_output_resize-udp_baseline",
+      "topology": "1x4",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-snapshot_output_resize-udp_25ms",
+      "topology": "1x4",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-snapshot_output_resize-udp_100ms",
+      "topology": "1x4",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-snapshot_output_resize-udp_loss_1pct",
+      "topology": "1x4",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-attach_restore_tab_switch-local",
+      "topology": "1x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "1x4-attach_restore_tab_switch-ssh_stdio",
+      "topology": "1x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "1x4-attach_restore_tab_switch-udp_baseline",
+      "topology": "1x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-attach_restore_tab_switch-udp_25ms",
+      "topology": "1x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-attach_restore_tab_switch-udp_100ms",
+      "topology": "1x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-attach_restore_tab_switch-udp_loss_1pct",
+      "topology": "1x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-idle-local",
+      "topology": "4x1",
+      "workload": "idle",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x1-idle-ssh_stdio",
+      "topology": "4x1",
+      "workload": "idle",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x1-idle-udp_baseline",
+      "topology": "4x1",
+      "workload": "idle",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-idle-udp_25ms",
+      "topology": "4x1",
+      "workload": "idle",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-idle-udp_100ms",
+      "topology": "4x1",
+      "workload": "idle",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-idle-udp_loss_1pct",
+      "topology": "4x1",
+      "workload": "idle",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-active_output-local",
+      "topology": "4x1",
+      "workload": "active_output",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x1-active_output-ssh_stdio",
+      "topology": "4x1",
+      "workload": "active_output",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x1-active_output-udp_baseline",
+      "topology": "4x1",
+      "workload": "active_output",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-active_output-udp_25ms",
+      "topology": "4x1",
+      "workload": "active_output",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-active_output-udp_100ms",
+      "topology": "4x1",
+      "workload": "active_output",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-active_output-udp_loss_1pct",
+      "topology": "4x1",
+      "workload": "active_output",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-all_output-local",
+      "topology": "4x1",
+      "workload": "all_output",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x1-all_output-ssh_stdio",
+      "topology": "4x1",
+      "workload": "all_output",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x1-all_output-udp_baseline",
+      "topology": "4x1",
+      "workload": "all_output",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-all_output-udp_25ms",
+      "topology": "4x1",
+      "workload": "all_output",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-all_output-udp_100ms",
+      "topology": "4x1",
+      "workload": "all_output",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-all_output-udp_loss_1pct",
+      "topology": "4x1",
+      "workload": "all_output",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-inactive_output-local",
+      "topology": "4x1",
+      "workload": "inactive_output",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x1-inactive_output-ssh_stdio",
+      "topology": "4x1",
+      "workload": "inactive_output",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x1-inactive_output-udp_baseline",
+      "topology": "4x1",
+      "workload": "inactive_output",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-inactive_output-udp_25ms",
+      "topology": "4x1",
+      "workload": "inactive_output",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-inactive_output-udp_100ms",
+      "topology": "4x1",
+      "workload": "inactive_output",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-inactive_output-udp_loss_1pct",
+      "topology": "4x1",
+      "workload": "inactive_output",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-interactive_flood-local",
+      "topology": "4x1",
+      "workload": "interactive_flood",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x1-interactive_flood-ssh_stdio",
+      "topology": "4x1",
+      "workload": "interactive_flood",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x1-interactive_flood-udp_baseline",
+      "topology": "4x1",
+      "workload": "interactive_flood",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-interactive_flood-udp_25ms",
+      "topology": "4x1",
+      "workload": "interactive_flood",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-interactive_flood-udp_100ms",
+      "topology": "4x1",
+      "workload": "interactive_flood",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-interactive_flood-udp_loss_1pct",
+      "topology": "4x1",
+      "workload": "interactive_flood",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-copy_search-local",
+      "topology": "4x1",
+      "workload": "copy_search",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x1-copy_search-ssh_stdio",
+      "topology": "4x1",
+      "workload": "copy_search",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x1-copy_search-udp_baseline",
+      "topology": "4x1",
+      "workload": "copy_search",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-copy_search-udp_25ms",
+      "topology": "4x1",
+      "workload": "copy_search",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-copy_search-udp_100ms",
+      "topology": "4x1",
+      "workload": "copy_search",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-copy_search-udp_loss_1pct",
+      "topology": "4x1",
+      "workload": "copy_search",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-resize_sweep-local",
+      "topology": "4x1",
+      "workload": "resize_sweep",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x1-resize_sweep-ssh_stdio",
+      "topology": "4x1",
+      "workload": "resize_sweep",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x1-resize_sweep-udp_baseline",
+      "topology": "4x1",
+      "workload": "resize_sweep",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-resize_sweep-udp_25ms",
+      "topology": "4x1",
+      "workload": "resize_sweep",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-resize_sweep-udp_100ms",
+      "topology": "4x1",
+      "workload": "resize_sweep",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-resize_sweep-udp_loss_1pct",
+      "topology": "4x1",
+      "workload": "resize_sweep",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-snapshot_output_resize-local",
+      "topology": "4x1",
+      "workload": "snapshot_output_resize",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x1-snapshot_output_resize-ssh_stdio",
+      "topology": "4x1",
+      "workload": "snapshot_output_resize",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x1-snapshot_output_resize-udp_baseline",
+      "topology": "4x1",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-snapshot_output_resize-udp_25ms",
+      "topology": "4x1",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-snapshot_output_resize-udp_100ms",
+      "topology": "4x1",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-snapshot_output_resize-udp_loss_1pct",
+      "topology": "4x1",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-attach_restore_tab_switch-local",
+      "topology": "4x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x1-attach_restore_tab_switch-ssh_stdio",
+      "topology": "4x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x1-attach_restore_tab_switch-udp_baseline",
+      "topology": "4x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-attach_restore_tab_switch-udp_25ms",
+      "topology": "4x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-attach_restore_tab_switch-udp_100ms",
+      "topology": "4x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-attach_restore_tab_switch-udp_loss_1pct",
+      "topology": "4x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-idle-local",
+      "topology": "4x4",
+      "workload": "idle",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x4-idle-ssh_stdio",
+      "topology": "4x4",
+      "workload": "idle",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x4-idle-udp_baseline",
+      "topology": "4x4",
+      "workload": "idle",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-idle-udp_25ms",
+      "topology": "4x4",
+      "workload": "idle",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-idle-udp_100ms",
+      "topology": "4x4",
+      "workload": "idle",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-idle-udp_loss_1pct",
+      "topology": "4x4",
+      "workload": "idle",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-active_output-local",
+      "topology": "4x4",
+      "workload": "active_output",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x4-active_output-ssh_stdio",
+      "topology": "4x4",
+      "workload": "active_output",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x4-active_output-udp_baseline",
+      "topology": "4x4",
+      "workload": "active_output",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-active_output-udp_25ms",
+      "topology": "4x4",
+      "workload": "active_output",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-active_output-udp_100ms",
+      "topology": "4x4",
+      "workload": "active_output",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-active_output-udp_loss_1pct",
+      "topology": "4x4",
+      "workload": "active_output",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-all_output-local",
+      "topology": "4x4",
+      "workload": "all_output",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x4-all_output-ssh_stdio",
+      "topology": "4x4",
+      "workload": "all_output",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x4-all_output-udp_baseline",
+      "topology": "4x4",
+      "workload": "all_output",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-all_output-udp_25ms",
+      "topology": "4x4",
+      "workload": "all_output",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-all_output-udp_100ms",
+      "topology": "4x4",
+      "workload": "all_output",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-all_output-udp_loss_1pct",
+      "topology": "4x4",
+      "workload": "all_output",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-inactive_output-local",
+      "topology": "4x4",
+      "workload": "inactive_output",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x4-inactive_output-ssh_stdio",
+      "topology": "4x4",
+      "workload": "inactive_output",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x4-inactive_output-udp_baseline",
+      "topology": "4x4",
+      "workload": "inactive_output",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-inactive_output-udp_25ms",
+      "topology": "4x4",
+      "workload": "inactive_output",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-inactive_output-udp_100ms",
+      "topology": "4x4",
+      "workload": "inactive_output",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-inactive_output-udp_loss_1pct",
+      "topology": "4x4",
+      "workload": "inactive_output",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-interactive_flood-local",
+      "topology": "4x4",
+      "workload": "interactive_flood",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x4-interactive_flood-ssh_stdio",
+      "topology": "4x4",
+      "workload": "interactive_flood",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x4-interactive_flood-udp_baseline",
+      "topology": "4x4",
+      "workload": "interactive_flood",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-interactive_flood-udp_25ms",
+      "topology": "4x4",
+      "workload": "interactive_flood",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-interactive_flood-udp_100ms",
+      "topology": "4x4",
+      "workload": "interactive_flood",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-interactive_flood-udp_loss_1pct",
+      "topology": "4x4",
+      "workload": "interactive_flood",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-copy_search-local",
+      "topology": "4x4",
+      "workload": "copy_search",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x4-copy_search-ssh_stdio",
+      "topology": "4x4",
+      "workload": "copy_search",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x4-copy_search-udp_baseline",
+      "topology": "4x4",
+      "workload": "copy_search",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-copy_search-udp_25ms",
+      "topology": "4x4",
+      "workload": "copy_search",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-copy_search-udp_100ms",
+      "topology": "4x4",
+      "workload": "copy_search",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-copy_search-udp_loss_1pct",
+      "topology": "4x4",
+      "workload": "copy_search",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-resize_sweep-local",
+      "topology": "4x4",
+      "workload": "resize_sweep",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x4-resize_sweep-ssh_stdio",
+      "topology": "4x4",
+      "workload": "resize_sweep",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x4-resize_sweep-udp_baseline",
+      "topology": "4x4",
+      "workload": "resize_sweep",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-resize_sweep-udp_25ms",
+      "topology": "4x4",
+      "workload": "resize_sweep",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-resize_sweep-udp_100ms",
+      "topology": "4x4",
+      "workload": "resize_sweep",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-resize_sweep-udp_loss_1pct",
+      "topology": "4x4",
+      "workload": "resize_sweep",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-snapshot_output_resize-local",
+      "topology": "4x4",
+      "workload": "snapshot_output_resize",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x4-snapshot_output_resize-ssh_stdio",
+      "topology": "4x4",
+      "workload": "snapshot_output_resize",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x4-snapshot_output_resize-udp_baseline",
+      "topology": "4x4",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-snapshot_output_resize-udp_25ms",
+      "topology": "4x4",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-snapshot_output_resize-udp_100ms",
+      "topology": "4x4",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-snapshot_output_resize-udp_loss_1pct",
+      "topology": "4x4",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-attach_restore_tab_switch-local",
+      "topology": "4x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "4x4-attach_restore_tab_switch-ssh_stdio",
+      "topology": "4x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "4x4-attach_restore_tab_switch-udp_baseline",
+      "topology": "4x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-attach_restore_tab_switch-udp_25ms",
+      "topology": "4x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-attach_restore_tab_switch-udp_100ms",
+      "topology": "4x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-attach_restore_tab_switch-udp_loss_1pct",
+      "topology": "4x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-idle-local",
+      "topology": "8x1",
+      "workload": "idle",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "8x1-idle-ssh_stdio",
+      "topology": "8x1",
+      "workload": "idle",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "8x1-idle-udp_baseline",
+      "topology": "8x1",
+      "workload": "idle",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-idle-udp_25ms",
+      "topology": "8x1",
+      "workload": "idle",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-idle-udp_100ms",
+      "topology": "8x1",
+      "workload": "idle",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-idle-udp_loss_1pct",
+      "topology": "8x1",
+      "workload": "idle",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-active_output-local",
+      "topology": "8x1",
+      "workload": "active_output",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "8x1-active_output-ssh_stdio",
+      "topology": "8x1",
+      "workload": "active_output",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "8x1-active_output-udp_baseline",
+      "topology": "8x1",
+      "workload": "active_output",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-active_output-udp_25ms",
+      "topology": "8x1",
+      "workload": "active_output",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-active_output-udp_100ms",
+      "topology": "8x1",
+      "workload": "active_output",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-active_output-udp_loss_1pct",
+      "topology": "8x1",
+      "workload": "active_output",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-all_output-local",
+      "topology": "8x1",
+      "workload": "all_output",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "8x1-all_output-ssh_stdio",
+      "topology": "8x1",
+      "workload": "all_output",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "8x1-all_output-udp_baseline",
+      "topology": "8x1",
+      "workload": "all_output",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-all_output-udp_25ms",
+      "topology": "8x1",
+      "workload": "all_output",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-all_output-udp_100ms",
+      "topology": "8x1",
+      "workload": "all_output",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-all_output-udp_loss_1pct",
+      "topology": "8x1",
+      "workload": "all_output",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-inactive_output-local",
+      "topology": "8x1",
+      "workload": "inactive_output",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "8x1-inactive_output-ssh_stdio",
+      "topology": "8x1",
+      "workload": "inactive_output",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "8x1-inactive_output-udp_baseline",
+      "topology": "8x1",
+      "workload": "inactive_output",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-inactive_output-udp_25ms",
+      "topology": "8x1",
+      "workload": "inactive_output",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-inactive_output-udp_100ms",
+      "topology": "8x1",
+      "workload": "inactive_output",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-inactive_output-udp_loss_1pct",
+      "topology": "8x1",
+      "workload": "inactive_output",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-interactive_flood-local",
+      "topology": "8x1",
+      "workload": "interactive_flood",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "8x1-interactive_flood-ssh_stdio",
+      "topology": "8x1",
+      "workload": "interactive_flood",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "8x1-interactive_flood-udp_baseline",
+      "topology": "8x1",
+      "workload": "interactive_flood",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-interactive_flood-udp_25ms",
+      "topology": "8x1",
+      "workload": "interactive_flood",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-interactive_flood-udp_100ms",
+      "topology": "8x1",
+      "workload": "interactive_flood",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-interactive_flood-udp_loss_1pct",
+      "topology": "8x1",
+      "workload": "interactive_flood",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-copy_search-local",
+      "topology": "8x1",
+      "workload": "copy_search",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "8x1-copy_search-ssh_stdio",
+      "topology": "8x1",
+      "workload": "copy_search",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "8x1-copy_search-udp_baseline",
+      "topology": "8x1",
+      "workload": "copy_search",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-copy_search-udp_25ms",
+      "topology": "8x1",
+      "workload": "copy_search",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-copy_search-udp_100ms",
+      "topology": "8x1",
+      "workload": "copy_search",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-copy_search-udp_loss_1pct",
+      "topology": "8x1",
+      "workload": "copy_search",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-resize_sweep-local",
+      "topology": "8x1",
+      "workload": "resize_sweep",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "8x1-resize_sweep-ssh_stdio",
+      "topology": "8x1",
+      "workload": "resize_sweep",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "8x1-resize_sweep-udp_baseline",
+      "topology": "8x1",
+      "workload": "resize_sweep",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-resize_sweep-udp_25ms",
+      "topology": "8x1",
+      "workload": "resize_sweep",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-resize_sweep-udp_100ms",
+      "topology": "8x1",
+      "workload": "resize_sweep",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-resize_sweep-udp_loss_1pct",
+      "topology": "8x1",
+      "workload": "resize_sweep",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-snapshot_output_resize-local",
+      "topology": "8x1",
+      "workload": "snapshot_output_resize",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "8x1-snapshot_output_resize-ssh_stdio",
+      "topology": "8x1",
+      "workload": "snapshot_output_resize",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "8x1-snapshot_output_resize-udp_baseline",
+      "topology": "8x1",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-snapshot_output_resize-udp_25ms",
+      "topology": "8x1",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-snapshot_output_resize-udp_100ms",
+      "topology": "8x1",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-snapshot_output_resize-udp_loss_1pct",
+      "topology": "8x1",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-attach_restore_tab_switch-local",
+      "topology": "8x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "local",
+      "roles": [
+        "daemon",
+        "client"
+      ]
+    },
+    {
+      "id": "8x1-attach_restore_tab_switch-ssh_stdio",
+      "topology": "8x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "ssh_stdio",
+      "roles": [
+        "daemon",
+        "client",
+        "ssh_stdio_peer"
+      ]
+    },
+    {
+      "id": "8x1-attach_restore_tab_switch-udp_baseline",
+      "topology": "8x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_baseline",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-attach_restore_tab_switch-udp_25ms",
+      "topology": "8x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_25ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-attach_restore_tab_switch-udp_100ms",
+      "topology": "8x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_100ms",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-attach_restore_tab_switch-udp_loss_1pct",
+      "topology": "8x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_loss_1pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-idle-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "idle",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-active_output-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "active_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-all_output-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "all_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-inactive_output-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "inactive_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-interactive_flood-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "interactive_flood",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-copy_search-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "copy_search",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-resize_sweep-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "resize_sweep",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-snapshot_output_resize-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "1x4-attach_restore_tab_switch-udp_loss_0pct",
+      "topology": "1x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-idle-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "idle",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-active_output-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "active_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-all_output-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "all_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-inactive_output-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "inactive_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-interactive_flood-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "interactive_flood",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-copy_search-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "copy_search",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-resize_sweep-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "resize_sweep",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-snapshot_output_resize-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x1-attach_restore_tab_switch-udp_loss_0pct",
+      "topology": "4x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-idle-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "idle",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-active_output-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "active_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-all_output-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "all_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-inactive_output-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "inactive_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-interactive_flood-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "interactive_flood",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-copy_search-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "copy_search",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-resize_sweep-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "resize_sweep",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-snapshot_output_resize-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "4x4-attach_restore_tab_switch-udp_loss_0pct",
+      "topology": "4x4",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-idle-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "idle",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-active_output-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "active_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-all_output-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "all_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-inactive_output-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "inactive_output",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-interactive_flood-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "interactive_flood",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-copy_search-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "copy_search",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-resize_sweep-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "resize_sweep",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-snapshot_output_resize-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "snapshot_output_resize",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    },
+    {
+      "id": "8x1-attach_restore_tab_switch-udp_loss_0pct",
+      "topology": "8x1",
+      "workload": "attach_restore_tab_switch",
+      "transport": "udp_loss_0pct",
+      "roles": [
+        "daemon",
+        "client",
+        "udp_peer"
+      ]
+    }
+  ]
+}

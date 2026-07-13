@@ -286,7 +286,18 @@ func commitDamageReceipts(receipts []damageReceipt) {
 
 // emitFrame is the sole side-effecting half of the pipeline. The caller holds
 // sendMu for the complete capture/compose/emit transaction.
-func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRenderState, composed composedRenderFrame) bool {
+func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRenderState, composed composedRenderFrame, batches ...*runtimeMarkBatch) bool {
+	var ownedMarks runtimeMarkBatch
+	var marks *runtimeMarkBatch
+	if len(batches) != 0 {
+		marks = batches[0]
+	} else {
+		ownedMarks = d.newRuntimeMarkBatch()
+		marks = &ownedMarks
+		// Direct test callers retain the same guarantee as paint: observer I/O
+		// follows emitFrame's release of attachment ownership.
+		defer marks.flush()
+	}
 	if sess == nil || ac == nil || state == nil {
 		if ac != nil {
 			ac.sendMu.Unlock()
@@ -306,7 +317,9 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 		ac.sendMu.Unlock()
 		return false
 	}
+	endDiff := marks.span(ports.RuntimeDiffStart, ports.RuntimeDiffEnd, 0)
 	prepared, err := ac.output.prepare(composed.frame, composed.damage, composed.reset)
+	endDiff(0, err == nil)
 	if err != nil {
 		ac.sess.mu.Unlock()
 		ac.sendMu.Unlock()
@@ -319,6 +332,7 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 	var sendErr error
 	if len(data) > 0 {
 		sendTr = ac.transport()
+		endEmit := marks.span(ports.RuntimeEmitStart, ports.RuntimeEmitEnd, uint64(len(data)))
 		if sendTr == nil {
 			sendErr = errors.New("client transport is nil")
 		} else {
@@ -328,6 +342,7 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 			}
 			sendErr = prepared.send(data, ac.echoAck.Load(), send)
 		}
+		endEmit(uint64(len(data)), sendErr == nil)
 	}
 	if sendErr == nil {
 		// Publish only after output preparation and transport emission both

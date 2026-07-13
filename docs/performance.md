@@ -1,107 +1,79 @@
-# Performance methodology (M5)
+# Performance measurement
 
-This baseline measures in-process daemon work only. It includes coordinator-enabled
-fixture scheduling metrics, but deliberately does **not** measure chunk
-encoding, compression, GC tuning, or real network latency. Output metrics count frames and encoded output data produced
-by the daemon; snapshot writes and serialized bytes are local snapshot-store
-proxies. These metrics approximate local rendering, IPC payload, and persistence
-work, not a Unix socket, SSH, or UDP transport. Real transport impairment and
-latency benchmarks are deferred.
+## S5a transport observability
 
-## Large-history daemon baseline
+S5a is measurement-only. It records process-local runtime marks and harness-owned
+end-to-end boundaries without changing rendering, pacing, transport policy, wire
+bytes, or `ProtocolVersion`. The canonical matrix and workload/topology/
+transport coverage are in [`testdata/perf/manifest.json`](../testdata/perf/manifest.json):
+`1x4`, `4x1`, `4x4`, and `8x1`, all at `120x40` with 10,000 rows per pane;
+idle, active/all/inactive output, interactive flood, copy search, resize sweep,
+snapshot/output/resize, and attach/restore/tab switch; local, SSH stdio, UDP
+baseline, UDP 25/100 ms, and UDP 0%/1% loss. It has 252 scenarios (4×9×7),
+with inapplicable cases required to be explicit. The seven transport entries are
+`local`, `ssh_stdio`, `udp_baseline`, `udp_loss_0pct`, `udp_25ms`, `udp_100ms`,
+and `udp_loss_1pct`.
 
-Use a single iteration only as a smoke check; it is not suitable for drawing
-performance conclusions:
+### Trace schema and clock domains
+
+Every process JSONL record has exactly these fields:
+`schema` (uint), `process_id` (string), `component` (string), `scenario`
+(string), `run`, `sequence`, `request_id`, `epoch` (uint), `kind` (string),
+`tick` (int64), `bytes`, `fragments`, `retransmits`, `pending` (uint),
+`ack_rtt_nanos` (int64), and `valid` (bool). Schema 1 is represented by:
+
+```json
+{"schema":1,"process_id":"p","component":"daemon","scenario":"s","run":1,"sequence":1,"request_id":1,"epoch":1,"kind":"diff_start","tick":0,"bytes":0,"fragments":0,"retransmits":0,"pending":0,"ack_rtt_nanos":0,"valid":true}
+```
+
+`tick` is stamped only by the concrete JSONL observer using its process-local
+injected monotonic clock; producers supply no timestamp. The harness sets `VEV_PERF_TRACE`,
+`VEV_PERF_PROCESS_ID`, `VEV_PERF_SCENARIO`, and `VEV_PERF_RUN` for every
+launched role, identifying its exclusive trace path and process/scenario/run
+mapping. Components in one OS
+process share that observer. The harness clock is a separate monotonic domain
+and is the sole clock for input-injection → terminal-bytes-successfully-flushed
+end-to-end samples. Cross-process ticks are never ordered or subtracted;
+records correlate only by scenario/run/sequence/request/epoch IDs.
+
+The named process-local spans are capture, compose, diff, queue wait,
+ACK-blocked interval, emit, adapter send, and adapter receive. Their start/end
+marks are paired within one process and summarized by component/adapter with
+raw records, counts, p50/p95/p99, and max. Diagnostic fields (bytes, fragments,
+retransmits, pending, ACK RTT) remain separate from duration calculations.
+
+### Baseline procedure and validity
+
+Use the public CLI harness (not internal packages):
+
+```sh
+go build -o /tmp/vev-perf ./
+rm -rf testdata/perf/results
+go run ./cmd/vev-perf-harness --vev-bin /tmp/vev-perf \
+  --manifest testdata/perf/manifest.json --out testdata/perf/results \
+  --warmup 10s --duration 30s --repetitions 10
+```
+
+The minimums are 30 seconds measured and 10 independent repetitions; warmup is
+excluded. During the measured interval the harness injects at most one event per
+second. At least 10 complete event pairs are required: both injection and
+successful terminal flush must fall inside the measured interval; straddling or
+failed events are retained only as raw diagnostics and are not samples. Each run must contain `manifest.json`, `raw-harness.jsonl`, per-process
+JSONL, `runs.json`, and `summary.json`. Reject results with missing input/flush
+boundaries, unmatched IDs, bad correlation, nonmonotonic same-process sequence,
+negative same-domain spans, fewer than 10 complete in-interval event pairs,
+invalid denominators,
+any cross-process tick arithmetic, or unmet duration/repetition minima. Raw
+JSONL and run manifests are the evidence files; no result authorizes a policy
+or optimization change.
+
+## Existing in-process smoke checks
+
+These commands measure local daemon work only and are not end-to-end transport
+results:
 
 ```sh
 go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1x -benchmem
-```
-
-For before/after comparison, collect repeated samples for the **full matrix**
-(all workloads and topologies), pinning CPU/governor and recording the host.
-The benchmark harness must be committed and present in **both** measured
-revisions: collect the baseline after the harness is introduced but before the
-optimization, then collect the optimized revision with that same harness. The
-fixed duration and count make the output suitable for `benchstat`:
-
-```sh
-go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1s -count=5 -benchmem > /tmp/vev-history-after.txt
-benchstat /tmp/vev-history-before.txt /tmp/vev-history-after.txt
-```
-
-The matrix exercises live paint, snapshot capture, copy-mode entry, copy search,
-and resize at `120x40` client geometry. Each pane is populated with 10,000
-full-width deterministic history rows containing a stable `needle-<tab>-<row>`
-prefix and patterned text. The layouts are:
-
-- 1 tab x 1 pane (control)
-- 1 tab x 4 panes
-- 4 tabs x 1 pane
-- 4 tabs x 4 panes
-- 8 tabs x 1 pane
-
-The fixture starts no PTY readers or transports. It primes the renderer shadow
-before timing; live paint then alternates fixed writes through the coordinator.
-The reported `outputframes/op` value counts output messages. `outputbytes/op`
-counts their encoded terminal data and excludes the 24-byte output header;
-`framepayloadbytes/op` counts the complete output payload including that header.
-`snapshotwrites/op` and `snapshotbytes/op` are local snapshot-store writes and
-serialized bytes. `coordinatorinvalidations/op`, `coordinatorwakes/op`, and
-`coordinatorcoalesced/op` respectively count scheduling requests, delivered
-wakes, and requests coalesced into those wakes; `coordinatorcoalescingratio`
-is the average number of coalesced invalidations delivered per wake. They must
-not be presented as network
-throughput or latency.
-
-Capture a pre-change result outside the repository, including Go and kernel
-context:
-
-```sh
-{
-  date -Is
-  go version
-  uname -a
-  git rev-parse HEAD
-  # Smoke only; do not use this result for comparisons.
-  go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1x -benchmem
-  # Repeated full matrix for every workload/topology used in conclusions.
-  go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1s -count=5 -benchmem
-} > /tmp/vev-history-before.txt 2>&1
-```
-
-## Immutable document allocation gate
-
-The copy-mode document retains an immutable view of existing scrollback rows and
-clones only the visible frame. Visual-search models share that document; cloning
-a model copies only its mutable input and match state. Check those two paths at
-10,000 history rows with:
-
-```sh
-go test ./internal/usecase/copy ./internal/usecase/visualsearch -run '^$' -bench '^(BenchmarkNewSnapshot10KRows|BenchmarkVisualSearchClone10KRows)$' -benchtime=1s -count=5 -benchmem
-```
-
-Treat `allocs/op` and `B/op` as allocation gates: compare the complete repeated
-output with the accepted baseline before merging, and investigate any increase.
-The automated scaling gates also compare equal row/match counts at narrow and
-wide row widths; `B/op` may grow by at most 2x, a conservative relative
-allowance that catches full cell-row copies without depending on an absolute
-Go-version-specific budget. This scope does not yet include an
-incremental/full-text search index: queries still scan the immutable document
-and produce a fresh match list. Chunk encoding, compression, GC tuning, and real Unix-socket, SSH, or UDP
-impairment/latency remain out of scope.
-
-## Lower-level smoke baseline
-
-Use this command to check renderer, VT, IPC, and daemon microbenchmarks without
-claiming an end-to-end transport result:
-
-```sh
 go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc -run '^$' -bench=. -benchmem
 go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkComposeFloatingFrameCached$' -benchmem
-```
-
-Enable daemon pprof explicitly when collecting a daemon profile:
-
-```sh
-VEV_PPROF_ADDR=127.0.0.1:6060 vev --daemon
 ```

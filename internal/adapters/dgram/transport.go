@@ -45,6 +45,14 @@ var (
 	errControlFull = errors.New("dgram: control queue full")
 )
 
+type RuntimeOption func(*Transport)
+
+// WithRuntimeObserver enables process-local marks without changing dgram's
+// behavior clock or carriage policy.
+func WithRuntimeObserver(observer ports.RuntimeObserver) RuntimeOption {
+	return func(t *Transport) { t.runtimeObserver = observer }
+}
+
 type Options struct {
 	MTU              int
 	ResendAfter      time.Duration
@@ -168,6 +176,11 @@ type Transport struct {
 	// mutation and before ordered event publication.
 	afterLinkStateCommit func(ports.LinkState)
 	observe              DiagnosticObserver
+	runtimeObserver      ports.RuntimeObserver
+	operationMu          sync.Mutex
+	operationCount       int
+	closing              bool
+	operationsDone       chan struct{}
 	diagnosticCh         chan Diagnostic
 	heartbeat            time.Duration
 	resendAfter          time.Duration
@@ -311,11 +324,11 @@ func (s *writeDeadlineState) expire(now time.Time) {
 	s.mu.Unlock()
 }
 
-func NewTransport(pc net.PacketConn, peer net.Addr, key []byte, sendDir, recvDir uint32) (*Transport, error) {
-	return NewTransportWithOptions(pc, peer, key, sendDir, recvDir, Options{})
+func NewTransport(pc net.PacketConn, peer net.Addr, key []byte, sendDir, recvDir uint32, runtimeOpts ...RuntimeOption) (*Transport, error) {
+	return NewTransportWithOptions(pc, peer, key, sendDir, recvDir, Options{}, runtimeOpts...)
 }
 
-func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendDir, recvDir uint32, opts Options) (*Transport, error) {
+func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendDir, recvDir uint32, opts Options, runtimeOpts ...RuntimeOption) (*Transport, error) {
 	c, err := pdgram.NewCodec(key)
 	if err != nil {
 		return nil, err
@@ -360,6 +373,11 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 		nextRecvSeq:             1,
 		recvBuf:                 make(map[uint64]ports.Frame),
 	}
+	for _, opt := range runtimeOpts {
+		if opt != nil {
+			opt(t)
+		}
+	}
 	t.sendWake = make(chan struct{})
 	t.control = make(chan controlRecord, controlQueueSize)
 	t.ackWake = make(chan struct{}, 1)
@@ -387,9 +405,19 @@ func NewTransportWithOptions(pc net.PacketConn, peer net.Addr, key []byte, sendD
 	return t, nil
 }
 
-func (t *Transport) Send(f ports.Frame) error { return t.send(f, false) }
+func (t *Transport) Send(f ports.Frame) error {
+	end := t.beginRuntimeOperation(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)))
+	err := t.send(f, false)
+	end(err == nil)
+	return err
+}
 
-func (t *Transport) SendAsync(f ports.Frame) error { return t.send(f, true) }
+func (t *Transport) SendAsync(f ports.Frame) error {
+	end := t.beginRuntimeOperation(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)))
+	err := t.send(f, true)
+	end(err == nil)
+	return err
+}
 
 // SendSynchronous owns queue reservation, fragment pacing, per-write deadlines,
 // and close cancellation. Callers must not layer a shorter preflight timer over it.
@@ -568,25 +596,35 @@ func (t *Transport) removePendingLocked(seq uint64) bool {
 }
 
 func (t *Transport) Recv() (ports.Frame, error) {
+	end := t.beginRuntimeOperation(ports.RuntimeAdapterReceiveStart, 0)
 	select {
 	case f := <-t.in:
+		end(true)
 		return f, nil
 	case <-t.done:
 		t.mu.Lock()
 		err := t.closeErr
 		t.mu.Unlock()
 		if err != nil {
+			end(false)
 			return ports.Frame{}, err
 		}
-		return ports.Frame{}, errors.New("dgram: closed")
+		err = errors.New("dgram: closed")
+		end(false)
+		return ports.Frame{}, err
 	}
 }
 func (t *Transport) Close() error {
+	done := t.beginShutdown()
 	t.closeWithError(errors.New("dgram: closed"))
 	t.mu.Lock()
 	pc := t.pc
 	t.mu.Unlock()
-	return pc.Close()
+	err := pc.Close()
+	if done != nil {
+		<-done
+	}
+	return err
 }
 
 func (t *Transport) Peer() net.Addr { t.mu.Lock(); defer t.mu.Unlock(); return t.peer }
@@ -1585,4 +1623,55 @@ func decodeData(b []byte) (uint64, bool, ports.Frame, bool) {
 }
 
 // DatagramTransport marks Transport as a UDP-style datagram transport.
+func (t *Transport) beginRuntimeOperation(start ports.RuntimeMarkKind, bytes uint64) func(bool) {
+	if t.runtimeObserver == nil {
+		return func(bool) {}
+	}
+	if !t.beginObservedOperation() {
+		return func(bool) {}
+	}
+	correlation := ports.NewRuntimeCorrelation()
+	t.runtimeObserver.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("dgram", correlation, start, bytes, true))
+	end := ports.RuntimeAdapterSendEnd
+	if start == ports.RuntimeAdapterReceiveStart {
+		end = ports.RuntimeAdapterReceiveEnd
+	}
+	return func(valid bool) {
+		defer t.finishObservedOperation()
+		t.runtimeObserver.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("dgram", correlation, end, bytes, valid))
+	}
+}
+
+func (t *Transport) beginObservedOperation() bool {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	if t.closing {
+		return false
+	}
+	if t.operationCount == 0 {
+		t.operationsDone = make(chan struct{})
+	}
+	t.operationCount++
+	return true
+}
+
+func (t *Transport) finishObservedOperation() {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	t.operationCount--
+	if t.operationCount == 0 {
+		close(t.operationsDone)
+	}
+}
+
+func (t *Transport) beginShutdown() <-chan struct{} {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	t.closing = true
+	if t.operationCount == 0 {
+		return nil
+	}
+	return t.operationsDone
+}
+
 func (*Transport) DatagramTransport() {}

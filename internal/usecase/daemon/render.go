@@ -5,6 +5,7 @@ import (
 	"bytes"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
@@ -193,7 +194,50 @@ func (d *Daemon) flushPTYEffects(sess *session, tb *tab, p *pane) {
 // paint draws the composed client frame (active tab plus status bar) and
 // sends the resulting bytes. The renderer shadow is reset on explicit invalidations
 // such as switch/create/close/rename/resize so the repaint is complete.
+func (d *Daemon) observeRuntime(kind ports.RuntimeMarkKind, bytes uint64, valid bool) {
+	if d != nil && d.runtimeObserver != nil {
+		d.runtimeObserver.ObserveRuntime(ports.NewRuntimeMark("daemon", kind, bytes, valid))
+	}
+}
+
+// runtimeMarkBatch captures immutable runtime marks during a render transaction.
+// paint owns attachment sendMu while it captures, composes, and emits; JSONL
+// observer I/O must therefore happen only after that ownership is released.
+type runtimeMarkBatch struct {
+	observer ports.RuntimeObserver
+	marks    []ports.RuntimeMark
+}
+
+func (d *Daemon) newRuntimeMarkBatch() runtimeMarkBatch {
+	if d == nil {
+		return runtimeMarkBatch{}
+	}
+	return runtimeMarkBatch{observer: d.runtimeObserver}
+}
+
+func (b *runtimeMarkBatch) span(start, end ports.RuntimeMarkKind, bytes uint64) func(uint64, bool) {
+	if b == nil || b.observer == nil {
+		return func(uint64, bool) {}
+	}
+	correlation := ports.NewRuntimeCorrelation()
+	b.marks = append(b.marks, ports.NewRuntimeMarkWithCorrelation("daemon", correlation, start, bytes, true))
+	return func(endBytes uint64, valid bool) {
+		b.marks = append(b.marks, ports.NewRuntimeMarkWithCorrelation("daemon", correlation, end, endBytes, valid))
+	}
+}
+
+func (b *runtimeMarkBatch) flush() {
+	if b == nil || b.observer == nil {
+		return
+	}
+	for _, mark := range b.marks {
+		b.observer.ObserveRuntime(mark)
+	}
+}
+
 func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...uint64) {
+	marks := d.newRuntimeMarkBatch()
+
 	attachmentEpoch := uint64(0)
 	if len(epochs) != 0 {
 		attachmentEpoch = epochs[0]
@@ -218,6 +262,8 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...
 	// the normal gate, but this ownership check also protects direct resize and
 	// test paint paths from consuming damage that cannot be emitted.
 	if ac.output != nil && ac.output.atCapacity() {
+		// The coordinator owns the blocked interval; this guard only protects
+		// direct test/resize paint calls from destructive capture.
 		ac.sendMu.Unlock()
 		return
 	}
@@ -228,11 +274,15 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...
 	overlays := ac.overlays.SnapshotForRender()
 	repaintAttachedClients := false
 	defer func() {
+		overlays.Unlock()
+		// Every return below has released sendMu before reaching this defer.
+		// Emit the captured sequence before any follow-up repaint can introduce
+		// another boundary, while no attachment, session, tab, or pane lock is held.
+		marks.flush()
 		if repaintAttachedClients {
 			d.repaintAllAttachedClients()
 		}
 	}()
-	defer overlays.Unlock()
 	preview := snapshotPickerPreview(nil)
 	if overlays.previewTab != tb {
 		preview = snapshotPickerPreview(overlays.previewTab)
@@ -270,7 +320,9 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...
 		pickerActive: overlays.pickerActive, paletteActive: overlays.paletteActive, promptActive: overlays.promptActive,
 		copyFeedback: overlays.copyFeedback,
 	}
+	endCapture := marks.span(ports.RuntimeCaptureStart, ports.RuntimeCaptureEnd, 0)
 	state, ok := captureRenderState(sess, ac, bars, capturedOverlays, preview, floatingCfg, reset, damageCaptureConsume)
+	endCapture(0, ok)
 	if !ok {
 		ac.sendMu.Unlock()
 		return
@@ -285,11 +337,13 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...
 		state.preview = pickerPreviewFromCapturedRender(previewState)
 	}
 	captureOverlayLayers(state, overlays, paletteCfg)
+	endCompose := marks.span(ports.RuntimeComposeStart, ports.RuntimeComposeEnd, 0)
 	composed := composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
+	endCompose(0, true)
 	if ac.renderStages.compose != nil {
 		ac.renderStages.compose()
 	}
-	d.emitFrame(sess, ac, state, composed)
+	d.emitFrame(sess, ac, state, composed, &marks)
 }
 
 type themeStyles struct {

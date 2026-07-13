@@ -22,8 +22,9 @@ import (
 // Scheduler debounce bounds. Idle updates use the minimum for low latency;
 // sustained floods step toward the maximum to reduce frame/syscall pressure.
 const (
-	minDebounceInterval   = 2 * time.Millisecond
-	maxSyncUpdateDuration = 500 * time.Millisecond
+	minDebounceInterval       = 2 * time.Millisecond
+	maxSyncUpdateDuration     = 500 * time.Millisecond
+	runtimeObserverQueueDepth = 64
 )
 
 const debounceInterval = minDebounceInterval
@@ -92,25 +93,28 @@ type Daemon struct {
 	// interval between JRS validation and its committed hand-off.
 	beforeRecentSessionHandoff func()
 
-	ptys                    ports.PTYFactory
-	clock                   ports.Clock
-	log                     *slog.Logger
-	baseEnv                 []string
-	shell                   string
-	shellArgs               []string
-	persist                 *persist.Persister
-	persistEnabled          bool
-	snaps                   ports.SnapshotStore
-	snapsEnabled            bool
-	snapshotMarshal         func(snapcodec.Session) ([]byte, error)
-	snapshotJobs            chan *snapshotCapture
-	snapshotWorkerMu        sync.Mutex
-	snapshotWorkerID        uint64
-	snapshotWorkerCtx       context.Context
-	snapshotWorkerCancel    context.CancelFunc
-	snapshotWorkerDone      chan struct{}
-	snapshotWorkerFlush     chan struct{}
-	snapshotWorkerFinalWake chan struct{}
+	ptys                     ports.PTYFactory
+	clock                    ports.Clock
+	log                      *slog.Logger
+	runtimeObserver          ports.RuntimeObserver
+	runtimeObserverCloser    ports.SerializedRuntimeObserver
+	runtimeObserverCloseOnce sync.Once
+	baseEnv                  []string
+	shell                    string
+	shellArgs                []string
+	persist                  *persist.Persister
+	persistEnabled           bool
+	snaps                    ports.SnapshotStore
+	snapsEnabled             bool
+	snapshotMarshal          func(snapcodec.Session) ([]byte, error)
+	snapshotJobs             chan *snapshotCapture
+	snapshotWorkerMu         sync.Mutex
+	snapshotWorkerID         uint64
+	snapshotWorkerCtx        context.Context
+	snapshotWorkerCancel     context.CancelFunc
+	snapshotWorkerDone       chan struct{}
+	snapshotWorkerFlush      chan struct{}
+	snapshotWorkerFinalWake  chan struct{}
 	// snapshotFinalJobs retains immutable terminal captures rejected by the
 	// bounded regular queue. It is only populated during session teardown and
 	// drained by the same worker, so persistence remains outside daemon locks.
@@ -182,6 +186,39 @@ func (s stoppedSession) same(other stoppedSession) bool {
 }
 
 type Option func(*Daemon)
+
+// WithRuntimeObserver enables opt-in process-local marks. It takes no clock:
+// the concrete observer is the sole timestamp owner.
+func WithRuntimeObserver(observer ports.RuntimeObserver) Option {
+	return func(d *Daemon) {
+		// Options are applied before the daemon starts. Replacing an owned
+		// observer here cannot race producers and must retire its worker.
+		if d.runtimeObserverCloser != nil {
+			d.runtimeObserverCloser.Close()
+			d.runtimeObserverCloser = nil
+		}
+		reporter, owned := ports.EnsureSerializedRuntimeObserver(observer, runtimeObserverQueueDepth)
+		d.runtimeObserver = reporter
+		if owned {
+			d.runtimeObserverCloser = reporter
+		}
+	}
+}
+
+// closeRuntimeObserver drains the daemon-owned reporter before teardown
+// completes. Application-owned process reporters are closed by their app
+// lifecycle instead, so shared observers never receive a duplicate close.
+func (d *Daemon) closeRuntimeObserver() {
+	if d == nil {
+		return
+	}
+	d.runtimeObserverCloseOnce.Do(func() {
+		if d.runtimeObserverCloser != nil {
+			d.runtimeObserverCloser.Flush()
+			d.runtimeObserverCloser.Close()
+		}
+	})
+}
 
 // WithShell overrides the command (and its args) each session spawns. The
 // default is $SHELL (or /bin/sh) with no arguments; tests use this to run a
@@ -356,6 +393,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 // returns when the last session is removed or ctx is cancelled; on the latter
 // path attached clients are detached with ReasonServerShutdown.
 func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
+	defer d.closeRuntimeObserver()
 	d.serveCtx, d.serveCancel = context.WithCancel(ctx)
 	defer d.serveCancel()
 	d.hardCtx, d.hardCancel = context.WithCancel(context.Background())

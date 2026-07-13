@@ -102,6 +102,10 @@ const stdinBufSize = 4096
 // goroutine, decoupling the input/resize pumps from transport back-pressure.
 const sendQueueDepth = 64
 
+// runtimeObserverQueueDepth bounds marks awaiting the one reporting worker.
+// A full queue records an ordered diagnostic gap rather than blocking ACKs.
+const runtimeObserverQueueDepth = 64
+
 var reconnectSleep = sleepReconnect
 var reconnectSleepWithResize = sleepReconnectWithResizeEvents
 
@@ -120,7 +124,36 @@ const (
 // ClipboardReader configured (clipboard non-nil) — local attaches forward
 // 0x16 untouched so the locally running agent's own clipboard handling
 // applies.
-func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) (retErr error) {
+// Option configures opt-in client runtime observation.
+type Option func(*runtimeOptions)
+
+type runtimeOptions struct{ observer ports.RuntimeObserver }
+
+// WithRuntimeObserver enables process-local marks. It intentionally accepts no
+// clock; timestamps are assigned by the concrete observer.
+func WithRuntimeObserver(observer ports.RuntimeObserver) Option {
+	return func(opts *runtimeOptions) { opts.observer = observer }
+}
+
+func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) error {
+	return run(ctx, dialer, term, clk, intent, name, remote, clipboard, log, nil)
+}
+
+// RunWithRuntimeObserver is the application wiring entry point.
+func RunWithRuntimeObserver(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observer ports.RuntimeObserver) error {
+	return run(ctx, dialer, term, clk, intent, name, remote, clipboard, log, observer)
+}
+
+func run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observer ports.RuntimeObserver) (retErr error) {
+	if reporter, owned := ports.EnsureSerializedRuntimeObserver(observer, runtimeObserverQueueDepth); reporter != nil {
+		if owned {
+			defer func() {
+				reporter.Flush()
+				reporter.Close()
+			}()
+		}
+		observer = reporter
+	}
 	if log == nil {
 		log = slog.Default()
 	}
@@ -244,7 +277,7 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 		if reporter, ok := transport.(ports.LinkStateReporter); ok {
 			linkEvents = reporter.LinkEvents()
 		}
-		result := attachOnce(ctx, transport, term, clk, attemptIntent, attemptName, resumeToken, processClientID, &ms, enterRaw, clearStatus, drawStatusStage, linkEvents, remote, clipboard, log)
+		result := attachOnce(ctx, transport, term, clk, attemptIntent, attemptName, resumeToken, processClientID, &ms, enterRaw, clearStatus, drawStatusStage, linkEvents, remote, clipboard, log, observer)
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
@@ -311,8 +344,14 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 // disappears, or the context is cancelled.
 //
 // It is kept as a compatibility wrapper for callers that still own dialing.
-func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string) error {
-	return Run(ctx, singleTransportDialer{transport: transport}, term, clk, intent, name, false, nil, slog.Default())
+func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, options ...Option) error {
+	var opts runtimeOptions
+	for _, option := range options {
+		if option != nil {
+			option(&opts)
+		}
+	}
+	return run(ctx, singleTransportDialer{transport: transport}, term, clk, intent, name, false, nil, slog.Default(), opts.observer)
 }
 
 type singleTransportDialer struct{ transport ports.Transport }
@@ -346,7 +385,11 @@ func requestedOutputWindow(transport ports.Transport) uint8 {
 	return 8
 }
 
-func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func(), drawStatusStage func(reconnectStage), linkEvents <-chan ports.LinkEvent, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) attachResult {
+func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func(), drawStatusStage func(reconnectStage), linkEvents <-chan ports.LinkEvent, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observers ...ports.RuntimeObserver) attachResult {
+	var observer ports.RuntimeObserver
+	if len(observers) != 0 {
+		observer = observers[0]
+	}
 	// 1. Handshake: send Hello with our size and TERM.
 	size, err := term.Size()
 	if err != nil {
@@ -500,6 +543,10 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 				}
 				if ferr := term.Flush(); ferr != nil {
 					return welcomedResult(fmt.Errorf("vev: flushing terminal: %w", ferr))
+				}
+				// The terminal boundary is after a successful flush and before ACK.
+				if observer != nil {
+					observer.ObserveRuntime(ports.NewRuntimeMark("client", ports.RuntimeTerminalFlushed, uint64(len(o.Data)), true))
 				}
 				if o.NewStateNum != 0 {
 					ackQueue.offer(o.NewStateNum)
