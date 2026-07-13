@@ -255,53 +255,89 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 }
 
 func TestPTYReaderRestoresPrimaryScreenImmediatelyAfterDEC1049Exit(t *testing.T) {
-	pty, steps, processed := newChannelPTY(t)
-	d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
-	// A one-frame local output window forces the replay to exercise the ACK
-	// edge between each visible terminal state without relying on elapsed time.
-	ac.output.maxOutstanding = 1
-	clock := newCoordinatorMockClock(t, 8)
-	d.clock = clock.clock
-	rc := d.attachCoordinator(sess, nil, ac, true)
-	client := vt.NewScreen(80, 25)
+	for _, tc := range []struct {
+		name          string
+		exitBeforeACK bool
+		exitSuffix    string
+		overlay       bool
+	}{
+		{name: "exit waits for local ACK"},
+		{name: "exit arrives before local ACK", exitBeforeACK: true},
+		{name: "prompt bytes follow exit before local ACK", exitBeforeACK: true, exitSuffix: "PROMPT> "},
+		{name: "palette overlay with bars", overlay: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pty, steps, processed := newChannelPTY(t)
+			d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
+			// A one-frame local output window forces the replay to exercise both
+			// ACK orderings without relying on elapsed time.
+			ac.output.maxOutstanding = 1
+			clock := newCoordinatorMockClock(t, 8)
+			d.clock = clock.clock
+			rc := d.attachCoordinator(sess, nil, ac, true)
+			client := vt.NewScreen(80, 25)
+			pane := sess.tabs[0].focusedPane()
 
-	d.sessWg.Add(1)
-	go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
+			d.sessWg.Add(1)
+			go d.ptyReader(sess, sess.tabs[0], pane)
+			t.Cleanup(func() {
+				steps <- channelPTYStep{err: io.EOF}
+				d.sessWg.Wait()
+			})
 
-	replay := func(data []byte, acknowledge bool) ports.Output {
-		t.Helper()
-		steps <- channelPTYStep{data: data}
-		awaitPTYReadProcessed(t, processed)
-		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
-		frame := awaitOutputFrameWithoutSleep(t, sends)
-		out := mustApplyOutput(t, client, frame)
-		if acknowledge {
-			ac.ackOutputState(out.NewStateNum)
-			rc.notifyAck()
-		}
-		return out
+			replay := func(data []byte, deadline time.Duration) ports.Output {
+				t.Helper()
+				steps <- channelPTYStep{data: data}
+				awaitPTYReadProcessed(t, processed)
+				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), deadline)
+				return mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
+			}
+			acknowledge := func(out ports.Output) {
+				ac.ackOutputState(out.NewStateNum)
+				rc.notifyAck()
+			}
+
+			if tc.overlay {
+				d.enterPalette(sess, ac)
+				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
+				acknowledge(mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends)))
+			}
+			acknowledge(replay([]byte("PRIMARY"), minOutputRenderDeadline))
+			primary := client.Frame.Clone()
+
+			// The reported PTY stream is deliberately split into enter, body, and
+			// exit reads. MATRIX distinguishes alternate cells in the replayed
+			// terminal model from all primary, chrome, and overlay cells.
+			acknowledge(replay([]byte("\x1b[?1049h"), minOutputRenderDeadline))
+			alternate := replay([]byte(strings.Repeat("MATRIX", 300)), minOutputRenderDeadline)
+			pane.mu.Lock()
+			require.Contains(t, strings.Join(frameRows(pane.screen.Frame), "\n"), "MATRIX", "fixture must make alternate cells visible to the production renderer")
+			pane.mu.Unlock()
+
+			exitData := []byte("\x1b[?1049l" + tc.exitSuffix)
+			if tc.exitBeforeACK {
+				steps <- channelPTYStep{data: exitData}
+				awaitPTYReadProcessed(t, processed)
+				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
+				requireNoCoordinatorOutputFrame(t, sends)
+				acknowledge(alternate)
+			} else {
+				acknowledge(alternate)
+				steps <- channelPTYStep{data: exitData}
+				awaitPTYReadProcessed(t, processed)
+				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
+			}
+			exit := mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
+			require.NotEmpty(t, exit.Data, "the first post-exit output must actively remove alternate cells")
+			rendered := strings.Join(frameRows(client.Frame), "\n")
+			require.NotContains(t, rendered, "MATRIX", "the first post-exit frame must not retain alternate cells")
+			if tc.exitSuffix == "" {
+				require.Equal(t, frameRows(primary), frameRows(client.Frame), "the first post-exit output must restore the primary screen")
+			} else {
+				require.Contains(t, rendered, tc.exitSuffix, "bytes immediately after DEC 1049 exit must appear in the first post-exit frame")
+			}
+		})
 	}
-
-	replay([]byte("PRIMARY"), true)
-	primary := client.Frame.Clone()
-
-	// This is the PTY byte sequence emitted by the reported command: primary
-	// content, a dense DEC alternate screen, then an immediate DEC restore.
-	alternate := replay(append([]byte("\x1b[?1049h"), []byte(strings.Repeat("X", 80*23))...), false)
-	require.Equal(t, 'X', client.Frame.At(79, 23).Rune, "fixture must make alternate cells client-visible")
-
-	steps <- channelPTYStep{data: []byte("\x1b[?1049l")}
-	awaitPTYReadProcessed(t, processed)
-	fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
-	requireNoCoordinatorOutputFrame(t, sends)
-	ac.ackOutputState(alternate.NewStateNum)
-	rc.notifyAck()
-	exit := mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
-	require.NotEmpty(t, exit.Data, "the first post-exit output must actively remove alternate cells")
-	require.Equal(t, frameRows(primary), frameRows(client.Frame), "the first output after DEC 1049 exit must restore primary cells and erase every alternate glyph")
-
-	steps <- channelPTYStep{err: io.EOF}
-	d.sessWg.Wait()
 }
 
 func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *testing.T) {
