@@ -1,9 +1,6 @@
 package snapshot
 
-import (
-	"github.com/bnema/vev/internal/usecase/layout"
-	"github.com/bnema/vev/pkg/renderer"
-)
+import "github.com/bnema/vev/internal/usecase/layout"
 
 // Session is the durable transfer representation for a named daemon session.
 type Session struct {
@@ -24,15 +21,16 @@ type Tab struct {
 	Panes      []Pane
 }
 
-// Pane captures terminal state needed to restore a fresh shell in the same cwd
-// with its scrollback and final visible primary screen.
+// Pane captures terminal state as opaque, canonical VT blobs. Snapshot owns
+// their length framing and order; pkg/vt owns their contents and validation.
 type Pane struct {
-	ID         layout.PaneID
-	StableID   string
-	Cwd        string
-	Scrollback [][]renderer.Cell
-	Visible    [][]renderer.Cell
-	Process    *Process
+	ID           layout.PaneID
+	StableID     string
+	Cwd          string
+	SealedChunks [][]byte // oldest-first, each a self-contained VT blob
+	Tail         []byte   // mandatory nonempty canonical VT blob
+	Visible      []byte   // mandatory nonempty canonical VT blob
+	Process      *Process
 }
 
 // Process captures restorable foreground process metadata.

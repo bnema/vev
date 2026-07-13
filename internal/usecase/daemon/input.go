@@ -202,8 +202,8 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 	mouseMode, mouseSGR := p.screen.MouseMode()
 	altScreen := p.screen.AltScreenActive()
 	scrollbackRows := 0
-	if p.scrollback != nil {
-		scrollbackRows = p.scrollback.Len()
+	if p.history != nil {
+		scrollbackRows = p.history.Len()
 	}
 	p.mu.Unlock()
 
@@ -249,7 +249,7 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 
 			// The immutable snapshot is the only live-pane access needed for drag entry.
 			p.mu.Lock()
-			document := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+			document := scopy.NewSnapshot(p.history, p.screen.Frame)
 			p.mu.Unlock()
 			tb := sess.activeTab()
 			if !d.publishCopyMode(sess, ac, tb, p, document, func(mode *scopy.Mode) {

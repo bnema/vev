@@ -572,14 +572,14 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 	d.resize(sess, ac, domain.Size{Cols: 4, Rows: 4})
 	require.Equal(t, "2222", frameRowString(win.focusedPane().screen.Frame, 0))
 	require.Equal(t, "3333", frameRowString(win.focusedPane().screen.Frame, 1))
-	require.Equal(t, 2, win.focusedPane().scrollback.Len())
-	require.Equal(t, "0000", cellsString(win.focusedPane().scrollback.View().Row(0)))
-	require.Equal(t, "1111", cellsString(win.focusedPane().scrollback.View().Row(1)))
+	require.Equal(t, 2, win.focusedPane().history.Len())
+	require.Equal(t, "0000", cellsString(win.focusedPane().history.View().Row(0)))
+	require.Equal(t, "1111", cellsString(win.focusedPane().history.View().Row(1)))
 
 	d.resize(sess, ac, domain.Size{Cols: 6, Rows: 6})
 	require.Equal(t, "2222  ", frameRowString(win.focusedPane().screen.Frame, 0))
 	require.Equal(t, "3333  ", frameRowString(win.focusedPane().screen.Frame, 1))
-	require.Equal(t, 2, win.focusedPane().scrollback.Len())
+	require.Equal(t, 2, win.focusedPane().history.Len())
 }
 
 func frameRowString(f renderer.Frame, y int) string {
@@ -911,7 +911,7 @@ func TestOverlayPaintInvalidationShowsAndRestoresBaseFrame(t *testing.T) {
 			open:  func(d *Daemon, sess *session, ac *attachedClient) { d.enterCopyMode(sess, ac) },
 			close: func(d *Daemon, _ *session, ac *attachedClient) { d.handleCopyInput(ac, []byte("q")) },
 			prepareScreen: func(sess *session) {
-				sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(4)
+				installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 4})
 			},
 			visible:      "[SCROLL]",
 			notVisible:   "[SCROLL]",
@@ -923,10 +923,10 @@ func TestOverlayPaintInvalidationShowsAndRestoresBaseFrame(t *testing.T) {
 			p, release := newBlockingPTY(t)
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 			defer release()
-			sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 			if tt.prepareScreen != nil {
 				tt.prepareScreen(sess)
 			}
+			sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 			if tt.wantRestored == "" {
 				tt.wantRestored = "live"
 			}
@@ -1295,7 +1295,7 @@ func TestComposeCopyClientFrameOverlaysBaseAtTarget(t *testing.T) {
 	}
 	p := newPane("floating", nil, domain.Size{Cols: 18, Rows: 2})
 	p.screen.Write([]byte("ab\r\ncd"))
-	document := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+	document := scopy.NewSnapshot(p.history, p.screen.Frame)
 	mode := scopy.NewMode(document)
 	target := domain.Rect{X: 2, Y: 3, Width: 18, Height: 2}
 
@@ -1355,7 +1355,7 @@ func TestPaintComposesCopyBodyAboveFloating(t *testing.T) {
 	defer releaseFloating()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
 	fp := newPane("floating", floatingPTY, domain.Size{Cols: 20, Rows: 3})
-	fp.scrollback.Append(testRow("flt-old"))
+	fp.history.Append(testRow("flt-old"))
 	fp.screen.Write([]byte("flt-live"))
 	installTestFloating(sess.activeTab(), fp, true)
 

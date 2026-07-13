@@ -6,154 +6,292 @@ import (
 	"errors"
 	"hash/crc32"
 	"math"
+	"strconv"
 	"testing"
 
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 )
 
-func TestMarshalMinimalGolden(t *testing.T) {
-	got, err := Marshal(Session{Name: "s", CreatedAt: 7})
+func TestV3SnapshotRoundTripPreservesExactTerminalData(t *testing.T) {
+	indexed := renderer.DefaultStyle()
+	indexed.Bold, indexed.Inverse = true, true
+	indexed.Attrs = renderer.AttrDim | renderer.AttrUnderline | renderer.AttrBlink | renderer.AttrStrikethrough
+	indexed.Foreground, indexed.Background = 196, 17
+	indexed.UnderlineStyle, indexed.HasUnderlineColor, indexed.UnderlineColor = renderer.UnderlineCurly, true, 203
+	rgb := renderer.DefaultStyle()
+	rgb.Italic, rgb.HasForegroundRGB, rgb.ForegroundRGB = true, true, renderer.RGB{R: 1, G: 2, B: 3}
+	rgb.HasBackgroundRGB, rgb.BackgroundRGB = true, renderer.RGB{R: 4, G: 5, B: 6}
+	rgb.UnderlineStyle, rgb.HasUnderlineColorRGB, rgb.UnderlineColorRGB = renderer.UnderlineDashed, true, renderer.RGB{R: 7, G: 8, B: 9}
+	sealed, tail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'I', Style: indexed}, {Rune: '好', Style: rgb}, {Continuation: true, Style: rgb}}})
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'V', Style: rgb}, {Rune: '界', Style: indexed}, {Continuation: true, Style: indexed}}})
+	sealed2, tail2 := historyBlobs(t, [][]renderer.Cell{{{Rune: 'S', Style: rgb}}, {{Rune: '2', Style: indexed}}})
+	visible2 := visibleBlob(t, [][]renderer.Cell{{{Rune: 'P', Style: indexed}, {Rune: '2', Style: rgb}}})
+	want := Session{Name: "v3 exact", Tabs: []Tab{{Focus: "p", Tree: &layout.Tree{Focus: "p", Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("p"), layout.NewLeaf("p2")}}}, Panes: []Pane{
+		{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible},
+		{ID: "p2", SealedChunks: sealed2, Tail: tail2, Visible: visible2},
+	}}}}
+	encoded, err := Marshal(want)
 	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
+		t.Fatal(err)
 	}
-	want := []byte{
-		'V', 'E', 'V', 'S', 0, 2, 0, 0, 0, 0, 0, 15, 0xff, 0xc2, 0x2e, 0xcb,
-		0, 1, 's', 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0,
+	requireV3Envelope(t, encoded)
+	got, err := Unmarshal(encoded)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("Marshal minimal bytes\ngot  % x\nwant % x", got, want)
+	if len(got.Tabs) != 1 || len(got.Tabs[0].Panes) != 2 || got.Tabs[0].Panes[0].ID != "p" || got.Tabs[0].Panes[1].ID != "p2" {
+		t.Fatalf("manifest round trip = %#v", got)
+	}
+	for i, wantPane := range want.Tabs[0].Panes {
+		gotPane := got.Tabs[0].Panes[i]
+		if len(gotPane.SealedChunks) != len(wantPane.SealedChunks) {
+			t.Fatalf("pane %q sealed chunks = %d, want %d", wantPane.ID, len(gotPane.SealedChunks), len(wantPane.SealedChunks))
+		}
+		for j := range wantPane.SealedChunks {
+			if !bytes.Equal(gotPane.SealedChunks[j], wantPane.SealedChunks[j]) {
+				t.Fatalf("pane %q sealed chunk %d changed during round trip", wantPane.ID, j)
+			}
+		}
+		if !bytes.Equal(gotPane.Tail, wantPane.Tail) {
+			t.Fatalf("pane %q tail changed during round trip", wantPane.ID)
+		}
+		if !bytes.Equal(gotPane.Visible, wantPane.Visible) {
+			t.Fatalf("pane %q visible blob changed during round trip", wantPane.ID)
+		}
+	}
+	if _, err := vt.HistoryFromBlobs(vt.HistoryConfig{MaxRows: 8, ChunkRows: 2}, got.Tabs[0].Panes[0].SealedChunks, got.Tabs[0].Panes[0].Tail); err != nil {
+		t.Fatalf("history decode: %v", err)
+	}
+	frame, err := vt.UnmarshalVisible(got.Tabs[0].Panes[0].Visible)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !frame.Row(0)[0].Equal(renderer.Cell{Rune: 'V', Style: rgb}) || !frame.Row(0)[2].Continuation {
+		t.Fatalf("visible terminal data lost: %#v", frame.Row(0))
 	}
 }
 
+func TestActiveTabReferenceMustBeExact(t *testing.T) {
+	validTab := Tab{}
+	for _, tc := range []struct {
+		name  string
+		s     Session
+		valid bool
+	}{
+		{name: "zero tabs active zero", s: Session{Active: 0}, valid: true},
+		{name: "zero tabs active nonzero", s: Session{Active: 1}},
+		{name: "nonempty tabs active in range", s: Session{Active: 0, Tabs: []Tab{validTab}}, valid: true},
+		{name: "nonempty tabs active past end", s: Session{Active: 1, Tabs: []Tab{validTab}}},
+	} {
+		t.Run("marshal "+tc.name, func(t *testing.T) {
+			_, err := Marshal(tc.s)
+			if tc.valid {
+				requireNoError(t, err)
+				return
+			}
+			if !errors.Is(err, ErrInvalidData) {
+				t.Fatalf("Marshal() error = %v, want %v", err, ErrInvalidData)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "zero tabs active nonzero", data: v3ActiveManifest(1, 0)},
+		{name: "nonempty tabs active past end", data: v3ActiveManifest(1, 1)},
+	} {
+		t.Run("unmarshal "+tc.name, func(t *testing.T) {
+			reject(t, v3Envelope(version, 0, tc.data), ErrInvalidData)
+		})
+	}
+}
+
+func TestUnmarshalRejectsV3LegacyVersions(t *testing.T) {
+	for _, version := range []uint16{1, 2} {
+		if _, err := Unmarshal(v3Envelope(version, 0, nil)); !errors.Is(err, ErrBadVersion) {
+			t.Fatalf("version %d: %v", version, err)
+		}
+	}
+}
+
+func TestUnmarshalRejectsMalformedV3EnvelopeBeforeAllocation(t *testing.T) {
+	body := v3Manifest(0, nil, nil, 0, nil, 0, nil)
+	valid := v3Envelope(version, 0, body)
+	badCRC := append([]byte(nil), valid...)
+	badCRC[15] ^= 1
+	for _, tc := range []struct {
+		name string
+		data []byte
+		want error
+	}{
+		{"short", valid[:15], ErrShortPayload}, {"magic", append([]byte("NOPE"), valid[4:]...), ErrBadMagic},
+		{"future", v3Envelope(version+1, 0, body), ErrBadVersion}, {"flags", v3Envelope(version, 1, body), ErrInvalidData},
+		{"crc", badCRC, ErrBadCRC}, {"body", v3EnvelopeWithLength(version, 0, nil, math.MaxUint32), ErrInvalidData},
+	} {
+		t.Run(tc.name, func(t *testing.T) { reject(t, tc.data, tc.want) })
+	}
+}
+
+func TestUnmarshalRejectsHostileV3ManifestDeclarationsBeforeAllocation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{"count", v3Manifest(math.MaxUint32, nil, nil, 0, nil, 0, nil)},
+		{"sealed", v3Manifest(1, []uint32{math.MaxUint32}, nil, 0, nil, 0, nil)},
+		{"tail", v3Manifest(0, nil, nil, math.MaxUint32, nil, 0, nil)},
+		{"visible", v3Manifest(0, nil, nil, 0, nil, math.MaxUint32, nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) { reject(t, v3Envelope(version, 0, tc.body), ErrInvalidData) })
+	}
+}
+
+func TestUnmarshalRejectsEveryV3PrefixAndTrailingGarbage(t *testing.T) {
+	sealed, tail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'h'}}})
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+	encoded, err := Marshal(Session{Name: "p", Tabs: []Tab{{Focus: "p", Tree: layout.NewTree("p"), Panes: []Pane{{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n := range len(encoded) {
+		reject(t, encoded[:n], nil)
+	}
+	reject(t, append(encoded, 0), ErrTrailingBytes)
+}
+
+func TestUnmarshalRejectsEmptyAndDuplicatePaneIDsDuringPreflight(t *testing.T) {
+	sealed, tail := historyBlobs(t, nil)
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+	for _, tc := range []struct {
+		name  string
+		panes []Pane
+	}{
+		{name: "empty", panes: []Pane{{ID: "", Tail: tail, Visible: visible}}},
+		{name: "duplicate", panes: []Pane{{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible}, {ID: "p", Tail: tail, Visible: visible}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := Marshal(Session{Name: "s", Tabs: []Tab{{Panes: tc.panes}}})
+			requireNoError(t, err)
+			reject(t, data, ErrInvalidData)
+		})
+	}
+}
+
+func TestUnmarshalRejectsInvalidTreeReference(t *testing.T) {
+	sealed, tail := historyBlobs(t, nil)
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+	encoded, err := Marshal(Session{Name: "p", Tabs: []Tab{{Focus: "missing", Tree: layout.NewTree("missing"), Panes: []Pane{{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Unmarshal(encoded); !errors.Is(err, ErrUnknownPane) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestUnmarshalRejectsNonCanonicalBlobRolesDuringPreflight(t *testing.T) {
+	sealed, tail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'a'}}, {{Rune: 'b'}}, {{Rune: 'c'}}})
+	if len(sealed) == 0 {
+		t.Fatal("expected a sealed chunk")
+	}
+	multiChunk := append([]byte(nil), sealed[0][:5]...)
+	multiChunk = binary.BigEndian.AppendUint32(multiChunk, 2)
+	multiChunk = append(multiChunk, sealed[0][9:]...)
+	multiChunk = append(multiChunk, sealed[0][9:]...)
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+	emptyVisible := visibleBlob(t, nil)
+	for _, tc := range []struct {
+		name string
+		tab  Tab
+	}{
+		{name: "sealed multi-chunk", tab: Tab{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", SealedChunks: [][]byte{multiChunk}, Tail: tail, Visible: visible}}}},
+		{name: "nonempty tail", tab: Tab{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", Tail: sealed[0], Visible: visible}}}},
+		{name: "empty visible geometry", tab: Tab{Panes: []Pane{{ID: "p", Tail: tail, Visible: emptyVisible}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := Marshal(Session{Name: "s", Tabs: []Tab{tc.tab}})
+			requireNoError(t, err)
+			reject(t, data, ErrInvalidData)
+		})
+	}
+}
+
+func TestUnmarshalRejectsMalformedTerminalBlobWithoutPanic(t *testing.T) {
+	tail := mustHistoryTail(t)
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+	// The visible cell's underline-style byte is outside the renderer enum.
+	visible[13+29] = 0xff
+	body := v3Manifest(0, nil, nil, uint32(len(tail)), tail, uint32(len(visible)), visible)
+	reject(t, v3Envelope(version, 0, body), ErrInvalidData)
+}
+
 func TestRoundTripNilTreeAndRootDoNotMaterializeLeaf(t *testing.T) {
-	cases := []struct {
+	for _, tc := range []struct {
 		name string
 		tab  Tab
 	}{
 		{name: "nil tree", tab: Tab{Tree: nil}},
 		{name: "nil root", tab: Tab{Tree: &layout.Tree{Root: nil}}},
-	}
-	for _, tc := range cases {
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b, err := Marshal(Session{Name: "s", Tabs: []Tab{tc.tab}})
-			if err != nil {
-				t.Fatalf("Marshal() error = %v", err)
-			}
-			got, err := Unmarshal(b)
-			if err != nil {
-				t.Fatalf("Unmarshal() error = %v", err)
-			}
-			if len(got.Tabs) != 1 {
-				t.Fatalf("tabs len = %d, want 1", len(got.Tabs))
-			}
-			if got.Tabs[0].Tree == nil {
-				t.Fatalf("Tree = nil, want tree with nil root")
-			}
-			if got.Tabs[0].Tree.Root != nil {
-				t.Fatalf("Root = %#v, want nil", got.Tabs[0].Tree.Root)
+			data, err := Marshal(Session{Name: "s", Tabs: []Tab{tc.tab}})
+			requireNoError(t, err)
+			got, err := Unmarshal(data)
+			requireNoError(t, err)
+			if got.Tabs[0].Tree == nil || got.Tabs[0].Tree.Root != nil {
+				t.Fatalf("tree = %#v, want nonnil tree with nil root", got.Tabs[0].Tree)
 			}
 		})
 	}
 }
 
-func TestRoundTripSessions(t *testing.T) {
-	boldRGB := renderer.DefaultStyle()
-	boldRGB.Bold = true
-	boldRGB.HasForegroundRGB = true
-	boldRGB.ForegroundRGB = renderer.RGB{R: 1, G: 2, B: 3}
-	indexed := renderer.DefaultStyle()
-	indexed.Foreground = 2
-	indexed.Background = 4
-	indexed.Inverse = true
-	indexed.Italic = true
-	deepTree := &layout.Tree{Focus: "2", Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
-		layout.NewLeaf("1"),
-		&layout.Node{Kind: layout.Stack, Expanded: "2", Children: []*layout.Node{layout.NewLeaf("2"), layout.NewLeaf("3")}},
-	}}}
-	cjkVisible := [][]renderer.Cell{{
-		{Rune: '好', Style: boldRGB},
-		{Continuation: true, Style: boldRGB},
-		{Rune: 'x', Style: indexed},
+func TestRoundTripSessionMetadataAndProcess(t *testing.T) {
+	sealed, tail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'h'}}, {{Rune: 'i'}}})
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+	want := Session{Name: "named", CreatedAt: 42, Active: 1, Tabs: []Tab{
+		{
+			StableID: "t1", Cols: 100, Rows: 40, NextPaneID: 9, Focus: "2",
+			Tree: &layout.Tree{Focus: "2", Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
+				layout.NewLeaf("1"), layout.NewLeaf("2"),
+			}}},
+			Panes: []Pane{
+				{ID: "1", StableID: "p1", Cwd: "/one", SealedChunks: sealed, Tail: tail, Visible: visible, Process: &Process{Argv: []string{"pi", "--resume"}, Strategy: "pi", Opts: ProcessOpts{AgentSessionID: "agent-123"}}},
+				{ID: "2", StableID: "p2", Cwd: "/two", SealedChunks: sealed, Tail: tail, Visible: visible},
+			},
+		},
+		{StableID: "t2", Cols: 80, Rows: 24, NextPaneID: 2, Focus: "a", Tree: layout.NewTree("a"), Panes: []Pane{{ID: "a", Cwd: "/tmp", SealedChunks: sealed, Tail: tail, Visible: visible}}},
 	}}
-	multi := Session{Name: "named", CreatedAt: 42, Active: 1, Tabs: []Tab{
-		{StableID: "t_stable", Cols: 100, Rows: 40, NextPaneID: 9, Focus: "2", Tree: deepTree, Panes: []Pane{{ID: "1", StableID: "p_one", Cwd: "/a", Scrollback: rows("abc"), Visible: rows("v"), Process: &Process{Argv: []string{"claude", "--resume"}, Strategy: "claude", Opts: ProcessOpts{AgentSessionID: "agent-123"}}}, {ID: "2", StableID: "p_two", Cwd: "/b", Visible: rows("focus")}, {ID: "3", StableID: "p_three", Cwd: "/c"}}},
-		{Cols: 80, Rows: 24, NextPaneID: 2, Focus: "a", Tree: layout.NewTree("a"), Panes: []Pane{{ID: "a", Cwd: "/tmp", Visible: cjkVisible}}},
-	}}
-	empty := Session{Name: "blank", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Cwd: "/", Scrollback: nil, Visible: rows("   ", "")}}}}}
-	large := Session{Name: "large", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Cwd: "/", Scrollback: manyRows(6000), Visible: rows("tail")}}}}}
-	cases := []struct {
-		name string
-		s    Session
-	}{
-		{name: "multi tab deep tree", s: multi},
-		{name: "empty and all blank", s: empty},
-		{name: "large scrollback", s: large},
+	data, err := Marshal(want)
+	requireNoError(t, err)
+	got, err := Unmarshal(data)
+	requireNoError(t, err)
+	if got.Name != want.Name || got.CreatedAt != want.CreatedAt || got.Active != want.Active || len(got.Tabs) != 2 {
+		t.Fatalf("session metadata round trip = %#v", got)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			b, err := Marshal(tc.s)
-			if err != nil {
-				t.Fatalf("Marshal() error = %v", err)
-			}
-			got, err := Unmarshal(b)
-			if err != nil {
-				t.Fatalf("Unmarshal() error = %v", err)
-			}
-			if !equalSession(got, trimSession(tc.s)) {
-				t.Fatalf("round trip mismatch\ngot  %#v\nwant %#v", got, trimSession(tc.s))
-			}
-		})
-	}
-}
-
-func TestUnmarshalRejectsMalformedWithoutPanic(t *testing.T) {
-	good, err := Marshal(Session{Name: "s", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p"}}}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cases := []struct {
-		name string
-		data []byte
-	}{
-		{"bad magic", append([]byte("NOPE"), good[4:]...)},
-		{"bad version", replaceU16(good, 4, 1)},
-		{"bad crc", append([]byte(nil), good[:len(good)-1]...)},
-		{"trailing", append(append([]byte(nil), good...), 0)},
-		{"body len overrun", replaceU32(good, 8, 999999)},
-		{"prefix", good[:len(good)/2]},
-		{"style oob", styleOOBSnapshot(t)},
-		{"unknown pane in tree", unknownPaneSnapshot(t)},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("Unmarshal panicked: %v", r)
-				}
-			}()
-			if _, err := Unmarshal(tc.data); err == nil {
-				t.Fatalf("Unmarshal() error = nil")
-			}
-		})
-	}
-	for i := 0; i < len(good); i++ {
-		if _, err := Unmarshal(good[:i]); err == nil {
-			t.Fatalf("prefix length %d unexpectedly succeeded", i)
-		}
+	pane := got.Tabs[0].Panes[0]
+	if pane.ID != "1" || pane.StableID != "p1" || pane.Cwd != "/one" || pane.Process == nil || pane.Process.Opts.AgentSessionID != "agent-123" || got.Tabs[0].Tree.Root.Kind != layout.Split {
+		t.Fatalf("pane metadata round trip = %#v", pane)
 	}
 }
 
 func TestMarshalRejectsProcessWithoutArgv(t *testing.T) {
-	_, err := Marshal(Session{Name: "s", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Process: &Process{Strategy: "generic"}}}}}})
+	_, err := Marshal(Session{Name: "s", Tabs: []Tab{
+		{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Process: &Process{Strategy: "generic"}}}},
+	}})
 	if !errors.Is(err, ErrInvalidData) {
 		t.Fatalf("Marshal() error = %v, want %v", err, ErrInvalidData)
 	}
 }
 
 func TestUnmarshalRejectsProcessWithoutArgv(t *testing.T) {
+	tail := mustHistoryTail(t)
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
 	var w payloadWriter
-	_ = w.putString("x")
+	_ = w.putString("s")
 	w.putUint64(0)
 	w.putUint16(0)
 	w.putUint16(1)
@@ -165,269 +303,209 @@ func TestUnmarshalRejectsProcessWithoutArgv(t *testing.T) {
 	_ = writeNode(&w, layout.NewLeaf("p"))
 	w.putUint16(1)
 	_ = w.putString("p")
-	_ = w.putString("p_stable")
 	_ = w.putString("")
-	w.putUint16(0)
+	_ = w.putString("")
 	w.putUint32(0)
-	w.putUint32(0)
+	w.putUint32(uint32(len(tail)))
+	w.b = append(w.b, tail...)
+	w.putUint32(uint32(len(visible)))
+	w.b = append(w.b, visible...)
 	w.putUint8(1)
-	w.putUint16(0)
+	w.putUint16(0) // argv count
 	_ = w.putString("generic")
 	_ = w.putString("")
-	_, err := Unmarshal(reheader(w.b, 0))
-	if !errors.Is(err, ErrInvalidData) {
+	if _, err := Unmarshal(v3Envelope(version, 0, w.b)); !errors.Is(err, ErrInvalidData) {
 		t.Fatalf("Unmarshal() error = %v, want %v", err, ErrInvalidData)
 	}
 }
 
-func TestUnmarshalRejectsOversizedBodiesBeforeAllocation(t *testing.T) {
-	body := []byte{0}
-	oversizedRaw := reheader(body, 0)
-	binary.BigEndian.PutUint32(oversizedRaw[8:12], uint32(maxDecodedBodySize+1))
-	oversizedFlate := reheader(body, flagFlate)
-	binary.BigEndian.PutUint32(oversizedFlate[8:12], uint32(maxDecodedBodySize+1))
-	cases := []struct {
-		name string
-		data []byte
-	}{
-		{name: "raw", data: oversizedRaw},
-		{name: "flate", data: oversizedFlate},
+func TestUnmarshalGlobalBudgetRejectionDoesNotAllocatePerPane(t *testing.T) {
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 256, ChunkRows: 256})
+	for range 256 {
+		history.Append([]renderer.Cell{{Rune: 'x'}})
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := Unmarshal(tc.data)
-			if !errors.Is(err, ErrInvalidData) {
-				t.Fatalf("Unmarshal() error = %v, want %v", err, ErrInvalidData)
-			}
-		})
+	sealed, tail, err := vt.MarshalSealedHistory(history.SealAndView())
+	requireNoError(t, err)
+	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
+
+	const paneCount = maxSnapshotRows/256 + 1
+	tabs := make([]Tab, paneCount)
+	for i := range tabs {
+		tabs[i] = Tab{Panes: []Pane{{ID: layout.PaneID(strconv.Itoa(i)), SealedChunks: sealed, Tail: tail, Visible: visible}}}
+	}
+	data, err := Marshal(Session{Name: "over-budget", Tabs: tabs})
+	requireNoError(t, err)
+
+	allocs := testing.AllocsPerRun(3, func() {
+		_, err := Unmarshal(data)
+		if !errors.Is(err, ErrInvalidData) {
+			panic(err)
+		}
+	})
+	// The error and testing harness may allocate a small fixed amount. Rejecting
+	// before semantic maps/slices are built must not scale with paneCount.
+	if allocs > 8 {
+		t.Fatalf("Unmarshal() allocations = %f, want fixed overhead only", allocs)
 	}
 }
 
-func TestUnmarshalRejectsMalformedRowCountsWithoutAllocation(t *testing.T) {
-	cases := []struct {
-		name string
-		data []byte
-		want error
-	}{
-		{name: "huge row count", data: malformedRowsSnapshot(math.MaxUint32, 0), want: ErrInvalidData},
-		{name: "huge run count", data: malformedRowsSnapshot(1, math.MaxUint16), want: ErrShortPayload},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("Unmarshal panicked: %v", r)
-				}
-			}()
-			_, err := Unmarshal(tc.data)
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("Unmarshal() error = %v, want %v", err, tc.want)
-			}
-		})
+func TestPreflightBudgetRejectsAggregateDecodedAllocation(t *testing.T) {
+	budget := preflightBudget{alloc: maxSnapshotDecodedAllocation - 1}
+	if budget.addProduct(1, 2) {
+		t.Fatal("allocation budget accepted an over-limit aggregate")
 	}
 }
 
-func TestFlateOnOff(t *testing.T) {
-	small, err := Marshal(Session{Name: "small"})
+func TestPreflightRejectsBroadTreeBeforeSecondPassAllocation(t *testing.T) {
+	body := v3WideTreeManifest(32_769)
+	if err := preflightSession(body); !errors.Is(err, ErrInvalidData) {
+		t.Fatalf("preflightSession() error = %v, want %v", err, ErrInvalidData)
+	}
+}
+
+func TestUnmarshalRejectsAggregateOpaqueBlobDeclarations(t *testing.T) {
+	body := v3Manifest(math.MaxUint32, nil, nil, math.MaxUint32, nil, math.MaxUint32, nil)
+	reject(t, v3Envelope(version, 0, body), ErrInvalidData)
+}
+
+func mustHistoryTail(t *testing.T) []byte {
+	t.Helper()
+	_, tail := historyBlobs(t, nil)
+	return tail
+}
+
+func requireNoError(t *testing.T, err error) {
+	t.Helper()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if flags := binary.BigEndian.Uint16(small[6:8]); flags != 0 {
-		t.Fatalf("small flags = %#x, want 0", flags)
+}
+
+func historyBlobs(t *testing.T, rows [][]renderer.Cell) ([][]byte, []byte) {
+	t.Helper()
+	h := vt.NewHistory(vt.HistoryConfig{MaxRows: 128, ChunkRows: 2})
+	for _, row := range rows {
+		h.Append(row)
 	}
-	large, err := Marshal(Session{Name: "large", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Scrollback: manyRows(5000)}}}}})
+	sealed, tail, err := vt.MarshalSealedHistory(h.SealAndView())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if flags := binary.BigEndian.Uint16(large[6:8]); flags&1 == 0 {
-		t.Fatalf("large flags = %#x, want flate bit", flags)
+	return sealed, tail
+}
+func visibleBlob(t *testing.T, rows [][]renderer.Cell) []byte {
+	t.Helper()
+	width := 0
+	for _, row := range rows {
+		width = max(width, len(row))
+	}
+	f := renderer.NewFrame(width, len(rows))
+	for y, row := range rows {
+		copy(f.Row(y), row)
+	}
+	b, err := vt.MarshalVisible(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+func requireV3Envelope(t *testing.T, data []byte) {
+	t.Helper()
+	if len(data) < 16 || binary.BigEndian.Uint16(data[4:6]) != version || binary.BigEndian.Uint16(data[6:8]) != 0 {
+		t.Fatalf("not v3 envelope: % x", data)
 	}
 }
-
-func BenchmarkMarshal10KRows(b *testing.B) {
-	s := Session{Name: "bench", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Cwd: "/tmp", Scrollback: manyRows(10000), Visible: rows("visible")}}}}}
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		if _, err := Marshal(s); err != nil {
-			b.Fatal(err)
+func reject(t *testing.T, data []byte, want error) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("panic: %v", r)
 		}
+	}()
+	_, err := Unmarshal(data)
+	if err == nil {
+		t.Fatal("accepted malformed input")
+	}
+	if want != nil && !errors.Is(err, want) {
+		t.Fatalf("error = %v, want %v", err, want)
 	}
 }
-
-func rows(lines ...string) [][]renderer.Cell {
-	out := make([][]renderer.Cell, len(lines))
-	for i, line := range lines {
-		for _, r := range line {
-			out[i] = append(out[i], renderer.Cell{Rune: r, Style: renderer.DefaultStyle()})
-		}
-	}
-	return out
+func v3Envelope(v, flags uint16, body []byte) []byte {
+	return v3EnvelopeWithLength(v, flags, body, uint32(len(body)))
 }
-
-func manyRows(n int) [][]renderer.Cell {
-	out := make([][]renderer.Cell, n)
-	for i := range out {
-		out[i] = rows("row data row data row data")[0]
-	}
-	return out
-}
-
-func equalSession(a, b Session) bool {
-	if a.Name != b.Name || a.CreatedAt != b.CreatedAt || a.Active != b.Active || len(a.Tabs) != len(b.Tabs) {
-		return false
-	}
-	for i := range a.Tabs {
-		if !equalTab(a.Tabs[i], b.Tabs[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func equalTab(a, b Tab) bool {
-	if a.StableID != b.StableID || a.Cols != b.Cols || a.Rows != b.Rows || a.NextPaneID != b.NextPaneID || a.Focus != b.Focus || len(a.Panes) != len(b.Panes) || !equalNode(treeRoot(a.Tree), treeRoot(b.Tree)) {
-		return false
-	}
-	for i := range a.Panes {
-		if a.Panes[i].ID != b.Panes[i].ID || a.Panes[i].StableID != b.Panes[i].StableID || a.Panes[i].Cwd != b.Panes[i].Cwd || !equalProcess(a.Panes[i].Process, b.Panes[i].Process) || !equalRows(a.Panes[i].Scrollback, b.Panes[i].Scrollback) || !equalRows(a.Panes[i].Visible, b.Panes[i].Visible) {
-			return false
-		}
-	}
-	return true
-}
-
-func equalProcess(a, b *Process) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	if a.Strategy != b.Strategy || a.Opts.AgentSessionID != b.Opts.AgentSessionID || len(a.Argv) != len(b.Argv) {
-		return false
-	}
-	for i := range a.Argv {
-		if a.Argv[i] != b.Argv[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func treeRoot(t *layout.Tree) *layout.Node {
-	if t == nil {
-		return nil
-	}
-	return t.Root
-}
-
-func equalNode(a, b *layout.Node) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	if a.Kind != b.Kind || a.Dir != b.Dir || a.Leaf != b.Leaf || a.Expanded != b.Expanded || len(a.Children) != len(b.Children) {
-		return false
-	}
-	for i := range a.Children {
-		if !equalNode(a.Children[i], b.Children[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func equalRows(a, b [][]renderer.Cell) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if len(a[i]) != len(b[i]) {
-			return false
-		}
-		for j := range a[i] {
-			if !a[i][j].Equal(b[i][j]) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func trimSession(s Session) Session {
-	for ti := range s.Tabs {
-		for pi := range s.Tabs[ti].Panes {
-			s.Tabs[ti].Panes[pi].Scrollback = trimRows(s.Tabs[ti].Panes[pi].Scrollback, false)
-			s.Tabs[ti].Panes[pi].Visible = trimRows(s.Tabs[ti].Panes[pi].Visible, true)
-		}
-	}
-	return s
-}
-
-func reheader(body []byte, flags uint16) []byte {
+func v3EnvelopeWithLength(v, flags uint16, body []byte, length uint32) []byte {
 	out := make([]byte, 16+len(body))
-	copy(out[:4], []byte("VEVS"))
-	binary.BigEndian.PutUint16(out[4:6], version)
+	copy(out, magic)
+	binary.BigEndian.PutUint16(out[4:6], v)
 	binary.BigEndian.PutUint16(out[6:8], flags)
-	binary.BigEndian.PutUint32(out[8:12], uint32(len(body)))
+	binary.BigEndian.PutUint32(out[8:12], length)
 	binary.BigEndian.PutUint32(out[12:16], crc32.ChecksumIEEE(body))
 	copy(out[16:], body)
 	return out
 }
 
-func replaceU16(b []byte, off int, v uint16) []byte {
-	out := append([]byte(nil), b...)
-	binary.BigEndian.PutUint16(out[off:], v)
-	return out
-}
-func replaceU32(b []byte, off int, v uint32) []byte {
-	out := append([]byte(nil), b...)
-	binary.BigEndian.PutUint32(out[off:], v)
-	return out
-}
-
-func malformedRowsSnapshot(rowCount uint32, runCount uint16) []byte {
-	var w payloadWriter
-	_ = w.putString("x")
-	w.putUint64(0)
-	w.putUint16(0)
-	w.putUint16(1)
-	_ = w.putString("")
-	w.putUint16(0)
-	w.putUint16(0)
-	w.putUint64(0)
-	_ = w.putString("p")
-	_ = writeNode(&w, layout.NewLeaf("p"))
-	w.putUint16(1)
-	_ = w.putString("p")
-	_ = w.putString("")
-	_ = w.putString("")
-	w.putUint16(0)
-	w.putUint32(rowCount)
-	if rowCount > 0 {
-		w.putUint16(runCount)
+func v3ActiveManifest(active, tabs uint16) []byte {
+	var b []byte
+	putS := func(s string) { b = binary.BigEndian.AppendUint16(b, uint16(len(s))); b = append(b, s...) }
+	putS("s")
+	b = append(b, make([]byte, 8)...)
+	b = binary.BigEndian.AppendUint16(b, active)
+	b = binary.BigEndian.AppendUint16(b, tabs)
+	for range tabs {
+		putS("")
+		b = append(b, make([]byte, 2+2+8)...)
+		putS("")
+		b = append(b, 3) // nil root
+		b = binary.BigEndian.AppendUint16(b, 0)
 	}
-	return reheader(w.b, 0)
+	return b
 }
 
-func styleOOBSnapshot(t *testing.T) []byte {
-	b, err := Marshal(Session{Name: "x", Tabs: []Tab{{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Visible: rows("x")}}}}})
-	if err != nil {
-		t.Fatal(err)
+// v3Manifest creates just enough session/tab/pane framing for hostile declarations.
+// v3WideTreeManifest declares a broad but compact tree without allocating a
+// matching layout.Node graph. It exercises preflight's manifest budget.
+func v3WideTreeManifest(children uint16) []byte {
+	var b []byte
+	putS := func(s string) { b = binary.BigEndian.AppendUint16(b, uint16(len(s))); b = append(b, s...) }
+	putS("s")
+	b = append(b, make([]byte, 8+2)...)
+	b = binary.BigEndian.AppendUint16(b, 1)
+	putS("")
+	b = append(b, make([]byte, 2+2+8)...)
+	putS("")
+	b = append(b, 1, byte(layout.Horizontal)) // split node
+	b = binary.BigEndian.AppendUint16(b, children)
+	for range children {
+		b = append(b, 0) // leaf
+		putS("")
 	}
-	bodyLen := int(binary.BigEndian.Uint32(b[8:12]))
-	body := append([]byte(nil), b[16:16+bodyLen]...)
-	for i := 0; i < len(body)-5; i++ { // run len=1,rune='x', style=0,cflags=0
-		if body[i] == 0 && body[i+1] == 1 && body[i+2] == 0 && body[i+3] == 0 && body[i+4] == 0 && body[i+5] == 'x' {
-			body[i+6] = 0
-			body[i+7] = 2
-			return reheader(body, 0)
-		}
-	}
-	t.Fatal("run not found")
-	return nil
+	b = binary.BigEndian.AppendUint16(b, 0) // panes
+	return b
 }
 
-func unknownPaneSnapshot(t *testing.T) []byte {
-	b, err := Marshal(Session{Name: "x", Tabs: []Tab{{Tree: layout.NewTree("missing"), Focus: "missing", Panes: []Pane{{ID: "p"}}}}})
-	if err != nil {
-		t.Fatal(err)
+func v3Manifest(sealed uint32, sealedLens []uint32, sealedData []byte, tailLen uint32, tailData []byte, visibleLen uint32, visibleData []byte) []byte {
+	var b []byte
+	putS := func(s string) { b = binary.BigEndian.AppendUint16(b, uint16(len(s))); b = append(b, s...) }
+	putS("s")
+	b = append(b, make([]byte, 8+2)...)
+	b = binary.BigEndian.AppendUint16(b, 1)
+	putS("")
+	b = append(b, make([]byte, 2+2+8)...)
+	putS("p")
+	b = append(b, 0)
+	putS("p")
+	b = binary.BigEndian.AppendUint16(b, 1)
+	putS("p")
+	putS("")
+	putS("")
+	b = binary.BigEndian.AppendUint32(b, sealed)
+	for _, l := range sealedLens {
+		b = binary.BigEndian.AppendUint32(b, l)
 	}
+	b = append(b, sealedData...)
+	b = binary.BigEndian.AppendUint32(b, tailLen)
+	b = append(b, tailData...)
+	b = binary.BigEndian.AppendUint32(b, visibleLen)
+	b = append(b, visibleData...)
 	return b
 }

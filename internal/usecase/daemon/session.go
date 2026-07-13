@@ -44,6 +44,13 @@ type session struct {
 	mruAt                  atomic.Uint64
 	snapDirty              atomic.Bool
 	snapEligible           atomic.Bool
+	// snapshotMu serializes the dirty generation with worker completion. It is
+	// intentionally independent from mu: persistence never holds session state
+	// locks while encoding or writing.
+	snapshotMu         sync.Mutex
+	snapshotGeneration uint64
+	snapshotPending    bool
+	snapshotChanged    chan struct{}
 	// syncGen makes synchronized-output watchdog generations unique across all
 	// panes in this session.
 	syncGen atomic.Uint64
@@ -671,7 +678,8 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 				d.log.Warn("deleting session snapshot failed", "err", err, "session", name)
 			}
 		} else {
-			d.captureSession(sess)
+			markSnapshotDirty(sess)
+			d.scheduleFinalSnapshot(sess)
 		}
 	}
 	d.mu.Lock()

@@ -14,10 +14,10 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -931,7 +931,7 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(50)
+	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 50})
 	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
 
 	// Press on a content row while scrollback is empty: the anchor is
@@ -941,7 +941,7 @@ func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 	// Simulate 5 lines evicted into scrollback between the Press and the
 	// first Motion (e.g. the child kept producing output).
 	for range 5 {
-		sess.tabs[0].focusedPane().scrollback.Append(testRow("evicted"))
+		sess.tabs[0].focusedPane().history.Append(testRow("evicted"))
 	}
 
 	// Motion lands on wire row 3 (0-based row 2 of the *current* screen).

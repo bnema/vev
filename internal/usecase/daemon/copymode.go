@@ -66,7 +66,7 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	// Capture the live pane under pane.mu; all subsequent copy interaction uses
 	// the immutable document while holding only copyMu.
 	p.mu.Lock()
-	document := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+	document := scopy.NewSnapshot(p.history, p.screen.Frame)
 	p.mu.Unlock()
 	if !d.publishCopyMode(sess, ac, tb, p, document, nil) {
 		return

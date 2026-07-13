@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"io"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -145,8 +146,26 @@ func TestPerformanceFixtureLargeHistoryTopology(t *testing.T) {
 	for _, tb := range fixture.sess.tabs {
 		require.Len(t, tb.panes, 4)
 		for _, p := range tb.panes {
-			require.Equal(t, 10_000, p.scrollback.Len())
+			require.Equal(t, 10_000, p.history.Len())
 		}
+	}
+}
+
+func TestPerformanceFixtureSnapshotCaptureRetainsSealedHistory(t *testing.T) {
+	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000})
+
+	first, ok := fixture.d.captureSnapshotState(fixture.sess, 1)
+	require.True(t, ok)
+	require.Len(t, first.tabs, 1)
+	require.Len(t, first.tabs[0].panes, 2)
+	require.Equal(t, 10_000, first.tabs[0].panes[0].history.Len())
+	require.Equal(t, 40, first.tabs[0].panes[0].history.ChunkCount())
+
+	second, ok := fixture.d.captureSnapshotState(fixture.sess, 2)
+	require.True(t, ok)
+	secondPane := capturePaneByID(second, first.tabs[0].panes[0].id)
+	if secondPane == nil || first.tabs[0].panes[0].history.Chunk(0) != secondPane.history.Chunk(0) {
+		t.Fatal("unchanged sealed history chunk was not reused across captures")
 	}
 }
 
@@ -179,12 +198,41 @@ var daemonHistoryTopologies = []daemonHistoryTopology{
 	{name: "8tabs-1pane", tabs: 8, panes: 1},
 }
 
+// v3 bounds a decoded snapshot to 256 MiB. One 120-column 10k-row tab is
+// representative and valid; multi-tab fixtures exceed that durable budget, so
+// snapshot capture/encode benchmark only the valid one-tab topologies.
+var daemonSnapshotTopologies = []daemonHistoryTopology{
+	{name: "1tab-1pane-control", tabs: 1, panes: 1},
+	{name: "1tab-4panes", tabs: 1, panes: 4},
+}
+
 func BenchmarkDaemonHistoryLivePaint(b *testing.B) {
 	benchmarkDaemonLargeHistory(b, "live-paint", func(f *performanceFixture) { f.paintLive() })
 }
+
+// BenchmarkDaemonHistorySnapshotCapture measures the synchronous immutable
+// capture boundary only. Encoding and the bounded worker queue are deliberately
+// excluded so scheduler latency cannot affect this benchmark.
 func BenchmarkDaemonHistorySnapshotCapture(b *testing.B) {
-	benchmarkDaemonLargeHistory(b, "snapshot-capture", func(f *performanceFixture) { f.captureSnapshot() })
+	benchmarkDaemonSnapshotCapture(b)
 }
+
+// BenchmarkDaemonHistorySnapshotEncode measures v3 encoding from an already
+// immutable capture, without queueing or persistence.
+func BenchmarkDaemonHistorySnapshotEncode(b *testing.B) {
+	benchmarkDaemonSnapshotEncode(b)
+}
+
+// BenchmarkDaemonHistorySnapshotRestore measures terminal-state restoration
+// from a validated v3 pane manifest without spawning PTY or session workers.
+func BenchmarkDaemonHistorySnapshotRestore(b *testing.B) {
+	benchmarkDaemonSnapshotRestore(b)
+}
+
+// BenchmarkDaemonHistoryCopyEnter uses the parent benchmark's repeated-entry
+// semantics: each operation replaces the active copy document. Exit cleanup is
+// intentionally outside this benchmark, so its allocations cannot be reported
+// as copy-entry work.
 func BenchmarkDaemonHistoryCopyEnter(b *testing.B) {
 	benchmarkDaemonLargeHistory(b, "copy-enter", func(f *performanceFixture) { f.d.enterCopyMode(f.sess, f.ac) })
 }
@@ -223,8 +271,12 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 			fixture := newPerformanceFixture(b, performanceConfig{
 				size: domain.Size{Cols: 120, Rows: 40}, tabs: topology.tabs, panes: topology.panes, historyRows: 10_000,
 			})
+			if !fixture.hasHistoryTopology(topology.tabs, topology.panes, 10_000) {
+				b.Fatal("invalid daemon history fixture")
+			}
 			if workload == "copy-search" {
-				fixture.d.enterCopyMode(fixture.sess, fixture.ac)
+				benchmarkDaemonCopySearch(b, fixture, run)
+				return
 			}
 			b.ReportAllocs()
 			fixture.resetMetrics()
@@ -238,24 +290,163 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 					b.Fatalf("decode last output: %v", err)
 				}
 			}
-			if workload == "snapshot-capture" {
-				payload := fixture.snaps.lastPayload()
-				if payload == nil {
-					b.Fatal("snapshot capture retained no snapshot payload")
-				}
-				if _, err := snapcodec.Unmarshal(payload); err != nil {
-					b.Fatalf("decode last snapshot: %v", err)
-				}
-			}
 			if workload == "live-paint" && metrics.outputFrames != uint64(b.N) {
 				b.Fatalf("live paint emitted %d frames for %d operations", metrics.outputFrames, b.N)
-			}
-			if workload == "snapshot-capture" && metrics.snapshotWrites != uint64(b.N) {
-				b.Fatalf("snapshot capture wrote %d snapshots for %d operations", metrics.snapshotWrites, b.N)
 			}
 			benchmarkReportMetrics(b, metrics, b.N, 10_000)
 		})
 	}
+}
+
+func benchmarkDaemonCopySearch(b *testing.B, fixture *performanceFixture, run func(*performanceFixture)) {
+	b.Helper()
+	fixture.d.enterCopyMode(fixture.sess, fixture.ac)
+	fixture.ac.ackOutputState(fixture.ac.output.next)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		run(fixture)
+		fixture.ac.ackOutputState(fixture.ac.output.next)
+	}
+	b.StopTimer()
+	if fixture.searchMatches() == 0 {
+		b.Fatal("copy search produced no deterministic matches")
+	}
+	b.ReportMetric(1, "copyoperations/op")
+}
+
+func benchmarkDaemonSnapshotCapture(b *testing.B) {
+	for _, topology := range daemonSnapshotTopologies {
+		b.Run(topology.name, func(b *testing.B) {
+			fixture := newPerformanceFixture(b, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: topology.tabs, panes: topology.panes, historyRows: 10_000})
+			if !fixture.hasHistoryTopology(topology.tabs, topology.panes, 10_000) {
+				b.Fatal("invalid daemon snapshot capture fixture")
+			}
+			first, ok := fixture.d.captureSnapshotState(fixture.sess, 1)
+			if !ok || !validBenchmarkCapture(first) {
+				b.Fatal("invalid snapshot capture fixture")
+			}
+			firstPane := first.tabs[0].panes[0]
+			firstChunk := firstPane.history.Chunk(0)
+			captures := 0
+			var last *snapshotCapture
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				last, ok = fixture.d.captureSnapshotState(fixture.sess, uint64(captures+2))
+				if !ok {
+					b.Fatal("snapshot capture unexpectedly rejected fixture")
+				}
+				captures++
+			}
+			b.StopTimer()
+			lastPane := capturePaneByID(last, firstPane.id)
+			if captures != b.N || !validBenchmarkCapture(last) || lastPane == nil || lastPane.history.Chunk(0) != firstChunk {
+				b.Fatal("snapshot capture did not preserve immutable sealed history")
+			}
+			b.ReportMetric(float64(capturePaneCount(last)), "capturepanes/op")
+		})
+	}
+}
+
+func benchmarkDaemonSnapshotEncode(b *testing.B) {
+	for _, topology := range daemonSnapshotTopologies {
+		b.Run(topology.name, func(b *testing.B) {
+			fixture := newPerformanceFixture(b, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: topology.tabs, panes: topology.panes, historyRows: 10_000})
+			if !fixture.hasHistoryTopology(topology.tabs, topology.panes, 10_000) {
+				b.Fatal("invalid daemon snapshot encode fixture")
+			}
+			capture, ok := fixture.d.captureSnapshotState(fixture.sess, 1)
+			if !ok || !validBenchmarkCapture(capture) {
+				b.Fatal("invalid snapshot encode fixture")
+			}
+			encoded, err := fixture.d.encodeSnapshotCapture(capture)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if _, err := snapcodec.Unmarshal(encoded); err != nil {
+				b.Fatalf("invalid v3 snapshot encode fixture: %v", err)
+			}
+			var last []byte
+			b.ReportAllocs()
+			b.SetBytes(int64(len(encoded)))
+			b.ResetTimer()
+			for range b.N {
+				last, err = fixture.d.encodeSnapshotCapture(capture)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.StopTimer()
+			if _, err := snapcodec.Unmarshal(last); err != nil {
+				b.Fatalf("snapshot encoder produced invalid v3 data: %v", err)
+			}
+			b.ReportMetric(float64(len(last)), "snapshotbytes/op")
+		})
+	}
+}
+
+func benchmarkDaemonSnapshotRestore(b *testing.B) {
+	fixture := newPerformanceFixture(b, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: 1, historyRows: 10_000})
+	if !fixture.hasHistoryTopology(1, 1, 10_000) {
+		b.Fatal("invalid daemon snapshot restore fixture")
+	}
+	capture, ok := fixture.d.captureSnapshotState(fixture.sess, 1)
+	if !ok || !validBenchmarkCapture(capture) {
+		b.Fatal("invalid snapshot restore fixture")
+	}
+	encoded, err := fixture.d.encodeSnapshotCapture(capture)
+	if err != nil {
+		b.Fatal(err)
+	}
+	snapshot, err := snapcodec.Unmarshal(encoded)
+	if err != nil || len(snapshot.Tabs) != 1 || len(snapshot.Tabs[0].Panes) == 0 {
+		b.Fatalf("invalid v3 snapshot restore fixture: %v", err)
+	}
+	paneSnapshot := snapshot.Tabs[0].Panes[0]
+	b.ReportAllocs()
+	b.SetBytes(int64(len(encoded)))
+	b.ResetTimer()
+	for range b.N {
+		if err := restorePaneTerminal(fixture.activePane, paneSnapshot); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	fixture.activePane.mu.Lock()
+	restoredRows := fixture.activePane.history.Len()
+	fixture.activePane.mu.Unlock()
+	if restoredRows != 10_000 {
+		b.Fatalf("snapshot restore retained %d history rows, want 10000", restoredRows)
+	}
+	b.ReportMetric(float64(restoredRows), "historyrows/restore")
+}
+
+func validBenchmarkCapture(capture *snapshotCapture) bool {
+	return capture != nil && len(capture.tabs) > 0 && len(capture.tabs[0].panes) > 0 && capture.tabs[0].panes[0].history.Len() == 10_000 && capture.tabs[0].panes[0].history.ChunkCount() > 0
+}
+
+func capturePaneCount(capture *snapshotCapture) int {
+	count := 0
+	for _, tab := range capture.tabs {
+		count += len(tab.panes)
+	}
+	return count
+}
+
+func capturePaneByID(capture *snapshotCapture, id layout.PaneID) *snapshotCapturePane {
+	if capture == nil {
+		return nil
+	}
+	for tabIndex := range capture.tabs {
+		for paneIndex := range capture.tabs[tabIndex].panes {
+			pane := &capture.tabs[tabIndex].panes[paneIndex]
+			if pane.id == id {
+				return pane
+			}
+		}
+	}
+	return nil
 }
 
 func TestCoordinatorCoalescingRatioReportsInvalidationsPerWake(t *testing.T) {
@@ -327,6 +518,42 @@ func TestLivePaintAllocationBudget(t *testing.T) {
 				fixture.ac.ackOutputState(fixture.ac.output.next)
 			})
 			require.LessOrEqual(t, allocs, float64(38), "live paint must reuse attachment-owned render scratch across warm paints")
+		})
+	}
+}
+
+// TestCopyEnterAllocationBudget protects the parent baseline plus 10%. Copy
+// rendering borrows sealed VT history rows; allocating a copy per viewport row
+// is a production regression even though the capture itself remains immutable.
+func TestCopyEnterAllocationBudget(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		tabs, panes, max int
+	}{
+		{name: "1tab-1pane", tabs: 1, panes: 1, max: 38},
+		{name: "1tab-4panes", tabs: 1, panes: 4, max: 43},
+		{name: "4tabs-1pane", tabs: 4, panes: 1, max: 42},
+		{name: "4tabs-4panes", tabs: 4, panes: 4, max: 48},
+		{name: "8tabs-1pane", tabs: 8, panes: 1, max: 50},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: tt.tabs, panes: tt.panes, historyRows: 10_000})
+			run := func() {
+				fixture.d.enterCopyMode(fixture.sess, fixture.ac)
+				fixture.ac.ackOutputState(fixture.ac.output.next)
+			}
+
+			// Always exercise and validate copy entry. The race detector adds
+			// instrumentation allocations which are not reported by the parent
+			// benchmark, so its allocation count cannot represent this budget.
+			run()
+			require.True(t, fixture.copyModeActive(), "copy entry must install a history-backed mode")
+			if !copyEnterAllocationBudgetEnabled {
+				return
+			}
+
+			allocs := testing.AllocsPerRun(20, run)
+			require.LessOrEqual(t, allocs, float64(tt.max), "copy enter must stay within 10%% of the parent allocation baseline")
 		})
 	}
 }
@@ -501,13 +728,15 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 		sess:        sess,
 		ac:          ac,
 		output:      output,
-		snaps:       &countingSnapshotStore{},
+		snaps:       &countingSnapshotStore{done: make(chan struct{}, 1)},
 		pty:         pty,
 		clock:       clock,
 		liveWrites:  [][]byte{[]byte("\x1b[1;1HA\x1b[2;2HA"), []byte("\x1b[1;1HB\x1b[2;2HB")},
 		resizeSizes: [2]domain.Size{{Cols: 100, Rows: 30}, config.size},
 	}
 	WithSnapshotStore(fixture.snaps)(d)
+	d.startSnapshotEncodeWorker()
+	t.Cleanup(d.stopSnapshotEncodeWorker)
 	for tabIndex, tb := range sess.tabs {
 		fixture.configureTab(tb, tabIndex, config.panes, config.historyRows, tabSize(config.size))
 	}
@@ -550,7 +779,7 @@ func (f *performanceFixture) configureTab(tb *tab, tabIndex, paneCount, historyR
 	for _, p := range tb.panes {
 		p.mu.Lock()
 		width := p.screen.Frame.Width
-		for row := 0; p.scrollback.Len() < historyRows; row++ {
+		for row := 0; p.history.Len() < historyRows; row++ {
 			p.screen.Write([]byte(performanceFullWidthRow(width, tabIndex, row) + "\r\n"))
 		}
 		p.mu.Unlock()
@@ -594,12 +823,47 @@ func (f *performanceFixture) paintLive() {
 func (f *performanceFixture) captureSnapshot() {
 	f.t.Helper()
 	require.True(f.t, f.d.captureSession(f.sess))
+	<-f.snaps.done
+	for range 4096 {
+		f.sess.snapshotMu.Lock()
+		pending := f.sess.snapshotPending
+		f.sess.snapshotMu.Unlock()
+		if !pending {
+			return
+		}
+		runtime.Gosched()
+	}
+	f.t.Fatal("snapshot worker did not finish performance capture")
 }
 
 func (f *performanceFixture) enterCopySearch() {
 	f.t.Helper()
 	f.d.enterCopyMode(f.sess, f.ac)
 	f.d.handleInput(f.sess, f.ac, []byte("/needle\r"))
+}
+
+func (f *performanceFixture) hasHistoryTopology(tabs, panes, historyRows int) bool {
+	if len(f.sess.tabs) != tabs {
+		return false
+	}
+	for _, tb := range f.sess.tabs {
+		tb.mu.Lock()
+		if len(tb.panes) != panes {
+			tb.mu.Unlock()
+			return false
+		}
+		for _, p := range tb.panes {
+			p.mu.Lock()
+			rows := p.history.Len()
+			p.mu.Unlock()
+			if rows != historyRows {
+				tb.mu.Unlock()
+				return false
+			}
+		}
+		tb.mu.Unlock()
+	}
+	return true
 }
 
 func (f *performanceFixture) searchMatches() int {
@@ -609,6 +873,12 @@ func (f *performanceFixture) searchMatches() int {
 		return 0
 	}
 	return len(f.ac.overlays.copyMode.Searches)
+}
+
+func (f *performanceFixture) copyModeActive() bool {
+	f.ac.overlays.copyMu.Lock()
+	defer f.ac.overlays.copyMu.Unlock()
+	return f.ac.overlays.copyMode != nil && f.ac.overlays.copySnapshot != nil && f.ac.overlays.copySnapshot.Len() >= 10_000
 }
 
 func (f *performanceFixture) resize() {
@@ -754,6 +1024,7 @@ type countingSnapshotStore struct {
 	mu sync.Mutex
 	countingSnapshotMetrics
 	last []byte
+	done chan struct{}
 }
 
 func (s *countingSnapshotStore) Write(_ string, data []byte) error {
@@ -762,6 +1033,9 @@ func (s *countingSnapshotStore) Write(_ string, data []byte) error {
 	s.bytes += uint64(len(data))
 	s.last = data
 	s.mu.Unlock()
+	if s.done != nil {
+		s.done <- struct{}{}
+	}
 	return nil
 }
 func (*countingSnapshotStore) Load() ([]ports.SnapshotBlob, error) { return nil, nil }

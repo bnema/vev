@@ -6,7 +6,6 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -16,15 +15,15 @@ import (
 // attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
 // The PTY reader takes only pane.mu, so child output never waits on client IO.
 type pane struct {
-	id         layout.PaneID
-	stableID   string
-	pty        ports.PTY
-	mu         sync.Mutex // guards screen, scrollback, syncGen, rect, resizeApplying, resizePending, PTY side effects, and title
-	resizeMu   sync.Mutex // serializes PTY resizes without holding mu
-	screen     *vt.Screen
-	scrollback *scopy.Scrollback
-	syncGen    uint64
-	rect       domain.Rect
+	id       layout.PaneID
+	stableID string
+	pty      ports.PTY
+	mu       sync.Mutex // guards screen, history, syncGen, rect, resizeApplying, resizePending, PTY side effects, and title
+	resizeMu sync.Mutex // serializes PTY resizes without holding mu
+	screen   *vt.Screen
+	history  *vt.History
+	syncGen  uint64
+	rect     domain.Rect
 	// resizeApplying gates VT parsing across PTY.Resize. The reader continues
 	// draining into resizePending so output is replayed against the target (or
 	// retained old) screen only after apply resolves.
@@ -48,16 +47,14 @@ func newPane(id layout.PaneID, pty ports.PTY, sz domain.Size) *pane {
 }
 
 func newPaneWithStableID(id layout.PaneID, stableID string, pty ports.PTY, sz domain.Size) *pane {
-	sb := scopy.NewScrollback(defaultScrollbackRows)
-	screen := vt.NewScreen(sz.Cols, sz.Rows)
-	screen.OnLineEvicted = sb.Append
+	screen := vt.NewScreenWithHistory(sz.Cols, sz.Rows, vt.HistoryConfig{MaxRows: defaultScrollbackRows})
 	return &pane{
-		id:         id,
-		stableID:   stableID,
-		pty:        pty,
-		screen:     screen,
-		scrollback: sb,
-		rect:       domain.Rect{Width: sz.Cols, Height: sz.Rows},
-		title:      paneTitleState{displayFallback: "sh"},
+		id:       id,
+		stableID: stableID,
+		pty:      pty,
+		screen:   screen,
+		history:  screen.History(),
+		rect:     domain.Rect{Width: sz.Cols, Height: sz.Rows},
+		title:    paneTitleState{displayFallback: "sh"},
 	}
 }
