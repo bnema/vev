@@ -165,24 +165,24 @@ func (d *Daemon) commitResize(sess *session, ac *attachedClient, plan resizePlan
 	d.observeRuntime(ports.RuntimeResizeCommitted, 0, true)
 }
 
-func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, epoch uint64) bool {
+func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *attachmentLease, epoch uint64) bool {
 	rc := sess.renderCoordinator()
 	if rc == nil {
 		return false
 	}
 	snap := rc.resizeSnapshot()
-	if !rc.resizeCurrent(epoch, ac, false) {
+	if !rc.resizeCurrentForLease(epoch, ac, lease, false) {
 		return false
 	}
 	d.exitCopyMode(ac)
 	plan := d.prepareResize(sess, snap.size)
-	if !rc.resizeCurrent(epoch, ac, false) {
+	if !rc.resizeCurrentForLease(epoch, ac, lease, false) {
 		return false
 	}
-	if !d.applyResize(&plan, func() bool { return rc.resizeCurrent(epoch, ac, false) }) {
+	if !d.applyResize(&plan, func() bool { return rc.resizeCurrentForLease(epoch, ac, lease, false) }) {
 		return false
 	}
-	if !rc.resizeCurrent(epoch, ac, true) {
+	if !rc.resizeCurrentForLease(epoch, ac, lease, true) {
 		return false
 	}
 	d.commitResize(sess, ac, plan)
@@ -193,12 +193,12 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, epoch u
 		}
 	}
 	if len(failed) != 0 {
-		rc.scheduleResizeRetry(epoch, ac, func() { d.retryResizeMembers(sess, ac, epoch, failed) })
+		rc.scheduleResizeRetryForLease(epoch, ac, lease, func() { d.retryResizeMembers(sess, ac, lease, epoch, failed) })
 	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
 	// A successful transaction publishes exactly one full S2 frame. The
 	// coordinator is the only emission route and stale epochs never reach it.
-	if !rc.invalidateForAttachmentAtResizeEpoch(ac, epoch, renderInvalidation{class: invalidateUrgent, reset: true, producer: "transactional_resize.go"}) {
+	if !rc.invalidateForLeaseAtResizeEpoch(ac, lease, epoch, renderInvalidation{class: invalidateUrgent, reset: true, producer: "transactional_resize.go"}) {
 		return false
 	}
 	// The resize debounce has already elapsed. Consume this sticky reset now;
@@ -210,16 +210,16 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, epoch u
 
 // retryResizeMembers retries only members which failed the committed epoch.
 // It never republishes geometry: an intervening resize owns that publication.
-func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, epoch uint64, members []resizeMember) {
+func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *attachmentLease, epoch uint64, members []resizeMember) {
 	rc := sess.renderCoordinator()
-	if rc == nil || !rc.retryCurrent(epoch, ac) {
+	if rc == nil || !rc.retryCurrentForLease(epoch, ac, lease) {
 		return
 	}
 	plan := resizePlan{members: append([]resizeMember(nil), members...)}
 	for i := range plan.members {
 		plan.members[i].retry = true
 	}
-	if !d.applyResize(&plan, func() bool { return rc.retryCurrent(epoch, ac) }) || !rc.retryCurrent(epoch, ac) {
+	if !d.applyResize(&plan, func() bool { return rc.retryCurrentForLease(epoch, ac, lease) }) || !rc.retryCurrentForLease(epoch, ac, lease) {
 		return
 	}
 	failed := make([]resizeMember, 0, len(plan.members))
@@ -240,10 +240,10 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, epoch uin
 		succeeded = true
 	}
 	if len(failed) != 0 {
-		rc.scheduleResizeRetry(epoch, ac, func() { d.retryResizeMembers(sess, ac, epoch, failed) })
+		rc.scheduleResizeRetryForLease(epoch, ac, lease, func() { d.retryResizeMembers(sess, ac, lease, epoch, failed) })
 	}
 	if succeeded {
-		rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: true, producer: "transactional_resize.go"})
+		rc.invalidateForLease(ac, lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "transactional_resize.go"})
 	}
 }
 
@@ -251,6 +251,16 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, epoch uin
 // attached requests, and coordinator schedule acceptance for async requests.
 // Headless requests have no reset invalidation and report geometry completion.
 func (d *Daemon) requestTransactionalResize(sess *session, ac *attachedClient, size domain.Size, immediate bool) bool {
+	if ac == nil {
+		return d.requestTransactionalResizeForLease(sess, nil, nil, size, immediate)
+	}
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	return d.requestTransactionalResizeForLease(sess, ac, rc.attachmentLease(ac), size, immediate)
+}
+
+// requestTransactionalResizeForLease carries the connection's captured lease
+// through the full resize transaction and every delayed retry callback.
+func (d *Daemon) requestTransactionalResizeForLease(sess *session, ac *attachedClient, lease *attachmentLease, size domain.Size, immediate bool) bool {
 	valid := sess != nil && size.Valid()
 	d.observeRuntime(ports.RuntimeResizeRequested, 0, valid)
 	if !valid {
@@ -264,13 +274,16 @@ func (d *Daemon) requestTransactionalResize(sess *session, ac *attachedClient, s
 		d.commitResize(sess, nil, plan)
 		return true
 	}
-	rc := d.attachCoordinator(sess, nil, ac, true)
+	rc := sess.renderCoordinator()
+	if rc == nil || !rc.leaseCurrent(lease, true) {
+		return false
+	}
 	if immediate {
-		epoch := rc.recordResizeRequest(size, ac)
+		epoch := rc.recordResizeRequestForLease(size, ac, lease)
 		if epoch == 0 {
 			return false
 		}
-		return d.runResizeTransaction(sess, ac, epoch)
+		return d.runResizeTransaction(sess, ac, lease, epoch)
 	}
-	return rc.scheduleResize(size, ac, func(epoch uint64) { d.runResizeTransaction(sess, ac, epoch) }) != 0
+	return rc.scheduleResizeForLease(size, ac, lease, func(epoch uint64) { d.runResizeTransaction(sess, ac, lease, epoch) }) != 0
 }

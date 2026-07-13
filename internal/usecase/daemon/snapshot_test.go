@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -95,13 +96,13 @@ func exerciseBlockedSnapshotWorker(t *testing.T, blockEncode bool) {
 	rc := newRenderCoordinator(renderCoordinatorOptions{
 		clock: stubClock{},
 		onInvalidate: func(renderInvalidation) {
-			d.paint(sess, ac, true)
+			d.paint(sess, ac, true, nil)
 			rendered <- struct{}{}
 		},
 	})
 	sess.installRenderCoordinator(rc)
 	rc.attach(ac)
-	require.True(t, rc.markAttachmentReady(ac))
+	require.True(t, rc.markAttachmentReady(rc.attachmentLease(ac)))
 	t.Cleanup(rc.noteSessionTeardown)
 
 	markSnapshotDirty(sess)
@@ -188,6 +189,166 @@ func TestFinalSnapshotFlushPersistsNewestNamedSessionBeforeWorkerTeardown(t *tes
 	default:
 		t.Fatal("final snapshot was dropped during worker teardown")
 	}
+}
+
+func TestFinalSnapshotSupersedesPendingCaptureBeforeWorkerTeardown(t *testing.T) {
+	clock := newFinalFlushClock()
+	store := &channelSnapshotStore{writes: make(chan []byte, 2)}
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
+	WithSnapshotStore(store)(d)
+	d.startSnapshotEncodeWorker()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	d.snapshotMarshal = func(s snapcodec.Session) ([]byte, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return snapcodec.Marshal(s)
+	}
+	sess := newSnapshotTestSession(t, "pending-final", false, "/work")
+	markSnapshotDirty(sess)
+	require.True(t, d.scheduleSnapshot(sess))
+	<-entered
+
+	pane := sess.tabs[0].panes["pane-1"]
+	pane.mu.Lock()
+	pane.screen.Write([]byte("\rterminal"))
+	pane.mu.Unlock()
+	markSnapshotDirty(sess)
+	require.True(t, d.scheduleFinalSnapshot(sess))
+
+	stopped := make(chan struct{})
+	go func() {
+		d.stopSnapshotEncodeWorker()
+		close(stopped)
+	}()
+	close(release)
+	<-stopped
+
+	require.Len(t, store.writes, 2, "teardown must flush the newer terminal capture")
+	var latest snapcodec.Session
+	for range 2 {
+		snap, err := snapcodec.Unmarshal(<-store.writes)
+		require.NoError(t, err)
+		latest = snap
+	}
+	frame, err := vt.UnmarshalVisible(latest.Tabs[0].Panes[0].Visible)
+	require.NoError(t, err)
+	require.Contains(t, rowText(frame.Row(0)), "terminal")
+}
+
+func TestFinalSnapshotFallbackCoalescesRepeatedTerminalCaptures(t *testing.T) {
+	store := discardSnapshotStore{}
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	WithSnapshotStore(store)(d)
+	d.startSnapshotEncodeWorker()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWorker := func() { releaseOnce.Do(func() { close(release) }) }
+	defer func() {
+		releaseWorker()
+		d.stopSnapshotEncodeWorker()
+	}()
+	var calls atomic.Int32
+	d.snapshotMarshal = func(s snapcodec.Session) ([]byte, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return snapcodec.Marshal(s)
+	}
+	sess := newSnapshotTestSession(t, "coalesced-final", false, "/work")
+	markSnapshotDirty(sess)
+	require.True(t, d.scheduleSnapshot(sess))
+	<-entered
+
+	for generation := uint64(1); generation <= 32; generation++ {
+		capture, ok := d.captureSnapshotState(sess, generation)
+		require.True(t, ok)
+		require.True(t, d.enqueueFinalSnapshotCapture(capture))
+	}
+
+	d.snapshotWorkerMu.Lock()
+	captures := make([]*snapshotCapture, 0, len(d.snapshotFinalJobs))
+	for _, capture := range d.snapshotFinalJobs {
+		captures = append(captures, capture)
+	}
+	d.snapshotWorkerMu.Unlock()
+	require.Len(t, captures, 1, "blocked workers retain only the latest terminal capture per session")
+	require.Equal(t, uint64(32), captures[0].generation)
+	releaseWorker()
+}
+
+func TestFinalSnapshotFallbackBoundsDistinctTerminalSessions(t *testing.T) {
+	store := discardSnapshotStore{}
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	WithSnapshotStore(store)(d)
+	d.startSnapshotEncodeWorker()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	d.snapshotMarshal = func(s snapcodec.Session) ([]byte, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return snapcodec.Marshal(s)
+	}
+	defer func() {
+		close(release)
+		d.stopSnapshotEncodeWorker()
+	}()
+
+	active := newSnapshotTestSession(t, "active", false, "/work")
+	queued := newSnapshotTestSession(t, "queued", false, "/work")
+	markSnapshotDirty(active)
+	markSnapshotDirty(queued)
+	require.True(t, d.scheduleSnapshot(active))
+	<-entered
+	require.True(t, d.scheduleSnapshot(queued), "fill the regular bounded queue before terminal retirement")
+
+	var superseded *session
+	for i := range snapshotFinalQueueCapacity {
+		sess := newSnapshotTestSession(t, fmt.Sprintf("terminal-%d", i), false, "/work")
+		markSnapshotDirty(sess)
+		require.True(t, d.scheduleFinalSnapshot(sess))
+		if i == 0 {
+			superseded = sess
+		}
+	}
+	markSnapshotDirty(superseded)
+	require.True(t, d.scheduleFinalSnapshot(superseded), "a newer generation for a retained session must supersede at capacity")
+
+	rejected := newSnapshotTestSession(t, "terminal-rejected", false, "/work")
+	d.mu.Lock()
+	d.sessions[rejected.id] = rejected
+	d.mu.Unlock()
+	markSnapshotDirty(rejected)
+	err := d.killSession(rejected, ports.ReasonSessionKilled, false)
+	require.ErrorContains(t, err, "snapshot worker unavailable or saturated")
+	d.mu.Lock()
+	require.Same(t, rejected, d.sessions[rejected.id], "rejected terminal state must remain registered for retry")
+	d.mu.Unlock()
+
+	d.snapshotWorkerMu.Lock()
+	retained := len(d.snapshotFinalJobs)
+	owners := len(d.snapshotFinalOrder)
+	supersedingCapture := d.snapshotFinalJobs[superseded]
+	d.snapshotWorkerMu.Unlock()
+	require.Equal(t, snapshotFinalQueueCapacity, retained, "distinct terminal captures must have a global bound")
+	require.Equal(t, snapshotFinalQueueCapacity, owners, "retention order must not retain extra session owners")
+	require.NotNil(t, supersedingCapture)
+	require.Equal(t, uint64(2), supersedingCapture.generation, "retained session must keep its newest terminal generation")
+	require.NotNil(t, rejected)
+	require.True(t, rejected.snapEligible.Load())
+	require.True(t, rejected.snapDirty.Load(), "a rejected terminal capture must remain retryable")
+	awaitSnapshotIdle(t, rejected)
 }
 
 func TestStopSnapshotEncodeWorkerDoesNotWaitForUncancellableWrite(t *testing.T) {
@@ -909,6 +1070,12 @@ func startSnapshotEncodeWorker(t *testing.T, d *Daemon) {
 	d.startSnapshotEncodeWorker()
 	t.Cleanup(d.stopSnapshotEncodeWorker)
 }
+
+type discardSnapshotStore struct{}
+
+func (discardSnapshotStore) Write(string, []byte) error          { return nil }
+func (discardSnapshotStore) Load() ([]ports.SnapshotBlob, error) { return nil, nil }
+func (discardSnapshotStore) Delete(string) error                 { return nil }
 
 type gatedSnapshotStore struct {
 	entered     chan struct{}

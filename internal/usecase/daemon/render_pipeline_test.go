@@ -9,6 +9,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/testutil/replaytest"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
@@ -40,23 +41,17 @@ func (*scriptedReplayTransport) Recv() (ports.Frame, error) { return ports.Frame
 func (*scriptedReplayTransport) Close() error               { return nil }
 
 func TestTransportReplayFinalShadowAndTerminalBytes(t *testing.T) {
-	frames := []ports.Frame{
-		{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("\x1b[2J\x1b[Hone\r\ntwo")})},
-		{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 1, NewStateNum: 2, EchoAck: 7, Data: []byte("\x1b[2;1HTWO")})},
-	}
+	frames := replaytest.Transcript()
 	transport := &scriptedReplayTransport{t: t, frames: frames}
 	terminal := vt.NewScreen(8, 3)
-	var transcript []byte
 	for _, frame := range frames {
 		require.NoError(t, transport.Send(frame))
 		output, err := ports.UnmarshalOutput(frame.Payload)
 		require.NoError(t, err)
 		require.Equal(t, frame.Payload, ports.MarshalOutput(output), "output payload must remain byte exact")
-		transcript = append(transcript, output.Data...)
 		terminal.Write(output.Data)
 	}
 	require.Equal(t, len(frames), transport.next)
-	require.Equal(t, "\x1b[2J\x1b[Hone\r\ntwo\x1b[2;1HTWO", string(transcript))
 	require.Equal(t, []string{"one     ", "TWO     ", "        "}, frameRows(terminal.Frame), "terminal replay is the final renderer shadow")
 }
 
@@ -66,7 +61,7 @@ func TestCapturePaneRenderStateOwnsVisibleFrameWithoutConsumingDamage(t *testing
 	p.screen.Write([]byte("old"))
 
 	p.mu.Lock()
-	captured := capturePaneRenderStateLocked(p, domain.Rect{Width: 3, Height: 1}, damageCaptureConsume)
+	captured := capturePaneRenderStateLocked(p, domain.Rect{Width: 3, Height: 1})
 	p.mu.Unlock()
 
 	require.Equal(t, 3, captured.frame.Width)
@@ -78,13 +73,13 @@ func TestCapturePaneRenderStateOwnsVisibleFrameWithoutConsumingDamage(t *testing
 	require.Equal(t, 'o', captured.frame.At(0, 0).Rune, "capture must not alias the mutable VT frame")
 }
 
-func TestCapturePaneRenderStatePreviewIsNonDestructive(t *testing.T) {
+func TestCapturePaneRenderStateIsAlwaysNonDestructive(t *testing.T) {
 	p := newPane("p", nil, domain.Size{Cols: 8, Rows: 2})
 	p.screen.ClearDamage()
 	p.screen.Write([]byte("preview"))
 
 	p.mu.Lock()
-	_ = capturePaneRenderStateLocked(p, domain.Rect{Width: 8, Height: 2}, damageCapturePreview)
+	_ = capturePaneRenderStateLocked(p, domain.Rect{Width: 8, Height: 2})
 	p.mu.Unlock()
 
 	require.NotEmpty(t, p.screen.Damage())
@@ -97,19 +92,19 @@ func TestCapturePaneRenderStateMalformedDamageFallsBackToFullRedraw(t *testing.T
 	p.screen.Damage()[0] = renderer.Damage{Kind: renderer.DamageText, X: -1, Y: 0, Width: 4, Height: 1}
 
 	p.mu.Lock()
-	captured := capturePaneRenderStateLocked(p, domain.Rect{Width: 8, Height: 2}, damageCaptureConsume)
+	captured := capturePaneRenderStateLocked(p, domain.Rect{Width: 8, Height: 2})
 	p.mu.Unlock()
 
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, captured.damage)
 }
 
-func TestCapturePaneRenderStateCollapsedConsumesBoundedly(t *testing.T) {
+func TestCapturePaneRenderStateCollapsedRetainsDamage(t *testing.T) {
 	p := newPane("p", nil, domain.Size{Cols: 8, Rows: 2})
 	p.screen.ClearDamage()
 	p.screen.Write([]byte("hidden"))
 
 	p.mu.Lock()
-	captured := capturePaneRenderStateLocked(p, domain.Rect{}, damageCaptureConsume)
+	captured := capturePaneRenderStateLocked(p, domain.Rect{})
 	p.mu.Unlock()
 
 	require.Zero(t, captured.frame.Width)
@@ -132,7 +127,7 @@ func TestPaintACKBlockedDoesNotDestructivelyCapture(t *testing.T) {
 	p.screen.Write([]byte("blocked"))
 	p.mu.Unlock()
 
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 
 	p.mu.Lock()
 	require.NotEmpty(t, p.screen.Damage())

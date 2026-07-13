@@ -62,9 +62,10 @@ type RuntimeMark struct {
 // a producer provide a timestamp in another clock domain.
 type RuntimeObserver interface{ ObserveRuntime(RuntimeMark) }
 
-// SerializedRuntimeObserver accepts marks without waiting for observer I/O.
-// Flush and Close wait until every accepted mark has reached Observer. Close
-// is idempotent and rejects later marks.
+// SerializedRuntimeObserver is the only observer contract accepted by runtime
+// transport and use-case hot paths. ObserveRuntime must return without waiting
+// for sink I/O. Flush and Close wait until every accepted mark has reached the
+// concrete observer; Close is idempotent and rejects later marks.
 type SerializedRuntimeObserver interface {
 	RuntimeObserver
 	Flush()

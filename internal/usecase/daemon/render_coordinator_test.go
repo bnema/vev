@@ -78,6 +78,59 @@ func newInertCoordinatorMockClock(t *testing.T, capacity int) *coordinatorMockCl
 // coordinator metadata. Before two-phase timer ownership this blocked while
 // c.mu was held during normal arming, urgent replacement, sync arming, and
 // detach cancellation.
+// TestRenderCoordinatorDetachJoinsSelectedDeadlineWorker reproduces the
+// lifecycle race exposed by timerOwnership extraction. A timer may select its
+// tick just before detach cancels it; cancellation alone does not prevent the
+// worker from entering an external readiness callback after lifecycle cleanup.
+func TestRenderCoordinatorDetachJoinsSelectedDeadlineWorker(t *testing.T) {
+	clock := portsmocks.NewMockClock(t)
+	timer := portsmocks.NewMockTimer(t)
+	timerC := make(chan time.Time, 1)
+	stopCalled := make(chan struct{})
+	clock.EXPECT().NewTimer(minOutputRenderDeadline).Return(timer).Once()
+	timer.EXPECT().C().Return((<-chan time.Time)(timerC)).Once()
+	timer.EXPECT().Stop().Run(func() { close(stopCalled) }).Return(true).Once()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	rc := newRenderCoordinator(renderCoordinatorOptions{
+		clock: clock,
+		ackReady: func() bool {
+			close(entered)
+			<-release
+			return true
+		},
+	})
+	ac := &attachedClient{}
+	rc.attach(ac)
+	rc.invalidate(renderInvalidation{class: invalidateOutput})
+	timerC <- time.Time{}
+	<-entered
+
+	detached := make(chan struct{})
+	go func() {
+		rc.noteDetach(ac)
+		close(detached)
+	}()
+	<-stopCalled
+	select {
+	case <-detached:
+		t.Fatal("detach returned before the selected deadline worker completed")
+	default:
+	}
+
+	close(release)
+	for range 4096 {
+		select {
+		case <-detached:
+			return
+		default:
+			runtime.Gosched()
+		}
+	}
+	t.Fatal("detach did not complete after the deadline worker was released")
+}
+
 func TestRenderCoordinatorTimerCallbacksReenterCoordinator(t *testing.T) {
 	clock := portsmocks.NewMockClock(t)
 	var rc *renderCoordinator
@@ -408,9 +461,8 @@ resize:
 		case epoch := <-resizeDone:
 			require.Equal(t, uint64(1), epoch)
 			wake := awaitWake(t, wakes)
-			require.Same(t, owner, wake.attachment)
-			wake.attachment = nil
-			wake.attachmentEpoch = 0
+			require.Same(t, owner, wake.lease.attachment)
+			wake.lease = nil
 			require.Equal(t, renderWake{coalesced: 1}, wake)
 			for range 4096 {
 				select {
@@ -801,10 +853,9 @@ func TestRenderCoordinatorPreviewWakesDoNotWaitForTargetAck(t *testing.T) {
 
 			preview := awaitWake(t, h.previews)
 			if tc.attach {
-				require.NotNil(t, preview.attachment)
+				require.NotNil(t, preview.lease.attachment)
 			}
-			preview.attachment = nil
-			preview.attachmentEpoch = 0
+			preview.lease = nil
 			require.Equal(t, renderWake{coalesced: 1}, preview,
 				"the viewer preview must receive target output without target ACK capacity")
 			requireNoWake(t, h.wakes)
@@ -814,10 +865,9 @@ func TestRenderCoordinatorPreviewWakesDoNotWaitForTargetAck(t *testing.T) {
 			h.rc.notifyAck()
 			wake := awaitWake(t, h.wakes)
 			if tc.attach {
-				require.NotNil(t, wake.attachment)
+				require.NotNil(t, wake.lease.attachment)
 			}
-			wake.attachment = nil
-			wake.attachmentEpoch = 0
+			wake.lease = nil
 			require.Equal(t, renderWake{coalesced: 1}, wake,
 				"the target primary frame remains pending for its own ACK")
 			requireNoWake(t, h.previews)
@@ -844,8 +894,7 @@ func TestRenderCoordinatorDetachedTargetPublishesPreviewOnlyInvalidations(t *tes
 		require.Len(t, timers, 1)
 		timers[0].ch <- time.Time{}
 		preview := awaitWake(t, h.previews)
-		preview.attachment = nil
-		preview.attachmentEpoch = 0
+		preview.lease = nil
 		require.Equal(t, renderWake{coalesced: 1}, preview)
 		requireNoWake(t, h.wakes)
 
@@ -855,8 +904,9 @@ func TestRenderCoordinatorDetachedTargetPublishesPreviewOnlyInvalidations(t *tes
 		require.False(t, h.rc.ackDeferred)
 		require.False(t, h.rc.deadlineDue)
 		require.Zero(t, h.rc.coalesced)
-		require.True(t, h.rc.detached)
-		require.Nil(t, h.rc.attachment)
+		require.True(t, h.rc.primaryDetachedLocked())
+		require.NotNil(t, h.rc.lease)
+		require.False(t, h.rc.lease.active)
 		h.rc.mu.Unlock()
 	}
 
@@ -870,7 +920,7 @@ func TestRenderCoordinatorDetachedTargetPublishesPreviewOnlyInvalidations(t *tes
 	timers[0].ch <- time.Time{}
 	wake := awaitWake(t, h.wakes)
 	require.True(t, wake.reset)
-	require.Same(t, replacement, wake.attachment)
+	require.Same(t, replacement, wake.lease.attachment)
 }
 
 func TestRenderCoordinatorPreviewLifecycleDropsStaleTargetWakes(t *testing.T) {
@@ -1262,7 +1312,7 @@ func TestConcurrentPaintInitializesOverlayUnderSendOwnership(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			d.paint(sess, ac, true)
+			d.paint(sess, ac, true, nil)
 		}()
 	}
 	close(start)
@@ -1313,7 +1363,7 @@ func TestCoordinatorDeadlineCannotPaintPublishedReplacementBeforeOwnershipInstal
 		wake: func(w renderWake) {
 			// This is the production ownership boundary: composition must use
 			// the coordinator's captured attachment, never sess.client.
-			d.paint(sess, w.attachment, w.reset)
+			d.paint(sess, w.lease.attachment, w.reset, w.lease)
 		},
 		ackReady: func() bool { return true },
 	})
@@ -1415,8 +1465,7 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 				h.rc.mu.Unlock()
 				h.rc.noteSyncEnd(p, 1)
 				preview := awaitWake(t, h.previews)
-				preview.attachment = nil
-				preview.attachmentEpoch = 0
+				preview.lease = nil
 				require.Equal(t, renderWake{urgent: true, coalesced: 1}, preview)
 				requireNoWake(t, h.previews)
 				requireNoWake(t, h.wakes)
@@ -1431,8 +1480,8 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 		h.rc.noteSyncBegin(p, 1)
 		watchdog := h.armedTimers(t)[0]
 		h.rc.noteReplace(old, replacement, false)
-		require.False(t, h.rc.markAttachmentReady(old), "old attachment Welcome is stale")
-		require.True(t, h.rc.markAttachmentReady(replacement))
+		require.False(t, h.rc.markAttachmentReady(h.rc.attachmentLease(old)), "old attachment Welcome is stale")
+		require.True(t, h.rc.markAttachmentReady(h.rc.attachmentLease(replacement)))
 
 		h.rc.invalidateForAttachment(old, renderInvalidation{class: invalidateUrgent, producer: "stale old attachment"})
 		require.Empty(t, h.armedTimers(t))
@@ -1454,7 +1503,7 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 		wake := awaitWake(t, h.wakes)
 		require.True(t, wake.reset)
 		require.True(t, wake.urgent)
-		require.Same(t, replacement, wake.attachment)
+		require.Same(t, replacement, wake.lease.attachment)
 		requireNoWake(t, h.wakes)
 	})
 

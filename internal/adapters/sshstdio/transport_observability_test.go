@@ -20,9 +20,12 @@ func TestTransportObservabilitySSHStdioEOFEndsReceive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
-	if _, err := NewTransport(bytes.NewReader(nil), &bytes.Buffer{}, nil, WithRuntimeObserver(observer)).Recv(); err == nil {
+	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	defer reporter.Close()
+	if _, err := NewTransport(bytes.NewReader(nil), &bytes.Buffer{}, nil, WithRuntimeObserver(reporter)).Recv(); err == nil {
 		t.Fatal("Recv() error = nil at EOF")
 	}
+	reporter.Close()
 	if err := closer.Close(); err != nil {
 		t.Fatalf("trace Close() error = %v", err)
 	}
@@ -35,9 +38,11 @@ func TestTransportObservabilitySSHStdioCloseEndsBlockedReceive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
+	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	defer reporter.Close()
 	reader := &sshShutdownReader{entered: make(chan struct{}), done: make(chan struct{})}
 	shutdownErr := errors.New("ssh shutdown failed")
-	transport := NewTransport(reader, &bytes.Buffer{}, func() error { return shutdownErr }, WithRuntimeObserver(observer))
+	transport := NewTransport(reader, &bytes.Buffer{}, func() error { return shutdownErr }, WithRuntimeObserver(reporter))
 	recvDone := make(chan error, 1)
 	go func() { _, err := transport.Recv(); recvDone <- err }()
 	<-reader.entered
@@ -47,6 +52,7 @@ func TestTransportObservabilitySSHStdioCloseEndsBlockedReceive(t *testing.T) {
 	if err := <-recvDone; err == nil {
 		t.Fatal("Recv() error = nil after Close()")
 	}
+	reporter.Close()
 	if err := closer.Close(); err != nil {
 		t.Fatalf("trace Close() error = %v", err)
 	}
@@ -126,10 +132,12 @@ func TestTransportObservabilitySSHStdioPreservesCarriage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
+	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	defer reporter.Close()
 
 	frame := ports.Frame{Type: ports.MsgOutput, Payload: []byte("stdio bytes stay exact")}
 	var observed, baseline bytes.Buffer
-	if err := NewTransport(bytes.NewReader(nil), &observed, nil, WithRuntimeObserver(observer)).Send(frame); err != nil {
+	if err := NewTransport(bytes.NewReader(nil), &observed, nil, WithRuntimeObserver(reporter)).Send(frame); err != nil {
 		t.Fatalf("observed Send() error = %v", err)
 	}
 	if err := NewTransport(bytes.NewReader(nil), &baseline, nil).Send(frame); err != nil {
@@ -138,13 +146,14 @@ func TestTransportObservabilitySSHStdioPreservesCarriage(t *testing.T) {
 	if !bytes.Equal(observed.Bytes(), baseline.Bytes()) {
 		t.Fatalf("observer changed SSH stdio wire bytes: got %x, want %x", observed.Bytes(), baseline.Bytes())
 	}
-	received, err := NewTransport(bytes.NewReader(baseline.Bytes()), &bytes.Buffer{}, nil, WithRuntimeObserver(observer)).Recv()
+	received, err := NewTransport(bytes.NewReader(baseline.Bytes()), &bytes.Buffer{}, nil, WithRuntimeObserver(reporter)).Recv()
 	if err != nil {
 		t.Fatalf("observed Recv() error = %v", err)
 	}
 	if received.Type != frame.Type || !bytes.Equal(received.Payload, frame.Payload) {
 		t.Fatalf("observed Recv() = %#v, want %#v", received, frame)
 	}
+	reporter.Close()
 	if err := closer.Close(); err != nil {
 		t.Fatalf("trace Close() error = %v", err)
 	}

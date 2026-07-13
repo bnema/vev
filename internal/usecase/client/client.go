@@ -102,10 +102,6 @@ const stdinBufSize = 4096
 // goroutine, decoupling the input/resize pumps from transport back-pressure.
 const sendQueueDepth = 64
 
-// runtimeObserverQueueDepth bounds marks awaiting the one reporting worker.
-// A full queue records an ordered diagnostic gap rather than blocking ACKs.
-const runtimeObserverQueueDepth = 64
-
 var reconnectSleep = sleepReconnect
 var reconnectSleepWithResize = sleepReconnectWithResizeEvents
 
@@ -127,11 +123,13 @@ const (
 // Option configures opt-in client runtime observation.
 type Option func(*runtimeOptions)
 
-type runtimeOptions struct{ observer ports.RuntimeObserver }
+type runtimeOptions struct {
+	observer ports.SerializedRuntimeObserver
+}
 
-// WithRuntimeObserver enables process-local marks. It intentionally accepts no
-// clock; timestamps are assigned by the concrete observer.
-func WithRuntimeObserver(observer ports.RuntimeObserver) Option {
+// WithRuntimeObserver accepts only a composition-root serialized observer, so
+// terminal and transport progress can never wait for a raw trace sink.
+func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
 	return func(opts *runtimeOptions) { opts.observer = observer }
 }
 
@@ -140,20 +138,11 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 }
 
 // RunWithRuntimeObserver is the application wiring entry point.
-func RunWithRuntimeObserver(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observer ports.RuntimeObserver) error {
+func RunWithRuntimeObserver(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observer ports.SerializedRuntimeObserver) error {
 	return run(ctx, dialer, term, clk, intent, name, remote, clipboard, log, observer)
 }
 
-func run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observer ports.RuntimeObserver) (retErr error) {
-	if reporter, owned := ports.EnsureSerializedRuntimeObserver(observer, runtimeObserverQueueDepth); reporter != nil {
-		if owned {
-			defer func() {
-				reporter.Flush()
-				reporter.Close()
-			}()
-		}
-		observer = reporter
-	}
+func run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observer ports.SerializedRuntimeObserver) (retErr error) {
 	if log == nil {
 		log = slog.Default()
 	}

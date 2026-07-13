@@ -364,7 +364,7 @@ func TestFloatingEOFRepaintsVisibleSlotOnly(t *testing.T) {
 
 		// Establish a renderer shadow first. The EOF repaint must reset it and
 		// redraw the underlying cell rather than depending on popup damage.
-		d.paint(sess, ac, true)
+		d.paint(sess, ac, true, nil)
 		baseline := awaitFrame(t, sends, ports.MsgOutput)
 		baselineOutput, err := ports.UnmarshalOutput(baseline.Payload)
 		require.NoError(t, err)

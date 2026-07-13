@@ -27,7 +27,9 @@ func TestTransportObservabilityDgramFailedCloseEndsReceiveAndSend(t *testing.T) 
 	}
 	receiveStarted := make(chan struct{})
 	signalingObserver := &dgramStartObserver{RuntimeObserver: observer, receiveStarted: receiveStarted}
-	transport, err := NewTransportWithOptions(&dgramCloseFailPC{fakePC: aPC, err: closeErr}, testAddr("b"), key(), 1, 2, Options{Clock: behaviorClock, ResendAfter: time.Hour, Heartbeat: time.Hour}, WithRuntimeObserver(signalingObserver))
+	reporter := ports.NewSerializedRuntimeObserver(signalingObserver, 64)
+	defer reporter.Close()
+	transport, err := NewTransportWithOptions(&dgramCloseFailPC{fakePC: aPC, err: closeErr}, testAddr("b"), key(), 1, 2, Options{Clock: behaviorClock, ResendAfter: time.Hour, Heartbeat: time.Hour}, WithRuntimeObserver(reporter))
 	if err != nil {
 		t.Fatalf("NewTransportWithOptions() error = %v", err)
 	}
@@ -43,6 +45,7 @@ func TestTransportObservabilityDgramFailedCloseEndsReceiveAndSend(t *testing.T) 
 	if err := <-recvDone; err == nil {
 		t.Fatal("Recv() error = nil after failed Close()")
 	}
+	reporter.Close()
 	if err := closer.Close(); err != nil {
 		t.Fatalf("trace Close() error = %v", err)
 	}
@@ -138,13 +141,15 @@ func TestTransportObservabilityDgramKeepsBehaviorClockSeparate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
+	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	defer reporter.Close()
 
-	a, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{Clock: behaviorClock, ResendAfter: time.Hour, Heartbeat: time.Hour}, WithRuntimeObserver(observer))
+	a, err := NewTransportWithOptions(aPC, testAddr("b"), key(), 1, 2, Options{Clock: behaviorClock, ResendAfter: time.Hour, Heartbeat: time.Hour}, WithRuntimeObserver(reporter))
 	if err != nil {
 		t.Fatalf("NewTransportWithOptions(a) error = %v", err)
 	}
 	defer func() { _ = a.Close() }()
-	b, err := NewTransportWithOptions(bPC, testAddr("a"), key(), 2, 1, Options{Clock: behaviorClock, ResendAfter: time.Hour, Heartbeat: time.Hour}, WithRuntimeObserver(observer))
+	b, err := NewTransportWithOptions(bPC, testAddr("a"), key(), 2, 1, Options{Clock: behaviorClock, ResendAfter: time.Hour, Heartbeat: time.Hour}, WithRuntimeObserver(reporter))
 	if err != nil {
 		t.Fatalf("NewTransportWithOptions(b) error = %v", err)
 	}
@@ -174,6 +179,7 @@ func TestTransportObservabilityDgramKeepsBehaviorClockSeparate(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Recv() did not receive deterministic simulated datagram")
 	}
+	reporter.Close()
 	if err := closer.Close(); err != nil {
 		t.Fatalf("trace Close() error = %v", err)
 	}

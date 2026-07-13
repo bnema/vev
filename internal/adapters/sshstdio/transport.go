@@ -38,7 +38,7 @@ type Option func(*transport)
 
 // WithRuntimeObserver enables process-local transport marks; it deliberately
 // takes only an observer so a carriage adapter never owns trace time.
-func WithRuntimeObserver(observer ports.RuntimeObserver) Option {
+func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
 	return func(t *transport) { t.observer = observer }
 }
 
@@ -65,7 +65,7 @@ type transport struct {
 	w              io.Writer
 	close          closeFunc
 	eofErr         eofErrFunc
-	observer       ports.RuntimeObserver
+	observer       ports.SerializedRuntimeObserver
 	operationMu    sync.Mutex
 	operationCount int
 	closing        bool

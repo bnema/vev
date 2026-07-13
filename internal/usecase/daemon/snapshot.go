@@ -18,6 +18,11 @@ import (
 // stalls session producers; the session remains dirty for the next interval.
 const snapshotQueueCapacity = 1
 
+// snapshotFinalQueueCapacity is a global bound for terminal captures retained
+// while the worker is blocked. On saturation a new terminal capture is rejected
+// (and left dirty) rather than silently dropping a persistence acknowledgement.
+const snapshotFinalQueueCapacity = 32
+
 type snapshotCapture struct {
 	session    *session
 	generation uint64
@@ -318,9 +323,9 @@ func (d *Daemon) scheduleSnapshot(sess *session) bool {
 	return d.scheduleSnapshotWithFinalFallback(sess, false)
 }
 
-// scheduleFinalSnapshot retains a terminal capture rejected by the regular
-// bounded queue. A removed session cannot be retried by snapshotSaver, so the
-// worker drains this fallback before it stops.
+// scheduleFinalSnapshot captures the terminal state even when an older capture
+// is pending. A removed session cannot be retried by snapshotSaver, so the
+// worker drains its retained terminal state before it stops.
 func (d *Daemon) scheduleFinalSnapshot(sess *session) bool {
 	return d.scheduleSnapshotWithFinalFallback(sess, true)
 }
@@ -330,11 +335,12 @@ func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bo
 		return true
 	}
 	sess.snapshotMu.Lock()
-	if !sess.snapDirty.Load() || sess.snapshotPending {
+	if !sess.snapDirty.Load() || (!final && sess.snapshotPending) {
 		sess.snapshotMu.Unlock()
 		return true
 	}
 	generation := sess.snapshotGeneration
+	sess.snapshotPendingCaptures++
 	sess.snapshotPending = true
 	sess.signalSnapshotChangedLocked()
 	sess.snapshotMu.Unlock()
@@ -371,18 +377,40 @@ func (d *Daemon) enqueueSnapshotCapture(capture *snapshotCapture) bool {
 }
 
 // enqueueFinalSnapshotCapture hands terminal captures to the existing worker
-// without making session teardown wait behind its normal bounded queue.
+// without making session teardown wait behind its normal bounded queue. A
+// blocked worker retains at most one terminal capture per session, replacing
+// stale state with the newest immutable capture.
 func (d *Daemon) enqueueFinalSnapshotCapture(capture *snapshotCapture) bool {
-	d.snapshotWorkerMu.Lock()
-	defer d.snapshotWorkerMu.Unlock()
-	if d.snapshotWorkerClosing || d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
+	if capture == nil || capture.session == nil {
 		return false
 	}
-	d.snapshotFinalJobs = append(d.snapshotFinalJobs, capture)
+	d.snapshotWorkerMu.Lock()
+	if d.snapshotWorkerClosing || d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
+		d.snapshotWorkerMu.Unlock()
+		return false
+	}
+	if d.snapshotFinalJobs == nil {
+		d.snapshotFinalJobs = make(map[*session]*snapshotCapture)
+	}
+	replaced, exists := d.snapshotFinalJobs[capture.session]
+	if !exists && len(d.snapshotFinalJobs) >= snapshotFinalQueueCapacity {
+		d.snapshotWorkerMu.Unlock()
+		d.log.Warn("terminal snapshot retention saturated; capture rejected", "session", capture.name, "capacity", snapshotFinalQueueCapacity)
+		return false
+	}
+	// Finish the stale capture before publishing its replacement. Otherwise a
+	// fast worker could persist the replacement and then have this stale failure
+	// mark the session dirty again.
+	d.finishSnapshotCapture(replaced, false)
+	if !exists {
+		d.snapshotFinalOrder = append(d.snapshotFinalOrder, capture.session)
+	}
+	d.snapshotFinalJobs[capture.session] = capture
 	select {
 	case d.snapshotWorkerFinalWake <- struct{}{}:
 	default:
 	}
+	d.snapshotWorkerMu.Unlock()
 	return true
 }
 
@@ -493,7 +521,10 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 	}
 	capture.finishOnce.Do(func() {
 		capture.session.snapshotMu.Lock()
-		capture.session.snapshotPending = false
+		if capture.session.snapshotPendingCaptures > 0 {
+			capture.session.snapshotPendingCaptures--
+		}
+		capture.session.snapshotPending = capture.session.snapshotPendingCaptures > 0
 		if succeeded && capture.session.snapshotGeneration == capture.generation {
 			capture.session.snapDirty.Store(false)
 		} else if !succeeded {
@@ -523,7 +554,8 @@ func (d *Daemon) startSnapshotEncodeWorker() {
 	d.snapshotWorkerDone = make(chan struct{})
 	d.snapshotWorkerFlush = make(chan struct{})
 	d.snapshotWorkerFinalWake = make(chan struct{}, 1)
-	d.snapshotFinalJobs = nil
+	d.snapshotFinalJobs = make(map[*session]*snapshotCapture)
+	d.snapshotFinalOrder = nil
 	d.snapshotWorkerClosing = false
 	d.snapshotWorkerInFlight = nil
 	done := d.snapshotWorkerDone
@@ -595,13 +627,17 @@ func (d *Daemon) startSnapshotEncodeWorker() {
 func (d *Daemon) takeFinalSnapshotCapture() *snapshotCapture {
 	d.snapshotWorkerMu.Lock()
 	defer d.snapshotWorkerMu.Unlock()
-	if len(d.snapshotFinalJobs) == 0 {
-		return nil
+	for len(d.snapshotFinalOrder) > 0 {
+		sess := d.snapshotFinalOrder[0]
+		d.snapshotFinalOrder[0] = nil
+		d.snapshotFinalOrder = d.snapshotFinalOrder[1:]
+		capture := d.snapshotFinalJobs[sess]
+		delete(d.snapshotFinalJobs, sess)
+		if capture != nil {
+			return capture
+		}
 	}
-	capture := d.snapshotFinalJobs[0]
-	d.snapshotFinalJobs[0] = nil
-	d.snapshotFinalJobs = d.snapshotFinalJobs[1:]
-	return capture
+	return nil
 }
 
 func (d *Daemon) setSnapshotWorkerInFlight(workerID uint64, capture *snapshotCapture) bool {
@@ -663,8 +699,11 @@ func (d *Daemon) finishStoppedSnapshotWorker(abandoned bool) {
 	d.snapshotWorkerClosing = false
 	d.snapshotWorkerInFlight = nil
 	queued := make([]*snapshotCapture, 0, len(d.snapshotJobs)+len(d.snapshotFinalJobs))
-	queued = append(queued, d.snapshotFinalJobs...)
+	for _, capture := range d.snapshotFinalJobs {
+		queued = append(queued, capture)
+	}
 	d.snapshotFinalJobs = nil
+	d.snapshotFinalOrder = nil
 	for {
 		select {
 		case capture := <-d.snapshotJobs:

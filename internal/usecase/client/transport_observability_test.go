@@ -3,6 +3,7 @@ package client_test
 import (
 	"bytes"
 	"context"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,14 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
 )
+
+func TestRuntimeObserverOptionRequiresSerializedContract(t *testing.T) {
+	got := reflect.TypeOf(client.WithRuntimeObserver).In(0)
+	want := reflect.TypeFor[ports.SerializedRuntimeObserver]()
+	if got != want {
+		t.Fatalf("WithRuntimeObserver accepts %v, want %v; raw blocking sinks must not enter the hot path", got, want)
+	}
+}
 
 func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	var out bytes.Buffer
@@ -32,6 +41,8 @@ func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	term.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
 
 	observer := &blockingClientRuntimeObserver{entered: make(chan struct{}), release: make(chan struct{})}
+	reporter := ports.NewSerializedRuntimeObserver(observer, 1)
+	defer reporter.Close()
 	acked := make(chan struct{})
 	transport := portsmocks.NewMockTransport(t)
 	transport.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
@@ -46,7 +57,7 @@ func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		result <- client.Attach(ctx, transport, term, realClock{}, ports.IntentEphemeral, "", client.WithRuntimeObserver(observer))
+		result <- client.Attach(ctx, transport, term, realClock{}, ports.IntentEphemeral, "", client.WithRuntimeObserver(reporter))
 	}()
 	awaitClientRuntime(t, observer.entered, "blocking observer")
 	awaitClientRuntime(t, flushed, "terminal flush")
@@ -71,6 +82,8 @@ func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	defer in.unblock()
 
 	observer := &clientRuntimeObserver{}
+	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	defer reporter.Close()
 	transport := portsmocks.NewMockTransport(t)
 	transport.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	unblock := scriptRecv(transport,
@@ -82,8 +95,9 @@ func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	transport.EXPECT().Send(isType(ports.MsgAck)).Return(nil).Maybe()
 	transport.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), transport, term, realClock{}, ports.IntentEphemeral, "", client.WithRuntimeObserver(observer))
+	err := client.Attach(context.Background(), transport, term, realClock{}, ports.IntentEphemeral, "", client.WithRuntimeObserver(reporter))
 	require.NoError(t, err)
+	reporter.Flush()
 	require.Equal(t, "unchanged-by-observer", out.String(), "observer must not alter terminal bytes")
 	require.Equal(t, int32(1), restores.Load())
 	// Carriage spans belong only to concrete adapters. The client owns the

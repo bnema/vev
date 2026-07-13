@@ -62,7 +62,8 @@ func TestDialContextPreservesOptions(t *testing.T) {
 	}
 	defer func() { _ = listener.Close() }()
 
-	observer := dialTestObserver{}
+	observer := ports.NewSerializedRuntimeObserver(dialTestObserver{}, 1)
+	defer observer.Close()
 	transport, err := DialContext(context.Background(), dir, WithRuntimeObserver(observer))
 	if err != nil {
 		t.Fatalf("DialContext: %v", err)

@@ -10,16 +10,6 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-// damageCaptureMode makes damage ownership explicit. Primary active-session
-// capture is destructive; picker preview observes the same VT state without
-// acknowledging it.
-type damageCaptureMode uint8
-
-const (
-	damageCapturePreview damageCaptureMode = iota
-	damageCaptureConsume
-)
-
 // capturedRenderState is the immutable hand-off from authoritative daemon
 // state to composition. Every field is a value or an owned bounded copy; the
 // composer must not retain or consult session, tab, pane, or overlay owners.
@@ -46,7 +36,7 @@ type damageReceipt struct {
 
 type capturedRenderState struct {
 	attachment         *attachedClient // identity only; never dereferenced by composition
-	attachmentEpoch    uint64
+	lease              *attachmentLease
 	reset              bool
 	layout             capturedTabLayout
 	panes              []capturedPaneRenderState
@@ -119,11 +109,11 @@ type capturedCursorInputs struct {
 // capturePaneRenderStateLocked copies only the visible rectangle required by
 // composition. It never copies scrollback/history and never lets the mutable
 // VT frame's Cells or row-offset slices escape pane.mu.
-func capturePaneRenderStateLocked(p *pane, visible domain.Rect, mode damageCaptureMode) capturedPaneRenderState {
-	return capturePaneRenderStateLockedInto(p, visible, mode, capturedPaneRenderState{})
+func capturePaneRenderStateLocked(p *pane, visible domain.Rect) capturedPaneRenderState {
+	return capturePaneRenderStateLockedInto(p, visible, capturedPaneRenderState{})
 }
 
-func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, _ damageCaptureMode, out capturedPaneRenderState) capturedPaneRenderState {
+func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, out capturedPaneRenderState) capturedPaneRenderState {
 	out.id, out.title, out.titleGeneration = p.id, p.displayTitleLocked(), p.title.generation
 	damage := p.screen.CaptureDamage()
 	out.damageGeneration = damage.Generation
@@ -176,12 +166,12 @@ func uncertainDamage(damage []renderer.Damage, width, height int) bool {
 	return false
 }
 
-// captureRenderState is the ownership boundary for a render transaction.
-// Callers hold attachment sendMu; this function then follows session -> tab ->
-// pane lock order. ACK-blocked primary capture returns before touching VT
-// damage. Preview mode is always non-destructive.
-func captureRenderState(sess *session, ac *attachedClient, bars barState, overlays capturedOverlayRenderState, preview picker.Preview, floatingCfg domain.FloatingConfig, reset bool, mode damageCaptureMode) (*capturedRenderState, bool) {
-	if sess == nil || ac == nil || (mode == damageCaptureConsume && ac.output != nil && ac.output.atCapacity()) {
+// capturePrimaryRenderState is the ownership boundary for a primary render
+// transaction. Callers hold attachment sendMu; this function then follows
+// session -> tab -> pane lock order. ACK-blocked capture returns before touching
+// VT damage, and every captured pane records a receipt for successful emission.
+func capturePrimaryRenderState(sess *session, ac *attachedClient, bars barState, overlays capturedOverlayRenderState, preview picker.Preview, floatingCfg domain.FloatingConfig, reset bool, lease *attachmentLease) (*capturedRenderState, bool) {
+	if sess == nil || ac == nil || (ac.output != nil && ac.output.atCapacity()) {
 		return nil, false
 	}
 	sess.mu.Lock()
@@ -190,7 +180,6 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 		return nil, false
 	}
 	tb := sess.tabs[sess.active]
-	epoch := ac.coordinatorEpoch.Load()
 	sess.mu.Unlock()
 
 	scratch := &ac.renderScratch
@@ -219,7 +208,7 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 	}
 	state := &scratch.state
 	*state = capturedRenderState{
-		attachment: ac, attachmentEpoch: epoch, reset: reset, bars: bars, theme: bars.theme,
+		attachment: ac, lease: lease, reset: reset, bars: bars, theme: bars.theme,
 		overlays: overlays, preview: preview,
 		layout:             capturedTabLayout{root: root, area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
 		floatingGeneration: tb.floating.generation,
@@ -240,10 +229,8 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 			visible = domain.Rect{}
 		}
 		p.mu.Lock()
-		captured := capturePaneRenderStateLockedInto(p, visible, mode, ac.captureFrames[p])
-		if mode == damageCaptureConsume {
-			state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
-		}
+		captured := capturePaneRenderStateLockedInto(p, visible, ac.captureFrames[p])
+		state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
 		captured.placement, captured.focused = placement, placement.ID == layoutSnap.focus
 		if captured.focused {
 			state.cursor = captureCursorInputsLocked(p, placement.Content, overlays)
@@ -262,18 +249,16 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 		p := tb.floating.pane
 		p.mu.Lock()
 		geometry := p.committedFloatingGeometryLocked(calculateContentFloatingGeometry(domain.Size{Cols: layoutSnap.area.Width, Rows: layoutSnap.area.Height}, floatingCfg))
-		captured := capturePaneRenderStateLockedInto(p, geometry.Inner, mode, ac.captureFrames[p])
-		if mode == damageCaptureConsume {
-			seen := false
-			for _, receipt := range state.receipts {
-				if receipt.pane == p {
-					seen = true
-					break
-				}
+		captured := capturePaneRenderStateLockedInto(p, geometry.Inner, ac.captureFrames[p])
+		seen := false
+		for _, receipt := range state.receipts {
+			if receipt.pane == p {
+				seen = true
+				break
 			}
-			if !seen {
-				state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
-			}
+		}
+		if !seen {
+			state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
 		}
 		ac.captureFrames[p] = captured
 		state.floating = capturedFloatingRenderState{visible: true, pane: captured, geometry: geometry, title: captured.title, generation: tb.floating.generation, titleGeneration: captured.titleGeneration}

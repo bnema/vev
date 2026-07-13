@@ -121,7 +121,7 @@ func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
 	client := vt.NewScreen(80, 25)
 	pane := sess.tabs[0].focusedPane()
 	pane.screen.Write([]byte("X"))
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
 	undimmed := client.Frame.At(0, 1)
 	topBar := client.Frame.At(0, 0)
@@ -322,6 +322,7 @@ func TestPTYReaderRestoresPrimaryScreenImmediatelyAfterDEC1049Exit(t *testing.T)
 			t.Cleanup(func() {
 				steps <- channelPTYStep{err: io.EOF}
 				d.sessWg.Wait()
+				d.waitNotifies()
 			})
 
 			replay := func(data []byte, deadline time.Duration) ports.Output {
@@ -466,7 +467,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		require.True(t, wake.urgent)
 		require.True(t, wake.reset, "the replacement's cleared batch must repaint a complete frame")
 		require.Equal(t, 2, wake.coalesced, "completion coalesces only with the replacement's fresh reset batch")
-		require.Same(t, replacement, wake.attachment)
+		require.Same(t, replacement, wake.lease.attachment)
 		select {
 		case duplicate := <-wakes:
 			t.Fatalf("sync completion must publish exactly one replacement wake: %#v", duplicate)
@@ -1036,7 +1037,7 @@ func TestOverlayPaintInvalidationShowsAndRestoresBaseFrame(t *testing.T) {
 		{
 			name:       "picker",
 			open:       func(d *Daemon, sess *session, ac *attachedClient) { d.enterPicker(sess, ac) },
-			close:      func(d *Daemon, sess *session, ac *attachedClient) { d.closePicker(ac); d.paint(sess, ac, true) },
+			close:      func(d *Daemon, sess *session, ac *attachedClient) { d.closePicker(ac); d.paint(sess, ac, true, nil) },
 			visible:    "Sessions",
 			notVisible: "Sessions",
 		},
@@ -1084,7 +1085,7 @@ func TestOverlayPaintBypassesComposedCache(t *testing.T) {
 	pane := sess.tabs[0].focusedPane()
 	pane.screen.Write([]byte("live"))
 
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	_ = mustOutputData(t, sends)
 	require.True(t, ac.pipelineCache.valid)
 	require.NotContains(t, frameText(ac.pipelineCache.frame), "Rename session")
@@ -1096,7 +1097,7 @@ func TestOverlayPaintBypassesComposedCache(t *testing.T) {
 	require.NotContains(t, frameText(ac.pipelineCache.frame), "Rename session")
 
 	d.closePrompt(ac)
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	restored := string(mustOutputData(t, sends))
 	require.NotContains(t, restored, "Rename session")
 	require.True(t, ac.pipelineCache.valid)
@@ -1235,7 +1236,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	d.resize(sess, ac, newSize)
 	// This test verifies resize ordering, not the idle fallback. Consume the
 	// pending resize paint deterministically under the non-firing stub clock.
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 
 	require.Equal(t, 80, screenWidthAtResize, "pty.Resize must run before screen.Resize")
 	require.Equal(t, 100, win.focusedPane().screen.Frame.Width, "screen resized after pty")
@@ -1266,7 +1267,7 @@ func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 	win.focusedPane().screen.Write([]byte("x"))
 	win.mu.Unlock()
 
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 
 	require.Equal(t, 1, sessionCount(d), "ephemeral session survives failed client send")
 	sess.mu.Lock()
@@ -1327,19 +1328,19 @@ func TestCursorTailVisibleHideAndMoveOnly(t *testing.T) {
 	win := sess.tabs[0]
 	win.focusedPane().screen.Write([]byte("A"))
 
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	data := mustOutputData(t, sends)
 	require.Contains(t, string(data), "\x1b[1 q")
 	require.Contains(t, string(data), "\x1b[?25h")
 
 	win.focusedPane().screen.Write([]byte("\x1b[2;3H"))
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	data = mustOutputData(t, sends)
 	require.Contains(t, string(data), "\x1b[3;3H")
 	require.Contains(t, string(data), "\x1b[?25h")
 
 	win.focusedPane().screen.Write([]byte("\x1b[?25l"))
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	data = mustOutputData(t, sends)
 	require.Contains(t, string(data), "\x1b[?25l")
 }
@@ -1356,7 +1357,7 @@ func TestPaintAlignsFloatingCursorWithCommittedGeometry(t *testing.T) {
 	floating.popupGeometry = committed
 	installTestFloating(sess.activeTab(), floating, true)
 
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	data := mustOutputData(t, sends)
 	want := committed.translate(contentArea.X, contentArea.Y)
 	require.Contains(t, string(data), cursorCSI(want.Inner.Y+1, 1))
@@ -1381,7 +1382,7 @@ func TestCursorTailUsesFocusedPanePlacement(t *testing.T) {
 	require.True(t, ok)
 	rightContent := placementContent(placements, right.id)
 
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	data := mustOutputData(t, sends)
 	want := cursorCSI(rightContent.Y+right.screen.CursorRow()+2, rightContent.X+right.screen.CursorCol()+1)
 	require.Contains(t, string(data), want)
@@ -1410,7 +1411,7 @@ func TestCursorTailUsesExpandedStackContentPlacement(t *testing.T) {
 	twoContent := placementContent(placements, two.id)
 	require.Greater(t, twoContent.Y, 0, "stack title bars should offset content")
 
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	data := mustOutputData(t, sends)
 	want := cursorCSI(twoContent.Y+two.screen.CursorRow()+2, twoContent.X+two.screen.CursorCol()+1)
 	require.Contains(t, string(data), want)

@@ -307,9 +307,16 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 	sess.mu.Lock()
 	owned := sess.client == ac
 	sess.mu.Unlock()
-	if !owned || state.attachment != ac || state.attachmentEpoch != ac.coordinatorEpoch.Load() || ac.currentSession() != sess {
+	if !owned || state.attachment != ac || ac.currentSession() != sess {
 		ac.sendMu.Unlock()
 		return false
+	}
+	if state.lease != nil {
+		rc := sess.renderCoordinator()
+		if rc == nil || state.lease.attachment != ac || !rc.leaseCurrent(state.lease, true) {
+			ac.sendMu.Unlock()
+			return false
+		}
 	}
 	ac.sess.mu.Lock()
 	if ac.sess.v != sess {

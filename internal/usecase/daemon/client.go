@@ -18,23 +18,22 @@ import (
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
 
+type transportSnapshot struct {
+	transport   ports.Transport
+	incarnation uint64
+}
+
 type attachedClient struct {
-	tr            ports.Transport
-	output        *outputStateStream
-	overlays      *overlayRuntime
-	overlayOnce   sync.Once
-	clientID      [16]byte
-	resumeCapable bool
-	resumeToken   uint64
-	parked        bool
-	// coordinatorEpoch is published atomically by renderCoordinator lifecycle
-	// transitions. A wake verifies it again after acquiring sendMu, so a parked
-	// attachment reused by resume cannot carry an old wake to its new transport.
-	coordinatorEpoch atomic.Uint64
-	// coordinatorReadyEpoch is non-zero only after Welcome completed for this
-	// exact coordinator incarnation. paint rechecks it under sendMu.
-	coordinatorReadyEpoch atomic.Uint64
-	echoAck               atomic.Uint64
+	tr                   ports.Transport
+	transportIncarnation uint64
+	output               *outputStateStream
+	overlays             *overlayRuntime
+	overlayOnce          sync.Once
+	clientID             [16]byte
+	resumeCapable        bool
+	resumeToken          uint64
+	parked               bool
+	echoAck              atomic.Uint64
 	// pipelineCache is the last successfully emitted composition. pipelineScratch
 	// is its attachment-owned alternate buffer; both are only touched under
 	// sendMu and must never share mutable backing storage.
@@ -171,7 +170,22 @@ func (ac *attachedClient) transport() ports.Transport {
 func (ac *attachedClient) replaceTransport(tr ports.Transport) {
 	ac.linkMu.Lock()
 	ac.tr = tr
+	ac.transportIncarnation++
 	ac.linkMu.Unlock()
+}
+
+// transportSnapshot binds a send to one concrete link lifetime. Callers must
+// revalidate it after acquiring sendMu before writing to that link.
+func (ac *attachedClient) transportSnapshot() transportSnapshot {
+	ac.linkMu.Lock()
+	defer ac.linkMu.Unlock()
+	return transportSnapshot{transport: ac.tr, incarnation: ac.transportIncarnation}
+}
+
+func (ac *attachedClient) transportSnapshotCurrent(expected transportSnapshot) bool {
+	ac.linkMu.Lock()
+	defer ac.linkMu.Unlock()
+	return ac.tr == expected.transport && ac.transportIncarnation == expected.incarnation
 }
 
 func (ac *attachedClient) closeTransport() error {
@@ -221,6 +235,22 @@ func (ac *attachedClient) sendTransport(f ports.Frame) (ports.Transport, error) 
 	return tr, tr.Send(f)
 }
 
+var errTransportReplaced = errors.New("client transport was replaced")
+
+// sendExpectedTransport writes only when expected is still the attachment's
+// current transport incarnation. It preserves sendMu -> linkMu lock ordering.
+func (ac *attachedClient) sendExpectedTransport(expected transportSnapshot, f ports.Frame) error {
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+	if !ac.transportSnapshotCurrent(expected) {
+		return errTransportReplaced
+	}
+	if expected.transport == nil {
+		return errors.New("client transport is nil")
+	}
+	return expected.transport.Send(f)
+}
+
 // boundedSend sends f to ac with a deadline watchdog: if the send (including
 // waiting on sendMu behind a wedged paint) does not complete within
 // detachNotifyTimeout, the transport is force-closed, failing the in-flight
@@ -231,10 +261,12 @@ func (d *Daemon) boundedSend(ac *attachedClient, f ports.Frame) {
 }
 
 func (d *Daemon) boundedSendErr(ac *attachedClient, f ports.Frame) error {
-	tr, err := d.boundedSendWith(func(capture func(ports.Transport)) error {
-		tr, err := ac.sendTransport(f)
-		capture(tr)
-		return err
+	expected := ac.transportSnapshot()
+	if expected.transport == nil {
+		return errors.New("client transport is nil")
+	}
+	tr, err := d.boundedSendWith(expected.transport, func() error {
+		return ac.sendExpectedTransport(expected, f)
 	})
 	if err != nil && errors.Is(err, errSendTimedOut) {
 		_ = ac.closeCapturedTransport(tr)
@@ -249,68 +281,50 @@ func (d *Daemon) boundedSendOutputErr(ac *attachedClient, b []byte) error {
 
 func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (ports.Transport, error) {
 	frame := ac.output.sideEffect(b, ac.echoAck.Load())
-	ac.sendMu.Lock()
-	tr := ac.transport()
-	if tr == nil {
-		ac.sendMu.Unlock()
+	expected := ac.transportSnapshot()
+	if expected.transport == nil {
 		return nil, errors.New("client transport is nil")
 	}
-	if owned, ok := tr.(ports.OwnedSynchronousTransport); ok {
+	ac.sendMu.Lock()
+	if !ac.transportSnapshotCurrent(expected) {
+		ac.sendMu.Unlock()
+		return expected.transport, errTransportReplaced
+	}
+	if owned, ok := expected.transport.(ports.OwnedSynchronousTransport); ok {
 		err := owned.SendSynchronous(frame)
 		ac.sendMu.Unlock()
-		return tr, err
+		return expected.transport, err
 	}
 	ac.sendMu.Unlock()
-	return d.boundedSendWith(func(capture func(ports.Transport)) error {
-		ac.sendMu.Lock()
-		defer ac.sendMu.Unlock()
-		tr := ac.transport()
-		capture(tr)
-		if tr == nil {
-			return errors.New("client transport is nil")
-		}
-		return tr.Send(frame)
+	return d.boundedSendWith(expected.transport, func() error {
+		return ac.sendExpectedTransport(expected, frame)
 	})
 }
 
 var errSendTimedOut = errors.New("send timed out")
 
-func (d *Daemon) boundedSendWith(send func(capture func(ports.Transport)) error) (ports.Transport, error) {
-	return d.boundedSendWithTimeout(detachNotifyTimeout, send)
+func (d *Daemon) boundedSendWith(tr ports.Transport, send func() error) (ports.Transport, error) {
+	return d.boundedSendWithTimeout(detachNotifyTimeout, tr, send)
 }
 
-func (d *Daemon) boundedSendWithTimeout(timeout time.Duration, send func(capture func(ports.Transport)) error) (ports.Transport, error) {
+func (d *Daemon) boundedSendWithTimeout(timeout time.Duration, tr ports.Transport, send func() error) (ports.Transport, error) {
 	timer := d.clock.NewTimer(timeout)
 	result := make(chan error, 1)
-	var (
-		capturedMu sync.Mutex
-		captured   ports.Transport
-	)
-	capture := func(tr ports.Transport) {
-		capturedMu.Lock()
-		captured = tr
-		capturedMu.Unlock()
-	}
-	capturedTransport := func() ports.Transport {
-		capturedMu.Lock()
-		defer capturedMu.Unlock()
-		return captured
-	}
 	go func() {
-		result <- send(capture)
+		result <- send()
 	}()
 	select {
 	case err := <-result:
 		timer.Stop()
-		return capturedTransport(), err
+		return tr, err
 	case <-timer.C():
 		select {
 		case err := <-result:
-			return capturedTransport(), err
+			return tr, err
 		default:
 		}
 		d.log.Warn("bounded send timed out; force closing client transport")
-		return capturedTransport(), errSendTimedOut
+		return tr, errSendTimedOut
 	}
 }
 
@@ -367,6 +381,12 @@ type attachClientOptions struct {
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, *attachedClient) {
+	ac, old, cleanup := d.attachClientDeferred(sess, tr, sz, opts)
+	cleanup.finish()
+	return ac, old
+}
+
+func (d *Daemon) attachClientDeferred(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, *attachedClient, renderLifecycleCleanup) {
 	resumeToken := uint64(0)
 	if opts.resumeCapable {
 		resumeToken = d.nextResumeTokenLocked()
@@ -389,22 +409,23 @@ func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size,
 	old := sess.client
 	name := sess.name
 	sess.mu.Unlock()
-	d.attachCoordinator(sess, old, ac, false)
+	_, cleanup := d.attachCoordinatorDeferred(sess, old, ac, false)
 	sess.mu.Lock()
 	sess.client = ac
 	sess.mu.Unlock()
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", name, "resume", opts.resumeCapable)
 	d.applyHostTheme(sess, ac, d.effectiveTheme(themeui.Theme{}), true)
-	return ac, old
+	return ac, old, cleanup
 }
 
 // handoffCoordinator prepares a cross-session ownership transfer before the
 // destination publishes sess.client. It never takes daemon/session locks while
 // taking sendMu, avoiding a d.mu/sendMu cycle with transport callbacks.
-func (d *Daemon) handoffCoordinator(from, target *session, old, current *attachedClient) {
+func (d *Daemon) handoffCoordinator(from, target *session, old, current *attachedClient) []renderLifecycleCleanup {
+	cleanups := make([]renderLifecycleCleanup, 0, 2)
 	if rc := from.renderCoordinator(); rc != nil {
-		rc.noteDetach(current)
+		cleanups = append(cleanups, rc.beginDetach(current))
 	}
 	current.sendMu.Lock()
 	current.output.rebase()
@@ -413,13 +434,26 @@ func (d *Daemon) handoffCoordinator(from, target *session, old, current *attache
 	// from the target session.
 	current.captureFrames = nil
 	current.sendMu.Unlock()
-	d.attachCoordinator(target, old, current, true)
+	_, cleanup := d.attachCoordinatorDeferred(target, old, current, true)
+	return append(cleanups, cleanup)
+}
+
+func finishRenderLifecycleCleanups(cleanups []renderLifecycleCleanup) {
+	for _, cleanup := range cleanups {
+		cleanup.finish()
+	}
 }
 
 // attachCoordinator is the sole direct attachment handoff. It creates at
 // most one coordinator for sess and changes its identity before any caller
 // can publish resize or render state for the new client.
 func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient, ready bool) *renderCoordinator {
+	rc, cleanup := d.attachCoordinatorDeferred(sess, old, current, ready)
+	cleanup.finish()
+	return rc
+}
+
+func (d *Daemon) attachCoordinatorDeferred(sess *session, old, current *attachedClient, ready bool) (*renderCoordinator, renderLifecycleCleanup) {
 	sess.mu.Lock()
 	rc := sess.renderCoordinator()
 	if rc == nil {
@@ -431,8 +465,8 @@ func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient, 
 				// attachment and its coordinator incarnation. The second check in
 				// paint occurs under sendMu, closing a park/resume race after this
 				// unlocked coordinator validation.
-				if w.attachment != nil && rc.wakeCurrent(w) {
-					d.paint(sess, w.attachment, w.reset, w.attachmentEpoch)
+				if w.lease != nil && rc.wakeCurrent(w) {
+					d.paint(sess, w.lease.attachment, w.reset, w.lease)
 				}
 			},
 			ackReady: func() bool {
@@ -451,12 +485,13 @@ func (d *Daemon) attachCoordinator(sess *session, old, current *attachedClient, 
 		sess.installRenderCoordinator(rc)
 	}
 	sess.mu.Unlock()
+	var cleanup renderLifecycleCleanup
 	if old != nil {
-		rc.noteReplace(old, current, ready)
+		cleanup = rc.beginReplace(old, current, ready)
 	} else if current != nil {
 		rc.attachWithReadiness(current, ready)
 	}
-	return rc
+	return rc, cleanup
 }
 
 // resetScreenDefaultColors clears the known default foreground/background

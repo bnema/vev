@@ -97,7 +97,7 @@ func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	source.mu.Lock()
 	source.screen.Write([]byte("source"))
 	source.mu.Unlock()
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	first := <-sends
 	firstOutput, err := ports.UnmarshalOutput(first.Payload)
 	require.NoError(t, err)
@@ -185,7 +185,7 @@ func TestAltFToggleRetainedFloatingPaneRepaintsImmediately(t *testing.T) {
 	installTestFloating(sess.activeTab(), floating, false)
 
 	// Establish the client shadow while the retained popup is hidden.
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
 
 	// Route the real Alt+F binding. Showing a retained pane must paint once.

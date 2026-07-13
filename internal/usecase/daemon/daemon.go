@@ -22,9 +22,8 @@ import (
 // Scheduler debounce bounds. Idle updates use the minimum for low latency;
 // sustained floods step toward the maximum to reduce frame/syscall pressure.
 const (
-	minDebounceInterval       = 2 * time.Millisecond
-	maxSyncUpdateDuration     = 500 * time.Millisecond
-	runtimeObserverQueueDepth = 64
+	minDebounceInterval   = 2 * time.Millisecond
+	maxSyncUpdateDuration = 500 * time.Millisecond
 )
 
 const debounceInterval = minDebounceInterval
@@ -92,33 +91,31 @@ type Daemon struct {
 	// beforeRecentSessionHandoff is a deterministic test seam for the narrow
 	// interval between JRS validation and its committed hand-off.
 	beforeRecentSessionHandoff func()
-
-	ptys                     ports.PTYFactory
-	clock                    ports.Clock
-	log                      *slog.Logger
-	runtimeObserver          ports.RuntimeObserver
-	runtimeObserverCloser    ports.SerializedRuntimeObserver
-	runtimeObserverCloseOnce sync.Once
-	baseEnv                  []string
-	shell                    string
-	shellArgs                []string
-	persist                  *persist.Persister
-	persistEnabled           bool
-	snaps                    ports.SnapshotStore
-	snapsEnabled             bool
-	snapshotMarshal          func(snapcodec.Session) ([]byte, error)
-	snapshotJobs             chan *snapshotCapture
-	snapshotWorkerMu         sync.Mutex
-	snapshotWorkerID         uint64
-	snapshotWorkerCtx        context.Context
-	snapshotWorkerCancel     context.CancelFunc
-	snapshotWorkerDone       chan struct{}
-	snapshotWorkerFlush      chan struct{}
-	snapshotWorkerFinalWake  chan struct{}
-	// snapshotFinalJobs retains immutable terminal captures rejected by the
-	// bounded regular queue. It is only populated during session teardown and
-	// drained by the same worker, so persistence remains outside daemon locks.
-	snapshotFinalJobs       []*snapshotCapture
+	ptys                       ports.PTYFactory
+	clock                      ports.Clock
+	log                        *slog.Logger
+	runtimeObserver            ports.RuntimeObserver
+	baseEnv                    []string
+	shell                      string
+	shellArgs                  []string
+	persist                    *persist.Persister
+	persistEnabled             bool
+	snaps                      ports.SnapshotStore
+	snapsEnabled               bool
+	snapshotMarshal            func(snapcodec.Session) ([]byte, error)
+	snapshotJobs               chan *snapshotCapture
+	snapshotWorkerMu           sync.Mutex
+	snapshotWorkerID           uint64
+	snapshotWorkerCtx          context.Context
+	snapshotWorkerCancel       context.CancelFunc
+	snapshotWorkerDone         chan struct{}
+	snapshotWorkerFlush        chan struct{}
+	snapshotWorkerFinalWake    chan struct{}
+	// snapshotFinalJobs coalesces terminal captures by session when the bounded
+	// regular queue is full. It retains at most snapshotFinalQueueCapacity named
+	// sessions, each with only its newest terminal state while the worker blocks.
+	snapshotFinalJobs       map[*session]*snapshotCapture
+	snapshotFinalOrder      []*session
 	snapshotWorkerClosing   bool
 	snapshotWorkerInFlight  *snapshotCapture
 	restoreDone             chan struct{}
@@ -187,37 +184,11 @@ func (s stoppedSession) same(other stoppedSession) bool {
 
 type Option func(*Daemon)
 
-// WithRuntimeObserver enables opt-in process-local marks. It takes no clock:
-// the concrete observer is the sole timestamp owner.
-func WithRuntimeObserver(observer ports.RuntimeObserver) Option {
-	return func(d *Daemon) {
-		// Options are applied before the daemon starts. Replacing an owned
-		// observer here cannot race producers and must retire its worker.
-		if d.runtimeObserverCloser != nil {
-			d.runtimeObserverCloser.Close()
-			d.runtimeObserverCloser = nil
-		}
-		reporter, owned := ports.EnsureSerializedRuntimeObserver(observer, runtimeObserverQueueDepth)
-		d.runtimeObserver = reporter
-		if owned {
-			d.runtimeObserverCloser = reporter
-		}
-	}
-}
-
-// closeRuntimeObserver drains the daemon-owned reporter before teardown
-// completes. Application-owned process reporters are closed by their app
-// lifecycle instead, so shared observers never receive a duplicate close.
-func (d *Daemon) closeRuntimeObserver() {
-	if d == nil {
-		return
-	}
-	d.runtimeObserverCloseOnce.Do(func() {
-		if d.runtimeObserverCloser != nil {
-			d.runtimeObserverCloser.Flush()
-			d.runtimeObserverCloser.Close()
-		}
-	})
+// WithRuntimeObserver accepts only a composition-root serialized observer.
+// The application owns its lifecycle; the daemon never creates or closes a
+// second reporting worker around it.
+func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
+	return func(d *Daemon) { d.runtimeObserver = observer }
 }
 
 // WithShell overrides the command (and its args) each session spawns. The
@@ -393,7 +364,6 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 // returns when the last session is removed or ctx is cancelled; on the latter
 // path attached clients are detached with ReasonServerShutdown.
 func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
-	defer d.closeRuntimeObserver()
 	d.serveCtx, d.serveCancel = context.WithCancel(ctx)
 	defer d.serveCancel()
 	d.hardCtx, d.hardCancel = context.WithCancel(context.Background())
@@ -493,7 +463,9 @@ func (d *Daemon) shutdownAll(reason uint8) {
 		return
 	}
 	for _, s := range snapshot {
-		_ = d.killSession(s, reason, false)
+		if err := d.killSession(s, reason, false); err != nil {
+			d.log.Error("closing session with unpersisted terminal state", "err", err)
+		}
 	}
 }
 
@@ -654,11 +626,21 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 		return
 	}
 
-	if err := ac.send(frameWelcome(sess, ac)); err != nil {
+	rc := sess.renderCoordinator()
+	lease := (*attachmentLease)(nil)
+	if rc != nil {
+		lease = rc.attachmentLease(ac)
+	}
+	expected := ac.transportSnapshot()
+	if lease == nil || expected.transport != tr {
 		d.clientGone(sess, ac, tr, false)
 		return
 	}
-	if rc := sess.renderCoordinator(); rc == nil || !rc.markAttachmentReady(ac) {
+	if err := ac.sendExpectedTransport(expected, frameWelcome(sess, ac)); err != nil {
+		d.clientGone(sess, ac, tr, false)
+		return
+	}
+	if !rc.markAttachmentReady(lease) {
 		// The attachment was displaced or detached while Welcome was in flight;
 		// never let this stale handshake emit an Output frame.
 		d.clientGone(sess, ac, tr, false)
@@ -676,6 +658,24 @@ type protoErr struct {
 }
 
 func (e *protoErr) Error() string { return e.text }
+
+// finishAttach completes an attachment prepared while d.mu is held. It
+// publishes the terminal state before releasing d.mu, then performs worker
+// joins and replacement teardown without the daemon lock.
+func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, term terminalEnv, h ports.Hello) *attachedClient {
+	ac, old, cleanup := d.attachClientDeferred(sess, tr, sz, attachClientOptions{
+		clientID:          h.ClientID,
+		resumeCapable:     true,
+		maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight),
+	})
+	sess.mu.Lock()
+	sess.terminal = term
+	sess.mu.Unlock()
+	d.mu.Unlock()
+	cleanup.finish()
+	d.detachReplacedClient(old)
+	return ac
+}
 
 // route resolves a Hello to a session and a freshly attached client, creating
 // the session for ephemeral/new intents.
@@ -727,13 +727,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
-		sess.mu.Lock()
-		sess.terminal = term
-		sess.mu.Unlock()
-		d.mu.Unlock()
-		d.detachReplacedClient(old)
-		return sess, ac, nil
+		return sess, d.finishAttach(sess, tr, sz, term, h), nil
 
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
@@ -743,13 +737,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
-		sess.mu.Lock()
-		sess.terminal = term
-		sess.mu.Unlock()
-		d.mu.Unlock()
-		d.detachReplacedClient(old)
-		return sess, ac, nil
+		return sess, d.finishAttach(sess, tr, sz, term, h), nil
 
 	case ports.IntentNew:
 		if h.Name == "" {
@@ -770,13 +758,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
-		sess.mu.Lock()
-		sess.terminal = term
-		sess.mu.Unlock()
-		d.mu.Unlock()
-		d.detachReplacedClient(old)
-		return sess, ac, nil
+		return sess, d.finishAttach(sess, tr, sz, term, h), nil
 
 	case ports.IntentAttach:
 		sess := d.findByNameLocked(h.Name)
@@ -795,13 +777,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
-		sess.mu.Lock()
-		sess.terminal = term
-		sess.mu.Unlock()
-		d.mu.Unlock()
-		d.detachReplacedClient(old)
-		return sess, ac, nil
+		return sess, d.finishAttach(sess, tr, sz, term, h), nil
 
 	default:
 		d.mu.Unlock()

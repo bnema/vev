@@ -402,7 +402,7 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 
 	// Do not expose targetSess.client until the target coordinator has claimed
 	// this attachment and the output dependency chain has been rebased.
-	d.handoffCoordinator(from, targetSess, old, ac)
+	cleanups := d.handoffCoordinator(from, targetSess, old, ac)
 	ac.setSession(targetSess)
 	targetSess.mu.Lock()
 	targetSess.client = ac
@@ -410,6 +410,7 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 	d.touchMRU(targetSess)
 	ac.recordPreviousSession(from)
 	d.mu.Unlock()
+	finishRenderLifecycleCleanups(cleanups)
 	return old
 }
 
@@ -441,7 +442,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	ac.setSession(nil)
 	from.mu.Unlock()
 
-	d.handoffCoordinator(from, targetSess, nil, ac)
+	cleanups := d.handoffCoordinator(from, targetSess, nil, ac)
 	ac.setSession(targetSess)
 	targetSess.mu.Lock()
 	targetSess.client = ac
@@ -449,6 +450,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	d.touchMRU(targetSess)
 	ac.recordPreviousSession(from)
 	d.mu.Unlock()
+	finishRenderLifecycleCleanups(cleanups)
 	d.firstPaint(targetSess, ac, ac.size)
 	return true
 }
@@ -523,7 +525,7 @@ func snapshotPickerPreview(tb *tab) picker.Preview {
 			visible = domain.Rect{}
 		}
 		p.mu.Lock()
-		captured := capturePaneRenderStateLocked(p, visible, damageCapturePreview)
+		captured := capturePaneRenderStateLocked(p, visible)
 		p.mu.Unlock()
 		captured.placement = placement
 		captured.focused = placement.ID == layoutSnap.focus

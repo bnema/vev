@@ -80,6 +80,62 @@ func TestNamedLinkLossParks(t *testing.T) {
 	require.True(t, parked, "named resume-capable link loss is parked")
 }
 
+func TestBoundedSendTimeoutCannotTargetResumedTransport(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	oldTransport := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "bounded-send-resume", 0), oldTransport)
+	require.NoError(t, err)
+	token := ac.resumeToken
+	d.clientGone(sess, ac, oldTransport, false)
+
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d.clock = clock
+	ac.sendMu.Lock()
+	expected := ac.transportSnapshot()
+	orphanDone := make(chan struct{})
+	type boundedResult struct {
+		transport ports.Transport
+		err       error
+	}
+	result := make(chan boundedResult, 1)
+	go func() {
+		transport, sendErr := d.boundedSendWithTimeout(time.Second, expected.transport, func() error {
+			defer close(orphanDone)
+			return ac.sendExpectedTransport(expected, frameDetached(ports.ReasonDetach))
+		})
+		result <- boundedResult{transport: transport, err: sendErr}
+	}()
+
+	// The worker is parked behind sendMu, so it has not observed a transport.
+	// Expire its deadline before resuming this same attachment with a new link.
+	timer := <-clock.timers
+	timer.ch <- time.Time{}
+	got := <-result
+	require.ErrorIs(t, got.err, errSendTimedOut)
+	require.Same(t, oldTransport, got.transport)
+	require.NoError(t, ac.closeCapturedTransport(got.transport))
+
+	newTransport := &closeTrackingTransport{}
+	d.mu.Lock()
+	resumedSess, resumedAC, ok, err := d.resumeParkedLocked(
+		helloResumeCapable(ports.IntentResume, sess.name, token),
+		newTransport,
+		domain.Size{Cols: 80, Rows: 24},
+	)
+	d.mu.Unlock()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Same(t, sess, resumedSess)
+	require.Same(t, ac, resumedAC)
+
+	ac.sendMu.Unlock()
+	<-orphanDone
+	require.Empty(t, newTransport.Sends(), "orphaned send must not write to the resumed transport")
+	require.False(t, newTransport.Closed(), "orphaned send must not close the resumed transport")
+}
+
 func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
@@ -279,7 +335,7 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, "work", token), newTr)
 	require.NoError(t, err)
 	require.Same(t, ac, resumedAC)
-	require.True(t, resumedSess.renderCoordinator().markAttachmentReady(resumedAC))
+	require.True(t, resumedSess.renderCoordinator().markAttachmentReady(resumedSess.renderCoordinator().attachmentLease(resumedAC)))
 	d.firstPaint(resumedSess, resumedAC, resumedAC.size)
 
 	sends := newTr.Sends()
@@ -291,7 +347,7 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 	resumedAC.ackOutputState(first.NewStateNum)
 
 	resumedSess.tabs[0].focusedPane().screen.Write([]byte("A"))
-	d.paint(resumedSess, resumedAC, false)
+	d.paint(resumedSess, resumedAC, false, nil)
 	sends = newTr.Sends()
 	require.Len(t, sends, 2)
 	second, err := ports.UnmarshalOutput(sends[1].Payload)
@@ -317,7 +373,7 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	tb.mu.Unlock()
 	survivor.screen.Write([]byte("survivor"))
 	closed.screen.Write([]byte("closed"))
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 
 	ac.sendMu.Lock()
 	require.Contains(t, ac.captureFrames, closed, "fixture must render and capture the pane before parking")
@@ -338,7 +394,7 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, sess, resumedSess)
 	require.Same(t, ac, resumedAC)
-	require.True(t, resumedSess.renderCoordinator().markAttachmentReady(resumedAC))
+	require.True(t, resumedSess.renderCoordinator().markAttachmentReady(resumedSess.renderCoordinator().attachmentLease(resumedAC)))
 	d.firstPaint(resumedSess, resumedAC, resumedAC.size)
 
 	sends := newTransport.Sends()

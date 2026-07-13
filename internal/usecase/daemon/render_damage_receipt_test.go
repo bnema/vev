@@ -10,6 +10,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPrimaryCaptureAloneRecordsDamageReceipts(t *testing.T) {
+	_, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+	p := sess.tabs[0].focusedPane()
+	p.mu.Lock()
+	p.screen.ClearDamage()
+	p.screen.Write([]byte("preview-safe"))
+	p.mu.Unlock()
+
+	preview := snapshotPickerPreview(sess.tabs[0])
+	require.NotEmpty(t, preview.Rows)
+	require.Empty(t, ac.renderScratch.receipts, "picker preview must not create primary damage receipts")
+	p.mu.Lock()
+	require.NotEmpty(t, p.screen.Damage(), "picker preview must not acknowledge VT damage")
+	p.mu.Unlock()
+
+	ac.sendMu.Lock()
+	state, ok := capturePrimaryRenderState(sess, ac, barState{}, capturedOverlayRenderState{}, pickerPreviewEmpty(), domain.FloatingConfig{}, false, nil)
+	ac.sendMu.Unlock()
+	require.True(t, ok)
+	require.Len(t, state.receipts, 1)
+	require.Same(t, p, state.receipts[0].pane, "the primary transaction owns the pane receipt")
+	p.mu.Lock()
+	require.NotEmpty(t, p.screen.Damage(), "primary capture remains non-destructive until emission commits")
+	p.mu.Unlock()
+}
+
 // These are deliberately end-to-end pipeline tests: the pending damage comes
 // from a real pane VT Write, not a hand-built FullRedraw.
 func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T) {
@@ -44,7 +70,7 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 			p := sess.tabs[0].focusedPane()
 
 			// Prime both the renderer shadow and the committed capture cache.
-			d.paint(sess, ac, true)
+			d.paint(sess, ac, true, nil)
 			<-sends
 			p.mu.Lock()
 			p.screen.Write([]byte("\x1b[1;1Hchanged"))
@@ -74,7 +100,7 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 
 func TestRenderDamageReceiptStaleGenerationForcesFullRedraw(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	<-sends
 	p := sess.tabs[0].focusedPane()
 	p.mu.Lock()
@@ -94,7 +120,7 @@ func TestRenderDamageReceiptStaleGenerationForcesFullRedraw(t *testing.T) {
 func captureComposeForReceiptTest(t *testing.T, sess *session, ac *attachedClient) (*capturedRenderState, composedRenderFrame) {
 	t.Helper()
 	ac.sendMu.Lock() // emitFrame releases the transaction lock.
-	state, ok := captureRenderState(sess, ac, barState{}, capturedOverlayRenderState{}, pickerPreviewEmpty(), domain.FloatingConfig{}, false, damageCaptureConsume)
+	state, ok := capturePrimaryRenderState(sess, ac, barState{}, capturedOverlayRenderState{}, pickerPreviewEmpty(), domain.FloatingConfig{}, false, nil)
 	require.True(t, ok)
 	return state, composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
 }

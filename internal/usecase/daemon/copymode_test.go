@@ -358,7 +358,7 @@ func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 		t.Fatalf("live repaint = %q, want live screen", string(liveMsg.Data))
 	}
 
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	followup := awaitFrame(t, sends, ports.MsgOutput)
 	followupMsg, err := ports.UnmarshalOutput(followup.Payload)
 	require.NoError(t, err)
@@ -698,7 +698,7 @@ func TestCopyModeEnterExitConcurrentWithPaintRace(t *testing.T) {
 			d.handleInput(sess, ac, []byte("q"))
 		})
 		wg.Go(func() {
-			d.paint(sess, ac, true)
+			d.paint(sess, ac, true, nil)
 		})
 	}
 	wg.Wait()
