@@ -242,9 +242,11 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, epoch uin
 	}
 }
 
-func (d *Daemon) requestTransactionalResize(sess *session, ac *attachedClient, size domain.Size, immediate bool) {
+// requestTransactionalResize reports whether the coordinator accepted the
+// request. Immediate requests complete synchronously before it returns.
+func (d *Daemon) requestTransactionalResize(sess *session, ac *attachedClient, size domain.Size, immediate bool) bool {
 	if sess == nil || !size.Valid() {
-		return
+		return false
 	}
 	if ac == nil {
 		// Headless geometry has no coordinator/transport to coalesce, but keeps
@@ -252,15 +254,16 @@ func (d *Daemon) requestTransactionalResize(sess *session, ac *attachedClient, s
 		plan := d.prepareResize(sess, size)
 		d.applyResize(&plan)
 		d.commitResize(sess, nil, plan)
-		return
+		return true
 	}
 	rc := d.attachCoordinator(sess, nil, ac, true)
 	if immediate {
 		epoch := rc.recordResizeRequest(size, ac)
-		if epoch != 0 {
-			d.runResizeTransaction(sess, ac, epoch)
+		if epoch == 0 {
+			return false
 		}
-		return
+		d.runResizeTransaction(sess, ac, epoch)
+		return true
 	}
-	rc.scheduleResize(size, ac, func(epoch uint64) { d.runResizeTransaction(sess, ac, epoch) })
+	return rc.scheduleResize(size, ac, func(epoch uint64) { d.runResizeTransaction(sess, ac, epoch) }) != 0
 }

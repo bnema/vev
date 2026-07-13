@@ -55,6 +55,43 @@ func TestPaletteBackdropDimsSimultaneousCopyMode(t *testing.T) {
 	require.True(t, paletteVisible, "palette must remain composed above copy mode")
 }
 
+func TestFirstPaintRetainedFloatingPaneEmitsOneReset(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		clientSize domain.Size
+	}{
+		{name: "matching outer size", clientSize: domain.Size{Cols: 80, Rows: 25}},
+		{name: "different outer size", clientSize: domain.Size{Cols: 100, Rows: 40}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pty, releasePTY := newBlockingPTY(t)
+			defer releasePTY()
+			d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
+			ac.sendMu.Lock()
+			ac.size = tc.clientSize
+			ac.sendMu.Unlock()
+
+			// A retained visible popup still needs activation warmup. When the
+			// outer terminal also changes, its completed transaction must cover
+			// that popup rather than emitting a second reset-producing frame.
+			floating := newPane(layout.PaneID("floating"), nil, domain.Size{Cols: 20, Rows: 8})
+			installTestFloating(sess.activeTab(), floating, true)
+
+			d.firstPaint(sess, ac, tc.clientSize)
+
+			frame := awaitFrame(t, sends, ports.MsgOutput)
+			output, err := ports.UnmarshalOutput(frame.Payload)
+			require.NoError(t, err)
+			require.Zero(t, output.BaseStateNum, "first paint must be a mandatory reset")
+			select {
+			case extra := <-sends:
+				t.Fatalf("first paint emitted duplicate frame after floating activation resize: %#v", extra)
+			default:
+			}
+		})
+	}
+}
+
 func TestPaletteBackdropKeepsSimultaneousPickerCrisp(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()

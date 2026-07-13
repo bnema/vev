@@ -1558,4 +1558,15 @@ func TestRenderCoordinatorResizeEpochDispatch(t *testing.T) {
 		requireNoInvalidation(t, invs)
 		requireNoCoordinatorOutputFrame(t, sends)
 	})
+
+	t.Run("async request reports coordinator schedule acceptance", func(t *testing.T) {
+		d, sess, ac, _, clk, _ := newResizeFixture(t)
+
+		require.True(t, d.requestTransactionalResize(sess, ac, domain.Size{Cols: 120, Rows: 24}, false))
+		awaitCoordinatorScheduledTimer(t, clk)
+
+		// A torn-down coordinator cannot accept a stale attachment's schedule.
+		sess.renderCoordinator().noteSessionTeardown()
+		require.False(t, d.requestTransactionalResize(sess, ac, domain.Size{Cols: 140, Rows: 30}, false))
+	})
 }

@@ -499,16 +499,16 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 	wsz := tb.size
 	tb.mu.Unlock()
 
-	resized := clientSize.Valid() && wsz != tabSize(clientSize)
-	if resized {
-		d.resizeForFirstPaint(sess, ac, clientSize)
+	outerResizeAccepted := false
+	if clientSize.Valid() && wsz != tabSize(clientSize) {
+		outerResizeAccepted = d.resizeForFirstPaint(sess, ac, clientSize)
 	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
-	// Activation can synchronously resize a retained floating pane through the
-	// same transaction. A resize already emitted the mandatory reset, so avoid
-	// queuing a second source-session frame that could outlive a hand-off.
-	d.activateTab(sess, tb)
-	if !resized {
+	// Activation can synchronously resize a retained floating pane. An accepted
+	// synchronous outer request already includes that pane and emits the reset,
+	// but activation still performs its warmup work.
+	activationResized := d.activateTabAfterResize(sess, tb, outerResizeAccepted)
+	if !outerResizeAccepted && !activationResized {
 		d.invalidateRenderNow(sess, ac, true, "client.go")
 	}
 }
@@ -646,9 +646,9 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 }
 
 // resizeForFirstPaint retains attach's synchronous geometry guarantee. The
-// firstPaint caller emits its full frame immediately after this commit.
-func (d *Daemon) resizeForFirstPaint(sess *session, ac *attachedClient, sz domain.Size) {
-	d.requestTransactionalResize(sess, ac, sz, true)
+// returned value reports whether the synchronous request was accepted.
+func (d *Daemon) resizeForFirstPaint(sess *session, ac *attachedClient, sz domain.Size) bool {
+	return d.requestTransactionalResize(sess, ac, sz, true)
 }
 
 // detachOnSendError drops a client whose transport failed, leaving the session
