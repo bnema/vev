@@ -128,6 +128,9 @@ func (c *renderCoordinator) scheduleResizeRetryForLease(epoch uint64, source *at
 	c.mu.Unlock()
 	stopAndJoinTimerWorker(old, nil)
 	if clock == nil {
+		c.mu.Lock()
+		c.retryTimerOwner().completeLocked(gen)
+		c.mu.Unlock()
 		if c.retryCurrentForLease(epoch, source, lease) {
 			run()
 		}
@@ -139,6 +142,9 @@ func (c *renderCoordinator) scheduleResizeRetryForLease(epoch uint64, source *at
 		// A nil timer channel is the deterministic disabled-clock contract used
 		// by headless tests; do not spin retries synchronously.
 		stopTimer(timer)
+		c.mu.Lock()
+		c.retryTimerOwner().completeLocked(gen)
+		c.mu.Unlock()
 		return
 	}
 	c.mu.Lock()

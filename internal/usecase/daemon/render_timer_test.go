@@ -19,7 +19,7 @@ func TestTimerOwnershipRejectsStaleTicketsAndCancelsWorkers(t *testing.T) {
 
 	ticket, stopped := owner.replaceLocked()
 	require.Nil(t, stopped.timer)
-	first := &portsmocks.MockTimer{}
+	first := portsmocks.NewMockTimer(t)
 	first.EXPECT().Stop().Return(true).Once()
 	firstCancel, firstDone, ok := owner.publishLocked(ticket, first)
 	require.True(t, ok)
@@ -32,7 +32,7 @@ func TestTimerOwnershipRejectsStaleTicketsAndCancelsWorkers(t *testing.T) {
 	require.Same(t, first, stopped.timer)
 	stopAndJoinTimerWorker(stopped, nil)
 
-	_, _, ok = owner.publishLocked(ticket, &portsmocks.MockTimer{})
+	_, _, ok = owner.publishLocked(ticket, portsmocks.NewMockTimer(t))
 	require.False(t, ok, "a stale generation must not reclaim a replacement lane")
 
 	require.True(t, owner.completeLocked(generation))

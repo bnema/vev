@@ -659,6 +659,24 @@ type protoErr struct {
 
 func (e *protoErr) Error() string { return e.text }
 
+// finishAttach completes an attachment prepared while d.mu is held. It
+// publishes the terminal state before releasing d.mu, then performs worker
+// joins and replacement teardown without the daemon lock.
+func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, term terminalEnv, h ports.Hello) *attachedClient {
+	ac, old, cleanup := d.attachClientDeferred(sess, tr, sz, attachClientOptions{
+		clientID:          h.ClientID,
+		resumeCapable:     true,
+		maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight),
+	})
+	sess.mu.Lock()
+	sess.terminal = term
+	sess.mu.Unlock()
+	d.mu.Unlock()
+	cleanup.finish()
+	d.detachReplacedClient(old)
+	return ac
+}
+
 // route resolves a Hello to a session and a freshly attached client, creating
 // the session for ephemeral/new intents.
 func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedClient, error) {
@@ -709,14 +727,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old, cleanup := d.attachClientDeferred(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
-		sess.mu.Lock()
-		sess.terminal = term
-		sess.mu.Unlock()
-		d.mu.Unlock()
-		cleanup.finish()
-		d.detachReplacedClient(old)
-		return sess, ac, nil
+		return sess, d.finishAttach(sess, tr, sz, term, h), nil
 
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
@@ -726,14 +737,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old, cleanup := d.attachClientDeferred(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
-		sess.mu.Lock()
-		sess.terminal = term
-		sess.mu.Unlock()
-		d.mu.Unlock()
-		cleanup.finish()
-		d.detachReplacedClient(old)
-		return sess, ac, nil
+		return sess, d.finishAttach(sess, tr, sz, term, h), nil
 
 	case ports.IntentNew:
 		if h.Name == "" {
@@ -754,14 +758,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old, cleanup := d.attachClientDeferred(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
-		sess.mu.Lock()
-		sess.terminal = term
-		sess.mu.Unlock()
-		d.mu.Unlock()
-		cleanup.finish()
-		d.detachReplacedClient(old)
-		return sess, ac, nil
+		return sess, d.finishAttach(sess, tr, sz, term, h), nil
 
 	case ports.IntentAttach:
 		sess := d.findByNameLocked(h.Name)
@@ -780,14 +777,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old, cleanup := d.attachClientDeferred(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
-		sess.mu.Lock()
-		sess.terminal = term
-		sess.mu.Unlock()
-		d.mu.Unlock()
-		cleanup.finish()
-		d.detachReplacedClient(old)
-		return sess, ac, nil
+		return sess, d.finishAttach(sess, tr, sz, term, h), nil
 
 	default:
 		d.mu.Unlock()
