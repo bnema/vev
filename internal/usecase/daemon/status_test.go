@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
+	"github.com/bnema/vev/internal/usecase/picker"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
@@ -1033,6 +1034,52 @@ func TestBarStateForMRURestoredStoppedSessionsUsePersistedOrder(t *testing.T) {
 	state := d.barStateFor(cur, "")
 	require.GreaterOrEqual(t, len(state.mru), 2)
 	require.Equal(t, []string{"alpha", "zeta"}, []string{state.mru[0].name, state.mru[1].name})
+}
+
+func TestCaptureRenderStatePreservesContextualMRUModeThroughScratchReuse(t *testing.T) {
+	_, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+	capture := func(bars barState) capturedRenderState {
+		t.Helper()
+		state, ok := captureRenderState(sess, ac, bars, capturedOverlayRenderState{}, picker.Preview{}, domain.FloatingConfig{}, false, damageCaptureConsume)
+		require.True(t, ok)
+		return *state
+	}
+	draw := func(state capturedRenderState) string {
+		t.Helper()
+		row := make([]renderer.Cell, 32)
+		drawStatusBarState(row, state.bars, resolveThemeStyles(nil))
+		return rowText(row)
+	}
+	normal := barState{status: statusSnapshot{session: "cur"}, mru: []recentSession{{name: "vty"}, {name: "misc"}}}
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+
+	// An empty but non-nil list is JRS contextual mode, not normal mode.
+	emptyContextual := capture(barState{status: normal.status, mru: normal.mru, rankedRecent: []rankedRecent{}})
+	require.NotNil(t, emptyContextual.bars.rankedRecent)
+	require.Empty(t, emptyContextual.bars.rankedRecent)
+	emptyRow := draw(emptyContextual)
+	require.NotContains(t, emptyRow, "vty")
+	require.NotContains(t, emptyRow, "misc")
+
+	// A later normal frame must clear contextual mode even after scratch reuse.
+	normalAfterEmpty := capture(normal)
+	require.Nil(t, normalAfterEmpty.bars.rankedRecent)
+	normalRow := draw(normalAfterEmpty)
+	require.Contains(t, normalRow, "vty")
+	require.Contains(t, normalRow, "misc")
+
+	// A populated contextual list reuses the same scratch and remains distinct.
+	populatedContextual := capture(barState{status: normal.status, mru: normal.mru, rankedRecent: []rankedRecent{{rank: 1, name: "jrs"}}})
+	require.NotNil(t, populatedContextual.bars.rankedRecent)
+	require.Equal(t, []rankedRecent{{rank: 1, name: "jrs"}}, populatedContextual.bars.rankedRecent)
+	populatedRow := draw(populatedContextual)
+	require.Contains(t, populatedRow, "1:jrs")
+	require.NotContains(t, populatedRow, "vty")
+
+	normalAfterPopulated := capture(normal)
+	require.Nil(t, normalAfterPopulated.bars.rankedRecent)
+	require.Contains(t, draw(normalAfterPopulated), "vty")
 }
 
 func TestStatusBarRendersMRUNamesEphemeralAndInlineBell(t *testing.T) {

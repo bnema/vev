@@ -14,7 +14,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
-	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
@@ -41,17 +40,19 @@ type attachedClient struct {
 	// sendMu and must never share mutable backing storage.
 	pipelineCache   composeCacheInput
 	pipelineScratch composeCacheInput
-	renderScratch   renderCaptureScratch                      // only touched while sendMu is held
-	captureFrames   map[layout.PaneID]capturedPaneRenderState // only touched while sendMu is held
-	size            domain.Size
-	keys            *keys.Router
-	sess            Guarded[*session]
-	mouseScan       mouse.Scanner
-	themeMu         sync.Mutex
-	theme           themeui.Theme
-	clientTheme     themeui.Theme
-	lastCursor      cursorOut
-	renderStages    renderStageHooks // invoked at real pipeline boundaries while sendMu is held
+	renderScratch   renderCaptureScratch // only touched while sendMu is held
+	// captureFrames is keyed by pane ownership, not the tab-local PaneID, so
+	// snapshots cannot leak when an attachment switches tabs or sessions.
+	captureFrames map[*pane]capturedPaneRenderState // only touched while sendMu is held
+	size          domain.Size
+	keys          *keys.Router
+	sess          Guarded[*session]
+	mouseScan     mouse.Scanner
+	themeMu       sync.Mutex
+	theme         themeui.Theme
+	clientTheme   themeui.Theme
+	lastCursor    cursorOut
+	renderStages  renderStageHooks // invoked at real pipeline boundaries while sendMu is held
 	// previousSession is guarded independently. It is retained through temporary
 	// setSession(nil) hand-offs and cleared only on terminal teardown.
 	previousSession Guarded[*session]
@@ -111,6 +112,30 @@ func (ac *attachedClient) clearPreviousSession() {
 	if ac != nil {
 		ac.previousSession.Set(nil)
 	}
+}
+
+// pruneCaptureFrames releases snapshots for panes that have left their owner.
+// Callers must not hold daemon, session, tab, or pane locks.
+func (ac *attachedClient) pruneCaptureFrames(panes ...*pane) {
+	if ac == nil || len(panes) == 0 {
+		return
+	}
+	ac.sendMu.Lock()
+	for _, p := range panes {
+		delete(ac.captureFrames, p)
+	}
+	ac.sendMu.Unlock()
+}
+
+// clearCaptureFrames releases all pane snapshots when the attachment no longer
+// owns a session.
+func (ac *attachedClient) clearCaptureFrames() {
+	if ac == nil {
+		return
+	}
+	ac.sendMu.Lock()
+	ac.captureFrames = nil
+	ac.sendMu.Unlock()
 }
 
 func (ac *attachedClient) getTheme() themeui.Theme {
@@ -383,6 +408,10 @@ func (d *Daemon) handoffCoordinator(from, target *session, old, current *attache
 	}
 	current.sendMu.Lock()
 	current.output.rebase()
+	// Capture snapshots are attachment-owned. Discard them while the attachment
+	// is exclusively held so the transfer releases panes no longer reachable
+	// from the target session.
+	current.captureFrames = nil
 	current.sendMu.Unlock()
 	d.attachCoordinator(target, old, current, true)
 }
@@ -471,14 +500,18 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 	wsz := tb.size
 	tb.mu.Unlock()
 
+	outerResizeAccepted := false
 	if clientSize.Valid() && wsz != tabSize(clientSize) {
-		d.resizeForFirstPaint(sess, ac, clientSize)
+		outerResizeAccepted = d.resizeForFirstPaint(sess, ac, clientSize)
 	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
-	// Activation can synchronously resize a retained floating pane through the
-	// same transaction. Fold its invalidation into this mandatory Welcome frame.
-	d.activateTab(sess, tb)
-	d.invalidateRenderNow(sess, ac, true, "client.go")
+	// Activation can synchronously resize a retained floating pane. An accepted
+	// synchronous outer request already includes that pane and emits the reset,
+	// but activation still performs its warmup work.
+	activationResized := d.activateTabAfterResize(sess, tb, outerResizeAccepted)
+	if !outerResizeAccepted && !activationResized {
+		d.invalidateRenderNow(sess, ac, true, "client.go")
+	}
 }
 
 // runConnLoop is the per-connection input router: it pumps client messages
@@ -614,9 +647,9 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 }
 
 // resizeForFirstPaint retains attach's synchronous geometry guarantee. The
-// firstPaint caller emits its full frame immediately after this commit.
-func (d *Daemon) resizeForFirstPaint(sess *session, ac *attachedClient, sz domain.Size) {
-	d.requestTransactionalResize(sess, ac, sz, true)
+// returned value reports whether the synchronous request was accepted.
+func (d *Daemon) resizeForFirstPaint(sess *session, ac *attachedClient, sz domain.Size) bool {
+	return d.requestTransactionalResize(sess, ac, sz, true)
 }
 
 // detachOnSendError drops a client whose transport failed, leaving the session

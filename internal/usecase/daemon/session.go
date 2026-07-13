@@ -632,14 +632,17 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	markSnapshotDirty(sess)
 
 	d.clearDestroyedTabPreview(tb)
+	tb.mu.Lock()
+	panes := tb.panesSnapshot()
+	tb.mu.Unlock()
+	if ac != nil {
+		ac.pruneCaptureFrames(panes...)
+	}
 	if tb.cancel != nil {
 		tb.cancel()
 	}
 	d.teardownFloating(tb, ac)
 	if rc := sess.renderCoordinator(); rc != nil {
-		tb.mu.Lock()
-		panes := tb.panesSnapshot()
-		tb.mu.Unlock()
 		for _, p := range panes {
 			rc.noteSyncPaneRemoved(p)
 		}
@@ -742,6 +745,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 		d.unregisterPreview(ac)
 		ac.clearPreviousSession()
 		ac.setSession(nil)
+		ac.clearCaptureFrames()
 	}
 
 	// Prevent queued launches from entering Open, then cancel the parent

@@ -165,25 +165,25 @@ func (d *Daemon) commitResize(sess *session, ac *attachedClient, plan resizePlan
 	d.observeRuntime(ports.RuntimeResizeCommitted, 0, true)
 }
 
-func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, epoch uint64) {
+func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, epoch uint64) bool {
 	rc := sess.renderCoordinator()
 	if rc == nil {
-		return
+		return false
 	}
 	snap := rc.resizeSnapshot()
 	if !rc.resizeCurrent(epoch, ac, false) {
-		return
+		return false
 	}
 	d.exitCopyMode(ac)
 	plan := d.prepareResize(sess, snap.size)
 	if !rc.resizeCurrent(epoch, ac, false) {
-		return
+		return false
 	}
 	if !d.applyResize(&plan, func() bool { return rc.resizeCurrent(epoch, ac, false) }) {
-		return
+		return false
 	}
 	if !rc.resizeCurrent(epoch, ac, true) {
-		return
+		return false
 	}
 	d.commitResize(sess, ac, plan)
 	failed := make([]resizeMember, 0, len(plan.members))
@@ -198,11 +198,14 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, epoch u
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
 	// A successful transaction publishes exactly one full S2 frame. The
 	// coordinator is the only emission route and stale epochs never reach it.
-	rc.invalidateForAttachment(ac, renderInvalidation{class: invalidateUrgent, reset: true, producer: "transactional_resize.go"})
+	if !rc.invalidateForAttachmentAtResizeEpoch(ac, epoch, renderInvalidation{class: invalidateUrgent, reset: true, producer: "transactional_resize.go"}) {
+		return false
+	}
 	// The resize debounce has already elapsed. Consume this sticky reset now;
 	// fire preserves ACK and synchronized-output gates rather than scheduling a
 	// second urgent deadline.
 	rc.fireCurrent(false)
+	return true
 }
 
 // retryResizeMembers retries only members which failed the committed epoch.
@@ -244,10 +247,14 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, epoch uin
 	}
 }
 
-func (d *Daemon) requestTransactionalResize(sess *session, ac *attachedClient, size domain.Size, immediate bool) {
-	d.observeRuntime(ports.RuntimeResizeRequested, 0, sess != nil && size.Valid())
-	if sess == nil || !size.Valid() {
-		return
+// requestTransactionalResize reports reset invalidation completion for immediate
+// attached requests, and coordinator schedule acceptance for async requests.
+// Headless requests have no reset invalidation and report geometry completion.
+func (d *Daemon) requestTransactionalResize(sess *session, ac *attachedClient, size domain.Size, immediate bool) bool {
+	valid := sess != nil && size.Valid()
+	d.observeRuntime(ports.RuntimeResizeRequested, 0, valid)
+	if !valid {
+		return false
 	}
 	if ac == nil {
 		// Headless geometry has no coordinator/transport to coalesce, but keeps
@@ -255,15 +262,15 @@ func (d *Daemon) requestTransactionalResize(sess *session, ac *attachedClient, s
 		plan := d.prepareResize(sess, size)
 		d.applyResize(&plan)
 		d.commitResize(sess, nil, plan)
-		return
+		return true
 	}
 	rc := d.attachCoordinator(sess, nil, ac, true)
 	if immediate {
 		epoch := rc.recordResizeRequest(size, ac)
-		if epoch != 0 {
-			d.runResizeTransaction(sess, ac, epoch)
+		if epoch == 0 {
+			return false
 		}
-		return
+		return d.runResizeTransaction(sess, ac, epoch)
 	}
-	rc.scheduleResize(size, ac, func(epoch uint64) { d.runResizeTransaction(sess, ac, epoch) })
+	return rc.scheduleResize(size, ac, func(epoch uint64) { d.runResizeTransaction(sess, ac, epoch) }) != 0
 }

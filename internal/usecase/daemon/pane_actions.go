@@ -255,6 +255,7 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 
 	if ac != nil {
 		ac.overlays.clearCopyModeForPane(p)
+		ac.pruneCaptureFrames(p)
 	}
 
 	if rc := sess.renderCoordinator(); rc != nil {
