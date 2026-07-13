@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"strings"
@@ -167,6 +168,70 @@ func TestAltCForwardsToPTY(t *testing.T) {
 
 	require.Equal(t, []byte("\x1bc"), <-writes)
 	releasePTY()
+}
+
+func TestAltFToggleRetainedFloatingPaneRepaintsImmediately(t *testing.T) {
+	normal, releaseNormal := newBlockingPTY(t)
+	floatingPTY, releaseFloating := newBlockingPTY(t)
+	defer releaseNormal()
+	defer releaseFloating()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
+	client := vt.NewScreen(80, 25)
+	floatingCtx, cancelFloating := context.WithCancel(sess.ctx)
+	defer cancelFloating()
+	floating := newPane("floating", floatingPTY, domain.Size{Cols: 20, Rows: 5})
+	floating.ctx = floatingCtx
+	floating.screen.Write([]byte("popup-content"))
+	installTestFloating(sess.activeTab(), floating, false)
+
+	// Establish the client shadow while the retained popup is hidden.
+	d.paint(sess, ac, true)
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+
+	// Route the real Alt+F binding. Showing a retained pane must paint once.
+	d.handleInput(sess, ac, []byte("\x1bf"))
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	require.Contains(t, strings.Join(frameRows(client.Frame), "\n"), "popup-content")
+	require.Contains(t, strings.Join(frameRows(client.Frame), "\n"), "┌")
+	select {
+	case extra := <-sends:
+		t.Fatalf("show emitted duplicate output: %#v", extra)
+	default:
+	}
+
+	// The second real key must repaint immediately, rather than waiting for
+	// unrelated output, while retaining the existing PTY and context.
+	d.handleInput(sess, ac, []byte("\x1bf"))
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	require.NotContains(t, strings.Join(frameRows(client.Frame), "\n"), "popup-content")
+	tb := sess.activeTab()
+	tb.mu.Lock()
+	require.Equal(t, floatingHidden, tb.floating.state)
+	require.Same(t, floating, tb.floating.pane)
+	generation := tb.floating.generation
+	tb.mu.Unlock()
+	require.Same(t, floatingPTY, floating.pty)
+	select {
+	case <-floating.ctx.Done():
+		t.Fatal("hiding retained popup cancelled its context")
+	default:
+	}
+
+	// A third show uses the installed pane; it must not launch or emit a second
+	// resize/start frame.
+	d.handleInput(sess, ac, []byte("\x1bf"))
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	require.Contains(t, strings.Join(frameRows(client.Frame), "\n"), "popup-content")
+	tb.mu.Lock()
+	require.Equal(t, floatingVisible, tb.floating.state)
+	require.Same(t, floating, tb.floating.pane)
+	require.Equal(t, generation, tb.floating.generation)
+	tb.mu.Unlock()
+	select {
+	case extra := <-sends:
+		t.Fatalf("retained show emitted duplicate output: %#v", extra)
+	default:
+	}
 }
 
 func requireFloatingInitialized(t *testing.T, tb *tab) {
