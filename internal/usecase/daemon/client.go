@@ -114,6 +114,30 @@ func (ac *attachedClient) clearPreviousSession() {
 	}
 }
 
+// pruneCaptureFrames releases snapshots for panes that have left their owner.
+// Callers must not hold daemon, session, tab, or pane locks.
+func (ac *attachedClient) pruneCaptureFrames(panes ...*pane) {
+	if ac == nil || len(panes) == 0 {
+		return
+	}
+	ac.sendMu.Lock()
+	for _, p := range panes {
+		delete(ac.captureFrames, p)
+	}
+	ac.sendMu.Unlock()
+}
+
+// clearCaptureFrames releases all pane snapshots when the attachment no longer
+// owns a session.
+func (ac *attachedClient) clearCaptureFrames() {
+	if ac == nil {
+		return
+	}
+	ac.sendMu.Lock()
+	ac.captureFrames = nil
+	ac.sendMu.Unlock()
+}
+
 func (ac *attachedClient) getTheme() themeui.Theme {
 	ac.themeMu.Lock()
 	defer ac.themeMu.Unlock()

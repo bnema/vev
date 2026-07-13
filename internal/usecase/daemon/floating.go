@@ -427,6 +427,9 @@ func (d *Daemon) reapFloating(sess *session, tb *tab, p *pane, generation uint64
 	sess.mu.Lock()
 	ac := sess.client
 	sess.mu.Unlock()
+	if ac != nil {
+		ac.pruneCaptureFrames(p)
+	}
 	copyCleared := ac != nil && ac.overlays.clearCopyModeForPane(p)
 	if ac != nil && (visible || copyCleared) {
 		d.invalidateRender(sess, ac, true, "floating.go")
@@ -443,6 +446,7 @@ func (d *Daemon) teardownFloating(tb *tab, ac *attachedClient) {
 	tb.mu.Unlock()
 	if ac != nil {
 		ac.overlays.clearCopyModeForPane(p)
+		ac.pruneCaptureFrames(p)
 	}
 	closeFloatingPane(p)
 }
