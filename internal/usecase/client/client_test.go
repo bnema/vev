@@ -155,40 +155,22 @@ func isType(typ ports.MsgType) any {
 	return mock.MatchedBy(func(f ports.Frame) bool { return f.Type == typ })
 }
 
-// handshakeClock exposes its timer so the pre-Welcome deadline can be tested
-// without waiting on wall time.
-type handshakeClock struct {
-	mu       sync.Mutex
-	duration time.Duration
-	created  chan *handshakeTimer
+const testPreWelcomeTimeout = 15 * time.Second
+
+func newHandshakeClock(t *testing.T, timerCount int) (*portsmocks.MockClock, <-chan chan time.Time) {
+	t.Helper()
+	created := make(chan chan time.Time, timerCount)
+	clk := portsmocks.NewMockClock(t)
+	clk.EXPECT().NewTimer(testPreWelcomeTimeout).RunAndReturn(func(time.Duration) ports.Timer {
+		timerC := make(chan time.Time, 1)
+		timer := portsmocks.NewMockTimer(t)
+		timer.EXPECT().C().Return((<-chan time.Time)(timerC)).Maybe()
+		timer.EXPECT().Stop().Return(true).Once()
+		created <- timerC
+		return timer
+	}).Times(timerCount)
+	return clk, created
 }
-
-type handshakeTimer struct{ ch chan time.Time }
-
-func newHandshakeClock() *handshakeClock {
-	return &handshakeClock{created: make(chan *handshakeTimer, 2)}
-}
-
-func (c *handshakeClock) Now() time.Time { return time.Time{} }
-
-func (c *handshakeClock) NewTimer(d time.Duration) ports.Timer {
-	c.mu.Lock()
-	c.duration = d
-	c.mu.Unlock()
-	t := &handshakeTimer{ch: make(chan time.Time, 1)}
-	c.created <- t
-	return t
-}
-
-func (c *handshakeClock) Duration() time.Duration {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.duration
-}
-
-func (t *handshakeTimer) C() <-chan time.Time      { return t.ch }
-func (t *handshakeTimer) Reset(time.Duration) bool { return false }
-func (t *handshakeTimer) Stop() bool               { return true }
 
 func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 	tests := []struct {
@@ -207,7 +189,11 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			clk := newHandshakeClock()
+			timerCount := 1
+			if tt.phase == "recv" {
+				timerCount = 2
+			}
+			clk, createdTimers := newHandshakeClock(t, timerCount)
 
 			term := portsmocks.NewMockTerminal(t)
 			term.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
@@ -243,13 +229,12 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 				errCh <- client.Run(ctx, dialer, term, clk, ports.IntentAttach, "main", false, nil, slog.New(slog.DiscardHandler))
 			}()
 
-			var timer *handshakeTimer
+			var timerC chan time.Time
 			select {
-			case timer = <-clk.created:
+			case timerC = <-createdTimers:
 			case <-time.After(time.Second):
 				t.Fatal("pre-Welcome timer was not created")
 			}
-			require.Equal(t, 15*time.Second, clk.Duration())
 			select {
 			case <-started:
 			case <-time.After(time.Second):
@@ -257,7 +242,7 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 			}
 			if tt.phase == "recv" {
 				select {
-				case timer = <-clk.created:
+				case timerC = <-createdTimers:
 				case <-time.After(time.Second):
 					t.Fatal("Welcome timer was not created")
 				}
@@ -266,7 +251,7 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 			if tt.end == "cancel" {
 				cancel()
 			} else {
-				timer.ch <- time.Time{}
+				timerC <- time.Time{}
 			}
 
 			select {

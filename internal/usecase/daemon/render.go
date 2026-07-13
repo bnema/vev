@@ -32,12 +32,8 @@ func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
 
 	// The normal attached render path needs no cross-session picker lookup.
 	// Only inactive or headless tabs can be renderable as a picker preview.
-	preview := false
-	if !active || !attached {
-		preview = d.tabIsPickerPreview(tb)
-		if !preview {
-			return false
-		}
+	if (!active || !attached) && !d.tabIsPickerPreview(tb) {
+		return false
 	}
 	tb.mu.Lock()
 	defer tb.mu.Unlock()

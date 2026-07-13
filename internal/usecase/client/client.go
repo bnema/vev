@@ -366,10 +366,10 @@ type attachResult struct {
 // boundedPreWelcome runs one blocking handshake operation. Transport methods
 // do not accept a context, so cancellation and expiry close this attempt's
 // transport to interrupt the call, then wait for its goroutine to exit.
-func boundedPreWelcome(ctx context.Context, clk ports.Clock, transport ports.Transport, operation func() error) (error, bool) {
+func boundedPreWelcome(ctx context.Context, clk ports.Clock, transport ports.Transport, operation func() error) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		_ = transport.Close()
-		return err, true
+		return true, err
 	}
 
 	timer := clk.NewTimer(preWelcomeTimeout)
@@ -384,23 +384,23 @@ func boundedPreWelcome(ctx context.Context, clk ports.Clock, transport ports.Tra
 		// already returned by the time we observe it here.
 		if ctx.Err() != nil {
 			_ = transport.Close()
-			return ctx.Err(), true
+			return true, ctx.Err()
 		}
 		select {
 		case <-timer.C():
 			_ = transport.Close()
-			return context.DeadlineExceeded, true
+			return true, context.DeadlineExceeded
 		default:
-			return err, false
+			return false, err
 		}
 	case <-ctx.Done():
 		_ = transport.Close()
 		<-completed
-		return ctx.Err(), true
+		return true, ctx.Err()
 	case <-timer.C():
 		_ = transport.Close()
 		<-completed
-		return context.DeadlineExceeded, true
+		return true, context.DeadlineExceeded
 	}
 }
 
@@ -451,7 +451,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 		TrueColor:         trueColor,
 		MaxOutputInFlight: requestedOutputWindow(transport),
 	}
-	if err, closed := boundedPreWelcome(ctx, clk, transport, func() error {
+	if closed, err := boundedPreWelcome(ctx, clk, transport, func() error {
 		return transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)})
 	}); err != nil {
 		return attachResult{transportClosed: closed, err: fmt.Errorf("vev: sending hello: %w", err)}
@@ -460,7 +460,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 
 	// 2. Await Welcome or a typed rejection.
 	var reply ports.Frame
-	err, closed := boundedPreWelcome(ctx, clk, transport, func() error {
+	closed, err := boundedPreWelcome(ctx, clk, transport, func() error {
 		var recvErr error
 		reply, recvErr = transport.Recv()
 		return recvErr

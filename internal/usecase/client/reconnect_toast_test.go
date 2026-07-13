@@ -187,7 +187,7 @@ func newReconnectHandshakeClock(t *testing.T) *portsmocks.MockClock {
 	timer := portsmocks.NewMockTimer(t)
 	timer.EXPECT().C().Return((<-chan time.Time)(make(chan time.Time))).Maybe()
 	timer.EXPECT().Stop().Return(true).Maybe()
-	clk.EXPECT().NewTimer(15 * time.Second).Return(timer).Maybe()
+	clk.EXPECT().NewTimer(preWelcomeTimeout).Return(timer).Maybe()
 	return clk
 }
 
