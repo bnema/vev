@@ -200,16 +200,22 @@ func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 	}
 	cfg := d.currentFloatingConfig()
 	tb.mu.Lock()
+	wasVisible := tb.floating.state == floatingVisible
 	start, generation := tb.toggleFloatingLocked()
 	// desiredVisible is meaningful only while a launch is warming. Installed
 	// slots derive their resize and paint work from the resulting slot state.
 	visible := tb.floating.state == floatingVisible
+	hidden := wasVisible && tb.floating.state == floatingHidden
 	tb.mu.Unlock()
 	if start {
 		d.launchFloating(sess, tb, cfg, generation, true)
 		if ac != nil {
 			d.invalidateRender(sess, ac, true, "floating.go")
 		}
+		return nil
+	}
+	if hidden {
+		d.invalidateRender(sess, ac, true, "floating.go")
 		return nil
 	}
 	if visible {
