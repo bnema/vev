@@ -197,6 +197,7 @@ type cliLauncher struct {
 	netemFactory udpNetemFactory
 	mu           sync.Mutex
 	peers        map[string]peerRoute
+	runtimes     map[string]string
 }
 
 type peerRoute struct {
@@ -206,7 +207,10 @@ type peerRoute struct {
 	netem   udpNetem
 }
 
-type preparedPeer struct{ route peerRoute }
+type preparedPeer struct {
+	route          peerRoute
+	cleanupRuntime func() error
+}
 
 func (p preparedPeer) Warmup([]byte) error                              { return nil }
 func (p preparedPeer) Measure([]byte, func() error, func() error) error { return nil }
@@ -230,6 +234,11 @@ func (p preparedPeer) Close() error {
 			errs = append(errs, err)
 		}
 	}
+	if p.cleanupRuntime != nil {
+		if err := p.cleanupRuntime(); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	return errors.Join(errs...)
 }
 
@@ -240,19 +249,20 @@ type terminalOutput interface {
 }
 
 type cliProcess struct {
-	cmd           *exec.Cmd
-	pty           io.ReadWriteCloser
-	output        terminalOutput
-	chunks        chan []byte
-	done          chan struct{}
-	closed        sync.Once
-	waitErr       chan error
-	waitTimeout   func() <-chan time.Time
-	forceCleanup  func()
-	forceKill     func()
-	shutdown      func() error
-	terminalReady bool
-	readyPath     string
+	cmd            *exec.Cmd
+	pty            io.ReadWriteCloser
+	output         terminalOutput
+	chunks         chan []byte
+	done           chan struct{}
+	closed         sync.Once
+	waitErr        chan error
+	waitTimeout    func() <-chan time.Time
+	forceCleanup   func()
+	forceKill      func()
+	shutdown       func() error
+	cleanupRuntime func() error
+	terminalReady  bool
+	readyPath      string
 }
 
 func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProcess, error) {
@@ -269,8 +279,18 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 	}
 	cmd := exec.Command(l.bin, role.Args...)
 	runDir := filepath.Dir(m.TracePath)
+	runtimeDir, err := l.runtimeDir(runDir)
+	if err != nil {
+		return nil, err
+	}
+	// Each role runs in its isolated evidence directory. All paths passed into
+	// the launcher were resolved at harness startup, so this cwd cannot redirect
+	// the binary, manifest-derived traces, runtime, or state paths. Runtime is
+	// kept in a short private directory because Unix socket paths have a small
+	// platform limit and canonical evidence paths may be deeply nested.
+	cmd.Dir = runDir
 	cmd.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN", "VEV_REMOTE_TRANSPORT"), traceEnvironment(m)...)
-	cmd.Env = append(cmd.Env, "XDG_RUNTIME_DIR="+filepath.Join(runDir, "runtime"),
+	cmd.Env = append(cmd.Env, "XDG_RUNTIME_DIR="+runtimeDir,
 		"XDG_STATE_HOME="+filepath.Join(runDir, "state"), "TERM=xterm-256color")
 	if m.Role == "client" {
 		l.mu.Lock()
@@ -284,13 +304,13 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 			cmd.Env = append(cmd.Env, "PATH="+runDir+":"+os.Getenv("PATH"), "VEV_REMOTE_TRANSPORT="+mode)
 		}
 	}
-	if err := safedir.EnsurePrivate(filepath.Join(runDir, "runtime")); err != nil {
-		return nil, err
-	}
 	if err := safedir.EnsurePrivate(filepath.Join(runDir, "state")); err != nil {
 		return nil, err
 	}
-	p := &cliProcess{cmd: cmd, waitErr: make(chan error, 1), readyPath: filepath.Join(runDir, "runtime", "vev", "daemon.sock")}
+	p := &cliProcess{cmd: cmd, waitErr: make(chan error, 1), readyPath: filepath.Join(runtimeDir, "vev", "daemon.sock")}
+	if m.Role == "daemon" {
+		p.cleanupRuntime = func() error { return l.releaseRuntime(runDir) }
+	}
 	if m.Role == "client" {
 		master, slave, err := openPTY()
 		if err != nil {
@@ -309,6 +329,9 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 			_ = output.Close()
 			_ = master.Close()
 			_ = slave.Close()
+			if p.cleanupRuntime != nil {
+				_ = p.cleanupRuntime()
+			}
 			return nil, err
 		}
 		_ = slave.Close()
@@ -325,6 +348,9 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = devNull, devNull, devNull
 		if err := cmd.Start(); err != nil {
 			_ = devNull.Close()
+			if p.cleanupRuntime != nil {
+				_ = p.cleanupRuntime()
+			}
 			return nil, err
 		}
 		_ = devNull.Close()
@@ -345,6 +371,41 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 	return p, nil
 }
 
+// runtimeDir returns one short, private runtime directory shared by the roles
+// of one run. Keeping the Unix socket outside deeply nested evidence output
+// avoids the platform socket-path limit without weakening run isolation.
+func (l *cliLauncher) runtimeDir(runDir string) (string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if path := l.runtimes[runDir]; path != "" {
+		return path, nil
+	}
+	path, err := os.MkdirTemp("", "vev-harness-runtime-")
+	if err != nil {
+		return "", err
+	}
+	if err := safedir.EnsurePrivate(path); err != nil {
+		_ = os.RemoveAll(path)
+		return "", err
+	}
+	if l.runtimes == nil {
+		l.runtimes = make(map[string]string)
+	}
+	l.runtimes[runDir] = path
+	return path, nil
+}
+
+func (l *cliLauncher) releaseRuntime(runDir string) error {
+	l.mu.Lock()
+	path := l.runtimes[runDir]
+	delete(l.runtimes, runDir)
+	l.mu.Unlock()
+	if path == "" {
+		return nil
+	}
+	return os.RemoveAll(path)
+}
+
 // preparePeer installs a per-run ssh command seam. The ordinary public client
 // still executes its documented remote attach command; its ssh child invokes
 // only the parsed public _stdio or _udp-proxy command. This makes the peer
@@ -352,10 +413,21 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 // separately launched but unused process.
 func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedProcess, error) {
 	runDir := filepath.Dir(m.TracePath)
+	l.mu.Lock()
+	runtimeDir := l.runtimes[runDir]
+	l.mu.Unlock()
+	peerOwnsRuntime := runtimeDir == ""
+	if peerOwnsRuntime {
+		var err error
+		runtimeDir, err = l.runtimeDir(runDir)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if err := safedir.EnsurePrivate(runDir); err != nil {
 		return nil, err
 	}
-	if err := safedir.EnsurePrivate(filepath.Join(runDir, "runtime")); err != nil {
+	if err := safedir.EnsurePrivate(runtimeDir); err != nil {
 		return nil, err
 	}
 	if err := safedir.EnsurePrivate(filepath.Join(runDir, "state")); err != nil {
@@ -416,7 +488,7 @@ case "$*" in
     ;;
   *) echo 'vev harness ssh seam rejected non-vev command' >&2; exit 64 ;;
 esac
-`, m.TracePath, m.ProcessID, filepath.Join(runDir, "runtime"), filepath.Join(runDir, "state"), l.bin, role.Args[1], ready, stderr, target, netemPort, route.pidPath, m.Scenario, m.Run)
+`, m.TracePath, m.ProcessID, runtimeDir, filepath.Join(runDir, "state"), l.bin, role.Args[1], ready, stderr, target, netemPort, route.pidPath, m.Scenario, m.Run)
 	if err := os.WriteFile(shim, []byte(body), 0o700); err != nil {
 		if route.netem != nil {
 			_ = route.netem.Close()
@@ -436,7 +508,11 @@ esac
 	}
 	l.peers[runDir] = route
 	l.mu.Unlock()
-	return preparedPeer{route: route}, nil
+	peer := preparedPeer{route: route}
+	if peerOwnsRuntime {
+		peer.cleanupRuntime = func() error { return l.releaseRuntime(runDir) }
+	}
+	return peer, nil
 }
 
 func remoteMode(t transport) (string, error) {
@@ -744,6 +820,11 @@ func (p *cliProcess) Close() error {
 				result = err
 			}
 		}
+		if p.cleanupRuntime != nil {
+			if err := p.cleanupRuntime(); result == nil {
+				result = err
+			}
+		}
 	})
 	return result
 }
@@ -873,6 +954,10 @@ func run(args []string, h *harness) error {
 	if err != nil {
 		return err
 	}
+	opt, err = resolvePathOptions(opt)
+	if err != nil {
+		return err
+	}
 	m, err := readManifest(opt.manifest)
 	if err != nil {
 		return err
@@ -972,6 +1057,27 @@ func parseOptions(args []string) (options, error) {
 	}
 	return o, nil
 }
+
+// resolvePathOptions captures the harness cwd once, before role launchers
+// assign their isolated working directories. All downstream filesystem access,
+// manifests, and process environments consequently refer to the same paths.
+func resolvePathOptions(o options) (options, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return o, fmt.Errorf("resolve harness working directory: %w", err)
+	}
+	absolute := func(path string) string {
+		if filepath.IsAbs(path) {
+			return filepath.Clean(path)
+		}
+		return filepath.Clean(filepath.Join(cwd, path))
+	}
+	o.vevBin = absolute(o.vevBin)
+	o.manifest = absolute(o.manifest)
+	o.out = absolute(o.out)
+	return o, nil
+}
+
 func readManifest(path string) (manifest, error) {
 	f, e := os.Open(path)
 	if e != nil {

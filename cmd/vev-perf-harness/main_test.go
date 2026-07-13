@@ -292,6 +292,94 @@ func TestHarnessCanonicalLocalRolesAreIsolatedAcrossRepetitions(t *testing.T) {
 	}
 }
 
+func TestHarnessResolvesCanonicalRelativePathsBeforeRoleCWDChanges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("public CLI relative-path lifecycle")
+	}
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep the real Unix-socket path below its platform limit while testing the
+	// exact documented relative output hierarchy.
+	workspace, err := os.MkdirTemp("", "vev-rel-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(workspace) })
+	bin := filepath.Join(workspace, "vev")
+	build := exec.Command("/usr/local/go/bin/go", "build", "-o", bin, "./")
+	build.Dir = root
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build public CLI: %v\n%s", err, output)
+	}
+	manifestPath := filepath.Join(workspace, "testdata", "perf", "manifest.json")
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(filepath.Join(root, "testdata", "perf", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalWD); err != nil {
+			t.Errorf("restore cwd: %v", err)
+		}
+	})
+
+	// These are the documented relative locations. cliLauncher changes every
+	// role to its run directory, so a failure to resolve them before launch
+	// would make VEV_PERF_TRACE point at a nonexistent nested directory.
+	h := defaultHarness()
+	h.clock = &fakeClock{}
+	if err := run([]string{
+		"--vev-bin", "./vev",
+		"--manifest", "testdata/perf/manifest.json",
+		"--out", "testdata/perf/results",
+		"--scenario", "1x4-idle-local",
+		"--warmup", "0s",
+		"--duration", "30s",
+		"--repetitions", "10",
+	}, h); err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(workspace, "testdata", "perf", "results")
+	for run := 1; run <= 10; run++ {
+		runDir := filepath.Join(out, fmt.Sprintf("1x4-idle-local-run-%03d", run))
+		manifestBytes, err := os.ReadFile(filepath.Join(runDir, "manifest.json"))
+		if err != nil {
+			t.Fatalf("run %d manifest: %v", run, err)
+		}
+		var persisted runManifest
+		if err := json.Unmarshal(manifestBytes, &persisted); err != nil {
+			t.Fatalf("run %d manifest JSON: %v", run, err)
+		}
+		if persisted.Run != run || len(persisted.Processes) != 2 {
+			t.Fatalf("run %d manifest=%+v", run, persisted)
+		}
+		for _, process := range persisted.Processes {
+			if !filepath.IsAbs(process.TracePath) || filepath.Dir(process.TracePath) != runDir {
+				t.Fatalf("run %d %s trace path=%q, want absolute path in %q", run, process.Role, process.TracePath, runDir)
+			}
+			trace, err := os.ReadFile(process.TracePath)
+			if err != nil || len(bytes.TrimSpace(trace)) == 0 {
+				t.Fatalf("run %d %s trace=%q err=%v", run, process.Role, process.TracePath, err)
+			}
+		}
+	}
+}
+
 func TestHarnessScenarioSelectionKeepsCanonicalManifestValidation(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -362,6 +450,34 @@ func TestTraceEnvironmentMatchesProcessMapping(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("trace environment missing %q: %s", want, got)
 		}
+	}
+}
+
+func TestResolvePathOptionsMakesRelativeAndAbsoluteInputsIdentical(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	absolute := options{
+		vevBin:   filepath.Join(cwd, "vev"),
+		manifest: filepath.Join(cwd, "testdata", "perf", "manifest.json"),
+		out:      filepath.Join(cwd, "testdata", "perf", "results"),
+	}
+	relative := options{
+		vevBin:   "vev",
+		manifest: "testdata/perf/manifest.json",
+		out:      "testdata/perf/results",
+	}
+	gotRelative, err := resolvePathOptions(relative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotAbsolute, err := resolvePathOptions(absolute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRelative != gotAbsolute {
+		t.Fatalf("relative paths resolved to %+v, absolute paths to %+v", gotRelative, gotAbsolute)
 	}
 }
 
