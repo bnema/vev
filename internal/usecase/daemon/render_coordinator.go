@@ -1096,16 +1096,24 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 	// notification rather than accumulating ackDeferred forever.
 	headlessPreviewOnly := c.detached && c.attachment == nil
 	if !headlessPreviewOnly && (!ready || (c.attachment != nil && !c.attachmentReady)) {
+		var ackStartObserver ports.RuntimeObserver
+		var ackStartCorrelation ports.RuntimeCorrelation
 		if !ready && deadline {
 			c.ackDeferred = true
 			if !c.ackBlocked && c.opts.observer != nil {
 				c.ackCorrelation = ports.NewRuntimeCorrelation()
 				c.ackBlocked = true
-				c.opts.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", c.ackCorrelation, ports.RuntimeACKBlockedStart, 0, true))
+				// Capture the immutable mark while coordinator state is owned, but
+				// invoke the potentially blocking observer only after c.mu is free.
+				ackStartObserver = c.opts.observer
+				ackStartCorrelation = c.ackCorrelation
 			}
 		}
 		preview, previews := c.takePendingPreviewsLocked()
 		c.mu.Unlock()
+		if ackStartObserver != nil {
+			ackStartObserver.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", ackStartCorrelation, ports.RuntimeACKBlockedStart, 0, true))
+		}
 		c.notifyPreviews(w, preview, previews)
 		return
 	}
