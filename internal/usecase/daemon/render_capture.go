@@ -225,6 +225,9 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 	}
 	state.panes = scratch.panes[:0]
 	state.tabGeneration = uint64(len(layoutSnap.fingerprint))
+	if ac.captureFrames == nil {
+		ac.captureFrames = make(map[*pane]capturedPaneRenderState)
+	}
 	for _, placement := range layoutSnap.placements {
 		p := tb.panes[placement.ID]
 		if p == nil {
@@ -235,9 +238,6 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 			visible = domain.Rect{}
 		}
 		p.mu.Lock()
-		if ac.captureFrames == nil {
-			ac.captureFrames = make(map[*pane]capturedPaneRenderState)
-		}
 		captured := capturePaneRenderStateLockedInto(p, visible, mode, ac.captureFrames[p])
 		if mode == damageCaptureConsume {
 			state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
@@ -260,9 +260,6 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 		p := tb.floating.pane
 		p.mu.Lock()
 		geometry := p.committedFloatingGeometryLocked(calculateContentFloatingGeometry(domain.Size{Cols: layoutSnap.area.Width, Rows: layoutSnap.area.Height}, floatingCfg))
-		if ac.captureFrames == nil {
-			ac.captureFrames = make(map[*pane]capturedPaneRenderState)
-		}
 		captured := capturePaneRenderStateLockedInto(p, geometry.Inner, mode, ac.captureFrames[p])
 		if mode == damageCaptureConsume {
 			seen := false
