@@ -25,12 +25,8 @@ func TestSnapshotEncodeWorkerDefersMarshalUntilAfterCapture(t *testing.T) {
 	store := &channelSnapshotStore{writes: make(chan []byte, 1)}
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	WithSnapshotStore(store)(d)
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(func() {
-		cancel()
-		d.stopSnapshotEncodeWorker()
-	})
-	d.startSnapshotEncodeWorker(ctx)
+	t.Cleanup(d.stopSnapshotEncodeWorker)
+	d.startSnapshotEncodeWorker()
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -72,11 +68,9 @@ func exerciseBlockedSnapshotWorker(t *testing.T, blockEncode bool) {
 	store := newGatedSnapshotStore()
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	WithSnapshotStore(store)(d)
-	ctx, cancel := context.WithCancel(t.Context())
-	d.startSnapshotEncodeWorker(ctx)
+	d.startSnapshotEncodeWorker()
 	t.Cleanup(func() {
 		store.unblock()
-		cancel()
 		d.stopSnapshotEncodeWorker()
 	})
 	if blockEncode {
@@ -157,9 +151,7 @@ func TestFinalSnapshotFlushPersistsNewestNamedSessionBeforeWorkerTeardown(t *tes
 	store := &channelSnapshotStore{writes: make(chan []byte, 1)}
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	WithSnapshotStore(store)(d)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	d.startSnapshotEncodeWorker(ctx)
+	d.startSnapshotEncodeWorker()
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -169,7 +161,8 @@ func TestFinalSnapshotFlushPersistsNewestNamedSessionBeforeWorkerTeardown(t *tes
 		return snapcodec.Marshal(s)
 	}
 	sess := newSnapshotTestSession(t, "final", false, "/work")
-	pty := sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+	pty, ok := sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+	require.True(t, ok)
 	pty.EXPECT().Close().Return(nil).Once()
 	sess.tabs[0].panes["pane-1"].screen.Write([]byte("\rnewest"))
 	d.sessions[sess.id] = sess
@@ -202,9 +195,7 @@ func TestStopSnapshotEncodeWorkerDoesNotWaitForUncancellableWrite(t *testing.T) 
 	clock := newFinalFlushClock()
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
 	WithSnapshotStore(store)(d)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	d.startSnapshotEncodeWorker(ctx)
+	d.startSnapshotEncodeWorker()
 
 	sess := newSnapshotTestSession(t, "stuck-write", false, "/work")
 	require.True(t, d.captureSession(sess))
@@ -240,10 +231,8 @@ func TestStoppedSnapshotWorkerLeavesCaptureRetryable(t *testing.T) {
 	store := &channelSnapshotStore{writes: make(chan []byte, 1)}
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	WithSnapshotStore(store)(d)
-	ctx, cancel := context.WithCancel(t.Context())
-	d.startSnapshotEncodeWorker(ctx)
+	d.startSnapshotEncodeWorker()
 	d.stopSnapshotEncodeWorker()
-	t.Cleanup(cancel)
 
 	sess := newSnapshotTestSession(t, "stopped", false, "/work")
 	markSnapshotDirty(sess)
@@ -285,6 +274,77 @@ func TestSnapshotQueueSaturationLeavesCaptureRetryable(t *testing.T) {
 	require.True(t, d.scheduleSnapshot(third))
 	<-store.writes
 	awaitSnapshotClean(t, third)
+}
+
+func TestNamedFinalSnapshotSurvivesSaturatedQueue(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(t *testing.T, d *Daemon, sess *session)
+	}{
+		{
+			name: "kill session",
+			stop: func(t *testing.T, d *Daemon, sess *session) {
+				t.Helper()
+				require.NoError(t, d.killSession(sess, ports.ReasonSessionKilled, false))
+			},
+		},
+		{
+			name: "shutdown all",
+			stop: func(t *testing.T, d *Daemon, _ *session) {
+				t.Helper()
+				d.shutdownAll(ports.ReasonServerShutdown)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &channelSnapshotStore{writes: make(chan []byte, 3)}
+			d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+			WithSnapshotStore(store)(d)
+			startSnapshotEncodeWorker(t, d)
+
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var calls atomic.Int32
+			d.snapshotMarshal = func(s snapcodec.Session) ([]byte, error) {
+				if calls.Add(1) == 1 {
+					close(entered)
+					<-release
+				}
+				return snapcodec.Marshal(s)
+			}
+			first := newSnapshotTestSession(t, "first", false, "/work")
+			second := newSnapshotTestSession(t, "second", false, "/work")
+			final := newSnapshotTestSession(t, "final", false, "/work")
+			finalPTY, ok := final.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+			require.True(t, ok)
+			finalPTY.EXPECT().Close().Return(nil).Once()
+			markSnapshotDirty(first)
+			markSnapshotDirty(second)
+			require.True(t, d.scheduleSnapshot(first))
+			<-entered
+			require.True(t, d.scheduleSnapshot(second))
+			d.sessions[final.id] = final
+
+			tc.stop(t, d, final)
+			require.NotContains(t, d.sessions, final.id, "final capture must survive session removal")
+			close(release)
+
+			written := make(map[string]bool, 3)
+			deadline := time.NewTimer(time.Second)
+			defer deadline.Stop()
+			for len(written) < 3 {
+				select {
+				case data := <-store.writes:
+					snap, err := snapcodec.Unmarshal(data)
+					require.NoError(t, err)
+					written[snap.Name] = true
+				case <-deadline.C:
+					t.Fatalf("final snapshot was dropped: wrote %v", written)
+				}
+			}
+			require.True(t, written[final.name])
+		})
+	}
 }
 
 func TestSnapshotCompletionSignalsWaiters(t *testing.T) {
@@ -846,12 +906,8 @@ func awaitSnapshotClean(t *testing.T, sess *session) {
 
 func startSnapshotEncodeWorker(t *testing.T, d *Daemon) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(t.Context())
-	d.startSnapshotEncodeWorker(ctx)
-	t.Cleanup(func() {
-		cancel()
-		d.stopSnapshotEncodeWorker()
-	})
+	d.startSnapshotEncodeWorker()
+	t.Cleanup(d.stopSnapshotEncodeWorker)
 }
 
 type gatedSnapshotStore struct {
