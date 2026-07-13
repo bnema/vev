@@ -383,6 +383,10 @@ func (d *Daemon) handoffCoordinator(from, target *session, old, current *attache
 	}
 	current.sendMu.Lock()
 	current.output.rebase()
+	// Capture snapshots are attachment-owned but pane IDs are only session-
+	// local. Discard them while the attachment is exclusively held so a pane
+	// in target cannot reuse pixels from an identically named source pane.
+	current.captureFrames = nil
 	current.sendMu.Unlock()
 	d.attachCoordinator(target, old, current, true)
 }
@@ -470,14 +474,18 @@ func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain
 	wsz := tb.size
 	tb.mu.Unlock()
 
-	if clientSize.Valid() && wsz != tabSize(clientSize) {
+	resized := clientSize.Valid() && wsz != tabSize(clientSize)
+	if resized {
 		d.resizeForFirstPaint(sess, ac, clientSize)
 	}
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
 	// Activation can synchronously resize a retained floating pane through the
-	// same transaction. Fold its invalidation into this mandatory Welcome frame.
+	// same transaction. A resize already emitted the mandatory reset, so avoid
+	// queuing a second source-session frame that could outlive a hand-off.
 	d.activateTab(sess, tb)
-	d.invalidateRenderNow(sess, ac, true, "client.go")
+	if !resized {
+		d.invalidateRenderNow(sess, ac, true, "client.go")
+	}
 }
 
 // runConnLoop is the per-connection input router: it pumps client messages
