@@ -22,7 +22,7 @@ func TestHarnessCanonicalLocalRolesAreIsolatedAcrossRepetitions(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(t.TempDir(), "vev")
-	build := exec.Command("/usr/local/go/bin/go", "build", "-o", bin, "./")
+	build := exec.Command("go", "build", "-o", bin, "./")
 	build.Dir = root
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build public CLI: %v\n%s", err, output)
@@ -120,7 +120,7 @@ func TestHarnessResolvesCanonicalRelativePathsBeforeRoleCWDChanges(t *testing.T)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(workspace) })
 	bin := filepath.Join(workspace, "vev")
-	build := exec.Command("/usr/local/go/bin/go", "build", "-o", bin, "./")
+	build := exec.Command("go", "build", "-o", bin, "./")
 	build.Dir = root
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build public CLI: %v\n%s", err, output)
