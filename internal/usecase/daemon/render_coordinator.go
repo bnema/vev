@@ -652,6 +652,9 @@ func (c *renderCoordinator) wakeCurrent(w renderWake) bool {
 func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 	c.mu.Lock()
 	var timer, resizeTimer, retryTimer ports.Timer
+	var observer ports.RuntimeObserver
+	var queueCorrelation, ackCorrelation ports.RuntimeCorrelation
+	var queueMarked, ackBlocked bool
 	if c.attachment == ac {
 		c.advanceAttachmentEpochLocked(ac)
 		c.attachment = nil
@@ -677,10 +680,10 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 		}
 		retryTimer, c.retryTimer = c.retryTimer, nil
 		c.retryGen++
+		observer, queueCorrelation, queueMarked = c.opts.observer, c.queueCorrelation, c.queueMarked
+		ackCorrelation, ackBlocked = c.ackCorrelation, c.ackBlocked
+		c.queueMarked, c.ackBlocked = false, false
 	}
-	observer, queueCorrelation, queueMarked := c.opts.observer, c.queueCorrelation, c.queueMarked
-	ackCorrelation, ackBlocked := c.ackCorrelation, c.ackBlocked
-	c.queueMarked, c.ackBlocked = false, false
 	c.mu.Unlock()
 	stopTimer(timer)
 	stopTimer(resizeTimer)
@@ -701,6 +704,9 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 		ready = readiness[0]
 	}
 	c.mu.Lock()
+	var observer ports.RuntimeObserver
+	var queueCorrelation, ackCorrelation ports.RuntimeCorrelation
+	var queueMarked, ackBlocked bool
 	// A coordinator may be installed while replacing a legacy attachment
 	// which predated coordinator ownership. In that case nil has no pending
 	// identity to invalidate, and the replacement becomes the first bound
@@ -734,10 +740,10 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 		}
 		retryTimer, c.retryTimer = c.retryTimer, nil
 		c.retryGen++
+		observer, queueCorrelation, queueMarked = c.opts.observer, c.queueCorrelation, c.queueMarked
+		ackCorrelation, ackBlocked = c.ackCorrelation, c.ackBlocked
+		c.queueMarked, c.ackBlocked = false, false
 	}
-	observer, queueCorrelation, queueMarked := c.opts.observer, c.queueCorrelation, c.queueMarked
-	ackCorrelation, ackBlocked := c.ackCorrelation, c.ackBlocked
-	c.queueMarked, c.ackBlocked = false, false
 	c.mu.Unlock()
 	stopTimer(timer)
 	stopTimer(resizeTimer)
@@ -1133,12 +1139,16 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 	timer := c.detachNormalTimerLocked()
 	c.pending, c.pendingReset, c.pendingUrgent, c.ackDeferred, c.deadlineDue, c.coalesced, c.armed = false, false, false, false, false, 0, false
 	observer, queueCorrelation, queueMarked := c.opts.observer, c.queueCorrelation, c.queueMarked
-	c.queueMarked = false
+	ackCorrelation, ackBlocked := c.ackCorrelation, c.ackBlocked
+	c.queueMarked, c.ackBlocked = false, false
 	wake := c.opts.wake
 	c.mu.Unlock()
 	stopTimer(timer)
 	if queueMarked && observer != nil {
 		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, true))
+	}
+	if ackBlocked && observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", ackCorrelation, ports.RuntimeACKBlockedEnd, 0, true))
 	}
 	if wake != nil && !headlessPreviewOnly {
 		wake(w)

@@ -288,7 +288,7 @@ func commitDamageReceipts(receipts []damageReceipt) {
 // sendMu for the complete capture/compose/emit transaction.
 func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRenderState, composed composedRenderFrame, batches ...*runtimeMarkBatch) bool {
 	var ownedMarks runtimeMarkBatch
-	marks := (*runtimeMarkBatch)(nil)
+	var marks *runtimeMarkBatch
 	if len(batches) != 0 {
 		marks = batches[0]
 	} else {

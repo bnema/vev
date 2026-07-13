@@ -140,6 +140,67 @@ func TestTransportObservabilityBlockedRenderObserverReleasesArchitectureLocks(t 
 
 // ACK-blocked start is captured while coordinator state changes, then emitted
 // after c.mu is unlocked. This closes the remaining coordinator-observer path.
+func TestTransportObservabilityACKBlockedSpansEndExactlyOnce(t *testing.T) {
+	cases := []struct {
+		name   string
+		finish func(*renderCoordinator, *bool)
+	}{
+		{
+			name: "notify ACK",
+			finish: func(rc *renderCoordinator, ready *bool) {
+				*ready = true
+				rc.notifyAck()
+			},
+		},
+		{
+			name: "successful consume",
+			finish: func(rc *renderCoordinator, ready *bool) {
+				*ready = true
+				rc.fire(rc.generation, false, false)
+			},
+		},
+		{
+			name: "teardown",
+			finish: func(rc *renderCoordinator, ready *bool) {
+				rc.noteSessionTeardown()
+			},
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			observer := &daemonRuntimeObserver{}
+			ready := false
+			rc := newRenderCoordinator(renderCoordinatorOptions{
+				observer: observer,
+				ackReady: func() bool { return ready },
+			})
+			rc.attach(&attachedClient{})
+			rc.invalidate(renderInvalidation{class: invalidateOutput})
+			rc.fire(rc.generation, false, true)
+			tt.finish(rc, &ready)
+			// A late notification after consuming or tearing down must not emit a
+			// second end for the already-cleared blocked interval.
+			rc.notifyAck()
+
+			var starts, ends []ports.RuntimeMark
+			for _, mark := range observer.marks {
+				switch mark.Kind {
+				case ports.RuntimeACKBlockedStart:
+					starts = append(starts, mark)
+				case ports.RuntimeACKBlockedEnd:
+					ends = append(ends, mark)
+				}
+			}
+			if len(starts) != 1 || len(ends) != 1 {
+				t.Fatalf("ACK-blocked span marks: starts=%+v ends=%+v all=%+v", starts, ends, observer.marks)
+			}
+			if starts[0].Sequence != ends[0].Sequence || starts[0].RequestID != ends[0].RequestID || starts[0].Epoch != ends[0].Epoch {
+				t.Fatalf("ACK-blocked span correlation changed: start=%+v end=%+v", starts[0], ends[0])
+			}
+		})
+	}
+}
+
 func TestTransportObservabilityBlockedCoordinatorObserverReleasesLock(t *testing.T) {
 	observer := newBlockingDaemonRuntimeObserver()
 	rc := newRenderCoordinator(renderCoordinatorOptions{

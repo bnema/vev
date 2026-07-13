@@ -88,6 +88,34 @@ func TestRuntimeCorrelationObserverUsesHarnessProcessInputs(t *testing.T) {
 	}
 }
 
+func TestRuntimeCorrelationObserverAllocatesMissingIDsProcessWide(t *testing.T) {
+	var got []RuntimeMark
+	collect := runtimeObserverFunc(func(mark RuntimeMark) { got = append(got, mark) })
+	first, err := NewRuntimeCorrelationObserver(collect, RuntimeCorrelationInputs{Scenario: "scenario", Run: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewRuntimeCorrelationObserver(collect, RuntimeCorrelationInputs{Scenario: "scenario", Run: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first.ObserveRuntime(RuntimeMark{Schema: RuntimeMarkSchema, Component: "first", Kind: RuntimeEmitStart, Valid: true})
+	second.ObserveRuntime(RuntimeMark{Schema: RuntimeMarkSchema, Component: "second", Kind: RuntimeEmitEnd, Valid: true})
+
+	if len(got) != 2 {
+		t.Fatalf("marks=%+v", got)
+	}
+	if got[0].Sequence == got[1].Sequence {
+		t.Fatalf("wrapper-local sequence collision: %+v", got)
+	}
+	for _, mark := range got {
+		if mark.RequestID != mark.Sequence || mark.Epoch != mark.RequestID {
+			t.Fatalf("missing-ID fallback changed: %+v", mark)
+		}
+	}
+}
+
 func TestRuntimeCorrelationObserverRejectsInvalidHarnessInputs(t *testing.T) {
 	for _, in := range []RuntimeCorrelationInputs{{}, {Scenario: "scenario"}} {
 		if _, err := NewRuntimeCorrelationObserver(runtimeObserverFunc(func(RuntimeMark) {}), in); err == nil {

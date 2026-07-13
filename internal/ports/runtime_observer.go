@@ -97,7 +97,7 @@ type RuntimeCorrelationInputs struct {
 
 // NewRuntimeCorrelationObserver binds every mark from one OS process to its
 // harness manifest scenario/run. Operation IDs remain producer-owned when
-// supplied; missing IDs are assigned from this process-local sequence.
+// supplied; missing IDs are assigned from the process-wide allocator.
 func NewRuntimeCorrelationObserver(observer RuntimeObserver, inputs RuntimeCorrelationInputs) (RuntimeObserver, error) {
 	if observer == nil || inputs.Scenario == "" || inputs.Run == 0 {
 		return nil, errors.New("invalid runtime correlation inputs")
@@ -108,7 +108,6 @@ func NewRuntimeCorrelationObserver(observer RuntimeObserver, inputs RuntimeCorre
 type runtimeCorrelationObserver struct {
 	observer RuntimeObserver
 	inputs   RuntimeCorrelationInputs
-	sequence atomic.Uint64
 }
 
 func (o *runtimeCorrelationObserver) ObserveRuntime(mark RuntimeMark) {
@@ -117,7 +116,7 @@ func (o *runtimeCorrelationObserver) ObserveRuntime(mark RuntimeMark) {
 	}
 	mark.Scenario, mark.Run = o.inputs.Scenario, o.inputs.Run
 	if mark.Sequence == 0 {
-		mark.Sequence = o.sequence.Add(1)
+		mark.Sequence = runtimeMarkSequence.Add(1)
 	}
 	if mark.RequestID == 0 {
 		mark.RequestID = mark.Sequence
