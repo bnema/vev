@@ -254,6 +254,56 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 	})
 }
 
+func TestPTYReaderRestoresPrimaryScreenImmediatelyAfterDEC1049Exit(t *testing.T) {
+	pty, steps, processed := newChannelPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
+	// A one-frame local output window forces the replay to exercise the ACK
+	// edge between each visible terminal state without relying on elapsed time.
+	ac.output.maxOutstanding = 1
+	clock := newCoordinatorMockClock(t, 8)
+	d.clock = clock.clock
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	client := vt.NewScreen(80, 25)
+
+	d.sessWg.Add(1)
+	go d.ptyReader(sess, sess.tabs[0], sess.tabs[0].focusedPane())
+
+	replay := func(data []byte, acknowledge bool) ports.Output {
+		t.Helper()
+		steps <- channelPTYStep{data: data}
+		awaitPTYReadProcessed(t, processed)
+		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
+		frame := awaitOutputFrameWithoutSleep(t, sends)
+		out := mustApplyOutput(t, client, frame)
+		if acknowledge {
+			ac.ackOutputState(out.NewStateNum)
+			rc.notifyAck()
+		}
+		return out
+	}
+
+	replay([]byte("PRIMARY"), true)
+	primary := client.Frame.Clone()
+
+	// This is the PTY byte sequence emitted by the reported command: primary
+	// content, a dense DEC alternate screen, then an immediate DEC restore.
+	alternate := replay(append([]byte("\x1b[?1049h"), []byte(strings.Repeat("X", 80*23))...), false)
+	require.Equal(t, 'X', client.Frame.At(79, 23).Rune, "fixture must make alternate cells client-visible")
+
+	steps <- channelPTYStep{data: []byte("\x1b[?1049l")}
+	awaitPTYReadProcessed(t, processed)
+	fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
+	requireNoCoordinatorOutputFrame(t, sends)
+	ac.ackOutputState(alternate.NewStateNum)
+	rc.notifyAck()
+	exit := mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
+	require.NotEmpty(t, exit.Data, "the first post-exit output must actively remove alternate cells")
+	require.Equal(t, frameRows(primary), frameRows(client.Frame), "the first output after DEC 1049 exit must restore primary cells and erase every alternate glyph")
+
+	steps <- channelPTYStep{err: io.EOF}
+	d.sessWg.Wait()
+}
+
 func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *testing.T) {
 	t.Run("detached target completes cross-session preview without later PTY output", func(t *testing.T) {
 		pty, steps, processed := newChannelPTY(t)
