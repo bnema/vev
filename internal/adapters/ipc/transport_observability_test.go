@@ -82,6 +82,7 @@ func assertIPCFailedSpanPairs(t *testing.T, path string) {
 	}
 	type mark struct {
 		ProcessID string `json:"process_id"`
+		Component string `json:"component"`
 		Scenario  string `json:"scenario"`
 		Run       uint64 `json:"run"`
 		Sequence  uint64 `json:"sequence"`
@@ -95,6 +96,7 @@ func assertIPCFailedSpanPairs(t *testing.T, path string) {
 		run, sequence, requestID, epoch uint64
 	}
 	starts := make(map[spanKey]mark)
+	startCounts := map[string]int{}
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		var m mark
 		if err := json.Unmarshal([]byte(line), &m); err != nil {
@@ -103,10 +105,14 @@ func assertIPCFailedSpanPairs(t *testing.T, path string) {
 		key := spanKey{m.ProcessID, m.Scenario, m.Run, m.Sequence, m.RequestID, m.Epoch}
 		switch m.Kind {
 		case "adapter_receive_start", "adapter_send_start":
+			if m.ProcessID != "ipc-process" || m.Component != "ipc" || m.Scenario != "runtime" || m.Run != 1 || m.Sequence == 0 || m.RequestID != m.Sequence || m.Epoch != m.Sequence || !m.Valid {
+				t.Fatalf("adapter start has invalid identity: %#v", m)
+			}
 			if _, exists := starts[key]; exists {
 				t.Fatalf("duplicate adapter start for %#v", key)
 			}
 			starts[key] = m
+			startCounts[m.Kind]++
 		case "adapter_receive_end", "adapter_send_end":
 			start, ok := starts[key]
 			if !ok || strings.TrimSuffix(start.Kind, "_start") != strings.TrimSuffix(m.Kind, "_end") {
@@ -120,6 +126,12 @@ func assertIPCFailedSpanPairs(t *testing.T, path string) {
 	}
 	if len(starts) != 0 {
 		t.Fatalf("unmatched adapter starts: %#v", starts)
+	}
+	if got := startCounts["adapter_receive_start"]; got != 2 {
+		t.Errorf("adapter receive starts = %d, want 2", got)
+	}
+	if got := startCounts["adapter_send_start"]; got != 1 {
+		t.Errorf("adapter send starts = %d, want 1", got)
 	}
 }
 

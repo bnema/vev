@@ -21,7 +21,9 @@ func TestTransportObservabilityJSONLOwnsTicksAndSchema(t *testing.T) {
 	observer.ObserveRuntime(validRuntimeMark(ports.RuntimeComposeStart))
 	// A producer's clock domain must never enter a JSONL record. Rejection is
 	// observable as no second record, rather than a silently rewritten mark.
-	observer.ObserveRuntime(ports.RuntimeMark{Schema: 1, ProcessID: "daemon-process", Component: "daemon", Scenario: "resize", Run: 7, Sequence: 9, Kind: ports.RuntimeComposeEnd, Tick: 99, Valid: true})
+	producerTicked := validRuntimeMark(ports.RuntimeComposeEnd)
+	producerTicked.Tick = 99
+	observer.ObserveRuntime(producerTicked)
 	if err := closer.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}

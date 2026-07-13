@@ -76,6 +76,9 @@ func ensureDaemon(ctx context.Context, dir string, dial dialFunc, spawn spawnFun
 		// rather than spawning a second daemon.
 		defer release()
 		slog.Info("spawning daemon", "socket_dir", dir)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if err := spawn(); err != nil {
 			slog.Error("daemon spawn failed", "err", err)
 			return nil, fmt.Errorf("vev: spawning daemon: %w", err)

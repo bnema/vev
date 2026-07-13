@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
 func TestPerformanceTraceUsesHarnessProcessMapping(t *testing.T) {
@@ -19,7 +20,9 @@ func TestPerformanceTraceUsesHarnessProcessMapping(t *testing.T) {
 	t.Setenv("VEV_PERF_SCENARIO", "1x4-idle-local")
 	t.Setenv("VEV_PERF_RUN", "1")
 
-	observer, closer, err := performanceTrace(&traceTestClock{})
+	clock := portsmocks.NewMockClock(t)
+	clock.EXPECT().Now().Return(time.Unix(0, 1)).Once()
+	observer, closer, err := performanceTrace(clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,11 +53,6 @@ func TestPerformanceTraceUsesHarnessProcessMapping(t *testing.T) {
 		t.Fatalf("mark does not match harness mapping: %+v", mark)
 	}
 }
-
-type traceTestClock struct{}
-
-func (*traceTestClock) Now() time.Time                     { return time.Unix(0, 1) }
-func (*traceTestClock) NewTimer(time.Duration) ports.Timer { return nil }
 
 func TestPerformanceTraceAppWiresOneObserverPerProcess(t *testing.T) {
 	source, err := os.ReadFile("run.go")

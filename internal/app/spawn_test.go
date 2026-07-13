@@ -153,6 +153,28 @@ func TestEnsureDaemonContextCancelledDoesNotDialOrSpawn(t *testing.T) {
 	}
 }
 
+func TestEnsureDaemonDoesNotSpawnWhenContextCancelsAfterFailedDial(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var spawnCalls atomic.Int32
+	dial := func(context.Context, string) (ports.Transport, error) {
+		cancel()
+		return nil, errDialFailed
+	}
+	spawn := func() error {
+		spawnCalls.Add(1)
+		return nil
+	}
+
+	_, err := ensureDaemon(ctx, filepath.Join(t.TempDir(), "vev"), dial, spawn, fastBackoff)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ensureDaemon error = %v, want context.Canceled", err)
+	}
+	if got := spawnCalls.Load(); got != 0 {
+		t.Fatalf("spawn called %d times after canceled failed dial, want 0", got)
+	}
+}
+
 func TestEnsureDaemonSpawnsThenDials(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "vev")
 	want := portsmocks.NewMockTransport(t)
