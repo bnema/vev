@@ -135,53 +135,13 @@ func appendHistoryCell(dst []byte, cell renderer.Cell) []byte {
 }
 
 // UnmarshalHistory strictly decodes a MarshalHistory payload. It rejects
-// malformed declarations, truncated data, and trailing bytes.
+// malformed declarations, cells, truncated data, and trailing bytes.
 func UnmarshalHistory(data []byte) (HistoryView, error) {
-	if len(data) < 9 || string(data[:4]) != historyMagic || data[4] != historyVersion {
+	view, _, ok := parseHistory(data, true)
+	if !ok {
 		return HistoryView{}, fmt.Errorf("unmarshal history: %w", errInvalidHistory)
 	}
-	if _, ok := preflightHistory(data[5:]); !ok {
-		return HistoryView{}, fmt.Errorf("unmarshal history: %w", errInvalidHistory)
-	}
-
-	p := historyParser{data: data[5:]}
-	chunkCount, ok := p.uint32()
-	if !ok || uint64(chunkCount) > uint64(len(p.data))/4 {
-		return HistoryView{}, fmt.Errorf("unmarshal history: %w", errInvalidHistory)
-	}
-	chunks := make([]*HistoryChunk, 0, chunkCount)
-	rowsTotal := 0
-	for range chunkCount {
-		rowCount, ok := p.uint32()
-		if !ok || rowCount == 0 || rowCount > maxHistoryChunkRows || uint64(rowCount) > uint64(len(p.data))/4 {
-			return HistoryView{}, fmt.Errorf("unmarshal history: %w", errInvalidHistory)
-		}
-		if rowsTotal > math.MaxInt-int(rowCount) {
-			return HistoryView{}, fmt.Errorf("unmarshal history: %w", errInvalidHistory)
-		}
-		rows := make([][]renderer.Cell, 0, rowCount)
-		for range rowCount {
-			cellCount, ok := p.uint32()
-			if !ok || uint64(cellCount) > maxHistoryRowCells || uint64(cellCount) > uint64(len(p.data))/historyCellBytes || uint64(cellCount) > uint64(math.MaxInt) {
-				return HistoryView{}, fmt.Errorf("unmarshal history: %w", errInvalidHistory)
-			}
-			row := make([]renderer.Cell, cellCount)
-			for i := range row {
-				cell, ok := p.cell()
-				if !ok || !validHistoryCell(cell) {
-					return HistoryView{}, fmt.Errorf("unmarshal history: %w", errInvalidHistory)
-				}
-				row[i] = cell
-			}
-			rows = append(rows, row)
-		}
-		rowsTotal += int(rowCount)
-		chunks = append(chunks, &HistoryChunk{rows: rows})
-	}
-	if len(p.data) != 0 {
-		return HistoryView{}, fmt.Errorf("unmarshal history: %w", errInvalidHistory)
-	}
-	return HistoryView{chunks: chunks, rows: rowsTotal}, nil
+	return view, nil
 }
 
 type historyDecodeStats struct {
@@ -192,35 +152,79 @@ type historyDecodeStats struct {
 	bytes  uint64
 }
 
-// preflightHistory validates declarations and aggregate budgets without
-// allocating decoded history. Its totals can be composed by snapshot decoders.
+// preflightHistory validates a history blob without allocating decoded rows.
+// It shares parseHistory with UnmarshalHistory so both paths enforce the same
+// structural, cell, and aggregate-budget constraints.
 func preflightHistory(data []byte) (historyDecodeStats, bool) {
-	p := historyParser{data: data}
+	_, stats, ok := parseHistory(data, false)
+	return stats, ok
+}
+
+// parseHistory is the authoritative history payload validation path. populate
+// controls whether validated cells are retained in a HistoryView.
+func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, bool) {
+	if len(data) < 9 || string(data[:4]) != historyMagic || data[4] != historyVersion {
+		return HistoryView{}, historyDecodeStats{}, false
+	}
+
+	p := historyParser{data: data[5:]}
 	chunkCount, ok := p.uint32()
 	if !ok || uint64(chunkCount) > maxHistoryChunks || uint64(chunkCount) > uint64(len(p.data))/4 {
-		return historyDecodeStats{}, false
+		return HistoryView{}, historyDecodeStats{}, false
 	}
 	stats := historyDecodeStats{chunks: uint64(chunkCount)}
+	var chunks []*HistoryChunk
+	if populate {
+		chunks = make([]*HistoryChunk, 0, chunkCount)
+	}
 	for range chunkCount {
 		rowCount, ok := p.uint32()
-		if !ok || rowCount == 0 || rowCount > maxHistoryChunkRows || uint64(rowCount) > uint64(len(p.data))/4 || !addHistoryDecodeBudget(&stats.rows, uint64(rowCount), maxHistoryRows) {
-			return historyDecodeStats{}, false
+		if !ok || rowCount == 0 || rowCount > maxHistoryChunkRows ||
+			uint64(rowCount) > uint64(len(p.data))/4 ||
+			!addHistoryDecodeBudget(&stats.rows, uint64(rowCount), maxHistoryRows) {
+			return HistoryView{}, historyDecodeStats{}, false
+		}
+
+		var rows [][]renderer.Cell
+		if populate {
+			rows = make([][]renderer.Cell, 0, rowCount)
 		}
 		for range rowCount {
 			cellCount, ok := p.uint32()
 			cellBytes, validCellBytes := historyCellByteCount(uint64(cellCount))
-			if !ok || uint64(cellCount) > maxHistoryRowCells || !validCellBytes || uint64(cellCount) > uint64(len(p.data))/historyCellBytes {
-				return historyDecodeStats{}, false
-			}
-			if !addHistoryDecodeBudget(&stats.cells, uint64(cellCount), maxHistoryCells) ||
+			if !ok || uint64(cellCount) > maxHistoryRowCells || !validCellBytes ||
+				uint64(cellCount) > uint64(len(p.data))/historyCellBytes ||
+				!addHistoryDecodeBudget(&stats.cells, uint64(cellCount), maxHistoryCells) ||
 				!addHistoryDecodeBudget(&stats.styles, uint64(cellCount), maxHistoryDecodeStyles) ||
 				!addHistoryDecodeBudget(&stats.bytes, cellBytes, maxHistoryDecodedBytes) {
-				return historyDecodeStats{}, false
+				return HistoryView{}, historyDecodeStats{}, false
 			}
-			p.data = p.data[int(cellBytes):]
+
+			var row []renderer.Cell
+			if populate {
+				row = make([]renderer.Cell, cellCount)
+			}
+			for i := uint32(0); i < cellCount; i++ {
+				cell, ok := p.cell()
+				if !ok || !validHistoryCell(cell) {
+					return HistoryView{}, historyDecodeStats{}, false
+				}
+				if populate {
+					row[i] = cell
+				}
+			}
+			if populate {
+				rows = append(rows, row)
+			}
+		}
+		if populate {
+			chunks = append(chunks, &HistoryChunk{rows: rows})
 		}
 	}
-	return stats, len(p.data) == 0
+	if len(p.data) != 0 {
+		return HistoryView{}, historyDecodeStats{}, false
+	}
+	return HistoryView{chunks: chunks, rows: int(stats.rows)}, stats, true
 }
 
 func historyCellByteCount(cellCount uint64) (uint64, bool) {

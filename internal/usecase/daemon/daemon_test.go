@@ -295,6 +295,7 @@ type welcomeBlockingTransport struct {
 	welcomeEntered chan struct{}
 	releaseWelcome chan struct{}
 	recvDone       chan struct{}
+	releaseOnce    sync.Once
 	closeOnce      sync.Once
 }
 
@@ -320,10 +321,16 @@ func newWelcomeBlockingTransport(t *testing.T) *welcomeBlockingTransport {
 		return ports.Frame{}, io.EOF
 	}).Maybe()
 	b.tr.EXPECT().Close().Return(nil).Maybe()
+	t.Cleanup(b.finish)
 	return b
 }
 
+func (b *welcomeBlockingTransport) release() {
+	b.releaseOnce.Do(func() { close(b.releaseWelcome) })
+}
+
 func (b *welcomeBlockingTransport) finish() {
+	b.release()
 	b.closeOnce.Do(func() { close(b.recvDone) })
 }
 
@@ -448,8 +455,8 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 		close(done)
 	}()
 
-	<-tr.welcomeEntered
-	welcome := <-tr.sends
+	awaitTestCompletion(t, tr.welcomeEntered, "timed out waiting for Welcome send")
+	welcome := awaitFrame(t, tr.sends, ports.MsgWelcome)
 	require.Equal(t, ports.MsgWelcome, welcome.Type)
 	sess := firstSession(d)
 	sess.mu.Lock()
@@ -469,16 +476,16 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 	rc.mu.Unlock()
 	require.NotNil(t, workerDone)
 	timer.ch <- time.Time{}
-	awaitHandshakeWorker(t, workerDone)
+	awaitTestCompletion(t, workerDone, "coordinator deadline worker did not complete")
 	requireNoCoordinatorOutputFrame(t, tr.sends)
 
-	close(tr.releaseWelcome)
+	tr.release()
 	output := awaitFrame(t, tr.sends, ports.MsgOutput)
 	first, err := ports.UnmarshalOutput(output.Payload)
 	require.NoError(t, err)
 	require.Zero(t, first.BaseStateNum, "the first post-Welcome frame is full")
 	tr.finish()
-	<-done
+	awaitTestCompletion(t, done, "timed out waiting for Welcome handler completion")
 	requireNoCoordinatorOutputFrame(t, tr.sends)
 }
 

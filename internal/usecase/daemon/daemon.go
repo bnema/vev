@@ -150,8 +150,14 @@ type Daemon struct {
 	done     chan struct{}
 	doneOnce sync.Once
 
-	sessWg sync.WaitGroup // PTY reader goroutines
+	// sessWg owns attention animation, bar-script polling, CWD sampling,
+	// snapshot save/restore, and floating-session launch goroutines.
+	sessWg sync.WaitGroup
 	connWg sync.WaitGroup // per-connection handler goroutines
+	// attachmentCleanupWg owns replacement transport closes and retired render
+	// worker joins. Only connection handlers add work; Serve waits for those
+	// handlers before joining this group, so no Add races its terminal Wait.
+	attachmentCleanupWg sync.WaitGroup
 }
 
 type parkedAttachment struct {
@@ -434,6 +440,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	// entered killSession may still submit its terminal capture after the
 	// registry snapshot has been removed.
 	d.connWg.Wait()
+	d.attachmentCleanupWg.Wait()
 	d.stopSnapshotEncodeWorker()
 	d.shutdownAll(ports.ReasonServerShutdown)
 	d.sessWg.Wait()
@@ -660,8 +667,8 @@ type protoErr struct {
 func (e *protoErr) Error() string { return e.text }
 
 // finishAttach completes an attachment prepared while d.mu is held. It
-// publishes the terminal state before releasing d.mu, then performs worker
-// joins and replacement teardown without the daemon lock.
+// publishes the terminal state before releasing d.mu, then queues replacement
+// teardown so obsolete worker joins never delay the new handshake.
 func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, term terminalEnv, h ports.Hello) *attachedClient {
 	ac, old, cleanup := d.attachClientDeferred(sess, tr, sz, attachClientOptions{
 		clientID:          h.ClientID,
@@ -672,8 +679,7 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 	sess.terminal = term
 	sess.mu.Unlock()
 	d.mu.Unlock()
-	cleanup.finish()
-	d.detachReplacedClient(old)
+	d.retireReplacedClient(old, cleanup)
 	return ac
 }
 

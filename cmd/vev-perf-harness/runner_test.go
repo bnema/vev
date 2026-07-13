@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bnema/vev/pkg/safedir"
 )
 
 func TestHarnessCanonicalLocalRolesAreIsolatedAcrossRepetitions(t *testing.T) {
@@ -126,7 +128,7 @@ func TestHarnessResolvesCanonicalRelativePathsBeforeRoleCWDChanges(t *testing.T)
 		t.Fatalf("build public CLI: %v\n%s", err, output)
 	}
 	manifestPath := filepath.Join(workspace, "testdata", "perf", "manifest.json")
-	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o700); err != nil {
+	if err := safedir.EnsurePrivate(filepath.Dir(manifestPath)); err != nil {
 		t.Fatal(err)
 	}
 	contents, err := os.ReadFile(filepath.Join(root, "testdata", "perf", "manifest.json"))

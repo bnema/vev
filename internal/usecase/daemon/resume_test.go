@@ -171,10 +171,10 @@ func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
 	rc.mu.Unlock()
 	require.NotNil(t, workerDone)
 	timer.ch <- time.Time{}
-	awaitHandshakeWorker(t, workerDone)
+	awaitTestCompletion(t, workerDone, "coordinator deadline worker did not complete")
 	requireNoCoordinatorOutputFrame(t, tr.sends)
 
-	close(tr.releaseWelcome)
+	tr.release()
 	output := awaitFrame(t, tr.sends, ports.MsgOutput)
 	first, err := ports.UnmarshalOutput(output.Payload)
 	require.NoError(t, err)

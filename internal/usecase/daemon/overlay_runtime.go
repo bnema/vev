@@ -13,12 +13,13 @@ import (
 type overlayRuntime struct {
 	ac *attachedClient
 
-	pickerMu             sync.Mutex
-	picker               *picker.Model
-	pickerPreview        *tab
-	pickerPreviewSession *session
-	pickerPending        []byte
-	pickerESC            pendingByteTimer
+	pickerMu                sync.Mutex
+	picker                  *picker.Model
+	pickerPreview           *tab
+	pickerPreviewSession    *session
+	pickerPreviewGeneration uint64
+	pickerPending           []byte
+	pickerESC               pendingByteTimer
 
 	paletteMu         sync.Mutex
 	palette           *palette.Model

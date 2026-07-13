@@ -119,6 +119,36 @@ func TestHarnessFlagsRejectShortMeasurements(t *testing.T) {
 	}
 }
 
+func TestValidateManifestRejectsEmptyAndDuplicateMatrixIDs(t *testing.T) {
+	canonical, err := readManifest(filepath.Join("..", "..", "testdata", "perf", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*manifest)
+		want   string
+	}{
+		{"empty topology", func(m *manifest) { m.Topologies[0].ID = "" }, "empty topology id"},
+		{"duplicate topology", func(m *manifest) { m.Topologies[1].ID = m.Topologies[0].ID }, "duplicate topology id"},
+		{"empty workload", func(m *manifest) { m.Workloads[0] = "" }, "empty workload id"},
+		{"duplicate workload", func(m *manifest) { m.Workloads[1] = m.Workloads[0] }, "duplicate workload id"},
+		{"empty transport", func(m *manifest) { m.Transports[0].ID = "" }, "empty transport id"},
+		{"duplicate transport", func(m *manifest) { m.Transports[1].ID = m.Transports[0].ID }, "duplicate transport id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := canonical
+			m.Topologies = append([]topology(nil), canonical.Topologies...)
+			m.Workloads = append([]string(nil), canonical.Workloads...)
+			m.Transports = append([]transport(nil), canonical.Transports...)
+			tc.mutate(&m)
+			if err := validateManifest(m); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("validateManifest() error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestHarnessManifestCoversCanonicalMatrix(t *testing.T) {
 	m, err := readManifest(filepath.Join("..", "..", "testdata", "perf", "manifest.json"))
 	if err != nil {
@@ -142,7 +172,7 @@ func TestHarnessCreatesExclusiveTraceManifestAndEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	closeTestFile(t, raw)
 	launcher := &fakeLauncher{}
 	h := defaultHarness()
 	h.clock = &fakeClock{}

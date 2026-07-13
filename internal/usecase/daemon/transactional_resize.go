@@ -243,6 +243,9 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *at
 		rc.scheduleResizeRetryForLease(epoch, ac, lease, func() { d.retryResizeMembers(sess, ac, lease, epoch, failed) })
 	}
 	if succeeded {
+		// Retry completion changes VT state after the original layout commit.
+		// Keep a named session's eventual snapshot generation aligned with it.
+		markSnapshotDirty(sess)
 		rc.invalidateForLease(ac, lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "transactional_resize.go"})
 	}
 }

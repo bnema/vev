@@ -227,6 +227,61 @@ func hostileHistoryDeclarations(chunkCount, rowCount int) []byte {
 	return data
 }
 
+func TestHistoryPreflightMatchesUnmarshalMalformedInput(t *testing.T) {
+	valid, err := MarshalHistory(historyViewWithDimensions(1, 1))
+	if err != nil {
+		t.Fatalf("marshal valid history: %v", err)
+	}
+	invalidRune := append([]byte(nil), valid...)
+	binary.BigEndian.PutUint32(invalidRune[17:21], ^uint32(0))
+	invalidUnderlineStyle := append([]byte(nil), valid...)
+	invalidUnderlineStyle[17+29] = byte(renderer.UnderlineDashed + 1)
+
+	tests := []struct {
+		name  string
+		data  []byte
+		valid bool
+	}{
+		{name: "valid", data: valid, valid: true},
+		{name: "truncated cell", data: valid[:len(valid)-1]},
+		{name: "trailing byte", data: append(append([]byte(nil), valid...), 0)},
+		{name: "invalid rune", data: invalidRune},
+		{name: "invalid underline style", data: invalidUnderlineStyle},
+		{name: "aggregate row budget", data: hostileHistoryDeclarations(47, maxHistoryChunkRows)},
+		{name: "zero row count", data: []byte{'V', 'T', 'H', '1', historyVersion, 0, 0, 0, 1, 0, 0, 0, 0}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, preflightErr := PreflightHistoryBlob(tt.data)
+			_, unmarshalErr := UnmarshalHistory(tt.data)
+			if (preflightErr == nil) != tt.valid || (unmarshalErr == nil) != tt.valid {
+				t.Fatalf("preflight error = %v, unmarshal error = %v, want valid = %t", preflightErr, unmarshalErr, tt.valid)
+			}
+		})
+	}
+}
+
+func FuzzHistoryPreflightMatchesUnmarshal(f *testing.F) {
+	valid, err := MarshalHistory(historyViewWithDimensions(1, 1))
+	if err != nil {
+		f.Fatalf("marshal valid history: %v", err)
+	}
+	invalidRune := append([]byte(nil), valid...)
+	binary.BigEndian.PutUint32(invalidRune[17:21], ^uint32(0))
+	f.Add(valid)
+	f.Add(invalidRune)
+	f.Add([]byte("VTH1\x01\x00\x00\x00\x00"))
+	f.Add([]byte("not a history payload"))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, preflightErr := PreflightHistoryBlob(data)
+		_, unmarshalErr := UnmarshalHistory(data)
+		if (preflightErr == nil) != (unmarshalErr == nil) {
+			t.Fatalf("preflight error = %v, unmarshal error = %v", preflightErr, unmarshalErr)
+		}
+	})
+}
+
 func assertHistoryRowsEqual(t *testing.T, view HistoryView, want [][]renderer.Cell) {
 	t.Helper()
 	if got := view.Len(); got != len(want) {

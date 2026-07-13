@@ -128,12 +128,11 @@ func (c *renderCoordinator) scheduleResizeRetryForLease(epoch uint64, source *at
 	c.mu.Unlock()
 	stopAndJoinTimerWorker(old, nil)
 	if clock == nil {
+		// A nil clock disables deferred retries. Completing the generation keeps
+		// retry bookkeeping consistent without recursively re-entering resize.
 		c.mu.Lock()
 		c.retryTimerOwner().completeLocked(gen)
 		c.mu.Unlock()
-		if c.retryCurrentForLease(epoch, source, lease) {
-			run()
-		}
 		return
 	}
 	timer := clock.NewTimer(minOutputRenderDeadline)

@@ -3,7 +3,6 @@ package daemon
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -120,15 +119,7 @@ func TestRenderCoordinatorDetachJoinsSelectedDeadlineWorker(t *testing.T) {
 	}
 
 	close(release)
-	for range 4096 {
-		select {
-		case <-detached:
-			return
-		default:
-			runtime.Gosched()
-		}
-	}
-	t.Fatal("detach did not complete after the deadline worker was released")
+	awaitTestCompletion(t, detached, "detach did not complete after the deadline worker was released")
 }
 
 func TestRenderCoordinatorTimerCallbacksReenterCoordinator(t *testing.T) {
@@ -207,16 +198,7 @@ func (h *coordinatorHarness) armedTimers(t *testing.T) []*coordinatorMockTimer {
 // deterministic contract failure, not a slow behavior to poll for.
 func awaitWake(t *testing.T, ch chan renderWake) renderWake {
 	t.Helper()
-	for range 4096 {
-		select {
-		case w := <-ch:
-			return w
-		default:
-			runtime.Gosched()
-		}
-	}
-	t.Fatal("coordinator did not publish a wake after fake-clock advancement")
-	return renderWake{}
+	return awaitTestValue(t, ch, "coordinator did not publish a wake after fake-clock advancement")
 }
 
 func requireNoWake(t *testing.T, ch chan renderWake) {
@@ -230,16 +212,7 @@ func requireNoWake(t *testing.T, ch chan renderWake) {
 
 func awaitInvalidation(t *testing.T, ch chan renderInvalidation) renderInvalidation {
 	t.Helper()
-	for range 4096 {
-		select {
-		case inv := <-ch:
-			return inv
-		default:
-			runtime.Gosched()
-		}
-	}
-	t.Fatal("producer did not publish a coordinator invalidation")
-	return renderInvalidation{}
+	return awaitTestValue(t, ch, "producer did not publish a coordinator invalidation")
 }
 
 func requireNoInvalidation(t *testing.T, ch chan renderInvalidation) {
@@ -444,40 +417,16 @@ func TestRenderCoordinatorAckReadinessReentersWithoutBlockingResize(t *testing.T
 		rc.fire(1, false, true)
 		close(fireDone)
 	}()
-	for range 4096 {
-		select {
-		case <-ackEntered:
-			goto resize
-		default:
-			runtime.Gosched()
-		}
-	}
-	t.Fatal("ack readiness was not evaluated")
+	awaitTestCompletion(t, ackEntered, "ack readiness was not evaluated")
 
-resize:
 	go func() { resizeDone <- rc.recordResizeRequest(domain.Size{Cols: 120, Rows: 40}, owner) }()
-	for range 4096 {
-		select {
-		case epoch := <-resizeDone:
-			require.Equal(t, uint64(1), epoch)
-			wake := awaitWake(t, wakes)
-			require.Same(t, owner, wake.lease.attachment)
-			wake.lease = nil
-			require.Equal(t, renderWake{coalesced: 1}, wake)
-			for range 4096 {
-				select {
-				case <-fireDone:
-					return
-				default:
-					runtime.Gosched()
-				}
-			}
-			t.Fatal("fire did not return after wake")
-		default:
-			runtime.Gosched()
-		}
-	}
-	t.Fatal("ack readiness re-entry blocked resize metadata")
+	epoch := awaitTestValue(t, resizeDone, "ack readiness re-entry blocked resize metadata")
+	require.Equal(t, uint64(1), epoch)
+	wake := awaitWake(t, wakes)
+	require.Same(t, owner, wake.lease.attachment)
+	wake.lease = nil
+	require.Equal(t, renderWake{coalesced: 1}, wake)
+	awaitTestCompletion(t, fireDone, "fire did not return after wake")
 }
 
 func TestRenderCoordinatorAckDoesNotBypassAnUnexpiredDeadline(t *testing.T) {
@@ -704,17 +653,8 @@ func TestRenderCoordinatorSyncGateRetriesWhenBatchPublishesDuringPredicate(t *te
 	// pending consumption. A stale gate result must be rejected and retried.
 	h.rc.noteSyncBeginWithRenderability(second, 2, func() bool { return true })
 	close(releaseGate)
-	for range 4096 {
-		select {
-		case <-fireDone:
-			goto fired
-		default:
-			runtime.Gosched()
-		}
-	}
-	t.Fatal("fire did not finish after retrying the registry snapshot")
+	awaitTestCompletion(t, fireDone, "fire did not finish after retrying the registry snapshot")
 
-fired:
 	requireNoWake(t, h.wakes)
 	h.rc.noteSyncEnd(second, 2)
 	require.Equal(t, renderWake{urgent: true, coalesced: 1}, awaitWake(t, h.wakes))
@@ -844,7 +784,7 @@ func TestRenderCoordinatorPreviewWakesDoNotWaitForTargetAck(t *testing.T) {
 				h.rc.attach(&attachedClient{})
 			}
 			viewer := &attachedClient{}
-			h.rc.subscribePreviewFor(viewer, func(w renderWake) { h.previews <- w })
+			h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
 
 			h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "target output"})
 			timers := h.armedTimers(t)
@@ -880,7 +820,7 @@ func TestRenderCoordinatorDetachedTargetPublishesPreviewOnlyInvalidations(t *tes
 	target, viewer := &attachedClient{}, &attachedClient{}
 	h.ackReady.Store(false)
 	h.rc.attach(target)
-	h.rc.subscribePreviewFor(viewer, func(w renderWake) { h.previews <- w })
+	h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
 	h.rc.noteDetach(target)
 
 	// A detached target only accepts PTY/session-owned invalidations. The old
@@ -894,7 +834,7 @@ func TestRenderCoordinatorDetachedTargetPublishesPreviewOnlyInvalidations(t *tes
 		require.Len(t, timers, 1)
 		timers[0].ch <- time.Time{}
 		preview := awaitWake(t, h.previews)
-		preview.lease = nil
+		require.Nil(t, preview.lease, "headless preview wakes must not retain a revoked primary lease")
 		require.Equal(t, renderWake{coalesced: 1}, preview)
 		requireNoWake(t, h.wakes)
 
@@ -937,7 +877,7 @@ func TestRenderCoordinatorPreviewLifecycleDropsStaleTargetWakes(t *testing.T) {
 			h := newCoordinatorHarness(t)
 			target, replacement, viewer := &attachedClient{}, &attachedClient{}, &attachedClient{}
 			h.rc.attach(target)
-			h.rc.subscribePreviewFor(viewer, func(w renderWake) { h.previews <- w })
+			h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
 			h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "target output"})
 			stale := h.armedTimers(t)
 			require.Len(t, stale, 1)
@@ -954,8 +894,8 @@ func TestRenderCoordinatorPreviewSubscriptionsAreIndependent(t *testing.T) {
 	h := newCoordinatorHarness(t)
 	one, two := &attachedClient{}, &attachedClient{}
 	first, second := make(chan renderWake, 1), make(chan renderWake, 1)
-	h.rc.subscribePreviewFor(one, func(w renderWake) { first <- w })
-	h.rc.subscribePreviewFor(two, func(w renderWake) { second <- w })
+	h.rc.subscribePreviewFor(one, 1, func(w renderWake) { first <- w })
+	h.rc.subscribePreviewFor(two, 1, func(w renderWake) { second <- w })
 	h.rc.attach(&attachedClient{})
 	h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "preview"})
 	last := h.armedTimers(t)
@@ -963,7 +903,7 @@ func TestRenderCoordinatorPreviewSubscriptionsAreIndependent(t *testing.T) {
 	awaitWake(t, first)
 	awaitWake(t, second)
 
-	h.rc.teardownPreviewFor(one)
+	h.rc.teardownPreviewFor(one, 1)
 	h.rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "preview"})
 	last = h.armedTimers(t)
 	last[len(last)-1].ch <- time.Time{}
@@ -1336,15 +1276,7 @@ func TestStartPaneGoroutinesAccountsForOneReader(t *testing.T) {
 
 func requireWorkerExit(t *testing.T, done <-chan struct{}) {
 	t.Helper()
-	for range 4096 {
-		select {
-		case <-done:
-			return
-		default:
-			runtime.Gosched()
-		}
-	}
-	t.Fatal("cancelled coordinator timer worker did not exit")
+	awaitTestCompletion(t, done, "cancelled coordinator timer worker did not exit")
 }
 
 func TestCoordinatorDeadlineCannotPaintPublishedReplacementBeforeOwnershipInstall(t *testing.T) {
@@ -1405,6 +1337,31 @@ func TestRenderCoordinatorClearResizeTimerKeepsNewerTimer(t *testing.T) {
 	rc.mu.Unlock()
 }
 
+func TestRenderCoordinatorNilClockRetryCompletesWithoutSynchronousRun(t *testing.T) {
+	rc := newRenderCoordinator(renderCoordinatorOptions{})
+	owner := &attachedClient{}
+	rc.attach(owner)
+	lease := rc.attachmentLease(owner)
+	epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 120, Rows: 40}, owner, lease)
+	require.NotZero(t, epoch)
+	require.True(t, rc.resizeCurrentForLease(epoch, owner, lease, true))
+
+	called := false
+	rc.scheduleResizeRetryForLease(epoch, owner, lease, func() { called = true })
+	require.False(t, called, "a nil clock is a disabled retry lane, not a synchronous retry")
+	rc.mu.Lock()
+	retryTimer, retryCancel, retryDone := rc.retryTimer, rc.retryCancel, rc.retryDone
+	rc.mu.Unlock()
+	require.Nil(t, retryTimer)
+	require.Nil(t, retryCancel)
+	require.NotNil(t, retryDone)
+	select {
+	case <-retryDone:
+	default:
+		t.Fatal("nil-clock retry did not publish its completion edge")
+	}
+}
+
 func TestRenderCoordinatorInertTimerFiresSynchronouslyWithoutWorker(t *testing.T) {
 	clock := portsmocks.NewMockClock(t)
 	timer := portsmocks.NewMockTimer(t)
@@ -1442,7 +1399,7 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 				h := newCoordinatorHarness(t)
 				target, viewer, p := &attachedClient{}, &attachedClient{}, &pane{}
 				h.rc.attach(target)
-				h.rc.subscribePreviewFor(viewer, func(w renderWake) { h.previews <- w })
+				h.rc.subscribePreviewFor(viewer, 1, func(w renderWake) { h.previews <- w })
 				h.rc.noteSyncBegin(p, 1)
 				watchdog := h.armedTimers(t)[0]
 				transition.run(h.rc, target)

@@ -58,11 +58,11 @@ func TestAltDigitSwitchesBetweenThreeTabs(t *testing.T) {
 		return len(sessions.Sessions) == 1 && sessions.Sessions[0].Tabs == 3
 	}, 2*time.Second, 5*time.Millisecond)
 	require.Eventually(t, func() bool { return len(writes1) == 1 }, 2*time.Second, 5*time.Millisecond)
-	require.Equal(t, []byte("A"), <-writes1)
+	requirePTYWrite(t, writes1, []byte("A"))
 	require.Eventually(t, func() bool { return len(writes2) == 1 }, 2*time.Second, 5*time.Millisecond)
-	require.Equal(t, []byte("B"), <-writes2)
+	requirePTYWrite(t, writes2, []byte("B"))
 	require.Eventually(t, func() bool { return len(writes3) == 1 }, 2*time.Second, 5*time.Millisecond)
-	require.Equal(t, []byte("C"), <-writes3)
+	requirePTYWrite(t, writes3, []byte("C"))
 
 	d.mu.Lock()
 	var sess *session
@@ -98,7 +98,7 @@ func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	source.screen.Write([]byte("source"))
 	source.mu.Unlock()
 	d.paint(sess, ac, true, nil)
-	first := <-sends
+	first := awaitFrame(t, sends, ports.MsgOutput)
 	firstOutput, err := ports.UnmarshalOutput(first.Payload)
 	require.NoError(t, err)
 	terminal := vt.NewScreen(ac.size.Cols, ac.size.Rows)
@@ -114,7 +114,7 @@ func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab2)
 	require.Equal(t, 1, activeTabIndex(sess))
 
-	second := <-sends
+	second := awaitFrame(t, sends, ports.MsgOutput)
 	secondOutput, err := ports.UnmarshalOutput(second.Payload)
 	require.NoError(t, err)
 	require.Zero(t, secondOutput.BaseStateNum, "tab switch must emit the complete target frame first")
@@ -166,7 +166,7 @@ func TestAltCForwardsToPTY(t *testing.T) {
 
 	d.handleInput(sess, ac, []byte("\x1bc"))
 
-	require.Equal(t, []byte("\x1bc"), <-writes)
+	requirePTYWrite(t, writes, []byte("\x1bc"))
 	releasePTY()
 }
 
@@ -396,7 +396,7 @@ func TestBracketedMultilinePasteForwardsDelimitersAndNewlines(t *testing.T) {
 	paste := []byte("\x1b[200~first line\nsecond line\n\x1b[201~")
 	d.handleInput(sess, ac, paste)
 
-	require.Equal(t, paste, <-writes)
+	requirePTYWrite(t, writes, paste)
 	releasePTY()
 }
 
@@ -478,7 +478,7 @@ func TestOverlayInputPrecedence(t *testing.T) {
 			input: []byte("Z"),
 			check: func(t *testing.T, ac *attachedClient, writes chan []byte) {
 				t.Helper()
-				require.Equal(t, []byte("Z"), <-writes)
+				requirePTYWrite(t, writes, []byte("Z"))
 			},
 		},
 	}
@@ -767,7 +767,7 @@ func TestAltXClosesActiveTabAndSelectsRemaining(t *testing.T) {
 	require.Equal(t, 1, activeTabIndex(sess), "closing middle tab selects the next remaining tab")
 	d.handleInput(sess, ac, []byte("Z"))
 	require.Eventually(t, func() bool { return len(writes) == 1 }, 2*time.Second, 5*time.Millisecond)
-	require.Equal(t, []byte("Z"), <-writes)
+	requirePTYWrite(t, writes, []byte("Z"))
 
 	releasePTY1()
 	releasePTY2()
@@ -871,8 +871,8 @@ func TestMouseAltScreenWheelMapsToArrows(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
 	d.handleInput(sess, ac, []byte("\x1b[<65;1;1M"))
 
-	require.Equal(t, []byte("\x1b[A\x1b[A\x1b[A"), <-writes)
-	require.Equal(t, []byte("\x1b[B\x1b[B\x1b[B"), <-writes)
+	requirePTYWrite(t, writes, []byte("\x1b[A\x1b[A\x1b[A"))
+	requirePTYWrite(t, writes, []byte("\x1b[B\x1b[B\x1b[B"))
 	require.Nil(t, ac.overlays.copyMode)
 }
 
@@ -927,7 +927,7 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("\x1b[?1006h"))
 	d.handleInput(sess, ac, raw)
-	require.Equal(t, []byte("\x1b[<0;2;2M"), <-writes)
+	requirePTYWrite(t, writes, []byte("\x1b[<0;2;2M"))
 
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
 	select {

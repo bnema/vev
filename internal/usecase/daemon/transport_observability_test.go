@@ -25,7 +25,7 @@ func TestTransportObservabilityDaemonBoundaries(t *testing.T) {
 	if !d.resizeForFirstPaint(sess, ac, domain.Size{Cols: 90, Rows: 25}) {
 		t.Fatal("first resize was not accepted")
 	}
-	first := <-sends
+	first := awaitFrame(t, sends, ports.MsgOutput)
 	if first.Type != ports.MsgOutput {
 		t.Fatalf("first frame = %v, want output", first.Type)
 	}
@@ -38,7 +38,7 @@ func TestTransportObservabilityDaemonBoundaries(t *testing.T) {
 	}
 	ac.ackOutputState(output.NewStateNum)
 	rc.notifyAck()
-	second := <-sends
+	second := awaitFrame(t, sends, ports.MsgOutput)
 	if second.Type != ports.MsgOutput {
 		t.Fatalf("second frame = %v, want output", second.Type)
 	}
@@ -118,7 +118,7 @@ func TestTransportObservabilityBlockedRenderObserverReleasesArchitectureLocks(t 
 		close(paintDone)
 	}()
 	awaitDaemonObserver(t, observer.entered, "blocked render observer")
-	frame := <-sends // The frame was emitted before the observer began its I/O.
+	frame := awaitFrame(t, sends, ports.MsgOutput) // The frame was emitted before the observer began its I/O.
 	output, err := ports.UnmarshalOutput(frame.Payload)
 	if err != nil {
 		t.Fatalf("decode emitted output: %v", err)
@@ -153,7 +153,7 @@ func TestTransportObservabilityBlockedRenderObserverReleasesArchitectureLocks(t 
 		d.paint(sess, ac, false, nil)
 		close(secondPaint)
 	}()
-	<-sends // The second frame is live even though serialized observer I/O waits.
+	_ = awaitFrame(t, sends, ports.MsgOutput) // The second frame is live even though serialized observer I/O waits.
 
 	close(observer.release)
 	awaitDaemonObserver(t, paintDone, "first render completion")

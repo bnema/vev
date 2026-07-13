@@ -183,9 +183,10 @@ func (d *Daemon) retainPickerESCLocked(ac *attachedClient) {
 		ac.overlays.pickerESC.timer = nil
 		ac.overlays.pickerESC.done = nil
 		ac.overlays.picker = nil
+		generation := ac.overlays.pickerPreviewGeneration
 		ac.overlays.pickerMu.Unlock()
 
-		d.unregisterPreview(ac)
+		d.clearPreviewGeneration(ac, generation)
 		if sess := ac.currentSession(); sess != nil {
 			d.invalidateRender(sess, ac, true, "picker.go")
 		}
@@ -215,21 +216,22 @@ func isPickerEscapePrefix(data []byte) bool {
 }
 
 func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
+	if ac == nil || ac.overlays == nil {
+		return
+	}
 	ac.overlays.pickerMu.Lock()
 	var target picker.Target
 	var ok bool
 	if ac.overlays.picker != nil {
 		target, ok = ac.overlays.picker.Selected()
 	}
-	previous := ac.overlays.pickerPreviewSession
+	previous, previousGeneration := ac.overlays.pickerPreviewSession, ac.overlays.pickerPreviewGeneration
+	ac.overlays.pickerPreviewGeneration++
+	generation := ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerPreviewSession = nil
 	ac.overlays.pickerPreview = nil
 	ac.overlays.pickerMu.Unlock()
-	if previous != nil {
-		if rc := previous.renderCoordinator(); rc != nil {
-			rc.teardownPreviewFor(ac)
-		}
-	}
+	d.teardownPreviewSubscription(ac, previous, previousGeneration)
 	if !ok {
 		return
 	}
@@ -240,13 +242,16 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	}
 	ac.overlays.pickerMu.Lock()
 	// Selection may have changed while the target was resolved.
-	if ac.overlays.picker == nil {
-		ac.overlays.pickerMu.Unlock()
+	selected, stillSelected := ac.overlays.picker.Selected()
+	valid := ac.overlays.pickerPreviewGeneration == generation && stillSelected && selected == target
+	if valid {
+		ac.overlays.pickerPreview = next
+		ac.overlays.pickerPreviewSession = targetSess
+	}
+	ac.overlays.pickerMu.Unlock()
+	if !valid {
 		return
 	}
-	ac.overlays.pickerPreview = next
-	ac.overlays.pickerPreviewSession = targetSess
-	ac.overlays.pickerMu.Unlock()
 	// A same-session preview is already invalidated by its own coordinator.
 	// Cross-session previews subscribe to the target's producer wake instead
 	// of starting a direct paint/timer path.
@@ -254,16 +259,38 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 		return
 	}
 	rc := d.attachCoordinator(targetSess, nil, nil, false)
-	rc.subscribePreviewFor(ac, func(renderWake) {
-		ac.overlays.pickerMu.Lock()
-		valid := ac.overlays.pickerPreviewSession == targetSess
-		ac.overlays.pickerMu.Unlock()
-		if valid {
+	rc.subscribePreviewFor(ac, generation, func(renderWake) {
+		if pickerPreviewCurrent(ac, targetSess, next, generation) {
 			if owner := ac.currentSession(); owner != nil {
 				d.invalidateRender(owner, ac, false, "picker preview")
 			}
 		}
 	})
+	// subscribePreviewFor is deliberately outside pickerMu. Revalidate after it
+	// returns and remove only this generation if selection changed meanwhile.
+	d.revalidatePreviewSubscription(ac, rc, targetSess, next, generation)
+}
+
+func pickerPreviewCurrent(ac *attachedClient, targetSess *session, next *tab, generation uint64) bool {
+	ac.overlays.pickerMu.Lock()
+	defer ac.overlays.pickerMu.Unlock()
+	return ac.overlays.pickerPreviewGeneration == generation && ac.overlays.pickerPreviewSession == targetSess && ac.overlays.pickerPreview == next
+}
+
+// revalidatePreviewSubscription removes a subscription that lost the picker
+// selection race after it was installed.
+func (d *Daemon) revalidatePreviewSubscription(ac *attachedClient, rc *renderCoordinator, targetSess *session, next *tab, generation uint64) {
+	if !pickerPreviewCurrent(ac, targetSess, next, generation) {
+		rc.teardownPreviewFor(ac, generation)
+	}
+}
+
+func (d *Daemon) teardownPreviewSubscription(ac *attachedClient, previous *session, generation uint64) {
+	if previous != nil {
+		if rc := previous.renderCoordinator(); rc != nil {
+			rc.teardownPreviewFor(ac, generation)
+		}
+	}
 }
 
 func (d *Daemon) unregisterPreview(ac *attachedClient) {
@@ -271,15 +298,26 @@ func (d *Daemon) unregisterPreview(ac *attachedClient) {
 		return
 	}
 	ac.overlays.pickerMu.Lock()
+	generation := ac.overlays.pickerPreviewGeneration
+	ac.overlays.pickerMu.Unlock()
+	d.clearPreviewGeneration(ac, generation)
+}
+
+// clearPreviewGeneration removes the preview only if it is still the observed
+// selection. Teardown paths may race a new picker selection.
+func (d *Daemon) clearPreviewGeneration(ac *attachedClient, generation uint64) bool {
+	ac.overlays.pickerMu.Lock()
+	if ac.overlays.pickerPreviewGeneration != generation {
+		ac.overlays.pickerMu.Unlock()
+		return false
+	}
 	previous := ac.overlays.pickerPreviewSession
+	ac.overlays.pickerPreviewGeneration++
 	ac.overlays.pickerPreviewSession = nil
 	ac.overlays.pickerPreview = nil
 	ac.overlays.pickerMu.Unlock()
-	if previous != nil {
-		if rc := previous.renderCoordinator(); rc != nil {
-			rc.teardownPreviewFor(ac)
-		}
-	}
+	d.teardownPreviewSubscription(ac, previous, generation)
+	return true
 }
 
 // clearDestroyedTabPreview clears coordinator-owned picker state for clients
@@ -303,10 +341,10 @@ func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
 			continue
 		}
 		ac.overlays.pickerMu.Lock()
-		cleared := ac.overlays.pickerPreview == tb
+		generation := ac.overlays.pickerPreviewGeneration
+		observed := ac.overlays.pickerPreview == tb
 		ac.overlays.pickerMu.Unlock()
-		if cleared {
-			d.unregisterPreview(ac)
+		if observed && d.clearPreviewGeneration(ac, generation) {
 			if sess := ac.currentSession(); sess != nil {
 				d.invalidateRender(sess, ac, true, "picker.go")
 			}
@@ -319,8 +357,9 @@ func (d *Daemon) closePicker(ac *attachedClient) {
 	ac.overlays.picker = nil
 	ac.overlays.pickerPending = nil
 	d.stopPickerPendingTimerLocked(ac)
+	generation := ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerMu.Unlock()
-	d.unregisterPreview(ac)
+	d.clearPreviewGeneration(ac, generation)
 }
 
 func (d *Daemon) tabByTarget(target picker.Target) *tab {

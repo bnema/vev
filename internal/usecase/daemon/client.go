@@ -174,6 +174,23 @@ func (ac *attachedClient) replaceTransport(tr ports.Transport) {
 	ac.linkMu.Unlock()
 }
 
+// revokeTransport removes tr only if it is still this attachment's current
+// link. It returns the revoked transport, so asynchronous retirement can
+// close exactly that link without touching a later resume/replacement.
+func (ac *attachedClient) revokeTransport(tr ports.Transport) ports.Transport {
+	if tr == nil {
+		return nil
+	}
+	ac.linkMu.Lock()
+	defer ac.linkMu.Unlock()
+	if ac.tr != tr {
+		return nil
+	}
+	ac.tr = nil
+	ac.transportIncarnation++
+	return tr
+}
+
 // transportSnapshot binds a send to one concrete link lifetime. Callers must
 // revalidate it after acquiring sendMu before writing to that link.
 func (ac *attachedClient) transportSnapshot() transportSnapshot {
@@ -509,17 +526,36 @@ func (d *Daemon) resetScreenDefaultColors(sess *session) {
 	d.applyHostTheme(sess, nil, d.effectiveTheme(themeui.Theme{}), true)
 }
 
-func (d *Daemon) detachReplacedClient(old *attachedClient) {
+// retireReplacedClient owns old-link retirement and obsolete render-worker
+// joins outside the replacement handshake. If a render already owns sendMu,
+// close immediately interrupts it; no Detached frame can safely overtake that
+// render. Otherwise the old link gets its bounded protocol notice first.
+func (d *Daemon) retireReplacedClient(old *attachedClient, cleanup renderLifecycleCleanup) {
 	if old == nil {
+		d.attachmentCleanupWg.Go(cleanup.finish)
 		return
 	}
-	d.unregisterPreview(old)
-	old.clearPreviousSession()
-	old.setSession(nil)
-	d.log.Info("client displaced")
-	// Async + bounded: a dead or wedged old client must not stall the new
-	// client's handshake.
-	d.notifyDetachedAsync(old, ports.ReasonDetach)
+	oldTransport := old.transportSnapshot().transport
+	blockedRender := !old.sendMu.TryLock()
+	if !blockedRender {
+		old.sendMu.Unlock()
+	}
+
+	d.attachmentCleanupWg.Go(func() {
+		if !blockedRender {
+			// A healthy idle client observes the required replacement notice. Its
+			// watchdog still bounds a peer that stops draining after this check.
+			d.boundedSend(old, frameDetached(ports.ReasonDetach))
+		}
+		_ = old.closeCapturedTransport(old.revokeTransport(oldTransport))
+		d.unregisterPreview(old)
+		old.clearPreviousSession()
+		old.setSession(nil)
+		d.log.Info("client displaced")
+	})
+	// Join independently: the close above releases a blocked render while the
+	// new attachment is already fully published.
+	d.attachmentCleanupWg.Go(cleanup.finish)
 }
 
 // firstPaint guarantees the freshly attached client sees the full screen: if
