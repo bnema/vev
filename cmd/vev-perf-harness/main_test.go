@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -249,13 +250,44 @@ func TestHarnessCanonicalLocalRolesAreIsolatedAcrossRepetitions(t *testing.T) {
 		if len(result.Processes) != 2 {
 			t.Fatalf("run %d process mappings = %+v", run, result.Processes)
 		}
+		runDir := filepath.Join(out, fmt.Sprintf("%s-run-%03d", safeName(local.ID), run))
+		manifestBytes, err := os.ReadFile(filepath.Join(runDir, "manifest.json"))
+		if err != nil {
+			t.Fatalf("run %d manifest: %v", run, err)
+		}
+		var persisted runManifest
+		if err := json.Unmarshal(manifestBytes, &persisted); err != nil {
+			t.Fatalf("run %d manifest JSON: %v", run, err)
+		}
+		if persisted.Run != run || len(persisted.Processes) != len(result.Processes) {
+			t.Fatalf("run %d manifest = %+v", run, persisted)
+		}
 		for _, process := range result.Processes {
 			if process.Role != "daemon" && process.Role != "client" {
 				t.Fatalf("run %d unexpected role %q", run, process.Role)
 			}
-			if _, err := os.Stat(process.TracePath); err != nil {
+			if filepath.Dir(process.TracePath) != runDir {
+				t.Fatalf("run %d %s trace outside its isolated run directory: %q", run, process.Role, process.TracePath)
+			}
+			trace, err := os.ReadFile(process.TracePath)
+			if err != nil {
 				t.Fatalf("run %d %s trace %q: %v", run, process.Role, process.TracePath, err)
 			}
+			if len(bytes.TrimSpace(trace)) == 0 {
+				t.Fatalf("run %d %s did not emit its declared trace", run, process.Role)
+			}
+			for _, line := range bytes.Split(bytes.TrimSpace(trace), []byte{'\n'}) {
+				var record traceRecord
+				if err := json.Unmarshal(line, &record); err != nil {
+					t.Fatalf("run %d %s trace JSON: %v", run, process.Role, err)
+				}
+				if record.ProcessID != process.ProcessID || record.Scenario != local.ID || record.Run != uint64(run) {
+					t.Fatalf("run %d %s trace escaped its manifest identity: %+v", run, process.Role, record)
+				}
+			}
+		}
+		if _, err := os.Stat(filepath.Join(runDir, "runtime", "vev", "daemon.sock")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("run %d left daemon socket for the next repetition: %v", run, err)
 		}
 	}
 }
@@ -365,6 +397,36 @@ func TestHarnessManifestCoversCanonicalMatrix(t *testing.T) {
 	m.Scenarios = m.Scenarios[:len(m.Scenarios)-1]
 	if err := validateManifest(m); err == nil {
 		t.Fatal("missing combination accepted")
+	}
+}
+
+func TestHarnessRejectsExistingRunDirectoryBeforeLaunchingRoles(t *testing.T) {
+	out := t.TempDir()
+	raw, err := os.OpenFile(filepath.Join(out, "raw.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	s := scenario{ID: "isolated", Roles: []string{"daemon", "client"}}
+	stale := filepath.Join(out, "isolated-run-001")
+	if err := os.Mkdir(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "preserve"), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launcher := &fakeLauncher{}
+	h := defaultHarness()
+	h.clock, h.launcher = &fakeClock{}, launcher
+	_, err = h.runOne(options{out: out, duration: minimumDuration}, manifest{}, s, 1, raw)
+	if err == nil || !strings.Contains(err.Error(), "create isolated run directory") {
+		t.Fatalf("existing run directory error = %v", err)
+	}
+	if len(launcher.mappings) != 0 {
+		t.Fatalf("roles launched against stale run directory: %+v", launcher.mappings)
+	}
+	if contents, readErr := os.ReadFile(filepath.Join(stale, "preserve")); readErr != nil || string(contents) != "stale" {
+		t.Fatalf("stale directory changed: contents=%q err=%v", contents, readErr)
 	}
 }
 
@@ -1195,6 +1257,22 @@ func TestHarnessAcceptsConcurrentProductionTraceInterleaving(t *testing.T) {
 	}
 	if len(spans) != 2 || spans[0].Component != "ipc" || spans[0].Name != "adapter_send_duration" || spans[0].Samples[0] != 21900 || spans[1].Component != "ipc" || spans[1].Name != "adapter_receive_duration" || spans[1].Samples[0] != 178550 {
 		t.Fatalf("spans=%+v", spans)
+	}
+}
+
+func TestHarnessRejectsMissingManifestRoleTrace(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "daemon.jsonl")
+	client := filepath.Join(dir, "client.jsonl")
+	if err := os.WriteFile(client, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := mergeProcessTraces([]processMapping{
+		{ProcessID: "daemon", ClockDomain: "daemon", TracePath: missing, Role: "daemon", Scenario: "s", Run: 1},
+		{ProcessID: "client", ClockDomain: "client", TracePath: client, Role: "client", Scenario: "s", Run: 1},
+	})
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing daemon trace error = %v, want not exist", err)
 	}
 }
 

@@ -821,6 +821,7 @@ type harness struct {
 	clock           clock
 	launcher        launcher
 	mkdir           func(string) error
+	createRunDir    func(string) error
 	create          func(string) (*os.File, error)
 	removeAll       func(string) error
 	gitSHA          func() string
@@ -834,7 +835,20 @@ func main() {
 	}
 }
 func defaultHarness() *harness {
-	return &harness{clock: systemClock{time.Now()}, mkdir: safedir.EnsurePrivate, create: func(p string) (*os.File, error) { return os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) }, removeAll: os.RemoveAll, gitSHA: recordedGitSHA}
+	return &harness{clock: systemClock{time.Now()}, mkdir: safedir.EnsurePrivate, createRunDir: createExclusiveRunDir, create: func(p string) (*os.File, error) { return os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) }, removeAll: os.RemoveAll, gitSHA: recordedGitSHA}
+}
+
+// createExclusiveRunDir prevents stale runtime, socket, state, or trace files
+// from an earlier invocation being mistaken for the next repetition's evidence.
+func createExclusiveRunDir(path string) error {
+	if err := os.Mkdir(path, 0o700); err != nil {
+		return err
+	}
+	if err := safedir.EnsurePrivate(path); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 // recordedGitSHA prefers build provenance so an installed public harness does
@@ -1108,8 +1122,12 @@ func set(v []string) map[string]bool {
 }
 func (h *harness) runOne(o options, mat manifest, s scenario, run int, raw io.Writer) (res runResult, err error) {
 	dir := filepath.Join(o.out, fmt.Sprintf("%s-run-%03d", safeName(s.ID), run))
-	if err = h.mkdir(dir); err != nil {
-		return res, err
+	createRunDir := h.createRunDir
+	if createRunDir == nil {
+		createRunDir = createExclusiveRunDir
+	}
+	if err = createRunDir(dir); err != nil {
+		return res, fmt.Errorf("create isolated run directory: %w", err)
 	}
 	success := false
 	defer func() {
