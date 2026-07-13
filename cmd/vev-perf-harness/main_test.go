@@ -200,6 +200,66 @@ func TestHarnessCanonicalLocalSmokeRealRoles(t *testing.T) {
 	}
 }
 
+func TestHarnessCanonicalLocalRolesAreIsolatedAcrossRepetitions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("public CLI repetition lifecycle")
+	}
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "vev")
+	build := exec.Command("/usr/local/go/bin/go", "build", "-o", bin, "./")
+	build.Dir = root
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build public CLI: %v\n%s", err, output)
+	}
+	m, err := readManifest(filepath.Join(root, "testdata", "perf", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var local scenario
+	for _, candidate := range m.Scenarios {
+		if candidate.ID == "1x4-idle-local" {
+			local = candidate
+			break
+		}
+	}
+	if local.ID == "" {
+		t.Fatal("canonical local scenario missing")
+	}
+	out, err := os.MkdirTemp("", "vev-ob-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(out)
+	raw, err := os.OpenFile(filepath.Join(out, "raw.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	h := defaultHarness()
+	h.clock = &fakeClock{}
+	h.launcher = &cliLauncher{bin: bin}
+	for run := 1; run <= 3; run++ {
+		result, err := h.runOne(options{vevBin: bin, out: out, duration: minimumDuration}, m, local, run, raw)
+		if err != nil {
+			t.Fatalf("run %d: %v", run, err)
+		}
+		if len(result.Processes) != 2 {
+			t.Fatalf("run %d process mappings = %+v", run, result.Processes)
+		}
+		for _, process := range result.Processes {
+			if process.Role != "daemon" && process.Role != "client" {
+				t.Fatalf("run %d unexpected role %q", run, process.Role)
+			}
+			if _, err := os.Stat(process.TracePath); err != nil {
+				t.Fatalf("run %d %s trace %q: %v", run, process.Role, process.TracePath, err)
+			}
+		}
+	}
+}
+
 func TestHarnessScenarioSelectionKeepsCanonicalManifestValidation(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
