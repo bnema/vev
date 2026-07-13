@@ -1615,6 +1615,7 @@ type traceRecord struct {
 	Epoch     uint64 `json:"epoch"`
 	Kind      string `json:"kind"`
 	Tick      int64  `json:"tick"`
+	Valid     bool   `json:"valid"`
 }
 type spanPair struct{ start, end, name string }
 
@@ -1689,7 +1690,13 @@ func mergeProcessTraces(mappings []processMapping) ([]span, error) {
 					if r.Tick < start.Tick {
 						return nil, errors.New("negative same-process span")
 					}
-					out = append(out, span{Component: r.Component, Name: pair.name, Samples: []int64{r.Tick - start.Tick}})
+					// Validity affects only measurement eligibility, never structural
+					// pairing: every start/end must still match in its exact process,
+					// component, and correlation domain. A failed start, failed end, or
+					// both is a paired diagnostic fact but contributes no latency sample.
+					if start.Valid && r.Valid {
+						out = append(out, span{Component: r.Component, Name: pair.name, Samples: []int64{r.Tick - start.Tick}})
+					}
 					delete(starts, k)
 				}
 			}

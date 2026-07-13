@@ -1277,7 +1277,7 @@ func (l *traceLauncher) Launch(m processMapping, command roleCommand) (launchedP
 	defer f.Close()
 	for i, pair := range spanPairs {
 		for n, kind := range []string{pair.start, pair.end} {
-			b, _ := json.Marshal(traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: uint64(i + 1), RequestID: 1, Epoch: 1, Kind: kind, Tick: int64(i*20 + n*5)})
+			b, _ := json.Marshal(traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: uint64(i + 1), RequestID: 1, Epoch: 1, Kind: kind, Tick: int64(i*20 + n*5), Valid: true})
 			if _, err := f.Write(append(b, '\n')); err != nil {
 				return nil, err
 			}
@@ -1303,12 +1303,12 @@ func (l *closeTraceLauncher) Launch(m processMapping, command roleCommand) (laun
 	if err != nil {
 		return nil, err
 	}
-	start := traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: 1, RequestID: 1, Epoch: 1, Kind: "adapter_receive_start", Tick: 10}
+	start := traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: 1, RequestID: 1, Epoch: 1, Kind: "adapter_receive_start", Tick: 10, Valid: true}
 	if err := appendTraceRecord(m.TracePath, start); err != nil {
 		return nil, err
 	}
 	return &closeTraceProcess{fakeProcess: p.(*fakeProcess), traceEnd: func() error {
-		return appendTraceRecord(m.TracePath, traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: 1, RequestID: 1, Epoch: 1, Kind: "adapter_receive_end", Tick: 20})
+		return appendTraceRecord(m.TracePath, traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: 1, RequestID: 1, Epoch: 1, Kind: "adapter_receive_end", Tick: 20, Valid: true})
 	}}, nil
 }
 
@@ -1461,7 +1461,7 @@ func TestHarnessRejectsCrossProcessAndBadTraceSpans(t *testing.T) {
 		return processMapping{ProcessID: "one", ClockDomain: "one", TracePath: path, Scenario: "s", Run: 1}
 	}
 	base := func(kind string, tick int64) traceRecord {
-		return traceRecord{ProcessID: "one", Component: "daemon", Scenario: "s", Run: 1, Sequence: 1, RequestID: 1, Epoch: 1, Kind: kind, Tick: tick}
+		return traceRecord{ProcessID: "one", Component: "daemon", Scenario: "s", Run: 1, Sequence: 1, RequestID: 1, Epoch: 1, Kind: kind, Tick: tick, Valid: true}
 	}
 	for _, records := range [][]traceRecord{
 		{base("diff_end", 1)},
@@ -1481,5 +1481,51 @@ func TestHarnessRejectsCrossProcessAndBadTraceSpans(t *testing.T) {
 	spans, err := mergeProcessTraces([]processMapping{m})
 	if err != nil || len(spans) != 1 || spans[0].Samples[0] != 2 {
 		t.Fatalf("spans=%+v err=%v", spans, err)
+	}
+}
+
+func TestHarnessExcludesFailedSpanDurationsWhileValidatingPairing(t *testing.T) {
+	base := func(kind string, tick int64, valid bool) traceRecord {
+		return traceRecord{ProcessID: "one", Component: "adapter", Scenario: "s", Run: 1, Sequence: 1, RequestID: 1, Epoch: 1, Kind: kind, Tick: tick, Valid: valid}
+	}
+	for _, tc := range []struct {
+		name      string
+		records   []traceRecord
+		wantSpans int
+		wantErr   bool
+	}{
+		{"successful adapter send is sampled", []traceRecord{base("adapter_send_start", 10, true), base("adapter_send_end", 20, true)}, 1, false},
+		{"failed adapter send end is excluded", []traceRecord{base("adapter_send_start", 10, true), base("adapter_send_end", 20, false)}, 0, false},
+		{"failed adapter receive end is excluded", []traceRecord{base("adapter_receive_start", 10, true), base("adapter_receive_end", 20, false)}, 0, false},
+		{"failed adapter send start is excluded", []traceRecord{base("adapter_send_start", 10, false), base("adapter_send_end", 20, true)}, 0, false},
+		{"failed adapter receive boundaries are excluded", []traceRecord{base("adapter_receive_start", 10, false), base("adapter_receive_end", 20, false)}, 0, false},
+		{"failed end without start is rejected", []traceRecord{base("adapter_send_end", 20, false)}, 0, true},
+		{"duplicate failed start is rejected", []traceRecord{base("adapter_send_start", 10, false), base("adapter_send_start", 15, false)}, 0, true},
+		{"negative failed span is rejected", []traceRecord{base("adapter_receive_start", 20, false), base("adapter_receive_end", 10, false)}, 0, true},
+		{"cross-component failed end is rejected", []traceRecord{base("adapter_send_start", 10, true), func() traceRecord { r := base("adapter_send_end", 20, false); r.Component = "other"; return r }()}, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "trace.jsonl")
+			var lines []string
+			for _, record := range tc.records {
+				lines = append(lines, mustJSON(record))
+			}
+			if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			spans, err := mergeProcessTraces([]processMapping{{ProcessID: "one", ClockDomain: "one", TracePath: path, Scenario: "s", Run: 1}})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("invalid trace accepted: %+v", tc.records)
+				}
+				return
+			}
+			if err != nil || len(spans) != tc.wantSpans {
+				t.Fatalf("spans=%+v err=%v, want %d spans", spans, err, tc.wantSpans)
+			}
+			if tc.wantSpans == 1 && spans[0].Samples[0] != 10 {
+				t.Fatalf("successful span=%+v, want 10ns", spans[0])
+			}
+		})
 	}
 }
