@@ -287,7 +287,7 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 	// a role working directory: daemon-owned subprocess cleanup may otherwise
 	// treat the evidence directory as its working tree and remove a preallocated
 	// trace while a later repetition is being merged.
-	cmd.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN", "VEV_REMOTE_TRANSPORT"), traceEnvironment(m)...)
+	cmd.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN", "VEV_REMOTE_TRANSPORT", "XDG_RUNTIME_DIR", "XDG_STATE_HOME"), traceEnvironment(m)...)
 	cmd.Env = append(cmd.Env, "XDG_RUNTIME_DIR="+runtimeDir,
 		"XDG_STATE_HOME="+filepath.Join(runDir, "state"), "TERM=xterm-256color")
 	if m.Role == "client" {

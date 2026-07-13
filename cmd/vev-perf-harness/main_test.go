@@ -130,6 +130,59 @@ func TestCLIProcessWaitReadyRequiresDaemonSocket(t *testing.T) {
 	}
 }
 
+func TestCLILauncherIsolatesRoleXDGEnvironmentAcrossRepetitions(t *testing.T) {
+	captureDir := t.TempDir()
+	t.Setenv("CAPTURE_DIR", captureDir)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "inherited-runtime"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "inherited-state"))
+
+	bin := filepath.Join(t.TempDir(), "capture-env")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nenv > \"$CAPTURE_DIR/$VEV_PERF_PROCESS_ID\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launcher := &cliLauncher{bin: bin}
+	for run := 1; run <= 3; run++ {
+		runDir := filepath.Join(t.TempDir(), fmt.Sprintf("run-%d", run))
+		if err := os.MkdirAll(runDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		roles := []string{"daemon", "client"}
+		for _, role := range roles {
+			id := fmt.Sprintf("run-%d-%s", run, role)
+			p, err := launcher.Launch(processMapping{
+				Role: role, TracePath: filepath.Join(runDir, role+".jsonl"), ProcessID: id,
+			}, roleCommand{Args: []string{"test"}})
+			if err != nil {
+				t.Fatalf("run %d %s launch: %v", run, role, err)
+			}
+			runtimeDir := launcher.runtimes[runDir]
+			if err := p.Close(); err != nil {
+				t.Fatalf("run %d %s close: %v", run, role, err)
+			}
+
+			env, err := os.ReadFile(filepath.Join(captureDir, id))
+			if err != nil {
+				t.Fatalf("run %d %s capture: %v", run, role, err)
+			}
+			for _, want := range []string{
+				"XDG_RUNTIME_DIR=" + runtimeDir,
+				"XDG_STATE_HOME=" + filepath.Join(runDir, "state"),
+			} {
+				name := strings.SplitN(want, "=", 2)[0]
+				if count := bytes.Count(env, []byte(name+"=")); count != 1 {
+					t.Fatalf("run %d %s %s entries = %d, want exactly one; env:\n%s", run, role, name, count, env)
+				}
+				if !bytes.Contains(env, []byte(want+"\n")) {
+					t.Fatalf("run %d %s missing %q; env:\n%s", run, role, want, env)
+				}
+			}
+		}
+		if err := launcher.releaseRuntime(runDir); err != nil {
+			t.Fatalf("run %d release runtime: %v", run, err)
+		}
+	}
+}
+
 func TestCLIProcessCloseUsesPublicDaemonShutdown(t *testing.T) {
 	wait := make(chan error, 1)
 	wait <- nil
