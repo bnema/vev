@@ -198,8 +198,10 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 	bars.status.tabs = scratch.statusTabs
 	scratch.mru = append(scratch.mru[:0], bars.mru...)
 	bars.mru = scratch.mru
-	scratch.ranked = append(scratch.ranked[:0], bars.rankedRecent...)
-	bars.rankedRecent = scratch.ranked
+	if bars.rankedRecent != nil {
+		scratch.ranked = copyRankedRecentInto(scratch.ranked, bars.rankedRecent)
+		bars.rankedRecent = scratch.ranked
+	}
 	if len(preview.Rows) > 0 {
 		preview = clonePickerPreview(preview)
 	} else {
@@ -280,6 +282,18 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 	}
 	scratch.receipts = state.receipts
 	return state, true
+}
+
+// copyRankedRecentInto preserves the non-nil empty slice that selects
+// contextual recent-session mode while retaining scratch capacity for reuse.
+func copyRankedRecentInto(dst, src []rankedRecent) []rankedRecent {
+	if len(src) == 0 {
+		if dst != nil {
+			return dst[:0]
+		}
+		return []rankedRecent{}
+	}
+	return append(dst[:0], src...)
 }
 
 func cloneLayoutNodeIntoScratch(src *layout.Node, scratch *renderCaptureScratch) *layout.Node {
