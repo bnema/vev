@@ -102,6 +102,10 @@ const stdinBufSize = 4096
 // goroutine, decoupling the input/resize pumps from transport back-pressure.
 const sendQueueDepth = 64
 
+// runtimeObserverQueueDepth bounds marks awaiting the one reporting worker.
+// A full queue records an ordered diagnostic gap rather than blocking ACKs.
+const runtimeObserverQueueDepth = 64
+
 var reconnectSleep = sleepReconnect
 var reconnectSleepWithResize = sleepReconnectWithResizeEvents
 
@@ -141,6 +145,11 @@ func RunWithRuntimeObserver(ctx context.Context, dialer ports.Dialer, term ports
 }
 
 func run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observer ports.RuntimeObserver) (retErr error) {
+	if observer != nil {
+		reporter := ports.NewSerializedRuntimeObserver(observer, runtimeObserverQueueDepth)
+		defer reporter.Close()
+		observer = reporter
+	}
 	if log == nil {
 		log = slog.Default()
 	}

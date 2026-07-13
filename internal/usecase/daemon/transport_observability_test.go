@@ -6,30 +6,64 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
-// This acceptance boundary deliberately configures the daemon with an
-// observer only. The clock remains the daemon's existing behavior clock;
-// timestamp ownership belongs to the concrete process observer.
+// This acceptance boundary exercises the attached resize, render, and ACK
+// path rather than merely listing the marks the implementation should emit.
 func TestTransportObservabilityDaemonBoundaries(t *testing.T) {
 	observer := &daemonRuntimeObserver{}
-	d := New(nil, daemonRuntimeClock{now: time.Unix(0, 101)}, nil, WithRuntimeObserver(observer))
-	if d == nil {
-		t.Fatal("New() returned nil")
+	d, sess, ac, sends := newManualSessionWithPTYs(t, &quietPTY{})
+	d.runtimeObserver = observer
+	// One in-flight state makes the second public resize take the ACK-blocked
+	// path. The real coordinator owns both renders and the ACK wake.
+	ac.output = newOutputStateStream(1)
+	rc := d.attachCoordinator(sess, nil, ac, true)
+
+	if !d.resizeForFirstPaint(sess, ac, domain.Size{Cols: 90, Rows: 25}) {
+		t.Fatal("first resize was not accepted")
+	}
+	first := <-sends
+	if first.Type != ports.MsgOutput {
+		t.Fatalf("first frame = %v, want output", first.Type)
+	}
+	output, err := ports.UnmarshalOutput(first.Payload)
+	if err != nil {
+		t.Fatalf("decode first output: %v", err)
+	}
+	if !d.resizeForFirstPaint(sess, ac, domain.Size{Cols: 100, Rows: 26}) {
+		t.Fatal("second resize was not accepted")
+	}
+	ac.ackOutputState(output.NewStateNum)
+	rc.notifyAck()
+	second := <-sends
+	if second.Type != ports.MsgOutput {
+		t.Fatalf("second frame = %v, want output", second.Type)
 	}
 
 	want := []ports.RuntimeMarkKind{
 		ports.RuntimeResizeRequested, ports.RuntimeResizeCommitted,
+		ports.RuntimeQueueEnqueued, ports.RuntimeQueueDequeued,
 		ports.RuntimeCaptureStart, ports.RuntimeCaptureEnd,
 		ports.RuntimeComposeStart, ports.RuntimeComposeEnd,
 		ports.RuntimeDiffStart, ports.RuntimeDiffEnd,
-		ports.RuntimeQueueEnqueued, ports.RuntimeQueueDequeued,
-		ports.RuntimeACKBlockedStart, ports.RuntimeACKBlockedEnd,
+		ports.RuntimeEmitStart, ports.RuntimeEmitEnd,
+		ports.RuntimeResizeRequested, ports.RuntimeResizeCommitted,
+		ports.RuntimeQueueEnqueued, ports.RuntimeACKBlockedStart,
+		ports.RuntimeACKBlockedEnd, ports.RuntimeQueueDequeued,
+		ports.RuntimeCaptureStart, ports.RuntimeCaptureEnd,
+		ports.RuntimeComposeStart, ports.RuntimeComposeEnd,
+		ports.RuntimeDiffStart, ports.RuntimeDiffEnd,
 		ports.RuntimeEmitStart, ports.RuntimeEmitEnd,
 	}
-	if len(want) != 14 {
-		t.Fatalf("daemon boundary mark inventory changed: %d", len(want))
+	if len(observer.marks) != len(want) {
+		t.Fatalf("runtime marks = %#v, want kinds %#v", observer.marks, want)
+	}
+	for i, kind := range want {
+		if observer.marks[i].Kind != kind {
+			t.Fatalf("runtime mark %d = %q, want %q; all=%#v", i, observer.marks[i].Kind, kind, observer.marks)
+		}
 	}
 }
 
@@ -38,19 +72,6 @@ type daemonRuntimeObserver struct{ marks []ports.RuntimeMark }
 func (o *daemonRuntimeObserver) ObserveRuntime(mark ports.RuntimeMark) {
 	o.marks = append(o.marks, mark)
 }
-
-type daemonRuntimeClock struct{ now time.Time }
-
-func (c daemonRuntimeClock) Now() time.Time { return c.now }
-func (c daemonRuntimeClock) NewTimer(d time.Duration) ports.Timer {
-	return daemonRuntimeTimer{timer: time.NewTimer(d)}
-}
-
-type daemonRuntimeTimer struct{ timer *time.Timer }
-
-func (t daemonRuntimeTimer) C() <-chan time.Time        { return t.timer.C }
-func (t daemonRuntimeTimer) Reset(d time.Duration) bool { return t.timer.Reset(d) }
-func (t daemonRuntimeTimer) Stop() bool                 { return t.timer.Stop() }
 
 type blockingDaemonRuntimeObserver struct {
 	mu      sync.Mutex

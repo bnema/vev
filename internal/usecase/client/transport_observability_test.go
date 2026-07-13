@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -14,6 +15,53 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
 )
+
+func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
+	var out bytes.Buffer
+	var restores atomic.Int32
+	resizeCh := make(chan domain.Size)
+	flushed := make(chan struct{})
+	term := portsmocks.NewMockTerminal(t)
+	term.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	term.EXPECT().EnterRaw().Return(func() error { restores.Add(1); return nil }, nil).Once()
+	in := newBlockingReader()
+	defer in.unblock()
+	term.EXPECT().In().Return(in).Maybe()
+	term.EXPECT().Out().Return(&out).Maybe()
+	term.EXPECT().Flush().Run(func() { close(flushed) }).Return(nil).Once()
+	term.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
+
+	observer := &blockingClientRuntimeObserver{entered: make(chan struct{}), release: make(chan struct{})}
+	acked := make(chan struct{})
+	transport := portsmocks.NewMockTransport(t)
+	transport.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	transport.EXPECT().Send(isType(ports.MsgAck)).Run(func(ports.Frame) { close(acked) }).Return(nil).Once()
+	unblock := scriptRecv(transport,
+		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(ports.MsgOutput, ports.MarshalOutput(ports.Output{Data: []byte("flush-before-observe"), NewStateNum: 3}))},
+	)
+	defer unblock()
+	transport.EXPECT().Close().Return(nil).Once()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- client.Attach(ctx, transport, term, realClock{}, ports.IntentEphemeral, "", client.WithRuntimeObserver(observer))
+	}()
+	awaitClientRuntime(t, observer.entered, "blocking observer")
+	awaitClientRuntime(t, flushed, "terminal flush")
+	awaitClientRuntime(t, acked, "ACK")
+	cancel()
+	close(observer.release)
+	select {
+	case err := <-result:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Attach did not complete after observer release")
+	}
+	require.Equal(t, "flush-before-observe", out.String())
+	require.Equal(t, int32(1), restores.Load())
+}
 
 func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	var out bytes.Buffer
@@ -41,6 +89,28 @@ func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	// Carriage spans belong only to concrete adapters. The client owns the
 	// post-successful-flush terminal boundary, before its ACK is queued.
 	observer.requireOrdered(t, ports.RuntimeTerminalFlushed)
+}
+
+type blockingClientRuntimeObserver struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (o *blockingClientRuntimeObserver) ObserveRuntime(ports.RuntimeMark) {
+	o.once.Do(func() {
+		close(o.entered)
+		<-o.release
+	})
+}
+
+func awaitClientRuntime(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
 }
 
 type clientRuntimeObserver struct {
