@@ -132,7 +132,8 @@ func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, _ damageCapt
 	width := min(max(visible.Width, 0), p.screen.Frame.Width)
 	height := min(max(visible.Height, 0), p.screen.Frame.Height)
 	needsFrame := len(damage.Damage) > 0
-	if out.frame.Width != width || out.frame.Height != height {
+	frameChanged := out.frame.Width != width || out.frame.Height != height
+	if frameChanged {
 		out.frame = renderer.NewFrame(width, height)
 		needsFrame = true
 	}
@@ -144,7 +145,10 @@ func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, _ damageCapt
 		}
 	}
 
-	if uncertainDamage(damage.Damage, p.screen.Frame.Width, p.screen.Frame.Height) {
+	if frameChanged || uncertainDamage(damage.Damage, p.screen.Frame.Width, p.screen.Frame.Height) {
+		// A cache entry with a new frame has no terminal-shadow equivalent.
+		// Redraw it even when the pane has no VT damage, such as an untouched
+		// pane first made visible after a tab or session switch.
 		out.damage = []renderer.Damage{renderer.FullRedraw()}
 	} else {
 		out.damage = append(out.damage[:0], damage.Damage...)
@@ -232,9 +236,9 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 		}
 		p.mu.Lock()
 		if ac.captureFrames == nil {
-			ac.captureFrames = make(map[layout.PaneID]capturedPaneRenderState)
+			ac.captureFrames = make(map[*pane]capturedPaneRenderState)
 		}
-		captured := capturePaneRenderStateLockedInto(p, visible, mode, ac.captureFrames[p.id])
+		captured := capturePaneRenderStateLockedInto(p, visible, mode, ac.captureFrames[p])
 		if mode == damageCaptureConsume {
 			state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
 		}
@@ -248,7 +252,7 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 			translated = append(translated, translatePaneDamage(damage, placement.Content, layoutSnap.area)...)
 		}
 		captured.rawDamage, captured.damage = captured.damage, translated
-		ac.captureFrames[captured.id] = captured
+		ac.captureFrames[p] = captured
 		state.panes = append(state.panes, captured)
 	}
 	scratch.panes = state.panes
@@ -257,9 +261,9 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 		p.mu.Lock()
 		geometry := p.committedFloatingGeometryLocked(calculateContentFloatingGeometry(domain.Size{Cols: layoutSnap.area.Width, Rows: layoutSnap.area.Height}, floatingCfg))
 		if ac.captureFrames == nil {
-			ac.captureFrames = make(map[layout.PaneID]capturedPaneRenderState)
+			ac.captureFrames = make(map[*pane]capturedPaneRenderState)
 		}
-		captured := capturePaneRenderStateLockedInto(p, geometry.Inner, mode, ac.captureFrames[p.id])
+		captured := capturePaneRenderStateLockedInto(p, geometry.Inner, mode, ac.captureFrames[p])
 		if mode == damageCaptureConsume {
 			seen := false
 			for _, receipt := range state.receipts {
@@ -272,7 +276,7 @@ func captureRenderState(sess *session, ac *attachedClient, bars barState, overla
 				state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
 			}
 		}
-		ac.captureFrames[captured.id] = captured
+		ac.captureFrames[p] = captured
 		state.floating = capturedFloatingRenderState{visible: true, pane: captured, geometry: geometry, title: captured.title, generation: tb.floating.generation, titleGeneration: captured.titleGeneration}
 		state.cursor = captureCursorInputsLocked(p, geometry.Inner, overlays)
 		p.mu.Unlock()

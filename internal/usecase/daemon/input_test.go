@@ -87,6 +87,40 @@ func TestAltDigitSwitchesBetweenThreeTabs(t *testing.T) {
 	d.sessWg.Wait()
 }
 
+func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, nil, nil)
+	source := sess.tabs[0].focusedPane()
+	target := sess.tabs[1].focusedPane()
+	require.Equal(t, source.id, target.id, "tabs deliberately reuse pane-1")
+
+	source.mu.Lock()
+	source.screen.Write([]byte("source"))
+	source.mu.Unlock()
+	d.paint(sess, ac, true)
+	first := <-sends
+	firstOutput, err := ports.UnmarshalOutput(first.Payload)
+	require.NoError(t, err)
+	terminal := vt.NewScreen(ac.size.Cols, ac.size.Rows)
+	terminal.Write(firstOutput.Data)
+
+	// A clean pane relies on the attachment capture cache for its retained
+	// snapshot. Both tabs deliberately use the tab-local default pane ID.
+	target.mu.Lock()
+	target.screen.ClearDamage()
+	target.mu.Unlock()
+	// Use the real key action: it requests the mandatory complete repaint for
+	// the first target-tab frame.
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab2)
+	require.Equal(t, 1, activeTabIndex(sess))
+
+	second := <-sends
+	secondOutput, err := ports.UnmarshalOutput(second.Payload)
+	require.NoError(t, err)
+	require.Zero(t, secondOutput.BaseStateNum, "tab switch must emit the complete target frame first")
+	terminal.Write(secondOutput.Data)
+	require.NotContains(t, strings.Join(frameRows(terminal.Frame), "\n"), "source", "the first target-tab frame must not retain source pane cells")
+}
+
 func TestAltCForwardsToPTY(t *testing.T) {
 	writes := make(chan []byte, 2)
 	p, releasePTY := newBlockingPTYWithWrites(t, writes)

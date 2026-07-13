@@ -14,7 +14,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
-	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
@@ -41,17 +40,19 @@ type attachedClient struct {
 	// sendMu and must never share mutable backing storage.
 	pipelineCache   composeCacheInput
 	pipelineScratch composeCacheInput
-	renderScratch   renderCaptureScratch                      // only touched while sendMu is held
-	captureFrames   map[layout.PaneID]capturedPaneRenderState // only touched while sendMu is held
-	size            domain.Size
-	keys            *keys.Router
-	sess            Guarded[*session]
-	mouseScan       mouse.Scanner
-	themeMu         sync.Mutex
-	theme           themeui.Theme
-	clientTheme     themeui.Theme
-	lastCursor      cursorOut
-	renderStages    renderStageHooks // invoked at real pipeline boundaries while sendMu is held
+	renderScratch   renderCaptureScratch // only touched while sendMu is held
+	// captureFrames is keyed by pane ownership, not the tab-local PaneID, so
+	// snapshots cannot leak when an attachment switches tabs or sessions.
+	captureFrames map[*pane]capturedPaneRenderState // only touched while sendMu is held
+	size          domain.Size
+	keys          *keys.Router
+	sess          Guarded[*session]
+	mouseScan     mouse.Scanner
+	themeMu       sync.Mutex
+	theme         themeui.Theme
+	clientTheme   themeui.Theme
+	lastCursor    cursorOut
+	renderStages  renderStageHooks // invoked at real pipeline boundaries while sendMu is held
 	// previousSession is guarded independently. It is retained through temporary
 	// setSession(nil) hand-offs and cleared only on terminal teardown.
 	previousSession Guarded[*session]
@@ -383,9 +384,9 @@ func (d *Daemon) handoffCoordinator(from, target *session, old, current *attache
 	}
 	current.sendMu.Lock()
 	current.output.rebase()
-	// Capture snapshots are attachment-owned but pane IDs are only session-
-	// local. Discard them while the attachment is exclusively held so a pane
-	// in target cannot reuse pixels from an identically named source pane.
+	// Capture snapshots are attachment-owned. Discard them while the attachment
+	// is exclusively held so the transfer releases panes no longer reachable
+	// from the target session.
 	current.captureFrames = nil
 	current.sendMu.Unlock()
 	d.attachCoordinator(target, old, current, true)
