@@ -257,21 +257,23 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 func TestPTYReaderRestoresPrimaryScreenImmediatelyAfterDEC1049Exit(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
+		window        uint64
 		exitBeforeACK bool
 		exitSuffix    string
 		overlay       bool
 	}{
-		{name: "exit waits for local ACK"},
-		{name: "exit arrives before local ACK", exitBeforeACK: true},
-		{name: "prompt bytes follow exit before local ACK", exitBeforeACK: true, exitSuffix: "PROMPT> "},
-		{name: "palette overlay with bars", overlay: true},
+		{name: "datagram output window (1): exit waits for ACK", window: 1},
+		{name: "datagram output window (1): exit and prompt arrive before ACK", window: 1, exitBeforeACK: true, exitSuffix: "PROMPT> "},
+		{name: "local default output window (8): exit waits for ACK", window: maxUnackedOutputStates},
+		{name: "local default output window (8): exit and prompt arrive before ACK", window: maxUnackedOutputStates, exitBeforeACK: true, exitSuffix: "PROMPT> "},
+		{name: "local default output window (8): palette overlay with bars", window: maxUnackedOutputStates, overlay: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pty, steps, processed := newChannelPTY(t)
 			d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
-			// A one-frame local output window forces the replay to exercise both
-			// ACK orderings without relying on elapsed time.
-			ac.output.maxOutstanding = 1
+			// Datagram clients use a one-frame window; local clients retain the
+			// default eight-frame window. Both ACK orderings stay deterministic.
+			ac.output.maxOutstanding = tc.window
 			clock := newCoordinatorMockClock(t, 8)
 			d.clock = clock.clock
 			rc := d.attachCoordinator(sess, nil, ac, true)
@@ -315,19 +317,28 @@ func TestPTYReaderRestoresPrimaryScreenImmediatelyAfterDEC1049Exit(t *testing.T)
 			pane.mu.Unlock()
 
 			exitData := []byte("\x1b[?1049l" + tc.exitSuffix)
+			var exit ports.Output
 			if tc.exitBeforeACK {
 				steps <- channelPTYStep{data: exitData}
 				awaitPTYReadProcessed(t, processed)
 				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
-				requireNoCoordinatorOutputFrame(t, sends)
-				acknowledge(alternate)
+				if tc.window == 1 {
+					requireNoCoordinatorOutputFrame(t, sends)
+					acknowledge(alternate)
+					exit = mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
+				} else {
+					exit = mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
+					require.Equal(t, alternate.NewStateNum, exit.BaseStateNum,
+						"local exit must be rendered before the alternate-frame ACK")
+					acknowledge(alternate)
+				}
 			} else {
 				acknowledge(alternate)
 				steps <- channelPTYStep{data: exitData}
 				awaitPTYReadProcessed(t, processed)
 				fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
+				exit = mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
 			}
-			exit := mustApplyOutput(t, client, awaitOutputFrameWithoutSleep(t, sends))
 			require.NotEmpty(t, exit.Data, "the first post-exit output must actively remove alternate cells")
 			rendered := strings.Join(frameRows(client.Frame), "\n")
 			require.NotContains(t, rendered, "MATRIX", "the first post-exit frame must not retain alternate cells")
