@@ -60,6 +60,42 @@ func TestRuntimeObserverRequiredSpanKinds(t *testing.T) {
 	}
 }
 
+func TestRuntimeCorrelationObserverUsesHarnessProcessInputs(t *testing.T) {
+	var got []RuntimeMark
+	observer, err := NewRuntimeCorrelationObserver(runtimeObserverFunc(func(mark RuntimeMark) {
+		got = append(got, mark)
+	}), RuntimeCorrelationInputs{Scenario: "1x4-idle-local", Run: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	observer.ObserveRuntime(RuntimeMark{Schema: RuntimeMarkSchema, Component: "daemon", Scenario: "runtime", Run: 1, Kind: RuntimeEmitEnd, Valid: true})
+	observer.ObserveRuntime(RuntimeMark{Schema: RuntimeMarkSchema, Component: "daemon", Scenario: "runtime", Run: 1, Sequence: 9, RequestID: 10, Epoch: 11, Kind: RuntimeEmitStart, Valid: true})
+
+	if len(got) != 2 {
+		t.Fatalf("marks=%+v", got)
+	}
+	for _, mark := range got {
+		if mark.Scenario != "1x4-idle-local" || mark.Run != 7 {
+			t.Fatalf("harness correlation was not applied: %+v", mark)
+		}
+		if mark.Sequence == 0 || mark.RequestID == 0 || mark.Epoch == 0 {
+			t.Fatalf("missing deterministic operation identity: %+v", mark)
+		}
+	}
+	if got[1].Sequence != 9 || got[1].RequestID != 10 || got[1].Epoch != 11 {
+		t.Fatalf("explicit operation identity changed: %+v", got[1])
+	}
+}
+
+func TestRuntimeCorrelationObserverRejectsInvalidHarnessInputs(t *testing.T) {
+	for _, in := range []RuntimeCorrelationInputs{{}, {Scenario: "scenario"}} {
+		if _, err := NewRuntimeCorrelationObserver(runtimeObserverFunc(func(RuntimeMark) {}), in); err == nil {
+			t.Fatalf("invalid inputs accepted: %+v", in)
+		}
+	}
+}
+
 func TestRuntimeMarkHasNoRenderingPayloadOrPolicyFields(t *testing.T) {
 	typ := reflect.TypeFor[RuntimeMark]()
 	for _, forbidden := range []string{"Cell", "Cells", "Payload", "Frame", "Renderer", "Policy", "Transport"} {

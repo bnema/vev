@@ -1,6 +1,9 @@
 package ports
 
-import "sync/atomic"
+import (
+	"errors"
+	"sync/atomic"
+)
 
 // RuntimeMarkSchema is the version of the process-local performance trace.
 const RuntimeMarkSchema uint16 = 1
@@ -82,6 +85,47 @@ func RuntimeMarkValid(mark RuntimeMark) bool {
 type RuntimeCorrelation struct {
 	Scenario                        string
 	Run, Sequence, RequestID, Epoch uint64
+}
+
+// RuntimeCorrelationInputs are supplied once by process orchestration. They
+// are deliberately data-only: consumer APIs continue to receive only their
+// one RuntimeObserver argument and never a clock or tick.
+type RuntimeCorrelationInputs struct {
+	Scenario string
+	Run      uint64
+}
+
+// NewRuntimeCorrelationObserver binds every mark from one OS process to its
+// harness manifest scenario/run. Operation IDs remain producer-owned when
+// supplied; missing IDs are assigned from this process-local sequence.
+func NewRuntimeCorrelationObserver(observer RuntimeObserver, inputs RuntimeCorrelationInputs) (RuntimeObserver, error) {
+	if observer == nil || inputs.Scenario == "" || inputs.Run == 0 {
+		return nil, errors.New("invalid runtime correlation inputs")
+	}
+	return &runtimeCorrelationObserver{observer: observer, inputs: inputs}, nil
+}
+
+type runtimeCorrelationObserver struct {
+	observer RuntimeObserver
+	inputs   RuntimeCorrelationInputs
+	sequence atomic.Uint64
+}
+
+func (o *runtimeCorrelationObserver) ObserveRuntime(mark RuntimeMark) {
+	if o == nil || o.observer == nil {
+		return
+	}
+	mark.Scenario, mark.Run = o.inputs.Scenario, o.inputs.Run
+	if mark.Sequence == 0 {
+		mark.Sequence = o.sequence.Add(1)
+	}
+	if mark.RequestID == 0 {
+		mark.RequestID = mark.Sequence
+	}
+	if mark.Epoch == 0 {
+		mark.Epoch = mark.RequestID
+	}
+	o.observer.ObserveRuntime(mark)
 }
 
 var runtimeMarkSequence atomic.Uint64

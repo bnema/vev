@@ -1,10 +1,60 @@
 package app
 
 import (
+	"bufio"
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/bnema/vev/internal/ports"
 )
+
+func TestPerformanceTraceUsesHarnessProcessMapping(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "process.jsonl")
+	t.Setenv("VEV_PERF_TRACE", path)
+	t.Setenv("VEV_PERF_PROCESS_ID", "idle-local-r001-daemon-01")
+	t.Setenv("VEV_PERF_SCENARIO", "1x4-idle-local")
+	t.Setenv("VEV_PERF_RUN", "1")
+
+	observer, closer, err := performanceTrace(&traceTestClock{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observer == nil || closer == nil {
+		t.Fatal("performance trace was not configured")
+	}
+	observer.ObserveRuntime(ports.RuntimeMark{Schema: ports.RuntimeMarkSchema, Component: "daemon", Scenario: "runtime", Run: 1, Kind: ports.RuntimeEmitEnd, Valid: true})
+	if err := closer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var mark struct {
+		ProcessID string `json:"process_id"`
+		Scenario  string `json:"scenario"`
+		Run       uint64 `json:"run"`
+		Sequence  uint64 `json:"sequence"`
+		RequestID uint64 `json:"request_id"`
+		Epoch     uint64 `json:"epoch"`
+	}
+	if err := json.NewDecoder(bufio.NewReader(f)).Decode(&mark); err != nil {
+		t.Fatal(err)
+	}
+	if mark.ProcessID != "idle-local-r001-daemon-01" || mark.Scenario != "1x4-idle-local" || mark.Run != 1 || mark.Sequence == 0 || mark.RequestID == 0 || mark.Epoch == 0 {
+		t.Fatalf("mark does not match harness mapping: %+v", mark)
+	}
+}
+
+type traceTestClock struct{}
+
+func (*traceTestClock) Now() time.Time                     { return time.Unix(0, 1) }
+func (*traceTestClock) NewTimer(time.Duration) ports.Timer { return nil }
 
 func TestPerformanceTraceAppWiresOneObserverPerProcess(t *testing.T) {
 	source, err := os.ReadFile("run.go")

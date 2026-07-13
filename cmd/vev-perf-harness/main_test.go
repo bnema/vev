@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -73,6 +74,117 @@ func (l *fakeLauncher) Launch(m processMapping, command roleCommand) (launchedPr
 	p := &fakeProcess{measureErr: l.measureErr[m.Role], closeErr: l.closeErr[m.Role]}
 	l.process = append(l.process, p)
 	return p, nil
+}
+
+func TestCLIProcessCloseIsBoundedWhenPublicRoleDoesNotExit(t *testing.T) {
+	deadline := make(chan time.Time)
+	close(deadline)
+	var term, kill int
+	p := &cliProcess{
+		waitErr:      make(chan error),
+		waitTimeout:  func() <-chan time.Time { return deadline },
+		forceCleanup: func() { term++ },
+		forceKill:    func() { kill++ },
+	}
+	if err := p.Close(); err == nil {
+		t.Fatal("stuck public role close succeeded")
+	}
+	if term != 1 || kill != 1 {
+		t.Fatalf("TERM/KILL calls = %d/%d, want 1/1", term, kill)
+	}
+}
+
+func TestHarnessCanonicalLocalSmokeRealRoles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("public CLI smoke")
+	}
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "vev")
+	build := exec.Command("/usr/local/go/bin/go", "build", "-o", bin, "./")
+	build.Dir = root
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build public CLI: %v\n%s", err, output)
+	}
+	m, err := readManifest(filepath.Join(root, "testdata", "perf", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateManifest(m); err != nil {
+		t.Fatal(err)
+	}
+	var local scenario
+	for _, s := range m.Scenarios {
+		if s.Topology == "1x4" && s.Workload == "idle" && s.Transport == "local" {
+			local = s
+			break
+		}
+	}
+	if local.ID == "" {
+		t.Fatal("canonical local scenario missing")
+	}
+	dir := t.TempDir()
+	raw, err := os.OpenFile(filepath.Join(dir, "raw.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	h := defaultHarness()
+	h.clock = &fakeClock{} // injected duration keeps the public 30s contract bounded in test
+	h.launcher = &cliLauncher{bin: bin}
+	result, err := h.runOne(options{vevBin: bin, out: dir, duration: minimumDuration}, m, local, 1, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Samples != 1 || len(result.Processes) != 2 {
+		t.Fatalf("canonical local smoke result=%+v", result)
+	}
+}
+
+func TestHarnessTestSelectionKeepsCanonicalManifestValidation(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(root, "testdata", "perf", "manifest.json")
+	m, err := readManifest(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateManifest(m); err != nil {
+		t.Fatal(err)
+	}
+	selected := m.Scenarios[0]
+	h := defaultHarness()
+	h.clock, h.launcher = &fakeClock{}, &fakeLauncher{}
+	h.selectScenarios = func(manifest) []scenario { return []scenario{selected} }
+	out := filepath.Join(t.TempDir(), "out")
+	if err := run([]string{"--vev-bin", "ignored", "--manifest", manifestPath, "--out", out, "--warmup", "0s", "--duration", "30s", "--repetitions", "10"}, h); err != nil {
+		t.Fatal(err)
+	}
+	var runs []runResult
+	b, err := os.ReadFile(filepath.Join(out, "runs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &runs); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 10 {
+		t.Fatalf("selected canonical runs=%d, want 10", len(runs))
+	}
+}
+
+func TestTraceEnvironmentMatchesProcessMapping(t *testing.T) {
+	mapping := processMapping{TracePath: "/tmp/trace.jsonl", ProcessID: "p-01", Scenario: "1x4-idle-local", Run: 3}
+	got := strings.Join(traceEnvironment(mapping), "\n")
+	for _, want := range []string{"VEV_PERF_TRACE=/tmp/trace.jsonl", "VEV_PERF_PROCESS_ID=p-01", "VEV_PERF_SCENARIO=1x4-idle-local", "VEV_PERF_RUN=3"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("trace environment missing %q: %s", want, got)
+		}
+	}
 }
 
 func TestHarnessFlagsRejectShortMeasurements(t *testing.T) {
@@ -190,10 +302,18 @@ type fakeOutput struct {
 func (o *fakeOutput) Sync() error { o.syncs++; return nil }
 func (*fakeOutput) Close() error  { return nil }
 
-type orderedPTY struct{ close func() }
+type orderedPTY struct {
+	write func([]byte)
+	close func()
+}
 
-func (*orderedPTY) Read([]byte) (int, error)    { return 0, os.ErrClosed }
-func (*orderedPTY) Write(b []byte) (int, error) { return len(b), nil }
+func (*orderedPTY) Read([]byte) (int, error) { return 0, os.ErrClosed }
+func (p *orderedPTY) Write(b []byte) (int, error) {
+	if p.write != nil {
+		p.write(b)
+	}
+	return len(b), nil
+}
 func (p *orderedPTY) Close() error {
 	p.close()
 	return nil
@@ -213,13 +333,19 @@ func TestCLIProcessCloseGracefulDetachCompletesSpanBeforeForcedCleanup(t *testin
 	waitErr := make(chan error, 1)
 	timeout := make(chan time.Time)
 	p := &cliProcess{
-		pty: &orderedPTY{close: func() {
-			order = append(order, "pty_closed")
-			// The graceful client detach has closed its transport and emitted its
-			// adapter receive-end mark before cmd.Wait reports completion.
-			order = append(order, "adapter_receive_end")
-			waitErr <- nil
-		}},
+		pty: &orderedPTY{
+			write: func(input []byte) {
+				if string(input) != "exit\n" {
+					t.Fatalf("graceful exit input=%q", input)
+				}
+				order = append(order, "exit_written")
+				// The graceful client exit has closed its transport and emitted
+				// its adapter receive-end mark before cmd.Wait completes.
+				order = append(order, "adapter_receive_end")
+				waitErr <- nil
+			},
+			close: func() { order = append(order, "pty_closed") },
+		},
 		output:      &orderedOutput{close: func() { order = append(order, "output_closed") }},
 		waitErr:     waitErr,
 		waitTimeout: func() <-chan time.Time { return timeout },
@@ -231,7 +357,7 @@ func TestCLIProcessCloseGracefulDetachCompletesSpanBeforeForcedCleanup(t *testin
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if !equalStrings(order, []string{"pty_closed", "adapter_receive_end", "output_closed"}) {
+	if !equalStrings(order, []string{"exit_written", "adapter_receive_end", "pty_closed", "output_closed"}) {
 		t.Fatalf("cleanup order=%q", order)
 	}
 }
@@ -569,7 +695,7 @@ func TestHarnessPreservesWorkloadAndCleanupErrors(t *testing.T) {
 	if !errors.Is(err, primary) || !errors.Is(err, cleanup) {
 		t.Fatalf("workload and cleanup errors were not both preserved: %v", err)
 	}
-	if got, want := err.Error(), primary.Error()+"\n"+cleanup.Error(); got != want {
+	if got, want := err.Error(), primary.Error()+"\nclose daemon role: "+cleanup.Error(); got != want {
 		t.Fatalf("error ordering=%q want %q", got, want)
 	}
 	for i, p := range launcher.process {

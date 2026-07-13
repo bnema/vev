@@ -247,7 +247,30 @@ func performanceTrace(clk ports.Clock) (ports.RuntimeObserver, io.Closer, error)
 	if path == "" {
 		return nil, nil, nil
 	}
-	return observability.NewJSONL(path, clk, processID)
+	observer, closer, err := observability.NewJSONL(path, clk, processID)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The harness supplies these manifest fields to every launched role. Keep a
+	// valid standalone trace for operators that set only the original trace
+	// variables, while ensuring harness traces match their process mapping.
+	inputs := ports.RuntimeCorrelationInputs{Scenario: os.Getenv("VEV_PERF_SCENARIO"), Run: 1}
+	if inputs.Scenario == "" {
+		inputs.Scenario = "runtime"
+	}
+	if rawRun := os.Getenv("VEV_PERF_RUN"); rawRun != "" {
+		inputs.Run, err = strconv.ParseUint(rawRun, 10, 64)
+		if err != nil || inputs.Run == 0 {
+			_ = closer.Close()
+			return nil, nil, fmt.Errorf("invalid VEV_PERF_RUN %q", rawRun)
+		}
+	}
+	observer, err = ports.NewRuntimeCorrelationObserver(observer, inputs)
+	if err != nil {
+		_ = closer.Close()
+		return nil, nil, err
+	}
+	return observer, closer, nil
 }
 
 func configureLogging(component logging.Component, rotateAtRuntime bool) (*slog.Logger, io.Closer, error) {
@@ -780,6 +803,13 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 	defer func() { _ = logCloser.Close() }()
 	log.Debug("udp proxy starting", "session", session)
 
+	observer, observerCloser, err := performanceTrace(clock.New())
+	if err != nil {
+		return fmt.Errorf("vev: performance trace: %w", err)
+	}
+	if observerCloser != nil {
+		defer func() { _ = observerCloser.Close() }()
+	}
 	portRange, err := parseUDPPortRange(os.Getenv(envUDPPortRange))
 	if err != nil {
 		return err
@@ -793,20 +823,15 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 	if _, err := rand.Read(key); err != nil {
 		return err
 	}
-	daemonTr, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+	daemonTr, err := ensureDaemon(ctx, ipc.SocketDir(), func(dir string) (ports.Transport, error) {
+		return ipc.Dial(dir, ipc.WithRuntimeObserver(observer))
+	}, realSpawn, defaultBackoff)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = daemonTr.Close() }()
 	udpOptions := udpProxyClientTransportOptions
 	udpOptions.Observe = dgram.DiagnosticLogObserver(log)
-	observer, observerCloser, err := performanceTrace(clock.New())
-	if err != nil {
-		return fmt.Errorf("vev: performance trace: %w", err)
-	}
-	if observerCloser != nil {
-		defer func() { _ = observerCloser.Close() }()
-	}
 	dg, err := dgram.NewTransportWithOptions(conn, nil, key, 2, 1, udpOptions, dgram.WithRuntimeObserver(observer))
 	if err != nil {
 		return err

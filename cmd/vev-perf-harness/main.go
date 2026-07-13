@@ -158,7 +158,7 @@ func closeLaunchedRoles(processes []launchedRole) error {
 	var failures []error
 	for i := len(processes) - 1; i >= 0; i-- {
 		if err := processes[i].process.Close(); err != nil {
-			failures = append(failures, err)
+			failures = append(failures, fmt.Errorf("close %s role: %w", processes[i].mapping.Role, err))
 		}
 	}
 	return errors.Join(failures...)
@@ -223,6 +223,7 @@ type cliProcess struct {
 	waitErr       chan error
 	waitTimeout   func() <-chan time.Time
 	forceCleanup  func()
+	forceKill     func()
 	terminalReady bool
 }
 
@@ -240,8 +241,8 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 	}
 	cmd := exec.Command(l.bin, role.Args...)
 	runDir := filepath.Dir(m.TracePath)
-	cmd.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_REMOTE_TRANSPORT"), "VEV_PERF_TRACE="+m.TracePath, "VEV_PERF_PROCESS_ID="+m.ProcessID,
-		"XDG_RUNTIME_DIR="+filepath.Join(runDir, "runtime"),
+	cmd.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN", "VEV_REMOTE_TRANSPORT"), traceEnvironment(m)...)
+	cmd.Env = append(cmd.Env, "XDG_RUNTIME_DIR="+filepath.Join(runDir, "runtime"),
 		"XDG_STATE_HOME="+filepath.Join(runDir, "state"), "TERM=xterm-256color")
 	if m.Role == "client" {
 		l.mu.Lock()
@@ -286,6 +287,9 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 		p.pty, p.output, p.chunks, p.done = master, output, make(chan []byte, 32), make(chan struct{})
 		go p.copyTerminal()
 	} else {
+		// Every launched role owns a dedicated process group, so the bounded
+		// cleanup path never signals the harness/test runner's group.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 		if err != nil {
 			return nil, err
@@ -352,11 +356,11 @@ func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedP
 set -eu
 case "$*" in
   *"_stdio"*)
-    exec env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _stdio %[6]q
+    exec env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q VEV_PERF_SCENARIO=%[12]q VEV_PERF_RUN=%[13]d XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _stdio %[6]q
     ;;
   *"_udp-bootstrap"*)
     rm -f %[7]q %[8]q %[9]q
-    env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _udp-proxy %[6]q >%[7]q 2>%[8]q &
+    env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q VEV_PERF_SCENARIO=%[12]q VEV_PERF_RUN=%[13]d XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _udp-proxy %[6]q >%[7]q 2>%[8]q &
     peer=$!
     printf '%%s\n' "$peer" > %[11]q
     i=0
@@ -372,7 +376,7 @@ case "$*" in
     ;;
   *) echo 'vev harness ssh seam rejected non-vev command' >&2; exit 64 ;;
 esac
-`, m.TracePath, m.ProcessID, filepath.Join(runDir, "runtime"), filepath.Join(runDir, "state"), l.bin, role.Args[1], ready, stderr, target, netemPort, route.pidPath)
+`, m.TracePath, m.ProcessID, filepath.Join(runDir, "runtime"), filepath.Join(runDir, "state"), l.bin, role.Args[1], ready, stderr, target, netemPort, route.pidPath, m.Scenario, m.Run)
 	if err := os.WriteFile(shim, []byte(body), 0o700); err != nil {
 		if route.netem != nil {
 			_ = route.netem.Close()
@@ -403,6 +407,18 @@ func remoteMode(t transport) (string, error) {
 		return "udp", nil
 	default:
 		return "", fmt.Errorf("transport %q cannot route through a remote peer", t.ID)
+	}
+}
+
+// traceEnvironment is the complete process-local identity supplied by the
+// persisted harness processMapping. App turns Scenario/Run into production
+// mark correlation; sequence/request/epoch remain process-local operation IDs.
+func traceEnvironment(m processMapping) []string {
+	return []string{
+		"VEV_PERF_TRACE=" + m.TracePath,
+		"VEV_PERF_PROCESS_ID=" + m.ProcessID,
+		"VEV_PERF_SCENARIO=" + m.Scenario,
+		"VEV_PERF_RUN=" + strconv.Itoa(m.Run),
 	}
 }
 
@@ -498,7 +514,7 @@ func (p *cliProcess) waitForTerminalReady() error {
 		select {
 		case chunk, ok := <-p.chunks:
 			if !ok {
-				return errors.New("client terminal closed before readiness output")
+				return p.terminalClosedError("readiness output")
 			}
 			if len(chunk) == 0 {
 				continue
@@ -520,6 +536,21 @@ func (p *cliProcess) waitForTerminalReady() error {
 	}
 }
 
+func (p *cliProcess) terminalClosedError(boundary string) error {
+	if p.waitErr != nil {
+		select {
+		case err := <-p.waitErr:
+			// Close owns reaping and may need the result after a failed boundary.
+			p.waitErr <- err
+			if err != nil {
+				return fmt.Errorf("client terminal closed before %s: %w", boundary, err)
+			}
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("client terminal closed before %s", boundary)
+}
+
 func (p *cliProcess) waitForTerminalMarker(marker, input []byte) error {
 	var received []byte
 	echo := newPTYLocalEcho(input)
@@ -529,7 +560,7 @@ func (p *cliProcess) waitForTerminalMarker(marker, input []byte) error {
 		select {
 		case chunk, ok := <-p.chunks:
 			if !ok {
-				return errors.New("client terminal closed before application output")
+				return p.terminalClosedError("application output")
 			}
 			received = append(received, echo.applicationOutput(chunk)...)
 		case err := <-p.waitErr:
@@ -591,23 +622,44 @@ func (p *cliProcess) Close() error {
 		if p.done != nil {
 			close(p.done)
 		}
-		// Closing the client PTY causes its stdin pump to detach, then close the
-		// transport and wait for its adapter receive end mark. Do this before a
-		// signal so process-local spans are complete in the trace.
+		// A public terminal client owns a shell session. Ask that shell to exit
+		// before closing the PTY so its transport can finish its receive span;
+		// this avoids turning ordinary harness teardown into an aborted trace.
+		exited := false
+		if p.pty != nil && p.waitErr != nil {
+			_, _ = p.pty.Write([]byte("exit\n"))
+			select {
+			case <-p.waitErr:
+				exited = true
+			case <-p.closeDeadline():
+			}
+		}
 		if p.pty != nil {
 			_ = p.pty.Close()
 		}
-		if p.waitErr != nil {
+		if p.waitErr != nil && !exited {
 			select {
 			case <-p.waitErr:
-				// The client exited through its normal detach path.
 			case <-p.closeDeadline():
+				// Teardown is deliberately bounded: a stuck public CLI or child
+				// must not hold a local harness run indefinitely.
 				p.forceProcessGroupCleanup()
-				<-p.waitErr
+				select {
+				case <-p.waitErr:
+				case <-p.closeDeadline():
+					p.forceProcessGroupKill()
+					select {
+					case <-p.waitErr:
+					case <-p.closeDeadline():
+						result = errors.New("timed out reaping public CLI process")
+					}
+				}
 			}
 		}
 		if p.output != nil {
-			result = p.output.Close()
+			if err := p.output.Close(); result == nil {
+				result = err
+			}
 		}
 	})
 	return result
@@ -629,6 +681,16 @@ func (p *cliProcess) forceProcessGroupCleanup() {
 		// The client is a session/process-group leader; forced cleanup must
 		// include its ssh seam/_stdio descendants.
 		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGTERM)
+	}
+}
+
+func (p *cliProcess) forceProcessGroupKill() {
+	if p.forceKill != nil {
+		p.forceKill()
+		return
+	}
+	if p.cmd != nil && p.cmd.Process != nil {
+		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
 	}
 }
 
@@ -667,12 +729,13 @@ func inputMarker(input []byte) []byte {
 }
 
 type harness struct {
-	clock     clock
-	launcher  launcher
-	mkdir     func(string) error
-	create    func(string) (*os.File, error)
-	removeAll func(string) error
-	gitSHA    func() string
+	clock           clock
+	launcher        launcher
+	mkdir           func(string) error
+	create          func(string) (*os.File, error)
+	removeAll       func(string) error
+	gitSHA          func() string
+	selectScenarios func(manifest) []scenario // test-only bounded fixture seam
 }
 
 func main() {
@@ -707,14 +770,18 @@ func run(args []string, h *harness) error {
 	results := make([]runResult, 0, len(m.Scenarios)*opt.repetitions)
 	var all []int64
 	var localSpans []span
-	for _, s := range m.Scenarios {
+	scenarios := m.Scenarios
+	if h.selectScenarios != nil {
+		scenarios = h.selectScenarios(m)
+	}
+	for _, s := range scenarios {
 		if s.InapplicableReason != "" {
 			continue
 		}
 		for r := 1; r <= opt.repetitions; r++ {
 			rr, err := h.runOne(opt, m, s, r, raw)
 			if err != nil {
-				return err
+				return fmt.Errorf("scenario %s run %d: %w", s.ID, r, err)
 			}
 			results = append(results, rr)
 			all = append(all, rr.EndToEnd...)
@@ -1246,7 +1313,12 @@ func mergeProcessTraces(mappings []processMapping) ([]span, error) {
 			}
 		}
 		if len(starts) != 0 {
-			return nil, errors.New("missing process-local span pair")
+			keys := make([]string, 0, len(starts))
+			for key := range starts {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			return nil, fmt.Errorf("missing process-local span pair for %s: %s", m.ProcessID, strings.Join(keys, ", "))
 		}
 	}
 	return out, nil
