@@ -9,8 +9,10 @@ transport coverage are in [`testdata/perf/manifest.json`](../testdata/perf/manif
 `1x4`, `4x1`, `4x4`, and `8x1`, all at `120x40` with 10,000 rows per pane;
 idle, active/all/inactive output, interactive flood, copy search, resize sweep,
 snapshot/output/resize, and attach/restore/tab switch; local, SSH stdio, UDP
-baseline, UDP 25/100 ms, and UDP 1% loss. It has 216 scenarios (4×9×6), with
-inapplicable cases required to be explicit.
+baseline, UDP 25/100 ms, and UDP 0%/1% loss. It has 252 scenarios (4×9×7),
+with inapplicable cases required to be explicit. The seven transport entries are
+`local`, `ssh_stdio`, `udp_baseline`, `udp_loss_0pct`, `udp_25ms`, `udp_100ms`,
+and `udp_loss_1pct`.
 
 ### Trace schema and clock domains
 
@@ -25,7 +27,10 @@ Every process JSONL record has exactly these fields:
 ```
 
 `tick` is stamped only by the concrete JSONL observer using its process-local
-injected monotonic clock; producers supply no timestamp. Components in one OS
+injected monotonic clock; producers supply no timestamp. The harness sets `VEV_PERF_TRACE`,
+`VEV_PERF_PROCESS_ID`, `VEV_PERF_SCENARIO`, and `VEV_PERF_RUN` for every
+launched role, identifying its exclusive trace path and process/scenario/run
+mapping. Components in one OS
 process share that observer. The harness clock is a separate monotonic domain
 and is the sole clock for input-injection → terminal-bytes-successfully-flushed
 end-to-end samples. Cross-process ticks are never ordered or subtracted;
@@ -50,10 +55,14 @@ go run ./cmd/vev-perf-harness --vev-bin /tmp/vev-perf \
 ```
 
 The minimums are 30 seconds measured and 10 independent repetitions; warmup is
-excluded. Each run must contain `manifest.json`, `raw-harness.jsonl`, per-process
+excluded. During the measured interval the harness injects at most one event per
+second. At least 10 complete event pairs are required: both injection and
+successful terminal flush must fall inside the measured interval; straddling or
+failed events are retained only as raw diagnostics and are not samples. Each run must contain `manifest.json`, `raw-harness.jsonl`, per-process
 JSONL, `runs.json`, and `summary.json`. Reject results with missing input/flush
 boundaries, unmatched IDs, bad correlation, nonmonotonic same-process sequence,
-negative same-domain spans, insufficient measured events, invalid denominators,
+negative same-domain spans, fewer than 10 complete in-interval event pairs,
+invalid denominators,
 any cross-process tick arithmetic, or unmet duration/repetition minima. Raw
 JSONL and run manifests are the evidence files; no result authorizes a policy
 or optimization change.

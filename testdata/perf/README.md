@@ -21,7 +21,9 @@ go run ./cmd/vev-perf-harness --vev-bin /tmp/vev-perf \
 Each run writes `manifest.json`, `raw-harness.jsonl`, one JSONL trace per
 launched process, `runs.json`, and `summary.json`. The process manifest records
 process ID, role, scenario/run, clock domain, exact exclusive trace path, and
-identity. The harness owns only the end-to-end boundaries: input injection to
+identity. Every launched role receives `VEV_PERF_TRACE`, `VEV_PERF_PROCESS_ID`,
+`VEV_PERF_SCENARIO`, and `VEV_PERF_RUN`; the first is exclusive to that process
+and the remaining values correlate it to the manifest. The harness owns only the end-to-end boundaries: input injection to
 terminal bytes successfully flushed. It never subtracts ticks from daemon,
 client, or adapter processes.
 
@@ -43,10 +45,25 @@ fragments, retransmits, pending, and ACK RTT remain diagnostics. Reports retain
 raw records and counts plus p50/p95/p99 (and max where applicable). End-to-end
 reports are harness-clock distributions only.
 
-Reject a result for missing or unmatched boundaries, missing flush, invalid
-correlation, nonmonotonic same-process sequence, negative same-domain duration,
-insufficient measured events, invalid denominators, cross-process tick math,
-less than 30 seconds measured, or fewer than 10 repetitions. Warmup is excluded
-from measured samples. Raw traces are evidence, not a transport-policy or
+The harness injects at most one measured event per second and requires at least
+10 complete in-interval event pairs. Both the input-injection and successful
+terminal-flush boundaries must be within the measured interval; warmup and
+straddling pairs are excluded from percentile samples (but retained as raw
+evidence). Reject a result for missing or unmatched boundaries, missing flush,
+invalid correlation, nonmonotonic same-process sequence, negative same-domain
+duration, fewer than 10 complete in-interval pairs, invalid denominators,
+cross-process tick math, less than 30 seconds measured, or fewer than 10
+repetitions. Warmup is excluded from measured samples. Raw traces are evidence, not a transport-policy or
 optimization gate; wire bytes, protocol version, rendering policy, pacing,
 compression, and loss behavior are unchanged.
+
+## Bounded manifest and harness checks
+
+Before a measurement, validate the manifest shape and run the harness tests without launching the full matrix:
+
+```sh
+jq -e '(.topologies|length)==4 and (.workloads|length)==9 and (.transports|length)==7 and (.scenarios|length)==252' testdata/perf/manifest.json
+go test ./cmd/vev-perf-harness
+```
+
+The full command above is the measurement procedure; its 10-second warmup, 30-second measured interval, and 10 repetitions are the minimum accepted settings.
