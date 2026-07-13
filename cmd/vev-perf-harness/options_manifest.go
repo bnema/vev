@@ -67,14 +67,18 @@ func resolvePathOptions(o options) (options, error) {
 }
 
 func readManifest(path string) (manifest, error) {
-	f, e := os.Open(path)
-	if e != nil {
-		return manifest{}, e
+	f, err := os.Open(path)
+	if err != nil {
+		return manifest{}, err
 	}
-	defer f.Close()
 	var m manifest
-	e = json.NewDecoder(f).Decode(&m)
-	return m, e
+	if err := json.NewDecoder(f).Decode(&m); err != nil {
+		return manifest{}, closeFile(f, err)
+	}
+	if err := f.Close(); err != nil {
+		return manifest{}, err
+	}
+	return m, nil
 }
 
 func validateManifest(m manifest) error {

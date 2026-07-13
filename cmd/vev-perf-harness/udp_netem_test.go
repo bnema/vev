@@ -9,6 +9,26 @@ import (
 	"time"
 )
 
+func TestUDPNetemDropsWhenBoundedSchedulerIsFull(t *testing.T) {
+	r := &udpNetemRelay{
+		done:  make(chan struct{}),
+		slots: make(chan struct{}, udpNetemQueueCapacity),
+		queue: make(chan scheduledPacket, udpNetemQueueCapacity),
+	}
+	packet := scheduledPacket{packet: []byte("bounded"), to: &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1}}
+	for range udpNetemQueueCapacity {
+		if !r.enqueue(packet) {
+			t.Fatal("enqueue() dropped packet before scheduler capacity was full")
+		}
+	}
+	if r.enqueue(packet) {
+		t.Fatal("enqueue() accepted packet beyond scheduler capacity")
+	}
+	if got := r.queueOverflowDrops.Load(); got != 1 {
+		t.Fatalf("queue overflow drops=%d, want 1", got)
+	}
+}
+
 func TestUDPNetemExecutesRTTAndLossFixtures(t *testing.T) {
 	fixtures := []struct {
 		name string
@@ -54,15 +74,36 @@ func TestUDPNetemExecutesRTTAndLossFixtures(t *testing.T) {
 			}
 			got := 0
 			buf := make([]byte, 32)
+			var relayAddr net.Addr
 			for got < tc.want {
-				if _, _, err := target.ReadFrom(buf); err != nil {
+				if _, relayAddr, err = target.ReadFrom(buf); err != nil {
 					t.Fatalf("received %d packets, want %d: %v", got, tc.want, err)
 				}
 				got++
 			}
 			if tc.rtt > 0 {
 				if elapsed := time.Since(started); elapsed < tc.rtt/2 {
-					t.Fatalf("one-way netem delay=%s, want at least %s", elapsed, tc.rtt/2)
+					t.Fatalf("client-to-target netem delay=%s, want at least %s", elapsed, tc.rtt/2)
+				}
+			}
+			if tc.loss == 0 {
+				// The relay learns the client from the first carriage packet. Replying
+				// through that same relay address verifies the target-to-client half
+				// of the configured RTT as well.
+				started = time.Now()
+				if _, err := target.WriteTo([]byte("reply"), relayAddr); err != nil {
+					t.Fatal(err)
+				}
+				if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := client.ReadFrom(buf); err != nil {
+					t.Fatalf("relay reply: %v", err)
+				}
+				if tc.rtt > 0 {
+					if elapsed := time.Since(started); elapsed < tc.rtt/2 {
+						t.Fatalf("target-to-client netem delay=%s, want at least %s", elapsed, tc.rtt/2)
+					}
 				}
 			}
 			// Keep the deadline short: extra carriage would prove the exact 1%%

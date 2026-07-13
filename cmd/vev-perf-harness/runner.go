@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +67,8 @@ func createExclusiveRunDir(path string) error {
 // recordedGitSHA prefers build provenance so an installed public harness does
 // not depend on its launch directory being a checkout. The git fallback keeps
 // go run evidence attributable as well.
+const gitSHACommandTimeout = time.Second
+
 func recordedGitSHA() string {
 	if info, ok := debug.ReadBuildInfo(); ok {
 		for _, setting := range info.Settings {
@@ -74,14 +77,16 @@ func recordedGitSHA() string {
 			}
 		}
 	}
-	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), gitSHACommandTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "rev-parse", "HEAD").Output()
 	if err == nil && strings.TrimSpace(string(out)) != "" {
 		return strings.TrimSpace(string(out))
 	}
 	return "unknown"
 }
 
-func run(args []string, h *harness) error {
+func run(args []string, h *harness) (err error) {
 	opt, err := parseOptions(args)
 	if err != nil {
 		return err
@@ -104,7 +109,11 @@ func run(args []string, h *harness) error {
 	if err != nil {
 		return err
 	}
-	defer raw.Close()
+	defer func() {
+		if closeErr := raw.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	results := make([]runResult, 0, len(m.Scenarios)*opt.repetitions)
 	var localSpans []span
 	scenarios := m.Scenarios

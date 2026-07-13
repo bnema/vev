@@ -167,28 +167,25 @@ func mergeProcessTraces(mappings []processMapping) ([]span, error) {
 		for scan.Scan() {
 			var r traceRecord
 			if err := json.Unmarshal(scan.Bytes(), &r); err != nil {
-				_ = f.Close()
-				return nil, err
+				return nil, closeFile(f, err)
 			}
 			if r.ProcessID != m.ProcessID || r.Scenario != m.Scenario || r.Run != uint64(m.Run) {
-				_ = f.Close()
-				return nil, errors.New("trace record identity does not match manifest")
+				return nil, closeFile(f, errors.New("trace record identity does not match manifest"))
 			}
 			if r.Scenario == "" || r.Run == 0 || r.Component == "" || r.Sequence == 0 || r.RequestID == 0 || r.Epoch == 0 {
-				_ = f.Close()
-				return nil, errors.New("trace record has invalid correlation fields")
+				return nil, closeFile(f, errors.New("trace record has invalid correlation fields"))
 			}
 			if _, ok := known[r.ProcessID]; !ok {
-				_ = f.Close()
-				return nil, errors.New("unknown trace process_id")
+				return nil, closeFile(f, errors.New("unknown trace process_id"))
 			}
 			records = append(records, r)
 		}
 		if err := scan.Err(); err != nil {
-			_ = f.Close()
+			return nil, closeFile(f, err)
+		}
+		if err := f.Close(); err != nil {
 			return nil, err
 		}
-		_ = f.Close()
 		// A process shares one observer across concurrent components. Correlation
 		// IDs are allocated before a goroutine reaches its first mark, so a later
 		// ID can be serialized before an earlier one. Their first appearance is
@@ -271,14 +268,19 @@ func percentiles(samples []int64) distribution {
 	return distribution{len(v), at(50), at(95), at(99), v[len(v)-1]}
 }
 
+func closeFile(f *os.File, err error) error {
+	return errors.Join(err, f.Close())
+}
+
 func writeJSON(path string, v any) error {
-	f, e := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if e != nil {
-		return e
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
 	}
-	defer f.Close()
-	e = json.NewEncoder(f).Encode(v)
-	return e
+	if err := json.NewEncoder(f).Encode(v); err != nil {
+		return closeFile(f, err)
+	}
+	return f.Close()
 }
 
 func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
@@ -293,19 +295,24 @@ func safeName(s string) string {
 }
 
 func readJSONL(path string) ([]map[string]json.RawMessage, error) {
-	f, e := os.Open(path)
-	if e != nil {
-		return nil, e
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
-	defer f.Close()
 	var r []map[string]json.RawMessage
 	scan := bufio.NewScanner(f)
 	for scan.Scan() {
 		var v map[string]json.RawMessage
-		if e := json.Unmarshal(scan.Bytes(), &v); e != nil {
-			return nil, e
+		if err := json.Unmarshal(scan.Bytes(), &v); err != nil {
+			return nil, closeFile(f, err)
 		}
 		r = append(r, v)
 	}
-	return r, scan.Err()
+	if err := scan.Err(); err != nil {
+		return nil, closeFile(f, err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+	return r, nil
 }

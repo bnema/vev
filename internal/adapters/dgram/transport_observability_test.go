@@ -95,27 +95,37 @@ func assertDgramFailedSpanPairs(t *testing.T, path string) {
 	type spanKey struct {
 		processID, scenario             string
 		run, sequence, requestID, epoch uint64
+		kind                            string
 	}
 	starts := make(map[spanKey]mark)
+	pairs := map[string]int{}
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		var m mark
 		if err := json.Unmarshal([]byte(line), &m); err != nil {
 			t.Fatalf("Unmarshal(trace): %v", err)
 		}
-		key := spanKey{m.ProcessID, m.Scenario, m.Run, m.Sequence, m.RequestID, m.Epoch}
+		key := spanKey{m.ProcessID, m.Scenario, m.Run, m.Sequence, m.RequestID, m.Epoch, m.Kind}
 		switch m.Kind {
 		case "adapter_receive_start", "adapter_send_start":
+			if _, exists := starts[key]; exists {
+				t.Fatalf("duplicate adapter start: %#v", m)
+			}
 			starts[key] = m
 		case "adapter_receive_end", "adapter_send_end":
+			key.kind = strings.TrimSuffix(m.Kind, "_end") + "_start"
 			start, ok := starts[key]
-			if !ok || strings.TrimSuffix(start.Kind, "_start") != strings.TrimSuffix(m.Kind, "_end") || m.Valid {
+			if !ok || m.Valid {
 				t.Fatalf("unmatched or valid failed end: start=%#v end=%#v", start, m)
 			}
+			pairs[strings.TrimSuffix(m.Kind, "_end")]++
 			delete(starts, key)
 		}
 	}
 	if len(starts) != 0 {
 		t.Fatalf("unmatched adapter starts: %#v", starts)
+	}
+	if pairs["adapter_send"] != 1 || pairs["adapter_receive"] != 1 || len(pairs) != 2 {
+		t.Fatalf("failed adapter span pairs=%v, want exactly one send and one receive", pairs)
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/heap"
 	"errors"
 	"fmt"
 	"net"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,12 +30,43 @@ type udpNetemConfig struct {
 	TargetPath  string
 }
 
+// udpNetemQueueCapacity bounds both packets waiting to be scheduled and
+// packets waiting for their delivery deadline. When it is full, the relay
+// drops the arriving packet and records it in queueOverflowDrops.
+const udpNetemQueueCapacity = 256
+
+type scheduledPacket struct {
+	packet []byte
+	to     net.Addr
+	due    time.Time
+}
+
+type scheduledPackets []scheduledPacket
+
+func (p scheduledPackets) Len() int           { return len(p) }
+func (p scheduledPackets) Less(i, j int) bool { return p[i].due.Before(p[j].due) }
+func (p scheduledPackets) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+func (p *scheduledPackets) Push(x any)        { *p = append(*p, x.(scheduledPacket)) }
+func (p *scheduledPackets) Pop() any {
+	old := *p
+	n := len(old)
+	item := old[n-1]
+	*p = old[:n-1]
+	return item
+}
+
 type udpNetemRelay struct {
 	config udpNetemConfig
 	conn   net.PacketConn
 	done   chan struct{}
 	wg     sync.WaitGroup
 	once   sync.Once
+
+	// slots bounds queued and deadline-pending packets together. The reader and
+	// the sole scheduler are the relay's only goroutines.
+	slots              chan struct{}
+	queue              chan scheduledPacket
+	queueOverflowDrops atomic.Uint64
 
 	mu          sync.Mutex
 	client, dst net.Addr
@@ -48,9 +81,16 @@ func newUDPNetem(config udpNetemConfig) (udpNetem, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &udpNetemRelay{config: config, conn: conn, done: make(chan struct{})}
-	r.wg.Add(1)
+	r := &udpNetemRelay{
+		config: config,
+		conn:   conn,
+		done:   make(chan struct{}),
+		slots:  make(chan struct{}, udpNetemQueueCapacity),
+		queue:  make(chan scheduledPacket, udpNetemQueueCapacity),
+	}
+	r.wg.Add(2)
 	go r.run()
+	go r.schedule()
 	return r, nil
 }
 
@@ -80,8 +120,79 @@ func (r *udpNetemRelay) run() {
 		if !ok || r.drop() {
 			continue
 		}
-		packet := append([]byte(nil), buf[:n]...)
-		r.schedule(packet, to)
+		// Copy because PacketConn reuses buf on its next read.
+		r.enqueue(scheduledPacket{packet: append([]byte(nil), buf[:n]...), to: to, due: time.Now().Add(r.config.RTT / 2)})
+	}
+}
+
+// enqueue implements the explicit overflow policy: never block the reader;
+// drop a packet if the bounded scheduler capacity has been reached.
+func (r *udpNetemRelay) enqueue(packet scheduledPacket) bool {
+	select {
+	case r.slots <- struct{}{}:
+	case <-r.done:
+		return false
+	default:
+		r.queueOverflowDrops.Add(1)
+		return false
+	}
+	select {
+	case r.queue <- packet:
+		return true
+	case <-r.done:
+		<-r.slots
+		return false
+	}
+}
+
+func (r *udpNetemRelay) schedule() {
+	defer r.wg.Done()
+	pending := scheduledPackets{}
+	heap.Init(&pending)
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
+	var timerC <-chan time.Time
+	resetTimer := func() {
+		if timerC != nil && !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		if pending.Len() == 0 {
+			timerC = nil
+			return
+		}
+		delay := time.Until(pending[0].due)
+		if delay < 0 {
+			delay = 0
+		}
+		timer.Reset(delay)
+		timerC = timer.C
+	}
+	for {
+		resetTimer()
+		select {
+		case <-r.done:
+			return
+		case packet := <-r.queue:
+			heap.Push(&pending, packet)
+		case <-timerC:
+			now := time.Now()
+			for pending.Len() > 0 && !pending[0].due.After(now) {
+				packet := heap.Pop(&pending).(scheduledPacket)
+				select {
+				case <-r.done:
+					return
+				default:
+					_, _ = r.conn.WriteTo(packet.packet, packet.to)
+					<-r.slots
+				}
+			}
+		}
 	}
 }
 
@@ -109,29 +220,6 @@ func (r *udpNetemRelay) drop() bool {
 	// The deterministic cycle makes the configured percentage auditable: a 1%
 	// fixture drops exactly one carriage packet in every 100 attempts.
 	return r.config.LossPercent > 0 && int((r.packet-1)%100) < r.config.LossPercent
-}
-
-func (r *udpNetemRelay) schedule(packet []byte, to net.Addr) {
-	delay := r.config.RTT / 2
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
-		if delay > 0 {
-			timer := time.NewTimer(delay)
-			defer timer.Stop()
-			select {
-			case <-timer.C:
-			case <-r.done:
-				return
-			}
-		}
-		select {
-		case <-r.done:
-			return
-		default:
-			_, _ = r.conn.WriteTo(packet, to)
-		}
-	}()
 }
 
 func udpNetemTarget(path string) (net.Addr, error) {
