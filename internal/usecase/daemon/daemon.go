@@ -110,6 +110,11 @@ type Daemon struct {
 	snapshotWorkerCancel    context.CancelFunc
 	snapshotWorkerDone      chan struct{}
 	snapshotWorkerFlush     chan struct{}
+	snapshotWorkerFinalWake chan struct{}
+	// snapshotFinalJobs retains immutable terminal captures rejected by the
+	// bounded regular queue. It is only populated during session teardown and
+	// drained by the same worker, so persistence remains outside daemon locks.
+	snapshotFinalJobs       []*snapshotCapture
 	snapshotWorkerClosing   bool
 	snapshotWorkerInFlight  *snapshotCapture
 	restoreDone             chan struct{}
@@ -417,8 +422,11 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	d.waitNotifies()
 	d.hardCancel()
 	d.serveCancel()
-	d.stopSnapshotEncodeWorker()
+	// Wait for handlers before flushing snapshots: a handler that already
+	// entered killSession may still submit its terminal capture after the
+	// registry snapshot has been removed.
 	d.connWg.Wait()
+	d.stopSnapshotEncodeWorker()
 	d.shutdownAll(ports.ReasonServerShutdown)
 	d.sessWg.Wait()
 	d.waitNotifies()

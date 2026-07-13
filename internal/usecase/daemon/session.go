@@ -679,7 +679,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 			}
 		} else {
 			markSnapshotDirty(sess)
-			d.scheduleSnapshot(sess)
+			d.scheduleFinalSnapshot(sess)
 		}
 	}
 	d.mu.Lock()

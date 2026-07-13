@@ -315,6 +315,17 @@ func restorePTYSize(contentRect domain.Rect, tabSize domain.Size) domain.Size {
 // scheduleSnapshot captures a session only once while an immutable capture is
 // queued or being written. It never waits for the bounded worker queue.
 func (d *Daemon) scheduleSnapshot(sess *session) bool {
+	return d.scheduleSnapshotWithFinalFallback(sess, false)
+}
+
+// scheduleFinalSnapshot retains a terminal capture rejected by the regular
+// bounded queue. A removed session cannot be retried by snapshotSaver, so the
+// worker drains this fallback before it stops.
+func (d *Daemon) scheduleFinalSnapshot(sess *session) bool {
+	return d.scheduleSnapshotWithFinalFallback(sess, true)
+}
+
+func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bool {
 	if d == nil || sess == nil || !d.snapsEnabled || d.snaps == nil || !sess.snapEligible.Load() {
 		return true
 	}
@@ -333,7 +344,7 @@ func (d *Daemon) scheduleSnapshot(sess *session) bool {
 		d.finishSnapshotCapture(capture, false)
 		return false
 	}
-	if d.enqueueSnapshotCapture(capture) {
+	if d.enqueueSnapshotCapture(capture) || (final && d.enqueueFinalSnapshotCapture(capture)) {
 		return true
 	}
 	// Coalesce under saturation or shutdown: the latest state stays dirty and
@@ -357,6 +368,22 @@ func (d *Daemon) enqueueSnapshotCapture(capture *snapshotCapture) bool {
 	default:
 		return false
 	}
+}
+
+// enqueueFinalSnapshotCapture hands terminal captures to the existing worker
+// without making session teardown wait behind its normal bounded queue.
+func (d *Daemon) enqueueFinalSnapshotCapture(capture *snapshotCapture) bool {
+	d.snapshotWorkerMu.Lock()
+	defer d.snapshotWorkerMu.Unlock()
+	if d.snapshotWorkerClosing || d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
+		return false
+	}
+	d.snapshotFinalJobs = append(d.snapshotFinalJobs, capture)
+	select {
+	case d.snapshotWorkerFinalWake <- struct{}{}:
+	default:
+	}
+	return true
 }
 
 // captureSession rotates history tails and clones visible frames while holding
@@ -495,10 +522,13 @@ func (d *Daemon) startSnapshotEncodeWorker(ctx context.Context) {
 	d.snapshotWorkerCancel = cancel
 	d.snapshotWorkerDone = make(chan struct{})
 	d.snapshotWorkerFlush = make(chan struct{})
+	d.snapshotWorkerFinalWake = make(chan struct{}, 1)
+	d.snapshotFinalJobs = nil
 	d.snapshotWorkerClosing = false
 	d.snapshotWorkerInFlight = nil
 	done := d.snapshotWorkerDone
 	flush := d.snapshotWorkerFlush
+	finalWake := d.snapshotWorkerFinalWake
 	d.snapshotWorkerMu.Unlock()
 	go func() {
 		defer close(done)
@@ -518,6 +548,17 @@ func (d *Daemon) startSnapshotEncodeWorker(ctx context.Context) {
 			d.finishSnapshotCapture(capture, err == nil && workerCtx.Err() == nil)
 			return workerCtx.Err() == nil
 		}
+		drainFinal := func() bool {
+			for {
+				capture := d.takeFinalSnapshotCapture()
+				if capture == nil {
+					return true
+				}
+				if !write(capture) {
+					return false
+				}
+			}
+		}
 		flushQueued := func() {
 			for {
 				select {
@@ -526,6 +567,7 @@ func (d *Daemon) startSnapshotEncodeWorker(ctx context.Context) {
 						return
 					}
 				default:
+					_ = drainFinal()
 					return
 				}
 			}
@@ -537,6 +579,10 @@ func (d *Daemon) startSnapshotEncodeWorker(ctx context.Context) {
 			case <-flush:
 				flushQueued()
 				return
+			case <-finalWake:
+				if !drainFinal() {
+					return
+				}
 			case capture := <-d.snapshotJobs:
 				if !write(capture) {
 					return
@@ -544,6 +590,18 @@ func (d *Daemon) startSnapshotEncodeWorker(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+func (d *Daemon) takeFinalSnapshotCapture() *snapshotCapture {
+	d.snapshotWorkerMu.Lock()
+	defer d.snapshotWorkerMu.Unlock()
+	if len(d.snapshotFinalJobs) == 0 {
+		return nil
+	}
+	capture := d.snapshotFinalJobs[0]
+	d.snapshotFinalJobs[0] = nil
+	d.snapshotFinalJobs = d.snapshotFinalJobs[1:]
+	return capture
 }
 
 func (d *Daemon) setSnapshotWorkerInFlight(workerID uint64, capture *snapshotCapture) bool {
@@ -601,9 +659,12 @@ func (d *Daemon) finishStoppedSnapshotWorker(abandoned bool) {
 	d.snapshotWorkerCancel = nil
 	d.snapshotWorkerDone = nil
 	d.snapshotWorkerFlush = nil
+	d.snapshotWorkerFinalWake = nil
 	d.snapshotWorkerClosing = false
 	d.snapshotWorkerInFlight = nil
-	queued := make([]*snapshotCapture, 0, len(d.snapshotJobs))
+	queued := make([]*snapshotCapture, 0, len(d.snapshotJobs)+len(d.snapshotFinalJobs))
+	queued = append(queued, d.snapshotFinalJobs...)
+	d.snapshotFinalJobs = nil
 	for {
 		select {
 		case capture := <-d.snapshotJobs:
