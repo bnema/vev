@@ -91,7 +91,7 @@ func TestAcquireSpawnLockTakesOverStaleLock(t *testing.T) {
 func TestRetryDialSucceedsAfterTransientFailures(t *testing.T) {
 	want := portsmocks.NewMockTransport(t)
 	var calls atomic.Int32
-	dial := func(string) (ports.Transport, error) {
+	dial := func(context.Context, string) (ports.Transport, error) {
 		if calls.Add(1) <= 3 {
 			return nil, errDialFailed
 		}
@@ -111,7 +111,7 @@ func TestRetryDialSucceedsAfterTransientFailures(t *testing.T) {
 }
 
 func TestRetryDialPermanentFailure(t *testing.T) {
-	dial := func(string) (ports.Transport, error) { return nil, errDialFailed }
+	dial := func(context.Context, string) (ports.Transport, error) { return nil, errDialFailed }
 	_, err := retryDial(context.Background(), t.TempDir(), dial, fastBackoff)
 	if !errors.Is(err, ErrDaemonUnreachable) {
 		t.Fatalf("retryDial error = %v, want ErrDaemonUnreachable", err)
@@ -121,10 +121,35 @@ func TestRetryDialPermanentFailure(t *testing.T) {
 func TestRetryDialContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	dial := func(string) (ports.Transport, error) { return nil, errDialFailed }
+	var calls atomic.Int32
+	dial := func(context.Context, string) (ports.Transport, error) {
+		calls.Add(1)
+		return nil, errDialFailed
+	}
 	_, err := retryDial(ctx, t.TempDir(), dial, fastBackoff)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("retryDial error = %v, want context.Canceled", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("dial called %d times for canceled context, want 0", calls.Load())
+	}
+}
+
+func TestEnsureDaemonContextCancelledDoesNotDialOrSpawn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	dial := func(context.Context, string) (ports.Transport, error) {
+		t.Fatal("ensureDaemon dialed with a canceled context")
+		return nil, nil
+	}
+	spawn := func() error {
+		t.Fatal("ensureDaemon spawned with a canceled context")
+		return nil
+	}
+
+	_, err := ensureDaemon(ctx, t.TempDir(), dial, spawn, fastBackoff)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ensureDaemon error = %v, want context.Canceled", err)
 	}
 }
 
@@ -132,7 +157,7 @@ func TestEnsureDaemonSpawnsThenDials(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "vev")
 	want := portsmocks.NewMockTransport(t)
 	var dialCalls, spawnCalls atomic.Int32
-	dial := func(string) (ports.Transport, error) {
+	dial := func(context.Context, string) (ports.Transport, error) {
 		// First (pre-spawn) dial fails; the post-spawn retry succeeds.
 		if dialCalls.Add(1) == 1 {
 			return nil, errDialFailed
@@ -163,7 +188,7 @@ func TestEnsureDaemonSpawnsThenDials(t *testing.T) {
 func TestEnsureDaemonReturnsExistingDaemon(t *testing.T) {
 	want := portsmocks.NewMockTransport(t)
 	var spawnCalls atomic.Int32
-	dial := func(string) (ports.Transport, error) { return want, nil }
+	dial := func(context.Context, string) (ports.Transport, error) { return want, nil }
 	spawn := func() error { spawnCalls.Add(1); return nil }
 
 	got, err := ensureDaemon(context.Background(), t.TempDir(), dial, spawn, fastBackoff)
@@ -180,7 +205,7 @@ func TestEnsureDaemonReturnsExistingDaemon(t *testing.T) {
 
 func TestEnsureDaemonSpawnFailure(t *testing.T) {
 	spawnErr := errors.New("exec boom")
-	dial := func(string) (ports.Transport, error) { return nil, errDialFailed }
+	dial := func(context.Context, string) (ports.Transport, error) { return nil, errDialFailed }
 	spawn := func() error { return spawnErr }
 
 	_, err := ensureDaemon(context.Background(), filepath.Join(t.TempDir(), "vev"), dial, spawn, fastBackoff)

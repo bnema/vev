@@ -565,8 +565,8 @@ type localDaemonDialer struct {
 func (d localDaemonDialer) Dial(ctx context.Context) (ports.Transport, error) {
 	dial := realDial
 	if d.observer != nil {
-		dial = func(dir string) (ports.Transport, error) {
-			return ipc.Dial(dir, ipc.WithRuntimeObserver(d.observer))
+		dial = func(ctx context.Context, dir string) (ports.Transport, error) {
+			return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(d.observer))
 		}
 	}
 	return ensureDaemon(ctx, d.dir, dial, realSpawn, defaultBackoff)
@@ -651,7 +651,7 @@ func requestDaemonStop(ctx context.Context) error {
 
 	done := make(chan error, 1)
 	go func() {
-		transport, err := realDial(ipc.SocketDir())
+		transport, err := realDial(ctx, ipc.SocketDir())
 		if err != nil {
 			done <- fmt.Errorf("vev: no daemon running")
 			return
@@ -704,8 +704,8 @@ func runStdio(ctx context.Context) error {
 	if observerCloser != nil {
 		defer func() { _ = observerCloser.Close() }()
 	}
-	transport, err := ensureDaemon(ctx, ipc.SocketDir(), func(dir string) (ports.Transport, error) {
-		return ipc.Dial(dir, ipc.WithRuntimeObserver(observer))
+	transport, err := ensureDaemon(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
+		return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(observer))
 	}, realSpawn, defaultBackoff)
 	if err != nil {
 		return err
@@ -823,8 +823,8 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 	if _, err := rand.Read(key); err != nil {
 		return err
 	}
-	daemonTr, err := ensureDaemon(ctx, ipc.SocketDir(), func(dir string) (ports.Transport, error) {
-		return ipc.Dial(dir, ipc.WithRuntimeObserver(observer))
+	daemonTr, err := ensureDaemon(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
+		return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(observer))
 	}, realSpawn, defaultBackoff)
 	if err != nil {
 		return err
@@ -975,8 +975,8 @@ func proxyTransports(ctx context.Context, a, b ports.Transport, log *slog.Logger
 
 // runList prints the daemon's session listing. With no daemon running, it
 // falls back to the persisted stopped-session records.
-func runList(_ context.Context) error {
-	transport, err := realDial(ipc.SocketDir())
+func runList(ctx context.Context) error {
+	transport, err := realDial(ctx, ipc.SocketDir())
 	if err != nil {
 		records, loadErr := persist.LoadReadOnly(platform.StateDir())
 		if loadErr != nil {
@@ -1040,8 +1040,8 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 }
 
 // runKill asks the daemon to terminate a named session, every session, or the daemon.
-func runKill(_ context.Context, name string, all, daemon bool) error {
-	transport, err := realDial(ipc.SocketDir())
+func runKill(ctx context.Context, name string, all, daemon bool) error {
+	transport, err := realDial(ctx, ipc.SocketDir())
 	if err != nil {
 		if name != "" && !all && !daemon {
 			storePath := persist.StorePath(platform.StateDir())
