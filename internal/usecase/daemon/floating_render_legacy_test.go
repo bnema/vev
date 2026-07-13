@@ -34,7 +34,7 @@ func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *
 	if cache != nil {
 		previousCapture = cache.floatingCaptured
 	}
-	captured := capturePaneRenderStateLockedInto(p, geometry.Inner, damageCaptureConsume, previousCapture)
+	captured := capturePaneRenderStateLockedInto(p, geometry.Inner, previousCapture)
 	// This retained legacy test helper models its historical synchronous
 	// consume path; production commits receipts in emitFrame instead.
 	p.screen.AcknowledgeDamage(captured.damageGeneration)

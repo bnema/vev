@@ -235,13 +235,8 @@ func (b *runtimeMarkBatch) flush() {
 	}
 }
 
-func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...uint64) {
+func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, lease *attachmentLease) {
 	marks := d.newRuntimeMarkBatch()
-
-	attachmentEpoch := uint64(0)
-	if len(epochs) != 0 {
-		attachmentEpoch = epochs[0]
-	}
 	tb := sess.activeTab()
 	if tb == nil {
 		return
@@ -254,9 +249,16 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...
 	sess.mu.Lock()
 	owned := sess.client == ac
 	sess.mu.Unlock()
-	if !owned || ac.currentSession() != sess || (attachmentEpoch != 0 && (ac.coordinatorEpoch.Load() != attachmentEpoch || ac.coordinatorReadyEpoch.Load() != attachmentEpoch)) {
+	if !owned || ac.currentSession() != sess {
 		ac.sendMu.Unlock()
 		return
+	}
+	if lease != nil {
+		rc := sess.renderCoordinator()
+		if rc == nil || lease.attachment != ac || !rc.leaseCurrent(lease, true) {
+			ac.sendMu.Unlock()
+			return
+		}
 	}
 	// Capacity is checked before any destructive capture. The coordinator is
 	// the normal gate, but this ownership check also protects direct resize and
@@ -321,7 +323,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, epochs ...
 		copyFeedback: overlays.copyFeedback,
 	}
 	endCapture := marks.span(ports.RuntimeCaptureStart, ports.RuntimeCaptureEnd, 0)
-	state, ok := captureRenderState(sess, ac, bars, capturedOverlays, preview, floatingCfg, reset, damageCaptureConsume)
+	state, ok := capturePrimaryRenderState(sess, ac, bars, capturedOverlays, preview, floatingCfg, reset, lease)
 	endCapture(0, ok)
 	if !ok {
 		ac.sendMu.Unlock()

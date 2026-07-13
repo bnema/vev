@@ -369,7 +369,7 @@ func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {
 	oldPane.screen.Write([]byte("stale-damage"))
 	require.NotEmpty(t, oldPane.screen.Damage())
 
-	d.paint(sess1, ac1, false)
+	d.paint(sess1, ac1, false, nil)
 
 	require.Zero(t, len(sends1), "stale paint from old session sent a frame")
 	require.NotEmpty(t, oldPane.screen.Damage(), "stale paint from old session consumed damage")
@@ -403,7 +403,7 @@ func TestPickerSessionSwitchWaitsForInFlightPaintSend(t *testing.T) {
 	sess1.tabs[0].focusedPane().screen.Write([]byte("paint while switching"))
 	paintDone := make(chan struct{})
 	go func() {
-		d.paint(sess1, ac, false)
+		d.paint(sess1, ac, false, nil)
 		close(paintDone)
 	}()
 	<-enteredSend
@@ -539,7 +539,7 @@ func TestPickerResizeRecomposesModal(t *testing.T) {
 	d.resize(sess, ac, domain.Size{Cols: 100, Rows: 30})
 	// Picker recomposition is the relevant event here; do not depend on a real
 	// resize-idle timer in this synchronous rendering test.
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 
 	out := awaitFrame(t, sends, ports.MsgOutput)
 	msg, err := ports.UnmarshalOutput(out.Payload)

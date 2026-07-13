@@ -51,7 +51,7 @@ func TestApplyConfigThemeRepaintInvalidatesComposedFrameCache(t *testing.T) {
 	right.screen.Write([]byte("R"))
 	right.mu.Unlock()
 
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	ac.sendMu.Lock()
 	require.True(t, ac.pipelineCache.valid)
 	lightDimmedPane := ac.pipelineCache.frame.At(21, 1).Style
@@ -1036,11 +1036,11 @@ func TestBarStateForMRURestoredStoppedSessionsUsePersistedOrder(t *testing.T) {
 	require.Equal(t, []string{"alpha", "zeta"}, []string{state.mru[0].name, state.mru[1].name})
 }
 
-func TestCaptureRenderStatePreservesContextualMRUModeThroughScratchReuse(t *testing.T) {
+func TestCapturePrimaryRenderStatePreservesContextualMRUModeThroughScratchReuse(t *testing.T) {
 	_, sess, ac, _ := newManualSessionWithPTYs(t, nil)
 	capture := func(bars barState) capturedRenderState {
 		t.Helper()
-		state, ok := captureRenderState(sess, ac, bars, capturedOverlayRenderState{}, picker.Preview{}, domain.FloatingConfig{}, false, damageCaptureConsume)
+		state, ok := capturePrimaryRenderState(sess, ac, bars, capturedOverlayRenderState{}, picker.Preview{}, domain.FloatingConfig{}, false, nil)
 		require.True(t, ok)
 		return *state
 	}

@@ -49,7 +49,7 @@ type RuntimeOption func(*Transport)
 
 // WithRuntimeObserver enables process-local marks without changing dgram's
 // behavior clock or carriage policy.
-func WithRuntimeObserver(observer ports.RuntimeObserver) RuntimeOption {
+func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) RuntimeOption {
 	return func(t *Transport) { t.runtimeObserver = observer }
 }
 
@@ -176,7 +176,7 @@ type Transport struct {
 	// mutation and before ordered event publication.
 	afterLinkStateCommit func(ports.LinkState)
 	observe              DiagnosticObserver
-	runtimeObserver      ports.RuntimeObserver
+	runtimeObserver      ports.SerializedRuntimeObserver
 	operationMu          sync.Mutex
 	operationCount       int
 	closing              bool

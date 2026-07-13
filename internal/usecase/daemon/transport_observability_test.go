@@ -114,7 +114,7 @@ func TestTransportObservabilityBlockedRenderObserverReleasesArchitectureLocks(t 
 
 	paintDone := make(chan struct{})
 	go func() {
-		d.paint(sess, ac, true)
+		d.paint(sess, ac, true, nil)
 		close(paintDone)
 	}()
 	awaitDaemonObserver(t, observer.entered, "blocked render observer")
@@ -150,7 +150,7 @@ func TestTransportObservabilityBlockedRenderObserverReleasesArchitectureLocks(t 
 	// write is blocked; it is not serialized behind the first attachment lock.
 	secondPaint := make(chan struct{})
 	go func() {
-		d.paint(sess, ac, false)
+		d.paint(sess, ac, false, nil)
 		close(secondPaint)
 	}()
 	<-sends // The second frame is live even though serialized observer I/O waits.
@@ -232,7 +232,9 @@ func TestTransportObservabilityBlockedACKEndDoesNotDelayNotifyAck(t *testing.T) 
 		endEntered:    make(chan struct{}),
 		releaseEnd:    make(chan struct{}),
 	}
-	d := New(nil, nil, nil, WithRuntimeObserver(observer))
+	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	defer reporter.Close()
+	d := New(nil, nil, nil, WithRuntimeObserver(reporter))
 	wakes := make(chan renderWake, 1)
 	var ready atomic.Bool
 	rc := newRenderCoordinator(renderCoordinatorOptions{
@@ -265,7 +267,7 @@ func TestTransportObservabilityBlockedACKEndDoesNotDelayNotifyAck(t *testing.T) 
 	}
 
 	close(observer.releaseEnd)
-	d.closeRuntimeObserver()
+	reporter.Close()
 }
 
 type blockingACKEndObserver struct {

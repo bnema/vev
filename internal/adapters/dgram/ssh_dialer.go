@@ -102,7 +102,7 @@ type RemoteDialer struct {
 	BootstrapTimeout time.Duration
 	ProbeTimeout     time.Duration
 	Log              *slog.Logger
-	RuntimeObserver  ports.RuntimeObserver
+	RuntimeObserver  ports.SerializedRuntimeObserver
 }
 
 func NewRemoteDialer(target, session string) RemoteDialer {

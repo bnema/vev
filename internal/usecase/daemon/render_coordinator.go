@@ -3,168 +3,10 @@ package daemon
 import (
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
-
-// S1 render coordinator contract. One coordinator serves one attached
-// session: producers mutate authoritative state and publish an invalidation;
-// only the coordinator decides when the transitional composition target runs.
-// Producers never compose or send. This file currently carries the inert
-// contract — state, options, and signatures exist so the behavioral
-// specification compiles — while wake scheduling, ACK gating, synchronized
-// output handling, and producer migration land in the GREEN slice.
-
-// Coordinator deadline bounds. Urgent transitions (input echo, overlay state
-// changes) must become visible within urgentRenderDeadline; bulk output
-// coalesces inside the adaptive [minOutputRenderDeadline,
-// maxOutputRenderDeadline] window.
-const (
-	urgentRenderDeadline    = 2 * time.Millisecond
-	minOutputRenderDeadline = 8 * time.Millisecond
-	maxOutputRenderDeadline = 16 * time.Millisecond
-)
-
-// invalidationClass ranks a producer transition's latency demand.
-type invalidationClass uint8
-
-const (
-	// invalidateOutput is bulk PTY/screen churn served by the adaptive window.
-	invalidateOutput invalidationClass = iota
-	// invalidateUrgent is an interactive transition served within 2ms.
-	invalidateUrgent
-)
-
-// renderInvalidation is one producer-published state transition.
-type renderInvalidation struct {
-	class invalidationClass
-	// reset requests a sticky FullRedraw: once requested it survives
-	// coalescing and ACK deferral until a wake actually delivers it.
-	reset bool
-	// producer identifies the publishing call-site for provenance.
-	producer string
-}
-
-// renderWake is one coalesced composition request delivered to the
-// transitional composition target (replaced by the S2 pipeline).
-type renderWake struct {
-	reset     bool
-	urgent    bool
-	coalesced int
-	// attachment is snapshotted under coordinator ownership. The wake
-	// consumer must compose only for this exact client, never by rereading
-	// session.client after an attach publication.
-	attachment *attachedClient
-	// watchdog marks a flush forced by the synchronized-output watchdog.
-	watchdog bool
-	// attachmentEpoch is captured with attachment and must still be current
-	// before this wake may compose or send.
-	attachmentEpoch uint64
-}
-
-// resizeRequestMetadata is the coordinator-owned latest requested resize
-// state: S3's transaction entry point reads it through resizeSnapshot. It is
-// metadata ownership only — S1/S2 dispatch stays with the coordinator
-// epoch timer path.
-type resizeRequestMetadata struct {
-	size      domain.Size
-	source    *attachedClient
-	epoch     uint64 // latest requested epoch
-	committed uint64 // latest published epoch
-}
-
-// renderCoordinatorOptions wires one coordinator instance.
-type renderCoordinatorOptions struct {
-	clock    ports.Clock
-	observer ports.RuntimeObserver
-	// wake is the transitional composition target.
-	wake func(renderWake)
-	// ackReady reports whether the attachment may compose another output
-	// state (the outputStateStream window has capacity).
-	ackReady func() bool
-	// syncRenderable reports whether a pane's synchronized batch currently
-	// contributes to the attached composition. It must not acquire c.mu.
-	syncRenderable func(*pane) bool
-	// syncActive is retained for existing test harness construction; per-pane
-	// lifecycle and syncRenderable are the coordinator gate.
-	syncActive func() bool
-	// onInvalidate observes every published invalidation (test-visible hook).
-	onInvalidate func(renderInvalidation)
-	// afterSyncGateEvaluated is a package-private deterministic test seam. It
-	// runs unlocked after visibility predicates and before registry validation.
-	afterSyncGateEvaluated func()
-}
-
-// renderCoordinator fans in producer invalidations for one attached session.
-// renderCoordinatorBurstMetrics is deliberately observational. It permits
-// benchmark/pprof callers to measure producer bursts without influencing
-// scheduling or transport policy.
-type renderCoordinatorBurstMetrics struct {
-	invalidations atomic.Uint64
-	wakes         atomic.Uint64
-	coalesced     atomic.Uint64
-}
-
-// ackBlockedSpan hands an ACK-blocked endpoint pair between coordinator
-// transitions without holding c.mu while the observer runs. A consuming ACK
-// may arrive while Start is blocked in observer I/O; finish records that
-// closure and publishStart emits it only after Start has returned.
-type ackBlockedSpan struct {
-	observer    ports.RuntimeObserver
-	correlation ports.RuntimeCorrelation
-
-	mu             sync.Mutex
-	startPublished bool
-	finished       bool
-	endPending     bool
-	endValid       bool
-}
-
-func newACKBlockedSpan(observer ports.RuntimeObserver) *ackBlockedSpan {
-	return &ackBlockedSpan{observer: observer, correlation: ports.NewRuntimeCorrelation()}
-}
-
-func (s *ackBlockedSpan) publishStart() {
-	s.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", s.correlation, ports.RuntimeACKBlockedStart, 0, true))
-
-	s.mu.Lock()
-	s.startPublished = true
-	endPending, endValid := s.endPending, s.endValid
-	s.endPending = false
-	s.mu.Unlock()
-	if endPending {
-		s.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", s.correlation, ports.RuntimeACKBlockedEnd, 0, endValid))
-	}
-}
-
-// finish closes a span at most once. It never invokes the observer before the
-// blocked start has completed publication.
-func (s *ackBlockedSpan) finish(valid bool) {
-	s.mu.Lock()
-	if s.finished {
-		s.mu.Unlock()
-		return
-	}
-	s.finished = true
-	if !s.startPublished {
-		s.endPending, s.endValid = true, valid
-		s.mu.Unlock()
-		return
-	}
-	s.mu.Unlock()
-	s.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", s.correlation, ports.RuntimeACKBlockedEnd, 0, valid))
-}
-
-// renderCoordinatorBurstMetricsSnapshot is an immutable, internal view for
-// benchmark reporting. Scheduling only writes the atomic counters above.
-type renderCoordinatorBurstMetricsSnapshot struct {
-	invalidations uint64
-	wakes         uint64
-	coalesced     uint64
-}
 
 type renderCoordinator struct {
 	mu   sync.Mutex
@@ -204,17 +46,10 @@ type renderCoordinator struct {
 	previewWake  func(renderWake)
 	previewWakes map[*attachedClient]func(renderWake)
 
-	// attachment is the currently bound client identity; callbacks from any
-	// other identity are stale and must not mutate coordinator state.
-	attachment *attachedClient
-	// attachmentEpoch distinguishes consecutive bindings of the same client
-	// object (notably park/resume, which replaces its transport in place).
-	attachmentEpoch uint64
-	// attachmentReady is true only after Welcome succeeded for this exact
-	// attachment incarnation. Internal cross-session handoffs bind ready.
-	attachmentReady bool
-	// detached rejects invalidations after detach/park until a new attachment.
-	detached bool
+	// lease is the sole primary attachment lifecycle state. A revoked lease is
+	// retained after detach so headless preview delivery remains distinguishable
+	// from an unbound test coordinator.
+	lease    *attachmentLease
 	torndown bool
 
 	resize resizeRequestMetadata
@@ -232,6 +67,7 @@ type renderCoordinator struct {
 	// validate their epoch before touching a pane.
 	retryTimer  ports.Timer
 	retryCancel chan struct{}
+	retryDone   chan struct{}
 	retryGen    uint64
 	metrics     renderCoordinatorBurstMetrics
 	// generation invalidates callbacks from superseded deadline/watchdog timers.
@@ -258,22 +94,25 @@ func newRenderCoordinator(opts renderCoordinatorOptions) *renderCoordinator {
 	return &renderCoordinator{opts: opts}
 }
 
-// detachNormalTimerLocked releases coordinator ownership. The caller must stop
-// the returned timer after dropping c.mu: Timer methods are external callbacks.
-func (c *renderCoordinator) detachNormalTimerLocked() ports.Timer {
-	timer := c.normalTimer
-	c.normalTimer = nil
-	if c.normalCancel != nil {
-		close(c.normalCancel)
-		c.normalCancel = nil
-	}
-	return timer
+// normalTimerOwner owns normal deadline cancellation and completion tickets.
+// Timer methods remain unlocked at its call sites.
+func (c *renderCoordinator) normalTimerOwner() timerOwnership {
+	return timerOwner(&c.normalTimer, &c.normalCancel, &c.normalWorkerDone, &c.generation)
 }
 
-func stopTimer(timer ports.Timer) {
-	if timer != nil {
-		timer.Stop()
-	}
+func (c *renderCoordinator) resizeTimerOwner() timerOwnership {
+	return timerOwner(&c.resizeTimer, &c.resizeCancel, &c.resizeDone, &c.resizeGen)
+}
+
+func (c *renderCoordinator) retryTimerOwner() timerOwnership {
+	return timerOwner(&c.retryTimer, &c.retryCancel, &c.retryDone, &c.retryGen)
+}
+
+// detachNormalTimerLocked releases coordinator ownership. The caller must stop
+// and join the returned worker after dropping c.mu: timer methods and worker
+// callbacks are external coordinator re-entry points.
+func (c *renderCoordinator) detachNormalTimerLocked() timerWorker {
+	return c.normalTimerOwner().detachLocked()
 }
 
 type syncBatch struct {
@@ -287,30 +126,20 @@ type syncBatch struct {
 	done       chan struct{}
 }
 
-func detachSyncBatchLocked(batch *syncBatch) ports.Timer {
-	timer := batch.timer
-	batch.timer = nil
-	if batch.cancel != nil {
-		close(batch.cancel)
-		batch.cancel = nil
-	}
-	return timer
+func (batch *syncBatch) timerOwner() timerOwnership {
+	return timerOwner(&batch.timer, &batch.cancel, &batch.done, &batch.generation)
 }
 
-func (c *renderCoordinator) detachSyncTimersLocked() []ports.Timer {
-	timers := make([]ports.Timer, 0, len(c.syncBatches))
+func detachSyncBatchLocked(batch *syncBatch) timerWorker { return batch.timerOwner().detachLocked() }
+
+func (c *renderCoordinator) detachSyncTimersLocked() []timerWorker {
+	workers := make([]timerWorker, 0, len(c.syncBatches))
 	for pane, batch := range c.syncBatches {
-		timers = append(timers, detachSyncBatchLocked(batch))
+		workers = append(workers, detachSyncBatchLocked(batch))
 		delete(c.syncBatches, pane)
 		c.syncRegistryVersion++
 	}
-	return timers
-}
-
-func stopTimers(timers []ports.Timer) {
-	for _, timer := range timers {
-		stopTimer(timer)
-	}
+	return workers
 }
 
 // invalidate publishes a coordinator-owned producer transition. Callers that
@@ -327,18 +156,32 @@ func (c *renderCoordinator) invalidateForAttachment(source *attachedClient, inv 
 	return c.invalidateForAttachmentAtResizeEpoch(source, 0, inv)
 }
 
+// invalidateForLease publishes an attachment-owned transition only for the
+// exact lifecycle incarnation that captured it.
+func (c *renderCoordinator) invalidateForLease(source *attachedClient, lease *attachmentLease, inv renderInvalidation) bool {
+	return c.invalidateForLeaseAtResizeEpoch(source, lease, 0, inv)
+}
+
 // invalidateForAttachmentAtResizeEpoch additionally requires epoch to remain
 // current when nonzero, so a completed resize cannot publish after a newer
 // request supersedes it.
 func (c *renderCoordinator) invalidateForAttachmentAtResizeEpoch(source *attachedClient, epoch uint64, inv renderInvalidation) bool {
+	return c.invalidateForLeaseAtResizeEpoch(source, nil, epoch, inv)
+}
+
+// invalidateForLeaseAtResizeEpoch is the attachment-callback variant: it
+// rejects a same-object replacement whose source pointer still matches but
+// whose lifecycle lease has been revoked.
+func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClient, lease *attachmentLease, epoch uint64, inv renderInvalidation) bool {
 	c.mu.Lock()
 	// An unbound coordinator is the manual/headless harness state; there is no
 	// published production attachment to protect there. A parked target may
 	// still publish its own PTY/session mutations to picker observers, but no
 	// attachment-owned callback may revive that target's render path.
-	detachedPreviewOnly := c.detached && source == nil && (c.previewWake != nil || len(c.previewWakes) != 0)
-	if c.torndown || (c.detached && !detachedPreviewOnly) || (source != nil && c.attachment != nil && c.attachment != source) ||
-		(epoch != 0 && (c.resize.epoch != epoch || c.resize.source != source)) {
+	detachedPreviewOnly := c.primaryDetachedLocked() && source == nil && (c.previewWake != nil || len(c.previewWakes) != 0)
+	if c.torndown || (lease != nil && (!c.leaseCurrentLocked(lease, true) || lease.attachment != source)) ||
+		(c.primaryDetachedLocked() && !detachedPreviewOnly) || (source != nil && c.lease != nil && c.lease.attachment != source) ||
+		(epoch != 0 && (c.resize.epoch != epoch || c.resize.source != source || (lease != nil && c.resize.lease != lease))) {
 		c.mu.Unlock()
 		return false
 	}
@@ -366,10 +209,9 @@ func (c *renderCoordinator) invalidateForAttachmentAtResizeEpoch(source *attache
 	// pending work. Completion republishes urgently and must reserve a fresh
 	// deadline rather than leaving that already-fired timer as the only arm.
 	arm := !wasPending || (!wasUrgent && c.pendingUrgent) || (!wasPreviewPending && c.pendingPreview) || c.deadlineDue
-	var old ports.Timer
+	var old timerWorker
 	if arm {
-		c.generation++
-		old = c.detachNormalTimerLocked()
+		_, old = c.normalTimerOwner().replaceLocked()
 	}
 	gen := c.generation
 	delay := minOutputRenderDeadline + time.Duration(c.outputPressure)*time.Millisecond
@@ -383,7 +225,7 @@ func (c *renderCoordinator) invalidateForAttachmentAtResizeEpoch(source *attache
 	if queueStart && observer != nil {
 		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueEnqueued, 0, true))
 	}
-	stopTimer(old)
+	stopAndJoinTimerWorker(old, nil)
 	if !arm || clock == nil {
 		if onInvalidate != nil {
 			onInvalidate(inv)
@@ -395,12 +237,11 @@ func (c *renderCoordinator) invalidateForAttachmentAtResizeEpoch(source *attache
 	// generation is still the reserved deadline after those external calls.
 	timer := clock.NewTimer(delay)
 	timerC := timer.C()
-	cancel := make(chan struct{})
-	done := make(chan struct{})
 	c.mu.Lock()
-	valid := !c.torndown && c.pending && c.generation == gen && c.normalTimer == nil
+	valid := !c.torndown && c.pending && c.generation == gen
+	var cancel, done chan struct{}
 	if valid && timerC != nil {
-		c.normalTimer, c.normalCancel, c.normalWorkerDone = timer, cancel, done
+		cancel, done, valid = c.normalTimerOwner().publishLocked(gen, timer)
 	}
 	c.mu.Unlock()
 	if !valid {
@@ -418,15 +259,10 @@ func (c *renderCoordinator) invalidateForAttachmentAtResizeEpoch(source *attache
 		}
 		return true
 	}
-	go func() {
-		defer close(done)
-		select {
-		case <-timerC:
-			c.markDeadlineDue(gen)
-			c.fire(gen, false, true)
-		case <-cancel:
-		}
-	}()
+	runTimerWorker(timerC, cancel, done, func() {
+		c.markDeadlineDue(gen)
+		c.fireFromTimer(gen, false, true, done)
+	})
 	// Test-visible observation follows deadline publication, so a producer
 	// callback cannot observe a successful invalidation before its timer owns
 	// a worker (and race tests cannot finish while a mock expectation remains).
@@ -487,7 +323,7 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 	if c.syncBatches == nil {
 		c.syncBatches = make(map[*pane]*syncBatch)
 	}
-	var old ports.Timer
+	var old timerWorker
 	if previous := c.syncBatches[p]; previous != nil {
 		old = detachSyncBatchLocked(previous)
 	}
@@ -499,7 +335,7 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 	c.syncRegistryVersion++
 	clock := c.opts.clock
 	c.mu.Unlock()
-	stopTimer(old)
+	stopAndJoinTimerWorker(old, nil)
 	if clock == nil {
 		return
 	}
@@ -508,25 +344,18 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 	// remove batch; identity validation below rejects this stale timer.
 	timer := clock.NewTimer(maxSyncUpdateDuration)
 	timerC := timer.C()
-	cancel := make(chan struct{})
-	done := make(chan struct{})
 	c.mu.Lock()
 	valid := !c.torndown && c.syncBatches[p] == batch && batch.generation == gen
+	var cancel, done chan struct{}
 	if valid {
-		batch.timer, batch.cancel, batch.done = timer, cancel, done
+		cancel, done, valid = batch.timerOwner().publishLocked(gen, timer)
 	}
 	c.mu.Unlock()
 	if !valid {
 		stopTimer(timer)
 		return
 	}
-	go func() {
-		defer close(done)
-		select {
-		case <-timerC:
-		case <-cancel:
-			return
-		}
+	runTimerWorker(timerC, cancel, done, func() {
 		// Keep the batch registered while force runs. A concurrent render must
 		// continue to observe the synchronized-output gate until the VT has
 		// authoritatively closed the batch.
@@ -547,7 +376,7 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 		c.mu.Lock()
 		current = c.syncBatches[p]
 		valid = !c.torndown && current == batch && current.generation == gen
-		var stopped ports.Timer
+		var stopped timerWorker
 		if valid {
 			delete(c.syncBatches, p)
 			c.syncRegistryVersion++
@@ -558,11 +387,11 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 		}
 		c.mu.Unlock()
 		if valid {
-			stopTimer(stopped)
+			stopAndJoinTimerWorker(stopped, done)
 			// Reevaluate the aggregate gate only after forcing this pane.
 			c.fireCurrent(true)
 		}
-	}()
+	})
 }
 
 // noteSyncEnd records completion for exactly one pane batch. It only flushes
@@ -596,26 +425,26 @@ func (c *renderCoordinator) removeSyncEnd(p *pane, gen uint64, renderable bool) 
 	}
 	delete(c.syncBatches, p)
 	c.syncRegistryVersion++
-	timer := detachSyncBatchLocked(batch)
+	worker := detachSyncBatchLocked(batch)
 	if renderable && len(c.syncBatches) == 0 && c.pending {
 		c.pendingUrgent = true
 	}
 	c.mu.Unlock()
-	stopTimer(timer)
+	stopAndJoinTimerWorker(worker, nil)
 	return renderable
 }
 
 // noteSyncPaneRemoved releases a pane watchdog when pane lifecycle ends.
 func (c *renderCoordinator) noteSyncPaneRemoved(p *pane) {
 	c.mu.Lock()
-	var timer ports.Timer
+	var worker timerWorker
 	if batch := c.syncBatches[p]; batch != nil {
 		delete(c.syncBatches, p)
 		c.syncRegistryVersion++
-		timer = detachSyncBatchLocked(batch)
+		worker = detachSyncBatchLocked(batch)
 	}
 	c.mu.Unlock()
-	stopTimer(timer)
+	stopAndJoinTimerWorker(worker, nil)
 }
 
 // subscribePreview installs fn as the preview observer for coalesced wakes.
@@ -651,17 +480,42 @@ func (c *renderCoordinator) teardownPreviewFor(viewer *attachedClient) {
 	c.mu.Unlock()
 }
 
-// advanceAttachmentEpochLocked invalidates every previously dispatched wake.
-// It mirrors the epoch onto the client so paint can recheck ownership after it
-// acquires sendMu without taking c.mu and creating a lock cycle.
-func (c *renderCoordinator) advanceAttachmentEpochLocked(clients ...*attachedClient) {
-	c.attachmentEpoch++
-	for _, ac := range clients {
-		if ac != nil {
-			ac.coordinatorEpoch.Store(c.attachmentEpoch)
-			ac.coordinatorReadyEpoch.Store(0)
-		}
+// primaryDetachedLocked distinguishes an explicitly detached primary from an
+// unbound coordinator used by headless tests. Preview subscribers remain live
+// for the former, but it can never regain a primary transport without a lease.
+func (c *renderCoordinator) primaryDetachedLocked() bool { return c.lease != nil && !c.lease.active }
+
+func (c *renderCoordinator) installLeaseLocked(ac *attachedClient, ready bool) *attachmentLease {
+	if c.lease != nil {
+		c.lease.active = false
 	}
+	c.lease = &attachmentLease{attachment: ac, ready: ready, active: ac != nil}
+	return c.lease
+}
+
+// attachmentLease returns the exact currently published lease for ac. Welcome
+// continuations capture this before their transport write and cannot later
+// bless a same-object park/resume replacement.
+func (c *renderCoordinator) attachmentLease(ac *attachedClient) *attachmentLease {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.torndown || c.lease == nil || !c.lease.active || c.lease.attachment != ac {
+		return nil
+	}
+	return c.lease
+}
+
+func (c *renderCoordinator) leaseCurrent(lease *attachmentLease, ready bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.leaseCurrentLocked(lease, ready)
+}
+
+// leaseCurrentLocked is a short, non-reentrant effect admission check. It
+// must not be used to retain c.mu across input routing, transport operations,
+// or other arbitrary handler work.
+func (c *renderCoordinator) leaseCurrentLocked(lease *attachmentLease, ready bool) bool {
+	return !c.torndown && lease != nil && c.lease == lease && lease.active && (!ready || lease.ready)
 }
 
 // attach binds an already-handshaken internal attachment. Route/resume use
@@ -670,150 +524,127 @@ func (c *renderCoordinator) attach(ac *attachedClient) { c.attachWithReadiness(a
 
 func (c *renderCoordinator) attachWithReadiness(ac *attachedClient, ready bool) {
 	c.mu.Lock()
-	if !c.torndown && c.attachment != ac {
-		c.advanceAttachmentEpochLocked(ac)
-		c.attachment = ac
-		c.detached = false
-		c.attachmentReady = ready
-		if ready && ac != nil {
-			ac.coordinatorReadyEpoch.Store(c.attachmentEpoch)
-		}
+	if !c.torndown && (c.lease == nil || !c.lease.active || c.lease.attachment != ac) {
+		c.installLeaseLocked(ac, ready)
 	}
 	c.mu.Unlock()
 }
 
-// markAttachmentReady completes the transport handshake for exactly the
-// current attachment incarnation. A stale Welcome can never revive a parked,
-// replaced, or detached attachment.
-func (c *renderCoordinator) markAttachmentReady(ac *attachedClient) bool {
+// markAttachmentReady completes only the captured attachment incarnation.
+// A stale Welcome must never bless a replacement that reused its client object.
+func (c *renderCoordinator) markAttachmentReady(lease *attachmentLease) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.torndown || c.detached || c.attachment != ac || ac == nil || ac.coordinatorEpoch.Load() != c.attachmentEpoch {
+	if !c.leaseCurrentLocked(lease, false) {
 		return false
 	}
-	c.attachmentReady = true
-	ac.coordinatorReadyEpoch.Store(c.attachmentEpoch)
+	lease.ready = true
 	return true
 }
 
-// wakeCurrent validates a dispatched wake without entering sendMu. The paint
-// path repeats the epoch check after taking sendMu, closing the remaining
-// lifecycle handoff window without holding c.mu across composition.
+// wakeCurrent validates a dispatched wake. paint repeats this check after
+// sendMu is acquired, so a reused attachedClient cannot revive an old wake.
 func (c *renderCoordinator) wakeCurrent(w renderWake) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return !c.torndown && !c.detached && c.attachmentReady && c.attachment == w.attachment && c.attachmentEpoch == w.attachmentEpoch
+	return c.leaseCurrentLocked(w.lease, true)
 }
 
-// noteDetach invalidates pending wakes and stale callbacks for a detaching
-// attachment.
-func (c *renderCoordinator) noteDetach(ac *attachedClient) {
+type renderLifecycleCleanup struct {
+	workers          []timerWorker
+	observer         ports.RuntimeObserver
+	queueCorrelation ports.RuntimeCorrelation
+	queueMarked      bool
+	ackBlocked       *ackBlockedSpan
+}
+
+func (cleanup renderLifecycleCleanup) finish() {
+	stopAndJoinTimerWorkers(cleanup.workers)
+	if cleanup.queueMarked && cleanup.observer != nil {
+		cleanup.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", cleanup.queueCorrelation, ports.RuntimeQueueDequeued, 0, false))
+	}
+	if cleanup.ackBlocked != nil {
+		cleanup.ackBlocked.finish(false)
+	}
+}
+
+// beginDetach invalidates pending work while leaving timer joins to the caller.
+// Callers holding daemon/session locks must publish the lifecycle transition,
+// release those locks, and only then call cleanup.finish().
+func (c *renderCoordinator) beginDetach(ac *attachedClient) renderLifecycleCleanup {
 	c.mu.Lock()
-	var timer, resizeTimer, retryTimer ports.Timer
-	var observer ports.RuntimeObserver
-	var queueCorrelation ports.RuntimeCorrelation
-	var queueMarked bool
-	var ackBlocked *ackBlockedSpan
-	if c.attachment == ac {
-		c.advanceAttachmentEpochLocked(ac)
-		c.attachment = nil
-		c.attachmentReady = false
-		c.detached = true
+	var cleanup renderLifecycleCleanup
+	if c.lease != nil && c.lease.active && c.lease.attachment == ac {
+		c.lease.active = false
 		c.pending = false
 		c.pendingReset = false
 		c.pendingUrgent = false
 		c.ackDeferred = false
 		c.pendingPreview = false
 		c.coalesced = 0
-		c.generation++
+		_, timer := c.normalTimerOwner().replaceLocked()
 		c.armed = false
-		timer = c.detachNormalTimerLocked()
-		if c.resizeCancel != nil {
-			close(c.resizeCancel)
-			c.resizeCancel = nil
+		_, resizeTimer := c.resizeTimerOwner().replaceLocked()
+		_, retryTimer := c.retryTimerOwner().replaceLocked()
+		cleanup = renderLifecycleCleanup{
+			workers:          []timerWorker{timer, resizeTimer, retryTimer},
+			observer:         c.opts.observer,
+			queueCorrelation: c.queueCorrelation,
+			queueMarked:      c.queueMarked,
+			ackBlocked:       c.ackBlocked,
 		}
-		resizeTimer, c.resizeTimer = c.resizeTimer, nil
-		if c.retryCancel != nil {
-			close(c.retryCancel)
-			c.retryCancel = nil
-		}
-		retryTimer, c.retryTimer = c.retryTimer, nil
-		c.retryGen++
-		observer, queueCorrelation, queueMarked = c.opts.observer, c.queueCorrelation, c.queueMarked
-		ackBlocked = c.ackBlocked
 		c.queueMarked, c.ackBlocked = false, nil
 	}
 	c.mu.Unlock()
-	stopTimer(timer)
-	stopTimer(resizeTimer)
-	stopTimer(retryTimer)
-	if queueMarked && observer != nil {
-		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, false))
-	}
-	if ackBlocked != nil {
-		ackBlocked.finish(false)
-	}
+	return cleanup
 }
 
-// noteReplace hands the coordinator from old to replacement; callbacks
-// captured by old become stale.
+// noteDetach is for callers that hold no outer lifecycle locks.
+func (c *renderCoordinator) noteDetach(ac *attachedClient) {
+	c.beginDetach(ac).finish()
+}
+
+// beginReplace hands the coordinator from old to replacement while leaving
+// detached timer joins to the caller.
+func (c *renderCoordinator) beginReplace(old, replacement *attachedClient, ready bool) renderLifecycleCleanup {
+	c.mu.Lock()
+	var cleanup renderLifecycleCleanup
+	// A coordinator may be installed while replacing a legacy attachment
+	// which predated coordinator ownership. In that case nil has no pending
+	// identity to invalidate, and the replacement becomes the first bound
+	// attachment atomically with this lifecycle transition.
+	if c.lease == nil || c.lease.attachment == old {
+		c.installLeaseLocked(replacement, ready)
+		c.pending = false
+		c.pendingReset = false
+		c.pendingUrgent = false
+		c.ackDeferred = false
+		c.pendingPreview = false
+		c.coalesced = 0
+		_, timer := c.normalTimerOwner().replaceLocked()
+		c.armed = false
+		_, resizeTimer := c.resizeTimerOwner().replaceLocked()
+		_, retryTimer := c.retryTimerOwner().replaceLocked()
+		cleanup = renderLifecycleCleanup{
+			workers:          []timerWorker{timer, resizeTimer, retryTimer},
+			observer:         c.opts.observer,
+			queueCorrelation: c.queueCorrelation,
+			queueMarked:      c.queueMarked,
+			ackBlocked:       c.ackBlocked,
+		}
+		c.queueMarked, c.ackBlocked = false, nil
+	}
+	c.mu.Unlock()
+	return cleanup
+}
+
+// noteReplace is for callers that hold no outer lifecycle locks.
 func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readiness ...bool) {
 	ready := true
 	if len(readiness) != 0 {
 		ready = readiness[0]
 	}
-	c.mu.Lock()
-	var observer ports.RuntimeObserver
-	var queueCorrelation ports.RuntimeCorrelation
-	var queueMarked bool
-	var ackBlocked *ackBlockedSpan
-	// A coordinator may be installed while replacing a legacy attachment
-	// which predated coordinator ownership. In that case nil has no pending
-	// identity to invalidate, and the replacement becomes the first bound
-	// attachment atomically with this lifecycle transition.
-	var timer, resizeTimer, retryTimer ports.Timer
-	if c.attachment == old || c.attachment == nil {
-		c.advanceAttachmentEpochLocked(old, replacement)
-		c.attachment = replacement
-		c.attachmentReady = ready
-		if ready && replacement != nil {
-			replacement.coordinatorReadyEpoch.Store(c.attachmentEpoch)
-		}
-		c.detached = false
-		c.pending = false
-		c.pendingReset = false
-		c.pendingUrgent = false
-		c.ackDeferred = false
-		c.pendingPreview = false
-		c.coalesced = 0
-		c.generation++
-		c.armed = false
-		timer = c.detachNormalTimerLocked()
-		if c.resizeCancel != nil {
-			close(c.resizeCancel)
-			c.resizeCancel = nil
-		}
-		resizeTimer, c.resizeTimer = c.resizeTimer, nil
-		if c.retryCancel != nil {
-			close(c.retryCancel)
-			c.retryCancel = nil
-		}
-		retryTimer, c.retryTimer = c.retryTimer, nil
-		c.retryGen++
-		observer, queueCorrelation, queueMarked = c.opts.observer, c.queueCorrelation, c.queueMarked
-		ackBlocked = c.ackBlocked
-		c.queueMarked, c.ackBlocked = false, nil
-	}
-	c.mu.Unlock()
-	stopTimer(timer)
-	stopTimer(resizeTimer)
-	stopTimer(retryTimer)
-	if queueMarked && observer != nil {
-		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, false))
-	}
-	if ackBlocked != nil {
-		ackBlocked.finish(false)
-	}
+	c.beginReplace(old, replacement, ready).finish()
 }
 
 // notePark invalidates pending wakes when the attachment parks for resume.
@@ -823,31 +654,19 @@ func (c *renderCoordinator) notePark(ac *attachedClient) { c.noteDetach(ac) }
 func (c *renderCoordinator) noteSessionTeardown() {
 	c.mu.Lock()
 	c.torndown = true
-	c.advanceAttachmentEpochLocked(c.attachment)
-	c.attachment = nil
-	c.attachmentReady = false
+	if c.lease != nil {
+		c.lease.active = false
+	}
 	c.previewWake = nil
 	c.previewWakes = nil
 	c.pending = false
-	if c.resizeCancel != nil {
-		close(c.resizeCancel)
-		c.resizeCancel = nil
-	}
-	resizeTimer := c.resizeTimer
-	c.resizeTimer = nil
-	if c.retryCancel != nil {
-		close(c.retryCancel)
-		c.retryCancel = nil
-	}
-	retryTimer := c.retryTimer
-	c.retryTimer = nil
-	c.retryGen++
+	_, resizeTimer := c.resizeTimerOwner().replaceLocked()
+	_, retryTimer := c.retryTimerOwner().replaceLocked()
 	c.ackDeferred = false
 	c.pendingPreview = false
-	c.generation++
+	_, timer := c.normalTimerOwner().replaceLocked()
 	c.armed = false
-	timer := c.detachNormalTimerLocked()
-	timers := c.detachSyncTimersLocked()
+	workers := c.detachSyncTimersLocked()
 	observer, queueCorrelation, queueMarked := c.opts.observer, c.queueCorrelation, c.queueMarked
 	ackBlocked := c.ackBlocked
 	c.queueMarked, c.ackBlocked = false, nil
@@ -858,234 +677,10 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	if ackBlocked != nil {
 		ackBlocked.finish(false)
 	}
-	stopTimer(timer)
-	stopTimer(resizeTimer)
-	stopTimer(retryTimer)
-	stopTimers(timers)
-}
-
-// recordResizeRequest records the latest requested geometry and source before
-// the request delegates to the coordinator epoch path. It returns
-// the strictly monotonically increased epoch, or 0 when the source is stale.
-func (c *renderCoordinator) recordResizeRequest(size domain.Size, source *attachedClient) uint64 {
-	c.mu.Lock()
-	if c.torndown || c.attachment != source {
-		c.mu.Unlock()
-		return 0
-	}
-	// An intervening request supersedes any failed-pane retry, even if a fake
-	// timer delivers a stopped callback afterwards.
-	if c.retryCancel != nil {
-		close(c.retryCancel)
-		c.retryCancel = nil
-	}
-	retryTimer := c.retryTimer
-	c.retryTimer = nil
-	c.retryGen++
-	c.resize.epoch++
-	c.resize.size = size
-	c.resize.source = source
-	epoch := c.resize.epoch
-	c.mu.Unlock()
-	stopTimer(retryTimer)
-	return epoch
-}
-
-// scheduleResize records a latest-wins request and runs apply after the bounded
-// bulk window. The callback never runs with c.mu held.
-func (c *renderCoordinator) scheduleResize(size domain.Size, source *attachedClient, run func(uint64)) uint64 {
-	epoch := c.recordResizeRequest(size, source)
-	if epoch == 0 {
-		return 0
-	}
-	c.mu.Lock()
-	old := c.resizeTimer
-	if c.resizeCancel != nil {
-		close(c.resizeCancel)
-	}
-	c.resizeGen++
-	gen := c.resizeGen
-	cancel := make(chan struct{})
-	done := make(chan struct{})
-	c.resizeCancel = cancel
-	c.resizeDone = done
-	clock := c.opts.clock
-	c.resizeTimer = nil
-	c.mu.Unlock()
-	stopTimer(old)
-	if clock == nil {
-		run(epoch)
-		close(done)
-		return epoch
-	}
-	timer := clock.NewTimer(minOutputRenderDeadline)
-	timerC := timer.C()
-	if timerC == nil {
-		stopTimer(timer)
-		run(epoch)
-		close(done)
-		return epoch
-	}
-	c.mu.Lock()
-	if c.resizeGen != gen || c.torndown {
-		c.mu.Unlock()
-		stopTimer(timer)
-		close(done)
-		return epoch
-	}
-	c.resizeTimer = timer
-	c.mu.Unlock()
-	go func() {
-		defer close(done)
-		select {
-		case <-timerC:
-		case <-cancel:
-			return
-		}
-		c.mu.Lock()
-		valid := !c.torndown && c.resizeGen == gen && c.resize.epoch == epoch && c.resize.source == source
-		c.mu.Unlock()
-		c.clearResizeTimer(gen)
-		if valid {
-			run(epoch)
-		}
-	}()
-	return epoch
-}
-
-// clearResizeTimer releases timer ownership only for the matching resize generation.
-// A stale callback must not clear a newer request's timer or cancellation channel.
-func (c *renderCoordinator) clearResizeTimer(gen uint64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.resizeGen != gen {
-		return
-	}
-	c.resizeTimer = nil
-	c.resizeCancel = nil
-}
-
-// resizeCurrent verifies that an apply/commit attempt still owns the newest
-// request. commit also advances the separately observable committed epoch.
-func (c *renderCoordinator) resizeCurrent(epoch uint64, source *attachedClient, commit bool) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.torndown || c.attachment != source || c.resize.source != source || c.resize.epoch != epoch {
-		return false
-	}
-	if commit {
-		if c.resize.committed >= epoch {
-			return false
-		}
-		c.resize.committed = epoch
-	}
-	return true
-}
-
-// scheduleResizeRetry serializes failed-pane retries through the injected
-// clock. Only a retry for the most recently committed epoch can run.
-func (c *renderCoordinator) scheduleResizeRetry(epoch uint64, source *attachedClient, run func()) {
-	c.mu.Lock()
-	if c.torndown || c.attachment != source || c.resize.source != source || c.resize.epoch != epoch || c.resize.committed != epoch {
-		c.mu.Unlock()
-		return
-	}
-	old := c.retryTimer
-	if c.retryCancel != nil {
-		close(c.retryCancel)
-	}
-	c.retryGen++
-	gen := c.retryGen
-	cancel := make(chan struct{})
-	c.retryCancel, c.retryTimer = cancel, nil
-	clock := c.opts.clock
-	c.mu.Unlock()
-	stopTimer(old)
-	if clock == nil {
-		run()
-		return
-	}
-	timer := clock.NewTimer(minOutputRenderDeadline)
-	timerC := timer.C()
-	if timerC == nil {
-		// A nil timer channel is the deterministic disabled-clock contract used
-		// by headless tests; do not spin retries synchronously.
-		stopTimer(timer)
-		return
-	}
-	c.mu.Lock()
-	valid := !c.torndown && c.retryGen == gen && c.resize.epoch == epoch && c.resize.committed == epoch && c.resize.source == source
-	if valid {
-		c.retryTimer = timer
-	}
-	c.mu.Unlock()
-	if !valid {
-		stopTimer(timer)
-		return
-	}
-	go func() {
-		select {
-		case <-timerC:
-		case <-cancel:
-			return
-		}
-		c.mu.Lock()
-		valid := !c.torndown && c.retryGen == gen && c.attachment == source && c.resize.source == source && c.resize.epoch == epoch && c.resize.committed == epoch
-		if valid {
-			c.retryTimer = nil
-			c.retryCancel = nil
-		}
-		c.mu.Unlock()
-		if valid {
-			run()
-		}
-	}()
-}
-
-// retryCurrent is stricter than resizeCurrent: retries may only repair the
-// newest geometry that has already been published.
-func (c *renderCoordinator) retryCurrent(epoch uint64, source *attachedClient) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return !c.torndown && c.attachment == source && c.resize.source == source && c.resize.epoch == epoch && c.resize.committed == epoch
-}
-
-// resizeCallbackDone returns the completion edge for the latest scheduled
-// resize callback. A nil result means no resize deadline is pending.
-func (c *renderCoordinator) resizeCallbackDone() <-chan struct{} {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.resizeDone
-}
-
-// resizeSnapshot returns a locked copy of the latest resize metadata.
-func (c *renderCoordinator) resizeSnapshot() resizeRequestMetadata {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.resize
-}
-
-// burstMetricsSnapshot returns a consistent read-only metric view for
-// benchmark reporting without exposing coordinator policy outside this package.
-func (c *renderCoordinator) burstMetricsSnapshot() renderCoordinatorBurstMetricsSnapshot {
-	return renderCoordinatorBurstMetricsSnapshot{
-		invalidations: c.metrics.invalidations.Load(),
-		wakes:         c.metrics.wakes.Load(),
-		coalesced:     c.metrics.coalesced.Load(),
-	}
-}
-
-// renderCoordinator returns the coordinator installed for this session.
-func (s *session) renderCoordinator() *renderCoordinator { return s.coordinator.Load() }
-
-// installRenderCoordinator publishes rc as the session's coordinator.
-func (s *session) installRenderCoordinator(rc *renderCoordinator) { s.coordinator.Store(rc) }
-
-func (c *renderCoordinator) fireCurrent(watchdog bool) {
-	c.mu.Lock()
-	gen := c.generation
-	c.mu.Unlock()
-	c.fire(gen, watchdog, watchdog)
+	stopAndJoinTimerWorker(timer, nil)
+	stopAndJoinTimerWorker(resizeTimer, nil)
+	stopAndJoinTimerWorker(retryTimer, nil)
+	stopAndJoinTimerWorkers(workers)
 }
 
 // invalidateRender is the sole producer fan-in. In tests and transitional
@@ -1099,7 +694,7 @@ func (d *Daemon) invalidateRender(sess *session, ac *attachedClient, reset bool,
 		}
 	}
 	if ac != nil {
-		d.paint(sess, ac, reset, 0)
+		d.paint(sess, ac, reset, nil)
 	}
 }
 
@@ -1115,11 +710,22 @@ func (d *Daemon) invalidateRenderNow(sess *session, ac *attachedClient, reset bo
 		}
 	}
 	if ac != nil {
-		d.paint(sess, ac, reset, 0)
+		d.paint(sess, ac, reset, nil)
 	}
 }
 
 func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
+	c.fireWithTimerWorker(gen, watchdog, deadline, nil)
+}
+
+// fireFromTimer consumes a normal deadline from its own worker. It must not
+// wait for that worker's done channel because runTimerWorker closes it only
+// after this callback returns.
+func (c *renderCoordinator) fireFromTimer(gen uint64, watchdog, deadline bool, self <-chan struct{}) {
+	c.fireWithTimerWorker(gen, watchdog, deadline, self)
+}
+
+func (c *renderCoordinator) fireWithTimerWorker(gen uint64, watchdog, deadline bool, self <-chan struct{}) {
 	// Readiness probes enter the attachment send path, which may in turn read
 	// coordinator metadata. Never hold c.mu across that external callback.
 	c.mu.Lock()
@@ -1131,7 +737,7 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 	// Do not probe ACK capacity through that lock before this incarnation is
 	// ready: a deadline that expires during the handshake must complete and
 	// leave work pending, rather than wedging behind Welcome.
-	handshakePending := c.attachment != nil && !c.attachmentReady
+	handshakePending := c.lease != nil && c.lease.active && !c.lease.ready
 	ackReady := c.opts.ackReady
 	c.mu.Unlock()
 	ready := !handshakePending && (ackReady == nil || ackReady())
@@ -1152,16 +758,12 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 		c.mu.Unlock()
 		return
 	}
-	attachmentEpoch := uint64(0)
-	if c.attachment != nil {
-		attachmentEpoch = c.attachmentEpoch
-	}
-	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog, attachment: c.attachment, attachmentEpoch: attachmentEpoch}
+	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog, lease: c.lease}
 	// A detached target has no primary transport or ACK window. Its pending
 	// state belongs exclusively to picker previews and must be consumed after
 	// notification rather than accumulating ackDeferred forever.
-	headlessPreviewOnly := c.detached && c.attachment == nil
-	if !headlessPreviewOnly && (!ready || (c.attachment != nil && !c.attachmentReady)) {
+	headlessPreviewOnly := c.primaryDetachedLocked()
+	if !headlessPreviewOnly && (!ready || (c.lease != nil && c.lease.active && !c.lease.ready)) {
 		var ackStart *ackBlockedSpan
 		if !ready && deadline {
 			c.ackDeferred = true
@@ -1194,14 +796,14 @@ func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 			c.outputPressure--
 		}
 	}
-	timer := c.detachNormalTimerLocked()
+	worker := c.detachNormalTimerLocked()
 	c.pending, c.pendingReset, c.pendingUrgent, c.ackDeferred, c.deadlineDue, c.coalesced, c.armed = false, false, false, false, false, 0, false
 	observer, queueCorrelation, queueMarked := c.opts.observer, c.queueCorrelation, c.queueMarked
 	ackBlocked := c.ackBlocked
 	c.queueMarked, c.ackBlocked = false, nil
 	wake := c.opts.wake
 	c.mu.Unlock()
-	stopTimer(timer)
+	stopAndJoinTimerWorker(worker, self)
 	if queueMarked && observer != nil {
 		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, true))
 	}

@@ -31,6 +31,8 @@ func TestRenderCoordinatorFreshWakeWaitsForWelcome(t *testing.T) {
 	h := newCoordinatorHarness(t)
 	ac := &attachedClient{}
 	h.rc.attachWithReadiness(ac, false)
+	lease := h.rc.attachmentLease(ac)
+	require.NotNil(t, lease)
 
 	h.rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true, producer: "pty"})
 	timer := awaitCoordinatorScheduledTimer(t, h.clk)
@@ -42,12 +44,12 @@ func TestRenderCoordinatorFreshWakeWaitsForWelcome(t *testing.T) {
 	requireWorkerExit(t, workerDone)
 	requireNoWake(t, h.wakes)
 
-	require.True(t, h.rc.markAttachmentReady(ac))
+	require.True(t, h.rc.markAttachmentReady(lease))
 	h.rc.fireCurrent(false)
 	wake := awaitWake(t, h.wakes)
 	require.True(t, wake.reset)
 	require.Equal(t, 1, wake.coalesced)
-	require.Same(t, ac, wake.attachment)
+	require.Same(t, ac, wake.lease.attachment)
 	requireNoWake(t, h.wakes)
 }
 
@@ -58,9 +60,14 @@ func TestRenderCoordinatorParkedResumeRequiresNewWelcome(t *testing.T) {
 	h := newCoordinatorHarness(t)
 	ac := &attachedClient{}
 	h.rc.attachWithReadiness(ac, false)
-	require.True(t, h.rc.markAttachmentReady(ac))
+	firstLease := h.rc.attachmentLease(ac)
+	require.True(t, h.rc.markAttachmentReady(firstLease))
 	h.rc.notePark(ac)
 	h.rc.attachWithReadiness(ac, false)
+	resumedLease := h.rc.attachmentLease(ac)
+	require.NotNil(t, resumedLease)
+	require.NotSame(t, firstLease, resumedLease)
+	require.False(t, h.rc.markAttachmentReady(firstLease), "stale Welcome must not bless the reused attachment")
 
 	h.rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "session"})
 	timer := awaitCoordinatorScheduledTimer(t, h.clk)
@@ -72,7 +79,7 @@ func TestRenderCoordinatorParkedResumeRequiresNewWelcome(t *testing.T) {
 	requireWorkerExit(t, workerDone)
 	requireNoWake(t, h.wakes)
 
-	require.True(t, h.rc.markAttachmentReady(ac))
+	require.True(t, h.rc.markAttachmentReady(resumedLease))
 	h.rc.fireCurrent(false)
 	wake := awaitWake(t, h.wakes)
 	require.True(t, wake.reset)

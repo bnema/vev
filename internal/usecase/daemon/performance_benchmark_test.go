@@ -75,7 +75,7 @@ func TestPerformanceFixtureCounters(t *testing.T) {
 
 func TestRenderStageHooksCountProductionBoundariesOnFailedSend(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	<-sends
 	var captures, compositions, emissions int
 	ac.renderStages = renderStageHooks{
@@ -88,7 +88,7 @@ func TestRenderStageHooksCountProductionBoundariesOnFailedSend(t *testing.T) {
 	p.mu.Lock()
 	p.screen.Write([]byte("hook"))
 	p.mu.Unlock()
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	require.Equal(t, 1, captures, "a completed capture counts even when its emission fails")
 	require.Equal(t, 1, compositions, "a completed composition counts even when its emission fails")
 	require.Zero(t, emissions, "emit counts only prepare and transport success")
@@ -756,7 +756,7 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 
 	// Prime the real renderer shadow before measurements. Subsequent paints use
 	// actual production diffs rather than the initial full frame.
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	fixture.resetMetrics()
 	return fixture
 }
@@ -815,7 +815,7 @@ func (f *performanceFixture) paintLive() {
 	if rc := f.sess.renderCoordinator(); rc != nil {
 		rc.invalidate(renderInvalidation{class: invalidateOutput, producer: "performance_benchmark_test.go"})
 	} else {
-		f.d.paint(f.sess, f.ac, false)
+		f.d.paint(f.sess, f.ac, false, nil)
 	}
 	f.paints++
 }
@@ -911,7 +911,7 @@ func (f *performanceFixture) retryLatest() {
 	epoch := f.sess.renderCoordinator().resizeSnapshot().committed
 	plan := f.d.prepareResize(f.sess, f.ac.size)
 	failuresBefore, callsBefore := f.pty.metrics()
-	f.d.retryResizeMembers(f.sess, f.ac, epoch, plan.members)
+	f.d.retryResizeMembers(f.sess, f.ac, f.sess.renderCoordinator().attachmentLease(f.ac), epoch, plan.members)
 	failuresAfter, callsAfter := f.pty.metrics()
 	f.ptyFailures += failuresAfter - failuresBefore
 	if callsAfter > callsBefore {

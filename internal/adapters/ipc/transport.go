@@ -40,13 +40,13 @@ type Option func(*unixTransport)
 
 // WithRuntimeObserver enables process-local transport marks. It accepts no
 // clock: timestamp ownership belongs to the configured observer.
-func WithRuntimeObserver(observer ports.RuntimeObserver) Option {
+func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
 	return func(t *unixTransport) { t.observer = observer }
 }
 
 type unixTransport struct {
 	conn           net.Conn
-	observer       ports.RuntimeObserver
+	observer       ports.SerializedRuntimeObserver
 	operationMu    sync.Mutex
 	operationCount int
 	closing        bool

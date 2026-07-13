@@ -82,7 +82,7 @@ func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 	require.Same(t, sess, routed)
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	first := awaitFrame(t, tr.sends, ports.MsgOutput)
 	out, err := ports.UnmarshalOutput(first.Payload)
 	require.NoError(t, err)
@@ -90,7 +90,7 @@ func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 
 	// Before the MsgAck, the renderer has already advanced along the ordered
 	// output dependency chain, so an unchanged repaint is a no-op.
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	requireNoOutputFrame(t, tr.sends)
 
 	tr.recv <- ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{AckedStateNum: out.NewStateNum})}
@@ -99,7 +99,7 @@ func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 
 	// The production MsgAck path retires retained states without moving the
 	// renderer baseline backward.
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	requireNoOutputFrame(t, tr.sends)
 }
 
@@ -111,7 +111,7 @@ func TestPaintExplicitlyUsesAsyncTransportCapability(t *testing.T) {
 	ac.replaceTransport(tr)
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 
 	awaitFrame(t, tr.asyncSends, ports.MsgOutput)
 	select {
@@ -144,7 +144,7 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 	}
 	pane.screen.ClearDamage()
 	client := vt.NewScreen(80, 25)
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	first := mustApplyOutput(t, client, awaitFrame(t, tr.sends, ports.MsgOutput))
 	ac.ackOutputState(first.NewStateNum)
 
@@ -164,7 +164,7 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 		pane.screen.Col = 0
 		pane.screen.Write([]byte("\nq"))
 		pane.screen.Frame = desired.Clone()
-		d.paint(sess, ac, false)
+		d.paint(sess, ac, false, nil)
 		mustApplyOutput(t, client, awaitFrame(t, tr.sends, ports.MsgOutput))
 	}
 
@@ -202,11 +202,11 @@ func TestLocalAttachStillAdvancesRendererOnSend(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	awaitFrame(t, sends, ports.MsgOutput)
 
 	// The first paint updates the renderer shadow without waiting for MsgAck.
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	requireNoOutputFrame(t, sends)
 }
 
@@ -217,17 +217,17 @@ func TestLocalOutputAckDoesNotMoveRendererShadowBackward(t *testing.T) {
 	pane := sess.tabs[0].focusedPane()
 
 	pane.screen.Write([]byte("A"))
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	first := awaitFrame(t, sends, ports.MsgOutput)
 	out, err := ports.UnmarshalOutput(first.Payload)
 	require.NoError(t, err)
 
 	pane.screen.Write([]byte("\rB"))
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	awaitFrame(t, sends, ports.MsgOutput)
 
 	ac.ackOutputState(out.NewStateNum)
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	requireNoOutputFrame(t, sends)
 }
 
@@ -264,7 +264,7 @@ func TestFailedPaintSendRollsBackOutputState(t *testing.T) {
 	ac.replaceTransport(failingOutputTransport{})
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 
 	require.Zero(t, ac.output.next)
 	require.Zero(t, ac.output.acked)
@@ -292,7 +292,7 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 				return pane.resizeApplying
 			}
 			pane.screen.Write([]byte(strings.Repeat("A", 79)))
-			d.paint(sess, ac, true)
+			d.paint(sess, ac, true, nil)
 			client := vt.NewScreen(80, 24)
 			initial := mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
 			ac.ackOutputState(initial.NewStateNum)
@@ -397,11 +397,11 @@ func TestDatagramWindowOneCoalescesPaintsUntilMsgAck(t *testing.T) {
 		MaxOutputInFlight: 1,
 	}, tr)
 	require.NoError(t, err)
-	require.True(t, sess.renderCoordinator().markAttachmentReady(ac))
+	require.True(t, sess.renderCoordinator().markAttachmentReady(sess.renderCoordinator().attachmentLease(ac)))
 
 	pane := sess.tabs[0].focusedPane()
 	pane.screen.Write([]byte("A"))
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	first := awaitFrame(t, tr.sends, ports.MsgOutput)
 	firstOutput, err := ports.UnmarshalOutput(first.Payload)
 	require.NoError(t, err)

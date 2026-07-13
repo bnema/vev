@@ -9,7 +9,7 @@ import (
 )
 
 // Legacy composition adapters are test-only. Production rendering is owned by
-// captureRenderState -> composeFrame -> emitFrame.
+// capturePrimaryRenderState -> composeFrame -> emitFrame.
 // copyTargetRectLocked maps a captured copy source into the already-composed
 // client frame. The caller holds tb.mu, preserving the layout/floating
 // snapshot while the rectangle is chosen.
@@ -201,14 +201,10 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 				titleGenerations[pl.ID] = generation
 			}
 		}
-		mode := damageCapturePreview
-		if consumeDamage {
-			mode = damageCaptureConsume
-		}
 		if pl.Collapsed || pl.Content.Width <= 0 || pl.Content.Height <= 0 {
 			if consumeDamage {
 				p.mu.Lock()
-				captured := capturePaneRenderStateLocked(p, domain.Rect{}, mode)
+				captured := capturePaneRenderStateLocked(p, domain.Rect{})
 				p.screen.AcknowledgeDamage(captured.damageGeneration)
 				p.mu.Unlock()
 			}
@@ -218,7 +214,7 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 		var paneDamage []renderer.Damage
 		if consumeDamage {
 			p.mu.Lock()
-			captured := capturePaneRenderStateLocked(p, pl.Content, mode)
+			captured := capturePaneRenderStateLocked(p, pl.Content)
 			p.screen.AcknowledgeDamage(captured.damageGeneration)
 			p.mu.Unlock()
 			paneFrame, paneDamage = captured.frame, captured.damage

@@ -20,6 +20,8 @@ func TestTransportObservabilityIPCEOFAndCloseEndFailedSpans(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
+	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	defer reporter.Close()
 
 	// EOF from the peer and a locally closed blocked receive are distinct
 	// shutdown paths; both must record a failed, correlated end.
@@ -31,7 +33,7 @@ func TestTransportObservabilityIPCEOFAndCloseEndFailedSpans(t *testing.T) {
 			observedConn := &ipcReadStartedConn{Conn: left, started: make(chan struct{})}
 			conn, started = observedConn, observedConn.started
 		}
-		transport := NewTransport(conn, WithRuntimeObserver(observer))
+		transport := NewTransport(conn, WithRuntimeObserver(reporter))
 		recvDone := make(chan error, 1)
 		go func() { _, err := transport.Recv(); recvDone <- err }()
 		if closeLocal {
@@ -51,12 +53,13 @@ func TestTransportObservabilityIPCEOFAndCloseEndFailedSpans(t *testing.T) {
 
 	// A peer shutdown also makes Send fail after its start mark.
 	left, right := net.Pipe()
-	transport := NewTransport(left, WithRuntimeObserver(observer))
+	transport := NewTransport(left, WithRuntimeObserver(reporter))
 	_ = right.Close()
 	if err := transport.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("failed")}); err == nil {
 		t.Fatal("Send() error = nil after peer close")
 	}
 	_ = transport.Close()
+	reporter.Close()
 	if err := closer.Close(); err != nil {
 		t.Fatalf("trace Close() error = %v", err)
 	}
@@ -141,12 +144,14 @@ func TestTransportObservabilityIPCMarksCarriageWithoutChangingBytes(t *testing.T
 	if err != nil {
 		t.Fatalf("NewJSONL() error = %v", err)
 	}
+	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
+	defer reporter.Close()
 
 	left, right := net.Pipe()
 	defer func() { _ = left.Close() }()
 	defer func() { _ = right.Close() }()
-	client := NewTransport(left, WithRuntimeObserver(observer))
-	server := NewTransport(right, WithRuntimeObserver(observer))
+	client := NewTransport(left, WithRuntimeObserver(reporter))
+	server := NewTransport(right, WithRuntimeObserver(reporter))
 	want := ports.Frame{Type: ports.MsgOutput, Payload: []byte("wire bytes stay exact")}
 
 	var wg sync.WaitGroup
@@ -163,6 +168,7 @@ func TestTransportObservabilityIPCMarksCarriageWithoutChangingBytes(t *testing.T
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("carried frame = %#v, want %#v", got, want)
 	}
+	reporter.Close()
 	if err := closer.Close(); err != nil {
 		t.Fatalf("trace Close() error = %v", err)
 	}

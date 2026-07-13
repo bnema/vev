@@ -7,6 +7,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/testutil/replaytest"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
@@ -15,10 +16,7 @@ import (
 // TestTransportReplayIntegration stays at the legal application boundary: it
 // observes only typed output frames and terminal bytes, never daemon internals.
 func TestTransportReplayIntegration(t *testing.T) {
-	frames := []ports.Frame{
-		{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 1, Data: []byte("\x1b[2J\x1b[Hone\r\ntwo")})},
-		{Type: ports.MsgOutput, Payload: ports.MarshalOutput(ports.Output{BaseStateNum: 1, NewStateNum: 2, EchoAck: 7, Data: []byte("\x1b[2;1HTWO")})},
-	}
+	frames := replaytest.Transcript()
 	left, right := net.Pipe()
 	t.Cleanup(func() { _ = left.Close(); _ = right.Close() })
 	sender, receiver := ipc.NewTransport(left), ipc.NewTransport(right)

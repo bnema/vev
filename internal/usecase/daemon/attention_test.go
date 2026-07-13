@@ -53,7 +53,7 @@ func TestPaintDoesNotAckActiveAttentionOnBlankPulseFrame(t *testing.T) {
 	d.setAttentionFrame(0)
 	d.noteAttention(sess, sess.tabs[0])
 
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	data := mustOutputData(t, sends)
 	require.NotContains(t, string(data), string(ui.AttentionGlyph))
 
@@ -62,7 +62,7 @@ func TestPaintDoesNotAckActiveAttentionOnBlankPulseFrame(t *testing.T) {
 	sess.mu.Unlock()
 
 	d.setAttentionFrame(1)
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	data = mustOutputData(t, sends)
 	require.Contains(t, string(data), string(ui.AttentionGlyph))
 
@@ -97,7 +97,7 @@ func TestPTYReaderActiveVisibleAgentNotificationRendersBellBeforeAck(t *testing.
 				return sess.tabs[0].attention && !sess.tabs[0].attentionAt.IsZero()
 			}, 2*time.Second, 5*time.Millisecond)
 
-			d.paint(sess, ac, true)
+			d.paint(sess, ac, true, nil)
 			data := mustOutputData(t, sends)
 			require.Contains(t, string(data), string(ui.AttentionGlyph))
 
@@ -242,7 +242,7 @@ func TestAckAttentionClearsOnlyPaintedVisibleTab(t *testing.T) {
 	sess.tabs[1].attentionAt = time.Unix(2, 0)
 	sess.mu.Unlock()
 
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	_ = mustOutputData(t, sends)
 	// The deferred repaint (from ackAttention) targets all attached clients,
 	// including this one, but the bars it would draw are already exactly what
@@ -272,7 +272,7 @@ func TestPaintPreservesBackgroundAttention(t *testing.T) {
 	sess.mu.Unlock()
 	d.setAttentionFrame(1)
 
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	data := mustOutputData(t, sends)
 
 	require.Contains(t, string(data), "")
@@ -292,7 +292,7 @@ func TestSwitchTabClearsAttentionEndToEnd(t *testing.T) {
 	sess.mu.Unlock()
 
 	require.True(t, sess.switchTab(1))
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	data := mustOutputData(t, sends)
 	// As above: the deferred all-clients repaint has nothing new to say about
 	// this client's bars, so no second frame follows.
@@ -321,7 +321,7 @@ func TestCloseRingingTabClearsClientBar(t *testing.T) {
 	sess.mu.Unlock()
 	d.setAttentionFrame(1)
 
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	before := mustOutputData(t, sends)
 	require.Contains(t, string(before), "")
 
@@ -346,7 +346,7 @@ func TestAnimationRepaintConfinedToBarRows(t *testing.T) {
 	sess.tabs[1].attentionAt = time.Unix(1, 0)
 	sess.mu.Unlock()
 
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	full := mustOutputData(t, sends)
 	require.Contains(t, string(full), "MIDSCREENMARKER")
 
@@ -428,7 +428,7 @@ func TestCloseRingingTabRefreshesOtherSessionBottomBar(t *testing.T) {
 	acB.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: acB}, nil)
 	d.sessions[sessB.id] = sessB
 
-	d.paint(sessB, acB, true)
+	d.paint(sessB, acB, true, nil)
 	before := mustOutputData(t, sendsB)
 	require.Contains(t, string(before), string(ui.AttentionGlyph))
 

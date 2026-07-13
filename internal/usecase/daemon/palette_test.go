@@ -518,7 +518,7 @@ func TestPaletteRenderAndInputCanRunConcurrently(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 200 {
-			d.paint(sess, ac, true)
+			d.paint(sess, ac, true, nil)
 		}
 	}()
 	go func() {

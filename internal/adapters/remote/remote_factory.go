@@ -11,7 +11,9 @@ import (
 )
 
 // DialerFactory selects the requested remote transport adapter.
-type DialerFactory struct{ observer ports.RuntimeObserver }
+type DialerFactory struct {
+	observer ports.SerializedRuntimeObserver
+}
 
 var _ ports.RemoteDialerFactory = DialerFactory{}
 
@@ -19,7 +21,7 @@ func NewDialerFactory() DialerFactory { return DialerFactory{} }
 
 // NewDialerFactoryWithRuntimeObserver wires the one process-local sink into
 // whichever concrete remote carriage adapter is selected.
-func NewDialerFactoryWithRuntimeObserver(observer ports.RuntimeObserver) DialerFactory {
+func NewDialerFactoryWithRuntimeObserver(observer ports.SerializedRuntimeObserver) DialerFactory {
 	return DialerFactory{observer: observer}
 }
 
@@ -46,7 +48,7 @@ type stdioDialer struct {
 	target   string
 	session  string
 	log      *slog.Logger
-	observer ports.RuntimeObserver
+	observer ports.SerializedRuntimeObserver
 }
 
 func (d stdioDialer) Dial(ctx context.Context) (ports.Transport, error) {

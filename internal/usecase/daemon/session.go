@@ -47,10 +47,11 @@ type session struct {
 	// snapshotMu serializes the dirty generation with worker completion. It is
 	// intentionally independent from mu: persistence never holds session state
 	// locks while encoding or writing.
-	snapshotMu         sync.Mutex
-	snapshotGeneration uint64
-	snapshotPending    bool
-	snapshotChanged    chan struct{}
+	snapshotMu              sync.Mutex
+	snapshotGeneration      uint64
+	snapshotPending         bool
+	snapshotPendingCaptures uint
+	snapshotChanged         chan struct{}
 	// syncGen makes synchronized-output watchdog generations unique across all
 	// panes in this session.
 	syncGen atomic.Uint64
@@ -253,7 +254,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 
 	// Prepare source invalidation, output rebase, and destination coordinator
 	// identity before publishing the destination attachment.
-	d.handoffCoordinator(from, newSess, nil, ac)
+	cleanups := d.handoffCoordinator(from, newSess, nil, ac)
 	ac.setSession(newSess)
 	newSess.mu.Lock()
 	newSess.client = ac
@@ -263,6 +264,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	ac.recordPreviousSession(from)
 	d.log.Info("client attached", "session", newSess.name, "resume", ac.resumeCapable)
 	d.mu.Unlock()
+	finishRenderLifecycleCleanups(cleanups)
 	d.firstPaint(newSess, ac, sz)
 	return nil
 }
@@ -670,7 +672,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	if !purge && !isEphemeral && d.persistEnabled {
 		d.refreshSessionCwd(sess)
 	}
-	var snapshotDeleteErr error
+	var snapshotDeleteErr, terminalSnapshotErr error
 	if d.snapsEnabled && !isEphemeral {
 		if purge {
 			sess.mu.Lock()
@@ -682,7 +684,15 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 			}
 		} else {
 			markSnapshotDirty(sess)
-			d.scheduleFinalSnapshot(sess)
+			if !d.scheduleFinalSnapshot(sess) {
+				sess.mu.Lock()
+				name := sess.name
+				sess.mu.Unlock()
+				terminalSnapshotErr = fmt.Errorf("retain final snapshot for session %q: snapshot worker unavailable or saturated", name)
+				if reason != ports.ReasonServerShutdown {
+					return terminalSnapshotErr
+				}
+			}
 		}
 	}
 	d.mu.Lock()
@@ -777,7 +787,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	if ac != nil {
 		d.notifyDetachedAsync(ac, reason)
 	}
-	return purgeErr
+	return errors.Join(purgeErr, terminalSnapshotErr)
 }
 
 // allocEphemeralNameLocked returns the lowest free decimal name. Caller holds
