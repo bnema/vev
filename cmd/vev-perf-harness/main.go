@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,6 +35,7 @@ const (
 
 type options struct {
 	vevBin, manifest, out string
+	scenario              string
 	warmup, duration      time.Duration
 	repetitions           int
 }
@@ -247,7 +250,9 @@ type cliProcess struct {
 	waitTimeout   func() <-chan time.Time
 	forceCleanup  func()
 	forceKill     func()
+	shutdown      func() error
 	terminalReady bool
+	readyPath     string
 }
 
 func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProcess, error) {
@@ -285,7 +290,7 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 	if err := safedir.EnsurePrivate(filepath.Join(runDir, "state")); err != nil {
 		return nil, err
 	}
-	p := &cliProcess{cmd: cmd, waitErr: make(chan error, 1)}
+	p := &cliProcess{cmd: cmd, waitErr: make(chan error, 1), readyPath: filepath.Join(runDir, "runtime", "vev", "daemon.sock")}
 	if m.Role == "client" {
 		master, slave, err := openPTY()
 		if err != nil {
@@ -323,6 +328,18 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 			return nil, err
 		}
 		_ = devNull.Close()
+	}
+	if m.Role == "daemon" {
+		// Stop the foreground daemon through its public CLI before its bounded
+		// process-group fallback. This lets blocked carriage operations close and
+		// serialize their failed end marks instead of being cut off by SIGKILL.
+		p.shutdown = func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			shutdown := exec.CommandContext(ctx, l.bin, "kill", "--daemon")
+			shutdown.Env = withoutEnv(cmd.Env, "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN")
+			return shutdown.Run()
+		}
 	}
 	go func() { p.waitErr <- cmd.Wait() }()
 	return p, nil
@@ -478,6 +495,38 @@ func (p *cliProcess) copyTerminal() {
 		}
 		if err != nil {
 			return
+		}
+	}
+}
+
+// WaitReady confirms the explicitly launched public daemon owns its unique
+// socket before a client is launched. Without this barrier, the normal client
+// auto-spawn behavior can create an unmanifested daemon process during startup.
+func (p *cliProcess) WaitReady() error {
+	if p.readyPath == "" {
+		return errors.New("daemon readiness path is empty")
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	for {
+		if info, err := os.Stat(p.readyPath); err == nil {
+			if info.Mode()&os.ModeSocket == 0 {
+				return fmt.Errorf("daemon readiness path %s is not a socket", p.readyPath)
+			}
+			return nil
+		}
+		select {
+		case err := <-p.waitErr:
+			p.waitErr <- err
+			if err == nil {
+				return errors.New("daemon exited before readiness")
+			}
+			return fmt.Errorf("daemon exited before readiness: %w", err)
+		case <-ticker.C:
+		case <-timer.C:
+			return fmt.Errorf("timed out waiting for daemon socket %s", p.readyPath)
 		}
 	}
 }
@@ -649,6 +698,17 @@ func (p *cliProcess) Close() error {
 		// before closing the PTY so its transport can finish its receive span;
 		// this avoids turning ordinary harness teardown into an aborted trace.
 		exited := false
+		if p.shutdown != nil && p.waitErr != nil {
+			select {
+			case <-p.waitErr:
+				exited = true
+			default:
+				// The client may have just ended the last session and raced this
+				// best-effort public shutdown. The normal bounded reaping path below
+				// remains authoritative in that case.
+				_ = p.shutdown()
+			}
+		}
 		if p.pty != nil && p.waitErr != nil {
 			_, _ = p.pty.Write([]byte("exit\n"))
 			select {
@@ -691,6 +751,12 @@ func (p *cliProcess) Close() error {
 func (p *cliProcess) closeDeadline() <-chan time.Time {
 	if p.waitTimeout != nil {
 		return p.waitTimeout()
+	}
+	if p.shutdown != nil {
+		// A public kill asks the daemon to finish bounded detached notices and
+		// close blocked carriage before it exits; do not turn that graceful
+		// protocol into a SIGKILL at the two-second client deadline.
+		return time.After(5 * time.Second)
 	}
 	return time.After(2 * time.Second)
 }
@@ -768,7 +834,25 @@ func main() {
 	}
 }
 func defaultHarness() *harness {
-	return &harness{clock: systemClock{time.Now()}, mkdir: safedir.EnsurePrivate, create: func(p string) (*os.File, error) { return os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) }, removeAll: os.RemoveAll, gitSHA: func() string { return "unknown" }}
+	return &harness{clock: systemClock{time.Now()}, mkdir: safedir.EnsurePrivate, create: func(p string) (*os.File, error) { return os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) }, removeAll: os.RemoveAll, gitSHA: recordedGitSHA}
+}
+
+// recordedGitSHA prefers build provenance so an installed public harness does
+// not depend on its launch directory being a checkout. The git fallback keeps
+// go run evidence attributable as well.
+func recordedGitSHA() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" && setting.Value != "" {
+				return setting.Value
+			}
+		}
+	}
+	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err == nil && strings.TrimSpace(string(out)) != "" {
+		return strings.TrimSpace(string(out))
+	}
+	return "unknown"
 }
 func run(args []string, h *harness) error {
 	opt, err := parseOptions(args)
@@ -793,6 +877,12 @@ func run(args []string, h *harness) error {
 	results := make([]runResult, 0, len(m.Scenarios)*opt.repetitions)
 	var localSpans []span
 	scenarios := m.Scenarios
+	if opt.scenario != "" {
+		scenarios, err = selectScenario(m, opt.scenario)
+		if err != nil {
+			return err
+		}
+	}
 	if h.selectScenarios != nil {
 		scenarios = h.selectScenarios(m)
 	}
@@ -840,6 +930,7 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.vevBin, "vev-bin", "", "public vev binary")
 	fs.StringVar(&o.manifest, "manifest", "", "manifest")
 	fs.StringVar(&o.out, "out", "", "output directory")
+	fs.StringVar(&o.scenario, "scenario", "", "one canonical scenario ID (after full manifest validation)")
 	fs.DurationVar(&o.warmup, "warmup", 0, "warmup")
 	fs.DurationVar(&o.duration, "duration", 0, "measurement duration")
 	fs.IntVar(&o.repetitions, "repetitions", 0, "repetitions")
@@ -948,6 +1039,22 @@ func validateManifest(m manifest) error {
 	}
 	return nil
 }
+
+// selectScenario is intentionally called only after validateManifest. A bounded
+// local evidence run therefore cannot mask an incomplete canonical matrix.
+func selectScenario(m manifest, id string) ([]scenario, error) {
+	for _, s := range m.Scenarios {
+		if s.ID != id {
+			continue
+		}
+		if s.InapplicableReason != "" {
+			return nil, fmt.Errorf("scenario %s is inapplicable: %s", id, s.InapplicableReason)
+		}
+		return []scenario{s}, nil
+	}
+	return nil, fmt.Errorf("unknown canonical scenario %s", id)
+}
+
 func requiredRoles(transportID string) []string {
 	switch transportID {
 	case "local":
@@ -1063,6 +1170,13 @@ func (h *harness) runOne(o options, mat manifest, s scenario, run int, raw io.Wr
 			return res, e
 		}
 		processes = append(processes, launchedRole{mapping: pm, process: p})
+		if pm.Role == "daemon" {
+			if ready, ok := p.(interface{ WaitReady() error }); ok {
+				if err = ready.WaitReady(); err != nil {
+					return res, err
+				}
+			}
+		}
 	}
 	for _, p := range processes {
 		if p.mapping.Role != "client" {
@@ -1382,7 +1496,7 @@ type traceRecord struct {
 }
 type spanPair struct{ start, end, name string }
 
-var spanPairs = []spanPair{{"diff_start", "diff_end", "diff_duration"}, {"queue_enqueued", "queue_dequeued", "queue_wait"}, {"ack_blocked_start", "ack_blocked_end", "ack_blocked_interval"}, {"adapter_send_start", "adapter_send_end", "adapter_send_duration"}, {"adapter_receive_start", "adapter_receive_end", "adapter_receive_duration"}}
+var spanPairs = []spanPair{{"capture_start", "capture_end", "capture_duration"}, {"compose_start", "compose_end", "compose_duration"}, {"diff_start", "diff_end", "diff_duration"}, {"queue_enqueued", "queue_dequeued", "queue_wait"}, {"ack_blocked_start", "ack_blocked_end", "ack_blocked_interval"}, {"emit_start", "emit_end", "emit_duration"}, {"adapter_send_start", "adapter_send_end", "adapter_send_duration"}, {"adapter_receive_start", "adapter_receive_end", "adapter_receive_duration"}}
 
 // mergeProcessTraces permits only records from one manifest process in a span.
 // In particular, the correlation key includes process_id before ticks are read.

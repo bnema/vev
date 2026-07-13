@@ -66,4 +66,4 @@ jq -e '(.topologies|length)==4 and (.workloads|length)==9 and (.transports|lengt
 go test ./cmd/vev-perf-harness
 ```
 
-The full command above is the measurement procedure; its 10-second warmup, 30-second measured interval, and 10 repetitions are the minimum accepted settings.
+The full command above is the measurement procedure; its 10-second warmup, 30-second measured interval, and 10 repetitions are the minimum accepted settings. For a bounded local evidence run, add `--scenario 1x4-idle-local`; the harness validates the complete canonical manifest before it applies that selection, so a single-scenario run cannot hide missing matrix coverage.

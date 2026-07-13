@@ -117,6 +117,40 @@ func TestCLIProcessCloseIsBoundedWhenPublicRoleDoesNotExit(t *testing.T) {
 	}
 }
 
+func TestCLIProcessWaitReadyRequiresDaemonSocket(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := (&cliProcess{readyPath: path, waitErr: make(chan error, 1)}).WaitReady(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCLIProcessCloseUsesPublicDaemonShutdown(t *testing.T) {
+	wait := make(chan error, 1)
+	wait <- nil
+	var shutdown int
+	p := &cliProcess{waitErr: wait, shutdown: func() error { shutdown++; return nil }}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if shutdown != 0 {
+		t.Fatalf("shutdown calls = %d, want 0 for an exited daemon", shutdown)
+	}
+
+	wait = make(chan error, 1)
+	p = &cliProcess{waitErr: wait, shutdown: func() error { shutdown++; wait <- nil; return nil }}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if shutdown != 1 {
+		t.Fatalf("shutdown calls = %d, want 1", shutdown)
+	}
+}
+
 func TestHarnessCanonicalLocalSmokeRealRoles(t *testing.T) {
 	if testing.Short() {
 		t.Skip("public CLI smoke")
@@ -166,7 +200,7 @@ func TestHarnessCanonicalLocalSmokeRealRoles(t *testing.T) {
 	}
 }
 
-func TestHarnessTestSelectionKeepsCanonicalManifestValidation(t *testing.T) {
+func TestHarnessScenarioSelectionKeepsCanonicalManifestValidation(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -176,15 +210,11 @@ func TestHarnessTestSelectionKeepsCanonicalManifestValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validateManifest(m); err != nil {
-		t.Fatal(err)
-	}
 	selected := m.Scenarios[0]
 	h := defaultHarness()
 	h.clock, h.launcher = &fakeClock{}, &fakeLauncher{}
-	h.selectScenarios = func(manifest) []scenario { return []scenario{selected} }
 	out := filepath.Join(t.TempDir(), "out")
-	if err := run([]string{"--vev-bin", "ignored", "--manifest", manifestPath, "--out", out, "--warmup", "0s", "--duration", "30s", "--repetitions", "10"}, h); err != nil {
+	if err := run([]string{"--vev-bin", "ignored", "--manifest", manifestPath, "--out", out, "--scenario", selected.ID, "--warmup", "0s", "--duration", "30s", "--repetitions", "10"}, h); err != nil {
 		t.Fatal(err)
 	}
 	var runs []runResult
@@ -197,6 +227,39 @@ func TestHarnessTestSelectionKeepsCanonicalManifestValidation(t *testing.T) {
 	}
 	if len(runs) != 10 {
 		t.Fatalf("selected canonical runs=%d, want 10", len(runs))
+	}
+	for _, result := range runs {
+		if result.Scenario != selected.ID {
+			t.Fatalf("selected scenario = %q, want %q", result.Scenario, selected.ID)
+		}
+	}
+}
+
+func TestHarnessScenarioSelectionRejectsIncompleteCanonicalManifest(t *testing.T) {
+	m, err := readManifest(filepath.Join("..", "..", "testdata", "perf", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := m.Scenarios[0]
+	m.Scenarios = m.Scenarios[:len(m.Scenarios)-1]
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "manifest.json")
+	if err := os.WriteFile(manifestPath, []byte(mustJSON(m)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launcher := &fakeLauncher{}
+	h := defaultHarness()
+	h.clock, h.launcher = &fakeClock{}, launcher
+	out := filepath.Join(dir, "out")
+	err = run([]string{"--vev-bin", "ignored", "--manifest", manifestPath, "--out", out, "--scenario", selected.ID, "--warmup", "0s", "--duration", "30s", "--repetitions", "10"}, h)
+	if err == nil || !strings.Contains(err.Error(), "missing scenario or inapplicable reason") {
+		t.Fatalf("incomplete manifest selection error = %v", err)
+	}
+	if len(launcher.mappings) != 0 {
+		t.Fatalf("launched with incomplete canonical manifest: %+v", launcher.mappings)
+	}
+	if _, statErr := os.Stat(out); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("output created before manifest validation: %v", statErr)
 	}
 }
 
@@ -881,6 +944,17 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func TestHarnessIncludesAllRequiredProcessLocalSpans(t *testing.T) {
+	got := make([]string, 0, len(spanPairs))
+	for _, pair := range spanPairs {
+		got = append(got, pair.name)
+	}
+	want := []string{"capture_duration", "compose_duration", "diff_duration", "queue_wait", "ack_blocked_interval", "emit_duration", "adapter_send_duration", "adapter_receive_duration"}
+	if !equalStrings(got, want) {
+		t.Fatalf("span pairs = %v, want %v", got, want)
+	}
 }
 
 func TestHarnessRawRecordsAreDeterministicJSONL(t *testing.T) {
