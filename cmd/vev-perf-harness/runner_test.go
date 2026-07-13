@@ -45,12 +45,12 @@ func TestHarnessCanonicalLocalRolesAreIsolatedAcrossRepetitions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(out)
+	removeTestTree(t, out)
 	raw, err := os.OpenFile(filepath.Join(out, "raw.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	closeTestFile(t, raw)
 	h := defaultHarness()
 	h.clock = &fakeClock{}
 	h.launcher = &cliLauncher{bin: bin}
@@ -118,7 +118,7 @@ func TestHarnessResolvesCanonicalRelativePathsBeforeRoleCWDChanges(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(workspace) })
+	removeTestTree(t, workspace)
 	bin := filepath.Join(workspace, "vev")
 	build := exec.Command("go", "build", "-o", bin, "./")
 	build.Dir = root
@@ -198,7 +198,7 @@ func TestHarnessRejectsExistingRunDirectoryBeforeLaunchingRoles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	closeTestFile(t, raw)
 	s := scenario{ID: "isolated", Roles: []string{"daemon", "client"}}
 	stale := filepath.Join(out, "isolated-run-001")
 	if err := os.Mkdir(stale, 0o700); err != nil {
@@ -282,7 +282,7 @@ func TestHarnessFakeRunnerRoutesClientToPeerAndCleansEveryRole(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer raw.Close()
+			closeTestFile(t, raw)
 			l := &fakeLauncher{}
 			h := defaultHarness()
 			h.clock, h.launcher = &fakeClock{}, l
@@ -320,13 +320,70 @@ func TestHarnessAggregatesRawEventsSeparatelyFromRunDispersion(t *testing.T) {
 	}
 }
 
+func TestHarnessRawRecordsContainEveryMarkWhileSamplesRemainFiltered(t *testing.T) {
+	dir := t.TempDir()
+	raw, err := os.OpenFile(filepath.Join(dir, "raw.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := defaultHarness()
+	h.clock, h.launcher = &fakeClock{}, &fakeLauncher{}
+	result, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "raw-complete", Roles: []string{"daemon", "client"}}, 1, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	marks := readHarnessMarks(t, filepath.Join(dir, "raw.jsonl"))
+	if got, want := len(marks), 2*(result.Samples+1); got != want {
+		t.Fatalf("raw marks=%d, want warmup plus every measured boundary=%d", got, want)
+	}
+	for i, mark := range marks[:2] {
+		if mark.Sequence != 1 || !mark.Valid || []string{"input_injected", "terminal_flushed"}[i] != mark.Kind {
+			t.Fatalf("warmup mark %d=%+v", i, mark)
+		}
+	}
+	for sequence := uint64(2); sequence <= uint64(result.Samples+1); sequence++ {
+		if marks[2*(sequence-1)].Sequence != sequence || marks[2*(sequence-1)+1].Sequence != sequence {
+			t.Fatalf("raw marks did not retain both boundaries for sequence %d: %+v", sequence, marks)
+		}
+	}
+}
+
+func TestHarnessPersistsFailedFlushDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	raw, err := os.OpenFile(filepath.Join(dir, "raw.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("flush failed")
+	h := defaultHarness()
+	h.clock, h.launcher = &fakeClock{}, failedFlushLauncher{err: failure}
+	_, err = h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "failed-flush", Roles: []string{"daemon", "client"}}, 1, raw)
+	if !errors.Is(err, failure) {
+		t.Fatalf("run error=%v, want failed flush", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	marks := readHarnessMarks(t, filepath.Join(dir, "raw.jsonl"))
+	if got, want := len(marks), 4; got != want {
+		t.Fatalf("raw marks=%d, want warmup and failed measured pair=%d: %+v", got, want, marks)
+	}
+	failed := marks[len(marks)-1]
+	if failed.Sequence != 2 || failed.Kind != "terminal_flushed" || failed.Valid {
+		t.Fatalf("failed flush diagnostic=%+v", failed)
+	}
+}
+
 func TestHarnessSchedulesMeasuredEventsAcrossFullInterval(t *testing.T) {
 	dir := t.TempDir()
 	raw, err := os.OpenFile(filepath.Join(dir, "raw.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	closeTestFile(t, raw)
 	h := defaultHarness()
 	h.clock, h.launcher = &fakeClock{}, &fakeLauncher{}
 	result, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "schedule", Roles: []string{"daemon", "client"}}, 1, raw)
@@ -343,8 +400,8 @@ func TestHarnessSchedulesMeasuredEventsAcrossFullInterval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != result.Samples*2 {
-		t.Fatalf("raw records=%d, want %d complete measured boundaries", len(records), result.Samples*2)
+	if want := result.Samples*2 + 2; len(records) != want {
+		t.Fatalf("raw records=%d, want %d warmup and measured boundaries", len(records), want)
 	}
 }
 
@@ -354,7 +411,7 @@ func TestHarnessPreservesWorkloadAndCleanupErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	closeTestFile(t, raw)
 	primary := errors.New("primary workload failure")
 	cleanup := errors.New("daemon cleanup failure")
 	launcher := &fakeLauncher{
@@ -383,7 +440,7 @@ func TestHarnessCleansRunDirectoryOnProcessFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	closeTestFile(t, raw)
 	launcher := &fakeLauncher{}
 	h := defaultHarness()
 	h.clock = &fakeClock{}

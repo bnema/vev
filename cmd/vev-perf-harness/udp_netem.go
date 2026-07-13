@@ -46,7 +46,13 @@ type scheduledPackets []scheduledPacket
 func (p scheduledPackets) Len() int           { return len(p) }
 func (p scheduledPackets) Less(i, j int) bool { return p[i].due.Before(p[j].due) }
 func (p scheduledPackets) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
-func (p *scheduledPackets) Push(x any)        { *p = append(*p, x.(scheduledPacket)) }
+func (p *scheduledPackets) Push(x any) {
+	packet, ok := x.(scheduledPacket)
+	if !ok {
+		panic(fmt.Sprintf("scheduled packet type %T", x))
+	}
+	*p = append(*p, packet)
+}
 func (p *scheduledPackets) Pop() any {
 	old := *p
 	n := len(old)
@@ -56,17 +62,19 @@ func (p *scheduledPackets) Pop() any {
 }
 
 type udpNetemRelay struct {
-	config udpNetemConfig
-	conn   net.PacketConn
-	done   chan struct{}
-	wg     sync.WaitGroup
-	once   sync.Once
+	config   udpNetemConfig
+	conn     net.PacketConn
+	done     chan struct{}
+	wg       sync.WaitGroup
+	once     sync.Once
+	closeErr error
 
 	// slots bounds queued and deadline-pending packets together. The reader and
 	// the sole scheduler are the relay's only goroutines.
 	slots              chan struct{}
 	queue              chan scheduledPacket
 	queueOverflowDrops atomic.Uint64
+	deliveryErrors     atomic.Uint64
 
 	mu          sync.Mutex
 	client, dst net.Addr
@@ -95,17 +103,26 @@ func newUDPNetem(config udpNetemConfig) (udpNetem, error) {
 }
 
 func (r *udpNetemRelay) Port() int {
-	return r.conn.LocalAddr().(*net.UDPAddr).Port
+	addr, ok := r.conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return 0
+	}
+	return addr.Port
 }
 
 func (r *udpNetemRelay) Close() error {
-	var closeErr error
 	r.once.Do(func() {
 		close(r.done)
-		closeErr = r.conn.Close()
+		r.closeErr = r.conn.Close()
 		r.wg.Wait()
+		if drops := r.queueOverflowDrops.Load(); drops != 0 {
+			r.closeErr = errors.Join(r.closeErr, fmt.Errorf("udp netem queue overflow drops: %d", drops))
+		}
+		if writes := r.deliveryErrors.Load(); writes != 0 {
+			r.closeErr = errors.Join(r.closeErr, fmt.Errorf("udp netem delivery errors: %d", writes))
+		}
 	})
-	return closeErr
+	return r.closeErr
 }
 
 func (r *udpNetemRelay) run() {
@@ -183,12 +200,21 @@ func (r *udpNetemRelay) schedule() {
 		case <-timerC:
 			now := time.Now()
 			for pending.Len() > 0 && !pending[0].due.After(now) {
-				packet := heap.Pop(&pending).(scheduledPacket)
+				packet, ok := heap.Pop(&pending).(scheduledPacket)
+				if !ok {
+					panic("scheduled packet heap contained unexpected type")
+				}
 				select {
 				case <-r.done:
 					return
 				default:
-					_, _ = r.conn.WriteTo(packet.packet, packet.to)
+					if _, err := r.conn.WriteTo(packet.packet, packet.to); err != nil {
+						select {
+						case <-r.done:
+						default:
+							r.deliveryErrors.Add(1)
+						}
+					}
 					<-r.slots
 				}
 			}

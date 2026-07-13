@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -58,8 +59,7 @@ func createExclusiveRunDir(path string) error {
 		return err
 	}
 	if err := safedir.EnsurePrivate(path); err != nil {
-		_ = os.Remove(path)
-		return err
+		return errors.Join(err, os.Remove(path))
 	}
 	return nil
 }
@@ -175,7 +175,9 @@ func (h *harness) runOne(o options, mat manifest, s scenario, run int, raw io.Wr
 	success := false
 	defer func() {
 		if !success {
-			_ = h.removeAll(dir)
+			if cleanupErr := h.removeAll(dir); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("remove failed run directory: %w", cleanupErr))
+			}
 		}
 	}()
 	maps := make([]processMapping, 0, len(s.Roles))
@@ -239,22 +241,38 @@ func (h *harness) runOne(o options, mat manifest, s scenario, run int, raw io.Wr
 			}
 		}
 	}
+	marks := []harnessMark{}
+	recordMark := func(mark harnessMark) error {
+		marks = append(marks, mark)
+		if err := json.NewEncoder(raw).Encode(mark); err != nil {
+			return fmt.Errorf("write raw harness mark: %w", err)
+		}
+		return nil
+	}
+	seq := uint64(0)
 	for _, p := range processes {
 		if p.mapping.Role != "client" {
 			continue
 		}
-		if err = p.process.Warmup(workloadInput(s, run, "warmup")); err != nil {
+		seq++
+		sequence := seq
+		if err = recordMark(harnessMark{Scenario: s.ID, Run: run, Sequence: sequence, Kind: "input_injected", Tick: h.clock.Now(), Valid: true}); err != nil {
 			return res, err
+		}
+		warmupErr := p.process.Warmup(workloadInput(s, run, "warmup"))
+		if markErr := recordMark(harnessMark{Scenario: s.ID, Run: run, Sequence: sequence, Kind: "terminal_flushed", Tick: h.clock.Now(), Valid: warmupErr == nil}); markErr != nil {
+			return res, errors.Join(warmupErr, markErr)
+		}
+		if warmupErr != nil {
+			return res, warmupErr
 		}
 	}
 	// The harness clock, rather than a process clock, owns the explicit warmup
-	// and measured intervals. Warmup boundaries are intentionally never added to
-	// marks, and each measured event must complete before interval.End to count.
+	// and measured intervals. Raw evidence retains every boundary, while only
+	// complete valid pairs within [Start, End) contribute measurement samples.
 	h.clock.Sleep(o.warmup)
 	interval := measuredInterval{Start: h.clock.Now()}
 	interval.End = interval.Start + o.duration.Nanoseconds()
-	marks := []harnessMark{}
-	seq := uint64(0)
 	nextInjection := interval.Start
 	for {
 		now := h.clock.Now()
@@ -271,16 +289,28 @@ func (h *harness) runOne(o options, mat manifest, s scenario, run int, raw io.Wr
 			}
 			seq++
 			sequence := seq
+			injectedRecorded := false
+			flushedRecorded := false
 			injected := func() error {
-				marks = append(marks, harnessMark{s.ID, run, sequence, "input_injected", h.clock.Now(), true})
+				if markErr := recordMark(harnessMark{Scenario: s.ID, Run: run, Sequence: sequence, Kind: "input_injected", Tick: h.clock.Now(), Valid: true}); markErr != nil {
+					return markErr
+				}
+				injectedRecorded = true
 				return nil
 			}
 			flushed := func() error {
-				marks = append(marks, harnessMark{s.ID, run, sequence, "terminal_flushed", h.clock.Now(), true})
+				if markErr := recordMark(harnessMark{Scenario: s.ID, Run: run, Sequence: sequence, Kind: "terminal_flushed", Tick: h.clock.Now(), Valid: true}); markErr != nil {
+					return markErr
+				}
+				flushedRecorded = true
 				return nil
 			}
-			if err = p.process.Measure(workloadInput(s, run, fmt.Sprintf("measured-%d", sequence)), injected, flushed); err != nil {
-				return res, err
+			if measureErr := p.process.Measure(workloadInput(s, run, fmt.Sprintf("measured-%d", sequence)), injected, flushed); measureErr != nil {
+				if injectedRecorded && !flushedRecorded {
+					diagnosticErr := recordMark(harnessMark{Scenario: s.ID, Run: run, Sequence: sequence, Kind: "terminal_flushed", Tick: h.clock.Now(), Valid: false})
+					return res, errors.Join(measureErr, diagnosticErr)
+				}
+				return res, measureErr
 			}
 		}
 		// Cap injection rate rather than bursting events after a slow terminal
@@ -307,18 +337,6 @@ func (h *harness) runOne(o options, mat manifest, s scenario, run int, raw io.Wr
 	spans, e := mergeProcessTraces(maps)
 	if e != nil {
 		return res, e
-	}
-	inInterval := make(map[uint64]bool, len(events))
-	for _, event := range events {
-		inInterval[event.Sequence] = true
-	}
-	for _, m := range marks {
-		if !inInterval[m.Sequence] {
-			continue
-		}
-		if _, e := fmt.Fprintf(raw, "%s\n", mustJSON(m)); e != nil {
-			return res, e
-		}
 	}
 	success = true
 	return runResult{Spans: spans, Scenario: s.ID, Run: run, Samples: len(samples), EndToEnd: samples, Event: percentiles(samples), Cadence: percentiles(cadenceSamples), CadenceSamples: cadenceSamples, MaxGap: maxGap, Processes: maps}, nil

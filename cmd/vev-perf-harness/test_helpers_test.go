@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"testing"
 	"time"
 )
 
@@ -100,6 +102,65 @@ func (l insufficientEventLauncher) Launch(m processMapping, _ roleCommand) (laun
 	return &fakeProcess{}, nil
 }
 
+type failedFlushProcess struct{ err error }
+
+func (*failedFlushProcess) Warmup([]byte) error { return nil }
+
+func (p *failedFlushProcess) Measure(_ []byte, injected, _ func() error) error {
+	if err := injected(); err != nil {
+		return err
+	}
+	return p.err
+}
+
+func (*failedFlushProcess) Close() error { return nil }
+
+type failedFlushLauncher struct{ err error }
+
+func (l failedFlushLauncher) Launch(m processMapping, _ roleCommand) (launchedProcess, error) {
+	if m.Role == "client" {
+		return &failedFlushProcess{err: l.err}, nil
+	}
+	return &fakeProcess{}, nil
+}
+
+func closeTestFile(t *testing.T, f *os.File) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := f.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			t.Error(err)
+		}
+	})
+}
+
+func removeTestTree(t *testing.T, path string) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := os.RemoveAll(path); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+func readHarnessMarks(t *testing.T, path string) []harnessMark {
+	t.Helper()
+	records, err := readJSONL(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marks := make([]harnessMark, len(records))
+	for i, record := range records {
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(encoded, &marks[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return marks
+}
+
 type fakePTY struct{ writes [][]byte }
 
 func (p *fakePTY) Read([]byte) (int, error) { return 0, os.ErrClosed }
@@ -175,7 +236,11 @@ func (l *failingLauncher) Launch(m processMapping, command roleCommand) (launche
 		return nil, err
 	}
 	if m.Role == "client" {
-		p.(*fakeProcess).fail = true
+		fake, ok := p.(*fakeProcess)
+		if !ok {
+			return nil, fmt.Errorf("fake launcher returned %T, want *fakeProcess", p)
+		}
+		fake.fail = true
 	}
 	return p, nil
 }
@@ -203,14 +268,19 @@ func (l *traceLauncher) Launch(m processMapping, command roleCommand) (launchedP
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
 	for i, pair := range spanPairs {
 		for n, kind := range []string{pair.start, pair.end} {
-			b, _ := json.Marshal(traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: uint64(i + 1), RequestID: 1, Epoch: 1, Kind: kind, Tick: int64(i*20 + n*5), Valid: true})
+			b, err := json.Marshal(traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: uint64(i + 1), RequestID: 1, Epoch: 1, Kind: kind, Tick: int64(i*20 + n*5), Valid: true})
+			if err != nil {
+				return nil, errors.Join(err, f.Close())
+			}
 			if _, err := f.Write(append(b, '\n')); err != nil {
-				return nil, err
+				return nil, errors.Join(err, f.Close())
 			}
 		}
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
 	}
 	return p, nil
 }
@@ -236,7 +306,11 @@ func (l *closeTraceLauncher) Launch(m processMapping, command roleCommand) (laun
 	if err := appendTraceRecord(m.TracePath, start); err != nil {
 		return nil, err
 	}
-	return &closeTraceProcess{fakeProcess: p.(*fakeProcess), traceEnd: func() error {
+	fake, ok := p.(*fakeProcess)
+	if !ok {
+		return nil, fmt.Errorf("fake launcher returned %T, want *fakeProcess", p)
+	}
+	return &closeTraceProcess{fakeProcess: fake, traceEnd: func() error {
 		return appendTraceRecord(m.TracePath, traceRecord{ProcessID: m.ProcessID, Component: m.Role, Scenario: m.Scenario, Run: uint64(m.Run), Sequence: 1, RequestID: 1, Epoch: 1, Kind: "adapter_receive_end", Tick: 20, Valid: true})
 	}}, nil
 }
@@ -246,13 +320,14 @@ func appendTraceRecord(path string, record traceRecord) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	b, err := json.Marshal(record)
 	if err != nil {
-		return err
+		return errors.Join(err, f.Close())
 	}
-	_, err = f.Write(append(b, '\n'))
-	return err
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		return errors.Join(err, f.Close())
+	}
+	return f.Close()
 }
 
 // boundedLocalConcurrentTrace is an excerpt from the second run of the

@@ -35,7 +35,7 @@ func measuredEventSamples(marks []harnessMark, interval measuredInterval) ([]eve
 				return nil, errors.New("negative harness duration")
 			}
 			delete(starts, m.Sequence)
-			if start >= interval.Start && m.Tick <= interval.End {
+			if start >= interval.Start && m.Tick < interval.End {
 				events = append(events, eventSample{Sequence: m.Sequence, Injected: start, Flushed: m.Tick, Latency: m.Tick - start})
 			}
 		default:
@@ -283,7 +283,13 @@ func writeJSON(path string, v any) error {
 	return f.Close()
 }
 
-func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(fmt.Sprintf("marshal JSON: %v", err))
+	}
+	return string(b)
+}
 
 func safeName(s string) string {
 	return strings.Map(func(r rune) rune {

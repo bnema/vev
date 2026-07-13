@@ -9,6 +9,15 @@ import (
 	"time"
 )
 
+func closeUDPFixture(t *testing.T, c interface{ Close() error }) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
 func TestUDPNetemDropsWhenBoundedSchedulerIsFull(t *testing.T) {
 	r := &udpNetemRelay{
 		done:  make(chan struct{}),
@@ -26,6 +35,21 @@ func TestUDPNetemDropsWhenBoundedSchedulerIsFull(t *testing.T) {
 	}
 	if got := r.queueOverflowDrops.Load(); got != 1 {
 		t.Fatalf("queue overflow drops=%d, want 1", got)
+	}
+}
+
+func TestUDPNetemCloseRejectsQueueOverflow(t *testing.T) {
+	netem, err := newUDPNetem(udpNetemConfig{TargetPath: filepath.Join(t.TempDir(), "target")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, ok := netem.(*udpNetemRelay)
+	if !ok {
+		t.Fatalf("netem type=%T, want *udpNetemRelay", netem)
+	}
+	relay.queueOverflowDrops.Store(3)
+	if err := netem.Close(); err == nil || err.Error() != "udp netem queue overflow drops: 3" {
+		t.Fatalf("Close error=%v, want overflow rejection", err)
 	}
 }
 
@@ -48,21 +72,25 @@ func TestUDPNetemExecutesRTTAndLossFixtures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer target.Close()
+			closeUDPFixture(t, target)
+			targetAddr, ok := target.LocalAddr().(*net.UDPAddr)
+			if !ok {
+				t.Fatalf("target address type=%T, want *net.UDPAddr", target.LocalAddr())
+			}
 			path := filepath.Join(t.TempDir(), "target")
-			if err := os.WriteFile(path, []byte("VEV-UDP "+strconv.Itoa(target.LocalAddr().(*net.UDPAddr).Port)+" key\\n"), 0o600); err != nil {
+			if err := os.WriteFile(path, []byte("VEV-UDP "+strconv.Itoa(targetAddr.Port)+" key\\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			netem, err := newUDPNetem(udpNetemConfig{RTT: tc.rtt, LossPercent: tc.loss, TargetPath: path})
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer netem.Close()
+			closeUDPFixture(t, netem)
 			client, err := net.ListenPacket("udp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer client.Close()
+			closeUDPFixture(t, client)
 			started := time.Now()
 			for i := 0; i < tc.sent; i++ {
 				if _, err := client.WriteTo([]byte{byte(i)}, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: netem.Port()}); err != nil {

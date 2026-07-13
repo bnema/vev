@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,6 +100,8 @@ func TestHarnessCollectsOnlyCompleteMeasuredIntervalEvents(t *testing.T) {
 		{Sequence: 3, Kind: "terminal_flushed", Tick: 201, Valid: true}, // exits interval
 		{Sequence: 4, Kind: "input_injected", Tick: 99, Valid: true},
 		{Sequence: 4, Kind: "terminal_flushed", Tick: 110, Valid: true}, // enters interval
+		{Sequence: 5, Kind: "input_injected", Tick: 180, Valid: true},
+		{Sequence: 5, Kind: "terminal_flushed", Tick: 200, Valid: true}, // end is excluded
 	}
 	events, err := measuredEventSamples(marks, interval)
 	if err != nil {
@@ -132,13 +135,27 @@ func TestHarnessRunRejectsStraddlingEventsAsInsufficient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	t.Cleanup(func() {
+		if err := raw.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			t.Error(err)
+		}
+	})
 	clock := &fakeClock{}
 	h := defaultHarness()
 	h.clock, h.launcher = clock, insufficientEventLauncher{clock: clock}
 	_, err = h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration}, manifest{}, scenario{ID: "late", Roles: []string{"daemon", "client"}}, 1, raw)
 	if err == nil || !strings.Contains(err.Error(), "insufficient in-interval event samples") {
 		t.Fatalf("straddling run error=%v, want insufficient in-interval sample rejection", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	marks := readHarnessMarks(t, filepath.Join(dir, "raw.jsonl"))
+	if got, want := len(marks), 4; got != want {
+		t.Fatalf("raw marks=%d, want warmup and straddling pair=%d: %+v", got, want, marks)
+	}
+	if straddling := marks[len(marks)-1]; straddling.Sequence != 2 || straddling.Kind != "terminal_flushed" || !straddling.Valid {
+		t.Fatalf("straddling boundary=%+v", straddling)
 	}
 }
 
@@ -186,7 +203,11 @@ func TestHarnessClosesRolesBeforeMergingReceiveSpans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	t.Cleanup(func() {
+		if err := raw.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			t.Error(err)
+		}
+	})
 	launcher := &closeTraceLauncher{}
 	h := defaultHarness()
 	h.clock, h.launcher = &fakeClock{}, launcher
@@ -282,10 +303,17 @@ func TestHarnessRejectsCrossProcessAndBadTraceSpans(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, r := range records {
-			b, _ := json.Marshal(r)
-			_, _ = f.Write(append(b, '\n'))
+			b, err := json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.Write(append(b, '\n')); err != nil {
+				t.Fatal(err)
+			}
 		}
-		_ = f.Close()
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
 		return processMapping{ProcessID: "one", ClockDomain: "one", TracePath: path, Scenario: "s", Run: 1}
 	}
 	base := func(kind string, tick int64) traceRecord {
