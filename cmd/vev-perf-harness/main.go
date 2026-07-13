@@ -283,12 +283,10 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 	if err != nil {
 		return nil, err
 	}
-	// Each role runs in its isolated evidence directory. All paths passed into
-	// the launcher were resolved at harness startup, so this cwd cannot redirect
-	// the binary, manifest-derived traces, runtime, or state paths. Runtime is
-	// kept in a short private directory because Unix socket paths have a small
-	// platform limit and canonical evidence paths may be deeply nested.
-	cmd.Dir = runDir
+	// All role inputs are absolute paths resolved at harness startup. Do not set
+	// a role working directory: daemon-owned subprocess cleanup may otherwise
+	// treat the evidence directory as its working tree and remove a preallocated
+	// trace while a later repetition is being merged.
 	cmd.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN", "VEV_REMOTE_TRANSPORT"), traceEnvironment(m)...)
 	cmd.Env = append(cmd.Env, "XDG_RUNTIME_DIR="+runtimeDir,
 		"XDG_STATE_HOME="+filepath.Join(runDir, "state"), "TERM=xterm-256color")
