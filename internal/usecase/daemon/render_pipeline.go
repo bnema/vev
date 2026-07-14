@@ -111,7 +111,16 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	baseFrame := frame
 	if state.floating.visible {
 		var floatingDamage []renderer.Damage
-		frame, floatingDamage = composeCapturedFloatingFrame(baseFrame, damage, state.floating, content, state.layout, state.theme, in, full || state.overlays.active())
+		frame, floatingDamage = composeCapturedFloatingFrame(floatingComposeInput{
+			baseFrame:  baseFrame,
+			baseDamage: damage,
+			floating:   state.floating,
+			content:    content,
+			layout:     state.layout,
+			theme:      state.theme,
+			cache:      in,
+			full:       full || state.overlays.active(),
+		})
 		damage = floatingDamage
 	}
 	if !full {
