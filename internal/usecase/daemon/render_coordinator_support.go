@@ -21,7 +21,7 @@ func (s *session) installRenderCoordinator(rc *renderCoordinator) { s.coordinato
 
 func (c *renderCoordinator) fireCurrent(watchdog bool) {
 	c.mu.Lock()
-	gen := c.generation
+	gen := c.normalLane.generation
 	c.mu.Unlock()
 	c.fire(gen, watchdog, watchdog)
 }

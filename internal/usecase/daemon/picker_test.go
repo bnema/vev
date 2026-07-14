@@ -324,6 +324,7 @@ func TestPickerDisplacementCancelsSupersededResize(t *testing.T) {
 
 	d.resize(sess2, ac2, domain.Size{Cols: 100, Rows: 24})
 	timer := <-clock.timers
+	done := captureResizeCallbackDone(t, sess2.renderCoordinator())
 	before := sess2.renderCoordinator().resizeSnapshot().epoch
 
 	require.Same(t, ac2, d.stealClientForTarget(sess1, ac1, sess2, picker.Target{Session: sess2.id}))
@@ -331,6 +332,7 @@ func TestPickerDisplacementCancelsSupersededResize(t *testing.T) {
 	// no attachment-local timer survives the transfer.
 	require.Equal(t, before, sess2.renderCoordinator().resizeSnapshot().epoch)
 	timer.ch <- time.Time{}
+	awaitTestCompletion(t, done, "superseded resize callback did not complete")
 }
 
 func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {

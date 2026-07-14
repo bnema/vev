@@ -20,7 +20,7 @@ func TestRenderCoordinatorFreshWakeWaitsForWelcome(t *testing.T) {
 	h.rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true, producer: "pty"})
 	timer := awaitCoordinatorScheduledTimer(t, h.clk)
 	h.rc.mu.Lock()
-	workerDone := h.rc.normalWorkerDone
+	workerDone := h.rc.normalLane.token.done
 	h.rc.mu.Unlock()
 	require.NotNil(t, workerDone)
 	timer.ch <- time.Time{}
@@ -55,7 +55,7 @@ func TestRenderCoordinatorParkedResumeRequiresNewWelcome(t *testing.T) {
 	h.rc.invalidate(renderInvalidation{class: invalidateUrgent, reset: true, producer: "session"})
 	timer := awaitCoordinatorScheduledTimer(t, h.clk)
 	h.rc.mu.Lock()
-	workerDone := h.rc.normalWorkerDone
+	workerDone := h.rc.normalLane.token.done
 	h.rc.mu.Unlock()
 	require.NotNil(t, workerDone)
 	timer.ch <- time.Time{}

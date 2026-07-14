@@ -103,7 +103,7 @@ func exerciseBlockedSnapshotWorker(t *testing.T, blockEncode bool) {
 	sess.installRenderCoordinator(rc)
 	rc.attach(ac)
 	require.True(t, rc.markAttachmentReady(rc.attachmentLease(ac)))
-	t.Cleanup(rc.noteSessionTeardown)
+	t.Cleanup(func() { rc.beginSessionTeardown().finish(); rc.waitForTimerWorkers() })
 
 	markSnapshotDirty(sess)
 	require.True(t, d.scheduleSnapshot(sess))

@@ -344,10 +344,11 @@ func TestTransactionalResizeObsoleteTimerCallbacksCommitOnlyLatestEpoch(t *testi
 	for len(timers) < 3 {
 		timers = append(timers, <-clock.timers)
 	}
+	done := captureResizeCallbackDone(t, sess.renderCoordinator())
 	for _, timer := range timers {
 		timer.ch <- time.Time{}
 	}
-	awaitResizeCallback(t, sess.renderCoordinator())
+	awaitTestCompletion(t, done, "latest resize callback did not complete")
 	require.Equal(t, []domain.Size{{Cols: 120, Rows: 30}}, pty.requested())
 	snapshot := sess.renderCoordinator().resizeSnapshot()
 	require.Equal(t, uint64(3), snapshot.epoch)
