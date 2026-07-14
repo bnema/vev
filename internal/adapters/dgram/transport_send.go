@@ -228,3 +228,11 @@ func (t *Transport) writeDatagram(pc net.PacketConn, peer net.Addr, pkt []byte, 
 }
 
 func (t *Transport) nextCounter() uint64 { t.mu.Lock(); defer t.mu.Unlock(); t.ctr++; return t.ctr }
+
+func (t *Transport) notifySendWaitersLocked() {
+	if t.sendWake == nil {
+		return
+	}
+	close(t.sendWake)
+	t.sendWake = make(chan struct{})
+}
