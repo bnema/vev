@@ -5,7 +5,7 @@ Remote attach starts with SSH bootstrap and then carries the vev session over au
 ## Operational model
 
 - SSH bootstrap starts or finds the remote UDP endpoint.
-- UDP carries normal session traffic after bootstrap.
+- UDP carries normal session traffic after bootstrap. The remote proxy binds a port in a fixed range, `61000-61023` by default; `VEV_UDP_PORT_RANGE` overrides it (a range, a single port, or `0` for a random ephemeral port).
 - Named sessions remain recoverable across daemon restarts; ephemeral sessions remain recoverable only while the daemon retains them.
 - `VEV_REMOTE_TRANSPORT=stdio` keeps all traffic inside SSH when direct UDP is blocked.
 
@@ -19,7 +19,7 @@ Resilience work uses these user-facing states:
 | `degraded` | authenticated UDP packets still arrive, but complete-record or ACK progress is delayed |
 | `probing` | authenticated UDP packet contact is absent, so vev probes for path recovery |
 | `resuming` | a replacement transport is attaching to the same session |
-| `offline` | authenticated UDP contact remains absent and vev resumes over SSH stdio |
+| `offline` | authenticated UDP contact remains absent; vev re-runs the SSH bootstrap and re-dials UDP with the resume token |
 | `expired` | the session or recovery window is no longer available |
 
 When a terminal is in raw mode, recovery messages appear as vev status text rather than as bytes written into the remote program's output stream.
