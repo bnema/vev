@@ -712,6 +712,25 @@ func TestRenderCoordinatorSynchronizedOutput(t *testing.T) {
 		requireNoWake(t, h.wakes)
 	})
 
+	t.Run("watchdog flushes after the snapshotted generation is replaced", func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
+		h.rc.mu.Lock()
+		staleGeneration := h.rc.normalLane.generation
+		h.rc.mu.Unlock()
+
+		// Simulate a new urgent publication after fireCurrent(true) snapshots its
+		// generation but before fire validates it.
+		h.rc.invalidate(renderInvalidation{class: invalidateUrgent})
+		h.rc.fire(staleGeneration, true, true)
+
+		w := awaitWake(t, h.wakes)
+		require.True(t, w.watchdog)
+		require.True(t, w.urgent)
+		require.Equal(t, 2, w.coalesced)
+		requireNoWake(t, h.wakes)
+	})
+
 	t.Run("stale watchdog generation cannot wake a completed batch", func(t *testing.T) {
 		h := newCoordinatorHarness(t)
 		h.syncActive.Store(true)

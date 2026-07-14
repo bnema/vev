@@ -42,7 +42,7 @@ func (c *renderCoordinator) scheduleResizeForLease(size domain.Size, source *att
 	timer := clock.NewTimer(minOutputRenderDeadline)
 	timerC := timer.C()
 	if timerC == nil {
-		stopDetachedTimer(&timerToken{timer: timer})
+		timer.Stop()
 		if c.resizeCurrentForLease(epoch, source, lease, false) {
 			run(epoch)
 		}
@@ -70,7 +70,7 @@ func (c *renderCoordinator) scheduleResizeForLease(size domain.Size, source *att
 	}
 	c.mu.Unlock()
 	if !valid {
-		stopDetachedTimer(&timerToken{timer: timer})
+		timer.Stop()
 	}
 	return epoch
 }
@@ -106,7 +106,7 @@ func (c *renderCoordinator) scheduleResizeRetryForLease(epoch uint64, source *at
 	timer := clock.NewTimer(minOutputRenderDeadline)
 	timerC := timer.C()
 	if timerC == nil {
-		stopDetachedTimer(&timerToken{timer: timer})
+		timer.Stop()
 		return
 	}
 	c.mu.Lock()
@@ -130,7 +130,7 @@ func (c *renderCoordinator) scheduleResizeRetryForLease(epoch uint64, source *at
 	}
 	c.mu.Unlock()
 	if !valid {
-		stopDetachedTimer(&timerToken{timer: timer})
+		timer.Stop()
 	}
 }
 

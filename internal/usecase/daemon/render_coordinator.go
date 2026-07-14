@@ -215,14 +215,14 @@ func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClie
 	}
 	c.mu.Unlock()
 	if !valid {
-		stopDetachedTimer(&timerToken{timer: timer})
+		timer.Stop()
 		if onInvalidate != nil {
 			onInvalidate(inv)
 		}
 		return true
 	}
 	if timerC == nil {
-		stopDetachedTimer(&timerToken{timer: timer})
+		timer.Stop()
 		c.fire(gen, false, true)
 		if onInvalidate != nil {
 			onInvalidate(inv)
@@ -707,7 +707,7 @@ func (d *Daemon) invalidateRenderNow(sess *session, ac *attachedClient, reset bo
 
 func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
 	c.mu.Lock()
-	if c.normalLane.generation != gen {
+	if !watchdog && c.normalLane.generation != gen {
 		c.mu.Unlock()
 		return
 	}

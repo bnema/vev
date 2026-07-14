@@ -370,6 +370,7 @@ func TestResizeBurstFlushesOnlyLatestGeometry(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first resize did not schedule a bounded paint")
 	}
+	firstDone := captureResizeCallbackDone(t, sess.renderCoordinator())
 	d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
 	var latest *signalTimer
 	select {
@@ -378,11 +379,12 @@ func TestResizeBurstFlushesOnlyLatestGeometry(t *testing.T) {
 		t.Fatal("latest resize did not replace the bounded paint")
 	}
 
-	done := captureResizeCallbackDone(t, sess.renderCoordinator())
+	latestDone := captureResizeCallbackDone(t, sess.renderCoordinator())
 	first.ch <- time.Now()
+	awaitTestCompletion(t, firstDone, "obsolete resize callback did not complete")
 	requireNoOutputFrame(t, sends)
 	latest.ch <- time.Now()
-	awaitTestCompletion(t, done, "latest resize callback did not complete")
+	awaitTestCompletion(t, latestDone, "latest resize callback did not complete")
 	awaitFrame(t, sends, ports.MsgOutput)
 	require.Equal(t, domain.Size{Cols: 120, Rows: 24}, ac.size)
 	require.Equal(t, 120, sess.activeTab().focusedPane().screen.Frame.Width)
