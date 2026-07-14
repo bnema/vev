@@ -11,7 +11,7 @@ What it is built around:
 
 - **Remote attach that survives bad networks.** SSH bootstraps the connection, then the session runs over UDP and resumes after sleep or Wi-Fi changes. Inspired by mosh, with its own protocol.
 - **Server-side rendering.** The daemon keeps a full VT screen per pane and sends minimal diffs to the client, so high-output programs (agents, build logs) stay smooth locally and over SSH.
-- **Nothing but the standard library.** VT emulation, renderer, wire protocol, and UDP transport are all in this repo. The only runtime dependencies are `golang.org/x/sys` and `golang.org/x/term`.
+- **Nothing but the standard library.** VT emulation, renderer, wire protocol, and UDP transport are all in this repo. Zero runtime dependencies.
 - **Performance treated as a feature.** A reproducible harness measures 252 scenarios across workloads and transports, including lossy and high-latency UDP.
 
 ## Install
