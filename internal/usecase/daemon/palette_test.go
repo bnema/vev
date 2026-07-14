@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -528,6 +529,70 @@ func TestPaletteRenderAndInputCanRunConcurrently(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+func TestPaletteTabCompletesSelectedCommandWithoutForwardingToPTY(t *testing.T) {
+	tests := []struct {
+		name          string
+		config        map[string]string
+		recent        string
+		query         string
+		want          string
+		wantRepaint   bool
+		setupRepaints int
+	}{
+		{name: "changed completion repaints once", query: "NX", want: "NXT", wantRepaint: true},
+		{name: "exact argument command is a no-op", query: "JRS 1", want: "JRS 1", wantRepaint: false},
+		{name: "empty query starts at registry first", want: "CNT", wantRepaint: true},
+		{name: "empty query starts at daemon MRU", recent: "NXT", want: "NXT", wantRepaint: true},
+		{name: "effective configured override completes", config: map[string]string{"new-tab": "NEW"}, want: "NEW", wantRepaint: true, setupRepaints: 1},
+		{name: "stale pre-override MRU is ignored", config: map[string]string{"new-tab": "NEW"}, recent: "CNT", want: "NEW", wantRepaint: true, setupRepaints: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writes := make(chan []byte, 1)
+			p, release := newBlockingPTYWithWrites(t, writes)
+			defer release()
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			if tt.recent != "" {
+				d.recordPaletteUse(tt.recent)
+			}
+			if tt.config != nil {
+				d.ApplyConfig(domain.Config{Codes: tt.config})
+				for range tt.setupRepaints {
+					awaitFrame(t, sends, ports.MsgOutput)
+				}
+			}
+
+			d.handleInput(sess, ac, []byte("\x1b "))
+			awaitFrame(t, sends, ports.MsgOutput) // drain palette open repaint
+			if tt.query != "" {
+				d.handleInput(sess, ac, []byte(tt.query))
+				awaitFrame(t, sends, ports.MsgOutput) // drain typed-query repaint
+			}
+
+			d.handleInput(sess, ac, []byte("\t"))
+			ac.overlays.paletteMu.Lock()
+			got := ac.overlays.palette.Query()
+			ac.overlays.paletteMu.Unlock()
+			require.Equal(t, tt.want, got)
+			if tt.wantRepaint {
+				awaitFrame(t, sends, ports.MsgOutput)
+			}
+			requireNoPaletteFrame(t, sends)
+			requireNoPTYWrite(t, writes)
+		})
+	}
+}
+
+func requireNoPaletteFrame(t *testing.T, sends <-chan ports.Frame) {
+	t.Helper()
+	select {
+	case frame := <-sends:
+		t.Fatalf("unexpected frame after no-op Tab: %#v", frame)
+	case <-time.After(50 * time.Millisecond):
+	}
 }
 
 func TestPaletteExecMethods(t *testing.T) {
