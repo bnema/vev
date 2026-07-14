@@ -67,6 +67,77 @@ func TestModelMatchesDeepCopiesPositions(t *testing.T) {
 	require.Equal(t, []int{0}, fresh[0].Positions)
 }
 
+func TestModelExactArgumentMatchMovesExistingFuzzyMatchToFront(t *testing.T) {
+	zzz := cmd("ZZZ", "", "ZZZ 1")
+	zzz.Arguments = command.ArgumentsRequired
+	commands := []command.Command{
+		cmd("AAA", "", "ZZZ 1"),
+		zzz,
+	}
+	want := Fuzzy(commands, "ZZZ 1")[1]
+	m := New(commands)
+
+	for _, r := range "ZZZ 1" {
+		m.Insert(r)
+	}
+
+	matches := m.Matches()
+	require.Len(t, matches, 2)
+	require.Equal(t, "ZZZ", matches[0].Command.Code)
+	require.Equal(t, want, matches[0], "the existing fuzzy match must retain its metadata")
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, "ZZZ", selected.Code)
+}
+
+func TestModelExactArgumentMatchKeepsAbsentAndFirstBehavior(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		commands func(zzz command.Command) []command.Command
+		want     Match
+		wantLen  int
+	}{
+		{
+			name: "absent fuzzy match is prepended",
+			commands: func(zzz command.Command) []command.Command {
+				return []command.Command{cmd("AAA", "", "ZZZ 1"), zzz}
+			},
+			want: Match{Command: command.Command{
+				Code:      "ZZZ",
+				Desc:      "unmatched",
+				Arguments: command.ArgumentsRequired,
+			}},
+			wantLen: 2,
+		},
+		{
+			name: "first fuzzy match is unchanged",
+			commands: func(zzz command.Command) []command.Command {
+				zzz.Desc = "ZZZ 1"
+				return []command.Command{zzz, cmd("ZZZZ", "", "ZZZ 1")}
+			},
+			want: func() Match {
+				zzz := cmd("ZZZ", "", "ZZZ 1")
+				zzz.Arguments = command.ArgumentsRequired
+				return Fuzzy([]command.Command{zzz, cmd("ZZZZ", "", "ZZZ 1")}, "ZZZ 1")[0]
+			}(),
+			wantLen: 2,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			zzz := cmd("ZZZ", "", "unmatched")
+			zzz.Arguments = command.ArgumentsRequired
+			m := New(tt.commands(zzz))
+			for _, r := range "ZZZ 1" {
+				m.Insert(r)
+			}
+
+			matches := m.Matches()
+			require.Len(t, matches, tt.wantLen)
+			require.Equal(t, tt.want, matches[0])
+		})
+	}
+}
+
 func TestRenderDrawsOnlyCodeAndDescriptionWithStyles(t *testing.T) {
 	m := New([]command.Command{
 		cmd("CPY", "Copy", "Enter copy mode"),
@@ -182,6 +253,68 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 			frame := m.Render(domain.Size{Cols: 28, Rows: 3}, RenderOptions{Styles: tt.styles()})
 
 			tt.assert(t, frame.At(tt.x, 1).Style)
+		})
+	}
+}
+
+func TestModelCompleteSelected(t *testing.T) {
+	jrs := cmd("JRS", "Jump", "Jump to recent session")
+	jrs.Arguments = command.ArgumentsRequired
+	registryFirst := command.Registry()[0]
+
+	tests := []struct {
+		name       string
+		commands   []command.Command
+		registry   bool
+		query      string
+		down       int
+		want       string
+		wantChange bool
+		rendered   string
+	}{
+		{name: "nil model", want: "", wantChange: false},
+		{name: "empty model", commands: nil, want: "", wantChange: false},
+		{name: "registry first from empty query", registry: true, want: registryFirst.Code, wantChange: true, rendered: registryFirst.Code},
+		{name: "prefix match", commands: []command.Command{cmd("CPY", "Copy", "Enter copy mode")}, query: "cp", want: "CPY", wantChange: true},
+		{name: "fuzzy match", commands: []command.Command{cmd("CPY", "Copy", "Enter copy mode")}, query: "cy", want: "CPY", wantChange: true},
+		{name: "description match", commands: []command.Command{cmd("CPY", "Copy", "Enter copy mode")}, query: "enter", want: "CPY", wantChange: true},
+		{name: "navigated selection", commands: []command.Command{cmd("AAA", "", ""), cmd("BBB", "", "")}, down: 1, want: "BBB", wantChange: true},
+		{name: "static command replaces query", commands: []command.Command{cmd("CPY", "Copy", "Enter copy mode")}, query: "copy", want: "CPY", wantChange: true},
+		{name: "argument command appends required space", commands: []command.Command{jrs}, query: "jrs", want: "JRS ", wantChange: true},
+		{name: "partial token preserves unicode whitespace argument bytes", commands: []command.Command{jrs}, query: "jr\u2003 \tα  β", want: "JRS α  β", wantChange: true},
+		{name: "exact code and argument is unchanged", commands: []command.Command{jrs}, query: "JRS\u2003  α  β", want: "JRS\u2003  α  β", wantChange: false},
+		{name: "no match", commands: []command.Command{cmd("CPY", "Copy", "Enter copy mode")}, query: "zzz", want: "zzz", wantChange: false},
+		{name: "effective override code", commands: []command.Command{{Slug: "new-tab", Code: "NT", Desc: "Create tab"}}, query: "n", want: "NT", wantChange: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var m *Model
+			if tt.name != "nil model" {
+				if tt.registry {
+					m = NewRegistry()
+				} else {
+					m = New(tt.commands)
+				}
+				for _, r := range tt.query {
+					m.Insert(r)
+				}
+				for range tt.down {
+					m.Down()
+				}
+			}
+
+			changed := m.CompleteSelected()
+			require.Equal(t, tt.wantChange, changed)
+			if m == nil {
+				require.Equal(t, tt.want, "")
+				return
+			}
+			require.Equal(t, tt.want, m.Query())
+			if tt.rendered != "" {
+				frame := m.Render(domain.Size{Cols: 32, Rows: 2}, RenderOptions{Styles: DefaultRenderStyles()})
+				require.Equal(t, "> "+tt.rendered, frameRow(frame, 0)[:len([]rune(tt.rendered))+2])
+			}
 		})
 	}
 }

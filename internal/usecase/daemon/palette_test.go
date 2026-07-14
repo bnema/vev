@@ -530,6 +530,100 @@ func TestPaletteRenderAndInputCanRunConcurrently(t *testing.T) {
 	wg.Wait()
 }
 
+func TestPaletteTabCompletesSelectedCommandWithoutForwardingToPTY(t *testing.T) {
+	tests := []struct {
+		name                       string
+		config                     map[string]string
+		recent                     string
+		query                      string
+		want                       string
+		wantCompletionInvalidation bool
+		setupInvalidations         int
+	}{
+		{name: "changed completion invalidates once", query: "NX", want: "NXT", wantCompletionInvalidation: true},
+		{name: "exact argument command is a no-op", query: "JRS 1", want: "JRS 1"},
+		{name: "empty query starts at registry first", want: "CNT", wantCompletionInvalidation: true},
+		{name: "empty query starts at daemon MRU", recent: "NXT", want: "NXT", wantCompletionInvalidation: true},
+		{name: "effective configured override completes", config: map[string]string{"new-tab": "NEW"}, want: "NEW", wantCompletionInvalidation: true, setupInvalidations: 1},
+		{name: "stale pre-override MRU is ignored", config: map[string]string{"new-tab": "NEW"}, recent: "CNT", want: "NEW", wantCompletionInvalidation: true, setupInvalidations: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writes := make(chan []byte, 1)
+			p, release := newBlockingPTYWithWrites(t, writes)
+			defer release()
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			invs := installPaletteInvalidationObserver(sess)
+			if tt.recent != "" {
+				d.recordPaletteUse(tt.recent)
+			}
+			if tt.config != nil {
+				d.ApplyConfig(domain.Config{Codes: tt.config})
+				for range tt.setupInvalidations {
+					awaitInvalidation(t, invs)
+				}
+				requireNoInvalidation(t, invs)
+			}
+
+			d.handleInput(sess, ac, []byte("\x1b "))
+			awaitInvalidation(t, invs)
+			requireNoInvalidation(t, invs)
+			if tt.query != "" {
+				d.handleInput(sess, ac, []byte(tt.query))
+				awaitInvalidation(t, invs)
+				requireNoInvalidation(t, invs)
+			}
+
+			d.handleInput(sess, ac, []byte("\t"))
+			ac.overlays.paletteMu.Lock()
+			got := ac.overlays.palette.Query()
+			ac.overlays.paletteMu.Unlock()
+			require.Equal(t, tt.want, got)
+			if tt.wantCompletionInvalidation {
+				awaitInvalidation(t, invs)
+			}
+			requireNoInvalidation(t, invs)
+			requireNoOutputFrame(t, sends)
+			requireNoPTYWrite(t, writes)
+		})
+	}
+}
+
+func TestPaletteBatchedTabCompletionPreservesRepaintInvalidation(t *testing.T) {
+	writes := make(chan []byte, 1)
+	p, release := newBlockingPTYWithWrites(t, writes)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	invs := installPaletteInvalidationObserver(sess)
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitInvalidation(t, invs)
+	requireNoInvalidation(t, invs)
+
+	d.handleInput(sess, ac, []byte("NX\t\t"))
+	ac.overlays.paletteMu.Lock()
+	got := ac.overlays.palette.Query()
+	ac.overlays.paletteMu.Unlock()
+	require.Equal(t, "NXT", got)
+	awaitInvalidation(t, invs)
+	requireNoInvalidation(t, invs)
+	requireNoOutputFrame(t, sends)
+	requireNoPTYWrite(t, writes)
+}
+
+func installPaletteInvalidationObserver(sess *session) chan renderInvalidation {
+	invs := make(chan renderInvalidation, 8)
+	sess.installRenderCoordinator(newRenderCoordinator(renderCoordinatorOptions{
+		clock: nil,
+		wake:  nil,
+		onInvalidate: func(inv renderInvalidation) {
+			invs <- inv
+		},
+	}))
+	return invs
+}
+
 func TestPaletteExecMethods(t *testing.T) {
 	p1, release1 := newBlockingPTY(t)
 	p2, release2 := newBlockingPTY(t)

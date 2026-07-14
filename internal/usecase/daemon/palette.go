@@ -125,6 +125,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 			ac.overlays.palette.Backspace()
 			changed = true
 		},
+		tab:    func() { changed = ac.overlays.palette.CompleteSelected() || changed },
 		up:     func() { ac.overlays.palette.Up(); changed = true },
 		down:   func() { ac.overlays.palette.Down(); changed = true },
 		cancel: func() { cancel = true },

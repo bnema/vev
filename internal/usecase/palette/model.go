@@ -1,6 +1,8 @@
 package palette
 
 import (
+	"unicode"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -86,6 +88,54 @@ func (m *Model) Selected() (command.Command, bool) {
 	return m.matches[m.selected].Command, true
 }
 
+// CompleteSelected replaces the query with the selected command's effective
+// code. Required-argument commands retain the typed argument bytes.
+func (m *Model) CompleteSelected() bool {
+	selected, ok := m.Selected()
+	if !ok {
+		return false
+	}
+
+	query := m.Query()
+	completed := selected.Code
+	if selected.Arguments == command.ArgumentsRequired {
+		token, args, hasSeparator := completionParts(query)
+		if token == selected.Code && hasSeparator && args != "" {
+			return false
+		}
+		completed += " "
+		if args != "" {
+			completed += args
+		}
+	}
+	if completed == query {
+		return false
+	}
+
+	m.input.SetValue(completed)
+	m.selected = 0
+	m.scroll = 0
+	m.refresh()
+	return true
+}
+
+// completionParts splits the first token at Unicode whitespace and returns
+// the argument beginning at its first non-whitespace byte.
+func completionParts(query string) (token, args string, hasSeparator bool) {
+	for i, r := range query {
+		if !unicode.IsSpace(r) {
+			continue
+		}
+		for j, argumentRune := range query[i:] {
+			if !unicode.IsSpace(argumentRune) {
+				return query[:i], query[i+j:], true
+			}
+		}
+		return query[:i], "", true
+	}
+	return query, "", false
+}
+
 // ArgumentCommand returns the exact argument-taking command being entered.
 func (m *Model) ArgumentCommand() (command.Command, bool) {
 	if m == nil {
@@ -107,22 +157,40 @@ func (m *Model) Matches() []Match {
 }
 
 func (m *Model) refresh() {
-	m.matches = Fuzzy(m.commands, m.input.Value())
+	query := m.input.Value()
+	m.matches = Fuzzy(m.commands, query)
 	// Once an argument-taking token is exact, retain its row while its
 	// arguments make ordinary fuzzy matching inapplicable.
-	if cmd, ok := ArgumentCommand(m.commands, m.input.Value()); ok {
-		found := false
-		for _, match := range m.matches {
-			if match.Command.Code == cmd.Code {
-				found = true
-				break
+	if cmd, ok := ArgumentCommand(m.commands, query); ok {
+		m.prependMatch(cmd)
+	} else if len(m.matches) == 0 {
+		// Arguments are not part of static command matching. When they would
+		// otherwise clear the list, keep required-argument candidates matched by
+		// the partial first token so Tab can complete them.
+		token, _, hasSeparator := completionParts(query)
+		if hasSeparator {
+			for _, match := range Fuzzy(m.commands, token) {
+				if match.Command.Arguments == command.ArgumentsRequired {
+					m.matches = append(m.matches, match)
+				}
 			}
-		}
-		if !found {
-			m.matches = append([]Match{{Command: cmd}}, m.matches...)
 		}
 	}
 	m.clamp()
+}
+
+func (m *Model) prependMatch(cmd command.Command) {
+	for i, match := range m.matches {
+		if match.Command.Code != cmd.Code {
+			continue
+		}
+		if i > 0 {
+			copy(m.matches[1:i+1], m.matches[:i])
+			m.matches[0] = match
+		}
+		return
+	}
+	m.matches = append([]Match{{Command: cmd}}, m.matches...)
 }
 func (m *Model) clamp() {
 	if len(m.matches) == 0 {

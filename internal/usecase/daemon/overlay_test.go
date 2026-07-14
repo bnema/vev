@@ -19,6 +19,8 @@ func TestRouteOverlayBytes(t *testing.T) {
 		wantCancel    int
 		wantUp        int
 		wantDown      int
+		wantTab       int
+		callback      bool
 	}{
 		{
 			name:        "text and split utf8",
@@ -76,13 +78,23 @@ func TestRouteOverlayBytes(t *testing.T) {
 			chunks:    [][]byte{{'a', 0x01, 0xff, 'b'}},
 			wantRunes: []rune{'a', 'b'},
 		},
+		{
+			name:     "tab routes to callback",
+			chunks:   [][]byte{{0x09}},
+			wantTab:  1,
+			callback: true,
+		},
+		{
+			name:   "tab without callback is consumed",
+			chunks: [][]byte{{0x09}},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var pending []byte
 			var gotRunes []rune
-			var gotBackspace, gotEnter, gotCancel, gotUp, gotDown int
+			var gotBackspace, gotEnter, gotCancel, gotUp, gotDown, gotTab int
 			ev := overlayEvents{
 				rune:      func(r rune) { gotRunes = append(gotRunes, r) },
 				backspace: func() { gotBackspace++ },
@@ -90,6 +102,9 @@ func TestRouteOverlayBytes(t *testing.T) {
 				cancel:    func() { gotCancel++ },
 				up:        func() { gotUp++ },
 				down:      func() { gotDown++ },
+			}
+			if tt.callback {
+				ev.tab = func() { gotTab++ }
 			}
 
 			for _, chunk := range tt.chunks {
@@ -103,6 +118,7 @@ func TestRouteOverlayBytes(t *testing.T) {
 			require.Equal(t, tt.wantCancel, gotCancel)
 			require.Equal(t, tt.wantUp, gotUp)
 			require.Equal(t, tt.wantDown, gotDown)
+			require.Equal(t, tt.wantTab, gotTab)
 		})
 	}
 }

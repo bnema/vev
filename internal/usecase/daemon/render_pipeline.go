@@ -184,7 +184,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	}
 	if snap.pickerActive && snap.pickerModel != nil {
 		o.picker.modal = pickerModal
-		renderStyles := picker.RenderStyles{Selection: styles.selection, SelectionName: styles.pickerSelectionName, SelectionMuted: styles.pickerSelectionMuted, Name: styles.pickerName, Detail: styles.paletteDesc, Base: renderer.DefaultStyle()}
+		renderStyles := picker.RenderStyles{Selection: styles.selection, SelectionName: styles.pickerSelectionName, SelectionMuted: styles.pickerSelectionMuted, Name: styles.pickerName, Detail: styles.paletteDesc, Base: renderer.DefaultStyle(), Separator: styles.pickerSeparator}
 		o.picker.inner = snap.pickerModel.Render(rectSize(pickerModal.Inner(size)), state.preview, renderStyles)
 	}
 	if snap.paletteActive && snap.paletteModel != nil {

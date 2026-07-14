@@ -9,6 +9,7 @@ type overlayEvents struct {
 	rune      func(rune)
 	backspace func()
 	enter     func()
+	tab       func()
 	cancel    func()
 	up        func()
 	down      func()
@@ -50,6 +51,9 @@ func routeOverlayBytes(data []byte, pending *[]byte, ev overlayEvents) {
 			i++
 		case '\r', '\n':
 			call(ev.enter)
+			i++
+		case 0x09:
+			call(ev.tab)
 			i++
 		case 0x7f, 0x08:
 			call(ev.backspace)

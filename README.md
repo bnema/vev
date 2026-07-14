@@ -178,7 +178,7 @@ Some terminals encode Alt+Space as a non-breaking space instead of `ESC Space`; 
 
 ## Command palette
 
-Open the palette with Alt+Space. Type a command code or fuzzy-match the label/description. Use Up/Down or Ctrl-N/Ctrl-P to move, Enter to run, and Esc/Ctrl-C to close.
+Open the palette with Alt+Space. Type a command code or fuzzy-match the label/description. Use Up/Down or Ctrl-N/Ctrl-P to move, Tab to complete the selected command code, Enter to run, and Esc/Ctrl-C to close. With an empty query, Tab completes the most recently successful command; commands that take an argument complete with a trailing space and preserve an argument already entered.
 
 Successful commands are promoted near the top the next time the palette opens. `BSK` toggles back to your previously active session. Typing `JRS` lists recent sessions by number in the status bar, and `JRS N` jumps to number N; the numbers are captured when you start typing, so a busy MRU list never shifts under you. An invalid or stale number leaves the palette open.
 
@@ -206,7 +206,7 @@ Rename prompts are prefilled with the current session name. Empty names and name
 
 ## Session picker
 
-Open it with `SSP` in the palette. It lists sessions and tabs — tab entries use the same `name (title)` form as the top bar, ellipsized to the list width — previews the selected target when space allows, and marks stopped sessions.
+Open it with `SSP` in the palette. It lists sessions and tabs — tab entries use the same `name (title)` form as the top bar, ellipsized to the list width — previews the selected target when space allows, and marks stopped sessions. Wide pickers place the preview beside the list with a muted divider; narrower pickers stack it below the list, then hide it when neither layout has useful space. A clipped preview stays anchored to the bottom of the target's visible terminal frame and never loads its scrollback.
 
 | Key | Action |
 |---|---|

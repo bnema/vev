@@ -371,6 +371,7 @@ type themeStyles struct {
 	pickerName           renderer.Style
 	pickerSelectionName  renderer.Style
 	pickerSelectionMuted renderer.Style
+	pickerSeparator      renderer.Style
 }
 
 func newThemeStyles(t themeui.Theme) themeStyles {
@@ -393,6 +394,7 @@ func newThemeStyles(t themeui.Theme) themeStyles {
 		pickerName:           themeui.EmphasisStyle(renderer.DefaultStyle(), t),
 		pickerSelectionName:  themeui.EmphasisStyle(selection, t),
 		pickerSelectionMuted: themeui.MutedVariantStyle(selection, t),
+		pickerSeparator:      themeui.MutedTextStyle(t),
 	}
 }
 

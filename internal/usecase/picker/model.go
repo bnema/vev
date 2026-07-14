@@ -7,11 +7,12 @@ import (
 )
 
 const (
-	MinPreviewWidth = 24
-	MinListWidth    = 16
-	MaxListWidth    = 32
-	MinPaneHeight   = 4
-	MinStackHeight  = 12
+	MinPreviewWidth           = 24
+	MinHorizontalPreviewWidth = 48
+	MinListWidth              = 16
+	MaxListWidth              = 32
+	MinPaneHeight             = 4
+	MinStackHeight            = 12
 )
 
 type SessionView struct {
@@ -40,13 +41,16 @@ type RenderStyles struct {
 	Name           renderer.Style // non-selected name segment
 	Detail         renderer.Style // non-selected detail segment
 	Base           renderer.Style // non-selected fill + suffixes
+	Separator      renderer.Style // preview separator
 }
 
 func defaultRenderStyles() RenderStyles {
 	selection := renderer.DefaultStyle()
 	selection.Inverse = true
 	base := renderer.DefaultStyle()
-	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Base: base}
+	separator := renderer.DefaultStyle()
+	separator.Attrs = renderer.AttrDim
+	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Base: base, Separator: separator}
 }
 
 type Target struct {
@@ -56,15 +60,22 @@ type Target struct {
 	Stopped  bool
 }
 
-type Preview struct {
-	Rows   [][]renderer.Cell
-	Width  int
-	Height int
-}
+// Preview is a bounded view of the selected pane's visible frame.
+type Preview = ui.FrameView
+
+type LayoutMode uint8
+
+const (
+	LayoutListOnly LayoutMode = iota
+	LayoutStacked
+	LayoutHorizontal
+)
 
 type Layout struct {
-	List    domain.Rect
-	Preview domain.Rect
+	Mode      LayoutMode
+	List      domain.Rect
+	Separator domain.Rect
+	Preview   domain.Rect
 }
 
 type Model struct {
@@ -125,13 +136,15 @@ func ChooseLayout(inner domain.Size) Layout {
 	if inner.Cols <= 0 || inner.Rows <= 0 {
 		return Layout{}
 	}
-	if inner.Rows >= MinPaneHeight && inner.Cols >= MinListWidth+1+MinPreviewWidth {
+	if inner.Rows >= MinPaneHeight {
 		listWidth := clamp(inner.Cols*30/100, MinListWidth, MaxListWidth)
 		previewWidth := inner.Cols - listWidth - 1
-		if previewWidth >= MinPreviewWidth {
+		if previewWidth >= MinHorizontalPreviewWidth {
 			return Layout{
-				List:    domain.Rect{Width: listWidth, Height: inner.Rows},
-				Preview: domain.Rect{X: listWidth + 1, Width: previewWidth, Height: inner.Rows},
+				Mode:      LayoutHorizontal,
+				List:      domain.Rect{Width: listWidth, Height: inner.Rows},
+				Separator: domain.Rect{X: listWidth, Width: 1, Height: inner.Rows},
+				Preview:   domain.Rect{X: listWidth + 1, Width: previewWidth, Height: inner.Rows},
 			}
 		}
 	}
@@ -139,11 +152,13 @@ func ChooseLayout(inner domain.Size) Layout {
 		listHeight := max(MinPaneHeight, inner.Rows*40/100)
 		previewHeight := inner.Rows - listHeight - 1
 		return Layout{
-			List:    domain.Rect{Width: inner.Cols, Height: listHeight},
-			Preview: domain.Rect{Y: listHeight + 1, Width: inner.Cols, Height: previewHeight},
+			Mode:      LayoutStacked,
+			List:      domain.Rect{Width: inner.Cols, Height: listHeight},
+			Separator: domain.Rect{Y: listHeight, Width: inner.Cols, Height: 1},
+			Preview:   domain.Rect{Y: listHeight + 1, Width: inner.Cols, Height: previewHeight},
 		}
 	}
-	return Layout{List: domain.Rect{Width: inner.Cols, Height: inner.Rows}}
+	return Layout{Mode: LayoutListOnly, List: domain.Rect{Width: inner.Cols, Height: inner.Rows}}
 }
 
 func (m *Model) Up() {
@@ -182,7 +197,13 @@ func (m *Model) Render(inner domain.Size, preview Preview, styles ...RenderStyle
 		styleSet = styles[0]
 	}
 	m.renderList(frame, layout.List, styleSet)
-	blitPreview(frame, layout.Preview, preview)
+	switch layout.Mode {
+	case LayoutHorizontal:
+		ui.DrawSeparator(frame, layout.Separator, ui.SeparatorVertical, styleSet.Separator)
+	case LayoutStacked:
+		ui.DrawSeparator(frame, layout.Separator, ui.SeparatorHorizontal, styleSet.Separator)
+	}
+	ui.BlitFrame(frame, layout.Preview, preview, ui.VerticalAnchorBottom)
 	return frame
 }
 
@@ -277,34 +298,4 @@ func clamp(n, low, high int) int {
 		return high
 	}
 	return n
-}
-
-func blitPreview(frame renderer.Frame, rect domain.Rect, preview Preview) {
-	if rect.Width <= 0 || rect.Height <= 0 {
-		return
-	}
-	w := min(rect.Width, frame.Width-rect.X)
-	h := min(rect.Height, frame.Height-rect.Y)
-	if w <= 0 || h <= 0 {
-		return
-	}
-	for y := range h {
-		if y >= preview.Height || y >= len(preview.Rows) {
-			continue
-		}
-		src := preview.Rows[y]
-		for x := range w {
-			if x >= preview.Width || x >= len(src) {
-				continue
-			}
-			cell := src[x]
-			if cell.Continuation && x == 0 {
-				continue
-			}
-			if !cell.Continuation && x == w-1 && x+1 < len(src) && src[x+1].Continuation {
-				continue
-			}
-			frame.Set(rect.X+x, rect.Y+y, cell)
-		}
-	}
 }
