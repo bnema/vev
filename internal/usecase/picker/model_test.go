@@ -65,30 +65,122 @@ func TestUpDownSkipsHeadersClampsAndCrossesSessions(t *testing.T) {
 	require.Equal(t, Target{Session: "s1", TabIndex: 1}, got, "up skips second session header")
 }
 
-func TestChooseLayoutBoundaries(t *testing.T) {
-	layout := ChooseLayout(domain.Size{Cols: 39, Rows: 12})
-	require.Equal(t, domain.Rect{Width: 39, Height: 4}, layout.List)
-	require.Equal(t, domain.Rect{Y: 5, Width: 39, Height: 7}, layout.Preview)
+func TestChooseLayoutResponsiveBoundaries(t *testing.T) {
+	tests := []struct {
+		name string
+		size domain.Size
+		want Layout
+	}{
+		{
+			name: "horizontal rows minus one is list only", size: domain.Size{Cols: 69, Rows: 3},
+			want: Layout{Mode: LayoutListOnly, List: domain.Rect{Width: 69, Height: 3}},
+		},
+		{
+			name: "horizontal preview minus one is list only", size: domain.Size{Cols: 68, Rows: 4},
+			want: Layout{Mode: LayoutListOnly, List: domain.Rect{Width: 68, Height: 4}},
+		},
+		{
+			name: "horizontal exact minimum preview", size: domain.Size{Cols: 69, Rows: 4},
+			want: Layout{Mode: LayoutHorizontal, List: domain.Rect{Width: 20, Height: 4}, Separator: domain.Rect{X: 20, Width: 1, Height: 4}, Preview: domain.Rect{X: 21, Width: 48, Height: 4}},
+		},
+		{
+			name: "horizontal preview plus one", size: domain.Size{Cols: 70, Rows: 4},
+			want: Layout{Mode: LayoutHorizontal, List: domain.Rect{Width: 21, Height: 4}, Separator: domain.Rect{X: 21, Width: 1, Height: 4}, Preview: domain.Rect{X: 22, Width: 48, Height: 4}},
+		},
+		{
+			name: "stacked columns minus one is list only", size: domain.Size{Cols: 23, Rows: 12},
+			want: Layout{Mode: LayoutListOnly, List: domain.Rect{Width: 23, Height: 12}},
+		},
+		{
+			name: "stacked rows minus one is list only", size: domain.Size{Cols: 24, Rows: 11},
+			want: Layout{Mode: LayoutListOnly, List: domain.Rect{Width: 24, Height: 11}},
+		},
+		{
+			name: "stacked exact minimum", size: domain.Size{Cols: 24, Rows: 12},
+			want: Layout{Mode: LayoutStacked, List: domain.Rect{Width: 24, Height: 4}, Separator: domain.Rect{Y: 4, Width: 24, Height: 1}, Preview: domain.Rect{Y: 5, Width: 24, Height: 7}},
+		},
+		{
+			name: "stacked list height plus one", size: domain.Size{Cols: 24, Rows: 13},
+			want: Layout{Mode: LayoutStacked, List: domain.Rect{Width: 24, Height: 5}, Separator: domain.Rect{Y: 5, Width: 24, Height: 1}, Preview: domain.Rect{Y: 6, Width: 24, Height: 7}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, ChooseLayout(tt.size))
+		})
+	}
+}
 
-	layout = ChooseLayout(domain.Size{Cols: 40, Rows: 4})
-	require.Equal(t, domain.Rect{Width: 40, Height: 4}, layout.List)
-	require.Equal(t, domain.Rect{}, layout.Preview)
+func TestRenderDrawsCustomOrientedSeparators(t *testing.T) {
+	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{Name: "tab"}}, Active: 0}}, "s", 0)
+	separator := renderer.Style{Foreground: 8, Attrs: renderer.AttrDim}
+	styles := RenderStyles{Separator: separator}
+	tests := []struct {
+		name string
+		size domain.Size
+		rect domain.Rect
+		rune rune
+	}{
+		{"horizontal layout", domain.Size{Cols: 69, Rows: 4}, domain.Rect{X: 20, Width: 1, Height: 4}, '│'},
+		{"stacked layout", domain.Size{Cols: 24, Rows: 12}, domain.Rect{Y: 4, Width: 24, Height: 1}, '─'},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame := m.Render(tt.size, Preview{}, styles)
+			for y := tt.rect.Y; y < tt.rect.Y+tt.rect.Height; y++ {
+				for x := tt.rect.X; x < tt.rect.X+tt.rect.Width; x++ {
+					got := frame.At(x, y)
+					require.Equal(t, tt.rune, got.Rune)
+					require.True(t, got.Style.Equal(separator))
+				}
+			}
+		})
+	}
+}
 
-	layout = ChooseLayout(domain.Size{Cols: 41, Rows: 4})
-	require.Equal(t, domain.Rect{Width: 16, Height: 4}, layout.List)
-	require.Equal(t, domain.Rect{X: 17, Width: 24, Height: 4}, layout.Preview)
+func TestRenderListOnlyOmitsSeparatorAndPreview(t *testing.T) {
+	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{Name: "tab"}}, Active: 0}}, "s", 0)
+	frame := m.Render(domain.Size{Cols: 23, Rows: 11}, Preview{Width: 1, Height: 1, Rows: [][]renderer.Cell{{cell('x')}}}, RenderStyles{Separator: renderer.Style{Foreground: 8}})
 
-	layout = ChooseLayout(domain.Size{Cols: 120, Rows: 4})
-	require.Equal(t, domain.Rect{Width: MaxListWidth, Height: 4}, layout.List)
-	require.Equal(t, domain.Rect{X: MaxListWidth + 1, Width: 87, Height: 4}, layout.Preview)
+	require.Equal(t, ' ', frame.At(22, 10).Rune)
+	require.NotEqual(t, 'x', frame.At(22, 10).Rune)
+}
 
-	layout = ChooseLayout(domain.Size{Cols: 24, Rows: 11})
-	require.Equal(t, domain.Rect{Width: 24, Height: 11}, layout.List)
-	require.Equal(t, domain.Rect{}, layout.Preview)
+func TestRenderPreviewAnchorsOversizedSourceToFinalRows(t *testing.T) {
+	m := New(nil, "", 0)
+	preview := Preview{Width: 24, Height: 9, Rows: previewRows(24, "abcdefghi")}
 
-	layout = ChooseLayout(domain.Size{Cols: 24, Rows: 12})
-	require.Equal(t, domain.Rect{Width: 24, Height: 4}, layout.List)
-	require.Equal(t, domain.Rect{Y: 5, Width: 24, Height: 7}, layout.Preview)
+	frame := m.Render(domain.Size{Cols: 24, Rows: 12}, preview)
+	require.Equal(t, 'c', frame.At(0, 5).Rune)
+	require.Equal(t, 'i', frame.At(0, 11).Rune)
+}
+
+func TestRenderPreviewBottomPlacesShortSource(t *testing.T) {
+	m := New(nil, "", 0)
+	preview := Preview{Width: 24, Height: 1, Rows: previewRows(24, "z")}
+
+	frame := m.Render(domain.Size{Cols: 24, Rows: 12}, preview)
+	require.Equal(t, ' ', frame.At(0, 5).Rune)
+	require.Equal(t, 'z', frame.At(0, 11).Rune)
+}
+
+func TestRenderAttentionMarkerSmokeWithResponsiveLayout(t *testing.T) {
+	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{Name: "tab", Attention: true}}, Active: 0}}, "s", 0)
+	frame := m.Render(domain.Size{Cols: 69, Rows: 4}, Preview{})
+
+	require.Equal(t, rune(ui.AttentionGlyph), frame.At(6, 1).Rune)
+}
+
+func previewRows(width int, labels string) [][]renderer.Cell {
+	rows := make([][]renderer.Cell, len(labels))
+	for y, label := range labels {
+		rows[y] = make([]renderer.Cell, width)
+		for x := range rows[y] {
+			rows[y][x] = cell(' ')
+		}
+		rows[y][0] = cell(label)
+	}
+	return rows
 }
 
 func TestSelectedMapping(t *testing.T) {
@@ -115,7 +207,7 @@ func TestStoppedSessionSelectableAndRendered(t *testing.T) {
 func TestRenderPreviewClipsPadsDropsWideRuneAndInvertsSelection(t *testing.T) {
 	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "tab"}}, Active: 0}}, "s1", 0)
 	preview := Preview{
-		Width:  24,
+		Width:  25,
 		Height: 1,
 		Rows: [][]renderer.Cell{{
 			cell('a'), cell('b'), cell('c'), cell('d'), cell('e'), cell('f'), cell('g'), cell('h'), cell('i'), cell('j'),
@@ -124,12 +216,12 @@ func TestRenderPreviewClipsPadsDropsWideRuneAndInvertsSelection(t *testing.T) {
 		}},
 	}
 
-	frame := m.Render(domain.Size{Cols: 41, Rows: 4}, preview)
+	frame := m.Render(domain.Size{Cols: 24, Rows: 12}, preview)
 	require.True(t, frame.At(0, 1).Style.Inverse)
-	require.Equal(t, 'a', frame.At(17, 0).Rune)
-	require.Equal(t, 'w', frame.At(39, 0).Rune)
-	require.Equal(t, ' ', frame.At(40, 0).Rune, "wide rune crossing preview pane is dropped")
-	require.Equal(t, ' ', frame.At(17, 1).Rune, "preview pane is padded with blanks")
+	require.Equal(t, 'a', frame.At(0, 11).Rune)
+	require.Equal(t, 'w', frame.At(22, 11).Rune)
+	require.Equal(t, ' ', frame.At(23, 11).Rune, "wide rune crossing preview pane is dropped")
+	require.Equal(t, ' ', frame.At(0, 5).Rune, "short preview is bottom anchored")
 }
 
 func TestRenderListScrollsSelectionIntoView(t *testing.T) {
@@ -147,12 +239,12 @@ func TestRenderListScrollsSelectionIntoView(t *testing.T) {
 func TestRenderListTruncatesLabelWithEllipsis(t *testing.T) {
 	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "a-really-long-focused-pane-tab-label"}}, Active: 0}}, "s1", 0)
 
-	frame := m.Render(domain.Size{Cols: 45, Rows: 5}, Preview{})
+	frame := m.Render(domain.Size{Cols: 69, Rows: 5}, Preview{})
 
-	layout := ChooseLayout(domain.Size{Cols: 45, Rows: 5})
-	require.Equal(t, 16, layout.List.Width, "test assumes a narrow list column")
+	layout := ChooseLayout(domain.Size{Cols: 69, Rows: 5})
+	require.Equal(t, 20, layout.List.Width, "test assumes a narrow list column")
 	require.Equal(t, '…', frame.At(layout.List.Width-1, 1).Rune, "truncated label should end with an ellipsis at the list edge")
-	require.Equal(t, ' ', frame.At(layout.List.Width, 1).Rune, "nothing should be drawn past the list width")
+	require.Equal(t, '│', frame.At(layout.List.Width, 1).Rune, "the separator occupies the cell after the list")
 }
 
 func TestRenderListOnlyDoesNotDrawPreview(t *testing.T) {
@@ -212,16 +304,16 @@ func TestRenderListTruncatesDetailBeforeName(t *testing.T) {
 		{Name: "short-name", Detail: " (a very long detail text)"},
 	}, Active: 0}}, "s1", 0)
 
-	frame := m.Render(domain.Size{Cols: 45, Rows: 5}, Preview{})
-	layout := ChooseLayout(domain.Size{Cols: 45, Rows: 5})
-	require.Equal(t, 16, layout.List.Width, "test assumes a narrow list column")
+	frame := m.Render(domain.Size{Cols: 69, Rows: 5}, Preview{})
+	layout := ChooseLayout(domain.Size{Cols: 69, Rows: 5})
+	require.Equal(t, 20, layout.List.Width, "test assumes a narrow list column")
 
-	want := "  short-name (a…"
+	want := "  short-name (a ver…"
 	for i, r := range want {
 		require.Equal(t, r, frame.At(i, 1).Rune, "cell %d", i)
 	}
 	require.Equal(t, '…', frame.At(layout.List.Width-1, 1).Rune, "detail is ellipsized to fit, the intact name is not touched")
-	require.Equal(t, ' ', frame.At(layout.List.Width, 1).Rune, "nothing drawn past the list width")
+	require.Equal(t, '│', frame.At(layout.List.Width, 1).Rune, "the separator occupies the cell after the list")
 }
 
 func TestRenderListTruncatesNameWhenAloneExceedsWidth(t *testing.T) {
@@ -229,12 +321,12 @@ func TestRenderListTruncatesNameWhenAloneExceedsWidth(t *testing.T) {
 		{Name: "a-really-long-focused-pane-tab-label", Detail: " (detail)"},
 	}, Active: 0}}, "s1", 0)
 
-	frame := m.Render(domain.Size{Cols: 45, Rows: 5}, Preview{})
-	layout := ChooseLayout(domain.Size{Cols: 45, Rows: 5})
-	require.Equal(t, 16, layout.List.Width, "test assumes a narrow list column")
+	frame := m.Render(domain.Size{Cols: 69, Rows: 5}, Preview{})
+	layout := ChooseLayout(domain.Size{Cols: 69, Rows: 5})
+	require.Equal(t, 20, layout.List.Width, "test assumes a narrow list column")
 
 	require.Equal(t, '…', frame.At(layout.List.Width-1, 1).Rune, "the name segment itself is ellipsized once it alone exceeds the width")
-	require.Equal(t, ' ', frame.At(layout.List.Width, 1).Rune, "nothing drawn past the list width, detail gets no room at all")
+	require.Equal(t, '│', frame.At(layout.List.Width, 1).Rune, "the separator occupies the cell after the list")
 }
 
 func cell(r rune) renderer.Cell {
