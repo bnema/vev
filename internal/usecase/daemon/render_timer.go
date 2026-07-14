@@ -1,126 +1,90 @@
 package daemon
 
 import (
+	"sync"
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
 )
 
-// timerOwnership is the coordinator-side ownership protocol for a timer lane.
-// Its methods ending in Locked require the owning coordinator lock. Timer.C,
-// Timer.Stop, and callbacks are deliberately kept out of this type and must
-// run after that lock is released: ports may synchronously re-enter the
-// coordinator.
-//
-// The pointers let each domain lane retain its own fields and predicates while
-// sharing generation tickets, cancellation, and worker completion ownership.
-type timerOwnership struct {
-	timer      *ports.Timer
-	cancel     *chan struct{}
-	done       *chan struct{}
-	generation *uint64
+// timerToken is the complete, immutable identity of one timer worker. A lane
+// owns either this token or nothing; cancellation and completion are never
+// retained separately where a stale callback could reacquire them.
+type timerToken struct {
+	generation uint64
+	timer      ports.Timer
+	cancel     chan struct{}
+	done       chan struct{}
 }
 
-func timerOwner(timer *ports.Timer, cancel, done *chan struct{}, generation *uint64) timerOwnership {
-	return timerOwnership{timer: timer, cancel: cancel, done: done, generation: generation}
+// timerLane is coordinator-owned and must be accessed while renderCoordinator.mu
+// is held. Detach removes the complete token before any external Timer call.
+type timerLane struct {
+	generation uint64
+	token      *timerToken
 }
 
-// timerWorker is a detached timer and the completion edge of the worker
-// waiting on it. Stop and wait must happen after releasing the owner lock:
-// both Timer.Stop and a callback completing the worker may re-enter the
-// coordinator.
-type timerWorker struct {
-	timer ports.Timer
-	done  <-chan struct{}
+func (l *timerLane) replaceLocked() (uint64, *timerToken) {
+	l.generation++
+	return l.generation, l.detachLocked()
 }
 
-// replaceLocked invalidates the current ticket and releases its timer worker
-// for an unlocked cancellation and join. A worker is always released even when
-// a fake timer's channel is nil or never fires.
-func (o timerOwnership) replaceLocked() (uint64, timerWorker) {
-	*o.generation = *o.generation + 1
-	return *o.generation, o.detachLocked()
-}
-
-// detachLocked releases the current worker and timer. The returned worker must
-// be stopped and joined after dropping the owner lock.
-func (o timerOwnership) detachLocked() timerWorker {
-	worker := timerWorker{timer: *o.timer, done: *o.done}
-	*o.timer = nil
-	if *o.cancel != nil {
-		close(*o.cancel)
-		*o.cancel = nil
+func (l *timerLane) detachLocked() *timerToken {
+	token := l.token
+	l.token = nil
+	if token != nil {
+		close(token.cancel)
 	}
-	return worker
+	return token
 }
 
-// publishLocked assigns a timer created and inspected outside the owner lock.
-// It rejects a stale ticket or an already-replaced timer without invoking a
-// port method.
-func (o timerOwnership) publishLocked(ticket uint64, timer ports.Timer) (cancel, done chan struct{}, ok bool) {
-	if *o.generation != ticket || *o.timer != nil {
-		return nil, nil, false
+func (l *timerLane) publishLocked(generation uint64, timer ports.Timer) *timerToken {
+	if l.generation != generation || l.token != nil {
+		return nil
 	}
-	cancel, done = make(chan struct{}), make(chan struct{})
-	*o.timer, *o.cancel, *o.done = timer, cancel, done
-	return cancel, done, true
+	token := &timerToken{
+		generation: generation,
+		timer:      timer,
+		cancel:     make(chan struct{}),
+		done:       make(chan struct{}),
+	}
+	l.token = token
+	return token
 }
 
-// clearLocked releases only the matching ticket after its worker has consumed
-// a tick. It cannot clear a replacement timer.
-func (o timerOwnership) clearLocked(ticket uint64) bool {
-	if *o.generation != ticket {
+func (l *timerLane) clearLocked(token *timerToken) bool {
+	if token == nil || l.generation != token.generation || l.token != token {
 		return false
 	}
-	*o.timer, *o.cancel = nil, nil
+	l.token = nil
 	return true
 }
 
-// completeLocked records a completed no-worker timer path (such as a disabled
-// clock) without overwriting a replacement lane's completion edge.
-func (o timerOwnership) completeLocked(ticket uint64) bool {
-	if *o.generation != ticket {
-		return false
-	}
-	done := make(chan struct{})
-	close(done)
-	*o.done = done
-	return true
-}
+// timerSupervisor owns worker accounting. Workers are registered only while
+// coordinator ownership is held and terminal teardown rejects registrations
+// before Wait begins, so Add cannot race the terminal Wait.
+type timerSupervisor struct{ workers sync.WaitGroup }
 
-// runTimerWorker owns the completion edge for an armed timer. A nil timer
-// channel intentionally does not start a worker; callers apply their
-// domain-specific disabled-clock behavior synchronously.
-func runTimerWorker(timerC <-chan time.Time, cancel <-chan struct{}, done chan struct{}, fire func()) {
+func (s *timerSupervisor) startLocked(token *timerToken, timerC <-chan time.Time, fire func()) {
+	s.workers.Add(1)
 	go func() {
-		defer close(done)
+		defer s.workers.Done()
+		defer close(token.done)
 		select {
 		case <-timerC:
 			fire()
-		case <-cancel:
+		case <-token.cancel:
 		}
 	}()
 }
 
-func stopTimer(timer ports.Timer) {
-	if timer != nil {
-		timer.Stop()
-	}
-}
+func (s *timerSupervisor) wait() { s.workers.Wait() }
 
-// stopAndJoinTimerWorker prevents a cancelled timer callback from escaping a
-// lifecycle boundary and touching transports or test-owned timer mocks later.
-// Callers must not hold coordinator locks here. self is supplied only by a
-// worker that consumed its own tick; waiting for that worker would deadlock.
-func stopAndJoinTimerWorker(worker timerWorker, self <-chan struct{}) {
-	stopTimer(worker.timer)
-	if worker.done != nil && worker.done != self {
-		<-worker.done
-	}
-}
-
-func stopAndJoinTimerWorkers(workers []timerWorker) {
-	for _, worker := range workers {
-		stopAndJoinTimerWorker(worker, nil)
+// stopDetachedTimer is intentionally non-blocking. Ordinary lifecycle and
+// replacement transitions may cancel/stop stale workers but callback stacks
+// never wait for a worker to finish.
+func stopDetachedTimer(token *timerToken) {
+	if token != nil && token.timer != nil {
+		token.timer.Stop()
 	}
 }

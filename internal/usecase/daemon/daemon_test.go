@@ -472,7 +472,7 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 	timer := awaitLatestCoordinatorTimer(t, clock)
 	rc := sess.renderCoordinator()
 	rc.mu.Lock()
-	workerDone := rc.normalWorkerDone
+	workerDone := rc.normalLane.token.done
 	rc.mu.Unlock()
 	require.NotNil(t, workerDone)
 	timer.ch <- time.Time{}

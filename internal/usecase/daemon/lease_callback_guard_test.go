@@ -14,14 +14,14 @@ func TestResizeAndRetryCallbacksRejectSameObjectLeaseReplacement(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		schedule func(*renderCoordinator, *attachedClient, *attachmentLease, func())
-		done     func(*renderCoordinator) <-chan struct{}
+		done     func(*testing.T, *renderCoordinator) <-chan struct{}
 	}{
 		{
 			name: "resize",
 			schedule: func(rc *renderCoordinator, ac *attachedClient, lease *attachmentLease, run func()) {
 				rc.scheduleResizeForLease(domain.Size{Cols: 100, Rows: 30}, ac, lease, func(uint64) { run() })
 			},
-			done: func(rc *renderCoordinator) <-chan struct{} { return rc.resizeCallbackDone() },
+			done: captureResizeCallbackDone,
 		},
 		{
 			name: "retry",
@@ -31,10 +31,14 @@ func TestResizeAndRetryCallbacksRejectSameObjectLeaseReplacement(t *testing.T) {
 				require.True(t, rc.resizeCurrentForLease(epoch, ac, lease, true))
 				rc.scheduleResizeRetryForLease(epoch, ac, lease, run)
 			},
-			done: func(rc *renderCoordinator) <-chan struct{} {
+			done: func(t *testing.T, rc *renderCoordinator) <-chan struct{} {
+				t.Helper()
 				rc.mu.Lock()
 				defer rc.mu.Unlock()
-				return rc.retryDone
+				if rc.retryLane.token == nil {
+					t.Fatal("coordinator did not publish a retry callback completion")
+				}
+				return rc.retryLane.token.done
 			},
 		},
 	} {
@@ -47,13 +51,13 @@ func TestResizeAndRetryCallbacksRejectSameObjectLeaseReplacement(t *testing.T) {
 			ran := false
 			tc.schedule(rc, ac, lease, func() { ran = true })
 			timer := awaitCoordinatorScheduledTimer(t, clock)
-			done := tc.done(rc)
+			done := tc.done(t, rc)
 			require.NotNil(t, done)
 
 			rc.notePark(ac)
 			rc.attach(ac) // resume the exact same object under a new incarnation
 			timer.ch <- time.Time{}
-			<-done
+			awaitTestCompletion(t, done, "stale callback did not complete")
 			for range 32 {
 				runtime.Gosched()
 			}

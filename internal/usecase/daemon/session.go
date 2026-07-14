@@ -749,7 +749,11 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	sess.client = nil
 	sess.mu.Unlock()
 	if rc := sess.renderCoordinator(); rc != nil {
-		rc.noteSessionTeardown()
+		// Terminal teardown has two phases: this session owner first prevents any
+		// new worker registration and detaches all tokens, then stops and waits
+		// outside coordinator callbacks and session locks.
+		rc.beginSessionTeardown().finish()
+		rc.waitForTimerWorkers()
 	}
 	if ac != nil {
 		d.unregisterPreview(ac)

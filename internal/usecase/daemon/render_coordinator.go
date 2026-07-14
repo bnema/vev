@@ -53,32 +53,16 @@ type renderCoordinator struct {
 	torndown bool
 
 	resize resizeRequestMetadata
-	// resizeTimer is independent from render invalidation deadlines. It owns
-	// resize burst coalescing and is cancelled by the same lifecycle changes.
-	resizeTimer  ports.Timer
-	resizeCancel chan struct{}
-	// resizeDone closes after the latest timer callback has either been
-	// rejected or completed its transaction. It provides a completion edge
-	// without polling scheduler state.
-	resizeDone chan struct{}
-	resizeGen  uint64
-	// retry is a separate, latest-committed-epoch retry lane. It is cancelled
-	// with resize requests and attachment lifecycle changes; callbacks also
-	// validate their epoch before touching a pane.
-	retryTimer  ports.Timer
-	retryCancel chan struct{}
-	retryDone   chan struct{}
-	retryGen    uint64
-	metrics     renderCoordinatorBurstMetrics
-	// generation invalidates callbacks from superseded deadline/watchdog timers.
-	// Each worker also owns an explicit cancellation channel: fake timers may
-	// expose a nil or never-firing C channel, so Stop alone cannot release a
-	// worker waiting in select.
-	generation       uint64
-	armed            bool
-	normalTimer      ports.Timer
-	normalCancel     chan struct{}
-	normalWorkerDone chan struct{}
+	// Each lane owns one complete immutable worker token at a time.
+	resizeLane timerLane
+	retryLane  timerLane
+	metrics    renderCoordinatorBurstMetrics
+	// normalLane owns render invalidation deadlines. The supervisor is only
+	// waited by the session owner after terminal teardown has rejected future
+	// registrations.
+	normalLane timerLane
+	armed      bool
+	supervisor timerSupervisor
 	// syncBatches is keyed by the stable pane owner. Each pane owns an
 	// independent watchdog; composition remains gated until every batch ends.
 	syncBatches map[*pane]*syncBatch
@@ -94,25 +78,10 @@ func newRenderCoordinator(opts renderCoordinatorOptions) *renderCoordinator {
 	return &renderCoordinator{opts: opts}
 }
 
-// normalTimerOwner owns normal deadline cancellation and completion tickets.
-// Timer methods remain unlocked at its call sites.
-func (c *renderCoordinator) normalTimerOwner() timerOwnership {
-	return timerOwner(&c.normalTimer, &c.normalCancel, &c.normalWorkerDone, &c.generation)
-}
-
-func (c *renderCoordinator) resizeTimerOwner() timerOwnership {
-	return timerOwner(&c.resizeTimer, &c.resizeCancel, &c.resizeDone, &c.resizeGen)
-}
-
-func (c *renderCoordinator) retryTimerOwner() timerOwnership {
-	return timerOwner(&c.retryTimer, &c.retryCancel, &c.retryDone, &c.retryGen)
-}
-
-// detachNormalTimerLocked releases coordinator ownership. The caller must stop
-// and join the returned worker after dropping c.mu: timer methods and worker
-// callbacks are external coordinator re-entry points.
-func (c *renderCoordinator) detachNormalTimerLocked() timerWorker {
-	return c.normalTimerOwner().detachLocked()
+// detachNormalTimerLocked removes the complete current token. The caller may
+// stop it only after dropping c.mu and must never wait for its worker.
+func (c *renderCoordinator) detachNormalTimerLocked() *timerToken {
+	return c.normalLane.detachLocked()
 }
 
 type syncBatch struct {
@@ -121,19 +90,13 @@ type syncBatch struct {
 	// acquired by this predicate.
 	renderable func() bool
 	force      func()
-	timer      ports.Timer
-	cancel     chan struct{}
-	done       chan struct{}
+	lane       timerLane
 }
 
-func (batch *syncBatch) timerOwner() timerOwnership {
-	return timerOwner(&batch.timer, &batch.cancel, &batch.done, &batch.generation)
-}
+func detachSyncBatchLocked(batch *syncBatch) *timerToken { return batch.lane.detachLocked() }
 
-func detachSyncBatchLocked(batch *syncBatch) timerWorker { return batch.timerOwner().detachLocked() }
-
-func (c *renderCoordinator) detachSyncTimersLocked() []timerWorker {
-	workers := make([]timerWorker, 0, len(c.syncBatches))
+func (c *renderCoordinator) detachSyncTimersLocked() []*timerToken {
+	workers := make([]*timerToken, 0, len(c.syncBatches))
 	for pane, batch := range c.syncBatches {
 		workers = append(workers, detachSyncBatchLocked(batch))
 		delete(c.syncBatches, pane)
@@ -209,11 +172,11 @@ func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClie
 	// pending work. Completion republishes urgently and must reserve a fresh
 	// deadline rather than leaving that already-fired timer as the only arm.
 	arm := !wasPending || (!wasUrgent && c.pendingUrgent) || (!wasPreviewPending && c.pendingPreview) || c.deadlineDue
-	var old timerWorker
+	var old *timerToken
 	if arm {
-		_, old = c.normalTimerOwner().replaceLocked()
+		_, old = c.normalLane.replaceLocked()
 	}
-	gen := c.generation
+	gen := c.normalLane.generation
 	delay := minOutputRenderDeadline + time.Duration(c.outputPressure)*time.Millisecond
 	if c.pendingUrgent {
 		delay = urgentRenderDeadline
@@ -225,7 +188,7 @@ func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClie
 	if queueStart && observer != nil {
 		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueEnqueued, 0, true))
 	}
-	stopAndJoinTimerWorker(old, nil)
+	stopDetachedTimer(old)
 	if !arm || clock == nil {
 		if onInvalidate != nil {
 			onInvalidate(inv)
@@ -238,31 +201,34 @@ func (c *renderCoordinator) invalidateForLeaseAtResizeEpoch(source *attachedClie
 	timer := clock.NewTimer(delay)
 	timerC := timer.C()
 	c.mu.Lock()
-	valid := !c.torndown && c.pending && c.generation == gen
-	var cancel, done chan struct{}
+	valid := !c.torndown && c.pending && c.normalLane.generation == gen
+	var token *timerToken
 	if valid && timerC != nil {
-		cancel, done, valid = c.normalTimerOwner().publishLocked(gen, timer)
+		token = c.normalLane.publishLocked(gen, timer)
+		valid = token != nil
+		if valid {
+			c.supervisor.startLocked(token, timerC, func() {
+				c.markDeadlineDue(token)
+				c.fireFromTimer(token, false, true)
+			})
+		}
 	}
 	c.mu.Unlock()
 	if !valid {
-		stopTimer(timer)
+		timer.Stop()
 		if onInvalidate != nil {
 			onInvalidate(inv)
 		}
 		return true
 	}
 	if timerC == nil {
-		stopTimer(timer)
+		timer.Stop()
 		c.fire(gen, false, true)
 		if onInvalidate != nil {
 			onInvalidate(inv)
 		}
 		return true
 	}
-	runTimerWorker(timerC, cancel, done, func() {
-		c.markDeadlineDue(gen)
-		c.fireFromTimer(gen, false, true, done)
-	})
 	// Test-visible observation follows deadline publication, so a producer
 	// callback cannot observe a successful invalidation before its timer owns
 	// a worker (and race tests cannot finish while a mock expectation remains).
@@ -282,7 +248,7 @@ func (c *renderCoordinator) notifyAck() {
 		c.mu.Unlock()
 		return
 	}
-	gen := c.generation
+	gen := c.normalLane.generation
 	blocked := c.ackBlocked
 	c.ackBlocked = nil
 	c.mu.Unlock()
@@ -296,9 +262,9 @@ func (c *renderCoordinator) notifyAck() {
 // arms that pane's watchdog. Overlapping pane batches are independent.
 // markDeadlineDue records a received timer tick before the worker probes ACK
 // readiness, so a concurrent ACK cannot miss an already-expired deadline.
-func (c *renderCoordinator) markDeadlineDue(gen uint64) {
+func (c *renderCoordinator) markDeadlineDue(token *timerToken) {
 	c.mu.Lock()
-	if c.fireValidLocked(gen, false) {
+	if c.fireValidLocked(token, token.generation, false) {
 		c.deadlineDue = true
 	}
 	c.mu.Unlock()
@@ -323,7 +289,7 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 	if c.syncBatches == nil {
 		c.syncBatches = make(map[*pane]*syncBatch)
 	}
-	var old timerWorker
+	var old *timerToken
 	if previous := c.syncBatches[p]; previous != nil {
 		old = detachSyncBatchLocked(previous)
 	}
@@ -335,7 +301,7 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 	c.syncRegistryVersion++
 	clock := c.opts.clock
 	c.mu.Unlock()
-	stopAndJoinTimerWorker(old, nil)
+	stopDetachedTimer(old)
 	if clock == nil {
 		return
 	}
@@ -345,53 +311,59 @@ func (c *renderCoordinator) noteSyncBeginWithRenderability(p *pane, gen uint64, 
 	timer := clock.NewTimer(maxSyncUpdateDuration)
 	timerC := timer.C()
 	c.mu.Lock()
-	valid := !c.torndown && c.syncBatches[p] == batch && batch.generation == gen
-	var cancel, done chan struct{}
-	if valid {
-		cancel, done, valid = batch.timerOwner().publishLocked(gen, timer)
+	valid := !c.torndown && c.syncBatches[p] == batch && batch.generation == gen && batch.lane.generation == 0
+	var token *timerToken
+	if valid && timerC != nil {
+		batch.lane.generation = gen
+		token = batch.lane.publishLocked(gen, timer)
+		valid = token != nil
+		if valid {
+			c.supervisor.startLocked(token, timerC, func() { c.runSyncWatchdog(p, batch, token) })
+		}
 	}
 	c.mu.Unlock()
-	if !valid {
-		stopTimer(timer)
+	if !valid || timerC == nil {
+		stopDetachedTimer(&timerToken{timer: timer})
 		return
 	}
-	runTimerWorker(timerC, cancel, done, func() {
-		// Keep the batch registered while force runs. A concurrent render must
-		// continue to observe the synchronized-output gate until the VT has
-		// authoritatively closed the batch.
-		c.mu.Lock()
-		current := c.syncBatches[p]
-		valid := !c.torndown && current == batch && current.generation == gen
-		c.mu.Unlock()
-		if !valid {
-			return
-		}
-		if batch.force != nil {
-			batch.force()
-		}
+}
 
-		// force may synchronously end this batch, replace it with a newer
-		// generation, or tear down the coordinator. Remove only the exact
-		// snapshot that expired, then publish one urgent completion wake.
-		c.mu.Lock()
-		current = c.syncBatches[p]
-		valid = !c.torndown && current == batch && current.generation == gen
-		var stopped timerWorker
-		if valid {
-			delete(c.syncBatches, p)
-			c.syncRegistryVersion++
-			stopped = detachSyncBatchLocked(batch)
-			if len(c.syncBatches) == 0 && c.pending {
-				c.pendingUrgent = true
-			}
+func (c *renderCoordinator) runSyncWatchdog(p *pane, batch *syncBatch, token *timerToken) {
+	// Keep the batch registered while force runs. A concurrent render must
+	// continue to observe the synchronized-output gate until the VT has
+	// authoritatively closed the batch.
+	c.mu.Lock()
+	current := c.syncBatches[p]
+	valid := !c.torndown && current == batch && current.generation == token.generation && current.lane.token == token
+	c.mu.Unlock()
+	if !valid {
+		return
+	}
+	if batch.force != nil {
+		batch.force()
+	}
+
+	// force may synchronously end this batch, replace it with a newer
+	// generation, or tear down the coordinator. Remove only the exact
+	// snapshot that expired, then publish one urgent completion wake.
+	c.mu.Lock()
+	current = c.syncBatches[p]
+	valid = !c.torndown && current == batch && current.generation == token.generation && current.lane.token == token
+	var stopped *timerToken
+	if valid {
+		delete(c.syncBatches, p)
+		c.syncRegistryVersion++
+		stopped = detachSyncBatchLocked(batch)
+		if len(c.syncBatches) == 0 && c.pending {
+			c.pendingUrgent = true
 		}
-		c.mu.Unlock()
-		if valid {
-			stopAndJoinTimerWorker(stopped, done)
-			// Reevaluate the aggregate gate only after forcing this pane.
-			c.fireCurrent(true)
-		}
-	})
+	}
+	c.mu.Unlock()
+	if valid {
+		stopDetachedTimer(stopped)
+		// Reevaluate the aggregate gate only after forcing this pane.
+		c.fireCurrent(true)
+	}
 }
 
 // noteSyncEnd records completion for exactly one pane batch. It only flushes
@@ -430,21 +402,21 @@ func (c *renderCoordinator) removeSyncEnd(p *pane, gen uint64, renderable bool) 
 		c.pendingUrgent = true
 	}
 	c.mu.Unlock()
-	stopAndJoinTimerWorker(worker, nil)
+	stopDetachedTimer(worker)
 	return renderable
 }
 
 // noteSyncPaneRemoved releases a pane watchdog when pane lifecycle ends.
 func (c *renderCoordinator) noteSyncPaneRemoved(p *pane) {
 	c.mu.Lock()
-	var worker timerWorker
+	var worker *timerToken
 	if batch := c.syncBatches[p]; batch != nil {
 		delete(c.syncBatches, p)
 		c.syncRegistryVersion++
 		worker = detachSyncBatchLocked(batch)
 	}
 	c.mu.Unlock()
-	stopAndJoinTimerWorker(worker, nil)
+	stopDetachedTimer(worker)
 }
 
 // subscribePreview installs fn as the preview observer for coalesced wakes.
@@ -564,7 +536,7 @@ func (c *renderCoordinator) wakeCurrent(w renderWake) bool {
 }
 
 type renderLifecycleCleanup struct {
-	workers          []timerWorker
+	tokens           []*timerToken
 	observer         ports.RuntimeObserver
 	queueCorrelation ports.RuntimeCorrelation
 	queueMarked      bool
@@ -572,7 +544,9 @@ type renderLifecycleCleanup struct {
 }
 
 func (cleanup renderLifecycleCleanup) finish() {
-	stopAndJoinTimerWorkers(cleanup.workers)
+	for _, token := range cleanup.tokens {
+		stopDetachedTimer(token)
+	}
 	if cleanup.queueMarked && cleanup.observer != nil {
 		cleanup.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", cleanup.queueCorrelation, ports.RuntimeQueueDequeued, 0, false))
 	}
@@ -581,9 +555,7 @@ func (cleanup renderLifecycleCleanup) finish() {
 	}
 }
 
-// beginDetach invalidates pending work while leaving timer joins to the caller.
-// Callers holding daemon/session locks must publish the lifecycle transition,
-// release those locks, and only then call cleanup.finish().
+// beginDetach invalidates pending work. It never waits for detached workers.
 func (c *renderCoordinator) beginDetach(ac *attachedClient) renderLifecycleCleanup {
 	c.mu.Lock()
 	var cleanup renderLifecycleCleanup
@@ -595,12 +567,12 @@ func (c *renderCoordinator) beginDetach(ac *attachedClient) renderLifecycleClean
 		c.ackDeferred = false
 		c.pendingPreview = false
 		c.coalesced = 0
-		_, timer := c.normalTimerOwner().replaceLocked()
+		_, timer := c.normalLane.replaceLocked()
 		c.armed = false
-		_, resizeTimer := c.resizeTimerOwner().replaceLocked()
-		_, retryTimer := c.retryTimerOwner().replaceLocked()
+		_, resizeTimer := c.resizeLane.replaceLocked()
+		_, retryTimer := c.retryLane.replaceLocked()
 		cleanup = renderLifecycleCleanup{
-			workers:          []timerWorker{timer, resizeTimer, retryTimer},
+			tokens:           []*timerToken{timer, resizeTimer, retryTimer},
 			observer:         c.opts.observer,
 			queueCorrelation: c.queueCorrelation,
 			queueMarked:      c.queueMarked,
@@ -617,8 +589,8 @@ func (c *renderCoordinator) noteDetach(ac *attachedClient) {
 	c.beginDetach(ac).finish()
 }
 
-// beginReplace hands the coordinator from old to replacement while leaving
-// detached timer joins to the caller.
+// beginReplace hands the coordinator from old to replacement without waiting
+// for detached workers.
 func (c *renderCoordinator) beginReplace(old, replacement *attachedClient, ready bool) renderLifecycleCleanup {
 	c.mu.Lock()
 	var cleanup renderLifecycleCleanup
@@ -634,12 +606,12 @@ func (c *renderCoordinator) beginReplace(old, replacement *attachedClient, ready
 		c.ackDeferred = false
 		c.pendingPreview = false
 		c.coalesced = 0
-		_, timer := c.normalTimerOwner().replaceLocked()
+		_, timer := c.normalLane.replaceLocked()
 		c.armed = false
-		_, resizeTimer := c.resizeTimerOwner().replaceLocked()
-		_, retryTimer := c.retryTimerOwner().replaceLocked()
+		_, resizeTimer := c.resizeLane.replaceLocked()
+		_, retryTimer := c.retryLane.replaceLocked()
 		cleanup = renderLifecycleCleanup{
-			workers:          []timerWorker{timer, resizeTimer, retryTimer},
+			tokens:           []*timerToken{timer, resizeTimer, retryTimer},
 			observer:         c.opts.observer,
 			queueCorrelation: c.queueCorrelation,
 			queueMarked:      c.queueMarked,
@@ -663,9 +635,14 @@ func (c *renderCoordinator) noteReplace(old, replacement *attachedClient, readin
 // notePark invalidates pending wakes when the attachment parks for resume.
 func (c *renderCoordinator) notePark(ac *attachedClient) { c.noteDetach(ac) }
 
-// noteSessionTeardown terminally invalidates the coordinator.
-func (c *renderCoordinator) noteSessionTeardown() {
+// beginSessionTeardown is terminal phase one. It rejects future worker
+// registration and atomically detaches every complete lane token.
+func (c *renderCoordinator) beginSessionTeardown() renderLifecycleCleanup {
 	c.mu.Lock()
+	if c.torndown {
+		c.mu.Unlock()
+		return renderLifecycleCleanup{}
+	}
 	c.torndown = true
 	if c.lease != nil {
 		c.lease.active = false
@@ -673,28 +650,29 @@ func (c *renderCoordinator) noteSessionTeardown() {
 	c.previewWake = nil
 	c.previewWakes = nil
 	c.pending = false
-	_, resizeTimer := c.resizeTimerOwner().replaceLocked()
-	_, retryTimer := c.retryTimerOwner().replaceLocked()
+	_, resizeTimer := c.resizeLane.replaceLocked()
+	_, retryTimer := c.retryLane.replaceLocked()
 	c.ackDeferred = false
 	c.pendingPreview = false
-	_, timer := c.normalTimerOwner().replaceLocked()
+	_, timer := c.normalLane.replaceLocked()
 	c.armed = false
 	workers := c.detachSyncTimersLocked()
 	observer, queueCorrelation, queueMarked := c.opts.observer, c.queueCorrelation, c.queueMarked
 	ackBlocked := c.ackBlocked
 	c.queueMarked, c.ackBlocked = false, nil
 	c.mu.Unlock()
-	if queueMarked && observer != nil {
-		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, false))
+	return renderLifecycleCleanup{
+		tokens:           append([]*timerToken{timer, resizeTimer, retryTimer}, workers...),
+		observer:         observer,
+		queueCorrelation: queueCorrelation,
+		queueMarked:      queueMarked,
+		ackBlocked:       ackBlocked,
 	}
-	if ackBlocked != nil {
-		ackBlocked.finish(false)
-	}
-	stopAndJoinTimerWorker(timer, nil)
-	stopAndJoinTimerWorker(resizeTimer, nil)
-	stopAndJoinTimerWorker(retryTimer, nil)
-	stopAndJoinTimerWorkers(workers)
 }
+
+// waitForTimerWorkers is terminal phase two. Only the session owner invokes it,
+// after beginSessionTeardown has made future supervisor registration impossible.
+func (c *renderCoordinator) waitForTimerWorkers() { c.supervisor.wait() }
 
 // invalidateRender is the sole producer fan-in. In tests and transitional
 // headless paths without an attached coordinator it retains the old private
@@ -728,21 +706,26 @@ func (d *Daemon) invalidateRenderNow(sess *session, ac *attachedClient, reset bo
 }
 
 func (c *renderCoordinator) fire(gen uint64, watchdog, deadline bool) {
-	c.fireWithTimerWorker(gen, watchdog, deadline, nil)
+	c.mu.Lock()
+	if !watchdog && c.normalLane.generation != gen {
+		c.mu.Unlock()
+		return
+	}
+	token := c.normalLane.token
+	c.mu.Unlock()
+	c.fireWithTimerToken(token, gen, watchdog, deadline)
 }
 
-// fireFromTimer consumes a normal deadline from its own worker. It must not
-// wait for that worker's done channel because runTimerWorker closes it only
-// after this callback returns.
-func (c *renderCoordinator) fireFromTimer(gen uint64, watchdog, deadline bool, self <-chan struct{}) {
-	c.fireWithTimerWorker(gen, watchdog, deadline, self)
+// fireFromTimer consumes a normal deadline using its exact immutable token.
+func (c *renderCoordinator) fireFromTimer(token *timerToken, watchdog, deadline bool) {
+	c.fireWithTimerToken(token, token.generation, watchdog, deadline)
 }
 
-func (c *renderCoordinator) fireWithTimerWorker(gen uint64, watchdog, deadline bool, self <-chan struct{}) {
+func (c *renderCoordinator) fireWithTimerToken(token *timerToken, gen uint64, watchdog, deadline bool) {
 	// Readiness probes enter the attachment send path, which may in turn read
 	// coordinator metadata. Never hold c.mu across that external callback.
 	c.mu.Lock()
-	if !c.fireValidLocked(gen, watchdog) {
+	if !c.fireValidLocked(token, gen, watchdog) {
 		c.mu.Unlock()
 		return
 	}
@@ -759,7 +742,7 @@ func (c *renderCoordinator) fireWithTimerWorker(gen uint64, watchdog, deadline b
 	// syncGateOpenLocked retries predicate evaluation on every registry change
 	// and returns holding c.mu, so pending consumption has no intervening gap.
 	c.mu.Lock()
-	if !c.fireValidLocked(gen, watchdog) {
+	if !c.fireValidLocked(token, gen, watchdog) {
 		c.mu.Unlock()
 		return
 	}
@@ -767,7 +750,7 @@ func (c *renderCoordinator) fireWithTimerWorker(gen uint64, watchdog, deadline b
 		c.mu.Unlock()
 		return
 	}
-	if !c.fireValidLocked(gen, watchdog) {
+	if !c.fireValidLocked(token, gen, watchdog) {
 		c.mu.Unlock()
 		return
 	}
@@ -821,7 +804,7 @@ func (c *renderCoordinator) fireWithTimerWorker(gen uint64, watchdog, deadline b
 	c.queueMarked, c.ackBlocked = false, nil
 	wake := c.opts.wake
 	c.mu.Unlock()
-	stopAndJoinTimerWorker(worker, self)
+	stopDetachedTimer(worker)
 	if queueMarked && observer != nil {
 		observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", queueCorrelation, ports.RuntimeQueueDequeued, 0, true))
 	}
@@ -834,8 +817,11 @@ func (c *renderCoordinator) fireWithTimerWorker(gen uint64, watchdog, deadline b
 	c.notifyPreviews(w, preview, previews)
 }
 
-func (c *renderCoordinator) fireValidLocked(gen uint64, watchdog bool) bool {
-	return !c.torndown && c.pending && (watchdog || gen == c.generation)
+func (c *renderCoordinator) fireValidLocked(token *timerToken, gen uint64, watchdog bool) bool {
+	if c.torndown || !c.pending || watchdog {
+		return !c.torndown && c.pending
+	}
+	return c.normalLane.generation == gen && (token == nil || c.normalLane.token == token)
 }
 
 // syncGateOpen evaluates pane visibility without c.mu, then reacquires and

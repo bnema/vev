@@ -178,13 +178,13 @@ func TestTransportObservabilityACKBlockedSpansEndExactlyOnce(t *testing.T) {
 			name: "successful consume",
 			finish: func(rc *renderCoordinator, ready *bool) {
 				*ready = true
-				rc.fire(rc.generation, false, false)
+				rc.fire(rc.normalLane.generation, false, false)
 			},
 		},
 		{
 			name: "teardown",
 			finish: func(rc *renderCoordinator, ready *bool) {
-				rc.noteSessionTeardown()
+				rc.beginSessionTeardown().finish()
 			},
 		},
 	}
@@ -198,7 +198,7 @@ func TestTransportObservabilityACKBlockedSpansEndExactlyOnce(t *testing.T) {
 			})
 			rc.attach(&attachedClient{})
 			rc.invalidate(renderInvalidation{class: invalidateOutput})
-			rc.fire(rc.generation, false, true)
+			rc.fire(rc.normalLane.generation, false, true)
 			tt.finish(rc, &ready)
 			// A late notification after consuming or tearing down must not emit a
 			// second end for the already-cleared blocked interval.
@@ -247,7 +247,7 @@ func TestTransportObservabilityBlockedACKEndDoesNotDelayNotifyAck(t *testing.T) 
 
 	// Enter the ACK-blocked state and wait until Start has reached the injected
 	// observer. End is the only deliberately blocked call in this test.
-	rc.fire(rc.generation, false, true)
+	rc.fire(rc.normalLane.generation, false, true)
 	awaitDaemonObserver(t, observer.startObserved, "ACK-blocked start observer")
 
 	ready.Store(true)
@@ -295,7 +295,7 @@ func TestTransportObservabilityBlockedCoordinatorObserverReleasesLock(t *testing
 	rc.attach(&attachedClient{})
 	rc.mu.Lock()
 	rc.pending = true
-	gen := rc.generation
+	gen := rc.normalLane.generation
 	rc.mu.Unlock()
 
 	fired := make(chan struct{})
@@ -357,7 +357,7 @@ func TestTransportObservabilityACKBlockedStartPublishesBeforeEnd(t *testing.T) {
 	})
 	rc.mu.Lock()
 	rc.pending = true
-	gen := rc.generation
+	gen := rc.normalLane.generation
 	rc.mu.Unlock()
 
 	fireDone := make(chan struct{})

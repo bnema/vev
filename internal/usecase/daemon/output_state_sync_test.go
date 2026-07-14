@@ -308,8 +308,9 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 			d.clock = clock
 			d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
 			timer := <-clock.timers
+			done := captureResizeCallbackDone(t, sess.renderCoordinator())
 			timer.ch <- time.Time{}
-			awaitResizeCallback(t, sess.renderCoordinator())
+			awaitTestCompletion(t, done, "resize callback did not complete")
 			require.True(t, p.deliveredWhileApplying(), "redraw must arrive while PTY.Resize owns the apply gate")
 			require.Equal(t, 'B', pane.screen.Frame.At(100, 0).Rune, "replay must parse the redraw before commit")
 
@@ -342,7 +343,9 @@ func TestResizeWithoutPTYOutputFlushesOneFullFrameAtDeadline(t *testing.T) {
 	}
 	requireNoOutputFrame(t, sends)
 
+	done := captureResizeCallbackDone(t, sess.renderCoordinator())
 	timer.ch <- time.Now()
+	awaitTestCompletion(t, done, "resize callback did not complete")
 	frame := awaitFrame(t, sends, ports.MsgOutput)
 	client := vt.NewScreen(120, 24)
 	out := mustApplyOutput(t, client, frame)
@@ -367,6 +370,7 @@ func TestResizeBurstFlushesOnlyLatestGeometry(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first resize did not schedule a bounded paint")
 	}
+	firstDone := captureResizeCallbackDone(t, sess.renderCoordinator())
 	d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
 	var latest *signalTimer
 	select {
@@ -375,9 +379,12 @@ func TestResizeBurstFlushesOnlyLatestGeometry(t *testing.T) {
 		t.Fatal("latest resize did not replace the bounded paint")
 	}
 
+	latestDone := captureResizeCallbackDone(t, sess.renderCoordinator())
 	first.ch <- time.Now()
+	awaitTestCompletion(t, firstDone, "obsolete resize callback did not complete")
 	requireNoOutputFrame(t, sends)
 	latest.ch <- time.Now()
+	awaitTestCompletion(t, latestDone, "latest resize callback did not complete")
 	awaitFrame(t, sends, ports.MsgOutput)
 	require.Equal(t, domain.Size{Cols: 120, Rows: 24}, ac.size)
 	require.Equal(t, 120, sess.activeTab().focusedPane().screen.Frame.Width)

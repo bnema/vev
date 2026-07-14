@@ -205,8 +205,8 @@ func fireCoordinatorTimer(t *testing.T, rc *renderCoordinator, timers []*coordin
 		}
 		var done <-chan struct{}
 		rc.mu.Lock()
-		if rc.normalTimer == timer.mock {
-			done = rc.normalWorkerDone
+		if rc.normalLane.token.timer == timer.mock {
+			done = rc.normalLane.token.done
 		}
 		rc.mu.Unlock()
 		timer.ch <- time.Time{}
