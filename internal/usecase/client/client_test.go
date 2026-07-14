@@ -862,7 +862,7 @@ func TestRunRestoresRawModeAfterAttachError(t *testing.T) {
 
 	err := runTestClient(context.Background(), testDependencies(d, tm, realClock{}, nil, nil), client.AttachRequest{Intent: ports.IntentEphemeral, SessionName: "", Remote: false})
 	require.Error(t, err)
-	require.Equal(t, int32(1), restoreCount.Load(), "Run must restore raw mode after attachOnce errors")
+	require.Equal(t, int32(1), restoreCount.Load(), "Run must restore raw mode after attach attempt errors")
 }
 
 func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {

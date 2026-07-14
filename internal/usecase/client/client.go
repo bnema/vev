@@ -190,20 +190,11 @@ func NewRunner(deps Dependencies) *Runner {
 // above attach attempts so raw mode remains active while a live client process
 // redials a lost link.
 func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) {
-	dialer := r.dialer
-	term := r.term
-	clk := r.clock
-	intent := request.Intent
-	name := request.SessionName
-	remote := request.Remote
-	clipboard := r.clipboard
-	log := r.logger
-	observer := r.runtimeObserver
 	ms := milestones{}
 
 	defer func() {
 		if retErr != nil {
-			log.Error("attach ended with error", "err", retErr, "missing_milestones", ms.missing())
+			r.logger.Error("attach ended with error", "err", retErr, "missing_milestones", ms.missing())
 		}
 	}()
 
@@ -221,7 +212,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			return nil
 		}
 		var err error
-		restore, err = term.EnterRaw()
+		restore, err = r.term.EnterRaw()
 		if err != nil {
 			return fmt.Errorf("vev: entering raw mode: %w", err)
 		}
@@ -231,87 +222,31 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	}
 
 	resumeToken := uint64(0)
-	attemptIntent := intent
-	attemptName := name
+	attemptRequest := request
 	backoff := defaultReconnectBackoff.initial
-	showingStatus := false
-	var reconnectToastRect domain.Rect
 	themeState := &terminalThemeState{}
-	statusStage := reconnectStageOfflineRetrying
-	redrawRemoteStatus := func(size domain.Size) {
-		if !rawEntered || !remote {
-			return
-		}
-		if showingStatus {
-			_ = clearReconnectToast(term.Out(), reconnectToastRect)
-		}
-		drawnRect, _ := drawReconnectToastStage(term.Out(), size, statusStage)
-		reconnectToastRect = drawnRect
-		_ = term.Flush()
-		showingStatus = true
-	}
-	var drawStatus func()
-	drawStatusStage := func(stage reconnectStage) {
-		statusStage = stage
-		if showingStatus && remote {
-			size, err := term.Size()
-			if err == nil {
-				redrawRemoteStatus(size)
-			}
-			return
-		}
-		drawStatus()
-	}
-	drawStatus = func() {
-		if !rawEntered || showingStatus {
-			return
-		}
-		if remote {
-			size, err := term.Size()
-			if err != nil {
-				return
-			}
-			redrawRemoteStatus(size)
-		} else {
-			_, _ = term.Out().Write([]byte(statusReconnect))
-			_ = term.Flush()
-			showingStatus = true
-		}
-	}
-	clearStatus := func() {
-		if !showingStatus {
-			return
-		}
-		if remote {
-			_ = clearReconnectToast(term.Out(), reconnectToastRect)
-		} else {
-			_, _ = term.Out().Write([]byte(statusClear))
-		}
-		_ = term.Flush()
-		showingStatus = false
-	}
-	sleepWhileReconnecting := func(d time.Duration) bool {
-		if remote && showingStatus {
-			return reconnectSleepWithResize(ctx, clk, d, term.ResizeEvents(), redrawRemoteStatus)
-		}
-		return reconnectSleep(ctx, clk, d)
+	reconnect := &reconnectUI{
+		term:       r.term,
+		remote:     request.Remote,
+		rawEntered: &rawEntered,
+		stage:      reconnectStageOfflineRetrying,
 	}
 
 	for {
-		transport, err := dialer.Dial(ctx)
+		transport, err := r.dialer.Dial(ctx)
 		if err != nil {
 			if resumeToken == 0 || ctx.Err() != nil {
-				clearStatus()
+				reconnect.clear()
 				return err
 			}
-			log.Warn("reconnect dial failed", "err", err, "backoff", backoff)
-			drawStatus()
-			if !sleepWhileReconnecting(backoff) {
-				clearStatus()
+			r.logger.Warn("reconnect dial failed", "err", err, "backoff", backoff)
+			reconnect.draw()
+			if !reconnect.sleep(ctx, r.clock, backoff) {
+				reconnect.clear()
 				return ctx.Err()
 			}
 			backoff = nextReconnectBackoff(backoff, defaultReconnectBackoff.max)
-			attemptIntent = ports.IntentResume
+			attemptRequest.Intent = ports.IntentResume
 			continue
 		}
 		ms.dialed = true
@@ -320,7 +255,18 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if reporter, ok := transport.(ports.LinkStateReporter); ok {
 			linkEvents = reporter.LinkEvents()
 		}
-		result := attachOnce(ctx, transport, term, clk, attemptIntent, attemptName, resumeToken, processClientID, &ms, themeState, enterRaw, clearStatus, drawStatusStage, linkEvents, remote, clipboard, log, observer)
+		result := (&attachAttempt{
+			runner:      r,
+			transport:   transport,
+			request:     attemptRequest,
+			resumeToken: resumeToken,
+			clientID:    processClientID,
+			milestones:  &ms,
+			themeState:  themeState,
+			enterRaw:    enterRaw,
+			reconnect:   reconnect,
+			linkEvents:  linkEvents,
+		}).run(ctx)
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
@@ -331,25 +277,99 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			resumeToken = result.resumeToken
 		}
 		if result.sessionName != "" {
-			attemptName = result.sessionName
+			attemptRequest.SessionName = result.sessionName
 		}
 		if result.err == nil {
-			clearStatus()
+			reconnect.clear()
 			return nil
 		}
 		if !shouldReconnect(result.err) || resumeToken == 0 || ctx.Err() != nil {
-			clearStatus()
+			reconnect.clear()
 			return result.err
 		}
-		log.Warn("reconnecting after attach error", "err", result.err, "backoff", backoff)
-		drawStatusStage(reconnectStageSSH)
-		if !sleepWhileReconnecting(backoff) {
-			clearStatus()
+		r.logger.Warn("reconnecting after attach error", "err", result.err, "backoff", backoff)
+		reconnect.drawStage(reconnectStageSSH)
+		if !reconnect.sleep(ctx, r.clock, backoff) {
+			reconnect.clear()
 			return ctx.Err()
 		}
 		backoff = nextReconnectBackoff(backoff, defaultReconnectBackoff.max)
-		attemptIntent = ports.IntentResume
+		attemptRequest.Intent = ports.IntentResume
 	}
+}
+
+// reconnectUI owns reconnect presentation while Runner owns the lifecycle.
+// Its methods run only on Runner's goroutine, preserving the terminal's
+// single-writer rule.
+type reconnectUI struct {
+	term       ports.Terminal
+	remote     bool
+	rawEntered *bool
+	showing    bool
+	rect       domain.Rect
+	stage      reconnectStage
+}
+
+func (u *reconnectUI) redraw(size domain.Size) {
+	if !*u.rawEntered || !u.remote {
+		return
+	}
+	if u.showing {
+		_ = clearReconnectToast(u.term.Out(), u.rect)
+	}
+	drawnRect, _ := drawReconnectToastStage(u.term.Out(), size, u.stage)
+	u.rect = drawnRect
+	_ = u.term.Flush()
+	u.showing = true
+}
+
+func (u *reconnectUI) drawStage(stage reconnectStage) {
+	u.stage = stage
+	if u.showing && u.remote {
+		size, err := u.term.Size()
+		if err == nil {
+			u.redraw(size)
+		}
+		return
+	}
+	u.draw()
+}
+
+func (u *reconnectUI) draw() {
+	if !*u.rawEntered || u.showing {
+		return
+	}
+	if u.remote {
+		size, err := u.term.Size()
+		if err != nil {
+			return
+		}
+		u.redraw(size)
+		return
+	}
+	_, _ = u.term.Out().Write([]byte(statusReconnect))
+	_ = u.term.Flush()
+	u.showing = true
+}
+
+func (u *reconnectUI) clear() {
+	if !u.showing {
+		return
+	}
+	if u.remote {
+		_ = clearReconnectToast(u.term.Out(), u.rect)
+	} else {
+		_, _ = u.term.Out().Write([]byte(statusClear))
+	}
+	_ = u.term.Flush()
+	u.showing = false
+}
+
+func (u *reconnectUI) sleep(ctx context.Context, clk ports.Clock, d time.Duration) bool {
+	if u.remote && u.showing {
+		return reconnectSleepWithResize(ctx, clk, d, u.term.ResizeEvents(), u.redraw)
+	}
+	return reconnectSleep(ctx, clk, d)
 }
 
 func sleepReconnect(ctx context.Context, clk ports.Clock, d time.Duration) bool {
@@ -382,6 +402,19 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 			}
 		}
 	}
+}
+
+type attachAttempt struct {
+	runner      *Runner
+	transport   ports.Transport
+	request     AttachRequest
+	resumeToken uint64
+	clientID    [16]byte
+	milestones  *milestones
+	themeState  *terminalThemeState
+	enterRaw    func() error
+	reconnect   *reconnectUI
+	linkEvents  <-chan ports.LinkEvent
 }
 
 type attachResult struct {
@@ -451,11 +484,23 @@ func requestedOutputWindow(transport ports.Transport) uint8 {
 	return 8
 }
 
-func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, themeState *terminalThemeState, enterRaw func() error, clearStatus func(), drawStatusStage func(reconnectStage), linkEvents <-chan ports.LinkEvent, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observers ...ports.RuntimeObserver) attachResult {
-	var observer ports.RuntimeObserver
-	if len(observers) != 0 {
-		observer = observers[0]
-	}
+func (a *attachAttempt) run(ctx context.Context) attachResult {
+	transport := a.transport
+	term := a.runner.term
+	clk := a.runner.clock
+	intent := a.request.Intent
+	name := a.request.SessionName
+	resumeToken := a.resumeToken
+	clientID := a.clientID
+	ms := a.milestones
+	themeState := a.themeState
+	enterRaw := a.enterRaw
+	reconnect := a.reconnect
+	linkEvents := a.linkEvents
+	remote := a.request.Remote
+	clipboard := a.runner.clipboard
+	log := a.runner.logger
+	observer := a.runner.runtimeObserver
 	// 1. Handshake: send Hello with our size and TERM.
 	size, err := term.Size()
 	if err != nil {
@@ -526,7 +571,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	if err := enterRaw(); err != nil {
 		return welcomedResult(err)
 	}
-	clearStatus()
+	reconnect.clear()
 	reportedTheme, restoreTheme := themeState.reportedTheme()
 
 	// 4. Derive a cancellable context so the pumps always unwind when the
@@ -560,7 +605,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 		clip = clipboard
 	}
 	go runSender(loopCtx, cancel, transport, sendCh, ackQueue, sendErrCh, log)
-	go runStdin(loopCtx, cancel, term.In(), sendCh, clk, themeState, requestColors, clip, log)
+	go (&stdinPump{ctx: loopCtx, cancel: cancel, in: term.In(), out: sendCh, clock: clk, themeState: themeState, clipboard: clip, logger: log, requestColors: requestColors}).run()
 	go runResize(loopCtx, term.ResizeEvents(), sendCh, log)
 
 	// 5. Output/main loop: the only goroutine that touches the terminal.
@@ -584,15 +629,15 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 				continue
 			}
 			if ev.State == ports.LinkStateConnected {
-				clearStatus()
+				reconnect.clear()
 				continue
 			}
 			if ev.State == ports.LinkStateDegraded {
 				log.Warn("UDP link degraded")
-				clearStatus()
+				reconnect.clear()
 				continue
 			}
-			drawStatusStage(stageForLinkState(ev.State))
+			reconnect.drawStage(stageForLinkState(ev.State))
 			if ev.State == ports.LinkStateOffline {
 				// Stop waiting for the transport to reach Dead at 60s: exit with
 				// a retryable error so Run re-dials over ssh with the resume
@@ -750,17 +795,38 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 	}
 }
 
-// runStdin pumps terminal input to the daemon as Input frames. A read error
+// stdinPump pumps terminal input to the daemon as Input frames. A read error
 // or EOF is treated as a detach: it best-effort sends a Detach frame and
 // cancels the loop.
 //
 // Known MVP limitation: a bare io.Reader cannot be unblocked from outside,
 // so on shutdown initiated elsewhere (daemon detach, transport loss) this
 // goroutine stays parked in Read until the next byte arrives or the process
-// exits. That is harmless here — Attach has already returned and restored
-// the terminal — and matches the standard pattern for stdin pumps; a
+// exits. That is harmless here — Run has already returned and restored the
+// terminal — and matches the standard pattern for stdin pumps; a
 // closable stdin duplicate could lift it later if ever needed.
-func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame, clk ports.Clock, themeState *terminalThemeState, requestColors func(), clipboard ports.ClipboardReader, log *slog.Logger) {
+type stdinPump struct {
+	ctx           context.Context
+	cancel        context.CancelFunc
+	in            io.Reader
+	out           chan<- ports.Frame
+	clock         ports.Clock
+	themeState    *terminalThemeState
+	clipboard     ports.ClipboardReader
+	logger        *slog.Logger
+	requestColors func()
+}
+
+func (p *stdinPump) run() {
+	ctx := p.ctx
+	cancel := p.cancel
+	in := p.in
+	out := p.out
+	clk := p.clock
+	themeState := p.themeState
+	requestColors := p.requestColors
+	clipboard := p.clipboard
+	log := p.logger
 	defer log.Debug("stdin pump exited")
 	buf := make([]byte, stdinBufSize)
 	var scanner theme.Scanner

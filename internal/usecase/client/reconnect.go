@@ -14,7 +14,7 @@ type reconnectBackoff struct {
 
 var defaultReconnectBackoff = reconnectBackoff{initial: 100 * time.Millisecond, max: 2 * time.Second}
 
-// errLinkOffline is returned by attachOnce when the transport link reaches the
+// errLinkOffline is returned by an attach attempt when the transport link reaches the
 // Offline state. It is retryable so Run re-dials over ssh with the resume token
 // at ~30s of silence instead of waiting the full Dead timeout at 60s.
 var errLinkOffline = errors.New("vev: link offline; reconnecting")

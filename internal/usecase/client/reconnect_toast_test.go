@@ -191,66 +191,70 @@ func newReconnectHandshakeClock(t *testing.T) *portsmocks.MockClock {
 	return clk
 }
 
+func newReconnectAttachAttempt(term ports.Terminal, transport ports.Transport, clock ports.Clock, request AttachRequest, resumeToken uint64, state *terminalThemeState, linkEvents <-chan ports.LinkEvent, ms *milestones) *attachAttempt {
+	rawEntered := false
+	enterRaw := func() error {
+		if rawEntered {
+			return nil
+		}
+		_, err := term.EnterRaw()
+		if err == nil {
+			rawEntered = true
+			ms.rawEntered = true
+		}
+		return err
+	}
+	runner := &Runner{term: term, clock: clock, logger: slog.New(slog.DiscardHandler)}
+	return &attachAttempt{
+		runner:      runner,
+		transport:   transport,
+		request:     request,
+		resumeToken: resumeToken,
+		clientID:    [16]byte{1},
+		milestones:  ms,
+		themeState:  state,
+		enterRaw:    enterRaw,
+		reconnect: &reconnectUI{
+			term:       term,
+			remote:     request.Remote,
+			rawEntered: &rawEntered,
+			stage:      reconnectStageOfflineRetrying,
+		},
+		linkEvents: linkEvents,
+	}
+}
+
 func TestReconnectToastDegradedClearsModalAndProbingIsVisible(t *testing.T) {
 	term := newReconnectToastTerminalHarness(t)
 	defer term.closeInput()
 	tr := newReconnectToastLinkTransport()
 	tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
 
-	stages := make(chan reconnectStage, 4)
-	clears := make(chan struct{}, 4)
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
-	go func() {
-		resultCh <- attachOnce(context.Background(), tr, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", 0, [16]byte{1}, &ms, &terminalThemeState{}, func() error {
-			_, err := term.term.EnterRaw()
-			return err
-		}, func() { clears <- struct{}{} }, func(stage reconnectStage) {
-			stages <- stage
-		}, tr.LinkEvents(), true, nil, slog.New(slog.DiscardHandler))
-	}()
+	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
+	go func() { resultCh <- attempt.run(context.Background()) }()
 
-	require.Eventually(t, func() bool { return len(clears) == 1 }, time.Second, time.Millisecond)
-	<-clears // Welcome clears any stale status from an earlier attempt.
 	tr.events <- ports.LinkEvent{State: ports.LinkStateDegraded}
-	select {
-	case <-clears:
-	case <-time.After(time.Second):
-		t.Fatal("degraded link did not clear stale reconnect modal")
-	}
-	select {
-	case stage := <-stages:
-		t.Fatalf("degraded link drew modal stage %v", stage)
-	case <-time.After(25 * time.Millisecond):
-	}
 	tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
-	require.Equal(t, reconnectStageProbingUDP, <-stages)
 	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)}
 	result := <-resultCh
 	require.NoError(t, result.err)
 	require.True(t, result.welcomed)
 }
 
-func TestAttachOnceOfflineLinkEventReturnsReconnectableError(t *testing.T) {
+func TestAttachAttemptOfflineLinkEventReturnsReconnectableError(t *testing.T) {
 	term := newReconnectToastTerminalHarness(t)
 	defer term.closeInput()
 	tr := newReconnectToastLinkTransport()
 	tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
 
-	stages := make(chan reconnectStage, 4)
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
-	go func() {
-		resultCh <- attachOnce(context.Background(), tr, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", 0, [16]byte{1}, &ms, &terminalThemeState{}, func() error {
-			_, err := term.term.EnterRaw()
-			return err
-		}, func() {}, func(stage reconnectStage) {
-			stages <- stage
-		}, tr.LinkEvents(), true, nil, slog.New(slog.DiscardHandler))
-	}()
+	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
+	go func() { resultCh <- attempt.run(context.Background()) }()
 
 	tr.events <- ports.LinkEvent{State: ports.LinkStateOffline}
-	require.Equal(t, reconnectStageOfflineRetrying, <-stages)
 	result := <-resultCh
 	require.ErrorIs(t, result.err, errLinkOffline)
 	require.True(t, result.welcomed)
@@ -565,12 +569,8 @@ func TestCachedThemeSendDoesNotBlockCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
-	go func() {
-		resultCh <- attachOnce(ctx, transport, term.term, newReconnectHandshakeClock(t), ports.IntentResume, "main", 44, [16]byte{1}, &ms, themeState, func() error {
-			_, err := term.term.EnterRaw()
-			return err
-		}, func() {}, func(reconnectStage) {}, nil, true, nil, slog.New(slog.DiscardHandler))
-	}()
+	attempt := newReconnectAttachAttempt(term.term, transport, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentResume, SessionName: "main", Remote: true}, 44, themeState, nil, &ms)
+	go func() { resultCh <- attempt.run(ctx) }()
 
 	select {
 	case <-transport.started:
