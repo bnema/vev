@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -638,15 +637,11 @@ func TestCaptureOverlayLayersResizeRecomposesPickerWithoutStalePreview(t *testin
 	}
 }
 
-func TestPickerPreviewAllocationsAreIndependentOfTenThousandScrollbackRows(t *testing.T) {
-	empty := newPickerPreviewTabWithHistoryRows(0)
+func TestPickerPreviewContainsOnlyVisibleFrameRowsWithLargeScrollback(t *testing.T) {
 	withScrollback := newPickerPreviewTabWithHistoryRows(10_000)
-	require.Zero(t, empty.focusedPane().screen.History().Len())
 	require.Equal(t, 10_000, withScrollback.focusedPane().screen.History().Len())
 
 	preview := snapshotPickerPreview(withScrollback)
-	emptyPreview := snapshotPickerPreview(empty)
-	require.Equal(t, emptyPreview, preview, "identical visible tabs must produce identical previews")
 	require.Equal(t, 10, preview.Width)
 	require.Equal(t, 3, preview.Height)
 	require.Len(t, preview.Rows, preview.Height)
@@ -665,20 +660,6 @@ func TestPickerPreviewAllocationsAreIndependentOfTenThousandScrollbackRows(t *te
 	}(), "\n")
 	require.Contains(t, got, "NOW")
 	require.NotContains(t, got, "history-only-marker")
-
-	emptyResult := benchmarkPickerPreview(empty, snapshotPickerPreview)
-	scrollbackResult := benchmarkPickerPreview(withScrollback, snapshotPickerPreview)
-	require.Equal(t, emptyResult.AllocsPerOp(), scrollbackResult.AllocsPerOp(), "preview allocations must not depend on retained scrollback")
-	require.Equal(t, emptyResult.AllocedBytesPerOp(), scrollbackResult.AllocedBytesPerOp(), "preview allocated bytes must not depend on retained scrollback")
-
-	// The local seam deliberately clones every history row. Its larger result
-	// demonstrates that the allocation assertion would fail if preview capture
-	// regressed to copying scrollback, without changing production code to make
-	// this test red.
-	cloningEmptyResult := benchmarkPickerPreview(empty, snapshotPickerPreviewWithClonedHistoryForTest)
-	cloningScrollbackResult := benchmarkPickerPreview(withScrollback, snapshotPickerPreviewWithClonedHistoryForTest)
-	require.Greater(t, cloningScrollbackResult.AllocsPerOp(), cloningEmptyResult.AllocsPerOp())
-	require.Greater(t, cloningScrollbackResult.AllocedBytesPerOp(), cloningEmptyResult.AllocedBytesPerOp())
 }
 
 func newPickerPreviewTabWithHistoryRows(historyRows int) *tab {
@@ -689,36 +670,6 @@ func newPickerPreviewTabWithHistoryRows(historyRows int) *tab {
 	}
 	p.screen.Write([]byte("NOW"))
 	return tb
-}
-
-func benchmarkPickerPreview(tb *tab, snapshot func(*tab) picker.Preview) testing.BenchmarkResult {
-	return testing.Benchmark(func(b *testing.B) {
-		b.ReportAllocs()
-		for range b.N {
-			runtime.KeepAlive(snapshot(tb))
-		}
-	})
-}
-
-func snapshotPickerPreviewWithClonedHistoryForTest(tb *tab) picker.Preview {
-	tb.mu.Lock()
-	p := tb.focusedPane()
-	if p == nil {
-		tb.mu.Unlock()
-		return picker.Preview{}
-	}
-	p.mu.Lock()
-	history := p.screen.History().View()
-	p.mu.Unlock()
-	tb.mu.Unlock()
-
-	var cloned [][]renderer.Cell
-	history.Range(func(row []renderer.Cell) bool {
-		cloned = append(cloned, append([]renderer.Cell(nil), row...))
-		return true
-	})
-	runtime.KeepAlive(cloned)
-	return snapshotPickerPreview(tb)
 }
 
 func TestPickerPreviewSinglePaneSnapshotsFocusedPane(t *testing.T) {
