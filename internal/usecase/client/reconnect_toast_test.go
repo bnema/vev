@@ -202,7 +202,7 @@ func TestReconnectToastDegradedClearsModalAndProbingIsVisible(t *testing.T) {
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
 	go func() {
-		resultCh <- attachOnce(context.Background(), tr, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", 0, [16]byte{1}, &ms, func() error {
+		resultCh <- attachOnce(context.Background(), tr, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", 0, [16]byte{1}, &ms, &terminalThemeState{}, func() error {
 			_, err := term.term.EnterRaw()
 			return err
 		}, func() { clears <- struct{}{} }, func(stage reconnectStage) {
@@ -241,7 +241,7 @@ func TestAttachOnceOfflineLinkEventReturnsReconnectableError(t *testing.T) {
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
 	go func() {
-		resultCh <- attachOnce(context.Background(), tr, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", 0, [16]byte{1}, &ms, func() error {
+		resultCh <- attachOnce(context.Background(), tr, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", 0, [16]byte{1}, &ms, &terminalThemeState{}, func() error {
 			_, err := term.term.EnterRaw()
 			return err
 		}, func() {}, func(stage reconnectStage) {
@@ -464,6 +464,164 @@ func TestRemoteReconnectToastLifecycleWithWrappedTransportError(t *testing.T) {
 	out := term.out.String()
 	require.Contains(t, out, reconnectToastMessage)
 	require.Contains(t, out, strings.Repeat(" ", reconnectToastBounds(term.size).Width))
+}
+
+type reconnectThemeTransport struct {
+	resumeToken          uint64
+	disconnectAfterTheme bool
+	recvCount            int
+	fullTheme            chan ports.Theme
+	observedTheme        ports.Theme
+}
+
+func newReconnectThemeTransport(token uint64, disconnectAfterTheme bool) *reconnectThemeTransport {
+	return &reconnectThemeTransport{
+		resumeToken:          token,
+		disconnectAfterTheme: disconnectAfterTheme,
+		fullTheme:            make(chan ports.Theme, 1),
+	}
+}
+
+func (t *reconnectThemeTransport) Send(f ports.Frame) error {
+	if f.Type != ports.MsgTheme {
+		return nil
+	}
+	theme, err := ports.UnmarshalTheme(f.Payload)
+	if err != nil {
+		return err
+	}
+	if theme.HasForeground && theme.HasBackground {
+		select {
+		case t.fullTheme <- theme:
+		default:
+		}
+	}
+	return nil
+}
+
+func (t *reconnectThemeTransport) Recv() (ports.Frame, error) {
+	t.recvCount++
+	if t.recvCount == 1 {
+		return reconnectToastWelcome(t.resumeToken), nil
+	}
+	t.observedTheme = <-t.fullTheme
+	if t.disconnectAfterTheme {
+		return ports.Frame{}, io.EOF
+	}
+	return reconnectToastDetach(ports.ReasonDetach), nil
+}
+
+func (t *reconnectThemeTransport) Close() error { return nil }
+
+type blockingThemeRestoreTransport struct {
+	started chan struct{}
+	closed  chan struct{}
+	recvs   int
+}
+
+func newBlockingThemeRestoreTransport() *blockingThemeRestoreTransport {
+	return &blockingThemeRestoreTransport{started: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (t *blockingThemeRestoreTransport) Send(f ports.Frame) error {
+	if f.Type != ports.MsgTheme {
+		return nil
+	}
+	close(t.started)
+	<-t.closed
+	return io.ErrClosedPipe
+}
+
+func (t *blockingThemeRestoreTransport) Recv() (ports.Frame, error) {
+	t.recvs++
+	if t.recvs == 1 {
+		return reconnectToastWelcome(44), nil
+	}
+	<-t.closed
+	return ports.Frame{}, io.EOF
+}
+
+func (t *blockingThemeRestoreTransport) Close() error {
+	select {
+	case <-t.closed:
+	default:
+		close(t.closed)
+	}
+	return nil
+}
+
+func TestCachedThemeSendDoesNotBlockCancellation(t *testing.T) {
+	term := newReconnectToastTerminalHarness(t)
+	defer term.closeInput()
+	themeState := &terminalThemeState{}
+	themeState.setTrueColor(true)
+	themeState.update(func(theme *ports.Theme) {
+		theme.HasForeground = true
+		theme.Foreground = renderer.RGB{R: 1, G: 2, B: 3}
+		theme.HasBackground = true
+		theme.Background = renderer.RGB{R: 4, G: 5, B: 6}
+	})
+	transport := newBlockingThemeRestoreTransport()
+	ctx, cancel := context.WithCancel(context.Background())
+	resultCh := make(chan attachResult, 1)
+	ms := milestones{}
+	go func() {
+		resultCh <- attachOnce(ctx, transport, term.term, newReconnectHandshakeClock(t), ports.IntentResume, "main", 44, [16]byte{1}, &ms, themeState, func() error {
+			_, err := term.term.EnterRaw()
+			return err
+		}, func() {}, func(reconnectStage) {}, nil, true, nil, slog.New(slog.DiscardHandler))
+	}()
+
+	select {
+	case <-transport.started:
+	case <-time.After(time.Second):
+		cancel()
+		_ = transport.Close()
+		t.Fatal("cached theme restoration did not start")
+	}
+	cancel()
+	select {
+	case result := <-resultCh:
+		require.True(t, result.welcomed)
+		require.NoError(t, result.err)
+		_ = transport.Close()
+	case <-time.After(100 * time.Millisecond):
+		_ = transport.Close()
+		<-resultCh
+		t.Fatal("cached theme send blocked attach cancellation")
+	}
+}
+
+func TestRemoteReconnectResendsKnownTerminalTheme(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("COLORTERM", "truecolor")
+	oldSleep := reconnectSleep
+	oldSleepWithResize := reconnectSleepWithResize
+	reconnectSleep = func(context.Context, ports.Clock, time.Duration) bool { return true }
+	reconnectSleepWithResize = func(context.Context, ports.Clock, time.Duration, <-chan domain.Size, func(domain.Size)) bool {
+		return true
+	}
+	defer func() {
+		reconnectSleep = oldSleep
+		reconnectSleepWithResize = oldSleepWithResize
+	}()
+
+	term := newReconnectToastTerminalHarness(t)
+	defer term.closeInput()
+	go func() {
+		_, _ = term.inWriter.Write([]byte("\x1b]10;#010203\x07\x1b]11;#040506\x07"))
+	}()
+	tr1 := newReconnectThemeTransport(44, true)
+	tr2 := newReconnectThemeTransport(55, false)
+	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr1, tr2}}
+
+	err := Run(context.Background(), dialer, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.True(t, tr2.observedTheme.HasForeground)
+	require.True(t, tr2.observedTheme.HasBackground)
+	require.True(t, tr2.observedTheme.TrueColor)
+	require.Equal(t, renderer.RGB{R: 1, G: 2, B: 3}, tr2.observedTheme.Foreground)
+	require.Equal(t, renderer.RGB{R: 4, G: 5, B: 6}, tr2.observedTheme.Background)
 }
 
 func TestRemoteEphemeralReconnectUsesAssignedSessionName(t *testing.T) {
