@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -70,6 +71,34 @@ func newReconnectToastTerminalHarnessWithOutput(t *testing.T, out io.Writer) *re
 }
 
 func (h *reconnectToastTerminalHarness) closeInput() { _ = h.inWriter.Close() }
+
+type reconnectToastOutputRecorder struct {
+	mu        sync.Mutex
+	pending   strings.Builder
+	completed chan string
+}
+
+func newReconnectToastOutputRecorder() *reconnectToastOutputRecorder {
+	return &reconnectToastOutputRecorder{completed: make(chan string, 3)}
+}
+
+func (r *reconnectToastOutputRecorder) Write(p []byte) (int, error) {
+	const restoreCursor = "\x1b[0m\x1b[u"
+
+	r.mu.Lock()
+	r.pending.Write(p)
+	var output string
+	if string(p) == restoreCursor {
+		output = r.pending.String()
+		r.pending.Reset()
+	}
+	r.mu.Unlock()
+
+	if output != "" {
+		r.completed <- output
+	}
+	return len(p), nil
+}
 
 func reconnectToastWelcome(token uint64) ports.Frame {
 	return reconnectToastWelcomeNamed("", token)
@@ -225,7 +254,8 @@ func newReconnectAttachAttempt(term ports.Terminal, transport ports.Transport, c
 }
 
 func TestReconnectToastDegradedClearsModalAndProbingIsVisible(t *testing.T) {
-	term := newReconnectToastTerminalHarness(t)
+	out := newReconnectToastOutputRecorder()
+	term := newReconnectToastTerminalHarnessWithOutput(t, out)
 	defer term.closeInput()
 	tr := newReconnectToastLinkTransport()
 	tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
@@ -235,8 +265,18 @@ func TestReconnectToastDegradedClearsModalAndProbingIsVisible(t *testing.T) {
 	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
 	go func() { resultCh <- attempt.run(context.Background()) }()
 
-	tr.events <- ports.LinkEvent{State: ports.LinkStateDegraded}
 	tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
+	probed := <-out.completed
+	require.Contains(t, probed, reconnectStageMessage(reconnectStageProbingUDP))
+
+	tr.events <- ports.LinkEvent{State: ports.LinkStateDegraded}
+	cleared := <-out.completed
+	assertReconnectToastClearCoversBounds(t, cleared, reconnectToastBoundsFor(term.size, reconnectStageMessage(reconnectStageProbingUDP)))
+
+	tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
+	probed = <-out.completed
+	require.Contains(t, probed, reconnectStageMessage(reconnectStageProbingUDP))
+
 	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)}
 	result := <-resultCh
 	require.NoError(t, result.err)
