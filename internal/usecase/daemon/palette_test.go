@@ -586,6 +586,25 @@ func TestPaletteTabCompletesSelectedCommandWithoutForwardingToPTY(t *testing.T) 
 	}
 }
 
+func TestPaletteBatchedTabCompletionPreservesRepaintInvalidation(t *testing.T) {
+	writes := make(chan []byte, 1)
+	p, release := newBlockingPTYWithWrites(t, writes)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput) // drain palette-open repaint
+
+	d.handleInput(sess, ac, []byte("NX\t\t"))
+	ac.overlays.paletteMu.Lock()
+	got := ac.overlays.palette.Query()
+	ac.overlays.paletteMu.Unlock()
+	require.Equal(t, "NXT", got)
+	awaitFrame(t, sends, ports.MsgOutput)
+	requireNoPaletteFrame(t, sends)
+	requireNoPTYWrite(t, writes)
+}
+
 func requireNoPaletteFrame(t *testing.T, sends <-chan ports.Frame) {
 	t.Helper()
 	select {
