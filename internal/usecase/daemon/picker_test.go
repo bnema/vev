@@ -15,6 +15,8 @@ import (
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
 
@@ -543,6 +545,124 @@ func TestPickerDestroyedTabCleanupDoesNotClearNewerGeneration(t *testing.T) {
 	_, subscribed := rc.previewWakes[viewer]
 	rc.mu.Unlock()
 	require.True(t, subscribed)
+}
+
+func TestCaptureOverlayLayersUsesMutedThemeStyleForPickerSeparators(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		theme themeui.Theme
+	}{
+		{name: "default terminal", theme: themeui.Theme{}},
+		{name: "truecolor terminal", theme: themeui.BuiltinDark},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := capturedRenderState{
+				theme:  tt.theme,
+				layout: capturedTabLayout{area: domain.Rect{Width: 100, Height: 38}},
+			}
+			snap := &overlayRenderSnapshot{
+				pickerActive: true,
+				pickerModel:  picker.New([]picker.SessionView{{ID: "s", Name: "session", Tabs: []picker.TabEntry{{Name: "tab"}}, Active: 0}}, "s", 0),
+			}
+
+			captureOverlayLayers(&state, snap, domain.PaletteConfig{})
+
+			inner := state.overlays.picker.inner
+			layout := picker.ChooseLayout(domain.Size{Cols: inner.Width, Rows: inner.Height})
+			require.Equal(t, picker.LayoutHorizontal, layout.Mode)
+			want := themeui.MutedTextStyle(tt.theme)
+			for y := layout.Separator.Y; y < layout.Separator.Y+layout.Separator.Height; y++ {
+				for x := layout.Separator.X; x < layout.Separator.X+layout.Separator.Width; x++ {
+					cell := inner.At(x, y)
+					require.Equal(t, '│', cell.Rune)
+					require.True(t, cell.Style.Equal(want))
+				}
+			}
+		})
+	}
+}
+
+func TestCaptureOverlayLayersResizeRecomposesPickerWithoutStalePreview(t *testing.T) {
+	model := picker.New([]picker.SessionView{{ID: "s", Name: "session", Tabs: []picker.TabEntry{{Name: "tab"}}, Active: 0}}, "s", 0)
+	state := capturedRenderState{theme: themeui.BuiltinDark}
+	cases := []struct {
+		name       string
+		size       domain.Size
+		marker     rune
+		wantMode   picker.LayoutMode
+		wantSep    rune
+		wantMarker bool
+	}{
+		{name: "horizontal", size: domain.Size{Cols: 100, Rows: 40}, marker: '◆', wantMode: picker.LayoutHorizontal, wantSep: '│', wantMarker: true},
+		{name: "stacked", size: domain.Size{Cols: 40, Rows: 20}, marker: '◇', wantMode: picker.LayoutStacked, wantSep: '─', wantMarker: true},
+		{name: "list only", size: domain.Size{Cols: 24, Rows: 11}, marker: '●', wantMode: picker.LayoutListOnly},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			state.layout.area = domain.Rect{Width: tt.size.Cols, Height: tt.size.Rows - 2}
+			snap := &overlayRenderSnapshot{pickerActive: true, pickerModel: model, previewTab: nil}
+			state.preview = picker.Preview{Width: 1, Height: 1, Rows: [][]renderer.Cell{{{Rune: tt.marker, Style: renderer.DefaultStyle()}}}}
+
+			captureOverlayLayers(&state, snap, domain.PaletteConfig{})
+
+			inner := state.overlays.picker.inner
+			layout := picker.ChooseLayout(domain.Size{Cols: inner.Width, Rows: inner.Height})
+			require.Equal(t, tt.wantMode, layout.Mode)
+			got := strings.Join(frameRows(inner), "\n")
+			if tt.wantMarker {
+				require.Contains(t, got, string(tt.marker))
+			} else {
+				require.NotContains(t, got, "◆")
+				require.NotContains(t, got, "◇")
+				require.NotContains(t, got, "●")
+			}
+			if tt.wantSep == 0 {
+				require.NotContains(t, got, "│")
+				require.NotContains(t, got, "─")
+				return
+			}
+			if tt.wantSep == '│' {
+				require.NotContains(t, got, "─")
+			} else {
+				require.NotContains(t, got, "│")
+			}
+			for y := layout.Separator.Y; y < layout.Separator.Y+layout.Separator.Height; y++ {
+				for x := layout.Separator.X; x < layout.Separator.X+layout.Separator.Width; x++ {
+					cell := inner.At(x, y)
+					require.Equal(t, tt.wantSep, cell.Rune)
+					require.True(t, cell.Style.Equal(themeui.MutedTextStyle(state.theme)))
+				}
+			}
+		})
+	}
+}
+
+func TestPickerPreviewDoesNotCloneScrollback(t *testing.T) {
+	tb := newTab(nil, domain.Size{Cols: 10, Rows: 3})
+	p := tb.focusedPane()
+	p.screen.Write([]byte(strings.Repeat("history-only-marker\n", 10_000)))
+	p.screen.Write([]byte("\rNOW"))
+
+	preview := snapshotPickerPreview(tb)
+
+	require.Equal(t, 10, preview.Width)
+	require.Equal(t, 3, preview.Height)
+	require.Len(t, preview.Rows, preview.Height)
+	cells := 0
+	for _, row := range preview.Rows {
+		require.Len(t, row, preview.Width)
+		cells += len(row)
+	}
+	require.Equal(t, preview.Width*preview.Height, cells)
+	got := strings.Join(func() []string {
+		rows := make([]string, len(preview.Rows))
+		for i, row := range preview.Rows {
+			rows[i] = rowText(row)
+		}
+		return rows
+	}(), "\n")
+	require.Contains(t, got, "NOW")
+	require.NotContains(t, got, "history-only-marker")
 }
 
 func TestPickerPreviewSinglePaneSnapshotsFocusedPane(t *testing.T) {
