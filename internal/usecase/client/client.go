@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -48,6 +49,34 @@ type DetachedError struct {
 }
 
 func (e *DetachedError) Error() string { return "vev: " + e.Text }
+
+// terminalThemeState retains the latest terminal-reported colors across
+// transport attempts so a replacement attachment can restore the daemon theme
+// without relying on another OSC response.
+type terminalThemeState struct {
+	mu    sync.Mutex
+	theme ports.Theme
+}
+
+func (s *terminalThemeState) setTrueColor(enabled bool) {
+	s.mu.Lock()
+	s.theme.TrueColor = enabled
+	s.mu.Unlock()
+}
+
+func (s *terminalThemeState) update(update func(*ports.Theme)) ports.Theme {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	update(&s.theme)
+	return s.theme
+}
+
+func (s *terminalThemeState) reportedTheme() (ports.Theme, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	theme := s.theme
+	return theme, theme.HasForeground || theme.HasBackground || theme.SchemeKnown
+}
 
 // milestones tracks lifecycle progress so a failure can report which stages
 // were never reached — the key diagnostic when an attach dies early.
@@ -187,6 +216,7 @@ func run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 	backoff := defaultReconnectBackoff.initial
 	showingStatus := false
 	var reconnectToastRect domain.Rect
+	themeState := &terminalThemeState{}
 	statusStage := reconnectStageOfflineRetrying
 	redrawRemoteStatus := func(size domain.Size) {
 		if !rawEntered || !remote {
@@ -270,7 +300,7 @@ func run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 		if reporter, ok := transport.(ports.LinkStateReporter); ok {
 			linkEvents = reporter.LinkEvents()
 		}
-		result := attachOnce(ctx, transport, term, clk, attemptIntent, attemptName, resumeToken, processClientID, &ms, enterRaw, clearStatus, drawStatusStage, linkEvents, remote, clipboard, log, observer)
+		result := attachOnce(ctx, transport, term, clk, attemptIntent, attemptName, resumeToken, processClientID, &ms, themeState, enterRaw, clearStatus, drawStatusStage, linkEvents, remote, clipboard, log, observer)
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
@@ -422,7 +452,7 @@ func requestedOutputWindow(transport ports.Transport) uint8 {
 	return 8
 }
 
-func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func(), drawStatusStage func(reconnectStage), linkEvents <-chan ports.LinkEvent, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observers ...ports.RuntimeObserver) attachResult {
+func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, themeState *terminalThemeState, enterRaw func() error, clearStatus func(), drawStatusStage func(reconnectStage), linkEvents <-chan ports.LinkEvent, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observers ...ports.RuntimeObserver) attachResult {
 	var observer ports.RuntimeObserver
 	if len(observers) != 0 {
 		observer = observers[0]
@@ -439,6 +469,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	termEnv := os.Getenv("TERM")
 	colorTerm := os.Getenv("COLORTERM")
 	trueColor := DetectTrueColor(termEnv, colorTerm)
+	themeState.setTrueColor(trueColor)
 	hello := ports.Hello{
 		Version:           ports.ProtocolVersion,
 		Intent:            intent,
@@ -497,6 +528,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 		return welcomedResult(err)
 	}
 	clearStatus()
+	reportedTheme, restoreTheme := themeState.reportedTheme()
 
 	// 4. Derive a cancellable context so the pumps always unwind when the
 	// loop returns. cancel runs first (LIFO): it signals the pumps; the
@@ -505,6 +537,9 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 	defer cancel()
 
 	sendCh := make(chan ports.Frame, sendQueueDepth)
+	if restoreTheme {
+		sendCh <- ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(reportedTheme)}
+	}
 	ackQueue := newCumulativeAckQueue()
 	sendErrCh := make(chan error, 1)
 
@@ -526,7 +561,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 		clip = clipboard
 	}
 	go runSender(loopCtx, cancel, transport, sendCh, ackQueue, sendErrCh, log)
-	go runStdin(loopCtx, cancel, term.In(), sendCh, clk, trueColor, requestColors, clip, log)
+	go runStdin(loopCtx, cancel, term.In(), sendCh, clk, themeState, requestColors, clip, log)
 	go runResize(loopCtx, term.ResizeEvents(), sendCh, log)
 
 	// 5. Output/main loop: the only goroutine that touches the terminal.
@@ -726,12 +761,11 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 // exits. That is harmless here — Attach has already returned and restored
 // the terminal — and matches the standard pattern for stdin pumps; a
 // closable stdin duplicate could lift it later if ever needed.
-func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame, clk ports.Clock, trueColor bool, requestColors func(), clipboard ports.ClipboardReader, log *slog.Logger) {
+func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out chan<- ports.Frame, clk ports.Clock, themeState *terminalThemeState, requestColors func(), clipboard ports.ClipboardReader, log *slog.Logger) {
 	defer log.Debug("stdin pump exited")
 	buf := make([]byte, stdinBufSize)
 	var scanner theme.Scanner
 	var inputSeq uint64
-	current := ports.Theme{TrueColor: trueColor}
 	var sendOK atomic.Bool
 	sendOK.Store(true)
 	send := func(frame ports.Frame) {
@@ -776,28 +810,30 @@ func runStdin(ctx context.Context, cancel context.CancelFunc, in io.Reader, out 
 	for {
 		n, rerr := in.Read(buf)
 		if n > 0 {
-			sendTheme := func() {
+			sendTheme := func(current ports.Theme) {
 				send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(current)})
 			}
 			scanner.Scan(buf[:n], func(kind int, rgb renderer.RGB) {
-				switch kind {
-				case 10:
-					current.HasForeground = true
-					current.Foreground = rgb
-				case 11:
-					current.HasBackground = true
-					current.Background = rgb
-				default:
-					return
-				}
-				sendTheme()
+				current := themeState.update(func(current *ports.Theme) {
+					switch kind {
+					case 10:
+						current.HasForeground = true
+						current.Foreground = rgb
+					case 11:
+						current.HasBackground = true
+						current.Background = rgb
+					}
+				})
+				sendTheme(current)
 			}, func(light bool) {
-				current.SchemeKnown = true
-				current.Light = light
+				current := themeState.update(func(current *ports.Theme) {
+					current.SchemeKnown = true
+					current.Light = light
+				})
 				if requestColors != nil {
 					requestColors()
 				}
-				sendTheme()
+				sendTheme(current)
 			}, sink)
 			if !sendOK.Load() {
 				return
