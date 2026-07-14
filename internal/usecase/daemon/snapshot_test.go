@@ -1041,6 +1041,8 @@ func newSnapshotTestSession(t *testing.T, name string, ephemeral bool, cwd strin
 
 func awaitSnapshotIdle(t testing.TB, sess *session) {
 	t.Helper()
+	timer := time.NewTimer(testWaitTimeout)
+	defer timer.Stop()
 	for {
 		sess.snapshotMu.Lock()
 		pending := sess.snapshotPending
@@ -1049,7 +1051,11 @@ func awaitSnapshotIdle(t testing.TB, sess *session) {
 		if !pending {
 			return
 		}
-		<-changed
+		select {
+		case <-changed:
+		case <-timer.C:
+			t.Fatal("timed out waiting for snapshot to become idle")
+		}
 	}
 }
 

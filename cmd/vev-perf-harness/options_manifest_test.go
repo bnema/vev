@@ -149,6 +149,54 @@ func TestValidateManifestRejectsEmptyAndDuplicateMatrixIDs(t *testing.T) {
 	}
 }
 
+func TestValidateManifestRejectsFullyCoveredUnknownMatrixIDs(t *testing.T) {
+	canonical, err := readManifest(filepath.Join("..", "..", "testdata", "perf", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*manifest)
+		want   string
+	}{
+		{
+			name: "topology",
+			mutate: func(m *manifest) {
+				m.Topologies = append(m.Topologies, topology{ID: "9x9", Geometry: "120x40", RowsPerPane: 10000})
+				for _, s := range canonical.Scenarios {
+					s.ID = "9x9-" + s.ID
+					s.Topology = "9x9"
+					m.Scenarios = append(m.Scenarios, s)
+				}
+			},
+			want: "unknown topology id \"9x9\"",
+		},
+		{
+			name: "workload",
+			mutate: func(m *manifest) {
+				m.Workloads = append(m.Workloads, "unknown_workload")
+				for _, s := range canonical.Scenarios {
+					s.ID = "unknown-workload-" + s.ID
+					s.Workload = "unknown_workload"
+					m.Scenarios = append(m.Scenarios, s)
+				}
+			},
+			want: "unknown workload id \"unknown_workload\"",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := canonical
+			m.Topologies = append([]topology(nil), canonical.Topologies...)
+			m.Workloads = append([]string(nil), canonical.Workloads...)
+			m.Scenarios = append([]scenario(nil), canonical.Scenarios...)
+			tc.mutate(&m)
+			if err := validateManifest(m); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("validateManifest() error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestHarnessManifestCoversCanonicalMatrix(t *testing.T) {
 	m, err := readManifest(filepath.Join("..", "..", "testdata", "perf", "manifest.json"))
 	if err != nil {

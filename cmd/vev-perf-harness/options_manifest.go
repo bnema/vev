@@ -10,6 +10,24 @@ import (
 	"path/filepath"
 )
 
+var (
+	canonicalTopologyIDs = []string{"1x4", "4x1", "4x4", "8x1"}
+	canonicalTopologySet = stringSet(canonicalTopologyIDs)
+	canonicalWorkloadIDs = []string{
+		"idle", "active_output", "all_output", "inactive_output", "interactive_flood",
+		"copy_search", "resize_sweep", "snapshot_output_resize", "attach_restore_tab_switch",
+	}
+	canonicalWorkloadSet = stringSet(canonicalWorkloadIDs)
+)
+
+func stringSet(ids []string) map[string]bool {
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set
+}
+
 func parseOptions(args []string) (options, error) {
 	var o options
 	fs := flag.NewFlagSet("vev-perf-harness", flag.ContinueOnError)
@@ -93,13 +111,15 @@ func validateManifest(m manifest) error {
 		if tops[t.ID] {
 			return fmt.Errorf("duplicate topology id %q", t.ID)
 		}
+		if !canonicalTopologySet[t.ID] {
+			return fmt.Errorf("unknown topology id %q", t.ID)
+		}
 		if t.Geometry != "120x40" || t.RowsPerPane != 10000 {
 			return fmt.Errorf("invalid topology %q", t.ID)
 		}
 		tops[t.ID] = true
 	}
-	wantT := []string{"1x4", "4x1", "4x4", "8x1"}
-	for _, v := range wantT {
+	for _, v := range canonicalTopologyIDs {
 		if !tops[v] {
 			return fmt.Errorf("missing canonical topology %s", v)
 		}
@@ -112,9 +132,12 @@ func validateManifest(m manifest) error {
 		if works[workload] {
 			return fmt.Errorf("duplicate workload id %q", workload)
 		}
+		if !canonicalWorkloadSet[workload] {
+			return fmt.Errorf("unknown workload id %q", workload)
+		}
 		works[workload] = true
 	}
-	for _, v := range []string{"idle", "active_output", "all_output", "inactive_output", "interactive_flood", "copy_search", "resize_sweep", "snapshot_output_resize", "attach_restore_tab_switch"} {
+	for _, v := range canonicalWorkloadIDs {
 		if !works[v] {
 			return fmt.Errorf("missing canonical workload %s", v)
 		}
