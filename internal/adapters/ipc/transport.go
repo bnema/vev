@@ -63,15 +63,18 @@ type unixTransport struct {
 	observedClosing bool
 	operationsDone  chan struct{}
 
-	// egressMu synchronizes Close with nonblocking enqueue. Once closed, no
-	// request can be left behind after the writer drains the queue.
-	egressMu      sync.Mutex
-	egressClosing bool
-	egress        chan sendRequest
-	done          chan struct{}
-	writerDone    chan struct{}
-	closeOnce     sync.Once
-	closeErr      error
+	// egressMu synchronizes Close with enqueue. Synchronous enqueuers are
+	// tracked separately so the writer cannot drain the queue until each has
+	// observed closure or finished enqueueing.
+	egressMu          sync.Mutex
+	egressClosing     bool
+	egressSenders     int
+	egressSendersDone chan struct{}
+	egress            chan sendRequest
+	done              chan struct{}
+	writerDone        chan struct{}
+	closeOnce         sync.Once
+	closeErr          error
 
 	// readBuf is reused across Recv calls (grow-once strategy): it grows
 	// to fit the largest frame seen so far and is never shrunk. The Frame
@@ -112,7 +115,7 @@ func (t *unixTransport) Send(f ports.Frame) error {
 	}
 	end := t.beginOperation(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)))
 	result := make(chan error, 1)
-	if err := t.enqueue(sendRequest{data: data, done: result, end: end}); err != nil {
+	if err := t.enqueueWait(sendRequest{data: data, done: result, end: end}); err != nil {
 		end(false)
 		return err
 	}
@@ -132,7 +135,7 @@ func (t *unixTransport) SendAsync(f ports.Frame) error {
 		return err
 	}
 	end := t.beginOperation(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)))
-	if err := t.enqueue(sendRequest{data: data, end: end}); err != nil {
+	if err := t.enqueueAsync(sendRequest{data: data, end: end}); err != nil {
 		end(false)
 		return err
 	}
@@ -151,7 +154,32 @@ func marshalFrame(f ports.Frame) ([]byte, error) {
 	return buf, nil
 }
 
-func (t *unixTransport) enqueue(req sendRequest) error {
+// enqueueWait waits for space in the egress queue. Close wakes waiters and
+// the writer waits for all in-flight enqueues before draining queued requests.
+func (t *unixTransport) enqueueWait(req sendRequest) error {
+	t.egressMu.Lock()
+	if t.egressClosing {
+		t.egressMu.Unlock()
+		return errClosed
+	}
+	if t.egressSenders == 0 {
+		t.egressSendersDone = make(chan struct{})
+	}
+	t.egressSenders++
+	t.egressMu.Unlock()
+
+	select {
+	case <-t.done:
+		t.finishEgressSender()
+		return errClosed
+	case t.egress <- req:
+		t.finishEgressSender()
+		return nil
+	}
+}
+
+// enqueueAsync performs a bounded, nonblocking enqueue for SendAsync.
+func (t *unixTransport) enqueueAsync(req sendRequest) error {
 	t.egressMu.Lock()
 	defer t.egressMu.Unlock()
 	if t.egressClosing {
@@ -165,6 +193,24 @@ func (t *unixTransport) enqueue(req sendRequest) error {
 	}
 }
 
+func (t *unixTransport) finishEgressSender() {
+	t.egressMu.Lock()
+	defer t.egressMu.Unlock()
+	t.egressSenders--
+	if t.egressSenders == 0 {
+		close(t.egressSendersDone)
+	}
+}
+
+func (t *unixTransport) waitForEgressSenders() {
+	t.egressMu.Lock()
+	done := t.egressSendersDone
+	t.egressMu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
 func (t *unixTransport) writeLoop() {
 	defer close(t.writerDone)
 	for {
@@ -172,6 +218,7 @@ func (t *unixTransport) writeLoop() {
 		case req := <-t.egress:
 			t.completeWrite(req, writeAll(t.conn, req.data))
 		case <-t.done:
+			t.waitForEgressSenders()
 			t.egressMu.Lock()
 			for {
 				select {
