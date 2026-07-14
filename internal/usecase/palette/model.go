@@ -180,10 +180,15 @@ func (m *Model) refresh() {
 }
 
 func (m *Model) prependMatch(cmd command.Command) {
-	for _, match := range m.matches {
-		if match.Command.Code == cmd.Code {
-			return
+	for i, match := range m.matches {
+		if match.Command.Code != cmd.Code {
+			continue
 		}
+		if i > 0 {
+			copy(m.matches[1:i+1], m.matches[:i])
+			m.matches[0] = match
+		}
+		return
 	}
 	m.matches = append([]Match{{Command: cmd}}, m.matches...)
 }

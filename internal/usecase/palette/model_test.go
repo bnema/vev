@@ -67,6 +67,77 @@ func TestModelMatchesDeepCopiesPositions(t *testing.T) {
 	require.Equal(t, []int{0}, fresh[0].Positions)
 }
 
+func TestModelExactArgumentMatchMovesExistingFuzzyMatchToFront(t *testing.T) {
+	zzz := cmd("ZZZ", "", "ZZZ 1")
+	zzz.Arguments = command.ArgumentsRequired
+	commands := []command.Command{
+		cmd("AAA", "", "ZZZ 1"),
+		zzz,
+	}
+	want := Fuzzy(commands, "ZZZ 1")[1]
+	m := New(commands)
+
+	for _, r := range "ZZZ 1" {
+		m.Insert(r)
+	}
+
+	matches := m.Matches()
+	require.Len(t, matches, 2)
+	require.Equal(t, "ZZZ", matches[0].Command.Code)
+	require.Equal(t, want, matches[0], "the existing fuzzy match must retain its metadata")
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, "ZZZ", selected.Code)
+}
+
+func TestModelExactArgumentMatchKeepsAbsentAndFirstBehavior(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		commands func(zzz command.Command) []command.Command
+		want     Match
+		wantLen  int
+	}{
+		{
+			name: "absent fuzzy match is prepended",
+			commands: func(zzz command.Command) []command.Command {
+				return []command.Command{cmd("AAA", "", "ZZZ 1"), zzz}
+			},
+			want: Match{Command: command.Command{
+				Code:      "ZZZ",
+				Desc:      "unmatched",
+				Arguments: command.ArgumentsRequired,
+			}},
+			wantLen: 2,
+		},
+		{
+			name: "first fuzzy match is unchanged",
+			commands: func(zzz command.Command) []command.Command {
+				zzz.Desc = "ZZZ 1"
+				return []command.Command{zzz, cmd("ZZZZ", "", "ZZZ 1")}
+			},
+			want: func() Match {
+				zzz := cmd("ZZZ", "", "ZZZ 1")
+				zzz.Arguments = command.ArgumentsRequired
+				return Fuzzy([]command.Command{zzz, cmd("ZZZZ", "", "ZZZ 1")}, "ZZZ 1")[0]
+			}(),
+			wantLen: 2,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			zzz := cmd("ZZZ", "", "unmatched")
+			zzz.Arguments = command.ArgumentsRequired
+			m := New(tt.commands(zzz))
+			for _, r := range "ZZZ 1" {
+				m.Insert(r)
+			}
+
+			matches := m.Matches()
+			require.Len(t, matches, tt.wantLen)
+			require.Equal(t, tt.want, matches[0])
+		})
+	}
+}
+
 func TestRenderDrawsOnlyCodeAndDescriptionWithStyles(t *testing.T) {
 	m := New([]command.Command{
 		cmd("CPY", "Copy", "Enter copy mode"),
