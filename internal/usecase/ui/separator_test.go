@@ -42,8 +42,10 @@ func TestDrawSeparator(t *testing.T) {
 func TestDrawSeparatorClipsAndRejectsInvalid(t *testing.T) {
 	style := renderer.DefaultStyle()
 	f := renderer.NewFrame(3, 3)
-	for i := range f.Cells {
-		f.Cells[i] = renderer.Cell{Rune: 'x', Style: style}
+	for y := range f.Height {
+		for x := range f.Width {
+			f.Set(x, y, renderer.Cell{Rune: 'x', Style: style})
+		}
 	}
 	DrawSeparator(f, domain.Rect{X: -2, Y: 1, Width: 8, Height: 1}, SeparatorHorizontal, style)
 	for x := 0; x < 3; x++ {
