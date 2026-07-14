@@ -26,7 +26,14 @@ func TestPrimaryCaptureAloneRecordsDamageReceipts(t *testing.T) {
 	p.mu.Unlock()
 
 	ac.sendMu.Lock()
-	state, ok := capturePrimaryRenderState(sess, ac, barState{}, capturedOverlayRenderState{}, pickerPreviewEmpty(), domain.FloatingConfig{}, false, nil)
+	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+		bars:        barState{},
+		overlays:    capturedOverlayRenderState{},
+		preview:     pickerPreviewEmpty(),
+		floatingCfg: domain.FloatingConfig{},
+		reset:       false,
+		lease:       nil,
+	})
 	ac.sendMu.Unlock()
 	require.True(t, ok)
 	require.Len(t, state.receipts, 1)
@@ -120,7 +127,14 @@ func TestRenderDamageReceiptStaleGenerationForcesFullRedraw(t *testing.T) {
 func captureComposeForReceiptTest(t *testing.T, sess *session, ac *attachedClient) (*capturedRenderState, composedRenderFrame) {
 	t.Helper()
 	ac.sendMu.Lock() // emitFrame releases the transaction lock.
-	state, ok := capturePrimaryRenderState(sess, ac, barState{}, capturedOverlayRenderState{}, pickerPreviewEmpty(), domain.FloatingConfig{}, false, nil)
+	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+		bars:        barState{},
+		overlays:    capturedOverlayRenderState{},
+		preview:     pickerPreviewEmpty(),
+		floatingCfg: domain.FloatingConfig{},
+		reset:       false,
+		lease:       nil,
+	})
 	require.True(t, ok)
 	return state, composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
 }

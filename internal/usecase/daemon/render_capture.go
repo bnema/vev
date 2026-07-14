@@ -166,11 +166,30 @@ func uncertainDamage(damage []renderer.Damage, width, height int) bool {
 	return false
 }
 
+type primaryCaptureRequest struct {
+	bars        barState
+	overlays    capturedOverlayRenderState
+	preview     picker.Preview
+	floatingCfg domain.FloatingConfig
+	reset       bool
+	lease       *attachmentLease
+}
+
 // capturePrimaryRenderState is the ownership boundary for a primary render
 // transaction. Callers hold attachment sendMu; this function then follows
 // session -> tab -> pane lock order. ACK-blocked capture returns before touching
 // VT damage, and every captured pane records a receipt for successful emission.
-func capturePrimaryRenderState(sess *session, ac *attachedClient, bars barState, overlays capturedOverlayRenderState, preview picker.Preview, floatingCfg domain.FloatingConfig, reset bool, lease *attachmentLease) (*capturedRenderState, bool) {
+func capturePrimaryRenderState(
+	sess *session,
+	ac *attachedClient,
+	request primaryCaptureRequest,
+) (*capturedRenderState, bool) {
+	bars := request.bars
+	overlays := request.overlays
+	preview := request.preview
+	floatingCfg := request.floatingCfg
+	reset := request.reset
+	lease := request.lease
 	if sess == nil || ac == nil || (ac.output != nil && ac.output.atCapacity()) {
 		return nil, false
 	}

@@ -1040,7 +1040,14 @@ func TestCapturePrimaryRenderStatePreservesContextualMRUModeThroughScratchReuse(
 	_, sess, ac, _ := newManualSessionWithPTYs(t, nil)
 	capture := func(bars barState) capturedRenderState {
 		t.Helper()
-		state, ok := capturePrimaryRenderState(sess, ac, bars, capturedOverlayRenderState{}, picker.Preview{}, domain.FloatingConfig{}, false, nil)
+		state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+			bars:        bars,
+			overlays:    capturedOverlayRenderState{},
+			preview:     picker.Preview{},
+			floatingCfg: domain.FloatingConfig{},
+			reset:       false,
+			lease:       nil,
+		})
 		require.True(t, ok)
 		return *state
 	}
