@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/bnema/vev/pkg/linuxterm"
 )
 
 // openPTYPair opens a real Linux PTY master/slave pair directly via
@@ -18,24 +19,24 @@ import (
 func openPTYPair(t *testing.T) (master, slave *os.File) {
 	t.Helper()
 
-	m, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)
+	m, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
 		t.Fatalf("open /dev/ptmx: %v", err)
 	}
 
-	if err := unix.IoctlSetPointerInt(int(m.Fd()), unix.TIOCSPTLCK, 0); err != nil {
+	if err := linuxterm.UnlockPt(int(m.Fd())); err != nil {
 		_ = m.Close()
 		t.Fatalf("unlock pty (TIOCSPTLCK): %v", err)
 	}
 
-	n, err := unix.IoctlGetInt(int(m.Fd()), unix.TIOCGPTN)
+	n, err := linuxterm.PtsNumber(int(m.Fd()))
 	if err != nil {
 		_ = m.Close()
 		t.Fatalf("get pty number (TIOCGPTN): %v", err)
 	}
 
 	slavePath := fmt.Sprintf("/dev/pts/%d", n)
-	s, err := os.OpenFile(slavePath, os.O_RDWR|unix.O_NOCTTY, 0)
+	s, err := os.OpenFile(slavePath, os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
 		_ = m.Close()
 		t.Fatalf("open slave %s: %v", slavePath, err)
@@ -53,8 +54,7 @@ func TestTerminal_RealPTY_RawModeSizeAndEscapes(t *testing.T) {
 	defer func() { _ = master.Close() }()
 	defer func() { _ = slave.Close() }()
 
-	ws := &unix.Winsize{Row: 24, Col: 80}
-	if err := unix.IoctlSetWinsize(int(slave.Fd()), unix.TIOCSWINSZ, ws); err != nil {
+	if err := linuxterm.SetWinsize(int(slave.Fd()), 80, 24); err != nil {
 		t.Fatalf("set winsize: %v", err)
 	}
 

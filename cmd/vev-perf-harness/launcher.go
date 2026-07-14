@@ -15,8 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bnema/vev/pkg/linuxterm"
 	"github.com/bnema/vev/pkg/safedir"
-	"golang.org/x/sys/unix"
 )
 
 type launchedProcess interface {
@@ -726,19 +726,19 @@ func (p *cliProcess) forceProcessGroupKill() {
 // openPTY is the small Linux PTY boundary needed to drive the public terminal
 // client. No daemon or adapter implementation is imported by this command.
 func openPTY() (*os.File, *os.File, error) {
-	masterFD, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY, 0)
+	masterFD, err := syscall.Open("/dev/ptmx", syscall.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
 		return nil, nil, err
 	}
-	closeMaster := func(err error) (*os.File, *os.File, error) { _ = unix.Close(masterFD); return nil, nil, err }
-	number, err := unix.IoctlGetInt(masterFD, unix.TIOCGPTN)
+	closeMaster := func(err error) (*os.File, *os.File, error) { _ = syscall.Close(masterFD); return nil, nil, err }
+	number, err := linuxterm.PtsNumber(masterFD)
 	if err != nil {
 		return closeMaster(err)
 	}
-	if err := unix.IoctlSetPointerInt(masterFD, unix.TIOCSPTLCK, 0); err != nil {
+	if err := linuxterm.UnlockPt(masterFD); err != nil {
 		return closeMaster(err)
 	}
-	slaveFD, err := unix.Open(fmt.Sprintf("/dev/pts/%d", number), unix.O_RDWR|unix.O_NOCTTY, 0)
+	slaveFD, err := syscall.Open(fmt.Sprintf("/dev/pts/%d", number), syscall.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
 		return closeMaster(err)
 	}

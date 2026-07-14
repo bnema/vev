@@ -1,10 +1,18 @@
 # vev
-***Norwegian: web, weave, tissue***
 
-There are many terminal multiplexers, but this one is mine. Minimal aesthetic, purely focused on performance, rendering high-output of vertical text, agentic coding, and remote work over SSH. Built in Go with no external deps as much as possible.
+*Norwegian: to weave*
 
-> [!IMPORTANT]
-> This is totally in alpha.
+A terminal multiplexer for Linux. One Go binary, a per-user daemon, a thin client.
+
+> [!WARNING]
+> Alpha software, Linux only. Expect breaking changes.
+
+What it is built around:
+
+- **Remote attach that survives bad networks.** SSH bootstraps the connection, then the session runs over UDP and resumes after sleep or Wi-Fi changes. Inspired by mosh, with its own protocol.
+- **Server-side rendering.** The daemon keeps a full VT screen per pane and sends minimal diffs to the client, so high-output programs (agents, build logs) stay smooth locally and over SSH.
+- **Nothing but the standard library.** VT emulation, renderer, wire protocol, and UDP transport are all in this repo. Zero runtime dependencies.
+- **Performance treated as a feature.** A reproducible harness measures 252 scenarios across workloads and transports, including lossy and high-latency UDP.
 
 ## Install
 
@@ -12,240 +20,57 @@ There are many terminal multiplexers, but this one is mine. Minimal aesthetic, p
 go install github.com/bnema/vev@latest
 ```
 
-From a checkout:
-
-```sh
-make install        # install vev and default bar scripts to Go's bin directory
-go build -o vev .  # local binary
-```
-
-`make install` places `vev-bar-top-right` and `vev-bar-bottom-right` beside the installed `vev` binary. If you install another way, copy the scripts from `scripts/` into a directory on `PATH` or replace the bar commands in config.
+From a checkout, `make install` also installs the default status bar scripts.
 
 ## Usage
 
 ```text
-vev                              attach to (or create) an ephemeral session
-vev new <name>                   create and attach to a named session
-vev attach <name>                attach to an existing session (alias: a)
-vev attach user@host[:session]   attach to a remote vev daemon over SSH
-vev ls                           list sessions (alias: list)
-vev kill <name>                  kill a session
-vev kill -- <name>               kill a name that starts with -
-vev kill --all                   kill all sessions and stop the daemon
-vev kill --daemon                stop the active vev daemon
-vev --help                       show help (aliases: -h, help)
-vev --version                    show version (alias: version)
+vev                              create an ephemeral session
+vev new <name>                   create a named session
+vev attach <name>                attach to a session (alias: a)
+vev attach user@host[:session]   attach to a remote daemon over SSH
+vev ls                           list sessions
+vev kill <name>                  kill a session (--all kills everything)
 ```
 
-Ephemeral sessions get a number (`0`, `1`, `2`, ...) and are temporary daemon-retained sessions. They survive detach and transient client connection loss while the daemon is running, but they are not persisted to disk and disappear when the daemon is killed, exits, or the machine restarts. Named sessions are persisted, survive daemon restarts, and can be resumed later. New and renamed session names must start with a letter or number and may contain only letters, numbers, dots, underscores, and dashes.
+The daemon starts on first use and exits with the last session. Ephemeral sessions are numbered, survive detach, and disappear with the daemon. Named sessions persist across daemon restarts and come back with their layout, scrollback, and allowlisted processes.
 
-The daemon starts on first use and exits when no sessions remain. Only one client is attached to a session at a time; attaching again displaces the old client.
+## Keys
 
-## Configuration
+No prefix key; everything is Alt.
 
-vev reads `$XDG_CONFIG_HOME/vev/config`, or `~/.config/vev/config` when `XDG_CONFIG_HOME` is unset. Missing files use defaults. The daemon reloads mtime/size changes while running, polling about every two seconds.
+| Key | Action |
+|---|---|
+| Alt+Space | command palette |
+| Alt+f | floating terminal for the current tab |
+| Alt+1 .. 9 | switch tab |
+| Alt+h/j/k/l, Alt+Arrow | focus pane |
+| Alt+a | jump to a session needing attention |
 
-```text
-# Theme: auto follows the client; dark/light force built-in palettes.
-theme = auto
-
-# Palette placement: auto, center, top-left, top, top-right, left, right,
-# bottom-left, bottom, or bottom-right.
-palette.anchor = auto
-
-# One prewarmed floating terminal per tab. An empty command uses the normal shell.
-floating.command =
-floating.width = 80%
-floating.height = 80%
-
-# Include the focused pane's OSC terminal title in tab labels (top bar and
-# session picker). The process name always shows; off keeps only that.
-tabs.terminal-title = on
-
-# Rebindable actions. Leave a line out to keep its built-in binding.
-open-palette = alt+space
-toggle-floating-pane = alt+f
-jump-attention = alt+a
-focus-pane-left = alt+h
-focus-pane-right = alt+l
-focus-pane-up = alt+k
-focus-pane-down = alt+j
-switch-tab-1 = alt+1
-switch-tab-2 = alt+2
-switch-tab-3 = alt+3
-switch-tab-4 = alt+4
-switch-tab-5 = alt+5
-switch-tab-6 = alt+6
-switch-tab-7 = alt+7
-switch-tab-8 = alt+8
-switch-tab-9 = alt+9
-
-# Named session snapshots restore layout, cwd, visible content, scrollback,
-# and foreground processes from this allowlist. Omit the key for these defaults;
-# set it empty to disable process relaunch.
-snapshot.restore_processes = vi,vim,nvim,emacs,man,less,more,tail,top,htop,btop,claude,codex,pi,opencode
-
-# Right bar anchors. Empty command values disable the matching anchor.
-bar.top-right = vev-bar-top-right
-bar.bottom-right = vev-bar-bottom-right
-bar.interval = 5s
-
-# Command palette codes are trimmed, uppercased, then checked as 2-3 letters or digits.
-code.new-tab = CNT
-code.new-session = CNS
-code.close-tab = CLT
-code.split-right = SPR
-code.split-left = SPL
-code.split-up = SPU
-code.split-down = SPD
-code.stack-pane = STP
-code.toggle-stack = TST
-code.close-pane = CLP
-code.focus-pane-left = FPL
-code.focus-pane-right = FPR
-code.focus-pane-up = FPU
-code.focus-pane-down = FPD
-code.next-tab = NXT
-code.previous-tab = PVT
-code.back-session = BSK
-code.jump-recent-session = JRS
-code.session-picker = SSP
-code.visual-mode = VIS
-code.toggle-floating-pane = FLT
-code.rename-session = RNS
-code.detach = DET
-```
-
-Configuring an action replaces all of its built-in aliases. In the example above, the focus-pane lines keep Alt+h/j/k/l but not the Alt+Arrow aliases; omit those lines to keep all built-ins.
-
-Key specs support `alt+<char>`, `alt+space`, and `alt+left/right/up/down`; digit key specs support `alt+1` through `alt+9`, not `alt+0`. `jump-attention` first opens the oldest attention tab in the current session; if none exists, it opens the oldest attention tab in another session. Invalid entries are logged as warnings and skipped where possible; duplicate config keys use the last value, binding conflicts keep the later action's defaults, and command-code conflicts drop the conflicting override.
-
-`floating.command` runs through the normal shell; leave it empty to launch that shell directly. `floating.width` and `floating.height` require exact percentages from `1%` through `100%`; invalid values log a warning and leave the last accepted value (or the `80%` default) intact. Reloading does not relaunch or immediately alter an installed floating terminal: a changed command is used on its next launch, while changed dimensions take effect when that terminal is next shown or resized. Only configuration—not floating runtime state—is restored after a daemon restart; restored tabs stay cold until first visited.
-
-`tabs.terminal-title` accepts `on` or `off` and defaults to `on`; invalid values log a warning and keep the last accepted value. Reload applies a changed value live.
-
-### Command palette anchoring
-
-`palette.anchor` accepts `auto` or the nine anchors `center`, `top-left`, `top`, `top-right`, `left`, `right`, `bottom-left`, `bottom`, and `bottom-right`. Values are trimmed and case-insensitive. The default is `auto`: palettes use the bottom shelf when the terminal is narrower than 96 columns, and a 64-column bottom-right rail at 96 columns or wider. An explicit anchor changes placement only; palette query and selection are preserved. Invalid values are warned about and leave the last valid value unchanged, as do duplicate entries until a valid replacement is supplied (the last valid value wins). Configuration reload applies a changed anchor live and repositions an open palette without resetting its query or selection.
-
-### Bar right anchors
-
-The top and bottom bar right anchors run configurable commands on the daemon host. By default, `bar.top-right = vev-bar-top-right` prints CPU, memory, then hour text (for example `C 12% M 48% 09:41`), and `bar.bottom-right = vev-bar-bottom-right` prints compact git state for the focused pane's `VEV_PANE_CWD`. Set either value empty to disable that anchor, or set it to another command to replace it.
-
-Both anchors share `bar.interval`, which defaults to `5s`; values below `1s` are clamped to `1s`. vev also refreshes around attach, resize, focus, and copy-feedback changes. Commands are bounded by a timeout and output limit. On failure or timeout, vev keeps the last good value; if there is none, the anchor is empty.
-
-Scripts receive these environment variables when available: `VEV_ANCHOR` (`top-right` or `bottom-right`), `VEV_SESSION`, `VEV_TAB`, `VEV_PANE`, `VEV_PANE_CWD`, and `VEV_COLS`. vev reads stdout only, uses the first line only, treats it as plain UTF-8 display text, and strips ANSI escape sequences and other control characters. Unicode and Nerd Font glyphs are supported. The v1 API does not support colors, styles, JSON, streaming output, or per-anchor intervals. The default git script runs `git status --porcelain` each refresh, so increase `bar.interval` or replace the command if that is too expensive for a large repository.
+The palette does the rest: type a short code (`SPR` split right, `CNT` new tab, `SSP` session picker, ...) or fuzzy-search the command list. Scroll up with the mouse to enter scrollback; vim keys move, `v` selects, `y` copies via OSC 52.
 
 ## Remote attach
 
 ```sh
-vev attach user@host
-vev attach user@host:session
+vev attach user@host[:session]
 ```
 
-Remote attach uses SSH only to start a UDP proxy on the remote host; the session itself then talks directly to the remote host over UDP. `vev` must be installed on the remote host, and the host name you pass to `vev attach` must be reachable both by SSH for bootstrap and by UDP for the session transport. Omitting `:session` opens an ephemeral remote session. Remote sessions can resume after temporary network disconnects, such as sleep or Wi-Fi changes, while the daemon still has the session. Named sessions additionally persist across daemon restarts.
+vev must be installed on the remote. If your firewall only allows SSH, open the UDP range first (default `61000:61023`, override with `VEV_UDP_PORT_RANGE`):
 
-vev's resilient remote attach work is inspired by [mosh](https://mosh.org/)'s mobile-shell approach to UDP-based recovery across flaky networks. vev uses its own wire protocol and implementation; it is not compatible with mosh clients or servers and does not copy mosh protocol code.
+```sh
+sudo ufw allow 61000:61023/udp
+```
 
-The default remote transport uses UDP. Its proxy binds a port in a fixed range on the remote (default `61000-61023`), so a host firewall that only allows SSH will drop the session datagrams and attach fails with `remote UDP transport unavailable: probe UDP transport`. Allow inbound UDP for that range on the remote to fix it — for example `sudo ufw allow 61000:61023/udp`, or on a trusted Tailscale network `sudo ufw allow in on tailscale0`. Override the range with `VEV_UDP_PORT_RANGE` on the remote (e.g. `VEV_UDP_PORT_RANGE=51000-51009`, a single `VEV_UDP_PORT_RANGE=51000`, or `VEV_UDP_PORT_RANGE=0` for a random ephemeral port).
+Where UDP is not an option, `VEV_REMOTE_TRANSPORT=stdio` keeps everything inside SSH at the cost of slower disconnect detection. Details in [docs/remote-resilience.md](docs/remote-resilience.md).
 
-Set `VEV_REMOTE_TRANSPORT=stdio` to use SSH stdio compatibility mode on networks where direct UDP is blocked or the SSH target is only reachable through jump-host or SSH-config-only routing. Stdio mode keeps all traffic inside SSH and does not require inbound UDP, but it may not notice sleep or Wi-Fi loss promptly. See `docs/remote-resilience.md` for concise operational notes.
+## Configuration
 
-## Terminal color
-
-When the attaching client reports truecolor support, vev advertises newly spawned panes as `TERM=xterm-direct` and exports `COLORTERM=truecolor` to child processes. Otherwise, panes use the conservative `TERM=xterm-256color` and do not receive `COLORTERM`. This works for local and remote attach because the client capability is carried inside vev's protocol rather than relying on SSH `SendEnv`/`AcceptEnv`.
-
-Applications that use terminfo can detect direct color from `xterm-direct`; applications that use the common environment convention can use `COLORTERM=truecolor` when it is present. Panes restored from a saved snapshot start conservatively before any client attaches; after attach or resume, newly spawned panes use that client's reported capability.
-
-## Terminal compatibility
-
-vev keeps a server-side VT screen for each pane. It tracks scroll regions with DECOM origin mode, ANSI insert mode, cursor-position and mode-query reports, alternate-screen state, bracketed paste, mouse tracking, synchronized updates, OSC 9/777 notifications, OSC 52 clipboard set requests, and double-width cells. Resize and edit operations repair double-width cells so CJK or emoji glyph halves are not left behind.
-
-## Keys
-
-All bindings use Alt directly; there is no prefix key.
-
-| Key | Action |
-|---|---|
-| Alt+Space | open the command palette |
-| Alt+f | show or hide the current tab's floating terminal |
-| Alt+1 .. Alt+9 | switch to tab by number |
-| Alt+h/j/k/l | focus pane left/down/up/right |
-| Alt+Arrow | focus pane by direction |
-| Alt+a | jump to a session with attention |
-
-Some terminals encode Alt+Space as a non-breaking space instead of `ESC Space`; in those terminals, the palette binding depends on whether the terminal can send `ESC Space` for Alt+Space.
-
-## Command palette
-
-Open the palette with Alt+Space. Type a command code or fuzzy-match the label/description. Use Up/Down or Ctrl-N/Ctrl-P to move, Tab to complete the selected command code, Enter to run, and Esc/Ctrl-C to close. With an empty query, Tab completes the most recently successful command; commands that take an argument complete with a trailing space and preserve an argument already entered.
-
-Successful commands are promoted near the top the next time the palette opens. `BSK` toggles back to your previously active session. Typing `JRS` lists recent sessions by number in the status bar, and `JRS N` jumps to number N; the numbers are captured when you start typing, so a busy MRU list never shifts under you. An invalid or stale number leaves the palette open.
-
-| Code | Action |
-|---|---|
-| CNT | create new tab |
-| CNS | create and switch to a named session |
-| CLT | close current tab |
-| SPR / SPL / SPU / SPD | split pane right / left / up / down |
-| STP | stack a new pane |
-| TST | toggle focused stack |
-| CLP | close focused pane |
-| FPL / FPR / FPU / FPD | focus pane left / right / up / down |
-| NXT / PVT | switch to next / previous tab |
-| BSK | toggle the previously active session |
-| JRS N | jump directly to recent session rank N |
-| SSP | open session picker |
-| VIS | enter visual mode |
-| FLT | show or hide the current tab's floating terminal |
-| RNS | rename session |
-| RNT | rename current tab |
-| DET | detach |
-
-Rename prompts are prefilled with the current session name. Empty names and names already used by another session are rejected.
-
-## Session picker
-
-Open it with `SSP` in the palette. It lists sessions and tabs — tab entries use the same `name (title)` form as the top bar, ellipsized to the list width — previews the selected target when space allows, and marks stopped sessions. Wide pickers place the preview beside the list with a muted divider; narrower pickers stack it below the list, then hide it when neither layout has useful space. A clipped preview stays anchored to the bottom of the target's visible terminal frame and never loads its scrollback.
-
-| Key | Action |
-|---|---|
-| j / k, Up / Down | move selection |
-| Enter | switch to or resume selected target |
-| x | kill/delete selected target |
-| q, Esc, Ctrl-C | close picker |
-
-## Panes and tabs
-
-Tabs hold pane layouts. Panes can be split left/right/up/down, stacked, focused by direction, and closed from the command palette. Clicking a pane focuses it.
-
-Each tab also owns one independent floating terminal. It prewarms asynchronously on the tab's first visit, opens centered at the configured percentage of the pane-content area, and dims normal pane content while leaving status bars and popup chrome crisp. Hiding it retains the process, screen, and scrollback; switching tabs restores each tab's own visible or hidden state. Process exit clears the slot so the next open recreates it. The title combines the foreground process and OSC terminal title as `ProcessName: ProcessTerminalTitle`, falling back to either available title and then the configured command or shell.
-
-While visible, the floating terminal receives ordinary input, bracketed paste, mouse input, clipboard-path injection, and scrollback/copy mode. Global vev bindings remain active, and a bare Esc is passed to the floating application. `Alt+f` and `FLT` toggle visibility; there is no separate floating-pane close command.
-
-The top bar shows each tab as `name (title)`, where the name is the tab's rename or number and the title is the focused pane's `ProcessName: ProcessTerminalTitle`. On truecolor clients the name renders bold and the parenthesized title slightly muted (in both the top bar and the session picker), derived from the client's reported theme; other terminals render plain labels. Set `tabs.terminal-title = off` to drop the `ProcessTerminalTitle` half from tab labels (top bar and session picker) and show only the process name; floating and stacked pane title bars are unaffected. Labels share the row width: when everything fits they render in full, otherwise unused space flows from short tabs to long ones and long labels are ellipsized, degrading to the bare tab name when space runs out. The bottom bar shows the active session followed by recent sessions, fading toward older entries. Ephemeral sessions are marked with `*`, for example `0*`.
-
-## Scrollback mode and copy
-
-Scrollback mode freezes a view over history while the program keeps running underneath. Enter it with the `VIS` palette command or by scrolling up with the mouse wheel. Passive browsing is labeled `[SCROLL]`; selecting lines changes the status to `[SELECT]`. Scrolling back to the bottom exits to the live pane.
-
-| Key | Action |
-|---|---|
-| j / k, Up / Down | move one line |
-| PgUp / PgDn | move one page |
-| g / G | jump to top / bottom |
-| v or Space | toggle line selection |
-| y or Enter | copy selection and exit |
-| q, Esc, Ctrl-C | exit without copying |
-
-Copy uses OSC 52 clipboard sequences when supported by your terminal. After a successful copy, the bottom bar briefly shows `copied N chars to clipboard`.
+Optional file at `~/.config/vev/config`, reloaded live. Themes, key bindings, palette codes, the floating terminal, status bar scripts: see [docs/configuration.md](docs/configuration.md). Terminal color and VT compatibility notes live in [docs/terminal.md](docs/terminal.md).
 
 ## Development
 
 ```sh
-go install golang.org/x/tools/cmd/goimports@latest
-go install github.com/vektra/mockery/v2@latest
 make test   # go test ./... -race
-make lint   # goimports check, then go vet ./...
+make lint   # goimports check, go vet
 make mocks  # regenerate mocks
 ```
