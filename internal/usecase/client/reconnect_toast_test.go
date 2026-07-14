@@ -179,6 +179,18 @@ func reconnectToastHelloFromSend(t *testing.T, tr *reconnectToastRecordingTransp
 	return hello
 }
 
+// newReconnectHandshakeClock supplies the non-firing timer needed by the
+// bounded pre-Welcome handshake; reconnect sleeps are stubbed by these tests.
+func newReconnectHandshakeClock(t *testing.T) *portsmocks.MockClock {
+	t.Helper()
+	clk := portsmocks.NewMockClock(t)
+	timer := portsmocks.NewMockTimer(t)
+	timer.EXPECT().C().Return((<-chan time.Time)(make(chan time.Time))).Maybe()
+	timer.EXPECT().Stop().Return(true).Maybe()
+	clk.EXPECT().NewTimer(preWelcomeTimeout).Return(timer).Maybe()
+	return clk
+}
+
 func TestReconnectToastDegradedClearsModalAndProbingIsVisible(t *testing.T) {
 	term := newReconnectToastTerminalHarness(t)
 	defer term.closeInput()
@@ -190,7 +202,7 @@ func TestReconnectToastDegradedClearsModalAndProbingIsVisible(t *testing.T) {
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
 	go func() {
-		resultCh <- attachOnce(context.Background(), tr, term.term, portsmocks.NewMockClock(t), ports.IntentAttach, "main", 0, [16]byte{1}, &ms, func() error {
+		resultCh <- attachOnce(context.Background(), tr, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", 0, [16]byte{1}, &ms, func() error {
 			_, err := term.term.EnterRaw()
 			return err
 		}, func() { clears <- struct{}{} }, func(stage reconnectStage) {
@@ -229,7 +241,7 @@ func TestAttachOnceOfflineLinkEventReturnsReconnectableError(t *testing.T) {
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
 	go func() {
-		resultCh <- attachOnce(context.Background(), tr, term.term, portsmocks.NewMockClock(t), ports.IntentAttach, "main", 0, [16]byte{1}, &ms, func() error {
+		resultCh <- attachOnce(context.Background(), tr, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", 0, [16]byte{1}, &ms, func() error {
 			_, err := term.term.EnterRaw()
 			return err
 		}, func() {}, func(stage reconnectStage) {
@@ -400,7 +412,7 @@ func TestRemoteReconnectToastClearsFailedDrawBounds(t *testing.T) {
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr}}
 
-	err := Run(ctx, dialer, term.term, portsmocks.NewMockClock(t), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
+	err := Run(ctx, dialer, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
 	require.ErrorIs(t, err, context.Canceled)
 	require.True(t, out.failed)
 	assertReconnectToastClearCoversBounds(t, out.String(), reconnectToastBoundsFor(term.size, reconnectStageMessage(reconnectStageSSH)))
@@ -435,7 +447,7 @@ func TestRemoteReconnectToastLifecycleWithWrappedTransportError(t *testing.T) {
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr1, tr2}}
 
-	err := Run(context.Background(), dialer, term.term, portsmocks.NewMockClock(t), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
+	err := Run(context.Background(), dialer, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	require.True(t, tr1.closed)
 	require.True(t, tr2.closed)
@@ -479,7 +491,7 @@ func TestRemoteEphemeralReconnectUsesAssignedSessionName(t *testing.T) {
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr1, tr2}}
 
-	err := Run(context.Background(), dialer, term.term, portsmocks.NewMockClock(t), ports.IntentEphemeral, "", true, nil, slog.New(slog.DiscardHandler))
+	err := Run(context.Background(), dialer, term.term, newReconnectHandshakeClock(t), ports.IntentEphemeral, "", true, nil, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	require.Equal(t, 2, dialer.calls)
 
@@ -564,7 +576,7 @@ func TestRemoteReconnectToastLifecycle(t *testing.T) {
 			dialer := portsmocks.NewMockDialer(t)
 			tt.configure(t, dialer)
 
-			err := Run(ctx, dialer, term.term, portsmocks.NewMockClock(t), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
+			err := Run(ctx, dialer, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
 			tt.wantErr(t, err)
 			out := term.out.String()
 			require.Contains(t, out, reconnectToastMessage)

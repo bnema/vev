@@ -12,13 +12,9 @@ import (
 // Coordinator contracts and support types are kept with their ownership
 // semantics, separate from the scheduling transitions in render_coordinator.
 
-// S1 render coordinator contract. One coordinator serves one attached
-// session: producers mutate authoritative state and publish an invalidation;
-// only the coordinator decides when the transitional composition target runs.
-// Producers never compose or send. This file currently carries the inert
-// contract — state, options, and signatures exist so the behavioral
-// specification compiles — while wake scheduling, ACK gating, synchronized
-// output handling, and producer migration land in the GREEN slice.
+// One coordinator serves a session: producers mutate authoritative state and
+// publish an invalidation; only the coordinator decides when composition runs.
+// Producers never compose or send.
 
 // Coordinator deadline bounds. Urgent transitions (input echo, overlay state
 // changes) must become visible within urgentRenderDeadline; bulk output
@@ -50,8 +46,7 @@ type renderInvalidation struct {
 	producer string
 }
 
-// renderWake is one coalesced composition request delivered to the
-// transitional composition target (replaced by the S2 pipeline).
+// renderWake is one coalesced composition request.
 type renderWake struct {
 	reset     bool
 	urgent    bool
@@ -78,9 +73,8 @@ type attachmentLease struct {
 }
 
 // resizeRequestMetadata is the coordinator-owned latest requested resize
-// state: S3's transaction entry point reads it through resizeSnapshot. It is
-// metadata ownership only — S1/S2 dispatch stays with the coordinator
-// epoch timer path.
+// state. Resize dispatch reads it through resizeSnapshot and validates the
+// coordinator epoch before applying it.
 type resizeRequestMetadata struct {
 	size   domain.Size
 	source *attachedClient
@@ -95,7 +89,7 @@ type resizeRequestMetadata struct {
 type renderCoordinatorOptions struct {
 	clock    ports.Clock
 	observer ports.RuntimeObserver
-	// wake is the transitional composition target.
+	// wake composes a coalesced render request.
 	wake func(renderWake)
 	// ackReady reports whether the attachment may compose another output
 	// state (the outputStateStream window has capacity).

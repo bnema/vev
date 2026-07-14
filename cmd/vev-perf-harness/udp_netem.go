@@ -2,6 +2,7 @@ package main
 
 import (
 	"container/heap"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -85,7 +86,8 @@ func newUDPNetem(config udpNetemConfig) (udpNetem, error) {
 	if config.RTT < 0 || config.LossPercent < 0 || config.LossPercent > 100 || config.TargetPath == "" {
 		return nil, fmt.Errorf("invalid UDP netem fixture: rtt=%s loss=%d target=%q", config.RTT, config.LossPercent, config.TargetPath)
 	}
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	conn, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}

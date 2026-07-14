@@ -3,7 +3,6 @@ package daemon
 import (
 	"fmt"
 	"io"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -76,7 +75,7 @@ func TestPerformanceFixtureCounters(t *testing.T) {
 func TestRenderStageHooksCountProductionBoundariesOnFailedSend(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
 	d.paint(sess, ac, true, nil)
-	<-sends
+	_ = awaitFrame(t, sends, ports.MsgOutput)
 	var captures, compositions, emissions int
 	ac.renderStages = renderStageHooks{
 		capture: func() { captures++ },
@@ -728,7 +727,7 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 		sess:        sess,
 		ac:          ac,
 		output:      output,
-		snaps:       &countingSnapshotStore{done: make(chan struct{}, 1)},
+		snaps:       &countingSnapshotStore{},
 		pty:         pty,
 		clock:       clock,
 		liveWrites:  [][]byte{[]byte("\x1b[1;1HA\x1b[2;2HA"), []byte("\x1b[1;1HB\x1b[2;2HB")},
@@ -823,17 +822,9 @@ func (f *performanceFixture) paintLive() {
 func (f *performanceFixture) captureSnapshot() {
 	f.t.Helper()
 	require.True(f.t, f.d.captureSession(f.sess))
-	<-f.snaps.done
-	for range 4096 {
-		f.sess.snapshotMu.Lock()
-		pending := f.sess.snapshotPending
-		f.sess.snapshotMu.Unlock()
-		if !pending {
-			return
-		}
-		runtime.Gosched()
-	}
-	f.t.Fatal("snapshot worker did not finish performance capture")
+	// Worker finalization clears snapshotPending and signals snapshotChanged on
+	// every success and failure path after persistence has returned.
+	awaitSnapshotIdle(f.t, f.sess)
 }
 
 func (f *performanceFixture) enterCopySearch() {
@@ -1024,7 +1015,6 @@ type countingSnapshotStore struct {
 	mu sync.Mutex
 	countingSnapshotMetrics
 	last []byte
-	done chan struct{}
 }
 
 func (s *countingSnapshotStore) Write(_ string, data []byte) error {
@@ -1033,9 +1023,6 @@ func (s *countingSnapshotStore) Write(_ string, data []byte) error {
 	s.bytes += uint64(len(data))
 	s.last = data
 	s.mu.Unlock()
-	if s.done != nil {
-		s.done <- struct{}{}
-	}
 	return nil
 }
 func (*countingSnapshotStore) Load() ([]ports.SnapshotBlob, error) { return nil, nil }

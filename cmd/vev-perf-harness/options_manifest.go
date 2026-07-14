@@ -87,7 +87,13 @@ func validateManifest(m manifest) error {
 	}
 	tops := map[string]bool{}
 	for _, t := range m.Topologies {
-		if t.ID == "" || t.Geometry != "120x40" || t.RowsPerPane != 10000 {
+		if t.ID == "" {
+			return errors.New("empty topology id")
+		}
+		if tops[t.ID] {
+			return fmt.Errorf("duplicate topology id %q", t.ID)
+		}
+		if t.Geometry != "120x40" || t.RowsPerPane != 10000 {
 			return fmt.Errorf("invalid topology %q", t.ID)
 		}
 		tops[t.ID] = true
@@ -98,7 +104,16 @@ func validateManifest(m manifest) error {
 			return fmt.Errorf("missing canonical topology %s", v)
 		}
 	}
-	works := set(m.Workloads)
+	works := map[string]bool{}
+	for _, workload := range m.Workloads {
+		if workload == "" {
+			return errors.New("empty workload id")
+		}
+		if works[workload] {
+			return fmt.Errorf("duplicate workload id %q", workload)
+		}
+		works[workload] = true
+	}
 	for _, v := range []string{"idle", "active_output", "all_output", "inactive_output", "interactive_flood", "copy_search", "resize_sweep", "snapshot_output_resize", "attach_restore_tab_switch"} {
 		if !works[v] {
 			return fmt.Errorf("missing canonical workload %s", v)
@@ -107,7 +122,10 @@ func validateManifest(m manifest) error {
 	trans := map[string]bool{}
 	for _, t := range m.Transports {
 		if t.ID == "" {
-			return errors.New("transport missing id")
+			return errors.New("empty transport id")
+		}
+		if trans[t.ID] {
+			return fmt.Errorf("duplicate transport id %q", t.ID)
 		}
 		if err := validateTransportFixture(t); err != nil {
 			return err
@@ -210,12 +228,4 @@ func validateTransportFixture(t transport) error {
 		return fmt.Errorf("invalid canonical transport fixture %+v", t)
 	}
 	return nil
-}
-
-func set(v []string) map[string]bool {
-	r := map[string]bool{}
-	for _, x := range v {
-		r[x] = true
-	}
-	return r
 }

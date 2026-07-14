@@ -624,6 +624,7 @@ func TestSnapshotSaverWritesDirtyNamedSessionsOnly(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for dirty snapshot write")
 	}
+	awaitSnapshotClean(t, dirty)
 
 	clock.fireNext(t)
 	select {
@@ -850,6 +851,7 @@ func TestSnapshotSaverKeepsDirtyWhenWriteFails(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for retry snapshot write")
 	}
+	awaitSnapshotClean(t, sess)
 	require.False(t, sess.snapDirty.Load())
 }
 
@@ -1037,7 +1039,7 @@ func newSnapshotTestSession(t *testing.T, name string, ephemeral bool, cwd strin
 	return sess
 }
 
-func awaitSnapshotIdle(t *testing.T, sess *session) {
+func awaitSnapshotIdle(t testing.TB, sess *session) {
 	t.Helper()
 	for {
 		sess.snapshotMu.Lock()

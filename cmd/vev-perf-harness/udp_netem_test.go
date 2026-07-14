@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -68,7 +69,8 @@ func TestUDPNetemExecutesRTTAndLossFixtures(t *testing.T) {
 	}
 	for _, tc := range fixtures {
 		t.Run(tc.name, func(t *testing.T) {
-			target, err := net.ListenPacket("udp", "127.0.0.1:0")
+			var lc net.ListenConfig
+			target, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -86,7 +88,7 @@ func TestUDPNetemExecutesRTTAndLossFixtures(t *testing.T) {
 				t.Fatal(err)
 			}
 			closeUDPFixture(t, netem)
-			client, err := net.ListenPacket("udp", "127.0.0.1:0")
+			client, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
 			}

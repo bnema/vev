@@ -102,6 +102,10 @@ const stdinBufSize = 4096
 // goroutine, decoupling the input/resize pumps from transport back-pressure.
 const sendQueueDepth = 64
 
+// preWelcomeTimeout bounds each blocking operation before the daemon has
+// accepted the attach. Mosh uses the same 15-second startup budget.
+const preWelcomeTimeout = 15 * time.Second
+
 var reconnectSleep = sleepReconnect
 var reconnectSleepWithResize = sleepReconnectWithResizeEvents
 
@@ -270,7 +274,9 @@ func run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
-		_ = transport.Close()
+		if !result.transportClosed {
+			_ = transport.Close()
+		}
 		if result.resumeToken != 0 {
 			resumeToken = result.resumeToken
 		}
@@ -350,10 +356,52 @@ func (d singleTransportDialer) Dial(context.Context) (ports.Transport, error) {
 }
 
 type attachResult struct {
-	resumeToken uint64
-	sessionName string
-	welcomed    bool
-	err         error
+	resumeToken     uint64
+	sessionName     string
+	welcomed        bool
+	transportClosed bool
+	err             error
+}
+
+// boundedPreWelcome runs one blocking handshake operation. Transport methods
+// do not accept a context, so cancellation and expiry close this attempt's
+// transport to interrupt the call, then wait for its goroutine to exit.
+func boundedPreWelcome(ctx context.Context, clk ports.Clock, transport ports.Transport, operation func() error) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		_ = transport.Close()
+		return true, err
+	}
+
+	timer := clk.NewTimer(preWelcomeTimeout)
+	defer timer.Stop()
+	completed := make(chan error, 1)
+	go func() { completed <- operation() }()
+
+	select {
+	case err := <-completed:
+		// Prefer a cancellation/expiry observed concurrently with completion.
+		// That event owns the transport lifetime even though the operation has
+		// already returned by the time we observe it here.
+		if ctx.Err() != nil {
+			_ = transport.Close()
+			return true, ctx.Err()
+		}
+		select {
+		case <-timer.C():
+			_ = transport.Close()
+			return true, context.DeadlineExceeded
+		default:
+			return false, err
+		}
+	case <-ctx.Done():
+		_ = transport.Close()
+		<-completed
+		return true, ctx.Err()
+	case <-timer.C():
+		_ = transport.Close()
+		<-completed
+		return true, context.DeadlineExceeded
+	}
 }
 
 // DetectTrueColor reports whether TERM/COLORTERM advertise direct color support.
@@ -403,15 +451,22 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 		TrueColor:         trueColor,
 		MaxOutputInFlight: requestedOutputWindow(transport),
 	}
-	if err := transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
-		return attachResult{err: fmt.Errorf("vev: sending hello: %w", err)}
+	if closed, err := boundedPreWelcome(ctx, clk, transport, func() error {
+		return transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)})
+	}); err != nil {
+		return attachResult{transportClosed: closed, err: fmt.Errorf("vev: sending hello: %w", err)}
 	}
 	ms.helloSent = true
 
 	// 2. Await Welcome or a typed rejection.
-	reply, err := transport.Recv()
+	var reply ports.Frame
+	closed, err := boundedPreWelcome(ctx, clk, transport, func() error {
+		var recvErr error
+		reply, recvErr = transport.Recv()
+		return recvErr
+	})
 	if err != nil {
-		return attachResult{err: fmt.Errorf("vev: awaiting welcome: %w", err)}
+		return attachResult{transportClosed: closed, err: fmt.Errorf("vev: awaiting welcome: %w", err)}
 	}
 	result := func(welcomed bool, err error) attachResult {
 		return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: welcomed, err: err}

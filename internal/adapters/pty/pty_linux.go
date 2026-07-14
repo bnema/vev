@@ -97,6 +97,20 @@ func (Factory) Open(ctx context.Context, command string, args []string, env []st
 		Setctty: true,
 		Ctty:    0,
 	}
+	// CommandContext's default cancellation kills only the direct child. The
+	// child leads a process group, so cancellation must target that group too.
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		if err := signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("pty: start %q: %w", command, err)
@@ -194,9 +208,8 @@ func (p *linuxPTY) Close() error {
 	p.closeOnce.Do(func() {
 		pid := p.cmd.Process.Pid
 
-		// Negative pid targets the whole process group (the child is the group
-		// leader thanks to Setsid). Ignore errors: the child may already be gone.
-		_ = unix.Kill(-pid, unix.SIGHUP)
+		// Ignore errors: the child may already be gone.
+		_ = signalProcessGroup(pid, syscall.SIGHUP)
 
 		// Reap the child (exit status is intentionally discarded; the port has no
 		// Wait — "child gone" surfaces to callers as io.EOF on Read).
@@ -209,13 +222,20 @@ func (p *linuxPTY) Close() error {
 		select {
 		case <-reaped:
 		case <-time.After(killGracePeriod):
-			_ = unix.Kill(-pid, unix.SIGKILL)
+			_ = signalProcessGroup(pid, syscall.SIGKILL)
 			<-reaped
 		}
 
 		p.closeErr = p.master.Close()
 	})
 	return p.closeErr
+}
+
+// signalProcessGroup signals the process group led by pid. Open creates each
+// child as its own session and process-group leader, so a negative pid reaches
+// both the command and every descendant that remains in its process group.
+func signalProcessGroup(pid int, signal syscall.Signal) error {
+	return unix.Kill(-pid, signal)
 }
 
 // setWinsize applies sz to the terminal referenced by fd via TIOCSWINSZ.

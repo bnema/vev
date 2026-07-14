@@ -33,10 +33,7 @@ func (s *DecodeStats) Add(other DecodeStats) bool {
 // PreflightHistoryBlob validates one self-contained history blob without
 // allocating decoded rows.
 func PreflightHistoryBlob(data []byte) (DecodeStats, error) {
-	if len(data) < 9 || string(data[:4]) != historyMagic || data[4] != historyVersion {
-		return DecodeStats{}, fmt.Errorf("preflight history: %w", errInvalidHistory)
-	}
-	stats, ok := preflightHistory(data[5:])
+	stats, ok := preflightHistory(data)
 	if !ok {
 		return DecodeStats{}, fmt.Errorf("preflight history: %w", errInvalidHistory)
 	}

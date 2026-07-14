@@ -205,6 +205,42 @@ func TestClose_TerminatesLongRunningChild(t *testing.T) {
 	}, 3*time.Second, 20*time.Millisecond)
 }
 
+func TestOpen_ContextCancellationTerminatesProcessGroup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping pty integration test in -short mode")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// The background sleep ignores SIGHUP so killing only the session leader
+	// cannot accidentally pass via the terminal's hangup behavior.
+	p, err := newFactory().Open(ctx, "sh", []string{"-c", `(trap '' HUP; exec sleep 60) & child=$!; printf '%s\n' "$child"; wait "$child"`}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = p.Close() })
+
+	buf := make([]byte, 64)
+	n, err := p.Read(buf)
+	require.NoError(t, err)
+	descendantPID, err := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
+	require.NoError(t, err)
+
+	cancel()
+
+	// The direct shell may remain as a zombie until Close reaps it; a zombie has
+	// exited, so it and the background sleep must not remain running.
+	require.Eventually(t, func() bool {
+		return processTerminated(p.Pid()) && processTerminated(descendantPID)
+	}, 3*time.Second, 20*time.Millisecond)
+}
+
+func processTerminated(pid int) bool {
+	if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		return true
+	}
+	status, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/status")
+	return err != nil || strings.Contains(string(status), "State:\tZ")
+}
+
 func TestResize_DeliversSIGWINCH(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pty integration test in -short mode")

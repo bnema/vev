@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -229,5 +230,105 @@ func TestTransportSendOversizePayloadRejected(t *testing.T) {
 	err := client.Send(ports.Frame{Type: ports.MsgOutput, Payload: payload})
 	if !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("client.Send() error = %v, want ErrFrameTooLarge", err)
+	}
+}
+
+func TestTransportAsyncEgressPreservesWelcomeBeforeOutput(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	server := NewTransport(serverConn)
+	client := NewTransport(clientConn)
+	async, ok := server.(ports.AsyncTransport)
+	if !ok {
+		t.Fatal("IPC transport does not implement AsyncTransport")
+	}
+
+	welcome := ports.Frame{Type: ports.MsgWelcome, Payload: []byte("welcome")}
+	sent := make(chan error, 1)
+	go func() { sent <- server.Send(welcome) }()
+	got, err := client.Recv()
+	if err != nil {
+		t.Fatalf("Recv welcome: %v", err)
+	}
+	if !reflect.DeepEqual(got, welcome) {
+		t.Fatalf("welcome = %#v, want %#v", got, welcome)
+	}
+	if err := <-sent; err != nil {
+		t.Fatalf("Send welcome: %v", err)
+	}
+
+	payload := []byte("first")
+	if err := async.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: payload}); err != nil {
+		t.Fatalf("SendAsync first output: %v", err)
+	}
+	payload[0] = 'X' // async ownership must not retain caller memory.
+	if err := async.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("second")}); err != nil {
+		t.Fatalf("SendAsync second output: %v", err)
+	}
+	for _, want := range []ports.Frame{
+		{Type: ports.MsgOutput, Payload: []byte("first")},
+		{Type: ports.MsgOutput, Payload: []byte("second")},
+	} {
+		got, err := client.Recv()
+		if err != nil {
+			t.Fatalf("Recv output: %v", err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("output = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestTransportAsyncEgressIsBoundedAndCloseInterruptsWorkers(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = clientConn.Close() }()
+
+	tr := NewTransport(serverConn)
+	async, ok := tr.(ports.AsyncTransport)
+	if !ok {
+		t.Fatal("IPC transport does not implement AsyncTransport")
+	}
+
+	// The first write blocks in net.Pipe because the peer never drains it.
+	if err := async.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("blocked")}); err != nil {
+		t.Fatalf("SendAsync blocked frame: %v", err)
+	}
+	var backpressure error
+	for range sendQueueCapacity + 2 {
+		err := async.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("queued")})
+		if errors.Is(err, ErrBackpressure) {
+			backpressure = err
+			break
+		}
+		if err != nil {
+			t.Fatalf("SendAsync unexpected error: %v", err)
+		}
+	}
+	if !errors.Is(backpressure, ErrBackpressure) {
+		t.Fatalf("SendAsync never reported bounded backpressure, got %v", backpressure)
+	}
+
+	recvDone := make(chan error, 1)
+	go func() {
+		_, err := tr.Recv()
+		recvDone <- err
+	}()
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-recvDone:
+		if err == nil {
+			t.Fatal("Recv succeeded after Close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not interrupt Recv")
+	}
+	select {
+	case <-tr.(*unixTransport).writerDone:
+	default:
+		t.Fatal("Close returned before the IPC writer terminated")
 	}
 }

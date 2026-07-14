@@ -401,24 +401,6 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 			t.Fatal("coordinator did not arm a controllable render timer")
 		}
 	}
-	awaitControlledOutput := func() ports.Frame {
-		deadline := time.NewTimer(2 * time.Second)
-		defer deadline.Stop()
-		for {
-			select {
-			case frame := <-sends:
-				if frame.Type == ports.MsgOutput {
-					return frame
-				}
-				t.Fatalf("unexpected frame type %d while advancing render clock", frame.Type)
-			case timer := <-clk.timers:
-				timer.ch <- time.Time{}
-			case <-deadline.C:
-				t.Fatal("controllable timers did not produce an output frame")
-				return ports.Frame{}
-			}
-		}
-	}
 	var hg sync.WaitGroup
 	hg.Go(func() { d.handleConn(tr) })
 	awaitFrame(t, sends, ports.MsgWelcome)
@@ -453,9 +435,9 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 	ac := sess.client
 	require.NotNil(t, ac)
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitControlledOutput()
+	awaitCoordinatorOutput(t, sends, clk.timers, "while advancing render clock", "controllable timers did not produce an output frame")
 	d.handleInput(sess, ac, []byte("VIS\r"))
-	awaitControlledOutput()
+	awaitCoordinatorOutput(t, sends, clk.timers, "while advancing render clock", "controllable timers did not produce an output frame")
 	d.handleInput(sess, ac, []byte{'g', ' ', 'G', 'y'})
 
 	var payload string

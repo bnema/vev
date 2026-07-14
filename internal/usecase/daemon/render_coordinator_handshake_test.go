@@ -1,28 +1,11 @@
 package daemon
 
 import (
-	"runtime"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
-
-// awaitHandshakeWorker observes the worker completion channel rather than a
-// scheduler-dependent no-wake window. The generated mock timer's channel is
-// the only event that advances it.
-func awaitHandshakeWorker(t *testing.T, done <-chan struct{}) {
-	t.Helper()
-	for range 1_000_000 {
-		select {
-		case <-done:
-			return
-		default:
-			runtime.Gosched()
-		}
-	}
-	t.Fatal("coordinator deadline worker did not complete")
-}
 
 // Fresh producer state may arrive after route has published an attachment but
 // before the transport has accepted Welcome. It must remain pending until the

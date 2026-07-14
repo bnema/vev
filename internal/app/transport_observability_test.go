@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/stretchr/testify/mock"
 )
 
 func TestPerformanceTraceUsesHarnessProcessMapping(t *testing.T) {
@@ -46,7 +48,11 @@ func TestPerformanceTraceUsesHarnessProcessMapping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			t.Errorf("close trace file: %v", err)
+		}
+	}()
 	var mark struct {
 		ProcessID string `json:"process_id"`
 		Scenario  string `json:"scenario"`
@@ -60,6 +66,48 @@ func TestPerformanceTraceUsesHarnessProcessMapping(t *testing.T) {
 	}
 	if mark.ProcessID != "idle-local-r001-daemon-01" || mark.Scenario != "1x4-idle-local" || mark.Run != 1 || mark.Sequence == 0 || mark.RequestID == 0 || mark.Epoch == 0 {
 		t.Fatalf("mark does not match harness mapping: %+v", mark)
+	}
+}
+
+func TestPerformanceTraceWithFactoriesCreatesOneConfiguredObserver(t *testing.T) {
+	t.Setenv("VEV_PERF_TRACE", "trace.jsonl")
+	t.Setenv("VEV_PERF_PROCESS_ID", "client-01")
+	t.Setenv("VEV_PERF_SCENARIO", "lossy-remote")
+	t.Setenv("VEV_PERF_RUN", "7")
+
+	clock := portsmocks.NewMockClock(t)
+	sink := portsmocks.NewMockRuntimeObserver(t)
+	sink.EXPECT().ObserveRuntime(mock.MatchedBy(func(mark ports.RuntimeMark) bool {
+		return mark.Component == "client" && mark.Scenario == "lossy-remote" && mark.Run == 7 &&
+			mark.Sequence != 0 && mark.RequestID != 0 && mark.Epoch != 0 && mark.Kind == ports.RuntimeEmitEnd
+	})).Once()
+
+	var sinkCalls, correlationCalls int
+	observer, closer, err := performanceTraceWithFactories(clock,
+		func(path string, gotClock ports.Clock, processID string) (ports.RuntimeObserver, io.Closer, error) {
+			sinkCalls++
+			if path != "trace.jsonl" || gotClock != clock || processID != "client-01" {
+				t.Fatalf("trace sink config = (%q, %v, %q)", path, gotClock, processID)
+			}
+			return sink, errorCloser{}, nil
+		},
+		func(got ports.RuntimeObserver, inputs ports.RuntimeCorrelationInputs) (ports.RuntimeObserver, error) {
+			correlationCalls++
+			if got != sink || inputs != (ports.RuntimeCorrelationInputs{Scenario: "lossy-remote", Run: 7}) {
+				t.Fatalf("trace correlation config = (%v, %+v)", got, inputs)
+			}
+			return ports.NewRuntimeCorrelationObserver(got, inputs)
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sinkCalls != 1 || correlationCalls != 1 || observer == nil || closer == nil {
+		t.Fatalf("trace setup = sink calls %d, correlation calls %d, observer %v, closer %v; want one configured observer", sinkCalls, correlationCalls, observer, closer)
+	}
+	observer.ObserveRuntime(ports.NewRuntimeMark("client", ports.RuntimeEmitEnd, 0, true))
+	if err := closer.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -154,23 +202,49 @@ type runtimeObserverFunc func(ports.RuntimeMark)
 
 func (f runtimeObserverFunc) ObserveRuntime(mark ports.RuntimeMark) { f(mark) }
 
-func TestPerformanceTraceAppWiresOneObserverPerProcess(t *testing.T) {
-	source, err := os.ReadFile("run.go")
-	if err != nil {
-		t.Fatalf("ReadFile(run.go): %v", err)
+func TestRunAttachPropagatesOneObserverToRemoteTransportFactory(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv(envRemoteTransport, string(ports.RemoteTransportStdio))
+
+	observer := ports.NewSerializedRuntimeObserver(runtimeObserverFunc(func(ports.RuntimeMark) {}), 1)
+	originalTrace := newPerformanceTrace
+	traceCalls := 0
+	newPerformanceTrace = func(ports.Clock) (ports.SerializedRuntimeObserver, io.Closer, error) {
+		traceCalls++
+		return observer, &runtimeTraceCloser{reporter: observer}, nil
 	}
-	text := string(source)
-	for _, required := range []string{
-		"VEV_PERF_TRACE",
-		"VEV_PERF_PROCESS_ID",
-		"observability.NewJSONL",
-		"WithRuntimeObserver",
-	} {
-		if !strings.Contains(text, required) {
-			t.Errorf("runtime trace wiring missing %q", required)
+	t.Cleanup(func() { newPerformanceTrace = originalTrace })
+
+	factory := portsmocks.NewMockRemoteDialerFactory(t)
+	factory.EXPECT().DialerForRemote("remote.example", "work", ports.RemoteTransportStdio, mock.Anything).Return(namedDialer{name: "remote"}, nil)
+	originalFactory := newRemoteDialerFactoryWithRuntimeObserver
+	factoryCalls := 0
+	newRemoteDialerFactoryWithRuntimeObserver = func(got ports.SerializedRuntimeObserver) ports.RemoteDialerFactory {
+		factoryCalls++
+		if got != observer {
+			t.Fatalf("remote transport observer = %v, want process observer %v", got, observer)
 		}
+		return factory
 	}
-	if strings.Contains(text, "WithRuntimeObserver(clock") || strings.Contains(text, "WithRuntimeObserver(clk") {
-		t.Error("consumer observer configuration must not accept a clock")
+	t.Cleanup(func() { newRemoteDialerFactoryWithRuntimeObserver = originalFactory })
+
+	originalRunClient := runClientWithRuntimeObserver
+	runClientWithRuntimeObserver = func(_ context.Context, gotDialer ports.Dialer, _ ports.Terminal, _ ports.Clock, _ uint8, _ string, _ bool, _ ports.ClipboardReader, _ *slog.Logger, got ports.SerializedRuntimeObserver) error {
+		if got != observer {
+			t.Fatalf("client transport observer = %v, want process observer %v", got, observer)
+		}
+		if gotDialer != (namedDialer{name: "remote"}) {
+			t.Fatalf("remote transport dialer = %v, want configured factory dialer", gotDialer)
+		}
+		return nil
+	}
+	t.Cleanup(func() { runClientWithRuntimeObserver = originalRunClient })
+
+	if err := runAttach(context.Background(), ports.IntentAttach, "work", "remote.example"); err != nil {
+		t.Fatal(err)
+	}
+	if traceCalls != 1 || factoryCalls != 1 {
+		t.Fatalf("trace/factory calls = %d/%d, want exactly one observer and one transport factory", traceCalls, factoryCalls)
 	}
 }

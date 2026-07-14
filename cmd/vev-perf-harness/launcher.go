@@ -281,26 +281,38 @@ func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedP
 	runtimeDir := l.runtimes[runDir]
 	l.mu.Unlock()
 	peerOwnsRuntime := runtimeDir == ""
+	fail := func(err error) error {
+		if peerOwnsRuntime {
+			return errors.Join(err, l.releaseRuntime(runDir))
+		}
+		return err
+	}
 	if peerOwnsRuntime {
 		var err error
 		runtimeDir, err = l.runtimeDir(runDir)
 		if err != nil {
-			return nil, err
+			return nil, fail(err)
 		}
 	}
 	if err := safedir.EnsurePrivate(runDir); err != nil {
-		return nil, err
+		return nil, fail(err)
 	}
 	if err := safedir.EnsurePrivate(runtimeDir); err != nil {
-		return nil, err
+		return nil, fail(err)
 	}
 	if err := safedir.EnsurePrivate(filepath.Join(runDir, "state")); err != nil {
-		return nil, err
+		return nil, fail(err)
 	}
 	if len(role.Args) != 2 || (role.Args[0] != "_stdio" && role.Args[0] != "_udp-proxy") {
-		return nil, fmt.Errorf("unsupported public peer command %q", role.Args)
+		return nil, fail(fmt.Errorf("unsupported public peer command %q", role.Args))
 	}
 	route := peerRoute{mapping: m, command: role}
+	closeNetem := func(err error) error {
+		if route.netem != nil {
+			err = errors.Join(err, route.netem.Close())
+		}
+		return fail(err)
+	}
 	if m.Role == "udp_peer" {
 		route.pidPath = filepath.Join(runDir, "udp-peer.pid")
 		factory := l.netemFactory
@@ -313,7 +325,7 @@ func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedP
 			TargetPath:  filepath.Join(runDir, "udp-peer.target"),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("start harness UDP netem: %w", err)
+			return nil, fail(fmt.Errorf("start harness UDP netem: %w", err))
 		}
 		route.netem = netem
 	}
@@ -354,10 +366,7 @@ case "$*" in
 esac
 `, m.TracePath, m.ProcessID, runtimeDir, filepath.Join(runDir, "state"), l.bin, role.Args[1], ready, stderr, target, netemPort, route.pidPath, m.Scenario, m.Run)
 	if err := os.WriteFile(shim, []byte(body), 0o700); err != nil {
-		if route.netem != nil {
-			_ = route.netem.Close()
-		}
-		return nil, err
+		return nil, closeNetem(err)
 	}
 	l.mu.Lock()
 	if l.peers == nil {
@@ -365,10 +374,7 @@ esac
 	}
 	if _, exists := l.peers[runDir]; exists {
 		l.mu.Unlock()
-		if route.netem != nil {
-			_ = route.netem.Close()
-		}
-		return nil, fmt.Errorf("duplicate transport peer for %s", runDir)
+		return nil, closeNetem(fmt.Errorf("duplicate transport peer for %s", runDir))
 	}
 	l.peers[runDir] = route
 	l.mu.Unlock()

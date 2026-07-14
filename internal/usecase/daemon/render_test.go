@@ -405,7 +405,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		viewer.overlays.pickerMu.Unlock()
 		d.sessions["viewer"] = &session{id: "viewer", client: viewer}
 		previews := make(chan renderWake, 2)
-		rc.subscribePreviewFor(viewer, func(w renderWake) { previews <- w })
+		rc.subscribePreviewFor(viewer, 1, func(w renderWake) { previews <- w })
 
 		d.sessWg.Add(1)
 		go d.ptyReader(target, target.tabs[0], target.tabs[0].focusedPane())
@@ -509,6 +509,22 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 // S2 keeps damage pending until the owning render capture consumes it. In
 // particular, a pane becoming invisible must not let a PTY reader erase data
 // that a later attachment or picker preview needs to render.
+func TestPaneRenderableActiveAttachmentDoesNotScanPickerPreviews(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, _, _ := newManualSessionWithPTYs(t, p)
+	tb := sess.activeTab()
+	pane := tb.focusedPane()
+
+	// Holding daemon ownership makes a picker scan block. An active attached
+	// tab must decide renderability from its session state without that scan.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	done := make(chan bool, 1)
+	go func() { done <- d.paneRenderable(sess, tb, pane) }()
+	require.True(t, awaitTestValue(t, done, "active attached renderability scanned picker previews"))
+}
+
 func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 	newFixture := func(t *testing.T) (*Daemon, *session, *tab, *pane, chan ports.Frame) {
 		t.Helper()

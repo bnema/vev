@@ -40,7 +40,9 @@ type Terminal interface {
 	Flush() error
 }
 
-// Transport is a framed message channel over a single connection.
+// Transport is a framed message channel over a single connection. Close must
+// be safe to call concurrently with Send and Recv, and must unblock active
+// Send and Recv calls.
 type Transport interface {
 	Send(Frame) error
 	Recv() (Frame, error) // blocking; io.EOF on close

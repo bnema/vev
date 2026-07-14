@@ -44,7 +44,7 @@ func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
 
 // NewTransport wraps separate reader/writer streams as a framed Transport.
 func NewTransport(r io.Reader, w io.Writer, closeFn closeFunc, opts ...Option) ports.Transport {
-	t := newTransport(r, w, closeFn, nil).(*transport)
+	t := newTransport(r, w, closeFn, nil)
 	for _, opt := range opts {
 		if opt != nil {
 			opt(t)
@@ -53,7 +53,7 @@ func NewTransport(r io.Reader, w io.Writer, closeFn closeFunc, opts ...Option) p
 	return t
 }
 
-func newTransport(r io.Reader, w io.Writer, closeFn closeFunc, eofErr eofErrFunc) ports.Transport {
+func newTransport(r io.Reader, w io.Writer, closeFn closeFunc, eofErr eofErrFunc) *transport {
 	if closeFn == nil {
 		closeFn = func() error { return nil }
 	}
@@ -361,7 +361,7 @@ func dialContext(ctx context.Context, target, session string, log *slog.Logger, 
 	}
 
 	waiter := newProcessWaiter(cmd, stdin, &stderr, sshCloseTimeout, log, target, session)
-	transport := newTransport(stdout, stdin, waiter.close, waiter.eofErr).(*transport)
+	transport := newTransport(stdout, stdin, waiter.close, waiter.eofErr)
 	for _, opt := range opts {
 		if opt != nil {
 			opt(transport)

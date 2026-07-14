@@ -25,18 +25,20 @@ func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
 	if sess == nil || tb == nil || p == nil {
 		return false
 	}
-	preview := d.tabIsPickerPreview(tb)
 	sess.mu.Lock()
 	active := sess.active >= 0 && sess.active < len(sess.tabs) && sess.tabs[sess.active] == tb
 	attached := sess.client != nil
 	sess.mu.Unlock()
+
+	// The normal attached render path needs no cross-session picker lookup.
+	// Only inactive or headless tabs can be renderable as a picker preview.
+	if (!active || !attached) && !d.tabIsPickerPreview(tb) {
+		return false
+	}
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	if tb.floating.pane == p {
 		return active && attached && tb.floating.state == floatingVisible
-	}
-	if (!active || !attached) && !preview {
-		return false
 	}
 	placements, ok := solvedPlacementsLocked(tb)
 	if !ok {

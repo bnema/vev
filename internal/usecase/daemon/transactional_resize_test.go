@@ -234,6 +234,41 @@ func TestTransactionalResizePartialFailureCommitsOnlySuccessfulPTYState(t *testi
 	require.NotEqual(t, oldFailedRect, second.rect, "failed PTY rectangle still follows the committed layout")
 }
 
+// A retry changes VT state after the committed layout, so it needs a distinct
+// snapshot generation. A failed retry must retain the prior screen and dirty
+// generation.
+func TestTransactionalResizeRetryMarksNamedSnapshotDirtyOnlyOnSuccess(t *testing.T) {
+	resizeErr := errors.New("scripted resize failure")
+	for _, tc := range []struct {
+		name           string
+		errs           []error
+		wantGeneration uint64
+		wantScreen     domain.Size
+	}{
+		{name: "success", errs: []error{resizeErr, nil}, wantGeneration: 2, wantScreen: domain.Size{Cols: 100, Rows: 28}},
+		{name: "failure", errs: []error{resizeErr, resizeErr}, wantGeneration: 1, wantScreen: domain.Size{Cols: 80, Rows: 23}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pty := &transactionalResizePTY{errs: tc.errs}
+			d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+			sess.snapEligible.Store(true)
+			tb, p := sess.activeTab(), sess.activeTab().focusedPane()
+
+			require.True(t, d.requestTransactionalResize(sess, ac, domain.Size{Cols: 100, Rows: 30}, true))
+			rc := sess.renderCoordinator()
+			snapshot := rc.resizeSnapshot()
+			d.retryResizeMembers(sess, ac, rc.attachmentLease(ac), snapshot.epoch, []resizeMember{{session: sess, tab: tb, pane: p, rect: p.rect}})
+
+			sess.snapshotMu.Lock()
+			generation := sess.snapshotGeneration
+			sess.snapshotMu.Unlock()
+			require.Equal(t, tc.wantGeneration, generation)
+			require.True(t, sess.snapDirty.Load())
+			require.Equal(t, tc.wantScreen, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height})
+		})
+	}
+}
+
 // S3 acceptance: a failed member is retried only for the newest committed
 // epoch. An intervening request supersedes the old retry, and a successful
 // retry must resize its VT before the forced full-frame emission.

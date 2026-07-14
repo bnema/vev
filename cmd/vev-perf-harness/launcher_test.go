@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bnema/vev/pkg/safedir"
 )
 
 func TestCLIProcessCloseIsBoundedWhenPublicRoleDoesNotExit(t *testing.T) {
@@ -32,11 +35,16 @@ func TestCLIProcessCloseIsBoundedWhenPublicRoleDoesNotExit(t *testing.T) {
 
 func TestCLIProcessWaitReadyRequiresDaemonSocket(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "daemon.sock")
-	listener, err := net.Listen("unix", path)
+	var lc net.ListenConfig
+	listener, err := lc.Listen(context.Background(), "unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	if err := (&cliProcess{readyPath: path, waitErr: make(chan error, 1)}).WaitReady(); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +63,7 @@ func TestCLILauncherIsolatesRoleXDGEnvironmentAcrossRepetitions(t *testing.T) {
 	launcher := &cliLauncher{bin: bin}
 	for run := 1; run <= 3; run++ {
 		runDir := filepath.Join(t.TempDir(), fmt.Sprintf("run-%d", run))
-		if err := os.MkdirAll(runDir, 0o700); err != nil {
+		if err := safedir.EnsurePrivate(runDir); err != nil {
 			t.Fatal(err)
 		}
 		roles := []string{"daemon", "client"}
@@ -92,6 +100,28 @@ func TestCLILauncherIsolatesRoleXDGEnvironmentAcrossRepetitions(t *testing.T) {
 		if err := launcher.releaseRuntime(runDir); err != nil {
 			t.Fatalf("run %d release runtime: %v", run, err)
 		}
+	}
+}
+
+func TestPreparePeerReleasesOwnedRuntimeOnPreparationFailure(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	runDir := filepath.Join(t.TempDir(), "run")
+	if err := safedir.EnsurePrivate(runDir); err != nil {
+		t.Fatal(err)
+	}
+	launcher := &cliLauncher{}
+	_, err := launcher.preparePeer(processMapping{
+		Role:      "ssh_stdio_peer",
+		TracePath: filepath.Join(runDir, "peer.jsonl"),
+	}, roleCommand{Args: []string{"invalid"}})
+	if err == nil || !strings.Contains(err.Error(), "unsupported public peer command") {
+		t.Fatalf("preparePeer error = %v", err)
+	}
+	if runtimeDir := launcher.runtimes[runDir]; runtimeDir != "" {
+		t.Fatalf("failed peer preparation leaked runtime directory %q", runtimeDir)
+	}
+	if paths, globErr := filepath.Glob(filepath.Join(os.TempDir(), "vev-harness-runtime-*")); globErr != nil || len(paths) != 0 {
+		t.Fatalf("failed peer preparation left runtime directories %q: %v", paths, globErr)
 	}
 }
 
@@ -153,7 +183,7 @@ func TestHarnessCanonicalLocalSmokeRealRoles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	closeTestFile(t, raw)
 	h := defaultHarness()
 	h.clock = &fakeClock{} // injected duration keeps the public 30s contract bounded in test
 	h.launcher = &cliLauncher{bin: bin}

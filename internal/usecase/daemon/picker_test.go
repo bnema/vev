@@ -477,6 +477,72 @@ func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {
 	require.NotContains(t, openedEnv, "TERM=xterm-direct")
 }
 
+func TestPickerPreviewGenerationRejectsStaleSubscriptionReplacement(t *testing.T) {
+	rc := newRenderCoordinator(renderCoordinatorOptions{})
+	viewer := &attachedClient{}
+	newer := func(renderWake) {}
+
+	require.True(t, rc.subscribePreviewFor(viewer, 2, newer))
+	require.False(t, rc.subscribePreviewFor(viewer, 1, func(renderWake) {}))
+	rc.teardownPreviewFor(viewer, 1)
+
+	rc.mu.Lock()
+	subscription, ok := rc.previewWakes[viewer]
+	rc.mu.Unlock()
+	require.True(t, ok)
+	require.Equal(t, uint64(2), subscription.generation)
+	require.NotNil(t, subscription.fn)
+}
+
+func TestPickerPreviewPostSubscribeRevalidationKeepsNewerSubscription(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	viewer := &attachedClient{}
+	viewer.initOverlays()
+	target := &session{}
+	tab := &tab{}
+	rc := newRenderCoordinator(renderCoordinatorOptions{})
+
+	viewer.overlays.pickerMu.Lock()
+	viewer.overlays.pickerPreviewGeneration = 2
+	viewer.overlays.pickerPreviewSession = target
+	viewer.overlays.pickerPreview = tab
+	viewer.overlays.pickerMu.Unlock()
+	require.True(t, rc.subscribePreviewFor(viewer, 2, func(renderWake) {}))
+
+	// This is the exact post-subscribe check from registerPreviewForSelection.
+	// It represents a generation-1 subscriber resuming after generation 2 won.
+	d.revalidatePreviewSubscription(viewer, rc, target, tab, 1)
+
+	rc.mu.Lock()
+	subscription, ok := rc.previewWakes[viewer]
+	rc.mu.Unlock()
+	require.True(t, ok)
+	require.Equal(t, uint64(2), subscription.generation)
+}
+
+func TestPickerDestroyedTabCleanupDoesNotClearNewerGeneration(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	viewer := &attachedClient{}
+	viewer.initOverlays()
+	newerSession := &session{}
+	newerTab := &tab{}
+	rc := newRenderCoordinator(renderCoordinatorOptions{})
+
+	viewer.overlays.pickerMu.Lock()
+	viewer.overlays.pickerPreviewGeneration = 2
+	viewer.overlays.pickerPreviewSession = newerSession
+	viewer.overlays.pickerPreview = newerTab
+	viewer.overlays.pickerMu.Unlock()
+	require.True(t, rc.subscribePreviewFor(viewer, 2, func(renderWake) {}))
+
+	require.False(t, d.clearPreviewGeneration(viewer, 1))
+	require.True(t, pickerPreviewCurrent(viewer, newerSession, newerTab, 2))
+	rc.mu.Lock()
+	_, subscribed := rc.previewWakes[viewer]
+	rc.mu.Unlock()
+	require.True(t, subscribed)
+}
+
 func TestPickerPreviewSinglePaneSnapshotsFocusedPane(t *testing.T) {
 	tb := newTab(nil, domain.Size{Cols: 10, Rows: 3})
 	p := tb.focusedPane()

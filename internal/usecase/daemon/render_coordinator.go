@@ -44,7 +44,7 @@ type renderCoordinator struct {
 	// subscriber. previewWakes tracks picker subscriptions by viewer, so one
 	// inactive session cannot replace another viewer's live preview.
 	previewWake  func(renderWake)
-	previewWakes map[*attachedClient]func(renderWake)
+	previewWakes map[*attachedClient]previewSubscription
 
 	// lease is the sole primary attachment lifecycle state. A revoked lease is
 	// retained after detach so headless preview delivery remains distinguishable
@@ -457,26 +457,39 @@ func (c *renderCoordinator) subscribePreview(fn func(renderWake)) {
 // teardownPreview removes the legacy preview subscription.
 func (c *renderCoordinator) teardownPreview() { c.mu.Lock(); c.previewWake = nil; c.mu.Unlock() }
 
-// subscribePreviewFor installs the dynamic picker observer owned by viewer.
-// The owner key makes target changes, detach, and session teardown precise.
-func (c *renderCoordinator) subscribePreviewFor(viewer *attachedClient, fn func(renderWake)) {
-	if viewer == nil || fn == nil {
-		return
-	}
-	c.mu.Lock()
-	if !c.torndown {
-		if c.previewWakes == nil {
-			c.previewWakes = make(map[*attachedClient]func(renderWake))
-		}
-		c.previewWakes[viewer] = fn
-	}
-	c.mu.Unlock()
+type previewSubscription struct {
+	generation uint64
+	fn         func(renderWake)
 }
 
-// teardownPreviewFor removes only viewer's dynamic picker observer.
-func (c *renderCoordinator) teardownPreviewFor(viewer *attachedClient) {
+// subscribePreviewFor installs the dynamic picker observer owned by viewer.
+// A newer picker generation wins, so a delayed subscription cannot replace it.
+func (c *renderCoordinator) subscribePreviewFor(viewer *attachedClient, generation uint64, fn func(renderWake)) bool {
+	if viewer == nil || fn == nil {
+		return false
+	}
 	c.mu.Lock()
-	delete(c.previewWakes, viewer)
+	defer c.mu.Unlock()
+	if c.torndown {
+		return false
+	}
+	if current, ok := c.previewWakes[viewer]; ok && current.generation > generation {
+		return false
+	}
+	if c.previewWakes == nil {
+		c.previewWakes = make(map[*attachedClient]previewSubscription)
+	}
+	c.previewWakes[viewer] = previewSubscription{generation: generation, fn: fn}
+	return true
+}
+
+// teardownPreviewFor removes viewer's observer only when it still belongs to
+// generation. A delayed teardown cannot clear a replacement subscription.
+func (c *renderCoordinator) teardownPreviewFor(viewer *attachedClient, generation uint64) {
+	c.mu.Lock()
+	if current, ok := c.previewWakes[viewer]; ok && current.generation == generation {
+		delete(c.previewWakes, viewer)
+	}
 	c.mu.Unlock()
 }
 
@@ -758,11 +771,16 @@ func (c *renderCoordinator) fireWithTimerWorker(gen uint64, watchdog, deadline b
 		c.mu.Unlock()
 		return
 	}
-	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog, lease: c.lease}
 	// A detached target has no primary transport or ACK window. Its pending
 	// state belongs exclusively to picker previews and must be consumed after
-	// notification rather than accumulating ackDeferred forever.
+	// notification rather than accumulating ackDeferred forever. Do not pass
+	// its revoked primary lease to preview consumers.
 	headlessPreviewOnly := c.primaryDetachedLocked()
+	lease := c.lease
+	if headlessPreviewOnly {
+		lease = nil
+	}
+	w := renderWake{reset: c.pendingReset, urgent: c.pendingUrgent, coalesced: c.coalesced, watchdog: watchdog, lease: lease}
 	if !headlessPreviewOnly && (!ready || (c.lease != nil && c.lease.active && !c.lease.ready)) {
 		var ackStart *ackBlockedSpan
 		if !ready && deadline {
@@ -860,8 +878,8 @@ func (c *renderCoordinator) takePendingPreviewsLocked() (func(renderWake), []fun
 	}
 	c.pendingPreview = false
 	previews := make([]func(renderWake), 0, len(c.previewWakes))
-	for _, fn := range c.previewWakes {
-		previews = append(previews, fn)
+	for _, subscription := range c.previewWakes {
+		previews = append(previews, subscription.fn)
 	}
 	return c.previewWake, previews
 }

@@ -243,8 +243,15 @@ func dispatch(ctx context.Context, cmd command) error {
 // performanceTrace creates one serialized timestamp owner for this process.
 // An empty trace environment leaves all production behavior and wire bytes
 // unchanged.
-// newPerformanceTrace is a test seam around composition-root trace setup.
-var newPerformanceTrace = performanceTrace
+// Composition-root factory seams keep observer propagation testable without
+// opening real transports.
+var (
+	newPerformanceTrace                       = performanceTrace
+	newRemoteDialerFactoryWithRuntimeObserver = func(observer ports.SerializedRuntimeObserver) ports.RemoteDialerFactory {
+		return remoteadapter.NewDialerFactoryWithRuntimeObserver(observer)
+	}
+	runClientWithRuntimeObserver = client.RunWithRuntimeObserver
+)
 
 func performanceTrace(clk ports.Clock) (ports.SerializedRuntimeObserver, io.Closer, error) {
 	return performanceTraceWithFactories(clk, observability.NewJSONL, ports.NewRuntimeCorrelationObserver)
@@ -475,10 +482,10 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 		localDialer: func() ports.Dialer {
 			return localDaemonDialer{dir: ipc.SocketDir(), observer: observer}
 		},
-		remoteDialerFactory:     remoteadapter.NewDialerFactoryWithRuntimeObserver(observer),
+		remoteDialerFactory:     newRemoteDialerFactoryWithRuntimeObserver(observer),
 		selectedRemoteTransport: os.Getenv(envRemoteTransport),
 		runClient: func(ctx context.Context, dialer ports.Dialer, terminal ports.Terminal, behaviorClock ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) error {
-			return client.RunWithRuntimeObserver(ctx, dialer, terminal, behaviorClock, intent, name, remote, clipboard, log, observer)
+			return runClientWithRuntimeObserver(ctx, dialer, terminal, behaviorClock, intent, name, remote, clipboard, log, observer)
 		},
 		createDetached: createDetachedLocalSession,
 		clipboard:      clipboard.New(),

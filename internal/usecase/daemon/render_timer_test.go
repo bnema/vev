@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"runtime"
 	"testing"
 	"time"
 
@@ -36,7 +35,7 @@ func TestTimerOwnershipRejectsStaleTicketsAndCancelsWorkers(t *testing.T) {
 	require.False(t, ok, "a stale generation must not reclaim a replacement lane")
 
 	require.True(t, owner.completeLocked(generation))
-	awaitTimerWorker(t, done)
+	awaitTestCompletion(t, done, "timer worker did not complete")
 }
 
 func TestRunTimerWorkerOwnsCompletionAfterTick(t *testing.T) {
@@ -46,23 +45,10 @@ func TestRunTimerWorkerOwnsCompletionAfterTick(t *testing.T) {
 	fired := make(chan struct{}, 1)
 	runTimerWorker(timerC, cancel, done, func() { fired <- struct{}{} })
 	timerC <- time.Time{}
-	awaitTimerWorker(t, done)
+	awaitTestCompletion(t, done, "timer worker did not complete")
 	select {
 	case <-fired:
 	default:
 		t.Fatal("timer worker did not run callback")
 	}
-}
-
-func awaitTimerWorker(t *testing.T, done <-chan struct{}) {
-	t.Helper()
-	for range 4096 {
-		select {
-		case <-done:
-			return
-		default:
-			runtime.Gosched()
-		}
-	}
-	t.Fatal("timer worker did not complete")
 }
