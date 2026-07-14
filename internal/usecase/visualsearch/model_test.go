@@ -61,14 +61,14 @@ func TestVisualSearchNewSnapshotOwnsSourceRows(t *testing.T) {
 	require.Equal(t, "alpha", matches[0].Text)
 }
 
-func TestVisualSearchCloneSharesDocumentAndKeepsUIStateIndependent(t *testing.T) {
+func TestVisualSearchCloneRetainsDocumentAndKeepsUIStateIndependent(t *testing.T) {
 	m := New(testSnapshot("alpha", "beta alpha"))
 	for _, r := range "alpha" {
 		m.Insert(r)
 	}
 	clone := m.Clone()
 
-	require.Same(t, &m.snapshot.Row(0)[0], &clone.snapshot.Row(0)[0])
+	require.Equal(t, m.snapshot.Row(0), clone.snapshot.Row(0))
 	clone.Down()
 	clone.Insert('z')
 

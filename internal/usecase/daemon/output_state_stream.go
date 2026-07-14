@@ -17,8 +17,6 @@ type outputStateStream struct {
 	renderer       *renderer.Renderer
 	next           uint64
 	acked          uint64
-	deferred       bool
-	deferredReset  bool
 	maxOutstanding uint64
 }
 
@@ -89,37 +87,10 @@ func (s *outputStateStream) ack(state uint64) {
 func (s *outputStateStream) rebase() {
 	s.acked = s.next
 	s.renderer.Reset()
-	s.clearDeferred()
 }
 
 func (s *outputStateStream) atCapacity() bool {
 	return s.outstanding() >= s.maxOutstanding
-}
-
-func (s *outputStateStream) deferIfAtCapacity(reset bool) bool {
-	if !s.atCapacity() {
-		if reset {
-			s.clearDeferred()
-		}
-		return false
-	}
-	s.deferred = true
-	s.deferredReset = s.deferredReset || reset
-	return true
-}
-
-func (s *outputStateStream) takeDeferred() (reset bool, ok bool) {
-	if !s.deferred || s.atCapacity() {
-		return false, false
-	}
-	reset = s.deferredReset
-	s.clearDeferred()
-	return reset, true
-}
-
-func (s *outputStateStream) clearDeferred() {
-	s.deferred = false
-	s.deferredReset = false
 }
 
 func (s *outputStateStream) outstanding() uint64 { return s.next - s.acked }

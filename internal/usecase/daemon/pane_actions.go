@@ -23,7 +23,7 @@ func (d *Daemon) spawnPaneOp(
 ) error {
 	if d.ptys == nil {
 		if ac != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "pane_actions.go")
 		}
 		return nil
 	}
@@ -69,7 +69,7 @@ func (d *Daemon) spawnPaneOp(
 		tb.mu.Unlock()
 		return fmt.Errorf("daemon: generating pane identity: %w", err)
 	}
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, rectSize(newRect))
+	pty, err := d.ptys.Open(sess.ctx, d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, rectSize(newRect))
 	if err != nil {
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "pane", newID, "kind", "pane")
 		tb.mu.Lock()
@@ -99,7 +99,7 @@ func (d *Daemon) spawnPaneOp(
 	d.startPaneGoroutines(sess, tb, p)
 	markSnapshotDirty(sess)
 	if ac != nil {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "pane_actions.go")
 	}
 	return nil
 }
@@ -111,7 +111,7 @@ func (d *Daemon) applyLayoutLocked(tb *tab) {
 	placements, ok := layout.Solve(tb.tree.Root, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
 	if !ok {
 		for _, p := range tb.panes {
-			d.resizePane(p, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
+			d.applyPaneResize(p, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
 		}
 		return
 	}
@@ -120,12 +120,12 @@ func (d *Daemon) applyLayoutLocked(tb *tab) {
 			continue
 		}
 		if p := tb.panes[pl.ID]; p != nil {
-			d.resizePane(p, pl.Content)
+			d.applyPaneResize(p, pl.Content)
 		}
 	}
 }
 
-func (d *Daemon) resizePane(p *pane, r domain.Rect) {
+func (d *Daemon) applyPaneResize(p *pane, r domain.Rect) {
 	if p == nil {
 		return
 	}
@@ -167,7 +167,7 @@ func (d *Daemon) stackPane(sess *session, ac *attachedClient) error {
 func (d *Daemon) toggleStack(sess *session, ac *attachedClient) error {
 	if d.ptys == nil {
 		if ac != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "pane_actions.go")
 		}
 		return nil
 	}
@@ -188,7 +188,7 @@ func (d *Daemon) toggleStack(sess *session, ac *attachedClient) error {
 	if err == nil {
 		markSnapshotDirty(sess)
 		if ac != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "pane_actions.go")
 		}
 	}
 	return err
@@ -197,7 +197,7 @@ func (d *Daemon) toggleStack(sess *session, ac *attachedClient) error {
 func (d *Daemon) closeFocusedPane(sess *session, ac *attachedClient) error {
 	if d.ptys == nil {
 		if ac != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "pane_actions.go")
 		}
 		return nil
 	}
@@ -255,8 +255,12 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 
 	if ac != nil {
 		ac.overlays.clearCopyModeForPane(p)
+		ac.pruneCaptureFrames(p)
 	}
 
+	if rc := sess.renderCoordinator(); rc != nil {
+		rc.noteSyncPaneRemoved(p)
+	}
 	if p.cancel != nil {
 		p.cancel()
 	}
@@ -267,7 +271,7 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 	markSnapshotDirty(sess)
 	if repaint {
 		if ac != nil {
-			d.paint(sess, ac, true)
+			d.invalidateRender(sess, ac, true, "pane_actions.go")
 		}
 	}
 	return nil
@@ -305,7 +309,7 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 				d.refreshPaneTitleOnFocus(sess, newFocus)
 			}
 		}
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "pane_actions.go")
 	}
 	if errors.Is(err, layout.ErrNoPane) {
 		return nil

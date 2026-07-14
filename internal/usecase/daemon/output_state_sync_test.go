@@ -82,7 +82,7 @@ func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 	require.Same(t, sess, routed)
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	first := awaitFrame(t, tr.sends, ports.MsgOutput)
 	out, err := ports.UnmarshalOutput(first.Payload)
 	require.NoError(t, err)
@@ -90,7 +90,7 @@ func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 
 	// Before the MsgAck, the renderer has already advanced along the ordered
 	// output dependency chain, so an unchanged repaint is a no-op.
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	requireNoOutputFrame(t, tr.sends)
 
 	tr.recv <- ports.Frame{Type: ports.MsgAck, Payload: ports.MarshalAck(ports.Ack{AckedStateNum: out.NewStateNum})}
@@ -99,7 +99,7 @@ func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 
 	// The production MsgAck path retires retained states without moving the
 	// renderer baseline backward.
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	requireNoOutputFrame(t, tr.sends)
 }
 
@@ -111,7 +111,7 @@ func TestPaintExplicitlyUsesAsyncTransportCapability(t *testing.T) {
 	ac.replaceTransport(tr)
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 
 	awaitFrame(t, tr.asyncSends, ports.MsgOutput)
 	select {
@@ -144,7 +144,7 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 	}
 	pane.screen.ClearDamage()
 	client := vt.NewScreen(80, 25)
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	first := mustApplyOutput(t, client, awaitFrame(t, tr.sends, ports.MsgOutput))
 	ac.ackOutputState(first.NewStateNum)
 
@@ -164,7 +164,7 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 		pane.screen.Col = 0
 		pane.screen.Write([]byte("\nq"))
 		pane.screen.Frame = desired.Clone()
-		d.paint(sess, ac, false)
+		d.paint(sess, ac, false, nil)
 		mustApplyOutput(t, client, awaitFrame(t, tr.sends, ports.MsgOutput))
 	}
 
@@ -202,11 +202,11 @@ func TestLocalAttachStillAdvancesRendererOnSend(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	awaitFrame(t, sends, ports.MsgOutput)
 
 	// The first paint updates the renderer shadow without waiting for MsgAck.
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	requireNoOutputFrame(t, sends)
 }
 
@@ -217,17 +217,17 @@ func TestLocalOutputAckDoesNotMoveRendererShadowBackward(t *testing.T) {
 	pane := sess.tabs[0].focusedPane()
 
 	pane.screen.Write([]byte("A"))
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	first := awaitFrame(t, sends, ports.MsgOutput)
 	out, err := ports.UnmarshalOutput(first.Payload)
 	require.NoError(t, err)
 
 	pane.screen.Write([]byte("\rB"))
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	awaitFrame(t, sends, ports.MsgOutput)
 
 	ac.ackOutputState(out.NewStateNum)
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	requireNoOutputFrame(t, sends)
 }
 
@@ -264,7 +264,7 @@ func TestFailedPaintSendRollsBackOutputState(t *testing.T) {
 	ac.replaceTransport(failingOutputTransport{})
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 
 	require.Zero(t, ac.output.next)
 	require.Zero(t, ac.output.acked)
@@ -279,30 +279,50 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 		{name: "stream window", window: maxUnackedOutputStates},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p, releasePTY := newBlockingPTY(t)
-			defer releasePTY()
+			// resizeReaderPTY delivers the child's SIGWINCH redraw through the
+			// actual ptyReader. Its Resize callback does not return until Read has
+			// accepted the bytes, at which point resizeApplying is still true.
+			p := newResizeReaderPTY([]byte("\x1b[1;81H" + strings.Repeat("B", 40)))
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 			ac.output.maxOutstanding = tc.window
 			pane := sess.activeTab().focusedPane()
-
+			p.applying = func() bool {
+				pane.mu.Lock()
+				defer pane.mu.Unlock()
+				return pane.resizeApplying
+			}
 			pane.screen.Write([]byte(strings.Repeat("A", 79)))
-			d.paint(sess, ac, true)
+			d.paint(sess, ac, true, nil)
 			client := vt.NewScreen(80, 24)
 			initial := mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
 			ac.ackOutputState(initial.NewStateNum)
 
-			// The child can redraw the newly exposed columns while the resize
-			// output is being prepared. The first visible grown frame must contain
-			// that redraw, regardless of the negotiated output window.
+			d.sessWg.Add(1)
+			pane.onExit = func() {}
+			go d.ptyReader(sess, sess.activeTab(), pane)
+			defer func() { p.close(); d.sessWg.Wait() }()
+
+			// The resize deadline drives coordinator prepare/apply/commit. No test
+			// writes the grown columns directly.
+			clock := &signalClock{timers: make(chan *signalTimer, 2)}
+			d.clock = clock
 			d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
-			pane.screen.Write([]byte("\x1b[1;81H" + strings.Repeat("B", 40)))
-			d.paint(sess, ac, false)
+			timer := <-clock.timers
+			done := captureResizeCallbackDone(t, sess.renderCoordinator())
+			timer.ch <- time.Time{}
+			awaitTestCompletion(t, done, "resize callback did not complete")
+			require.True(t, p.deliveredWhileApplying(), "redraw must arrive while PTY.Resize owns the apply gate")
+			require.Equal(t, 'B', pane.screen.Frame.At(100, 0).Rune, "replay must parse the redraw before commit")
 
 			client.Resize(120, 24)
 			mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
 			require.Equal(t, 'B', client.Frame.At(100, 1).Rune,
 				"first grown frame exposed stale pre-SIGWINCH pane content")
-			requireNoOutputFrame(t, sends)
+			select {
+			case extra := <-sends:
+				t.Fatalf("resize emitted more than one frame: %#v", extra)
+			default:
+			}
 		})
 	}
 }
@@ -323,7 +343,9 @@ func TestResizeWithoutPTYOutputFlushesOneFullFrameAtDeadline(t *testing.T) {
 	}
 	requireNoOutputFrame(t, sends)
 
+	done := captureResizeCallbackDone(t, sess.renderCoordinator())
 	timer.ch <- time.Now()
+	awaitTestCompletion(t, done, "resize callback did not complete")
 	frame := awaitFrame(t, sends, ports.MsgOutput)
 	client := vt.NewScreen(120, 24)
 	out := mustApplyOutput(t, client, frame)
@@ -348,6 +370,7 @@ func TestResizeBurstFlushesOnlyLatestGeometry(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first resize did not schedule a bounded paint")
 	}
+	firstDone := captureResizeCallbackDone(t, sess.renderCoordinator())
 	d.resize(sess, ac, domain.Size{Cols: 120, Rows: 24})
 	var latest *signalTimer
 	select {
@@ -356,9 +379,12 @@ func TestResizeBurstFlushesOnlyLatestGeometry(t *testing.T) {
 		t.Fatal("latest resize did not replace the bounded paint")
 	}
 
+	latestDone := captureResizeCallbackDone(t, sess.renderCoordinator())
 	first.ch <- time.Now()
+	awaitTestCompletion(t, firstDone, "obsolete resize callback did not complete")
 	requireNoOutputFrame(t, sends)
 	latest.ch <- time.Now()
+	awaitTestCompletion(t, latestDone, "latest resize callback did not complete")
 	awaitFrame(t, sends, ports.MsgOutput)
 	require.Equal(t, domain.Size{Cols: 120, Rows: 24}, ac.size)
 	require.Equal(t, 120, sess.activeTab().focusedPane().screen.Frame.Width)
@@ -378,20 +404,21 @@ func TestDatagramWindowOneCoalescesPaintsUntilMsgAck(t *testing.T) {
 		MaxOutputInFlight: 1,
 	}, tr)
 	require.NoError(t, err)
+	require.True(t, sess.renderCoordinator().markAttachmentReady(sess.renderCoordinator().attachmentLease(ac)))
 
 	pane := sess.tabs[0].focusedPane()
 	pane.screen.Write([]byte("A"))
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 	first := awaitFrame(t, tr.sends, ports.MsgOutput)
 	firstOutput, err := ports.UnmarshalOutput(first.Payload)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), firstOutput.NewStateNum)
 	for range 100 {
 		pane.screen.Write([]byte("x"))
-		d.paint(sess, ac, false)
+		d.invalidateRender(sess, ac, false, "output_state_sync_test.go")
 	}
 	pane.screen.Write([]byte("LATEST"))
-	d.paint(sess, ac, false)
+	d.invalidateRender(sess, ac, false, "output_state_sync_test.go")
 	requireNoOutputFrame(t, tr.sends)
 	require.Equal(t, uint64(1), ac.output.outstanding(), "only one state-bearing datagram output may be unacknowledged")
 

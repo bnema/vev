@@ -155,6 +155,120 @@ func isType(typ ports.MsgType) any {
 	return mock.MatchedBy(func(f ports.Frame) bool { return f.Type == typ })
 }
 
+const testPreWelcomeTimeout = 15 * time.Second
+
+func newHandshakeClock(t *testing.T, timerCount int) (*portsmocks.MockClock, <-chan chan time.Time) {
+	t.Helper()
+	created := make(chan chan time.Time, timerCount)
+	clk := portsmocks.NewMockClock(t)
+	clk.EXPECT().NewTimer(testPreWelcomeTimeout).RunAndReturn(func(time.Duration) ports.Timer {
+		timerC := make(chan time.Time, 1)
+		timer := portsmocks.NewMockTimer(t)
+		timer.EXPECT().C().Return((<-chan time.Time)(timerC)).Maybe()
+		timer.EXPECT().Stop().Return(true).Once()
+		created <- timerC
+		return timer
+	}).Times(timerCount)
+	return clk, created
+}
+
+func TestRunBoundsPreWelcomeOperations(t *testing.T) {
+	tests := []struct {
+		name  string
+		phase string
+		end   string
+		want  error
+	}{
+		{name: "cancel while sending hello", phase: "send", end: "cancel", want: context.Canceled},
+		{name: "timeout while sending hello", phase: "send", end: "timeout", want: context.DeadlineExceeded},
+		{name: "cancel while receiving welcome", phase: "recv", end: "cancel", want: context.Canceled},
+		{name: "timeout while receiving welcome", phase: "recv", end: "timeout", want: context.DeadlineExceeded},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			timerCount := 1
+			if tt.phase == "recv" {
+				timerCount = 2
+			}
+			clk, createdTimers := newHandshakeClock(t, timerCount)
+
+			term := portsmocks.NewMockTerminal(t)
+			term.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+			// No EnterRaw expectation: it must not run before Welcome.
+
+			started := make(chan struct{})
+			closed := make(chan struct{})
+			operationExited := make(chan struct{})
+			tr := portsmocks.NewMockTransport(t)
+			tr.EXPECT().Close().Run(func() { close(closed) }).Return(nil).Once()
+
+			block := func() error {
+				close(started)
+				<-closed
+				close(operationExited)
+				return io.ErrClosedPipe
+			}
+			if tt.phase == "send" {
+				tr.EXPECT().Send(isType(ports.MsgHello)).RunAndReturn(func(ports.Frame) error {
+					return block()
+				}).Once()
+			} else {
+				tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+				tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+					return ports.Frame{}, block()
+				}).Once()
+			}
+			dialer := portsmocks.NewMockDialer(t)
+			dialer.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
+
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- client.Run(ctx, dialer, term, clk, ports.IntentAttach, "main", false, nil, slog.New(slog.DiscardHandler))
+			}()
+
+			var timerC chan time.Time
+			select {
+			case timerC = <-createdTimers:
+			case <-time.After(time.Second):
+				t.Fatal("pre-Welcome timer was not created")
+			}
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("pre-Welcome operation did not start")
+			}
+			if tt.phase == "recv" {
+				select {
+				case timerC = <-createdTimers:
+				case <-time.After(time.Second):
+					t.Fatal("Welcome timer was not created")
+				}
+			}
+
+			if tt.end == "cancel" {
+				cancel()
+			} else {
+				timerC <- time.Time{}
+			}
+
+			select {
+			case err := <-errCh:
+				require.ErrorIs(t, err, tt.want)
+			case <-time.After(time.Second):
+				t.Fatal("Run did not return after pre-Welcome cancellation")
+			}
+			select {
+			case <-operationExited:
+			case <-time.After(time.Second):
+				t.Fatal("pre-Welcome operation leaked after Run returned")
+			}
+		})
+	}
+}
+
 func TestAttachHelloIncludesTrueColor(t *testing.T) {
 	t.Setenv("TERM", "xterm-256color")
 	t.Setenv("COLORTERM", "truecolor")

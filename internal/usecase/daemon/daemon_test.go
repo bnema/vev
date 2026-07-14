@@ -142,7 +142,7 @@ func newBlockingOpenFactory(t *testing.T, d *Daemon) *blockingOpenFactory {
 	return f
 }
 
-func (f *blockingOpenFactory) Open(string, []string, []string, string, domain.Size) (ports.PTY, error) {
+func (f *blockingOpenFactory) Open(_ context.Context, _ string, _ []string, _ []string, _ string, _ domain.Size) (ports.PTY, error) {
 	<-f.release
 	return nil, io.ErrClosedPipe
 }
@@ -154,8 +154,8 @@ func newFactory(t *testing.T, p ports.PTY) *portsmocks.MockPTYFactory {
 	t.Helper()
 	f := portsmocks.NewMockPTYFactory(t)
 	var normal domain.Size
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ string, _ []string, _ []string, _ string, sz domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, _ []string, _ string, sz domain.Size) (ports.PTY, error) {
 			if !normal.Valid() {
 				normal = sz
 			}
@@ -174,8 +174,8 @@ func newFactorySeq(t *testing.T, ptys ...ports.PTY) *portsmocks.MockPTYFactory {
 	var mu sync.Mutex
 	var normal domain.Size
 	next := 0
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ string, _ []string, _ []string, _ string, sz domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, _ []string, _ string, sz domain.Size) (ports.PTY, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			if !normal.Valid() {
@@ -286,6 +286,54 @@ func listSessions(t *testing.T, d *Daemon) ports.Sessions {
 	return sessions
 }
 
+// welcomeBlockingTransport holds the route-level handshake precisely between
+// attachment publication and Welcome acceptance. It uses the generated
+// transport mock while channels make both sides of the wire deterministic.
+type welcomeBlockingTransport struct {
+	tr             *portsmocks.MockTransport
+	sends          chan ports.Frame
+	welcomeEntered chan struct{}
+	releaseWelcome chan struct{}
+	recvDone       chan struct{}
+	releaseOnce    sync.Once
+	closeOnce      sync.Once
+}
+
+func newWelcomeBlockingTransport(t *testing.T) *welcomeBlockingTransport {
+	t.Helper()
+	b := &welcomeBlockingTransport{
+		sends:          make(chan ports.Frame, 8),
+		welcomeEntered: make(chan struct{}),
+		releaseWelcome: make(chan struct{}),
+		recvDone:       make(chan struct{}),
+	}
+	b.tr = portsmocks.NewMockTransport(t)
+	b.tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f ports.Frame) error {
+		b.sends <- f
+		if f.Type == ports.MsgWelcome {
+			close(b.welcomeEntered)
+			<-b.releaseWelcome
+		}
+		return nil
+	}).Maybe()
+	b.tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		<-b.recvDone
+		return ports.Frame{}, io.EOF
+	}).Maybe()
+	b.tr.EXPECT().Close().Return(nil).Maybe()
+	t.Cleanup(b.finish)
+	return b
+}
+
+func (b *welcomeBlockingTransport) release() {
+	b.releaseOnce.Do(func() { close(b.releaseWelcome) })
+}
+
+func (b *welcomeBlockingTransport) finish() {
+	b.release()
+	b.closeOnce.Do(func() { close(b.recvDone) })
+}
+
 func newCapturingTransport(t testing.TB) (*portsmocks.MockTransport, chan ports.Frame) {
 	t.Helper()
 	tr := portsmocks.NewMockTransport(t)
@@ -394,6 +442,52 @@ type realTimer struct{ t *time.Timer }
 func (r realTimer) C() <-chan time.Time        { return r.t.C }
 func (r realTimer) Reset(d time.Duration) bool { return r.t.Reset(d) }
 func (r realTimer) Stop() bool                 { return r.t.Stop() }
+
+func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
+	pty, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	clock := newCoordinatorMockClock(t, 4)
+	d := newTestDaemon(t, newFactory(t, pty), clock.clock)
+	tr := newWelcomeBlockingTransport(t)
+	done := make(chan struct{})
+	go func() {
+		d.handleHello(tr.tr, mustHello(ports.IntentNew, "welcome-gate", domain.Size{Cols: 80, Rows: 24}))
+		close(done)
+	}()
+
+	awaitTestCompletion(t, tr.welcomeEntered, "timed out waiting for Welcome send")
+	welcome := awaitFrame(t, tr.sends, ports.MsgWelcome)
+	require.Equal(t, ports.MsgWelcome, welcome.Type)
+	sess := firstSession(d)
+	sess.mu.Lock()
+	ac := sess.client
+	sess.mu.Unlock()
+	require.NotNil(t, ac, "route must publish the attachment before Welcome returns")
+
+	// Exercise the real producer fan-in after publication. The deadline worker
+	// has completed before asserting the gate, so this is not a timing race.
+	d.invalidateRender(sess, ac, true, "welcome-gate-test")
+	// Attach-time theme setup may have armed an older bulk timer. The fresh
+	// urgent producer replaces it, so advance the newest published deadline.
+	timer := awaitLatestCoordinatorTimer(t, clock)
+	rc := sess.renderCoordinator()
+	rc.mu.Lock()
+	workerDone := rc.normalLane.token.done
+	rc.mu.Unlock()
+	require.NotNil(t, workerDone)
+	timer.ch <- time.Time{}
+	awaitTestCompletion(t, workerDone, "coordinator deadline worker did not complete")
+	requireNoCoordinatorOutputFrame(t, tr.sends)
+
+	tr.release()
+	output := awaitFrame(t, tr.sends, ports.MsgOutput)
+	first, err := ports.UnmarshalOutput(output.Payload)
+	require.NoError(t, err)
+	require.Zero(t, first.BaseStateNum, "the first post-Welcome frame is full")
+	tr.finish()
+	awaitTestCompletion(t, done, "timed out waiting for Welcome handler completion")
+	requireNoCoordinatorOutputFrame(t, tr.sends)
+}
 
 // TestServeReturnsDespiteWedgedClientOnShutdown: killSession's teardown must
 // not be gated behind the Detached notice. The client transport wedges every

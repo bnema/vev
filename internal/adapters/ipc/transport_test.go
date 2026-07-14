@@ -6,8 +6,10 @@ import (
 	"io"
 	"net"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -229,5 +231,288 @@ func TestTransportSendOversizePayloadRejected(t *testing.T) {
 	err := client.Send(ports.Frame{Type: ports.MsgOutput, Payload: payload})
 	if !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("client.Send() error = %v, want ErrFrameTooLarge", err)
+	}
+}
+
+func TestTransportAsyncEgressPreservesWelcomeBeforeOutput(t *testing.T) {
+	const timeout = time.Second
+
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+	if err := serverConn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("SetDeadline server connection: %v", err)
+	}
+	if err := clientConn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("SetDeadline client connection: %v", err)
+	}
+
+	server := NewTransport(serverConn)
+	defer closeTransport(t, server)
+	client := NewTransport(clientConn)
+	defer closeTransport(t, client)
+	async, ok := server.(ports.AsyncTransport)
+	if !ok {
+		t.Fatal("IPC transport does not implement AsyncTransport")
+	}
+
+	welcome := ports.Frame{Type: ports.MsgWelcome, Payload: []byte("welcome")}
+	sent := make(chan error, 1)
+	go func() { sent <- server.Send(welcome) }()
+	got, err := client.Recv()
+	if err != nil {
+		t.Fatalf("Recv welcome: %v", err)
+	}
+	if !reflect.DeepEqual(got, welcome) {
+		t.Fatalf("welcome = %#v, want %#v", got, welcome)
+	}
+	select {
+	case err := <-sent:
+		if err != nil {
+			t.Fatalf("Send welcome: %v", err)
+		}
+	case <-time.After(timeout):
+		t.Fatal("Send welcome did not return")
+	}
+
+	payload := []byte("first")
+	if err := async.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: payload}); err != nil {
+		t.Fatalf("SendAsync first output: %v", err)
+	}
+	payload[0] = 'X' // async ownership must not retain caller memory.
+	if err := async.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("second")}); err != nil {
+		t.Fatalf("SendAsync second output: %v", err)
+	}
+	for _, want := range []ports.Frame{
+		{Type: ports.MsgOutput, Payload: []byte("first")},
+		{Type: ports.MsgOutput, Payload: []byte("second")},
+	} {
+		got, err := client.Recv()
+		if err != nil {
+			t.Fatalf("Recv output: %v", err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("output = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestTransportSendWaitsForEgressCapacity(t *testing.T) {
+	const timeout = time.Second
+
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+	if err := clientConn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("SetDeadline client connection: %v", err)
+	}
+
+	server := NewTransport(serverConn)
+	defer closeTransport(t, server)
+	transport, ok := server.(*unixTransport)
+	if !ok {
+		t.Fatal("IPC transport is not a unixTransport")
+	}
+	client := NewTransport(clientConn)
+	defer closeTransport(t, client)
+	async, ok := server.(ports.AsyncTransport)
+	if !ok {
+		t.Fatal("IPC transport does not implement AsyncTransport")
+	}
+
+	queued := fillAsyncEgress(t, transport, async, timeout)
+	want := ports.Frame{Type: ports.MsgOutput, Payload: []byte("synchronous")}
+	sent := make(chan error, 1)
+	go func() { sent <- server.Send(want) }()
+	waitForEgressSender(t, transport, timeout)
+
+	select {
+	case err := <-sent:
+		t.Fatalf("Send returned before capacity was available: %v", err)
+	default:
+	}
+
+	for _, want := range append(queued, want) {
+		got, err := client.Recv()
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("Recv = %#v, want %#v", got, want)
+		}
+	}
+	select {
+	case err := <-sent:
+		if err != nil {
+			t.Fatalf("Send after draining: %v", err)
+		}
+	case <-time.After(timeout):
+		t.Fatal("Send did not return after draining")
+	}
+}
+
+func TestTransportCloseInterruptsSendWaitingForEgressCapacity(t *testing.T) {
+	const timeout = time.Second
+
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = clientConn.Close() }()
+
+	server := NewTransport(serverConn)
+	defer closeTransport(t, server)
+	transport, ok := server.(*unixTransport)
+	if !ok {
+		t.Fatal("IPC transport is not a unixTransport")
+	}
+	async, ok := server.(ports.AsyncTransport)
+	if !ok {
+		t.Fatal("IPC transport does not implement AsyncTransport")
+	}
+	fillAsyncEgress(t, transport, async, timeout)
+
+	sent := make(chan error, 1)
+	go func() { sent <- server.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("synchronous")}) }()
+	waitForEgressSender(t, transport, timeout)
+
+	closeTransport(t, server)
+	select {
+	case err := <-sent:
+		if !errors.Is(err, errClosed) {
+			t.Fatalf("Send after Close = %v, want errClosed", err)
+		}
+	case <-time.After(timeout):
+		t.Fatal("Close did not interrupt Send")
+	}
+}
+
+func waitForEgressSender(t *testing.T, transport *unixTransport, timeout time.Duration) {
+	t.Helper()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		transport.egressMu.Lock()
+		senders := transport.egressSenders
+		transport.egressMu.Unlock()
+		if senders > 0 {
+			return
+		}
+		select {
+		case <-timer.C:
+			t.Fatal("Send did not register as an egress capacity waiter")
+		default:
+			runtime.Gosched()
+		}
+	}
+}
+
+func closeTransport(t *testing.T, transport ports.Transport) {
+	t.Helper()
+
+	closed := make(chan error, 1)
+	go func() { closed <- transport.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return")
+	}
+}
+
+func fillAsyncEgress(t *testing.T, transport *unixTransport, async ports.AsyncTransport, timeout time.Duration) []ports.Frame {
+	t.Helper()
+
+	first := ports.Frame{Type: ports.MsgOutput, Payload: []byte{0}}
+	if err := async.SendAsync(first); err != nil {
+		t.Fatalf("SendAsync blocked frame: %v", err)
+	}
+	waitForEgressDequeue(t, transport, timeout)
+
+	queued := []ports.Frame{first}
+	for i := 1; ; i++ {
+		frame := ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}
+		err := async.SendAsync(frame)
+		switch {
+		case err == nil:
+			queued = append(queued, frame)
+		case errors.Is(err, ErrBackpressure):
+			return queued
+		default:
+			t.Fatalf("SendAsync queued frame: %v", err)
+		}
+	}
+}
+
+func waitForEgressDequeue(t *testing.T, transport *unixTransport, timeout time.Duration) {
+	t.Helper()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		if len(transport.egress) == 0 {
+			return
+		}
+		select {
+		case <-timer.C:
+			t.Fatal("IPC writer did not dequeue the blocked frame")
+		default:
+			runtime.Gosched()
+		}
+	}
+}
+
+func TestTransportAsyncEgressIsBoundedAndCloseInterruptsWorkers(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = clientConn.Close() }()
+
+	tr := NewTransport(serverConn)
+	defer closeTransport(t, tr)
+	transport, ok := tr.(*unixTransport)
+	if !ok {
+		t.Fatal("IPC transport is not a unixTransport")
+	}
+	async, ok := tr.(ports.AsyncTransport)
+	if !ok {
+		t.Fatal("IPC transport does not implement AsyncTransport")
+	}
+
+	// The first write blocks in net.Pipe because the peer never drains it.
+	if err := async.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("blocked")}); err != nil {
+		t.Fatalf("SendAsync blocked frame: %v", err)
+	}
+	var backpressure error
+	for range sendQueueCapacity + 2 {
+		err := async.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("queued")})
+		if errors.Is(err, ErrBackpressure) {
+			backpressure = err
+			break
+		}
+		if err != nil {
+			t.Fatalf("SendAsync unexpected error: %v", err)
+		}
+	}
+	if !errors.Is(backpressure, ErrBackpressure) {
+		t.Fatalf("SendAsync never reported bounded backpressure, got %v", backpressure)
+	}
+
+	recvDone := make(chan error, 1)
+	go func() {
+		_, err := tr.Recv()
+		recvDone <- err
+	}()
+	closeTransport(t, tr)
+	select {
+	case err := <-recvDone:
+		if err == nil {
+			t.Fatal("Recv succeeded after Close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not interrupt Recv")
+	}
+	select {
+	case <-transport.writerDone:
+	default:
+		t.Fatal("Close returned before the IPC writer terminated")
 	}
 }

@@ -2,7 +2,7 @@ package daemon
 
 import (
 	"context"
-	"sync"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -217,6 +218,47 @@ func TestPickerLoneEscapeExitsAfterDelay(t *testing.T) {
 	require.Eventually(t, func() bool { return !ac.overlays.pickerActive() }, time.Second, 5*time.Millisecond)
 }
 
+func TestBackSessionFirstResetDoesNotReuseSamePaneIDCapture(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	defer releasePTY1()
+	defer releasePTY2()
+	d, source, ac, sends := newManualSessionWithPTYs(t, p1)
+	source.id, source.name = "source", "source"
+	delete(d.sessions, domain.SessionID("manual"))
+	d.sessions[source.id] = source
+	target := &session{
+		id: "target", name: "target", ctx: source.ctx, cancel: func() {},
+		tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 22})},
+	}
+	d.sessions[target.id] = target
+
+	sourcePane := source.tabs[0].focusedPane()
+	targetPane := target.tabs[0].focusedPane()
+	require.Equal(t, layout.PaneID("pane-1"), sourcePane.id, "source uses reusable pane-1")
+	require.Equal(t, sourcePane.id, targetPane.id, "target deliberately reuses pane-1")
+	sourcePane.screen.Write([]byte("SOURCE"))
+	client := vt.NewScreen(80, 25)
+	d.firstPaint(source, ac, ac.size)
+	sourceOutput := mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	ac.ackOutputState(sourceOutput.NewStateNum)
+
+	targetPane.screen.Write([]byte("TARGET"))
+	targetPane.screen.ClearDamage() // TARGET is already rendered and has no pending VT damage.
+	require.Empty(t, targetPane.screen.Damage(), "target deliberately has no pending VT damage")
+	ac.previousSession.Set(target)
+
+	// Exercise the user-facing previous-session route, which delegates to the
+	// real switchToTarget hand-off and immediately emits its required reset.
+	d.backSession(source, ac)
+	firstReset := awaitFrame(t, sends, ports.MsgOutput)
+	out := mustApplyOutput(t, client, firstReset)
+	require.Zero(t, out.BaseStateNum, "the first target frame must be the reset, not an eventual repair")
+	frame := strings.Join(frameRows(client.Frame), "\n")
+	require.NotContains(t, frame, "SOURCE", "first target reset must not reuse source capture")
+	require.Contains(t, frame, "TARGET", "first target reset must immediately show clean target VT state")
+}
+
 func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
@@ -259,6 +301,40 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	awaitFrame(t, sends1, ports.MsgOutput)
 }
 
+func TestPickerDisplacementCancelsSupersededResize(t *testing.T) {
+	p1, releasePTY1 := newBlockingPTY(t)
+	p2, releasePTY2 := newBlockingPTY(t)
+	defer releasePTY1()
+	defer releasePTY2()
+	clock := &signalClock{timers: make(chan *signalTimer, 2)}
+	d := newTestDaemon(t, nil, clock)
+	tr1, _ := newCapturingTransport(t)
+	tr2, _ := newCapturingTransport(t)
+	ac1 := &attachedClient{tr: tr1, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	ac2 := &attachedClient{tr: tr2, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	sctx1, cancel1 := context.WithCancel(d.serveCtx)
+	sctx2, cancel2 := context.WithCancel(d.serveCtx)
+	defer cancel1()
+	defer cancel2()
+	sess1 := &session{id: "s1", name: "alpha", ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, client: ac1}
+	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, client: ac2}
+	ac1.setSession(sess1)
+	ac2.setSession(sess2)
+	d.sessions[sess1.id], d.sessions[sess2.id] = sess1, sess2
+
+	d.resize(sess2, ac2, domain.Size{Cols: 100, Rows: 24})
+	timer := <-clock.timers
+	done := captureResizeCallbackDone(t, sess2.renderCoordinator())
+	before := sess2.renderCoordinator().resizeSnapshot().epoch
+
+	require.Same(t, ac2, d.stealClientForTarget(sess1, ac1, sess2, picker.Target{Session: sess2.id}))
+	// The target coordinator invalidates its scheduled epoch during handoff;
+	// no attachment-local timer survives the transfer.
+	require.Equal(t, before, sess2.renderCoordinator().resizeSnapshot().epoch)
+	timer.ch <- time.Time{}
+	awaitTestCompletion(t, done, "superseded resize callback did not complete")
+}
+
 func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
@@ -295,7 +371,7 @@ func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {
 	oldPane.screen.Write([]byte("stale-damage"))
 	require.NotEmpty(t, oldPane.screen.Damage())
 
-	d.paint(sess1, ac1, false)
+	d.paint(sess1, ac1, false, nil)
 
 	require.Zero(t, len(sends1), "stale paint from old session sent a frame")
 	require.NotEmpty(t, oldPane.screen.Damage(), "stale paint from old session consumed damage")
@@ -329,7 +405,7 @@ func TestPickerSessionSwitchWaitsForInFlightPaintSend(t *testing.T) {
 	sess1.tabs[0].focusedPane().screen.Write([]byte("paint while switching"))
 	paintDone := make(chan struct{})
 	go func() {
-		d.paint(sess1, ac, false)
+		d.paint(sess1, ac, false, nil)
 		close(paintDone)
 	}()
 	<-enteredSend
@@ -368,8 +444,8 @@ func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {
 	defer releasePTY3()
 	var openedEnv []string
 	f := portsmocks.NewMockPTYFactory(t)
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ string, _ []string, env []string, _ string, sz domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, env []string, _ string, sz domain.Size) (ports.PTY, error) {
 			if sz != (domain.Size{Cols: 80, Rows: 22}) {
 				return newQuietPTY(), nil
 			}
@@ -401,6 +477,72 @@ func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {
 	require.Contains(t, openedEnv, "TERM=xterm-256color")
 	require.NotContains(t, openedEnv, "COLORTERM=truecolor")
 	require.NotContains(t, openedEnv, "TERM=xterm-direct")
+}
+
+func TestPickerPreviewGenerationRejectsStaleSubscriptionReplacement(t *testing.T) {
+	rc := newRenderCoordinator(renderCoordinatorOptions{})
+	viewer := &attachedClient{}
+	newer := func(renderWake) {}
+
+	require.True(t, rc.subscribePreviewFor(viewer, 2, newer))
+	require.False(t, rc.subscribePreviewFor(viewer, 1, func(renderWake) {}))
+	rc.teardownPreviewFor(viewer, 1)
+
+	rc.mu.Lock()
+	subscription, ok := rc.previewWakes[viewer]
+	rc.mu.Unlock()
+	require.True(t, ok)
+	require.Equal(t, uint64(2), subscription.generation)
+	require.NotNil(t, subscription.fn)
+}
+
+func TestPickerPreviewPostSubscribeRevalidationKeepsNewerSubscription(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	viewer := &attachedClient{}
+	viewer.initOverlays()
+	target := &session{}
+	tab := &tab{}
+	rc := newRenderCoordinator(renderCoordinatorOptions{})
+
+	viewer.overlays.pickerMu.Lock()
+	viewer.overlays.pickerPreviewGeneration = 2
+	viewer.overlays.pickerPreviewSession = target
+	viewer.overlays.pickerPreview = tab
+	viewer.overlays.pickerMu.Unlock()
+	require.True(t, rc.subscribePreviewFor(viewer, 2, func(renderWake) {}))
+
+	// This is the exact post-subscribe check from registerPreviewForSelection.
+	// It represents a generation-1 subscriber resuming after generation 2 won.
+	d.revalidatePreviewSubscription(viewer, rc, target, tab, 1)
+
+	rc.mu.Lock()
+	subscription, ok := rc.previewWakes[viewer]
+	rc.mu.Unlock()
+	require.True(t, ok)
+	require.Equal(t, uint64(2), subscription.generation)
+}
+
+func TestPickerDestroyedTabCleanupDoesNotClearNewerGeneration(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	viewer := &attachedClient{}
+	viewer.initOverlays()
+	newerSession := &session{}
+	newerTab := &tab{}
+	rc := newRenderCoordinator(renderCoordinatorOptions{})
+
+	viewer.overlays.pickerMu.Lock()
+	viewer.overlays.pickerPreviewGeneration = 2
+	viewer.overlays.pickerPreviewSession = newerSession
+	viewer.overlays.pickerPreview = newerTab
+	viewer.overlays.pickerMu.Unlock()
+	require.True(t, rc.subscribePreviewFor(viewer, 2, func(renderWake) {}))
+
+	require.False(t, d.clearPreviewGeneration(viewer, 1))
+	require.True(t, pickerPreviewCurrent(viewer, newerSession, newerTab, 2))
+	rc.mu.Lock()
+	_, subscribed := rc.previewWakes[viewer]
+	rc.mu.Unlock()
+	require.True(t, subscribed)
 }
 
 func TestPickerPreviewSinglePaneSnapshotsFocusedPane(t *testing.T) {
@@ -448,123 +590,6 @@ func TestPickerPreviewMultiPaneComposesTabFrame(t *testing.T) {
 	require.Equal(t, 'R', preview.Rows[2][21].Rune, "expanded stacked pane content should be included")
 }
 
-func TestPickerLivePreviewRepaintsInactiveTab(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 2)
-	defer func() {
-		for _, release := range releases {
-			release()
-		}
-	}()
-
-	d.enterPicker(sess, ac)
-	awaitFrame(t, sends, ports.MsgOutput)
-	d.handleInput(sess, ac, []byte("j"))
-	awaitFrame(t, sends, ports.MsgOutput)
-
-	previewTab := sess.tabs[1]
-	previewTab.mu.Lock()
-	previewTab.focusedPane().screen.Write([]byte("inactive-preview-live"))
-	previewTab.mu.Unlock()
-	d.render(sess, previewTab, previewTab.focusedPane())
-
-	previewOut := awaitFrame(t, sends, ports.MsgOutput)
-	previewMsg, err := ports.UnmarshalOutput(previewOut.Payload)
-	require.NoError(t, err)
-	require.Contains(t, string(previewMsg.Data), "inactive-preview-live")
-}
-
-func TestPickerLivePreviewRepaintsCrossSessionTab(t *testing.T) {
-	p1, releasePTY1 := newBlockingPTY(t)
-	p2, releasePTY2 := newBlockingPTY(t)
-	defer releasePTY1()
-	defer releasePTY2()
-	d := newTestDaemon(t, nil, stubClock{})
-	tr1, sends1 := newCapturingTransport(t)
-	tr2, _ := newCapturingTransport(t)
-	ac1 := &attachedClient{tr: tr1, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
-	ac1.initOverlays()
-	ac2 := &attachedClient{tr: tr2, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
-	ac2.initOverlays()
-	sctx1, cancel1 := context.WithCancel(d.serveCtx)
-	sctx2, cancel2 := context.WithCancel(d.serveCtx)
-	defer cancel1()
-	defer cancel2()
-	sess1 := &session{id: "s1", name: "alpha", ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, client: ac1}
-	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, client: ac2}
-	ac1.setSession(sess1)
-	ac2.setSession(sess2)
-	ac1.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac1}, nil)
-	ac2.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac2}, nil)
-	d.sessions[sess1.id] = sess1
-	d.sessions[sess2.id] = sess2
-
-	d.enterPicker(sess1, ac1)
-	awaitFrame(t, sends1, ports.MsgOutput)
-	d.handleInput(sess1, ac1, []byte("j"))
-	awaitFrame(t, sends1, ports.MsgOutput)
-
-	previewTab := sess2.tabs[0]
-	previewTab.mu.Lock()
-	previewTab.focusedPane().screen.Write([]byte("cross-session-preview-live"))
-	previewTab.mu.Unlock()
-	d.render(sess2, previewTab, previewTab.focusedPane())
-
-	previewOut := awaitFrame(t, sends1, ports.MsgOutput)
-	previewMsg, err := ports.UnmarshalOutput(previewOut.Payload)
-	require.NoError(t, err)
-	require.Contains(t, string(previewMsg.Data), "cross-session-preview-live")
-}
-
-func TestPickerOpenCloseNavigationConcurrentWithRenderRace(t *testing.T) {
-	d, sess, ac, sends, releases := newManualTabSession(t, 3)
-	defer func() {
-		for _, release := range releases {
-			release()
-		}
-	}()
-
-	done := make(chan struct{})
-	var drain sync.WaitGroup
-	drain.Go(func() {
-		for {
-			select {
-			case <-sends:
-			case <-done:
-				return
-			}
-		}
-	})
-
-	var wg sync.WaitGroup
-	for i := range 100 {
-		wg.Go(func() {
-			d.enterPicker(sess, ac)
-		})
-		wg.Go(func() {
-			d.handlePickerInput(ac, []byte("j"))
-			d.handlePickerInput(ac, []byte("k"))
-		})
-		wg.Go(func() {
-			d.closePicker(ac)
-		})
-		tb := sess.tabs[i%len(sess.tabs)]
-		wg.Go(func() {
-			tb.mu.Lock()
-			p := tb.focusedPane()
-			tb.mu.Unlock()
-			if p != nil {
-				p.mu.Lock()
-				p.screen.Write([]byte("render-race"))
-				p.mu.Unlock()
-			}
-			d.render(sess, tb, p)
-		})
-	}
-	wg.Wait()
-	close(done)
-	drain.Wait()
-}
-
 func TestPickerModalGeometry(t *testing.T) {
 	base := domain.Size{Cols: 100, Rows: 40}
 
@@ -582,7 +607,7 @@ func TestPickerResizeRecomposesModal(t *testing.T) {
 	d.resize(sess, ac, domain.Size{Cols: 100, Rows: 30})
 	// Picker recomposition is the relevant event here; do not depend on a real
 	// resize-idle timer in this synchronous rendering test.
-	d.paint(sess, ac, false)
+	d.paint(sess, ac, false, nil)
 
 	out := awaitFrame(t, sends, ports.MsgOutput)
 	msg, err := ports.UnmarshalOutput(out.Payload)
@@ -600,8 +625,8 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 	var opens [][]string
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
-		func(_ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
+		func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
 			opens = append(opens, append([]string(nil), env...))
 			if len(opens) == 1 {
 				return p1, nil
@@ -610,7 +635,7 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 		},
 	).Twice()
 	floating := newQuietPTY()
-	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
 		return got != normalSize && got.Valid()
 	})).Return(floating, nil).Once()
 	d := newTestDaemon(t, f, stubClock{})

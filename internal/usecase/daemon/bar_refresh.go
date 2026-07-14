@@ -306,12 +306,11 @@ func (d *Daemon) pokeSessionRender(sess *session) {
 	if sess == nil {
 		return
 	}
-	if tb := sess.activeTab(); tb != nil {
-		tb.mu.Lock()
-		p := tb.focusedPane()
-		tb.mu.Unlock()
-		if p != nil {
-			signal(p.dirty)
-		}
-	}
+	sess.mu.Lock()
+	ac := sess.client
+	sess.mu.Unlock()
+	// A headless session can still supply a picker preview to an attachment
+	// owned by another session. Its coordinator fans this wake out to those
+	// preview subscribers even though no primary attachment is bound.
+	d.invalidateRender(sess, ac, false, "bar_refresh.go")
 }

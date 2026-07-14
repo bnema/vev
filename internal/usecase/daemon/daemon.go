@@ -1,29 +1,4 @@
-// Package daemon holds vev's server-side session multiplexer use case: the
-// accept loop, the ephemeral/named session registry, the per-tab PTY reader
-// and VT screen, and the per-client debounced render scheduler.
-//
-// Concurrency model (sessions own one or more PTY-backed tabs):
-//
-//   - Serve runs the accept loop. Each accepted connection is handled by its
-//     own goroutine (handleConn): it reads the first frame and routes it to a
-//     session create/attach, a list, or a kill.
-//   - Per session there are exactly two long-lived goroutines: the PTY reader
-//     (drains child output into the VT screen and pokes a cap-1 dirty channel)
-//     and the render scheduler (debounces dirties and paints the attached
-//     client). Both are tied to the session context and unwind when the
-//     session is killed (pty.Close unblocks the reader; ctx cancel stops the
-//     scheduler).
-//   - The daemon exits (Serve returns) when the last session is removed, or
-//     when the parent context is cancelled (graceful shutdown notifies any
-//     attached clients with ReasonServerShutdown). Client detach does not end
-//     a session: ephemeral sessions stay in memory until explicitly killed or
-//     until the daemon exits, and named sessions can also persist on disk.
-//
-// Locking: a pane's screen/scrollback and per-client renderer shadow are
-// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
-// session.mu; the registry by Daemon.mu. When more than one is held the order
-// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
-// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
+// Package daemon holds vev's server-side session multiplexer use case.
 package daemon
 
 import (
@@ -41,14 +16,13 @@ import (
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
+	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
 // Scheduler debounce bounds. Idle updates use the minimum for low latency;
 // sustained floods step toward the maximum to reduce frame/syscall pressure.
 const (
 	minDebounceInterval   = 2 * time.Millisecond
-	maxDebounceInterval   = 16 * time.Millisecond
-	debounceStep          = 2 * time.Millisecond
 	maxSyncUpdateDuration = 500 * time.Millisecond
 )
 
@@ -117,17 +91,33 @@ type Daemon struct {
 	// beforeRecentSessionHandoff is a deterministic test seam for the narrow
 	// interval between JRS validation and its committed hand-off.
 	beforeRecentSessionHandoff func()
-
-	ptys                    ports.PTYFactory
-	clock                   ports.Clock
-	log                     *slog.Logger
-	baseEnv                 []string
-	shell                   string
-	shellArgs               []string
-	persist                 *persist.Persister
-	persistEnabled          bool
-	snaps                   ports.SnapshotStore
-	snapsEnabled            bool
+	ptys                       ports.PTYFactory
+	clock                      ports.Clock
+	log                        *slog.Logger
+	runtimeObserver            ports.RuntimeObserver
+	baseEnv                    []string
+	shell                      string
+	shellArgs                  []string
+	persist                    *persist.Persister
+	persistEnabled             bool
+	snaps                      ports.SnapshotStore
+	snapsEnabled               bool
+	snapshotMarshal            func(snapcodec.Session) ([]byte, error)
+	snapshotJobs               chan *snapshotCapture
+	snapshotWorkerMu           sync.Mutex
+	snapshotWorkerID           uint64
+	snapshotWorkerCtx          context.Context
+	snapshotWorkerCancel       context.CancelFunc
+	snapshotWorkerDone         chan struct{}
+	snapshotWorkerFlush        chan struct{}
+	snapshotWorkerFinalWake    chan struct{}
+	// snapshotFinalJobs coalesces terminal captures by session when the bounded
+	// regular queue is full. It retains at most snapshotFinalQueueCapacity named
+	// sessions, each with only its newest terminal state while the worker blocks.
+	snapshotFinalJobs       map[*session]*snapshotCapture
+	snapshotFinalOrder      []*session
+	snapshotWorkerClosing   bool
+	snapshotWorkerInFlight  *snapshotCapture
 	restoreDone             chan struct{}
 	restoreOnce             sync.Once
 	procCwd                 func(int) (string, error)
@@ -160,8 +150,14 @@ type Daemon struct {
 	done     chan struct{}
 	doneOnce sync.Once
 
-	sessWg sync.WaitGroup // PTY reader + scheduler goroutines
+	// sessWg owns attention animation, bar-script polling, CWD sampling,
+	// snapshot save/restore, and floating-session launch goroutines.
+	sessWg sync.WaitGroup
 	connWg sync.WaitGroup // per-connection handler goroutines
+	// attachmentCleanupWg owns replacement transport closes and retired render
+	// worker joins. Only connection handlers add work; Serve waits for those
+	// handlers before joining this group, so no Add races its terminal Wait.
+	attachmentCleanupWg sync.WaitGroup
 }
 
 type parkedAttachment struct {
@@ -193,6 +189,13 @@ func (s stoppedSession) same(other stoppedSession) bool {
 }
 
 type Option func(*Daemon)
+
+// WithRuntimeObserver accepts only a composition-root serialized observer.
+// The application owns its lifecycle; the daemon never creates or closes a
+// second reporting worker around it.
+func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
+	return func(d *Daemon) { d.runtimeObserver = observer }
+}
 
 // WithShell overrides the command (and its args) each session spawns. The
 // default is $SHELL (or /bin/sh) with no arguments; tests use this to run a
@@ -312,6 +315,8 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		done:            make(chan struct{}),
 		restoreDone:     make(chan struct{}),
 		animWake:        make(chan struct{}, 1),
+		snapshotMarshal: snapcodec.Marshal,
+		snapshotJobs:    make(chan *snapshotCapture, snapshotQueueCapacity),
 		resumeParkGrace: defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
@@ -382,6 +387,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 		})
 	}
 	if d.snapsEnabled {
+		d.startSnapshotEncodeWorker()
 		d.sessWg.Go(func() {
 			d.snapshotSaver(d.serveCtx)
 		})
@@ -425,12 +431,17 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	// remaining parked connections, so graceful notices are never raced by the
 	// force-close. Finally drain the conn handlers, run one defensive sweep in
 	// case any ordering ever leaves a session behind, and join the session
-	// goroutines (readers unblock via pty.Close, schedulers via ctx cancel).
+	// goroutines (readers unblock via pty.Close, coordinators via ctx cancel).
 	d.shutdownAll(ports.ReasonServerShutdown)
 	d.waitNotifies()
 	d.hardCancel()
 	d.serveCancel()
+	// Wait for handlers before flushing snapshots: a handler that already
+	// entered killSession may still submit its terminal capture after the
+	// registry snapshot has been removed.
 	d.connWg.Wait()
+	d.attachmentCleanupWg.Wait()
+	d.stopSnapshotEncodeWorker()
 	d.shutdownAll(ports.ReasonServerShutdown)
 	d.sessWg.Wait()
 	d.waitNotifies()
@@ -459,7 +470,9 @@ func (d *Daemon) shutdownAll(reason uint8) {
 		return
 	}
 	for _, s := range snapshot {
-		_ = d.killSession(s, reason, false)
+		if err := d.killSession(s, reason, false); err != nil {
+			d.log.Error("closing session with unpersisted terminal state", "err", err)
+		}
 	}
 }
 
@@ -620,7 +633,23 @@ func (d *Daemon) handleHello(tr ports.Transport, f ports.Frame) {
 		return
 	}
 
-	if err := ac.send(frameWelcome(sess, ac)); err != nil {
+	rc := sess.renderCoordinator()
+	lease := (*attachmentLease)(nil)
+	if rc != nil {
+		lease = rc.attachmentLease(ac)
+	}
+	expected := ac.transportSnapshot()
+	if lease == nil || expected.transport != tr {
+		d.clientGone(sess, ac, tr, false)
+		return
+	}
+	if err := ac.sendExpectedTransport(expected, frameWelcome(sess, ac)); err != nil {
+		d.clientGone(sess, ac, tr, false)
+		return
+	}
+	if !rc.markAttachmentReady(lease) {
+		// The attachment was displaced or detached while Welcome was in flight;
+		// never let this stale handshake emit an Output frame.
 		d.clientGone(sess, ac, tr, false)
 		return
 	}
@@ -636,6 +665,23 @@ type protoErr struct {
 }
 
 func (e *protoErr) Error() string { return e.text }
+
+// finishAttach completes an attachment prepared while d.mu is held. It
+// publishes the terminal state before releasing d.mu, then queues replacement
+// teardown so obsolete worker joins never delay the new handshake.
+func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, term terminalEnv, h ports.Hello) *attachedClient {
+	ac, old, cleanup := d.attachClientDeferred(sess, tr, sz, attachClientOptions{
+		clientID:          h.ClientID,
+		resumeCapable:     true,
+		maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight),
+	})
+	sess.mu.Lock()
+	sess.terminal = term
+	sess.mu.Unlock()
+	d.mu.Unlock()
+	d.retireReplacedClient(old, cleanup)
+	return ac
+}
 
 // route resolves a Hello to a session and a freshly attached client, creating
 // the session for ephemeral/new intents.
@@ -687,13 +733,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
-		sess.mu.Lock()
-		sess.terminal = term
-		sess.mu.Unlock()
-		d.mu.Unlock()
-		d.detachReplacedClient(old)
-		return sess, ac, nil
+		return sess, d.finishAttach(sess, tr, sz, term, h), nil
 
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
@@ -703,13 +743,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
-		sess.mu.Lock()
-		sess.terminal = term
-		sess.mu.Unlock()
-		d.mu.Unlock()
-		d.detachReplacedClient(old)
-		return sess, ac, nil
+		return sess, d.finishAttach(sess, tr, sz, term, h), nil
 
 	case ports.IntentNew:
 		if h.Name == "" {
@@ -730,13 +764,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			return nil, nil, err
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
-		sess.mu.Lock()
-		sess.terminal = term
-		sess.mu.Unlock()
-		d.mu.Unlock()
-		d.detachReplacedClient(old)
-		return sess, ac, nil
+		return sess, d.finishAttach(sess, tr, sz, term, h), nil
 
 	case ports.IntentAttach:
 		sess := d.findByNameLocked(h.Name)
@@ -755,13 +783,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 		}
 		d.purgeParkedForSessionLocked(sess)
-		ac, old := d.attachClient(sess, tr, sz, attachClientOptions{clientID: h.ClientID, resumeCapable: true, maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight)})
-		sess.mu.Lock()
-		sess.terminal = term
-		sess.mu.Unlock()
-		d.mu.Unlock()
-		d.detachReplacedClient(old)
-		return sess, ac, nil
+		return sess, d.finishAttach(sess, tr, sz, term, h), nil
 
 	default:
 		d.mu.Unlock()

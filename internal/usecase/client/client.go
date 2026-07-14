@@ -102,6 +102,10 @@ const stdinBufSize = 4096
 // goroutine, decoupling the input/resize pumps from transport back-pressure.
 const sendQueueDepth = 64
 
+// preWelcomeTimeout bounds each blocking operation before the daemon has
+// accepted the attach. Mosh uses the same 15-second startup budget.
+const preWelcomeTimeout = 15 * time.Second
+
 var reconnectSleep = sleepReconnect
 var reconnectSleepWithResize = sleepReconnectWithResizeEvents
 
@@ -120,7 +124,29 @@ const (
 // ClipboardReader configured (clipboard non-nil) — local attaches forward
 // 0x16 untouched so the locally running agent's own clipboard handling
 // applies.
-func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) (retErr error) {
+// Option configures opt-in client runtime observation.
+type Option func(*runtimeOptions)
+
+type runtimeOptions struct {
+	observer ports.SerializedRuntimeObserver
+}
+
+// WithRuntimeObserver accepts only a composition-root serialized observer, so
+// terminal and transport progress can never wait for a raw trace sink.
+func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
+	return func(opts *runtimeOptions) { opts.observer = observer }
+}
+
+func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) error {
+	return run(ctx, dialer, term, clk, intent, name, remote, clipboard, log, nil)
+}
+
+// RunWithRuntimeObserver is the application wiring entry point.
+func RunWithRuntimeObserver(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observer ports.SerializedRuntimeObserver) error {
+	return run(ctx, dialer, term, clk, intent, name, remote, clipboard, log, observer)
+}
+
+func run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observer ports.SerializedRuntimeObserver) (retErr error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -244,11 +270,13 @@ func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk port
 		if reporter, ok := transport.(ports.LinkStateReporter); ok {
 			linkEvents = reporter.LinkEvents()
 		}
-		result := attachOnce(ctx, transport, term, clk, attemptIntent, attemptName, resumeToken, processClientID, &ms, enterRaw, clearStatus, drawStatusStage, linkEvents, remote, clipboard, log)
+		result := attachOnce(ctx, transport, term, clk, attemptIntent, attemptName, resumeToken, processClientID, &ms, enterRaw, clearStatus, drawStatusStage, linkEvents, remote, clipboard, log, observer)
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
-		_ = transport.Close()
+		if !result.transportClosed {
+			_ = transport.Close()
+		}
 		if result.resumeToken != 0 {
 			resumeToken = result.resumeToken
 		}
@@ -311,8 +339,14 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 // disappears, or the context is cancelled.
 //
 // It is kept as a compatibility wrapper for callers that still own dialing.
-func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string) error {
-	return Run(ctx, singleTransportDialer{transport: transport}, term, clk, intent, name, false, nil, slog.Default())
+func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, options ...Option) error {
+	var opts runtimeOptions
+	for _, option := range options {
+		if option != nil {
+			option(&opts)
+		}
+	}
+	return run(ctx, singleTransportDialer{transport: transport}, term, clk, intent, name, false, nil, slog.Default(), opts.observer)
 }
 
 type singleTransportDialer struct{ transport ports.Transport }
@@ -322,10 +356,52 @@ func (d singleTransportDialer) Dial(context.Context) (ports.Transport, error) {
 }
 
 type attachResult struct {
-	resumeToken uint64
-	sessionName string
-	welcomed    bool
-	err         error
+	resumeToken     uint64
+	sessionName     string
+	welcomed        bool
+	transportClosed bool
+	err             error
+}
+
+// boundedPreWelcome runs one blocking handshake operation. Transport methods
+// do not accept a context, so cancellation and expiry close this attempt's
+// transport to interrupt the call, then wait for its goroutine to exit.
+func boundedPreWelcome(ctx context.Context, clk ports.Clock, transport ports.Transport, operation func() error) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		_ = transport.Close()
+		return true, err
+	}
+
+	timer := clk.NewTimer(preWelcomeTimeout)
+	defer timer.Stop()
+	completed := make(chan error, 1)
+	go func() { completed <- operation() }()
+
+	select {
+	case err := <-completed:
+		// Prefer a cancellation/expiry observed concurrently with completion.
+		// That event owns the transport lifetime even though the operation has
+		// already returned by the time we observe it here.
+		if ctx.Err() != nil {
+			_ = transport.Close()
+			return true, ctx.Err()
+		}
+		select {
+		case <-timer.C():
+			_ = transport.Close()
+			return true, context.DeadlineExceeded
+		default:
+			return false, err
+		}
+	case <-ctx.Done():
+		_ = transport.Close()
+		<-completed
+		return true, ctx.Err()
+	case <-timer.C():
+		_ = transport.Close()
+		<-completed
+		return true, context.DeadlineExceeded
+	}
 }
 
 // DetectTrueColor reports whether TERM/COLORTERM advertise direct color support.
@@ -346,7 +422,11 @@ func requestedOutputWindow(transport ports.Transport) uint8 {
 	return 8
 }
 
-func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func(), drawStatusStage func(reconnectStage), linkEvents <-chan ports.LinkEvent, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) attachResult {
+func attachOnce(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, resumeToken uint64, clientID [16]byte, ms *milestones, enterRaw func() error, clearStatus func(), drawStatusStage func(reconnectStage), linkEvents <-chan ports.LinkEvent, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observers ...ports.RuntimeObserver) attachResult {
+	var observer ports.RuntimeObserver
+	if len(observers) != 0 {
+		observer = observers[0]
+	}
 	// 1. Handshake: send Hello with our size and TERM.
 	size, err := term.Size()
 	if err != nil {
@@ -371,15 +451,22 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 		TrueColor:         trueColor,
 		MaxOutputInFlight: requestedOutputWindow(transport),
 	}
-	if err := transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
-		return attachResult{err: fmt.Errorf("vev: sending hello: %w", err)}
+	if closed, err := boundedPreWelcome(ctx, clk, transport, func() error {
+		return transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)})
+	}); err != nil {
+		return attachResult{transportClosed: closed, err: fmt.Errorf("vev: sending hello: %w", err)}
 	}
 	ms.helloSent = true
 
 	// 2. Await Welcome or a typed rejection.
-	reply, err := transport.Recv()
+	var reply ports.Frame
+	closed, err := boundedPreWelcome(ctx, clk, transport, func() error {
+		var recvErr error
+		reply, recvErr = transport.Recv()
+		return recvErr
+	})
 	if err != nil {
-		return attachResult{err: fmt.Errorf("vev: awaiting welcome: %w", err)}
+		return attachResult{transportClosed: closed, err: fmt.Errorf("vev: awaiting welcome: %w", err)}
 	}
 	result := func(welcomed bool, err error) attachResult {
 		return attachResult{resumeToken: resumeToken, sessionName: name, welcomed: welcomed, err: err}
@@ -500,6 +587,10 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 				}
 				if ferr := term.Flush(); ferr != nil {
 					return welcomedResult(fmt.Errorf("vev: flushing terminal: %w", ferr))
+				}
+				// The terminal boundary is after a successful flush and before ACK.
+				if observer != nil {
+					observer.ObserveRuntime(ports.NewRuntimeMark("client", ports.RuntimeTerminalFlushed, uint64(len(o.Data)), true))
 				}
 				if o.NewStateNum != 0 {
 					ackQueue.offer(o.NewStateNum)

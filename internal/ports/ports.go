@@ -24,7 +24,9 @@ type PTY interface {
 
 // PTYFactory creates PTYs by spawning a command attached to a new pseudo-terminal.
 type PTYFactory interface {
-	Open(cmd string, args []string, env []string, dir string, sz domain.Size) (PTY, error)
+	// Open creates a PTY while honoring ctx cancellation. Implementations must
+	// return promptly once ctx is cancelled and must not leave a child running.
+	Open(ctx context.Context, cmd string, args []string, env []string, dir string, sz domain.Size) (PTY, error)
 }
 
 // Terminal is the CLIENT-side controlling terminal.
@@ -38,7 +40,9 @@ type Terminal interface {
 	Flush() error
 }
 
-// Transport is a framed message channel over a single connection.
+// Transport is a framed message channel over a single connection. Close must
+// be safe to call concurrently with Send and Recv, and must unblock active
+// Send and Recv calls.
 type Transport interface {
 	Send(Frame) error
 	Recv() (Frame, error) // blocking; io.EOF on close

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 type closeTrackingTransport struct {
@@ -75,6 +78,110 @@ func TestNamedLinkLossParks(t *testing.T) {
 	_, parked := d.parked[token]
 	d.mu.Unlock()
 	require.True(t, parked, "named resume-capable link loss is parked")
+}
+
+func TestBoundedSendTimeoutCannotTargetResumedTransport(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	oldTransport := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "bounded-send-resume", 0), oldTransport)
+	require.NoError(t, err)
+	token := ac.resumeToken
+	d.clientGone(sess, ac, oldTransport, false)
+
+	clock := &signalClock{timers: make(chan *signalTimer, 1)}
+	d.clock = clock
+	ac.sendMu.Lock()
+	expected := ac.transportSnapshot()
+	orphanDone := make(chan struct{})
+	type boundedResult struct {
+		transport ports.Transport
+		err       error
+	}
+	result := make(chan boundedResult, 1)
+	go func() {
+		transport, sendErr := d.boundedSendWithTimeout(time.Second, expected.transport, func() error {
+			defer close(orphanDone)
+			return ac.sendExpectedTransport(expected, frameDetached(ports.ReasonDetach))
+		})
+		result <- boundedResult{transport: transport, err: sendErr}
+	}()
+
+	// The worker is parked behind sendMu, so it has not observed a transport.
+	// Expire its deadline before resuming this same attachment with a new link.
+	timer := <-clock.timers
+	timer.ch <- time.Time{}
+	got := <-result
+	require.ErrorIs(t, got.err, errSendTimedOut)
+	require.Same(t, oldTransport, got.transport)
+	require.NoError(t, ac.closeCapturedTransport(got.transport))
+
+	newTransport := &closeTrackingTransport{}
+	d.mu.Lock()
+	resumedSess, resumedAC, ok, err := d.resumeParkedLocked(
+		helloResumeCapable(ports.IntentResume, sess.name, token),
+		newTransport,
+		domain.Size{Cols: 80, Rows: 24},
+	)
+	d.mu.Unlock()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Same(t, sess, resumedSess)
+	require.Same(t, ac, resumedAC)
+
+	ac.sendMu.Unlock()
+	<-orphanDone
+	require.Empty(t, newTransport.Sends(), "orphaned send must not write to the resumed transport")
+	require.False(t, newTransport.Closed(), "orphaned send must not close the resumed transport")
+}
+
+func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
+	pty, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	clock := newCoordinatorMockClock(t, 4)
+	d := newTestDaemon(t, newFactorySeq(t, pty), clock.clock)
+	oldTransport := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "resume-welcome-gate", 0), oldTransport)
+	require.NoError(t, err)
+	token := ac.resumeToken
+	d.clientGone(sess, ac, oldTransport, false)
+
+	tr := newWelcomeBlockingTransport(t)
+	done := make(chan struct{})
+	resumeHello := helloResumeCapable(ports.IntentResume, sess.name, token)
+	go func() {
+		d.handleHello(tr.tr, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(resumeHello)})
+		close(done)
+	}()
+
+	<-tr.welcomeEntered
+	welcome := <-tr.sends
+	require.Equal(t, ports.MsgWelcome, welcome.Type)
+	sess.mu.Lock()
+	resumed := sess.client
+	sess.mu.Unlock()
+	require.Same(t, ac, resumed)
+
+	d.invalidateRender(sess, resumed, true, "resume-welcome-gate-test")
+	timer := awaitLatestCoordinatorTimer(t, clock)
+	rc := sess.renderCoordinator()
+	rc.mu.Lock()
+	workerDone := rc.normalLane.token.done
+	rc.mu.Unlock()
+	require.NotNil(t, workerDone)
+	timer.ch <- time.Time{}
+	awaitTestCompletion(t, workerDone, "coordinator deadline worker did not complete")
+	requireNoCoordinatorOutputFrame(t, tr.sends)
+
+	tr.release()
+	output := awaitFrame(t, tr.sends, ports.MsgOutput)
+	first, err := ports.UnmarshalOutput(output.Payload)
+	require.NoError(t, err)
+	require.Zero(t, first.BaseStateNum)
+	tr.finish()
+	<-done
+	requireNoCoordinatorOutputFrame(t, tr.sends)
 }
 
 func TestEphemeralLinkLossParksAndResumes(t *testing.T) {
@@ -228,6 +335,7 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, "work", token), newTr)
 	require.NoError(t, err)
 	require.Same(t, ac, resumedAC)
+	require.True(t, resumedSess.renderCoordinator().markAttachmentReady(resumedSess.renderCoordinator().attachmentLease(resumedAC)))
 	d.firstPaint(resumedSess, resumedAC, resumedAC.size)
 
 	sends := newTr.Sends()
@@ -239,12 +347,66 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 	resumedAC.ackOutputState(first.NewStateNum)
 
 	resumedSess.tabs[0].focusedPane().screen.Write([]byte("A"))
-	d.paint(resumedSess, resumedAC, false)
+	d.paint(resumedSess, resumedAC, false, nil)
 	sends = newTr.Sends()
 	require.Len(t, sends, 2)
 	second, err := ports.UnmarshalOutput(sends[1].Payload)
 	require.NoError(t, err)
 	require.Equal(t, first.NewStateNum, second.BaseStateNum)
+}
+
+func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactorySeq(t, pty), stubClock{})
+	oldTransport := &closeTrackingTransport{}
+	sess, ac, err := d.route(helloResumeCapable(ports.IntentNew, "work", 0), oldTransport)
+	require.NoError(t, err)
+
+	tb := sess.tabs[0]
+	survivor := tb.panes["pane-1"]
+	closed := newPane("pane-2", nil, domain.Size{Cols: 40, Rows: 23})
+	tb.mu.Lock()
+	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-1"}
+	tb.panes[closed.id] = closed
+	d.applyLayoutLocked(tb)
+	tb.mu.Unlock()
+	survivor.screen.Write([]byte("survivor"))
+	closed.screen.Write([]byte("closed"))
+	d.paint(sess, ac, true, nil)
+
+	ac.sendMu.Lock()
+	require.Contains(t, ac.captureFrames, closed, "fixture must render and capture the pane before parking")
+	ac.sendMu.Unlock()
+	token := ac.resumeToken
+	require.True(t, sess.detachIfCurrent(ac))
+	require.True(t, d.parkAttachment(sess, ac))
+
+	// Headless close cannot find the parked attachment through sess.client.
+	// Its capture must already have been released before the attachment parked.
+	require.NoError(t, d.closePane(sess, tb, closed.id, nil, false))
+	ac.sendMu.Lock()
+	require.NotContains(t, ac.captureFrames, closed, "parked attachment must not retain a pane closed while headless")
+	ac.sendMu.Unlock()
+
+	newTransport := &closeTrackingTransport{}
+	resumedSess, resumedAC, err := d.route(helloResumeCapable(ports.IntentResume, sess.name, token), newTransport)
+	require.NoError(t, err)
+	require.Same(t, sess, resumedSess)
+	require.Same(t, ac, resumedAC)
+	require.True(t, resumedSess.renderCoordinator().markAttachmentReady(resumedSess.renderCoordinator().attachmentLease(resumedAC)))
+	d.firstPaint(resumedSess, resumedAC, resumedAC.size)
+
+	sends := newTransport.Sends()
+	require.Len(t, sends, 1)
+	output, err := ports.UnmarshalOutput(sends[0].Payload)
+	require.NoError(t, err)
+	require.Zero(t, output.BaseStateNum, "resume must start with a complete frame")
+	terminal := vt.NewScreen(resumedAC.size.Cols, resumedAC.size.Rows)
+	terminal.Write(output.Data)
+	contents := strings.Join(frameRows(terminal.Frame), "\n")
+	require.Contains(t, contents, "survivor", "resume first paint must contain current headless content")
+	require.NotContains(t, contents, "closed", "resume first paint must not contain closed pane content")
 }
 
 func TestExplicitDetachDoesNotPark(t *testing.T) {

@@ -54,7 +54,7 @@ func TestCopyModeLifecycleClosePaneClearsRecoveredClientState(t *testing.T) {
 	sess.client = ac
 	ac.setSession(sess)
 	closing.mu.Lock()
-	document := scopy.NewSnapshot(closing.scrollback, closing.screen.Frame)
+	document := scopy.NewSnapshot(closing.history, closing.screen.Frame)
 	closing.mu.Unlock()
 	ac.overlays.copyMu.Lock()
 	ac.overlays.copyPane = closing
@@ -94,7 +94,7 @@ func TestCopyModeLifecycleDoesNotRenderCandidateBeforeValidation(t *testing.T) {
 	tb := sess.activeTab()
 	p := tb.focusedPane()
 	p.mu.Lock()
-	document := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+	document := scopy.NewSnapshot(p.history, p.screen.Frame)
 	p.mu.Unlock()
 
 	// Hold session validation after publication and make the captured target
@@ -157,7 +157,7 @@ func TestCopyModeLifecycleRejectsPublicationForInactiveOrRemovedPane(t *testing.
 			tb := sess.activeTab()
 			p := tb.focusedPane()
 			p.mu.Lock()
-			document := scopy.NewSnapshot(p.scrollback, p.screen.Frame)
+			document := scopy.NewSnapshot(p.history, p.screen.Frame)
 			p.mu.Unlock()
 			tc.invalidate(sess, tb, p)
 

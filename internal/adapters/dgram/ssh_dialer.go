@@ -102,6 +102,7 @@ type RemoteDialer struct {
 	BootstrapTimeout time.Duration
 	ProbeTimeout     time.Duration
 	Log              *slog.Logger
+	RuntimeObserver  ports.SerializedRuntimeObserver
 }
 
 func NewRemoteDialer(target, session string) RemoteDialer {
@@ -180,7 +181,7 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 		RebindPacketConn: func(net.PacketConn) (net.PacketConn, error) {
 			return listenUDPPacket(ctx)
 		},
-	})
+	}, WithRuntimeObserver(d.RuntimeObserver))
 	if err != nil {
 		_ = pc.Close()
 		return nil, udpUnavailable("create UDP transport", err, &stderr)

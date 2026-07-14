@@ -2055,6 +2055,24 @@ func TestResize(t *testing.T) {
 // ClearDamage
 // ---------------------------------------------------------------------------
 
+func TestDamageSaturationBoundsPendingRecords(t *testing.T) {
+	s := NewScreen(2, 2)
+	s.ClearDamage()
+
+	for i := range 1_100 {
+		s.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: i % 2, Width: 1, Height: 1, Count: 1})
+	}
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, s.Damage())
+
+	// Saturation is sticky until the render owner acknowledges or clears it.
+	s.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 0, Width: 1, Height: 1, Count: 1})
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, s.Damage())
+
+	s.ClearDamage()
+	s.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 0, Width: 1, Height: 1, Count: 1})
+	require.Equal(t, []renderer.Damage{{Kind: renderer.DamageText, X: 0, Y: 0, Width: 1, Height: 1, Count: 1}}, s.Damage())
+}
+
 func TestClearDamage(t *testing.T) {
 	tests := []struct {
 		name string
@@ -3283,4 +3301,37 @@ func TestScreenAltScreenActiveAccessor(t *testing.T) {
 	if s.AltScreenActive() {
 		t.Fatal("alt screen should be inactive after exit")
 	}
+}
+
+func TestDamageCaptureAcknowledgementPreservesConcurrentWrite(t *testing.T) {
+	s := NewScreen(8, 2)
+	s.ClearDamage()
+	s.Write([]byte("a"))
+
+	captured := s.CaptureDamage()
+	require.NotEmpty(t, captured.Damage)
+	s.Write([]byte("b"))
+
+	require.False(t, s.AcknowledgeDamage(captured.Generation))
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, s.Damage(), "stale acknowledgement must retain later writes conservatively")
+}
+
+func TestDamageCaptureAcknowledgementClearsMatchingGeneration(t *testing.T) {
+	s := NewScreen(8, 2)
+	s.ClearDamage()
+	s.Write([]byte("a"))
+
+	captured := s.CaptureDamage()
+	require.True(t, s.AcknowledgeDamage(captured.Generation))
+	require.Empty(t, s.Damage())
+}
+
+func TestDamageCaptureOwnsDamageSlice(t *testing.T) {
+	s := NewScreen(8, 2)
+	s.ClearDamage()
+	s.Write([]byte("a"))
+
+	captured := s.CaptureDamage()
+	s.ClearDamage()
+	require.NotEmpty(t, captured.Damage, "captured damage must not alias mutable screen storage")
 }

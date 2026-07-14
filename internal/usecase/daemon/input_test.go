@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"strings"
@@ -14,10 +15,10 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -57,11 +58,11 @@ func TestAltDigitSwitchesBetweenThreeTabs(t *testing.T) {
 		return len(sessions.Sessions) == 1 && sessions.Sessions[0].Tabs == 3
 	}, 2*time.Second, 5*time.Millisecond)
 	require.Eventually(t, func() bool { return len(writes1) == 1 }, 2*time.Second, 5*time.Millisecond)
-	require.Equal(t, []byte("A"), <-writes1)
+	requirePTYWrite(t, writes1, []byte("A"))
 	require.Eventually(t, func() bool { return len(writes2) == 1 }, 2*time.Second, 5*time.Millisecond)
-	require.Equal(t, []byte("B"), <-writes2)
+	requirePTYWrite(t, writes2, []byte("B"))
 	require.Eventually(t, func() bool { return len(writes3) == 1 }, 2*time.Second, 5*time.Millisecond)
-	require.Equal(t, []byte("C"), <-writes3)
+	requirePTYWrite(t, writes3, []byte("C"))
 
 	d.mu.Lock()
 	var sess *session
@@ -87,6 +88,77 @@ func TestAltDigitSwitchesBetweenThreeTabs(t *testing.T) {
 	d.sessWg.Wait()
 }
 
+func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, nil, nil)
+	source := sess.tabs[0].focusedPane()
+	target := sess.tabs[1].focusedPane()
+	require.Equal(t, source.id, target.id, "tabs deliberately reuse pane-1")
+
+	source.mu.Lock()
+	source.screen.Write([]byte("source"))
+	source.mu.Unlock()
+	d.paint(sess, ac, true, nil)
+	first := awaitFrame(t, sends, ports.MsgOutput)
+	firstOutput, err := ports.UnmarshalOutput(first.Payload)
+	require.NoError(t, err)
+	terminal := vt.NewScreen(ac.size.Cols, ac.size.Rows)
+	terminal.Write(firstOutput.Data)
+
+	// A clean pane relies on the attachment capture cache for its retained
+	// snapshot. Both tabs deliberately use the tab-local default pane ID.
+	target.mu.Lock()
+	target.screen.ClearDamage()
+	target.mu.Unlock()
+	// Use the real key action: it requests the mandatory complete repaint for
+	// the first target-tab frame.
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab2)
+	require.Equal(t, 1, activeTabIndex(sess))
+
+	second := awaitFrame(t, sends, ports.MsgOutput)
+	secondOutput, err := ports.UnmarshalOutput(second.Payload)
+	require.NoError(t, err)
+	require.Zero(t, secondOutput.BaseStateNum, "tab switch must emit the complete target frame first")
+	terminal.Write(secondOutput.Data)
+	require.NotContains(t, strings.Join(frameRows(terminal.Frame), "\n"), "source", "the first target-tab frame must not retain source pane cells")
+}
+
+func TestClosePanePrunesAttachedCaptureFrameAndKeepsSurvivor(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+	tb := sess.tabs[0]
+	survivor := tb.panes["pane-1"]
+	closed := newPane("pane-2", nil, domain.Size{Cols: 40, Rows: 23})
+	tb.mu.Lock()
+	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
+	tb.panes[closed.id] = closed
+	tb.mu.Unlock()
+
+	cachedSurvivor := capturedPaneRenderState{title: "survivor"}
+	ac.captureFrames = map[*pane]capturedPaneRenderState{
+		survivor: cachedSurvivor,
+		closed:   {title: "closed"},
+	}
+
+	require.NoError(t, d.closePane(sess, tb, closed.id, ac, false))
+	require.NotContains(t, ac.captureFrames, closed, "closed pane must not remain strongly retained by its attachment")
+	require.Equal(t, cachedSurvivor, ac.captureFrames[survivor], "surviving pane keeps its incremental capture")
+}
+
+func TestCloseTabPrunesAttachedCaptureFrames(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, nil, nil)
+	closedTab, survivorTab := sess.tabs[0], sess.tabs[1]
+	closed := closedTab.panes["pane-1"]
+	survivor := survivorTab.panes["pane-1"]
+	cachedSurvivor := capturedPaneRenderState{title: "survivor"}
+	ac.captureFrames = map[*pane]capturedPaneRenderState{
+		closed:   {title: "closed"},
+		survivor: cachedSurvivor,
+	}
+
+	d.closeTab(sess, closedTab, false)
+	require.NotContains(t, ac.captureFrames, closed, "closed tab panes must not remain strongly retained by its attachment")
+	require.Equal(t, cachedSurvivor, ac.captureFrames[survivor], "surviving tab pane keeps its incremental capture")
+}
+
 func TestAltCForwardsToPTY(t *testing.T) {
 	writes := make(chan []byte, 2)
 	p, releasePTY := newBlockingPTYWithWrites(t, writes)
@@ -94,8 +166,72 @@ func TestAltCForwardsToPTY(t *testing.T) {
 
 	d.handleInput(sess, ac, []byte("\x1bc"))
 
-	require.Equal(t, []byte("\x1bc"), <-writes)
+	requirePTYWrite(t, writes, []byte("\x1bc"))
 	releasePTY()
+}
+
+func TestAltFToggleRetainedFloatingPaneRepaintsImmediately(t *testing.T) {
+	normal, releaseNormal := newBlockingPTY(t)
+	floatingPTY, releaseFloating := newBlockingPTY(t)
+	defer releaseNormal()
+	defer releaseFloating()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
+	client := vt.NewScreen(80, 25)
+	floatingCtx, cancelFloating := context.WithCancel(sess.ctx)
+	defer cancelFloating()
+	floating := newPane("floating", floatingPTY, domain.Size{Cols: 20, Rows: 5})
+	floating.ctx = floatingCtx
+	floating.screen.Write([]byte("popup-content"))
+	installTestFloating(sess.activeTab(), floating, false)
+
+	// Establish the client shadow while the retained popup is hidden.
+	d.paint(sess, ac, true, nil)
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+
+	// Route the real Alt+F binding. Showing a retained pane must paint once.
+	d.handleInput(sess, ac, []byte("\x1bf"))
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	require.Contains(t, strings.Join(frameRows(client.Frame), "\n"), "popup-content")
+	require.Contains(t, strings.Join(frameRows(client.Frame), "\n"), "┌")
+	select {
+	case extra := <-sends:
+		t.Fatalf("show emitted duplicate output: %#v", extra)
+	default:
+	}
+
+	// The second real key must repaint immediately, rather than waiting for
+	// unrelated output, while retaining the existing PTY and context.
+	d.handleInput(sess, ac, []byte("\x1bf"))
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	require.NotContains(t, strings.Join(frameRows(client.Frame), "\n"), "popup-content")
+	tb := sess.activeTab()
+	tb.mu.Lock()
+	require.Equal(t, floatingHidden, tb.floating.state)
+	require.Same(t, floating, tb.floating.pane)
+	generation := tb.floating.generation
+	tb.mu.Unlock()
+	require.Same(t, floatingPTY, floating.pty)
+	select {
+	case <-floating.ctx.Done():
+		t.Fatal("hiding retained popup cancelled its context")
+	default:
+	}
+
+	// A third show uses the installed pane; it must not launch or emit a second
+	// resize/start frame.
+	d.handleInput(sess, ac, []byte("\x1bf"))
+	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	require.Contains(t, strings.Join(frameRows(client.Frame), "\n"), "popup-content")
+	tb.mu.Lock()
+	require.Equal(t, floatingVisible, tb.floating.state)
+	require.Same(t, floating, tb.floating.pane)
+	require.Equal(t, generation, tb.floating.generation)
+	tb.mu.Unlock()
+	select {
+	case extra := <-sends:
+		t.Fatalf("retained show emitted duplicate output: %#v", extra)
+	default:
+	}
 }
 
 func requireFloatingInitialized(t *testing.T, tb *tab) {
@@ -260,7 +396,7 @@ func TestBracketedMultilinePasteForwardsDelimitersAndNewlines(t *testing.T) {
 	paste := []byte("\x1b[200~first line\nsecond line\n\x1b[201~")
 	d.handleInput(sess, ac, paste)
 
-	require.Equal(t, paste, <-writes)
+	requirePTYWrite(t, writes, paste)
 	releasePTY()
 }
 
@@ -342,7 +478,7 @@ func TestOverlayInputPrecedence(t *testing.T) {
 			input: []byte("Z"),
 			check: func(t *testing.T, ac *attachedClient, writes chan []byte) {
 				t.Helper()
-				require.Equal(t, []byte("Z"), <-writes)
+				requirePTYWrite(t, writes, []byte("Z"))
 			},
 		},
 	}
@@ -464,6 +600,45 @@ func TestStaleBackSessionClearPreservesConcurrentTarget(t *testing.T) {
 	ac.clearPreviousSessionIf(stale)
 
 	require.Same(t, updated, ac.previousSession.Get())
+}
+
+// backSession's invalid-target fallback is a render producer: it must publish
+// exactly one coordinator invalidation instead of composing directly, while
+// the valid-target hand-off (TestPaletteBackSessionTogglesPreviousSession) and
+// the guarded stale clear (TestStaleBackSessionClearPreservesConcurrentTarget)
+// keep their PR #73 behavior unchanged.
+func TestBackSessionInvalidTargetsFallBackThroughOneInvalidation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(current *session, ac *attachedClient)
+	}{
+		{name: "no previous target", prepare: func(*session, *attachedClient) {}},
+		{name: "stale previous target", prepare: func(_ *session, ac *attachedClient) {
+			ac.previousSession.Set(&session{id: "gone"})
+		}},
+		{name: "previous target equals current", prepare: func(current *session, ac *attachedClient) {
+			ac.previousSession.Set(current)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+			defer releaseAll(releases)
+			invs := make(chan renderInvalidation, 4)
+			current.installRenderCoordinator(newRenderCoordinator(renderCoordinatorOptions{
+				clock:        d.clock,
+				wake:         func(renderWake) {},
+				onInvalidate: func(inv renderInvalidation) { invs <- inv },
+			}))
+			tc.prepare(current, ac)
+
+			d.backSession(current, ac)
+
+			require.Same(t, current, ac.currentSession(), "an invalid target must not move the attachment")
+			awaitInvalidation(t, invs)
+			requireNoInvalidation(t, invs)
+			requireNoOutputFrame(t, sends)
+		})
+	}
 }
 
 func TestSwitchSourcePreviousSessionContracts(t *testing.T) {
@@ -592,7 +767,7 @@ func TestAltXClosesActiveTabAndSelectsRemaining(t *testing.T) {
 	require.Equal(t, 1, activeTabIndex(sess), "closing middle tab selects the next remaining tab")
 	d.handleInput(sess, ac, []byte("Z"))
 	require.Eventually(t, func() bool { return len(writes) == 1 }, 2*time.Second, 5*time.Millisecond)
-	require.Equal(t, []byte("Z"), <-writes)
+	requirePTYWrite(t, writes, []byte("Z"))
 
 	releasePTY1()
 	releasePTY2()
@@ -696,8 +871,8 @@ func TestMouseAltScreenWheelMapsToArrows(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
 	d.handleInput(sess, ac, []byte("\x1b[<65;1;1M"))
 
-	require.Equal(t, []byte("\x1b[A\x1b[A\x1b[A"), <-writes)
-	require.Equal(t, []byte("\x1b[B\x1b[B\x1b[B"), <-writes)
+	requirePTYWrite(t, writes, []byte("\x1b[A\x1b[A\x1b[A"))
+	requirePTYWrite(t, writes, []byte("\x1b[B\x1b[B\x1b[B"))
 	require.Nil(t, ac.overlays.copyMode)
 }
 
@@ -752,7 +927,7 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("\x1b[?1006h"))
 	d.handleInput(sess, ac, raw)
-	require.Equal(t, []byte("\x1b[<0;2;2M"), <-writes)
+	requirePTYWrite(t, writes, []byte("\x1b[<0;2;2M"))
 
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
 	select {
@@ -892,7 +1067,7 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	sess.tabs[0].focusedPane().scrollback = scopy.NewScrollback(50)
+	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 50})
 	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
 
 	// Press on a content row while scrollback is empty: the anchor is
@@ -902,7 +1077,7 @@ func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 	// Simulate 5 lines evicted into scrollback between the Press and the
 	// first Motion (e.g. the child kept producing output).
 	for range 5 {
-		sess.tabs[0].focusedPane().scrollback.Append(testRow("evicted"))
+		sess.tabs[0].focusedPane().history.Append(testRow("evicted"))
 	}
 
 	// Motion lands on wire row 3 (0-based row 2 of the *current* screen).

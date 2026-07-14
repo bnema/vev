@@ -74,7 +74,7 @@ func recvPump(tr ports.Transport) *pump {
 // attach dials, handshakes, and returns the transport plus its frame pump.
 func attach(t *testing.T, dir string, intent uint8, name string, sz domain.Size) (ports.Transport, *pump) {
 	t.Helper()
-	tr, err := ipc.Dial(dir)
+	tr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	hello := ports.Hello{Version: ports.ProtocolVersion, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color"}
 	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}))
@@ -91,7 +91,7 @@ func attach(t *testing.T, dir string, intent uint8, name string, sz domain.Size)
 
 func listRemoteSessions(t *testing.T, dir string) ports.Sessions {
 	t.Helper()
-	tr, err := ipc.Dial(dir)
+	tr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	defer func() { _ = tr.Close() }()
 	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(ports.List{})}))
@@ -104,7 +104,7 @@ func listRemoteSessions(t *testing.T, dir string) ports.Sessions {
 }
 
 func killAll(dir string) error {
-	tr, err := ipc.Dial(dir)
+	tr, err := ipc.DialContext(context.Background(), dir)
 	if err != nil {
 		return err
 	}
@@ -248,7 +248,7 @@ func TestIntegration_CommandPaletteRenamesEphemeralSession(t *testing.T) {
 	text = awaitScreenText(t, p, sz, " work ")
 	require.NotContains(t, text, "work*")
 
-	listTr, err := ipc.Dial(dir)
+	listTr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	defer func() { _ = listTr.Close() }()
 	require.NoError(t, listTr.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(ports.List{})}))
@@ -367,7 +367,7 @@ func TestIntegration_KillAllShutsDownDaemon(t *testing.T) {
 	tr2, _ := attach(t, dir, ports.IntentNew, "two", sz)
 	require.NoError(t, tr2.Close())
 
-	killTr, err := ipc.Dial(dir)
+	killTr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	defer func() { _ = killTr.Close() }()
 	require.NoError(t, killTr.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}))

@@ -35,6 +35,10 @@ type screenState struct {
 // so keep this value in sync if that payload cap changes.
 const maxEscapeBufferLen = 128 * 1024
 
+// maxPendingDamage bounds metadata retained while no render transaction can
+// acknowledge a screen. Saturation falls back to one exact full redraw.
+const maxPendingDamage = 1024
+
 const (
 	// ColorSchemeReportDark is the DEC 2031 dark-scheme report.
 	ColorSchemeReportDark = "\x1b[?997;1n"
@@ -81,15 +85,20 @@ type Screen struct {
 	// never invoke it. Nil disables it.
 	OnClipboard func(b64 string)
 
+	history *History
+
 	defaultFG          renderer.RGB
 	defaultBG          renderer.RGB
 	defaultColorsKnown bool
 	terminalTitle      string
 
-	damage     []renderer.Damage
-	escapeBuf  []byte
-	csiScratch []int
-	sgrScratch []int
+	damage                 []renderer.Damage
+	damageGeneration       uint64
+	damageSaturated        bool
+	damageFullRedrawSticky bool
+	escapeBuf              []byte
+	csiScratch             []int
+	sgrScratch             []int
 
 	scrollTop        int
 	scrollBottom     int
@@ -112,24 +121,33 @@ type Screen struct {
 
 func NewScreen(width, height int) *Screen {
 	s := &Screen{
-		Frame:         renderer.NewFrame(width, height),
-		Style:         renderer.DefaultStyle(),
-		damage:        []renderer.Damage{renderer.FullRedraw()},
-		cursorVisible: true,
+		Frame:            renderer.NewFrame(width, height),
+		Style:            renderer.DefaultStyle(),
+		damage:           []renderer.Damage{renderer.FullRedraw()},
+		damageGeneration: 1,
+		cursorVisible:    true,
 	}
 	s.resetScrollRegion()
 	return s
 }
 
+// NewScreenWithHistory creates a screen that records rows evicted from its
+// primary screen into bounded immutable terminal history.
+func NewScreenWithHistory(width, height int, config HistoryConfig) *Screen {
+	s := NewScreen(width, height)
+	s.history = NewHistory(config)
+	return s
+}
+
+// History returns this screen's terminal history, or nil when history was not
+// configured with NewScreenWithHistory.
+func (s *Screen) History() *History { return s.history }
+
 func (s *Screen) Resize(width, height int) {
 	if width == s.Frame.Width && height == s.Frame.Height {
 		return
 	}
-	evict := func(row []renderer.Cell) {
-		if s.OnLineEvicted != nil {
-			s.OnLineEvicted(append([]renderer.Cell(nil), row...))
-		}
-	}
+	evict := s.recordEvicted
 
 	if s.alternate != nil {
 		var shift int
@@ -162,10 +180,37 @@ func (s *Screen) Resize(width, height int) {
 	s.fullRedraw()
 }
 
+// DamageCapture is an immutable copy of pending damage at one screen generation.
+type DamageCapture struct {
+	Damage     []renderer.Damage
+	Generation uint64
+}
+
 // Damage returns the current damage list. The caller must not modify the
 // returned slice; ClearDamage must be called after the damage is consumed.
 func (s *Screen) Damage() []renderer.Damage { return s.damage }
-func (s *Screen) ClearDamage()              { s.damage = s.damage[:0] }
+func (s *Screen) ClearDamage() {
+	s.damage = s.damage[:0]
+	s.damageSaturated = false
+	s.damageFullRedrawSticky = false
+}
+
+// CaptureDamage snapshots pending damage without consuming it.
+func (s *Screen) CaptureDamage() DamageCapture {
+	return DamageCapture{Damage: append([]renderer.Damage(nil), s.damage...), Generation: s.damageGeneration}
+}
+
+// AcknowledgeDamage consumes a capture only if no screen mutation occurred
+// since it was taken. A stale acknowledgement conservatively requests a full
+// redraw, ensuring intervening writes remain visible to the next capture.
+func (s *Screen) AcknowledgeDamage(generation uint64) bool {
+	if generation != s.damageGeneration {
+		s.fullRedraw()
+		return false
+	}
+	s.ClearDamage()
+	return true
+}
 
 // SyncUpdateActive reports whether DEC private mode 2026 (synchronized update)
 // is currently enabled by the child process.
@@ -547,11 +592,20 @@ func (s *Screen) scrollUpRegion(top, bottom, n int) {
 }
 
 func (s *Screen) emitLineEvicted(top, n int) {
-	if s.OnLineEvicted == nil || s.alternate != nil {
+	if s.alternate != nil {
 		return
 	}
 	for y := top; y < top+n; y++ {
-		s.OnLineEvicted(append([]renderer.Cell(nil), s.Frame.Row(y)...))
+		s.recordEvicted(s.Frame.Row(y))
+	}
+}
+
+func (s *Screen) recordEvicted(row []renderer.Cell) {
+	if s.history != nil {
+		s.history.Append(row)
+	}
+	if s.OnLineEvicted != nil {
+		s.OnLineEvicted(append([]renderer.Cell(nil), row...))
 	}
 }
 
@@ -599,6 +653,15 @@ func (s *Screen) normalizedRegion(top, bottom int) (int, int, bool) {
 }
 
 func (s *Screen) record(d renderer.Damage) {
+	s.damageGeneration++
+	if s.damageSaturated || s.damageFullRedrawSticky {
+		return
+	}
+	if len(s.damage) >= maxPendingDamage {
+		s.damage = []renderer.Damage{renderer.FullRedraw()}
+		s.damageSaturated = true
+		return
+	}
 	// Replace FullRedraw with the first concrete damage item.
 	if len(s.damage) == 1 && s.damage[0].Kind == renderer.DamageFullRedraw {
 		s.damage[0] = d
@@ -616,7 +679,12 @@ func (s *Screen) record(d renderer.Damage) {
 }
 
 func (s *Screen) fullRedraw() {
+	s.damageGeneration++
 	s.damage = []renderer.Damage{renderer.FullRedraw()}
+	// A structural frame replacement (such as DEC 1049 exit) cannot be
+	// represented by the following text damage alone. Retain the redraw until
+	// the render owner acknowledges this screen generation.
+	s.damageFullRedrawSticky = true
 }
 
 func (s *Screen) consumeEscape(data []byte) (consumed int, partial bool) {

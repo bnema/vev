@@ -277,6 +277,18 @@ func TestBarScriptRunIgnoresStaleConfigVersion(t *testing.T) {
 	require.Empty(t, state.bottomRight)
 }
 
+func TestPokeSessionRenderWakesHeadlessPreviewCoordinator(t *testing.T) {
+	d := newBarRefreshTestDaemon(nil, time.Second)
+	sess := newBarRefreshTestSession()
+	var invalidations int
+	rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(renderInvalidation) { invalidations++ }})
+	sess.installRenderCoordinator(rc)
+
+	d.pokeSessionRender(sess)
+
+	require.Equal(t, 1, invalidations)
+}
+
 func TestBarScriptRefreshIsPerSession(t *testing.T) {
 	r := &fakeBarRunner{outs: []string{"top-a", "bottom-a", "top-b", "bottom-b"}}
 	d := newBarRefreshTestDaemon(r, time.Second)

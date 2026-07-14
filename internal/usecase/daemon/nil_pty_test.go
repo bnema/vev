@@ -24,7 +24,7 @@ func TestNilPTYLifecyclePathsDoNotPanic(t *testing.T) {
 	sess.tabs = []*tab{first, second}
 
 	require.NotPanics(t, func() {
-		d.resizePane(first.focusedPane(), domain.Rect{Width: 20, Height: 5})
+		d.applyPaneResize(first.focusedPane(), domain.Rect{Width: 20, Height: 5})
 	})
 	require.Equal(t, 20, first.focusedPane().screen.Frame.Width)
 	require.Equal(t, 5, first.focusedPane().screen.Frame.Height)

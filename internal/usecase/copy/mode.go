@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 // OSC52MaxPayloadBytes caps clipboard payloads while vev intentionally emits
@@ -17,51 +18,76 @@ import (
 const OSC52MaxPayloadBytes = 75_000
 
 // Snapshot is the immutable scrollback-mode document: history followed by the
-// visible screen. History rows are immutable by Scrollback's append contract;
-// the visible frame is cloned once when the snapshot is constructed.
+// visible screen. VT HistoryView retains immutable chunks; the visible frame is
+// cloned once when the snapshot is constructed.
 type Snapshot struct {
-	history HistoryView
+	history vt.HistoryView
 	screen  renderer.Frame
 	Width   int
 	Height  int
 }
 
-// NewSnapshot freezes the current scrollback view and clones the visible screen.
-func NewSnapshot(sb *Scrollback, screen renderer.Frame) Snapshot {
-	var history HistoryView
-	if sb != nil {
-		history = sb.View()
+// NewSnapshot seals the current VT history tail, then freezes that immutable
+// view and clones the visible screen. Sealing prevents repeated copy entry from
+// cloning every row in a partial tail.
+func NewSnapshot(historySource *vt.History, screen renderer.Frame) Snapshot {
+	var history vt.HistoryView
+	if historySource != nil {
+		history = historySource.SealAndView()
 	}
 	return Snapshot{history: history, screen: screen.Clone(), Width: screen.Width, Height: screen.Height}
 }
 
 // NewSnapshotFromRows constructs a snapshot that owns explicit caller rows.
 // It is intended for callers that already have a complete document rather than
-// a scrollback and visible frame.
+// a scrollback and visible frame. Height is viewport geometry, not a request to
+// append blank document rows.
 func NewSnapshotFromRows(rows [][]renderer.Cell, width, height int) Snapshot {
-	owned := make([][]renderer.Cell, len(rows))
-	for i, row := range rows {
-		owned[i] = append([]renderer.Cell(nil), row...)
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: len(rows), ChunkRows: 256})
+	for _, row := range rows {
+		history.Append(row)
 	}
-	return Snapshot{history: HistoryView{rows: owned}, Width: width, Height: height}
+	return Snapshot{history: history.SealAndView(), Width: width, Height: height}
 }
 
 // Len returns the number of document rows.
 func (s Snapshot) Len() int { return s.history.Len() + s.screen.Height }
 
-// Row returns document row i, or nil when i is out of range.
+// Row returns document row i, or nil when i is out of range. History rows
+// borrow immutable history storage and must be treated as read-only.
 func (s Snapshot) Row(i int) []renderer.Cell {
 	if i < 0 {
 		return nil
 	}
 	if i < s.history.Len() {
-		return s.history.Row(i)
+		return s.history.BorrowedRow(i)
 	}
 	i -= s.history.Len()
 	if i >= s.screen.Height {
 		return nil
 	}
 	return s.screen.Row(i)
+}
+
+func (s Snapshot) rangeRows(yield func(int, []renderer.Cell) bool) {
+	rowIndex := 0
+	stopped := false
+	s.history.Range(func(row []renderer.Cell) bool {
+		if !yield(rowIndex, row) {
+			stopped = true
+			return false
+		}
+		rowIndex++
+		return true
+	})
+	if stopped {
+		return
+	}
+	for y := range s.screen.Height {
+		if !yield(rowIndex+y, s.screen.Row(y)) {
+			return
+		}
+	}
 }
 
 // Mode stores per-client scrollback viewport and line-selection state.
@@ -102,8 +128,7 @@ func FindMatches(s Snapshot, query string) []SearchMatch {
 	}
 	needle := lowerRunes(query)
 	matches := make([]SearchMatch, 0)
-	for row := range s.Len() {
-		cells := s.Row(row)
+	s.rangeRows(func(row int, cells []renderer.Cell) bool {
 		haystack, cellIndexes := searchableCells(cells)
 		var text string
 		for start := 0; start+len(needle) <= len(haystack); {
@@ -122,7 +147,8 @@ func FindMatches(s Snapshot, query string) []SearchMatch {
 			matches = append(matches, SearchMatch{Row: row, Start: cellIndexes[start], End: cellEnd, Text: text})
 			start += len(needle)
 		}
-	}
+		return true
+	})
 	return matches
 }
 

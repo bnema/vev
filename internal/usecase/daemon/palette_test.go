@@ -371,7 +371,7 @@ func TestPaletteCreateTabErrorRepaintsAfterClose(t *testing.T) {
 	d, sess, ac, sends, releases := newManualTabSession(t, 1)
 	defer releases[0]()
 	ptys := portsmocks.NewMockPTYFactory(t)
-	ptys.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("open failed"))
+	ptys.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("open failed"))
 	d.ptys = ptys
 
 	d.handleInput(sess, ac, []byte("\x1b "))
@@ -518,7 +518,7 @@ func TestPaletteRenderAndInputCanRunConcurrently(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 200 {
-			d.paint(sess, ac, true)
+			d.paint(sess, ac, true, nil)
 		}
 	}()
 	go func() {

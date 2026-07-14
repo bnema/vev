@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/config"
 	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/adapters/pty"
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/adapters/shellcmd"
@@ -238,6 +240,106 @@ func dispatch(ctx context.Context, cmd command) error {
 	}
 }
 
+// performanceTrace creates one serialized timestamp owner for this process.
+// An empty trace environment leaves all production behavior and wire bytes
+// unchanged.
+// Composition-root factory seams keep observer propagation testable without
+// opening real transports.
+var (
+	newPerformanceTrace                       = performanceTrace
+	newRemoteDialerFactoryWithRuntimeObserver = func(observer ports.SerializedRuntimeObserver) ports.RemoteDialerFactory {
+		return remoteadapter.NewDialerFactoryWithRuntimeObserver(observer)
+	}
+	runClientWithRuntimeObserver = client.RunWithRuntimeObserver
+)
+
+func performanceTrace(clk ports.Clock) (ports.SerializedRuntimeObserver, io.Closer, error) {
+	return performanceTraceWithFactories(clk, observability.NewJSONL, ports.NewRuntimeCorrelationObserver)
+}
+
+// performanceTraceWithFactories keeps setup rollback behavior directly
+// testable without requiring an operating-system file close failure.
+func performanceTraceWithFactories(
+	clk ports.Clock,
+	newSink func(string, ports.Clock, string) (ports.RuntimeObserver, io.Closer, error),
+	newCorrelation func(ports.RuntimeObserver, ports.RuntimeCorrelationInputs) (ports.RuntimeObserver, error),
+) (ports.SerializedRuntimeObserver, io.Closer, error) {
+	path, processID := os.Getenv("VEV_PERF_TRACE"), os.Getenv("VEV_PERF_PROCESS_ID")
+	if path == "" {
+		return nil, nil, nil
+	}
+	observer, closer, err := newSink(path, clk, processID)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The harness supplies these manifest fields to every launched role. Keep a
+	// valid standalone trace for operators that set only the original trace
+	// variables, while ensuring harness traces match their process mapping.
+	inputs := ports.RuntimeCorrelationInputs{Scenario: os.Getenv("VEV_PERF_SCENARIO"), Run: 1}
+	if inputs.Scenario == "" {
+		inputs.Scenario = "runtime"
+	}
+	if rawRun := os.Getenv("VEV_PERF_RUN"); rawRun != "" {
+		inputs.Run, err = strconv.ParseUint(rawRun, 10, 64)
+		if err != nil {
+			setupErr := fmt.Errorf("invalid VEV_PERF_RUN %q: %w", rawRun, err)
+			return nil, nil, closeTraceAfterSetupFailure(closer, setupErr)
+		}
+		if inputs.Run == 0 {
+			setupErr := fmt.Errorf("invalid VEV_PERF_RUN %q", rawRun)
+			return nil, nil, closeTraceAfterSetupFailure(closer, setupErr)
+		}
+	}
+	observer, err = newCorrelation(observer, inputs)
+	if err != nil {
+		setupErr := fmt.Errorf("configure runtime trace correlation: %w", err)
+		return nil, nil, closeTraceAfterSetupFailure(closer, setupErr)
+	}
+	reporter := ports.NewSerializedRuntimeObserver(observer, runtimeTraceQueueDepth)
+	return reporter, &runtimeTraceCloser{reporter: reporter, closer: closer}, nil
+}
+
+func closeTraceAfterSetupFailure(closer io.Closer, setupErr error) error {
+	if closer == nil {
+		return setupErr
+	}
+	if closeErr := closer.Close(); closeErr != nil {
+		return errors.Join(setupErr, fmt.Errorf("close performance trace after setup failure: %w", closeErr))
+	}
+	return setupErr
+}
+
+// runtimeTraceQueueDepth bounds all process-local trace producer handoffs.
+// A full queue emits the serialized diagnostic gap rather than delaying a
+// terminal, transport, or ACK progress path.
+const runtimeTraceQueueDepth = 256
+
+// runtimeTraceCloser owns the two-stage trace shutdown: drain the reporter
+// before closing the concrete timestamp/file owner. sync.Once makes every
+// deferred and explicit close path safe without closing shared workers twice.
+type runtimeTraceCloser struct {
+	reporter ports.SerializedRuntimeObserver
+	closer   io.Closer
+	once     sync.Once
+	err      error
+}
+
+func (c *runtimeTraceCloser) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.once.Do(func() {
+		if c.reporter != nil {
+			c.reporter.Flush()
+			c.reporter.Close()
+		}
+		if c.closer != nil {
+			c.err = c.closer.Close()
+		}
+	})
+	return c.err
+}
+
 func configureLogging(component logging.Component, rotateAtRuntime bool) (*slog.Logger, io.Closer, error) {
 	return logging.Setup(logging.Config{
 		Dir:             platform.StateDir(),
@@ -278,14 +380,23 @@ func pprofAddrIsLoopback(addr string) bool {
 // entered by an auto-spawned child): it sets up logging, binds the socket,
 // constructs the daemon, and serves until the last session exits or a
 // termination signal arrives (graceful shutdown notifies attached clients).
-func runDaemon() error {
+func runDaemon() (retErr error) {
 	log, logCloser, err := configureLogging(logging.Daemon, true)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = logCloser.Close() }()
 
-	ln, err := ipc.Listen(ipc.SocketDir())
+	clk := clock.New()
+	observer, observerCloser, err := newPerformanceTrace(clk)
+	if err != nil {
+		return fmt.Errorf("vev: performance trace: %w", err)
+	}
+	if observerCloser != nil {
+		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
+	}
+	// Every accepted local connection shares this process's serialized sink.
+	ln, err := ipc.Listen(ipc.SocketDir(), ipc.WithRuntimeObserver(observer))
 	if err != nil {
 		log.Error("daemon listen failed", "socket_dir", ipc.SocketDir(), "err", err)
 		return fmt.Errorf("vev: daemon listen: %w", err)
@@ -309,6 +420,9 @@ func runDaemon() error {
 
 	log.Info("daemon starting", "socket", ln.Addr())
 	daemonOpts := []daemon.Option(nil)
+	if observer != nil {
+		daemonOpts = append(daemonOpts, daemon.WithRuntimeObserver(observer))
+	}
 	configPath := platform.ConfigPath()
 	cfg, warnings, err := config.Load(configPath)
 	if err != nil {
@@ -327,7 +441,6 @@ func runDaemon() error {
 		log.Info("session persistence enabled", "path", storePath)
 		daemonOpts = append(daemonOpts, daemon.WithStore(store))
 	}
-	clk := clock.New()
 	d := daemon.New(pty.NewFactory(), clk, log, daemonOpts...)
 	watchCtx, stopWatch := context.WithCancel(ctx)
 	defer stopWatch()
@@ -350,20 +463,32 @@ func runDaemon() error {
 // runAttach dials (auto-spawning the daemon if needed) and runs the client
 // attach loop. Logging goes to the shared file: the client must never write
 // to the console while the terminal is raw.
-func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) error {
+func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (retErr error) {
 	log, logCloser, err := configureLogging(logging.Client, false)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = logCloser.Close() }()
 
+	clk := clock.New()
+	observer, observerCloser, err := newPerformanceTrace(clk)
+	if err != nil {
+		return fmt.Errorf("vev: performance trace: %w", err)
+	}
+	if observerCloser != nil {
+		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
+	}
 	return runAttachWithDeps(ctx, intent, name, remoteTarget, os.Getenv("VEV"), log, runAttachDeps{
-		localDialer:             defaultLocalDialer,
-		remoteDialerFactory:     defaultRemoteDialerFactory(),
+		localDialer: func() ports.Dialer {
+			return localDaemonDialer{dir: ipc.SocketDir(), observer: observer}
+		},
+		remoteDialerFactory:     newRemoteDialerFactoryWithRuntimeObserver(observer),
 		selectedRemoteTransport: os.Getenv(envRemoteTransport),
-		runClient:               client.Run,
-		createDetached:          createDetachedLocalSession,
-		clipboard:               clipboard.New(),
+		runClient: func(ctx context.Context, dialer ports.Dialer, terminal ports.Terminal, behaviorClock ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) error {
+			return runClientWithRuntimeObserver(ctx, dialer, terminal, behaviorClock, intent, name, remote, clipboard, log, observer)
+		},
+		createDetached: createDetachedLocalSession,
+		clipboard:      clipboard.New(),
 	})
 }
 
@@ -499,10 +624,19 @@ func isDaemonVersionDrift(err error) bool {
 	return protocolErr.Code == ports.ErrVersionMismatch || protocolErr.Text == legacyMalformedHelloSignal
 }
 
-type localDaemonDialer struct{ dir string }
+type localDaemonDialer struct {
+	dir      string
+	observer ports.SerializedRuntimeObserver
+}
 
 func (d localDaemonDialer) Dial(ctx context.Context) (ports.Transport, error) {
-	return ensureDaemon(ctx, d.dir, realDial, realSpawn, defaultBackoff)
+	dial := realDial
+	if d.observer != nil {
+		dial = func(ctx context.Context, dir string) (ports.Transport, error) {
+			return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(d.observer))
+		}
+	}
+	return ensureDaemon(ctx, d.dir, dial, realSpawn, defaultBackoff)
 }
 
 func detachedLocalHello(name, cwd string) ports.Hello {
@@ -584,7 +718,7 @@ func requestDaemonStop(ctx context.Context) error {
 
 	done := make(chan error, 1)
 	go func() {
-		transport, err := realDial(ipc.SocketDir())
+		transport, err := realDial(ctx, ipc.SocketDir())
 		if err != nil {
 			done <- fmt.Errorf("vev: no daemon running")
 			return
@@ -621,7 +755,7 @@ func requestDaemonStop(ctx context.Context) error {
 // runStdio is the hidden remote-side mode used by `ssh host vev _stdio`: it
 // connects to the per-user daemon (auto-spawning it if needed) and proxies the
 // framed protocol between process stdio and the daemon socket.
-func runStdio(ctx context.Context) error {
+func runStdio(ctx context.Context) (retErr error) {
 	log, logCloser, err := configureLogging(logging.Stdio, false)
 	if err != nil {
 		return err
@@ -629,13 +763,22 @@ func runStdio(ctx context.Context) error {
 	defer func() { _ = logCloser.Close() }()
 	log.Debug("stdio proxy starting")
 
-	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+	clk := clock.New()
+	observer, observerCloser, err := newPerformanceTrace(clk)
+	if err != nil {
+		return fmt.Errorf("vev: performance trace: %w", err)
+	}
+	if observerCloser != nil {
+		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
+	}
+	transport, err := ensureDaemon(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
+		return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(observer))
+	}, realSpawn, defaultBackoff)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = transport.Close() }()
-
-	stdio := sshstdio.NewTransport(os.Stdin, os.Stdout, nil)
+	stdio := sshstdio.NewTransport(os.Stdin, os.Stdout, nil, sshstdio.WithRuntimeObserver(observer))
 	return proxyTransports(ctx, stdio, transport, log)
 }
 
@@ -719,7 +862,7 @@ func runUDPBootstrap(ctx context.Context, session string) error {
 }
 
 // runUDPProxy is the detached long-lived remote-side datagram proxy.
-func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
+func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr error) {
 	log, logCloser, err := configureLogging(logging.Stdio, false)
 	if err != nil {
 		return err
@@ -727,6 +870,13 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 	defer func() { _ = logCloser.Close() }()
 	log.Debug("udp proxy starting", "session", session)
 
+	observer, observerCloser, err := newPerformanceTrace(clock.New())
+	if err != nil {
+		return fmt.Errorf("vev: performance trace: %w", err)
+	}
+	if observerCloser != nil {
+		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
+	}
 	portRange, err := parseUDPPortRange(os.Getenv(envUDPPortRange))
 	if err != nil {
 		return err
@@ -740,14 +890,16 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) error {
 	if _, err := rand.Read(key); err != nil {
 		return err
 	}
-	daemonTr, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+	daemonTr, err := ensureDaemon(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
+		return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(observer))
+	}, realSpawn, defaultBackoff)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = daemonTr.Close() }()
 	udpOptions := udpProxyClientTransportOptions
 	udpOptions.Observe = dgram.DiagnosticLogObserver(log)
-	dg, err := dgram.NewTransportWithOptions(conn, nil, key, 2, 1, udpOptions)
+	dg, err := dgram.NewTransportWithOptions(conn, nil, key, 2, 1, udpOptions, dgram.WithRuntimeObserver(observer))
 	if err != nil {
 		return err
 	}
@@ -890,8 +1042,8 @@ func proxyTransports(ctx context.Context, a, b ports.Transport, log *slog.Logger
 
 // runList prints the daemon's session listing. With no daemon running, it
 // falls back to the persisted stopped-session records.
-func runList(_ context.Context) error {
-	transport, err := realDial(ipc.SocketDir())
+func runList(ctx context.Context) error {
+	transport, err := realDial(ctx, ipc.SocketDir())
 	if err != nil {
 		records, loadErr := persist.LoadReadOnly(platform.StateDir())
 		if loadErr != nil {
@@ -955,8 +1107,8 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 }
 
 // runKill asks the daemon to terminate a named session, every session, or the daemon.
-func runKill(_ context.Context, name string, all, daemon bool) error {
-	transport, err := realDial(ipc.SocketDir())
+func runKill(ctx context.Context, name string, all, daemon bool) error {
+	transport, err := realDial(ctx, ipc.SocketDir())
 	if err != nil {
 		if name != "" && !all && !daemon {
 			storePath := persist.StorePath(platform.StateDir())

@@ -1,27 +1,4 @@
-// Package daemon holds vev's server-side session multiplexer use case: the
-// accept loop, the ephemeral/named session registry, the per-tab PTY reader
-// and VT screen, and the per-client debounced render scheduler.
-//
-// Concurrency model (sessions own one or more PTY-backed tabs):
-//
-//   - Serve runs the accept loop. Each accepted connection is handled by its
-//     own goroutine (handleConn): it reads the first frame and routes it to a
-//     session create/attach, a list, or a kill.
-//   - Per session there are exactly two long-lived goroutines: the PTY reader
-//     (drains child output into the VT screen and pokes a cap-1 dirty channel)
-//     and the render scheduler (debounces dirties and paints the attached
-//     client). Both are tied to the session context and unwind when the
-//     session is killed (pty.Close unblocks the reader; ctx cancel stops the
-//     scheduler).
-//   - The daemon exits (Serve returns) when the last session is removed, or
-//     when the parent context is cancelled (graceful shutdown notifies any
-//     attached clients with ReasonServerShutdown).
-//
-// Locking: a pane's screen/scrollback and per-client renderer shadow are
-// guarded by pane.mu/tab.mu as appropriate; the attached-client pointer by
-// session.mu; the registry by Daemon.mu. When more than one is held the order
-// is always attachedClient.sendMu > Daemon.mu > session.mu > tab.mu > pane.mu.
-// The PTY reader only ever takes pane.mu, so it never blocks on a slow client.
+// Package daemon holds vev's server-side session multiplexer use case.
 package daemon
 
 import (
@@ -67,15 +44,35 @@ type session struct {
 	mruAt                  atomic.Uint64
 	snapDirty              atomic.Bool
 	snapEligible           atomic.Bool
+	// snapshotMu serializes the dirty generation with worker completion. It is
+	// intentionally independent from mu: persistence never holds session state
+	// locks while encoding or writing.
+	snapshotMu              sync.Mutex
+	snapshotGeneration      uint64
+	snapshotPending         bool
+	snapshotPendingCaptures uint
+	snapshotChanged         chan struct{}
+	// syncGen makes synchronized-output watchdog generations unique across all
+	// panes in this session.
+	syncGen atomic.Uint64
+	// coordinator fans in this session's producer render invalidations.
+	coordinator atomic.Pointer[renderCoordinator]
 	// clipFiles records clipboard-image-transfer temp file paths (see
 	// clipboard.go) written for this session, removed best-effort in
 	// killSession.
 	clipFiles []string
+
+	// floatingLaunchMu is ownership synchronization for external floating
+	// launches. It is separate from mu so PTYFactory.Open never holds a
+	// session, tab, or daemon architecture lock.
+	floatingLaunchMu       sync.Mutex
+	floatingLaunchStopping bool
+	floatingLaunches       map[*floatingLaunch]struct{}
 }
 
 // tab is a pane layout container; pane owns PTY/screen/scrollback/render scheduling state.
 type tab struct {
-	mu sync.Mutex // guards tree, panes, floating, nextPaneID, size, previewClient, and pane map membership
+	mu sync.Mutex // guards tree, panes, floating, nextPaneID, size, and pane map membership
 
 	stableID   string
 	name       string
@@ -88,9 +85,6 @@ type tab struct {
 	// floating is independent from the normal layout tree and pane map.
 	floating floatingSlot
 
-	// previewClient tracks the one client currently previewing this tab in the picker.
-	// v1 is last-writer-wins: multiple clients previewing the same tab are not supported.
-	previewClient *attachedClient
 	// attention fields are guarded by the owning session.mu.
 	attention             bool
 	attentionAt           time.Time
@@ -100,7 +94,7 @@ type tab struct {
 // attachedClient is a client currently attached to a session's tab. rend is
 // its private renderer shadow (so each client gets output minimised against
 // what it has actually seen). sendMu serialises the two senders — the render
-// scheduler and the connection handler — so the transport's single-writer
+// coordinator and the connection handler — so the transport's single-writer
 
 func (d *Daemon) touchMRU(sess *session) {
 	if d == nil || sess == nil {
@@ -145,7 +139,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 			closeTabs(tabs)
 			return nil, err
 		}
-		pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
+		pty, err := d.ptys.Open(d.serveCtx, d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
 		if err != nil {
 			closeTabs(tabs)
 			d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "session")
@@ -258,16 +252,19 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	ac.setSession(nil)
 	from.mu.Unlock()
 
+	// Prepare source invalidation, output rebase, and destination coordinator
+	// identity before publishing the destination attachment.
+	cleanups := d.handoffCoordinator(from, newSess, nil, ac)
+	ac.setSession(newSess)
 	newSess.mu.Lock()
 	newSess.client = ac
 	newSess.mu.Unlock()
 
 	d.touchMRU(newSess)
-	ac.setSession(newSess)
 	ac.recordPreviousSession(from)
 	d.log.Info("client attached", "session", newSess.name, "resume", ac.resumeCapable)
 	d.mu.Unlock()
-
+	finishRenderLifecycleCleanups(cleanups)
 	d.firstPaint(newSess, ac, sz)
 	return nil
 }
@@ -284,7 +281,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	if err != nil {
 		return err
 	}
-	pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
+	pty, err := d.ptys.Open(sess.ctx, d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
 	if err != nil {
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "tab")
 		return fmt.Errorf("daemon: spawning tab for session %q: %w", name, err)
@@ -418,9 +415,9 @@ func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 		sess.mu.Unlock()
 		d.log.Info("pane created", "session", name, "pane", p.id)
 	}
-	d.sessWg.Add(2)
+	// Scheduler ownership was removed; this launch creates exactly one reader.
+	d.sessWg.Add(1)
 	go d.ptyReader(sess, tb, p)
-	go d.scheduler(sess, tb, p)
 }
 
 // attachClient makes ac the session's current client, displacing any prior one
@@ -637,16 +634,27 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	markSnapshotDirty(sess)
 
 	d.clearDestroyedTabPreview(tb)
+	tb.mu.Lock()
+	panes := tb.panesSnapshot()
+	tb.mu.Unlock()
+	if ac != nil {
+		ac.pruneCaptureFrames(panes...)
+	}
 	if tb.cancel != nil {
 		tb.cancel()
 	}
 	d.teardownFloating(tb, ac)
+	if rc := sess.renderCoordinator(); rc != nil {
+		for _, p := range panes {
+			rc.noteSyncPaneRemoved(p)
+		}
+	}
 	tb.closeAllPanes()
 	if wasActive {
 		d.activateTab(sess, destination)
 	}
 	if repaint && ac != nil {
-		d.paint(sess, ac, true)
+		d.invalidateRender(sess, ac, true, "session.go")
 	}
 	if ringing {
 		d.repaintAllAttachedClients()
@@ -664,7 +672,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	if !purge && !isEphemeral && d.persistEnabled {
 		d.refreshSessionCwd(sess)
 	}
-	var snapshotDeleteErr error
+	var snapshotDeleteErr, terminalSnapshotErr error
 	if d.snapsEnabled && !isEphemeral {
 		if purge {
 			sess.mu.Lock()
@@ -675,7 +683,16 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 				d.log.Warn("deleting session snapshot failed", "err", err, "session", name)
 			}
 		} else {
-			d.captureSession(sess)
+			markSnapshotDirty(sess)
+			if !d.scheduleFinalSnapshot(sess) {
+				sess.mu.Lock()
+				name := sess.name
+				sess.mu.Unlock()
+				terminalSnapshotErr = fmt.Errorf("retain final snapshot for session %q: snapshot worker unavailable or saturated", name)
+				if reason != ports.ReasonServerShutdown {
+					return terminalSnapshotErr
+				}
+			}
 		}
 	}
 	d.mu.Lock()
@@ -731,13 +748,24 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	ac := sess.client
 	sess.client = nil
 	sess.mu.Unlock()
+	if rc := sess.renderCoordinator(); rc != nil {
+		// Terminal teardown has two phases: this session owner first prevents any
+		// new worker registration and detaches all tokens, then stops and waits
+		// outside coordinator callbacks and session locks.
+		rc.beginSessionTeardown().finish()
+		rc.waitForTimerWorkers()
+	}
 	if ac != nil {
-		ac.cancelResizePaint()
 		d.unregisterPreview(ac)
 		ac.clearPreviousSession()
 		ac.setSession(nil)
+		ac.clearCaptureFrames()
 	}
 
+	// Prevent queued launches from entering Open, then cancel the parent
+	// context. The launch worker owns any late PTY result and closes it rather
+	// than publishing it into the torn-down tab.
+	sess.stopFloatingLaunches()
 	sess.cancel()
 	sess.mu.Lock()
 	tabs := append([]*tab(nil), sess.tabs...)
@@ -763,7 +791,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	if ac != nil {
 		d.notifyDetachedAsync(ac, reason)
 	}
-	return purgeErr
+	return errors.Join(purgeErr, terminalSnapshotErr)
 }
 
 // allocEphemeralNameLocked returns the lowest free decimal name. Caller holds

@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
+	"github.com/bnema/vev/internal/usecase/picker"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
@@ -50,11 +51,11 @@ func TestApplyConfigThemeRepaintInvalidatesComposedFrameCache(t *testing.T) {
 	right.screen.Write([]byte("R"))
 	right.mu.Unlock()
 
-	d.paint(sess, ac, true)
+	d.paint(sess, ac, true, nil)
 	ac.sendMu.Lock()
-	require.True(t, ac.composed.valid)
-	lightDimmedPane := ac.composed.frame.At(21, 1).Style
-	lightDivider := ac.composed.frame.At(20, 1).Style
+	require.True(t, ac.pipelineCache.valid)
+	lightDimmedPane := ac.pipelineCache.frame.At(21, 1).Style
+	lightDivider := ac.pipelineCache.frame.At(20, 1).Style
 	ac.sendMu.Unlock()
 	left.mu.Lock()
 	left.screen.ClearDamage()
@@ -67,9 +68,9 @@ func TestApplyConfigThemeRepaintInvalidatesComposedFrameCache(t *testing.T) {
 
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
-	require.True(t, ac.composed.valid, "reset=false config repaint should rebuild the composed cache")
-	require.NotEqual(t, lightDimmedPane, ac.composed.frame.At(21, 1).Style, "dimmed pane style must not stay cached across theme reapply")
-	require.NotEqual(t, lightDivider, ac.composed.frame.At(20, 1).Style, "divider style must not stay cached across theme reapply")
+	require.True(t, ac.pipelineCache.valid, "reset=false config repaint should rebuild the composed cache")
+	require.NotEqual(t, lightDimmedPane, ac.pipelineCache.frame.At(21, 1).Style, "dimmed pane style must not stay cached across theme reapply")
+	require.NotEqual(t, lightDivider, ac.pipelineCache.frame.At(20, 1).Style, "divider style must not stay cached across theme reapply")
 }
 
 func TestStatusCompositionGolden(t *testing.T) {
@@ -1035,6 +1036,52 @@ func TestBarStateForMRURestoredStoppedSessionsUsePersistedOrder(t *testing.T) {
 	require.Equal(t, []string{"alpha", "zeta"}, []string{state.mru[0].name, state.mru[1].name})
 }
 
+func TestCapturePrimaryRenderStatePreservesContextualMRUModeThroughScratchReuse(t *testing.T) {
+	_, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+	capture := func(bars barState) capturedRenderState {
+		t.Helper()
+		state, ok := capturePrimaryRenderState(sess, ac, bars, capturedOverlayRenderState{}, picker.Preview{}, domain.FloatingConfig{}, false, nil)
+		require.True(t, ok)
+		return *state
+	}
+	draw := func(state capturedRenderState) string {
+		t.Helper()
+		row := make([]renderer.Cell, 32)
+		drawStatusBarState(row, state.bars, resolveThemeStyles(nil))
+		return rowText(row)
+	}
+	normal := barState{status: statusSnapshot{session: "cur"}, mru: []recentSession{{name: "vty"}, {name: "misc"}}}
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+
+	// An empty but non-nil list is JRS contextual mode, not normal mode.
+	emptyContextual := capture(barState{status: normal.status, mru: normal.mru, rankedRecent: []rankedRecent{}})
+	require.NotNil(t, emptyContextual.bars.rankedRecent)
+	require.Empty(t, emptyContextual.bars.rankedRecent)
+	emptyRow := draw(emptyContextual)
+	require.NotContains(t, emptyRow, "vty")
+	require.NotContains(t, emptyRow, "misc")
+
+	// A later normal frame must clear contextual mode even after scratch reuse.
+	normalAfterEmpty := capture(normal)
+	require.Nil(t, normalAfterEmpty.bars.rankedRecent)
+	normalRow := draw(normalAfterEmpty)
+	require.Contains(t, normalRow, "vty")
+	require.Contains(t, normalRow, "misc")
+
+	// A populated contextual list reuses the same scratch and remains distinct.
+	populatedContextual := capture(barState{status: normal.status, mru: normal.mru, rankedRecent: []rankedRecent{{rank: 1, name: "jrs"}}})
+	require.NotNil(t, populatedContextual.bars.rankedRecent)
+	require.Equal(t, []rankedRecent{{rank: 1, name: "jrs"}}, populatedContextual.bars.rankedRecent)
+	populatedRow := draw(populatedContextual)
+	require.Contains(t, populatedRow, "1:jrs")
+	require.NotContains(t, populatedRow, "vty")
+
+	normalAfterPopulated := capture(normal)
+	require.Nil(t, normalAfterPopulated.bars.rankedRecent)
+	require.Contains(t, draw(normalAfterPopulated), "vty")
+}
+
 func TestStatusBarRendersMRUNamesEphemeralAndInlineBell(t *testing.T) {
 	state := barState{
 		status:         statusSnapshot{session: "cur"},
@@ -1309,11 +1356,11 @@ func TestStatusBarCopyFeedbackBoundaryWidths(t *testing.T) {
 	}
 }
 
-func TestStatusRepaintsOnCreateSwitchAndResize(t *testing.T) {
+func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)
-	clock := &signalClock{timers: make(chan *signalTimer, 1)}
-	d := newTestDaemon(t, newFactorySeq(t, p1, p2), clock)
+	clock := newCoordinatorMockClock(t, 64)
+	d := newTestDaemon(t, newFactorySeq(t, p1, p2), clock.clock)
 	tr, sends, releaseConn := newConn(t,
 		mustHello(ports.IntentNew, "work", domain.Size{Cols: 20, Rows: 5}),
 		frameInput([]byte("\x1b ")),
@@ -1326,16 +1373,21 @@ func TestStatusRepaintsOnCreateSwitchAndResize(t *testing.T) {
 	hg.Go(func() { d.handleConn(tr) })
 	awaitFrame(t, sends, ports.MsgWelcome)
 	first := awaitFrame(t, sends, ports.MsgOutput)
-	palette := awaitFrame(t, sends, ports.MsgOutput)
-	created := awaitFrame(t, sends, ports.MsgOutput)
-	switched := awaitFrame(t, sends, ports.MsgOutput)
-	// The resize frame is intentionally idle-coalesced; fire its fake-clock
-	// deadline rather than relying on the old synchronous behavior.
-	(<-clock.timers).ch <- time.Time{}
-	resized := awaitFrame(t, sends, ports.MsgOutput)
+	require.Eventually(t, func() bool {
+		sessions := listSessions(t, d)
+		return len(sessions.Sessions) == 1 && sessions.Sessions[0].Tabs == 2
+	}, 2*time.Second, time.Millisecond)
 
-	_ = palette
-	for _, f := range []ports.Frame{first, created, switched, resized} {
+	// The queued create, switch, and resize transitions may collapse into one
+	// latest-state wake. Advance every retained coordinator deadline
+	// until that coalesced output is observable.
+	resized := awaitCoordinatorOutput(
+		t, sends, clock.timers,
+		"while awaiting resized output",
+		"timed out awaiting resized output frame",
+	)
+
+	for _, f := range []ports.Frame{first, resized} {
 		out, err := ports.UnmarshalOutput(f.Payload)
 		require.NoError(t, err)
 		require.Contains(t, string(out.Data), "work")

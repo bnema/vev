@@ -34,12 +34,26 @@ var (
 type closeFunc func() error
 type eofErrFunc func() error
 
-// NewTransport wraps separate reader/writer streams as a framed Transport.
-func NewTransport(r io.Reader, w io.Writer, closeFn closeFunc) ports.Transport {
-	return newTransport(r, w, closeFn, nil)
+type Option func(*transport)
+
+// WithRuntimeObserver enables process-local transport marks; it deliberately
+// takes only an observer so a carriage adapter never owns trace time.
+func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
+	return func(t *transport) { t.observer = observer }
 }
 
-func newTransport(r io.Reader, w io.Writer, closeFn closeFunc, eofErr eofErrFunc) ports.Transport {
+// NewTransport wraps separate reader/writer streams as a framed Transport.
+func NewTransport(r io.Reader, w io.Writer, closeFn closeFunc, opts ...Option) ports.Transport {
+	t := newTransport(r, w, closeFn, nil)
+	for _, opt := range opts {
+		if opt != nil {
+			opt(t)
+		}
+	}
+	return t
+}
+
+func newTransport(r io.Reader, w io.Writer, closeFn closeFunc, eofErr eofErrFunc) *transport {
 	if closeFn == nil {
 		closeFn = func() error { return nil }
 	}
@@ -47,18 +61,25 @@ func newTransport(r io.Reader, w io.Writer, closeFn closeFunc, eofErr eofErrFunc
 }
 
 type transport struct {
-	r      io.Reader
-	w      io.Writer
-	close  closeFunc
-	eofErr eofErrFunc
+	r              io.Reader
+	w              io.Writer
+	close          closeFunc
+	eofErr         eofErrFunc
+	observer       ports.SerializedRuntimeObserver
+	operationMu    sync.Mutex
+	operationCount int
+	closing        bool
+	operationsDone chan struct{}
 
 	mu      sync.Mutex
 	readBuf []byte
 }
 
 func (t *transport) Send(f ports.Frame) error {
+	end := t.beginOperation(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)))
 	n := 1 + len(f.Payload)
 	if n > maxFrameLen {
+		end(false)
 		return ErrFrameTooLarge
 	}
 
@@ -68,22 +89,28 @@ func (t *transport) Send(f ports.Frame) error {
 	copy(buf[frameHeaderLen+1:], f.Payload)
 
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	_, err := t.w.Write(buf)
+	t.mu.Unlock()
+	end(err == nil)
 	return err
 }
 
 func (t *transport) Recv() (ports.Frame, error) {
+	end := t.beginOperation(ports.RuntimeAdapterReceiveStart, 0)
 	var hdr [frameHeaderLen]byte
 	if _, err := io.ReadFull(t.r, hdr[:]); err != nil {
-		return ports.Frame{}, t.mapEOFError(err)
+		err = t.mapEOFError(err)
+		end(false)
+		return ports.Frame{}, err
 	}
 
 	n := binary.BigEndian.Uint32(hdr[:])
 	if n == 0 {
+		end(false)
 		return ports.Frame{}, ErrZeroLengthFrame
 	}
 	if n > maxFrameLen {
+		end(false)
 		return ports.Frame{}, ErrFrameTooLarge
 	}
 
@@ -93,11 +120,33 @@ func (t *transport) Recv() (ports.Frame, error) {
 		t.readBuf = t.readBuf[:n]
 	}
 	if _, err := io.ReadFull(t.r, t.readBuf); err != nil {
-		return ports.Frame{}, t.mapEOFError(err)
+		err = t.mapEOFError(err)
+		end(false)
+		return ports.Frame{}, err
 	}
 
 	payload := append([]byte(nil), t.readBuf[1:]...)
+	end(true)
 	return ports.Frame{Type: ports.MsgType(t.readBuf[0]), Payload: payload}, nil
+}
+
+func (t *transport) beginOperation(start ports.RuntimeMarkKind, bytes uint64) func(bool) {
+	if t.observer == nil {
+		return func(bool) {}
+	}
+	if !t.beginObservedOperation() {
+		return func(bool) {}
+	}
+	correlation := ports.NewRuntimeCorrelation()
+	t.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("sshstdio", correlation, start, bytes, true))
+	end := ports.RuntimeAdapterSendEnd
+	if start == ports.RuntimeAdapterReceiveStart {
+		end = ports.RuntimeAdapterReceiveEnd
+	}
+	return func(valid bool) {
+		defer t.finishObservedOperation()
+		t.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("sshstdio", correlation, end, bytes, valid))
+	}
 }
 
 func (t *transport) mapEOFError(err error) error {
@@ -110,7 +159,56 @@ func (t *transport) mapEOFError(err error) error {
 	return err
 }
 
-func (t *transport) Close() error { return t.close() }
+func (t *transport) Close() error {
+	done := t.beginShutdown()
+	// Closing the reader first releases a Recv blocked in io.ReadFull even if
+	// the subprocess shutdown callback reports an error. This lets Recv emit
+	// its failed end mark before the process observer is closed.
+	var readErr error
+	if r, ok := t.r.(io.Closer); ok {
+		readErr = r.Close()
+	}
+	closeErr := t.close()
+	if done != nil {
+		<-done
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return readErr
+}
+
+func (t *transport) beginObservedOperation() bool {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	if t.closing {
+		return false
+	}
+	if t.operationCount == 0 {
+		t.operationsDone = make(chan struct{})
+	}
+	t.operationCount++
+	return true
+}
+
+func (t *transport) finishObservedOperation() {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	t.operationCount--
+	if t.operationCount == 0 {
+		close(t.operationsDone)
+	}
+}
+
+func (t *transport) beginShutdown() <-chan struct{} {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	t.closing = true
+	if t.operationCount == 0 {
+		return nil
+	}
+	return t.operationsDone
+}
 
 type processWaiter struct {
 	cmd     *exec.Cmd
@@ -222,17 +320,26 @@ func Dial(target, session string) (ports.Transport, error) {
 	return DialContext(context.Background(), target, session)
 }
 
+// DialContextWithRuntimeObserver is the option-bearing production constructor.
+func DialContextWithRuntimeObserver(ctx context.Context, target, session string, logger *slog.Logger, opts ...Option) (ports.Transport, error) {
+	return dialContext(ctx, target, session, logger, opts...)
+}
+
 // DialContext is like Dial, but the context is propagated to ssh startup so a
 // canceled attach attempt interrupts the local ssh process. Callers may pass a
 // logger to record ssh start failures and non-clean exits without logging the
 // generated command line.
 func DialContext(ctx context.Context, target, session string, logger ...*slog.Logger) (ports.Transport, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 	var log *slog.Logger
 	if len(logger) > 0 {
 		log = logger[0]
+	}
+	return dialContext(ctx, target, session, log)
+}
+
+func dialContext(ctx context.Context, target, session string, log *slog.Logger, opts ...Option) (ports.Transport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	spec := BuildCommand(target, session)
 	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
@@ -254,5 +361,11 @@ func DialContext(ctx context.Context, target, session string, logger ...*slog.Lo
 	}
 
 	waiter := newProcessWaiter(cmd, stdin, &stderr, sshCloseTimeout, log, target, session)
-	return newTransport(stdout, stdin, waiter.close, waiter.eofErr), nil
+	transport := newTransport(stdout, stdin, waiter.close, waiter.eofErr)
+	for _, opt := range opts {
+		if opt != nil {
+			opt(transport)
+		}
+	}
+	return transport, nil
 }

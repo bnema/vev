@@ -7,10 +7,29 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
 )
 
 var benchmarkSnapshotSink Snapshot
+
+func row(text string) []renderer.Cell {
+	result := make([]renderer.Cell, 0, len([]rune(text)))
+	for _, r := range text {
+		result = append(result, renderer.Cell{Rune: r, Style: renderer.DefaultStyle()})
+	}
+	return result
+}
+
+func newHistory(rows int) *vt.History { return vt.NewHistory(vt.HistoryConfig{MaxRows: rows}) }
+
+func rowText(cells []renderer.Cell) string {
+	runes := make([]rune, len(cells))
+	for i, cell := range cells {
+		runes[i] = cell.Rune
+	}
+	return string(runes)
+}
 
 func snapshot(lines []string, height int) Snapshot {
 	rows := make([][]renderer.Cell, len(lines))
@@ -355,6 +374,24 @@ func TestFindMatchesKeepsRuneAndCellIndexesAlignedWhenLowercasing(t *testing.T) 
 	require.Equal(t, 2, matches[0].End)
 }
 
+func TestFindMatchesDoesNotCopyEveryHistoryRow(t *testing.T) {
+	const rows = 100
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: rows, ChunkRows: 10})
+	for range rows {
+		history.Append(row(strings.Repeat("x", 120)))
+	}
+	s := NewSnapshot(history, renderer.NewFrame(120, 1))
+
+	allocs := testing.AllocsPerRun(10, func() {
+		if matches := FindMatches(s, "missing"); len(matches) != 0 {
+			t.Fatalf("unexpected matches: %d", len(matches))
+		}
+	})
+	if allocs >= 250 {
+		t.Fatalf("FindMatches allocations = %.0f, want < 250 (no row copy per history row)", allocs)
+	}
+}
+
 func TestCopyModeSearchUsesDisplayCellOffsetsForWideRows(t *testing.T) {
 	row := []renderer.Cell{
 		{Rune: '界'},
@@ -478,6 +515,94 @@ func TestOSC52FromBase64(t *testing.T) {
 	}
 }
 
+func TestNewSnapshotFreezesHistoryAndVisibleScreen(t *testing.T) {
+	history := newHistory(1)
+	history.Append(row("old"))
+	screen := renderer.NewFrame(3, 1)
+	copy(screen.Row(0), row("one"))
+
+	document := NewSnapshot(history, screen)
+	history.Append(row("new"))
+	screen.Set(0, 0, renderer.Cell{Rune: 'x'})
+
+	require.Equal(t, 2, document.Len())
+	require.Equal(t, "old", rowText(document.Row(0)))
+	require.Equal(t, "one", rowText(document.Row(1)))
+	require.Nil(t, document.Row(-1))
+	require.Nil(t, document.Row(2))
+}
+
+func TestNewSnapshotFromRowsOwnsCallerRows(t *testing.T) {
+	rows := [][]renderer.Cell{row("one")}
+	document := NewSnapshotFromRows(rows, 3, 1)
+	rows[0][0].Rune = 'x'
+	require.Equal(t, "one", rowText(document.Row(0)))
+}
+
+func TestNewSnapshotFromRowsKeepsDocumentAndViewportDimensionsIndependent(t *testing.T) {
+	document := NewSnapshotFromRows([][]renderer.Cell{row("one"), row("two")}, 7, 5)
+
+	require.Equal(t, 2, document.Len())
+	require.Equal(t, 7, document.Width)
+	require.Equal(t, 5, document.Height)
+	require.Equal(t, "one", rowText(document.Row(0)))
+	require.Equal(t, "two", rowText(document.Row(1)))
+	require.Nil(t, document.Row(2))
+}
+
+// This scaling gate deliberately compares equal row counts rather than an
+// absolute budget, which varies between Go releases. A HistoryView shares
+// sealed chunks, so its allocation must not grow with history-row width.
+func TestNewSnapshotAllocationIsWidthIndependent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping benchmark-driven allocation gate in short mode")
+	}
+	narrow := benchmarkNewSnapshotBytes(16)
+	wide := benchmarkNewSnapshotBytes(512)
+	const conservativeWidthTolerance = 2
+	require.LessOrEqual(t, wide, narrow*conservativeWidthTolerance,
+		"NewSnapshot B/op scaled with row width: narrow=%d wide=%d", narrow, wide)
+}
+
+func benchmarkNewSnapshotBytes(width int) int64 {
+	const historyRows = 256
+	history := newHistory(historyRows)
+	for range historyRows {
+		history.Append(make([]renderer.Cell, width))
+	}
+	// Keep visible-frame work constant so the comparison isolates history rows.
+	screen := renderer.NewFrame(8, 4)
+	result := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			benchmarkSnapshotSink = NewSnapshot(history, screen)
+		}
+	})
+	return result.AllocedBytesPerOp()
+}
+
+// This regression replaces the removed Scrollback ring tests: the VT history
+// remains bounded oldest-first and a captured copy document survives eviction.
+func TestNewSnapshotRetainsBoundedHistoryAcrossLaterEviction(t *testing.T) {
+	history := newHistory(2)
+	history.Append(row("one"))
+	history.Append(row("two"))
+	document := NewSnapshot(history, renderer.NewFrame(3, 1))
+	history.Append(row("three"))
+	history.Append(row("four"))
+
+	// A copy document is history followed by the visible frame. Its total is
+	// therefore the bounded retained history plus the one visible row.
+	require.Equal(t, 3, document.Len())
+	require.Equal(t, "one", rowText(document.Row(0)))
+	require.Equal(t, "two", rowText(document.Row(1)))
+	require.Equal(t, "   ", rowText(document.Row(2)), "the visible frame remains part of the document")
+	view := history.View()
+	require.Equal(t, "three", rowText(view.Row(0)))
+	require.Equal(t, "four", rowText(view.Row(1)))
+}
+
 func BenchmarkNewSnapshot10KRows(b *testing.B) {
 	const (
 		width       = 120
@@ -485,9 +610,9 @@ func BenchmarkNewSnapshot10KRows(b *testing.B) {
 		historyRows = 10_000
 	)
 
-	scrollback := NewScrollback(historyRows)
+	history := newHistory(historyRows)
 	for range historyRows {
-		scrollback.Append(row(strings.Repeat("x", width)))
+		history.Append(row(strings.Repeat("x", width)))
 	}
 	screen := renderer.NewFrame(width, height)
 	for y := range height {
@@ -497,7 +622,7 @@ func BenchmarkNewSnapshot10KRows(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		benchmarkSnapshotSink = NewSnapshot(scrollback, screen)
+		benchmarkSnapshotSink = NewSnapshot(history, screen)
 	}
 }
 

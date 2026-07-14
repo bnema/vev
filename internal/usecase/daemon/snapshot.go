@@ -4,17 +4,58 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
 
-const snapshotInterval = 30 * time.Second
+// snapshotQueueCapacity bounds retained immutable captures. A full queue never
+// stalls session producers; the session remains dirty for the next interval.
+const snapshotQueueCapacity = 1
+
+// snapshotFinalQueueCapacity is a global bound for terminal captures retained
+// while the worker is blocked. On saturation a new terminal capture is rejected
+// (and left dirty) rather than silently dropping a persistence acknowledgement.
+const snapshotFinalQueueCapacity = 32
+
+type snapshotCapture struct {
+	session    *session
+	generation uint64
+	name       string
+	createdAt  uint64
+	active     uint16
+	tabs       []snapshotCaptureTab
+	finishOnce sync.Once
+}
+
+type snapshotCaptureTab struct {
+	stableID   string
+	cols       uint16
+	rows       uint16
+	nextPaneID uint64
+	focus      layout.PaneID
+	tree       *layout.Tree
+	panes      []snapshotCapturePane
+}
+
+type snapshotCapturePane struct {
+	id       layout.PaneID
+	stableID string
+	cwd      string
+	history  vt.HistoryView
+	visible  renderer.Frame
+	process  *snapcodec.Process
+}
+
+const (
+	snapshotInterval          = 30 * time.Second
+	snapshotFinalFlushTimeout = time.Second
+)
 
 func (d *Daemon) closeRestoreDone() {
 	d.restoreOnce.Do(func() { close(d.restoreDone) })
@@ -50,6 +91,13 @@ func (d *Daemon) restoreSnapshots(ctx context.Context) {
 func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if len(snap.Tabs) == 0 {
+		if snap.Active != 0 {
+			return fmt.Errorf("snapshot: active tab out of range")
+		}
+	} else if int(snap.Active) >= len(snap.Tabs) {
+		return fmt.Errorf("snapshot: active tab out of range")
 	}
 	if snap.Name == "" {
 		return fmt.Errorf("snapshot: empty session name")
@@ -141,7 +189,7 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 					return fmt.Errorf("snapshot: generating pane identity: %w", err)
 				}
 			}
-			pty, err := d.ptys.Open(d.shell, d.shellArgs, d.childEnv(snap.Name, tabStableID, paneStableID, restoreTerm), paneSnap.Cwd, contentSize)
+			pty, err := d.ptys.Open(ctx, d.shell, d.shellArgs, d.childEnv(snap.Name, tabStableID, paneStableID, restoreTerm), paneSnap.Cwd, contentSize)
 			if err != nil {
 				closeOpened()
 				return err
@@ -149,7 +197,13 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 			p := newPaneWithStableID(paneSnap.ID, paneStableID, pty, contentSize)
 			p.ctx, p.cancel = context.WithCancel(tb.ctx)
 			p.rect = contentRect
-			seedPaneRows(p, paneSnap.Scrollback, paneSnap.Visible)
+			if err := restorePaneTerminal(p, paneSnap); err != nil {
+				// p is not in tb.panes yet, so closeOpened cannot reach it.
+				p.cancel()
+				_ = pty.Close()
+				closeOpened()
+				return err
+			}
 			if restoreCommand != "" {
 				if _, err := pty.Write([]byte(restoreCommand + "\n")); err != nil {
 					d.log.Warn("writing snapshot restore command failed", "err", err, "session", snap.Name, "pane", paneSnap.ID)
@@ -164,9 +218,6 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 	}
 	createdAt := int64(snap.CreatedAt)
 	sess := &session{name: snap.Name, ctx: sctx, cancel: cancel, tabs: opened, active: int(snap.Active), terminal: restoreTerm, createdAt: createdAt}
-	if sess.active < 0 || sess.active >= len(sess.tabs) {
-		sess.active = 0
-	}
 	sess.snapEligible.Store(true)
 	if len(snap.Tabs) > 0 && len(snap.Tabs[0].Panes) > 0 {
 		sess.cwd = snap.Tabs[0].Panes[0].Cwd
@@ -201,36 +252,51 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 }
 
 func markSnapshotDirty(sess *session) {
-	if sess == nil {
+	if sess == nil || !sess.snapEligible.Load() {
 		return
 	}
-	if sess.snapEligible.Load() {
-		sess.snapDirty.Store(true)
-	}
+	sess.snapshotMu.Lock()
+	sess.snapshotGeneration++
+	sess.snapDirty.Store(true)
+	sess.signalSnapshotChangedLocked()
+	sess.snapshotMu.Unlock()
 }
 
-func seedPaneRows(p *pane, scrollback, visible [][]renderer.Cell) {
+// snapshotChangeLocked returns a channel closed by the next snapshot state
+// transition. snapshotMu must be held.
+func (sess *session) snapshotChangeLocked() chan struct{} {
+	if sess.snapshotChanged == nil {
+		sess.snapshotChanged = make(chan struct{})
+	}
+	return sess.snapshotChanged
+}
+
+// signalSnapshotChangedLocked wakes waiters after a snapshot state transition.
+// snapshotMu must be held.
+func (sess *session) signalSnapshotChangedLocked() {
+	close(sess.snapshotChangeLocked())
+	sess.snapshotChanged = make(chan struct{})
+}
+
+func restorePaneTerminal(p *pane, snap snapcodec.Pane) error {
+	if len(snap.Tail) == 0 {
+		return fmt.Errorf("snapshot history: missing tail blob")
+	}
+	if len(snap.Visible) == 0 {
+		return fmt.Errorf("snapshot visible: missing visible blob")
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.scrollback = scopy.NewScrollback(defaultScrollbackRows)
-	for _, row := range scrollback {
-		p.scrollback.Append(row)
+	screen, err := vt.NewScreenWithRestoredHistory(p.screen.Frame.Width, p.screen.Frame.Height, vt.HistoryConfig{MaxRows: defaultScrollbackRows}, snap.SealedChunks, snap.Tail)
+	if err != nil {
+		return fmt.Errorf("snapshot history: %w", err)
 	}
-	if len(visible) > 0 {
-		p.screen = vt.NewScreen(p.screen.Frame.Width, p.screen.Frame.Height)
-		for y, row := range visible {
-			if y >= p.screen.Frame.Height {
-				break
-			}
-			for x, cell := range row {
-				if x >= p.screen.Frame.Width {
-					break
-				}
-				p.screen.Frame.Set(x, y, cell)
-			}
-		}
+	if err := screen.RestorePrimaryVisible(snap.Visible); err != nil {
+		return fmt.Errorf("snapshot visible: %w", err)
 	}
-	p.screen.OnLineEvicted = p.scrollback.Append
+	p.screen = screen
+	p.history = screen.History()
+	return nil
 }
 
 func restorePTYSize(contentRect domain.Rect, tabSize domain.Size) domain.Size {
@@ -251,35 +317,135 @@ func restorePTYSize(contentRect domain.Rect, tabSize domain.Size) domain.Size {
 	return domain.Size{Cols: cols, Rows: rows}
 }
 
-func (d *Daemon) captureSession(sess *session) bool {
-	if d == nil || sess == nil || !d.snapsEnabled || d.snaps == nil {
+// scheduleSnapshot captures a session only once while an immutable capture is
+// queued or being written. It never waits for the bounded worker queue.
+func (d *Daemon) scheduleSnapshot(sess *session) bool {
+	return d.scheduleSnapshotWithFinalFallback(sess, false)
+}
+
+// scheduleFinalSnapshot captures the terminal state even when an older capture
+// is pending. A removed session cannot be retried by snapshotSaver, so the
+// worker drains its retained terminal state before it stops.
+func (d *Daemon) scheduleFinalSnapshot(sess *session) bool {
+	return d.scheduleSnapshotWithFinalFallback(sess, true)
+}
+
+func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bool {
+	if d == nil || sess == nil || !d.snapsEnabled || d.snaps == nil || !sess.snapEligible.Load() {
 		return true
 	}
+	sess.snapshotMu.Lock()
+	if !sess.snapDirty.Load() || (!final && sess.snapshotPending) {
+		sess.snapshotMu.Unlock()
+		return true
+	}
+	generation := sess.snapshotGeneration
+	sess.snapshotPendingCaptures++
+	sess.snapshotPending = true
+	sess.signalSnapshotChangedLocked()
+	sess.snapshotMu.Unlock()
 
+	capture, ok := d.captureSnapshotState(sess, generation)
+	if !ok {
+		d.finishSnapshotCapture(capture, false)
+		return false
+	}
+	if d.enqueueSnapshotCapture(capture) || (final && d.enqueueFinalSnapshotCapture(capture)) {
+		return true
+	}
+	// Coalesce under saturation or shutdown: the latest state stays dirty and
+	// will be captured on a later tick once an active worker has room.
+	d.finishSnapshotCapture(capture, false)
+	return false
+}
+
+// enqueueSnapshotCapture serializes worker shutdown with the non-blocking
+// queue send. The queue is deliberately never closed: producers can race
+// shutdown without risking a send-on-closed panic.
+func (d *Daemon) enqueueSnapshotCapture(capture *snapshotCapture) bool {
+	d.snapshotWorkerMu.Lock()
+	defer d.snapshotWorkerMu.Unlock()
+	if d.snapshotWorkerClosing || d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
+		return false
+	}
+	select {
+	case d.snapshotJobs <- capture:
+		return true
+	default:
+		return false
+	}
+}
+
+// enqueueFinalSnapshotCapture hands terminal captures to the existing worker
+// without making session teardown wait behind its normal bounded queue. A
+// blocked worker retains at most one terminal capture per session, replacing
+// stale state with the newest immutable capture.
+func (d *Daemon) enqueueFinalSnapshotCapture(capture *snapshotCapture) bool {
+	if capture == nil || capture.session == nil {
+		return false
+	}
+	d.snapshotWorkerMu.Lock()
+	if d.snapshotWorkerClosing || d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
+		d.snapshotWorkerMu.Unlock()
+		return false
+	}
+	if d.snapshotFinalJobs == nil {
+		d.snapshotFinalJobs = make(map[*session]*snapshotCapture)
+	}
+	replaced, exists := d.snapshotFinalJobs[capture.session]
+	if !exists && len(d.snapshotFinalJobs) >= snapshotFinalQueueCapacity {
+		d.snapshotWorkerMu.Unlock()
+		d.log.Warn("terminal snapshot retention saturated; capture rejected", "session", capture.name, "capacity", snapshotFinalQueueCapacity)
+		return false
+	}
+	// Finish the stale capture before publishing its replacement. Otherwise a
+	// fast worker could persist the replacement and then have this stale failure
+	// mark the session dirty again.
+	d.finishSnapshotCapture(replaced, false)
+	if !exists {
+		d.snapshotFinalOrder = append(d.snapshotFinalOrder, capture.session)
+	}
+	d.snapshotFinalJobs[capture.session] = capture
+	select {
+	case d.snapshotWorkerFinalWake <- struct{}{}:
+	default:
+	}
+	d.snapshotWorkerMu.Unlock()
+	return true
+}
+
+// captureSession rotates history tails and clones visible frames while holding
+// each pane lock. The returned capture contains only immutable state; encoding
+// and persistence are deliberately deferred to snapshotEncodeWorker.
+func (d *Daemon) captureSnapshotState(sess *session, generation uint64) (*snapshotCapture, bool) {
 	sess.mu.Lock()
-	name := sess.name
+	capture := &snapshotCapture{
+		session:    sess,
+		generation: generation,
+		name:       sess.name,
+		createdAt:  uint64(sess.createdAt),
+		active:     uint16(max(sess.active, 0)),
+	}
 	ephemeral := sess.ephemeral
-	createdAt := sess.createdAt
-	active := sess.active
 	fallbackCwd := sess.cwd
 	tabs := append([]*tab(nil), sess.tabs...)
 	sess.mu.Unlock()
-	if ephemeral || name == "" {
-		return true
+	if ephemeral || capture.name == "" {
+		return capture, false
 	}
 
-	snap := snapcodec.Session{Name: name, CreatedAt: uint64(createdAt), Active: uint16(max(active, 0))}
+	capture.tabs = make([]snapshotCaptureTab, 0, len(tabs))
 	for _, tb := range tabs {
 		tb.mu.Lock()
-		tabSnap := snapcodec.Tab{
-			StableID:   tb.stableID,
-			Cols:       uint16(max(tb.size.Cols, 0)),
-			Rows:       uint16(max(tb.size.Rows, 0)),
-			NextPaneID: uint64(max(tb.nextPaneID, 0)),
-			Tree:       tb.tree.Clone(),
+		tabCapture := snapshotCaptureTab{
+			stableID:   tb.stableID,
+			cols:       uint16(max(tb.size.Cols, 0)),
+			rows:       uint16(max(tb.size.Rows, 0)),
+			nextPaneID: uint64(max(tb.nextPaneID, 0)),
+			tree:       tb.tree.Clone(),
 		}
 		if tb.tree != nil {
-			tabSnap.Focus = tb.tree.Focus
+			tabCapture.focus = tb.tree.Focus
 		}
 		panes := make([]*pane, 0, len(tb.panes))
 		for _, p := range tb.panes {
@@ -287,49 +453,272 @@ func (d *Daemon) captureSession(sess *session) bool {
 		}
 		tb.mu.Unlock()
 
-		paneIDs := make(map[layout.PaneID]struct{}, len(panes))
-		paneSnaps := make([]snapcodec.Pane, 0, len(panes))
+		tabCapture.panes = make([]snapshotCapturePane, 0, len(panes))
 		for _, p := range panes {
 			p.mu.Lock()
-			pid := 0
 			pty := p.pty
+			pid := 0
 			if pty != nil {
 				pid = pty.Pid()
 			}
-			paneSnap := snapcodec.Pane{
-				ID:         p.id,
-				StableID:   p.stableID,
-				Scrollback: cloneRows(p.scrollback.Snapshot()),
-				Visible:    cloneRows(p.screen.PrimaryVisibleRows()),
+			paneCapture := snapshotCapturePane{
+				id:       p.id,
+				stableID: p.stableID,
+				history:  p.history.SealAndView(),
+				visible:  p.screen.PrimaryVisibleFrame(),
 			}
 			p.mu.Unlock()
-			paneSnap.Cwd = fallbackCwd
+			paneCapture.cwd = fallbackCwd
 			if d.procCwd != nil && pid > 0 {
 				if cwd, err := d.procCwd(pid); err == nil && cwd != "" {
-					paneSnap.Cwd = cwd
+					paneCapture.cwd = cwd
 				}
 			}
-			paneSnap.Process = d.capturePaneProcess(pty, pid)
-			paneIDs[paneSnap.ID] = struct{}{}
-			paneSnaps = append(paneSnaps, paneSnap)
+			paneCapture.process = d.capturePaneProcess(pty, pid)
+			tabCapture.panes = append(tabCapture.panes, paneCapture)
+		}
+		capture.tabs = append(capture.tabs, tabCapture)
+	}
+	return capture, true
+}
+
+// captureSession remains the synchronous producer-facing trigger for callers
+// such as teardown and benchmarks; the actual encoding and Write stay async.
+func (d *Daemon) captureSession(sess *session) bool {
+	markSnapshotDirty(sess)
+	return d.scheduleSnapshot(sess)
+}
+
+func (d *Daemon) encodeSnapshotCapture(capture *snapshotCapture) ([]byte, error) {
+	snap := snapcodec.Session{Name: capture.name, CreatedAt: capture.createdAt, Active: capture.active, Tabs: make([]snapcodec.Tab, 0, len(capture.tabs))}
+	for _, tabCapture := range capture.tabs {
+		tabSnap := snapcodec.Tab{
+			StableID: tabCapture.stableID, Cols: tabCapture.cols, Rows: tabCapture.rows,
+			NextPaneID: tabCapture.nextPaneID, Focus: tabCapture.focus, Tree: tabCapture.tree,
+			Panes: make([]snapcodec.Pane, 0, len(tabCapture.panes)),
+		}
+		paneIDs := make(map[layout.PaneID]struct{}, len(tabCapture.panes))
+		for _, paneCapture := range tabCapture.panes {
+			sealed, tail, historyErr := vt.MarshalSealedHistory(paneCapture.history)
+			visible, visibleErr := vt.MarshalVisible(paneCapture.visible)
+			if historyErr != nil || visibleErr != nil {
+				return nil, fmt.Errorf("terminal snapshot pane %s: history=%w visible=%w", paneCapture.id, historyErr, visibleErr)
+			}
+			tabSnap.Panes = append(tabSnap.Panes, snapcodec.Pane{ID: paneCapture.id, StableID: paneCapture.stableID, Cwd: paneCapture.cwd, SealedChunks: sealed, Tail: tail, Visible: visible, Process: paneCapture.process})
+			paneIDs[paneCapture.id] = struct{}{}
 		}
 		if tabSnap.Tree != nil {
 			pruneTreeToPanes(tabSnap.Tree.Root, paneIDs)
 		}
-		tabSnap.Panes = paneSnaps
 		snap.Tabs = append(snap.Tabs, tabSnap)
 	}
+	return d.snapshotMarshal(snap)
+}
 
-	data, err := snapcodec.Marshal(snap)
-	if err != nil {
-		d.log.Warn("marshaling session snapshot failed", "err", err, "session", name)
+func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool) {
+	if capture == nil {
+		return
+	}
+	capture.finishOnce.Do(func() {
+		capture.session.snapshotMu.Lock()
+		if capture.session.snapshotPendingCaptures > 0 {
+			capture.session.snapshotPendingCaptures--
+		}
+		capture.session.snapshotPending = capture.session.snapshotPendingCaptures > 0
+		if succeeded && capture.session.snapshotGeneration == capture.generation {
+			capture.session.snapDirty.Store(false)
+		} else if !succeeded {
+			capture.session.snapDirty.Store(true)
+		}
+		capture.session.signalSnapshotChangedLocked()
+		capture.session.snapshotMu.Unlock()
+	})
+}
+
+func (d *Daemon) startSnapshotEncodeWorker() {
+	if d == nil {
+		return
+	}
+	d.snapshotWorkerMu.Lock()
+	if d.snapshotWorkerCancel != nil {
+		d.snapshotWorkerMu.Unlock()
+		return
+	}
+	// Shutdown owns the worker lifetime so it can flush captures after Serve
+	// cancels its parent context. The worker is always stopped explicitly.
+	workerCtx, cancel := context.WithCancel(context.Background())
+	d.snapshotWorkerID++
+	workerID := d.snapshotWorkerID
+	d.snapshotWorkerCtx = workerCtx
+	d.snapshotWorkerCancel = cancel
+	d.snapshotWorkerDone = make(chan struct{})
+	d.snapshotWorkerFlush = make(chan struct{})
+	d.snapshotWorkerFinalWake = make(chan struct{}, 1)
+	d.snapshotFinalJobs = make(map[*session]*snapshotCapture)
+	d.snapshotFinalOrder = nil
+	d.snapshotWorkerClosing = false
+	d.snapshotWorkerInFlight = nil
+	done := d.snapshotWorkerDone
+	flush := d.snapshotWorkerFlush
+	finalWake := d.snapshotWorkerFinalWake
+	d.snapshotWorkerMu.Unlock()
+	go func() {
+		defer close(done)
+		write := func(capture *snapshotCapture) bool {
+			if workerCtx.Err() != nil || !d.setSnapshotWorkerInFlight(workerID, capture) {
+				d.finishSnapshotCapture(capture, false)
+				return false
+			}
+			data, err := d.encodeSnapshotCapture(capture)
+			if err == nil && workerCtx.Err() == nil {
+				err = d.snaps.Write(capture.name, data)
+			}
+			d.clearSnapshotWorkerInFlight(workerID, capture)
+			if err != nil && workerCtx.Err() == nil {
+				d.log.Warn("writing session snapshot failed", "err", err, "session", capture.name)
+			}
+			d.finishSnapshotCapture(capture, err == nil && workerCtx.Err() == nil)
+			return workerCtx.Err() == nil
+		}
+		drainFinal := func() bool {
+			for {
+				capture := d.takeFinalSnapshotCapture()
+				if capture == nil {
+					return true
+				}
+				if !write(capture) {
+					return false
+				}
+			}
+		}
+		flushQueued := func() {
+			for {
+				select {
+				case capture := <-d.snapshotJobs:
+					if !write(capture) {
+						return
+					}
+				default:
+					_ = drainFinal()
+					return
+				}
+			}
+		}
+		for {
+			select {
+			case <-workerCtx.Done():
+				return
+			case <-flush:
+				flushQueued()
+				return
+			case <-finalWake:
+				if !drainFinal() {
+					return
+				}
+			case capture := <-d.snapshotJobs:
+				if !write(capture) {
+					return
+				}
+			}
+		}
+	}()
+}
+
+func (d *Daemon) takeFinalSnapshotCapture() *snapshotCapture {
+	d.snapshotWorkerMu.Lock()
+	defer d.snapshotWorkerMu.Unlock()
+	for len(d.snapshotFinalOrder) > 0 {
+		sess := d.snapshotFinalOrder[0]
+		d.snapshotFinalOrder[0] = nil
+		d.snapshotFinalOrder = d.snapshotFinalOrder[1:]
+		capture := d.snapshotFinalJobs[sess]
+		delete(d.snapshotFinalJobs, sess)
+		if capture != nil {
+			return capture
+		}
+	}
+	return nil
+}
+
+func (d *Daemon) setSnapshotWorkerInFlight(workerID uint64, capture *snapshotCapture) bool {
+	d.snapshotWorkerMu.Lock()
+	defer d.snapshotWorkerMu.Unlock()
+	if d.snapshotWorkerID != workerID || d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
 		return false
 	}
-	if err := d.snaps.Write(name, data); err != nil {
-		d.log.Warn("writing session snapshot failed", "err", err, "session", name)
-		return false
-	}
+	d.snapshotWorkerInFlight = capture
 	return true
+}
+
+func (d *Daemon) clearSnapshotWorkerInFlight(workerID uint64, capture *snapshotCapture) {
+	d.snapshotWorkerMu.Lock()
+	defer d.snapshotWorkerMu.Unlock()
+	if d.snapshotWorkerID == workerID && d.snapshotWorkerInFlight == capture {
+		d.snapshotWorkerInFlight = nil
+	}
+}
+
+func (d *Daemon) stopSnapshotEncodeWorker() {
+	if d == nil {
+		return
+	}
+	d.snapshotWorkerMu.Lock()
+	cancel := d.snapshotWorkerCancel
+	if cancel == nil || d.snapshotWorkerClosing {
+		d.snapshotWorkerMu.Unlock()
+		return
+	}
+	// Stop accepting producers, then let the single worker drain its bounded
+	// queue. A non-context-aware store may still block indefinitely, so the
+	// injected clock bounds how long teardown waits before detaching it.
+	d.snapshotWorkerClosing = true
+	flush := d.snapshotWorkerFlush
+	done := d.snapshotWorkerDone
+	close(flush)
+	timer := d.clock.NewTimer(snapshotFinalFlushTimeout)
+	d.snapshotWorkerMu.Unlock()
+
+	select {
+	case <-done:
+		timer.Stop()
+		d.finishStoppedSnapshotWorker(false)
+	case <-timer.C():
+		cancel()
+		d.finishStoppedSnapshotWorker(true)
+	}
+}
+
+func (d *Daemon) finishStoppedSnapshotWorker(abandoned bool) {
+	d.snapshotWorkerMu.Lock()
+	inFlight := d.snapshotWorkerInFlight
+	d.snapshotWorkerCtx = nil
+	d.snapshotWorkerCancel = nil
+	d.snapshotWorkerDone = nil
+	d.snapshotWorkerFlush = nil
+	d.snapshotWorkerFinalWake = nil
+	d.snapshotWorkerClosing = false
+	d.snapshotWorkerInFlight = nil
+	queued := make([]*snapshotCapture, 0, len(d.snapshotJobs)+len(d.snapshotFinalJobs))
+	for _, capture := range d.snapshotFinalJobs {
+		queued = append(queued, capture)
+	}
+	d.snapshotFinalJobs = nil
+	d.snapshotFinalOrder = nil
+	for {
+		select {
+		case capture := <-d.snapshotJobs:
+			queued = append(queued, capture)
+		default:
+			d.snapshotWorkerMu.Unlock()
+			if abandoned {
+				d.finishSnapshotCapture(inFlight, false)
+			}
+			for _, capture := range queued {
+				d.finishSnapshotCapture(capture, false)
+			}
+			return
+		}
+	}
 }
 
 func (d *Daemon) capturePaneProcess(pty interface{ ForegroundPgid() (int, error) }, shellPid int) *snapcodec.Process {
@@ -368,25 +757,12 @@ func (d *Daemon) snapshotSaver(ctx context.Context) {
 		sessions := d.sessionsSnapshotLocked()
 		d.mu.Unlock()
 		for _, sess := range sessions {
-			if sess.snapEligible.Load() && sess.snapDirty.Swap(false) {
-				if !d.captureSession(sess) {
-					sess.snapDirty.Store(true)
-				}
+			if sess.snapEligible.Load() && sess.snapDirty.Load() {
+				d.scheduleSnapshot(sess)
 			}
 		}
 		t.Reset(snapshotInterval)
 	}
-}
-
-func cloneRows(rows [][]renderer.Cell) [][]renderer.Cell {
-	if len(rows) == 0 {
-		return nil
-	}
-	out := make([][]renderer.Cell, len(rows))
-	for i, row := range rows {
-		out[i] = append([]renderer.Cell(nil), row...)
-	}
-	return out
 }
 
 func pruneTreeToPanes(n *layout.Node, panes map[layout.PaneID]struct{}) bool {
