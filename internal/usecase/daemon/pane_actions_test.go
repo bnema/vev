@@ -16,6 +16,7 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/pkg/renderer"
 )
 
 func TestSplitPaneCreatesFocusedShellInRequestedPosition(t *testing.T) {
@@ -309,7 +310,15 @@ func TestCloseOriginalPaneLeavesSurvivorFunctional(t *testing.T) {
 	daemonKeyHandler{d: d, ac: ac}.Forward([]byte("Z"))
 	require.Equal(t, []byte("Z"), <-writes)
 	tb.focusedPane().screen.Write([]byte("survivor"))
-	frame, _ := composeClientFrame(sess, tb, false, "")
+	content := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
+	frame := composeFrame(capturedRenderState{
+		reset:  true,
+		layout: capturedTabLayout{area: content, focus: tb.focusedPane().id, valid: true},
+		panes: []capturedPaneRenderState{{
+			id: tb.focusedPane().id, frame: tb.focusedPane().screen.Frame.Clone(), placement: layout.Placement{ID: tb.focusedPane().id, Content: content}, focused: true, damage: []renderer.Damage{renderer.FullRedraw()},
+		}},
+		bars: barState{status: sess.statusSegments(true)},
+	}, composeCacheInput{}).frame
 	require.Contains(t, frameRowString(frame, 1), "survivor")
 }
 

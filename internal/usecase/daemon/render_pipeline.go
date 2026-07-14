@@ -86,6 +86,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	if titles == nil {
 		titles = make(map[layout.PaneID]uint64, len(state.panes))
 	}
+	clear(titles)
 	damage := scratch.damage[:0]
 	for _, pane := range state.panes {
 		pl := offsetPlacement(pane.placement, 0, 1)

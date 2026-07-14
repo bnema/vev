@@ -267,8 +267,17 @@ func TestComposeFloatingFrameRendersPaneOwnedCommandFallback(t *testing.T) {
 	base := renderer.NewFrame(40, 12)
 	content := domain.Rect{Y: 1, Width: 40, Height: 10}
 	cfg := domain.FloatingConfig{Width: 80, Height: 80}
-	frame, _, _ := composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, false)
-	geometry := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg).translate(content.X, content.Y)
+	geometry := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg)
+	captured := capturedPaneRenderState{frame: renderer.NewFrame(geometry.Inner.Width, geometry.Inner.Height), title: "btop", titleGeneration: 1}
+	frame, _ := composeCapturedFloatingFrame(floatingComposeInput{
+		baseFrame: base,
+		floating: capturedFloatingRenderState{
+			visible: true, pane: captured, geometry: geometry, title: captured.title, generation: 1, titleGeneration: captured.titleGeneration,
+		},
+		content: content,
+		theme:   themeui.Theme{},
+	})
+	geometry = geometry.translate(content.X, content.Y)
 	var gotTitle strings.Builder
 	for x := geometry.Bounds.X + 2; x < geometry.Bounds.X+geometry.Bounds.Width-2; x++ {
 		gotTitle.WriteRune(frame.At(x, geometry.Bounds.Y).Rune)
@@ -276,10 +285,14 @@ func TestComposeFloatingFrameRendersPaneOwnedCommandFallback(t *testing.T) {
 	require.Equal(t, "btop", strings.TrimRight(gotTitle.String(), "─"))
 }
 
-func TestComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
+func TestCaptureAndComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 	p := newPane("floating", nil, domain.Size{Cols: 80, Rows: 24})
-	base := renderer.NewFrame(80, 24)
-	content := domain.Rect{Width: 80, Height: 24}
+	tb := newTab(nil, domain.Size{Cols: 80, Rows: 24})
+	installTestFloating(tb, p, true)
+	ac := &attachedClient{}
+	ac.initOverlays()
+	sess := &session{tabs: []*tab{tb}, client: ac}
+	base := barState{}
 	cfg := domain.FloatingConfig{Width: 100, Height: 100}
 
 	start := make(chan struct{})
@@ -289,7 +302,6 @@ func TestComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 		defer wg.Done()
 		<-start
 		for range 500 {
-			// This is the same pane lock used by ptyReader around Screen.Write.
 			p.mu.Lock()
 			p.screen.Write([]byte("\x1b[Hreader"))
 			p.mu.Unlock()
@@ -298,9 +310,14 @@ func TestComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-start
-		cache := &composedFrameCache{}
+		cache := composeCacheInput{}
 		for range 500 {
-			composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+			ac.sendMu.Lock()
+			state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{bars: base, floatingCfg: cfg})
+			ac.sendMu.Unlock()
+			require.True(t, ok)
+			out := composeFrame(*state, cache)
+			cache = out.cache
 		}
 	}()
 	close(start)

@@ -366,11 +366,10 @@ func TestAnimationRepaintConfinedToBarRows(t *testing.T) {
 	require.NotContains(t, string(data), "MIDSCREENMARKER")
 }
 
-// TestComposeClientFrameWithStateAttentionFrameChangeDamagesOnlyBars pins the
-// same invariant at the composeClientFrameWithState level: with a warm
-// barCache and no screen damage, changing only bars.attentionFrame must
-// produce damage confined to row 0 (top bar) and the last row (bottom bar).
-func TestComposeClientFrameWithStateAttentionFrameChangeDamagesOnlyBars(t *testing.T) {
+// TestComposeFrameAttentionFrameChangeDamagesOnlyBars pins the same invariant
+// through the production composition pipeline: with a warm cache and no pane
+// damage, changing only bars.attentionFrame damages only the chrome rows.
+func TestComposeFrameAttentionFrameChangeDamagesOnlyBars(t *testing.T) {
 	d, sess, _, _, releases := newManualTabSession(t, 2)
 	defer releases[0]()
 	defer releases[1]()
@@ -381,14 +380,17 @@ func TestComposeClientFrameWithStateAttentionFrameChangeDamagesOnlyBars(t *testi
 	sess.mu.Unlock()
 
 	tb := sess.tabs[0]
-	var cache barCache
 	bars := d.barStateFor(sess, "")
-	_, damage := composeClientFrameWithState(bars, tb, true, &cache)
-	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
+	area := domain.Rect{Width: tb.focusedPane().screen.Frame.Width, Height: tb.focusedPane().screen.Frame.Height}
+	state := capturedRenderState{reset: true, layout: capturedTabLayout{area: area, valid: true}, bars: bars}
+	out := composeFrame(state, composeCacheInput{})
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, out.damage)
 	tb.focusedPane().screen.ClearDamage()
 
 	bars.attentionFrame++
-	_, damage = composeClientFrameWithState(bars, tb, false, &cache)
+	state.reset, state.bars = false, bars
+	out = composeFrame(state, out.cache)
+	damage := out.damage
 	require.NotEmpty(t, damage)
 	lastRow := tb.focusedPane().screen.Frame.Height + 1
 	for _, dmg := range damage {
