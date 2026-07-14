@@ -3,11 +3,13 @@ package daemon
 import (
 	"errors"
 	"io"
+	"maps"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/stretchr/testify/require"
 )
@@ -86,6 +88,126 @@ func TestComposeFrameClearsFloatingFrameWhenItCloses(t *testing.T) {
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, result.damage)
 }
 
+func TestComposeFrameCacheSkipsUndamagedBlitsAndInvalidatesFocusAndLayout(t *testing.T) {
+	theme := themeui.Theme{Known: true, TrueColor: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 10, B: 10}}
+	initial := cachedSplitState("horizontal-left", "left", layout.Horizontal, theme)
+	committed := composeFrame(initial, composeCacheInput{})
+	require.Equal(t, '│', committed.frame.At(20, 1).Rune)
+	focusedStyle := committed.frame.At(0, 1).Style
+	dimmedStyle := committed.frame.At(21, 1).Style
+
+	undamaged := initial
+	undamaged.reset = false
+	undamaged.panes[0].frame.Set(0, 0, renderer.Cell{Rune: 'Z', Style: renderer.DefaultStyle()})
+	undamaged.panes[0].damage = nil
+	undamaged.panes[1].frame.Set(0, 0, renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()})
+	undamaged.panes[1].damage = []renderer.Damage{{Kind: renderer.DamageText, X: 21, Width: 1, Height: 1}}
+	out := composeFrame(undamaged, committed.cache, composeCacheInput{})
+	require.Equal(t, 'L', out.frame.At(0, 1).Rune, "an undamaged pane must retain the committed blit")
+	require.Equal(t, 'x', out.frame.At(21, 1).Rune)
+	require.Contains(t, out.damage, renderer.Damage{Kind: renderer.DamageText, X: 21, Y: 1, Width: 1, Height: 1})
+
+	focusChanged := cachedSplitState("horizontal-right", "right", layout.Horizontal, theme)
+	focusChanged.reset = false
+	focusChanged.panes[0].damage, focusChanged.panes[1].damage = nil, nil
+	out = composeFrame(focusChanged, out.cache, committed.cache)
+	require.Equal(t, dimmedStyle, out.frame.At(0, 1).Style, "the old focus must be re-blitted dimmed")
+	require.Equal(t, focusedStyle, out.frame.At(21, 1).Style, "the new focus must be re-blitted undimmed")
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, out.damage)
+
+	vertical := cachedSplitState("vertical-right", "right", layout.Vertical, theme)
+	vertical.reset = false
+	vertical.panes[0].damage, vertical.panes[1].damage = nil, nil
+	out = composeFrame(vertical, out.cache, committed.cache)
+	require.NotEqual(t, '│', out.frame.At(20, 1).Rune, "layout invalidation must clear the old vertical divider")
+	require.Equal(t, '─', out.frame.At(20, 3).Rune)
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, out.damage)
+}
+
+func TestComposeFrameCacheRefreshesStackTitlesAndBars(t *testing.T) {
+	initial := cachedStackTitleState("one", 1, true)
+	committed := composeFrame(initial, composeCacheInput{})
+
+	renamed := initial
+	renamed.reset = false
+	renamed.panes[0].title, renamed.panes[0].titleGeneration = "renamed", 2
+	out := composeFrame(renamed, committed.cache, composeCacheInput{})
+	require.Equal(t, "renamed", rowText(out.frame.Row(1))[:7])
+	require.Contains(t, out.damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 1, Width: 20, Height: 1})
+
+	unchanged := composeFrame(renamed, out.cache, committed.cache)
+	require.NotContains(t, unchanged.damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 1, Width: 20, Height: 1})
+
+	bars := cacheBarState("one", true)
+	committed = composeFrame(bars, composeCacheInput{})
+	bars.reset = false
+	bars.panes[0].damage = []renderer.Damage{{Kind: renderer.DamageText, Width: 1, Height: 1}}
+	out = composeFrame(bars, committed.cache, composeCacheInput{})
+	for _, damage := range out.damage {
+		require.NotEqual(t, 0, damage.Y, "unchanged top bar must remain cached")
+		require.NotEqual(t, 2, damage.Y, "unchanged bottom bar must remain cached")
+	}
+	bars.panes[0].damage = nil
+	bars.bars.bottomRight = "two"
+	out = composeFrame(bars, out.cache, committed.cache)
+	require.Contains(t, out.damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 2, Width: 6, Height: 1})
+	require.NotContains(t, out.damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 0, Width: 6, Height: 1})
+}
+
+func TestComposeFrameCachedTitleBarsDoNotAllocate(t *testing.T) {
+	state := cachedStackTitleState("title", 1, true)
+	committed, scratch := composeCacheInput{}, composeCacheInput{}
+	compose := func() {
+		out := composeFrame(state, committed, scratch)
+		scratch, committed = committed, out.cache
+		state.reset = false
+	}
+	compose()
+	compose()
+	compose()
+
+	allocs := testing.AllocsPerRun(100, compose)
+	require.Zero(t, allocs, "warm production title composition must reuse the committed and scratch cache backing storage")
+}
+
+func cachedSplitState(fingerprint string, focus layout.PaneID, direction layout.SplitDir, theme themeui.Theme) capturedRenderState {
+	left, right := layout.PaneID("left"), layout.PaneID("right")
+	placements := []layout.Placement{{ID: left, Content: domain.Rect{Width: 20, Height: 5}}, {ID: right, Content: domain.Rect{X: 21, Width: 20, Height: 5}}}
+	leftFrame, rightFrame := cachePaneFrame(20, 5, 'L'), cachePaneFrame(20, 5, 'R')
+	if direction == layout.Vertical {
+		placements = []layout.Placement{{ID: left, Content: domain.Rect{Width: 41, Height: 2}}, {ID: right, Content: domain.Rect{Y: 3, Width: 41, Height: 2}}}
+		leftFrame, rightFrame = cachePaneFrame(41, 2, 'L'), cachePaneFrame(41, 2, 'R')
+	}
+	return capturedRenderState{
+		reset:  true,
+		layout: capturedTabLayout{root: &layout.Node{Kind: layout.Split, Dir: direction, Children: []*layout.Node{layout.NewLeaf(left), layout.NewLeaf(right)}}, area: domain.Rect{Width: 41, Height: 5}, focus: focus, placements: placements, fingerprint: fingerprint, valid: true},
+		panes:  []capturedPaneRenderState{{id: left, frame: leftFrame, placement: placements[0], focused: focus == left, damage: []renderer.Damage{renderer.FullRedraw()}}, {id: right, frame: rightFrame, placement: placements[1], focused: focus == right, damage: []renderer.Damage{renderer.FullRedraw()}}},
+		theme:  theme,
+	}
+}
+
+func cachedStackTitleState(title string, generation uint64, reset bool) capturedRenderState {
+	first, second := layout.PaneID("first"), layout.PaneID("second")
+	placements := []layout.Placement{{ID: first, TitleBar: domain.Rect{Width: 20, Height: 1}, Collapsed: true}, {ID: second, TitleBar: domain.Rect{Y: 1, Width: 20, Height: 1}, Collapsed: true}}
+	return capturedRenderState{
+		reset:  reset,
+		layout: capturedTabLayout{root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(first), layout.NewLeaf(second)}, Expanded: second}, area: domain.Rect{Width: 20, Height: 5}, focus: second, placements: placements, fingerprint: "stack", valid: true},
+		panes:  []capturedPaneRenderState{{id: first, title: title, titleGeneration: generation, placement: placements[0]}, {id: second, title: "second", titleGeneration: 1, placement: placements[1], focused: true}},
+	}
+}
+
+func cacheBarState(bottom string, reset bool) capturedRenderState {
+	pane := cachePaneFrame(6, 1, 'P')
+	placement := layout.Placement{ID: "pane", Content: domain.Rect{Width: 6, Height: 1}}
+	return capturedRenderState{reset: reset, layout: capturedTabLayout{area: domain.Rect{Width: 6, Height: 1}, focus: "pane", placements: []layout.Placement{placement}, fingerprint: "bar", valid: true}, panes: []capturedPaneRenderState{{id: "pane", frame: pane, placement: placement, focused: true, damage: []renderer.Damage{renderer.FullRedraw()}}}, bars: barState{bottomRight: bottom}}
+}
+
+func cachePaneFrame(width, height int, r rune) renderer.Frame {
+	frame := renderer.NewFrame(width, height)
+	frame.Set(0, 0, renderer.Cell{Rune: r, Style: renderer.DefaultStyle()})
+	return frame
+}
+
 func cacheState(title string, generation uint64) capturedRenderState {
 	pane := renderer.NewFrame(6, 1)
 	for x, r := range title[:min(len(title), 6)] {
@@ -106,9 +228,7 @@ func cloneComposeCache(in composeCacheInput) composeCacheInput {
 	out := in
 	out.frame = in.frame.Clone()
 	out.titleGenerations = make(map[layout.PaneID]uint64, len(in.titleGenerations))
-	for id, generation := range in.titleGenerations {
-		out.titleGenerations[id] = generation
-	}
+	maps.Copy(out.titleGenerations, in.titleGenerations)
 	out.damage = append([]renderer.Damage(nil), in.damage...)
 	out.bars.top = append([]renderer.Cell(nil), in.bars.top...)
 	out.bars.bottom = append([]renderer.Cell(nil), in.bars.bottom...)

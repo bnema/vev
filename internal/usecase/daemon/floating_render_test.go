@@ -332,6 +332,30 @@ func TestDrawFloatingBorderOmitsTinyAxes(t *testing.T) {
 	}
 }
 
+func TestComposeCapturedFloatingFrameCachedAllocationsAreOnlyFrameClone(t *testing.T) {
+	base := renderer.NewFrame(80, 24)
+	content := domain.Rect{Y: 1, Width: 80, Height: 22}
+	geometry := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, domain.FloatingConfig{Width: 80, Height: 80})
+	input := floatingComposeInput{
+		baseFrame: base,
+		floating: capturedFloatingRenderState{
+			visible:  true,
+			pane:     capturedPaneRenderState{frame: renderer.NewFrame(62, 18), title: "float", titleGeneration: 1},
+			geometry: geometry, title: "float", generation: 1, titleGeneration: 1,
+		},
+		content: content,
+		cache: composeCacheInput{
+			valid: true, floatingGeneration: 1, floatingGeometry: geometry.translate(content.X, content.Y), floatingTitleGeneration: 1,
+		},
+	}
+
+	allocs := testing.AllocsPerRun(100, func() { composeCapturedFloatingFrame(input) })
+	// The production entry point deliberately clones Frame.Cells and its row
+	// offsets to keep the cached base immutable; those are its two unavoidable
+	// allocations. A higher count would reintroduce avoidable cache churn.
+	require.LessOrEqual(t, allocs, float64(2))
+}
+
 func BenchmarkComposeCapturedFloatingFrameCached(b *testing.B) {
 	base := renderer.NewFrame(80, 24)
 	content := domain.Rect{Y: 1, Width: 80, Height: 22}
