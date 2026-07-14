@@ -186,6 +186,68 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 	}
 }
 
+func TestModelCompleteSelected(t *testing.T) {
+	jrs := cmd("JRS", "Jump", "Jump to recent session")
+	jrs.Arguments = command.ArgumentsRequired
+	registryFirst := command.Registry()[0]
+
+	tests := []struct {
+		name       string
+		commands   []command.Command
+		registry   bool
+		query      string
+		down       int
+		want       string
+		wantChange bool
+		rendered   string
+	}{
+		{name: "nil model", want: "", wantChange: false},
+		{name: "empty model", commands: nil, want: "", wantChange: false},
+		{name: "registry first from empty query", registry: true, want: registryFirst.Code, wantChange: true, rendered: registryFirst.Code},
+		{name: "prefix match", commands: []command.Command{cmd("CPY", "Copy", "Enter copy mode")}, query: "cp", want: "CPY", wantChange: true},
+		{name: "fuzzy match", commands: []command.Command{cmd("CPY", "Copy", "Enter copy mode")}, query: "cy", want: "CPY", wantChange: true},
+		{name: "description match", commands: []command.Command{cmd("CPY", "Copy", "Enter copy mode")}, query: "enter", want: "CPY", wantChange: true},
+		{name: "navigated selection", commands: []command.Command{cmd("AAA", "", ""), cmd("BBB", "", "")}, down: 1, want: "BBB", wantChange: true},
+		{name: "static command replaces query", commands: []command.Command{cmd("CPY", "Copy", "Enter copy mode")}, query: "copy", want: "CPY", wantChange: true},
+		{name: "argument command appends required space", commands: []command.Command{jrs}, query: "jrs", want: "JRS ", wantChange: true},
+		{name: "partial token preserves unicode whitespace argument bytes", commands: []command.Command{jrs}, query: "jr\u2003 \tα  β", want: "JRS α  β", wantChange: true},
+		{name: "exact code and argument is unchanged", commands: []command.Command{jrs}, query: "JRS\u2003  α  β", want: "JRS\u2003  α  β", wantChange: false},
+		{name: "no match", commands: []command.Command{cmd("CPY", "Copy", "Enter copy mode")}, query: "zzz", want: "zzz", wantChange: false},
+		{name: "effective override code", commands: []command.Command{{Slug: "new-tab", Code: "NT", Desc: "Create tab"}}, query: "n", want: "NT", wantChange: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var m *Model
+			if tt.name != "nil model" {
+				if tt.registry {
+					m = NewRegistry()
+				} else {
+					m = New(tt.commands)
+				}
+				for _, r := range tt.query {
+					m.Insert(r)
+				}
+				for range tt.down {
+					m.Down()
+				}
+			}
+
+			changed := m.CompleteSelected()
+			require.Equal(t, tt.wantChange, changed)
+			if m == nil {
+				require.Equal(t, tt.want, "")
+				return
+			}
+			require.Equal(t, tt.want, m.Query())
+			if tt.rendered != "" {
+				frame := m.Render(domain.Size{Cols: 32, Rows: 2}, RenderOptions{Styles: DefaultRenderStyles()})
+				require.Equal(t, "> "+tt.rendered, frameRow(frame, 0)[:len([]rune(tt.rendered))+2])
+			}
+		})
+	}
+}
+
 func TestRenderGuidanceReplacesOnlyExactContextualRow(t *testing.T) {
 	jrs := cmd("JRS", "Jump", "Jump to recent session")
 	jrs.Arguments = command.ArgumentsRequired
