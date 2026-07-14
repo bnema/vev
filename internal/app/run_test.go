@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -401,10 +400,6 @@ func TestRunLocalAttachDeclineKeepsOriginalError(t *testing.T) {
 func TestRunAttachRejectsNestedVEVBeforeDial(t *testing.T) {
 	called := false
 	err := runAttachWithDeps(context.Background(), ports.IntentEphemeral, "", "", "outer", nil, runAttachDeps{
-		attachLocal: func(context.Context, uint8, string, *slog.Logger) error {
-			called = true
-			return nil
-		},
 		createDetached: func(context.Context, string) error {
 			called = true
 			return nil
@@ -424,10 +419,6 @@ func TestRunAttachRejectsNestedVEVBeforeDial(t *testing.T) {
 func TestRunAttachNestedNewCreatesDetachedSession(t *testing.T) {
 	var gotName string
 	err := runAttachWithDeps(context.Background(), ports.IntentNew, "scratch", "", "outer", nil, runAttachDeps{
-		attachLocal: func(context.Context, uint8, string, *slog.Logger) error {
-			t.Fatal("nested new should not attach to the session")
-			return nil
-		},
 		createDetached: func(_ context.Context, name string) error {
 			gotName = name
 			return nil
@@ -488,16 +479,16 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 				remoteDialerFactory:     factory,
 				selectedRemoteTransport: tt.selectedTransport,
 				clipboard:               clip,
-				runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, _ *slog.Logger) error {
-					nd, ok := d.(namedDialer)
+				runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
+					nd, ok := deps.Dialer.(namedDialer)
 					if !ok {
-						t.Fatalf("dialer type = %T, want namedDialer", d)
+						t.Fatalf("dialer type = %T, want namedDialer", deps.Dialer)
 					}
 					gotDialer = nd.name
-					gotRemote = remote
-					gotClipboard = clipboard
-					if intent != ports.IntentAttach || name != "work" {
-						t.Fatalf("intent/name = %d/%q, want attach/work", intent, name)
+					gotRemote = request.Remote
+					gotClipboard = deps.Clipboard
+					if request.Intent != ports.IntentAttach || request.SessionName != "work" {
+						t.Fatalf("intent/name = %d/%q, want attach/work", request.Intent, request.SessionName)
 					}
 					return nil
 				},
@@ -525,7 +516,7 @@ func TestRunAttachWithDepsRejectsInvalidRemoteTransportBeforeDialing(t *testing.
 	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory:     factory,
 		selectedRemoteTransport: "serial",
-		runClient: func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, bool, ports.ClipboardReader, *slog.Logger) error {
+		runClient: func(context.Context, client.Dependencies, client.AttachRequest) error {
 			runClientCalled = true
 			return nil
 		},
@@ -546,7 +537,7 @@ func TestRunAttachWithDepsReturnsFactoryErrorBeforeRunClient(t *testing.T) {
 
 	err := runAttachWithDeps(context.Background(), ports.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory: factory,
-		runClient: func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, bool, ports.ClipboardReader, *slog.Logger) error {
+		runClient: func(context.Context, client.Dependencies, client.AttachRequest) error {
 			runClientCalled = true
 			return nil
 		},
@@ -568,16 +559,16 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 		localDialer:         func() ports.Dialer { return namedDialer{name: "local"} },
 		remoteDialerFactory: factory,
 		clipboard:           &fakeClipboardReader{}, // must NOT reach runClient for a local attach
-		runClient: func(_ context.Context, d ports.Dialer, _ ports.Terminal, _ ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, _ *slog.Logger) error {
-			nd, ok := d.(namedDialer)
+		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
+			nd, ok := deps.Dialer.(namedDialer)
 			if !ok {
-				t.Fatalf("dialer type = %T, want namedDialer", d)
+				t.Fatalf("dialer type = %T, want namedDialer", deps.Dialer)
 			}
 			gotDialer = nd.name
-			gotRemote = remote
-			gotClipboard = clipboard
-			if intent != ports.IntentEphemeral || name != "" {
-				t.Fatalf("intent/name = %d/%q, want ephemeral/empty", intent, name)
+			gotRemote = request.Remote
+			gotClipboard = deps.Clipboard
+			if request.Intent != ports.IntentEphemeral || request.SessionName != "" {
+				t.Fatalf("intent/name = %d/%q, want ephemeral/empty", request.Intent, request.SessionName)
 			}
 			return nil
 		},

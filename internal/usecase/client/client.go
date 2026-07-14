@@ -143,42 +143,62 @@ const (
 	statusClear     = "\r\x1b[2K"
 )
 
-// Run connects via dialer and runs the attach client. It owns the terminal
-// lifecycle above attach attempts so raw mode remains active while a live
-// client process redials a lost link.
-//
-// remote and clipboard together gate the clipboard-image-transfer feature
-// (docs/superpowers/specs/2026-07-04-clipboard-image-transfer-design.md):
-// Ctrl+V is only intercepted on a remote attach (remote true) with a
-// ClipboardReader configured (clipboard non-nil) — local attaches forward
-// 0x16 untouched so the locally running agent's own clipboard handling
-// applies.
-// Option configures opt-in client runtime observation.
-type Option func(*runtimeOptions)
-
-type runtimeOptions struct {
-	observer ports.SerializedRuntimeObserver
+// Dependencies supplies the collaborators required by a Runner.
+type Dependencies struct {
+	Dialer          ports.Dialer
+	Terminal        ports.Terminal
+	Clock           ports.Clock
+	Clipboard       ports.ClipboardReader
+	Logger          *slog.Logger
+	RuntimeObserver ports.SerializedRuntimeObserver
 }
 
-// WithRuntimeObserver accepts only a composition-root serialized observer, so
-// terminal and transport progress can never wait for a raw trace sink.
-func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
-	return func(opts *runtimeOptions) { opts.observer = observer }
+// AttachRequest identifies the session and transport mode for one client run.
+type AttachRequest struct {
+	Intent      uint8
+	SessionName string
+	Remote      bool
 }
 
-func Run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) error {
-	return run(ctx, dialer, term, clk, intent, name, remote, clipboard, log, nil)
+// Runner owns the client lifecycle across one or more attachment attempts.
+type Runner struct {
+	dialer          ports.Dialer
+	term            ports.Terminal
+	clock           ports.Clock
+	clipboard       ports.ClipboardReader
+	logger          *slog.Logger
+	runtimeObserver ports.SerializedRuntimeObserver
 }
 
-// RunWithRuntimeObserver is the application wiring entry point.
-func RunWithRuntimeObserver(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observer ports.SerializedRuntimeObserver) error {
-	return run(ctx, dialer, term, clk, intent, name, remote, clipboard, log, observer)
-}
-
-func run(ctx context.Context, dialer ports.Dialer, term ports.Terminal, clk ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger, observer ports.SerializedRuntimeObserver) (retErr error) {
+// NewRunner constructs a client runner. A nil logger uses the process default.
+func NewRunner(deps Dependencies) *Runner {
+	log := deps.Logger
 	if log == nil {
 		log = slog.Default()
 	}
+	return &Runner{
+		dialer:          deps.Dialer,
+		term:            deps.Terminal,
+		clock:           deps.Clock,
+		clipboard:       deps.Clipboard,
+		logger:          log,
+		runtimeObserver: deps.RuntimeObserver,
+	}
+}
+
+// Run connects and runs the attach client. It owns the terminal lifecycle
+// above attach attempts so raw mode remains active while a live client process
+// redials a lost link.
+func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) {
+	dialer := r.dialer
+	term := r.term
+	clk := r.clock
+	intent := request.Intent
+	name := request.SessionName
+	remote := request.Remote
+	clipboard := r.clipboard
+	log := r.logger
+	observer := r.runtimeObserver
 	ms := milestones{}
 
 	defer func() {
@@ -362,27 +382,6 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 			}
 		}
 	}
-}
-
-// Attach connects an already-dialed transport to the controlling terminal
-// and runs the attach loop until the session detaches, the daemon
-// disappears, or the context is cancelled.
-//
-// It is kept as a compatibility wrapper for callers that still own dialing.
-func Attach(ctx context.Context, transport ports.Transport, term ports.Terminal, clk ports.Clock, intent uint8, name string, options ...Option) error {
-	var opts runtimeOptions
-	for _, option := range options {
-		if option != nil {
-			option(&opts)
-		}
-	}
-	return run(ctx, singleTransportDialer{transport: transport}, term, clk, intent, name, false, nil, slog.Default(), opts.observer)
-}
-
-type singleTransportDialer struct{ transport ports.Transport }
-
-func (d singleTransportDialer) Dial(context.Context) (ports.Transport, error) {
-	return d.transport, nil
 }
 
 type attachResult struct {

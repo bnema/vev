@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"log/slog"
 	"testing"
 	"time"
 
@@ -86,7 +85,7 @@ func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReade
 	d := portsmocks.NewMockDialer(t)
 	d.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 
-	err := client.Run(context.Background(), d, tm, realClock{}, ports.IntentEphemeral, "", remote, clip, slog.New(slog.DiscardHandler))
+	err := runTestClient(context.Background(), testDependencies(d, tm, realClock{}, clip, nil), client.AttachRequest{Intent: ports.IntentEphemeral, Remote: remote})
 	require.NoError(t, err)
 	return gotInput, gotImage
 }

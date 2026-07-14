@@ -412,7 +412,7 @@ func TestRemoteReconnectToastClearsFailedDrawBounds(t *testing.T) {
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr}}
 
-	err := Run(ctx, dialer, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
+	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
 	require.ErrorIs(t, err, context.Canceled)
 	require.True(t, out.failed)
 	assertReconnectToastClearCoversBounds(t, out.String(), reconnectToastBoundsFor(term.size, reconnectStageMessage(reconnectStageSSH)))
@@ -447,7 +447,7 @@ func TestRemoteReconnectToastLifecycleWithWrappedTransportError(t *testing.T) {
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr1, tr2}}
 
-	err := Run(context.Background(), dialer, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
+	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
 	require.NoError(t, err)
 	require.True(t, tr1.closed)
 	require.True(t, tr2.closed)
@@ -615,7 +615,7 @@ func TestRemoteReconnectResendsKnownTerminalTheme(t *testing.T) {
 	tr2 := newReconnectThemeTransport(55, false)
 	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr1, tr2}}
 
-	err := Run(context.Background(), dialer, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
+	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
 	require.NoError(t, err)
 	require.True(t, tr2.observedTheme.HasForeground)
 	require.True(t, tr2.observedTheme.HasBackground)
@@ -649,7 +649,7 @@ func TestRemoteEphemeralReconnectUsesAssignedSessionName(t *testing.T) {
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []ports.Transport{tr1, tr2}}
 
-	err := Run(context.Background(), dialer, term.term, newReconnectHandshakeClock(t), ports.IntentEphemeral, "", true, nil, slog.New(slog.DiscardHandler))
+	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentEphemeral, SessionName: "", Remote: true})
 	require.NoError(t, err)
 	require.Equal(t, 2, dialer.calls)
 
@@ -734,7 +734,7 @@ func TestRemoteReconnectToastLifecycle(t *testing.T) {
 			dialer := portsmocks.NewMockDialer(t)
 			tt.configure(t, dialer)
 
-			err := Run(ctx, dialer, term.term, newReconnectHandshakeClock(t), ports.IntentAttach, "main", true, nil, slog.New(slog.DiscardHandler))
+			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
 			tt.wantErr(t, err)
 			out := term.out.String()
 			require.Contains(t, out, reconnectToastMessage)
