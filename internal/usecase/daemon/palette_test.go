@@ -4,7 +4,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -533,20 +532,20 @@ func TestPaletteRenderAndInputCanRunConcurrently(t *testing.T) {
 
 func TestPaletteTabCompletesSelectedCommandWithoutForwardingToPTY(t *testing.T) {
 	tests := []struct {
-		name          string
-		config        map[string]string
-		recent        string
-		query         string
-		want          string
-		wantRepaint   bool
-		setupRepaints int
+		name                       string
+		config                     map[string]string
+		recent                     string
+		query                      string
+		want                       string
+		wantCompletionInvalidation bool
+		setupInvalidations         int
 	}{
-		{name: "changed completion repaints once", query: "NX", want: "NXT", wantRepaint: true},
-		{name: "exact argument command is a no-op", query: "JRS 1", want: "JRS 1", wantRepaint: false},
-		{name: "empty query starts at registry first", want: "CNT", wantRepaint: true},
-		{name: "empty query starts at daemon MRU", recent: "NXT", want: "NXT", wantRepaint: true},
-		{name: "effective configured override completes", config: map[string]string{"new-tab": "NEW"}, want: "NEW", wantRepaint: true, setupRepaints: 1},
-		{name: "stale pre-override MRU is ignored", config: map[string]string{"new-tab": "NEW"}, recent: "CNT", want: "NEW", wantRepaint: true, setupRepaints: 1},
+		{name: "changed completion invalidates once", query: "NX", want: "NXT", wantCompletionInvalidation: true},
+		{name: "exact argument command is a no-op", query: "JRS 1", want: "JRS 1"},
+		{name: "empty query starts at registry first", want: "CNT", wantCompletionInvalidation: true},
+		{name: "empty query starts at daemon MRU", recent: "NXT", want: "NXT", wantCompletionInvalidation: true},
+		{name: "effective configured override completes", config: map[string]string{"new-tab": "NEW"}, want: "NEW", wantCompletionInvalidation: true, setupInvalidations: 1},
+		{name: "stale pre-override MRU is ignored", config: map[string]string{"new-tab": "NEW"}, recent: "CNT", want: "NEW", wantCompletionInvalidation: true, setupInvalidations: 1},
 	}
 
 	for _, tt := range tests {
@@ -555,21 +554,25 @@ func TestPaletteTabCompletesSelectedCommandWithoutForwardingToPTY(t *testing.T) 
 			p, release := newBlockingPTYWithWrites(t, writes)
 			defer release()
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			invs := installPaletteInvalidationObserver(sess)
 			if tt.recent != "" {
 				d.recordPaletteUse(tt.recent)
 			}
 			if tt.config != nil {
 				d.ApplyConfig(domain.Config{Codes: tt.config})
-				for range tt.setupRepaints {
-					awaitFrame(t, sends, ports.MsgOutput)
+				for range tt.setupInvalidations {
+					awaitInvalidation(t, invs)
 				}
+				requireNoInvalidation(t, invs)
 			}
 
 			d.handleInput(sess, ac, []byte("\x1b "))
-			awaitFrame(t, sends, ports.MsgOutput) // drain palette open repaint
+			awaitInvalidation(t, invs)
+			requireNoInvalidation(t, invs)
 			if tt.query != "" {
 				d.handleInput(sess, ac, []byte(tt.query))
-				awaitFrame(t, sends, ports.MsgOutput) // drain typed-query repaint
+				awaitInvalidation(t, invs)
+				requireNoInvalidation(t, invs)
 			}
 
 			d.handleInput(sess, ac, []byte("\t"))
@@ -577,10 +580,11 @@ func TestPaletteTabCompletesSelectedCommandWithoutForwardingToPTY(t *testing.T) 
 			got := ac.overlays.palette.Query()
 			ac.overlays.paletteMu.Unlock()
 			require.Equal(t, tt.want, got)
-			if tt.wantRepaint {
-				awaitFrame(t, sends, ports.MsgOutput)
+			if tt.wantCompletionInvalidation {
+				awaitInvalidation(t, invs)
 			}
-			requireNoPaletteFrame(t, sends)
+			requireNoInvalidation(t, invs)
+			requireNoOutputFrame(t, sends)
 			requireNoPTYWrite(t, writes)
 		})
 	}
@@ -591,27 +595,33 @@ func TestPaletteBatchedTabCompletionPreservesRepaintInvalidation(t *testing.T) {
 	p, release := newBlockingPTYWithWrites(t, writes)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	invs := installPaletteInvalidationObserver(sess)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, ports.MsgOutput) // drain palette-open repaint
+	awaitInvalidation(t, invs)
+	requireNoInvalidation(t, invs)
 
 	d.handleInput(sess, ac, []byte("NX\t\t"))
 	ac.overlays.paletteMu.Lock()
 	got := ac.overlays.palette.Query()
 	ac.overlays.paletteMu.Unlock()
 	require.Equal(t, "NXT", got)
-	awaitFrame(t, sends, ports.MsgOutput)
-	requireNoPaletteFrame(t, sends)
+	awaitInvalidation(t, invs)
+	requireNoInvalidation(t, invs)
+	requireNoOutputFrame(t, sends)
 	requireNoPTYWrite(t, writes)
 }
 
-func requireNoPaletteFrame(t *testing.T, sends <-chan ports.Frame) {
-	t.Helper()
-	select {
-	case frame := <-sends:
-		t.Fatalf("unexpected frame after no-op Tab: %#v", frame)
-	case <-time.After(50 * time.Millisecond):
-	}
+func installPaletteInvalidationObserver(sess *session) chan renderInvalidation {
+	invs := make(chan renderInvalidation, 8)
+	sess.installRenderCoordinator(newRenderCoordinator(renderCoordinatorOptions{
+		clock: nil,
+		wake:  nil,
+		onInvalidate: func(inv renderInvalidation) {
+			invs <- inv
+		},
+	}))
+	return invs
 }
 
 func TestPaletteExecMethods(t *testing.T) {
