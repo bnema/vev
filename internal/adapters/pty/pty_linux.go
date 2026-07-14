@@ -5,7 +5,7 @@ package pty
 // The Linux adapter drives /dev/ptmx directly (open master, TIOCGPTN to learn
 // the slave index, TIOCSPTLCK to unlock, then open /dev/pts/<N>) rather than
 // depending on a third-party pty package, keeping the dependency surface at
-// x/sys/unix plus the standard library.
+// the standard library alone.
 
 import (
 	"context"
@@ -21,7 +21,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
-	"golang.org/x/sys/unix"
+	"github.com/bnema/vev/pkg/linuxterm"
 )
 
 // killGracePeriod is how long Close waits for a signalled child to exit before
@@ -43,7 +43,7 @@ func (Factory) Open(ctx context.Context, command string, args []string, env []st
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	masterFd, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
+	masterFd, err := syscall.Open("/dev/ptmx", syscall.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("pty: open /dev/ptmx: %w", err)
 	}
@@ -52,22 +52,22 @@ func (Factory) Open(ctx context.Context, command string, args []string, env []st
 	ok := false
 	defer func() {
 		if !ok {
-			_ = unix.Close(masterFd)
+			_ = syscall.Close(masterFd)
 		}
 	}()
 
-	ptn, err := unix.IoctlGetInt(masterFd, unix.TIOCGPTN)
+	ptn, err := linuxterm.PtsNumber(masterFd)
 	if err != nil {
 		return nil, fmt.Errorf("pty: TIOCGPTN: %w", err)
 	}
 
 	// Unlock the slave so it can be opened.
-	if err := unix.IoctlSetPointerInt(masterFd, unix.TIOCSPTLCK, 0); err != nil {
+	if err := linuxterm.UnlockPt(masterFd); err != nil {
 		return nil, fmt.Errorf("pty: TIOCSPTLCK: %w", err)
 	}
 
 	slaveName := fmt.Sprintf("/dev/pts/%d", ptn)
-	slave, err := os.OpenFile(slaveName, os.O_RDWR|unix.O_NOCTTY, 0)
+	slave, err := os.OpenFile(slaveName, os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
 		return nil, fmt.Errorf("pty: open %s: %w", slaveName, err)
 	}
@@ -141,7 +141,7 @@ var _ ports.PTY = (*linuxPTY)(nil)
 // normal end of stream, so EIO is mapped to io.EOF here.
 func (p *linuxPTY) Read(b []byte) (int, error) {
 	n, err := p.master.Read(b)
-	if err != nil && errors.Is(err, unix.EIO) {
+	if err != nil && errors.Is(err, syscall.EIO) {
 		return n, io.EOF
 	}
 	return n, err
@@ -189,7 +189,7 @@ func (p *linuxPTY) ForegroundPgid() (int, error) {
 	var pgid int
 	var ioctlErr error
 	if err := rc.Control(func(fd uintptr) {
-		pgid, ioctlErr = unix.IoctlGetInt(int(fd), unix.TIOCGPGRP)
+		pgid, ioctlErr = linuxterm.ForegroundProcessGroup(int(fd))
 	}); err != nil {
 		return 0, fmt.Errorf("pty: foreground pgid: %w", err)
 	}
@@ -235,13 +235,10 @@ func (p *linuxPTY) Close() error {
 // child as its own session and process-group leader, so a negative pid reaches
 // both the command and every descendant that remains in its process group.
 func signalProcessGroup(pid int, signal syscall.Signal) error {
-	return unix.Kill(-pid, signal)
+	return syscall.Kill(-pid, signal)
 }
 
 // setWinsize applies sz to the terminal referenced by fd via TIOCSWINSZ.
 func setWinsize(fd int, sz domain.Size) error {
-	return unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, &unix.Winsize{
-		Row: uint16(sz.Rows),
-		Col: uint16(sz.Cols),
-	})
+	return linuxterm.SetWinsize(fd, uint16(sz.Cols), uint16(sz.Rows))
 }
