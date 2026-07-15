@@ -4,10 +4,14 @@ package ports
 //
 // Implementations may buffer writes; Sync is the durability barrier.
 type Store interface {
+	// Get returns a stable copy of the value for key. The caller owns the
+	// returned slice and may retain or mutate it.
 	Get(key []byte) ([]byte, bool)
 	Set(key, val []byte) error
 	Delete(key []byte) error
 	// Range iterates key/value pairs; fn returning false stops iteration early.
+	// Each key and value is a stable copy owned by the caller, which may retain
+	// or mutate either slice after Range returns.
 	Range(fn func(k, v []byte) bool)
 	Sync() error
 	Close() error
