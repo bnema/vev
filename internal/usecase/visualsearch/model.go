@@ -106,7 +106,7 @@ func (m *Model) Matches() []scopy.SearchMatch {
 }
 
 func (m *Model) refresh() {
-	m.matches = scopy.FindMatches(m.snapshot, m.input.Value())
+	m.matches = scopy.FindMatches(scopy.NewDocument(m.snapshot, ""), m.input.Value())
 	m.clamp()
 	m.ensureVisible(defaultVisibleRows)
 }

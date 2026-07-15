@@ -10,26 +10,15 @@ import (
 	"github.com/bnema/vev/pkg/vt"
 )
 
-// OSC52MaxPayloadBytes caps clipboard payloads while vev intentionally emits
-// exactly one OSC 52 sequence. Splitting one clipboard copy across multiple OSC
-// 52 sequences replaces the clipboard repeatedly in common terminals, corrupting
-// the intended result, so oversized selections are deferred until a terminal-
-// specific continuation protocol is supported.
 const OSC52MaxPayloadBytes = 75_000
 
-// Snapshot is the immutable scrollback-mode document: history followed by the
-// visible screen. VT HistoryView retains immutable chunks; the visible frame is
-// cloned once when the snapshot is constructed.
+// Snapshot is the immutable scrollback document: sealed history plus a cloned screen.
 type Snapshot struct {
-	history vt.HistoryView
-	screen  renderer.Frame
-	Width   int
-	Height  int
+	history       vt.HistoryView
+	screen        renderer.Frame
+	Width, Height int
 }
 
-// NewSnapshot seals the current VT history tail, then freezes that immutable
-// view and clones the visible screen. Sealing prevents repeated copy entry from
-// cloning every row in a partial tail.
 func NewSnapshot(historySource *vt.History, screen renderer.Frame) Snapshot {
 	var history vt.HistoryView
 	if historySource != nil {
@@ -37,11 +26,6 @@ func NewSnapshot(historySource *vt.History, screen renderer.Frame) Snapshot {
 	}
 	return Snapshot{history: history, screen: screen.Clone(), Width: screen.Width, Height: screen.Height}
 }
-
-// NewSnapshotFromRows constructs a snapshot that owns explicit caller rows.
-// It is intended for callers that already have a complete document rather than
-// a scrollback and visible frame. Height is viewport geometry, not a request to
-// append blank document rows.
 func NewSnapshotFromRows(rows [][]renderer.Cell, width, height int) Snapshot {
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: len(rows), ChunkRows: 256})
 	for _, row := range rows {
@@ -49,12 +33,7 @@ func NewSnapshotFromRows(rows [][]renderer.Cell, width, height int) Snapshot {
 	}
 	return Snapshot{history: history.SealAndView(), Width: width, Height: height}
 }
-
-// Len returns the number of document rows.
 func (s Snapshot) Len() int { return s.history.Len() + s.screen.Height }
-
-// Row returns document row i, or nil when i is out of range. History rows
-// borrow immutable history storage and must be treated as read-only.
 func (s Snapshot) Row(i int) []renderer.Cell {
 	if i < 0 {
 		return nil
@@ -68,299 +47,276 @@ func (s Snapshot) Row(i int) []renderer.Cell {
 	}
 	return s.screen.Row(i)
 }
-
 func (s Snapshot) rangeRows(yield func(int, []renderer.Cell) bool) {
-	rowIndex := 0
+	i := 0
 	stopped := false
-	s.history.Range(func(row []renderer.Cell) bool {
-		if !yield(rowIndex, row) {
+	s.history.Range(func(r []renderer.Cell) bool {
+		if !yield(i, r) {
 			stopped = true
 			return false
 		}
-		rowIndex++
+		i++
 		return true
 	})
 	if stopped {
 		return
 	}
 	for y := range s.screen.Height {
-		if !yield(rowIndex+y, s.screen.Row(y)) {
+		if !yield(i+y, s.screen.Row(y)) {
 			return
 		}
 	}
 }
 
-// Mode stores per-client scrollback viewport and line-selection state.
 type SearchMatch struct {
-	Row   int
-	Start int
-	End   int
-	Text  string
-}
+	Row, Start, End int
+	Text            string
+} // End is exclusive display-cell offset.
 
 type Mode struct {
+	document    *Document
+	navigator   Navigator
+	selection   Selection
 	ViewportTop int
-	Cursor      int
-	Anchor      int
-	Selecting   bool
 	SearchQuery string
 	Searches    []SearchMatch
 	SearchIndex int
 }
 
-func NewMode(s Snapshot) *Mode {
-	m := &Mode{Anchor: -1}
-	m.ViewportTop = max(s.Len()-s.Height, 0)
-	m.Cursor = max(s.Len()-1, 0)
-	m.clamp(s)
+func NewMode(doc *Document) *Mode {
+	m := &Mode{document: doc, SearchIndex: -1}
+	if doc != nil && doc.Len() > 0 {
+		m.navigator = NewNavigator(Pos{Row: doc.Len() - 1})
+		m.navigator.Set(doc, m.navigator.Pos)
+		m.ViewportTop = max(doc.Len()-max(doc.Height(), 1), 0)
+	}
 	return m
 }
-
-func (m *Mode) Move(s Snapshot, delta int) { m.SetCursor(s, m.Cursor+delta) }
-func (m *Mode) Page(s Snapshot, pages int) { m.SetCursor(s, m.Cursor+pages*max(s.Height, 1)) }
-func (m *Mode) Top(s Snapshot)             { m.SetCursor(s, 0) }
-func (m *Mode) Bottom(s Snapshot)          { m.SetCursor(s, s.Len()-1) }
-
-func FindMatches(s Snapshot, query string) []SearchMatch {
-	query = strings.TrimSpace(query)
-	if query == "" {
+func (m *Mode) Document() *Document {
+	if m == nil {
 		return nil
 	}
-	needle := lowerRunes(query)
-	matches := make([]SearchMatch, 0)
-	s.rangeRows(func(row int, cells []renderer.Cell) bool {
-		haystack, cellIndexes := searchableCells(cells)
-		var text string
-		for start := 0; start+len(needle) <= len(haystack); {
-			if !slices.Equal(haystack[start:start+len(needle)], needle) {
-				start++
-				continue
-			}
-			if text == "" {
-				text = rowString(cells)
-			}
-			end := start + len(needle)
-			cellEnd := len(cells)
-			if end < len(cellIndexes) {
-				cellEnd = cellIndexes[end]
-			}
-			matches = append(matches, SearchMatch{Row: row, Start: cellIndexes[start], End: cellEnd, Text: text})
-			start += len(needle)
-		}
-		return true
-	})
-	return matches
+	return m.document
 }
-
-func searchableCells(cells []renderer.Cell) ([]rune, []int) {
-	runes := make([]rune, 0, len(cells))
-	cellIndexes := make([]int, 0, len(cells))
-	for x, cell := range cells {
-		if cell.Continuation {
-			continue
-		}
-		r := cell.Rune
-		if r == 0 {
-			r = ' '
-		}
-		runes = append(runes, unicode.ToLower(r))
-		cellIndexes = append(cellIndexes, x)
+func (m *Mode) Cursor() Pos {
+	if m == nil {
+		return Pos{}
 	}
-	return runes, cellIndexes
+	return m.navigator.Pos
 }
-
-func lowerRunes(s string) []rune {
-	runes := []rune(s)
-	for i, r := range runes {
-		runes[i] = unicode.ToLower(r)
+func (m *Mode) Selection() Selection {
+	if m == nil {
+		return Selection{}
 	}
-	return runes
+	return m.selection
 }
-
-func (m *Mode) Search(s Snapshot, query string) bool {
-	return m.SetSearchMatches(s, query, FindMatches(s, query), 0)
+func (m *Mode) SetPosition(p Pos) bool {
+	if m == nil {
+		return false
+	}
+	changed := m.navigator.Set(m.document, p)
+	m.adjustViewport()
+	return changed
 }
-
-func (m *Mode) SetSearchMatches(s Snapshot, query string, matches []SearchMatch, index int) bool {
+func (m *Mode) move(op func(*Document) bool, stream bool) bool {
+	if m == nil || m.document == nil {
+		return false
+	}
+	if stream && m.selection.Enabled && m.selection.Granularity == Line {
+		m.selection.AsCharacter()
+	}
+	changed := op(m.document)
+	if changed {
+		if m.selection.Enabled {
+			m.selection.Extend(m.navigator.Pos)
+		}
+		m.adjustViewport()
+	}
+	return changed
+}
+func (m *Mode) Left() bool         { return m.move(m.navigator.Left, true) }
+func (m *Mode) Right() bool        { return m.move(m.navigator.Right, true) }
+func (m *Mode) Up() bool           { return m.move(m.navigator.Up, false) }
+func (m *Mode) Down() bool         { return m.move(m.navigator.Down, false) }
+func (m *Mode) WordNext() bool     { return m.move(m.navigator.WordNext, true) }
+func (m *Mode) WordBackward() bool { return m.move(m.navigator.WordBackward, true) }
+func (m *Mode) WordEnd() bool      { return m.move(m.navigator.WordEnd, true) }
+func (m *Mode) MoveRows(delta int) bool {
+	if delta == 0 {
+		return false
+	}
+	changed := false
+	op := m.Up
+	if delta > 0 {
+		op = m.Down
+	}
+	for range abs(delta) {
+		if !op() {
+			break
+		}
+		changed = true
+	}
+	return changed
+}
+func (m *Mode) Page(pages int) bool {
+	if m == nil || m.document == nil {
+		return false
+	}
+	return m.move(func(d *Document) bool { return m.navigator.Page(d, pages*max(d.Height(), 1)) }, false)
+}
+func (m *Mode) Top() bool    { return m.move(m.navigator.Top, false) }
+func (m *Mode) Bottom() bool { return m.move(m.navigator.Bottom, false) }
+func (m *Mode) AtBottom() bool {
+	if m == nil || m.document == nil || m.document.Len() == 0 {
+		return m != nil && m.ViewportTop == 0
+	}
+	return m.navigator.Pos.Row == m.document.Len()-1 && m.ViewportTop == max(m.document.Len()-max(m.document.Height(), 1), 0)
+}
+func (m *Mode) ToggleLineSelection() {
+	if m.selection.Enabled {
+		m.selection = Selection{}
+		return
+	}
+	m.selection = NewLineSelection(m.navigator.Pos)
+}
+func (m *Mode) StartCharacterSelection(p Pos) bool {
+	if m == nil || m.document == nil {
+		return false
+	}
+	p, ok := m.document.Normalize(p)
+	if !ok {
+		return false
+	}
+	m.navigator.Set(m.document, p)
+	m.selection = Selection{Anchor: p, Active: p, Granularity: Character, Enabled: true}
+	m.adjustViewport()
+	return true
+}
+func (m *Mode) ExtendCharacterSelection(p Pos) bool {
+	if m == nil || !m.selection.Enabled {
+		return false
+	}
+	p, ok := m.document.Normalize(p)
+	if !ok {
+		return false
+	}
+	m.selection.AsCharacter()
+	m.selection.Extend(p)
+	m.navigator.Set(m.document, p)
+	m.adjustViewport()
+	return true
+}
+func (m *Mode) SelectWordAt(p Pos) bool {
+	if m == nil {
+		return false
+	}
+	s, ok := NewWordSelection(m.document, p)
+	if !ok {
+		return false
+	}
+	m.selection = s
+	m.navigator.Set(m.document, s.Active)
+	m.adjustViewport()
+	return true
+}
+func (m *Mode) ExtendWordSelection(p Pos) bool {
+	if m == nil || !m.selection.Enabled {
+		return false
+	}
+	_, end, ok := m.document.WordBounds(p)
+	if !ok {
+		return false
+	}
+	m.selection.Granularity = Word
+	m.selection.Extend(end)
+	m.navigator.Set(m.document, end)
+	m.adjustViewport()
+	return true
+}
+func (m *Mode) Search(query string) bool {
+	return m.SetSearchMatches(query, FindMatches(m.document, query), 0)
+}
+func (m *Mode) SetSearchMatches(query string, matches []SearchMatch, index int) bool {
+	if m == nil {
+		return false
+	}
+	m.SearchQuery = strings.TrimSpace(query)
 	if len(matches) == 0 {
-		m.SearchQuery = strings.TrimSpace(query)
 		m.Searches = nil
 		m.SearchIndex = -1
 		return false
 	}
-	m.SearchQuery = strings.TrimSpace(query)
 	m.Searches = append(m.Searches[:0], matches...)
-	if index < 0 {
-		index = 0
-	}
-	if index >= len(matches) {
-		index = len(matches) - 1
-	}
-	m.SearchIndex = index
-	m.SetCursor(s, matches[index].Row)
+	m.SearchIndex = min(max(index, 0), len(matches)-1)
+	m.SetPosition(Pos{Row: matches[m.SearchIndex].Row, Col: matches[m.SearchIndex].Start})
 	return true
 }
-
-func (m *Mode) NextSearchMatch(s Snapshot, delta int) bool {
-	if len(m.Searches) == 0 || delta == 0 {
+func (m *Mode) NextSearchMatch(delta int) bool {
+	if m == nil || len(m.Searches) == 0 || delta == 0 {
 		return false
 	}
 	m.SearchIndex = (m.SearchIndex + delta) % len(m.Searches)
 	if m.SearchIndex < 0 {
 		m.SearchIndex += len(m.Searches)
 	}
-	m.SetCursor(s, m.Searches[m.SearchIndex].Row)
+	match := m.Searches[m.SearchIndex]
+	m.SetPosition(Pos{Row: match.Row, Col: match.Start})
 	return true
 }
-
-// SetCursor moves the visual cursor to row, clamping it to the snapshot and
-// scrolling the viewport just enough to keep it visible.
-func (m *Mode) SetCursor(s Snapshot, row int) { m.setCursor(s, row) }
-
-// StartSelectionAt starts a line-wise visual selection at row.
-func (m *Mode) StartSelectionAt(s Snapshot, row int) {
-	m.SetCursor(s, row)
-	m.Anchor = m.Cursor
-	m.Selecting = true
-}
-
-// ExtendTo extends an active line-wise visual selection to row while preserving
-// the original anchor.
-func (m *Mode) ExtendTo(s Snapshot, row int) { m.SetCursor(s, row) }
-
-func (m *Mode) AtBottom(s Snapshot) bool {
-	total := s.Len()
-	if total == 0 {
-		return m.Cursor == 0 && m.ViewportTop == 0
-	}
-	return m.Cursor == total-1 && m.ViewportTop == max(total-max(s.Height, 1), 0)
-}
-
-func (m *Mode) ToggleSelection() {
-	if m.Selecting {
-		m.Selecting = false
-		m.Anchor = -1
-		return
-	}
-	m.Selecting = true
-	m.Anchor = m.Cursor
-}
-
-func (m *Mode) setCursor(s Snapshot, cursor int) {
-	m.Cursor = cursor
-	m.clamp(s)
-	if m.Cursor < m.ViewportTop {
-		m.ViewportTop = m.Cursor
-	}
-	if bottom := m.ViewportTop + max(s.Height, 1) - 1; m.Cursor > bottom {
-		m.ViewportTop = m.Cursor - max(s.Height, 1) + 1
-	}
-	m.clamp(s)
-}
-
-func (m *Mode) clamp(s Snapshot) {
-	total := s.Len()
-	if total == 0 {
-		m.Cursor, m.ViewportTop = 0, 0
-		return
-	}
-	m.Cursor = min(max(m.Cursor, 0), total-1)
-	maxTop := max(total-max(s.Height, 1), 0)
-	m.ViewportTop = min(max(m.ViewportTop, 0), maxTop)
-}
-
-func (m *Mode) SelectedBounds() (int, int, bool) {
-	if !m.Selecting || m.Anchor < 0 {
-		return 0, 0, false
-	}
-	lo, hi := m.Anchor, m.Cursor
-	if lo > hi {
-		lo, hi = hi, lo
-	}
-	return lo, hi, true
-}
-
-func (m *Mode) SelectedText(s Snapshot) string {
-	lo, hi, ok := m.SelectedBounds()
-	if !ok || s.Len() == 0 {
+func (m *Mode) SelectedText() string {
+	if m == nil {
 		return ""
 	}
-	lo = max(lo, 0)
-	hi = min(hi, s.Len()-1)
-	lines := make([]string, 0, hi-lo+1)
-	for i := lo; i <= hi; i++ {
-		lines = append(lines, rowString(s.Row(i)))
-	}
-	return strings.Join(lines, "\n")
+	return m.selection.Text(m.document)
 }
-
-func (m *Mode) Render(s Snapshot, styles ...renderer.Style) renderer.Frame {
-	m.clamp(s)
-	frame := renderer.NewFrame(s.Width, s.Height+1)
-	lo, hi, selected := m.SelectedBounds()
-	selectionStyle, hasSelectionStyle := optionalStyle(styles, 1)
-	for y := range s.Height {
-		src := m.ViewportTop + y
-		if src >= s.Len() {
-			break
-		}
-		row := frame.Row(y)
-		copy(row, s.Row(src))
-		lineSelected := selected && src >= lo && src <= hi
-		if lineSelected {
-			for x := range row {
-				applySelectionStyle(&row[x].Style, selectionStyle, hasSelectionStyle)
-			}
-		}
-		if match, ok := m.currentSearchMatchForRow(src); ok {
-			for x := match.Start; x < match.End && x < len(row); x++ {
-				applySelectionStyle(&row[x].Style, selectionStyle, hasSelectionStyle)
-			}
-		}
-		if src == m.Cursor && !lineSelected && len(row) > 0 {
-			applySelectionStyle(&row[0].Style, selectionStyle, hasSelectionStyle)
-		}
-	}
-	style := inverseStyle()
-	if len(styles) > 0 {
-		style = styles[0]
-	}
-	drawCopyStatus(frame.Row(s.Height), m, s.Len(), style)
-	return frame
-}
-
-func (m *Mode) currentSearchMatchForRow(row int) (SearchMatch, bool) {
-	if m.SearchIndex < 0 || m.SearchIndex >= len(m.Searches) {
-		return SearchMatch{}, false
-	}
-	match := m.Searches[m.SearchIndex]
-	return match, match.Row == row
-}
-
-func optionalStyle(styles []renderer.Style, idx int) (renderer.Style, bool) {
-	if idx >= len(styles) {
-		return renderer.Style{}, false
-	}
-	return styles[idx], true
-}
-
-func applySelectionStyle(dst *renderer.Style, selection renderer.Style, ok bool) {
-	if !ok || selection.Equal(inverseStyle()) {
-		dst.Inverse = true
+func (m *Mode) adjustViewport() {
+	if m == nil || m.document == nil || m.document.Len() == 0 {
 		return
 	}
-	*dst = selection
+	rows := max(m.document.Height(), 1)
+	if m.navigator.Pos.Row < m.ViewportTop {
+		m.ViewportTop = m.navigator.Pos.Row
+	}
+	if m.navigator.Pos.Row >= m.ViewportTop+rows {
+		m.ViewportTop = m.navigator.Pos.Row - rows + 1
+	}
+	m.ViewportTop = min(max(m.ViewportTop, 0), max(m.document.Len()-rows, 0))
 }
 
-func inverseStyle() renderer.Style {
-	style := renderer.DefaultStyle()
-	style.Inverse = true
-	return style
+func FindMatches(doc *Document, query string) []SearchMatch {
+	query = strings.TrimSpace(query)
+	if doc == nil || query == "" {
+		return nil
+	}
+	needle := lowerRunes(query)
+	matches := []SearchMatch{}
+	doc.Snapshot().rangeRows(func(row int, cells []renderer.Cell) bool {
+		hay, indexes := searchableCells(cells)
+		text := ""
+		for start := 0; start+len(needle) <= len(hay); {
+			if !slices.Equal(hay[start:start+len(needle)], needle) {
+				start++
+				continue
+			}
+			if text == "" {
+				text = doc.LineText(row)
+			}
+			end := start + len(needle)
+			cellEnd := len(cells)
+			if end < len(indexes) {
+				cellEnd = indexes[end]
+			}
+			matches = append(matches, SearchMatch{Row: row, Start: indexes[start], End: cellEnd, Text: text})
+			start += len(needle)
+		}
+		return true
+	})
+	return matches
 }
-
-func rowString(row []renderer.Cell) string {
-	runes := make([]rune, 0, len(row))
-	for _, c := range row {
+func searchableCells(cells []renderer.Cell) ([]rune, []int) {
+	rs := make([]rune, 0, len(cells))
+	is := make([]int, 0, len(cells))
+	for x, c := range cells {
 		if c.Continuation {
 			continue
 		}
@@ -368,21 +324,93 @@ func rowString(row []renderer.Cell) string {
 		if r == 0 {
 			r = ' '
 		}
-		runes = append(runes, r)
+		rs = append(rs, unicode.ToLower(r))
+		is = append(is, x)
 	}
-	return strings.TrimRight(string(runes), " ")
+	return rs, is
+}
+func lowerRunes(s string) []rune {
+	rs := []rune(s)
+	for i, r := range rs {
+		rs[i] = unicode.ToLower(r)
+	}
+	return rs
 }
 
+func (m *Mode) Render(styles ...renderer.Style) renderer.Frame {
+	if m == nil || m.document == nil {
+		return renderer.NewFrame(0, 0)
+	}
+	d := m.document
+	frame := renderer.NewFrame(d.Width(), d.Height()+1)
+	ranges := m.selection.Ranges(d)
+	selected := make(map[int][]CellRange, len(ranges))
+	for _, r := range ranges {
+		selected[r.Row] = append(selected[r.Row], r)
+	}
+	selection, hasSelection := optionalStyle(styles, 1)
+	for y := range d.Height() {
+		src := m.ViewportTop + y
+		if src >= d.Len() {
+			break
+		}
+		row := frame.Row(y)
+		copy(row, d.Row(src))
+		if match, ok := m.currentSearchMatchForRow(src); ok {
+			for x := max(match.Start, 0); x < min(match.End, len(row)); x++ {
+				applySelectionStyle(&row[x].Style, selection, hasSelection)
+			}
+		}
+		covered := false
+		for _, r := range selected[src] {
+			covered = true
+			for x := max(r.Start, 0); x <= min(r.End, len(row)-1); x++ {
+				applySelectionStyle(&row[x].Style, selection, hasSelection)
+			}
+		}
+		if src == m.navigator.Pos.Row && !covered && len(row) > 0 {
+			col := min(max(m.navigator.Pos.Col, 0), len(row)-1)
+			applySelectionStyle(&row[col].Style, selection, hasSelection)
+		}
+	}
+	status := inverseStyle()
+	if len(styles) > 0 {
+		status = styles[0]
+	}
+	drawCopyStatus(frame.Row(d.Height()), m, d.Len(), status)
+	return frame
+}
+func (m *Mode) currentSearchMatchForRow(row int) (SearchMatch, bool) {
+	if m == nil || m.SearchIndex < 0 || m.SearchIndex >= len(m.Searches) {
+		return SearchMatch{}, false
+	}
+	v := m.Searches[m.SearchIndex]
+	return v, v.Row == row
+}
+func optionalStyle(styles []renderer.Style, idx int) (renderer.Style, bool) {
+	if idx >= len(styles) {
+		return renderer.Style{}, false
+	}
+	return styles[idx], true
+}
+func applySelectionStyle(dst *renderer.Style, style renderer.Style, ok bool) {
+	if !ok || style.Equal(inverseStyle()) {
+		dst.Inverse = true
+		return
+	}
+	*dst = style
+}
+func inverseStyle() renderer.Style { s := renderer.DefaultStyle(); s.Inverse = true; return s }
 func drawCopyStatus(row []renderer.Cell, m *Mode, total int, style renderer.Style) {
 	for i := range row {
 		row[i] = renderer.BlankCell()
 	}
 	text := " [SCROLL] "
-	if m.Selecting {
+	if m.selection.Enabled {
 		text = " [SELECT] "
 	}
 	if total > 0 {
-		text += strconvItoa(m.Cursor+1) + "/" + strconvItoa(total) + " "
+		text += strconvItoa(m.navigator.Pos.Row+1) + "/" + strconvItoa(total) + " "
 	} else {
 		text += "0/0 "
 	}
@@ -400,21 +428,12 @@ func drawCopyStatus(row []renderer.Cell, m *Mode, total int, style renderer.Styl
 	}
 }
 
-// OSC52 encodes text for clipboard transfer as one complete OSC 52 sequence.
-// Oversized payloads return no sequence rather than emitting corrupting
-// multi-sequence replacements.
 func OSC52(text string) [][]byte {
 	if len([]byte(text)) > OSC52MaxPayloadBytes {
 		return nil
 	}
-	encoded := base64.StdEncoding.EncodeToString([]byte(text))
-	return [][]byte{[]byte("\x1b]52;c;" + encoded + "\x07")}
+	return [][]byte{[]byte("\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\x07")}
 }
-
-// OSC52FromBase64 builds the normalized OSC 52 sequence to forward a
-// clipboard set request that a pane app already emitted as base64. It
-// returns nil if b64 is not valid base64 or its decoded length exceeds
-// OSC52MaxPayloadBytes — callers must drop the request silently in that case.
 func OSC52FromBase64(b64 string) []byte {
 	decoded, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil || len(decoded) > OSC52MaxPayloadBytes {
@@ -422,17 +441,22 @@ func OSC52FromBase64(b64 string) []byte {
 	}
 	return []byte("\x1b]52;c;" + b64 + "\x07")
 }
-
 func strconvItoa(n int) string {
 	if n == 0 {
 		return "0"
 	}
-	var buf [20]byte
-	i := len(buf)
+	var b [20]byte
+	i := len(b)
 	for n > 0 {
 		i--
-		buf[i] = byte('0' + n%10)
+		b[i] = byte('0' + n%10)
 		n /= 10
 	}
-	return string(buf[i:])
+	return string(b[i:])
+}
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }

@@ -114,7 +114,7 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	pane.mu.Lock()
 	snap := scopy.NewSnapshot(pane.history, pane.screen.Frame)
 	pane.mu.Unlock()
-	mode := scopy.NewMode(snap)
+	mode := scopy.NewMode(scopy.NewDocument(snap, domain.DefaultWordSeparators))
 	bars := barState{status: sess.statusSegments(true)}
 
 	base := renderer.NewFrame(80, 25)
@@ -133,7 +133,7 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 200 {
-			_, _ = composeCopyClientFrame(mode, &snap, target, base, bars)
+			_, _ = composeCopyClientFrame(mode, target, base, bars)
 		}
 	}()
 	wg.Wait()
@@ -148,7 +148,7 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 	tb.focusedPane().screen = vt.NewScreen(12, 3)
 	tb.focusedPane().screen.Write([]byte("live"))
 	snap := scopy.NewSnapshot(tb.focusedPane().history, tb.focusedPane().screen.Frame)
-	mode := scopy.NewMode(snap)
+	mode := scopy.NewMode(scopy.NewDocument(snap, domain.DefaultWordSeparators))
 
 	bars := barState{status: sess.statusSegments(true)}
 	content := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
@@ -160,7 +160,7 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 		}},
 		bars: bars,
 	}, composeCacheInput{}).frame
-	frame, damage := composeCopyClientFrame(mode, &snap, domain.Rect{X: 0, Y: 1, Width: 12, Height: 3}, base, bars)
+	frame, damage := composeCopyClientFrame(mode, domain.Rect{X: 0, Y: 1, Width: 12, Height: 3}, base, bars)
 
 	require.Equal(t, 80, frame.Width)
 	require.Equal(t, 25, frame.Height)
@@ -220,7 +220,7 @@ func TestCopyModeSearchModalRoutesBatchedInputAfterSlash(t *testing.T) {
 
 	require.Nil(t, ac.overlays.copySearch)
 	require.NotNil(t, ac.overlays.copyMode)
-	require.Equal(t, 0, ac.overlays.copyMode.Cursor)
+	require.Equal(t, 0, ac.overlays.copyMode.Cursor().Row)
 	select {
 	case got := <-writes:
 		t.Fatalf("batched visual search input forwarded to PTY: %q", got)
@@ -257,14 +257,14 @@ func TestCopyModeSearchModalJumpsAndKeepsNavigation(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\r"))
 	awaitFrame(t, sends, ports.MsgOutput)
 	require.Nil(t, ac.overlays.copySearch)
-	require.Equal(t, 0, ac.overlays.copyMode.Cursor)
+	require.Equal(t, 0, ac.overlays.copyMode.Cursor().Row)
 
 	d.handleInput(sess, ac, []byte("n"))
 	awaitFrame(t, sends, ports.MsgOutput)
-	require.Equal(t, 1, ac.overlays.copyMode.Cursor)
+	require.Equal(t, 1, ac.overlays.copyMode.Cursor().Row)
 	d.handleInput(sess, ac, []byte("N"))
 	awaitFrame(t, sends, ports.MsgOutput)
-	require.Equal(t, 0, ac.overlays.copyMode.Cursor)
+	require.Equal(t, 0, ac.overlays.copyMode.Cursor().Row)
 
 	select {
 	case got := <-writes:
@@ -289,12 +289,12 @@ func TestCopyModeSearchModalSelectionPreviewsBehindModal(t *testing.T) {
 	d.handleInput(sess, ac, []byte("alpha"))
 	awaitFrame(t, sends, ports.MsgOutput)
 	require.NotNil(t, ac.overlays.copySearch)
-	require.Equal(t, 0, ac.overlays.copyMode.Cursor, "typing a query previews the selected first result behind the modal")
+	require.Equal(t, 0, ac.overlays.copyMode.Cursor().Row, "typing a query previews the selected first result behind the modal")
 
 	d.handleInput(sess, ac, []byte{0x0e})
 	awaitFrame(t, sends, ports.MsgOutput)
 	require.NotNil(t, ac.overlays.copySearch)
-	require.Equal(t, 1, ac.overlays.copyMode.Cursor, "moving modal selection previews that result without Enter")
+	require.Equal(t, 1, ac.overlays.copyMode.Cursor().Row, "moving modal selection previews that result without Enter")
 }
 
 func TestCopyModeSearchModalCapturesMouseAndClearsOnExit(t *testing.T) {
@@ -310,11 +310,11 @@ func TestCopyModeSearchModalCapturesMouseAndClearsOnExit(t *testing.T) {
 	d.handleInput(sess, ac, []byte("/alpha"))
 	awaitFrame(t, sends, ports.MsgOutput)
 	require.NotNil(t, ac.overlays.copySearch)
-	cursor := ac.overlays.copyMode.Cursor
+	cursor := ac.overlays.copyMode.Cursor().Row
 
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
 	require.NotNil(t, ac.overlays.copySearch)
-	require.Equal(t, cursor, ac.overlays.copyMode.Cursor)
+	require.Equal(t, cursor, ac.overlays.copyMode.Cursor().Row)
 
 	d.handleInput(sess, ac, []byte("\x1b"))
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -517,7 +517,7 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 			}
 
 			require.NotNil(t, ac.overlays.copyMode)
-			require.Equal(t, tc.wantCursor, ac.overlays.copyMode.Cursor)
+			require.Equal(t, tc.wantCursor, ac.overlays.copyMode.Cursor().Row)
 		})
 	}
 }
@@ -790,11 +790,11 @@ func TestFloatingCopyModeWheelUsesCapturedSnapshot(t *testing.T) {
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
-	require.Equal(t, total-1, ac.overlays.copyMode.Cursor)
+	require.Equal(t, total-1, ac.overlays.copyMode.Cursor().Row)
 
 	d.copyWheel(sess, ac, -3)
 	awaitFrame(t, sends, ports.MsgOutput)
-	require.Equal(t, total-4, ac.overlays.copyMode.Cursor)
+	require.Equal(t, total-4, ac.overlays.copyMode.Cursor().Row)
 
 	d.copyWheel(sess, ac, 3)
 	awaitFrame(t, sends, ports.MsgOutput)
@@ -821,15 +821,15 @@ func TestFloatingCopyModeMouseSelectsFloatingRows(t *testing.T) {
 	press := fmt.Sprintf("\x1b[<0;%d;%dM", inner.X+3, inner.Y+3)
 	d.handleInput(sess, ac, []byte(press))
 	awaitFrame(t, sends, ports.MsgOutput)
-	require.Equal(t, viewportTop+1, ac.overlays.copyMode.Cursor)
+	require.Equal(t, viewportTop+1, ac.overlays.copyMode.Cursor().Row)
 
 	motion := fmt.Sprintf("\x1b[<32;%d;%dM", inner.X+3, inner.Y+4)
 	d.handleInput(sess, ac, []byte(motion))
 	awaitFrame(t, sends, ports.MsgOutput)
-	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
-	require.True(t, ok)
-	require.Equal(t, viewportTop+1, lo)
-	require.Equal(t, viewportTop+2, hi)
+	selection := ac.overlays.copyMode.Selection()
+	require.True(t, selection.Enabled)
+	require.Equal(t, viewportTop+1, selection.Anchor.Row)
+	require.Equal(t, viewportTop+2, selection.Active.Row)
 }
 
 func TestFloatingExitClearsCopyModeBeforeRepaint(t *testing.T) {

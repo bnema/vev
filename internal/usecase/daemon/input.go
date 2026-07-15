@@ -249,19 +249,21 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 
 			// The immutable snapshot is the only live-pane access needed for drag entry.
 			p.mu.Lock()
-			document := scopy.NewSnapshot(p.history, p.screen.Frame)
+			snapshot := scopy.NewSnapshot(p.history, p.screen.Frame)
 			p.mu.Unlock()
+			cfg := d.currentCopyConfig()
+			document := scopy.NewDocument(snapshot, cfg.WordSeparators)
 			tb := sess.activeTab()
 			if !d.publishCopyMode(sess, ac, tb, p, document, func(mode *scopy.Mode) {
-				mode.StartSelectionAt(document, pressTop+pressRow)
-				mode.ExtendTo(document, document.Len()-document.Height+ev.Row)
-			}) {
+				mode.SetPosition(scopy.Pos{Row: pressTop + pressRow, Col: 0})
+				mode.ToggleLineSelection()
+				mode.MoveRows(document.Len() - document.Height() + ev.Row - mode.Cursor().Row)
+			}, nil) {
 				return
 			}
 			rt.copyMu.Lock()
-			// Publication is revalidated before this state is installed, and no
-			// lifecycle lock is held while copyMu is taken.
-			if rt.copyPane == p && rt.copySnapshot != nil && rt.copyMode != nil {
+			// Row-compatible temporary pointer state; phase 4 supplies exact columns.
+			if rt.copyPane == p && rt.copyDocument == document && rt.copyMode != nil {
 				rt.copyPressRow = pressTop + pressRow
 				rt.copyPressRowValid = true
 				rt.copyDragging = true

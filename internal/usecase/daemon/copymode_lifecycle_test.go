@@ -54,11 +54,11 @@ func TestCopyModeLifecycleClosePaneClearsRecoveredClientState(t *testing.T) {
 	sess.client = ac
 	ac.setSession(sess)
 	closing.mu.Lock()
-	document := scopy.NewSnapshot(closing.history, closing.screen.Frame)
+	document := scopy.NewDocument(scopy.NewSnapshot(closing.history, closing.screen.Frame), domain.DefaultWordSeparators)
 	closing.mu.Unlock()
 	ac.overlays.copyMu.Lock()
 	ac.overlays.copyPane = closing
-	ac.overlays.copySnapshot = &document
+	ac.overlays.copyDocument = document
 	ac.overlays.copyMode = scopy.NewMode(document)
 	ac.overlays.copyMu.Unlock()
 
@@ -94,7 +94,7 @@ func TestCopyModeLifecycleDoesNotRenderCandidateBeforeValidation(t *testing.T) {
 	tb := sess.activeTab()
 	p := tb.focusedPane()
 	p.mu.Lock()
-	document := scopy.NewSnapshot(p.history, p.screen.Frame)
+	document := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame), domain.DefaultWordSeparators)
 	p.mu.Unlock()
 
 	// Hold session validation after publication and make the captured target
@@ -104,12 +104,12 @@ func TestCopyModeLifecycleDoesNotRenderCandidateBeforeValidation(t *testing.T) {
 	sess.active = 1
 	result := make(chan bool, 1)
 	go func() {
-		result <- d.publishCopyMode(sess, ac, tb, p, document, nil)
+		result <- d.publishCopyMode(sess, ac, tb, p, document, nil, nil)
 	}()
 	published := assert.Eventually(t, func() bool {
 		ac.overlays.copyMu.Lock()
 		defer ac.overlays.copyMu.Unlock()
-		return ac.overlays.copyPane == p && ac.overlays.copySnapshot != nil
+		return ac.overlays.copyPane == p && ac.overlays.copyDocument != nil
 	}, time.Second, time.Millisecond)
 	if !published {
 		sess.mu.Unlock()
@@ -157,11 +157,11 @@ func TestCopyModeLifecycleRejectsPublicationForInactiveOrRemovedPane(t *testing.
 			tb := sess.activeTab()
 			p := tb.focusedPane()
 			p.mu.Lock()
-			document := scopy.NewSnapshot(p.history, p.screen.Frame)
+			document := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame), domain.DefaultWordSeparators)
 			p.mu.Unlock()
 			tc.invalidate(sess, tb, p)
 
-			require.False(t, d.publishCopyMode(sess, ac, tb, p, document, nil))
+			require.False(t, d.publishCopyMode(sess, ac, tb, p, document, nil, nil))
 			require.False(t, ac.overlays.copyActive())
 			require.Nil(t, copyTargetPane(ac.overlays))
 		})

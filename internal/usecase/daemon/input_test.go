@@ -844,7 +844,7 @@ func TestMouseWheelEntersScrollbackModeAndExitsAtBottom(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
 	data := mustOutputData(t, sends)
 	require.NotNil(t, ac.overlays.copyMode)
-	require.Equal(t, 19, ac.overlays.copyMode.Cursor)
+	require.Equal(t, 19, ac.overlays.copyMode.Cursor().Row)
 	require.Contains(t, string(data), "[SCROLL]")
 
 	d.handleInput(sess, ac, []byte("\x1b[<65;1;1M"))
@@ -950,8 +950,12 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 	mustOutputData(t, sends)
 	require.NotNil(t, ac.overlays.copyMode)
-	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
-	require.True(t, ok)
+	selection := ac.overlays.copyMode.Selection()
+	require.True(t, selection.Enabled)
+	lo, hi := selection.Anchor.Row, selection.Active.Row
+	if lo > hi {
+		lo, hi = hi, lo
+	}
 	require.Equal(t, 0, lo)
 	require.Equal(t, 2, hi)
 }
@@ -968,8 +972,12 @@ func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;2M"))
 	mustOutputData(t, sends)
 	require.NotNil(t, ac.overlays.copyMode)
-	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
-	require.True(t, ok)
+	selection := ac.overlays.copyMode.Selection()
+	require.True(t, selection.Enabled)
+	lo, hi := selection.Anchor.Row, selection.Active.Row
+	if lo > hi {
+		lo, hi = hi, lo
+	}
 	require.Equal(t, 0, lo)
 	require.Equal(t, 1, hi)
 
@@ -1039,8 +1047,12 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;2M"))
 	mustOutputData(t, sends)
 	require.NotNil(t, ac.overlays.copyMode)
-	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
-	require.True(t, ok)
+	selection := ac.overlays.copyMode.Selection()
+	require.True(t, selection.Enabled)
+	lo, hi := selection.Anchor.Row, selection.Active.Row
+	if lo > hi {
+		lo, hi = hi, lo
+	}
 	require.Equal(t, 0, lo)
 	require.Equal(t, 1, hi)
 
@@ -1053,8 +1065,12 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 
 	require.NotNil(t, ac.overlays.copyMode)
-	lo, hi, ok = ac.overlays.copyMode.SelectedBounds()
-	require.True(t, ok)
+	selection = ac.overlays.copyMode.Selection()
+	require.True(t, selection.Enabled)
+	lo, hi = selection.Anchor.Row, selection.Active.Row
+	if lo > hi {
+		lo, hi = hi, lo
+	}
 	require.Equal(t, 0, lo, "anchor must not have moved")
 	require.Equal(t, 1, hi, "status-row press must invalidate the drag so the motion is a no-op")
 }
@@ -1087,8 +1103,12 @@ func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 
 	require.NotNil(t, ac.overlays.copyMode)
-	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
-	require.True(t, ok)
+	selection := ac.overlays.copyMode.Selection()
+	require.True(t, selection.Enabled)
+	lo, hi := selection.Anchor.Row, selection.Active.Row
+	if lo > hi {
+		lo, hi = hi, lo
+	}
 	require.Equal(t, 0, lo, "anchor stays content-stable at the row under the pointer at press time")
 	require.Equal(t, 7, hi, "extend target must track the pointer's current content row, not a stale scrollback offset")
 }
@@ -1202,8 +1222,12 @@ func TestCopyModeDragOutsideSplitPaneClampsToPaneContent(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;12M"))
 	mustOutputData(t, sends)
 
-	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
-	require.True(t, ok)
+	selection := ac.overlays.copyMode.Selection()
+	require.True(t, selection.Enabled)
+	lo, hi := selection.Anchor.Row, selection.Active.Row
+	if lo > hi {
+		lo, hi = hi, lo
+	}
 	require.Equal(t, 0, lo)
 	require.Equal(t, 9, hi)
 }

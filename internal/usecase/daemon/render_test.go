@@ -1175,10 +1175,10 @@ func TestComposeCopyClientFrameOverlaysBaseAtTarget(t *testing.T) {
 	p := newPane("floating", nil, domain.Size{Cols: 18, Rows: 2})
 	p.screen.Write([]byte("ab\r\ncd"))
 	document := scopy.NewSnapshot(p.history, p.screen.Frame)
-	mode := scopy.NewMode(document)
+	mode := scopy.NewMode(scopy.NewDocument(document, domain.DefaultWordSeparators))
 	target := domain.Rect{X: 2, Y: 3, Width: 18, Height: 2}
 
-	frame, damage := composeCopyClientFrame(mode, &document, target, base, barState{})
+	frame, damage := composeCopyClientFrame(mode, target, base, barState{})
 
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
 	require.Equal(t, "##ab                ", rowText(frame.Row(3)))
