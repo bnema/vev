@@ -23,41 +23,6 @@ func documentFromStrings(lines []string, separators string) *Document {
 	return NewDocument(NewSnapshotFromRows(rows, 32, 4), separators)
 }
 
-func mustNormalize(t *testing.T, doc *Document, pos Pos) Pos {
-	t.Helper()
-	got, ok := doc.Normalize(pos)
-	require.True(t, ok)
-	return got
-}
-
-func mustPrev(t *testing.T, doc *Document, pos Pos) Pos {
-	t.Helper()
-	got, ok := doc.PrevGlyph(pos)
-	require.True(t, ok)
-	return got
-}
-
-func mustNext(t *testing.T, doc *Document, pos Pos) Pos {
-	t.Helper()
-	got, ok := doc.NextGlyph(pos)
-	require.True(t, ok)
-	return got
-}
-
-func mustWordStart(t *testing.T, doc *Document, pos Pos) Pos {
-	t.Helper()
-	got, _, ok := doc.WordBounds(pos)
-	require.True(t, ok)
-	return got
-}
-
-func mustWordEnd(t *testing.T, doc *Document, pos Pos) Pos {
-	t.Helper()
-	_, got, ok := doc.WordBounds(pos)
-	require.True(t, ok)
-	return got
-}
-
 func TestDocumentNormalize(t *testing.T) {
 	wide := []renderer.Cell{{Rune: 'a'}, {Rune: '界'}, {Continuation: true}, {Rune: ' '}, {Rune: 'b'}}
 	doc := NewDocument(NewSnapshotFromRows([][]renderer.Cell{wide, {}}, 5, 1), " -_@")
