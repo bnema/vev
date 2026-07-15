@@ -176,6 +176,12 @@ func (t *Transport) ackSendLoop() {
 }
 
 func (t *Transport) sendControl(kind byte, id uint64) error {
+	// Do not take writeMu: control must remain available while data writes are
+	// blocked. The read lock instead keeps the selected connection alive until
+	// every control fragment has been written.
+	t.controlConnMu.RLock()
+	defer t.controlConnMu.RUnlock()
+
 	var payload [9]byte
 	payload[0] = kind
 	binary.BigEndian.PutUint64(payload[1:], id)
@@ -213,4 +219,8 @@ func (t *Transport) sendControl(kind byte, id uint64) error {
 		}
 	}
 	return nil
+}
+
+func (t *Transport) sendAck(seq uint64) {
+	_ = t.sendControl(recAck, seq)
 }

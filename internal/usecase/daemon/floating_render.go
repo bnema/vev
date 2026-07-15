@@ -9,7 +9,7 @@ import (
 
 // floatingGeometry describes a popup's outer frame and terminal content area.
 // Bounds and Inner always share the same coordinate space. Committed pane
-// geometry is origin-zero and tab-content-relative; composeFloatingFrame
+// geometry is origin-zero and tab-content-relative; composeCapturedFloatingFrame
 // translates both fields and returns/caches frame-absolute geometry. Callers
 // must not translate a composed or cached value again.
 type floatingGeometry struct {
@@ -85,12 +85,32 @@ func calculateContentFloatingGeometry(content domain.Size, cfg domain.FloatingCo
 	}
 }
 
-func composeCapturedFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, floating capturedFloatingRenderState, content domain.Rect, layoutSnap capturedTabLayout, theme themeui.Theme, cache composeCacheInput, full bool) (renderer.Frame, []renderer.Damage) {
+type floatingComposeInput struct {
+	baseFrame  renderer.Frame
+	baseDamage []renderer.Damage
+	floating   capturedFloatingRenderState
+	content    domain.Rect
+	layout     capturedTabLayout
+	theme      themeui.Theme
+	cache      composeCacheInput
+	full       bool
+}
+
+func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, []renderer.Damage) {
+	base := input.baseFrame
+	baseDamage := input.baseDamage
+	floating := input.floating
+	content := input.content
+	layoutSnap := input.layout
+	theme := input.theme
+	cache := input.cache
+	full := input.full
+
 	frame := base.Clone()
-	legacyLayout := tabLayoutSnapshot{placements: layoutSnap.placements, area: layoutSnap.area, focus: layoutSnap.focus, ok: layoutSnap.valid}
-	(overlayBackdrop{DimPaneContents: true}).apply(frame, content, legacyLayout, theme)
+	layoutSnapshot := tabLayoutSnapshot{placements: layoutSnap.placements, area: layoutSnap.area, focus: layoutSnap.focus, ok: layoutSnap.valid}
+	(overlayBackdrop{DimPaneContents: true}).apply(frame, content, layoutSnapshot, theme)
 	geometry := floating.geometry.translate(content.X, content.Y)
-	blitPaneFrame(frame, geometry.Inner, floating.pane.frame, false, theme)
+	blitPaneFrame(frame, geometry.Inner, floating.pane.frame, false, themeui.NewDimmer(theme))
 	damage := append([]renderer.Damage(nil), baseDamage...)
 	for _, d := range floating.pane.damage {
 		damage = append(damage, translatePaneDamage(d, geometry.Inner, content)...)

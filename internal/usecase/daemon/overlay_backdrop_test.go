@@ -71,7 +71,7 @@ func TestOverlayBackdropClipsPlacementsToFrame(t *testing.T) {
 			(overlayBackdrop{DimPaneContents: true}).apply(frame, domain.Rect{Width: 4, Height: 4}, snap, backdropTheme())
 
 			for _, point := range tt.affected {
-				require.Equal(t, themeui.DimStyle(original, backdropTheme()), frame.At(point[0], point[1]).Style)
+				require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(original), frame.At(point[0], point[1]).Style)
 			}
 			for _, point := range tt.unaffected {
 				require.Equal(t, original, frame.At(point[0], point[1]).Style)

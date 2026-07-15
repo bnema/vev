@@ -1,6 +1,9 @@
 package daemon
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"path/filepath"
@@ -163,14 +166,22 @@ func TestComposeFrameUsesCapturedValuesAfterOwnersMutate(t *testing.T) {
 }
 
 func TestProductionRenderUsesOnlyTypedComposeEntryPoint(t *testing.T) {
-	for _, name := range []string{"render.go", "floating_render.go", "picker.go"} {
-		data, err := os.ReadFile(filepath.Join(".", name))
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	for _, name := range files {
+		parsed, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
 		require.NoError(t, err)
-		source := string(data)
-		for _, forbidden := range []string{
-			"func composeClientFrame", "func composeTabFrame", "func composeFloatingFrame",
-		} {
-			require.NotContains(t, source, forbidden, "%s retains duplicate production composition path", name)
+		for _, declaration := range parsed.Decls {
+			switch declaration := declaration.(type) {
+			case *ast.FuncDecl:
+				forbidden := declaration.Name.Name == "composeFloatingFrame" || declaration.Name.Name == "copyTargetRectLocked" || strings.HasPrefix(declaration.Name.Name, "composeClientFrame") || strings.HasPrefix(declaration.Name.Name, "composeTabFrame")
+				require.False(t, forbidden, "%s declares forbidden legacy render helper %s", name, declaration.Name.Name)
+			case *ast.GenDecl:
+				for _, spec := range declaration.Specs {
+					typeSpec, ok := spec.(*ast.TypeSpec)
+					require.False(t, ok && typeSpec.Name.Name == "composedFrameCache", "%s declares forbidden legacy render cache", name)
+				}
+			}
 		}
 	}
 	data, err := os.ReadFile("render_pipeline.go")

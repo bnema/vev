@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/stretchr/testify/mock"
 )
 
@@ -229,17 +229,17 @@ func TestRunAttachPropagatesOneObserverToRemoteTransportFactory(t *testing.T) {
 	}
 	t.Cleanup(func() { newRemoteDialerFactoryWithRuntimeObserver = originalFactory })
 
-	originalRunClient := runClientWithRuntimeObserver
-	runClientWithRuntimeObserver = func(_ context.Context, gotDialer ports.Dialer, _ ports.Terminal, _ ports.Clock, _ uint8, _ string, _ bool, _ ports.ClipboardReader, _ *slog.Logger, got ports.SerializedRuntimeObserver) error {
-		if got != observer {
-			t.Fatalf("client transport observer = %v, want process observer %v", got, observer)
+	originalRunClient := runClientWithDeps
+	runClientWithDeps = func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
+		if deps.RuntimeObserver != observer {
+			t.Fatalf("client transport observer = %v, want process observer %v", deps.RuntimeObserver, observer)
 		}
-		if gotDialer != (namedDialer{name: "remote"}) {
-			t.Fatalf("remote transport dialer = %v, want configured factory dialer", gotDialer)
+		if deps.Dialer != (namedDialer{name: "remote"}) {
+			t.Fatalf("remote transport dialer = %v, want configured factory dialer", deps.Dialer)
 		}
 		return nil
 	}
-	t.Cleanup(func() { runClientWithRuntimeObserver = originalRunClient })
+	t.Cleanup(func() { runClientWithDeps = originalRunClient })
 
 	if err := runAttach(context.Background(), ports.IntentAttach, "work", "remote.example"); err != nil {
 		t.Fatal(err)

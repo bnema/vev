@@ -250,7 +250,13 @@ var (
 	newRemoteDialerFactoryWithRuntimeObserver = func(observer ports.SerializedRuntimeObserver) ports.RemoteDialerFactory {
 		return remoteadapter.NewDialerFactoryWithRuntimeObserver(observer)
 	}
-	runClientWithRuntimeObserver = client.RunWithRuntimeObserver
+	runClientWithDeps runClientFunc = func(
+		ctx context.Context,
+		deps client.Dependencies,
+		request client.AttachRequest,
+	) error {
+		return client.NewRunner(deps).Run(ctx, request)
+	}
 )
 
 func performanceTrace(clk ports.Clock) (ports.SerializedRuntimeObserver, io.Closer, error) {
@@ -484,11 +490,10 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 		},
 		remoteDialerFactory:     newRemoteDialerFactoryWithRuntimeObserver(observer),
 		selectedRemoteTransport: os.Getenv(envRemoteTransport),
-		runClient: func(ctx context.Context, dialer ports.Dialer, terminal ports.Terminal, behaviorClock ports.Clock, intent uint8, name string, remote bool, clipboard ports.ClipboardReader, log *slog.Logger) error {
-			return runClientWithRuntimeObserver(ctx, dialer, terminal, behaviorClock, intent, name, remote, clipboard, log, observer)
-		},
-		createDetached: createDetachedLocalSession,
-		clipboard:      clipboard.New(),
+		runClient:               runClientWithDeps,
+		createDetached:          createDetachedLocalSession,
+		clipboard:               clipboard.New(),
+		runtimeObserver:         observer,
 	})
 }
 
@@ -500,13 +505,15 @@ func defaultRemoteDialerFactory() ports.RemoteDialerFactory {
 	return remoteadapter.NewDialerFactory()
 }
 
+type runClientFunc func(context.Context, client.Dependencies, client.AttachRequest) error
+
 type runAttachDeps struct {
-	attachLocal             func(context.Context, uint8, string, *slog.Logger) error // compatibility hook for focused tests
 	localDialer             func() ports.Dialer
 	remoteDialerFactory     ports.RemoteDialerFactory
 	selectedRemoteTransport string
-	runClient               func(context.Context, ports.Dialer, ports.Terminal, ports.Clock, uint8, string, bool, ports.ClipboardReader, *slog.Logger) error
+	runClient               runClientFunc
 	createDetached          func(context.Context, string) error
+	runtimeObserver         ports.SerializedRuntimeObserver
 	// clipboard reads a clipboard image on a remote attach's Ctrl+V (see
 	// docs/superpowers/specs/2026-07-04-clipboard-image-transfer-design.md).
 	// Only used for the remote-dialer branch below; local attaches never
@@ -535,7 +542,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 
 	runClient := deps.runClient
 	if runClient == nil {
-		runClient = client.Run
+		runClient = runClientWithDeps
 	}
 	if remoteTarget != "" {
 		mode, err := remoteTransportModeFromEnv(deps.selectedRemoteTransport)
@@ -553,26 +560,33 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if err != nil {
 			return err
 		}
-		return runClient(ctx, dialer, term.New(), clock.New(), intent, name, true, deps.clipboard, log)
+		return runClient(ctx, client.Dependencies{
+			Dialer:          dialer,
+			Terminal:        term.New(),
+			Clock:           clock.New(),
+			Clipboard:       deps.clipboard,
+			Logger:          log,
+			RuntimeObserver: deps.runtimeObserver,
+		}, client.AttachRequest{Intent: intent, SessionName: name, Remote: true})
 	}
 
-	attachLocal := deps.attachLocal
-	if attachLocal == nil {
-		localDialer := deps.localDialer
-		if localDialer == nil {
-			localDialer = defaultLocalDialer
-		}
-		attachLocal = func(ctx context.Context, intent uint8, name string, log *slog.Logger) error {
-			if log != nil {
-				log.Info("attaching to local session", "intent", intent, "name", name)
-			}
-			return runClient(ctx, localDialer(), term.New(), clock.New(), intent, name, false, nil, log)
-		}
+	localDialer := deps.localDialer
+	if localDialer == nil {
+		localDialer = defaultLocalDialer
 	}
 	return runLocalAttachWithRecovery(ctx, intent, name, attachRecoveryDeps{
 		confirmer: confirm.NewConfirmer(os.Stdin, os.Stderr),
 		attach: func(ctx context.Context, intent uint8, name string) error {
-			return attachLocal(ctx, intent, name, log)
+			if log != nil {
+				log.Info("attaching to local session", "intent", intent, "name", name)
+			}
+			return runClient(ctx, client.Dependencies{
+				Dialer:          localDialer(),
+				Terminal:        term.New(),
+				Clock:           clock.New(),
+				Logger:          log,
+				RuntimeObserver: deps.runtimeObserver,
+			}, client.AttachRequest{Intent: intent, SessionName: name})
 		},
 		killDaemon:      requestDaemonStop,
 		settleAfterKill: waitForDaemonStop,

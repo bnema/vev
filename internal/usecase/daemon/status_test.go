@@ -87,7 +87,16 @@ func TestStatusCompositionGolden(t *testing.T) {
 	win.size = domain.Size{Cols: 12, Rows: 2}
 	win.focusedPane().screen.Write([]byte("hello"))
 
-	frame, damage := composeClientFrame(sess, win, true, "")
+	frameState := capturedRenderState{
+		reset:  true,
+		layout: capturedTabLayout{area: domain.Rect{Width: 12, Height: 2}, focus: win.focusedPane().id, valid: true},
+		panes: []capturedPaneRenderState{{
+			id: win.focusedPane().id, frame: win.focusedPane().screen.Frame.Clone(), placement: layout.Placement{ID: win.focusedPane().id, Content: domain.Rect{Width: 12, Height: 2}}, focused: true, damage: []renderer.Damage{renderer.FullRedraw()},
+		}},
+		bars: barState{status: sess.statusSegments(true)},
+	}
+	composed := composeFrame(frameState, composeCacheInput{})
+	frame, damage := composed.frame, composed.damage
 
 	require.Equal(t, 12, frame.Width)
 	require.Equal(t, 4, frame.Height)
@@ -409,8 +418,10 @@ func TestStatusCompositionUsesTruecolorTheme(t *testing.T) {
 	})
 
 	bars := barState{status: sess.statusSegments(true), theme: ac.getTheme()}
-	frame, damage := composeClientFrameWithState(bars, win, true)
-	out, err := renderer.New(renderer.Capabilities{}).Draw(frame, damage)
+	composed := composeFrame(capturedRenderState{
+		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 12, Height: 2}, valid: true}, bars: bars, theme: bars.theme,
+	}, composeCacheInput{})
+	out, err := renderer.New(renderer.Capabilities{}).Draw(composed.frame, composed.damage)
 
 	require.NoError(t, err)
 	require.Contains(t, string(out), ";48;2;")
@@ -788,7 +799,9 @@ func TestStatusMarksEphemeralSession(t *testing.T) {
 	win.focusedPane().screen.Resize(12, 2)
 	win.size = domain.Size{Cols: 12, Rows: 2}
 
-	frame, _ := composeClientFrame(sess, win, true, "")
+	frame := composeFrame(capturedRenderState{
+		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 12, Height: 2}, valid: true}, bars: barState{status: sess.statusSegments(true)},
+	}, composeCacheInput{}).frame
 
 	require.Equal(t, " 1 (sh)     ", rowText(frame.Row(0)))
 	require.Equal(t, " 0*         ", rowText(frame.Row(3)))
@@ -853,13 +866,19 @@ func TestStatusCopyFeedbackRendersOnlyWhenFullyFits(t *testing.T) {
 	win.focusedPane().screen.Resize(30, 2)
 	win.size = domain.Size{Cols: 30, Rows: 2}
 
-	frame, _ := composeClientFrame(sess, win, true, "ok")
+	frame := composeFrame(capturedRenderState{
+		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 30, Height: 2}, valid: true}, bars: barState{status: sess.statusSegments(true), copyFeedback: "ok"},
+	}, composeCacheInput{}).frame
 	require.Equal(t, " work                       ok", rowText(frame.Row(3)))
 
-	frame, _ = composeClientFrame(sess, win, true, "1234567890123456789")
+	frame = composeFrame(capturedRenderState{
+		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 30, Height: 2}, valid: true}, bars: barState{status: sess.statusSegments(true), copyFeedback: "1234567890123456789"},
+	}, composeCacheInput{}).frame
 	require.Equal(t, " work      1234567890123456789", rowText(frame.Row(3)))
 
-	frame, _ = composeClientFrame(sess, win, true, "selection too large to copy")
+	frame = composeFrame(capturedRenderState{
+		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 30, Height: 2}, valid: true}, bars: barState{status: sess.statusSegments(true), copyFeedback: "selection too large to copy"},
+	}, composeCacheInput{}).frame
 	require.Equal(t, " work                         ", rowText(frame.Row(3)))
 }
 
@@ -923,7 +942,9 @@ func TestTopBarRendersAttentionBell(t *testing.T) {
 	sess.tabs[1].attentionAt = time.Unix(10, 0)
 	sess.mu.Unlock()
 
-	frame, _ := composeClientFrameWithState(barState{status: sess.statusSegments(true), attentionFrame: 1}, win, true)
+	frame := composeFrame(capturedRenderState{
+		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 18, Height: 2}, valid: true}, bars: barState{status: sess.statusSegments(true), attentionFrame: 1},
+	}, composeCacheInput{}).frame
 
 	// Tab 2's label is enriched with its focused pane's title ("sh", the
 	// default shell fallback) and truncated to fit alongside the bell. The
@@ -1040,7 +1061,14 @@ func TestCapturePrimaryRenderStatePreservesContextualMRUModeThroughScratchReuse(
 	_, sess, ac, _ := newManualSessionWithPTYs(t, nil)
 	capture := func(bars barState) capturedRenderState {
 		t.Helper()
-		state, ok := capturePrimaryRenderState(sess, ac, bars, capturedOverlayRenderState{}, picker.Preview{}, domain.FloatingConfig{}, false, nil)
+		state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+			bars:        bars,
+			overlays:    capturedOverlayRenderState{},
+			preview:     picker.Preview{},
+			floatingCfg: domain.FloatingConfig{},
+			reset:       false,
+			lease:       nil,
+		})
 		require.True(t, ok)
 		return *state
 	}

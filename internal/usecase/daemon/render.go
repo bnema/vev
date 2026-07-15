@@ -325,7 +325,14 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, lease *att
 		copyFeedback: overlays.copyFeedback,
 	}
 	endCapture := marks.span(ports.RuntimeCaptureStart, ports.RuntimeCaptureEnd, 0)
-	state, ok := capturePrimaryRenderState(sess, ac, bars, capturedOverlays, preview, floatingCfg, reset, lease)
+	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+		bars:        bars,
+		overlays:    capturedOverlays,
+		preview:     preview,
+		floatingCfg: floatingCfg,
+		reset:       reset,
+		lease:       lease,
+	})
 	endCapture(0, ok)
 	if !ok {
 		ac.sendMu.Unlock()
@@ -423,14 +430,14 @@ func offsetPlacement(pl layout.Placement, dx, dy int) layout.Placement {
 	return pl
 }
 
-func blitPaneFrame(dst renderer.Frame, r domain.Rect, src renderer.Frame, dim bool, theme themeui.Theme) {
+func blitPaneFrame(dst renderer.Frame, r domain.Rect, src renderer.Frame, dim bool, dimmer themeui.Dimmer) {
 	rows := min(r.Height, src.Height)
 	cols := min(r.Width, src.Width)
 	for y := range rows {
 		for x := range cols {
 			cell := src.At(x, y)
 			if dim {
-				cell.Style = themeui.DimStyle(cell.Style, theme)
+				cell.Style = dimmer.Dim(cell.Style)
 			}
 			dst.Set(r.X+x, r.Y+y, cell)
 		}

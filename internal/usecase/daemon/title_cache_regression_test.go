@@ -10,28 +10,24 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
-func TestComposeClientFrameCachePrunesTitleGenerationsAfterLayoutChurn(t *testing.T) {
-	win := newTab(nil, domain.Size{Cols: 20, Rows: 5})
-	first := win.focusedPane()
-	var bars barCache
-	var composed composedFrameCache
-	state := barState{status: (&session{id: "s", name: "work", tabs: []*tab{win}}).statusSegments(true)}
+func TestComposeFramePrunesTitleGenerationsAfterLayoutChurn(t *testing.T) {
+	committed := composeCacheInput{}
+	scratch := composeCacheInput{}
+	first := layout.PaneID("pane-1")
 
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		id := layout.PaneID(fmt.Sprintf("pane-%d", i+2))
-		replacement := newPane(id, nil, domain.Size{Cols: 20, Rows: 3})
-		win.panes = map[layout.PaneID]*pane{first.id: first, id: replacement}
-		win.tree.Root = &layout.Node{Kind: layout.Stack, Children: []*layout.Node{
-			layout.NewLeaf(first.id),
-			layout.NewLeaf(id),
-		}, Expanded: id}
-		win.tree.Focus = id
+		state := capturedRenderState{
+			reset:  i == 0,
+			layout: capturedTabLayout{area: domain.Rect{Width: 20, Height: 5}, fingerprint: fmt.Sprintf("layout-%d", i), valid: true},
+			panes: []capturedPaneRenderState{
+				{id: first, title: "first", titleGeneration: 1, placement: layout.Placement{ID: first, TitleBar: domain.Rect{Width: 20, Height: 1}, Collapsed: true}},
+				{id: id, title: "replacement", titleGeneration: 1, placement: layout.Placement{ID: id, TitleBar: domain.Rect{Y: 1, Width: 20, Height: 1}, Collapsed: true}},
+			},
+		}
+		out := composeFrame(state, committed, scratch)
+		scratch, committed = committed, out.cache
 
-		composeClientFrameWithLayoutCached(state, win, i == 0, solveTabLayoutLocked(win), &bars, &composed)
-
-		require.Equal(t, map[layout.PaneID]uint64{
-			first.id: composed.titleGenerations[first.id],
-			id:       composed.titleGenerations[id],
-		}, composed.titleGenerations)
+		require.Equal(t, map[layout.PaneID]uint64{first: 1, id: 1}, committed.titleGenerations)
 	}
 }

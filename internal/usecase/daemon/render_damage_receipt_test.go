@@ -5,6 +5,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/stretchr/testify/require"
@@ -26,7 +27,14 @@ func TestPrimaryCaptureAloneRecordsDamageReceipts(t *testing.T) {
 	p.mu.Unlock()
 
 	ac.sendMu.Lock()
-	state, ok := capturePrimaryRenderState(sess, ac, barState{}, capturedOverlayRenderState{}, pickerPreviewEmpty(), domain.FloatingConfig{}, false, nil)
+	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+		bars:        barState{},
+		overlays:    capturedOverlayRenderState{},
+		preview:     pickerPreviewEmpty(),
+		floatingCfg: domain.FloatingConfig{},
+		reset:       false,
+		lease:       nil,
+	})
 	ac.sendMu.Unlock()
 	require.True(t, ok)
 	require.Len(t, state.receipts, 1)
@@ -38,6 +46,36 @@ func TestPrimaryCaptureAloneRecordsDamageReceipts(t *testing.T) {
 
 // These are deliberately end-to-end pipeline tests: the pending damage comes
 // from a real pane VT Write, not a hand-built FullRedraw.
+func TestCaptureComposeEmitAcknowledgesCollapsedPaneDamageOnlyAfterEmission(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+	tb := sess.tabs[0]
+	visible := tb.focusedPane()
+	collapsed := newPane("collapsed", nil, domain.Size{Cols: 80, Rows: 23})
+	tb.panes[collapsed.id] = collapsed
+	tb.tree = &layout.Tree{
+		Root:  &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(visible.id), layout.NewLeaf(collapsed.id)}, Expanded: visible.id},
+		Focus: visible.id,
+	}
+	visible.screen.ClearDamage()
+	collapsed.screen.ClearDamage()
+	collapsed.screen.Write([]byte("hidden damage"))
+
+	ac.sendMu.Lock()
+	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{bars: barState{}})
+	require.True(t, ok)
+	collapsedReceipt := false
+	for _, receipt := range state.receipts {
+		collapsedReceipt = collapsedReceipt || receipt.pane == collapsed
+	}
+	require.True(t, collapsedReceipt, "capture must retain a receipt for the collapsed pane")
+	require.NotEmpty(t, collapsed.screen.Damage(), "capture alone must not acknowledge collapsed-pane damage")
+	composed := composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
+	require.True(t, d.emitFrame(sess, ac, state, composed))
+
+	<-sends
+	require.Empty(t, collapsed.screen.Damage(), "successful emission must acknowledge the collapsed-pane receipt")
+}
+
 func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -120,7 +158,14 @@ func TestRenderDamageReceiptStaleGenerationForcesFullRedraw(t *testing.T) {
 func captureComposeForReceiptTest(t *testing.T, sess *session, ac *attachedClient) (*capturedRenderState, composedRenderFrame) {
 	t.Helper()
 	ac.sendMu.Lock() // emitFrame releases the transaction lock.
-	state, ok := capturePrimaryRenderState(sess, ac, barState{}, capturedOverlayRenderState{}, pickerPreviewEmpty(), domain.FloatingConfig{}, false, nil)
+	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+		bars:        barState{},
+		overlays:    capturedOverlayRenderState{},
+		preview:     pickerPreviewEmpty(),
+		floatingCfg: domain.FloatingConfig{},
+		reset:       false,
+		lease:       nil,
+	})
 	require.True(t, ok)
 	return state, composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
 }
