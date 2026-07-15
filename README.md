@@ -47,7 +47,7 @@ No prefix key; everything is Alt.
 | Alt+h/j/k/l, Alt+Arrow | focus pane |
 | Alt+a | jump to a session needing attention |
 
-The palette does the rest: type a short code (`SPR` split right, `CNT` new tab, `SSP` session picker, ...) or fuzzy-search the command list. Scroll up with the mouse to enter scrollback; vim keys move, `v` selects, `y` copies via OSC 52.
+The palette does the rest: type a short code (`SPR` split right, `CNT` new tab, `SSP` session picker, ...) or fuzzy-search the command list. Named active and stopped sessions are fuzzy-searchable, and selecting a stopped session resumes it. Scroll up with the mouse to enter scrollback; vim keys move, `v` selects, `y` copies via OSC 52.
 
 ## Remote attach
 
