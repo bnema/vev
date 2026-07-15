@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1029,6 +1031,111 @@ func TestEphemeralRenamePromotesAndStoppedCollisionRejected(t *testing.T) {
 	require.True(t, state.has("named"))
 }
 
+func TestEphemeralPromotionAssignsAndPersistsLifecycleIdentity(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	store, state := newMockStore(t)
+	clock := &lifecycleClock{nows: []time.Time{time.Unix(0, 100)}}
+	d := newTestDaemon(t, newFactory(t, p), clock)
+	WithStore(store)(d)
+
+	sess, err := d.createSessionLocked("0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+	require.Zero(t, sess.createdAt, "regression fixture: ephemerals have no lifecycle identity")
+
+	require.NoError(t, d.renameSession(sess, "named"))
+
+	require.False(t, sess.ephemeral)
+	require.Equal(t, "named", sess.name)
+	require.Equal(t, int64(100), sess.createdAt)
+	require.Equal(t, sess.createdAt, state.record(t, "named").CreatedAt)
+}
+
+func TestEphemeralPromotionLifecyclePreventsStaleSameNamePaletteTarget(t *testing.T) {
+	fromPTY, releaseFrom := newBlockingPTY(t)
+	firstPTY, releaseFirst := newBlockingPTY(t)
+	secondPTY, releaseSecond := newBlockingPTY(t)
+	defer releaseFrom()
+	defer releaseFirst()
+	defer releaseSecond()
+
+	d, from, ac, _ := newManualSessionWithPTYs(t, fromPTY)
+	store, _ := newMockStore(t)
+	clock := &lifecycleClock{nows: []time.Time{time.Unix(0, 100), time.Unix(0, 100)}}
+	d.clock = clock
+	d.ptys = newFactorySeq(t, firstPTY, secondPTY)
+	WithStore(store)(d)
+
+	first, err := d.createSessionLocked("0", true, "/tmp", ac.size, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+	require.NoError(t, d.renameSession(first, "named"))
+	staleCreatedAt := first.createdAt
+	require.NotZero(t, staleCreatedAt)
+	require.NoError(t, d.killSession(first, ports.ReasonSessionKilled, true))
+	d.sessWg.Wait()
+
+	second, err := d.createSessionLocked("0", true, "/tmp", ac.size, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+	require.NoError(t, d.renameSession(second, "named"))
+	require.NotEqual(t, staleCreatedAt, second.createdAt)
+
+	require.False(t, d.switchToTarget(from, ac, picker.Target{Name: "named", TabIndex: -1, ExpectedCreatedAt: &staleCreatedAt}))
+	require.Same(t, from, ac.currentSession())
+	releaseSecond()
+	d.sessWg.Wait()
+}
+
+func TestEphemeralPromotionLifecycleFailuresLeaveStateRollbackSafe(t *testing.T) {
+	t.Run("allocator exhaustion", func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		store, state := newMockStore(t)
+		d := newTestDaemon(t, newFactory(t, p), stubClock{})
+		WithStore(store)(d)
+		d.lastAllocatedCreatedAt = math.MaxInt64
+
+		sess, err := d.createSessionLocked("0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.EqualError(t, d.renameSession(sess, "named"), "daemon: lifecycle identities exhausted")
+		require.Equal(t, "0", sess.name)
+		require.True(t, sess.ephemeral)
+		require.Zero(t, sess.createdAt)
+		require.Equal(t, int64(math.MaxInt64), d.lastAllocatedCreatedAt)
+		require.False(t, state.has("named"))
+	})
+
+	t.Run("persistence failure", func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		store := portsmocks.NewMockStore(t)
+		var attempted map[string][]byte
+		store.EXPECT().Set(mock.Anything, mock.Anything).RunAndReturn(func(key, value []byte) error {
+			attempted = map[string][]byte{string(key): append([]byte(nil), value...)}
+			return errors.New("disk full")
+		}).Once()
+		clock := &lifecycleClock{nows: []time.Time{time.Unix(0, 100), time.Unix(0, 100)}}
+		d := newTestDaemon(t, newFactory(t, p), clock)
+		WithStore(store)(d)
+
+		sess, err := d.createSessionLocked("0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.EqualError(t, d.renameSession(sess, "named"), "disk full")
+		require.Equal(t, "0", sess.name)
+		require.True(t, sess.ephemeral)
+		require.Zero(t, sess.createdAt)
+		require.Equal(t, int64(100), d.lastAllocatedCreatedAt, "a failed durable write may be ambiguous, so its lifecycle identity remains reserved")
+		records, err := persist.New(newStaticStore(attempted)).LoadAll()
+		require.NoError(t, err)
+		require.Len(t, records, 1)
+		require.Equal(t, int64(100), records[0].CreatedAt, "a promotion must never attempt to persist a zero lifecycle identity")
+
+		store.EXPECT().Set(mock.Anything, mock.Anything).Return(nil).Once()
+		store.EXPECT().Sync().Return(nil).Once()
+		require.NoError(t, d.renameSession(sess, "named"))
+		require.Equal(t, int64(101), sess.createdAt, "the high-water mark must remain monotonic after a failed promotion")
+	})
+}
+
 func TestRefreshSessionCwdTouchesOnlyOnChange(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	p, release := newBlockingPTY(t)
@@ -1497,4 +1604,145 @@ func TestShellFromEnvironmentFallsBackOnlyWhenAbsentOrEmpty(t *testing.T) {
 			require.Equal(t, tt.want, shellFromEnvironment(tt.env))
 		})
 	}
+}
+
+type lifecycleClock struct {
+	nows []time.Time
+	next int
+}
+
+func (c *lifecycleClock) Now() time.Time {
+	i := min(c.next, len(c.nows)-1)
+	c.next++
+	return c.nows[i]
+}
+func (*lifecycleClock) NewTimer(time.Duration) ports.Timer { return stubTimer{} }
+
+func TestNamedSessionLifecycleTimestampsAreMonotonicAcrossClockRegression(t *testing.T) {
+	ptys := make([]ports.PTY, 3)
+	var releases []func()
+	for i := range ptys {
+		p, release := newBlockingPTY(t)
+		ptys[i] = p
+		releases = append(releases, release)
+	}
+	defer releaseAll(releases)
+	clock := &lifecycleClock{nows: []time.Time{time.Unix(0, 100), time.Unix(0, 100), time.Unix(0, 50)}}
+	d := newTestDaemon(t, newFactorySeq(t, ptys...), clock)
+	sz := domain.Size{Cols: 80, Rows: 24}
+
+	var got []int64
+	for _, name := range []string{"one", "two", "three"} {
+		sess, err := d.createSessionLocked(name, false, "/tmp", sz, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		got = append(got, sess.createdAt)
+	}
+	require.Equal(t, []int64{100, 101, 102}, got)
+}
+
+func TestNamedSessionLifecycleExhaustionDoesNotMutateSessionState(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.lastAllocatedCreatedAt = math.MaxInt64
+	d.nextID = 17
+	d.stopped["retained"] = stoppedSession{name: "retained", cwd: "/tmp", createdAt: 9}
+
+	sess, err := d.createSessionLocked("new", false, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+
+	require.ErrorContains(t, err, "lifecycle identities exhausted")
+	require.Nil(t, sess)
+	require.Empty(t, d.sessions)
+	require.Equal(t, uint64(17), d.nextID)
+	require.Equal(t, int64(math.MaxInt64), d.lastAllocatedCreatedAt)
+	require.Equal(t, stoppedSession{name: "retained", cwd: "/tmp", createdAt: 9}, d.stopped["retained"])
+
+	_, _, err = d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "routed", Size: domain.Size{Cols: 80, Rows: 24}}, nil)
+	require.ErrorContains(t, err, "lifecycle identities exhausted")
+	require.Empty(t, d.sessions)
+	require.Equal(t, uint64(17), d.nextID)
+	require.Equal(t, stoppedSession{name: "retained", cwd: "/tmp", createdAt: 9}, d.stopped["retained"])
+}
+
+func TestNamedSessionLifecycleTimestampStartsAfterPersistedHighWaterMark(t *testing.T) {
+	store, _ := newMockStore(t)
+	seed := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
+	require.NoError(t, seed.persist.Save(persist.Record{Name: "old", Cwd: "/tmp", CreatedAt: 900, UpdatedAt: 900}))
+
+	p, release := newBlockingPTY(t)
+	defer release()
+	clock := &lifecycleClock{nows: []time.Time{time.Unix(0, 100)}}
+	// Constructing with persistence must establish the lifecycle high-water mark.
+	d := New(newFactory(t, p), clock, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
+	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
+	t.Cleanup(d.serveCancel)
+
+	sess, err := d.createSessionLocked("new", false, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+	require.Equal(t, int64(901), sess.createdAt)
+}
+
+func TestResumingStoppedSessionPreservesLifecycleIdentityInPersistence(t *testing.T) {
+	fromPTY, releaseFrom := newBlockingPTY(t)
+	targetPTY, releaseTarget := newBlockingPTY(t)
+	defer releaseFrom()
+	defer releaseTarget()
+	d, from, ac, _ := newManualSessionWithPTYs(t, fromPTY)
+	store, state := newMockStore(t)
+	WithStore(store)(d)
+	d.ptys = newFactory(t, targetPTY)
+	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp", createdAt: 77}
+
+	require.True(t, d.resumeStoppedAndSwitch(from, ac, picker.Target{Name: "stopped", Stopped: true}))
+	resumed := ac.currentSession()
+	require.Equal(t, int64(77), resumed.createdAt)
+	require.Equal(t, int64(77), state.record(t, "stopped").CreatedAt)
+}
+
+func TestLifecycleExpectedTargetChecksAreAtomicAcrossStateTransitions(t *testing.T) {
+	t.Run("active replacement is rejected", func(t *testing.T) {
+		d, from, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+		target := d.sessions["recent"]
+		target.createdAt = 22
+		expected := int64(21)
+
+		require.False(t, d.switchToTarget(from, ac, picker.Target{Session: target.id, Name: "recent", TabIndex: 0, ExpectedCreatedAt: &expected}))
+		require.Same(t, from, ac.currentSession())
+	})
+
+	t.Run("active target that stopped resumes same lifecycle", func(t *testing.T) {
+		fromPTY, releaseFrom := newBlockingPTY(t)
+		targetPTY, releaseTarget := newBlockingPTY(t)
+		defer releaseFrom()
+		defer releaseTarget()
+		d, from, ac, _ := newManualSessionWithPTYs(t, fromPTY)
+		d.ptys = newFactory(t, targetPTY)
+		expected := int64(31)
+		d.stopped["target"] = stoppedSession{name: "target", cwd: "/tmp", createdAt: expected}
+
+		require.True(t, d.switchToTarget(from, ac, picker.Target{Session: "old-active-id", Name: "target", TabIndex: 0, ExpectedCreatedAt: &expected}))
+		require.Equal(t, "target", ac.currentSession().name)
+		require.Equal(t, expected, ac.currentSession().createdAt)
+	})
+
+	t.Run("stopped target that became active switches same lifecycle", func(t *testing.T) {
+		d, from, ac, _, releases := newRecentNavigationTestSessions(t)
+		defer releaseAll(releases)
+		target := d.sessions["recent"]
+		target.createdAt = 41
+		expected := int64(41)
+
+		require.True(t, d.switchToTarget(from, ac, picker.Target{Session: "stopped:recent", Name: "recent", TabIndex: 0, Stopped: true, ExpectedCreatedAt: &expected}))
+		require.Same(t, target, ac.currentSession())
+	})
+
+	t.Run("stopped deletion and recreation is rejected", func(t *testing.T) {
+		fromPTY, releaseFrom := newBlockingPTY(t)
+		defer releaseFrom()
+		d, from, ac, _ := newManualSessionWithPTYs(t, fromPTY)
+		d.stopped["target"] = stoppedSession{name: "target", cwd: "/tmp", createdAt: 52}
+		expected := int64(51)
+
+		require.False(t, d.switchToTarget(from, ac, picker.Target{Name: "target", TabIndex: 0, Stopped: true, ExpectedCreatedAt: &expected}))
+		require.Same(t, from, ac.currentSession())
+	})
 }

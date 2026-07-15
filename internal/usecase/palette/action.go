@@ -13,16 +13,17 @@ type Action struct {
 	Args    []string
 }
 
-// ParseAction recognizes an exact effective command token. It accepts outer
-// and repeated whitespace but never treats a prefix or concatenated token as
-// a command. Static commands reject arguments.
-func ParseAction(commands []command.Command, input string) (Action, bool) {
+// ParseAction recognizes an exact effective command result token. It accepts
+// outer and repeated whitespace but never treats a prefix or concatenated token
+// as a command. Static commands reject arguments.
+func ParseAction(results []Result, input string) (Action, bool) {
 	fields := strings.Fields(input)
 	if len(fields) == 0 {
 		return Action{}, false
 	}
-	for _, cmd := range commands {
-		if !strings.EqualFold(fields[0], cmd.Code) {
+	for _, result := range results {
+		cmd, ok := result.Command()
+		if !ok || !strings.EqualFold(fields[0], cmd.Code) {
 			continue
 		}
 		args := append([]string(nil), fields[1:]...)
@@ -43,15 +44,23 @@ func ParseAction(commands []command.Command, input string) (Action, bool) {
 
 // ArgumentCommand returns the exact argument-taking command whose token is
 // being typed, including the whitespace-before-argument state.
-func ArgumentCommand(commands []command.Command, input string) (command.Command, bool) {
+func ArgumentCommand(results []Result, input string) (command.Command, bool) {
+	_, cmd, ok := argumentResult(results, input)
+	return cmd, ok
+}
+
+// argumentResult finds the exact argument-taking command and its source row in
+// one pass so callers can reuse the immutable result without another scan.
+func argumentResult(results []Result, input string) (Result, command.Command, bool) {
 	fields := strings.Fields(input)
 	if len(fields) == 0 {
-		return command.Command{}, false
+		return Result{}, command.Command{}, false
 	}
-	for _, cmd := range commands {
-		if cmd.Arguments == command.ArgumentsRequired && strings.EqualFold(fields[0], cmd.Code) {
-			return cmd, true
+	for _, result := range results {
+		cmd, ok := result.Command()
+		if ok && cmd.Arguments == command.ArgumentsRequired && strings.EqualFold(fields[0], cmd.Code) {
+			return result, cmd, true
 		}
 	}
-	return command.Command{}, false
+	return Result{}, command.Command{}, false
 }

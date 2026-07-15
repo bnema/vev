@@ -142,8 +142,12 @@ func TestApplyConfigRepaintsActivePaletteWithoutReplacingModel(t *testing.T) {
 	require.Equal(t, query, ac.overlays.palette.Query())
 	selectedAfter, ok := ac.overlays.palette.Selected()
 	require.True(t, ok)
-	require.Equal(t, selected.Slug, selectedAfter.Slug)
-	require.Equal(t, selected.Code, selectedAfter.Code)
+	selectedCommand, ok := selected.Command()
+	require.True(t, ok)
+	selectedAfterCommand, ok := selectedAfter.Command()
+	require.True(t, ok)
+	require.Equal(t, selectedCommand.Slug, selectedAfterCommand.Slug)
+	require.Equal(t, selectedCommand.Code, selectedAfterCommand.Code)
 }
 
 func TestApplyConfigPublishesImmutableFloatingSnapshot(t *testing.T) {

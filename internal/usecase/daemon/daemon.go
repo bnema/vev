@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"os"
 	"slices"
 	"sort"
@@ -67,7 +68,11 @@ type Daemon struct {
 	sessions map[domain.SessionID]*session
 	stopped  map[string]stoppedSession
 	nextID   uint64
-	mruSeq   atomic.Uint64
+	// lastAllocatedCreatedAt is the named-session lifecycle timestamp high-water
+	// mark. It is guarded by mu and prevents a wall-clock regression from
+	// reusing a lifecycle identity.
+	lastAllocatedCreatedAt int64
+	mruSeq                 atomic.Uint64
 	// closing marks that shutdown has irreversibly begun. It is set under mu,
 	// atomically with the event that makes shutdown inevitable (the registry
 	// emptying in killSession, or shutdownAll starting), and checked by route
@@ -300,6 +305,25 @@ func WithConfig(cfg domain.Config) Option {
 	}
 }
 
+// allocateLifecycleCreatedAtLocked returns a unique lifecycle timestamp. Caller
+// holds d.mu. The persisted high-water mark is loaded by New before any named
+// session can be resumed or created.
+func (d *Daemon) allocateLifecycleCreatedAtLocked() (int64, error) {
+	now := d.nowUnixNano()
+	if now <= d.lastAllocatedCreatedAt {
+		if d.lastAllocatedCreatedAt == math.MaxInt64 {
+			return 0, errors.New("daemon: lifecycle identities exhausted")
+		}
+		now = d.lastAllocatedCreatedAt + 1
+	}
+	d.lastAllocatedCreatedAt = now
+	return now, nil
+}
+
+func (d *Daemon) nowUnixNano() int64 {
+	return d.clock.Now().UnixNano()
+}
+
 // New constructs a Daemon. ptys spawns PTY-backed children, clock drives the
 // render debounce, and log receives diagnostics (defaults to slog.Default).
 func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Option) *Daemon {
@@ -366,11 +390,20 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		d.log.Warn("loading persisted sessions failed", "err", err)
 	} else {
 		var maxSeq uint64
+		var maxCreatedAt int64
+		hasCreatedAt := false
 		for _, r := range records {
 			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, lastUsedSeq: r.LastUsedSeq, tabNames: r.TabNames}
+			if !hasCreatedAt || r.CreatedAt > maxCreatedAt {
+				maxCreatedAt = r.CreatedAt
+				hasCreatedAt = true
+			}
 			if r.LastUsedSeq > maxSeq {
 				maxSeq = r.LastUsedSeq
 			}
+		}
+		if hasCreatedAt {
+			d.lastAllocatedCreatedAt = maxCreatedAt
 		}
 		d.mruSeq.Store(maxSeq)
 	}

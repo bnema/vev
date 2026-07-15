@@ -49,6 +49,11 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 	for _, s := range sessions {
 		s.mu.Lock()
 		view := picker.SessionView{ID: s.id, Name: s.name, Active: s.active, Tabs: make([]picker.TabEntry, len(s.tabs))}
+		if !s.ephemeral {
+			createdAt := s.createdAt
+			view.TargetName = s.name
+			view.ExpectedCreatedAt = &createdAt
+		}
 		sessionAttention := false
 		for i, tb := range s.tabs {
 			name := tabDisplayName(tb, i)
@@ -71,11 +76,14 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 		views = append(views, view)
 	}
 	for _, s := range stopped {
+		createdAt := s.createdAt
 		views = append(views, picker.SessionView{
-			ID:      domain.SessionID("stopped:" + s.name),
-			Name:    s.name,
-			Tabs:    []picker.TabEntry{{}},
-			Stopped: true,
+			ID:                domain.SessionID("stopped:" + s.name),
+			Name:              s.name,
+			TargetName:        s.name,
+			Tabs:              []picker.TabEntry{{}},
+			Stopped:           true,
+			ExpectedCreatedAt: &createdAt,
 		})
 	}
 	return views, curTab
@@ -383,48 +391,102 @@ func (d *Daemon) sessionByID(id domain.SessionID) *session {
 	return d.sessions[id]
 }
 
-func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker.Target) bool {
-	if target.Stopped {
-		return d.resumeStoppedAndSwitch(sess, ac, target)
-	}
-	targetSess := d.sessionByID(target.Session)
-	if targetSess == nil {
-		d.invalidateRender(sess, ac, true, "picker.go")
-		return false
-	}
-	if targetSess == sess {
-		if sess.switchTab(target.TabIndex) {
-			d.activateTab(sess, sess.activeTab())
+// switchToTarget resolves named lifecycle targets and commits their transition
+// while d.mu is held. A named palette result is allowed to cross an
+// active/stopped transition, but it never follows a same-name replacement.
+func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker.Target) bool {
+	d.mu.Lock()
+	var (
+		targetSess *session
+		old        *attachedClient
+		cleanups   []renderLifecycleCleanup
+		switched   bool
+	)
+	if target.Name != "" {
+		active, stopped, isStopped, ok := d.resolveNamedLifecycleTargetLocked(target)
+		if ok {
+			if isStopped {
+				targetSess, cleanups, switched = d.resumeStoppedAndSwitchLocked(from, ac, target, stopped)
+			} else {
+				// The snapshot ID may describe the stopped representation. The
+				// locked name/lifecycle resolver chose this active incarnation.
+				resolvedTarget := target
+				resolvedTarget.Session = active.id
+				targetSess, old, cleanups, switched = d.switchToActiveTargetLocked(from, ac, active, resolvedTarget)
+			}
 		}
-		d.invalidateRender(sess, ac, true, "picker.go")
-		return true
+	} else if active := d.sessions[target.Session]; active != nil {
+		targetSess, old, cleanups, switched = d.switchToActiveTargetLocked(from, ac, active, target)
 	}
-	old := d.stealClientForTarget(sess, ac, targetSess, target)
-	if ac.currentSession() != targetSess {
-		d.invalidateRender(sess, ac, true, "picker.go")
+	d.mu.Unlock()
+
+	if !switched {
+		d.invalidateRender(from, ac, true, "picker.go")
 		return false
 	}
+	finishRenderLifecycleCleanups(cleanups)
 	if old != nil && old != ac {
 		d.unregisterPreview(old)
 		old.clearPreviousSession()
 		old.setSession(nil)
 		d.notifyDetachedAsync(old, ports.ReasonDetach)
 	}
-	d.firstPaint(targetSess, ac, ac.size)
+	if targetSess == from {
+		d.activateTab(from, from.activeTab())
+		d.invalidateRender(from, ac, true, "picker.go")
+	} else {
+		d.firstPaint(targetSess, ac, ac.size)
+	}
 	return true
 }
 
-func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetSess *session, target picker.Target) *attachedClient {
-	d.mu.Lock()
+// resolveNamedLifecycleTargetLocked chooses exactly one current representation
+// of a named lifecycle. Caller holds d.mu. Matching the name and lifecycle
+// identity here closes the lookup-to-handoff window for palette targets.
+func (d *Daemon) resolveNamedLifecycleTargetLocked(target picker.Target) (*session, stoppedSession, bool, bool) {
+	if target.Name == "" {
+		return nil, stoppedSession{}, false, false
+	}
+	if active := d.findByNameLocked(target.Name); active != nil {
+		active.mu.Lock()
+		matches := targetMatchesLifecycle(target, active.name, active.createdAt)
+		active.mu.Unlock()
+		return active, stoppedSession{}, false, matches
+	}
+	stopped, ok := d.stopped[target.Name]
+	if !ok || stopped.purging || !targetMatchesLifecycle(target, stopped.name, stopped.createdAt) {
+		return nil, stoppedSession{}, false, false
+	}
+	return nil, stopped, true, true
+}
+
+// switchToActiveTargetLocked commits an active target handoff. Caller holds
+// d.mu and releases it before completing render cleanup or first paint.
+func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, targetSess *session, target picker.Target) (*session, *attachedClient, []renderLifecycleCleanup, bool) {
 	if d.sessions[target.Session] != targetSess {
-		d.mu.Unlock()
-		return nil
+		return nil, nil, nil, false
+	}
+	if targetSess == from {
+		targetSess.mu.Lock()
+		defer targetSess.mu.Unlock()
+		if targetSess.client != ac || !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) || target.TabIndex < 0 || target.TabIndex >= len(targetSess.tabs) {
+			return nil, nil, nil, false
+		}
+		targetSess.active = target.TabIndex
+		return targetSess, nil, nil, true
+	}
+
+	targetSess.mu.Lock()
+	matches := targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt)
+	if !matches {
+		targetSess.mu.Unlock()
+		return nil, nil, nil, false
 	}
 	from.mu.Lock()
 	if from.client != ac {
 		from.mu.Unlock()
-		d.mu.Unlock()
-		return nil
+		targetSess.mu.Unlock()
+		return nil, nil, nil, false
 	}
 	term := from.terminal
 	env := copyEnvironment(from.env)
@@ -432,7 +494,6 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 	ac.setSession(nil)
 	from.mu.Unlock()
 
-	targetSess.mu.Lock()
 	old := targetSess.client
 	targetSess.terminal = term
 	targetSess.env = copyEnvironment(env)
@@ -441,8 +502,8 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 	}
 	targetSess.mu.Unlock()
 
-	// Do not expose targetSess.client until the target coordinator has claimed
-	// this attachment and the output dependency chain has been rebased.
+	// Prepare source invalidation, output rebase, and destination coordinator
+	// identity before publishing the destination attachment.
 	cleanups := d.handoffCoordinator(from, targetSess, old, ac)
 	ac.setSession(targetSess)
 	targetSess.mu.Lock()
@@ -450,24 +511,17 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 	targetSess.mu.Unlock()
 	d.touchMRU(targetSess)
 	ac.recordPreviousSession(from)
-	d.mu.Unlock()
-	finishRenderLifecycleCleanups(cleanups)
-	return old
+	return targetSess, old, cleanups, true
 }
 
-func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, target picker.Target) bool {
-	d.mu.Lock()
-	stopped, ok := d.stopped[target.Name]
-	if !ok || stopped.purging {
-		d.mu.Unlock()
-		d.invalidateRender(from, ac, true, "picker.go")
-		return false
-	}
+// resumeStoppedAndSwitchLocked creates the stopped representation and commits
+// the handoff while d.mu is held. Creation failure leaves the source client
+// and stopped record untouched.
+func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient, target picker.Target, stopped stoppedSession) (*session, []renderLifecycleCleanup, bool) {
 	from.mu.Lock()
 	if from.client != ac {
 		from.mu.Unlock()
-		d.mu.Unlock()
-		return false
+		return nil, nil, false
 	}
 	term := from.terminal
 	env := copyEnvironment(from.env)
@@ -475,10 +529,8 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.size, term, env, stopped.tabNames)
 	if err != nil {
 		from.mu.Unlock()
-		d.mu.Unlock()
 		d.log.Warn("resuming stopped session failed", "err", err, "session", target.Name)
-		d.invalidateRender(from, ac, true, "picker.go")
-		return false
+		return nil, nil, false
 	}
 	from.client = nil
 	ac.setSession(nil)
@@ -491,7 +543,44 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	targetSess.mu.Unlock()
 	d.touchMRU(targetSess)
 	ac.recordPreviousSession(from)
+	return targetSess, cleanups, true
+}
+
+func targetMatchesLifecycle(target picker.Target, name string, createdAt int64) bool {
+	return target.ExpectedCreatedAt == nil || (target.Name == name && *target.ExpectedCreatedAt == createdAt)
+}
+
+// stealClientForTarget is retained for direct-ID callers and tests. Named
+// targets must use switchToTarget so resolution and commit share d.mu.
+func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetSess *session, target picker.Target) *attachedClient {
+	d.mu.Lock()
+	_, old, cleanups, switched := d.switchToActiveTargetLocked(from, ac, targetSess, target)
 	d.mu.Unlock()
+	if !switched {
+		return nil
+	}
+	finishRenderLifecycleCleanups(cleanups)
+	return old
+}
+
+// resumeStoppedAndSwitch is retained for direct callers and tests. It resolves
+// its stopped target and commits creation under one d.mu critical section.
+func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, target picker.Target) bool {
+	d.mu.Lock()
+	stopped, ok := d.stopped[target.Name]
+	var (
+		targetSess *session
+		cleanups   []renderLifecycleCleanup
+		switched   bool
+	)
+	if ok && !stopped.purging && targetMatchesLifecycle(target, stopped.name, stopped.createdAt) {
+		targetSess, cleanups, switched = d.resumeStoppedAndSwitchLocked(from, ac, target, stopped)
+	}
+	d.mu.Unlock()
+	if !switched {
+		d.invalidateRender(from, ac, true, "picker.go")
+		return false
+	}
 	finishRenderLifecycleCleanups(cleanups)
 	d.firstPaint(targetSess, ac, ac.size)
 	return true

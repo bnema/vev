@@ -3,6 +3,7 @@ package palette
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
@@ -11,33 +12,33 @@ import (
 )
 
 func TestModelInsertBackspaceAndSelectionClamp(t *testing.T) {
-	m := New([]command.Command{
+	m := New(CommandResults([]command.Command{
 		cmd("ABC", "Alpha", "first"),
 		cmd("DEF", "Delta", "second"),
 		cmd("AXY", "Other", "third"),
-	})
+	}))
 
 	require.Equal(t, "", m.Query())
 	selected, ok := m.Selected()
 	require.True(t, ok)
-	require.Equal(t, "ABC", selected.Code)
+	require.Equal(t, "ABC", selectedCommandCode(t, selected))
 
 	m.Down()
 	m.Down()
 	selected, ok = m.Selected()
 	require.True(t, ok)
-	require.Equal(t, "AXY", selected.Code)
+	require.Equal(t, "AXY", selectedCommandCode(t, selected))
 
 	m.Insert('d')
 	require.Equal(t, "d", m.Query())
 	selected, ok = m.Selected()
 	require.True(t, ok)
-	require.Equal(t, "DEF", selected.Code, "selection clamps to only match after query changes")
+	require.Equal(t, "DEF", selectedCommandCode(t, selected), "selection clamps to only match after query changes")
 
 	m.Up()
 	selected, ok = m.Selected()
 	require.True(t, ok)
-	require.Equal(t, "DEF", selected.Code, "up at first match clamps")
+	require.Equal(t, "DEF", selectedCommandCode(t, selected), "up at first match clamps")
 
 	m.Backspace()
 	require.Equal(t, "", m.Query())
@@ -45,7 +46,7 @@ func TestModelInsertBackspaceAndSelectionClamp(t *testing.T) {
 }
 
 func TestModelNoMatchesClearsSelection(t *testing.T) {
-	m := New([]command.Command{cmd("ABC", "Alpha", "first")})
+	m := New(CommandResults([]command.Command{cmd("ABC", "Alpha", "first")}))
 	m.Insert('z')
 
 	_, ok := m.Selected()
@@ -54,7 +55,7 @@ func TestModelNoMatchesClearsSelection(t *testing.T) {
 }
 
 func TestModelMatchesDeepCopiesPositions(t *testing.T) {
-	m := New([]command.Command{cmd("ABC", "Alpha", "first")})
+	m := New(CommandResults([]command.Command{cmd("ABC", "Alpha", "first")}))
 	m.Insert('a')
 
 	matches := m.Matches()
@@ -74,8 +75,8 @@ func TestModelExactArgumentMatchMovesExistingFuzzyMatchToFront(t *testing.T) {
 		cmd("AAA", "", "ZZZ 1"),
 		zzz,
 	}
-	want := Fuzzy(commands, "ZZZ 1")[1]
-	m := New(commands)
+	want := Fuzzy(CommandResults(commands), "ZZZ 1")[1]
+	m := New(CommandResults(commands))
 
 	for _, r := range "ZZZ 1" {
 		m.Insert(r)
@@ -83,11 +84,11 @@ func TestModelExactArgumentMatchMovesExistingFuzzyMatchToFront(t *testing.T) {
 
 	matches := m.Matches()
 	require.Len(t, matches, 2)
-	require.Equal(t, "ZZZ", matches[0].Command.Code)
+	require.Equal(t, "ZZZ", matchCommandCode(t, matches[0]))
 	require.Equal(t, want, matches[0], "the existing fuzzy match must retain its metadata")
 	selected, ok := m.Selected()
 	require.True(t, ok)
-	require.Equal(t, "ZZZ", selected.Code)
+	require.Equal(t, "ZZZ", selectedCommandCode(t, selected))
 }
 
 func TestModelExactArgumentMatchKeepsAbsentAndFirstBehavior(t *testing.T) {
@@ -102,11 +103,11 @@ func TestModelExactArgumentMatchKeepsAbsentAndFirstBehavior(t *testing.T) {
 			commands: func(zzz command.Command) []command.Command {
 				return []command.Command{cmd("AAA", "", "ZZZ 1"), zzz}
 			},
-			want: Match{Command: command.Command{
+			want: newMatch(NewCommandResult(command.Command{
 				Code:      "ZZZ",
 				Desc:      "unmatched",
 				Arguments: command.ArgumentsRequired,
-			}},
+			}), 0),
 			wantLen: 2,
 		},
 		{
@@ -118,7 +119,7 @@ func TestModelExactArgumentMatchKeepsAbsentAndFirstBehavior(t *testing.T) {
 			want: func() Match {
 				zzz := cmd("ZZZ", "", "ZZZ 1")
 				zzz.Arguments = command.ArgumentsRequired
-				return Fuzzy([]command.Command{zzz, cmd("ZZZZ", "", "ZZZ 1")}, "ZZZ 1")[0]
+				return Fuzzy(CommandResults([]command.Command{zzz, cmd("ZZZZ", "", "ZZZ 1")}), "ZZZ 1")[0]
 			}(),
 			wantLen: 2,
 		},
@@ -126,7 +127,7 @@ func TestModelExactArgumentMatchKeepsAbsentAndFirstBehavior(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			zzz := cmd("ZZZ", "", "unmatched")
 			zzz.Arguments = command.ArgumentsRequired
-			m := New(tt.commands(zzz))
+			m := New(CommandResults(tt.commands(zzz)))
 			for _, r := range "ZZZ 1" {
 				m.Insert(r)
 			}
@@ -139,10 +140,10 @@ func TestModelExactArgumentMatchKeepsAbsentAndFirstBehavior(t *testing.T) {
 }
 
 func TestRenderDrawsOnlyCodeAndDescriptionWithStyles(t *testing.T) {
-	m := New([]command.Command{
+	m := New(CommandResults([]command.Command{
 		cmd("CPY", "Copy", "Enter copy mode"),
 		cmd("CNT", "New", "Create tab"),
-	})
+	}))
 	m.Insert('c')
 	m.Insert('y')
 	frame := m.Render(domain.Size{Cols: 28, Rows: 3}, RenderOptions{Styles: DefaultRenderStyles()})
@@ -165,7 +166,7 @@ func TestRenderDrawsOnlyCodeAndDescriptionWithStyles(t *testing.T) {
 }
 
 func TestRenderSafelyClipsVisibleFieldsAtNarrowWidths(t *testing.T) {
-	m := New([]command.Command{cmd("CPY", "Copy", "Enter copy mode")})
+	m := New(CommandResults([]command.Command{cmd("CPY", "Copy", "Enter copy mode")}))
 	want := []rune("CPY Enter copy mode")
 
 	for _, cols := range []int{0, 1, 3, 4, 7} {
@@ -177,6 +178,18 @@ func TestRenderSafelyClipsVisibleFieldsAtNarrowWidths(t *testing.T) {
 			}
 		})
 	}
+}
+
+func selectedCommandCode(t *testing.T, result Result) string {
+	t.Helper()
+	cmd, ok := result.Command()
+	require.True(t, ok, "selected result is a command")
+	return cmd.Code
+}
+
+func matchCommandCode(t *testing.T, match Match) string {
+	t.Helper()
+	return selectedCommandCode(t, match.Result)
 }
 
 func frameRow(frame renderer.Frame, y int) string {
@@ -247,7 +260,7 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := New([]command.Command{cmd("CPY", "Copy", "Enter copy mode")})
+			m := New(CommandResults([]command.Command{cmd("CPY", "Copy", "Enter copy mode")}))
 			m.Insert('c')
 			m.Insert('y')
 			frame := m.Render(domain.Size{Cols: 28, Rows: 3}, RenderOptions{Styles: tt.styles()})
@@ -294,7 +307,7 @@ func TestModelCompleteSelected(t *testing.T) {
 				if tt.registry {
 					m = NewRegistry()
 				} else {
-					m = New(tt.commands)
+					m = New(CommandResults(tt.commands))
 				}
 				for _, r := range tt.query {
 					m.Insert(r)
@@ -319,11 +332,65 @@ func TestModelCompleteSelected(t *testing.T) {
 	}
 }
 
+func TestModelUsesDefensiveTypedResultsAndKeepsSessionsCommandInert(t *testing.T) {
+	created := time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC)
+	results := []Result{
+		NewCommandResult(cmd("JRS", "Jump", "Jump to recent session")),
+		NewActiveSessionResult("work", created, "work-id"),
+		NewStoppedSessionResult("work", created),
+	}
+	m := New(results)
+	results[1] = NewActiveSessionResult("changed", created, "changed-id")
+
+	for _, r := range "work" {
+		m.Insert(r)
+	}
+	matches := m.Matches()
+	require.Len(t, matches, 2)
+	require.Equal(t, ResultKindActiveSession, matches[0].Result.Kind())
+	matches[0].Result = NewCommandResult(cmd("BAD", "", ""))
+	require.Equal(t, ResultKindActiveSession, m.Matches()[0].Result.Kind())
+
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, ResultKindActiveSession, selected.Kind())
+	id, active := selected.SessionID()
+	require.True(t, active)
+	require.Equal(t, domain.SessionID("work-id"), id)
+	require.False(t, m.CompleteSelected(), "sessions never participate in tab completion")
+	require.Equal(t, "work", m.Query())
+	_, argument := m.ArgumentCommand()
+	require.False(t, argument)
+
+	frame := m.Render(domain.Size{Cols: 28, Rows: 2}, RenderOptions{Styles: DefaultRenderStyles()})
+	require.Equal(t, "Switch to session work      ", frameRow(frame, 1))
+}
+
+func TestRenderStoppedSessionHighlightsNameAfterResumePrefix(t *testing.T) {
+	m := New([]Result{NewStoppedSessionResult("work", time.Unix(0, 1))})
+	m.Insert('w')
+	m.Insert('k')
+
+	frame := m.Render(domain.Size{Cols: 28, Rows: 2}, RenderOptions{Styles: DefaultRenderStyles()})
+
+	require.Equal(t, "Resume session work         ", frameRow(frame, 1))
+	require.False(t, frame.At(14, 1).Style.Bold, "resume prefix is not highlighted")
+	require.True(t, frame.At(15, 1).Style.Bold, "first matched session rune is highlighted")
+	require.True(t, frame.At(18, 1).Style.Bold, "last matched session rune is highlighted")
+}
+
+func TestRenderFeedbackUsesSelectedSessionRowWithoutAddingResult(t *testing.T) {
+	m := New([]Result{NewActiveSessionResult("work", time.Unix(0, 1), "work")})
+	frame := m.Render(domain.Size{Cols: 64, Rows: 3}, RenderOptions{Styles: DefaultRenderStyles(), Feedback: "requested session is unavailable"})
+	require.Len(t, m.Matches(), 1)
+	require.Contains(t, frameRow(frame, 1), "requested session is unavailable")
+}
+
 func TestRenderGuidanceReplacesOnlyExactContextualRow(t *testing.T) {
 	jrs := cmd("JRS", "Jump", "Jump to recent session")
 	jrs.Arguments = command.ArgumentsRequired
 	jrs.ContextHint = command.ContextHintRecentSessions
-	m := New([]command.Command{jrs})
+	m := New(CommandResults([]command.Command{jrs}))
 	for _, r := range "JRS 1" {
 		m.Insert(r)
 	}
