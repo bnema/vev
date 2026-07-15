@@ -3,6 +3,7 @@ package daemon
 
 import (
 	"strconv"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -15,6 +16,17 @@ import (
 )
 
 var copySearchModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Search ", Anchor: domain.AnchorBottom, Margins: ui.Margins{Bottom: 1}}
+
+const copyDoubleClickInterval = 500 * time.Millisecond
+
+func sameCopyPos(a, b scopy.Pos) bool { return a.Row == b.Row && a.Col == b.Col }
+
+func (d *Daemon) isCopyDoubleClickLocked(rt *overlayRuntime, pane *pane, pos scopy.Pos, now time.Time) bool {
+	candidate := rt.copyClick
+	return candidate.valid && !candidate.dragged && candidate.pane == pane &&
+		sameCopyPos(candidate.pos, pos) && !now.Before(candidate.at) &&
+		now.Sub(candidate.at) <= copyDoubleClickInterval
+}
 
 func copyTargetPane(rt *overlayRuntime) *pane {
 	if rt == nil {
@@ -94,7 +106,7 @@ func (d *Daemon) publishCopyMode(sess *session, ac *attachedClient, tb *tab, p *
 	if activate != nil {
 		rt.clearCopyPointerForTransferLocked()
 	} else {
-		rt.invalidateCopyPointerLocked()
+		rt.invalidateCopyPointerLocked(true)
 	}
 	pointerEpoch := rt.copyPointerEpoch
 	rt.copyMu.Unlock()
@@ -150,7 +162,17 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event, ma
 		pointer := rt.copyPointer
 		if !pointer.valid || pointer.pane != mapped.pane || pointer.document != rt.copyDocument {
 			rt.beginCopyPointerLocked(copyPointerState{pane: mapped.pane, document: rt.copyDocument, geometry: geometry, press: mapped.pos})
+			pointer = rt.copyPointer
 		}
+		now := d.clock.Now()
+		if d.isCopyDoubleClickLocked(rt, mapped.pane, mapped.pos, now) {
+			pointer.wordDrag = rt.copyMode.SelectWordAt(mapped.pos)
+			changed = pointer.wordDrag || changed
+			rt.copyClick = copyClickCandidate{}
+		} else {
+			rt.copyClick = copyClickCandidate{valid: true, pane: mapped.pane, pos: mapped.pos, at: now}
+		}
+		rt.copyPointer = pointer
 	case mouse.Motion:
 		pointer := rt.copyPointer
 		if pointer.valid && pointer.epoch == snapshot.epoch && pointer.pane == mapped.pane && pointer.document == rt.copyDocument {
@@ -158,11 +180,18 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event, ma
 				rt.copyMode.StartCharacterSelection(pointer.press)
 				pointer.dragging = true
 			}
-			changed = rt.copyMode.ExtendCharacterSelection(mapped.pos) || changed
+			if rt.copyClick.valid && rt.copyClick.pane == pointer.pane {
+				rt.copyClick.dragged = true
+			}
+			if pointer.wordDrag {
+				changed = rt.copyMode.ExtendWordSelection(mapped.pos) || changed
+			} else {
+				changed = rt.copyMode.ExtendCharacterSelection(mapped.pos) || changed
+			}
 			rt.copyPointer = pointer
 		}
 	case mouse.Release:
-		rt.invalidateCopyPointerLocked()
+		rt.invalidateCopyPointerLocked(false)
 	}
 	rt.copyMu.Unlock()
 	if changed {

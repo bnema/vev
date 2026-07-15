@@ -166,14 +166,14 @@ func invalidateRejectedLeftPointer(rt *overlayRuntime, ev mouse.Event) {
 		return
 	}
 	rt.copyMu.Lock()
-	rt.invalidateCopyPointerLocked()
+	rt.invalidateCopyPointerLocked(true)
 	rt.copyMu.Unlock()
 }
 
 // handleFreshCopyPress is the only normal-screen press path that creates a
 // selection candidate. Its geometry comes from the same frame-absolute hit
 // test used by active copy mode, never from pane-local synthetic rectangles.
-func (d *Daemon) handleFreshCopyPress(_ *session, ac *attachedClient, tb *tab, routed *pane, ev mouse.Event) bool {
+func (d *Daemon) handleFreshCopyPress(sess *session, ac *attachedClient, tb *tab, routed *pane, ev mouse.Event) bool {
 	if routed == nil {
 		return false
 	}
@@ -182,7 +182,7 @@ func (d *Daemon) handleFreshCopyPress(_ *session, ac *attachedClient, tb *tab, r
 	tb.mu.Unlock()
 	if !ok || geometry.pane != routed {
 		ac.overlays.copyMu.Lock()
-		ac.overlays.invalidateCopyPointerLocked()
+		ac.overlays.invalidateCopyPointerLocked(true)
 		ac.overlays.copyMu.Unlock()
 		return true
 	}
@@ -198,15 +198,42 @@ func (d *Daemon) handleFreshCopyPress(_ *session, ac *attachedClient, tb *tab, r
 	mapped, ok := mapCopyMouse(ev, geometry, max(document.Len()-document.Height(), 0), document, false)
 	if !ok {
 		ac.overlays.copyMu.Lock()
-		ac.overlays.invalidateCopyPointerLocked()
+		ac.overlays.invalidateCopyPointerLocked(true)
 		ac.overlays.copyMu.Unlock()
 		return true
 	}
-	ac.overlays.copyMu.Lock()
-	if ac.overlays.copyMode == nil && ac.overlays.copyCandidate == nil {
-		ac.overlays.beginCopyPointerLocked(copyPointerState{pane: geometry.pane, document: document, geometry: geometry, press: mapped.pos})
+	rt := ac.overlays
+	rt.copyMu.Lock()
+	if rt.copyMode != nil || rt.copyCandidate != nil {
+		rt.copyMu.Unlock()
+		return true
 	}
-	ac.overlays.copyMu.Unlock()
+	rt.beginCopyPointerLocked(copyPointerState{pane: geometry.pane, document: document, geometry: geometry, press: mapped.pos})
+	pointer := rt.copyPointer
+	now := d.clock.Now()
+	doubleClick := d.isCopyDoubleClickLocked(rt, geometry.pane, mapped.pos, now)
+	if doubleClick {
+		rt.copyClick = copyClickCandidate{}
+	} else {
+		rt.copyClick = copyClickCandidate{valid: true, pane: geometry.pane, pos: mapped.pos, at: now}
+	}
+	rt.copyMu.Unlock()
+	if !doubleClick {
+		return true
+	}
+
+	selectedWord := false
+	if d.publishCopyMode(sess, ac, tb, geometry.pane, document, func(mode *scopy.Mode) {
+		selectedWord = mode.SelectWordAt(mapped.pos)
+	}, func(runtime *overlayRuntime, mode *scopy.Mode) {
+		if runtime.copyPointerEpoch != pointer.epoch || runtime.copyPane != pointer.pane || mode.Document() != pointer.document {
+			return
+		}
+		pointer.wordDrag = selectedWord
+		runtime.copyPointer = pointer
+	}) {
+		d.invalidateRender(sess, ac, true, "input.go")
+	}
 	return true
 }
 
@@ -223,7 +250,7 @@ func (d *Daemon) handleFreshCopyPointer(sess *session, ac *attachedClient, ev mo
 		if active && ev.Type == mouse.Release {
 			rt.copyMu.Lock()
 			if rt.copyPointerEpoch == epoch {
-				rt.invalidateCopyPointerLocked()
+				rt.invalidateCopyPointerLocked(false)
 			}
 			rt.copyMu.Unlock()
 			return true
@@ -234,7 +261,7 @@ func (d *Daemon) handleFreshCopyPointer(sess *session, ac *attachedClient, ev mo
 		if ev.Type == mouse.Release {
 			rt.copyMu.Lock()
 			if rt.copyPointerEpoch == epoch {
-				rt.invalidateCopyPointerLocked()
+				rt.invalidateCopyPointerLocked(false)
 			}
 			rt.copyMu.Unlock()
 			return true
@@ -248,16 +275,23 @@ func (d *Daemon) handleFreshCopyPointer(sess *session, ac *attachedClient, ev mo
 	if mouseMode != 0 || altScreen {
 		rt.copyMu.Lock()
 		if rt.copyPointerEpoch == epoch {
-			rt.invalidateCopyPointerLocked()
+			rt.invalidateCopyPointerLocked(true)
 		}
 		rt.copyMu.Unlock()
 		return false // preserve child forwarding when it enabled mouse reporting.
 	}
 	mapped, ok := mapCopyMouse(ev, pointer.geometry, max(pointer.document.Len()-pointer.document.Height(), 0), pointer.document, ev.Type == mouse.Motion)
+	if ev.Type == mouse.Motion {
+		rt.copyMu.Lock()
+		if rt.copyPointerEpoch == epoch && rt.copyClick.valid && rt.copyClick.pane == pointer.pane {
+			rt.copyClick.dragged = true
+		}
+		rt.copyMu.Unlock()
+	}
 	if ev.Type == mouse.Release {
 		rt.copyMu.Lock()
 		if rt.copyPointerEpoch == epoch {
-			rt.invalidateCopyPointerLocked()
+			rt.invalidateCopyPointerLocked(false)
 		}
 		rt.copyMu.Unlock()
 		return true
@@ -321,7 +355,7 @@ func invalidateSnapshotCopyPointer(rt *overlayRuntime, snapshot copyMouseInputSn
 		rt.copyPane != snapshot.pane || rt.copyDocument != snapshot.document {
 		return
 	}
-	rt.invalidateCopyPointerLocked()
+	rt.invalidateCopyPointerLocked(true)
 }
 
 // handleActiveCopyMouse keeps every drag tied to the pane/document captured at

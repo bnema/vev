@@ -20,10 +20,17 @@ func TestCopyModeLifecycleResizeExitsBeforeGeometryChange(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 	d.enterCopyMode(sess, ac)
 	require.True(t, ac.overlays.copyActive())
+	ac.overlays.copyMu.Lock()
+	seedCopyInteractionLocked(ac.overlays, ac.overlays.copyPane, ac.overlays.copyDocument)
+	ac.overlays.copyMu.Unlock()
 
 	d.resize(sess, ac, domain.Size{Cols: 100, Rows: 30})
 
 	require.False(t, ac.overlays.copyActive())
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
+	ac.overlays.copyMu.Unlock()
 }
 
 func TestCopyModeLifecycleActivateTabClearsRuntime(t *testing.T) {
@@ -35,11 +42,18 @@ func TestCopyModeLifecycleActivateTabClearsRuntime(t *testing.T) {
 	}()
 	d.enterCopyMode(sess, ac)
 	require.True(t, ac.overlays.copyActive())
+	ac.overlays.copyMu.Lock()
+	seedCopyInteractionLocked(ac.overlays, ac.overlays.copyPane, ac.overlays.copyDocument)
+	ac.overlays.copyMu.Unlock()
 
 	require.True(t, sess.switchTab(1))
 	d.activateTab(sess, sess.activeTab())
 
 	require.False(t, ac.overlays.copyActive())
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
+	ac.overlays.copyMu.Unlock()
 }
 
 func TestCopyModeLifecycleClosePaneClearsRecoveredClientState(t *testing.T) {
@@ -61,11 +75,16 @@ func TestCopyModeLifecycleClosePaneClearsRecoveredClientState(t *testing.T) {
 	ac.overlays.copyPane = closing
 	ac.overlays.copyDocument = document
 	ac.overlays.copyMode = scopy.NewMode(document)
+	seedCopyInteractionLocked(ac.overlays, closing, document)
 	ac.overlays.copyMu.Unlock()
 
 	require.NoError(t, d.closePane(sess, tb, "pane-2", nil, false))
 	require.False(t, ac.overlays.copyActive())
 	require.Nil(t, copyTargetPane(ac.overlays))
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
+	ac.overlays.copyMu.Unlock()
 }
 
 func TestCopyModeLifecycleCloseOnlyPaneInTabClearsRecoveredClientState(t *testing.T) {
@@ -184,6 +203,7 @@ func TestCopyModeLifecyclePublicationEpochRejectsReleaseAndPaneClose(t *testing.
 			require.Nil(t, ac.overlays.copyMode, "stale publication must not resurrect copy mode")
 			require.Nil(t, ac.overlays.copyCandidate)
 			require.False(t, ac.overlays.copyPointer.valid)
+			require.False(t, ac.overlays.copyClick.valid)
 			ac.overlays.copyMu.Unlock()
 		})
 	}
@@ -231,6 +251,7 @@ func TestCopyModeLifecycleFloatingCloseDuringPublicationDoesNotResurrect(t *test
 	require.Nil(t, ac.overlays.copyMode)
 	require.Nil(t, ac.overlays.copyCandidate)
 	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
 	ac.overlays.copyMu.Unlock()
 }
 
