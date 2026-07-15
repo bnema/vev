@@ -124,6 +124,30 @@ func TestComposeFrameCacheSkipsUndamagedBlitsAndInvalidatesFocusAndLayout(t *tes
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, out.damage)
 }
 
+func TestComposeFrameStackDrawsTitleBarsAndDimsCollapsed(t *testing.T) {
+	state := cachedStackTitleState("collapsed", 1, true)
+	state.theme = themeui.Theme{
+		Known:      true,
+		TrueColor:  true,
+		HasFG:      true,
+		HasBG:      true,
+		Foreground: renderer.RGB{R: 220, G: 210, B: 200},
+		Background: renderer.RGB{R: 20, G: 30, B: 40},
+	}
+	before := cloneCapturedStackState(state)
+
+	out := composeFrame(state, composeCacheInput{})
+
+	collapsedTitle := out.frame.At(0, 1)
+	require.Equal(t, 'c', collapsedTitle.Rune)
+	require.True(t, collapsedTitle.Style.HasForegroundRGB, "collapsed title bar must use dimmed chrome")
+	focusedTitle := out.frame.At(0, 2)
+	require.Equal(t, 's', focusedTitle.Rune)
+	require.True(t, focusedTitle.Style.Inverse || focusedTitle.Style.HasBackgroundRGB, "focused title bar must use accent chrome")
+	require.Equal(t, 'E', out.frame.At(0, 3).Rune, "expanded pane content must be visible below its title bar")
+	require.Equal(t, before, state, "composition must not mutate the captured source frame")
+}
+
 func TestComposeFrameCacheRefreshesStackTitlesAndBars(t *testing.T) {
 	initial := cachedStackTitleState("one", 1, true)
 	committed := composeFrame(initial, composeCacheInput{})
@@ -188,12 +212,29 @@ func cachedSplitState(fingerprint string, focus layout.PaneID, direction layout.
 
 func cachedStackTitleState(title string, generation uint64, reset bool) capturedRenderState {
 	first, second := layout.PaneID("first"), layout.PaneID("second")
-	placements := []layout.Placement{{ID: first, TitleBar: domain.Rect{Width: 20, Height: 1}, Collapsed: true}, {ID: second, TitleBar: domain.Rect{Y: 1, Width: 20, Height: 1}, Collapsed: true}}
+	placements := []layout.Placement{
+		{ID: first, TitleBar: domain.Rect{Width: 20, Height: 1}, Collapsed: true, InStack: true},
+		{ID: second, TitleBar: domain.Rect{Y: 1, Width: 20, Height: 1}, Content: domain.Rect{Y: 2, Width: 20, Height: 3}, InStack: true},
+	}
 	return capturedRenderState{
 		reset:  reset,
 		layout: capturedTabLayout{root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(first), layout.NewLeaf(second)}, Expanded: second}, area: domain.Rect{Width: 20, Height: 5}, focus: second, placements: placements, fingerprint: "stack", valid: true},
-		panes:  []capturedPaneRenderState{{id: first, title: title, titleGeneration: generation, placement: placements[0]}, {id: second, title: "second", titleGeneration: 1, placement: placements[1], focused: true}},
+		panes:  []capturedPaneRenderState{{id: first, title: title, titleGeneration: generation, placement: placements[0]}, {id: second, frame: cachePaneFrame(20, 3, 'E'), title: "second", titleGeneration: 1, placement: placements[1], focused: true, damage: []renderer.Damage{renderer.FullRedraw()}}},
 	}
+}
+
+func cloneCapturedStackState(in capturedRenderState) capturedRenderState {
+	out := in
+	out.layout.placements = append([]layout.Placement(nil), in.layout.placements...)
+	out.panes = append([]capturedPaneRenderState(nil), in.panes...)
+	for i := range out.panes {
+		if in.panes[i].frame.Cells != nil {
+			out.panes[i].frame = in.panes[i].frame.Clone()
+		}
+		out.panes[i].rawDamage = append([]renderer.Damage(nil), in.panes[i].rawDamage...)
+		out.panes[i].damage = append([]renderer.Damage(nil), in.panes[i].damage...)
+	}
+	return out
 }
 
 func cacheBarState(bottom string, reset bool) capturedRenderState {
