@@ -672,13 +672,16 @@ func (e *protoErr) Error() string { return e.text }
 // publishes the terminal state before releasing d.mu, then queues replacement
 // teardown so obsolete worker joins never delay the new handshake.
 func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, term terminalEnv, h ports.Hello) *attachedClient {
+	// Session state is the sole source for future PTY children. Update it before
+	// publishing the attachment; existing PTYs keep their original environment.
+	sess.mu.Lock()
+	sess.env = copyEnvironment(h.Env)
+	sess.terminal = term
+	sess.mu.Unlock()
 	ac, old, cleanup := d.attachClientDeferred(sess, tr, sz, attachClientOptions{
-		clientID:           h.ClientID,
-		resumeCapable:      true,
-		maxOutputInFlight:  normalizeOutputWindow(h.MaxOutputInFlight),
-		environment:        h.Env,
-		terminal:           term,
-		refreshEnvironment: true,
+		clientID:          h.ClientID,
+		resumeCapable:     true,
+		maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight),
 	})
 	d.mu.Unlock()
 	d.retireReplacedClient(old, cleanup)
@@ -728,7 +731,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			var err error
-			sess, err = d.createSessionWithEnvLocked(h.Name, false, cwd, sz, term, h.Env, stopped.tabNames)
+			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, term, h.Env, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err
@@ -739,7 +742,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
-		sess, err := d.createSessionWithEnvLocked(name, true, h.Cwd, sz, term, h.Env)
+		sess, err := d.createSessionLocked(name, true, h.Cwd, sz, term, h.Env)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
@@ -760,7 +763,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}
 		}
-		sess, err := d.createSessionWithEnvLocked(h.Name, false, h.Cwd, sz, term, h.Env)
+		sess, err := d.createSessionLocked(h.Name, false, h.Cwd, sz, term, h.Env)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
@@ -778,7 +781,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			var err error
-			sess, err = d.createSessionWithEnvLocked(h.Name, false, cwd, sz, term, h.Env, stopped.tabNames)
+			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, term, h.Env, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err

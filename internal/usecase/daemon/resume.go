@@ -179,12 +179,13 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	// mandatory first paint cannot be blocked by ACKs that died with the link.
 	ac.output.rebase()
 	ac.output.maxOutstanding = uint64(normalizeOutputWindow(h.MaxOutputInFlight))
-	ac.setEnvironment(h.Env)
 	ac.replaceTransport(tr)
 	ac.size = sz
 	ac.resumeToken = d.nextResumeTokenLocked()
 	ac.parked = false
 	ac.setSession(sess)
+	// The resumed session's snapshot is the sole source for future PTY children.
+	// Existing PTYs retain the environment they were started with.
 	sess.mu.Lock()
 	sess.env = copyEnvironment(h.Env)
 	sess.terminal = terminalEnv{TrueColor: h.TrueColor}

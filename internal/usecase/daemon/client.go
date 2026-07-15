@@ -55,8 +55,6 @@ type attachedClient struct {
 	// previousSession is guarded independently. It is retained through temporary
 	// setSession(nil) hand-offs and cleared only on terminal teardown.
 	previousSession Guarded[*session]
-	envMu           sync.Mutex // guards the immutable attach environment snapshot
-	env             []string
 	linkMu          sync.Mutex
 	sendMu          sync.Mutex
 }
@@ -108,18 +106,6 @@ func (ac *attachedClient) initOverlays() {
 func (ac *attachedClient) currentSession() *session { return ac.sess.Get() }
 
 func (ac *attachedClient) setSession(sess *session) { ac.sess.Set(sess) }
-
-func (ac *attachedClient) environment() []string {
-	ac.envMu.Lock()
-	defer ac.envMu.Unlock()
-	return copyEnvironment(ac.env)
-}
-
-func (ac *attachedClient) setEnvironment(env []string) {
-	ac.envMu.Lock()
-	ac.env = copyEnvironment(env)
-	ac.envMu.Unlock()
-}
 
 func (ac *attachedClient) clearPreviousSession() {
 	if ac != nil {
@@ -406,12 +392,9 @@ func (d *Daemon) notifiesSnapshot() []chan struct{} {
 }
 
 type attachClientOptions struct {
-	clientID           [16]byte
-	resumeCapable      bool
-	maxOutputInFlight  uint8
-	environment        []string
-	terminal           terminalEnv
-	refreshEnvironment bool
+	clientID          [16]byte
+	resumeCapable     bool
+	maxOutputInFlight uint8
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.Transport, sz domain.Size, opts attachClientOptions) (*attachedClient, *attachedClient) {
@@ -432,7 +415,6 @@ func (d *Daemon) attachClientDeferred(sess *session, tr ports.Transport, sz doma
 		clientID:      opts.clientID,
 		resumeCapable: opts.resumeCapable,
 		resumeToken:   resumeToken,
-		env:           copyEnvironment(opts.environment),
 	}
 	ac.initOverlays()
 	ac.setSession(sess)
@@ -443,10 +425,6 @@ func (d *Daemon) attachClientDeferred(sess *session, tr ports.Transport, sz doma
 	sess.mu.Lock()
 	old := sess.client
 	name := sess.name
-	if opts.refreshEnvironment {
-		sess.env = copyEnvironment(opts.environment)
-		sess.terminal = opts.terminal
-	}
 	sess.mu.Unlock()
 	_, cleanup := d.attachCoordinatorDeferred(sess, old, ac, false)
 	sess.mu.Lock()

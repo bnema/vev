@@ -129,11 +129,7 @@ func (d *Daemon) touchMRU(sess *session) {
 	}
 }
 
-func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, restoredTabNames ...[]string) (*session, error) {
-	return d.createSessionWithEnvLocked(name, ephemeral, cwd, sz, term, d.baseEnv, restoredTabNames...)
-}
-
-func (d *Daemon) createSessionWithEnvLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
+func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
 	env = copyEnvironment(env)
 	tbSize := tabSize(sz)
 	var names []string
@@ -227,7 +223,6 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 		return err
 	}
 	sz := ac.size
-	env := ac.environment()
 	d.mu.Lock()
 	if d.closing {
 		d.mu.Unlock()
@@ -240,6 +235,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	from.mu.Lock()
 	cwd := from.cwd
 	term := from.terminal
+	env := copyEnvironment(from.env)
 	if from.client != ac {
 		from.mu.Unlock()
 		d.mu.Unlock()
@@ -247,7 +243,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	}
 	from.mu.Unlock()
 
-	newSess, err := d.createSessionWithEnvLocked(name, false, cwd, sz, term, env)
+	newSess, err := d.createSessionLocked(name, false, cwd, sz, term, env)
 	if err != nil {
 		d.mu.Unlock()
 		return err

@@ -853,7 +853,7 @@ func TestCreateSessionSeedsMRUFromStopped(t *testing.T) {
 	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 1, lastUsedSeq: 42}
 	d.mruSeq.Store(42)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.Equal(t, uint64(42), sess.mruAt.Load())
 	require.Equal(t, uint64(42), state.record(t, "work").LastUsedSeq)
@@ -869,7 +869,7 @@ func TestCreateRenameKillPersistenceLifecycle(t *testing.T) {
 	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
 	WithStore(store)(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.True(t, state.has("work"))
 	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
@@ -893,7 +893,7 @@ func TestRenameTabPersistsForNamedSession(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(store)(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
 
@@ -930,7 +930,7 @@ func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
 			WithStore(store)(d)
 			sz := domain.Size{Cols: 80, Rows: 24}
 
-			sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+			sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 			require.NoError(t, err)
 			require.NoError(t, d.createTab(sess, sz))
 			require.NoError(t, d.createTab(sess, sz))
@@ -978,7 +978,7 @@ func TestRenameTabDoesNotPersistForEphemeralSession(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(store)(d)
 
-	sess, err := d.createSessionLocked("0", true, "/tmp/work", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("0", true, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
 	require.Equal(t, "shell", sess.tabs[0].name)
@@ -1021,7 +1021,7 @@ func TestEphemeralRenamePromotesAndStoppedCollisionRejected(t *testing.T) {
 	WithStore(store)(d)
 	d.stopped["taken"] = stoppedSession{name: "taken", cwd: "/tmp", createdAt: 1}
 
-	sess, err := d.createSessionLocked("0", true, "/tmp/e", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("0", true, "/tmp/e", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.False(t, state.has("0"))
 	require.EqualError(t, d.renameSession(sess, "taken"), "name already in use")
@@ -1039,7 +1039,7 @@ func TestRefreshSessionCwdTouchesOnlyOnChange(t *testing.T) {
 	cwd := "/tmp/work"
 	WithCwdReader(func(int) (string, error) { return cwd, nil })(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	state.mu.Lock()
 	setsAfterCreate := state.sets
@@ -1136,7 +1136,7 @@ func TestNewSessionAssignsStableIDsAndChildEnv(t *testing.T) {
 	d := newTestDaemon(t, f, stubClock{})
 	d.baseEnv = []string{"KEEP=1", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{TrueColor: true})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{TrueColor: true}, d.baseEnv)
 	require.NoError(t, err)
 	defer func() {
 		_ = d.killSession(sess, ports.ReasonServerShutdown, false)
@@ -1192,7 +1192,7 @@ func TestRenameSessionUnsafeNameRejected(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.ErrorIs(t, d.renameSession(sess, "my work"), domain.ErrInvalidSessionName)
 }
@@ -1208,9 +1208,9 @@ func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {
 	WithStore(store)(d)
 	WithCwdReader(func(int) (string, error) { return "/tmp/latest", nil })(d)
 
-	natural, err := d.createSessionLocked("natural", false, "/tmp/old", sz, terminalEnv{})
+	natural, err := d.createSessionLocked("natural", false, "/tmp/old", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
-	other, err := d.createSessionLocked("other", false, "/tmp/other", sz, terminalEnv{})
+	other, err := d.createSessionLocked("other", false, "/tmp/other", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	_ = d.killSession(natural, ports.ReasonSessionKilled, false)
 	require.True(t, state.has("natural"))

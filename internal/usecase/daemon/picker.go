@@ -415,7 +415,6 @@ func (d *Daemon) switchToTarget(sess *session, ac *attachedClient, target picker
 }
 
 func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetSess *session, target picker.Target) *attachedClient {
-	env := ac.environment()
 	d.mu.Lock()
 	if d.sessions[target.Session] != targetSess {
 		d.mu.Unlock()
@@ -428,6 +427,7 @@ func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetS
 		return nil
 	}
 	term := from.terminal
+	env := copyEnvironment(from.env)
 	from.client = nil
 	ac.setSession(nil)
 	from.mu.Unlock()
@@ -470,9 +470,9 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 		return false
 	}
 	term := from.terminal
-	env := ac.environment()
+	env := copyEnvironment(from.env)
 	cwd := d.dirOrHome(stopped.cwd)
-	targetSess, err := d.createSessionWithEnvLocked(target.Name, false, cwd, ac.size, term, env, stopped.tabNames)
+	targetSess, err := d.createSessionLocked(target.Name, false, cwd, ac.size, term, env, stopped.tabNames)
 	if err != nil {
 		from.mu.Unlock()
 		d.mu.Unlock()

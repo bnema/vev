@@ -1,16 +1,19 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -678,14 +681,31 @@ func TestSequencedInputDoesNotPrematurelyEchoAck(t *testing.T) {
 	require.Zero(t, ac.echoAck.Load())
 }
 
-func TestResumeParkedUpdatesTerminalEnv(t *testing.T) {
-	pty, release := newBlockingPTY(t)
-	defer release()
-	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+func TestResumeParkedReplacesFuturePTYEnvironment(t *testing.T) {
+	initialPTY, releaseInitial := newBlockingPTY(t)
+	futurePTY, releaseFuture := newBlockingPTY(t)
+	defer releaseInitial()
+	defer releaseFuture()
+	var commands []string
+	var envs [][]string
+	factory := portsmocks.NewMockPTYFactory(t)
+	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, command string, _ []string, env []string, _ string, size domain.Size) (ports.PTY, error) {
+			if size != (domain.Size{Cols: 80, Rows: 22}) {
+				return newQuietPTY(), nil
+			}
+			commands = append(commands, command)
+			envs = append(envs, append([]string(nil), env...))
+			if len(commands) == 1 {
+				return initialPTY, nil
+			}
+			return futurePTY, nil
+		},
+	).Maybe()
+	d := newTestDaemon(t, factory, stubClock{})
 	tr, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
 	hello := helloResumeCapable(ports.IntentNew, "work", 0)
-	hello.Env = []string{"SECRET=before", "SHELL=/bin/sh"}
-	hello.TrueColor = false
+	hello.Env = []string{"SECRET=before", "SHELL=/bin/sh", "TERM=old", "VEV=old"}
 	sess, ac, err := d.route(hello, tr)
 	require.NoError(t, err)
 	token := ac.resumeToken
@@ -693,16 +713,21 @@ func TestResumeParkedUpdatesTerminalEnv(t *testing.T) {
 	require.True(t, d.parkAttachment(sess, ac))
 
 	resumeHello := helloResumeCapable(ports.IntentResume, "work", token)
-	resumeHello.Env = []string{"SECRET=after", "SHELL=/usr/bin/fish"}
+	resumeHello.Env = []string{"SECRET=after", "PAIR=a=b", "SHELL=/usr/bin/fish", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}
 	resumeHello.TrueColor = true
-	_, resumed, ok, err := d.resumeParked(resumeHello, &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
+	_, _, ok, err := d.resumeParked(resumeHello, &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	require.True(t, ok)
+	require.NoError(t, d.createTab(sess, domain.Size{Cols: 80, Rows: 24}))
+
 	sess.mu.Lock()
-	defer sess.mu.Unlock()
+	future := sess.tabs[1].focusedPane()
+	futureTabID, futurePaneID := sess.tabs[1].stableID, future.stableID
 	require.True(t, sess.terminal.TrueColor)
 	require.Equal(t, resumeHello.Env, sess.env)
-	require.Equal(t, resumeHello.Env, resumed.environment())
+	sess.mu.Unlock()
+	require.Equal(t, []string{"/bin/sh", "/usr/bin/fish"}, commands)
+	require.Equal(t, []string{"SECRET=after", "PAIR=a=b", "SHELL=/usr/bin/fish", "TERM=xterm-direct", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + futureTabID + ",pane=" + futurePaneID}, envs[1])
 }
 
 func TestResumeRenegotiatesOutputWindowOnReusedStream(t *testing.T) {
