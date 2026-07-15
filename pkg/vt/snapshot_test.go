@@ -7,6 +7,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPrimaryVisibleSnapshotRetainsReflowBoundaries(t *testing.T) {
+	s := NewScreen(5, 3)
+	s.Write([]byte("abcdefgh"))
+	blob, err := s.MarshalPrimaryVisible()
+	require.NoError(t, err)
+
+	restored := NewScreen(1, 1)
+	require.NoError(t, restored.RestorePrimaryVisible(blob))
+	restored.Resize(3, 3)
+	require.Equal(t, "abc", rowString(restored.Frame.Row(0)))
+	require.Equal(t, "def", rowString(restored.Frame.Row(1)))
+	require.Equal(t, "gh ", rowString(restored.Frame.Row(2)))
+}
+
 func TestPrimaryVisibleRowsCopiesActivePrimaryScreen(t *testing.T) {
 	s := NewScreen(6, 2)
 	s.Write([]byte("hello"))

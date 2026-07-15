@@ -4,6 +4,7 @@ import "github.com/bnema/vev/pkg/renderer"
 
 type screenState struct {
 	frame        renderer.Frame
+	buffer       *buffer
 	row          int
 	col          int
 	style        renderer.Style
@@ -86,7 +87,8 @@ func (s *Screen) colorSchemeReport() []byte {
 }
 
 func (s *Screen) reset() {
-	s.Frame = renderer.NewFrame(s.Frame.Width, s.Frame.Height)
+	s.buffer = newBuffer(s.Frame.Width, s.Frame.Height)
+	s.Frame = s.buffer.frame
 	s.Row, s.Col = 0, 0
 	s.Style = renderer.DefaultStyle()
 	s.escapeBuf = s.escapeBuf[:0]
@@ -190,6 +192,7 @@ func (s *Screen) enterAlternateScreen() {
 	if s.alternate == nil {
 		s.alternate = &screenState{
 			frame:        cloneFrame(s.Frame),
+			buffer:       s.buffer.clone(),
 			row:          s.Row,
 			col:          s.Col,
 			style:        s.Style,
@@ -200,7 +203,8 @@ func (s *Screen) enterAlternateScreen() {
 			insertMode:   s.insertMode,
 		}
 	}
-	s.Frame = renderer.NewFrame(s.Frame.Width, s.Frame.Height)
+	s.buffer = newBuffer(s.Frame.Width, s.Frame.Height)
+	s.Frame = s.buffer.frame
 	s.Row, s.Col = 0, 0
 	s.Style = renderer.DefaultStyle()
 	s.savedCursor = cursorState{}
@@ -213,7 +217,11 @@ func (s *Screen) exitAlternateScreen() {
 		return
 	}
 	state := s.alternate
-	s.Frame = cloneFrame(state.frame)
+	s.buffer = state.buffer
+	if s.buffer == nil {
+		s.buffer = bufferFromFrame(cloneFrame(state.frame))
+	}
+	s.Frame = s.buffer.frame
 	s.Row = clamp(state.row, 0, s.Frame.Height-1)
 	s.Col = clamp(state.col, 0, s.Frame.Width-1)
 	s.Style = state.style

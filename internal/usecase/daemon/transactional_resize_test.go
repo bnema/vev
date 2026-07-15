@@ -357,6 +357,9 @@ func TestTransactionalResizeObsoleteTimerCallbacksCommitOnlyLatestEpoch(t *testi
 	// through S2 immediately (subject to ACK/sync gates).
 	frame := <-frames
 	require.Equal(t, ports.MsgOutput, frame.Type, "the committed epoch emits a full frame")
+	output, err := ports.UnmarshalOutput(frame.Payload)
+	require.NoError(t, err)
+	require.Zero(t, output.BaseStateNum, "the accepted resize frame must reset the renderer state")
 	select {
 	case extra := <-frames:
 		t.Fatalf("obsolete epoch emitted an additional frame: %#v", extra)

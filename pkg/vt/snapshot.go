@@ -8,7 +8,10 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-const visibleMagic = "VTV1"
+const (
+	visibleMagic         = "VTV2"
+	visibleBoundaryBytes = 5
+)
 
 // DecodeStats describes resources declared by one canonical VT blob.
 type DecodeStats struct {
@@ -112,15 +115,40 @@ func NewScreenWithRestoredHistory(width, height int, config HistoryConfig, seale
 // MarshalVisible encodes the exact visible primary frame, including every
 // blank, row width, and terminal cell attribute.
 func MarshalVisible(frame renderer.Frame) ([]byte, error) {
-	if frame.Width < 0 || frame.Height < 0 || uint64(frame.Width) > math.MaxUint32 || uint64(frame.Height) > math.MaxUint32 {
+	if _, _, _, ok := visibleEncodingBudget(frame.Width, frame.Height); !ok {
 		return nil, fmt.Errorf("marshal visible: %w", errInvalidHistory)
 	}
-	cells := uint64(frame.Width) * uint64(frame.Height)
-	bytes, ok := historyCellByteCount(cells)
-	if !ok || cells > maxHistoryCells || bytes > maxHistoryDecodedBytes {
+	boundaries := make([]lineBoundary, frame.Height)
+	for y := range boundaries {
+		for x := frame.Width - 1; x >= 0; x-- {
+			if !frame.At(x, y).Equal(renderer.BlankCell()) {
+				boundaries[y].end = x + 1
+				break
+			}
+		}
+	}
+	return marshalVisible(frame, boundaries)
+}
+
+// MarshalPrimaryVisible preserves the primary buffer's logical-line boundaries
+// alongside its cells so a restored viewport can subsequently reflow.
+func (s *Screen) MarshalPrimaryVisible() ([]byte, error) {
+	b := s.buffer
+	if s.alternate != nil {
+		b = s.alternate.buffer
+	}
+	if b == nil {
+		return MarshalVisible(s.PrimaryVisibleFrame())
+	}
+	return marshalVisible(b.frame, b.boundaries)
+}
+
+func marshalVisible(frame renderer.Frame, boundaries []lineBoundary) ([]byte, error) {
+	_, bytes, boundaryBytes, ok := visibleEncodingBudget(frame.Width, frame.Height)
+	if !ok || len(boundaries) != frame.Height {
 		return nil, fmt.Errorf("marshal visible: %w", errInvalidHistory)
 	}
-	out := make([]byte, 0, 13+bytes)
+	out := make([]byte, 0, int(13+bytes+boundaryBytes))
 	out = append(out, visibleMagic...)
 	out = append(out, historyVersion)
 	out = binary.BigEndian.AppendUint32(out, uint32(frame.Width))
@@ -133,6 +161,14 @@ func MarshalVisible(frame renderer.Frame) ([]byte, error) {
 			out = appendHistoryCell(out, cell)
 		}
 	}
+	for _, boundary := range boundaries {
+		out = binary.BigEndian.AppendUint32(out, uint32(boundary.end))
+		if boundary.soft {
+			out = append(out, 1)
+		} else {
+			out = append(out, 0)
+		}
+	}
 	return out, nil
 }
 
@@ -143,12 +179,8 @@ func PreflightVisibleBlob(data []byte) (DecodeStats, error) {
 		return DecodeStats{}, fmt.Errorf("preflight visible: %w", errInvalidHistory)
 	}
 	width, height := uint64(binary.BigEndian.Uint32(data[5:9])), uint64(binary.BigEndian.Uint32(data[9:13]))
-	if width != 0 && height > math.MaxUint64/width {
-		return DecodeStats{}, fmt.Errorf("preflight visible: %w", errInvalidHistory)
-	}
-	cells := width * height
-	bytes, ok := historyCellByteCount(cells)
-	if !ok || cells > maxHistoryCells || bytes > maxHistoryDecodedBytes || uint64(len(data)-13) != bytes {
+	cells, bytes, boundaryBytes, ok := visibleEncodingBudget64(width, height)
+	if !ok || bytes > math.MaxUint64-boundaryBytes || uint64(len(data)-13) != bytes+boundaryBytes {
 		return DecodeStats{}, fmt.Errorf("preflight visible: %w", errInvalidHistory)
 	}
 	p := historyParser{data: data[13:]}
@@ -158,24 +190,65 @@ func PreflightVisibleBlob(data []byte) (DecodeStats, error) {
 			return DecodeStats{}, fmt.Errorf("preflight visible: %w", errInvalidHistory)
 		}
 	}
+	for range height {
+		if uint64(binary.BigEndian.Uint32(p.data[:4])) > width || p.data[4] > 1 {
+			return DecodeStats{}, fmt.Errorf("preflight visible: %w", errInvalidHistory)
+		}
+		p.data = p.data[5:]
+	}
 	return DecodeStats{Rows: height, Cells: cells, Styles: cells, Bytes: bytes}, nil
+}
+
+func visibleEncodingBudget(width, height int) (cells, cellBytes, boundaryBytes uint64, ok bool) {
+	if width < 0 || height < 0 {
+		return 0, 0, 0, false
+	}
+	return visibleEncodingBudget64(uint64(width), uint64(height))
+}
+
+func visibleEncodingBudget64(width, height uint64) (cells, cellBytes, boundaryBytes uint64, ok bool) {
+	if width > math.MaxUint32 || height > math.MaxUint32 || (width != 0 && height > math.MaxUint64/width) || height > math.MaxUint64/visibleBoundaryBytes {
+		return 0, 0, 0, false
+	}
+	cells = width * height
+	cellBytes, ok = historyCellByteCount(cells)
+	if !ok || cells > maxHistoryCells || cellBytes > maxHistoryDecodedBytes {
+		return 0, 0, 0, false
+	}
+	boundaryBytes = height * visibleBoundaryBytes
+	if boundaryBytes > maxVisibleBoundaryBytes {
+		return 0, 0, 0, false
+	}
+	return cells, cellBytes, boundaryBytes, true
 }
 
 // UnmarshalVisible decodes a preflighted exact visible frame.
 func UnmarshalVisible(data []byte) (renderer.Frame, error) {
+	frame, _, err := unmarshalVisible(data)
+	return frame, err
+}
+
+func unmarshalVisible(data []byte) (renderer.Frame, []lineBoundary, error) {
 	if _, err := PreflightVisibleBlob(data); err != nil {
-		return renderer.Frame{}, err
+		return renderer.Frame{}, nil, err
 	}
 	width, height := int(binary.BigEndian.Uint32(data[5:9])), int(binary.BigEndian.Uint32(data[9:13]))
 	frame := renderer.NewFrame(width, height)
-	p := historyParser{data: data[13:]}
+	cellBytes, _ := historyCellByteCount(uint64(width) * uint64(height))
+	p := historyParser{data: data[13 : 13+cellBytes]}
 	for y := range height {
 		for x := range width {
 			cell, _ := p.cell()
 			frame.Set(x, y, cell)
 		}
 	}
-	return frame, nil
+	boundaries := make([]lineBoundary, height)
+	offset := 13 + int(cellBytes)
+	for y := range boundaries {
+		boundaries[y] = lineBoundary{end: clamp(int(binary.BigEndian.Uint32(data[offset:offset+4])), 0, width), soft: data[offset+4] == 1}
+		offset += 5
+	}
+	return frame, boundaries, nil
 }
 
 // PrimaryVisibleFrame returns a deep copy of the exact visible primary frame.
@@ -203,17 +276,21 @@ func (s *Screen) PrimaryVisibleRows() [][]renderer.Cell {
 
 // RestorePrimaryVisible replaces the primary frame from an exact visible blob.
 func (s *Screen) RestorePrimaryVisible(blob []byte) error {
-	frame, err := UnmarshalVisible(blob)
+	frame, boundaries, err := unmarshalVisible(blob)
 	if err != nil {
 		return err
 	}
+	b := bufferFromFrame(frame)
+	b.boundaries = boundaries
 	// A persisted primary frame is authoritative: restoring it directly keeps
 	// exact row widths and height even when a collapsed layout chose a smaller
 	// initial PTY size. A subsequent resize reconciles it with live geometry.
 	if s.alternate != nil {
 		s.alternate.frame = frame
+		s.alternate.buffer = b
 	} else {
-		s.Frame = frame
+		s.buffer = b
+		s.Frame = b.frame
 	}
 	s.fullRedraw()
 	return nil

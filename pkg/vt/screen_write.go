@@ -17,6 +17,7 @@ func (s *Screen) putRune(r rune) {
 		if s.Frame.Width > 0 && s.Col >= s.Frame.Width {
 			s.Col = s.Frame.Width - 1
 		}
+		s.buffer.hard(s.Row)
 		s.index()
 	case '\b':
 		if s.Col > 0 {
@@ -50,6 +51,7 @@ func (s *Screen) putPrintable(r rune) {
 	}
 	// Deferred wrap: cursor sits past the last column.
 	if s.Col >= s.Frame.Width {
+		s.buffer.soft(s.Row)
 		s.Col = 0
 		s.index()
 	}
@@ -74,6 +76,8 @@ func (s *Screen) putPrintable(r rune) {
 			}
 			s.clearWidePairAt(s.Col, s.Row)
 			s.Frame.Set(s.Col, s.Row, renderer.BlankCell())
+			s.buffer.truncate(s.Row, cx)
+			s.buffer.continueRow(s.Row)
 			s.record(renderer.Damage{Kind: renderer.DamageText, X: cx, Y: s.Row, Width: s.Col - cx + 1, Height: 1, Count: 1})
 			s.Col = 0
 			s.index()
@@ -95,6 +99,7 @@ func (s *Screen) putPrintable(r rune) {
 			row[x] = renderer.BlankCell()
 		}
 		s.repairRow(s.Row)
+		s.buffer.insert(s.Row, s.Col, w)
 		if leftSplit {
 			insertDamageX = s.Col - 1
 		}
@@ -114,6 +119,7 @@ func (s *Screen) putPrintable(r rune) {
 		s.Frame.Set(x, s.Row, renderer.BlankCell())
 	}
 	s.Frame.Set(s.Col, s.Row, renderer.Cell{Rune: r, Style: s.Style})
+	s.buffer.content(s.Row, s.Col+w)
 	if w == 2 {
 		s.Frame.Set(s.Col+1, s.Row, renderer.Cell{Continuation: true, Style: s.Style})
 	}
@@ -188,6 +194,7 @@ func (s *Screen) clearRow(y, x0, x1 int) (start, width int) {
 	for x := x0; x < x1; x++ {
 		s.Frame.Set(x, y, blank)
 	}
+	s.buffer.clear(y, x0, x1)
 	return x0, x1 - x0
 }
 
