@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -331,6 +332,36 @@ func TestAttachHelloIncludesTrueColor(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("hello frame was not sent")
 	}
+}
+
+func TestAttachHelloIncludesCompleteLocalEnvironment(t *testing.T) {
+	t.Setenv("VEV_CLIENT_ENV_TEST", "TOKEN=a=b=c")
+
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	tm, in := newHappyTerminal(t, &out, &restoreCount, resizeCh)
+	defer in.unblock()
+
+	gotHello := make(chan ports.Hello, 1)
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).RunAndReturn(func(f ports.Frame) error {
+		hello, err := ports.UnmarshalHello(f.Payload)
+		if err != nil {
+			return err
+		}
+		gotHello <- hello
+		return nil
+	}).Once()
+	unblock := scriptRecv(tr,
+		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))},
+	)
+	defer unblock()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	require.NoError(t, runTestClient(context.Background(), attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentEphemeral}))
+	require.Equal(t, os.Environ(), (<-gotHello).Env)
 }
 
 func TestAttachHelloRequestsSingleOutputForDatagramTransport(t *testing.T) {

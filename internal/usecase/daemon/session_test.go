@@ -853,7 +853,7 @@ func TestCreateSessionSeedsMRUFromStopped(t *testing.T) {
 	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 1, lastUsedSeq: 42}
 	d.mruSeq.Store(42)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.Equal(t, uint64(42), sess.mruAt.Load())
 	require.Equal(t, uint64(42), state.record(t, "work").LastUsedSeq)
@@ -869,7 +869,7 @@ func TestCreateRenameKillPersistenceLifecycle(t *testing.T) {
 	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
 	WithStore(store)(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.True(t, state.has("work"))
 	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
@@ -893,7 +893,7 @@ func TestRenameTabPersistsForNamedSession(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(store)(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
 
@@ -930,7 +930,7 @@ func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
 			WithStore(store)(d)
 			sz := domain.Size{Cols: 80, Rows: 24}
 
-			sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+			sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 			require.NoError(t, err)
 			require.NoError(t, d.createTab(sess, sz))
 			require.NoError(t, d.createTab(sess, sz))
@@ -978,7 +978,7 @@ func TestRenameTabDoesNotPersistForEphemeralSession(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(store)(d)
 
-	sess, err := d.createSessionLocked("0", true, "/tmp/work", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("0", true, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.NoError(t, d.renameTab(sess, sess.tabs[0], "shell"))
 	require.Equal(t, "shell", sess.tabs[0].name)
@@ -1021,7 +1021,7 @@ func TestEphemeralRenamePromotesAndStoppedCollisionRejected(t *testing.T) {
 	WithStore(store)(d)
 	d.stopped["taken"] = stoppedSession{name: "taken", cwd: "/tmp", createdAt: 1}
 
-	sess, err := d.createSessionLocked("0", true, "/tmp/e", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("0", true, "/tmp/e", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.False(t, state.has("0"))
 	require.EqualError(t, d.renameSession(sess, "taken"), "name already in use")
@@ -1039,7 +1039,7 @@ func TestRefreshSessionCwdTouchesOnlyOnChange(t *testing.T) {
 	cwd := "/tmp/work"
 	WithCwdReader(func(int) (string, error) { return cwd, nil })(d)
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	state.mu.Lock()
 	setsAfterCreate := state.sets
@@ -1136,7 +1136,7 @@ func TestNewSessionAssignsStableIDsAndChildEnv(t *testing.T) {
 	d := newTestDaemon(t, f, stubClock{})
 	d.baseEnv = []string{"KEEP=1", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}
 
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{TrueColor: true})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{TrueColor: true}, d.baseEnv)
 	require.NoError(t, err)
 	defer func() {
 		_ = d.killSession(sess, ports.ReasonServerShutdown, false)
@@ -1192,7 +1192,7 @@ func TestRenameSessionUnsafeNameRejected(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
-	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.ErrorIs(t, d.renameSession(sess, "my work"), domain.ErrInvalidSessionName)
 }
@@ -1208,9 +1208,9 @@ func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {
 	WithStore(store)(d)
 	WithCwdReader(func(int) (string, error) { return "/tmp/latest", nil })(d)
 
-	natural, err := d.createSessionLocked("natural", false, "/tmp/old", sz, terminalEnv{})
+	natural, err := d.createSessionLocked("natural", false, "/tmp/old", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
-	other, err := d.createSessionLocked("other", false, "/tmp/other", sz, terminalEnv{})
+	other, err := d.createSessionLocked("other", false, "/tmp/other", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	_ = d.killSession(natural, ports.ReasonSessionKilled, false)
 	require.True(t, state.has("natural"))
@@ -1421,4 +1421,80 @@ func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
 	release1()
 	release2()
 	d.sessWg.Wait()
+}
+
+func TestAttachEnvironmentReplacesFuturePTYInputs(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p1, release1 := newBlockingPTY(t)
+	defer release1()
+	p2, release2 := newBlockingPTY(t)
+	defer release2()
+
+	var commands []string
+	var envs [][]string
+	f := portsmocks.NewMockPTYFactory(t)
+	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
+		func(_ context.Context, command string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+			commands = append(commands, command)
+			envs = append(envs, append([]string(nil), env...))
+			if len(envs) == 1 {
+				return p1, nil
+			}
+			return p2, nil
+		},
+	).Twice()
+	floating := newQuietPTY()
+	expectFloatingPrewarmOpen(f, normalSize, floating)
+	d := newTestDaemon(t, f, stubClock{})
+	tr1 := portsmocks.NewMockTransport(t)
+	tr1.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr1.EXPECT().Close().Return(nil).Maybe()
+	tr2 := portsmocks.NewMockTransport(t)
+	tr2.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr2.EXPECT().Close().Return(nil).Maybe()
+
+	first := []string{"SECRET=first", "TERM=bad", "TERM_PROGRAM_extra=keep", "SHELL=/usr/bin/fish", "A=a=b"}
+	sess, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work", Size: sz, Env: first}, tr1)
+	require.NoError(t, err)
+	second := []string{"SECRET=second", "TERM=bad", "TERM_PROGRAM_extra=keep", "SHELL=/bin/bash", "A=a=b"}
+	_, ac, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: sz, Env: second}, tr2)
+	require.NoError(t, err)
+	defer func() {
+		_ = d.killSession(sess, ports.ReasonServerShutdown, false)
+		d.sessWg.Wait()
+	}()
+
+	require.Equal(t, "/usr/bin/fish", commands[0])
+	require.Equal(t, []string{"SECRET=first", "TERM_PROGRAM_extra=keep", "SHELL=/usr/bin/fish", "A=a=b", "TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[0].stableID + ",pane=" + sess.tabs[0].panes["pane-1"].stableID}, envs[0])
+	require.NoError(t, d.createTab(sess, ac.size))
+	require.Equal(t, "/bin/bash", commands[1])
+	require.Equal(t, []string{"SECRET=second", "TERM_PROGRAM_extra=keep", "SHELL=/bin/bash", "A=a=b", "TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[1].stableID + ",pane=" + sess.tabs[1].panes["pane-1"].stableID}, envs[1])
+}
+
+func TestChildEnvFromPreservesNonReservedEntriesVerbatimAndInOrder(t *testing.T) {
+	env := []string{"SECRET=a=b=c", "TERM_PROGRAM_extra=keep", "TERM", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old", "EMPTY="}
+	got := childEnvFrom(env, "work", "tab", "pane", terminalEnv{})
+	require.Equal(t, []string{
+		"SECRET=a=b=c", "TERM_PROGRAM_extra=keep", "TERM", "EMPTY=",
+		"TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=tab,pane=pane",
+	}, got)
+}
+
+func TestShellFromEnvironmentFallsBackOnlyWhenAbsentOrEmpty(t *testing.T) {
+	tests := []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{name: "absent", want: "/bin/sh"},
+		{name: "empty", env: []string{"SHELL="}, want: "/bin/sh"},
+		{name: "set", env: []string{"SHELL=/usr/bin/fish"}, want: "/usr/bin/fish"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, shellFromEnvironment(tt.env))
+		})
+	}
 }

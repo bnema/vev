@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -74,9 +75,14 @@ func recvPump(tr ports.Transport) *pump {
 // attach dials, handshakes, and returns the transport plus its frame pump.
 func attach(t *testing.T, dir string, intent uint8, name string, sz domain.Size) (ports.Transport, *pump) {
 	t.Helper()
+	return attachWithEnvironment(t, dir, intent, name, sz, nil)
+}
+
+func attachWithEnvironment(t *testing.T, dir string, intent uint8, name string, sz domain.Size, env []string) (ports.Transport, *pump) {
+	t.Helper()
 	tr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
-	hello := ports.Hello{Version: ports.ProtocolVersion, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color"}
+	hello := ports.Hello{Version: ports.ProtocolVersion, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color", TrueColor: true, Env: env}
 	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}))
 	p := recvPump(tr)
 	select {
@@ -187,6 +193,64 @@ func screenText(s *vt.Screen) string {
 		}
 	}
 	return b.String()
+}
+
+func shellFixture(t *testing.T, label string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "shell")
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nprintf 'SHELL_COMMAND="+label+"\\n'\nexec /bin/sh\n"), 0o700))
+	return path
+}
+
+func assertChildEnvironment(t *testing.T, tr ports.Transport, p *pump, sz domain.Size, wantTestEnv, wantShell, wantRuntimeDir, wantWayland string) {
+	t.Helper()
+	command := "printf '\\033[2J\\033[H'; printf 'VEV_TEST_ENV=%s SHELL=%s XDG_RUNTIME_DIR=%s WAYLAND_DISPLAY=%s TERM=%s COLORTERM=%s TERM_PROGRAM=%s VEV_PREFIX=%.24s\\n' \"$VEV_TEST_ENV\" \"${SHELL##*/}\" \"$XDG_RUNTIME_DIR\" \"$WAYLAND_DISPLAY\" \"$TERM\" \"$COLORTERM\" \"$TERM_PROGRAM\" \"$VEV\"\n"
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte(command)})}))
+	text := awaitScreenText(t, p, sz, "TERM_PROGRAM=vev")
+	for _, want := range []string{
+		"VEV_TEST_ENV=" + wantTestEnv,
+		"SHELL=" + filepath.Base(wantShell),
+		"XDG_RUNTIME_DIR=" + wantRuntimeDir,
+		"WAYLAND_DISPLAY=" + wantWayland,
+		"TERM=xterm-direct",
+		"COLORTERM=truecolor",
+		"TERM_PROGRAM=vev",
+		"VEV_PREFIX=session=environment,tab=",
+	} {
+		require.Contains(t, text, want)
+	}
+}
+
+func TestIntegration_AttachEnvironmentRefreshesFuturePTYChildren(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	dir, _ := startDaemon(t)
+	firstShell := shellFixture(t, "first")
+	secondShell := shellFixture(t, "second")
+	firstEnv := []string{
+		"VEV_TEST_ENV=first", "SHELL=" + firstShell, "XDG_RUNTIME_DIR=/run/first", "WAYLAND_DISPLAY=wayland-first",
+		"TERM=client", "COLORTERM=client", "TERM_PROGRAM=client", "VEV=client",
+	}
+
+	tr1, p1 := attachWithEnvironment(t, dir, ports.IntentNew, "environment", sz, firstEnv)
+	defer func() { _ = tr1.Close() }()
+	awaitText(t, p1, sz, "SHELL_COMMAND=first")
+	assertChildEnvironment(t, tr1, p1, sz, "first", firstShell, "/run/first", "wayland-first")
+
+	secondEnv := []string{
+		"VEV_TEST_ENV=second", "SHELL=" + secondShell, "XDG_RUNTIME_DIR=/run/second", "WAYLAND_DISPLAY=wayland-second",
+		"TERM=client", "COLORTERM=client", "TERM_PROGRAM=client", "VEV=client",
+	}
+	tr2, p2 := attachWithEnvironment(t, dir, ports.IntentAttach, "environment", sz, secondEnv)
+	defer func() { _ = tr2.Close() }()
+
+	// The first shell was already running, so it retains its original environment.
+	assertChildEnvironment(t, tr2, p2, sz, "first", firstShell, "/run/first", "wayland-first")
+
+	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("\x1b ")})}))
+	awaitText(t, p2, sz, "Commands")
+	require.NoError(t, tr2.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("CNT\r")})}))
+	awaitText(t, p2, sz, "SHELL_COMMAND=second")
+	assertChildEnvironment(t, tr2, p2, sz, "second", secondShell, "/run/second", "wayland-second")
 }
 
 func TestIntegration_AttachFirstOutput(t *testing.T) {

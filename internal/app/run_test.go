@@ -24,6 +24,142 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// scriptRecv makes a transport yield frames in order, then wait for done
+// before returning EOF. The shared done channel coordinates proxy readers
+// without relying on scheduling or sleeps.
+func scriptRecv(tr *portsmocks.MockTransport, done <-chan struct{}, frames ...ports.Frame) *portsmocks.MockTransport_Recv_Call {
+	script := make(chan ports.Frame, len(frames))
+	for _, frame := range frames {
+		script <- frame
+	}
+	return tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		select {
+		case frame := <-script:
+			return frame, nil
+		case <-done:
+			return ports.Frame{}, io.EOF
+		}
+	})
+}
+
+func TestFirstHelloTransportReplacesRemoteEnvironment(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		session  string
+		wantName string
+	}{
+		{name: "stdio replaces environment", wantName: ""},
+		{name: "udp proxy replaces environment and retains session rewrite", session: "work", wantName: "work"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			original := ports.Hello{
+				Version:           ports.ProtocolVersion,
+				Intent:            ports.IntentAttach,
+				ClientID:          [16]byte{1},
+				ResumeToken:       2,
+				Size:              domain.Size{Cols: 80, Rows: 24},
+				TermEnv:           "client-term",
+				Cwd:               "/client",
+				TrueColor:         true,
+				MaxOutputInFlight: 8,
+				Env:               []string{"CLIENT=value"},
+			}
+			nonHello := ports.Frame{Type: ports.MsgInput, Payload: []byte("unchanged")}
+			transport := portsmocks.NewMockTransport(t)
+			done := make(chan struct{})
+			scriptRecv(transport, done,
+				ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(original)},
+				nonHello,
+			).Times(2)
+			wrapped := newFirstHelloTransport(transport, tt.session, []string{"REMOTE=one", "TOKEN=a=b=c"})
+
+			frame, err := wrapped.Recv()
+			require.NoError(t, err)
+			got, err := ports.UnmarshalHello(frame.Payload)
+			require.NoError(t, err)
+			original.Name = tt.wantName
+			original.Env = []string{"REMOTE=one", "TOKEN=a=b=c"}
+			require.Equal(t, original, got)
+
+			frame, err = wrapped.Recv()
+			require.NoError(t, err)
+			require.Equal(t, nonHello, frame)
+		})
+	}
+}
+
+func TestRunStdioProxyReplacesHelloEnvironmentAtDaemonBoundary(t *testing.T) {
+	original := remoteProxyHello()
+	client, daemon, sent := newRemoteProxyTransports(t, original)
+
+	err := runStdioProxy(context.Background(), client, daemon, []string{"REMOTE=one", "TOKEN=a=b=c"}, nil)
+	require.NoError(t, err)
+
+	got := firstHello(t, sent)
+	original.Env = []string{"REMOTE=one", "TOKEN=a=b=c"}
+	require.Equal(t, original, got)
+}
+
+func TestRunUDPProxyRuntimeReplacesHelloEnvironmentAndSessionAtDaemonBoundary(t *testing.T) {
+	original := remoteProxyHello()
+	client, daemon, sent := newRemoteProxyTransports(t, original)
+
+	err := runUDPProxyRuntime(context.Background(), "remote-work", client, daemon, []string{"REMOTE=udp", "TOKEN=a=b=c"}, nil)
+	require.NoError(t, err)
+
+	got := firstHello(t, sent)
+	original.Name = "remote-work"
+	original.Env = []string{"REMOTE=udp", "TOKEN=a=b=c"}
+	require.Equal(t, original, got)
+}
+
+func remoteProxyHello() ports.Hello {
+	return ports.Hello{
+		Version:           ports.ProtocolVersion,
+		Intent:            ports.IntentAttach,
+		ClientID:          [16]byte{1},
+		ResumeToken:       2,
+		Size:              domain.Size{Cols: 80, Rows: 24},
+		TermEnv:           "client-term",
+		Cwd:               "/client",
+		TrueColor:         true,
+		MaxOutputInFlight: 1,
+		Env:               []string{"CLIENT=value"},
+	}
+}
+
+func newRemoteProxyTransports(t *testing.T, hello ports.Hello) (*portsmocks.MockTransport, *portsmocks.MockTransport, <-chan ports.Frame) {
+	t.Helper()
+	client := portsmocks.NewMockTransport(t)
+	daemon := portsmocks.NewMockTransport(t)
+	clientDone := make(chan struct{})
+	daemonDone := make(chan struct{})
+	sent := make(chan ports.Frame, 1)
+
+	scriptRecv(client, clientDone, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}).Maybe()
+	client.EXPECT().Close().RunAndReturn(func() error {
+		close(clientDone)
+		return nil
+	}).Once()
+	daemon.EXPECT().Send(mock.Anything).RunAndReturn(func(frame ports.Frame) error {
+		sent <- frame
+		close(daemonDone)
+		return nil
+	}).Once()
+	scriptRecv(daemon, daemonDone).Once()
+	daemon.EXPECT().Close().Return(nil).Once()
+
+	return client, daemon, sent
+}
+
+func firstHello(t *testing.T, sent <-chan ports.Frame) ports.Hello {
+	t.Helper()
+	frame := <-sent
+	hello, err := ports.UnmarshalHello(frame.Payload)
+	require.NoError(t, err)
+	return hello
+}
+
 func TestRunUDPProxyUsesBoundedClientMaxPending(t *testing.T) {
 	require.Equal(t, 32, udpProxyClientTransportOptions.MaxPending)
 }
@@ -443,6 +579,7 @@ func TestDetachedLocalHelloIncludesTrueColor(t *testing.T) {
 	require.Equal(t, "xterm-direct", hello.TermEnv)
 	require.Equal(t, "/tmp/work", hello.Cwd)
 	require.True(t, hello.TrueColor)
+	require.Equal(t, os.Environ(), hello.Env)
 }
 
 type namedDialer struct{ name string }

@@ -445,12 +445,14 @@ func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {
 	defer releasePTY2()
 	defer releasePTY3()
 	var openedEnv []string
+	var openedCommand string
 	f := portsmocks.NewMockPTYFactory(t)
 	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, _ string, _ []string, env []string, _ string, sz domain.Size) (ports.PTY, error) {
+		func(_ context.Context, command string, _ []string, env []string, _ string, sz domain.Size) (ports.PTY, error) {
 			if sz != (domain.Size{Cols: 80, Rows: 22}) {
 				return newQuietPTY(), nil
 			}
+			openedCommand = command
 			openedEnv = append([]string(nil), env...)
 			return p3, nil
 		},
@@ -464,8 +466,8 @@ func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
 	defer cancel2()
-	sess1 := &session{id: "s1", name: "alpha", cwd: t.TempDir(), ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, client: ac1, terminal: terminalEnv{}}
-	sess2 := &session{id: "s2", name: "beta", cwd: t.TempDir(), ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, client: ac2, terminal: terminalEnv{TrueColor: true}}
+	sess1 := &session{id: "s1", name: "alpha", cwd: t.TempDir(), ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, client: ac1, terminal: terminalEnv{}, env: []string{"SECRET=from-active-session", "SHELL=/usr/bin/fish", "PAIR=a=b"}}
+	sess2 := &session{id: "s2", name: "beta", cwd: t.TempDir(), ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}, client: ac2, terminal: terminalEnv{TrueColor: true}, env: []string{"STALE=destination-only", "SHELL=/bin/stale", "TERM=xterm-direct", "COLORTERM=truecolor", "TERM_PROGRAM=stale", "VEV=stale"}}
 	ac1.setSession(sess1)
 	ac2.setSession(sess2)
 	d.sessions[sess1.id] = sess1
@@ -476,9 +478,13 @@ func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {
 	require.Same(t, ac2, old)
 	require.False(t, sess2.terminal.TrueColor)
 	require.NoError(t, d.createTab(sess2, domain.Size{Cols: 80, Rows: 24}))
-	require.Contains(t, openedEnv, "TERM=xterm-256color")
-	require.NotContains(t, openedEnv, "COLORTERM=truecolor")
-	require.NotContains(t, openedEnv, "TERM=xterm-direct")
+	sess2.mu.Lock()
+	futureTabID := sess2.tabs[1].stableID
+	futurePaneID := sess2.tabs[1].focusedPane().stableID
+	sess2.mu.Unlock()
+	require.Equal(t, "/usr/bin/fish", openedCommand)
+	require.Equal(t, []string{"SECRET=from-active-session", "SHELL=/usr/bin/fish", "PAIR=a=b", "TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=beta,tab=" + futureTabID + ",pane=" + futurePaneID}, openedEnv)
+	require.NotContains(t, openedEnv, "STALE=destination-only")
 }
 
 func TestPickerPreviewGenerationRejectsStaleSubscriptionReplacement(t *testing.T) {

@@ -331,48 +331,48 @@ func blockingRead(t *testing.T) func([]byte) (int, error) {
 	}
 }
 
-func TestSplitPaneInheritsTerminalEnv(t *testing.T) {
-	tests := []struct {
-		name           string
-		term           terminalEnv
-		wantContain    []string
-		wantNotContain []string
+func TestSplitPaneUsesExactAuthoritativeEnvironment(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		term terminalEnv
+		want []string
 	}{
 		{
-			name:        "truecolor",
-			term:        terminalEnv{TrueColor: true},
-			wantContain: []string{"TERM=xterm-direct", "COLORTERM=truecolor", "TERM_PROGRAM=vev"},
+			name: "truecolor",
+			term: terminalEnv{TrueColor: true},
+			want: []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/usr/bin/fish", "TERM=xterm-direct", "COLORTERM=truecolor", "TERM_PROGRAM=vev"},
 		},
 		{
-			name:           "no truecolor",
-			term:           terminalEnv{},
-			wantContain:    []string{"TERM=xterm-256color", "TERM_PROGRAM=vev"},
-			wantNotContain: []string{"TERM=xterm-direct", "COLORTERM=truecolor"},
+			name: "no truecolor",
+			want: []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/usr/bin/fish", "TERM=xterm-256color", "TERM_PROGRAM=vev"},
 		},
-	}
-
-	for _, tt := range tests {
+	} {
 		t.Run(tt.name, func(t *testing.T) {
 			d, sess, oldPTY, factory := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
+			d.shellOverride = false
 			sess.terminal = tt.term
+			sess.env = []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/usr/bin/fish", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}
 			newPTY := portsmocks.NewMockPTY(t)
 			oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Once()
 			newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
+			var command string
 			var gotEnv []string
-			factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).RunAndReturn(
-				func(_ context.Context, _ string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+			factory.EXPECT().Open(mock.Anything, mock.Anything, []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).RunAndReturn(
+				func(_ context.Context, gotCommand string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+					command = gotCommand
 					gotEnv = append([]string(nil), env...)
 					return newPTY, nil
 				},
 			).Once()
 
 			require.NoError(t, d.splitPane(sess, nil, layout.Right))
-			for _, want := range tt.wantContain {
-				require.Contains(t, gotEnv, want)
-			}
-			for _, notWant := range tt.wantNotContain {
-				require.NotContains(t, gotEnv, notWant)
-			}
+			tb := sess.activeTab()
+			tb.mu.Lock()
+			paneID := tb.panes["pane-2"].stableID
+			tabID := tb.stableID
+			tb.mu.Unlock()
+			require.Equal(t, "/usr/bin/fish", command)
+			require.Equal(t, append(tt.want, "VEV=session=s,tab="+tabID+",pane="+paneID), gotEnv)
 		})
 	}
 }

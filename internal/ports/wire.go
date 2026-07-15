@@ -69,6 +69,9 @@ type Hello struct {
 	// MaxOutputInFlight is the requested maximum number of unacknowledged
 	// state-bearing output frames.
 	MaxOutputInFlight uint8
+	// Env is the complete exported client environment for future PTY children.
+	// Entries are opaque strings so their ordering and contents are preserved.
+	Env []string
 }
 
 // Input carries raw bytes typed/pasted by the client, destined for the PTY.
@@ -207,6 +210,11 @@ func (w *payloadWriter) putString(s string) {
 	w.b = append(w.b, s...)
 }
 
+func (w *payloadWriter) putLongString(s string) {
+	w.putUint32(uint32(len(s)))
+	w.b = append(w.b, s...)
+}
+
 // payloadReader consumes a message payload field by field in wire order,
 // erroring instead of panicking on any short read.
 type payloadReader struct {
@@ -271,6 +279,19 @@ func (r *payloadReader) getString() (string, error) {
 	return s, nil
 }
 
+func (r *payloadReader) getLongString() (string, error) {
+	n, err := r.getUint32()
+	if err != nil {
+		return "", err
+	}
+	if uint64(n) > uint64(len(r.b)) {
+		return "", errShortPayload
+	}
+	s := string(r.b[:int(n)])
+	r.b = r.b[int(n):]
+	return s, nil
+}
+
 // rest consumes and returns all remaining bytes, copied so the result is
 // independent of the reader's backing array.
 func (r *payloadReader) rest() []byte {
@@ -313,6 +334,10 @@ func MarshalHello(h Hello) []byte {
 		w.putUint8(0)
 	}
 	w.putUint8(h.MaxOutputInFlight)
+	w.putUint32(uint32(len(h.Env)))
+	for _, entry := range h.Env {
+		w.putLongString(entry)
+	}
 	return w.b
 }
 
@@ -361,6 +386,25 @@ func UnmarshalHello(b []byte) (Hello, error) {
 	h.TrueColor = trueColor != 0
 	if h.MaxOutputInFlight, err = r.getUint8(); err != nil {
 		return Hello{}, err
+	}
+	envCount, err := r.getUint32()
+	if err != nil {
+		return Hello{}, err
+	}
+	// Each entry has at least its uint32 byte length. Check that before
+	// allocating so a malformed count cannot force an excessive allocation.
+	if uint64(envCount) > uint64(len(r.b)/4) {
+		return Hello{}, errShortPayload
+	}
+	if envCount != 0 {
+		h.Env = make([]string, 0, int(envCount))
+		for range int(envCount) {
+			entry, err := r.getLongString()
+			if err != nil {
+				return Hello{}, err
+			}
+			h.Env = append(h.Env, entry)
+		}
 	}
 	if err := r.done(); err != nil {
 		return Hello{}, err

@@ -525,6 +525,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		Cwd:               cwd,
 		TrueColor:         trueColor,
 		MaxOutputInFlight: requestedOutputWindow(transport),
+		Env:               os.Environ(),
 	}
 	if closed, err := boundedPreWelcome(ctx, clk, transport, func() error {
 		return transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)})

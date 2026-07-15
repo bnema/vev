@@ -184,9 +184,12 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	ac.resumeToken = d.nextResumeTokenLocked()
 	ac.parked = false
 	ac.setSession(sess)
+	// The resumed session's snapshot is the sole source for future PTY children.
+	// Existing PTYs retain the environment they were started with.
 	sess.mu.Lock()
-	sess.client = ac
+	sess.env = copyEnvironment(h.Env)
 	sess.terminal = terminalEnv{TrueColor: h.TrueColor}
+	sess.client = ac
 	sess.mu.Unlock()
 	d.attachCoordinator(sess, nil, ac, false)
 	d.touchMRU(sess)

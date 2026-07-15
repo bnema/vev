@@ -24,6 +24,7 @@ import (
 type gatedFloatingOpen struct {
 	command string
 	args    []string
+	env     []string
 	dir     string
 	size    domain.Size
 }
@@ -37,8 +38,8 @@ func newGatedOpenFactory(t *testing.T, result ports.PTY, openErr error) (*portsm
 	releaseOpen := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(releaseOpen)
 	factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, command string, args, _ []string, dir string, size domain.Size) (ports.PTY, error) {
-			opened <- gatedFloatingOpen{command: command, args: append([]string(nil), args...), dir: dir, size: size}
+		func(_ context.Context, command string, args, env []string, dir string, size domain.Size) (ports.PTY, error) {
+			opened <- gatedFloatingOpen{command: command, args: append([]string(nil), args...), env: append([]string(nil), env...), dir: dir, size: size}
 			<-release
 			return result, openErr
 		}).Once()
@@ -143,11 +144,10 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 	pty.EXPECT().Close().RunAndReturn(func() error { unblock(); return nil }).Once()
 	factory, opened, allowOpen := newGatedOpenFactory(t, pty, nil)
 	d := newTestDaemon(t, factory, stubClock{})
-	d.shell = "/bin/custom-shell"
 	cwd := t.TempDir()
 	tb := newTabWithStableID("t_stable", "p_normal", newBlockingPanePTY(t), domain.Size{Cols: 100, Rows: 40})
 	tb.ctx, tb.cancel = context.WithCancel(t.Context())
-	sess := &session{name: "work", cwd: cwd, tabs: []*tab{tb}, ctx: t.Context()}
+	sess := &session{name: "work", cwd: cwd, terminal: terminalEnv{TrueColor: true}, env: []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/bin/custom-shell", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}, tabs: []*tab{tb}, ctx: t.Context()}
 	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark, Floating: domain.FloatingConfig{Command: "btop --utf", Width: 50, Height: 50}})
 	d.ensureFloatingWarm(sess, tb)
 	// Open has started while this goroutine owns tab.mu: an external factory
@@ -171,6 +171,7 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 	floating := tb.floating.pane
 	tb.mu.Unlock()
 	require.NotNil(t, floating)
+	require.Equal(t, []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/bin/custom-shell", "TERM=xterm-direct", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + tb.stableID + ",pane=" + floating.stableID}, openCall.env)
 	assertPaneDefaultColors(t, floating, themeui.BuiltinDark.Foreground, themeui.BuiltinDark.Background)
 	assertPaneColorScheme(t, floating, false)
 	require.Equal(t, "/bin/custom-shell", openCall.command)
