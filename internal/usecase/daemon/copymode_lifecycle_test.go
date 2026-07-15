@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
@@ -117,31 +116,52 @@ func TestCopyModeLifecycleDoesNotRenderCandidateBeforeValidation(t *testing.T) {
 	document := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame), domain.DefaultWordSeparators)
 	p.mu.Unlock()
 
-	// Hold session validation after publication and make the captured target
-	// stale. A render snapshot taken in this window must not expose the
-	// candidate document.
-	sess.mu.Lock()
-	sess.active = 1
+	// Pause after candidate publication, then make the captured target stale.
+	// A render snapshot while paused must not expose the candidate document.
+	reached := make(chan struct{})
+	resume := make(chan struct{})
+	done := make(chan struct{})
+	d.beforeCopyModeRevalidate = func() {
+		close(reached)
+		<-resume
+	}
+	resumed := false
+	defer func() {
+		if !resumed {
+			close(resume)
+		}
+		select {
+		case <-done:
+			d.beforeCopyModeRevalidate = nil
+		case <-time.After(time.Second):
+			t.Error("copy mode publication did not finish after revalidation gate was released")
+		}
+	}()
+
 	result := make(chan bool, 1)
 	go func() {
+		defer close(done)
 		result <- d.publishCopyMode(sess, ac, tb, p, document, nil, nil)
 	}()
-	published := assert.Eventually(t, func() bool {
-		ac.overlays.copyMu.Lock()
-		defer ac.overlays.copyMu.Unlock()
-		return ac.overlays.copyPane == p && ac.overlays.copyDocument != nil
-	}, time.Second, time.Millisecond)
-	if !published {
-		sess.mu.Unlock()
-		<-result
-		return
+	select {
+	case <-reached:
+	case <-time.After(time.Second):
+		t.Fatal("copy mode publication did not reach revalidation gate")
 	}
+
 	renderSnapshot := ac.overlays.SnapshotForRender()
 	candidateWasRenderable := renderSnapshot.copyActive
 	renderSnapshot.Unlock()
-	sess.mu.Unlock()
+	require.True(t, sess.switchTab(1))
+	close(resume)
+	resumed = true
 
-	require.False(t, <-result)
+	select {
+	case published := <-result:
+		require.False(t, published)
+	case <-time.After(time.Second):
+		t.Fatal("copy mode publication did not finish after revalidation gate was released")
+	}
 	require.False(t, candidateWasRenderable)
 	require.False(t, ac.overlays.copyActive())
 	require.Nil(t, copyTargetPane(ac.overlays))
