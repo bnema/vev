@@ -60,10 +60,14 @@ func (t *Transport) hopPacketConnOnce(generation uint64) {
 	t.mu.Unlock()
 	pc, err := rebind(old)
 
-	// Serialize the swap with writes. writePacket takes writeMu before mu, so
-	// preserve that order here while retiring old.
+	// Lock order is writeMu -> controlConnMu -> mu. Data writes take only
+	// writeMu, while control writes hold controlConnMu's read lock without
+	// writeMu; therefore a hop waits for active control writes but does not make
+	// them wait for a blocked data write.
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
+	t.controlConnMu.Lock()
+	defer t.controlConnMu.Unlock()
 	t.mu.Lock()
 	if err != nil {
 		t.rollbackHopLocked(generation)

@@ -224,7 +224,12 @@ type Transport struct {
 	in     chan ports.Frame
 	done   chan struct{}
 
-	writeMu sync.Mutex
+	// Connection replacement takes writeMu, controlConnMu, then mu. Data writes
+	// take only writeMu; control writes take controlConnMu's read lock, then mu.
+	// This keeps control independent of data writes while preventing a rebind
+	// from retiring its PacketConn during a control write.
+	writeMu       sync.Mutex
+	controlConnMu sync.RWMutex
 	// beforeDataPace is a test synchronization hook. It is read under mu.
 	beforeDataPace func()
 	// afterDataPaceWait observes a data pacer's next manual-clock deadline.
