@@ -864,7 +864,7 @@ func TestMouseDragCopyEntryCapturesSourceForYank(t *testing.T) {
 	copy(pane.screen.Frame.Row(0), testRow("alpha"))
 	copy(pane.screen.Frame.Row(1), testRow("bravo"))
 
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;2M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M\x1b[<32;1;3M"))
 	mustOutputData(t, sends)
 	require.NotNil(t, ac.overlays.copyMode)
 	ac.overlays.copyMu.Lock()
@@ -876,6 +876,6 @@ func TestMouseDragCopyEntryCapturesSourceForYank(t *testing.T) {
 	out := awaitFrame(t, sends, ports.MsgOutput)
 	msg, err := ports.UnmarshalOutput(out.Payload)
 	require.NoError(t, err)
-	want := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte("alpha\nbravo")) + "\x07"
+	want := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte("alpha"+strings.Repeat(" ", 75)+"\nb")) + "\x07"
 	require.Equal(t, want, string(msg.Data))
 }

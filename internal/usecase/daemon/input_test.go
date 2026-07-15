@@ -15,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
@@ -945,9 +946,9 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 	}
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("\x1b[?1006l\x1b[?1000l"))
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
 	require.Nil(t, ac.overlays.copyMode, "press alone must still not enter visual mode")
-	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
+	d.handleInput(sess, ac, []byte("\x1b[<32;1;4M"))
 	mustOutputData(t, sends)
 	require.NotNil(t, ac.overlays.copyMode)
 	selection := ac.overlays.copyMode.Selection()
@@ -960,6 +961,30 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 	require.Equal(t, 2, hi)
 }
 
+func TestCopyModeMouseHorizontalReverseDragUsesExactOSC52(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow("alpha"))
+	d.enterCopyMode(sess, ac)
+	mustOutputData(t, sends)
+
+	// SGR is one based: Cy2 is the first body row. Dragging from column 3
+	// back to column 1 is the same stream as the forward endpoints 1..3.
+	d.handleInput(sess, ac, []byte("\x1b[<0;4;2M\x1b[<32;2;2M"))
+	mustOutputData(t, sends)
+	d.handleInput(sess, ac, []byte("\x1b[<0;2;2m"))
+	d.handleInput(sess, ac, []byte("y"))
+	var msg ports.Output
+	require.Eventually(t, func() bool {
+		frame := awaitFrame(t, sends, ports.MsgOutput)
+		var err error
+		msg, err = ports.UnmarshalOutput(frame.Payload)
+		return err == nil && string(msg.Data) == string(scopy.OSC52("lph")[0])
+	}, 2*time.Second, 5*time.Millisecond)
+	require.Equal(t, scopy.OSC52("lph")[0], msg.Data)
+	require.Nil(t, ac.overlays.copyPointer.pane)
+}
+
 func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
@@ -969,7 +994,7 @@ func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;2M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M\x1b[<32;1;3M"))
 	mustOutputData(t, sends)
 	require.NotNil(t, ac.overlays.copyMode)
 	selection := ac.overlays.copyMode.Selection()
@@ -989,7 +1014,7 @@ func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 	}, 2*time.Second, 5*time.Millisecond, "OSC52 output = %q", data)
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(strings.TrimPrefix(data, "\x1b]52;c;"), "\a"))
 	require.NoError(t, err)
-	require.Equal(t, "alpha\nbravo", string(decoded))
+	require.Equal(t, "alpha"+strings.Repeat(" ", 75)+"\nb", string(decoded))
 	require.Nil(t, ac.overlays.copyMode)
 
 	exitPaint := string(mustOutputData(t, sends))
@@ -1009,16 +1034,16 @@ func TestMouseNormalScreenStatusRowClearsStalePressState(t *testing.T) {
 	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
 
 	// Press on a content row establishes a (soon to be stale) anchor.
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
 	require.Nil(t, ac.overlays.copyMode)
 
 	// Release lands on the status row: must still clear the press state,
 	// regardless of the row it landed on.
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;24m"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;25m"))
 
 	// A brand new button hold starts with a Press on the status row: must
 	// clear (not silently preserve) any prior press state.
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;24M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;25M"))
 
 	// Motion onto a content row must not resurrect a stale anchor.
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
@@ -1044,7 +1069,7 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	mustOutputData(t, sends)
 
 	// Full drag: press row0, motion to row1 -> selection [0,1].
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;2M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M\x1b[<32;1;3M"))
 	mustOutputData(t, sends)
 	require.NotNil(t, ac.overlays.copyMode)
 	selection := ac.overlays.copyMode.Selection()
@@ -1057,8 +1082,8 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	require.Equal(t, 1, hi)
 
 	// Release, then a new button hold starting with Press on the status row.
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;2m"))
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;24M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;3m"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;25M"))
 
 	// Motion onto a content row must be a no-op: the status-row press must
 	// have cleared copyPressRowValid/copyDragging.
@@ -1087,8 +1112,8 @@ func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
 
 	// Press on a content row while scrollback is empty: the anchor is
-	// content-stable at pressTop(0)+pressRow(0) = row 0.
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
+	// content-stable at the first body row = document row 0.
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
 
 	// Simulate 5 lines evicted into scrollback between the Press and the
 	// first Motion (e.g. the child kept producing output).
@@ -1110,7 +1135,7 @@ func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
 		lo, hi = hi, lo
 	}
 	require.Equal(t, 0, lo, "anchor stays content-stable at the row under the pointer at press time")
-	require.Equal(t, 7, hi, "extend target must track the pointer's current content row, not a stale scrollback offset")
+	require.Equal(t, 1, hi, "the press-owned immutable document keeps the mapped endpoint stable")
 }
 
 func TestMouseSplitReportPreservesOrder(t *testing.T) {
@@ -1219,7 +1244,7 @@ func TestCopyModeDragOutsideSplitPaneClampsToPaneContent(t *testing.T) {
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
 
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;12M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M\x1b[<32;1;12M"))
 	mustOutputData(t, sends)
 
 	selection := ac.overlays.copyMode.Selection()

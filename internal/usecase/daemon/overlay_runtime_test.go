@@ -171,6 +171,29 @@ func TestOverlayRuntimeSnapshotCarriesCopyModeDocumentAndClearReleasesIt(t *test
 	ac.overlays.copyMu.Unlock()
 }
 
+func TestOverlayRuntimePointerEpochInvalidatesTransferAndPaneClose(t *testing.T) {
+	ac := &attachedClient{}
+	ac.initOverlays()
+	p := newPane("pane", nil, domain.Size{Cols: 4, Rows: 1})
+	document := scopy.NewDocument(scopy.NewSnapshotFromRows([][]renderer.Cell{testRow("row")}, 4, 1), domain.DefaultWordSeparators)
+
+	ac.overlays.copyMu.Lock()
+	ac.overlays.beginCopyPointerLocked(copyPointerState{pane: p, document: document, press: scopy.Pos{}})
+	staleEpoch := ac.overlays.copyPointer.epoch
+	ac.overlays.clearCopyPointerForTransferLocked()
+	ac.overlays.invalidateCopyPointerLocked(true) // release/close while publish revalidates
+	require.NotEqual(t, staleEpoch, ac.overlays.copyPointerEpoch)
+	require.False(t, ac.overlays.copyPointer.valid)
+	ac.overlays.copyClick = copyClickCandidate{valid: true, pane: p}
+	ac.overlays.copyMu.Unlock()
+
+	require.True(t, ac.overlays.clearCopyModeForPane(p))
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
+	ac.overlays.copyMu.Unlock()
+}
+
 func TestOverlayRuntimeCopyModeDocumentSurvivesRingOverwrite(t *testing.T) {
 	ac := &attachedClient{}
 	ac.initOverlays()

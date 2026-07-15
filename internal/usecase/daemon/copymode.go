@@ -91,9 +91,11 @@ func (d *Daemon) publishCopyMode(sess *session, ac *attachedClient, tb *tab, p *
 	rt.copyPane = p
 	rt.copySearch = nil
 	rt.copySearchPending = nil
-	rt.copyPressRowValid = false
-	rt.copyDragging = false
-	rt.normalMousePressValid = false
+	if activate != nil {
+		rt.clearCopyPointerForTransferLocked()
+	} else {
+		rt.invalidateCopyPointerLocked(true)
+	}
 	rt.copyMu.Unlock()
 	valid := sess.activeTab() == tb
 	if valid {
@@ -118,48 +120,41 @@ func (d *Daemon) publishCopyMode(sess *session, ac *attachedClient, tb *tab, p *
 	return true
 }
 
-// copyMouse remains row-compatible until centralized pointer mapping supplies columns.
-func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
+// copyMouse receives already mapped client-frame coordinates. The caller owns
+// geometry resolution; this function only mutates immutable-document state.
+func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event, mapped mappedCopyMouse) {
 	rt := ac.overlays
 	if ev.Button != mouse.Left {
 		return
 	}
 	rt.copyMu.Lock()
-	if rt.copyMode == nil || rt.copyPane == nil || rt.copyDocument == nil {
-		rt.copyMu.Unlock()
-		return
-	}
-	document := rt.copyDocument
-	if ev.Row >= document.Height() {
-		if ev.Type == mouse.Press {
-			rt.copyPressRowValid = false
-			rt.copyDragging = false
+	if rt.copyMode == nil || rt.copyPane != mapped.pane || rt.copyDocument == nil || rt.copyDocument != rt.copyMode.Document() {
+		if ev.Type == mouse.Release {
+			rt.invalidateCopyPointerLocked(false)
 		}
 		rt.copyMu.Unlock()
 		return
 	}
-	pos := scopy.Pos{Row: rt.copyMode.ViewportTop + ev.Row, Col: 0}
 	changed := false
 	switch ev.Type {
 	case mouse.Press:
-		if rt.copyMode.SetPosition(pos) {
-			changed = true
+		changed = rt.copyMode.SetPosition(mapped.pos)
+		pointer := rt.copyPointer
+		if !pointer.valid || pointer.pane != mapped.pane || pointer.document != rt.copyDocument {
+			rt.beginCopyPointerLocked(copyPointerState{pane: mapped.pane, document: rt.copyDocument, press: mapped.pos})
 		}
-		rt.copyPressRow = rt.copyMode.Cursor().Row
-		rt.copyPressRowValid = true
-		rt.copyDragging = false
 	case mouse.Motion:
-		if rt.copyPressRowValid {
-			if !rt.copyDragging {
-				rt.copyMode.SetPosition(scopy.Pos{Row: rt.copyPressRow, Col: 0})
-				rt.copyMode.ToggleLineSelection()
-				rt.copyDragging = true
+		pointer := rt.copyPointer
+		if pointer.valid && pointer.pane == mapped.pane && pointer.document == rt.copyDocument {
+			if !pointer.dragging {
+				rt.copyMode.StartCharacterSelection(pointer.press)
+				pointer.dragging = true
 			}
-			changed = rt.copyMode.MoveRows(pos.Row-rt.copyMode.Cursor().Row) || changed
+			changed = rt.copyMode.ExtendCharacterSelection(mapped.pos) || changed
+			rt.copyPointer = pointer
 		}
 	case mouse.Release:
-		rt.copyPressRowValid = false
-		rt.copyDragging = false
+		rt.invalidateCopyPointerLocked(false)
 	}
 	rt.copyMu.Unlock()
 	if changed {

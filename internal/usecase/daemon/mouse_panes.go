@@ -144,8 +144,5 @@ func (d *Daemon) exitCopyMode(ac *attachedClient) {
 	}
 	rt.copyMu.Lock()
 	rt.clearCopyModeLocked()
-	rt.copyPressRowValid = false
-	rt.copyDragging = false
-	rt.normalMousePressValid = false
 	rt.copyMu.Unlock()
 }
