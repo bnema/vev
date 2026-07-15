@@ -130,6 +130,7 @@ type Daemon struct {
 	codeOverrides           atomic.Pointer[map[string]string]
 	restoreProcessAllowlist atomic.Pointer[map[string]struct{}]
 	floatingConfig          atomic.Pointer[domain.FloatingConfig]
+	copyConfig              atomic.Pointer[domain.CopyConfig]
 	paletteConfig           atomic.Pointer[domain.PaletteConfig]
 	tabsConfig              atomic.Pointer[domain.TabsConfig]
 	themeMode               atomic.Uint32
@@ -331,6 +332,8 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	defaults := domain.Defaults()
 	defaultFloating := defaults.Floating
 	d.floatingConfig.Store(&defaultFloating)
+	defaultCopy := defaults.Copy
+	d.copyConfig.Store(&defaultCopy)
 	defaultPalette := defaults.Palette
 	d.paletteConfig.Store(&defaultPalette)
 	for _, o := range opts {

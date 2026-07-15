@@ -50,6 +50,21 @@ func TestApplyConfigHotReloadSwapsBindingsAndCodes(t *testing.T) {
 	require.Equal(t, "NT", cmd.Code)
 }
 
+func TestApplyConfigPublishesCopyConfig(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	require.Equal(t, domain.CopyConfig{WordSeparators: domain.DefaultWordSeparators}, d.currentCopyConfig())
+
+	configured := domain.Defaults()
+	configured.Copy = domain.CopyConfig{WordSeparators: "/:"}
+	d.ApplyConfig(configured)
+	require.Equal(t, domain.CopyConfig{WordSeparators: "/:"}, d.currentCopyConfig())
+
+	reloaded := domain.Defaults()
+	reloaded.Copy = domain.CopyConfig{}
+	d.ApplyConfig(reloaded)
+	require.Equal(t, domain.CopyConfig{}, d.currentCopyConfig())
+}
+
 func TestApplyConfigPublishesImmutablePaletteSnapshot(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	require.Equal(t, domain.Defaults().Palette, d.currentPaletteConfig())
