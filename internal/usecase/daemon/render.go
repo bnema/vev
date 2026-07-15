@@ -325,7 +325,14 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, lease *att
 		copyFeedback: overlays.copyFeedback,
 	}
 	endCapture := marks.span(ports.RuntimeCaptureStart, ports.RuntimeCaptureEnd, 0)
-	state, ok := capturePrimaryRenderState(sess, ac, bars, capturedOverlays, preview, floatingCfg, reset, lease)
+	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
+		bars:        bars,
+		overlays:    capturedOverlays,
+		preview:     preview,
+		floatingCfg: floatingCfg,
+		reset:       reset,
+		lease:       lease,
+	})
 	endCapture(0, ok)
 	if !ok {
 		ac.sendMu.Unlock()

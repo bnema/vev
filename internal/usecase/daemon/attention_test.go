@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -366,11 +367,10 @@ func TestAnimationRepaintConfinedToBarRows(t *testing.T) {
 	require.NotContains(t, string(data), "MIDSCREENMARKER")
 }
 
-// TestComposeClientFrameWithStateAttentionFrameChangeDamagesOnlyBars pins the
-// same invariant at the composeClientFrameWithState level: with a warm
-// barCache and no screen damage, changing only bars.attentionFrame must
-// produce damage confined to row 0 (top bar) and the last row (bottom bar).
-func TestComposeClientFrameWithStateAttentionFrameChangeDamagesOnlyBars(t *testing.T) {
+// TestComposeFrameAttentionFrameChangeDamagesOnlyBars pins the same invariant
+// through the production composition pipeline: with a warm cache and no pane
+// damage, changing only bars.attentionFrame damages only the chrome rows.
+func TestComposeFrameAttentionFrameChangeDamagesOnlyBars(t *testing.T) {
 	d, sess, _, _, releases := newManualTabSession(t, 2)
 	defer releases[0]()
 	defer releases[1]()
@@ -381,16 +381,39 @@ func TestComposeClientFrameWithStateAttentionFrameChangeDamagesOnlyBars(t *testi
 	sess.mu.Unlock()
 
 	tb := sess.tabs[0]
-	var cache barCache
+	pane := tb.focusedPane()
+	pane.screen.Write([]byte("ATTENTION-PANE-CONTENT"))
 	bars := d.barStateFor(sess, "")
-	_, damage := composeClientFrameWithState(bars, tb, true, &cache)
-	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
-	tb.focusedPane().screen.ClearDamage()
+	area := domain.Rect{Width: pane.screen.Frame.Width, Height: pane.screen.Frame.Height}
+	placement := layout.Placement{ID: pane.id, Content: area}
+	state := capturedRenderState{
+		reset:  true,
+		layout: capturedTabLayout{area: area, focus: pane.id, placements: []layout.Placement{placement}, valid: true},
+		panes: []capturedPaneRenderState{{
+			id: pane.id, frame: pane.screen.Frame.Clone(), placement: placement, focused: true,
+			damage: []renderer.Damage{renderer.FullRedraw()},
+		}},
+		bars: bars,
+	}
+	out := composeFrame(state, composeCacheInput{})
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, out.damage)
+	require.Len(t, state.panes, 1)
+	require.Contains(t, rowText(out.frame.Row(1)), "ATTENTION-PANE-CONTENT")
+	firstContent := rowText(out.frame.Row(1))
 
+	// The pane was included in the warmed cache; it has no new damage when the
+	// attention pulse advances, so the subsequent compose must retain it.
 	bars.attentionFrame++
-	_, damage = composeClientFrameWithState(bars, tb, false, &cache)
+	state.reset, state.bars = false, bars
+	state.panes[0].damage = nil
+	out = composeFrame(state, out.cache)
+	damage := out.damage
+	require.Len(t, state.panes, 1, "pane state must remain present when it has no damage")
+	require.Empty(t, state.panes[0].damage)
+	require.Equal(t, firstContent, rowText(out.frame.Row(1)), "unchanged pane content must remain in the composed frame")
+	require.Contains(t, rowText(out.frame.Row(1)), "ATTENTION-PANE-CONTENT")
 	require.NotEmpty(t, damage)
-	lastRow := tb.focusedPane().screen.Frame.Height + 1
+	lastRow := pane.screen.Frame.Height + 1
 	for _, dmg := range damage {
 		require.Contains(t, []int{0, lastRow}, dmg.Y, "expected damage confined to bar rows, got y=%d", dmg.Y)
 	}

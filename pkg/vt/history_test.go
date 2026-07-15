@@ -147,6 +147,51 @@ func TestHistoryOwnedByScreenIgnoresAlternateScreenEvictions(t *testing.T) {
 	}
 }
 
+func TestHistoryRecordsOnlyTopEdgeScrollEvictions(t *testing.T) {
+	tests := []struct {
+		name       string
+		top        int
+		bottom     int
+		wantRows   int
+		wantEvents int
+	}{
+		{
+			name:       "interior scroll region does not enter global history",
+			top:        1,
+			bottom:     3,
+			wantRows:   0,
+			wantEvents: 0,
+		},
+		{
+			name:       "top-edge scroll enters global history",
+			top:        0,
+			bottom:     3,
+			wantRows:   1,
+			wantEvents: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewScreenWithHistory(4, 4, HistoryConfig{MaxRows: 8, ChunkRows: 2})
+			for y := range s.Frame.Height {
+				copy(s.Frame.Row(y), historyRow(string([]byte{byte('A' + y), byte('A' + y), byte('A' + y), byte('A' + y)})))
+			}
+			events := 0
+			s.OnLineEvicted = func([]renderer.Cell) { events++ }
+
+			s.scrollUpRegion(tt.top, tt.bottom, 1)
+
+			if got := s.History().View().Len(); got != tt.wantRows {
+				t.Errorf("history rows = %d, want %d", got, tt.wantRows)
+			}
+			if events != tt.wantEvents {
+				t.Errorf("eviction events = %d, want %d", events, tt.wantEvents)
+			}
+		})
+	}
+}
+
 func historyRow(text string) []renderer.Cell {
 	row := make([]renderer.Cell, len(text))
 	for i, r := range text {

@@ -128,35 +128,56 @@ func TestFloatingAxisGeometryEndpointsAndTinyBorders(t *testing.T) {
 	}
 }
 
-func TestComposeFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testing.T) {
-	p := newPane("floating", nil, domain.Size{Cols: 6, Rows: 3})
-	p.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'F'})
-	p.title.processName, p.title.terminalTitle, p.title.generation = "nvim", "project/main.go", 1
+func TestComposeCapturedFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testing.T) {
 	base := renderer.NewFrame(40, 12)
 	base.Set(2, 2, renderer.Cell{Rune: 'B'})
 	content := domain.Rect{Y: 1, Width: 40, Height: 10}
-	cache := &composedFrameCache{}
-	frame, _, _ := composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, domain.FloatingConfig{Width: 80, Height: 80}), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	geometry := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, domain.FloatingConfig{Width: 80, Height: 80})
+	paneFrame := renderer.NewFrame(6, 3)
+	paneFrame.Set(0, 0, renderer.Cell{Rune: 'F'})
+	floating := capturedFloatingRenderState{
+		visible:         true,
+		pane:            capturedPaneRenderState{frame: paneFrame, title: "nvim: project/main.go", titleGeneration: 1},
+		geometry:        geometry,
+		title:           "nvim: project/main.go",
+		generation:      1,
+		titleGeneration: 1,
+	}
+	frame, _ := composeCapturedFloatingFrame(floatingComposeInput{
+		baseFrame: base,
+		floating:  floating,
+		content:   content,
+		theme:     themeui.Theme{},
+	})
 	require.Equal(t, 'B', base.At(2, 2).Rune, "backdrop must only touch the composed destination")
-	geometry := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, domain.FloatingConfig{Width: 80, Height: 80}).translate(content.X, content.Y)
-	require.Equal(t, '┌', frame.At(geometry.Bounds.X, geometry.Bounds.Y).Rune)
-	require.Equal(t, 'F', frame.At(geometry.Inner.X, geometry.Inner.Y).Rune)
+	frameGeometry := geometry.translate(content.X, content.Y)
+	require.Equal(t, '┌', frame.At(frameGeometry.Bounds.X, frameGeometry.Bounds.Y).Rune)
+	require.Equal(t, 'F', frame.At(frameGeometry.Inner.X, frameGeometry.Inner.Y).Rune)
 	var gotTitle strings.Builder
-	for x := geometry.Bounds.X + 2; x < geometry.Bounds.X+geometry.Bounds.Width-2; x++ {
-		gotTitle.WriteRune(frame.At(x, geometry.Bounds.Y).Rune)
+	for x := frameGeometry.Bounds.X + 2; x < frameGeometry.Bounds.X+frameGeometry.Bounds.Width-2; x++ {
+		gotTitle.WriteRune(frame.At(x, frameGeometry.Bounds.Y).Rune)
 	}
 	require.Equal(t, "nvim: project/main.go", strings.TrimRight(gotTitle.String(), "─"))
 
-	p.mu.Lock()
-	p.title.generation++
-	p.mu.Unlock()
-	_, damage, _ := composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, domain.FloatingConfig{Width: 80, Height: 80}), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+	floating.titleGeneration++
+	_, damage := composeCapturedFloatingFrame(floatingComposeInput{
+		baseFrame: base,
+		floating:  floating,
+		content:   content,
+		theme:     themeui.Theme{},
+		cache: composeCacheInput{
+			valid:                   true,
+			floatingGeneration:      1,
+			floatingGeometry:        frameGeometry,
+			floatingTitleGeneration: 1,
+		},
+	})
 	require.Len(t, damage, 1)
-	require.Equal(t, geometry.Bounds.Y, damage[0].Y)
+	require.Equal(t, frameGeometry.Bounds.Y, damage[0].Y)
 	require.Equal(t, 1, damage[0].Height)
 }
 
-func TestComposeFloatingFrameGeometryChangesInvalidateCache(t *testing.T) {
+func TestComposeCapturedFloatingFrameGeometryChangesInvalidateCache(t *testing.T) {
 	initial := floatingGeometry{
 		Bounds: domain.Rect{X: 4, Y: 2, Width: 8, Height: 5},
 		Inner:  domain.Rect{X: 5, Y: 3, Width: 6, Height: 3},
@@ -176,20 +197,27 @@ func TestComposeFloatingFrameGeometryChangesInvalidateCache(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := newPane("floating", nil, domain.Size{Cols: 6, Rows: 3})
-			p.rect, p.popupGeometry = initial.Inner, initial
-			cache := &composedFrameCache{}
 			base := renderer.NewFrame(30, 12)
 			content := domain.Rect{Y: 1, Width: 30, Height: 10}
-			_, damage, _ := composeFloatingFrame(base, nil, p, 1, content, floatingGeometry{}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+			pane := capturedPaneRenderState{frame: renderer.NewFrame(6, 3), titleGeneration: 1}
+			initialInput := floatingComposeInput{
+				baseFrame: base,
+				floating:  capturedFloatingRenderState{visible: true, pane: pane, geometry: initial, generation: 1, titleGeneration: 1},
+				content:   content,
+				theme:     themeui.Theme{},
+			}
+			_, damage := composeCapturedFloatingFrame(initialInput)
 			require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
 
-			p.mu.Lock()
-			p.rect, p.popupGeometry = tt.next.Inner, tt.next
-			p.mu.Unlock()
-			_, damage, _ = composeFloatingFrame(base, nil, p, 1, content, floatingGeometry{}, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+			initialInput.floating.geometry = tt.next
+			initialInput.cache = composeCacheInput{
+				valid:                   true,
+				floatingGeneration:      1,
+				floatingGeometry:        initial.translate(content.X, content.Y),
+				floatingTitleGeneration: 1,
+			}
+			_, damage = composeCapturedFloatingFrame(initialInput)
 			require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
-			require.Equal(t, tt.next.translate(content.X, content.Y), cache.floatingGeometry)
 		})
 	}
 }
@@ -239,8 +267,17 @@ func TestComposeFloatingFrameRendersPaneOwnedCommandFallback(t *testing.T) {
 	base := renderer.NewFrame(40, 12)
 	content := domain.Rect{Y: 1, Width: 40, Height: 10}
 	cfg := domain.FloatingConfig{Width: 80, Height: 80}
-	frame, _, _ := composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, false)
-	geometry := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg).translate(content.X, content.Y)
+	geometry := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg)
+	captured := capturedPaneRenderState{frame: renderer.NewFrame(geometry.Inner.Width, geometry.Inner.Height), title: "btop", titleGeneration: 1}
+	frame, _ := composeCapturedFloatingFrame(floatingComposeInput{
+		baseFrame: base,
+		floating: capturedFloatingRenderState{
+			visible: true, pane: captured, geometry: geometry, title: captured.title, generation: 1, titleGeneration: captured.titleGeneration,
+		},
+		content: content,
+		theme:   themeui.Theme{},
+	})
+	geometry = geometry.translate(content.X, content.Y)
 	var gotTitle strings.Builder
 	for x := geometry.Bounds.X + 2; x < geometry.Bounds.X+geometry.Bounds.Width-2; x++ {
 		gotTitle.WriteRune(frame.At(x, geometry.Bounds.Y).Rune)
@@ -248,10 +285,14 @@ func TestComposeFloatingFrameRendersPaneOwnedCommandFallback(t *testing.T) {
 	require.Equal(t, "btop", strings.TrimRight(gotTitle.String(), "─"))
 }
 
-func TestComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
+func TestCaptureAndComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 	p := newPane("floating", nil, domain.Size{Cols: 80, Rows: 24})
-	base := renderer.NewFrame(80, 24)
-	content := domain.Rect{Width: 80, Height: 24}
+	tb := newTab(nil, domain.Size{Cols: 80, Rows: 24})
+	installTestFloating(tb, p, true)
+	ac := &attachedClient{}
+	ac.initOverlays()
+	sess := &session{tabs: []*tab{tb}, client: ac}
+	base := barState{}
 	cfg := domain.FloatingConfig{Width: 100, Height: 100}
 
 	start := make(chan struct{})
@@ -261,7 +302,6 @@ func TestComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 		defer wg.Done()
 		<-start
 		for range 500 {
-			// This is the same pane lock used by ptyReader around Screen.Write.
 			p.mu.Lock()
 			p.screen.Write([]byte("\x1b[Hreader"))
 			p.mu.Unlock()
@@ -270,9 +310,14 @@ func TestComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-start
-		cache := &composedFrameCache{}
+		cache := composeCacheInput{}
 		for range 500 {
-			composeFloatingFrame(base, nil, p, 1, content, calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+			ac.sendMu.Lock()
+			state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{bars: base, floatingCfg: cfg})
+			ac.sendMu.Unlock()
+			require.True(t, ok)
+			out := composeFrame(*state, cache)
+			cache = out.cache
 		}
 	}()
 	close(start)
@@ -287,39 +332,59 @@ func TestDrawFloatingBorderOmitsTinyAxes(t *testing.T) {
 	}
 }
 
-func BenchmarkComposeFloatingFrameCached(b *testing.B) {
-	p := newPane("floating", nil, domain.Size{Cols: 62, Rows: 18})
-	p.title.displayFallback = "float"
+func TestComposeCapturedFloatingFrameCachedAllocationsAreOnlyFrameClone(t *testing.T) {
 	base := renderer.NewFrame(80, 24)
 	content := domain.Rect{Y: 1, Width: 80, Height: 22}
-	cfg := domain.FloatingConfig{Width: 80, Height: 80}
-	desired := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg)
-	cache := &composedFrameCache{}
-	composeFloatingFrame(base, nil, p, 1, content, desired, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
-	p.screen.ClearDamage()
+	geometry := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, domain.FloatingConfig{Width: 80, Height: 80})
+	input := floatingComposeInput{
+		baseFrame: base,
+		floating: capturedFloatingRenderState{
+			visible:  true,
+			pane:     capturedPaneRenderState{frame: renderer.NewFrame(62, 18), title: "float", titleGeneration: 1},
+			geometry: geometry, title: "float", generation: 1, titleGeneration: 1,
+		},
+		content: content,
+		cache: composeCacheInput{
+			valid: true, floatingGeneration: 1, floatingGeometry: geometry.translate(content.X, content.Y), floatingTitleGeneration: 1,
+		},
+	}
+
+	allocs := testing.AllocsPerRun(100, func() { composeCapturedFloatingFrame(input) })
+	// The production entry point deliberately clones Frame.Cells and its row
+	// offsets to keep the cached base immutable; those are its two unavoidable
+	// allocations. A higher count would reintroduce avoidable cache churn.
+	require.LessOrEqual(t, allocs, float64(2))
+}
+
+func BenchmarkComposeCapturedFloatingFrameCached(b *testing.B) {
+	base := renderer.NewFrame(80, 24)
+	content := domain.Rect{Y: 1, Width: 80, Height: 22}
+	geometry := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, domain.FloatingConfig{Width: 80, Height: 80})
+	input := floatingComposeInput{
+		baseFrame: base,
+		floating: capturedFloatingRenderState{
+			visible:         true,
+			pane:            capturedPaneRenderState{frame: renderer.NewFrame(62, 18), title: "float", titleGeneration: 1},
+			geometry:        geometry,
+			title:           "float",
+			generation:      1,
+			titleGeneration: 1,
+		},
+		content: content,
+		theme:   themeui.Theme{},
+		cache: composeCacheInput{
+			valid:                   true,
+			floatingGeneration:      1,
+			floatingGeometry:        geometry.translate(content.X, content.Y),
+			floatingTitleGeneration: 1,
+		},
+	}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		composeFloatingFrame(base, nil, p, 1, content, desired, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
+		composeCapturedFloatingFrame(input)
 	}
-}
-
-func TestComposeFloatingFrameCachedDoesNotAllocate(t *testing.T) {
-	p := newPane("floating", nil, domain.Size{Cols: 62, Rows: 18})
-	p.title.displayFallback = "float"
-	base := renderer.NewFrame(80, 24)
-	content := domain.Rect{Y: 1, Width: 80, Height: 22}
-	cfg := domain.FloatingConfig{Width: 80, Height: 80}
-	desired := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, cfg)
-	cache := &composedFrameCache{}
-	composeFloatingFrame(base, nil, p, 1, content, desired, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
-	p.screen.ClearDamage()
-
-	allocs := testing.AllocsPerRun(100, func() {
-		composeFloatingFrame(base, nil, p, 1, content, desired, tabLayoutSnapshot{}, themeui.Theme{}, cache, false)
-	})
-	require.Zero(t, allocs, "cached floating composition must not allocate without damage or title changes")
 }
 
 func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {
@@ -368,7 +433,7 @@ func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {
 
 func TestFailedFloatingResizeKeepsCommittedRenderAndInputGeometry(t *testing.T) {
 	cfg := domain.FloatingConfig{Width: 50, Height: 50}
-	oldContent := domain.Rect{Y: 1, Width: 80, Height: 24}
+	oldContent := domain.Rect{Width: 80, Height: 24}
 	newContent := domain.Rect{Y: 1, Width: 100, Height: 40}
 	oldGeometry := calculateContentFloatingGeometry(domain.Size{Cols: oldContent.Width, Rows: oldContent.Height}, cfg)
 	newGeometry := calculateContentFloatingGeometry(domain.Size{Cols: newContent.Width, Rows: newContent.Height}, cfg)
@@ -384,14 +449,28 @@ func TestFailedFloatingResizeKeepsCommittedRenderAndInputGeometry(t *testing.T) 
 	require.False(t, applyFloatingResizePlanForTest(d, p, newGeometry))
 	tb.mu.Lock()
 	_, inputGeometry, visible := tb.visibleFloatingSnapshotLocked(cfg)
-	copyRect := copyTargetRectLocked(tabLayoutSnapshot{}, newContent, p, p, true, oldGeometry.translate(newContent.X, newContent.Y))
 	tb.mu.Unlock()
 	require.True(t, visible)
 	require.Equal(t, oldGeometry, inputGeometry)
-	require.Equal(t, oldGeometry.translate(newContent.X, newContent.Y).Inner, copyRect)
 
+	p.mu.Lock()
+	captured := capturePaneRenderStateLocked(p, oldGeometry.Inner)
+	p.mu.Unlock()
 	base := renderer.NewFrame(newContent.Width, newContent.Height+2)
-	frame, _, _ := composeFloatingFrame(base, nil, p, 1, newContent, calculateContentFloatingGeometry(domain.Size{Cols: newContent.Width, Rows: newContent.Height}, cfg), tabLayoutSnapshot{}, themeui.Theme{}, &composedFrameCache{}, true)
+	frame, _ := composeCapturedFloatingFrame(floatingComposeInput{
+		baseFrame: base,
+		floating: capturedFloatingRenderState{
+			visible:         true,
+			pane:            captured,
+			geometry:        oldGeometry,
+			title:           captured.title,
+			generation:      1,
+			titleGeneration: captured.titleGeneration,
+		},
+		content: newContent,
+		theme:   themeui.Theme{},
+		full:    true,
+	})
 	oldFrameGeometry := oldGeometry.translate(newContent.X, newContent.Y)
 	newFrameGeometry := newGeometry.translate(newContent.X, newContent.Y)
 	require.Equal(t, '┌', frame.At(oldFrameGeometry.Bounds.X, oldFrameGeometry.Bounds.Y).Rune)

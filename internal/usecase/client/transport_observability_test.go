@@ -17,11 +17,11 @@ import (
 	"github.com/bnema/vev/internal/usecase/client"
 )
 
-func TestRuntimeObserverOptionRequiresSerializedContract(t *testing.T) {
-	got := reflect.TypeOf(client.WithRuntimeObserver).In(0)
-	want := reflect.TypeFor[ports.SerializedRuntimeObserver]()
-	if got != want {
-		t.Fatalf("WithRuntimeObserver accepts %v, want %v; raw blocking sinks must not enter the hot path", got, want)
+func TestRuntimeObserverDependencyUsesSerializedContract(t *testing.T) {
+	deps := reflect.TypeFor[client.Dependencies]()
+	field, ok := deps.FieldByName("RuntimeObserver")
+	if !ok || field.Type != reflect.TypeFor[ports.SerializedRuntimeObserver]() {
+		t.Fatalf("Dependencies.RuntimeObserver is %v, want %v; raw blocking sinks must not enter the hot path", field.Type, reflect.TypeFor[ports.SerializedRuntimeObserver]())
 	}
 }
 
@@ -57,7 +57,7 @@ func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		result <- client.Attach(ctx, transport, term, realClock{}, ports.IntentEphemeral, "", client.WithRuntimeObserver(reporter))
+		result <- runTestClient(ctx, testDependencies(transportDialer{transport: transport}, term, realClock{}, nil, reporter), client.AttachRequest{Intent: ports.IntentEphemeral})
 	}()
 	awaitClientRuntime(t, observer.entered, "blocking observer")
 	awaitClientRuntime(t, flushed, "terminal flush")
@@ -95,7 +95,7 @@ func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	transport.EXPECT().Send(isType(ports.MsgAck)).Return(nil).Maybe()
 	transport.EXPECT().Close().Return(nil).Once()
 
-	err := client.Attach(context.Background(), transport, term, realClock{}, ports.IntentEphemeral, "", client.WithRuntimeObserver(reporter))
+	err := runTestClient(context.Background(), testDependencies(transportDialer{transport: transport}, term, realClock{}, nil, reporter), client.AttachRequest{Intent: ports.IntentEphemeral})
 	require.NoError(t, err)
 	reporter.Flush()
 	require.Equal(t, "unchanged-by-observer", out.String(), "observer must not alter terminal bytes")

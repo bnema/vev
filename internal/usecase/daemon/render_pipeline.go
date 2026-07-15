@@ -90,6 +90,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	if titles == nil {
 		titles = make(map[layout.PaneID]uint64, len(state.panes))
 	}
+	clear(titles)
 	damage := scratch.damage[:0]
 	for _, pane := range state.panes {
 		pl := offsetPlacement(pane.placement, 0, 1)
@@ -115,7 +116,16 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	baseFrame := frame
 	if state.floating.visible {
 		var floatingDamage []renderer.Damage
-		frame, floatingDamage = composeCapturedFloatingFrame(baseFrame, damage, state.floating, content, state.layout, state.theme, in, full || state.overlays.active())
+		frame, floatingDamage = composeCapturedFloatingFrame(floatingComposeInput{
+			baseFrame:  baseFrame,
+			baseDamage: damage,
+			floating:   state.floating,
+			content:    content,
+			layout:     state.layout,
+			theme:      state.theme,
+			cache:      in,
+			full:       full || state.overlays.active(),
+		})
 		damage = floatingDamage
 	}
 	if !full {
@@ -228,9 +238,9 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 		}
 		frame, damage = composeCopyClientFrame(o.copyMode, o.copySnapshot, target, frame, state.bars)
 	}
-	legacy := tabLayoutSnapshot{placements: state.layout.placements, area: state.layout.area, focus: state.layout.focus, ok: state.layout.valid}
+	layoutSnapshot := tabLayoutSnapshot{placements: state.layout.placements, area: state.layout.area, focus: state.layout.focus, ok: state.layout.valid}
 	if o.paletteActive && !state.floating.visible {
-		(overlayBackdrop{DimPaneContents: true}).apply(frame, content, legacy, state.theme)
+		(overlayBackdrop{DimPaneContents: true}).apply(frame, content, layoutSnapshot, state.theme)
 	}
 	for _, modal := range []capturedModal{o.copySearch, o.picker, o.palette, o.prompt} {
 		if modal.inner.Width == 0 && modal.inner.Height == 0 {

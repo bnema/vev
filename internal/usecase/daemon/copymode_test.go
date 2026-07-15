@@ -151,7 +151,15 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 	mode := scopy.NewMode(snap)
 
 	bars := barState{status: sess.statusSegments(true)}
-	base, _ := composeClientFrameWithState(bars, tb, true)
+	content := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
+	base := composeFrame(capturedRenderState{
+		reset:  true,
+		layout: capturedTabLayout{area: content, focus: tb.focusedPane().id, valid: true},
+		panes: []capturedPaneRenderState{{
+			id: tb.focusedPane().id, frame: tb.focusedPane().screen.Frame.Clone(), placement: layout.Placement{ID: tb.focusedPane().id, Content: content}, focused: true, damage: []renderer.Damage{renderer.FullRedraw()},
+		}},
+		bars: bars,
+	}, composeCacheInput{}).frame
 	frame, damage := composeCopyClientFrame(mode, &snap, domain.Rect{X: 0, Y: 1, Width: 12, Height: 3}, base, bars)
 
 	require.Equal(t, 80, frame.Width)

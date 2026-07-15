@@ -16,7 +16,8 @@ go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc ./internal/usecase/daemo
 ```
 
 - Format with **goimports**.
-- Install dev tools once with `go install golang.org/x/tools/cmd/goimports@latest` and `go install github.com/vektra/mockery/v2@latest`.
+- Install dev tools once with `go install golang.org/x/tools/cmd/goimports@latest` and `go install github.com/vektra/mockery/v3@v3.7.1`.
+- Use Mockery v3 consistently across Go projects.
 - `make test` runs `go test ./... -race`.
 - `make lint` checks `goimports -l`, then `go vet`.
 - Enable daemon pprof with `VEV_PPROF_ADDR=127.0.0.1:6060 vev --daemon`.
