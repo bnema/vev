@@ -3,6 +3,7 @@ package daemon
 
 import (
 	"strconv"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -15,6 +16,17 @@ import (
 )
 
 var copySearchModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Search ", Anchor: domain.AnchorBottom, Margins: ui.Margins{Bottom: 1}}
+
+const copyDoubleClickInterval = 500 * time.Millisecond
+
+func sameCopyPos(a, b scopy.Pos) bool { return a.Row == b.Row && a.Col == b.Col }
+
+func (d *Daemon) isCopyDoubleClickLocked(rt *overlayRuntime, pane *pane, pos scopy.Pos, now time.Time) bool {
+	candidate := rt.copyClick
+	return candidate.valid && !candidate.dragged && candidate.pane == pane &&
+		sameCopyPos(candidate.pos, pos) && !now.Before(candidate.at) &&
+		now.Sub(candidate.at) <= copyDoubleClickInterval
+}
 
 func copyTargetPane(rt *overlayRuntime) *pane {
 	if rt == nil {
@@ -31,27 +43,24 @@ func copyTargetPane(rt *overlayRuntime) *pane {
 func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 	rt := ac.overlays
 	rt.copyMu.Lock()
-	if rt.copyMode == nil || rt.copyPane == nil || rt.copySnapshot == nil {
+	if rt.copyMode == nil || rt.copyPane == nil || rt.copyDocument == nil {
 		rt.copyMu.Unlock()
 		return
 	}
-	document := rt.copySnapshot
-	if delta > 0 && rt.copyMode.AtBottom(*document) {
+	if delta > 0 && rt.copyMode.AtBottom() {
 		rt.clearCopyModeLocked()
 		rt.copyMu.Unlock()
 		d.invalidateRender(sess, ac, true, "copymode.go")
 		return
 	}
-	rt.copyMode.Move(*document, delta)
-	exit := delta > 0 && rt.copyMode.AtBottom(*document)
+	rt.copyMode.MoveRows(delta)
+	exit := delta > 0 && rt.copyMode.AtBottom()
 	if exit {
 		rt.clearCopyModeLocked()
 	}
 	rt.copyMu.Unlock()
-
 	d.invalidateRender(sess, ac, true, "copymode.go")
 }
-
 func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	tb := sess.activeTab()
 	if tb == nil {
@@ -63,23 +72,21 @@ func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	if p == nil {
 		return
 	}
-	// Capture the live pane under pane.mu; all subsequent copy interaction uses
-	// the immutable document while holding only copyMu.
 	p.mu.Lock()
-	document := scopy.NewSnapshot(p.history, p.screen.Frame)
+	snapshot := scopy.NewSnapshot(p.history, p.screen.Frame)
 	p.mu.Unlock()
-	if !d.publishCopyMode(sess, ac, tb, p, document, nil) {
+	cfg := d.currentCopyConfig()
+	document := scopy.NewDocument(snapshot, cfg.WordSeparators)
+	if !d.publishCopyMode(sess, ac, tb, p, document, nil, nil) {
 		return
 	}
 	d.invalidateRender(sess, ac, true, "copymode.go")
 }
 
-// publishCopyMode installs a non-renderable candidate, validates its captured
-// target without overlapping copyMu with session or tab locks, then atomically
-// activates that same candidate. A tab transition, pane close, or newer
-// publication invalidates the candidate before it can render or be yanked.
-func (d *Daemon) publishCopyMode(sess *session, ac *attachedClient, tb *tab, p *pane, document scopy.Snapshot, prepare func(*scopy.Mode)) bool {
-	if sess == nil || ac == nil || tb == nil || p == nil {
+// publishCopyMode serializes overlay publication after pane membership is
+// revalidated. Document is the sole immutable copy payload.
+func (d *Daemon) publishCopyMode(sess *session, ac *attachedClient, tb *tab, p *pane, document *scopy.Document, prepare func(*scopy.Mode), activate func(*overlayRuntime, *scopy.Mode)) bool {
+	if sess == nil || ac == nil || tb == nil || p == nil || document == nil {
 		return false
 	}
 	mode := scopy.NewMode(document)
@@ -92,26 +99,33 @@ func (d *Daemon) publishCopyMode(sess *session, ac *attachedClient, tb *tab, p *
 	rt.copyPending = nil
 	rt.copyMode = nil
 	rt.copyCandidate = mode
-	rt.copySnapshot = &document
+	rt.copyDocument = document
 	rt.copyPane = p
 	rt.copySearch = nil
 	rt.copySearchPending = nil
-	rt.copyPressRowValid = false
-	rt.copyDragging = false
-	rt.normalMousePressValid = false
+	if activate != nil {
+		rt.clearCopyPointerForTransferLocked()
+	} else {
+		rt.invalidateCopyPointerLocked(true)
+	}
+	pointerEpoch := rt.copyPointerEpoch
 	rt.copyMu.Unlock()
-
-	active := sess.activeTab()
-	valid := active == tb
+	if d.beforeCopyModeRevalidate != nil {
+		d.beforeCopyModeRevalidate()
+	}
+	valid := sess.activeTab() == tb
 	if valid {
 		tb.mu.Lock()
 		valid = tb.panes[p.id] == p || (tb.floating.state == floatingVisible && tb.floating.pane == p)
 		tb.mu.Unlock()
 	}
-
 	rt.copyMu.Lock()
 	defer rt.copyMu.Unlock()
-	if rt.copyCandidate != mode || rt.copyPane != p || rt.copySnapshot != &document {
+	if rt.copyCandidate != mode || rt.copyPane != p || rt.copyDocument != document {
+		return false
+	}
+	if pointerEpoch != rt.copyPointerEpoch {
+		rt.discardCopyCandidateLocked(mode)
 		return false
 	}
 	if !valid {
@@ -120,52 +134,76 @@ func (d *Daemon) publishCopyMode(sess *session, ac *attachedClient, tb *tab, p *
 	}
 	rt.copyCandidate = nil
 	rt.copyMode = mode
+	if activate != nil {
+		activate(rt, mode)
+	}
 	return true
 }
 
-func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event) {
+// copyMouse receives an already mapped client-frame position. It revalidates
+// the immutable snapshot under copyMu before changing selection state, so a
+// concurrent scroll or pointer lifecycle transition cannot apply stale rows.
+func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event, mapped mappedCopyMouse, snapshot copyMouseInputSnapshot, geometry copyMouseGeometry) {
 	rt := ac.overlays
 	if ev.Button != mouse.Left {
 		return
 	}
 	rt.copyMu.Lock()
-	if rt.copyMode == nil || rt.copyPane == nil || rt.copySnapshot == nil {
+	if rt.copyMode != snapshot.mode || rt.copyPane != snapshot.pane || rt.copyDocument != snapshot.document ||
+		rt.copyPointerEpoch != snapshot.epoch || rt.copyMode == nil || rt.copyDocument != rt.copyMode.Document() ||
+		rt.copyMode.ViewportTop != snapshot.viewportTop {
 		rt.copyMu.Unlock()
 		return
 	}
-	document := rt.copySnapshot
-	if ev.Row >= document.Height {
-		if ev.Type == mouse.Press {
-			rt.copyPressRowValid = false
-			rt.copyDragging = false
-		}
-		rt.copyMu.Unlock()
-		return
-	}
-	absRow := rt.copyMode.ViewportTop + ev.Row
 	changed := false
 	switch ev.Type {
 	case mouse.Press:
-		rt.copyMode.SetCursor(*document, absRow)
-		rt.copyPressRow = rt.copyMode.Cursor
-		rt.copyPressRowValid = true
-		rt.copyDragging = false
-		changed = true
+		changed = rt.copyMode.SetPosition(mapped.pos)
+		pointer := rt.copyPointer
+		if !pointer.valid || pointer.pane != mapped.pane || pointer.document != rt.copyDocument {
+			rt.beginCopyPointerLocked(copyPointerState{pane: mapped.pane, document: rt.copyDocument, geometry: geometry, press: mapped.pos})
+			pointer = rt.copyPointer
+		}
+		now := d.clock.Now()
+		if d.isCopyDoubleClickLocked(rt, mapped.pane, mapped.pos, now) {
+			pointer.wordDrag = rt.copyMode.SelectWordAt(mapped.pos)
+			changed = pointer.wordDrag || changed
+			rt.copyClick = copyClickCandidate{}
+		} else {
+			rt.copyClick = copyClickCandidate{valid: true, pane: mapped.pane, pos: mapped.pos, at: now}
+		}
+		rt.copyPointer = pointer
 	case mouse.Motion:
-		if !rt.copyPressRowValid {
-			break
+		pointer := rt.copyPointer
+		if pointer.valid && pointer.epoch == snapshot.epoch && pointer.pane == mapped.pane && pointer.document == rt.copyDocument {
+			if !pointer.dragging {
+				if !pointer.wordDrag {
+					rt.copyMode.StartCharacterSelection(pointer.press)
+				}
+				pointer.dragging = true
+			}
+			if rt.copyClick.valid && rt.copyClick.pane == pointer.pane {
+				rt.copyClick.dragged = true
+			}
+			if pointer.wordDrag {
+				changed = rt.copyMode.ExtendWordSelection(mapped.pos) || changed
+			} else {
+				changed = rt.copyMode.ExtendCharacterSelection(mapped.pos) || changed
+			}
+			rt.copyPointer = pointer
 		}
-		if !rt.copyDragging {
-			rt.copyMode.StartSelectionAt(*document, rt.copyPressRow)
-			rt.copyDragging = true
-		}
-		rt.copyMode.ExtendTo(*document, absRow)
-		changed = true
 	case mouse.Release:
-		// Button release intentionally has no visual effect.
+		pointer := rt.copyPointer
+		if pointer.valid && pointer.epoch == snapshot.epoch && pointer.pane == mapped.pane && pointer.document == rt.copyDocument && pointer.dragging {
+			if pointer.wordDrag {
+				changed = rt.copyMode.ExtendWordSelection(mapped.pos) || changed
+			} else {
+				changed = rt.copyMode.ExtendCharacterSelection(mapped.pos) || changed
+			}
+		}
+		rt.invalidateCopyPointerLocked(false)
 	}
 	rt.copyMu.Unlock()
-
 	if changed {
 		d.invalidateRender(sess, ac, true, "copymode.go")
 	}
@@ -178,7 +216,7 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		return
 	}
 	rt.copyMu.Lock()
-	if rt.copyMode == nil || rt.copyPane == nil || rt.copySnapshot == nil {
+	if rt.copyMode == nil || rt.copyPane == nil || rt.copyDocument == nil {
 		rt.copyPending = nil
 		d.stopCopyPendingTimerLocked(ac)
 		rt.copyMu.Unlock()
@@ -186,61 +224,71 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	}
 	if len(rt.copyPending) > 0 {
 		d.stopCopyPendingTimerLocked(ac)
-		combined := make([]byte, 0, len(rt.copyPending)+len(data))
-		combined = append(combined, rt.copyPending...)
-		combined = append(combined, data...)
-		data = combined
+		data = append(append([]byte(nil), rt.copyPending...), data...)
 		rt.copyPending = nil
 	}
-	document := rt.copySnapshot
 	if rt.copySearch != nil {
-		changed, closeSearch, accepted := d.routeCopySearchInputLocked(rt, *document, data)
+		changed, close, accepted := d.routeCopySearchInputLocked(rt, data)
 		rt.copyMu.Unlock()
-		if changed || closeSearch || accepted {
+		if changed || close || accepted {
 			d.invalidateRender(sess, ac, true, "copymode.go")
 		}
 		return
 	}
-	changed := false
-	copyOut := false
-	exit := false
+	changed, copyOut, exit := false, false, false
 	for i := 0; i < len(data); i++ {
 		switch data[i] {
+		case 'h':
+			rt.copyMode.Left()
+			changed = true
 		case 'j':
-			rt.copyMode.Move(*document, 1)
+			rt.copyMode.Down()
 			changed = true
 		case 'k':
-			rt.copyMode.Move(*document, -1)
+			rt.copyMode.Up()
+			changed = true
+		case 'l':
+			rt.copyMode.Right()
+			changed = true
+		case 'w':
+			rt.copyMode.WordNext()
+			changed = true
+		case 'b':
+			rt.copyMode.WordBackward()
+			changed = true
+		case 'e':
+			rt.copyMode.WordEnd()
 			changed = true
 		case 'g':
-			rt.copyMode.Top(*document)
+			rt.copyMode.Top()
 			changed = true
 		case 'G':
-			rt.copyMode.Bottom(*document)
+			rt.copyMode.Bottom()
 			changed = true
 		case ' ', 'v':
-			rt.copyMode.ToggleSelection()
+			rt.copyMode.ToggleLineSelection()
 			changed = true
 		case '/':
-			rt.copySearch = visualsearch.New(*document)
+			rt.copySearch = visualsearch.New(rt.copyMode.Document().Snapshot())
 			rt.copySearchPending = nil
 			changed = true
 			if i+1 < len(data) {
-				searchChanged, _, accepted := d.routeCopySearchInputLocked(rt, *document, data[i+1:])
-				changed = changed || searchChanged || accepted
+				a, b, c := d.routeCopySearchInputLocked(rt, data[i+1:])
+				changed = changed || a || c
+				_ = b
 			}
 			i = len(data)
 		case 'n':
-			changed = rt.copyMode.NextSearchMatch(*document, 1) || changed
+			changed = rt.copyMode.NextSearchMatch(1) || changed
 		case 'N':
-			changed = rt.copyMode.NextSearchMatch(*document, -1) || changed
+			changed = rt.copyMode.NextSearchMatch(-1) || changed
 		case '\r', '\n', 'y':
 			copyOut = true
 			exit = true
 		case 'q', 0x03, 0x1b:
 			if data[i] == 0x1b {
 				tail := data[i:]
-				consumed, ok := routeCopyEscape(rt.copyMode, *document, tail)
+				consumed, ok := routeCopyEscape(rt.copyMode, tail)
 				if ok {
 					i += consumed - 1
 					changed = true
@@ -260,14 +308,13 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 	}
 	text := ""
 	if copyOut {
-		text = rt.copyMode.SelectedText(*document)
+		text = rt.copyMode.SelectedText()
 	}
 	if exit {
 		d.stopCopyPendingTimerLocked(ac)
 		rt.clearCopyModeLocked()
 	}
 	rt.copyMu.Unlock()
-
 	if copyOut && text != "" {
 		chunks := scopy.OSC52(text)
 		for _, chunk := range chunks {
@@ -285,63 +332,34 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		}
 		rt.copyMu.Unlock()
 	}
-	if exit {
-		d.invalidateRender(sess, ac, true, "copymode.go")
-		return
-	}
-	if changed {
+	if exit || changed {
 		d.invalidateRender(sess, ac, true, "copymode.go")
 	}
 }
-
-func (d *Daemon) routeCopySearchInputLocked(rt *overlayRuntime, snap scopy.Snapshot, data []byte) (changed bool, closeSearch bool, accepted bool) {
-	routeOverlayBytes(data, &rt.copySearchPending, overlayEvents{
-		rune: func(r rune) {
-			rt.copySearch.Insert(r)
-			changed = true
-		},
-		backspace: func() {
-			rt.copySearch.Backspace()
-			changed = true
-		},
-		enter: func() {
-			if _, ok := rt.copySearch.Selected(); ok {
-				searchSnap := rt.copySearch.Snapshot()
-				accepted = rt.copyMode.SetSearchMatches(searchSnap, rt.copySearch.Query(), rt.copySearch.Matches(), rt.copySearch.SelectedIndex())
-				closeSearch = accepted
-			}
-		},
-		cancel: func() { closeSearch = true },
-		up: func() {
-			rt.copySearch.Up()
-			changed = true
-		},
-		down: func() {
-			rt.copySearch.Down()
-			changed = true
-		},
-	})
+func (d *Daemon) routeCopySearchInputLocked(rt *overlayRuntime, data []byte) (changed, closeSearch, accepted bool) {
+	routeOverlayBytes(data, &rt.copySearchPending, overlayEvents{rune: func(r rune) { rt.copySearch.Insert(r); changed = true }, backspace: func() { rt.copySearch.Backspace(); changed = true }, enter: func() {
+		if _, ok := rt.copySearch.Selected(); ok {
+			accepted = rt.copyMode.SetSearchMatches(rt.copySearch.Query(), rt.copySearch.Matches(), rt.copySearch.SelectedIndex())
+			closeSearch = accepted
+		}
+	}, cancel: func() { closeSearch = true }, up: func() { rt.copySearch.Up(); changed = true }, down: func() { rt.copySearch.Down(); changed = true }})
 	if changed && !closeSearch {
-		d.previewCopySearchSelectionLocked(rt, snap)
+		d.previewCopySearchSelectionLocked(rt)
 	}
 	if closeSearch {
 		rt.copySearch = nil
 		rt.copySearchPending = nil
 	}
-	return changed, closeSearch, accepted
+	return
 }
-
-func (d *Daemon) previewCopySearchSelectionLocked(rt *overlayRuntime, snap scopy.Snapshot) {
+func (d *Daemon) previewCopySearchSelectionLocked(rt *overlayRuntime) {
 	if rt == nil || rt.copyMode == nil || rt.copySearch == nil {
 		return
 	}
-	match, ok := rt.copySearch.Selected()
-	if !ok {
-		return
+	if match, ok := rt.copySearch.Selected(); ok {
+		rt.copyMode.SetPosition(scopy.Pos{Row: match.Row, Col: match.Start})
 	}
-	rt.copyMode.SetCursor(snap, match.Row)
 }
-
 func (d *Daemon) retainCopyESCLocked(ac *attachedClient) {
 	rt := ac.overlays
 	mode := rt.copyMode
@@ -361,53 +379,44 @@ func (d *Daemon) retainCopyESCLocked(ac *attachedClient) {
 		}
 		rt.clearCopyModeLocked()
 		rt.copyMu.Unlock()
-
 		if sess := ac.currentSession(); sess != nil {
 			d.invalidateRender(sess, ac, true, "copymode.go")
 		}
 	})
 }
-
-func (d *Daemon) stopCopyPendingTimerLocked(ac *attachedClient) {
-	rt := ac.overlays
-	rt.copyESC.stop()
-}
-
-func routeCopyEscape(m *scopy.Mode, snap scopy.Snapshot, data []byte) (int, bool) {
+func (d *Daemon) stopCopyPendingTimerLocked(ac *attachedClient) { ac.overlays.copyESC.stop() }
+func routeCopyEscape(m *scopy.Mode, data []byte) (int, bool) {
 	if len(data) >= 3 && (data[1] == '[' || data[1] == 'O') {
 		switch data[2] {
 		case 'A':
-			m.Move(snap, -1)
+			m.Up()
 			return 3, true
 		case 'B':
-			m.Move(snap, 1)
+			m.Down()
 			return 3, true
 		}
 	}
 	if len(data) >= 4 && data[1] == '[' && data[3] == '~' {
 		switch data[2] {
 		case '5':
-			m.Page(snap, -1)
+			m.Page(-1)
 			return 4, true
 		case '6':
-			m.Page(snap, 1)
+			m.Page(1)
 			return 4, true
 		}
 	}
 	return 0, false
 }
-
 func isCopyEscapePrefix(data []byte) bool {
-	return len(data) == 2 && data[0] == 0x1b && (data[1] == '[' || data[1] == 'O') ||
-		len(data) == 3 && data[0] == 0x1b && data[1] == '[' && (data[2] == '5' || data[2] == '6')
+	return len(data) == 2 && data[0] == 0x1b && (data[1] == '[' || data[1] == 'O') || len(data) == 3 && data[0] == 0x1b && data[1] == '[' && (data[2] == '5' || data[2] == '6')
 }
-
-func composeCopyClientFrame(mode *scopy.Mode, document *scopy.Snapshot, target domain.Rect, frame renderer.Frame, bars barState) (renderer.Frame, []renderer.Damage) {
-	if mode == nil || document == nil || target.Width <= 0 || target.Height <= 0 || frame.Width <= 0 || frame.Height <= 0 {
+func composeCopyClientFrame(mode *scopy.Mode, target domain.Rect, frame renderer.Frame, bars barState) (renderer.Frame, []renderer.Damage) {
+	if mode == nil || target.Width <= 0 || target.Height <= 0 || frame.Width <= 0 || frame.Height <= 0 {
 		return frame, nil
 	}
 	styles := newThemeStyles(bars.theme)
-	copyFrame := mode.Render(*document, styles.copyStatus, styles.selection)
+	copyFrame := mode.Render(styles.copyStatus, styles.selection)
 	bodyRows := max(copyFrame.Height-1, 0)
 	for y := 0; y < target.Height && y < bodyRows && target.Y+y < frame.Height-1; y++ {
 		dstX := max(target.X, 0)
@@ -419,10 +428,8 @@ func composeCopyClientFrame(mode *scopy.Mode, document *scopy.Snapshot, target d
 		}
 	}
 	statusY := frame.Height - 1
-	statusRow := frame.Row(statusY)
-	blank := renderer.BlankCell()
-	for x := range statusRow {
-		statusRow[x] = blank
+	for x := range frame.Row(statusY) {
+		frame.Row(statusY)[x] = renderer.BlankCell()
 	}
 	copy(frame.Row(statusY), copyFrame.Row(copyFrame.Height - 1)[:min(frame.Width, copyFrame.Width)])
 	return frame, []renderer.Damage{renderer.FullRedraw()}

@@ -2,6 +2,8 @@ package renderer
 
 import (
 	"bytes"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -68,6 +70,91 @@ func setRow(f Frame, y int, s string, st Style) {
 	for _, ru := range s {
 		f.Set(col, y, Cell{Rune: ru, Style: st})
 		col++
+	}
+}
+
+func hasCUB(out string) bool {
+	for i := 0; i+2 < len(out); i++ {
+		if out[i] != '\x1b' || out[i+1] != '[' {
+			continue
+		}
+		j := i + 2
+		for j < len(out) && out[j] >= '0' && out[j] <= '9' {
+			j++
+		}
+		if j < len(out) && out[j] == 'D' {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBackwardOverlappingDamageRendersFinalSpanOnce(t *testing.T) {
+	r := New(Capabilities{})
+	base := NewFrame(10, 1)
+	if _, err := r.Draw(base, []Damage{FullRedraw()}); err != nil {
+		t.Fatal(err)
+	}
+
+	frame := NewFrame(10, 1)
+	setRow(frame, 0, "abcdefghi", DefaultStyle())
+	got := drawGolden(t, r, frame, []Damage{
+		{Kind: DamageText, X: 4, Y: 0, Width: 5, Height: 1, Count: 1},
+		{Kind: DamageText, X: 0, Y: 0, Width: 5, Height: 1, Count: 1},
+	})
+	want := "\x1b[1;1Habcdefghi\x1b[0m"
+	if got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestDamageOrderPermutationProducesCanonicalOutput(t *testing.T) {
+	tests := []struct {
+		name  string
+		spans []Damage
+	}{
+		{
+			name: "overlapping spans",
+			spans: []Damage{
+				{Kind: DamageText, X: 0, Y: 0, Width: 5, Height: 1, Count: 1},
+				{Kind: DamageText, X: 4, Y: 0, Width: 5, Height: 1, Count: 1},
+			},
+		},
+		{
+			name: "adjacent spans",
+			spans: []Damage{
+				{Kind: DamageText, X: 0, Y: 0, Width: 5, Height: 1, Count: 1},
+				{Kind: DamageText, X: 5, Y: 0, Width: 4, Height: 1, Count: 1},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			render := func(spans []Damage) string {
+				t.Helper()
+				r := New(Capabilities{})
+				if _, err := r.Draw(NewFrame(10, 1), []Damage{FullRedraw()}); err != nil {
+					t.Fatal(err)
+				}
+				frame := NewFrame(10, 1)
+				setRow(frame, 0, "abcdefghi", DefaultStyle())
+				return drawGolden(t, r, frame, spans)
+			}
+
+			forward := render(tt.spans)
+			reverse := render([]Damage{tt.spans[1], tt.spans[0]})
+			if forward != reverse {
+				t.Fatalf("forward output = %q, reverse output = %q", forward, reverse)
+			}
+			if hasCUB(forward) {
+				t.Fatalf("canonical output contains CUB: %q", forward)
+			}
+			want := "\x1b[1;1Habcdefghi\x1b[0m"
+			if forward != want {
+				t.Fatalf("output = %q, want canonical output %q", forward, want)
+			}
+		})
 	}
 }
 
@@ -256,4 +343,145 @@ func TestWideRunCursorTrackingAndEL(t *testing.T) {
 			t.Fatalf("second draw not a no-op: %q", string(out2))
 		}
 	})
+}
+
+func TestScrollFastPathEmitsCanonicalTextDamage(t *testing.T) {
+	render := func(damage []Damage) string {
+		t.Helper()
+		r := New(Capabilities{})
+		base := NewFrame(10, 3)
+		setRow(base, 0, "aaaaaaaaaa", DefaultStyle())
+		setRow(base, 1, "bbbbbbbbbb", DefaultStyle())
+		setRow(base, 2, "cccccccccc", DefaultStyle())
+		if _, err := r.Draw(base, []Damage{FullRedraw()}); err != nil {
+			t.Fatal(err)
+		}
+
+		frame := NewFrame(10, 3)
+		setRow(frame, 0, "bbbbbbbbbb", DefaultStyle())
+		setRow(frame, 1, "cccccccccc", DefaultStyle())
+		setRow(frame, 2, "abcdefghij", DefaultStyle())
+		out, err := r.Draw(frame, damage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+
+	scroll := Damage{Kind: DamageScrollUp, X: 0, Y: 0, Width: 10, Height: 3, Count: 1}
+	forward := render([]Damage{
+		scroll,
+		{Kind: DamageText, X: 0, Y: 2, Width: 5, Height: 1},
+		{Kind: DamageText, X: 4, Y: 2, Width: 6, Height: 1},
+	})
+	reverse := render([]Damage{
+		{Kind: DamageText, X: 4, Y: 2, Width: 6, Height: 1},
+		scroll,
+		{Kind: DamageText, X: 0, Y: 2, Width: 5, Height: 1},
+	})
+	if forward != reverse {
+		t.Fatalf("scroll output depends on text damage order: forward %q, reverse %q", forward, reverse)
+	}
+	if strings.Contains(forward, "\r") || !strings.Contains(forward, "abcdefghij") {
+		t.Fatalf("scroll output did not emit one forward canonical span: %q", forward)
+	}
+}
+
+func TestCanonicalDamageMergesClearAndText(t *testing.T) {
+	r := New(Capabilities{})
+	base := NewFrame(10, 1)
+	if _, err := r.Draw(base, []Damage{FullRedraw()}); err != nil {
+		t.Fatal(err)
+	}
+	frame := NewFrame(10, 1)
+	setRow(frame, 0, "abcdefghi", DefaultStyle())
+	out, err := r.Draw(frame, []Damage{
+		{Kind: DamageClear, X: 5, Y: 0, Width: 4, Height: 1},
+		{Kind: DamageText, X: 0, Y: 0, Width: 5, Height: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(out), "\x1b[1;1Habcdefghi\x1b[0m"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestCanonicalDamagePreservesWideHeadTracking(t *testing.T) {
+	r := New(Capabilities{})
+	base := NewFrame(8, 1)
+	if _, err := r.Draw(base, []Damage{FullRedraw()}); err != nil {
+		t.Fatal(err)
+	}
+	frame := NewFrame(8, 1)
+	frame.Set(0, 0, Cell{Rune: 'A', Style: DefaultStyle()})
+	frame.Set(1, 0, Cell{Rune: '你', Style: DefaultStyle()})
+	frame.Set(2, 0, Cell{Continuation: true, Style: DefaultStyle()})
+	frame.Set(4, 0, Cell{Rune: 'B', Style: DefaultStyle()})
+	out, err := r.Draw(frame, []Damage{
+		{Kind: DamageText, X: 4, Y: 0, Width: 1, Height: 1},
+		{Kind: DamageText, X: 0, Y: 0, Width: 2, Height: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(out), "\x1b[1;1HA你\x1b[1;5HB\x1b[0m"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestScrollPlannerFallbackRedrawsWithoutScrollEscape(t *testing.T) {
+	r := New(Capabilities{})
+	base := NewFrame(1, maxPlannedDamageSpans+1)
+	if _, err := r.Draw(base, []Damage{FullRedraw()}); err != nil {
+		t.Fatal(err)
+	}
+
+	frame := base.Clone()
+	frame.ScrollUp(0, frame.Height-1, 1)
+	frame.Set(0, frame.Height-1, Cell{Rune: 'X', Style: DefaultStyle()})
+	damage := []Damage{
+		{Kind: DamageScrollUp, X: 0, Y: 0, Width: frame.Width, Height: frame.Height, Count: 1},
+		{Kind: DamageText, X: 0, Y: 0, Width: frame.Width, Height: frame.Height},
+	}
+	out, err := r.Draw(frame, damage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scrollEscape := "\x1b[1;" + strconv.Itoa(frame.Height) + "r"; strings.Contains(string(out), scrollEscape) {
+		t.Fatalf("planner fallback emitted scroll escape %q before full redraw: %q", scrollEscape, string(out))
+	}
+	if !strings.Contains(string(out), "X") {
+		t.Fatalf("planner fallback did not redraw the frame: %q", string(out))
+	}
+	out, err = r.Draw(frame, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("planner fallback did not synchronize shadow; follow-up output = %q", string(out))
+	}
+}
+
+func TestDamagePlannerFallbackRedrawsAndSynchronizesShadow(t *testing.T) {
+	r := New(Capabilities{})
+	frame := NewFrame(1, maxPlannedDamageSpans+1)
+	if _, err := r.Draw(frame, []Damage{FullRedraw()}); err != nil {
+		t.Fatal(err)
+	}
+	frame.Set(0, frame.Height-1, Cell{Rune: 'X', Style: DefaultStyle()})
+	out, err := r.Draw(frame, []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 1, Height: frame.Height}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "X") {
+		t.Fatalf("fallback output did not redraw the frame: %q", string(out))
+	}
+	out, err = r.Draw(frame, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("fallback did not synchronize shadow; follow-up output = %q", string(out))
+	}
 }

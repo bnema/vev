@@ -869,7 +869,7 @@ func (f *performanceFixture) searchMatches() int {
 func (f *performanceFixture) copyModeActive() bool {
 	f.ac.overlays.copyMu.Lock()
 	defer f.ac.overlays.copyMu.Unlock()
-	return f.ac.overlays.copyMode != nil && f.ac.overlays.copySnapshot != nil && f.ac.overlays.copySnapshot.Len() >= 10_000
+	return f.ac.overlays.copyMode != nil && f.ac.overlays.copyDocument != nil && f.ac.overlays.copyDocument.Len() >= 10_000
 }
 
 func (f *performanceFixture) resize() {

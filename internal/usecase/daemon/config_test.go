@@ -50,6 +50,51 @@ func TestApplyConfigHotReloadSwapsBindingsAndCodes(t *testing.T) {
 	require.Equal(t, "NT", cmd.Code)
 }
 
+func TestApplyConfigPublishesCopyConfig(t *testing.T) {
+	tests := []struct {
+		name  string
+		apply func(*Daemon)
+		want  domain.CopyConfig
+	}{
+		{
+			name: "default",
+			want: domain.CopyConfig{WordSeparators: domain.DefaultWordSeparators},
+		},
+		{
+			name: "custom",
+			apply: func(d *Daemon) {
+				cfg := domain.Defaults()
+				cfg.Copy = domain.CopyConfig{WordSeparators: "/:"}
+				d.ApplyConfig(cfg)
+			},
+			want: domain.CopyConfig{WordSeparators: "/:"},
+		},
+		{
+			name: "reload empty",
+			apply: func(d *Daemon) {
+				configured := domain.Defaults()
+				configured.Copy = domain.CopyConfig{WordSeparators: "/:"}
+				d.ApplyConfig(configured)
+
+				reloaded := domain.Defaults()
+				reloaded.Copy = domain.CopyConfig{}
+				d.ApplyConfig(reloaded)
+			},
+			want: domain.CopyConfig{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			if tt.apply != nil {
+				tt.apply(d)
+			}
+			require.Equal(t, tt.want, d.currentCopyConfig())
+		})
+	}
+}
+
 func TestApplyConfigPublishesImmutablePaletteSnapshot(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	require.Equal(t, domain.Defaults().Palette, d.currentPaletteConfig())

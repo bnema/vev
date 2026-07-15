@@ -31,6 +31,51 @@ func BenchmarkRendererFullFrameDraw(b *testing.B) {
 	b.ReportMetric(float64(outBytes)/float64(b.N), "outbytes/op")
 }
 
+func BenchmarkRendererFragmentedDamage(b *testing.B) {
+	const (
+		width  = 120
+		height = 40
+	)
+
+	baseline := NewFrame(width, height)
+	markBenchmarkFrame(&baseline)
+	frame := NewFrame(width, height)
+	markBenchmarkFrame(&frame)
+
+	// Create 256 overlapping or vertically adjacent text rectangles in reverse
+	// row/column order. Canonical damage planning must sort and merge these into
+	// stable per-row spans before emission.
+	damage := make([]Damage, 0, 256)
+	for row := 15; row >= 0; row-- {
+		for col := 15; col >= 0; col-- {
+			x, y := col*7, row*2
+			damage = append(damage, Damage{Kind: DamageText, X: x, Y: y, Width: 8, Height: 2})
+			for dy := range 2 {
+				for dx := range 8 {
+					frame.Set(x+dx, y+dy, Cell{Rune: 'z', Style: DefaultStyle()})
+				}
+			}
+		}
+	}
+
+	r := New(Capabilities{})
+	b.ReportAllocs()
+	var outBytes int64
+	for b.Loop() {
+		// Each iteration starts with the identical pre-update terminal shadow.
+		r.replaceShadow(baseline)
+		out, err := r.Draw(frame, damage)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(out) == 0 {
+			b.Fatal("expected renderer output")
+		}
+		outBytes += int64(len(out))
+	}
+	b.ReportMetric(float64(outBytes)/float64(b.N), "outbytes/op")
+}
+
 func BenchmarkRendererScrollFastPath(b *testing.B) {
 	frame := NewFrame(120, 40)
 	markBenchmarkFrame(&frame)

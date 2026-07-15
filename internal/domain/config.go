@@ -5,6 +5,9 @@ import "time"
 // MinBarInterval is the minimum supported bar refresh interval.
 const MinBarInterval = time.Second
 
+// DefaultWordSeparators matches tmux's practical shell-oriented word boundaries.
+const DefaultWordSeparators = " -_@"
+
 // ThemeMode selects how vev derives its color scheme.
 type ThemeMode int
 
@@ -47,6 +50,11 @@ type BarConfig struct {
 	Interval    time.Duration
 }
 
+// CopyConfig contains copy-mode text selection settings.
+type CopyConfig struct {
+	WordSeparators string
+}
+
 // PaletteConfig contains palette placement settings. A false AnchorSet uses the
 // adaptive automatic placement.
 type PaletteConfig struct {
@@ -77,6 +85,7 @@ type Config struct {
 	BindingEntries []ConfigEntry
 	Codes          map[string]string
 	Snapshot       SnapshotConfig
+	Copy           CopyConfig
 	Palette        PaletteConfig
 	Floating       FloatingConfig
 	Tabs           TabsConfig
@@ -102,6 +111,9 @@ func Defaults() Config {
 		Codes:          map[string]string{},
 		Snapshot: SnapshotConfig{
 			RestoreProcesses: DefaultSnapshotRestoreProcesses(),
+		},
+		Copy: CopyConfig{
+			WordSeparators: DefaultWordSeparators,
 		},
 		Floating: FloatingConfig{
 			Width:  80,

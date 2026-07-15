@@ -187,7 +187,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	}
 	o := &state.overlays
 	o.copyActive, o.copySearchActive, o.pickerActive, o.paletteActive, o.promptActive = snap.copyActive, snap.copySearchModel != nil, snap.pickerActive, snap.paletteActive, snap.promptActive
-	o.copyMode, o.copySnapshot = snap.copyMode, snap.copySnapshot
+	o.copyMode = snap.copyMode
 	if snap.copyPane != nil {
 		o.copyPaneID = snap.copyPane.id
 	}
@@ -238,7 +238,7 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 				}
 			}
 		}
-		frame, damage = composeCopyClientFrame(o.copyMode, o.copySnapshot, target, frame, state.bars)
+		frame, damage = composeCopyClientFrame(o.copyMode, target, frame, state.bars)
 	}
 	layoutSnapshot := tabLayoutSnapshot{placements: state.layout.placements, area: state.layout.area, focus: state.layout.focus, ok: state.layout.valid}
 	if o.paletteActive && !state.floating.visible {

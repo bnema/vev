@@ -96,27 +96,33 @@ type Daemon struct {
 	// beforeRecentSessionHandoff is a deterministic test seam for the narrow
 	// interval between JRS validation and its committed hand-off.
 	beforeRecentSessionHandoff func()
-	ptys                       ports.PTYFactory
-	clock                      ports.Clock
-	log                        *slog.Logger
-	runtimeObserver            ports.RuntimeObserver
-	baseEnv                    []string
-	shell                      string
-	shellArgs                  []string
-	shellOverride              bool
-	persist                    *persist.Persister
-	persistEnabled             bool
-	snaps                      ports.SnapshotStore
-	snapsEnabled               bool
-	snapshotMarshal            func(snapcodec.Session) ([]byte, error)
-	snapshotJobs               chan *snapshotCapture
-	snapshotWorkerMu           sync.Mutex
-	snapshotWorkerID           uint64
-	snapshotWorkerCtx          context.Context
-	snapshotWorkerCancel       context.CancelFunc
-	snapshotWorkerDone         chan struct{}
-	snapshotWorkerFlush        chan struct{}
-	snapshotWorkerFinalWake    chan struct{}
+	// beforeCopyModeRevalidate is a deterministic test seam between staging a
+	// copy-mode candidate and revalidating its pane membership.
+	beforeCopyModeRevalidate func()
+	// beforeCopyMouseMap is a deterministic seam after an immutable copy-input
+	// snapshot is captured and before its mapped position is applied.
+	beforeCopyMouseMap      func()
+	ptys                    ports.PTYFactory
+	clock                   ports.Clock
+	log                     *slog.Logger
+	runtimeObserver         ports.RuntimeObserver
+	baseEnv                 []string
+	shell                   string
+	shellArgs               []string
+	shellOverride           bool
+	persist                 *persist.Persister
+	persistEnabled          bool
+	snaps                   ports.SnapshotStore
+	snapsEnabled            bool
+	snapshotMarshal         func(snapcodec.Session) ([]byte, error)
+	snapshotJobs            chan *snapshotCapture
+	snapshotWorkerMu        sync.Mutex
+	snapshotWorkerID        uint64
+	snapshotWorkerCtx       context.Context
+	snapshotWorkerCancel    context.CancelFunc
+	snapshotWorkerDone      chan struct{}
+	snapshotWorkerFlush     chan struct{}
+	snapshotWorkerFinalWake chan struct{}
 	// snapshotFinalJobs coalesces terminal captures by session when the bounded
 	// regular queue is full. It retains at most snapshotFinalQueueCapacity named
 	// sessions, each with only its newest terminal state while the worker blocks.
@@ -135,6 +141,7 @@ type Daemon struct {
 	codeOverrides           atomic.Pointer[map[string]string]
 	restoreProcessAllowlist atomic.Pointer[map[string]struct{}]
 	floatingConfig          atomic.Pointer[domain.FloatingConfig]
+	copyConfig              atomic.Pointer[domain.CopyConfig]
 	paletteConfig           atomic.Pointer[domain.PaletteConfig]
 	tabsConfig              atomic.Pointer[domain.TabsConfig]
 	themeMode               atomic.Uint32
@@ -355,6 +362,8 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	defaults := domain.Defaults()
 	defaultFloating := defaults.Floating
 	d.floatingConfig.Store(&defaultFloating)
+	defaultCopy := defaults.Copy
+	d.copyConfig.Store(&defaultCopy)
 	defaultPalette := defaults.Palette
 	d.paletteConfig.Store(&defaultPalette)
 	for _, o := range opts {

@@ -15,8 +15,10 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/usecase/mouse"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -844,7 +846,7 @@ func TestMouseWheelEntersScrollbackModeAndExitsAtBottom(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b[<64;1;1M"))
 	data := mustOutputData(t, sends)
 	require.NotNil(t, ac.overlays.copyMode)
-	require.Equal(t, 19, ac.overlays.copyMode.Cursor)
+	require.Equal(t, 19, ac.overlays.copyMode.Cursor().Row)
 	require.Contains(t, string(data), "[SCROLL]")
 
 	d.handleInput(sess, ac, []byte("\x1b[<65;1;1M"))
@@ -945,15 +947,60 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 	}
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("\x1b[?1006l\x1b[?1000l"))
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
 	require.Nil(t, ac.overlays.copyMode, "press alone must still not enter visual mode")
-	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
+	d.handleInput(sess, ac, []byte("\x1b[<32;1;4M"))
 	mustOutputData(t, sends)
 	require.NotNil(t, ac.overlays.copyMode)
-	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
-	require.True(t, ok)
+	selection := ac.overlays.copyMode.Selection()
+	require.True(t, selection.Enabled)
+	lo, hi := selection.Anchor.Row, selection.Active.Row
+	if lo > hi {
+		lo, hi = hi, lo
+	}
 	require.Equal(t, 0, lo)
 	require.Equal(t, 2, hi)
+}
+
+func TestCopyModeMousePressReleaseWithoutMotionEmitsNoOSC52(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow("alpha"))
+	d.enterCopyMode(sess, ac)
+	mustOutputData(t, sends)
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M\x1b[<0;1;2m"))
+	d.handleInput(sess, ac, []byte("y"))
+
+	for range 2 { // press repaint, then copy-mode exit repaint
+		require.NotContains(t, string(mustOutputData(t, sends)), "\x1b]52;c;", "a click without motion has no selection to copy")
+	}
+	require.False(t, ac.overlays.copyActive())
+}
+
+func TestCopyModeMouseHorizontalReverseDragUsesExactOSC52(t *testing.T) {
+	p, _ := newBlockingPTY(t)
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow("alpha"))
+	d.enterCopyMode(sess, ac)
+	mustOutputData(t, sends)
+
+	// SGR is one based: Cy2 is the first body row. Dragging from column 3
+	// back to column 1 is the same stream as the forward endpoints 1..3.
+	d.handleInput(sess, ac, []byte("\x1b[<0;4;2M\x1b[<32;2;2M"))
+	mustOutputData(t, sends)
+	d.handleInput(sess, ac, []byte("\x1b[<0;2;2m"))
+	d.handleInput(sess, ac, []byte("y"))
+	var msg ports.Output
+	require.Eventually(t, func() bool {
+		frame := awaitFrame(t, sends, ports.MsgOutput)
+		var err error
+		msg, err = ports.UnmarshalOutput(frame.Payload)
+		return err == nil && string(msg.Data) == string(scopy.OSC52("lph")[0])
+	}, 2*time.Second, 5*time.Millisecond)
+	require.Equal(t, scopy.OSC52("lph")[0], msg.Data)
+	require.Nil(t, ac.overlays.copyPointer.pane)
 }
 
 func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
@@ -965,11 +1012,15 @@ func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;2M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M\x1b[<32;1;3M"))
 	mustOutputData(t, sends)
 	require.NotNil(t, ac.overlays.copyMode)
-	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
-	require.True(t, ok)
+	selection := ac.overlays.copyMode.Selection()
+	require.True(t, selection.Enabled)
+	lo, hi := selection.Anchor.Row, selection.Active.Row
+	if lo > hi {
+		lo, hi = hi, lo
+	}
 	require.Equal(t, 0, lo)
 	require.Equal(t, 1, hi)
 
@@ -981,7 +1032,7 @@ func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 	}, 2*time.Second, 5*time.Millisecond, "OSC52 output = %q", data)
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(strings.TrimPrefix(data, "\x1b]52;c;"), "\a"))
 	require.NoError(t, err)
-	require.Equal(t, "alpha\nbravo", string(decoded))
+	require.Equal(t, "alpha"+strings.Repeat(" ", 75)+"\nb", string(decoded))
 	require.Nil(t, ac.overlays.copyMode)
 
 	exitPaint := string(mustOutputData(t, sends))
@@ -1001,16 +1052,16 @@ func TestMouseNormalScreenStatusRowClearsStalePressState(t *testing.T) {
 	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
 
 	// Press on a content row establishes a (soon to be stale) anchor.
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
 	require.Nil(t, ac.overlays.copyMode)
 
 	// Release lands on the status row: must still clear the press state,
 	// regardless of the row it landed on.
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;24m"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;25m"))
 
 	// A brand new button hold starts with a Press on the status row: must
 	// clear (not silently preserve) any prior press state.
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;24M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;25M"))
 
 	// Motion onto a content row must not resurrect a stale anchor.
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
@@ -1024,6 +1075,28 @@ func TestMouseNormalScreenStatusRowClearsStalePressState(t *testing.T) {
 // a Press on the status row left the previous drag state in place and a
 // following Motion on a content row silently extended the old selection
 // instead of being a no-op.
+func TestCopyModeRejectedReleaseClearsPointerAndClickBeforeMotion(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	d.enterCopyMode(sess, ac)
+	mustOutputData(t, sends)
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
+	ac.overlays.copyMu.Lock()
+	require.True(t, ac.overlays.copyPointer.valid)
+	ac.overlays.copyMu.Unlock()
+
+	// Wire row 25 is below the focused pane content, so the release is not a
+	// valid endpoint and must not leave a drag that later motion can revive.
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;25m\x1b[<32;1;3M"))
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	selection := ac.overlays.copyMode.Selection()
+	require.False(t, selection.Enabled)
+	ac.overlays.copyMu.Unlock()
+}
+
 func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
@@ -1036,61 +1109,66 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	mustOutputData(t, sends)
 
 	// Full drag: press row0, motion to row1 -> selection [0,1].
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;2M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M\x1b[<32;1;3M"))
 	mustOutputData(t, sends)
 	require.NotNil(t, ac.overlays.copyMode)
-	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
-	require.True(t, ok)
+	selection := ac.overlays.copyMode.Selection()
+	require.True(t, selection.Enabled)
+	lo, hi := selection.Anchor.Row, selection.Active.Row
+	if lo > hi {
+		lo, hi = hi, lo
+	}
 	require.Equal(t, 0, lo)
 	require.Equal(t, 1, hi)
 
 	// Release, then a new button hold starting with Press on the status row.
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;2m"))
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;24M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;3m"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;25M"))
 
 	// Motion onto a content row must be a no-op: the status-row press must
 	// have cleared copyPressRowValid/copyDragging.
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 
 	require.NotNil(t, ac.overlays.copyMode)
-	lo, hi, ok = ac.overlays.copyMode.SelectedBounds()
-	require.True(t, ok)
+	selection = ac.overlays.copyMode.Selection()
+	require.True(t, selection.Enabled)
+	lo, hi = selection.Anchor.Row, selection.Active.Row
+	if lo > hi {
+		lo, hi = hi, lo
+	}
 	require.Equal(t, 0, lo, "anchor must not have moved")
 	require.Equal(t, 1, hi, "status-row press must invalidate the drag so the motion is a no-op")
 }
 
-// TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset covers a
-// regression where the first drag Motion extended the selection using the
-// scrollback length captured at Press time instead of the current
-// scrollback length, so if lines were evicted into scrollback between the
-// Press and the first Motion, the extend target landed on the wrong row.
-func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
+// TestMouseNormalScreenDragUsesPressOwnedDocumentAfterOutputEviction verifies
+// that output eviction after Press does not change endpoint mapping: the
+// immutable press-owned Document keeps pointer rows 0→1 mapped to rows 0→1.
+func TestMouseNormalScreenDragUsesPressOwnedDocumentAfterOutputEviction(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 50})
 	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
 
-	// Press on a content row while scrollback is empty: the anchor is
-	// content-stable at pressTop(0)+pressRow(0) = row 0.
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M"))
+	// Press anchors document row 0 before output eviction.
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
 
-	// Simulate 5 lines evicted into scrollback between the Press and the
-	// first Motion (e.g. the child kept producing output).
+	// Output evicts five lines after Press; the Document remains immutable.
 	for range 5 {
 		sess.tabs[0].focusedPane().history.Append(testRow("evicted"))
 	}
 
-	// Motion lands on wire row 3 (0-based row 2 of the *current* screen).
-	// The extend target must track the pointer's current content row:
-	// current scrollback length (5) + ev.Row (2) = 7 -- not the stale
-	// pressTop(0)+ev.Row(2) = 2.
+	// Motion maps the next endpoint through the press-owned Document.
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 
 	require.NotNil(t, ac.overlays.copyMode)
-	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
-	require.True(t, ok)
+	selection := ac.overlays.copyMode.Selection()
+	require.True(t, selection.Enabled)
+	lo, hi := selection.Anchor.Row, selection.Active.Row
+	if lo > hi {
+		lo, hi = hi, lo
+	}
 	require.Equal(t, 0, lo, "anchor stays content-stable at the row under the pointer at press time")
-	require.Equal(t, 7, hi, "extend target must track the pointer's current content row, not a stale scrollback offset")
+	require.Equal(t, 1, hi, "the press-owned immutable document keeps the mapped endpoint stable")
 }
 
 func TestMouseSplitReportPreservesOrder(t *testing.T) {
@@ -1133,6 +1211,137 @@ func TestMouseWheelOverUnfocusedPaneDoesNotFocusAndForwardsChildMouse(t *testing
 	d.handleInput(sess, ac, []byte("\x1b[<64;22;2M"))
 
 	require.Equal(t, layout.PaneID("pane-1"), tb.tree.Focus)
+}
+
+func TestRejectedLeftReleaseInvalidatesFreshPointerBeforeMotion(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		setup  func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, press *[]byte) []byte
+		reject []byte
+	}{
+		{
+			name: "split divider",
+			setup: func(t *testing.T, d *Daemon, sess *session, _ *attachedClient, _ *[]byte) []byte {
+				tb := sess.activeTab()
+				p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
+				tb.mu.Lock()
+				tb.size = domain.Size{Cols: 41, Rows: 10}
+				tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+				tb.panes["pane-2"] = p2
+				tb.mu.Unlock()
+				return []byte("\x1b[<0;21;2m")
+			},
+		},
+		{
+			name: "split title bar",
+			setup: func(t *testing.T, d *Daemon, sess *session, _ *attachedClient, _ *[]byte) []byte {
+				tb := sess.activeTab()
+				p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
+				tb.mu.Lock()
+				tb.size = domain.Size{Cols: 41, Rows: 10}
+				tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+				tb.panes["pane-2"] = p2
+				tb.mu.Unlock()
+				return []byte("\x1b[<0;1;1m")
+			},
+		},
+		{
+			name: "floating exterior",
+			setup: func(t *testing.T, d *Daemon, sess *session, _ *attachedClient, press *[]byte) []byte {
+				tb := sess.activeTab()
+				floating := newPane("floating", nil, domain.Size{Cols: 20, Rows: 5})
+				installTestFloating(tb, floating, true)
+				tb.mu.Lock()
+				_, geometry, visible := tb.visibleFloatingSnapshotLocked(d.currentFloatingConfig())
+				tb.mu.Unlock()
+				require.True(t, visible)
+				*press = fmt.Appendf(nil, "\x1b[<0;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+2)
+				return []byte("\x1b[<0;1;1m")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			defer release()
+			d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+			press := []byte("\x1b[<0;1;2M")
+			reject := tc.setup(t, d, sess, ac, &press)
+
+			// A content press is fresh state. The rejected release must clear it
+			// before a following motion has an opportunity to publish copy mode.
+			d.handleInput(sess, ac, press)
+			ac.overlays.copyMu.Lock()
+			require.True(t, ac.overlays.copyPointer.valid)
+			ac.overlays.copyMu.Unlock()
+
+			d.handleInput(sess, ac, reject)
+			d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
+
+			ac.overlays.copyMu.Lock()
+			require.False(t, ac.overlays.copyPointer.valid)
+			require.Nil(t, ac.overlays.copyMode, "rejected release followed by motion must not publish")
+			ac.overlays.copyMu.Unlock()
+		})
+	}
+}
+
+func TestRejectedLeftPressAndInactiveReleaseInvalidateStalePointer(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M")) // a new rejected title-bar press
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	ac.overlays.copyMu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
+	ac.setSession(nil)
+	d.handleMouse(ac, mouse.Event{Button: mouse.Left, Type: mouse.Release})
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	ac.overlays.copyMu.Unlock()
+}
+
+func TestFocusedSplitTitleBarPressInvalidatesFreshPointerBeforeMotion(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	tb := sess.activeTab()
+	p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 8})
+	p3 := newPane("pane-3", nil, domain.Size{Cols: 20, Rows: 1})
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 41, Rows: 10}
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
+		layout.NewLeaf("pane-1"),
+		{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf("pane-2"), layout.NewLeaf("pane-3")}, Expanded: "pane-2"},
+	}}
+	tb.tree.Focus = "pane-2"
+	tb.panes["pane-2"] = p2
+	tb.panes["pane-3"] = p3
+	tb.mu.Unlock()
+
+	// A content press gives pane-2 a fresh candidate. Pressing that already
+	// focused pane's title bar must make the following motion a no-op rather
+	// than reusing this pointer to publish copy mode.
+	d.handleInput(sess, ac, []byte("\x1b[<0;22;3M"))
+	ac.overlays.copyMu.Lock()
+	require.True(t, ac.overlays.copyPointer.valid)
+	epoch := ac.overlays.copyPointerEpoch
+	ac.overlays.copyMu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;22;2M"))
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.Greater(t, ac.overlays.copyPointerEpoch, epoch)
+	ac.overlays.copyMu.Unlock()
+	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus, "title press on focused pane must preserve focus")
+
+	d.handleInput(sess, ac, []byte("\x1b[<32;22;4M"))
+	ac.overlays.copyMu.Lock()
+	require.Nil(t, ac.overlays.copyMode, "motion after title-bar press must not publish stale pointer state")
+	ac.overlays.copyMu.Unlock()
 }
 
 func TestMouseDividerAndTitleBarDoNotForwardBogusCoordinates(t *testing.T) {
@@ -1199,11 +1408,15 @@ func TestCopyModeDragOutsideSplitPaneClampsToPaneContent(t *testing.T) {
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
 
-	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M\x1b[<32;1;12M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M\x1b[<32;1;12M"))
 	mustOutputData(t, sends)
 
-	lo, hi, ok := ac.overlays.copyMode.SelectedBounds()
-	require.True(t, ok)
+	selection := ac.overlays.copyMode.Selection()
+	require.True(t, selection.Enabled)
+	lo, hi := selection.Anchor.Row, selection.Active.Row
+	if lo > hi {
+		lo, hi = hi, lo
+	}
 	require.Equal(t, 0, lo)
 	require.Equal(t, 9, hi)
 }
@@ -1251,4 +1464,272 @@ func TestMouseCollapsedStackBarExpandsAndFocuses(t *testing.T) {
 
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Root.Expanded)
+}
+
+func TestActiveCopyPressOnOtherPaneFocusesAndExitsBeforeFutureInput(t *testing.T) {
+	p1, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
+	tb := sess.activeTab()
+	p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 41, Rows: 10}
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+	tb.panes["pane-2"] = p2
+	tb.mu.Unlock()
+
+	d.enterCopyMode(sess, ac)
+	require.True(t, ac.overlays.copyActive())
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
+	ac.overlays.copyMu.Lock()
+	require.True(t, ac.overlays.copyPointer.valid)
+	require.True(t, ac.overlays.copyClick.valid)
+	ac.overlays.copyMu.Unlock()
+
+	// A press in the right split must focus it, then leave the old pane's copy
+	// snapshot behind. The following press is therefore a fresh p2 candidate.
+	d.handleInput(sess, ac, []byte("\x1b[<0;22;2M"))
+	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
+	require.False(t, ac.overlays.copyActive())
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
+	ac.overlays.copyMu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;22;2M"))
+	ac.overlays.copyMu.Lock()
+	pointer := ac.overlays.copyPointer
+	ac.overlays.copyMu.Unlock()
+	require.True(t, pointer.valid)
+	require.Same(t, p2, pointer.pane)
+}
+
+func TestCopyModeReleaseMapsFinalEndpointAndInvalidatesPointer(t *testing.T) {
+	d, sess, ac, _ := mouseCopyHarness(t, "alpha bravo")
+
+	// Motion starts an active drag; Release then arrives farther away without
+	// another Motion and must still extend its final endpoint.
+	copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<32;5;2M")
+	copyMouseInput(d, sess, ac, "\x1b[<0;8;2m")
+
+	ac.overlays.copyMu.Lock()
+	selection := ac.overlays.copyMode.Selection()
+	pointerValid := ac.overlays.copyPointer.valid
+	ac.overlays.copyMu.Unlock()
+	require.True(t, selection.Enabled)
+	require.Equal(t, scopy.Pos{Row: 0, Col: 0}, selection.Anchor)
+	require.Equal(t, scopy.Pos{Row: 0, Col: 7}, selection.Active)
+	require.False(t, pointerValid)
+}
+
+func TestCopySearchReleaseMapsFinalEndpointAndInvalidatesPointer(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		release string
+		wantCol int
+	}{
+		{name: "in pane", release: "\x1b[<0;8;2m", wantCol: 7},
+		{name: "outside pane clamps", release: "\x1b[<0;99;2m", wantCol: 79},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sess, ac, _ := mouseCopyHarness(t, "alpha bravo")
+
+			copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<32;5;2M")
+			copyMouseInput(d, sess, ac, "/")
+			require.True(t, ac.overlays.copySearchActive())
+
+			// Search owns ordinary mouse input, but the release still completes
+			// the active drag against its press-owned geometry.
+			copyMouseInput(d, sess, ac, tc.release)
+			copyMouseInput(d, sess, ac, "\x03")
+
+			ac.overlays.copyMu.Lock()
+			selection := ac.overlays.copyMode.Selection()
+			pointerValid := ac.overlays.copyPointer.valid
+			ac.overlays.copyMu.Unlock()
+			require.True(t, selection.Enabled)
+			require.Equal(t, scopy.Pos{Row: 0, Col: 0}, selection.Anchor)
+			require.Equal(t, scopy.Pos{Row: 0, Col: tc.wantCol}, selection.Active)
+			require.False(t, pointerValid)
+			require.False(t, ac.overlays.copySearchActive())
+		})
+	}
+}
+
+// TestActiveCopyMouseIgnoresStalePointerResets makes the mapping/reset race
+// deterministic. Each path captures a copy-input snapshot, yields while that
+// snapshot is outside copyMu, then starts a new pointer. The old event must
+// never invalidate the new interaction.
+func TestActiveCopyMouseIgnoresStalePointerResets(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) mouse.Event
+	}{
+		{
+			name: "press-owned release rejects mapping",
+			prepare: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) mouse.Event {
+				t.Helper()
+				p := sess.activeTab().focusedPane()
+				tb := sess.activeTab()
+				tb.mu.Lock()
+				geometry, ok := hitTestCopyMouseGeometryLocked(tb, d.currentFloatingConfig(), 1, 2)
+				tb.mu.Unlock()
+				require.True(t, ok)
+				ac.overlays.copyMu.Lock()
+				ac.overlays.beginCopyPointerLocked(copyPointerState{pane: p, document: ac.overlays.copyDocument, geometry: geometry})
+				ac.overlays.copyMu.Unlock()
+				return mouse.Event{Button: mouse.Left, Type: mouse.Release, Col: geometry.content.X - 1, Row: geometry.content.Y}
+			},
+		},
+		{
+			name: "current geometry disappears",
+			prepare: func(t *testing.T, _ *Daemon, sess *session, _ *attachedClient) mouse.Event {
+				t.Helper()
+				tb := sess.activeTab()
+				tb.mu.Lock()
+				tb.tree = nil
+				tb.mu.Unlock()
+				return mouse.Event{Button: mouse.Left, Type: mouse.Press, Col: 1, Row: 2}
+			},
+		},
+		{
+			name: "fresh press rejects document mapping",
+			prepare: func(t *testing.T, _ *Daemon, sess *session, _ *attachedClient) mouse.Event {
+				t.Helper()
+				tb := sess.activeTab()
+				tb.mu.Lock()
+				tb.size.Rows = 40 // valid layout coordinate, outside the old document.
+				tb.mu.Unlock()
+				return mouse.Event{Button: mouse.Left, Type: mouse.Press, Col: 1, Row: 30}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			defer release()
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			d.enterCopyMode(sess, ac)
+			mustOutputData(t, sends)
+			ev := tc.prepare(t, d, sess, ac)
+
+			var want copyPointerState
+			d.beforeCopyMouseMap = func() {
+				ac.overlays.copyMu.Lock()
+				ac.overlays.beginCopyPointerLocked(copyPointerState{
+					pane:     ac.overlays.copyPane,
+					document: ac.overlays.copyDocument,
+					press:    scopy.Pos{Row: 7, Col: 7},
+				})
+				want = ac.overlays.copyPointer
+				ac.overlays.copyMu.Unlock()
+			}
+			defer func() { d.beforeCopyMouseMap = nil }()
+
+			d.handleActiveCopyMouse(sess, ac, sess.activeTab(), ev)
+
+			ac.overlays.copyMu.Lock()
+			defer ac.overlays.copyMu.Unlock()
+			require.True(t, want.valid, "test seam must start the newer pointer")
+			require.True(t, ac.overlays.copyPointer.valid)
+			require.Equal(t, want.epoch, ac.overlays.copyPointerEpoch)
+			require.Equal(t, want.epoch, ac.overlays.copyPointer.epoch)
+			require.Same(t, want.pane, ac.overlays.copyPointer.pane)
+			require.Same(t, want.document, ac.overlays.copyPointer.document)
+			require.Equal(t, want.press, ac.overlays.copyPointer.press)
+		})
+	}
+}
+
+func TestActiveCopyMouseRejectsViewportChangeAfterMappingSnapshot(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	pane := sess.activeTab().focusedPane()
+	for range 8 {
+		pane.history.Append(testRow("history"))
+	}
+	d.enterCopyMode(sess, ac)
+	mustOutputData(t, sends)
+
+	ac.overlays.copyMu.Lock()
+	before := ac.overlays.copyMode.Cursor()
+	ac.overlays.copyMu.Unlock()
+	d.beforeCopyMouseMap = func() {
+		ac.overlays.copyMu.Lock()
+		ac.overlays.copyMode.ViewportTop--
+		ac.overlays.copyMu.Unlock()
+	}
+	defer func() { d.beforeCopyMouseMap = nil }()
+
+	// The seam changes ViewportTop after the map snapshot but before copyMouse
+	// revalidates it. The stale mapped row must not move the selection cursor.
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
+	ac.overlays.copyMu.Lock()
+	require.Equal(t, before, ac.overlays.copyMode.Cursor())
+	require.False(t, ac.overlays.copyPointer.valid)
+	ac.overlays.copyMu.Unlock()
+}
+
+func TestFreshCopyPressUsesFrameAbsoluteHitTestGeometry(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, d *Daemon, sess *session) (*pane, mouse.Event)
+	}{
+		{
+			name: "mono",
+			setup: func(_ *testing.T, _ *Daemon, sess *session) (*pane, mouse.Event) {
+				return sess.activeTab().focusedPane(), mouse.Event{Button: mouse.Left, Type: mouse.Press, Col: 1, Row: 1}
+			},
+		},
+		{
+			name: "split",
+			setup: func(_ *testing.T, _ *Daemon, sess *session) (*pane, mouse.Event) {
+				tb := sess.activeTab()
+				p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
+				tb.mu.Lock()
+				tb.size = domain.Size{Cols: 41, Rows: 10}
+				tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+				tb.panes["pane-2"] = p2
+				tb.mu.Unlock()
+				return p2, mouse.Event{Button: mouse.Left, Type: mouse.Press, Col: 22, Row: 3}
+			},
+		},
+		{
+			name: "floating",
+			setup: func(t *testing.T, d *Daemon, sess *session) (*pane, mouse.Event) {
+				p := newPane("floating", nil, domain.Size{Cols: 20, Rows: 5})
+				installTestFloating(sess.activeTab(), p, true)
+				tb := sess.activeTab()
+				tb.mu.Lock()
+				_, geometry, visible := tb.visibleFloatingSnapshotLocked(d.currentFloatingConfig())
+				tb.mu.Unlock()
+				require.True(t, visible)
+				return p, mouse.Event{Button: mouse.Left, Type: mouse.Press, Col: geometry.Inner.X + 1, Row: geometry.Inner.Y + 2}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			defer release()
+			d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+			wantPane, ev := tc.setup(t, d, sess)
+			tb := sess.activeTab()
+			tb.mu.Lock()
+			wantGeometry, ok := hitTestCopyMouseGeometryLocked(tb, d.currentFloatingConfig(), ev.Col, ev.Row)
+			tb.mu.Unlock()
+			require.True(t, ok)
+			require.Same(t, wantPane, wantGeometry.pane)
+
+			d.handleMouse(ac, ev)
+			ac.overlays.copyMu.Lock()
+			pointer := ac.overlays.copyPointer
+			ac.overlays.copyMu.Unlock()
+			require.True(t, pointer.valid)
+			require.Same(t, wantPane, pointer.pane)
+			require.Equal(t, wantGeometry, pointer.geometry)
+			mapped, ok := mapCopyMouse(ev, wantGeometry, max(pointer.document.Len()-pointer.document.Height(), 0), pointer.document, false)
+			require.True(t, ok)
+			require.Equal(t, mapped.pos, pointer.press)
+		})
+	}
 }
