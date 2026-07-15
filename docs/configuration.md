@@ -79,7 +79,7 @@ Mouse drag selects a text range. Double-click selects the word under the pointer
 ```ini
 # Unicode whitespace always separates words.
 # The default is " -_@".
-copy.word-separators = " -_@/"
+copy.word-separators = " -_@"
 ```
 
 Set `copy.word-separators = ""` to use only Unicode whitespace as a separator.
