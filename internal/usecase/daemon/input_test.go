@@ -1140,31 +1140,24 @@ func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	require.Equal(t, 1, hi, "status-row press must invalidate the drag so the motion is a no-op")
 }
 
-// TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset covers a
-// regression where the first drag Motion extended the selection using the
-// scrollback length captured at Press time instead of the current
-// scrollback length, so if lines were evicted into scrollback between the
-// Press and the first Motion, the extend target landed on the wrong row.
-func TestMouseNormalScreenDragExtendsToCurrentScrollbackOffset(t *testing.T) {
+// TestMouseNormalScreenDragUsesPressOwnedDocumentAfterOutputEviction verifies
+// that output eviction after Press does not change endpoint mapping: the
+// immutable press-owned Document keeps pointer rows 0→1 mapped to rows 0→1.
+func TestMouseNormalScreenDragUsesPressOwnedDocumentAfterOutputEviction(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 50})
 	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
 
-	// Press on a content row while scrollback is empty: the anchor is
-	// content-stable at the first body row = document row 0.
+	// Press anchors document row 0 before output eviction.
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
 
-	// Simulate 5 lines evicted into scrollback between the Press and the
-	// first Motion (e.g. the child kept producing output).
+	// Output evicts five lines after Press; the Document remains immutable.
 	for range 5 {
 		sess.tabs[0].focusedPane().history.Append(testRow("evicted"))
 	}
 
-	// Motion lands on wire row 3 (0-based row 2 of the *current* screen).
-	// The extend target must track the pointer's current content row:
-	// current scrollback length (5) + ev.Row (2) = 7 -- not the stale
-	// pressTop(0)+ev.Row(2) = 2.
+	// Motion maps the next endpoint through the press-owned Document.
 	d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 
 	require.NotNil(t, ac.overlays.copyMode)
@@ -1509,6 +1502,24 @@ func TestActiveCopyPressOnOtherPaneFocusesAndExitsBeforeFutureInput(t *testing.T
 	ac.overlays.copyMu.Unlock()
 	require.True(t, pointer.valid)
 	require.Same(t, p2, pointer.pane)
+}
+
+func TestCopyModeReleaseMapsFinalEndpointAndInvalidatesPointer(t *testing.T) {
+	d, sess, ac, _ := mouseCopyHarness(t, "alpha bravo")
+
+	// Motion starts an active drag; Release then arrives farther away without
+	// another Motion and must still extend its final endpoint.
+	copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<32;5;2M")
+	copyMouseInput(d, sess, ac, "\x1b[<0;8;2m")
+
+	ac.overlays.copyMu.Lock()
+	selection := ac.overlays.copyMode.Selection()
+	pointerValid := ac.overlays.copyPointer.valid
+	ac.overlays.copyMu.Unlock()
+	require.True(t, selection.Enabled)
+	require.Equal(t, scopy.Pos{Row: 0, Col: 0}, selection.Anchor)
+	require.Equal(t, scopy.Pos{Row: 0, Col: 7}, selection.Active)
+	require.False(t, pointerValid)
 }
 
 func TestCopySearchReleaseMapsFinalEndpointAndInvalidatesPointer(t *testing.T) {

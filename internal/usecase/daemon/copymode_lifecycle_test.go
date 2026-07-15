@@ -208,16 +208,32 @@ func TestCopyModeLifecyclePublicationEpochRejectsReleaseAndPaneClose(t *testing.
 				close(reached)
 				<-resume
 			}
+			resumed := false
+			defer func() {
+				if !resumed {
+					close(resume)
+				}
+				d.beforeCopyModeRevalidate = nil
+			}()
 			done := make(chan struct{})
 			go func() {
 				d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
 				close(done)
 			}()
-			<-reached
+			select {
+			case <-reached:
+			case <-time.After(time.Second):
+				t.Fatal("copy mode publication did not reach revalidation gate")
+			}
 
 			tc.invalidate(t, d, sess, ac, tb, p)
 			close(resume)
-			<-done
+			resumed = true
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("copy mode publication did not finish after revalidation gate was released")
+			}
 
 			ac.overlays.copyMu.Lock()
 			require.Nil(t, ac.overlays.copyMode, "stale publication must not resurrect copy mode")
@@ -257,15 +273,31 @@ func TestCopyModeLifecycleFloatingCloseDuringPublicationDoesNotResurrect(t *test
 		close(reached)
 		<-resume
 	}
+	resumed := false
+	defer func() {
+		if !resumed {
+			close(resume)
+		}
+		d.beforeCopyModeRevalidate = nil
+	}()
 	done := make(chan struct{})
 	go func() {
 		d.handleInput(sess, ac, motion)
 		close(done)
 	}()
-	<-reached
+	select {
+	case <-reached:
+	case <-time.After(time.Second):
+		t.Fatal("copy mode publication did not reach revalidation gate")
+	}
 	d.teardownFloating(tb, ac)
 	close(resume)
-	<-done
+	resumed = true
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("copy mode publication did not finish after revalidation gate was released")
+	}
 
 	ac.overlays.copyMu.Lock()
 	require.Nil(t, ac.overlays.copyMode)

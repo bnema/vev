@@ -92,6 +92,21 @@ func TestCopyModeSearchNavigationExtendsActiveSelection(t *testing.T) {
 	require.Equal(t, Selection{Anchor: Pos{Row: 0}, Active: Pos{Row: 2, Col: 2}, Granularity: Character, Enabled: true}, m.Selection())
 }
 
+func TestCopyModeSearchExtendsSelectionWhenMatchIsAlreadyAtCursor(t *testing.T) {
+	m := modeFor([]string{"zero", "one"}, 2)
+	require.True(t, m.StartCharacterSelection(Pos{Row: 0}))
+	require.True(t, m.ExtendCharacterSelection(Pos{Row: 1, Col: 1}))
+	require.True(t, m.SetPosition(Pos{Row: 0}))
+
+	require.True(t, m.SetSearchMatches("zero", []SearchMatch{{Row: 0, Start: 0, End: 4}}, 0))
+	require.Equal(t, Pos{Row: 0}, m.Selection().Active)
+}
+
+func TestCopyModeSearchNilMode(t *testing.T) {
+	var mode *Mode
+	require.False(t, mode.Search("anything"))
+}
+
 func TestCopyModeRenderBoundsCursorToRenderedRow(t *testing.T) {
 	m := NewMode(NewDocument(NewSnapshotFromRows([][]renderer.Cell{row("alpha")}, 2, 1), ""))
 	require.True(t, m.SetPosition(Pos{Row: 0, Col: 4}), "cursor remains valid in the document despite a narrow render frame")

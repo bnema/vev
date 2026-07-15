@@ -23,9 +23,7 @@ func (d *Daemon) handleCopyMouse(sess *session, ac *attachedClient, tb *tab, ev 
 		return true
 	}
 	if ev.Button == mouse.Left && ev.Type == mouse.Release {
-		rt.copyMu.Lock()
-		rt.invalidateCopyPointerLocked(false)
-		rt.copyMu.Unlock()
+		d.handleActiveCopyMouse(sess, ac, tb, ev)
 		return true
 	}
 	switch ev.Button {

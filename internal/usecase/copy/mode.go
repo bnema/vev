@@ -234,6 +234,9 @@ func (m *Mode) ExtendWordSelection(p Pos) bool {
 	return true
 }
 func (m *Mode) Search(query string) bool {
+	if m == nil {
+		return false
+	}
 	return m.SetSearchMatches(query, FindMatches(m.document, query), 0)
 }
 func (m *Mode) SetSearchMatches(query string, matches []SearchMatch, index int) bool {
@@ -267,7 +270,12 @@ func (m *Mode) moveToSearchMatch(match SearchMatch) {
 	if m == nil || m.document == nil {
 		return
 	}
-	if m.navigator.Set(m.document, Pos{Row: match.Row, Col: match.Start}) && m.selection.Enabled {
+	pos, ok := m.document.Normalize(Pos{Row: match.Row, Col: match.Start})
+	if !ok {
+		return
+	}
+	m.navigator.Set(m.document, pos)
+	if m.selection.Enabled {
 		m.selection.Extend(m.navigator.Pos)
 	}
 	m.adjustViewport()
