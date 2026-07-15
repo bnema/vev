@@ -37,6 +37,21 @@ func (b *buffer) content(y, end int) {
 	b.boundaries[y].end = max(b.boundaries[y].end, clamp(end, 0, b.frame.Width))
 }
 
+func (b *buffer) truncate(y, end int) {
+	if y < 0 || y >= len(b.boundaries) {
+		return
+	}
+	b.boundaries[y].end = min(b.boundaries[y].end, clamp(end, 0, b.frame.Width))
+}
+
+// insert retains the meaningful shifted tail when insertion happens within it.
+func (b *buffer) insert(y, at, width int) {
+	if y < 0 || y >= len(b.boundaries) || at >= b.boundaries[y].end {
+		return
+	}
+	b.boundaries[y].end = min(b.boundaries[y].end+width, b.frame.Width)
+}
+
 func (b *buffer) hard(y int) {
 	if y >= 0 && y < len(b.boundaries) {
 		b.boundaries[y].soft = false

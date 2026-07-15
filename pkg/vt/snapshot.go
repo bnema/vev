@@ -8,7 +8,10 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-const visibleMagic = "VTV2"
+const (
+	visibleMagic         = "VTV2"
+	visibleBoundaryBytes = 5
+)
 
 // DecodeStats describes resources declared by one canonical VT blob.
 type DecodeStats struct {
@@ -112,6 +115,9 @@ func NewScreenWithRestoredHistory(width, height int, config HistoryConfig, seale
 // MarshalVisible encodes the exact visible primary frame, including every
 // blank, row width, and terminal cell attribute.
 func MarshalVisible(frame renderer.Frame) ([]byte, error) {
+	if _, _, _, ok := visibleEncodingBudget(frame.Width, frame.Height); !ok {
+		return nil, fmt.Errorf("marshal visible: %w", errInvalidHistory)
+	}
 	boundaries := make([]lineBoundary, frame.Height)
 	for y := range boundaries {
 		for x := frame.Width - 1; x >= 0; x-- {
@@ -138,19 +144,11 @@ func (s *Screen) MarshalPrimaryVisible() ([]byte, error) {
 }
 
 func marshalVisible(frame renderer.Frame, boundaries []lineBoundary) ([]byte, error) {
-	if frame.Width < 0 || frame.Height < 0 || uint64(frame.Width) > math.MaxUint32 || uint64(frame.Height) > math.MaxUint32 {
+	_, bytes, boundaryBytes, ok := visibleEncodingBudget(frame.Width, frame.Height)
+	if !ok || len(boundaries) != frame.Height {
 		return nil, fmt.Errorf("marshal visible: %w", errInvalidHistory)
 	}
-	cells := uint64(frame.Width) * uint64(frame.Height)
-	bytes, ok := historyCellByteCount(cells)
-	if !ok || cells > maxHistoryCells || bytes > maxHistoryDecodedBytes {
-		return nil, fmt.Errorf("marshal visible: %w", errInvalidHistory)
-	}
-	if len(boundaries) != frame.Height {
-		return nil, fmt.Errorf("marshal visible: %w", errInvalidHistory)
-	}
-	boundaryBytes := frame.Height * 5
-	out := make([]byte, 0, 13+bytes+uint64(boundaryBytes))
+	out := make([]byte, 0, int(13+bytes+boundaryBytes))
 	out = append(out, visibleMagic...)
 	out = append(out, historyVersion)
 	out = binary.BigEndian.AppendUint32(out, uint32(frame.Width))
@@ -181,13 +179,8 @@ func PreflightVisibleBlob(data []byte) (DecodeStats, error) {
 		return DecodeStats{}, fmt.Errorf("preflight visible: %w", errInvalidHistory)
 	}
 	width, height := uint64(binary.BigEndian.Uint32(data[5:9])), uint64(binary.BigEndian.Uint32(data[9:13]))
-	if width != 0 && height > math.MaxUint64/width {
-		return DecodeStats{}, fmt.Errorf("preflight visible: %w", errInvalidHistory)
-	}
-	cells := width * height
-	bytes, ok := historyCellByteCount(cells)
-	expected := bytes + uint64(height)*5
-	if !ok || cells > maxHistoryCells || bytes > maxHistoryDecodedBytes || uint64(len(data)-13) != expected {
+	cells, bytes, boundaryBytes, ok := visibleEncodingBudget64(width, height)
+	if !ok || bytes > math.MaxUint64-boundaryBytes || uint64(len(data)-13) != bytes+boundaryBytes {
 		return DecodeStats{}, fmt.Errorf("preflight visible: %w", errInvalidHistory)
 	}
 	p := historyParser{data: data[13:]}
@@ -204,6 +197,29 @@ func PreflightVisibleBlob(data []byte) (DecodeStats, error) {
 		p.data = p.data[5:]
 	}
 	return DecodeStats{Rows: height, Cells: cells, Styles: cells, Bytes: bytes}, nil
+}
+
+func visibleEncodingBudget(width, height int) (cells, cellBytes, boundaryBytes uint64, ok bool) {
+	if width < 0 || height < 0 {
+		return 0, 0, 0, false
+	}
+	return visibleEncodingBudget64(uint64(width), uint64(height))
+}
+
+func visibleEncodingBudget64(width, height uint64) (cells, cellBytes, boundaryBytes uint64, ok bool) {
+	if width > math.MaxUint32 || height > math.MaxUint32 || (width != 0 && height > math.MaxUint64/width) || height > math.MaxUint64/visibleBoundaryBytes {
+		return 0, 0, 0, false
+	}
+	cells = width * height
+	cellBytes, ok = historyCellByteCount(cells)
+	if !ok || cells > maxHistoryCells || cellBytes > maxHistoryDecodedBytes {
+		return 0, 0, 0, false
+	}
+	boundaryBytes = height * visibleBoundaryBytes
+	if boundaryBytes > maxVisibleBoundaryBytes {
+		return 0, 0, 0, false
+	}
+	return cells, cellBytes, boundaryBytes, true
 }
 
 // UnmarshalVisible decodes a preflighted exact visible frame.

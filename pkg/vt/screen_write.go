@@ -76,6 +76,7 @@ func (s *Screen) putPrintable(r rune) {
 			}
 			s.clearWidePairAt(s.Col, s.Row)
 			s.Frame.Set(s.Col, s.Row, renderer.BlankCell())
+			s.buffer.truncate(s.Row, cx)
 			s.buffer.continueRow(s.Row)
 			s.record(renderer.Damage{Kind: renderer.DamageText, X: cx, Y: s.Row, Width: s.Col - cx + 1, Height: 1, Count: 1})
 			s.Col = 0
@@ -98,6 +99,7 @@ func (s *Screen) putPrintable(r rune) {
 			row[x] = renderer.BlankCell()
 		}
 		s.repairRow(s.Row)
+		s.buffer.insert(s.Row, s.Col, w)
 		if leftSplit {
 			insertDamageX = s.Col - 1
 		}

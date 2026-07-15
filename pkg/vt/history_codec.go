@@ -24,8 +24,9 @@ const (
 	maxHistoryRowCells = 160
 	maxHistoryCells    = maxHistoryRows * maxHistoryRowCells
 
-	maxHistoryDecodeStyles = maxHistoryCells
-	maxHistoryDecodedBytes = maxHistoryCells * historyCellBytes
+	maxHistoryDecodeStyles  = maxHistoryCells
+	maxHistoryDecodedBytes  = maxHistoryCells * historyCellBytes
+	maxVisibleBoundaryBytes = maxHistoryRows * visibleBoundaryBytes
 )
 
 var errInvalidHistory = errors.New("invalid history payload")
