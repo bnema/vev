@@ -74,7 +74,9 @@ func (s *Screen) scrollUpRegion(top, bottom, n int) {
 }
 
 func (s *Screen) emitLineEvicted(top, n int) {
-	if s.alternate != nil {
+	// Only rows leaving the top edge of the primary screen belong to global
+	// scrollback. Interior DECSTBM scroll regions are local mutations.
+	if s.alternate != nil || top != 0 {
 		return
 	}
 	for y := top; y < top+n; y++ {

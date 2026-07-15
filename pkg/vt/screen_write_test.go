@@ -190,17 +190,37 @@ func TestCursorControlChars(t *testing.T) {
 			},
 		},
 		{
-			name: "tab advances to next 8-column boundary",
+			name: "tab moves cursor without changing cells or damage",
 			run: func(t *testing.T) {
-				s := NewScreen(20, 3)
-				s.Write([]byte("A\tB"))
-
-				assertCell(t, s, 0, 0, 'A')
-				// Tab advances to next 8-column boundary (col 8).
-				for i := 1; i < 8; i++ {
-					assertCell(t, s, i, 0, ' ')
+				s := NewScreen(10, 2)
+				for y := range s.Frame.Height {
+					for x := range s.Frame.Width {
+						s.Frame.Set(x, y, renderer.Cell{Rune: rune('a' + y*s.Frame.Width + x)})
+					}
 				}
-				assertCell(t, s, 8, 0, 'B')
+				before := s.Frame.Clone()
+				s.Row, s.Col = 1, 6
+				s.ClearDamage()
+
+				s.Write([]byte("\t"))
+				if s.Row != 1 || s.Col != 8 {
+					t.Errorf("cursor after tab = row=%d col=%d, want row=1 col=8", s.Row, s.Col)
+				}
+				assertFramesEqual(t, s.Frame, before)
+				if got := s.Damage(); len(got) != 0 {
+					t.Errorf("tab damage = %+v, want none", got)
+				}
+
+				// A tab whose next stop lies past the edge clamps at the last
+				// column; it must not wrap or scroll the bottom row.
+				s.Write([]byte("\t"))
+				if s.Row != 1 || s.Col != 9 {
+					t.Errorf("cursor after clamped tab = row=%d col=%d, want row=1 col=9", s.Row, s.Col)
+				}
+				assertFramesEqual(t, s.Frame, before)
+				if got := s.Damage(); len(got) != 0 {
+					t.Errorf("clamped tab damage = %+v, want none", got)
+				}
 			},
 		},
 	}
@@ -675,14 +695,21 @@ func TestWideAndZeroWidthRunes(t *testing.T) {
 			},
 		},
 		{
-			name: "wide char on a width-1 screen degrades to a single cell",
+			name: "wide char on a width-1 screen becomes a narrow replacement rune",
 			run: func(t *testing.T) {
 				s := NewScreen(1, 2)
-				// A wide rune cannot fit on a 1-column screen; it must not write
-				// an out-of-bounds continuation cell.
+				// A wide rune cannot fit on a 1-column screen. Store a narrow
+				// replacement instead so renderer width matches the cell layout.
 				s.Write([]byte("你"))
 
-				assertCell(t, s, 0, 0, '你')
+				assertCell(t, s, 0, 0, '\uFFFD')
+				if got := renderer.RuneWidth(cellAt(s, 0, 0).Rune); got != 1 {
+					t.Errorf("stored rune width = %d, want 1", got)
+				}
+				if cellAt(s, 0, 0).Continuation {
+					t.Error("width-1 replacement must not be a continuation")
+				}
+				assertNoOrphanWideCells(t, s)
 				if s.Col != 1 {
 					t.Errorf("cursor at col=%d, want 1", s.Col)
 				}

@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
@@ -25,6 +26,13 @@ func hasDamageKind(d []renderer.Damage, kind renderer.DamageKind) bool {
 
 func cellAt(s *Screen, x, y int) renderer.Cell {
 	return s.Frame.At(x, y)
+}
+
+func assertFramesEqual(t *testing.T, got, want renderer.Frame) {
+	t.Helper()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("frame changed unexpectedly")
+	}
 }
 
 func assertCell(t *testing.T, s *Screen, x, y int, expected rune) {

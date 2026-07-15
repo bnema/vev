@@ -23,9 +23,10 @@ func (s *Screen) putRune(r rune) {
 			s.Col--
 		}
 	case '\t':
-		spaces := 8 - (s.Col % 8)
-		for range spaces {
-			s.putPrintable(' ')
+		// HT moves to the next tab stop without modifying the frame. Clamp at
+		// the right edge rather than triggering deferred wrap or a scroll.
+		if s.Frame.Width > 0 {
+			s.Col = min(s.Col+8-s.Col%8, s.Frame.Width-1)
 		}
 	default:
 		// Drop C1 control characters (U+0080-U+009F).
@@ -60,10 +61,10 @@ func (s *Screen) putPrintable(r rune) {
 	// current line, clear the abandoned last cell and wrap to the next line.
 	if w == 2 && s.Col+1 >= s.Frame.Width {
 		if s.Frame.Width < 2 {
-			// The screen is too narrow to ever hold a wide rune; degrade to a
-			// single narrow cell so the cursor stays aligned and we never write
-			// a continuation cell out of bounds.
-			w = 1
+			// The screen is too narrow to ever hold a wide rune; store a narrow
+			// replacement so the cell's renderer width matches its layout.
+			r = '\uFFFD'
+			w = renderer.RuneWidth(r)
 		} else {
 			// The abandoned cell may itself be the continuation of a pair whose
 			// left half sits one column back; report damage over the full span.
