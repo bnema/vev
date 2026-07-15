@@ -1473,6 +1473,78 @@ func TestMouseCollapsedStackBarExpandsAndFocuses(t *testing.T) {
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Root.Expanded)
 }
 
+func TestActiveCopyPressOnOtherPaneFocusesAndExitsBeforeFutureInput(t *testing.T) {
+	p1, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p1)
+	tb := sess.activeTab()
+	p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 41, Rows: 10}
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+	tb.panes["pane-2"] = p2
+	tb.mu.Unlock()
+
+	d.enterCopyMode(sess, ac)
+	require.True(t, ac.overlays.copyActive())
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
+	ac.overlays.copyMu.Lock()
+	require.True(t, ac.overlays.copyPointer.valid)
+	require.True(t, ac.overlays.copyClick.valid)
+	ac.overlays.copyMu.Unlock()
+
+	// A press in the right split must focus it, then leave the old pane's copy
+	// snapshot behind. The following press is therefore a fresh p2 candidate.
+	d.handleInput(sess, ac, []byte("\x1b[<0;22;2M"))
+	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
+	require.False(t, ac.overlays.copyActive())
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
+	ac.overlays.copyMu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;22;2M"))
+	ac.overlays.copyMu.Lock()
+	pointer := ac.overlays.copyPointer
+	ac.overlays.copyMu.Unlock()
+	require.True(t, pointer.valid)
+	require.Same(t, p2, pointer.pane)
+}
+
+func TestCopySearchReleaseMapsFinalEndpointAndInvalidatesPointer(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		release string
+		wantCol int
+	}{
+		{name: "in pane", release: "\x1b[<0;8;2m", wantCol: 7},
+		{name: "outside pane clamps", release: "\x1b[<0;99;2m", wantCol: 79},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sess, ac, _ := mouseCopyHarness(t, "alpha bravo")
+
+			copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<32;5;2M")
+			copyMouseInput(d, sess, ac, "/")
+			require.True(t, ac.overlays.copySearchActive())
+
+			// Search owns ordinary mouse input, but the release still completes
+			// the active drag against its press-owned geometry.
+			copyMouseInput(d, sess, ac, tc.release)
+			copyMouseInput(d, sess, ac, "\x03")
+
+			ac.overlays.copyMu.Lock()
+			selection := ac.overlays.copyMode.Selection()
+			pointerValid := ac.overlays.copyPointer.valid
+			ac.overlays.copyMu.Unlock()
+			require.True(t, selection.Enabled)
+			require.Equal(t, scopy.Pos{Row: 0, Col: 0}, selection.Anchor)
+			require.Equal(t, scopy.Pos{Row: 0, Col: tc.wantCol}, selection.Active)
+			require.False(t, pointerValid)
+			require.False(t, ac.overlays.copySearchActive())
+		})
+	}
+}
+
 // TestActiveCopyMouseIgnoresStalePointerResets makes the mapping/reset race
 // deterministic. Each path captures a copy-input snapshot, yields while that
 // snapshot is outside copyMu, then starts a new pointer. The old event must

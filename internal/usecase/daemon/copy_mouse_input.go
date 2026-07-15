@@ -13,13 +13,19 @@ func (d *Daemon) handleCopyMouse(sess *session, ac *attachedClient, tb *tab, ev 
 	if !rt.copyActive() {
 		return false
 	}
+	if rt.copySearchActive() {
+		// Search owns ordinary mouse input, but a release completes an
+		// in-flight drag. Route it through the active mapper so its endpoint is
+		// clamped against the press-owned geometry before clearing the pointer.
+		if ev.Button == mouse.Left && ev.Type == mouse.Release {
+			d.handleActiveCopyMouse(sess, ac, tb, ev)
+		}
+		return true
+	}
 	if ev.Button == mouse.Left && ev.Type == mouse.Release {
 		rt.copyMu.Lock()
 		rt.invalidateCopyPointerLocked(false)
 		rt.copyMu.Unlock()
-		return true
-	}
-	if rt.copySearchActive() {
 		return true
 	}
 	switch ev.Button {
@@ -251,7 +257,7 @@ func (d *Daemon) handleActiveCopyMouse(sess *session, ac *attachedClient, tb *ta
 	// later floating/layout change must not turn an in-flight drag into a hit
 	// on a different pane.
 	if ev.Type != mouse.Press && snapshot.pointer.valid && snapshot.pointer.pane == snapshot.pane && snapshot.pointer.document == snapshot.document {
-		mapped, ok := mapCopyMouse(ev, snapshot.pointer.geometry, snapshot.viewportTop, snapshot.document, ev.Type == mouse.Motion)
+		mapped, ok := mapCopyMouse(ev, snapshot.pointer.geometry, snapshot.viewportTop, snapshot.document, ev.Type == mouse.Motion || ev.Type == mouse.Release)
 		if ev.Type == mouse.Release && !ok {
 			invalidateSnapshotCopyPointer(rt, snapshot)
 			return
@@ -263,15 +269,24 @@ func (d *Daemon) handleActiveCopyMouse(sess *session, ac *attachedClient, tb *ta
 	}
 	tb.mu.Lock()
 	geometry, ok := copyMouseGeometryForPaneLocked(tb, cfg, snapshot.pane)
-	if !ok && ev.Type == mouse.Press {
-		// Preserve the established press-on-another-pane behavior: copy mode
-		// exits rather than retargeting its immutable document.
-		if hit, hitOK := hitTestCopyMouseGeometryLocked(tb, cfg, ev.Col, ev.Row); hitOK && hit.pane != snapshot.pane && tb.tree != nil {
-			focusPlacementLocked(tb, hit.pane.id)
-			d.applyLayoutLocked(tb)
+	otherPane := false
+	if ev.Type == mouse.Press {
+		// A new press is allowed to change focus, but never the document owned
+		// by the active copy mode. Do all tab work first; exitCopyMode takes
+		// copyMu only after tb.mu is released.
+		if hit, hitOK := hitTestCopyMouseGeometryLocked(tb, cfg, ev.Col, ev.Row); hitOK && hit.pane != snapshot.pane {
+			otherPane = true
+			if tb.tree != nil {
+				focusPlacementLocked(tb, hit.pane.id)
+				d.applyLayoutLocked(tb)
+			}
 		}
 	}
 	tb.mu.Unlock()
+	if otherPane {
+		d.exitCopyMode(ac)
+		return
+	}
 	if !ok {
 		if ev.Type == mouse.Release || ev.Type == mouse.Press {
 			invalidateSnapshotCopyPointer(rt, snapshot)
@@ -281,21 +296,6 @@ func (d *Daemon) handleActiveCopyMouse(sess *session, ac *attachedClient, tb *ta
 	clamp := ev.Type == mouse.Motion || ev.Type == mouse.Release
 	mapped, mappedOK := mapCopyMouse(ev, geometry, snapshot.viewportTop, snapshot.document, clamp)
 	if !mappedOK {
-		if ev.Type == mouse.Press {
-			otherPane := false
-			tb.mu.Lock()
-			if hit, hitOK := hitTestCopyMouseGeometryLocked(tb, cfg, ev.Col, ev.Row); hitOK && hit.pane != snapshot.pane {
-				otherPane = true
-				if tb.tree != nil {
-					focusPlacementLocked(tb, hit.pane.id)
-					d.applyLayoutLocked(tb)
-				}
-			}
-			tb.mu.Unlock()
-			if otherPane {
-				d.exitCopyMode(ac)
-			}
-		}
 		if ev.Type == mouse.Release || ev.Type == mouse.Press {
 			invalidateSnapshotCopyPointer(rt, snapshot)
 		}

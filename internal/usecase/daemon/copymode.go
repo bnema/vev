@@ -193,6 +193,14 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event, ma
 			rt.copyPointer = pointer
 		}
 	case mouse.Release:
+		pointer := rt.copyPointer
+		if pointer.valid && pointer.epoch == snapshot.epoch && pointer.pane == mapped.pane && pointer.document == rt.copyDocument && pointer.dragging {
+			if pointer.wordDrag {
+				changed = rt.copyMode.ExtendWordSelection(mapped.pos) || changed
+			} else {
+				changed = rt.copyMode.ExtendCharacterSelection(mapped.pos) || changed
+			}
+		}
 		rt.invalidateCopyPointerLocked(false)
 	}
 	rt.copyMu.Unlock()
