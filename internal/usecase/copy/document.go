@@ -178,7 +178,7 @@ func (d *Document) PreviousWordStart(pos Pos) (Pos, bool) {
 }
 
 // NextWordEnd returns the inclusive end of the current word, or of the next
-// word when pos is on a separator.
+// word when pos is on a separator or at the end of a word.
 func (d *Document) NextWordEnd(pos Pos) (Pos, bool) {
 	pos, ok := d.Normalize(pos)
 	if !ok {
@@ -188,6 +188,10 @@ func (d *Document) NextWordEnd(pos Pos) (Pos, bool) {
 	i := d.glyphIndex(glyphs, pos)
 	if i < 0 {
 		return Pos{}, false
+	}
+	if !d.isSeparator(d.runeAt(glyphs[i])) &&
+		(i+1 == len(glyphs) || !d.sameWord(glyphs[i+1], glyphs[i])) {
+		i++
 	}
 	for i < len(glyphs) && d.isSeparator(d.runeAt(glyphs[i])) {
 		i++

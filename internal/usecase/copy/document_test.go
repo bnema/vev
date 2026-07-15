@@ -136,6 +136,24 @@ func TestDocumentWordMovement(t *testing.T) {
 	}
 }
 
+func TestDocumentNextWordEndAdvancesPastCompletedWord(t *testing.T) {
+	doc := documentFromStrings([]string{"alpha beta"}, "/")
+
+	got, ok := doc.NextWordEnd(Pos{Row: 0, Col: 4})
+
+	require.True(t, ok)
+	require.Equal(t, Pos{Row: 0, Col: 9}, got)
+}
+
+func TestDocumentNextWordEndCrossesEmptyRow(t *testing.T) {
+	doc := documentFromStrings([]string{"alpha", "", "beta"}, "/")
+
+	got, ok := doc.NextWordEnd(Pos{Row: 0, Col: 4})
+
+	require.True(t, ok)
+	require.Equal(t, Pos{Row: 2, Col: 3}, got)
+}
+
 func TestDocumentExtractRanges(t *testing.T) {
 	wide := []renderer.Cell{{Rune: 'a'}, {Rune: '界'}, {Continuation: true}, {Rune: ' '}, {Rune: 'b'}}
 	doc := NewDocument(NewSnapshotFromRows([][]renderer.Cell{documentCells("alpha  "), documentCells("beta"), wide, {}}, 7, 4), "")
