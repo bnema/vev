@@ -146,6 +146,17 @@ func (rt *overlayRuntime) clearCopyPointerForTransferLocked() {
 	rt.copyClick = copyClickCandidate{}
 }
 
+func (rt *overlayRuntime) discardCopyCandidateLocked(candidate *scopy.Mode) {
+	if rt.copyCandidate != candidate {
+		return
+	}
+	rt.copyCandidate = nil
+	rt.copyDocument = nil
+	rt.copyPane = nil
+	rt.copySearch = nil
+	rt.copySearchPending = nil
+}
+
 func (rt *overlayRuntime) clearCopyModeLocked() {
 	rt.copyMode = nil
 	rt.copyCandidate = nil

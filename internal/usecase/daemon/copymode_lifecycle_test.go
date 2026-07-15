@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -125,6 +126,116 @@ func TestCopyModeLifecycleDoesNotRenderCandidateBeforeValidation(t *testing.T) {
 	require.False(t, candidateWasRenderable)
 	require.False(t, ac.overlays.copyActive())
 	require.Nil(t, copyTargetPane(ac.overlays))
+}
+
+func TestCopyModeLifecyclePublicationEpochRejectsReleaseAndPaneClose(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		invalidate func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, tb *tab, p *pane)
+	}{
+		{
+			name: "release during publication",
+			invalidate: func(_ *testing.T, d *Daemon, sess *session, ac *attachedClient, _ *tab, _ *pane) {
+				d.handleInput(sess, ac, []byte("\x1b[<0;1;2m"))
+			},
+		},
+		{
+			name: "pane close during publication",
+			invalidate: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, tb *tab, p *pane) {
+				require.NoError(t, d.closePane(sess, tb, p.id, ac, false))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sess, ac, _, releases := newManualTabSession(t, 2)
+			defer func() {
+				for _, release := range releases {
+					release()
+				}
+			}()
+			tb := sess.activeTab()
+			p := tb.focusedPane()
+
+			// A real press is required: the motion publication must inherit this
+			// pointer epoch, rather than publishing a fresh interaction.
+			d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
+			ac.overlays.copyMu.Lock()
+			require.True(t, ac.overlays.copyPointer.valid)
+			ac.overlays.copyClick = copyClickCandidate{valid: true, pane: p}
+			ac.overlays.copyMu.Unlock()
+
+			reached := make(chan struct{})
+			resume := make(chan struct{})
+			d.beforeCopyModeRevalidate = func() {
+				close(reached)
+				<-resume
+			}
+			done := make(chan struct{})
+			go func() {
+				d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
+				close(done)
+			}()
+			<-reached
+
+			tc.invalidate(t, d, sess, ac, tb, p)
+			close(resume)
+			<-done
+
+			ac.overlays.copyMu.Lock()
+			require.Nil(t, ac.overlays.copyMode, "stale publication must not resurrect copy mode")
+			require.Nil(t, ac.overlays.copyCandidate)
+			require.False(t, ac.overlays.copyPointer.valid)
+			require.False(t, ac.overlays.copyClick.valid)
+			ac.overlays.copyMu.Unlock()
+		})
+	}
+}
+
+func TestCopyModeLifecycleFloatingCloseDuringPublicationDoesNotResurrect(t *testing.T) {
+	d, sess, ac, _, releases := newManualTabSession(t, 2)
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	tb := sess.activeTab()
+	floating := newPane("floating", nil, domain.Size{Cols: 20, Rows: 5})
+	installTestFloating(tb, floating, true)
+	tb.mu.Lock()
+	_, geometry, visible := tb.visibleFloatingSnapshotLocked(d.currentFloatingConfig())
+	tb.mu.Unlock()
+	require.True(t, visible)
+	press := fmt.Appendf(nil, "\x1b[<0;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+2)
+	motion := fmt.Appendf(nil, "\x1b[<32;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+3)
+
+	d.handleInput(sess, ac, press)
+	ac.overlays.copyMu.Lock()
+	require.True(t, ac.overlays.copyPointer.valid)
+	ac.overlays.copyClick = copyClickCandidate{valid: true, pane: floating}
+	ac.overlays.copyMu.Unlock()
+
+	reached := make(chan struct{})
+	resume := make(chan struct{})
+	d.beforeCopyModeRevalidate = func() {
+		close(reached)
+		<-resume
+	}
+	done := make(chan struct{})
+	go func() {
+		d.handleInput(sess, ac, motion)
+		close(done)
+	}()
+	<-reached
+	d.teardownFloating(tb, ac)
+	close(resume)
+	<-done
+
+	ac.overlays.copyMu.Lock()
+	require.Nil(t, ac.overlays.copyMode)
+	require.Nil(t, ac.overlays.copyCandidate)
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
+	ac.overlays.copyMu.Unlock()
 }
 
 func TestCopyModeLifecycleRejectsPublicationForInactiveOrRemovedPane(t *testing.T) {

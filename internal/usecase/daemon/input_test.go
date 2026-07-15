@@ -18,6 +18,7 @@ import (
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/usecase/mouse"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -961,6 +962,23 @@ func TestMouseChildForwardingStatusDropAndPressDrop(t *testing.T) {
 	require.Equal(t, 2, hi)
 }
 
+func TestCopyModeMousePressReleaseWithoutMotionEmitsNoOSC52(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow("alpha"))
+	d.enterCopyMode(sess, ac)
+	mustOutputData(t, sends)
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M\x1b[<0;1;2m"))
+	d.handleInput(sess, ac, []byte("y"))
+
+	for range 2 { // press repaint, then copy-mode exit repaint
+		require.NotContains(t, string(mustOutputData(t, sends)), "\x1b]52;c;", "a click without motion has no selection to copy")
+	}
+	require.False(t, ac.overlays.copyActive())
+}
+
 func TestCopyModeMouseHorizontalReverseDragUsesExactOSC52(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
@@ -1057,6 +1075,30 @@ func TestMouseNormalScreenStatusRowClearsStalePressState(t *testing.T) {
 // a Press on the status row left the previous drag state in place and a
 // following Motion on a content row silently extended the old selection
 // instead of being a no-op.
+func TestCopyModeRejectedReleaseClearsPointerAndClickBeforeMotion(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	d.enterCopyMode(sess, ac)
+	mustOutputData(t, sends)
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
+	ac.overlays.copyMu.Lock()
+	require.True(t, ac.overlays.copyPointer.valid)
+	ac.overlays.copyClick = copyClickCandidate{valid: true, pane: ac.overlays.copyPointer.pane}
+	ac.overlays.copyMu.Unlock()
+
+	// Wire row 25 is below the focused pane content, so the release is not a
+	// valid endpoint and must not leave a drag that later motion can revive.
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;25m\x1b[<32;1;3M"))
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
+	selection := ac.overlays.copyMode.Selection()
+	require.False(t, selection.Enabled)
+	ac.overlays.copyMu.Unlock()
+}
+
 func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
@@ -1178,6 +1220,100 @@ func TestMouseWheelOverUnfocusedPaneDoesNotFocusAndForwardsChildMouse(t *testing
 	d.handleInput(sess, ac, []byte("\x1b[<64;22;2M"))
 
 	require.Equal(t, layout.PaneID("pane-1"), tb.tree.Focus)
+}
+
+func TestRejectedLeftReleaseInvalidatesFreshPointerBeforeMotion(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		setup  func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, press *[]byte) []byte
+		reject []byte
+	}{
+		{
+			name: "split divider",
+			setup: func(t *testing.T, d *Daemon, sess *session, _ *attachedClient, _ *[]byte) []byte {
+				tb := sess.activeTab()
+				p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
+				tb.mu.Lock()
+				tb.size = domain.Size{Cols: 41, Rows: 10}
+				tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+				tb.panes["pane-2"] = p2
+				tb.mu.Unlock()
+				return []byte("\x1b[<0;21;2m")
+			},
+		},
+		{
+			name: "split title bar",
+			setup: func(t *testing.T, d *Daemon, sess *session, _ *attachedClient, _ *[]byte) []byte {
+				tb := sess.activeTab()
+				p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
+				tb.mu.Lock()
+				tb.size = domain.Size{Cols: 41, Rows: 10}
+				tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+				tb.panes["pane-2"] = p2
+				tb.mu.Unlock()
+				return []byte("\x1b[<0;1;1m")
+			},
+		},
+		{
+			name: "floating exterior",
+			setup: func(t *testing.T, d *Daemon, sess *session, _ *attachedClient, press *[]byte) []byte {
+				tb := sess.activeTab()
+				floating := newPane("floating", nil, domain.Size{Cols: 20, Rows: 5})
+				installTestFloating(tb, floating, true)
+				tb.mu.Lock()
+				_, geometry, visible := tb.visibleFloatingSnapshotLocked(d.currentFloatingConfig())
+				tb.mu.Unlock()
+				require.True(t, visible)
+				*press = fmt.Appendf(nil, "\x1b[<0;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+2)
+				return []byte("\x1b[<0;1;1m")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			defer release()
+			d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+			press := []byte("\x1b[<0;1;2M")
+			reject := tc.setup(t, d, sess, ac, &press)
+
+			// A content press is fresh state. The rejected release must clear it
+			// before a following motion has an opportunity to publish copy mode.
+			d.handleInput(sess, ac, press)
+			ac.overlays.copyMu.Lock()
+			require.True(t, ac.overlays.copyPointer.valid)
+			ac.overlays.copyClick = copyClickCandidate{valid: true, pane: ac.overlays.copyPointer.pane}
+			ac.overlays.copyMu.Unlock()
+
+			d.handleInput(sess, ac, reject)
+			d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
+
+			ac.overlays.copyMu.Lock()
+			require.False(t, ac.overlays.copyPointer.valid)
+			require.False(t, ac.overlays.copyClick.valid)
+			require.Nil(t, ac.overlays.copyMode, "rejected release followed by motion must not publish")
+			ac.overlays.copyMu.Unlock()
+		})
+	}
+}
+
+func TestRejectedLeftPressAndInactiveReleaseInvalidateStalePointer(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;1M")) // a new rejected title-bar press
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	ac.overlays.copyMu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
+	ac.setSession(nil)
+	d.handleMouse(ac, mouse.Event{Button: mouse.Left, Type: mouse.Release})
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
+	ac.overlays.copyMu.Unlock()
 }
 
 func TestMouseDividerAndTitleBarDoNotForwardBogusCoordinates(t *testing.T) {

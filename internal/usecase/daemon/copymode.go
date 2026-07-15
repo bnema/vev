@@ -96,7 +96,11 @@ func (d *Daemon) publishCopyMode(sess *session, ac *attachedClient, tb *tab, p *
 	} else {
 		rt.invalidateCopyPointerLocked(true)
 	}
+	pointerEpoch := rt.copyPointerEpoch
 	rt.copyMu.Unlock()
+	if d.beforeCopyModeRevalidate != nil {
+		d.beforeCopyModeRevalidate()
+	}
 	valid := sess.activeTab() == tb
 	if valid {
 		tb.mu.Lock()
@@ -106,6 +110,10 @@ func (d *Daemon) publishCopyMode(sess *session, ac *attachedClient, tb *tab, p *
 	rt.copyMu.Lock()
 	defer rt.copyMu.Unlock()
 	if rt.copyCandidate != mode || rt.copyPane != p || rt.copyDocument != document {
+		return false
+	}
+	if pointerEpoch != rt.copyPointerEpoch {
+		rt.discardCopyCandidateLocked(mode)
 		return false
 	}
 	if !valid {

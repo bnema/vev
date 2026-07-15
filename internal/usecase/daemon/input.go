@@ -41,10 +41,12 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	}
 	sess := ac.currentSession()
 	if sess == nil {
+		invalidateRejectedLeftPointer(rt, ev)
 		return
 	}
 	tb := sess.activeTab()
 	if tb == nil {
+		invalidateRejectedLeftPointer(rt, ev)
 		return
 	}
 
@@ -69,6 +71,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	if floatingVisible {
 		if !pointInRect(ev.Col, contentRow, floatingGeometry.Inner) {
 			tb.mu.Unlock()
+			invalidateRejectedLeftPointer(rt, ev)
 			return
 		}
 		tb.mu.Unlock()
@@ -85,6 +88,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	if hit && pointInRect(ev.Col, contentRow, pl.TitleBar) {
 		if !isMouseFocusPress(ev) {
 			tb.mu.Unlock()
+			invalidateRejectedLeftPointer(rt, ev)
 			return
 		}
 		oldFocus := focusedID
@@ -111,6 +115,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 		hoveredFocused = pl.ID == oldFocus
 		tb.mu.Unlock()
 		if p == nil {
+			invalidateRejectedLeftPointer(rt, ev)
 			return
 		}
 		if isMouseFocusPress(ev) && pl.ID != oldFocus {
@@ -125,15 +130,29 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	} else {
 		if multi {
 			tb.mu.Unlock()
+			invalidateRejectedLeftPointer(rt, ev)
 			return
 		}
 		p = tb.focusedPane()
 		tb.mu.Unlock()
 		if p == nil {
+			invalidateRejectedLeftPointer(rt, ev)
 			return
 		}
 	}
 	d.handleTerminalMouse(sess, ac, p, ev, translated, hoveredFocused)
+}
+
+// invalidateRejectedLeftPointer clears a stale drag before returning from an
+// event that cannot be routed to terminal content. It never runs while tab or
+// pane locks are held, preserving the copyMu -> tab/pane lock prohibition.
+func invalidateRejectedLeftPointer(rt *overlayRuntime, ev mouse.Event) {
+	if rt == nil || ev.Button != mouse.Left || (ev.Type != mouse.Press && ev.Type != mouse.Release) {
+		return
+	}
+	rt.copyMu.Lock()
+	rt.invalidateCopyPointerLocked(true)
+	rt.copyMu.Unlock()
 }
 
 // handleActiveCopyMouse keeps every drag tied to the pane/document captured at
@@ -153,10 +172,10 @@ func (d *Daemon) handleActiveCopyMouse(sess *session, ac *attachedClient, tb *ta
 	// later floating/layout change must not turn an in-flight drag into a hit
 	// on a different pane.
 	if ev.Type != mouse.Press && pointer.valid && pointer.pane == target && pointer.document == document {
-		mapped, ok := mapCopyMouse(ev, pointer.geometry, mode.ViewportTop, document, true)
+		mapped, ok := mapCopyMouse(ev, pointer.geometry, mode.ViewportTop, document, ev.Type == mouse.Motion)
 		if ev.Type == mouse.Release && !ok {
 			rt.copyMu.Lock()
-			rt.invalidateCopyPointerLocked(false)
+			rt.invalidateCopyPointerLocked(true)
 			rt.copyMu.Unlock()
 			return
 		}
@@ -181,7 +200,7 @@ func (d *Daemon) handleActiveCopyMouse(sess *session, ac *attachedClient, tb *ta
 	if !ok {
 		if ev.Type == mouse.Release || ev.Type == mouse.Press {
 			rt.copyMu.Lock()
-			rt.invalidateCopyPointerLocked(ev.Type == mouse.Press)
+			rt.invalidateCopyPointerLocked(true)
 			rt.copyMu.Unlock()
 		}
 		return
@@ -206,7 +225,7 @@ func (d *Daemon) handleActiveCopyMouse(sess *session, ac *attachedClient, tb *ta
 		}
 		if ev.Type == mouse.Release || ev.Type == mouse.Press {
 			rt.copyMu.Lock()
-			rt.invalidateCopyPointerLocked(ev.Type == mouse.Press)
+			rt.invalidateCopyPointerLocked(true)
 			rt.copyMu.Unlock()
 		}
 		return
@@ -303,7 +322,7 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 			d.invalidateRender(sess, ac, true, "input.go")
 		case mouse.Release:
 			rt.copyMu.Lock()
-			rt.invalidateCopyPointerLocked(false)
+			rt.invalidateCopyPointerLocked(true)
 			rt.copyMu.Unlock()
 		}
 	case mouse.WheelUp:
