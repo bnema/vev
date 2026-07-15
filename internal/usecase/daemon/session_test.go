@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1531,6 +1532,28 @@ func TestNamedSessionLifecycleTimestampsAreMonotonicAcrossClockRegression(t *tes
 		got = append(got, sess.createdAt)
 	}
 	require.Equal(t, []int64{100, 101, 102}, got)
+}
+
+func TestNamedSessionLifecycleExhaustionDoesNotMutateSessionState(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.lastAllocatedCreatedAt = math.MaxInt64
+	d.nextID = 17
+	d.stopped["retained"] = stoppedSession{name: "retained", cwd: "/tmp", createdAt: 9}
+
+	sess, err := d.createSessionLocked("new", false, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+
+	require.ErrorContains(t, err, "lifecycle identities exhausted")
+	require.Nil(t, sess)
+	require.Empty(t, d.sessions)
+	require.Equal(t, uint64(17), d.nextID)
+	require.Equal(t, int64(math.MaxInt64), d.lastAllocatedCreatedAt)
+	require.Equal(t, stoppedSession{name: "retained", cwd: "/tmp", createdAt: 9}, d.stopped["retained"])
+
+	_, _, err = d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "routed", Size: domain.Size{Cols: 80, Rows: 24}}, nil)
+	require.ErrorContains(t, err, "lifecycle identities exhausted")
+	require.Empty(t, d.sessions)
+	require.Equal(t, uint64(17), d.nextID)
+	require.Equal(t, stoppedSession{name: "retained", cwd: "/tmp", createdAt: 9}, d.stopped["retained"])
 }
 
 func TestNamedSessionLifecycleTimestampStartsAfterPersistedHighWaterMark(t *testing.T) {

@@ -16,11 +16,13 @@ const (
 )
 
 type SessionView struct {
-	ID      domain.SessionID
-	Name    string
-	Tabs    []TabEntry
-	Active  int
-	Stopped bool
+	ID                domain.SessionID
+	Name              string
+	TargetName        string
+	Tabs              []TabEntry
+	Active            int
+	Stopped           bool
+	ExpectedCreatedAt *int64
 }
 
 // TabEntry is one tab row; Name is drawn emphasized, Detail muted.
@@ -93,29 +95,30 @@ type row struct {
 	detail    string // " (paneTitle)" segment, muted; "" for headers
 	attention bool   // draw the attention marker right after the name, before detail; tab rows only
 	session   domain.SessionID
-	// targetName is the stopped-session lookup name threaded into Target;
+	// targetName is the named-session lookup name threaded into Target;
 	// distinct from dispName, which is what gets drawn.
-	targetName string
-	tabIndex   int
-	stopped    bool
+	targetName        string
+	tabIndex          int
+	stopped           bool
+	expectedCreatedAt *int64
 }
 
 func New(sessions []SessionView, cur domain.SessionID, curTab int) *Model {
 	m := &Model{selected: -1}
 	activeSelection := -1
 	for _, session := range sessions {
-		targetName := ""
-		if session.Stopped {
+		targetName := session.TargetName
+		if targetName == "" && (session.Stopped || session.ExpectedCreatedAt != nil) {
 			targetName = session.Name
 		}
-		m.rows = append(m.rows, row{header: true, dispName: session.Name, session: session.ID, targetName: targetName, tabIndex: -1, stopped: session.Stopped})
+		m.rows = append(m.rows, row{header: true, dispName: session.Name, session: session.ID, targetName: targetName, tabIndex: -1, stopped: session.Stopped, expectedCreatedAt: session.ExpectedCreatedAt})
 		active := session.Active
 		if active < 0 || active >= len(session.Tabs) {
 			active = 0
 		}
 		for i, tab := range session.Tabs {
 			idx := len(m.rows)
-			m.rows = append(m.rows, row{dispName: tab.Name, detail: tab.Detail, attention: tab.Attention, session: session.ID, targetName: targetName, tabIndex: i, stopped: session.Stopped})
+			m.rows = append(m.rows, row{dispName: tab.Name, detail: tab.Detail, attention: tab.Attention, session: session.ID, targetName: targetName, tabIndex: i, stopped: session.Stopped, expectedCreatedAt: session.ExpectedCreatedAt})
 			if session.ID == cur && i == curTab {
 				m.selected = idx
 			}
@@ -181,7 +184,7 @@ func (m *Model) Selected() (Target, bool) {
 	if r.header {
 		return Target{}, false
 	}
-	return Target{Session: r.session, Name: r.targetName, TabIndex: r.tabIndex, Stopped: r.stopped}, true
+	return Target{Session: r.session, Name: r.targetName, TabIndex: r.tabIndex, Stopped: r.stopped, ExpectedCreatedAt: r.expectedCreatedAt}, true
 }
 
 func (m *Model) Clone() *Model {

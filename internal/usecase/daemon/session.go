@@ -131,6 +131,25 @@ func (d *Daemon) touchMRU(sess *session) {
 
 func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
 	env = copyEnvironment(env)
+	stopped, resuming := d.stopped[name]
+	var createdAt int64
+	if !ephemeral {
+		if resuming {
+			// A stopped session is the same lifecycle when resumed; it must retain
+			// the persisted identity rather than receive a fresh timestamp.
+			createdAt = stopped.createdAt
+			if createdAt > d.lastAllocatedCreatedAt {
+				d.lastAllocatedCreatedAt = createdAt
+			}
+		} else {
+			var err error
+			createdAt, err = d.allocateLifecycleCreatedAtLocked()
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	tbSize := tabSize(sz)
 	var names []string
 	if len(restoredTabNames) > 0 {
@@ -159,18 +178,6 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 
 	id := domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
 	d.nextID++
-	stopped, resuming := d.stopped[name]
-	var createdAt int64
-	if !ephemeral && resuming {
-		// A stopped session is the same lifecycle when resumed; it must retain
-		// the persisted identity rather than receive a fresh timestamp.
-		createdAt = stopped.createdAt
-		if createdAt > d.lastAllocatedCreatedAt {
-			d.lastAllocatedCreatedAt = createdAt
-		}
-	} else {
-		createdAt = d.allocateLifecycleCreatedAtLocked()
-	}
 
 	sctx, cancel := context.WithCancel(d.serveCtx)
 	for _, tb := range tabs {

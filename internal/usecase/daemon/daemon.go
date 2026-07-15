@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"os"
 	"slices"
 	"sort"
@@ -300,13 +301,16 @@ func WithConfig(cfg domain.Config) Option {
 // allocateLifecycleCreatedAtLocked returns a unique lifecycle timestamp. Caller
 // holds d.mu. The persisted high-water mark is loaded by New before any named
 // session can be resumed or created.
-func (d *Daemon) allocateLifecycleCreatedAtLocked() int64 {
+func (d *Daemon) allocateLifecycleCreatedAtLocked() (int64, error) {
 	now := d.nowUnixNano()
 	if now <= d.lastAllocatedCreatedAt {
+		if d.lastAllocatedCreatedAt == math.MaxInt64 {
+			return 0, errors.New("daemon: lifecycle identities exhausted")
+		}
 		now = d.lastAllocatedCreatedAt + 1
 	}
 	d.lastAllocatedCreatedAt = now
-	return now
+	return now, nil
 }
 
 func (d *Daemon) nowUnixNano() int64 {

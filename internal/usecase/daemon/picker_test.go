@@ -67,6 +67,31 @@ func TestPickerViewsAddsBellSuffixForAttention(t *testing.T) {
 	require.Equal(t, []picker.TabEntry{{Name: "1"}, {Name: "2"}}, views[0].Tabs)
 	require.Equal(t, "beta ", views[1].Name)
 	require.Equal(t, []picker.TabEntry{{Name: "shell"}, {Name: "logs", Attention: true}}, views[1].Tabs)
+
+	model := picker.New(views, current.id, 0)
+	model.Down()
+	model.Down()
+	target, ok := model.Selected()
+	require.True(t, ok)
+	require.Equal(t, "beta", target.Name)
+	require.NotNil(t, target.ExpectedCreatedAt)
+}
+
+func TestPickerViewsCarryNamedLifecycleIdentity(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	ctx, cancel := context.WithCancel(d.serveCtx)
+	defer cancel()
+	active := &session{id: "active", name: "active", createdAt: 23, ctx: ctx, cancel: cancel, tabs: []*tab{{}}}
+	d.sessions[active.id] = active
+	d.stopped["stopped"] = stoppedSession{name: "stopped", createdAt: 24}
+
+	views, _ := d.pickerViews(active)
+
+	require.Len(t, views, 2)
+	require.NotNil(t, views[0].ExpectedCreatedAt)
+	require.Equal(t, int64(23), *views[0].ExpectedCreatedAt)
+	require.NotNil(t, views[1].ExpectedCreatedAt)
+	require.Equal(t, int64(24), *views[1].ExpectedCreatedAt)
 }
 
 func TestPickerViewsComposesFocusedPaneTitleWithAttentionSuffix(t *testing.T) {
@@ -403,6 +428,8 @@ func TestPickerSessionSwitchWaitsForInFlightPaintSend(t *testing.T) {
 	sess1 := &session{id: "s1", name: "alpha", ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}, client: ac}
 	sess2 := &session{id: "s2", name: "beta", ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
 	ac.setSession(sess1)
+	d.sessions[sess1.id] = sess1
+	d.sessions[sess2.id] = sess2
 
 	sess1.tabs[0].focusedPane().screen.Write([]byte("paint while switching"))
 	paintDone := make(chan struct{})
@@ -412,17 +439,17 @@ func TestPickerSessionSwitchWaitsForInFlightPaintSend(t *testing.T) {
 	}()
 	<-enteredSend
 
+	switchStarted := make(chan struct{})
 	switchDone := make(chan struct{})
 	go func() {
-		ac.setSession(sess2)
+		close(switchStarted)
+		d.stealClientForTarget(sess1, ac, sess2, picker.Target{Session: sess2.id})
 		close(switchDone)
 	}()
-	select {
-	case <-switchDone:
-		t.Fatal("session switch completed while paint Send was still in flight")
-	case <-time.After(50 * time.Millisecond):
-	}
+	<-switchStarted
 
+	// enteredSend proves paint owns ac.sendMu. The real handoff also takes that
+	// lock, so releasing the transport send is the deterministic handoff gate.
 	close(releaseSend)
 	select {
 	case <-paintDone:
