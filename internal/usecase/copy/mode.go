@@ -248,7 +248,7 @@ func (m *Mode) SetSearchMatches(query string, matches []SearchMatch, index int) 
 	}
 	m.Searches = append(m.Searches[:0], matches...)
 	m.SearchIndex = min(max(index, 0), len(matches)-1)
-	m.SetPosition(Pos{Row: matches[m.SearchIndex].Row, Col: matches[m.SearchIndex].Start})
+	m.moveToSearchMatch(matches[m.SearchIndex])
 	return true
 }
 func (m *Mode) NextSearchMatch(delta int) bool {
@@ -260,8 +260,17 @@ func (m *Mode) NextSearchMatch(delta int) bool {
 		m.SearchIndex += len(m.Searches)
 	}
 	match := m.Searches[m.SearchIndex]
-	m.SetPosition(Pos{Row: match.Row, Col: match.Start})
+	m.moveToSearchMatch(match)
 	return true
+}
+func (m *Mode) moveToSearchMatch(match SearchMatch) {
+	if m == nil || m.document == nil {
+		return
+	}
+	if m.navigator.Set(m.document, Pos{Row: match.Row, Col: match.Start}) && m.selection.Enabled {
+		m.selection.Extend(m.navigator.Pos)
+	}
+	m.adjustViewport()
 }
 func (m *Mode) SelectedText() string {
 	if m == nil {
@@ -349,6 +358,7 @@ func (m *Mode) Render(styles ...renderer.Style) renderer.Frame {
 		selected[r.Row] = append(selected[r.Row], r)
 	}
 	selection, hasSelection := optionalStyle(styles, 1)
+	cursor, cursorValid := d.Normalize(m.navigator.Pos)
 	for y := range d.Height() {
 		src := m.ViewportTop + y
 		if src >= d.Len() {
@@ -361,16 +371,17 @@ func (m *Mode) Render(styles ...renderer.Style) renderer.Frame {
 				applySelectionStyle(&row[x].Style, selection, hasSelection)
 			}
 		}
-		covered := false
+		cursorCovered := false
 		for _, r := range selected[src] {
-			covered = true
 			for x := max(r.Start, 0); x <= min(r.End, len(row)-1); x++ {
 				applySelectionStyle(&row[x].Style, selection, hasSelection)
 			}
+			if cursorValid && r.Row == cursor.Row && cursor.Col >= r.Start && cursor.Col <= r.End {
+				cursorCovered = true
+			}
 		}
-		if src == m.navigator.Pos.Row && !covered && len(row) > 0 {
-			col := min(max(m.navigator.Pos.Col, 0), len(row)-1)
-			applySelectionStyle(&row[col].Style, selection, hasSelection)
+		if src == cursor.Row && cursorValid && !cursorCovered && len(row) > 0 {
+			applySelectionStyle(&row[cursor.Col].Style, selection, hasSelection)
 		}
 	}
 	status := inverseStyle()

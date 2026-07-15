@@ -76,6 +76,33 @@ func TestCopyModeRenderSelectionWinsSearchAndWideGlyph(t *testing.T) {
 	require.True(t, f.At(1, 0).Style.HasBackgroundRGB)
 }
 
+func TestCopyModeSearchNavigationExtendsActiveSelection(t *testing.T) {
+	matches := []SearchMatch{{Row: 1, Start: 1, End: 2}, {Row: 2, Start: 2, End: 3}}
+	m := modeFor([]string{"zero", "one", "two"}, 3)
+
+	m.SetPosition(Pos{Row: 0})
+	m.ToggleLineSelection()
+	require.True(t, m.SetSearchMatches("match", matches, 0))
+	require.Equal(t, Selection{Anchor: Pos{Row: 0}, Active: Pos{Row: 1, Col: 1}, Granularity: Line, Enabled: true}, m.Selection())
+
+	require.True(t, m.Right())
+	require.Equal(t, Character, m.Selection().Granularity)
+	require.True(t, m.NextSearchMatch(1))
+	require.Equal(t, Selection{Anchor: Pos{Row: 0}, Active: Pos{Row: 2, Col: 2}, Granularity: Character, Enabled: true}, m.Selection())
+}
+
+func TestCopyModeRenderKeepsPassiveCursorOutsidePartialSameRowSelection(t *testing.T) {
+	cells := []renderer.Cell{{Rune: '界'}, {Continuation: true}, {Rune: 'a'}, {Rune: 'b'}}
+	m := NewMode(NewDocument(NewSnapshotFromRows([][]renderer.Cell{cells}, 4, 1), ""))
+	require.True(t, m.StartCharacterSelection(Pos{Row: 0, Col: 2}))
+	require.True(t, m.SetPosition(Pos{Row: 0, Col: 1})) // Normalize the wide-glyph continuation to its head.
+
+	selection := renderer.Style{HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{R: 1}}
+	f := m.Render(renderer.DefaultStyle(), selection)
+	require.True(t, f.At(0, 0).Style.HasBackgroundRGB)
+	require.True(t, f.At(2, 0).Style.HasBackgroundRGB)
+}
+
 func TestFindMatchesUsesExclusiveDisplayCellOffsets(t *testing.T) {
 	cells := []renderer.Cell{{Rune: '界'}, {Continuation: true}, {Rune: 'a'}, {Rune: 'l'}, {Rune: 'p'}, {Rune: 'h'}, {Rune: 'a'}}
 	doc := NewDocument(NewSnapshotFromRows([][]renderer.Cell{cells}, 7, 1), "")
