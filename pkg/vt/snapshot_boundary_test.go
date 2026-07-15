@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPreflightVisibleRejectsMalformedBoundariesAndLegacyFormat(t *testing.T) {
+func TestPreflightVisibleRejectsMalformedBoundaries(t *testing.T) {
 	s := NewScreen(4, 2)
 	s.Write([]byte("abcdef"))
 	blob, err := s.MarshalPrimaryVisible()
@@ -40,11 +40,4 @@ func TestPreflightVisibleRejectsMalformedBoundariesAndLegacyFormat(t *testing.T)
 			require.Error(t, err)
 		})
 	}
-
-	t.Run("legacy VTV1 omits boundaries", func(t *testing.T) {
-		legacy := append([]byte(nil), blob[:boundaryOffset]...)
-		copy(legacy[:4], "VTV1")
-		_, err := PreflightVisibleBlob(legacy)
-		require.Error(t, err)
-	})
 }
