@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -25,20 +24,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type firstHelloTestTransport struct {
-	frames []ports.Frame
-}
-
-func (t *firstHelloTestTransport) Send(ports.Frame) error { return nil }
-func (t *firstHelloTestTransport) Recv() (ports.Frame, error) {
-	if len(t.frames) == 0 {
-		return ports.Frame{}, io.EOF
+// scriptRecv makes a transport yield frames in order, then wait for done
+// before returning EOF. The shared done channel coordinates proxy readers
+// without relying on scheduling or sleeps.
+func scriptRecv(tr *portsmocks.MockTransport, done <-chan struct{}, frames ...ports.Frame) *portsmocks.MockTransport_Recv_Call {
+	script := make(chan ports.Frame, len(frames))
+	for _, frame := range frames {
+		script <- frame
 	}
-	frame := t.frames[0]
-	t.frames = t.frames[1:]
-	return frame, nil
+	return tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		select {
+		case frame := <-script:
+			return frame, nil
+		case <-done:
+			return ports.Frame{}, io.EOF
+		}
+	})
 }
-func (t *firstHelloTestTransport) Close() error { return nil }
 
 func TestFirstHelloTransportReplacesRemoteEnvironment(t *testing.T) {
 	for _, tt := range []struct {
@@ -63,10 +65,12 @@ func TestFirstHelloTransportReplacesRemoteEnvironment(t *testing.T) {
 				Env:               []string{"CLIENT=value"},
 			}
 			nonHello := ports.Frame{Type: ports.MsgInput, Payload: []byte("unchanged")}
-			transport := &firstHelloTestTransport{frames: []ports.Frame{
-				{Type: ports.MsgHello, Payload: ports.MarshalHello(original)},
+			transport := portsmocks.NewMockTransport(t)
+			done := make(chan struct{})
+			scriptRecv(transport, done,
+				ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(original)},
 				nonHello,
-			}}
+			).Times(2)
 			wrapped := newFirstHelloTransport(transport, tt.session, []string{"REMOTE=one", "TOKEN=a=b=c"})
 
 			frame, err := wrapped.Recv()
@@ -86,26 +90,24 @@ func TestFirstHelloTransportReplacesRemoteEnvironment(t *testing.T) {
 
 func TestRunStdioProxyReplacesHelloEnvironmentAtDaemonBoundary(t *testing.T) {
 	original := remoteProxyHello()
-	client := newRemoteProxyClient(original)
-	daemon := newRemoteProxyDaemon()
+	client, daemon, sent := newRemoteProxyTransports(t, original)
 
 	err := runStdioProxy(context.Background(), client, daemon, []string{"REMOTE=one", "TOKEN=a=b=c"}, nil)
 	require.NoError(t, err)
 
-	got := daemon.firstHello(t)
+	got := firstHello(t, sent)
 	original.Env = []string{"REMOTE=one", "TOKEN=a=b=c"}
 	require.Equal(t, original, got)
 }
 
 func TestRunUDPProxyRuntimeReplacesHelloEnvironmentAndSessionAtDaemonBoundary(t *testing.T) {
 	original := remoteProxyHello()
-	client := newRemoteProxyClient(original)
-	daemon := newRemoteProxyDaemon()
+	client, daemon, sent := newRemoteProxyTransports(t, original)
 
 	err := runUDPProxyRuntime(context.Background(), "remote-work", client, daemon, []string{"REMOTE=udp", "TOKEN=a=b=c"}, nil)
 	require.NoError(t, err)
 
-	got := daemon.firstHello(t)
+	got := firstHello(t, sent)
 	original.Name = "remote-work"
 	original.Env = []string{"REMOTE=udp", "TOKEN=a=b=c"}
 	require.Equal(t, original, got)
@@ -126,62 +128,35 @@ func remoteProxyHello() ports.Hello {
 	}
 }
 
-type remoteProxyClient struct {
-	first ports.Frame
-	done  chan struct{}
-	once  sync.Once
+func newRemoteProxyTransports(t *testing.T, hello ports.Hello) (*portsmocks.MockTransport, *portsmocks.MockTransport, <-chan ports.Frame) {
+	t.Helper()
+	client := portsmocks.NewMockTransport(t)
+	daemon := portsmocks.NewMockTransport(t)
+	clientDone := make(chan struct{})
+	daemonDone := make(chan struct{})
+	sent := make(chan ports.Frame, 1)
+
+	scriptRecv(client, clientDone, ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}).Maybe()
+	client.EXPECT().Close().RunAndReturn(func() error {
+		close(clientDone)
+		return nil
+	}).Once()
+	daemon.EXPECT().Send(mock.Anything).RunAndReturn(func(frame ports.Frame) error {
+		sent <- frame
+		close(daemonDone)
+		return nil
+	}).Once()
+	scriptRecv(daemon, daemonDone).Once()
+	daemon.EXPECT().Close().Return(nil).Once()
+
+	return client, daemon, sent
 }
 
-func newRemoteProxyClient(hello ports.Hello) *remoteProxyClient {
-	return &remoteProxyClient{
-		first: ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)},
-		done:  make(chan struct{}),
-	}
-}
-
-func (t *remoteProxyClient) Send(ports.Frame) error { return nil }
-func (t *remoteProxyClient) Recv() (ports.Frame, error) {
-	if t.first.Type != 0 {
-		frame := t.first
-		t.first = ports.Frame{}
-		return frame, nil
-	}
-	<-t.done
-	return ports.Frame{}, io.EOF
-}
-func (t *remoteProxyClient) Close() error {
-	t.once.Do(func() { close(t.done) })
-	return nil
-}
-
-type remoteProxyDaemon struct {
-	sent chan ports.Frame
-	done chan struct{}
-	once sync.Once
-}
-
-func newRemoteProxyDaemon() *remoteProxyDaemon {
-	return &remoteProxyDaemon{sent: make(chan ports.Frame, 1), done: make(chan struct{})}
-}
-
-func (t *remoteProxyDaemon) Send(frame ports.Frame) error {
-	t.sent <- frame
-	t.once.Do(func() { close(t.done) })
-	return nil
-}
-func (t *remoteProxyDaemon) Recv() (ports.Frame, error) {
-	<-t.done
-	return ports.Frame{}, io.EOF
-}
-func (t *remoteProxyDaemon) Close() error {
-	t.once.Do(func() { close(t.done) })
-	return nil
-}
-func (t *remoteProxyDaemon) firstHello(testingT *testing.T) ports.Hello {
-	testingT.Helper()
-	frame := <-t.sent
+func firstHello(t *testing.T, sent <-chan ports.Frame) ports.Hello {
+	t.Helper()
+	frame := <-sent
 	hello, err := ports.UnmarshalHello(frame.Payload)
-	require.NoError(testingT, err)
+	require.NoError(t, err)
 	return hello
 }
 
