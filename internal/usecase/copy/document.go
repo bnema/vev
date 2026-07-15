@@ -121,29 +121,40 @@ func (d *Document) WordBounds(pos Pos) (Pos, Pos, bool) {
 }
 
 // NextWordStart returns the beginning of the next word after pos, crossing
-// physical rows as necessary.
+// physical rows as necessary. It walks only the rows between pos and the
+// target instead of materializing every glyph in the document.
 func (d *Document) NextWordStart(pos Pos) (Pos, bool) {
 	pos, ok := d.Normalize(pos)
 	if !ok {
 		return Pos{}, false
 	}
-	glyphs := d.glyphs()
-	i := d.glyphIndex(glyphs, pos)
-	if i < 0 {
-		return d.firstWordAfterRow(glyphs, pos.Row)
-	}
-	if !d.isSeparator(d.runeAt(glyphs[i])) {
-		for i < len(glyphs) && d.sameWord(glyphs[i], pos) {
-			i++
+
+	candidate := pos
+	if d.isGlyph(candidate) && !d.isSeparator(d.runeAt(candidate)) {
+		for {
+			next, ok := d.nextDocumentGlyph(candidate)
+			if !ok {
+				return Pos{}, false
+			}
+			if !d.sameWord(next, candidate) {
+				candidate = next
+				break
+			}
+			candidate = next
+		}
+	} else {
+		candidate, ok = d.nextDocumentGlyph(candidate)
+		if !ok {
+			return Pos{}, false
 		}
 	}
-	for i < len(glyphs) && d.isSeparator(d.runeAt(glyphs[i])) {
-		i++
+	for d.isSeparator(d.runeAt(candidate)) {
+		candidate, ok = d.nextDocumentGlyph(candidate)
+		if !ok {
+			return Pos{}, false
+		}
 	}
-	if i < len(glyphs) {
-		return glyphs[i], true
-	}
-	return Pos{}, false
+	return candidate, true
 }
 
 // PreviousWordStart returns the beginning of the current word, or of the
@@ -153,58 +164,71 @@ func (d *Document) PreviousWordStart(pos Pos) (Pos, bool) {
 	if !ok {
 		return Pos{}, false
 	}
-	glyphs := d.glyphs()
-	i := d.glyphIndex(glyphs, pos)
-	if i < 0 {
-		return d.lastWordBeforeRow(glyphs, pos.Row)
-	}
-	if !d.isSeparator(d.runeAt(glyphs[i])) && i > 0 && d.sameWord(glyphs[i-1], glyphs[i]) {
-		for i > 0 && d.sameWord(glyphs[i-1], glyphs[i]) {
-			i--
+
+	if d.isGlyph(pos) && !d.isSeparator(d.runeAt(pos)) {
+		previous, ok := d.previousDocumentGlyph(pos)
+		if ok && d.sameWord(previous, pos) {
+			for d.sameWord(previous, pos) {
+				pos = previous
+				previous, ok = d.previousDocumentGlyph(pos)
+				if !ok {
+					break
+				}
+			}
+			return pos, true
 		}
-		return glyphs[i], true
 	}
-	i--
-	for i >= 0 && d.isSeparator(d.runeAt(glyphs[i])) {
-		i--
-	}
-	if i < 0 {
+
+	candidate, ok := d.previousDocumentGlyph(pos)
+	if !ok {
 		return Pos{}, false
 	}
-	for i > 0 && d.sameWord(glyphs[i-1], glyphs[i]) {
-		i--
+	for d.isSeparator(d.runeAt(candidate)) {
+		candidate, ok = d.previousDocumentGlyph(candidate)
+		if !ok {
+			return Pos{}, false
+		}
 	}
-	return glyphs[i], true
+	for {
+		previous, ok := d.previousDocumentGlyph(candidate)
+		if !ok || !d.sameWord(previous, candidate) {
+			return candidate, true
+		}
+		candidate = previous
+	}
 }
 
 // NextWordEnd returns the inclusive end of the current word, or of the next
 // word when pos is on a separator or at the end of a word.
 func (d *Document) NextWordEnd(pos Pos) (Pos, bool) {
 	pos, ok := d.Normalize(pos)
-	if !ok {
+	if !ok || !d.isGlyph(pos) {
 		return Pos{}, false
 	}
-	glyphs := d.glyphs()
-	i := d.glyphIndex(glyphs, pos)
-	if i < 0 {
-		return Pos{}, false
+
+	candidate := pos
+	if !d.isSeparator(d.runeAt(candidate)) {
+		next, ok := d.nextDocumentGlyph(candidate)
+		if !ok {
+			return Pos{}, false
+		}
+		if !d.sameWord(next, candidate) {
+			candidate = next
+		}
 	}
-	if !d.isSeparator(d.runeAt(glyphs[i])) &&
-		(i+1 == len(glyphs) || !d.sameWord(glyphs[i+1], glyphs[i])) {
-		i++
+	for d.isSeparator(d.runeAt(candidate)) {
+		candidate, ok = d.nextDocumentGlyph(candidate)
+		if !ok {
+			return Pos{}, false
+		}
 	}
-	for i < len(glyphs) && d.isSeparator(d.runeAt(glyphs[i])) {
-		i++
+	for {
+		next, ok := d.nextDocumentGlyph(candidate)
+		if !ok || !d.sameWord(next, candidate) {
+			return candidate, true
+		}
+		candidate = next
 	}
-	if i == len(glyphs) {
-		return Pos{}, false
-	}
-	end := glyphs[i]
-	for i+1 < len(glyphs) && d.sameWord(glyphs[i+1], glyphs[i]) {
-		i++
-		end = glyphs[i]
-	}
-	return end, true
 }
 
 // LineText returns row text without duplicated continuation cells and retains
@@ -299,49 +323,42 @@ func (d *Document) runeAt(pos Pos) rune {
 	return cell.Rune
 }
 
-func (d *Document) glyphs() []Pos {
-	glyphs := make([]Pos, 0)
-	for row := 0; row < d.Len(); row++ {
-		for col, cell := range d.Row(row) {
-			if !cell.Continuation {
-				glyphs = append(glyphs, Pos{Row: row, Col: col})
+// nextDocumentGlyph finds the next glyph in document order without building
+// an index for unrelated scrollback rows.
+func (d *Document) nextDocumentGlyph(pos Pos) (Pos, bool) {
+	for row := pos.Row; row < d.Len(); row++ {
+		cells := d.Row(row)
+		start := 0
+		if row == pos.Row {
+			start = pos.Col + 1
+		}
+		for col := start; col < len(cells); col++ {
+			if !cells[col].Continuation {
+				return Pos{Row: row, Col: col}, true
 			}
 		}
 	}
-	return glyphs
+	return Pos{}, false
 }
 
-func (d *Document) glyphIndex(glyphs []Pos, pos Pos) int {
-	for i, glyph := range glyphs {
-		if glyph == pos {
-			return i
+// previousDocumentGlyph finds the previous glyph in document order without
+// building an index for unrelated scrollback rows.
+func (d *Document) previousDocumentGlyph(pos Pos) (Pos, bool) {
+	for row := pos.Row; row >= 0; row-- {
+		cells := d.Row(row)
+		start := len(cells) - 1
+		if row == pos.Row {
+			start = min(pos.Col-1, start)
+		}
+		for col := start; col >= 0; col-- {
+			if !cells[col].Continuation {
+				return Pos{Row: row, Col: col}, true
+			}
 		}
 	}
-	return -1
+	return Pos{}, false
 }
 
 func (d *Document) sameWord(left, right Pos) bool {
 	return left.Row == right.Row && !d.isSeparator(d.runeAt(left)) && !d.isSeparator(d.runeAt(right))
-}
-
-func (d *Document) firstWordAfterRow(glyphs []Pos, row int) (Pos, bool) {
-	for _, glyph := range glyphs {
-		if glyph.Row > row && !d.isSeparator(d.runeAt(glyph)) {
-			return glyph, true
-		}
-	}
-	return Pos{}, false
-}
-
-func (d *Document) lastWordBeforeRow(glyphs []Pos, row int) (Pos, bool) {
-	for i := len(glyphs) - 1; i >= 0; i-- {
-		if glyphs[i].Row >= row || d.isSeparator(d.runeAt(glyphs[i])) {
-			continue
-		}
-		for i > 0 && d.sameWord(glyphs[i-1], glyphs[i]) {
-			i--
-		}
-		return glyphs[i], true
-	}
-	return Pos{}, false
 }

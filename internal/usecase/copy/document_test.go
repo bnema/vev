@@ -154,6 +154,63 @@ func TestDocumentNextWordEndCrossesEmptyRow(t *testing.T) {
 	require.Equal(t, Pos{Row: 2, Col: 3}, got)
 }
 
+func TestDocumentWordMovementPreservesWideSeparatorsEmptyRowsAndEndProgression(t *testing.T) {
+	wide := []renderer.Cell{{Rune: 'a'}, {Rune: '界'}, {Continuation: true}, {Rune: '/'}, {Rune: 'b'}}
+	doc := NewDocument(NewSnapshotFromRows([][]renderer.Cell{wide, {}, documentCells(" cd")}, 5, 3), "/")
+
+	tests := []struct {
+		name string
+		move func(Pos) (Pos, bool)
+		in   Pos
+		want Pos
+	}{
+		{"next start skips wide word and separator", doc.NextWordStart, Pos{Row: 0, Col: 1}, Pos{Row: 0, Col: 4}},
+		{"previous start crosses separator", doc.PreviousWordStart, Pos{Row: 0, Col: 4}, Pos{Row: 0, Col: 0}},
+		{"end advances from wide word", doc.NextWordEnd, Pos{Row: 0, Col: 1}, Pos{Row: 0, Col: 4}},
+		{"next start crosses empty row", doc.NextWordStart, Pos{Row: 0, Col: 4}, Pos{Row: 2, Col: 1}},
+		{"previous start crosses empty row", doc.PreviousWordStart, Pos{Row: 2, Col: 1}, Pos{Row: 0, Col: 4}},
+		{"end crosses empty row", doc.NextWordEnd, Pos{Row: 0, Col: 4}, Pos{Row: 2, Col: 2}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := tt.move(tt.in)
+			require.True(t, ok)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestDocumentWordMovementDoesNotAllocateWholeDocument(t *testing.T) {
+	lines := make([]string, 8_192)
+	lines[0] = "alpha/beta"
+	for i := 1; i < len(lines); i++ {
+		lines[i] = "unrelated"
+	}
+	doc := documentFromStrings(lines, "/")
+
+	tests := []struct {
+		name string
+		move func(Pos) (Pos, bool)
+		in   Pos
+		want Pos
+	}{
+		{"next start", doc.NextWordStart, Pos{Row: 0, Col: 2}, Pos{Row: 0, Col: 6}},
+		{"previous start", doc.PreviousWordStart, Pos{Row: 0, Col: 2}, Pos{Row: 0, Col: 0}},
+		{"next end", doc.NextWordEnd, Pos{Row: 0, Col: 2}, Pos{Row: 0, Col: 4}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			allocs := testing.AllocsPerRun(100, func() {
+				got, ok := tt.move(tt.in)
+				if !ok || got != tt.want {
+					t.Fatalf("move() = (%v, %t), want (%v, true)", got, ok, tt.want)
+				}
+			})
+			require.Zero(t, allocs, "local word movement must not materialize the document")
+		})
+	}
+}
+
 func TestDocumentExtractRanges(t *testing.T) {
 	wide := []renderer.Cell{{Rune: 'a'}, {Rune: '界'}, {Continuation: true}, {Rune: ' '}, {Rune: 'b'}}
 	doc := NewDocument(NewSnapshotFromRows([][]renderer.Cell{documentCells("alpha  "), documentCells("beta"), wide, {}}, 7, 4), "")
@@ -176,6 +233,34 @@ func TestDocumentExtractRanges(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.want, doc.Extract(tt.ranges, tt.linewise))
 		})
+	}
+}
+
+var benchmarkDocumentWordPos Pos
+
+func BenchmarkDocumentWordMovementLocal(b *testing.B) {
+	lines := make([]string, 32_768)
+	lines[0] = "alpha/beta"
+	for i := 1; i < len(lines); i++ {
+		lines[i] = "unrelated"
+	}
+	doc := documentFromStrings(lines, "/")
+	moves := []func(Pos) (Pos, bool){
+		doc.NextWordStart,
+		doc.PreviousWordStart,
+		doc.NextWordEnd,
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, move := range moves {
+			pos, ok := move(Pos{Row: 0, Col: 2})
+			if !ok {
+				b.Fatal("local word movement failed")
+			}
+			benchmarkDocumentWordPos = pos
+		}
 	}
 }
 
