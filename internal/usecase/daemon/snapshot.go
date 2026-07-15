@@ -114,13 +114,11 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 
 	sctx, cancel := context.WithCancel(d.serveCtx)
 	opened := make([]*tab, 0, len(snap.Tabs))
-	// Snapshot restore runs before any client Hello is available, so restored
-	// panes start with the conservative terminal environment. The next attach or
-	// resume updates sess.terminal for future panes from the client's capability.
+	// Snapshot restore runs before any client Hello is available. Start panes
+	// from the daemon environment captured at startup; the next attach replaces
+	// this snapshot for future panes from the client's capability.
 	restoreTerm := terminalEnv{}
-	// No attach exists during restore, so no client environment is available.
-	// Future attaches replace this empty snapshot before publishing a client.
-	restoreEnv := []string(nil)
+	restoreEnv := copyEnvironment(d.baseEnv)
 	closeOpened := func() {
 		for _, tb := range opened {
 			tb.closeAllPanes()

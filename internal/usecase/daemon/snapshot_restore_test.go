@@ -86,6 +86,57 @@ func TestRestoreSessionClosesOpenedPTYWhenTerminalRestoreFails(t *testing.T) {
 	require.Equal(t, 1, factory.opens[0].pty.closeCount())
 }
 
+func TestRestoreSessionUsesDaemonFallbackEnvironmentAndShellBeforeAttach(t *testing.T) {
+	factory := &restorePTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	d.baseEnv = []string{"ORDINARY=preserved", "SHELL=/usr/local/bin/daemon-shell", "TERM=stale", "RAW"}
+
+	require.NoError(t, d.restoreSession(context.Background(), snapcodec.Session{Name: "work", Tabs: []snapcodec.Tab{{
+		StableID: "tab", Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{terminalPane(t, "pane-1", "pane", "/tmp", nil, nil)},
+	}}}))
+	require.Len(t, factory.opens, 1)
+	require.Equal(t, "/usr/local/bin/daemon-shell", factory.opens[0].command)
+	require.Equal(t, []string{
+		"ORDINARY=preserved", "SHELL=/usr/local/bin/daemon-shell", "RAW",
+		"TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=tab,pane=pane",
+	}, factory.opens[0].env)
+
+	d.baseEnv[0] = "ORDINARY=changed"
+	d.mu.Lock()
+	restored := d.findByNameLocked("work")
+	d.mu.Unlock()
+	require.NotNil(t, restored)
+	restored.mu.Lock()
+	require.Equal(t, []string{"ORDINARY=preserved", "SHELL=/usr/local/bin/daemon-shell", "TERM=stale", "RAW"}, restored.env)
+	restored.mu.Unlock()
+
+	tr, _ := newCapturingTransport(t)
+	_, ac, err := d.route(ports.Hello{
+		Version: ports.ProtocolVersion,
+		Intent:  ports.IntentAttach,
+		Name:    "work",
+		Size:    domain.Size{Cols: 80, Rows: 24},
+		Env:     []string{"ORDINARY=attached", "SHELL=/bin/attached-shell"},
+	}, tr)
+	require.NoError(t, err)
+	require.NoError(t, d.createTab(restored, ac.size))
+	require.Len(t, factory.opens, 2)
+	require.Equal(t, "/bin/attached-shell", factory.opens[1].command)
+
+	restored.mu.Lock()
+	attachedTab := restored.tabs[1]
+	restored.mu.Unlock()
+	attachedTab.mu.Lock()
+	attachedPane := attachedTab.panes["pane-1"]
+	attachedTab.mu.Unlock()
+	require.Equal(t, []string{
+		"ORDINARY=attached", "SHELL=/bin/attached-shell",
+		"TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + attachedTab.stableID + ",pane=" + attachedPane.stableID,
+	}, factory.opens[1].env)
+	require.NoError(t, d.killSession(restored, ports.ReasonSessionKilled, false))
+	d.sessWg.Wait()
+}
+
 func TestRestoreSnapshotsRestoresLayoutCwdAndRows(t *testing.T) {
 	store := &restoreSnapshotStore{}
 	store.blobs = []ports.SnapshotBlob{{Name: "work", Data: mustSnapshotBytes(t, snapcodec.Session{
@@ -541,19 +592,20 @@ type restorePTYFactory struct {
 }
 
 type restorePTYOpen struct {
-	ctx  context.Context
-	dir  string
-	size domain.Size
-	env  []string
-	pty  *restorePTY
+	ctx     context.Context
+	command string
+	dir     string
+	size    domain.Size
+	env     []string
+	pty     *restorePTY
 }
 
-func (f *restorePTYFactory) Open(ctx context.Context, _ string, _ []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
+func (f *restorePTYFactory) Open(ctx context.Context, command string, _ []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	pty := newRestorePTY()
 	pty.writeErr = f.writeErr
-	f.opens = append(f.opens, restorePTYOpen{ctx: ctx, dir: dir, size: sz, env: append([]string(nil), env...), pty: pty})
+	f.opens = append(f.opens, restorePTYOpen{ctx: ctx, command: command, dir: dir, size: sz, env: append([]string(nil), env...), pty: pty})
 	return pty, nil
 }
 
