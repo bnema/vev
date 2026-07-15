@@ -978,7 +978,7 @@ func TestBarStateForContextualRecentUsesSnapshotAndNormalUsesLiveMRU(t *testing.
 	done := make(chan struct{})
 	d.mu.Lock()
 	go func() {
-		contextual = d.barStateForPaletteHints(sess, "", &hints, []recentSession{{name: "captured", ephemeral: true, attention: true}})
+		contextual = d.barStateForPaletteHints(sess, "", &hints, []recentSession{{name: "captured", attention: true}})
 		close(done)
 	}()
 	select {
@@ -990,7 +990,7 @@ func TestBarStateForContextualRecentUsesSnapshotAndNormalUsesLiveMRU(t *testing.
 	d.mu.Unlock()
 
 	require.Empty(t, contextual.mru, "contextual composition must not read the live MRU")
-	require.Equal(t, []rankedRecent{{rank: 1, name: "captured", ephemeral: true, attention: true, selected: true}}, contextual.rankedRecent)
+	require.Equal(t, []rankedRecent{{rank: 1, name: "captured", attention: true, selected: true}}, contextual.rankedRecent)
 
 	normal := d.barStateFor(sess, "")
 	require.Len(t, normal.mru, 1)
@@ -1018,6 +1018,24 @@ func TestBarStateForMRUFreshestFirstCapCurrentExcludedAndAttention(t *testing.T)
 		require.NotEqual(t, "current", got.name)
 	}
 	require.True(t, state.mru[1].attention, "s8 attention should be carried into MRU state")
+}
+
+func TestBarStateForMRUExcludesEphemeralSessions(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, current, _, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+
+	persistent := &session{id: "named", name: "named", tabs: []*tab{{}}}
+	persistent.mruAt.Store(1)
+	ephemeral := &session{id: "ephemeral", name: "1", ephemeral: true, tabs: []*tab{{}}}
+	ephemeral.mruAt.Store(2)
+	d.sessions[persistent.id] = persistent
+	d.sessions[ephemeral.id] = ephemeral
+
+	state := d.barStateFor(current, "")
+
+	require.Len(t, state.mru, 1)
+	require.Equal(t, "named", state.mru[0].name)
 }
 
 func TestBarStateForMRUZeroTimesUseDeterministicNameOrder(t *testing.T) {
@@ -1110,20 +1128,20 @@ func TestCapturePrimaryRenderStatePreservesContextualMRUModeThroughScratchReuse(
 	require.Contains(t, draw(normalAfterPopulated), "vty")
 }
 
-func TestStatusBarRendersMRUNamesEphemeralAndInlineBell(t *testing.T) {
+func TestStatusBarRendersMRUNamesAndInlineBell(t *testing.T) {
 	state := barState{
 		status:         statusSnapshot{session: "cur"},
 		attentionFrame: 1,
 		mru: []recentSession{
 			{name: "fresh"},
-			{name: "tmp", ephemeral: true, attention: true},
+			{name: "tmp", attention: true},
 		},
 	}
 	row := make([]renderer.Cell, 24)
 
 	drawStatusBarState(row, state, resolveThemeStyles(nil))
 
-	require.Equal(t, " cur  fresh  tmp*      ", rowText(row))
+	require.Equal(t, " cur  fresh  tmp       ", rowText(row))
 	for _, c := range row {
 		if c.Rune == ui.AttentionGlyph {
 			require.True(t, c.Style.Bold)

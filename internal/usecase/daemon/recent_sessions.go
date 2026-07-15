@@ -11,13 +11,12 @@ import (
 type recentSession struct {
 	id        domain.SessionID
 	name      string
-	ephemeral bool
 	attention bool
 	mruAt     uint64
 }
 
-// recentSessions returns the current session's capped MRU list. Callers may
-// retain the returned values for the lifetime of an interaction.
+// recentSessions returns the current session's capped named-session MRU list.
+// Callers may retain the returned values for the lifetime of an interaction.
 func (d *Daemon) recentSessions(current *session) []recentSession {
 	if d == nil {
 		return nil
@@ -29,11 +28,14 @@ func (d *Daemon) recentSessions(current *session) []recentSession {
 			continue
 		}
 		sess.mu.Lock()
+		if sess.ephemeral {
+			sess.mu.Unlock()
+			continue
+		}
 		entry := recentSession{
-			id:        sess.id,
-			name:      sess.name,
-			ephemeral: sess.ephemeral,
-			mruAt:     sess.mruAt.Load(),
+			id:    sess.id,
+			name:  sess.name,
+			mruAt: sess.mruAt.Load(),
 		}
 		for _, tb := range sess.tabs {
 			if tb.attention {
