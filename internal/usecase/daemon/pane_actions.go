@@ -35,6 +35,7 @@ func (d *Daemon) spawnPaneOp(
 	sess.mu.Lock()
 	name, cwd := sess.name, sess.cwd
 	term := sess.terminal
+	env := copyEnvironment(sess.env)
 	sess.mu.Unlock()
 
 	tb.mu.Lock()
@@ -69,7 +70,8 @@ func (d *Daemon) spawnPaneOp(
 		tb.mu.Unlock()
 		return fmt.Errorf("daemon: generating pane identity: %w", err)
 	}
-	pty, err := d.ptys.Open(sess.ctx, d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, rectSize(newRect))
+	command, args := d.ptyCommand(env)
+	pty, err := d.ptys.Open(sess.ctx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, rectSize(newRect))
 	if err != nil {
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "pane", newID, "kind", "pane")
 		tb.mu.Lock()

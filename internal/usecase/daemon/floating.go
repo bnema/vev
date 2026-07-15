@@ -313,6 +313,7 @@ func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfi
 func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.FloatingConfig, userOpen bool) (floatingLaunchSpec, error) {
 	sess.mu.Lock()
 	name, cwd, term, sessCtx := sess.name, sess.cwd, sess.terminal, sess.ctx
+	env := copyEnvironment(sess.env)
 	sess.mu.Unlock()
 	tb.mu.Lock()
 	geometry := calculateContentFloatingGeometry(domain.Size{Cols: tb.size.Cols, Rows: tb.size.Rows}, cfg)
@@ -342,7 +343,7 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 	if tabCtx == nil {
 		tabCtx = context.Background()
 	}
-	command, args := d.shell, append([]string(nil), d.shellArgs...)
+	command, args := d.ptyCommand(env)
 	if cfg.Command != "" {
 		args = []string{"-lc", cfg.Command}
 	}
@@ -352,10 +353,10 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 		size:         size,
 		geometry:     geometry,
 		paneStableID: paneStableID,
-		env:          d.childEnv(name, tabStableID, paneStableID, term),
+		env:          childEnvFrom(env, name, tabStableID, paneStableID, term),
 		command:      command,
 		args:         args,
-		fallback:     floatingCommandFallback(cfg.Command, d.shell),
+		fallback:     floatingCommandFallback(cfg.Command, command),
 		parentCtx:    tabCtx,
 		userOpen:     userOpen,
 	}, nil

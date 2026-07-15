@@ -118,6 +118,9 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 	// panes start with the conservative terminal environment. The next attach or
 	// resume updates sess.terminal for future panes from the client's capability.
 	restoreTerm := terminalEnv{}
+	// No attach exists during restore, so no client environment is available.
+	// Future attaches replace this empty snapshot before publishing a client.
+	restoreEnv := []string(nil)
 	closeOpened := func() {
 		for _, tb := range opened {
 			tb.closeAllPanes()
@@ -189,7 +192,8 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 					return fmt.Errorf("snapshot: generating pane identity: %w", err)
 				}
 			}
-			pty, err := d.ptys.Open(ctx, d.shell, d.shellArgs, d.childEnv(snap.Name, tabStableID, paneStableID, restoreTerm), paneSnap.Cwd, contentSize)
+			command, args := d.ptyCommand(restoreEnv)
+			pty, err := d.ptys.Open(ctx, command, args, childEnvFrom(restoreEnv, snap.Name, tabStableID, paneStableID, restoreTerm), paneSnap.Cwd, contentSize)
 			if err != nil {
 				closeOpened()
 				return err
@@ -217,7 +221,7 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		return nil
 	}
 	createdAt := int64(snap.CreatedAt)
-	sess := &session{name: snap.Name, ctx: sctx, cancel: cancel, tabs: opened, active: int(snap.Active), terminal: restoreTerm, createdAt: createdAt}
+	sess := &session{name: snap.Name, ctx: sctx, cancel: cancel, tabs: opened, active: int(snap.Active), terminal: restoreTerm, env: restoreEnv, createdAt: createdAt}
 	sess.snapEligible.Store(true)
 	if len(snap.Tabs) > 0 && len(snap.Tabs[0].Panes) > 0 {
 		sess.cwd = snap.Tabs[0].Panes[0].Cwd

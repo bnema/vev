@@ -98,6 +98,7 @@ type Daemon struct {
 	baseEnv                    []string
 	shell                      string
 	shellArgs                  []string
+	shellOverride              bool
 	persist                    *persist.Persister
 	persistEnabled             bool
 	snaps                      ports.SnapshotStore
@@ -204,6 +205,7 @@ func WithShell(cmd string, args []string) Option {
 	return func(d *Daemon) {
 		d.shell = cmd
 		d.shellArgs = args
+		d.shellOverride = true
 	}
 }
 
@@ -671,13 +673,13 @@ func (e *protoErr) Error() string { return e.text }
 // teardown so obsolete worker joins never delay the new handshake.
 func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size, term terminalEnv, h ports.Hello) *attachedClient {
 	ac, old, cleanup := d.attachClientDeferred(sess, tr, sz, attachClientOptions{
-		clientID:          h.ClientID,
-		resumeCapable:     true,
-		maxOutputInFlight: normalizeOutputWindow(h.MaxOutputInFlight),
+		clientID:           h.ClientID,
+		resumeCapable:      true,
+		maxOutputInFlight:  normalizeOutputWindow(h.MaxOutputInFlight),
+		environment:        h.Env,
+		terminal:           term,
+		refreshEnvironment: true,
 	})
-	sess.mu.Lock()
-	sess.terminal = term
-	sess.mu.Unlock()
 	d.mu.Unlock()
 	d.retireReplacedClient(old, cleanup)
 	return ac
@@ -726,7 +728,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			var err error
-			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, term, stopped.tabNames)
+			sess, err = d.createSessionWithEnvLocked(h.Name, false, cwd, sz, term, h.Env, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err
@@ -737,7 +739,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 
 	case ports.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
-		sess, err := d.createSessionLocked(name, true, h.Cwd, sz, term)
+		sess, err := d.createSessionWithEnvLocked(name, true, h.Cwd, sz, term, h.Env)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
@@ -758,7 +760,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			d.mu.Unlock()
 			return nil, nil, &protoErr{ports.ErrNameTaken, "session name already in use: " + h.Name}
 		}
-		sess, err := d.createSessionLocked(h.Name, false, h.Cwd, sz, term)
+		sess, err := d.createSessionWithEnvLocked(h.Name, false, h.Cwd, sz, term, h.Env)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err
@@ -776,7 +778,7 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			var err error
-			sess, err = d.createSessionLocked(h.Name, false, cwd, sz, term, stopped.tabNames)
+			sess, err = d.createSessionWithEnvLocked(h.Name, false, cwd, sz, term, h.Env, stopped.tabNames)
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err

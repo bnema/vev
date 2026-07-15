@@ -40,10 +40,13 @@ type session struct {
 	clipboardWorkerRunning bool
 	cwd                    string
 	terminal               terminalEnv
-	createdAt              int64
-	mruAt                  atomic.Uint64
-	snapDirty              atomic.Bool
-	snapEligible           atomic.Bool
+	// env is the authoritative immutable environment snapshot for future PTY children.
+	// It is guarded by mu and is always copied on ingress and egress.
+	env          []string
+	createdAt    int64
+	mruAt        atomic.Uint64
+	snapDirty    atomic.Bool
+	snapEligible atomic.Bool
 	// snapshotMu serializes the dirty generation with worker completion. It is
 	// intentionally independent from mu: persistence never holds session state
 	// locks while encoding or writing.
@@ -127,6 +130,11 @@ func (d *Daemon) touchMRU(sess *session) {
 }
 
 func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, restoredTabNames ...[]string) (*session, error) {
+	return d.createSessionWithEnvLocked(name, ephemeral, cwd, sz, term, d.baseEnv, restoredTabNames...)
+}
+
+func (d *Daemon) createSessionWithEnvLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
+	env = copyEnvironment(env)
 	tbSize := tabSize(sz)
 	var names []string
 	if len(restoredTabNames) > 0 {
@@ -139,7 +147,8 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 			closeTabs(tabs)
 			return nil, err
 		}
-		pty, err := d.ptys.Open(d.serveCtx, d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
+		command, args := d.ptyCommand(env)
+		pty, err := d.ptys.Open(d.serveCtx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
 		if err != nil {
 			closeTabs(tabs)
 			d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "session")
@@ -175,6 +184,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		tabs:      tabs,
 		cwd:       cwd,
 		terminal:  term,
+		env:       env,
 		createdAt: createdAt,
 	}
 	if lastUsedSeq > 0 {
@@ -217,6 +227,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 		return err
 	}
 	sz := ac.size
+	env := ac.environment()
 	d.mu.Lock()
 	if d.closing {
 		d.mu.Unlock()
@@ -236,7 +247,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	}
 	from.mu.Unlock()
 
-	newSess, err := d.createSessionLocked(name, false, cwd, sz, term)
+	newSess, err := d.createSessionWithEnvLocked(name, false, cwd, sz, term, env)
 	if err != nil {
 		d.mu.Unlock()
 		return err
@@ -276,12 +287,14 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	cwd := sess.cwd
 	client := sess.client
 	term := sess.terminal
+	env := copyEnvironment(sess.env)
 	sess.mu.Unlock()
 	tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 	if err != nil {
 		return err
 	}
-	pty, err := d.ptys.Open(sess.ctx, d.shell, d.shellArgs, d.childEnv(name, tabStableID, paneStableID, term), cwd, tbSize)
+	command, args := d.ptyCommand(env)
+	pty, err := d.ptys.Open(sess.ctx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
 	if err != nil {
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "tab")
 		return fmt.Errorf("daemon: spawning tab for session %q: %w", name, err)
@@ -899,18 +912,54 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 	d.mu.Unlock()
 }
 
-// childEnv builds the session child's environment: the daemon's own, with terminal
-// and VEV values forced to well-known values.
+// childEnv retains the daemon-environment helper for daemon-local legacy callers.
+// Interactive PTY launch paths use childEnvFrom with their session snapshot.
 func (d *Daemon) childEnv(name, tabStableID, paneStableID string, term terminalEnv) []string {
-	out := make([]string, 0, len(d.baseEnv)+4)
-	for _, e := range d.baseEnv {
-		if strings.HasPrefix(e, "TERM=") ||
-			strings.HasPrefix(e, "COLORTERM=") ||
-			strings.HasPrefix(e, "TERM_PROGRAM=") ||
-			strings.HasPrefix(e, "VEV=") {
+	return childEnvFrom(d.baseEnv, name, tabStableID, paneStableID, term)
+}
+
+func copyEnvironment(env []string) []string {
+	return append([]string(nil), env...)
+}
+
+func environmentEntry(entry string) (name, value string, ok bool) {
+	i := strings.IndexByte(entry, '=')
+	if i < 0 {
+		return "", "", false
+	}
+	return entry[:i], entry[i+1:], true
+}
+
+func (d *Daemon) ptyCommand(env []string) (string, []string) {
+	if d.shellOverride {
+		return d.shell, append([]string(nil), d.shellArgs...)
+	}
+	return shellFromEnvironment(env), nil
+}
+
+func shellFromEnvironment(env []string) string {
+	shell := ""
+	for _, entry := range env {
+		if name, value, ok := environmentEntry(entry); ok && name == "SHELL" {
+			shell = value
+		}
+	}
+	if shell == "" {
+		return "/bin/sh"
+	}
+	return shell
+}
+
+// childEnvFrom preserves the supplied environment byte-for-byte and in order,
+// except for exact reserved variable names which vev owns.
+func childEnvFrom(env []string, name, tabStableID, paneStableID string, term terminalEnv) []string {
+	out := make([]string, 0, len(env)+4)
+	for _, entry := range env {
+		key, _, ok := environmentEntry(entry)
+		if ok && (key == "TERM" || key == "COLORTERM" || key == "TERM_PROGRAM" || key == "VEV") {
 			continue
 		}
-		out = append(out, e)
+		out = append(out, entry)
 	}
 	if term.TrueColor {
 		out = append(out, "TERM=xterm-direct", "COLORTERM=truecolor")

@@ -1422,3 +1422,67 @@ func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
 	release2()
 	d.sessWg.Wait()
 }
+
+func TestAttachEnvironmentReplacesFuturePTYInputs(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p1, release1 := newBlockingPTY(t)
+	defer release1()
+	p2, release2 := newBlockingPTY(t)
+	defer release2()
+
+	var commands []string
+	var envs [][]string
+	f := portsmocks.NewMockPTYFactory(t)
+	normalSize := domain.Size{Cols: sz.Cols, Rows: sz.Rows - 2}
+	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, normalSize).RunAndReturn(
+		func(_ context.Context, command string, _ []string, env []string, _ string, _ domain.Size) (ports.PTY, error) {
+			commands = append(commands, command)
+			envs = append(envs, append([]string(nil), env...))
+			if len(envs) == 1 {
+				return p1, nil
+			}
+			return p2, nil
+		},
+	).Twice()
+	floating := newQuietPTY()
+	expectFloatingPrewarmOpen(f, normalSize, floating)
+	d := newTestDaemon(t, f, stubClock{})
+	tr1 := portsmocks.NewMockTransport(t)
+	tr1.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr1.EXPECT().Close().Return(nil).Maybe()
+	tr2 := portsmocks.NewMockTransport(t)
+	tr2.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr2.EXPECT().Close().Return(nil).Maybe()
+
+	first := []string{"SECRET=first", "TERM=bad", "TERM_PROGRAM_extra=keep", "SHELL=/usr/bin/fish", "A=a=b"}
+	sess, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentNew, Name: "work", Size: sz, Env: first}, tr1)
+	require.NoError(t, err)
+	second := []string{"SECRET=second", "TERM=bad", "TERM_PROGRAM_extra=keep", "SHELL=/bin/bash", "A=a=b"}
+	_, ac, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: "work", Size: sz, Env: second}, tr2)
+	require.NoError(t, err)
+	defer func() {
+		_ = d.killSession(sess, ports.ReasonServerShutdown, false)
+		d.sessWg.Wait()
+	}()
+
+	require.Equal(t, "/usr/bin/fish", commands[0])
+	require.Equal(t, []string{"SECRET=first", "TERM_PROGRAM_extra=keep", "SHELL=/usr/bin/fish", "A=a=b", "TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[0].stableID + ",pane=" + sess.tabs[0].panes["pane-1"].stableID}, envs[0])
+	require.NoError(t, d.createTab(sess, ac.size))
+	require.Equal(t, "/bin/bash", commands[1])
+	require.Equal(t, []string{"SECRET=second", "TERM_PROGRAM_extra=keep", "SHELL=/bin/bash", "A=a=b", "TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[1].stableID + ",pane=" + sess.tabs[1].panes["pane-1"].stableID}, envs[1])
+}
+
+func TestChildEnvFromPreservesNonReservedEntriesVerbatimAndInOrder(t *testing.T) {
+	env := []string{"SECRET=a=b=c", "TERM_PROGRAM_extra=keep", "TERM", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old", "EMPTY="}
+	got := childEnvFrom(env, "work", "tab", "pane", terminalEnv{})
+	require.Equal(t, []string{
+		"SECRET=a=b=c", "TERM_PROGRAM_extra=keep", "TERM", "EMPTY=",
+		"TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=tab,pane=pane",
+	}, got)
+}
+
+func TestShellFromEnvironmentFallsBackOnlyWhenAbsentOrEmpty(t *testing.T) {
+	require.Equal(t, "/bin/sh", shellFromEnvironment(nil))
+	require.Equal(t, "/bin/sh", shellFromEnvironment([]string{"SHELL="}))
+	require.Equal(t, "/usr/bin/fish", shellFromEnvironment([]string{"SHELL=/usr/bin/fish"}))
+}

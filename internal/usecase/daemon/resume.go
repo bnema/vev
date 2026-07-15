@@ -179,14 +179,16 @@ func (d *Daemon) resumeParkedLocked(h ports.Hello, tr ports.Transport, sz domain
 	// mandatory first paint cannot be blocked by ACKs that died with the link.
 	ac.output.rebase()
 	ac.output.maxOutstanding = uint64(normalizeOutputWindow(h.MaxOutputInFlight))
+	ac.setEnvironment(h.Env)
 	ac.replaceTransport(tr)
 	ac.size = sz
 	ac.resumeToken = d.nextResumeTokenLocked()
 	ac.parked = false
 	ac.setSession(sess)
 	sess.mu.Lock()
-	sess.client = ac
+	sess.env = copyEnvironment(h.Env)
 	sess.terminal = terminalEnv{TrueColor: h.TrueColor}
+	sess.client = ac
 	sess.mu.Unlock()
 	d.attachCoordinator(sess, nil, ac, false)
 	d.touchMRU(sess)

@@ -143,11 +143,10 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 	pty.EXPECT().Close().RunAndReturn(func() error { unblock(); return nil }).Once()
 	factory, opened, allowOpen := newGatedOpenFactory(t, pty, nil)
 	d := newTestDaemon(t, factory, stubClock{})
-	d.shell = "/bin/custom-shell"
 	cwd := t.TempDir()
 	tb := newTabWithStableID("t_stable", "p_normal", newBlockingPanePTY(t), domain.Size{Cols: 100, Rows: 40})
 	tb.ctx, tb.cancel = context.WithCancel(t.Context())
-	sess := &session{name: "work", cwd: cwd, tabs: []*tab{tb}, ctx: t.Context()}
+	sess := &session{name: "work", cwd: cwd, env: []string{"SHELL=/bin/custom-shell"}, tabs: []*tab{tb}, ctx: t.Context()}
 	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark, Floating: domain.FloatingConfig{Command: "btop --utf", Width: 50, Height: 50}})
 	d.ensureFloatingWarm(sess, tb)
 	// Open has started while this goroutine owns tab.mu: an external factory

@@ -684,6 +684,7 @@ func TestResumeParkedUpdatesTerminalEnv(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	tr, _, _ := newConn(t, mustHello(ports.IntentAttach, "unused", domain.Size{}))
 	hello := helloResumeCapable(ports.IntentNew, "work", 0)
+	hello.Env = []string{"SECRET=before", "SHELL=/bin/sh"}
 	hello.TrueColor = false
 	sess, ac, err := d.route(hello, tr)
 	require.NoError(t, err)
@@ -692,13 +693,16 @@ func TestResumeParkedUpdatesTerminalEnv(t *testing.T) {
 	require.True(t, d.parkAttachment(sess, ac))
 
 	resumeHello := helloResumeCapable(ports.IntentResume, "work", token)
+	resumeHello.Env = []string{"SECRET=after", "SHELL=/usr/bin/fish"}
 	resumeHello.TrueColor = true
-	_, _, ok, err := d.resumeParked(resumeHello, &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
+	_, resumed, ok, err := d.resumeParked(resumeHello, &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	require.True(t, ok)
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	require.True(t, sess.terminal.TrueColor)
+	require.Equal(t, resumeHello.Env, sess.env)
+	require.Equal(t, resumeHello.Env, resumed.environment())
 }
 
 func TestResumeRenegotiatesOutputWindowOnReusedStream(t *testing.T) {
