@@ -104,6 +104,54 @@ func TestResize(t *testing.T) {
 			},
 		},
 		{
+			name: "soft wrapped lines reflow on shrink and growth",
+			run: func(t *testing.T) {
+				s := NewScreen(5, 3)
+				s.Write([]byte("abcdefgh"))
+
+				s.Resize(3, 3)
+				if got := []string{rowString(s, 0), rowString(s, 1), rowString(s, 2)}; strings.Join(got, ",") != "abc,def,gh " {
+					t.Fatalf("shrink rows = %q", got)
+				}
+
+				s.Resize(5, 3)
+				if got := []string{rowString(s, 0), rowString(s, 1)}; strings.Join(got, ",") != "abcde,fgh  " {
+					t.Fatalf("growth rows = %q", got)
+				}
+			},
+		},
+		{
+			name: "erase preserves a soft wrap boundary",
+			run: func(t *testing.T) {
+				s := NewScreen(4, 2)
+				s.Write([]byte("abcdef"))
+				s.Write([]byte("\x1b[1;1H\x1b[2K"))
+
+				s.Resize(3, 2)
+				if got := rowString(s, 0); got != "ef " {
+					t.Fatalf("erased soft line reflow = %q", got)
+				}
+			},
+		},
+		{
+			name: "wide edge padding does not become logical content",
+			run: func(t *testing.T) {
+				s := NewScreen(4, 3)
+				s.Write([]byte("abc界x"))
+
+				s.Resize(3, 3)
+				if got := rowString(s, 0); got != "abc" {
+					t.Fatalf("first reflow row = %q", got)
+				}
+				assertCell(t, s, 0, 1, '界')
+				if !cellAt(s, 1, 1).Continuation {
+					t.Fatal("wide continuation was not retained")
+				}
+				assertCell(t, s, 2, 1, 'x')
+				assertNoOrphanWideCells(t, s)
+			},
+		},
+		{
 			name: "width truncates and pads without reflow",
 			run: func(t *testing.T) {
 				s := NewScreen(6, 2)

@@ -18,6 +18,7 @@ func (s *Screen) index() {
 }
 
 func (s *Screen) nextLine() {
+	s.buffer.hard(s.Row)
 	s.Col = 0
 	s.index()
 }
@@ -69,6 +70,7 @@ func (s *Screen) scrollUpRegion(top, bottom, n int) {
 	// instead of copying cells. See renderer.Frame.ScrollUp.
 	s.emitLineEvicted(top, n)
 	s.Frame.ScrollUp(top, bottom, n)
+	s.buffer.scrollUp(top, bottom, n)
 	s.record(renderer.Damage{Kind: renderer.DamageScrollUp, X: 0, Y: top, Width: w, Height: height, Count: n})
 	s.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: bottom - n + 1, Width: w, Height: n, Count: 1})
 }
@@ -108,6 +110,7 @@ func (s *Screen) scrollDownRegion(top, bottom, n int) {
 	}
 	// Full-width region: rotate line offsets instead of copying cells.
 	s.Frame.ScrollDown(top, bottom, n)
+	s.buffer.scrollDown(top, bottom, n)
 	s.record(renderer.Damage{Kind: renderer.DamageText, X: 0, Y: top, Width: w, Height: height, Count: 1})
 }
 

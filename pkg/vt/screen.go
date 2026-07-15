@@ -51,6 +51,7 @@ type Screen struct {
 	OnClipboard func(b64 string)
 
 	history *History
+	buffer  *buffer
 
 	defaultFG          renderer.RGB
 	defaultBG          renderer.RGB
@@ -85,8 +86,10 @@ type Screen struct {
 }
 
 func NewScreen(width, height int) *Screen {
+	b := newBuffer(width, height)
 	s := &Screen{
-		Frame:            renderer.NewFrame(width, height),
+		Frame:            b.frame,
+		buffer:           b,
 		Style:            renderer.DefaultStyle(),
 		damage:           []renderer.Damage{renderer.FullRedraw()},
 		damageGeneration: 1,
@@ -165,6 +168,7 @@ func (s *Screen) consumeEscape(data []byte) (consumed int, partial bool) {
 		s.restoreCursor()
 		return 2, false
 	case 'D':
+		s.buffer.hard(s.Row)
 		s.index()
 		return 2, false
 	case 'E':

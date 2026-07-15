@@ -408,6 +408,9 @@ func (s *Screen) clearScreenMode(mode int) {
 		for i := range s.Frame.Cells {
 			s.Frame.Cells[i] = blank
 		}
+		for y := range s.buffer.boundaries {
+			s.buffer.boundaries[y] = lineBoundary{soft: s.buffer.boundaries[y].soft}
+		}
 		s.record(renderer.Damage{Kind: renderer.DamageClear, X: 0, Y: 0, Width: s.Frame.Width, Height: s.Frame.Height, Count: 1})
 	default:
 		for y := s.Row; y < s.Frame.Height; y++ {
