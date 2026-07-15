@@ -216,39 +216,5 @@ func (t *Transport) sendControl(kind byte, id uint64) error {
 }
 
 func (t *Transport) sendAck(seq uint64) {
-	var b [9]byte
-	b[0] = recAck
-	binary.BigEndian.PutUint64(b[1:], seq)
-	_ = t.sendPayload(b[:])
-}
-func (t *Transport) sendPayload(p []byte) error {
-	frags, err := pdgram.FragmentPayload(t.nextCounter(), p, t.mtu-pdgram.HeaderSize-t.codec.Overhead())
-	if err != nil {
-		return err
-	}
-	for _, f := range frags {
-		raw, err := pdgram.MarshalFragment(f)
-		if err != nil {
-			return err
-		}
-		pkt := t.codec.Seal(t.sendDir, t.nextCounter(), raw, nil)
-		t.mu.Lock()
-		peer := t.peer
-		closed := t.closed
-		closeErr := t.closeErr
-		t.mu.Unlock()
-		if closed {
-			if closeErr != nil {
-				return closeErr
-			}
-			return errors.New("dgram: closed")
-		}
-		if peer == nil {
-			return errors.New("dgram: no peer")
-		}
-		if err := t.writePacket(pkt, peer); err != nil {
-			return err
-		}
-	}
-	return nil
+	_ = t.sendControl(recAck, seq)
 }

@@ -208,6 +208,44 @@ func TestACKDeadlineDispatchesWhileAdvisoryWriteIsBlocked(t *testing.T) {
 	awaitSignal(t, ackStarted, "ACK write while advisory probe remains blocked")
 }
 
+func TestACKBypassesDataWriterAndRemainsDecodable(t *testing.T) {
+	aPC, bPC := newPair()
+	a, err := NewTransportWithOptions(aPC, bPC.addr, key(), 1, 2, Options{
+		ResendAfter: time.Hour, Heartbeat: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }()
+
+	acks := make(chan uint64, 1)
+	aPC.drop = func(pkt []byte, _ net.Addr) bool {
+		_, raw, err := a.codec.Open(pkt, a.sendDir, nil, nil)
+		if err != nil {
+			t.Errorf("open ACK: %v", err)
+			return true
+		}
+		frag, err := pdgram.UnmarshalFragment(raw)
+		if err != nil {
+			t.Errorf("unmarshal ACK: %v", err)
+			return true
+		}
+		if frag.Count != 1 || len(frag.Data) != 9 || frag.Data[0] != recAck {
+			t.Errorf("control record=%x, want encoded ACK", frag.Data)
+			return true
+		}
+		acks <- binary.BigEndian.Uint64(frag.Data[1:])
+		return true
+	}
+
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	go a.sendAck(42)
+	if seq := awaitResult(t, acks, "ACK while data writer is blocked"); seq != 42 {
+		t.Fatalf("ACK sequence=%d, want 42", seq)
+	}
+}
+
 func TestProbeDoesNotBlockOnDataWriter(t *testing.T) {
 	aPC, bPC := newPair()
 	a, err := NewTransportWithOptions(aPC, bPC.addr, key(), 1, 2, Options{
