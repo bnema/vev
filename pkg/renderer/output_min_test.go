@@ -2,6 +2,7 @@ package renderer
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -341,4 +342,112 @@ func TestWideRunCursorTrackingAndEL(t *testing.T) {
 			t.Fatalf("second draw not a no-op: %q", string(out2))
 		}
 	})
+}
+
+func TestScrollFastPathEmitsCanonicalTextDamage(t *testing.T) {
+	render := func(damage []Damage) string {
+		t.Helper()
+		r := New(Capabilities{})
+		base := NewFrame(10, 3)
+		setRow(base, 0, "aaaaaaaaaa", DefaultStyle())
+		setRow(base, 1, "bbbbbbbbbb", DefaultStyle())
+		setRow(base, 2, "cccccccccc", DefaultStyle())
+		if _, err := r.Draw(base, []Damage{FullRedraw()}); err != nil {
+			t.Fatal(err)
+		}
+
+		frame := NewFrame(10, 3)
+		setRow(frame, 0, "bbbbbbbbbb", DefaultStyle())
+		setRow(frame, 1, "cccccccccc", DefaultStyle())
+		setRow(frame, 2, "abcdefghij", DefaultStyle())
+		out, err := r.Draw(frame, damage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+
+	scroll := Damage{Kind: DamageScrollUp, X: 0, Y: 0, Width: 10, Height: 3, Count: 1}
+	forward := render([]Damage{
+		scroll,
+		{Kind: DamageText, X: 0, Y: 2, Width: 5, Height: 1},
+		{Kind: DamageText, X: 4, Y: 2, Width: 6, Height: 1},
+	})
+	reverse := render([]Damage{
+		{Kind: DamageText, X: 4, Y: 2, Width: 6, Height: 1},
+		scroll,
+		{Kind: DamageText, X: 0, Y: 2, Width: 5, Height: 1},
+	})
+	if forward != reverse {
+		t.Fatalf("scroll output depends on text damage order: forward %q, reverse %q", forward, reverse)
+	}
+	if strings.Contains(forward, "\r") || !strings.Contains(forward, "abcdefghij") {
+		t.Fatalf("scroll output did not emit one forward canonical span: %q", forward)
+	}
+}
+
+func TestCanonicalDamageMergesClearAndText(t *testing.T) {
+	r := New(Capabilities{})
+	base := NewFrame(10, 1)
+	if _, err := r.Draw(base, []Damage{FullRedraw()}); err != nil {
+		t.Fatal(err)
+	}
+	frame := NewFrame(10, 1)
+	setRow(frame, 0, "abcdefghi", DefaultStyle())
+	out, err := r.Draw(frame, []Damage{
+		{Kind: DamageClear, X: 5, Y: 0, Width: 4, Height: 1},
+		{Kind: DamageText, X: 0, Y: 0, Width: 5, Height: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(out), "\x1b[1;1Habcdefghi\x1b[0m"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestCanonicalDamagePreservesWideHeadTracking(t *testing.T) {
+	r := New(Capabilities{})
+	base := NewFrame(8, 1)
+	if _, err := r.Draw(base, []Damage{FullRedraw()}); err != nil {
+		t.Fatal(err)
+	}
+	frame := NewFrame(8, 1)
+	frame.Set(0, 0, Cell{Rune: 'A', Style: DefaultStyle()})
+	frame.Set(1, 0, Cell{Rune: '你', Style: DefaultStyle()})
+	frame.Set(2, 0, Cell{Continuation: true, Style: DefaultStyle()})
+	frame.Set(4, 0, Cell{Rune: 'B', Style: DefaultStyle()})
+	out, err := r.Draw(frame, []Damage{
+		{Kind: DamageText, X: 4, Y: 0, Width: 1, Height: 1},
+		{Kind: DamageText, X: 0, Y: 0, Width: 2, Height: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(out), "\x1b[1;1HA你\x1b[1;5HB\x1b[0m"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestDamagePlannerFallbackRedrawsAndSynchronizesShadow(t *testing.T) {
+	r := New(Capabilities{})
+	frame := NewFrame(1, maxPlannedDamageSpans+1)
+	if _, err := r.Draw(frame, []Damage{FullRedraw()}); err != nil {
+		t.Fatal(err)
+	}
+	frame.Set(0, frame.Height-1, Cell{Rune: 'X', Style: DefaultStyle()})
+	out, err := r.Draw(frame, []Damage{{Kind: DamageText, X: 0, Y: 0, Width: 1, Height: frame.Height}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "X") {
+		t.Fatalf("fallback output did not redraw the frame: %q", string(out))
+	}
+	out, err = r.Draw(frame, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("fallback did not synchronize shadow; follow-up output = %q", string(out))
+	}
 }
