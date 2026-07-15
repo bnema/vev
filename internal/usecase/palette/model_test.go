@@ -182,7 +182,7 @@ func TestRenderSafelyClipsVisibleFieldsAtNarrowWidths(t *testing.T) {
 
 func selectedCommandCode(t *testing.T, result Result) string {
 	t.Helper()
-	cmd, ok := result.CommandInfo()
+	cmd, ok := result.Command()
 	require.True(t, ok, "selected result is a command")
 	return cmd.Code
 }
@@ -353,9 +353,8 @@ func TestModelUsesDefensiveTypedResultsAndKeepsSessionsCommandInert(t *testing.T
 
 	selected, ok := m.Selected()
 	require.True(t, ok)
-	session, ok := selected.Session()
-	require.True(t, ok)
-	id, active := session.SessionID()
+	require.Equal(t, ResultKindActiveSession, selected.Kind())
+	id, active := selected.SessionID()
 	require.True(t, active)
 	require.Equal(t, domain.SessionID("work-id"), id)
 	require.False(t, m.CompleteSelected(), "sessions never participate in tab completion")

@@ -2,6 +2,7 @@ package palette
 
 import (
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/usecase/command"
 )
@@ -45,6 +46,17 @@ func TestArgumentCommandKeepsExactRowVisible(t *testing.T) {
 	cmd := command.Command{Code: "JRS", Arguments: command.ArgumentsRequired}
 	if got, ok := ArgumentCommand(CommandResults([]command.Command{cmd}), "JRS 1"); !ok || got.Code != "JRS" {
 		t.Fatalf("ArgumentCommand() = %#v, %v; want JRS, true", got, ok)
+	}
+}
+
+func TestArgumentResultReturnsTheMatchingRowAndCommand(t *testing.T) {
+	jrs := command.Command{Code: "JRS", Arguments: command.ArgumentsRequired}
+	results := []Result{NewStoppedSessionResult("JRS", time.Time{}), NewCommandResult(jrs)}
+
+	result, got, ok := argumentResult(results, "jrs 1")
+
+	if !ok || result.Kind() != ResultKindCommand || got.Code != jrs.Code {
+		t.Fatalf("argumentResult() = %#v, %#v, %v; want matching JRS row and command", result, got, ok)
 	}
 }
 

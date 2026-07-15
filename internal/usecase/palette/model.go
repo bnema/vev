@@ -27,16 +27,21 @@ type RenderOptions struct {
 }
 
 type Model struct {
-	results  []Result
-	input    ui.TextInput
-	matches  []Match
-	selected int
-	scroll   int
+	results         []Result
+	argumentResults []Result
+	input           ui.TextInput
+	matches         []Match
+	selected        int
+	scroll          int
 }
 
 // New accepts typed immutable palette results.
 func New(results []Result) *Model {
-	m := &Model{results: append([]Result(nil), results...)}
+	copied := append([]Result(nil), results...)
+	m := &Model{
+		results:         copied,
+		argumentResults: requiredArgumentResults(copied),
+	}
 	m.refresh()
 	return m
 }
@@ -88,7 +93,7 @@ func (m *Model) Down() {
 // Selected returns the typed immutable target, not an executable command.
 func (m *Model) Selected() (Result, bool) {
 	if m == nil || m.selected < 0 || m.selected >= len(m.matches) {
-		return nil, false
+		return Result{}, false
 	}
 	return m.matches[m.selected].Result, true
 }
@@ -100,7 +105,7 @@ func (m *Model) CompleteSelected() bool {
 	if !ok {
 		return false
 	}
-	cmd, ok := selected.CommandInfo()
+	cmd, ok := selected.Command()
 	if !ok {
 		return false
 	}
@@ -166,10 +171,10 @@ func (m *Model) Matches() []Match {
 
 func (m *Model) refresh() {
 	query := m.input.Value()
-	m.matches = fuzzyResults(m.results, query)
+	m.matches = Fuzzy(m.results, query)
 	// Once an argument-taking static token is exact, retain its row while its
 	// arguments make ordinary fuzzy matching inapplicable.
-	if result, ok := m.argumentResult(query); ok {
+	if result, _, ok := argumentResult(m.results, query); ok {
 		m.prependMatch(result)
 	} else if len(m.matches) == 0 {
 		// Arguments are not part of static command matching. When they would
@@ -177,34 +182,27 @@ func (m *Model) refresh() {
 		// the partial first token so Tab can complete them.
 		token, _, hasSeparator := completionParts(query)
 		if hasSeparator {
-			for _, match := range fuzzyResults(m.results, token) {
-				if cmd, ok := match.Result.CommandInfo(); ok && cmd.Arguments == command.ArgumentsRequired {
-					m.matches = append(m.matches, match)
-				}
-			}
+			m.matches = Fuzzy(m.argumentResults, token)
 		}
 	}
 	m.clamp()
 }
 
-func (m *Model) argumentResult(input string) (Result, bool) {
-	cmd, ok := ArgumentCommand(m.results, input)
-	if !ok {
-		return nil, false
-	}
-	for _, result := range m.results {
-		candidate, ok := result.CommandInfo()
-		if ok && candidate.Code == cmd.Code {
-			return result, true
+func requiredArgumentResults(results []Result) []Result {
+	commands := make([]Result, 0, len(results))
+	for _, result := range results {
+		cmd, ok := result.Command()
+		if ok && cmd.Arguments == command.ArgumentsRequired {
+			commands = append(commands, result)
 		}
 	}
-	return nil, false
+	return commands
 }
 
 func (m *Model) prependMatch(result Result) {
-	cmd, _ := result.CommandInfo()
+	cmd, _ := result.Command()
 	for i, match := range m.matches {
-		candidate, ok := match.Result.CommandInfo()
+		candidate, ok := match.Result.Command()
 		if !ok || candidate.Code != cmd.Code {
 			continue
 		}
@@ -260,7 +258,7 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 	}
 	codeWidth := 0
 	for _, match := range m.matches {
-		if cmd, ok := match.Result.CommandInfo(); ok && utf8.RuneCountInString(cmd.Code) > codeWidth {
+		if cmd, ok := match.Result.Command(); ok && utf8.RuneCountInString(cmd.Code) > codeWidth {
 			codeWidth = utf8.RuneCountInString(cmd.Code)
 		}
 	}
@@ -276,7 +274,7 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 			style = selection
 		}
 		ui.FillRect(frame, domain.Rect{Y: y + start, Width: frame.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
-		if cmd, ok := match.Result.CommandInfo(); ok {
+		if cmd, ok := match.Result.Command(); ok {
 			m.renderCommand(frame, y+start, style, selection, desc, codeWidth, cmd, match.Positions, activeCmd, activeOK, opts.Guidance, opts.Feedback, idx == m.selected)
 			continue
 		}

@@ -22,7 +22,7 @@ func ParseAction(results []Result, input string) (Action, bool) {
 		return Action{}, false
 	}
 	for _, result := range results {
-		cmd, ok := result.CommandInfo()
+		cmd, ok := result.Command()
 		if !ok || !strings.EqualFold(fields[0], cmd.Code) {
 			continue
 		}
@@ -45,15 +45,22 @@ func ParseAction(results []Result, input string) (Action, bool) {
 // ArgumentCommand returns the exact argument-taking command whose token is
 // being typed, including the whitespace-before-argument state.
 func ArgumentCommand(results []Result, input string) (command.Command, bool) {
+	_, cmd, ok := argumentResult(results, input)
+	return cmd, ok
+}
+
+// argumentResult finds the exact argument-taking command and its source row in
+// one pass so callers can reuse the immutable result without another scan.
+func argumentResult(results []Result, input string) (Result, command.Command, bool) {
 	fields := strings.Fields(input)
 	if len(fields) == 0 {
-		return command.Command{}, false
+		return Result{}, command.Command{}, false
 	}
 	for _, result := range results {
-		cmd, ok := result.CommandInfo()
+		cmd, ok := result.Command()
 		if ok && cmd.Arguments == command.ArgumentsRequired && strings.EqualFold(fields[0], cmd.Code) {
-			return cmd, true
+			return result, cmd, true
 		}
 	}
-	return command.Command{}, false
+	return Result{}, command.Command{}, false
 }

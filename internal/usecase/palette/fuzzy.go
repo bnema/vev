@@ -17,19 +17,13 @@ type Match struct {
 	search    string
 }
 
-// Fuzzy searches typed immutable palette results.
+// Fuzzy searches immutable palette results.
 func Fuzzy(results []Result, query string) []Match {
-	return fuzzyResults(results, query)
-}
-
-func fuzzyResults(results []Result, query string) []Match {
 	needle := strings.ToLower(query)
 	if query == "" {
 		out := make([]Match, 0, len(results))
 		for i, result := range results {
-			if result != nil {
-				out = append(out, newMatch(result, i))
-			}
+			out = append(out, newMatch(result, i))
 		}
 		return out
 	}
@@ -37,9 +31,6 @@ func fuzzyResults(results []Result, query string) []Match {
 	needleRunes := []rune(needle)
 	var out []Match
 	for i, result := range results {
-		if result == nil {
-			continue
-		}
 		if match, ok := score(result, needle, needleRunes, i); ok {
 			out = append(out, match)
 		}
@@ -92,7 +83,7 @@ func score(result Result, needle string, needleRunes []rune, order int) (Match, 
 		match.rank, match.span, match.first = 3, positions[len(positions)-1]-positions[0]+1, positions[0]
 		return match, true
 	}
-	if cmd, ok := result.CommandInfo(); ok {
+	if cmd, ok := result.Command(); ok {
 		if positions, ok := subsequencePositions([]rune(strings.ToLower(cmd.Desc)), needleRunes); ok {
 			match.rank, match.span, match.first = 4, positions[len(positions)-1]-positions[0]+1, positions[0]
 			return match, true

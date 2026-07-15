@@ -16,7 +16,7 @@ func cmd(code, name, desc string) command.Command {
 func codes(matches []Match) []string {
 	out := make([]string, len(matches))
 	for i, match := range matches {
-		cmd, ok := match.Result.CommandInfo()
+		cmd, ok := match.Result.Command()
 		if !ok {
 			continue
 		}
@@ -102,32 +102,15 @@ func TestFuzzyMixedResultsPrioritizeCommandShortcodeAndRankSessions(t *testing.T
 	require.Empty(t, matches[4].Positions)
 }
 
-func TestFuzzyCachesNormalizedSearchTextPerMatch(t *testing.T) {
-	calls := 0
-	results := []Result{
-		countingResult{text: "aBravo", calls: &calls},
-		countingResult{text: "aAlpha", calls: &calls},
-	}
+func TestFuzzySortsEquivalentSessionMatchesByNormalizedText(t *testing.T) {
+	created := time.Time{}
+	matches := Fuzzy([]Result{
+		NewStoppedSessionResult("aBravo", created),
+		NewStoppedSessionResult("aAlpha", created),
+	}, "a")
 
-	matches := Fuzzy(results, "a")
-
-	require.Len(t, matches, 2)
-	require.Equal(t, 2, calls, "sorting must use the normalized text cached in Match")
+	require.Equal(t, []string{"aAlpha", "aBravo"}, matchSearchText(matches))
 }
-
-type countingResult struct {
-	text  string
-	calls *int
-}
-
-func (r countingResult) Kind() ResultKind    { return ResultKindStoppedSession }
-func (r countingResult) DisplayText() string { return r.text }
-func (r countingResult) SearchText() string {
-	(*r.calls)++
-	return r.text
-}
-func (r countingResult) CommandInfo() (command.Command, bool) { return command.Command{}, false }
-func (r countingResult) Session() (SessionResult, bool)       { return SessionResult{}, false }
 
 func TestFuzzyMixedResultsUsesKindThenNormalizedTextThenStableOrder(t *testing.T) {
 	created := time.Time{}

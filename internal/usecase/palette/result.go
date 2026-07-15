@@ -16,65 +16,80 @@ const (
 	ResultKindStoppedSession
 )
 
-// Result is a searchable palette target. Command and session accessors make
-// the target's capabilities explicit without callers needing type assertions.
-type Result interface {
-	Kind() ResultKind
-	DisplayText() string
-	SearchText() string
-	CommandInfo() (command.Command, bool)
-	Session() (SessionResult, bool)
-}
-
-// CommandResult is a static command palette target.
-type CommandResult struct {
+// Result is an immutable palette target. Its kind is the sole discriminator
+// for its private command or session payload.
+type Result struct {
+	kind    ResultKind
 	command command.Command
+	session sessionPayload
 }
 
-func NewCommandResult(cmd command.Command) CommandResult     { return CommandResult{command: cmd} }
-func (r CommandResult) Kind() ResultKind                     { return ResultKindCommand }
-func (r CommandResult) DisplayText() string                  { return r.command.Code }
-func (r CommandResult) SearchText() string                   { return r.command.Code }
-func (r CommandResult) Command() command.Command             { return r.command }
-func (r CommandResult) CommandInfo() (command.Command, bool) { return r.command, true }
-func (r CommandResult) Session() (SessionResult, bool)       { return SessionResult{}, false }
-
-// SessionResult is an immutable named-session target. An active session has a
-// SessionID; a stopped session intentionally does not.
-type SessionResult struct {
+type sessionPayload struct {
 	name      string
 	createdAt time.Time
 	sessionID domain.SessionID
-	active    bool
 }
 
-func NewActiveSessionResult(name string, createdAt time.Time, sessionID domain.SessionID) SessionResult {
-	return SessionResult{name: name, createdAt: createdAt, sessionID: sessionID, active: true}
+// NewCommandResult creates a static command palette target.
+func NewCommandResult(cmd command.Command) Result {
+	return Result{kind: ResultKindCommand, command: cmd}
 }
 
-func NewStoppedSessionResult(name string, createdAt time.Time) SessionResult {
-	return SessionResult{name: name, createdAt: createdAt}
-}
-
-func (r SessionResult) Kind() ResultKind {
-	if r.active {
-		return ResultKindActiveSession
+// NewActiveSessionResult creates an immutable active named-session target.
+func NewActiveSessionResult(name string, createdAt time.Time, sessionID domain.SessionID) Result {
+	return Result{
+		kind:    ResultKindActiveSession,
+		session: sessionPayload{name: name, createdAt: createdAt, sessionID: sessionID},
 	}
-	return ResultKindStoppedSession
 }
-func (r SessionResult) Name() string         { return r.name }
-func (r SessionResult) CreatedAt() time.Time { return r.createdAt }
-func (r SessionResult) SessionID() (domain.SessionID, bool) {
-	return r.sessionID, r.active
+
+// NewStoppedSessionResult creates an immutable stopped named-session target.
+func NewStoppedSessionResult(name string, createdAt time.Time) Result {
+	return Result{
+		kind:    ResultKindStoppedSession,
+		session: sessionPayload{name: name, createdAt: createdAt},
+	}
 }
-func (r SessionResult) DisplayText() string                  { return sessionDisplayPrefix + r.name }
-func (r SessionResult) SearchText() string                   { return r.name }
-func (r SessionResult) CommandInfo() (command.Command, bool) { return command.Command{}, false }
-func (r SessionResult) Session() (SessionResult, bool)       { return r, true }
+
+func (r Result) Kind() ResultKind { return r.kind }
+
+func (r Result) DisplayText() string {
+	if r.kind == ResultKindCommand {
+		return r.command.Code
+	}
+	return sessionDisplayPrefix + r.session.name
+}
+
+func (r Result) SearchText() string {
+	if r.kind == ResultKindCommand {
+		return r.command.Code
+	}
+	return r.session.name
+}
+
+// Command returns the command payload only for command results.
+func (r Result) Command() (command.Command, bool) {
+	return r.command, r.kind == ResultKindCommand
+}
+
+// SessionName returns the session name only for session results.
+func (r Result) SessionName() (string, bool) {
+	return r.session.name, r.kind != ResultKindCommand
+}
+
+// SessionCreatedAt returns the session creation time only for session results.
+func (r Result) SessionCreatedAt() (time.Time, bool) {
+	return r.session.createdAt, r.kind != ResultKindCommand
+}
+
+// SessionID returns the lifecycle identity only for active session results.
+func (r Result) SessionID() (domain.SessionID, bool) {
+	return r.session.sessionID, r.kind == ResultKindActiveSession
+}
 
 const sessionDisplayPrefix = "Switch to session "
 
-// CommandResults converts static commands to typed palette targets.
+// CommandResults converts static commands to immutable palette targets.
 func CommandResults(commands []command.Command) []Result {
 	results := make([]Result, len(commands))
 	for i, cmd := range commands {
