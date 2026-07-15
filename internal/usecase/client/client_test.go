@@ -360,7 +360,7 @@ func TestAttachHelloIncludesCompleteLocalEnvironment(t *testing.T) {
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	require.NoError(t, client.Attach(context.Background(), tr, tm, realClock{}, ports.IntentEphemeral, ""))
+	require.NoError(t, runTestClient(context.Background(), attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentEphemeral}))
 	require.Equal(t, os.Environ(), (<-gotHello).Env)
 }
 
