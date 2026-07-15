@@ -71,6 +71,91 @@ func setRow(f Frame, y int, s string, st Style) {
 	}
 }
 
+func hasCUB(out string) bool {
+	for i := 0; i+2 < len(out); i++ {
+		if out[i] != '\x1b' || out[i+1] != '[' {
+			continue
+		}
+		j := i + 2
+		for j < len(out) && out[j] >= '0' && out[j] <= '9' {
+			j++
+		}
+		if j < len(out) && out[j] == 'D' {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBackwardOverlappingDamageRendersFinalSpanOnce(t *testing.T) {
+	r := New(Capabilities{})
+	base := NewFrame(10, 1)
+	if _, err := r.Draw(base, []Damage{FullRedraw()}); err != nil {
+		t.Fatal(err)
+	}
+
+	frame := NewFrame(10, 1)
+	setRow(frame, 0, "abcdefghi", DefaultStyle())
+	got := drawGolden(t, r, frame, []Damage{
+		{Kind: DamageText, X: 4, Y: 0, Width: 5, Height: 1, Count: 1},
+		{Kind: DamageText, X: 0, Y: 0, Width: 5, Height: 1, Count: 1},
+	})
+	want := "\x1b[1;1Habcdefghi\x1b[0m"
+	if got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestDamageOrderPermutationProducesCanonicalOutput(t *testing.T) {
+	tests := []struct {
+		name  string
+		spans []Damage
+	}{
+		{
+			name: "overlapping spans",
+			spans: []Damage{
+				{Kind: DamageText, X: 0, Y: 0, Width: 5, Height: 1, Count: 1},
+				{Kind: DamageText, X: 4, Y: 0, Width: 5, Height: 1, Count: 1},
+			},
+		},
+		{
+			name: "adjacent spans",
+			spans: []Damage{
+				{Kind: DamageText, X: 0, Y: 0, Width: 5, Height: 1, Count: 1},
+				{Kind: DamageText, X: 5, Y: 0, Width: 4, Height: 1, Count: 1},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			render := func(spans []Damage) string {
+				t.Helper()
+				r := New(Capabilities{})
+				if _, err := r.Draw(NewFrame(10, 1), []Damage{FullRedraw()}); err != nil {
+					t.Fatal(err)
+				}
+				frame := NewFrame(10, 1)
+				setRow(frame, 0, "abcdefghi", DefaultStyle())
+				return drawGolden(t, r, frame, spans)
+			}
+
+			forward := render(tt.spans)
+			reverse := render([]Damage{tt.spans[1], tt.spans[0]})
+			if forward != reverse {
+				t.Fatalf("forward output = %q, reverse output = %q", forward, reverse)
+			}
+			if hasCUB(forward) {
+				t.Fatalf("canonical output contains CUB: %q", forward)
+			}
+			want := "\x1b[1;1Habcdefghi\x1b[0m"
+			if forward != want {
+				t.Fatalf("output = %q, want canonical output %q", forward, want)
+			}
+		})
+	}
+}
+
 func TestNativeClearGolden(t *testing.T) {
 	tests := []struct {
 		name  string
