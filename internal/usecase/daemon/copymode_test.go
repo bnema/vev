@@ -813,7 +813,9 @@ func TestFloatingCopyModeMouseSelectsFloatingRows(t *testing.T) {
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, ports.MsgOutput)
+	ac.overlays.copyMu.Lock()
 	viewportTop := ac.overlays.copyMode.ViewportTop
+	ac.overlays.copyMu.Unlock()
 	inner := calculateContentFloatingGeometry(domain.Size{Cols: 80, Rows: 23}, d.currentFloatingConfig()).Inner
 
 	// Copy body row k renders at wire row inner.Y+k+2 (top bar + content

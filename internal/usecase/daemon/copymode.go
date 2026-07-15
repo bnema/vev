@@ -94,7 +94,7 @@ func (d *Daemon) publishCopyMode(sess *session, ac *attachedClient, tb *tab, p *
 	if activate != nil {
 		rt.clearCopyPointerForTransferLocked()
 	} else {
-		rt.invalidateCopyPointerLocked(true)
+		rt.invalidateCopyPointerLocked()
 	}
 	pointerEpoch := rt.copyPointerEpoch
 	rt.copyMu.Unlock()
@@ -128,18 +128,18 @@ func (d *Daemon) publishCopyMode(sess *session, ac *attachedClient, tb *tab, p *
 	return true
 }
 
-// copyMouse receives already mapped client-frame coordinates. The caller owns
-// geometry resolution; this function only mutates immutable-document state.
-func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event, mapped mappedCopyMouse) {
+// copyMouse receives an already mapped client-frame position. It revalidates
+// the immutable snapshot under copyMu before changing selection state, so a
+// concurrent scroll or pointer lifecycle transition cannot apply stale rows.
+func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event, mapped mappedCopyMouse, snapshot copyMouseInputSnapshot, geometry copyMouseGeometry) {
 	rt := ac.overlays
 	if ev.Button != mouse.Left {
 		return
 	}
 	rt.copyMu.Lock()
-	if rt.copyMode == nil || rt.copyPane != mapped.pane || rt.copyDocument == nil || rt.copyDocument != rt.copyMode.Document() {
-		if ev.Type == mouse.Release {
-			rt.invalidateCopyPointerLocked(false)
-		}
+	if rt.copyMode != snapshot.mode || rt.copyPane != snapshot.pane || rt.copyDocument != snapshot.document ||
+		rt.copyPointerEpoch != snapshot.epoch || rt.copyMode == nil || rt.copyDocument != rt.copyMode.Document() ||
+		rt.copyMode.ViewportTop != snapshot.viewportTop {
 		rt.copyMu.Unlock()
 		return
 	}
@@ -149,11 +149,11 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event, ma
 		changed = rt.copyMode.SetPosition(mapped.pos)
 		pointer := rt.copyPointer
 		if !pointer.valid || pointer.pane != mapped.pane || pointer.document != rt.copyDocument {
-			rt.beginCopyPointerLocked(copyPointerState{pane: mapped.pane, document: rt.copyDocument, press: mapped.pos})
+			rt.beginCopyPointerLocked(copyPointerState{pane: mapped.pane, document: rt.copyDocument, geometry: geometry, press: mapped.pos})
 		}
 	case mouse.Motion:
 		pointer := rt.copyPointer
-		if pointer.valid && pointer.pane == mapped.pane && pointer.document == rt.copyDocument {
+		if pointer.valid && pointer.epoch == snapshot.epoch && pointer.pane == mapped.pane && pointer.document == rt.copyDocument {
 			if !pointer.dragging {
 				rt.copyMode.StartCharacterSelection(pointer.press)
 				pointer.dragging = true
@@ -162,7 +162,7 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event, ma
 			rt.copyPointer = pointer
 		}
 	case mouse.Release:
-		rt.invalidateCopyPointerLocked(false)
+		rt.invalidateCopyPointerLocked()
 	}
 	rt.copyMu.Unlock()
 	if changed {

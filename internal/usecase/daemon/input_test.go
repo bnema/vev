@@ -1085,7 +1085,6 @@ func TestCopyModeRejectedReleaseClearsPointerAndClickBeforeMotion(t *testing.T) 
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
 	ac.overlays.copyMu.Lock()
 	require.True(t, ac.overlays.copyPointer.valid)
-	ac.overlays.copyClick = copyClickCandidate{valid: true, pane: ac.overlays.copyPointer.pane}
 	ac.overlays.copyMu.Unlock()
 
 	// Wire row 25 is below the focused pane content, so the release is not a
@@ -1093,7 +1092,6 @@ func TestCopyModeRejectedReleaseClearsPointerAndClickBeforeMotion(t *testing.T) 
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;25m\x1b[<32;1;3M"))
 	ac.overlays.copyMu.Lock()
 	require.False(t, ac.overlays.copyPointer.valid)
-	require.False(t, ac.overlays.copyClick.valid)
 	selection := ac.overlays.copyMode.Selection()
 	require.False(t, selection.Enabled)
 	ac.overlays.copyMu.Unlock()
@@ -1281,7 +1279,6 @@ func TestRejectedLeftReleaseInvalidatesFreshPointerBeforeMotion(t *testing.T) {
 			d.handleInput(sess, ac, press)
 			ac.overlays.copyMu.Lock()
 			require.True(t, ac.overlays.copyPointer.valid)
-			ac.overlays.copyClick = copyClickCandidate{valid: true, pane: ac.overlays.copyPointer.pane}
 			ac.overlays.copyMu.Unlock()
 
 			d.handleInput(sess, ac, reject)
@@ -1289,7 +1286,6 @@ func TestRejectedLeftReleaseInvalidatesFreshPointerBeforeMotion(t *testing.T) {
 
 			ac.overlays.copyMu.Lock()
 			require.False(t, ac.overlays.copyPointer.valid)
-			require.False(t, ac.overlays.copyClick.valid)
 			require.Nil(t, ac.overlays.copyMode, "rejected release followed by motion must not publish")
 			ac.overlays.copyMu.Unlock()
 		})
@@ -1312,7 +1308,6 @@ func TestRejectedLeftPressAndInactiveReleaseInvalidateStalePointer(t *testing.T)
 	d.handleMouse(ac, mouse.Event{Button: mouse.Left, Type: mouse.Release})
 	ac.overlays.copyMu.Lock()
 	require.False(t, ac.overlays.copyPointer.valid)
-	require.False(t, ac.overlays.copyClick.valid)
 	ac.overlays.copyMu.Unlock()
 }
 
@@ -1340,14 +1335,12 @@ func TestFocusedSplitTitleBarPressInvalidatesFreshPointerBeforeMotion(t *testing
 	d.handleInput(sess, ac, []byte("\x1b[<0;22;3M"))
 	ac.overlays.copyMu.Lock()
 	require.True(t, ac.overlays.copyPointer.valid)
-	ac.overlays.copyClick = copyClickCandidate{valid: true, pane: ac.overlays.copyPointer.pane}
 	epoch := ac.overlays.copyPointerEpoch
 	ac.overlays.copyMu.Unlock()
 
 	d.handleInput(sess, ac, []byte("\x1b[<0;22;2M"))
 	ac.overlays.copyMu.Lock()
 	require.False(t, ac.overlays.copyPointer.valid)
-	require.False(t, ac.overlays.copyClick.valid)
 	require.Greater(t, ac.overlays.copyPointerEpoch, epoch)
 	ac.overlays.copyMu.Unlock()
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus, "title press on focused pane must preserve focus")
@@ -1478,4 +1471,98 @@ func TestMouseCollapsedStackBarExpandsAndFocuses(t *testing.T) {
 
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Root.Expanded)
+}
+
+func TestActiveCopyMouseRejectsViewportChangeAfterMappingSnapshot(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	pane := sess.activeTab().focusedPane()
+	for range 8 {
+		pane.history.Append(testRow("history"))
+	}
+	d.enterCopyMode(sess, ac)
+	mustOutputData(t, sends)
+
+	ac.overlays.copyMu.Lock()
+	before := ac.overlays.copyMode.Cursor()
+	ac.overlays.copyMu.Unlock()
+	d.beforeCopyMouseMap = func() {
+		ac.overlays.copyMu.Lock()
+		ac.overlays.copyMode.ViewportTop--
+		ac.overlays.copyMu.Unlock()
+	}
+	defer func() { d.beforeCopyMouseMap = nil }()
+
+	// The seam changes ViewportTop after the map snapshot but before copyMouse
+	// revalidates it. The stale mapped row must not move the selection cursor.
+	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
+	ac.overlays.copyMu.Lock()
+	require.Equal(t, before, ac.overlays.copyMode.Cursor())
+	require.False(t, ac.overlays.copyPointer.valid)
+	ac.overlays.copyMu.Unlock()
+}
+
+func TestFreshCopyPressUsesFrameAbsoluteHitTestGeometry(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, d *Daemon, sess *session) (*pane, mouse.Event)
+	}{
+		{
+			name: "mono",
+			setup: func(_ *testing.T, _ *Daemon, sess *session) (*pane, mouse.Event) {
+				return sess.activeTab().focusedPane(), mouse.Event{Button: mouse.Left, Type: mouse.Press, Col: 1, Row: 1}
+			},
+		},
+		{
+			name: "split",
+			setup: func(_ *testing.T, _ *Daemon, sess *session) (*pane, mouse.Event) {
+				tb := sess.activeTab()
+				p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
+				tb.mu.Lock()
+				tb.size = domain.Size{Cols: 41, Rows: 10}
+				tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+				tb.panes["pane-2"] = p2
+				tb.mu.Unlock()
+				return p2, mouse.Event{Button: mouse.Left, Type: mouse.Press, Col: 22, Row: 3}
+			},
+		},
+		{
+			name: "floating",
+			setup: func(t *testing.T, d *Daemon, sess *session) (*pane, mouse.Event) {
+				p := newPane("floating", nil, domain.Size{Cols: 20, Rows: 5})
+				installTestFloating(sess.activeTab(), p, true)
+				tb := sess.activeTab()
+				tb.mu.Lock()
+				_, geometry, visible := tb.visibleFloatingSnapshotLocked(d.currentFloatingConfig())
+				tb.mu.Unlock()
+				require.True(t, visible)
+				return p, mouse.Event{Button: mouse.Left, Type: mouse.Press, Col: geometry.Inner.X + 1, Row: geometry.Inner.Y + 2}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			defer release()
+			d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+			wantPane, ev := tc.setup(t, d, sess)
+			tb := sess.activeTab()
+			tb.mu.Lock()
+			wantGeometry, ok := hitTestCopyMouseGeometryLocked(tb, d.currentFloatingConfig(), ev.Col, ev.Row)
+			tb.mu.Unlock()
+			require.True(t, ok)
+			require.Same(t, wantPane, wantGeometry.pane)
+
+			d.handleMouse(ac, ev)
+			ac.overlays.copyMu.Lock()
+			pointer := ac.overlays.copyPointer
+			ac.overlays.copyMu.Unlock()
+			require.True(t, pointer.valid)
+			require.Same(t, wantPane, pointer.pane)
+			require.Equal(t, wantGeometry, pointer.geometry)
+			mapped, ok := mapCopyMouse(ev, wantGeometry, max(pointer.document.Len()-pointer.document.Height(), 0), pointer.document, false)
+			require.True(t, ok)
+			require.Equal(t, mapped.pos, pointer.press)
+		})
+	}
 }

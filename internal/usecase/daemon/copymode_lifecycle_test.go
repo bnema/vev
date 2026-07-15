@@ -161,7 +161,6 @@ func TestCopyModeLifecyclePublicationEpochRejectsReleaseAndPaneClose(t *testing.
 			d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
 			ac.overlays.copyMu.Lock()
 			require.True(t, ac.overlays.copyPointer.valid)
-			ac.overlays.copyClick = copyClickCandidate{valid: true, pane: p}
 			ac.overlays.copyMu.Unlock()
 
 			reached := make(chan struct{})
@@ -185,7 +184,6 @@ func TestCopyModeLifecyclePublicationEpochRejectsReleaseAndPaneClose(t *testing.
 			require.Nil(t, ac.overlays.copyMode, "stale publication must not resurrect copy mode")
 			require.Nil(t, ac.overlays.copyCandidate)
 			require.False(t, ac.overlays.copyPointer.valid)
-			require.False(t, ac.overlays.copyClick.valid)
 			ac.overlays.copyMu.Unlock()
 		})
 	}
@@ -211,7 +209,6 @@ func TestCopyModeLifecycleFloatingCloseDuringPublicationDoesNotResurrect(t *test
 	d.handleInput(sess, ac, press)
 	ac.overlays.copyMu.Lock()
 	require.True(t, ac.overlays.copyPointer.valid)
-	ac.overlays.copyClick = copyClickCandidate{valid: true, pane: floating}
 	ac.overlays.copyMu.Unlock()
 
 	reached := make(chan struct{})
@@ -234,7 +231,6 @@ func TestCopyModeLifecycleFloatingCloseDuringPublicationDoesNotResurrect(t *test
 	require.Nil(t, ac.overlays.copyMode)
 	require.Nil(t, ac.overlays.copyCandidate)
 	require.False(t, ac.overlays.copyPointer.valid)
-	require.False(t, ac.overlays.copyClick.valid)
 	ac.overlays.copyMu.Unlock()
 }
 

@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"sync"
-	"time"
 
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -45,7 +44,6 @@ type overlayRuntime struct {
 	copySearchPending []byte
 	copyFeedback      string
 	copyPointer       copyPointerState
-	copyClick         copyClickCandidate
 	copyPointerEpoch  uint64
 }
 
@@ -57,15 +55,6 @@ type copyPointerState struct {
 	geometry copyMouseGeometry
 	press    scopy.Pos
 	dragging bool
-	wordDrag bool
-}
-
-type copyClickCandidate struct {
-	valid   bool
-	pane    *pane
-	pos     scopy.Pos
-	at      time.Time
-	dragged bool
 }
 
 func newOverlayRuntime(ac *attachedClient) *overlayRuntime {
@@ -131,19 +120,15 @@ func (rt *overlayRuntime) beginCopyPointerLocked(pointer copyPointerState) {
 	rt.copyPointer = pointer
 }
 
-func (rt *overlayRuntime) invalidateCopyPointerLocked(clearClick bool) {
+func (rt *overlayRuntime) invalidateCopyPointerLocked() {
 	rt.copyPointerEpoch++
 	rt.copyPointer = copyPointerState{}
-	if clearClick {
-		rt.copyClick = copyClickCandidate{}
-	}
 }
 
 // clearCopyPointerForTransferLocked leaves the epoch unchanged so an input or
 // teardown occurring while publication revalidates can invalidate the transfer.
 func (rt *overlayRuntime) clearCopyPointerForTransferLocked() {
 	rt.copyPointer = copyPointerState{}
-	rt.copyClick = copyClickCandidate{}
 }
 
 func (rt *overlayRuntime) discardCopyCandidateLocked(candidate *scopy.Mode) {
@@ -164,7 +149,7 @@ func (rt *overlayRuntime) clearCopyModeLocked() {
 	rt.copyPane = nil
 	rt.copySearch = nil
 	rt.copySearchPending = nil
-	rt.invalidateCopyPointerLocked(true)
+	rt.invalidateCopyPointerLocked()
 }
 
 func (rt *overlayRuntime) clearCopyModeForPane(p *pane) bool {
@@ -174,11 +159,11 @@ func (rt *overlayRuntime) clearCopyModeForPane(p *pane) bool {
 	rt.copyMu.Lock()
 	defer rt.copyMu.Unlock()
 	active := rt.copyPane == p && (rt.copyMode != nil || rt.copyCandidate != nil)
-	prePublication := rt.copyPointer.pane == p || rt.copyClick.pane == p
+	prePublication := rt.copyPointer.pane == p
 	if active {
 		rt.clearCopyModeLocked()
 	} else if prePublication {
-		rt.invalidateCopyPointerLocked(true)
+		rt.invalidateCopyPointerLocked()
 	}
 	return active || prePublication
 }

@@ -181,16 +181,17 @@ func TestOverlayRuntimePointerEpochInvalidatesTransferAndPaneClose(t *testing.T)
 	ac.overlays.beginCopyPointerLocked(copyPointerState{pane: p, document: document, press: scopy.Pos{}})
 	staleEpoch := ac.overlays.copyPointer.epoch
 	ac.overlays.clearCopyPointerForTransferLocked()
-	ac.overlays.invalidateCopyPointerLocked(true) // release/close while publish revalidates
+	ac.overlays.invalidateCopyPointerLocked() // release/close while publish revalidates
 	require.NotEqual(t, staleEpoch, ac.overlays.copyPointerEpoch)
 	require.False(t, ac.overlays.copyPointer.valid)
-	ac.overlays.copyClick = copyClickCandidate{valid: true, pane: p}
+	ac.overlays.copyCandidate = scopy.NewMode(document)
+	ac.overlays.copyDocument = document
+	ac.overlays.copyPane = p
 	ac.overlays.copyMu.Unlock()
 
 	require.True(t, ac.overlays.clearCopyModeForPane(p))
 	ac.overlays.copyMu.Lock()
 	require.False(t, ac.overlays.copyPointer.valid)
-	require.False(t, ac.overlays.copyClick.valid)
 	ac.overlays.copyMu.Unlock()
 }
 
