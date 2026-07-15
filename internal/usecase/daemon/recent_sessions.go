@@ -11,7 +11,6 @@ import (
 type recentSession struct {
 	id        domain.SessionID
 	name      string
-	ephemeral bool
 	attention bool
 	mruAt     uint64
 }
@@ -34,10 +33,9 @@ func (d *Daemon) recentSessions(current *session) []recentSession {
 			continue
 		}
 		entry := recentSession{
-			id:        sess.id,
-			name:      sess.name,
-			ephemeral: sess.ephemeral,
-			mruAt:     sess.mruAt.Load(),
+			id:    sess.id,
+			name:  sess.name,
+			mruAt: sess.mruAt.Load(),
 		}
 		for _, tb := range sess.tabs {
 			if tb.attention {

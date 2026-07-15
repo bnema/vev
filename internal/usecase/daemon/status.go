@@ -93,7 +93,7 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles)
 		fittedMRU := fitMRU(state.mru, len(row), x, rightText)
 		for i, sess := range fittedMRU {
 			style := mruStyle(styles.statusBar, state.theme, i, len(fittedMRU))
-			drawStatusSessionEntry(row, &x, sess.name, sess.ephemeral, sess.attention, style, state.attentionFrame)
+			drawStatusSessionEntry(row, &x, sess.name, sess.attention, style, state.attentionFrame)
 		}
 	}
 	drawRightPlainText(row, rightText, x, styles.statusBar)
@@ -102,7 +102,6 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles)
 type rankedRecent struct {
 	rank      int
 	name      string
-	ephemeral bool
 	attention bool
 	selected  bool
 }
@@ -111,11 +110,7 @@ func drawRankedStatusSessionEntry(row []renderer.Cell, x *int, sess rankedRecent
 	prefixStyle := style
 	prefixStyle.Bold = true
 	writeStatusText(row, x, " "+strconv.Itoa(sess.rank)+":", prefixStyle)
-	name := sess.name
-	if sess.ephemeral {
-		name += "*"
-	}
-	writeStatusText(row, x, name, style)
+	writeStatusText(row, x, sess.name, style)
 	if sess.attention {
 		writeStatusText(row, x, " ", style)
 		writeBell(row, x, attentionFrame, style)
@@ -123,10 +118,7 @@ func drawRankedStatusSessionEntry(row []renderer.Cell, x *int, sess rankedRecent
 	writeStatusText(row, x, " ", style)
 }
 
-func drawStatusSessionEntry(row []renderer.Cell, x *int, name string, ephemeral, attention bool, style renderer.Style, attentionFrame int) {
-	if ephemeral {
-		name += "*"
-	}
+func drawStatusSessionEntry(row []renderer.Cell, x *int, name string, attention bool, style renderer.Style, attentionFrame int) {
 	writeStatusText(row, x, " "+name, style)
 	if attention {
 		writeStatusText(row, x, " ", style)
@@ -228,7 +220,6 @@ func rankedRecentForHints(hints *palette.ContextualHints, recent []recentSession
 		// recent was copied with the hint under paletteMu, so this only enriches
 		// the render snapshot and never performs a live domain lookup.
 		if i < len(recent) {
-			entry.ephemeral = recent[i].ephemeral
 			entry.attention = recent[i].attention
 		}
 		entries = append(entries, entry)
@@ -364,11 +355,7 @@ func fitRankedRecent(entries []rankedRecent, rowLen, leftUsed int, feedback stri
 		return nil
 	}
 	cost := func(e rankedRecent) int {
-		name := e.name
-		if e.ephemeral {
-			name += "*"
-		}
-		width := 2 + statusTextWidth(strconv.Itoa(e.rank)+":") + statusTextWidth(name)
+		width := 2 + statusTextWidth(strconv.Itoa(e.rank)+":") + statusTextWidth(e.name)
 		if e.attention {
 			width += 1 + renderer.RuneWidth(ui.AttentionGlyph)
 		}
@@ -396,11 +383,7 @@ func fitMRU(entries []recentSession, rowLen, leftUsed int, feedback string) []re
 		return nil
 	}
 	cost := func(e recentSession) int {
-		name := e.name
-		if e.ephemeral {
-			name += "*"
-		}
-		n := 2 + statusTextWidth(name)
+		n := 2 + statusTextWidth(e.name)
 		if e.attention {
 			n += 1 + renderer.RuneWidth(ui.AttentionGlyph)
 		}
