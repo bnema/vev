@@ -78,53 +78,77 @@ func TestFuzzyEmptyQueryPreservesRegistryOrder(t *testing.T) {
 	require.Equal(t, []string{"B", "A"}, codes(matches))
 }
 
-func TestFuzzyMixedResultsPrioritizeCommandShortcodeAndRankSessions(t *testing.T) {
+func TestFuzzyOrdersMixedResults(t *testing.T) {
 	created := time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC)
-	results := []Result{
-		NewStoppedSessionResult("work", created),
-		NewCommandResult(cmd("WORK", "", "Create a workspace")),
-		NewActiveSessionResult("work", created, domain.SessionID("work-id")),
-		NewCommandResult(cmd("WQORRK", "", "")),
-		NewCommandResult(cmd("ZZZ", "", "work tools")),
+	tests := []struct {
+		name          string
+		results       []Result
+		query         string
+		wantText      []string
+		wantKinds     []ResultKind
+		wantPositions [][]int
+		wantActiveIDs map[int]domain.SessionID
+	}{
+		{
+			name: "command shortcode precedes sessions and description matches",
+			results: []Result{
+				NewStoppedSessionResult("work", created),
+				NewCommandResult(cmd("WORK", "", "Create a workspace")),
+				NewActiveSessionResult("work", created, domain.SessionID("work-id")),
+				NewCommandResult(cmd("WQORRK", "", "")),
+				NewCommandResult(cmd("ZZZ", "", "work tools")),
+			},
+			query:         "work",
+			wantText:      []string{"WORK", "work", "work", "WQORRK", "ZZZ"},
+			wantKinds:     []ResultKind{ResultKindCommand, ResultKindActiveSession, ResultKindStoppedSession, ResultKindCommand, ResultKindCommand},
+			wantPositions: [][]int{{0, 1, 2, 3}, {0, 1, 2, 3}, {0, 1, 2, 3}, {0, 2, 3, 5}, nil},
+		},
+		{
+			name: "equivalent sessions sort by normalized text",
+			results: []Result{
+				NewStoppedSessionResult("aBravo", time.Time{}),
+				NewStoppedSessionResult("aAlpha", time.Time{}),
+			},
+			query:         "a",
+			wantText:      []string{"aAlpha", "aBravo"},
+			wantKinds:     []ResultKind{ResultKindStoppedSession, ResultKindStoppedSession},
+			wantPositions: [][]int{{0}, {0}},
+		},
+		{
+			name: "kind then normalized text then stable order",
+			results: []Result{
+				NewStoppedSessionResult("aBravo", time.Time{}),
+				NewStoppedSessionResult("aAlpha", time.Time{}),
+				NewActiveSessionResult("aZulu", time.Time{}, "z"),
+				NewActiveSessionResult("aEcho", time.Time{}, "e"),
+				NewActiveSessionResult("aEcho", time.Time{}, "e2"),
+				NewCommandResult(cmd("AX", "", "")),
+			},
+			query:         "a",
+			wantText:      []string{"AX", "aEcho", "aEcho", "aZulu", "aAlpha", "aBravo"},
+			wantKinds:     []ResultKind{ResultKindCommand, ResultKindActiveSession, ResultKindActiveSession, ResultKindActiveSession, ResultKindStoppedSession, ResultKindStoppedSession},
+			wantPositions: [][]int{{0}, {0}, {0}, {0}, {0}, {0}},
+			wantActiveIDs: map[int]domain.SessionID{1: "e", 2: "e2", 3: "z"},
+		},
 	}
 
-	matches := Fuzzy(results, "work")
-	require.Equal(t, []string{"WORK", "work", "work", "WQORRK", "ZZZ"}, matchSearchText(matches))
-	require.Equal(t, []ResultKind{
-		ResultKindCommand,
-		ResultKindActiveSession,
-		ResultKindStoppedSession,
-		ResultKindCommand,
-		ResultKindCommand,
-	}, matchKinds(matches))
-	require.Equal(t, []int{0, 1, 2, 3}, matches[0].Positions)
-	require.Equal(t, []int{0, 1, 2, 3}, matches[1].Positions)
-	require.Empty(t, matches[4].Positions)
-}
-
-func TestFuzzySortsEquivalentSessionMatchesByNormalizedText(t *testing.T) {
-	created := time.Time{}
-	matches := Fuzzy([]Result{
-		NewStoppedSessionResult("aBravo", created),
-		NewStoppedSessionResult("aAlpha", created),
-	}, "a")
-
-	require.Equal(t, []string{"aAlpha", "aBravo"}, matchSearchText(matches))
-}
-
-func TestFuzzyMixedResultsUsesKindThenNormalizedTextThenStableOrder(t *testing.T) {
-	created := time.Time{}
-	results := []Result{
-		NewStoppedSessionResult("aBravo", created),
-		NewStoppedSessionResult("aAlpha", created),
-		NewActiveSessionResult("aZulu", created, "z"),
-		NewActiveSessionResult("aEcho", created, "e"),
-		NewActiveSessionResult("aEcho", created, "e2"),
-		NewCommandResult(cmd("AX", "", "")),
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matches := Fuzzy(tt.results, tt.query)
+			require.Equal(t, tt.wantText, matchSearchText(matches))
+			require.Equal(t, tt.wantKinds, matchKinds(matches))
+			positions := make([][]int, len(matches))
+			for i := range matches {
+				positions[i] = matches[i].Positions
+			}
+			require.Equal(t, tt.wantPositions, positions)
+			for index, wantID := range tt.wantActiveIDs {
+				gotID, ok := matches[index].Result.SessionID()
+				require.True(t, ok)
+				require.Equal(t, wantID, gotID)
+			}
+		})
 	}
-
-	matches := Fuzzy(results, "a")
-	require.Equal(t, []string{"AX", "aEcho", "aEcho", "aZulu", "aAlpha", "aBravo"}, matchSearchText(matches))
 }
 
 func matchSearchText(matches []Match) []string {

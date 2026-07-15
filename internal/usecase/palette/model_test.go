@@ -366,6 +366,19 @@ func TestModelUsesDefensiveTypedResultsAndKeepsSessionsCommandInert(t *testing.T
 	require.Equal(t, "Switch to session work      ", frameRow(frame, 1))
 }
 
+func TestRenderStoppedSessionHighlightsNameAfterResumePrefix(t *testing.T) {
+	m := New([]Result{NewStoppedSessionResult("work", time.Unix(0, 1))})
+	m.Insert('w')
+	m.Insert('k')
+
+	frame := m.Render(domain.Size{Cols: 28, Rows: 2}, RenderOptions{Styles: DefaultRenderStyles()})
+
+	require.Equal(t, "Resume session work         ", frameRow(frame, 1))
+	require.False(t, frame.At(14, 1).Style.Bold, "resume prefix is not highlighted")
+	require.True(t, frame.At(15, 1).Style.Bold, "first matched session rune is highlighted")
+	require.True(t, frame.At(18, 1).Style.Bold, "last matched session rune is highlighted")
+}
+
 func TestRenderFeedbackUsesSelectedSessionRowWithoutAddingResult(t *testing.T) {
 	m := New([]Result{NewActiveSessionResult("work", time.Unix(0, 1), "work")})
 	frame := m.Render(domain.Size{Cols: 64, Rows: 3}, RenderOptions{Styles: DefaultRenderStyles(), Feedback: "requested session is unavailable"})

@@ -42,6 +42,7 @@ func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
 	createdAt, ok = stopped.SessionCreatedAt()
 	require.True(t, ok)
 	require.Equal(t, created, createdAt)
+	require.Equal(t, "Resume session archive", stopped.DisplayText())
 	_, ok = stopped.SessionID()
 	require.False(t, ok)
 }

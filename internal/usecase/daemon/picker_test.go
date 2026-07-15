@@ -94,6 +94,47 @@ func TestPickerViewsCarryNamedLifecycleIdentity(t *testing.T) {
 	require.Equal(t, int64(24), *views[1].ExpectedCreatedAt)
 }
 
+func TestPickerRejectsRecreatedEphemeralTargetFromStaleSelection(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, current, ac, _ := newManualSessionWithPTYs(t, p)
+	ctx, cancel := context.WithCancel(d.serveCtx)
+	defer cancel()
+	original := &session{id: "ephemeral-1", name: "2", ephemeral: true, ctx: ctx, cancel: cancel, tabs: []*tab{{}}}
+	d.sessions[original.id] = original
+
+	views, _ := d.pickerViews(current)
+	var originalView picker.SessionView
+	for _, view := range views {
+		if view.ID == original.id {
+			originalView = view
+			break
+		}
+	}
+	model := picker.New([]picker.SessionView{originalView}, original.id, 0)
+	target, ok := model.Selected()
+	require.True(t, ok)
+
+	delete(d.sessions, original.id)
+	replacement := &session{id: "ephemeral-2", name: original.name, ephemeral: true, ctx: ctx, cancel: cancel, tabs: []*tab{{}}}
+	d.sessions[replacement.id] = replacement
+
+	require.False(t, d.switchToTarget(current, ac, target))
+	require.Same(t, current, ac.currentSession())
+}
+
+func TestSameSessionSwitchRejectsReplacedClient(t *testing.T) {
+	p1, release1 := newBlockingPTY(t)
+	p2, release2 := newBlockingPTY(t)
+	defer release1()
+	defer release2()
+	d, current, ac, _ := newManualSessionWithPTYs(t, p1, p2)
+	current.client = &attachedClient{}
+
+	require.False(t, d.switchToTarget(current, ac, picker.Target{Session: current.id, TabIndex: 1}))
+	require.Equal(t, 0, current.active)
+}
+
 func TestPickerViewsComposesFocusedPaneTitleWithAttentionSuffix(t *testing.T) {
 	p1, releasePTY1 := newBlockingPTY(t)
 	p2, releasePTY2 := newBlockingPTY(t)

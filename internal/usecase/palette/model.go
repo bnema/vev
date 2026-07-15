@@ -313,7 +313,7 @@ func (m *Model) renderCommand(frame renderer.Frame, y int, style, selection, des
 
 func (m *Model) renderSession(frame renderer.Frame, y int, style, selection renderer.Style, match Match, feedback string, selected bool) {
 	x, nextHighlight := 0, 0
-	prefixWidth := utf8.RuneCountInString(sessionDisplayPrefix)
+	prefixWidth := utf8.RuneCountInString(match.Result.sessionDisplayPrefix())
 	for _, r := range match.Result.DisplayText() {
 		cellStyle := style
 		if nextHighlight < len(match.Positions) && prefixWidth+match.Positions[nextHighlight] == x {

@@ -57,7 +57,14 @@ func (r Result) DisplayText() string {
 	if r.kind == ResultKindCommand {
 		return r.command.Code
 	}
-	return sessionDisplayPrefix + r.session.name
+	return r.sessionDisplayPrefix() + r.session.name
+}
+
+func (r Result) sessionDisplayPrefix() string {
+	if r.kind == ResultKindStoppedSession {
+		return stoppedSessionDisplayPrefix
+	}
+	return activeSessionDisplayPrefix
 }
 
 func (r Result) SearchText() string {
@@ -87,7 +94,10 @@ func (r Result) SessionID() (domain.SessionID, bool) {
 	return r.session.sessionID, r.kind == ResultKindActiveSession
 }
 
-const sessionDisplayPrefix = "Switch to session "
+const (
+	activeSessionDisplayPrefix  = "Switch to session "
+	stoppedSessionDisplayPrefix = "Resume session "
+)
 
 // CommandResults converts static commands to immutable palette targets.
 func CommandResults(commands []command.Command) []Result {

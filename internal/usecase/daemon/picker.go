@@ -48,9 +48,10 @@ func (d *Daemon) pickerViews(cur *session) ([]picker.SessionView, int) {
 	curTab := 0
 	for _, s := range sessions {
 		s.mu.Lock()
-		view := picker.SessionView{ID: s.id, Name: s.name, TargetName: s.name, Active: s.active, Tabs: make([]picker.TabEntry, len(s.tabs))}
+		view := picker.SessionView{ID: s.id, Name: s.name, Active: s.active, Tabs: make([]picker.TabEntry, len(s.tabs))}
 		if !s.ephemeral {
 			createdAt := s.createdAt
+			view.TargetName = s.name
 			view.ExpectedCreatedAt = &createdAt
 		}
 		sessionAttention := false
@@ -468,7 +469,7 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 	if targetSess == from {
 		targetSess.mu.Lock()
 		defer targetSess.mu.Unlock()
-		if !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) || target.TabIndex < 0 || target.TabIndex >= len(targetSess.tabs) {
+		if targetSess.client != ac || !targetMatchesLifecycle(target, targetSess.name, targetSess.createdAt) || target.TabIndex < 0 || target.TabIndex >= len(targetSess.tabs) {
 			return nil, nil, nil, false
 		}
 		targetSess.active = target.TabIndex
