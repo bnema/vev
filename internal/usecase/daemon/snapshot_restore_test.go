@@ -94,12 +94,13 @@ func TestRestoreSessionUsesDaemonFallbackEnvironmentAndShellBeforeAttach(t *test
 	require.NoError(t, d.restoreSession(context.Background(), snapcodec.Session{Name: "work", Tabs: []snapcodec.Tab{{
 		StableID: "tab", Cols: 80, Rows: 24, Tree: layout.NewTree("pane-1"), Panes: []snapcodec.Pane{terminalPane(t, "pane-1", "pane", "/tmp", nil, nil)},
 	}}}))
-	require.Len(t, factory.opens, 1)
-	require.Equal(t, "/usr/local/bin/daemon-shell", factory.opens[0].command)
+	initialOpens := factory.snapshotOpens()
+	require.Len(t, initialOpens, 1)
+	require.Equal(t, "/usr/local/bin/daemon-shell", initialOpens[0].command)
 	require.Equal(t, []string{
 		"ORDINARY=preserved", "SHELL=/usr/local/bin/daemon-shell", "RAW",
 		"TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=tab,pane=pane",
-	}, factory.opens[0].env)
+	}, initialOpens[0].env)
 
 	d.baseEnv[0] = "ORDINARY=changed"
 	d.mu.Lock()
@@ -120,19 +121,28 @@ func TestRestoreSessionUsesDaemonFallbackEnvironmentAndShellBeforeAttach(t *test
 	}, tr)
 	require.NoError(t, err)
 	require.NoError(t, d.createTab(restored, ac.size))
-	require.Len(t, factory.opens, 2)
-	require.Equal(t, "/bin/attached-shell", factory.opens[1].command)
 
 	restored.mu.Lock()
 	attachedTab := restored.tabs[1]
 	restored.mu.Unlock()
 	attachedTab.mu.Lock()
 	attachedPane := attachedTab.panes["pane-1"]
+	attachedTabStableID := attachedTab.stableID
+	attachedPaneStableID := attachedPane.stableID
 	attachedTab.mu.Unlock()
+	expectedVEV := "VEV=session=work,tab=" + attachedTabStableID + ",pane=" + attachedPaneStableID
+	var attachedOpens []restorePTYOpen
+	for _, open := range factory.snapshotOpens() {
+		if containsEnv(open.env, expectedVEV) {
+			attachedOpens = append(attachedOpens, open)
+		}
+	}
+	require.Len(t, attachedOpens, 1)
+	require.Equal(t, "/bin/attached-shell", attachedOpens[0].command)
 	require.Equal(t, []string{
 		"ORDINARY=attached", "SHELL=/bin/attached-shell",
-		"TERM=xterm-256color", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + attachedTab.stableID + ",pane=" + attachedPane.stableID,
-	}, factory.opens[1].env)
+		"TERM=xterm-256color", "TERM_PROGRAM=vev", expectedVEV,
+	}, attachedOpens[0].env)
 	require.NoError(t, d.killSession(restored, ports.ReasonSessionKilled, false))
 	d.sessWg.Wait()
 }
@@ -607,6 +617,17 @@ func (f *restorePTYFactory) Open(ctx context.Context, command string, _ []string
 	pty.writeErr = f.writeErr
 	f.opens = append(f.opens, restorePTYOpen{ctx: ctx, command: command, dir: dir, size: sz, env: append([]string(nil), env...), pty: pty})
 	return pty, nil
+}
+
+func (f *restorePTYFactory) snapshotOpens() []restorePTYOpen {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	opens := make([]restorePTYOpen, len(f.opens))
+	copy(opens, f.opens)
+	for i := range opens {
+		opens[i].env = append([]string(nil), opens[i].env...)
+	}
+	return opens
 }
 
 type restorePTY struct {
