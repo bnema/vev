@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -81,6 +82,107 @@ func TestFirstHelloTransportReplacesRemoteEnvironment(t *testing.T) {
 			require.Equal(t, nonHello, frame)
 		})
 	}
+}
+
+func TestRunStdioProxyReplacesHelloEnvironmentAtDaemonBoundary(t *testing.T) {
+	original := remoteProxyHello()
+	client := newRemoteProxyClient(original)
+	daemon := newRemoteProxyDaemon()
+
+	err := runStdioProxy(context.Background(), client, daemon, []string{"REMOTE=one", "TOKEN=a=b=c"}, nil)
+	require.NoError(t, err)
+
+	got := daemon.firstHello(t)
+	original.Env = []string{"REMOTE=one", "TOKEN=a=b=c"}
+	require.Equal(t, original, got)
+}
+
+func TestRunUDPProxyRuntimeReplacesHelloEnvironmentAndSessionAtDaemonBoundary(t *testing.T) {
+	original := remoteProxyHello()
+	client := newRemoteProxyClient(original)
+	daemon := newRemoteProxyDaemon()
+
+	err := runUDPProxyRuntime(context.Background(), "remote-work", client, daemon, []string{"REMOTE=udp", "TOKEN=a=b=c"}, nil)
+	require.NoError(t, err)
+
+	got := daemon.firstHello(t)
+	original.Name = "remote-work"
+	original.Env = []string{"REMOTE=udp", "TOKEN=a=b=c"}
+	require.Equal(t, original, got)
+}
+
+func remoteProxyHello() ports.Hello {
+	return ports.Hello{
+		Version:           ports.ProtocolVersion,
+		Intent:            ports.IntentAttach,
+		ClientID:          [16]byte{1},
+		ResumeToken:       2,
+		Size:              domain.Size{Cols: 80, Rows: 24},
+		TermEnv:           "client-term",
+		Cwd:               "/client",
+		TrueColor:         true,
+		MaxOutputInFlight: 1,
+		Env:               []string{"CLIENT=value"},
+	}
+}
+
+type remoteProxyClient struct {
+	first ports.Frame
+	done  chan struct{}
+	once  sync.Once
+}
+
+func newRemoteProxyClient(hello ports.Hello) *remoteProxyClient {
+	return &remoteProxyClient{
+		first: ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)},
+		done:  make(chan struct{}),
+	}
+}
+
+func (t *remoteProxyClient) Send(ports.Frame) error { return nil }
+func (t *remoteProxyClient) Recv() (ports.Frame, error) {
+	if t.first.Type != 0 {
+		frame := t.first
+		t.first = ports.Frame{}
+		return frame, nil
+	}
+	<-t.done
+	return ports.Frame{}, io.EOF
+}
+func (t *remoteProxyClient) Close() error {
+	t.once.Do(func() { close(t.done) })
+	return nil
+}
+
+type remoteProxyDaemon struct {
+	sent chan ports.Frame
+	done chan struct{}
+	once sync.Once
+}
+
+func newRemoteProxyDaemon() *remoteProxyDaemon {
+	return &remoteProxyDaemon{sent: make(chan ports.Frame, 1), done: make(chan struct{})}
+}
+
+func (t *remoteProxyDaemon) Send(frame ports.Frame) error {
+	t.sent <- frame
+	t.once.Do(func() { close(t.done) })
+	return nil
+}
+func (t *remoteProxyDaemon) Recv() (ports.Frame, error) {
+	<-t.done
+	return ports.Frame{}, io.EOF
+}
+func (t *remoteProxyDaemon) Close() error {
+	t.once.Do(func() { close(t.done) })
+	return nil
+}
+func (t *remoteProxyDaemon) firstHello(testingT *testing.T) ports.Hello {
+	testingT.Helper()
+	frame := <-t.sent
+	hello, err := ports.UnmarshalHello(frame.Payload)
+	require.NoError(testingT, err)
+	return hello
 }
 
 func TestRunUDPProxyUsesBoundedClientMaxPending(t *testing.T) {

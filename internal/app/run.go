@@ -794,7 +794,7 @@ func runStdio(ctx context.Context) (retErr error) {
 	}
 	defer func() { _ = transport.Close() }()
 	stdio := sshstdio.NewTransport(os.Stdin, os.Stdout, nil, sshstdio.WithRuntimeObserver(observer))
-	return proxyTransports(ctx, newFirstHelloTransport(stdio, "", os.Environ()), transport, log)
+	return runStdioProxy(ctx, stdio, transport, os.Environ(), log)
 }
 
 var (
@@ -935,8 +935,7 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr e
 		return err
 	}
 
-	dgramTr := newFirstHelloTransport(dg, session, os.Environ())
-	return dgram.ProxyRuntime{Client: dgramTr, Daemon: daemonTr, Log: log, IdleTTL: udpProxyIdleTTL}.Run(ctx)
+	return runUDPProxyRuntime(ctx, session, dg, daemonTr, os.Environ(), log)
 }
 
 const udpProxyIdleTTL = 15 * time.Minute
@@ -1069,6 +1068,24 @@ func (t *firstHelloTransport) Recv() (ports.Frame, error) {
 	}
 	f.Payload = ports.MarshalHello(h)
 	return f, nil
+}
+
+// runStdioProxy applies the remote host environment before the stdio stream
+// reaches the daemon. Its explicit environment input keeps this host boundary
+// independently testable.
+func runStdioProxy(ctx context.Context, client, daemon ports.Transport, env []string, log *slog.Logger) error {
+	return proxyTransports(ctx, newFirstHelloTransport(client, "", env), daemon, log)
+}
+
+// runUDPProxyRuntime applies the remote host environment and selected session
+// before the datagram stream reaches the daemon.
+func runUDPProxyRuntime(ctx context.Context, session string, client, daemon ports.Transport, env []string, log *slog.Logger) error {
+	return dgram.ProxyRuntime{
+		Client:  newFirstHelloTransport(client, session, env),
+		Daemon:  daemon,
+		Log:     log,
+		IdleTTL: udpProxyIdleTTL,
+	}.Run(ctx)
 }
 
 func proxyTransports(ctx context.Context, a, b ports.Transport, log *slog.Logger) error {
