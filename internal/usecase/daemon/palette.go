@@ -165,13 +165,44 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		return
 	}
 	routeOverlayBytes(data, &ac.overlays.palettePending, overlayEvents{
-		rune:      func(r rune) { ac.overlays.palette.Insert(r); changed = true },
-		backspace: func() { ac.overlays.palette.Backspace(); changed = true },
-		tab:       func() { changed = ac.overlays.palette.CompleteSelected() || changed },
-		up:        func() { ac.overlays.palette.Up(); changed = true },
-		down:      func() { ac.overlays.palette.Down(); changed = true },
-		cancel:    func() { cancel = true },
+		rune: func(r rune) {
+			if !execute {
+				ac.overlays.palette.Insert(r)
+				changed = true
+			}
+		},
+		backspace: func() {
+			if !execute {
+				ac.overlays.palette.Backspace()
+				changed = true
+			}
+		},
+		tab: func() {
+			if !execute {
+				changed = ac.overlays.palette.CompleteSelected() || changed
+			}
+		},
+		up: func() {
+			if !execute {
+				ac.overlays.palette.Up()
+				changed = true
+			}
+		},
+		down: func() {
+			if !execute {
+				ac.overlays.palette.Down()
+				changed = true
+			}
+		},
+		cancel: func() {
+			if !execute {
+				cancel = true
+			}
+		},
 		enter: func() {
+			if execute {
+				return
+			}
 			selected, ok := ac.overlays.palette.Selected()
 			if !ok {
 				changed = true

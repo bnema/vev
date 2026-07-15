@@ -102,6 +102,22 @@ func TestPaletteSessionFailureFeedbackClearsOnQueryChange(t *testing.T) {
 	ac.overlays.paletteMu.Unlock()
 }
 
+func TestPaletteEnterFreezesActiveSessionSelectionAgainstTrailingInput(t *testing.T) {
+	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	target := d.sessions[domain.SessionID("recent")]
+	target.createdAt = 42
+
+	d.handleInput(current, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(current, ac, []byte("recent\rx"))
+
+	require.Same(t, target, ac.currentSession(), "Enter must retain the selected session despite trailing frame bytes")
+	require.False(t, ac.overlays.paletteActive(), "trailing input must not prevent the captured selection from closing the palette")
+	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
 func TestPaletteSelectedActiveSessionSwitchesWithoutRecordingCommandRecency(t *testing.T) {
 	d, current, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
@@ -117,6 +133,32 @@ func TestPaletteSelectedActiveSessionSwitchesWithoutRecordingCommandRecency(t *t
 	require.False(t, ac.overlays.paletteActive())
 	require.Empty(t, d.paletteRecent, "session selections are not command recency")
 	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteStoppedSessionResumeFailureKeepsPaletteAndSourceAttachment(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, current, ac, sends := newManualSessionWithPTYs(t, p)
+	stopped := stoppedSession{name: "stopped", cwd: "/tmp", createdAt: 42, lastUsedSeq: 7, tabNames: []string{"shell", "logs"}}
+	d.stopped[stopped.name] = stopped
+	ptys := portsmocks.NewMockPTYFactory(t)
+	ptys.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("open failed")).Once()
+	d.ptys = ptys
+
+	d.handleInput(current, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(current, ac, []byte("stopped\r"))
+
+	require.Same(t, current, ac.currentSession(), "failed resume must retain the source attachment")
+	current.mu.Lock()
+	require.Same(t, ac, current.client)
+	current.mu.Unlock()
+	require.True(t, ac.overlays.paletteActive())
+	ac.overlays.paletteMu.Lock()
+	require.Equal(t, "requested session is unavailable", ac.overlays.paletteFeedback)
+	ac.overlays.paletteMu.Unlock()
+	require.Equal(t, stopped, d.stopped[stopped.name], "failed resume must retain stopped lifecycle metadata")
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
@@ -300,6 +342,23 @@ func TestPaletteJRSMalformedRankFeedback(t *testing.T) {
 	require.Equal(t, "rank must be one positive decimal", ac.overlays.paletteFeedback)
 	ac.overlays.paletteMu.Unlock()
 	awaitFrame(t, sends, ports.MsgOutput)
+}
+
+func TestPaletteFailureDoesNotOverwriteChangedQueryInSameGeneration(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+
+	d.enterPalette(sess, ac)
+	ac.overlays.paletteMu.Lock()
+	generation := ac.overlays.paletteGeneration
+	ac.overlays.palette.Insert('x')
+	ac.overlays.paletteMu.Unlock()
+	ac.paletteFailure(generation, "", "stale failure")
+
+	ac.overlays.paletteMu.Lock()
+	require.Empty(t, ac.overlays.paletteFeedback)
+	ac.overlays.paletteMu.Unlock()
 }
 
 func TestPaletteFailureDoesNotOverwriteNewerInteraction(t *testing.T) {
