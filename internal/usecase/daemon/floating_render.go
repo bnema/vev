@@ -90,7 +90,7 @@ func composeCapturedFloatingFrame(base renderer.Frame, baseDamage []renderer.Dam
 	legacyLayout := tabLayoutSnapshot{placements: layoutSnap.placements, area: layoutSnap.area, focus: layoutSnap.focus, ok: layoutSnap.valid}
 	(overlayBackdrop{DimPaneContents: true}).apply(frame, content, legacyLayout, theme)
 	geometry := floating.geometry.translate(content.X, content.Y)
-	blitPaneFrame(frame, geometry.Inner, floating.pane.frame, false, theme)
+	blitPaneFrame(frame, geometry.Inner, floating.pane.frame, false, themeui.NewDimmer(theme))
 	damage := append([]renderer.Damage(nil), baseDamage...)
 	for _, d := range floating.pane.damage {
 		damage = append(damage, translatePaneDamage(d, geometry.Inner, content)...)

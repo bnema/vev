@@ -176,7 +176,7 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 		clear(titleGenerations)
 	}
 	if ok && !cacheValid {
-		drawDividers(frame, root, area, themeui.DimStyle(newThemeStyles(theme).border, theme))
+		drawDividers(frame, root, area, themeui.NewDimmer(theme).Dim(newThemeStyles(theme).border))
 	}
 	var damage []renderer.Damage
 	for _, pl := range placements {
@@ -222,7 +222,7 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 			p.mu.Lock()
 			paneDamage = p.screen.Damage()
 			if !cacheValid || len(paneDamage) > 0 {
-				blitPaneFrame(frame, pl.Content, p.screen.Frame, !focused, theme)
+				blitPaneFrame(frame, pl.Content, p.screen.Frame, !focused, themeui.NewDimmer(theme, themeui.WithForegroundDimming(inactivePaneForegroundDimming)))
 			}
 			for _, d := range paneDamage {
 				localContent := pl.Content
@@ -234,7 +234,7 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 			continue
 		}
 		if !cacheValid || len(paneDamage) > 0 {
-			blitPaneFrame(frame, pl.Content, paneFrame, !focused, theme)
+			blitPaneFrame(frame, pl.Content, paneFrame, !focused, themeui.NewDimmer(theme, themeui.WithForegroundDimming(inactivePaneForegroundDimming)))
 		}
 		for _, d := range paneDamage {
 			localContent := pl.Content
@@ -265,7 +265,7 @@ func drawPaneTitleBar(frame renderer.Frame, pl layout.Placement, p *pane, focuse
 	if focused {
 		style = styles.statusBar
 	} else {
-		style = themeui.DimStyle(style, theme)
+		style = themeui.NewDimmer(theme).Dim(style)
 	}
 	for x := pl.TitleBar.X; x < pl.TitleBar.X+pl.TitleBar.Width && x < frame.Width; x++ {
 		frame.Set(x, pl.TitleBar.Y, renderer.Cell{Rune: ' ', Style: style})

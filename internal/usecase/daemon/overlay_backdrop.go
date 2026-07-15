@@ -36,6 +36,7 @@ func (b overlayBackdrop) apply(frame renderer.Frame, contentArea domain.Rect, la
 }
 
 func dimFrameRect(frame renderer.Frame, rect domain.Rect, theme themeui.Theme) {
+	dimmer := themeui.NewDimmer(theme)
 	x0 := max(rect.X, 0)
 	y0 := max(rect.Y, 0)
 	x1 := min(rect.X+rect.Width, frame.Width)
@@ -43,7 +44,7 @@ func dimFrameRect(frame renderer.Frame, rect domain.Rect, theme themeui.Theme) {
 	for y := y0; y < y1; y++ {
 		for x := x0; x < x1; x++ {
 			cell := frame.At(x, y)
-			cell.Style = themeui.DimStyle(cell.Style, theme)
+			cell.Style = dimmer.Dim(cell.Style)
 			frame.Set(x, y, cell)
 		}
 	}

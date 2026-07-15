@@ -52,6 +52,8 @@ type composedRenderFrame struct {
 // composeFrame is pure with respect to daemon ownership: it consumes only the
 // capture, the last committed cache, and an independent attachment-owned
 // scratch cache. It returns a replacement cache without mutating committed.
+const inactivePaneForegroundDimming = 55
+
 func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...composeCacheInput) composedRenderFrame {
 	scratch := composeCacheInput{}
 	if len(scratchIn) > 0 {
@@ -74,11 +76,13 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		}
 	}
 	styles := newThemeStyles(state.theme)
+	defaultDimmer := themeui.NewDimmer(state.theme)
+	inactivePaneDimmer := themeui.NewDimmer(state.theme, themeui.WithForegroundDimming(inactivePaneForegroundDimming))
 	drawTopBarSnapshot(frame.Row(0), state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
 	drawStatusBarState(frame.Row(rows+1), state.bars, styles)
 	content := domain.Rect{Y: 1, Width: width, Height: rows}
 	if state.layout.valid && state.layout.root != nil {
-		drawDividers(frame, state.layout.root, content, themeui.DimStyle(styles.border, state.theme))
+		drawDividers(frame, state.layout.root, content, defaultDimmer.Dim(styles.border))
 	}
 
 	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme || in.floatingVisible != state.floating.visible
@@ -90,14 +94,14 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	for _, pane := range state.panes {
 		pl := offsetPlacement(pane.placement, 0, 1)
 		if pl.TitleBar.Height > 0 {
-			drawCapturedPaneTitleBar(frame, pl, pane.title, pane.focused, state.theme)
+			drawCapturedPaneTitleBar(frame, pl, pane.title, pane.focused, styles, defaultDimmer)
 			if !full && in.titleGenerations[pane.id] != pane.titleGeneration {
 				damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: pl.TitleBar.X, Y: pl.TitleBar.Y, Width: pl.TitleBar.Width, Height: pl.TitleBar.Height})
 			}
 			titles[pane.id] = pane.titleGeneration
 		}
 		if !pl.Collapsed && pl.Content.Width > 0 && pl.Content.Height > 0 && (full || len(pane.damage) > 0) {
-			blitPaneFrame(frame, pl.Content, pane.frame, !pane.focused, state.theme)
+			blitPaneFrame(frame, pl.Content, pane.frame, !pane.focused, inactivePaneDimmer)
 		}
 		for _, d := range pane.damage {
 			if d.Kind != renderer.DamageFullRedraw {
@@ -141,13 +145,12 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }
 
-func drawCapturedPaneTitleBar(frame renderer.Frame, pl layout.Placement, title string, focused bool, theme themeui.Theme) {
-	styles := newThemeStyles(theme)
+func drawCapturedPaneTitleBar(frame renderer.Frame, pl layout.Placement, title string, focused bool, styles themeStyles, dimmer themeui.Dimmer) {
 	style := styles.border
 	if focused {
 		style = styles.statusBar
 	} else {
-		style = themeui.DimStyle(style, theme)
+		style = dimmer.Dim(style)
 	}
 	for x := pl.TitleBar.X; x < pl.TitleBar.X+pl.TitleBar.Width && x < frame.Width; x++ {
 		frame.Set(x, pl.TitleBar.Y, renderer.Cell{Rune: ' ', Style: style})

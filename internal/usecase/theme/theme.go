@@ -373,28 +373,131 @@ func MutedVariantStyle(base renderer.Style, t Theme) renderer.Style {
 	return out
 }
 
-func DimStyle(style renderer.Style, t Theme) renderer.Style {
-	if !usable(t) {
+const defaultDimmingPercent = 35
+
+// Dimmer transforms resolved terminal colors for subdued UI states. Construct
+// it once and reuse it while rendering cells with the same theme and policy.
+type Dimmer struct {
+	theme             Theme
+	backgroundPercent int
+	foregroundPercent int
+}
+
+type dimmingTarget uint8
+
+const (
+	dimBackground dimmingTarget = iota
+	dimForeground
+)
+
+// DimmerOption customizes a Dimmer without allocating a closure.
+type DimmerOption struct {
+	target  dimmingTarget
+	percent int
+}
+
+// WithBackgroundDimming overrides the default 35 percent background fade.
+func WithBackgroundDimming(percent int) DimmerOption {
+	return DimmerOption{target: dimBackground, percent: percent}
+}
+
+// WithForegroundDimming overrides the default 35 percent foreground fade.
+func WithForegroundDimming(percent int) DimmerOption {
+	return DimmerOption{target: dimForeground, percent: percent}
+}
+
+// NewDimmer returns a reusable dimmer with optional per-channel overrides.
+func NewDimmer(t Theme, opts ...DimmerOption) Dimmer {
+	d := Dimmer{
+		theme:             t,
+		backgroundPercent: defaultDimmingPercent,
+		foregroundPercent: defaultDimmingPercent,
+	}
+	for _, opt := range opts {
+		switch opt.target {
+		case dimBackground:
+			d.backgroundPercent = opt.percent
+		case dimForeground:
+			d.foregroundPercent = opt.percent
+		}
+	}
+	d.backgroundPercent = clampPercent(d.backgroundPercent)
+	d.foregroundPercent = clampPercent(d.foregroundPercent)
+	return d
+}
+
+// Dim fades a style's resolved background toward the terminal background,
+// then fades its foreground and custom underline toward that dimmed background.
+func (d Dimmer) Dim(style renderer.Style) renderer.Style {
+	if !usable(d.theme) {
 		return style
 	}
-	out := style
-	out.HasForegroundRGB = true
-	if style.HasForegroundRGB {
-		out.ForegroundRGB = Blend(style.ForegroundRGB, t.Background, 0.35)
-	} else if style.Foreground >= 0 {
-		out.ForegroundRGB = Blend(xterm256Color(style.Foreground), t.Background, 0.35)
-	} else {
-		out.ForegroundRGB = Blend(t.Foreground, t.Background, 0.35)
+
+	foreground := resolveForeground(style, d.theme)
+	background := resolveBackground(style, d.theme)
+	if style.Inverse {
+		foreground, background = background, foreground
 	}
+	background = blendPercent(background, d.theme.Background, d.backgroundPercent)
+
+	out := style
+	out.Inverse = false
+	out.HasForegroundRGB = true
+	out.ForegroundRGB = blendPercent(foreground, background, d.foregroundPercent)
 	out.HasBackgroundRGB = true
-	if style.HasBackgroundRGB {
-		out.BackgroundRGB = Blend(style.BackgroundRGB, t.Background, 0.35)
-	} else if style.Background >= 0 {
-		out.BackgroundRGB = Blend(xterm256Color(style.Background), t.Background, 0.35)
-	} else {
-		out.BackgroundRGB = Blend(t.Background, t.Background, 0.35)
+	out.BackgroundRGB = background
+	if style.HasUnderlineColorRGB || style.HasUnderlineColor {
+		underline := style.UnderlineColorRGB
+		if !style.HasUnderlineColorRGB {
+			underline = xterm256Color(style.UnderlineColor)
+		}
+		out.HasUnderlineColor = false
+		out.HasUnderlineColorRGB = true
+		out.UnderlineColorRGB = blendPercent(underline, background, d.foregroundPercent)
 	}
 	return out
+}
+
+func resolveForeground(style renderer.Style, t Theme) renderer.RGB {
+	if style.HasForegroundRGB {
+		return style.ForegroundRGB
+	}
+	if style.Foreground >= 0 {
+		return xterm256Color(style.Foreground)
+	}
+	return t.Foreground
+}
+
+func resolveBackground(style renderer.Style, t Theme) renderer.RGB {
+	if style.HasBackgroundRGB {
+		return style.BackgroundRGB
+	}
+	if style.Background >= 0 {
+		return xterm256Color(style.Background)
+	}
+	return t.Background
+}
+
+func blendPercent(a, b renderer.RGB, percent int) renderer.RGB {
+	return renderer.RGB{
+		R: blendBytePercent(a.R, b.R, percent),
+		G: blendBytePercent(a.G, b.G, percent),
+		B: blendBytePercent(a.B, b.B, percent),
+	}
+}
+
+func blendBytePercent(a, b uint8, percent int) uint8 {
+	return uint8((int(a)*(100-percent) + int(b)*percent + 50) / 100)
+}
+
+func clampPercent(percent int) int {
+	if percent < 0 {
+		return 0
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
 }
 
 var (
