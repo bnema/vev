@@ -67,7 +67,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command) []
 	for _, cmd := range commands {
 		results = append(results, palette.NewCommandResult(cmd))
 	}
-	active := make([]palette.SessionResult, 0, len(sessions))
+	active := make([]palette.Result, 0, len(sessions))
 	for _, candidate := range sessions {
 		if candidate == current {
 			continue
@@ -80,7 +80,11 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command) []
 			active = append(active, palette.NewActiveSessionResult(name, time.Unix(0, createdAt), id))
 		}
 	}
-	sort.Slice(active, func(i, j int) bool { return active[i].Name() < active[j].Name() })
+	sort.Slice(active, func(i, j int) bool {
+		left, _ := active[i].SessionName()
+		right, _ := active[j].SessionName()
+		return left < right
+	})
 	sort.Slice(stopped, func(i, j int) bool { return stopped[i].name < stopped[j].name })
 	for _, candidate := range active {
 		results = append(results, candidate)
@@ -150,7 +154,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		return
 	}
 	var cmd command.Command
-	var sessionTarget palette.SessionResult
+	var sessionTarget palette.Result
 	var hasSessionTarget bool
 	var args []string
 	var recent []recentSession
@@ -209,7 +213,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 				return
 			}
 			rawQuery = ac.overlays.palette.Query()
-			if selectedCommand, ok := selected.CommandInfo(); ok {
+			if selectedCommand, ok := selected.Command(); ok {
 				cmd = selectedCommand
 				// JRS is contextual: fuzzy selection cannot turn an unrelated
 				// query into a jump.
@@ -222,8 +226,8 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 					args = action.Args
 					recent = append([]recentSession(nil), ac.overlays.paletteRecent...)
 				}
-			} else if selectedSession, ok := selected.Session(); ok {
-				sessionTarget = selectedSession
+			} else if _, ok := selected.SessionName(); ok {
+				sessionTarget = selected
 				hasSessionTarget = true
 			} else {
 				changed = true
@@ -258,8 +262,10 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	}
 
 	if hasSessionTarget {
-		createdAt := sessionTarget.CreatedAt().UnixNano()
-		target := picker.Target{Name: sessionTarget.Name(), TabIndex: -1, ExpectedCreatedAt: &createdAt}
+		createdAt, _ := sessionTarget.SessionCreatedAt()
+		expectedCreatedAt := createdAt.UnixNano()
+		name, _ := sessionTarget.SessionName()
+		target := picker.Target{Name: name, TabIndex: -1, ExpectedCreatedAt: &expectedCreatedAt}
 		if id, active := sessionTarget.SessionID(); active {
 			target.Session = id
 		} else {

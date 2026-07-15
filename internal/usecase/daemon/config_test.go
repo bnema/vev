@@ -8,7 +8,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
-	"github.com/bnema/vev/internal/usecase/palette"
 )
 
 type captureKeyHandler struct {
@@ -98,12 +97,12 @@ func TestApplyConfigRepaintsActivePaletteWithoutReplacingModel(t *testing.T) {
 	require.Equal(t, query, ac.overlays.palette.Query())
 	selectedAfter, ok := ac.overlays.palette.Selected()
 	require.True(t, ok)
-	selectedCommand, ok := selected.(palette.CommandResult)
+	selectedCommand, ok := selected.Command()
 	require.True(t, ok)
-	selectedAfterCommand, ok := selectedAfter.(palette.CommandResult)
+	selectedAfterCommand, ok := selectedAfter.Command()
 	require.True(t, ok)
-	require.Equal(t, selectedCommand.Command().Slug, selectedAfterCommand.Command().Slug)
-	require.Equal(t, selectedCommand.Command().Code, selectedAfterCommand.Command().Code)
+	require.Equal(t, selectedCommand.Slug, selectedAfterCommand.Slug)
+	require.Equal(t, selectedCommand.Code, selectedAfterCommand.Code)
 }
 
 func TestApplyConfigPublishesImmutableFloatingSnapshot(t *testing.T) {

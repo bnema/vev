@@ -63,8 +63,8 @@ func TestPaletteEntryPublishesEligibleNamedSessionResults(t *testing.T) {
 
 	got := map[string]palette.ResultKind{}
 	for _, match := range ac.overlays.palette.Matches() {
-		if result, ok := match.Result.(palette.SessionResult); ok {
-			got[result.Name()] = result.Kind()
+		if name, ok := match.Result.SessionName(); ok {
+			got[name] = match.Result.Kind()
 		}
 	}
 	require.Equal(t, map[string]palette.ResultKind{
@@ -85,7 +85,7 @@ func TestPaletteSessionFailureFeedbackClearsOnQueryChange(t *testing.T) {
 	ac.overlays.paletteMu.Lock()
 	selected, ok := ac.overlays.palette.Selected()
 	ac.overlays.paletteMu.Unlock()
-	_, isSession := selected.(palette.SessionResult)
+	_, isSession := selected.SessionName()
 	require.True(t, ok)
 	require.True(t, isSession)
 	d.mu.Lock()
@@ -455,9 +455,9 @@ func TestPaletteReopensWithSuccessfulCommandFirst(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 	result, ok := ac.overlays.palette.Selected()
 	require.True(t, ok)
-	cmd, ok := result.(palette.CommandResult)
+	cmd, ok := result.Command()
 	require.True(t, ok)
-	require.Equal(t, "NXT", cmd.Command().Code)
+	require.Equal(t, "NXT", cmd.Code)
 }
 
 func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
@@ -568,17 +568,17 @@ func TestPaletteCtrlNAndCtrlPNavigate(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 	result, ok := ac.overlays.palette.Selected()
 	require.True(t, ok)
-	cmd, ok := result.(palette.CommandResult)
+	cmd, ok := result.Command()
 	require.True(t, ok)
-	require.Equal(t, "CNS", cmd.Command().Code)
+	require.Equal(t, "CNS", cmd.Code)
 
 	d.handlePaletteInput(ac, []byte{0x10})
 	awaitFrame(t, sends, ports.MsgOutput)
 	result, ok = ac.overlays.palette.Selected()
 	require.True(t, ok)
-	cmd, ok = result.(palette.CommandResult)
+	cmd, ok = result.Command()
 	require.True(t, ok)
-	require.Equal(t, "CNT", cmd.Command().Code)
+	require.Equal(t, "CNT", cmd.Code)
 }
 
 func TestPaletteModalGeometry(t *testing.T) {
