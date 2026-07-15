@@ -352,11 +352,7 @@ func (m *Mode) Render(styles ...renderer.Style) renderer.Frame {
 	}
 	d := m.document
 	frame := renderer.NewFrame(d.Width(), d.Height()+1)
-	ranges := m.selection.Ranges(d)
-	selected := make(map[int][]CellRange, len(ranges))
-	for _, r := range ranges {
-		selected[r.Row] = append(selected[r.Row], r)
-	}
+	selectionBounds, hasSelectionBounds := m.selection.bounds(d)
 	selection, hasSelection := optionalStyle(styles, 1)
 	cursor, cursorValid := d.Normalize(m.navigator.Pos)
 	for y := range d.Height() {
@@ -372,12 +368,14 @@ func (m *Mode) Render(styles ...renderer.Style) renderer.Frame {
 			}
 		}
 		cursorCovered := false
-		for _, r := range selected[src] {
-			for x := max(r.Start, 0); x <= min(r.End, len(row)-1); x++ {
-				applySelectionStyle(&row[x].Style, selection, hasSelection)
-			}
-			if cursorValid && r.Row == cursor.Row && cursor.Col >= r.Start && cursor.Col <= r.End {
-				cursorCovered = true
+		if hasSelectionBounds {
+			if r, ok := selectionBounds.rangeForRow(d, src); ok {
+				for x := max(r.Start, 0); x <= min(r.End, len(row)-1); x++ {
+					applySelectionStyle(&row[x].Style, selection, hasSelection)
+				}
+				if cursorValid && r.Row == cursor.Row && cursor.Col >= r.Start && cursor.Col <= r.End {
+					cursorCovered = true
+				}
 			}
 		}
 		if src == cursor.Row && cursorValid && !cursorCovered && len(row) > 0 {

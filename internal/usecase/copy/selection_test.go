@@ -54,6 +54,33 @@ func TestSelectionRanges(t *testing.T) {
 	}
 }
 
+func TestSelectionRangeForRowMatchesCanonicalRanges(t *testing.T) {
+	wide := []renderer.Cell{{Rune: 'a'}, {Rune: '界'}, {Continuation: true}, {Rune: 'b'}}
+	doc := NewDocument(NewSnapshotFromRows([][]renderer.Cell{row("alpha"), wide, row("bravo")}, 5, 3), " -_@")
+	tests := []struct {
+		name      string
+		selection Selection
+		row       int
+		want      CellRange
+		ok        bool
+	}{
+		{"line reverse", Selection{Anchor: Pos{2, 1}, Active: Pos{0, 2}, Granularity: Line, Enabled: true}, 1, CellRange{Row: 1, End: 3}, true},
+		{"character wide", Selection{Anchor: Pos{0, 2}, Active: Pos{1, 1}, Granularity: Character, Enabled: true}, 1, CellRange{Row: 1, End: 2}, true},
+		{"word", Selection{Anchor: Pos{0, 2}, Active: Pos{2, 1}, Granularity: Word, Enabled: true}, 1, CellRange{Row: 1, End: 3}, true},
+		{"outside selection", Selection{Anchor: Pos{0, 2}, Active: Pos{1, 1}, Granularity: Character, Enabled: true}, 2, CellRange{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := tt.selection.RangeForRow(doc, tt.row)
+			require.Equal(t, tt.ok, ok)
+			if ok {
+				require.Equal(t, tt.want, got)
+				require.Contains(t, tt.selection.Ranges(doc), got)
+			}
+		})
+	}
+}
+
 func TestSelectionOrdered(t *testing.T) {
 	tests := []struct {
 		name      string

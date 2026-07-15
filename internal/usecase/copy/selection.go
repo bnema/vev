@@ -49,40 +49,92 @@ func (s Selection) Ordered() (Pos, Pos) {
 // Ranges returns the canonical, inclusive per-physical-row display-cell
 // ranges. It returns nil for disabled selections or invalid endpoints.
 func (s Selection) Ranges(doc *Document) []CellRange {
-	if !s.Enabled || doc == nil {
+	bounds, ok := s.bounds(doc)
+	if !ok {
 		return nil
+	}
+	ranges := make([]CellRange, 0, bounds.end.Row-bounds.start.Row+1)
+	for row := bounds.start.Row; row <= bounds.end.Row; row++ {
+		r, ok := bounds.rangeForRow(doc, row)
+		if ok {
+			ranges = append(ranges, r)
+		}
+	}
+	return ranges
+}
+
+// RangeForRow returns the canonical inclusive range for one document row. It
+// lets viewport renderers avoid materializing ranges for off-screen rows.
+func (s Selection) RangeForRow(doc *Document, row int) (CellRange, bool) {
+	bounds, ok := s.bounds(doc)
+	if !ok {
+		return CellRange{}, false
+	}
+	return bounds.rangeForRow(doc, row)
+}
+
+type selectionBounds struct {
+	start, end Pos
+	linewise   bool
+}
+
+func (s Selection) bounds(doc *Document) (selectionBounds, bool) {
+	if !s.Enabled || doc == nil {
+		return selectionBounds{}, false
 	}
 	anchor, ok := doc.Normalize(s.Anchor)
 	if !ok {
-		return nil
+		return selectionBounds{}, false
 	}
 	active, ok := doc.Normalize(s.Active)
 	if !ok {
-		return nil
+		return selectionBounds{}, false
 	}
 
 	switch s.Granularity {
 	case Line:
 		start, end := order(anchor, active)
-		return lineRanges(doc, start.Row, end.Row)
+		return selectionBounds{start: start, end: end, linewise: true}, true
 	case Character:
 		start, end := order(anchor, active)
-		return streamRanges(doc, start, end)
+		return selectionBounds{start: start, end: end}, true
 	case Word:
 		anchorStart, anchorEnd, ok := doc.WordBounds(anchor)
 		if !ok {
-			return nil
+			return selectionBounds{}, false
 		}
 		activeStart, activeEnd, ok := doc.WordBounds(active)
 		if !ok {
-			return nil
+			return selectionBounds{}, false
 		}
 		start, _ := order(anchorStart, activeStart)
 		_, end := order(anchorEnd, activeEnd)
-		return streamRanges(doc, start, end)
+		return selectionBounds{start: start, end: end}, true
 	default:
-		return nil
+		return selectionBounds{}, false
 	}
+}
+
+func (b selectionBounds) rangeForRow(doc *Document, row int) (CellRange, bool) {
+	if row < b.start.Row || row > b.end.Row {
+		return CellRange{}, false
+	}
+	cells := doc.Row(row)
+	if len(cells) == 0 {
+		return CellRange{Row: row}, true
+	}
+	if b.linewise {
+		return CellRange{Row: row, End: len(cells) - 1}, true
+	}
+
+	start, end := 0, len(cells)-1
+	if row == b.start.Row {
+		start = b.start.Col
+	}
+	if row == b.end.Row {
+		end = glyphEnd(cells, b.end.Col)
+	}
+	return CellRange{Row: row, Start: start, End: end}, true
 }
 
 // Text extracts the selection using its range granularity's newline and
@@ -115,40 +167,6 @@ func order(left, right Pos) (Pos, Pos) {
 		return right, left
 	}
 	return left, right
-}
-
-func lineRanges(doc *Document, startRow, endRow int) []CellRange {
-	ranges := make([]CellRange, 0, endRow-startRow+1)
-	for row := startRow; row <= endRow; row++ {
-		cells := doc.Row(row)
-		if len(cells) == 0 {
-			ranges = append(ranges, CellRange{Row: row})
-			continue
-		}
-		ranges = append(ranges, CellRange{Row: row, End: len(cells) - 1})
-	}
-	return ranges
-}
-
-func streamRanges(doc *Document, start, end Pos) []CellRange {
-	ranges := make([]CellRange, 0, end.Row-start.Row+1)
-	for row := start.Row; row <= end.Row; row++ {
-		cells := doc.Row(row)
-		if len(cells) == 0 {
-			ranges = append(ranges, CellRange{Row: row})
-			continue
-		}
-
-		first, last := 0, len(cells)-1
-		if row == start.Row {
-			first = start.Col
-		}
-		if row == end.Row {
-			last = glyphEnd(cells, end.Col)
-		}
-		ranges = append(ranges, CellRange{Row: row, Start: first, End: last})
-	}
-	return ranges
 }
 
 // glyphEnd expands a glyph-head endpoint over all of its continuation cells.

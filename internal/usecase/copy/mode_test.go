@@ -8,6 +8,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -107,6 +108,98 @@ func TestFindMatchesUsesExclusiveDisplayCellOffsets(t *testing.T) {
 	cells := []renderer.Cell{{Rune: '界'}, {Continuation: true}, {Rune: 'a'}, {Rune: 'l'}, {Rune: 'p'}, {Rune: 'h'}, {Rune: 'a'}}
 	doc := NewDocument(NewSnapshotFromRows([][]renderer.Cell{cells}, 7, 1), "")
 	require.Equal(t, []SearchMatch{{Row: 0, Start: 2, End: 7, Text: "界alpha"}}, FindMatches(doc, "alpha"))
+}
+
+func TestFindMatchesRepeatedUnicodeDisplayCells(t *testing.T) {
+	cells := []renderer.Cell{
+		{Rune: 'Ä'}, {Rune: '界'}, {Continuation: true},
+		{Rune: 'ä'}, {Rune: '界'}, {Continuation: true},
+		{Rune: 'Ä'}, {Rune: '界'}, {Continuation: true},
+	}
+	doc := NewDocument(NewSnapshotFromRows([][]renderer.Cell{row("aaaa"), cells}, 9, 2), "")
+
+	for _, tt := range []struct {
+		name, query string
+		want        []SearchMatch
+	}{
+		{
+			name:  "repeated non-overlapping",
+			query: "aa",
+			want: []SearchMatch{
+				{Row: 0, Start: 0, End: 2, Text: "aaaa"},
+				{Row: 0, Start: 2, End: 4, Text: "aaaa"},
+			},
+		},
+		{
+			name:  "unicode display cells",
+			query: "Ä界",
+			want: []SearchMatch{
+				{Row: 1, Start: 0, End: 3, Text: "Ä界ä界Ä界"},
+				{Row: 1, Start: 3, End: 6, Text: "Ä界ä界Ä界"},
+				{Row: 1, Start: 6, End: 9, Text: "Ä界ä界Ä界"},
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, FindMatches(doc, tt.query))
+		})
+	}
+}
+
+func TestFindMatchesUsesSealedScrollbackWithoutGlobalCopy(t *testing.T) {
+	const rows = 10_000
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: rows + 1, ChunkRows: 256})
+	for range rows {
+		history.Append(row("unmatched"))
+	}
+	history.Append(row("target"))
+	snapshot := NewSnapshot(history, renderer.NewFrame(16, 1))
+	view := history.SealAndView()
+	require.Same(t, view.Chunk(0), snapshot.history.Chunk(0))
+
+	doc := NewDocument(snapshot, "")
+	require.Equal(t, []SearchMatch{{Row: rows, Start: 0, End: 6, Text: "target"}}, FindMatches(doc, "target"))
+}
+
+func TestCopyModeRenderSelectionAllocationsBoundedToViewport(t *testing.T) {
+	const (
+		rows      = 10_000
+		height    = 4
+		maxAllocs = 20
+	)
+	lines := make([][]renderer.Cell, rows)
+	for i := range lines {
+		lines[i] = row("selection")
+	}
+	m := NewMode(NewDocument(NewSnapshotFromRows(lines, 16, height), ""))
+	require.True(t, m.StartCharacterSelection(Pos{}))
+	require.True(t, m.ExtendCharacterSelection(Pos{Row: rows - 1, Col: 8}))
+
+	allocs := testing.AllocsPerRun(10, func() {
+		_ = m.Render()
+	})
+	require.LessOrEqual(t, allocs, float64(maxAllocs), "rendering a %d-line selection must only allocate for its %d-line viewport", rows, height)
+}
+
+func BenchmarkCopyModeRenderLargeSelection(b *testing.B) {
+	const (
+		rows   = 10_000
+		height = 4
+	)
+	lines := make([][]renderer.Cell, rows)
+	for i := range lines {
+		lines[i] = row("selection")
+	}
+	m := NewMode(NewDocument(NewSnapshotFromRows(lines, 16, height), ""))
+	if !m.StartCharacterSelection(Pos{}) || !m.ExtendCharacterSelection(Pos{Row: rows - 1, Col: 8}) {
+		b.Fatal("could not create large selection")
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_ = m.Render()
+	}
 }
 
 func TestCopyModeOSC52SelectionMatrix(t *testing.T) {
