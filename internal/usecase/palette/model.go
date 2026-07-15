@@ -20,6 +20,9 @@ type RenderStyles struct {
 type RenderOptions struct {
 	Styles   RenderStyles
 	Guidance string
+	// Feedback is interaction-scoped daemon feedback. It replaces the selected
+	// row's contextual detail without adding a searchable result or row.
+	Feedback string
 }
 
 type Model struct {
@@ -275,15 +278,15 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 		}
 		ui.FillRect(frame, domain.Rect{Y: y + start, Width: frame.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
 		if cmd, ok := resultCommand(match.Result); ok {
-			m.renderCommand(frame, y+start, style, selection, desc, codeWidth, cmd, match.Positions, activeCmd, activeOK, opts.Guidance)
+			m.renderCommand(frame, y+start, style, selection, desc, codeWidth, cmd, match.Positions, activeCmd, activeOK, opts.Guidance, opts.Feedback, idx == m.selected)
 			continue
 		}
-		m.renderSession(frame, y+start, style, selection, match)
+		m.renderSession(frame, y+start, style, selection, match, opts.Feedback, idx == m.selected)
 	}
 	return frame
 }
 
-func (m *Model) renderCommand(frame renderer.Frame, y int, style, selection, desc renderer.Style, codeWidth int, cmd command.Command, positions []int, activeCmd command.Command, activeOK bool, guidance string) {
+func (m *Model) renderCommand(frame renderer.Frame, y int, style, selection, desc renderer.Style, codeWidth int, cmd command.Command, positions []int, activeCmd command.Command, activeOK bool, guidance, feedback string, selected bool) {
 	x, highlight := 0, map[int]bool{}
 	for _, position := range positions {
 		highlight[position] = true
@@ -305,14 +308,20 @@ func (m *Model) renderCommand(frame renderer.Frame, y int, style, selection, des
 		x++
 	}
 	description := cmd.Desc
-	if guidance != "" && activeOK && cmd.ContextHint != command.ContextHintNone && activeCmd.Code == cmd.Code {
+	if feedback != "" && selected {
+		description = feedback
+	} else if guidance != "" && activeOK && cmd.ContextHint != command.ContextHintNone && activeCmd.Code == cmd.Code {
 		description = guidance
 	}
 	ui.DrawText(frame, x, y, frame.Width, description, mergePaletteDescStyle(style, desc))
 }
 
-func (m *Model) renderSession(frame renderer.Frame, y int, style, selection renderer.Style, match Match) {
+func (m *Model) renderSession(frame renderer.Frame, y int, style, selection renderer.Style, match Match, feedback string, selected bool) {
 	text := []rune(match.Result.DisplayText())
+	if feedback != "" && selected {
+		text = append(text, ' ')
+		text = append(text, []rune(feedback)...)
+	}
 	highlight := map[int]bool{}
 	prefix := len([]rune("Switch to session "))
 	for _, position := range match.Positions {

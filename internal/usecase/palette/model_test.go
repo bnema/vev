@@ -366,6 +366,13 @@ func TestModelUsesDefensiveTypedResultsAndKeepsSessionsCommandInert(t *testing.T
 	require.Equal(t, "Switch to session work      ", frameRow(frame, 1))
 }
 
+func TestRenderFeedbackUsesSelectedSessionRowWithoutAddingResult(t *testing.T) {
+	m := New([]Result{NewActiveSessionResult("work", time.Unix(0, 1), "work")})
+	frame := m.Render(domain.Size{Cols: 64, Rows: 3}, RenderOptions{Styles: DefaultRenderStyles(), Feedback: "requested session is unavailable"})
+	require.Len(t, m.Matches(), 1)
+	require.Contains(t, frameRow(frame, 1), "requested session is unavailable")
+}
+
 func TestRenderGuidanceReplacesOnlyExactContextualRow(t *testing.T) {
 	jrs := cmd("JRS", "Jump", "Jump to recent session")
 	jrs.Arguments = command.ArgumentsRequired
