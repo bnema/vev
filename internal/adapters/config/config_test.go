@@ -344,6 +344,9 @@ func TestParse(t *testing.T) {
 			if tt.want.Snapshot.RestoreProcesses == nil && !tt.want.Snapshot.RestoreProcessesSet {
 				tt.want.Snapshot.RestoreProcesses = append([]string(nil), domain.DefaultSnapshotRestoreProcesses()...)
 			}
+			if tt.want.Copy.WordSeparators == "" {
+				tt.want.Copy = domain.Defaults().Copy
+			}
 			got, warnings, err := Parse(strings.NewReader(tt.input))
 			if err != nil {
 				t.Fatalf("Parse() error = %v", err)
@@ -417,6 +420,71 @@ func TestDefaultsCopiesSnapshotRestoreProcesses(t *testing.T) {
 	first.Snapshot.RestoreProcesses[0] = "mutated"
 	second := domain.Defaults()
 	require.Equal(t, "vi", second.Snapshot.RestoreProcesses[0])
+}
+
+func TestParseCopyWordSeparators(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		input        string
+		want         string
+		wantWarnings []domain.Warning
+	}{
+		{
+			name:  "default",
+			input: "",
+			want:  domain.DefaultWordSeparators,
+		},
+		{
+			name:  "quoted preserves leading separator space",
+			input: `copy.word-separators = " -_@/"`,
+			want:  " -_@/",
+		},
+		{
+			name:  "quoted empty is valid",
+			input: `copy.word-separators = ""`,
+			want:  "",
+		},
+		{
+			name:  "unquoted empty is valid",
+			input: "copy.word-separators =",
+			want:  "",
+		},
+		{
+			name:  "malformed quote keeps default",
+			input: `copy.word-separators = "unterminated`,
+			want:  domain.DefaultWordSeparators,
+			wantWarnings: []domain.Warning{
+				{Line: 1, Msg: `invalid copy.word-separators "\"unterminated"`},
+			},
+		},
+		{
+			name:  "duplicate last value wins",
+			input: "copy.word-separators = /\ncopy.word-separators = _",
+			want:  "_",
+			wantWarnings: []domain.Warning{
+				{Line: 2, Msg: `duplicate key "copy.word-separators"`},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg, warnings, err := Parse(strings.NewReader(tt.input))
+			require.NoError(t, err)
+			require.Equal(t, tt.want, cfg.Copy.WordSeparators)
+			require.Equal(t, tt.wantWarnings, warnings)
+		})
+	}
+}
+
+func TestDefaultsCopyWordSeparators(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, " -_@", domain.Defaults().Copy.WordSeparators)
 }
 
 func TestParsePreservesBindingFileOrder(t *testing.T) {
