@@ -199,6 +199,14 @@ func PreflightVisibleBlob(data []byte) (DecodeStats, error) {
 			return DecodeStats{}, fmt.Errorf("preflight visible: %w", errInvalidHistory)
 		}
 	}
+	if string(data[:4]) == visibleMagicV2 {
+		for range height {
+			if uint64(binary.BigEndian.Uint32(p.data[:4])) > width || p.data[4] > 1 {
+				return DecodeStats{}, fmt.Errorf("preflight visible: %w", errInvalidHistory)
+			}
+			p.data = p.data[5:]
+		}
+	}
 	return DecodeStats{Rows: height, Cells: cells, Styles: cells, Bytes: bytes}, nil
 }
 

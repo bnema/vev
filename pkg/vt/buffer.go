@@ -67,17 +67,27 @@ func (b *buffer) clear(y, x0, x1 int) {
 }
 
 func (b *buffer) scrollUp(top, bottom, n int) {
-	for ; n > 0; n-- {
-		copy(b.boundaries[top:bottom], b.boundaries[top+1:bottom+1])
-		b.boundaries[bottom] = lineBoundary{}
+	// A region operation changes which rows meet at both region edges. A soft
+	// boundary belongs to the row it follows, not the cells moved into its
+	// neighbor, so sever links crossing either edge before reflow can observe
+	// them.
+	b.hard(top - 1)
+	copy(b.boundaries[top:bottom-n+1], b.boundaries[top+n:bottom+1])
+	for y := bottom - n + 1; y <= bottom; y++ {
+		b.boundaries[y] = lineBoundary{}
 	}
+	b.hard(bottom - n)
 }
 
 func (b *buffer) scrollDown(top, bottom, n int) {
-	for ; n > 0; n-- {
-		copy(b.boundaries[top+1:bottom+1], b.boundaries[top:bottom])
-		b.boundaries[top] = lineBoundary{}
+	// See scrollUp: the old top no longer follows the row above the region, and
+	// the last moved row no longer precedes the row below it.
+	b.hard(top - 1)
+	copy(b.boundaries[top+n:bottom+1], b.boundaries[top:bottom-n+1])
+	for y := top; y < top+n; y++ {
+		b.boundaries[y] = lineBoundary{}
 	}
+	b.hard(bottom)
 }
 
 func (b *buffer) hydrate() {
