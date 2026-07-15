@@ -70,6 +70,20 @@ Invalid values log a warning and keep the last valid value.
 
 Key specs: `alt+<char>`, `alt+space`, `alt+left/right/up/down`, `alt+1` through `alt+9`. Configuring an action replaces all of its built-in aliases (set `focus-pane-left` and the Alt+Arrow alias is gone). Tab switching also accepts the top-row symbols of non-QWERTY layouts, so AZERTY works without extra config.
 
+## Copy mode
+
+Scroll up with the mouse to enter copy mode. Use `h`, `j`, `k`, and `l` to move, `w`, `b`, and `e` for word motions, `v` or Space to start line selection, and `y` or Enter to copy.
+
+Mouse drag selects a text range. Double-click selects the word under the pointer; dragging after a double-click extends by complete words.
+
+```ini
+# Unicode whitespace always separates words.
+# The default is " -_@".
+copy.word-separators = " -_@/"
+```
+
+Set `copy.word-separators = ""` to use only Unicode whitespace as a separator.
+
 ## Palette anchor
 
 `auto` uses a bottom shelf on narrow terminals and a bottom-right rail from 96 columns up. Reload moves an open palette without losing your query.

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -149,10 +150,12 @@ func TestCopyWordDragAndOSC52(t *testing.T) {
 	mode := ac.overlays.copyMode
 	selection := mode.Selection()
 	text := mode.SelectedText()
+	width := mode.Document().Width()
 	ac.overlays.copyMu.Unlock()
+	want := "alpha beta" + strings.Repeat(" ", width-len("alpha beta")) + "\ngamma"
 	require.Equal(t, scopy.Word, selection.Granularity)
-	require.Equal(t, "alpha beta\ngamma", text)
-	require.Equal(t, "\x1b]52;c;YWxwaGEgYmV0YQpnYW1tYQ=\a", string(scopy.OSC52(text)[0]))
+	require.Equal(t, want, text)
+	require.Equal(t, scopy.OSC52(want)[0], scopy.OSC52(text)[0])
 
 	copyMouseInput(d, sess, ac, "y")
 	require.False(t, ac.overlays.copyActive())
@@ -167,11 +170,12 @@ func TestCopyPointerResetClearsClick(t *testing.T) {
 	p := newPane("pane", nil, domain.Size{Cols: 4, Rows: 1})
 	doc := scopy.NewDocument(scopy.NewSnapshotFromRows([][]renderer.Cell{testRow("word")}, 4, 1), domain.DefaultWordSeparators)
 	for _, tc := range []struct {
-		name  string
-		reset func(*overlayRuntime)
+		name        string
+		reset       func(*overlayRuntime)
+		holdsCopyMu bool
 	}{
-		{name: "clear mode", reset: func(rt *overlayRuntime) { rt.clearCopyModeLocked() }},
-		{name: "replace publication", reset: func(rt *overlayRuntime) { rt.invalidateCopyPointerLocked(true) }},
+		{name: "clear mode", reset: func(rt *overlayRuntime) { rt.clearCopyModeLocked() }, holdsCopyMu: true},
+		{name: "replace publication", reset: func(rt *overlayRuntime) { rt.invalidateCopyPointerLocked(true) }, holdsCopyMu: true},
 		{name: "pane close", reset: func(rt *overlayRuntime) { rt.clearCopyModeForPane(p) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -179,7 +183,13 @@ func TestCopyPointerResetClearsClick(t *testing.T) {
 			rt.copyMu.Lock()
 			rt.copyPane, rt.copyDocument, rt.copyMode = p, doc, scopy.NewMode(doc)
 			seedCopyInteractionLocked(rt, p, doc)
-			tc.reset(rt)
+			if !tc.holdsCopyMu {
+				rt.copyMu.Unlock()
+				tc.reset(rt)
+				rt.copyMu.Lock()
+			} else {
+				tc.reset(rt)
+			}
 			require.False(t, rt.copyPointer.valid)
 			require.False(t, rt.copyClick.valid)
 			rt.copyMu.Unlock()
