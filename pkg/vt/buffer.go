@@ -117,18 +117,28 @@ func (b *buffer) hasSoft() bool {
 
 // resizeFixed keeps hard physical lines independent. It is the common shell
 // path and avoids constructing logical-line scratch state when nothing wraps.
-func (b *buffer) resizeFixed(width, height int, cursors ...*bufferCursor) [][]renderer.Cell {
+func (b *buffer) resizeFixed(width, height int, active, saved *bufferCursor) [][]renderer.Cell {
 	anchor := 0
-	if len(cursors) > 0 && cursors[0] != nil {
-		anchor = cursors[0].row
+	if active != nil {
+		anchor = active.row
 	}
 	shift := clamp(anchor-(height-1), 0, max(b.frame.Height-height, 0))
 	evicted := make([][]renderer.Cell, 0, shift)
-	for y := 0; y < shift; y++ {
+	for y := range shift {
 		evicted = append(evicted, append([]renderer.Cell(nil), b.frame.Row(y)...))
 	}
-	next := newBuffer(width, height)
-	for y := 0; y < height; y++ {
+	// Fixed-line resizes can retain the boundary backing store. In particular,
+	// keep its capacity through a short viewport so the common shrink/grow
+	// sequence does not add metadata allocation to every resize epoch.
+	boundaries := b.boundaries
+	if cap(boundaries) < height {
+		boundaries = make([]lineBoundary, height)
+	} else {
+		boundaries = boundaries[:height]
+	}
+	next := buffer{frame: renderer.NewFrame(width, height), boundaries: boundaries}
+	copied := 0
+	for y := range height {
 		sy := y + shift
 		if sy >= b.frame.Height {
 			break
@@ -137,156 +147,206 @@ func (b *buffer) resizeFixed(width, height int, cursors ...*bufferCursor) [][]re
 		next.boundaries[y] = b.boundaries[sy]
 		next.boundaries[y].end = min(next.boundaries[y].end, width)
 		repairFrameRow(next.frame, y)
+		copied++
 	}
-	for _, cur := range cursors {
+	clear(next.boundaries[copied:])
+	for _, cur := range [2]*bufferCursor{active, saved} {
 		if cur != nil {
 			cur.row = clamp(cur.row-shift, 0, height-1)
 			cur.col = clamp(cur.col, 0, width)
+		}
+	}
+	*b = next
+	return evicted
+}
+
+type reflowPoint struct {
+	line, offset int
+	row, col     int
+}
+
+// cursorReflowPoints maps source cursor positions to offsets in their logical
+// lines. There are exactly two callers (active and DECSC), so this stays flat
+// and stack allocated rather than building a row/column lookup map.
+func (b *buffer) cursorReflowPoints(active, saved *bufferCursor) [2]reflowPoint {
+	points := [2]reflowPoint{{line: -1}, {line: -1}}
+	cursors := [2]*bufferCursor{active, saved}
+	for start := 0; start < b.frame.Height; {
+		end := start
+		for b.boundaries[end].soft && end+1 < b.frame.Height {
+			end++
+		}
+		for i, cur := range cursors {
+			if cur == nil || cur.row < start || cur.row > end {
+				continue
+			}
+			offset := 0
+			for y := start; y < cur.row; y++ {
+				offset += b.boundaries[y].end
+			}
+			points[i] = reflowPoint{
+				line:   start,
+				offset: offset + min(clamp(cur.col, 0, b.frame.Width), b.boundaries[cur.row].end),
+			}
+		}
+		start = end + 1
+	}
+	return points
+}
+
+// resize lays out only the current grid. It does two direct, bounded passes:
+// the first maps both cursors and counts rows; the second writes only the
+// retained viewport (and the rows genuinely evicted to history). It never
+// materializes logical lines, per-cell position maps, or temporary output rows.
+func (b *buffer) resize(width, height int, active, saved *bufferCursor) [][]renderer.Cell {
+	if !b.hasSoft() {
+		return b.resizeFixed(width, height, active, saved)
+	}
+	// Only reflow needs meaningful extents; hard physical rows are copied as
+	// cells, so scanning blank rows on the shell fast path is wasted work.
+	b.hydrate()
+	for _, cur := range [2]*bufferCursor{active, saved} {
+		if cur != nil {
+			b.content(cur.row, cur.col)
+		}
+	}
+
+	points := b.cursorReflowPoints(active, saved)
+	rows := b.layoutReflow(width, &points, nil, 0, nil)
+	anchor := 0
+	if active != nil {
+		anchor = points[0].row
+	}
+	shift := clamp(anchor-(height-1), 0, max(rows-height, 0))
+
+	next := newBuffer(width, height)
+	var evicted [][]renderer.Cell
+	var evictedCells []renderer.Cell
+	if shift > 0 {
+		// History needs owned rows. One flat backing store replaces a temporary
+		// allocation per evicted output row.
+		evicted = make([][]renderer.Cell, shift)
+		evictedCells = make([]renderer.Cell, shift*width)
+		for y := range evicted {
+			evicted[y] = evictedCells[y*width : (y+1)*width]
+		}
+	}
+	b.layoutReflow(width, &points, next, shift, evictedCells)
+	for i, cur := range [2]*bufferCursor{active, saved} {
+		if cur != nil {
+			cur.row = clamp(points[i].row-shift, 0, height-1)
+			cur.col = clamp(points[i].col, 0, width)
 		}
 	}
 	*b = *next
 	return evicted
 }
 
-// resize lays out only the current grid. It returns the top rows discarded by
-// height reduction and maps every supplied cursor in the same layout pass.
-func (b *buffer) resize(width, height int, cursors ...*bufferCursor) [][]renderer.Cell {
-	b.hydrate()
-	if !b.hasSoft() {
-		return b.resizeFixed(width, height, cursors...)
-	}
-	for _, cur := range cursors {
-		if cur != nil {
-			b.content(cur.row, cur.col)
-		}
-	}
-	oldW := b.frame.Width
-	type logical struct {
-		cells  []renderer.Cell
-		points map[int]int // old row/column key -> cell offset
-		reflow bool
-	}
-	var lines []logical
-	for y := 0; y < b.frame.Height; {
-		line := logical{points: make(map[int]int)}
-		for {
-			end := b.boundaries[y].end
-			for x := 0; x <= oldW; x++ {
-				line.points[y*(oldW+1)+x] = len(line.cells) + min(x, end)
+// layoutReflow maps source offsets and, when dst is non-nil, emits only rows in
+// [shift, shift+dst.height). Rows before shift are written straight into the
+// contiguous eviction backing store. The return is the logical output height.
+func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, shift int, evicted []renderer.Cell) int {
+	row, col := 0, 0
+	blankEvicted := func(outputRow int) []renderer.Cell {
+		if outputRow < shift {
+			out := evicted[outputRow*width : (outputRow+1)*width]
+			for i := range out {
+				out[i] = renderer.BlankCell()
 			}
-			line.cells = append(line.cells, b.frame.Row(y)[:end]...)
-			soft := b.boundaries[y].soft && y+1 < b.frame.Height
-			line.reflow = line.reflow || soft
-			y++
-			if !soft {
-				break
+			return out
+		}
+		if dst != nil && outputRow < shift+dst.frame.Height {
+			return dst.frame.Row(outputRow - shift)
+		}
+		return nil
+	}
+	var output []renderer.Cell
+	if dst != nil && (shift > 0 || dst.frame.Height > 0) {
+		output = blankEvicted(0)
+	}
+	finishRow := func(soft bool) {
+		if dst != nil && row >= shift && row < shift+dst.frame.Height {
+			dst.boundaries[row-shift] = lineBoundary{end: col, soft: soft}
+		}
+		row++
+		col = 0
+		if dst != nil {
+			output = blankEvicted(row)
+		}
+	}
+	setPoint := func(line, offset, pointRow, pointCol int) {
+		for i := range points {
+			if points[i].line == line && points[i].offset == offset {
+				points[i].row, points[i].col = pointRow, pointCol
 			}
 		}
-		lines = append(lines, line)
 	}
-
-	type point struct{ row, col int }
-	cursorOffsets := make([]struct{ line, offset int }, len(cursors))
-	for ci, cur := range cursors {
-		if cur == nil {
-			continue
-		}
-		key := clamp(cur.row, 0, max(b.frame.Height-1, 0))*(oldW+1) + clamp(cur.col, 0, oldW)
-		for li := range lines {
-			if offset, ok := lines[li].points[key]; ok {
-				cursorOffsets[ci] = struct{ line, offset int }{li, offset}
-				break
+	setRemainingPoints := func(line, offset, pointRow, pointCol int) {
+		for i := range points {
+			if points[i].line == line && points[i].offset >= offset {
+				points[i].row, points[i].col = pointRow, pointCol
 			}
 		}
 	}
 
-	var rows [][]renderer.Cell
-	var bounds []lineBoundary
-	positions := make([][]point, len(lines))
-	for li, line := range lines {
-		positions[li] = make([]point, len(line.cells)+1)
-		row := make([]renderer.Cell, width)
-		for x := range row {
-			row[x] = renderer.BlankCell()
+	for start := 0; start < b.frame.Height; {
+		end := start
+		for b.boundaries[end].soft && end+1 < b.frame.Height {
+			end++
 		}
-		x := 0
-		for i := 0; i < len(line.cells); {
-			if line.cells[i].Continuation { // corrupt input is repaired below.
-				i++
-				continue
-			}
-			w := renderer.RuneWidth(line.cells[i].Rune)
-			wide := w == 2 && i+1 < len(line.cells) && line.cells[i+1].Continuation
-			if !wide || width < 2 {
-				w = 1
-			}
-			if x+w > width && x > 0 {
-				if !line.reflow {
-					for j := i; j <= len(line.cells); j++ {
-						positions[li][j] = point{len(rows), x}
+		reflow := end > start
+		offset := 0
+		truncated := false
+		for y := start; y <= end && !truncated; y++ {
+			cells := b.frame.Row(y)
+			limit := b.boundaries[y].end
+			for x := 0; x < limit; {
+				cell := cells[x]
+				if cell.Continuation { // Repair malformed rows by dropping orphaned tails.
+					setPoint(start, offset, row, col)
+					x++
+					offset++
+					continue
+				}
+				wide := renderer.RuneWidth(cell.Rune) == 2 && x+1 < limit && cells[x+1].Continuation
+				w := 1
+				if wide && width >= 2 {
+					w = 2
+				}
+				if col+w > width && col > 0 {
+					if !reflow {
+						setRemainingPoints(start, offset, row, col)
+						truncated = true
+						break
 					}
-					break
+					finishRow(true)
 				}
-				rows = append(rows, row)
-				bounds = append(bounds, lineBoundary{end: x, soft: true})
-				row = make([]renderer.Cell, width)
-				for j := range row {
-					row[j] = renderer.BlankCell()
+				setPoint(start, offset, row, col)
+				if wide && width >= 2 {
+					if output != nil {
+						output[col], output[col+1] = cell, cells[x+1]
+					}
+					setPoint(start, offset+1, row, col+1)
+					col += 2
+					x += 2
+					offset += 2
+					continue
 				}
-				x = 0
-			}
-			positions[li][i] = point{len(rows), x}
-			if w == 2 && width >= 2 {
-				row[x], row[x+1] = line.cells[i], line.cells[i+1]
-				positions[li][i+1] = point{len(rows), x + 1}
-				x += 2
-				i += 2
-			} else {
-				cell := line.cells[i]
 				if wide {
 					cell.Rune = '\uFFFD'
 					cell.Continuation = false
 				}
-				row[x] = cell
+				if output != nil {
+					output[col] = cell
+				}
+				col++
 				x++
-				i++
+				offset++
 			}
 		}
-		positions[li][len(line.cells)] = point{len(rows), x}
-		rows = append(rows, row)
-		bounds = append(bounds, lineBoundary{end: x})
+		setPoint(start, offset, row, col)
+		finishRow(false)
+		start = end + 1
 	}
-	if len(rows) == 0 {
-		rows = append(rows, make([]renderer.Cell, width))
-		for x := range rows[0] {
-			rows[0][x] = renderer.BlankCell()
-		}
-		bounds = append(bounds, lineBoundary{})
-	}
-
-	anchor := 0
-	if len(cursors) > 0 && cursors[0] != nil {
-		co := cursorOffsets[0]
-		anchor = positions[co.line][min(co.offset, len(positions[co.line])-1)].row
-	}
-	shift := clamp(anchor-(height-1), 0, max(len(rows)-height, 0))
-	var evicted [][]renderer.Cell
-	for y := 0; y < shift; y++ {
-		evicted = append(evicted, append([]renderer.Cell(nil), rows[y]...))
-	}
-	next := newBuffer(width, height)
-	for y := 0; y < height && y+shift < len(rows); y++ {
-		copy(next.frame.Row(y), rows[y+shift])
-		next.boundaries[y] = bounds[y+shift]
-	}
-	for ci, cur := range cursors {
-		if cur == nil {
-			continue
-		}
-		co := cursorOffsets[ci]
-		p := positions[co.line][min(co.offset, len(positions[co.line])-1)]
-		cur.row, cur.col = clamp(p.row-shift, 0, height-1), clamp(p.col, 0, width)
-	}
-	*b = *next
-	return evicted
+	return row
 }

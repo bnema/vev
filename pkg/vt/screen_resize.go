@@ -22,8 +22,7 @@ func (s *Screen) Resize(width, height int) {
 		if saved != nil && saved.saved {
 			savedPoint = &bufferCursor{row: saved.row, col: saved.col}
 		}
-		cursors := []*bufferCursor{active, savedPoint}
-		evicted := b.resize(width, height, cursors...)
+		evicted := b.resize(width, height, active, savedPoint)
 		if evict {
 			for _, line := range evicted {
 				s.recordEvicted(line)
