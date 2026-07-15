@@ -1473,6 +1473,90 @@ func TestMouseCollapsedStackBarExpandsAndFocuses(t *testing.T) {
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Root.Expanded)
 }
 
+// TestActiveCopyMouseIgnoresStalePointerResets makes the mapping/reset race
+// deterministic. Each path captures a copy-input snapshot, yields while that
+// snapshot is outside copyMu, then starts a new pointer. The old event must
+// never invalidate the new interaction.
+func TestActiveCopyMouseIgnoresStalePointerResets(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) mouse.Event
+	}{
+		{
+			name: "press-owned release rejects mapping",
+			prepare: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) mouse.Event {
+				t.Helper()
+				p := sess.activeTab().focusedPane()
+				tb := sess.activeTab()
+				tb.mu.Lock()
+				geometry, ok := hitTestCopyMouseGeometryLocked(tb, d.currentFloatingConfig(), 1, 2)
+				tb.mu.Unlock()
+				require.True(t, ok)
+				ac.overlays.copyMu.Lock()
+				ac.overlays.beginCopyPointerLocked(copyPointerState{pane: p, document: ac.overlays.copyDocument, geometry: geometry})
+				ac.overlays.copyMu.Unlock()
+				return mouse.Event{Button: mouse.Left, Type: mouse.Release, Col: geometry.content.X - 1, Row: geometry.content.Y}
+			},
+		},
+		{
+			name: "current geometry disappears",
+			prepare: func(t *testing.T, _ *Daemon, sess *session, _ *attachedClient) mouse.Event {
+				t.Helper()
+				tb := sess.activeTab()
+				tb.mu.Lock()
+				tb.tree = nil
+				tb.mu.Unlock()
+				return mouse.Event{Button: mouse.Left, Type: mouse.Press, Col: 1, Row: 2}
+			},
+		},
+		{
+			name: "fresh press rejects document mapping",
+			prepare: func(t *testing.T, _ *Daemon, sess *session, _ *attachedClient) mouse.Event {
+				t.Helper()
+				tb := sess.activeTab()
+				tb.mu.Lock()
+				tb.size.Rows = 40 // valid layout coordinate, outside the old document.
+				tb.mu.Unlock()
+				return mouse.Event{Button: mouse.Left, Type: mouse.Press, Col: 1, Row: 30}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			defer release()
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			d.enterCopyMode(sess, ac)
+			mustOutputData(t, sends)
+			ev := tc.prepare(t, d, sess, ac)
+
+			var want copyPointerState
+			d.beforeCopyMouseMap = func() {
+				ac.overlays.copyMu.Lock()
+				ac.overlays.beginCopyPointerLocked(copyPointerState{
+					pane:     ac.overlays.copyPane,
+					document: ac.overlays.copyDocument,
+					press:    scopy.Pos{Row: 7, Col: 7},
+				})
+				want = ac.overlays.copyPointer
+				ac.overlays.copyMu.Unlock()
+			}
+			defer func() { d.beforeCopyMouseMap = nil }()
+
+			d.handleActiveCopyMouse(sess, ac, sess.activeTab(), ev)
+
+			ac.overlays.copyMu.Lock()
+			defer ac.overlays.copyMu.Unlock()
+			require.True(t, want.valid, "test seam must start the newer pointer")
+			require.True(t, ac.overlays.copyPointer.valid)
+			require.Equal(t, want.epoch, ac.overlays.copyPointerEpoch)
+			require.Equal(t, want.epoch, ac.overlays.copyPointer.epoch)
+			require.Same(t, want.pane, ac.overlays.copyPointer.pane)
+			require.Same(t, want.document, ac.overlays.copyPointer.document)
+			require.Equal(t, want.press, ac.overlays.copyPointer.press)
+		})
+	}
+}
+
 func TestActiveCopyMouseRejectsViewportChangeAfterMappingSnapshot(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()

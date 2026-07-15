@@ -311,6 +311,19 @@ func snapshotCopyMouseInput(rt *overlayRuntime) (copyMouseInputSnapshot, bool) {
 	}, true
 }
 
+// invalidateSnapshotCopyPointer clears only the pointer captured with the
+// input snapshot. Mapping runs outside copyMu, so a newer press can otherwise
+// be erased by an older rejected event.
+func invalidateSnapshotCopyPointer(rt *overlayRuntime, snapshot copyMouseInputSnapshot) {
+	rt.copyMu.Lock()
+	defer rt.copyMu.Unlock()
+	if rt.copyPointerEpoch != snapshot.epoch || rt.copyMode != snapshot.mode ||
+		rt.copyPane != snapshot.pane || rt.copyDocument != snapshot.document {
+		return
+	}
+	rt.invalidateCopyPointerLocked()
+}
+
 // handleActiveCopyMouse keeps every drag tied to the pane/document captured at
 // press time. Geometry is resolved after copyMu is released to preserve the
 // daemon's copyMu -> tab/pane lock prohibition.
@@ -320,19 +333,17 @@ func (d *Daemon) handleActiveCopyMouse(sess *session, ac *attachedClient, tb *ta
 	if !active {
 		return
 	}
+	if d.beforeCopyMouseMap != nil {
+		d.beforeCopyMouseMap()
+	}
 	cfg := d.currentFloatingConfig()
 	// Once pressed, use the committed rectangle captured by that press. A
 	// later floating/layout change must not turn an in-flight drag into a hit
 	// on a different pane.
 	if ev.Type != mouse.Press && snapshot.pointer.valid && snapshot.pointer.pane == snapshot.pane && snapshot.pointer.document == snapshot.document {
-		if d.beforeCopyMouseMap != nil {
-			d.beforeCopyMouseMap()
-		}
 		mapped, ok := mapCopyMouse(ev, snapshot.pointer.geometry, snapshot.viewportTop, snapshot.document, ev.Type == mouse.Motion)
 		if ev.Type == mouse.Release && !ok {
-			rt.copyMu.Lock()
-			rt.invalidateCopyPointerLocked()
-			rt.copyMu.Unlock()
+			invalidateSnapshotCopyPointer(rt, snapshot)
 			return
 		}
 		if ok {
@@ -353,16 +364,11 @@ func (d *Daemon) handleActiveCopyMouse(sess *session, ac *attachedClient, tb *ta
 	tb.mu.Unlock()
 	if !ok {
 		if ev.Type == mouse.Release || ev.Type == mouse.Press {
-			rt.copyMu.Lock()
-			rt.invalidateCopyPointerLocked()
-			rt.copyMu.Unlock()
+			invalidateSnapshotCopyPointer(rt, snapshot)
 		}
 		return
 	}
 	clamp := ev.Type == mouse.Motion || ev.Type == mouse.Release
-	if d.beforeCopyMouseMap != nil {
-		d.beforeCopyMouseMap()
-	}
 	mapped, mappedOK := mapCopyMouse(ev, geometry, snapshot.viewportTop, snapshot.document, clamp)
 	if !mappedOK {
 		if ev.Type == mouse.Press {
@@ -381,9 +387,7 @@ func (d *Daemon) handleActiveCopyMouse(sess *session, ac *attachedClient, tb *ta
 			}
 		}
 		if ev.Type == mouse.Release || ev.Type == mouse.Press {
-			rt.copyMu.Lock()
-			rt.invalidateCopyPointerLocked()
-			rt.copyMu.Unlock()
+			invalidateSnapshotCopyPointer(rt, snapshot)
 		}
 		return
 	}
