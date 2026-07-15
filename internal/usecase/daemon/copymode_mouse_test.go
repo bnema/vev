@@ -140,6 +140,71 @@ func TestCopyDoubleClick(t *testing.T) {
 	})
 }
 
+func TestCopySearchReleaseInvalidatesPointerBeforeNextDrag(t *testing.T) {
+	d, sess, ac, _ := mouseCopyHarness(t, "alpha bravo")
+
+	copyMouseInput(d, sess, ac, "\x1b[<0;1;2M")
+	ac.overlays.copyMu.Lock()
+	require.True(t, ac.overlays.copyPointer.valid)
+	epoch := ac.overlays.copyPointerEpoch
+	ac.overlays.copyMu.Unlock()
+
+	copyMouseInput(d, sess, ac, "/")
+	require.True(t, ac.overlays.copySearchActive())
+	copyMouseInput(d, sess, ac, "\x1b[<0;1;2m")
+
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid, "release must clear the pointer while search owns mouse input")
+	require.Greater(t, ac.overlays.copyPointerEpoch, epoch, "release must advance the pointer epoch")
+	ac.overlays.copyMu.Unlock()
+
+	copyMouseInput(d, sess, ac, "\x03")
+	require.False(t, ac.overlays.copySearchActive())
+	copyMouseInput(d, sess, ac, "\x1b[<0;7;2M\x1b[<32;9;2M")
+
+	ac.overlays.copyMu.Lock()
+	selection := ac.overlays.copyMode.Selection()
+	ac.overlays.copyMu.Unlock()
+	require.True(t, selection.Enabled)
+	require.Equal(t, scopy.Pos{Row: 0, Col: 6}, selection.Anchor)
+	require.Equal(t, scopy.Pos{Row: 0, Col: 8}, selection.Active)
+}
+
+func TestNormalScreenPassiveDoubleClickSetsMappedCursor(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		text  string
+		setup func(*Daemon)
+	}{
+		{name: "whitespace", text: "alpha beta"},
+		{name: "configured separator", text: "alpha/beta", setup: func(d *Daemon) {
+			cfg := domain.Defaults()
+			cfg.Copy.WordSeparators = "/"
+			d.ApplyConfig(cfg)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sess, ac, clock := mouseCopyHarness(t, tc.text)
+			d.exitCopyMode(ac)
+			if tc.setup != nil {
+				tc.setup(d)
+			}
+
+			copyMouseInput(d, sess, ac, "\x1b[<0;6;2M\x1b[<0;6;2m")
+			clock.Advance(time.Millisecond)
+			copyMouseInput(d, sess, ac, "\x1b[<0;6;2M")
+
+			ac.overlays.copyMu.Lock()
+			mode := ac.overlays.copyMode
+			selection := mode.Selection()
+			cursor := mode.Cursor()
+			ac.overlays.copyMu.Unlock()
+			require.False(t, selection.Enabled)
+			require.Equal(t, scopy.Pos{Row: 0, Col: 5}, cursor)
+		})
+	}
+}
+
 func TestCopyWordDragAndOSC52(t *testing.T) {
 	d, sess, ac, clock := mouseCopyHarness(t, "alpha beta", "gamma delta")
 	copyMouseInput(d, sess, ac, "\x1b[<0;1;2M\x1b[<0;1;2m")
