@@ -2,6 +2,7 @@ package palette
 
 import (
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
@@ -27,38 +28,20 @@ type RenderOptions struct {
 
 type Model struct {
 	results  []Result
-	commands []command.Command
 	input    ui.TextInput
 	matches  []Match
 	selected int
 	scroll   int
 }
 
-// New accepts typed results. []command.Command remains supported while callers
-// migrate, and is immediately converted to immutable CommandResults.
-func New(items any) *Model {
-	m := &Model{results: paletteResults(items)}
-	for _, result := range m.results {
-		if cmd, ok := resultCommand(result); ok {
-			m.commands = append(m.commands, cmd)
-		}
-	}
+// New accepts typed immutable palette results.
+func New(results []Result) *Model {
+	m := &Model{results: append([]Result(nil), results...)}
 	m.refresh()
 	return m
 }
 
-func paletteResults(items any) []Result {
-	switch values := items.(type) {
-	case []Result:
-		return append([]Result(nil), values...)
-	case []command.Command:
-		return commandResults(values)
-	default:
-		return nil
-	}
-}
-
-func NewRegistry() *Model { return New(commandResults(command.Registry())) }
+func NewRegistry() *Model { return New(CommandResults(command.Registry())) }
 
 func DefaultRenderStyles() RenderStyles {
 	selection := renderer.DefaultStyle()
@@ -117,7 +100,7 @@ func (m *Model) CompleteSelected() bool {
 	if !ok {
 		return false
 	}
-	cmd, ok := resultCommand(selected)
+	cmd, ok := selected.CommandInfo()
 	if !ok {
 		return false
 	}
@@ -166,7 +149,7 @@ func (m *Model) ArgumentCommand() (command.Command, bool) {
 	if m == nil {
 		return command.Command{}, false
 	}
-	return ArgumentCommand(m.commands, m.Query())
+	return ArgumentCommand(m.results, m.Query())
 }
 
 func (m *Model) Matches() []Match {
@@ -186,16 +169,16 @@ func (m *Model) refresh() {
 	m.matches = fuzzyResults(m.results, query)
 	// Once an argument-taking static token is exact, retain its row while its
 	// arguments make ordinary fuzzy matching inapplicable.
-	if cmd, ok := ArgumentCommand(m.commands, query); ok {
-		m.prependMatch(cmd)
+	if result, ok := m.argumentResult(query); ok {
+		m.prependMatch(result)
 	} else if len(m.matches) == 0 {
 		// Arguments are not part of static command matching. When they would
 		// otherwise clear the list, keep required-argument candidates matched by
 		// the partial first token so Tab can complete them.
 		token, _, hasSeparator := completionParts(query)
 		if hasSeparator {
-			for _, match := range fuzzyResults(commandResults(m.commands), token) {
-				if match.Command.Arguments == command.ArgumentsRequired {
+			for _, match := range fuzzyResults(m.results, token) {
+				if cmd, ok := match.Result.CommandInfo(); ok && cmd.Arguments == command.ArgumentsRequired {
 					m.matches = append(m.matches, match)
 				}
 			}
@@ -204,9 +187,25 @@ func (m *Model) refresh() {
 	m.clamp()
 }
 
-func (m *Model) prependMatch(cmd command.Command) {
+func (m *Model) argumentResult(input string) (Result, bool) {
+	cmd, ok := ArgumentCommand(m.results, input)
+	if !ok {
+		return nil, false
+	}
+	for _, result := range m.results {
+		candidate, ok := result.CommandInfo()
+		if ok && candidate.Code == cmd.Code {
+			return result, true
+		}
+	}
+	return nil, false
+}
+
+func (m *Model) prependMatch(result Result) {
+	cmd, _ := result.CommandInfo()
 	for i, match := range m.matches {
-		if match.Command.Code != cmd.Code {
+		candidate, ok := match.Result.CommandInfo()
+		if !ok || candidate.Code != cmd.Code {
 			continue
 		}
 		if i > 0 {
@@ -215,7 +214,7 @@ func (m *Model) prependMatch(cmd command.Command) {
 		}
 		return
 	}
-	m.matches = append([]Match{{Result: NewCommandResult(cmd), Command: cmd}}, m.matches...)
+	m.matches = append([]Match{newMatch(result, 0)}, m.matches...)
 }
 func (m *Model) clamp() {
 	if len(m.matches) == 0 {
@@ -261,8 +260,8 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 	}
 	codeWidth := 0
 	for _, match := range m.matches {
-		if cmd, ok := resultCommand(match.Result); ok && len([]rune(cmd.Code)) > codeWidth {
-			codeWidth = len([]rune(cmd.Code))
+		if cmd, ok := match.Result.CommandInfo(); ok && utf8.RuneCountInString(cmd.Code) > codeWidth {
+			codeWidth = utf8.RuneCountInString(cmd.Code)
 		}
 	}
 	activeCmd, activeOK := m.ArgumentCommand()
@@ -277,7 +276,7 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 			style = selection
 		}
 		ui.FillRect(frame, domain.Rect{Y: y + start, Width: frame.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
-		if cmd, ok := resultCommand(match.Result); ok {
+		if cmd, ok := match.Result.CommandInfo(); ok {
 			m.renderCommand(frame, y+start, style, selection, desc, codeWidth, cmd, match.Positions, activeCmd, activeOK, opts.Guidance, opts.Feedback, idx == m.selected)
 			continue
 		}
@@ -287,16 +286,14 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 }
 
 func (m *Model) renderCommand(frame renderer.Frame, y int, style, selection, desc renderer.Style, codeWidth int, cmd command.Command, positions []int, activeCmd command.Command, activeOK bool, guidance, feedback string, selected bool) {
-	x, highlight := 0, map[int]bool{}
-	for _, position := range positions {
-		highlight[position] = true
-	}
-	for i, r := range []rune(cmd.Code) {
+	x, nextHighlight := 0, 0
+	for _, r := range cmd.Code {
 		cellStyle := style
 		cellStyle.Bold = true
-		if highlight[i] {
+		if nextHighlight < len(positions) && positions[nextHighlight] == x {
 			cellStyle = selection
 			cellStyle.Bold = true
+			nextHighlight++
 		}
 		if x < frame.Width {
 			frame.Set(x, y, renderer.Cell{Rune: r, Style: cellStyle})
@@ -317,25 +314,32 @@ func (m *Model) renderCommand(frame renderer.Frame, y int, style, selection, des
 }
 
 func (m *Model) renderSession(frame renderer.Frame, y int, style, selection renderer.Style, match Match, feedback string, selected bool) {
-	text := []rune(match.Result.DisplayText())
-	if feedback != "" && selected {
-		text = append(text, ' ')
-		text = append(text, []rune(feedback)...)
-	}
-	highlight := map[int]bool{}
-	prefix := len([]rune("Switch to session "))
-	for _, position := range match.Positions {
-		highlight[prefix+position] = true
-	}
-	for x, r := range text {
+	x, nextHighlight := 0, 0
+	prefixWidth := utf8.RuneCountInString(sessionDisplayPrefix)
+	for _, r := range match.Result.DisplayText() {
 		cellStyle := style
-		if highlight[x] {
+		if nextHighlight < len(match.Positions) && prefixWidth+match.Positions[nextHighlight] == x {
 			cellStyle = selection
 			cellStyle.Bold = true
+			nextHighlight++
 		}
 		if x < frame.Width {
 			frame.Set(x, y, renderer.Cell{Rune: r, Style: cellStyle})
 		}
+		x++
+	}
+	if feedback == "" || !selected {
+		return
+	}
+	if x < frame.Width {
+		frame.Set(x, y, renderer.Cell{Rune: ' ', Style: style})
+	}
+	x++
+	for _, r := range feedback {
+		if x < frame.Width {
+			frame.Set(x, y, renderer.Cell{Rune: r, Style: style})
+		}
+		x++
 	}
 }
 

@@ -16,52 +16,56 @@ func cmd(code, name, desc string) command.Command {
 func codes(matches []Match) []string {
 	out := make([]string, len(matches))
 	for i, match := range matches {
-		out[i] = match.Command.Code
+		cmd, ok := match.Result.CommandInfo()
+		if !ok {
+			continue
+		}
+		out[i] = cmd.Code
 	}
 	return out
 }
 
 func TestFuzzyOrdersVisibleFieldScoringTiers(t *testing.T) {
-	matches := Fuzzy([]command.Command{
+	matches := Fuzzy(CommandResults([]command.Command{
 		cmd("ZQQ", "unused", "alpha beta"),
 		cmd("XAB", "unused", "subsequence code"),
 		cmd("ABX", "unused", "prefix code"),
 		cmd("AB", "unused", "exact code"),
-	}, "ab")
+	}), "ab")
 
 	require.Equal(t, []string{"AB", "ABX", "XAB", "ZQQ"}, codes(matches))
 	require.Empty(t, matches[3].Positions, "description matches do not expose code highlight positions")
 }
 
 func TestFuzzyDoesNotMatchCommandNames(t *testing.T) {
-	matches := Fuzzy([]command.Command{
+	matches := Fuzzy(CommandResults([]command.Command{
 		cmd("CPY", "Create Alpha Beta", "Enter copy mode"),
 		cmd("ZQQ", "unused", "Alpha Beta tools"),
-	}, "ab")
+	}), "ab")
 
 	require.Equal(t, []string{"ZQQ"}, codes(matches))
 }
 
 func TestFuzzyDescriptionMatchingIsCaseInsensitiveWithoutCodeHighlights(t *testing.T) {
-	matches := Fuzzy([]command.Command{cmd("CPY", "unused", "Enter COPY mode")}, "copy")
+	matches := Fuzzy(CommandResults([]command.Command{cmd("CPY", "unused", "Enter COPY mode")}), "copy")
 
 	require.Len(t, matches, 1)
 	require.Empty(t, matches[0].Positions)
 }
 
 func TestFuzzyTieBreaksBySpanFirstThenCode(t *testing.T) {
-	matches := Fuzzy([]command.Command{
+	matches := Fuzzy(CommandResults([]command.Command{
 		cmd("ZAXQB", "", ""), // span 3, first 1
 		cmd("BAXQ", "", ""),  // span 3, first 1, code sorts first
 		cmd("PXAQ", "", ""),  // span 2, first 2
 		cmd("BAQ", "", ""),   // span 2, first 0
-	}, "aq")
+	}), "aq")
 
 	require.Equal(t, []string{"BAQ", "PXAQ", "BAXQ", "ZAXQB"}, codes(matches))
 }
 
 func TestFuzzyIsCaseInsensitiveAndHighlightsCodeRunePositions(t *testing.T) {
-	matches := Fuzzy([]command.Command{cmd("CpY", "Copy mode", "Enter copy mode")}, "cy")
+	matches := Fuzzy(CommandResults([]command.Command{cmd("CpY", "Copy mode", "Enter copy mode")}), "cy")
 
 	require.Len(t, matches, 1)
 	require.Equal(t, []int{0, 2}, matches[0].Positions)
@@ -69,7 +73,7 @@ func TestFuzzyIsCaseInsensitiveAndHighlightsCodeRunePositions(t *testing.T) {
 
 func TestFuzzyEmptyQueryPreservesRegistryOrder(t *testing.T) {
 	commands := []command.Command{cmd("B", "", ""), cmd("A", "", "")}
-	matches := Fuzzy(commands, "")
+	matches := Fuzzy(CommandResults(commands), "")
 
 	require.Equal(t, []string{"B", "A"}, codes(matches))
 }
@@ -97,6 +101,33 @@ func TestFuzzyMixedResultsPrioritizeCommandShortcodeAndRankSessions(t *testing.T
 	require.Equal(t, []int{0, 1, 2, 3}, matches[1].Positions)
 	require.Empty(t, matches[4].Positions)
 }
+
+func TestFuzzyCachesNormalizedSearchTextPerMatch(t *testing.T) {
+	calls := 0
+	results := []Result{
+		countingResult{text: "aBravo", calls: &calls},
+		countingResult{text: "aAlpha", calls: &calls},
+	}
+
+	matches := Fuzzy(results, "a")
+
+	require.Len(t, matches, 2)
+	require.Equal(t, 2, calls, "sorting must use the normalized text cached in Match")
+}
+
+type countingResult struct {
+	text  string
+	calls *int
+}
+
+func (r countingResult) Kind() ResultKind    { return ResultKindStoppedSession }
+func (r countingResult) DisplayText() string { return r.text }
+func (r countingResult) SearchText() string {
+	(*r.calls)++
+	return r.text
+}
+func (r countingResult) CommandInfo() (command.Command, bool) { return command.Command{}, false }
+func (r countingResult) Session() (SessionResult, bool)       { return SessionResult{}, false }
 
 func TestFuzzyMixedResultsUsesKindThenNormalizedTextThenStableOrder(t *testing.T) {
 	created := time.Time{}

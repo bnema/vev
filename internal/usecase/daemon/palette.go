@@ -178,13 +178,12 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 				return
 			}
 			rawQuery = ac.overlays.palette.Query()
-			switch result := selected.(type) {
-			case palette.CommandResult:
-				cmd = result.Command()
+			if selectedCommand, ok := selected.CommandInfo(); ok {
+				cmd = selectedCommand
 				// JRS is contextual: fuzzy selection cannot turn an unrelated
 				// query into a jump.
 				if cmd.Slug == "jump-recent-session" {
-					action, valid := palette.ParseAction([]command.Command{cmd}, rawQuery)
+					action, valid := palette.ParseAction([]palette.Result{selected}, rawQuery)
 					if !valid {
 						changed = true
 						return
@@ -192,10 +191,10 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 					args = action.Args
 					recent = append([]recentSession(nil), ac.overlays.paletteRecent...)
 				}
-			case palette.SessionResult:
-				sessionTarget = result
+			} else if selectedSession, ok := selected.Session(); ok {
+				sessionTarget = selectedSession
 				hasSessionTarget = true
-			default:
+			} else {
 				changed = true
 				return
 			}
@@ -276,7 +275,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 }
 
 func paletteArgs(query string, cmd command.Command) []string {
-	action, ok := palette.ParseAction([]command.Command{cmd}, query)
+	action, ok := palette.ParseAction(palette.CommandResults([]command.Command{cmd}), query)
 	if !ok {
 		return nil
 	}

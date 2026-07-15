@@ -12,11 +12,11 @@ import (
 )
 
 func TestModelInsertBackspaceAndSelectionClamp(t *testing.T) {
-	m := New([]command.Command{
+	m := New(CommandResults([]command.Command{
 		cmd("ABC", "Alpha", "first"),
 		cmd("DEF", "Delta", "second"),
 		cmd("AXY", "Other", "third"),
-	})
+	}))
 
 	require.Equal(t, "", m.Query())
 	selected, ok := m.Selected()
@@ -46,7 +46,7 @@ func TestModelInsertBackspaceAndSelectionClamp(t *testing.T) {
 }
 
 func TestModelNoMatchesClearsSelection(t *testing.T) {
-	m := New([]command.Command{cmd("ABC", "Alpha", "first")})
+	m := New(CommandResults([]command.Command{cmd("ABC", "Alpha", "first")}))
 	m.Insert('z')
 
 	_, ok := m.Selected()
@@ -55,7 +55,7 @@ func TestModelNoMatchesClearsSelection(t *testing.T) {
 }
 
 func TestModelMatchesDeepCopiesPositions(t *testing.T) {
-	m := New([]command.Command{cmd("ABC", "Alpha", "first")})
+	m := New(CommandResults([]command.Command{cmd("ABC", "Alpha", "first")}))
 	m.Insert('a')
 
 	matches := m.Matches()
@@ -75,8 +75,8 @@ func TestModelExactArgumentMatchMovesExistingFuzzyMatchToFront(t *testing.T) {
 		cmd("AAA", "", "ZZZ 1"),
 		zzz,
 	}
-	want := Fuzzy(commands, "ZZZ 1")[1]
-	m := New(commands)
+	want := Fuzzy(CommandResults(commands), "ZZZ 1")[1]
+	m := New(CommandResults(commands))
 
 	for _, r := range "ZZZ 1" {
 		m.Insert(r)
@@ -84,7 +84,7 @@ func TestModelExactArgumentMatchMovesExistingFuzzyMatchToFront(t *testing.T) {
 
 	matches := m.Matches()
 	require.Len(t, matches, 2)
-	require.Equal(t, "ZZZ", matches[0].Command.Code)
+	require.Equal(t, "ZZZ", matchCommandCode(t, matches[0]))
 	require.Equal(t, want, matches[0], "the existing fuzzy match must retain its metadata")
 	selected, ok := m.Selected()
 	require.True(t, ok)
@@ -103,15 +103,11 @@ func TestModelExactArgumentMatchKeepsAbsentAndFirstBehavior(t *testing.T) {
 			commands: func(zzz command.Command) []command.Command {
 				return []command.Command{cmd("AAA", "", "ZZZ 1"), zzz}
 			},
-			want: Match{Result: NewCommandResult(command.Command{
+			want: newMatch(NewCommandResult(command.Command{
 				Code:      "ZZZ",
 				Desc:      "unmatched",
 				Arguments: command.ArgumentsRequired,
-			}), Command: command.Command{
-				Code:      "ZZZ",
-				Desc:      "unmatched",
-				Arguments: command.ArgumentsRequired,
-			}},
+			}), 0),
 			wantLen: 2,
 		},
 		{
@@ -123,7 +119,7 @@ func TestModelExactArgumentMatchKeepsAbsentAndFirstBehavior(t *testing.T) {
 			want: func() Match {
 				zzz := cmd("ZZZ", "", "ZZZ 1")
 				zzz.Arguments = command.ArgumentsRequired
-				return Fuzzy([]command.Command{zzz, cmd("ZZZZ", "", "ZZZ 1")}, "ZZZ 1")[0]
+				return Fuzzy(CommandResults([]command.Command{zzz, cmd("ZZZZ", "", "ZZZ 1")}), "ZZZ 1")[0]
 			}(),
 			wantLen: 2,
 		},
@@ -131,7 +127,7 @@ func TestModelExactArgumentMatchKeepsAbsentAndFirstBehavior(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			zzz := cmd("ZZZ", "", "unmatched")
 			zzz.Arguments = command.ArgumentsRequired
-			m := New(tt.commands(zzz))
+			m := New(CommandResults(tt.commands(zzz)))
 			for _, r := range "ZZZ 1" {
 				m.Insert(r)
 			}
@@ -144,10 +140,10 @@ func TestModelExactArgumentMatchKeepsAbsentAndFirstBehavior(t *testing.T) {
 }
 
 func TestRenderDrawsOnlyCodeAndDescriptionWithStyles(t *testing.T) {
-	m := New([]command.Command{
+	m := New(CommandResults([]command.Command{
 		cmd("CPY", "Copy", "Enter copy mode"),
 		cmd("CNT", "New", "Create tab"),
-	})
+	}))
 	m.Insert('c')
 	m.Insert('y')
 	frame := m.Render(domain.Size{Cols: 28, Rows: 3}, RenderOptions{Styles: DefaultRenderStyles()})
@@ -170,7 +166,7 @@ func TestRenderDrawsOnlyCodeAndDescriptionWithStyles(t *testing.T) {
 }
 
 func TestRenderSafelyClipsVisibleFieldsAtNarrowWidths(t *testing.T) {
-	m := New([]command.Command{cmd("CPY", "Copy", "Enter copy mode")})
+	m := New(CommandResults([]command.Command{cmd("CPY", "Copy", "Enter copy mode")}))
 	want := []rune("CPY Enter copy mode")
 
 	for _, cols := range []int{0, 1, 3, 4, 7} {
@@ -186,9 +182,14 @@ func TestRenderSafelyClipsVisibleFieldsAtNarrowWidths(t *testing.T) {
 
 func selectedCommandCode(t *testing.T, result Result) string {
 	t.Helper()
-	cmd, ok := resultCommand(result)
+	cmd, ok := result.CommandInfo()
 	require.True(t, ok, "selected result is a command")
 	return cmd.Code
+}
+
+func matchCommandCode(t *testing.T, match Match) string {
+	t.Helper()
+	return selectedCommandCode(t, match.Result)
 }
 
 func frameRow(frame renderer.Frame, y int) string {
@@ -259,7 +260,7 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := New([]command.Command{cmd("CPY", "Copy", "Enter copy mode")})
+			m := New(CommandResults([]command.Command{cmd("CPY", "Copy", "Enter copy mode")}))
 			m.Insert('c')
 			m.Insert('y')
 			frame := m.Render(domain.Size{Cols: 28, Rows: 3}, RenderOptions{Styles: tt.styles()})
@@ -306,7 +307,7 @@ func TestModelCompleteSelected(t *testing.T) {
 				if tt.registry {
 					m = NewRegistry()
 				} else {
-					m = New(tt.commands)
+					m = New(CommandResults(tt.commands))
 				}
 				for _, r := range tt.query {
 					m.Insert(r)
@@ -352,7 +353,7 @@ func TestModelUsesDefensiveTypedResultsAndKeepsSessionsCommandInert(t *testing.T
 
 	selected, ok := m.Selected()
 	require.True(t, ok)
-	session, ok := selected.(SessionResult)
+	session, ok := selected.Session()
 	require.True(t, ok)
 	id, active := session.SessionID()
 	require.True(t, active)
@@ -377,7 +378,7 @@ func TestRenderGuidanceReplacesOnlyExactContextualRow(t *testing.T) {
 	jrs := cmd("JRS", "Jump", "Jump to recent session")
 	jrs.Arguments = command.ArgumentsRequired
 	jrs.ContextHint = command.ContextHintRecentSessions
-	m := New([]command.Command{jrs})
+	m := New(CommandResults([]command.Command{jrs}))
 	for _, r := range "JRS 1" {
 		m.Insert(r)
 	}

@@ -16,12 +16,14 @@ const (
 	ResultKindStoppedSession
 )
 
-// Result is a searchable palette target. Only CommandResult is executable as
-// a command; session results deliberately carry no command semantics.
+// Result is a searchable palette target. Command and session accessors make
+// the target's capabilities explicit without callers needing type assertions.
 type Result interface {
 	Kind() ResultKind
 	DisplayText() string
 	SearchText() string
+	CommandInfo() (command.Command, bool)
+	Session() (SessionResult, bool)
 }
 
 // CommandResult is a static command palette target.
@@ -29,11 +31,13 @@ type CommandResult struct {
 	command command.Command
 }
 
-func NewCommandResult(cmd command.Command) CommandResult { return CommandResult{command: cmd} }
-func (r CommandResult) Kind() ResultKind                 { return ResultKindCommand }
-func (r CommandResult) DisplayText() string              { return r.command.Code }
-func (r CommandResult) SearchText() string               { return r.command.Code }
-func (r CommandResult) Command() command.Command         { return r.command }
+func NewCommandResult(cmd command.Command) CommandResult     { return CommandResult{command: cmd} }
+func (r CommandResult) Kind() ResultKind                     { return ResultKindCommand }
+func (r CommandResult) DisplayText() string                  { return r.command.Code }
+func (r CommandResult) SearchText() string                   { return r.command.Code }
+func (r CommandResult) Command() command.Command             { return r.command }
+func (r CommandResult) CommandInfo() (command.Command, bool) { return r.command, true }
+func (r CommandResult) Session() (SessionResult, bool)       { return SessionResult{}, false }
 
 // SessionResult is an immutable named-session target. An active session has a
 // SessionID; a stopped session intentionally does not.
@@ -63,10 +67,15 @@ func (r SessionResult) CreatedAt() time.Time { return r.createdAt }
 func (r SessionResult) SessionID() (domain.SessionID, bool) {
 	return r.sessionID, r.active
 }
-func (r SessionResult) DisplayText() string { return "Switch to session " + r.name }
-func (r SessionResult) SearchText() string  { return r.name }
+func (r SessionResult) DisplayText() string                  { return sessionDisplayPrefix + r.name }
+func (r SessionResult) SearchText() string                   { return r.name }
+func (r SessionResult) CommandInfo() (command.Command, bool) { return command.Command{}, false }
+func (r SessionResult) Session() (SessionResult, bool)       { return r, true }
 
-func commandResults(commands []command.Command) []Result {
+const sessionDisplayPrefix = "Switch to session "
+
+// CommandResults converts static commands to typed palette targets.
+func CommandResults(commands []command.Command) []Result {
 	results := make([]Result, len(commands))
 	for i, cmd := range commands {
 		results[i] = NewCommandResult(cmd)
