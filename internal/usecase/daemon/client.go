@@ -51,7 +51,7 @@ type attachedClient struct {
 	theme         themeui.Theme
 	clientTheme   themeui.Theme
 	lastCursor    cursorOut
-	renderStages  renderStageHooks // invoked at real pipeline boundaries while sendMu is held
+	renderStages  renderStageHooks // optional render and handoff observability hooks
 	// previousSession is guarded independently. It is retained through temporary
 	// setSession(nil) hand-offs and cleared only on terminal teardown.
 	previousSession Guarded[*session]
@@ -437,12 +437,15 @@ func (d *Daemon) attachClientDeferred(sess *session, tr ports.Transport, sz doma
 }
 
 // handoffCoordinator prepares a cross-session ownership transfer before the
-// destination publishes sess.client. It never takes daemon/session locks while
-// taking sendMu, avoiding a d.mu/sendMu cycle with transport callbacks.
+// destination publishes sess.client. Callers may hold d.mu, but this function
+// acquires no daemon or session locks while it holds sendMu.
 func (d *Daemon) handoffCoordinator(from, target *session, old, current *attachedClient) []renderLifecycleCleanup {
 	cleanups := make([]renderLifecycleCleanup, 0, 2)
 	if rc := from.renderCoordinator(); rc != nil {
 		cleanups = append(cleanups, rc.beginDetach(current))
+	}
+	if current.renderStages.handoffRebase != nil {
+		current.renderStages.handoffRebase()
 	}
 	current.sendMu.Lock()
 	current.output.rebase()

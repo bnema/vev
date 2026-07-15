@@ -421,6 +421,10 @@ func TestPickerSessionSwitchWaitsForInFlightPaintSend(t *testing.T) {
 	tr.EXPECT().Close().Return(nil).Maybe()
 	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	ac.initOverlays()
+	handoffAtSendMu := make(chan struct{})
+	ac.renderStages = renderStageHooks{
+		handoffRebase: func() { close(handoffAtSendMu) },
+	}
 	sctx1, cancel1 := context.WithCancel(d.serveCtx)
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
@@ -439,29 +443,25 @@ func TestPickerSessionSwitchWaitsForInFlightPaintSend(t *testing.T) {
 	}()
 	<-enteredSend
 
-	switchStarted := make(chan struct{})
 	switchDone := make(chan struct{})
 	go func() {
-		close(switchStarted)
-		d.stealClientForTarget(sess1, ac, sess2, picker.Target{Session: sess2.id})
+		cleanups := d.handoffCoordinator(sess1, sess2, nil, ac)
+		finishRenderLifecycleCleanups(cleanups)
 		close(switchDone)
 	}()
-	<-switchStarted
+	awaitTestCompletion(t, handoffAtSendMu, "session switch did not reach the handoff sendMu boundary")
 
-	// enteredSend proves paint owns ac.sendMu. The real handoff also takes that
-	// lock, so releasing the transport send is the deterministic handoff gate.
-	close(releaseSend)
-	select {
-	case <-paintDone:
-	case <-time.After(time.Second):
-		t.Fatal("paint did not finish after Send was released")
-	}
+	// The handoff is immediately about to acquire sendMu, which paint still owns
+	// through its blocked transport send.
 	select {
 	case <-switchDone:
-	case <-time.After(time.Second):
-		t.Fatal("session switch did not complete after paint finished")
+		t.Fatal("session switch completed while paint owned sendMu")
+	default:
 	}
-	require.Same(t, sess2, ac.currentSession())
+
+	close(releaseSend)
+	awaitTestCompletion(t, paintDone, "paint did not finish after Send was released")
+	awaitTestCompletion(t, switchDone, "session handoff did not complete after paint finished")
 }
 
 func TestPickerCrossSessionSwitchCopiesTerminalEnvForFutureTabs(t *testing.T) {

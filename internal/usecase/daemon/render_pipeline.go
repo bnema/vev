@@ -16,15 +16,17 @@ import (
 
 // composeCacheInput is an attachment-local value snapshot. composeFrame never
 // retains or accesses the attachment that owns it.
-// renderStageHooks are optional observability hooks. They are invoked only at
-// completed production boundaries: capture and compose after their result is
-// available, and emit after prepare plus transport success (including a
-// successful no-byte emission). Failed attempts count for capture/compose but
-// never for emit.
+// renderStageHooks are optional observability hooks. capture and compose run
+// after their result is available, and emit after prepare plus transport success
+// (including a successful no-byte emission); those hooks run while sendMu is
+// held. Failed attempts count for capture/compose but never for emit.
+// handoffRebase marks the boundary immediately before a handoff acquires sendMu
+// to rebase attachment-owned output state, so it intentionally runs unlocked.
 type renderStageHooks struct {
-	capture func()
-	compose func()
-	emit    func()
+	capture       func()
+	compose       func()
+	emit          func()
+	handoffRebase func()
 }
 
 type composeCacheInput struct {
