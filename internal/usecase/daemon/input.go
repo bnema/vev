@@ -95,6 +95,10 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 		focusPlacementLocked(tb, pl.ID)
 		d.applyLayoutLocked(tb)
 		tb.mu.Unlock()
+		// A title bar never routes to terminal content. Clear any pre-existing
+		// left-button candidate before handling the focus result, including when
+		// this press leaves the same pane focused.
+		invalidateRejectedLeftPointer(rt, ev)
 		if pl.ID != oldFocus {
 			d.exitCopyMode(ac)
 			d.refreshPaneTitleOnFocus(sess, pl.ID)

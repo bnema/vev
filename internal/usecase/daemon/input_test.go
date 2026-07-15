@@ -1316,6 +1316,48 @@ func TestRejectedLeftPressAndInactiveReleaseInvalidateStalePointer(t *testing.T)
 	ac.overlays.copyMu.Unlock()
 }
 
+func TestFocusedSplitTitleBarPressInvalidatesFreshPointerBeforeMotion(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	tb := sess.activeTab()
+	p2 := newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 8})
+	p3 := newPane("pane-3", nil, domain.Size{Cols: 20, Rows: 1})
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 41, Rows: 10}
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
+		layout.NewLeaf("pane-1"),
+		{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf("pane-2"), layout.NewLeaf("pane-3")}, Expanded: "pane-2"},
+	}}
+	tb.tree.Focus = "pane-2"
+	tb.panes["pane-2"] = p2
+	tb.panes["pane-3"] = p3
+	tb.mu.Unlock()
+
+	// A content press gives pane-2 a fresh candidate. Pressing that already
+	// focused pane's title bar must make the following motion a no-op rather
+	// than reusing this pointer to publish copy mode.
+	d.handleInput(sess, ac, []byte("\x1b[<0;22;3M"))
+	ac.overlays.copyMu.Lock()
+	require.True(t, ac.overlays.copyPointer.valid)
+	ac.overlays.copyClick = copyClickCandidate{valid: true, pane: ac.overlays.copyPointer.pane}
+	epoch := ac.overlays.copyPointerEpoch
+	ac.overlays.copyMu.Unlock()
+
+	d.handleInput(sess, ac, []byte("\x1b[<0;22;2M"))
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
+	require.Greater(t, ac.overlays.copyPointerEpoch, epoch)
+	ac.overlays.copyMu.Unlock()
+	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus, "title press on focused pane must preserve focus")
+
+	d.handleInput(sess, ac, []byte("\x1b[<32;22;4M"))
+	ac.overlays.copyMu.Lock()
+	require.Nil(t, ac.overlays.copyMode, "motion after title-bar press must not publish stale pointer state")
+	ac.overlays.copyMu.Unlock()
+}
+
 func TestMouseDividerAndTitleBarDoNotForwardBogusCoordinates(t *testing.T) {
 	cases := []struct {
 		name string
