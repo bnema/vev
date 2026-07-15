@@ -7,7 +7,10 @@ import (
 	"github.com/bnema/vev/internal/usecase/command"
 )
 
+// Match is a fuzzy-matched immutable palette result. Command is retained for
+// compatibility with command-only callers; session results leave it empty.
 type Match struct {
+	Result    Result
 	Command   command.Command
 	Positions []int
 	rank      int
@@ -16,18 +19,39 @@ type Match struct {
 	order     int
 }
 
-func Fuzzy(commands []command.Command, query string) []Match {
+// Fuzzy searches either typed results or the legacy command-only input. New
+// callers should provide []Result so session targets remain typed end-to-end.
+func Fuzzy(items any, query string) []Match {
+	var results []Result
+	switch values := items.(type) {
+	case []Result:
+		results = append([]Result(nil), values...)
+	case []command.Command:
+		results = commandResults(values)
+	default:
+		return nil
+	}
+	return fuzzyResults(results, query)
+}
+
+func fuzzyResults(results []Result, query string) []Match {
 	if query == "" {
-		out := make([]Match, len(commands))
-		for i, cmd := range commands {
-			out[i] = Match{Command: cmd, order: i}
+		out := make([]Match, 0, len(results))
+		for i, result := range results {
+			if result != nil {
+				out = append(out, newMatch(result, i))
+			}
 		}
 		return out
 	}
+
 	var out []Match
-	for i, cmd := range commands {
-		if m, ok := score(cmd, query, i); ok {
-			out = append(out, m)
+	for i, result := range results {
+		if result == nil {
+			continue
+		}
+		if match, ok := score(result, query, i); ok {
+			out = append(out, match)
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -41,41 +65,81 @@ func Fuzzy(commands []command.Command, query string) []Match {
 		if a.first != b.first {
 			return a.first < b.first
 		}
-		if a.Command.Code != b.Command.Code {
-			return a.Command.Code < b.Command.Code
+		if a.Result.Kind() != b.Result.Kind() {
+			return a.Result.Kind() < b.Result.Kind()
+		}
+		if aText, bText := normalizedSearchText(a.Result), normalizedSearchText(b.Result); aText != bText {
+			return aText < bText
 		}
 		return a.order < b.order
 	})
 	return out
 }
 
-func score(cmd command.Command, query string, order int) (Match, bool) {
-	code := []rune(cmd.Code)
-	q := []rune(query)
-	codeLower := strings.ToLower(cmd.Code)
-	qLower := strings.ToLower(query)
-	if codeLower == qLower {
-		return Match{Command: cmd, Positions: rangePositions(len(code)), rank: 0, span: len(code), first: 0, order: order}, true
+func score(result Result, query string, order int) (Match, bool) {
+	text := normalizedSearchText(result)
+	needle := strings.ToLower(query)
+	textRunes, queryRunes := []rune(text), []rune(needle)
+	match := newMatch(result, order)
+
+	// An exact command shortcode always wins over every other match. The
+	// remaining results then share exact/prefix/subsequence scoring.
+	if result.Kind() == ResultKindCommand && text == needle {
+		match.Positions = rangePositions(len(textRunes))
+		match.rank, match.span, match.first = 0, len(textRunes), 0
+		return match, true
 	}
-	if strings.HasPrefix(codeLower, qLower) {
-		return Match{Command: cmd, Positions: rangePositions(len(q)), rank: 1, span: len(q), first: 0, order: order}, true
+	if text == needle {
+		match.Positions = rangePositions(len(textRunes))
+		match.rank, match.span, match.first = 1, len(textRunes), 0
+		return match, true
 	}
-	if positions, ok := subsequencePositions([]rune(codeLower), []rune(qLower)); ok {
-		return Match{Command: cmd, Positions: positions, rank: 2, span: positions[len(positions)-1] - positions[0] + 1, first: positions[0], order: order}, true
+	if strings.HasPrefix(text, needle) {
+		match.Positions = rangePositions(len(queryRunes))
+		match.rank, match.span, match.first = 2, len(queryRunes), 0
+		return match, true
 	}
-	text := strings.ToLower(cmd.Desc)
-	if positions, ok := subsequencePositions([]rune(text), []rune(qLower)); ok {
-		return Match{Command: cmd, rank: 3, span: positions[len(positions)-1] - positions[0] + 1, first: positions[0], order: order}, true
+	if positions, ok := subsequencePositions(textRunes, queryRunes); ok {
+		match.Positions = positions
+		match.rank, match.span, match.first = 3, positions[len(positions)-1]-positions[0]+1, positions[0]
+		return match, true
+	}
+	if cmd, ok := resultCommand(result); ok {
+		if positions, ok := subsequencePositions([]rune(strings.ToLower(cmd.Desc)), queryRunes); ok {
+			match.rank, match.span, match.first = 4, positions[len(positions)-1]-positions[0]+1, positions[0]
+			return match, true
+		}
 	}
 	return Match{}, false
 }
 
-func rangePositions(n int) []int {
-	p := make([]int, n)
-	for i := range p {
-		p[i] = i
+func newMatch(result Result, order int) Match {
+	match := Match{Result: result, order: order}
+	if cmd, ok := resultCommand(result); ok {
+		match.Command = cmd
 	}
-	return p
+	return match
+}
+
+func normalizedSearchText(result Result) string { return strings.ToLower(result.SearchText()) }
+
+func resultCommand(result Result) (command.Command, bool) {
+	switch result := result.(type) {
+	case CommandResult:
+		return result.Command(), true
+	case *CommandResult:
+		return result.Command(), true
+	default:
+		return command.Command{}, false
+	}
+}
+
+func rangePositions(n int) []int {
+	positions := make([]int, n)
+	for i := range positions {
+		positions[i] = i
+	}
+	return positions
 }
 
 func subsequencePositions(haystack, needle []rune) ([]int, bool) {

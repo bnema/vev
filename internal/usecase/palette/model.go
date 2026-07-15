@@ -23,6 +23,7 @@ type RenderOptions struct {
 }
 
 type Model struct {
+	results  []Result
 	commands []command.Command
 	input    ui.TextInput
 	matches  []Match
@@ -30,13 +31,31 @@ type Model struct {
 	scroll   int
 }
 
-func New(commands []command.Command) *Model {
-	m := &Model{commands: append([]command.Command(nil), commands...)}
+// New accepts typed results. []command.Command remains supported while callers
+// migrate, and is immediately converted to immutable CommandResults.
+func New(items any) *Model {
+	m := &Model{results: paletteResults(items)}
+	for _, result := range m.results {
+		if cmd, ok := resultCommand(result); ok {
+			m.commands = append(m.commands, cmd)
+		}
+	}
 	m.refresh()
 	return m
 }
 
-func NewRegistry() *Model { return New(command.Registry()) }
+func paletteResults(items any) []Result {
+	switch values := items.(type) {
+	case []Result:
+		return append([]Result(nil), values...)
+	case []command.Command:
+		return commandResults(values)
+	default:
+		return nil
+	}
+}
+
+func NewRegistry() *Model { return New(commandResults(command.Registry())) }
 
 func DefaultRenderStyles() RenderStyles {
 	selection := renderer.DefaultStyle()
@@ -49,16 +68,14 @@ func DefaultRenderStyles() RenderStyles {
 func (m *Model) Insert(r rune) {
 	if m != nil {
 		m.input.Insert(r)
-		m.selected = 0
-		m.scroll = 0
+		m.selected, m.scroll = 0, 0
 		m.refresh()
 	}
 }
 func (m *Model) Backspace() {
 	if m != nil && m.input.Value() != "" {
 		m.input.Backspace()
-		m.selected = 0
-		m.scroll = 0
+		m.selected, m.scroll = 0, 0
 		m.refresh()
 	}
 }
@@ -81,26 +98,32 @@ func (m *Model) Down() {
 		m.clamp()
 	}
 }
-func (m *Model) Selected() (command.Command, bool) {
+
+// Selected returns the typed immutable target, not an executable command.
+func (m *Model) Selected() (Result, bool) {
 	if m == nil || m.selected < 0 || m.selected >= len(m.matches) {
-		return command.Command{}, false
+		return nil, false
 	}
-	return m.matches[m.selected].Command, true
+	return m.matches[m.selected].Result, true
 }
 
-// CompleteSelected replaces the query with the selected command's effective
-// code. Required-argument commands retain the typed argument bytes.
+// CompleteSelected only completes static command results. Session targets can
+// never be parsed, completed, or otherwise treated as commands.
 func (m *Model) CompleteSelected() bool {
 	selected, ok := m.Selected()
 	if !ok {
 		return false
 	}
+	cmd, ok := resultCommand(selected)
+	if !ok {
+		return false
+	}
 
 	query := m.Query()
-	completed := selected.Code
-	if selected.Arguments == command.ArgumentsRequired {
+	completed := cmd.Code
+	if cmd.Arguments == command.ArgumentsRequired {
 		token, args, hasSeparator := completionParts(query)
-		if token == selected.Code && hasSeparator && args != "" {
+		if token == cmd.Code && hasSeparator && args != "" {
 			return false
 		}
 		completed += " "
@@ -113,8 +136,7 @@ func (m *Model) CompleteSelected() bool {
 	}
 
 	m.input.SetValue(completed)
-	m.selected = 0
-	m.scroll = 0
+	m.selected, m.scroll = 0, 0
 	m.refresh()
 	return true
 }
@@ -136,7 +158,7 @@ func completionParts(query string) (token, args string, hasSeparator bool) {
 	return query, "", false
 }
 
-// ArgumentCommand returns the exact argument-taking command being entered.
+// ArgumentCommand returns the exact argument-taking static command being entered.
 func (m *Model) ArgumentCommand() (command.Command, bool) {
 	if m == nil {
 		return command.Command{}, false
@@ -158,8 +180,8 @@ func (m *Model) Matches() []Match {
 
 func (m *Model) refresh() {
 	query := m.input.Value()
-	m.matches = Fuzzy(m.commands, query)
-	// Once an argument-taking token is exact, retain its row while its
+	m.matches = fuzzyResults(m.results, query)
+	// Once an argument-taking static token is exact, retain its row while its
 	// arguments make ordinary fuzzy matching inapplicable.
 	if cmd, ok := ArgumentCommand(m.commands, query); ok {
 		m.prependMatch(cmd)
@@ -169,7 +191,7 @@ func (m *Model) refresh() {
 		// the partial first token so Tab can complete them.
 		token, _, hasSeparator := completionParts(query)
 		if hasSeparator {
-			for _, match := range Fuzzy(m.commands, token) {
+			for _, match := range fuzzyResults(commandResults(m.commands), token) {
 				if match.Command.Arguments == command.ArgumentsRequired {
 					m.matches = append(m.matches, match)
 				}
@@ -190,12 +212,11 @@ func (m *Model) prependMatch(cmd command.Command) {
 		}
 		return
 	}
-	m.matches = append([]Match{{Command: cmd}}, m.matches...)
+	m.matches = append([]Match{{Result: NewCommandResult(cmd), Command: cmd}}, m.matches...)
 }
 func (m *Model) clamp() {
 	if len(m.matches) == 0 {
-		m.selected = -1
-		m.scroll = 0
+		m.selected, m.scroll = -1, 0
 		return
 	}
 	if m.selected < 0 {
@@ -218,21 +239,15 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 	if frame.Width == 0 || frame.Height == 0 {
 		return frame
 	}
-	base := renderer.DefaultStyle()
-	selection := styles.Selection
-	desc := styles.Description
+	base, selection, desc := renderer.DefaultStyle(), styles.Selection, styles.Description
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: base})
 	if m == nil {
 		ui.DrawInputLine(frame, 0, "> ", "", base, selection)
 		return frame
 	}
 	ui.DrawInputLine(frame, 0, "> ", m.Query(), base, selection)
-	start := 1
-	visible := frame.Height - start
-	if visible <= 0 {
-		return frame
-	}
-	if len(m.matches) == 0 {
+	start, visible := 1, frame.Height-1
+	if visible <= 0 || len(m.matches) == 0 {
 		return frame
 	}
 	if m.selected < m.scroll {
@@ -243,8 +258,8 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 	}
 	codeWidth := 0
 	for _, match := range m.matches {
-		if len([]rune(match.Command.Code)) > codeWidth {
-			codeWidth = len([]rune(match.Command.Code))
+		if cmd, ok := resultCommand(match.Result); ok && len([]rune(cmd.Code)) > codeWidth {
+			codeWidth = len([]rune(cmd.Code))
 		}
 	}
 	activeCmd, activeOK := m.ArgumentCommand()
@@ -259,34 +274,60 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 			style = selection
 		}
 		ui.FillRect(frame, domain.Rect{Y: y + start, Width: frame.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
-		x := 0
-		highlight := map[int]bool{}
-		for _, p := range match.Positions {
-			highlight[p] = true
+		if cmd, ok := resultCommand(match.Result); ok {
+			m.renderCommand(frame, y+start, style, selection, desc, codeWidth, cmd, match.Positions, activeCmd, activeOK, opts.Guidance)
+			continue
 		}
-		for i, r := range []rune(match.Command.Code) {
-			cellStyle := style
-			cellStyle.Bold = true
-			if highlight[i] {
-				cellStyle = selection
-				cellStyle.Bold = true
-			}
-			if x < frame.Width {
-				frame.Set(x, y+start, renderer.Cell{Rune: r, Style: cellStyle})
-			}
-			x++
-		}
-		for x < codeWidth+1 && x < frame.Width {
-			frame.Set(x, y+start, renderer.Cell{Rune: ' ', Style: style})
-			x++
-		}
-		description := match.Command.Desc
-		if opts.Guidance != "" && activeOK && match.Command.ContextHint != command.ContextHintNone && activeCmd.Code == match.Command.Code {
-			description = opts.Guidance
-		}
-		ui.DrawText(frame, x, y+start, frame.Width, description, mergePaletteDescStyle(style, desc))
+		m.renderSession(frame, y+start, style, selection, match)
 	}
 	return frame
+}
+
+func (m *Model) renderCommand(frame renderer.Frame, y int, style, selection, desc renderer.Style, codeWidth int, cmd command.Command, positions []int, activeCmd command.Command, activeOK bool, guidance string) {
+	x, highlight := 0, map[int]bool{}
+	for _, position := range positions {
+		highlight[position] = true
+	}
+	for i, r := range []rune(cmd.Code) {
+		cellStyle := style
+		cellStyle.Bold = true
+		if highlight[i] {
+			cellStyle = selection
+			cellStyle.Bold = true
+		}
+		if x < frame.Width {
+			frame.Set(x, y, renderer.Cell{Rune: r, Style: cellStyle})
+		}
+		x++
+	}
+	for x < codeWidth+1 && x < frame.Width {
+		frame.Set(x, y, renderer.Cell{Rune: ' ', Style: style})
+		x++
+	}
+	description := cmd.Desc
+	if guidance != "" && activeOK && cmd.ContextHint != command.ContextHintNone && activeCmd.Code == cmd.Code {
+		description = guidance
+	}
+	ui.DrawText(frame, x, y, frame.Width, description, mergePaletteDescStyle(style, desc))
+}
+
+func (m *Model) renderSession(frame renderer.Frame, y int, style, selection renderer.Style, match Match) {
+	text := []rune(match.Result.DisplayText())
+	highlight := map[int]bool{}
+	prefix := len([]rune("Switch to session "))
+	for _, position := range match.Positions {
+		highlight[prefix+position] = true
+	}
+	for x, r := range text {
+		cellStyle := style
+		if highlight[x] {
+			cellStyle = selection
+			cellStyle.Bold = true
+		}
+		if x < frame.Width {
+			frame.Set(x, y, renderer.Cell{Rune: r, Style: cellStyle})
+		}
+	}
 }
 
 func mergePaletteDescStyle(line, desc renderer.Style) renderer.Style {

@@ -3,6 +3,7 @@ package palette
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
@@ -20,24 +21,24 @@ func TestModelInsertBackspaceAndSelectionClamp(t *testing.T) {
 	require.Equal(t, "", m.Query())
 	selected, ok := m.Selected()
 	require.True(t, ok)
-	require.Equal(t, "ABC", selected.Code)
+	require.Equal(t, "ABC", selectedCommandCode(t, selected))
 
 	m.Down()
 	m.Down()
 	selected, ok = m.Selected()
 	require.True(t, ok)
-	require.Equal(t, "AXY", selected.Code)
+	require.Equal(t, "AXY", selectedCommandCode(t, selected))
 
 	m.Insert('d')
 	require.Equal(t, "d", m.Query())
 	selected, ok = m.Selected()
 	require.True(t, ok)
-	require.Equal(t, "DEF", selected.Code, "selection clamps to only match after query changes")
+	require.Equal(t, "DEF", selectedCommandCode(t, selected), "selection clamps to only match after query changes")
 
 	m.Up()
 	selected, ok = m.Selected()
 	require.True(t, ok)
-	require.Equal(t, "DEF", selected.Code, "up at first match clamps")
+	require.Equal(t, "DEF", selectedCommandCode(t, selected), "up at first match clamps")
 
 	m.Backspace()
 	require.Equal(t, "", m.Query())
@@ -87,7 +88,7 @@ func TestModelExactArgumentMatchMovesExistingFuzzyMatchToFront(t *testing.T) {
 	require.Equal(t, want, matches[0], "the existing fuzzy match must retain its metadata")
 	selected, ok := m.Selected()
 	require.True(t, ok)
-	require.Equal(t, "ZZZ", selected.Code)
+	require.Equal(t, "ZZZ", selectedCommandCode(t, selected))
 }
 
 func TestModelExactArgumentMatchKeepsAbsentAndFirstBehavior(t *testing.T) {
@@ -102,7 +103,11 @@ func TestModelExactArgumentMatchKeepsAbsentAndFirstBehavior(t *testing.T) {
 			commands: func(zzz command.Command) []command.Command {
 				return []command.Command{cmd("AAA", "", "ZZZ 1"), zzz}
 			},
-			want: Match{Command: command.Command{
+			want: Match{Result: NewCommandResult(command.Command{
+				Code:      "ZZZ",
+				Desc:      "unmatched",
+				Arguments: command.ArgumentsRequired,
+			}), Command: command.Command{
 				Code:      "ZZZ",
 				Desc:      "unmatched",
 				Arguments: command.ArgumentsRequired,
@@ -177,6 +182,13 @@ func TestRenderSafelyClipsVisibleFieldsAtNarrowWidths(t *testing.T) {
 			}
 		})
 	}
+}
+
+func selectedCommandCode(t *testing.T, result Result) string {
+	t.Helper()
+	cmd, ok := resultCommand(result)
+	require.True(t, ok, "selected result is a command")
+	return cmd.Code
 }
 
 func frameRow(frame renderer.Frame, y int) string {
@@ -317,6 +329,41 @@ func TestModelCompleteSelected(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestModelUsesDefensiveTypedResultsAndKeepsSessionsCommandInert(t *testing.T) {
+	created := time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC)
+	results := []Result{
+		NewCommandResult(cmd("JRS", "Jump", "Jump to recent session")),
+		NewActiveSessionResult("work", created, "work-id"),
+		NewStoppedSessionResult("work", created),
+	}
+	m := New(results)
+	results[1] = NewActiveSessionResult("changed", created, "changed-id")
+
+	for _, r := range "work" {
+		m.Insert(r)
+	}
+	matches := m.Matches()
+	require.Len(t, matches, 2)
+	require.Equal(t, ResultKindActiveSession, matches[0].Result.Kind())
+	matches[0].Result = NewCommandResult(cmd("BAD", "", ""))
+	require.Equal(t, ResultKindActiveSession, m.Matches()[0].Result.Kind())
+
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	session, ok := selected.(SessionResult)
+	require.True(t, ok)
+	id, active := session.SessionID()
+	require.True(t, active)
+	require.Equal(t, domain.SessionID("work-id"), id)
+	require.False(t, m.CompleteSelected(), "sessions never participate in tab completion")
+	require.Equal(t, "work", m.Query())
+	_, argument := m.ArgumentCommand()
+	require.False(t, argument)
+
+	frame := m.Render(domain.Size{Cols: 28, Rows: 2}, RenderOptions{Styles: DefaultRenderStyles()})
+	require.Equal(t, "Switch to session work      ", frameRow(frame, 1))
 }
 
 func TestRenderGuidanceReplacesOnlyExactContextualRow(t *testing.T) {

@@ -2,7 +2,9 @@ package palette
 
 import (
 	"testing"
+	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/stretchr/testify/require"
 )
@@ -70,4 +72,59 @@ func TestFuzzyEmptyQueryPreservesRegistryOrder(t *testing.T) {
 	matches := Fuzzy(commands, "")
 
 	require.Equal(t, []string{"B", "A"}, codes(matches))
+}
+
+func TestFuzzyMixedResultsPrioritizeCommandShortcodeAndRankSessions(t *testing.T) {
+	created := time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC)
+	results := []Result{
+		NewStoppedSessionResult("work", created),
+		NewCommandResult(cmd("WORK", "", "Create a workspace")),
+		NewActiveSessionResult("work", created, domain.SessionID("work-id")),
+		NewCommandResult(cmd("WQORRK", "", "")),
+		NewCommandResult(cmd("ZZZ", "", "work tools")),
+	}
+
+	matches := Fuzzy(results, "work")
+	require.Equal(t, []string{"WORK", "work", "work", "WQORRK", "ZZZ"}, matchSearchText(matches))
+	require.Equal(t, []ResultKind{
+		ResultKindCommand,
+		ResultKindActiveSession,
+		ResultKindStoppedSession,
+		ResultKindCommand,
+		ResultKindCommand,
+	}, matchKinds(matches))
+	require.Equal(t, []int{0, 1, 2, 3}, matches[0].Positions)
+	require.Equal(t, []int{0, 1, 2, 3}, matches[1].Positions)
+	require.Empty(t, matches[4].Positions)
+}
+
+func TestFuzzyMixedResultsUsesKindThenNormalizedTextThenStableOrder(t *testing.T) {
+	created := time.Time{}
+	results := []Result{
+		NewStoppedSessionResult("aBravo", created),
+		NewStoppedSessionResult("aAlpha", created),
+		NewActiveSessionResult("aZulu", created, "z"),
+		NewActiveSessionResult("aEcho", created, "e"),
+		NewActiveSessionResult("aEcho", created, "e2"),
+		NewCommandResult(cmd("AX", "", "")),
+	}
+
+	matches := Fuzzy(results, "a")
+	require.Equal(t, []string{"AX", "aEcho", "aEcho", "aZulu", "aAlpha", "aBravo"}, matchSearchText(matches))
+}
+
+func matchSearchText(matches []Match) []string {
+	out := make([]string, len(matches))
+	for i, match := range matches {
+		out[i] = match.Result.SearchText()
+	}
+	return out
+}
+
+func matchKinds(matches []Match) []ResultKind {
+	out := make([]ResultKind, len(matches))
+	for i, match := range matches {
+		out[i] = match.Result.Kind()
+	}
+	return out
 }
