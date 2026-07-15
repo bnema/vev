@@ -46,7 +46,7 @@ func TestPaletteBackdropDimsSimultaneousCopyMode(t *testing.T) {
 	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
 	dimmed := client.Frame.At(0, 1)
 	require.Equal(t, undimmed.Rune, dimmed.Rune, "palette backdrop must preserve copy content")
-	require.Equal(t, themeui.DimStyle(undimmed.Style, theme), dimmed.Style, "palette backdrop must dim the composed copy frame")
+	require.Equal(t, themeui.NewDimmer(theme).Dim(undimmed.Style), dimmed.Style, "palette backdrop must dim the composed copy frame")
 	require.Equal(t, copyBar, client.Frame.Row(client.Frame.Height-1), "copy status bar must remain crisp")
 	paletteVisible := false
 	for y := range client.Frame.Height {
@@ -110,7 +110,7 @@ func TestPaletteBackdropKeepsSimultaneousPickerCrisp(t *testing.T) {
 	d.enterPalette(sess, ac)
 	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
 	require.Equal(t, pickerTitle, client.Frame.At(36, 2), "picker composed with palette must remain crisp")
-	require.Equal(t, themeui.DimStyle(undimmedPane.Style, backdropTheme()), client.Frame.At(0, 1).Style, "pane content outside overlays must use the theme dim style")
+	require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(undimmedPane.Style), client.Frame.At(0, 1).Style, "pane content outside overlays must use the theme dim style")
 }
 
 func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
@@ -131,7 +131,7 @@ func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
 	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
 	dimmed := client.Frame.At(0, 1)
 	require.Equal(t, 'X', dimmed.Rune)
-	require.Equal(t, themeui.DimStyle(undimmed.Style, backdropTheme()), dimmed.Style, "open palette must use the theme dim style")
+	require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(undimmed.Style), dimmed.Style, "open palette must use the theme dim style")
 	require.Equal(t, topBar, client.Frame.At(0, 0), "top chrome remains crisp")
 	require.Equal(t, bottomBar, client.Frame.At(0, 24), "bottom chrome remains crisp")
 

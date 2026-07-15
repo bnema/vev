@@ -430,14 +430,14 @@ func offsetPlacement(pl layout.Placement, dx, dy int) layout.Placement {
 	return pl
 }
 
-func blitPaneFrame(dst renderer.Frame, r domain.Rect, src renderer.Frame, dim bool, theme themeui.Theme) {
+func blitPaneFrame(dst renderer.Frame, r domain.Rect, src renderer.Frame, dim bool, dimmer themeui.Dimmer) {
 	rows := min(r.Height, src.Height)
 	cols := min(r.Width, src.Width)
 	for y := range rows {
 		for x := range cols {
 			cell := src.At(x, y)
 			if dim {
-				cell.Style = themeui.DimStyle(cell.Style, theme)
+				cell.Style = dimmer.Dim(cell.Style)
 			}
 			dst.Set(r.X+x, r.Y+y, cell)
 		}

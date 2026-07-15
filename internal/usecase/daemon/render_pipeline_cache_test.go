@@ -95,6 +95,7 @@ func TestComposeFrameCacheSkipsUndamagedBlitsAndInvalidatesFocusAndLayout(t *tes
 	require.Equal(t, '│', committed.frame.At(20, 1).Rune)
 	focusedStyle := committed.frame.At(0, 1).Style
 	dimmedStyle := committed.frame.At(21, 1).Style
+	require.Equal(t, renderer.RGB{R: 96, G: 96, B: 96}, dimmedStyle.ForegroundRGB, "inactive panes should use stronger foreground dimming")
 
 	undamaged := initial
 	undamaged.reset = false
