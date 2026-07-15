@@ -73,6 +73,25 @@ func TestPaletteEntryPublishesEligibleNamedSessionResults(t *testing.T) {
 	}, got)
 }
 
+func TestPaletteRecentSessionsExcludeEphemeralSessions(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, current, ac, _ := newManualSessionWithPTYs(t, p)
+	named := &session{id: "named", name: "named", tabs: []*tab{{}}}
+	named.mruAt.Store(1)
+	ephemeral := &session{id: "ephemeral", name: "1", ephemeral: true, tabs: []*tab{{}}}
+	ephemeral.mruAt.Store(2)
+	d.sessions[named.id] = named
+	d.sessions[ephemeral.id] = ephemeral
+
+	d.enterPalette(current, ac)
+	ac.overlays.paletteMu.Lock()
+	defer ac.overlays.paletteMu.Unlock()
+
+	require.Len(t, ac.overlays.paletteRecent, 1)
+	require.Equal(t, named.id, ac.overlays.paletteRecent[0].id)
+}
+
 func TestPaletteSessionFailureFeedbackClearsOnQueryChange(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()

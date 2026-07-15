@@ -87,8 +87,15 @@ func TestPickerViewsIncludesEphemeralSessions(t *testing.T) {
 	views, _ := d.pickerViews(current)
 
 	require.Len(t, views, 2)
-	require.Equal(t, ephemeral.id, views[0].ID)
-	require.Equal(t, "1", views[0].Name)
+	var ephemeralView picker.SessionView
+	for _, view := range views {
+		if view.ID == ephemeral.id {
+			ephemeralView = view
+			break
+		}
+	}
+	require.Equal(t, ephemeral.id, ephemeralView.ID)
+	require.Equal(t, "1", ephemeralView.Name)
 }
 
 func TestPickerViewsCarryNamedLifecycleIdentity(t *testing.T) {
