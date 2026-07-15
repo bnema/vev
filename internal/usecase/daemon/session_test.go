@@ -1482,7 +1482,19 @@ func TestChildEnvFromPreservesNonReservedEntriesVerbatimAndInOrder(t *testing.T)
 }
 
 func TestShellFromEnvironmentFallsBackOnlyWhenAbsentOrEmpty(t *testing.T) {
-	require.Equal(t, "/bin/sh", shellFromEnvironment(nil))
-	require.Equal(t, "/bin/sh", shellFromEnvironment([]string{"SHELL="}))
-	require.Equal(t, "/usr/bin/fish", shellFromEnvironment([]string{"SHELL=/usr/bin/fish"}))
+	tests := []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{name: "absent", want: "/bin/sh"},
+		{name: "empty", env: []string{"SHELL="}, want: "/bin/sh"},
+		{name: "set", env: []string{"SHELL=/usr/bin/fish"}, want: "/usr/bin/fish"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, shellFromEnvironment(tt.env))
+		})
+	}
 }

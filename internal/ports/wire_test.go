@@ -135,6 +135,8 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 			0x00, 0x00, 0x00, 0x06, 'X', 'Y', '=', '1', '2', '3',
 		}
 		require.Equal(t, want, got)
+		assertAllPrefixesFail(t, got, UnmarshalHello)
+		assertTrailingGarbageFails(t, got, UnmarshalHello)
 	})
 
 	t.Run("lossless order and values", func(t *testing.T) {
