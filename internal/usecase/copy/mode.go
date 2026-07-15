@@ -379,7 +379,8 @@ func (m *Mode) Render(styles ...renderer.Style) renderer.Frame {
 			}
 		}
 		if src == cursor.Row && cursorValid && !cursorCovered && len(row) > 0 {
-			applySelectionStyle(&row[cursor.Col].Style, selection, hasSelection)
+			cursorCol := min(cursor.Col, len(row)-1)
+			applySelectionStyle(&row[cursorCol].Style, selection, hasSelection)
 		}
 	}
 	status := inverseStyle()

@@ -177,7 +177,9 @@ func (d *Daemon) copyMouse(sess *session, ac *attachedClient, ev mouse.Event, ma
 		pointer := rt.copyPointer
 		if pointer.valid && pointer.epoch == snapshot.epoch && pointer.pane == mapped.pane && pointer.document == rt.copyDocument {
 			if !pointer.dragging {
-				rt.copyMode.StartCharacterSelection(pointer.press)
+				if !pointer.wordDrag {
+					rt.copyMode.StartCharacterSelection(pointer.press)
+				}
 				pointer.dragging = true
 			}
 			if rt.copyClick.valid && rt.copyClick.pane == pointer.pane {

@@ -92,6 +92,16 @@ func TestCopyModeSearchNavigationExtendsActiveSelection(t *testing.T) {
 	require.Equal(t, Selection{Anchor: Pos{Row: 0}, Active: Pos{Row: 2, Col: 2}, Granularity: Character, Enabled: true}, m.Selection())
 }
 
+func TestCopyModeRenderBoundsCursorToRenderedRow(t *testing.T) {
+	m := NewMode(NewDocument(NewSnapshotFromRows([][]renderer.Cell{row("alpha")}, 2, 1), ""))
+	require.True(t, m.SetPosition(Pos{Row: 0, Col: 4}), "cursor remains valid in the document despite a narrow render frame")
+
+	selection := renderer.Style{HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{R: 1}}
+	require.NotPanics(t, func() { _ = m.Render(renderer.DefaultStyle(), selection) })
+	frame := m.Render(renderer.DefaultStyle(), selection)
+	require.True(t, frame.At(1, 0).Style.HasBackgroundRGB, "a valid off-frame cursor is rendered at the visible edge")
+}
+
 func TestCopyModeRenderKeepsPassiveCursorOutsidePartialSameRowSelection(t *testing.T) {
 	cells := []renderer.Cell{{Rune: '界'}, {Continuation: true}, {Rune: 'a'}, {Rune: 'b'}}
 	m := NewMode(NewDocument(NewSnapshotFromRows([][]renderer.Cell{cells}, 4, 1), ""))

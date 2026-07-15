@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +139,63 @@ func TestCopyDoubleClick(t *testing.T) {
 		ac.overlays.copyMu.Unlock()
 		require.NotEqual(t, scopy.Word, selection.Granularity)
 	})
+}
+
+func TestCopyWordDragKeepsWordAnchorOnFirstMotion(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		pressCol, motionCol    int
+		wantAnchor, wantActive scopy.Pos
+	}{
+		{
+			name:       "forward from inside first word",
+			pressCol:   3,
+			motionCol:  8,
+			wantAnchor: scopy.Pos{Row: 0},
+			wantActive: scopy.Pos{Row: 0, Col: 9},
+		},
+		{
+			name:       "reverse from inside second word",
+			pressCol:   8,
+			motionCol:  3,
+			wantAnchor: scopy.Pos{Row: 0, Col: 6},
+			wantActive: scopy.Pos{Row: 0, Col: 4},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sess, ac, clock := mouseCopyHarness(t, "alpha beta")
+			copyMouseInput(d, sess, ac, "\x1b[<0;"+strconv.Itoa(tc.pressCol)+";2M\x1b[<0;"+strconv.Itoa(tc.pressCol)+";2m")
+			clock.Advance(time.Millisecond)
+			copyMouseInput(d, sess, ac, "\x1b[<0;"+strconv.Itoa(tc.pressCol)+";2M\x1b[<32;"+strconv.Itoa(tc.motionCol)+";2M")
+
+			ac.overlays.copyMu.Lock()
+			selection := ac.overlays.copyMode.Selection()
+			text := ac.overlays.copyMode.SelectedText()
+			pointer := ac.overlays.copyPointer
+			ac.overlays.copyMu.Unlock()
+			require.Equal(t, scopy.Word, selection.Granularity)
+			require.Equal(t, tc.wantAnchor, selection.Anchor)
+			require.Equal(t, tc.wantActive, selection.Active)
+			require.Equal(t, "alpha beta", text)
+			require.True(t, pointer.dragging)
+			require.True(t, pointer.wordDrag)
+		})
+	}
+}
+
+func TestCopyCharacterDragStartsAtPress(t *testing.T) {
+	d, sess, ac, _ := mouseCopyHarness(t, "alpha beta")
+	copyMouseInput(d, sess, ac, "\x1b[<0;3;2M\x1b[<32;8;2M")
+
+	ac.overlays.copyMu.Lock()
+	selection := ac.overlays.copyMode.Selection()
+	pointer := ac.overlays.copyPointer
+	ac.overlays.copyMu.Unlock()
+	require.Equal(t, scopy.Character, selection.Granularity)
+	require.Equal(t, scopy.Pos{Row: 0, Col: 2}, selection.Anchor)
+	require.Equal(t, scopy.Pos{Row: 0, Col: 7}, selection.Active)
+	require.True(t, pointer.dragging)
+	require.False(t, pointer.wordDrag)
 }
 
 func TestCopySearchReleaseInvalidatesPointerBeforeNextDrag(t *testing.T) {
