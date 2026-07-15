@@ -481,6 +481,7 @@ func attachOnce(ctx context.Context, transport ports.Transport, term ports.Termi
 		Cwd:               cwd,
 		TrueColor:         trueColor,
 		MaxOutputInFlight: requestedOutputWindow(transport),
+		Env:               os.Environ(),
 	}
 	if closed, err := boundedPreWelcome(ctx, clk, transport, func() error {
 		return transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)})

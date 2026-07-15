@@ -25,6 +25,65 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type firstHelloTestTransport struct {
+	frames []ports.Frame
+}
+
+func (t *firstHelloTestTransport) Send(ports.Frame) error { return nil }
+func (t *firstHelloTestTransport) Recv() (ports.Frame, error) {
+	if len(t.frames) == 0 {
+		return ports.Frame{}, io.EOF
+	}
+	frame := t.frames[0]
+	t.frames = t.frames[1:]
+	return frame, nil
+}
+func (t *firstHelloTestTransport) Close() error { return nil }
+
+func TestFirstHelloTransportReplacesRemoteEnvironment(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		session  string
+		wantName string
+	}{
+		{name: "stdio replaces environment", wantName: ""},
+		{name: "udp proxy replaces environment and retains session rewrite", session: "work", wantName: "work"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			original := ports.Hello{
+				Version:           ports.ProtocolVersion,
+				Intent:            ports.IntentAttach,
+				ClientID:          [16]byte{1},
+				ResumeToken:       2,
+				Size:              domain.Size{Cols: 80, Rows: 24},
+				TermEnv:           "client-term",
+				Cwd:               "/client",
+				TrueColor:         true,
+				MaxOutputInFlight: 8,
+				Env:               []string{"CLIENT=value"},
+			}
+			nonHello := ports.Frame{Type: ports.MsgInput, Payload: []byte("unchanged")}
+			transport := &firstHelloTestTransport{frames: []ports.Frame{
+				{Type: ports.MsgHello, Payload: ports.MarshalHello(original)},
+				nonHello,
+			}}
+			wrapped := newFirstHelloTransport(transport, tt.session, []string{"REMOTE=one", "TOKEN=a=b=c"})
+
+			frame, err := wrapped.Recv()
+			require.NoError(t, err)
+			got, err := ports.UnmarshalHello(frame.Payload)
+			require.NoError(t, err)
+			original.Name = tt.wantName
+			original.Env = []string{"REMOTE=one", "TOKEN=a=b=c"}
+			require.Equal(t, original, got)
+
+			frame, err = wrapped.Recv()
+			require.NoError(t, err)
+			require.Equal(t, nonHello, frame)
+		})
+	}
+}
+
 func TestRunUDPProxyUsesBoundedClientMaxPending(t *testing.T) {
 	require.Equal(t, 32, udpProxyClientTransportOptions.MaxPending)
 }
@@ -452,6 +511,7 @@ func TestDetachedLocalHelloIncludesTrueColor(t *testing.T) {
 	require.Equal(t, "xterm-direct", hello.TermEnv)
 	require.Equal(t, "/tmp/work", hello.Cwd)
 	require.True(t, hello.TrueColor)
+	require.Equal(t, os.Environ(), hello.Env)
 }
 
 type namedDialer struct{ name string }

@@ -649,6 +649,7 @@ func detachedLocalHello(name, cwd string) ports.Hello {
 		TermEnv:   termEnv,
 		Cwd:       cwd,
 		TrueColor: client.DetectTrueColor(termEnv, os.Getenv("COLORTERM")),
+		Env:       os.Environ(),
 	}
 }
 
@@ -779,7 +780,7 @@ func runStdio(ctx context.Context) (retErr error) {
 	}
 	defer func() { _ = transport.Close() }()
 	stdio := sshstdio.NewTransport(os.Stdin, os.Stdout, nil, sshstdio.WithRuntimeObserver(observer))
-	return proxyTransports(ctx, stdio, transport, log)
+	return proxyTransports(ctx, newFirstHelloTransport(stdio, "", os.Environ()), transport, log)
 }
 
 var (
@@ -920,10 +921,7 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr e
 		return err
 	}
 
-	var dgramTr ports.Transport = dg
-	if session != "" {
-		dgramTr = preHelloNameTransport{Transport: dg, session: session}
-	}
+	dgramTr := newFirstHelloTransport(dg, session, os.Environ())
 	return dgram.ProxyRuntime{Client: dgramTr, Daemon: daemonTr, Log: log, IdleTTL: udpProxyIdleTTL}.Run(ctx)
 }
 
@@ -1015,24 +1013,47 @@ func listenUDPInRange(ctx context.Context, r udpPortRange) (net.PacketConn, erro
 	return nil, fmt.Errorf("no free UDP port in range %d-%d: %w", r.start, r.end, lastErr)
 }
 
-type preHelloNameTransport struct {
+// firstHelloTransport applies proxy-owned values to exactly the first Hello
+// crossing a remote boundary. It intentionally leaves all later frames and
+// malformed Hellos untouched so proxying preserves the client stream.
+type firstHelloTransport struct {
 	ports.Transport
+	mu      sync.Mutex
+	seen    bool
 	session string
+	env     []string
 }
 
-func (t preHelloNameTransport) Recv() (ports.Frame, error) {
+func newFirstHelloTransport(transport ports.Transport, session string, env []string) *firstHelloTransport {
+	return &firstHelloTransport{
+		Transport: transport,
+		session:   session,
+		env:       append([]string(nil), env...),
+	}
+}
+
+func (t *firstHelloTransport) Recv() (ports.Frame, error) {
 	f, err := t.Transport.Recv()
-	if err != nil || f.Type != ports.MsgHello || t.session == "" {
+	if err != nil || f.Type != ports.MsgHello {
 		return f, err
 	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.seen {
+		return f, nil
+	}
+	t.seen = true
+
 	h, err := ports.UnmarshalHello(f.Payload)
 	if err != nil {
 		return f, nil
 	}
+	h.Env = append([]string(nil), t.env...)
 	if h.Name == "" {
 		h.Name = t.session
-		f.Payload = ports.MarshalHello(h)
 	}
+	f.Payload = ports.MarshalHello(h)
 	return f, nil
 }
 
