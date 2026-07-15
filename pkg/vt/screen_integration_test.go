@@ -6,6 +6,45 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
+func TestZshAutosuggestionRepaintEmitsForwardDamage(t *testing.T) {
+	s := NewScreen(20, 2)
+	r := renderer.New(renderer.Capabilities{})
+
+	s.Write([]byte("❯ "))
+	if _, err := r.Draw(s.Frame, s.Damage()); err != nil {
+		t.Fatal(err)
+	}
+	s.ClearDamage()
+
+	s.Write([]byte("h"))
+	if _, err := r.Draw(s.Frame, s.Damage()); err != nil {
+		t.Fatal(err)
+	}
+	s.ClearDamage()
+
+	s.Write([]byte("\x1b[31mh\x1b[39m"))
+	s.Write([]byte("\x1b[38mello\x1b[39m\r \x1b[31mh\x1b[39m"))
+
+	for y := range s.Frame.Height {
+		for x := range s.Frame.Width {
+			r := s.Frame.At(x, y).Rune
+			if r == '\r' || r == '\n' {
+				t.Fatalf("cell(%d,%d) contains control rune %q", x, y, r)
+			}
+		}
+	}
+
+	out, err := r.Draw(s.Frame, s.Damage())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range out {
+		if b == '\r' || b == '\n' {
+			t.Fatalf("incremental output contains raw control byte %q: %q", b, string(out))
+		}
+	}
+}
+
 func TestIntegrationScenarios(t *testing.T) {
 	tests := []struct {
 		name string

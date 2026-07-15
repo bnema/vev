@@ -81,12 +81,22 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 	}
 
 	if scroll, ok := findSafeScroll(frame, damage); ok && r.canApplyScroll(frame, scroll, damage) {
+		spans, full := buildDamagePlan(frame, damage, &scroll)
+		if full {
+			r.writeFull(buf, frame, &st)
+			r.advanceShadow(frame)
+			if r.caps.SynchronizedOutput {
+				buf.WriteString(SyncEndCSI)
+			}
+			return copyBytes(buf), nil
+		}
+
 		emitScrollUp(buf, scroll)
 		// emitScrollUp resets the SGR pen to default (matching st's initial
 		// pen) but leaves the cursor wherever the DECSTBM restore put it —
 		// terminal-dependent, so cursor tracking stays invalidated.
 		r.applyScroll(scroll)
-		r.writeDamage(buf, frame, damage, &scroll, &st)
+		r.emitDamageSpans(buf, frame, spans, &st)
 		r.advanceDamage(frame, damage, &scroll)
 		if r.caps.SynchronizedOutput {
 			buf.WriteString(SyncEndCSI)
@@ -106,8 +116,11 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 		return copyBytes(buf), nil
 	}
 
-	r.writeDamage(buf, frame, damage, nil, &st)
-	r.advanceDamage(frame, damage, nil)
+	if r.writeDamage(buf, frame, damage, nil, &st) {
+		r.advanceShadow(frame)
+	} else {
+		r.advanceDamage(frame, damage, nil)
+	}
 	if r.caps.SynchronizedOutput {
 		buf.WriteString(SyncEndCSI)
 	}
@@ -167,7 +180,9 @@ func (r *Renderer) writeFull(out *bytes.Buffer, frame Frame, st *drawState) {
 	out.WriteString("\x1b[0m")
 }
 
-func (r *Renderer) writeDamage(out *bytes.Buffer, frame Frame, damage []Damage, skip *Damage, st *drawState) {
+// writeDamage emits a canonical, bounded view of text and clear damage. It
+// reports whether the planner exceeded its budget and emitted a full redraw.
+func (r *Renderer) writeDamage(out *bytes.Buffer, frame Frame, damage []Damage, skip *Damage, st *drawState) bool {
 	if len(damage) == 0 {
 		for y := range frame.Height {
 			if r.lineDirty(frame, y) {
@@ -175,22 +190,21 @@ func (r *Renderer) writeDamage(out *bytes.Buffer, frame Frame, damage []Damage, 
 			}
 		}
 		out.WriteString("\x1b[0m")
-		return
+		return false
 	}
-	for _, d := range damage {
-		if skip != nil && sameDamage(d, *skip) {
-			continue
-		}
-		switch d.Kind {
-		case DamageText, DamageClear:
-			x, y, w, h, ok := clampRect(frame, d.X, d.Y, d.Width, d.Height)
-			if !ok {
-				continue
-			}
-			for row := y; row < y+h; row++ {
-				r.emitSpan(out, frame, row, x, w, st)
-			}
-		}
+
+	spans, full := buildDamagePlan(frame, damage, skip)
+	if full {
+		r.writeFull(out, frame, st)
+		return true
+	}
+	r.emitDamageSpans(out, frame, spans, st)
+	return false
+}
+
+func (r *Renderer) emitDamageSpans(out *bytes.Buffer, frame Frame, spans []damageSpan, st *drawState) {
+	for _, span := range spans {
+		r.emitSpan(out, frame, span.y, span.x, span.width, st)
 	}
 	out.WriteString("\x1b[0m")
 }
@@ -261,17 +275,38 @@ func (r *Renderer) syncRect(frame Frame, x, y, width, height int) {
 }
 
 func clampRect(frame Frame, x, y, width, height int) (int, int, int, int, bool) {
-	if width <= 0 || height <= 0 {
+	x, width, okX := clampRange(x, width, frame.Width)
+	y, height, okY := clampRange(y, height, frame.Height)
+	if !okX || !okY {
 		return 0, 0, 0, 0, false
 	}
-	x0 := max(0, x)
-	y0 := max(0, y)
-	x1 := min(frame.Width, x+width)
-	y1 := min(frame.Height, y+height)
-	if x1 <= x0 || y1 <= y0 {
-		return 0, 0, 0, 0, false
+	return x, y, width, height, true
+}
+
+// clampRange intersects [pos, pos+size) with [0, limit) without evaluating an
+// overflowing endpoint from untrusted damage coordinates.
+func clampRange(pos, size, limit int) (int, int, bool) {
+	if size <= 0 || limit <= 0 || pos >= limit {
+		return 0, 0, false
 	}
-	return x0, y0, x1 - x0, y1 - y0, true
+	if pos < 0 {
+		// -size is safe because size is positive. If pos is at or before that
+		// point, the rectangle ends at or before zero.
+		if pos <= -size {
+			return 0, 0, false
+		}
+		end := pos + size // pos > -size proves this addition cannot overflow.
+		if end > limit {
+			end = limit
+		}
+		return 0, end, true
+	}
+
+	available := limit - pos
+	if size > available {
+		size = available
+	}
+	return pos, size, true
 }
 
 // writeCursor emits a cursor-positioning CSI sequence without fmt.Fprintf
