@@ -159,17 +159,26 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 
 	id := domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
 	d.nextID++
-	createdAt := time.Now().UnixNano()
+	stopped, resuming := d.stopped[name]
+	var createdAt int64
+	if !ephemeral && resuming {
+		// A stopped session is the same lifecycle when resumed; it must retain
+		// the persisted identity rather than receive a fresh timestamp.
+		createdAt = stopped.createdAt
+		if createdAt > d.lastAllocatedCreatedAt {
+			d.lastAllocatedCreatedAt = createdAt
+		}
+	} else {
+		createdAt = d.allocateLifecycleCreatedAtLocked()
+	}
 
 	sctx, cancel := context.WithCancel(d.serveCtx)
 	for _, tb := range tabs {
 		tb.ctx, tb.cancel = context.WithCancel(sctx)
 	}
 	lastUsedSeq := uint64(0)
-	if !ephemeral {
-		if stopped, ok := d.stopped[name]; ok {
-			lastUsedSeq = stopped.lastUsedSeq
-		}
+	if !ephemeral && resuming {
+		lastUsedSeq = stopped.lastUsedSeq
 	}
 	sess := &session{
 		id:        id,
@@ -495,10 +504,6 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	oldName := sess.name
 	wasEphemeral := sess.ephemeral
 	createdAt := sess.createdAt
-	if createdAt == 0 {
-		createdAt = time.Now().UnixNano()
-		sess.createdAt = createdAt
-	}
 	lastUsedSeq := sess.mruAt.Load()
 	if wasEphemeral || oldName != name {
 		record := sess.persistRecordLocked(time.Now().UnixNano())
@@ -572,10 +577,6 @@ func (d *Daemon) renameTab(sess *session, tb *tab, name string) error {
 
 func (s *session) persistRecordLocked(updatedAt int64) persist.Record {
 	createdAt := s.createdAt
-	if createdAt == 0 {
-		createdAt = updatedAt
-		s.createdAt = createdAt
-	}
 	tabNames := make([]string, len(s.tabs))
 	lastCustom := -1
 	for i, tb := range s.tabs {

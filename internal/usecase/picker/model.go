@@ -58,6 +58,10 @@ type Target struct {
 	Name     string
 	TabIndex int
 	Stopped  bool
+	// ExpectedCreatedAt optionally pins this target to a particular named
+	// session lifecycle. Callers that obtain a snapshot outside the daemon use
+	// it to reject a same-name replacement at commit time.
+	ExpectedCreatedAt *int64
 }
 
 // Preview is a bounded view of the selected pane's visible frame.
