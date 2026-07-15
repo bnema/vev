@@ -158,6 +158,9 @@ func composeTabFrameIntoWithLayout(tb *tab, frame renderer.Frame, area domain.Re
 func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area domain.Rect, theme themeui.Theme, layoutSnap tabLayoutSnapshot, cacheValid bool, consumeDamage bool, titleGenerations map[layout.PaneID]uint64) []renderer.Damage {
 	contentArea := domain.Rect{Width: area.Width, Height: area.Height}
 	root := tb.tree.Root
+	styles := newThemeStyles(theme)
+	defaultDimmer := themeui.NewDimmer(theme)
+	inactivePaneDimmer := themeui.NewDimmer(theme, themeui.WithForegroundDimming(inactivePaneForegroundDimming))
 	placements, ok := layoutSnap.placements, layoutSnap.ok && layoutSnap.root == root && layoutSnap.area == contentArea
 	if !ok {
 		placements, ok = layout.Solve(root, contentArea)
@@ -176,7 +179,7 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 		clear(titleGenerations)
 	}
 	if ok && !cacheValid {
-		drawDividers(frame, root, area, themeui.DimStyle(newThemeStyles(theme).border, theme))
+		drawDividers(frame, root, area, defaultDimmer.Dim(styles.border))
 	}
 	var damage []renderer.Damage
 	for _, pl := range placements {
@@ -190,7 +193,7 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 		focused := tb.tree.Focus == pl.ID
 		pl = offsetPlacement(pl, area.X, area.Y)
 		if pl.TitleBar.Height > 0 {
-			generation := drawPaneTitleBar(frame, pl, p, focused, theme)
+			generation := drawPaneTitleBar(frame, pl, p, focused, styles, defaultDimmer)
 			if cacheValid && (titleGenerations == nil || titleGenerations[pl.ID] != generation) {
 				titleDamage := pl.TitleBar
 				titleDamage.X -= area.X
@@ -222,7 +225,7 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 			p.mu.Lock()
 			paneDamage = p.screen.Damage()
 			if !cacheValid || len(paneDamage) > 0 {
-				blitPaneFrame(frame, pl.Content, p.screen.Frame, !focused, theme)
+				blitPaneFrame(frame, pl.Content, p.screen.Frame, !focused, inactivePaneDimmer)
 			}
 			for _, d := range paneDamage {
 				localContent := pl.Content
@@ -234,7 +237,7 @@ func composeTabFrameIntoWithLayoutOptions(tb *tab, frame renderer.Frame, area do
 			continue
 		}
 		if !cacheValid || len(paneDamage) > 0 {
-			blitPaneFrame(frame, pl.Content, paneFrame, !focused, theme)
+			blitPaneFrame(frame, pl.Content, paneFrame, !focused, inactivePaneDimmer)
 		}
 		for _, d := range paneDamage {
 			localContent := pl.Content
@@ -259,13 +262,12 @@ func clearFrameRect(frame renderer.Frame, r domain.Rect) {
 	}
 }
 
-func drawPaneTitleBar(frame renderer.Frame, pl layout.Placement, p *pane, focused bool, theme themeui.Theme) uint64 {
-	styles := newThemeStyles(theme)
+func drawPaneTitleBar(frame renderer.Frame, pl layout.Placement, p *pane, focused bool, styles themeStyles, dimmer themeui.Dimmer) uint64 {
 	style := styles.border
 	if focused {
 		style = styles.statusBar
 	} else {
-		style = themeui.DimStyle(style, theme)
+		style = dimmer.Dim(style)
 	}
 	for x := pl.TitleBar.X; x < pl.TitleBar.X+pl.TitleBar.Width && x < frame.Width; x++ {
 		frame.Set(x, pl.TitleBar.Y, renderer.Cell{Rune: ' ', Style: style})

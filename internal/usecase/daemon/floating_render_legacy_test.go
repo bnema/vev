@@ -44,7 +44,7 @@ func composeFloatingFrame(base renderer.Frame, baseDamage []renderer.Damage, p *
 	p.mu.Unlock()
 	title := captured.title
 	titleGeneration := captured.titleGeneration
-	blitPaneFrame(frame, geometry.Inner, captured.frame, false, theme)
+	blitPaneFrame(frame, geometry.Inner, captured.frame, false, themeui.NewDimmer(theme))
 	damage := append([]renderer.Damage(nil), baseDamage...)
 	for _, d := range captured.damage {
 		damage = append(damage, translatePaneDamage(d, geometry.Inner, content)...)

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseXColor(t *testing.T) {
@@ -261,7 +262,83 @@ func TestScannerFlushesOverflowingPartialQueue(t *testing.T) {
 	}
 }
 
-func TestDimStyle(t *testing.T) {
+func TestDimmer(t *testing.T) {
+	theme := Theme{
+		Foreground: renderer.RGB{R: 240, G: 240, B: 240},
+		Background: renderer.RGB{R: 10, G: 20, B: 30},
+		HasFG:      true, HasBG: true, Known: true, TrueColor: true,
+	}
+	dimmer := NewDimmer(theme, WithForegroundDimming(55))
+
+	t.Run("fades foreground toward the faded cell background", func(t *testing.T) {
+		style := renderer.Style{
+			Foreground: -1, Background: -1,
+			HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 250, G: 100, B: 50},
+			HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{R: 50, G: 150, B: 250},
+		}
+
+		got := dimmer.Dim(style)
+
+		require.Equal(t, renderer.RGB{R: 36, G: 105, B: 173}, got.BackgroundRGB)
+		require.Equal(t, renderer.RGB{R: 132, G: 103, B: 118}, got.ForegroundRGB)
+	})
+
+	t.Run("resolves inverse and custom underline colors before fading", func(t *testing.T) {
+		style := renderer.Style{
+			Bold: true, Italic: true, Inverse: true, Attrs: renderer.AttrUnderline,
+			Foreground: -1, Background: -1,
+			HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 250, G: 100, B: 50},
+			HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{R: 50, G: 150, B: 250},
+			HasUnderlineColorRGB: true, UnderlineColorRGB: renderer.RGB{R: 200, G: 10, B: 100},
+		}
+
+		got := dimmer.Dim(style)
+
+		require.False(t, got.Inverse)
+		require.Equal(t, renderer.RGB{R: 166, G: 72, B: 43}, got.BackgroundRGB)
+		require.Equal(t, renderer.RGB{R: 114, G: 107, B: 136}, got.ForegroundRGB)
+		require.Equal(t, renderer.RGB{R: 181, G: 44, B: 69}, got.UnderlineColorRGB)
+		require.True(t, got.Bold)
+		require.True(t, got.Italic)
+		require.Equal(t, renderer.AttrUnderline, got.Attrs)
+	})
+
+	t.Run("resolves indexed and default colors", func(t *testing.T) {
+		style := renderer.Style{
+			Foreground:        196,
+			Background:        -1,
+			HasUnderlineColor: true,
+			UnderlineColor:    46,
+		}
+
+		got := dimmer.Dim(style)
+
+		require.Equal(t, renderer.RGB{R: 10, G: 20, B: 30}, got.BackgroundRGB)
+		require.Equal(t, renderer.RGB{R: 120, G: 11, B: 17}, got.ForegroundRGB)
+		require.True(t, got.HasUnderlineColorRGB)
+		require.Equal(t, renderer.RGB{R: 6, G: 126, B: 17}, got.UnderlineColorRGB)
+	})
+
+	t.Run("clamps percentages", func(t *testing.T) {
+		style := renderer.Style{
+			Foreground: -1, Background: -1,
+			HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 250, G: 100, B: 50},
+			HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{R: 50, G: 150, B: 250},
+		}
+
+		got := NewDimmer(theme, WithBackgroundDimming(-1), WithForegroundDimming(101)).Dim(style)
+
+		require.Equal(t, style.BackgroundRGB, got.BackgroundRGB)
+		require.Equal(t, style.BackgroundRGB, got.ForegroundRGB)
+	})
+
+	t.Run("leaves style unchanged without a usable truecolor theme", func(t *testing.T) {
+		style := renderer.Style{Foreground: 196, Background: 21, Inverse: true}
+		require.Equal(t, style, NewDimmer(Theme{}, WithForegroundDimming(55)).Dim(style))
+	})
+}
+
+func TestDimmerDefaults(t *testing.T) {
 	theme := Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 20, B: 30}, HasFG: true, HasBG: true, Known: true, TrueColor: true}
 	tests := []struct {
 		name string
@@ -311,9 +388,9 @@ func TestDimStyle(t *testing.T) {
 				Foreground:       -1,
 				Background:       21,
 				HasForegroundRGB: true,
-				ForegroundRGB:    Blend(theme.Foreground, theme.Background, 0.35),
+				ForegroundRGB:    renderer.RGB{R: 131, G: 132, B: 192},
 				HasBackgroundRGB: true,
-				BackgroundRGB:    Blend(renderer.RGB{R: 0, G: 0, B: 255}, theme.Background, 0.35),
+				BackgroundRGB:    renderer.RGB{R: 4, G: 7, B: 176},
 			},
 		},
 		{
@@ -330,18 +407,18 @@ func TestDimStyle(t *testing.T) {
 				Foreground:       -1,
 				Background:       -1,
 				HasForegroundRGB: true,
-				ForegroundRGB:    Blend(renderer.RGB{R: 100, G: 50, B: 25}, theme.Background, 0.35),
+				ForegroundRGB:    renderer.RGB{R: 71, G: 58, B: 61},
 				HasBackgroundRGB: true,
-				BackgroundRGB:    Blend(renderer.RGB{R: 20, G: 100, B: 180}, theme.Background, 0.35),
+				BackgroundRGB:    renderer.RGB{R: 17, G: 72, B: 128},
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := DimStyle(tt.in, theme)
+			got := NewDimmer(theme).Dim(tt.in)
 			if !got.Equal(tt.want) {
-				t.Fatalf("DimStyle()=%+v want %+v", got, tt.want)
+				t.Fatalf("Dimmer.Dim()=%+v want %+v", got, tt.want)
 			}
 		})
 	}
