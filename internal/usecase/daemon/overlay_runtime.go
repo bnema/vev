@@ -158,7 +158,6 @@ type overlayRenderSnapshot struct {
 
 	copyActive      bool
 	copyMode        *scopy.Mode
-	copyDocument    *scopy.Document
 	copyPane        *pane
 	copySearchModel *visualsearch.Model
 	copyFeedback    string
@@ -195,7 +194,6 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 	rt.copyMu.Lock()
 	snap.copyActive = rt.copyMode != nil
 	snap.copyPane = rt.copyPane
-	snap.copyDocument = rt.copyDocument
 	if rt.copyMode != nil {
 		copyModeValue := *rt.copyMode
 		copyModeValue.Searches = append([]scopy.SearchMatch(nil), rt.copyMode.Searches...)

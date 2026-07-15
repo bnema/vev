@@ -145,7 +145,7 @@ func TestOverlayRuntimeHandleInputInactive(t *testing.T) {
 	require.False(t, ac.overlays.HandleInput(&Daemon{}, []byte("x")))
 }
 
-func TestOverlayRuntimeSnapshotCarriesCopyDocumentAndClearReleasesIt(t *testing.T) {
+func TestOverlayRuntimeSnapshotCarriesCopyModeDocumentAndClearReleasesIt(t *testing.T) {
 	ac := &attachedClient{}
 	ac.initOverlays()
 	p := newPane("floating", nil, domain.Size{Cols: 4, Rows: 2})
@@ -159,7 +159,8 @@ func TestOverlayRuntimeSnapshotCarriesCopyDocumentAndClearReleasesIt(t *testing.
 
 	renderSnap := ac.overlays.SnapshotForRender()
 	require.Same(t, p, renderSnap.copyPane)
-	require.Same(t, document, renderSnap.copyDocument)
+	require.NotNil(t, renderSnap.copyMode)
+	require.Same(t, document, renderSnap.copyMode.Document())
 	renderSnap.Unlock()
 
 	ac.overlays.copyMu.Lock()
@@ -170,7 +171,7 @@ func TestOverlayRuntimeSnapshotCarriesCopyDocumentAndClearReleasesIt(t *testing.
 	ac.overlays.copyMu.Unlock()
 }
 
-func TestOverlayRuntimeCopyDocumentSurvivesRingOverwrite(t *testing.T) {
+func TestOverlayRuntimeCopyModeDocumentSurvivesRingOverwrite(t *testing.T) {
 	ac := &attachedClient{}
 	ac.initOverlays()
 	history := newTestHistory(1)
@@ -185,6 +186,7 @@ func TestOverlayRuntimeCopyDocumentSurvivesRingOverwrite(t *testing.T) {
 	history.Append(testRow("after"))
 	renderSnap := ac.overlays.SnapshotForRender()
 	defer renderSnap.Unlock()
-	require.Same(t, document, renderSnap.copyDocument)
-	require.Equal(t, "before", rowText(renderSnap.copyDocument.Snapshot().Row(0)))
+	require.NotNil(t, renderSnap.copyMode)
+	require.Same(t, document, renderSnap.copyMode.Document())
+	require.Equal(t, "before", rowText(renderSnap.copyMode.Document().Snapshot().Row(0)))
 }
