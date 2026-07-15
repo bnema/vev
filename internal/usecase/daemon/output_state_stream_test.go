@@ -77,6 +77,36 @@ func drawOutputState(t *testing.T, stream *outputStateStream, frame renderer.Fra
 	return stream.frame(data, reset, echoAck), true, nil
 }
 
+// A resize is a state reset, but it must not turn subsequent idle or damaged
+// renders into full frames.
+func TestOutputStateStreamResizeFrameThenNoopAndDamageAreDifferential(t *testing.T) {
+	screen := vt.NewScreen(4, 2)
+	screen.Write([]byte("abcd"))
+	screen.ClearDamage()
+	screen.Resize(6, 2)
+
+	stream := newOutputStateStream()
+	resized, ok, err := drawOutputState(t, stream, screen.Frame, screen.Damage(), true, 0)
+	require.NoError(t, err)
+	require.True(t, ok)
+	resizeOutput, err := ports.UnmarshalOutput(resized.Payload)
+	require.NoError(t, err)
+	require.Zero(t, resizeOutput.BaseStateNum, "resize must emit the one reset frame")
+	screen.ClearDamage()
+
+	_, ok, err = drawOutputState(t, stream, screen.Frame, screen.Damage(), false, 0)
+	require.NoError(t, err)
+	require.False(t, ok, "an unchanged render after resize must emit nothing")
+
+	screen.Frame.Set(0, 0, renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()})
+	damaged, ok, err := drawOutputState(t, stream, screen.Frame, []renderer.Damage{{Kind: renderer.DamageText, Width: 1, Height: 1}}, false, 0)
+	require.NoError(t, err)
+	require.True(t, ok)
+	damageOutput, err := ports.UnmarshalOutput(damaged.Payload)
+	require.NoError(t, err)
+	require.Equal(t, resizeOutput.NewStateNum, damageOutput.BaseStateNum, "later damage must remain incremental")
+}
+
 func TestOutputStateStreamDefaultsAndNormalizesWindow(t *testing.T) {
 	require.Equal(t, uint64(8), newOutputStateStream().maxOutstanding)
 	require.Equal(t, uint64(8), newOutputStateStream(0).maxOutstanding)

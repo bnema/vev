@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
@@ -157,6 +158,38 @@ func benchmarkHistory(t testing.TB, rows, width, chunkRows int) *History {
 		history.Append(cells)
 	}
 	return history
+}
+
+// BenchmarkScreenResizeReflowViewport verifies resize only visits the live
+// viewport. The 10K-history variant must track the control rather than history
+// length; history is deliberately populated without changing the viewport.
+func BenchmarkScreenResizeReflowViewport(b *testing.B) {
+	b.Run("control", func(b *testing.B) { benchmarkScreenResizeReflow(b, 0) })
+	b.Run("10k-history", func(b *testing.B) { benchmarkScreenResizeReflow(b, 10_000) })
+}
+
+func benchmarkScreenResizeReflow(b *testing.B, historyRows int) {
+	b.Helper()
+	s := NewScreenWithHistory(120, 40, HistoryConfig{MaxRows: historyRows + 500})
+	if historyRows > 0 {
+		for range historyRows {
+			s.history.Append(make([]renderer.Cell, 120))
+		}
+	}
+	s.Write(bytes.Repeat([]byte("x"), 120*39))
+	s.ClearDamage()
+	sizes := [2][2]int{{80, 40}, {120, 40}}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; b.Loop(); i++ {
+		s.Resize(sizes[i%len(sizes)][0], sizes[i%len(sizes)][1])
+		s.ClearDamage()
+	}
+	b.StopTimer()
+	if got := s.History(); historyRows > 0 && got.Len() < historyRows {
+		b.Fatalf("resize discarded retained history rows: got %d want at least %d", got.Len(), historyRows)
+	}
 }
 
 func BenchmarkScreenShellRedrawBurst(b *testing.B) {
