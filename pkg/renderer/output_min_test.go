@@ -2,6 +2,7 @@ package renderer
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -426,6 +427,39 @@ func TestCanonicalDamagePreservesWideHeadTracking(t *testing.T) {
 	}
 	if got, want := string(out), "\x1b[1;1HA你\x1b[1;5HB\x1b[0m"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestScrollPlannerFallbackRedrawsWithoutScrollEscape(t *testing.T) {
+	r := New(Capabilities{})
+	base := NewFrame(1, maxPlannedDamageSpans+1)
+	if _, err := r.Draw(base, []Damage{FullRedraw()}); err != nil {
+		t.Fatal(err)
+	}
+
+	frame := base.Clone()
+	frame.ScrollUp(0, frame.Height-1, 1)
+	frame.Set(0, frame.Height-1, Cell{Rune: 'X', Style: DefaultStyle()})
+	damage := []Damage{
+		{Kind: DamageScrollUp, X: 0, Y: 0, Width: frame.Width, Height: frame.Height, Count: 1},
+		{Kind: DamageText, X: 0, Y: 0, Width: frame.Width, Height: frame.Height},
+	}
+	out, err := r.Draw(frame, damage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scrollEscape := "\x1b[1;" + strconv.Itoa(frame.Height) + "r"; strings.Contains(string(out), scrollEscape) {
+		t.Fatalf("planner fallback emitted scroll escape %q before full redraw: %q", scrollEscape, string(out))
+	}
+	if !strings.Contains(string(out), "X") {
+		t.Fatalf("planner fallback did not redraw the frame: %q", string(out))
+	}
+	out, err = r.Draw(frame, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("planner fallback did not synchronize shadow; follow-up output = %q", string(out))
 	}
 }
 

@@ -1,6 +1,9 @@
 package renderer
 
-import "sort"
+import (
+	"cmp"
+	"slices"
+)
 
 const maxPlannedDamageSpans = 4096
 
@@ -32,11 +35,11 @@ func buildDamagePlan(frame Frame, damage []Damage, skip *Damage) ([]damageSpan, 
 		}
 	}
 
-	sort.Slice(spans, func(i, j int) bool {
-		if spans[i].y != spans[j].y {
-			return spans[i].y < spans[j].y
+	slices.SortFunc(spans, func(a, b damageSpan) int {
+		if c := cmp.Compare(a.y, b.y); c != 0 {
+			return c
 		}
-		return spans[i].x < spans[j].x
+		return cmp.Compare(a.x, b.x)
 	})
 
 	return mergeDamageSpans(spans), false

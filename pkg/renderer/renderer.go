@@ -81,16 +81,23 @@ func (r *Renderer) Draw(frame Frame, damage []Damage) ([]byte, error) {
 	}
 
 	if scroll, ok := findSafeScroll(frame, damage); ok && r.canApplyScroll(frame, scroll, damage) {
+		spans, full := buildDamagePlan(frame, damage, &scroll)
+		if full {
+			r.writeFull(buf, frame, &st)
+			r.advanceShadow(frame)
+			if r.caps.SynchronizedOutput {
+				buf.WriteString(SyncEndCSI)
+			}
+			return copyBytes(buf), nil
+		}
+
 		emitScrollUp(buf, scroll)
 		// emitScrollUp resets the SGR pen to default (matching st's initial
 		// pen) but leaves the cursor wherever the DECSTBM restore put it —
 		// terminal-dependent, so cursor tracking stays invalidated.
 		r.applyScroll(scroll)
-		if r.writeDamage(buf, frame, damage, &scroll, &st) {
-			r.advanceShadow(frame)
-		} else {
-			r.advanceDamage(frame, damage, &scroll)
-		}
+		r.emitDamageSpans(buf, frame, spans, &st)
+		r.advanceDamage(frame, damage, &scroll)
 		if r.caps.SynchronizedOutput {
 			buf.WriteString(SyncEndCSI)
 		}
@@ -191,11 +198,15 @@ func (r *Renderer) writeDamage(out *bytes.Buffer, frame Frame, damage []Damage, 
 		r.writeFull(out, frame, st)
 		return true
 	}
+	r.emitDamageSpans(out, frame, spans, st)
+	return false
+}
+
+func (r *Renderer) emitDamageSpans(out *bytes.Buffer, frame Frame, spans []damageSpan, st *drawState) {
 	for _, span := range spans {
 		r.emitSpan(out, frame, span.y, span.x, span.width, st)
 	}
 	out.WriteString("\x1b[0m")
-	return false
 }
 
 func (r *Renderer) lineDirty(frame Frame, y int) bool {
