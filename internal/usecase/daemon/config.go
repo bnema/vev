@@ -29,6 +29,8 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	d.restoreProcessAllowlist.Store(&allowlist)
 	floating := cfg.Floating
 	d.floatingConfig.Store(&floating)
+	copyConfig := cfg.Copy
+	d.copyConfig.Store(&copyConfig)
 	palette := cfg.Palette
 	d.paletteConfig.Store(&palette)
 	tabs := cfg.Tabs
@@ -180,6 +182,13 @@ func (d *Daemon) logConfigWarning(w domain.Warning) {
 		return
 	}
 	d.log.Warn("config warning", "msg", w.Msg)
+}
+
+func (d *Daemon) currentCopyConfig() domain.CopyConfig {
+	if cfg := d.copyConfig.Load(); cfg != nil {
+		return *cfg
+	}
+	return domain.Defaults().Copy
 }
 
 func (d *Daemon) currentPaletteConfig() domain.PaletteConfig {

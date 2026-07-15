@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"strconv"
 
-	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
@@ -33,6 +32,7 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 }
 
 func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
+	frameEvent := ev
 	ac.initOverlays()
 	rt := ac.overlays
 	if rt.promptActive() || rt.paletteActive() || rt.pickerActive() {
@@ -40,82 +40,21 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	}
 	sess := ac.currentSession()
 	if sess == nil {
+		invalidateRejectedLeftPointer(rt, ev)
 		return
 	}
 	tb := sess.activeTab()
 	if tb == nil {
+		invalidateRejectedLeftPointer(rt, ev)
 		return
 	}
 
-	if rt.copyActive() {
-		if rt.copySearchActive() {
-			return
-		}
-		copyPane := copyTargetPane(rt)
-		tb.mu.Lock()
-		floatingPane, geometry, floatingVisible := tb.visibleFloatingSnapshotLocked(d.currentFloatingConfig())
-		floatingCopy := floatingVisible && copyPane == floatingPane
-		tb.mu.Unlock()
-		if floatingCopy {
-			contentRow := ev.Row - 1
-			if !pointInRect(ev.Col, contentRow, geometry.Inner) {
-				return
-			}
-			// Match the multi-pane translation: hand copyMouse a zero-based
-			// popup row so a click selects exactly the row under the pointer.
-			ev.Row = contentRow
-			ev = translateMouseEvent(ev, geometry.Inner.X, geometry.Inner.Y)
-			switch ev.Button {
-			case mouse.Left:
-				d.copyMouse(sess, ac, ev)
-			case mouse.WheelUp:
-				d.copyWheel(sess, ac, -3)
-			case mouse.WheelDown:
-				d.copyWheel(sess, ac, 3)
-			}
-			return
-		}
-		if ev.Button == mouse.Left {
-			contentRow := ev.Row - 1
-			tb.mu.Lock()
-			p := tb.focusedPane()
-			var pl layout.Placement
-			var ok bool
-			multi := len(tb.panes) > 1
-			if p != nil {
-				pl, ok = focusedPlacementLocked(tb)
-			}
-			if ok && multi && !pointInRect(ev.Col, contentRow, pl.Content) && ev.Type == mouse.Press {
-				if target, hit := hitTestPlacementLocked(tb, ev.Col, contentRow); hit {
-					oldFocus := tb.tree.Focus
-					focusPlacementLocked(tb, target.ID)
-					d.applyLayoutLocked(tb)
-					tb.mu.Unlock()
-					d.exitCopyMode(ac)
-					if target.ID != oldFocus {
-						d.refreshPaneTitleOnFocus(sess, target.ID)
-					}
-					d.invalidateRender(sess, ac, true, "input.go")
-					return
-				}
-			}
-			tb.mu.Unlock()
-			if ok && multi {
-				clampedCol := clampInt(ev.Col, pl.Content.X, pl.Content.X+pl.Content.Width-1)
-				clampedRow := clampInt(contentRow, pl.Content.Y, pl.Content.Y+pl.Content.Height-1)
-				ev.Col = clampedCol
-				ev.Row = clampedRow
-				ev = translateMouseEvent(ev, pl.Content.X, pl.Content.Y)
-			}
-		}
-		switch ev.Button {
-		case mouse.Left:
-			d.copyMouse(sess, ac, ev)
-		case mouse.WheelUp:
-			d.copyWheel(sess, ac, -3)
-		case mouse.WheelDown:
-			d.copyWheel(sess, ac, 3)
-		}
+	if d.handleCopyMouse(sess, ac, tb, ev) {
+		return
+	}
+	// A fresh drag is pinned to its press geometry. Handle later events before
+	// normal terminal routing so crossing a split cannot retarget its document.
+	if ev.Button == mouse.Left && ev.Type != mouse.Press && d.handleFreshCopyPointer(sess, ac, ev) {
 		return
 	}
 
@@ -125,9 +64,13 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	if floatingVisible {
 		if !pointInRect(ev.Col, contentRow, floatingGeometry.Inner) {
 			tb.mu.Unlock()
+			invalidateRejectedLeftPointer(rt, ev)
 			return
 		}
 		tb.mu.Unlock()
+		if ev.Button == mouse.Left && ev.Type == mouse.Press && d.handleFreshCopyPress(sess, ac, tb, floating, frameEvent) {
+			return
+		}
 		ev = translateMouseEvent(ev, floatingGeometry.Inner.X, floatingGeometry.Inner.Y)
 		d.handleTerminalMouse(sess, ac, floating, ev, true, true)
 		return
@@ -141,12 +84,17 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	if hit && pointInRect(ev.Col, contentRow, pl.TitleBar) {
 		if !isMouseFocusPress(ev) {
 			tb.mu.Unlock()
+			invalidateRejectedLeftPointer(rt, ev)
 			return
 		}
 		oldFocus := focusedID
 		focusPlacementLocked(tb, pl.ID)
 		d.applyLayoutLocked(tb)
 		tb.mu.Unlock()
+		// A title bar never routes to terminal content. Clear any pre-existing
+		// left-button candidate before handling the focus result, including when
+		// this press leaves the same pane focused.
+		invalidateRejectedLeftPointer(rt, ev)
 		if pl.ID != oldFocus {
 			d.exitCopyMode(ac)
 			d.refreshPaneTitleOnFocus(sess, pl.ID)
@@ -167,6 +115,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 		hoveredFocused = pl.ID == oldFocus
 		tb.mu.Unlock()
 		if p == nil {
+			invalidateRejectedLeftPointer(rt, ev)
 			return
 		}
 		if isMouseFocusPress(ev) && pl.ID != oldFocus {
@@ -181,13 +130,18 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	} else {
 		if multi {
 			tb.mu.Unlock()
+			invalidateRejectedLeftPointer(rt, ev)
 			return
 		}
 		p = tb.focusedPane()
 		tb.mu.Unlock()
 		if p == nil {
+			invalidateRejectedLeftPointer(rt, ev)
 			return
 		}
+	}
+	if ev.Button == mouse.Left && ev.Type == mouse.Press && d.handleFreshCopyPress(sess, ac, tb, p, frameEvent) {
+		return
 	}
 	d.handleTerminalMouse(sess, ac, p, ev, translated, hoveredFocused)
 }
@@ -196,15 +150,10 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 	if p == nil {
 		return
 	}
-	rt := ac.overlays
 	p.mu.Lock()
 	childRows := p.screen.Frame.Height
 	mouseMode, mouseSGR := p.screen.MouseMode()
 	altScreen := p.screen.AltScreenActive()
-	scrollbackRows := 0
-	if p.history != nil {
-		scrollbackRows = p.history.Len()
-	}
 	p.mu.Unlock()
 
 	if mouseMode != 0 {
@@ -220,59 +169,6 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 	}
 
 	switch ev.Button {
-	case mouse.Left:
-		switch ev.Type {
-		case mouse.Press:
-			if altScreen || ev.Row >= childRows {
-				rt.copyMu.Lock()
-				rt.normalMousePressValid = false
-				rt.copyMu.Unlock()
-				return
-			}
-			rt.copyMu.Lock()
-			rt.normalMousePressRow = ev.Row
-			rt.normalMousePressTop = scrollbackRows
-			rt.normalMousePressValid = true
-			rt.copyMu.Unlock()
-		case mouse.Motion:
-			if altScreen || ev.Row >= childRows {
-				return
-			}
-			rt.copyMu.Lock()
-			pressValid := rt.normalMousePressValid
-			pressRow := rt.normalMousePressRow
-			pressTop := rt.normalMousePressTop
-			rt.copyMu.Unlock()
-			if !pressValid {
-				return
-			}
-
-			// The immutable snapshot is the only live-pane access needed for drag entry.
-			p.mu.Lock()
-			document := scopy.NewSnapshot(p.history, p.screen.Frame)
-			p.mu.Unlock()
-			tb := sess.activeTab()
-			if !d.publishCopyMode(sess, ac, tb, p, document, func(mode *scopy.Mode) {
-				mode.StartSelectionAt(document, pressTop+pressRow)
-				mode.ExtendTo(document, document.Len()-document.Height+ev.Row)
-			}) {
-				return
-			}
-			rt.copyMu.Lock()
-			// Publication is revalidated before this state is installed, and no
-			// lifecycle lock is held while copyMu is taken.
-			if rt.copyPane == p && rt.copySnapshot != nil && rt.copyMode != nil {
-				rt.copyPressRow = pressTop + pressRow
-				rt.copyPressRowValid = true
-				rt.copyDragging = true
-			}
-			rt.copyMu.Unlock()
-			d.invalidateRender(sess, ac, true, "input.go")
-		case mouse.Release:
-			rt.copyMu.Lock()
-			rt.normalMousePressValid = false
-			rt.copyMu.Unlock()
-		}
 	case mouse.WheelUp:
 		if altScreen {
 			d.writeToPane(sess, p, []byte("\x1b[A\x1b[A\x1b[A"))

@@ -1,10 +1,10 @@
 package daemon
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
@@ -19,10 +19,17 @@ func TestCopyModeLifecycleResizeExitsBeforeGeometryChange(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
 	d.enterCopyMode(sess, ac)
 	require.True(t, ac.overlays.copyActive())
+	ac.overlays.copyMu.Lock()
+	seedCopyInteractionLocked(ac.overlays, ac.overlays.copyPane, ac.overlays.copyDocument)
+	ac.overlays.copyMu.Unlock()
 
 	d.resize(sess, ac, domain.Size{Cols: 100, Rows: 30})
 
 	require.False(t, ac.overlays.copyActive())
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
+	ac.overlays.copyMu.Unlock()
 }
 
 func TestCopyModeLifecycleActivateTabClearsRuntime(t *testing.T) {
@@ -34,11 +41,18 @@ func TestCopyModeLifecycleActivateTabClearsRuntime(t *testing.T) {
 	}()
 	d.enterCopyMode(sess, ac)
 	require.True(t, ac.overlays.copyActive())
+	ac.overlays.copyMu.Lock()
+	seedCopyInteractionLocked(ac.overlays, ac.overlays.copyPane, ac.overlays.copyDocument)
+	ac.overlays.copyMu.Unlock()
 
 	require.True(t, sess.switchTab(1))
 	d.activateTab(sess, sess.activeTab())
 
 	require.False(t, ac.overlays.copyActive())
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
+	ac.overlays.copyMu.Unlock()
 }
 
 func TestCopyModeLifecycleClosePaneClearsRecoveredClientState(t *testing.T) {
@@ -54,17 +68,22 @@ func TestCopyModeLifecycleClosePaneClearsRecoveredClientState(t *testing.T) {
 	sess.client = ac
 	ac.setSession(sess)
 	closing.mu.Lock()
-	document := scopy.NewSnapshot(closing.history, closing.screen.Frame)
+	document := scopy.NewDocument(scopy.NewSnapshot(closing.history, closing.screen.Frame), domain.DefaultWordSeparators)
 	closing.mu.Unlock()
 	ac.overlays.copyMu.Lock()
 	ac.overlays.copyPane = closing
-	ac.overlays.copySnapshot = &document
+	ac.overlays.copyDocument = document
 	ac.overlays.copyMode = scopy.NewMode(document)
+	seedCopyInteractionLocked(ac.overlays, closing, document)
 	ac.overlays.copyMu.Unlock()
 
 	require.NoError(t, d.closePane(sess, tb, "pane-2", nil, false))
 	require.False(t, ac.overlays.copyActive())
 	require.Nil(t, copyTargetPane(ac.overlays))
+	ac.overlays.copyMu.Lock()
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
+	ac.overlays.copyMu.Unlock()
 }
 
 func TestCopyModeLifecycleCloseOnlyPaneInTabClearsRecoveredClientState(t *testing.T) {
@@ -94,37 +113,198 @@ func TestCopyModeLifecycleDoesNotRenderCandidateBeforeValidation(t *testing.T) {
 	tb := sess.activeTab()
 	p := tb.focusedPane()
 	p.mu.Lock()
-	document := scopy.NewSnapshot(p.history, p.screen.Frame)
+	document := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame), domain.DefaultWordSeparators)
 	p.mu.Unlock()
 
-	// Hold session validation after publication and make the captured target
-	// stale. A render snapshot taken in this window must not expose the
-	// candidate document.
-	sess.mu.Lock()
-	sess.active = 1
+	// Pause after candidate publication, then make the captured target stale.
+	// A render snapshot while paused must not expose the candidate document.
+	reached := make(chan struct{})
+	resume := make(chan struct{})
+	done := make(chan struct{})
+	d.beforeCopyModeRevalidate = func() {
+		close(reached)
+		<-resume
+	}
+	resumed := false
+	defer func() {
+		if !resumed {
+			close(resume)
+		}
+		select {
+		case <-done:
+			d.beforeCopyModeRevalidate = nil
+		case <-time.After(time.Second):
+			t.Error("copy mode publication did not finish after revalidation gate was released")
+		}
+	}()
+
 	result := make(chan bool, 1)
 	go func() {
-		result <- d.publishCopyMode(sess, ac, tb, p, document, nil)
+		defer close(done)
+		result <- d.publishCopyMode(sess, ac, tb, p, document, nil, nil)
 	}()
-	published := assert.Eventually(t, func() bool {
-		ac.overlays.copyMu.Lock()
-		defer ac.overlays.copyMu.Unlock()
-		return ac.overlays.copyPane == p && ac.overlays.copySnapshot != nil
-	}, time.Second, time.Millisecond)
-	if !published {
-		sess.mu.Unlock()
-		<-result
-		return
+	select {
+	case <-reached:
+	case <-time.After(time.Second):
+		t.Fatal("copy mode publication did not reach revalidation gate")
 	}
+
 	renderSnapshot := ac.overlays.SnapshotForRender()
 	candidateWasRenderable := renderSnapshot.copyActive
 	renderSnapshot.Unlock()
-	sess.mu.Unlock()
+	require.True(t, sess.switchTab(1))
+	close(resume)
+	resumed = true
 
-	require.False(t, <-result)
+	select {
+	case published := <-result:
+		require.False(t, published)
+	case <-time.After(time.Second):
+		t.Fatal("copy mode publication did not finish after revalidation gate was released")
+	}
 	require.False(t, candidateWasRenderable)
 	require.False(t, ac.overlays.copyActive())
 	require.Nil(t, copyTargetPane(ac.overlays))
+}
+
+func TestCopyModeLifecyclePublicationEpochRejectsReleaseAndPaneClose(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		invalidate func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, tb *tab, p *pane)
+	}{
+		{
+			name: "release during publication",
+			invalidate: func(_ *testing.T, d *Daemon, sess *session, ac *attachedClient, _ *tab, _ *pane) {
+				d.handleInput(sess, ac, []byte("\x1b[<0;1;2m"))
+			},
+		},
+		{
+			name: "pane close during publication",
+			invalidate: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, tb *tab, p *pane) {
+				require.NoError(t, d.closePane(sess, tb, p.id, ac, false))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, sess, ac, _, releases := newManualTabSession(t, 2)
+			defer func() {
+				for _, release := range releases {
+					release()
+				}
+			}()
+			tb := sess.activeTab()
+			p := tb.focusedPane()
+
+			// A real press is required: the motion publication must inherit this
+			// pointer epoch, rather than publishing a fresh interaction.
+			d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
+			ac.overlays.copyMu.Lock()
+			require.True(t, ac.overlays.copyPointer.valid)
+			ac.overlays.copyMu.Unlock()
+
+			reached := make(chan struct{})
+			resume := make(chan struct{})
+			d.beforeCopyModeRevalidate = func() {
+				close(reached)
+				<-resume
+			}
+			resumed := false
+			defer func() {
+				if !resumed {
+					close(resume)
+				}
+				d.beforeCopyModeRevalidate = nil
+			}()
+			done := make(chan struct{})
+			go func() {
+				d.handleInput(sess, ac, []byte("\x1b[<32;1;3M"))
+				close(done)
+			}()
+			select {
+			case <-reached:
+			case <-time.After(time.Second):
+				t.Fatal("copy mode publication did not reach revalidation gate")
+			}
+
+			tc.invalidate(t, d, sess, ac, tb, p)
+			close(resume)
+			resumed = true
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("copy mode publication did not finish after revalidation gate was released")
+			}
+
+			ac.overlays.copyMu.Lock()
+			require.Nil(t, ac.overlays.copyMode, "stale publication must not resurrect copy mode")
+			require.Nil(t, ac.overlays.copyCandidate)
+			require.False(t, ac.overlays.copyPointer.valid)
+			require.False(t, ac.overlays.copyClick.valid)
+			ac.overlays.copyMu.Unlock()
+		})
+	}
+}
+
+func TestCopyModeLifecycleFloatingCloseDuringPublicationDoesNotResurrect(t *testing.T) {
+	d, sess, ac, _, releases := newManualTabSession(t, 2)
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	tb := sess.activeTab()
+	floating := newPane("floating", nil, domain.Size{Cols: 20, Rows: 5})
+	installTestFloating(tb, floating, true)
+	tb.mu.Lock()
+	_, geometry, visible := tb.visibleFloatingSnapshotLocked(d.currentFloatingConfig())
+	tb.mu.Unlock()
+	require.True(t, visible)
+	press := fmt.Appendf(nil, "\x1b[<0;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+2)
+	motion := fmt.Appendf(nil, "\x1b[<32;%d;%dM", geometry.Inner.X+1, geometry.Inner.Y+3)
+
+	d.handleInput(sess, ac, press)
+	ac.overlays.copyMu.Lock()
+	require.True(t, ac.overlays.copyPointer.valid)
+	ac.overlays.copyMu.Unlock()
+
+	reached := make(chan struct{})
+	resume := make(chan struct{})
+	d.beforeCopyModeRevalidate = func() {
+		close(reached)
+		<-resume
+	}
+	resumed := false
+	defer func() {
+		if !resumed {
+			close(resume)
+		}
+		d.beforeCopyModeRevalidate = nil
+	}()
+	done := make(chan struct{})
+	go func() {
+		d.handleInput(sess, ac, motion)
+		close(done)
+	}()
+	select {
+	case <-reached:
+	case <-time.After(time.Second):
+		t.Fatal("copy mode publication did not reach revalidation gate")
+	}
+	d.teardownFloating(tb, ac)
+	close(resume)
+	resumed = true
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("copy mode publication did not finish after revalidation gate was released")
+	}
+
+	ac.overlays.copyMu.Lock()
+	require.Nil(t, ac.overlays.copyMode)
+	require.Nil(t, ac.overlays.copyCandidate)
+	require.False(t, ac.overlays.copyPointer.valid)
+	require.False(t, ac.overlays.copyClick.valid)
+	ac.overlays.copyMu.Unlock()
 }
 
 func TestCopyModeLifecycleRejectsPublicationForInactiveOrRemovedPane(t *testing.T) {
@@ -157,11 +337,11 @@ func TestCopyModeLifecycleRejectsPublicationForInactiveOrRemovedPane(t *testing.
 			tb := sess.activeTab()
 			p := tb.focusedPane()
 			p.mu.Lock()
-			document := scopy.NewSnapshot(p.history, p.screen.Frame)
+			document := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame), domain.DefaultWordSeparators)
 			p.mu.Unlock()
 			tc.invalidate(sess, tb, p)
 
-			require.False(t, d.publishCopyMode(sess, ac, tb, p, document, nil))
+			require.False(t, d.publishCopyMode(sess, ac, tb, p, document, nil, nil))
 			require.False(t, ac.overlays.copyActive())
 			require.Nil(t, copyTargetPane(ac.overlays))
 		})

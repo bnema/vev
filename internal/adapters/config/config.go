@@ -31,6 +31,7 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	var warnings []domain.Warning
 	seenBindingKeys := make(map[string]bool)
 	seenFloatingKeys := make(map[string]bool)
+	seenCopyKeys := make(map[string]bool)
 	seenPaletteKeys := make(map[string]bool)
 	seenTabsKeys := make(map[string]bool)
 
@@ -112,6 +113,14 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				continue
 			}
 			cfg.Tabs.TerminalTitle = on
+		case key == "copy.word-separators":
+			warnings = warnDuplicateKey(warnings, seenCopyKeys, key, lineNo)
+			separators, ok := parseConfigString(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid copy.word-separators %q", value)})
+				continue
+			}
+			cfg.Copy.WordSeparators = separators
 		case key == "floating.command":
 			warnings = warnDuplicateKey(warnings, seenFloatingKeys, key, lineNo)
 			command, ok := parseBarCommand(value)
@@ -311,6 +320,26 @@ func parseBarCommand(value string) (string, bool) {
 		return unquoted, true
 	}
 	return value, true
+}
+
+func parseConfigString(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", true
+	}
+	startsQuoted := strings.HasPrefix(value, `"`)
+	endsQuoted := strings.HasSuffix(value, `"`)
+	if startsQuoted != endsQuoted {
+		return "", false
+	}
+	if !startsQuoted {
+		return value, true
+	}
+	unquoted, err := strconv.Unquote(value)
+	if err != nil {
+		return "", false
+	}
+	return unquoted, true
 }
 
 func parseTheme(value string) (domain.ThemeMode, bool) {
