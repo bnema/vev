@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"math"
@@ -1028,6 +1029,111 @@ func TestEphemeralRenamePromotesAndStoppedCollisionRejected(t *testing.T) {
 	require.EqualError(t, d.renameSession(sess, "taken"), "name already in use")
 	require.NoError(t, d.renameSession(sess, "named"))
 	require.True(t, state.has("named"))
+}
+
+func TestEphemeralPromotionAssignsAndPersistsLifecycleIdentity(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	store, state := newMockStore(t)
+	clock := &lifecycleClock{nows: []time.Time{time.Unix(0, 100)}}
+	d := newTestDaemon(t, newFactory(t, p), clock)
+	WithStore(store)(d)
+
+	sess, err := d.createSessionLocked("0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+	require.Zero(t, sess.createdAt, "regression fixture: ephemerals have no lifecycle identity")
+
+	require.NoError(t, d.renameSession(sess, "named"))
+
+	require.False(t, sess.ephemeral)
+	require.Equal(t, "named", sess.name)
+	require.Equal(t, int64(100), sess.createdAt)
+	require.Equal(t, sess.createdAt, state.record(t, "named").CreatedAt)
+}
+
+func TestEphemeralPromotionLifecyclePreventsStaleSameNamePaletteTarget(t *testing.T) {
+	fromPTY, releaseFrom := newBlockingPTY(t)
+	firstPTY, releaseFirst := newBlockingPTY(t)
+	secondPTY, releaseSecond := newBlockingPTY(t)
+	defer releaseFrom()
+	defer releaseFirst()
+	defer releaseSecond()
+
+	d, from, ac, _ := newManualSessionWithPTYs(t, fromPTY)
+	store, _ := newMockStore(t)
+	clock := &lifecycleClock{nows: []time.Time{time.Unix(0, 100), time.Unix(0, 100)}}
+	d.clock = clock
+	d.ptys = newFactorySeq(t, firstPTY, secondPTY)
+	WithStore(store)(d)
+
+	first, err := d.createSessionLocked("0", true, "/tmp", ac.size, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+	require.NoError(t, d.renameSession(first, "named"))
+	staleCreatedAt := first.createdAt
+	require.NotZero(t, staleCreatedAt)
+	require.NoError(t, d.killSession(first, ports.ReasonSessionKilled, true))
+	d.sessWg.Wait()
+
+	second, err := d.createSessionLocked("0", true, "/tmp", ac.size, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+	require.NoError(t, d.renameSession(second, "named"))
+	require.NotEqual(t, staleCreatedAt, second.createdAt)
+
+	require.False(t, d.switchToTarget(from, ac, picker.Target{Name: "named", TabIndex: -1, ExpectedCreatedAt: &staleCreatedAt}))
+	require.Same(t, from, ac.currentSession())
+	releaseSecond()
+	d.sessWg.Wait()
+}
+
+func TestEphemeralPromotionLifecycleFailuresLeaveStateRollbackSafe(t *testing.T) {
+	t.Run("allocator exhaustion", func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		store, state := newMockStore(t)
+		d := newTestDaemon(t, newFactory(t, p), stubClock{})
+		WithStore(store)(d)
+		d.lastAllocatedCreatedAt = math.MaxInt64
+
+		sess, err := d.createSessionLocked("0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.EqualError(t, d.renameSession(sess, "named"), "daemon: lifecycle identities exhausted")
+		require.Equal(t, "0", sess.name)
+		require.True(t, sess.ephemeral)
+		require.Zero(t, sess.createdAt)
+		require.Equal(t, int64(math.MaxInt64), d.lastAllocatedCreatedAt)
+		require.False(t, state.has("named"))
+	})
+
+	t.Run("persistence failure", func(t *testing.T) {
+		p, release := newBlockingPTY(t)
+		defer release()
+		store := portsmocks.NewMockStore(t)
+		var attempted map[string][]byte
+		store.EXPECT().Set(mock.Anything, mock.Anything).RunAndReturn(func(key, value []byte) error {
+			attempted = map[string][]byte{string(key): append([]byte(nil), value...)}
+			return errors.New("disk full")
+		}).Once()
+		clock := &lifecycleClock{nows: []time.Time{time.Unix(0, 100), time.Unix(0, 100)}}
+		d := newTestDaemon(t, newFactory(t, p), clock)
+		WithStore(store)(d)
+
+		sess, err := d.createSessionLocked("0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+		require.NoError(t, err)
+		require.EqualError(t, d.renameSession(sess, "named"), "disk full")
+		require.Equal(t, "0", sess.name)
+		require.True(t, sess.ephemeral)
+		require.Zero(t, sess.createdAt)
+		require.Equal(t, int64(100), d.lastAllocatedCreatedAt, "a failed durable write may be ambiguous, so its lifecycle identity remains reserved")
+		records, err := persist.New(newStaticStore(attempted)).LoadAll()
+		require.NoError(t, err)
+		require.Len(t, records, 1)
+		require.Equal(t, int64(100), records[0].CreatedAt, "a promotion must never attempt to persist a zero lifecycle identity")
+
+		store.EXPECT().Set(mock.Anything, mock.Anything).Return(nil).Once()
+		store.EXPECT().Sync().Return(nil).Once()
+		require.NoError(t, d.renameSession(sess, "named"))
+		require.Equal(t, int64(101), sess.createdAt, "the high-water mark must remain monotonic after a failed promotion")
+	})
 }
 
 func TestRefreshSessionCwdTouchesOnlyOnChange(t *testing.T) {

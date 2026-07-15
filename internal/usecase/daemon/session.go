@@ -511,9 +511,17 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	oldName := sess.name
 	wasEphemeral := sess.ephemeral
 	createdAt := sess.createdAt
+	if wasEphemeral {
+		var err error
+		createdAt, err = d.allocateLifecycleCreatedAtLocked()
+		if err != nil {
+			sess.mu.Unlock()
+			return err
+		}
+	}
 	lastUsedSeq := sess.mruAt.Load()
 	if wasEphemeral || oldName != name {
-		record := sess.persistRecordLocked(time.Now().UnixNano())
+		record := sess.persistRecordLocked(d.nowUnixNano())
 		record.Name = name
 		record.CreatedAt = createdAt
 		record.LastUsedSeq = lastUsedSeq
@@ -543,6 +551,7 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	delete(d.stopped, oldName)
 	delete(d.stopped, name)
 	sess.name = name
+	sess.createdAt = createdAt
 	sess.ephemeral = false
 	sess.snapEligible.Store(name != "")
 	sess.mu.Unlock()

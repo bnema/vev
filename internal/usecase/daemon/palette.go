@@ -86,9 +86,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command) []
 		return left < right
 	})
 	sort.Slice(stopped, func(i, j int) bool { return stopped[i].name < stopped[j].name })
-	for _, candidate := range active {
-		results = append(results, candidate)
-	}
+	results = append(results, active...)
 	for _, candidate := range stopped {
 		results = append(results, palette.NewStoppedSessionResult(candidate.name, time.Unix(0, candidate.createdAt)))
 	}
