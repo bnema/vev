@@ -1020,6 +1020,24 @@ func TestBarStateForMRUFreshestFirstCapCurrentExcludedAndAttention(t *testing.T)
 	require.True(t, state.mru[1].attention, "s8 attention should be carried into MRU state")
 }
 
+func TestBarStateForMRUExcludesEphemeralSessions(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, current, _, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+
+	persistent := &session{id: "named", name: "named", tabs: []*tab{{}}}
+	persistent.mruAt.Store(1)
+	ephemeral := &session{id: "ephemeral", name: "1", ephemeral: true, tabs: []*tab{{}}}
+	ephemeral.mruAt.Store(2)
+	d.sessions[persistent.id] = persistent
+	d.sessions[ephemeral.id] = ephemeral
+
+	state := d.barStateFor(current, "")
+
+	require.Len(t, state.mru, 1)
+	require.Equal(t, "named", state.mru[0].name)
+}
+
 func TestBarStateForMRUZeroTimesUseDeterministicNameOrder(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	d, sess, _, _ := newManualSessionWithPTYs(t, p)

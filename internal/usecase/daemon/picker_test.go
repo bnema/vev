@@ -77,6 +77,20 @@ func TestPickerViewsAddsBellSuffixForAttention(t *testing.T) {
 	require.NotNil(t, target.ExpectedCreatedAt)
 }
 
+func TestPickerViewsIncludesEphemeralSessions(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	current := &session{id: "current", name: "current", tabs: []*tab{{}}}
+	ephemeral := &session{id: "ephemeral", name: "1", ephemeral: true, tabs: []*tab{{}}}
+	d.sessions[current.id] = current
+	d.sessions[ephemeral.id] = ephemeral
+
+	views, _ := d.pickerViews(current)
+
+	require.Len(t, views, 2)
+	require.Equal(t, ephemeral.id, views[0].ID)
+	require.Equal(t, "1", views[0].Name)
+}
+
 func TestPickerViewsCarryNamedLifecycleIdentity(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	ctx, cancel := context.WithCancel(d.serveCtx)
