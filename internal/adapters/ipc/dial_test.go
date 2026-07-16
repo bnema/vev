@@ -3,7 +3,6 @@ package ipc
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -43,7 +42,7 @@ func TestDialContextCanceledOrExpired(t *testing.T) {
 			ctx, cancel := tt.ctx()
 			defer cancel()
 
-			transport, err := DialContext(ctx, t.TempDir())
+			transport, err := DialContext(ctx, shortSocketDir(t))
 			if transport != nil {
 				t.Fatal("DialContext returned a transport for a completed context")
 			}
@@ -55,7 +54,7 @@ func TestDialContextCanceledOrExpired(t *testing.T) {
 }
 
 func TestDialContextPreservesOptions(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "vev")
+	dir := shortSocketDir(t, "vev")
 	listener, err := Listen(dir)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)

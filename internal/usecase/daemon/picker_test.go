@@ -857,9 +857,13 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 		},
 	).Twice()
 	floating := newQuietPTY()
+	floatingOpened := make(chan struct{})
 	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(got domain.Size) bool {
 		return got != normalSize && got.Valid()
-	})).Return(floating, nil).Once()
+	})).RunAndReturn(func(context.Context, string, []string, []string, string, domain.Size) (ports.PTY, error) {
+		close(floatingOpened)
+		return floating, nil
+	}).Once()
 	d := newTestDaemon(t, f, stubClock{})
 	d.stopped["old"] = stoppedSession{name: "old", cwd: t.TempDir(), createdAt: 1}
 	tr := portsmocks.NewMockTransport(t)
@@ -877,6 +881,11 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 	require.Contains(t, opens[1], "TERM=xterm-direct")
 	require.Contains(t, opens[1], "COLORTERM=truecolor")
 	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
+	select {
+	case <-floatingOpened:
+	case <-time.After(time.Second):
+		t.Fatal("floating prewarm PTY was not opened")
+	}
 	_ = d.killSession(got, ports.ReasonSessionKilled, false)
 	release1()
 	release2()
