@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package clipboard implements ports.ClipboardReader over Wayland's
 // wl-clipboard CLI (wl-paste). It is the client-side seam that lets a remote
 // attach forward a locally clipped image to the daemon (see
@@ -50,7 +52,7 @@ type WlPaste struct {
 
 // New returns a WlPaste clipboard reader that shells out to the real
 // wl-paste binary.
-func New() *WlPaste {
+func New() ports.ClipboardReader {
 	return &WlPaste{execCommand: exec.CommandContext, readTimeout: defaultReadTimeout}
 }
 
