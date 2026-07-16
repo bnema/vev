@@ -2,10 +2,9 @@
 
 package pty
 
-// The Linux adapter drives /dev/ptmx directly (open master, TIOCGPTN to learn
-// the slave index, TIOCSPTLCK to unlock, then open /dev/pts/<N>) rather than
-// depending on a third-party pty package, keeping the dependency surface at
-// the standard library alone.
+// The Linux adapter drives /dev/ptmx directly and delegates slave preparation
+// to rawterm rather than depending on a third-party pty package, keeping the
+// dependency surface at the standard library alone.
 
 import (
 	"context"
@@ -21,7 +20,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/linuxterm"
+	"github.com/bnema/vev/pkg/rawterm"
 )
 
 // killGracePeriod is how long Close waits for a signalled child to exit before
@@ -56,20 +55,9 @@ func (Factory) Open(ctx context.Context, command string, args []string, env []st
 		}
 	}()
 
-	ptn, err := linuxterm.PtsNumber(masterFd)
+	slave, err := rawterm.PreparePty(masterFd)
 	if err != nil {
-		return nil, fmt.Errorf("pty: TIOCGPTN: %w", err)
-	}
-
-	// Unlock the slave so it can be opened.
-	if err := linuxterm.UnlockPt(masterFd); err != nil {
-		return nil, fmt.Errorf("pty: TIOCSPTLCK: %w", err)
-	}
-
-	slaveName := fmt.Sprintf("/dev/pts/%d", ptn)
-	slave, err := os.OpenFile(slaveName, os.O_RDWR|syscall.O_NOCTTY, 0)
-	if err != nil {
-		return nil, fmt.Errorf("pty: open %s: %w", slaveName, err)
+		return nil, fmt.Errorf("pty: prepare pty: %w", err)
 	}
 	// The child dups the slave into its std fds and holds its own copies, so the
 	// parent always drops the slave once Start has run (or on any error).
@@ -189,7 +177,7 @@ func (p *linuxPTY) ForegroundPgid() (int, error) {
 	var pgid int
 	var ioctlErr error
 	if err := rc.Control(func(fd uintptr) {
-		pgid, ioctlErr = linuxterm.ForegroundProcessGroup(int(fd))
+		pgid, ioctlErr = rawterm.ForegroundProcessGroup(int(fd))
 	}); err != nil {
 		return 0, fmt.Errorf("pty: foreground pgid: %w", err)
 	}
@@ -240,5 +228,5 @@ func signalProcessGroup(pid int, signal syscall.Signal) error {
 
 // setWinsize applies sz to the terminal referenced by fd via TIOCSWINSZ.
 func setWinsize(fd int, sz domain.Size) error {
-	return linuxterm.SetWinsize(fd, uint16(sz.Cols), uint16(sz.Rows))
+	return rawterm.SetWinsize(fd, uint16(sz.Cols), uint16(sz.Rows))
 }

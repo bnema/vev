@@ -1,8 +1,9 @@
-package linuxterm
+//go:build linux
+
+package rawterm
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"syscall"
 	"testing"
@@ -11,7 +12,7 @@ import (
 
 // openPTYPair opens a real Linux PTY master/slave pair directly via
 // /dev/ptmx using the package under test, so these tests double as an
-// integration check of PtsNumber/UnlockPt against the kernel.
+// integration check of PreparePty against the kernel.
 func openPTYPair(t *testing.T) (master, slave *os.File) {
 	t.Helper()
 
@@ -21,22 +22,10 @@ func openPTYPair(t *testing.T) (master, slave *os.File) {
 	}
 	master = os.NewFile(uintptr(masterFD), "pty-master")
 
-	if err := UnlockPt(masterFD); err != nil {
-		_ = master.Close()
-		t.Fatalf("UnlockPt: %v", err)
-	}
-
-	n, err := PtsNumber(masterFD)
+	slave, err = PreparePty(masterFD)
 	if err != nil {
 		_ = master.Close()
-		t.Fatalf("PtsNumber: %v", err)
-	}
-
-	slavePath := fmt.Sprintf("/dev/pts/%d", n)
-	slave, err = os.OpenFile(slavePath, os.O_RDWR|syscall.O_NOCTTY, 0)
-	if err != nil {
-		_ = master.Close()
-		t.Fatalf("open slave %s: %v", slavePath, err)
+		t.Fatalf("PreparePty: %v", err)
 	}
 
 	return master, slave
@@ -110,8 +99,8 @@ func TestMakeRawRestore(t *testing.T) {
 	}
 
 	var current syscall.Termios
-	if err := ioctl(fd, syscall.TCGETS, unsafe.Pointer(&current)); err != nil {
-		t.Fatalf("TCGETS after MakeRaw: %v", err)
+	if err := ioctl(fd, reqGetTermios, unsafe.Pointer(&current)); err != nil {
+		t.Fatalf("get termios after MakeRaw: %v", err)
 	}
 	if current.Lflag&syscall.ECHO != 0 {
 		t.Errorf("ECHO still set after MakeRaw")

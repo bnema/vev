@@ -11,7 +11,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/linuxterm"
+	"github.com/bnema/vev/pkg/rawterm"
 )
 
 // Compile-time check that Terminal satisfies ports.Terminal.
@@ -49,10 +49,10 @@ type Terminal struct {
 	bw  *batchWriter
 
 	mu         sync.Mutex
-	orig       *linuxterm.State // saved terminal state; nil when raw mode wasn't entered (or was restored)
-	entered    bool             // true between a successful EnterRaw and its restore
-	rawSkipped bool             // true if fd wasn't a tty, so MakeRaw/Restore were skipped
-	restoreFn  func() error     // the single idempotent restore closure for the current session
+	orig       *rawterm.State // saved terminal state; nil when raw mode wasn't entered (or was restored)
+	entered    bool           // true between a successful EnterRaw and its restore
+	rawSkipped bool           // true if fd wasn't a tty, so MakeRaw/Restore were skipped
+	restoreFn  func() error   // the single idempotent restore closure for the current session
 
 	// Resize watcher state, also guarded by mu so watcher start
 	// (ResizeEvents) and watcher stop (restore) are strictly ordered:
@@ -95,9 +95,9 @@ func (t *Terminal) EnterRaw() (func() error, error) {
 		return t.restoreFn, nil
 	}
 
-	var old *linuxterm.State
-	if linuxterm.IsTerminal(t.fd) {
-		s, err := linuxterm.MakeRaw(t.fd)
+	var old *rawterm.State
+	if rawterm.IsTerminal(t.fd) {
+		s, err := rawterm.MakeRaw(t.fd)
 		if err != nil {
 			return nil, fmt.Errorf("term: make raw: %w", err)
 		}
@@ -170,14 +170,14 @@ func (t *Terminal) restoreRawLocked() error {
 	if t.orig == nil {
 		return nil
 	}
-	err := linuxterm.Restore(t.fd, t.orig)
+	err := rawterm.Restore(t.fd, t.orig)
 	t.orig = nil
 	return err
 }
 
 // Size returns the current terminal dimensions.
 func (t *Terminal) Size() (domain.Size, error) {
-	cols, rows, err := linuxterm.GetSize(t.fd)
+	cols, rows, err := rawterm.GetSize(t.fd)
 	if err != nil {
 		return domain.Size{}, fmt.Errorf("term: get size: %w", err)
 	}
