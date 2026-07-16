@@ -1,8 +1,8 @@
-//go:build linux
+//go:build linux || darwin
 
 package pty
 
-// The Linux adapter drives /dev/ptmx directly and delegates slave preparation
+// The Unix adapter drives /dev/ptmx directly and delegates slave preparation
 // to rawterm rather than depending on a third-party pty package, keeping the
 // dependency surface at the standard library alone.
 
@@ -27,10 +27,10 @@ import (
 // escalating from SIGHUP to SIGKILL.
 const killGracePeriod = 2 * time.Second
 
-// Factory implements ports.PTYFactory for Linux.
+// Factory implements ports.PTYFactory on supported Unix platforms.
 type Factory struct{}
 
-// NewFactory returns a Linux PTY factory.
+// NewFactory returns a Unix PTY factory.
 func NewFactory() *Factory { return &Factory{} }
 
 // Open spawns command with args attached to a freshly allocated pseudo-terminal
@@ -105,14 +105,14 @@ func (Factory) Open(ctx context.Context, command string, args []string, env []st
 	}
 	ok = true
 
-	return &linuxPTY{
+	return &unixPTY{
 		master: os.NewFile(uintptr(masterFd), "pty-master"),
 		cmd:    cmd,
 	}, nil
 }
 
-// linuxPTY is a running child attached to the master end of a pty.
-type linuxPTY struct {
+// unixPTY is a running child attached to the master end of a pty.
+type unixPTY struct {
 	master *os.File
 	cmd    *exec.Cmd
 
@@ -120,14 +120,14 @@ type linuxPTY struct {
 	closeErr  error
 }
 
-var _ ports.PTY = (*linuxPTY)(nil)
+var _ ports.PTY = (*unixPTY)(nil)
 
 // Read returns child output read from the master.
 //
 // When the child (the last process holding the slave open) exits, the kernel
 // makes reads of the master fail with EIO. Callers treat "child gone" as a
 // normal end of stream, so EIO is mapped to io.EOF here.
-func (p *linuxPTY) Read(b []byte) (int, error) {
+func (p *unixPTY) Read(b []byte) (int, error) {
 	n, err := p.master.Read(b)
 	if err != nil && errors.Is(err, syscall.EIO) {
 		return n, io.EOF
@@ -136,7 +136,7 @@ func (p *linuxPTY) Read(b []byte) (int, error) {
 }
 
 // Write sends input bytes to the child via the master.
-func (p *linuxPTY) Write(b []byte) (int, error) {
+func (p *unixPTY) Write(b []byte) (int, error) {
 	return p.master.Write(b)
 }
 
@@ -148,7 +148,7 @@ func (p *linuxPTY) Write(b []byte) (int, error) {
 // every subsequent Read into a thread-parking syscall and breaking the
 // Close-unblocks-Read behavior. Control also pins the fd for the duration and
 // fails cleanly (os.ErrClosed) after Close.
-func (p *linuxPTY) Resize(sz domain.Size) error {
+func (p *unixPTY) Resize(sz domain.Size) error {
 	rc, err := p.master.SyscallConn()
 	if err != nil {
 		return fmt.Errorf("pty: resize: %w", err)
@@ -163,13 +163,13 @@ func (p *linuxPTY) Resize(sz domain.Size) error {
 }
 
 // Pid reports the child process id.
-func (p *linuxPTY) Pid() int {
+func (p *unixPTY) Pid() int {
 	return p.cmd.Process.Pid
 }
 
 // ForegroundPgid reports the process group currently in the foreground for the
 // pty's controlling terminal.
-func (p *linuxPTY) ForegroundPgid() (int, error) {
+func (p *unixPTY) ForegroundPgid() (int, error) {
 	rc, err := p.master.SyscallConn()
 	if err != nil {
 		return 0, fmt.Errorf("pty: foreground pgid: %w", err)
@@ -192,7 +192,7 @@ func (p *linuxPTY) ForegroundPgid() (int, error) {
 // escalates to SIGKILL. The child is reaped (via cmd.Wait) to avoid a zombie,
 // and the master fd is closed last so any blocked Read unblocks. Close is
 // idempotent: subsequent calls are no-ops and return the first result.
-func (p *linuxPTY) Close() error {
+func (p *unixPTY) Close() error {
 	p.closeOnce.Do(func() {
 		pid := p.cmd.Process.Pid
 
