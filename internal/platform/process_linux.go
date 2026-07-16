@@ -5,14 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
-
-const processRecordCacheTTL = 250 * time.Millisecond
 
 // ProcessInspector implements ports.ProcessInspector using Linux /proc.
 type ProcessInspector struct {
@@ -87,8 +84,6 @@ func processArgv(path string, pid int) ([]string, error) {
 	return argv, nil
 }
 
-type processRecord struct{ pid, pgrp int }
-
 // ProcessGroupArgv returns argv for a restorable foreground process in pgid.
 // A bare pane shell (the only process in its foreground group) returns nil argv.
 func ProcessGroupArgv(pgid int, shellPid int) ([]string, error) {
@@ -101,23 +96,6 @@ func ProcessGroupArgv(pgid int, shellPid int) ([]string, error) {
 		return nil, nil
 	}
 	return ProcessArgv(pid)
-}
-
-func selectProcessGroupPID(recs []processRecord, pgid int, shellPid int) (int, bool) {
-	if pgid <= 0 {
-		return 0, false
-	}
-	matches := make([]int, 0)
-	for _, r := range recs {
-		if r.pgrp == pgid && r.pid != shellPid {
-			matches = append(matches, r.pid)
-		}
-	}
-	if len(matches) == 0 {
-		return 0, false
-	}
-	sort.Ints(matches)
-	return matches[0], true
 }
 
 func readProcRecords(root string) ([]processRecord, error) {

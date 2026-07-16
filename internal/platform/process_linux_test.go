@@ -1,3 +1,5 @@
+//go:build linux
+
 package platform
 
 import (
@@ -137,6 +139,53 @@ func TestParseStatPgrp(t *testing.T) {
 	got, err := parseStatPgrp("123 (cmd with spaces) S 1 456 456 0")
 	if err != nil || got != 456 {
 		t.Fatalf("parseStatPgrp = %d, %v; want 456, nil", got, err)
+	}
+}
+
+func TestParseKernProcArgs2(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    []byte
+		want    []string
+		wantErr bool
+	}{
+		{
+			name: "argv after executable and padding",
+			data: append([]byte{2, 0, 0, 0}, []byte("/bin/tool\x00\x00tool\x00arg\x00ENV=value\x00")...),
+			want: []string{"tool", "arg"},
+		},
+		{
+			name: "preserves empty argument",
+			data: append([]byte{3, 0, 0, 0}, []byte("/bin/tool\x00tool\x00\x00arg\x00")...),
+			want: []string{"tool", "", "arg"},
+		},
+		{
+			name:    "truncated argc",
+			data:    []byte{1, 0, 0},
+			wantErr: true,
+		},
+		{
+			name:    "unterminated executable path",
+			data:    append([]byte{1, 0, 0, 0}, []byte("/bin/tool")...),
+			wantErr: true,
+		},
+		{
+			name:    "truncated argv",
+			data:    append([]byte{1, 0, 0, 0}, []byte("/bin/tool\x00tool")...),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseKernProcArgs2(tt.data)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseKernProcArgs2 error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("parseKernProcArgs2 = %#v; want %#v", got, tt.want)
+			}
+		})
 	}
 }
 
