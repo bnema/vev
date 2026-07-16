@@ -14,9 +14,13 @@ permissions:
 
 jobs:
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -32,3 +36,10 @@ jobs:
         run: make lint
       - name: Test
         run: make test
+      - name: Cross-compile darwin/arm64
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          CGO_ENABLED: 0
+          GOARCH: arm64
+          GOOS: darwin
+        run: go build ./...
