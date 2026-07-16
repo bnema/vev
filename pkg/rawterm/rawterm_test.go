@@ -90,6 +90,11 @@ func TestMakeRawRestore(t *testing.T) {
 
 	fd := int(slave.Fd())
 
+	var original syscall.Termios
+	if err := ioctl(fd, reqGetTermios, unsafe.Pointer(&original)); err != nil {
+		t.Fatalf("get termios before MakeRaw: %v", err)
+	}
+
 	old, err := MakeRaw(fd)
 	if err != nil {
 		t.Fatalf("MakeRaw: %v", err)
@@ -114,6 +119,14 @@ func TestMakeRawRestore(t *testing.T) {
 
 	if err := Restore(fd, old); err != nil {
 		t.Fatalf("Restore: %v", err)
+	}
+
+	var restored syscall.Termios
+	if err := ioctl(fd, reqGetTermios, unsafe.Pointer(&restored)); err != nil {
+		t.Fatalf("get termios after Restore: %v", err)
+	}
+	if restored != original {
+		t.Errorf("termios after Restore = %#v, want original %#v", restored, original)
 	}
 }
 

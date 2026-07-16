@@ -57,20 +57,7 @@ func TestOpen_DarwinEchoAndOutputEOF(t *testing.T) {
 	_, err = io.WriteString(echoPTY, "roundtrip\n")
 	require.NoError(t, err)
 
-	buf := make([]byte, 256)
-	deadline := time.Now().Add(5 * time.Second)
-	var output string
-	for !strings.Contains(output, "roundtrip") {
-		if time.Now().After(deadline) {
-			t.Fatalf("did not read echoed data, got %q", output)
-		}
-		n, readErr := echoPTY.Read(buf)
-		output += string(buf[:n])
-		if readErr != nil {
-			require.ErrorIs(t, readErr, io.EOF)
-			break
-		}
-	}
+	output := readUntilDarwin(t, echoPTY, "roundtrip", 5*time.Second)
 	require.Contains(t, output, "roundtrip")
 }
 

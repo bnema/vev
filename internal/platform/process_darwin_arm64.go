@@ -22,6 +22,8 @@ const (
 	procPIDVnodePathInfo   = 9
 	darwinKinfoProcSize    = 0x288
 	darwinVnodePathInfoLen = 2352
+	maxDarwinPID           = 1<<31 - 1
+	rawSysctlMaxRetries    = 3
 )
 
 // ProcessInspector implements ports.ProcessInspector using Darwin sysctl and
@@ -100,10 +102,11 @@ func ProcessCwd(pid int) (string, error) {
 
 // ProcessComm returns the p_comm field from KERN_PROC_PID data.
 func ProcessComm(pid int) (string, error) {
-	if pid <= 0 {
+	pid32, ok := darwinPID(pid)
+	if !ok {
 		return "", fmt.Errorf("process comm: invalid pid %d", pid)
 	}
-	data, err := rawSysctl([]int32{ctlKern, kernProc, kernProcPID, int32(pid)})
+	data, err := rawSysctl([]int32{ctlKern, kernProc, kernProcPID, pid32})
 	if err != nil {
 		return "", fmt.Errorf("process comm: sysctl pid %d: %w", pid, err)
 	}
@@ -124,10 +127,11 @@ func ProcessComm(pid int) (string, error) {
 
 // ProcessArgv returns argv from KERN_PROCARGS2.
 func ProcessArgv(pid int) ([]string, error) {
-	if pid <= 0 {
+	pid32, ok := darwinPID(pid)
+	if !ok {
 		return nil, fmt.Errorf("process argv: invalid pid %d", pid)
 	}
-	data, err := rawSysctl([]int32{ctlKern, kernProcArgs2, int32(pid)})
+	data, err := rawSysctl([]int32{ctlKern, kernProcArgs2, pid32})
 	if err != nil {
 		return nil, fmt.Errorf("process argv: sysctl pid %d: %w", pid, err)
 	}
@@ -162,12 +166,23 @@ func readDarwinProcessRecords() ([]processRecord, error) {
 	return recs, nil
 }
 
+func darwinPID(pid int) (int32, bool) {
+	if pid <= 0 || pid > maxDarwinPID {
+		return 0, false
+	}
+	return int32(pid), true
+}
+
 // rawSysctl reads a binary sysctl MIB, retrying if a growing result races the
 // size query. It is the stdlib syscall equivalent of sysctl(3).
 func rawSysctl(mib []int32) ([]byte, error) {
-	for {
+	return rawSysctlWith(mib, sysctl)
+}
+
+func rawSysctlWith(mib []int32, call func([]int32, *byte, *uintptr) error) ([]byte, error) {
+	for retry := 0; retry <= rawSysctlMaxRetries; retry++ {
 		var size uintptr
-		if err := sysctl(mib, nil, &size); err != nil {
+		if err := call(mib, nil, &size); err != nil {
 			return nil, err
 		}
 		if size == 0 {
@@ -175,14 +190,18 @@ func rawSysctl(mib []int32) ([]byte, error) {
 		}
 		buf := make([]byte, size)
 		n := size
-		if err := sysctl(mib, &buf[0], &n); err != nil {
-			if err == syscall.ENOMEM {
+		if err := call(mib, &buf[0], &n); err != nil {
+			if err == syscall.ENOMEM && retry < rawSysctlMaxRetries {
 				continue
+			}
+			if err == syscall.ENOMEM {
+				return nil, fmt.Errorf("sysctl %v: result grew after %d retries: %w", mib, rawSysctlMaxRetries, err)
 			}
 			return nil, err
 		}
 		return buf[:n], nil
 	}
+	panic("unreachable")
 }
 
 func sysctl(mib []int32, old *byte, oldlen *uintptr) error {
