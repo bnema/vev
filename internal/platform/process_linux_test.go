@@ -174,6 +174,16 @@ func TestParseKernProcArgs2(t *testing.T) {
 			data:    append([]byte{1, 0, 0, 0}, []byte("/bin/tool\x00tool")...),
 			wantErr: true,
 		},
+		{
+			name:    "negative argc",
+			data:    append([]byte{0xff, 0xff, 0xff, 0xff}, []byte("/bin/tool\x00tool\x00")...),
+			wantErr: true,
+		},
+		{
+			name:    "argc exceeds remaining data",
+			data:    append([]byte{0xff, 0xff, 0xff, 0x7f}, []byte("/bin/tool\x00tool\x00")...),
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

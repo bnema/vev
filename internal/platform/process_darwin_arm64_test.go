@@ -6,7 +6,28 @@ import (
 	"os"
 	"syscall"
 	"testing"
+	"unsafe"
 )
+
+func TestDarwinKinfoProcLayout(t *testing.T) {
+	tests := []struct {
+		name string
+		got  uintptr
+		want uintptr
+	}{
+		{"Proc.Pid", unsafe.Offsetof(kinfoProc{}.Proc) + unsafe.Offsetof(externProc{}.Pid), 40},
+		{"Proc.Comm", unsafe.Offsetof(kinfoProc{}.Proc) + unsafe.Offsetof(externProc{}.Comm), 243},
+		{"Eproc.Pgid", unsafe.Offsetof(kinfoProc{}.Eproc) + unsafe.Offsetof(eproc{}.Pgid), 564},
+		{"kinfoProc size", unsafe.Sizeof(kinfoProc{}), darwinKinfoProcSize},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("%s = %d; want %d", tt.name, tt.got, tt.want)
+			}
+		})
+	}
+}
 
 func TestDarwinProcessInspectorCurrentProcess(t *testing.T) {
 	inspector := NewProcessInspector()

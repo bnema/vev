@@ -238,7 +238,6 @@ type externProc struct {
 	Un         [16]byte
 	Vmspace    uintptr
 	Sigacts    uintptr
-	_          [3]byte
 	Flag       int32
 	Stat       int8
 	Pid        int32

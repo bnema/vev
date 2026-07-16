@@ -36,7 +36,7 @@ func parseKernProcArgs2(data []byte) ([]string, error) {
 	if len(data) < argcSize {
 		return nil, fmt.Errorf("KERN_PROCARGS2: truncated argc")
 	}
-	argc := int(binary.LittleEndian.Uint32(data[:argcSize]))
+	argc := int(int32(binary.LittleEndian.Uint32(data[:argcSize])))
 	if argc <= 0 {
 		return nil, fmt.Errorf("KERN_PROCARGS2: invalid argc %d", argc)
 	}
@@ -49,6 +49,11 @@ func parseKernProcArgs2(data []byte) ([]string, error) {
 	rest = rest[execEnd+1:]
 	for len(rest) > 0 && rest[0] == 0 {
 		rest = rest[1:]
+	}
+	// Each argument must contain at least its terminating NUL byte. Check this
+	// before allocating from the kernel-provided argc.
+	if argc > len(rest) {
+		return nil, fmt.Errorf("KERN_PROCARGS2: argc %d exceeds remaining data", argc)
 	}
 
 	argv := make([]string, 0, argc)
