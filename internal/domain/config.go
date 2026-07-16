@@ -115,6 +115,10 @@ func Defaults() Config {
 		Copy: CopyConfig{
 			WordSeparators: DefaultWordSeparators,
 		},
+		Palette: PaletteConfig{
+			Anchor:    AnchorCenter,
+			AnchorSet: true,
+		},
 		Floating: FloatingConfig{
 			Width:  80,
 			Height: 80,
