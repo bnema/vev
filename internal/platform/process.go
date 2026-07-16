@@ -34,17 +34,17 @@ func selectProcessGroupPID(recs []processRecord, pgid int, shellPid int) (int, b
 func parseKernProcArgs2(data []byte) ([]string, error) {
 	const argcSize = 4
 	if len(data) < argcSize {
-		return nil, fmt.Errorf("KERN_PROCARGS2: truncated argc")
+		return nil, fmt.Errorf("kern_procargs2: truncated argc")
 	}
 	argc := int(int32(binary.LittleEndian.Uint32(data[:argcSize])))
 	if argc <= 0 {
-		return nil, fmt.Errorf("KERN_PROCARGS2: invalid argc %d", argc)
+		return nil, fmt.Errorf("kern_procargs2: invalid argc %d", argc)
 	}
 
 	rest := data[argcSize:]
 	execEnd := bytes.IndexByte(rest, 0)
 	if execEnd < 0 {
-		return nil, fmt.Errorf("KERN_PROCARGS2: unterminated executable path")
+		return nil, fmt.Errorf("kern_procargs2: unterminated executable path")
 	}
 	rest = rest[execEnd+1:]
 	for len(rest) > 0 && rest[0] == 0 {
@@ -53,14 +53,14 @@ func parseKernProcArgs2(data []byte) ([]string, error) {
 	// Each argument must contain at least its terminating NUL byte. Check this
 	// before allocating from the kernel-provided argc.
 	if argc > len(rest) {
-		return nil, fmt.Errorf("KERN_PROCARGS2: argc %d exceeds remaining data", argc)
+		return nil, fmt.Errorf("kern_procargs2: argc %d exceeds remaining data", argc)
 	}
 
 	argv := make([]string, 0, argc)
 	for len(argv) < argc {
 		end := bytes.IndexByte(rest, 0)
 		if end < 0 {
-			return nil, fmt.Errorf("KERN_PROCARGS2: truncated argv")
+			return nil, fmt.Errorf("kern_procargs2: truncated argv")
 		}
 		argv = append(argv, string(rest[:end]))
 		rest = rest[end+1:]

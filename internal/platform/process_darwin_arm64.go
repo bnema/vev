@@ -150,7 +150,7 @@ func readDarwinProcessRecords() ([]processRecord, error) {
 		return nil, err
 	}
 	if len(data)%darwinKinfoProcSize != 0 {
-		return nil, fmt.Errorf("KERN_PROC_ALL returned %d bytes, not a multiple of %d", len(data), darwinKinfoProcSize)
+		return nil, fmt.Errorf("kern_proc_all returned %d bytes, not a multiple of %d", len(data), darwinKinfoProcSize)
 	}
 	recs := make([]processRecord, 0, len(data)/darwinKinfoProcSize)
 	for len(data) > 0 {
