@@ -74,19 +74,54 @@ func TestOpen_DarwinEchoAndOutputEOF(t *testing.T) {
 	require.Contains(t, output, "roundtrip")
 }
 
+func readUntilDarwin(t *testing.T, p ports.PTY, marker string, deadline time.Duration) string {
+	t.Helper()
+	type result struct {
+		output string
+		err    error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		var output strings.Builder
+		buf := make([]byte, 256)
+		for !strings.Contains(output.String(), marker) {
+			n, err := p.Read(buf)
+			output.Write(buf[:n])
+			if err != nil {
+				resultCh <- result{output: output.String(), err: err}
+				return
+			}
+		}
+		resultCh <- result{output: output.String()}
+	}()
+
+	select {
+	case result := <-resultCh:
+		require.NoError(t, result.err)
+		return result.output
+	case <-time.After(deadline):
+		t.Fatal("timed out waiting for pty readiness")
+		return ""
+	}
+}
+
 func TestOpen_DarwinResizeAndForegroundPgid(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pty integration test in -short mode")
 	}
 
-	p, err := pty.NewFactory().Open(context.Background(), "sh", []string{"-c", "sleep 0.2; stty size"}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
+	const ready = "__vev_ready__"
+	p, err := pty.NewFactory().Open(context.Background(), "sh", []string{"-c", "stty -echo; printf '__vev_ready__\\n'; IFS= read -r release; stty size"}, os.Environ(), "", domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = p.Close() })
 
+	require.Contains(t, readUntilDarwin(t, p, ready, 5*time.Second), ready)
 	pgid, err := p.ForegroundPgid()
 	require.NoError(t, err)
 	require.Greater(t, pgid, 0)
 	require.NoError(t, p.Resize(domain.Size{Cols: 120, Rows: 40}))
+	_, err = io.WriteString(p, "release\n")
+	require.NoError(t, err)
 	require.Equal(t, "40 120", strings.TrimSpace(string(readAllDarwin(t, p, 5*time.Second))))
 }
 
