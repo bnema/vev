@@ -8,7 +8,7 @@ theme = auto
 
 # Palette placement: auto, center, top-left, top, top-right, left, right,
 # bottom-left, bottom, or bottom-right.
-palette.anchor = auto
+palette.anchor = center
 
 # One prewarmed floating terminal per tab. An empty command uses the normal shell.
 floating.command =
@@ -86,7 +86,7 @@ Set `copy.word-separators = ""` to use only Unicode whitespace as a separator.
 
 ## Palette anchor
 
-`auto` uses a bottom shelf on narrow terminals and a bottom-right rail from 96 columns up. Reload moves an open palette without losing your query.
+The command palette is centered by default. Set `palette.anchor` to another anchor to reposition it, or use `auto` for a bottom shelf on narrow terminals and a bottom-right rail from 96 columns up. Reload moves an open palette without losing your query.
 
 ## Floating terminal
 

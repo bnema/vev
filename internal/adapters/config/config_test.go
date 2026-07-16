@@ -347,6 +347,9 @@ func TestParse(t *testing.T) {
 			if tt.want.Copy.WordSeparators == "" {
 				tt.want.Copy = domain.Defaults().Copy
 			}
+			if !tt.want.Palette.AnchorSet {
+				tt.want.Palette = domain.Defaults().Palette
+			}
 			got, warnings, err := Parse(strings.NewReader(tt.input))
 			if err != nil {
 				t.Fatalf("Parse() error = %v", err)
