@@ -20,7 +20,7 @@ AUR for `-rc.*`/`-alpha.*` prerelease tags).
    VEV_VERSION=v0.X.Y sh "$installer"
    rm -f "$installer"
    ```
-   Confirm `vev --version` prints the exact tag.
+   Confirm `vev --version` prints `vev 0.X.Y (commit ..., built ...)`.
 5. Stable tags only: confirm https://aur.archlinux.org/packages/vev-bin
    picked up the new version.
 

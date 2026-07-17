@@ -91,7 +91,7 @@ release:
 
     ### Script (Linux x86_64, macOS arm64)
     ```sh
-    curl -fsSL https://raw.githubusercontent.com/bnema/vev/{{ .Tag }}/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/bnema/vev/{{ .Tag }}/install.sh | VEV_VERSION={{ .Tag }} sh
     ```
 
     ### Arch Linux
