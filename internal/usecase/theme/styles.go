@@ -40,6 +40,7 @@ func PulseColor(base renderer.Style, intensity float64) renderer.Style {
 	if base.HasForegroundRGB && base.HasBackgroundRGB {
 		style.ForegroundRGB = Blend(base.BackgroundRGB, base.ForegroundRGB, intensity)
 	} else {
+		style.HasForegroundRGB = false
 		style.Foreground = 244 + int(intensity*11)
 	}
 	return style

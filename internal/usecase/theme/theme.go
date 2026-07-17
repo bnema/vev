@@ -107,8 +107,8 @@ func parseXColorComponent(s string) (uint8, bool) {
 	if err != nil {
 		return 0, false
 	}
-	max := uint64((1 << (4 * len(s))) - 1)
-	return uint8(value * 255 / max), true
+	maxValue := uint64((1 << (4 * len(s))) - 1)
+	return uint8(value * 255 / maxValue), true
 }
 
 func parseHexByte(s string) (uint8, bool) {

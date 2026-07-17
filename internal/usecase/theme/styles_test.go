@@ -59,6 +59,8 @@ func TestPulseColor(t *testing.T) {
 		HasUnderlineColorRGB: false,
 	}
 	indexedBase := renderer.Style{Foreground: -1, Background: -1, Inverse: true}
+	mixedBase := rgbBase
+	mixedBase.HasBackgroundRGB = false
 
 	tests := []struct {
 		name      string
@@ -95,6 +97,18 @@ func TestPulseColor(t *testing.T) {
 			want: func() renderer.Style {
 				style := rgbBase
 				style.Bold = true
+				return style
+			}(),
+		},
+		{
+			name:      "RGB foreground without RGB background uses indexed grayscale",
+			base:      mixedBase,
+			intensity: 0.5,
+			want: func() renderer.Style {
+				style := mixedBase
+				style.Bold = true
+				style.HasForegroundRGB = false
+				style.Foreground = 249
 				return style
 			}(),
 		},
