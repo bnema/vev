@@ -11,7 +11,7 @@ jobs:
   release:
     # Pinned by SHA deliberately: this workflow receives the AUR key.
     # Bump the pin manually when bnema/gh-actions changes.
-    uses: bnema/gh-actions/.github/workflows/go-release.yml@46d7b3ad4fbb1686ee267c27d6d60e2cf4aa9c72
+    uses: bnema/gh-actions/.github/workflows/go-release.yml@c53682d2c64181019affd71b1707e5a189912ddd
     with:
       go-version-file: go.mod
       goreleaser-version: '~> v2'
