@@ -1047,3 +1047,75 @@ func TestRunDoesNotRetryTerminalDetachedError(t *testing.T) {
 	require.Equal(t, int32(1), d.calls.Load())
 	require.Equal(t, int32(1), term.restoreCount.Load())
 }
+
+func TestAttachSchemeRequeryClearsStalePalette(t *testing.T) {
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	input := newChunkedBlockingReader(
+		[]byte("\x1b]11;#010203\a\x1b]4;1;#112233\a\x1b]4;14;#778899\a"),
+		[]byte("\x1b[?997;2n"),
+	)
+	defer input.unblock()
+
+	tm := portsmocks.NewMockTerminal(t)
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
+	tm.EXPECT().In().Return(input).Maybe()
+	tm.EXPECT().Out().Return(&out).Maybe()
+	tm.EXPECT().Flush().Return(nil).Maybe()
+	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
+	tm.EXPECT().QueryColors().Return(nil).Once()
+
+	var themes []ports.Theme
+	var themesMu sync.Mutex
+	clearedPalette := make(chan struct{})
+	var clearOnce sync.Once
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(ports.MsgTheme)).RunAndReturn(func(f ports.Frame) error {
+		theme, err := ports.UnmarshalTheme(f.Payload)
+		require.NoError(t, err)
+		themesMu.Lock()
+		themes = append(themes, theme)
+		themesMu.Unlock()
+		if theme.SchemeKnown && theme.PaletteKnown == 0 {
+			clearOnce.Do(func() { close(clearedPalette) })
+		}
+		return nil
+	}).Times(3)
+
+	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
+	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
+	closed := make(chan struct{})
+	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		select {
+		case <-closed:
+			return ports.Frame{}, io.EOF
+		default:
+		}
+		select {
+		case <-clearedPalette:
+			close(closed)
+			return detached, nil
+		default:
+			return welcome, nil
+		}
+	}).Maybe()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	require.NoError(t, runTestClient(context.Background(), attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentEphemeral}))
+	require.Equal(t, int32(1), restoreCount.Load())
+
+	themesMu.Lock()
+	defer themesMu.Unlock()
+	require.Len(t, themes, 3, "one complete snapshot per input chunk plus the re-query invalidation")
+	require.Equal(t, uint16(1<<1|1<<14), themes[0].PaletteKnown)
+	require.True(t, themes[0].HasBackground)
+	require.Equal(t, uint16(1<<1|1<<14), themes[1].PaletteKnown, "scheme update retains palette until re-query")
+	require.True(t, themes[1].SchemeKnown)
+	require.Zero(t, themes[2].PaletteKnown, "re-query must invalidate stale palette entries")
+	require.Equal(t, themes[0].Background, themes[2].Background)
+	require.True(t, themes[2].SchemeKnown)
+	require.True(t, themes[2].Light)
+}

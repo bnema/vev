@@ -71,11 +71,24 @@ func (s *terminalThemeState) update(update func(*ports.Theme)) ports.Theme {
 	return s.theme
 }
 
-func (s *terminalThemeState) reportedTheme() (ports.Theme, bool) {
+func (s *terminalThemeState) snapshot() ports.Theme {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	theme := s.theme
-	return theme, theme.HasForeground || theme.HasBackground || theme.SchemeKnown
+	return s.theme
+}
+
+// clearPalette invalidates entries from a previous terminal color query while
+// retaining independently reported foreground, background, and scheme data.
+func (s *terminalThemeState) clearPalette() ports.Theme {
+	return s.update(func(theme *ports.Theme) {
+		theme.PaletteKnown = 0
+		theme.Palette = [16]renderer.RGB{}
+	})
+}
+
+func (s *terminalThemeState) reportedTheme() (ports.Theme, bool) {
+	theme := s.snapshot()
+	return theme, theme.HasForeground || theme.HasBackground || theme.SchemeKnown || theme.PaletteKnown != 0
 }
 
 // milestones tracks lifecycle progress so a failure can report which stages
@@ -646,6 +659,15 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				return welcomedResult(errLinkOffline)
 			}
 		case <-colorQueryCh:
+			// A fresh query supersedes every prior OSC 4 response. Queue the
+			// cleared snapshot before writing the query so the daemon never
+			// applies stale palette entries while it awaits the new responses.
+			clearedTheme := themeState.clearPalette()
+			select {
+			case sendCh <- ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(clearedTheme)}:
+			case <-loopCtx.Done():
+				return welcomedResult(nil)
+			}
 			if err := term.QueryColors(); err != nil {
 				log.Warn("querying terminal colors", "err", err)
 			}
@@ -876,11 +898,10 @@ func (p *stdinPump) run() {
 	for {
 		n, rerr := in.Read(buf)
 		if n > 0 {
-			sendTheme := func(current ports.Theme) {
-				send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(current)})
-			}
+			themeChanged := false
+			queryColors := false
 			scanner.Scan(buf[:n], func(kind int, rgb renderer.RGB) {
-				current := themeState.update(func(current *ports.Theme) {
+				themeState.update(func(current *ports.Theme) {
 					switch kind {
 					case 10:
 						current.HasForeground = true
@@ -890,20 +911,30 @@ func (p *stdinPump) run() {
 						current.Background = rgb
 					}
 				})
-				sendTheme(current)
-			}, func(int, renderer.RGB) {
-				// Palette inheritance is wired by the theme update path; retain a
-				// no-op callback here until that path owns palette updates.
+				themeChanged = true
+			}, func(slot int, rgb renderer.RGB) {
+				themeState.update(func(current *ports.Theme) {
+					current.PaletteKnown |= uint16(1) << slot
+					current.Palette[slot] = rgb
+				})
+				themeChanged = true
 			}, func(light bool) {
-				current := themeState.update(func(current *ports.Theme) {
+				themeState.update(func(current *ports.Theme) {
 					current.SchemeKnown = true
 					current.Light = light
 				})
-				if requestColors != nil {
-					requestColors()
-				}
-				sendTheme(current)
+				themeChanged = true
+				queryColors = true
 			}, sink)
+			if themeChanged {
+				send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(themeState.snapshot())})
+			}
+			// Defer the re-query until this read's complete snapshot is queued;
+			// otherwise the main loop could invalidate palette state midway
+			// through a chunk containing multiple terminal responses.
+			if queryColors && requestColors != nil {
+				requestColors()
+			}
 			if !sendOK.Load() {
 				return
 			}
