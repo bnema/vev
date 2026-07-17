@@ -891,6 +891,9 @@ func (p *stdinPump) run() {
 					}
 				})
 				sendTheme(current)
+			}, func(int, renderer.RGB) {
+				// Palette inheritance is wired by the theme update path; retain a
+				// no-op callback here until that path owns palette updates.
 			}, func(light bool) {
 				current := themeState.update(func(current *ports.Theme) {
 					current.SchemeKnown = true

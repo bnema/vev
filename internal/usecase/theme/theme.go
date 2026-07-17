@@ -120,12 +120,13 @@ func parseHexByte(s string) (uint8, bool) {
 	return uint8(v), true
 }
 
-// Scanner decodes OSC 10/11 color responses while preserving ordinary bytes.
+// Scanner decodes terminal color responses while preserving ordinary bytes.
 type Scanner struct {
 	pending []byte
 }
 
-// Scan extracts ESC ] 10;<color> and ESC ] 11;<color> terminated by BEL or ST.
+// Scan extracts ESC ] 10;<color>, ESC ] 11;<color>, and ESC ] 4;<slot>;<color>
+// responses terminated by BEL or ST.
 // All non-matching bytes are emitted through onBytes in original order, and a
 // contiguous run of ordinary bytes (including any ESC that does not start a
 // color-OSC sequence, e.g. keyboard/mouse escape sequences like SGR mouse
@@ -133,7 +134,7 @@ type Scanner struct {
 // callers never see it split. Partial OSC color responses are buffered across
 // calls, but the buffer is bounded so an unterminated OSC cannot block
 // unrelated input forever.
-func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), onScheme func(light bool), onBytes func([]byte)) {
+func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), onPalette func(slot int, rgb renderer.RGB), onScheme func(light bool), onBytes func([]byte)) {
 	if len(s.pending) > 0 {
 		combined := make([]byte, 0, len(s.pending)+len(data))
 		combined = append(combined, s.pending...)
@@ -164,7 +165,7 @@ func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), on
 			return
 		}
 
-		completePrefix, possiblePrefix := colorOSCPrefix(data[i:])
+		kind, prefixLen, completePrefix, possiblePrefix := colorOSCPrefix(data[i:])
 		if !completePrefix {
 			if possiblePrefix {
 				if byteStart < i {
@@ -185,20 +186,30 @@ func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), on
 			onBytes(data[byteStart:i])
 		}
 
-		termStart, termEnd := findTerminator(data[i+5:])
+		termStart, termEnd := findTerminator(data[i+prefixLen:])
 		if termStart < 0 {
 			s.bufferOrFlush(data[i:], onBytes)
 			return
 		}
-		termStart += i + 5
-		termEnd += i + 5
+		termStart += i + prefixLen
+		termEnd += i + prefixLen
 		raw := data[i:termEnd]
-		kind := int(data[i+3]-'0') + 10
-		rgb, ok := ParseXColor(string(data[i+5 : termStart]))
-		if ok {
-			onColor(kind, rgb)
-		} else {
-			onBytes(raw)
+		body := string(data[i+prefixLen : termStart])
+		switch kind {
+		case 4:
+			slot, rgb, ok := parsePaletteResponse(body)
+			if ok {
+				onPalette(slot, rgb)
+			} else {
+				onBytes(raw)
+			}
+		default:
+			rgb, ok := ParseXColor(body)
+			if ok {
+				onColor(kind, rgb)
+			} else {
+				onBytes(raw)
+			}
 		}
 		i = termEnd - 1
 		byteStart = termEnd
@@ -218,23 +229,52 @@ func (s *Scanner) bufferOrFlush(partial []byte, onBytes func([]byte)) {
 	s.pending = append(s.pending, partial...)
 }
 
-func colorOSCPrefix(data []byte) (complete bool, possible bool) {
+func colorOSCPrefix(data []byte) (kind, prefixLen int, complete bool, possible bool) {
 	if len(data) < 2 {
-		return false, false
+		return 0, 0, false, false
 	}
-	prefixes := [][]byte{[]byte("\x1b]10;"), []byte("\x1b]11;")}
-	for _, prefix := range prefixes {
-		if len(data) >= len(prefix) {
-			if bytes.Equal(data[:len(prefix)], prefix) {
-				return true, true
+	prefixes := []struct {
+		kind   int
+		prefix []byte
+	}{
+		{kind: 10, prefix: []byte("\x1b]10;")},
+		{kind: 11, prefix: []byte("\x1b]11;")},
+		{kind: 4, prefix: []byte("\x1b]4;")},
+	}
+	for _, candidate := range prefixes {
+		if len(data) >= len(candidate.prefix) {
+			if bytes.Equal(data[:len(candidate.prefix)], candidate.prefix) {
+				return candidate.kind, len(candidate.prefix), true, true
 			}
 			continue
 		}
-		if bytes.Equal(data, prefix[:len(data)]) {
-			return false, true
+		if bytes.Equal(data, candidate.prefix[:len(data)]) {
+			return candidate.kind, len(candidate.prefix), false, true
 		}
 	}
-	return false, false
+	return 0, 0, false, false
+}
+
+func parsePaletteResponse(body string) (int, renderer.RGB, bool) {
+	indexEnd := strings.IndexByte(body, ';')
+	if indexEnd < 1 {
+		return 0, renderer.RGB{}, false
+	}
+	slot := 0
+	for _, b := range []byte(body[:indexEnd]) {
+		if b < '0' || b > '9' {
+			return 0, renderer.RGB{}, false
+		}
+		slot = slot*10 + int(b-'0')
+		if slot > 15 {
+			return 0, renderer.RGB{}, false
+		}
+	}
+	rgb, ok := ParseXColor(body[indexEnd+1:])
+	if !ok {
+		return 0, renderer.RGB{}, false
+	}
+	return slot, rgb, true
 }
 
 // schemeCSIPrefixes lists the CSI ?997 scheme-notification sequences vev

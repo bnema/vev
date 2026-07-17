@@ -50,7 +50,7 @@ func TestScannerExtractsBELAndSTColors(t *testing.T) {
 			kind int
 			rgb  renderer.RGB
 		}{kind: kind, rgb: rgb})
-	}, func(light bool) {}, func(b []byte) { out.Write(b) })
+	}, func(slot int, rgb renderer.RGB) {}, func(light bool) {}, func(b []byte) { out.Write(b) })
 
 	if out.String() != "abc" {
 		t.Fatalf("passthrough=%q want %q", out.String(), "abc")
@@ -73,8 +73,8 @@ func TestScannerHandlesSplitSequences(t *testing.T) {
 	onColor := func(kind int, rgb renderer.RGB) { got = append(got, rgb) }
 	onBytes := func(b []byte) { out.Write(b) }
 
-	s.Scan([]byte("x\x1b]10;#12"), onColor, func(light bool) {}, onBytes)
-	s.Scan([]byte("3456\x07y"), onColor, func(light bool) {}, onBytes)
+	s.Scan([]byte("x\x1b]10;#12"), onColor, func(slot int, rgb renderer.RGB) {}, func(light bool) {}, onBytes)
+	s.Scan([]byte("3456\x07y"), onColor, func(slot int, rgb renderer.RGB) {}, func(light bool) {}, onBytes)
 
 	if out.String() != "xy" {
 		t.Fatalf("passthrough=%q want xy", out.String())
@@ -112,7 +112,7 @@ func TestScannerHandlesSplitSchemeNotifications(t *testing.T) {
 			var out bytes.Buffer
 
 			for _, chunk := range tt.chunks {
-				s.Scan([]byte(chunk), func(kind int, rgb renderer.RGB) {}, func(light bool) { schemes = append(schemes, light) }, func(b []byte) { out.Write(b) })
+				s.Scan([]byte(chunk), func(kind int, rgb renderer.RGB) {}, func(slot int, rgb renderer.RGB) {}, func(light bool) { schemes = append(schemes, light) }, func(b []byte) { out.Write(b) })
 			}
 
 			if out.String() != tt.wantOut {
@@ -130,7 +130,7 @@ func TestScannerForwardsBareCSIIntroducerImmediately(t *testing.T) {
 	var out bytes.Buffer
 	schemes := 0
 
-	s.Scan([]byte("a\x1b["), func(kind int, rgb renderer.RGB) {}, func(light bool) { schemes++ }, func(b []byte) { out.Write(b) })
+	s.Scan([]byte("a\x1b["), func(kind int, rgb renderer.RGB) {}, func(slot int, rgb renderer.RGB) {}, func(light bool) { schemes++ }, func(b []byte) { out.Write(b) })
 
 	if out.String() != "a\x1b[" {
 		t.Fatalf("passthrough=%q want %q", out.String(), "a\x1b[")
@@ -140,7 +140,7 @@ func TestScannerForwardsBareCSIIntroducerImmediately(t *testing.T) {
 	}
 
 	out.Reset()
-	s.Scan([]byte("A"), func(kind int, rgb renderer.RGB) {}, func(light bool) { schemes++ }, func(b []byte) { out.Write(b) })
+	s.Scan([]byte("A"), func(kind int, rgb renderer.RGB) {}, func(slot int, rgb renderer.RGB) {}, func(light bool) { schemes++ }, func(b []byte) { out.Write(b) })
 
 	if out.String() != "A" {
 		t.Fatalf("follow-up passthrough=%q want %q (no stale state)", out.String(), "A")
@@ -152,7 +152,7 @@ func TestScannerForwardsInterleavedGarbageInOrder(t *testing.T) {
 	var out bytes.Buffer
 	colors := 0
 
-	s.Scan([]byte("ab\x1b]12;#112233\x07cd\x1b]10;nope\x07ef"), func(kind int, rgb renderer.RGB) { colors++ }, func(light bool) {}, func(b []byte) { out.Write(b) })
+	s.Scan([]byte("ab\x1b]12;#112233\x07cd\x1b]10;nope\x07ef"), func(kind int, rgb renderer.RGB) { colors++ }, func(slot int, rgb renderer.RGB) {}, func(light bool) {}, func(b []byte) { out.Write(b) })
 
 	if colors != 0 {
 		t.Fatalf("colors=%d want 0", colors)
@@ -168,7 +168,7 @@ func TestScannerForwardsStandaloneEscapeImmediately(t *testing.T) {
 	var out bytes.Buffer
 	colors := 0
 
-	s.Scan([]byte("\x1b"), func(kind int, rgb renderer.RGB) { colors++ }, func(light bool) {}, func(b []byte) { out.Write(b) })
+	s.Scan([]byte("\x1b"), func(kind int, rgb renderer.RGB) { colors++ }, func(slot int, rgb renderer.RGB) {}, func(light bool) {}, func(b []byte) { out.Write(b) })
 
 	if colors != 0 {
 		t.Fatalf("colors=%d want 0", colors)
@@ -184,7 +184,7 @@ func TestScannerDoesNotSplitSGRMouseReport(t *testing.T) {
 	colors := 0
 
 	in := []byte("\x1b[<0;1;1M")
-	s.Scan(in, func(kind int, rgb renderer.RGB) { colors++ }, func(light bool) {}, func(b []byte) {
+	s.Scan(in, func(kind int, rgb renderer.RGB) { colors++ }, func(slot int, rgb renderer.RGB) {}, func(light bool) {}, func(b []byte) {
 		chunks = append(chunks, append([]byte(nil), b...))
 	})
 
@@ -204,7 +204,7 @@ func TestScannerDoesNotSplitArrowKey(t *testing.T) {
 	var chunks [][]byte
 
 	in := []byte("\x1b[A")
-	s.Scan(in, func(kind int, rgb renderer.RGB) {}, func(light bool) {}, func(b []byte) {
+	s.Scan(in, func(kind int, rgb renderer.RGB) {}, func(slot int, rgb renderer.RGB) {}, func(light bool) {}, func(b []byte) {
 		chunks = append(chunks, append([]byte(nil), b...))
 	})
 
@@ -229,7 +229,7 @@ func TestScannerKeepsMouseReportContiguousAroundColorResponse(t *testing.T) {
 			kind int
 			rgb  renderer.RGB
 		}{kind: kind, rgb: rgb})
-	}, func(light bool) {}, func(b []byte) {
+	}, func(slot int, rgb renderer.RGB) {}, func(light bool) {}, func(b []byte) {
 		chunks = append(chunks, append([]byte(nil), b...))
 	})
 
@@ -254,8 +254,8 @@ func TestScannerFlushesOverflowingPartialQueue(t *testing.T) {
 	var s Scanner
 	var out bytes.Buffer
 
-	s.Scan(append([]byte("\x1b]10;"), bytes.Repeat([]byte("a"), 70)...), func(kind int, rgb renderer.RGB) {}, func(light bool) {}, func(b []byte) { out.Write(b) })
-	s.Scan([]byte("Z"), func(kind int, rgb renderer.RGB) {}, func(light bool) {}, func(b []byte) { out.Write(b) })
+	s.Scan(append([]byte("\x1b]10;"), bytes.Repeat([]byte("a"), 70)...), func(kind int, rgb renderer.RGB) {}, func(slot int, rgb renderer.RGB) {}, func(light bool) {}, func(b []byte) { out.Write(b) })
+	s.Scan([]byte("Z"), func(kind int, rgb renderer.RGB) {}, func(slot int, rgb renderer.RGB) {}, func(light bool) {}, func(b []byte) { out.Write(b) })
 
 	if out.Len() == 0 || !bytes.Contains(out.Bytes(), []byte("\x1b]10;")) || !bytes.HasSuffix(out.Bytes(), []byte("Z")) {
 		t.Fatalf("overflow passthrough=%q", out.String())
