@@ -605,12 +605,23 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// the main loop, which is the only goroutine allowed to touch term.Out()/
 	// term.Flush(); QueryColors writes through the same batched writer, so
 	// calling it directly from the stdin pump would race the main loop's
-	// output writes.
-	colorQueryCh := make(chan struct{}, 1)
-	requestColors := func() {
+	// output writes. The acknowledgement creates a generation boundary: after
+	// a scheme response, stdin must not read another chunk (which may contain
+	// old OSC 4 replies) until this loop has cleared the palette and issued the
+	// replacement query.
+	colorQueryCh := make(chan colorQueryRequest)
+	requestColors := func() bool {
+		request := colorQueryRequest{acknowledged: make(chan struct{})}
 		select {
-		case colorQueryCh <- struct{}{}:
-		default:
+		case colorQueryCh <- request:
+		case <-loopCtx.Done():
+			return false
+		}
+		select {
+		case <-request.acknowledged:
+			return true
+		case <-loopCtx.Done():
+			return false
 		}
 	}
 
@@ -658,7 +669,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				// token. Run closes this transport on the way out.
 				return welcomedResult(errLinkOffline)
 			}
-		case <-colorQueryCh:
+		case request := <-colorQueryCh:
 			// A fresh query supersedes every prior OSC 4 response. Queue the
 			// cleared snapshot before writing the query so the daemon never
 			// applies stale palette entries while it awaits the new responses.
@@ -671,6 +682,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			if err := term.QueryColors(); err != nil {
 				log.Warn("querying terminal colors", "err", err)
 			}
+			close(request.acknowledged)
 		case r := <-recvCh:
 			if r.err != nil {
 				if errors.Is(r.err, io.EOF) {
@@ -828,6 +840,10 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 // exits. That is harmless here — Run has already returned and restored the
 // terminal — and matches the standard pattern for stdin pumps; a
 // closable stdin duplicate could lift it later if ever needed.
+type colorQueryRequest struct {
+	acknowledged chan struct{}
+}
+
 type stdinPump struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -837,7 +853,7 @@ type stdinPump struct {
 	themeState    *terminalThemeState
 	clipboard     ports.ClipboardReader
 	logger        *slog.Logger
-	requestColors func()
+	requestColors func() bool
 }
 
 func (p *stdinPump) run() {
@@ -932,8 +948,8 @@ func (p *stdinPump) run() {
 			// Defer the re-query until this read's complete snapshot is queued;
 			// otherwise the main loop could invalidate palette state midway
 			// through a chunk containing multiple terminal responses.
-			if queryColors && requestColors != nil {
-				requestColors()
+			if queryColors && requestColors != nil && !requestColors() {
+				return
 			}
 			if !sendOK.Load() {
 				return

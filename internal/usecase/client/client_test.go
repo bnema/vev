@@ -137,6 +137,40 @@ func (r *chunkedBlockingReader) Read(p []byte) (int, error) {
 
 func (r *chunkedBlockingReader) unblock() { close(r.done) }
 
+// queryBoundaryReader reports an attempt to read the second chunk before
+// returning it, allowing a test to prove that a scheme re-query is a real
+// stdin generation boundary rather than a lossy notification.
+type queryBoundaryReader struct {
+	first, second     []byte
+	secondRead        chan struct{}
+	allowSecond, done <-chan struct{}
+	reads             int
+}
+
+func (r *queryBoundaryReader) Read(p []byte) (int, error) {
+	switch r.reads {
+	case 0:
+		r.reads++
+		return copy(p, r.first), nil
+	case 1:
+		select {
+		case r.secondRead <- struct{}{}:
+		case <-r.done:
+			return 0, io.EOF
+		}
+		select {
+		case <-r.allowSecond:
+			r.reads++
+			return copy(p, r.second), nil
+		case <-r.done:
+			return 0, io.EOF
+		}
+	default:
+		<-r.done
+		return 0, io.EOF
+	}
+}
+
 func newHappyTerminal(t *testing.T, out *bytes.Buffer, restoreCount *atomic.Int32, resizeCh chan domain.Size) (*portsmocks.MockTerminal, *blockingReader) {
 	tm := portsmocks.NewMockTerminal(t)
 	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
@@ -1046,6 +1080,107 @@ func TestRunDoesNotRetryTerminalDetachedError(t *testing.T) {
 	require.True(t, errors.As(err, &de))
 	require.Equal(t, int32(1), d.calls.Load())
 	require.Equal(t, int32(1), term.restoreCount.Load())
+}
+
+func TestAttachSchemeRequeryCreatesPaletteGenerationBoundary(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	allowSecond := make(chan struct{})
+	inputDone := make(chan struct{})
+	input := &queryBoundaryReader{
+		first:       []byte("\x1b]4;1;#112233\a\x1b[?997;2n"),
+		second:      []byte("\x1b]4;2;#445566\a"),
+		secondRead:  make(chan struct{}, 1),
+		allowSecond: allowSecond,
+		done:        inputDone,
+	}
+	defer close(inputDone)
+
+	var out bytes.Buffer
+	var restoreCount atomic.Int32
+	resizeCh := make(chan domain.Size)
+	queryStarted := make(chan struct{})
+	allowQuery := make(chan struct{})
+	tm := portsmocks.NewMockTerminal(t)
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
+	tm.EXPECT().In().Return(input).Maybe()
+	tm.EXPECT().Out().Return(&out).Maybe()
+	tm.EXPECT().Flush().Return(nil).Maybe()
+	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
+	tm.EXPECT().QueryColors().RunAndReturn(func() error {
+		close(queryStarted)
+		<-allowQuery
+		return nil
+	}).Once()
+
+	themes := make(chan ports.Theme, 3)
+	recvRelease := make(chan struct{})
+	var welcomed atomic.Bool
+	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(ports.MsgTheme)).RunAndReturn(func(f ports.Frame) error {
+		theme, err := ports.UnmarshalTheme(f.Payload)
+		require.NoError(t, err)
+		themes <- theme
+		return nil
+	}).Times(3)
+	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		if welcomed.CompareAndSwap(false, true) {
+			return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"})), nil
+		}
+		<-recvRelease
+		return ports.Frame{}, io.EOF
+	}).Maybe()
+	tr.EXPECT().Close().Return(nil).Once()
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- runTestClient(ctx, attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentEphemeral})
+	}()
+
+	select {
+	case <-queryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("main loop did not start the palette re-query")
+	}
+	select {
+	case <-input.secondRead:
+		t.Fatal("stdin read the next chunk before the cleared theme and query completed")
+	default:
+	}
+
+	close(allowQuery)
+	select {
+	case <-input.secondRead:
+	case <-time.After(time.Second):
+		t.Fatal("stdin did not resume after the palette re-query completed")
+	}
+	close(allowSecond)
+
+	var got [3]ports.Theme
+	for i := range got {
+		select {
+		case got[i] = <-themes:
+		case <-time.After(time.Second):
+			t.Fatalf("theme %d was not sent", i)
+		}
+	}
+	require.Equal(t, uint16(1<<1), got[0].PaletteKnown)
+	require.True(t, got[0].SchemeKnown)
+	require.Zero(t, got[1].PaletteKnown, "the old palette must be cleared before a later read is admitted")
+	require.True(t, got[1].SchemeKnown)
+	require.Equal(t, uint16(1<<2), got[2].PaletteKnown, "only the post-query chunk may populate the new palette generation")
+
+	cancel()
+	select {
+	case err := <-runDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("attach did not return after cancellation")
+	}
+	close(recvRelease)
+	require.Equal(t, int32(1), restoreCount.Load())
 }
 
 func TestAttachSchemeRequeryClearsStalePalette(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -41,6 +42,37 @@ func TestTerminalThemeStateClearPalettePreservesReportedColors(t *testing.T) {
 	require.True(t, reported, "foreground/background remain usable after palette invalidation")
 }
 
+type queryBoundaryReader struct {
+	first, second      []byte
+	readSecond         chan struct{}
+	allowSecond, close <-chan struct{}
+	reads              int
+}
+
+func (r *queryBoundaryReader) Read(p []byte) (int, error) {
+	switch r.reads {
+	case 0:
+		r.reads++
+		return copy(p, r.first), nil
+	case 1:
+		select {
+		case r.readSecond <- struct{}{}:
+		case <-r.close:
+			return 0, io.EOF
+		}
+		select {
+		case <-r.allowSecond:
+			r.reads++
+			return copy(p, r.second), nil
+		case <-r.close:
+			return 0, io.EOF
+		}
+	default:
+		<-r.close
+		return 0, io.EOF
+	}
+}
+
 func TestStdinPumpCoalescesPaletteAndBackgroundThemePerRead(t *testing.T) {
 	state := &terminalThemeState{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -74,4 +106,148 @@ func TestStdinPumpCoalescesPaletteAndBackgroundThemePerRead(t *testing.T) {
 		t.Fatalf("got extra frame after one input chunk: %v", extra.Type)
 	default:
 	}
+}
+
+func TestStdinPumpWaitsForQueryAcknowledgementBeforeNextRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	allowSecond := make(chan struct{})
+	closeReader := make(chan struct{})
+	reader := &queryBoundaryReader{
+		first:       []byte("\x1b]4;1;#112233\a\x1b[?997;2n"),
+		second:      []byte("\x1b]4;2;#445566\a"),
+		readSecond:  make(chan struct{}, 1),
+		allowSecond: allowSecond,
+		close:       closeReader,
+	}
+	queryStarted := make(chan struct{})
+	allowQuery := make(chan struct{})
+	out := make(chan ports.Frame, 3)
+	pump := stdinPump{
+		ctx:        ctx,
+		cancel:     cancel,
+		in:         reader,
+		out:        out,
+		themeState: &terminalThemeState{},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		requestColors: func() bool {
+			close(queryStarted)
+			select {
+			case <-allowQuery:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		},
+	}
+	pumpDone := make(chan struct{})
+	go func() {
+		pump.run()
+		close(pumpDone)
+	}()
+
+	select {
+	case <-queryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("palette re-query was not requested")
+	}
+	select {
+	case <-reader.readSecond:
+		t.Fatal("stdin pump started the next read before the query acknowledgement")
+	default:
+	}
+
+	close(allowQuery)
+	select {
+	case <-reader.readSecond:
+	case <-time.After(time.Second):
+		t.Fatal("stdin pump did not resume after the query acknowledgement")
+	}
+
+	cancel()
+	close(closeReader)
+	select {
+	case <-pumpDone:
+	case <-time.After(time.Second):
+		t.Fatal("stdin pump did not unwind after cancellation")
+	}
+}
+
+type chunksReader struct {
+	chunks [][]byte
+	next   int
+}
+
+func (r *chunksReader) Read(p []byte) (int, error) {
+	if r.next == len(r.chunks) {
+		return 0, io.EOF
+	}
+	chunk := r.chunks[r.next]
+	r.next++
+	return copy(p, chunk), nil
+}
+
+func TestStdinPumpAcknowledgesRepeatedSchemeChunks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requests := 0
+	pump := stdinPump{
+		ctx:    ctx,
+		cancel: cancel,
+		in: &chunksReader{chunks: [][]byte{
+			[]byte("\x1b[?997;2n"),
+			[]byte("\x1b[?997;1n"),
+		}},
+		out:        make(chan ports.Frame, 3),
+		themeState: &terminalThemeState{},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		requestColors: func() bool {
+			requests++
+			return true
+		},
+	}
+
+	pump.run()
+	require.Equal(t, 2, requests, "each completed scheme chunk must receive its own acknowledgement")
+}
+
+func TestStdinPumpQueryAcknowledgementCancellationDoesNotDeadlock(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	closeReader := make(chan struct{})
+	reader := &queryBoundaryReader{
+		first: []byte("\x1b[?997;2n"),
+		close: closeReader,
+	}
+	requestStarted := make(chan struct{})
+	pump := stdinPump{
+		ctx:        ctx,
+		cancel:     cancel,
+		in:         reader,
+		out:        make(chan ports.Frame, 2),
+		themeState: &terminalThemeState{},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		requestColors: func() bool {
+			close(requestStarted)
+			<-ctx.Done()
+			return false
+		},
+	}
+	pumpDone := make(chan struct{})
+	go func() {
+		pump.run()
+		close(pumpDone)
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("palette re-query was not requested")
+	}
+	cancel()
+	select {
+	case <-pumpDone:
+	case <-time.After(time.Second):
+		t.Fatal("stdin pump deadlocked waiting for a cancelled query acknowledgement")
+	}
+	close(closeReader)
 }
