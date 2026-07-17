@@ -117,7 +117,7 @@ func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, [
 	}
 	popupChanged := !cache.valid || cache.floatingGeneration != floating.generation || cache.floatingGeometry != geometry
 	titleChanged := popupChanged || cache.floatingTitleGeneration != floating.titleGeneration
-	drawFloatingBorder(frame, geometry.Bounds, floating.title, newThemeStyles(theme).border)
+	drawFloatingBorder(frame, geometry.Bounds, floating.title, themeui.NewStyles(theme).Border)
 	if full || popupChanged {
 		return frame, []renderer.Damage{renderer.FullRedraw()}
 	}

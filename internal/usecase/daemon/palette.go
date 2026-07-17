@@ -9,6 +9,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -496,10 +497,10 @@ func (e paletteExec) JumpRecentSession(rank int) error {
 	return nil
 }
 
-func composePaletteClientFrame(model *palette.Model, base renderer.Frame, cfg domain.PaletteConfig, guidance string, styles ...themeStyles) (renderer.Frame, []renderer.Damage) {
-	styleSet := resolveThemeStyles(styles)
+func composePaletteClientFrame(model *palette.Model, base renderer.Frame, cfg domain.PaletteConfig, guidance string, styles ...themeui.Styles) (renderer.Frame, []renderer.Damage) {
+	styleSet := resolveStyles(styles)
 	modal := paletteModalFor(domain.Size{Cols: base.Width, Rows: base.Height}, cfg)
-	return composeModalClientFrame(base, modal, styleSet, styleSet.selection, func(size domain.Size, _ ...renderer.Style) renderer.Frame {
-		return model.Render(size, palette.RenderOptions{Styles: palette.RenderStyles{Selection: styleSet.selection, Description: styleSet.paletteDesc}, Guidance: guidance})
+	return composeModalClientFrame(base, modal, styleSet, styleSet.Selection, func(size domain.Size, _ ...renderer.Style) renderer.Frame {
+		return model.Render(size, palette.RenderOptions{Styles: palette.RenderStyles{Selection: styleSet.Selection, Description: styleSet.PaletteDesc}, Guidance: guidance})
 	})
 }

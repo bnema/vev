@@ -267,9 +267,9 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 			Known:      true,
 			TrueColor:  true,
 		}
-		styles := newThemeStyles(theme)
-		require.False(t, styles.tabTitle.Equal(styles.statusBar), "sanity: muted title style must differ from the base style on a truecolor theme")
-		require.False(t, styles.tabTitleActive.Equal(styles.accent), "sanity: muted active-title style must differ from the base accent style")
+		styles := themeui.NewStyles(theme)
+		require.False(t, styles.TabTitle.Equal(styles.StatusBar), "sanity: muted title style must differ from the base style on a truecolor theme")
+		require.False(t, styles.TabTitleActive.Equal(styles.Accent), "sanity: muted active-title style must differ from the base accent style")
 
 		labels := fitTabLabels(tabs, rowLen, "")
 
@@ -286,17 +286,17 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 		nameEnd := x + 1 + labels[0].nameLen
 		for i := x; i < nameEnd; i++ {
 			require.True(t, row[i].Style.Bold, "cell %d: name segment must be bold", i)
-			require.True(t, row[i].Style.Equal(styles.tabName), "cell %d: name segment style mismatch", i)
+			require.True(t, row[i].Style.Equal(styles.TabName), "cell %d: name segment style mismatch", i)
 		}
 		x = nameEnd
 		titleLen := len(labels[0].text) - labels[0].nameLen
 		titleEnd := x + titleLen
 		for i := x; i < titleEnd; i++ {
 			require.False(t, row[i].Style.Bold, "cell %d: title segment must not be bold", i)
-			require.True(t, row[i].Style.Equal(styles.tabTitle), "cell %d: title segment style mismatch", i)
+			require.True(t, row[i].Style.Equal(styles.TabTitle), "cell %d: title segment style mismatch", i)
 		}
 		x = titleEnd
-		require.True(t, row[x].Style.Equal(styles.statusBar), "cell %d: tab 0 trailing space must keep the base style", x)
+		require.True(t, row[x].Style.Equal(styles.StatusBar), "cell %d: tab 0 trailing space must keep the base style", x)
 		x++
 
 		// tab 1: active, attention, no title: name, attention space+bell (both
@@ -304,16 +304,16 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 		nameEnd = x + 1 + labels[1].nameLen
 		for i := x; i < nameEnd; i++ {
 			require.True(t, row[i].Style.Bold, "cell %d: active name segment must be bold", i)
-			require.True(t, row[i].Style.Equal(styles.tabNameActive), "cell %d: active name segment style mismatch", i)
+			require.True(t, row[i].Style.Equal(styles.TabNameActive), "cell %d: active name segment style mismatch", i)
 		}
 		require.Equal(t, len(labels[1].text), labels[1].nameLen, "tab 1 has no pane title, so its whole label is the name segment")
 		x = nameEnd
-		require.True(t, row[x].Style.Equal(styles.accent), "cell %d: tab 1 attention leading space must keep the active base style", x)
+		require.True(t, row[x].Style.Equal(styles.Accent), "cell %d: tab 1 attention leading space must keep the active base style", x)
 		x++
 		tab1Bell := x
-		require.True(t, row[x].Style.Equal(styles.accent), "cell %d: tab 1 blank bell must keep the active base style, not DefaultStyle", x)
+		require.True(t, row[x].Style.Equal(styles.Accent), "cell %d: tab 1 blank bell must keep the active base style, not DefaultStyle", x)
 		x++
-		require.True(t, row[x].Style.Equal(styles.accent), "cell %d: tab 1 trailing space must keep the active base style", x)
+		require.True(t, row[x].Style.Equal(styles.Accent), "cell %d: tab 1 trailing space must keep the active base style", x)
 		x++
 
 		// tab 2: inactive, attention, with title: name, attention space+bell
@@ -321,22 +321,22 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 		nameEnd = x + 1 + labels[2].nameLen
 		for i := x; i < nameEnd; i++ {
 			require.True(t, row[i].Style.Bold, "cell %d: tab 2 name segment must be bold", i)
-			require.True(t, row[i].Style.Equal(styles.tabName), "cell %d: tab 2 name segment style mismatch", i)
+			require.True(t, row[i].Style.Equal(styles.TabName), "cell %d: tab 2 name segment style mismatch", i)
 		}
 		x = nameEnd
-		require.True(t, row[x].Style.Equal(styles.statusBar), "cell %d: tab 2 attention leading space must keep the base style", x)
+		require.True(t, row[x].Style.Equal(styles.StatusBar), "cell %d: tab 2 attention leading space must keep the base style", x)
 		x++
 		tab2Bell := x
-		require.True(t, row[x].Style.Equal(styles.statusBar), "cell %d: tab 2 blank bell must keep the base style, not DefaultStyle", x)
+		require.True(t, row[x].Style.Equal(styles.StatusBar), "cell %d: tab 2 blank bell must keep the base style, not DefaultStyle", x)
 		x++
 		titleLen = len(labels[2].text) - labels[2].nameLen
 		titleEnd = x + titleLen
 		for i := x; i < titleEnd; i++ {
 			require.False(t, row[i].Style.Bold, "cell %d: tab 2 title segment must not be bold", i)
-			require.True(t, row[i].Style.Equal(styles.tabTitle), "cell %d: tab 2 title segment style mismatch", i)
+			require.True(t, row[i].Style.Equal(styles.TabTitle), "cell %d: tab 2 title segment style mismatch", i)
 		}
 		x = titleEnd
-		require.True(t, row[x].Style.Equal(styles.statusBar), "cell %d: tab 2 trailing space must keep the base style", x)
+		require.True(t, row[x].Style.Equal(styles.StatusBar), "cell %d: tab 2 trailing space must keep the base style", x)
 
 		// On a visible pulse frame, the bell glyph itself must keep the same
 		// background as its tab's base style.
@@ -344,18 +344,18 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 		drawTopBarSnapshot(visibleRow, status, 1, "", styles)
 		require.Equal(t, rune(ui.AttentionGlyph), visibleRow[tab1Bell].Rune)
 		require.True(t, visibleRow[tab1Bell].Style.HasBackgroundRGB)
-		require.Equal(t, styles.accent.BackgroundRGB, visibleRow[tab1Bell].Style.BackgroundRGB, "tab 1's visible bell must keep the active base background")
+		require.Equal(t, styles.Accent.BackgroundRGB, visibleRow[tab1Bell].Style.BackgroundRGB, "tab 1's visible bell must keep the active base background")
 		require.Equal(t, rune(ui.AttentionGlyph), visibleRow[tab2Bell].Rune)
 		require.True(t, visibleRow[tab2Bell].Style.HasBackgroundRGB)
-		require.Equal(t, styles.statusBar.BackgroundRGB, visibleRow[tab2Bell].Style.BackgroundRGB, "tab 2's visible bell must keep the plain base background")
+		require.Equal(t, styles.StatusBar.BackgroundRGB, visibleRow[tab2Bell].Style.BackgroundRGB, "tab 2's visible bell must keep the plain base background")
 	})
 
 	t.Run("non-usable theme matches the pre-change fallback styles", func(t *testing.T) {
-		styles := resolveThemeStyles(nil)
-		require.True(t, styles.tabName.Equal(styles.statusBar))
-		require.True(t, styles.tabTitle.Equal(styles.statusBar))
-		require.True(t, styles.tabNameActive.Equal(styles.accent))
-		require.True(t, styles.tabTitleActive.Equal(styles.accent))
+		styles := resolveStyles(nil)
+		require.True(t, styles.TabName.Equal(styles.StatusBar))
+		require.True(t, styles.TabTitle.Equal(styles.StatusBar))
+		require.True(t, styles.TabNameActive.Equal(styles.Accent))
+		require.True(t, styles.TabTitleActive.Equal(styles.Accent))
 
 		row := make([]renderer.Cell, rowLen)
 		drawTopBarSnapshot(row, status, 0, "", styles)
@@ -371,15 +371,15 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 		require.Equal(t, tab0+tab1+tab2+strings.Repeat(" ", rowLen-len(tab0)-len(tab1)-len(tab2)), rowText(row))
 
 		for i, c := range row[:len(tab0)] {
-			require.True(t, c.Style.Equal(styles.statusBar), "cell %d should use the plain base style", i)
+			require.True(t, c.Style.Equal(styles.StatusBar), "cell %d should use the plain base style", i)
 		}
 		tab1Start := len(tab0)
 		for i := tab1Start; i < tab1Start+len(tab1); i++ {
-			require.True(t, row[i].Style.Equal(styles.accent), "cell %d should use the plain accent style, including the blank bell cell", i)
+			require.True(t, row[i].Style.Equal(styles.Accent), "cell %d should use the plain accent style, including the blank bell cell", i)
 		}
 		tab2Start := tab1Start + len(tab1)
 		for i := tab2Start; i < tab2Start+len(tab2); i++ {
-			require.True(t, row[i].Style.Equal(styles.statusBar), "cell %d should use the plain base style, including the blank bell cell", i)
+			require.True(t, row[i].Style.Equal(styles.StatusBar), "cell %d should use the plain base style, including the blank bell cell", i)
 		}
 	})
 }
@@ -847,7 +847,7 @@ func TestTopBarRightAnchor(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			row := make([]renderer.Cell, tt.width)
 
-			drawTopBarSnapshot(row, tt.status, 0, tt.topRight, resolveThemeStyles(nil))
+			drawTopBarSnapshot(row, tt.status, 0, tt.topRight, resolveStyles(nil))
 
 			require.Equal(t, tt.want, rowText(row))
 			if tt.continuationCell > 0 {
@@ -1093,7 +1093,7 @@ func TestCapturePrimaryRenderStatePreservesContextualMRUModeThroughScratchReuse(
 	draw := func(state capturedRenderState) string {
 		t.Helper()
 		row := make([]renderer.Cell, 32)
-		drawStatusBarState(row, state.bars, resolveThemeStyles(nil))
+		drawStatusBarState(row, state.bars, resolveStyles(nil))
 		return rowText(row)
 	}
 	normal := barState{status: statusSnapshot{session: "cur"}, mru: []recentSession{{name: "vty"}, {name: "misc"}}}
@@ -1139,7 +1139,7 @@ func TestStatusBarRendersMRUNamesAndInlineBell(t *testing.T) {
 	}
 	row := make([]renderer.Cell, 24)
 
-	drawStatusBarState(row, state, resolveThemeStyles(nil))
+	drawStatusBarState(row, state, resolveStyles(nil))
 
 	require.Equal(t, " cur  fresh  tmp       ", rowText(row))
 	for _, c := range row {
@@ -1153,19 +1153,19 @@ func TestStatusBarRendersMRUNamesAndInlineBell(t *testing.T) {
 
 func TestStatusBarCurrentSessionUsesAccentStyle(t *testing.T) {
 	theme := themeui.Theme{Foreground: renderer.RGB{R: 220, G: 220, B: 220}, Background: renderer.RGB{R: 10, G: 10, B: 10}, HasFG: true, HasBG: true, TrueColor: true, Known: true}
-	styles := newThemeStyles(theme)
+	styles := themeui.NewStyles(theme)
 	row := make([]renderer.Cell, 16)
 
 	drawStatusBarState(row, barState{status: statusSnapshot{session: "cur"}, theme: theme}, styles)
 
 	for _, idx := range []int{0, 1, 2, 3, 4} {
-		require.True(t, row[idx].Style.Equal(styles.accent), "cell %d should use accent style", idx)
+		require.True(t, row[idx].Style.Equal(styles.Accent), "cell %d should use accent style", idx)
 	}
-	require.NotEqual(t, styles.statusBar.BackgroundRGB, styles.accent.BackgroundRGB)
+	require.NotEqual(t, styles.StatusBar.BackgroundRGB, styles.Accent.BackgroundRGB)
 }
 
 func TestStatusBarContextualRanksPreserveOriginalRanksAndSelectedAccent(t *testing.T) {
-	styles := resolveThemeStyles(nil)
+	styles := resolveStyles(nil)
 	row := make([]renderer.Cell, 18)
 	state := barState{
 		status: statusSnapshot{session: "cur"},
@@ -1190,8 +1190,8 @@ func TestStatusBarContextualRanksPreserveOriginalRanksAndSelectedAccent(t *testi
 		if cell.Rune == '2' {
 			found = true
 			require.True(t, cell.Style.Bold)
-			require.Equal(t, styles.accent.Foreground, cell.Style.Foreground)
-			require.Equal(t, styles.accent.Background, cell.Style.Background)
+			require.Equal(t, styles.Accent.Foreground, cell.Style.Foreground)
+			require.Equal(t, styles.Accent.Background, cell.Style.Background)
 			break
 		}
 	}
@@ -1200,7 +1200,7 @@ func TestStatusBarContextualRanksPreserveOriginalRanksAndSelectedAccent(t *testi
 
 func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
 	theme := themeui.Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 20, G: 20, B: 20}, HasFG: true, HasBG: true, TrueColor: true, Known: true}
-	styles := newThemeStyles(theme)
+	styles := themeui.NewStyles(theme)
 	state := barState{status: statusSnapshot{session: "c"}, theme: theme, mru: []recentSession{{name: "a"}, {name: "b"}, {name: "c"}}}
 	row := make([]renderer.Cell, 16)
 
@@ -1209,14 +1209,14 @@ func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
 	firstFG := row[4].Style.ForegroundRGB.R
 	secondFG := row[7].Style.ForegroundRGB.R
 	thirdFG := row[10].Style.ForegroundRGB.R
-	require.Equal(t, styles.statusBar.ForegroundRGB.R, firstFG)
+	require.Equal(t, styles.StatusBar.ForegroundRGB.R, firstFG)
 	require.Greater(t, firstFG, secondFG)
 	require.Greater(t, secondFG, thirdFG)
 
 	firstBG := row[4].Style.BackgroundRGB.R
 	secondBG := row[7].Style.BackgroundRGB.R
 	thirdBG := row[10].Style.BackgroundRGB.R
-	require.Equal(t, styles.statusBar.BackgroundRGB.R, firstBG)
+	require.Equal(t, styles.StatusBar.BackgroundRGB.R, firstBG)
 	require.Greater(t, firstBG, secondBG)
 	require.Greater(t, secondBG, thirdBG)
 
@@ -1229,7 +1229,7 @@ func TestStatusBarNarrowRowsDropWholeOldestMRUEntries(t *testing.T) {
 	state := barState{status: statusSnapshot{session: "cur"}, mru: []recentSession{{name: "fresh"}, {name: "middle"}, {name: "old"}}}
 	row := make([]renderer.Cell, 21)
 
-	drawStatusBarState(row, state, resolveThemeStyles(nil))
+	drawStatusBarState(row, state, resolveStyles(nil))
 
 	text := rowText(row)
 	require.Contains(t, text, "fresh")
@@ -1273,7 +1273,7 @@ func TestStatusBarMRUWidthAwareBudget(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			row := make([]renderer.Cell, tt.cols)
 
-			drawStatusBarState(row, state, resolveThemeStyles(nil))
+			drawStatusBarState(row, state, resolveStyles(nil))
 
 			text := rowText(row)
 			for _, want := range tt.wantShown {
@@ -1346,7 +1346,7 @@ func TestStatusBarBottomRightAndMRUFitting(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			row := make([]renderer.Cell, tt.width)
 
-			drawStatusBarState(row, tt.state, resolveThemeStyles(nil))
+			drawStatusBarState(row, tt.state, resolveStyles(nil))
 
 			text := rowText(row)
 			if tt.want != "" {
@@ -1372,7 +1372,7 @@ func TestStatusBarCopyFeedbackFullyRenderedAlongsideMRU(t *testing.T) {
 	state := barState{status: statusSnapshot{session: "cur"}, copyFeedback: "copied", mru: []recentSession{{name: "a"}, {name: "b"}, {name: "c"}}}
 	row := make([]renderer.Cell, 20)
 
-	drawStatusBarState(row, state, resolveThemeStyles(nil))
+	drawStatusBarState(row, state, resolveStyles(nil))
 
 	text := rowText(row)
 	require.Contains(t, text, " a")
@@ -1395,7 +1395,7 @@ func TestStatusBarCopyFeedbackBoundaryWidths(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			row := make([]renderer.Cell, tt.cols)
 
-			drawStatusBarState(row, state, resolveThemeStyles(nil))
+			drawStatusBarState(row, state, resolveStyles(nil))
 
 			require.Equal(t, tt.want, rowText(row))
 		})

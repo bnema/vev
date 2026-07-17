@@ -77,14 +77,14 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 			copy(frame.Row(y), in.frame.Row(y))
 		}
 	}
-	styles := newThemeStyles(state.theme)
+	styles := themeui.NewStyles(state.theme)
 	defaultDimmer := themeui.NewDimmer(state.theme)
 	inactivePaneDimmer := themeui.NewDimmer(state.theme, themeui.WithForegroundDimming(inactivePaneForegroundDimming))
 	drawTopBarSnapshot(frame.Row(0), state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
 	drawStatusBarState(frame.Row(rows+1), state.bars, styles)
 	content := domain.Rect{Y: 1, Width: width, Height: rows}
 	if state.layout.valid && state.layout.root != nil {
-		drawDividers(frame, state.layout.root, content, defaultDimmer.Dim(styles.border))
+		drawDividers(frame, state.layout.root, content, defaultDimmer.Dim(styles.Border))
 	}
 
 	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme || in.floatingVisible != state.floating.visible
@@ -157,10 +157,10 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }
 
-func drawCapturedPaneTitleBar(frame renderer.Frame, pl layout.Placement, title string, focused bool, styles themeStyles, dimmer themeui.Dimmer) {
-	style := styles.border
+func drawCapturedPaneTitleBar(frame renderer.Frame, pl layout.Placement, title string, focused bool, styles themeui.Styles, dimmer themeui.Dimmer) {
+	style := styles.Border
 	if focused {
-		style = styles.statusBar
+		style = styles.StatusBar
 	} else {
 		style = dimmer.Dim(style)
 	}
@@ -191,15 +191,15 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	if snap.copyPane != nil {
 		o.copyPaneID = snap.copyPane.id
 	}
-	styles := newThemeStyles(state.theme)
+	styles := themeui.NewStyles(state.theme)
 	size := domain.Size{Cols: state.layout.area.Width, Rows: state.layout.area.Height + 2}
 	if snap.copySearchModel != nil {
 		o.copySearch.modal = copySearchModal
-		o.copySearch.inner = snap.copySearchModel.Render(rectSize(copySearchModal.Inner(size)), styles.selection)
+		o.copySearch.inner = snap.copySearchModel.Render(rectSize(copySearchModal.Inner(size)), styles.Selection)
 	}
 	if snap.pickerActive && snap.pickerModel != nil {
 		o.picker.modal = pickerModal
-		renderStyles := picker.RenderStyles{Selection: styles.selection, SelectionName: styles.pickerSelectionName, SelectionMuted: styles.pickerSelectionMuted, Name: styles.pickerName, Detail: styles.paletteDesc, Base: renderer.DefaultStyle(), Separator: styles.pickerSeparator}
+		renderStyles := picker.RenderStyles{Selection: styles.Selection, SelectionName: styles.PickerSelectionName, SelectionMuted: styles.PickerSelectionMuted, Name: styles.PickerName, Detail: styles.PaletteDesc, Base: renderer.DefaultStyle(), Separator: styles.PickerSeparator}
 		o.picker.inner = snap.pickerModel.Render(rectSize(pickerModal.Inner(size)), state.preview, renderStyles)
 	}
 	if snap.paletteActive && snap.paletteModel != nil {
@@ -209,11 +209,11 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 			guidance = snap.paletteHints.Feedback
 		}
 		o.paletteGuidance = snap.paletteFeedback
-		o.palette.inner = snap.paletteModel.Render(rectSize(o.palette.modal.Inner(size)), palette.RenderOptions{Styles: palette.RenderStyles{Selection: styles.selection, Description: styles.paletteDesc}, Guidance: guidance, Feedback: snap.paletteFeedback})
+		o.palette.inner = snap.paletteModel.Render(rectSize(o.palette.modal.Inner(size)), palette.RenderOptions{Styles: palette.RenderStyles{Selection: styles.Selection, Description: styles.PaletteDesc}, Guidance: guidance, Feedback: snap.paletteFeedback})
 	}
 	if snap.promptActive && snap.promptModel != nil {
 		o.prompt.modal = promptModalFor(snap.promptModel.Title())
-		o.prompt.inner = snap.promptModel.Render(rectSize(o.prompt.modal.Inner(size)), styles.accent)
+		o.prompt.inner = snap.promptModel.Render(rectSize(o.prompt.modal.Inner(size)), styles.Accent)
 	}
 	state.cursor.hiddenByOverlay = o.active()
 }
@@ -248,7 +248,7 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 		if modal.inner.Width == 0 && modal.inner.Height == 0 {
 			continue
 		}
-		inner := modal.modal.Composite(frame, newThemeStyles(state.theme).border)
+		inner := modal.modal.Composite(frame, themeui.NewStyles(state.theme).Border)
 		for y := range min(inner.Height, modal.inner.Height) {
 			copy(frame.Row(inner.Y + y)[inner.X:inner.X+min(inner.Width, modal.inner.Width)], modal.inner.Row(y)[:min(inner.Width, modal.inner.Width)])
 		}

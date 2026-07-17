@@ -10,6 +10,7 @@ import (
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/mouse"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/internal/usecase/visualsearch"
 	"github.com/bnema/vev/pkg/renderer"
@@ -415,8 +416,8 @@ func composeCopyClientFrame(mode *scopy.Mode, target domain.Rect, frame renderer
 	if mode == nil || target.Width <= 0 || target.Height <= 0 || frame.Width <= 0 || frame.Height <= 0 {
 		return frame, nil
 	}
-	styles := newThemeStyles(bars.theme)
-	copyFrame := mode.Render(styles.copyStatus, styles.selection)
+	styles := themeui.NewStyles(bars.theme)
+	copyFrame := mode.Render(styles.CopyStatus, styles.Selection)
 	bodyRows := max(copyFrame.Height-1, 0)
 	for y := 0; y < target.Height && y < bodyRows && target.Y+y < frame.Height-1; y++ {
 		dstX := max(target.X, 0)

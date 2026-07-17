@@ -357,59 +357,11 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, lease *att
 	d.emitFrame(sess, ac, state, composed, &marks)
 }
 
-type themeStyles struct {
-	statusBar   renderer.Style
-	accent      renderer.Style
-	border      renderer.Style
-	selection   renderer.Style
-	copyStatus  renderer.Style
-	paletteDesc renderer.Style
-
-	// Top bar tab label segments: name (bold) and parenthesized pane-title
-	// (muted), one pair per base style. No-ops to statusBar/accent on
-	// non-truecolor themes.
-	tabName        renderer.Style
-	tabNameActive  renderer.Style
-	tabTitle       renderer.Style
-	tabTitleActive renderer.Style
-
-	// Session picker row segments. Detail reuses paletteDesc (both are
-	// themeui.MutedTextStyle(t)); pickerName/pickerSelection* are picker-only.
-	pickerName           renderer.Style
-	pickerSelectionName  renderer.Style
-	pickerSelectionMuted renderer.Style
-	pickerSeparator      renderer.Style
-}
-
-func newThemeStyles(t themeui.Theme) themeStyles {
-	statusBar := themeui.StatusBarStyle(t)
-	accent := themeui.AccentStyle(t)
-	selection := themeui.SelectionStyle(t)
-	return themeStyles{
-		statusBar:   statusBar,
-		accent:      accent,
-		border:      themeui.BorderStyle(t),
-		selection:   selection,
-		copyStatus:  selection,
-		paletteDesc: themeui.MutedTextStyle(t),
-
-		tabName:        themeui.EmphasisStyle(statusBar, t),
-		tabNameActive:  themeui.EmphasisStyle(accent, t),
-		tabTitle:       themeui.MutedVariantStyle(statusBar, t),
-		tabTitleActive: themeui.MutedVariantStyle(accent, t),
-
-		pickerName:           themeui.EmphasisStyle(renderer.DefaultStyle(), t),
-		pickerSelectionName:  themeui.EmphasisStyle(selection, t),
-		pickerSelectionMuted: themeui.MutedVariantStyle(selection, t),
-		pickerSeparator:      themeui.MutedTextStyle(t),
-	}
-}
-
-func resolveThemeStyles(styles []themeStyles) themeStyles {
+func resolveStyles(styles []themeui.Styles) themeui.Styles {
 	if len(styles) > 0 {
 		return styles[0]
 	}
-	return newThemeStyles(themeui.Theme{})
+	return themeui.NewStyles(themeui.Theme{})
 }
 
 type barCache struct {
