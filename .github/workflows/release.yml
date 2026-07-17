@@ -1,0 +1,19 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Pinned by SHA deliberately: this workflow receives the AUR key.
+    # Bump the pin manually when bnema/gh-actions changes.
+    uses: bnema/gh-actions/.github/workflows/go-release.yml@46d7b3ad4fbb1686ee267c27d6d60e2cf4aa9c72
+    with:
+      go-version-file: go.mod
+      goreleaser-version: '~> v2'
+    secrets:
+      AUR_KEY: ${{ secrets.AUR_KEY }}
