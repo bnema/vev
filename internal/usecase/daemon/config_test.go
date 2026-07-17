@@ -197,16 +197,22 @@ func TestThemeConfigSnapshotIsAtomic(t *testing.T) {
 		{mode: domain.ThemeAuto, paletteOff: true}:  {},
 		{mode: domain.ThemeDark, paletteOff: false}: {},
 	}
-	ready := make(chan struct{})
-	readerStarted := make(chan struct{})
+	firstPublished := make(chan struct{})
+	firstObserved := make(chan struct{})
+	secondPublished := make(chan struct{})
+	secondObserved := make(chan struct{})
+	observed := make(chan themeConfigSnapshot, 2)
 	invalid := make(chan themeConfigSnapshot, 1)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		d.storeThemeConfig(first)
-		close(ready)
-		<-readerStarted
+		close(firstPublished)
+		<-firstObserved
+		d.storeThemeConfig(second)
+		close(secondPublished)
+		<-secondObserved
 		for range 10_000 {
 			d.storeThemeConfig(second)
 			d.storeThemeConfig(first)
@@ -214,8 +220,12 @@ func TestThemeConfigSnapshotIsAtomic(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		<-ready
-		close(readerStarted)
+		<-firstPublished
+		observed <- d.currentThemeConfig()
+		close(firstObserved)
+		<-secondPublished
+		observed <- d.currentThemeConfig()
+		close(secondObserved)
 		for range 20_000 {
 			snapshot := d.currentThemeConfig()
 			if _, ok := allowed[snapshot]; !ok {
@@ -228,6 +238,8 @@ func TestThemeConfigSnapshotIsAtomic(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+	require.Equal(t, themeConfigSnapshot{mode: domain.ThemeAuto, paletteOff: true}, <-observed)
+	require.Equal(t, themeConfigSnapshot{mode: domain.ThemeDark, paletteOff: false}, <-observed)
 	select {
 	case snapshot := <-invalid:
 		t.Fatalf("observed mixed theme configuration: %#v", snapshot)
