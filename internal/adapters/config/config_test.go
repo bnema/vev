@@ -332,6 +332,9 @@ func TestParse(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			if !tt.want.ThemePalette {
+				tt.want.ThemePalette = domain.Defaults().ThemePalette
+			}
 			if tt.want.Bar.Interval == 0 {
 				tt.want.Bar = domain.Defaults().Bar
 			}
@@ -362,6 +365,58 @@ func TestParse(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseThemePalette(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		input        string
+		want         bool
+		wantWarnings []domain.Warning
+	}{
+		{
+			name:  "on enables terminal palette inheritance",
+			input: "theme.palette = on\n",
+			want:  true,
+		},
+		{
+			name:  "off disables terminal palette inheritance",
+			input: "theme.palette = off\n",
+			want:  false,
+		},
+		{
+			name:  "invalid value warns once and keeps default",
+			input: "theme.palette = maybe\n",
+			want:  true,
+			wantWarnings: []domain.Warning{
+				{Line: 1, Msg: "invalid theme.palette \"maybe\""},
+			},
+		},
+		{
+			name:  "absent key keeps default",
+			input: "theme = dark\n",
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, warnings, err := Parse(strings.NewReader(tt.input))
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got.ThemePalette)
+			require.Equal(t, tt.wantWarnings, warnings)
+		})
+	}
+}
+
+func TestDefaultsThemePalette(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, domain.Defaults().ThemePalette)
 }
 
 func TestParseTabsTerminalTitle(t *testing.T) {

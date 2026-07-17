@@ -68,6 +68,13 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				continue
 			}
 			cfg.Theme = mode
+		case key == "theme.palette":
+			on, ok := parseOnOff(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid theme.palette %q", value)})
+				continue
+			}
+			cfg.ThemePalette = on
 		case key == "bar.top-right":
 			command, ok := parseBarCommand(value)
 			if !ok {

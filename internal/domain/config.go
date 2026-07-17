@@ -81,6 +81,7 @@ type TabsConfig struct {
 // layer can decide which actions it understands.
 type Config struct {
 	Theme          ThemeMode
+	ThemePalette   bool
 	Bar            BarConfig
 	BindingEntries []ConfigEntry
 	Codes          map[string]string
@@ -101,7 +102,8 @@ type Warning struct {
 // Defaults returns vev's default configuration.
 func Defaults() Config {
 	return Config{
-		Theme: ThemeAuto,
+		Theme:        ThemeAuto,
+		ThemePalette: true,
 		Bar: BarConfig{
 			TopRight:    "vev-bar-top-right",
 			BottomRight: "vev-bar-bottom-right",
