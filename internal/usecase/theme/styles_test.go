@@ -148,6 +148,61 @@ func TestMRUFade(t *testing.T) {
 	}
 }
 
+func TestThemePaletteColor(t *testing.T) {
+	palette := [16]renderer.RGB{
+		3: {R: 0x11, G: 0x22, B: 0x33},
+		7: {R: 0xaa, G: 0xbb, B: 0xcc},
+	}
+	theme := Theme{
+		UsePalette:   true,
+		Palette:      palette,
+		PaletteKnown: 1<<3 | 1<<7,
+	}
+
+	tests := []struct {
+		name string
+		slot int
+		want renderer.RGB
+		ok   bool
+	}{
+		{name: "known slot", slot: 3, want: palette[3], ok: true},
+		{name: "unknown slot", slot: 4},
+		{name: "negative slot", slot: -1},
+		{name: "slot above palette", slot: 16},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := theme.PaletteColor(tt.slot)
+			require.Equal(t, tt.ok, ok)
+			require.Equal(t, tt.want, got)
+		})
+	}
+
+	theme.UsePalette = false
+	got, ok := theme.PaletteColor(3)
+	require.False(t, ok)
+	require.Equal(t, renderer.RGB{}, got)
+}
+
+func TestBuiltinThemesDoNotUsePalette(t *testing.T) {
+	for name, theme := range map[string]Theme{
+		"dark":  BuiltinDark,
+		"light": BuiltinLight,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.False(t, theme.UsePalette)
+			require.Zero(t, theme.PaletteKnown)
+			require.Equal(t, [16]renderer.RGB{}, theme.Palette)
+		})
+	}
+}
+
+func TestThemeIsComparable(t *testing.T) {
+	themes := map[Theme]bool{BuiltinDark: true}
+	require.True(t, themes[BuiltinDark])
+}
+
 func TestNewStylesComposesSemanticStyles(t *testing.T) {
 	theme := Theme{
 		Foreground: renderer.RGB{R: 0xc8, G: 0xc8, B: 0xc8},

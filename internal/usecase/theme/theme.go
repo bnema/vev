@@ -11,16 +11,28 @@ import (
 
 const maxPending = 64
 
-// Theme describes terminal default colors reported by OSC 10/11.
+// Theme describes terminal default colors and ANSI palette entries.
 type Theme struct {
-	Foreground  renderer.RGB
-	Background  renderer.RGB
-	HasFG       bool
-	HasBG       bool
-	TrueColor   bool
-	Known       bool
-	SchemeKnown bool
-	Light       bool
+	Foreground   renderer.RGB
+	Background   renderer.RGB
+	Palette      [16]renderer.RGB
+	PaletteKnown uint16
+	HasFG        bool
+	HasBG        bool
+	TrueColor    bool
+	Known        bool
+	SchemeKnown  bool
+	Light        bool
+	UsePalette   bool
+}
+
+// PaletteColor returns a palette color only when palette inheritance is
+// enabled and the terminal reported the requested ANSI slot.
+func (t Theme) PaletteColor(slot int) (renderer.RGB, bool) {
+	if !t.UsePalette || slot < 0 || slot >= len(t.Palette) || t.PaletteKnown&(uint16(1)<<slot) == 0 {
+		return renderer.RGB{}, false
+	}
+	return t.Palette[slot], true
 }
 
 var (
