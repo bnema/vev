@@ -1,0 +1,137 @@
+version: 2
+
+project_name: vev
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: vev
+    main: .
+    binary: vev
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: linux
+        goarch: arm64
+      - goos: darwin
+        goarch: amd64
+    ldflags:
+      - -s -w
+      - -X github.com/bnema/vev/internal/app.version={{.Version}}
+      - -X github.com/bnema/vev/internal/app.commit={{.ShortCommit}}
+      - -X github.com/bnema/vev/internal/app.date={{.Date}}
+
+archives:
+  - id: default
+    # Contract consumed by install.sh and the AUR package block:
+    # vev_linux_x86_64.tar.gz / vev_darwin_arm64.tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Os }}_{{ if eq .Arch "amd64" }}x86_64{{ else }}{{ .Arch }}{{ end }}
+    formats: ['tar.gz']
+    files:
+      - LICENSE
+      - README.md
+      - scripts/vev-bar-top-right
+      - scripts/vev-bar-bottom-right
+
+checksum:
+  # Fixed name: install.sh downloads .../download/<tag>/checksums.txt
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - '^build\(deps\):'
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: Features
+      regexp: '^feat(\(.+\))?:'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^fix(\(.+\))?:'
+      order: 1
+    - title: Performance
+      regexp: '^perf(\(.+\))?:'
+      order: 2
+    - title: Refactoring
+      regexp: '^refactor(\(.+\))?:'
+      order: 3
+    - title: Other Changes
+      order: 999
+
+release:
+  github:
+    owner: bnema
+    name: vev
+  draft: false
+  replace_existing_draft: true
+  prerelease: auto
+  make_latest: true
+  footer: |
+    ---
+
+    ## Install
+
+    ### Script (Linux x86_64, macOS arm64)
+    ```sh
+    curl -fsSL https://raw.githubusercontent.com/bnema/vev/main/install.sh | sh
+    ```
+
+    ### Arch Linux
+    ```sh
+    yay -S vev-bin
+    ```
+
+    ### macOS note
+    The darwin binary is ad-hoc signed by the Go toolchain, not notarized.
+    Installing via the script or `curl` avoids the quarantine attribute;
+    if you downloaded the archive with a browser, Gatekeeper will block it.
+    Removing the attribute bypasses a Gatekeeper security control — only do
+    it for the vev binary itself, after verifying its checksum:
+    ```sh
+    xattr -d com.apple.quarantine ~/.local/bin/vev
+    ```
+
+    **Full Changelog**: https://github.com/bnema/vev/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+git:
+  tag_sort: smartsemver
+
+aurs:
+  - name: vev-bin
+    ids: ['default']
+    homepage: https://github.com/bnema/vev
+    description: Terminal multiplexer with a per-user daemon, server-side rendering, and minimal socket/SSH diffs
+    maintainers:
+      - bnema <b at bnema dot dev>
+    license: MIT
+    private_key: '{{ .Env.AUR_KEY }}'
+    git_url: ssh://aur@aur.archlinux.org/vev-bin.git
+    # auto: prerelease tags (v1.2.3-rc.1) are not pushed to AUR.
+    skip_upload: auto
+    provides:
+      - vev
+    conflicts:
+      - vev
+    package: |-
+      install -Dm755 "./vev" "${pkgdir}/usr/bin/vev"
+      install -Dm755 "./scripts/vev-bar-top-right" "${pkgdir}/usr/bin/vev-bar-top-right"
+      install -Dm755 "./scripts/vev-bar-bottom-right" "${pkgdir}/usr/bin/vev-bar-bottom-right"
+      install -Dm644 "./LICENSE" "${pkgdir}/usr/share/licenses/vev-bin/LICENSE"
+    commit_msg_template: 'Update to {{ .Tag }}'
