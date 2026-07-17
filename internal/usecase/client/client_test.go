@@ -1121,7 +1121,10 @@ func TestAttachSchemeRequeryCreatesPaletteGenerationBoundary(t *testing.T) {
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	tr.EXPECT().Send(isType(ports.MsgTheme)).RunAndReturn(func(f ports.Frame) error {
 		theme, err := ports.UnmarshalTheme(f.Payload)
-		require.NoError(t, err)
+		if err != nil {
+			t.Errorf("decode sent theme: %v", err)
+			return err
+		}
 		themes <- theme
 		return nil
 	}).Times(3)
@@ -1210,7 +1213,10 @@ func TestAttachSchemeRequeryClearsStalePalette(t *testing.T) {
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	tr.EXPECT().Send(isType(ports.MsgTheme)).RunAndReturn(func(f ports.Frame) error {
 		theme, err := ports.UnmarshalTheme(f.Payload)
-		require.NoError(t, err)
+		if err != nil {
+			t.Errorf("decode sent theme: %v", err)
+			return err
+		}
 		themesMu.Lock()
 		themes = append(themes, theme)
 		themesMu.Unlock()
