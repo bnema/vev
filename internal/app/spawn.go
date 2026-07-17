@@ -157,13 +157,18 @@ func realDial(ctx context.Context, dir string) (ports.Transport, error) {
 // and never writes to the client's terminal. It logs via slog to the shared
 // log file instead.
 func realSpawn() error {
+	exePath, err := selfExePath()
+	if err != nil {
+		return fmt.Errorf("resolving executable path: %w", err)
+	}
+
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("opening %s: %w", os.DevNull, err)
 	}
 	defer func() { _ = devNull.Close() }()
 
-	cmd := exec.Command("/proc/self/exe", "--daemon")
+	cmd := exec.Command(exePath, "--daemon")
 	cmd.Dir = platform.DirOrHome("")
 	cmd.Stdin = devNull
 	cmd.Stdout = devNull

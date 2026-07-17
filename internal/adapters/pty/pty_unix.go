@@ -1,11 +1,10 @@
-//go:build linux
+//go:build linux || darwin
 
 package pty
 
-// The Linux adapter drives /dev/ptmx directly (open master, TIOCGPTN to learn
-// the slave index, TIOCSPTLCK to unlock, then open /dev/pts/<N>) rather than
-// depending on a third-party pty package, keeping the dependency surface at
-// the standard library alone.
+// The Unix adapter drives /dev/ptmx directly and delegates slave preparation
+// to rawterm rather than depending on a third-party pty package, keeping the
+// dependency surface at the standard library alone.
 
 import (
 	"context"
@@ -21,17 +20,17 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/pkg/linuxterm"
+	"github.com/bnema/vev/pkg/rawterm"
 )
 
 // killGracePeriod is how long Close waits for a signalled child to exit before
 // escalating from SIGHUP to SIGKILL.
 const killGracePeriod = 2 * time.Second
 
-// Factory implements ports.PTYFactory for Linux.
+// Factory implements ports.PTYFactory on supported Unix platforms.
 type Factory struct{}
 
-// NewFactory returns a Linux PTY factory.
+// NewFactory returns a Unix PTY factory.
 func NewFactory() *Factory { return &Factory{} }
 
 // Open spawns command with args attached to a freshly allocated pseudo-terminal
@@ -56,20 +55,9 @@ func (Factory) Open(ctx context.Context, command string, args []string, env []st
 		}
 	}()
 
-	ptn, err := linuxterm.PtsNumber(masterFd)
+	slave, err := rawterm.PreparePty(masterFd)
 	if err != nil {
-		return nil, fmt.Errorf("pty: TIOCGPTN: %w", err)
-	}
-
-	// Unlock the slave so it can be opened.
-	if err := linuxterm.UnlockPt(masterFd); err != nil {
-		return nil, fmt.Errorf("pty: TIOCSPTLCK: %w", err)
-	}
-
-	slaveName := fmt.Sprintf("/dev/pts/%d", ptn)
-	slave, err := os.OpenFile(slaveName, os.O_RDWR|syscall.O_NOCTTY, 0)
-	if err != nil {
-		return nil, fmt.Errorf("pty: open %s: %w", slaveName, err)
+		return nil, fmt.Errorf("pty: prepare pty: %w", err)
 	}
 	// The child dups the slave into its std fds and holds its own copies, so the
 	// parent always drops the slave once Start has run (or on any error).
@@ -117,14 +105,14 @@ func (Factory) Open(ctx context.Context, command string, args []string, env []st
 	}
 	ok = true
 
-	return &linuxPTY{
+	return &unixPTY{
 		master: os.NewFile(uintptr(masterFd), "pty-master"),
 		cmd:    cmd,
 	}, nil
 }
 
-// linuxPTY is a running child attached to the master end of a pty.
-type linuxPTY struct {
+// unixPTY is a running child attached to the master end of a pty.
+type unixPTY struct {
 	master *os.File
 	cmd    *exec.Cmd
 
@@ -132,14 +120,14 @@ type linuxPTY struct {
 	closeErr  error
 }
 
-var _ ports.PTY = (*linuxPTY)(nil)
+var _ ports.PTY = (*unixPTY)(nil)
 
 // Read returns child output read from the master.
 //
 // When the child (the last process holding the slave open) exits, the kernel
 // makes reads of the master fail with EIO. Callers treat "child gone" as a
 // normal end of stream, so EIO is mapped to io.EOF here.
-func (p *linuxPTY) Read(b []byte) (int, error) {
+func (p *unixPTY) Read(b []byte) (int, error) {
 	n, err := p.master.Read(b)
 	if err != nil && errors.Is(err, syscall.EIO) {
 		return n, io.EOF
@@ -148,7 +136,7 @@ func (p *linuxPTY) Read(b []byte) (int, error) {
 }
 
 // Write sends input bytes to the child via the master.
-func (p *linuxPTY) Write(b []byte) (int, error) {
+func (p *unixPTY) Write(b []byte) (int, error) {
 	return p.master.Write(b)
 }
 
@@ -160,7 +148,7 @@ func (p *linuxPTY) Write(b []byte) (int, error) {
 // every subsequent Read into a thread-parking syscall and breaking the
 // Close-unblocks-Read behavior. Control also pins the fd for the duration and
 // fails cleanly (os.ErrClosed) after Close.
-func (p *linuxPTY) Resize(sz domain.Size) error {
+func (p *unixPTY) Resize(sz domain.Size) error {
 	rc, err := p.master.SyscallConn()
 	if err != nil {
 		return fmt.Errorf("pty: resize: %w", err)
@@ -175,13 +163,13 @@ func (p *linuxPTY) Resize(sz domain.Size) error {
 }
 
 // Pid reports the child process id.
-func (p *linuxPTY) Pid() int {
+func (p *unixPTY) Pid() int {
 	return p.cmd.Process.Pid
 }
 
 // ForegroundPgid reports the process group currently in the foreground for the
 // pty's controlling terminal.
-func (p *linuxPTY) ForegroundPgid() (int, error) {
+func (p *unixPTY) ForegroundPgid() (int, error) {
 	rc, err := p.master.SyscallConn()
 	if err != nil {
 		return 0, fmt.Errorf("pty: foreground pgid: %w", err)
@@ -189,7 +177,7 @@ func (p *linuxPTY) ForegroundPgid() (int, error) {
 	var pgid int
 	var ioctlErr error
 	if err := rc.Control(func(fd uintptr) {
-		pgid, ioctlErr = linuxterm.ForegroundProcessGroup(int(fd))
+		pgid, ioctlErr = rawterm.ForegroundProcessGroup(int(fd))
 	}); err != nil {
 		return 0, fmt.Errorf("pty: foreground pgid: %w", err)
 	}
@@ -204,7 +192,7 @@ func (p *linuxPTY) ForegroundPgid() (int, error) {
 // escalates to SIGKILL. The child is reaped (via cmd.Wait) to avoid a zombie,
 // and the master fd is closed last so any blocked Read unblocks. Close is
 // idempotent: subsequent calls are no-ops and return the first result.
-func (p *linuxPTY) Close() error {
+func (p *unixPTY) Close() error {
 	p.closeOnce.Do(func() {
 		pid := p.cmd.Process.Pid
 
@@ -240,5 +228,5 @@ func signalProcessGroup(pid int, signal syscall.Signal) error {
 
 // setWinsize applies sz to the terminal referenced by fd via TIOCSWINSZ.
 func setWinsize(fd int, sz domain.Size) error {
-	return linuxterm.SetWinsize(fd, uint16(sz.Cols), uint16(sz.Rows))
+	return rawterm.SetWinsize(fd, uint16(sz.Cols), uint16(sz.Rows))
 }

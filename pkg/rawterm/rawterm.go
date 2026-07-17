@@ -1,9 +1,9 @@
-// Package linuxterm provides the small set of terminal-control primitives
-// vev needs (raw mode, window size, pty allocation) directly on top of the
-// frozen stdlib syscall package, so the module does not depend on
-// golang.org/x/term or golang.org/x/sys. vev is Linux-only, and the Linux
-// TIOC*/TCGETS ioctl numbers and Termios layout syscall exposes are stable.
-package linuxterm
+//go:build linux || darwin
+
+// Package rawterm provides the small set of terminal-control primitives vev
+// needs directly on top of the frozen stdlib syscall package. The common raw
+// mode and terminal-size operations use platform-specific termios requests.
+package rawterm
 
 import (
 	"fmt"
@@ -40,7 +40,7 @@ func ioctl(fd int, req uintptr, arg unsafe.Pointer) error {
 // IsTerminal reports whether fd refers to a terminal device.
 func IsTerminal(fd int) bool {
 	var t syscall.Termios
-	return ioctl(fd, syscall.TCGETS, unsafe.Pointer(&t)) == nil
+	return ioctl(fd, reqGetTermios, unsafe.Pointer(&t)) == nil
 }
 
 // MakeRaw puts the terminal referenced by fd into raw mode and returns its
@@ -48,8 +48,8 @@ func IsTerminal(fd int) bool {
 // changes applied match golang.org/x/term's MakeRaw semantics exactly.
 func MakeRaw(fd int) (*State, error) {
 	var oldState State
-	if err := ioctl(fd, syscall.TCGETS, unsafe.Pointer(&oldState.termios)); err != nil {
-		return nil, fmt.Errorf("linuxterm: get termios: %w", err)
+	if err := ioctl(fd, reqGetTermios, unsafe.Pointer(&oldState.termios)); err != nil {
+		return nil, fmt.Errorf("rawterm: get termios: %w", err)
 	}
 
 	raw := oldState.termios
@@ -61,8 +61,8 @@ func MakeRaw(fd int) (*State, error) {
 	raw.Cc[syscall.VMIN] = 1
 	raw.Cc[syscall.VTIME] = 0
 
-	if err := ioctl(fd, syscall.TCSETS, unsafe.Pointer(&raw)); err != nil {
-		return nil, fmt.Errorf("linuxterm: set termios: %w", err)
+	if err := ioctl(fd, reqSetTermios, unsafe.Pointer(&raw)); err != nil {
+		return nil, fmt.Errorf("rawterm: set termios: %w", err)
 	}
 
 	return &oldState, nil
@@ -71,8 +71,8 @@ func MakeRaw(fd int) (*State, error) {
 // Restore applies a previously captured State back to the terminal
 // referenced by fd.
 func Restore(fd int, s *State) error {
-	if err := ioctl(fd, syscall.TCSETS, unsafe.Pointer(&s.termios)); err != nil {
-		return fmt.Errorf("linuxterm: set termios: %w", err)
+	if err := ioctl(fd, reqSetTermios, unsafe.Pointer(&s.termios)); err != nil {
+		return fmt.Errorf("rawterm: set termios: %w", err)
 	}
 	return nil
 }
@@ -81,7 +81,7 @@ func Restore(fd int, s *State) error {
 func GetSize(fd int) (cols, rows int, err error) {
 	var ws winsize
 	if err := ioctl(fd, syscall.TIOCGWINSZ, unsafe.Pointer(&ws)); err != nil {
-		return 0, 0, fmt.Errorf("linuxterm: get winsize: %w", err)
+		return 0, 0, fmt.Errorf("rawterm: get winsize: %w", err)
 	}
 	return int(ws.Col), int(ws.Row), nil
 }
@@ -90,27 +90,7 @@ func GetSize(fd int) (cols, rows int, err error) {
 func SetWinsize(fd int, cols, rows uint16) error {
 	ws := winsize{Row: rows, Col: cols}
 	if err := ioctl(fd, syscall.TIOCSWINSZ, unsafe.Pointer(&ws)); err != nil {
-		return fmt.Errorf("linuxterm: set winsize: %w", err)
-	}
-	return nil
-}
-
-// PtsNumber returns the pty slave number for the master referenced by
-// masterFD (TIOCGPTN).
-func PtsNumber(masterFD int) (int, error) {
-	var n int32
-	if err := ioctl(masterFD, syscall.TIOCGPTN, unsafe.Pointer(&n)); err != nil {
-		return 0, fmt.Errorf("linuxterm: get pts number: %w", err)
-	}
-	return int(n), nil
-}
-
-// UnlockPt unlocks the pty slave associated with masterFD so it can be
-// opened (TIOCSPTLCK).
-func UnlockPt(masterFD int) error {
-	var unlock int32
-	if err := ioctl(masterFD, syscall.TIOCSPTLCK, unsafe.Pointer(&unlock)); err != nil {
-		return fmt.Errorf("linuxterm: unlock pty: %w", err)
+		return fmt.Errorf("rawterm: set winsize: %w", err)
 	}
 	return nil
 }
@@ -120,7 +100,7 @@ func UnlockPt(masterFD int) error {
 func ForegroundProcessGroup(fd int) (int, error) {
 	var pgid int32
 	if err := ioctl(fd, syscall.TIOCGPGRP, unsafe.Pointer(&pgid)); err != nil {
-		return 0, fmt.Errorf("linuxterm: get foreground process group: %w", err)
+		return 0, fmt.Errorf("rawterm: get foreground process group: %w", err)
 	}
 	return int(pgid), nil
 }

@@ -3,14 +3,13 @@
 package term
 
 import (
-	"fmt"
 	"io"
 	"os"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/pkg/linuxterm"
+	"github.com/bnema/vev/pkg/rawterm"
 )
 
 // openPTYPair opens a real Linux PTY master/slave pair directly via
@@ -24,22 +23,10 @@ func openPTYPair(t *testing.T) (master, slave *os.File) {
 		t.Fatalf("open /dev/ptmx: %v", err)
 	}
 
-	if err := linuxterm.UnlockPt(int(m.Fd())); err != nil {
-		_ = m.Close()
-		t.Fatalf("unlock pty (TIOCSPTLCK): %v", err)
-	}
-
-	n, err := linuxterm.PtsNumber(int(m.Fd()))
+	s, err := rawterm.PreparePty(int(m.Fd()))
 	if err != nil {
 		_ = m.Close()
-		t.Fatalf("get pty number (TIOCGPTN): %v", err)
-	}
-
-	slavePath := fmt.Sprintf("/dev/pts/%d", n)
-	s, err := os.OpenFile(slavePath, os.O_RDWR|syscall.O_NOCTTY, 0)
-	if err != nil {
-		_ = m.Close()
-		t.Fatalf("open slave %s: %v", slavePath, err)
+		t.Fatalf("prepare pty: %v", err)
 	}
 
 	return m, s
@@ -54,7 +41,7 @@ func TestTerminal_RealPTY_RawModeSizeAndEscapes(t *testing.T) {
 	defer func() { _ = master.Close() }()
 	defer func() { _ = slave.Close() }()
 
-	if err := linuxterm.SetWinsize(int(slave.Fd()), 80, 24); err != nil {
+	if err := rawterm.SetWinsize(int(slave.Fd()), 80, 24); err != nil {
 		t.Fatalf("set winsize: %v", err)
 	}
 

@@ -1,3 +1,5 @@
+//go:build linux
+
 package main
 
 import (
@@ -15,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bnema/vev/pkg/linuxterm"
+	"github.com/bnema/vev/pkg/rawterm"
 	"github.com/bnema/vev/pkg/safedir"
 )
 
@@ -731,11 +733,11 @@ func openPTY() (*os.File, *os.File, error) {
 		return nil, nil, err
 	}
 	closeMaster := func(err error) (*os.File, *os.File, error) { _ = syscall.Close(masterFD); return nil, nil, err }
-	number, err := linuxterm.PtsNumber(masterFD)
+	number, err := rawterm.PtsNumber(masterFD)
 	if err != nil {
 		return closeMaster(err)
 	}
-	if err := linuxterm.UnlockPt(masterFD); err != nil {
+	if err := rawterm.UnlockPt(masterFD); err != nil {
 		return closeMaster(err)
 	}
 	slaveFD, err := syscall.Open(fmt.Sprintf("/dev/pts/%d", number), syscall.O_RDWR|syscall.O_NOCTTY, 0)

@@ -877,6 +877,15 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 	require.Contains(t, opens[1], "TERM=xterm-direct")
 	require.Contains(t, opens[1], "COLORTERM=truecolor")
 	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
+	require.Eventually(t, func() bool {
+		tb := got.activeTab()
+		if tb == nil {
+			return false
+		}
+		tb.mu.Lock()
+		defer tb.mu.Unlock()
+		return tb.floating.pane != nil && tb.floating.pane.pty == floating
+	}, time.Second, 5*time.Millisecond)
 	_ = d.killSession(got, ports.ReasonSessionKilled, false)
 	release1()
 	release2()

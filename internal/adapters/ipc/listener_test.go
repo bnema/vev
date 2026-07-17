@@ -13,7 +13,7 @@ import (
 )
 
 func TestListenAcceptRoundTrip(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "vev")
+	dir := shortSocketDir(t, "vev")
 
 	ln, err := Listen(dir)
 	if err != nil {
@@ -65,8 +65,7 @@ func TestListenAcceptRoundTrip(t *testing.T) {
 }
 
 func TestListenMkdirsSocketDir(t *testing.T) {
-	base := t.TempDir()
-	dir := filepath.Join(base, "nested", "socketdir")
+	dir := shortSocketDir(t, "nested", "socketdir")
 
 	ln, err := Listen(dir)
 	if err != nil {
@@ -87,7 +86,7 @@ func TestListenMkdirsSocketDir(t *testing.T) {
 }
 
 func TestListenRejectsHostileSocketDir(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "socketdir")
+	dir := shortSocketDir(t, "socketdir")
 	if err := os.MkdirAll(dir, 0o777); err != nil {
 		t.Fatalf("mkdir hostile socket dir: %v", err)
 	}
@@ -106,7 +105,7 @@ func TestListenRejectsHostileSocketDir(t *testing.T) {
 }
 
 func TestListenStaleSocketCleanedUp(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "vev")
+	dir := shortSocketDir(t, "vev")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatalf("mkdir safe socket dir: %v", err)
 	}
@@ -140,7 +139,7 @@ func TestListenStaleSocketCleanedUp(t *testing.T) {
 }
 
 func TestListenLiveDaemonRejected(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "vev")
+	dir := shortSocketDir(t, "vev")
 
 	first, err := Listen(dir)
 	if err != nil {
