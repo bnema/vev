@@ -1,6 +1,36 @@
 package theme
 
-import "github.com/bnema/vev/pkg/renderer"
+import (
+	"math"
+
+	"github.com/bnema/vev/pkg/renderer"
+)
+
+const accentContrastMin = 3.0
+
+// RelativeLuminance returns a color's WCAG 2.x relative luminance.
+func RelativeLuminance(color renderer.RGB) float64 {
+	linearize := func(channel uint8) float64 {
+		srgb := float64(channel) / 255
+		if srgb <= 0.04045 {
+			return srgb / 12.92
+		}
+		return math.Pow((srgb+0.055)/1.055, 2.4)
+	}
+
+	return 0.2126*linearize(color.R) +
+		0.7152*linearize(color.G) +
+		0.0722*linearize(color.B)
+}
+
+// ContrastRatio returns the WCAG 2.x contrast ratio between two colors.
+func ContrastRatio(a, b renderer.RGB) float64 {
+	aLuminance := RelativeLuminance(a)
+	bLuminance := RelativeLuminance(b)
+	lighter := math.Max(aLuminance, bLuminance)
+	darker := math.Min(aLuminance, bLuminance)
+	return (lighter + 0.05) / (darker + 0.05)
+}
 
 // PulseColor derives the attention pulse color at intensity while preserving
 // the base style's remaining attributes.

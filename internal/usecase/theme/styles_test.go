@@ -7,6 +7,44 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRelativeLuminance(t *testing.T) {
+	tests := []struct {
+		name  string
+		color renderer.RGB
+		want  float64
+	}{
+		{name: "black", color: renderer.RGB{}, want: 0},
+		{name: "white", color: renderer.RGB{R: 255, G: 255, B: 255}, want: 1},
+		{name: "sRGB linearization breakpoint", color: renderer.RGB{R: 10}, want: 0.2126 * (10.0 / 255.0 / 12.92)},
+		{name: "nonlinear sRGB", color: renderer.RGB{R: 128, G: 128, B: 128}, want: 0.21586050011389923},
+		{name: "red", color: renderer.RGB{R: 255}, want: 0.2126},
+		{name: "green", color: renderer.RGB{G: 255}, want: 0.7152},
+		{name: "blue", color: renderer.RGB{B: 255}, want: 0.0722},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := RelativeLuminance(tt.color)
+			require.InDelta(t, tt.want, got, 1e-12)
+			require.Equal(t, got, RelativeLuminance(tt.color))
+		})
+	}
+}
+
+func TestContrastRatio(t *testing.T) {
+	black := renderer.RGB{}
+	white := renderer.RGB{R: 255, G: 255, B: 255}
+	middle := renderer.RGB{R: 123, G: 45, B: 67}
+
+	require.InDelta(t, 21, ContrastRatio(black, white), 1e-12)
+	require.InDelta(t, 1, ContrastRatio(middle, middle), 1e-12)
+	require.Equal(t, ContrastRatio(black, middle), ContrastRatio(middle, black))
+}
+
+func TestAccentContrastMinimum(t *testing.T) {
+	require.Equal(t, 3.0, accentContrastMin)
+}
+
 func TestPulseColor(t *testing.T) {
 	rgbBase := renderer.Style{
 		Italic:               true,
