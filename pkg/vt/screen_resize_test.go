@@ -121,15 +121,42 @@ func TestResize(t *testing.T) {
 			},
 		},
 		{
-			name: "erase preserves a soft wrap boundary",
+			name: "erase severs a soft wrap boundary",
 			run: func(t *testing.T) {
 				s := NewScreen(4, 2)
 				s.Write([]byte("abcdef"))
 				s.Write([]byte("\x1b[1;1H\x1b[2K"))
 
+				// Erasing through the right edge ends the logical line: the
+				// blank head must not pull "ef" up a row on reflow.
 				s.Resize(3, 2)
-				if got := rowString(s, 0); got != "ef " {
+				if got := []string{rowString(s, 0), rowString(s, 1)}; strings.Join(got, ",") != "   ,ef " {
 					t.Fatalf("erased soft line reflow = %q", got)
+				}
+			},
+		},
+		{
+			name: "in-place repaint does not merge with the row below",
+			run: func(t *testing.T) {
+				// Status UIs (docker buildx, shell prompt redraws) repaint a
+				// previously soft-wrapped row with CUP + text + EL and no
+				// newline. The stale soft link must not glue the repainted row
+				// to the unrelated row below: reflow would merge them, and the
+				// next shrink would truncate the merged line, losing cells.
+				s := NewScreen(40, 8)
+				s.Write([]byte(strings.Repeat("A", 40) + "BBBB\r\n"))
+				s.Write([]byte("tail-line\r\n"))
+				s.Write([]byte("\x1b[1;1HSHORT\x1b[K"))
+				s.Write([]byte("\x1b[4;1H"))
+
+				s.Resize(60, 8)
+				if got := []string{rowString(s, 0), rowString(s, 1), rowString(s, 2)}; strings.TrimRight(got[0], " ") != "SHORT" || strings.TrimRight(got[1], " ") != "BBBB" || strings.TrimRight(got[2], " ") != "tail-line" {
+					t.Fatalf("grow rows = %q", got)
+				}
+
+				s.Resize(40, 8)
+				if got := []string{rowString(s, 0), rowString(s, 1), rowString(s, 2)}; strings.TrimRight(got[0], " ") != "SHORT" || strings.TrimRight(got[1], " ") != "BBBB" || strings.TrimRight(got[2], " ") != "tail-line" {
+					t.Fatalf("round-trip rows = %q", got)
 				}
 			},
 		},
