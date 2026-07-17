@@ -8,6 +8,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -601,27 +602,25 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	ackQueue := newCumulativeAckQueue()
 	sendErrCh := make(chan error, 1)
 
-	// colorQueryCh hands an OSC 10/11 re-query request from the stdin pump to
-	// the main loop, which is the only goroutine allowed to touch term.Out()/
-	// term.Flush(); QueryColors writes through the same batched writer, so
-	// calling it directly from the stdin pump would race the main loop's
-	// output writes. The acknowledgement creates a generation boundary: after
-	// a scheme response, stdin must not read another chunk (which may contain
-	// old OSC 4 replies) until this loop has cleared the palette and issued the
-	// replacement query.
+	// Palette re-queries use DSR (CSI 5 n) as an ordered sentinel. The stdin
+	// pump drains terminal replies through CSI 0 n before it permits the main
+	// loop to publish the cleared scheme and issue QueryColors. This separates
+	// bytes already queued (including Scanner.pending) from replacement replies
+	// without allowing a second goroutine to write to the terminal.
 	colorQueryCh := make(chan colorQueryRequest)
-	requestColors := func() bool {
-		request := colorQueryRequest{acknowledged: make(chan struct{})}
+	paletteReadyCh := make(chan paletteQueryReady)
+	requestColors := func() (colorQueryRequest, bool) {
+		request := colorQueryRequest{sentinelWritten: make(chan struct{})}
 		select {
 		case colorQueryCh <- request:
 		case <-loopCtx.Done():
-			return false
+			return colorQueryRequest{}, false
 		}
 		select {
-		case <-request.acknowledged:
-			return true
+		case <-request.sentinelWritten:
+			return request, true
 		case <-loopCtx.Done():
-			return false
+			return colorQueryRequest{}, false
 		}
 	}
 
@@ -630,7 +629,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		clip = clipboard
 	}
 	go runSender(loopCtx, cancel, transport, sendCh, ackQueue, sendErrCh, log)
-	go (&stdinPump{ctx: loopCtx, cancel: cancel, in: term.In(), out: sendCh, clock: clk, themeState: themeState, clipboard: clip, logger: log, requestColors: requestColors}).run()
+	go (&stdinPump{ctx: loopCtx, cancel: cancel, in: term.In(), out: sendCh, clock: clk, themeState: themeState, clipboard: clip, logger: log, requestColors: requestColors, paletteReady: paletteReadyCh}).run()
 	go runResize(loopCtx, term.ResizeEvents(), sendCh, log)
 
 	// 5. Output/main loop: the only goroutine that touches the terminal.
@@ -670,10 +669,18 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				return welcomedResult(errLinkOffline)
 			}
 		case request := <-colorQueryCh:
-			// A fresh query supersedes every prior OSC 4 response. Queue the
-			// cleared snapshot before writing the query so the daemon never
-			// applies stale palette entries while it awaits the new responses.
-			clearedTheme := themeState.clearPalette()
+			if _, err := term.Out().Write([]byte("\x1b[5n")); err != nil {
+				return welcomedResult(fmt.Errorf("vev: writing palette sentinel: %w", err))
+			}
+			if err := term.Flush(); err != nil {
+				return welcomedResult(fmt.Errorf("vev: flushing palette sentinel: %w", err))
+			}
+			close(request.sentinelWritten)
+		case ready := <-paletteReadyCh:
+			// CSI 0 n proves all earlier replies have been discarded by stdin.
+			// Publish the one cleared scheme snapshot before emitting the query;
+			// stdin remains paused until QueryColors has completed below.
+			clearedTheme := themeState.snapshot()
 			select {
 			case sendCh <- ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(clearedTheme)}:
 			case <-loopCtx.Done():
@@ -682,7 +689,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			if err := term.QueryColors(); err != nil {
 				log.Warn("querying terminal colors", "err", err)
 			}
-			close(request.acknowledged)
+			close(ready.queryIssued)
 		case r := <-recvCh:
 			if r.err != nil {
 				if errors.Is(r.err, io.EOF) {
@@ -841,7 +848,50 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 // terminal — and matches the standard pattern for stdin pumps; a
 // closable stdin duplicate could lift it later if ever needed.
 type colorQueryRequest struct {
-	acknowledged chan struct{}
+	sentinelWritten chan struct{}
+}
+
+type paletteQueryReady struct {
+	queryIssued chan struct{}
+}
+
+type paletteDrain struct {
+	pending []byte
+}
+
+type palettePhase uint8
+
+const (
+	paletteAccepting palettePhase = iota
+	paletteBoundaryRequested
+	paletteDraining
+	paletteAwaitingQuery
+)
+
+var paletteSentinel = []byte("\x1b[0n")
+
+// scan consumes the DSR response while forwarding every other byte in order.
+// It retains only a possible sentinel prefix, so a split CSI 0 n is consumed
+// without dropping a user's partial escape sequence on cancellation.
+func (d *paletteDrain) scan(data []byte, onBytes func([]byte), onSentinel func()) {
+	for _, b := range data {
+		d.pending = append(d.pending, b)
+		for len(d.pending) > 0 && !bytes.HasPrefix(paletteSentinel, d.pending) {
+			onBytes(d.pending[:1])
+			d.pending = d.pending[1:]
+		}
+		if bytes.Equal(d.pending, paletteSentinel) {
+			d.pending = nil
+			onSentinel()
+		}
+	}
+}
+
+func (d *paletteDrain) flush(onBytes func([]byte)) {
+	if len(d.pending) != 0 {
+		onBytes(d.pending)
+		d.pending = nil
+	}
 }
 
 type stdinPump struct {
@@ -853,7 +903,8 @@ type stdinPump struct {
 	themeState    *terminalThemeState
 	clipboard     ports.ClipboardReader
 	logger        *slog.Logger
-	requestColors func() bool
+	requestColors func() (colorQueryRequest, bool)
+	paletteReady  chan<- paletteQueryReady
 }
 
 func (p *stdinPump) run() {
@@ -911,12 +962,37 @@ func (p *stdinPump) run() {
 		sink = ci.Scan
 	}
 
+	phase := paletteAccepting
+	var drain paletteDrain
 	for {
 		n, rerr := in.Read(buf)
 		if n > 0 {
 			themeChanged := false
-			queryColors := false
+			queryNeeded := false
+			onBytes := func(data []byte) {
+				if phase != paletteDraining {
+					sink(data)
+					return
+				}
+				drain.scan(data, sink, func() {
+					phase = paletteAwaitingQuery
+					ready := paletteQueryReady{queryIssued: make(chan struct{})}
+					select {
+					case p.paletteReady <- ready:
+					case <-ctx.Done():
+						return
+					}
+					select {
+					case <-ready.queryIssued:
+						phase = paletteAccepting
+					case <-ctx.Done():
+					}
+				})
+			}
 			scanner.Scan(buf[:n], func(kind int, rgb renderer.RGB) {
+				if phase != paletteAccepting {
+					return
+				}
 				themeState.update(func(current *ports.Theme) {
 					switch kind {
 					case 10:
@@ -929,6 +1005,9 @@ func (p *stdinPump) run() {
 				})
 				themeChanged = true
 			}, func(slot int, rgb renderer.RGB) {
+				if phase != paletteAccepting {
+					return
+				}
 				themeState.update(func(current *ports.Theme) {
 					current.PaletteKnown |= uint16(1) << slot
 					current.Palette[slot] = rgb
@@ -939,23 +1018,35 @@ func (p *stdinPump) run() {
 					current.SchemeKnown = true
 					current.Light = light
 				})
-				themeChanged = true
-				queryColors = true
-			}, sink)
-			if themeChanged {
+				// The scheme itself begins a new palette generation. Suppress every
+				// color reply after it, including those remaining in this read, and
+				// defer invalidation until Scan completes so no partial snapshot is
+				// observable mid-chunk.
+				themeChanged = false
+				if phase == paletteAccepting {
+					phase = paletteBoundaryRequested
+					queryNeeded = true
+				}
+			}, onBytes)
+			if queryNeeded {
+				themeState.clearPalette()
+				if requestColors != nil {
+					if _, ok := requestColors(); !ok {
+						return
+					}
+					phase = paletteDraining
+				}
+			} else if themeChanged {
 				send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(themeState.snapshot())})
-			}
-			// Defer the re-query until this read's complete snapshot is queued;
-			// otherwise the main loop could invalidate palette state midway
-			// through a chunk containing multiple terminal responses.
-			if queryColors && requestColors != nil && !requestColors() {
-				return
 			}
 			if !sendOK.Load() {
 				return
 			}
 		}
 		if rerr != nil {
+			if phase == paletteDraining {
+				drain.flush(sink)
+			}
 			// Best-effort detach notification, then unwind.
 			select {
 			case out <- ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})}:

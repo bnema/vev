@@ -1082,108 +1082,78 @@ func TestRunDoesNotRetryTerminalDetachedError(t *testing.T) {
 	require.Equal(t, int32(1), term.restoreCount.Load())
 }
 
-func TestAttachSchemeRequeryCreatesPaletteGenerationBoundary(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	allowSecond := make(chan struct{})
-	inputDone := make(chan struct{})
-	input := &queryBoundaryReader{
-		first:       []byte("\x1b]4;1;#112233\a\x1b[?997;2n"),
-		second:      []byte("\x1b]4;2;#445566\a"),
-		secondRead:  make(chan struct{}, 1),
-		allowSecond: allowSecond,
-		done:        inputDone,
-	}
-	defer close(inputDone)
+func TestAttachSchemeRequeryUsesSentinelToDiscardSplitStalePalette(t *testing.T) {
+	input := newChunkedBlockingReader(
+		[]byte("a\x1b]4;1;#112233\a\x1b[?997;2n\x1b]4;2;#44"),
+		[]byte("5566\ab\x1b["),
+		[]byte("0nc\x1b]4;3;#778899\ad"),
+	)
+	defer input.unblock()
 
 	var out bytes.Buffer
 	var restoreCount atomic.Int32
 	resizeCh := make(chan domain.Size)
-	queryStarted := make(chan struct{})
-	allowQuery := make(chan struct{})
 	tm := portsmocks.NewMockTerminal(t)
 	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
 	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
 	tm.EXPECT().In().Return(input).Maybe()
 	tm.EXPECT().Out().Return(&out).Maybe()
 	tm.EXPECT().Flush().Return(nil).Maybe()
+	tm.EXPECT().QueryColors().Return(nil).Once()
 	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
-	tm.EXPECT().QueryColors().RunAndReturn(func() error {
-		close(queryStarted)
-		<-allowQuery
-		return nil
-	}).Once()
 
-	themes := make(chan ports.Theme, 3)
-	recvRelease := make(chan struct{})
-	var welcomed atomic.Bool
+	var inputBytes []byte
+	var inputMu sync.Mutex
+	themes := make(chan ports.Theme, 2)
+	freshTheme := make(chan struct{})
+	var freshOnce sync.Once
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
+		in, err := ports.UnmarshalInput(f.Payload)
+		if err != nil {
+			return err
+		}
+		inputMu.Lock()
+		inputBytes = append(inputBytes, in.Data...)
+		inputMu.Unlock()
+		return nil
+	}).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgTheme)).RunAndReturn(func(f ports.Frame) error {
 		theme, err := ports.UnmarshalTheme(f.Payload)
 		if err != nil {
-			t.Errorf("decode sent theme: %v", err)
 			return err
 		}
 		themes <- theme
+		if theme.PaletteKnown == 1<<3 {
+			freshOnce.Do(func() { close(freshTheme) })
+		}
 		return nil
-	}).Times(3)
+	}).Times(2)
+	var welcomed atomic.Bool
 	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
 		if welcomed.CompareAndSwap(false, true) {
 			return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"})), nil
 		}
-		<-recvRelease
-		return ports.Frame{}, io.EOF
+		<-freshTheme
+		return frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach})), nil
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
 
-	runDone := make(chan error, 1)
-	go func() {
-		runDone <- runTestClient(ctx, attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentEphemeral})
-	}()
-
-	select {
-	case <-queryStarted:
-	case <-time.After(time.Second):
-		t.Fatal("main loop did not start the palette re-query")
-	}
-	select {
-	case <-input.secondRead:
-		t.Fatal("stdin read the next chunk before the cleared theme and query completed")
-	default:
-	}
-
-	close(allowQuery)
-	select {
-	case <-input.secondRead:
-	case <-time.After(time.Second):
-		t.Fatal("stdin did not resume after the palette re-query completed")
-	}
-	close(allowSecond)
-
-	var got [3]ports.Theme
-	for i := range got {
-		select {
-		case got[i] = <-themes:
-		case <-time.After(time.Second):
-			t.Fatalf("theme %d was not sent", i)
-		}
-	}
-	require.Equal(t, uint16(1<<1), got[0].PaletteKnown)
-	require.True(t, got[0].SchemeKnown)
-	require.Zero(t, got[1].PaletteKnown, "the old palette must be cleared before a later read is admitted")
-	require.True(t, got[1].SchemeKnown)
-	require.Equal(t, uint16(1<<2), got[2].PaletteKnown, "only the post-query chunk may populate the new palette generation")
-
-	cancel()
-	select {
-	case err := <-runDone:
-		require.NoError(t, err)
-	case <-time.After(time.Second):
-		t.Fatal("attach did not return after cancellation")
-	}
-	close(recvRelease)
+	require.NoError(t, runTestClient(context.Background(), attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentEphemeral}))
+	require.Equal(t, "\x1b[5n", out.String(), "the DSR sentinel must be the only main-loop terminal write")
 	require.Equal(t, int32(1), restoreCount.Load())
+
+	cleared := <-themes
+	fresh := <-themes
+	require.True(t, cleared.SchemeKnown)
+	require.True(t, cleared.Light)
+	require.Zero(t, cleared.PaletteKnown, "only the cleared scheme snapshot may cross the boundary")
+	require.Equal(t, uint16(1<<3), fresh.PaletteKnown, "only colors after the sentinel and replacement query are accepted")
+	require.Zero(t, fresh.PaletteKnown&(1<<1|1<<2), "pre-boundary palette slots must not leak into the new generation")
+	inputMu.Lock()
+	require.Equal(t, []byte("abcd"), inputBytes, "ordinary input around split stale and sentinel responses must survive")
+	inputMu.Unlock()
 }
 
 func TestAttachSchemeRequeryClearsStalePalette(t *testing.T) {
@@ -1193,6 +1163,7 @@ func TestAttachSchemeRequeryClearsStalePalette(t *testing.T) {
 	input := newChunkedBlockingReader(
 		[]byte("\x1b]11;#010203\a\x1b]4;1;#112233\a\x1b]4;14;#778899\a"),
 		[]byte("\x1b[?997;2n"),
+		[]byte("\x1b[0n"),
 	)
 	defer input.unblock()
 
@@ -1224,7 +1195,7 @@ func TestAttachSchemeRequeryClearsStalePalette(t *testing.T) {
 			clearOnce.Do(func() { close(clearedPalette) })
 		}
 		return nil
-	}).Times(3)
+	}).Times(2)
 
 	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
 	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
@@ -1250,13 +1221,11 @@ func TestAttachSchemeRequeryClearsStalePalette(t *testing.T) {
 
 	themesMu.Lock()
 	defer themesMu.Unlock()
-	require.Len(t, themes, 3, "one complete snapshot per input chunk plus the re-query invalidation")
+	require.Len(t, themes, 2, "the old palette snapshot and one cleared scheme snapshot are sent")
 	require.Equal(t, uint16(1<<1|1<<14), themes[0].PaletteKnown)
 	require.True(t, themes[0].HasBackground)
-	require.Equal(t, uint16(1<<1|1<<14), themes[1].PaletteKnown, "scheme update retains palette until re-query")
+	require.Zero(t, themes[1].PaletteKnown, "the DSR-delimited re-query must invalidate stale palette entries")
+	require.Equal(t, themes[0].Background, themes[1].Background)
 	require.True(t, themes[1].SchemeKnown)
-	require.Zero(t, themes[2].PaletteKnown, "re-query must invalidate stale palette entries")
-	require.Equal(t, themes[0].Background, themes[2].Background)
-	require.True(t, themes[2].SchemeKnown)
-	require.True(t, themes[2].Light)
+	require.True(t, themes[1].Light)
 }

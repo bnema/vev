@@ -130,13 +130,13 @@ func TestStdinPumpWaitsForQueryAcknowledgementBeforeNextRead(t *testing.T) {
 		out:        out,
 		themeState: &terminalThemeState{},
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-		requestColors: func() bool {
+		requestColors: func() (colorQueryRequest, bool) {
 			close(queryStarted)
 			select {
 			case <-allowQuery:
-				return true
+				return colorQueryRequest{}, true
 			case <-ctx.Done():
-				return false
+				return colorQueryRequest{}, false
 			}
 		},
 	}
@@ -187,7 +187,7 @@ func (r *chunksReader) Read(p []byte) (int, error) {
 	return copy(p, chunk), nil
 }
 
-func TestStdinPumpAcknowledgesRepeatedSchemeChunks(t *testing.T) {
+func TestStdinPumpDefersRepeatedSchemeChunksUntilSentinel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	requests := 0
@@ -201,14 +201,14 @@ func TestStdinPumpAcknowledgesRepeatedSchemeChunks(t *testing.T) {
 		out:        make(chan ports.Frame, 3),
 		themeState: &terminalThemeState{},
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-		requestColors: func() bool {
+		requestColors: func() (colorQueryRequest, bool) {
 			requests++
-			return true
+			return colorQueryRequest{}, true
 		},
 	}
 
 	pump.run()
-	require.Equal(t, 2, requests, "each completed scheme chunk must receive its own acknowledgement")
+	require.Equal(t, 1, requests, "a later scheme response is drained until the first sentinel arrives")
 }
 
 func TestStdinPumpQueryAcknowledgementCancellationDoesNotDeadlock(t *testing.T) {
@@ -226,10 +226,10 @@ func TestStdinPumpQueryAcknowledgementCancellationDoesNotDeadlock(t *testing.T) 
 		out:        make(chan ports.Frame, 2),
 		themeState: &terminalThemeState{},
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-		requestColors: func() bool {
+		requestColors: func() (colorQueryRequest, bool) {
 			close(requestStarted)
 			<-ctx.Done()
-			return false
+			return colorQueryRequest{}, false
 		},
 	}
 	pumpDone := make(chan struct{})
