@@ -86,30 +86,29 @@ func ParseXColor(s string) (renderer.RGB, bool) {
 	if len(parts) != 3 {
 		return renderer.RGB{}, false
 	}
-	width := len(parts[0])
-	if width != 2 && width != 4 {
-		return renderer.RGB{}, false
-	}
 	var out [3]uint8
 	for i, part := range parts {
-		if len(part) != width {
+		component, ok := parseXColorComponent(part)
+		if !ok {
 			return renderer.RGB{}, false
 		}
-		if width == 2 {
-			v, ok := parseHexByte(part)
-			if !ok {
-				return renderer.RGB{}, false
-			}
-			out[i] = v
-			continue
-		}
-		v, err := strconv.ParseUint(part, 16, 16)
-		if err != nil {
-			return renderer.RGB{}, false
-		}
-		out[i] = uint8(v >> 8)
+		out[i] = component
 	}
 	return renderer.RGB{R: out[0], G: out[1], B: out[2]}, true
+}
+
+// parseXColorComponent scales an XParseColor component of one to four hex
+// digits to an 8-bit channel.
+func parseXColorComponent(s string) (uint8, bool) {
+	if len(s) < 1 || len(s) > 4 {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(s, 16, 16)
+	if err != nil {
+		return 0, false
+	}
+	max := uint64((1 << (4 * len(s))) - 1)
+	return uint8(value * 255 / max), true
 }
 
 func parseHexByte(s string) (uint8, bool) {
@@ -500,7 +499,8 @@ func paletteForegroundStyle(base, neutral renderer.Style, t Theme) renderer.Styl
 			}
 			candidate := Blend(base.ForegroundRGB, blue, titleHueBlend)
 			if ContrastRatio(candidate, base.BackgroundRGB) >= accentContrastMin {
-				out := base
+				out := neutral
+				out.HasForegroundRGB = true
 				out.ForegroundRGB = candidate
 				return out
 			}

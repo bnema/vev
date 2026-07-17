@@ -390,6 +390,74 @@ func TestPaletteTitleHueDerivation(t *testing.T) {
 	}
 }
 
+func TestPaletteForegroundStylesKeepTheirRenderedBackgrounds(t *testing.T) {
+	base := Theme{
+		Foreground: renderer.RGB{R: 240, G: 240, B: 240},
+		Background: renderer.RGB{R: 50, G: 50, B: 50},
+		HasFG:      true, HasBG: true, Known: true, TrueColor: true, UsePalette: true,
+	}
+
+	tests := []struct {
+		name           string
+		theme          Theme
+		wantForeground renderer.RGB
+		wantIndexed    int
+	}{
+		{
+			name:           "RGB palette foreground",
+			theme:          func() Theme { t := base; t.PaletteKnown = 1 << ansiBlue; return t }(),
+			wantForeground: Blend(base.Foreground, renderer.RGB{}, titleHueBlend),
+			wantIndexed:    -1,
+		},
+		{
+			name:        "indexed foreground fallback",
+			theme:       func() Theme { t := base; t.SchemeKnown = true; return t }(),
+			wantIndexed: ansiBrightBlue,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			styles := NewStyles(tt.theme)
+
+			for name, style := range map[string]renderer.Style{
+				"border":     styles.Border,
+				"muted text": styles.PaletteDesc,
+			} {
+				require.False(t, style.HasBackgroundRGB, "%s must remain foreground-only", name)
+				if tt.wantIndexed >= 0 {
+					require.False(t, style.HasForegroundRGB, "%s must use an indexed foreground", name)
+					require.Equal(t, tt.wantIndexed, style.Foreground, name)
+				} else {
+					require.True(t, style.HasForegroundRGB, "%s must use the RGB palette foreground", name)
+					require.Equal(t, tt.wantForeground, style.ForegroundRGB, name)
+				}
+			}
+
+			status := StatusBarStyle(tt.theme)
+			accent := AccentStyle(tt.theme)
+			for name, style := range map[string]renderer.Style{
+				"title":        styles.TabTitle,
+				"active title": styles.TabTitleActive,
+			} {
+				wantBackground := status.BackgroundRGB
+				if name == "active title" {
+					wantBackground = accent.BackgroundRGB
+				}
+				require.True(t, style.HasBackgroundRGB, "%s must retain its title background", name)
+				require.Equal(t, wantBackground, style.BackgroundRGB, name)
+				if tt.wantIndexed >= 0 {
+					require.False(t, style.HasForegroundRGB, "%s must use an indexed foreground", name)
+					require.Equal(t, tt.wantIndexed, style.Foreground, name)
+				} else {
+					require.True(t, style.HasForegroundRGB, "%s must use the RGB palette foreground", name)
+					require.Equal(t, tt.wantForeground, style.ForegroundRGB, name)
+				}
+			}
+		})
+	}
+}
+
 func TestPaletteIndexedForegroundFallback(t *testing.T) {
 	base := Theme{UsePalette: true, SchemeKnown: true, Known: true}
 

@@ -16,10 +16,15 @@ func TestParseXColor(t *testing.T) {
 		want renderer.RGB
 		ok   bool
 	}{
-		{name: "short rgb", in: "rgb:12/ab/FF", want: renderer.RGB{R: 0x12, G: 0xab, B: 0xff}, ok: true},
+		{name: "mixed component widths scale independently", in: "rgb:1/24/86", want: renderer.RGB{R: 0x11, G: 0x24, B: 0x86}, ok: true},
+		{name: "one, three, and four digit components", in: "rgb:f/abc/1234", want: renderer.RGB{R: 0xff, G: 0xab, B: 0x12}, ok: true},
 		{name: "wide rgb uses high byte", in: "rgb:1234/abcd/FFFF", want: renderer.RGB{R: 0x12, G: 0xab, B: 0xff}, ok: true},
 		{name: "hex", in: "#01aBff", want: renderer.RGB{R: 0x01, G: 0xab, B: 0xff}, ok: true},
-		{name: "mixed width rejected", in: "rgb:12/abcd/ff", ok: false},
+		{name: "empty component rejected", in: "rgb:/24/86", ok: false},
+		{name: "too-wide component rejected", in: "rgb:12345/24/86", ok: false},
+		{name: "non-hex component rejected", in: "rgb:1/2g/86", ok: false},
+		{name: "missing component rejected", in: "rgb:1/24", ok: false},
+		{name: "extra component rejected", in: "rgb:1/24/86/ff", ok: false},
 		{name: "garbage rejected", in: "not-a-color", ok: false},
 		{name: "bad hex rejected", in: "#xyzxyz", ok: false},
 	}
