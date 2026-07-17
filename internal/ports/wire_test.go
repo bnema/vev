@@ -254,35 +254,71 @@ func TestThemeGoldenAndRoundTrip(t *testing.T) {
 		{R: 0x34, G: 0x35, B: 0x36}, {R: 0x37, G: 0x38, B: 0x39},
 		{R: 0x3a, G: 0x3b, B: 0x3c}, {R: 0x3d, G: 0x3e, B: 0x3f},
 	}
-	msg := Theme{
-		HasForeground: true,
-		Foreground:    renderer.RGB{R: 1, G: 2, B: 3},
-		HasBackground: true,
-		Background:    renderer.RGB{R: 4, G: 5, B: 6},
-		TrueColor:     true,
-		SchemeKnown:   true,
-		PaletteKnown:  0x8001,
-		Palette:       palette,
-	}
-	want := []byte{
-		0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x80, 0x01,
-		0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-		0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21,
-		0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a,
-		0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33,
-		0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c,
-		0x3d, 0x3e, 0x3f,
+	zeroes := make([]byte, 57)
+	tests := []struct {
+		name string
+		msg  Theme
+		want []byte
+	}{
+		{
+			name: "empty",
+			msg:  Theme{},
+			want: zeroes,
+		},
+		{
+			name: "foreground only",
+			msg: Theme{
+				HasForeground: true,
+				Foreground:    renderer.RGB{R: 10, G: 20, B: 30},
+				Background:    renderer.RGB{R: 40, G: 50, B: 60},
+			},
+			want: append([]byte{0x01, 0x0a, 0x14, 0x1e, 0x28, 0x32, 0x3c}, zeroes[7:]...),
+		},
+		{
+			name: "light flag without known scheme",
+			msg: Theme{
+				Light: true,
+			},
+			want: append([]byte{0x10}, zeroes[1:]...),
+		},
+		{
+			name: "full palette",
+			msg: Theme{
+				HasForeground: true,
+				Foreground:    renderer.RGB{R: 1, G: 2, B: 3},
+				HasBackground: true,
+				Background:    renderer.RGB{R: 4, G: 5, B: 6},
+				TrueColor:     true,
+				SchemeKnown:   true,
+				PaletteKnown:  0x8001,
+				Palette:       palette,
+			},
+			want: []byte{
+				0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x80, 0x01,
+				0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+				0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21,
+				0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a,
+				0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33,
+				0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c,
+				0x3d, 0x3e, 0x3f,
+			},
+		},
 	}
 
-	got := MarshalTheme(msg)
-	require.Len(t, got, 57)
-	require.Equal(t, want, got)
-	back, err := UnmarshalTheme(got)
-	require.NoError(t, err)
-	require.Equal(t, msg, back)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MarshalTheme(tt.msg)
+			require.Len(t, got, 57)
+			require.Equal(t, tt.want, got)
+			back, err := UnmarshalTheme(got)
+			require.NoError(t, err)
+			require.Equal(t, tt.msg, back)
+		})
+	}
 
-	assertAllPrefixesFail(t, got, UnmarshalTheme)
-	assertTrailingGarbageFails(t, got, UnmarshalTheme)
+	full := MarshalTheme(tests[len(tests)-1].msg)
+	assertAllPrefixesFail(t, full, UnmarshalTheme)
+	assertTrailingGarbageFails(t, full, UnmarshalTheme)
 }
 
 func TestResizeGoldenAndRoundTrip(t *testing.T) {
