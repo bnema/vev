@@ -41,28 +41,21 @@ func pulseStyle(frame int, base renderer.Style) (renderer.Style, bool) {
 		distance = -distance
 	}
 	intensity := 1 - float64(distance)/float64(peak)
-	style := base
-	style.Bold = true
-	if base.HasForegroundRGB && base.HasBackgroundRGB {
-		style.ForegroundRGB = themeui.Blend(base.BackgroundRGB, base.ForegroundRGB, intensity)
-	} else {
-		style.Foreground = 244 + int(intensity*11)
-	}
-	return style, true
+	return themeui.PulseColor(base, intensity), true
 }
 
-func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, topRight string, styles themeStyles) {
+func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, topRight string, styles themeui.Styles) {
 	clearStatusRow(row)
 	x := 0
 	labels := fitTabLabels(status.tabs, len(row), topRight)
 	for i, w := range status.tabs {
-		baseStyle := styles.statusBar
-		nameStyle := styles.tabName
-		titleStyle := styles.tabTitle
+		baseStyle := styles.StatusBar
+		nameStyle := styles.TabName
+		titleStyle := styles.TabTitle
 		if w.active {
-			baseStyle = styles.accent
-			nameStyle = styles.tabNameActive
-			titleStyle = styles.tabTitleActive
+			baseStyle = styles.Accent
+			nameStyle = styles.TabNameActive
+			titleStyle = styles.TabTitleActive
 		}
 		label := labels[i]
 		writeStatusText(row, &x, " "+label.text[:label.nameLen], nameStyle)
@@ -73,30 +66,30 @@ func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, t
 		writeStatusText(row, &x, label.text[label.nameLen:], titleStyle)
 		writeStatusText(row, &x, " ", baseStyle)
 	}
-	drawRightPlainText(row, topRight, x, styles.statusBar)
+	drawRightPlainText(row, topRight, x, styles.StatusBar)
 }
 
-func drawStatusBarState(row []renderer.Cell, state barState, styles themeStyles) {
+func drawStatusBarState(row []renderer.Cell, state barState, styles themeui.Styles) {
 	clearStatusRow(row)
 	x := 0
 	rightText := composeBottomRightText(state.bottomRight, state.copyFeedback)
-	writeStatusText(row, &x, " "+state.status.session+" ", styles.accent)
+	writeStatusText(row, &x, " "+state.status.session+" ", styles.Accent)
 	if state.rankedRecent != nil {
 		for _, sess := range fitRankedRecent(state.rankedRecent, len(row), x, rightText) {
-			style := styles.statusBar // contextual ranks deliberately do not fade.
+			style := styles.StatusBar // contextual ranks deliberately do not fade.
 			if sess.selected {
-				style = styles.accent
+				style = styles.Accent
 			}
 			drawRankedStatusSessionEntry(row, &x, sess, style, state.attentionFrame)
 		}
 	} else {
 		fittedMRU := fitMRU(state.mru, len(row), x, rightText)
 		for i, sess := range fittedMRU {
-			style := mruStyle(styles.statusBar, state.theme, i, len(fittedMRU))
+			style := mruStyle(styles.StatusBar, state.theme, i, len(fittedMRU))
 			drawStatusSessionEntry(row, &x, sess.name, sess.attention, style, state.attentionFrame)
 		}
 	}
-	drawRightPlainText(row, rightText, x, styles.statusBar)
+	drawRightPlainText(row, rightText, x, styles.StatusBar)
 }
 
 type rankedRecent struct {
@@ -170,7 +163,7 @@ type barState struct {
 	attentionFrame int
 	// theme is the client's terminal theme, if reported. Its zero value
 	// (Theme{}, Known: false) is a valid "no theme" default that resolves to
-	// the pre-theme fallback styles (see newThemeStyles / theme.usable).
+	// the pre-theme fallback styles (see themeui.NewStyles / theme.usable).
 	theme themeui.Theme
 }
 
@@ -434,13 +427,7 @@ func mruFutureRightReserve(rowLen int) int {
 }
 
 func mruStyle(base renderer.Style, t themeui.Theme, i, count int) renderer.Style {
-	if count <= 1 || !base.HasForegroundRGB || !base.HasBackgroundRGB || !t.HasBG {
-		return base
-	}
-	amount := (float64(i) / float64(count-1)) * 0.6
-	base.ForegroundRGB = themeui.Blend(base.ForegroundRGB, t.Background, amount)
-	base.BackgroundRGB = themeui.Blend(base.BackgroundRGB, t.Background, amount)
-	return base
+	return themeui.MRUFade(base, t, i, count)
 }
 
 // writeBell draws the attention glyph on its visible beat, or a plain cell in

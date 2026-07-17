@@ -31,7 +31,9 @@ const (
 	bracketedPasteDisable = "\x1b[?2004l"
 	colorSchemeEnable     = "\x1b[?2031h"
 	colorSchemeDisable    = "\x1b[?2031l"
-	oscColorQuery         = "\x1b]10;?\x07\x1b]11;?\x07"
+	oscDefaultColorQuery  = "\x1b]10;?\x07\x1b]11;?\x07"
+	oscPaletteQuery       = "\x1b]4;0;?;1;?;2;?;3;?;4;?;5;?;6;?;7;?;8;?;9;?;10;?;11;?;12;?;13;?;14;?;15;?\x07"
+	oscColorQuery         = oscDefaultColorQuery + oscPaletteQuery
 )
 
 // bufSize is the batched writer's buffer capacity.
@@ -235,7 +237,8 @@ func (t *Terminal) stopResizeLocked() {
 	t.resizeWG.Wait()
 }
 
-// QueryColors re-emits OSC 10/11 queries for default foreground/background.
+// QueryColors re-emits OSC 10/11 queries for default foreground/background
+// followed by one batched OSC 4 query for palette slots 0 through 15.
 func (t *Terminal) QueryColors() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()

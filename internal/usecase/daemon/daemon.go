@@ -144,7 +144,7 @@ type Daemon struct {
 	copyConfig              atomic.Pointer[domain.CopyConfig]
 	paletteConfig           atomic.Pointer[domain.PaletteConfig]
 	tabsConfig              atomic.Pointer[domain.TabsConfig]
-	themeMode               atomic.Uint32
+	themeConfig             atomic.Pointer[themeConfigSnapshot]
 	barScripts              *barScriptState
 	resumeParkGrace         time.Duration
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes

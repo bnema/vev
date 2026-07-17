@@ -11,16 +11,28 @@ import (
 
 const maxPending = 64
 
-// Theme describes terminal default colors reported by OSC 10/11.
+// Theme describes terminal default colors and ANSI palette entries.
 type Theme struct {
-	Foreground  renderer.RGB
-	Background  renderer.RGB
-	HasFG       bool
-	HasBG       bool
-	TrueColor   bool
-	Known       bool
-	SchemeKnown bool
-	Light       bool
+	Foreground   renderer.RGB
+	Background   renderer.RGB
+	Palette      [16]renderer.RGB
+	PaletteKnown uint16
+	HasFG        bool
+	HasBG        bool
+	TrueColor    bool
+	Known        bool
+	SchemeKnown  bool
+	Light        bool
+	UsePalette   bool
+}
+
+// PaletteColor returns a palette color only when palette inheritance is
+// enabled and the terminal reported the requested ANSI slot.
+func (t Theme) PaletteColor(slot int) (renderer.RGB, bool) {
+	if !t.UsePalette || slot < 0 || slot >= len(t.Palette) || t.PaletteKnown&(uint16(1)<<slot) == 0 {
+		return renderer.RGB{}, false
+	}
+	return t.Palette[slot], true
 }
 
 var (
@@ -74,30 +86,29 @@ func ParseXColor(s string) (renderer.RGB, bool) {
 	if len(parts) != 3 {
 		return renderer.RGB{}, false
 	}
-	width := len(parts[0])
-	if width != 2 && width != 4 {
-		return renderer.RGB{}, false
-	}
 	var out [3]uint8
 	for i, part := range parts {
-		if len(part) != width {
+		component, ok := parseXColorComponent(part)
+		if !ok {
 			return renderer.RGB{}, false
 		}
-		if width == 2 {
-			v, ok := parseHexByte(part)
-			if !ok {
-				return renderer.RGB{}, false
-			}
-			out[i] = v
-			continue
-		}
-		v, err := strconv.ParseUint(part, 16, 16)
-		if err != nil {
-			return renderer.RGB{}, false
-		}
-		out[i] = uint8(v >> 8)
+		out[i] = component
 	}
 	return renderer.RGB{R: out[0], G: out[1], B: out[2]}, true
+}
+
+// parseXColorComponent scales an XParseColor component of one to four hex
+// digits to an 8-bit channel.
+func parseXColorComponent(s string) (uint8, bool) {
+	if len(s) < 1 || len(s) > 4 {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(s, 16, 16)
+	if err != nil {
+		return 0, false
+	}
+	maxValue := uint64((1 << (4 * len(s))) - 1)
+	return uint8(value * 255 / maxValue), true
 }
 
 func parseHexByte(s string) (uint8, bool) {
@@ -108,12 +119,13 @@ func parseHexByte(s string) (uint8, bool) {
 	return uint8(v), true
 }
 
-// Scanner decodes OSC 10/11 color responses while preserving ordinary bytes.
+// Scanner decodes terminal color responses while preserving ordinary bytes.
 type Scanner struct {
 	pending []byte
 }
 
-// Scan extracts ESC ] 10;<color> and ESC ] 11;<color> terminated by BEL or ST.
+// Scan extracts ESC ] 10;<color>, ESC ] 11;<color>, and ESC ] 4;<slot>;<color>
+// responses terminated by BEL or ST.
 // All non-matching bytes are emitted through onBytes in original order, and a
 // contiguous run of ordinary bytes (including any ESC that does not start a
 // color-OSC sequence, e.g. keyboard/mouse escape sequences like SGR mouse
@@ -121,7 +133,7 @@ type Scanner struct {
 // callers never see it split. Partial OSC color responses are buffered across
 // calls, but the buffer is bounded so an unterminated OSC cannot block
 // unrelated input forever.
-func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), onScheme func(light bool), onBytes func([]byte)) {
+func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), onPalette func(slot int, rgb renderer.RGB), onScheme func(light bool), onBytes func([]byte)) {
 	if len(s.pending) > 0 {
 		combined := make([]byte, 0, len(s.pending)+len(data))
 		combined = append(combined, s.pending...)
@@ -152,7 +164,7 @@ func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), on
 			return
 		}
 
-		completePrefix, possiblePrefix := colorOSCPrefix(data[i:])
+		kind, prefixLen, completePrefix, possiblePrefix := colorOSCPrefix(data[i:])
 		if !completePrefix {
 			if possiblePrefix {
 				if byteStart < i {
@@ -173,20 +185,30 @@ func (s *Scanner) Scan(data []byte, onColor func(kind int, rgb renderer.RGB), on
 			onBytes(data[byteStart:i])
 		}
 
-		termStart, termEnd := findTerminator(data[i+5:])
+		termStart, termEnd := findTerminator(data[i+prefixLen:])
 		if termStart < 0 {
 			s.bufferOrFlush(data[i:], onBytes)
 			return
 		}
-		termStart += i + 5
-		termEnd += i + 5
+		termStart += i + prefixLen
+		termEnd += i + prefixLen
 		raw := data[i:termEnd]
-		kind := int(data[i+3]-'0') + 10
-		rgb, ok := ParseXColor(string(data[i+5 : termStart]))
-		if ok {
-			onColor(kind, rgb)
-		} else {
-			onBytes(raw)
+		body := string(data[i+prefixLen : termStart])
+		switch kind {
+		case 4:
+			slot, rgb, ok := parsePaletteResponse(body)
+			if ok {
+				onPalette(slot, rgb)
+			} else {
+				onBytes(raw)
+			}
+		default:
+			rgb, ok := ParseXColor(body)
+			if ok {
+				onColor(kind, rgb)
+			} else {
+				onBytes(raw)
+			}
 		}
 		i = termEnd - 1
 		byteStart = termEnd
@@ -206,23 +228,52 @@ func (s *Scanner) bufferOrFlush(partial []byte, onBytes func([]byte)) {
 	s.pending = append(s.pending, partial...)
 }
 
-func colorOSCPrefix(data []byte) (complete bool, possible bool) {
+func colorOSCPrefix(data []byte) (kind, prefixLen int, complete bool, possible bool) {
 	if len(data) < 2 {
-		return false, false
+		return 0, 0, false, false
 	}
-	prefixes := [][]byte{[]byte("\x1b]10;"), []byte("\x1b]11;")}
-	for _, prefix := range prefixes {
-		if len(data) >= len(prefix) {
-			if bytes.Equal(data[:len(prefix)], prefix) {
-				return true, true
+	prefixes := []struct {
+		kind   int
+		prefix []byte
+	}{
+		{kind: 10, prefix: []byte("\x1b]10;")},
+		{kind: 11, prefix: []byte("\x1b]11;")},
+		{kind: 4, prefix: []byte("\x1b]4;")},
+	}
+	for _, candidate := range prefixes {
+		if len(data) >= len(candidate.prefix) {
+			if bytes.Equal(data[:len(candidate.prefix)], candidate.prefix) {
+				return candidate.kind, len(candidate.prefix), true, true
 			}
 			continue
 		}
-		if bytes.Equal(data, prefix[:len(data)]) {
-			return false, true
+		if bytes.Equal(data, candidate.prefix[:len(data)]) {
+			return candidate.kind, len(candidate.prefix), false, true
 		}
 	}
-	return false, false
+	return 0, 0, false, false
+}
+
+func parsePaletteResponse(body string) (int, renderer.RGB, bool) {
+	indexEnd := strings.IndexByte(body, ';')
+	if indexEnd < 1 {
+		return 0, renderer.RGB{}, false
+	}
+	slot := 0
+	for _, b := range []byte(body[:indexEnd]) {
+		if b < '0' || b > '9' {
+			return 0, renderer.RGB{}, false
+		}
+		slot = slot*10 + int(b-'0')
+		if slot > 15 {
+			return 0, renderer.RGB{}, false
+		}
+	}
+	rgb, ok := ParseXColor(body[indexEnd+1:])
+	if !ok {
+		return 0, renderer.RGB{}, false
+	}
+	return slot, rgb, true
 }
 
 // schemeCSIPrefixes lists the CSI ?997 scheme-notification sequences vev
@@ -305,6 +356,13 @@ func StatusBarStyle(t Theme) renderer.Style {
 	return style
 }
 
+const (
+	ansiBlue       = 4
+	ansiBrightBlue = 12
+	accentBlend    = 0.25
+	titleHueBlend  = 0.2
+)
+
 func AccentStyle(t Theme) renderer.Style {
 	if !usable(t) {
 		return inverseStyle()
@@ -313,28 +371,69 @@ func AccentStyle(t Theme) renderer.Style {
 	style.HasForegroundRGB = true
 	style.ForegroundRGB = t.Foreground
 	style.HasBackgroundRGB = true
-	style.BackgroundRGB = Blend(t.Background, t.Foreground, 0.25)
+	style.BackgroundRGB = accentBackground(t)
 	return style
+}
+
+// accentBackground uses a terminal's blue palette only when the resulting
+// foreground/background pair remains legible. A neutral blend is always the
+// fallback, including when palette inheritance is disabled.
+func accentBackground(t Theme) renderer.RGB {
+	neutral := Blend(t.Background, t.Foreground, accentBlend)
+	if !t.UsePalette {
+		return neutral
+	}
+	for _, slot := range []int{ansiBlue, ansiBrightBlue} {
+		blue, ok := t.PaletteColor(slot)
+		if !ok {
+			continue
+		}
+		candidate := Blend(t.Background, blue, accentBlend)
+		if ContrastRatio(t.Foreground, candidate) >= accentContrastMin {
+			return candidate
+		}
+	}
+	return neutral
 }
 
 func BorderStyle(t Theme) renderer.Style {
-	if !usable(t) {
-		return renderer.DefaultStyle()
+	neutral := renderer.DefaultStyle()
+	if usable(t) {
+		neutral.HasForegroundRGB = true
+		neutral.ForegroundRGB = Blend(t.Foreground, t.Background, 0.40)
 	}
-	style := renderer.DefaultStyle()
-	style.HasForegroundRGB = true
-	style.ForegroundRGB = Blend(t.Foreground, t.Background, 0.40)
-	return style
+	if !t.UsePalette {
+		return neutral
+	}
+
+	base := renderer.DefaultStyle()
+	if usable(t) {
+		base.HasForegroundRGB = true
+		base.ForegroundRGB = t.Foreground
+		base.HasBackgroundRGB = true
+		base.BackgroundRGB = t.Background
+	}
+	return paletteForegroundStyle(base, neutral, t)
 }
 
 func MutedTextStyle(t Theme) renderer.Style {
-	if !usable(t) {
-		return renderer.DefaultStyle()
+	neutral := renderer.DefaultStyle()
+	if usable(t) {
+		neutral.HasForegroundRGB = true
+		neutral.ForegroundRGB = Blend(t.Foreground, t.Background, 0.45)
 	}
-	style := renderer.DefaultStyle()
-	style.HasForegroundRGB = true
-	style.ForegroundRGB = Blend(t.Foreground, t.Background, 0.45)
-	return style
+	if !t.UsePalette {
+		return neutral
+	}
+
+	base := renderer.DefaultStyle()
+	if usable(t) {
+		base.HasForegroundRGB = true
+		base.ForegroundRGB = t.Foreground
+		base.HasBackgroundRGB = true
+		base.BackgroundRGB = t.Background
+	}
+	return paletteForegroundStyle(base, neutral, t)
 }
 
 // mutedVariantBlend is the fraction MutedVariantStyle blends a style's own
@@ -371,6 +470,61 @@ func MutedVariantStyle(base renderer.Style, t Theme) renderer.Style {
 	out := base
 	out.ForegroundRGB = Blend(base.ForegroundRGB, bg, mutedVariantBlend)
 	return out
+}
+
+// PaletteMutedVariantStyle derives a title foreground from a terminal blue
+// palette entry. Its contrast is evaluated against the title's actual base
+// background, rather than the terminal background, because status and active
+// title backgrounds differ.
+func PaletteMutedVariantStyle(base renderer.Style, t Theme) renderer.Style {
+	return paletteForegroundStyle(base, MutedVariantStyle(base, t), t)
+}
+
+// paletteForegroundStyle uses palette blues for a foreground only. It never
+// changes a background, so palette inheritance cannot introduce indexed
+// backgrounds. If terminal RGB data is unavailable, a known color scheme can
+// still select a best-effort ANSI foreground. A reported blue that fails
+// contrast deliberately suppresses that indexed fallback.
+func paletteForegroundStyle(base, neutral renderer.Style, t Theme) renderer.Style {
+	if !t.UsePalette {
+		return neutral
+	}
+
+	knownBlue := paletteBlueKnown(t)
+	if usable(t) && base.HasForegroundRGB && base.HasBackgroundRGB {
+		for _, slot := range []int{ansiBlue, ansiBrightBlue} {
+			blue, ok := t.PaletteColor(slot)
+			if !ok {
+				continue
+			}
+			candidate := Blend(base.ForegroundRGB, blue, titleHueBlend)
+			if ContrastRatio(candidate, base.BackgroundRGB) >= accentContrastMin {
+				out := neutral
+				out.HasForegroundRGB = true
+				out.ForegroundRGB = candidate
+				return out
+			}
+		}
+	}
+
+	if !knownBlue && t.SchemeKnown {
+		out := neutral
+		out.HasForegroundRGB = false
+		if t.Light {
+			out.Foreground = ansiBlue
+		} else {
+			out.Foreground = ansiBrightBlue
+		}
+		return out
+	}
+	return neutral
+}
+
+func paletteBlueKnown(t Theme) bool {
+	if !t.UsePalette {
+		return false
+	}
+	return t.PaletteKnown&(uint16(1)<<ansiBlue|uint16(1)<<ansiBrightBlue) != 0
 }
 
 const defaultDimmingPercent = 35

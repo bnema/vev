@@ -10,6 +10,8 @@ import (
 	"github.com/bnema/vev/internal/domain"
 )
 
+const wantColorQueries = "\x1b]10;?\x07\x1b]11;?\x07\x1b]4;0;?;1;?;2;?;3;?;4;?;5;?;6;?;7;?;8;?;9;?;10;?;11;?;12;?;13;?;14;?;15;?\x07"
+
 // pipePair returns an os.Pipe and a goroutine that continuously copies
 // everything written to the write end into captured, closing done once
 // the write end is closed (EOF).
@@ -60,7 +62,7 @@ func TestTerminal_EnterRaw_NonTTY_EmitsAltScreenAndCursorEscapes(t *testing.T) {
 	_ = outW.Close()
 	<-done
 
-	want := altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + oscColorQuery + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + altScreenExit
+	want := altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + wantColorQueries + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + altScreenExit
 	if got := captured.String(); got != want {
 		t.Fatalf("captured escapes = %q, want %q", got, want)
 	}
@@ -101,7 +103,7 @@ func TestTerminal_EnterRaw_IsIdempotentAcrossCalls(t *testing.T) {
 	// Alt-screen/cursor/theme-query escapes must appear exactly once for enter and
 	// cursor/alt-screen exits exactly once, regardless of how many times
 	// EnterRaw/restore were called.
-	want := altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + oscColorQuery + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + altScreenExit
+	want := altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + wantColorQueries + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + altScreenExit
 	if got := captured.String(); got != want {
 		t.Fatalf("captured escapes = %q, want %q", got, want)
 	}
@@ -124,8 +126,8 @@ func TestTerminal_QueryColors(t *testing.T) {
 	}
 	_ = outW.Close()
 	<-done
-	if got := captured.String(); got != oscColorQuery {
-		t.Fatalf("captured = %q, want %q", got, oscColorQuery)
+	if got := captured.String(); got != wantColorQueries {
+		t.Fatalf("captured = %q, want %q", got, wantColorQueries)
 	}
 }
 

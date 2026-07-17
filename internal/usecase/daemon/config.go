@@ -16,6 +16,26 @@ import (
 
 var commandCodePattern = regexp.MustCompile(`^[A-Z0-9]{2,3}$`)
 
+// themeConfigSnapshot is published as one immutable value. Its zero value is
+// the default theme configuration: automatic mode with palette inheritance on.
+type themeConfigSnapshot struct {
+	mode       domain.ThemeMode
+	paletteOff bool
+}
+
+func (d *Daemon) storeThemeConfig(cfg domain.Config) {
+	snapshot := themeConfigSnapshot{mode: cfg.Theme, paletteOff: !cfg.ThemePalette}
+	d.themeConfig.Store(&snapshot)
+}
+
+func (d *Daemon) currentThemeConfig() themeConfigSnapshot {
+	snapshot := d.themeConfig.Load()
+	if snapshot == nil {
+		return themeConfigSnapshot{}
+	}
+	return *snapshot
+}
+
 // ApplyConfig validates and atomically swaps daemon runtime configuration.
 func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	bindings, warnings := keys.BuildBindingEntries(cfg.BindingEntries)
@@ -35,7 +55,7 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	d.paletteConfig.Store(&palette)
 	tabs := cfg.Tabs
 	d.tabsConfig.Store(&tabs)
-	d.themeMode.Store(uint32(cfg.Theme))
+	d.storeThemeConfig(cfg)
 	if d.barScripts != nil {
 		d.barScripts.mu.Lock()
 		d.barScripts.initLocked()
@@ -240,12 +260,14 @@ func (d *Daemon) commandByEffectiveCode(code string) (command.Command, bool) {
 }
 
 func (d *Daemon) effectiveTheme(clientTheme theme.Theme) theme.Theme {
-	switch domain.ThemeMode(d.themeMode.Load()) {
+	config := d.currentThemeConfig()
+	switch config.mode {
 	case domain.ThemeDark:
 		return theme.BuiltinDark
 	case domain.ThemeLight:
 		return theme.BuiltinLight
 	default:
+		clientTheme.UsePalette = !config.paletteOff
 		return clientTheme
 	}
 }

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -8,6 +9,8 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"github.com/bnema/vev/pkg/renderer"
 )
 
 type captureKeyHandler struct {
@@ -48,6 +51,200 @@ func TestApplyConfigHotReloadSwapsBindingsAndCodes(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "new-tab", cmd.Slug)
 	require.Equal(t, "NT", cmd.Code)
+}
+
+func TestApplyThemeCopiesTerminalPaletteAndHotReloadGatesIt(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+
+	clientPalette := [16]renderer.RGB{}
+	clientPalette[1] = renderer.RGB{R: 1, G: 2, B: 3}
+	clientPalette[12] = renderer.RGB{R: 4, G: 5, B: 6}
+	d.applyTheme(sess, ac, ports.Theme{
+		HasForeground: true,
+		Foreground:    renderer.RGB{R: 7, G: 8, B: 9},
+		HasBackground: true,
+		Background:    renderer.RGB{R: 10, G: 11, B: 12},
+		Palette:       clientPalette,
+		PaletteKnown:  1<<1 | 1<<12,
+	})
+
+	require.Equal(t, clientPalette, ac.getClientTheme().Palette)
+	require.Equal(t, uint16(1<<1|1<<12), ac.getClientTheme().PaletteKnown)
+	require.True(t, ac.getTheme().UsePalette)
+
+	cfg := domain.Defaults()
+	cfg.ThemePalette = false
+	d.ApplyConfig(cfg)
+
+	// ApplyConfig reuses the live client report and repaints without requiring
+	// a reconnect; only palette inheritance changes.
+	reloaded := ac.getTheme()
+	require.Equal(t, clientPalette, reloaded.Palette)
+	require.Equal(t, uint16(1<<1|1<<12), reloaded.PaletteKnown)
+	require.False(t, reloaded.UsePalette)
+}
+
+func TestEffectiveThemePaletteGate(t *testing.T) {
+	clientPalette := [16]renderer.RGB{}
+	clientPalette[3] = renderer.RGB{R: 1, G: 2, B: 3}
+	clientTheme := themeui.Theme{
+		Palette:      clientPalette,
+		PaletteKnown: 1 << 3,
+	}
+
+	tests := []struct {
+		name       string
+		config     domain.Config
+		want       themeui.Theme
+		usePalette bool
+	}{
+		{
+			name:       "auto inherits terminal palette by default",
+			config:     domain.Defaults(),
+			want:       clientTheme,
+			usePalette: true,
+		},
+		{
+			name: "auto disables terminal palette",
+			config: func() domain.Config {
+				cfg := domain.Defaults()
+				cfg.ThemePalette = false
+				return cfg
+			}(),
+			want: clientTheme,
+		},
+		{
+			name: "forced dark uses palette free builtin",
+			config: domain.Config{
+				Theme:        domain.ThemeDark,
+				ThemePalette: true,
+			},
+			want: themeui.BuiltinDark,
+		},
+		{
+			name: "forced dark ignores disabled palette inheritance",
+			config: domain.Config{
+				Theme:        domain.ThemeDark,
+				ThemePalette: false,
+			},
+			want: themeui.BuiltinDark,
+		},
+		{
+			name: "forced light uses palette free builtin",
+			config: domain.Config{
+				Theme:        domain.ThemeLight,
+				ThemePalette: true,
+			},
+			want: themeui.BuiltinLight,
+		},
+		{
+			name: "forced light ignores disabled palette inheritance",
+			config: domain.Config{
+				Theme:        domain.ThemeLight,
+				ThemePalette: false,
+			},
+			want: themeui.BuiltinLight,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			d.ApplyConfig(tt.config)
+
+			got := d.effectiveTheme(clientTheme)
+			want := tt.want
+			want.UsePalette = tt.usePalette
+			require.Equal(t, want, got)
+		})
+	}
+}
+
+func TestThemeConfigSnapshotIsAtomic(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+
+	// A nil atomic pointer is the zero/default snapshot: auto theme with
+	// terminal palette inheritance enabled.
+	require.Equal(t, themeConfigSnapshot{}, d.currentThemeConfig())
+
+	for _, tt := range []struct {
+		name string
+		mode domain.ThemeMode
+		gate bool
+	}{
+		{name: "auto palette enabled", mode: domain.ThemeAuto, gate: true},
+		{name: "auto palette disabled", mode: domain.ThemeAuto, gate: false},
+		{name: "dark palette enabled", mode: domain.ThemeDark, gate: true},
+		{name: "dark palette disabled", mode: domain.ThemeDark, gate: false},
+		{name: "light palette enabled", mode: domain.ThemeLight, gate: true},
+		{name: "light palette disabled", mode: domain.ThemeLight, gate: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d.storeThemeConfig(domain.Config{Theme: tt.mode, ThemePalette: tt.gate})
+			require.Equal(t, themeConfigSnapshot{mode: tt.mode, paletteOff: !tt.gate}, d.currentThemeConfig())
+		})
+	}
+
+	// Publish complementary configurations concurrently. Every load must be a
+	// complete published snapshot, never mode from one update and gate from
+	// another. Coordination establishes concurrent readers/writers without
+	// timing sleeps.
+	first := domain.Config{Theme: domain.ThemeAuto, ThemePalette: false}
+	second := domain.Config{Theme: domain.ThemeDark, ThemePalette: true}
+	allowed := map[themeConfigSnapshot]struct{}{
+		{mode: domain.ThemeAuto, paletteOff: true}:  {},
+		{mode: domain.ThemeDark, paletteOff: false}: {},
+	}
+	firstPublished := make(chan struct{})
+	firstObserved := make(chan struct{})
+	secondPublished := make(chan struct{})
+	secondObserved := make(chan struct{})
+	observed := make(chan themeConfigSnapshot, 2)
+	invalid := make(chan themeConfigSnapshot, 1)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		d.storeThemeConfig(first)
+		close(firstPublished)
+		<-firstObserved
+		d.storeThemeConfig(second)
+		close(secondPublished)
+		<-secondObserved
+		for range 10_000 {
+			d.storeThemeConfig(second)
+			d.storeThemeConfig(first)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-firstPublished
+		observed <- d.currentThemeConfig()
+		close(firstObserved)
+		<-secondPublished
+		observed <- d.currentThemeConfig()
+		close(secondObserved)
+		for range 20_000 {
+			snapshot := d.currentThemeConfig()
+			if _, ok := allowed[snapshot]; !ok {
+				select {
+				case invalid <- snapshot:
+				default:
+				}
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	require.Equal(t, themeConfigSnapshot{mode: domain.ThemeAuto, paletteOff: true}, <-observed)
+	require.Equal(t, themeConfigSnapshot{mode: domain.ThemeDark, paletteOff: false}, <-observed)
+	select {
+	case snapshot := <-invalid:
+		t.Fatalf("observed mixed theme configuration: %#v", snapshot)
+	default:
+	}
 }
 
 func TestApplyConfigPublishesCopyConfig(t *testing.T) {
