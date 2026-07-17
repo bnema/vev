@@ -145,8 +145,11 @@ type Daemon struct {
 	paletteConfig           atomic.Pointer[domain.PaletteConfig]
 	tabsConfig              atomic.Pointer[domain.TabsConfig]
 	themeMode               atomic.Uint32
-	barScripts              *barScriptState
-	resumeParkGrace         time.Duration
+	// themePaletteOff is deliberately inverted so its zero value preserves the
+	// default-on terminal palette inheritance before configuration is loaded.
+	themePaletteOff atomic.Bool
+	barScripts      *barScriptState
+	resumeParkGrace time.Duration
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
 	tempDir string

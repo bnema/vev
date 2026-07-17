@@ -8,6 +8,8 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"github.com/bnema/vev/pkg/renderer"
 )
 
 type captureKeyHandler struct {
@@ -48,6 +50,99 @@ func TestApplyConfigHotReloadSwapsBindingsAndCodes(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "new-tab", cmd.Slug)
 	require.Equal(t, "NT", cmd.Code)
+}
+
+func TestApplyThemeCopiesTerminalPaletteAndHotReloadGatesIt(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+
+	clientPalette := [16]renderer.RGB{}
+	clientPalette[1] = renderer.RGB{R: 1, G: 2, B: 3}
+	clientPalette[12] = renderer.RGB{R: 4, G: 5, B: 6}
+	d.applyTheme(sess, ac, ports.Theme{
+		HasForeground: true,
+		Foreground:    renderer.RGB{R: 7, G: 8, B: 9},
+		HasBackground: true,
+		Background:    renderer.RGB{R: 10, G: 11, B: 12},
+		Palette:       clientPalette,
+		PaletteKnown:  1<<1 | 1<<12,
+	})
+
+	require.Equal(t, clientPalette, ac.getClientTheme().Palette)
+	require.Equal(t, uint16(1<<1|1<<12), ac.getClientTheme().PaletteKnown)
+	require.True(t, ac.getTheme().UsePalette)
+
+	cfg := domain.Defaults()
+	cfg.ThemePalette = false
+	d.ApplyConfig(cfg)
+
+	// ApplyConfig reuses the live client report and repaints without requiring
+	// a reconnect; only palette inheritance changes.
+	reloaded := ac.getTheme()
+	require.Equal(t, clientPalette, reloaded.Palette)
+	require.Equal(t, uint16(1<<1|1<<12), reloaded.PaletteKnown)
+	require.False(t, reloaded.UsePalette)
+}
+
+func TestEffectiveThemePaletteGate(t *testing.T) {
+	clientPalette := [16]renderer.RGB{}
+	clientPalette[3] = renderer.RGB{R: 1, G: 2, B: 3}
+	clientTheme := themeui.Theme{
+		Palette:      clientPalette,
+		PaletteKnown: 1 << 3,
+	}
+
+	tests := []struct {
+		name       string
+		config     domain.Config
+		want       themeui.Theme
+		usePalette bool
+	}{
+		{
+			name:       "auto inherits terminal palette by default",
+			config:     domain.Defaults(),
+			want:       clientTheme,
+			usePalette: true,
+		},
+		{
+			name: "auto disables terminal palette",
+			config: func() domain.Config {
+				cfg := domain.Defaults()
+				cfg.ThemePalette = false
+				return cfg
+			}(),
+			want: clientTheme,
+		},
+		{
+			name: "forced dark uses palette free builtin",
+			config: domain.Config{
+				Theme:        domain.ThemeDark,
+				ThemePalette: true,
+			},
+			want: themeui.BuiltinDark,
+		},
+		{
+			name: "forced light uses palette free builtin",
+			config: domain.Config{
+				Theme:        domain.ThemeLight,
+				ThemePalette: true,
+			},
+			want: themeui.BuiltinLight,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			d.ApplyConfig(tt.config)
+
+			got := d.effectiveTheme(clientTheme)
+			want := tt.want
+			want.UsePalette = tt.usePalette
+			require.Equal(t, want, got)
+		})
+	}
 }
 
 func TestApplyConfigPublishesCopyConfig(t *testing.T) {

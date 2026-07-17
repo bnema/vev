@@ -698,14 +698,16 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 
 func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) {
 	clientTheme := themeui.Theme{
-		Foreground:  msg.Foreground,
-		Background:  msg.Background,
-		HasFG:       msg.HasForeground,
-		HasBG:       msg.HasBackground,
-		TrueColor:   msg.TrueColor,
-		Known:       msg.HasForeground && msg.HasBackground,
-		SchemeKnown: msg.SchemeKnown,
-		Light:       msg.Light,
+		Foreground:   msg.Foreground,
+		Background:   msg.Background,
+		Palette:      msg.Palette,
+		PaletteKnown: msg.PaletteKnown,
+		HasFG:        msg.HasForeground,
+		HasBG:        msg.HasBackground,
+		TrueColor:    msg.TrueColor,
+		Known:        msg.HasForeground && msg.HasBackground,
+		SchemeKnown:  msg.SchemeKnown,
+		Light:        msg.Light,
 	}
 	ac.setClientTheme(clientTheme)
 	t := d.effectiveTheme(clientTheme)

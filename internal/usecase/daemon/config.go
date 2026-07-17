@@ -36,6 +36,7 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	tabs := cfg.Tabs
 	d.tabsConfig.Store(&tabs)
 	d.themeMode.Store(uint32(cfg.Theme))
+	d.themePaletteOff.Store(!cfg.ThemePalette)
 	if d.barScripts != nil {
 		d.barScripts.mu.Lock()
 		d.barScripts.initLocked()
@@ -246,6 +247,7 @@ func (d *Daemon) effectiveTheme(clientTheme theme.Theme) theme.Theme {
 	case domain.ThemeLight:
 		return theme.BuiltinLight
 	default:
+		clientTheme.UsePalette = !d.themePaletteOff.Load()
 		return clientTheme
 	}
 }
