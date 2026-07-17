@@ -137,40 +137,6 @@ func (r *chunkedBlockingReader) Read(p []byte) (int, error) {
 
 func (r *chunkedBlockingReader) unblock() { close(r.done) }
 
-// queryBoundaryReader reports an attempt to read the second chunk before
-// returning it, allowing a test to prove that a scheme re-query is a real
-// stdin generation boundary rather than a lossy notification.
-type queryBoundaryReader struct {
-	first, second     []byte
-	secondRead        chan struct{}
-	allowSecond, done <-chan struct{}
-	reads             int
-}
-
-func (r *queryBoundaryReader) Read(p []byte) (int, error) {
-	switch r.reads {
-	case 0:
-		r.reads++
-		return copy(p, r.first), nil
-	case 1:
-		select {
-		case r.secondRead <- struct{}{}:
-		case <-r.done:
-			return 0, io.EOF
-		}
-		select {
-		case <-r.allowSecond:
-			r.reads++
-			return copy(p, r.second), nil
-		case <-r.done:
-			return 0, io.EOF
-		}
-	default:
-		<-r.done
-		return 0, io.EOF
-	}
-}
-
 func newHappyTerminal(t *testing.T, out *bytes.Buffer, restoreCount *atomic.Int32, resizeCh chan domain.Size) (*portsmocks.MockTerminal, *blockingReader) {
 	tm := portsmocks.NewMockTerminal(t)
 	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
