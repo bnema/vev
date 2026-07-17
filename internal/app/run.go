@@ -101,9 +101,19 @@ usage:
   vev --help          show this help
   vev --version       show version`
 
-// version is vev's reported build version. Wired here for the MVP; a build
-// stamp can replace it later.
-const version = "0.1.0-dev"
+// Build metadata. Defaults describe a plain `go build`; releases overwrite
+// them via -ldflags "-X github.com/bnema/vev/internal/app.version=..." (and
+// .commit / .date) — see .goreleaser.yaml.
+var (
+	version = "0.1.0-dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
+// versionLine renders the --version output.
+func versionLine() string {
+	return fmt.Sprintf("vev %s (commit %s, built %s)", version, commit, date)
+}
 
 // Run is the entry point invoked by main. It parses args into a command and
 // dispatches it.
@@ -219,7 +229,7 @@ func dispatch(ctx context.Context, cmd command) error {
 		fmt.Println(usageText)
 		return nil
 	case kindVersion:
-		fmt.Println("vev", version)
+		fmt.Println(versionLine())
 		return nil
 	case kindDaemon:
 		return runDaemon()
