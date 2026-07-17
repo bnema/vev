@@ -85,8 +85,8 @@ type Resize struct {
 	Size domain.Size
 }
 
-// Theme reports the client's terminal foreground/background colors and
-// whether the client terminal supports truecolor.
+// Theme reports the client's terminal foreground/background colors, ANSI
+// palette entries, and whether the client terminal supports truecolor.
 type Theme struct {
 	HasForeground bool
 	Foreground    renderer.RGB
@@ -95,6 +95,8 @@ type Theme struct {
 	TrueColor     bool
 	SchemeKnown   bool
 	Light         bool
+	PaletteKnown  uint16
+	Palette       [16]renderer.RGB
 }
 
 // ImagePush carries a clipboard image from a remote client, to be written to
@@ -464,7 +466,7 @@ func MarshalResize(m Resize) []byte {
 	return w.b
 }
 
-// MarshalTheme encodes m into a fixed-width Theme message payload.
+// MarshalTheme encodes m into a 57-byte fixed-width Theme message payload.
 func MarshalTheme(m Theme) []byte {
 	var flags uint8
 	if m.HasForeground {
@@ -482,14 +484,25 @@ func MarshalTheme(m Theme) []byte {
 	if m.Light {
 		flags |= 0x10
 	}
-	return []byte{
-		flags,
-		m.Foreground.R, m.Foreground.G, m.Foreground.B,
-		m.Background.R, m.Background.G, m.Background.B,
+
+	w := payloadWriter{b: make([]byte, 0, 57)}
+	w.putUint8(flags)
+	w.putUint8(m.Foreground.R)
+	w.putUint8(m.Foreground.G)
+	w.putUint8(m.Foreground.B)
+	w.putUint8(m.Background.R)
+	w.putUint8(m.Background.G)
+	w.putUint8(m.Background.B)
+	w.putUint16(m.PaletteKnown)
+	for _, color := range m.Palette {
+		w.putUint8(color.R)
+		w.putUint8(color.G)
+		w.putUint8(color.B)
 	}
+	return w.b
 }
 
-// UnmarshalTheme decodes a fixed-width Theme message payload.
+// UnmarshalTheme decodes a 57-byte fixed-width Theme message payload.
 func UnmarshalTheme(b []byte) (Theme, error) {
 	r := payloadReader{b: b}
 	flags, err := r.getUint8()
@@ -520,10 +533,12 @@ func UnmarshalTheme(b []byte) (Theme, error) {
 	if err != nil {
 		return Theme{}, err
 	}
-	if err := r.done(); err != nil {
+	paletteKnown, err := r.getUint16()
+	if err != nil {
 		return Theme{}, err
 	}
-	return Theme{
+
+	m := Theme{
 		HasForeground: flags&0x01 != 0,
 		Foreground:    renderer.RGB{R: fgR, G: fgG, B: fgB},
 		HasBackground: flags&0x02 != 0,
@@ -531,7 +546,23 @@ func UnmarshalTheme(b []byte) (Theme, error) {
 		TrueColor:     flags&0x04 != 0,
 		SchemeKnown:   flags&0x08 != 0,
 		Light:         flags&0x10 != 0,
-	}, nil
+		PaletteKnown:  paletteKnown,
+	}
+	for i := range m.Palette {
+		if m.Palette[i].R, err = r.getUint8(); err != nil {
+			return Theme{}, err
+		}
+		if m.Palette[i].G, err = r.getUint8(); err != nil {
+			return Theme{}, err
+		}
+		if m.Palette[i].B, err = r.getUint8(); err != nil {
+			return Theme{}, err
+		}
+	}
+	if err := r.done(); err != nil {
+		return Theme{}, err
+	}
+	return m, nil
 }
 
 // UnmarshalResize decodes a Resize message payload.
