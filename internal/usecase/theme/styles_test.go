@@ -241,6 +241,230 @@ func TestThemeIsComparable(t *testing.T) {
 	require.True(t, themes[BuiltinDark])
 }
 
+func TestPaletteAccentBackground(t *testing.T) {
+	base := Theme{
+		Foreground: renderer.RGB{R: 200, G: 200, B: 200},
+		Background: renderer.RGB{R: 100, G: 100, B: 100},
+		HasFG:      true,
+		HasBG:      true,
+		Known:      true,
+		TrueColor:  true,
+		UsePalette: true,
+	}
+	neutral := Blend(base.Background, base.Foreground, accentBlend)
+
+	tests := []struct {
+		name            string
+		palette         [16]renderer.RGB
+		known           uint16
+		usePalette      bool
+		want            renderer.RGB
+		wantContrastMin bool
+	}{
+		{
+			name:            "slot 4 supplies a contrasting accent background",
+			palette:         [16]renderer.RGB{4: {B: 255}, 12: {R: 200, G: 200, B: 200}},
+			known:           1<<4 | 1<<12,
+			usePalette:      true,
+			want:            Blend(base.Background, renderer.RGB{B: 255}, accentBlend),
+			wantContrastMin: true,
+		},
+		{
+			name:            "slot 4 failure escalates to slot 12",
+			palette:         [16]renderer.RGB{4: {R: 200, G: 200, B: 200}, 12: {}},
+			known:           1<<4 | 1<<12,
+			usePalette:      true,
+			want:            Blend(base.Background, renderer.RGB{}, accentBlend),
+			wantContrastMin: true,
+		},
+		{
+			name:       "both palette blues failing uses exact neutral blend",
+			palette:    [16]renderer.RGB{4: {R: 200, G: 200, B: 200}, 12: {R: 200, G: 200, B: 200}},
+			known:      1<<4 | 1<<12,
+			usePalette: true,
+			want:       neutral,
+		},
+		{
+			name:       "missing palette blues uses exact neutral blend",
+			usePalette: true,
+			want:       neutral,
+		},
+		{
+			name:       "palette disabled preserves neutral accent",
+			palette:    [16]renderer.RGB{4: {B: 255}},
+			known:      1 << 4,
+			usePalette: false,
+			want:       neutral,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			theme := base
+			theme.Palette = tt.palette
+			theme.PaletteKnown = tt.known
+			theme.UsePalette = tt.usePalette
+
+			got := AccentStyle(theme)
+			require.True(t, got.HasBackgroundRGB)
+			require.Equal(t, tt.want, got.BackgroundRGB)
+			if tt.wantContrastMin {
+				require.GreaterOrEqual(t, ContrastRatio(theme.Foreground, got.BackgroundRGB), accentContrastMin)
+			}
+		})
+	}
+}
+
+func TestPaletteTitleHueDerivation(t *testing.T) {
+	base := Theme{
+		Foreground: renderer.RGB{R: 200, G: 200, B: 200},
+		Background: renderer.RGB{R: 100, G: 100, B: 100},
+		HasFG:      true,
+		HasBG:      true,
+		Known:      true,
+		TrueColor:  true,
+		UsePalette: true,
+	}
+
+	tests := []struct {
+		name    string
+		theme   Theme
+		palette [16]renderer.RGB
+		known   uint16
+	}{
+		{
+			name: "slot 4 is used when it contrasts for each title",
+			theme: Theme{
+				Foreground: renderer.RGB{R: 240, G: 240, B: 240},
+				Background: renderer.RGB{R: 50, G: 50, B: 50},
+				HasFG:      true, HasBG: true, Known: true, TrueColor: true, UsePalette: true,
+			},
+			palette: [16]renderer.RGB{4: {}, 12: {R: 200, G: 200, B: 200}},
+
+			known: 1<<4 | 1<<12,
+		},
+		{
+			name:    "each title escalates independently from slot 4 to slot 12",
+			palette: [16]renderer.RGB{4: {}, 12: {R: 255, G: 255, B: 255}},
+			known:   1<<4 | 1<<12,
+		},
+		{
+			name:    "both title hues failing retains neutral muted styles",
+			palette: [16]renderer.RGB{4: {R: 200, G: 200, B: 200}, 12: {R: 200, G: 200, B: 200}},
+			known:   1<<4 | 1<<12,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			theme := base
+			if tt.theme.Known {
+				theme = tt.theme
+			}
+			theme.Palette = tt.palette
+			theme.PaletteKnown = tt.known
+			styles := NewStyles(theme)
+			status := StatusBarStyle(theme)
+			accent := AccentStyle(theme)
+
+			if tt.name == "both title hues failing retains neutral muted styles" {
+				require.True(t, styles.TabTitle.Equal(MutedVariantStyle(status, theme)))
+				require.True(t, styles.TabTitleActive.Equal(MutedVariantStyle(accent, theme)))
+				return
+			}
+
+			require.True(t, styles.TabTitle.HasForegroundRGB)
+			require.True(t, styles.TabTitleActive.HasForegroundRGB)
+			require.GreaterOrEqual(t, ContrastRatio(styles.TabTitle.ForegroundRGB, status.BackgroundRGB), accentContrastMin)
+			require.GreaterOrEqual(t, ContrastRatio(styles.TabTitleActive.ForegroundRGB, accent.BackgroundRGB), accentContrastMin)
+
+			if tt.name == "slot 4 is used when it contrasts for each title" {
+				require.Equal(t, Blend(theme.Foreground, theme.Palette[4], titleHueBlend), styles.TabTitle.ForegroundRGB)
+				require.Equal(t, Blend(theme.Foreground, theme.Palette[4], titleHueBlend), styles.TabTitleActive.ForegroundRGB)
+			}
+			if tt.name == "each title escalates independently from slot 4 to slot 12" {
+				require.Equal(t, Blend(theme.Foreground, theme.Palette[12], titleHueBlend), styles.TabTitle.ForegroundRGB)
+				require.Equal(t, Blend(theme.Foreground, theme.Palette[4], titleHueBlend), styles.TabTitleActive.ForegroundRGB)
+			}
+		})
+	}
+}
+
+func TestPaletteIndexedForegroundFallback(t *testing.T) {
+	base := Theme{UsePalette: true, SchemeKnown: true, Known: true}
+
+	tests := []struct {
+		name  string
+		theme Theme
+		want  int
+		ok    bool
+	}{
+		{name: "dark scheme uses bright blue", theme: base, want: 12, ok: true},
+		{name: "light scheme uses blue", theme: func() Theme { t := base; t.Light = true; return t }(), want: 4, ok: true},
+		{name: "unknown scheme remains neutral", theme: Theme{UsePalette: true, Known: true}},
+		{name: "known RGB blue that cannot be evaluated remains neutral", theme: Theme{UsePalette: true, SchemeKnown: true, PaletteKnown: 1 << 4}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			styles := NewStyles(tt.theme)
+			baselineTheme := tt.theme
+			baselineTheme.UsePalette = false
+			baseline := NewStyles(baselineTheme)
+			for name, style := range map[string]renderer.Style{
+				"title":        styles.TabTitle,
+				"active title": styles.TabTitleActive,
+				"border":       styles.Border,
+				"muted text":   styles.PaletteDesc,
+			} {
+				require.False(t, style.HasBackgroundRGB, "%s must never receive an indexed background", name)
+				if tt.ok {
+					require.False(t, style.HasForegroundRGB, "%s must use an indexed foreground", name)
+					require.Equal(t, tt.want, style.Foreground, name)
+				} else {
+					want := map[string]renderer.Style{
+						"title": baseline.TabTitle, "active title": baseline.TabTitleActive,
+						"border": baseline.Border, "muted text": baseline.PaletteDesc,
+					}[name]
+					require.Equal(t, want, style, name)
+				}
+			}
+		})
+	}
+}
+
+func TestPaletteMissingRGBUsesOnlyIndexedTitleForeground(t *testing.T) {
+	theme := Theme{
+		Foreground: renderer.RGB{R: 240, G: 240, B: 240},
+		Background: renderer.RGB{R: 30, G: 30, B: 30},
+		HasFG:      true, HasBG: true, Known: true, TrueColor: true,
+		UsePalette: true, SchemeKnown: true,
+	}
+	styles := NewStyles(theme)
+	for name, style := range map[string]renderer.Style{
+		"title": styles.TabTitle, "active title": styles.TabTitleActive,
+		"border": styles.Border, "muted text": styles.PaletteDesc,
+	} {
+		require.False(t, style.HasForegroundRGB, "%s must use an indexed foreground", name)
+		require.Equal(t, ansiBrightBlue, style.Foreground, name)
+		require.Equal(t, -1, style.Background, "%s must not use an indexed background", name)
+	}
+}
+
+func TestPaletteDisabledAndForcedModesPreserveExistingStyles(t *testing.T) {
+	palette := [16]renderer.RGB{4: {B: 255}, 12: {R: 255, G: 255, B: 255}}
+	usableTheme := Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 100, G: 100, B: 100}, HasFG: true, HasBG: true, Known: true, TrueColor: true}
+	withDisabledPalette := usableTheme
+	withDisabledPalette.Palette = palette
+	withDisabledPalette.PaletteKnown = 1<<4 | 1<<12
+	withDisabledPalette.UsePalette = false
+
+	require.Equal(t, NewStyles(usableTheme), NewStyles(withDisabledPalette))
+
+	forced := Theme{Known: true, SchemeKnown: true, UsePalette: false}
+	require.Equal(t, NewStyles(Theme{Known: true}), NewStyles(forced))
+}
+
 func TestNewStylesComposesSemanticStyles(t *testing.T) {
 	theme := Theme{
 		Foreground: renderer.RGB{R: 0xc8, G: 0xc8, B: 0xc8},

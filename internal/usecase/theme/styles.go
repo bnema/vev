@@ -92,12 +92,12 @@ func NewStyles(t Theme) Styles {
 
 		TabName:        EmphasisStyle(statusBar, t),
 		TabNameActive:  EmphasisStyle(accent, t),
-		TabTitle:       MutedVariantStyle(statusBar, t),
-		TabTitleActive: MutedVariantStyle(accent, t),
+		TabTitle:       PaletteMutedVariantStyle(statusBar, t),
+		TabTitleActive: PaletteMutedVariantStyle(accent, t),
 
 		PickerName:           EmphasisStyle(renderer.DefaultStyle(), t),
 		PickerSelectionName:  EmphasisStyle(selection, t),
-		PickerSelectionMuted: MutedVariantStyle(selection, t),
+		PickerSelectionMuted: PaletteMutedVariantStyle(selection, t),
 		PickerSeparator:      MutedTextStyle(t),
 	}
 }
