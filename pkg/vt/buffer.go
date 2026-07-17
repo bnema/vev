@@ -76,8 +76,14 @@ func (b *buffer) clear(y, x0, x1 int) {
 		return
 	}
 	b.content(y, x1)
+	if x1 >= b.frame.Width {
+		// Erasing through the right edge leaves nothing flowing onto the next
+		// row: the logical line ends here. Keeping a stale soft link would let
+		// reflow merge a repainted row with the unrelated row below it.
+		b.boundaries[y].soft = false
+	}
 	if x0 == 0 && x1 >= b.frame.Width {
-		b.boundaries[y] = lineBoundary{soft: b.boundaries[y].soft}
+		b.boundaries[y] = lineBoundary{}
 	}
 }
 
