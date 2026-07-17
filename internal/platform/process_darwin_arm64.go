@@ -70,14 +70,15 @@ func (p *ProcessInspector) processRecords() ([]processRecord, error) {
 
 // ProcessCwd returns the current working directory from proc_pidinfo.
 func ProcessCwd(pid int) (string, error) {
-	if pid <= 0 {
+	pid32, ok := darwinPID(pid)
+	if !ok {
 		return "", fmt.Errorf("process cwd: invalid pid %d", pid)
 	}
 	var info procVnodePathInfo
 	n, _, errno := syscall.Syscall6(
 		syscall.SYS_PROC_INFO,
 		procInfoCallPIDInfo,
-		uintptr(pid),
+		uintptr(pid32),
 		procPIDVnodePathInfo,
 		0,
 		uintptr(unsafe.Pointer(&info)),

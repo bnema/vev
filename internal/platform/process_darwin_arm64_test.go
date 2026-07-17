@@ -73,26 +73,38 @@ func TestDarwinProcessInspectorCurrentProcess(t *testing.T) {
 		t.Fatalf("Argv(%d) = %#v; want argv[0] %q", pid, argv, os.Args[0])
 	}
 
-	cmd := exec.Command("/bin/sleep", "5")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
+	stdinReader, stdinWriter, err := os.Pipe()
+	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
+	cmd := exec.Command("/bin/cat")
+	cmd.Stdin = stdinReader
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		_ = stdinReader.Close()
+		_ = stdinWriter.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = stdinReader.Close()
+		_ = stdinWriter.Close()
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-	}()
+	})
 	groupArgv, err := inspector.GroupArgv(cmd.Process.Pid, -1)
 	if err != nil {
 		t.Fatalf("GroupArgv(child group): %v", err)
 	}
-	if len(groupArgv) != 2 || groupArgv[0] != "/bin/sleep" || groupArgv[1] != "5" {
-		t.Fatalf("GroupArgv(child group) = %#v; want [/bin/sleep 5]", groupArgv)
+	if len(groupArgv) != 1 || groupArgv[0] != "/bin/cat" {
+		t.Fatalf("GroupArgv(child group) = %#v; want [/bin/cat]", groupArgv)
 	}
 }
 
 func TestDarwinPIDRejectsUnrepresentableValues(t *testing.T) {
 	for _, pid := range []int{0, -1, maxDarwinPID + 1} {
+		if _, err := ProcessCwd(pid); err == nil {
+			t.Errorf("ProcessCwd(%d) succeeded; want invalid PID error", pid)
+		}
 		if _, err := ProcessComm(pid); err == nil {
 			t.Errorf("ProcessComm(%d) succeeded; want invalid PID error", pid)
 		}
