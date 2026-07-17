@@ -52,11 +52,11 @@ changelog:
   use: github
   filters:
     exclude:
-      - '^docs:'
-      - '^test:'
-      - '^ci:'
-      - '^chore:'
-      - '^build\(deps\):'
+      - '^docs(\(.+\))?:'
+      - '^test(\(.+\))?:'
+      - '^ci(\(.+\))?:'
+      - '^chore(\(.+\))?:'
+      - '^build\(deps.*\):'
       - Merge pull request
       - Merge branch
   groups:
@@ -91,7 +91,7 @@ release:
 
     ### Script (Linux x86_64, macOS arm64)
     ```sh
-    curl -fsSL https://raw.githubusercontent.com/bnema/vev/main/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/bnema/vev/{{ .Tag }}/install.sh | sh
     ```
 
     ### Arch Linux
@@ -109,7 +109,11 @@ release:
     xattr -d com.apple.quarantine ~/.local/bin/vev
     ```
 
+    {{- if .PreviousTag }}
     **Full Changelog**: https://github.com/bnema/vev/compare/{{ .PreviousTag }}...{{ .Tag }}
+    {{- else }}
+    **Full Changelog**: https://github.com/bnema/vev/releases/tag/{{ .Tag }}
+    {{- end }}
 
 git:
   tag_sort: smartsemver

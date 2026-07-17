@@ -4,11 +4,13 @@ on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: write
+# Default to no token permissions; release alone needs GitHub Release writes.
+permissions: {}
 
 jobs:
   release:
+    permissions:
+      contents: write
     # Pinned by SHA deliberately: this workflow receives the AUR key.
     # Bump the pin manually when bnema/gh-actions changes.
     uses: bnema/gh-actions/.github/workflows/go-release.yml@fcda8139e65ec45af95bc385e318351c86712d48

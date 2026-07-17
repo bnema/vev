@@ -17,10 +17,8 @@ func TestVersionDefaults(t *testing.T) {
 }
 
 func TestVersionLine(t *testing.T) {
-	got := versionLine()
-	for _, part := range []string{version, commit, date} {
-		if !strings.Contains(got, part) {
-			t.Fatalf("versionLine() = %q, missing %q", got, part)
-		}
+	want := "vev " + version + " (commit " + commit + ", built " + date + ")"
+	if got := versionLine(); got != want {
+		t.Fatalf("versionLine() = %q, want %q", got, want)
 	}
 }

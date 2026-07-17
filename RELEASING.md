@@ -11,8 +11,16 @@ AUR for `-rc.*`/`-alpha.*` prerelease tags).
 1. main is green on both CI legs (ubuntu, macos-14).
 2. Tag and push. Watch: `gh run watch`.
 3. Verify the release page: two archives + `checksums.txt` + grouped changelog.
-4. `curl -fsSL https://raw.githubusercontent.com/bnema/vev/main/install.sh | sh`
-   on a Linux box; confirm `vev --version` prints the tag.
+4. On Linux amd64, download the installer from the exact tag, inspect it,
+   then run it for that same version:
+   ```sh
+   installer=$(mktemp)
+   curl -fsSL https://raw.githubusercontent.com/bnema/vev/v0.X.Y/install.sh -o "$installer"
+   less "$installer"
+   VEV_VERSION=v0.X.Y sh "$installer"
+   rm -f "$installer"
+   ```
+   Confirm `vev --version` prints the exact tag.
 5. Stable tags only: confirm https://aur.archlinux.org/packages/vev-bin
    picked up the new version.
 
@@ -22,11 +30,12 @@ Do **not** delete or re-push the tag. The GitHub release is the source of truth;
 only the PKGBUILD push failed (usually SSH/key). Fix the cause, then either:
 
 - Re-run the failed workflow job (`gh run rerun <run-id> --failed`), which
-  re-executes goreleaser idempotently (`replace_existing_draft`, same tag), or
-- Push the PKGBUILD by hand: `goreleaser release --clean --skip=validate`
-  locally with `AUR_KEY` exported, or clone
-  `ssh://aur@aur.archlinux.org/vev-bin.git` and commit the PKGBUILD generated
-  under `dist/`.
+  re-executes goreleaser idempotently for the same tag, or
+- For manual recovery, clone
+  `ssh://aur@aur.archlinux.org/vev-bin.git`, update its existing PKGBUILD for
+  the exact tag using that GitHub Release's `checksums.txt`, and regenerate
+  `.SRCINFO` with `makepkg --printsrcinfo > .SRCINFO`. Review the diff, then
+  commit and push only the AUR repository.
 
 ## If AUR publishes but GitHub fails
 
