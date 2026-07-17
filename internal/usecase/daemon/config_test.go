@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -123,10 +124,26 @@ func TestEffectiveThemePaletteGate(t *testing.T) {
 			want: themeui.BuiltinDark,
 		},
 		{
+			name: "forced dark ignores disabled palette inheritance",
+			config: domain.Config{
+				Theme:        domain.ThemeDark,
+				ThemePalette: false,
+			},
+			want: themeui.BuiltinDark,
+		},
+		{
 			name: "forced light uses palette free builtin",
 			config: domain.Config{
 				Theme:        domain.ThemeLight,
 				ThemePalette: true,
+			},
+			want: themeui.BuiltinLight,
+		},
+		{
+			name: "forced light ignores disabled palette inheritance",
+			config: domain.Config{
+				Theme:        domain.ThemeLight,
+				ThemePalette: false,
 			},
 			want: themeui.BuiltinLight,
 		},
@@ -142,6 +159,79 @@ func TestEffectiveThemePaletteGate(t *testing.T) {
 			want.UsePalette = tt.usePalette
 			require.Equal(t, want, got)
 		})
+	}
+}
+
+func TestThemeConfigSnapshotIsAtomic(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+
+	// A nil atomic pointer is the zero/default snapshot: auto theme with
+	// terminal palette inheritance enabled.
+	require.Equal(t, themeConfigSnapshot{}, d.currentThemeConfig())
+
+	for _, tt := range []struct {
+		name string
+		mode domain.ThemeMode
+		gate bool
+	}{
+		{name: "auto palette enabled", mode: domain.ThemeAuto, gate: true},
+		{name: "auto palette disabled", mode: domain.ThemeAuto, gate: false},
+		{name: "dark palette enabled", mode: domain.ThemeDark, gate: true},
+		{name: "dark palette disabled", mode: domain.ThemeDark, gate: false},
+		{name: "light palette enabled", mode: domain.ThemeLight, gate: true},
+		{name: "light palette disabled", mode: domain.ThemeLight, gate: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d.storeThemeConfig(domain.Config{Theme: tt.mode, ThemePalette: tt.gate})
+			require.Equal(t, themeConfigSnapshot{mode: tt.mode, paletteOff: !tt.gate}, d.currentThemeConfig())
+		})
+	}
+
+	// Publish complementary configurations concurrently. Every load must be a
+	// complete published snapshot, never mode from one update and gate from
+	// another. Coordination establishes concurrent readers/writers without
+	// timing sleeps.
+	first := domain.Config{Theme: domain.ThemeAuto, ThemePalette: false}
+	second := domain.Config{Theme: domain.ThemeDark, ThemePalette: true}
+	allowed := map[themeConfigSnapshot]struct{}{
+		{mode: domain.ThemeAuto, paletteOff: true}:  {},
+		{mode: domain.ThemeDark, paletteOff: false}: {},
+	}
+	ready := make(chan struct{})
+	readerStarted := make(chan struct{})
+	invalid := make(chan themeConfigSnapshot, 1)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		d.storeThemeConfig(first)
+		close(ready)
+		<-readerStarted
+		for range 10_000 {
+			d.storeThemeConfig(second)
+			d.storeThemeConfig(first)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-ready
+		close(readerStarted)
+		for range 20_000 {
+			snapshot := d.currentThemeConfig()
+			if _, ok := allowed[snapshot]; !ok {
+				select {
+				case invalid <- snapshot:
+				default:
+				}
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	select {
+	case snapshot := <-invalid:
+		t.Fatalf("observed mixed theme configuration: %#v", snapshot)
+	default:
 	}
 }
 
