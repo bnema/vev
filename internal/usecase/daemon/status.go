@@ -41,14 +41,7 @@ func pulseStyle(frame int, base renderer.Style) (renderer.Style, bool) {
 		distance = -distance
 	}
 	intensity := 1 - float64(distance)/float64(peak)
-	style := base
-	style.Bold = true
-	if base.HasForegroundRGB && base.HasBackgroundRGB {
-		style.ForegroundRGB = themeui.Blend(base.BackgroundRGB, base.ForegroundRGB, intensity)
-	} else {
-		style.Foreground = 244 + int(intensity*11)
-	}
-	return style, true
+	return themeui.PulseColor(base, intensity), true
 }
 
 func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, topRight string, styles themeui.Styles) {
@@ -434,13 +427,7 @@ func mruFutureRightReserve(rowLen int) int {
 }
 
 func mruStyle(base renderer.Style, t themeui.Theme, i, count int) renderer.Style {
-	if count <= 1 || !base.HasForegroundRGB || !base.HasBackgroundRGB || !t.HasBG {
-		return base
-	}
-	amount := (float64(i) / float64(count-1)) * 0.6
-	base.ForegroundRGB = themeui.Blend(base.ForegroundRGB, t.Background, amount)
-	base.BackgroundRGB = themeui.Blend(base.BackgroundRGB, t.Background, amount)
-	return base
+	return themeui.MRUFade(base, t, i, count)
 }
 
 // writeBell draws the attention glyph on its visible beat, or a plain cell in
