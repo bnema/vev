@@ -1048,11 +1048,11 @@ func TestRunDoesNotRetryTerminalDetachedError(t *testing.T) {
 	require.Equal(t, int32(1), term.restoreCount.Load())
 }
 
-func TestAttachSchemeRequeryUsesSentinelToDiscardSplitStalePalette(t *testing.T) {
+func TestAttachSchemeRequeryCorrelatesSplitBoundaryAndDiscardsStalePalette(t *testing.T) {
 	input := newChunkedBlockingReader(
-		[]byte("a\x1b]4;1;#112233\a\x1b[?997;2n\x1b]4;2;#44"),
-		[]byte("5566\ab\x1b["),
-		[]byte("0nc\x1b]4;3;#778899\ad"),
+		[]byte("a\x1b]4;1;#112233\a\x1b[?997;2n"),
+		[]byte("\x1b[0n\x1b]4;2;#445566\ab\x1b[?2031;"),
+		[]byte("2$yc\x1b]4;3;#778899\ad"),
 	)
 	defer input.unblock()
 
@@ -1107,7 +1107,7 @@ func TestAttachSchemeRequeryUsesSentinelToDiscardSplitStalePalette(t *testing.T)
 	tr.EXPECT().Close().Return(nil).Once()
 
 	require.NoError(t, runTestClient(context.Background(), attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentEphemeral}))
-	require.Equal(t, "\x1b[5n", out.String(), "the DSR sentinel must be the only main-loop terminal write")
+	require.Equal(t, "\x1b[?2031$p", out.String(), "the correlated boundary query must be the only main-loop terminal write")
 	require.Equal(t, int32(1), restoreCount.Load())
 
 	cleared := <-themes
@@ -1115,10 +1115,10 @@ func TestAttachSchemeRequeryUsesSentinelToDiscardSplitStalePalette(t *testing.T)
 	require.True(t, cleared.SchemeKnown)
 	require.True(t, cleared.Light)
 	require.Zero(t, cleared.PaletteKnown, "only the cleared scheme snapshot may cross the boundary")
-	require.Equal(t, uint16(1<<3), fresh.PaletteKnown, "only colors after the sentinel and replacement query are accepted")
+	require.Equal(t, uint16(1<<3), fresh.PaletteKnown, "only colors after the boundary response and replacement query are accepted")
 	require.Zero(t, fresh.PaletteKnown&(1<<1|1<<2), "pre-boundary palette slots must not leak into the new generation")
 	inputMu.Lock()
-	require.Equal(t, []byte("abcd"), inputBytes, "ordinary input around split stale and sentinel responses must survive")
+	require.Equal(t, []byte("a\x1b[0nbcd"), inputBytes, "the old status response and ordinary input around the boundary must survive")
 	inputMu.Unlock()
 }
 
@@ -1129,7 +1129,7 @@ func TestAttachSchemeRequeryClearsStalePalette(t *testing.T) {
 	input := newChunkedBlockingReader(
 		[]byte("\x1b]11;#010203\a\x1b]4;1;#112233\a\x1b]4;14;#778899\a"),
 		[]byte("\x1b[?997;2n"),
-		[]byte("\x1b[0n"),
+		[]byte("\x1b[?2031;1$y"),
 	)
 	defer input.unblock()
 
@@ -1190,7 +1190,7 @@ func TestAttachSchemeRequeryClearsStalePalette(t *testing.T) {
 	require.Len(t, themes, 2, "the old palette snapshot and one cleared scheme snapshot are sent")
 	require.Equal(t, uint16(1<<1|1<<14), themes[0].PaletteKnown)
 	require.True(t, themes[0].HasBackground)
-	require.Zero(t, themes[1].PaletteKnown, "the DSR-delimited re-query must invalidate stale palette entries")
+	require.Zero(t, themes[1].PaletteKnown, "the correlated boundary re-query must invalidate stale palette entries")
 	require.Equal(t, themes[0].Background, themes[1].Background)
 	require.True(t, themes[1].SchemeKnown)
 	require.True(t, themes[1].Light)

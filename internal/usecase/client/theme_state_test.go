@@ -187,7 +187,7 @@ func (r *chunksReader) Read(p []byte) (int, error) {
 	return copy(p, chunk), nil
 }
 
-func TestStdinPumpDefersRepeatedSchemeChunksUntilSentinel(t *testing.T) {
+func TestStdinPumpDefersRepeatedSchemeChunksUntilBoundary(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	requests := 0
@@ -208,7 +208,40 @@ func TestStdinPumpDefersRepeatedSchemeChunksUntilSentinel(t *testing.T) {
 	}
 
 	pump.run()
-	require.Equal(t, 1, requests, "a later scheme response is drained until the first sentinel arrives")
+	require.Equal(t, 1, requests, "a later scheme response is drained until the boundary response arrives")
+}
+
+func TestPaletteDrainConsumesOnlyPrivateModeBoundaryResponses(t *testing.T) {
+	for _, status := range []byte{'0', '1', '2', '3', '4'} {
+		t.Run(string(status), func(t *testing.T) {
+			response := []byte("\x1b[?2031;" + string(status) + "$y")
+			var got []byte
+			boundaries := 0
+			drain := paletteDrain{}
+			drain.scan(append([]byte("x"), response[:len(response)-2]...), func(data []byte) {
+				got = append(got, data...)
+			}, func() { boundaries++ })
+			drain.scan(append(response[len(response)-2:], 'y'), func(data []byte) {
+				got = append(got, data...)
+			}, func() { boundaries++ })
+
+			require.Equal(t, []byte("xy"), got)
+			require.Equal(t, 1, boundaries)
+		})
+	}
+}
+
+func TestPaletteDrainForwardsNonmatchingAndPartialBytes(t *testing.T) {
+	var got []byte
+	boundaries := 0
+	drain := paletteDrain{}
+	emit := func(data []byte) { got = append(got, data...) }
+	drain.scan([]byte("\x1b[0n\x1b[?2031;5$y"), emit, func() { boundaries++ })
+	drain.scan([]byte("\x1b[?2031;"), emit, func() { boundaries++ })
+	drain.flush(emit)
+
+	require.Equal(t, []byte("\x1b[0n\x1b[?2031;5$y\x1b[?2031;"), got)
+	require.Zero(t, boundaries)
 }
 
 func TestStdinPumpQueryAcknowledgementCancellationDoesNotDeadlock(t *testing.T) {

@@ -8,7 +8,6 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -602,22 +601,23 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	ackQueue := newCumulativeAckQueue()
 	sendErrCh := make(chan error, 1)
 
-	// Palette re-queries use DSR (CSI 5 n) as an ordered sentinel. The stdin
-	// pump drains terminal replies through CSI 0 n before it permits the main
-	// loop to publish the cleared scheme and issue QueryColors. This separates
-	// bytes already queued (including Scanner.pending) from replacement replies
-	// without allowing a second goroutine to write to the terminal.
+	// Palette re-queries use a private-mode query as an ordered boundary. The
+	// stdin pump drains terminal replies through its mode-specific response
+	// before it permits the main loop to publish the cleared scheme and issue
+	// QueryColors. This separates bytes already queued (including
+	// Scanner.pending) from replacement replies without allowing a second
+	// goroutine to write to the terminal.
 	colorQueryCh := make(chan colorQueryRequest)
 	paletteReadyCh := make(chan paletteQueryReady)
 	requestColors := func() (colorQueryRequest, bool) {
-		request := colorQueryRequest{sentinelWritten: make(chan struct{})}
+		request := colorQueryRequest{boundaryWritten: make(chan struct{})}
 		select {
 		case colorQueryCh <- request:
 		case <-loopCtx.Done():
 			return colorQueryRequest{}, false
 		}
 		select {
-		case <-request.sentinelWritten:
+		case <-request.boundaryWritten:
 			return request, true
 		case <-loopCtx.Done():
 			return colorQueryRequest{}, false
@@ -669,17 +669,18 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				return welcomedResult(errLinkOffline)
 			}
 		case request := <-colorQueryCh:
-			if _, err := term.Out().Write([]byte("\x1b[5n")); err != nil {
-				return welcomedResult(fmt.Errorf("vev: writing palette sentinel: %w", err))
+			if _, err := term.Out().Write(paletteBoundaryQuery); err != nil {
+				return welcomedResult(fmt.Errorf("vev: writing palette boundary query: %w", err))
 			}
 			if err := term.Flush(); err != nil {
-				return welcomedResult(fmt.Errorf("vev: flushing palette sentinel: %w", err))
+				return welcomedResult(fmt.Errorf("vev: flushing palette boundary query: %w", err))
 			}
-			close(request.sentinelWritten)
+			close(request.boundaryWritten)
 		case ready := <-paletteReadyCh:
-			// CSI 0 n proves all earlier replies have been discarded by stdin.
-			// Publish the one cleared scheme snapshot before emitting the query;
-			// stdin remains paused until QueryColors has completed below.
+			// The private-mode response proves all earlier replies have been
+			// discarded by stdin. Publish the one cleared scheme snapshot before
+			// emitting the query; stdin remains paused until QueryColors has
+			// completed below.
 			clearedTheme := themeState.snapshot()
 			select {
 			case sendCh <- ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(clearedTheme)}:
@@ -848,7 +849,7 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 // terminal — and matches the standard pattern for stdin pumps; a
 // closable stdin duplicate could lift it later if ever needed.
 type colorQueryRequest struct {
-	sentinelWritten chan struct{}
+	boundaryWritten chan struct{}
 }
 
 type paletteQueryReady struct {
@@ -868,21 +869,59 @@ const (
 	paletteAwaitingQuery
 )
 
-var paletteSentinel = []byte("\x1b[0n")
+var paletteBoundaryQuery = []byte("\x1b[?2031$p")
 
-// scan consumes the DSR response while forwarding every other byte in order.
-// It retains only a possible sentinel prefix, so a split CSI 0 n is consumed
-// without dropping a user's partial escape sequence on cancellation.
-func (d *paletteDrain) scan(data []byte, onBytes func([]byte), onSentinel func()) {
+// paletteBoundaryResponses accepts valid DECRQM status values for private
+// mode 2031. The private mode number correlates this reply with the query
+// that starts a replacement palette generation.
+var paletteBoundaryResponses = [][]byte{
+	[]byte("\x1b[?2031;0$y"),
+	[]byte("\x1b[?2031;1$y"),
+	[]byte("\x1b[?2031;2$y"),
+	[]byte("\x1b[?2031;3$y"),
+	[]byte("\x1b[?2031;4$y"),
+}
+
+// scan consumes the private-mode boundary response while forwarding every
+// other byte in order. It retains only a possible response prefix, so split
+// replies are consumed without dropping a user's partial escape sequence on
+// cancellation.
+func (d *paletteDrain) scan(data []byte, onBytes func([]byte), onBoundary func()) {
 	for _, b := range data {
 		d.pending = append(d.pending, b)
-		for len(d.pending) > 0 && !bytes.HasPrefix(paletteSentinel, d.pending) {
+		for len(d.pending) > 0 {
+			matched := false
+			possible := false
+			for _, response := range paletteBoundaryResponses {
+				if len(d.pending) > len(response) {
+					continue
+				}
+				match := true
+				for i := range d.pending {
+					if d.pending[i] != response[i] {
+						match = false
+						break
+					}
+				}
+				if !match {
+					continue
+				}
+				if len(d.pending) == len(response) {
+					matched = true
+				} else {
+					possible = true
+				}
+			}
+			if matched {
+				d.pending = nil
+				onBoundary()
+				break
+			}
+			if possible {
+				break
+			}
 			onBytes(d.pending[:1])
 			d.pending = d.pending[1:]
-		}
-		if bytes.Equal(d.pending, paletteSentinel) {
-			d.pending = nil
-			onSentinel()
 		}
 	}
 }
