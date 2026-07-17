@@ -3,8 +3,10 @@
 vev reads `~/.config/vev/config` (`$XDG_CONFIG_HOME` respected). No file means defaults. The daemon picks up changes within a couple of seconds; no restart needed.
 
 ```text
-# Theme: auto follows the client; dark/light force built-in palettes.
+# Theme: auto follows the client; dark/light use neutral built-in defaults.
 theme = auto
+# In auto mode, inherit the terminal's ANSI blue for chrome accents.
+theme.palette = on
 
 # Palette placement: auto, center, top-left, top, top-right, left, right,
 # bottom-left, bottom, or bottom-right.
@@ -65,6 +67,10 @@ code.detach = DET
 ```
 
 Invalid values log a warning and keep the last valid value.
+
+## Theme
+
+With `theme = auto`, vev follows the terminal's foreground, background, light/dark scheme, and ANSI palette as the terminal reports changes. `theme.palette = on` is the default and uses the terminal's blue for chrome accents when available; vev falls back to neutral foreground/background blends when the color is unavailable or lacks contrast. Set it to `off` for blend-only styling. Forced `theme = dark` or `theme = light` modes are always blend-only.
 
 ## Bindings
 
