@@ -134,6 +134,48 @@ func TestCLIProcessCloseIsBoundedWhenPublicRoleDoesNotExit(t *testing.T) {
 	}
 }
 
+func TestCLIProcessCloseSIGTERMStopIsGraceful(t *testing.T) {
+	// A role reaped during the SIGTERM wait stopped gracefully: no SIGKILL, and
+	// Close must not report an error for a stage that can still flush a trace.
+	waitErr := make(chan error, 1)
+	never := make(chan time.Time)
+	var term, kill int
+	p := &cliProcess{
+		waitErr:      waitErr,
+		waitTimeout:  func() <-chan time.Time { return never },
+		forceCleanup: func() { term++; waitErr <- nil },
+		forceKill:    func() { kill++ },
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("graceful SIGTERM stop returned error: %v", err)
+	}
+	if term != 1 || kill != 0 {
+		t.Fatalf("TERM/KILL calls = %d/%d, want 1/0", term, kill)
+	}
+}
+
+func TestCLIProcessCloseErrorsAfterKillEscalation(t *testing.T) {
+	// A role that only dies to SIGKILL may have truncated its trace, so Close must
+	// surface a named escalation error rather than a silent success.
+	waitErr := make(chan error, 1)
+	deadline := make(chan time.Time, 1)
+	deadline <- time.Now() // one ready deadline releases the SIGTERM wait
+	var term, kill int
+	p := &cliProcess{
+		waitErr:      waitErr,
+		waitTimeout:  func() <-chan time.Time { return deadline },
+		forceCleanup: func() { term++ },
+		forceKill:    func() { kill++; waitErr <- nil },
+	}
+	err := p.Close()
+	if err == nil || !strings.Contains(err.Error(), "killed") {
+		t.Fatalf("kill escalation error = %v, want a named killed escalation", err)
+	}
+	if term != 1 || kill != 1 {
+		t.Fatalf("TERM/KILL calls = %d/%d, want 1/1", term, kill)
+	}
+}
+
 func TestCLIProcessWaitReadyRequiresDaemonSocket(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "daemon.sock")
 	var lc net.ListenConfig
