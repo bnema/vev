@@ -2,12 +2,7 @@
 
 *Norwegian: to weave*
 
-A terminal multiplexer for Linux and macOS on Apple silicon (arm64). One Go binary, a per-user daemon, a thin client.
-
-> [!WARNING]
-> Alpha software. Expect breaking changes.
-
-Pre-built releases are available for Linux x86_64, Linux arm64, and macOS on Apple silicon (arm64). CI tests on Ubuntu x86_64 and macOS arm64; it also verifies cross-compilation for Linux arm64 and macOS arm64. Linux arm64 is not tested on native ARM hardware.
+A terminal multiplexer for Linux and macOS (arm64). One Go binary, a per-user daemon, a thin client.
 
 What it is built around:
 
