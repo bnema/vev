@@ -408,7 +408,7 @@ func TestStatusCompositionUsesTruecolorTheme(t *testing.T) {
 	win := sess.activeTab()
 	win.focusedPane().screen.Resize(12, 2)
 	win.size = domain.Size{Cols: 12, Rows: 2}
-	ac.setTheme(themeui.Theme{
+	ac.setThemeForTest(themeui.Theme{
 		Foreground: renderer.RGB{R: 220, G: 220, B: 220},
 		Background: renderer.RGB{R: 10, G: 20, B: 30},
 		HasFG:      true,
@@ -438,9 +438,9 @@ func TestStatusApplyThemeStoresClientAndPropagatesScreens(t *testing.T) {
 
 	d.applyTheme(sess, ac, msg)
 
-	require.Equal(t, renderer.RGB{R: 1, G: 2, B: 3}, ac.getTheme().Foreground)
-	require.True(t, ac.getTheme().SchemeKnown)
-	require.True(t, ac.getTheme().Light)
+	require.Equal(t, renderer.RGB{R: 1, G: 2, B: 3}, ac.getAppliedTheme().Raw.Foreground)
+	require.True(t, ac.getAppliedTheme().Raw.SchemeKnown)
+	require.True(t, ac.getAppliedTheme().Raw.Light)
 	assertSessionDefaultColors(t, sess, renderer.RGB{R: 1, G: 2, B: 3}, renderer.RGB{R: 4, G: 5, B: 6})
 	assertSessionColorScheme(t, sess, true)
 }
@@ -494,7 +494,7 @@ func TestApplyThemeForcedBuiltinThemePropagatesToChromeAndPanes(t *testing.T) {
 				TrueColor: true, SchemeKnown: true, Light: !tc.want.Light,
 			})
 
-			require.Equal(t, tc.want, ac.getTheme())
+			require.Equal(t, tc.want, ac.getAppliedTheme().Raw)
 			assertSessionDefaultColors(t, sess, tc.want.Foreground, tc.want.Background)
 			assertSessionColorScheme(t, sess, tc.want.Light)
 		})
@@ -530,7 +530,7 @@ func TestAttachClientAppliesForcedThemeBeforeMsgTheme(t *testing.T) {
 
 			ac, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 
-			require.Equal(t, tc.want, ac.getTheme())
+			require.Equal(t, tc.want, ac.getAppliedTheme().Raw)
 			assertSessionDefaultColors(t, sess, tc.want.Foreground, tc.want.Background)
 			assertSessionColorScheme(t, sess, tc.want.Light)
 		})

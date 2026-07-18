@@ -57,7 +57,6 @@ type attachedClient struct {
 	sess          Guarded[*session]
 	mouseScan     mouse.Scanner
 	themeMu       sync.Mutex
-	theme         themeui.Theme // compatibility mirror of applied.Raw
 	clientTheme   themeui.Theme
 	appliedTheme  appliedTheme
 	lastCursor    cursorOut
@@ -147,19 +146,16 @@ func (ac *attachedClient) clearCaptureFrames() {
 	ac.sendMu.Unlock()
 }
 
-func (ac *attachedClient) getTheme() themeui.Theme {
-	return ac.getAppliedTheme().Raw
-}
-
 func (ac *attachedClient) getAppliedTheme() appliedTheme {
 	ac.themeMu.Lock()
 	defer ac.themeMu.Unlock()
-	if ac.appliedTheme.Generation == 0 {
+	applied := ac.appliedTheme
+	if applied.Generation == 0 {
 		// An unattached client has no terminal report yet. Reuse the static
 		// neutral cache rather than resolving from a render path.
-		return appliedTheme{Raw: ac.theme, Resolved: themeui.ResolvedTheme{Theme: ac.theme, Styles: fallbackChromeStyles}}
+		applied.Resolved = themeui.ResolvedTheme{Theme: applied.Raw, Styles: fallbackChromeStyles}
 	}
-	return ac.appliedTheme
+	return applied
 }
 
 func (ac *attachedClient) getClientTheme() themeui.Theme {
@@ -168,9 +164,10 @@ func (ac *attachedClient) getClientTheme() themeui.Theme {
 	return ac.clientTheme
 }
 
-func (ac *attachedClient) setTheme(t themeui.Theme) {
-	// Test and legacy setup paths have no daemon policy context. Keep their
-	// neutral automatic behavior while publishing a complete immutable value.
+// setThemeForTest publishes a complete applied snapshot for tests that do
+// not exercise daemon configuration. Production theme changes use
+// applyHostThemeLocked, which supplies the active policy.
+func (ac *attachedClient) setThemeForTest(t themeui.Theme) {
 	ac.setAppliedTheme(appliedTheme{Raw: t, Resolved: themeui.Resolve(t, domain.ThemeAccent{Mode: domain.ThemeAccentAuto})})
 }
 
@@ -178,7 +175,6 @@ func (ac *attachedClient) setAppliedTheme(next appliedTheme) {
 	ac.themeMu.Lock()
 	next.Generation = ac.appliedTheme.Generation + 1
 	ac.appliedTheme = next
-	ac.theme = next.Raw
 	ac.themeMu.Unlock()
 }
 
