@@ -53,7 +53,7 @@ func TestDiagnosticSnapshotSeparatesProgressAges(t *testing.T) {
 
 func TestDiagnosticSnapshotIsLockConsistentDuringConcurrentUpdate(t *testing.T) {
 	now := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
-	clock := &snapshotClock{now: now, sampled: make(chan struct{}), release: make(chan struct{})}
+	clock := &snapshotClock{now: now, sampled: make(chan struct{}, 1), release: make(chan struct{})}
 	tr := &Transport{
 		clock:                   clock,
 		lastAuthenticatedPacket: now.Add(-time.Second),

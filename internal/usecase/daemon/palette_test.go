@@ -385,12 +385,17 @@ func TestPaletteJRSDisplacedTargetKeepsInteractionOpen(t *testing.T) {
 	}
 	d.handleInput(sess, ac, []byte("\x1b "))
 	awaitFrame(t, sends, ports.MsgOutput)
-	go d.handleInput(sess, ac, []byte("JRS 1\r"))
+	handleDone := make(chan struct{})
+	go func() {
+		d.handleInput(sess, ac, []byte("JRS 1\r"))
+		close(handleDone)
+	}()
 	<-validated
 	d.mu.Lock()
 	delete(d.sessions, target.id)
 	d.mu.Unlock()
 	close(releaseHandoff)
+	<-handleDone
 
 	awaitFrame(t, sends, ports.MsgOutput)
 	require.True(t, ac.overlays.paletteActive())
