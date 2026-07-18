@@ -5,8 +5,10 @@ vev reads `~/.config/vev/config` (`$XDG_CONFIG_HOME` respected). No file means d
 ```text
 # Theme: auto follows the client; dark/light use neutral built-in defaults.
 theme = auto
-# In auto mode, inherit the terminal's ANSI blue for chrome accents.
+# In auto mode with palette inheritance enabled, infer a terminal accent.
 theme.palette = on
+# Accent policy: auto or one exact ANSI slot number from 0 through 15.
+theme.accent = auto
 
 # Palette placement: auto, center, top-left, top, top-right, left, right,
 # bottom-left, bottom, or bottom-right.
@@ -66,11 +68,15 @@ code.rename-tab = RNT
 code.detach = DET
 ```
 
-Invalid values log a warning and keep the last valid value.
+Invalid values log a warning and resolve that setting to its default on both initial load and reload.
 
 ## Theme
 
-With `theme = auto`, vev follows the terminal's foreground, background, light/dark scheme, and ANSI palette as the terminal reports changes. `theme.palette = on` is the default and uses the terminal's blue for chrome accents when available; vev falls back to neutral foreground/background blends when the color is unavailable or lacks contrast. Set it to `off` for blend-only styling. Forced `theme = dark` or `theme = light` modes are always blend-only.
+With `theme = auto`, vev follows the terminal's foreground, background, light/dark scheme, and ANSI palette as the terminal reports changes. `theme.palette = on` is the default. `theme.accent = auto` selects automatic terminal accent inference; `theme.accent = 0` through `theme.accent = 15` selects exactly that ANSI slot. Arbitrary RGB values and `off` are not accepted for `theme.accent`.
+
+Slots `0`, `7`, `8`, and `15` are valid explicit selections, but log a warning because conventional neutral slots may provide little or no accent separation. An invalid accent value logs a warning and falls back to `auto`, including on hot reload.
+
+`theme.palette = off` is authoritative: it keeps exact neutral foreground/background rendering and ignores `theme.accent`. Forced `theme = dark` or `theme = light` is also neutral and ignores both palette and accent policy.
 
 ## Bindings
 

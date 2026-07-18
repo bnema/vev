@@ -75,6 +75,12 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				continue
 			}
 			cfg.ThemePalette = on
+		case key == "theme.accent":
+			accent, warning := parseThemeAccent(value)
+			cfg.ThemeAccent = accent
+			if warning != "" {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: warning})
+			}
 		case key == "bar.top-right":
 			command, ok := parseBarCommand(value)
 			if !ok {
