@@ -13,10 +13,11 @@ import (
 type RenderStyles struct {
 	// Base fills unused modal interior cells; Row is the ordinary inactive
 	// result surface. They are separate to retain the chrome hierarchy.
-	Base        renderer.Style
-	Row         renderer.Style
-	Selection   renderer.Style
-	Description renderer.Style
+	Base                 renderer.Style
+	Row                  renderer.Style
+	Selection            renderer.Style
+	Description          renderer.Style
+	SelectionDescription renderer.Style
 }
 
 // RenderOptions contains presentation supplied by the daemon for one render.
@@ -57,8 +58,10 @@ func DefaultRenderStyles() RenderStyles {
 	selection.Inverse = true
 	description := renderer.DefaultStyle()
 	description.Italic = true
+	selectionDescription := selection
+	selectionDescription.Italic = true
 	base := renderer.DefaultStyle()
-	return RenderStyles{Base: base, Row: base, Selection: selection, Description: description}
+	return RenderStyles{Base: base, Row: base, Selection: selection, Description: description, SelectionDescription: selectionDescription}
 }
 
 func (m *Model) Insert(r rune) {
@@ -248,6 +251,10 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 		return frame
 	}
 	base, row, selection, desc := styles.Base, styles.Row, styles.Selection, styles.Description
+	selectionDesc := styles.SelectionDescription
+	if selectionDesc == (renderer.Style{}) {
+		selectionDesc = mergePaletteDescStyle(selection, desc)
+	}
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: base})
 	if m == nil {
 		ui.DrawInputLine(frame, 0, "> ", "", base, selection)
@@ -283,7 +290,7 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 		}
 		ui.FillRect(frame, domain.Rect{Y: y + start, Width: frame.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
 		if cmd, ok := match.Result.Command(); ok {
-			m.renderCommand(frame, y+start, style, selection, desc, codeWidth, cmd, match.Positions, activeCmd, activeOK, opts.Guidance, opts.Feedback, idx == m.selected)
+			m.renderCommand(frame, y+start, style, selection, desc, selectionDesc, codeWidth, cmd, match.Positions, activeCmd, activeOK, opts.Guidance, opts.Feedback, idx == m.selected)
 			continue
 		}
 		m.renderSession(frame, y+start, style, selection, match, opts.Feedback, idx == m.selected)
@@ -291,7 +298,7 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 	return frame
 }
 
-func (m *Model) renderCommand(frame renderer.Frame, y int, style, selection, desc renderer.Style, codeWidth int, cmd command.Command, positions []int, activeCmd command.Command, activeOK bool, guidance, feedback string, selected bool) {
+func (m *Model) renderCommand(frame renderer.Frame, y int, style, selection, desc, selectionDesc renderer.Style, codeWidth int, cmd command.Command, positions []int, activeCmd command.Command, activeOK bool, guidance, feedback string, selected bool) {
 	x, nextHighlight := 0, 0
 	for _, r := range cmd.Code {
 		cellStyle := style
@@ -316,7 +323,11 @@ func (m *Model) renderCommand(frame renderer.Frame, y int, style, selection, des
 	} else if guidance != "" && activeOK && cmd.ContextHint != command.ContextHintNone && activeCmd.Code == cmd.Code {
 		description = guidance
 	}
-	ui.DrawText(frame, x, y, frame.Width, description, mergePaletteDescStyle(style, desc))
+	descriptionStyle := mergePaletteDescStyle(style, desc)
+	if selected {
+		descriptionStyle = selectionDesc
+	}
+	ui.DrawText(frame, x, y, frame.Width, description, descriptionStyle)
 }
 
 func (m *Model) renderSession(frame renderer.Frame, y int, style, selection renderer.Style, match Match, feedback string, selected bool) {

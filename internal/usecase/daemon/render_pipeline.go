@@ -226,7 +226,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 			guidance = snap.paletteHints.Feedback
 		}
 		o.paletteGuidance = snap.paletteFeedback
-		o.palette.inner = snap.paletteModel.Render(rectSize(o.palette.modal.Inner(size)), palette.RenderOptions{Styles: palette.RenderStyles{Base: styles.PickerBase, Row: styles.SurfaceInactive, Selection: styles.PickerSelection, Description: styles.PickerDescription}, Guidance: guidance, Feedback: snap.paletteFeedback})
+		o.palette.inner = snap.paletteModel.Render(rectSize(o.palette.modal.Inner(size)), palette.RenderOptions{Styles: palette.RenderStyles{Base: styles.PickerBase, Row: styles.SurfaceInactive, Selection: styles.PickerSelection, Description: styles.PickerDescription, SelectionDescription: styles.PickerSelectionMuted}, Guidance: guidance, Feedback: snap.paletteFeedback})
 	}
 	if snap.promptActive && snap.promptModel != nil {
 		o.prompt.modal = promptModalFor(snap.promptModel.Title())
