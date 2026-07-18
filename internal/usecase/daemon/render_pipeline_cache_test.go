@@ -125,6 +125,30 @@ func TestComposeFrameCacheSkipsUndamagedBlitsAndInvalidatesFocusAndLayout(t *tes
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, out.damage)
 }
 
+func TestComposeFrameUsesCachedNeutralStructuralBorder(t *testing.T) {
+	theme := themeui.Theme{Known: true, TrueColor: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 220, G: 210, B: 200}, Background: renderer.RGB{R: 20, G: 30, B: 40}}
+	neutralBorder := renderer.Style{HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 170, G: 80, B: 30}}
+	expected := themeui.NewDimmer(theme).Dim(neutralBorder)
+
+	t.Run("divider", func(t *testing.T) {
+		state := cachedSplitState("horizontal-left", "left", layout.Horizontal, theme)
+		state.styles.NeutralBorder = neutralBorder
+
+		out := composeFrame(state, composeCacheInput{})
+		require.Equal(t, expected, out.frame.At(20, 1).Style)
+	})
+
+	t.Run("unfocused title", func(t *testing.T) {
+		state := cachedStackTitleState("collapsed", 1, true)
+		state.theme = theme
+		state.styles = themeui.Resolve(theme, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles
+		state.styles.NeutralBorder = neutralBorder
+
+		out := composeFrame(state, composeCacheInput{})
+		require.Equal(t, expected, out.frame.At(0, 1).Style)
+	})
+}
+
 func TestComposeFrameStackDrawsTitleBarsAndDimsCollapsed(t *testing.T) {
 	state := cachedStackTitleState("collapsed", 1, true)
 	state.theme = themeui.Theme{

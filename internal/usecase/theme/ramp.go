@@ -116,7 +116,7 @@ func mutedBorder(t Theme, accent, adjacent renderer.RGB) renderer.Style {
 			return foregroundStyle(candidate)
 		}
 	}
-	return neutralBorderStyle(t)
+	return neutralBorder(t)
 }
 
 // activeBorder starts at the accent endpoint and reduces only when needed.
@@ -127,7 +127,7 @@ func activeBorder(t Theme, accent, adjacent renderer.RGB) renderer.Style {
 			return foregroundStyle(candidate)
 		}
 	}
-	return neutralBorderStyle(t)
+	return neutralBorder(t)
 }
 
 func foregroundStyle(color renderer.RGB) renderer.Style {

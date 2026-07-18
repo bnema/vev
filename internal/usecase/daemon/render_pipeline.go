@@ -89,7 +89,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	}
 	state.styles = styles
 	defaultDimmer := themeui.NewDimmer(state.theme)
-	neutralBorder := themeui.NeutralBorderStyle(state.theme)
+	neutralBorder := styles.NeutralBorder
 	inactivePaneDimmer := themeui.NewDimmer(state.theme, themeui.WithForegroundDimming(inactivePaneForegroundDimming))
 	drawTopBarSnapshot(frame.Row(0), state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
 	drawStatusBarState(frame.Row(rows+1), state.bars, styles)

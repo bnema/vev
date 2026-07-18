@@ -72,6 +72,10 @@ type Styles struct {
 	SurfaceActive   renderer.Style
 	BorderMuted     renderer.Style
 	BorderActive    renderer.Style
+	// NeutralBorder is the non-accent structural border for pane dividers and
+	// unfocused pane title bars. It is resolved with the rest of the immutable
+	// chrome snapshot so composition never derives theme colors.
+	NeutralBorder renderer.Style
 
 	TabInactive      renderer.Style
 	TabInactiveTitle renderer.Style

@@ -94,6 +94,7 @@ func TestResolveBuildsCompleteStylesFromOneAccent(t *testing.T) {
 	require.Equal(t, resolved.Ramp.SurfaceBar, resolved.Styles.SurfaceBar)
 	require.Equal(t, resolved.Ramp.SurfaceActive, resolved.Styles.SurfaceActive)
 	require.Equal(t, resolved.Ramp.BorderActive, resolved.Styles.BorderActive)
+	require.Equal(t, foregroundStyle(Blend(theme.Foreground, theme.Background, 0.40)), resolved.Styles.NeutralBorder)
 	require.True(t, resolved.Styles.TabActive.Bold)
 	require.Equal(t, resolved.Styles.SurfaceRecent, resolved.Styles.MRURecent)
 	require.Equal(t, resolved.Styles.SurfaceBar, resolved.Styles.PickerBase)

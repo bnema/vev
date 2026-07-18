@@ -45,6 +45,7 @@ func stylesFromRamp(t Theme, accent Accent, ramp Ramp) Styles {
 		SurfaceActive:   ramp.SurfaceActive,
 		BorderMuted:     ramp.BorderMuted,
 		BorderActive:    ramp.BorderActive,
+		NeutralBorder:   neutralBorder(t),
 
 		TabInactive:      ramp.SurfaceInactive,
 		TabInactiveTitle: inactiveTitle,
@@ -114,7 +115,7 @@ func neutralStyles(t Theme) Styles {
 	if usable(t) {
 		status = rgbSurface(t.Foreground, Blend(t.Background, t.Foreground, 0.12))
 		accent = rgbSurface(t.Foreground, Blend(t.Background, t.Foreground, neutralAccentBlend))
-		border = neutralBorderStyle(t)
+		border = neutralBorder(t)
 		// Preserve the legacy neutral muted foreground while retaining the
 		// semantic row/bar background beneath description and separator cells.
 		inactiveDescription = status
@@ -129,6 +130,7 @@ func neutralStyles(t Theme) Styles {
 		SurfaceActive:   accent,
 		BorderMuted:     border,
 		BorderActive:    border,
+		NeutralBorder:   border,
 
 		TabInactive:      EmphasisStyle(status, t),
 		TabInactiveTitle: MutedVariantStyle(status, t),
@@ -162,16 +164,15 @@ func withMRUStyles(styles Styles, ramp Ramp) Styles {
 	return styles
 }
 
-// NeutralBorderStyle is the existing non-accent structural border input for
-// dimmed pane chrome. It intentionally does not consume a resolved accent.
-func NeutralBorderStyle(t Theme) renderer.Style {
+// neutralBorder is the existing non-accent structural border input for pane
+// chrome. It intentionally does not consume a resolved accent and is called
+// only while resolving an immutable style snapshot.
+func neutralBorder(t Theme) renderer.Style {
 	if !usable(t) {
 		return renderer.DefaultStyle()
 	}
 	return foregroundStyle(Blend(t.Foreground, t.Background, 0.40))
 }
-
-func neutralBorderStyle(t Theme) renderer.Style { return NeutralBorderStyle(t) }
 
 func legacyMutedText(t Theme) renderer.Style {
 	if !usable(t) {

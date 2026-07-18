@@ -160,7 +160,7 @@ func legacyAndSemanticStyles(styles Styles) map[string]renderer.Style {
 		"SurfaceBar": styles.SurfaceBar, "SurfaceInactive": styles.SurfaceInactive,
 		"SurfaceRecent": styles.SurfaceRecent, "SurfaceActive": styles.SurfaceActive,
 		"BorderMuted": styles.BorderMuted, "BorderActive": styles.BorderActive,
-		"PickerSeparator": styles.PickerSeparator, "StatusBar": styles.StatusBar,
+		"NeutralBorder": styles.NeutralBorder, "PickerSeparator": styles.PickerSeparator, "StatusBar": styles.StatusBar,
 		"Accent": styles.Accent, "Border": styles.Border, "Selection": styles.Selection,
 		"CopyStatus": styles.CopyStatus, "PaletteDesc": styles.PaletteDesc,
 		"TabName": styles.TabName, "TabNameActive": styles.TabNameActive,
