@@ -77,20 +77,6 @@ func (s *terminalThemeState) snapshot() ports.Theme {
 	return s.theme
 }
 
-// clearPalette invalidates entries from a previous terminal color query while
-// retaining independently reported foreground, background, and scheme data.
-func (s *terminalThemeState) clearPalette() ports.Theme {
-	return s.update(func(theme *ports.Theme) {
-		theme.PaletteKnown = 0
-		theme.Palette = [16]renderer.RGB{}
-	})
-}
-
-func (s *terminalThemeState) reportedTheme() (ports.Theme, bool) {
-	theme := s.snapshot()
-	return theme, theme.HasForeground || theme.HasBackground || theme.SchemeKnown || theme.PaletteKnown != 0
-}
-
 // milestones tracks lifecycle progress so a failure can report which stages
 // were never reached — the key diagnostic when an attach dies early.
 type milestones struct {
@@ -244,6 +230,23 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		rawEntered: &rawEntered,
 		stage:      reconnectStageOfflineRetrying,
 	}
+	var input *terminalInputPump
+	defer func() {
+		if input != nil {
+			input.stop()
+		}
+	}()
+	originalEnterRaw := enterRaw
+	enterRaw = func() error {
+		if err := originalEnterRaw(); err != nil {
+			return err
+		}
+		if input == nil {
+			input = newTerminalInputPump(r.term.In())
+			input.start()
+		}
+		return nil
+	}
 
 	for {
 		transport, err := r.dialer.Dial(ctx)
@@ -279,6 +282,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			enterRaw:    enterRaw,
 			reconnect:   reconnect,
 			linkEvents:  linkEvents,
+			terminalInput: func() *terminalInputPump {
+				return input
+			},
 		}).run(ctx)
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
@@ -418,16 +424,17 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 }
 
 type attachAttempt struct {
-	runner      *Runner
-	transport   ports.Transport
-	request     AttachRequest
-	resumeToken uint64
-	clientID    [16]byte
-	milestones  *milestones
-	themeState  *terminalThemeState
-	enterRaw    func() error
-	reconnect   *reconnectUI
-	linkEvents  <-chan ports.LinkEvent
+	runner        *Runner
+	transport     ports.Transport
+	request       AttachRequest
+	resumeToken   uint64
+	clientID      [16]byte
+	milestones    *milestones
+	themeState    *terminalThemeState
+	enterRaw      func() error
+	reconnect     *reconnectUI
+	linkEvents    <-chan ports.LinkEvent
+	terminalInput func() *terminalInputPump
 }
 
 type attachResult struct {
@@ -592,6 +599,16 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// coordinator owner.
 	loopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	input := (*terminalInputPump)(nil)
+	if a.terminalInput != nil {
+		input = a.terminalInput()
+	}
+	ownedInput := input == nil
+	if ownedInput {
+		input = newTerminalInputPump(term.In())
+		input.start()
+		defer input.stop()
+	}
 
 	sendCh := make(chan ports.Frame, sendQueueDepth)
 	ackQueue := newCumulativeAckQueue()
@@ -703,7 +720,18 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	}
 	senderStarted = true
 	go runSender(loopCtx, cancel, transport, sendCh, ackQueue, sendErrCh, log)
-	go (&stdinPump{ctx: loopCtx, cancel: cancel, in: term.In(), out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration}).run()
+	stdinDone := make(chan struct{})
+	go func() {
+		defer close(stdinDone)
+		(&stdinPump{ctx: loopCtx, cancel: cancel, input: input, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration}).run()
+	}()
+	// A scanner must finish before the next attach starts. The lifecycle-owned
+	// reader remains available for reconnect, but a cancelled scanner cannot
+	// consume a later read result intended for its replacement.
+	defer func() {
+		cancel()
+		<-stdinDone
+	}()
 	go runResize(loopCtx, term.ResizeEvents(), sendCh, log)
 
 	// 5. Output/main loop: the only goroutine that touches the terminal.
@@ -905,23 +933,71 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 	}
 }
 
-// stdinPump pumps terminal input to the daemon as Input frames. A read error
-// or EOF is treated as a detach: it best-effort sends a Detach frame and
-// cancels the loop.
-//
-// Known MVP limitation: a bare io.Reader cannot be unblocked from outside,
-// so on shutdown initiated elsewhere (daemon detach, transport loss) the
-// reader goroutine stays parked in Read until the next byte arrives or the
-// process exits. That is harmless here — Run has already returned and
-// restored the terminal — and matches the standard pattern for stdin pumps;
-// a closable stdin duplicate could lift it later if ever needed.
+// terminalReadResult is copied by terminalInputPump before the next Read so
+// terminal input remains owned by one lifecycle reader across reconnects.
+type terminalReadResult struct {
+	data []byte
+	err  error
+}
+
+// terminalInputPump is the sole consumer of the caller-owned terminal reader.
+// It is started once after raw mode is entered and is reused by each attach
+// scanner. A bare io.Reader cannot be interrupted, so one final Read may stay
+// blocked after Run exits; stop drops its result and never closes caller-owned
+// stdin. Reconnects never add another reader.
+type terminalInputPump struct {
+	in      io.Reader
+	reads   chan terminalReadResult
+	done    chan struct{}
+	startMu sync.Once
+	stopMu  sync.Once
+}
+
+func newTerminalInputPump(in io.Reader) *terminalInputPump {
+	return &terminalInputPump{
+		in:    in,
+		reads: make(chan terminalReadResult, 1),
+		done:  make(chan struct{}),
+	}
+}
+
+func (p *terminalInputPump) start() {
+	p.startMu.Do(func() {
+		go func() {
+			defer close(p.reads)
+			buf := make([]byte, stdinBufSize)
+			for {
+				n, err := p.in.Read(buf)
+				result := terminalReadResult{err: err}
+				if n > 0 {
+					result.data = append([]byte(nil), buf[:n]...)
+				}
+				select {
+				case p.reads <- result:
+				case <-p.done:
+					return
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	})
+}
+
+func (p *terminalInputPump) stop() {
+	p.stopMu.Do(func() { close(p.done) })
+}
+
 // stdinPump parses terminal color reports into generation-tagged events while
-// preserving all ordinary terminal input byte-for-byte. It never publishes a
-// Theme and never writes terminal output; attachAttempt owns both operations.
+// preserving all ordinary terminal input byte-for-byte. It never reads the
+// terminal directly, publishes a Theme, or writes terminal output;
+// attachAttempt owns those operations.
 type stdinPump struct {
 	ctx               context.Context
 	cancel            context.CancelFunc
-	in                io.Reader
+	in                io.Reader // compatibility for isolated scanner tests
+	input             *terminalInputPump
 	out               chan<- ports.Frame
 	clock             ports.Clock
 	clipboard         ports.ClipboardReader
@@ -933,7 +1009,6 @@ type stdinPump struct {
 
 func (p *stdinPump) run() {
 	defer p.logger.Debug("stdin pump exited")
-	buf := make([]byte, stdinBufSize)
 	var scanner theme.Scanner
 	var markers paletteMarkerScanner
 	var inputSeq uint64
@@ -978,29 +1053,14 @@ func (p *stdinPump) run() {
 		}
 		sink = ci.Scan
 	}
-	type readResult struct {
-		data []byte
-		err  error
+	input := p.input
+	ownedInput := input == nil
+	if ownedInput {
+		input = newTerminalInputPump(p.in)
+		input.start()
+		defer input.stop()
 	}
-	reads := make(chan readResult, 1)
-	go func() {
-		defer close(reads)
-		for {
-			n, err := p.in.Read(buf)
-			result := readResult{err: err}
-			if n > 0 {
-				result.data = append([]byte(nil), buf[:n]...)
-			}
-			select {
-			case reads <- result:
-			case <-p.ctx.Done():
-				return
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
+	reads := input.reads
 
 	var markerTimer ports.Timer
 	var markerTimerC <-chan time.Time
