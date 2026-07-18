@@ -48,9 +48,11 @@ func (m Modal) Inner(base domain.Size) domain.Rect {
 	}
 }
 
-// Composite draws the modal border and title, clears the interior, and returns
-// the inner content rectangle. Cells outside the modal bounds are not changed.
-func (m Modal) Composite(f renderer.Frame, border renderer.Style) domain.Rect {
+// Composite draws the modal border and title, fills its interior, and returns
+// the inner content rectangle. Border and interior styles are deliberately
+// independent so unfocused structure and chrome surfaces retain their roles.
+// Cells outside the modal bounds are not changed.
+func (m Modal) Composite(f renderer.Frame, border, interior renderer.Style) domain.Rect {
 	bounds := m.Bounds(domain.Size{Cols: f.Width, Rows: f.Height})
 	inner := domain.Rect{
 		X:      bounds.X + 1,
@@ -59,7 +61,7 @@ func (m Modal) Composite(f renderer.Frame, border renderer.Style) domain.Rect {
 		Height: max(0, bounds.Height-2),
 	}
 	DrawBox(f, bounds, border)
-	FillRect(f, inner, renderer.BlankCell())
+	FillRect(f, inner, renderer.Cell{Rune: ' ', Style: interior})
 	if bounds.Width > 2 && bounds.Height > 0 && m.Title != "" {
 		left := bounds.X + 1
 		right := bounds.X + bounds.Width - 1

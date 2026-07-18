@@ -9,8 +9,10 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
+	"github.com/bnema/vev/internal/usecase/prompt"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
+	"github.com/bnema/vev/internal/usecase/visualsearch"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -206,25 +208,29 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	size := domain.Size{Cols: state.layout.area.Width, Rows: state.layout.area.Height + 2}
 	if snap.copySearchModel != nil {
 		o.copySearch.modal = copySearchModal
-		o.copySearch.inner = snap.copySearchModel.Render(rectSize(copySearchModal.Inner(size)), styles.Selection)
+		o.copySearch.focused = true
+		o.copySearch.inner = snap.copySearchModel.RenderStyled(rectSize(copySearchModal.Inner(size)), visualsearch.RenderStyles{Base: styles.PromptBase, Selection: styles.SearchSelection})
 	}
 	if snap.pickerActive && snap.pickerModel != nil {
 		o.picker.modal = pickerModal
-		renderStyles := picker.RenderStyles{Selection: styles.Selection, SelectionName: styles.PickerSelectionName, SelectionMuted: styles.PickerSelectionMuted, Name: styles.PickerName, Detail: styles.PaletteDesc, Base: renderer.DefaultStyle(), Separator: styles.PickerSeparator}
+		o.picker.focused = true
+		renderStyles := picker.RenderStyles{Background: styles.PickerBase, Selection: styles.PickerSelection, SelectionName: styles.PickerSelectionName, SelectionMuted: styles.PickerSelectionMuted, Name: styles.SurfaceInactive, Detail: styles.PickerDescription, Base: styles.SurfaceInactive, Separator: styles.PickerSeparator}
 		o.picker.inner = snap.pickerModel.Render(rectSize(pickerModal.Inner(size)), state.preview, renderStyles)
 	}
 	if snap.paletteActive && snap.paletteModel != nil {
 		o.palette.modal = paletteModalFor(size, paletteCfg)
+		o.palette.focused = true
 		guidance := ""
 		if snap.paletteHints != nil {
 			guidance = snap.paletteHints.Feedback
 		}
 		o.paletteGuidance = snap.paletteFeedback
-		o.palette.inner = snap.paletteModel.Render(rectSize(o.palette.modal.Inner(size)), palette.RenderOptions{Styles: palette.RenderStyles{Selection: styles.Selection, Description: styles.PaletteDesc}, Guidance: guidance, Feedback: snap.paletteFeedback})
+		o.palette.inner = snap.paletteModel.Render(rectSize(o.palette.modal.Inner(size)), palette.RenderOptions{Styles: palette.RenderStyles{Base: styles.PickerBase, Row: styles.SurfaceInactive, Selection: styles.PickerSelection, Description: styles.PickerDescription}, Guidance: guidance, Feedback: snap.paletteFeedback})
 	}
 	if snap.promptActive && snap.promptModel != nil {
 		o.prompt.modal = promptModalFor(snap.promptModel.Title())
-		o.prompt.inner = snap.promptModel.Render(rectSize(o.prompt.modal.Inner(size)), styles.Accent)
+		o.prompt.focused = true
+		o.prompt.inner = snap.promptModel.RenderStyled(rectSize(o.prompt.modal.Inner(size)), prompt.RenderStyles{Base: styles.PromptBase, Selection: styles.SurfaceActive})
 	}
 	state.cursor.hiddenByOverlay = o.active()
 }
@@ -259,7 +265,11 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 		if modal.inner.Width == 0 && modal.inner.Height == 0 {
 			continue
 		}
-		inner := modal.modal.Composite(frame, state.styles.BorderMuted)
+		border := state.styles.BorderMuted
+		if modal.focused {
+			border = state.styles.BorderActive
+		}
+		inner := modal.modal.Composite(frame, border, state.styles.PickerBase)
 		for y := range min(inner.Height, modal.inner.Height) {
 			copy(frame.Row(inner.Y + y)[inner.X:inner.X+min(inner.Width, modal.inner.Width)], modal.inner.Row(y)[:min(inner.Width, modal.inner.Width)])
 		}

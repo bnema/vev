@@ -400,3 +400,15 @@ func TestRenderGuidanceReplacesOnlyExactContextualRow(t *testing.T) {
 		t.Fatalf("command row = %q, want contextual guidance without a feedback row", got)
 	}
 }
+
+func TestRenderStylesFillBaseRowsAndSelection(t *testing.T) {
+	m := New(CommandResults([]command.Command{cmd("ABC", "Alpha", "first")}))
+	base := renderer.Style{Foreground: 1, Background: 2}
+	row := renderer.Style{Foreground: 3, Background: 4}
+	selection := renderer.Style{Foreground: 5, Background: 6}
+	frame := m.Render(domain.Size{Cols: 24, Rows: 4}, RenderOptions{Styles: RenderStyles{Base: base, Row: row, Selection: selection, Description: row}})
+
+	require.True(t, frame.At(23, 3).Style.Equal(base), "unused interior keeps modal base")
+	require.True(t, frame.At(23, 0).Style.Equal(base), "input row keeps base surface")
+	require.True(t, frame.At(23, 1).Style.Equal(selection), "selected result owns active surface")
+}

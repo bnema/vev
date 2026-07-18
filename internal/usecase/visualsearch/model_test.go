@@ -186,3 +186,14 @@ func rowText(row []renderer.Cell) string {
 	}
 	return b.String()
 }
+
+func TestVisualSearchRenderStyledFillsBaseAndSelection(t *testing.T) {
+	m := New(testSnapshot("alpha"))
+	m.Insert('a')
+	base := renderer.Style{Foreground: 1, Background: 2}
+	selection := renderer.Style{Foreground: 3, Background: 4}
+	frame := m.RenderStyled(domain.Size{Cols: 20, Rows: 4}, RenderStyles{Base: base, Selection: selection})
+
+	require.True(t, frame.At(19, 3).Style.Equal(base), "blank filler keeps base surface")
+	require.True(t, frame.At(2, 0).Style.Equal(selection), "input caret keeps selection surface")
+}

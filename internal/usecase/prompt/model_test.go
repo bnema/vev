@@ -57,3 +57,13 @@ func TestModelRenderHandlesTinySize(t *testing.T) {
 	require.Equal(t, 0, frame.Width)
 	require.Equal(t, 0, frame.Height)
 }
+
+func TestModelRenderStyledFillsBaseAndSelection(t *testing.T) {
+	m := New(" Rename ", "x")
+	base := renderer.Style{Foreground: 1, Background: 2}
+	selection := renderer.Style{Foreground: 3, Background: 4}
+	frame := m.RenderStyled(domain.Size{Cols: 12, Rows: 2}, RenderStyles{Base: base, Selection: selection})
+
+	require.True(t, frame.At(11, 1).Style.Equal(base), "blank filler keeps base surface")
+	require.True(t, frame.At(3, 0).Style.Equal(selection), "caret keeps selection surface")
+}

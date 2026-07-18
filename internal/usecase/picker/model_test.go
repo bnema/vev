@@ -332,3 +332,19 @@ func TestRenderListTruncatesNameWhenAloneExceedsWidth(t *testing.T) {
 func cell(r rune) renderer.Cell {
 	return renderer.Cell{Rune: r, Style: renderer.DefaultStyle()}
 }
+
+func TestRenderStylesFillBackgroundRowsAndSelection(t *testing.T) {
+	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{Name: "tab"}}, Active: 0}}, "s", 0)
+	background := renderer.Style{Foreground: 1, Background: 2}
+	base := renderer.Style{Foreground: 3, Background: 4}
+	selection := renderer.Style{Foreground: 5, Background: 6}
+	frame := m.Render(domain.Size{Cols: 20, Rows: 5}, Preview{}, RenderStyles{
+		Background: background, Base: base, Name: base, Detail: base,
+		Selection: selection, SelectionName: selection, SelectionMuted: selection,
+		Separator: base,
+	})
+
+	require.True(t, frame.At(19, 4).Style.Equal(background), "unused interior keeps modal base")
+	require.True(t, frame.At(19, 0).Style.Equal(base), "ordinary row owns inactive surface")
+	require.True(t, frame.At(19, 1).Style.Equal(selection), "selected row owns active surface")
+}
