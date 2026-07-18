@@ -22,9 +22,16 @@ type Accent struct {
 }
 
 // The resolver only ever considers the chromatic ANSI slots in automatic
-// mode. Keeping this as a fixed array makes resolution bounded and independent
-// of terminal response order.
-var accentCandidateSlots = [...]uint8{1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14}
+// mode. This immutable mapping keeps resolution bounded and independent of
+// terminal response order without mutable package-level state.
+const accentCandidateCount = 12
+
+func accentCandidateSlot(index int) uint8 {
+	if index < 6 {
+		return uint8(index + 1)
+	}
+	return uint8(index + 3)
+}
 
 type accentGroup struct {
 	members   uint16
@@ -64,10 +71,11 @@ func resolveAutoAccent(t Theme) Accent {
 		return schemeIndexedBlue(t)
 	}
 
-	var colors [len(accentCandidateSlots)]oklab
+	var colors [accentCandidateCount]oklab
 	var eligible uint16
 	background := rgbToOKLab(t.Background)
-	for i, slot := range accentCandidateSlots {
+	for i := range accentCandidateCount {
+		slot := accentCandidateSlot(i)
 		if t.PaletteKnown&(uint16(1)<<slot) == 0 {
 			continue
 		}
@@ -80,13 +88,13 @@ func resolveAutoAccent(t Theme) Accent {
 		return fallbackAutoAccent(t, background)
 	}
 
-	var adjacent [len(accentCandidateSlots)]uint16
-	for i := range accentCandidateSlots {
+	var adjacent [accentCandidateCount]uint16
+	for i := range accentCandidateCount {
 		if eligible&(uint16(1)<<i) == 0 {
 			continue
 		}
 		adjacent[i] = uint16(1) << i
-		for j := i + 1; j < len(accentCandidateSlots); j++ {
+		for j := i + 1; j < accentCandidateCount; j++ {
 			if eligible&(uint16(1)<<j) == 0 || !accentConnected(colors[i], colors[j]) {
 				continue
 			}
@@ -95,15 +103,15 @@ func resolveAutoAccent(t Theme) Accent {
 		}
 	}
 
-	var groups [len(accentCandidateSlots)]accentGroup
+	var groups [accentCandidateCount]accentGroup
 	var visited uint16
 	groupCount := 0
-	for start := range accentCandidateSlots {
+	for start := range accentCandidateCount {
 		startBit := uint16(1) << start
 		if eligible&startBit == 0 || visited&startBit != 0 {
 			continue
 		}
-		var queue [len(accentCandidateSlots)]uint8
+		var queue [accentCandidateCount]uint8
 		head, tail := 0, 1
 		queue[0] = uint8(start)
 		visited |= startBit
@@ -112,7 +120,7 @@ func resolveAutoAccent(t Theme) Accent {
 			head++
 			groups[groupCount].members |= uint16(1) << i
 			neighbors := adjacent[i] &^ visited
-			for j := range accentCandidateSlots {
+			for j := range accentCandidateCount {
 				bit := uint16(1) << j
 				if neighbors&bit == 0 {
 					continue
@@ -141,7 +149,7 @@ func resolveAutoAccent(t Theme) Accent {
 		runnerSize, runnerPairs = groups[runner].size, groups[runner].pairs
 	}
 	if winner.size >= 2 && (winner.size > runnerSize || winner.pairs > runnerPairs) {
-		slot := accentCandidateSlots[winner.rep]
+		slot := accentCandidateSlot(int(winner.rep))
 		return resolvedAccent(t, t.Palette[slot], slot)
 	}
 
@@ -180,23 +188,24 @@ func indexedAccent(slot uint8) Accent {
 	return Accent{Slot: slot, IndexedOnly: true}
 }
 
-func finalizeAccentGroup(group *accentGroup, colors [len(accentCandidateSlots)]oklab) {
+func finalizeAccentGroup(group *accentGroup, colors [accentCandidateCount]oklab) {
 	var representative uint8
 	var representativeDistance float64
 	first := true
-	for i, slot := range accentCandidateSlots {
+	for i := range accentCandidateCount {
+		slot := accentCandidateSlot(i)
 		if group.members&(uint16(1)<<i) == 0 {
 			continue
 		}
 		group.size++
 		group.chromaSum += okLabChroma(colors[i])
 		var totalDistance float64
-		for j := range accentCandidateSlots {
+		for j := range accentCandidateCount {
 			if group.members&(uint16(1)<<j) != 0 {
 				totalDistance += okLabDistance(colors[i], colors[j])
 			}
 		}
-		if first || totalDistance < representativeDistance || (totalDistance == representativeDistance && slot < accentCandidateSlots[representative]) {
+		if first || totalDistance < representativeDistance || (totalDistance == representativeDistance && slot < accentCandidateSlot(int(representative))) {
 			first = false
 			representative = uint8(i)
 			representativeDistance = totalDistance
@@ -211,8 +220,8 @@ func finalizeAccentGroup(group *accentGroup, colors [len(accentCandidateSlots)]o
 }
 
 func accentGroupHasSlot(group accentGroup, slot uint8) bool {
-	for i, candidate := range accentCandidateSlots {
-		if candidate == slot {
+	for i := range accentCandidateCount {
+		if accentCandidateSlot(i) == slot {
 			return group.members&(uint16(1)<<i) != 0
 		}
 	}
@@ -236,7 +245,7 @@ func betterAccentGroup(a, b accentGroup) bool {
 	if aBlue != bBlue {
 		return aBlue
 	}
-	return accentCandidateSlots[a.rep] < accentCandidateSlots[b.rep]
+	return accentCandidateSlot(int(a.rep)) < accentCandidateSlot(int(b.rep))
 }
 
 func resolvedAccent(t Theme, color renderer.RGB, slot uint8) Accent {

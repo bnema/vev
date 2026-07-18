@@ -9,6 +9,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestAccentCandidateSlotsAreFixedAndAscending(t *testing.T) {
+	want := [...]uint8{1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14}
+	for i, slot := range want {
+		require.Equalf(t, slot, accentCandidateSlot(i), "candidate index %d", i)
+	}
+}
+
 func TestResolveAccentThresholds(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -193,7 +200,7 @@ func TestResolveAccentDeterministicAcrossShuffledPaletteConstruction(t *testing.
 
 func TestResolveAccentMedoidAndTieBreak(t *testing.T) {
 	group := accentGroup{members: 1<<0 | 1<<1 | 1<<2}
-	colors := [len(accentCandidateSlots)]oklab{
+	colors := [accentCandidateCount]oklab{
 		{L: 0.10, A: 0.10}, {L: 0.11, A: 0.10}, {L: 0.12, A: 0.10},
 	}
 	finalizeAccentGroup(&group, colors)
