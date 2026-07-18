@@ -199,9 +199,10 @@ func TestComposeCapturedFloatingFrameUsesSemanticBorderWithoutTintingPaneCells(t
 		floating: capturedFloatingRenderState{
 			visible: true, focused: true, pane: capturedPaneRenderState{frame: pane}, geometry: geometry, title: "float", generation: 1,
 		},
-		content: content,
-		styles:  themeui.Styles{BorderActive: active, BorderMuted: muted},
-		full:    true,
+		content:      content,
+		borderActive: active,
+		borderMuted:  muted,
+		full:         true,
 	})
 	bounds := geometry.translate(content.X, content.Y)
 	require.Equal(t, active, frame.At(bounds.Bounds.X, bounds.Bounds.Y).Style, "focused floating border must use BorderActive")
@@ -220,11 +221,12 @@ func TestComposeCapturedFloatingFrameUsesMutedBorderWhenUnfocused(t *testing.T) 
 	active, muted := renderer.Style{Foreground: 2}, renderer.Style{Foreground: 4}
 
 	frame, _ := composeCapturedFloatingFrame(floatingComposeInput{
-		baseFrame: base,
-		floating:  capturedFloatingRenderState{visible: true, pane: capturedPaneRenderState{frame: renderer.NewFrame(4, 1)}, geometry: geometry, title: "float", generation: 1},
-		content:   content,
-		styles:    themeui.Styles{BorderActive: active, BorderMuted: muted},
-		full:      true,
+		baseFrame:    base,
+		floating:     capturedFloatingRenderState{visible: true, pane: capturedPaneRenderState{frame: renderer.NewFrame(4, 1)}, geometry: geometry, title: "float", generation: 1},
+		content:      content,
+		borderActive: active,
+		borderMuted:  muted,
+		full:         true,
 	})
 	bounds := geometry.translate(content.X, content.Y)
 	require.Equal(t, muted, frame.At(bounds.Bounds.X, bounds.Bounds.Y).Style)

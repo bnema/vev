@@ -86,15 +86,16 @@ func calculateContentFloatingGeometry(content domain.Size, cfg domain.FloatingCo
 }
 
 type floatingComposeInput struct {
-	baseFrame  renderer.Frame
-	baseDamage []renderer.Damage
-	floating   capturedFloatingRenderState
-	content    domain.Rect
-	layout     capturedTabLayout
-	theme      themeui.Theme
-	styles     themeui.Styles
-	cache      composeCacheInput
-	full       bool
+	baseFrame    renderer.Frame
+	baseDamage   []renderer.Damage
+	floating     capturedFloatingRenderState
+	content      domain.Rect
+	layout       capturedTabLayout
+	theme        themeui.Theme
+	borderMuted  renderer.Style
+	borderActive renderer.Style
+	cache        composeCacheInput
+	full         bool
 }
 
 func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, []renderer.Damage) {
@@ -104,7 +105,8 @@ func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, [
 	content := input.content
 	layoutSnap := input.layout
 	theme := input.theme
-	styles := input.styles
+	borderMuted := input.borderMuted
+	borderActive := input.borderActive
 	cache := input.cache
 	full := input.full
 
@@ -119,9 +121,9 @@ func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, [
 	}
 	popupChanged := !cache.valid || cache.floatingGeneration != floating.generation || cache.floatingGeometry != geometry || cache.floatingFocused != floating.focused
 	titleChanged := popupChanged || cache.floatingTitleGeneration != floating.titleGeneration
-	border := styles.BorderMuted
+	border := borderMuted
 	if floating.focused {
-		border = styles.BorderActive
+		border = borderActive
 	}
 	drawFloatingBorder(frame, geometry.Bounds, floating.title, border)
 	if full || popupChanged {
