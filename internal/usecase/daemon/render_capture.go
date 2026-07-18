@@ -43,6 +43,8 @@ type capturedRenderState struct {
 	floating           capturedFloatingRenderState
 	bars               barState
 	theme              themeui.Theme
+	styles             themeui.Styles
+	styleGeneration    uint64
 	overlays           capturedOverlayRenderState
 	preview            picker.Preview
 	cursor             capturedCursorInputs
@@ -74,6 +76,7 @@ type capturedPaneRenderState struct {
 
 type capturedFloatingRenderState struct {
 	visible         bool
+	focused         bool
 	pane            capturedPaneRenderState
 	geometry        floatingGeometry
 	title           string
@@ -91,8 +94,9 @@ type capturedOverlayRenderState struct {
 }
 
 type capturedModal struct {
-	modal ui.Modal
-	inner renderer.Frame
+	modal   ui.Modal
+	inner   renderer.Frame
+	focused bool
 }
 
 func (o capturedOverlayRenderState) active() bool {
@@ -166,12 +170,14 @@ func uncertainDamage(damage []renderer.Damage, width, height int) bool {
 }
 
 type primaryCaptureRequest struct {
-	bars        barState
-	overlays    capturedOverlayRenderState
-	preview     picker.Preview
-	floatingCfg domain.FloatingConfig
-	reset       bool
-	lease       *attachmentLease
+	bars            barState
+	overlays        capturedOverlayRenderState
+	preview         picker.Preview
+	floatingCfg     domain.FloatingConfig
+	styles          themeui.Styles
+	styleGeneration uint64
+	reset           bool
+	lease           *attachmentLease
 }
 
 // capturePrimaryRenderState is the ownership boundary for a primary render
@@ -227,6 +233,7 @@ func capturePrimaryRenderState(
 	state := &scratch.state
 	*state = capturedRenderState{
 		attachment: ac, lease: lease, reset: reset, bars: bars, theme: bars.theme,
+		styles: request.styles, styleGeneration: request.styleGeneration,
 		overlays: overlays, preview: preview,
 		layout:             capturedTabLayout{root: root, area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
 		floatingGeneration: tb.floating.generation,
@@ -279,7 +286,9 @@ func capturePrimaryRenderState(
 			state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
 		}
 		ac.captureFrames[p] = captured
-		state.floating = capturedFloatingRenderState{visible: true, pane: captured, geometry: geometry, title: captured.title, generation: tb.floating.generation, titleGeneration: captured.titleGeneration}
+		// A visible floating pane is the terminal input target, so its structural
+		// border carries the focused semantic role independently of its content.
+		state.floating = capturedFloatingRenderState{visible: true, focused: true, pane: captured, geometry: geometry, title: captured.title, generation: tb.floating.generation, titleGeneration: captured.titleGeneration}
 		state.cursor = captureCursorInputsLocked(p, geometry.Inner, overlays)
 		p.mu.Unlock()
 	}

@@ -82,6 +82,7 @@ type TabsConfig struct {
 type Config struct {
 	Theme          ThemeMode
 	ThemePalette   bool
+	ThemeAccent    ThemeAccent
 	Bar            BarConfig
 	BindingEntries []ConfigEntry
 	Codes          map[string]string
@@ -104,6 +105,7 @@ func Defaults() Config {
 	return Config{
 		Theme:        ThemeAuto,
 		ThemePalette: true,
+		ThemeAccent:  ThemeAccent{Mode: ThemeAccentAuto},
 		Bar: BarConfig{
 			Interval: 5 * time.Second,
 		},

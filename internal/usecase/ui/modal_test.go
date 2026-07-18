@@ -5,6 +5,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/stretchr/testify/require"
 )
 
 func TestModalBounds(t *testing.T) {
@@ -130,9 +131,10 @@ func TestCompositeDrawsModalAndPreservesExterior(t *testing.T) {
 	exterior := renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()}
 	FillRect(f, domain.Rect{X: 0, Y: 0, Width: 10, Height: 6}, exterior)
 
-	style := renderer.Style{Bold: true, Foreground: 2, Background: -1}
+	border := renderer.Style{Bold: true, Foreground: 2, Background: -1}
+	interior := renderer.Style{Foreground: 3, Background: 4}
 	m := Modal{WidthPct: 60, HeightPct: 80, Title: "Hi"}
-	inner := m.Composite(f, style)
+	inner := m.Composite(f, border, interior)
 	wantInner := domain.Rect{X: 3, Y: 2, Width: 4, Height: 2}
 	if inner != wantInner {
 		t.Fatalf("Composite() inner = %+v, want %+v", inner, wantInner)
@@ -149,10 +151,14 @@ func TestCompositeDrawsModalAndPreservesExterior(t *testing.T) {
 
 	for y := inner.Y; y < inner.Y+inner.Height; y++ {
 		for x := inner.X; x < inner.X+inner.Width; x++ {
-			if got := f.At(x, y); !got.Equal(renderer.BlankCell()) {
-				t.Fatalf("interior cell (%d,%d) = %+v, want blank", x, y, got)
+			want := renderer.Cell{Rune: ' ', Style: interior}
+			if got := f.At(x, y); !got.Equal(want) {
+				t.Fatalf("interior cell (%d,%d) = %+v, want %+v", x, y, got, want)
 			}
 		}
+	}
+	if got := f.At(2, 1).Style; !got.Equal(border) {
+		t.Fatalf("border style = %+v, want %+v", got, border)
 	}
 	assertCell(t, f, 0, 0, exterior)
 	assertCell(t, f, 9, 5, exterior)
@@ -212,5 +218,29 @@ func assertCell(t *testing.T, f renderer.Frame, x, y int, want renderer.Cell) {
 	t.Helper()
 	if got := f.At(x, y); !got.Equal(want) {
 		t.Fatalf("cell (%d,%d) = %+v, want %+v", x, y, got, want)
+	}
+}
+
+func TestCompositePreservesTinyAndClippedGeometry(t *testing.T) {
+	border := renderer.Style{Foreground: 1, Background: 2}
+	interior := renderer.Style{Foreground: 3, Background: 4}
+	for _, tt := range []struct {
+		name string
+		size domain.Size
+		want domain.Rect
+	}{
+		{name: "one cell", size: domain.Size{Cols: 1, Rows: 1}, want: domain.Rect{X: 1, Y: 1}},
+		{name: "two cells", size: domain.Size{Cols: 2, Rows: 2}, want: domain.Rect{X: 1, Y: 1}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			frame := renderer.NewFrame(tt.size.Cols, tt.size.Rows)
+			got := (Modal{WidthPct: 100, HeightPct: 100}).Composite(frame, border, interior)
+			require.Equal(t, tt.want, got)
+			for y := range frame.Height {
+				for x := range frame.Width {
+					require.True(t, frame.At(x, y).Style.Equal(border), "tiny border remains clipped in bounds")
+				}
+			}
+		})
 	}
 }

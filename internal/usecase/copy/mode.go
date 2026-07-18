@@ -421,7 +421,7 @@ func applySelectionStyle(dst *renderer.Style, style renderer.Style, ok bool) {
 func inverseStyle() renderer.Style { s := renderer.DefaultStyle(); s.Inverse = true; return s }
 func drawCopyStatus(row []renderer.Cell, m *Mode, total int, style renderer.Style) {
 	for i := range row {
-		row[i] = renderer.BlankCell()
+		row[i] = renderer.Cell{Rune: ' ', Style: style}
 	}
 	text := " [SCROLL] "
 	if m.selection.Enabled {

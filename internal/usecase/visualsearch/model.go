@@ -133,6 +133,12 @@ func (m *Model) clamp() {
 
 const defaultVisibleRows = 10
 
+// RenderStyles contains the base chrome surface and active selection role.
+type RenderStyles struct {
+	Base      renderer.Style
+	Selection renderer.Style
+}
+
 func (m *Model) ensureVisible(visible int) {
 	if m == nil || visible <= 0 || len(m.matches) == 0 {
 		return
@@ -146,16 +152,22 @@ func (m *Model) ensureVisible(visible int) {
 }
 
 func (m *Model) Render(inner domain.Size, selectedStyle ...renderer.Style) renderer.Frame {
-	frame := renderer.NewFrame(max(inner.Cols, 0), max(inner.Rows, 0))
-	if frame.Width == 0 || frame.Height == 0 {
-		return frame
-	}
 	base := renderer.DefaultStyle()
 	selection := base
 	selection.Inverse = true
 	if len(selectedStyle) > 0 {
 		selection = selectedStyle[0]
 	}
+	return m.RenderStyled(inner, RenderStyles{Base: base, Selection: selection})
+}
+
+// RenderStyled renders with explicit chrome roles captured by the daemon.
+func (m *Model) RenderStyled(inner domain.Size, styles RenderStyles) renderer.Frame {
+	frame := renderer.NewFrame(max(inner.Cols, 0), max(inner.Rows, 0))
+	if frame.Width == 0 || frame.Height == 0 {
+		return frame
+	}
+	base, selection := styles.Base, styles.Selection
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: base})
 	ui.DrawInputLine(frame, 0, "/", m.Query(), base, selection)
 	visible := frame.Height - 1

@@ -7,6 +7,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/stretchr/testify/require"
 )
@@ -270,6 +271,59 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 	}
 }
 
+func TestPaletteDescriptionKeepsInactiveRowSurfaceAcrossFallbacks(t *testing.T) {
+	paletteColors := [16]renderer.RGB{}
+	paletteColors[2] = renderer.RGB{R: 10, G: 230, B: 120}
+	paletteColors[10] = paletteColors[2]
+	accentTheme := themeui.Theme{
+		Foreground: renderer.RGB{R: 230, G: 230, B: 230}, Background: renderer.RGB{R: 8, G: 9, B: 10},
+		HasFG: true, HasBG: true, Known: true, TrueColor: true, UsePalette: true,
+		Palette: paletteColors, PaletteKnown: 1<<2 | 1<<10,
+	}
+	indexedTheme := accentTheme
+	indexedTheme.TrueColor = false
+	paletteOffTheme := accentTheme
+	paletteOffTheme.UsePalette = false
+	neutralTheme := paletteOffTheme
+	neutralTheme.PaletteKnown = 0
+
+	tests := []struct {
+		name   string
+		theme  themeui.Theme
+		policy domain.ThemeAccent
+	}{
+		{name: "truecolor accent", theme: accentTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2}},
+		{name: "indexed only", theme: indexedTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2}},
+		{name: "palette off", theme: paletteOffTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
+		{name: "forced dark", theme: themeui.BuiltinDark, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
+		{name: "forced light", theme: themeui.BuiltinLight, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
+		{name: "neutral fallback", theme: neutralTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			styles := themeui.Resolve(tt.theme, tt.policy).Styles
+			model := New(CommandResults([]command.Command{
+				cmd("ONE", "One", "first description"),
+				cmd("TWO", "Two", "second description"),
+			}))
+			model.Down()
+			frame := model.Render(domain.Size{Cols: 32, Rows: 3}, RenderOptions{Styles: RenderStyles{
+				Base: styles.PickerBase, Row: styles.SurfaceInactive,
+				Selection: styles.PickerSelection, Description: styles.PickerDescription,
+			}})
+			description := frame.At(4, 1).Style
+			require.Equal(t, styles.SurfaceInactive.Background, description.Background)
+			require.Equal(t, styles.SurfaceInactive.HasBackgroundRGB, description.HasBackgroundRGB)
+			require.Equal(t, styles.SurfaceInactive.BackgroundRGB, description.BackgroundRGB)
+			if tt.name == "indexed only" {
+				require.Equal(t, 2, description.Foreground)
+				require.False(t, description.HasBackgroundRGB)
+			}
+		})
+	}
+}
+
 func TestModelCompleteSelected(t *testing.T) {
 	jrs := cmd("JRS", "Jump", "Jump to recent session")
 	jrs.Arguments = command.ArgumentsRequired
@@ -399,4 +453,16 @@ func TestRenderGuidanceReplacesOnlyExactContextualRow(t *testing.T) {
 	if got := frameRow(frame, 1); got != "JRS jump to recent session 1" {
 		t.Fatalf("command row = %q, want contextual guidance without a feedback row", got)
 	}
+}
+
+func TestRenderStylesFillBaseRowsAndSelection(t *testing.T) {
+	m := New(CommandResults([]command.Command{cmd("ABC", "Alpha", "first")}))
+	base := renderer.Style{Foreground: 1, Background: 2}
+	row := renderer.Style{Foreground: 3, Background: 4}
+	selection := renderer.Style{Foreground: 5, Background: 6}
+	frame := m.Render(domain.Size{Cols: 24, Rows: 4}, RenderOptions{Styles: RenderStyles{Base: base, Row: row, Selection: selection, Description: row}})
+
+	require.True(t, frame.At(23, 3).Style.Equal(base), "unused interior keeps modal base")
+	require.True(t, frame.At(23, 0).Style.Equal(base), "input row keeps base surface")
+	require.True(t, frame.At(23, 1).Style.Equal(selection), "selected result owns active surface")
 }

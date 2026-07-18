@@ -11,6 +11,10 @@ import (
 )
 
 type RenderStyles struct {
+	// Base fills unused modal interior cells; Row is the ordinary inactive
+	// result surface. They are separate to retain the chrome hierarchy.
+	Base        renderer.Style
+	Row         renderer.Style
 	Selection   renderer.Style
 	Description renderer.Style
 }
@@ -53,7 +57,8 @@ func DefaultRenderStyles() RenderStyles {
 	selection.Inverse = true
 	description := renderer.DefaultStyle()
 	description.Italic = true
-	return RenderStyles{Selection: selection, Description: description}
+	base := renderer.DefaultStyle()
+	return RenderStyles{Base: base, Row: base, Selection: selection, Description: description}
 }
 
 func (m *Model) Insert(r rune) {
@@ -235,11 +240,14 @@ func (m *Model) clamp() {
 
 func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 	styles := opts.Styles
+	if styles == (RenderStyles{}) {
+		styles = DefaultRenderStyles()
+	}
 	frame := renderer.NewFrame(max(inner.Cols, 0), max(inner.Rows, 0))
 	if frame.Width == 0 || frame.Height == 0 {
 		return frame
 	}
-	base, selection, desc := renderer.DefaultStyle(), styles.Selection, styles.Description
+	base, row, selection, desc := styles.Base, styles.Row, styles.Selection, styles.Description
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: base})
 	if m == nil {
 		ui.DrawInputLine(frame, 0, "> ", "", base, selection)
@@ -269,7 +277,7 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 			break
 		}
 		match := m.matches[idx]
-		style := base
+		style := row
 		if idx == m.selected {
 			style = selection
 		}

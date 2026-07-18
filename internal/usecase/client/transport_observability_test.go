@@ -37,7 +37,7 @@ func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	defer in.unblock()
 	term.EXPECT().In().Return(in).Maybe()
 	term.EXPECT().Out().Return(&out).Maybe()
-	term.EXPECT().Flush().Run(func() { close(flushed) }).Return(nil).Once()
+	term.EXPECT().Flush().Run(func() { closeOnce(flushed) }).Return(nil).Maybe()
 	term.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
 
 	observer := &blockingClientRuntimeObserver{entered: make(chan struct{}), release: make(chan struct{})}
@@ -46,6 +46,7 @@ func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	acked := make(chan struct{})
 	transport := portsmocks.NewMockTransport(t)
 	transport.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	transport.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	transport.EXPECT().Send(isType(ports.MsgAck)).Run(func(ports.Frame) { close(acked) }).Return(nil).Once()
 	unblock := scriptRecv(transport,
 		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
@@ -70,7 +71,7 @@ func TestBlockingRuntimeObserverDoesNotDelayTerminalFlushOrACK(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Attach did not complete after observer release")
 	}
-	require.Equal(t, "flush-before-observe", out.String())
+	require.Equal(t, "\x1b]10;?\x07\x1b]11;?\x07\x1b]4;0;?;1;?;2;?;3;?;4;?;5;?;6;?;7;?;8;?;9;?;10;?;11;?;12;?;13;?;14;?;15;?\x07\x1b[?2031$pflush-before-observe", out.String())
 	require.Equal(t, int32(1), restores.Load())
 }
 
@@ -86,6 +87,7 @@ func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	defer reporter.Close()
 	transport := portsmocks.NewMockTransport(t)
 	transport.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	transport.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	unblock := scriptRecv(transport,
 		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
 		recvItem{f: frameOf(ports.MsgOutput, ports.MarshalOutput(ports.Output{Data: []byte("unchanged-by-observer"), NewStateNum: 3}))},
@@ -98,7 +100,7 @@ func TestTerminalFlushBoundaryTransportObservability(t *testing.T) {
 	err := runTestClient(context.Background(), testDependencies(transportDialer{transport: transport}, term, realClock{}, nil, reporter), client.AttachRequest{Intent: ports.IntentEphemeral})
 	require.NoError(t, err)
 	reporter.Flush()
-	require.Equal(t, "unchanged-by-observer", out.String(), "observer must not alter terminal bytes")
+	require.Equal(t, "\x1b]10;?\x07\x1b]11;?\x07\x1b]4;0;?;1;?;2;?;3;?;4;?;5;?;6;?;7;?;8;?;9;?;10;?;11;?;12;?;13;?;14;?;15;?\x07\x1b[?2031$punchanged-by-observer", out.String(), "observer must not alter terminal bytes")
 	require.Equal(t, int32(1), restores.Load())
 	// Carriage spans belong only to concrete adapters. The client owns the
 	// post-successful-flush terminal boundary, before its ACK is queued.

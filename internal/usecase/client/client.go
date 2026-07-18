@@ -77,20 +77,6 @@ func (s *terminalThemeState) snapshot() ports.Theme {
 	return s.theme
 }
 
-// clearPalette invalidates entries from a previous terminal color query while
-// retaining independently reported foreground, background, and scheme data.
-func (s *terminalThemeState) clearPalette() ports.Theme {
-	return s.update(func(theme *ports.Theme) {
-		theme.PaletteKnown = 0
-		theme.Palette = [16]renderer.RGB{}
-	})
-}
-
-func (s *terminalThemeState) reportedTheme() (ports.Theme, bool) {
-	theme := s.snapshot()
-	return theme, theme.HasForeground || theme.HasBackground || theme.SchemeKnown || theme.PaletteKnown != 0
-}
-
 // milestones tracks lifecycle progress so a failure can report which stages
 // were never reached — the key diagnostic when an attach dies early.
 type milestones struct {
@@ -181,6 +167,9 @@ type Runner struct {
 	clipboard       ports.ClipboardReader
 	logger          *slog.Logger
 	runtimeObserver ports.SerializedRuntimeObserver
+
+	inputMu sync.Mutex
+	input   *terminalInputPump
 }
 
 // NewRunner constructs a client runner. A nil logger uses the process default.
@@ -197,6 +186,21 @@ func NewRunner(deps Dependencies) *Runner {
 		logger:          log,
 		runtimeObserver: deps.RuntimeObserver,
 	}
+}
+
+// terminalInput returns the Runner-owned sole reader. It survives sequential
+// Run calls because a caller-owned reader may remain blocked after an attach
+// exits and therefore cannot safely be replaced by another reader.
+func (r *Runner) terminalInput() *terminalInputPump {
+	r.inputMu.Lock()
+	defer r.inputMu.Unlock()
+
+	if r.input == nil || r.input.hasExited() || r.input.isClosed() {
+		r.input = newTerminalInputPump(r.term.In())
+		r.input.start()
+	}
+	r.input.resume()
+	return r.input
 }
 
 // Run connects and runs the attach client. It owns the terminal lifecycle
@@ -244,6 +248,22 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		rawEntered: &rawEntered,
 		stage:      reconnectStageOfflineRetrying,
 	}
+	var input *terminalInputPump
+	defer func() {
+		if input != nil {
+			input.suspend()
+		}
+	}()
+	originalEnterRaw := enterRaw
+	enterRaw = func() error {
+		if err := originalEnterRaw(); err != nil {
+			return err
+		}
+		if input == nil {
+			input = r.terminalInput()
+		}
+		return nil
+	}
 
 	for {
 		transport, err := r.dialer.Dial(ctx)
@@ -279,6 +299,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			enterRaw:    enterRaw,
 			reconnect:   reconnect,
 			linkEvents:  linkEvents,
+			terminalInput: func() *terminalInputPump {
+				return input
+			},
 		}).run(ctx)
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
@@ -418,16 +441,17 @@ func sleepReconnectWithResizeEvents(ctx context.Context, clk ports.Clock, d time
 }
 
 type attachAttempt struct {
-	runner      *Runner
-	transport   ports.Transport
-	request     AttachRequest
-	resumeToken uint64
-	clientID    [16]byte
-	milestones  *milestones
-	themeState  *terminalThemeState
-	enterRaw    func() error
-	reconnect   *reconnectUI
-	linkEvents  <-chan ports.LinkEvent
+	runner        *Runner
+	transport     ports.Transport
+	request       AttachRequest
+	resumeToken   uint64
+	clientID      [16]byte
+	milestones    *milestones
+	themeState    *terminalThemeState
+	enterRaw      func() error
+	reconnect     *reconnectUI
+	linkEvents    <-chan ports.LinkEvent
+	terminalInput func() *terminalInputPump
 }
 
 type attachResult struct {
@@ -477,6 +501,16 @@ func boundedPreWelcome(ctx context.Context, clk ports.Clock, transport ports.Tra
 		<-completed
 		return true, context.DeadlineExceeded
 	}
+}
+
+// paletteSlot validates the scanner's signed slot before narrowing it for the
+// wire accumulator. Keep this boundary even though the in-tree Scanner also
+// validates slots: callbacks are an interface boundary.
+func paletteSlot(slot int) (uint8, bool) {
+	if slot < 0 || slot > 15 {
+		return 0, false
+	}
+	return uint8(slot), true
 }
 
 // DetectTrueColor reports whether TERM/COLORTERM advertise direct color support.
@@ -586,50 +620,160 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		return welcomedResult(err)
 	}
 	reconnect.clear()
-	reportedTheme, restoreTheme := themeState.reportedTheme()
 
 	// 4. Derive a cancellable context so the pumps always unwind when the
-	// loop returns. cancel runs first (LIFO): it signals the pumps; the
-	// deferred Close above then unblocks any pump parked in a syscall.
+	// loop returns. The attach loop is the sole terminal writer and palette
+	// coordinator owner.
 	loopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	input := (*terminalInputPump)(nil)
+	if a.terminalInput != nil {
+		input = a.terminalInput()
+	}
+	ownedInput := input == nil
+	if ownedInput {
+		input = newTerminalInputPump(term.In())
+		input.start()
+		defer input.stop()
+	}
+	inputConsumer := input.claim()
+	claimActive := true
+	revokeInputClaim := func() {
+		if claimActive {
+			input.revoke(inputConsumer)
+			claimActive = false
+		}
+	}
+	// Register revocation before any palette publication or terminal I/O: both
+	// can fail before the stdin scanner is started, and a reconnect must still
+	// be able to claim this lifecycle-owned reader.
+	defer revokeInputClaim()
 
 	sendCh := make(chan ports.Frame, sendQueueDepth)
-	if restoreTheme {
-		sendCh <- ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(reportedTheme)}
-	}
 	ackQueue := newCumulativeAckQueue()
 	sendErrCh := make(chan error, 1)
+	senderStarted := false
+	paletteEvents := make(chan paletteGenerationEvent, 32)
+	var activeGeneration atomic.Uint64
+	coordinator := newPaletteGenerationCoordinator()
+	type paletteTimer struct {
+		timer  ports.Timer
+		cancel chan struct{}
+	}
+	drainTimers := map[paletteGenerationID]paletteTimer{}
+	completionTimers := map[paletteGenerationID]paletteTimer{}
+	cancelTimer := func(timers map[paletteGenerationID]paletteTimer, id paletteGenerationID) {
+		if timer, ok := timers[id]; ok {
+			timer.timer.Stop()
+			close(timer.cancel)
+			delete(timers, id)
+		}
+	}
+	publish := func(snapshot ports.Theme) error {
+		frame := ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(snapshot)}
+		// The initial cleared snapshot is sent before the sender exists. This
+		// keeps the generation publication ordered before the first query and
+		// avoids leaving a queued Theme behind an immediate detach.
+		if !senderStarted {
+			if err := transport.Send(frame); err != nil {
+				return fmt.Errorf("sending initial theme: %w", err)
+			}
+			return nil
+		}
+		select {
+		case sendCh <- frame:
+			return nil
+		case <-loopCtx.Done():
+			return context.Canceled
+		}
+	}
+	processPaletteActions := func(actions []paletteGenerationAction) error {
+		for _, action := range actions {
+			switch action.kind {
+			case paletteActionPublishCleared:
+				if err := publish(action.theme); err != nil {
+					return fmt.Errorf("publishing theme: %w", err)
+				}
+			case paletteActionPublishFinal:
+				themeState.update(func(current *ports.Theme) { *current = action.theme })
+				if err := publish(action.theme); err != nil {
+					return fmt.Errorf("publishing theme: %w", err)
+				}
+			case paletteActionWriteDrain, paletteActionWriteBatch:
+				if _, err := term.Out().Write([]byte(action.bytes)); err != nil {
+					return fmt.Errorf("writing palette query: %w", err)
+				}
+				if err := term.Flush(); err != nil {
+					return fmt.Errorf("flushing palette query: %w", err)
+				}
+			case paletteActionArmDrainDeadline, paletteActionArmCompletionDeadline:
+				timer := clk.NewTimer(action.deadline)
+				entry := paletteTimer{timer: timer, cancel: make(chan struct{})}
+				timers := drainTimers
+				kind := paletteEventDrainDeadline
+				if action.kind == paletteActionArmCompletionDeadline {
+					timers = completionTimers
+					kind = paletteEventCompletionDeadline
+				}
+				timers[action.id] = entry
+				go func(id paletteGenerationID, eventKind paletteGenerationEventKind, timer paletteTimer) {
+					select {
+					case <-timer.timer.C():
+						select {
+						case paletteEvents <- paletteGenerationEvent{id: id, kind: eventKind}:
+						case <-loopCtx.Done():
+						}
+					case <-timer.cancel:
+					case <-loopCtx.Done():
+					}
+				}(action.id, kind, entry)
+			case paletteActionCancelDrainDeadline:
+				cancelTimer(drainTimers, action.id)
+			case paletteActionCancelCompletionDeadline:
+				cancelTimer(completionTimers, action.id)
+			}
+		}
+		return nil
+	}
+	defer func() {
+		for id := range drainTimers {
+			cancelTimer(drainTimers, id)
+		}
+		for id := range completionTimers {
+			cancelTimer(completionTimers, id)
+		}
+	}()
 
-	// Palette re-queries use a private-mode query as an ordered boundary. The
-	// stdin pump drains terminal replies through its mode-specific response
-	// before it permits the main loop to publish the cleared scheme and issue
-	// QueryColors. This separates bytes already queued (including
-	// Scanner.pending) from replacement replies without allowing a second
-	// goroutine to write to the terminal.
-	colorQueryCh := make(chan colorQueryRequest)
-	paletteReadyCh := make(chan paletteQueryReady)
-	requestColors := func() (colorQueryRequest, bool) {
-		request := colorQueryRequest{boundaryWritten: make(chan struct{})}
-		select {
-		case colorQueryCh <- request:
-		case <-loopCtx.Done():
-			return colorQueryRequest{}, false
-		}
-		select {
-		case <-request.boundaryWritten:
-			return request, true
-		case <-loopCtx.Done():
-			return colorQueryRequest{}, false
-		}
+	// Initial acquisition is a generation too. A reconnect publishes its one
+	// cleared snapshot from retained definitive colors, never a restore frame.
+	retained := themeState.snapshot()
+	initialActions := coordinator.start(retained, false)
+	activeGeneration.Store(uint64(coordinator.current.id))
+	if err := processPaletteActions(initialActions); err != nil {
+		return welcomedResult(err)
 	}
 
 	var clip ports.ClipboardReader
 	if remote {
 		clip = clipboard
 	}
+	senderStarted = true
 	go runSender(loopCtx, cancel, transport, sendCh, ackQueue, sendErrCh, log)
-	go (&stdinPump{ctx: loopCtx, cancel: cancel, in: term.In(), out: sendCh, clock: clk, themeState: themeState, clipboard: clip, logger: log, requestColors: requestColors, paletteReady: paletteReadyCh}).run()
+	stdinDone := make(chan struct{})
+	go func() {
+		defer close(stdinDone)
+		(&stdinPump{ctx: loopCtx, cancel: cancel, input: input, consumer: inputConsumer, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration}).run()
+	}()
+	// Scanner cancellation can leave an undecided marker suffix (including a
+	// standalone Escape) that it must hand back to the lifecycle-owned reader.
+	// Wait for that handoff before revoking the claim: otherwise a replacement
+	// scanner could claim the reader between revocation and preservation and
+	// lose the suffix.
+	defer func() {
+		cancel()
+		<-stdinDone
+		revokeInputClaim()
+	}()
 	go runResize(loopCtx, term.ResizeEvents(), sendCh, log)
 
 	// 5. Output/main loop: the only goroutine that touches the terminal.
@@ -668,29 +812,22 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				// token. Run closes this transport on the way out.
 				return welcomedResult(errLinkOffline)
 			}
-		case request := <-colorQueryCh:
-			if _, err := term.Out().Write(paletteBoundaryQuery); err != nil {
-				return welcomedResult(fmt.Errorf("vev: writing palette boundary query: %w", err))
+		case event := <-paletteEvents:
+			if event.kind == paletteEventScheme {
+				retained := themeState.update(func(current *ports.Theme) {
+					current.SchemeKnown = true
+					current.Light = event.light
+				})
+				actions := coordinator.start(retained, true)
+				activeGeneration.Store(uint64(coordinator.current.id))
+				if err := processPaletteActions(actions); err != nil {
+					return welcomedResult(err)
+				}
+				continue
 			}
-			if err := term.Flush(); err != nil {
-				return welcomedResult(fmt.Errorf("vev: flushing palette boundary query: %w", err))
+			if err := processPaletteActions(coordinator.handle(event)); err != nil {
+				return welcomedResult(err)
 			}
-			close(request.boundaryWritten)
-		case ready := <-paletteReadyCh:
-			// The private-mode response proves all earlier replies have been
-			// discarded by stdin. Publish the one cleared scheme snapshot before
-			// emitting the query; stdin remains paused until QueryColors has
-			// completed below.
-			clearedTheme := themeState.snapshot()
-			select {
-			case sendCh <- ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(clearedTheme)}:
-			case <-loopCtx.Done():
-				return welcomedResult(nil)
-			}
-			if err := term.QueryColors(); err != nil {
-				log.Warn("querying terminal colors", "err", err)
-			}
-			close(ready.queryIssued)
 		case r := <-recvCh:
 			if r.err != nil {
 				if errors.Is(r.err, io.EOF) {
@@ -838,160 +975,397 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 	}
 }
 
-// stdinPump pumps terminal input to the daemon as Input frames. A read error
-// or EOF is treated as a detach: it best-effort sends a Detach frame and
-// cancels the loop.
-//
-// Known MVP limitation: a bare io.Reader cannot be unblocked from outside,
-// so on shutdown initiated elsewhere (daemon detach, transport loss) this
-// goroutine stays parked in Read until the next byte arrives or the process
-// exits. That is harmless here — Run has already returned and restored the
-// terminal — and matches the standard pattern for stdin pumps; a
-// closable stdin duplicate could lift it later if ever needed.
-type colorQueryRequest struct {
-	boundaryWritten chan struct{}
+// terminalReadResult is copied by terminalInputPump before the next Read so
+// terminal input remains owned by one lifecycle reader across reconnects.
+type terminalReadResult struct {
+	data []byte
+	err  error
 }
 
-type paletteQueryReady struct {
-	queryIssued chan struct{}
+// terminalInputPump is the sole consumer of the caller-owned terminal reader.
+// It is started once after raw mode is entered and is reused by each attach
+// scanner. A bare io.Reader cannot be interrupted, so a Read may stay blocked
+// after Run exits; suspend drops any result received while inactive and never
+// closes caller-owned stdin. Reconnects and later runs never add another reader.
+type terminalInputPump struct {
+	in   io.Reader
+	done chan struct{}
+
+	mu sync.Mutex
+	// residual holds scanner bytes that were read but not delivered when an
+	// attempt is cancelled. It is consumed before the next terminal Read so a
+	// replacement scanner neither loses a partial marker nor replays bytes
+	// whose callbacks already ran.
+	residual           []byte
+	pending            *terminalReadResult
+	consumer           uint64
+	delivering         uint64
+	deliveringResidual bool
+	nextID             uint64
+	activation         uint64
+	closed             bool
+	active             bool
+	ready              chan struct{}
+	space              chan struct{}
+	state              chan struct{}
+	exited             chan struct{}
+	afterRevoke        func() // test synchronization hook
+	startMu            sync.Once
+	stopMu             sync.Once
 }
 
-type paletteDrain struct {
-	pending []byte
+func newTerminalInputPump(in io.Reader) *terminalInputPump {
+	space := make(chan struct{}, 1)
+	space <- struct{}{}
+	return &terminalInputPump{
+		in:         in,
+		done:       make(chan struct{}),
+		activation: 1,
+		active:     true,
+		ready:      make(chan struct{}, 1),
+		space:      space,
+		state:      make(chan struct{}, 1),
+		exited:     make(chan struct{}),
+	}
 }
 
-type palettePhase uint8
-
-const (
-	paletteAccepting palettePhase = iota
-	paletteBoundaryRequested
-	paletteDraining
-	paletteAwaitingQuery
-)
-
-var paletteBoundaryQuery = []byte("\x1b[?2031$p")
-
-// paletteBoundaryResponses accepts valid DECRQM status values for private
-// mode 2031. The private mode number correlates this reply with the query
-// that starts a replacement palette generation.
-var paletteBoundaryResponses = [][]byte{
-	[]byte("\x1b[?2031;0$y"),
-	[]byte("\x1b[?2031;1$y"),
-	[]byte("\x1b[?2031;2$y"),
-	[]byte("\x1b[?2031;3$y"),
-	[]byte("\x1b[?2031;4$y"),
+// claim grants one attach scanner exclusive permission to dequeue terminal
+// input. The reader itself remains lifecycle-owned across reconnects.
+func (p *terminalInputPump) claim() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.consumer != 0 {
+		panic("terminal input consumer already claimed")
+	}
+	p.nextID++
+	p.consumer = p.nextID
+	return p.consumer
 }
 
-// scan consumes the private-mode boundary response while forwarding every
-// other byte in order. It retains only a possible response prefix, so split
-// replies are consumed without dropping a user's partial escape sequence on
-// cancellation.
-func (d *paletteDrain) scan(data []byte, onBytes func([]byte), onBoundary func()) {
-	for _, b := range data {
-		d.pending = append(d.pending, b)
-		for len(d.pending) > 0 {
-			matched := false
-			possible := false
-			for _, response := range paletteBoundaryResponses {
-				if len(d.pending) > len(response) {
-					continue
-				}
-				match := true
-				for i := range d.pending {
-					if d.pending[i] != response[i] {
-						match = false
-						break
-					}
-				}
-				if !match {
-					continue
-				}
-				if len(d.pending) == len(response) {
-					matched = true
-				} else {
-					possible = true
-				}
-			}
-			if matched {
-				d.pending = nil
-				onBoundary()
-				break
-			}
-			if possible {
-				break
-			}
-			onBytes(d.pending[:1])
-			d.pending = d.pending[1:]
+// revoke invalidates an attempt before its replacement is allowed to claim
+// input. Pending bytes are deliberately retained for that replacement.
+func (p *terminalInputPump) revoke(consumer uint64) {
+	p.mu.Lock()
+	if p.consumer == consumer {
+		p.consumer = 0
+	}
+	// An unacknowledged read was never delivered by this scanner. Leave it
+	// pending and make it available to its replacement.
+	if p.delivering == consumer {
+		p.delivering = 0
+		p.deliveringResidual = false
+	}
+	p.mu.Unlock()
+	p.signalReady()
+	if p.afterRevoke != nil {
+		p.afterRevoke()
+	}
+}
+
+func (p *terminalInputPump) signalReady() {
+	select {
+	case p.ready <- struct{}{}:
+	default:
+	}
+}
+
+// enqueue retains at most one completed terminal read. The reader blocks
+// before publishing another result, keeping handoff buffering bounded.
+func (p *terminalInputPump) enqueue(result terminalReadResult, activation uint64) bool {
+	select {
+	case <-p.done:
+		return false
+	case <-p.space:
+	}
+	p.mu.Lock()
+	if p.closed || !p.active || p.activation != activation {
+		p.mu.Unlock()
+		p.space <- struct{}{}
+		return false
+	}
+	p.pending = &result
+	p.mu.Unlock()
+	p.signalReady()
+	return true
+}
+
+// take leases a ready result only to the current, non-cancelled consumer.
+// The raw read remains pending until ack, so revocation or cancellation before
+// scanner delivery leaves the exact bytes available to the next attempt.
+func (p *terminalInputPump) take(ctx context.Context, consumer uint64) (terminalReadResult, bool) {
+	p.mu.Lock()
+	if ctx.Err() != nil || p.consumer != consumer || p.delivering != 0 {
+		ready := (len(p.residual) != 0 || p.pending != nil) && p.delivering == 0
+		p.mu.Unlock()
+		if ready {
+			p.signalReady()
+		}
+		return terminalReadResult{}, false
+	}
+	if len(p.residual) != 0 {
+		result := terminalReadResult{data: append([]byte(nil), p.residual...)}
+		p.delivering = consumer
+		p.deliveringResidual = true
+		p.mu.Unlock()
+		return result, true
+	}
+	if p.pending == nil {
+		p.mu.Unlock()
+		return terminalReadResult{}, false
+	}
+	result := *p.pending
+	p.delivering = consumer
+	p.deliveringResidual = false
+	p.mu.Unlock()
+	return result, true
+}
+
+// preserveResidual records the undecided marker prefix after callbacks for the
+// rest of its read have completed. It is intentionally bounded by the marker
+// scanner's fixed response prefixes and is replayed before later terminal
+// reads on a replacement attempt.
+func (p *terminalInputPump) preserveResidual(consumer uint64, data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.consumer != consumer {
+		return
+	}
+	p.residual = append(p.residual[:0], data...)
+}
+
+// ack commits scanner delivery of a leased read and lets the lifecycle reader
+// accept the next result. Only the consumer that holds the lease can ack it.
+func (p *terminalInputPump) ack(consumer uint64) {
+	p.mu.Lock()
+	if p.consumer != consumer || p.delivering != consumer {
+		p.mu.Unlock()
+		return
+	}
+	wasResidual := p.deliveringResidual
+	if wasResidual {
+		p.residual = nil
+	} else {
+		p.pending = nil
+	}
+	p.delivering = 0
+	p.deliveringResidual = false
+	more := len(p.residual) != 0 || p.pending != nil
+	p.mu.Unlock()
+	if wasResidual {
+		if more {
+			p.signalReady()
+		}
+		return
+	}
+	p.space <- struct{}{}
+}
+
+func (p *terminalInputPump) finish() {
+	p.mu.Lock()
+	p.closed = true
+	p.mu.Unlock()
+	p.signalReady()
+	p.signalState()
+}
+
+func (p *terminalInputPump) signalState() {
+	select {
+	case p.state <- struct{}{}:
+	default:
+	}
+}
+
+func (p *terminalInputPump) waitForActive() (uint64, bool) {
+	for {
+		p.mu.Lock()
+		active, closed, activation := p.active, p.closed, p.activation
+		p.mu.Unlock()
+		if closed {
+			return 0, false
+		}
+		if active {
+			return activation, true
+		}
+		select {
+		case <-p.done:
+			return 0, false
+		case <-p.state:
 		}
 	}
 }
 
-func (d *paletteDrain) flush(onBytes func([]byte)) {
-	if len(d.pending) != 0 {
-		onBytes(d.pending)
-		d.pending = nil
+func (p *terminalInputPump) start() {
+	p.startMu.Do(func() {
+		go func() {
+			defer close(p.exited)
+			buf := make([]byte, stdinBufSize)
+			for {
+				activation, ok := p.waitForActive()
+				if !ok {
+					return
+				}
+				n, err := p.in.Read(buf)
+				result := terminalReadResult{err: err}
+				if n > 0 {
+					result.data = append([]byte(nil), buf[:n]...)
+				}
+				if !p.enqueue(result, activation) {
+					if p.isClosed() {
+						return
+					}
+					continue
+				}
+				if err != nil {
+					p.finish()
+					return
+				}
+			}
+		}()
+	})
+}
+
+func (p *terminalInputPump) hasExited() bool {
+	select {
+	case <-p.exited:
+		return true
+	default:
+		return false
 	}
 }
 
+func (p *terminalInputPump) isClosed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closed
+}
+
+// suspend drops input completed after an attach ends and parks the lifecycle
+// reader before its next Read. A later Run resumes this same reader, avoiding
+// both input replay between runs and a competing read on caller-owned stdin.
+func (p *terminalInputPump) suspend() {
+	p.mu.Lock()
+	p.active = false
+	discarded := p.pending != nil
+	p.residual = nil
+	p.pending = nil
+	p.delivering = 0
+	p.deliveringResidual = false
+	p.mu.Unlock()
+	if discarded {
+		select {
+		case p.space <- struct{}{}:
+		default:
+		}
+	}
+	p.signalState()
+	p.signalReady()
+}
+
+func (p *terminalInputPump) resume() {
+	p.mu.Lock()
+	if !p.closed && !p.active {
+		p.activation++
+		p.active = true
+	}
+	p.mu.Unlock()
+	p.signalState()
+}
+
+func (p *terminalInputPump) stop() {
+	p.stopMu.Do(func() {
+		// Mark closure while holding the same mutex that publishes a completed
+		// Read. A Read which returns after stop therefore cannot publish even
+		// when both done and space are selectable in enqueue.
+		p.mu.Lock()
+		p.closed = true
+		p.mu.Unlock()
+		close(p.done)
+		p.signalReady()
+		p.signalState()
+	})
+}
+
+// stdinPump parses terminal color reports into generation-tagged events while
+// preserving all ordinary terminal input byte-for-byte. It never reads the
+// terminal directly, publishes a Theme, or writes terminal output;
+// attachAttempt owns those operations.
 type stdinPump struct {
-	ctx           context.Context
-	cancel        context.CancelFunc
-	in            io.Reader
-	out           chan<- ports.Frame
-	clock         ports.Clock
-	themeState    *terminalThemeState
-	clipboard     ports.ClipboardReader
-	logger        *slog.Logger
-	requestColors func() (colorQueryRequest, bool)
-	paletteReady  chan<- paletteQueryReady
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	in                  io.Reader // compatibility for isolated scanner tests
+	input               *terminalInputPump
+	consumer            uint64
+	out                 chan<- ports.Frame
+	clock               ports.Clock
+	clipboard           ports.ClipboardReader
+	logger              *slog.Logger
+	paletteEvents       chan<- paletteGenerationEvent
+	activeGeneration    *atomic.Uint64
+	afterPaletteEvent   func(paletteGenerationEvent) // test synchronization hook
+	afterInputTake      func()                       // test synchronization hook
+	afterInputDelivered func()                       // test synchronization hook
 }
 
 func (p *stdinPump) run() {
-	ctx := p.ctx
-	cancel := p.cancel
-	in := p.in
-	out := p.out
-	clk := p.clock
-	themeState := p.themeState
-	requestColors := p.requestColors
-	clipboard := p.clipboard
-	log := p.logger
-	defer log.Debug("stdin pump exited")
-	buf := make([]byte, stdinBufSize)
+	defer p.logger.Debug("stdin pump exited")
 	var scanner theme.Scanner
+	var markers paletteMarkerScanner
 	var inputSeq uint64
 	var sendOK atomic.Bool
+	var undeliveredMu sync.Mutex
+	var undelivered []byte
 	sendOK.Store(true)
-	send := func(frame ports.Frame) {
+	send := func(frame ports.Frame) bool {
+		if !sendOK.Load() {
+			return false
+		}
 		select {
-		case out <- frame:
-		case <-ctx.Done():
+		case p.out <- frame:
+			if p.afterInputDelivered != nil {
+				p.afterInputDelivered()
+			}
+			return true
+		case <-p.ctx.Done():
 			sendOK.Store(false)
+			return false
 		}
 	}
-	// The coalescer reframes a bracketed paste split across reads into one
-	// MsgInput frame, so a marker boundary can never leave a lone ESC on the
-	// wire. Its emit runs one MsgInput per call, keeping the inputSeq contract.
-	coalescer := newPasteCoalescer(clk, func(data []byte) {
+	sendEvent := func(event paletteGenerationEvent) bool {
+		if !sendOK.Load() {
+			return false
+		}
+		select {
+		case p.paletteEvents <- event:
+			if p.afterPaletteEvent != nil {
+				p.afterPaletteEvent(event)
+			}
+			return true
+		case <-p.ctx.Done():
+			sendOK.Store(false)
+			return false
+		}
+	}
+	coalescer := newPasteCoalescer(p.clock, func(data []byte) {
 		if len(data) == 0 {
 			return
 		}
-		copyData := append([]byte(nil), data...)
 		inputSeq++
-		send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{InputSeq: inputSeq, Data: copyData})})
+		if !send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{InputSeq: inputSeq, Data: append([]byte(nil), data...)})}) {
+			undeliveredMu.Lock()
+			undelivered = append(undelivered, data...)
+			undeliveredMu.Unlock()
+		}
 	})
 	defer coalescer.Close()
-
-	// On a remote attach with a ClipboardReader configured, splice in the
-	// clipboard interceptor ahead of the coalescer so a bare Ctrl+V (0x16)
-	// becomes a clipboard image push instead of reaching the coalescer (and
-	// from there the remote pane) as an ordinary keystroke.
 	sink := coalescer.Scan
-	if clipboard != nil {
+	if p.clipboard != nil {
 		ci := &clipboardIntercept{
 			coalescer: coalescer,
-			reader:    clipboard,
-			log:       log,
+			reader:    p.clipboard,
+			log:       p.logger,
 			sendImage: func(mime string, data []byte) {
 				inputSeq++
 				send(ports.Frame{Type: ports.MsgImagePush, Payload: ports.MarshalImagePush(ports.ImagePush{InputSeq: inputSeq, Mime: mime, Data: data})})
@@ -1000,99 +1374,156 @@ func (p *stdinPump) run() {
 		}
 		sink = ci.Scan
 	}
+	input := p.input
+	ownedInput := input == nil
+	if ownedInput {
+		input = newTerminalInputPump(p.in)
+		input.start()
+		defer input.stop()
+	}
+	consumer := p.consumer
+	if consumer == 0 {
+		consumer = input.claim()
+		defer input.revoke(consumer)
+	}
+	// A marker prefix is ordinary terminal input until it becomes a complete
+	// DECRQM reply. If cancellation wins while it is withheld, preserve just
+	// that undecided suffix; the rest of its source read has already been
+	// delivered and must not be replayed by the next attempt.
+	defer func() {
+		if p.ctx.Err() != nil {
+			// Closing flushes any bracketed-paste prefix or buffer through the
+			// coalescer's emit callback. Failed ordinary-input deliveries are
+			// retained ahead of a trailing undecided marker prefix, matching their
+			// original order within the raw read.
+			held := coalescer.CloseAndTakeHeld()
+			undeliveredMu.Lock()
+			residual := append([]byte(nil), undelivered...)
+			undeliveredMu.Unlock()
+			residual = append(residual, held...)
+			residual = append(residual, markers.takePending()...)
+			input.preserveResidual(consumer, residual)
+		}
+	}()
 
-	phase := paletteAccepting
-	var drain paletteDrain
+	var markerTimer ports.Timer
+	var markerTimerC <-chan time.Time
+	flushMarkerPrefix := func() {
+		markers.flush(sink)
+		markerTimer = nil
+		markerTimerC = nil
+	}
+	// Disarm before processing a subsequent read. A deadline already ready at
+	// that boundary wins, so bytes cannot be retroactively consumed as a
+	// marker after they were due to be forwarded as ordinary input.
+	disarmMarkerDeadline := func() {
+		if markerTimer == nil {
+			return
+		}
+		select {
+		case <-markerTimerC:
+			flushMarkerPrefix()
+			return
+		default:
+		}
+		if !markerTimer.Stop() {
+			// Stop reports false only after expiry or a prior stop. This timer is
+			// owned only here, so expiry wins even if delivery to C races this
+			// select; do not let a late value consume a newly arrived suffix.
+			flushMarkerPrefix()
+			return
+		}
+		markerTimer = nil
+		markerTimerC = nil
+	}
+	armMarkerDeadline := func() {
+		disarmMarkerDeadline()
+		markerTimer = p.clock.NewTimer(paletteMarkerAmbiguityDeadline)
+		markerTimerC = markerTimer.C()
+	}
+	defer disarmMarkerDeadline()
+
 	for {
-		n, rerr := in.Read(buf)
-		if n > 0 {
-			themeChanged := false
-			queryNeeded := false
-			onBytes := func(data []byte) {
-				if phase != paletteDraining {
-					sink(data)
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-markerTimerC:
+			flushMarkerPrefix()
+		case <-input.ready:
+			result, ok := input.take(p.ctx, consumer)
+			if !ok {
+				if p.ctx.Err() != nil {
 					return
 				}
-				drain.scan(data, sink, func() {
-					phase = paletteAwaitingQuery
-					ready := paletteQueryReady{queryIssued: make(chan struct{})}
-					select {
-					case p.paletteReady <- ready:
-					case <-ctx.Done():
-						return
-					}
-					select {
-					case <-ready.queryIssued:
-						phase = paletteAccepting
-					case <-ctx.Done():
-					}
-				})
+				continue
 			}
-			scanner.Scan(buf[:n], func(kind int, rgb renderer.RGB) {
-				if phase != paletteAccepting {
-					return
-				}
-				themeState.update(func(current *ports.Theme) {
-					switch kind {
-					case 10:
-						current.HasForeground = true
-						current.Foreground = rgb
-					case 11:
-						current.HasBackground = true
-						current.Background = rgb
-					}
-				})
-				themeChanged = true
-			}, func(slot int, rgb renderer.RGB) {
-				if phase != paletteAccepting {
-					return
-				}
-				themeState.update(func(current *ports.Theme) {
-					current.PaletteKnown |= uint16(1) << slot
-					current.Palette[slot] = rgb
-				})
-				themeChanged = true
-			}, func(light bool) {
-				themeState.update(func(current *ports.Theme) {
-					current.SchemeKnown = true
-					current.Light = light
-				})
-				// The scheme itself begins a new palette generation. Suppress every
-				// color reply after it, including those remaining in this read, and
-				// defer invalidation until Scan completes so no partial snapshot is
-				// observable mid-chunk.
-				themeChanged = false
-				if phase == paletteAccepting {
-					phase = paletteBoundaryRequested
-					queryNeeded = true
-				}
-			}, onBytes)
-			if queryNeeded {
-				themeState.clearPalette()
-				if requestColors != nil {
-					if _, ok := requestColors(); !ok {
-						return
-					}
-					phase = paletteDraining
-				}
-			} else if themeChanged {
-				send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(themeState.snapshot())})
+			if p.afterInputTake != nil {
+				p.afterInputTake()
 			}
-			if !sendOK.Load() {
+			// The lease is not acknowledged until scanner delivery completes.
+			// This second check closes the cancellation window after take.
+			if p.ctx.Err() != nil {
 				return
 			}
-		}
-		if rerr != nil {
-			if phase == paletteDraining {
-				drain.flush(sink)
+			disarmMarkerDeadline()
+			// All scanner callbacks from this Read must retain this one generation.
+			// A scheme notification can start its replacement before a later byte in
+			// the same read is scanned; reloading there would misclassify an old
+			// completion marker as the replacement's drain response.
+			readGeneration := paletteGenerationID(p.activeGeneration.Load())
+			if len(result.data) > 0 {
+				scanner.Scan(result.data, func(kind int, rgb renderer.RGB) {
+					kindEvent := paletteEventForeground
+					if kind == 11 {
+						kindEvent = paletteEventBackground
+					}
+					sendEvent(paletteGenerationEvent{id: readGeneration, kind: kindEvent, rgb: rgb})
+				}, func(slot int, rgb renderer.RGB) {
+					// Scanner implementations are independently testable; retain the
+					// protocol boundary here too so a malformed implementation cannot
+					// wrap a negative or oversized int into an ANSI palette slot.
+					slot8, ok := paletteSlot(slot)
+					if !ok {
+						return
+					}
+					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventPalette, slot: slot8, rgb: rgb})
+				}, func(light bool) {
+					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventScheme, light: light})
+				}, func(data []byte) {
+					markers.scan(data, sink, func() {
+						sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventMarker})
+					})
+				})
+				if !sendOK.Load() {
+					// Commit the source read so callbacks accepted before cancellation
+					// are never replayed. The deferred handoff retains only ordinary
+					// bytes whose callback could not be delivered, plus any undecided
+					// trailing marker prefix.
+					input.ack(consumer)
+					return
+				}
 			}
-			// Best-effort detach notification, then unwind.
-			select {
-			case out <- ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})}:
-			case <-ctx.Done():
+			if markers.hasPendingPrefix() {
+				armMarkerDeadline()
 			}
-			cancel()
-			return
+			if result.err != nil {
+				disarmMarkerDeadline()
+				markers.flush(sink)
+				select {
+				case p.out <- ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})}:
+				case <-p.ctx.Done():
+				}
+				p.cancel()
+				return
+			}
+			// Commit every callback from this raw read before observing a
+			// concurrent cancellation. Any remaining marker prefix is retained
+			// by the deferred handoff above, so reconnects never duplicate the
+			// delivered bytes or lose a standalone Escape.
+			input.ack(consumer)
+			if p.ctx.Err() != nil {
+				return
+			}
 		}
 	}
 }

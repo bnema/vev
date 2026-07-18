@@ -295,7 +295,8 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, lease *att
 	// Contextual ranks are completely captured under paletteMu. Compose them
 	// without reading the live MRU, whose order may have changed mid-interaction.
 	bars := d.barStateForPaletteHints(sess, overlays.copyFeedback, overlays.paletteHints, overlays.paletteRecent)
-	bars.theme = ac.getTheme()
+	applied := ac.getAppliedTheme()
+	bars.theme = applied.Raw
 	attentionVisible := pulseVisible(bars.attentionFrame)
 	repaintAttachedClients = sess.ackAttention(tb, attentionVisible)
 
@@ -326,12 +327,14 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, lease *att
 	}
 	endCapture := marks.span(ports.RuntimeCaptureStart, ports.RuntimeCaptureEnd, 0)
 	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{
-		bars:        bars,
-		overlays:    capturedOverlays,
-		preview:     preview,
-		floatingCfg: floatingCfg,
-		reset:       reset,
-		lease:       lease,
+		bars:            bars,
+		overlays:        capturedOverlays,
+		preview:         preview,
+		floatingCfg:     floatingCfg,
+		styles:          applied.Resolved.Styles,
+		styleGeneration: applied.Generation,
+		reset:           reset,
+		lease:           lease,
 	})
 	endCapture(0, ok)
 	if !ok {
@@ -357,11 +360,13 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, lease *att
 	d.emitFrame(sess, ac, state, composed, &marks)
 }
 
+var fallbackChromeStyles = themeui.Resolve(themeui.Theme{}, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles
+
 func resolveStyles(styles []themeui.Styles) themeui.Styles {
 	if len(styles) > 0 {
 		return styles[0]
 	}
-	return themeui.NewStyles(themeui.Theme{})
+	return fallbackChromeStyles
 }
 
 type barCache struct {

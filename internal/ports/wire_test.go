@@ -321,6 +321,23 @@ func TestThemeGoldenAndRoundTrip(t *testing.T) {
 	assertTrailingGarbageFails(t, full, UnmarshalTheme)
 }
 
+func TestThemeGenerationClearedWireGoldenPreservesProtocolVersion(t *testing.T) {
+	// A generation clear retains defaults/capabilities but has no palette bits.
+	// This literal payload locks the existing 57-byte Theme layout while the
+	// full definitive-palette golden above locks the final publication.
+	cleared := Theme{
+		HasForeground: true,
+		Foreground:    renderer.RGB{R: 1, G: 2, B: 3},
+		HasBackground: true,
+		Background:    renderer.RGB{R: 4, G: 5, B: 6},
+		TrueColor:     true,
+		SchemeKnown:   true,
+	}
+	want := append([]byte{0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00}, make([]byte, 48)...)
+	require.Equal(t, want, MarshalTheme(cleared))
+	require.Equal(t, uint16(16), ProtocolVersion)
+}
+
 func TestResizeGoldenAndRoundTrip(t *testing.T) {
 	msg := Resize{Size: domain.Size{Cols: 100, Rows: 40}}
 	want := []byte{0x00, 0x64, 0x00, 0x28}

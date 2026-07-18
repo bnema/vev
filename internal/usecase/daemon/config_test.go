@@ -72,7 +72,7 @@ func TestApplyThemeCopiesTerminalPaletteAndHotReloadGatesIt(t *testing.T) {
 
 	require.Equal(t, clientPalette, ac.getClientTheme().Palette)
 	require.Equal(t, uint16(1<<1|1<<12), ac.getClientTheme().PaletteKnown)
-	require.True(t, ac.getTheme().UsePalette)
+	require.True(t, ac.getAppliedTheme().Raw.UsePalette)
 
 	cfg := domain.Defaults()
 	cfg.ThemePalette = false
@@ -80,7 +80,7 @@ func TestApplyThemeCopiesTerminalPaletteAndHotReloadGatesIt(t *testing.T) {
 
 	// ApplyConfig reuses the live client report and repaints without requiring
 	// a reconnect; only palette inheritance changes.
-	reloaded := ac.getTheme()
+	reloaded := ac.getAppliedTheme().Raw
 	require.Equal(t, clientPalette, reloaded.Palette)
 	require.Equal(t, uint16(1<<1|1<<12), reloaded.PaletteKnown)
 	require.False(t, reloaded.UsePalette)

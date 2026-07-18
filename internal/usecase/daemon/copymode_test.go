@@ -115,7 +115,6 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	snap := scopy.NewSnapshot(pane.history, pane.screen.Frame)
 	pane.mu.Unlock()
 	mode := scopy.NewMode(scopy.NewDocument(snap, domain.DefaultWordSeparators))
-	bars := barState{status: sess.statusSegments(true)}
 
 	base := renderer.NewFrame(80, 25)
 	target := domain.Rect{X: 0, Y: 1, Width: 80, Height: 23}
@@ -133,7 +132,7 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 200 {
-			_, _ = composeCopyClientFrame(mode, target, base, bars)
+			_, _ = composeCopyClientFrame(mode, target, base, resolveStyles(nil))
 		}
 	}()
 	wg.Wait()
@@ -160,7 +159,7 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 		}},
 		bars: bars,
 	}, composeCacheInput{}).frame
-	frame, damage := composeCopyClientFrame(mode, domain.Rect{X: 0, Y: 1, Width: 12, Height: 3}, base, bars)
+	frame, damage := composeCopyClientFrame(mode, domain.Rect{X: 0, Y: 1, Width: 12, Height: 3}, base, resolveStyles(nil))
 
 	require.Equal(t, 80, frame.Width)
 	require.Equal(t, 25, frame.Height)
@@ -880,4 +879,38 @@ func TestMouseDragCopyEntryCapturesSourceForYank(t *testing.T) {
 	require.NoError(t, err)
 	want := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte("alpha"+strings.Repeat(" ", 75)+"\nb")) + "\x07"
 	require.Equal(t, want, string(msg.Data))
+}
+
+func TestComposeCopyClientFrameStylesStatusContentAndSurround(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		selectMode bool
+		want       string
+	}{
+		{name: "scroll", want: "[SCROLL]"},
+		{name: "selection", selectMode: true, want: "[SELECT]"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			base := renderer.NewFrame(20, 8)
+			pane := newPane("split", nil, domain.Size{Cols: 12, Rows: 2})
+			pane.screen.Write([]byte("copy"))
+			mode := scopy.NewMode(scopy.NewDocument(scopy.NewSnapshot(pane.history, pane.screen.Frame), domain.DefaultWordSeparators))
+			if tt.selectMode {
+				mode.ToggleLineSelection()
+			}
+			styles := resolveStyles(nil)
+			styles.SurfaceBar = renderer.Style{Foreground: 7, Background: 3}
+			styles.CopyStatus = renderer.Style{Foreground: 5, Background: 4}
+
+			frame, _ := composeCopyClientFrame(mode, domain.Rect{X: 0, Y: 1, Width: 12, Height: 2}, base, styles)
+			status := frame.Row(frame.Height - 1)
+			for x := range 12 {
+				require.Truef(t, status[x].Style.Equal(styles.CopyStatus), "status content cell %d must use CopyStatus", x)
+			}
+			for x := 12; x < len(status); x++ {
+				require.Truef(t, status[x].Style.Equal(styles.SurfaceBar), "surrounding status cell %d must use SurfaceBar", x)
+			}
+			require.Contains(t, rowText(status), tt.want)
+		})
+	}
 }

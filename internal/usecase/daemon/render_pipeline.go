@@ -9,8 +9,10 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
+	"github.com/bnema/vev/internal/usecase/prompt"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
+	"github.com/bnema/vev/internal/usecase/visualsearch"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -36,11 +38,13 @@ type composeCacheInput struct {
 	titleGenerations        map[layout.PaneID]uint64
 	damage                  []renderer.Damage
 	floatingVisible         bool
+	floatingFocused         bool
 	floatingGeneration      uint64
 	floatingGeometry        floatingGeometry
 	floatingTitleGeneration uint64
 	bars                    barCache
 	theme                   themeui.Theme
+	styleGeneration         uint64
 }
 
 type composedRenderFrame struct {
@@ -77,17 +81,24 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 			copy(frame.Row(y), in.frame.Row(y))
 		}
 	}
-	styles := themeui.NewStyles(state.theme)
+	styles := state.styles
+	if styles == (themeui.Styles{}) {
+		// Direct/test-only composition has no applied snapshot; production
+		// capture always supplies immutable styles.
+		styles = fallbackChromeStyles
+	}
+	state.styles = styles
 	defaultDimmer := themeui.NewDimmer(state.theme)
+	neutralBorder := styles.NeutralBorder
 	inactivePaneDimmer := themeui.NewDimmer(state.theme, themeui.WithForegroundDimming(inactivePaneForegroundDimming))
 	drawTopBarSnapshot(frame.Row(0), state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
 	drawStatusBarState(frame.Row(rows+1), state.bars, styles)
 	content := domain.Rect{Y: 1, Width: width, Height: rows}
 	if state.layout.valid && state.layout.root != nil {
-		drawDividers(frame, state.layout.root, content, defaultDimmer.Dim(styles.Border))
+		drawDividers(frame, state.layout.root, content, defaultDimmer.Dim(neutralBorder))
 	}
 
-	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme || in.floatingVisible != state.floating.visible
+	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme || in.styleGeneration != state.styleGeneration || in.floatingVisible != state.floating.visible
 	titles := scratch.titleGenerations
 	if titles == nil {
 		titles = make(map[layout.PaneID]uint64, len(state.panes))
@@ -97,7 +108,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	for _, pane := range state.panes {
 		pl := offsetPlacement(pane.placement, 0, 1)
 		if pl.TitleBar.Height > 0 {
-			drawCapturedPaneTitleBar(frame, pl, pane.title, pane.focused, styles, defaultDimmer)
+			drawCapturedPaneTitleBar(frame, pl, pane.title, pane.focused, styles, neutralBorder, defaultDimmer)
 			if !full && in.titleGenerations[pane.id] != pane.titleGeneration {
 				damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: pl.TitleBar.X, Y: pl.TitleBar.Y, Width: pl.TitleBar.Width, Height: pl.TitleBar.Height})
 			}
@@ -119,14 +130,16 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	if state.floating.visible {
 		var floatingDamage []renderer.Damage
 		frame, floatingDamage = composeCapturedFloatingFrame(floatingComposeInput{
-			baseFrame:  baseFrame,
-			baseDamage: damage,
-			floating:   state.floating,
-			content:    content,
-			layout:     state.layout,
-			theme:      state.theme,
-			cache:      in,
-			full:       full || state.overlays.active(),
+			baseFrame:    baseFrame,
+			baseDamage:   damage,
+			floating:     state.floating,
+			content:      content,
+			layout:       state.layout,
+			theme:        state.theme,
+			borderMuted:  styles.BorderMuted,
+			borderActive: styles.BorderActive,
+			cache:        in,
+			full:         full || state.overlays.active(),
 		})
 		damage = floatingDamage
 	}
@@ -152,17 +165,15 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	cursorInputs := state.cursor
 	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || state.overlays.active()
 	cursor := desiredCapturedCursor(cursorInputs)
-	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, titleGenerations: titles, damage: damage, floatingVisible: state.floating.visible, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
+	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, floatingVisible: state.floating.visible, floatingFocused: state.floating.focused, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
 	outCache.bars.capture(baseFrame.Row(0), baseFrame.Row(rows+1))
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }
 
-func drawCapturedPaneTitleBar(frame renderer.Frame, pl layout.Placement, title string, focused bool, styles themeui.Styles, dimmer themeui.Dimmer) {
-	style := styles.Border
-	if focused {
-		style = styles.StatusBar
-	} else {
-		style = dimmer.Dim(style)
+func drawCapturedPaneTitleBar(frame renderer.Frame, pl layout.Placement, title string, focused bool, styles themeui.Styles, neutralBorder renderer.Style, dimmer themeui.Dimmer) {
+	style := styles.StatusBar
+	if !focused {
+		style = dimmer.Dim(neutralBorder)
 	}
 	for x := pl.TitleBar.X; x < pl.TitleBar.X+pl.TitleBar.Width && x < frame.Width; x++ {
 		frame.Set(x, pl.TitleBar.Y, renderer.Cell{Rune: ' ', Style: style})
@@ -191,29 +202,36 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	if snap.copyPane != nil {
 		o.copyPaneID = snap.copyPane.id
 	}
-	styles := themeui.NewStyles(state.theme)
+	styles := state.styles
+	if styles == (themeui.Styles{}) {
+		styles = fallbackChromeStyles
+	}
 	size := domain.Size{Cols: state.layout.area.Width, Rows: state.layout.area.Height + 2}
 	if snap.copySearchModel != nil {
 		o.copySearch.modal = copySearchModal
-		o.copySearch.inner = snap.copySearchModel.Render(rectSize(copySearchModal.Inner(size)), styles.Selection)
+		o.copySearch.focused = true
+		o.copySearch.inner = snap.copySearchModel.RenderStyled(rectSize(copySearchModal.Inner(size)), visualsearch.RenderStyles{Base: styles.PromptBase, Selection: styles.SearchSelection})
 	}
 	if snap.pickerActive && snap.pickerModel != nil {
 		o.picker.modal = pickerModal
-		renderStyles := picker.RenderStyles{Selection: styles.Selection, SelectionName: styles.PickerSelectionName, SelectionMuted: styles.PickerSelectionMuted, Name: styles.PickerName, Detail: styles.PaletteDesc, Base: renderer.DefaultStyle(), Separator: styles.PickerSeparator}
+		o.picker.focused = true
+		renderStyles := picker.RenderStyles{Background: styles.PickerBase, Selection: styles.PickerSelection, SelectionName: styles.PickerSelectionName, SelectionMuted: styles.PickerSelectionMuted, Name: styles.SurfaceInactive, Detail: styles.PickerDescription, Base: styles.SurfaceInactive, Separator: styles.PickerSeparator}
 		o.picker.inner = snap.pickerModel.Render(rectSize(pickerModal.Inner(size)), state.preview, renderStyles)
 	}
 	if snap.paletteActive && snap.paletteModel != nil {
 		o.palette.modal = paletteModalFor(size, paletteCfg)
+		o.palette.focused = true
 		guidance := ""
 		if snap.paletteHints != nil {
 			guidance = snap.paletteHints.Feedback
 		}
 		o.paletteGuidance = snap.paletteFeedback
-		o.palette.inner = snap.paletteModel.Render(rectSize(o.palette.modal.Inner(size)), palette.RenderOptions{Styles: palette.RenderStyles{Selection: styles.Selection, Description: styles.PaletteDesc}, Guidance: guidance, Feedback: snap.paletteFeedback})
+		o.palette.inner = snap.paletteModel.Render(rectSize(o.palette.modal.Inner(size)), palette.RenderOptions{Styles: palette.RenderStyles{Base: styles.PickerBase, Row: styles.SurfaceInactive, Selection: styles.PickerSelection, Description: styles.PickerDescription}, Guidance: guidance, Feedback: snap.paletteFeedback})
 	}
 	if snap.promptActive && snap.promptModel != nil {
 		o.prompt.modal = promptModalFor(snap.promptModel.Title())
-		o.prompt.inner = snap.promptModel.Render(rectSize(o.prompt.modal.Inner(size)), styles.Accent)
+		o.prompt.focused = true
+		o.prompt.inner = snap.promptModel.RenderStyled(rectSize(o.prompt.modal.Inner(size)), prompt.RenderStyles{Base: styles.PromptBase, Selection: styles.SurfaceActive})
 	}
 	state.cursor.hiddenByOverlay = o.active()
 }
@@ -238,7 +256,7 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 				}
 			}
 		}
-		frame, damage = composeCopyClientFrame(o.copyMode, target, frame, state.bars)
+		frame, damage = composeCopyClientFrame(o.copyMode, target, frame, state.styles)
 	}
 	layoutSnapshot := tabLayoutSnapshot{placements: state.layout.placements, area: state.layout.area, focus: state.layout.focus, ok: state.layout.valid}
 	if o.paletteActive && !state.floating.visible {
@@ -248,7 +266,11 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 		if modal.inner.Width == 0 && modal.inner.Height == 0 {
 			continue
 		}
-		inner := modal.modal.Composite(frame, themeui.NewStyles(state.theme).Border)
+		border := state.styles.BorderMuted
+		if modal.focused {
+			border = state.styles.BorderActive
+		}
+		inner := modal.modal.Composite(frame, border, state.styles.PickerBase)
 		for y := range min(inner.Height, modal.inner.Height) {
 			copy(frame.Row(inner.Y + y)[inner.X:inner.X+min(inner.Width, modal.inner.Width)], modal.inner.Row(y)[:min(inner.Width, modal.inner.Width)])
 		}

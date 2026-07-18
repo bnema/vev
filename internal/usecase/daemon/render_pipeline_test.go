@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/testutil/replaytest"
 	"github.com/bnema/vev/internal/usecase/layout"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
@@ -223,6 +224,7 @@ func TestComposeEmitExactReplayTiledFloatingBarsOverlayAndCursor(t *testing.T) {
 		bars:     barState{status: statusSnapshot{session: "sess", tabs: []statusTab{{name: "tab", active: true}}}, topRight: "R", bottomRight: "B"},
 		overlays: capturedOverlayRenderState{promptActive: true, prompt: capturedModal{modal: ui.Modal{FixedWidth: 8, FixedHeight: 3, Title: "Prompt"}, inner: modalInner}},
 		cursor:   capturedCursorInputs{row: 1, col: 2, visible: true, renderable: true, content: domain.Rect{X: 4, Y: 2, Width: 4, Height: 1}},
+		styles:   resolveStyles(nil),
 	}
 	composed := composeFrame(state, composeCacheInput{})
 	require.Equal(t, []string{" tab       R", "AAAAAAAAAAAA", "BB┌Prompt┐BB", "CC│PROMPT│CC", "DD└──────┘DD", "EEEEEEEEEEEE", " sess      B"}, frameRows(composed.frame))
@@ -287,6 +289,33 @@ func TestComposeEmitExactReplaySafeAndUnsafeScroll(t *testing.T) {
 			again, err := stream.renderer.Draw(second.frame, nil)
 			require.NoError(t, err)
 			require.Empty(t, again, "renderer shadow must equal replayed terminal state")
+		})
+	}
+}
+
+func TestComposeCapturedOverlaysUsesCachedModalRoles(t *testing.T) {
+	muted := renderer.Style{Foreground: 1, Background: 2}
+	active := renderer.Style{Foreground: 3, Background: 4}
+	interior := renderer.Style{Foreground: 5, Background: 6}
+	modal := ui.Modal{FixedWidth: 6, FixedHeight: 4, Title: "x"}
+
+	for _, tt := range []struct {
+		name    string
+		focused bool
+		border  renderer.Style
+	}{
+		{name: "unfocused", focused: false, border: muted},
+		{name: "focused", focused: true, border: active},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := capturedRenderState{
+				styles:   themeui.Styles{PickerBase: interior, BorderMuted: muted, BorderActive: active},
+				overlays: capturedOverlayRenderState{prompt: capturedModal{modal: modal, inner: renderer.NewFrame(1, 1), focused: tt.focused}},
+			}
+			frame, _ := composeCapturedOverlays(state, renderer.NewFrame(10, 8), nil, domain.Rect{})
+			bounds := modal.Bounds(domain.Size{Cols: 10, Rows: 8})
+			require.True(t, frame.At(bounds.X, bounds.Y).Style.Equal(tt.border), "border uses cached focused role")
+			require.True(t, frame.At(bounds.X+2, bounds.Y+2).Style.Equal(interior), "unrendered modal interior uses cached chrome role")
 		})
 	}
 }

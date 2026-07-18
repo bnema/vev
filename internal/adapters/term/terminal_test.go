@@ -10,8 +10,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 )
 
-const wantColorQueries = "\x1b]10;?\x07\x1b]11;?\x07\x1b]4;0;?;1;?;2;?;3;?;4;?;5;?;6;?;7;?;8;?;9;?;10;?;11;?;12;?;13;?;14;?;15;?\x07"
-
 // pipePair returns an os.Pipe and a goroutine that continuously copies
 // everything written to the write end into captured, closing done once
 // the write end is closed (EOF).
@@ -62,9 +60,12 @@ func TestTerminal_EnterRaw_NonTTY_EmitsAltScreenAndCursorEscapes(t *testing.T) {
 	_ = outW.Close()
 	<-done
 
-	want := altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + wantColorQueries + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + altScreenExit
+	want := altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + altScreenExit
 	if got := captured.String(); got != want {
 		t.Fatalf("captured escapes = %q, want %q", got, want)
+	}
+	if got := captured.String(); bytes.Contains([]byte(got), []byte("\x1b]10;?")) || bytes.Contains([]byte(got), []byte("\x1b]4;")) {
+		t.Fatalf("EnterRaw emitted a color query: %q", got)
 	}
 }
 
@@ -100,34 +101,11 @@ func TestTerminal_EnterRaw_IsIdempotentAcrossCalls(t *testing.T) {
 	_ = outW.Close()
 	<-done
 
-	// Alt-screen/cursor/theme-query escapes must appear exactly once for enter and
-	// cursor/alt-screen exits exactly once, regardless of how many times
-	// EnterRaw/restore were called.
-	want := altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + wantColorQueries + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + altScreenExit
+	// Alt-screen/cursor escapes must appear exactly once for enter and exits
+	// exactly once, regardless of how many times EnterRaw/restore were called.
+	want := altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + altScreenExit
 	if got := captured.String(); got != want {
 		t.Fatalf("captured escapes = %q, want %q", got, want)
-	}
-}
-
-func TestTerminal_QueryColors(t *testing.T) {
-	inR, inW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe(in): %v", err)
-	}
-	defer func() { _ = inW.Close() }()
-	defer func() { _ = inR.Close() }()
-
-	outR, outW, captured, done := pipeCapture(t)
-	defer func() { _ = outR.Close() }()
-
-	tm := NewWithFiles(inR, outW)
-	if err := tm.QueryColors(); err != nil {
-		t.Fatalf("QueryColors: %v", err)
-	}
-	_ = outW.Close()
-	<-done
-	if got := captured.String(); got != wantColorQueries {
-		t.Fatalf("captured = %q, want %q", got, wantColorQueries)
 	}
 }
 

@@ -31,9 +31,6 @@ const (
 	bracketedPasteDisable = "\x1b[?2004l"
 	colorSchemeEnable     = "\x1b[?2031h"
 	colorSchemeDisable    = "\x1b[?2031l"
-	oscDefaultColorQuery  = "\x1b]10;?\x07\x1b]11;?\x07"
-	oscPaletteQuery       = "\x1b]4;0;?;1;?;2;?;3;?;4;?;5;?;6;?;7;?;8;?;9;?;10;?;11;?;12;?;13;?;14;?;15;?\x07"
-	oscColorQuery         = oscDefaultColorQuery + oscPaletteQuery
 )
 
 // bufSize is the batched writer's buffer capacity.
@@ -110,7 +107,7 @@ func (t *Terminal) EnterRaw() (func() error, error) {
 	}
 	t.orig = old
 
-	if _, err := t.bw.WriteString(altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + oscColorQuery); err != nil {
+	if _, err := t.bw.WriteString(altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable); err != nil {
 		_ = t.restoreRawLocked()
 		return nil, fmt.Errorf("term: enter alt screen: %w", err)
 	}
@@ -235,20 +232,6 @@ func (t *Terminal) stopResizeLocked() {
 		}
 	}
 	t.resizeWG.Wait()
-}
-
-// QueryColors re-emits OSC 10/11 queries for default foreground/background
-// followed by one batched OSC 4 query for palette slots 0 through 15.
-func (t *Terminal) QueryColors() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if _, err := t.bw.WriteString(oscColorQuery); err != nil {
-		return fmt.Errorf("term: query colors: %w", err)
-	}
-	if err := t.bw.Flush(); err != nil {
-		return fmt.Errorf("term: query colors: %w", err)
-	}
-	return nil
 }
 
 // In returns the reader for the controlling terminal's input.

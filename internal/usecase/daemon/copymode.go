@@ -412,11 +412,10 @@ func routeCopyEscape(m *scopy.Mode, data []byte) (int, bool) {
 func isCopyEscapePrefix(data []byte) bool {
 	return len(data) == 2 && data[0] == 0x1b && (data[1] == '[' || data[1] == 'O') || len(data) == 3 && data[0] == 0x1b && data[1] == '[' && (data[2] == '5' || data[2] == '6')
 }
-func composeCopyClientFrame(mode *scopy.Mode, target domain.Rect, frame renderer.Frame, bars barState) (renderer.Frame, []renderer.Damage) {
+func composeCopyClientFrame(mode *scopy.Mode, target domain.Rect, frame renderer.Frame, styles themeui.Styles) (renderer.Frame, []renderer.Damage) {
 	if mode == nil || target.Width <= 0 || target.Height <= 0 || frame.Width <= 0 || frame.Height <= 0 {
 		return frame, nil
 	}
-	styles := themeui.NewStyles(bars.theme)
 	copyFrame := mode.Render(styles.CopyStatus, styles.Selection)
 	bodyRows := max(copyFrame.Height-1, 0)
 	for y := 0; y < target.Height && y < bodyRows && target.Y+y < frame.Height-1; y++ {
@@ -430,7 +429,7 @@ func composeCopyClientFrame(mode *scopy.Mode, target domain.Rect, frame renderer
 	}
 	statusY := frame.Height - 1
 	for x := range frame.Row(statusY) {
-		frame.Row(statusY)[x] = renderer.BlankCell()
+		frame.Row(statusY)[x] = renderer.Cell{Rune: ' ', Style: styles.SurfaceBar}
 	}
 	copy(frame.Row(statusY), copyFrame.Row(copyFrame.Height - 1)[:min(frame.Width, copyFrame.Width)])
 	return frame, []renderer.Damage{renderer.FullRedraw()}

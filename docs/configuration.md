@@ -5,8 +5,10 @@ vev reads `~/.config/vev/config` (`$XDG_CONFIG_HOME` respected). No file means d
 ```text
 # Theme: auto follows the client; dark/light use neutral built-in defaults.
 theme = auto
-# In auto mode, inherit the terminal's ANSI blue for chrome accents.
+# In auto mode with palette inheritance enabled, infer a terminal accent.
 theme.palette = on
+# Accent policy: auto or one exact ANSI slot number from 0 through 15.
+theme.accent = auto
 
 # Palette placement: auto, center, top-left, top, top-right, left, right,
 # bottom-left, bottom, or bottom-right.
@@ -66,11 +68,17 @@ code.rename-tab = RNT
 code.detach = DET
 ```
 
-Invalid values log a warning and keep the last valid value.
+Invalid values log a warning and resolve that setting to its default on both initial load and reload.
 
 ## Theme
 
-With `theme = auto`, vev follows the terminal's foreground, background, light/dark scheme, and ANSI palette as the terminal reports changes. `theme.palette = on` is the default and uses the terminal's blue for chrome accents when available; vev falls back to neutral foreground/background blends when the color is unavailable or lacks contrast. Set it to `off` for blend-only styling. Forced `theme = dark` or `theme = light` modes are always blend-only.
+With `theme = auto`, vev follows the terminal's reported foreground, background, light/dark scheme, and ANSI palette. `theme.palette = on` is the default. `theme.accent = auto` derives one accent from the terminal's chromatic ANSI colors; repeated terminal colors are preferred, otherwise vev uses an eligible blue slot when available. `theme.accent = 0` through `theme.accent = 15` selects exactly that ANSI slot. Arbitrary RGB values and `off` are not accepted for `theme.accent`.
+
+When the terminal provides truecolor defaults and a usable RGB palette slot, vev uses the resolved accent for active chrome and derives softer bar, inactive, recent-session, and border colors from it. It preserves readability by reducing a surface intensity when needed. Terminal application/pane colors are not recolored. Without truecolor default colors or a usable RGB resolved accent, chrome backgrounds remain neutral; an available selected ANSI slot can still decorate foregrounds or borders. An explicit unavailable slot is never replaced with another slot.
+
+Slots `0`, `7`, `8`, and `15` are valid explicit selections, but log a warning because conventional neutral slots may provide little or no accent separation. An invalid accent value logs a warning and falls back to `auto`, including on hot reload.
+
+`theme.palette = off` is authoritative: it keeps exact neutral foreground/background rendering and ignores `theme.accent`. Forced `theme = dark` or `theme = light` is also neutral and ignores both palette and accent policy. Configuration reload immediately reapplies the current terminal snapshot; vev updates a live palette when the terminal reports a light/dark scheme change, but cannot detect palette changes a terminal does not report.
 
 ## Bindings
 

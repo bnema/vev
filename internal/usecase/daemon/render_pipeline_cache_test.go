@@ -125,6 +125,30 @@ func TestComposeFrameCacheSkipsUndamagedBlitsAndInvalidatesFocusAndLayout(t *tes
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, out.damage)
 }
 
+func TestComposeFrameUsesCachedNeutralStructuralBorder(t *testing.T) {
+	theme := themeui.Theme{Known: true, TrueColor: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 220, G: 210, B: 200}, Background: renderer.RGB{R: 20, G: 30, B: 40}}
+	neutralBorder := renderer.Style{HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 170, G: 80, B: 30}}
+	expected := themeui.NewDimmer(theme).Dim(neutralBorder)
+
+	t.Run("divider", func(t *testing.T) {
+		state := cachedSplitState("horizontal-left", "left", layout.Horizontal, theme)
+		state.styles.NeutralBorder = neutralBorder
+
+		out := composeFrame(state, composeCacheInput{})
+		require.Equal(t, expected, out.frame.At(20, 1).Style)
+	})
+
+	t.Run("unfocused title", func(t *testing.T) {
+		state := cachedStackTitleState("collapsed", 1, true)
+		state.theme = theme
+		state.styles = themeui.Resolve(theme, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles
+		state.styles.NeutralBorder = neutralBorder
+
+		out := composeFrame(state, composeCacheInput{})
+		require.Equal(t, expected, out.frame.At(0, 1).Style)
+	})
+}
+
 func TestComposeFrameStackDrawsTitleBarsAndDimsCollapsed(t *testing.T) {
 	state := cachedStackTitleState("collapsed", 1, true)
 	state.theme = themeui.Theme{
@@ -135,6 +159,7 @@ func TestComposeFrameStackDrawsTitleBarsAndDimsCollapsed(t *testing.T) {
 		Foreground: renderer.RGB{R: 220, G: 210, B: 200},
 		Background: renderer.RGB{R: 20, G: 30, B: 40},
 	}
+	state.styles = themeui.Resolve(state.theme, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles
 	before := cloneCapturedStackState(state)
 
 	out := composeFrame(state, composeCacheInput{})
@@ -208,6 +233,7 @@ func cachedSplitState(fingerprint string, focus layout.PaneID, direction layout.
 		layout: capturedTabLayout{root: &layout.Node{Kind: layout.Split, Dir: direction, Children: []*layout.Node{layout.NewLeaf(left), layout.NewLeaf(right)}}, area: domain.Rect{Width: 41, Height: 5}, focus: focus, placements: placements, fingerprint: fingerprint, valid: true},
 		panes:  []capturedPaneRenderState{{id: left, frame: leftFrame, placement: placements[0], focused: focus == left, damage: []renderer.Damage{renderer.FullRedraw()}}, {id: right, frame: rightFrame, placement: placements[1], focused: focus == right, damage: []renderer.Damage{renderer.FullRedraw()}}},
 		theme:  theme,
+		styles: themeui.Resolve(theme, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles,
 	}
 }
 
@@ -221,6 +247,7 @@ func cachedStackTitleState(title string, generation uint64, reset bool) captured
 		reset:  reset,
 		layout: capturedTabLayout{root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(first), layout.NewLeaf(second)}, Expanded: second}, area: domain.Rect{Width: 20, Height: 5}, focus: second, placements: placements, fingerprint: "stack", valid: true},
 		panes:  []capturedPaneRenderState{{id: first, title: title, titleGeneration: generation, placement: placements[0]}, {id: second, frame: cachePaneFrame(20, 3, 'E'), title: "second", titleGeneration: 1, placement: placements[1], focused: true, damage: []renderer.Damage{renderer.FullRedraw()}}},
+		styles: resolveStyles(nil),
 	}
 }
 
@@ -241,7 +268,7 @@ func cloneCapturedStackState(in capturedRenderState) capturedRenderState {
 func cacheBarState(bottom string, reset bool) capturedRenderState {
 	pane := cachePaneFrame(6, 1, 'P')
 	placement := layout.Placement{ID: "pane", Content: domain.Rect{Width: 6, Height: 1}}
-	return capturedRenderState{reset: reset, layout: capturedTabLayout{area: domain.Rect{Width: 6, Height: 1}, focus: "pane", placements: []layout.Placement{placement}, fingerprint: "bar", valid: true}, panes: []capturedPaneRenderState{{id: "pane", frame: pane, placement: placement, focused: true, damage: []renderer.Damage{renderer.FullRedraw()}}}, bars: barState{bottomRight: bottom}}
+	return capturedRenderState{reset: reset, layout: capturedTabLayout{area: domain.Rect{Width: 6, Height: 1}, focus: "pane", placements: []layout.Placement{placement}, fingerprint: "bar", valid: true}, panes: []capturedPaneRenderState{{id: "pane", frame: pane, placement: placement, focused: true, damage: []renderer.Damage{renderer.FullRedraw()}}}, bars: barState{bottomRight: bottom}, styles: resolveStyles(nil)}
 }
 
 func cachePaneFrame(width, height int, r rune) renderer.Frame {
@@ -263,6 +290,7 @@ func cacheState(title string, generation uint64) capturedRenderState {
 		panes:    []capturedPaneRenderState{{id: "pane", frame: pane, placement: layout.Placement{ID: "pane", Content: domain.Rect{Width: 6, Height: 1}, TitleBar: domain.Rect{Width: 6, Height: 1}}, title: title, titleGeneration: generation, focused: true, damage: []renderer.Damage{renderer.FullRedraw()}}},
 		floating: capturedFloatingRenderState{visible: true, pane: capturedPaneRenderState{frame: floating, damage: []renderer.Damage{renderer.FullRedraw()}}, geometry: floatingGeometry{Bounds: domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}, Inner: domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}}, generation: generation, titleGeneration: generation},
 		bars:     barState{topRight: title, bottomRight: title},
+		styles:   resolveStyles(nil),
 	}
 }
 

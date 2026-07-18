@@ -30,7 +30,7 @@ func TestPaletteBackdropDimsSimultaneousCopyMode(t *testing.T) {
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	theme := backdropTheme()
-	ac.setTheme(theme)
+	ac.setThemeForTest(theme)
 	client := vt.NewScreen(80, 25)
 	pane := sess.tabs[0].focusedPane()
 	pane.screen.Write([]byte("\x1b[38;2;180;90;30mX"))
@@ -96,7 +96,7 @@ func TestPaletteBackdropKeepsSimultaneousPickerCrisp(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	ac.setTheme(backdropTheme())
+	ac.setThemeForTest(backdropTheme())
 	client := vt.NewScreen(80, 25)
 	pane := sess.tabs[0].focusedPane()
 	pane.screen.Write([]byte("X"))
@@ -117,7 +117,7 @@ func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	ac.setTheme(backdropTheme())
+	ac.setThemeForTest(backdropTheme())
 	client := vt.NewScreen(80, 25)
 	pane := sess.tabs[0].focusedPane()
 	pane.screen.Write([]byte("X"))
@@ -1178,7 +1178,7 @@ func TestComposeCopyClientFrameOverlaysBaseAtTarget(t *testing.T) {
 	mode := scopy.NewMode(scopy.NewDocument(document, domain.DefaultWordSeparators))
 	target := domain.Rect{X: 2, Y: 3, Width: 18, Height: 2}
 
-	frame, damage := composeCopyClientFrame(mode, target, base, barState{})
+	frame, damage := composeCopyClientFrame(mode, target, base, resolveStyles(nil))
 
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)
 	require.Equal(t, "##ab                ", rowText(frame.Row(3)))

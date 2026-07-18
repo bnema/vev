@@ -256,3 +256,12 @@ func TestOSC52LimitsAndBase64(t *testing.T) {
 	encoded := base64.StdEncoding.EncodeToString([]byte("hello"))
 	require.Equal(t, []byte("\x1b]52;c;"+encoded+"\x07"), OSC52FromBase64(encoded))
 }
+
+func TestCopyModeRenderStylesStatusFiller(t *testing.T) {
+	m := modeFor([]string{"alpha"}, 5)
+	status := renderer.Style{Foreground: 1, Background: 2}
+	selection := renderer.Style{Foreground: 3, Background: 4}
+	frame := m.Render(status, selection)
+
+	require.True(t, frame.At(4, frame.Height-1).Style.Equal(status), "status filler keeps cached status surface")
+}

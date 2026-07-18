@@ -158,15 +158,27 @@ func (c *pasteCoalescer) Buffering() bool {
 	return c.buffering || len(c.pending) > 0
 }
 
-// Close stops any pending timers and their goroutines. Held bytes are dropped:
-// Close runs only as the stdin pump unwinds on detach, when there is nowhere
-// left to deliver them.
+// Close stops any pending timers and their goroutines. Callers which hand input
+// to a replacement must first use CloseAndTakeHeld so undecided bytes survive.
 func (c *pasteCoalescer) Close() {
+	_ = c.CloseAndTakeHeld()
+}
+
+// CloseAndTakeHeld stops the coalescer and returns ordinary bytes withheld while
+// deciding whether an opening marker or complete bracketed paste would arrive.
+// The returned bytes retain their original order and are removed from c.
+func (c *pasteCoalescer) CloseAndTakeHeld() []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closed = true
 	c.stopFlushTimer()
 	c.stopSafetyTimer()
+	held := append([]byte(nil), c.pending...)
+	held = append(held, c.buf...)
+	c.pending = nil
+	c.buf = nil
+	c.buffering = false
+	return held
 }
 
 func (c *pasteCoalescer) startFlushTimer() {

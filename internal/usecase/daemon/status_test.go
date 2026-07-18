@@ -408,7 +408,7 @@ func TestStatusCompositionUsesTruecolorTheme(t *testing.T) {
 	win := sess.activeTab()
 	win.focusedPane().screen.Resize(12, 2)
 	win.size = domain.Size{Cols: 12, Rows: 2}
-	ac.setTheme(themeui.Theme{
+	ac.setThemeForTest(themeui.Theme{
 		Foreground: renderer.RGB{R: 220, G: 220, B: 220},
 		Background: renderer.RGB{R: 10, G: 20, B: 30},
 		HasFG:      true,
@@ -417,9 +417,10 @@ func TestStatusCompositionUsesTruecolorTheme(t *testing.T) {
 		Known:      true,
 	})
 
-	bars := barState{status: sess.statusSegments(true), theme: ac.getTheme()}
+	applied := ac.getAppliedTheme()
+	bars := barState{status: sess.statusSegments(true), theme: applied.Raw}
 	composed := composeFrame(capturedRenderState{
-		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 12, Height: 2}, valid: true}, bars: bars, theme: bars.theme,
+		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 12, Height: 2}, valid: true}, bars: bars, theme: bars.theme, styles: applied.Resolved.Styles, styleGeneration: applied.Generation,
 	}, composeCacheInput{})
 	out, err := renderer.New(renderer.Capabilities{}).Draw(composed.frame, composed.damage)
 
@@ -437,9 +438,9 @@ func TestStatusApplyThemeStoresClientAndPropagatesScreens(t *testing.T) {
 
 	d.applyTheme(sess, ac, msg)
 
-	require.Equal(t, renderer.RGB{R: 1, G: 2, B: 3}, ac.getTheme().Foreground)
-	require.True(t, ac.getTheme().SchemeKnown)
-	require.True(t, ac.getTheme().Light)
+	require.Equal(t, renderer.RGB{R: 1, G: 2, B: 3}, ac.getAppliedTheme().Raw.Foreground)
+	require.True(t, ac.getAppliedTheme().Raw.SchemeKnown)
+	require.True(t, ac.getAppliedTheme().Raw.Light)
 	assertSessionDefaultColors(t, sess, renderer.RGB{R: 1, G: 2, B: 3}, renderer.RGB{R: 4, G: 5, B: 6})
 	assertSessionColorScheme(t, sess, true)
 }
@@ -493,7 +494,7 @@ func TestApplyThemeForcedBuiltinThemePropagatesToChromeAndPanes(t *testing.T) {
 				TrueColor: true, SchemeKnown: true, Light: !tc.want.Light,
 			})
 
-			require.Equal(t, tc.want, ac.getTheme())
+			require.Equal(t, tc.want, ac.getAppliedTheme().Raw)
 			assertSessionDefaultColors(t, sess, tc.want.Foreground, tc.want.Background)
 			assertSessionColorScheme(t, sess, tc.want.Light)
 		})
@@ -529,7 +530,7 @@ func TestAttachClientAppliesForcedThemeBeforeMsgTheme(t *testing.T) {
 
 			ac, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
 
-			require.Equal(t, tc.want, ac.getTheme())
+			require.Equal(t, tc.want, ac.getAppliedTheme().Raw)
 			assertSessionDefaultColors(t, sess, tc.want.Foreground, tc.want.Background)
 			assertSessionColorScheme(t, sess, tc.want.Light)
 		})
@@ -1199,28 +1200,22 @@ func TestStatusBarContextualRanksPreserveOriginalRanksAndSelectedAccent(t *testi
 }
 
 func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
-	theme := themeui.Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 20, G: 20, B: 20}, HasFG: true, HasBG: true, TrueColor: true, Known: true}
-	styles := themeui.NewStyles(theme)
-	state := barState{status: statusSnapshot{session: "c"}, theme: theme, mru: []recentSession{{name: "a"}, {name: "b"}, {name: "c"}}}
+	theme := themeui.Theme{Foreground: renderer.RGB{R: 0xd8, G: 0xdc, B: 0xe8}, Background: renderer.RGB{R: 0x08, G: 0x09, B: 0x0a}, HasFG: true, HasBG: true, TrueColor: true, Known: true, UsePalette: true}
+	theme.Palette[2] = renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}
+	theme.Palette[10] = theme.Palette[2]
+	theme.PaletteKnown = 1<<2 | 1<<10
+	resolved := themeui.Resolve(theme, domain.ThemeAccent{Mode: domain.ThemeAccentAuto})
+	state := barState{status: statusSnapshot{session: "c"}, mru: []recentSession{{name: "a"}, {name: "b"}, {name: "c"}}}
 	row := make([]renderer.Cell, 16)
 
-	drawStatusBarState(row, state, styles)
+	drawStatusBarState(row, state, resolved.Styles)
 
-	firstFG := row[4].Style.ForegroundRGB.R
-	secondFG := row[7].Style.ForegroundRGB.R
-	thirdFG := row[10].Style.ForegroundRGB.R
-	require.Equal(t, styles.StatusBar.ForegroundRGB.R, firstFG)
-	require.Greater(t, firstFG, secondFG)
-	require.Greater(t, secondFG, thirdFG)
+	for index, cell := range []int{4, 7, 10} {
+		require.True(t, row[cell].Style.Equal(themeui.MRUStyle(resolved.Ramp, index, 3)))
+	}
+	require.NotEqual(t, resolved.Styles.SurfaceBar.BackgroundRGB, row[10].Style.BackgroundRGB, "oldest MRU remains distinct from the bar")
 
-	firstBG := row[4].Style.BackgroundRGB.R
-	secondBG := row[7].Style.BackgroundRGB.R
-	thirdBG := row[10].Style.BackgroundRGB.R
-	require.Equal(t, styles.StatusBar.BackgroundRGB.R, firstBG)
-	require.Greater(t, firstBG, secondBG)
-	require.Greater(t, secondBG, thirdBG)
-
-	plain := mruStyle(renderer.DefaultStyle(), themeui.Theme{}, 1, 3)
+	plain := resolveStyles(nil).MRUStyle(1, 3)
 	require.False(t, plain.HasForegroundRGB)
 	require.False(t, plain.HasBackgroundRGB)
 }
@@ -1400,6 +1395,101 @@ func TestStatusBarCopyFeedbackBoundaryWidths(t *testing.T) {
 			require.Equal(t, tt.want, rowText(row))
 		})
 	}
+}
+
+func TestStatusBarsUseCompleteSemanticSurfaces(t *testing.T) {
+	theme := themeui.Theme{
+		Foreground: renderer.RGB{R: 0xd8, G: 0xdc, B: 0xe8},
+		Background: renderer.RGB{R: 0x08, G: 0x09, B: 0x0a},
+		HasFG:      true,
+		HasBG:      true,
+		TrueColor:  true,
+		Known:      true,
+		UsePalette: true,
+	}
+	theme.Palette[2] = renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}
+	theme.Palette[10] = theme.Palette[2]
+	theme.PaletteKnown = 1<<2 | 1<<10
+	resolved := themeui.Resolve(theme, domain.ThemeAccent{Mode: domain.ThemeAccentAuto})
+	styles := resolved.Styles
+
+	t.Run("top bar maps inactive active and secondary roles while filling the row", func(t *testing.T) {
+		row := make([]renderer.Cell, 48)
+		status := statusSnapshot{tabs: []statusTab{{name: "idle", paneTitle: "shell"}, {name: "selected", active: true}}}
+		drawTopBarSnapshot(row, status, 0, "clock", styles)
+
+		for _, cell := range row[28:40] {
+			require.True(t, cell.Style.Equal(styles.SurfaceBar), "unowned top-bar filler must retain SurfaceBar")
+		}
+		require.True(t, row[1].Style.Equal(styles.TabInactive), "inactive name must use TabInactive")
+		require.True(t, row[5].Style.Equal(styles.TabInactiveTitle), "pane title must use contrast-derived secondary text")
+		selected := strings.Index(rowText(row), "selected")
+		require.GreaterOrEqual(t, selected, 0)
+		require.True(t, row[selected].Style.Equal(styles.TabActive), "active tab must outrank inactive styling")
+		require.True(t, row[selected].Style.Bold, "active tab stays bold")
+	})
+
+	t.Run("bottom bar maps current ranked and MRU roles without sacrificing right-side readability", func(t *testing.T) {
+		row := make([]renderer.Cell, 48)
+		state := barState{
+			status:      statusSnapshot{session: "current"},
+			bottomRight: "script ok",
+			mru:         []recentSession{{name: "new"}, {name: "middle"}, {name: "old"}},
+		}
+		drawStatusBarState(row, state, styles)
+		for i := range len(" current ") {
+			require.True(t, row[i].Style.Equal(styles.SurfaceActive), "current session must use SurfaceActive")
+		}
+		for index, name := range []string{"new", "middle", "old"} {
+			at := strings.Index(rowText(row), name)
+			require.GreaterOrEqual(t, at, 0)
+			require.True(t, row[at].Style.Equal(themeui.MRUStyle(resolved.Ramp, index, 3)), "%s has the wrong MRU position surface", name)
+		}
+		for _, cell := range row[30:38] {
+			require.True(t, cell.Style.Equal(styles.SurfaceBar), "bottom filler must retain SurfaceBar")
+		}
+		at := strings.Index(rowText(row), "script ok")
+		require.GreaterOrEqual(t, at, 0)
+		require.True(t, row[at].Style.Equal(styles.SurfaceBar), "right-side script text must remain readable on SurfaceBar")
+
+		ranked := make([]renderer.Cell, 48)
+		drawStatusBarState(ranked, barState{
+			status:       statusSnapshot{session: "current"},
+			rankedRecent: []rankedRecent{{rank: 1, name: "inactive"}, {rank: 2, name: "chosen", selected: true}},
+		}, styles)
+		inactive := strings.Index(rowText(ranked), "inactive")
+		chosen := strings.Index(rowText(ranked), "chosen")
+		require.True(t, ranked[inactive].Style.Equal(styles.SurfaceInactive), "unselected ranked recent must use SurfaceInactive")
+		require.True(t, ranked[chosen].Style.Equal(styles.SurfaceActive), "selected ranked recent must outrank inactive styling")
+	})
+
+	t.Run("MRU zero and singleton cases retain semantic edge surfaces", func(t *testing.T) {
+		empty := make([]renderer.Cell, 20)
+		drawStatusBarState(empty, barState{status: statusSnapshot{session: "current"}}, styles)
+		for _, cell := range empty[len(" current "):] {
+			require.True(t, cell.Style.Equal(styles.SurfaceBar), "empty MRU leaves a complete SurfaceBar")
+		}
+
+		single := make([]renderer.Cell, 20)
+		drawStatusBarState(single, barState{status: statusSnapshot{session: "current"}, mru: []recentSession{{name: "only"}}}, styles)
+		only := strings.Index(rowText(single), "only")
+		require.GreaterOrEqual(t, only, 0)
+		require.True(t, single[only].Style.Equal(styles.SurfaceRecent), "a singleton MRU must retain the 22 percent recent surface")
+	})
+
+	t.Run("attention pulse preserves its active or inactive base surface", func(t *testing.T) {
+		row := make([]renderer.Cell, 32)
+		drawTopBarSnapshot(row, statusSnapshot{tabs: []statusTab{{name: "active", active: true, attention: true}, {name: "idle", attention: true}}}, 1, "", styles)
+		bells := make([]int, 0, 2)
+		for i, cell := range row {
+			if cell.Rune == ui.AttentionGlyph {
+				bells = append(bells, i)
+			}
+		}
+		require.Len(t, bells, 2)
+		require.Equal(t, styles.SurfaceActive.BackgroundRGB, row[bells[0]].Style.BackgroundRGB, "active must outrank attention")
+		require.Equal(t, styles.SurfaceInactive.BackgroundRGB, row[bells[1]].Style.BackgroundRGB, "attention must preserve inactive base surface")
+	})
 }
 
 func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {

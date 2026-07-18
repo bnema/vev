@@ -500,7 +500,7 @@ func (e paletteExec) JumpRecentSession(rank int) error {
 func composePaletteClientFrame(model *palette.Model, base renderer.Frame, cfg domain.PaletteConfig, guidance string, styles ...themeui.Styles) (renderer.Frame, []renderer.Damage) {
 	styleSet := resolveStyles(styles)
 	modal := paletteModalFor(domain.Size{Cols: base.Width, Rows: base.Height}, cfg)
-	return composeModalClientFrame(base, modal, styleSet, styleSet.Selection, func(size domain.Size, _ ...renderer.Style) renderer.Frame {
-		return model.Render(size, palette.RenderOptions{Styles: palette.RenderStyles{Selection: styleSet.Selection, Description: styleSet.PaletteDesc}, Guidance: guidance})
+	return composeModalClientFrame(base, modal, styleSet, func(size domain.Size) renderer.Frame {
+		return model.Render(size, palette.RenderOptions{Styles: palette.RenderStyles{Base: styleSet.PickerBase, Row: styleSet.SurfaceInactive, Selection: styleSet.PickerSelection, Description: styleSet.PickerDescription}, Guidance: guidance})
 	})
 }

@@ -42,6 +42,7 @@ func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReade
 	allowDetach := make(chan struct{})
 
 	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
 		in, err := ports.UnmarshalInput(f.Payload)

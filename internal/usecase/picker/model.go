@@ -42,8 +42,11 @@ type RenderStyles struct {
 	SelectionMuted renderer.Style // selected row detail segment
 	Name           renderer.Style // non-selected name segment
 	Detail         renderer.Style // non-selected detail segment
-	Base           renderer.Style // non-selected fill + suffixes
-	Separator      renderer.Style // preview separator
+	// Background fills otherwise unused interior cells. Base owns ordinary
+	// rows, preserving a distinct inactive surface from modal chrome.
+	Background renderer.Style
+	Base       renderer.Style // non-selected row fill + suffixes
+	Separator  renderer.Style // preview separator
 }
 
 func defaultRenderStyles() RenderStyles {
@@ -52,7 +55,7 @@ func defaultRenderStyles() RenderStyles {
 	base := renderer.DefaultStyle()
 	separator := renderer.DefaultStyle()
 	separator.Attrs = renderer.AttrDim
-	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Base: base, Separator: separator}
+	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Background: base, Base: base, Separator: separator}
 }
 
 type Target struct {
@@ -203,6 +206,7 @@ func (m *Model) Render(inner domain.Size, preview Preview, styles ...RenderStyle
 	if len(styles) > 0 {
 		styleSet = styles[0]
 	}
+	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: styleSet.Background})
 	m.renderList(frame, layout.List, styleSet)
 	switch layout.Mode {
 	case LayoutHorizontal:

@@ -292,6 +292,7 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("pre-Welcome operation leaked after Run returned")
 			}
+			tr.AssertNotCalled(t, "Send", isType(ports.MsgTheme))
 		})
 	}
 }
@@ -308,6 +309,8 @@ func TestAttachHelloIncludesTrueColor(t *testing.T) {
 
 	gotHello := make(chan ports.Hello, 1)
 	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgHello)).RunAndReturn(func(f ports.Frame) error {
 		hello, err := ports.UnmarshalHello(f.Payload)
 		require.NoError(t, err)
@@ -345,6 +348,8 @@ func TestAttachHelloIncludesCompleteLocalEnvironment(t *testing.T) {
 
 	gotHello := make(chan ports.Hello, 1)
 	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgHello)).RunAndReturn(func(f ports.Frame) error {
 		hello, err := ports.UnmarshalHello(f.Payload)
 		if err != nil {
@@ -372,6 +377,8 @@ func TestAttachHelloRequestsSingleOutputForDatagramTransport(t *testing.T) {
 	defer in.unblock()
 
 	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgHello)).RunAndReturn(func(f ports.Frame) error {
 		hello, err := ports.UnmarshalHello(f.Payload)
 		require.NoError(t, err)
@@ -396,6 +403,8 @@ func TestAttachHappyPath(t *testing.T) {
 	defer in.unblock()
 
 	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	unblock := scriptRecv(tr,
 		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1", SessionName: "main"}))},
@@ -407,7 +416,7 @@ func TestAttachHappyPath(t *testing.T) {
 
 	err := runTestClient(context.Background(), attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentEphemeral, SessionName: ""})
 	require.NoError(t, err)
-	require.Equal(t, "hello world", out.String())
+	require.Equal(t, "\x1b]10;?\x07\x1b]11;?\x07\x1b]4;0;?;1;?;2;?;3;?;4;?;5;?;6;?;7;?;8;?;9;?;10;?;11;?;12;?;13;?;14;?;15;?\x07\x1b[?2031$phello world", out.String())
 	require.Equal(t, int32(1), restoreCount.Load(), "restore must run exactly once")
 }
 
@@ -429,6 +438,7 @@ func TestAttachVersionMismatch(t *testing.T) {
 	var pe *client.ProtocolError
 	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
 	require.Equal(t, ports.ErrVersionMismatch, pe.Code)
+	tr.AssertNotCalled(t, "Send", isType(ports.MsgTheme))
 }
 
 func TestAttachRestoredOnRecvErrorMidStream(t *testing.T) {
@@ -439,6 +449,8 @@ func TestAttachRestoredOnRecvErrorMidStream(t *testing.T) {
 	defer in.unblock()
 
 	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	boom := errors.New("connection reset")
 	unblock := scriptRecv(tr,
@@ -461,6 +473,8 @@ func TestAttachDaemonVanishedOnEOF(t *testing.T) {
 	defer in.unblock()
 
 	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	unblock := scriptRecv(tr,
 		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))},
@@ -473,221 +487,6 @@ func TestAttachDaemonVanishedOnEOF(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, io.EOF)
 	require.Equal(t, int32(1), restoreCount.Load())
-}
-
-func TestAttachStdinOSCColorResponseSendsThemeAndPreservesInput(t *testing.T) {
-	t.Setenv("COLORTERM", "truecolor")
-
-	var out bytes.Buffer
-	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
-	input := newOneShotBlockingReader([]byte("a\x1b]11;rgb:0101/0202/0303\x07b"))
-	defer input.unblock()
-
-	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
-	tm.EXPECT().EnterRaw().Return(func() error {
-		restoreCount.Add(1)
-		return nil
-	}, nil).Once()
-	tm.EXPECT().In().Return(input).Maybe()
-	tm.EXPECT().Out().Return(&out).Maybe()
-	tm.EXPECT().Flush().Return(nil).Maybe()
-	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
-
-	gotTheme := make(chan ports.Theme, 1)
-	gotInput := make(chan []byte, 2)
-	allowDetach := make(chan struct{})
-
-	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
-	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
-		in, err := ports.UnmarshalInput(f.Payload)
-		require.NoError(t, err)
-		require.NotContains(t, string(in.Data), "\x1b]11;")
-		gotInput <- append([]byte(nil), in.Data...)
-		if bytes.Contains(in.Data, []byte("b")) {
-			close(allowDetach)
-		}
-		return nil
-	}).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).RunAndReturn(func(f ports.Frame) error {
-		th, err := ports.UnmarshalTheme(f.Payload)
-		require.NoError(t, err)
-		gotTheme <- th
-		return nil
-	}).Once()
-
-	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
-	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
-	recvCh := make(chan recvItem, 1)
-	recvCh <- recvItem{f: welcome}
-	closed := make(chan struct{})
-	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
-		select {
-		case it := <-recvCh:
-			return it.f, it.err
-		case <-allowDetach:
-			select {
-			case <-closed:
-				return ports.Frame{}, io.EOF
-			default:
-				close(closed)
-				return detached, nil
-			}
-		case <-closed:
-			return ports.Frame{}, io.EOF
-		}
-	}).Maybe()
-	tr.EXPECT().Close().Return(nil).Once()
-
-	err := runTestClient(context.Background(), attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentEphemeral, SessionName: ""})
-	require.NoError(t, err)
-	require.Equal(t, int32(1), restoreCount.Load())
-
-	select {
-	case th := <-gotTheme:
-		require.True(t, th.HasBackground)
-		require.Equal(t, uint8(1), th.Background.R)
-		require.Equal(t, uint8(2), th.Background.G)
-		require.Equal(t, uint8(3), th.Background.B)
-		require.True(t, th.TrueColor)
-	case <-time.After(2 * time.Second):
-		t.Fatal("theme frame was not sent")
-	}
-
-	var inputBytes []byte
-	for {
-		select {
-		case b := <-gotInput:
-			inputBytes = append(inputBytes, b...)
-		default:
-			require.Equal(t, []byte("ab"), inputBytes)
-			return
-		}
-	}
-}
-
-func TestAttachStdinThemeTrueColorFalseWhenCOLORTERMNotTruecolor(t *testing.T) {
-	t.Setenv("TERM", "xterm-256color")
-	t.Setenv("COLORTERM", "")
-
-	var out bytes.Buffer
-	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
-	input := newOneShotBlockingReader([]byte("\x1b]10;#010203\x07"))
-	defer input.unblock()
-
-	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
-	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
-	tm.EXPECT().In().Return(input).Maybe()
-	tm.EXPECT().Out().Return(&out).Maybe()
-	tm.EXPECT().Flush().Return(nil).Maybe()
-	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
-
-	gotTheme := make(chan ports.Theme, 1)
-	allowDetach := make(chan struct{})
-	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).RunAndReturn(func(f ports.Frame) error {
-		th, err := ports.UnmarshalTheme(f.Payload)
-		require.NoError(t, err)
-		gotTheme <- th
-		close(allowDetach)
-		return nil
-	}).Once()
-	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
-	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
-	recvCh := make(chan recvItem, 1)
-	recvCh <- recvItem{f: welcome}
-	closed := make(chan struct{})
-	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
-		select {
-		case it := <-recvCh:
-			return it.f, it.err
-		case <-allowDetach:
-			select {
-			case <-closed:
-				return ports.Frame{}, io.EOF
-			default:
-				close(closed)
-				return detached, nil
-			}
-		case <-closed:
-			return ports.Frame{}, io.EOF
-		}
-	}).Maybe()
-	tr.EXPECT().Close().Return(nil).Once()
-
-	err := runTestClient(context.Background(), attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentEphemeral, SessionName: ""})
-	require.NoError(t, err)
-	select {
-	case th := <-gotTheme:
-		require.True(t, th.HasForeground)
-		require.False(t, th.TrueColor)
-	case <-time.After(2 * time.Second):
-		t.Fatal("theme frame was not sent")
-	}
-}
-
-func TestAttachForwardsStandaloneEscapeInput(t *testing.T) {
-	var out bytes.Buffer
-	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
-	input := newOneShotBlockingReader([]byte("\x1b"))
-	defer input.unblock()
-
-	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
-	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
-	tm.EXPECT().In().Return(input).Maybe()
-	tm.EXPECT().Out().Return(&out).Maybe()
-	tm.EXPECT().Flush().Return(nil).Maybe()
-	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
-
-	gotInput := make(chan []byte, 1)
-	allowDetach := make(chan struct{})
-	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
-	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
-		in, err := ports.UnmarshalInput(f.Payload)
-		require.NoError(t, err)
-		gotInput <- in.Data
-		close(allowDetach)
-		return nil
-	}).Once()
-	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
-	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
-	recvCh := make(chan recvItem, 1)
-	recvCh <- recvItem{f: welcome}
-	closed := make(chan struct{})
-	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
-		select {
-		case it := <-recvCh:
-			return it.f, it.err
-		case <-allowDetach:
-			select {
-			case <-closed:
-				return ports.Frame{}, io.EOF
-			default:
-				close(closed)
-				return detached, nil
-			}
-		case <-closed:
-			return ports.Frame{}, io.EOF
-		}
-	}).Maybe()
-	tr.EXPECT().Close().Return(nil).Once()
-
-	err := runTestClient(context.Background(), attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentEphemeral, SessionName: ""})
-	require.NoError(t, err)
-	select {
-	case got := <-gotInput:
-		require.Equal(t, []byte("\x1b"), got)
-	case <-time.After(2 * time.Second):
-		t.Fatal("standalone escape input was not sent")
-	}
 }
 
 func TestAttachStdinForwardsSGRMouseReportAsSingleFrame(t *testing.T) {
@@ -708,6 +507,8 @@ func TestAttachStdinForwardsSGRMouseReportAsSingleFrame(t *testing.T) {
 	gotInput := make(chan []byte, 2)
 	allowDetach := make(chan struct{})
 	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
 		in, err := ports.UnmarshalInput(f.Payload)
@@ -768,6 +569,8 @@ func TestAttachStdinCoalescesSplitBracketedPaste(t *testing.T) {
 	gotInput := make(chan []byte, 1)
 	allowDetach := make(chan struct{})
 	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
 		in, err := ports.UnmarshalInput(f.Payload)
@@ -821,6 +624,8 @@ func TestAttachForwardsResize(t *testing.T) {
 	var firstRecvOnce sync.Once
 
 	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	// The resize frame is forwarded via the sender goroutine.
 	gotResize := make(chan ports.Resize, 1)
@@ -880,6 +685,8 @@ func TestRunRestoresRawModeAfterAttachError(t *testing.T) {
 	defer in.unblock()
 
 	tr := portsmocks.NewMockTransport(t)
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	boom := errors.New("connection reset")
 	unblock := scriptRecv(tr,
@@ -915,6 +722,7 @@ func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
 	require.Error(t, err)
 	var pe *client.ProtocolError
 	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
+	tr.AssertNotCalled(t, "Send", isType(ports.MsgTheme))
 }
 
 func TestRunPhaseASingleAttempt(t *testing.T) {
@@ -987,7 +795,6 @@ func (t *runTerminal) EnterRaw() (func() error, error) {
 }
 func (t *runTerminal) Size() (domain.Size, error)       { return domain.Size{Cols: 80, Rows: 24}, nil }
 func (t *runTerminal) ResizeEvents() <-chan domain.Size { return t.resizeCh }
-func (t *runTerminal) QueryColors() error               { return nil }
 func (t *runTerminal) In() io.Reader                    { return t.in }
 func (t *runTerminal) Out() io.Writer                   { return &t.out }
 func (t *runTerminal) Flush() error                     { return nil }
@@ -1046,152 +853,4 @@ func TestRunDoesNotRetryTerminalDetachedError(t *testing.T) {
 	require.True(t, errors.As(err, &de))
 	require.Equal(t, int32(1), d.calls.Load())
 	require.Equal(t, int32(1), term.restoreCount.Load())
-}
-
-func TestAttachSchemeRequeryCorrelatesSplitBoundaryAndDiscardsStalePalette(t *testing.T) {
-	input := newChunkedBlockingReader(
-		[]byte("a\x1b]4;1;#112233\a\x1b[?997;2n"),
-		[]byte("\x1b[0n\x1b]4;2;#445566\ab\x1b[?2031;"),
-		[]byte("2$yc\x1b]4;3;#778899\ad"),
-	)
-	defer input.unblock()
-
-	var out bytes.Buffer
-	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
-	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
-	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
-	tm.EXPECT().In().Return(input).Maybe()
-	tm.EXPECT().Out().Return(&out).Maybe()
-	tm.EXPECT().Flush().Return(nil).Maybe()
-	tm.EXPECT().QueryColors().Return(nil).Once()
-	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
-
-	var inputBytes []byte
-	var inputMu sync.Mutex
-	themes := make(chan ports.Theme, 2)
-	freshTheme := make(chan struct{})
-	var freshOnce sync.Once
-	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
-	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
-		in, err := ports.UnmarshalInput(f.Payload)
-		if err != nil {
-			return err
-		}
-		inputMu.Lock()
-		inputBytes = append(inputBytes, in.Data...)
-		inputMu.Unlock()
-		return nil
-	}).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).RunAndReturn(func(f ports.Frame) error {
-		theme, err := ports.UnmarshalTheme(f.Payload)
-		if err != nil {
-			return err
-		}
-		themes <- theme
-		if theme.PaletteKnown == 1<<3 {
-			freshOnce.Do(func() { close(freshTheme) })
-		}
-		return nil
-	}).Times(2)
-	var welcomed atomic.Bool
-	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
-		if welcomed.CompareAndSwap(false, true) {
-			return frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"})), nil
-		}
-		<-freshTheme
-		return frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach})), nil
-	}).Maybe()
-	tr.EXPECT().Close().Return(nil).Once()
-
-	require.NoError(t, runTestClient(context.Background(), attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentEphemeral}))
-	require.Equal(t, "\x1b[?2031$p", out.String(), "the correlated boundary query must be the only main-loop terminal write")
-	require.Equal(t, int32(1), restoreCount.Load())
-
-	cleared := <-themes
-	fresh := <-themes
-	require.True(t, cleared.SchemeKnown)
-	require.True(t, cleared.Light)
-	require.Zero(t, cleared.PaletteKnown, "only the cleared scheme snapshot may cross the boundary")
-	require.Equal(t, uint16(1<<3), fresh.PaletteKnown, "only colors after the boundary response and replacement query are accepted")
-	require.Zero(t, fresh.PaletteKnown&(1<<1|1<<2), "pre-boundary palette slots must not leak into the new generation")
-	inputMu.Lock()
-	require.Equal(t, []byte("a\x1b[0nbcd"), inputBytes, "the old status response and ordinary input around the boundary must survive")
-	inputMu.Unlock()
-}
-
-func TestAttachSchemeRequeryClearsStalePalette(t *testing.T) {
-	var out bytes.Buffer
-	var restoreCount atomic.Int32
-	resizeCh := make(chan domain.Size)
-	input := newChunkedBlockingReader(
-		[]byte("\x1b]11;#010203\a\x1b]4;1;#112233\a\x1b]4;14;#778899\a"),
-		[]byte("\x1b[?997;2n"),
-		[]byte("\x1b[?2031;1$y"),
-	)
-	defer input.unblock()
-
-	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
-	tm.EXPECT().EnterRaw().Return(func() error { restoreCount.Add(1); return nil }, nil).Once()
-	tm.EXPECT().In().Return(input).Maybe()
-	tm.EXPECT().Out().Return(&out).Maybe()
-	tm.EXPECT().Flush().Return(nil).Maybe()
-	tm.EXPECT().ResizeEvents().Return(resizeCh).Maybe()
-	tm.EXPECT().QueryColors().Return(nil).Once()
-
-	var themes []ports.Theme
-	var themesMu sync.Mutex
-	clearedPalette := make(chan struct{})
-	var clearOnce sync.Once
-	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).RunAndReturn(func(f ports.Frame) error {
-		theme, err := ports.UnmarshalTheme(f.Payload)
-		if err != nil {
-			t.Errorf("decode sent theme: %v", err)
-			return err
-		}
-		themesMu.Lock()
-		themes = append(themes, theme)
-		themesMu.Unlock()
-		if theme.SchemeKnown && theme.PaletteKnown == 0 {
-			clearOnce.Do(func() { close(clearedPalette) })
-		}
-		return nil
-	}).Times(2)
-
-	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
-	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
-	closed := make(chan struct{})
-	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
-		select {
-		case <-closed:
-			return ports.Frame{}, io.EOF
-		default:
-		}
-		select {
-		case <-clearedPalette:
-			close(closed)
-			return detached, nil
-		default:
-			return welcome, nil
-		}
-	}).Maybe()
-	tr.EXPECT().Close().Return(nil).Once()
-
-	require.NoError(t, runTestClient(context.Background(), attachTestDependencies(tr, tm, realClock{}), client.AttachRequest{Intent: ports.IntentEphemeral}))
-	require.Equal(t, int32(1), restoreCount.Load())
-
-	themesMu.Lock()
-	defer themesMu.Unlock()
-	require.Len(t, themes, 2, "the old palette snapshot and one cleared scheme snapshot are sent")
-	require.Equal(t, uint16(1<<1|1<<14), themes[0].PaletteKnown)
-	require.True(t, themes[0].HasBackground)
-	require.Zero(t, themes[1].PaletteKnown, "the correlated boundary re-query must invalidate stale palette entries")
-	require.Equal(t, themes[0].Background, themes[1].Background)
-	require.True(t, themes[1].SchemeKnown)
-	require.True(t, themes[1].Light)
 }

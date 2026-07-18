@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/stretchr/testify/require"
@@ -50,21 +49,22 @@ func TestLoadMissingPaletteAnchorDefaultsToCenter(t *testing.T) {
 func TestWatchPaletteAnchorRestoresCenteredDefaultAfterFileRemoval(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config")
 	require.NoError(t, os.WriteFile(path, []byte("palette.anchor = top-right\n"), 0o600))
-	clk := newFakeClock(time.Unix(0, 0))
+	clk := newWatchClockMock(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	changes := make(chan domain.Config, 2)
 	done := make(chan error, 1)
-	go func() { done <- Watch(ctx, clk, path, func(cfg domain.Config, _ []domain.Warning) { changes <- cfg }) }()
-	clk.waitForTimers(t, 1)
+	go func() {
+		done <- Watch(ctx, clk.clock, path, func(cfg domain.Config, _ []domain.Warning) { changes <- cfg })
+	}()
+	clk.waitForTimer()
 
 	require.NoError(t, os.WriteFile(path, []byte("palette.anchor = bottom-left\n"), 0o600))
-	clk.advance(2 * time.Second)
+	clk.fire()
 	require.Equal(t, domain.AnchorBottomLeft, (<-changes).Palette.Anchor)
 
 	require.NoError(t, os.Remove(path))
-	clk.waitForTimers(t, 1)
-	clk.advance(2 * time.Second)
+	clk.fire()
 	got := <-changes
 	require.Equal(t, domain.PaletteConfig{Anchor: domain.AnchorCenter, AnchorSet: true}, got.Palette)
 	cancel()
