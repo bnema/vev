@@ -139,6 +139,17 @@ func TestBarScriptRefreshSkipsRunnerWhenCommandsDisabled(t *testing.T) {
 	require.Empty(t, state.bottomRight)
 }
 
+func TestDefaultBarConfigDoesNotInvokeRunner(t *testing.T) {
+	r := &fakeBarRunner{}
+	d := newBarRefreshTestDaemon(r, time.Second)
+	d.barScripts.cfg = barConfigFromDomain(domain.Defaults().Bar)
+	sess := newBarRefreshTestSession()
+	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+
+	require.False(t, d.refreshBarScriptsIfDue(sess, time.Unix(0, 0), true))
+	require.Empty(t, r.calls)
+}
+
 func TestBarScriptForcedRefreshRespectsMinimumInterval(t *testing.T) {
 	r := &fakeBarRunner{outs: []string{"top1", "bottom1", "top2", "bottom2"}}
 	d := newBarRefreshTestDaemon(r, 5*time.Second)

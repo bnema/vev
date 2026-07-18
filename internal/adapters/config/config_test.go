@@ -16,6 +16,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDefaultsDisableBarCommands(t *testing.T) {
+	bar := domain.Defaults().Bar
+	require.Empty(t, bar.TopRight)
+	require.Empty(t, bar.BottomRight)
+}
+
 func TestParse(t *testing.T) {
 	t.Parallel()
 
@@ -217,7 +223,7 @@ func TestParse(t *testing.T) {
 				Theme: domain.ThemeAuto,
 				Bar: domain.BarConfig{
 					TopRight:    "echo foo #1",
-					BottomRight: "vev-bar-bottom-right",
+					BottomRight: "",
 					Interval:    5 * time.Second,
 				},
 				BindingEntries: []domain.ConfigEntry{},
@@ -230,8 +236,8 @@ func TestParse(t *testing.T) {
 			want: domain.Config{
 				Theme: domain.ThemeAuto,
 				Bar: domain.BarConfig{
-					TopRight:    "vev-bar-top-right",
-					BottomRight: "vev-bar-bottom-right",
+					TopRight:    "",
+					BottomRight: "",
 					Interval:    5 * time.Second,
 				},
 				BindingEntries: []domain.ConfigEntry{},
@@ -259,8 +265,8 @@ func TestParse(t *testing.T) {
 			want: domain.Config{
 				Theme: domain.ThemeAuto,
 				Bar: domain.BarConfig{
-					TopRight:    "vev-bar-top-right",
-					BottomRight: "vev-bar-bottom-right",
+					TopRight:    "",
+					BottomRight: "",
 					Interval:    5 * time.Second,
 				},
 				BindingEntries: []domain.ConfigEntry{},
@@ -274,8 +280,8 @@ func TestParse(t *testing.T) {
 			want: domain.Config{
 				Theme: domain.ThemeAuto,
 				Bar: domain.BarConfig{
-					TopRight:    "vev-bar-top-right",
-					BottomRight: "vev-bar-bottom-right",
+					TopRight:    "",
+					BottomRight: "",
 					Interval:    time.Second,
 				},
 				BindingEntries: []domain.ConfigEntry{},
