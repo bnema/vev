@@ -46,13 +46,15 @@ const (
 	paletteEventForeground
 	paletteEventBackground
 	paletteEventPalette
+	paletteEventScheme
 )
 
 type paletteGenerationEvent struct {
-	id   paletteGenerationID
-	kind paletteGenerationEventKind
-	rgb  renderer.RGB
-	slot uint8
+	id    paletteGenerationID
+	kind  paletteGenerationEventKind
+	rgb   renderer.RGB
+	slot  uint8
+	light bool
 }
 
 // paletteGenerationAction is deliberately declarative. The attach loop is
@@ -214,6 +216,7 @@ func (c *paletteGenerationCoordinator) finalize() []paletteGenerationAction {
 	c.active = false
 	c.finalized = c.current.theme
 	return []paletteGenerationAction{
+		{kind: paletteActionCancelDrainDeadline, id: c.current.id},
 		{kind: paletteActionCancelCompletionDeadline, id: c.current.id},
 		{kind: paletteActionPublishFinal, id: c.current.id, theme: c.finalized},
 	}
@@ -250,37 +253,41 @@ var paletteMarkerResponses = [][]byte{
 }
 
 func (s *paletteMarkerScanner) scan(data []byte, onBytes func([]byte), onMarker func()) {
-	for _, b := range data {
+	for i, b := range data {
 		s.pending = append(s.pending, b)
-		for len(s.pending) > 0 {
-			matched, possible := false, false
-			for _, response := range paletteMarkerResponses {
-				if len(s.pending) > len(response) {
-					continue
-				}
-				if string(s.pending) != string(response[:len(s.pending)]) {
-					continue
-				}
-				if len(s.pending) == len(response) {
-					matched = true
-				} else {
-					possible = true
-				}
+		matched, possible := false, false
+		for _, response := range paletteMarkerResponses {
+			if len(s.pending) > len(response) || string(s.pending) != string(response[:len(s.pending)]) {
+				continue
 			}
-			if matched {
-				s.pending = nil
-				onMarker()
-				break
+			if len(s.pending) == len(response) {
+				matched = true
+			} else {
+				possible = true
 			}
-			if possible {
-				break
-			}
+		}
+		if matched {
+			s.pending = nil
+			onMarker()
+			continue
+		}
+		if possible {
+			continue
+		}
+		if s.pending[0] != '\x1b' {
 			onBytes(s.pending[:1])
 			s.pending = s.pending[1:]
+			continue
 		}
+		// This is not a marker. Forward the entire remaining read as one
+		// contiguous input run so CSI mouse reports and escape sequences keep
+		// their framing.
+		s.pending = append(s.pending, data[i+1:]...)
+		onBytes(s.pending)
+		s.pending = nil
+		return
 	}
 }
-
 func (s *paletteMarkerScanner) flush(onBytes func([]byte)) {
 	if len(s.pending) == 0 {
 		return

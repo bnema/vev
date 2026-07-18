@@ -114,6 +114,7 @@ func TestPaletteGenerationInitialPublishesClearedThenDefinitive(t *testing.T) {
 	clock.apply(final)
 
 	require.Equal(t, []paletteGenerationActionKind{
+		paletteActionCancelDrainDeadline,
 		paletteActionCancelCompletionDeadline,
 		paletteActionPublishFinal,
 	}, actionKinds(final))

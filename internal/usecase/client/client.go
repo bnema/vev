@@ -586,50 +586,121 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		return welcomedResult(err)
 	}
 	reconnect.clear()
-	reportedTheme, restoreTheme := themeState.reportedTheme()
 
 	// 4. Derive a cancellable context so the pumps always unwind when the
-	// loop returns. cancel runs first (LIFO): it signals the pumps; the
-	// deferred Close above then unblocks any pump parked in a syscall.
+	// loop returns. The attach loop is the sole terminal writer and palette
+	// coordinator owner.
 	loopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	sendCh := make(chan ports.Frame, sendQueueDepth)
-	if restoreTheme {
-		sendCh <- ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(reportedTheme)}
-	}
 	ackQueue := newCumulativeAckQueue()
 	sendErrCh := make(chan error, 1)
+	senderStarted := false
+	paletteEvents := make(chan paletteGenerationEvent, 32)
+	var activeGeneration atomic.Uint64
+	coordinator := newPaletteGenerationCoordinator()
+	type paletteTimer struct {
+		timer  ports.Timer
+		cancel chan struct{}
+	}
+	drainTimers := map[paletteGenerationID]paletteTimer{}
+	completionTimers := map[paletteGenerationID]paletteTimer{}
+	cancelTimer := func(timers map[paletteGenerationID]paletteTimer, id paletteGenerationID) {
+		if timer, ok := timers[id]; ok {
+			timer.timer.Stop()
+			close(timer.cancel)
+			delete(timers, id)
+		}
+	}
+	publish := func(snapshot ports.Theme) bool {
+		frame := ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(snapshot)}
+		// The initial cleared snapshot is sent before the sender exists. This
+		// keeps the generation publication ordered before the first query and
+		// avoids leaving a queued Theme behind an immediate detach.
+		if !senderStarted {
+			return transport.Send(frame) == nil
+		}
+		select {
+		case sendCh <- frame:
+			return true
+		case <-loopCtx.Done():
+			return false
+		}
+	}
+	processPaletteActions := func(actions []paletteGenerationAction) error {
+		for _, action := range actions {
+			switch action.kind {
+			case paletteActionPublishCleared:
+				if !publish(action.theme) {
+					return context.Canceled
+				}
+			case paletteActionPublishFinal:
+				themeState.update(func(current *ports.Theme) { *current = action.theme })
+				if !publish(action.theme) {
+					return context.Canceled
+				}
+			case paletteActionWriteDrain, paletteActionWriteBatch:
+				if _, err := term.Out().Write([]byte(action.bytes)); err != nil {
+					return fmt.Errorf("writing palette query: %w", err)
+				}
+				if err := term.Flush(); err != nil {
+					return fmt.Errorf("flushing palette query: %w", err)
+				}
+			case paletteActionArmDrainDeadline, paletteActionArmCompletionDeadline:
+				timer := clk.NewTimer(action.deadline)
+				entry := paletteTimer{timer: timer, cancel: make(chan struct{})}
+				timers := drainTimers
+				kind := paletteEventDrainDeadline
+				if action.kind == paletteActionArmCompletionDeadline {
+					timers = completionTimers
+					kind = paletteEventCompletionDeadline
+				}
+				timers[action.id] = entry
+				go func(id paletteGenerationID, eventKind paletteGenerationEventKind, timer paletteTimer) {
+					select {
+					case <-timer.timer.C():
+						select {
+						case paletteEvents <- paletteGenerationEvent{id: id, kind: eventKind}:
+						case <-loopCtx.Done():
+						}
+					case <-timer.cancel:
+					case <-loopCtx.Done():
+					}
+				}(action.id, kind, entry)
+			case paletteActionCancelDrainDeadline:
+				cancelTimer(drainTimers, action.id)
+			case paletteActionCancelCompletionDeadline:
+				cancelTimer(completionTimers, action.id)
+			}
+		}
+		return nil
+	}
+	defer func() {
+		for id := range drainTimers {
+			cancelTimer(drainTimers, id)
+		}
+		for id := range completionTimers {
+			cancelTimer(completionTimers, id)
+		}
+	}()
 
-	// Palette re-queries use a private-mode query as an ordered boundary. The
-	// stdin pump drains terminal replies through its mode-specific response
-	// before it permits the main loop to publish the cleared scheme and issue
-	// QueryColors. This separates bytes already queued (including
-	// Scanner.pending) from replacement replies without allowing a second
-	// goroutine to write to the terminal.
-	colorQueryCh := make(chan colorQueryRequest)
-	paletteReadyCh := make(chan paletteQueryReady)
-	requestColors := func() (colorQueryRequest, bool) {
-		request := colorQueryRequest{boundaryWritten: make(chan struct{})}
-		select {
-		case colorQueryCh <- request:
-		case <-loopCtx.Done():
-			return colorQueryRequest{}, false
-		}
-		select {
-		case <-request.boundaryWritten:
-			return request, true
-		case <-loopCtx.Done():
-			return colorQueryRequest{}, false
-		}
+	// Initial acquisition is a generation too. A reconnect publishes its one
+	// cleared snapshot from retained definitive colors, never a restore frame.
+	retained := themeState.snapshot()
+	initialActions := coordinator.start(retained, false)
+	activeGeneration.Store(uint64(coordinator.current.id))
+	if err := processPaletteActions(initialActions); err != nil {
+		return welcomedResult(err)
 	}
 
 	var clip ports.ClipboardReader
 	if remote {
 		clip = clipboard
 	}
+	senderStarted = true
 	go runSender(loopCtx, cancel, transport, sendCh, ackQueue, sendErrCh, log)
-	go (&stdinPump{ctx: loopCtx, cancel: cancel, in: term.In(), out: sendCh, clock: clk, themeState: themeState, clipboard: clip, logger: log, requestColors: requestColors, paletteReady: paletteReadyCh}).run()
+	go (&stdinPump{ctx: loopCtx, cancel: cancel, in: term.In(), out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration}).run()
 	go runResize(loopCtx, term.ResizeEvents(), sendCh, log)
 
 	// 5. Output/main loop: the only goroutine that touches the terminal.
@@ -668,29 +739,22 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				// token. Run closes this transport on the way out.
 				return welcomedResult(errLinkOffline)
 			}
-		case request := <-colorQueryCh:
-			if _, err := term.Out().Write([]byte(paletteBoundaryQuery)); err != nil {
-				return welcomedResult(fmt.Errorf("vev: writing palette boundary query: %w", err))
+		case event := <-paletteEvents:
+			if event.kind == paletteEventScheme {
+				retained := themeState.update(func(current *ports.Theme) {
+					current.SchemeKnown = true
+					current.Light = event.light
+				})
+				actions := coordinator.start(retained, true)
+				activeGeneration.Store(uint64(coordinator.current.id))
+				if err := processPaletteActions(actions); err != nil {
+					return welcomedResult(err)
+				}
+				continue
 			}
-			if err := term.Flush(); err != nil {
-				return welcomedResult(fmt.Errorf("vev: flushing palette boundary query: %w", err))
+			if err := processPaletteActions(coordinator.handle(event)); err != nil {
+				return welcomedResult(err)
 			}
-			close(request.boundaryWritten)
-		case ready := <-paletteReadyCh:
-			// The private-mode response proves all earlier replies have been
-			// discarded by stdin. Publish the one cleared scheme snapshot before
-			// emitting the query; stdin remains paused until QueryColors has
-			// completed below.
-			clearedTheme := themeState.snapshot()
-			select {
-			case sendCh <- ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(clearedTheme)}:
-			case <-loopCtx.Done():
-				return welcomedResult(nil)
-			}
-			if err := term.QueryColors(); err != nil {
-				log.Warn("querying terminal colors", "err", err)
-			}
-			close(ready.queryIssued)
 		case r := <-recvCh:
 			if r.err != nil {
 				if errors.Is(r.err, io.EOF) {
@@ -848,148 +912,57 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 // exits. That is harmless here — Run has already returned and restored the
 // terminal — and matches the standard pattern for stdin pumps; a
 // closable stdin duplicate could lift it later if ever needed.
-type colorQueryRequest struct {
-	boundaryWritten chan struct{}
-}
-
-type paletteQueryReady struct {
-	queryIssued chan struct{}
-}
-
-type paletteDrain struct {
-	pending []byte
-}
-
-type palettePhase uint8
-
-const (
-	paletteAccepting palettePhase = iota
-	paletteBoundaryRequested
-	paletteDraining
-	paletteAwaitingQuery
-)
-
-// paletteBoundaryResponses accepts valid DECRQM status values for private
-// mode 2031. The private mode number correlates this reply with the query
-// that starts a replacement palette generation.
-var paletteBoundaryResponses = [][]byte{
-	[]byte("\x1b[?2031;0$y"),
-	[]byte("\x1b[?2031;1$y"),
-	[]byte("\x1b[?2031;2$y"),
-	[]byte("\x1b[?2031;3$y"),
-	[]byte("\x1b[?2031;4$y"),
-}
-
-// scan consumes the private-mode boundary response while forwarding every
-// other byte in order. It retains only a possible response prefix, so split
-// replies are consumed without dropping a user's partial escape sequence on
-// cancellation.
-func (d *paletteDrain) scan(data []byte, onBytes func([]byte), onBoundary func()) {
-	for _, b := range data {
-		d.pending = append(d.pending, b)
-		for len(d.pending) > 0 {
-			matched := false
-			possible := false
-			for _, response := range paletteBoundaryResponses {
-				if len(d.pending) > len(response) {
-					continue
-				}
-				match := true
-				for i := range d.pending {
-					if d.pending[i] != response[i] {
-						match = false
-						break
-					}
-				}
-				if !match {
-					continue
-				}
-				if len(d.pending) == len(response) {
-					matched = true
-				} else {
-					possible = true
-				}
-			}
-			if matched {
-				d.pending = nil
-				onBoundary()
-				break
-			}
-			if possible {
-				break
-			}
-			onBytes(d.pending[:1])
-			d.pending = d.pending[1:]
-		}
-	}
-}
-
-func (d *paletteDrain) flush(onBytes func([]byte)) {
-	if len(d.pending) != 0 {
-		onBytes(d.pending)
-		d.pending = nil
-	}
-}
-
+// stdinPump parses terminal color reports into generation-tagged events while
+// preserving all ordinary terminal input byte-for-byte. It never publishes a
+// Theme and never writes terminal output; attachAttempt owns both operations.
 type stdinPump struct {
-	ctx           context.Context
-	cancel        context.CancelFunc
-	in            io.Reader
-	out           chan<- ports.Frame
-	clock         ports.Clock
-	themeState    *terminalThemeState
-	clipboard     ports.ClipboardReader
-	logger        *slog.Logger
-	requestColors func() (colorQueryRequest, bool)
-	paletteReady  chan<- paletteQueryReady
+	ctx              context.Context
+	cancel           context.CancelFunc
+	in               io.Reader
+	out              chan<- ports.Frame
+	clock            ports.Clock
+	clipboard        ports.ClipboardReader
+	logger           *slog.Logger
+	paletteEvents    chan<- paletteGenerationEvent
+	activeGeneration *atomic.Uint64
 }
 
 func (p *stdinPump) run() {
-	ctx := p.ctx
-	cancel := p.cancel
-	in := p.in
-	out := p.out
-	clk := p.clock
-	themeState := p.themeState
-	requestColors := p.requestColors
-	clipboard := p.clipboard
-	log := p.logger
-	defer log.Debug("stdin pump exited")
+	defer p.logger.Debug("stdin pump exited")
 	buf := make([]byte, stdinBufSize)
 	var scanner theme.Scanner
+	var markers paletteMarkerScanner
 	var inputSeq uint64
 	var sendOK atomic.Bool
 	sendOK.Store(true)
 	send := func(frame ports.Frame) {
 		select {
-		case out <- frame:
-		case <-ctx.Done():
+		case p.out <- frame:
+		case <-p.ctx.Done():
 			sendOK.Store(false)
 		}
 	}
-	// The coalescer reframes a bracketed paste split across reads into one
-	// MsgInput frame, so a marker boundary can never leave a lone ESC on the
-	// wire. Its emit runs one MsgInput per call, keeping the inputSeq contract.
-	coalescer := newPasteCoalescer(clk, func(data []byte) {
+	sendEvent := func(event paletteGenerationEvent) {
+		select {
+		case p.paletteEvents <- event:
+		case <-p.ctx.Done():
+			sendOK.Store(false)
+		}
+	}
+	coalescer := newPasteCoalescer(p.clock, func(data []byte) {
 		if len(data) == 0 {
 			return
 		}
-		copyData := append([]byte(nil), data...)
 		inputSeq++
-		send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{InputSeq: inputSeq, Data: copyData})})
+		send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{InputSeq: inputSeq, Data: append([]byte(nil), data...)})})
 	})
 	defer coalescer.Close()
-
-	// On a remote attach with a ClipboardReader configured, splice in the
-	// clipboard interceptor ahead of the coalescer so a bare Ctrl+V (0x16)
-	// becomes a clipboard image push instead of reaching the coalescer (and
-	// from there the remote pane) as an ordinary keystroke.
 	sink := coalescer.Scan
-	if clipboard != nil {
+	if p.clipboard != nil {
 		ci := &clipboardIntercept{
 			coalescer: coalescer,
-			reader:    clipboard,
-			log:       log,
+			reader:    p.clipboard,
+			log:       p.logger,
 			sendImage: func(mime string, data []byte) {
 				inputSeq++
 				send(ports.Frame{Type: ports.MsgImagePush, Payload: ports.MarshalImagePush(ports.ImagePush{InputSeq: inputSeq, Mime: mime, Data: data})})
@@ -998,98 +971,38 @@ func (p *stdinPump) run() {
 		}
 		sink = ci.Scan
 	}
-
-	phase := paletteAccepting
-	var drain paletteDrain
+	id := func() paletteGenerationID {
+		return paletteGenerationID(p.activeGeneration.Load())
+	}
 	for {
-		n, rerr := in.Read(buf)
+		n, rerr := p.in.Read(buf)
 		if n > 0 {
-			themeChanged := false
-			queryNeeded := false
-			onBytes := func(data []byte) {
-				if phase != paletteDraining {
-					sink(data)
-					return
-				}
-				drain.scan(data, sink, func() {
-					phase = paletteAwaitingQuery
-					ready := paletteQueryReady{queryIssued: make(chan struct{})}
-					select {
-					case p.paletteReady <- ready:
-					case <-ctx.Done():
-						return
-					}
-					select {
-					case <-ready.queryIssued:
-						phase = paletteAccepting
-					case <-ctx.Done():
-					}
-				})
-			}
 			scanner.Scan(buf[:n], func(kind int, rgb renderer.RGB) {
-				if phase != paletteAccepting {
-					return
+				kindEvent := paletteEventForeground
+				if kind == 11 {
+					kindEvent = paletteEventBackground
 				}
-				themeState.update(func(current *ports.Theme) {
-					switch kind {
-					case 10:
-						current.HasForeground = true
-						current.Foreground = rgb
-					case 11:
-						current.HasBackground = true
-						current.Background = rgb
-					}
-				})
-				themeChanged = true
+				sendEvent(paletteGenerationEvent{id: id(), kind: kindEvent, rgb: rgb})
 			}, func(slot int, rgb renderer.RGB) {
-				if phase != paletteAccepting {
-					return
-				}
-				themeState.update(func(current *ports.Theme) {
-					current.PaletteKnown |= uint16(1) << slot
-					current.Palette[slot] = rgb
-				})
-				themeChanged = true
+				sendEvent(paletteGenerationEvent{id: id(), kind: paletteEventPalette, slot: uint8(slot), rgb: rgb})
 			}, func(light bool) {
-				themeState.update(func(current *ports.Theme) {
-					current.SchemeKnown = true
-					current.Light = light
+				sendEvent(paletteGenerationEvent{id: id(), kind: paletteEventScheme, light: light})
+			}, func(data []byte) {
+				markers.scan(data, sink, func() {
+					sendEvent(paletteGenerationEvent{id: id(), kind: paletteEventMarker})
 				})
-				// The scheme itself begins a new palette generation. Suppress every
-				// color reply after it, including those remaining in this read, and
-				// defer invalidation until Scan completes so no partial snapshot is
-				// observable mid-chunk.
-				themeChanged = false
-				if phase == paletteAccepting {
-					phase = paletteBoundaryRequested
-					queryNeeded = true
-				}
-			}, onBytes)
-			if queryNeeded {
-				themeState.clearPalette()
-				if requestColors != nil {
-					if _, ok := requestColors(); !ok {
-						return
-					}
-					phase = paletteDraining
-				}
-			} else if themeChanged {
-				send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(themeState.snapshot())})
-			}
+			})
 			if !sendOK.Load() {
 				return
 			}
 		}
 		if rerr != nil {
-			if phase == paletteDraining {
-				drain.flush(sink)
-			}
-			// Best-effort detach notification, then unwind.
+			markers.flush(sink)
 			select {
-			case out <- ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})}:
-			case <-ctx.Done():
+			case p.out <- ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})}:
+			case <-p.ctx.Done():
 			}
-			cancel()
+			p.cancel()
 			return
 		}
 	}
