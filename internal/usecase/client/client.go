@@ -610,6 +610,17 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		defer input.stop()
 	}
 	inputConsumer := input.claim()
+	claimActive := true
+	revokeInputClaim := func() {
+		if claimActive {
+			input.revoke(inputConsumer)
+			claimActive = false
+		}
+	}
+	// Register revocation before any palette publication or terminal I/O: both
+	// can fail before the stdin scanner is started, and a reconnect must still
+	// be able to claim this lifecycle-owned reader.
+	defer revokeInputClaim()
 
 	sendCh := make(chan ports.Frame, sendQueueDepth)
 	ackQueue := newCumulativeAckQueue()
@@ -729,7 +740,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// Revoke this scanner's dequeue permission before waiting for it to exit.
 	// The lifecycle-owned reader retains queued bytes for the next attempt.
 	defer func() {
-		input.revoke(inputConsumer)
+		// Revoke before scanner teardown so replacement attempts can claim the
+		// lifecycle-owned reader as soon as this attempt releases it.
+		revokeInputClaim()
 		cancel()
 		<-stdinDone
 	}()
@@ -950,15 +963,16 @@ type terminalInputPump struct {
 	in   io.Reader
 	done chan struct{}
 
-	mu       sync.Mutex
-	pending  *terminalReadResult
-	consumer uint64
-	nextID   uint64
-	closed   bool
-	ready    chan struct{}
-	space    chan struct{}
-	startMu  sync.Once
-	stopMu   sync.Once
+	mu         sync.Mutex
+	pending    *terminalReadResult
+	consumer   uint64
+	delivering uint64
+	nextID     uint64
+	closed     bool
+	ready      chan struct{}
+	space      chan struct{}
+	startMu    sync.Once
+	stopMu     sync.Once
 }
 
 func newTerminalInputPump(in io.Reader) *terminalInputPump {
@@ -992,6 +1006,11 @@ func (p *terminalInputPump) revoke(consumer uint64) {
 	if p.consumer == consumer {
 		p.consumer = 0
 	}
+	// An unacknowledged read was never delivered by this scanner. Leave it
+	// pending and make it available to its replacement.
+	if p.delivering == consumer {
+		p.delivering = 0
+	}
 	p.mu.Unlock()
 	p.signalReady()
 }
@@ -1023,13 +1042,13 @@ func (p *terminalInputPump) enqueue(result terminalReadResult) bool {
 	return true
 }
 
-// take gives a ready result only to the current, non-cancelled consumer. It
-// checks cancellation after readiness is observed, so cancellation wins a
-// simultaneous cancellation/read race and leaves the result queued.
+// take leases a ready result only to the current, non-cancelled consumer.
+// The raw read remains pending until ack, so revocation or cancellation before
+// scanner delivery leaves the exact bytes available to the next attempt.
 func (p *terminalInputPump) take(ctx context.Context, consumer uint64) (terminalReadResult, bool) {
 	p.mu.Lock()
-	if ctx.Err() != nil || p.consumer != consumer || p.pending == nil {
-		pending := p.pending != nil
+	if ctx.Err() != nil || p.consumer != consumer || p.pending == nil || p.delivering != 0 {
+		pending := p.pending != nil && p.delivering == 0
 		p.mu.Unlock()
 		if pending {
 			p.signalReady()
@@ -1037,10 +1056,23 @@ func (p *terminalInputPump) take(ctx context.Context, consumer uint64) (terminal
 		return terminalReadResult{}, false
 	}
 	result := *p.pending
+	p.delivering = consumer
+	p.mu.Unlock()
+	return result, true
+}
+
+// ack commits scanner delivery of a leased read and lets the lifecycle reader
+// accept the next result. Only the consumer that holds the lease can ack it.
+func (p *terminalInputPump) ack(consumer uint64) {
+	p.mu.Lock()
+	if p.consumer != consumer || p.delivering != consumer {
+		p.mu.Unlock()
+		return
+	}
 	p.pending = nil
+	p.delivering = 0
 	p.mu.Unlock()
 	p.space <- struct{}{}
-	return result, true
 }
 
 func (p *terminalInputPump) finish() {
@@ -1093,6 +1125,7 @@ type stdinPump struct {
 	paletteEvents     chan<- paletteGenerationEvent
 	activeGeneration  *atomic.Uint64
 	afterPaletteEvent func(paletteGenerationEvent) // test synchronization hook
+	afterInputTake    func()                       // test synchronization hook
 }
 
 func (p *stdinPump) run() {
@@ -1205,6 +1238,14 @@ func (p *stdinPump) run() {
 				}
 				continue
 			}
+			if p.afterInputTake != nil {
+				p.afterInputTake()
+			}
+			// The lease is not acknowledged until scanner delivery completes.
+			// This second check closes the cancellation window after take.
+			if p.ctx.Err() != nil {
+				return
+			}
 			disarmMarkerDeadline()
 			// All scanner callbacks from this Read must retain this one generation.
 			// A scheme notification can start its replacement before a later byte in
@@ -1244,6 +1285,10 @@ func (p *stdinPump) run() {
 				p.cancel()
 				return
 			}
+			if !sendOK.Load() || p.ctx.Err() != nil {
+				return
+			}
+			input.ack(consumer)
 		}
 	}
 }

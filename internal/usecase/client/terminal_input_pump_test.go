@@ -99,6 +99,43 @@ func TestTerminalInputPumpCancellationHandoffPreservesQueuedBytes(t *testing.T) 
 	<-replacementDone
 }
 
+func TestTerminalInputPumpCancellationAfterTakeRequeuesRawRead(t *testing.T) {
+	input := newTerminalInputPump(nil)
+	want := []byte("first\x00second\xff")
+	input.enqueue(terminalReadResult{data: append([]byte(nil), want...)})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	consumer := input.claim()
+	taken := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		(&stdinPump{
+			ctx: ctx, cancel: cancel, input: input, consumer: consumer,
+			out: make(chan ports.Frame, 1), clock: newAttachPaletteClock(),
+			logger: slog.New(slog.DiscardHandler), paletteEvents: make(chan paletteGenerationEvent),
+			afterInputTake: func() {
+				close(taken)
+				<-release
+			},
+		}).run()
+		close(done)
+	}()
+
+	<-taken
+	cancel()
+	close(release)
+	<-done
+	input.revoke(consumer)
+
+	replacement := input.claim()
+	got, ok := input.take(context.Background(), replacement)
+	require.True(t, ok, "cancelled delivery must leave the read for the replacement scanner")
+	require.Equal(t, want, got.data)
+	input.ack(replacement)
+	input.revoke(replacement)
+}
+
 func TestTerminalInputPumpReusesOneReaderAcrossCancelledAttempts(t *testing.T) {
 	reader := newLifecycleReader()
 	input := newTerminalInputPump(reader)

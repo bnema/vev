@@ -61,6 +61,7 @@ type attachPaletteWriter struct {
 	mu     sync.Mutex
 	writes []string
 	wrote  chan string
+	err    error
 }
 
 func newAttachPaletteWriter() *attachPaletteWriter {
@@ -70,7 +71,11 @@ func (w *attachPaletteWriter) Write(data []byte) (int, error) {
 	copyData := string(data)
 	w.mu.Lock()
 	w.writes = append(w.writes, copyData)
+	err := w.err
 	w.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
 	w.wrote <- copyData
 	return len(data), nil
 }
@@ -167,9 +172,18 @@ func startAttachPaletteHarness(state *terminalThemeState) *attachPaletteHarness 
 }
 
 func startAttachPaletteHarnessWithTransport(state *terminalThemeState, transport *attachPaletteTransport) *attachPaletteHarness {
+	return startAttachPaletteHarnessWithInput(state, transport, nil)
+}
+
+func startAttachPaletteHarnessWithInput(state *terminalThemeState, transport *attachPaletteTransport, input *terminalInputPump) *attachPaletteHarness {
+	return startAttachPaletteHarnessWithInputAndWriteError(state, transport, input, nil)
+}
+
+func startAttachPaletteHarnessWithInputAndWriteError(state *terminalThemeState, transport *attachPaletteTransport, input *terminalInputPump, writeErr error) *attachPaletteHarness {
 	clock := newAttachPaletteClock()
 	reader := newAttachPaletteReader()
 	writer := newAttachPaletteWriter()
+	writer.err = writeErr
 	term := &attachPaletteTerminalHarness{in: reader, out: writer, resize: make(chan domain.Size)}
 	ms := &milestones{}
 	runner := &Runner{term: term, clock: clock, logger: slog.New(slog.DiscardHandler)}
@@ -178,6 +192,9 @@ func startAttachPaletteHarnessWithTransport(state *terminalThemeState, transport
 		milestones: ms, themeState: state,
 		enterRaw:  func() error { ms.rawEntered = true; return nil },
 		reconnect: &reconnectUI{term: term, rawEntered: new(bool)},
+		terminalInput: func() *terminalInputPump {
+			return input
+		},
 	}
 	h := &attachPaletteHarness{clock: clock, reader: reader, writer: writer, transport: transport, done: make(chan attachResult, 1)}
 	go func() { h.done <- attempt.run(context.Background()) }()
@@ -273,16 +290,44 @@ func TestAttachSchemeReplacementAndDeadlinesProgressWhileReadBlocks(t *testing.T
 	h.detach(t)
 }
 
-func TestAttachInitialClearedThemeSendReturnsTransportError(t *testing.T) {
+func TestAttachInitialPaletteFailureRevokesInputClaim(t *testing.T) {
 	t.Setenv("COLORTERM", "truecolor")
-	want := errors.New("initial theme send failed")
-	transport := newAttachPaletteTransport()
-	transport.themeSendErr = want
-	h := startAttachPaletteHarnessWithTransport(&terminalThemeState{}, transport)
+	for _, tc := range []struct {
+		name     string
+		start    func(*terminalInputPump) *attachPaletteHarness
+		contains string
+	}{
+		{
+			name: "publish",
+			start: func(input *terminalInputPump) *attachPaletteHarness {
+				want := errors.New("initial theme send failed")
+				transport := newAttachPaletteTransport()
+				transport.themeSendErr = want
+				return startAttachPaletteHarnessWithInput(&terminalThemeState{}, transport, input)
+			},
+			contains: "publishing theme",
+		},
+		{
+			name: "write",
+			start: func(input *terminalInputPump) *attachPaletteHarness {
+				return startAttachPaletteHarnessWithInputAndWriteError(&terminalThemeState{}, newAttachPaletteTransport(), input, errors.New("palette write failed"))
+			},
+			contains: "writing palette query",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := newTerminalInputPump(nil)
+			failed := tc.start(input)
+			err := (<-failed.done).err
+			require.ErrorContains(t, err, tc.contains)
 
-	err := (<-h.done).err
-	require.ErrorIs(t, err, want)
-	require.ErrorContains(t, err, "publishing theme")
+			// The next attach must be able to claim the lifecycle-owned reader.
+			// Before revocation was registered at claim time this panicked above.
+			reconnected := startAttachPaletteHarnessWithInput(&terminalThemeState{}, newAttachPaletteTransport(), input)
+			require.Equal(t, paletteColorBatch, reconnected.nextWrite(t))
+			reconnected.detach(t)
+		})
+	}
 }
 
 func TestStdinPumpSameReadSchemeAndOldMarkerCannotAdvanceReplacement(t *testing.T) {
