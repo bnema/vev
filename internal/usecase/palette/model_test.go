@@ -7,6 +7,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/command"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/stretchr/testify/require"
 )
@@ -266,6 +267,59 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 			frame := m.Render(domain.Size{Cols: 28, Rows: 3}, RenderOptions{Styles: tt.styles()})
 
 			tt.assert(t, frame.At(tt.x, 1).Style)
+		})
+	}
+}
+
+func TestPaletteDescriptionKeepsInactiveRowSurfaceAcrossFallbacks(t *testing.T) {
+	paletteColors := [16]renderer.RGB{}
+	paletteColors[2] = renderer.RGB{R: 10, G: 230, B: 120}
+	paletteColors[10] = paletteColors[2]
+	accentTheme := themeui.Theme{
+		Foreground: renderer.RGB{R: 230, G: 230, B: 230}, Background: renderer.RGB{R: 8, G: 9, B: 10},
+		HasFG: true, HasBG: true, Known: true, TrueColor: true, UsePalette: true,
+		Palette: paletteColors, PaletteKnown: 1<<2 | 1<<10,
+	}
+	indexedTheme := accentTheme
+	indexedTheme.TrueColor = false
+	paletteOffTheme := accentTheme
+	paletteOffTheme.UsePalette = false
+	neutralTheme := paletteOffTheme
+	neutralTheme.PaletteKnown = 0
+
+	tests := []struct {
+		name   string
+		theme  themeui.Theme
+		policy domain.ThemeAccent
+	}{
+		{name: "truecolor accent", theme: accentTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2}},
+		{name: "indexed only", theme: indexedTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2}},
+		{name: "palette off", theme: paletteOffTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
+		{name: "forced dark", theme: themeui.BuiltinDark, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
+		{name: "forced light", theme: themeui.BuiltinLight, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
+		{name: "neutral fallback", theme: neutralTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			styles := themeui.Resolve(tt.theme, tt.policy).Styles
+			model := New(CommandResults([]command.Command{
+				cmd("ONE", "One", "first description"),
+				cmd("TWO", "Two", "second description"),
+			}))
+			model.Down()
+			frame := model.Render(domain.Size{Cols: 32, Rows: 3}, RenderOptions{Styles: RenderStyles{
+				Base: styles.PickerBase, Row: styles.SurfaceInactive,
+				Selection: styles.PickerSelection, Description: styles.PickerDescription,
+			}})
+			description := frame.At(4, 1).Style
+			require.Equal(t, styles.SurfaceInactive.Background, description.Background)
+			require.Equal(t, styles.SurfaceInactive.HasBackgroundRGB, description.HasBackgroundRGB)
+			require.Equal(t, styles.SurfaceInactive.BackgroundRGB, description.BackgroundRGB)
+			if tt.name == "indexed only" {
+				require.Equal(t, 2, description.Foreground)
+				require.False(t, description.HasBackgroundRGB)
+			}
 		})
 	}
 }

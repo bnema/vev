@@ -89,7 +89,7 @@ func indexedStyles(styles Styles, slot uint8) Styles {
 	// blue fallback too. Keep the strict explicit index on each foreground
 	// decoration without changing any neutral surface background.
 	styles.Border = styles.BorderMuted
-	styles.PaletteDesc = styles.PickerDescription
+	styles.PaletteDesc = indexedForeground(styles.PaletteDesc, slot)
 	styles.TabTitle = styles.TabInactiveTitle
 	styles.TabTitleActive = styles.TabActiveTitle
 	styles.PickerSelectionMuted = indexedForeground(styles.PickerSelectionMuted, slot)
@@ -109,12 +109,18 @@ func neutralStyles(t Theme) Styles {
 	status := renderer.DefaultStyle()
 	accent := inverseStyle()
 	border := renderer.DefaultStyle()
-	muted := renderer.DefaultStyle()
+	inactiveDescription := status
+	barDescription := status
 	if usable(t) {
 		status = rgbSurface(t.Foreground, Blend(t.Background, t.Foreground, 0.12))
 		accent = rgbSurface(t.Foreground, Blend(t.Background, t.Foreground, neutralAccentBlend))
 		border = neutralBorderStyle(t)
-		muted = foregroundStyle(Blend(t.Foreground, t.Background, 0.45))
+		// Preserve the legacy neutral muted foreground while retaining the
+		// semantic row/bar background beneath description and separator cells.
+		inactiveDescription = status
+		inactiveDescription.ForegroundRGB = Blend(t.Foreground, t.Background, 0.45)
+		barDescription = status
+		barDescription.ForegroundRGB = Blend(t.Foreground, t.Background, 0.45)
 	}
 	styles := Styles{
 		SurfaceBar:      status,
@@ -132,13 +138,16 @@ func neutralStyles(t Theme) Styles {
 
 		PickerBase:        status,
 		PickerSelection:   EmphasisStyle(accent, t),
-		PickerDescription: muted,
-		PickerSeparator:   muted,
+		PickerDescription: inactiveDescription,
+		PickerSeparator:   barDescription,
 		PromptBase:        status,
 		CopyStatus:        accent,
 		SearchSelection:   accent,
 	}
 	styles = withLegacyAliases(styles, t)
+	// PaletteDesc is a Phase 3 compatibility alias. It retains its legacy
+	// foreground-only bytes; rendered palette descriptions use PickerDescription.
+	styles.PaletteDesc = legacyMutedText(t)
 	// Neutral and indexed fallbacks retain their existing non-RGB hierarchy;
 	// MRU entries deliberately share the neutral recent surface.
 	return withMRUStyles(styles, Ramp{SurfaceBar: styles.SurfaceBar, SurfaceRecent: styles.SurfaceRecent})
@@ -163,6 +172,13 @@ func NeutralBorderStyle(t Theme) renderer.Style {
 }
 
 func neutralBorderStyle(t Theme) renderer.Style { return NeutralBorderStyle(t) }
+
+func legacyMutedText(t Theme) renderer.Style {
+	if !usable(t) {
+		return renderer.DefaultStyle()
+	}
+	return foregroundStyle(Blend(t.Foreground, t.Background, 0.45))
+}
 
 func withLegacyAliases(styles Styles, t Theme) Styles {
 	styles.StatusBar = styles.SurfaceBar

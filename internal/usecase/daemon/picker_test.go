@@ -642,36 +642,84 @@ func TestPickerDestroyedTabCleanupDoesNotClearNewerGeneration(t *testing.T) {
 	require.True(t, subscribed)
 }
 
-func TestCaptureOverlayLayersUsesMutedThemeStyleForPickerSeparators(t *testing.T) {
-	for _, tt := range []struct {
-		name  string
-		theme themeui.Theme
+func TestCaptureOverlayLayersPreservesPickerSemanticSurfacesAcrossFallbacks(t *testing.T) {
+	palette := [16]renderer.RGB{}
+	palette[2] = renderer.RGB{R: 10, G: 230, B: 120}
+	palette[10] = palette[2]
+	accentTheme := themeui.Theme{
+		Foreground: renderer.RGB{R: 230, G: 230, B: 230}, Background: renderer.RGB{R: 8, G: 9, B: 10},
+		HasFG: true, HasBG: true, Known: true, TrueColor: true, UsePalette: true,
+		Palette: palette, PaletteKnown: 1<<2 | 1<<10,
+	}
+	indexedTheme := accentTheme
+	indexedTheme.TrueColor = false
+	neutralTheme := accentTheme
+	neutralTheme.PaletteKnown = 0
+	neutralTheme.SchemeKnown = false
+
+	defaults := domain.Defaults()
+	paletteOff := defaults
+	paletteOff.ThemePalette = false
+	forcedDark := defaults
+	forcedDark.Theme = domain.ThemeDark
+	forcedLight := defaults
+	forcedLight.Theme = domain.ThemeLight
+	tests := []struct {
+		name    string
+		raw     themeui.Theme
+		config  domain.Config
+		indexed bool
 	}{
-		{name: "default terminal", theme: themeui.Theme{}},
-		{name: "truecolor terminal", theme: themeui.BuiltinDark},
-	} {
+		{name: "truecolor accent", raw: accentTheme, config: defaults},
+		{name: "indexed only", raw: indexedTheme, config: defaults, indexed: true},
+		{name: "palette off", raw: accentTheme, config: paletteOff},
+		{name: "forced dark", raw: accentTheme, config: forcedDark},
+		{name: "forced light", raw: accentTheme, config: forcedLight},
+		{name: "neutral fallback", raw: neutralTheme, config: defaults},
+	}
+
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			d.ApplyConfig(tt.config)
+			applied := d.resolveAppliedTheme(tt.raw)
 			state := capturedRenderState{
-				theme:  tt.theme,
-				styles: themeui.Resolve(tt.theme, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles,
+				theme:  applied.Raw,
+				styles: applied.Resolved.Styles,
 				layout: capturedTabLayout{area: domain.Rect{Width: 100, Height: 38}},
 			}
 			snap := &overlayRenderSnapshot{
 				pickerActive: true,
-				pickerModel:  picker.New([]picker.SessionView{{ID: "s", Name: "session", Tabs: []picker.TabEntry{{Name: "tab"}}, Active: 0}}, "s", 0),
+				pickerModel: picker.New([]picker.SessionView{
+					{ID: "selected", Name: "selected", Tabs: []picker.TabEntry{{Name: "one"}}, Active: 0},
+					{ID: "inactive", Name: "inactive", Tabs: []picker.TabEntry{{Name: "two", Detail: " (detail)"}}, Active: 0},
+				}, "selected", 0),
 			}
 
 			captureOverlayLayers(&state, snap, domain.PaletteConfig{})
 
+			require.Equal(t, state.styles.SurfaceInactive.Background, state.styles.PickerDescription.Background)
+			require.Equal(t, state.styles.SurfaceInactive.HasBackgroundRGB, state.styles.PickerDescription.HasBackgroundRGB)
+			require.Equal(t, state.styles.SurfaceInactive.BackgroundRGB, state.styles.PickerDescription.BackgroundRGB)
+			require.Equal(t, state.styles.SurfaceBar.Background, state.styles.PickerSeparator.Background)
+			require.Equal(t, state.styles.SurfaceBar.HasBackgroundRGB, state.styles.PickerSeparator.HasBackgroundRGB)
+			require.Equal(t, state.styles.SurfaceBar.BackgroundRGB, state.styles.PickerSeparator.BackgroundRGB)
+			if tt.indexed {
+				require.Equal(t, 2, state.styles.PickerDescription.Foreground)
+				require.Equal(t, 2, state.styles.PickerSeparator.Foreground)
+				require.False(t, state.styles.PickerDescription.HasBackgroundRGB)
+				require.False(t, state.styles.PickerSeparator.HasBackgroundRGB)
+			}
+
 			inner := state.overlays.picker.inner
 			layout := picker.ChooseLayout(domain.Size{Cols: inner.Width, Rows: inner.Height})
 			require.Equal(t, picker.LayoutHorizontal, layout.Mode)
-			want := state.styles.PickerSeparator
+			require.True(t, inner.At(5, 3).Style.Equal(state.styles.PickerDescription), "description text retains the inactive row surface")
 			for y := layout.Separator.Y; y < layout.Separator.Y+layout.Separator.Height; y++ {
 				for x := layout.Separator.X; x < layout.Separator.X+layout.Separator.Width; x++ {
 					cell := inner.At(x, y)
 					require.Equal(t, '│', cell.Rune)
-					require.True(t, cell.Style.Equal(want))
+					require.True(t, cell.Style.Equal(state.styles.PickerSeparator), "separator retains the bar surface")
 				}
 			}
 		})

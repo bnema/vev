@@ -13,9 +13,77 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
+
+func TestCaptureOverlayLayersPreservesPaletteDescriptionSurfaceAcrossFallbacks(t *testing.T) {
+	paletteColors := [16]renderer.RGB{}
+	paletteColors[2] = renderer.RGB{R: 10, G: 230, B: 120}
+	paletteColors[10] = paletteColors[2]
+	accentTheme := themeui.Theme{
+		Foreground: renderer.RGB{R: 230, G: 230, B: 230}, Background: renderer.RGB{R: 8, G: 9, B: 10},
+		HasFG: true, HasBG: true, Known: true, TrueColor: true, UsePalette: true,
+		Palette: paletteColors, PaletteKnown: 1<<2 | 1<<10,
+	}
+	indexedTheme := accentTheme
+	indexedTheme.TrueColor = false
+	neutralTheme := accentTheme
+	neutralTheme.PaletteKnown = 0
+	neutralTheme.SchemeKnown = false
+
+	defaults := domain.Defaults()
+	paletteOff := defaults
+	paletteOff.ThemePalette = false
+	forcedDark := defaults
+	forcedDark.Theme = domain.ThemeDark
+	forcedLight := defaults
+	forcedLight.Theme = domain.ThemeLight
+	tests := []struct {
+		name    string
+		raw     themeui.Theme
+		config  domain.Config
+		indexed bool
+	}{
+		{name: "truecolor accent", raw: accentTheme, config: defaults},
+		{name: "indexed only", raw: indexedTheme, config: defaults, indexed: true},
+		{name: "palette off", raw: accentTheme, config: paletteOff},
+		{name: "forced dark", raw: accentTheme, config: forcedDark},
+		{name: "forced light", raw: accentTheme, config: forcedLight},
+		{name: "neutral fallback", raw: neutralTheme, config: defaults},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			d.ApplyConfig(tt.config)
+			applied := d.resolveAppliedTheme(tt.raw)
+			model := palette.New(palette.CommandResults([]command.Command{
+				{Code: "ONE", Name: "One", Desc: "first description"},
+				{Code: "TWO", Name: "Two", Desc: "second description"},
+			}))
+			model.Down()
+			state := capturedRenderState{
+				theme:  applied.Raw,
+				styles: applied.Resolved.Styles,
+				layout: capturedTabLayout{area: domain.Rect{Width: 100, Height: 38}},
+			}
+			snap := &overlayRenderSnapshot{paletteActive: true, paletteModel: model}
+
+			captureOverlayLayers(&state, snap, domain.PaletteConfig{})
+
+			description := state.overlays.palette.inner.At(4, 1).Style
+			require.Equal(t, state.styles.SurfaceInactive.Background, description.Background)
+			require.Equal(t, state.styles.SurfaceInactive.HasBackgroundRGB, description.HasBackgroundRGB)
+			require.Equal(t, state.styles.SurfaceInactive.BackgroundRGB, description.BackgroundRGB)
+			if tt.indexed {
+				require.Equal(t, 2, description.Foreground)
+				require.False(t, description.HasBackgroundRGB)
+			}
+		})
+	}
+}
 
 func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	p1, release1 := newBlockingPTY(t)

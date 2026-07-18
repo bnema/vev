@@ -115,6 +115,9 @@ func TestLegacyAliasesPaletteOffAndForcedThemesRemainExact(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := Resolve(tt.theme, domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2}).Styles
 			want := prePhase3LegacyAliases(tt.theme)
+			// PickerSeparator is now a semantic role with the SurfaceBar
+			// background; it was never a compatibility alias.
+			delete(want, "PickerSeparator")
 			for name, style := range want {
 				require.Equalf(t, style, legacyAndSemanticStyles(got)[name], "%s", name)
 			}
