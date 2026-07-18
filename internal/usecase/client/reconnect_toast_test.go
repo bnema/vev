@@ -110,19 +110,6 @@ func reconnectToastDetach(reason uint8) ports.Frame {
 	return ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(ports.Detached{Reason: reason})}
 }
 
-func mockReconnectTransport(t *testing.T, recvs ...reconnectToastRecv) *portsmocks.MockTransport {
-	t.Helper()
-	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(mock.MatchedBy(func(f ports.Frame) bool { return f.Type == ports.MsgTheme })).Return(nil).Maybe()
-	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
-	for _, recv := range recvs {
-		tr.EXPECT().Recv().Return(recv.frame, recv.err).Once()
-	}
-	tr.EXPECT().Recv().Return(ports.Frame{}, io.EOF).Maybe()
-	tr.EXPECT().Close().Return(nil).Maybe()
-	return tr
-}
-
 type reconnectToastRecv struct {
 	frame ports.Frame
 	err   error
@@ -143,9 +130,14 @@ func (d *reconnectToastSequenceDialer) Dial(context.Context) (ports.Transport, e
 }
 
 type reconnectToastRecordingTransport struct {
+	mu     sync.Mutex
 	recvs  []reconnectToastRecv
 	sends  []ports.Frame
 	closed bool
+}
+
+func newReconnectToastRecordingTransport(recvs ...reconnectToastRecv) *reconnectToastRecordingTransport {
+	return &reconnectToastRecordingTransport{recvs: append([]reconnectToastRecv(nil), recvs...)}
 }
 
 type reconnectToastLinkTransport struct {
@@ -180,11 +172,15 @@ func (t *reconnectToastLinkTransport) LinkEvents() <-chan ports.LinkEvent { retu
 func (t *reconnectToastLinkTransport) LinkState() ports.LinkState { return t.state }
 
 func (t *reconnectToastRecordingTransport) Send(f ports.Frame) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.sends = append(t.sends, f)
 	return nil
 }
 
 func (t *reconnectToastRecordingTransport) Recv() (ports.Frame, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if len(t.recvs) == 0 {
 		return ports.Frame{}, io.EOF
 	}
@@ -194,15 +190,47 @@ func (t *reconnectToastRecordingTransport) Recv() (ports.Frame, error) {
 }
 
 func (t *reconnectToastRecordingTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.closed = true
 	return nil
 }
 
+func (t *reconnectToastRecordingTransport) sentFrames() []ports.Frame {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]ports.Frame(nil), t.sends...)
+}
+
+func (t *reconnectToastRecordingTransport) wasClosed() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.closed
+}
+
+// assertReconnectToastAttemptPublishesOnlyClearedTheme verifies the precise
+// handshake publication for these no-OSC-response reconnect paths. A final
+// Theme would be wrong here: no terminal palette response was supplied.
+func assertReconnectToastAttemptPublishesOnlyClearedTheme(t *testing.T, tr *reconnectToastRecordingTransport) {
+	t.Helper()
+	frames := tr.sentFrames()
+	require.Len(t, frames, 2)
+	require.Equal(t, ports.MsgHello, frames[0].Type)
+	require.Equal(t, ports.MsgTheme, frames[1].Type)
+	theme, err := ports.UnmarshalTheme(frames[1].Payload)
+	require.NoError(t, err)
+	require.False(t, theme.HasForeground)
+	require.False(t, theme.HasBackground)
+	require.Zero(t, theme.PaletteKnown)
+	require.True(t, tr.wasClosed())
+}
+
 func reconnectToastHelloFromSend(t *testing.T, tr *reconnectToastRecordingTransport) ports.Hello {
 	t.Helper()
-	require.NotEmpty(t, tr.sends)
-	require.Equal(t, ports.MsgHello, tr.sends[0].Type)
-	hello, err := ports.UnmarshalHello(tr.sends[0].Payload)
+	frames := tr.sentFrames()
+	require.NotEmpty(t, frames)
+	require.Equal(t, ports.MsgHello, frames[0].Type)
+	hello, err := ports.UnmarshalHello(frames[0].Payload)
 	require.NoError(t, err)
 	return hello
 }
@@ -494,8 +522,8 @@ func TestRemoteReconnectToastLifecycleWithWrappedTransportError(t *testing.T) {
 
 	err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), Logger: slog.New(slog.DiscardHandler)}).Run(context.Background(), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
 	require.NoError(t, err)
-	require.True(t, tr1.closed)
-	require.True(t, tr2.closed)
+	require.True(t, tr1.wasClosed())
+	require.True(t, tr2.wasClosed())
 	require.Equal(t, 2, dialer.calls)
 
 	firstHello := reconnectToastHelloFromSend(t, tr1)
@@ -555,18 +583,19 @@ func TestRemoteEphemeralReconnectUsesAssignedSessionName(t *testing.T) {
 func TestRemoteReconnectToastLifecycle(t *testing.T) {
 	tests := []struct {
 		name      string
-		configure func(t *testing.T, dialer *portsmocks.MockDialer)
+		configure func(t *testing.T, dialer *portsmocks.MockDialer) []*reconnectToastRecordingTransport
 		sleep     func(cancel context.CancelFunc) bool
 		wantErr   func(t *testing.T, err error)
 		wantBlank bool
 	}{
 		{
 			name: "clears on successful reconnect",
-			configure: func(t *testing.T, dialer *portsmocks.MockDialer) {
-				tr1 := mockReconnectTransport(t, reconnectToastRecv{frame: reconnectToastWelcome(11)}, reconnectToastRecv{err: io.EOF})
-				tr2 := mockReconnectTransport(t, reconnectToastRecv{frame: reconnectToastWelcome(22)}, reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)})
+			configure: func(t *testing.T, dialer *portsmocks.MockDialer) []*reconnectToastRecordingTransport {
+				tr1 := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(11)}, reconnectToastRecv{err: io.EOF})
+				tr2 := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(22)}, reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)})
 				dialer.EXPECT().Dial(mock.Anything).Return(tr1, nil).Once()
 				dialer.EXPECT().Dial(mock.Anything).Return(tr2, nil).Once()
+				return []*reconnectToastRecordingTransport{tr1, tr2}
 			},
 			sleep:     func(context.CancelFunc) bool { return true },
 			wantErr:   func(t *testing.T, err error) { require.NoError(t, err) },
@@ -574,9 +603,10 @@ func TestRemoteReconnectToastLifecycle(t *testing.T) {
 		},
 		{
 			name: "clears on cancellation",
-			configure: func(t *testing.T, dialer *portsmocks.MockDialer) {
-				tr := mockReconnectTransport(t, reconnectToastRecv{frame: reconnectToastWelcome(11)}, reconnectToastRecv{err: io.EOF})
+			configure: func(t *testing.T, dialer *portsmocks.MockDialer) []*reconnectToastRecordingTransport {
+				tr := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(11)}, reconnectToastRecv{err: io.EOF})
 				dialer.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
+				return []*reconnectToastRecordingTransport{tr}
 			},
 			sleep: func(cancel context.CancelFunc) bool {
 				cancel()
@@ -587,11 +617,12 @@ func TestRemoteReconnectToastLifecycle(t *testing.T) {
 		},
 		{
 			name: "clears on final exit",
-			configure: func(t *testing.T, dialer *portsmocks.MockDialer) {
-				tr1 := mockReconnectTransport(t, reconnectToastRecv{frame: reconnectToastWelcome(11)}, reconnectToastRecv{err: io.EOF})
-				tr2 := mockReconnectTransport(t, reconnectToastRecv{frame: reconnectToastWelcome(22)}, reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonSessionKilled)})
+			configure: func(t *testing.T, dialer *portsmocks.MockDialer) []*reconnectToastRecordingTransport {
+				tr1 := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(11)}, reconnectToastRecv{err: io.EOF})
+				tr2 := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(22)}, reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonSessionKilled)})
 				dialer.EXPECT().Dial(mock.Anything).Return(tr1, nil).Once()
 				dialer.EXPECT().Dial(mock.Anything).Return(tr2, nil).Once()
+				return []*reconnectToastRecordingTransport{tr1, tr2}
 			},
 			sleep: func(context.CancelFunc) bool { return true },
 			wantErr: func(t *testing.T, err error) {
@@ -619,10 +650,13 @@ func TestRemoteReconnectToastLifecycle(t *testing.T) {
 			term := newReconnectToastTerminalHarness(t)
 			defer term.closeInput()
 			dialer := portsmocks.NewMockDialer(t)
-			tt.configure(t, dialer)
+			transports := tt.configure(t, dialer)
 
 			err := NewRunner(Dependencies{Dialer: dialer, Terminal: term.term, Clock: newReconnectHandshakeClock(t), Logger: slog.New(slog.DiscardHandler)}).Run(ctx, AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true})
 			tt.wantErr(t, err)
+			for _, transport := range transports {
+				assertReconnectToastAttemptPublishesOnlyClearedTheme(t, transport)
+			}
 			out := term.out.String()
 			require.Contains(t, out, reconnectToastMessage)
 			if tt.wantBlank {

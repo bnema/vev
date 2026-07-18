@@ -308,4 +308,13 @@ func (s *paletteMarkerScanner) flush(onBytes func([]byte)) {
 	s.pending = nil
 }
 
+// takePending transfers only an undecided DECRQM prefix to a replacement
+// scanner. Callers use it during cancellation after all other callbacks from
+// the source read have been committed, preventing both loss and replay.
+func (s *paletteMarkerScanner) takePending() []byte {
+	pending := append([]byte(nil), s.pending...)
+	s.pending = nil
+	return pending
+}
+
 func (s *paletteMarkerScanner) hasPendingPrefix() bool { return len(s.pending) != 0 }

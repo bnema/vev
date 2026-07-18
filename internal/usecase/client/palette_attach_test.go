@@ -30,18 +30,33 @@ func (paletteAttachTimer) Reset(time.Duration) bool { return false }
 func (paletteAttachTimer) Stop() bool               { return true }
 
 type paletteAttachReader struct {
+	mu   sync.Mutex
 	data []byte
+	done chan struct{}
 	once sync.Once
 }
 
-func (r *paletteAttachReader) Read(p []byte) (int, error) {
-	read := false
-	r.once.Do(func() { read = true })
-	if read {
-		return copy(p, r.data), nil
-	}
-	select {}
+func newPaletteAttachReader(data []byte) *paletteAttachReader {
+	return &paletteAttachReader{data: append([]byte(nil), data...), done: make(chan struct{})}
 }
+
+// Read retains unread bytes after a short read and blocks only until close.
+// This keeps the test terminal reader faithful to io.Reader and makes a
+// failed test teardown deterministic instead of leaving a goroutine parked.
+func (r *paletteAttachReader) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	if len(r.data) != 0 {
+		n := copy(p, r.data)
+		r.data = r.data[n:]
+		r.mu.Unlock()
+		return n, nil
+	}
+	r.mu.Unlock()
+	<-r.done
+	return 0, io.EOF
+}
+
+func (r *paletteAttachReader) close() { r.once.Do(func() { close(r.done) }) }
 
 type paletteAttachTerminal struct {
 	in     io.Reader
@@ -100,8 +115,27 @@ func (t *paletteAttachTransport) Recv() (ports.Frame, error) {
 }
 func (*paletteAttachTransport) Close() error { return nil }
 
+func TestPaletteAttachReaderPreservesShortReadRemainderAndCloses(t *testing.T) {
+	reader := newPaletteAttachReader([]byte("abcdef"))
+	first := make([]byte, 2)
+	n, err := reader.Read(first)
+	require.NoError(t, err)
+	require.Equal(t, "ab", string(first[:n]))
+
+	rest := make([]byte, 8)
+	n, err = reader.Read(rest)
+	require.NoError(t, err)
+	require.Equal(t, "cdef", string(rest[:n]))
+
+	reader.close()
+	n, err = reader.Read(rest)
+	require.Zero(t, n)
+	require.ErrorIs(t, err, io.EOF)
+}
+
 func TestAttachPublishesOnlyClearedAndDefinitiveInitialPalette(t *testing.T) {
-	input := &paletteAttachReader{data: []byte("\x1b]10;#010203\a\x1b]11;#040506\a\x1b]4;2;#102030\a\x1b[?2031;1$y")}
+	input := newPaletteAttachReader([]byte("\x1b]10;#010203\a\x1b]11;#040506\a\x1b]4;2;#102030\a\x1b[?2031;1$y"))
+	t.Cleanup(input.close)
 	term := &paletteAttachTerminal{in: input, resize: make(chan domain.Size)}
 	transport := &paletteAttachTransport{finalSet: make(chan struct{})}
 	ms := &milestones{}
@@ -119,6 +153,10 @@ func TestAttachPublishesOnlyClearedAndDefinitiveInitialPalette(t *testing.T) {
 
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
+	require.Len(t, transport.sent, 3)
+	require.Equal(t, []ports.MsgType{ports.MsgHello, ports.MsgTheme, ports.MsgTheme}, []ports.MsgType{
+		transport.sent[0].Type, transport.sent[1].Type, transport.sent[2].Type,
+	}, "the protocol requires Hello before the two palette publications")
 	require.Len(t, transport.themes, 2)
 	cleared, definitive := transport.themes[0], transport.themes[1]
 	require.Zero(t, cleared.PaletteKnown)

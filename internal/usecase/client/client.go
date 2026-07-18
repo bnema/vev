@@ -503,6 +503,16 @@ func boundedPreWelcome(ctx context.Context, clk ports.Clock, transport ports.Tra
 	}
 }
 
+// paletteSlot validates the scanner's signed slot before narrowing it for the
+// wire accumulator. Keep this boundary even though the in-tree Scanner also
+// validates slots: callbacks are an interface boundary.
+func paletteSlot(slot int) (uint8, bool) {
+	if slot < 0 || slot > 15 {
+		return 0, false
+	}
+	return uint8(slot), true
+}
+
 // DetectTrueColor reports whether TERM/COLORTERM advertise direct color support.
 func DetectTrueColor(termEnv, colorTerm string) bool {
 	switch strings.ToLower(strings.TrimSpace(colorTerm)) {
@@ -980,19 +990,25 @@ type terminalInputPump struct {
 	in   io.Reader
 	done chan struct{}
 
-	mu         sync.Mutex
-	pending    *terminalReadResult
-	consumer   uint64
-	delivering uint64
-	nextID     uint64
-	closed     bool
-	active     bool
-	ready      chan struct{}
-	space      chan struct{}
-	state      chan struct{}
-	exited     chan struct{}
-	startMu    sync.Once
-	stopMu     sync.Once
+	mu sync.Mutex
+	// residual holds scanner bytes that were read but not delivered when an
+	// attempt is cancelled. It is consumed before the next terminal Read so a
+	// replacement scanner neither loses a partial marker nor replays bytes
+	// whose callbacks already ran.
+	residual           []byte
+	pending            *terminalReadResult
+	consumer           uint64
+	delivering         uint64
+	deliveringResidual bool
+	nextID             uint64
+	closed             bool
+	active             bool
+	ready              chan struct{}
+	space              chan struct{}
+	state              chan struct{}
+	exited             chan struct{}
+	startMu            sync.Once
+	stopMu             sync.Once
 }
 
 func newTerminalInputPump(in io.Reader) *terminalInputPump {
@@ -1033,6 +1049,7 @@ func (p *terminalInputPump) revoke(consumer uint64) {
 	// pending and make it available to its replacement.
 	if p.delivering == consumer {
 		p.delivering = 0
+		p.deliveringResidual = false
 	}
 	p.mu.Unlock()
 	p.signalReady()
@@ -1070,18 +1087,46 @@ func (p *terminalInputPump) enqueue(result terminalReadResult) bool {
 // scanner delivery leaves the exact bytes available to the next attempt.
 func (p *terminalInputPump) take(ctx context.Context, consumer uint64) (terminalReadResult, bool) {
 	p.mu.Lock()
-	if ctx.Err() != nil || p.consumer != consumer || p.pending == nil || p.delivering != 0 {
-		pending := p.pending != nil && p.delivering == 0
+	if ctx.Err() != nil || p.consumer != consumer || p.delivering != 0 {
+		ready := (len(p.residual) != 0 || p.pending != nil) && p.delivering == 0
 		p.mu.Unlock()
-		if pending {
+		if ready {
 			p.signalReady()
 		}
 		return terminalReadResult{}, false
 	}
+	if len(p.residual) != 0 {
+		result := terminalReadResult{data: append([]byte(nil), p.residual...)}
+		p.delivering = consumer
+		p.deliveringResidual = true
+		p.mu.Unlock()
+		return result, true
+	}
+	if p.pending == nil {
+		p.mu.Unlock()
+		return terminalReadResult{}, false
+	}
 	result := *p.pending
 	p.delivering = consumer
+	p.deliveringResidual = false
 	p.mu.Unlock()
 	return result, true
+}
+
+// preserveResidual records the undecided marker prefix after callbacks for the
+// rest of its read have completed. It is intentionally bounded by the marker
+// scanner's fixed response prefixes and is replayed before later terminal
+// reads on a replacement attempt.
+func (p *terminalInputPump) preserveResidual(consumer uint64, data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.consumer != consumer {
+		return
+	}
+	p.residual = append(p.residual[:0], data...)
 }
 
 // ack commits scanner delivery of a leased read and lets the lifecycle reader
@@ -1092,9 +1137,22 @@ func (p *terminalInputPump) ack(consumer uint64) {
 		p.mu.Unlock()
 		return
 	}
-	p.pending = nil
+	wasResidual := p.deliveringResidual
+	if wasResidual {
+		p.residual = nil
+	} else {
+		p.pending = nil
+	}
 	p.delivering = 0
+	p.deliveringResidual = false
+	more := len(p.residual) != 0 || p.pending != nil
 	p.mu.Unlock()
+	if wasResidual {
+		if more {
+			p.signalReady()
+		}
+		return
+	}
 	p.space <- struct{}{}
 }
 
@@ -1183,8 +1241,10 @@ func (p *terminalInputPump) suspend() {
 	p.mu.Lock()
 	p.active = false
 	discarded := p.pending != nil
+	p.residual = nil
 	p.pending = nil
 	p.delivering = 0
+	p.deliveringResidual = false
 	p.mu.Unlock()
 	if discarded {
 		select {
@@ -1224,19 +1284,20 @@ func (p *terminalInputPump) stop() {
 // terminal directly, publishes a Theme, or writes terminal output;
 // attachAttempt owns those operations.
 type stdinPump struct {
-	ctx               context.Context
-	cancel            context.CancelFunc
-	in                io.Reader // compatibility for isolated scanner tests
-	input             *terminalInputPump
-	consumer          uint64
-	out               chan<- ports.Frame
-	clock             ports.Clock
-	clipboard         ports.ClipboardReader
-	logger            *slog.Logger
-	paletteEvents     chan<- paletteGenerationEvent
-	activeGeneration  *atomic.Uint64
-	afterPaletteEvent func(paletteGenerationEvent) // test synchronization hook
-	afterInputTake    func()                       // test synchronization hook
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	in                  io.Reader // compatibility for isolated scanner tests
+	input               *terminalInputPump
+	consumer            uint64
+	out                 chan<- ports.Frame
+	clock               ports.Clock
+	clipboard           ports.ClipboardReader
+	logger              *slog.Logger
+	paletteEvents       chan<- paletteGenerationEvent
+	activeGeneration    *atomic.Uint64
+	afterPaletteEvent   func(paletteGenerationEvent) // test synchronization hook
+	afterInputTake      func()                       // test synchronization hook
+	afterInputDelivered func()                       // test synchronization hook
 }
 
 func (p *stdinPump) run() {
@@ -1249,6 +1310,9 @@ func (p *stdinPump) run() {
 	send := func(frame ports.Frame) {
 		select {
 		case p.out <- frame:
+			if p.afterInputDelivered != nil {
+				p.afterInputDelivered()
+			}
 		case <-p.ctx.Done():
 			sendOK.Store(false)
 		}
@@ -1297,6 +1361,15 @@ func (p *stdinPump) run() {
 		consumer = input.claim()
 		defer input.revoke(consumer)
 	}
+	// A marker prefix is ordinary terminal input until it becomes a complete
+	// DECRQM reply. If cancellation wins while it is withheld, preserve just
+	// that undecided suffix; the rest of its source read has already been
+	// delivered and must not be replayed by the next attempt.
+	defer func() {
+		if p.ctx.Err() != nil {
+			input.preserveResidual(consumer, markers.takePending())
+		}
+	}()
 
 	var markerTimer ports.Timer
 	var markerTimerC <-chan time.Time
@@ -1371,7 +1444,14 @@ func (p *stdinPump) run() {
 					}
 					sendEvent(paletteGenerationEvent{id: readGeneration, kind: kindEvent, rgb: rgb})
 				}, func(slot int, rgb renderer.RGB) {
-					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventPalette, slot: uint8(slot), rgb: rgb})
+					// Scanner implementations are independently testable; retain the
+					// protocol boundary here too so a malformed implementation cannot
+					// wrap a negative or oversized int into an ANSI palette slot.
+					slot8, ok := paletteSlot(slot)
+					if !ok {
+						return
+					}
+					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventPalette, slot: slot8, rgb: rgb})
 				}, func(light bool) {
 					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventScheme, light: light})
 				}, func(data []byte) {
@@ -1396,10 +1476,17 @@ func (p *stdinPump) run() {
 				p.cancel()
 				return
 			}
-			if !sendOK.Load() || p.ctx.Err() != nil {
+			if !sendOK.Load() {
 				return
 			}
+			// Commit every callback from this raw read before observing a
+			// concurrent cancellation. Any remaining marker prefix is retained
+			// by the deferred handoff above, so reconnects never duplicate the
+			// delivered bytes or lose a standalone Escape.
 			input.ack(consumer)
+			if p.ctx.Err() != nil {
+				return
+			}
 		}
 	}
 }

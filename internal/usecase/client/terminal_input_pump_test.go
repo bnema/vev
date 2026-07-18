@@ -71,6 +71,26 @@ func (r *lateStopReader) Read(p []byte) (int, error) {
 	return copy(p, result.data), result.err
 }
 
+func TestPaletteSlotRejectsOutOfRangeIntBeforeNarrowing(t *testing.T) {
+	for _, tc := range []struct {
+		slot int
+		want uint8
+		ok   bool
+	}{
+		{slot: -1},
+		{slot: 0, want: 0, ok: true},
+		{slot: 15, want: 15, ok: true},
+		{slot: 16},
+		{slot: 256},
+	} {
+		got, ok := paletteSlot(tc.slot)
+		require.Equal(t, tc.ok, ok, "slot %d", tc.slot)
+		if ok {
+			require.Equal(t, tc.want, got, "slot %d", tc.slot)
+		}
+	}
+}
+
 func TestTerminalInputPumpStopDropsLateReadWithoutStartingAnother(t *testing.T) {
 	reader := newLateStopReader()
 	input := newTerminalInputPump(reader)
@@ -199,6 +219,85 @@ func TestTerminalInputPumpCancellationAfterTakeRequeuesRawRead(t *testing.T) {
 	require.Equal(t, want, got.data)
 	input.ack(replacement)
 	input.revoke(replacement)
+}
+
+func TestTerminalInputPumpCancellationPreservesStandaloneEscapeForReplacement(t *testing.T) {
+	input := newTerminalInputPump(nil)
+	input.enqueue(terminalReadResult{data: []byte("\x1b")})
+	var activeGeneration atomic.Uint64
+
+	oldCtx, cancelOld := context.WithCancel(context.Background())
+	oldClock := newAttachPaletteClock()
+	oldDone := make(chan struct{})
+	go func() {
+		(&stdinPump{
+			ctx: oldCtx, cancel: cancelOld, input: input, out: make(chan ports.Frame, 1),
+			clock: oldClock, logger: slog.New(slog.DiscardHandler), paletteEvents: make(chan paletteGenerationEvent),
+			activeGeneration: &activeGeneration,
+		}).run()
+		close(oldDone)
+	}()
+	// The ambiguity timer proves the ESC was scanned and its raw read was
+	// committed; only the marker scanner's undecided suffix remains.
+	<-oldClock.timers
+	cancelOld()
+	<-oldDone
+
+	newCtx, cancelNew := context.WithCancel(context.Background())
+	defer cancelNew()
+	newClock := newAttachPaletteClock()
+	out := make(chan ports.Frame, 1)
+	newDone := make(chan struct{})
+	go func() {
+		(&stdinPump{
+			ctx: newCtx, cancel: cancelNew, input: input, out: out,
+			clock: newClock, logger: slog.New(slog.DiscardHandler), paletteEvents: make(chan paletteGenerationEvent),
+			activeGeneration: &activeGeneration,
+		}).run()
+		close(newDone)
+	}()
+	(<-newClock.timers).fire() // marker ambiguity deadline
+	(<-newClock.timers).fire() // paste coalescer's lone-ESC deadline
+	frame := <-out
+	got, err := ports.UnmarshalInput(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, []byte("\x1b"), got.Data)
+
+	cancelNew()
+	<-newDone
+}
+
+func TestTerminalInputPumpCancellationAfterDeliveredCallbackDoesNotReplay(t *testing.T) {
+	input := newTerminalInputPump(nil)
+	input.enqueue(terminalReadResult{data: []byte("x")})
+	var activeGeneration atomic.Uint64
+	ctx, cancel := context.WithCancel(context.Background())
+	delivered := make(chan struct{})
+	done := make(chan struct{})
+	out := make(chan ports.Frame, 1)
+	go func() {
+		(&stdinPump{
+			ctx: ctx, cancel: cancel, input: input, out: out, clock: newAttachPaletteClock(),
+			logger: slog.New(slog.DiscardHandler), paletteEvents: make(chan paletteGenerationEvent),
+			activeGeneration: &activeGeneration,
+			afterInputDelivered: func() {
+				cancel()
+				close(delivered)
+			},
+		}).run()
+		close(done)
+	}()
+	frame := <-out
+	got, err := ports.UnmarshalInput(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, []byte("x"), got.Data)
+	<-delivered
+	<-done
+
+	consumer := input.claim()
+	_, ok := input.take(context.Background(), consumer)
+	require.False(t, ok, "a callback already delivered to the sender must not replay after reconnect")
+	input.revoke(consumer)
 }
 
 func TestTerminalInputPumpReusesOneReaderAcrossCancelledAttempts(t *testing.T) {
