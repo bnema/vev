@@ -36,6 +36,16 @@ jobs:
         run: make lint
       - name: Test
         run: make test
+      - name: Test installer
+        if: matrix.os == 'ubuntu-latest'
+        run: make test-installer
+      - name: Cross-compile linux/arm64
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          CGO_ENABLED: 0
+          GOARCH: arm64
+          GOOS: linux
+        run: go build ./...
       - name: Cross-compile darwin/arm64
         if: matrix.os == 'ubuntu-latest'
         env:
