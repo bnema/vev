@@ -11,11 +11,60 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/bnema/vev/pkg/safedir"
 )
+
+func TestCLIProcessCloseKeepsTerminalDrainActiveUntilClientExit(t *testing.T) {
+	pty, err := os.CreateTemp(t.TempDir(), "pty")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting := make(chan struct{})
+	deadline := make(chan time.Time)
+	waitErr := make(chan error)
+	done := make(chan struct{})
+	closed := make(chan error, 1)
+	var waitingOnce sync.Once
+	p := &cliProcess{
+		pty:     pty,
+		done:    done,
+		waitErr: waitErr,
+		waitTimeout: func() <-chan time.Time {
+			waitingOnce.Do(func() { close(waiting) })
+			return deadline
+		},
+	}
+	go func() { closed <- p.Close() }()
+
+	select {
+	case <-waiting:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not begin waiting for graceful client exit")
+	}
+	select {
+	case <-done:
+		t.Fatal("terminal drain stopped before the client exited")
+	default:
+	}
+	waitErr <- nil
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not finish after the client exited")
+	}
+	select {
+	case <-done:
+	default:
+		t.Fatal("terminal drain remained active after client exit")
+	}
+}
 
 func TestCLIProcessCloseIsBoundedWhenPublicRoleDoesNotExit(t *testing.T) {
 	deadline := make(chan time.Time)

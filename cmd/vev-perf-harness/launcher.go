@@ -628,9 +628,6 @@ func (e *ptyLocalEcho) applicationOutput(chunk []byte) []byte {
 func (p *cliProcess) Close() error {
 	var result error
 	p.closed.Do(func() {
-		if p.done != nil {
-			close(p.done)
-		}
 		// A public terminal client owns a shell session. Ask that shell to exit
 		// before closing the PTY so its transport can finish its receive span;
 		// this avoids turning ordinary harness teardown into an aborted trace.
@@ -653,6 +650,12 @@ func (p *cliProcess) Close() error {
 				exited = true
 			case <-p.closeDeadline():
 			}
+		}
+		// Keep draining terminal output while the client exits gracefully. If the
+		// drain stops first, restoration output can fill the PTY and block the
+		// client before it closes its observed transport receive operation.
+		if p.done != nil {
+			close(p.done)
 		}
 		if p.pty != nil {
 			_ = p.pty.Close()
