@@ -113,6 +113,7 @@ func TestThemeGenerationTransportSequences(t *testing.T) {
 				frame, err := receiver.Recv()
 				require.NoError(t, err)
 				require.Equal(t, ports.MsgTheme, frame.Type)
+				require.Equal(t, ports.MarshalTheme(want), frame.Payload, "theme payload must be preserved byte-for-byte before decode")
 				got, err := ports.UnmarshalTheme(frame.Payload)
 				require.NoError(t, err)
 				require.Equal(t, want, got)

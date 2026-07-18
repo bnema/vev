@@ -100,6 +100,7 @@ func indexedStyles(styles Styles, slot uint8) Styles {
 func indexedForeground(style renderer.Style, slot uint8) renderer.Style {
 	style.HasForegroundRGB = false
 	style.Foreground = int(slot)
+	style.Inverse = false
 	return style
 }
 

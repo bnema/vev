@@ -171,10 +171,8 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 }
 
 func drawCapturedPaneTitleBar(frame renderer.Frame, pl layout.Placement, title string, focused bool, styles themeui.Styles, neutralBorder renderer.Style, dimmer themeui.Dimmer) {
-	style := neutralBorder
-	if focused {
-		style = styles.StatusBar
-	} else {
+	style := styles.StatusBar
+	if !focused {
 		style = dimmer.Dim(neutralBorder)
 	}
 	for x := pl.TitleBar.X; x < pl.TitleBar.X+pl.TitleBar.Width && x < frame.Width; x++ {

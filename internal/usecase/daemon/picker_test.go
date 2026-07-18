@@ -774,7 +774,7 @@ func TestCaptureOverlayLayersResizeRecomposesPickerWithoutStalePreview(t *testin
 				for x := layout.Separator.X; x < layout.Separator.X+layout.Separator.Width; x++ {
 					cell := inner.At(x, y)
 					require.Equal(t, tt.wantSep, cell.Rune)
-					require.True(t, cell.Style.Equal(themeui.MutedTextStyle(state.theme)))
+					require.True(t, cell.Style.Equal(state.styles.PickerSeparator), "separator must use the cached PickerSeparator role")
 				}
 			}
 		})

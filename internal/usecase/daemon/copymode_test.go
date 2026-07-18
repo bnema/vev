@@ -881,18 +881,36 @@ func TestMouseDragCopyEntryCapturesSourceForYank(t *testing.T) {
 	require.Equal(t, want, string(msg.Data))
 }
 
-func TestComposeCopyClientFrameFillsFullStatusRowForSplitPane(t *testing.T) {
-	base := renderer.NewFrame(20, 8)
-	pane := newPane("split", nil, domain.Size{Cols: 12, Rows: 2})
-	pane.screen.Write([]byte("copy"))
-	mode := scopy.NewMode(scopy.NewDocument(scopy.NewSnapshot(pane.history, pane.screen.Frame), domain.DefaultWordSeparators))
-	styles := resolveStyles(nil)
-	styles.SurfaceBar = renderer.Style{Foreground: 7, Background: 3}
+func TestComposeCopyClientFrameStylesStatusContentAndSurround(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		selectMode bool
+		want       string
+	}{
+		{name: "scroll", want: "[SCROLL]"},
+		{name: "selection", selectMode: true, want: "[SELECT]"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			base := renderer.NewFrame(20, 8)
+			pane := newPane("split", nil, domain.Size{Cols: 12, Rows: 2})
+			pane.screen.Write([]byte("copy"))
+			mode := scopy.NewMode(scopy.NewDocument(scopy.NewSnapshot(pane.history, pane.screen.Frame), domain.DefaultWordSeparators))
+			if tt.selectMode {
+				mode.ToggleLineSelection()
+			}
+			styles := resolveStyles(nil)
+			styles.SurfaceBar = renderer.Style{Foreground: 7, Background: 3}
+			styles.CopyStatus = renderer.Style{Foreground: 5, Background: 4}
 
-	frame, _ := composeCopyClientFrame(mode, domain.Rect{X: 0, Y: 1, Width: 12, Height: 2}, base, styles)
-
-	for x, cell := range frame.Row(frame.Height - 1) {
-		require.Truef(t, cell.Style.Equal(styles.SurfaceBar), "status cell %d must retain the full-width SurfaceBar role", x)
+			frame, _ := composeCopyClientFrame(mode, domain.Rect{X: 0, Y: 1, Width: 12, Height: 2}, base, styles)
+			status := frame.Row(frame.Height - 1)
+			for x := range 12 {
+				require.Truef(t, status[x].Style.Equal(styles.CopyStatus), "status content cell %d must use CopyStatus", x)
+			}
+			for x := 12; x < len(status); x++ {
+				require.Truef(t, status[x].Style.Equal(styles.SurfaceBar), "surrounding status cell %d must use SurfaceBar", x)
+			}
+			require.Contains(t, rowText(status), tt.want)
+		})
 	}
-	require.Contains(t, rowText(frame.Row(frame.Height-1)), "[SCROLL]")
 }

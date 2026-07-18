@@ -187,13 +187,23 @@ func rowText(row []renderer.Cell) string {
 	return b.String()
 }
 
-func TestVisualSearchRenderStyledFillsBaseAndSelection(t *testing.T) {
-	m := New(testSnapshot("alpha"))
-	m.Insert('a')
+func TestVisualSearchRenderStyledUsesSemanticRoles(t *testing.T) {
 	base := renderer.Style{Foreground: 1, Background: 2}
 	selection := renderer.Style{Foreground: 3, Background: 4}
-	frame := m.RenderStyled(domain.Size{Cols: 20, Rows: 4}, RenderStyles{Base: base, Selection: selection})
-
-	require.True(t, frame.At(19, 3).Style.Equal(base), "blank filler keeps base surface")
-	require.True(t, frame.At(2, 0).Style.Equal(selection), "input caret keeps selection surface")
+	for _, tt := range []struct {
+		name string
+		x, y int
+		want renderer.Style
+		why  string
+	}{
+		{name: "blank filler", x: 19, y: 3, want: base, why: "blank filler keeps base surface"},
+		{name: "input caret", x: 2, y: 0, want: selection, why: "input caret keeps selection surface"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(testSnapshot("alpha"))
+			m.Insert('a')
+			frame := m.RenderStyled(domain.Size{Cols: 20, Rows: 4}, RenderStyles{Base: base, Selection: selection})
+			require.True(t, frame.At(tt.x, tt.y).Style.Equal(tt.want), tt.why)
+		})
+	}
 }

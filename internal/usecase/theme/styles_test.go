@@ -139,6 +139,21 @@ func TestPulseColor(t *testing.T) {
 	}
 }
 
+func TestIndexedForegroundClearsInverseForNonTrueColorFallback(t *testing.T) {
+	fallback := indexedForeground(renderer.Style{
+		Bold:             true,
+		Inverse:          true,
+		Foreground:       -1,
+		HasForegroundRGB: true,
+		ForegroundRGB:    renderer.RGB{R: 1, G: 2, B: 3},
+	}, 2)
+
+	require.False(t, fallback.Inverse, "an indexed foreground must not become an effective background")
+	require.False(t, fallback.HasForegroundRGB)
+	require.Equal(t, 2, fallback.Foreground)
+	require.True(t, fallback.Bold)
+}
+
 func TestMRUFade(t *testing.T) {
 	base := renderer.Style{
 		Bold:                 true,
