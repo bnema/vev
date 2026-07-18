@@ -230,8 +230,6 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 			closed := make(chan struct{})
 			operationExited := make(chan struct{})
 			tr := portsmocks.NewMockTransport(t)
-			tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-			tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 			tr.EXPECT().Close().Run(func() { close(closed) }).Return(nil).Once()
 
 			block := func() error {
@@ -294,6 +292,7 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("pre-Welcome operation leaked after Run returned")
 			}
+			tr.AssertNotCalled(t, "Send", isType(ports.MsgTheme))
 		})
 	}
 }
@@ -427,8 +426,6 @@ func TestAttachVersionMismatch(t *testing.T) {
 	// EnterRaw must NOT be called on the error-before-welcome path.
 
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	tr.EXPECT().Recv().Return(
 		frameOf(ports.MsgError, ports.MarshalErrorMsg(ports.ErrorMsg{Code: ports.ErrVersionMismatch, Text: "version mismatch"})),
@@ -441,6 +438,7 @@ func TestAttachVersionMismatch(t *testing.T) {
 	var pe *client.ProtocolError
 	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
 	require.Equal(t, ports.ErrVersionMismatch, pe.Code)
+	tr.AssertNotCalled(t, "Send", isType(ports.MsgTheme))
 }
 
 func TestAttachRestoredOnRecvErrorMidStream(t *testing.T) {
@@ -711,8 +709,6 @@ func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
 	// EnterRaw must NOT be called when the daemon rejects Hello before Welcome.
 
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
 	tr.EXPECT().Recv().Return(
 		frameOf(ports.MsgError, ports.MarshalErrorMsg(ports.ErrorMsg{Code: ports.ErrVersionMismatch, Text: "version mismatch"})),
@@ -726,6 +722,7 @@ func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
 	require.Error(t, err)
 	var pe *client.ProtocolError
 	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
+	tr.AssertNotCalled(t, "Send", isType(ports.MsgTheme))
 }
 
 func TestRunPhaseASingleAttempt(t *testing.T) {

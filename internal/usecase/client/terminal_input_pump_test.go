@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -69,6 +70,37 @@ func (r *lateStopReader) Read(p []byte) (int, error) {
 	r.started <- struct{}{}
 	result := <-r.release
 	return copy(p, result.data), result.err
+}
+
+func requireSignal(t *testing.T, ch <-chan struct{}, message string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal(message)
+	}
+}
+
+func requireFrame(t *testing.T, ch <-chan ports.Frame, message string) ports.Frame {
+	t.Helper()
+	select {
+	case frame := <-ch:
+		return frame
+	case <-time.After(time.Second):
+		t.Fatal(message)
+		return ports.Frame{}
+	}
+}
+
+func requireTimer(t *testing.T, ch <-chan *attachPaletteTimer, message string) *attachPaletteTimer {
+	t.Helper()
+	select {
+	case timer := <-ch:
+		return timer
+	case <-time.After(time.Second):
+		t.Fatal(message)
+		return nil
+	}
 }
 
 func TestPaletteSlotRejectsOutOfRangeIntBeforeNarrowing(t *testing.T) {
@@ -140,7 +172,7 @@ func TestTerminalInputPumpCancellationHandoffPreservesQueuedBytes(t *testing.T) 
 	// Both cancellation and a terminal read are ready before the old scanner
 	// tries to dequeue. It must surrender the read to its replacement.
 	want := []byte("first\x00second\xff")
-	input.enqueue(terminalReadResult{data: append([]byte(nil), want...)})
+	input.enqueue(terminalReadResult{data: append([]byte(nil), want...)}, 1)
 
 	var activeGeneration atomic.Uint64
 	cancelledCtx, cancelCancelled := context.WithCancel(context.Background())
@@ -187,7 +219,7 @@ func TestTerminalInputPumpCancellationHandoffPreservesQueuedBytes(t *testing.T) 
 func TestTerminalInputPumpCancellationAfterTakeRequeuesRawRead(t *testing.T) {
 	input := newTerminalInputPump(nil)
 	want := []byte("first\x00second\xff")
-	input.enqueue(terminalReadResult{data: append([]byte(nil), want...)})
+	input.enqueue(terminalReadResult{data: append([]byte(nil), want...)}, 1)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	consumer := input.claim()
@@ -223,7 +255,7 @@ func TestTerminalInputPumpCancellationAfterTakeRequeuesRawRead(t *testing.T) {
 
 func TestTerminalInputPumpCancellationPreservesStandaloneEscapeForReplacement(t *testing.T) {
 	input := newTerminalInputPump(nil)
-	input.enqueue(terminalReadResult{data: []byte("\x1b")})
+	input.enqueue(terminalReadResult{data: []byte("\x1b")}, 1)
 	var activeGeneration atomic.Uint64
 
 	oldCtx, cancelOld := context.WithCancel(context.Background())
@@ -267,9 +299,127 @@ func TestTerminalInputPumpCancellationPreservesStandaloneEscapeForReplacement(t 
 	<-newDone
 }
 
+func TestTerminalInputPumpCancellationAfterInputBeforeOSCPreservesOnlyUndeliveredSuffix(t *testing.T) {
+	input := newTerminalInputPump(nil)
+	input.enqueue(terminalReadResult{data: []byte("x\x1b]10;rgb:ffff/0000/0000\x07y")}, 1)
+	var activeGeneration atomic.Uint64
+	ctx, cancel := context.WithCancel(context.Background())
+	delivered := make(chan struct{})
+	done := make(chan struct{})
+	out := make(chan ports.Frame, 1)
+	go func() {
+		(&stdinPump{
+			ctx: ctx, cancel: cancel, input: input, out: out, clock: newAttachPaletteClock(),
+			logger: slog.New(slog.DiscardHandler), paletteEvents: make(chan paletteGenerationEvent),
+			activeGeneration: &activeGeneration,
+			afterInputDelivered: func() {
+				cancel()
+				close(delivered)
+			},
+		}).run()
+		close(done)
+	}()
+	frame := requireFrame(t, out, "timed out waiting for delivered input prefix")
+	got, err := ports.UnmarshalInput(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, []byte("x"), got.Data)
+	requireSignal(t, delivered, "timed out waiting for cancellation after input delivery")
+	requireSignal(t, done, "timed out waiting for cancelled stdin pump")
+
+	replacementCtx, cancelReplacement := context.WithCancel(context.Background())
+	replacementOut := make(chan ports.Frame, 1)
+	replacementDone := make(chan struct{})
+	go func() {
+		(&stdinPump{
+			ctx: replacementCtx, cancel: cancelReplacement, input: input,
+			out: replacementOut, clock: newAttachPaletteClock(),
+			logger: slog.New(slog.DiscardHandler), paletteEvents: make(chan paletteGenerationEvent),
+			activeGeneration: &activeGeneration,
+		}).run()
+		close(replacementDone)
+	}()
+	frame = requireFrame(t, replacementOut, "timed out waiting for undelivered input suffix")
+	got, err = ports.UnmarshalInput(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, []byte("y"), got.Data, "replacement must receive only the undelivered ordinary suffix")
+
+	cancelReplacement()
+	requireSignal(t, replacementDone, "timed out waiting for replacement stdin pump shutdown")
+}
+
+func TestTerminalInputPumpCancellationPreservesCoalescerHeldSuffix(t *testing.T) {
+	input := newTerminalInputPump(nil)
+	held := ports.BracketedPasteOpenMarker[:3]
+	raw := append([]byte("x\x1b]10;rgb:ffff/0000/0000\x07"), held...)
+	input.enqueue(terminalReadResult{data: raw}, 1)
+	var activeGeneration atomic.Uint64
+	ctx, cancel := context.WithCancel(context.Background())
+	out := make(chan ports.Frame, 1)
+	done := make(chan struct{})
+	go func() {
+		(&stdinPump{
+			ctx: ctx, cancel: cancel, input: input, out: out, clock: newAttachPaletteClock(),
+			logger: slog.New(slog.DiscardHandler), paletteEvents: make(chan paletteGenerationEvent),
+			activeGeneration:    &activeGeneration,
+			afterInputDelivered: cancel,
+		}).run()
+		close(done)
+	}()
+	frame := requireFrame(t, out, "timed out waiting for delivered input prefix")
+	got, err := ports.UnmarshalInput(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, []byte("x"), got.Data)
+	requireSignal(t, done, "timed out waiting for cancelled stdin pump")
+
+	replacementCtx, cancelReplacement := context.WithCancel(context.Background())
+	replacementClock := newAttachPaletteClock()
+	replacementOut := make(chan ports.Frame, 1)
+	replacementDone := make(chan struct{})
+	go func() {
+		(&stdinPump{
+			ctx: replacementCtx, cancel: cancelReplacement, input: input,
+			out: replacementOut, clock: replacementClock,
+			logger: slog.New(slog.DiscardHandler), paletteEvents: make(chan paletteGenerationEvent),
+			activeGeneration: &activeGeneration,
+		}).run()
+		close(replacementDone)
+	}()
+	requireTimer(t, replacementClock.timers, "timed out waiting for paste-prefix ambiguity timer").fire()
+	frame = requireFrame(t, replacementOut, "timed out waiting for coalescer-held suffix")
+	got, err = ports.UnmarshalInput(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, held, got.Data, "replacement must receive the coalescer-held suffix exactly once")
+
+	cancelReplacement()
+	requireSignal(t, replacementDone, "timed out waiting for replacement stdin pump shutdown")
+}
+
+func TestTerminalInputPumpRejectsReadFromPriorActivation(t *testing.T) {
+	reader := newLateStopReader()
+	input := newTerminalInputPump(reader)
+	input.start()
+	requireSignal(t, reader.started, "timed out waiting for initial activation Read")
+
+	input.suspend()
+	input.resume()
+	reader.release <- terminalReadResult{data: []byte("stale")}
+
+	// The old read must be discarded after resume, then the reader may begin a
+	// new Read for the current activation.
+	requireSignal(t, reader.started, "timed out waiting for current activation Read")
+	consumer := input.claim()
+	_, ok := input.take(context.Background(), consumer)
+	require.False(t, ok, "a Read authorized before suspend/resume must not reach the new activation")
+	input.revoke(consumer)
+
+	input.stop()
+	reader.release <- terminalReadResult{}
+	requireSignal(t, input.exited, "timed out waiting for terminal input pump shutdown")
+}
+
 func TestTerminalInputPumpCancellationAfterDeliveredCallbackDoesNotReplay(t *testing.T) {
 	input := newTerminalInputPump(nil)
-	input.enqueue(terminalReadResult{data: []byte("x")})
+	input.enqueue(terminalReadResult{data: []byte("x")}, 1)
 	var activeGeneration atomic.Uint64
 	ctx, cancel := context.WithCancel(context.Background())
 	delivered := make(chan struct{})

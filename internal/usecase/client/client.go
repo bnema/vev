@@ -1002,6 +1002,7 @@ type terminalInputPump struct {
 	delivering         uint64
 	deliveringResidual bool
 	nextID             uint64
+	activation         uint64
 	closed             bool
 	active             bool
 	ready              chan struct{}
@@ -1017,13 +1018,14 @@ func newTerminalInputPump(in io.Reader) *terminalInputPump {
 	space := make(chan struct{}, 1)
 	space <- struct{}{}
 	return &terminalInputPump{
-		in:     in,
-		done:   make(chan struct{}),
-		active: true,
-		ready:  make(chan struct{}, 1),
-		space:  space,
-		state:  make(chan struct{}, 1),
-		exited: make(chan struct{}),
+		in:         in,
+		done:       make(chan struct{}),
+		activation: 1,
+		active:     true,
+		ready:      make(chan struct{}, 1),
+		space:      space,
+		state:      make(chan struct{}, 1),
+		exited:     make(chan struct{}),
 	}
 }
 
@@ -1069,14 +1071,14 @@ func (p *terminalInputPump) signalReady() {
 
 // enqueue retains at most one completed terminal read. The reader blocks
 // before publishing another result, keeping handoff buffering bounded.
-func (p *terminalInputPump) enqueue(result terminalReadResult) bool {
+func (p *terminalInputPump) enqueue(result terminalReadResult, activation uint64) bool {
 	select {
 	case <-p.done:
 		return false
 	case <-p.space:
 	}
 	p.mu.Lock()
-	if p.closed || !p.active {
+	if p.closed || !p.active || p.activation != activation {
 		p.mu.Unlock()
 		p.space <- struct{}{}
 		return false
@@ -1176,20 +1178,20 @@ func (p *terminalInputPump) signalState() {
 	}
 }
 
-func (p *terminalInputPump) waitForActive() bool {
+func (p *terminalInputPump) waitForActive() (uint64, bool) {
 	for {
 		p.mu.Lock()
-		active, closed := p.active, p.closed
+		active, closed, activation := p.active, p.closed, p.activation
 		p.mu.Unlock()
 		if closed {
-			return false
+			return 0, false
 		}
 		if active {
-			return true
+			return activation, true
 		}
 		select {
 		case <-p.done:
-			return false
+			return 0, false
 		case <-p.state:
 		}
 	}
@@ -1201,7 +1203,8 @@ func (p *terminalInputPump) start() {
 			defer close(p.exited)
 			buf := make([]byte, stdinBufSize)
 			for {
-				if !p.waitForActive() {
+				activation, ok := p.waitForActive()
+				if !ok {
 					return
 				}
 				n, err := p.in.Read(buf)
@@ -1209,7 +1212,7 @@ func (p *terminalInputPump) start() {
 				if n > 0 {
 					result.data = append([]byte(nil), buf[:n]...)
 				}
-				if !p.enqueue(result) {
+				if !p.enqueue(result, activation) {
 					if p.isClosed() {
 						return
 					}
@@ -1263,7 +1266,8 @@ func (p *terminalInputPump) suspend() {
 
 func (p *terminalInputPump) resume() {
 	p.mu.Lock()
-	if !p.closed {
+	if !p.closed && !p.active {
+		p.activation++
 		p.active = true
 	}
 	p.mu.Unlock()
@@ -1311,25 +1315,37 @@ func (p *stdinPump) run() {
 	var markers paletteMarkerScanner
 	var inputSeq uint64
 	var sendOK atomic.Bool
+	var undeliveredMu sync.Mutex
+	var undelivered []byte
 	sendOK.Store(true)
-	send := func(frame ports.Frame) {
+	send := func(frame ports.Frame) bool {
+		if !sendOK.Load() {
+			return false
+		}
 		select {
 		case p.out <- frame:
 			if p.afterInputDelivered != nil {
 				p.afterInputDelivered()
 			}
+			return true
 		case <-p.ctx.Done():
 			sendOK.Store(false)
+			return false
 		}
 	}
-	sendEvent := func(event paletteGenerationEvent) {
+	sendEvent := func(event paletteGenerationEvent) bool {
+		if !sendOK.Load() {
+			return false
+		}
 		select {
 		case p.paletteEvents <- event:
 			if p.afterPaletteEvent != nil {
 				p.afterPaletteEvent(event)
 			}
+			return true
 		case <-p.ctx.Done():
 			sendOK.Store(false)
+			return false
 		}
 	}
 	coalescer := newPasteCoalescer(p.clock, func(data []byte) {
@@ -1337,7 +1353,11 @@ func (p *stdinPump) run() {
 			return
 		}
 		inputSeq++
-		send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{InputSeq: inputSeq, Data: append([]byte(nil), data...)})})
+		if !send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{InputSeq: inputSeq, Data: append([]byte(nil), data...)})}) {
+			undeliveredMu.Lock()
+			undelivered = append(undelivered, data...)
+			undeliveredMu.Unlock()
+		}
 	})
 	defer coalescer.Close()
 	sink := coalescer.Scan
@@ -1372,7 +1392,17 @@ func (p *stdinPump) run() {
 	// delivered and must not be replayed by the next attempt.
 	defer func() {
 		if p.ctx.Err() != nil {
-			input.preserveResidual(consumer, markers.takePending())
+			// Closing flushes any bracketed-paste prefix or buffer through the
+			// coalescer's emit callback. Failed ordinary-input deliveries are
+			// retained ahead of a trailing undecided marker prefix, matching their
+			// original order within the raw read.
+			held := coalescer.CloseAndTakeHeld()
+			undeliveredMu.Lock()
+			residual := append([]byte(nil), undelivered...)
+			undeliveredMu.Unlock()
+			residual = append(residual, held...)
+			residual = append(residual, markers.takePending()...)
+			input.preserveResidual(consumer, residual)
 		}
 	}()
 
@@ -1465,6 +1495,11 @@ func (p *stdinPump) run() {
 					})
 				})
 				if !sendOK.Load() {
+					// Commit the source read so callbacks accepted before cancellation
+					// are never replayed. The deferred handoff retains only ordinary
+					// bytes whose callback could not be delivered, plus any undecided
+					// trailing marker prefix.
+					input.ack(consumer)
 					return
 				}
 			}
@@ -1479,9 +1514,6 @@ func (p *stdinPump) run() {
 				case <-p.ctx.Done():
 				}
 				p.cancel()
-				return
-			}
-			if !sendOK.Load() {
 				return
 			}
 			// Commit every callback from this raw read before observing a
