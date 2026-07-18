@@ -18,8 +18,10 @@ func TestResolveAccentThresholds(t *testing.T) {
 	}{
 		{name: "chroma below", color: oklab{L: accentMinBackgroundDistance, A: accentMinChroma - 0.000001}},
 		{name: "chroma at", color: oklab{L: accentMinBackgroundDistance, A: accentMinChroma}, want: true},
+		{name: "chroma above", color: oklab{L: accentMinBackgroundDistance, A: accentMinChroma + 0.000001}, want: true},
 		{name: "background distance below", color: oklab{L: accentMinBackgroundDistance - 0.000001, A: accentMinChroma}, background: oklab{A: accentMinChroma}},
 		{name: "background distance at", color: oklab{L: accentMinBackgroundDistance, A: accentMinChroma}, background: oklab{A: accentMinChroma}, want: true},
+		{name: "background distance above", color: oklab{L: accentMinBackgroundDistance + 0.000001, A: accentMinChroma}, background: oklab{A: accentMinChroma}, want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -28,6 +30,7 @@ func TestResolveAccentThresholds(t *testing.T) {
 	}
 
 	a := oklab{}
+	require.True(t, accentConnected(a, oklab{L: accentClusterDistance - 0.000001}))
 	require.True(t, accentConnected(a, oklab{L: accentClusterDistance}))
 	require.False(t, accentConnected(a, oklab{L: accentClusterDistance + 0.000001}))
 }
@@ -143,10 +146,10 @@ func TestResolveAccentExplicitSlot(t *testing.T) {
 			want:   Accent{RGB: renderer.RGB{R: 9, G: 8, B: 12}, Slot: 3, Known: true},
 		},
 		{
-			name:   "unknown explicit slot never substitutes fallback blue",
+			name:   "unknown explicit slot keeps its exact indexed decoration",
 			theme:  paletteTheme(map[int]renderer.RGB{2: teal, 10: teal, 4: blue}),
 			policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 5},
-			want:   Accent{},
+			want:   Accent{Slot: 5, IndexedOnly: true},
 		},
 		{
 			name:   "explicit known slot is indexed only without truecolor prerequisites",

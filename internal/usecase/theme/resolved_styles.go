@@ -28,7 +28,7 @@ func Resolve(t Theme, policy domain.ThemeAccent) ResolvedTheme {
 func stylesFromRamp(t Theme, accent Accent, ramp Ramp) Styles {
 	if !accent.Known || accent.IndexedOnly || !usable(t) || !ramp.rgb {
 		styles := neutralStyles(t)
-		if accent.Known && accent.IndexedOnly {
+		if accent.IndexedOnly {
 			styles = indexedStyles(styles, accent.Slot)
 		}
 		return styles
@@ -54,12 +54,14 @@ func stylesFromRamp(t Theme, accent Accent, ramp Ramp) Styles {
 		PickerBase:        ramp.SurfaceBar,
 		PickerSelection:   EmphasisStyle(ramp.SurfaceActive, t),
 		PickerDescription: barDescription,
-		PickerSeparator:   ramp.BorderMuted,
-		PromptBase:        ramp.SurfaceBar,
-		CopyStatus:        ramp.SurfaceBar,
-		SearchSelection:   EmphasisStyle(ramp.SurfaceActive, t),
+		// Separators are secondary text on the picker base surface, not
+		// non-text borders; they therefore require the normal 4.5:1 contrast.
+		PickerSeparator: barDescription,
+		PromptBase:      ramp.SurfaceBar,
+		CopyStatus:      ramp.SurfaceBar,
+		SearchSelection: EmphasisStyle(ramp.SurfaceActive, t),
 	}
-	return withLegacyAliases(styles)
+	return withLegacyAliases(styles, t)
 }
 
 func secondarySurface(base renderer.Style) renderer.Style {
@@ -77,16 +79,25 @@ func secondarySurface(base renderer.Style) renderer.Style {
 func indexedStyles(styles Styles, slot uint8) Styles {
 	styles.BorderMuted = indexedForeground(styles.BorderMuted, slot)
 	styles.BorderActive = indexedForeground(styles.BorderActive, slot)
+	styles.TabInactiveTitle = indexedForeground(styles.TabInactiveTitle, slot)
+	styles.TabActiveTitle = indexedForeground(styles.TabActiveTitle, slot)
+	styles.PickerDescription = indexedForeground(styles.PickerDescription, slot)
 	styles.PickerSeparator = indexedForeground(styles.PickerSeparator, slot)
+
+	// Compatibility aliases historically received the scheme-aware indexed
+	// blue fallback too. Keep the strict explicit index on each foreground
+	// decoration without changing any neutral surface background.
 	styles.Border = styles.BorderMuted
+	styles.PaletteDesc = styles.PickerDescription
+	styles.TabTitle = styles.TabInactiveTitle
+	styles.TabTitleActive = styles.TabActiveTitle
+	styles.PickerSelectionMuted = indexedForeground(styles.PickerSelectionMuted, slot)
 	return styles
 }
 
 func indexedForeground(style renderer.Style, slot uint8) renderer.Style {
 	style.HasForegroundRGB = false
 	style.Foreground = int(slot)
-	style.HasBackgroundRGB = false
-	style.Background = -1
 	return style
 }
 
@@ -126,7 +137,7 @@ func neutralStyles(t Theme) Styles {
 		CopyStatus:        accent,
 		SearchSelection:   accent,
 	}
-	return withLegacyAliases(styles)
+	return withLegacyAliases(styles, t)
 }
 
 func neutralBorderStyle(t Theme) renderer.Style {
@@ -136,7 +147,7 @@ func neutralBorderStyle(t Theme) renderer.Style {
 	return foregroundStyle(Blend(t.Foreground, t.Background, 0.40))
 }
 
-func withLegacyAliases(styles Styles) Styles {
+func withLegacyAliases(styles Styles, t Theme) Styles {
 	styles.StatusBar = styles.SurfaceBar
 	styles.Accent = styles.SurfaceActive
 	styles.Border = styles.BorderMuted
@@ -146,8 +157,10 @@ func withLegacyAliases(styles Styles) Styles {
 	styles.TabNameActive = styles.TabActive
 	styles.TabTitle = styles.TabInactiveTitle
 	styles.TabTitleActive = styles.TabActiveTitle
-	styles.PickerName = styles.PickerBase
-	styles.PickerSelectionName = styles.PickerSelection
-	styles.PickerSelectionMuted = secondarySurface(styles.PickerSelection)
+	// These aliases retain their pre-semantic-role contracts for render paths
+	// that have not migrated yet.
+	styles.PickerName = EmphasisStyle(renderer.DefaultStyle(), t)
+	styles.PickerSelectionName = EmphasisStyle(styles.Selection, t)
+	styles.PickerSelectionMuted = MutedVariantStyle(styles.Selection, t)
 	return styles
 }

@@ -49,17 +49,19 @@ func ResolveAccent(t Theme, policy domain.ThemeAccent) Accent {
 
 func resolveExplicitAccent(t Theme, slot uint8) Accent {
 	if slot >= uint8(len(t.Palette)) || t.PaletteKnown&(uint16(1)<<slot) == 0 {
-		return Accent{}
+		// An explicit policy is a strict override. Even without OSC RGB for its
+		// slot, it may still safely decorate foregrounds and borders by index.
+		return indexedAccent(slot)
 	}
 	return resolvedAccent(t, t.Palette[slot], slot)
 }
 
 func resolveAutoAccent(t Theme) Accent {
 	// Background is necessary to reject colors that merely alias the terminal
-	// surface. Foreground and truecolor are deliberately not required here:
-	// the winning slot remains useful as an indexed foreground-only fallback.
+	// surface. Without it, retain the pre-accent scheme-aware ANSI blue
+	// foreground fallback rather than inventing an RGB background.
 	if !t.HasBG {
-		return Accent{}
+		return schemeIndexedBlue(t)
 	}
 
 	var colors [len(accentCandidateSlots)]oklab
@@ -75,7 +77,7 @@ func resolveAutoAccent(t Theme) Accent {
 		}
 	}
 	if eligible == 0 {
-		return Accent{}
+		return fallbackAutoAccent(t, background)
 	}
 
 	var adjacent [len(accentCandidateSlots)]uint16
@@ -143,6 +145,10 @@ func resolveAutoAccent(t Theme) Accent {
 		return resolvedAccent(t, t.Palette[slot], slot)
 	}
 
+	return fallbackAutoAccent(t, background)
+}
+
+func fallbackAutoAccent(t Theme, background oklab) Accent {
 	for _, slot := range [...]uint8{4, 12} {
 		if t.PaletteKnown&(uint16(1)<<slot) == 0 {
 			continue
@@ -152,7 +158,26 @@ func resolveAutoAccent(t Theme) Accent {
 			return resolvedAccent(t, t.Palette[slot], slot)
 		}
 	}
-	return Accent{}
+	if t.PaletteKnown&(uint16(1)<<4|uint16(1)<<12) != 0 {
+		// A terminal-reported blue that fails eligibility deliberately does not
+		// become an unvalidated indexed fallback.
+		return Accent{}
+	}
+	return schemeIndexedBlue(t)
+}
+
+func schemeIndexedBlue(t Theme) Accent {
+	if !t.SchemeKnown {
+		return Accent{}
+	}
+	if t.Light {
+		return indexedAccent(4)
+	}
+	return indexedAccent(12)
+}
+
+func indexedAccent(slot uint8) Accent {
+	return Accent{Slot: slot, IndexedOnly: true}
 }
 
 func finalizeAccentGroup(group *accentGroup, colors [len(accentCandidateSlots)]oklab) {
