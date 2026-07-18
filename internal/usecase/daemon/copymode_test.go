@@ -880,3 +880,19 @@ func TestMouseDragCopyEntryCapturesSourceForYank(t *testing.T) {
 	want := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte("alpha"+strings.Repeat(" ", 75)+"\nb")) + "\x07"
 	require.Equal(t, want, string(msg.Data))
 }
+
+func TestComposeCopyClientFrameFillsFullStatusRowForSplitPane(t *testing.T) {
+	base := renderer.NewFrame(20, 8)
+	pane := newPane("split", nil, domain.Size{Cols: 12, Rows: 2})
+	pane.screen.Write([]byte("copy"))
+	mode := scopy.NewMode(scopy.NewDocument(scopy.NewSnapshot(pane.history, pane.screen.Frame), domain.DefaultWordSeparators))
+	styles := resolveStyles(nil)
+	styles.SurfaceBar = renderer.Style{Foreground: 7, Background: 3}
+
+	frame, _ := composeCopyClientFrame(mode, domain.Rect{X: 0, Y: 1, Width: 12, Height: 2}, base, styles)
+
+	for x, cell := range frame.Row(frame.Height - 1) {
+		require.Truef(t, cell.Style.Equal(styles.SurfaceBar), "status cell %d must retain the full-width SurfaceBar role", x)
+	}
+	require.Contains(t, rowText(frame.Row(frame.Height-1)), "[SCROLL]")
+}

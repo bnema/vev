@@ -89,12 +89,13 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	}
 	state.styles = styles
 	defaultDimmer := themeui.NewDimmer(state.theme)
+	neutralBorder := themeui.NeutralBorderStyle(state.theme)
 	inactivePaneDimmer := themeui.NewDimmer(state.theme, themeui.WithForegroundDimming(inactivePaneForegroundDimming))
 	drawTopBarSnapshot(frame.Row(0), state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
 	drawStatusBarState(frame.Row(rows+1), state.bars, styles)
 	content := domain.Rect{Y: 1, Width: width, Height: rows}
 	if state.layout.valid && state.layout.root != nil {
-		drawDividers(frame, state.layout.root, content, defaultDimmer.Dim(styles.Border))
+		drawDividers(frame, state.layout.root, content, defaultDimmer.Dim(neutralBorder))
 	}
 
 	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme || in.styleGeneration != state.styleGeneration || in.floatingVisible != state.floating.visible
@@ -107,7 +108,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	for _, pane := range state.panes {
 		pl := offsetPlacement(pane.placement, 0, 1)
 		if pl.TitleBar.Height > 0 {
-			drawCapturedPaneTitleBar(frame, pl, pane.title, pane.focused, styles, defaultDimmer)
+			drawCapturedPaneTitleBar(frame, pl, pane.title, pane.focused, styles, neutralBorder, defaultDimmer)
 			if !full && in.titleGenerations[pane.id] != pane.titleGeneration {
 				damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: pl.TitleBar.X, Y: pl.TitleBar.Y, Width: pl.TitleBar.Width, Height: pl.TitleBar.Height})
 			}
@@ -168,12 +169,12 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }
 
-func drawCapturedPaneTitleBar(frame renderer.Frame, pl layout.Placement, title string, focused bool, styles themeui.Styles, dimmer themeui.Dimmer) {
-	style := styles.Border
+func drawCapturedPaneTitleBar(frame renderer.Frame, pl layout.Placement, title string, focused bool, styles themeui.Styles, neutralBorder renderer.Style, dimmer themeui.Dimmer) {
+	style := neutralBorder
 	if focused {
 		style = styles.StatusBar
 	} else {
-		style = dimmer.Dim(style)
+		style = dimmer.Dim(neutralBorder)
 	}
 	for x := pl.TitleBar.X; x < pl.TitleBar.X+pl.TitleBar.Width && x < frame.Width; x++ {
 		frame.Set(x, pl.TitleBar.Y, renderer.Cell{Rune: ' ', Style: style})

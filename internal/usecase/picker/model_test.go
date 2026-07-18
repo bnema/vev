@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/stretchr/testify/require"
@@ -347,4 +348,30 @@ func TestRenderStylesFillBackgroundRowsAndSelection(t *testing.T) {
 	require.True(t, frame.At(19, 4).Style.Equal(background), "unused interior keeps modal base")
 	require.True(t, frame.At(19, 0).Style.Equal(base), "ordinary row owns inactive surface")
 	require.True(t, frame.At(19, 1).Style.Equal(selection), "selected row owns active surface")
+}
+
+func TestAccentPickerDetailKeepsInactiveSurfaceAndListFiller(t *testing.T) {
+	palette := [16]renderer.RGB{}
+	palette[2] = renderer.RGB{R: 10, G: 230, B: 120}
+	palette[10] = palette[2]
+	hostTheme := themeui.Theme{
+		Foreground: renderer.RGB{R: 230, G: 230, B: 230}, Background: renderer.RGB{R: 8, G: 9, B: 10},
+		HasFG: true, HasBG: true, Known: true, TrueColor: true, UsePalette: true,
+		Palette: palette, PaletteKnown: 1<<2 | 1<<10,
+	}
+	styles := themeui.Resolve(hostTheme, domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2}).Styles
+	require.Equal(t, styles.SurfaceInactive.BackgroundRGB, styles.PickerDescription.BackgroundRGB, "description must retain the inactive row surface")
+
+	model := New([]SessionView{
+		{ID: "selected", Name: "selected", Tabs: []TabEntry{{Name: "one"}}, Active: 0},
+		{ID: "inactive", Name: "inactive", Tabs: []TabEntry{{Name: "two", Detail: " (detail)"}}, Active: 0},
+	}, "selected", 0)
+	frame := model.Render(domain.Size{Cols: 32, Rows: 4}, Preview{}, RenderStyles{
+		Background: styles.PickerBase, Base: styles.SurfaceInactive, Name: styles.SurfaceInactive,
+		Detail: styles.PickerDescription, Selection: styles.PickerSelection,
+		SelectionName: styles.PickerSelection, SelectionMuted: styles.PickerSelection,
+		Separator: styles.PickerSeparator,
+	})
+	require.True(t, frame.At(5, 3).Style.Equal(styles.PickerDescription), "description text must retain its contrast-derived foreground and inactive background")
+	require.True(t, frame.At(31, 3).Style.Equal(styles.SurfaceInactive), "unused row cells must retain the inactive surface")
 }

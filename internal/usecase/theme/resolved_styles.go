@@ -36,6 +36,7 @@ func stylesFromRamp(t Theme, accent Accent, ramp Ramp) Styles {
 
 	inactiveTitle := secondarySurface(ramp.SurfaceInactive)
 	activeTitle := secondarySurface(ramp.SurfaceActive)
+	inactiveDescription := secondarySurface(ramp.SurfaceInactive)
 	barDescription := secondarySurface(ramp.SurfaceBar)
 	styles := Styles{
 		SurfaceBar:      ramp.SurfaceBar,
@@ -53,7 +54,7 @@ func stylesFromRamp(t Theme, accent Accent, ramp Ramp) Styles {
 
 		PickerBase:        ramp.SurfaceBar,
 		PickerSelection:   EmphasisStyle(ramp.SurfaceActive, t),
-		PickerDescription: barDescription,
+		PickerDescription: inactiveDescription,
 		// Separators are secondary text on the picker base surface, not
 		// non-text borders; they therefore require the normal 4.5:1 contrast.
 		PickerSeparator: barDescription,
@@ -152,12 +153,16 @@ func withMRUStyles(styles Styles, ramp Ramp) Styles {
 	return styles
 }
 
-func neutralBorderStyle(t Theme) renderer.Style {
+// NeutralBorderStyle is the existing non-accent structural border input for
+// dimmed pane chrome. It intentionally does not consume a resolved accent.
+func NeutralBorderStyle(t Theme) renderer.Style {
 	if !usable(t) {
 		return renderer.DefaultStyle()
 	}
 	return foregroundStyle(Blend(t.Foreground, t.Background, 0.40))
 }
+
+func neutralBorderStyle(t Theme) renderer.Style { return NeutralBorderStyle(t) }
 
 func withLegacyAliases(styles Styles, t Theme) Styles {
 	styles.StatusBar = styles.SurfaceBar

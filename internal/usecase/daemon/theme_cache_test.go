@@ -76,3 +76,29 @@ func TestAppliedThemeKeepsDimmerOutsideResolvedChrome(t *testing.T) {
 	require.Equal(t, cell, out.frame.At(0, 1))
 	require.Equal(t, themeui.NewDimmer(raw, themeui.WithForegroundDimming(inactivePaneForegroundDimming)).Dim(cell.Style), out.frame.At(2, 1).Style)
 }
+
+func TestChromeDimmersUseNeutralInputsOutsideAccentRamp(t *testing.T) {
+	raw := cacheTheme()
+	resolved := themeui.Resolve(raw, domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2})
+	neutral := renderer.DefaultStyle()
+	neutral.HasForegroundRGB = true
+	neutral.ForegroundRGB = themeui.Blend(raw.Foreground, raw.Background, 0.40)
+	want := themeui.NewDimmer(raw).Dim(neutral)
+	accentDerived := themeui.NewDimmer(raw).Dim(resolved.Styles.BorderMuted)
+
+	split := cachedSplitState("neutral-divider", "left", layout.Horizontal, raw)
+	split.styles = resolved.Styles
+	splitOut := composeFrame(split, composeCacheInput{})
+	require.Equal(t, 'L', splitOut.frame.At(0, 1).Rune, "split geometry and pane content must remain unchanged")
+	require.Equal(t, 'R', splitOut.frame.At(21, 1).Rune, "split geometry and pane content must remain unchanged")
+	require.Equal(t, want, splitOut.frame.At(20, 1).Style, "divider must dim a neutral input")
+	require.NotEqual(t, accentDerived, splitOut.frame.At(20, 1).Style, "divider must exclude accent-ramp styles from Dimmer")
+
+	titles := cachedStackTitleState("inactive", 1, true)
+	titles.theme, titles.styles = raw, resolved.Styles
+	titleOut := composeFrame(titles, composeCacheInput{})
+	require.Equal(t, 'i', titleOut.frame.At(0, 1).Rune, "inactive title geometry must remain unchanged")
+	require.Equal(t, want, titleOut.frame.At(0, 1).Style, "inactive title must dim a neutral input")
+	require.NotEqual(t, accentDerived, titleOut.frame.At(0, 1).Style, "inactive title must exclude accent-ramp styles from Dimmer")
+	require.Equal(t, 'E', titleOut.frame.At(0, 3).Rune, "pane content must remain unchanged")
+}
