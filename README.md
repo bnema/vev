@@ -20,7 +20,7 @@ What it is built around:
 go install github.com/bnema/vev@latest
 ```
 
-From a checkout, `make install` also installs the default status bar scripts.
+The default UI runs entirely from the `vev` binary. Optional external bar anchors can be configured in `~/.config/vev/config`.
 
 ## Usage
 

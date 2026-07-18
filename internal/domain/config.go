@@ -105,9 +105,7 @@ func Defaults() Config {
 		Theme:        ThemeAuto,
 		ThemePalette: true,
 		Bar: BarConfig{
-			TopRight:    "vev-bar-top-right",
-			BottomRight: "vev-bar-bottom-right",
-			Interval:    5 * time.Second,
+			Interval: 5 * time.Second,
 		},
 		BindingEntries: []ConfigEntry{},
 		Codes:          map[string]string{},
