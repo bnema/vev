@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -354,6 +355,91 @@ func TestComposeCapturedFloatingFrameCachedAllocationsAreOnlyFrameClone(t *testi
 	// offsets to keep the cached base immutable; those are its two unavoidable
 	// allocations. A higher count would reintroduce avoidable cache churn.
 	require.LessOrEqual(t, allocs, float64(2))
+}
+
+var (
+	benchmarkComposeSink composedRenderFrame
+	benchmarkOutputSink  []byte
+)
+
+// benchmarkCapturedRenderState is a stable, post-capture production input: one
+// 80x24 pane, both chrome bars, and no pending pane damage. The primed cache
+// below makes each benchmark operation exercise the cached compose path.
+func benchmarkCapturedRenderState() capturedRenderState {
+	pane := renderer.NewFrame(80, 24)
+	for y := range pane.Height {
+		for x := range pane.Width {
+			pane.Set(x, y, renderer.Cell{Rune: rune('a' + (x+y)%26)})
+		}
+	}
+	terminalTheme := themeui.Theme{
+		Foreground: renderer.RGB{R: 0xd8, G: 0xdc, B: 0xe8},
+		Background: renderer.RGB{R: 0x08, G: 0x09, B: 0x0a},
+		Palette: [16]renderer.RGB{
+			2:  {R: 0x7d, G: 0xb5, B: 0xb5},
+			4:  {R: 0x6c, G: 0x9b, B: 0xd9},
+			10: {R: 0x7d, G: 0xb5, B: 0xb5},
+			12: {R: 0x6c, G: 0x9b, B: 0xd9},
+			14: {R: 0x7d, G: 0xb5, B: 0xb5},
+		},
+		PaletteKnown: 1<<2 | 1<<4 | 1<<10 | 1<<12 | 1<<14,
+		HasFG:        true,
+		HasBG:        true,
+		TrueColor:    true,
+		Known:        true,
+		SchemeKnown:  true,
+		UsePalette:   true,
+	}
+	placement := layout.Placement{ID: "benchmark-pane", Content: domain.Rect{Width: 80, Height: 24}}
+	return capturedRenderState{
+		layout: capturedTabLayout{
+			area:        domain.Rect{Width: 80, Height: 24},
+			focus:       placement.ID,
+			placements:  []layout.Placement{placement},
+			fingerprint: "benchmark-one-pane",
+			valid:       true,
+		},
+		panes: []capturedPaneRenderState{{id: placement.ID, frame: pane, placement: placement, focused: true}},
+		bars: barState{
+			status:      statusSnapshot{session: "main", tabs: []statusTab{{name: "main", paneTitle: "shell", active: true}}},
+			topRight:    "vev",
+			bottomRight: "main",
+			mru:         []recentSession{{name: "work"}, {name: "logs"}},
+			theme:       terminalTheme,
+		},
+		theme: terminalTheme,
+	}
+}
+
+func benchmarkComposeCacheInput(state capturedRenderState) composeCacheInput {
+	priming := state
+	priming.reset = true
+	priming.panes = append([]capturedPaneRenderState(nil), state.panes...)
+	priming.panes[0].damage = []renderer.Damage{renderer.FullRedraw()}
+	return composeFrame(priming, composeCacheInput{}).cache
+}
+
+func BenchmarkComposeCapturedFrame(b *testing.B) {
+	state := benchmarkCapturedRenderState()
+	cache := benchmarkComposeCacheInput(state)
+	scratch := composeCacheInput{}
+	draw := renderer.New(renderer.Capabilities{})
+	var totalBytes int64
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		composed := composeFrame(state, cache, scratch)
+		scratch = composed.cache
+		draw.Reset()
+		out, err := draw.Draw(composed.frame, composed.damage)
+		if err != nil {
+			b.Fatal(err)
+		}
+		totalBytes += int64(len(out))
+		benchmarkComposeSink, benchmarkOutputSink = composed, out
+	}
+	b.ReportMetric(float64(totalBytes)/float64(b.N), "output-bytes/op")
 }
 
 func BenchmarkComposeCapturedFloatingFrameCached(b *testing.B) {
