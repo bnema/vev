@@ -50,6 +50,55 @@ func (r *lifecycleReader) maxActive() int {
 	return r.max
 }
 
+func TestTerminalInputPumpCancellationHandoffPreservesQueuedBytes(t *testing.T) {
+	input := newTerminalInputPump(nil)
+	// Both cancellation and a terminal read are ready before the old scanner
+	// tries to dequeue. It must surrender the read to its replacement.
+	want := []byte("first\x00second\xff")
+	input.enqueue(terminalReadResult{data: append([]byte(nil), want...)})
+
+	var activeGeneration atomic.Uint64
+	cancelledCtx, cancelCancelled := context.WithCancel(context.Background())
+	cancelCancelled()
+	cancelledDone := make(chan struct{})
+	go func() {
+		(&stdinPump{
+			ctx: cancelledCtx, cancel: cancelCancelled, input: input,
+			out: make(chan ports.Frame, 1), clock: newAttachPaletteClock(),
+			logger: slog.New(slog.DiscardHandler), paletteEvents: make(chan paletteGenerationEvent),
+			activeGeneration: &activeGeneration,
+		}).run()
+		close(cancelledDone)
+	}()
+	<-cancelledDone
+
+	replacementCtx, cancelReplacement := context.WithCancel(context.Background())
+	defer cancelReplacement()
+	out := make(chan ports.Frame, len(want))
+	replacementDone := make(chan struct{})
+	go func() {
+		(&stdinPump{
+			ctx: replacementCtx, cancel: cancelReplacement, input: input,
+			out: out, clock: newAttachPaletteClock(),
+			logger: slog.New(slog.DiscardHandler), paletteEvents: make(chan paletteGenerationEvent),
+			activeGeneration: &activeGeneration,
+		}).run()
+		close(replacementDone)
+	}()
+
+	var got []byte
+	for len(got) < len(want) {
+		frame := <-out
+		input, err := ports.UnmarshalInput(frame.Payload)
+		require.NoError(t, err)
+		got = append(got, input.Data...)
+	}
+	require.Equal(t, want, got, "handoff must preserve every queued byte in order")
+
+	cancelReplacement()
+	<-replacementDone
+}
+
 func TestTerminalInputPumpReusesOneReaderAcrossCancelledAttempts(t *testing.T) {
 	reader := newLifecycleReader()
 	input := newTerminalInputPump(reader)

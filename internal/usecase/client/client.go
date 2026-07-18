@@ -609,6 +609,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		input.start()
 		defer input.stop()
 	}
+	inputConsumer := input.claim()
 
 	sendCh := make(chan ports.Frame, sendQueueDepth)
 	ackQueue := newCumulativeAckQueue()
@@ -723,12 +724,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	stdinDone := make(chan struct{})
 	go func() {
 		defer close(stdinDone)
-		(&stdinPump{ctx: loopCtx, cancel: cancel, input: input, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration}).run()
+		(&stdinPump{ctx: loopCtx, cancel: cancel, input: input, consumer: inputConsumer, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration}).run()
 	}()
-	// A scanner must finish before the next attach starts. The lifecycle-owned
-	// reader remains available for reconnect, but a cancelled scanner cannot
-	// consume a later read result intended for its replacement.
+	// Revoke this scanner's dequeue permission before waiting for it to exit.
+	// The lifecycle-owned reader retains queued bytes for the next attempt.
 	defer func() {
+		input.revoke(inputConsumer)
 		cancel()
 		<-stdinDone
 	}()
@@ -946,25 +947,112 @@ type terminalReadResult struct {
 // blocked after Run exits; stop drops its result and never closes caller-owned
 // stdin. Reconnects never add another reader.
 type terminalInputPump struct {
-	in      io.Reader
-	reads   chan terminalReadResult
-	done    chan struct{}
-	startMu sync.Once
-	stopMu  sync.Once
+	in   io.Reader
+	done chan struct{}
+
+	mu       sync.Mutex
+	pending  *terminalReadResult
+	consumer uint64
+	nextID   uint64
+	closed   bool
+	ready    chan struct{}
+	space    chan struct{}
+	startMu  sync.Once
+	stopMu   sync.Once
 }
 
 func newTerminalInputPump(in io.Reader) *terminalInputPump {
+	space := make(chan struct{}, 1)
+	space <- struct{}{}
 	return &terminalInputPump{
 		in:    in,
-		reads: make(chan terminalReadResult, 1),
 		done:  make(chan struct{}),
+		ready: make(chan struct{}, 1),
+		space: space,
 	}
+}
+
+// claim grants one attach scanner exclusive permission to dequeue terminal
+// input. The reader itself remains lifecycle-owned across reconnects.
+func (p *terminalInputPump) claim() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.consumer != 0 {
+		panic("terminal input consumer already claimed")
+	}
+	p.nextID++
+	p.consumer = p.nextID
+	return p.consumer
+}
+
+// revoke invalidates an attempt before its replacement is allowed to claim
+// input. Pending bytes are deliberately retained for that replacement.
+func (p *terminalInputPump) revoke(consumer uint64) {
+	p.mu.Lock()
+	if p.consumer == consumer {
+		p.consumer = 0
+	}
+	p.mu.Unlock()
+	p.signalReady()
+}
+
+func (p *terminalInputPump) signalReady() {
+	select {
+	case p.ready <- struct{}{}:
+	default:
+	}
+}
+
+// enqueue retains at most one completed terminal read. The reader blocks
+// before publishing another result, keeping handoff buffering bounded.
+func (p *terminalInputPump) enqueue(result terminalReadResult) bool {
+	select {
+	case <-p.done:
+		return false
+	case <-p.space:
+	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		p.space <- struct{}{}
+		return false
+	}
+	p.pending = &result
+	p.mu.Unlock()
+	p.signalReady()
+	return true
+}
+
+// take gives a ready result only to the current, non-cancelled consumer. It
+// checks cancellation after readiness is observed, so cancellation wins a
+// simultaneous cancellation/read race and leaves the result queued.
+func (p *terminalInputPump) take(ctx context.Context, consumer uint64) (terminalReadResult, bool) {
+	p.mu.Lock()
+	if ctx.Err() != nil || p.consumer != consumer || p.pending == nil {
+		pending := p.pending != nil
+		p.mu.Unlock()
+		if pending {
+			p.signalReady()
+		}
+		return terminalReadResult{}, false
+	}
+	result := *p.pending
+	p.pending = nil
+	p.mu.Unlock()
+	p.space <- struct{}{}
+	return result, true
+}
+
+func (p *terminalInputPump) finish() {
+	p.mu.Lock()
+	p.closed = true
+	p.mu.Unlock()
+	p.signalReady()
 }
 
 func (p *terminalInputPump) start() {
 	p.startMu.Do(func() {
 		go func() {
-			defer close(p.reads)
 			buf := make([]byte, stdinBufSize)
 			for {
 				n, err := p.in.Read(buf)
@@ -972,12 +1060,11 @@ func (p *terminalInputPump) start() {
 				if n > 0 {
 					result.data = append([]byte(nil), buf[:n]...)
 				}
-				select {
-				case p.reads <- result:
-				case <-p.done:
+				if !p.enqueue(result) {
 					return
 				}
 				if err != nil {
+					p.finish()
 					return
 				}
 			}
@@ -998,6 +1085,7 @@ type stdinPump struct {
 	cancel            context.CancelFunc
 	in                io.Reader // compatibility for isolated scanner tests
 	input             *terminalInputPump
+	consumer          uint64
 	out               chan<- ports.Frame
 	clock             ports.Clock
 	clipboard         ports.ClipboardReader
@@ -1060,7 +1148,11 @@ func (p *stdinPump) run() {
 		input.start()
 		defer input.stop()
 	}
-	reads := input.reads
+	consumer := p.consumer
+	if consumer == 0 {
+		consumer = input.claim()
+		defer input.revoke(consumer)
+	}
 
 	var markerTimer ports.Timer
 	var markerTimerC <-chan time.Time
@@ -1105,9 +1197,13 @@ func (p *stdinPump) run() {
 			return
 		case <-markerTimerC:
 			flushMarkerPrefix()
-		case result, ok := <-reads:
+		case <-input.ready:
+			result, ok := input.take(p.ctx, consumer)
 			if !ok {
-				return
+				if p.ctx.Err() != nil {
+					return
+				}
+				continue
 			}
 			disarmMarkerDeadline()
 			// All scanner callbacks from this Read must retain this one generation.
