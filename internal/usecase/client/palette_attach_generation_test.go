@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -274,6 +276,67 @@ func TestAttachInitialClearedThemeSendReturnsTransportError(t *testing.T) {
 	err := (<-h.done).err
 	require.ErrorIs(t, err, want)
 	require.ErrorContains(t, err, "publishing theme")
+}
+
+func TestStdinPumpSameReadSchemeAndOldMarkerCannotAdvanceReplacement(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	coordinator := newPaletteGenerationCoordinator()
+	coordinator.start(ports.Theme{}, false)
+	var activeGeneration atomic.Uint64
+	activeGeneration.Store(uint64(coordinator.current.id))
+
+	// An unbuffered event channel forces the attach loop to process the scheme
+	// notification and publish its replacement generation before the scanner
+	// can deliver the old marker from the same terminal Read.
+	events := make(chan paletteGenerationEvent)
+	out := make(chan ports.Frame, 1)
+	schemeHandled := make(chan struct{})
+	pump := &stdinPump{
+		ctx:              ctx,
+		cancel:           cancel,
+		in:               strings.NewReader("\x1b[?997;2n\x1b[?2031;1$y"),
+		out:              out,
+		clock:            newAttachPaletteClock(),
+		logger:           slog.New(slog.DiscardHandler),
+		paletteEvents:    events,
+		activeGeneration: &activeGeneration,
+		afterPaletteEvent: func(event paletteGenerationEvent) {
+			if event.kind == paletteEventScheme {
+				<-schemeHandled
+			}
+		},
+	}
+	pumpDone := make(chan struct{})
+	go func() {
+		pump.run()
+		close(pumpDone)
+	}()
+
+	scheme := <-events
+	require.Equal(t, paletteEventScheme, scheme.kind)
+	oldID := scheme.id
+
+	// This models attachAttempt handling the scheme event. The replacement is
+	// draining, so a marker tagged with its ID would incorrectly start its
+	// color batch before the real drain boundary arrives.
+	coordinator.start(ports.Theme{SchemeKnown: true, Light: scheme.light}, true)
+	newID := coordinator.current.id
+	activeGeneration.Store(uint64(newID))
+	close(schemeHandled)
+	require.NotEqual(t, oldID, newID)
+	require.Equal(t, generationDraining, coordinator.current.phase)
+
+	oldMarker := <-events
+	require.Equal(t, paletteEventMarker, oldMarker.kind)
+	require.Equal(t, oldID, oldMarker.id, "one read must retain its generation tag")
+	require.Empty(t, coordinator.handle(oldMarker))
+	require.True(t, coordinator.active)
+	require.Equal(t, generationDraining, coordinator.current.phase)
+	require.Equal(t, newID, coordinator.current.id)
+
+	<-pumpDone
 }
 
 func TestAttachLateDrainCannotFinalizeReplacementEarly(t *testing.T) {

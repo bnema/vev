@@ -919,15 +919,16 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 // preserving all ordinary terminal input byte-for-byte. It never publishes a
 // Theme and never writes terminal output; attachAttempt owns both operations.
 type stdinPump struct {
-	ctx              context.Context
-	cancel           context.CancelFunc
-	in               io.Reader
-	out              chan<- ports.Frame
-	clock            ports.Clock
-	clipboard        ports.ClipboardReader
-	logger           *slog.Logger
-	paletteEvents    chan<- paletteGenerationEvent
-	activeGeneration *atomic.Uint64
+	ctx               context.Context
+	cancel            context.CancelFunc
+	in                io.Reader
+	out               chan<- ports.Frame
+	clock             ports.Clock
+	clipboard         ports.ClipboardReader
+	logger            *slog.Logger
+	paletteEvents     chan<- paletteGenerationEvent
+	activeGeneration  *atomic.Uint64
+	afterPaletteEvent func(paletteGenerationEvent) // test synchronization hook
 }
 
 func (p *stdinPump) run() {
@@ -948,6 +949,9 @@ func (p *stdinPump) run() {
 	sendEvent := func(event paletteGenerationEvent) {
 		select {
 		case p.paletteEvents <- event:
+			if p.afterPaletteEvent != nil {
+				p.afterPaletteEvent(event)
+			}
 		case <-p.ctx.Done():
 			sendOK.Store(false)
 		}
@@ -974,25 +978,27 @@ func (p *stdinPump) run() {
 		}
 		sink = ci.Scan
 	}
-	id := func() paletteGenerationID {
-		return paletteGenerationID(p.activeGeneration.Load())
-	}
 	for {
 		n, rerr := p.in.Read(buf)
+		// All scanner callbacks from this Read must retain this one generation.
+		// A scheme notification can start its replacement before a later byte in
+		// the same read is scanned; reloading there would misclassify an old
+		// completion marker as the replacement's drain response.
+		readGeneration := paletteGenerationID(p.activeGeneration.Load())
 		if n > 0 {
 			scanner.Scan(buf[:n], func(kind int, rgb renderer.RGB) {
 				kindEvent := paletteEventForeground
 				if kind == 11 {
 					kindEvent = paletteEventBackground
 				}
-				sendEvent(paletteGenerationEvent{id: id(), kind: kindEvent, rgb: rgb})
+				sendEvent(paletteGenerationEvent{id: readGeneration, kind: kindEvent, rgb: rgb})
 			}, func(slot int, rgb renderer.RGB) {
-				sendEvent(paletteGenerationEvent{id: id(), kind: paletteEventPalette, slot: uint8(slot), rgb: rgb})
+				sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventPalette, slot: uint8(slot), rgb: rgb})
 			}, func(light bool) {
-				sendEvent(paletteGenerationEvent{id: id(), kind: paletteEventScheme, light: light})
+				sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventScheme, light: light})
 			}, func(data []byte) {
 				markers.scan(data, sink, func() {
-					sendEvent(paletteGenerationEvent{id: id(), kind: paletteEventMarker})
+					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventMarker})
 				})
 			})
 			if !sendOK.Load() {
