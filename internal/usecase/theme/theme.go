@@ -356,89 +356,22 @@ func StatusBarStyle(t Theme) renderer.Style {
 	return style
 }
 
-const (
-	ansiBlue       = 4
-	ansiBrightBlue = 12
-	accentBlend    = 0.25
-	titleHueBlend  = 0.2
-)
-
+// The compatibility helpers below retain the neutral styles for isolated
+// callers. Accent-aware construction goes exclusively through Resolve.
 func AccentStyle(t Theme) renderer.Style {
-	if !usable(t) {
-		return inverseStyle()
-	}
-	style := renderer.DefaultStyle()
-	style.HasForegroundRGB = true
-	style.ForegroundRGB = t.Foreground
-	style.HasBackgroundRGB = true
-	style.BackgroundRGB = accentBackground(t)
-	return style
-}
-
-// accentBackground uses a terminal's blue palette only when the resulting
-// foreground/background pair remains legible. A neutral blend is always the
-// fallback, including when palette inheritance is disabled.
-func accentBackground(t Theme) renderer.RGB {
-	neutral := Blend(t.Background, t.Foreground, accentBlend)
-	if !t.UsePalette {
-		return neutral
-	}
-	for _, slot := range []int{ansiBlue, ansiBrightBlue} {
-		blue, ok := t.PaletteColor(slot)
-		if !ok {
-			continue
-		}
-		candidate := Blend(t.Background, blue, accentBlend)
-		if ContrastRatio(t.Foreground, candidate) >= accentContrastMin {
-			return candidate
-		}
-	}
-	return neutral
+	return neutralStyles(t).SurfaceActive
 }
 
 func BorderStyle(t Theme) renderer.Style {
-	neutral := renderer.DefaultStyle()
-	if usable(t) {
-		neutral.HasForegroundRGB = true
-		neutral.ForegroundRGB = Blend(t.Foreground, t.Background, 0.40)
-	}
-	if !t.UsePalette {
-		return neutral
-	}
-
-	base := renderer.DefaultStyle()
-	if usable(t) {
-		base.HasForegroundRGB = true
-		base.ForegroundRGB = t.Foreground
-		base.HasBackgroundRGB = true
-		base.BackgroundRGB = t.Background
-	}
-	return paletteForegroundStyle(base, neutral, t)
+	return neutralStyles(t).BorderMuted
 }
 
 func MutedTextStyle(t Theme) renderer.Style {
-	neutral := renderer.DefaultStyle()
-	if usable(t) {
-		neutral.HasForegroundRGB = true
-		neutral.ForegroundRGB = Blend(t.Foreground, t.Background, 0.45)
-	}
-	if !t.UsePalette {
-		return neutral
-	}
-
-	base := renderer.DefaultStyle()
-	if usable(t) {
-		base.HasForegroundRGB = true
-		base.ForegroundRGB = t.Foreground
-		base.HasBackgroundRGB = true
-		base.BackgroundRGB = t.Background
-	}
-	return paletteForegroundStyle(base, neutral, t)
+	return neutralStyles(t).PickerDescription
 }
 
 // mutedVariantBlend is the fraction MutedVariantStyle blends a style's own
-// foreground toward its own background, subtler than MutedTextStyle's 0.45
-// (which blends the theme's global fg/bg instead of a style's own colors).
+// foreground toward its own background.
 const mutedVariantBlend = 0.4
 
 // EmphasisStyle returns base with bold applied when the client theme supports
@@ -452,79 +385,21 @@ func EmphasisStyle(base renderer.Style, t Theme) renderer.Style {
 	return out
 }
 
-// MutedVariantStyle fades base's foreground toward its background when both
-// are RGB and the client theme supports styled output; otherwise base is
-// returned unchanged. When base has an RGB foreground but no RGB background,
-// it fades toward t.Background instead.
+// MutedVariantStyle fades base's foreground toward its own background.
 func MutedVariantStyle(base renderer.Style, t Theme) renderer.Style {
 	if !usable(t) || !base.HasForegroundRGB {
 		return base
 	}
-	bg := base.BackgroundRGB
+	background := base.BackgroundRGB
 	if !base.HasBackgroundRGB {
 		if !t.HasBG {
 			return base
 		}
-		bg = t.Background
+		background = t.Background
 	}
 	out := base
-	out.ForegroundRGB = Blend(base.ForegroundRGB, bg, mutedVariantBlend)
+	out.ForegroundRGB = Blend(base.ForegroundRGB, background, mutedVariantBlend)
 	return out
-}
-
-// PaletteMutedVariantStyle derives a title foreground from a terminal blue
-// palette entry. Its contrast is evaluated against the title's actual base
-// background, rather than the terminal background, because status and active
-// title backgrounds differ.
-func PaletteMutedVariantStyle(base renderer.Style, t Theme) renderer.Style {
-	return paletteForegroundStyle(base, MutedVariantStyle(base, t), t)
-}
-
-// paletteForegroundStyle uses palette blues for a foreground only. It never
-// changes a background, so palette inheritance cannot introduce indexed
-// backgrounds. If terminal RGB data is unavailable, a known color scheme can
-// still select a best-effort ANSI foreground. A reported blue that fails
-// contrast deliberately suppresses that indexed fallback.
-func paletteForegroundStyle(base, neutral renderer.Style, t Theme) renderer.Style {
-	if !t.UsePalette {
-		return neutral
-	}
-
-	knownBlue := paletteBlueKnown(t)
-	if usable(t) && base.HasForegroundRGB && base.HasBackgroundRGB {
-		for _, slot := range []int{ansiBlue, ansiBrightBlue} {
-			blue, ok := t.PaletteColor(slot)
-			if !ok {
-				continue
-			}
-			candidate := Blend(base.ForegroundRGB, blue, titleHueBlend)
-			if ContrastRatio(candidate, base.BackgroundRGB) >= accentContrastMin {
-				out := neutral
-				out.HasForegroundRGB = true
-				out.ForegroundRGB = candidate
-				return out
-			}
-		}
-	}
-
-	if !knownBlue && t.SchemeKnown {
-		out := neutral
-		out.HasForegroundRGB = false
-		if t.Light {
-			out.Foreground = ansiBlue
-		} else {
-			out.Foreground = ansiBrightBlue
-		}
-		return out
-	}
-	return neutral
-}
-
-func paletteBlueKnown(t Theme) bool {
-	if !t.UsePalette {
-		return false
-	}
-	return t.PaletteKnown&(uint16(1)<<ansiBlue|uint16(1)<<ansiBrightBlue) != 0
 }
 
 const defaultDimmingPercent = 35

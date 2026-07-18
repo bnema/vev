@@ -3,10 +3,14 @@ package theme
 import (
 	"testing"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
-var benchmarkStylesSink Styles
+var (
+	benchmarkStylesSink   Styles
+	benchmarkResolvedSink ResolvedTheme
+)
 
 func benchmarkPaletteTheme() Theme {
 	return Theme{
@@ -44,5 +48,24 @@ func BenchmarkNewStyles(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		benchmarkStylesSink = NewStyles(theme)
+	}
+}
+
+func TestResolveAllocations(t *testing.T) {
+	theme := benchmarkPaletteTheme()
+	allocs := testing.AllocsPerRun(1000, func() {
+		benchmarkResolvedSink = Resolve(theme, domain.ThemeAccent{Mode: domain.ThemeAccentAuto})
+	})
+	if allocs != 0 {
+		t.Fatalf("Resolve allocations/op = %v, want 0", allocs)
+	}
+}
+
+func BenchmarkResolve(b *testing.B) {
+	theme := benchmarkPaletteTheme()
+	policy := domain.ThemeAccent{Mode: domain.ThemeAccentAuto}
+	b.ReportAllocs()
+	for b.Loop() {
+		benchmarkResolvedSink = Resolve(theme, policy)
 	}
 }

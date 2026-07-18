@@ -3,6 +3,7 @@ package theme
 import (
 	"math"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -58,47 +59,47 @@ func MRUFade(base renderer.Style, t Theme, i, count int) renderer.Style {
 	return base
 }
 
-// Styles is the resolved set of terminal chrome styles for a client theme.
+// Styles is the complete semantic set of terminal chrome styles. The legacy
+// aliases remain until daemon renderers consume the semantic fields directly.
 type Styles struct {
-	StatusBar   renderer.Style
-	Accent      renderer.Style
-	Border      renderer.Style
-	Selection   renderer.Style
-	CopyStatus  renderer.Style
-	PaletteDesc renderer.Style
+	SurfaceBar      renderer.Style
+	SurfaceInactive renderer.Style
+	SurfaceRecent   renderer.Style
+	SurfaceActive   renderer.Style
+	BorderMuted     renderer.Style
+	BorderActive    renderer.Style
 
-	TabName        renderer.Style
-	TabNameActive  renderer.Style
-	TabTitle       renderer.Style
-	TabTitleActive renderer.Style
+	TabInactive      renderer.Style
+	TabInactiveTitle renderer.Style
+	TabActive        renderer.Style
+	TabActiveTitle   renderer.Style
+	MRURecent        renderer.Style
 
+	PickerBase        renderer.Style
+	PickerSelection   renderer.Style
+	PickerDescription renderer.Style
+	PickerSeparator   renderer.Style
+	PromptBase        renderer.Style
+	CopyStatus        renderer.Style
+	SearchSelection   renderer.Style
+
+	// Compatibility aliases for pre-cache render paths.
+	StatusBar            renderer.Style
+	Accent               renderer.Style
+	Border               renderer.Style
+	Selection            renderer.Style
+	PaletteDesc          renderer.Style
+	TabName              renderer.Style
+	TabNameActive        renderer.Style
+	TabTitle             renderer.Style
+	TabTitleActive       renderer.Style
 	PickerName           renderer.Style
 	PickerSelectionName  renderer.Style
 	PickerSelectionMuted renderer.Style
-	PickerSeparator      renderer.Style
 }
 
-// NewStyles composes the terminal chrome styles from the semantic theme styles.
+// NewStyles applies the default automatic policy. New callers that own a
+// policy should use Resolve and retain its complete immutable result.
 func NewStyles(t Theme) Styles {
-	statusBar := StatusBarStyle(t)
-	accent := AccentStyle(t)
-	selection := SelectionStyle(t)
-	return Styles{
-		StatusBar:   statusBar,
-		Accent:      accent,
-		Border:      BorderStyle(t),
-		Selection:   selection,
-		CopyStatus:  selection,
-		PaletteDesc: MutedTextStyle(t),
-
-		TabName:        EmphasisStyle(statusBar, t),
-		TabNameActive:  EmphasisStyle(accent, t),
-		TabTitle:       PaletteMutedVariantStyle(statusBar, t),
-		TabTitleActive: PaletteMutedVariantStyle(accent, t),
-
-		PickerName:           EmphasisStyle(renderer.DefaultStyle(), t),
-		PickerSelectionName:  EmphasisStyle(selection, t),
-		PickerSelectionMuted: PaletteMutedVariantStyle(selection, t),
-		PickerSeparator:      MutedTextStyle(t),
-	}
+	return Resolve(t, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles
 }
