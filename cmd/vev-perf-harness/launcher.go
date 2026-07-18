@@ -628,6 +628,23 @@ func (e *ptyLocalEcho) applicationOutput(chunk []byte) []byte {
 func (p *cliProcess) Close() error {
 	var result error
 	p.closed.Do(func() {
+		// No measurement waits for terminal chunks during teardown. Continue
+		// consuming them so a full channel cannot block the client before it
+		// receives the shell exit request and closes its transport receive span.
+		if p.chunks != nil && p.done != nil {
+			go func() {
+				for {
+					select {
+					case _, ok := <-p.chunks:
+						if !ok {
+							return
+						}
+					case <-p.done:
+						return
+					}
+				}
+			}()
+		}
 		// A public terminal client owns a shell session. Ask that shell to exit
 		// before closing the PTY so its transport can finish its receive span;
 		// this avoids turning ordinary harness teardown into an aborted trace.
