@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -83,13 +84,14 @@ func (t *attachPaletteTerminalHarness) Out() io.Writer                   { retur
 func (*attachPaletteTerminalHarness) Flush() error                       { return nil }
 
 type attachPaletteTransport struct {
-	mu       sync.Mutex
-	frames   []ports.Frame
-	themes   []ports.Theme
-	themeCh  chan ports.Theme
-	inputCh  chan ports.Input
-	detached chan ports.Frame
-	welcomed bool
+	mu           sync.Mutex
+	frames       []ports.Frame
+	themes       []ports.Theme
+	themeCh      chan ports.Theme
+	inputCh      chan ports.Input
+	detached     chan ports.Frame
+	themeSendErr error
+	welcomed     bool
 }
 
 func newAttachPaletteTransport() *attachPaletteTransport {
@@ -102,9 +104,13 @@ func newAttachPaletteTransport() *attachPaletteTransport {
 func (t *attachPaletteTransport) Send(frame ports.Frame) error {
 	t.mu.Lock()
 	t.frames = append(t.frames, frame)
+	themeSendErr := t.themeSendErr
 	t.mu.Unlock()
 	switch frame.Type {
 	case ports.MsgTheme:
+		if themeSendErr != nil {
+			return themeSendErr
+		}
 		got, err := ports.UnmarshalTheme(frame.Payload)
 		if err != nil {
 			return err
@@ -148,11 +154,14 @@ type attachPaletteHarness struct {
 }
 
 func startAttachPaletteHarness(state *terminalThemeState) *attachPaletteHarness {
+	return startAttachPaletteHarnessWithTransport(state, newAttachPaletteTransport())
+}
+
+func startAttachPaletteHarnessWithTransport(state *terminalThemeState, transport *attachPaletteTransport) *attachPaletteHarness {
 	clock := newAttachPaletteClock()
 	reader := newAttachPaletteReader()
 	writer := newAttachPaletteWriter()
 	term := &attachPaletteTerminalHarness{in: reader, out: writer, resize: make(chan domain.Size)}
-	transport := newAttachPaletteTransport()
 	ms := &milestones{}
 	runner := &Runner{term: term, clock: clock, logger: slog.New(slog.DiscardHandler)}
 	attempt := &attachAttempt{
@@ -255,6 +264,18 @@ func TestAttachSchemeReplacementAndDeadlinesProgressWhileReadBlocks(t *testing.T
 	h.detach(t)
 }
 
+func TestAttachInitialClearedThemeSendReturnsTransportError(t *testing.T) {
+	t.Setenv("COLORTERM", "truecolor")
+	want := errors.New("initial theme send failed")
+	transport := newAttachPaletteTransport()
+	transport.themeSendErr = want
+	h := startAttachPaletteHarnessWithTransport(&terminalThemeState{}, transport)
+
+	err := (<-h.done).err
+	require.ErrorIs(t, err, want)
+	require.ErrorContains(t, err, "publishing theme")
+}
+
 func TestAttachLateDrainCannotFinalizeReplacementEarly(t *testing.T) {
 	t.Setenv("COLORTERM", "truecolor")
 	h := startAttachPaletteHarness(&terminalThemeState{})
@@ -272,9 +293,10 @@ func TestAttachLateDrainCannotFinalizeReplacementEarly(t *testing.T) {
 	require.Equal(t, paletteColorBatch, h.nextWrite(t))
 	completionDeadline := h.nextTimer(t)
 
-	// The first marker is the late drain response. The second is the batch
-	// completion marker. Colors between them prove the first cannot finalize.
-	h.reader.send("\x1b[?2031;1$y\x1b]10;#111213\a\x1b]11;#141516\a\x1b]4;3;#212223\a\x1b[?2031;1$y")
+	// The drain's stale reports arrive before its late boundary and must not
+	// contaminate the replacement accumulator. Reports after that boundary are
+	// the batch's reports and are collected through the second marker.
+	h.reader.send("\x1b]10;#a1a2a3\a\x1b]11;#a4a5a6\a\x1b]4;2;#a7a8a9\a\x1b[?2031;1$y\x1b]10;#111213\a\x1b]11;#141516\a\x1b]4;3;#212223\a\x1b[?2031;1$y")
 	final := h.nextTheme(t)
 	require.Equal(t, renderer.RGB{R: 17, G: 18, B: 19}, final.Foreground)
 	require.Equal(t, renderer.RGB{R: 20, G: 21, B: 22}, final.Background)

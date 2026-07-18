@@ -149,7 +149,7 @@ func TestPaletteGenerationReplacementWaitsForDrain(t *testing.T) {
 	}, actionKinds(batch))
 }
 
-func TestPaletteGenerationLateDrainMarkerNeedsCompletionMarker(t *testing.T) {
+func TestPaletteGenerationLateDrainBoundaryExcludesStaleOSC(t *testing.T) {
 	g := newPaletteGenerationCoordinator()
 	clock := newManualPaletteClock()
 	start := g.start(generationTheme(), true)
@@ -163,11 +163,24 @@ func TestPaletteGenerationLateDrainMarkerNeedsCompletionMarker(t *testing.T) {
 		paletteActionArmCompletionDeadline,
 	}, actionKinds(timedOut))
 
+	// The drain reply may be late, so reports received before its boundary are
+	// conservatively excluded from this generation's accumulator.
+	g.foreground(id, renderer.RGB{R: 1, G: 2, B: 3})
+	g.background(id, renderer.RGB{R: 4, G: 5, B: 6})
+	g.palette(id, 2, renderer.RGB{R: 7, G: 8, B: 9})
+
 	lateDrain := g.marker(id)
 	require.Empty(t, lateDrain, "the late drain response must not finalize the batch")
+	g.foreground(id, renderer.RGB{R: 10, G: 11, B: 12})
+	g.background(id, renderer.RGB{R: 13, G: 14, B: 15})
+	g.palette(id, 3, renderer.RGB{R: 16, G: 17, B: 18})
 	complete := g.marker(id)
 	clock.apply(complete)
-	require.Equal(t, paletteActionPublishFinal, complete[len(complete)-1].kind)
+	final := findAction(t, complete, paletteActionPublishFinal).theme
+	require.Equal(t, renderer.RGB{R: 10, G: 11, B: 12}, final.Foreground)
+	require.Equal(t, renderer.RGB{R: 13, G: 14, B: 15}, final.Background)
+	require.Equal(t, uint16(1<<3), final.PaletteKnown)
+	require.Equal(t, renderer.RGB{R: 16, G: 17, B: 18}, final.Palette[3])
 }
 
 func TestPaletteGenerationCompletionDeadlineFinalizesAfterMissingLateDrain(t *testing.T) {

@@ -613,32 +613,35 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			delete(timers, id)
 		}
 	}
-	publish := func(snapshot ports.Theme) bool {
+	publish := func(snapshot ports.Theme) error {
 		frame := ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(snapshot)}
 		// The initial cleared snapshot is sent before the sender exists. This
 		// keeps the generation publication ordered before the first query and
 		// avoids leaving a queued Theme behind an immediate detach.
 		if !senderStarted {
-			return transport.Send(frame) == nil
+			if err := transport.Send(frame); err != nil {
+				return fmt.Errorf("sending initial theme: %w", err)
+			}
+			return nil
 		}
 		select {
 		case sendCh <- frame:
-			return true
+			return nil
 		case <-loopCtx.Done():
-			return false
+			return context.Canceled
 		}
 	}
 	processPaletteActions := func(actions []paletteGenerationAction) error {
 		for _, action := range actions {
 			switch action.kind {
 			case paletteActionPublishCleared:
-				if !publish(action.theme) {
-					return context.Canceled
+				if err := publish(action.theme); err != nil {
+					return fmt.Errorf("publishing theme: %w", err)
 				}
 			case paletteActionPublishFinal:
 				themeState.update(func(current *ports.Theme) { *current = action.theme })
-				if !publish(action.theme) {
-					return context.Canceled
+				if err := publish(action.theme); err != nil {
+					return fmt.Errorf("publishing theme: %w", err)
 				}
 			case paletteActionWriteDrain, paletteActionWriteBatch:
 				if _, err := term.Out().Write([]byte(action.bytes)); err != nil {

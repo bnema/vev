@@ -31,10 +31,11 @@ const (
 )
 
 type paletteGeneration struct {
-	id              paletteGenerationID
-	phase           paletteGenerationPhase
-	theme           ports.Theme
-	expectedMarkers int
+	id                        paletteGenerationID
+	phase                     paletteGenerationPhase
+	theme                     ports.Theme
+	expectedMarkers           int
+	awaitingLateDrainBoundary bool
 }
 
 type paletteGenerationEventKind uint8
@@ -156,8 +157,11 @@ func (c *paletteGenerationCoordinator) handle(event paletteGenerationEvent) []pa
 			return nil
 		}
 		c.current.phase = generationCollecting
-		// A late drain response may still arrive after the batch marker.
+		// A late drain response may still arrive after the batch marker. Exclude
+		// OSC reports until its boundary is consumed: otherwise stale drain-era
+		// reports could become part of this generation's definitive snapshot.
 		c.current.expectedMarkers = 2
+		c.current.awaitingLateDrainBoundary = true
 		return []paletteGenerationAction{
 			{kind: paletteActionWriteBatch, id: event.id, bytes: paletteColorBatch},
 			{kind: paletteActionArmCompletionDeadline, id: event.id, deadline: paletteGenerationDeadline},
@@ -168,17 +172,17 @@ func (c *paletteGenerationCoordinator) handle(event paletteGenerationEvent) []pa
 		}
 		return c.finalize()
 	case paletteEventForeground:
-		if c.current.phase == generationCollecting {
+		if c.current.phase == generationCollecting && !c.current.awaitingLateDrainBoundary {
 			c.current.theme.HasForeground = true
 			c.current.theme.Foreground = event.rgb
 		}
 	case paletteEventBackground:
-		if c.current.phase == generationCollecting {
+		if c.current.phase == generationCollecting && !c.current.awaitingLateDrainBoundary {
 			c.current.theme.HasBackground = true
 			c.current.theme.Background = event.rgb
 		}
 	case paletteEventPalette:
-		if c.current.phase == generationCollecting && event.slot < 16 {
+		if c.current.phase == generationCollecting && !c.current.awaitingLateDrainBoundary && event.slot < 16 {
 			c.current.theme.PaletteKnown |= uint16(1) << event.slot
 			c.current.theme.Palette[event.slot] = event.rgb
 		}
@@ -199,6 +203,9 @@ func (c *paletteGenerationCoordinator) onMarker() []paletteGenerationAction {
 	case generationCollecting:
 		if c.current.expectedMarkers == 0 {
 			c.current.expectedMarkers = 1
+		}
+		if c.current.awaitingLateDrainBoundary {
+			c.current.awaitingLateDrainBoundary = false
 		}
 		c.current.expectedMarkers--
 		if c.current.expectedMarkers == 0 {
