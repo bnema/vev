@@ -203,10 +203,11 @@ func frameRow(frame renderer.Frame, y int) string {
 
 func TestRenderUsesConfiguredStyles(t *testing.T) {
 	tests := []struct {
-		name   string
-		styles func() RenderStyles
-		x      int
-		assert func(t *testing.T, style renderer.Style)
+		name       string
+		styles     func() RenderStyles
+		x, y       int
+		unfiltered bool
+		assert     func(t *testing.T, style renderer.Style)
 	}{
 		{
 			name: "selection style for fuzzy highlights",
@@ -219,6 +220,7 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 				return styles
 			},
 			x: 0,
+			y: 1,
 			assert: func(t *testing.T, style renderer.Style) {
 				require.True(t, style.Bold)
 				require.False(t, style.Inverse)
@@ -237,7 +239,9 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 				styles.Description = muted
 				return styles
 			},
-			x: 4,
+			x:          4,
+			y:          2,
+			unfiltered: true,
 			assert: func(t *testing.T, style renderer.Style) {
 				require.True(t, style.Italic)
 				require.True(t, style.HasForegroundRGB)
@@ -250,9 +254,11 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 			styles: func() RenderStyles {
 				styles := DefaultRenderStyles()
 				styles.Description.Italic = false
+				styles.SelectionDescription.Italic = false
 				return styles
 			},
 			x: 4,
+			y: 1,
 			assert: func(t *testing.T, style renderer.Style) {
 				require.False(t, style.Italic)
 			},
@@ -261,14 +267,73 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := New(CommandResults([]command.Command{cmd("CPY", "Copy", "Enter copy mode")}))
-			m.Insert('c')
-			m.Insert('y')
+			m := New(CommandResults([]command.Command{
+				cmd("CPY", "Copy", "Enter copy mode"),
+				cmd("CNT", "New", "Create tab"),
+			}))
+			if !tt.unfiltered {
+				m.Insert('c')
+				m.Insert('y')
+			}
 			frame := m.Render(domain.Size{Cols: 28, Rows: 3}, RenderOptions{Styles: tt.styles()})
 
-			tt.assert(t, frame.At(tt.x, 1).Style)
+			tt.assert(t, frame.At(tt.x, tt.y).Style)
 		})
 	}
+}
+
+func TestPaletteDescriptionUsesSelectedRowForeground(t *testing.T) {
+	selection := renderer.DefaultStyle()
+	selection.HasForegroundRGB = true
+	selection.ForegroundRGB = renderer.RGB{R: 240, G: 241, B: 242}
+	selection.HasBackgroundRGB = true
+	selection.BackgroundRGB = renderer.RGB{R: 20, G: 21, B: 22}
+	description := renderer.DefaultStyle()
+	description.Italic = true
+	description.HasForegroundRGB = true
+	description.ForegroundRGB = renderer.RGB{R: 100, G: 101, B: 102}
+	selectionDescription := selection
+	selectionDescription.Italic = true
+	selectionDescription.ForegroundRGB = renderer.RGB{R: 220, G: 221, B: 222}
+
+	model := New(CommandResults([]command.Command{
+		cmd("ONE", "One", "first description"),
+		cmd("TWO", "Two", "second description"),
+	}))
+	frame := model.Render(domain.Size{Cols: 32, Rows: 3}, RenderOptions{Styles: RenderStyles{
+		Base: renderer.DefaultStyle(), Row: renderer.DefaultStyle(),
+		Selection: selection, Description: description, SelectionDescription: selectionDescription,
+	}})
+
+	selected := frame.At(4, 1).Style
+	require.True(t, selected.Equal(selectionDescription))
+
+	inactive := frame.At(4, 2).Style
+	require.Equal(t, description.ForegroundRGB, inactive.ForegroundRGB)
+	require.True(t, inactive.Italic)
+}
+
+func TestPaletteDescriptionWithoutSelectionStylePreservesDescriptionForeground(t *testing.T) {
+	selection := renderer.DefaultStyle()
+	selection.HasForegroundRGB = true
+	selection.ForegroundRGB = renderer.RGB{R: 240, G: 241, B: 242}
+	selection.HasBackgroundRGB = true
+	selection.BackgroundRGB = renderer.RGB{R: 20, G: 21, B: 22}
+	description := renderer.DefaultStyle()
+	description.Italic = true
+	description.HasForegroundRGB = true
+	description.ForegroundRGB = renderer.RGB{R: 100, G: 101, B: 102}
+
+	model := New(CommandResults([]command.Command{cmd("ONE", "One", "first description")}))
+	frame := model.Render(domain.Size{Cols: 32, Rows: 2}, RenderOptions{Styles: RenderStyles{
+		Base: renderer.DefaultStyle(), Row: renderer.DefaultStyle(),
+		Selection: selection, Description: description,
+	}})
+
+	selected := frame.At(4, 1).Style
+	require.Equal(t, description.ForegroundRGB, selected.ForegroundRGB)
+	require.Equal(t, selection.BackgroundRGB, selected.BackgroundRGB)
+	require.True(t, selected.Italic)
 }
 
 func TestPaletteDescriptionKeepsInactiveRowSurfaceAcrossFallbacks(t *testing.T) {
@@ -311,15 +376,19 @@ func TestPaletteDescriptionKeepsInactiveRowSurfaceAcrossFallbacks(t *testing.T) 
 			frame := model.Render(domain.Size{Cols: 32, Rows: 3}, RenderOptions{Styles: RenderStyles{
 				Base: styles.PickerBase, Row: styles.SurfaceInactive,
 				Selection: styles.PickerSelection, Description: styles.PickerDescription,
+				SelectionDescription: styles.PickerSelectionMuted,
 			}})
-			description := frame.At(4, 1).Style
-			require.Equal(t, styles.SurfaceInactive.Background, description.Background)
-			require.Equal(t, styles.SurfaceInactive.HasBackgroundRGB, description.HasBackgroundRGB)
-			require.Equal(t, styles.SurfaceInactive.BackgroundRGB, description.BackgroundRGB)
+			inactive := frame.At(4, 1).Style
+			require.Equal(t, styles.SurfaceInactive.Background, inactive.Background)
+			require.Equal(t, styles.SurfaceInactive.HasBackgroundRGB, inactive.HasBackgroundRGB)
+			require.Equal(t, styles.SurfaceInactive.BackgroundRGB, inactive.BackgroundRGB)
 			if tt.name == "indexed only" {
-				require.Equal(t, 2, description.Foreground)
-				require.False(t, description.HasBackgroundRGB)
+				require.Equal(t, 2, inactive.Foreground)
+				require.False(t, inactive.HasBackgroundRGB)
 			}
+
+			selected := frame.At(4, 2).Style
+			require.True(t, selected.Equal(styles.PickerSelectionMuted))
 		})
 	}
 }

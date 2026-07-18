@@ -73,14 +73,17 @@ func TestCaptureOverlayLayersPreservesPaletteDescriptionSurfaceAcrossFallbacks(t
 
 			captureOverlayLayers(&state, snap, domain.PaletteConfig{})
 
-			description := state.overlays.palette.inner.At(4, 1).Style
-			require.Equal(t, state.styles.SurfaceInactive.Background, description.Background)
-			require.Equal(t, state.styles.SurfaceInactive.HasBackgroundRGB, description.HasBackgroundRGB)
-			require.Equal(t, state.styles.SurfaceInactive.BackgroundRGB, description.BackgroundRGB)
+			inactive := state.overlays.palette.inner.At(4, 1).Style
+			require.Equal(t, state.styles.SurfaceInactive.Background, inactive.Background)
+			require.Equal(t, state.styles.SurfaceInactive.HasBackgroundRGB, inactive.HasBackgroundRGB)
+			require.Equal(t, state.styles.SurfaceInactive.BackgroundRGB, inactive.BackgroundRGB)
 			if tt.indexed {
-				require.Equal(t, 2, description.Foreground)
-				require.False(t, description.HasBackgroundRGB)
+				require.Equal(t, 2, inactive.Foreground)
+				require.False(t, inactive.HasBackgroundRGB)
 			}
+
+			selected := state.overlays.palette.inner.At(4, 2).Style
+			require.True(t, selected.Equal(state.styles.PickerSelectionMuted))
 		})
 	}
 }
@@ -719,6 +722,18 @@ func TestComposePaletteClientFrameUsesConfiguredPosition(t *testing.T) {
 			require.Equal(t, '┌', frame.At(tt.at.X, tt.at.Y).Rune)
 		})
 	}
+}
+
+func TestComposePaletteClientFrameUsesSelectedDescriptionTheme(t *testing.T) {
+	model := palette.New(palette.CommandResults([]command.Command{{Code: "ONE", Desc: "first description"}}))
+	size := domain.Size{Cols: 120, Rows: 40}
+	base := renderer.NewFrame(size.Cols, size.Rows)
+	styles := themeui.Resolve(themeui.BuiltinDark, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles
+
+	frame, _ := composePaletteClientFrame(model, base, domain.PaletteConfig{}, "", styles)
+	inner := paletteModalFor(size, domain.PaletteConfig{}).Inner(size)
+
+	require.True(t, frame.At(inner.X+4, inner.Y+1).Style.Equal(styles.PickerSelectionMuted))
 }
 
 func TestPaletteUTF8PendingCompletesFilter(t *testing.T) {
