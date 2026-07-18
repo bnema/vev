@@ -99,6 +99,14 @@ func TestClientTracePairsAfterPTYHangup(t *testing.T) {
 			t.Errorf("close daemon role: %v", err)
 		}
 	}()
+	// Close the client on every exit path so a failed assertion cannot leak the
+	// process. Close is idempotent (sync.Once): the explicit call below, once
+	// reached, is the one whose result is asserted; this defer is a backstop.
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client role: %v", err)
+		}
+	}()
 
 	// Wait until the client is attached with a receive pump blocked mid-frame:
 	// its trace then holds one more adapter_receive_start than end. That in-flight
@@ -112,15 +120,10 @@ func TestClientTracePairsAfterPTYHangup(t *testing.T) {
 	if err := client.pty.Close(); err != nil {
 		t.Fatalf("close client PTY master: %v", err)
 	}
-	select {
-	case <-client.waitErr:
-	case <-time.After(10 * time.Second):
-		t.Fatal("client did not exit after PTY hangup")
-	}
-	if client.output != nil {
-		if err := client.output.Close(); err != nil {
-			t.Errorf("close client terminal output: %v", err)
-		}
+	// Close runs the bounded escalation ladder; the hangup above already severed
+	// the PTY, so this should reap gracefully without reaching SIGTERM/SIGKILL.
+	if err := client.Close(); err != nil {
+		t.Fatalf("client did not exit cleanly after PTY hangup: %v", err)
 	}
 
 	// The severed client's trace must pair. On the unfixed client this fails with

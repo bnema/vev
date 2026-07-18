@@ -131,6 +131,7 @@ type cliProcess struct {
 	cleanupRuntime func() error
 	terminalReady  bool
 	readyPath      string
+	closeResult    error
 }
 
 func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProcess, error) {
@@ -634,7 +635,6 @@ func (e *ptyLocalEcho) applicationOutput(chunk []byte) []byte {
 // teardown. Every path closes the PTY exactly once and finalizes output and
 // runtime state.
 func (p *cliProcess) Close() error {
-	var result error
 	p.closed.Do(func() {
 		// 1. Drain terminal output for the whole teardown. Without an active
 		// consumer a full chunks channel stalls copyTerminal, which then stops
@@ -715,9 +715,9 @@ func (p *cliProcess) Close() error {
 		// downstream merge mystery. The graceful rungs never error on their own.
 		if killed {
 			if exited {
-				result = errors.New("public CLI process did not exit after hangup and SIGTERM; killed")
+				p.closeResult = errors.New("public CLI process did not exit after hangup and SIGTERM; killed")
 			} else {
-				result = errors.New("timed out reaping public CLI process")
+				p.closeResult = errors.New("timed out reaping public CLI process")
 			}
 		}
 
@@ -731,17 +731,17 @@ func (p *cliProcess) Close() error {
 			<-drainDone
 		}
 		if p.output != nil {
-			if err := p.output.Close(); result == nil {
-				result = err
+			if err := p.output.Close(); p.closeResult == nil {
+				p.closeResult = err
 			}
 		}
 		if p.cleanupRuntime != nil {
-			if err := p.cleanupRuntime(); result == nil {
-				result = err
+			if err := p.cleanupRuntime(); p.closeResult == nil {
+				p.closeResult = err
 			}
 		}
 	})
-	return result
+	return p.closeResult
 }
 
 // drainTerminalOutput consumes copyTerminal's chunks for the duration of a
