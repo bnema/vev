@@ -288,6 +288,7 @@ func TestAttachSchemeReplacementAndDeadlinesProgressWhileReadBlocks(t *testing.T
 	require.False(t, final.HasForeground)
 	require.False(t, final.HasBackground)
 	h.detach(t)
+	require.Len(t, h.transport.snapshots(), 4, "initial and replacement generations each publish only cleared then definitive Theme snapshots")
 }
 
 func TestAttachInitialPaletteFailureRevokesInputClaim(t *testing.T) {
