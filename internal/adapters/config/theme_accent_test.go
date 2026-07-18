@@ -146,5 +146,10 @@ func TestWatchThemeAccentInvalidReloadFallsBackToAuto(t *testing.T) {
 	}
 
 	cancel()
-	require.True(t, errors.Is(<-done, context.Canceled))
+	select {
+	case err := <-done:
+		require.True(t, errors.Is(err, context.Canceled))
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for config watcher shutdown")
+	}
 }

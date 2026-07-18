@@ -55,7 +55,10 @@ func ResolveAccent(t Theme, policy domain.ThemeAccent) Accent {
 }
 
 func resolveExplicitAccent(t Theme, slot uint8) Accent {
-	if slot >= uint8(len(t.Palette)) || t.PaletteKnown&(uint16(1)<<slot) == 0 {
+	if slot >= uint8(len(t.Palette)) {
+		return Accent{}
+	}
+	if t.PaletteKnown&(uint16(1)<<slot) == 0 {
 		// An explicit policy is a strict override. Even without OSC RGB for its
 		// slot, it may still safely decorate foregrounds and borders by index.
 		return indexedAccent(slot)

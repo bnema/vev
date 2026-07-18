@@ -159,6 +159,24 @@ func TestResolveAccentExplicitSlot(t *testing.T) {
 			want:   Accent{Slot: 5, IndexedOnly: true},
 		},
 		{
+			name:   "unknown final palette slot keeps its indexed decoration",
+			theme:  paletteTheme(map[int]renderer.RGB{2: teal, 10: teal, 4: blue}),
+			policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 15},
+			want:   Accent{Slot: 15, IndexedOnly: true},
+		},
+		{
+			name:   "first slot outside palette is rejected",
+			theme:  paletteTheme(map[int]renderer.RGB{2: teal, 10: teal, 4: blue}),
+			policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 16},
+			want:   Accent{},
+		},
+		{
+			name:   "maximum uint8 slot outside palette is rejected",
+			theme:  paletteTheme(map[int]renderer.RGB{2: teal, 10: teal, 4: blue}),
+			policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 255},
+			want:   Accent{},
+		},
+		{
 			name:   "explicit known slot is indexed only without truecolor prerequisites",
 			theme:  func() Theme { t := paletteTheme(map[int]renderer.RGB{3: teal}); t.TrueColor = false; return t }(),
 			policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 3},
