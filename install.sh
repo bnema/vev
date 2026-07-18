@@ -1,5 +1,5 @@
 #!/bin/sh
-# vev installer — Linux x86_64 and macOS arm64.
+# vev installer — Linux x86_64/arm64 and macOS arm64.
 # Usage: curl -fsSL https://raw.githubusercontent.com/bnema/vev/main/install.sh | sh
 # Env: VEV_VERSION=vX.Y.Z to pin a version (default: latest release).
 set -eu
@@ -14,9 +14,10 @@ err()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
 case "$OS/$ARCH" in
-  linux/x86_64|linux/amd64) TARBALL="vev_linux_x86_64.tar.gz" ;;
-  darwin/arm64)             TARBALL="vev_darwin_arm64.tar.gz" ;;
-  *) err "unsupported platform: $OS/$ARCH (supported: linux/x86_64, darwin/arm64)" ;;
+  linux/x86_64|linux/amd64)  TARBALL="vev_linux_x86_64.tar.gz" ;;
+  linux/aarch64|linux/arm64) TARBALL="vev_linux_arm64.tar.gz" ;;
+  darwin/arm64)              TARBALL="vev_darwin_arm64.tar.gz" ;;
+  *) err "unsupported platform: $OS/$ARCH (supported: linux/x86_64, linux/arm64, darwin/arm64)" ;;
 esac
 
 # --- Pick install dir ------------------------------------------------------

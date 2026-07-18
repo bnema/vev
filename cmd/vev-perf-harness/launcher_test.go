@@ -18,6 +18,56 @@ import (
 	"github.com/bnema/vev/pkg/safedir"
 )
 
+type discardTerminalOutput struct{}
+
+func (discardTerminalOutput) Write(p []byte) (int, error) { return len(p), nil }
+func (discardTerminalOutput) Sync() error                 { return nil }
+func (discardTerminalOutput) Close() error                { return nil }
+
+func TestCLIProcessCloseDrainsQueuedTerminalOutputBeforeClientExit(t *testing.T) {
+	harnessPTY, clientPTY := net.Pipe()
+	t.Cleanup(func() { _ = clientPTY.Close() })
+	waitErr := make(chan error)
+	secondRead := make(chan struct{})
+	p := &cliProcess{
+		pty:         harnessPTY,
+		output:      discardTerminalOutput{},
+		chunks:      make(chan []byte, 1),
+		done:        make(chan struct{}),
+		waitErr:     waitErr,
+		waitTimeout: func() <-chan time.Time { return time.After(time.Second) },
+	}
+	go p.copyTerminal()
+	go func() {
+		_, _ = clientPTY.Write([]byte("first"))
+		_, _ = clientPTY.Write([]byte("second"))
+		close(secondRead)
+		buf := make([]byte, len("exit\n"))
+		if _, err := clientPTY.Read(buf); err != nil {
+			return
+		}
+		if _, err := clientPTY.Write([]byte("third")); err != nil {
+			return
+		}
+		waitErr <- nil
+	}()
+	select {
+	case <-secondRead:
+	case <-time.After(time.Second):
+		t.Fatal("terminal reader did not queue output")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- p.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not drain queued terminal output before waiting for client exit")
+	}
+}
+
 func TestCLIProcessCloseKeepsTerminalDrainActiveUntilClientExit(t *testing.T) {
 	pty, err := os.CreateTemp(t.TempDir(), "pty")
 	if err != nil {

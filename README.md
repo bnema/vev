@@ -7,7 +7,7 @@ A terminal multiplexer for Linux and macOS on Apple silicon (arm64). One Go bina
 > [!WARNING]
 > Alpha software. Expect breaking changes.
 
-CI covers Ubuntu and macOS arm64. The release installer supports Linux x86_64 and macOS arm64.
+Pre-built releases are available for Linux x86_64, Linux arm64, and macOS on Apple silicon (arm64). CI tests on Ubuntu x86_64 and macOS arm64; it also verifies cross-compilation for Linux arm64 and macOS arm64. Linux arm64 is not tested on native ARM hardware.
 
 What it is built around:
 
@@ -18,11 +18,19 @@ What it is built around:
 
 ## Install
 
+Install a pre-built release on Linux x86_64/arm64 or macOS Apple silicon (arm64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bnema/vev/main/install.sh | sh
+```
+
+Alternatively, build and install the binary with Go:
+
 ```sh
 go install github.com/bnema/vev@latest
 ```
 
-The default UI runs entirely from the `vev` binary. Optional external bar anchors can be configured in `~/.config/vev/config`.
+The default UI runs entirely from the `vev` binary. The pre-built installer also installs optional external bar anchors, which only take effect when configured in `~/.config/vev/config`.
 
 ## Usage
 
