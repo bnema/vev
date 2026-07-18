@@ -178,6 +178,75 @@ func TestComposeCapturedFloatingFrameDoesNotMutateSourceAndDamagesTitle(t *testi
 	require.Equal(t, 1, damage[0].Height)
 }
 
+func TestComposeCapturedFloatingFrameUsesSemanticBorderWithoutTintingPaneCells(t *testing.T) {
+	base := renderer.NewFrame(20, 9)
+	content := domain.Rect{Y: 1, Width: 20, Height: 7}
+	geometry := floatingGeometry{
+		Bounds: domain.Rect{X: 3, Y: 1, Width: 8, Height: 5},
+		Inner:  domain.Rect{X: 4, Y: 2, Width: 6, Height: 3},
+	}
+	active := renderer.Style{Foreground: 2, Background: 3}
+	muted := renderer.Style{Foreground: 4, Background: 5}
+	pane := renderer.NewFrame(6, 3)
+	for y := range pane.Height {
+		for x := range pane.Width {
+			pane.Set(x, y, renderer.Cell{Rune: rune('a' + y*pane.Width + x), Style: renderer.Style{Foreground: x + y*10, Background: x + y*10 + 1}})
+		}
+	}
+
+	frame, _ := composeCapturedFloatingFrame(floatingComposeInput{
+		baseFrame: base,
+		floating: capturedFloatingRenderState{
+			visible: true, focused: true, pane: capturedPaneRenderState{frame: pane}, geometry: geometry, title: "float", generation: 1,
+		},
+		content: content,
+		styles:  themeui.Styles{BorderActive: active, BorderMuted: muted},
+		full:    true,
+	})
+	bounds := geometry.translate(content.X, content.Y)
+	require.Equal(t, active, frame.At(bounds.Bounds.X, bounds.Bounds.Y).Style, "focused floating border must use BorderActive")
+	require.NotEqual(t, muted, frame.At(bounds.Bounds.X, bounds.Bounds.Y).Style)
+	for y := range bounds.Inner.Height {
+		for x := range bounds.Inner.Width {
+			require.Equal(t, pane.At(x, y), frame.At(bounds.Inner.X+x, bounds.Inner.Y+y), "pane cell (%d,%d) must remain byte-identical", x, y)
+		}
+	}
+}
+
+func TestComposeCapturedFloatingFrameUsesMutedBorderWhenUnfocused(t *testing.T) {
+	base := renderer.NewFrame(12, 7)
+	content := domain.Rect{Y: 1, Width: 12, Height: 5}
+	geometry := floatingGeometry{Bounds: domain.Rect{X: 2, Y: 1, Width: 6, Height: 3}, Inner: domain.Rect{X: 3, Y: 2, Width: 4, Height: 1}}
+	active, muted := renderer.Style{Foreground: 2}, renderer.Style{Foreground: 4}
+
+	frame, _ := composeCapturedFloatingFrame(floatingComposeInput{
+		baseFrame: base,
+		floating:  capturedFloatingRenderState{visible: true, pane: capturedPaneRenderState{frame: renderer.NewFrame(4, 1)}, geometry: geometry, title: "float", generation: 1},
+		content:   content,
+		styles:    themeui.Styles{BorderActive: active, BorderMuted: muted},
+		full:      true,
+	})
+	bounds := geometry.translate(content.X, content.Y)
+	require.Equal(t, muted, frame.At(bounds.Bounds.X, bounds.Bounds.Y).Style)
+}
+
+func TestComposeCapturedFloatingFrameFocusChangeInvalidatesCache(t *testing.T) {
+	content := domain.Rect{Y: 1, Width: 12, Height: 5}
+	geometry := floatingGeometry{Bounds: domain.Rect{X: 2, Y: 1, Width: 6, Height: 3}, Inner: domain.Rect{X: 3, Y: 2, Width: 4, Height: 1}}
+	frame, damage := composeCapturedFloatingFrame(floatingComposeInput{
+		baseFrame: renderer.NewFrame(12, 7),
+		floating: capturedFloatingRenderState{
+			visible: true, focused: true, pane: capturedPaneRenderState{frame: renderer.NewFrame(4, 1)}, geometry: geometry, generation: 1,
+		},
+		content: content,
+		cache: composeCacheInput{
+			valid: true, floatingGeneration: 1, floatingGeometry: geometry.translate(content.X, content.Y),
+		},
+	})
+	require.NotNil(t, frame)
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage, "a focused border role change must redraw the popup")
+}
+
 func TestComposeCapturedFloatingFrameGeometryChangesInvalidateCache(t *testing.T) {
 	initial := floatingGeometry{
 		Bounds: domain.Rect{X: 4, Y: 2, Width: 8, Height: 5},

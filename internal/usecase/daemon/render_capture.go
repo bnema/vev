@@ -76,6 +76,7 @@ type capturedPaneRenderState struct {
 
 type capturedFloatingRenderState struct {
 	visible         bool
+	focused         bool
 	pane            capturedPaneRenderState
 	geometry        floatingGeometry
 	title           string
@@ -285,7 +286,9 @@ func capturePrimaryRenderState(
 			state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
 		}
 		ac.captureFrames[p] = captured
-		state.floating = capturedFloatingRenderState{visible: true, pane: captured, geometry: geometry, title: captured.title, generation: tb.floating.generation, titleGeneration: captured.titleGeneration}
+		// A visible floating pane is the terminal input target, so its structural
+		// border carries the focused semantic role independently of its content.
+		state.floating = capturedFloatingRenderState{visible: true, focused: true, pane: captured, geometry: geometry, title: captured.title, generation: tb.floating.generation, titleGeneration: captured.titleGeneration}
 		state.cursor = captureCursorInputsLocked(p, geometry.Inner, overlays)
 		p.mu.Unlock()
 	}

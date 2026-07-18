@@ -117,9 +117,13 @@ func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, [
 	for _, d := range floating.pane.damage {
 		damage = append(damage, translatePaneDamage(d, geometry.Inner, content)...)
 	}
-	popupChanged := !cache.valid || cache.floatingGeneration != floating.generation || cache.floatingGeometry != geometry
+	popupChanged := !cache.valid || cache.floatingGeneration != floating.generation || cache.floatingGeometry != geometry || cache.floatingFocused != floating.focused
 	titleChanged := popupChanged || cache.floatingTitleGeneration != floating.titleGeneration
-	drawFloatingBorder(frame, geometry.Bounds, floating.title, styles.BorderMuted)
+	border := styles.BorderMuted
+	if floating.focused {
+		border = styles.BorderActive
+	}
+	drawFloatingBorder(frame, geometry.Bounds, floating.title, border)
 	if full || popupChanged {
 		return frame, []renderer.Damage{renderer.FullRedraw()}
 	}
