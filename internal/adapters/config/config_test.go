@@ -7,12 +7,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/stretchr/testify/require"
 )
 
@@ -587,7 +586,7 @@ func TestWatchReloadsChangedFileWithFakeClock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	clk := newFakeClock(time.Unix(0, 0))
+	clk := newWatchClockMock(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -598,16 +597,16 @@ func TestWatchReloadsChangedFileWithFakeClock(t *testing.T) {
 	changes := make(chan change, 2)
 	done := make(chan error, 1)
 	go func() {
-		done <- Watch(ctx, clk, path, func(cfg domain.Config, warnings []domain.Warning) {
+		done <- Watch(ctx, clk.clock, path, func(cfg domain.Config, warnings []domain.Warning) {
 			changes <- change{cfg: cfg, warnings: warnings}
 		})
 	}()
 
-	clk.waitForTimers(t, 1)
+	clk.waitForTimer()
 	if err := os.WriteFile(path, []byte("theme = light\nbad line\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	clk.advance(2 * time.Second)
+	clk.fire()
 
 	var got change
 	select {
@@ -636,7 +635,7 @@ func TestWatchUsesDefaultsWhenReloadLoadFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	clk := newFakeClock(time.Unix(0, 0))
+	clk := newWatchClockMock(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -647,17 +646,17 @@ func TestWatchUsesDefaultsWhenReloadLoadFails(t *testing.T) {
 	changes := make(chan change, 2)
 	done := make(chan error, 1)
 	go func() {
-		done <- Watch(ctx, clk, path, func(cfg domain.Config, warnings []domain.Warning) {
+		done <- Watch(ctx, clk.clock, path, func(cfg domain.Config, warnings []domain.Warning) {
 			changes <- change{cfg: cfg, warnings: warnings}
 		})
 	}()
 
-	clk.waitForTimers(t, 1)
+	clk.waitForTimer()
 	tooLong := strings.Repeat("x", 70*1024)
 	if err := os.WriteFile(path, []byte(tooLong), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	clk.advance(2 * time.Second)
+	clk.fire()
 
 	got := <-changes
 	require.Equal(t, domain.Defaults(), got.cfg)
@@ -673,23 +672,23 @@ func TestWatchDoesNotRepeatPersistentStatError(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), strings.Repeat("x", 5000))
-	clk := newFakeClock(time.Unix(0, 0))
+	clk := newWatchClockMock(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	changes := make(chan []domain.Warning, 4)
 	done := make(chan error, 1)
 	go func() {
-		done <- Watch(ctx, clk, path, func(_ domain.Config, warnings []domain.Warning) {
+		done <- Watch(ctx, clk.clock, path, func(_ domain.Config, warnings []domain.Warning) {
 			changes <- warnings
 		})
 	}()
 
 	first := <-changes
 	require.Len(t, first, 1)
-	clk.waitForTimers(t, 1)
-	clk.advance(2 * time.Second)
-	clk.advance(2 * time.Second)
+	clk.waitForTimer()
+	clk.fire()
+	clk.fire()
 
 	select {
 	case extra := <-changes:
@@ -703,96 +702,55 @@ func TestWatchDoesNotRepeatPersistentStatError(t *testing.T) {
 	}
 }
 
-var _ ports.Clock = (*fakeClock)(nil)
-var _ ports.Timer = (*fakeTimer)(nil)
-
-type fakeClock struct {
-	mu     sync.Mutex
-	now    time.Time
-	timers []*fakeTimer
-	notify chan struct{}
+type watchClockMock struct {
+	t      *testing.T
+	clock  *portsmocks.MockClock
+	ticks  chan time.Time
+	ready  chan struct{}
+	resets chan struct{}
 }
 
-func newFakeClock(now time.Time) *fakeClock {
-	return &fakeClock{now: now, notify: make(chan struct{}, 16)}
-}
-
-func (c *fakeClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *fakeClock) NewTimer(d time.Duration) ports.Timer {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	t := &fakeTimer{clock: c, ch: make(chan time.Time, 1), next: c.now.Add(d), active: true}
-	c.timers = append(c.timers, t)
-	c.notify <- struct{}{}
-	return t
-}
-
-func (c *fakeClock) waitForTimers(t *testing.T, n int) {
+func newWatchClockMock(t *testing.T) *watchClockMock {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
-	for c.timerCount() < n {
-		select {
-		case <-c.notify:
-		case <-deadline:
-			t.Fatalf("timed out waiting for %d timers, got %d", n, c.timerCount())
-		}
+	timer := portsmocks.NewMockTimer(t)
+	clock := portsmocks.NewMockClock(t)
+	m := &watchClockMock{
+		t:      t,
+		clock:  clock,
+		ticks:  make(chan time.Time),
+		ready:  make(chan struct{}),
+		resets: make(chan struct{}),
+	}
+	timer.EXPECT().C().Return(m.ticks)
+	timer.EXPECT().Reset(pollInterval).Run(func(time.Duration) {
+		m.resets <- struct{}{}
+	}).Return(false)
+	timer.EXPECT().Stop().Return(true)
+	clock.EXPECT().NewTimer(pollInterval).Run(func(time.Duration) {
+		close(m.ready)
+	}).Return(timer).Once()
+	return m
+}
+
+func (m *watchClockMock) waitForTimer() {
+	m.t.Helper()
+	select {
+	case <-m.ready:
+	case <-time.After(time.Second):
+		m.t.Fatal("timed out waiting for watcher timer creation")
 	}
 }
 
-func (c *fakeClock) timerCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.timers)
-}
-
-func (c *fakeClock) advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.now = c.now.Add(d)
-	for _, timer := range c.timers {
-		timer.mu.Lock()
-		if timer.active && !timer.next.After(c.now) {
-			timer.ch <- c.now
-			timer.active = false
-		}
-		timer.mu.Unlock()
+func (m *watchClockMock) fire() {
+	m.t.Helper()
+	select {
+	case m.ticks <- time.Now():
+	case <-time.After(time.Second):
+		m.t.Fatal("timed out firing watcher timer")
 	}
-}
-
-type fakeTimer struct {
-	clock  *fakeClock
-	mu     sync.Mutex
-	ch     chan time.Time
-	next   time.Time
-	active bool
-}
-
-func (t *fakeTimer) C() <-chan time.Time { return t.ch }
-
-func (t *fakeTimer) Reset(d time.Duration) bool {
-	t.clock.mu.Lock()
-	defer t.clock.mu.Unlock()
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	wasActive := t.active
-	t.active = true
-	t.next = t.clock.now.Add(d)
-	return wasActive
-}
-
-func (t *fakeTimer) Stop() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	wasActive := t.active
-	t.active = false
-	return wasActive
+	select {
+	case <-m.resets:
+	case <-time.After(time.Second):
+		m.t.Fatal("timed out waiting for watcher timer reset")
+	}
 }

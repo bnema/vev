@@ -118,7 +118,7 @@ func TestWatchThemeAccentInvalidReloadFallsBackToAuto(t *testing.T) {
 	require.Empty(t, warnings)
 	require.Equal(t, domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2}, initial.ThemeAccent)
 
-	clk := newFakeClock(time.Unix(0, 0))
+	clk := newWatchClockMock(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	type change struct {
@@ -128,14 +128,14 @@ func TestWatchThemeAccentInvalidReloadFallsBackToAuto(t *testing.T) {
 	changes := make(chan change, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- Watch(ctx, clk, path, func(cfg domain.Config, warnings []domain.Warning) {
+		done <- Watch(ctx, clk.clock, path, func(cfg domain.Config, warnings []domain.Warning) {
 			changes <- change{cfg: cfg, warnings: warnings}
 		})
 	}()
 
-	clk.waitForTimers(t, 1)
+	clk.waitForTimer()
 	require.NoError(t, os.WriteFile(path, []byte("theme.accent = invalid\n"), 0o600))
-	clk.advance(2 * time.Second)
+	clk.fire()
 
 	select {
 	case got := <-changes:
