@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -48,6 +49,70 @@ func (r *lifecycleReader) maxActive() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.max
+}
+
+type lateStopReader struct {
+	started chan struct{}
+	release chan terminalReadResult
+	reads   atomic.Int32
+}
+
+func newLateStopReader() *lateStopReader {
+	return &lateStopReader{
+		started: make(chan struct{}, 2),
+		release: make(chan terminalReadResult, 1),
+	}
+}
+
+func (r *lateStopReader) Read(p []byte) (int, error) {
+	r.reads.Add(1)
+	r.started <- struct{}{}
+	result := <-r.release
+	return copy(p, result.data), result.err
+}
+
+func TestTerminalInputPumpStopDropsLateReadWithoutStartingAnother(t *testing.T) {
+	reader := newLateStopReader()
+	input := newTerminalInputPump(reader)
+	input.start()
+	<-reader.started // The sole lifecycle read is blocked in the caller-owned reader.
+
+	input.stop()
+	reader.release <- terminalReadResult{data: []byte("late")}
+
+	// The late read must be discarded rather than published. Both possible
+	// outcomes are channel-synchronized: a correct pump exits; the historical
+	// race published and immediately issued a second Read.
+	select {
+	case <-input.exited:
+	case <-reader.started:
+		require.Fail(t, "pump issued another Read after stop")
+	}
+	require.Equal(t, int32(1), reader.reads.Load())
+
+	consumer := input.claim()
+	_, ok := input.take(context.Background(), consumer)
+	require.False(t, ok, "late read must not be available after stop")
+	input.revoke(consumer)
+	input.stop() // stop is deliberately idempotent.
+}
+
+func TestRunnerReusesBlockedTerminalInputPumpAcrossRuns(t *testing.T) {
+	reader := newLateStopReader()
+	runner := &Runner{term: &attachPaletteTerminalHarness{
+		in: reader, out: newAttachPaletteWriter(), resize: make(chan domain.Size),
+	}}
+
+	first := runner.terminalInput()
+	<-reader.started
+	first.suspend()
+	second := runner.terminalInput()
+	require.Same(t, first, second, "a later Run must reuse a blocked caller-owned reader")
+	require.Equal(t, int32(1), reader.reads.Load())
+
+	first.stop()
+	reader.release <- terminalReadResult{}
+	<-first.exited
 }
 
 func TestTerminalInputPumpCancellationHandoffPreservesQueuedBytes(t *testing.T) {

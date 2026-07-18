@@ -167,6 +167,9 @@ type Runner struct {
 	clipboard       ports.ClipboardReader
 	logger          *slog.Logger
 	runtimeObserver ports.SerializedRuntimeObserver
+
+	inputMu sync.Mutex
+	input   *terminalInputPump
 }
 
 // NewRunner constructs a client runner. A nil logger uses the process default.
@@ -183,6 +186,21 @@ func NewRunner(deps Dependencies) *Runner {
 		logger:          log,
 		runtimeObserver: deps.RuntimeObserver,
 	}
+}
+
+// terminalInput returns the Runner-owned sole reader. It survives sequential
+// Run calls because a caller-owned reader may remain blocked after an attach
+// exits and therefore cannot safely be replaced by another reader.
+func (r *Runner) terminalInput() *terminalInputPump {
+	r.inputMu.Lock()
+	defer r.inputMu.Unlock()
+
+	if r.input == nil || r.input.hasExited() || r.input.isClosed() {
+		r.input = newTerminalInputPump(r.term.In())
+		r.input.start()
+	}
+	r.input.resume()
+	return r.input
 }
 
 // Run connects and runs the attach client. It owns the terminal lifecycle
@@ -233,7 +251,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	var input *terminalInputPump
 	defer func() {
 		if input != nil {
-			input.stop()
+			input.suspend()
 		}
 	}()
 	originalEnterRaw := enterRaw
@@ -242,8 +260,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			return err
 		}
 		if input == nil {
-			input = newTerminalInputPump(r.term.In())
-			input.start()
+			input = r.terminalInput()
 		}
 		return nil
 	}
@@ -956,9 +973,9 @@ type terminalReadResult struct {
 
 // terminalInputPump is the sole consumer of the caller-owned terminal reader.
 // It is started once after raw mode is entered and is reused by each attach
-// scanner. A bare io.Reader cannot be interrupted, so one final Read may stay
-// blocked after Run exits; stop drops its result and never closes caller-owned
-// stdin. Reconnects never add another reader.
+// scanner. A bare io.Reader cannot be interrupted, so a Read may stay blocked
+// after Run exits; suspend drops any result received while inactive and never
+// closes caller-owned stdin. Reconnects and later runs never add another reader.
 type terminalInputPump struct {
 	in   io.Reader
 	done chan struct{}
@@ -969,8 +986,11 @@ type terminalInputPump struct {
 	delivering uint64
 	nextID     uint64
 	closed     bool
+	active     bool
 	ready      chan struct{}
 	space      chan struct{}
+	state      chan struct{}
+	exited     chan struct{}
 	startMu    sync.Once
 	stopMu     sync.Once
 }
@@ -979,10 +999,13 @@ func newTerminalInputPump(in io.Reader) *terminalInputPump {
 	space := make(chan struct{}, 1)
 	space <- struct{}{}
 	return &terminalInputPump{
-		in:    in,
-		done:  make(chan struct{}),
-		ready: make(chan struct{}, 1),
-		space: space,
+		in:     in,
+		done:   make(chan struct{}),
+		active: true,
+		ready:  make(chan struct{}, 1),
+		space:  space,
+		state:  make(chan struct{}, 1),
+		exited: make(chan struct{}),
 	}
 }
 
@@ -1031,7 +1054,7 @@ func (p *terminalInputPump) enqueue(result terminalReadResult) bool {
 	case <-p.space:
 	}
 	p.mu.Lock()
-	if p.closed {
+	if p.closed || !p.active {
 		p.mu.Unlock()
 		p.space <- struct{}{}
 		return false
@@ -1080,20 +1103,54 @@ func (p *terminalInputPump) finish() {
 	p.closed = true
 	p.mu.Unlock()
 	p.signalReady()
+	p.signalState()
+}
+
+func (p *terminalInputPump) signalState() {
+	select {
+	case p.state <- struct{}{}:
+	default:
+	}
+}
+
+func (p *terminalInputPump) waitForActive() bool {
+	for {
+		p.mu.Lock()
+		active, closed := p.active, p.closed
+		p.mu.Unlock()
+		if closed {
+			return false
+		}
+		if active {
+			return true
+		}
+		select {
+		case <-p.done:
+			return false
+		case <-p.state:
+		}
+	}
 }
 
 func (p *terminalInputPump) start() {
 	p.startMu.Do(func() {
 		go func() {
+			defer close(p.exited)
 			buf := make([]byte, stdinBufSize)
 			for {
+				if !p.waitForActive() {
+					return
+				}
 				n, err := p.in.Read(buf)
 				result := terminalReadResult{err: err}
 				if n > 0 {
 					result.data = append([]byte(nil), buf[:n]...)
 				}
 				if !p.enqueue(result) {
-					return
+					if p.isClosed() {
+						return
+					}
+					continue
 				}
 				if err != nil {
 					p.finish()
@@ -1104,8 +1161,62 @@ func (p *terminalInputPump) start() {
 	})
 }
 
+func (p *terminalInputPump) hasExited() bool {
+	select {
+	case <-p.exited:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *terminalInputPump) isClosed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closed
+}
+
+// suspend drops input completed after an attach ends and parks the lifecycle
+// reader before its next Read. A later Run resumes this same reader, avoiding
+// both input replay between runs and a competing read on caller-owned stdin.
+func (p *terminalInputPump) suspend() {
+	p.mu.Lock()
+	p.active = false
+	discarded := p.pending != nil
+	p.pending = nil
+	p.delivering = 0
+	p.mu.Unlock()
+	if discarded {
+		select {
+		case p.space <- struct{}{}:
+		default:
+		}
+	}
+	p.signalState()
+	p.signalReady()
+}
+
+func (p *terminalInputPump) resume() {
+	p.mu.Lock()
+	if !p.closed {
+		p.active = true
+	}
+	p.mu.Unlock()
+	p.signalState()
+}
+
 func (p *terminalInputPump) stop() {
-	p.stopMu.Do(func() { close(p.done) })
+	p.stopMu.Do(func() {
+		// Mark closure while holding the same mutex that publishes a completed
+		// Read. A Read which returns after stop therefore cannot publish even
+		// when both done and space are selectable in enqueue.
+		p.mu.Lock()
+		p.closed = true
+		p.mu.Unlock()
+		close(p.done)
+		p.signalReady()
+		p.signalState()
+	})
 }
 
 // stdinPump parses terminal color reports into generation-tagged events while
