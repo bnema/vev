@@ -1,4 +1,4 @@
-.PHONY: install test lint mocks
+.PHONY: install test test-installer lint mocks
 
 install:
 	go install .
@@ -9,6 +9,9 @@ install:
 
 test:
 	go test ./... -race
+
+test-installer:
+	sh scripts/install_platform_test.sh
 
 lint:
 	@test -z "$$(goimports -l .)"
