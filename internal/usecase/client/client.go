@@ -910,11 +910,11 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.T
 // cancels the loop.
 //
 // Known MVP limitation: a bare io.Reader cannot be unblocked from outside,
-// so on shutdown initiated elsewhere (daemon detach, transport loss) this
-// goroutine stays parked in Read until the next byte arrives or the process
-// exits. That is harmless here — Run has already returned and restored the
-// terminal — and matches the standard pattern for stdin pumps; a
-// closable stdin duplicate could lift it later if ever needed.
+// so on shutdown initiated elsewhere (daemon detach, transport loss) the
+// reader goroutine stays parked in Read until the next byte arrives or the
+// process exits. That is harmless here — Run has already returned and
+// restored the terminal — and matches the standard pattern for stdin pumps;
+// a closable stdin duplicate could lift it later if ever needed.
 // stdinPump parses terminal color reports into generation-tagged events while
 // preserving all ordinary terminal input byte-for-byte. It never publishes a
 // Theme and never writes terminal output; attachAttempt owns both operations.
@@ -978,41 +978,116 @@ func (p *stdinPump) run() {
 		}
 		sink = ci.Scan
 	}
-	for {
-		n, rerr := p.in.Read(buf)
-		// All scanner callbacks from this Read must retain this one generation.
-		// A scheme notification can start its replacement before a later byte in
-		// the same read is scanned; reloading there would misclassify an old
-		// completion marker as the replacement's drain response.
-		readGeneration := paletteGenerationID(p.activeGeneration.Load())
-		if n > 0 {
-			scanner.Scan(buf[:n], func(kind int, rgb renderer.RGB) {
-				kindEvent := paletteEventForeground
-				if kind == 11 {
-					kindEvent = paletteEventBackground
-				}
-				sendEvent(paletteGenerationEvent{id: readGeneration, kind: kindEvent, rgb: rgb})
-			}, func(slot int, rgb renderer.RGB) {
-				sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventPalette, slot: uint8(slot), rgb: rgb})
-			}, func(light bool) {
-				sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventScheme, light: light})
-			}, func(data []byte) {
-				markers.scan(data, sink, func() {
-					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventMarker})
-				})
-			})
-			if !sendOK.Load() {
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	reads := make(chan readResult, 1)
+	go func() {
+		defer close(reads)
+		for {
+			n, err := p.in.Read(buf)
+			result := readResult{err: err}
+			if n > 0 {
+				result.data = append([]byte(nil), buf[:n]...)
+			}
+			select {
+			case reads <- result:
+			case <-p.ctx.Done():
+				return
+			}
+			if err != nil {
 				return
 			}
 		}
-		if rerr != nil {
-			markers.flush(sink)
-			select {
-			case p.out <- ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})}:
-			case <-p.ctx.Done():
-			}
-			p.cancel()
+	}()
+
+	var markerTimer ports.Timer
+	var markerTimerC <-chan time.Time
+	flushMarkerPrefix := func() {
+		markers.flush(sink)
+		markerTimer = nil
+		markerTimerC = nil
+	}
+	// Disarm before processing a subsequent read. A deadline already ready at
+	// that boundary wins, so bytes cannot be retroactively consumed as a
+	// marker after they were due to be forwarded as ordinary input.
+	disarmMarkerDeadline := func() {
+		if markerTimer == nil {
 			return
+		}
+		select {
+		case <-markerTimerC:
+			flushMarkerPrefix()
+			return
+		default:
+		}
+		if !markerTimer.Stop() {
+			// Stop reports false only after expiry or a prior stop. This timer is
+			// owned only here, so expiry wins even if delivery to C races this
+			// select; do not let a late value consume a newly arrived suffix.
+			flushMarkerPrefix()
+			return
+		}
+		markerTimer = nil
+		markerTimerC = nil
+	}
+	armMarkerDeadline := func() {
+		disarmMarkerDeadline()
+		markerTimer = p.clock.NewTimer(paletteMarkerAmbiguityDeadline)
+		markerTimerC = markerTimer.C()
+	}
+	defer disarmMarkerDeadline()
+
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-markerTimerC:
+			flushMarkerPrefix()
+		case result, ok := <-reads:
+			if !ok {
+				return
+			}
+			disarmMarkerDeadline()
+			// All scanner callbacks from this Read must retain this one generation.
+			// A scheme notification can start its replacement before a later byte in
+			// the same read is scanned; reloading there would misclassify an old
+			// completion marker as the replacement's drain response.
+			readGeneration := paletteGenerationID(p.activeGeneration.Load())
+			if len(result.data) > 0 {
+				scanner.Scan(result.data, func(kind int, rgb renderer.RGB) {
+					kindEvent := paletteEventForeground
+					if kind == 11 {
+						kindEvent = paletteEventBackground
+					}
+					sendEvent(paletteGenerationEvent{id: readGeneration, kind: kindEvent, rgb: rgb})
+				}, func(slot int, rgb renderer.RGB) {
+					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventPalette, slot: uint8(slot), rgb: rgb})
+				}, func(light bool) {
+					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventScheme, light: light})
+				}, func(data []byte) {
+					markers.scan(data, sink, func() {
+						sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventMarker})
+					})
+				})
+				if !sendOK.Load() {
+					return
+				}
+			}
+			if markers.hasPendingPrefix() {
+				armMarkerDeadline()
+			}
+			if result.err != nil {
+				disarmMarkerDeadline()
+				markers.flush(sink)
+				select {
+				case p.out <- ports.Frame{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})}:
+				case <-p.ctx.Done():
+				}
+				p.cancel()
+				return
+			}
 		}
 	}
 }

@@ -19,6 +19,11 @@ const paletteColorBatch = "\x1b]10;?\x07\x1b]11;?\x07" +
 // user-facing timeout. Timer ownership belongs to the attach loop.
 const paletteGenerationDeadline = 200 * time.Millisecond
 
+// paletteMarkerAmbiguityDeadline bounds how long an Escape byte may remain
+// withheld while it could still become a DECRQM completion response. Match
+// the existing local input-prefix bound so a keypress remains prompt.
+const paletteMarkerAmbiguityDeadline = pasteFlushDelay
+
 type paletteGenerationID uint64
 
 type paletteGenerationPhase uint8
@@ -302,3 +307,5 @@ func (s *paletteMarkerScanner) flush(onBytes func([]byte)) {
 	onBytes(s.pending)
 	s.pending = nil
 }
+
+func (s *paletteMarkerScanner) hasPendingPrefix() bool { return len(s.pending) != 0 }

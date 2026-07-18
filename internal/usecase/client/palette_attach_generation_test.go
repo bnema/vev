@@ -22,7 +22,11 @@ import (
 // Tests fire only the deadline they intend to exercise; no wall clock is used.
 type attachPaletteClock struct{ timers chan *attachPaletteTimer }
 
-type attachPaletteTimer struct{ ch chan time.Time }
+type attachPaletteTimer struct {
+	ch       chan time.Time
+	stopped  chan struct{}
+	stopOnce sync.Once
+}
 
 func newAttachPaletteClock() *attachPaletteClock {
 	return &attachPaletteClock{timers: make(chan *attachPaletteTimer, 16)}
@@ -30,14 +34,17 @@ func newAttachPaletteClock() *attachPaletteClock {
 
 func (*attachPaletteClock) Now() time.Time { return time.Time{} }
 func (c *attachPaletteClock) NewTimer(time.Duration) ports.Timer {
-	timer := &attachPaletteTimer{ch: make(chan time.Time, 1)}
+	timer := &attachPaletteTimer{ch: make(chan time.Time, 1), stopped: make(chan struct{})}
 	c.timers <- timer
 	return timer
 }
 func (t *attachPaletteTimer) C() <-chan time.Time    { return t.ch }
 func (*attachPaletteTimer) Reset(time.Duration) bool { return false }
-func (*attachPaletteTimer) Stop() bool               { return true }
-func (t *attachPaletteTimer) fire()                  { t.ch <- time.Time{} }
+func (t *attachPaletteTimer) Stop() bool {
+	t.stopOnce.Do(func() { close(t.stopped) })
+	return true
+}
+func (t *attachPaletteTimer) fire() { t.ch <- time.Time{} }
 
 type attachPaletteReader struct{ chunks chan []byte }
 
@@ -367,6 +374,46 @@ func TestAttachLateDrainCannotFinalizeReplacementEarly(t *testing.T) {
 	// The marker finalization cancels, rather than fires, the independently
 	// armed completion deadline.
 	_ = completionDeadline
+	h.detach(t)
+}
+
+func TestAttachForwardsStandaloneEscapeAfterAmbiguityDeadline(t *testing.T) {
+	t.Setenv("COLORTERM", "truecolor")
+	h := startAttachPaletteHarness(&terminalThemeState{})
+	require.Equal(t, paletteColorBatch, h.nextWrite(t))
+	_ = h.nextTimer(t) // initial palette completion deadline
+	_ = h.nextTheme(t) // initial cleared publication
+
+	// A bare Escape is ambiguous with the prefix of the DECRQM completion
+	// response. It must not require another Read or EOF before reaching the
+	// daemon.
+	h.reader.send("\x1b")
+	h.nextTimer(t).fire() // DECRQM ambiguity deadline
+	h.nextTimer(t).fire() // bracketed-paste ambiguity deadline
+	input := <-h.transport.inputCh
+	require.Equal(t, []byte("\x1b"), input.Data)
+	h.detach(t)
+}
+
+func TestAttachConsumesSplitMarkerAndCancelsAmbiguityDeadline(t *testing.T) {
+	t.Setenv("COLORTERM", "truecolor")
+	h := startAttachPaletteHarness(&terminalThemeState{})
+	require.Equal(t, paletteColorBatch, h.nextWrite(t))
+	_ = h.nextTimer(t) // initial palette completion deadline
+	_ = h.nextTheme(t) // initial cleared publication
+
+	h.reader.send("before\x1b[?2031;")
+	markerDeadline := h.nextTimer(t)
+	h.reader.send("1$yafter")
+
+	final := h.nextTheme(t)
+	require.False(t, final.HasForeground)
+	var got []byte
+	for len(got) < len("beforeafter") {
+		got = append(got, (<-h.transport.inputCh).Data...)
+	}
+	require.Equal(t, []byte("beforeafter"), got)
+	<-markerDeadline.stopped
 	h.detach(t)
 }
 
