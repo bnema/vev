@@ -92,6 +92,7 @@ type floatingComposeInput struct {
 	content    domain.Rect
 	layout     capturedTabLayout
 	theme      themeui.Theme
+	styles     themeui.Styles
 	cache      composeCacheInput
 	full       bool
 }
@@ -103,6 +104,7 @@ func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, [
 	content := input.content
 	layoutSnap := input.layout
 	theme := input.theme
+	styles := input.styles
 	cache := input.cache
 	full := input.full
 
@@ -117,7 +119,7 @@ func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, [
 	}
 	popupChanged := !cache.valid || cache.floatingGeneration != floating.generation || cache.floatingGeometry != geometry
 	titleChanged := popupChanged || cache.floatingTitleGeneration != floating.titleGeneration
-	drawFloatingBorder(frame, geometry.Bounds, floating.title, themeui.NewStyles(theme).Border)
+	drawFloatingBorder(frame, geometry.Bounds, floating.title, styles.BorderMuted)
 	if full || popupChanged {
 		return frame, []renderer.Damage{renderer.FullRedraw()}
 	}

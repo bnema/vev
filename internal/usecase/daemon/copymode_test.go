@@ -115,7 +115,6 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	snap := scopy.NewSnapshot(pane.history, pane.screen.Frame)
 	pane.mu.Unlock()
 	mode := scopy.NewMode(scopy.NewDocument(snap, domain.DefaultWordSeparators))
-	bars := barState{status: sess.statusSegments(true)}
 
 	base := renderer.NewFrame(80, 25)
 	target := domain.Rect{X: 0, Y: 1, Width: 80, Height: 23}
@@ -133,7 +132,7 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 200 {
-			_, _ = composeCopyClientFrame(mode, target, base, bars)
+			_, _ = composeCopyClientFrame(mode, target, base, resolveStyles(nil))
 		}
 	}()
 	wg.Wait()
@@ -160,7 +159,7 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 		}},
 		bars: bars,
 	}, composeCacheInput{}).frame
-	frame, damage := composeCopyClientFrame(mode, domain.Rect{X: 0, Y: 1, Width: 12, Height: 3}, base, bars)
+	frame, damage := composeCopyClientFrame(mode, domain.Rect{X: 0, Y: 1, Width: 12, Height: 3}, base, resolveStyles(nil))
 
 	require.Equal(t, 80, frame.Width)
 	require.Equal(t, 25, frame.Height)

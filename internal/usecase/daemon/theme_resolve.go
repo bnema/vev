@@ -13,6 +13,11 @@ func (d *Daemon) applyHostTheme(sess *session, ac *attachedClient, t theme.Theme
 }
 
 func (d *Daemon) applyHostThemeLocked(sess *session, ac *attachedClient, t theme.Theme, clearUnknownScheme bool) bool {
+	// Resolve while applying, never while composing. The theme mutex only
+	// publishes the completed value and is not held across session/tab/pane
+	// locks, preserving the daemon lock order.
+	applied := d.resolveAppliedTheme(t)
+	t = applied.Raw
 	sess.mu.Lock()
 	if ac != nil {
 		if sess.client != ac {
@@ -27,7 +32,7 @@ func (d *Daemon) applyHostThemeLocked(sess *session, ac *attachedClient, t theme
 	sess.mu.Unlock()
 
 	if ac != nil {
-		ac.setTheme(t)
+		ac.setAppliedTheme(applied)
 	}
 	for _, tb := range tabs {
 		tb.mu.Lock()

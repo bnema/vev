@@ -21,10 +21,11 @@ var commandCodePattern = regexp.MustCompile(`^[A-Z0-9]{2,3}$`)
 type themeConfigSnapshot struct {
 	mode       domain.ThemeMode
 	paletteOff bool
+	accent     domain.ThemeAccent
 }
 
 func (d *Daemon) storeThemeConfig(cfg domain.Config) {
-	snapshot := themeConfigSnapshot{mode: cfg.Theme, paletteOff: !cfg.ThemePalette}
+	snapshot := themeConfigSnapshot{mode: cfg.Theme, paletteOff: !cfg.ThemePalette, accent: cfg.ThemeAccent}
 	d.themeConfig.Store(&snapshot)
 }
 
@@ -259,8 +260,7 @@ func (d *Daemon) commandByEffectiveCode(code string) (command.Command, bool) {
 	return command.Command{}, false
 }
 
-func (d *Daemon) effectiveTheme(clientTheme theme.Theme) theme.Theme {
-	config := d.currentThemeConfig()
+func effectiveThemeForConfig(clientTheme theme.Theme, config themeConfigSnapshot) theme.Theme {
 	switch config.mode {
 	case domain.ThemeDark:
 		return theme.BuiltinDark
@@ -270,6 +270,16 @@ func (d *Daemon) effectiveTheme(clientTheme theme.Theme) theme.Theme {
 		clientTheme.UsePalette = !config.paletteOff
 		return clientTheme
 	}
+}
+
+func (d *Daemon) effectiveTheme(clientTheme theme.Theme) theme.Theme {
+	return effectiveThemeForConfig(clientTheme, d.currentThemeConfig())
+}
+
+func (d *Daemon) resolveAppliedTheme(raw theme.Theme) appliedTheme {
+	config := d.currentThemeConfig()
+	effective := effectiveThemeForConfig(raw, config)
+	return appliedTheme{Raw: effective, Resolved: theme.Resolve(effective, config.accent)}
 }
 
 func (d *Daemon) reapplyThemeAllSessions() {
@@ -290,12 +300,12 @@ func (d *Daemon) reapplyThemeSession(sess *session) {
 	ac := sess.client
 	sess.mu.Unlock()
 	if ac == nil {
-		d.applyHostTheme(sess, nil, d.effectiveTheme(theme.Theme{}), true)
+		d.applyHostTheme(sess, nil, theme.Theme{}, true)
 		return
 	}
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 	sess.themeMu.Lock()
 	defer sess.themeMu.Unlock()
-	d.applyHostThemeLocked(sess, ac, d.effectiveTheme(ac.getClientTheme()), false)
+	d.applyHostThemeLocked(sess, ac, ac.getClientTheme(), false)
 }

@@ -223,6 +223,7 @@ func TestComposeEmitExactReplayTiledFloatingBarsOverlayAndCursor(t *testing.T) {
 		bars:     barState{status: statusSnapshot{session: "sess", tabs: []statusTab{{name: "tab", active: true}}}, topRight: "R", bottomRight: "B"},
 		overlays: capturedOverlayRenderState{promptActive: true, prompt: capturedModal{modal: ui.Modal{FixedWidth: 8, FixedHeight: 3, Title: "Prompt"}, inner: modalInner}},
 		cursor:   capturedCursorInputs{row: 1, col: 2, visible: true, renderable: true, content: domain.Rect{X: 4, Y: 2, Width: 4, Height: 1}},
+		styles:   resolveStyles(nil),
 	}
 	composed := composeFrame(state, composeCacheInput{})
 	require.Equal(t, []string{" tab       R", "AAAAAAAAAAAA", "BB┌Prompt┐BB", "CC│PROMPT│CC", "DD└──────┘DD", "EEEEEEEEEEEE", " sess      B"}, frameRows(composed.frame))

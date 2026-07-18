@@ -417,9 +417,10 @@ func TestStatusCompositionUsesTruecolorTheme(t *testing.T) {
 		Known:      true,
 	})
 
-	bars := barState{status: sess.statusSegments(true), theme: ac.getTheme()}
+	applied := ac.getAppliedTheme()
+	bars := barState{status: sess.statusSegments(true), theme: applied.Raw}
 	composed := composeFrame(capturedRenderState{
-		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 12, Height: 2}, valid: true}, bars: bars, theme: bars.theme,
+		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 12, Height: 2}, valid: true}, bars: bars, theme: bars.theme, styles: applied.Resolved.Styles, styleGeneration: applied.Generation,
 	}, composeCacheInput{})
 	out, err := renderer.New(renderer.Capabilities{}).Draw(composed.frame, composed.damage)
 

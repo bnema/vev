@@ -653,6 +653,7 @@ func TestCaptureOverlayLayersUsesMutedThemeStyleForPickerSeparators(t *testing.T
 		t.Run(tt.name, func(t *testing.T) {
 			state := capturedRenderState{
 				theme:  tt.theme,
+				styles: themeui.Resolve(tt.theme, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles,
 				layout: capturedTabLayout{area: domain.Rect{Width: 100, Height: 38}},
 			}
 			snap := &overlayRenderSnapshot{
@@ -665,7 +666,7 @@ func TestCaptureOverlayLayersUsesMutedThemeStyleForPickerSeparators(t *testing.T
 			inner := state.overlays.picker.inner
 			layout := picker.ChooseLayout(domain.Size{Cols: inner.Width, Rows: inner.Height})
 			require.Equal(t, picker.LayoutHorizontal, layout.Mode)
-			want := themeui.MutedTextStyle(tt.theme)
+			want := state.styles.PickerSeparator
 			for y := layout.Separator.Y; y < layout.Separator.Y+layout.Separator.Height; y++ {
 				for x := layout.Separator.X; x < layout.Separator.X+layout.Separator.Width; x++ {
 					cell := inner.At(x, y)
@@ -679,7 +680,7 @@ func TestCaptureOverlayLayersUsesMutedThemeStyleForPickerSeparators(t *testing.T
 
 func TestCaptureOverlayLayersResizeRecomposesPickerWithoutStalePreview(t *testing.T) {
 	model := picker.New([]picker.SessionView{{ID: "s", Name: "session", Tabs: []picker.TabEntry{{Name: "tab"}}, Active: 0}}, "s", 0)
-	state := capturedRenderState{theme: themeui.BuiltinDark}
+	state := capturedRenderState{theme: themeui.BuiltinDark, styles: themeui.Resolve(themeui.BuiltinDark, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles}
 	cases := []struct {
 		name       string
 		size       domain.Size

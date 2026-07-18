@@ -41,6 +41,7 @@ type composeCacheInput struct {
 	floatingTitleGeneration uint64
 	bars                    barCache
 	theme                   themeui.Theme
+	styleGeneration         uint64
 }
 
 type composedRenderFrame struct {
@@ -77,7 +78,13 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 			copy(frame.Row(y), in.frame.Row(y))
 		}
 	}
-	styles := themeui.NewStyles(state.theme)
+	styles := state.styles
+	if styles == (themeui.Styles{}) {
+		// Direct/test-only composition has no applied snapshot; production
+		// capture always supplies immutable styles.
+		styles = fallbackChromeStyles
+	}
+	state.styles = styles
 	defaultDimmer := themeui.NewDimmer(state.theme)
 	inactivePaneDimmer := themeui.NewDimmer(state.theme, themeui.WithForegroundDimming(inactivePaneForegroundDimming))
 	drawTopBarSnapshot(frame.Row(0), state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
@@ -87,7 +94,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		drawDividers(frame, state.layout.root, content, defaultDimmer.Dim(styles.Border))
 	}
 
-	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme || in.floatingVisible != state.floating.visible
+	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme || in.styleGeneration != state.styleGeneration || in.floatingVisible != state.floating.visible
 	titles := scratch.titleGenerations
 	if titles == nil {
 		titles = make(map[layout.PaneID]uint64, len(state.panes))
@@ -125,6 +132,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 			content:    content,
 			layout:     state.layout,
 			theme:      state.theme,
+			styles:     styles,
 			cache:      in,
 			full:       full || state.overlays.active(),
 		})
@@ -152,7 +160,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	cursorInputs := state.cursor
 	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || state.overlays.active()
 	cursor := desiredCapturedCursor(cursorInputs)
-	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, titleGenerations: titles, damage: damage, floatingVisible: state.floating.visible, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
+	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, floatingVisible: state.floating.visible, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
 	outCache.bars.capture(baseFrame.Row(0), baseFrame.Row(rows+1))
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }
@@ -191,7 +199,10 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	if snap.copyPane != nil {
 		o.copyPaneID = snap.copyPane.id
 	}
-	styles := themeui.NewStyles(state.theme)
+	styles := state.styles
+	if styles == (themeui.Styles{}) {
+		styles = fallbackChromeStyles
+	}
 	size := domain.Size{Cols: state.layout.area.Width, Rows: state.layout.area.Height + 2}
 	if snap.copySearchModel != nil {
 		o.copySearch.modal = copySearchModal
@@ -238,7 +249,7 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 				}
 			}
 		}
-		frame, damage = composeCopyClientFrame(o.copyMode, target, frame, state.bars)
+		frame, damage = composeCopyClientFrame(o.copyMode, target, frame, state.styles)
 	}
 	layoutSnapshot := tabLayoutSnapshot{placements: state.layout.placements, area: state.layout.area, focus: state.layout.focus, ok: state.layout.valid}
 	if o.paletteActive && !state.floating.visible {
@@ -248,7 +259,7 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 		if modal.inner.Width == 0 && modal.inner.Height == 0 {
 			continue
 		}
-		inner := modal.modal.Composite(frame, themeui.NewStyles(state.theme).Border)
+		inner := modal.modal.Composite(frame, state.styles.BorderMuted)
 		for y := range min(inner.Height, modal.inner.Height) {
 			copy(frame.Row(inner.Y + y)[inner.X:inner.X+min(inner.Width, modal.inner.Width)], modal.inner.Row(y)[:min(inner.Width, modal.inner.Width)])
 		}

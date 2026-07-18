@@ -23,6 +23,15 @@ type transportSnapshot struct {
 	incarnation uint64
 }
 
+// appliedTheme is the single immutable chrome snapshot consumed by rendering.
+// Raw retains terminal defaults for panes; Resolved belongs exclusively to vev
+// chrome. Generation changes whenever either terminal input or policy changes.
+type appliedTheme struct {
+	Raw        themeui.Theme
+	Resolved   themeui.ResolvedTheme
+	Generation uint64
+}
+
 type attachedClient struct {
 	tr                   ports.Transport
 	transportIncarnation uint64
@@ -48,8 +57,9 @@ type attachedClient struct {
 	sess          Guarded[*session]
 	mouseScan     mouse.Scanner
 	themeMu       sync.Mutex
-	theme         themeui.Theme
+	theme         themeui.Theme // compatibility mirror of applied.Raw
 	clientTheme   themeui.Theme
+	appliedTheme  appliedTheme
 	lastCursor    cursorOut
 	renderStages  renderStageHooks // optional render and handoff observability hooks
 	// previousSession is guarded independently. It is retained through temporary
@@ -138,9 +148,18 @@ func (ac *attachedClient) clearCaptureFrames() {
 }
 
 func (ac *attachedClient) getTheme() themeui.Theme {
+	return ac.getAppliedTheme().Raw
+}
+
+func (ac *attachedClient) getAppliedTheme() appliedTheme {
 	ac.themeMu.Lock()
 	defer ac.themeMu.Unlock()
-	return ac.theme
+	if ac.appliedTheme.Generation == 0 {
+		// An unattached client has no terminal report yet. Reuse the static
+		// neutral cache rather than resolving from a render path.
+		return appliedTheme{Raw: ac.theme, Resolved: themeui.ResolvedTheme{Theme: ac.theme, Styles: fallbackChromeStyles}}
+	}
+	return ac.appliedTheme
 }
 
 func (ac *attachedClient) getClientTheme() themeui.Theme {
@@ -150,8 +169,16 @@ func (ac *attachedClient) getClientTheme() themeui.Theme {
 }
 
 func (ac *attachedClient) setTheme(t themeui.Theme) {
+	// Test and legacy setup paths have no daemon policy context. Keep their
+	// neutral automatic behavior while publishing a complete immutable value.
+	ac.setAppliedTheme(appliedTheme{Raw: t, Resolved: themeui.Resolve(t, domain.ThemeAccent{Mode: domain.ThemeAccentAuto})})
+}
+
+func (ac *attachedClient) setAppliedTheme(next appliedTheme) {
 	ac.themeMu.Lock()
-	ac.theme = t
+	next.Generation = ac.appliedTheme.Generation + 1
+	ac.appliedTheme = next
+	ac.theme = next.Raw
 	ac.themeMu.Unlock()
 }
 
@@ -432,7 +459,7 @@ func (d *Daemon) attachClientDeferred(sess *session, tr ports.Transport, sz doma
 	sess.mu.Unlock()
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", name, "resume", opts.resumeCapable)
-	d.applyHostTheme(sess, ac, d.effectiveTheme(themeui.Theme{}), true)
+	d.applyHostTheme(sess, ac, themeui.Theme{}, true)
 	return ac, old, cleanup
 }
 
@@ -526,7 +553,7 @@ func (d *Daemon) attachCoordinatorDeferred(sess *session, old, current *attached
 // (and run its own attach-time reset), so this call must leave the tabs
 // alone rather than clobbering that client's freshly applied colors.
 func (d *Daemon) resetScreenDefaultColors(sess *session) {
-	d.applyHostTheme(sess, nil, d.effectiveTheme(themeui.Theme{}), true)
+	d.applyHostTheme(sess, nil, themeui.Theme{}, true)
 }
 
 // retireReplacedClient owns old-link retirement and obsolete render-worker
@@ -710,9 +737,8 @@ func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) 
 		Light:        msg.Light,
 	}
 	ac.setClientTheme(clientTheme)
-	t := d.effectiveTheme(clientTheme)
 
-	if !d.applyHostTheme(sess, ac, t, false) {
+	if !d.applyHostTheme(sess, ac, clientTheme, false) {
 		return
 	}
 	d.invalidateRender(sess, ac, true, "client.go")
