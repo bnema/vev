@@ -61,7 +61,7 @@ func stylesFromRamp(t Theme, accent Accent, ramp Ramp) Styles {
 		CopyStatus:      ramp.SurfaceBar,
 		SearchSelection: EmphasisStyle(ramp.SurfaceActive, t),
 	}
-	return withLegacyAliases(styles, t)
+	return withMRUStyles(withLegacyAliases(styles, t), ramp)
 }
 
 func secondarySurface(base renderer.Style) renderer.Style {
@@ -137,7 +137,19 @@ func neutralStyles(t Theme) Styles {
 		CopyStatus:        accent,
 		SearchSelection:   accent,
 	}
-	return withLegacyAliases(styles, t)
+	styles = withLegacyAliases(styles, t)
+	// Neutral and indexed fallbacks retain their existing non-RGB hierarchy;
+	// MRU entries deliberately share the neutral recent surface.
+	return withMRUStyles(styles, Ramp{SurfaceBar: styles.SurfaceBar, SurfaceRecent: styles.SurfaceRecent})
+}
+
+func withMRUStyles(styles Styles, ramp Ramp) Styles {
+	for count := 1; count <= len(styles.mruStyles); count++ {
+		for index := 0; index < count; index++ {
+			styles.mruStyles[count-1][index] = MRUStyle(ramp, index, count)
+		}
+	}
+	return styles
 }
 
 func neutralBorderStyle(t Theme) renderer.Style {

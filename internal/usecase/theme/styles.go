@@ -62,6 +62,10 @@ func MRUFade(base renderer.Style, t Theme, i, count int) renderer.Style {
 // Styles is the complete semantic set of terminal chrome styles. The legacy
 // aliases remain until daemon renderers consume the semantic fields directly.
 type Styles struct {
+	// mruStyles are all position/count combinations that status composition
+	// can display. They keep OKLab interpolation out of render paths.
+	mruStyles [9][9]renderer.Style
+
 	SurfaceBar      renderer.Style
 	SurfaceInactive renderer.Style
 	SurfaceRecent   renderer.Style
@@ -102,4 +106,20 @@ type Styles struct {
 // policy should use Resolve and retain its complete immutable result.
 func NewStyles(t Theme) Styles {
 	return Resolve(t, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles
+}
+
+// MRUStyle returns the position-dependent recent-session surface. Color
+// interpolation stays owned by theme; renderers consume only this cached
+// semantic style snapshot.
+func (s Styles) MRUStyle(index, count int) renderer.Style {
+	if count <= 0 || count > len(s.mruStyles) {
+		return s.MRURecent
+	}
+	if index < 0 {
+		index = 0
+	}
+	if index >= count {
+		index = count - 1
+	}
+	return s.mruStyles[count-1][index]
 }

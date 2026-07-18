@@ -45,17 +45,17 @@ func pulseStyle(frame int, base renderer.Style) (renderer.Style, bool) {
 }
 
 func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, topRight string, styles themeui.Styles) {
-	clearStatusRow(row)
+	clearStatusRow(row, styles.SurfaceBar)
 	x := 0
 	labels := fitTabLabels(status.tabs, len(row), topRight)
 	for i, w := range status.tabs {
-		baseStyle := styles.StatusBar
-		nameStyle := styles.TabName
-		titleStyle := styles.TabTitle
+		baseStyle := styles.SurfaceInactive
+		nameStyle := styles.TabInactive
+		titleStyle := styles.TabInactiveTitle
 		if w.active {
-			baseStyle = styles.Accent
-			nameStyle = styles.TabNameActive
-			titleStyle = styles.TabTitleActive
+			baseStyle = styles.SurfaceActive
+			nameStyle = styles.TabActive
+			titleStyle = styles.TabActiveTitle
 		}
 		label := labels[i]
 		writeStatusText(row, &x, " "+label.text[:label.nameLen], nameStyle)
@@ -66,30 +66,30 @@ func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, t
 		writeStatusText(row, &x, label.text[label.nameLen:], titleStyle)
 		writeStatusText(row, &x, " ", baseStyle)
 	}
-	drawRightPlainText(row, topRight, x, styles.StatusBar)
+	drawRightPlainText(row, topRight, x, styles.SurfaceBar)
 }
 
 func drawStatusBarState(row []renderer.Cell, state barState, styles themeui.Styles) {
-	clearStatusRow(row)
+	clearStatusRow(row, styles.SurfaceBar)
 	x := 0
 	rightText := composeBottomRightText(state.bottomRight, state.copyFeedback)
-	writeStatusText(row, &x, " "+state.status.session+" ", styles.Accent)
+	writeStatusText(row, &x, " "+state.status.session+" ", styles.SurfaceActive)
 	if state.rankedRecent != nil {
 		for _, sess := range fitRankedRecent(state.rankedRecent, len(row), x, rightText) {
-			style := styles.StatusBar // contextual ranks deliberately do not fade.
+			style := styles.SurfaceInactive // contextual ranks deliberately do not fade.
 			if sess.selected {
-				style = styles.Accent
+				style = styles.SurfaceActive
 			}
 			drawRankedStatusSessionEntry(row, &x, sess, style, state.attentionFrame)
 		}
 	} else {
 		fittedMRU := fitMRU(state.mru, len(row), x, rightText)
 		for i, sess := range fittedMRU {
-			style := mruStyle(styles.StatusBar, state.theme, i, len(fittedMRU))
+			style := styles.MRUStyle(i, len(fittedMRU))
 			drawStatusSessionEntry(row, &x, sess.name, sess.attention, style, state.attentionFrame)
 		}
 	}
-	drawRightPlainText(row, rightText, x, styles.StatusBar)
+	drawRightPlainText(row, rightText, x, styles.SurfaceBar)
 }
 
 type rankedRecent struct {
@@ -147,9 +147,10 @@ func statusTextWidth(text string) int {
 	return width
 }
 
-func clearStatusRow(row []renderer.Cell) {
+func clearStatusRow(row []renderer.Cell, style renderer.Style) {
+	blank := renderer.Cell{Rune: ' ', Style: style}
 	for i := range row {
-		row[i] = renderer.BlankCell()
+		row[i] = blank
 	}
 }
 
@@ -424,10 +425,6 @@ func mruFutureRightReserve(rowLen int) int {
 		return mruReserveMax
 	}
 	return reserve
-}
-
-func mruStyle(base renderer.Style, t themeui.Theme, i, count int) renderer.Style {
-	return themeui.MRUFade(base, t, i, count)
 }
 
 // writeBell draws the attention glyph on its visible beat, or a plain cell in
