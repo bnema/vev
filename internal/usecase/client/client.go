@@ -764,14 +764,15 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		defer close(stdinDone)
 		(&stdinPump{ctx: loopCtx, cancel: cancel, input: input, consumer: inputConsumer, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration}).run()
 	}()
-	// Revoke this scanner's dequeue permission before waiting for it to exit.
-	// The lifecycle-owned reader retains queued bytes for the next attempt.
+	// Scanner cancellation can leave an undecided marker suffix (including a
+	// standalone Escape) that it must hand back to the lifecycle-owned reader.
+	// Wait for that handoff before revoking the claim: otherwise a replacement
+	// scanner could claim the reader between revocation and preservation and
+	// lose the suffix.
 	defer func() {
-		// Revoke before scanner teardown so replacement attempts can claim the
-		// lifecycle-owned reader as soon as this attempt releases it.
-		revokeInputClaim()
 		cancel()
 		<-stdinDone
+		revokeInputClaim()
 	}()
 	go runResize(loopCtx, term.ResizeEvents(), sendCh, log)
 
@@ -1007,6 +1008,7 @@ type terminalInputPump struct {
 	space              chan struct{}
 	state              chan struct{}
 	exited             chan struct{}
+	afterRevoke        func() // test synchronization hook
 	startMu            sync.Once
 	stopMu             sync.Once
 }
@@ -1053,6 +1055,9 @@ func (p *terminalInputPump) revoke(consumer uint64) {
 	}
 	p.mu.Unlock()
 	p.signalReady()
+	if p.afterRevoke != nil {
+		p.afterRevoke()
+	}
 }
 
 func (p *terminalInputPump) signalReady() {

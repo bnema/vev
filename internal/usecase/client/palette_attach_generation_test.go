@@ -255,6 +255,62 @@ func TestAttachReconnectClearsRetainedPaletteInOnePublication(t *testing.T) {
 	require.Len(t, reconnected.transport.snapshots(), 2, "reconnect must not send a restore Theme before its cleared publication")
 }
 
+func TestAttachReconnectPreservesStandaloneEscapeBeforeClaimRevocation(t *testing.T) {
+	t.Setenv("COLORTERM", "truecolor")
+	reader := newAttachPaletteReader()
+	input := newTerminalInputPump(reader)
+	input.start()
+	t.Cleanup(input.stop)
+
+	first := startAttachPaletteHarnessWithInput(&terminalThemeState{}, newAttachPaletteTransport(), input)
+	require.Equal(t, paletteColorBatch, first.nextWrite(t))
+	_ = first.nextTheme(t)
+	_ = first.nextTimer(t) // initial palette completion deadline
+
+	// A standalone Escape is withheld as a possible DECRQM marker prefix. Its
+	// raw read is committed, leaving only the scanner-local residual to hand
+	// over when this attach is replaced.
+	reader.send("\x1b")
+	_ = first.nextTimer(t) // standalone Escape ambiguity deadline
+
+	revoked := make(chan []byte, 1)
+	allowRevocationToReturn := make(chan struct{})
+	var releaseRevocation sync.Once
+	release := func() { releaseRevocation.Do(func() { close(allowRevocationToReturn) }) }
+	defer release()
+	input.afterRevoke = func() {
+		input.mu.Lock()
+		residual := append([]byte(nil), input.residual...)
+		input.mu.Unlock()
+		revoked <- residual
+		<-allowRevocationToReturn
+	}
+
+	// Detach starts reconnect teardown. The residual must already be owned by
+	// the lifecycle reader at the precise point the old claim is revoked.
+	first.transport.detached <- ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach})}
+	require.Equal(t, []byte("\x1b"), <-revoked)
+	release()
+	require.NoError(t, (<-first.done).err)
+	input.afterRevoke = nil
+
+	// The replacement attach receives the retained byte exactly once.
+	second := startAttachPaletteHarnessWithInput(&terminalThemeState{}, newAttachPaletteTransport(), input)
+	require.Equal(t, paletteColorBatch, second.nextWrite(t))
+	_ = second.nextTheme(t)
+	_ = second.nextTimer(t) // initial palette completion deadline
+	second.nextTimer(t).fire()
+	second.nextTimer(t).fire()
+	got := <-second.transport.inputCh
+	require.Equal(t, []byte("\x1b"), got.Data)
+	select {
+	case duplicate := <-second.transport.inputCh:
+		require.Failf(t, "duplicate input", "unexpected duplicate %q", duplicate.Data)
+	default:
+	}
+	second.detach(t)
+}
+
 func TestAttachSchemeReplacementAndDeadlinesProgressWhileReadBlocks(t *testing.T) {
 	t.Setenv("COLORTERM", "truecolor")
 	h := startAttachPaletteHarness(&terminalThemeState{})
