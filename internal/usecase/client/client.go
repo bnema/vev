@@ -669,7 +669,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				return welcomedResult(errLinkOffline)
 			}
 		case request := <-colorQueryCh:
-			if _, err := term.Out().Write(paletteBoundaryQuery); err != nil {
+			if _, err := term.Out().Write([]byte(paletteBoundaryQuery)); err != nil {
 				return welcomedResult(fmt.Errorf("vev: writing palette boundary query: %w", err))
 			}
 			if err := term.Flush(); err != nil {
@@ -868,8 +868,6 @@ const (
 	paletteDraining
 	paletteAwaitingQuery
 )
-
-var paletteBoundaryQuery = []byte("\x1b[?2031$p")
 
 // paletteBoundaryResponses accepts valid DECRQM status values for private
 // mode 2031. The private mode number correlates this reply with the query
