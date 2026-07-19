@@ -134,6 +134,82 @@ func TestCLIProcessCloseIsBoundedWhenPublicRoleDoesNotExit(t *testing.T) {
 	}
 }
 
+func TestCLIProcessCloseEscalationOutcome(t *testing.T) {
+	tests := []struct {
+		name        string
+		reapsAt     string // "term" or "kill": which rung's callback reaps the process
+		waitTimeout func() func() <-chan time.Time
+		wantErrSub  string // "" means Close must return nil
+		wantTerm    int
+		wantKill    int
+	}{
+		{
+			// A role reaped during the SIGTERM wait stopped gracefully: no SIGKILL,
+			// and Close must not report an error for a stage that can still flush a
+			// trace. The deadline channel never fires, so only the SIGTERM callback
+			// reaping the process can end the wait.
+			name:    "SIGTERM stop is graceful",
+			reapsAt: "term",
+			waitTimeout: func() func() <-chan time.Time {
+				never := make(chan time.Time)
+				return func() <-chan time.Time { return never }
+			},
+			wantErrSub: "",
+			wantTerm:   1,
+			wantKill:   0,
+		},
+		{
+			// A role that only dies to SIGKILL may have truncated its trace, so
+			// Close must surface a named escalation error rather than a silent
+			// success. One ready deadline releases the SIGTERM wait so the ladder
+			// escalates to SIGKILL, whose callback then reaps the process.
+			name:    "errors after kill escalation",
+			reapsAt: "kill",
+			waitTimeout: func() func() <-chan time.Time {
+				deadline := make(chan time.Time, 1)
+				deadline <- time.Now()
+				return func() <-chan time.Time { return deadline }
+			},
+			wantErrSub: "killed",
+			wantTerm:   1,
+			wantKill:   1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			waitErr := make(chan error, 1)
+			var term, kill int
+			p := &cliProcess{
+				waitErr:     waitErr,
+				waitTimeout: tt.waitTimeout(),
+				forceCleanup: func() {
+					term++
+					if tt.reapsAt == "term" {
+						waitErr <- nil
+					}
+				},
+				forceKill: func() {
+					kill++
+					if tt.reapsAt == "kill" {
+						waitErr <- nil
+					}
+				},
+			}
+			err := p.Close()
+			if tt.wantErrSub == "" {
+				if err != nil {
+					t.Fatalf("Close() error = %v, want nil", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("Close() error = %v, want an error containing %q", err, tt.wantErrSub)
+			}
+			if term != tt.wantTerm || kill != tt.wantKill {
+				t.Fatalf("TERM/KILL calls = %d/%d, want %d/%d", term, kill, tt.wantTerm, tt.wantKill)
+			}
+		})
+	}
+}
+
 func TestCLIProcessWaitReadyRequiresDaemonSocket(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "daemon.sock")
 	var lc net.ListenConfig

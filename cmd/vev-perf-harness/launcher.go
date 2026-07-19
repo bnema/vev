@@ -131,6 +131,7 @@ type cliProcess struct {
 	cleanupRuntime func() error
 	terminalReady  bool
 	readyPath      string
+	closeResult    error
 }
 
 func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProcess, error) {
@@ -625,89 +626,150 @@ func (e *ptyLocalEcho) applicationOutput(chunk []byte) []byte {
 	return nil
 }
 
+// Close tears down a launched role along a bounded escalation ladder. Each rung
+// performs one action, then waits a single closeDeadline for the process to be
+// reaped before the next rung escalates. The graceful rungs — the public daemon
+// stop, the client shell exit, the controlling-terminal hangup, and SIGTERM —
+// let a role close its blocked transport operations and serialize their end
+// marks; only a SIGKILL severs a process before it can, so only that rung fails
+// teardown. Every path closes the PTY exactly once and finalizes output and
+// runtime state.
 func (p *cliProcess) Close() error {
-	var result error
 	p.closed.Do(func() {
-		// No measurement waits for terminal chunks during teardown. Continue
-		// consuming them so a full channel cannot block the client before it
-		// receives the shell exit request and closes its transport receive span.
-		if p.chunks != nil && p.done != nil {
-			go func() {
-				for {
-					select {
-					case _, ok := <-p.chunks:
-						if !ok {
-							return
-						}
-					case <-p.done:
-						return
-					}
-				}
-			}()
-		}
-		// A public terminal client owns a shell session. Ask that shell to exit
-		// before closing the PTY so its transport can finish its receive span;
-		// this avoids turning ordinary harness teardown into an aborted trace.
+		// 1. Drain terminal output for the whole teardown. Without an active
+		// consumer a full chunks channel stalls copyTerminal, which then stops
+		// reading the PTY master and blocks the client mid-restore before it can
+		// close its observed receive operation. The drain stops with p.done.
+		drainDone := p.drainTerminalOutput()
+
 		exited := false
-		if p.shutdown != nil && p.waitErr != nil {
-			select {
-			case <-p.waitErr:
-				exited = true
-			default:
-				// The client may have just ended the last session and raced this
-				// best-effort public shutdown. The normal bounded reaping path below
-				// remains authoritative in that case.
-				_ = p.shutdown()
+		// waitForExit blocks up to one bounded deadline for the reap.
+		waitForExit := func() {
+			if p.waitErr == nil || exited {
+				return
 			}
-		}
-		if p.pty != nil && p.waitErr != nil {
-			_, _ = p.pty.Write([]byte("exit\n"))
 			select {
 			case <-p.waitErr:
 				exited = true
 			case <-p.closeDeadline():
 			}
 		}
-		// Keep draining terminal output while the client exits gracefully. If the
-		// drain stops first, restoration output can fill the PTY and block the
-		// client before it closes its observed transport receive operation.
+		// reaped reports whether the process is already gone; a role with no
+		// process to reap needs no escalation at all.
+		reaped := func() bool {
+			if p.waitErr == nil || exited {
+				return true
+			}
+			select {
+			case <-p.waitErr:
+				exited = true
+				return true
+			default:
+				return false
+			}
+		}
+		ptyClosed := false
+		closePTY := func() {
+			if p.pty != nil && !ptyClosed {
+				_ = p.pty.Close()
+				ptyClosed = true
+			}
+		}
+
+		// 2. Daemon role: ask the public daemon to stop before any signal so its
+		// blocked carriage can close and serialize failed end marks.
+		if p.shutdown != nil && !reaped() {
+			_ = p.shutdown()
+			waitForExit()
+		}
+		// 3. Client role: a public terminal client owns a shell session. Ask that
+		// shell to exit so the client detaches and its transport finishes its
+		// receive span cleanly.
+		if p.pty != nil && !reaped() {
+			_, _ = p.pty.Write([]byte("exit\n"))
+			waitForExit()
+		}
+		// 4. Hang up the controlling terminal. The attach path installs a signal
+		// handler, so this SIGHUP is a graceful detach — not an abrupt kill — and
+		// the client still flushes its in-flight receive end mark.
+		if p.pty != nil && !reaped() {
+			closePTY()
+			waitForExit()
+		}
+		// 5. SIGTERM the role's own process group. The daemon and, through its
+		// attach signal handler, the client both treat this as a graceful stop.
+		if !reaped() {
+			p.forceProcessGroupCleanup()
+			waitForExit()
+		}
+		// 6. SIGKILL the role's process group. This severs the process; an
+		// in-flight observed operation cannot be closed, so its trace may truncate.
+		killed := false
+		if !reaped() {
+			killed = true
+			p.forceProcessGroupKill()
+			waitForExit()
+		}
+		// 7. A SIGKILL escalation cannot guarantee a complete trace. Fail teardown
+		// with a clear cause rather than letting the truncation surface later as a
+		// downstream merge mystery. The graceful rungs never error on their own.
+		if killed {
+			if exited {
+				p.closeResult = errors.New("public CLI process did not exit after hangup and SIGTERM; killed")
+			} else {
+				p.closeResult = errors.New("timed out reaping public CLI process")
+			}
+		}
+
+		// Close the PTY exactly once on every path: an early graceful exit skips
+		// the hangup rung, so close it here before the drain stops.
+		closePTY()
 		if p.done != nil {
 			close(p.done)
 		}
-		if p.pty != nil {
-			_ = p.pty.Close()
-		}
-		if p.waitErr != nil && !exited {
-			select {
-			case <-p.waitErr:
-			case <-p.closeDeadline():
-				// Teardown is deliberately bounded: a stuck public CLI or child
-				// must not hold a local harness run indefinitely.
-				p.forceProcessGroupCleanup()
-				select {
-				case <-p.waitErr:
-				case <-p.closeDeadline():
-					p.forceProcessGroupKill()
-					select {
-					case <-p.waitErr:
-					case <-p.closeDeadline():
-						result = errors.New("timed out reaping public CLI process")
-					}
-				}
-			}
+		if drainDone != nil {
+			<-drainDone
 		}
 		if p.output != nil {
-			if err := p.output.Close(); result == nil {
-				result = err
+			if err := p.output.Close(); p.closeResult == nil {
+				p.closeResult = err
 			}
 		}
 		if p.cleanupRuntime != nil {
-			if err := p.cleanupRuntime(); result == nil {
-				result = err
+			if err := p.cleanupRuntime(); p.closeResult == nil {
+				p.closeResult = err
 			}
 		}
 	})
-	return result
+	return p.closeResult
+}
+
+// drainTerminalOutput consumes copyTerminal's chunks for the duration of a
+// teardown so a full channel can never wedge copyTerminal (and thus the client's
+// PTY). It returns nil when there is no terminal to drain, and otherwise a
+// channel closed once the consumer has stopped on p.done.
+func (p *cliProcess) drainTerminalOutput() <-chan struct{} {
+	if p.chunks == nil || p.done == nil {
+		return nil
+	}
+	done := make(chan struct{})
+	chunks := p.chunks
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case _, ok := <-chunks:
+				if !ok {
+					// copyTerminal closed the channel; a closed channel is always
+					// ready, so stop selecting it and wait only for the stop signal.
+					chunks = nil
+				}
+			case <-p.done:
+				return
+			}
+		}
+	}()
+	return done
 }
 
 func (p *cliProcess) closeDeadline() <-chan time.Time {
@@ -748,7 +810,12 @@ func (p *cliProcess) forceProcessGroupKill() {
 // openPTY is the small Linux PTY boundary needed to drive the public terminal
 // client. No daemon or adapter implementation is imported by this command.
 func openPTY() (*os.File, *os.File, error) {
-	masterFD, err := syscall.Open("/dev/ptmx", syscall.O_RDWR|syscall.O_NOCTTY, 0)
+	// O_CLOEXEC keeps these harness-owned descriptors out of the launched client:
+	// exec dup2s the slave onto the child's stdio, but an inherited master (or a
+	// second slave) would otherwise leak in and hold the terminal open, so closing
+	// the harness master could never hang up the client. cmd.Start still remaps the
+	// slave onto fds 0-2, which are exempt from close-on-exec.
+	masterFD, err := syscall.Open("/dev/ptmx", syscall.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -760,7 +827,7 @@ func openPTY() (*os.File, *os.File, error) {
 	if err := rawterm.UnlockPt(masterFD); err != nil {
 		return closeMaster(err)
 	}
-	slaveFD, err := syscall.Open(fmt.Sprintf("/dev/pts/%d", number), syscall.O_RDWR|syscall.O_NOCTTY, 0)
+	slaveFD, err := syscall.Open(fmt.Sprintf("/dev/pts/%d", number), syscall.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return closeMaster(err)
 	}

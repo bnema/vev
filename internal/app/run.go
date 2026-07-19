@@ -480,6 +480,15 @@ func runDaemon() (retErr error) {
 // attach loop. Logging goes to the shared file: the client must never write
 // to the console while the terminal is raw.
 func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (retErr error) {
+	// Treat a controlling-terminal hangup or termination request as a graceful
+	// detach rather than an abrupt process death. Cancelling the context unwinds
+	// the client's pumps, closes its transport, and lets the deferred trace closer
+	// flush the in-flight receive's end mark — so teardown never truncates a span.
+	// Raw mode disables ISIG, so catching SIGINT here does not affect interactive
+	// Ctrl+C, which the daemon delivers to the remote shell as a normal keystroke.
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	log, logCloser, err := configureLogging(logging.Client, false)
 	if err != nil {
 		return err
