@@ -738,24 +738,20 @@ func TestSnapshotCaptureSkipsBareShellProcess(t *testing.T) {
 }
 
 func TestKillSessionSnapshotsNamedSessionBeforeClosingPanes(t *testing.T) {
-	store := portsmocks.NewMockSnapshotStore(t)
+	store := newGatedSnapshotStore()
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	WithSnapshotStore(store)(d)
-	startSnapshotEncodeWorker(t, d)
+	d.startSnapshotEncodeWorker()
+	t.Cleanup(func() {
+		store.unblock()
+		d.stopSnapshotEncodeWorker()
+	})
 	d.procCwd = func(int) (string, error) { return "/live", nil }
 
 	sess := newSnapshotTestSession(t, "work", false, "/fallback")
 	d.sessions[sess.id] = sess
 
 	var closed atomic.Bool
-	store.EXPECT().Write("work", mock.Anything).RunAndReturn(func(_ string, data []byte) error {
-		snap, err := snapcodec.Unmarshal(data)
-		require.NoError(t, err)
-		require.Equal(t, "work", snap.Name)
-		require.Equal(t, "/live", snap.Tabs[0].Panes[0].Cwd)
-		require.True(t, closed.Load(), "snapshot persistence must not delay pane close")
-		return nil
-	}).Once()
 	mockPTY, ok := sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
 	require.True(t, ok)
 	mockPTY.EXPECT().Close().RunAndReturn(func() error {
@@ -764,7 +760,22 @@ func TestKillSessionSnapshotsNamedSessionBeforeClosingPanes(t *testing.T) {
 	}).Once()
 
 	require.NoError(t, d.killSession(sess, 0, false))
+	// closeAllPanes runs synchronously inside killSession, which has already
+	// returned here. The store's write gate is still held below, so
+	// persistence cannot have completed yet: this proves pane close did not
+	// wait on it, with zero timing dependence on the encode worker.
+	require.True(t, closed.Load(), "snapshot persistence must not delay pane close")
+
+	store.unblock()
 	awaitSnapshotClean(t, sess)
+
+	writes, name, data := store.recorded()
+	require.Equal(t, 1, writes)
+	require.Equal(t, "work", name)
+	snap, err := snapcodec.Unmarshal(data)
+	require.NoError(t, err)
+	require.Equal(t, "work", snap.Name)
+	require.Equal(t, "/live", snap.Tabs[0].Panes[0].Cwd)
 }
 
 func TestPTYReaderSynchronizedUpdateFlushMarksSnapshotDirty(t *testing.T) {
@@ -1061,6 +1072,8 @@ func awaitSnapshotIdle(t testing.TB, sess *session) {
 
 func awaitSnapshotClean(t *testing.T, sess *session) {
 	t.Helper()
+	timer := time.NewTimer(testWaitTimeout)
+	defer timer.Stop()
 	for {
 		sess.snapshotMu.Lock()
 		clean := !sess.snapDirty.Load()
@@ -1069,7 +1082,11 @@ func awaitSnapshotClean(t *testing.T, sess *session) {
 		if clean {
 			return
 		}
-		<-changed
+		select {
+		case <-changed:
+		case <-timer.C:
+			t.Fatal("timed out waiting for snapshot to become clean")
+		}
 	}
 }
 
@@ -1090,6 +1107,11 @@ type gatedSnapshotStore struct {
 	release     chan struct{}
 	once        sync.Once
 	releaseOnce sync.Once
+
+	mu     sync.Mutex
+	writes int
+	name   string
+	data   []byte
 }
 
 func newGatedSnapshotStore() *gatedSnapshotStore {
@@ -1099,13 +1121,27 @@ func newGatedSnapshotStore() *gatedSnapshotStore {
 func (s *gatedSnapshotStore) enter()   { s.once.Do(func() { close(s.entered) }) }
 func (s *gatedSnapshotStore) unblock() { s.releaseOnce.Do(func() { close(s.release) }) }
 
-func (s *gatedSnapshotStore) Write(_ string, _ []byte) error {
+func (s *gatedSnapshotStore) Write(name string, data []byte) error {
 	s.enter()
 	<-s.release
+	s.mu.Lock()
+	s.writes++
+	s.name = name
+	s.data = append([]byte(nil), data...)
+	s.mu.Unlock()
 	return nil
 }
 func (*gatedSnapshotStore) Load() ([]ports.SnapshotBlob, error) { return nil, nil }
 func (*gatedSnapshotStore) Delete(string) error                 { return nil }
+
+// recorded returns the write count and the most recently written name/data,
+// captured under the store's own lock so it is safe to call from the test
+// goroutine after the write has happened-before via awaitSnapshotClean.
+func (s *gatedSnapshotStore) recorded() (int, string, []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writes, s.name, s.data
+}
 
 type neverReturningSnapshotStore struct {
 	entered chan struct{}
