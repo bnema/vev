@@ -632,8 +632,13 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 		name := sess.name
 		sess.mu.Unlock()
 		d.mu.Unlock()
+		if err := d.killSession(sess, ports.ReasonSessionKilled, false); err != nil {
+			d.log.Warn("closing last tab failed", "session", name, "err", err)
+			d.reportError(sess, domain.UserErr(domain.NoticeSnapshotSaturated,
+				"couldn't close tab: session state not yet saved; try again", err))
+			return
+		}
 		d.log.Info("tab closed", "session", name, "last", true)
-		_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 		return
 	}
 	ringing := tb.attention
