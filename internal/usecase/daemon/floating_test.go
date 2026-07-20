@@ -594,12 +594,14 @@ func TestFloatingInstallLogsSessionNameSafelyDuringRename(t *testing.T) {
 
 func TestToggleFloatingStructuralErrorsAreUserErrors(t *testing.T) {
 	tests := []struct {
-		name string
-		d    *Daemon
-		sess *session
+		name    string
+		d       *Daemon
+		sess    *session
+		wantMsg string
+		cause   error
 	}{
-		{"nil session", newTestDaemon(t, nil, stubClock{}), nil},
-		{"no active tab", newTestDaemon(t, nil, stubClock{}), &session{}},
+		{"nil session", newTestDaemon(t, nil, stubClock{}), nil, "couldn't open floating pane: no active session", nil},
+		{"no active tab", newTestDaemon(t, nil, stubClock{}), &session{}, "couldn't open floating pane: no active tab", layout.ErrNotFound},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -610,7 +612,10 @@ func TestToggleFloatingStructuralErrorsAreUserErrors(t *testing.T) {
 			require.ErrorAs(t, err, &ue)
 			require.Equal(t, domain.NoticeFloatingSpawn, ue.Code)
 			require.Equal(t, domain.NoticeError, ue.Severity)
-			require.NotEmpty(t, ue.Msg)
+			require.Equal(t, tc.wantMsg, ue.Msg)
+			if tc.cause != nil {
+				require.NotContains(t, ue.Msg, tc.cause.Error())
+			}
 		})
 	}
 }
