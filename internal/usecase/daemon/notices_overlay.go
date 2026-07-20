@@ -1,8 +1,13 @@
 package daemon
 
 import (
+	"fmt"
+	"strings"
+	"time"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/notices"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -44,6 +49,8 @@ func (d *Daemon) handleNoticesInput(ac *attachedClient, data []byte) {
 	}
 	changed := false
 	exit := false
+	yank := false
+	var yankTarget domain.Notification
 	for i := 0; i < len(data); i++ {
 		switch data[i] {
 		case 'j':
@@ -52,6 +59,11 @@ func (d *Daemon) handleNoticesInput(ac *attachedClient, data []byte) {
 		case 'k':
 			ac.overlays.noticesOverlay.Up()
 			changed = true
+		case 'y':
+			if n, ok := ac.overlays.noticesOverlay.Selected(); ok {
+				yankTarget = n
+				yank = true
+			}
 		case 'q', 0x03, 0x1b:
 			if data[i] == 0x1b {
 				tail := data[i:]
@@ -78,8 +90,66 @@ func (d *Daemon) handleNoticesInput(ac *attachedClient, data []byte) {
 	if exit {
 		d.closeNotices(ac)
 	}
+	if yank {
+		// yankNotice sends over the wire and repaints itself, so it must run
+		// with noticeMu released; a quick yank doesn't close the overlay the
+		// way copy mode's own 'y' commits and exits.
+		d.yankNotice(sess, ac, yankTarget)
+	}
 	if exit || changed {
 		d.invalidateRender(sess, ac, true, "notices_overlay.go")
+	}
+}
+
+// yankNotice copies n's formatted details to the client's clipboard via
+// OSC52, mirroring copy mode's own yank path (copymode.go handleCopyInput):
+// send each chunk, then leave a one-shot status-bar confirmation that the
+// next repaint clears.
+func (d *Daemon) yankNotice(sess *session, ac *attachedClient, n domain.Notification) {
+	chunks := scopy.OSC52(noticeYankPayload(n))
+	for _, chunk := range chunks {
+		failed, err := d.boundedSendOutputErrTransport(ac, chunk)
+		if err != nil {
+			d.detachOnSendError(sess, ac, failed)
+			return
+		}
+	}
+	ac.overlays.copyMu.Lock()
+	if len(chunks) > 0 {
+		ac.overlays.copyFeedback = "copied notification details"
+	} else {
+		ac.overlays.copyFeedback = "notification too large to copy"
+	}
+	ac.overlays.copyMu.Unlock()
+	d.invalidateRender(sess, ac, true, "notices_overlay.go")
+}
+
+// noticeYankPayload formats n the way the yank commands put it on the
+// clipboard: a header line with timestamp, severity, code slug, and coalesce
+// count, then the message, then the full cause chain when present.
+func noticeYankPayload(n domain.Notification) string {
+	b := &strings.Builder{}
+	fmt.Fprintf(b, "[%s] %s %s", n.Time.Format(time.RFC3339), severityWord(n.Severity), n.Code.String())
+	if n.Count > 1 {
+		fmt.Fprintf(b, " ×%d", n.Count)
+	}
+	fmt.Fprintf(b, "\n%s\n", n.Message)
+	if n.Details != "" {
+		fmt.Fprintf(b, "details: %s\n", n.Details)
+	}
+	return b.String()
+}
+
+// severityWord renders sev as the word used in yank payloads, distinct from
+// the single-letter form the history list draws (notices.severityLetter).
+func severityWord(sev domain.NoticeSeverity) string {
+	switch sev {
+	case domain.NoticeWarn:
+		return "warn"
+	case domain.NoticeError:
+		return "error"
+	default:
+		return "info"
 	}
 }
 

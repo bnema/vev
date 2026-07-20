@@ -32,6 +32,7 @@ func Registry() []Command {
 		}},
 		{Slug: "session-picker", Code: "SSP", Name: "Session picker", Desc: "Open the session picker", Run: func(ctx Context, _ []string) error { return ctx.OpenSessionPicker() }},
 		{Slug: "notifications", Code: "NTC", Name: "Notifications", Desc: "Show notification history", Run: func(ctx Context, _ []string) error { return ctx.OpenNotifications() }},
+		{Slug: "yank-last-notification", Code: "YLN", Name: "Yank last notification", Desc: "Copy the most recent notification's details to the clipboard", Run: func(ctx Context, _ []string) error { return ctx.YankLastNotification() }},
 		{Slug: "visual-mode", Code: "VIS", Name: "Visual mode", Desc: "Enter visual mode", Run: func(ctx Context, _ []string) error { return ctx.EnterVisualMode() }},
 		{Slug: "rename-session", Code: "RNS", Name: "Rename session", Desc: "Rename the session (an ephemeral session becomes named)", Run: func(ctx Context, _ []string) error { return ctx.RenameSession() }},
 		{Slug: "rename-tab", Code: "RNT", Name: "Rename tab", Desc: "Rename the current tab", Run: func(ctx Context, _ []string) error { return ctx.RenameTab() }},

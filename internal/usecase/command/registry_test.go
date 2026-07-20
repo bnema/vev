@@ -7,7 +7,7 @@ import (
 
 func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
 	commands := Registry()
-	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "JRS", "SSP", "NTC", "VIS", "RNS", "RNT", "DET"}
+	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "JRS", "SSP", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}
 
 	if len(commands) != len(wantCodes) {
 		t.Fatalf("Registry() returned %d commands, want %d", len(commands), len(wantCodes))
@@ -57,6 +57,16 @@ func TestRegistryIncludesNotifications(t *testing.T) {
 	}
 }
 
+func TestRegistryIncludesYankLastNotification(t *testing.T) {
+	cmd, ok := ByCode("YLN")
+	if !ok {
+		t.Fatal("ByCode(\"YLN\") ok = false, want true")
+	}
+	if cmd.Slug != "yank-last-notification" || cmd.Code != "YLN" || cmd.Name != "Yank last notification" {
+		t.Fatalf("yank command = %#v, want yank-last-notification/YLN/Yank last notification", cmd)
+	}
+}
+
 func TestByCodeIsCaseInsensitive(t *testing.T) {
 	for _, code := range []string{"CNT", "cnt", "CnT"} {
 		cmd, ok := ByCode(code)
@@ -99,6 +109,7 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 		{code: "JRS", expect: func(ctx *MockContext) { ctx.EXPECT().JumpRecentSession(1).Return(nil).Once() }},
 		{code: "SSP", expect: func(ctx *MockContext) { ctx.EXPECT().OpenSessionPicker().Return(nil).Once() }},
 		{code: "NTC", expect: func(ctx *MockContext) { ctx.EXPECT().OpenNotifications().Return(nil).Once() }},
+		{code: "YLN", expect: func(ctx *MockContext) { ctx.EXPECT().YankLastNotification().Return(nil).Once() }},
 		{code: "VIS", expect: func(ctx *MockContext) { ctx.EXPECT().EnterVisualMode().Return(nil).Once() }},
 		{code: "RNS", expect: func(ctx *MockContext) { ctx.EXPECT().RenameSession().Return(nil).Once() }},
 		{code: "RNT", expect: func(ctx *MockContext) { ctx.EXPECT().RenameTab().Return(nil).Once() }},

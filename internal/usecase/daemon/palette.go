@@ -485,6 +485,19 @@ func (e paletteExec) OpenNotifications() error {
 	return nil
 }
 
+func (e paletteExec) YankLastNotification() error {
+	n, ok := e.d.notices.latest()
+	if !ok {
+		// Reported directly rather than returned: the generic cmd.Run error
+		// path only logs, so a returned error here would never reach the
+		// user as the warn toast this no-op is supposed to produce.
+		e.d.reportError(e.sess, domain.UserWarn(domain.NoticeInternal, "no notifications yet", nil))
+		return nil
+	}
+	e.d.yankNotice(e.sess, e.ac, n)
+	return nil
+}
+
 func (e paletteExec) JumpRecentSession(rank int) error {
 	if rank < 1 || rank > len(e.recent) {
 		return command.ErrInvalidArguments
