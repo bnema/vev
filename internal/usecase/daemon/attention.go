@@ -42,23 +42,27 @@ func (d *Daemon) noteAttention(sess *session, tb *tab) {
 	d.pokeAttentionTicker()
 }
 
-func (d *Daemon) jumpAttention(sess *session, ac *attachedClient) {
+// jumpAttention switches to the oldest pending attention target, local tab
+// first and then another session's. Returning nil never implies a switch
+// happened — it also covers "no target exists", which is routine and not an
+// error. Only a failure to reach a target that does exist is a genuine error.
+func (d *Daemon) jumpAttention(sess *session, ac *attachedClient) error {
 	if sess == nil || ac == nil {
-		return
+		return nil
 	}
 	if idx, ok := oldestAttentionTab(sess); ok {
 		if sess.switchTab(idx) {
 			d.activateTab(sess, sess.activeTab())
 			d.invalidateRender(sess, ac, true, "attention.go")
 		}
-		return
+		return nil
 	}
 
 	target, ok := d.oldestOtherSessionAttention(sess)
 	if !ok {
-		return
+		return nil
 	}
-	_ = d.switchToTarget(sess, ac, picker.Target{Session: target.sessionID, TabIndex: target.tabIndex})
+	return d.switchToTarget(sess, ac, picker.Target{Session: target.sessionID, TabIndex: target.tabIndex})
 }
 
 func oldestAttentionTab(sess *session) (int, bool) {

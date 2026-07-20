@@ -317,7 +317,7 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 		d.invalidateRender(sess, ac, true, "pane_actions.go")
 	}
 	if errors.Is(err, layout.ErrNoPane) {
-		return nil
+		return errNoNeighbor
 	}
 	return err
 }

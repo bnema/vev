@@ -329,6 +329,35 @@ func TestFloatingStaysTerminalTargetAfterDirectionalFocus(t *testing.T) {
 	requirePTYWrite(t, floatingWrites, []byte("x"))
 }
 
+// TestActionFocusPaneAtEdgeStaysSilent drives a directional focus move with
+// no pane on that side (the session has a single, unsplit pane). This is
+// routine navigation, not a failure, and must never produce a notice.
+func TestActionFocusPaneAtEdgeStaysSilent(t *testing.T) {
+	d, _, ac, _ := newManualSessionWithPTYs(t, nil)
+
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneLeft)
+
+	require.Empty(t, d.notices.history(), "no-neighbor focus move must stay silent")
+}
+
+// TestActionFocusPaneGenuineErrorReportsNoticeInternal drives a directional
+// focus move against a tab with no layout tree at all — a genuine structural
+// error distinct from "no pane in that direction" — and asserts it reaches
+// the user as a notice instead of being silently discarded.
+func TestActionFocusPaneGenuineErrorReportsNoticeInternal(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+	tb := sess.activeTab()
+	tb.mu.Lock()
+	tb.tree = nil
+	tb.mu.Unlock()
+
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneLeft)
+
+	history := d.notices.history()
+	require.Len(t, history, 1, "a genuine layout-tree error must surface exactly one notice")
+	require.Equal(t, domain.NoticeInternal, history[0].Code)
+}
+
 func TestFloatingVisibilityRemainsIndependentAcrossTabSwitches(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
 	first := sess.activeTab()

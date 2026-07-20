@@ -286,19 +286,30 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 	case keys.ActionOpenPalette:
 		h.d.enterPalette(sess, h.ac)
 	case keys.ActionJumpAttention:
-		h.d.jumpAttention(sess, h.ac)
+		if err := h.d.jumpAttention(sess, h.ac); err != nil {
+			h.d.reportError(sess, err)
+		}
 	case keys.ActionToggleFloatingPane:
 		if err := h.d.toggleFloating(sess, h.ac); err != nil {
 			h.d.log.Warn("toggle floating pane failed", "err", err)
+			h.d.reportError(sess, err)
 		}
 	case keys.ActionFocusPaneLeft:
-		_ = h.d.focusDir(sess, h.ac, layout.Left)
+		if err := h.d.focusDir(sess, h.ac, layout.Left); err != nil {
+			h.d.reportError(sess, err)
+		}
 	case keys.ActionFocusPaneRight:
-		_ = h.d.focusDir(sess, h.ac, layout.Right)
+		if err := h.d.focusDir(sess, h.ac, layout.Right); err != nil {
+			h.d.reportError(sess, err)
+		}
 	case keys.ActionFocusPaneUp:
-		_ = h.d.focusDir(sess, h.ac, layout.Up)
+		if err := h.d.focusDir(sess, h.ac, layout.Up); err != nil {
+			h.d.reportError(sess, err)
+		}
 	case keys.ActionFocusPaneDown:
-		_ = h.d.focusDir(sess, h.ac, layout.Down)
+		if err := h.d.focusDir(sess, h.ac, layout.Down); err != nil {
+			h.d.reportError(sess, err)
+		}
 	case keys.ActionSwitchTab1, keys.ActionSwitchTab2, keys.ActionSwitchTab3,
 		keys.ActionSwitchTab4, keys.ActionSwitchTab5, keys.ActionSwitchTab6,
 		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:
