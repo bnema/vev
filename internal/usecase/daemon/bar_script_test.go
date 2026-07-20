@@ -85,7 +85,7 @@ func TestBarScriptContextEnv(t *testing.T) {
 func TestBarScriptRunner(t *testing.T) {
 	t.Run("nil runner returns explicit error for command", func(t *testing.T) {
 		runner := barScriptRunner{}
-		got, err := runner.run(context.Background(), "date", barScriptContext{})
+		got, err := runner.run(context.Background(), "date", nil, barScriptContext{})
 		if err == nil || err.Error() != "bar script command runner is nil" {
 			t.Fatalf("run err = %v, want explicit nil runner error", err)
 		}
@@ -96,7 +96,7 @@ func TestBarScriptRunner(t *testing.T) {
 
 	t.Run("empty command skips port runner", func(t *testing.T) {
 		runner := barScriptRunner{}
-		got, err := runner.run(context.Background(), " \t\n ", barScriptContext{})
+		got, err := runner.run(context.Background(), " \t\n ", nil, barScriptContext{})
 		if err != nil {
 			t.Fatalf("run err = %v, want nil", err)
 		}
@@ -120,9 +120,11 @@ func TestBarScriptRunner(t *testing.T) {
 				containsEnv(spec.Env, "VEV_COLS=120") &&
 				!containsEnv(spec.Env, "VEV_ANCHOR=old")
 		})).Return([]byte("\x1b[31mok\x1b[0m\nignored"), nil)
-		runner := barScriptRunner{runner: portRunner, timeout: 50 * time.Millisecond, baseEnv: []string{"PATH=/bin", "VEV_ANCHOR=old"}}
+		runner := barScriptRunner{runner: portRunner, timeout: 50 * time.Millisecond}
 
-		got, err := runner.run(context.Background(), "printf 'ok\\nignored'", barScriptContext{Anchor: "top-right", Session: "work", Tab: "tab-1", Pane: "pane-1", PaneCWD: "/repo", Cols: 120})
+		got, err := runner.run(context.Background(), "printf 'ok\\nignored'",
+			[]string{"PATH=/bin", "VEV_ANCHOR=old"},
+			barScriptContext{Anchor: "top-right", Session: "work", Tab: "tab-1", Pane: "pane-1", PaneCWD: "/repo", Cols: 120})
 		if err != nil {
 			t.Fatalf("run err = %v, want nil", err)
 		}
@@ -137,7 +139,7 @@ func TestBarScriptRunner(t *testing.T) {
 		portRunner.EXPECT().Run(mock.Anything, mock.Anything).Return([]byte("partial\x00 output\nignored"), wantErr)
 		runner := barScriptRunner{runner: portRunner, timeout: time.Second}
 
-		got, err := runner.run(context.Background(), "false", barScriptContext{})
+		got, err := runner.run(context.Background(), "false", nil, barScriptContext{})
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("run err = %v, want %v", err, wantErr)
 		}
@@ -154,7 +156,7 @@ func TestBarScriptRunner(t *testing.T) {
 		})
 		runner := barScriptRunner{runner: portRunner, timeout: time.Nanosecond}
 
-		_, err := runner.run(context.Background(), "sleep 1", barScriptContext{})
+		_, err := runner.run(context.Background(), "sleep 1", nil, barScriptContext{})
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("run err = %v, want %v", err, context.DeadlineExceeded)
 		}
@@ -168,7 +170,7 @@ func TestBarScriptRunnerBoundsStdoutBeforeSanitize(t *testing.T) {
 	})).Return([]byte(strings.Repeat("a", 4096)), nil)
 	runner := barScriptRunner{runner: portRunner, timeout: time.Second}
 
-	got, err := runner.run(context.Background(), "long-output", barScriptContext{})
+	got, err := runner.run(context.Background(), "long-output", nil, barScriptContext{})
 	if err != nil {
 		t.Fatalf("run bounded output: %v", err)
 	}

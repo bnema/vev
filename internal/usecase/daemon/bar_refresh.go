@@ -9,7 +9,7 @@ import (
 )
 
 type barScriptExecutor interface {
-	run(context.Context, string, barScriptContext) (string, error)
+	run(ctx context.Context, command string, env []string, scriptCtx barScriptContext) (string, error)
 }
 
 type barScriptConfig struct {
@@ -86,13 +86,14 @@ func (d *Daemon) barScriptInterval() time.Duration {
 	return effectiveBarInterval(d.barScripts.cfg.interval)
 }
 
-func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScriptContext, bool) {
+func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScriptContext, []string, bool) {
 	ctx := barScriptContext{Anchor: anchor}
 	if sess == nil {
-		return ctx, false
+		return ctx, nil, false
 	}
 	sess.mu.Lock()
 	ctx.Session = sess.name
+	env := sess.env
 	active := sess.active
 	var tb *tab
 	if active >= 0 && active < len(sess.tabs) {
@@ -102,7 +103,7 @@ func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScrip
 	ctx.PaneCWD = sess.cwd
 	sess.mu.Unlock()
 	if ac == nil || tb == nil {
-		return ctx, false
+		return ctx, env, false
 	}
 	tb.mu.Lock()
 	ctx.Tab = tb.stableID
@@ -120,7 +121,7 @@ func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScrip
 			ctx.PaneCWD = cwd
 		}
 	}
-	return ctx, true
+	return ctx, env, true
 }
 
 func (d *Daemon) barScriptPoller(ctx context.Context) {
@@ -166,9 +167,12 @@ func (d *Daemon) refreshBarScriptsIfDue(sess *session, now time.Time, force bool
 	if d == nil || d.barScripts == nil || sess == nil {
 		return false
 	}
-	baseCtx, ok := d.collectBarScriptContext(sess, "")
+	baseCtx, env, ok := d.collectBarScriptContext(sess, "")
 	if !ok {
 		return false
+	}
+	if len(env) == 0 {
+		env = d.baseEnv
 	}
 	d.barScripts.mu.Lock()
 	d.barScripts.initLocked()
@@ -213,7 +217,7 @@ func (d *Daemon) refreshBarScriptsIfDue(sess *session, now time.Time, force bool
 	runner := d.barScripts.runner
 	version := d.barScripts.version
 	d.barScripts.mu.Unlock()
-	go d.runBarScripts(sess, runner, cfg, baseCtx, version)
+	go d.runBarScripts(sess, runner, cfg, baseCtx, env, version)
 	return true
 }
 
@@ -247,16 +251,16 @@ func (d *Daemon) scheduleBarScriptRefreshLocked(sess *session, delay time.Durati
 	}()
 }
 
-func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barScriptConfig, base barScriptContext, version uint64) {
+func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barScriptConfig, base barScriptContext, env []string, version uint64) {
 	if runner == nil {
-		runner = barScriptRunner{baseEnv: d.baseEnv}
+		runner = barScriptRunner{}
 	}
 	ctx := sess.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	top, topOK := d.runOneBarScript(ctx, runner, cfg.topRight, base, "top-right", sess.name)
-	bottom, bottomOK := d.runOneBarScript(ctx, runner, cfg.bottomRight, base, "bottom-right", sess.name)
+	top, topOK := d.runOneBarScript(ctx, runner, cfg.topRight, env, base, "top-right", sess.name)
+	bottom, bottomOK := d.runOneBarScript(ctx, runner, cfg.bottomRight, env, base, "bottom-right", sess.name)
 	d.barScripts.mu.Lock()
 	d.barScripts.initLocked()
 	if !d.barScripts.running[sess.id] || d.barScripts.version != version {
@@ -287,12 +291,12 @@ func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barS
 	}
 }
 
-func (d *Daemon) runOneBarScript(ctx context.Context, runner barScriptExecutor, command string, base barScriptContext, anchor, sessionName string) (string, bool) {
+func (d *Daemon) runOneBarScript(ctx context.Context, runner barScriptExecutor, command string, env []string, base barScriptContext, anchor, sessionName string) (string, bool) {
 	if command == "" {
 		return "", true
 	}
 	base.Anchor = anchor
-	out, err := runner.run(ctx, command, base)
+	out, err := runner.run(ctx, command, env, base)
 	if err != nil {
 		if d.log != nil {
 			d.log.Warn("bar script failed; keeping last good output", "anchor", anchor, "session", sessionName, "err", err)

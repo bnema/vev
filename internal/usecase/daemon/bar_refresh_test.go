@@ -23,7 +23,7 @@ type fakeBarRunner struct {
 	errs  []error
 }
 
-func (r *fakeBarRunner) run(_ context.Context, _ string, ctx barScriptContext) (string, error) {
+func (r *fakeBarRunner) run(_ context.Context, _ string, _ []string, ctx barScriptContext) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, ctx)
@@ -48,14 +48,14 @@ func newBlockingBarRunner(outs []string) *blockingBarRunner {
 	return &blockingBarRunner{fakeBarRunner: &fakeBarRunner{outs: outs}, entered: make(chan struct{}), release: make(chan struct{})}
 }
 
-func (r *blockingBarRunner) run(ctx context.Context, command string, barCtx barScriptContext) (string, error) {
+func (r *blockingBarRunner) run(ctx context.Context, command string, env []string, barCtx barScriptContext) (string, error) {
 	r.once.Do(func() { close(r.entered) })
 	select {
 	case <-r.release:
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
-	return r.fakeBarRunner.run(ctx, command, barCtx)
+	return r.fakeBarRunner.run(ctx, command, env, barCtx)
 }
 
 func TestBarScriptRefreshIntervalClampingTickAndLastGoodOnFailure(t *testing.T) {
@@ -243,7 +243,7 @@ func TestBarScriptRunDoesNotRestoreClearedSessionState(t *testing.T) {
 	d.barScripts.mu.Unlock()
 
 	d.clearBarScriptsForSession(sess.id)
-	d.runBarScripts(sess, r, d.barScripts.cfg, barScriptContext{}, 0)
+	d.runBarScripts(sess, r, d.barScripts.cfg, barScriptContext{}, nil, 0)
 
 	state := d.barStateFor(sess, "")
 	require.Empty(t, state.topRight)
@@ -281,7 +281,7 @@ func TestBarScriptRunIgnoresStaleConfigVersion(t *testing.T) {
 	d.barScripts.version = 2
 	d.barScripts.mu.Unlock()
 
-	d.runBarScripts(sess, r, d.barScripts.cfg, barScriptContext{}, 1)
+	d.runBarScripts(sess, r, d.barScripts.cfg, barScriptContext{}, nil, 1)
 
 	state := d.barStateFor(sess, "")
 	require.Empty(t, state.topRight)
@@ -359,4 +359,64 @@ func waitBarRefreshIdle(t *testing.T, d *Daemon) {
 		defer d.barScripts.mu.Unlock()
 		return len(d.barScripts.running) == 0
 	}, time.Second, time.Millisecond)
+}
+
+type envRecordingRunner struct {
+	mu   sync.Mutex
+	envs [][]string
+}
+
+func (r *envRecordingRunner) run(_ context.Context, _ string, env []string, _ barScriptContext) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.envs = append(r.envs, append([]string(nil), env...))
+	return "out", nil
+}
+
+func (r *envRecordingRunner) captured() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([][]string(nil), r.envs...)
+}
+
+func TestBarScriptsUseSessionEnvNotDaemonBaseEnv(t *testing.T) {
+	tests := []struct {
+		name     string
+		sessEnv  []string
+		baseEnv  []string
+		wantPath string
+	}{
+		{
+			name:     "session env wins over stale daemon env",
+			sessEnv:  []string{"PATH=/home/u/.local/bin:/usr/bin"},
+			baseEnv:  []string{"PATH=/usr/bin"},
+			wantPath: "PATH=/home/u/.local/bin:/usr/bin",
+		},
+		{
+			name:     "falls back to daemon env when session env empty",
+			sessEnv:  nil,
+			baseEnv:  []string{"PATH=/usr/bin"},
+			wantPath: "PATH=/usr/bin",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &envRecordingRunner{}
+			d := newBarRefreshTestDaemon(r, time.Second)
+			d.baseEnv = tc.baseEnv
+			sess := newBarRefreshTestSession()
+			sess.env = tc.sessEnv
+			sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+
+			require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(0, 0), true))
+			waitBarRefreshIdle(t, d)
+
+			envs := r.captured()
+			require.Len(t, envs, 2, "one call per anchor")
+			for _, env := range envs {
+				require.Contains(t, env, tc.wantPath)
+			}
+		})
+	}
 }

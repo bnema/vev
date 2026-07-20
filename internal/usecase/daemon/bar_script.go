@@ -55,10 +55,9 @@ func (c barScriptContext) env(base []string) []string {
 type barScriptRunner struct {
 	runner  ports.ShellCommandRunner
 	timeout time.Duration
-	baseEnv []string
 }
 
-func (r barScriptRunner) run(ctx context.Context, command string, scriptCtx barScriptContext) (string, error) {
+func (r barScriptRunner) run(ctx context.Context, command string, env []string, scriptCtx barScriptContext) (string, error) {
 	if strings.TrimSpace(command) == "" {
 		return "", nil
 	}
@@ -74,7 +73,7 @@ func (r barScriptRunner) run(ctx context.Context, command string, scriptCtx barS
 
 	stdout, err := r.runner.Run(ctx, ports.CommandSpec{
 		Command:     command,
-		Env:         scriptCtx.env(r.baseEnv),
+		Env:         scriptCtx.env(env),
 		Timeout:     timeout,
 		StdoutLimit: barScriptOutputLimit,
 	})

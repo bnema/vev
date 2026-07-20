@@ -283,7 +283,7 @@ func WithTempDir(dir string) Option {
 func WithBarScriptCommandRunner(runner ports.ShellCommandRunner) Option {
 	return func(d *Daemon) {
 		if runner != nil {
-			d.barScripts.runner = barScriptRunner{runner: runner, baseEnv: d.baseEnv}
+			d.barScripts.runner = barScriptRunner{runner: runner}
 		}
 	}
 }
