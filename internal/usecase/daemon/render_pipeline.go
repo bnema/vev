@@ -274,6 +274,14 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 	if o.paletteActive && !state.floating.visible {
 		(overlayBackdrop{DimPaneContents: true}).apply(frame, content, layoutSnapshot, state.theme)
 	}
+	// This paint order intentionally differs from HandleInput's keyboard
+	// priority (prompt > palette > picker > notices > copy, see
+	// overlay_runtime.go), which paints the picker under notices instead of
+	// over it. Currently unreachable: notices only opens via the palette, and
+	// HandleInput short-circuits to the first active overlay, so picker and
+	// notices are never simultaneously active. If that ever changes, this
+	// mismatch would let the picker own the keyboard while notices visually
+	// covers it.
 	for _, modal := range []capturedModal{o.copySearch, o.picker, o.noticesOverlay, o.palette, o.prompt} {
 		if modal.inner.Width == 0 && modal.inner.Height == 0 {
 			continue

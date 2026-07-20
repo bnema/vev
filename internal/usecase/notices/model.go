@@ -121,8 +121,10 @@ func (m *Model) Render(inner domain.Size, styles RenderStyles) renderer.Frame {
 	return frame
 }
 
-// rowMessage appends a "×N" coalesce count suffix, matching the toast
-// overlay's own count formatting.
+// rowMessage appends a "×N" coalesce count suffix. The format string matches
+// the toast overlay's own count formatting (internal/usecase/ui.ComposeNotices),
+// but the field it is appended to differs: the toast appends to Title, while
+// this row appends to Message, matching this overlay's row layout.
 func rowMessage(n domain.Notification) string {
 	if n.Count > 1 {
 		return fmt.Sprintf("%s ×%d", n.Message, n.Count)
