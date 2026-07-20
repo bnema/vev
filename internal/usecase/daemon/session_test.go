@@ -1079,7 +1079,7 @@ func TestEphemeralPromotionLifecyclePreventsStaleSameNamePaletteTarget(t *testin
 	require.NoError(t, d.renameSession(second, "named"))
 	require.NotEqual(t, staleCreatedAt, second.createdAt)
 
-	require.False(t, d.switchToTarget(from, ac, picker.Target{Name: "named", TabIndex: -1, ExpectedCreatedAt: &staleCreatedAt}))
+	require.Error(t, d.switchToTarget(from, ac, picker.Target{Name: "named", TabIndex: -1, ExpectedCreatedAt: &staleCreatedAt}))
 	require.Same(t, from, ac.currentSession())
 	releaseSecond()
 	d.sessWg.Wait()
@@ -1729,7 +1729,7 @@ func TestLifecycleExpectedTargetChecksAreAtomicAcrossStateTransitions(t *testing
 		target.createdAt = 22
 		expected := int64(21)
 
-		require.False(t, d.switchToTarget(from, ac, picker.Target{Session: target.id, Name: "recent", TabIndex: 0, ExpectedCreatedAt: &expected}))
+		require.Error(t, d.switchToTarget(from, ac, picker.Target{Session: target.id, Name: "recent", TabIndex: 0, ExpectedCreatedAt: &expected}))
 		require.Same(t, from, ac.currentSession())
 	})
 
@@ -1743,7 +1743,7 @@ func TestLifecycleExpectedTargetChecksAreAtomicAcrossStateTransitions(t *testing
 		expected := int64(31)
 		d.stopped["target"] = stoppedSession{name: "target", cwd: "/tmp", createdAt: expected}
 
-		require.True(t, d.switchToTarget(from, ac, picker.Target{Session: "old-active-id", Name: "target", TabIndex: 0, ExpectedCreatedAt: &expected}))
+		require.NoError(t, d.switchToTarget(from, ac, picker.Target{Session: "old-active-id", Name: "target", TabIndex: 0, ExpectedCreatedAt: &expected}))
 		require.Equal(t, "target", ac.currentSession().name)
 		require.Equal(t, expected, ac.currentSession().createdAt)
 	})
@@ -1755,7 +1755,7 @@ func TestLifecycleExpectedTargetChecksAreAtomicAcrossStateTransitions(t *testing
 		target.createdAt = 41
 		expected := int64(41)
 
-		require.True(t, d.switchToTarget(from, ac, picker.Target{Session: "stopped:recent", Name: "recent", TabIndex: 0, Stopped: true, ExpectedCreatedAt: &expected}))
+		require.NoError(t, d.switchToTarget(from, ac, picker.Target{Session: "stopped:recent", Name: "recent", TabIndex: 0, Stopped: true, ExpectedCreatedAt: &expected}))
 		require.Same(t, target, ac.currentSession())
 	})
 
@@ -1766,7 +1766,7 @@ func TestLifecycleExpectedTargetChecksAreAtomicAcrossStateTransitions(t *testing
 		d.stopped["target"] = stoppedSession{name: "target", cwd: "/tmp", createdAt: 52}
 		expected := int64(51)
 
-		require.False(t, d.switchToTarget(from, ac, picker.Target{Name: "target", TabIndex: 0, Stopped: true, ExpectedCreatedAt: &expected}))
+		require.Error(t, d.switchToTarget(from, ac, picker.Target{Name: "target", TabIndex: 0, Stopped: true, ExpectedCreatedAt: &expected}))
 		require.Same(t, from, ac.currentSession())
 	})
 }

@@ -58,7 +58,7 @@ func (d *Daemon) jumpAttention(sess *session, ac *attachedClient) {
 	if !ok {
 		return
 	}
-	d.switchToTarget(sess, ac, picker.Target{Session: target.sessionID, TabIndex: target.tabIndex})
+	_ = d.switchToTarget(sess, ac, picker.Target{Session: target.sessionID, TabIndex: target.tabIndex})
 }
 
 func oldestAttentionTab(sess *session) (int, bool) {

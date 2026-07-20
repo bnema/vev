@@ -270,7 +270,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		} else {
 			target.Stopped = true
 		}
-		if !d.switchToTarget(sess, ac, target) {
+		if err := d.switchToTarget(sess, ac, target); err != nil {
 			ac.paletteFailure(generation, rawQuery, "requested session is unavailable")
 			d.invalidateRender(sess, ac, true, "palette.go")
 			return
@@ -510,7 +510,7 @@ func (e paletteExec) JumpRecentSession(rank int) error {
 	if e.d.beforeRecentSessionHandoff != nil {
 		e.d.beforeRecentSessionHandoff()
 	}
-	if !e.d.switchToTarget(e.sess, e.ac, picker.Target{Session: target.id, TabIndex: -1}) {
+	if err := e.d.switchToTarget(e.sess, e.ac, picker.Target{Session: target.id, TabIndex: -1}); err != nil {
 		return command.ErrInvalidArguments
 	}
 	return nil

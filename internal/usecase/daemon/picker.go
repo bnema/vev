@@ -122,7 +122,9 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 			target, ok := ac.overlays.picker.Selected()
 			ac.overlays.pickerMu.Unlock()
 			if ok {
-				d.killPickerTarget(target)
+				if err := d.killPickerTarget(target); err != nil {
+					d.reportError(sess, err)
+				}
 			}
 			d.refreshPicker(ac)
 			d.invalidateRender(sess, ac, true, "picker.go")
@@ -171,7 +173,9 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 		d.closePicker(ac)
 	}
 	if switchTarget && ok {
-		d.switchToTarget(sess, ac, target)
+		if err := d.switchToTarget(sess, ac, target); err != nil {
+			d.reportError(sess, err)
+		}
 		return
 	}
 	if exit || changed {
@@ -394,19 +398,20 @@ func (d *Daemon) sessionByID(id domain.SessionID) *session {
 // switchToTarget resolves named lifecycle targets and commits their transition
 // while d.mu is held. A named palette result is allowed to cross an
 // active/stopped transition, but it never follows a same-name replacement.
-func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker.Target) bool {
+func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker.Target) error {
 	d.mu.Lock()
 	var (
 		targetSess *session
 		old        *attachedClient
 		cleanups   []renderLifecycleCleanup
 		switched   bool
+		cause      error
 	)
 	if target.Name != "" {
 		active, stopped, isStopped, ok := d.resolveNamedLifecycleTargetLocked(target)
 		if ok {
 			if isStopped {
-				targetSess, cleanups, switched = d.resumeStoppedAndSwitchLocked(from, ac, target, stopped)
+				targetSess, cleanups, switched, cause = d.resumeStoppedAndSwitchLocked(from, ac, target, stopped)
 			} else {
 				// The snapshot ID may describe the stopped representation. The
 				// locked name/lifecycle resolver chose this active incarnation.
@@ -422,7 +427,7 @@ func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker
 
 	if !switched {
 		d.invalidateRender(from, ac, true, "picker.go")
-		return false
+		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", cause)
 	}
 	finishRenderLifecycleCleanups(cleanups)
 	if old != nil && old != ac {
@@ -437,7 +442,7 @@ func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker
 	} else {
 		d.firstPaint(targetSess, ac, ac.size)
 	}
-	return true
+	return nil
 }
 
 // resolveNamedLifecycleTargetLocked chooses exactly one current representation
@@ -517,11 +522,11 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 // resumeStoppedAndSwitchLocked creates the stopped representation and commits
 // the handoff while d.mu is held. Creation failure leaves the source client
 // and stopped record untouched.
-func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient, target picker.Target, stopped stoppedSession) (*session, []renderLifecycleCleanup, bool) {
+func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient, target picker.Target, stopped stoppedSession) (*session, []renderLifecycleCleanup, bool, error) {
 	from.mu.Lock()
 	if from.client != ac {
 		from.mu.Unlock()
-		return nil, nil, false
+		return nil, nil, false, nil
 	}
 	term := from.terminal
 	env := copyEnvironment(from.env)
@@ -530,7 +535,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 	if err != nil {
 		from.mu.Unlock()
 		d.log.Warn("resuming stopped session failed", "err", err, "session", target.Name)
-		return nil, nil, false
+		return nil, nil, false, err
 	}
 	from.client = nil
 	ac.setSession(nil)
@@ -543,7 +548,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 	targetSess.mu.Unlock()
 	d.touchMRU(targetSess)
 	ac.recordPreviousSession(from)
-	return targetSess, cleanups, true
+	return targetSess, cleanups, true, nil
 }
 
 func targetMatchesLifecycle(target picker.Target, name string, createdAt int64) bool {
@@ -574,7 +579,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 		switched   bool
 	)
 	if ok && !stopped.purging && targetMatchesLifecycle(target, stopped.name, stopped.createdAt) {
-		targetSess, cleanups, switched = d.resumeStoppedAndSwitchLocked(from, ac, target, stopped)
+		targetSess, cleanups, switched, _ = d.resumeStoppedAndSwitchLocked(from, ac, target, stopped)
 	}
 	d.mu.Unlock()
 	if !switched {
@@ -586,7 +591,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	return true
 }
 
-func (d *Daemon) killPickerTarget(target picker.Target) {
+func (d *Daemon) killPickerTarget(target picker.Target) error {
 	if target.Stopped {
 		d.mu.Lock()
 		stopped, ok := d.stopped[target.Name]
@@ -594,12 +599,12 @@ func (d *Daemon) killPickerTarget(target picker.Target) {
 			if err := d.persist.Delete(target.Name); err != nil {
 				d.mu.Unlock()
 				d.log.Warn("deleting persisted stopped session failed", "err", err, "session", target.Name)
-				return
+				return domain.UserErr(domain.NoticePersistDelete, "couldn't delete stopped session", err)
 			}
 			delete(d.stopped, target.Name)
 		}
 		d.mu.Unlock()
-		return
+		return nil
 	}
 	d.mu.Lock()
 	targetSess := d.sessions[target.Session]
@@ -607,6 +612,7 @@ func (d *Daemon) killPickerTarget(target picker.Target) {
 	if targetSess != nil {
 		_ = d.killSession(targetSess, ports.ReasonSessionKilled, true)
 	}
+	return nil
 }
 
 func (d *Daemon) refreshPicker(ac *attachedClient) {
