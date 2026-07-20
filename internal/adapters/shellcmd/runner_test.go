@@ -166,5 +166,5 @@ func TestRunnerBoundsStderr(t *testing.T) {
 		StdoutLimit: 1024,
 		StderrLimit: 64,
 	})
-	require.LessOrEqual(t, len(res.Stderr), 64)
+	require.Equal(t, 64, len(res.Stderr), "stderr must be captured and truncated to StderrLimit")
 }
