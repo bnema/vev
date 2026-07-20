@@ -1444,6 +1444,41 @@ func TestMouseHitTestFocusesPaneAndTranslatesSGRColumns(t *testing.T) {
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
 }
 
+// TestMouseGatedWhileNoticesOverlayActive guards against a click on the
+// notifications modal falling through to pane hit-testing underneath it: the
+// modal has no mouse handler of its own, so without the gate a click would
+// silently retarget focus and forward SGR bytes to whichever pane sits under
+// the modal's coordinates.
+func TestMouseGatedWhileNoticesOverlayActive(t *testing.T) {
+	p1 := portsmocks.NewMockPTY(t)
+	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2 := portsmocks.NewMockPTY(t)
+	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
+	d.procComm = nil
+	tb := sess.activeTab()
+	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 5})
+	p2pane.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 41, Rows: 5}
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+	tb.tree.Focus = "pane-1"
+	tb.panes["pane-2"] = p2pane
+	tb.mu.Unlock()
+
+	d.notices.record(domain.Notification{Code: domain.NoticePaneSpawn, Message: "m", Time: time.Unix(1, 0)})
+	d.enterNotices(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.True(t, ac.overlays.noticesActive())
+
+	// Same coordinates that TestMouseHitTestFocusesPaneAndTranslatesSGRColumns
+	// proves would otherwise focus pane-2 and forward the SGR report to it.
+	d.handleInput(sess, ac, []byte("\x1b[<0;22;2M"))
+
+	require.Equal(t, layout.PaneID("pane-1"), tb.tree.Focus, "mouse must not reach pane hit-testing while the notices overlay is open")
+	require.True(t, ac.overlays.noticesActive(), "mouse click must not close the notices overlay")
+}
+
 func TestMouseCollapsedStackBarExpandsAndFocuses(t *testing.T) {
 	p1 := portsmocks.NewMockPTY(t)
 	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 3}).Return(nil).Maybe()
