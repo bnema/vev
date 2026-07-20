@@ -229,8 +229,7 @@ func (d *Daemon) showToast(ac *attachedClient, n domain.Notification) {
 		return
 	}
 
-	rt.noticeSeq++
-	toast := noticeToast{n: n, seq: rt.noticeSeq}
+	toast := noticeToast{n: n}
 	rt.noticeToasts = append([]noticeToast{toast}, rt.noticeToasts...)
 	if len(rt.noticeToasts) > maxVisibleToasts {
 		for i := maxVisibleToasts; i < len(rt.noticeToasts); i++ {

@@ -367,14 +367,21 @@ func TestReportErrorNonBenignIsNeverDropped(t *testing.T) {
 
 func TestNotifyRoutesToSessionClientOnly(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
-	_, _, otherAC, _ := newNoticeFixture(t, newNoticeClock())
+
+	other := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	other.initOverlays()
+	sess2 := &session{id: "manual-2", name: "other", ctx: sess.ctx, cancel: func() {}, client: other}
+	other.setSession(sess2)
+	d.mu.Lock()
+	d.sessions[sess2.id] = sess2
+	d.mu.Unlock()
 
 	d.notify(sess, domain.NoticeInfo, domain.NoticeClipboard, "copied", nil)
 
 	toasts := awaitToastCount(t, ac, 1)
 	require.Equal(t, sess.id, toasts[0].SessionID)
-	otherToasts, _ := visibleToasts(otherAC)
-	require.Empty(t, otherToasts, "another daemon's client must be untouched")
+	otherToasts, _ := visibleToasts(other)
+	require.Empty(t, otherToasts, "another session's client must be untouched by session-scoped notices")
 }
 
 func TestNotifySessionWithoutClientRecordsHistoryOnly(t *testing.T) {
