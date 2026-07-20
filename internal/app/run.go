@@ -451,13 +451,19 @@ func runDaemon() (retErr error) {
 	daemonOpts = append(daemonOpts, daemon.WithProcessInspector(platform.NewProcessInspector()), daemon.WithDirOrHome(platform.DirOrHome))
 	daemonOpts = append(daemonOpts, daemon.WithSnapshotStore(snapshotadapter.NewStore(snapshotDir())))
 	storePath := persist.StorePath(platform.StateDir())
+	var storeErr error
 	if store, err := kv.Open(storePath); err != nil {
 		log.Warn("opening session store failed; persistence disabled", "path", storePath, "err", err)
+		storeErr = err
 	} else {
 		log.Info("session persistence enabled", "path", storePath)
 		daemonOpts = append(daemonOpts, daemon.WithStore(store))
 	}
 	d := daemon.New(pty.NewFactory(), clk, log, daemonOpts...)
+	if storeErr != nil {
+		d.NotifyGlobal(domain.NoticeWarn, domain.NoticePersistDisabled,
+			"session persistence is disabled; sessions will not survive daemon restarts", storeErr)
+	}
 	watchCtx, stopWatch := context.WithCancel(ctx)
 	defer stopWatch()
 	go func() {

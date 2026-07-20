@@ -443,6 +443,37 @@ func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
 	require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
 }
 
+// TestNotifyGlobalPersistDisabledDrainsAtFirstAttach guards the store-open
+// failure contract (Task 13): app/run.go queues this exact code and message
+// via NotifyGlobal before any client has attached, and the first attach must
+// see it via firstPaint's pending-queue drain.
+func TestNotifyGlobalPersistDisabledDrainsAtFirstAttach(t *testing.T) {
+	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+	sess.mu.Lock()
+	sess.client = nil
+	sess.mu.Unlock()
+
+	cause := errors.New("open store.db: permission denied")
+	d.NotifyGlobal(domain.NoticeWarn, domain.NoticePersistDisabled,
+		"session persistence is disabled; sessions will not survive daemon restarts", cause)
+
+	require.Len(t, d.notices.history(), 1)
+	toasts, _ := visibleToasts(ac)
+	require.Empty(t, toasts, "no attached client means nothing to paint yet")
+
+	// Re-attach and let firstPaint drain the pending queue.
+	sess.mu.Lock()
+	sess.client = ac
+	sess.mu.Unlock()
+	d.firstPaint(sess, ac, domain.Size{})
+
+	drained := awaitToastCount(t, ac, 1)
+	require.Equal(t, domain.NoticePersistDisabled, drained[0].Code)
+	require.Equal(t, domain.NoticeWarn, drained[0].Severity)
+	require.Equal(t, "session persistence is disabled; sessions will not survive daemon restarts", drained[0].Message)
+	require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
+}
+
 // levelCaptureHandler records the slog.Level of every record it's handed, so
 // tests can assert on log verbosity without parsing formatted output.
 type levelCaptureHandler struct {
