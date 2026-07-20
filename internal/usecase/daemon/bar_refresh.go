@@ -107,6 +107,9 @@ func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScrip
 	}
 	sess.mu.Lock()
 	ctx.Session = sess.name
+	// No copy needed: writers always replace sess.env with a whole fresh
+	// slice under sess.mu (daemon.go, resume.go), and nothing mutates the
+	// backing array in place, so capturing the header here is safe.
 	env := sess.env
 	active := sess.active
 	var tb *tab

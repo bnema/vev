@@ -222,8 +222,11 @@ func TestRefreshBarScriptsAllSessionsForcesRun(t *testing.T) {
 	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
 	d.sessions = map[domain.SessionID]*session{sess.id: sess}
 
-	// Nothing has run yet, and the 60s interval means a non-forced tick would
-	// not be due for a long time.
+	// Verifies refreshBarScriptsAllSessions iterates every live session and
+	// dispatches a run for each. This does not exercise force specifically:
+	// lastRefresh is zero on a fresh session, so refreshBarScriptsIfDue skips
+	// the interval check regardless of force, and a non-forcing call would
+	// pass this test too.
 	d.refreshBarScriptsAllSessions()
 	waitBarRefreshIdle(t, d)
 
