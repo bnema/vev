@@ -86,11 +86,12 @@ type capturedFloatingRenderState struct {
 
 type capturedOverlayRenderState struct {
 	copyActive, copySearchActive, pickerActive, paletteActive, promptActive bool
+	noticesOverlayActive                                                    bool
 	copyMode                                                                *scopy.Mode
 	copyPaneID                                                              layout.PaneID
 	copyFeedback                                                            string
 	paletteGuidance                                                         string
-	copySearch, picker, palette, prompt                                     capturedModal
+	copySearch, picker, palette, prompt, noticesOverlay                     capturedModal
 	notices                                                                 []domain.Notification
 	noticeOverflow                                                          int
 }
@@ -102,7 +103,7 @@ type capturedModal struct {
 }
 
 func (o capturedOverlayRenderState) active() bool {
-	return o.copyActive || o.copySearchActive || o.pickerActive || o.paletteActive || o.promptActive
+	return o.copyActive || o.copySearchActive || o.pickerActive || o.paletteActive || o.promptActive || o.noticesOverlayActive
 }
 
 type capturedCursorInputs struct {

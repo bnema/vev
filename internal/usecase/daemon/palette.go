@@ -480,6 +480,11 @@ func (e paletteExec) OpenSessionPicker() error {
 	return nil
 }
 
+func (e paletteExec) OpenNotifications() error {
+	e.d.enterNotices(e.sess, e.ac)
+	return nil
+}
+
 func (e paletteExec) JumpRecentSession(rank int) error {
 	if rank < 1 || rank > len(e.recent) {
 		return command.ErrInvalidArguments

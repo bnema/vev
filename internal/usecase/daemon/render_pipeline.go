@@ -7,6 +7,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/usecase/notices"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/prompt"
@@ -201,6 +202,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	}
 	o := &state.overlays
 	o.copyActive, o.copySearchActive, o.pickerActive, o.paletteActive, o.promptActive = snap.copyActive, snap.copySearchModel != nil, snap.pickerActive, snap.paletteActive, snap.promptActive
+	o.noticesOverlayActive = snap.noticesOverlayActive
 	o.copyMode = snap.copyMode
 	o.notices, o.noticeOverflow = snap.notices, snap.noticeOverflow
 	if snap.copyPane != nil {
@@ -221,6 +223,12 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 		o.picker.focused = true
 		renderStyles := picker.RenderStyles{Background: styles.PickerBase, Selection: styles.PickerSelection, SelectionName: styles.PickerSelectionName, SelectionMuted: styles.PickerSelectionMuted, Name: styles.SurfaceInactive, Detail: styles.PickerDescription, Base: styles.SurfaceInactive, Separator: styles.PickerSeparator}
 		o.picker.inner = snap.pickerModel.Render(rectSize(pickerModal.Inner(size)), state.preview, renderStyles)
+	}
+	if snap.noticesOverlayActive && snap.noticesOverlayModel != nil {
+		o.noticesOverlay.modal = noticesModal
+		o.noticesOverlay.focused = true
+		renderStyles := notices.RenderStyles{Background: styles.PickerBase, Base: styles.SurfaceInactive, Selection: styles.PickerSelection, Text: styles.SurfaceInactive, SelectionText: styles.PickerSelectionName, Muted: styles.PickerDescription, SelectionMuted: styles.PickerSelectionMuted}
+		o.noticesOverlay.inner = snap.noticesOverlayModel.Render(rectSize(noticesModal.Inner(size)), renderStyles)
 	}
 	if snap.paletteActive && snap.paletteModel != nil {
 		o.palette.modal = paletteModalFor(size, paletteCfg)
@@ -266,7 +274,7 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 	if o.paletteActive && !state.floating.visible {
 		(overlayBackdrop{DimPaneContents: true}).apply(frame, content, layoutSnapshot, state.theme)
 	}
-	for _, modal := range []capturedModal{o.copySearch, o.picker, o.palette, o.prompt} {
+	for _, modal := range []capturedModal{o.copySearch, o.picker, o.noticesOverlay, o.palette, o.prompt} {
 		if modal.inner.Width == 0 && modal.inner.Height == 0 {
 			continue
 		}

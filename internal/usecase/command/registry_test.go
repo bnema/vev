@@ -7,7 +7,7 @@ import (
 
 func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
 	commands := Registry()
-	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "JRS", "SSP", "VIS", "RNS", "RNT", "DET"}
+	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "JRS", "SSP", "NTC", "VIS", "RNS", "RNT", "DET"}
 
 	if len(commands) != len(wantCodes) {
 		t.Fatalf("Registry() returned %d commands, want %d", len(commands), len(wantCodes))
@@ -44,6 +44,16 @@ func TestRegistryIncludesFloatingPaneToggle(t *testing.T) {
 	}
 	if cmd.Slug != "toggle-floating-pane" || cmd.Code != "FLT" || cmd.Name != "Toggle floating pane" {
 		t.Fatalf("floating command = %#v, want toggle-floating-pane/FLT/Toggle floating pane", cmd)
+	}
+}
+
+func TestRegistryIncludesNotifications(t *testing.T) {
+	cmd, ok := ByCode("NTC")
+	if !ok {
+		t.Fatal("ByCode(\"NTC\") ok = false, want true")
+	}
+	if cmd.Slug != "notifications" || cmd.Code != "NTC" || cmd.Name != "Notifications" {
+		t.Fatalf("notifications command = %#v, want notifications/NTC/Notifications", cmd)
 	}
 }
 
@@ -88,6 +98,7 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 		{code: "BSK", expect: func(ctx *MockContext) { ctx.EXPECT().BackSession().Return(nil).Once() }},
 		{code: "JRS", expect: func(ctx *MockContext) { ctx.EXPECT().JumpRecentSession(1).Return(nil).Once() }},
 		{code: "SSP", expect: func(ctx *MockContext) { ctx.EXPECT().OpenSessionPicker().Return(nil).Once() }},
+		{code: "NTC", expect: func(ctx *MockContext) { ctx.EXPECT().OpenNotifications().Return(nil).Once() }},
 		{code: "VIS", expect: func(ctx *MockContext) { ctx.EXPECT().EnterVisualMode().Return(nil).Once() }},
 		{code: "RNS", expect: func(ctx *MockContext) { ctx.EXPECT().RenameSession().Return(nil).Once() }},
 		{code: "RNT", expect: func(ctx *MockContext) { ctx.EXPECT().RenameTab().Return(nil).Once() }},
