@@ -332,21 +332,24 @@ func (d *Daemon) runOneBarScript(ctx context.Context, runner barScriptExecutor, 
 	base.Anchor = anchor
 	out, err := runner.run(ctx, command, env, base)
 	if err != nil {
-		d.logBarScriptFailure(sess, anchor, command, env, err)
+		d.logBarScriptFailure(sess, base.Session, anchor, command, env, err)
 		return "", false
 	}
 	d.clearBarFailure(sess.id, anchor)
 	return out, true
 }
 
-func (d *Daemon) logBarScriptFailure(sess *session, anchor, command string, env []string, err error) {
+// logBarScriptFailure logs a bar script failure. sessionName must come from a
+// synchronized read of sess.name (e.g. base.Session, captured under sess.mu
+// in collectBarScriptContext) since sess.name is mutable via session rename.
+func (d *Daemon) logBarScriptFailure(sess *session, sessionName, anchor, command string, env []string, err error) {
 	if d.log == nil {
 		return
 	}
 	if !d.shouldLogBarFailure(sess.id, anchor, err.Error()) {
 		return
 	}
-	attrs := []any{"anchor", anchor, "session", sess.name, "command", command, "err", err}
+	attrs := []any{"anchor", anchor, "session", sessionName, "command", command, "err", err}
 	var scriptErr *barScriptError
 	if errors.As(err, &scriptErr) {
 		attrs = append(attrs, "exit_code", scriptErr.exitCode)

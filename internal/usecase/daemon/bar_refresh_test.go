@@ -272,16 +272,33 @@ func TestBarScriptRunConsumesPendingAfterRunningClears(t *testing.T) {
 	}, time.Second, time.Millisecond)
 }
 
+// TestBarScriptFailureLogsOnceUntilSignatureChanges covers the full
+// shouldLogBarFailure/clearBarFailure contract for a single anchor
+// (top-right; bottom-right always succeeds in this test so it never
+// contributes a log line):
+//
+//  1. an identical repeated failure does not log a second time,
+//  2. a different failure for the same session+anchor logs again, and
+//  3. a successful run clears the recorded signature, so a subsequent
+//     identical failure logs again afterward.
+//
+// Each refresh consumes two fakeBarRunner call-count entries (top-right then
+// bottom-right), so the stages are order-dependent and asserted sequentially
+// rather than table-driven.
 func TestBarScriptFailureLogsOnceUntilSignatureChanges(t *testing.T) {
 	var buf bytes.Buffer
 	var mu sync.Mutex
 	logger := slog.New(slog.NewTextHandler(&syncWriter{w: &buf, mu: &mu}, nil))
 
+	notFound := &barScriptError{exitCode: 127, stderr: "sh: vev-bar-top-right: not found", err: errors.New("exit status 127")}
+	permissionDenied := &barScriptError{exitCode: 126, stderr: "sh: vev-bar-top-right: permission denied", err: errors.New("exit status 126")}
+
 	r := &fakeBarRunner{errs: []error{
-		&barScriptError{exitCode: 127, stderr: "sh: vev-bar-top-right: not found", err: errors.New("exit status 127")},
-		&barScriptError{exitCode: 127, stderr: "sh: vev-bar-bottom-right: not found", err: errors.New("exit status 127")},
-		&barScriptError{exitCode: 127, stderr: "sh: vev-bar-top-right: not found", err: errors.New("exit status 127")},
-		&barScriptError{exitCode: 127, stderr: "sh: vev-bar-bottom-right: not found", err: errors.New("exit status 127")},
+		notFound, nil, // refresh 1: top fails
+		notFound, nil, // refresh 2: top fails identically -> must not log again
+		permissionDenied, nil, // refresh 3: top fails differently -> must log again
+		nil, nil, // refresh 4: top succeeds -> clears recorded signature
+		notFound, nil, // refresh 5: top fails with the original signature -> must log (cleared)
 	}}
 	d := newBarRefreshTestDaemon(r, time.Second)
 	d.log = logger
@@ -289,19 +306,40 @@ func TestBarScriptFailureLogsOnceUntilSignatureChanges(t *testing.T) {
 	sess := newBarRefreshTestSession()
 	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
 
+	readBuf := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.String()
+	}
+
 	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(0, 0), true))
 	waitBarRefreshIdle(t, d)
+	out := readBuf()
+	require.Equal(t, 1, strings.Count(out, "anchor=top-right"), "first failure should log")
+	require.Contains(t, out, "not found")
+	require.Contains(t, out, "PATH=/usr/bin")
+
 	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(10, 0), true))
 	waitBarRefreshIdle(t, d)
+	out = readBuf()
+	require.Equal(t, 1, strings.Count(out, "anchor=top-right"), "identical repeated failure should not log again")
 
-	mu.Lock()
-	out := buf.String()
-	mu.Unlock()
+	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(20, 0), true))
+	waitBarRefreshIdle(t, d)
+	out = readBuf()
+	require.Equal(t, 2, strings.Count(out, "anchor=top-right"), "a different failure for the same anchor should log again")
+	require.Contains(t, out, "permission denied")
 
-	require.Equal(t, 1, strings.Count(out, "anchor=top-right"),
-		"identical repeated failure should log once")
-	require.Contains(t, out, "PATH=/usr/bin")
-	require.Contains(t, out, "not found")
+	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(30, 0), true))
+	waitBarRefreshIdle(t, d)
+	out = readBuf()
+	require.Equal(t, 2, strings.Count(out, "anchor=top-right"), "a successful run must not log and must clear the recorded signature")
+
+	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(40, 0), true))
+	waitBarRefreshIdle(t, d)
+	out = readBuf()
+	require.Equal(t, 3, strings.Count(out, "anchor=top-right"),
+		"an identical failure after a successful run should log again since the recorded signature was cleared")
 }
 
 type syncWriter struct {
