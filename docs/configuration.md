@@ -110,4 +110,6 @@ The command runs through your shell. A changed command applies on the next launc
 
 Anchor commands run on the daemon host every `bar.interval` (minimum 1s). vev reads the first line of stdout, strips ANSI codes, and keeps the last good value on failure. Scripts get `VEV_ANCHOR`, `VEV_SESSION`, `VEV_TAB`, `VEV_PANE`, `VEV_PANE_CWD`, and `VEV_COLS`.
 
+Commands resolve against the environment of the client currently attached to the session, the same environment new panes inherit. A command that works in your shell will work as an anchor without restarting the daemon. When an anchor fails, the daemon logs the exit code and the command's stderr; exit 127 means the command was not found on that `PATH`.
+
 Both anchors are disabled by default, so `go install github.com/bnema/vev@latest` needs no companion scripts. Set either command to opt in; explicit commands are run unchanged. Checkout and release installs include `vev-bar-top-right` and `vev-bar-bottom-right` example scripts, which can be configured by name when they are on the daemon host's `PATH`. The bottom-right example runs `git status --porcelain` on each refresh; raise the interval or replace it if that is too heavy for your repository.
