@@ -35,11 +35,14 @@ type NoticeStyles struct {
 }
 
 // ComposeNotices stacks notice boxes top-right of frame, newest first. Each
-// box is min(60, frame.Width*2/5) wide (floored at 24), titled with the
-// notice's slug and an optional " ×N" count suffix, and its message is
-// word-wrapped to at most 3 lines. Boxes stack downward with one blank row
-// between them; once the count behind overflow is nonzero, a right-aligned
-// "+N more" line follows the last box.
+// box's width starts at frame.Width*2/5, is capped at noticeMaxWidth (60),
+// then floored at noticeMinWidth (24), then clamped down to frame.Width so it
+// never exceeds the frame — on frames narrower than the floor, that final
+// clamp overrides the floor. Each box is titled with the notice's slug and an
+// optional " ×N" count suffix, and its message is word-wrapped to at most 3
+// lines. Boxes stack downward with one blank row between them; once the
+// count behind overflow is nonzero, a right-aligned "+N more" line follows
+// the last box.
 func ComposeNotices(frame renderer.Frame, notices []NoticeView, overflow int, styles NoticeStyles) {
 	if frame.Width <= 0 || frame.Height <= 0 || (len(notices) == 0 && overflow <= 0) {
 		return
