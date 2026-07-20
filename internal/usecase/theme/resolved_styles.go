@@ -45,6 +45,7 @@ func stylesFromRamp(t Theme, accent Accent, ramp Ramp) Styles {
 		SurfaceActive:   ramp.SurfaceActive,
 		BorderMuted:     ramp.BorderMuted,
 		BorderActive:    ramp.BorderActive,
+		BorderWarn:      ramp.BorderWarn,
 		NeutralBorder:   neutralBorder(t),
 
 		TabInactive:      ramp.SurfaceInactive,
@@ -81,6 +82,7 @@ func secondarySurface(base renderer.Style) renderer.Style {
 func indexedStyles(styles Styles, slot uint8) Styles {
 	styles.BorderMuted = indexedForeground(styles.BorderMuted, slot)
 	styles.BorderActive = indexedForeground(styles.BorderActive, slot)
+	styles.BorderWarn = indexedForeground(styles.BorderWarn, slot)
 	styles.TabInactiveTitle = indexedForeground(styles.TabInactiveTitle, slot)
 	styles.TabActiveTitle = indexedForeground(styles.TabActiveTitle, slot)
 	styles.PickerDescription = indexedForeground(styles.PickerDescription, slot)
@@ -131,6 +133,7 @@ func neutralStyles(t Theme) Styles {
 		SurfaceActive:   accent,
 		BorderMuted:     border,
 		BorderActive:    border,
+		BorderWarn:      border,
 		NeutralBorder:   border,
 
 		TabInactive:      EmphasisStyle(status, t),

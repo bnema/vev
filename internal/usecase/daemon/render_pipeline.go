@@ -307,13 +307,13 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 }
 
 // noticeStylesFrom picks the toast box color per severity from the theme's
-// existing chrome roles. A first pass: dedicated notice styling is out of
-// scope here.
+// chrome roles. Warn uses the dedicated BorderWarn role so it reads as
+// distinct from Info instead of sharing BorderMuted with it.
 func noticeStylesFrom(styles themeui.Styles) ui.NoticeStyles {
 	return ui.NoticeStyles{
 		Text:     styles.PickerBase,
 		BoxError: styles.BorderActive,
-		BoxWarn:  styles.BorderMuted,
+		BoxWarn:  styles.BorderWarn,
 		BoxInfo:  styles.BorderMuted,
 	}
 }

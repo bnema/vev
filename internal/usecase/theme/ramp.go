@@ -5,6 +5,15 @@ import "github.com/bnema/vev/pkg/renderer"
 const (
 	normalTextContrast = 4.5
 	borderContrast     = 3.0
+
+	// warnHueDegrees is the fixed OKLCh hue target for the Warn border role.
+	// Reference amber hues under this package's own rgbToOKLab: conventional
+	// "amber" #FFBF00 sits at ~84 degrees, Tailwind's amber-500 (#F59E0B) at
+	// ~70 degrees, CSS "orange" at ~71 degrees. 75 degrees sits centrally in
+	// that band, so a warn border reads as amber/gold regardless of which
+	// hue the user's single accent happens to occupy (blue ~256, red ~29,
+	// green ~145 under the same conversion).
+	warnHueDegrees = 75.0
 )
 
 // Ramp is the contrast-safe set of semantic terminal chrome colors.
@@ -15,6 +24,7 @@ type Ramp struct {
 	SurfaceActive   renderer.Style
 	BorderMuted     renderer.Style
 	BorderActive    renderer.Style
+	BorderWarn      renderer.Style
 
 	background renderer.RGB
 	accent     renderer.RGB
@@ -52,6 +62,7 @@ func BuildRamp(t Theme, accent Accent) Ramp {
 		SurfaceActive:   active,
 		BorderMuted:     mutedBorder(t, accent.RGB, bar.BackgroundRGB),
 		BorderActive:    activeBorder(t, accent.RGB, bar.BackgroundRGB),
+		BorderWarn:      warnBorder(t, accent.RGB, bar.BackgroundRGB),
 		background:      t.Background,
 		accent:          accent.RGB,
 		rgb:             true,
@@ -130,6 +141,22 @@ func activeBorder(t Theme, accent, adjacent renderer.RGB) renderer.Style {
 	return neutralBorder(t)
 }
 
+// warnBorder searches the same accent-derived weight scale activeBorder
+// uses, but replaces each candidate's hue with the fixed amber target before
+// checking contrast: the result keeps the accent's lightness/chroma band
+// (so it belongs to the ramp) while always reading as amber, regardless of
+// the user's accent hue.
+func warnBorder(t Theme, accent, adjacent renderer.RGB) renderer.Style {
+	for weight := 100; weight >= 0; weight-- {
+		candidate := okLabLerp(t.Background, accent, float64(weight)/100)
+		amber := shiftHue(candidate, warnHueDegrees)
+		if ContrastRatio(amber, adjacent) >= borderContrast {
+			return foregroundStyle(amber)
+		}
+	}
+	return neutralBorder(t)
+}
+
 func foregroundStyle(color renderer.RGB) renderer.Style {
 	style := renderer.DefaultStyle()
 	style.HasForegroundRGB = true
@@ -146,6 +173,7 @@ func neutralRamp(t Theme) Ramp {
 		SurfaceActive:   styles.SurfaceActive,
 		BorderMuted:     styles.BorderMuted,
 		BorderActive:    styles.BorderActive,
+		BorderWarn:      styles.BorderWarn,
 	}
 }
 

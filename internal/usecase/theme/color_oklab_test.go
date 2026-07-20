@@ -93,6 +93,81 @@ func TestOKLabToRGBClampsOutOfGamutChannels(t *testing.T) {
 	}
 }
 
+func TestOKLabOKLChRoundTrip(t *testing.T) {
+	colors := []oklab{
+		rgbToOKLab(renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}),
+		rgbToOKLab(renderer.RGB{R: 0xff}),
+		rgbToOKLab(renderer.RGB{B: 0xff}),
+		rgbToOKLab(renderer.RGB{R: 128, G: 128, B: 128}),
+	}
+	for _, want := range colors {
+		got := oklchToOKLab(oklabToOKLCh(want))
+		if math.Abs(got.L-want.L) > 1e-9 || math.Abs(got.A-want.A) > 1e-9 || math.Abs(got.B-want.B) > 1e-9 {
+			t.Fatalf("oklch round trip %+v = %+v, want %+v", want, got, want)
+		}
+	}
+}
+
+func TestOKLabToOKLChHueIsDegreesInRange(t *testing.T) {
+	tests := []struct {
+		name string
+		rgb  renderer.RGB
+		want float64
+	}{
+		// Known reference hues, computed with the same conversion this
+		// package uses: red sits near 29 degrees, blue near 264, amber
+		// (#FFBF00) near 84.
+		{name: "red", rgb: renderer.RGB{R: 255}, want: 29.2},
+		{name: "amber #FFBF00", rgb: renderer.RGB{R: 0xff, G: 0xbf, B: 0x00}, want: 84.1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := oklabToOKLCh(rgbToOKLab(tt.rgb))
+			if got.H < 0 || got.H >= 360 {
+				t.Fatalf("hue %v out of [0, 360) range", got.H)
+			}
+			if math.Abs(got.H-tt.want) > 0.5 {
+				t.Fatalf("hue = %v, want ~%v", got.H, tt.want)
+			}
+		})
+	}
+}
+
+func TestShiftHuePreservesLightnessAndChromaButReplacesHue(t *testing.T) {
+	tests := []struct {
+		name   string
+		source renderer.RGB
+	}{
+		{name: "blue accent", source: renderer.RGB{R: 0x6c, G: 0x9b, B: 0xd9}},
+		{name: "red accent", source: renderer.RGB{R: 0xcc, G: 0x66, B: 0x66}},
+		{name: "green accent", source: renderer.RGB{R: 0x6c, G: 0xae, B: 0x6c}},
+	}
+	const target = warnHueDegrees
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sourceLCh := oklabToOKLCh(rgbToOKLab(tt.source))
+			shifted := shiftHue(tt.source, target)
+			shiftedLCh := oklabToOKLCh(rgbToOKLab(shifted))
+
+			// sRGB gamut clamping in okLabToRGB can perturb L/C slightly for
+			// out-of-gamut combinations; allow a small tolerance. These three
+			// sources sit safely inside the gamut at the amber target hue
+			// (verified independently), so a tight tolerance still catches a
+			// broken implementation.
+			if math.Abs(shiftedLCh.L-sourceLCh.L) > 0.03 {
+				t.Fatalf("lightness drifted: got %v, want ~%v", shiftedLCh.L, sourceLCh.L)
+			}
+			if math.Abs(shiftedLCh.C-sourceLCh.C) > 0.03 {
+				t.Fatalf("chroma drifted: got %v, want ~%v", shiftedLCh.C, sourceLCh.C)
+			}
+			if math.Abs(shiftedLCh.H-target) > 1 {
+				t.Fatalf("hue = %v, want ~%v", shiftedLCh.H, target)
+			}
+		})
+	}
+}
+
 func channelDelta(a, b uint8) uint8 {
 	if a > b {
 		return a - b

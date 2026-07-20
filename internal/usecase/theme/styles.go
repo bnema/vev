@@ -72,6 +72,12 @@ type Styles struct {
 	SurfaceActive   renderer.Style
 	BorderMuted     renderer.Style
 	BorderActive    renderer.Style
+	// BorderWarn is the amber-hued warn-severity border. Unlike every other
+	// role in this camaïeu palette it does not blend toward the resolved
+	// accent color: it keeps the accent's lightness/chroma band but shifts
+	// hue to a fixed amber target (see warnHueDegrees), so Warn reads as
+	// amber and stays distinct from Error regardless of the accent hue.
+	BorderWarn renderer.Style
 	// NeutralBorder is the non-accent structural border for pane dividers and
 	// unfocused pane title bars. It is resolved with the rest of the immutable
 	// chrome snapshot so composition never derives theme colors.

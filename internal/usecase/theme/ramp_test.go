@@ -1,6 +1,7 @@
 package theme
 
 import (
+	"math"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -74,6 +75,52 @@ func TestBuildRampReducesActiveToHighestSafeWeight(t *testing.T) {
 	require.Equal(t, okLabLerp(theme.Background, accent.RGB, float64(wantWeight)/100), ramp.SurfaceActive.BackgroundRGB)
 }
 
+func TestBuildRampWarnBorderIsAmberAndDistinctAcrossAccentHues(t *testing.T) {
+	theme := rampTheme(false)
+
+	for name, accentRGB := range map[string]renderer.RGB{
+		"blue accent": {R: 0x6c, G: 0x9b, B: 0xd9},
+		"red accent":  {R: 0xcc, G: 0x66, B: 0x66},
+	} {
+		t.Run(name, func(t *testing.T) {
+			accent := Accent{RGB: accentRGB, Known: true}
+			ramp := BuildRamp(theme, accent)
+
+			require.True(t, ramp.BorderWarn.HasForegroundRGB)
+			require.False(t, ramp.BorderWarn.HasBackgroundRGB)
+
+			accentHue := oklabToOKLCh(rgbToOKLab(accentRGB)).H
+			warnHue := oklabToOKLCh(rgbToOKLab(ramp.BorderWarn.ForegroundRGB)).H
+			distanceToTarget := func(h float64) float64 {
+				d := math.Abs(h - warnHueDegrees)
+				if d > 180 {
+					d = 360 - d
+				}
+				return d
+			}
+			// Warn must land measurably closer to the amber target than the
+			// accent itself sits, in both directions (blue and the
+			// adversarial case of a red accent, which sits close to zero
+			// degrees and could otherwise get confused with an
+			// under-rotated "warm" accent border).
+			require.Less(t, distanceToTarget(warnHue), distanceToTarget(accentHue))
+			require.Less(t, distanceToTarget(warnHue), 5.0)
+
+			// Distinct from the sibling borders by more than a rounding
+			// difference: use the same OKLab distance scale accent
+			// clustering already treats as "different colors"
+			// (accentClusterDistance groups colors within 0.04).
+			warnLab := rgbToOKLab(ramp.BorderWarn.ForegroundRGB)
+			mutedLab := rgbToOKLab(ramp.BorderMuted.ForegroundRGB)
+			activeLab := rgbToOKLab(ramp.BorderActive.ForegroundRGB)
+			require.Greater(t, okLabDistance(warnLab, mutedLab), accentClusterDistance)
+			require.Greater(t, okLabDistance(warnLab, activeLab), accentClusterDistance)
+
+			require.GreaterOrEqual(t, ContrastRatio(ramp.BorderWarn.ForegroundRGB, ramp.SurfaceBar.BackgroundRGB), borderContrast)
+		})
+	}
+}
+
 func TestMRUStyleFadesFromRecentToElevenPercent(t *testing.T) {
 	theme := rampTheme(false)
 	ramp := BuildRamp(theme, Accent{RGB: renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}, Known: true})
@@ -94,6 +141,7 @@ func TestResolveBuildsCompleteStylesFromOneAccent(t *testing.T) {
 	require.Equal(t, resolved.Ramp.SurfaceBar, resolved.Styles.SurfaceBar)
 	require.Equal(t, resolved.Ramp.SurfaceActive, resolved.Styles.SurfaceActive)
 	require.Equal(t, resolved.Ramp.BorderActive, resolved.Styles.BorderActive)
+	require.Equal(t, resolved.Ramp.BorderWarn, resolved.Styles.BorderWarn)
 	require.Equal(t, foregroundStyle(Blend(theme.Foreground, theme.Background, 0.40)), resolved.Styles.NeutralBorder)
 	require.True(t, resolved.Styles.TabActive.Bold)
 	require.Equal(t, resolved.Styles.SurfaceRecent, resolved.Styles.MRURecent)
@@ -112,6 +160,8 @@ func TestResolveIndexedAndPaletteOffNeverUseAccentBackground(t *testing.T) {
 	require.False(t, indexed.Styles.SurfaceActive.HasBackgroundRGB)
 	require.Equal(t, 2, indexed.Styles.BorderActive.Foreground)
 	require.False(t, indexed.Styles.BorderActive.HasBackgroundRGB)
+	require.Equal(t, 2, indexed.Styles.BorderWarn.Foreground)
+	require.False(t, indexed.Styles.BorderWarn.HasBackgroundRGB)
 
 	theme.TrueColor = true
 	theme.UsePalette = false
