@@ -292,12 +292,12 @@ type floatingLaunchSpec struct {
 func (d *Daemon) launchFloating(sess *session, tb *tab, cfg domain.FloatingConfig, generation uint64, userOpen bool) {
 	spec, err := d.newFloatingLaunchSpec(sess, tb, cfg, userOpen)
 	if err != nil {
-		d.failFloatingLaunch(tb, generation, userOpen, spec.sessionName, err)
+		d.failFloatingLaunch(sess, tb, generation, userOpen, spec.sessionName, err)
 		return
 	}
 	launch, ok := sess.registerFloatingLaunch()
 	if !ok {
-		d.failFloatingLaunch(tb, generation, userOpen, spec.sessionName, context.Canceled)
+		d.failFloatingLaunch(sess, tb, generation, userOpen, spec.sessionName, context.Canceled)
 		return
 	}
 	// Count the launch before its goroutine starts. It remains counted through
@@ -381,7 +381,7 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 	}()
 	pty, err := d.ptys.Open(openCtx, spec.command, spec.args, spec.env, spec.cwd, spec.size)
 	if err != nil {
-		d.failFloatingLaunch(tb, generation, spec.userOpen, spec.sessionName, err)
+		d.failFloatingLaunch(sess, tb, generation, spec.userOpen, spec.sessionName, err)
 		return
 	}
 	p := newPaneWithStableID(layout.PaneID("floating"), spec.paneStableID, pty, spec.size)
@@ -402,7 +402,7 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 	d.installFloating(sess, tb, p, generation)
 }
 
-func (d *Daemon) failFloatingLaunch(tb *tab, generation uint64, userOpen bool, sessionName string, err error) {
+func (d *Daemon) failFloatingLaunch(sess *session, tb *tab, generation uint64, userOpen bool, sessionName string, err error) {
 	tb.mu.Lock()
 	current := tb.failFloatingLocked(generation)
 	tb.mu.Unlock()
@@ -412,6 +412,15 @@ func (d *Daemon) failFloatingLaunch(tb *tab, generation uint64, userOpen bool, s
 			kind = "user-open"
 		}
 		d.log.Warn("floating pty spawn failed", "err", err, "session", sessionName, "kind", kind)
+		// A background prewarm is speculative: the user never asked for it, so
+		// a toast here would be confusing noise. Only a user-initiated open
+		// (the user pressed the toggle-floating key) earns a toast; if a
+		// prewarm failure matters, the user's later open attempt will fail
+		// too and surface then.
+		if userOpen {
+			d.reportError(sess, domain.UserErr(domain.NoticeFloatingSpawn,
+				"couldn't open floating pane: command failed to start", err))
+		}
 	}
 }
 
