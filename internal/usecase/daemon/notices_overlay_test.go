@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -72,20 +73,22 @@ func TestNoticesJKNavigatesSelection(t *testing.T) {
 
 func TestNoticesQAndCtrlCCloseImmediatelyAndClearState(t *testing.T) {
 	for _, key := range []byte{'q', 0x03} {
-		p, release := newBlockingPTY(t)
-		d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-		d.notices.record(domain.Notification{Code: domain.NoticePaneSpawn, Message: "m", Time: time.Unix(1, 0)})
+		t.Run(fmt.Sprintf("key=%q", key), func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			defer release()
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			d.notices.record(domain.Notification{Code: domain.NoticePaneSpawn, Message: "m", Time: time.Unix(1, 0)})
 
-		d.enterNotices(sess, ac)
-		awaitFrame(t, sends, ports.MsgOutput)
-		require.True(t, ac.overlays.noticesActive())
+			d.enterNotices(sess, ac)
+			awaitFrame(t, sends, ports.MsgOutput)
+			require.True(t, ac.overlays.noticesActive())
 
-		d.handleInput(sess, ac, []byte{key})
-		awaitFrame(t, sends, ports.MsgOutput)
+			d.handleInput(sess, ac, []byte{key})
+			awaitFrame(t, sends, ports.MsgOutput)
 
-		require.False(t, ac.overlays.noticesActive())
-		require.Nil(t, ac.overlays.noticesOverlay)
-		release()
+			require.False(t, ac.overlays.noticesActive())
+			require.Nil(t, ac.overlays.noticesOverlay)
+		})
 	}
 }
 

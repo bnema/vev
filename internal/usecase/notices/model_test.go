@@ -157,11 +157,25 @@ func TestRenderEmptyHistoryShowsPlaceholderNotBlank(t *testing.T) {
 
 func TestRenderDegenerateDimensionsDoesNotPanic(t *testing.T) {
 	m := New([]domain.Notification{{Message: "x", Time: time.Unix(0, 0)}}, time.Unix(0, 0))
-	sizes := []domain.Size{{Cols: 0, Rows: 0}, {Cols: -1, Rows: 5}, {Cols: 5, Rows: -1}, {Cols: 0, Rows: 5}, {Cols: 1, Rows: 1}}
-	for _, size := range sizes {
-		frame := m.Render(size, testStyles())
-		if frame.Width < 0 || frame.Height < 0 {
-			t.Fatalf("Render(%+v) produced negative frame dims", size)
+	tests := []struct {
+		size       domain.Size
+		wantWidth  int
+		wantHeight int
+	}{
+		// Render clamps each negative dimension to 0 independently via
+		// max(inner.Cols, 0) / max(inner.Rows, 0); it never clamps the pair
+		// together, so a negative Cols with a valid Rows still yields a
+		// zero-width, full-height frame (and vice versa).
+		{domain.Size{Cols: 0, Rows: 0}, 0, 0},
+		{domain.Size{Cols: -1, Rows: 5}, 0, 5},
+		{domain.Size{Cols: 5, Rows: -1}, 5, 0},
+		{domain.Size{Cols: 0, Rows: 5}, 0, 5},
+		{domain.Size{Cols: 1, Rows: 1}, 1, 1},
+	}
+	for _, tt := range tests {
+		frame := m.Render(tt.size, testStyles())
+		if frame.Width != tt.wantWidth || frame.Height != tt.wantHeight {
+			t.Fatalf("Render(%+v) = frame{Width: %d, Height: %d}, want {Width: %d, Height: %d}", tt.size, frame.Width, frame.Height, tt.wantWidth, tt.wantHeight)
 		}
 	}
 }
