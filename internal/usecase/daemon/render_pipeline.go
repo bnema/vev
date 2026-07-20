@@ -151,7 +151,10 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: rows + 1, Width: width, Height: 1})
 		}
 	}
-	if state.overlays.active() {
+	// Toasts render even with no modal overlay active, so this gate also
+	// checks for pending notices rather than only state.overlays.active().
+	overlaysOrToasts := state.overlays.active() || len(state.overlays.notices) > 0
+	if overlaysOrToasts {
 		// Without a floating frame, overlay composition would otherwise mutate
 		// the base cache in place. Floating composition already owns a clone.
 		if !state.floating.visible {
@@ -159,7 +162,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		}
 		frame, damage = composeCapturedOverlays(state, frame, damage, content)
 	}
-	if full || state.overlays.active() {
+	if full || overlaysOrToasts {
 		damage = []renderer.Damage{renderer.FullRedraw()}
 	}
 	cursorInputs := state.cursor
@@ -199,6 +202,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	o := &state.overlays
 	o.copyActive, o.copySearchActive, o.pickerActive, o.paletteActive, o.promptActive = snap.copyActive, snap.copySearchModel != nil, snap.pickerActive, snap.paletteActive, snap.promptActive
 	o.copyMode = snap.copyMode
+	o.notices, o.noticeOverflow = snap.notices, snap.noticeOverflow
 	if snap.copyPane != nil {
 		o.copyPaneID = snap.copyPane.id
 	}
@@ -276,7 +280,26 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 		}
 		damage = []renderer.Damage{renderer.FullRedraw()}
 	}
+	if len(o.notices) > 0 || o.noticeOverflow > 0 {
+		views := make([]ui.NoticeView, len(o.notices))
+		for i, n := range o.notices {
+			views[i] = ui.NoticeView{Severity: uint8(n.Severity), Title: n.Code.String(), Message: n.Message, Count: n.Count}
+		}
+		ui.ComposeNotices(frame, views, o.noticeOverflow, noticeStylesFrom(state.styles))
+	}
 	return frame, damage
+}
+
+// noticeStylesFrom picks the toast box color per severity from the theme's
+// existing chrome roles. A first pass: dedicated notice styling is out of
+// scope here.
+func noticeStylesFrom(styles themeui.Styles) ui.NoticeStyles {
+	return ui.NoticeStyles{
+		Text:     styles.PickerBase,
+		BoxError: styles.BorderActive,
+		BoxWarn:  styles.BorderMuted,
+		BoxInfo:  styles.BorderMuted,
+	}
 }
 
 func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte {

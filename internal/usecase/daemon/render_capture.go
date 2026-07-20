@@ -91,6 +91,8 @@ type capturedOverlayRenderState struct {
 	copyFeedback                                                            string
 	paletteGuidance                                                         string
 	copySearch, picker, palette, prompt                                     capturedModal
+	notices                                                                 []domain.Notification
+	noticeOverflow                                                          int
 }
 
 type capturedModal struct {

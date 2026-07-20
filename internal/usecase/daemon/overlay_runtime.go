@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
@@ -243,6 +244,9 @@ type overlayRenderSnapshot struct {
 	promptActive bool
 	promptModel  *promptui.Model
 	promptLocked bool
+
+	notices        []domain.Notification
+	noticeOverflow int
 }
 
 // SnapshotForRender captures the overlay state needed by paint.
@@ -256,6 +260,18 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 	if rt == nil {
 		return snap
 	}
+
+	// noticeMu is innermost and never held across render, so it is taken and
+	// released here rather than tracked like paletteMu/promptMu below.
+	rt.noticeMu.Lock()
+	if len(rt.noticeToasts) > 0 {
+		snap.notices = make([]domain.Notification, len(rt.noticeToasts))
+		for i, t := range rt.noticeToasts {
+			snap.notices[i] = t.n
+		}
+	}
+	snap.noticeOverflow = rt.noticeOverflow
+	rt.noticeMu.Unlock()
 
 	rt.copyMu.Lock()
 	snap.copyActive = rt.copyMode != nil
