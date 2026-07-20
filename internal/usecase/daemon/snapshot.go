@@ -579,6 +579,11 @@ func (d *Daemon) startSnapshotEncodeWorker() {
 			d.clearSnapshotWorkerInFlight(workerID, capture)
 			if err != nil && workerCtx.Err() == nil {
 				d.log.Warn("writing session snapshot failed", "err", err, "session", capture.name)
+				// Global, not session-scoped: by now the session may already be
+				// torn down, so a session notice would be dead-on-arrival. No lock
+				// is held here (clearSnapshotWorkerInFlight released its own).
+				d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotWrite,
+					"couldn't save session "+capture.name+"; recent state may be lost on restart", err)
 			}
 			d.finishSnapshotCapture(capture, err == nil && workerCtx.Err() == nil)
 			return workerCtx.Err() == nil
