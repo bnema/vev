@@ -13,6 +13,17 @@ type barScriptExecutor interface {
 	run(ctx context.Context, command string, env []string, scriptCtx barScriptContext) (string, error)
 }
 
+// Anchor names, exported to bar scripts as VEV_ANCHOR and documented in
+// docs/configuration.md. barAnchors must list every anchor so cleanup in
+// clearBarScriptsForSession stays in sync with the anchors run in
+// runBarScripts.
+const (
+	barAnchorTopRight    = "top-right"
+	barAnchorBottomRight = "bottom-right"
+)
+
+var barAnchors = []string{barAnchorTopRight, barAnchorBottomRight}
+
 type barScriptConfig struct {
 	topRight    string
 	bottomRight string
@@ -207,8 +218,9 @@ func (d *Daemon) clearBarScriptsForSession(id domain.SessionID) {
 	delete(d.barScripts.lastContext, id)
 	delete(d.barScripts.running, id)
 	delete(d.barScripts.pending, id)
-	delete(d.barScripts.lastFailure, barScriptFailureKey{id: id, anchor: "top-right"})
-	delete(d.barScripts.lastFailure, barScriptFailureKey{id: id, anchor: "bottom-right"})
+	for _, anchor := range barAnchors {
+		delete(d.barScripts.lastFailure, barScriptFailureKey{id: id, anchor: anchor})
+	}
 }
 
 // shouldLogBarFailure reports whether this failure differs from the last one
@@ -329,8 +341,8 @@ func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barS
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	top, topOK := d.runOneBarScript(ctx, runner, cfg.topRight, env, base, "top-right", sess)
-	bottom, bottomOK := d.runOneBarScript(ctx, runner, cfg.bottomRight, env, base, "bottom-right", sess)
+	top, topOK := d.runOneBarScript(ctx, runner, cfg.topRight, env, base, barAnchorTopRight, sess)
+	bottom, bottomOK := d.runOneBarScript(ctx, runner, cfg.bottomRight, env, base, barAnchorBottomRight, sess)
 	d.barScripts.mu.Lock()
 	d.barScripts.initLocked()
 	if !d.barScripts.running[sess.id] || d.barScripts.version != version {
