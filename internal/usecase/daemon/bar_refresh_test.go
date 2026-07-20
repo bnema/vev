@@ -12,7 +12,9 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -434,53 +436,49 @@ func TestBarScriptRefreshIsPerSession(t *testing.T) {
 	require.Equal(t, "bottom-b", stateB.bottomRight)
 }
 
-// pollerFakeTimer is a manually-fired timer for barScriptPoller tests. Its
-// channel is buffered so the test goroutine can push a tick before the
-// poller reaches its select without blocking.
-type pollerFakeTimer struct {
-	ch chan time.Time
+// pollerMockClock and pollerMockTimer wrap the generated portsmocks.MockClock
+// and portsmocks.MockTimer (see internal/ports/mocks/clock_mock.go), following
+// the coordinatorMockClock pattern in render_coordinator_test.go: the mocks
+// supply the ports.Clock/ports.Timer implementations, while a small
+// hand-owned struct retains the real channel and requested duration for each
+// timer so the test goroutine can fire ticks and assert on re-arming.
+type pollerMockClock struct {
+	clock  *portsmocks.MockClock
+	timers chan *pollerMockTimer
 }
 
-func (t *pollerFakeTimer) C() <-chan time.Time      { return t.ch }
-func (t *pollerFakeTimer) Reset(time.Duration) bool { return true }
-func (t *pollerFakeTimer) Stop() bool               { return true }
-
-// pollerFakeClock records every timer barScriptPoller creates, along with the
-// duration requested, so a test can assert on re-arming behavior without real
-// sleeps or waiting out domain.MinBarInterval. NewTimer runs on the poller
-// goroutine while the test goroutine reads via count/at, so all access is
-// mutex-guarded; nothing here calls testify from the poller goroutine.
-type pollerFakeClock struct {
-	mu     sync.Mutex
-	timers []*pollerFakeTimer
-	durs   []time.Duration
+type pollerMockTimer struct {
+	mock     *portsmocks.MockTimer
+	ch       chan time.Time
+	duration time.Duration
 }
 
-func (c *pollerFakeClock) Now() time.Time { return time.Unix(0, 0) }
-
-func (c *pollerFakeClock) NewTimer(d time.Duration) ports.Timer {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	t := &pollerFakeTimer{ch: make(chan time.Time, 1)}
-	c.timers = append(c.timers, t)
-	c.durs = append(c.durs, d)
-	return t
-}
-
-func (c *pollerFakeClock) count() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.timers)
-}
-
-func (c *pollerFakeClock) at(i int) (*pollerFakeTimer, time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.timers[i], c.durs[i]
+func newPollerMockClock(t *testing.T, capacity int) *pollerMockClock {
+	t.Helper()
+	clk := &pollerMockClock{
+		clock:  portsmocks.NewMockClock(t),
+		timers: make(chan *pollerMockTimer, capacity),
+	}
+	clk.clock.EXPECT().Now().Return(time.Unix(0, 0)).Maybe()
+	clk.clock.EXPECT().NewTimer(mock.Anything).RunAndReturn(func(d time.Duration) ports.Timer {
+		timer := &pollerMockTimer{
+			mock:     portsmocks.NewMockTimer(t),
+			duration: d,
+			ch:       make(chan time.Time, 1),
+		}
+		// Stop is called 0, 1, or 2 times per timer depending on whether it is
+		// replaced mid-loop or torn down by the poller's deferred Stop on
+		// exit, so its expectation is unconstrained.
+		timer.mock.EXPECT().C().Maybe().Return((<-chan time.Time)(timer.ch))
+		timer.mock.EXPECT().Stop().Maybe().Return(true)
+		clk.timers <- timer
+		return timer.mock
+	}).Maybe()
+	return clk
 }
 
 // TestBarScriptPollerRearmsTicksReloadsAndExitsOnCancel drives barScriptPoller
-// directly (not through Serve) with a fake clock, covering the three
+// directly (not through Serve) with a mock clock, covering the three
 // behaviors the Task 5 rewrite touched but left untested:
 //
 //  1. after a tick fires, the loop arms a NEW timer instead of blocking
@@ -489,9 +487,9 @@ func (c *pollerFakeClock) at(i int) (*pollerFakeTimer, time.Duration) {
 //     rather than the one the poller started with, and
 //  3. cancelling the context makes the goroutine return instead of leaking.
 func TestBarScriptPollerRearmsTicksReloadsAndExitsOnCancel(t *testing.T) {
-	clk := &pollerFakeClock{}
+	clk := newPollerMockClock(t, 8)
 	d := newBarRefreshTestDaemon(&fakeBarRunner{}, 2*time.Second)
-	d.clock = clk
+	d.clock = clk.clock
 	d.barScripts.reload = make(chan struct{}, 1)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -502,16 +500,23 @@ func TestBarScriptPollerRearmsTicksReloadsAndExitsOnCancel(t *testing.T) {
 	}()
 
 	// Stage 1: the poller arms its first timer at the configured interval.
-	require.Eventually(t, func() bool { return clk.count() >= 1 }, time.Second, time.Millisecond)
-	_, dur0 := clk.at(0)
-	require.Equal(t, 2*time.Second, dur0)
+	var timer0 *pollerMockTimer
+	select {
+	case timer0 = <-clk.timers:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the poller's initial timer")
+	}
+	require.Equal(t, 2*time.Second, timer0.duration)
 
 	// Stage 2: firing that timer processes the tick and re-arms a new one.
-	timer0, _ := clk.at(0)
 	timer0.ch <- time.Unix(0, 0)
-	require.Eventually(t, func() bool { return clk.count() >= 2 }, time.Second, time.Millisecond)
-	_, dur1 := clk.at(1)
-	require.Equal(t, 2*time.Second, dur1, "tick re-arm should keep the same interval when config is unchanged")
+	var timer1 *pollerMockTimer
+	select {
+	case timer1 = <-clk.timers:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the poller to re-arm after a tick")
+	}
+	require.Equal(t, 2*time.Second, timer1.duration, "tick re-arm should keep the same interval when config is unchanged")
 
 	// Stage 3: changing the interval and signaling reload re-arms at the NEW
 	// interval instead of waiting out the timer armed under the old one.
@@ -519,20 +524,21 @@ func TestBarScriptPollerRearmsTicksReloadsAndExitsOnCancel(t *testing.T) {
 	d.barScripts.cfg.interval = 7 * time.Second
 	d.barScripts.mu.Unlock()
 	d.barScripts.reload <- struct{}{}
-	require.Eventually(t, func() bool { return clk.count() >= 3 }, time.Second, time.Millisecond)
-	_, dur2 := clk.at(2)
-	require.Equal(t, 7*time.Second, dur2, "reload should re-arm at the newly configured interval")
+	var timer2 *pollerMockTimer
+	select {
+	case timer2 = <-clk.timers:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the poller to re-arm after reload")
+	}
+	require.Equal(t, 7*time.Second, timer2.duration, "reload should re-arm at the newly configured interval")
 
 	// Stage 4: cancelling the context exits the goroutine instead of leaking it.
 	cancel()
-	require.Eventually(t, func() bool {
-		select {
-		case <-done:
-			return true
-		default:
-			return false
-		}
-	}, time.Second, time.Millisecond, "barScriptPoller should exit promptly after context cancellation")
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("barScriptPoller did not exit after context cancellation")
+	}
 }
 
 func TestApplyConfigSignalsPollerReload(t *testing.T) {
