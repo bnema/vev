@@ -213,6 +213,34 @@ func TestApplyConfigPreservesBarOutputsWhenBarConfigUnchanged(t *testing.T) {
 	require.Equal(t, "bottom-good", state.bottomRight)
 }
 
+func TestRefreshBarScriptsAllSessionsForcesRun(t *testing.T) {
+	r := &fakeBarRunner{outs: []string{"top1", "bottom1"}}
+	d := newBarRefreshTestDaemon(r, 60*time.Second)
+	sess := newBarRefreshTestSession()
+	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+	d.sessions = map[domain.SessionID]*session{sess.id: sess}
+
+	// Nothing has run yet, and the 60s interval means a non-forced tick would
+	// not be due for a long time.
+	d.refreshBarScriptsAllSessions()
+	waitBarRefreshIdle(t, d)
+
+	require.Len(t, r.calls, 2, "should force a run for every live session")
+	require.Equal(t, "top1", d.barStateFor(sess, "").topRight)
+}
+
+func TestApplyConfigBumpsVersionOnlyWhenBarConfigChanges(t *testing.T) {
+	r := &fakeBarRunner{}
+	d := newBarRefreshTestDaemon(r, time.Second)
+
+	before := d.barScripts.version
+	d.ApplyConfig(domain.Config{Bar: domain.BarConfig{TopRight: "top", BottomRight: "bottom", Interval: time.Second}})
+	require.Equal(t, before, d.barScripts.version, "identical bar config must not invalidate")
+
+	d.ApplyConfig(domain.Config{Bar: domain.BarConfig{TopRight: "changed", BottomRight: "bottom", Interval: time.Second}})
+	require.Equal(t, before+1, d.barScripts.version, "changed bar config must invalidate")
+}
+
 func TestBarScriptFailureLogsAndRetainsLastGood(t *testing.T) {
 	var logs bytes.Buffer
 	r := &fakeBarRunner{outs: []string{"top-good", "bottom-good"}}

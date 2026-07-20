@@ -150,6 +150,19 @@ func (d *Daemon) barScriptPoller(ctx context.Context) {
 	}
 }
 
+// refreshBarScriptsAllSessions forces a bar-script run for every live session.
+// Called after a config change so a new command takes effect immediately rather
+// than leaving the anchor blank until the poller's next tick.
+func (d *Daemon) refreshBarScriptsAllSessions() {
+	if d == nil || d.barScripts == nil || d.clock == nil {
+		return
+	}
+	now := d.clock.Now()
+	for _, sess := range d.sessionsSnapshot() {
+		d.refreshBarScriptsIfDue(sess, now, true)
+	}
+}
+
 func (d *Daemon) sessionsSnapshot() []*session {
 	d.mu.Lock()
 	defer d.mu.Unlock()
