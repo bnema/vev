@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -113,6 +114,20 @@ func noticeTTL(sev domain.NoticeSeverity) time.Duration {
 	}
 }
 
+// slogLevelFor maps a notice severity to the slog level it should log at, so
+// routine info notices (e.g. a successful clipboard copy) don't drown out
+// real warnings at the default VEV_LOG=info verbosity.
+func slogLevelFor(sev domain.NoticeSeverity) slog.Level {
+	switch sev {
+	case domain.NoticeInfo:
+		return slog.LevelInfo
+	case domain.NoticeWarn:
+		return slog.LevelWarn
+	default:
+		return slog.LevelError
+	}
+}
+
 // noticeDetails renders the full Unwrap chain for the yank/history views. The
 // toast itself never shows this — only the UserError's own message.
 func noticeDetails(err error) string {
@@ -167,7 +182,7 @@ func (d *Daemon) notify(sess *session, sev domain.NoticeSeverity, code domain.No
 		n.SessionID = sess.id
 	}
 	n = d.notices.record(n)
-	d.log.Warn("user notice", "code", code.String(), "severity", sev, "msg", msg, "err", cause)
+	d.log.Log(d.serveCtx, slogLevelFor(sev), "user notice", "code", code.String(), "severity", sev, "msg", msg, "err", cause)
 
 	if sess != nil {
 		sess.mu.Lock()

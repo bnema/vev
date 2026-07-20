@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -440,6 +441,48 @@ func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
 	require.Equal(t, domain.NoticeSnapshotWrite, drained[0].Code)
 	require.Equal(t, "snapshot write failed", drained[0].Message)
 	require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
+}
+
+// levelCaptureHandler records the slog.Level of every record it's handed, so
+// tests can assert on log verbosity without parsing formatted output.
+type levelCaptureHandler struct {
+	mu     sync.Mutex
+	levels []slog.Level
+}
+
+func (h *levelCaptureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *levelCaptureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.levels = append(h.levels, r.Level)
+	return nil
+}
+
+func (h *levelCaptureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *levelCaptureHandler) WithGroup(string) slog.Handler      { return h }
+
+func TestNotifyLogsAtSeverityLevel(t *testing.T) {
+	tests := []struct {
+		name string
+		sev  domain.NoticeSeverity
+		want slog.Level
+	}{
+		{"info severity logs at info", domain.NoticeInfo, slog.LevelInfo},
+		{"warn severity logs at warn", domain.NoticeWarn, slog.LevelWarn},
+		{"error severity logs at error", domain.NoticeError, slog.LevelError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, newNoticeClock())
+			capture := &levelCaptureHandler{}
+			d.log = slog.New(capture)
+
+			d.notify(nil, tt.sev, domain.NoticeClipboard, "msg", nil)
+
+			require.Equal(t, []slog.Level{tt.want}, capture.levels)
+		})
+	}
 }
 
 func TestShowToastCoalesceAndTrim(t *testing.T) {
