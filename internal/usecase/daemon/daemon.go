@@ -146,6 +146,7 @@ type Daemon struct {
 	tabsConfig              atomic.Pointer[domain.TabsConfig]
 	themeConfig             atomic.Pointer[themeConfigSnapshot]
 	barScripts              *barScriptState
+	notices                 *noticeCenter
 	resumeParkGrace         time.Duration
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
@@ -350,6 +351,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		animWake:        make(chan struct{}, 1),
 		snapshotMarshal: snapcodec.Marshal,
 		snapshotJobs:    make(chan *snapshotCapture, snapshotQueueCapacity),
+		notices:         newNoticeCenter(),
 		resumeParkGrace: defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),

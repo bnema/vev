@@ -589,6 +589,12 @@ func (d *Daemon) retireReplacedClient(old *attachedClient, cleanup renderLifecyc
 // emits a full redraw. Attach must not wait for the resize-idle fallback
 // timer.
 func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain.Size) {
+	// Global notices raised while nothing was attached surface on this client.
+	// Drained before the early return below so a session without an active tab
+	// cannot swallow the queue.
+	for _, n := range d.notices.drainPending() {
+		d.showToast(ac, n)
+	}
 	tb := sess.activeTab()
 	if tb == nil {
 		return

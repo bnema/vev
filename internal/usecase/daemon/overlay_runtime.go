@@ -48,6 +48,16 @@ type overlayRuntime struct {
 	copyPointer       copyPointerState
 	copyClick         copyClickCandidate
 	copyPointerEpoch  uint64
+
+	// noticeMu is the innermost overlay lock: it guards the toast fields below
+	// and nothing is ever locked, sent, or rendered while it is held. The only
+	// permitted nesting is sendMu -> noticeMu (rendering reads the toasts).
+	noticeMu       sync.Mutex
+	noticeToasts   []noticeToast
+	noticeOverflow int
+	// noticeSeq numbers toast entries so an already-fired expiry timer cannot
+	// dismiss the refreshed entry that replaced the one it belonged to.
+	noticeSeq uint64
 }
 
 type copyPointerState struct {
