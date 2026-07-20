@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRunnerRun(t *testing.T) {
@@ -19,7 +20,7 @@ func TestRunnerRun(t *testing.T) {
 	}{
 		{name: "success", command: "printf 'ok'", limit: 1024, want: "ok"},
 		{name: "bounded stdout", command: "yes a | head -c 4096", limit: 8, want: "a\na\na\na\n"},
-		{name: "stderr discarded", command: "printf out; printf err >&2", limit: 1024, want: "out"},
+		{name: "stderr does not leak into stdout", command: "printf out; printf err >&2", limit: 1024, want: "out"},
 		{name: "zero limit captures nothing", command: "printf output", limit: 0, want: ""},
 		{name: "negative limit captures nothing", command: "printf output", limit: -1, want: ""},
 	}
@@ -32,8 +33,8 @@ func TestRunnerRun(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Run() error = %v", err)
 			}
-			if string(got) != tt.want {
-				t.Fatalf("Run() = %q, want %q", string(got), tt.want)
+			if string(got.Stdout) != tt.want {
+				t.Fatalf("Run() = %q, want %q", string(got.Stdout), tt.want)
 			}
 		})
 	}
@@ -47,8 +48,8 @@ func TestRunnerRunReturnsPartialStdoutOnError(t *testing.T) {
 	if err == nil {
 		t.Fatal("Run() error = nil, want non-zero exit error")
 	}
-	if string(got) != "abc" {
-		t.Fatalf("Run() = %q, want bounded partial stdout %q", string(got), "abc")
+	if string(got.Stdout) != "abc" {
+		t.Fatalf("Run() = %q, want bounded partial stdout %q", string(got.Stdout), "abc")
 	}
 }
 
@@ -101,7 +102,69 @@ func TestRunnerRunUsesProvidedEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if strings.TrimSpace(string(got)) != "from-env" {
-		t.Fatalf("Run() env output = %q, want from-env", string(got))
+	if strings.TrimSpace(string(got.Stdout)) != "from-env" {
+		t.Fatalf("Run() env output = %q, want from-env", string(got.Stdout))
 	}
+}
+
+func TestRunnerCapturesStderrAndExitCode(t *testing.T) {
+	tests := []struct {
+		name         string
+		command      string
+		wantExitCode int
+		wantStderr   string
+		wantStdout   string
+	}{
+		{
+			name:         "command not found reports 127 and stderr",
+			command:      "definitely-not-a-real-command-xyz",
+			wantExitCode: 127,
+			wantStderr:   "not found",
+		},
+		{
+			name:         "explicit exit code with stderr",
+			command:      "echo oops >&2; exit 3",
+			wantExitCode: 3,
+			wantStderr:   "oops",
+		},
+		{
+			name:         "success reports zero and stdout",
+			command:      "echo hello",
+			wantExitCode: 0,
+			wantStdout:   "hello",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := New().Run(context.Background(), ports.CommandSpec{
+				Command:     tc.command,
+				Timeout:     5 * time.Second,
+				StdoutLimit: 1024,
+				StderrLimit: 1024,
+			})
+			if tc.wantExitCode == 0 {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+			require.Equal(t, tc.wantExitCode, res.ExitCode)
+			if tc.wantStderr != "" {
+				require.Contains(t, string(res.Stderr), tc.wantStderr)
+			}
+			if tc.wantStdout != "" {
+				require.Contains(t, string(res.Stdout), tc.wantStdout)
+			}
+		})
+	}
+}
+
+func TestRunnerBoundsStderr(t *testing.T) {
+	res, _ := New().Run(context.Background(), ports.CommandSpec{
+		Command:     "yes badness 2>/dev/null | head -c 100000 >&2",
+		Timeout:     5 * time.Second,
+		StdoutLimit: 1024,
+		StderrLimit: 64,
+	})
+	require.Equal(t, 64, len(res.Stderr), "stderr must be captured and truncated to StderrLimit")
 }

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -9,8 +10,19 @@ import (
 )
 
 type barScriptExecutor interface {
-	run(context.Context, string, barScriptContext) (string, error)
+	run(ctx context.Context, command string, env []string, scriptCtx barScriptContext) (string, error)
 }
+
+// Anchor names, exported to bar scripts as VEV_ANCHOR and documented in
+// docs/configuration.md. barAnchors must list every anchor so cleanup in
+// clearBarScriptsForSession stays in sync with the anchors run in
+// runBarScripts.
+const (
+	barAnchorTopRight    = "top-right"
+	barAnchorBottomRight = "bottom-right"
+)
+
+var barAnchors = []string{barAnchorTopRight, barAnchorBottomRight}
 
 type barScriptConfig struct {
 	topRight    string
@@ -23,6 +35,11 @@ type barScriptOutputs struct {
 	bottomRight string
 }
 
+type barScriptFailureKey struct {
+	id     domain.SessionID
+	anchor string
+}
+
 type barScriptState struct {
 	mu          sync.Mutex
 	cfg         barScriptConfig
@@ -32,7 +49,12 @@ type barScriptState struct {
 	lastContext map[domain.SessionID]barScriptContext
 	running     map[domain.SessionID]bool
 	pending     map[domain.SessionID]bool
+	lastFailure map[barScriptFailureKey]string
 	version     uint64
+
+	// reload wakes barScriptPoller so an interval change takes effect without
+	// waiting out the timer armed under the previous interval.
+	reload chan struct{}
 }
 
 func effectiveBarInterval(d time.Duration) time.Duration {
@@ -65,6 +87,9 @@ func (s *barScriptState) initLocked() {
 	if s.pending == nil {
 		s.pending = make(map[domain.SessionID]bool)
 	}
+	if s.lastFailure == nil {
+		s.lastFailure = make(map[barScriptFailureKey]string)
+	}
 }
 
 func (d *Daemon) barScriptSnapshot(sess *session) (string, string) {
@@ -86,13 +111,17 @@ func (d *Daemon) barScriptInterval() time.Duration {
 	return effectiveBarInterval(d.barScripts.cfg.interval)
 }
 
-func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScriptContext, bool) {
+func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScriptContext, []string, bool) {
 	ctx := barScriptContext{Anchor: anchor}
 	if sess == nil {
-		return ctx, false
+		return ctx, nil, false
 	}
 	sess.mu.Lock()
 	ctx.Session = sess.name
+	// No copy needed: writers always replace sess.env with a whole fresh
+	// slice under sess.mu (daemon.go, resume.go), and nothing mutates the
+	// backing array in place, so capturing the header here is safe.
+	env := sess.env
 	active := sess.active
 	var tb *tab
 	if active >= 0 && active < len(sess.tabs) {
@@ -102,7 +131,7 @@ func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScrip
 	ctx.PaneCWD = sess.cwd
 	sess.mu.Unlock()
 	if ac == nil || tb == nil {
-		return ctx, false
+		return ctx, env, false
 	}
 	tb.mu.Lock()
 	ctx.Tab = tb.stableID
@@ -120,22 +149,51 @@ func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScrip
 			ctx.PaneCWD = cwd
 		}
 	}
-	return ctx, true
+	return ctx, env, true
+}
+
+// signalBarPollerReload wakes the poller without blocking. The channel is
+// buffered to one, so a pending signal already conveys "config changed".
+func (d *Daemon) signalBarPollerReload() {
+	if d == nil || d.barScripts == nil || d.barScripts.reload == nil {
+		return
+	}
+	select {
+	case d.barScripts.reload <- struct{}{}:
+	default:
+	}
 }
 
 func (d *Daemon) barScriptPoller(ctx context.Context) {
 	timer := d.clock.NewTimer(d.barScriptInterval())
-	defer timer.Stop()
+	defer func() { timer.Stop() }()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-d.barScripts.reload:
+			timer.Stop()
+			timer = d.clock.NewTimer(d.barScriptInterval())
 		case now := <-timer.C():
 			for _, sess := range d.sessionsSnapshot() {
 				d.refreshBarScriptsIfDue(sess, now, false)
 			}
-			timer.Reset(d.barScriptInterval())
+			timer.Stop()
+			timer = d.clock.NewTimer(d.barScriptInterval())
 		}
+	}
+}
+
+// refreshBarScriptsAllSessions forces a bar-script run for every live session.
+// Called after a config change so a new command takes effect immediately rather
+// than leaving the anchor blank until the poller's next tick.
+func (d *Daemon) refreshBarScriptsAllSessions() {
+	if d == nil || d.barScripts == nil || d.clock == nil {
+		return
+	}
+	now := d.clock.Now()
+	for _, sess := range d.sessionsSnapshot() {
+		d.refreshBarScriptsIfDue(sess, now, true)
 	}
 }
 
@@ -160,15 +218,43 @@ func (d *Daemon) clearBarScriptsForSession(id domain.SessionID) {
 	delete(d.barScripts.lastContext, id)
 	delete(d.barScripts.running, id)
 	delete(d.barScripts.pending, id)
+	for _, anchor := range barAnchors {
+		delete(d.barScripts.lastFailure, barScriptFailureKey{id: id, anchor: anchor})
+	}
+}
+
+// shouldLogBarFailure reports whether this failure differs from the last one
+// logged for the same session and anchor, so a persistently broken script
+// warns once instead of every refresh interval.
+func (d *Daemon) shouldLogBarFailure(id domain.SessionID, anchor, signature string) bool {
+	d.barScripts.mu.Lock()
+	defer d.barScripts.mu.Unlock()
+	d.barScripts.initLocked()
+	key := barScriptFailureKey{id: id, anchor: anchor}
+	if d.barScripts.lastFailure[key] == signature {
+		return false
+	}
+	d.barScripts.lastFailure[key] = signature
+	return true
+}
+
+func (d *Daemon) clearBarFailure(id domain.SessionID, anchor string) {
+	d.barScripts.mu.Lock()
+	defer d.barScripts.mu.Unlock()
+	d.barScripts.initLocked()
+	delete(d.barScripts.lastFailure, barScriptFailureKey{id: id, anchor: anchor})
 }
 
 func (d *Daemon) refreshBarScriptsIfDue(sess *session, now time.Time, force bool) bool {
 	if d == nil || d.barScripts == nil || sess == nil {
 		return false
 	}
-	baseCtx, ok := d.collectBarScriptContext(sess, "")
+	baseCtx, env, ok := d.collectBarScriptContext(sess, "")
 	if !ok {
 		return false
+	}
+	if len(env) == 0 {
+		env = d.baseEnv
 	}
 	d.barScripts.mu.Lock()
 	d.barScripts.initLocked()
@@ -213,7 +299,7 @@ func (d *Daemon) refreshBarScriptsIfDue(sess *session, now time.Time, force bool
 	runner := d.barScripts.runner
 	version := d.barScripts.version
 	d.barScripts.mu.Unlock()
-	go d.runBarScripts(sess, runner, cfg, baseCtx, version)
+	go d.runBarScripts(sess, runner, cfg, baseCtx, env, version)
 	return true
 }
 
@@ -247,16 +333,16 @@ func (d *Daemon) scheduleBarScriptRefreshLocked(sess *session, delay time.Durati
 	}()
 }
 
-func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barScriptConfig, base barScriptContext, version uint64) {
+func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barScriptConfig, base barScriptContext, env []string, version uint64) {
 	if runner == nil {
-		runner = barScriptRunner{baseEnv: d.baseEnv}
+		runner = barScriptRunner{}
 	}
 	ctx := sess.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	top, topOK := d.runOneBarScript(ctx, runner, cfg.topRight, base, "top-right", sess.name)
-	bottom, bottomOK := d.runOneBarScript(ctx, runner, cfg.bottomRight, base, "bottom-right", sess.name)
+	top, topOK := d.runOneBarScript(ctx, runner, cfg.topRight, env, base, barAnchorTopRight, sess)
+	bottom, bottomOK := d.runOneBarScript(ctx, runner, cfg.bottomRight, env, base, barAnchorBottomRight, sess)
 	d.barScripts.mu.Lock()
 	d.barScripts.initLocked()
 	if !d.barScripts.running[sess.id] || d.barScripts.version != version {
@@ -287,19 +373,44 @@ func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barS
 	}
 }
 
-func (d *Daemon) runOneBarScript(ctx context.Context, runner barScriptExecutor, command string, base barScriptContext, anchor, sessionName string) (string, bool) {
+func (d *Daemon) runOneBarScript(ctx context.Context, runner barScriptExecutor, command string, env []string, base barScriptContext, anchor string, sess *session) (string, bool) {
 	if command == "" {
 		return "", true
 	}
 	base.Anchor = anchor
-	out, err := runner.run(ctx, command, base)
+	out, err := runner.run(ctx, command, env, base)
 	if err != nil {
-		if d.log != nil {
-			d.log.Warn("bar script failed; keeping last good output", "anchor", anchor, "session", sessionName, "err", err)
-		}
+		d.logBarScriptFailure(sess, base.Session, anchor, command, env, err)
 		return "", false
 	}
+	d.clearBarFailure(sess.id, anchor)
 	return out, true
+}
+
+// logBarScriptFailure logs a bar script failure. sessionName must come from a
+// synchronized read of sess.name (e.g. base.Session, captured under sess.mu
+// in collectBarScriptContext) since sess.name is mutable via session rename.
+func (d *Daemon) logBarScriptFailure(sess *session, sessionName, anchor, command string, env []string, err error) {
+	if d.log == nil {
+		return
+	}
+	if !d.shouldLogBarFailure(sess.id, anchor, err.Error()) {
+		return
+	}
+	attrs := []any{"anchor", anchor, "session", sessionName, "command", command, "err", err}
+	var scriptErr *barScriptError
+	if errors.As(err, &scriptErr) {
+		attrs = append(attrs, "exit_code", scriptErr.exitCode)
+		if scriptErr.stderr != "" {
+			attrs = append(attrs, "stderr", scriptErr.stderr)
+		}
+		if scriptErr.exitCode == 127 {
+			attrs = append(attrs, "hint",
+				"command not found on the daemon's PATH; use an absolute path or ensure it is on the attaching client's PATH",
+				"PATH", pathFromEnv(env))
+		}
+	}
+	d.log.Warn("bar script failed; keeping last good output", attrs...)
 }
 
 func (d *Daemon) pokeSessionRender(sess *session) {

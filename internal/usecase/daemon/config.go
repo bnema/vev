@@ -57,6 +57,7 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	tabs := cfg.Tabs
 	d.tabsConfig.Store(&tabs)
 	d.storeThemeConfig(cfg)
+	barChanged := false
 	if d.barScripts != nil {
 		d.barScripts.mu.Lock()
 		d.barScripts.initLocked()
@@ -67,9 +68,15 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 			d.barScripts.lastRefresh = make(map[domain.SessionID]time.Time)
 			d.barScripts.lastContext = make(map[domain.SessionID]barScriptContext)
 			d.barScripts.pending = make(map[domain.SessionID]bool)
+			d.barScripts.lastFailure = make(map[barScriptFailureKey]string)
 			d.barScripts.version++
+			barChanged = true
 		}
 		d.barScripts.mu.Unlock()
+	}
+	if barChanged {
+		d.signalBarPollerReload()
+		d.refreshBarScriptsAllSessions()
 	}
 	d.reapplyThemeAllSessions()
 	d.repaintAllAttachedClients()

@@ -283,7 +283,7 @@ func WithTempDir(dir string) Option {
 func WithBarScriptCommandRunner(runner ports.ShellCommandRunner) Option {
 	return func(d *Daemon) {
 		if runner != nil {
-			d.barScripts.runner = barScriptRunner{runner: runner, baseEnv: d.baseEnv}
+			d.barScripts.runner = barScriptRunner{runner: runner}
 		}
 	}
 }
@@ -357,6 +357,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 			lastRefresh: make(map[domain.SessionID]time.Time),
 			lastContext: make(map[domain.SessionID]barScriptContext),
 			running:     make(map[domain.SessionID]bool),
+			reload:      make(chan struct{}, 1),
 		},
 	}
 	defaults := domain.Defaults()
