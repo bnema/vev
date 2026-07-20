@@ -434,6 +434,107 @@ func TestBarScriptRefreshIsPerSession(t *testing.T) {
 	require.Equal(t, "bottom-b", stateB.bottomRight)
 }
 
+// pollerFakeTimer is a manually-fired timer for barScriptPoller tests. Its
+// channel is buffered so the test goroutine can push a tick before the
+// poller reaches its select without blocking.
+type pollerFakeTimer struct {
+	ch chan time.Time
+}
+
+func (t *pollerFakeTimer) C() <-chan time.Time      { return t.ch }
+func (t *pollerFakeTimer) Reset(time.Duration) bool { return true }
+func (t *pollerFakeTimer) Stop() bool               { return true }
+
+// pollerFakeClock records every timer barScriptPoller creates, along with the
+// duration requested, so a test can assert on re-arming behavior without real
+// sleeps or waiting out domain.MinBarInterval. NewTimer runs on the poller
+// goroutine while the test goroutine reads via count/at, so all access is
+// mutex-guarded; nothing here calls testify from the poller goroutine.
+type pollerFakeClock struct {
+	mu     sync.Mutex
+	timers []*pollerFakeTimer
+	durs   []time.Duration
+}
+
+func (c *pollerFakeClock) Now() time.Time { return time.Unix(0, 0) }
+
+func (c *pollerFakeClock) NewTimer(d time.Duration) ports.Timer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t := &pollerFakeTimer{ch: make(chan time.Time, 1)}
+	c.timers = append(c.timers, t)
+	c.durs = append(c.durs, d)
+	return t
+}
+
+func (c *pollerFakeClock) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.timers)
+}
+
+func (c *pollerFakeClock) at(i int) (*pollerFakeTimer, time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.timers[i], c.durs[i]
+}
+
+// TestBarScriptPollerRearmsTicksReloadsAndExitsOnCancel drives barScriptPoller
+// directly (not through Serve) with a fake clock, covering the three
+// behaviors the Task 5 rewrite touched but left untested:
+//
+//  1. after a tick fires, the loop arms a NEW timer instead of blocking
+//     forever (the regression that would silently stop bar refreshes),
+//  2. a reload signal re-arms the timer at the newly configured interval
+//     rather than the one the poller started with, and
+//  3. cancelling the context makes the goroutine return instead of leaking.
+func TestBarScriptPollerRearmsTicksReloadsAndExitsOnCancel(t *testing.T) {
+	clk := &pollerFakeClock{}
+	d := newBarRefreshTestDaemon(&fakeBarRunner{}, 2*time.Second)
+	d.clock = clk
+	d.barScripts.reload = make(chan struct{}, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		d.barScriptPoller(ctx)
+		close(done)
+	}()
+
+	// Stage 1: the poller arms its first timer at the configured interval.
+	require.Eventually(t, func() bool { return clk.count() >= 1 }, time.Second, time.Millisecond)
+	_, dur0 := clk.at(0)
+	require.Equal(t, 2*time.Second, dur0)
+
+	// Stage 2: firing that timer processes the tick and re-arms a new one.
+	timer0, _ := clk.at(0)
+	timer0.ch <- time.Unix(0, 0)
+	require.Eventually(t, func() bool { return clk.count() >= 2 }, time.Second, time.Millisecond)
+	_, dur1 := clk.at(1)
+	require.Equal(t, 2*time.Second, dur1, "tick re-arm should keep the same interval when config is unchanged")
+
+	// Stage 3: changing the interval and signaling reload re-arms at the NEW
+	// interval instead of waiting out the timer armed under the old one.
+	d.barScripts.mu.Lock()
+	d.barScripts.cfg.interval = 7 * time.Second
+	d.barScripts.mu.Unlock()
+	d.barScripts.reload <- struct{}{}
+	require.Eventually(t, func() bool { return clk.count() >= 3 }, time.Second, time.Millisecond)
+	_, dur2 := clk.at(2)
+	require.Equal(t, 7*time.Second, dur2, "reload should re-arm at the newly configured interval")
+
+	// Stage 4: cancelling the context exits the goroutine instead of leaking it.
+	cancel()
+	require.Eventually(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond, "barScriptPoller should exit promptly after context cancellation")
+}
+
 func TestApplyConfigSignalsPollerReload(t *testing.T) {
 	r := &fakeBarRunner{}
 	d := newBarRefreshTestDaemon(r, 60*time.Second)
