@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -84,7 +85,11 @@ func (r barScriptRunner) run(ctx context.Context, command string, env []string, 
 	}
 	text := sanitizeBarScriptOutput(res.Stdout, barScriptOutputLimit)
 	if err != nil {
-		return text, err
+		return text, &barScriptError{
+			exitCode: res.ExitCode,
+			stderr:   sanitizeBarScriptOutput(res.Stderr, barScriptStderrLimit),
+			err:      err,
+		}
 	}
 	return text, nil
 }
@@ -181,4 +186,31 @@ func trimUTF8Bytes(s string, limit int) string {
 		limit--
 	}
 	return s[:limit]
+}
+
+// barScriptError carries the diagnostic detail needed to explain why a bar
+// script failed: the process exit code and whatever it wrote to stderr.
+type barScriptError struct {
+	exitCode int
+	stderr   string
+	err      error
+}
+
+func (e *barScriptError) Error() string {
+	if e.stderr != "" {
+		return fmt.Sprintf("exit %d: %s", e.exitCode, e.stderr)
+	}
+	return fmt.Sprintf("exit %d", e.exitCode)
+}
+
+func (e *barScriptError) Unwrap() error { return e.err }
+
+// pathFromEnv returns the PATH entry's value, or "" when unset.
+func pathFromEnv(env []string) string {
+	for _, entry := range env {
+		if name, value, ok := environmentEntry(entry); ok && name == "PATH" {
+			return value
+		}
+	}
+	return ""
 }

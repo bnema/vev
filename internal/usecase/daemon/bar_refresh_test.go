@@ -272,6 +272,49 @@ func TestBarScriptRunConsumesPendingAfterRunningClears(t *testing.T) {
 	}, time.Second, time.Millisecond)
 }
 
+func TestBarScriptFailureLogsOnceUntilSignatureChanges(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	logger := slog.New(slog.NewTextHandler(&syncWriter{w: &buf, mu: &mu}, nil))
+
+	r := &fakeBarRunner{errs: []error{
+		&barScriptError{exitCode: 127, stderr: "sh: vev-bar-top-right: not found", err: errors.New("exit status 127")},
+		&barScriptError{exitCode: 127, stderr: "sh: vev-bar-bottom-right: not found", err: errors.New("exit status 127")},
+		&barScriptError{exitCode: 127, stderr: "sh: vev-bar-top-right: not found", err: errors.New("exit status 127")},
+		&barScriptError{exitCode: 127, stderr: "sh: vev-bar-bottom-right: not found", err: errors.New("exit status 127")},
+	}}
+	d := newBarRefreshTestDaemon(r, time.Second)
+	d.log = logger
+	d.baseEnv = []string{"PATH=/usr/bin"}
+	sess := newBarRefreshTestSession()
+	sess.client = &attachedClient{size: domain.Size{Cols: 80, Rows: 24}}
+
+	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(0, 0), true))
+	waitBarRefreshIdle(t, d)
+	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(10, 0), true))
+	waitBarRefreshIdle(t, d)
+
+	mu.Lock()
+	out := buf.String()
+	mu.Unlock()
+
+	require.Equal(t, 1, strings.Count(out, "anchor=top-right"),
+		"identical repeated failure should log once")
+	require.Contains(t, out, "PATH=/usr/bin")
+	require.Contains(t, out, "not found")
+}
+
+type syncWriter struct {
+	w  *bytes.Buffer
+	mu *sync.Mutex
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
 func TestBarScriptRunIgnoresStaleConfigVersion(t *testing.T) {
 	r := &fakeBarRunner{outs: []string{"top", "bottom"}}
 	d := newBarRefreshTestDaemon(r, time.Second)

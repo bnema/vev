@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -23,6 +24,11 @@ type barScriptOutputs struct {
 	bottomRight string
 }
 
+type barScriptFailureKey struct {
+	id     domain.SessionID
+	anchor string
+}
+
 type barScriptState struct {
 	mu          sync.Mutex
 	cfg         barScriptConfig
@@ -32,6 +38,7 @@ type barScriptState struct {
 	lastContext map[domain.SessionID]barScriptContext
 	running     map[domain.SessionID]bool
 	pending     map[domain.SessionID]bool
+	lastFailure map[barScriptFailureKey]string
 	version     uint64
 }
 
@@ -64,6 +71,9 @@ func (s *barScriptState) initLocked() {
 	}
 	if s.pending == nil {
 		s.pending = make(map[domain.SessionID]bool)
+	}
+	if s.lastFailure == nil {
+		s.lastFailure = make(map[barScriptFailureKey]string)
 	}
 }
 
@@ -161,6 +171,30 @@ func (d *Daemon) clearBarScriptsForSession(id domain.SessionID) {
 	delete(d.barScripts.lastContext, id)
 	delete(d.barScripts.running, id)
 	delete(d.barScripts.pending, id)
+	delete(d.barScripts.lastFailure, barScriptFailureKey{id: id, anchor: "top-right"})
+	delete(d.barScripts.lastFailure, barScriptFailureKey{id: id, anchor: "bottom-right"})
+}
+
+// shouldLogBarFailure reports whether this failure differs from the last one
+// logged for the same session and anchor, so a persistently broken script
+// warns once instead of every refresh interval.
+func (d *Daemon) shouldLogBarFailure(id domain.SessionID, anchor, signature string) bool {
+	d.barScripts.mu.Lock()
+	defer d.barScripts.mu.Unlock()
+	d.barScripts.initLocked()
+	key := barScriptFailureKey{id: id, anchor: anchor}
+	if d.barScripts.lastFailure[key] == signature {
+		return false
+	}
+	d.barScripts.lastFailure[key] = signature
+	return true
+}
+
+func (d *Daemon) clearBarFailure(id domain.SessionID, anchor string) {
+	d.barScripts.mu.Lock()
+	defer d.barScripts.mu.Unlock()
+	d.barScripts.initLocked()
+	delete(d.barScripts.lastFailure, barScriptFailureKey{id: id, anchor: anchor})
 }
 
 func (d *Daemon) refreshBarScriptsIfDue(sess *session, now time.Time, force bool) bool {
@@ -259,8 +293,8 @@ func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barS
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	top, topOK := d.runOneBarScript(ctx, runner, cfg.topRight, env, base, "top-right", sess.name)
-	bottom, bottomOK := d.runOneBarScript(ctx, runner, cfg.bottomRight, env, base, "bottom-right", sess.name)
+	top, topOK := d.runOneBarScript(ctx, runner, cfg.topRight, env, base, "top-right", sess)
+	bottom, bottomOK := d.runOneBarScript(ctx, runner, cfg.bottomRight, env, base, "bottom-right", sess)
 	d.barScripts.mu.Lock()
 	d.barScripts.initLocked()
 	if !d.barScripts.running[sess.id] || d.barScripts.version != version {
@@ -291,19 +325,41 @@ func (d *Daemon) runBarScripts(sess *session, runner barScriptExecutor, cfg barS
 	}
 }
 
-func (d *Daemon) runOneBarScript(ctx context.Context, runner barScriptExecutor, command string, env []string, base barScriptContext, anchor, sessionName string) (string, bool) {
+func (d *Daemon) runOneBarScript(ctx context.Context, runner barScriptExecutor, command string, env []string, base barScriptContext, anchor string, sess *session) (string, bool) {
 	if command == "" {
 		return "", true
 	}
 	base.Anchor = anchor
 	out, err := runner.run(ctx, command, env, base)
 	if err != nil {
-		if d.log != nil {
-			d.log.Warn("bar script failed; keeping last good output", "anchor", anchor, "session", sessionName, "err", err)
-		}
+		d.logBarScriptFailure(sess, anchor, command, env, err)
 		return "", false
 	}
+	d.clearBarFailure(sess.id, anchor)
 	return out, true
+}
+
+func (d *Daemon) logBarScriptFailure(sess *session, anchor, command string, env []string, err error) {
+	if d.log == nil {
+		return
+	}
+	if !d.shouldLogBarFailure(sess.id, anchor, err.Error()) {
+		return
+	}
+	attrs := []any{"anchor", anchor, "session", sess.name, "command", command, "err", err}
+	var scriptErr *barScriptError
+	if errors.As(err, &scriptErr) {
+		attrs = append(attrs, "exit_code", scriptErr.exitCode)
+		if scriptErr.stderr != "" {
+			attrs = append(attrs, "stderr", scriptErr.stderr)
+		}
+		if scriptErr.exitCode == 127 {
+			attrs = append(attrs, "hint",
+				"command not found on the daemon's PATH; use an absolute path or ensure it is on the attaching client's PATH",
+				"PATH", pathFromEnv(env))
+		}
+	}
+	d.log.Warn("bar script failed; keeping last good output", attrs...)
 }
 
 func (d *Daemon) pokeSessionRender(sess *session) {
