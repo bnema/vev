@@ -491,7 +491,7 @@ func (e paletteExec) YankLastNotification() error {
 		// Reported directly rather than returned: the generic cmd.Run error
 		// path only logs, so a returned error here would never reach the
 		// user as the warn toast this no-op is supposed to produce.
-		e.d.reportError(e.sess, domain.UserWarn(domain.NoticeInternal, "no notifications yet", nil))
+		e.d.reportError(e.sess, domain.UserWarn(domain.NoticeClipboard, "no notifications yet", nil))
 		return nil
 	}
 	e.d.yankNotice(e.sess, e.ac, n)

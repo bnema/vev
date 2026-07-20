@@ -203,7 +203,7 @@ func TestYankLastNotificationWithEmptyHistoryShowsWarnToast(t *testing.T) {
 
 	history := d.notices.history()
 	require.Len(t, history, 1)
-	require.Equal(t, domain.NoticeInternal, history[0].Code)
+	require.Equal(t, domain.NoticeClipboard, history[0].Code)
 	require.Equal(t, domain.NoticeWarn, history[0].Severity)
 	require.Equal(t, "no notifications yet", history[0].Message)
 }
