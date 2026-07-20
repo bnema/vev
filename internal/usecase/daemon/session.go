@@ -309,7 +309,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	pty, err := d.ptys.Open(sess.ctx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
 	if err != nil {
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "tab")
-		return fmt.Errorf("daemon: spawning tab for session %q: %w", name, err)
+		return domain.UserErr(domain.NoticeTabSpawn, "couldn't open tab: shell failed to start", err)
 	}
 	tb := newTabWithStableID(tabStableID, paneStableID, pty, tbSize)
 	if client != nil {

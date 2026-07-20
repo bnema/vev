@@ -121,9 +121,9 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 
 // TestPaletteCommandFailureSurfacesAsNotice drives a palette command whose Run
 // target fails and asserts the failure reaches the user as a notice instead of
-// only a log line. Task 8 will wrap the new-tab spawn failure as a
-// domain.UserError with NoticeTabSpawn; until then it flows through
-// unclassified and lands on the NoticeInternal catch-all.
+// only a log line. The new-tab spawn failure is wrapped as a domain.UserError
+// with NoticeTabSpawn (session.go createTab), so it surfaces under that code
+// rather than the NoticeInternal catch-all.
 func TestPaletteCommandFailureSurfacesAsNotice(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
@@ -139,7 +139,7 @@ func TestPaletteCommandFailureSurfacesAsNotice(t *testing.T) {
 
 	history := d.notices.history()
 	require.NotEmpty(t, history, "failed palette command must record a notice")
-	require.Equal(t, domain.NoticeInternal, history[0].Code)
+	require.Equal(t, domain.NoticeTabSpawn, history[0].Code)
 }
 
 func TestPaletteEntryPublishesEligibleNamedSessionResults(t *testing.T) {

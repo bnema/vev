@@ -592,6 +592,29 @@ func TestFloatingInstallLogsSessionNameSafelyDuringRename(t *testing.T) {
 	d.sessWg.Wait()
 }
 
+func TestToggleFloatingStructuralErrorsAreUserErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		d    *Daemon
+		sess *session
+	}{
+		{"nil session", newTestDaemon(t, nil, stubClock{}), nil},
+		{"no active tab", newTestDaemon(t, nil, stubClock{}), &session{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.d.toggleFloating(tc.sess, nil)
+			require.Error(t, err)
+
+			var ue *domain.UserError
+			require.ErrorAs(t, err, &ue)
+			require.Equal(t, domain.NoticeFloatingSpawn, ue.Code)
+			require.Equal(t, domain.NoticeError, ue.Severity)
+			require.NotEmpty(t, ue.Msg)
+		})
+	}
+}
+
 func TestFloatingToggleUsesVisibleTarget(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	tb := newFloatingTestTab(t)

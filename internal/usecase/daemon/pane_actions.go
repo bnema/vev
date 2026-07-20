@@ -48,6 +48,9 @@ func (d *Daemon) spawnPaneOp(
 	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
 	if err := mutate(tb.tree, oldFocus, newID, area); err != nil {
 		tb.mu.Unlock()
+		if errors.Is(err, layout.ErrTooSmall) {
+			return domain.UserWarn(domain.NoticeLayoutTooSmall, "not enough space to split", err)
+		}
 		return err
 	}
 	tb.nextPaneID++
@@ -56,7 +59,7 @@ func (d *Daemon) spawnPaneOp(
 		_ = tb.tree.Close(newID)
 		tb.tree.Focus = oldFocus
 		tb.mu.Unlock()
-		return layout.ErrTooSmall
+		return domain.UserWarn(domain.NoticeLayoutTooSmall, "not enough space to split", layout.ErrTooSmall)
 	}
 	newRect := placementContent(placements, newID)
 	tabStableID := tb.stableID
@@ -78,7 +81,7 @@ func (d *Daemon) spawnPaneOp(
 		_ = tb.tree.Close(newID)
 		tb.tree.Focus = oldFocus
 		tb.mu.Unlock()
-		return err
+		return domain.UserErr(domain.NoticePaneSpawn, "couldn't open pane: shell failed to start", err)
 	}
 
 	pctx, cancel := context.WithCancel(tb.ctx)

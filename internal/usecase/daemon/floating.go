@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -192,11 +191,11 @@ func (d *Daemon) activateTabAfterResize(sess *session, tb *tab, outerResizeAccep
 // launches asynchronously; installed slots are retained when hidden.
 func (d *Daemon) toggleFloating(sess *session, ac *attachedClient) error {
 	if d == nil || sess == nil {
-		return fmt.Errorf("floating pane: session required")
+		return domain.UserErr(domain.NoticeFloatingSpawn, "couldn't open floating pane: no active session", nil)
 	}
 	tb := sess.activeTab()
 	if tb == nil {
-		return layout.ErrNotFound
+		return domain.UserErr(domain.NoticeFloatingSpawn, "couldn't open floating pane: no active tab", layout.ErrNotFound)
 	}
 	cfg := d.currentFloatingConfig()
 	tb.mu.Lock()

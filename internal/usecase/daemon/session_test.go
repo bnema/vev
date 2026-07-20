@@ -1304,6 +1304,30 @@ func TestRenameSessionUnsafeNameRejected(t *testing.T) {
 	require.ErrorIs(t, d.renameSession(sess, "my work"), domain.ErrInvalidSessionName)
 }
 
+func TestCreateTabPtyFailureIsUserError(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+
+	cause := errors.New("fork/exec: no such file")
+	failing := portsmocks.NewMockPTYFactory(t)
+	failing.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, cause).Once()
+	d.ptys = failing
+
+	err = d.createTab(sess, sz)
+
+	var ue *domain.UserError
+	require.ErrorAs(t, err, &ue)
+	require.Equal(t, domain.NoticeTabSpawn, ue.Code)
+	require.Equal(t, domain.NoticeError, ue.Severity)
+	require.Equal(t, "couldn't open tab: shell failed to start", ue.Msg)
+	require.ErrorIs(t, err, cause)
+	require.NotContains(t, ue.Msg, cause.Error())
+}
+
 func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	p1, release1 := newBlockingPTY(t)
