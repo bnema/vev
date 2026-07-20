@@ -14,6 +14,7 @@ import (
 
 const (
 	barScriptOutputLimit  = 1024
+	barScriptStderrLimit  = 512
 	barScriptDisplayLimit = 256
 	barScriptTimeout      = time.Second
 )
@@ -71,16 +72,17 @@ func (r barScriptRunner) run(ctx context.Context, command string, env []string, 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	stdout, err := r.runner.Run(ctx, ports.CommandSpec{
+	res, err := r.runner.Run(ctx, ports.CommandSpec{
 		Command:     command,
 		Env:         scriptCtx.env(env),
 		Timeout:     timeout,
 		StdoutLimit: barScriptOutputLimit,
+		StderrLimit: barScriptStderrLimit,
 	})
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "", context.DeadlineExceeded
 	}
-	text := sanitizeBarScriptOutput(stdout, barScriptOutputLimit)
+	text := sanitizeBarScriptOutput(res.Stdout, barScriptOutputLimit)
 	if err != nil {
 		return text, err
 	}

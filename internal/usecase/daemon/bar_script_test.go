@@ -119,7 +119,7 @@ func TestBarScriptRunner(t *testing.T) {
 				containsEnv(spec.Env, "VEV_PANE_CWD=/repo") &&
 				containsEnv(spec.Env, "VEV_COLS=120") &&
 				!containsEnv(spec.Env, "VEV_ANCHOR=old")
-		})).Return([]byte("\x1b[31mok\x1b[0m\nignored"), nil)
+		})).Return(ports.CommandResult{Stdout: []byte("\x1b[31mok\x1b[0m\nignored")}, nil)
 		runner := barScriptRunner{runner: portRunner, timeout: 50 * time.Millisecond}
 
 		got, err := runner.run(context.Background(), "printf 'ok\\nignored'",
@@ -136,7 +136,8 @@ func TestBarScriptRunner(t *testing.T) {
 	t.Run("port failure returns sanitized partial stdout and error", func(t *testing.T) {
 		wantErr := errors.New("exit 1")
 		portRunner := portsmocks.NewMockShellCommandRunner(t)
-		portRunner.EXPECT().Run(mock.Anything, mock.Anything).Return([]byte("partial\x00 output\nignored"), wantErr)
+		portRunner.EXPECT().Run(mock.Anything, mock.Anything).
+			Return(ports.CommandResult{Stdout: []byte("partial\x00 output\nignored"), ExitCode: 1}, wantErr)
 		runner := barScriptRunner{runner: portRunner, timeout: time.Second}
 
 		got, err := runner.run(context.Background(), "false", nil, barScriptContext{})
@@ -150,10 +151,11 @@ func TestBarScriptRunner(t *testing.T) {
 
 	t.Run("timeout propagates deadline", func(t *testing.T) {
 		portRunner := portsmocks.NewMockShellCommandRunner(t)
-		portRunner.EXPECT().Run(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, _ ports.CommandSpec) ([]byte, error) {
-			<-ctx.Done()
-			return nil, ctx.Err()
-		})
+		portRunner.EXPECT().Run(mock.Anything, mock.Anything).RunAndReturn(
+			func(ctx context.Context, _ ports.CommandSpec) (ports.CommandResult, error) {
+				<-ctx.Done()
+				return ports.CommandResult{ExitCode: -1}, ctx.Err()
+			})
 		runner := barScriptRunner{runner: portRunner, timeout: time.Nanosecond}
 
 		_, err := runner.run(context.Background(), "sleep 1", nil, barScriptContext{})
@@ -167,7 +169,7 @@ func TestBarScriptRunnerBoundsStdoutBeforeSanitize(t *testing.T) {
 	portRunner := portsmocks.NewMockShellCommandRunner(t)
 	portRunner.EXPECT().Run(mock.Anything, mock.MatchedBy(func(spec ports.CommandSpec) bool {
 		return spec.StdoutLimit == barScriptOutputLimit
-	})).Return([]byte(strings.Repeat("a", 4096)), nil)
+	})).Return(ports.CommandResult{Stdout: []byte(strings.Repeat("a", 4096))}, nil)
 	runner := barScriptRunner{runner: portRunner, timeout: time.Second}
 
 	got, err := runner.run(context.Background(), "long-output", nil, barScriptContext{})

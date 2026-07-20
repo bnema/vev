@@ -3,6 +3,7 @@ package shellcmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os/exec"
 	"syscall"
@@ -16,8 +17,8 @@ type Runner struct{}
 // New returns a production shell command runner.
 func New() Runner { return Runner{} }
 
-// Run executes spec.Command through sh -c, capturing bounded stdout and discarding stderr.
-func (Runner) Run(ctx context.Context, spec ports.CommandSpec) ([]byte, error) {
+// Run executes spec.Command through sh -c, capturing bounded stdout and stderr.
+func (Runner) Run(ctx context.Context, spec ports.CommandSpec) (ports.CommandResult, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", spec.Command)
 	cmd.Env = spec.Env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -28,14 +29,24 @@ func (Runner) Run(ctx context.Context, spec ports.CommandSpec) ([]byte, error) {
 		}
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
-	var stdout boundedBuffer
+	var stdout, stderr boundedBuffer
 	stdout.limit = spec.StdoutLimit
+	stderr.limit = spec.StderrLimit
 	cmd.Stdout = &stdout
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil {
-		return stdout.Bytes(), err
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	res := ports.CommandResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			res.ExitCode = exitErr.ExitCode()
+		} else {
+			res.ExitCode = -1
+		}
+		return res, err
 	}
-	return stdout.Bytes(), nil
+	return res, nil
 }
 
 type boundedBuffer struct {

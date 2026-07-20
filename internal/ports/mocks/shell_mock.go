@@ -39,24 +39,22 @@ func (_m *MockShellCommandRunner) EXPECT() *MockShellCommandRunner_Expecter {
 }
 
 // Run provides a mock function for the type MockShellCommandRunner
-func (_mock *MockShellCommandRunner) Run(ctx context.Context, spec ports.CommandSpec) ([]byte, error) {
+func (_mock *MockShellCommandRunner) Run(ctx context.Context, spec ports.CommandSpec) (ports.CommandResult, error) {
 	ret := _mock.Called(ctx, spec)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Run")
 	}
 
-	var r0 []byte
+	var r0 ports.CommandResult
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.CommandSpec) ([]byte, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.CommandSpec) (ports.CommandResult, error)); ok {
 		return returnFunc(ctx, spec)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.CommandSpec) []byte); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.CommandSpec) ports.CommandResult); ok {
 		r0 = returnFunc(ctx, spec)
 	} else {
-		if ret.Get(0) != nil {
-			r0 = ret.Get(0).([]byte)
-		}
+		r0 = ret.Get(0).(ports.CommandResult)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, ports.CommandSpec) error); ok {
 		r1 = returnFunc(ctx, spec)
@@ -96,12 +94,12 @@ func (_c *MockShellCommandRunner_Run_Call) Run(run func(ctx context.Context, spe
 	return _c
 }
 
-func (_c *MockShellCommandRunner_Run_Call) Return(bytes []byte, err error) *MockShellCommandRunner_Run_Call {
-	_c.Call.Return(bytes, err)
+func (_c *MockShellCommandRunner_Run_Call) Return(commandResult ports.CommandResult, err error) *MockShellCommandRunner_Run_Call {
+	_c.Call.Return(commandResult, err)
 	return _c
 }
 
-func (_c *MockShellCommandRunner_Run_Call) RunAndReturn(run func(ctx context.Context, spec ports.CommandSpec) ([]byte, error)) *MockShellCommandRunner_Run_Call {
+func (_c *MockShellCommandRunner_Run_Call) RunAndReturn(run func(ctx context.Context, spec ports.CommandSpec) (ports.CommandResult, error)) *MockShellCommandRunner_Run_Call {
 	_c.Call.Return(run)
 	return _c
 }
