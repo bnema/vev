@@ -75,6 +75,7 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 		d.barScripts.mu.Unlock()
 	}
 	if barChanged {
+		d.signalBarPollerReload()
 		d.refreshBarScriptsAllSessions()
 	}
 	d.reapplyThemeAllSessions()

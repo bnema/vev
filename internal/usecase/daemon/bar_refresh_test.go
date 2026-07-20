@@ -434,6 +434,25 @@ func TestBarScriptRefreshIsPerSession(t *testing.T) {
 	require.Equal(t, "bottom-b", stateB.bottomRight)
 }
 
+func TestApplyConfigSignalsPollerReload(t *testing.T) {
+	r := &fakeBarRunner{}
+	d := newBarRefreshTestDaemon(r, 60*time.Second)
+	d.barScripts.reload = make(chan struct{}, 1)
+
+	cfg := domain.Defaults()
+	cfg.Bar.TopRight = "t"
+	cfg.Bar.BottomRight = "b"
+	cfg.Bar.Interval = time.Second
+	d.ApplyConfig(cfg)
+
+	select {
+	case <-d.barScripts.reload:
+	default:
+		t.Fatal("ApplyConfig should signal the poller to re-arm its timer")
+	}
+	require.Equal(t, time.Second, d.barScriptInterval())
+}
+
 func newBarRefreshTestDaemon(r barScriptExecutor, interval time.Duration) *Daemon {
 	d := &Daemon{clock: barRefreshTestClock{}, barScripts: &barScriptState{
 		cfg:         barScriptConfig{topRight: "top", bottomRight: "bottom", interval: effectiveBarInterval(interval)},

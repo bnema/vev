@@ -40,6 +40,10 @@ type barScriptState struct {
 	pending     map[domain.SessionID]bool
 	lastFailure map[barScriptFailureKey]string
 	version     uint64
+
+	// reload wakes barScriptPoller so an interval change takes effect without
+	// waiting out the timer armed under the previous interval.
+	reload chan struct{}
 }
 
 func effectiveBarInterval(d time.Duration) time.Duration {
@@ -134,18 +138,34 @@ func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScrip
 	return ctx, env, true
 }
 
+// signalBarPollerReload wakes the poller without blocking. The channel is
+// buffered to one, so a pending signal already conveys "config changed".
+func (d *Daemon) signalBarPollerReload() {
+	if d == nil || d.barScripts == nil || d.barScripts.reload == nil {
+		return
+	}
+	select {
+	case d.barScripts.reload <- struct{}{}:
+	default:
+	}
+}
+
 func (d *Daemon) barScriptPoller(ctx context.Context) {
 	timer := d.clock.NewTimer(d.barScriptInterval())
-	defer timer.Stop()
+	defer func() { timer.Stop() }()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-d.barScripts.reload:
+			timer.Stop()
+			timer = d.clock.NewTimer(d.barScriptInterval())
 		case now := <-timer.C():
 			for _, sess := range d.sessionsSnapshot() {
 				d.refreshBarScriptsIfDue(sess, now, false)
 			}
-			timer.Reset(d.barScriptInterval())
+			timer.Stop()
+			timer = d.clock.NewTimer(d.barScriptInterval())
 		}
 	}
 }
