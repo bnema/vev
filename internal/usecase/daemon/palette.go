@@ -305,6 +305,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	}
 	if err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac}, args); err != nil {
 		d.log.Error("palette command failed", "err", err, "command", cmd.Code)
+		d.reportError(sess, err)
 	} else {
 		d.recordPaletteUse(cmd.Code)
 	}

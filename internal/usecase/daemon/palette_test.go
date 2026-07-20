@@ -119,6 +119,29 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
+// TestPaletteCommandFailureSurfacesAsNotice drives a palette command whose Run
+// target fails and asserts the failure reaches the user as a notice instead of
+// only a log line. Task 8 will wrap the new-tab spawn failure as a
+// domain.UserError with NoticeTabSpawn; until then it flows through
+// unclassified and lands on the NoticeInternal catch-all.
+func TestPaletteCommandFailureSurfacesAsNotice(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	ptys := portsmocks.NewMockPTYFactory(t)
+	ptys.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("open failed")).Once()
+	d.ptys = ptys
+
+	d.handleInput(sess, ac, []byte("\x1b "))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(sess, ac, []byte("CNT\r"))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	history := d.notices.history()
+	require.NotEmpty(t, history, "failed palette command must record a notice")
+	require.Equal(t, domain.NoticeInternal, history[0].Code)
+}
+
 func TestPaletteEntryPublishesEligibleNamedSessionResults(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
