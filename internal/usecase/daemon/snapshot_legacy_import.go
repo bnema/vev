@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/bnema/vev/internal/ports"
@@ -42,10 +41,4 @@ func legacyPublication(snapshot snapcodec.Session) (ports.SnapshotPublication, e
 		return ports.SnapshotPublication{}, fmt.Errorf("snapshot: marshal legacy import manifest: %w", err)
 	}
 	return ports.SnapshotPublication{Name: snapshot.Name, Generation: 1, Manifest: encoded, Objects: objects}, nil
-}
-
-func sameSnapshotSession(left, right snapcodec.Session) bool {
-	leftBytes, leftErr := snapcodec.Marshal(left)
-	rightBytes, rightErr := snapcodec.Marshal(right)
-	return leftErr == nil && rightErr == nil && bytes.Equal(leftBytes, rightBytes)
 }

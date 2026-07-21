@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 
 	"github.com/bnema/vev/internal/domain"
@@ -88,7 +90,7 @@ func generationObject(generation ports.SnapshotGeneration, ref snapcodec.ObjectR
 		return nil, fmt.Errorf("snapshot: object kind mismatch")
 	}
 	data, ok := generation.Objects[ref.Digest]
-	if !ok || uint32(len(data)) != ref.Size {
+	if !ok || uint32(len(data)) != ref.Size || sha256.Sum256(data) != ref.Digest {
 		return nil, fmt.Errorf("snapshot: missing object")
 	}
 	gotKind, payload, err := snapcodec.UnmarshalObject(data)
@@ -102,7 +104,7 @@ func generationObject(generation ports.SnapshotGeneration, ref snapcodec.ObjectR
 // a legacy blob only after publication and a full repository reload verify the
 // exact converted session, leaving failures retryable on the next startup.
 func (d *Daemon) importLegacySnapshots(ctx context.Context) {
-	if d.legacySnapshots == nil || d.snapshotRepository == nil {
+	if d.legacySnapshots == nil || d.snapshotRepository == nil || ctx.Err() != nil {
 		return
 	}
 	existing, err := d.snapshotRepository.List(ctx)
@@ -120,7 +122,11 @@ func (d *Daemon) importLegacySnapshots(ctx context.Context) {
 		return
 	}
 	for _, blob := range legacy {
+		if ctx.Err() != nil {
+			return
+		}
 		if _, ok := present[blob.Name]; ok {
+			d.retryLegacyDelete(ctx, blob)
 			continue
 		}
 		snapshot, err := snapcodec.Unmarshal(blob.Data)
@@ -136,21 +142,74 @@ func (d *Daemon) importLegacySnapshots(ctx context.Context) {
 			var generation ports.SnapshotGeneration
 			generation, err = d.snapshotRepository.Load(ctx, snapshot.Name)
 			if err == nil {
-				var restored snapcodec.Session
-				restored, err = sessionFromGeneration(generation)
-				if err == nil && !sameSnapshotSession(snapshot, restored) {
-					err = fmt.Errorf("snapshot: legacy import verification mismatch")
-				}
+				err = verifyLegacyImportGeneration(generation, publication)
 			}
 		}
 		if err != nil {
 			d.log.Warn("importing legacy snapshot failed", "session", blob.Name, "err", err)
 			continue
 		}
+		d.rememberLegacyDelete(blob)
 		if err := d.legacySnapshots.DeleteLegacy(ctx, blob.Name); err != nil {
 			d.log.Warn("deleting imported legacy snapshot failed", "session", blob.Name, "err", err)
 			continue
 		}
+		d.forgetLegacyDelete(blob.Name)
 		present[blob.Name] = struct{}{}
 	}
+}
+
+func verifyLegacyImportGeneration(generation ports.SnapshotGeneration, publication ports.SnapshotPublication) error {
+	if generation.Name != publication.Name || generation.Generation != publication.Generation || !bytes.Equal(generation.Manifest, publication.Manifest) {
+		return fmt.Errorf("snapshot: legacy import verification mismatch")
+	}
+	expected := make(map[ports.SnapshotDigest][]byte, len(publication.Objects))
+	for _, object := range publication.Objects {
+		if sha256.Sum256(object.Data) != object.Digest {
+			return fmt.Errorf("snapshot: legacy import publication digest mismatch")
+		}
+		expected[object.Digest] = object.Data
+	}
+	if len(generation.Objects) != len(expected) {
+		return fmt.Errorf("snapshot: legacy import verification mismatch")
+	}
+	for digest, expectedData := range expected {
+		actual, ok := generation.Objects[digest]
+		if !ok || !bytes.Equal(actual, expectedData) || sha256.Sum256(actual) != digest {
+			return fmt.Errorf("snapshot: legacy import verification mismatch")
+		}
+	}
+	return nil
+}
+
+func (d *Daemon) rememberLegacyDelete(blob ports.LegacySnapshot) {
+	d.legacyImportMu.Lock()
+	if d.legacyImportPending == nil {
+		d.legacyImportPending = make(map[string][]byte)
+	}
+	d.legacyImportPending[blob.Name] = append([]byte(nil), blob.Data...)
+	d.legacyImportMu.Unlock()
+}
+
+func (d *Daemon) forgetLegacyDelete(name string) {
+	d.legacyImportMu.Lock()
+	delete(d.legacyImportPending, name)
+	d.legacyImportMu.Unlock()
+}
+
+// retryLegacyDelete only acts on a blob which this daemon has already
+// published and exactly reloaded. An unrelated pre-existing generation must
+// continue to leave its legacy counterpart untouched.
+func (d *Daemon) retryLegacyDelete(ctx context.Context, blob ports.LegacySnapshot) {
+	d.legacyImportMu.Lock()
+	pending, ok := d.legacyImportPending[blob.Name]
+	d.legacyImportMu.Unlock()
+	if !ok || !bytes.Equal(pending, blob.Data) {
+		return
+	}
+	if err := d.legacySnapshots.DeleteLegacy(ctx, blob.Name); err != nil {
+		d.log.Warn("deleting imported legacy snapshot failed", "session", blob.Name, "err", err)
+		return
+	}
+	d.forgetLegacyDelete(blob.Name)
 }

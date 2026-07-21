@@ -214,7 +214,10 @@ func preflightPaneStructure(r *payloadReader, totals *vt.DecodeStats, blobs *uin
 	if err != nil {
 		return err
 	}
-	if tail.Chunks != 0 || tail.Rows != 0 || tail.Cells != 0 {
+	// A capture keeps the live mutable tail separate from immutable sealed
+	// chunks. It may therefore contain one partial chunk (or the canonical
+	// empty tail), but never a sequence of sealed chunks.
+	if tail.Chunks > 1 {
 		return fmt.Errorf("%w: tail blob role", ErrInvalidData)
 	}
 	visible, err := preflightBlob(r, totals, blobs, false, budget)

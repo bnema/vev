@@ -126,8 +126,12 @@ type Daemon struct {
 	// narrower checkpoint-only test seam.
 	snapshotDeletion ports.SnapshotDeletionTombstone
 	snapsEnabled     bool
-	noticeStore      ports.NoticeStore
-	snapshotMarshal  func(snapcodec.Session) ([]byte, error)
+	// legacyImportPending holds verified legacy blobs whose source deletion
+	// failed, so a later import retries only deletion rather than publication.
+	legacyImportMu      sync.Mutex
+	legacyImportPending map[string][]byte
+	noticeStore         ports.NoticeStore
+	snapshotMarshal     func(snapcodec.Session) ([]byte, error)
 	// snapshotChunkCache contains only encoded immutable sealed chunks. It is
 	// independent of pane state and is bounded to prevent checkpoint history
 	// from becoming unbounded daemon memory.
@@ -374,25 +378,26 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		shell = "/bin/sh"
 	}
 	d := &Daemon{
-		sessions:           make(map[domain.SessionID]*session),
-		stopped:            make(map[string]stoppedSession),
-		parked:             make(map[uint64]*parkedAttachment),
-		ptys:               ptys,
-		clock:              clock,
-		log:                log,
-		baseEnv:            os.Environ(),
-		shell:              shell,
-		persist:            persist.New(nil),
-		dirOrHome:          dirOrHome,
-		done:               make(chan struct{}),
-		restoreDone:        make(chan struct{}),
-		animWake:           make(chan struct{}, 1),
-		snapshotMarshal:    snapcodec.Marshal,
-		snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit),
-		snapshotJobs:       make(chan *snapshotCapture, snapshotQueueCapacity),
-		snapshotWake:       make(chan struct{}, 1),
-		notices:            newNoticeCenter(),
-		resumeParkGrace:    defaultResumeParkGrace,
+		sessions:            make(map[domain.SessionID]*session),
+		stopped:             make(map[string]stoppedSession),
+		parked:              make(map[uint64]*parkedAttachment),
+		ptys:                ptys,
+		clock:               clock,
+		log:                 log,
+		baseEnv:             os.Environ(),
+		shell:               shell,
+		persist:             persist.New(nil),
+		dirOrHome:           dirOrHome,
+		done:                make(chan struct{}),
+		restoreDone:         make(chan struct{}),
+		animWake:            make(chan struct{}, 1),
+		snapshotMarshal:     snapcodec.Marshal,
+		snapshotChunkCache:  newSnapshotChunkCache(snapshotChunkCacheLimit),
+		legacyImportPending: make(map[string][]byte),
+		snapshotJobs:        make(chan *snapshotCapture, snapshotQueueCapacity),
+		snapshotWake:        make(chan struct{}, 1),
+		notices:             newNoticeCenter(),
+		resumeParkGrace:     defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
