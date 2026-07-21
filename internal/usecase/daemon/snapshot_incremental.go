@@ -101,8 +101,11 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 	for _, tab := range capture.tabs {
 		outTab := snapcodec.ManifestTab{StableID: tab.stableID, Cols: tab.cols, Rows: tab.rows, NextPaneID: tab.nextPaneID, Focus: tab.focus, Tree: tab.tree, Panes: make([]snapcodec.ManifestPane, 0, len(tab.panes))}
 		for _, pane := range tab.panes {
-			if pane.visibleErr != nil {
-				return ports.SnapshotPublication{}, fmt.Errorf("snapshot visible: %w", pane.visibleErr)
+			// visible was copied under pane.mu. Marshal it here in the worker,
+			// after all pane and session locks have been released.
+			visible, err := pane.visible.Marshal()
+			if err != nil {
+				return ports.SnapshotPublication{}, fmt.Errorf("snapshot visible: %w", err)
 			}
 			outPane := snapcodec.ManifestPane{ID: pane.id, StableID: pane.stableID, Cwd: pane.cwd, Process: pane.process}
 			sealedCount := pane.sealed.ChunkCount()
@@ -130,7 +133,7 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 			if err != nil {
 				return ports.SnapshotPublication{}, err
 			}
-			visibleObject, err := snapcodec.MarshalObject(snapcodec.Visible, pane.visible)
+			visibleObject, err := snapcodec.MarshalObject(snapcodec.Visible, visible)
 			if err != nil {
 				return ports.SnapshotPublication{}, err
 			}

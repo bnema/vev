@@ -790,21 +790,104 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 // ptyReader drains child output into the VT screen and pokes the dirty channel
 // (non-blocking: a full channel already means a render is pending). On any read
 
+// beginSnapshotPurge commits a logical named-session kill before its live
+// identity or persisted metadata is removed. It never runs under daemon or
+// session locks.
+func (d *Daemon) beginSnapshotPurge(name string) error {
+	if d.snapshotDeletion == nil || name == "" {
+		return nil
+	}
+	return d.snapshotDeletion.Tombstone(context.Background(), name)
+}
+
+// finishSnapshotPurge deletes both independently durable snapshot sources,
+// then metadata, and only then clears the tombstone. Any failure deliberately
+// leaves the marker in place so startup cannot restore or import the name and
+// a later live/offline kill can retry the idempotent source deletes.
+func (d *Daemon) finishSnapshotPurge(name string) error {
+	var incrementalErr, legacyErr error
+	if d.snapshotRepository != nil {
+		incrementalErr = d.snapshotRepository.Delete(context.Background(), name)
+	}
+	if d.legacySnapshots != nil {
+		legacyErr = d.legacySnapshots.DeleteLegacy(context.Background(), name)
+	}
+	if incrementalErr != nil || legacyErr != nil {
+		return errors.Join(incrementalErr, legacyErr)
+	}
+	if err := d.persist.Delete(name); err != nil {
+		return err
+	}
+	if d.snapshotDeletion != nil {
+		return d.snapshotDeletion.DeleteTombstone(context.Background(), name)
+	}
+	return nil
+}
+
+// retryStoppedPurge completes a previously closed session's durable purge.
+// It keeps the stopped record hidden until all sources and metadata cross their
+// deletion boundaries.
+func (d *Daemon) retryStoppedPurge(name string) error {
+	d.mu.Lock()
+	stopped, ok := d.stopped[name]
+	if !ok {
+		d.mu.Unlock()
+		return nil
+	}
+	// A stopped session without a durable snapshot source retains the existing
+	// metadata-only delete behavior. There is no restore/import source to fence.
+	if d.snapshotDeletion == nil {
+		d.mu.Unlock()
+		if err := d.persist.Delete(name); err != nil {
+			return err
+		}
+		d.mu.Lock()
+		if _, ok := d.stopped[name]; ok {
+			delete(d.stopped, name)
+		}
+		d.mu.Unlock()
+		return nil
+	}
+	stopped.purging = true
+	d.stopped[name] = stopped
+	d.mu.Unlock()
+
+	if err := d.beginSnapshotPurge(name); err != nil {
+		return err
+	}
+	if err := d.finishSnapshotPurge(name); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	if current, ok := d.stopped[name]; ok && current.purging {
+		delete(d.stopped, name)
+	}
+	d.mu.Unlock()
+	return nil
+}
+
 func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	ringing := sess.anyAttention()
 	sess.mu.Lock()
 	isEphemeral := sess.ephemeral
+	name := sess.name
 	sess.mu.Unlock()
-	// A repository delete must never race an older publication that could
-	// recreate the just-quarantined name. Do not hold daemon or session locks
-	// while joining: a repository implementation may ignore cancellation.
-	if purge && !isEphemeral && d.snapshotRepository != nil {
-		<-quarantineSnapshotCoordinator(sess)
+	// Commit the tombstone before changing live identity or metadata. A
+	// repository delete must never race an older publication that could recreate
+	// the just-quarantined name. Do not hold daemon or session locks while
+	// tombstoning or joining: a repository implementation may block on I/O.
+	if purge && !isEphemeral {
+		if err := d.beginSnapshotPurge(name); err != nil {
+			return err
+		}
+		if d.snapshotRepository != nil {
+			<-quarantineSnapshotCoordinator(sess)
+		}
 	}
 	if !purge && !isEphemeral && d.persistEnabled {
 		d.refreshSessionCwd(sess)
 	}
-	var snapshotDeleteErr, terminalSnapshotErr error
+	var terminalSnapshotErr error
 	if d.snapsEnabled && !isEphemeral {
 		if purge {
 			if d.snapshotRepository != nil {
@@ -858,25 +941,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	d.mu.Unlock()
 	d.log.Info("session closed", "session", stoppedName, "id", sess.id, "ephemeral", ephemeral, "purge", purge, "reason", reason)
 
-	purgeErr := snapshotDeleteErr
-	if !ephemeral && purge {
-		if err := d.persist.Delete(stoppedName); err != nil {
-			purgeErr = err
-			d.log.Warn("deleting persisted session failed", "err", err, "session", stoppedName)
-			d.mu.Lock()
-			if stopped, ok := d.stopped[stoppedName]; ok && stopped.purging {
-				stopped.purging = false
-				d.stopped[stoppedName] = stopped
-			}
-			d.mu.Unlock()
-		} else {
-			d.mu.Lock()
-			if stopped, ok := d.stopped[stoppedName]; ok && stopped.purging {
-				delete(d.stopped, stoppedName)
-			}
-			d.mu.Unlock()
-		}
-	}
+	var purgeErr error
 
 	// A global route that selected this attachment must publish before terminal
 	// teardown makes it stale.
@@ -920,12 +985,20 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 			d.log.Warn("removing clipboard temp file failed", "err", err, "path", path)
 		}
 	}
-	// The coordinator and all panes are now stopped, so no producer can
-	// publish another generation after this destructive repository delete.
-	if !ephemeral && purge && d.snapshotRepository != nil {
-		if err := d.snapshotRepository.Delete(context.Background(), stoppedName); err != nil {
+	// The coordinator and all panes are now stopped, so no producer can publish
+	// another generation after this destructive source deletion. Keep the
+	// tombstone and hidden stopped record when any source or metadata operation
+	// fails; retryStoppedPurge (including a repeated live kill) resumes safely.
+	if !ephemeral && purge {
+		if err := d.finishSnapshotPurge(stoppedName); err != nil {
 			purgeErr = errors.Join(purgeErr, err)
-			d.log.Warn("deleting session snapshot failed", "err", err, "session", stoppedName)
+			d.log.Warn("finishing session snapshot purge failed", "err", err, "session", stoppedName)
+		} else {
+			d.mu.Lock()
+			if stopped, ok := d.stopped[stoppedName]; ok && stopped.purging {
+				delete(d.stopped, stoppedName)
+			}
+			d.mu.Unlock()
 		}
 	}
 	if empty {

@@ -73,3 +73,12 @@ type LegacySnapshotSource interface {
 	LoadLegacy(context.Context) ([]LegacySnapshot, error)
 	DeleteLegacy(context.Context, string) error
 }
+
+// SnapshotDeletionTombstone makes a named-session purge durable across the
+// independent incremental and legacy snapshot sources. A tombstoned name must
+// not be restored or imported until both source deletions and metadata removal
+// have completed.
+type SnapshotDeletionTombstone interface {
+	Tombstone(context.Context, string) error
+	DeleteTombstone(context.Context, string) error
+}

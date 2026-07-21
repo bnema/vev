@@ -121,9 +121,13 @@ type Daemon struct {
 	// read-only migration input and is never used for new writes.
 	snapshotRepository ports.SnapshotRepository
 	legacySnapshots    ports.LegacySnapshotSource
-	snapsEnabled       bool
-	noticeStore        ports.NoticeStore
-	snapshotMarshal    func(snapcodec.Session) ([]byte, error)
+	// snapshotDeletion durably fences a live purge across both snapshot
+	// sources. Production repositories must provide it; nil preserves the
+	// narrower checkpoint-only test seam.
+	snapshotDeletion ports.SnapshotDeletionTombstone
+	snapsEnabled     bool
+	noticeStore      ports.NoticeStore
+	snapshotMarshal  func(snapcodec.Session) ([]byte, error)
 	// snapshotChunkCache contains only encoded immutable sealed chunks. It is
 	// independent of pane state and is bounded to prevent checkpoint history
 	// from becoming unbounded daemon memory.
@@ -259,6 +263,11 @@ func WithSnapshotRepository(repository ports.SnapshotRepository, legacy ports.Le
 	return func(d *Daemon) {
 		d.snapshotRepository = repository
 		d.legacySnapshots = legacy
+		if deletion, ok := repository.(ports.SnapshotDeletionTombstone); ok {
+			d.snapshotDeletion = deletion
+		} else if deletion, ok := legacy.(ports.SnapshotDeletionTombstone); ok {
+			d.snapshotDeletion = deletion
+		}
 		d.snapsEnabled = repository != nil
 	}
 }

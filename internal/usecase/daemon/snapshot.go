@@ -63,12 +63,13 @@ type snapshotCapturePane struct {
 	// history is retained for the v3 compatibility encoder. Incremental
 	// captures keep sealed identities and a copied tail separately so capture
 	// never rotates a live mutable tail merely to persist it.
-	history    vt.HistoryView
-	sealed     vt.HistorySnapshotView
-	tail       vt.HistoryView
-	visible    []byte
-	visibleErr error
-	process    *snapcodec.Process
+	history vt.HistoryView
+	sealed  vt.HistorySnapshotView
+	tail    vt.HistoryView
+	// visible is an owned copy taken while pane.mu is held. It must be
+	// marshaled only after that lock has been released.
+	visible vt.PrimaryVisibleSnapshot
+	process *snapcodec.Process
 }
 
 // snapshotFailureSignature classifies a persistence failure without retaining
@@ -686,12 +687,10 @@ func (d *Daemon) captureSnapshotState(sess *session, generation uint64) (*snapsh
 			if pty != nil {
 				pid = pty.Pid()
 			}
-			visible, visibleErr := p.screen.MarshalPrimaryVisible()
 			paneCapture := snapshotCapturePane{
-				id:         p.id,
-				stableID:   p.stableID,
-				visible:    visible,
-				visibleErr: visibleErr,
+				id:       p.id,
+				stableID: p.stableID,
+				visible:  p.screen.PrimaryVisibleSnapshot(),
 			}
 			paneCapture.sealed = p.history.SnapshotView()
 			paneCapture.tail = paneCapture.sealed.Tail()
@@ -731,10 +730,11 @@ func (d *Daemon) encodeSnapshotCapture(capture *snapshotCapture) ([]byte, error)
 			if historyErr != nil {
 				return nil, fmt.Errorf("terminal snapshot pane %s history: %w", paneCapture.id, historyErr)
 			}
-			if paneCapture.visibleErr != nil {
-				return nil, fmt.Errorf("terminal snapshot pane %s visible: %w", paneCapture.id, paneCapture.visibleErr)
+			visible, visibleErr := paneCapture.visible.Marshal()
+			if visibleErr != nil {
+				return nil, fmt.Errorf("terminal snapshot pane %s visible: %w", paneCapture.id, visibleErr)
 			}
-			tabSnap.Panes = append(tabSnap.Panes, snapcodec.Pane{ID: paneCapture.id, StableID: paneCapture.stableID, Cwd: paneCapture.cwd, SealedChunks: sealed, Tail: tail, Visible: paneCapture.visible, Process: paneCapture.process})
+			tabSnap.Panes = append(tabSnap.Panes, snapcodec.Pane{ID: paneCapture.id, StableID: paneCapture.stableID, Cwd: paneCapture.cwd, SealedChunks: sealed, Tail: tail, Visible: visible, Process: paneCapture.process})
 			paneIDs[paneCapture.id] = struct{}{}
 		}
 		if tabSnap.Tree != nil {

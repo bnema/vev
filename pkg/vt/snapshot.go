@@ -141,17 +141,47 @@ func MarshalVisible(frame renderer.Frame) ([]byte, error) {
 	return marshalVisible(frame, boundaries)
 }
 
-// MarshalPrimaryVisible preserves the primary buffer's logical-line boundaries
-// alongside its cells so a restored viewport can subsequently reflow.
-func (s *Screen) MarshalPrimaryVisible() ([]byte, error) {
+// PrimaryVisibleSnapshot is an owned copy of the primary buffer's visible
+// state. Capture it while the screen owner is synchronized, then Marshal it
+// after releasing that lock.
+type PrimaryVisibleSnapshot struct {
+	frame      renderer.Frame
+	boundaries []lineBoundary
+}
+
+// PrimaryVisibleSnapshot copies the saved primary frame and its logical-line
+// boundaries. When the alternate screen is active, the saved primary buffer is
+// copied rather than the currently displayed alternate buffer.
+func (s *Screen) PrimaryVisibleSnapshot() PrimaryVisibleSnapshot {
 	b := s.buffer
 	if s.alternate != nil {
 		b = s.alternate.buffer
 	}
 	if b == nil {
-		return MarshalVisible(s.PrimaryVisibleFrame())
+		return PrimaryVisibleSnapshot{frame: s.PrimaryVisibleFrame()}
 	}
-	return marshalVisible(b.frame, b.boundaries)
+	return PrimaryVisibleSnapshot{
+		frame:      b.frame.Clone(),
+		boundaries: append([]lineBoundary(nil), b.boundaries...),
+	}
+}
+
+// Marshal encodes an owned primary visible snapshot without accessing live VT
+// state.
+func (v PrimaryVisibleSnapshot) Marshal() ([]byte, error) {
+	if len(v.boundaries) == 0 && v.frame.Height > 0 {
+		return MarshalVisible(v.frame)
+	}
+	return marshalVisible(v.frame, v.boundaries)
+}
+
+// MarshalPrimaryVisible preserves the primary buffer's logical-line boundaries
+// alongside its cells so a restored viewport can subsequently reflow.
+//
+// Deprecated: callers holding a pane lock should use PrimaryVisibleSnapshot
+// and marshal the result after unlocking.
+func (s *Screen) MarshalPrimaryVisible() ([]byte, error) {
+	return s.PrimaryVisibleSnapshot().Marshal()
 }
 
 func marshalVisible(frame renderer.Frame, boundaries []lineBoundary) ([]byte, error) {
