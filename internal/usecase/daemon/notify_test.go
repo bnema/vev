@@ -15,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/pkg/vt"
 )
 
 func TestClientNoticeMapsFixedActionsAndDismissesOnlyConnectionToast(t *testing.T) {
@@ -297,16 +298,6 @@ func awaitToastCount(t *testing.T, ac *attachedClient, want int) []domain.Notifi
 	}, 2*time.Second, time.Millisecond, "toast count never reached %d", want)
 	got, _ := visibleToasts(ac)
 	return got
-}
-
-func drainFrames(sends chan ports.Frame) {
-	for {
-		select {
-		case <-sends:
-		default:
-			return
-		}
-	}
 }
 
 func TestReportErrorUserErrorBecomesNotification(t *testing.T) {
@@ -746,7 +737,11 @@ func TestToastExpiresOnFakeClock(t *testing.T) {
 
 	d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
 	awaitToastCount(t, ac, 1)
-	drainFrames(sends)
+	shown := awaitFrame(t, sends, ports.MsgOutput)
+	shownOutput, err := ports.UnmarshalOutput(shown.Payload)
+	require.NoError(t, err)
+	terminal := vt.NewScreen(80, 25)
+	terminal.Write(shownOutput.Data)
 
 	// Short of the 8s error TTL nothing expires.
 	clk.advance(7 * time.Second)
@@ -758,11 +753,14 @@ func TestToastExpiresOnFakeClock(t *testing.T) {
 	_, overflow := visibleToasts(ac)
 	require.Zero(t, overflow, "overflow resets once no toast is visible")
 
-	select {
-	case <-sends:
-	case <-time.After(2 * time.Second):
-		t.Fatal("expiry did not invalidate the render")
-	}
+	expired := awaitFrame(t, sends, ports.MsgOutput)
+	expiredOutput, err := ports.UnmarshalOutput(expired.Payload)
+	require.NoError(t, err)
+	terminal.Write(expiredOutput.Data)
+	ac.sendMu.Lock()
+	base := ac.pipelineCache.frame.Clone()
+	ac.sendMu.Unlock()
+	require.Equal(t, frameRows(base), frameRows(terminal.Frame), "fake-clock expiry must restore every old toast cell")
 }
 
 // TestToastExpiryOnlyRemovesItsOwnEntry proves a fired timer cannot dismiss a

@@ -44,6 +44,7 @@ type composeCacheInput struct {
 	floatingGeometry        floatingGeometry
 	floatingTitleGeneration uint64
 	bars                    barCache
+	toastFootprints         []domain.Rect
 	theme                   themeui.Theme
 	styleGeneration         uint64
 }
@@ -152,10 +153,13 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: rows + 1, Width: width, Height: 1})
 		}
 	}
-	// Toasts render even with no modal overlay active, so this gate also
-	// checks for pending notices rather than only state.overlays.active().
-	overlaysOrToasts := state.overlays.active() || len(state.overlays.notices) > 0
-	if overlaysOrToasts {
+	// The cache stays toast-free. The terminal shadow, in contrast, includes
+	// toasts, so every render damages both the last and current toast coverage.
+	// This restores cells exposed by dismissal and redraws a stable toast over
+	// any underlying pane update without promoting either case to a full frame.
+	overlaysActive := state.overlays.active()
+	toastsVisible := len(state.overlays.notices) > 0 || state.overlays.noticeOverflow > 0
+	if overlaysActive || toastsVisible {
 		// Without a floating frame, overlay composition would otherwise mutate
 		// the base cache in place. Floating composition already owns a clone.
 		if !state.floating.visible {
@@ -163,13 +167,17 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		}
 		frame, damage = composeCapturedOverlays(state, frame, damage, content)
 	}
-	if full || overlaysOrToasts {
+	toastFootprints := composeCapturedNotices(state.overlays, frame, state.styles)
+	if full || overlaysActive {
 		damage = []renderer.Damage{renderer.FullRedraw()}
+	} else {
+		damage = appendToastDamage(damage, in.toastFootprints)
+		damage = appendToastDamage(damage, toastFootprints)
 	}
 	cursorInputs := state.cursor
-	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || state.overlays.active()
+	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || overlaysActive
 	cursor := desiredCapturedCursor(cursorInputs)
-	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, floatingVisible: state.floating.visible, floatingFocused: state.floating.focused, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
+	outCache := composeCacheInput{valid: !overlaysActive, frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, toastFootprints: append(scratch.toastFootprints[:0], toastFootprints...), floatingVisible: state.floating.visible, floatingFocused: state.floating.focused, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
 	outCache.bars.capture(baseFrame.Row(0), baseFrame.Row(rows+1))
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }
@@ -296,14 +304,27 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 		}
 		damage = []renderer.Damage{renderer.FullRedraw()}
 	}
-	if len(o.notices) > 0 || o.noticeOverflow > 0 {
-		views := make([]ui.NoticeView, len(o.notices))
-		for i, n := range o.notices {
-			views[i] = ui.NoticeView{Severity: uint8(n.Severity), Title: n.Code.String(), Message: n.Message, Count: n.Count}
-		}
-		ui.ComposeNotices(frame, views, o.noticeOverflow, noticeStylesFrom(state.styles))
-	}
 	return frame, damage
+}
+
+func composeCapturedNotices(overlays capturedOverlayRenderState, frame renderer.Frame, styles themeui.Styles) []domain.Rect {
+	if len(overlays.notices) == 0 && overlays.noticeOverflow == 0 {
+		return nil
+	}
+	views := make([]ui.NoticeView, len(overlays.notices))
+	for i, n := range overlays.notices {
+		views[i] = ui.NoticeView{Severity: uint8(n.Severity), Title: n.Code.String(), Message: n.Message, Count: n.Count}
+	}
+	return ui.ComposeNotices(frame, views, overlays.noticeOverflow, noticeStylesFrom(styles))
+}
+
+func appendToastDamage(damage []renderer.Damage, footprints []domain.Rect) []renderer.Damage {
+	for _, footprint := range footprints {
+		if footprint.Width > 0 && footprint.Height > 0 {
+			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: footprint.X, Y: footprint.Y, Width: footprint.Width, Height: footprint.Height})
+		}
+	}
+	return damage
 }
 
 // noticeStylesFrom picks the toast box color per severity from the theme's

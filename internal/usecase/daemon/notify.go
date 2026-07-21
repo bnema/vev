@@ -374,5 +374,8 @@ func (d *Daemon) repaintForNotice(ac *attachedClient) {
 		// invalidateRender cannot paint without a session.
 		return
 	}
-	d.invalidateRender(sess, ac, true, "notify.go")
+	// Toast footprints carry their own old/new damage, so a normal notice
+	// transition can remain incremental. First paint and transport recovery
+	// still provide their independent reset invariants.
+	d.invalidateRender(sess, ac, false, "notify.go")
 }

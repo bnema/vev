@@ -43,10 +43,12 @@ type NoticeStyles struct {
 // lines. Boxes stack downward with one blank row between them; once the
 // count behind overflow is nonzero, a right-aligned "+N more" line follows
 // the last box.
-func ComposeNotices(frame renderer.Frame, notices []NoticeView, overflow int, styles NoticeStyles) {
+func ComposeNotices(frame renderer.Frame, notices []NoticeView, overflow int, styles NoticeStyles) []domain.Rect {
 	if frame.Width <= 0 || frame.Height <= 0 || (len(notices) == 0 && overflow <= 0) {
-		return
+		return nil
 	}
+
+	footprints := make([]domain.Rect, 0, len(notices)+1)
 
 	width := frame.Width * 2 / 5
 	if width > noticeMaxWidth {
@@ -59,7 +61,7 @@ func ComposeNotices(frame renderer.Frame, notices []NoticeView, overflow int, st
 		width = frame.Width
 	}
 	if width <= 0 {
-		return
+		return nil
 	}
 	x := frame.Width - noticeMargin - width
 	y := noticeMargin
@@ -75,6 +77,7 @@ func ComposeNotices(frame renderer.Frame, notices []NoticeView, overflow int, st
 		}
 		height := len(lines) + 2
 		bounds := domain.Rect{X: x, Y: y, Width: width, Height: height}
+		footprints = append(footprints, bounds)
 		box := noticeBoxStyle(styles, n.Severity)
 		DrawBox(frame, bounds, box)
 
@@ -112,7 +115,9 @@ func ComposeNotices(frame renderer.Frame, notices []NoticeView, overflow int, st
 			start = x
 		}
 		DrawText(frame, start, y, x+width, text, styles.Text)
+		footprints = append(footprints, domain.Rect{X: start, Y: y, Width: x + width - start, Height: 1})
 	}
+	return footprints
 }
 
 func noticeBoxStyle(styles NoticeStyles, severity uint8) renderer.Style {

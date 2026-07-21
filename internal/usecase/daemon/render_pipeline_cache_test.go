@@ -300,6 +300,7 @@ func cloneComposeCache(in composeCacheInput) composeCacheInput {
 	out.titleGenerations = make(map[layout.PaneID]uint64, len(in.titleGenerations))
 	maps.Copy(out.titleGenerations, in.titleGenerations)
 	out.damage = append([]renderer.Damage(nil), in.damage...)
+	out.toastFootprints = append([]domain.Rect(nil), in.toastFootprints...)
 	out.bars.top = append([]renderer.Cell(nil), in.bars.top...)
 	out.bars.bottom = append([]renderer.Cell(nil), in.bars.bottom...)
 	return out
