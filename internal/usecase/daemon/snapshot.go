@@ -43,17 +43,24 @@ type snapshotCaptureTab struct {
 }
 
 type snapshotCapturePane struct {
-	id         layout.PaneID
-	stableID   string
-	cwd        string
+	id       layout.PaneID
+	stableID string
+	cwd      string
+	// history is retained for the v3 compatibility encoder. Incremental
+	// captures keep sealed identities and a copied tail separately so capture
+	// never rotates a live mutable tail merely to persist it.
 	history    vt.HistoryView
+	sealed     vt.HistorySnapshotView
+	tail       vt.HistoryView
 	visible    []byte
 	visibleErr error
 	process    *snapcodec.Process
 }
 
 const (
-	snapshotInterval          = 30 * time.Second
+	// Routine checkpoints are rate limited from completion; forced teardown
+	// checkpoints use the same bounded worker but never consume this window.
+	snapshotInterval          = 2 * time.Minute
 	snapshotFinalFlushTimeout = time.Second
 )
 
@@ -82,7 +89,14 @@ func (d *Daemon) restoreSnapshots(ctx context.Context) {
 			}
 		}
 	}
-	if !d.snapsEnabled || d.snaps == nil {
+	if !d.snapsEnabled {
+		return
+	}
+	if d.snapshotRepository != nil {
+		d.restoreIncrementalSnapshots(ctx)
+		return
+	}
+	if d.snaps == nil {
 		return
 	}
 	blobs, err := d.snaps.Load()
@@ -139,7 +153,11 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 	}
 	d.mu.Unlock()
 
-	sctx, cancel := context.WithCancel(d.serveCtx)
+	parent := d.serveCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	sctx, cancel := context.WithCancel(parent)
 	opened := make([]*tab, 0, len(snap.Tabs))
 	// Snapshot restore runs before any client Hello is available. Start panes
 	// from the daemon environment captured at startup; the next attach replaces
@@ -318,7 +336,7 @@ func restorePaneTerminal(p *pane, snap snapcodec.Pane) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	screen, err := vt.NewScreenWithRestoredHistory(p.screen.Frame.Width, p.screen.Frame.Height, vt.HistoryConfig{MaxRows: defaultScrollbackRows}, snap.SealedChunks, snap.Tail)
+	screen, err := vt.NewScreenWithRestoredHistory(p.screen.Frame.Width, p.screen.Frame.Height, vt.HistoryConfig{MaxRows: defaultScrollbackRows, MaxCells: defaultScrollbackCells}, snap.SealedChunks, snap.Tail)
 	if err != nil {
 		return fmt.Errorf("snapshot history: %w", err)
 	}
@@ -362,7 +380,7 @@ func (d *Daemon) scheduleFinalSnapshot(sess *session) bool {
 }
 
 func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bool {
-	if d == nil || sess == nil || !d.snapsEnabled || d.snaps == nil || !sess.snapEligible.Load() {
+	if d == nil || sess == nil || !d.snapsEnabled || (d.snapshotRepository == nil && d.snaps == nil) || !sess.snapEligible.Load() {
 		return true
 	}
 	sess.snapshotMu.Lock()
@@ -496,9 +514,14 @@ func (d *Daemon) captureSnapshotState(sess *session, generation uint64) (*snapsh
 			paneCapture := snapshotCapturePane{
 				id:         p.id,
 				stableID:   p.stableID,
-				history:    p.history.SealAndView(),
 				visible:    visible,
 				visibleErr: visibleErr,
+			}
+			if d.snapshotRepository != nil {
+				paneCapture.sealed = p.history.SnapshotView()
+				paneCapture.tail = paneCapture.sealed.Tail()
+			} else {
+				paneCapture.history = p.history.SealAndView()
 			}
 			p.mu.Unlock()
 			paneCapture.cwd = fallbackCwd
@@ -601,9 +624,20 @@ func (d *Daemon) startSnapshotEncodeWorker() {
 				d.finishSnapshotCapture(capture, false)
 				return false
 			}
-			data, err := d.encodeSnapshotCapture(capture)
-			if err == nil && workerCtx.Err() == nil {
-				err = d.snaps.Write(capture.name, data)
+			var err error
+			if d.snapshotRepository != nil {
+				publication, publicationErr := d.incrementalPublication(capture)
+				if publicationErr != nil {
+					err = publicationErr
+				} else if workerCtx.Err() == nil {
+					err = d.snapshotRepository.Publish(workerCtx, publication)
+				}
+			} else {
+				data, encodeErr := d.encodeSnapshotCapture(capture)
+				err = encodeErr
+				if err == nil && workerCtx.Err() == nil {
+					err = d.snaps.Write(capture.name, data)
+				}
 			}
 			d.clearSnapshotWorkerInFlight(workerID, capture)
 			if err != nil && workerCtx.Err() == nil {
@@ -781,15 +815,7 @@ func (d *Daemon) capturePaneProcess(pty interface{ ForegroundPgid() (int, error)
 }
 
 func (d *Daemon) snapshotSaver(ctx context.Context) {
-	t := d.clock.NewTimer(snapshotInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C():
-		}
-
+	checkpoint := func() {
 		d.mu.Lock()
 		sessions := d.sessionsSnapshotLocked()
 		d.mu.Unlock()
@@ -798,7 +824,21 @@ func (d *Daemon) snapshotSaver(ctx context.Context) {
 				d.scheduleSnapshot(sess)
 			}
 		}
-		t.Reset(snapshotInterval)
+	}
+	// A session born dirty must not wait through a full interval before its
+	// first crash-safe checkpoint. Producers remain non-blocking because each
+	// schedule call only attempts the bounded handoff.
+	checkpoint()
+	t := d.clock.NewTimer(snapshotInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C():
+			checkpoint()
+			t.Reset(snapshotInterval)
+		}
 	}
 }
 
