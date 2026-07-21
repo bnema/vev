@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/bnema/vev/internal/ports"
 	codec "github.com/bnema/vev/internal/usecase/snapshot"
@@ -38,11 +39,21 @@ type Repository struct {
 	hooks  repositoryHooks
 }
 
+// repositoryHooks makes each persistence boundary fault-injectable. Hooks run
+// immediately before their respective syscall and are intentionally package
+// private so production callers cannot weaken repository guarantees.
 type repositoryHooks struct {
 	beforeBlobWrite     func(string) error
 	beforeManifestWrite func(string) error
 	beforeHeadWrite     func(string) error
-	writeFile           func(string, []byte) error
+	createTemp          func(string) error
+	writeTemp           func(string) error
+	syncFile            func(string) error
+	closeFile           func(string) error
+	installImmutable    func(string) error
+	rename              func(string) error
+	syncDirectory       func(string) error
+	remove              func(string) error
 }
 
 var _ ports.SnapshotRepository = (*Repository)(nil)
@@ -81,7 +92,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		if !equalBytes(currentManifest, publication.Manifest) {
 			return fmt.Errorf("snapshot generation %d: immutable conflict", publication.Generation)
 		}
-		return nil // exact replay; validation above also rejects altered objects.
+		return nil
 	}
 
 	for digest, ref := range refs {
@@ -96,8 +107,8 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		if exists {
 			continue
 		}
-		object, supplied := supplied[digest]
-		if !supplied {
+		object, ok := supplied[digest]
+		if !ok {
 			return fmt.Errorf("missing referenced object %x", digest)
 		}
 		if r.hooks.beforeBlobWrite != nil {
@@ -105,15 +116,22 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 				return err
 			}
 		}
-		if err := r.atomicWrite(path, object.Data); err != nil {
+		if err := r.writeImmutable(path, object.Data, func(existing []byte) error {
+			if sha256.Sum256(existing) != digest || !validObject(existing, ref) {
+				return fmt.Errorf("existing immutable object is invalid")
+			}
+			return nil
+		}); err != nil {
 			return fmt.Errorf("write object: %w", err)
 		}
 	}
 
 	manifestPath := r.manifestPath(key, publication.Generation)
-	if existing, exists, err := readOptionalBounded(manifestPath); err != nil {
+	existing, exists, err := readOptionalBounded(manifestPath)
+	if err != nil {
 		return err
-	} else if exists {
+	}
+	if exists {
 		if !equalBytes(existing, publication.Manifest) {
 			return fmt.Errorf("manifest generation %d: immutable conflict", publication.Generation)
 		}
@@ -123,7 +141,12 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 				return err
 			}
 		}
-		if err := r.atomicWrite(manifestPath, publication.Manifest); err != nil {
+		if err := r.writeImmutable(manifestPath, publication.Manifest, func(existing []byte) error {
+			if !equalBytes(existing, publication.Manifest) {
+				return fmt.Errorf("manifest generation %d: immutable conflict", publication.Generation)
+			}
+			return nil
+		}); err != nil {
 			return fmt.Errorf("write manifest: %w", err)
 		}
 	}
@@ -132,7 +155,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 			return err
 		}
 	}
-	if err := r.atomicWrite(r.headPath(key), marshalHead(publication.Generation, sha256.Sum256(publication.Manifest))); err != nil {
+	if err := r.writeMutable(r.headPath(key), marshalHead(publication.Generation, sha256.Sum256(publication.Manifest))); err != nil {
 		return fmt.Errorf("write HEAD: %w", err)
 	}
 	return nil
@@ -157,9 +180,6 @@ func (r *Repository) List(ctx context.Context) ([]string, error) {
 		if !entry.IsDir() || !canonicalSessionKey(entry.Name()) {
 			continue
 		}
-		// Loading is intentionally authoritative: a directory is listed only
-		// when its complete newest valid generation can be restored. Unsafe
-		// keys are not reversible, so obtain their name from a validated VEVM.
 		numbers, err := r.generationNumbers(entry.Name())
 		if err != nil {
 			continue
@@ -189,8 +209,6 @@ func (r *Repository) Load(ctx context.Context, name string) (ports.SnapshotGener
 		return ports.SnapshotGeneration{}, err
 	}
 	key := sessionKey(name)
-	// HEAD is only a hint. A torn/corrupt newest generation must never hide an
-	// older complete generation.
 	preferred, preferredDigest, err := r.readHead(key)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		preferred = 0
@@ -226,14 +244,16 @@ func (r *Repository) Delete(ctx context.Context, name string) error {
 	lock := r.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
-	err := os.RemoveAll(r.sessionPath(key))
-	if err != nil {
+	path := r.sessionPath(key)
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("stat snapshot session: %w", err)
+	}
+	if err := os.RemoveAll(path); err != nil {
 		return fmt.Errorf("delete snapshot session: %w", err)
 	}
-	if _, err := os.Stat(r.dir); err == nil {
-		return syncDirectory(r.dir)
-	}
-	return nil
+	return r.syncDirectory(filepath.Join(r.dir, repositorySessionsDir))
 }
 
 // Maintain removes abandoned temporary and quarantine files. Immutable data is
@@ -257,7 +277,10 @@ func (r *Repository) Maintain(ctx context.Context) error {
 		}
 		base := entry.Name()
 		if strings.HasPrefix(base, ".tmp-") || strings.HasPrefix(base, ".quarantine-") {
-			return os.Remove(path)
+			if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			return r.syncDirectory(filepath.Dir(path))
 		}
 		return nil
 	})
@@ -277,6 +300,7 @@ func (r *Repository) LoadLegacy(ctx context.Context) ([]ports.LegacySnapshot, er
 	}
 	return out, nil
 }
+
 func (r *Repository) DeleteLegacy(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -295,6 +319,9 @@ func validatePublication(p ports.SnapshotPublication) (codec.Manifest, map[ports
 	refs := manifestRefs(manifest)
 	if refs == nil {
 		return codec.Manifest{}, nil, nil, fmt.Errorf("conflicting manifest references")
+	}
+	if !withinGenerationBudget(len(p.Manifest), refs) {
+		return codec.Manifest{}, nil, nil, fmt.Errorf("snapshot generation too large")
 	}
 	objects := make(map[ports.SnapshotDigest]ports.SnapshotObject, len(p.Objects))
 	for _, object := range p.Objects {
@@ -315,6 +342,20 @@ func validatePublication(p ports.SnapshotPublication) (codec.Manifest, map[ports
 		objects[object.Digest] = ports.SnapshotObject{Digest: object.Digest, Data: append([]byte(nil), object.Data...)}
 	}
 	return manifest, refs, objects, nil
+}
+
+func withinGenerationBudget(manifestSize int, refs map[ports.SnapshotDigest]codec.ObjectRef) bool {
+	if manifestSize < 0 || manifestSize > maxRepositoryRead {
+		return false
+	}
+	total := uint64(manifestSize)
+	for _, ref := range refs {
+		if uint64(ref.Size) > uint64(maxRepositoryRead)-total {
+			return false
+		}
+		total += uint64(ref.Size)
+	}
+	return true
 }
 
 func manifestRefs(manifest codec.Manifest) map[ports.SnapshotDigest]codec.ObjectRef {
@@ -371,26 +412,18 @@ func (r *Repository) loadGeneration(ctx context.Context, name, key string, gener
 		return ports.SnapshotGeneration{}, fmt.Errorf("invalid manifest")
 	}
 	refs := manifestRefs(manifest)
-	if refs == nil {
-		return ports.SnapshotGeneration{}, fmt.Errorf("conflicting manifest references")
+	if refs == nil || !withinGenerationBudget(len(data), refs) {
+		return ports.SnapshotGeneration{}, fmt.Errorf("snapshot generation too large")
 	}
 	objects := make(map[ports.SnapshotDigest][]byte, len(refs))
-	total := len(data)
 	for digest, ref := range refs {
 		if err := ctx.Err(); err != nil {
 			return ports.SnapshotGeneration{}, err
-		}
-		// Ref sizes were validated by the VEVM preflight. Check the aggregate
-		// before allocating another object so hostile repositories cannot exceed
-		// the restore budget transiently.
-		if uint64(ref.Size) > uint64(maxRepositoryRead-total) {
-			return ports.SnapshotGeneration{}, fmt.Errorf("snapshot generation too large")
 		}
 		object, err := readBounded(r.objectPath(key, digest))
 		if err != nil {
 			return ports.SnapshotGeneration{}, err
 		}
-		total += len(object)
 		if sha256.Sum256(object) != digest || !validObject(object, ref) {
 			return ports.SnapshotGeneration{}, fmt.Errorf("invalid object")
 		}
@@ -403,27 +436,61 @@ func validObject(data []byte, ref codec.ObjectRef) bool {
 	kind, payload, err := codec.PreflightObject(data)
 	return err == nil && kind == ref.Kind && len(payload) > 0 && len(data) == int(ref.Size)
 }
+
 func verifyObjectFile(path string, digest ports.SnapshotDigest, ref codec.ObjectRef) (bool, error) {
 	data, exists, err := readOptionalBounded(path)
 	if err != nil || !exists {
 		return exists, err
 	}
-	return true, func() error {
-		if sha256.Sum256(data) != digest || !validObject(data, ref) {
-			return fmt.Errorf("existing immutable object is invalid")
-		}
-		return nil
-	}()
+	if sha256.Sum256(data) != digest || !validObject(data, ref) {
+		return true, fmt.Errorf("existing immutable object is invalid")
+	}
+	return true, nil
 }
 
 func (r *Repository) ensureSession(key string) error {
-	for _, dir := range []string{r.dir, filepath.Join(r.dir, repositorySessionsDir), r.sessionPath(key), filepath.Join(r.sessionPath(key), repositoryObjectsDir), filepath.Join(r.sessionPath(key), repositoryGenerations)} {
-		if err := safedir.EnsurePrivate(dir); err != nil {
+	for _, dir := range []string{
+		r.dir,
+		filepath.Join(r.dir, repositorySessionsDir),
+		r.sessionPath(key),
+		filepath.Join(r.sessionPath(key), repositoryObjectsDir),
+		filepath.Join(r.sessionPath(key), repositoryGenerations),
+	} {
+		if err := r.ensurePrivateDirectory(dir); err != nil {
 			return fmt.Errorf("create snapshot repository directory: %w", err)
 		}
 	}
 	return nil
 }
+
+func (r *Repository) ensurePrivateDirectory(dir string) error {
+	_, err := os.Lstat(dir)
+	created := errors.Is(err, os.ErrNotExist)
+	if err != nil && !created {
+		return err
+	}
+	if created {
+		parent := filepath.Dir(dir)
+		if _, err := os.Lstat(parent); errors.Is(err, os.ErrNotExist) {
+			if err := r.ensurePrivateDirectory(parent); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+	}
+	if err := safedir.EnsurePrivate(dir); err != nil {
+		return err
+	}
+	if created {
+		return r.syncDirectory(filepath.Dir(dir))
+	}
+	return nil
+}
+
 func (r *Repository) sessionPath(key string) string {
 	return filepath.Join(r.dir, repositorySessionsDir, key)
 }
@@ -459,12 +526,6 @@ func canonicalSessionKey(key string) bool {
 	_, err := hex.DecodeString(key[1:])
 	return err == nil && strings.ToLower(key[1:]) == key[1:]
 }
-func nameFromSafeKey(key string) string {
-	if strings.HasPrefix(key, "@") {
-		return ""
-	}
-	return key
-}
 func generationFilename(generation uint64) string {
 	return fmt.Sprintf("%0*d.manifest", generationWidth, generation)
 }
@@ -473,8 +534,6 @@ func parseGenerationFilename(name string) (uint64, bool) {
 		return 0, false
 	}
 	n := strings.TrimSuffix(name, ".manifest")
-	if strings.HasPrefix(n, "0") && n != fmt.Sprintf("%0*d", generationWidth, 0) { /* zero padding required, strconv below verifies width */
-	}
 	generation, err := strconv.ParseUint(n, 10, 64)
 	return generation, err == nil && generationFilename(generation) == name && generation != 0
 }
@@ -533,47 +592,185 @@ func (r *Repository) readHead(key string) (uint64, ports.SnapshotDigest, error) 
 	return generation, digest, nil
 }
 
-func (r *Repository) atomicWrite(path string, data []byte) error {
-	if r.hooks.writeFile != nil {
-		return r.hooks.writeFile(path, append([]byte(nil), data...))
-	}
-	return atomicWriteFile(path, data)
-}
-func atomicWriteFile(path string, data []byte) error {
+// writeImmutable publishes data with link(2), whose EEXIST behavior prevents a
+// raced target from being overwritten. A competing target is accepted only
+// after verifier reads it through the same secure descriptor path as Load.
+func (r *Repository) writeImmutable(path string, data []byte, verifier func([]byte) error) error {
 	dir := filepath.Dir(path)
-	if err := safedir.EnsurePrivate(dir); err != nil {
+	if err := r.ensurePrivateDirectory(dir); err != nil {
 		return err
 	}
-	temp, err := os.CreateTemp(dir, ".tmp-")
+	temp, err := r.createTemp(dir)
 	if err != nil {
 		return err
 	}
 	tempPath := temp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tempPath)
+	closed := false
+	cleanup := func(cause error) error {
+		if !closed {
+			if err := r.closeFile(temp); err != nil && cause == nil {
+				cause = err
+			}
+			closed = true
 		}
-	}()
+		if err := r.remove(tempPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cause = errors.Join(cause, err)
+		} else if err == nil {
+			cause = errors.Join(cause, r.syncDirectory(dir))
+		}
+		return cause
+	}
 	if err := temp.Chmod(0o600); err != nil {
-		_ = temp.Close()
+		return cleanup(err)
+	}
+	if err := r.writeFile(temp, data); err != nil {
+		return cleanup(err)
+	}
+	if err := r.syncFile(temp); err != nil {
+		return cleanup(err)
+	}
+	if err := r.closeFile(temp); err != nil {
+		closed = true
+		return cleanup(err)
+	}
+	closed = true
+	if err := r.installImmutable(tempPath, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			existing, readErr := readBounded(path)
+			if readErr != nil {
+				return cleanup(readErr)
+			}
+			if verifyErr := verifier(existing); verifyErr != nil {
+				return cleanup(verifyErr)
+			}
+			return cleanup(nil)
+		}
+		return cleanup(err)
+	}
+	if err := r.syncDirectory(dir); err != nil {
+		return cleanup(err)
+	}
+	return cleanup(nil)
+}
+
+// writeMutable is used only for HEAD, the sole authoritative pointer allowed
+// to advance. The old or fully synced new HEAD is therefore always recoverable.
+func (r *Repository) writeMutable(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := r.ensurePrivateDirectory(dir); err != nil {
 		return err
 	}
-	if _, err := temp.Write(data); err != nil {
-		_ = temp.Close()
+	temp, err := r.createTemp(dir)
+	if err != nil {
 		return err
 	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return err
+	tempPath := temp.Name()
+	closed := false
+	cleanup := func(cause error) error {
+		if !closed {
+			if err := r.closeFile(temp); err != nil && cause == nil {
+				cause = err
+			}
+			closed = true
+		}
+		if err := r.remove(tempPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cause = errors.Join(cause, err)
+		} else if err == nil {
+			cause = errors.Join(cause, r.syncDirectory(dir))
+		}
+		return cause
 	}
-	if err := temp.Close(); err != nil {
-		return err
+	if err := temp.Chmod(0o600); err != nil {
+		return cleanup(err)
 	}
-	if err := os.Rename(tempPath, path); err != nil {
-		return err
+	if err := r.writeFile(temp, data); err != nil {
+		return cleanup(err)
 	}
-	cleanup = false
+	if err := r.syncFile(temp); err != nil {
+		return cleanup(err)
+	}
+	if err := r.closeFile(temp); err != nil {
+		closed = true
+		return cleanup(err)
+	}
+	closed = true
+	if err := r.rename(tempPath, path); err != nil {
+		return cleanup(err)
+	}
+	if err := r.syncDirectory(dir); err != nil {
+		return cleanup(err)
+	}
+	// rename consumed tempPath. Its directory sync above persists both rename
+	// and the absence of the temporary entry.
+	return nil
+}
+
+func (r *Repository) createTemp(dir string) (*os.File, error) {
+	if r.hooks.createTemp != nil {
+		if err := r.hooks.createTemp(dir); err != nil {
+			return nil, err
+		}
+	}
+	return os.CreateTemp(dir, ".tmp-")
+}
+func (r *Repository) writeFile(f *os.File, data []byte) error {
+	if r.hooks.writeTemp != nil {
+		if err := r.hooks.writeTemp(f.Name()); err != nil {
+			return err
+		}
+	}
+	_, err := f.Write(data)
+	return err
+}
+func (r *Repository) syncFile(f *os.File) error {
+	if r.hooks.syncFile != nil {
+		if err := r.hooks.syncFile(f.Name()); err != nil {
+			return err
+		}
+	}
+	return f.Sync()
+}
+func (r *Repository) closeFile(f *os.File) error {
+	var injected error
+	if r.hooks.closeFile != nil {
+		injected = r.hooks.closeFile(f.Name())
+	}
+	closeErr := f.Close()
+	if injected != nil {
+		return injected
+	}
+	return closeErr
+}
+func (r *Repository) installImmutable(oldPath, newPath string) error {
+	if r.hooks.installImmutable != nil {
+		if err := r.hooks.installImmutable(newPath); err != nil {
+			return err
+		}
+	}
+	return os.Link(oldPath, newPath)
+}
+func (r *Repository) rename(oldPath, newPath string) error {
+	if r.hooks.rename != nil {
+		if err := r.hooks.rename(newPath); err != nil {
+			return err
+		}
+	}
+	return os.Rename(oldPath, newPath)
+}
+func (r *Repository) remove(path string) error {
+	if r.hooks.remove != nil {
+		if err := r.hooks.remove(path); err != nil {
+			return err
+		}
+	}
+	return os.Remove(path)
+}
+func (r *Repository) syncDirectory(dir string) error {
+	if r.hooks.syncDirectory != nil {
+		if err := r.hooks.syncDirectory(dir); err != nil {
+			return err
+		}
+	}
 	return syncDirectory(dir)
 }
 func syncDirectory(dir string) error {
@@ -581,9 +778,13 @@ func syncDirectory(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return f.Sync()
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
+
 func readOptionalBounded(path string) ([]byte, bool, error) {
 	data, err := readBounded(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -591,31 +792,55 @@ func readOptionalBounded(path string) ([]byte, bool, error) {
 	}
 	return data, err == nil, err
 }
+
+// readBounded opens the final component with O_NOFOLLOW, validates the opened
+// descriptor, then reads a hard bounded amount. It deliberately never trusts
+// path metadata obtained before opening the descriptor.
 func readBounded(path string) ([]byte, error) {
-	info, err := os.Lstat(path)
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() {
+	f := os.NewFile(uintptr(fd), path)
+	if f == nil {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("open snapshot file")
+	}
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(fd, &stat); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if stat.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		_ = f.Close()
 		return nil, fmt.Errorf("not a regular file")
 	}
-	if info.Size() < 0 || info.Size() > maxRepositoryRead {
+	if int(stat.Uid) != os.Geteuid() {
+		_ = f.Close()
+		return nil, fmt.Errorf("snapshot file is not owned by effective uid")
+	}
+	if stat.Mode&0o077 != 0 {
+		_ = f.Close()
+		return nil, fmt.Errorf("snapshot file has unsafe permissions")
+	}
+	if stat.Size < 0 || stat.Size > int64(maxRepositoryRead) {
+		_ = f.Close()
 		return nil, fmt.Errorf("snapshot file too large")
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
+	data, readErr := io.ReadAll(io.LimitReader(f, int64(maxRepositoryRead)+1))
+	closeErr := f.Close()
+	if readErr != nil {
+		return nil, readErr
 	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, maxRepositoryRead+1))
-	if err != nil {
-		return nil, err
+	if closeErr != nil {
+		return nil, closeErr
 	}
 	if len(data) > maxRepositoryRead {
 		return nil, fmt.Errorf("snapshot file too large")
 	}
 	return data, nil
 }
+
 func equalBytes(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false

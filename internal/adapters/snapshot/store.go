@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -73,7 +72,9 @@ func (s *Store) Write(name string, data []byte) error {
 		return fmt.Errorf("rename snapshot: %w", err)
 	}
 	keepTmp = true
-	syncDir(s.dir)
+	if err := syncDir(s.dir); err != nil {
+		return fmt.Errorf("sync snapshot dir: %w", err)
+	}
 	return nil
 }
 
@@ -123,31 +124,14 @@ func (s *Store) Delete(name string) error {
 	if err != nil {
 		return fmt.Errorf("delete snapshot: %w", err)
 	}
-	syncDir(s.dir)
+	if err := syncDir(s.dir); err != nil {
+		return fmt.Errorf("sync snapshot dir: %w", err)
+	}
 	return nil
 }
 
 func readSnapshotFileBounded(path string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > maxSnapshotFileSize {
-		return nil, fmt.Errorf("snapshot too large: %d bytes", info.Size())
-	}
-	data, err := io.ReadAll(io.LimitReader(f, maxSnapshotFileSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxSnapshotFileSize {
-		return nil, fmt.Errorf("snapshot too large: %d bytes", len(data))
-	}
-	return data, nil
+	return readBounded(path)
 }
 
 func filenameForName(name string) string {
@@ -158,11 +142,6 @@ func filenameForName(name string) string {
 	return "@" + hex.EncodeToString(sum[:])[:40] + ".snap"
 }
 
-func syncDir(dir string) {
-	f, err := os.Open(dir)
-	if err != nil {
-		return
-	}
-	defer func() { _ = f.Close() }()
-	_ = f.Sync()
+func syncDir(dir string) error {
+	return syncDirectory(dir)
 }
