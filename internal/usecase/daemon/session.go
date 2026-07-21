@@ -43,6 +43,7 @@ type session struct {
 	client                 *attachedClient
 	clipboardQueue         []clipboardForward
 	clipboardWorkerRunning bool
+	renameInProgress       bool
 	cwd                    string
 	terminal               terminalEnv
 	// env is the authoritative immutable environment snapshot for future PTY children.
@@ -61,8 +62,18 @@ type session struct {
 	snapshotNextEligibleAt     time.Time
 	snapshotAttempted          bool
 	snapshotAttemptKind        snapshotAttemptKind
+	// The coordinator state below is guarded by snapshotMu. A capture can be
+	// queued globally or in flight, never more than one of each per session.
+	// Quarantine cancels the session publication context before destructive
+	// repository operations and publicationDone joins a started publication.
 	snapshotPending            bool
 	snapshotPendingCaptures    uint
+	snapshotQueuedCapture      *snapshotCapture
+	snapshotInFlightCapture    *snapshotCapture
+	snapshotPublicationDone    chan struct{}
+	snapshotPublicationContext context.Context
+	snapshotPublicationCancel  context.CancelFunc
+	snapshotQuarantined        bool
 	// snapshotFailureSig is the stable class of the active failed publication.
 	// It is guarded by snapshotMu and deliberately never contains error text.
 	snapshotFailureSig string
@@ -530,15 +541,27 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	if err := domain.ValidateSessionName(name); err != nil {
 		return err
 	}
+
+	// Reserve the rename while state is inspected, then perform persistence and
+	// repository I/O without daemon/session locks. In particular, Delete must
+	// follow coordinator quarantine+join or a late Publish could recreate the
+	// old repository identity.
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if taken := d.findByNameLocked(name); taken != nil && taken != sess {
-		return errSessionNameInUse
-	}
-	if stopped, ok := d.stopped[name]; ok && stopped.name != sess.name {
+		d.mu.Unlock()
 		return errSessionNameInUse
 	}
 	sess.mu.Lock()
+	if sess.renameInProgress {
+		sess.mu.Unlock()
+		d.mu.Unlock()
+		return errors.New("session rename already in progress")
+	}
+	if stopped, ok := d.stopped[name]; ok && stopped.name != sess.name {
+		sess.mu.Unlock()
+		d.mu.Unlock()
+		return errSessionNameInUse
+	}
 	oldName := sess.name
 	wasEphemeral := sess.ephemeral
 	createdAt := sess.createdAt
@@ -547,45 +570,65 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		createdAt, err = d.allocateLifecycleCreatedAtLocked()
 		if err != nil {
 			sess.mu.Unlock()
+			d.mu.Unlock()
 			return err
 		}
 	}
 	lastUsedSeq := sess.mruAt.Load()
+	record := sess.persistRecordLocked(d.nowUnixNano())
+	record.Name = name
+	record.CreatedAt = createdAt
+	record.LastUsedSeq = lastUsedSeq
+	sess.renameInProgress = true
+	sess.mu.Unlock()
+	d.mu.Unlock()
+
+	rollback := func(err error, resume bool) error {
+		if cleanupErr := d.persist.Delete(name); cleanupErr != nil {
+			d.log.Warn("cleaning up renamed persisted session failed", "err", cleanupErr, "session", name)
+		}
+		if resume {
+			resumeSnapshotCoordinator(sess)
+		}
+		sess.mu.Lock()
+		sess.renameInProgress = false
+		sess.mu.Unlock()
+		return err
+	}
 	if wasEphemeral || oldName != name {
-		record := sess.persistRecordLocked(d.nowUnixNano())
-		record.Name = name
-		record.CreatedAt = createdAt
-		record.LastUsedSeq = lastUsedSeq
 		if err := d.persist.Save(record); err != nil {
+			sess.mu.Lock()
+			sess.renameInProgress = false
 			sess.mu.Unlock()
 			return err
 		}
 	}
 	if !wasEphemeral && oldName != name {
+		<-quarantineSnapshotCoordinator(sess)
 		if d.snapsEnabled && d.snapshotRepository != nil {
 			if err := d.snapshotRepository.Delete(context.Background(), oldName); err != nil {
-				if cleanupErr := d.persist.Delete(name); cleanupErr != nil {
-					d.log.Warn("cleaning up renamed persisted session failed", "err", cleanupErr, "session", name)
-				}
-				sess.mu.Unlock()
-				return err
+				return rollback(err, true)
 			}
 		}
 		if err := d.persist.Delete(oldName); err != nil {
-			if cleanupErr := d.persist.Delete(name); cleanupErr != nil {
-				d.log.Warn("cleaning up renamed persisted session failed", "err", cleanupErr, "session", name)
-			}
-			sess.mu.Unlock()
-			return err
+			return rollback(err, true)
 		}
+		resumeSnapshotCoordinator(sess)
 	}
+
+	d.mu.Lock()
+	sess.mu.Lock()
+	// The reservation prevents another rename. A closing session is allowed to
+	// finish this short commit; killSession subsequently owns its teardown.
 	delete(d.stopped, oldName)
 	delete(d.stopped, name)
 	sess.name = name
 	sess.createdAt = createdAt
 	sess.ephemeral = false
+	sess.renameInProgress = false
 	sess.snapEligible.Store(name != "")
 	sess.mu.Unlock()
+	d.mu.Unlock()
 	markSnapshotDirty(sess)
 	return nil
 }
@@ -731,6 +774,12 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	sess.mu.Lock()
 	isEphemeral := sess.ephemeral
 	sess.mu.Unlock()
+	// A repository delete must never race an older publication that could
+	// recreate the just-quarantined name. Do not hold daemon or session locks
+	// while joining: a repository implementation may ignore cancellation.
+	if purge && !isEphemeral && d.snapshotRepository != nil {
+		<-quarantineSnapshotCoordinator(sess)
+	}
 	if !purge && !isEphemeral && d.persistEnabled {
 		d.refreshSessionCwd(sess)
 	}

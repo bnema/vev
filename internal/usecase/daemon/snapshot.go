@@ -34,14 +34,16 @@ const (
 )
 
 type snapshotCapture struct {
-	session     *session
-	attemptKind snapshotAttemptKind
-	generation  uint64
-	name        string
-	createdAt   uint64
-	active      uint16
-	tabs        []snapshotCaptureTab
-	finishOnce  sync.Once
+	session              *session
+	attemptKind          snapshotAttemptKind
+	generation           uint64
+	name                 string
+	createdAt            uint64
+	active               uint16
+	tabs                 []snapshotCaptureTab
+	publicationContext   context.Context
+	coordinatorDiscarded bool // guarded by session.snapshotMu
+	finishOnce           sync.Once
 }
 
 type snapshotCaptureTab struct {
@@ -299,6 +301,72 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 	return nil
 }
 
+// snapshotCoordinatorContext returns the cancellation context shared by this
+// session's queued and in-flight captures. snapshotMu serializes creation with
+// quarantine, so a publisher can never obtain a live context after quarantine.
+func snapshotCoordinatorContext(sess *session) (context.Context, context.CancelFunc) {
+	sess.snapshotMu.Lock()
+	defer sess.snapshotMu.Unlock()
+	if sess.snapshotPublicationContext == nil {
+		sess.snapshotPublicationContext, sess.snapshotPublicationCancel = context.WithCancel(context.Background())
+	}
+	return sess.snapshotPublicationContext, sess.snapshotPublicationCancel
+}
+
+// quarantineSnapshotCoordinator prevents a deleted session from starting any
+// further publication. The returned join channel is closed after an already
+// started repository call returns; callers must wait without daemon or session
+// locks before deleting repository state.
+func quarantineSnapshotCoordinator(sess *session) <-chan struct{} {
+	if sess == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	sess.snapshotMu.Lock()
+	sess.snapshotQuarantined = true
+	sess.snapEligible.Store(false)
+	if sess.snapshotPublicationCancel != nil {
+		sess.snapshotPublicationCancel()
+	}
+	// Remove a not-yet-started capture from the coordinator immediately. The
+	// global queue may still contain it, but startSnapshotPublication compares
+	// identity and will discard it even if this session is later renamed.
+	if sess.snapshotQueuedCapture != nil {
+		sess.snapshotQueuedCapture.coordinatorDiscarded = true
+		sess.snapshotQueuedCapture = nil
+		if sess.snapshotPendingCaptures > 0 {
+			sess.snapshotPendingCaptures--
+		}
+		sess.snapshotPending = sess.snapshotPendingCaptures > 0 || sess.snapshotInFlightCapture != nil
+	}
+	done := sess.snapshotPublicationDone
+	if done == nil {
+		done = make(chan struct{})
+		close(done)
+	}
+	sess.signalSnapshotChangedLocked()
+	sess.snapshotMu.Unlock()
+	return done
+}
+
+// resumeSnapshotCoordinator is used only after a rename's old repository name
+// has been quarantined and deleted. Queued captures were discarded during
+// quarantine, so the new context cannot publish under the old identity.
+func resumeSnapshotCoordinator(sess *session) {
+	if sess == nil {
+		return
+	}
+	sess.snapshotMu.Lock()
+	if sess.snapshotPublicationCancel != nil {
+		sess.snapshotPublicationCancel()
+	}
+	sess.snapshotPublicationContext, sess.snapshotPublicationCancel = context.WithCancel(context.Background())
+	sess.snapshotQuarantined = false
+	sess.signalSnapshotChangedLocked()
+	sess.snapshotMu.Unlock()
+}
+
 func markSnapshotDirty(sess *session) {
 	if sess == nil || !sess.snapEligible.Load() {
 		return
@@ -395,11 +463,20 @@ func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bo
 	}
 	sess.snapshotMu.Lock()
 	routineRateLimited := d.snapshotRepository != nil
-	if !sess.snapDirty.Load() || (!final && (sess.snapshotPending || (routineRateLimited && !sess.snapshotNextEligibleAt.IsZero() && d.clock.Now().Before(sess.snapshotNextEligibleAt)))) {
+	// Forced attempts coalesce with a routine capture too. This keeps the
+	// coordinator at one queued plus one in-flight capture, while the dirty
+	// generation ensures a later checkpoint observes mutations made meanwhile.
+	if sess.snapshotQuarantined || !sess.snapDirty.Load() || sess.snapshotPending ||
+		(!final && routineRateLimited && !sess.snapshotNextEligibleAt.IsZero() && d.clock.Now().Before(sess.snapshotNextEligibleAt)) {
+		available := !sess.snapshotQuarantined
 		sess.snapshotMu.Unlock()
-		return true
+		return available
+	}
+	if sess.snapshotPublicationContext == nil {
+		sess.snapshotPublicationContext, sess.snapshotPublicationCancel = context.WithCancel(context.Background())
 	}
 	generation := sess.snapshotGeneration
+	publicationContext := sess.snapshotPublicationContext
 	sess.snapshotCapturedGeneration = generation
 	sess.snapshotAttempted = true
 	sess.snapshotAttemptKind = kind
@@ -411,8 +488,19 @@ func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bo
 	capture, ok := d.captureSnapshotState(sess, generation)
 	if capture != nil {
 		capture.attemptKind = kind
+		capture.publicationContext = publicationContext
 	}
 	if !ok {
+		d.finishSnapshotCapture(capture, false)
+		return false
+	}
+	sess.snapshotMu.Lock()
+	quarantined := sess.snapshotQuarantined
+	if !quarantined {
+		sess.snapshotQueuedCapture = capture
+	}
+	sess.snapshotMu.Unlock()
+	if quarantined {
 		d.finishSnapshotCapture(capture, false)
 		return false
 	}
@@ -586,6 +674,28 @@ func (d *Daemon) encodeSnapshotCapture(capture *snapshotCapture) ([]byte, error)
 	return d.snapshotMarshal(snap)
 }
 
+// startSnapshotPublication moves a retained capture from the producer queue to
+// the repository worker. Quarantine and this transition share snapshotMu, so a
+// repository call cannot begin after destructive teardown has quarantined the
+// session.
+func startSnapshotPublication(capture *snapshotCapture) bool {
+	if capture == nil || capture.session == nil {
+		return false
+	}
+	sess := capture.session
+	sess.snapshotMu.Lock()
+	defer sess.snapshotMu.Unlock()
+	if sess.snapshotQuarantined || sess.snapshotQueuedCapture != capture {
+		return false
+	}
+	sess.snapshotQueuedCapture = nil
+	sess.snapshotInFlightCapture = capture
+	sess.snapshotPublicationDone = make(chan struct{})
+	sess.snapshotPending = true
+	sess.signalSnapshotChangedLocked()
+	return true
+}
+
 func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool) {
 	if capture == nil {
 		return
@@ -595,8 +705,19 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 		if capture.session.snapshotPendingCaptures > 0 {
 			capture.session.snapshotPendingCaptures--
 		}
-		capture.session.snapshotPending = capture.session.snapshotPendingCaptures > 0
-		if capture.attemptKind == snapshotAttemptRoutine && d.snapshotRepository != nil {
+		if capture.session.snapshotQueuedCapture == capture {
+			capture.session.snapshotQueuedCapture = nil
+		}
+		if capture.session.snapshotInFlightCapture == capture {
+			capture.session.snapshotInFlightCapture = nil
+			if capture.session.snapshotPublicationDone != nil {
+				close(capture.session.snapshotPublicationDone)
+				capture.session.snapshotPublicationDone = nil
+			}
+		}
+		capture.session.snapshotPending = capture.session.snapshotPendingCaptures > 0 ||
+			capture.session.snapshotQueuedCapture != nil || capture.session.snapshotInFlightCapture != nil
+		if !capture.coordinatorDiscarded && capture.attemptKind == snapshotAttemptRoutine && d.snapshotRepository != nil {
 			// The interval is measured from completion, including a failed
 			// attempt. A forced teardown checkpoint deliberately leaves it alone.
 			capture.session.snapshotNextEligibleAt = d.clock.Now().Add(snapshotInterval)
@@ -695,16 +816,22 @@ func (d *Daemon) startSnapshotEncodeWorker() {
 	go func() {
 		defer close(done)
 		write := func(capture *snapshotCapture) bool {
-			if workerCtx.Err() != nil || !d.setSnapshotWorkerInFlight(workerID, capture) {
+			if workerCtx.Err() != nil || !startSnapshotPublication(capture) || !d.setSnapshotWorkerInFlight(workerID, capture) {
 				d.finishSnapshotCapture(capture, false)
-				return false
+				return workerCtx.Err() == nil
 			}
 			publication, err := d.incrementalPublication(capture)
+			publicationContext := capture.publicationContext
+			if publicationContext == nil {
+				publicationContext = workerCtx
+			}
 			if err == nil && workerCtx.Err() == nil {
-				err = d.snapshotRepository.Publish(workerCtx, publication)
+				if err = publicationContext.Err(); err == nil {
+					err = d.snapshotRepository.Publish(publicationContext, publication)
+				}
 			}
 			d.clearSnapshotWorkerInFlight(workerID, capture)
-			if err != nil && workerCtx.Err() == nil {
+			if err != nil && workerCtx.Err() == nil && publicationContext.Err() == nil {
 				// Global, not session-scoped: by now the session may already be
 				// torn down, so a session notice would be dead-on-arrival. No lock
 				// is held here (clearSnapshotWorkerInFlight released its own).

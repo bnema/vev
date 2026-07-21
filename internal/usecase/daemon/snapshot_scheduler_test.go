@@ -14,6 +14,60 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
 
+func TestSnapshotCoordinatorQuarantineCancelsPublicationBeforeDelete(t *testing.T) {
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	ctx, cancel := snapshotCoordinatorContext(sess)
+	done := quarantineSnapshotCoordinator(sess)
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(testWaitTimeout):
+		t.Fatal("quarantine did not cancel publication")
+	}
+	select {
+	case <-done:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("quarantine did not join idle coordinator")
+	}
+	cancel()
+}
+
+func TestSnapshotCoordinatorQuarantineJoinsInFlightPublication(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	WithSnapshotRepository(repository, nil)(d)
+	startSnapshotEncodeWorker(t, d)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(context.Context, ports.SnapshotPublication) error {
+		close(started)
+		<-release // deliberately ignore cancellation
+		return nil
+	}).Once()
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	markSnapshotDirty(sess)
+	require.True(t, d.scheduleSnapshot(sess))
+	select {
+	case <-started:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("publication did not start")
+	}
+
+	done := quarantineSnapshotCoordinator(sess)
+	select {
+	case <-done:
+		t.Fatal("quarantine joined before publication returned")
+	default:
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("quarantine did not join publication")
+	}
+}
+
 func TestRoutineSnapshotEligibilityStartsAtCompletionAndForcedDoesNotMoveIt(t *testing.T) {
 	clock := &snapshotSchedulerClock{now: time.Unix(100, 0)}
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
