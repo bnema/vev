@@ -48,18 +48,19 @@ type Repository struct {
 // immediately before their respective syscall and are intentionally package
 // private so production callers cannot weaken repository guarantees.
 type repositoryHooks struct {
-	beforeBlobWrite     func(string) error
-	beforeManifestWrite func(string) error
-	beforeHeadWrite     func(string) error
-	createTemp          func(string) error
-	writeTemp           func(string) error
-	syncFile            func(string) error
-	closeFile           func(string) error
-	installImmutable    func(string) error
-	rename              func(string) error
-	syncDirectory       func(string) error
-	remove              func(string) error
-	beforeSessionLock   func(string)
+	beforeBlobWrite          func(string) error
+	beforeManifestWrite      func(string) error
+	beforeHeadWrite          func(string) error
+	createTemp               func(string) error
+	writeTemp                func(string) error
+	syncFile                 func(string) error
+	closeFile                func(string) error
+	installImmutable         func(string) error
+	rename                   func(string) error
+	syncDirectory            func(string) error
+	remove                   func(string) error
+	openMaintenanceDirectory func(string) (maintenanceDirectory, error)
+	beforeSessionLock        func(string)
 }
 
 var _ ports.SnapshotRepository = (*Repository)(nil)

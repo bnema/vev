@@ -13,6 +13,80 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
+func TestReadMaintenanceDirentPreservesCursorAndCloseFailuresWithoutPaths(t *testing.T) {
+	privatePath := filepath.Join(t.TempDir(), "private-maintenance-directory")
+	closeCause := errors.New("injected close failure")
+	seekCause := errors.New("injected seek failure")
+	readCause := errors.New("injected read failure")
+
+	for _, tc := range []struct {
+		name      string
+		offset    int64
+		seekErr   error
+		readErr   error
+		wantCause []error
+		wantOps   []string
+	}{
+		{
+			name:      "close only",
+			wantCause: []error{closeCause},
+			wantOps:   []string{"close maintenance directory"},
+		},
+		{
+			name:      "seek and close",
+			offset:    1,
+			seekErr:   &os.PathError{Op: "seek", Path: privatePath, Err: seekCause},
+			wantCause: []error{seekCause, closeCause},
+			wantOps:   []string{"seek maintenance directory", "close maintenance directory"},
+		},
+		{
+			name:      "read and close",
+			readErr:   &os.PathError{Op: "read", Path: privatePath, Err: readCause},
+			wantCause: []error{readCause, closeCause},
+			wantOps:   []string{"read maintenance directory", "close maintenance directory"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := NewRepository(privateDir(t))
+			repo.hooks.openMaintenanceDirectory = func(string) (maintenanceDirectory, error) {
+				return fakeMaintenanceDirectory{
+					seekErr:  tc.seekErr,
+					readErr:  tc.readErr,
+					closeErr: &os.PathError{Op: "close", Path: privatePath, Err: closeCause},
+				}, nil
+			}
+
+			_, _, err := repo.readMaintenanceDirent(privatePath, 1, &maintenanceCursor{offset: tc.offset})
+			if err == nil {
+				t.Fatal("readMaintenanceDirent error = nil, want failure")
+			}
+			for _, cause := range tc.wantCause {
+				if !errors.Is(err, cause) {
+					t.Errorf("errors.Is(%v, %v) = false, want true", err, cause)
+				}
+			}
+			for _, operation := range tc.wantOps {
+				if !strings.Contains(err.Error(), operation) {
+					t.Errorf("error = %q, want stable operation context %q", err, operation)
+				}
+			}
+			if strings.Contains(err.Error(), privatePath) {
+				t.Errorf("error leaks private path: %q", err)
+			}
+		})
+	}
+}
+
+type fakeMaintenanceDirectory struct {
+	seekErr  error
+	readErr  error
+	closeErr error
+}
+
+func (d fakeMaintenanceDirectory) Seek(int64, int) (int64, error) { return 0, d.seekErr }
+func (d fakeMaintenanceDirectory) ReadDirent([]byte) (int, error) { return 0, d.readErr }
+func (d fakeMaintenanceDirectory) Close() error                   { return d.closeErr }
+
 func TestRepositoryDeleteQuarantinesCanonicalSessionBeforeCleanup(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	if err := repo.Publish(context.Background(), repositoryPublication(t, "named", 1, []byte("state"))); err != nil {

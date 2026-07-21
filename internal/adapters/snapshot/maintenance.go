@@ -246,7 +246,7 @@ func (r *Repository) readMaintenanceDir(dir string, n int, purpose string) ([]ma
 		r.maintenanceCursors[id] = cursor
 	}
 
-	entries, done, err := readMaintenanceDirent(dir, n, cursor)
+	entries, done, err := r.readMaintenanceDirent(dir, n, cursor)
 	if err != nil {
 		delete(r.maintenanceCursors, id)
 		return nil, false, err
@@ -257,17 +257,55 @@ func (r *Repository) readMaintenanceDir(dir string, n int, purpose string) ([]ma
 	return entries, done, nil
 }
 
+// maintenanceDirectory is the small syscall surface needed to resume a
+// bounded getdents cursor. It permits deterministic fault injection without
+// retaining directory descriptors between maintenance passes.
+type maintenanceDirectory interface {
+	Seek(int64, int) (int64, error)
+	ReadDirent([]byte) (int, error)
+	Close() error
+}
+
+type osMaintenanceDirectory struct{ file *os.File }
+
+func (d osMaintenanceDirectory) Seek(offset int64, whence int) (int64, error) {
+	return syscall.Seek(int(d.file.Fd()), offset, whence)
+}
+
+func (d osMaintenanceDirectory) ReadDirent(buffer []byte) (int, error) {
+	return syscall.ReadDirent(int(d.file.Fd()), buffer)
+}
+
+func (d osMaintenanceDirectory) Close() error { return d.file.Close() }
+
+func (r *Repository) openMaintenanceDirectory(dir string) (maintenanceDirectory, error) {
+	if open := r.hooks.openMaintenanceDirectory; open != nil {
+		return open(dir)
+	}
+	file, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	return osMaintenanceDirectory{file: file}, nil
+}
+
+// maintenanceDirectoryError adds stable operation context and removes any
+// filesystem path while retaining the underlying cause for errors.Is.
+func maintenanceDirectoryError(operation string, err error) error {
+	return fmt.Errorf("%s: %w", operation, safeFilesystemError(err))
+}
+
 // readMaintenanceDirent uses the Linux getdents seek cookie from each record.
 // syscall.Dirent's Off field is the d_off member of linux_dirent64 and
 // syscall.Seek is lseek(2), as defined by Go's syscall Linux sources.
-func readMaintenanceDirent(dir string, limit int, cursor *maintenanceCursor) (entries []maintenanceDirEntry, done bool, err error) {
-	file, err := os.Open(dir)
+func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *maintenanceCursor) (entries []maintenanceDirEntry, done bool, err error) {
+	file, err := r.openMaintenanceDirectory(dir)
 	if err != nil {
-		return nil, false, err
+		return nil, false, maintenanceDirectoryError("open maintenance directory", err)
 	}
 	defer func() {
 		if closeErr := file.Close(); closeErr != nil {
-			closeErr = fmt.Errorf("close maintenance directory %q: %w", dir, closeErr)
+			closeErr = maintenanceDirectoryError("close maintenance directory", closeErr)
 			if err != nil {
 				err = errors.Join(err, closeErr)
 			} else {
@@ -277,19 +315,18 @@ func readMaintenanceDirent(dir string, limit int, cursor *maintenanceCursor) (en
 			}
 		}
 	}()
-	fd := int(file.Fd())
 	if cursor.offset != 0 {
-		if _, err := syscall.Seek(fd, cursor.offset, io.SeekStart); err != nil {
-			return nil, false, err
+		if _, err := file.Seek(cursor.offset, io.SeekStart); err != nil {
+			return nil, false, maintenanceDirectoryError("seek maintenance directory", err)
 		}
 	}
 
 	entries = make([]maintenanceDirEntry, 0, limit)
 	buffer := make([]byte, 8192)
 	for len(entries) < limit {
-		count, err := syscall.ReadDirent(fd, buffer)
+		count, err := file.ReadDirent(buffer)
 		if err != nil {
-			return nil, false, err
+			return nil, false, maintenanceDirectoryError("read maintenance directory", err)
 		}
 		if count == 0 {
 			return entries, true, nil
@@ -319,7 +356,7 @@ func readMaintenanceDirent(dir string, limit int, cursor *maintenanceCursor) (en
 				continue
 			}
 			if err != nil {
-				return nil, false, err
+				return nil, false, maintenanceDirectoryError("stat maintenance directory entry", err)
 			}
 			entries = append(entries, maintenanceDirEntry{name: name, isDir: info.IsDir()})
 		}
