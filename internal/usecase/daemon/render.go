@@ -298,7 +298,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, lease *att
 	d.refreshSessionFocusedTitles(sess)
 	// Contextual ranks are completely captured under paletteMu. Compose them
 	// without reading the live MRU, whose order may have changed mid-interaction.
-	bars := d.barStateForPaletteHints(sess, overlays.copyFeedback, overlays.paletteHints, overlays.paletteRecent)
+	bars := d.barStateForPaletteHints(sess, overlays.statusFeedback, overlays.paletteHints, overlays.paletteRecent)
 	applied := ac.getAppliedTheme()
 	bars.theme = applied.Raw
 	attentionVisible := pulseVisible(bars.attentionFrame)
@@ -327,7 +327,7 @@ func (d *Daemon) paint(sess *session, ac *attachedClient, reset bool, lease *att
 	capturedOverlays := capturedOverlayRenderState{
 		copyActive: overlays.copyActive, copySearchActive: overlays.copySearchModel != nil,
 		pickerActive: overlays.pickerActive, paletteActive: overlays.paletteActive, promptActive: overlays.promptActive,
-		copyFeedback: overlays.copyFeedback,
+		statusFeedback: overlays.statusFeedback,
 	}
 	endCapture := marks.span(ports.RuntimeCaptureStart, ports.RuntimeCaptureEnd, 0)
 	state, ok := capturePrimaryRenderState(sess, ac, primaryCaptureRequest{

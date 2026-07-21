@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 
 	"github.com/bnema/vev/internal/domain"
@@ -22,6 +23,7 @@ const (
 	fileName             = "pending-notices.jsonl"
 	inFlightFileName     = "pending-notices.inflight.jsonl"
 	lockFileName         = "pending-notices.lock"
+	claimLockFileName    = "pending-notices.claim.lock"
 	maxNoticeRecordSize  = 4 << 20
 	noticeReadBufferSize = 64 << 10
 )
@@ -30,11 +32,24 @@ const (
 type Store struct {
 	dir string
 
-	// afterClaimRead is used by package tests to pause a claim after its reader
-	// reached EOF while it still owns the interprocess lock. It is nil in
+	claimMu   sync.Mutex
+	claimLock *os.File
+
+	// afterAppendOpen is used by package tests to pause an append after it has
+	// opened the pending file while it owns the interprocess lock. It is nil in
 	// production.
-	afterClaimRead func()
+	afterAppendOpen func()
 }
+
+var (
+	// ErrClaimInProgress means another live Store owns the in-flight claim.
+	// Callers must leave it for that owner rather than replaying or acknowledging
+	// its notices.
+	ErrClaimInProgress = errors.New("pending notice claim in progress")
+	// ErrNoClaimOwner means Ack was called by a Store that did not make the
+	// current claim.
+	ErrNoClaimOwner = errors.New("pending notice claim is not owned by this store")
+)
 
 var _ ports.NoticeStore = (*Store)(nil)
 
@@ -53,6 +68,10 @@ func (s *Store) inFlightPath() string {
 
 func (s *Store) lockPath() string {
 	return filepath.Join(s.dir, lockFileName)
+}
+
+func (s *Store) claimLockPath() string {
+	return filepath.Join(s.dir, claimLockFileName)
 }
 
 // withLock serializes Append, Claim, and Ack across Store instances and
@@ -76,6 +95,52 @@ func (s *Store) withLock(fn func() error) error {
 	}
 	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
 	return fn()
+}
+
+// acquireClaimLock reserves the current in-flight file for this Store until
+// Ack. The flock is released by the kernel if this process exits, allowing a
+// later daemon to recover an abandoned claim.
+func (s *Store) acquireClaimLock() error {
+	s.claimMu.Lock()
+	defer s.claimMu.Unlock()
+	if s.claimLock != nil {
+		return ErrClaimInProgress
+	}
+	f, err := os.OpenFile(s.claimLockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open notice claim lock: %w", err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("secure notice claim lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return ErrClaimInProgress
+		}
+		return fmt.Errorf("lock pending notice claim: %w", err)
+	}
+	s.claimLock = f
+	return nil
+}
+
+func (s *Store) releaseClaimLock() {
+	s.claimMu.Lock()
+	f := s.claimLock
+	s.claimLock = nil
+	s.claimMu.Unlock()
+	if f == nil {
+		return
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = f.Close()
+}
+
+func (s *Store) ownsClaim() bool {
+	s.claimMu.Lock()
+	defer s.claimMu.Unlock()
+	return s.claimLock != nil
 }
 
 func syncDir(dir string) error {
@@ -105,6 +170,9 @@ func (s *Store) Append(n domain.Notification) error {
 			_ = f.Close()
 			return fmt.Errorf("secure pending notices: %w", err)
 		}
+		if s.afterAppendOpen != nil {
+			s.afterAppendOpen()
+		}
 		if _, err := f.Write(data); err != nil {
 			_ = f.Close()
 			return fmt.Errorf("write notice: %w", err)
@@ -124,12 +192,23 @@ func (s *Store) Append(n domain.Notification) error {
 }
 
 // Claim atomically moves pending notices into an in-flight file and returns
-// their valid JSONL entries in order. The in-flight file is intentionally kept
-// until Ack, so an unacknowledged import is replayed after a crash. A missing
-// pending file means there is nothing to claim.
+// their valid JSONL entries in order. Its Store owns the claim until Ack, so a
+// concurrent Store cannot replay or acknowledge it. The ownership flock is
+// released on process exit, allowing an unacknowledged import to be replayed
+// after a crash. A missing pending file means there is nothing to claim.
 func (s *Store) Claim() ([]domain.Notification, error) {
 	var notices []domain.Notification
 	err := s.withLock(func() error {
+		if err := s.acquireClaimLock(); err != nil {
+			return err
+		}
+		keepClaim := false
+		defer func() {
+			if !keepClaim {
+				s.releaseClaimLock()
+			}
+		}()
+
 		inFlight := s.inFlightPath()
 		if _, err := os.Stat(inFlight); err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
@@ -150,8 +229,8 @@ func (s *Store) Claim() ([]domain.Notification, error) {
 
 		var err error
 		notices, err = readNotices(inFlight)
-		if err == nil && s.afterClaimRead != nil {
-			s.afterClaimRead()
+		if err == nil {
+			keepClaim = true
 		}
 		return err
 	})
@@ -233,16 +312,23 @@ func appendNoticeFragment(line, fragment []byte) ([]byte, bool) {
 	return append(line, fragment...), false
 }
 
-// Ack permanently removes the current in-flight claim. It is only called once
+// Ack permanently removes this Store's in-flight claim. It is only called once
 // the daemon has recorded and queued every claimed notice.
 func (s *Store) Ack() error {
+	if !s.ownsClaim() {
+		return ErrNoClaimOwner
+	}
 	return s.withLock(func() error {
+		if !s.ownsClaim() {
+			return ErrNoClaimOwner
+		}
 		if err := os.Remove(s.inFlightPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("ack claimed notices: %w", err)
 		}
 		if err := syncDir(s.dir); err != nil {
 			return fmt.Errorf("sync acknowledged notices: %w", err)
 		}
+		s.releaseClaimLock()
 		return nil
 	})
 }

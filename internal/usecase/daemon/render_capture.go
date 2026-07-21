@@ -89,7 +89,7 @@ type capturedOverlayRenderState struct {
 	noticesOverlayActive                                                    bool
 	copyMode                                                                *scopy.Mode
 	copyPaneID                                                              layout.PaneID
-	copyFeedback                                                            string
+	statusFeedback                                                          string
 	paletteGuidance                                                         string
 	copySearch, picker, palette, prompt, noticesOverlay                     capturedModal
 	notices                                                                 []domain.Notification

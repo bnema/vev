@@ -46,7 +46,7 @@ type overlayRuntime struct {
 	copyESC           pendingByteTimer
 	copySearch        *visualsearch.Model
 	copySearchPending []byte
-	copyFeedback      string
+	statusFeedback    string
 	copyPointer       copyPointerState
 	copyClick         copyClickCandidate
 	copyPointerEpoch  uint64
@@ -249,7 +249,7 @@ type overlayRenderSnapshot struct {
 	copyMode        *scopy.Mode
 	copyPane        *pane
 	copySearchModel *visualsearch.Model
-	copyFeedback    string
+	statusFeedback  string
 
 	pickerActive bool
 	pickerModel  *picker.Model
@@ -310,9 +310,9 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 		snap.copyMode = &copyModeValue
 	}
 	snap.copySearchModel = rt.copySearch.Clone()
-	snap.copyFeedback = rt.copyFeedback
-	if snap.copyFeedback != "" && !snap.copyActive {
-		rt.copyFeedback = ""
+	snap.statusFeedback = rt.statusFeedback
+	if snap.statusFeedback != "" && !snap.copyActive {
+		rt.statusFeedback = ""
 	}
 	rt.copyMu.Unlock()
 

@@ -327,9 +327,9 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		}
 		rt.copyMu.Lock()
 		if len(chunks) > 0 {
-			rt.copyFeedback = "copied " + strconv.Itoa(len([]rune(text))) + " chars to clipboard"
+			rt.statusFeedback = "copied " + strconv.Itoa(len([]rune(text))) + " chars to clipboard"
 		} else {
-			rt.copyFeedback = "selection too large to copy"
+			rt.statusFeedback = "selection too large to copy"
 		}
 		rt.copyMu.Unlock()
 	}

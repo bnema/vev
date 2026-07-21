@@ -41,7 +41,9 @@ func TestStoreClaimAckRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []domain.Notification{first, second}, claimed)
 
-	// A fresh store simulates a daemon crash after Claim but before Ack.
+	// Releasing the claim lock simulates the kernel closing it when the daemon
+	// crashes. The in-flight file remains and a fresh process/store replays it.
+	store.releaseClaimLock()
 	recovered := New(dir)
 	replayed, err := recovered.Claim()
 	require.NoError(t, err)
@@ -53,41 +55,59 @@ func TestStoreClaimAckRoundTrip(t *testing.T) {
 	require.Empty(t, again)
 }
 
-func TestStoreClaimDoesNotLoseAppendAfterRotation(t *testing.T) {
+func TestStoreClaimWaitsForAppendInCriticalSection(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "vev")
 	store := New(dir)
 	first := domain.Notification{Message: "before claim"}
-	second := domain.Notification{Message: "after claim rotation"}
+	second := domain.Notification{Message: "append holds pending file open"}
 	require.NoError(t, store.Append(first))
 
-	rotated := make(chan struct{})
-	allowRead := make(chan struct{})
-	store.afterClaimRead = func() {
-		close(rotated)
-		<-allowRead
+	appendEntered := make(chan struct{})
+	allowAppend := make(chan struct{})
+	store.afterAppendOpen = func() {
+		close(appendEntered)
+		<-allowAppend
 	}
+	appendDone := make(chan error, 1)
+	go func() { appendDone <- store.Append(second) }()
+	<-appendEntered // Append owns the operation lock and an open pending file.
+
+	claimant := New(dir)
 	claimDone := make(chan []domain.Notification, 1)
 	errDone := make(chan error, 1)
 	go func() {
-		claimed, err := store.Claim()
+		claimed, err := claimant.Claim()
 		claimDone <- claimed
 		errDone <- err
 	}()
-	<-rotated
-
-	appendDone := make(chan error, 1)
-	go func() { appendDone <- New(dir).Append(second) }()
-	close(allowRead)
-	require.NoError(t, <-errDone)
-	require.Equal(t, []domain.Notification{first}, <-claimDone)
+	close(allowAppend)
 	require.NoError(t, <-appendDone)
+	require.NoError(t, <-errDone)
+	require.Equal(t, []domain.Notification{first, second}, <-claimDone)
+	require.NoError(t, claimant.Ack())
+}
 
-	require.NoError(t, store.Ack())
-	claimed, err := New(dir).Claim()
+func TestStoreClaimOwnershipPreventsLiveReplayOrAck(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "vev")
+	owner := New(dir)
+	require.NoError(t, owner.Append(domain.Notification{Message: "owned"}))
+	claimed, err := owner.Claim()
 	require.NoError(t, err)
-	require.Equal(t, []domain.Notification{second}, claimed)
-	require.NoError(t, New(dir).Ack())
+	require.Len(t, claimed, 1)
+
+	other := New(dir)
+	replayed, err := other.Claim()
+	require.ErrorIs(t, err, ErrClaimInProgress)
+	require.Nil(t, replayed)
+	require.ErrorIs(t, other.Ack(), ErrNoClaimOwner)
+
+	// The rejected Ack must leave the owner's in-flight record intact.
+	require.NoError(t, owner.Ack())
+	empty, err := New(dir).Claim()
+	require.NoError(t, err)
+	require.Empty(t, empty)
 }
 
 func TestStoreClaimMissingFileReturnsNil(t *testing.T) {

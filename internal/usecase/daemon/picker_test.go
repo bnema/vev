@@ -988,7 +988,7 @@ func TestPickerEnterOnStoppedSessionRestoreFailureSurfacesNoticeAndStaysPut(t *t
 	awaitFrame(t, sends, ports.MsgOutput)
 
 	history := d.notices.history()
-	require.NotEmpty(t, history, "failed stopped-session restore must record a notice")
+	require.Len(t, history, 1, "failed stopped-session restore must record exactly one notice")
 	require.Equal(t, domain.NoticeSessionUnavailable, history[0].Code)
 	require.Equal(t, domain.NoticeError, history[0].Severity)
 

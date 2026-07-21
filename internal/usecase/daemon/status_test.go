@@ -868,17 +868,17 @@ func TestStatusCopyFeedbackRendersOnlyWhenFullyFits(t *testing.T) {
 	win.size = domain.Size{Cols: 30, Rows: 2}
 
 	frame := composeFrame(capturedRenderState{
-		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 30, Height: 2}, valid: true}, bars: barState{status: sess.statusSegments(true), copyFeedback: "ok"},
+		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 30, Height: 2}, valid: true}, bars: barState{status: sess.statusSegments(true), statusFeedback: "ok"},
 	}, composeCacheInput{}).frame
 	require.Equal(t, " work                       ok", rowText(frame.Row(3)))
 
 	frame = composeFrame(capturedRenderState{
-		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 30, Height: 2}, valid: true}, bars: barState{status: sess.statusSegments(true), copyFeedback: "1234567890123456789"},
+		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 30, Height: 2}, valid: true}, bars: barState{status: sess.statusSegments(true), statusFeedback: "1234567890123456789"},
 	}, composeCacheInput{}).frame
 	require.Equal(t, " work      1234567890123456789", rowText(frame.Row(3)))
 
 	frame = composeFrame(capturedRenderState{
-		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 30, Height: 2}, valid: true}, bars: barState{status: sess.statusSegments(true), copyFeedback: "selection too large to copy"},
+		reset: true, layout: capturedTabLayout{area: domain.Rect{Width: 30, Height: 2}, valid: true}, bars: barState{status: sess.statusSegments(true), statusFeedback: "selection too large to copy"},
 	}, composeCacheInput{}).frame
 	require.Equal(t, " work                         ", rowText(frame.Row(3)))
 }
@@ -1295,21 +1295,21 @@ func TestStatusBarBottomRightAndMRUFitting(t *testing.T) {
 		{
 			name:         "script text and copy feedback",
 			width:        32,
-			state:        barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", copyFeedback: "copied", mru: []recentSession{{name: "a"}}},
+			state:        barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", statusFeedback: "copied", mru: []recentSession{{name: "a"}}},
 			wantContains: []string{" a"},
 			wantSuffix:   " main ↑3 * copied",
 		},
 		{
 			name:            "hide on overlap",
 			width:           16,
-			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", copyFeedback: "copied", mru: []recentSession{{name: "fresh"}}},
+			state:           barState{status: statusSnapshot{session: "cur"}, bottomRight: "main ↑3 *", statusFeedback: "copied", mru: []recentSession{{name: "fresh"}}},
 			want:            " cur            ",
 			wantNotContains: []string{"main", "copied"},
 		},
 		{
 			name:  "empty script keeps copy feedback behavior",
 			width: 12,
-			state: barState{status: statusSnapshot{session: "cur"}, bottomRight: "", copyFeedback: "copied", mru: []recentSession{{name: "fresh"}}},
+			state: barState{status: statusSnapshot{session: "cur"}, bottomRight: "", statusFeedback: "copied", mru: []recentSession{{name: "fresh"}}},
 			want:  " cur  copied",
 		},
 		{
@@ -1364,7 +1364,7 @@ func TestStatusBarBottomRightAndMRUFitting(t *testing.T) {
 }
 
 func TestStatusBarCopyFeedbackFullyRenderedAlongsideMRU(t *testing.T) {
-	state := barState{status: statusSnapshot{session: "cur"}, copyFeedback: "copied", mru: []recentSession{{name: "a"}, {name: "b"}, {name: "c"}}}
+	state := barState{status: statusSnapshot{session: "cur"}, statusFeedback: "copied", mru: []recentSession{{name: "a"}, {name: "b"}, {name: "c"}}}
 	row := make([]renderer.Cell, 20)
 
 	drawStatusBarState(row, state, resolveStyles(nil))
@@ -1377,7 +1377,7 @@ func TestStatusBarCopyFeedbackFullyRenderedAlongsideMRU(t *testing.T) {
 }
 
 func TestStatusBarCopyFeedbackBoundaryWidths(t *testing.T) {
-	state := barState{status: statusSnapshot{session: "cur"}, copyFeedback: "copied", mru: []recentSession{{name: "fresh"}}}
+	state := barState{status: statusSnapshot{session: "cur"}, statusFeedback: "copied", mru: []recentSession{{name: "fresh"}}}
 	tests := []struct {
 		name string
 		cols int

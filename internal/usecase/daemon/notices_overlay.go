@@ -225,9 +225,9 @@ func (d *Daemon) yankNotice(sess *session, ac *attachedClient, n domain.Notifica
 	}
 	ac.overlays.copyMu.Lock()
 	if len(chunks) > 0 {
-		ac.overlays.copyFeedback = "copied notification details"
+		ac.overlays.statusFeedback = "copied notification details"
 	} else {
-		ac.overlays.copyFeedback = "notification too large to copy"
+		ac.overlays.statusFeedback = "notification too large to copy"
 	}
 	ac.overlays.copyMu.Unlock()
 	d.invalidateRender(sess, ac, true, "notices_overlay.go")

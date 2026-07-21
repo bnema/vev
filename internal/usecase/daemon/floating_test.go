@@ -670,6 +670,7 @@ func TestToggleFloatingStructuralErrorsAreUserErrors(t *testing.T) {
 			require.Equal(t, tc.wantMsg, ue.Msg)
 			if tc.cause != nil {
 				require.NotContains(t, ue.Msg, tc.cause.Error())
+				require.ErrorIs(t, ue, tc.cause)
 			}
 		})
 	}
