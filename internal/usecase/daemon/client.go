@@ -43,6 +43,10 @@ type attachedClient struct {
 	resumeToken          uint64
 	parked               bool
 	echoAck              atomic.Uint64
+	// prepareFailureFallback prevents a direct fallback paint from recursively
+	// reporting the same failed prepare through its notice repaint. It is only
+	// needed while no render coordinator is installed.
+	prepareFailureFallback atomic.Bool
 	// pipelineCache is the last successfully emitted composition. pipelineScratch
 	// is its attachment-owned alternate buffer; both are only touched under
 	// sendMu and must never share mutable backing storage.

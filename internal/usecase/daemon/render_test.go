@@ -218,6 +218,28 @@ func fireCoordinatorTimer(t *testing.T, rc *renderCoordinator, timers []*coordin
 	t.Fatalf("coordinator did not arm %s timer", duration)
 }
 
+func TestPTYReaderLogsClosureWithoutNotification(t *testing.T) {
+	pty := portsmocks.NewMockPTY(t)
+	readErr := errors.New("pty master closed")
+	pty.EXPECT().Read(mock.Anything).Return(0, readErr).Once()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+	var logs bytes.Buffer
+	d.log = slog.New(slog.NewTextHandler(&logs, nil))
+	pane := sess.tabs[0].focusedPane()
+	pane.onExit = func() {}
+
+	d.sessWg.Add(1)
+	d.ptyReader(sess, sess.tabs[0], pane)
+
+	require.Contains(t, logs.String(), "level=INFO")
+	require.Contains(t, logs.String(), "msg=\"pane pty closed\"")
+	require.Contains(t, logs.String(), "err=\"pty master closed\"")
+	require.Contains(t, logs.String(), "session=work")
+	require.Empty(t, d.notices.history(), "PTY closure is diagnostic only")
+	toasts, _ := visibleToasts(ac)
+	require.Empty(t, toasts, "PTY closure must not notify the user")
+}
+
 func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 	t.Run("inactive synchronized pane activates only after complete urgent frame", func(t *testing.T) {
 		inactivePTY, inactiveSteps, inactiveProcessed := newChannelPTY(t)

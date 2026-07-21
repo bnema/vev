@@ -380,8 +380,11 @@ func TestActionFocusPaneGenuineErrorReportsNoticeInternal(t *testing.T) {
 	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneLeft)
 
 	history := d.notices.history()
-	require.Len(t, history, 1, "a genuine layout-tree error must surface exactly one notice")
+	require.Len(t, history, 2, "the layout error and its failed direct display update must both surface")
 	require.Equal(t, domain.NoticeInternal, history[0].Code)
+	require.Equal(t, "display update failed", history[0].Message)
+	require.Equal(t, domain.NoticeInternal, history[1].Code)
+	require.Equal(t, "internal error", history[1].Message)
 }
 
 func TestFloatingVisibilityRemainsIndependentAcrossTabSwitches(t *testing.T) {

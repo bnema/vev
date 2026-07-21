@@ -104,6 +104,10 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+			// Prepare failures now schedule recovery through the coordinator;
+			// retain the failed transaction here until this test explicitly retries.
+			d.clock = newNoticeClock()
+			d.attachCoordinator(sess, nil, ac, true)
 			healthy := ac.transport()
 			p := sess.tabs[0].focusedPane()
 
@@ -134,6 +138,42 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 			p.mu.Unlock()
 		})
 	}
+}
+
+func TestPrepareFailureNotifiesAndSchedulesRecovery(t *testing.T) {
+	clock := newNoticeClock()
+	d, sess, ac, _ := newNoticeFixture(t, clock)
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	var producers []string
+	rc.opts.onInvalidate = func(inv renderInvalidation) {
+		// Both the notice repaint and the explicit recovery must re-enter only
+		// after emitFrame releases its attachment locks.
+		require.True(t, ac.sendMu.TryLock(), "invalidation must not run under sendMu")
+		ac.sendMu.Unlock()
+		producers = append(producers, inv.producer)
+	}
+	state, composed := captureComposeForReceiptTest(t, sess, ac)
+	// An invalid frame makes output.prepare fail after capture. emitFrame owns
+	// sendMu on entry and releases it before reporting and rescheduling.
+	composed.frame = renderer.Frame{Width: 1}
+
+	require.True(t, d.emitFrame(sess, ac, state, composed))
+
+	history := d.notices.history()
+	require.Len(t, history, 1)
+	require.Equal(t, domain.NoticeInternal, history[0].Code)
+	require.Equal(t, "display update failed", history[0].Message)
+	toasts, _ := visibleToasts(ac)
+	require.Len(t, toasts, 1)
+	require.Equal(t, "display update failed", toasts[0].Message)
+
+	rc.mu.Lock()
+	pending, reset := rc.pending, rc.pendingReset
+	rc.mu.Unlock()
+	require.True(t, pending, "prepare failure must schedule a recovery render")
+	require.True(t, reset, "recovery must invalidate the full render state")
+	require.Contains(t, producers, "render_pipeline.go:prepare-failed", "prepare failure must explicitly schedule recovery")
+	require.Contains(t, clock.durations(), urgentRenderDeadline, "notice/recovery invalidation must arm the coordinator")
 }
 
 func TestRenderDamageReceiptStaleGenerationForcesFullRedraw(t *testing.T) {

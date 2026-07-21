@@ -501,11 +501,18 @@ func TestFloatingLaunchUsesLiveOrValidatedSessionCwd(t *testing.T) {
 type floatingLogHandler struct {
 	slog.Handler
 	handled chan struct{}
+	mu      sync.Mutex
 }
 
-func (h floatingLogHandler) Handle(ctx context.Context, r slog.Record) error {
+func (h *floatingLogHandler) Handle(ctx context.Context, r slog.Record) error {
 	err := h.Handler.Handle(ctx, r)
-	close(h.handled)
+	h.mu.Lock()
+	select {
+	case <-h.handled:
+	default:
+		close(h.handled)
+	}
+	h.mu.Unlock()
 	return err
 }
 
@@ -514,7 +521,7 @@ func TestFloatingLaunchFailureCapturesSessionNameBeforeConcurrentRename(t *testi
 	var logs bytes.Buffer
 	handled := make(chan struct{})
 	d := newTestDaemon(t, factory, stubClock{})
-	d.log = slog.New(floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
+	d.log = slog.New(&floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
 	tb := newFloatingTestTab(t)
 	sess := &session{name: "captured", tabs: []*tab{tb}, ctx: t.Context()}
 	d.startFloating(sess, tb, false)
@@ -552,7 +559,7 @@ func TestFloatingInstallLogsSessionNameSafelyDuringRename(t *testing.T) {
 	var logs bytes.Buffer
 	handled := make(chan struct{})
 	d := newTestDaemon(t, factory, stubClock{})
-	d.log = slog.New(floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
+	d.log = slog.New(&floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
 	tb := newFloatingTestTab(t)
 	sess := &session{name: "captured", tabs: []*tab{tb}, ctx: t.Context()}
 
