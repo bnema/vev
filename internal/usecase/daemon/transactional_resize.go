@@ -71,6 +71,11 @@ func (d *Daemon) prepareResize(sess *session, size domain.Size) resizePlan {
 // applyResize deliberately holds only a pane's resizeMu around its PTY call;
 // no daemon, session, tab, or pane lock crosses the external boundary.
 func (d *Daemon) applyResize(plan *resizePlan, current ...func() bool) bool {
+	// Collect degradation across the loop and report once after it returns to
+	// lock-free code: notify acquires sess.mu/d.mu and repaints, so it must never
+	// run while a pane's resizeMu is held across the external PTY call below.
+	failed := 0
+	var lastErr error
 	for i := range plan.members {
 		if len(current) != 0 && !current[0]() {
 			return false
@@ -91,6 +96,8 @@ func (d *Daemon) applyResize(plan *resizePlan, current ...func() bool) bool {
 			m.ok = true
 		} else if err := pty.Resize(rectSize(m.rect)); err != nil {
 			d.log.Warn("pty resize failed", "err", err)
+			failed++
+			lastErr = err
 			d.replayResizePending(m.session, m.tab, m.pane, false, m.rect)
 		} else {
 			m.ok = true
@@ -98,6 +105,13 @@ func (d *Daemon) applyResize(plan *resizePlan, current ...func() bool) bool {
 			m.screenResized = true
 		}
 		m.pane.resizeMu.Unlock()
+	}
+	if failed > 0 {
+		// Every resizeMu (and pane/session/daemon lock) is released here: each was
+		// bracketed inside the loop. plan.members is non-empty because a failure
+		// came from one of its members, so members[0] is always safe.
+		d.notify(plan.members[0].session, domain.NoticeWarn, domain.NoticeResizeFailed,
+			"pane resize failed; retrying in background", lastErr)
 	}
 	return true
 }
