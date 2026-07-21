@@ -23,7 +23,7 @@ const (
 // Store remains available separately for the one-way legacy bridge.
 type Repository struct {
 	dir   string
-	locks sync.Map // map[string]*sync.Mutex
+	locks sync.Map // map[string]*sessionMutex
 	hooks repositoryHooks
 
 	// storageEpochs is guarded by each session's lock. It invalidates a
@@ -59,6 +59,7 @@ type repositoryHooks struct {
 	rename              func(string) error
 	syncDirectory       func(string) error
 	remove              func(string) error
+	beforeSessionLock   func(string)
 }
 
 var _ ports.SnapshotRepository = (*Repository)(nil)
@@ -78,7 +79,24 @@ func (r *Repository) invalidateStorageEpoch(key string) {
 // storageEpoch must be called with sessionLock(key) held.
 func (r *Repository) storageEpoch(key string) uint64 { return r.storageEpochs[key] }
 
-func (r *Repository) sessionLock(key string) *sync.Mutex {
-	lock, _ := r.locks.LoadOrStore(key, &sync.Mutex{})
-	return lock.(*sync.Mutex)
+// sessionMutex provides a test-only boundary immediately before a contested
+// session mutex. Production hooks are nil, so normal locking is unchanged.
+type sessionMutex struct {
+	repository *Repository
+	key        string
+	mu         sync.Mutex
+}
+
+func (m *sessionMutex) Lock() {
+	if hook := m.repository.hooks.beforeSessionLock; hook != nil {
+		hook(m.key)
+	}
+	m.mu.Lock()
+}
+
+func (m *sessionMutex) Unlock() { m.mu.Unlock() }
+
+func (r *Repository) sessionLock(key string) *sessionMutex {
+	lock, _ := r.locks.LoadOrStore(key, &sessionMutex{repository: r, key: key})
+	return lock.(*sessionMutex)
 }

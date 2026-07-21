@@ -77,13 +77,14 @@ func TestRepositoryDeleteWaitsForPublication(t *testing.T) {
 		publishDone <- repo.Publish(context.Background(), repositoryPublication(t, "named", 2, []byte("second")))
 	}()
 	<-entered
+	deleteReached := make(chan struct{})
+	deleteRelease := make(chan struct{})
+	repo.hooks.beforeSessionLock = waitAtSessionLock(deleteReached, deleteRelease)
 	deleteDone := make(chan error, 1)
 	go func() { deleteDone <- repo.Delete(context.Background(), "named") }()
-	select {
-	case err := <-deleteDone:
-		t.Fatalf("Delete returned before Publish released its lock: %v", err)
-	default:
-	}
+	<-deleteReached
+	// Delete is parked at the session-lock boundary while Publish owns it.
+	close(deleteRelease)
 	close(release)
 	if err := <-publishDone; err != nil {
 		t.Fatal(err)
@@ -152,14 +153,14 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 		lock := repo.sessionLock(key)
 		lock.Lock()
 		ctx, cancel := context.WithCancel(context.Background())
-		started := make(chan struct{})
+		reached := make(chan struct{})
+		release := make(chan struct{})
+		repo.hooks.beforeSessionLock = waitAtSessionLock(reached, release)
 		done := make(chan error, 1)
-		go func() {
-			close(started)
-			done <- repo.Publish(ctx, repositoryPublication(t, "named", 1, []byte("state")))
-		}()
-		<-started
+		go func() { done <- repo.Publish(ctx, repositoryPublication(t, "named", 1, []byte("state"))) }()
+		<-reached
 		cancel()
+		close(release)
 		lock.Unlock()
 		if err := <-done; !errors.Is(err, context.Canceled) {
 			t.Fatalf("Publish error = %v, want canceled", err)
@@ -185,15 +186,19 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 				lock := repo.sessionLock(key)
 				lock.Lock()
 				ctx, cancel := context.WithCancel(context.Background())
-				started := make(chan struct{})
+				reached := make(chan struct{})
+				release := make(chan struct{})
+				repo.hooks.beforeSessionLock = waitAtSessionLock(reached, release)
 				done := make(chan error, 1)
-				go func() { close(started); done <- operation.run(ctx) }()
-				<-started
+				go func() { done <- operation.run(ctx) }()
+				<-reached
 				cancel()
+				close(release)
 				lock.Unlock()
 				if err := <-done; !errors.Is(err, context.Canceled) {
 					t.Fatalf("%s error = %v, want canceled", operation.name, err)
 				}
+				repo.hooks.beforeSessionLock = nil
 				if _, err := repo.Load(context.Background(), "named"); err != nil {
 					t.Fatalf("%s mutated session: %v", operation.name, err)
 				}
@@ -208,19 +213,30 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 		lock := repo.sessionLock(sessionKey("named"))
 		lock.Lock()
 		ctx, cancel := context.WithCancel(context.Background())
-		started := make(chan struct{})
+		reached := make(chan struct{})
+		release := make(chan struct{})
+		repo.hooks.beforeSessionLock = waitAtSessionLock(reached, release)
 		done := make(chan error, 1)
-		go func() { close(started); done <- repo.Maintain(ctx) }()
-		<-started
+		go func() { done <- repo.Maintain(ctx) }()
+		<-reached
 		cancel()
+		close(release)
 		lock.Unlock()
 		if err := <-done; !errors.Is(err, context.Canceled) {
 			t.Fatalf("Maintain error = %v, want canceled", err)
 		}
+		repo.hooks.beforeSessionLock = nil
 		if _, err := repo.Load(context.Background(), "named"); err != nil {
 			t.Fatalf("Maintain mutated session: %v", err)
 		}
 	})
+}
+
+func waitAtSessionLock(reached chan<- struct{}, release <-chan struct{}) func(string) {
+	return func(string) {
+		close(reached)
+		<-release
+	}
 }
 
 func TestRepositoryDeleteRetriesPendingQuarantineSyncWithoutDeletingRecreatedSession(t *testing.T) {
@@ -271,6 +287,93 @@ func TestRepositoryMaintainResumesNestedQuarantineWithinBatch(t *testing.T) {
 	if _, err := os.Lstat(quarantine); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("quarantine after resumed maintenance = %v, want removed", err)
 	}
+}
+
+func TestRepositoryMaintainClosesContinuationDirectories(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	sessions := filepath.Join(repo.dir, repositorySessionsDir)
+	for i := 0; i < maintenanceBatch+1; i++ {
+		generations := filepath.Join(sessions, fmt.Sprintf("named-%03d", i), repositoryGenerations)
+		if err := os.MkdirAll(generations, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for j := 0; j < maintenanceBatch+1; j++ {
+			if err := os.WriteFile(filepath.Join(generations, fmt.Sprintf("unclassified-%03d", j)), []byte("state"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	before := openDescriptorCount(t)
+	if err := repo.Maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := openDescriptorCount(t); got > before+4 {
+		t.Fatalf("open descriptors after bounded maintenance = %d, want at most %d", got, before+4)
+	}
+}
+
+func openDescriptorCount(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(entries)
+}
+
+func TestRepositoryMaintainBoundsQueuedShardNames(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	key := sessionKey("named")
+	root := filepath.Join(repo.sessionPath(key), repositoryObjectsDir)
+	for i := 0; i < maintenanceBatch*2; i++ {
+		if err := os.MkdirAll(filepath.Join(root, fmt.Sprintf("%02x", i)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repo.maintenanceCursors = make(map[string]*maintenanceCursor)
+	state := &sessionMaintenance{marked: make(map[uint64]manifestMaintenance), markDone: true}
+	for i := 0; i < maintenanceBatch+2; i++ {
+		budget := maintenanceBatch
+		if err := repo.sweepSession(context.Background(), key, state, &budget); err != nil {
+			t.Fatal(err)
+		}
+		if got := len(state.sweepQueue); got > maintenanceBatch {
+			t.Fatalf("queued shard names = %d, want at most %d", got, maintenanceBatch)
+		}
+	}
+}
+
+func TestRepositoryMaintainResumesCursorAfterDirectoryMutation(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	if err := os.Mkdir(repo.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maintenanceBatch+1; i++ {
+		if err := os.WriteFile(filepath.Join(repo.dir, fmt.Sprintf("live-%03d", i)), []byte("live"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repo.Maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Mutating entries ahead of the saved cookie must not reset traversal to
+	// the prefix or lose a stale entry appended after that cookie.
+	if err := os.Remove(filepath.Join(repo.dir, "live-000")); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(repo.dir, ".tmp-appended")
+	if err := os.WriteFile(stale, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := repo.Maintain(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(stale); errors.Is(err, os.ErrNotExist) {
+			return
+		}
+	}
+	t.Fatal("stale entry appended after cursor mutation was not eventually removed")
 }
 
 func TestRepositoryMaintainDoesNotStarveLaterTemporaryEntries(t *testing.T) {

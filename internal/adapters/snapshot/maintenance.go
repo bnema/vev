@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/bnema/vev/internal/ports"
 	codec "github.com/bnema/vev/internal/usecase/snapshot"
@@ -152,8 +154,8 @@ func (r *Repository) Maintain(ctx context.Context) (err error) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		path := filepath.Join(sessions, entry.Name())
-		if isQuarantine(entry.Name()) {
+		path := filepath.Join(sessions, entry.name)
+		if isQuarantine(entry.name) {
 			changed, err := r.removeTreeBatch(ctx, path, &budget)
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("remove snapshot quarantine %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
@@ -168,12 +170,12 @@ func (r *Repository) Maintain(ctx context.Context) (err error) {
 			}
 			continue
 		}
-		if !entry.IsDir() || !canonicalSessionKey(entry.Name()) {
+		if !entry.isDir || !canonicalSessionKey(entry.name) {
 			continue
 		}
-		lock := r.sessionLock(entry.Name())
+		lock := r.sessionLock(entry.name)
 		lock.Lock()
-		err = r.maintainSession(ctx, entry.Name(), &budget)
+		err = r.maintainSession(ctx, entry.name, &budget)
 		lock.Unlock()
 		if err != nil {
 			return err
@@ -182,9 +184,21 @@ func (r *Repository) Maintain(ctx context.Context) (err error) {
 	return nil
 }
 
+// maintenanceCursor is deliberately reopenable metadata, not an open file.
+// On Linux, d_off is the seek cookie returned by getdents(2); seeking a newly
+// opened descriptor to it resumes the directory stream. Go's File.ReadDir
+// cannot be used here: its 8 KiB internal getdents buffer advances the kernel
+// offset beyond a short ReadDir result (see os/dir_unix.go), so saving SeekCur
+// after ReadDir would skip buffered entries.
 type maintenanceCursor struct {
-	file    *os.File
-	pending []os.DirEntry
+	offset  int64
+	pending []maintenanceDirEntry
+	done    bool
+}
+
+type maintenanceDirEntry struct {
+	name  string
+	isDir bool
 }
 
 type manifestMaintenance struct {
@@ -205,68 +219,111 @@ type sessionMaintenance struct {
 }
 
 func (r *Repository) resetMaintenance() {
-	for _, cursor := range r.maintenanceCursors {
-		if cursor.file != nil {
-			_ = cursor.file.Close()
-		}
-	}
 	r.maintenanceCursors = nil
 	r.maintenanceSessions = nil
 }
 
 func maintenanceCursorID(dir, purpose string) string { return purpose + "\x00" + dir }
 
-// readMaintenanceDir advances one named directory cursor. Callers must return
-// entries they could not process with requeueMaintenanceEntries before yielding
-// for budget exhaustion. This prevents a ReadDir batch from skipping work when
-// an earlier operation spends the remainder of the pass budget.
-func (r *Repository) readMaintenanceDir(dir string, n int, purpose string) ([]os.DirEntry, bool, error) {
+// readMaintenanceDir advances one named directory cursor. Its continuation is
+// only a Linux seek cookie and at most one call's worth of pending names. The
+// descriptor used to read a call is always closed before this method returns.
+// Callers must return entries they could not process with
+// requeueMaintenanceEntries before yielding for budget exhaustion.
+func (r *Repository) readMaintenanceDir(dir string, n int, purpose string) ([]maintenanceDirEntry, bool, error) {
 	id := maintenanceCursorID(dir, purpose)
 	cursor := r.maintenanceCursors[id]
 	if cursor != nil && len(cursor.pending) != 0 {
 		entries := cursor.pending
 		cursor.pending = nil
-		return entries, cursor.file == nil, nil
-	}
-	if cursor != nil && cursor.file == nil {
-		delete(r.maintenanceCursors, id)
-		cursor = nil
+		if cursor.done {
+			delete(r.maintenanceCursors, id)
+		}
+		return entries, cursor.done, nil
 	}
 	if cursor == nil {
-		file, err := os.Open(dir)
+		cursor = &maintenanceCursor{}
+		r.maintenanceCursors[id] = cursor
+	}
+
+	entries, done, err := readMaintenanceDirent(dir, n, cursor)
+	if err != nil {
+		delete(r.maintenanceCursors, id)
+		return nil, false, err
+	}
+	if done {
+		delete(r.maintenanceCursors, id)
+	}
+	return entries, done, nil
+}
+
+// readMaintenanceDirent uses the Linux getdents seek cookie from each record.
+// syscall.Dirent's Off field is the d_off member of linux_dirent64 and
+// syscall.Seek is lseek(2), as defined by Go's syscall Linux sources.
+func readMaintenanceDirent(dir string, limit int, cursor *maintenanceCursor) ([]maintenanceDirEntry, bool, error) {
+	file, err := os.Open(dir)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+	fd := int(file.Fd())
+	if cursor.offset != 0 {
+		if _, err := syscall.Seek(fd, cursor.offset, io.SeekStart); err != nil {
+			return nil, false, err
+		}
+	}
+
+	entries := make([]maintenanceDirEntry, 0, limit)
+	buffer := make([]byte, 8192)
+	for len(entries) < limit {
+		count, err := syscall.ReadDirent(fd, buffer)
 		if err != nil {
 			return nil, false, err
 		}
-		cursor = &maintenanceCursor{file: file}
-		r.maintenanceCursors[id] = cursor
-	}
-	entries, err := cursor.file.ReadDir(n)
-	if err != nil && !errors.Is(err, io.EOF) {
-		delete(r.maintenanceCursors, id)
-		closeErr := cursor.file.Close()
-		if closeErr != nil {
-			return nil, false, closeErr
+		if count == 0 {
+			return entries, true, nil
 		}
-		return nil, false, err
+		for data := buffer[:count]; len(data) != 0 && len(entries) < limit; {
+			if len(data) < int(unsafe.Offsetof(syscall.Dirent{}.Name)) {
+				return nil, false, syscall.EIO
+			}
+			record := (*syscall.Dirent)(unsafe.Pointer(&data[0]))
+			reclen := int(record.Reclen)
+			if reclen <= 0 || reclen > len(data) {
+				return nil, false, syscall.EIO
+			}
+			data = data[reclen:]
+			// Advance past every raw record, including dot and disappeared entries.
+			cursor.offset = record.Off
+			nameBytes := unsafe.Slice((*byte)(unsafe.Pointer(&record.Name[0])), reclen-int(unsafe.Offsetof(syscall.Dirent{}.Name)))
+			if end := strings.IndexByte(string(nameBytes), 0); end >= 0 {
+				nameBytes = nameBytes[:end]
+			}
+			name := string(nameBytes)
+			if name == "." || name == ".." || name == "" {
+				continue
+			}
+			info, err := os.Lstat(filepath.Join(dir, name))
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, false, err
+			}
+			entries = append(entries, maintenanceDirEntry{name: name, isDir: info.IsDir()})
+		}
 	}
-	if !errors.Is(err, io.EOF) && len(entries) == n {
-		return entries, false, nil
-	}
-	delete(r.maintenanceCursors, id)
-	if closeErr := cursor.file.Close(); closeErr != nil {
-		return nil, false, closeErr
-	}
-	return entries, true, nil
+	return entries, false, nil
 }
 
-func (r *Repository) requeueMaintenanceEntries(dir, purpose string, entries []os.DirEntry) {
+func (r *Repository) requeueMaintenanceEntries(dir, purpose string, entries []maintenanceDirEntry) {
 	if len(entries) == 0 {
 		return
 	}
 	id := maintenanceCursorID(dir, purpose)
 	cursor := r.maintenanceCursors[id]
 	if cursor == nil {
-		cursor = &maintenanceCursor{}
+		cursor = &maintenanceCursor{done: true}
 		r.maintenanceCursors[id] = cursor
 	}
 	cursor.pending = append(entries, cursor.pending...)
@@ -367,8 +424,8 @@ func (r *Repository) maintainSession(ctx context.Context, key string, budget *in
 			r.requeueMaintenanceEntries(objectRoot, "object-temps-shards:"+key, shards[i:])
 			return nil
 		}
-		if shard.IsDir() {
-			if err := r.removeTemps(ctx, filepath.Join(objectRoot, shard.Name()), budget, "object-temps:"+key+":"+shard.Name()); err != nil {
+		if shard.isDir {
+			if err := r.removeTemps(ctx, filepath.Join(objectRoot, shard.name), budget, "object-temps:"+key+":"+shard.name); err != nil {
 				return err
 			}
 		}
@@ -445,11 +502,8 @@ func (r *Repository) maintenanceToken(key string) (string, bool, error) {
 func (r *Repository) clearSessionMaintenance(key string) {
 	delete(r.maintenanceSessions, key)
 	prefix := "\x00" + filepath.Clean(r.sessionPath(key))
-	for id, cursor := range r.maintenanceCursors {
+	for id := range r.maintenanceCursors {
 		if strings.HasSuffix(id, prefix) || strings.Contains(id, ":"+key+":") || strings.Contains(id, ":"+key+"\x00") {
-			if cursor.file != nil {
-				_ = cursor.file.Close()
-			}
 			delete(r.maintenanceCursors, id)
 		}
 	}
@@ -469,10 +523,10 @@ func (r *Repository) markSession(ctx context.Context, key string, state *session
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if entry.IsDir() {
+		if entry.isDir {
 			continue
 		}
-		generation, ok := parseGenerationFilename(entry.Name())
+		generation, ok := parseGenerationFilename(entry.name)
 		if !ok {
 			continue
 		}
@@ -561,7 +615,10 @@ func (r *Repository) sweepSession(ctx context.Context, key string, state *sessio
 	}
 	referenced := retainedReferences(state.marked, state.conservative)
 	root := filepath.Join(r.sessionPath(key), repositoryObjectsDir)
-	if !state.sweepRootDone {
+	// Do not keep accumulating shard names while draining earlier work. This
+	// bounds retained names to one directory batch even for a session with many
+	// object shards.
+	if !state.sweepRootDone && len(state.sweepQueue) == 0 {
 		entries, done, err := r.readMaintenanceDir(root, maintenanceBatch, "sweep-shards:"+key)
 		if errors.Is(err, os.ErrNotExist) {
 			state.sweepRootDone = true
@@ -569,8 +626,8 @@ func (r *Repository) sweepSession(ctx context.Context, key string, state *sessio
 			return fmt.Errorf("read snapshot objects: %w", safeFilesystemError(err))
 		} else {
 			for _, entry := range entries {
-				if entry.IsDir() {
-					state.sweepQueue = append(state.sweepQueue, entry.Name())
+				if entry.isDir {
+					state.sweepQueue = append(state.sweepQueue, entry.name)
 				}
 			}
 			state.sweepRootDone = done
@@ -649,14 +706,14 @@ func (r *Repository) sweepShard(ctx context.Context, dir string, referenced map[
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
-		digest, ok := parseObjectDigest(object.Name())
-		if !ok || object.IsDir() {
+		digest, ok := parseObjectDigest(object.name)
+		if !ok || object.isDir {
 			continue
 		}
 		if _, used := referenced[digest]; used {
 			continue
 		}
-		path := filepath.Join(dir, object.Name())
+		path := filepath.Join(dir, object.name)
 		if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return false, fmt.Errorf("remove snapshot object %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
 		}
@@ -690,10 +747,10 @@ func (r *Repository) removeTemps(ctx context.Context, dir string, budget *int, p
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), ".tmp-") {
+		if entry.isDir || !strings.HasPrefix(entry.name, ".tmp-") {
 			continue
 		}
-		path := filepath.Join(dir, entry.Name())
+		path := filepath.Join(dir, entry.name)
 		if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove snapshot maintenance file %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
 		}
