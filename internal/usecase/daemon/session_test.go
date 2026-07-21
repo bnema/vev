@@ -306,7 +306,7 @@ func TestAttachReplaceDetachesOld(t *testing.T) {
 	// A is notified it was detached.
 	dA := awaitFrame(t, sendsA, ports.MsgDetached)
 	det, _ := ports.UnmarshalDetached(dA.Payload)
-	require.Equal(t, ports.ReasonDetach, det.Reason)
+	require.Equal(t, ports.ReasonReplaced, det.Reason)
 
 	// B is now the current client.
 	sess.mu.Lock()

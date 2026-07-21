@@ -61,6 +61,7 @@ func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReade
 		gotImage <- ip
 		return nil
 	}).Maybe()
+	tr.EXPECT().Send(isType(ports.MsgClientNotice)).Return(nil).Maybe()
 
 	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
 	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
@@ -158,7 +159,7 @@ func (d clipboardToastLifecycleDialer) Dial(context.Context) (ports.Transport, e
 	return d.transport, nil
 }
 
-func TestRunRemoteClipboardFailureReconcilesOnResetFrame(t *testing.T) {
+func TestRunRemoteClipboardFailureNotifiesDaemonAndWritesOutputVerbatim(t *testing.T) {
 	var out bytes.Buffer
 	resizeEvents := make(chan domain.Size)
 	input := newOneShotBlockingReader([]byte{0x16})
@@ -181,51 +182,32 @@ func TestRunRemoteClipboardFailureReconcilesOnResetFrame(t *testing.T) {
 		result <- client.NewRunner(client.Dependencies{Dialer: clipboardToastLifecycleDialer{transport: transport}, Terminal: term, Clock: realClock{}, Clipboard: clipboard}).Run(context.Background(), client.AttachRequest{Intent: ports.IntentEphemeral, Remote: true})
 	}()
 
-	for {
+	var gotNotice bool
+	for !gotNotice {
 		select {
 		case sent := <-transport.sends:
-			if sent.Type != ports.MsgResize {
+			if sent.Type != ports.MsgClientNotice {
 				continue
 			}
-			goto resized
-		case <-time.After(time.Second):
-			t.Fatal("client did not request a daemon reset after drawing clipboard toast")
-		}
-	}
-
-resized:
-	require.Contains(t, out.String(), "image paste failed; sent Ctrl+V")
-	transport.recv <- frameOf(ports.MsgOutput, ports.MarshalOutput(ports.Output{BaseStateNum: 1, NewStateNum: 2, Data: []byte("incremental")}))
-	for {
-		select {
-		case sent := <-transport.sends:
-			if sent.Type != ports.MsgAck {
-				continue
-			}
-			ack, err := ports.UnmarshalAck(sent.Payload)
+			notice, err := ports.UnmarshalClientNotice(sent.Payload)
 			require.NoError(t, err)
-			if ack.AckedStateNum == 2 {
-				goto incrementalAcknowledged
-			}
+			require.Equal(t, ports.ClientNoticeClipboardFallback, notice.Action)
+			gotNotice = true
 		case <-time.After(time.Second):
-			t.Fatal("client did not ACK discarded incremental output")
+			t.Fatal("client did not notify daemon of clipboard failure")
 		}
 	}
-
-incrementalAcknowledged:
-	require.NotContains(t, out.String(), "incremental", "incremental output must not overwrite a local toast before reset")
-	transport.recv <- frameOf(ports.MsgOutput, ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 3, Data: []byte("authoritative reset")}))
+	beforeOutput := out.String()
+	transport.recv <- frameOf(ports.MsgOutput, ports.MarshalOutput(ports.Output{BaseStateNum: 1, NewStateNum: 2, Data: []byte("incremental")}))
 	transport.recv <- frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
 
 	select {
 	case err := <-result:
 		require.NoError(t, err)
 	case <-time.After(time.Second):
-		t.Fatal("client did not finish after reset frame")
+		t.Fatal("client did not finish")
 	}
-	got := out.String()
-	require.NotContains(t, got, "incremental", "incremental output must not overwrite a local toast before reset")
-	require.Contains(t, got, "authoritative reset")
+	require.Equal(t, beforeOutput+"incremental", out.String(), "daemon output must remain verbatim with no local toast bytes")
 }
 
 func TestRunRemoteClipboardOversizedImageForwardsCtrlV(t *testing.T) {

@@ -399,7 +399,7 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	det := awaitFrame(t, sends2, ports.MsgDetached)
 	dm, err := ports.UnmarshalDetached(det.Payload)
 	require.NoError(t, err)
-	require.Equal(t, ports.ReasonDetach, dm.Reason)
+	require.Equal(t, ports.ReasonReplaced, dm.Reason)
 	awaitFrame(t, sends1, ports.MsgOutput)
 }
 

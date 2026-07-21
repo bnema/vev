@@ -32,7 +32,9 @@ const (
 	NoticeInputDropped
 	NoticeResizeFailed
 	NoticeClipboard
+	NoticeClipboardTooLarge
 	NoticeAutoResume
+	NoticeConnection
 )
 
 var noticeSlugs = map[NoticeCode]string{
@@ -53,7 +55,9 @@ var noticeSlugs = map[NoticeCode]string{
 	NoticeInputDropped:       "input-dropped",
 	NoticeResizeFailed:       "resize-failed",
 	NoticeClipboard:          "clipboard",
+	NoticeClipboardTooLarge:  "clipboard-too-large",
 	NoticeAutoResume:         "auto-resume",
+	NoticeConnection:         "connection",
 }
 
 func (c NoticeCode) String() string {

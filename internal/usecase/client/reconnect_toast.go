@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/pkg/renderer"
 )
@@ -46,39 +45,6 @@ func drawClientToast(out io.Writer, size domain.Size, message string) (domain.Re
 		return domain.Rect{}, nil
 	}
 	return bounds, writeReconnectToast(out, bounds, reconnectToastLinesFor(bounds, message))
-}
-
-// clientToastUI owns a transient client-local overlay. It is intentionally
-// reconciled by a daemon reset frame rather than erased locally: an
-// incremental daemon diff cannot restore cells hidden by the overlay.
-type clientToastUI struct {
-	showing bool
-	rect    domain.Rect
-}
-
-func (u *clientToastUI) draw(term ports.Terminal, size domain.Size, message string) bool {
-	changed := u.showing
-	if u.showing {
-		_ = clearReconnectToast(term.Out(), u.rect)
-		u.showing = false
-		u.rect = domain.Rect{}
-	}
-	rect, _ := drawClientToast(term.Out(), size, message)
-	if rect.Width <= 0 || rect.Height <= 0 {
-		_ = term.Flush()
-		return changed
-	}
-	u.rect = rect
-	u.showing = true
-	_ = term.Flush()
-	return true
-}
-
-// reconcile marks the overlay gone after the daemon has painted a full reset
-// frame over it. It deliberately emits no terminal bytes.
-func (u *clientToastUI) reconcile() {
-	u.showing = false
-	u.rect = domain.Rect{}
 }
 
 func clearReconnectToast(out io.Writer, bounds domain.Rect) error {

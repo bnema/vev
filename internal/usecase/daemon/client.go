@@ -575,7 +575,7 @@ func (d *Daemon) retireReplacedClient(old *attachedClient, cleanup renderLifecyc
 		if !blockedRender {
 			// A healthy idle client observes the required replacement notice. Its
 			// watchdog still bounds a peer that stops draining after this check.
-			d.boundedSend(old, frameDetached(ports.ReasonDetach))
+			d.boundedSend(old, frameDetached(ports.ReasonReplaced))
 		}
 		_ = old.closeCapturedTransport(old.revokeTransport(oldTransport))
 		d.unregisterPreview(old)
@@ -665,6 +665,12 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 			if ip, derr := ports.UnmarshalImagePush(f.Payload); derr == nil {
 				d.handleSequencedImagePush(sess, ac, ip.InputSeq, ip)
 			}
+		case ports.MsgClientNotice:
+			if notice, derr := ports.UnmarshalClientNotice(f.Payload); derr == nil {
+				d.handleClientNotice(sess, ac, notice)
+			} else {
+				d.log.Warn("malformed client notice", "err", derr)
+			}
 		case ports.MsgDetach:
 			d.clientGone(sess, ac, tr, true)
 			return
@@ -752,6 +758,40 @@ func (d *Daemon) applyTheme(sess *session, ac *attachedClient, msg ports.Theme) 
 
 func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	d.requestTransactionalResize(sess, ac, sz, false)
+}
+
+// handleClientNotice maps the closed client-event enum to daemon-owned notice
+// content. The connection loop has already bound sess and ac to this transport;
+// verify that ownership is still current before changing presentation state.
+func (d *Daemon) handleClientNotice(sess *session, ac *attachedClient, notice ports.ClientNotice) {
+	sess.mu.Lock()
+	current := sess.client == ac
+	sess.mu.Unlock()
+	if !current {
+		return
+	}
+
+	switch notice.Action {
+	case ports.ClientNoticeClipboardFallback:
+		d.recordClientNotice(sess, ac, domain.NoticeError, domain.NoticeClipboard, "image paste failed; sent Ctrl+V")
+	case ports.ClientNoticeClipboardTooLarge:
+		d.recordClientNotice(sess, ac, domain.NoticeWarn, domain.NoticeClipboardTooLarge, "image too large to paste")
+	case ports.ClientNoticeLinkDegraded:
+		d.recordClientNotice(sess, ac, domain.NoticeWarn, domain.NoticeConnection, "connection degraded")
+	case ports.ClientNoticeLinkConnected:
+		d.dismissToast(ac, domain.NoticeConnection, sess.id)
+	}
+}
+
+func (d *Daemon) recordClientNotice(sess *session, ac *attachedClient, sev domain.NoticeSeverity, code domain.NoticeCode, message string) {
+	n := d.notices.record(domain.Notification{
+		Code:      code,
+		Severity:  sev,
+		Message:   message,
+		Time:      d.clock.Now(),
+		SessionID: sess.id,
+	})
+	d.showToast(ac, n)
 }
 
 // resizeForFirstPaint retains attach's synchronous geometry guarantee. The

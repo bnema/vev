@@ -269,6 +269,28 @@ func (rt *overlayRuntime) indexOfToastLocked(code domain.NoticeCode, sid domain.
 	return -1
 }
 
+// dismissToast removes only the specified visible toast. In particular, a
+// link-connected event must not clear clipboard or other notice state.
+func (d *Daemon) dismissToast(ac *attachedClient, code domain.NoticeCode, sid domain.SessionID) {
+	if ac == nil || ac.overlays == nil {
+		return
+	}
+	rt := ac.overlays
+	rt.noticeMu.Lock()
+	i := rt.indexOfToastLocked(code, sid)
+	if i < 0 {
+		rt.noticeMu.Unlock()
+		return
+	}
+	rt.noticeToasts[i].timer.stop()
+	rt.noticeToasts = append(rt.noticeToasts[:i], rt.noticeToasts[i+1:]...)
+	if len(rt.noticeToasts) == 0 {
+		rt.noticeOverflow = 0
+	}
+	rt.noticeMu.Unlock()
+	d.repaintForNotice(ac)
+}
+
 // retainToastTimerLocked arms the toast's TTL. Callers must hold noticeMu; the
 // timer goroutine re-acquires it and releases it before repainting, so the
 // callback never runs with noticeMu held.

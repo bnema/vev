@@ -141,6 +141,7 @@ func newReconnectToastRecordingTransport(recvs ...reconnectToastRecv) *reconnect
 }
 
 type reconnectToastLinkTransport struct {
+	mu     sync.Mutex
 	recvCh chan reconnectToastRecv
 	sends  []ports.Frame
 	events chan ports.LinkEvent
@@ -156,8 +157,16 @@ func newReconnectToastLinkTransport() *reconnectToastLinkTransport {
 }
 
 func (t *reconnectToastLinkTransport) Send(f ports.Frame) error {
+	t.mu.Lock()
 	t.sends = append(t.sends, f)
+	t.mu.Unlock()
 	return nil
+}
+
+func (t *reconnectToastLinkTransport) sentFrames() []ports.Frame {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]ports.Frame(nil), t.sends...)
 }
 
 func (t *reconnectToastLinkTransport) Recv() (ports.Frame, error) {
@@ -282,7 +291,7 @@ func newReconnectAttachAttempt(term ports.Terminal, transport ports.Transport, c
 	}
 }
 
-func TestReconnectToastDegradedDrawsToastAndProbingIsVisible(t *testing.T) {
+func TestReconnectLinkEventsNotifyDaemonWithoutLocalTerminalWrites(t *testing.T) {
 	out := newReconnectToastOutputRecorder()
 	term := newReconnectToastTerminalHarnessWithOutput(t, out)
 	defer term.closeInput()
@@ -294,25 +303,26 @@ func TestReconnectToastDegradedDrawsToastAndProbingIsVisible(t *testing.T) {
 	attempt := newReconnectAttachAttempt(term.term, tr, newReconnectHandshakeClock(t), AttachRequest{Intent: ports.IntentAttach, SessionName: "main", Remote: true}, 0, &terminalThemeState{}, tr.LinkEvents(), &ms)
 	go func() { resultCh <- attempt.run(context.Background()) }()
 
-	tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
-	probed := <-out.completed
-	require.Contains(t, probed, reconnectStageMessage(reconnectStageProbingUDP))
-
 	tr.events <- ports.LinkEvent{State: ports.LinkStateDegraded}
-	cleared := <-out.completed
-	assertReconnectToastClearCoversBounds(t, cleared, reconnectToastBoundsFor(term.size, reconnectStageMessage(reconnectStageProbingUDP)))
-	degraded := <-out.completed
-	require.Contains(t, degraded, reconnectStageMessage(reconnectStageDegraded))
-
-	tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
-	cleared = <-out.completed
-	assertReconnectToastClearCoversBounds(t, cleared, reconnectToastBoundsFor(term.size, reconnectStageMessage(reconnectStageDegraded)))
-	probed = <-out.completed
-	require.Contains(t, probed, reconnectStageMessage(reconnectStageProbingUDP))
-
 	tr.events <- ports.LinkEvent{State: ports.LinkStateConnected}
-	cleared = <-out.completed
-	assertReconnectToastClearCoversBounds(t, cleared, reconnectToastBoundsFor(term.size, reconnectStageMessage(reconnectStageProbingUDP)))
+	require.Eventually(t, func() bool {
+		var actions []uint8
+		for _, frame := range tr.sentFrames() {
+			if frame.Type != ports.MsgClientNotice {
+				continue
+			}
+			notice, err := ports.UnmarshalClientNotice(frame.Payload)
+			if err == nil {
+				actions = append(actions, notice.Action)
+			}
+		}
+		return len(actions) == 2 && actions[0] == ports.ClientNoticeLinkDegraded && actions[1] == ports.ClientNoticeLinkConnected
+	}, time.Second, time.Millisecond)
+	select {
+	case bytes := <-out.completed:
+		t.Fatalf("link notices wrote client-local terminal bytes: %q", bytes)
+	default:
+	}
 
 	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)}
 	result := <-resultCh
@@ -338,44 +348,21 @@ func TestAttachAttemptOfflineLinkEventReturnsReconnectableError(t *testing.T) {
 	require.True(t, shouldReconnect(result.err), "offline exit must be reconnectable")
 }
 
+func TestDetachedResultReplacementAndCleanDetach(t *testing.T) {
+	if err := detachedResult(ports.ReasonDetach); err != nil {
+		t.Fatalf("clean detach = %v, want nil", err)
+	}
+	err := detachedResult(ports.ReasonReplaced)
+	var detached *DetachedError
+	if !errors.As(err, &detached) {
+		t.Fatalf("replacement error = %T, want *DetachedError", err)
+	}
+	require.Equal(t, "session taken over by another client", detached.Text)
+}
+
 func TestReconnectToastBoundsUseCenterAnchor(t *testing.T) {
 	bounds := reconnectToastBounds(domain.Size{Cols: 80, Rows: 24})
 	require.Equal(t, domain.Rect{X: 29, Y: 10, Width: 22, Height: 3}, bounds)
-}
-
-func TestClientToastReconciliationWaitsForDaemonResetFrame(t *testing.T) {
-	tests := []struct {
-		name string
-		out  ports.Output
-		want bool
-	}{
-		{name: "incremental frame", out: ports.Output{BaseStateNum: 7, NewStateNum: 8}, want: false},
-		{name: "state-less side effect", out: ports.Output{}, want: false},
-		{name: "reset frame", out: ports.Output{BaseStateNum: 0, NewStateNum: 9}, want: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, isClientToastResyncFrame(tt.out))
-		})
-	}
-}
-
-func TestClientToastDrawsWithoutInputPumpTerminalWrites(t *testing.T) {
-	out := newReconnectToastOutputRecorder()
-	term := newReconnectToastTerminalHarnessWithOutput(t, out)
-	defer term.closeInput()
-	toast := clientToastUI{}
-
-	require.True(t, toast.draw(term.term, term.size, "image paste failed; sent Ctrl+V"))
-	drawn := <-out.completed
-	require.Contains(t, drawn, "image paste failed; sent Ctrl+V")
-	toast.reconcile()
-
-	select {
-	case got := <-out.completed:
-		t.Fatalf("reconcile wrote terminal bytes: %q", got)
-	default:
-	}
 }
 
 func TestReconnectToastDrawAndClearHelpers(t *testing.T) {

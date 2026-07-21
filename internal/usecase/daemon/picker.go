@@ -434,7 +434,7 @@ func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker
 		d.unregisterPreview(old)
 		old.clearPreviousSession()
 		old.setSession(nil)
-		d.notifyDetachedAsync(old, ports.ReasonDetach)
+		d.notifyDetachedAsync(old, ports.ReasonReplaced)
 	}
 	if targetSess == from {
 		d.activateTab(from, from.activeTab())

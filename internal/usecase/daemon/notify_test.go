@@ -14,7 +14,56 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 )
+
+func TestClientNoticeMapsFixedActionsAndDismissesOnlyConnectionToast(t *testing.T) {
+	d, sess, ac, _ := newNoticeFixture(t, &noticeClock{})
+	d.handleClientNotice(sess, ac, ports.ClientNotice{Action: ports.ClientNoticeClipboardFallback})
+	d.handleClientNotice(sess, ac, ports.ClientNotice{Action: ports.ClientNoticeClipboardTooLarge})
+	d.handleClientNotice(sess, ac, ports.ClientNotice{Action: ports.ClientNoticeLinkDegraded})
+
+	toasts, _ := visibleToasts(ac)
+	require.Len(t, toasts, 3)
+	require.Equal(t, []domain.Notification{
+		{Code: domain.NoticeConnection, Severity: domain.NoticeWarn, Message: "connection degraded", SessionID: sess.id, Count: 1},
+		{Code: domain.NoticeClipboardTooLarge, Severity: domain.NoticeWarn, Message: "image too large to paste", SessionID: sess.id, Count: 1},
+		{Code: domain.NoticeClipboard, Severity: domain.NoticeError, Message: "image paste failed; sent Ctrl+V", SessionID: sess.id, Count: 1},
+	}, stripNoticeTimes(toasts))
+
+	d.handleClientNotice(sess, ac, ports.ClientNotice{Action: ports.ClientNoticeLinkConnected})
+	toasts, _ = visibleToasts(ac)
+	require.Len(t, toasts, 2)
+	for _, toast := range toasts {
+		require.NotEqual(t, domain.NoticeConnection, toast.Code)
+	}
+}
+
+func TestMalformedClientNoticeIsIgnored(t *testing.T) {
+	d, _, ac, _ := newNoticeFixture(t, &noticeClock{})
+	tr := ac.tr.(*portsmocks.MockTransport)
+	frames := []ports.Frame{
+		{Type: ports.MsgClientNotice, Payload: []byte{0xff}},
+		{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})},
+	}
+	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+		frame := frames[0]
+		frames = frames[1:]
+		return frame, nil
+	}).Times(2)
+	d.runConnLoop(ac)
+	toasts, _ := visibleToasts(ac)
+	require.Empty(t, toasts)
+	require.Empty(t, d.notices.history())
+}
+
+func stripNoticeTimes(notices []domain.Notification) []domain.Notification {
+	out := append([]domain.Notification(nil), notices...)
+	for i := range out {
+		out[i].Time = time.Time{}
+	}
+	return out
+}
 
 func notice(code domain.NoticeCode, msg string, sid domain.SessionID) domain.Notification {
 	return domain.Notification{Code: code, Severity: domain.NoticeError, Message: msg, Time: time.Unix(1, 0), SessionID: sid}
