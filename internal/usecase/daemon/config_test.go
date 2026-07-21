@@ -543,3 +543,34 @@ func TestApplyConfigInvalidDefaultsWithoutPanic(t *testing.T) {
 	_, ok = d.commandByEffectiveCode("TOOLONG")
 	require.False(t, ok)
 }
+
+func TestApplyConfigSurfacesOneNoticeAggregatingAllWarnings(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{
+		Theme: domain.ThemeAuto,
+		BindingEntries: []domain.ConfigEntry{
+			{Key: "unknown-action", Value: "alt+x"},
+		},
+		Codes: map[string]string{
+			"missing-command": "OK",
+			"new-tab":         "toolong",
+		},
+	})
+
+	history := d.notices.history()
+	var reloadNotices []domain.Notification
+	for _, n := range history {
+		if n.Code == domain.NoticeConfigReload {
+			reloadNotices = append(reloadNotices, n)
+		}
+	}
+	require.Len(t, reloadNotices, 1, "expected exactly one config-reload notice per ApplyConfig call")
+
+	n := reloadNotices[0]
+	require.Equal(t, domain.NoticeWarn, n.Severity)
+	require.Equal(t, domain.SessionID(""), n.SessionID, "config reload notice must be global")
+	require.Contains(t, n.Message, "config reloaded with 3 warning(s):")
+	require.Contains(t, n.Details, `unknown action "unknown-action"`)
+	require.Contains(t, n.Details, `unknown command code slug "missing-command"`)
+	require.Contains(t, n.Details, `invalid command code for "new-tab"`)
+}

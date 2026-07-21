@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"regexp"
@@ -40,10 +41,11 @@ func (d *Daemon) currentThemeConfig() themeConfigSnapshot {
 // ApplyConfig validates and atomically swaps daemon runtime configuration.
 func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	bindings, warnings := keys.BuildBindingEntries(cfg.BindingEntries)
-	for _, warning := range warnings {
+	overrides, codeWarnings := d.buildCodeOverrides(cfg.Codes)
+	allWarnings := append(append([]domain.Warning{}, warnings...), codeWarnings...)
+	for _, warning := range allWarnings {
 		d.logConfigWarning(warning)
 	}
-	overrides := d.buildCodeOverrides(cfg.Codes)
 	allowlist := restoreProcessAllowlistFromConfig(cfg.Snapshot)
 	d.bindings.Store(bindings)
 	d.codeOverrides.Store(&overrides)
@@ -73,24 +75,47 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	}
 	d.reapplyThemeAllSessions()
 	d.repaintAllAttachedClients()
+
+	if len(allWarnings) > 0 {
+		first := allWarnings[0]
+		d.notify(nil, domain.NoticeWarn, domain.NoticeConfigReload,
+			fmt.Sprintf("config reloaded with %d warning(s): line %d: %s", len(allWarnings), first.Line, first.Msg),
+			configWarningsError(allWarnings))
+	}
 }
 
-func (d *Daemon) buildCodeOverrides(configured map[string]string) map[string]string {
+// configWarningsError joins every config warning into a single error whose
+// message lists them all, so noticeDetails (which renders a cause's own
+// Error() string) surfaces every warning line in one notice's Details.
+func configWarningsError(warnings []domain.Warning) error {
+	lines := make([]string, len(warnings))
+	for i, w := range warnings {
+		if w.Line > 0 {
+			lines[i] = fmt.Sprintf("line %d: %s", w.Line, w.Msg)
+		} else {
+			lines[i] = w.Msg
+		}
+	}
+	return errors.New(strings.Join(lines, "; "))
+}
+
+func (d *Daemon) buildCodeOverrides(configured map[string]string) (map[string]string, []domain.Warning) {
 	commands := command.Registry()
 	bySlug := make(map[string]command.Command, len(commands))
 	for _, cmd := range commands {
 		bySlug[cmd.Slug] = cmd
 	}
 
+	var warnings []domain.Warning
 	desired := make(map[string]string)
 	for _, slug := range sortedKeys(configured) {
 		if _, ok := bySlug[slug]; !ok {
-			d.logConfigWarning(domain.Warning{Msg: fmt.Sprintf("unknown command code slug %q", slug)})
+			warnings = append(warnings, domain.Warning{Msg: fmt.Sprintf("unknown command code slug %q", slug)})
 			continue
 		}
 		code := strings.ToUpper(strings.TrimSpace(configured[slug]))
 		if !commandCodePattern.MatchString(code) {
-			d.logConfigWarning(domain.Warning{Msg: fmt.Sprintf("invalid command code for %q", slug)})
+			warnings = append(warnings, domain.Warning{Msg: fmt.Sprintf("invalid command code for %q", slug)})
 			continue
 		}
 		desired[slug] = code
@@ -146,7 +171,7 @@ func (d *Daemon) buildCodeOverrides(configured map[string]string) map[string]str
 				if _, isOverride := accepted[slug]; !isOverride {
 					continue
 				}
-				d.logConfigWarning(domain.Warning{Msg: fmt.Sprintf("command code %q for %q conflicts with %q", code, slug, keep)})
+				warnings = append(warnings, domain.Warning{Msg: fmt.Sprintf("command code %q for %q conflicts with %q", code, slug, keep)})
 				delete(accepted, slug)
 				dropped = true
 			}
@@ -155,7 +180,7 @@ func (d *Daemon) buildCodeOverrides(configured map[string]string) map[string]str
 			break
 		}
 	}
-	return accepted
+	return accepted, warnings
 }
 
 func sortedKeys(values map[string]string) []string {
