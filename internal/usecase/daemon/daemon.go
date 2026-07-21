@@ -114,6 +114,7 @@ type Daemon struct {
 	persistEnabled          bool
 	snaps                   ports.SnapshotStore
 	snapsEnabled            bool
+	noticeStore             ports.NoticeStore
 	snapshotMarshal         func(snapcodec.Session) ([]byte, error)
 	snapshotJobs            chan *snapshotCapture
 	snapshotWorkerMu        sync.Mutex
@@ -238,6 +239,12 @@ func WithSnapshotStore(store ports.SnapshotStore) Option {
 		d.snaps = store
 		d.snapsEnabled = store != nil
 	}
+}
+
+// WithNoticeStore enables persisting undeliverable notices across daemon
+// restarts. A nil store keeps the daemon in no-op notice-persistence mode.
+func WithNoticeStore(store ports.NoticeStore) Option {
+	return func(d *Daemon) { d.noticeStore = store }
 }
 
 // WithCwdReader overrides the process cwd reader used for persistence tests.

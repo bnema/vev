@@ -32,6 +32,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/config"
 	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/adapters/noticefile"
 	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/adapters/pty"
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
@@ -450,6 +451,7 @@ func runDaemon() (retErr error) {
 	daemonOpts = append(daemonOpts, daemon.WithBarScriptCommandRunner(shellcmd.New()))
 	daemonOpts = append(daemonOpts, daemon.WithProcessInspector(platform.NewProcessInspector()), daemon.WithDirOrHome(platform.DirOrHome))
 	daemonOpts = append(daemonOpts, daemon.WithSnapshotStore(snapshotadapter.NewStore(snapshotDir())))
+	daemonOpts = append(daemonOpts, daemon.WithNoticeStore(noticefile.New(platform.StateDir())))
 	storePath := persist.StorePath(platform.StateDir())
 	var storeErr error
 	if store, err := kv.Open(storePath); err != nil {

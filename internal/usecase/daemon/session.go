@@ -723,6 +723,19 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 				if reason != ports.ReasonServerShutdown {
 					return terminalSnapshotErr
 				}
+				// The daemon is dying: there is no attached client left to toast, so
+				// persist the failure for the next startup to surface instead.
+				if ns := d.noticeStore; ns != nil {
+					if err := ns.Append(domain.Notification{
+						Code:     domain.NoticeSnapshotWrite,
+						Severity: domain.NoticeError,
+						Message:  "session " + name + " shut down without saving terminal state",
+						Details:  noticeDetails(terminalSnapshotErr),
+						Time:     d.clock.Now(),
+					}); err != nil {
+						d.log.Warn("persisting shutdown notice failed", "err", err, "session", name)
+					}
+				}
 			}
 		}
 	}

@@ -63,7 +63,17 @@ func (d *Daemon) closeRestoreDone() {
 
 func (d *Daemon) restoreSnapshots(ctx context.Context) {
 	defer d.closeRestoreDone()
-	if d == nil || !d.snapsEnabled || d.snaps == nil {
+	if d == nil {
+		return
+	}
+	if ns := d.noticeStore; ns != nil {
+		drained, _ := ns.Drain()
+		for _, n := range drained {
+			d.notices.record(n)
+			d.notices.queueGlobal(n)
+		}
+	}
+	if !d.snapsEnabled || d.snaps == nil {
 		return
 	}
 	blobs, err := d.snaps.Load()
