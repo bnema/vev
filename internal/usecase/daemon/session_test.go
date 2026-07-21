@@ -674,12 +674,13 @@ func TestServeReturnsDespiteWedgedClientOnShutdown(t *testing.T) {
 }
 
 type mockStoreState struct {
-	mu     sync.Mutex
-	data   map[string][]byte
-	sets   int
-	dels   []string
-	syncs  int
-	closed bool
+	mu        sync.Mutex
+	data      map[string][]byte
+	sets      int
+	dels      []string
+	deleteErr func(string) error
+	syncs     int
+	closed    bool
 }
 
 func newMockStore(t *testing.T) (*portsmocks.MockStore, *mockStoreState) {
@@ -702,8 +703,14 @@ func newMockStore(t *testing.T) (*portsmocks.MockStore, *mockStoreState) {
 	store.EXPECT().Delete(mock.Anything).RunAndReturn(func(k []byte) error {
 		state.mu.Lock()
 		defer state.mu.Unlock()
-		state.dels = append(state.dels, string(k))
-		delete(state.data, string(k))
+		key := string(k)
+		state.dels = append(state.dels, key)
+		if state.deleteErr != nil {
+			if err := state.deleteErr(key); err != nil {
+				return err
+			}
+		}
+		delete(state.data, key)
 		return nil
 	}).Maybe()
 	store.EXPECT().Range(mock.Anything).Run(func(fn func(k, v []byte) bool) {

@@ -74,6 +74,7 @@ type session struct {
 	snapshotPublicationContext context.Context
 	snapshotPublicationCancel  context.CancelFunc
 	snapshotQuarantined        bool
+	snapshotQuarantineEpoch    uint64
 	// snapshotFailureSig is the stable class of the active failed publication.
 	// It is guarded by snapshotMu and deliberately never contains error text.
 	snapshotFailureSig string
@@ -583,12 +584,13 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	sess.mu.Unlock()
 	d.mu.Unlock()
 
-	rollback := func(err error, resume bool) error {
+	rollback := func(err error) error {
+		// The old record remains authoritative until its deletion succeeds. If
+		// repository deletion was attempted, its outcome is not safely
+		// reversible, so the coordinator stays quarantined rather than risking a
+		// publication that recreates the deleted old identity.
 		if cleanupErr := d.persist.Delete(name); cleanupErr != nil {
 			d.log.Warn("cleaning up renamed persisted session failed", "err", cleanupErr, "session", name)
-		}
-		if resume {
-			resumeSnapshotCoordinator(sess)
 		}
 		sess.mu.Lock()
 		sess.renameInProgress = false
@@ -603,17 +605,18 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 			return err
 		}
 	}
+	var quarantine snapshotCoordinatorQuarantine
 	if !wasEphemeral && oldName != name {
-		<-quarantineSnapshotCoordinator(sess)
+		quarantine = quarantineSnapshotCoordinatorWithEpoch(sess)
+		<-quarantine.done
 		if d.snapsEnabled && d.snapshotRepository != nil {
 			if err := d.snapshotRepository.Delete(context.Background(), oldName); err != nil {
-				return rollback(err, true)
+				return rollback(err)
 			}
 		}
 		if err := d.persist.Delete(oldName); err != nil {
-			return rollback(err, true)
+			return rollback(err)
 		}
-		resumeSnapshotCoordinator(sess)
 	}
 
 	d.mu.Lock()
@@ -626,9 +629,22 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	sess.createdAt = createdAt
 	sess.ephemeral = false
 	sess.renameInProgress = false
-	sess.snapEligible.Store(name != "")
+	// Keep the coordinator in quarantine until the new in-memory identity is
+	// fully committed. The fresh coordinator below makes the new repository
+	// start at generation one.
+	if !wasEphemeral && oldName != name {
+		sess.snapEligible.Store(false)
+	} else {
+		sess.snapEligible.Store(name != "")
+	}
 	sess.mu.Unlock()
 	d.mu.Unlock()
+	if !wasEphemeral && oldName != name {
+		// A concurrent teardown may have quarantined after this rename did. In
+		// that case its newer epoch owns the stopped coordinator.
+		resumeSnapshotCoordinatorForNewIdentity(sess, quarantine)
+		return nil
+	}
 	markSnapshotDirty(sess)
 	return nil
 }

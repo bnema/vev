@@ -313,17 +313,30 @@ func snapshotCoordinatorContext(sess *session) (context.Context, context.CancelF
 	return sess.snapshotPublicationContext, sess.snapshotPublicationCancel
 }
 
+// snapshotCoordinatorQuarantine identifies one stop request. A later teardown
+// can supersede it, in which case only that later owner may resume publication.
+type snapshotCoordinatorQuarantine struct {
+	done  <-chan struct{}
+	epoch uint64
+}
+
 // quarantineSnapshotCoordinator prevents a deleted session from starting any
 // further publication. The returned join channel is closed after an already
 // started repository call returns; callers must wait without daemon or session
 // locks before deleting repository state.
 func quarantineSnapshotCoordinator(sess *session) <-chan struct{} {
+	return quarantineSnapshotCoordinatorWithEpoch(sess).done
+}
+
+func quarantineSnapshotCoordinatorWithEpoch(sess *session) snapshotCoordinatorQuarantine {
 	if sess == nil {
 		done := make(chan struct{})
 		close(done)
-		return done
+		return snapshotCoordinatorQuarantine{done: done}
 	}
 	sess.snapshotMu.Lock()
+	sess.snapshotQuarantineEpoch++
+	epoch := sess.snapshotQuarantineEpoch
 	sess.snapshotQuarantined = true
 	sess.snapEligible.Store(false)
 	if sess.snapshotPublicationCancel != nil {
@@ -347,24 +360,47 @@ func quarantineSnapshotCoordinator(sess *session) <-chan struct{} {
 	}
 	sess.signalSnapshotChangedLocked()
 	sess.snapshotMu.Unlock()
-	return done
+	return snapshotCoordinatorQuarantine{done: done, epoch: epoch}
 }
 
-// resumeSnapshotCoordinator is used only after a rename's old repository name
-// has been quarantined and deleted. Queued captures were discarded during
-// quarantine, so the new context cannot publish under the old identity.
-func resumeSnapshotCoordinator(sess *session) {
+// resumeSnapshotCoordinatorForNewIdentity starts a fresh repository lineage
+// only after rename committed its new in-memory name. The epoch prevents a
+// concurrent teardown from being undone by a late rename completion.
+func resumeSnapshotCoordinatorForNewIdentity(sess *session, quarantine snapshotCoordinatorQuarantine) bool {
 	if sess == nil {
-		return
+		return false
 	}
 	sess.snapshotMu.Lock()
+	if !sess.snapshotQuarantined || sess.snapshotQuarantineEpoch != quarantine.epoch {
+		sess.snapshotMu.Unlock()
+		return false
+	}
 	if sess.snapshotPublicationCancel != nil {
 		sess.snapshotPublicationCancel()
 	}
 	sess.snapshotPublicationContext, sess.snapshotPublicationCancel = context.WithCancel(context.Background())
 	sess.snapshotQuarantined = false
+	// A repository name owns its own generation stream. Reset all scheduler
+	// state while eligibility remains false, then atomically make generation 1
+	// dirty and wake the scheduler.
+	sess.snapshotGeneration = 1
+	sess.snapshotCapturedGeneration = 0
+	sess.snapshotNextEligibleAt = time.Time{}
+	sess.snapshotAttempted = false
+	sess.snapshotAttemptKind = snapshotAttemptRoutine
+	sess.snapshotFailureSig = ""
+	sess.snapDirty.Store(true)
+	sess.snapEligible.Store(true)
 	sess.signalSnapshotChangedLocked()
+	wake := sess.snapshotWake
 	sess.snapshotMu.Unlock()
+	if wake != nil {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+	return true
 }
 
 func markSnapshotDirty(sess *session) {
