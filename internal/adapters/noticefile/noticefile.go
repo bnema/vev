@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -18,9 +19,11 @@ import (
 )
 
 const (
-	fileName         = "pending-notices.jsonl"
-	inFlightFileName = "pending-notices.inflight.jsonl"
-	lockFileName     = "pending-notices.lock"
+	fileName             = "pending-notices.jsonl"
+	inFlightFileName     = "pending-notices.inflight.jsonl"
+	lockFileName         = "pending-notices.lock"
+	maxNoticeRecordSize  = 4 << 20
+	noticeReadBufferSize = 64 << 10
 )
 
 // Store persists notices as JSON-lines under dir.
@@ -166,23 +169,68 @@ func readNotices(path string) ([]domain.Notification, error) {
 	defer func() { _ = f.Close() }()
 
 	var notices []domain.Notification
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4<<20)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
+	reader := bufio.NewReaderSize(f, noticeReadBufferSize)
+	for {
+		line, oversized, eof, err := readNoticeRecord(reader)
+		if err != nil {
+			return nil, fmt.Errorf("read claimed notices: %w", err)
+		}
+		if len(line) > 0 && !oversized {
+			var n domain.Notification
+			if err := json.Unmarshal(line, &n); err == nil {
+				notices = append(notices, n)
+			}
+		}
+		if eof {
+			return notices, nil
+		}
+	}
+}
+
+// readNoticeRecord reads one newline-delimited record without retaining more
+// than maxNoticeRecordSize bytes. Oversized records are discarded through
+// their delimiter so a later valid record can still be read.
+func readNoticeRecord(reader *bufio.Reader) (line []byte, oversized, eof bool, err error) {
+	for {
+		fragment, readErr := reader.ReadSlice('\n')
+		if len(fragment) > 0 && fragment[len(fragment)-1] == '\n' {
+			fragment = fragment[:len(fragment)-1]
+		}
+		if !oversized {
+			line, oversized = appendNoticeFragment(line, fragment)
+		}
+
+		switch {
+		case readErr == nil:
+			return line, oversized, false, nil
+		case errors.Is(readErr, bufio.ErrBufferFull):
 			continue
+		case errors.Is(readErr, io.EOF):
+			return line, oversized, true, nil
+		default:
+			return nil, false, false, readErr
 		}
-		var n domain.Notification
-		if err := json.Unmarshal(line, &n); err != nil {
-			continue // corrupt or partial line must not abort the claim
+	}
+}
+
+func appendNoticeFragment(line, fragment []byte) ([]byte, bool) {
+	if len(fragment) > maxNoticeRecordSize-len(line) {
+		return nil, true
+	}
+	required := len(line) + len(fragment)
+	if required > cap(line) {
+		capacity := cap(line) * 2
+		if capacity < noticeReadBufferSize {
+			capacity = noticeReadBufferSize
 		}
-		notices = append(notices, n)
+		if capacity > maxNoticeRecordSize {
+			capacity = maxNoticeRecordSize
+		}
+		grown := make([]byte, len(line), capacity)
+		copy(grown, line)
+		line = grown
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read claimed notices: %w", err)
-	}
-	return notices, nil
+	return append(line, fragment...), false
 }
 
 // Ack permanently removes the current in-flight claim. It is only called once
