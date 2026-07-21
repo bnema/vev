@@ -61,6 +61,31 @@ func (nc *noticeCenter) record(n domain.Notification) domain.Notification {
 	return n
 }
 
+// recordSnapshotFailure coalesces a repeated stable snapshot failure in the
+// history. Details contains the signature rather than raw error text, so this
+// comparison cannot be affected by volatile paths or snapshot content.
+func (nc *noticeCenter) recordSnapshotFailure(n domain.Notification) (domain.Notification, bool) {
+	if n.Count == 0 {
+		n.Count = 1
+	}
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+	for i := len(nc.ring) - 1; i >= 0; i-- {
+		previous := &nc.ring[i]
+		if previous.Code != domain.NoticeSnapshotWrite || previous.SessionID != n.SessionID || previous.Details != n.Details {
+			continue
+		}
+		previous.Count += n.Count
+		previous.Time = n.Time
+		return *previous, true
+	}
+	nc.ring = append(nc.ring, n)
+	if len(nc.ring) > noticeHistoryCap {
+		nc.ring = nc.ring[len(nc.ring)-noticeHistoryCap:]
+	}
+	return n, false
+}
+
 func (nc *noticeCenter) history() []domain.Notification {
 	nc.mu.Lock()
 	defer nc.mu.Unlock()

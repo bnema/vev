@@ -129,8 +129,12 @@ type Daemon struct {
 	// snapshotChunkCache contains only encoded immutable sealed chunks. It is
 	// independent of pane state and is bounded to prevent checkpoint history
 	// from becoming unbounded daemon memory.
-	snapshotChunkCache      *snapshotChunkCache
-	snapshotJobs            chan *snapshotCapture
+	snapshotChunkCache *snapshotChunkCache
+	snapshotJobs       chan *snapshotCapture
+	// snapshotWake wakes the repository scheduler when a session becomes dirty
+	// or an attempt completes. It is never closed and producers only send
+	// non-blockingly.
+	snapshotWake            chan struct{}
 	snapshotWorkerMu        sync.Mutex
 	snapshotWorkerID        uint64
 	snapshotWorkerCtx       context.Context
@@ -141,28 +145,33 @@ type Daemon struct {
 	// snapshotFinalJobs coalesces terminal captures by session when the bounded
 	// regular queue is full. It retains at most snapshotFinalQueueCapacity named
 	// sessions, each with only its newest terminal state while the worker blocks.
-	snapshotFinalJobs       map[*session]*snapshotCapture
-	snapshotFinalOrder      []*session
-	snapshotWorkerClosing   bool
-	snapshotWorkerInFlight  *snapshotCapture
-	restoreDone             chan struct{}
-	restoreOnce             sync.Once
-	procCwd                 func(int) (string, error)
-	procComm                func(int) (string, error)
-	procArgv                func(int) ([]string, error)
-	procGroupArgv           func(int, int) ([]string, error)
-	dirOrHome               func(string) string
-	bindings                atomic.Pointer[keys.Bindings]
-	codeOverrides           atomic.Pointer[map[string]string]
-	restoreProcessAllowlist atomic.Pointer[map[string]struct{}]
-	floatingConfig          atomic.Pointer[domain.FloatingConfig]
-	copyConfig              atomic.Pointer[domain.CopyConfig]
-	paletteConfig           atomic.Pointer[domain.PaletteConfig]
-	tabsConfig              atomic.Pointer[domain.TabsConfig]
-	themeConfig             atomic.Pointer[themeConfigSnapshot]
-	barScripts              *barScriptState
-	notices                 *noticeCenter
-	resumeParkGrace         time.Duration
+	snapshotFinalJobs      map[*session]*snapshotCapture
+	snapshotFinalOrder     []*session
+	snapshotWorkerClosing  bool
+	snapshotWorkerInFlight *snapshotCapture
+	// snapshotNoticeMu guards the active global persistence failure signature.
+	// It is separate from snapshotWorkerMu so notice routing cannot block a
+	// producer or a repository worker.
+	snapshotNoticeMu               sync.Mutex
+	snapshotActiveFailureSignature string
+	restoreDone                    chan struct{}
+	restoreOnce                    sync.Once
+	procCwd                        func(int) (string, error)
+	procComm                       func(int) (string, error)
+	procArgv                       func(int) ([]string, error)
+	procGroupArgv                  func(int, int) ([]string, error)
+	dirOrHome                      func(string) string
+	bindings                       atomic.Pointer[keys.Bindings]
+	codeOverrides                  atomic.Pointer[map[string]string]
+	restoreProcessAllowlist        atomic.Pointer[map[string]struct{}]
+	floatingConfig                 atomic.Pointer[domain.FloatingConfig]
+	copyConfig                     atomic.Pointer[domain.CopyConfig]
+	paletteConfig                  atomic.Pointer[domain.PaletteConfig]
+	tabsConfig                     atomic.Pointer[domain.TabsConfig]
+	themeConfig                    atomic.Pointer[themeConfigSnapshot]
+	barScripts                     *barScriptState
+	notices                        *noticeCenter
+	resumeParkGrace                time.Duration
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
 	tempDir string
@@ -383,6 +392,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		snapshotMarshal:    snapcodec.Marshal,
 		snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit),
 		snapshotJobs:       make(chan *snapshotCapture, snapshotQueueCapacity),
+		snapshotWake:       make(chan struct{}, 1),
 		notices:            newNoticeCenter(),
 		resumeParkGrace:    defaultResumeParkGrace,
 		barScripts: &barScriptState{

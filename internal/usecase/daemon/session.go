@@ -55,11 +55,19 @@ type session struct {
 	// snapshotMu serializes the dirty generation with worker completion. It is
 	// intentionally independent from mu: persistence never holds session state
 	// locks while encoding or writing.
-	snapshotMu              sync.Mutex
-	snapshotGeneration      uint64
-	snapshotPending         bool
-	snapshotPendingCaptures uint
-	snapshotChanged         chan struct{}
+	snapshotMu                 sync.Mutex
+	snapshotGeneration         uint64
+	snapshotCapturedGeneration uint64
+	snapshotNextEligibleAt     time.Time
+	snapshotAttempted          bool
+	snapshotAttemptKind        snapshotAttemptKind
+	snapshotPending            bool
+	snapshotPendingCaptures    uint
+	// snapshotFailureSig is the stable class of the active failed publication.
+	// It is guarded by snapshotMu and deliberately never contains error text.
+	snapshotFailureSig string
+	snapshotChanged    chan struct{}
+	snapshotWake       chan struct{}
 	// syncGen makes synchronized-output watchdog generations unique across all
 	// panes in this session.
 	syncGen atomic.Uint64
@@ -193,16 +201,17 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		lastUsedSeq = stopped.lastUsedSeq
 	}
 	sess := &session{
-		id:        id,
-		name:      name,
-		ephemeral: ephemeral,
-		ctx:       sctx,
-		cancel:    cancel,
-		tabs:      tabs,
-		cwd:       cwd,
-		terminal:  term,
-		env:       env,
-		createdAt: createdAt,
+		id:           id,
+		name:         name,
+		ephemeral:    ephemeral,
+		ctx:          sctx,
+		cancel:       cancel,
+		tabs:         tabs,
+		cwd:          cwd,
+		terminal:     term,
+		env:          env,
+		createdAt:    createdAt,
+		snapshotWake: d.snapshotWake,
 	}
 	if lastUsedSeq > 0 {
 		sess.mruAt.Store(lastUsedSeq)

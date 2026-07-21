@@ -40,11 +40,11 @@ func TestSnapshotWriteFailureNotifiesGlobally(t *testing.T) {
 	// poll-only completion signal. No require runs on the worker goroutine.
 	toasts := awaitToastCount(t, survivorClient, 1)
 	require.Equal(t, domain.NoticeSnapshotWrite, toasts[0].Code)
-	require.Equal(t, "couldn't save session failing; recent state may be lost on restart", toasts[0].Message)
+	require.Equal(t, "couldn't save session state; recent state may be lost on restart", toasts[0].Message)
 	require.Equal(t, domain.NoticeError, toasts[0].Severity)
 	require.Equal(t, domain.SessionID(""), toasts[0].SessionID,
 		"snapshot write failures are global, never scoped to the (possibly gone) failing session")
-	require.Contains(t, toasts[0].Details, "disk full")
+	require.Equal(t, "publish:*errors.errorString", toasts[0].Details)
 }
 
 // TestCloseLastTabSaturatedSnapshotSurfacesNotice proves that when closing the

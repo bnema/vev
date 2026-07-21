@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -22,14 +23,25 @@ const snapshotQueueCapacity = 1
 // (and left dirty) rather than silently dropping a persistence acknowledgement.
 const snapshotFinalQueueCapacity = 32
 
+// snapshotAttemptKind distinguishes rate-limited routine publications from
+// mandatory terminal checkpoints. Forced attempts never consume the routine
+// completion window.
+type snapshotAttemptKind uint8
+
+const (
+	snapshotAttemptRoutine snapshotAttemptKind = iota
+	snapshotAttemptForced
+)
+
 type snapshotCapture struct {
-	session    *session
-	generation uint64
-	name       string
-	createdAt  uint64
-	active     uint16
-	tabs       []snapshotCaptureTab
-	finishOnce sync.Once
+	session     *session
+	attemptKind snapshotAttemptKind
+	generation  uint64
+	name        string
+	createdAt   uint64
+	active      uint16
+	tabs        []snapshotCaptureTab
+	finishOnce  sync.Once
 }
 
 type snapshotCaptureTab struct {
@@ -55,6 +67,24 @@ type snapshotCapturePane struct {
 	visible    []byte
 	visibleErr error
 	process    *snapcodec.Process
+}
+
+// snapshotFailureSignature classifies a persistence failure without retaining
+// error text. Error strings often contain object content or filesystem paths,
+// neither of which is stable enough for deduplication or suitable for a global
+// notice history.
+func snapshotFailureSignature(phase string, err error) string {
+	if err == nil {
+		return phase + ":none"
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return phase + ":canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return phase + ":deadline"
+	default:
+		return fmt.Sprintf("%s:%T", phase, err)
+	}
 }
 
 const (
@@ -266,7 +296,7 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		return nil
 	}
 	createdAt := int64(snap.CreatedAt)
-	sess := &session{name: snap.Name, ctx: sctx, cancel: cancel, tabs: opened, active: int(snap.Active), terminal: restoreTerm, env: restoreEnv, createdAt: createdAt}
+	sess := &session{name: snap.Name, ctx: sctx, cancel: cancel, tabs: opened, active: int(snap.Active), terminal: restoreTerm, env: restoreEnv, createdAt: createdAt, snapshotWake: d.snapshotWake}
 	sess.snapEligible.Store(true)
 	if len(snap.Tabs) > 0 && len(snap.Tabs[0].Panes) > 0 {
 		sess.cwd = snap.Tabs[0].Panes[0].Cwd
@@ -308,7 +338,14 @@ func markSnapshotDirty(sess *session) {
 	sess.snapshotGeneration++
 	sess.snapDirty.Store(true)
 	sess.signalSnapshotChangedLocked()
+	wake := sess.snapshotWake
 	sess.snapshotMu.Unlock()
+	if wake != nil {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // snapshotChangeLocked returns a channel closed by the next snapshot state
@@ -383,18 +420,29 @@ func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bo
 	if d == nil || sess == nil || !d.snapsEnabled || (d.snapshotRepository == nil && d.snaps == nil) || !sess.snapEligible.Load() {
 		return true
 	}
+	kind := snapshotAttemptRoutine
+	if final {
+		kind = snapshotAttemptForced
+	}
 	sess.snapshotMu.Lock()
-	if !sess.snapDirty.Load() || (!final && sess.snapshotPending) {
+	routineRateLimited := d.snapshotRepository != nil
+	if !sess.snapDirty.Load() || (!final && (sess.snapshotPending || (routineRateLimited && !sess.snapshotNextEligibleAt.IsZero() && d.clock.Now().Before(sess.snapshotNextEligibleAt)))) {
 		sess.snapshotMu.Unlock()
 		return true
 	}
 	generation := sess.snapshotGeneration
+	sess.snapshotCapturedGeneration = generation
+	sess.snapshotAttempted = true
+	sess.snapshotAttemptKind = kind
 	sess.snapshotPendingCaptures++
 	sess.snapshotPending = true
 	sess.signalSnapshotChangedLocked()
 	sess.snapshotMu.Unlock()
 
 	capture, ok := d.captureSnapshotState(sess, generation)
+	if capture != nil {
+		capture.attemptKind = kind
+	}
 	if !ok {
 		d.finishSnapshotCapture(capture, false)
 		return false
@@ -556,8 +604,11 @@ func (d *Daemon) encodeSnapshotCapture(capture *snapshotCapture) ([]byte, error)
 		paneIDs := make(map[layout.PaneID]struct{}, len(tabCapture.panes))
 		for _, paneCapture := range tabCapture.panes {
 			sealed, tail, historyErr := vt.MarshalSealedHistory(paneCapture.history)
-			if historyErr != nil || paneCapture.visibleErr != nil {
-				return nil, fmt.Errorf("terminal snapshot pane %s: history=%w visible=%w", paneCapture.id, historyErr, paneCapture.visibleErr)
+			if historyErr != nil {
+				return nil, fmt.Errorf("terminal snapshot pane %s history: %w", paneCapture.id, historyErr)
+			}
+			if paneCapture.visibleErr != nil {
+				return nil, fmt.Errorf("terminal snapshot pane %s visible: %w", paneCapture.id, paneCapture.visibleErr)
 			}
 			tabSnap.Panes = append(tabSnap.Panes, snapcodec.Pane{ID: paneCapture.id, StableID: paneCapture.stableID, Cwd: paneCapture.cwd, SealedChunks: sealed, Tail: tail, Visible: paneCapture.visible, Process: paneCapture.process})
 			paneIDs[paneCapture.id] = struct{}{}
@@ -580,14 +631,73 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 			capture.session.snapshotPendingCaptures--
 		}
 		capture.session.snapshotPending = capture.session.snapshotPendingCaptures > 0
+		if capture.attemptKind == snapshotAttemptRoutine && d.snapshotRepository != nil {
+			// The interval is measured from completion, including a failed
+			// attempt. A forced teardown checkpoint deliberately leaves it alone.
+			capture.session.snapshotNextEligibleAt = d.clock.Now().Add(snapshotInterval)
+		}
 		if succeeded && capture.session.snapshotGeneration == capture.generation {
 			capture.session.snapDirty.Store(false)
+			capture.session.snapshotFailureSig = ""
 		} else if !succeeded {
 			capture.session.snapDirty.Store(true)
 		}
 		capture.session.signalSnapshotChangedLocked()
+		wake := capture.session.snapshotWake
 		capture.session.snapshotMu.Unlock()
+		if wake != nil {
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+		}
+		if succeeded {
+			d.clearSnapshotFailure()
+		}
 	})
+}
+
+// reportSnapshotFailure records every failed persistence attempt but only
+// displays a toast when its stable phase/error class changes. This keeps a
+// blocked disk from repeatedly repainting every attached client while retaining
+// the count in notification history.
+func (d *Daemon) reportSnapshotFailure(capture *snapshotCapture, phase string, cause error) {
+	if d == nil || capture == nil || capture.session == nil || cause == nil {
+		return
+	}
+	signature := snapshotFailureSignature(phase, cause)
+	capture.session.snapshotMu.Lock()
+	capture.session.snapshotFailureSig = signature
+	capture.session.snapshotMu.Unlock()
+
+	d.snapshotNoticeMu.Lock()
+	changed := d.snapshotActiveFailureSignature != signature
+	d.snapshotActiveFailureSignature = signature
+	d.snapshotNoticeMu.Unlock()
+
+	n := domain.Notification{
+		Code:     domain.NoticeSnapshotWrite,
+		Severity: domain.NoticeError,
+		Message:  "couldn't save session state; recent state may be lost on restart",
+		// The history is intentionally diagnostic only at the error-class level.
+		// Raw causes can include user paths and terminal content.
+		Details: signature,
+		Time:    d.clock.Now(),
+	}
+	n, _ = d.notices.recordSnapshotFailure(n)
+	d.log.Warn("writing session snapshot failed", "phase", phase, "class", signature, "session", capture.name)
+	if changed {
+		d.deliverGlobal(n)
+	}
+}
+
+func (d *Daemon) clearSnapshotFailure() {
+	if d == nil {
+		return
+	}
+	d.snapshotNoticeMu.Lock()
+	d.snapshotActiveFailureSignature = ""
+	d.snapshotNoticeMu.Unlock()
 }
 
 func (d *Daemon) startSnapshotEncodeWorker() {
@@ -641,12 +751,10 @@ func (d *Daemon) startSnapshotEncodeWorker() {
 			}
 			d.clearSnapshotWorkerInFlight(workerID, capture)
 			if err != nil && workerCtx.Err() == nil {
-				d.log.Warn("writing session snapshot failed", "err", err, "session", capture.name)
 				// Global, not session-scoped: by now the session may already be
 				// torn down, so a session notice would be dead-on-arrival. No lock
 				// is held here (clearSnapshotWorkerInFlight released its own).
-				d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotWrite,
-					"couldn't save session "+capture.name+"; recent state may be lost on restart", err)
+				d.reportSnapshotFailure(capture, "publish", err)
 			}
 			d.finishSnapshotCapture(capture, err == nil && workerCtx.Err() == nil)
 			return workerCtx.Err() == nil
@@ -815,6 +923,10 @@ func (d *Daemon) capturePaneProcess(pty interface{ ForegroundPgid() (int, error)
 }
 
 func (d *Daemon) snapshotSaver(ctx context.Context) {
+	if d.snapshotRepository != nil {
+		d.snapshotRepositorySaver(ctx)
+		return
+	}
 	checkpoint := func() {
 		d.mu.Lock()
 		sessions := d.sessionsSnapshotLocked()
@@ -840,6 +952,71 @@ func (d *Daemon) snapshotSaver(ctx context.Context) {
 			t.Reset(snapshotInterval)
 		}
 	}
+}
+
+// snapshotRepositorySaver waits until the earliest completion-derived routine
+// eligibility. State changes wake it immediately, so a newly dirty session is
+// captured without waiting for an unrelated session's interval.
+func (d *Daemon) snapshotRepositorySaver(ctx context.Context) {
+	if d == nil {
+		return
+	}
+	timer := d.clock.NewTimer(24 * time.Hour)
+	defer timer.Stop()
+	for {
+		delay := d.scheduleEligibleRepositorySnapshots()
+		timer.Reset(delay)
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.snapshotWake:
+		case <-timer.C():
+		}
+	}
+}
+
+func (d *Daemon) scheduleEligibleRepositorySnapshots() time.Duration {
+	d.mu.Lock()
+	sessions := d.sessionsSnapshotLocked()
+	d.mu.Unlock()
+	now := d.clock.Now()
+	for _, sess := range sessions {
+		if !sess.snapEligible.Load() || !sess.snapDirty.Load() {
+			continue
+		}
+		sess.snapshotMu.Lock()
+		due := !sess.snapshotPending && (sess.snapshotNextEligibleAt.IsZero() || !now.Before(sess.snapshotNextEligibleAt))
+		sess.snapshotMu.Unlock()
+		if due {
+			d.scheduleSnapshot(sess)
+		}
+	}
+
+	// Scheduling can synchronously fail or mark a capture pending, so inspect
+	// the final state to select the actual earliest timer deadline.
+	var next time.Time
+	for _, sess := range sessions {
+		if !sess.snapEligible.Load() || !sess.snapDirty.Load() {
+			continue
+		}
+		sess.snapshotMu.Lock()
+		eligibleAt := sess.snapshotNextEligibleAt
+		pending := sess.snapshotPending
+		sess.snapshotMu.Unlock()
+		if pending || eligibleAt.IsZero() {
+			continue
+		}
+		if next.IsZero() || eligibleAt.Before(next) {
+			next = eligibleAt
+		}
+	}
+	if next.IsZero() {
+		return 24 * time.Hour
+	}
+	if delay := next.Sub(now); delay > 0 {
+		return delay
+	}
+	return 0
 }
 
 func pruneTreeToPanes(n *layout.Node, panes map[layout.PaneID]struct{}) bool {
