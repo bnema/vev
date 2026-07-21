@@ -260,12 +260,23 @@ func (r *Repository) readMaintenanceDir(dir string, n int, purpose string) ([]ma
 // readMaintenanceDirent uses the Linux getdents seek cookie from each record.
 // syscall.Dirent's Off field is the d_off member of linux_dirent64 and
 // syscall.Seek is lseek(2), as defined by Go's syscall Linux sources.
-func readMaintenanceDirent(dir string, limit int, cursor *maintenanceCursor) ([]maintenanceDirEntry, bool, error) {
+func readMaintenanceDirent(dir string, limit int, cursor *maintenanceCursor) (entries []maintenanceDirEntry, done bool, err error) {
 	file, err := os.Open(dir)
 	if err != nil {
 		return nil, false, err
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			closeErr = fmt.Errorf("close maintenance directory %q: %w", dir, closeErr)
+			if err != nil {
+				err = errors.Join(err, closeErr)
+			} else {
+				entries = nil
+				done = false
+				err = closeErr
+			}
+		}
+	}()
 	fd := int(file.Fd())
 	if cursor.offset != 0 {
 		if _, err := syscall.Seek(fd, cursor.offset, io.SeekStart); err != nil {
@@ -273,7 +284,7 @@ func readMaintenanceDirent(dir string, limit int, cursor *maintenanceCursor) ([]
 		}
 	}
 
-	entries := make([]maintenanceDirEntry, 0, limit)
+	entries = make([]maintenanceDirEntry, 0, limit)
 	buffer := make([]byte, 8192)
 	for len(entries) < limit {
 		count, err := syscall.ReadDirent(fd, buffer)
