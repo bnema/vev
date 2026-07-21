@@ -468,6 +468,112 @@ func TestNotifyGlobalFansOutToAttachedClients(t *testing.T) {
 	require.Empty(t, d.notices.drainPending(), "delivered globals must not also be queued")
 }
 
+func TestNotifyGlobalDoesNotStrandNoticeWhenFirstPaintRacesQueue(t *testing.T) {
+	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+	sess.mu.Lock()
+	sess.client = nil
+	sess.mu.Unlock()
+
+	routeObserved := make(chan struct{})
+	releaseRoute := make(chan struct{})
+	d.notices.beforeQueueGlobal = func() {
+		close(routeObserved)
+		<-releaseRoute
+	}
+	globalDone := make(chan struct{})
+	go func() {
+		d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotWrite, "snapshot write failed", nil)
+		close(globalDone)
+	}()
+	<-routeObserved // global routing has observed the detached session
+
+	// Publish the attachment and start firstPaint while global routing still
+	// owns its gate. firstPaint must wait for the queue, then drain it.
+	sess.mu.Lock()
+	sess.client = ac
+	sess.mu.Unlock()
+	paintDone := make(chan struct{})
+	go func() {
+		d.firstPaint(sess, ac, domain.Size{})
+		close(paintDone)
+	}()
+
+	close(releaseRoute)
+	<-globalDone
+	<-paintDone
+	toasts, _ := visibleToasts(ac)
+	require.Len(t, toasts, 1)
+	require.Equal(t, domain.NoticeSnapshotWrite, toasts[0].Code)
+	require.Empty(t, d.notices.drainPending())
+}
+
+func TestNotifyGlobalSerializesDetachWithDelivery(t *testing.T) {
+	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+
+	routeObserved := make(chan struct{})
+	releaseRoute := make(chan struct{})
+	d.notices.beforeGlobalDelivery = func() {
+		close(routeObserved)
+		<-releaseRoute
+	}
+	globalDone := make(chan struct{})
+	go func() {
+		d.NotifyGlobal(domain.NoticeWarn, domain.NoticeConfigReload, "config reload failed", nil)
+		close(globalDone)
+	}()
+	<-routeObserved // ac is selected and routingMu is held
+
+	detached := make(chan bool, 1)
+	go func() { detached <- d.detachIfCurrent(sess, ac) }()
+	close(releaseRoute)
+	<-globalDone
+	require.True(t, <-detached)
+
+	// The selected attachment received the toast before it could become stale.
+	toasts, _ := visibleToasts(ac)
+	require.Len(t, toasts, 1)
+	sess.mu.Lock()
+	require.Nil(t, sess.client)
+	sess.mu.Unlock()
+}
+
+func TestNotifyGlobalSerializesReplacementWithDelivery(t *testing.T) {
+	d, sess, old, _ := newNoticeFixture(t, newNoticeClock())
+
+	routeObserved := make(chan struct{})
+	releaseRoute := make(chan struct{})
+	d.notices.beforeGlobalDelivery = func() {
+		close(routeObserved)
+		<-releaseRoute
+	}
+	globalDone := make(chan struct{})
+	go func() {
+		d.NotifyGlobal(domain.NoticeWarn, domain.NoticeConfigReload, "config reload failed", nil)
+		close(globalDone)
+	}()
+	<-routeObserved // old is selected and routingMu is held
+
+	tr, _ := newCapturingTransport(t)
+	replaced := make(chan *attachedClient, 1)
+	go func() {
+		ac, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+		replaced <- ac
+	}()
+	close(releaseRoute)
+	<-globalDone
+	current := <-replaced
+
+	// Replacement cannot make old a stale delivery target: it publishes only
+	// after the selected attachment has received the global toast.
+	oldToasts, _ := visibleToasts(old)
+	require.Len(t, oldToasts, 1)
+	newToasts, _ := visibleToasts(current)
+	require.Empty(t, newToasts)
+	sess.mu.Lock()
+	require.Same(t, current, sess.client)
+	sess.mu.Unlock()
+}
+
 func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 	sess.mu.Lock()

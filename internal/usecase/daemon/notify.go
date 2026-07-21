@@ -28,9 +28,19 @@ var errNoNeighbor = errors.New("no pane in that direction")
 // global notices awaiting a first attached client. Its mu is leaf-level: no
 // other lock is ever taken while holding it.
 type noticeCenter struct {
-	mu      sync.Mutex
-	ring    []domain.Notification
-	pending []domain.Notification
+	mu sync.Mutex
+	// routingMu serializes global deliver-or-queue with the first-paint drain.
+	// Attachment removal also takes it, so a client selected for a global toast
+	// remains current until that toast is published.
+	routingMu sync.Mutex
+	ring      []domain.Notification
+	pending   []domain.Notification
+	// beforeQueueGlobal is a deterministic test seam after routing has observed
+	// no attachments and before it queues the notice.
+	beforeQueueGlobal func()
+	// beforeGlobalDelivery is a deterministic test seam after targets have been
+	// selected and before their toast stacks are touched.
+	beforeGlobalDelivery func()
 }
 
 func newNoticeCenter() *noticeCenter { return &noticeCenter{} }
@@ -169,7 +179,9 @@ func (d *Daemon) reportError(sess *session, err error) {
 // notice waits in the pending queue for the next attach.
 //
 // Locking: sess.mu and d.mu are only held to snapshot; showToast is always
-// called with no daemon, session, or pane lock held.
+// called with no daemon, session, or pane lock held. Global routing holds the
+// notice center's routingMu across selection and publication, which serializes
+// it with attachment detach and pending-queue drains.
 func (d *Daemon) notify(sess *session, sev domain.NoticeSeverity, code domain.NoticeCode, msg string, cause error) {
 	n := domain.Notification{
 		Code:     code,
@@ -194,25 +206,61 @@ func (d *Daemon) notify(sess *session, sev domain.NoticeSeverity, code domain.No
 		return
 	}
 
+	d.deliverGlobal(n)
+}
+
+// deliverGlobal atomically selects all current attachments and either publishes
+// to all of them or queues the notice. routingMu is deliberately held through
+// showToast, but never with d.mu or sess.mu held: detach cannot turn a selected
+// target stale between selection and publication, and firstPaint cannot drain
+// before an unattached route has queued its notice.
+func (d *Daemon) deliverGlobal(n domain.Notification) {
 	d.mu.Lock()
+	d.notices.routingMu.Lock()
 	sessions := make([]*session, 0, len(d.sessions))
 	for _, s := range d.sessions {
 		sessions = append(sessions, s)
 	}
 	d.mu.Unlock()
+	defer d.notices.routingMu.Unlock()
 
+	if d.notices.beforeGlobalDelivery != nil {
+		d.notices.beforeGlobalDelivery()
+	}
 	delivered := false
 	for _, s := range sessions {
 		s.mu.Lock()
 		ac := s.client
 		s.mu.Unlock()
-		if ac != nil {
-			d.showToast(ac, n)
-			delivered = true
+		if ac == nil {
+			continue
 		}
+		d.showToast(ac, n)
+		delivered = true
 	}
 	if !delivered {
+		if d.notices.beforeQueueGlobal != nil {
+			d.notices.beforeQueueGlobal()
+		}
 		d.notices.queueGlobal(n)
+	}
+}
+
+// drainPendingForFirstPaint publishes pending globals only while ac remains the
+// session's current attachment. It shares routingMu with deliverGlobal, so an
+// unattached global route cannot queue after this drain has already happened.
+func (d *Daemon) drainPendingForFirstPaint(sess *session, ac *attachedClient) {
+	d.notices.routingMu.Lock()
+	defer d.notices.routingMu.Unlock()
+
+	sess.mu.Lock()
+	current := sess.client == ac
+	sess.mu.Unlock()
+	if !current {
+		return
+	}
+	for _, n := range d.notices.drainPending() {
+		d.showToast(ac, n)
 	}
 }
 

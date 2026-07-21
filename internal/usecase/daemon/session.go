@@ -253,12 +253,17 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 		d.mu.Unlock()
 		return errSessionNameInUse
 	}
+	// The caller owns d.mu. Make the entire ownership handoff atomic with
+	// global routing so it cannot select a client between source removal and
+	// destination publication.
+	d.notices.routingMu.Lock()
 	from.mu.Lock()
 	cwd := from.cwd
 	term := from.terminal
 	env := copyEnvironment(from.env)
 	if from.client != ac {
 		from.mu.Unlock()
+		d.notices.routingMu.Unlock()
 		d.mu.Unlock()
 		return errors.New("client detached")
 	}
@@ -266,12 +271,14 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 
 	newSess, err := d.createSessionLocked(name, false, cwd, sz, term, env)
 	if err != nil {
+		d.notices.routingMu.Unlock()
 		d.mu.Unlock()
 		return err
 	}
 	from.mu.Lock()
 	if from.client != ac {
 		from.mu.Unlock()
+		d.notices.routingMu.Unlock()
 		d.mu.Unlock()
 		_ = d.killSession(newSess, ports.ReasonSessionKilled, true)
 		return errors.New("client detached")
@@ -291,6 +298,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	d.touchMRU(newSess)
 	ac.recordPreviousSession(from)
 	d.log.Info("client attached", "session", newSess.name, "resume", ac.resumeCapable)
+	d.notices.routingMu.Unlock()
 	d.mu.Unlock()
 	finishRenderLifecycleCleanups(cleanups)
 	d.firstPaint(newSess, ac, sz)
@@ -462,6 +470,15 @@ func (s *session) detachIfCurrent(ac *attachedClient) bool {
 		return true
 	}
 	return false
+}
+
+// detachIfCurrent serializes client removal with global notice routing. The
+// routing lock is released before the caller performs teardown, so it covers
+// only attachment ownership and is never held across transport work.
+func (d *Daemon) detachIfCurrent(sess *session, ac *attachedClient) bool {
+	d.notices.routingMu.Lock()
+	defer d.notices.routingMu.Unlock()
+	return sess.detachIfCurrent(ac)
 }
 
 func (s *session) activeTab() *tab {
@@ -793,10 +810,14 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 		}
 	}
 
+	// A global route that selected this attachment must publish before terminal
+	// teardown makes it stale.
+	d.notices.routingMu.Lock()
 	sess.mu.Lock()
 	ac := sess.client
 	sess.client = nil
 	sess.mu.Unlock()
+	d.notices.routingMu.Unlock()
 	if rc := sess.renderCoordinator(); rc != nil {
 		// Terminal teardown has two phases: this session owner first prevents any
 		// new worker registration and detaches all tokens, then stops and waits

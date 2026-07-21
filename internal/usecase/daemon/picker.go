@@ -468,6 +468,10 @@ func (d *Daemon) resolveNamedLifecycleTargetLocked(target picker.Target) (*sessi
 // switchToActiveTargetLocked commits an active target handoff. Caller holds
 // d.mu and releases it before completing render cleanup or first paint.
 func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, targetSess *session, target picker.Target) (*session, *attachedClient, []renderLifecycleCleanup, bool) {
+	// The caller already holds d.mu. Keep handoff ownership atomic with global
+	// routing so it cannot select an attachment midway between sessions.
+	d.notices.routingMu.Lock()
+	defer d.notices.routingMu.Unlock()
 	if d.sessions[target.Session] != targetSess {
 		return nil, nil, nil, false
 	}
@@ -523,6 +527,10 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 // the handoff while d.mu is held. Creation failure leaves the source client
 // and stopped record untouched.
 func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient, target picker.Target, stopped stoppedSession) (*session, []renderLifecycleCleanup, bool, error) {
+	// The caller already holds d.mu. Keep handoff ownership atomic with global
+	// routing so it cannot select an attachment midway between sessions.
+	d.notices.routingMu.Lock()
+	defer d.notices.routingMu.Unlock()
 	from.mu.Lock()
 	if from.client != ac {
 		from.mu.Unlock()
