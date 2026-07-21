@@ -28,6 +28,9 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// A failed publication can still leave immutable blobs or a manifest behind.
+	// Invalidate an in-progress GC mark before creating any publication storage.
+	r.invalidateStorageEpoch(key)
 	if err := r.ensureSession(key); err != nil {
 		return err
 	}

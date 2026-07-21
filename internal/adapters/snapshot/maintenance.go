@@ -70,6 +70,9 @@ func (r *Repository) Delete(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// A renamed session can be replaced by a later publication. Invalidate any
+	// mark made for the old namespace before that replacement becomes possible.
+	r.invalidateStorageEpoch(key)
 	if err := r.rename(canonical, quarantine); err != nil {
 		return fmt.Errorf("quarantine snapshot session %q: %w", key, safeFilesystemError(err))
 	}
@@ -191,6 +194,7 @@ type manifestMaintenance struct {
 
 type sessionMaintenance struct {
 	token         string
+	epoch         uint64
 	marked        map[uint64]manifestMaintenance
 	uncertain     bool
 	conservative  bool
@@ -380,6 +384,12 @@ func (r *Repository) maintainSession(ctx context.Context, key string, budget *in
 			return nil
 		}
 	}
+	if state.epoch != r.storageEpoch(key) {
+		// A publication may have left an unpublished manifest after this mark.
+		// Discard all mark and sweep cursors; the next pass starts from it.
+		r.clearSessionMaintenance(key)
+		return nil
+	}
 	if err := r.removeObsoleteManifests(ctx, key, state, budget); err != nil || *budget == 0 {
 		return err
 	}
@@ -401,10 +411,11 @@ func (r *Repository) sessionMaintenanceState(key string) (*sessionMaintenance, e
 		return nil, err
 	}
 	state := r.maintenanceSessions[key]
-	if state == nil || state.token != token {
+	if state == nil || state.token != token || state.epoch != r.storageEpoch(key) {
 		r.clearSessionMaintenance(key)
 		state = &sessionMaintenance{
 			token:        token,
+			epoch:        r.storageEpoch(key),
 			conservative: conservative,
 			marked:       make(map[uint64]manifestMaintenance),
 		}
@@ -542,6 +553,12 @@ func (r *Repository) removeObsoleteManifests(ctx context.Context, key string, st
 }
 
 func (r *Repository) sweepSession(ctx context.Context, key string, state *sessionMaintenance, budget *int) error {
+	// Every bounded sweep batch is tied to the mark's storage epoch. Do not use
+	// stale references after any publication or replacement.
+	if state.epoch != r.storageEpoch(key) {
+		r.clearSessionMaintenance(key)
+		return nil
+	}
 	referenced := retainedReferences(state.marked, state.conservative)
 	root := filepath.Join(r.sessionPath(key), repositoryObjectsDir)
 	if !state.sweepRootDone {

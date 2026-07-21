@@ -26,6 +26,11 @@ type Repository struct {
 	locks sync.Map // map[string]*sync.Mutex
 	hooks repositoryHooks
 
+	// storageEpochs is guarded by each session's lock. It invalidates a
+	// maintenance mark whenever publication or deletion changes that session's
+	// on-disk namespace.
+	storageEpochs map[string]uint64
+
 	// maintenanceMu owns continuation state for bounded maintenance. Keeping
 	// directory handles on the repository makes successive calls advance rather
 	// than repeatedly reading the first batch of a large directory.
@@ -61,7 +66,17 @@ var _ ports.LegacySnapshotSource = (*Repository)(nil)
 
 // NewRepository creates a repository rooted at dir. It does not create files
 // until the first publication, so merely constructing it is side-effect free.
-func NewRepository(dir string) *Repository { return &Repository{dir: dir} }
+func NewRepository(dir string) *Repository {
+	return &Repository{dir: dir, storageEpochs: make(map[string]uint64)}
+}
+
+// invalidateStorageEpoch must be called with sessionLock(key) held.
+func (r *Repository) invalidateStorageEpoch(key string) {
+	r.storageEpochs[key]++
+}
+
+// storageEpoch must be called with sessionLock(key) held.
+func (r *Repository) storageEpoch(key string) uint64 { return r.storageEpochs[key] }
 
 func (r *Repository) sessionLock(key string) *sync.Mutex {
 	lock, _ := r.locks.LoadOrStore(key, &sync.Mutex{})

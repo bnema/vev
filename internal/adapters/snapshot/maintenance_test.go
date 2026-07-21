@@ -530,3 +530,93 @@ func TestRepositoryMaintainClassifiesUnpublishedGenerationsBeforeSweep(t *testin
 		})
 	}
 }
+
+func TestRepositoryMaintainRestartsMarkAfterFailedPublication(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	key := sessionKey("named")
+	first := publicationWithTailShard(t, "named", 1, "ff")
+	stalePaths := make([]string, 0, maintenanceBatch+1)
+	for i := 0; i < maintenanceBatch+1; i++ {
+		digest := digestInShard(t, "00", i)
+		path := repo.objectPath(key, digest)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stalePaths = append(stalePaths, path)
+	}
+	if err := repo.Publish(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+
+	// This completes marking but exhausts the sweep budget in the stale shard,
+	// leaving the next sweep batch pending.
+	if err := repo.Maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	staleRemaining := false
+	for _, path := range stalePaths {
+		if _, err := os.Lstat(path); err == nil {
+			staleRemaining = true
+			break
+		}
+	}
+	if !staleRemaining {
+		t.Fatal("sweep did not leave a pending stale object")
+	}
+
+	second := publicationWithTailShard(t, "named", 2, "ff")
+	injected := errors.New("before HEAD")
+	repo.hooks.beforeHeadWrite = func(string) error { return injected }
+	if err := repo.Publish(context.Background(), second); !errors.Is(err, injected) {
+		t.Fatalf("Publish error = %v, want injected failure", err)
+	}
+	repo.hooks.beforeHeadWrite = nil
+
+	for i := 0; i < 20; i++ {
+		if err := repo.Maintain(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		for _, object := range second.Objects {
+			if _, err := os.Lstat(repo.objectPath(key, object.Digest)); err != nil {
+				t.Fatalf("object referenced by failed publication removed on pass %d: %v", i, err)
+			}
+		}
+		staleRemaining = false
+		for _, path := range stalePaths {
+			if _, err := os.Lstat(path); err == nil {
+				staleRemaining = true
+				break
+			}
+		}
+	}
+	if staleRemaining {
+		t.Fatal("stale object was not eventually swept")
+	}
+}
+
+func publicationWithTailShard(t *testing.T, name string, generation uint64, shard string) ports.SnapshotPublication {
+	t.Helper()
+	for i := 0; i < 4096; i++ {
+		publication := repositoryPublication(t, name, generation, []byte(fmt.Sprintf("state-%d-%d", generation, i)))
+		if fmt.Sprintf("%02x", publication.Objects[0].Digest[0]) == shard {
+			return publication
+		}
+	}
+	t.Fatalf("did not find publication tail in shard %q", shard)
+	return ports.SnapshotPublication{}
+}
+
+func digestInShard(t *testing.T, shard string, n int) ports.SnapshotDigest {
+	t.Helper()
+	for i := 0; i < 4096; i++ {
+		digest := sha256.Sum256([]byte(fmt.Sprintf("stale-%d-%d", n, i)))
+		if fmt.Sprintf("%02x", digest[0]) == shard {
+			return digest
+		}
+	}
+	t.Fatalf("did not find stale digest in shard %q", shard)
+	return ports.SnapshotDigest{}
+}
