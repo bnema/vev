@@ -242,7 +242,7 @@ func preflightObjectRef(r *payloadReader, want ObjectKind) error {
 	if err != nil {
 		return err
 	}
-	if size < manifestHeaderSize+5 || size > maxObjectEnvelopeSize {
+	if !validObjectEnvelopeSize(size) {
 		return fmt.Errorf("%w: object size", ErrInvalidData)
 	}
 	return nil

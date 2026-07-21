@@ -12,11 +12,15 @@ import (
 )
 
 const (
-	manifestMagic         = "VEVM"
-	objectMagic           = "VEVO"
-	ManifestVersion       = uint16(1)
-	manifestHeaderSize    = 16
-	maxObjectEnvelopeSize = maxSnapshotBytes + manifestHeaderSize + 5
+	manifestMagic                = "VEVM"
+	objectMagic                  = "VEVO"
+	ManifestVersion              = uint16(1)
+	manifestHeaderSize           = 16
+	objectEnvelopeBodyPrefixSize = 1 + 4 // object kind and payload length
+	minObjectEnvelopeSize        = manifestHeaderSize + objectEnvelopeBodyPrefixSize + 1
+	// maxDecodedBodySize includes the object kind and payload-length prefix.
+	maxObjectEnvelopeSize = manifestHeaderSize + maxDecodedBodySize
+	maxObjectPayloadSize  = maxDecodedBodySize - objectEnvelopeBodyPrefixSize
 )
 
 // SnapshotDigest is the shared content-address type used by the repository.
@@ -144,7 +148,7 @@ func UnmarshalManifest(encoded []byte) (Manifest, error) {
 // MarshalObject frames payload as VEVO and returns the bytes together with the
 // SHA-256 address of those complete bytes.
 func MarshalObject(kind ObjectKind, payload []byte) (ports.SnapshotObject, error) {
-	if !validObjectKind(kind) || len(payload) == 0 || len(payload) > maxSnapshotBytes {
+	if !validObjectKind(kind) || len(payload) == 0 || len(payload) > maxObjectPayloadSize {
 		return ports.SnapshotObject{}, fmt.Errorf("%w: object", ErrInvalidData)
 	}
 	var w payloadWriter
@@ -181,7 +185,7 @@ func PreflightObject(encoded []byte) (ObjectKind, []byte, error) {
 		return 0, nil, fmt.Errorf("%w: object kind", ErrInvalidData)
 	}
 	n := binary.BigEndian.Uint32(body[1:5])
-	if n == 0 || n > maxSnapshotBytes {
+	if n == 0 || n > maxObjectPayloadSize {
 		return 0, nil, fmt.Errorf("%w: object length", ErrInvalidData)
 	}
 	if uint64(n) > uint64(len(body)-5) {
@@ -424,11 +428,15 @@ func validatePaneRefs(p ManifestPane) error {
 	return validateObjectRef(p.Visible, Visible)
 }
 func validateObjectRef(ref ObjectRef, want ObjectKind) error {
-	if ref.Kind != want || ref.Size < manifestHeaderSize+5 || ref.Size > maxObjectEnvelopeSize || isZeroDigest(ref.Digest) {
+	if ref.Kind != want || !validObjectEnvelopeSize(ref.Size) || isZeroDigest(ref.Digest) {
 		return fmt.Errorf("%w: object reference", ErrInvalidData)
 	}
 	return nil
 }
+func validObjectEnvelopeSize(size uint32) bool {
+	return size >= minObjectEnvelopeSize && size <= maxObjectEnvelopeSize
+}
+
 func validObjectKind(kind ObjectKind) bool {
 	return kind == HistoryChunk || kind == HistoryTail || kind == Visible
 }

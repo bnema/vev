@@ -85,8 +85,8 @@ func TestObjectCodecReturnsContentAddressedObjectAndPayload(t *testing.T) {
 }
 
 func TestManifestDimensionBoundaries(t *testing.T) {
-	ref := ObjectRef{Kind: HistoryTail, Digest: ports.SnapshotDigest{1}, Size: manifestHeaderSize + 5}
-	visible := ObjectRef{Kind: Visible, Digest: ports.SnapshotDigest{2}, Size: manifestHeaderSize + 5}
+	ref := ObjectRef{Kind: HistoryTail, Digest: ports.SnapshotDigest{1}, Size: minObjectEnvelopeSize}
+	visible := ObjectRef{Kind: Visible, Digest: ports.SnapshotDigest{2}, Size: minObjectEnvelopeSize}
 	for _, tc := range []struct {
 		name       string
 		cols, rows uint16
@@ -110,9 +110,74 @@ func TestManifestRejectsImpossibleObjectEnvelopeSize(t *testing.T) {
 	manifest := Manifest{Name: "named", Tabs: []ManifestTab{{Cols: 1, Rows: 1, Panes: []ManifestPane{{
 		ID:      "pane",
 		Tail:    ObjectRef{Kind: HistoryTail, Digest: SnapshotDigest{1}, Size: 1},
-		Visible: ObjectRef{Kind: Visible, Digest: SnapshotDigest{2}, Size: manifestHeaderSize + 5},
+		Visible: ObjectRef{Kind: Visible, Digest: SnapshotDigest{2}, Size: minObjectEnvelopeSize},
 	}}}}}
 	if _, err := MarshalManifest(manifest); !errors.Is(err, ErrInvalidData) {
 		t.Fatalf("MarshalManifest() error = %v, want invalid data", err)
 	}
+}
+
+func TestObjectRefEnvelopeSizeBoundaries(t *testing.T) {
+	const (
+		minimum = manifestHeaderSize + 1 + 4 + 1
+		maximum = manifestHeaderSize + maxDecodedBodySize
+	)
+	if minObjectEnvelopeSize != minimum || maxObjectEnvelopeSize != maximum {
+		t.Fatalf("object envelope range = [%d, %d], want [%d, %d]", minObjectEnvelopeSize, maxObjectEnvelopeSize, minimum, maximum)
+	}
+	object, err := MarshalObject(HistoryTail, []byte{0})
+	if err != nil {
+		t.Fatalf("MarshalObject() error = %v", err)
+	}
+	if len(object.Data) != minimum {
+		t.Fatalf("MarshalObject() size = %d, want %d", len(object.Data), minimum)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		size  uint32
+		valid bool
+	}{
+		{name: "one below minimum", size: minimum - 1},
+		{name: "minimum", size: minimum, valid: true},
+		{name: "maximum declaration", size: maximum, valid: true},
+		{name: "one above maximum", size: maximum + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := manifestWithTailSize(tc.size)
+			encoded, err := MarshalManifest(manifest)
+			if tc.valid {
+				if err != nil {
+					t.Fatalf("MarshalManifest() error = %v", err)
+				}
+				if _, err := UnmarshalManifest(encoded); err != nil {
+					t.Fatalf("UnmarshalManifest() error = %v", err)
+				}
+			} else if !errors.Is(err, ErrInvalidData) {
+				t.Fatalf("MarshalManifest() error = %v, want invalid data", err)
+			}
+
+			var w payloadWriter
+			writeObjectRef(&w, ObjectRef{Kind: HistoryTail, Digest: SnapshotDigest{1}, Size: tc.size})
+			err = preflightObjectRef(&payloadReader{b: w.b}, HistoryTail)
+			if tc.valid && err != nil {
+				t.Fatalf("preflightObjectRef() error = %v", err)
+			}
+			if !tc.valid && !errors.Is(err, ErrInvalidData) {
+				t.Fatalf("preflightObjectRef() error = %v, want invalid data", err)
+			}
+		})
+	}
+}
+
+func manifestWithTailSize(size uint32) Manifest {
+	return Manifest{Name: "named", Tabs: []ManifestTab{{
+		Cols: 1,
+		Rows: 1,
+		Panes: []ManifestPane{{
+			ID:      "pane",
+			Tail:    ObjectRef{Kind: HistoryTail, Digest: SnapshotDigest{1}, Size: size},
+			Visible: ObjectRef{Kind: Visible, Digest: SnapshotDigest{2}, Size: minObjectEnvelopeSize},
+		}},
+	}}}
 }
