@@ -32,8 +32,13 @@ const debounceInterval = minDebounceInterval
 // ptyReadBufSize is the PTY reader's read buffer.
 const ptyReadBufSize = 32 * 1024
 
-// defaultScrollbackRows is the per-tab retained history size.
-const defaultScrollbackRows = 10_000
+// New and restored panes are bounded by both history rows and cells. The
+// cell budget keeps a very wide terminal from retaining disproportionately
+// more scrollback than the normal 160-column case.
+const (
+	defaultScrollbackRows  = 10_000
+	defaultScrollbackCells = 12_000 * 160
+)
 
 // detachNotifyTimeout bounds the best-effort Detached notification on the
 // detach/kill/shutdown paths: if a wedged client (full kernel send buffer)
@@ -101,21 +106,30 @@ type Daemon struct {
 	beforeCopyModeRevalidate func()
 	// beforeCopyMouseMap is a deterministic seam after an immutable copy-input
 	// snapshot is captured and before its mapped position is applied.
-	beforeCopyMouseMap      func()
-	ptys                    ports.PTYFactory
-	clock                   ports.Clock
-	log                     *slog.Logger
-	runtimeObserver         ports.RuntimeObserver
-	baseEnv                 []string
-	shell                   string
-	shellArgs               []string
-	shellOverride           bool
-	persist                 *persist.Persister
-	persistEnabled          bool
-	snaps                   ports.SnapshotStore
-	snapsEnabled            bool
-	noticeStore             ports.NoticeStore
-	snapshotMarshal         func(snapcodec.Session) ([]byte, error)
+	beforeCopyMouseMap func()
+	ptys               ports.PTYFactory
+	clock              ports.Clock
+	log                *slog.Logger
+	runtimeObserver    ports.RuntimeObserver
+	baseEnv            []string
+	shell              string
+	shellArgs          []string
+	shellOverride      bool
+	persist            *persist.Persister
+	persistEnabled     bool
+	// snapshotRepository is the sole production checkpoint contract. snaps is
+	// retained temporarily only for the v3 test bridge; application wiring
+	// always installs snapshotRepository.
+	snapshotRepository ports.SnapshotRepository
+	legacySnapshots    ports.LegacySnapshotSource
+	snaps              ports.SnapshotStore
+	snapsEnabled       bool
+	noticeStore        ports.NoticeStore
+	snapshotMarshal    func(snapcodec.Session) ([]byte, error)
+	// snapshotChunkCache contains only encoded immutable sealed chunks. It is
+	// independent of pane state and is bounded to prevent checkpoint history
+	// from becoming unbounded daemon memory.
+	snapshotChunkCache      *snapshotChunkCache
 	snapshotJobs            chan *snapshotCapture
 	snapshotWorkerMu        sync.Mutex
 	snapshotWorkerID        uint64
@@ -232,8 +246,18 @@ func WithStore(store ports.Store) Option {
 	}
 }
 
-// WithSnapshotStore enables durable named session snapshots. A nil store keeps
-// the daemon in no-op snapshot mode.
+// WithSnapshotRepository enables content-addressed incremental snapshots. The
+// legacy source is read-only migration input and is never used for new writes.
+func WithSnapshotRepository(repository ports.SnapshotRepository, legacy ports.LegacySnapshotSource) Option {
+	return func(d *Daemon) {
+		d.snapshotRepository = repository
+		d.legacySnapshots = legacy
+		d.snapsEnabled = repository != nil
+	}
+}
+
+// WithSnapshotStore is the v3 compatibility seam for existing embedders. New
+// application wiring must use WithSnapshotRepository.
 func WithSnapshotStore(store ports.SnapshotStore) Option {
 	return func(d *Daemon) {
 		d.snaps = store
@@ -343,23 +367,24 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		shell = "/bin/sh"
 	}
 	d := &Daemon{
-		sessions:        make(map[domain.SessionID]*session),
-		stopped:         make(map[string]stoppedSession),
-		parked:          make(map[uint64]*parkedAttachment),
-		ptys:            ptys,
-		clock:           clock,
-		log:             log,
-		baseEnv:         os.Environ(),
-		shell:           shell,
-		persist:         persist.New(nil),
-		dirOrHome:       dirOrHome,
-		done:            make(chan struct{}),
-		restoreDone:     make(chan struct{}),
-		animWake:        make(chan struct{}, 1),
-		snapshotMarshal: snapcodec.Marshal,
-		snapshotJobs:    make(chan *snapshotCapture, snapshotQueueCapacity),
-		notices:         newNoticeCenter(),
-		resumeParkGrace: defaultResumeParkGrace,
+		sessions:           make(map[domain.SessionID]*session),
+		stopped:            make(map[string]stoppedSession),
+		parked:             make(map[uint64]*parkedAttachment),
+		ptys:               ptys,
+		clock:              clock,
+		log:                log,
+		baseEnv:            os.Environ(),
+		shell:              shell,
+		persist:            persist.New(nil),
+		dirOrHome:          dirOrHome,
+		done:               make(chan struct{}),
+		restoreDone:        make(chan struct{}),
+		animWake:           make(chan struct{}, 1),
+		snapshotMarshal:    snapcodec.Marshal,
+		snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit),
+		snapshotJobs:       make(chan *snapshotCapture, snapshotQueueCapacity),
+		notices:            newNoticeCenter(),
+		resumeParkGrace:    defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
@@ -622,9 +647,15 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	if target == nil {
 		if stopped, ok := d.stopped[k.Name]; ok {
 			d.mu.Unlock()
-			if d.snapsEnabled && d.snaps != nil {
-				if err := d.snaps.Delete(k.Name); err != nil {
-					d.log.Warn("deleting stopped session snapshot failed", "err", err, "session", k.Name)
+			if d.snapsEnabled {
+				var deleteErr error
+				if d.snapshotRepository != nil {
+					deleteErr = d.snapshotRepository.Delete(context.Background(), k.Name)
+				} else if d.snaps != nil {
+					deleteErr = d.snaps.Delete(k.Name)
+				}
+				if deleteErr != nil {
+					d.log.Warn("deleting stopped session snapshot failed", "err", deleteErr, "session", k.Name)
 					_ = tr.Send(frameError(ports.ErrInternal, "deleting stopped session snapshot failed"))
 					return
 				}
