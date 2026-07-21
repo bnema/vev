@@ -35,11 +35,17 @@ func (failingDeleteStore) Range(func(k, v []byte) bool) {}
 func (failingDeleteStore) Sync() error                  { return nil }
 func (failingDeleteStore) Close() error                 { return nil }
 
-type refusingSnapshotDeleteStore struct{ err error }
+type refusingSnapshotDeleteRepository struct{ err error }
 
-func (refusingSnapshotDeleteStore) Write(string, []byte) error          { return nil }
-func (refusingSnapshotDeleteStore) Load() ([]ports.SnapshotBlob, error) { return nil, nil }
-func (s refusingSnapshotDeleteStore) Delete(string) error               { return s.err }
+func (refusingSnapshotDeleteRepository) Publish(context.Context, ports.SnapshotPublication) error {
+	return nil
+}
+func (refusingSnapshotDeleteRepository) List(context.Context) ([]string, error) { return nil, nil }
+func (refusingSnapshotDeleteRepository) Load(context.Context, string) (ports.SnapshotGeneration, error) {
+	return ports.SnapshotGeneration{}, nil
+}
+func (s refusingSnapshotDeleteRepository) Delete(context.Context, string) error { return s.err }
+func (refusingSnapshotDeleteRepository) Maintain(context.Context) error         { return nil }
 
 func newTestTabWithContext(p ports.PTY, ctx context.Context, cancel context.CancelFunc) *tab {
 	tb := newTab(p, domain.Size{Cols: 80, Rows: 23})
@@ -998,7 +1004,7 @@ func TestPickerKillActiveSessionSnapshotDeleteRefusalReportsOnceAndKeepsPicker(t
 	d, from, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
 	cause := errors.New("snapshot delete refused")
-	WithSnapshotStore(refusingSnapshotDeleteStore{err: cause})(d)
+	WithSnapshotRepository(refusingSnapshotDeleteRepository{err: cause}, nil)(d)
 	target := d.sessions[domain.SessionID("recent")]
 
 	d.enterPicker(from, ac)

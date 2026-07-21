@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sync"
@@ -15,16 +16,16 @@ import (
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
-func TestCountingSnapshotStoreWriteCountsAndRetainsOpaquePayload(t *testing.T) {
-	store := &countingSnapshotStore{}
+func TestCountingSnapshotRepositoryPublishCountsAndRetainsManifest(t *testing.T) {
+	repository := &countingSnapshotRepository{}
 	payload := []byte{0xff, 0x00, 0xfe}
 
-	require.NoError(t, store.Write("session", payload))
-	require.Equal(t, countingSnapshotMetrics{writes: 1, bytes: uint64(len(payload))}, store.metrics())
-	require.Equal(t, payload, store.lastPayload())
+	require.NoError(t, repository.Publish(context.Background(), ports.SnapshotPublication{Name: "session", Manifest: payload}))
+	require.Equal(t, countingSnapshotMetrics{writes: 1, bytes: uint64(len(payload))}, repository.metrics())
+	require.Equal(t, payload, repository.lastPayload())
 
 	payload[0] = 0x01
-	require.Equal(t, payload, store.lastPayload(), "the counting sink must retain the payload slice header, not copy it")
+	require.Equal(t, payload, repository.lastPayload(), "the counting sink must retain the payload slice header, not copy it")
 }
 
 func TestCountingOutputTransportCountsOpaquePayloadAndRejectsShortPayload(t *testing.T) {
@@ -157,13 +158,13 @@ func TestPerformanceFixtureSnapshotCaptureRetainsSealedHistory(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, first.tabs, 1)
 	require.Len(t, first.tabs[0].panes, 2)
-	require.Equal(t, 10_000, first.tabs[0].panes[0].history.Len())
-	require.Equal(t, 40, first.tabs[0].panes[0].history.ChunkCount())
+	require.Equal(t, 10_000, first.tabs[0].panes[0].sealed.Len())
+	require.Positive(t, first.tabs[0].panes[0].sealed.ChunkCount())
 
 	second, ok := fixture.d.captureSnapshotState(fixture.sess, 2)
 	require.True(t, ok)
 	secondPane := capturePaneByID(second, first.tabs[0].panes[0].id)
-	if secondPane == nil || first.tabs[0].panes[0].history.Chunk(0) != secondPane.history.Chunk(0) {
+	if secondPane == nil || first.tabs[0].panes[0].sealed.Chunk(0) != secondPane.sealed.Chunk(0) {
 		t.Fatal("unchanged sealed history chunk was not reused across captures")
 	}
 }
@@ -674,7 +675,7 @@ type performanceFixture struct {
 	sess                *session
 	ac                  *attachedClient
 	output              *countingOutputTransport
-	snaps               *countingSnapshotStore
+	snapshots           *countingSnapshotRepository
 	activePane          *pane
 	liveWrites          [][]byte
 	paints              int
@@ -727,13 +728,13 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 		sess:        sess,
 		ac:          ac,
 		output:      output,
-		snaps:       &countingSnapshotStore{},
+		snapshots:   &countingSnapshotRepository{},
 		pty:         pty,
 		clock:       clock,
 		liveWrites:  [][]byte{[]byte("\x1b[1;1HA\x1b[2;2HA"), []byte("\x1b[1;1HB\x1b[2;2HB")},
 		resizeSizes: [2]domain.Size{{Cols: 100, Rows: 30}, config.size},
 	}
-	WithSnapshotStore(fixture.snaps)(d)
+	WithSnapshotRepository(fixture.snapshots, nil)(d)
 	d.startSnapshotEncodeWorker()
 	t.Cleanup(d.stopSnapshotEncodeWorker)
 	for tabIndex, tb := range sess.tabs {
@@ -927,7 +928,7 @@ func (f *performanceFixture) resized() bool {
 
 func (f *performanceFixture) resetMetrics() {
 	f.output.reset()
-	f.snaps.reset()
+	f.snapshots.reset()
 	f.renderCaptures = 0
 	f.renderCompositions = 0
 	f.renderEmissions = 0
@@ -943,7 +944,7 @@ func (f *performanceFixture) resetMetrics() {
 
 func (f *performanceFixture) metrics() performanceMetrics {
 	output := f.output.metrics()
-	snapshots := f.snaps.metrics()
+	snapshots := f.snapshots.metrics()
 	metrics := performanceMetrics{
 		outputFrames: output.frames, outputBytes: output.bytes, outputPayloadBytes: output.payloadBytes,
 		snapshotWrites: snapshots.writes, snapshotBytes: snapshots.bytes,
@@ -1011,34 +1012,41 @@ func (t *countingOutputTransport) lastPayload() []byte {
 }
 
 type countingSnapshotMetrics struct{ writes, bytes uint64 }
-type countingSnapshotStore struct {
+type countingSnapshotRepository struct {
 	mu sync.Mutex
 	countingSnapshotMetrics
 	last []byte
 }
 
-func (s *countingSnapshotStore) Write(_ string, data []byte) error {
+func (s *countingSnapshotRepository) Publish(_ context.Context, publication ports.SnapshotPublication) error {
 	s.mu.Lock()
 	s.writes++
-	s.bytes += uint64(len(data))
-	s.last = data
+	s.bytes += uint64(len(publication.Manifest))
+	for _, object := range publication.Objects {
+		s.bytes += uint64(len(object.Data))
+	}
+	s.last = publication.Manifest
 	s.mu.Unlock()
 	return nil
 }
-func (*countingSnapshotStore) Load() ([]ports.SnapshotBlob, error) { return nil, nil }
-func (*countingSnapshotStore) Delete(string) error                 { return nil }
-func (s *countingSnapshotStore) reset() {
+func (*countingSnapshotRepository) List(context.Context) ([]string, error) { return nil, nil }
+func (*countingSnapshotRepository) Load(context.Context, string) (ports.SnapshotGeneration, error) {
+	return ports.SnapshotGeneration{}, nil
+}
+func (*countingSnapshotRepository) Delete(context.Context, string) error { return nil }
+func (*countingSnapshotRepository) Maintain(context.Context) error       { return nil }
+func (s *countingSnapshotRepository) reset() {
 	s.mu.Lock()
 	s.countingSnapshotMetrics = countingSnapshotMetrics{}
 	s.last = nil
 	s.mu.Unlock()
 }
-func (s *countingSnapshotStore) metrics() countingSnapshotMetrics {
+func (s *countingSnapshotRepository) metrics() countingSnapshotMetrics {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.countingSnapshotMetrics
 }
-func (s *countingSnapshotStore) lastPayload() []byte {
+func (s *countingSnapshotRepository) lastPayload() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.last

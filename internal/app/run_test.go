@@ -352,10 +352,7 @@ func TestRunKillDeletesStoppedSessionWithoutDaemon(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close error = %v", err)
 	}
-	snapshots := snapshot.NewStore(filepath.Join(stateRoot, "vev", "snapshots"))
-	if err := snapshots.Write("stored", []byte("snapshot bytes")); err != nil {
-		t.Fatalf("snapshot Write error = %v", err)
-	}
+	snapshots := snapshot.NewRepository(filepath.Join(stateRoot, "vev", "snapshots"))
 
 	got := captureStdout(t, func() {
 		if err := runKill(context.Background(), "stored", false, false); err != nil {
@@ -372,12 +369,12 @@ func TestRunKillDeletesStoppedSessionWithoutDaemon(t *testing.T) {
 	if len(records) != 0 {
 		t.Fatalf("records after kill = %#v, want none", records)
 	}
-	blobs, err := snapshots.Load()
+	names, err := snapshots.List(context.Background())
 	if err != nil {
-		t.Fatalf("snapshot Load error = %v", err)
+		t.Fatalf("snapshot List error = %v", err)
 	}
-	if len(blobs) != 0 {
-		t.Fatalf("snapshots after kill = %#v, want none", blobs)
+	if len(names) != 0 {
+		t.Fatalf("snapshots after kill = %#v, want none", names)
 	}
 }
 

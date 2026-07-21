@@ -5,11 +5,26 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/bnema/vev/internal/ports"
 )
+
+var safeNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,200}$`)
+
+const maxSnapshotFileSize = 16 + (256 << 20)
+
+// filenameForName maps a session name to its deterministic legacy filename.
+// It remains only for the one-way v3 import path.
+func filenameForName(name string) string {
+	if safeNameRE.MatchString(name) {
+		return name + ".snap"
+	}
+	sum := sha256.Sum256([]byte(name))
+	return "@" + hex.EncodeToString(sum[:])[:40] + ".snap"
+}
 
 func (r *Repository) sessionPath(key string) string {
 	return filepath.Join(r.dir, repositorySessionsDir, key)

@@ -24,7 +24,7 @@ const (
 	magic                = "VEVS"
 	version              = uint16(3)
 	maxDecodedBodySize   = 256 << 20
-	maxSnapshotBlobs     = 1 << 16
+	maxSnapshotObjects   = 1 << 16
 	maxSnapshotBytes     = 256 << 20
 	maxSnapshotRows      = 1 << 20
 	maxSnapshotCells     = 16 << 20
@@ -449,7 +449,7 @@ func writePane(w *payloadWriter, p Pane) error {
 	if err := w.putString(p.Cwd); err != nil {
 		return err
 	}
-	if len(p.SealedChunks) > maxSnapshotBlobs {
+	if len(p.SealedChunks) > maxSnapshotObjects {
 		return fmt.Errorf("%w: too many sealed chunks", ErrInvalidData)
 	}
 	w.putUint32(uint32(len(p.SealedChunks)))
@@ -490,7 +490,7 @@ func readPane(r *payloadReader) (Pane, error) {
 	if err != nil {
 		return Pane{}, err
 	}
-	if n > maxSnapshotBlobs || uint64(n) > uint64(len(r.b))/4 {
+	if n > maxSnapshotObjects || uint64(n) > uint64(len(r.b))/4 {
 		return Pane{}, fmt.Errorf("%w: sealed chunks", ErrInvalidData)
 	}
 	sealed := make([][]byte, n)

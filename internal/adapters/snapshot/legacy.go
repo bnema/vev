@@ -13,9 +13,8 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// LoadLegacy reads only pre-incremental root .snap files. Store remains the
-// legacy writer until the migration cutover, but is deliberately not used by
-// this read path so incremental repository directories are never traversed.
+// LoadLegacy reads only pre-incremental root .snap files. It is deliberately
+// isolated from repository reads so incremental directories are never traversed.
 func (r *Repository) LoadLegacy(ctx context.Context) ([]ports.LegacySnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

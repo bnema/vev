@@ -124,39 +124,8 @@ func (d *Daemon) restoreSnapshots(ctx context.Context) {
 	}
 	if d.snapshotRepository != nil {
 		d.restoreIncrementalSnapshots(ctx)
-		return
 	}
-	if d.snaps == nil {
-		return
-	}
-	blobs, err := d.snaps.Load()
-	if err != nil {
-		d.log.Warn("loading session snapshots failed", "err", err)
-		d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotRestore,
-			"couldn't load saved sessions after restart", err)
-		return
-	}
-	for _, blob := range blobs {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		snap, err := snapcodec.Unmarshal(blob.Data)
-		if err != nil {
-			d.log.Warn("decoding session snapshot failed", "err", err, "session", blob.Name)
-			d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotRestore,
-				"couldn't restore session "+blob.Name+" after restart", err)
-			continue
-		}
-		if err := d.restoreSession(ctx, snap); err != nil {
-			d.log.Warn("restoring session snapshot failed", "err", err, "session", snap.Name)
-			if ctx.Err() == nil {
-				d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotRestore,
-					"couldn't restore session "+snap.Name+" after restart", err)
-			}
-		}
-	}
+
 }
 
 func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) error {
@@ -410,14 +379,14 @@ func (d *Daemon) scheduleSnapshot(sess *session) bool {
 }
 
 // scheduleFinalSnapshot captures the terminal state even when an older capture
-// is pending. A removed session cannot be retried by snapshotSaver, so the
+// is pending. A removed session cannot be retried by the repository scheduler, so the
 // worker drains its retained terminal state before it stops.
 func (d *Daemon) scheduleFinalSnapshot(sess *session) bool {
 	return d.scheduleSnapshotWithFinalFallback(sess, true)
 }
 
 func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bool {
-	if d == nil || sess == nil || !d.snapsEnabled || (d.snapshotRepository == nil && d.snaps == nil) || !sess.snapEligible.Load() {
+	if d == nil || sess == nil || !d.snapsEnabled || d.snapshotRepository == nil || !sess.snapEligible.Load() {
 		return true
 	}
 	kind := snapshotAttemptRoutine
@@ -565,12 +534,8 @@ func (d *Daemon) captureSnapshotState(sess *session, generation uint64) (*snapsh
 				visible:    visible,
 				visibleErr: visibleErr,
 			}
-			if d.snapshotRepository != nil {
-				paneCapture.sealed = p.history.SnapshotView()
-				paneCapture.tail = paneCapture.sealed.Tail()
-			} else {
-				paneCapture.history = p.history.SealAndView()
-			}
+			paneCapture.sealed = p.history.SnapshotView()
+			paneCapture.tail = paneCapture.sealed.Tail()
 			p.mu.Unlock()
 			paneCapture.cwd = fallbackCwd
 			if d.procCwd != nil && pid > 0 {
@@ -734,20 +699,9 @@ func (d *Daemon) startSnapshotEncodeWorker() {
 				d.finishSnapshotCapture(capture, false)
 				return false
 			}
-			var err error
-			if d.snapshotRepository != nil {
-				publication, publicationErr := d.incrementalPublication(capture)
-				if publicationErr != nil {
-					err = publicationErr
-				} else if workerCtx.Err() == nil {
-					err = d.snapshotRepository.Publish(workerCtx, publication)
-				}
-			} else {
-				data, encodeErr := d.encodeSnapshotCapture(capture)
-				err = encodeErr
-				if err == nil && workerCtx.Err() == nil {
-					err = d.snaps.Write(capture.name, data)
-				}
+			publication, err := d.incrementalPublication(capture)
+			if err == nil && workerCtx.Err() == nil {
+				err = d.snapshotRepository.Publish(workerCtx, publication)
 			}
 			d.clearSnapshotWorkerInFlight(workerID, capture)
 			if err != nil && workerCtx.Err() == nil {
@@ -919,38 +873,6 @@ func (d *Daemon) capturePaneProcess(pty interface{ ForegroundPgid() (int, error)
 		Opts: snapcodec.ProcessOpts{
 			AgentSessionID: extractAgentSessionID(strategy, argv),
 		},
-	}
-}
-
-func (d *Daemon) snapshotSaver(ctx context.Context) {
-	if d.snapshotRepository != nil {
-		d.snapshotRepositorySaver(ctx)
-		return
-	}
-	checkpoint := func() {
-		d.mu.Lock()
-		sessions := d.sessionsSnapshotLocked()
-		d.mu.Unlock()
-		for _, sess := range sessions {
-			if sess.snapEligible.Load() && sess.snapDirty.Load() {
-				d.scheduleSnapshot(sess)
-			}
-		}
-	}
-	// A session born dirty must not wait through a full interval before its
-	// first crash-safe checkpoint. Producers remain non-blocking because each
-	// schedule call only attempts the bounded handoff.
-	checkpoint()
-	t := d.clock.NewTimer(snapshotInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C():
-			checkpoint()
-			t.Reset(snapshotInterval)
-		}
 	}
 }
 

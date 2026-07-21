@@ -117,12 +117,10 @@ type Daemon struct {
 	shellOverride      bool
 	persist            *persist.Persister
 	persistEnabled     bool
-	// snapshotRepository is the sole production checkpoint contract. snaps is
-	// retained temporarily only for the v3 test bridge; application wiring
-	// always installs snapshotRepository.
+	// snapshotRepository is the sole checkpoint contract. legacySnapshots is
+	// read-only migration input and is never used for new writes.
 	snapshotRepository ports.SnapshotRepository
 	legacySnapshots    ports.LegacySnapshotSource
-	snaps              ports.SnapshotStore
 	snapsEnabled       bool
 	noticeStore        ports.NoticeStore
 	snapshotMarshal    func(snapcodec.Session) ([]byte, error)
@@ -262,15 +260,6 @@ func WithSnapshotRepository(repository ports.SnapshotRepository, legacy ports.Le
 		d.snapshotRepository = repository
 		d.legacySnapshots = legacy
 		d.snapsEnabled = repository != nil
-	}
-}
-
-// WithSnapshotStore is the v3 compatibility seam for existing embedders. New
-// application wiring must use WithSnapshotRepository.
-func WithSnapshotStore(store ports.SnapshotStore) Option {
-	return func(d *Daemon) {
-		d.snaps = store
-		d.snapsEnabled = store != nil
 	}
 }
 
@@ -478,7 +467,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	if d.snapsEnabled {
 		d.startSnapshotEncodeWorker()
 		d.sessWg.Go(func() {
-			d.snapshotSaver(d.serveCtx)
+			d.snapshotRepositorySaver(d.serveCtx)
 		})
 		d.sessWg.Go(func() {
 			d.restoreSnapshots(d.serveCtx)
@@ -661,8 +650,6 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 				var deleteErr error
 				if d.snapshotRepository != nil {
 					deleteErr = d.snapshotRepository.Delete(context.Background(), k.Name)
-				} else if d.snaps != nil {
-					deleteErr = d.snaps.Delete(k.Name)
 				}
 				if deleteErr != nil {
 					d.log.Warn("deleting stopped session snapshot failed", "err", deleteErr, "session", k.Name)

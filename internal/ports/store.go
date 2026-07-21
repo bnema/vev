@@ -22,19 +22,6 @@ type Store interface {
 	Close() error
 }
 
-// SnapshotBlob is a durable named session snapshot payload.
-type SnapshotBlob struct {
-	Name string
-	Data []byte
-}
-
-// SnapshotStore persists encoded session snapshots by name.
-type SnapshotStore interface {
-	Write(name string, data []byte) error
-	Load() ([]SnapshotBlob, error)
-	Delete(name string) error
-}
-
 // SnapshotDigest is the SHA-256 content address of a complete snapshot object.
 type SnapshotDigest [sha256.Size]byte
 

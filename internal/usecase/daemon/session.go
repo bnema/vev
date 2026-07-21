@@ -570,14 +570,6 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 				sess.mu.Unlock()
 				return err
 			}
-		} else if d.snapsEnabled && d.snaps != nil {
-			if err := d.snaps.Delete(oldName); err != nil {
-				if cleanupErr := d.persist.Delete(name); cleanupErr != nil {
-					d.log.Warn("cleaning up renamed persisted session failed", "err", cleanupErr, "session", name)
-				}
-				sess.mu.Unlock()
-				return err
-			}
 		}
 		if err := d.persist.Delete(oldName); err != nil {
 			if cleanupErr := d.persist.Delete(name); cleanupErr != nil {
@@ -745,18 +737,10 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	var snapshotDeleteErr, terminalSnapshotErr error
 	if d.snapsEnabled && !isEphemeral {
 		if purge {
-			sess.mu.Lock()
-			name := sess.name
-			sess.mu.Unlock()
 			if d.snapshotRepository != nil {
 				// Repository deletion is intentionally deferred until the render
 				// coordinator is cancelled and joined below. See client.go's lock
 				// ordering notes: no coordinator callback may race a purge.
-			} else if d.snaps != nil {
-				if err := d.snaps.Delete(name); err != nil {
-					snapshotDeleteErr = err
-					d.log.Warn("deleting session snapshot failed", "err", err, "session", name)
-				}
 			}
 		} else {
 			markSnapshotDirty(sess)
