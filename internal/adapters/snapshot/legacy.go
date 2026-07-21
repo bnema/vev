@@ -78,23 +78,41 @@ func (r *Repository) LoadLegacy(ctx context.Context) ([]ports.LegacySnapshot, er
 }
 
 // DeleteLegacy deletes the deterministic v3 file and synchronizes the root.
-// A sync failure is returned even though the unlink may have succeeded; retrying
-// is safe because an already absent legacy file is considered deleted.
+// Once an unlink succeeds, its directory sync remains pending until it succeeds;
+// this lets an absent-file retry complete the durability boundary without
+// deleting a file recreated in the meantime.
 func (r *Repository) DeleteLegacy(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	path := filepath.Join(r.dir, filenameForName(name))
+	filename := filenameForName(name)
+	lock := r.sessionLock("legacy-sync:" + filename)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, pending := r.pendingLegacySync.Load(filename); pending {
+		return r.syncPendingLegacy(ctx, filename)
+	}
+
+	path := filepath.Join(r.dir, filename)
 	if err := r.remove(path); errors.Is(err, os.ErrNotExist) {
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("delete legacy snapshot: %w", safeFilesystemError(err))
 	}
+	r.pendingLegacySync.Store(filename, struct{}{})
+	return r.syncPendingLegacy(ctx, filename)
+}
+
+func (r *Repository) syncPendingLegacy(ctx context.Context, filename string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := r.syncDirectory(r.dir); err != nil {
 		return fmt.Errorf("sync legacy snapshot directory: %w", safeFilesystemError(err))
 	}
+	r.pendingLegacySync.Delete(filename)
 	return nil
 }

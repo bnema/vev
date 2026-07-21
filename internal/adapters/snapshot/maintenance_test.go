@@ -379,3 +379,154 @@ func TestRepositoryMaintainUsesFixedRemovalBatch(t *testing.T) {
 		t.Fatalf("remaining stale entries = %d, want 1 after one batch", len(entries))
 	}
 }
+
+func TestRepositoryMaintainQueuesFetchedSessionsPastWorkBudget(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	if err := os.MkdirAll(filepath.Join(repo.dir, repositorySessionsDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo.dir, ".tmp-consume-budget"), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	removed := make(map[string]int)
+	for i := 0; i < maintenanceBatch+1; i++ {
+		path := filepath.Join(repo.dir, repositorySessionsDir, fmt.Sprintf(".deleting-%03d", i))
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repo.hooks.remove = func(path string) error {
+		if strings.HasPrefix(filepath.Base(path), ".deleting-") {
+			removed[path]++
+		}
+		return nil
+	}
+
+	sessions := filepath.Join(repo.dir, repositorySessionsDir)
+	f, err := os.Open(sessions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetched, err := f.ReadDir(maintenanceBatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unread, err := f.ReadDir(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	queued := fetched[len(fetched)-1].Name()
+	if err := repo.Maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(sessions, queued)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fetched but unprocessed session %q = %v, want removed on next call", queued, err)
+	}
+	if _, err := os.Lstat(filepath.Join(sessions, unread[0].Name())); err != nil {
+		t.Fatalf("unread session %q = %v, want queued entry to run first", unread[0].Name(), err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if err := repo.Maintain(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(sessions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("queued sessions after resumed maintenance = %d, want none", len(entries))
+	}
+	if len(removed) != maintenanceBatch+1 {
+		t.Fatalf("removed sessions = %d, want %d", len(removed), maintenanceBatch+1)
+	}
+	for path, calls := range removed {
+		if calls != 1 {
+			t.Fatalf("remove calls for %q = %d, want one", path, calls)
+		}
+	}
+}
+
+func TestRepositoryMaintainClassifiesUnpublishedGenerationsBeforeSweep(t *testing.T) {
+	for _, head := range []struct {
+		name string
+		set  func(t *testing.T, repo *Repository, key string)
+	}{
+		{
+			name: "missing",
+			set: func(t *testing.T, repo *Repository, key string) {
+				t.Helper()
+				if err := os.Remove(repo.headPath(key)); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "corrupt",
+			set: func(t *testing.T, repo *Repository, key string) {
+				t.Helper()
+				if err := os.WriteFile(repo.headPath(key), []byte("corrupt"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(head.name, func(t *testing.T) {
+			repo := NewRepository(privateDir(t))
+			key := sessionKey("named")
+			publications := make([]ports.SnapshotPublication, 0, maintenanceBatch+2)
+			for generation := uint64(1); generation <= maintenanceBatch+2; generation++ {
+				publication := repositoryPublication(t, "named", generation, []byte(fmt.Sprintf("state-%d", generation)))
+				if err := repo.Publish(context.Background(), publication); err != nil {
+					t.Fatal(err)
+				}
+				publications = append(publications, publication)
+			}
+			head.set(t, repo, key)
+			stale := sha256.Sum256([]byte("unpublished stale object"))
+			stalePath := repo.objectPath(key, stale)
+			if err := os.MkdirAll(filepath.Dir(stalePath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(stalePath, []byte("unpublished stale object"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := repo.Maintain(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(stalePath); err != nil {
+				t.Fatalf("stale object swept before full manifest classification: %v", err)
+			}
+			for _, publication := range publications {
+				if _, err := os.Lstat(repo.objectPath(key, publication.Objects[0].Digest)); err != nil {
+					t.Fatalf("object for unpublished generation %d removed early: %v", publication.Generation, err)
+				}
+			}
+
+			for i := 0; i < 600; i++ {
+				if err := repo.Maintain(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Lstat(stalePath); errors.Is(err, os.ErrNotExist) {
+					break
+				} else if i == 599 {
+					t.Fatal("stale object was not swept after complete classification")
+				}
+			}
+			for _, publication := range publications {
+				if _, err := os.Lstat(repo.objectPath(key, publication.Objects[0].Digest)); err != nil {
+					t.Fatalf("object for unpublished generation %d removed: %v", publication.Generation, err)
+				}
+			}
+		})
+	}
+}

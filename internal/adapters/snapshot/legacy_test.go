@@ -81,12 +81,21 @@ func TestRepositoryDeleteLegacySurfacesRootSyncAndCanRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	injected := errors.New("root sync")
-	repo.hooks.syncDirectory = func(string) error { return injected }
+	syncCalls := 0
+	repo.hooks.syncDirectory = func(string) error {
+		syncCalls++
+		if syncCalls == 1 {
+			return injected
+		}
+		return nil
+	}
 	if err := repo.DeleteLegacy(context.Background(), "named"); !errors.Is(err, injected) {
 		t.Fatalf("DeleteLegacy error = %v, want root sync error", err)
 	}
-	repo.hooks.syncDirectory = nil
 	if err := repo.DeleteLegacy(context.Background(), "named"); err != nil {
 		t.Fatalf("retry DeleteLegacy: %v", err)
+	}
+	if syncCalls != 2 {
+		t.Fatalf("sync calls = %d, want retry to sync absent file", syncCalls)
 	}
 }

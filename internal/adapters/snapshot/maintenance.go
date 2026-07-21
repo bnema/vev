@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -140,8 +141,9 @@ func (r *Repository) Maintain(ctx context.Context) (err error) {
 	if err != nil {
 		return fmt.Errorf("read snapshot maintenance sessions: %w", safeFilesystemError(err))
 	}
-	for _, entry := range entries {
+	for i, entry := range entries {
 		if budget == 0 {
+			r.requeueMaintenanceEntries(sessions, "sessions", entries[i:])
 			return nil
 		}
 		if err := ctx.Err(); err != nil {
@@ -177,7 +179,10 @@ func (r *Repository) Maintain(ctx context.Context) (err error) {
 	return nil
 }
 
-type maintenanceCursor struct{ file *os.File }
+type maintenanceCursor struct {
+	file    *os.File
+	pending []os.DirEntry
+}
 
 type manifestMaintenance struct {
 	refs     map[ports.SnapshotDigest]codec.ObjectRef
@@ -188,6 +193,7 @@ type sessionMaintenance struct {
 	token         string
 	marked        map[uint64]manifestMaintenance
 	uncertain     bool
+	conservative  bool
 	markDone      bool
 	manifestQueue []uint64
 	sweepQueue    []string
@@ -196,17 +202,32 @@ type sessionMaintenance struct {
 
 func (r *Repository) resetMaintenance() {
 	for _, cursor := range r.maintenanceCursors {
-		_ = cursor.file.Close()
+		if cursor.file != nil {
+			_ = cursor.file.Close()
+		}
 	}
 	r.maintenanceCursors = nil
 	r.maintenanceSessions = nil
 }
 
-// readMaintenanceDir advances one named directory cursor. It closes and
-// forgets the handle at EOF, so the following call begins a fresh cycle.
+func maintenanceCursorID(dir, purpose string) string { return purpose + "\x00" + dir }
+
+// readMaintenanceDir advances one named directory cursor. Callers must return
+// entries they could not process with requeueMaintenanceEntries before yielding
+// for budget exhaustion. This prevents a ReadDir batch from skipping work when
+// an earlier operation spends the remainder of the pass budget.
 func (r *Repository) readMaintenanceDir(dir string, n int, purpose string) ([]os.DirEntry, bool, error) {
-	id := purpose + "\x00" + dir
+	id := maintenanceCursorID(dir, purpose)
 	cursor := r.maintenanceCursors[id]
+	if cursor != nil && len(cursor.pending) != 0 {
+		entries := cursor.pending
+		cursor.pending = nil
+		return entries, cursor.file == nil, nil
+	}
+	if cursor != nil && cursor.file == nil {
+		delete(r.maintenanceCursors, id)
+		cursor = nil
+	}
 	if cursor == nil {
 		file, err := os.Open(dir)
 		if err != nil {
@@ -232,6 +253,19 @@ func (r *Repository) readMaintenanceDir(dir string, n int, purpose string) ([]os
 		return nil, false, closeErr
 	}
 	return entries, true, nil
+}
+
+func (r *Repository) requeueMaintenanceEntries(dir, purpose string, entries []os.DirEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	id := maintenanceCursorID(dir, purpose)
+	cursor := r.maintenanceCursors[id]
+	if cursor == nil {
+		cursor = &maintenanceCursor{}
+		r.maintenanceCursors[id] = cursor
+	}
+	cursor.pending = append(entries, cursor.pending...)
 }
 
 func isQuarantine(name string) bool { return strings.HasPrefix(name, ".deleting-") }
@@ -324,8 +358,9 @@ func (r *Repository) maintainSession(ctx context.Context, key string, budget *in
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read snapshot object shards: %w", safeFilesystemError(err))
 	}
-	for _, shard := range shards {
+	for i, shard := range shards {
 		if *budget == 0 {
+			r.requeueMaintenanceEntries(objectRoot, "object-temps-shards:"+key, shards[i:])
 			return nil
 		}
 		if shard.IsDir() {
@@ -361,38 +396,39 @@ func (r *Repository) maintainSession(ctx context.Context, key string, budget *in
 }
 
 func (r *Repository) sessionMaintenanceState(key string) (*sessionMaintenance, error) {
-	token, exists, err := r.maintenanceToken(key)
+	token, conservative, err := r.maintenanceToken(key)
 	if err != nil {
 		return nil, err
-	}
-	if !exists {
-		r.clearSessionMaintenance(key)
-		return &sessionMaintenance{token: "missing", marked: make(map[uint64]manifestMaintenance)}, nil
 	}
 	state := r.maintenanceSessions[key]
 	if state == nil || state.token != token {
 		r.clearSessionMaintenance(key)
-		state = &sessionMaintenance{token: token, marked: make(map[uint64]manifestMaintenance)}
+		state = &sessionMaintenance{
+			token:        token,
+			conservative: conservative,
+			marked:       make(map[uint64]manifestMaintenance),
+		}
 		r.maintenanceSessions[key] = state
 	}
 	return state, nil
 }
 
-// maintenanceToken is the publication boundary. Publish and Delete share the
-// per-session lock with maintenance, and a changed HEAD on a later call makes
-// us discard partial marking/sweeping before deleting anything else.
+// maintenanceToken is the publication boundary. A missing or corrupt HEAD is
+// itself stable maintenance state: we retain every classified reference until a
+// valid publication changes that state, rather than restarting the mark pass.
 func (r *Repository) maintenanceToken(key string) (string, bool, error) {
 	data, exists, err := readOptionalBounded(r.headPath(key))
-	if errors.Is(err, os.ErrNotExist) {
-		return "", false, nil
-	}
 	if err != nil {
 		return "", false, err
 	}
 	if !exists {
-		return "", false, nil
+		return "missing", true, nil
 	}
-	return string(data), true, nil
+	sum := sha256.Sum256(data)
+	if _, _, err := r.readHead(key); err != nil {
+		return fmt.Sprintf("invalid:%x", sum), true, nil
+	}
+	return fmt.Sprintf("valid:%x", sum), false, nil
 }
 
 func (r *Repository) clearSessionMaintenance(key string) {
@@ -400,7 +436,9 @@ func (r *Repository) clearSessionMaintenance(key string) {
 	prefix := "\x00" + filepath.Clean(r.sessionPath(key))
 	for id, cursor := range r.maintenanceCursors {
 		if strings.HasSuffix(id, prefix) || strings.Contains(id, ":"+key+":") || strings.Contains(id, ":"+key+"\x00") {
-			_ = cursor.file.Close()
+			if cursor.file != nil {
+				_ = cursor.file.Close()
+			}
 			delete(r.maintenanceCursors, id)
 		}
 	}
@@ -454,7 +492,9 @@ func (r *Repository) markSession(ctx context.Context, key string, state *session
 	}
 	if done {
 		state.markDone = true
-		state.manifestQueue = retainedManifestQueue(state.marked)
+		if !state.conservative {
+			state.manifestQueue = retainedManifestQueue(state.marked)
+		}
 	}
 	return nil
 }
@@ -502,7 +542,7 @@ func (r *Repository) removeObsoleteManifests(ctx context.Context, key string, st
 }
 
 func (r *Repository) sweepSession(ctx context.Context, key string, state *sessionMaintenance, budget *int) error {
-	referenced := retainedReferences(state.marked)
+	referenced := retainedReferences(state.marked, state.conservative)
 	root := filepath.Join(r.sessionPath(key), repositoryObjectsDir)
 	if !state.sweepRootDone {
 		entries, done, err := r.readMaintenanceDir(root, maintenanceBatch, "sweep-shards:"+key)
@@ -535,7 +575,16 @@ func (r *Repository) sweepSession(ctx context.Context, key string, state *sessio
 	return nil
 }
 
-func retainedReferences(marked map[uint64]manifestMaintenance) map[ports.SnapshotDigest]struct{} {
+func retainedReferences(marked map[uint64]manifestMaintenance, conservative bool) map[ports.SnapshotDigest]struct{} {
+	if conservative {
+		references := make(map[ports.SnapshotDigest]struct{})
+		for _, item := range marked {
+			for digest := range item.refs {
+				references[digest] = struct{}{}
+			}
+		}
+		return references
+	}
 	complete := make([]uint64, 0, len(marked))
 	for generation, item := range marked {
 		if item.complete {
@@ -575,9 +624,10 @@ func (r *Repository) sweepShard(ctx context.Context, dir string, referenced map[
 	if err != nil {
 		return false, fmt.Errorf("read snapshot object shard: %w", safeFilesystemError(err))
 	}
-	for _, object := range entries {
+	for i, object := range entries {
 		if *budget == 0 {
-			break
+			r.requeueMaintenanceEntries(dir, "sweep-objects:"+key+":"+shard, entries[i:])
+			return false, nil
 		}
 		if err := ctx.Err(); err != nil {
 			return false, err
@@ -615,8 +665,9 @@ func (r *Repository) removeTemps(ctx context.Context, dir string, budget *int, p
 	if err != nil {
 		return fmt.Errorf("read snapshot maintenance directory: %w", safeFilesystemError(err))
 	}
-	for _, entry := range entries {
+	for i, entry := range entries {
 		if *budget == 0 {
+			r.requeueMaintenanceEntries(dir, purpose, entries[i:])
 			return nil
 		}
 		if err := ctx.Err(); err != nil {

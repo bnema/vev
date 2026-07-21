@@ -32,6 +32,11 @@ type Repository struct {
 	maintenanceMu       sync.Mutex
 	maintenanceCursors  map[string]*maintenanceCursor
 	maintenanceSessions map[string]*sessionMaintenance
+
+	// pendingLegacySync records an unlink whose root-directory sync failed.
+	// It is keyed by the deterministic legacy filename and shares a per-file
+	// lock with DeleteLegacy so a retry cannot acknowledge a recreated file.
+	pendingLegacySync sync.Map // map[string]struct{}
 }
 
 // repositoryHooks makes each persistence boundary fault-injectable. Hooks run
