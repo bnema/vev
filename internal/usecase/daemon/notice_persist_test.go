@@ -103,16 +103,17 @@ func TestKillSessionServerShutdownNotSaturatedSkipsAppend(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestStartupDrainRecordsAndToastsPendingNotices proves notices persisted by a
-// previous daemon are recorded to history and toasted to the first client that
-// attaches after this daemon starts.
-func TestStartupDrainRecordsAndToastsPendingNotices(t *testing.T) {
-	drained := []domain.Notification{
+// TestStartupClaimRecordsAndToastsPendingNotices proves notices persisted by
+// a previous daemon are recorded to history and toasted to the first client
+// that attaches after this daemon starts before their claim is acknowledged.
+func TestStartupClaimRecordsAndToastsPendingNotices(t *testing.T) {
+	claimed := []domain.Notification{
 		{Code: domain.NoticeSnapshotWrite, Severity: domain.NoticeError, Message: "session a shut down without saving terminal state"},
 		{Code: domain.NoticeSnapshotWrite, Severity: domain.NoticeError, Message: "session b shut down without saving terminal state"},
 	}
 	notices := portsmocks.NewMockNoticeStore(t)
-	notices.EXPECT().Drain().Return(drained, nil).Once()
+	notices.EXPECT().Claim().Return(claimed, nil).Once()
+	notices.EXPECT().Ack().Return(nil).Once()
 
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()

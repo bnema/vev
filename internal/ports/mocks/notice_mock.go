@@ -36,6 +36,50 @@ func (_m *MockNoticeStore) EXPECT() *MockNoticeStore_Expecter {
 	return &MockNoticeStore_Expecter{mock: &_m.Mock}
 }
 
+// Ack provides a mock function for the type MockNoticeStore
+func (_mock *MockNoticeStore) Ack() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for Ack")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockNoticeStore_Ack_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Ack'
+type MockNoticeStore_Ack_Call struct {
+	*mock.Call
+}
+
+// Ack is a helper method to define mock.On call
+func (_e *MockNoticeStore_Expecter) Ack() *MockNoticeStore_Ack_Call {
+	return &MockNoticeStore_Ack_Call{Call: _e.mock.On("Ack")}
+}
+
+func (_c *MockNoticeStore_Ack_Call) Run(run func()) *MockNoticeStore_Ack_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockNoticeStore_Ack_Call) Return(err error) *MockNoticeStore_Ack_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockNoticeStore_Ack_Call) RunAndReturn(run func() error) *MockNoticeStore_Ack_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Append provides a mock function for the type MockNoticeStore
 func (_mock *MockNoticeStore) Append(n domain.Notification) error {
 	ret := _mock.Called(n)
@@ -87,12 +131,12 @@ func (_c *MockNoticeStore_Append_Call) RunAndReturn(run func(n domain.Notificati
 	return _c
 }
 
-// Drain provides a mock function for the type MockNoticeStore
-func (_mock *MockNoticeStore) Drain() ([]domain.Notification, error) {
+// Claim provides a mock function for the type MockNoticeStore
+func (_mock *MockNoticeStore) Claim() ([]domain.Notification, error) {
 	ret := _mock.Called()
 
 	if len(ret) == 0 {
-		panic("no return value specified for Drain")
+		panic("no return value specified for Claim")
 	}
 
 	var r0 []domain.Notification
@@ -115,29 +159,29 @@ func (_mock *MockNoticeStore) Drain() ([]domain.Notification, error) {
 	return r0, r1
 }
 
-// MockNoticeStore_Drain_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Drain'
-type MockNoticeStore_Drain_Call struct {
+// MockNoticeStore_Claim_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Claim'
+type MockNoticeStore_Claim_Call struct {
 	*mock.Call
 }
 
-// Drain is a helper method to define mock.On call
-func (_e *MockNoticeStore_Expecter) Drain() *MockNoticeStore_Drain_Call {
-	return &MockNoticeStore_Drain_Call{Call: _e.mock.On("Drain")}
+// Claim is a helper method to define mock.On call
+func (_e *MockNoticeStore_Expecter) Claim() *MockNoticeStore_Claim_Call {
+	return &MockNoticeStore_Claim_Call{Call: _e.mock.On("Claim")}
 }
 
-func (_c *MockNoticeStore_Drain_Call) Run(run func()) *MockNoticeStore_Drain_Call {
+func (_c *MockNoticeStore_Claim_Call) Run(run func()) *MockNoticeStore_Claim_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		run()
 	})
 	return _c
 }
 
-func (_c *MockNoticeStore_Drain_Call) Return(notifications []domain.Notification, err error) *MockNoticeStore_Drain_Call {
+func (_c *MockNoticeStore_Claim_Call) Return(notifications []domain.Notification, err error) *MockNoticeStore_Claim_Call {
 	_c.Call.Return(notifications, err)
 	return _c
 }
 
-func (_c *MockNoticeStore_Drain_Call) RunAndReturn(run func() ([]domain.Notification, error)) *MockNoticeStore_Drain_Call {
+func (_c *MockNoticeStore_Claim_Call) RunAndReturn(run func() ([]domain.Notification, error)) *MockNoticeStore_Claim_Call {
 	_c.Call.Return(run)
 	return _c
 }

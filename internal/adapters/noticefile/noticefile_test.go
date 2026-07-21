@@ -6,10 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bnema/vev/internal/domain"
 )
 
-func TestStoreAppendDrainRoundTrip(t *testing.T) {
+func TestStoreClaimAckRoundTrip(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "vev")
 	store := New(dir)
@@ -30,110 +32,106 @@ func TestStoreAppendDrainRoundTrip(t *testing.T) {
 		Time:     time.Date(2026, 7, 20, 10, 5, 0, 0, time.UTC),
 		Count:    2,
 	}
+	require.NoError(t, store.Append(first))
+	require.NoError(t, store.Append(second))
 
-	if err := store.Append(first); err != nil {
-		t.Fatalf("Append first: %v", err)
-	}
-	if err := store.Append(second); err != nil {
-		t.Fatalf("Append second: %v", err)
-	}
+	claimed, err := store.Claim()
+	require.NoError(t, err)
+	require.Equal(t, []domain.Notification{first, second}, claimed)
 
-	got, err := store.Drain()
-	if err != nil {
-		t.Fatalf("Drain: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("Drain len = %d, want 2", len(got))
-	}
-	if !got[0].Time.Equal(first.Time) || got[0].Message != first.Message || got[0].Code != first.Code ||
-		got[0].Severity != first.Severity || got[0].Details != first.Details || got[0].Count != first.Count ||
-		got[0].SessionID != first.SessionID {
-		t.Fatalf("first notice round-trip mismatch: got %#v, want %#v", got[0], first)
-	}
-	if !got[1].Time.Equal(second.Time) || got[1].Message != second.Message || got[1].Code != second.Code ||
-		got[1].Severity != second.Severity || got[1].Count != second.Count {
-		t.Fatalf("second notice round-trip mismatch: got %#v, want %#v", got[1], second)
-	}
+	// A fresh store simulates a daemon crash after Claim but before Ack.
+	recovered := New(dir)
+	replayed, err := recovered.Claim()
+	require.NoError(t, err)
+	require.Equal(t, claimed, replayed)
 
-	again, err := store.Drain()
-	if err != nil {
-		t.Fatalf("Drain again: %v", err)
-	}
-	if len(again) != 0 {
-		t.Fatalf("Drain again len = %d, want 0", len(again))
-	}
+	require.NoError(t, recovered.Ack())
+	again, err := New(dir).Claim()
+	require.NoError(t, err)
+	require.Empty(t, again)
 }
 
-func TestStoreDrainMissingFileReturnsNil(t *testing.T) {
+func TestStoreClaimDoesNotLoseAppendAfterRotation(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "vev")
 	store := New(dir)
+	first := domain.Notification{Message: "before claim"}
+	second := domain.Notification{Message: "after claim rotation"}
+	require.NoError(t, store.Append(first))
 
-	got, err := store.Drain()
-	if err != nil {
-		t.Fatalf("Drain: %v", err)
+	rotated := make(chan struct{})
+	allowRead := make(chan struct{})
+	store.afterClaimRead = func() {
+		close(rotated)
+		<-allowRead
 	}
-	if got != nil {
-		t.Fatalf("Drain on missing file = %#v, want nil", got)
-	}
+	claimDone := make(chan []domain.Notification, 1)
+	errDone := make(chan error, 1)
+	go func() {
+		claimed, err := store.Claim()
+		claimDone <- claimed
+		errDone <- err
+	}()
+	<-rotated
+
+	appendDone := make(chan error, 1)
+	go func() { appendDone <- New(dir).Append(second) }()
+	close(allowRead)
+	require.NoError(t, <-errDone)
+	require.Equal(t, []domain.Notification{first}, <-claimDone)
+	require.NoError(t, <-appendDone)
+
+	require.NoError(t, store.Ack())
+	claimed, err := New(dir).Claim()
+	require.NoError(t, err)
+	require.Equal(t, []domain.Notification{second}, claimed)
+	require.NoError(t, New(dir).Ack())
 }
 
-func TestStoreDrainSkipsGarbageLines(t *testing.T) {
+func TestStoreClaimMissingFileReturnsNil(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+
+	got, err := New(filepath.Join(t.TempDir(), "vev")).Claim()
+	require.NoError(t, err)
+	require.Nil(t, got)
+}
+
+func TestStoreClaimSkipsGarbageLinesInOrder(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "vev")
 	store := New(dir)
-	path := filepath.Join(dir, "pending-notices.jsonl")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
+	path := filepath.Join(dir, fileName)
+	require.NoError(t, os.MkdirAll(dir, 0o700))
 
 	good := `{"Code":9,"Severity":2,"Message":"first"}` + "\n"
 	garbage := "not json at all\n"
 	good2 := `{"Code":10,"Severity":1,"Message":"second"}` + "\n"
-	if err := os.WriteFile(path, []byte(good+garbage+good2), 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
+	require.NoError(t, os.WriteFile(path, []byte(good+garbage+good2), 0o600))
 
-	got, err := store.Drain()
-	if err != nil {
-		t.Fatalf("Drain: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("Drain len = %d, want 2 (garbage line skipped)", len(got))
-	}
-	if got[0].Message != "first" || got[1].Message != "second" {
-		t.Fatalf("Drain messages = %q, %q; want first, second", got[0].Message, got[1].Message)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile after drain: %v", err)
-	}
-	if len(data) != 0 {
-		t.Fatalf("file not truncated after Drain, got %d bytes", len(data))
-	}
+	got, err := store.Claim()
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, "first", got[0].Message)
+	require.Equal(t, "second", got[1].Message)
+	require.NoError(t, store.Ack())
 }
 
-func TestStoreAppendPrivatizesDir(t *testing.T) {
+func TestStoreAppendUsesPrivatePermissions(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "vev")
 	store := New(dir)
 
-	if err := store.Append(domain.Notification{Message: "x"}); err != nil {
-		t.Fatalf("Append: %v", err)
-	}
+	require.NoError(t, store.Append(domain.Notification{Message: "x"}))
 	info, err := os.Stat(dir)
-	if err != nil {
-		t.Fatalf("Stat dir: %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0o700 {
-		t.Fatalf("dir mode = %v, want 0700", got)
-	}
-	fi, err := os.Stat(filepath.Join(dir, "pending-notices.jsonl"))
-	if err != nil {
-		t.Fatalf("Stat file: %v", err)
-	}
-	if got := fi.Mode().Perm(); got != 0o600 {
-		t.Fatalf("file mode = %v, want 0600", got)
-	}
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+	fi, err := os.Stat(filepath.Join(dir, fileName))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+
+	_, err = store.Claim()
+	require.NoError(t, err)
+	fi, err = os.Stat(filepath.Join(dir, inFlightFileName))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
 }

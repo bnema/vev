@@ -67,13 +67,19 @@ func (d *Daemon) restoreSnapshots(ctx context.Context) {
 		return
 	}
 	if ns := d.noticeStore; ns != nil {
-		drained, err := ns.Drain()
+		claimed, err := ns.Claim()
 		if err != nil {
-			d.log.Warn("draining pending notices failed", "err", err)
-		}
-		for _, n := range drained {
-			d.notices.record(n)
-			d.notices.queueGlobal(n)
+			d.log.Warn("claiming pending notices failed", "err", err)
+		} else {
+			for _, n := range claimed {
+				d.notices.record(n)
+				d.notices.queueGlobal(n)
+			}
+			// Do not discard the claim until every notice has been recorded and
+			// queued. An Ack failure is safe: the claim is replayed at startup.
+			if err := ns.Ack(); err != nil {
+				d.log.Warn("acknowledging pending notices failed", "err", err)
+			}
 		}
 	}
 	if !d.snapsEnabled || d.snaps == nil {
