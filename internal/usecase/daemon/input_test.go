@@ -648,6 +648,27 @@ func TestPaletteBackSessionDoesNotMoveWithoutValidTarget(t *testing.T) {
 	}
 }
 
+func TestBackSessionReportsStaleHandoffOnce(t *testing.T) {
+	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	target := d.sessions[domain.SessionID("recent")]
+	ac.previousSession.Set(target)
+
+	// A displaced attachment makes the previously valid handoff stale by the
+	// time switchToTarget commits it.
+	current.mu.Lock()
+	current.client = nil
+	current.mu.Unlock()
+
+	d.backSession(current, ac)
+
+	require.Same(t, current, ac.currentSession(), "a stale handoff must leave the attachment on its origin")
+	require.Same(t, target, ac.previousSession.Get(), "a failed handoff remains retryable")
+	history := d.notices.history()
+	require.Len(t, history, 1, "the switch failure must be reported exactly once")
+	require.Equal(t, domain.NoticeSessionUnavailable, history[0].Code)
+}
+
 func TestStaleBackSessionClearPreservesConcurrentTarget(t *testing.T) {
 	ac := &attachedClient{}
 	stale := &session{id: "stale"}

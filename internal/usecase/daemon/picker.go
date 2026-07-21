@@ -564,7 +564,7 @@ func (d *Daemon) killPickerTarget(target picker.Target) error {
 	targetSess := d.sessions[target.Session]
 	d.mu.Unlock()
 	if targetSess != nil {
-		_ = d.killSession(targetSess, ports.ReasonSessionKilled, true)
+		return d.killSession(targetSess, ports.ReasonSessionKilled, true)
 	}
 	return nil
 }

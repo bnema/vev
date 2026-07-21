@@ -35,6 +35,12 @@ func (failingDeleteStore) Range(func(k, v []byte) bool) {}
 func (failingDeleteStore) Sync() error                  { return nil }
 func (failingDeleteStore) Close() error                 { return nil }
 
+type refusingSnapshotDeleteStore struct{ err error }
+
+func (refusingSnapshotDeleteStore) Write(string, []byte) error          { return nil }
+func (refusingSnapshotDeleteStore) Load() ([]ports.SnapshotBlob, error) { return nil, nil }
+func (s refusingSnapshotDeleteStore) Delete(string) error               { return s.err }
+
 func newTestTabWithContext(p ports.PTY, ctx context.Context, cancel context.CancelFunc) *tab {
 	tb := newTab(p, domain.Size{Cols: 80, Rows: 23})
 	tb.ctx, tb.cancel = ctx, cancel
@@ -990,6 +996,33 @@ func TestPickerEnterOnStoppedSessionRestoreFailureSurfacesNoticeAndStaysPut(t *t
 	require.Equal(t, domain.NoticeSessionUnavailable, toasts[0].Code)
 
 	require.Same(t, from, ac.currentSession(), "a failed restore must leave the client on its origin session")
+}
+
+func TestPickerKillActiveSessionSnapshotDeleteRefusalReportsOnceAndKeepsPicker(t *testing.T) {
+	d, from, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	cause := errors.New("snapshot delete refused")
+	WithSnapshotStore(refusingSnapshotDeleteStore{err: cause})(d)
+	target := d.sessions[domain.SessionID("recent")]
+
+	d.enterPicker(from, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(from, ac, []byte("k"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(from, ac, []byte("x"))
+
+	history := d.notices.history()
+	require.Len(t, history, 1, "the refused purge must be reported exactly once")
+	require.Equal(t, domain.NoticeInternal, history[0].Code)
+	require.Contains(t, history[0].Details, cause.Error())
+	require.Len(t, awaitToastCount(t, ac, 1), 1, "the refusal must produce one visible notice")
+
+	require.Same(t, from, ac.currentSession(), "purging another session must preserve the attachment")
+	require.True(t, ac.overlays.pickerActive(), "x refreshes the picker instead of closing it")
+	d.mu.Lock()
+	_, stillActive := d.sessions[target.id]
+	d.mu.Unlock()
+	require.False(t, stillActive, "the purge keeps its existing removal semantics despite cleanup failure")
 }
 
 // TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry
