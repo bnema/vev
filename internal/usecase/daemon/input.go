@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"strconv"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
@@ -212,6 +213,8 @@ func (d *Daemon) writeToPane(sess *session, p *pane, data []byte) {
 			sess.mu.Unlock()
 		}
 		d.log.Error("pty write failed", "err", err, "session", name)
+		d.notify(sess, domain.NoticeError, domain.NoticeInputDropped,
+			"input not delivered to pane", err)
 	}
 }
 

@@ -105,6 +105,26 @@ func newBlockingPTYWithWrites(t *testing.T, writes chan<- []byte) (*portsmocks.M
 	return p, unblock
 }
 
+// newBlockingPTYWithFailingWrite returns a MockPTY whose Write always fails
+// with writeErr, simulating a wedged pty (or a dead child) that cannot
+// accept forwarded keystrokes.
+func newBlockingPTYWithFailingWrite(t *testing.T, writeErr error) (*portsmocks.MockPTY, func()) {
+	t.Helper()
+	p := portsmocks.NewMockPTY(t)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	p.EXPECT().Read(mock.Anything).RunAndReturn(func(b []byte) (int, error) {
+		<-release
+		return 0, io.EOF
+	}).Maybe()
+	p.EXPECT().Write(mock.Anything).Return(0, writeErr).Maybe()
+	p.EXPECT().Resize(mock.Anything).Return(nil).Maybe()
+	p.EXPECT().Close().RunAndReturn(func() error { unblock(); return nil }).Maybe()
+	p.EXPECT().Pid().Return(4242).Maybe()
+	return p, unblock
+}
+
 // quietPTY is an independently closable PTY for background floating prewarms.
 // It intentionally has no testify expectations: tests using the factories below
 // are asserting their regular panes, not incidental asynchronous prewarms.

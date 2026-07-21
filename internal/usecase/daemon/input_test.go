@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -170,6 +171,31 @@ func TestAltCForwardsToPTY(t *testing.T) {
 
 	requirePTYWrite(t, writes, []byte("\x1bc"))
 	releasePTY()
+}
+
+// TestWriteToPaneFailureNotifiesDroppedInput drives forwarded keystrokes into
+// a pane whose pty.Write always fails (a wedged pty, or a dead child). The
+// user's typing must not silently vanish: each failed write records a
+// NoticeInputDropped notice, and repeated failures on the same code coalesce
+// into a single toast with a rising count rather than spamming one per key.
+func TestWriteToPaneFailureNotifiesDroppedInput(t *testing.T) {
+	writeErr := errors.New("write /dev/ptmx: input/output error")
+	p, releasePTY := newBlockingPTYWithFailingWrite(t, writeErr)
+	defer releasePTY()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+
+	for range 5 {
+		d.handleInput(sess, ac, []byte("x"))
+	}
+
+	toasts := awaitToastCount(t, ac, 1)
+	require.Equal(t, domain.NoticeInputDropped, toasts[0].Code)
+	require.Equal(t, domain.NoticeError, toasts[0].Severity)
+	require.Equal(t, "input not delivered to pane", toasts[0].Message)
+	require.Equal(t, 5, toasts[0].Count, "5 failed writes must coalesce into one toast, not one per keystroke")
+
+	hist := d.notices.history()
+	require.Len(t, hist, 5, "coalescing is display-only; history keeps every occurrence")
 }
 
 func TestAltFToggleRetainedFloatingPaneRepaintsImmediately(t *testing.T) {
