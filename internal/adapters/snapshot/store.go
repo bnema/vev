@@ -72,7 +72,7 @@ func (s *Store) Write(name string, data []byte) error {
 		return fmt.Errorf("rename snapshot: %w", err)
 	}
 	keepTmp = true
-	if err := syncDir(s.dir); err != nil {
+	if err := syncDirectory(s.dir); err != nil {
 		return fmt.Errorf("sync snapshot dir: %w", err)
 	}
 	return nil
@@ -101,7 +101,7 @@ func (s *Store) Load() ([]ports.SnapshotBlob, error) {
 		if entry.IsDir() || !strings.HasSuffix(base, ".snap") {
 			continue
 		}
-		data, err := readSnapshotFileBounded(path)
+		data, err := readBounded(path)
 		if err != nil {
 			s.log.Warn("read snapshot", "path", path, "err", err)
 			continue
@@ -124,14 +124,10 @@ func (s *Store) Delete(name string) error {
 	if err != nil {
 		return fmt.Errorf("delete snapshot: %w", err)
 	}
-	if err := syncDir(s.dir); err != nil {
+	if err := syncDirectory(s.dir); err != nil {
 		return fmt.Errorf("sync snapshot dir: %w", err)
 	}
 	return nil
-}
-
-func readSnapshotFileBounded(path string) ([]byte, error) {
-	return readBounded(path)
 }
 
 func filenameForName(name string) string {
@@ -140,8 +136,4 @@ func filenameForName(name string) string {
 	}
 	sum := sha256.Sum256([]byte(name))
 	return "@" + hex.EncodeToString(sum[:])[:40] + ".snap"
-}
-
-func syncDir(dir string) error {
-	return syncDirectory(dir)
 }
