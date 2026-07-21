@@ -13,6 +13,10 @@ const (
 	repositoryHead        = "HEAD"
 	generationWidth       = 20
 	maxRepositoryRead     = maxSnapshotFileSize
+	// Legacy import is deliberately smaller than the per-file parser ceiling:
+	// importing old snapshots must not accumulate an unbounded startup payload.
+	maxLegacySnapshotFiles = 64
+	maxLegacySnapshotBytes = 8 << 20
 )
 
 // Repository is the crash-safe, content-addressed session snapshot store.

@@ -17,9 +17,15 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	lock := r.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	refs, supplied, err := validatePublication(publication)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := r.ensureSession(key); err != nil {
@@ -61,6 +67,9 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 				return err
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := r.writeImmutable(path, object.Data, func(existing []byte) error {
 			if sha256.Sum256(existing) != digest || !validObject(existing, ref) {
 				return fmt.Errorf("existing immutable object is invalid")
@@ -86,6 +95,9 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 				return err
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := r.writeImmutable(manifestPath, publication.Manifest, func(existing []byte) error {
 			if !equalBytes(existing, publication.Manifest) {
 				return fmt.Errorf("manifest generation %d: immutable conflict", publication.Generation)
@@ -99,6 +111,9 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		if err := r.hooks.beforeHeadWrite(r.headPath(key)); err != nil {
 			return err
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := r.writeMutable(r.headPath(key), marshalHead(publication.Generation, sha256.Sum256(publication.Manifest))); err != nil {
 		return fmt.Errorf("write HEAD: %w", err)

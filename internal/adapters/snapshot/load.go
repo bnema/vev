@@ -65,6 +65,9 @@ func (r *Repository) Load(ctx context.Context, name string) (ports.SnapshotGener
 	lock := r.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := ctx.Err(); err != nil {
+		return ports.SnapshotGeneration{}, err
+	}
 	return r.load(ctx, name, key)
 }
 

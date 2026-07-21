@@ -3,8 +3,10 @@ package snapshot
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -30,6 +32,37 @@ func TestRepositoryLegacyReadsOnlyBoundedRootSnapshots(t *testing.T) {
 	if len(got) != 2 || got[0].Name != "" || got[1].Name != "named" {
 		t.Fatalf("LoadLegacy = %#v, want root safe and hashed snapshots", got)
 	}
+}
+
+func TestRepositoryLegacyRejectsTooManyAndTooLargeAggregateSnapshots(t *testing.T) {
+	t.Run("count", func(t *testing.T) {
+		repo := NewRepository(privateDir(t))
+		if err := os.Mkdir(repo.dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < maxLegacySnapshotFiles+1; i++ {
+			if err := os.WriteFile(filepath.Join(repo.dir, fmt.Sprintf("%03d.snap", i)), []byte("legacy"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := repo.LoadLegacy(context.Background()); err == nil || !strings.Contains(err.Error(), "too many") {
+			t.Fatalf("LoadLegacy error = %v, want actionable count limit", err)
+		}
+	})
+	t.Run("aggregate bytes", func(t *testing.T) {
+		repo := NewRepository(privateDir(t))
+		if err := os.Mkdir(repo.dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for i, size := range []int{maxLegacySnapshotBytes / 2, maxLegacySnapshotBytes/2 + 1} {
+			if err := os.WriteFile(filepath.Join(repo.dir, fmt.Sprintf("%d.snap", i)), make([]byte, size), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := repo.LoadLegacy(context.Background()); err == nil || !strings.Contains(err.Error(), "aggregate") {
+			t.Fatalf("LoadLegacy error = %v, want actionable aggregate limit", err)
+		}
+	})
 }
 
 func TestRepositoryDeleteLegacyMissingFileDoesNotRequireRoot(t *testing.T) {

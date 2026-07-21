@@ -140,6 +140,134 @@ func TestRepositoryMaintainPreservesIncompleteManifestReferences(t *testing.T) {
 	}
 }
 
+func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.T) {
+	t.Run("publish", func(t *testing.T) {
+		repo := NewRepository(privateDir(t))
+		key := sessionKey("named")
+		lock := repo.sessionLock(key)
+		lock.Lock()
+		ctx, cancel := context.WithCancel(context.Background())
+		started := make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			close(started)
+			done <- repo.Publish(ctx, repositoryPublication(t, "named", 1, []byte("state")))
+		}()
+		<-started
+		cancel()
+		lock.Unlock()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("Publish error = %v, want canceled", err)
+		}
+		if _, err := os.Lstat(repo.dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Publish mutated canceled repository: %v", err)
+		}
+	})
+	t.Run("load and delete", func(t *testing.T) {
+		repo := NewRepository(privateDir(t))
+		if err := repo.Publish(context.Background(), repositoryPublication(t, "named", 1, []byte("state"))); err != nil {
+			t.Fatal(err)
+		}
+		key := sessionKey("named")
+		for _, operation := range []struct {
+			name string
+			run  func(context.Context) error
+		}{
+			{"load", func(ctx context.Context) error { _, err := repo.Load(ctx, "named"); return err }},
+			{"delete", func(ctx context.Context) error { return repo.Delete(ctx, "named") }},
+		} {
+			t.Run(operation.name, func(t *testing.T) {
+				lock := repo.sessionLock(key)
+				lock.Lock()
+				ctx, cancel := context.WithCancel(context.Background())
+				started := make(chan struct{})
+				done := make(chan error, 1)
+				go func() { close(started); done <- operation.run(ctx) }()
+				<-started
+				cancel()
+				lock.Unlock()
+				if err := <-done; !errors.Is(err, context.Canceled) {
+					t.Fatalf("%s error = %v, want canceled", operation.name, err)
+				}
+				if _, err := repo.Load(context.Background(), "named"); err != nil {
+					t.Fatalf("%s mutated session: %v", operation.name, err)
+				}
+			})
+		}
+	})
+	t.Run("maintain", func(t *testing.T) {
+		repo := NewRepository(privateDir(t))
+		if err := repo.Publish(context.Background(), repositoryPublication(t, "named", 1, []byte("state"))); err != nil {
+			t.Fatal(err)
+		}
+		lock := repo.sessionLock(sessionKey("named"))
+		lock.Lock()
+		ctx, cancel := context.WithCancel(context.Background())
+		started := make(chan struct{})
+		done := make(chan error, 1)
+		go func() { close(started); done <- repo.Maintain(ctx) }()
+		<-started
+		cancel()
+		lock.Unlock()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("Maintain error = %v, want canceled", err)
+		}
+		if _, err := repo.Load(context.Background(), "named"); err != nil {
+			t.Fatalf("Maintain mutated session: %v", err)
+		}
+	})
+}
+
+func TestRepositoryDeleteRetriesPendingQuarantineSyncWithoutDeletingRecreatedSession(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	if err := repo.Publish(context.Background(), repositoryPublication(t, "named", 1, []byte("old"))); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("sessions sync")
+	repo.hooks.syncDirectory = func(string) error { return injected }
+	if err := repo.Delete(context.Background(), "named"); !errors.Is(err, injected) {
+		t.Fatalf("Delete error = %v, want sync failure", err)
+	}
+	repo.hooks.syncDirectory = nil
+	if err := repo.Publish(context.Background(), repositoryPublication(t, "named", 1, []byte("new"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Delete(context.Background(), "named"); err != nil {
+		t.Fatalf("retry Delete: %v", err)
+	}
+	if _, err := repo.Load(context.Background(), "named"); err != nil {
+		t.Fatalf("recreated session was deleted: %v", err)
+	}
+}
+
+func TestRepositoryMaintainResumesNestedQuarantineWithinBatch(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	quarantine := filepath.Join(repo.dir, repositorySessionsDir, ".deleting-named-test")
+	for i := 0; i < maintenanceBatch+1; i++ {
+		path := filepath.Join(quarantine, "nested", string(rune('a'+i)))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repo.Maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(quarantine); errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("quarantine after one bounded call = %v, want remaining tree", err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := repo.Maintain(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Lstat(quarantine); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("quarantine after resumed maintenance = %v, want removed", err)
+	}
+}
+
 func TestRepositoryMaintainUsesFixedRemovalBatch(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	if err := os.Mkdir(repo.dir, 0o700); err != nil {
