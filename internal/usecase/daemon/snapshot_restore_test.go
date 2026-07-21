@@ -497,6 +497,55 @@ func TestRestoreSnapshotsSkipsCreatedAtOverflow(t *testing.T) {
 	require.Nil(t, restored)
 }
 
+// TestRestoreSnapshotsNotifiesGlobalOnUnrestorableSnapshots proves each
+// unrestorable snapshot is recorded to history individually, while the
+// pending-global queue dedups them by code into a single toast with the
+// combined Count. Both blobs decode fine (valid snapcodec bytes, Marshal
+// itself validates Active/tab range) but fail in restoreSession itself: an
+// empty embedded session name is rejected deterministically, before any lock
+// is taken or PTY is opened.
+func TestRestoreSnapshotsNotifiesGlobalOnUnrestorableSnapshots(t *testing.T) {
+	badSnap := mustSnapshotBytes(t, snapcodec.Session{Name: ""})
+	store := &restoreSnapshotStore{blobs: []ports.SnapshotBlob{
+		{Name: "bad-1", Data: badSnap},
+		{Name: "bad-2", Data: badSnap},
+	}}
+	factory := &restorePTYFactory{}
+	d := newTestDaemon(t, factory, newNoticeClock())
+	WithSnapshotStore(store)(d)
+
+	// Mirrors real startup (daemon.go's Serve): restoreSnapshots runs off the
+	// caller goroutine and signals completion by closing d.restoreDone.
+	d.sessWg.Go(func() { d.restoreSnapshots(d.serveCtx) })
+
+	select {
+	case <-d.restoreDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("restoreSnapshots did not close restoreDone in time")
+	}
+
+	require.Empty(t, factory.opens, "both snapshots must fail before any PTY is opened")
+	require.Len(t, d.notices.history(), 2, "each failure is recorded individually")
+	for _, n := range d.notices.history() {
+		require.Equal(t, domain.NoticeSnapshotRestore, n.Code)
+		require.Equal(t, domain.NoticeError, n.Severity)
+	}
+
+	tr, _ := newCapturingTransport(t)
+	sess, ac, err := d.route(ports.Hello{
+		Version: ports.ProtocolVersion,
+		Intent:  ports.IntentEphemeral,
+		Size:    domain.Size{Cols: 80, Rows: 24},
+	}, tr)
+	require.NoError(t, err)
+	d.firstPaint(sess, ac, ac.size)
+
+	toasts := awaitToastCount(t, ac, 1)
+	require.Equal(t, domain.NoticeSnapshotRestore, toasts[0].Code)
+	require.Equal(t, 2, toasts[0].Count, "two same-code failures dedup into one toast counted twice")
+	require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
+}
+
 func TestNamedRouteWaitsForRestoreBarrier(t *testing.T) {
 	releaseLoad := make(chan struct{})
 	loaded := make(chan struct{})

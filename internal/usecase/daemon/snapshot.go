@@ -69,6 +69,8 @@ func (d *Daemon) restoreSnapshots(ctx context.Context) {
 	blobs, err := d.snaps.Load()
 	if err != nil {
 		d.log.Warn("loading session snapshots failed", "err", err)
+		d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotRestore,
+			"couldn't load saved sessions after restart", err)
 		return
 	}
 	for _, blob := range blobs {
@@ -80,10 +82,14 @@ func (d *Daemon) restoreSnapshots(ctx context.Context) {
 		snap, err := snapcodec.Unmarshal(blob.Data)
 		if err != nil {
 			d.log.Warn("decoding session snapshot failed", "err", err, "session", blob.Name)
+			d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotRestore,
+				"couldn't restore session "+blob.Name+" after restart", err)
 			continue
 		}
 		if err := d.restoreSession(ctx, snap); err != nil {
 			d.log.Warn("restoring session snapshot failed", "err", err, "session", snap.Name)
+			d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotRestore,
+				"couldn't restore session "+snap.Name+" after restart", err)
 		}
 	}
 }
