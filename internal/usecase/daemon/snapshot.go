@@ -268,7 +268,7 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		return nil
 	}
 	createdAt := int64(snap.CreatedAt)
-	sess := &session{name: snap.Name, ctx: sctx, cancel: cancel, tabs: opened, active: int(snap.Active), terminal: restoreTerm, env: restoreEnv, createdAt: createdAt, snapshotWake: d.snapshotWake}
+	sess := &session{name: snap.Name, ctx: sctx, cancel: cancel, tabs: opened, active: int(snap.Active), terminal: restoreTerm, env: restoreEnv, createdAt: createdAt, snapshotWake: d.snapshotWake, snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit)}
 	sess.snapEligible.Store(true)
 	if len(snap.Tabs) > 0 && len(snap.Tabs[0].Panes) > 0 {
 		sess.cwd = snap.Tabs[0].Panes[0].Cwd
@@ -392,6 +392,7 @@ func resumeSnapshotCoordinatorForNewIdentity(sess *session, quarantine snapshotC
 	sess.snapshotAttempted = false
 	sess.snapshotAttemptKind = snapshotAttemptRoutine
 	sess.snapshotFailureSig = ""
+	sess.snapshotChunkCache = newSnapshotChunkCache(snapshotChunkCacheLimit)
 	sess.snapDirty.Store(true)
 	sess.snapEligible.Store(true)
 	sess.signalSnapshotChangedLocked()

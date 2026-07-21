@@ -132,11 +132,7 @@ type Daemon struct {
 	legacyImportPending map[string][]byte
 	noticeStore         ports.NoticeStore
 	snapshotMarshal     func(snapcodec.Session) ([]byte, error)
-	// snapshotChunkCache contains only encoded immutable sealed chunks. It is
-	// independent of pane state and is bounded to prevent checkpoint history
-	// from becoming unbounded daemon memory.
-	snapshotChunkCache *snapshotChunkCache
-	snapshotJobs       chan *snapshotCapture
+	snapshotJobs        chan *snapshotCapture
 	// snapshotWake wakes the repository scheduler when a session becomes dirty
 	// or an attempt completes. It is never closed and producers only send
 	// non-blockingly.
@@ -392,7 +388,6 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		restoreDone:         make(chan struct{}),
 		animWake:            make(chan struct{}, 1),
 		snapshotMarshal:     snapcodec.Marshal,
-		snapshotChunkCache:  newSnapshotChunkCache(snapshotChunkCacheLimit),
 		legacyImportPending: make(map[string][]byte),
 		snapshotJobs:        make(chan *snapshotCapture, snapshotQueueCapacity),
 		snapshotWake:        make(chan struct{}, 1),

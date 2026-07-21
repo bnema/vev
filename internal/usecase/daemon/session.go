@@ -83,6 +83,10 @@ type session struct {
 	// snapshotFailureSig is the stable class of the active failed publication.
 	// It is guarded by snapshotMu and deliberately never contains error text.
 	snapshotFailureSig string
+	// snapshotChunkCache retains encoded sealed history only for this named
+	// session. snapshotMu owns it so cache touches never contend with pane
+	// state or mutate bytes retained by queued/in-flight publications.
+	snapshotChunkCache *snapshotChunkCache
 	snapshotChanged    chan struct{}
 	snapshotWake       chan struct{}
 	// syncGen makes synchronized-output watchdog generations unique across all
@@ -229,6 +233,9 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		env:          env,
 		createdAt:    createdAt,
 		snapshotWake: d.snapshotWake,
+	}
+	if !ephemeral && name != "" {
+		sess.snapshotChunkCache = newSnapshotChunkCache(snapshotChunkCacheLimit)
 	}
 	if lastUsedSeq > 0 {
 		sess.mruAt.Store(lastUsedSeq)
@@ -650,6 +657,11 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		resumeSnapshotCoordinatorForNewIdentity(sess, quarantine)
 		return nil
 	}
+	if wasEphemeral {
+		sess.snapshotMu.Lock()
+		sess.snapshotChunkCache = newSnapshotChunkCache(snapshotChunkCacheLimit)
+		sess.snapshotMu.Unlock()
+	}
 	markSnapshotDirty(sess)
 	return nil
 }
@@ -911,6 +923,14 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 				d.persistShutdownSnapshotFailure(name, terminalSnapshotErr)
 			}
 		}
+	}
+	if !isEphemeral {
+		// Joining first preserves byte ownership for a publication that is still
+		// encoding while this session is being torn down.
+		<-quarantineSnapshotCoordinator(sess)
+		sess.snapshotMu.Lock()
+		sess.snapshotChunkCache = nil
+		sess.snapshotMu.Unlock()
 	}
 	d.mu.Lock()
 	if _, ok := d.sessions[sess.id]; !ok {

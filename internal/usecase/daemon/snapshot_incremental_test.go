@@ -41,7 +41,8 @@ func TestIncrementalPublicationReusesSealedChunkObject(t *testing.T) {
 	view := history.SealAndView()
 	visible := vt.NewScreen(1, 1).PrimaryVisibleSnapshot()
 	d := New(nil, nil, nil)
-	capture := &snapshotCapture{name: "work", generation: 1, tabs: []snapshotCaptureTab{{stableID: "t", cols: 1, rows: 1, panes: []snapshotCapturePane{{id: "p", stableID: "p", history: view, visible: visible}}}}}
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	capture := &snapshotCapture{session: sess, name: "work", generation: 1, tabs: []snapshotCaptureTab{{stableID: "t", cols: 1, rows: 1, panes: []snapshotCapturePane{{id: "p", stableID: "p", history: view, visible: visible}}}}}
 	first, err := d.incrementalPublication(capture)
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +55,7 @@ func TestIncrementalPublicationReusesSealedChunkObject(t *testing.T) {
 	if len(first.Objects) == 0 || len(second.Objects) == 0 {
 		t.Fatal("publication omitted required objects")
 	}
-	if got, want := d.snapshotChunkCache.used, d.snapshotChunkCache.limit; got > want {
+	if got, want := sess.snapshotChunkCache.used, sess.snapshotChunkCache.limit; got > want {
 		t.Fatalf("cache bytes = %d, limit = %d", got, want)
 	}
 }
