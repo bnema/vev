@@ -77,11 +77,17 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	d.repaintAllAttachedClients()
 
 	if len(allWarnings) > 0 {
-		first := allWarnings[0]
 		d.notify(nil, domain.NoticeWarn, domain.NoticeConfigReload,
-			fmt.Sprintf("config reloaded with %d warning(s): line %d: %s", len(allWarnings), first.Line, first.Msg),
-			configWarningsError(allWarnings))
+			configReloadNoticeMessage(allWarnings), configWarningsError(allWarnings))
 	}
+}
+
+func configReloadNoticeMessage(warnings []domain.Warning) string {
+	first := warnings[0]
+	if first.Line > 0 {
+		return fmt.Sprintf("config reloaded with %d warning(s): line %d: %s", len(warnings), first.Line, first.Msg)
+	}
+	return fmt.Sprintf("config reloaded with %d warning(s): %s", len(warnings), first.Msg)
 }
 
 // configWarningsError joins every config warning into a single error whose

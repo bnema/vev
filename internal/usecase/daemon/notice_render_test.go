@@ -92,7 +92,7 @@ func TestPaintComposesNoticeToastTopRightAndExpiresOnTTL(t *testing.T) {
 		t.Fatalf("composed frame missing toast message top-right:\n%s", strings.Join(rows, "\n"))
 	}
 
-	clk.advance(8 * time.Second) // error-severity TTL, per noticeTTL
+	clk.advance(noticeTTL(domain.NoticeError))
 	awaitToastCount(t, ac, 0)
 	select {
 	case f := <-sends:

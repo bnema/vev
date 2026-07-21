@@ -690,7 +690,7 @@ func TestMsgTypeConstantsDistinct(t *testing.T) {
 			ReasonReplaced:       "ReasonReplaced",
 		}
 		if len(vals) != 4 {
-			t.Fatalf("expected 3 distinct detached reasons, got %d", len(vals))
+			t.Fatalf("expected 4 distinct detached reasons, got %d", len(vals))
 		}
 	})
 }

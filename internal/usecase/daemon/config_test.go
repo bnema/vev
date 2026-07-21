@@ -560,6 +560,30 @@ func TestApplyConfigInvalidDefaultsWithoutPanic(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestConfigReloadNoticeMessageIncludesLineOnlyWhenKnown(t *testing.T) {
+	tests := []struct {
+		name     string
+		warnings []domain.Warning
+		want     string
+	}{
+		{
+			name:     "no source line",
+			warnings: []domain.Warning{{Msg: "unknown action"}},
+			want:     "config reloaded with 1 warning(s): unknown action",
+		},
+		{
+			name:     "source line",
+			warnings: []domain.Warning{{Line: 12, Msg: "unknown action"}},
+			want:     "config reloaded with 1 warning(s): line 12: unknown action",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, configReloadNoticeMessage(tt.warnings))
+		})
+	}
+}
+
 func TestApplyConfigSurfacesOneNoticeAggregatingAllWarnings(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	d.ApplyConfig(domain.Config{
@@ -586,6 +610,7 @@ func TestApplyConfigSurfacesOneNoticeAggregatingAllWarnings(t *testing.T) {
 	require.Equal(t, domain.NoticeWarn, n.Severity)
 	require.Equal(t, domain.SessionID(""), n.SessionID, "config reload notice must be global")
 	require.Contains(t, n.Message, "config reloaded with 3 warning(s):")
+	require.NotContains(t, n.Message, "line 0:")
 	require.Contains(t, n.Details, `unknown action "unknown-action"`)
 	require.Contains(t, n.Details, `unknown command code slug "missing-command"`)
 	require.Contains(t, n.Details, `invalid command code for "new-tab"`)

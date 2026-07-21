@@ -62,10 +62,10 @@ func (d *Daemon) closeRestoreDone() {
 }
 
 func (d *Daemon) restoreSnapshots(ctx context.Context) {
-	defer d.closeRestoreDone()
 	if d == nil {
 		return
 	}
+	defer d.closeRestoreDone()
 	if ns := d.noticeStore; ns != nil {
 		claimed, err := ns.Claim()
 		if err != nil {

@@ -110,22 +110,47 @@ func TestPromptSubmitSessionSpawnFailureReportsOneSafeNotice(t *testing.T) {
 }
 
 func TestPromptSubmitValidationErrorStaysInlineOnly(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	tests := []struct {
+		name    string
+		input   []byte
+		wantErr error
+		setup   func(*Daemon)
+	}{
+		{name: "invalid name", input: []byte("invalid name\r"), wantErr: domain.ErrInvalidSessionName},
+		{name: "required name", input: []byte("\r"), wantErr: errSessionNameRequired},
+		{
+			name:    "name in use",
+			input:   []byte("taken\r"),
+			wantErr: errSessionNameInUse,
+			setup: func(d *Daemon) {
+				d.sessions["taken"] = &session{id: "taken", name: "taken"}
+			},
+		},
+	}
 
-	d.enterPrompt(sess, ac, " Create session ", "", func(name string) error {
-		return d.createSessionAndSwitch(sess, ac, name)
-	})
-	awaitFrame(t, sends, ports.MsgOutput)
-	d.handlePromptInput(ac, []byte("invalid name\r"))
-	repaint := awaitFrame(t, sends, ports.MsgOutput)
-	output, err := ports.UnmarshalOutput(repaint.Payload)
-	require.NoError(t, err)
-	require.Contains(t, string(output.Data), domain.ErrInvalidSessionName.Error())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			defer release()
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			if tt.setup != nil {
+				tt.setup(d)
+			}
 
-	require.True(t, ac.overlays.promptActive())
-	require.Empty(t, d.notices.history())
+			d.enterPrompt(sess, ac, " Create session ", "", func(name string) error {
+				return d.createSessionAndSwitch(sess, ac, name)
+			})
+			awaitFrame(t, sends, ports.MsgOutput)
+			d.handlePromptInput(ac, tt.input)
+			repaint := awaitFrame(t, sends, ports.MsgOutput)
+			output, err := ports.UnmarshalOutput(repaint.Payload)
+			require.NoError(t, err)
+			require.Contains(t, string(output.Data), tt.wantErr.Error())
+
+			require.True(t, ac.overlays.promptActive())
+			require.Empty(t, d.notices.history())
+		})
+	}
 }
 
 func TestPromptEscapeCancelsWithoutRename(t *testing.T) {

@@ -59,6 +59,11 @@ func TestRestorePaneTerminalRejectsMissingOrMalformedCanonicalBlobs(t *testing.T
 	}
 }
 
+func TestRestoreSnapshotsNilDaemonDoesNotPanic(t *testing.T) {
+	var d *Daemon
+	require.NotPanics(t, func() { d.restoreSnapshots(t.Context()) })
+}
+
 func TestRestoreSessionRejectsInvalidActiveTab(t *testing.T) {
 	factory := &restorePTYFactory{}
 	d := newTestDaemon(t, factory, stubClock{})

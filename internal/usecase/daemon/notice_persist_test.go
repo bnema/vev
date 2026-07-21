@@ -51,7 +51,8 @@ func TestKillSessionServerShutdownSaturatedAppendsNotice(t *testing.T) {
 	}
 
 	target := newSnapshotTestSession(t, "target", false, "/work")
-	targetPTY := target.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+	targetPTY, ok := target.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+	require.True(t, ok, "target pane PTY must be a MockPTY")
 	targetPTY.EXPECT().Close().Return(nil).Maybe()
 	d.mu.Lock()
 	d.sessions[target.id] = target
@@ -92,7 +93,8 @@ func TestKillSessionServerShutdownNotSaturatedSkipsAppend(t *testing.T) {
 	d.noticeStore = notices
 
 	target := newSnapshotTestSession(t, "target", false, "/work")
-	targetPTY := target.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+	targetPTY, ok := target.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+	require.True(t, ok, "target pane PTY must be a MockPTY")
 	targetPTY.EXPECT().Close().Return(nil).Maybe()
 	d.mu.Lock()
 	d.sessions[target.id] = target

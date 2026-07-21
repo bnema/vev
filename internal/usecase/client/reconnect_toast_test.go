@@ -141,32 +141,31 @@ func newReconnectToastRecordingTransport(recvs ...reconnectToastRecv) *reconnect
 }
 
 type reconnectToastLinkTransport struct {
-	mu     sync.Mutex
-	recvCh chan reconnectToastRecv
-	sends  []ports.Frame
-	events chan ports.LinkEvent
-	state  ports.LinkState
+	recvCh        chan reconnectToastRecv
+	clientNotices chan ports.ClientNotice
+	events        chan ports.LinkEvent
+	state         ports.LinkState
 }
 
 func newReconnectToastLinkTransport() *reconnectToastLinkTransport {
 	return &reconnectToastLinkTransport{
-		recvCh: make(chan reconnectToastRecv, 4),
-		events: make(chan ports.LinkEvent, 4),
-		state:  ports.LinkStateConnected,
+		recvCh:        make(chan reconnectToastRecv, 4),
+		clientNotices: make(chan ports.ClientNotice, 2),
+		events:        make(chan ports.LinkEvent, 4),
+		state:         ports.LinkStateConnected,
 	}
 }
 
 func (t *reconnectToastLinkTransport) Send(f ports.Frame) error {
-	t.mu.Lock()
-	t.sends = append(t.sends, f)
-	t.mu.Unlock()
+	if f.Type != ports.MsgClientNotice {
+		return nil
+	}
+	notice, err := ports.UnmarshalClientNotice(f.Payload)
+	if err != nil {
+		return err
+	}
+	t.clientNotices <- notice
 	return nil
-}
-
-func (t *reconnectToastLinkTransport) sentFrames() []ports.Frame {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return append([]ports.Frame(nil), t.sends...)
 }
 
 func (t *reconnectToastLinkTransport) Recv() (ports.Frame, error) {
@@ -305,19 +304,8 @@ func TestReconnectLinkEventsNotifyDaemonWithoutLocalTerminalWrites(t *testing.T)
 
 	tr.events <- ports.LinkEvent{State: ports.LinkStateDegraded}
 	tr.events <- ports.LinkEvent{State: ports.LinkStateConnected}
-	require.Eventually(t, func() bool {
-		var actions []uint8
-		for _, frame := range tr.sentFrames() {
-			if frame.Type != ports.MsgClientNotice {
-				continue
-			}
-			notice, err := ports.UnmarshalClientNotice(frame.Payload)
-			if err == nil {
-				actions = append(actions, notice.Action)
-			}
-		}
-		return len(actions) == 2 && actions[0] == ports.ClientNoticeLinkDegraded && actions[1] == ports.ClientNoticeLinkConnected
-	}, time.Second, time.Millisecond)
+	require.Equal(t, ports.ClientNoticeLinkDegraded, (<-tr.clientNotices).Action)
+	require.Equal(t, ports.ClientNoticeLinkConnected, (<-tr.clientNotices).Action)
 	select {
 	case bytes := <-out.completed:
 		t.Fatalf("link notices wrote client-local terminal bytes: %q", bytes)

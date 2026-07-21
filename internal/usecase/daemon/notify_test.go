@@ -42,7 +42,8 @@ func TestClientNoticeMapsFixedActionsAndDismissesOnlyConnectionToast(t *testing.
 
 func TestMalformedClientNoticeIsIgnored(t *testing.T) {
 	d, _, ac, _ := newNoticeFixture(t, &noticeClock{})
-	tr := ac.tr.(*portsmocks.MockTransport)
+	tr, ok := ac.tr.(*portsmocks.MockTransport)
+	require.True(t, ok, "attached client transport must be a MockTransport")
 	frames := []ports.Frame{
 		{Type: ports.MsgClientNotice, Payload: []byte{0xff}},
 		{Type: ports.MsgDetach, Payload: ports.MarshalDetach(ports.Detach{})},
