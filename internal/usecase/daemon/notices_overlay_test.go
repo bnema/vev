@@ -271,6 +271,44 @@ func TestNoticesYKeyYanksSelectedNotification(t *testing.T) {
 	require.True(t, ac.overlays.noticesActive())
 }
 
+func TestNoticesBatchedYankCapturesSelectionAtY(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        []byte
+		wantYanked   string
+		wantSelected string
+	}{
+		{name: "yank then down", input: []byte("yj"), wantYanked: "third", wantSelected: "second"},
+		{name: "down then yank", input: []byte("jy"), wantYanked: "second", wantSelected: "second"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			defer release()
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			d.notices.record(domain.Notification{Code: domain.NoticePaneSpawn, Message: "first", Time: time.Unix(1, 0)})
+			d.notices.record(domain.Notification{Code: domain.NoticeTabSpawn, Message: "second", Time: time.Unix(2, 0)})
+			d.notices.record(domain.Notification{Code: domain.NoticeInternal, Message: "third", Time: time.Unix(3, 0)})
+
+			d.enterNotices(sess, ac)
+			awaitFrame(t, sends, ports.MsgOutput)
+			d.handleInput(sess, ac, tt.input)
+
+			out := awaitFrame(t, sends, ports.MsgOutput)
+			msg, err := ports.UnmarshalOutput(out.Payload)
+			require.NoError(t, err)
+			payload := strings.TrimSuffix(strings.TrimPrefix(string(msg.Data), "\x1b]52;c;"), "\a")
+			decoded, err := base64.StdEncoding.DecodeString(payload)
+			require.NoError(t, err)
+			require.Contains(t, string(decoded), "\n"+tt.wantYanked+"\n")
+
+			selected, ok := ac.overlays.noticesOverlay.Selected()
+			require.True(t, ok)
+			require.Equal(t, tt.wantSelected, selected.Message)
+		})
+	}
+}
+
 func TestNoticesYKeyWithNoSelectionIsNoOp(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)

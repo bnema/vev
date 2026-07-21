@@ -171,17 +171,15 @@ func (d *Daemon) handleNoticesInput(ac *attachedClient, data []byte) {
 		rt.noticeMu.Unlock()
 		return
 	}
+	var yankTarget domain.Notification
+	var yank bool
 	result := handleListInputLocked(d.clock, data, d.noticesListInputState(ac), func(b byte) listInputResult {
 		if b == 'y' {
+			yankTarget, yank = rt.noticesOverlay.Selected()
 			return listInputResult{action: b}
 		}
 		return listInputResult{}
 	})
-	var yankTarget domain.Notification
-	yank := result.action == 'y'
-	if yank {
-		yankTarget, yank = rt.noticesOverlay.Selected()
-	}
 	rt.noticeMu.Unlock()
 
 	if result.exit {
