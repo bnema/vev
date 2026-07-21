@@ -137,9 +137,9 @@ func TestChunkCodecRejectsDimensionsBeyondSupportedLimits(t *testing.T) {
 			data: historyPayloadWithDimensions(supportedRows+1, 0),
 		},
 		{
-			name: "too many aggregate cells",
-			view: historyViewWithDimensions(maxHistoryCells+1, 0),
-			data: historyPayloadWithDimensions(maxHistoryRows+1, 0),
+			name: "too many aggregate cells within row budget",
+			view: historyViewWithDimensions(maxHistoryRows, maxHistoryRowCells+1),
+			data: historyPayloadWithDimensions(maxHistoryRows, maxHistoryRowCells+1),
 		},
 	}
 

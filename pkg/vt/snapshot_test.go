@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bnema/vev/pkg/renderer"
 	"github.com/stretchr/testify/require"
 )
 
@@ -46,6 +47,22 @@ func TestHistorySnapshotViewDoesNotSealTailAndCopiesIt(t *testing.T) {
 	decoded, err := UnmarshalHistory(tail)
 	require.NoError(t, err)
 	require.Equal(t, []string{"CCCC"}, historyViewTexts(decoded))
+}
+
+func TestHistoryFromBlobsNormalizesFullTailBeforeAppend(t *testing.T) {
+	fullTail, err := MarshalHistory(HistoryView{
+		chunks: []*HistoryChunk{{rows: [][]renderer.Cell{historyRow("AAAA"), historyRow("BBBB")}}},
+		rows:   2,
+	})
+	require.NoError(t, err)
+
+	restored, err := HistoryFromBlobs(HistoryConfig{MaxRows: 4, ChunkRows: 2}, nil, fullTail)
+	require.NoError(t, err)
+	require.NoError(t, restored.Append(historyRow("CCCC")))
+
+	require.Equal(t, []string{"AAAA", "BBBB", "CCCC"}, historyViewTexts(restored.View()))
+	require.Len(t, restored.chunks, 1, "a full restored tail must become sealed")
+	require.Len(t, restored.tail, 1, "the appended row must be the mutable tail")
 }
 
 func TestHistoryFromBlobsRestoresCellAccountingAndEvictsToBothBudgets(t *testing.T) {

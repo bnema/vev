@@ -217,6 +217,27 @@ func TestHistoryBoundsRowsAndCellsWithExactRowEviction(t *testing.T) {
 	}
 }
 
+func TestHistoryAppendIsNoOpForNilAndZeroValue(t *testing.T) {
+	tests := []struct {
+		name    string
+		history *History
+	}{
+		{name: "nil history"},
+		{name: "zero-value history", history: &History{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.history.Append(historyRow("row")); err != nil {
+				t.Fatalf("append error = %v, want nil", err)
+			}
+			if got := tt.history.Len(); got != 0 {
+				t.Fatalf("retained rows = %d, want 0", got)
+			}
+		})
+	}
+}
+
 func TestHistoryRejectsRowWiderThanCellBudgetWithoutMutation(t *testing.T) {
 	history := NewHistory(HistoryConfig{MaxRows: 2, MaxCells: 2, ChunkRows: 2})
 	if err := history.Append(historyRow("ok")); err != nil {

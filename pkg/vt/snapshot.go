@@ -106,6 +106,7 @@ func HistoryFromBlobs(config HistoryConfig, sealed [][]byte, tail []byte) (*Hist
 		h.cells += view.Cells()
 	}
 	h.evict()
+	h.normalizeTail()
 	return h, nil
 }
 

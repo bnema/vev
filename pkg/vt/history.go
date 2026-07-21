@@ -108,6 +108,16 @@ func (h *History) sealTail() {
 	h.tail = nil
 }
 
+// normalizeTail seals complete chunks so the mutable tail remains shorter than
+// chunkRows. Restored snapshots may have been written with a different chunk
+// size than the current history configuration.
+func (h *History) normalizeTail() {
+	for h.chunkRows > 0 && len(h.tail) >= h.chunkRows {
+		h.chunks = append(h.chunks, &HistoryChunk{rows: h.tail[:h.chunkRows]})
+		h.tail = h.tail[h.chunkRows:]
+	}
+}
+
 func (h *History) evict() {
 	h.evictUntil(0, 0)
 }
