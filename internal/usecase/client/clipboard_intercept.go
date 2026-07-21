@@ -29,6 +29,7 @@ type clipboardIntercept struct {
 	reader    ports.ClipboardReader
 	log       *slog.Logger
 	sendImage func(mime string, data []byte)
+	showToast func(string)
 	next      func([]byte)
 }
 
@@ -99,12 +100,18 @@ func (c *clipboardIntercept) handleCtrlV() {
 	if err != nil {
 		if !errors.Is(err, ports.ErrNoClipboardImage) {
 			c.log.Warn("clipboard image read failed", "err", err)
+			if c.showToast != nil {
+				c.showToast("image paste failed; sent Ctrl+V")
+			}
 		}
 		c.next([]byte{ctrlV})
 		return
 	}
 	if len(data) > maxClipboardImagePush {
 		c.log.Warn("clipboard image too large to send, forwarding Ctrl+V instead", "size", len(data), "cap", maxClipboardImagePush)
+		if c.showToast != nil {
+			c.showToast("image too large to paste")
+		}
 		c.next([]byte{ctrlV})
 		return
 	}

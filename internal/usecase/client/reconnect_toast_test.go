@@ -282,7 +282,7 @@ func newReconnectAttachAttempt(term ports.Terminal, transport ports.Transport, c
 	}
 }
 
-func TestReconnectToastDegradedClearsModalAndProbingIsVisible(t *testing.T) {
+func TestReconnectToastDegradedDrawsToastAndProbingIsVisible(t *testing.T) {
 	out := newReconnectToastOutputRecorder()
 	term := newReconnectToastTerminalHarnessWithOutput(t, out)
 	defer term.closeInput()
@@ -301,10 +301,18 @@ func TestReconnectToastDegradedClearsModalAndProbingIsVisible(t *testing.T) {
 	tr.events <- ports.LinkEvent{State: ports.LinkStateDegraded}
 	cleared := <-out.completed
 	assertReconnectToastClearCoversBounds(t, cleared, reconnectToastBoundsFor(term.size, reconnectStageMessage(reconnectStageProbingUDP)))
+	degraded := <-out.completed
+	require.Contains(t, degraded, reconnectStageMessage(reconnectStageDegraded))
 
 	tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
+	cleared = <-out.completed
+	assertReconnectToastClearCoversBounds(t, cleared, reconnectToastBoundsFor(term.size, reconnectStageMessage(reconnectStageDegraded)))
 	probed = <-out.completed
 	require.Contains(t, probed, reconnectStageMessage(reconnectStageProbingUDP))
+
+	tr.events <- ports.LinkEvent{State: ports.LinkStateConnected}
+	cleared = <-out.completed
+	assertReconnectToastClearCoversBounds(t, cleared, reconnectToastBoundsFor(term.size, reconnectStageMessage(reconnectStageProbingUDP)))
 
 	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(ports.ReasonDetach)}
 	result := <-resultCh
@@ -335,6 +343,41 @@ func TestReconnectToastBoundsUseCenterAnchor(t *testing.T) {
 	require.Equal(t, domain.Rect{X: 29, Y: 10, Width: 22, Height: 3}, bounds)
 }
 
+func TestClientToastReconciliationWaitsForDaemonResetFrame(t *testing.T) {
+	tests := []struct {
+		name string
+		out  ports.Output
+		want bool
+	}{
+		{name: "incremental frame", out: ports.Output{BaseStateNum: 7, NewStateNum: 8}, want: false},
+		{name: "state-less side effect", out: ports.Output{}, want: false},
+		{name: "reset frame", out: ports.Output{BaseStateNum: 0, NewStateNum: 9}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, isClientToastResyncFrame(tt.out))
+		})
+	}
+}
+
+func TestClientToastDrawsWithoutInputPumpTerminalWrites(t *testing.T) {
+	out := newReconnectToastOutputRecorder()
+	term := newReconnectToastTerminalHarnessWithOutput(t, out)
+	defer term.closeInput()
+	toast := clientToastUI{}
+
+	require.True(t, toast.draw(term.term, term.size, "image paste failed; sent Ctrl+V"))
+	drawn := <-out.completed
+	require.Contains(t, drawn, "image paste failed; sent Ctrl+V")
+	toast.reconcile()
+
+	select {
+	case got := <-out.completed:
+		t.Fatalf("reconcile wrote terminal bytes: %q", got)
+	default:
+	}
+}
+
 func TestReconnectToastDrawAndClearHelpers(t *testing.T) {
 	var out bytes.Buffer
 	size := domain.Size{Cols: 80, Rows: 24}
@@ -357,6 +400,28 @@ func TestReconnectToastLinesClampToBounds(t *testing.T) {
 		require.LessOrEqual(t, displayWidth(line), bounds.Width)
 	}
 	require.Contains(t, strings.Join(lines, "\n"), "…")
+}
+
+func TestReconnectToastStageBytesUnchangedAfterClientHelperExtraction(t *testing.T) {
+	for _, stage := range []reconnectStage{reconnectStageDegraded, reconnectStageProbingUDP, reconnectStageSSH, reconnectStageOfflineRetrying} {
+		t.Run(reconnectStageMessage(stage), func(t *testing.T) {
+			var got, want bytes.Buffer
+			gotBounds, gotErr := drawReconnectToastStage(&got, domain.Size{Cols: 80, Rows: 24}, stage)
+			wantBounds, wantErr := legacyReconnectToastStage(&want, domain.Size{Cols: 80, Rows: 24}, stage)
+			require.Equal(t, wantErr, gotErr)
+			require.Equal(t, wantBounds, gotBounds)
+			require.Equal(t, want.String(), got.String())
+		})
+	}
+}
+
+func legacyReconnectToastStage(out io.Writer, size domain.Size, stage reconnectStage) (domain.Rect, error) {
+	message := reconnectStageMessage(stage)
+	bounds := reconnectToastBoundsFor(size, message)
+	if bounds.Width <= 0 || bounds.Height <= 0 {
+		return domain.Rect{}, nil
+	}
+	return bounds, writeReconnectToast(out, bounds, reconnectToastLinesFor(bounds, message))
 }
 
 func TestReconnectToastStageTransitionsClearDrawnBounds(t *testing.T) {

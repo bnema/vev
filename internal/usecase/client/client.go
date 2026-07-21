@@ -650,6 +650,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	defer revokeInputClaim()
 
 	sendCh := make(chan ports.Frame, sendQueueDepth)
+	// Client-local clipboard failures are published from stdinPump and rendered
+	// only here, the attach loop's sole terminal writer.
+	clientToasts := make(chan string, 1)
 	ackQueue := newCumulativeAckQueue()
 	sendErrCh := make(chan error, 1)
 	senderStarted := false
@@ -762,7 +765,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	stdinDone := make(chan struct{})
 	go func() {
 		defer close(stdinDone)
-		(&stdinPump{ctx: loopCtx, cancel: cancel, input: input, consumer: inputConsumer, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration}).run()
+		(&stdinPump{ctx: loopCtx, cancel: cancel, input: input, consumer: inputConsumer, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration, clientToasts: clientToasts}).run()
 	}()
 	// Scanner cancellation can leave an undecided marker suffix (including a
 	// standalone Escape) that it must hand back to the lifecycle-owned reader.
@@ -780,6 +783,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	recvCh := make(chan recvResult, 1)
 	go runRecv(loopCtx, transport, recvCh, log)
 
+	var transientToast clientToastUI
+	awaitingToastResync := false
 	for {
 		select {
 		case <-loopCtx.Done():
@@ -789,6 +794,25 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			case serr := <-sendErrCh:
 				return welcomedResult(fmt.Errorf("vev: sending to daemon: %w", serr))
 			default:
+				return welcomedResult(nil)
+			}
+		case message := <-clientToasts:
+			size, serr := term.Size()
+			if serr != nil {
+				log.Warn("reading terminal size for client toast", "err", serr)
+				continue
+			}
+			if !transientToast.draw(term, size, message) || awaitingToastResync {
+				continue
+			}
+			// MsgResize is the existing reset-producing primitive. Sending the
+			// current size preserves wire compatibility and causes the daemon to
+			// publish an authoritative full frame; until then incremental frames
+			// are acknowledged but not written over this local overlay.
+			select {
+			case sendCh <- ports.Frame{Type: ports.MsgResize, Payload: ports.MarshalResize(ports.Resize{Size: size})}:
+				awaitingToastResync = true
+			case <-loopCtx.Done():
 				return welcomedResult(nil)
 			}
 		case ev, ok := <-linkEvents:
@@ -802,7 +826,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			}
 			if ev.State == ports.LinkStateDegraded {
 				log.Warn("UDP link degraded")
-				reconnect.clear()
+				reconnect.drawStage(reconnectStageDegraded)
 				continue
 			}
 			reconnect.drawStage(stageForLinkState(ev.State))
@@ -841,11 +865,25 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if derr != nil {
 					return welcomedResult(fmt.Errorf("vev: decoding output: %w", derr))
 				}
+				// A local toast obscures terminal cells unknown to an incremental
+				// daemon diff. A same-size MsgResize above produces this reset
+				// frame (BaseStateNum=0); acknowledge any intervening state without
+				// writing it, then apply only the authoritative full frame.
+				if awaitingToastResync && !isClientToastResyncFrame(o) {
+					if o.NewStateNum != 0 {
+						ackQueue.offer(o.NewStateNum)
+					}
+					continue
+				}
 				if _, werr := term.Out().Write(o.Data); werr != nil {
 					return welcomedResult(fmt.Errorf("vev: writing terminal output: %w", werr))
 				}
 				if ferr := term.Flush(); ferr != nil {
 					return welcomedResult(fmt.Errorf("vev: flushing terminal: %w", ferr))
+				}
+				if awaitingToastResync {
+					transientToast.reconcile()
+					awaitingToastResync = false
 				}
 				// The terminal boundary is after a successful flush and before ACK.
 				if observer != nil {
@@ -882,6 +920,13 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 
 // recvResult carries one framed message (or a read error) from the receive
 // pump to the main loop.
+// isClientToastResyncFrame identifies the authoritative reset emitted by the
+// daemon's existing resize path. State-less side effects also have base zero,
+// so they must not dismiss an overlay.
+func isClientToastResyncFrame(o ports.Output) bool {
+	return o.BaseStateNum == 0 && o.NewStateNum != 0
+}
+
 type recvResult struct {
 	frame ports.Frame
 	err   error
@@ -1304,6 +1349,7 @@ type stdinPump struct {
 	logger              *slog.Logger
 	paletteEvents       chan<- paletteGenerationEvent
 	activeGeneration    *atomic.Uint64
+	clientToasts        chan<- string
 	afterPaletteEvent   func(paletteGenerationEvent) // test synchronization hook
 	afterInputTake      func()                       // test synchronization hook
 	afterInputDelivered func()                       // test synchronization hook
@@ -1366,6 +1412,15 @@ func (p *stdinPump) run() {
 			coalescer: coalescer,
 			reader:    p.clipboard,
 			log:       p.logger,
+			showToast: func(message string) {
+				if p.clientToasts == nil {
+					return
+				}
+				select {
+				case p.clientToasts <- message:
+				case <-p.ctx.Done():
+				}
+			},
 			sendImage: func(mime string, data []byte) {
 				inputSeq++
 				send(ports.Frame{Type: ports.MsgImagePush, Payload: ports.MarshalImagePush(ports.ImagePush{InputSeq: inputSeq, Mime: mime, Data: data})})

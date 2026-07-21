@@ -3,6 +3,7 @@ package client_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReade
 	defer input.unblock()
 
 	tm := portsmocks.NewMockTerminal(t)
-	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Once()
+	tm.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Maybe()
 	tm.EXPECT().EnterRaw().Return(func() error { restoreCount++; return nil }, nil).Once()
 	tm.EXPECT().In().Return(input).Maybe()
 	tm.EXPECT().Out().Return(&out).Maybe()
@@ -44,6 +45,7 @@ func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReade
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(ports.MsgResize)).Return(nil).Maybe()
 	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
 		in, err := ports.UnmarshalInput(f.Payload)
 		require.NoError(t, err)
@@ -135,6 +137,95 @@ func TestRunRemoteClipboardCtrlVWithNoImageForwardsCtrlV(t *testing.T) {
 	gotInput, _ := runRemoteClipboardTest(t, true, clip, []byte("a\x16b"), 'b')
 
 	require.Equal(t, []byte("a\x16b"), drainInput(gotInput), "Ctrl+V must be forwarded verbatim when the clipboard has no image")
+}
+
+type clipboardToastLifecycleTransport struct {
+	recv  chan ports.Frame
+	sends chan ports.Frame
+}
+
+func (t *clipboardToastLifecycleTransport) Send(f ports.Frame) error {
+	t.sends <- f
+	return nil
+}
+
+func (t *clipboardToastLifecycleTransport) Recv() (ports.Frame, error) { return <-t.recv, nil }
+func (*clipboardToastLifecycleTransport) Close() error                 { return nil }
+
+type clipboardToastLifecycleDialer struct{ transport ports.Transport }
+
+func (d clipboardToastLifecycleDialer) Dial(context.Context) (ports.Transport, error) {
+	return d.transport, nil
+}
+
+func TestRunRemoteClipboardFailureReconcilesOnResetFrame(t *testing.T) {
+	var out bytes.Buffer
+	resizeEvents := make(chan domain.Size)
+	input := newOneShotBlockingReader([]byte{0x16})
+	defer input.unblock()
+	term := portsmocks.NewMockTerminal(t)
+	term.EXPECT().Size().Return(domain.Size{Cols: 80, Rows: 24}, nil).Maybe()
+	term.EXPECT().EnterRaw().Return(func() error { return nil }, nil).Once()
+	term.EXPECT().In().Return(input).Maybe()
+	term.EXPECT().Out().Return(&out).Maybe()
+	term.EXPECT().Flush().Return(nil).Maybe()
+	term.EXPECT().ResizeEvents().Return((<-chan domain.Size)(resizeEvents)).Maybe()
+
+	clipboard := portsmocks.NewMockClipboardReader(t)
+	clipboard.EXPECT().ReadImage(mock.Anything).Return("", nil, errors.New("read failed")).Once()
+	transport := &clipboardToastLifecycleTransport{recv: make(chan ports.Frame, 8), sends: make(chan ports.Frame, 16)}
+	transport.recv <- frameOf(ports.MsgWelcome, ports.MarshalWelcome(ports.Welcome{SessionID: "s1"}))
+
+	result := make(chan error, 1)
+	go func() {
+		result <- client.NewRunner(client.Dependencies{Dialer: clipboardToastLifecycleDialer{transport: transport}, Terminal: term, Clock: realClock{}, Clipboard: clipboard}).Run(context.Background(), client.AttachRequest{Intent: ports.IntentEphemeral, Remote: true})
+	}()
+
+	for {
+		select {
+		case sent := <-transport.sends:
+			if sent.Type != ports.MsgResize {
+				continue
+			}
+			goto resized
+		case <-time.After(time.Second):
+			t.Fatal("client did not request a daemon reset after drawing clipboard toast")
+		}
+	}
+
+resized:
+	require.Contains(t, out.String(), "image paste failed; sent Ctrl+V")
+	transport.recv <- frameOf(ports.MsgOutput, ports.MarshalOutput(ports.Output{BaseStateNum: 1, NewStateNum: 2, Data: []byte("incremental")}))
+	for {
+		select {
+		case sent := <-transport.sends:
+			if sent.Type != ports.MsgAck {
+				continue
+			}
+			ack, err := ports.UnmarshalAck(sent.Payload)
+			require.NoError(t, err)
+			if ack.AckedStateNum == 2 {
+				goto incrementalAcknowledged
+			}
+		case <-time.After(time.Second):
+			t.Fatal("client did not ACK discarded incremental output")
+		}
+	}
+
+incrementalAcknowledged:
+	require.NotContains(t, out.String(), "incremental", "incremental output must not overwrite a local toast before reset")
+	transport.recv <- frameOf(ports.MsgOutput, ports.MarshalOutput(ports.Output{BaseStateNum: 0, NewStateNum: 3, Data: []byte("authoritative reset")}))
+	transport.recv <- frameOf(ports.MsgDetached, ports.MarshalDetached(ports.Detached{Reason: ports.ReasonDetach}))
+
+	select {
+	case err := <-result:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("client did not finish after reset frame")
+	}
+	got := out.String()
+	require.NotContains(t, got, "incremental", "incremental output must not overwrite a local toast before reset")
+	require.Contains(t, got, "authoritative reset")
 }
 
 func TestRunRemoteClipboardOversizedImageForwardsCtrlV(t *testing.T) {
