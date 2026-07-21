@@ -451,3 +451,266 @@ func (t *snapshotDeadlineTimer) C() <-chan time.Time    { return t.ch }
 func (*snapshotDeadlineTimer) Reset(time.Duration) bool { return true }
 func (*snapshotDeadlineTimer) Stop() bool               { return true }
 func (t *snapshotDeadlineTimer) fire()                  { t.ch <- time.Unix(101, 0) }
+
+// deterministicSnapshotClock records timer resets and advances only when a
+// test explicitly fires its timer. It deliberately has no wall-clock behavior.
+type deterministicSnapshotClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	timers chan *deterministicSnapshotTimer
+}
+
+func newDeterministicSnapshotClock(now time.Time) *deterministicSnapshotClock {
+	return &deterministicSnapshotClock{now: now, timers: make(chan *deterministicSnapshotTimer, 1)}
+}
+
+func (c *deterministicSnapshotClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *deterministicSnapshotClock) advance(now time.Time) {
+	c.mu.Lock()
+	c.now = now
+	c.mu.Unlock()
+}
+
+func (c *deterministicSnapshotClock) NewTimer(time.Duration) ports.Timer {
+	timer := &deterministicSnapshotTimer{clock: c, ch: make(chan time.Time, 1), resets: make(chan time.Duration, 16)}
+	c.timers <- timer
+	return timer
+}
+
+func (c *deterministicSnapshotClock) timer() *deterministicSnapshotTimer { return <-c.timers }
+
+type deterministicSnapshotTimer struct {
+	clock  *deterministicSnapshotClock
+	ch     chan time.Time
+	resets chan time.Duration
+}
+
+func (t *deterministicSnapshotTimer) C() <-chan time.Time { return t.ch }
+func (t *deterministicSnapshotTimer) Reset(delay time.Duration) bool {
+	t.resets <- delay
+	return true
+}
+func (*deterministicSnapshotTimer) Stop() bool { return true }
+func (t *deterministicSnapshotTimer) fire()    { t.ch <- t.clock.Now() }
+
+func awaitSnapshotCleanSignal(sess *session) {
+	for {
+		sess.snapshotMu.Lock()
+		clean := !sess.snapDirty.Load()
+		changed := sess.snapshotChangeLocked()
+		sess.snapshotMu.Unlock()
+		if clean {
+			return
+		}
+		<-changed
+	}
+}
+
+func TestSnapshotCompletionSchedulesRoutineRetriesFromCompletion(t *testing.T) {
+	now := time.Unix(100, 0)
+	clock := newDeterministicSnapshotClock(now)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	WithSnapshotRepository(repository, nil)(d)
+
+	for _, tt := range []struct {
+		name             string
+		kind             snapshotAttemptKind
+		succeeded        bool
+		existingEligible time.Time
+		wantDirty        bool
+		wantEligible     time.Time
+	}{
+		{name: "routine success", kind: snapshotAttemptRoutine, succeeded: true, wantEligible: now.Add(snapshotInterval)},
+		{name: "routine failure", kind: snapshotAttemptRoutine, wantDirty: true, wantEligible: now.Add(snapshotInterval)},
+		{name: "forced completion preserves routine eligibility", kind: snapshotAttemptForced, succeeded: true, existingEligible: now.Add(time.Minute), wantEligible: now.Add(time.Minute)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			sess := newSnapshotTestSession(t, "work", false, "/work")
+			sess.snapshotGeneration = 1
+			sess.snapshotNextEligibleAt = tt.existingEligible
+			sess.snapDirty.Store(true)
+			d.finishSnapshotCapture(&snapshotCapture{session: sess, generation: 1, attemptKind: tt.kind}, tt.succeeded)
+
+			require.Equal(t, tt.wantDirty, sess.snapDirty.Load())
+			sess.snapshotMu.Lock()
+			require.Equal(t, tt.wantEligible, sess.snapshotNextEligibleAt)
+			sess.snapshotMu.Unlock()
+		})
+	}
+}
+
+func TestSnapshotSchedulerImmediateEligibilityAndStaleCapturesRemainDirty(t *testing.T) {
+	now := time.Unix(100, 0)
+	clock := newDeterministicSnapshotClock(now)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
+	WithSnapshotRepository(portsmocks.NewMockSnapshotRepository(t), nil)(d)
+
+	t.Run("no prior attempt is immediately eligible", func(t *testing.T) {
+		sess := newSnapshotTestSession(t, "immediate", false, "/work")
+		sess.snapshotWake = d.snapshotWake
+		sess.snapDirty.Store(true)
+		d.sessions[sess.id] = sess
+
+		require.Equal(t, snapshotInterval, d.scheduleEligibleRepositorySnapshots())
+		sess.snapshotMu.Lock()
+		require.True(t, sess.snapshotAttempted)
+		require.Equal(t, uint64(0), sess.snapshotCapturedGeneration)
+		require.Equal(t, now.Add(snapshotInterval), sess.snapshotNextEligibleAt)
+		sess.snapshotMu.Unlock()
+	})
+
+	t.Run("queued and in-flight stale successes cannot clear newer generation", func(t *testing.T) {
+		for _, state := range []struct {
+			name string
+			set  func(*session, *snapshotCapture)
+		}{
+			{name: "queued", set: func(sess *session, capture *snapshotCapture) { sess.snapshotQueuedCapture = capture }},
+			{name: "in flight", set: func(sess *session, capture *snapshotCapture) { sess.snapshotInFlightCapture = capture }},
+		} {
+			t.Run(state.name, func(t *testing.T) {
+				sess := newSnapshotTestSession(t, state.name, false, "/work")
+				sess.snapshotGeneration = 1
+				sess.snapDirty.Store(true)
+				capture := &snapshotCapture{session: sess, generation: 1, attemptKind: snapshotAttemptRoutine}
+				sess.snapshotPendingCaptures = 1
+				sess.snapshotPending = true
+				state.set(sess, capture)
+
+				markSnapshotDirty(sess)
+				d.finishSnapshotCapture(capture, true)
+
+				require.True(t, sess.snapDirty.Load())
+				require.Equal(t, uint64(1), sess.snapshotPublishedGeneration)
+				require.Equal(t, now.Add(snapshotInterval), sess.snapshotNextEligibleAt)
+			})
+		}
+	})
+}
+
+func TestSnapshotWorkerQueueIsBoundedAndForcedCapturesCoalesce(t *testing.T) {
+	now := time.Unix(100, 0)
+	clock := newDeterministicSnapshotClock(now)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	WithSnapshotRepository(repository, nil)(d)
+	startSnapshotEncodeWorker(t, d)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	publications := make(chan ports.SnapshotPublication, 3)
+	var blockFirst sync.Once
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
+		publications <- publication
+		if publication.Name == "in-flight" {
+			blockFirst.Do(func() {
+				close(started)
+				<-release
+			})
+		}
+		return nil
+	}).Times(3)
+
+	inFlight := newSnapshotTestSession(t, "in-flight", false, "/work")
+	markSnapshotDirty(inFlight)
+	require.True(t, d.scheduleSnapshot(inFlight))
+	<-started
+
+	queued := newSnapshotTestSession(t, "queued", false, "/work")
+	markSnapshotDirty(queued)
+	require.True(t, d.scheduleSnapshot(queued))
+
+	d.snapshotWorkerMu.Lock()
+	require.NotNil(t, d.snapshotWorkerInFlight)
+	require.Len(t, d.snapshotJobs, snapshotQueueCapacity)
+	d.snapshotWorkerMu.Unlock()
+
+	saturated := newSnapshotTestSession(t, "saturated", false, "/work")
+	markSnapshotDirty(saturated)
+	require.False(t, d.scheduleSnapshot(saturated), "a saturated queue must not block the producer")
+	require.True(t, saturated.snapDirty.Load(), "the rejected capture remains retryable")
+	saturated.snapshotMu.Lock()
+	require.Equal(t, now.Add(snapshotInterval), saturated.snapshotNextEligibleAt)
+	saturated.snapshotMu.Unlock()
+
+	// A forced request bypasses the routine rate limit and repeated requests
+	// coalesce to one successor after the in-flight capture completes.
+	markSnapshotDirty(inFlight)
+	require.True(t, d.scheduleFinalSnapshot(inFlight))
+	markSnapshotDirty(inFlight)
+	require.True(t, d.scheduleFinalSnapshot(inFlight))
+	close(release)
+
+	gotGenerations := []uint64{(<-publications).Generation, (<-publications).Generation, (<-publications).Generation}
+	require.ElementsMatch(t, []uint64{1, 1, 3}, gotGenerations, "one forced successor bypasses the routine limit while queued work remains bounded")
+	awaitSnapshotCleanSignal(inFlight)
+}
+
+func TestSnapshotRepositorySaverUsesEarliestDeadlineAndRecomputes(t *testing.T) {
+	now := time.Unix(100, 0)
+	clock := newDeterministicSnapshotClock(now)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	WithSnapshotRepository(repository, nil)(d)
+	startSnapshotEncodeWorker(t, d)
+
+	published := make(chan ports.SnapshotPublication, 1)
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
+		published <- publication
+		return nil
+	}).Once()
+
+	later := newSnapshotTestSession(t, "later", false, "/work")
+	later.snapshotWake = d.snapshotWake
+	later.snapDirty.Store(true)
+	later.snapshotNextEligibleAt = now.Add(10 * time.Minute)
+	d.sessions[later.id] = later
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		d.snapshotRepositorySaver(ctx)
+		close(done)
+	}()
+	timer := clock.timer()
+	require.Equal(t, 10*time.Minute, <-timer.resets)
+
+	earlier := newSnapshotTestSession(t, "earlier", false, "/work")
+	earlier.snapshotWake = d.snapshotWake
+	earlier.snapDirty.Store(true)
+	earlier.snapshotNextEligibleAt = now.Add(5 * time.Minute)
+	d.sessions[earlier.id] = earlier
+	d.snapshotWake <- struct{}{}
+	require.Equal(t, 5*time.Minute, <-timer.resets)
+
+	clock.advance(now.Add(5 * time.Minute))
+	timer.fire()
+	// The saver first recomputes immediately after queueing the due capture.
+	require.Equal(t, 5*time.Minute, <-timer.resets)
+	publication := <-published
+	require.Equal(t, "earlier", publication.Name, "timer fires exactly at the earliest eligibility")
+	for {
+		earlier.snapshotMu.Lock()
+		clean := !earlier.snapDirty.Load()
+		changed := earlier.snapshotChangeLocked()
+		earlier.snapshotMu.Unlock()
+		if clean {
+			break
+		}
+		<-changed
+	}
+	// The later dirty session is still the next deadline after completion.
+	require.Equal(t, 5*time.Minute, <-timer.resets)
+
+	delete(d.sessions, later.id)
+	d.snapshotWake <- struct{}{}
+	require.Equal(t, 24*time.Hour, <-timer.resets)
+
+	cancel()
+	<-done
+}
