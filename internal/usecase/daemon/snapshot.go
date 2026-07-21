@@ -385,6 +385,8 @@ func resumeSnapshotCoordinatorForNewIdentity(sess *session, quarantine snapshotC
 	// dirty and wake the scheduler.
 	sess.snapshotGeneration = 1
 	sess.snapshotCapturedGeneration = 0
+	sess.snapshotPublishedGeneration = 0
+	sess.snapshotForcedGeneration = 0
 	sess.snapshotNextEligibleAt = time.Time{}
 	sess.snapshotAttempted = false
 	sess.snapshotAttemptKind = snapshotAttemptRoutine
@@ -499,14 +501,21 @@ func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bo
 	}
 	sess.snapshotMu.Lock()
 	routineRateLimited := d.snapshotRepository != nil
-	// Forced attempts coalesce with a routine capture too. This keeps the
-	// coordinator at one queued plus one in-flight capture, while the dirty
-	// generation ensures a later checkpoint observes mutations made meanwhile.
-	if sess.snapshotQuarantined || !sess.snapDirty.Load() || sess.snapshotPending ||
-		(!final && routineRateLimited && !sess.snapshotNextEligibleAt.IsZero() && d.clock.Now().Before(sess.snapshotNextEligibleAt)) {
+	if sess.snapshotQuarantined || !sess.snapDirty.Load() {
 		available := !sess.snapshotQuarantined
 		sess.snapshotMu.Unlock()
 		return available
+	}
+	if final && sess.snapshotGeneration > sess.snapshotForcedGeneration {
+		// Do not let an older queued or in-flight routine publication satisfy a
+		// terminal checkpoint. The intent is retained until a publication at
+		// this generation (or newer) succeeds.
+		sess.snapshotForcedGeneration = sess.snapshotGeneration
+	}
+	if sess.snapshotPending ||
+		(!final && routineRateLimited && !sess.snapshotNextEligibleAt.IsZero() && d.clock.Now().Before(sess.snapshotNextEligibleAt)) {
+		sess.snapshotMu.Unlock()
+		return true
 	}
 	if sess.snapshotPublicationContext == nil {
 		sess.snapshotPublicationContext, sess.snapshotPublicationCancel = context.WithCancel(context.Background())
@@ -547,6 +556,32 @@ func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bo
 	// will be captured on a later tick once an active worker has room.
 	d.finishSnapshotCapture(capture, false)
 	return false
+}
+
+// waitForSnapshotGeneration waits only for the bounded terminal checkpoint
+// deadline. It observes successful publication, rather than dirty state, so a
+// concurrent later mutation cannot turn a completed forced checkpoint into a
+// false timeout.
+func (d *Daemon) waitForSnapshotGeneration(sess *session, generation uint64) bool {
+	if d == nil || sess == nil || generation == 0 {
+		return true
+	}
+	timer := d.clock.NewTimer(snapshotFinalFlushTimeout)
+	defer timer.Stop()
+	for {
+		sess.snapshotMu.Lock()
+		published := sess.snapshotPublishedGeneration >= generation
+		changed := sess.snapshotChangeLocked()
+		sess.snapshotMu.Unlock()
+		if published {
+			return true
+		}
+		select {
+		case <-changed:
+		case <-timer.C():
+			return false
+		}
+	}
 }
 
 // enqueueSnapshotCapture serializes worker shutdown with the non-blocking
@@ -737,6 +772,7 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 		return
 	}
 	capture.finishOnce.Do(func() {
+		shouldScheduleForcedSuccessor := false
 		capture.session.snapshotMu.Lock()
 		if capture.session.snapshotPendingCaptures > 0 {
 			capture.session.snapshotPendingCaptures--
@@ -758,12 +794,26 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 			// attempt. A forced teardown checkpoint deliberately leaves it alone.
 			capture.session.snapshotNextEligibleAt = d.clock.Now().Add(snapshotInterval)
 		}
+		if succeeded {
+			capture.session.snapshotPublishedGeneration = max(capture.session.snapshotPublishedGeneration, capture.generation)
+		}
 		if succeeded && capture.session.snapshotGeneration == capture.generation {
 			capture.session.snapDirty.Store(false)
 			capture.session.snapshotFailureSig = ""
 		} else if !succeeded {
 			capture.session.snapDirty.Store(true)
 		}
+		if succeeded && capture.session.snapshotForcedGeneration != 0 &&
+			capture.generation >= capture.session.snapshotForcedGeneration {
+			capture.session.snapshotForcedGeneration = 0
+		}
+		// A failed forced publication remains dirty for ordinary retry rather
+		// than recursively creating forced jobs. A later forced request records
+		// a newer intent and can create its one bounded successor.
+		shouldScheduleForcedSuccessor = capture.session.snapshotForcedGeneration != 0 &&
+			capture.generation < capture.session.snapshotForcedGeneration &&
+			capture.session.snapshotQueuedCapture == nil && capture.session.snapshotInFlightCapture == nil &&
+			(succeeded || capture.attemptKind != snapshotAttemptForced)
 		capture.session.signalSnapshotChangedLocked()
 		wake := capture.session.snapshotWake
 		capture.session.snapshotMu.Unlock()
@@ -772,6 +822,12 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 			case wake <- struct{}{}:
 			default:
 			}
+		}
+		if shouldScheduleForcedSuccessor {
+			// This runs after publication completion and outside snapshotMu. It
+			// bypasses routine eligibility while preserving the single queued and
+			// single in-flight capture bound.
+			_ = d.scheduleFinalSnapshot(capture.session)
 		}
 		if succeeded {
 			d.clearSnapshotFailure()

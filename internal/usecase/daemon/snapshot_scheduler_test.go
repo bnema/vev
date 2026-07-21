@@ -195,6 +195,183 @@ func TestRenameRollbackAfterOldDeleteLeavesOldCoordinatorStopped(t *testing.T) {
 	}
 }
 
+func TestForcedSnapshotSchedulesSuccessorAfterRoutineInFlight(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	WithSnapshotRepository(repository, nil)(d)
+	startSnapshotEncodeWorker(t, d)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	publications := make(chan ports.SnapshotPublication, 2)
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
+		publications <- publication
+		if publication.Generation == 1 {
+			close(started)
+			<-release
+		}
+		return nil
+	}).Twice()
+
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	markSnapshotDirty(sess)
+	require.True(t, d.scheduleSnapshot(sess))
+	select {
+	case <-started:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("routine publication did not start")
+	}
+
+	// The terminal state changed after the routine capture, so its publication
+	// cannot satisfy the forced checkpoint.
+	sess.tabs[0].panes["pane-1"].screen.Write([]byte(" terminal"))
+	markSnapshotDirty(sess)
+	require.True(t, d.scheduleFinalSnapshot(sess))
+	close(release)
+
+	awaitSnapshotClean(t, sess)
+	require.Equal(t, uint64(1), (<-publications).Generation)
+	require.Equal(t, uint64(2), (<-publications).Generation)
+}
+
+func TestForcedSnapshotSchedulesSuccessorForRoutineCaptureQueuedBehindWorker(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	WithSnapshotRepository(repository, nil)(d)
+	startSnapshotEncodeWorker(t, d)
+
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	workPublications := make(chan ports.SnapshotPublication, 2)
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
+		if publication.Name == "blocker" {
+			close(blockerStarted)
+			<-releaseBlocker
+			return nil
+		}
+		workPublications <- publication
+		return nil
+	}).Times(3)
+
+	blocker := newSnapshotTestSession(t, "blocker", false, "/work")
+	markSnapshotDirty(blocker)
+	require.True(t, d.scheduleSnapshot(blocker))
+	select {
+	case <-blockerStarted:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("blocking publication did not start")
+	}
+
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	markSnapshotDirty(sess)
+	require.True(t, d.scheduleSnapshot(sess), "routine capture should occupy the bounded queue")
+	sess.tabs[0].panes["pane-1"].screen.Write([]byte(" terminal"))
+	markSnapshotDirty(sess)
+	require.True(t, d.scheduleFinalSnapshot(sess))
+	close(releaseBlocker)
+
+	awaitSnapshotClean(t, sess)
+	require.Equal(t, uint64(1), (<-workPublications).Generation)
+	require.Equal(t, uint64(2), (<-workPublications).Generation)
+}
+
+func TestMultipleForcedSnapshotsCoalesceToOneSuccessor(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	WithSnapshotRepository(repository, nil)(d)
+	startSnapshotEncodeWorker(t, d)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	publications := make(chan ports.SnapshotPublication, 2)
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
+		publications <- publication
+		if publication.Generation == 1 {
+			close(started)
+			<-release
+		}
+		return nil
+	}).Twice()
+
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	markSnapshotDirty(sess)
+	require.True(t, d.scheduleSnapshot(sess))
+	select {
+	case <-started:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("routine publication did not start")
+	}
+	markSnapshotDirty(sess)
+	require.True(t, d.scheduleFinalSnapshot(sess))
+	markSnapshotDirty(sess)
+	require.True(t, d.scheduleFinalSnapshot(sess))
+	close(release)
+
+	awaitSnapshotClean(t, sess)
+	require.Equal(t, uint64(1), (<-publications).Generation)
+	require.Equal(t, uint64(3), (<-publications).Generation)
+	sess.snapshotMu.Lock()
+	require.False(t, sess.snapshotPending)
+	require.Nil(t, sess.snapshotQueuedCapture)
+	require.Nil(t, sess.snapshotInFlightCapture)
+	sess.snapshotMu.Unlock()
+}
+
+func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.T) {
+	clock := newSnapshotDeadlineClock()
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	WithSnapshotRepository(repository, nil)(d)
+	notices := portsmocks.NewMockNoticeStore(t)
+	WithNoticeStore(notices)(d)
+	startSnapshotEncodeWorker(t, d)
+
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	defer close(releaseBlocker)
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
+		if publication.Name == "blocker" {
+			close(blockerStarted)
+			<-releaseBlocker
+		}
+		return nil
+	}).Maybe()
+	notices.EXPECT().Append(mock.MatchedBy(func(notification domain.Notification) bool {
+		return notification.Code == domain.NoticeSnapshotWrite && notification.Severity == domain.NoticeError
+	})).Return(nil).Once()
+
+	blocker := newSnapshotTestSession(t, "blocker", false, "/work")
+	markSnapshotDirty(blocker)
+	require.True(t, d.scheduleSnapshot(blocker))
+	select {
+	case <-blockerStarted:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("blocking publication did not start")
+	}
+
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	pty := sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+	pty.EXPECT().Close().Return(nil).Maybe()
+	d.sessions[sess.id] = sess
+	markSnapshotDirty(sess)
+	require.True(t, d.scheduleSnapshot(sess), "routine capture should occupy the bounded queue")
+
+	killed := make(chan error, 1)
+	go func() { killed <- d.killSession(sess, ports.ReasonServerShutdown, false) }()
+	timer := clock.nextTimer(t)
+	timer.fire()
+	require.Error(t, <-killed)
+
+	sess.snapshotMu.Lock()
+	require.True(t, sess.snapDirty.Load())
+	require.Greater(t, sess.snapshotForcedGeneration, sess.snapshotPublishedGeneration)
+	require.NotNil(t, sess.snapshotQueuedCapture, "the one routine capture remains retryable")
+	sess.snapshotMu.Unlock()
+	d.snapshotWorkerMu.Lock()
+	require.LessOrEqual(t, len(d.snapshotJobs), snapshotQueueCapacity)
+	d.snapshotWorkerMu.Unlock()
+}
+
 func TestRoutineSnapshotEligibilityStartsAtCompletionAndForcedDoesNotMoveIt(t *testing.T) {
 	clock := &snapshotSchedulerClock{now: time.Unix(100, 0)}
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
@@ -241,3 +418,36 @@ func (c *snapshotSchedulerClock) Now() time.Time {
 }
 
 func (*snapshotSchedulerClock) NewTimer(time.Duration) ports.Timer { return stubTimer{} }
+
+type snapshotDeadlineClock struct {
+	timers chan *snapshotDeadlineTimer
+}
+
+func newSnapshotDeadlineClock() *snapshotDeadlineClock {
+	return &snapshotDeadlineClock{timers: make(chan *snapshotDeadlineTimer, 4)}
+}
+
+func (*snapshotDeadlineClock) Now() time.Time { return time.Unix(100, 0) }
+func (c *snapshotDeadlineClock) NewTimer(time.Duration) ports.Timer {
+	timer := &snapshotDeadlineTimer{ch: make(chan time.Time, 1)}
+	c.timers <- timer
+	return timer
+}
+
+func (c *snapshotDeadlineClock) nextTimer(t *testing.T) *snapshotDeadlineTimer {
+	t.Helper()
+	select {
+	case timer := <-c.timers:
+		return timer
+	case <-time.After(testWaitTimeout):
+		t.Fatal("snapshot deadline timer was not created")
+		return nil
+	}
+}
+
+type snapshotDeadlineTimer struct{ ch chan time.Time }
+
+func (t *snapshotDeadlineTimer) C() <-chan time.Time    { return t.ch }
+func (*snapshotDeadlineTimer) Reset(time.Duration) bool { return true }
+func (*snapshotDeadlineTimer) Stop() bool               { return true }
+func (t *snapshotDeadlineTimer) fire()                  { t.ch <- time.Unix(101, 0) }

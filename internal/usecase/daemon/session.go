@@ -56,18 +56,23 @@ type session struct {
 	// snapshotMu serializes the dirty generation with worker completion. It is
 	// intentionally independent from mu: persistence never holds session state
 	// locks while encoding or writing.
-	snapshotMu                 sync.Mutex
-	snapshotGeneration         uint64
-	snapshotCapturedGeneration uint64
-	snapshotNextEligibleAt     time.Time
-	snapshotAttempted          bool
-	snapshotAttemptKind        snapshotAttemptKind
+	snapshotMu                  sync.Mutex
+	snapshotGeneration          uint64
+	snapshotCapturedGeneration  uint64
+	snapshotPublishedGeneration uint64
+	snapshotNextEligibleAt      time.Time
+	snapshotAttempted           bool
+	snapshotAttemptKind         snapshotAttemptKind
 	// The coordinator state below is guarded by snapshotMu. A capture can be
 	// queued globally or in flight, never more than one of each per session.
 	// Quarantine cancels the session publication context before destructive
 	// repository operations and publicationDone joins a started publication.
-	snapshotPending            bool
-	snapshotPendingCaptures    uint
+	snapshotPending         bool
+	snapshotPendingCaptures uint
+	// snapshotForcedGeneration is the newest dirty generation a forced
+	// checkpoint must publish. It survives an older routine capture so worker
+	// completion can enqueue exactly one forced successor.
+	snapshotForcedGeneration   uint64
 	snapshotQueuedCapture      *snapshotCapture
 	snapshotInFlightCapture    *snapshotCapture
 	snapshotPublicationDone    chan struct{}
@@ -809,11 +814,14 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 			}
 		} else {
 			markSnapshotDirty(sess)
-			if !d.scheduleFinalSnapshot(sess) {
+			sess.snapshotMu.Lock()
+			terminalGeneration := sess.snapshotGeneration
+			sess.snapshotMu.Unlock()
+			if !d.scheduleFinalSnapshot(sess) || !d.waitForSnapshotGeneration(sess, terminalGeneration) {
 				sess.mu.Lock()
 				name := sess.name
 				sess.mu.Unlock()
-				terminalSnapshotErr = fmt.Errorf("retain final snapshot for session %q: snapshot worker unavailable or saturated", name)
+				terminalSnapshotErr = fmt.Errorf("retain final snapshot for session %q: snapshot worker unavailable, saturated, or timed out", name)
 				if reason != ports.ReasonServerShutdown {
 					return terminalSnapshotErr
 				}
