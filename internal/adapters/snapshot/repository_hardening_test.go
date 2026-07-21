@@ -75,7 +75,7 @@ func TestValidatePublicationRejectsUnloadableAggregate(t *testing.T) {
 		t.Fatal(err)
 	}
 	pub.Objects = nil // validation permits omitted objects for immutable reuse.
-	if _, _, _, err := validatePublication(pub); err == nil {
+	if _, _, err := validatePublication(pub); err == nil {
 		t.Fatal("validatePublication accepted unloadable aggregate")
 	} else if errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("validatePublication returned unrelated error: %v", err)

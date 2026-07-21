@@ -18,11 +18,10 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	lock.Lock()
 	defer lock.Unlock()
 
-	manifest, refs, supplied, err := validatePublication(publication)
+	refs, supplied, err := validatePublication(publication)
 	if err != nil {
 		return err
 	}
-	_ = manifest
 	if err := r.ensureSession(key); err != nil {
 		return err
 	}
@@ -106,40 +105,40 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	}
 	return nil
 }
-func validatePublication(p ports.SnapshotPublication) (codec.Manifest, map[ports.SnapshotDigest]codec.ObjectRef, map[ports.SnapshotDigest]ports.SnapshotObject, error) {
+func validatePublication(p ports.SnapshotPublication) (map[ports.SnapshotDigest]codec.ObjectRef, map[ports.SnapshotDigest]ports.SnapshotObject, error) {
 	manifest, err := codec.UnmarshalManifest(p.Manifest)
 	if err != nil {
-		return codec.Manifest{}, nil, nil, fmt.Errorf("invalid manifest: %w", err)
+		return nil, nil, fmt.Errorf("invalid manifest: %w", err)
 	}
 	if manifest.Name != p.Name || manifest.Generation != p.Generation || p.Generation == 0 {
-		return codec.Manifest{}, nil, nil, fmt.Errorf("manifest name or generation does not match publication")
+		return nil, nil, fmt.Errorf("manifest name or generation does not match publication")
 	}
 	refs := manifestRefs(manifest)
 	if refs == nil {
-		return codec.Manifest{}, nil, nil, fmt.Errorf("conflicting manifest references")
+		return nil, nil, fmt.Errorf("conflicting manifest references")
 	}
 	if !withinGenerationBudget(len(p.Manifest), refs) {
-		return codec.Manifest{}, nil, nil, fmt.Errorf("snapshot generation too large")
+		return nil, nil, fmt.Errorf("snapshot generation too large")
 	}
 	objects := make(map[ports.SnapshotDigest]ports.SnapshotObject, len(p.Objects))
 	for _, object := range p.Objects {
 		if sha256.Sum256(object.Data) != object.Digest {
-			return codec.Manifest{}, nil, nil, fmt.Errorf("object digest mismatch")
+			return nil, nil, fmt.Errorf("object digest mismatch")
 		}
 		ref, used := refs[object.Digest]
 		if !used {
-			return codec.Manifest{}, nil, nil, fmt.Errorf("unreferenced object")
+			return nil, nil, fmt.Errorf("unreferenced object")
 		}
 		kind, payload, err := codec.PreflightObject(object.Data)
 		if err != nil || kind != ref.Kind || len(object.Data) != int(ref.Size) || len(payload) == 0 {
-			return codec.Manifest{}, nil, nil, fmt.Errorf("invalid object envelope")
+			return nil, nil, fmt.Errorf("invalid object envelope")
 		}
 		if old, duplicate := objects[object.Digest]; duplicate && !equalBytes(old.Data, object.Data) {
-			return codec.Manifest{}, nil, nil, fmt.Errorf("conflicting object")
+			return nil, nil, fmt.Errorf("conflicting object")
 		}
 		objects[object.Digest] = ports.SnapshotObject{Digest: object.Digest, Data: append([]byte(nil), object.Data...)}
 	}
-	return manifest, refs, objects, nil
+	return refs, objects, nil
 }
 
 func withinGenerationBudget(manifestSize int, refs map[ports.SnapshotDigest]codec.ObjectRef) bool {
