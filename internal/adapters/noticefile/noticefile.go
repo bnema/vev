@@ -40,10 +40,12 @@ type Store struct {
 	// production.
 	afterAppendOpen func()
 
-	// removeFile and syncDirectory make Ack cleanup failures deterministic in
-	// package tests. They are nil in production.
-	removeFile    func(string) error
-	syncDirectory func(string) error
+	// removeFile, syncDirectory, and beforeAckRelease make Ack cleanup and
+	// claim-release ordering deterministic in package tests. They are nil in
+	// production.
+	removeFile       func(string) error
+	syncDirectory    func(string) error
+	beforeAckRelease func()
 }
 
 var (
@@ -329,14 +331,21 @@ func (s *Store) Ack() error {
 	if !s.ownsClaim() {
 		return ErrNoClaimOwner
 	}
-	// Ack is terminal for this Store's claim even when removing or syncing the
-	// record fails: retaining the flock would indefinitely block recovery.
-	defer s.releaseClaimLock()
-
 	return s.withLock(func() error {
 		if !s.ownsClaim() {
 			return ErrNoClaimOwner
 		}
+		// Ack is terminal for this Store's claim even when removing or syncing
+		// the record fails. Release while the operation lock is still held so a
+		// concurrent Claim on this Store cannot see a removed in-flight file
+		// while it still appears to own the claim.
+		defer func() {
+			if s.beforeAckRelease != nil {
+				s.beforeAckRelease()
+			}
+			s.releaseClaimLock()
+		}()
+
 		remove := os.Remove
 		if s.removeFile != nil {
 			remove = s.removeFile

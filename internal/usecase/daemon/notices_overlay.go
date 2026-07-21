@@ -96,6 +96,7 @@ func handleListInputLocked(clock ports.Clock, data []byte, state listInputState,
 				continue
 			}
 			result.exit = true
+			return result
 		default:
 			custom := action(data[i])
 			if custom.action != 0 {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -155,6 +156,72 @@ func TestStoreAckReleasesClaimAfterCleanupFailure(t *testing.T) {
 			require.Equal(t, tt.want, recovered)
 		})
 	}
+}
+
+func TestStoreAckSerializesClaimReleaseWithSameStoreReclaim(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "vev")
+	store := New(dir)
+	require.NoError(t, store.Append(domain.Notification{Message: "owned"}))
+	_, err := store.Claim()
+	require.NoError(t, err)
+
+	releaseEntered := make(chan struct{})
+	allowRelease := make(chan struct{})
+	lockHeld := make(chan error, 1)
+	store.beforeAckRelease = func() {
+		held, err := operationLockHeld(store.lockPath())
+		if err != nil {
+			lockHeld <- err
+		} else if !held {
+			lockHeld <- errors.New("Ack released the operation lock before claim ownership")
+		} else {
+			lockHeld <- nil
+		}
+		close(releaseEntered)
+		<-allowRelease
+	}
+
+	ackDone := make(chan error, 1)
+	go func() { ackDone <- store.Ack() }()
+	<-releaseEntered // The in-flight file is gone, but Ack still owns the operation lock.
+	require.NoError(t, <-lockHeld)
+
+	claimStarted := make(chan struct{})
+	claimDone := make(chan struct {
+		notices []domain.Notification
+		err     error
+	}, 1)
+	go func() {
+		close(claimStarted)
+		notices, err := store.Claim()
+		claimDone <- struct {
+			notices []domain.Notification
+			err     error
+		}{notices, err}
+	}()
+	<-claimStarted
+	close(allowRelease)
+
+	require.NoError(t, <-ackDone)
+	reclaimed := <-claimDone
+	require.NoError(t, reclaimed.err)
+	require.Empty(t, reclaimed.notices)
+}
+
+func operationLockHeld(path string) (bool, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return true, nil
+		}
+		return false, err
+	}
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+	return false, nil
 }
 
 func TestStoreClaimOwnershipPreventsLiveReplayOrAck(t *testing.T) {

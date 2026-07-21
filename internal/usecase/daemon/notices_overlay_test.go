@@ -245,6 +245,14 @@ func TestHandleListInputStopsAfterExitInBatchedInput(t *testing.T) {
 			wantExit: true,
 		},
 		{
+			name:       "invalid escape exit ignores trailing navigation and actions",
+			input:      []byte{'\x1b', 'x', 'j', 'y'},
+			custom:     func(b byte) listInputResult { return listInputResult{action: b} },
+			wantExit:   true,
+			wantCalls:  nil,
+			wantAction: 0,
+		},
+		{
 			name:  "custom exit retains action and ignores trailing bytes",
 			input: []byte("xjy"),
 			custom: func(b byte) listInputResult {
