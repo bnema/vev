@@ -228,6 +228,8 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 			if restoreCommand != "" {
 				if _, err := pty.Write([]byte(restoreCommand + "\n")); err != nil {
 					d.log.Warn("writing snapshot restore command failed", "err", err, "session", snap.Name, "pane", paneSnap.ID)
+					d.NotifyGlobal(domain.NoticeWarn, domain.NoticeAutoResume,
+						"couldn't restore the running program in session "+snap.Name, err)
 				}
 			}
 			tb.panes[paneSnap.ID] = p

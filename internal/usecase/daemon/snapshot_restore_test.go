@@ -546,6 +546,47 @@ func TestRestoreSnapshotsNotifiesGlobalOnUnrestorableSnapshots(t *testing.T) {
 	require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
 }
 
+func TestRestoreSnapshotsNotifiesGlobalOnResumeCommandWriteFailure(t *testing.T) {
+	proc := &snapcodec.Process{Argv: []string{"pi"}, Strategy: processStrategyPi, Opts: snapcodec.ProcessOpts{AgentSessionID: "abc123"}}
+	store := processRestoreTestStore(t, "agent-session", proc)
+	factory := &restorePTYFactory{writeErr: errors.New("boom")}
+	d := newTestDaemon(t, factory, newNoticeClock())
+	WithSnapshotStore(store)(d)
+	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"pi"}}})
+
+	// Mirrors real startup (daemon.go's Serve): restoreSnapshots runs off the
+	// caller goroutine and signals completion by closing d.restoreDone.
+	d.sessWg.Go(func() { d.restoreSnapshots(d.serveCtx) })
+
+	select {
+	case <-d.restoreDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("restoreSnapshots did not close restoreDone in time")
+	}
+
+	require.Len(t, factory.opens, 1, "the pane still opens even though the resume write fails")
+	require.Equal(t, []string{"pi --resume abc123\n"}, factory.opens[0].pty.writes)
+
+	history := d.notices.history()
+	require.Len(t, history, 1)
+	require.Equal(t, domain.NoticeAutoResume, history[0].Code)
+	require.Equal(t, domain.NoticeWarn, history[0].Severity)
+	require.Equal(t, "couldn't restore the running program in session agent-session", history[0].Message)
+
+	tr, _ := newCapturingTransport(t)
+	sess, ac, err := d.route(ports.Hello{
+		Version: ports.ProtocolVersion,
+		Intent:  ports.IntentEphemeral,
+		Size:    domain.Size{Cols: 80, Rows: 24},
+	}, tr)
+	require.NoError(t, err)
+	d.firstPaint(sess, ac, ac.size)
+
+	toasts := awaitToastCount(t, ac, 1)
+	require.Equal(t, domain.NoticeAutoResume, toasts[0].Code)
+	require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
+}
+
 func TestNamedRouteWaitsForRestoreBarrier(t *testing.T) {
 	releaseLoad := make(chan struct{})
 	loaded := make(chan struct{})
