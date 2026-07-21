@@ -90,6 +90,7 @@ func HistoryFromBlobs(config HistoryConfig, sealed [][]byte, tail []byte) (*Hist
 		if err != nil || len(view.chunks) != 1 || len(view.chunks[0].rows) == 0 {
 			return nil, fmt.Errorf("restore sealed history: %w", errInvalidHistory)
 		}
+		h.evictUntil(len(view.chunks[0].rows), view.Cells())
 		h.chunks = append(h.chunks, view.chunks[0])
 		h.rows += len(view.chunks[0].rows)
 		h.cells += view.Cells()
@@ -99,6 +100,7 @@ func HistoryFromBlobs(config HistoryConfig, sealed [][]byte, tail []byte) (*Hist
 		return nil, fmt.Errorf("restore history tail: %w", errInvalidHistory)
 	}
 	if len(view.chunks) == 1 {
+		h.evictUntil(len(view.chunks[0].rows), view.Cells())
 		h.tail = view.chunks[0].rows
 		h.rows += len(h.tail)
 		h.cells += view.Cells()

@@ -8,9 +8,10 @@ import (
 )
 
 var (
-	benchmarkHistoryViewSink  HistoryView
-	benchmarkHistoryBlobSink  []byte
-	benchmarkHistoryBlobsSink [][]byte
+	benchmarkHistoryViewSink     HistoryView
+	benchmarkHistorySnapshotSink HistorySnapshotView
+	benchmarkHistoryBlobSink     []byte
+	benchmarkHistoryBlobsSink    [][]byte
 )
 
 // TestHistoryViewPartialTailAllocationBounded guards the capture property used
@@ -73,6 +74,25 @@ func BenchmarkHistoryView10KRowsPartialTail(b *testing.B) {
 		b.Fatal("partial-tail capture did not reuse its sealed chunks")
 	}
 	b.ReportMetric(float64(10_000%256), "tailrows/view")
+}
+
+func BenchmarkHistorySnapshotView10KRowsPartialTail(b *testing.B) {
+	history := benchmarkHistory(b, 10_000, 120, 256)
+	if got, want := len(history.tail), 16; got != want {
+		b.Fatalf("partial tail rows = %d, want %d", got, want)
+	}
+	sealed := history.View().Chunk(0)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		benchmarkHistorySnapshotSink = history.SnapshotView()
+	}
+	b.StopTimer()
+	if got := benchmarkHistorySnapshotSink; got.Chunk(0) != sealed || got.Tail().Len() != 16 {
+		b.Fatal("snapshot did not preserve chunk identity and tail rows")
+	}
+	b.ReportMetric(float64(benchmarkHistorySnapshotSink.ChunkCount()), "sealedchunks/view")
 }
 
 func BenchmarkMarshalHistoryChunk256x120(b *testing.B) {

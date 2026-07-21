@@ -2,6 +2,8 @@ package vt
 
 import (
 	"encoding/binary"
+	"fmt"
+	"math"
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
@@ -123,10 +125,7 @@ func TestChunkCodecSupportsRepresentativeHistory(t *testing.T) {
 }
 
 func TestChunkCodecRejectsDimensionsBeyondSupportedLimits(t *testing.T) {
-	const (
-		supportedRows  = 12_000
-		supportedWidth = 160
-	)
+	const supportedRows = 12_000
 	tests := []struct {
 		name string
 		view HistoryView
@@ -138,9 +137,9 @@ func TestChunkCodecRejectsDimensionsBeyondSupportedLimits(t *testing.T) {
 			data: historyPayloadWithDimensions(supportedRows+1, 0),
 		},
 		{
-			name: "too many cells in a row",
-			view: historyViewWithDimensions(1, supportedWidth+1),
-			data: historyPayloadWithDimensions(1, supportedWidth+1),
+			name: "too many aggregate cells",
+			view: historyViewWithDimensions(maxHistoryCells+1, 0),
+			data: historyPayloadWithDimensions(maxHistoryRows+1, 0),
 		},
 	}
 
@@ -151,6 +150,28 @@ func TestChunkCodecRejectsDimensionsBeyondSupportedLimits(t *testing.T) {
 			}
 			if _, err := UnmarshalHistory(tt.data); err == nil {
 				t.Fatal("unmarshal accepted dimensions beyond the supported limits")
+			}
+		})
+	}
+}
+
+func TestChunkCodecAcceptsWideRowsWithinAggregateBudget(t *testing.T) {
+	for _, width := range []int{161, 293, math.MaxUint16} {
+		t.Run(fmt.Sprintf("width_%d", width), func(t *testing.T) {
+			view := historyViewWithDimensions(1, width)
+			encoded, err := MarshalHistory(view)
+			if err != nil {
+				t.Fatalf("marshal width %d: %v", width, err)
+			}
+			decoded, err := UnmarshalHistory(encoded)
+			if err != nil {
+				t.Fatalf("unmarshal width %d: %v", width, err)
+			}
+			if got := len(decoded.Row(0)); got != width {
+				t.Fatalf("decoded width = %d, want %d", got, width)
+			}
+			if stats, err := PreflightHistoryBlob(encoded); err != nil || stats.Cells != uint64(width) {
+				t.Fatalf("preflight stats = %+v, err = %v", stats, err)
 			}
 		})
 	}

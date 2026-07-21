@@ -88,13 +88,15 @@ func (h *History) Append(row []renderer.Cell) error {
 	if len(row) > h.maxCells {
 		return ErrHistoryRowTooWide
 	}
+	// Make room before adding so Cells cannot overflow even when the default
+	// capacity is MaxInt.
+	h.evictFor(len(row))
 	h.tail = append(h.tail, append([]renderer.Cell(nil), row...))
 	h.rows++
 	h.cells += len(row)
 	if len(h.tail) == h.chunkRows {
 		h.sealTail()
 	}
-	h.evict()
 	return nil
 }
 
@@ -107,7 +109,18 @@ func (h *History) sealTail() {
 }
 
 func (h *History) evict() {
-	for h.rows > h.maxRows || h.cells > h.maxCells {
+	h.evictUntil(0, 0)
+}
+
+// evictFor discards oldest rows until another row using cellCount cells can fit.
+func (h *History) evictFor(cellCount int) {
+	h.evictUntil(1, cellCount)
+}
+
+// evictUntil makes room for rowCount rows and cellCount cells without
+// overflowing either accounting total.
+func (h *History) evictUntil(rowCount, cellCount int) {
+	for h.rows > h.maxRows-rowCount || h.cells > h.maxCells-cellCount {
 		if len(h.chunks) > 0 {
 			chunk := h.chunks[0]
 			row := chunk.rows[0]
