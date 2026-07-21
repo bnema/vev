@@ -510,7 +510,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	// force-close. Finally drain the conn handlers, run one defensive sweep in
 	// case any ordering ever leaves a session behind, and join the session
 	// goroutines (readers unblock via pty.Close, coordinators via ctx cancel).
-	d.shutdownAll(ports.ReasonServerShutdown)
+	checkpointIncomplete := d.shutdownAll(ports.ReasonServerShutdown)
 	d.waitNotifies()
 	d.hardCancel()
 	d.serveCancel()
@@ -519,7 +519,14 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	// registry snapshot has been removed.
 	d.connWg.Wait()
 	d.attachmentCleanupWg.Wait()
-	d.stopSnapshotEncodeWorker()
+	// Forced terminal checkpoints run before shutdown stops producers or the
+	// worker. If one consumed its bounded deadline, do not spend a second
+	// deadline trying to flush a repository call that already ignored it.
+	if checkpointIncomplete {
+		d.abandonSnapshotEncodeWorker()
+	} else {
+		d.stopSnapshotEncodeWorker()
+	}
 	d.shutdownAll(ports.ReasonServerShutdown)
 	d.sessWg.Wait()
 	d.waitNotifies()
@@ -533,7 +540,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 // closing under the same lock as the snapshot guarantees no session can be
 // inserted after the snapshot: route rejects once closing is set, and both run
 // under d.mu. killSession (which relocks) runs after the lock is released.
-func (d *Daemon) shutdownAll(reason uint8) {
+func (d *Daemon) shutdownAll(reason uint8) (checkpointIncomplete bool) {
 	d.mu.Lock()
 	d.closing = true
 	for token, parked := range d.parked {
@@ -545,13 +552,35 @@ func (d *Daemon) shutdownAll(reason uint8) {
 	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
-		return
+		return false
 	}
 	for _, s := range snapshot {
 		if err := d.killSession(s, reason, false); err != nil {
+			checkpointIncomplete = true
 			d.log.Error("closing session with unpersisted terminal state", "err", err)
 		}
 	}
+	return checkpointIncomplete
+}
+
+// abandonSnapshotEncodeWorker stops accepting captures and detaches a worker
+// whose repository call already exceeded the terminal checkpoint deadline. A
+// repository implementation is allowed to ignore context cancellation, so
+// Serve cannot join that call without violating its shutdown bound.
+func (d *Daemon) abandonSnapshotEncodeWorker() {
+	if d == nil {
+		return
+	}
+	d.snapshotWorkerMu.Lock()
+	cancel := d.snapshotWorkerCancel
+	if cancel == nil || d.snapshotWorkerClosing {
+		d.snapshotWorkerMu.Unlock()
+		return
+	}
+	d.snapshotWorkerClosing = true
+	cancel()
+	d.snapshotWorkerMu.Unlock()
+	d.finishStoppedSnapshotWorker(true)
 }
 
 func (d *Daemon) sessionsSnapshotLocked() []*session {

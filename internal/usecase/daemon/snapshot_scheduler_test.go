@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -370,6 +371,172 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 	d.snapshotWorkerMu.Lock()
 	require.LessOrEqual(t, len(d.snapshotJobs), snapshotQueueCapacity)
 	d.snapshotWorkerMu.Unlock()
+}
+
+func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	WithSnapshotRepository(repository, nil)(d)
+	repository.EXPECT().List(mock.Anything).Return(nil, nil).Maybe()
+
+	published := make(chan ports.SnapshotPublication, 2)
+	allowTerminalPublication := make(chan struct{})
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
+		published <- publication
+		if publication.Generation == 2 {
+			<-allowTerminalPublication
+		}
+		return nil
+	}).Twice()
+
+	tr, sends, _ := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
+	l := serveSnapshotListener(t, tr)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() { served <- d.Serve(ctx, l) }()
+
+	awaitFrame(t, sends, ports.MsgWelcome)
+	markSnapshotDirty(firstSession(d))
+	d.snapshotWake <- struct{}{}
+	first := <-published
+	require.Equal(t, uint64(1), first.Generation)
+
+	cancel()
+	terminal := <-published
+	require.Equal(t, uint64(2), terminal.Generation, "shutdown must publish a forced terminal checkpoint")
+	close(allowTerminalPublication)
+
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(testWaitTimeout):
+		t.Fatal("Serve did not return after the terminal checkpoint completed")
+	}
+}
+
+func TestServeShutdownDeadlineDoesNotWaitTwiceForUncooperativeSnapshotRepository(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
+	clock := newServeShutdownClock()
+	d := newTestDaemon(t, newFactory(t, p), clock)
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	WithSnapshotRepository(repository, nil)(d)
+	repository.EXPECT().List(mock.Anything).Return(nil, nil).Maybe()
+	noticeStore := portsmocks.NewMockNoticeStore(t)
+	WithNoticeStore(noticeStore)(d)
+	noticeStore.EXPECT().Claim().Return(nil, nil).Maybe()
+	noticeStore.EXPECT().Ack().Return(nil).Maybe()
+	noticeStore.EXPECT().Append(mock.MatchedBy(func(n domain.Notification) bool {
+		return n.Code == domain.NoticeSnapshotWrite && n.Severity == domain.NoticeError
+	})).Return(nil).Once()
+
+	terminalPublicationStarted := make(chan struct{})
+	releaseTerminalPublication := make(chan struct{})
+	var lastValid atomic.Uint64
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
+		if publication.Generation == 1 {
+			lastValid.Store(publication.Generation)
+			return nil
+		}
+		close(terminalPublicationStarted)
+		<-releaseTerminalPublication // Deliberately ignores the worker cancellation context.
+		return nil
+	}).Twice()
+
+	tr, sends, _ := newConn(t, mustHello(ports.IntentNew, "work", domain.Size{Cols: 80, Rows: 24}))
+	l := serveSnapshotListener(t, tr)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() { served <- d.Serve(ctx, l) }()
+
+	awaitFrame(t, sends, ports.MsgWelcome)
+	markSnapshotDirty(firstSession(d))
+	d.snapshotWake <- struct{}{}
+	require.Eventually(t, func() bool { return lastValid.Load() == 1 }, testWaitTimeout, time.Millisecond)
+
+	cancel()
+	select {
+	case <-terminalPublicationStarted:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("shutdown terminal checkpoint did not reach the worker")
+	}
+	d.snapshotWorkerMu.Lock()
+	workerDone := d.snapshotWorkerDone
+	d.snapshotWorkerMu.Unlock()
+	require.NotNil(t, workerDone)
+	defer func() {
+		close(releaseTerminalPublication)
+		select {
+		case <-workerDone:
+		case <-time.After(testWaitTimeout):
+			t.Error("snapshot worker leaked after its repository call was released")
+		}
+	}()
+	clock.nextFinalTimer(t).fire()
+
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(testWaitTimeout):
+		t.Fatal("Serve waited beyond the terminal checkpoint deadline")
+	}
+	require.Equal(t, uint64(1), lastValid.Load(), "the last valid checkpoint remains available after the terminal attempt times out")
+}
+
+type serveShutdownClock struct {
+	finalTimers chan *snapshotDeadlineTimer
+}
+
+func newServeShutdownClock() *serveShutdownClock {
+	return &serveShutdownClock{finalTimers: make(chan *snapshotDeadlineTimer, 2)}
+}
+
+func (*serveShutdownClock) Now() time.Time { return time.Unix(100, 0) }
+func (c *serveShutdownClock) NewTimer(delay time.Duration) ports.Timer {
+	if delay != snapshotFinalFlushTimeout {
+		return stubTimer{}
+	}
+	timer := &snapshotDeadlineTimer{ch: make(chan time.Time, 1)}
+	c.finalTimers <- timer
+	return timer
+}
+
+func (c *serveShutdownClock) nextFinalTimer(t *testing.T) *snapshotDeadlineTimer {
+	t.Helper()
+	select {
+	case timer := <-c.finalTimers:
+		return timer
+	case <-time.After(testWaitTimeout):
+		t.Fatal("shutdown checkpoint deadline timer was not created")
+		return nil
+	}
+}
+
+func serveSnapshotListener(t *testing.T, tr ports.Transport) *portsmocks.MockListener {
+	t.Helper()
+	l := portsmocks.NewMockListener(t)
+	connections := make(chan ports.Transport, 1)
+	connections <- tr
+	closed := make(chan struct{})
+	var once sync.Once
+	l.EXPECT().Accept().RunAndReturn(func() (ports.Transport, error) {
+		select {
+		case conn := <-connections:
+			return conn, nil
+		case <-closed:
+			return nil, io.EOF
+		}
+	}).Maybe()
+	l.EXPECT().Close().RunAndReturn(func() error {
+		once.Do(func() { close(closed) })
+		return nil
+	}).Maybe()
+	l.EXPECT().Addr().Return("mock").Maybe()
+	return l
 }
 
 func TestRoutineSnapshotEligibilityStartsAtCompletionAndForcedDoesNotMoveIt(t *testing.T) {
