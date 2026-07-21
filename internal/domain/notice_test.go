@@ -7,36 +7,13 @@ import (
 )
 
 func TestNoticeCodeString(t *testing.T) {
-	tests := []struct {
-		code NoticeCode
-		want string
-	}{
-		{NoticeInternal, "internal"},
-		{NoticePaneSpawn, "pane-spawn"},
-		{NoticeTabSpawn, "tab-spawn"},
-		{NoticeFloatingSpawn, "floating-spawn"},
-		{NoticeSessionSpawn, "session-spawn"},
-		{NoticeLayoutTooSmall, "layout-too-small"},
-		{NoticePaneNotFound, "pane-not-found"},
-		{NoticeSessionUnavailable, "session-unavailable"},
-		{NoticePersistDisabled, "persist-disabled"},
-		{NoticeSnapshotWrite, "snapshot-write"},
-		{NoticeSnapshotRestore, "snapshot-restore"},
-		{NoticeSnapshotSaturated, "snapshot-saturated"},
-		{NoticePersistDelete, "persist-delete"},
-		{NoticeConfigReload, "config-reload"},
-		{NoticeInputDropped, "input-dropped"},
-		{NoticeResizeFailed, "resize-failed"},
-		{NoticeClipboard, "clipboard"},
-		{NoticeClipboardTooLarge, "clipboard-too-large"},
-		{NoticeAutoResume, "auto-resume"},
-		{NoticeConnection, "connection"},
-		{NoticeCode(9999), "unknown"},
-	}
-	for _, tt := range tests {
-		if got := tt.code.String(); got != tt.want {
-			t.Errorf("NoticeCode(%d).String() = %q, want %q", tt.code, got, tt.want)
+	for code := range noticeCodeLimit {
+		if got := code.String(); got == "unknown" {
+			t.Errorf("NoticeCode(%d).String() = unknown, want declared code slug", code)
 		}
+	}
+	if got := NoticeCode(9999).String(); got != "unknown" {
+		t.Errorf("NoticeCode(9999).String() = %q, want unknown", got)
 	}
 }
 

@@ -39,6 +39,11 @@ type Store struct {
 	// opened the pending file while it owns the interprocess lock. It is nil in
 	// production.
 	afterAppendOpen func()
+
+	// removeFile and syncDirectory make Ack cleanup failures deterministic in
+	// package tests. They are nil in production.
+	removeFile    func(string) error
+	syncDirectory func(string) error
 }
 
 var (
@@ -192,13 +197,19 @@ func (s *Store) Append(n domain.Notification) error {
 }
 
 // Claim atomically moves pending notices into an in-flight file and returns
-// their valid JSONL entries in order. Its Store owns the claim until Ack, so a
-// concurrent Store cannot replay or acknowledge it. The ownership flock is
-// released on process exit, allowing an unacknowledged import to be replayed
-// after a crash. A missing pending file means there is nothing to claim.
+// their valid JSONL entries in order. Repeating Claim on its owning Store
+// replays that Store's existing claim; a concurrent Store cannot replay or
+// acknowledge it. The ownership flock is released on process exit, allowing
+// an unacknowledged import to be replayed after a crash. A missing pending
+// file means there is nothing to claim.
 func (s *Store) Claim() ([]domain.Notification, error) {
 	var notices []domain.Notification
 	err := s.withLock(func() error {
+		if s.ownsClaim() {
+			var err error
+			notices, err = readNotices(s.inFlightPath())
+			return err
+		}
 		if err := s.acquireClaimLock(); err != nil {
 			return err
 		}
@@ -318,17 +329,28 @@ func (s *Store) Ack() error {
 	if !s.ownsClaim() {
 		return ErrNoClaimOwner
 	}
+	// Ack is terminal for this Store's claim even when removing or syncing the
+	// record fails: retaining the flock would indefinitely block recovery.
+	defer s.releaseClaimLock()
+
 	return s.withLock(func() error {
 		if !s.ownsClaim() {
 			return ErrNoClaimOwner
 		}
-		if err := os.Remove(s.inFlightPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		remove := os.Remove
+		if s.removeFile != nil {
+			remove = s.removeFile
+		}
+		if err := remove(s.inFlightPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("ack claimed notices: %w", err)
 		}
-		if err := syncDir(s.dir); err != nil {
+		sync := syncDir
+		if s.syncDirectory != nil {
+			sync = s.syncDirectory
+		}
+		if err := sync(s.dir); err != nil {
 			return fmt.Errorf("sync acknowledged notices: %w", err)
 		}
-		s.releaseClaimLock()
 		return nil
 	})
 }

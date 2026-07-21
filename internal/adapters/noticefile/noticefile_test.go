@@ -2,6 +2,7 @@ package noticefile
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,6 +87,74 @@ func TestStoreClaimWaitsForAppendInCriticalSection(t *testing.T) {
 	require.NoError(t, <-errDone)
 	require.Equal(t, []domain.Notification{first, second}, <-claimDone)
 	require.NoError(t, claimant.Ack())
+}
+
+func TestStoreRepeatedClaimReplaysOwnerAndBlocksCompetitor(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "vev")
+	owner := New(dir)
+	want := domain.Notification{Message: "owned"}
+	require.NoError(t, owner.Append(want))
+
+	first, err := owner.Claim()
+	require.NoError(t, err)
+	require.Equal(t, []domain.Notification{want}, first)
+
+	replayed, err := owner.Claim()
+	require.NoError(t, err)
+	require.Equal(t, first, replayed)
+
+	other := New(dir)
+	blocked, err := other.Claim()
+	require.ErrorIs(t, err, ErrClaimInProgress)
+	require.Nil(t, blocked)
+
+	require.NoError(t, owner.Ack())
+	empty, err := other.Claim()
+	require.NoError(t, err)
+	require.Empty(t, empty)
+}
+
+func TestStoreAckReleasesClaimAfterCleanupFailure(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name   string
+		inject func(*Store, error)
+		want   []domain.Notification
+	}{
+		{
+			name: "remove",
+			inject: func(store *Store, cause error) {
+				store.removeFile = func(string) error { return cause }
+			},
+			want: []domain.Notification{{Message: "owned"}},
+		},
+		{
+			name: "sync directory",
+			inject: func(store *Store, cause error) {
+				store.syncDirectory = func(string) error { return cause }
+			},
+			want: nil,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "vev")
+			owner := New(dir)
+			require.NoError(t, owner.Append(domain.Notification{Message: "owned"}))
+			_, err := owner.Claim()
+			require.NoError(t, err)
+
+			cause := errors.New("cleanup failed")
+			tt.inject(owner, cause)
+			require.ErrorIs(t, owner.Ack(), cause)
+
+			// A new Store proves the failed Ack released the ownership flock.
+			recovered, err := New(dir).Claim()
+			require.NoError(t, err)
+			require.Equal(t, tt.want, recovered)
+		})
+	}
 }
 
 func TestStoreClaimOwnershipPreventsLiveReplayOrAck(t *testing.T) {

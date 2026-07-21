@@ -71,6 +71,7 @@ func handleListInputLocked(clock ports.Clock, data []byte, state listInputState,
 			result.changed = true
 		case 'q', 0x03:
 			result.exit = true
+			return result
 		case keys.ESC:
 			tail := data[i:]
 			if consumed, move := routeListEscape(tail); consumed > 0 {
@@ -100,9 +101,14 @@ func handleListInputLocked(clock ports.Clock, data []byte, state listInputState,
 			if custom.action != 0 {
 				result.action = custom.action
 			}
-			result.exit = result.exit || custom.exit
-			result.stop = custom.stop
-			if result.stop {
+			if custom.exit {
+				result.exit = true
+			}
+			if custom.stop {
+				result.stop = true
+				return result
+			}
+			if custom.exit {
 				return result
 			}
 		}

@@ -222,6 +222,86 @@ func TestHandleListInputConsumesUnsupportedCompleteEscapeSequences(t *testing.T)
 	}
 }
 
+func TestHandleListInputStopsAfterExitInBatchedInput(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		input      []byte
+		custom     func(byte) listInputResult
+		wantExit   bool
+		wantStop   bool
+		wantAction byte
+		wantCalls  []byte
+	}{
+		{
+			name:     "q ignores trailing navigation and actions",
+			input:    []byte("qjy"),
+			custom:   func(b byte) listInputResult { return listInputResult{action: b} },
+			wantExit: true,
+		},
+		{
+			name:     "ctrl-c ignores trailing navigation and actions",
+			input:    []byte{0x03, 'j', 'y'},
+			custom:   func(b byte) listInputResult { return listInputResult{action: b} },
+			wantExit: true,
+		},
+		{
+			name:  "custom exit retains action and ignores trailing bytes",
+			input: []byte("xjy"),
+			custom: func(b byte) listInputResult {
+				if b == 'x' {
+					return listInputResult{action: b, exit: true}
+				}
+				return listInputResult{action: b}
+			},
+			wantExit: true, wantAction: 'x', wantCalls: []byte("x"),
+		},
+		{
+			name:  "custom stop retains action and ignores trailing bytes",
+			input: []byte("xjy"),
+			custom: func(b byte) listInputResult {
+				if b == 'x' {
+					return listInputResult{action: b, stop: true}
+				}
+				return listInputResult{action: b}
+			},
+			wantStop: true, wantAction: 'x', wantCalls: []byte("x"),
+		},
+		{
+			name:  "custom exit and stop retain both flags and action",
+			input: []byte("xjy"),
+			custom: func(b byte) listInputResult {
+				if b == 'x' {
+					return listInputResult{action: b, exit: true, stop: true}
+				}
+				return listInputResult{action: b}
+			},
+			wantExit: true, wantStop: true, wantAction: 'x', wantCalls: []byte("x"),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var pending, calls []byte
+			var down int
+			state := listInputState{
+				pending:  &pending,
+				esc:      &pendingByteTimer{},
+				moveUp:   func() {},
+				moveDown: func() { down++ },
+			}
+
+			result := handleListInputLocked(nil, tt.input, state, func(b byte) listInputResult {
+				calls = append(calls, b)
+				return tt.custom(b)
+			})
+
+			require.Equal(t, tt.wantExit, result.exit)
+			require.Equal(t, tt.wantStop, result.stop)
+			require.Equal(t, tt.wantAction, result.action)
+			require.Equal(t, tt.wantCalls, calls)
+			require.Zero(t, down, "trailing j must not be processed")
+		})
+	}
+}
+
 func TestNoticesOpenWithEmptyHistoryShowsPlaceholderWithoutPanic(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)

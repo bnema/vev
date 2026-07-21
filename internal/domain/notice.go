@@ -41,6 +41,10 @@ const (
 	NoticeClipboardTooLarge
 	NoticeAutoResume
 	NoticeConnection
+
+	// noticeCodeLimit is an append-only declaration sentinel, not a persisted
+	// valid notice code. Keep it last when adding a NoticeCode.
+	noticeCodeLimit
 )
 
 var noticeSlugs = map[NoticeCode]string{
