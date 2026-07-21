@@ -95,7 +95,9 @@ func TestManifestPreflightHostileDeclarations(t *testing.T) {
 	t.Run("tab count", func(t *testing.T) {
 		var w payloadWriter
 		w.putUint64(1)
-		_ = w.putString("name")
+		if err := w.putString("name"); err != nil {
+			t.Fatalf("putString(name): %v", err)
+		}
 		w.putUint64(1)
 		w.putUint16(0)
 		w.putUint16(^uint16(0))
