@@ -67,7 +67,10 @@ func (d *Daemon) restoreSnapshots(ctx context.Context) {
 		return
 	}
 	if ns := d.noticeStore; ns != nil {
-		drained, _ := ns.Drain()
+		drained, err := ns.Drain()
+		if err != nil {
+			d.log.Warn("draining pending notices failed", "err", err)
+		}
 		for _, n := range drained {
 			d.notices.record(n)
 			d.notices.queueGlobal(n)
