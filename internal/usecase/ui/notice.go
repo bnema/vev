@@ -23,8 +23,9 @@ type NoticeView struct {
 	Count    int
 }
 
-// NoticeStyles selects the box border style by severity; Text styles both the
-// title (drawn on the border) and the wrapped message body.
+// NoticeStyles selects severity-colored styles for each box's border and title.
+// Text styles the wrapped message body and overflow indicator; it excludes the
+// title, which is drawn with the box's severity style.
 type NoticeStyles struct {
 	Text     renderer.Style
 	BoxInfo  renderer.Style

@@ -3,6 +3,9 @@ package domain
 import "time"
 
 // NoticeSeverity ranks a user-facing notification.
+//
+// Its numeric values persist in JSON notice records and are a protocol/domain
+// contract. Add values only at the end; never reorder existing values.
 type NoticeSeverity uint8
 
 const (
@@ -12,6 +15,9 @@ const (
 )
 
 // NoticeCode identifies a failure meaning, not a call site.
+//
+// Its numeric values persist in JSON notice records and are a protocol/domain
+// contract. Add values only at the end; never reorder existing values.
 type NoticeCode uint16
 
 const (

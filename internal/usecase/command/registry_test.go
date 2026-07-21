@@ -47,23 +47,24 @@ func TestRegistryIncludesFloatingPaneToggle(t *testing.T) {
 	}
 }
 
-func TestRegistryIncludesNotifications(t *testing.T) {
-	cmd, ok := ByCode("NTC")
-	if !ok {
-		t.Fatal("ByCode(\"NTC\") ok = false, want true")
-	}
-	if cmd.Slug != "notifications" || cmd.Code != "NTC" || cmd.Name != "Notifications" {
-		t.Fatalf("notifications command = %#v, want notifications/NTC/Notifications", cmd)
-	}
-}
-
-func TestRegistryIncludesYankLastNotification(t *testing.T) {
-	cmd, ok := ByCode("YLN")
-	if !ok {
-		t.Fatal("ByCode(\"YLN\") ok = false, want true")
-	}
-	if cmd.Slug != "yank-last-notification" || cmd.Code != "YLN" || cmd.Name != "Yank last notification" {
-		t.Fatalf("yank command = %#v, want yank-last-notification/YLN/Yank last notification", cmd)
+func TestRegistryIncludesNotificationCommands(t *testing.T) {
+	for _, tt := range []struct {
+		code string
+		slug string
+		name string
+	}{
+		{code: "NTC", slug: "notifications", name: "Notifications"},
+		{code: "YLN", slug: "yank-last-notification", name: "Yank last notification"},
+	} {
+		t.Run(tt.code, func(t *testing.T) {
+			cmd, ok := ByCode(tt.code)
+			if !ok {
+				t.Fatalf("ByCode(%q) ok = false, want true", tt.code)
+			}
+			if cmd.Slug != tt.slug || cmd.Code != tt.code || cmd.Name != tt.name {
+				t.Fatalf("command = %#v, want %s/%s/%s", cmd, tt.slug, tt.code, tt.name)
+			}
+		})
 	}
 }
 

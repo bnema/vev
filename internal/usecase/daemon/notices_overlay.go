@@ -84,7 +84,8 @@ func handleListInputLocked(clock ports.Clock, data []byte, state listInputState,
 			}
 			if isListEscapePrefix(tail) {
 				*state.pending = append((*state.pending)[:0], tail...)
-				break
+				i += len(tail) - 1
+				continue
 			}
 			result.exit = true
 		default:

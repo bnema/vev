@@ -147,6 +147,44 @@ func TestNoticesSplitArrowNavigatesWithoutClosing(t *testing.T) {
 	}
 }
 
+func TestHandleListInputConsumesSplitEscapePrefix(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		prefix   []byte
+		tail     byte
+		wantUp   int
+		wantDown int
+	}{
+		{name: "CSI up", prefix: []byte("\x1b["), tail: 'A', wantUp: 1},
+		{name: "CSI down", prefix: []byte("\x1b["), tail: 'B', wantDown: 1},
+		{name: "SS3 up", prefix: []byte("\x1bO"), tail: 'A', wantUp: 1},
+		{name: "SS3 down", prefix: []byte("\x1bO"), tail: 'B', wantDown: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var pending, custom []byte
+			var up, down int
+			state := listInputState{
+				pending:  &pending,
+				esc:      &pendingByteTimer{},
+				moveUp:   func() { up++ },
+				moveDown: func() { down++ },
+			}
+			action := func(b byte) listInputResult {
+				custom = append(custom, b)
+				return listInputResult{}
+			}
+
+			handleListInputLocked(nil, tt.prefix, state, action)
+			handleListInputLocked(nil, []byte{tt.tail}, state, action)
+
+			require.Equal(t, tt.wantUp, up)
+			require.Equal(t, tt.wantDown, down)
+			require.Empty(t, custom, "escape prefix bytes must not reach the custom action")
+			require.Empty(t, pending)
+		})
+	}
+}
+
 func TestNoticesOpenWithEmptyHistoryShowsPlaceholderWithoutPanic(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
