@@ -449,14 +449,17 @@ func verifyObjectFile(path string, digest ports.SnapshotDigest, ref codec.Object
 }
 
 func (r *Repository) ensureSession(key string) error {
-	for _, dir := range []string{
-		r.dir,
-		filepath.Join(r.dir, repositorySessionsDir),
-		r.sessionPath(key),
-		filepath.Join(r.sessionPath(key), repositoryObjectsDir),
-		filepath.Join(r.sessionPath(key), repositoryGenerations),
+	for _, directory := range []struct {
+		path  string
+		phase string
+	}{
+		{r.dir, "repository"},
+		{filepath.Join(r.dir, repositorySessionsDir), "sessions"},
+		{r.sessionPath(key), "session"},
+		{filepath.Join(r.sessionPath(key), repositoryObjectsDir), "objects"},
+		{filepath.Join(r.sessionPath(key), repositoryGenerations), "generations"},
 	} {
-		if err := r.ensurePrivateDirectory(dir); err != nil {
+		if err := r.ensurePrivateDirectoryPhase(directory.path, directory.phase); err != nil {
 			return fmt.Errorf("create snapshot repository directory: %w", err)
 		}
 	}
@@ -464,6 +467,10 @@ func (r *Repository) ensureSession(key string) error {
 }
 
 func (r *Repository) ensurePrivateDirectory(dir string) error {
+	return r.ensurePrivateDirectoryPhase(dir, "snapshot directory")
+}
+
+func (r *Repository) ensurePrivateDirectoryPhase(dir, phase string) error {
 	_, err := os.Lstat(dir)
 	created := errors.Is(err, os.ErrNotExist)
 	if err != nil && !created {
@@ -472,7 +479,7 @@ func (r *Repository) ensurePrivateDirectory(dir string) error {
 	if created {
 		parent := filepath.Dir(dir)
 		if _, err := os.Lstat(parent); errors.Is(err, os.ErrNotExist) {
-			if err := r.ensurePrivateDirectory(parent); err != nil {
+			if err := r.ensurePrivateDirectoryPhase(parent, "snapshot directory"); err != nil {
 				return err
 			}
 		} else if err != nil {
@@ -486,7 +493,9 @@ func (r *Repository) ensurePrivateDirectory(dir string) error {
 		return err
 	}
 	if created {
-		return r.syncDirectory(filepath.Dir(dir))
+		if err := r.syncDirectory(filepath.Dir(dir)); err != nil {
+			return fmt.Errorf("%s parent directory sync: %w", phase, err)
+		}
 	}
 	return nil
 }
@@ -597,7 +606,11 @@ func (r *Repository) readHead(key string) (uint64, ports.SnapshotDigest, error) 
 // after verifier reads it through the same secure descriptor path as Load.
 func (r *Repository) writeImmutable(path string, data []byte, verifier func([]byte) error) error {
 	dir := filepath.Dir(path)
-	if err := r.ensurePrivateDirectory(dir); err != nil {
+	phase := "object shard"
+	if filepath.Base(dir) == repositoryGenerations {
+		phase = "generation"
+	}
+	if err := r.ensurePrivateDirectoryPhase(dir, phase); err != nil {
 		return err
 	}
 	temp, err := r.createTemp(dir)
@@ -608,8 +621,8 @@ func (r *Repository) writeImmutable(path string, data []byte, verifier func([]by
 	closed := false
 	cleanup := func(cause error) error {
 		if !closed {
-			if err := r.closeFile(temp); err != nil && cause == nil {
-				cause = err
+			if err := r.closeFile(temp); err != nil {
+				cause = errors.Join(cause, err)
 			}
 			closed = true
 		}
@@ -668,8 +681,8 @@ func (r *Repository) writeMutable(path string, data []byte) error {
 	closed := false
 	cleanup := func(cause error) error {
 		if !closed {
-			if err := r.closeFile(temp); err != nil && cause == nil {
-				cause = err
+			if err := r.closeFile(temp); err != nil {
+				cause = errors.Join(cause, err)
 			}
 			closed = true
 		}
