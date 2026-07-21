@@ -88,7 +88,9 @@ func (s *Screen) emitLineEvicted(top, n int) {
 
 func (s *Screen) recordEvicted(row []renderer.Cell) {
 	if s.history != nil {
-		s.history.Append(row)
+		// Oversized rows cannot fit the configured cell budget. Scrolling must
+		// still complete (and notify observers), so history drops that row.
+		_ = s.history.Append(row)
 	}
 	if s.OnLineEvicted != nil {
 		s.OnLineEvicted(append([]renderer.Cell(nil), row...))

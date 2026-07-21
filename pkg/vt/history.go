@@ -1,10 +1,20 @@
 package vt
 
-import "github.com/bnema/vev/pkg/renderer"
+import (
+	"errors"
+	"math"
+
+	"github.com/bnema/vev/pkg/renderer"
+)
+
+// ErrHistoryRowTooWide is returned when a row cannot fit within the configured
+// cell budget. The history is not modified when this error is returned.
+var ErrHistoryRowTooWide = errors.New("history row exceeds cell capacity")
 
 // HistoryConfig controls the bounded terminal history retained by a Screen.
 type HistoryConfig struct {
 	MaxRows   int
+	MaxCells  int
 	ChunkRows int
 }
 
@@ -13,10 +23,12 @@ type HistoryConfig struct {
 // appends.
 type History struct {
 	maxRows   int
+	maxCells  int
 	chunkRows int
 	chunks    []*HistoryChunk
 	tail      [][]renderer.Cell
 	rows      int
+	cells     int
 }
 
 // HistoryChunk is an immutable group of history rows. Its identity is stable
@@ -30,6 +42,17 @@ type HistoryChunk struct {
 type HistoryView struct {
 	chunks []*HistoryChunk
 	rows   int
+	cells  int
+}
+
+// HistorySnapshotView captures sealed history chunks and the mutable tail
+// independently. Sealed chunks are shared by identity; Tail is owned by the
+// view and can be serialized without rotating the live tail into a chunk.
+type HistorySnapshotView struct {
+	chunks []*HistoryChunk
+	tail   [][]renderer.Cell
+	rows   int
+	cells  int
 }
 
 func NewHistory(config HistoryConfig) *History {
@@ -42,20 +65,37 @@ func NewHistory(config HistoryConfig) *History {
 	}
 	chunkRows = min(chunkRows, 256)
 	chunkRows = min(chunkRows, config.MaxRows)
-	return &History{maxRows: config.MaxRows, chunkRows: chunkRows}
+	maxCells := config.MaxCells
+	if maxCells <= 0 {
+		maxCells = defaultHistoryMaxCells(config.MaxRows)
+	}
+	return &History{maxRows: config.MaxRows, maxCells: maxCells, chunkRows: chunkRows}
+}
+
+func defaultHistoryMaxCells(maxRows int) int {
+	if maxRows > math.MaxInt/160 {
+		return math.MaxInt
+	}
+	return maxRows * 160
 }
 
 // Append records a copy of row. Once a chunk is full it is sealed forever.
-func (h *History) Append(row []renderer.Cell) {
+// Rows wider than the total cell capacity are rejected without mutation.
+func (h *History) Append(row []renderer.Cell) error {
 	if h == nil || h.maxRows == 0 {
-		return
+		return nil
+	}
+	if len(row) > h.maxCells {
+		return ErrHistoryRowTooWide
 	}
 	h.tail = append(h.tail, append([]renderer.Cell(nil), row...))
 	h.rows++
+	h.cells += len(row)
 	if len(h.tail) == h.chunkRows {
 		h.sealTail()
 	}
 	h.evict()
+	return nil
 }
 
 func (h *History) sealTail() {
@@ -67,12 +107,31 @@ func (h *History) sealTail() {
 }
 
 func (h *History) evict() {
-	for h.rows > h.maxRows && len(h.chunks) > 0 {
-		evicted := h.chunks[0]
-		h.rows -= len(evicted.rows)
-		copy(h.chunks, h.chunks[1:])
-		h.chunks[len(h.chunks)-1] = nil
-		h.chunks = h.chunks[:len(h.chunks)-1]
+	for h.rows > h.maxRows || h.cells > h.maxCells {
+		if len(h.chunks) > 0 {
+			chunk := h.chunks[0]
+			row := chunk.rows[0]
+			h.rows--
+			h.cells -= len(row)
+			if len(chunk.rows) == 1 {
+				copy(h.chunks, h.chunks[1:])
+				h.chunks[len(h.chunks)-1] = nil
+				h.chunks = h.chunks[:len(h.chunks)-1]
+			} else {
+				// Preserve cell storage while replacing only the chunk wrapper: a
+				// retained view may still refer to the original immutable chunk.
+				h.chunks[0] = &HistoryChunk{rows: chunk.rows[1:]}
+			}
+			continue
+		}
+		if len(h.tail) == 0 {
+			return
+		}
+		row := h.tail[0]
+		h.rows--
+		h.cells -= len(row)
+		h.tail[0] = nil
+		h.tail = h.tail[1:]
 	}
 }
 
@@ -93,13 +152,34 @@ func (h *History) View() HistoryView {
 	}
 	chunks := append([]*HistoryChunk(nil), h.chunks...)
 	if len(h.tail) > 0 {
-		rows := make([][]renderer.Cell, len(h.tail))
-		for i, row := range h.tail {
-			rows[i] = append([]renderer.Cell(nil), row...)
-		}
-		chunks = append(chunks, &HistoryChunk{rows: rows})
+		chunks = append(chunks, &HistoryChunk{rows: cloneHistoryRows(h.tail)})
 	}
-	return HistoryView{chunks: chunks, rows: h.rows}
+	return HistoryView{chunks: chunks, rows: h.rows, cells: h.cells}
+}
+
+// SnapshotView captures history for persistence without sealing the mutable
+// tail. Sealed chunks are shared by identity and the tail is deeply copied.
+func (h *History) SnapshotView() HistorySnapshotView {
+	if h == nil || h.rows == 0 {
+		return HistorySnapshotView{}
+	}
+	return HistorySnapshotView{
+		chunks: append([]*HistoryChunk(nil), h.chunks...),
+		tail:   cloneHistoryRows(h.tail),
+		rows:   h.rows,
+		cells:  h.cells,
+	}
+}
+
+func cloneHistoryRows(rows [][]renderer.Cell) [][]renderer.Cell {
+	if len(rows) == 0 {
+		return nil
+	}
+	copyRows := make([][]renderer.Cell, len(rows))
+	for i, row := range rows {
+		copyRows[i] = append([]renderer.Cell(nil), row...)
+	}
+	return copyRows
 }
 
 // Len returns the currently retained history row count.
@@ -110,6 +190,14 @@ func (h *History) Len() int {
 	return h.rows
 }
 
+// Cells returns the currently retained history cell count.
+func (h *History) Cells() int {
+	if h == nil {
+		return 0
+	}
+	return h.cells
+}
+
 // Cap returns the configured bounded row capacity.
 func (h *History) Cap() int {
 	if h == nil {
@@ -118,7 +206,16 @@ func (h *History) Cap() int {
 	return h.maxRows
 }
 
+// CellCap returns the configured bounded cell capacity.
+func (h *History) CellCap() int {
+	if h == nil {
+		return 0
+	}
+	return h.maxCells
+}
+
 func (v HistoryView) Len() int        { return v.rows }
+func (v HistoryView) Cells() int      { return v.cells }
 func (v HistoryView) ChunkCount() int { return len(v.chunks) }
 
 // Chunk returns the immutable chunk at i, or nil when i is out of range.
@@ -160,4 +257,32 @@ func (v HistoryView) BorrowedRow(i int) []renderer.Cell {
 		i -= len(chunk.rows)
 	}
 	return nil
+}
+
+func (v HistorySnapshotView) Len() int        { return v.rows }
+func (v HistorySnapshotView) Cells() int      { return v.cells }
+func (v HistorySnapshotView) ChunkCount() int { return len(v.chunks) }
+
+// Chunk returns a sealed immutable chunk at i, or nil when i is out of range.
+func (v HistorySnapshotView) Chunk(i int) *HistoryChunk {
+	if i < 0 || i >= len(v.chunks) {
+		return nil
+	}
+	return v.chunks[i]
+}
+
+// Tail returns an immutable view of the copied mutable tail.
+func (v HistorySnapshotView) Tail() HistoryView {
+	if len(v.tail) == 0 {
+		return HistoryView{}
+	}
+	return HistoryView{chunks: []*HistoryChunk{{rows: v.tail}}, rows: len(v.tail), cells: historyRowsCells(v.tail)}
+}
+
+func historyRowsCells(rows [][]renderer.Cell) int {
+	cells := 0
+	for _, row := range rows {
+		cells += len(row)
+	}
+	return cells
 }
