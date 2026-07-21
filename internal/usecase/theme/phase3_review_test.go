@@ -98,6 +98,8 @@ func TestPickerSeparatorUsesSecondaryTextContrast(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, want, resolved.Styles.PickerSeparator.ForegroundRGB)
 	require.False(t, resolved.Styles.PickerSeparator.HasBackgroundRGB)
+	require.Equal(t, want, resolved.Styles.PickerDescription.ForegroundRGB)
+	require.False(t, resolved.Styles.PickerDescription.HasBackgroundRGB)
 	require.GreaterOrEqual(t, ContrastRatio(resolved.Styles.PickerSeparator.ForegroundRGB, theme.Background), normalTextContrast)
 }
 
