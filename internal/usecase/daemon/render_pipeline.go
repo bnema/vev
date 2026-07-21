@@ -229,13 +229,13 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	if snap.pickerActive && snap.pickerModel != nil {
 		o.picker.modal = pickerModal
 		o.picker.focused = true
-		renderStyles := picker.RenderStyles{Background: styles.PickerBase, Selection: styles.PickerSelection, SelectionName: styles.PickerSelectionName, SelectionMuted: styles.PickerSelectionMuted, Name: styles.SurfaceInactive, Detail: styles.PickerDescription, Base: styles.SurfaceInactive, Separator: styles.PickerSeparator}
+		renderStyles := picker.RenderStyles{Background: styles.PickerBase, Selection: styles.PickerSelection, SelectionName: styles.PickerSelectionName, SelectionMuted: styles.PickerSelectionMuted, Name: styles.PickerName, Detail: styles.PickerDescription, Base: styles.PickerBase, Separator: styles.PickerSeparator}
 		o.picker.inner = snap.pickerModel.Render(rectSize(pickerModal.Inner(size)), state.preview, renderStyles)
 	}
 	if snap.noticesOverlayActive && snap.noticesOverlayModel != nil {
 		o.noticesOverlay.modal = noticesModal
 		o.noticesOverlay.focused = true
-		renderStyles := notices.RenderStyles{Background: styles.PickerBase, Base: styles.SurfaceInactive, Selection: styles.PickerSelection, Text: styles.SurfaceInactive, SelectionText: styles.PickerSelectionName, Muted: styles.PickerDescription, SelectionMuted: styles.PickerSelectionMuted}
+		renderStyles := notices.RenderStyles{Background: styles.PickerBase, Base: styles.PickerBase, Selection: styles.PickerSelection, Text: styles.PickerBase, SelectionText: styles.PickerSelectionName, Muted: styles.PickerDescription, SelectionMuted: styles.PickerSelectionMuted}
 		o.noticesOverlay.inner = snap.noticesOverlayModel.Render(rectSize(noticesModal.Inner(size)), renderStyles)
 	}
 	if snap.paletteActive && snap.paletteModel != nil {
@@ -246,7 +246,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 			guidance = snap.paletteHints.Feedback
 		}
 		o.paletteGuidance = snap.paletteFeedback
-		o.palette.inner = snap.paletteModel.Render(rectSize(o.palette.modal.Inner(size)), palette.RenderOptions{Styles: palette.RenderStyles{Base: styles.PickerBase, Row: styles.SurfaceInactive, Selection: styles.PickerSelection, Description: styles.PickerDescription, SelectionDescription: styles.PickerSelectionMuted}, Guidance: guidance, Feedback: snap.paletteFeedback})
+		o.palette.inner = snap.paletteModel.Render(rectSize(o.palette.modal.Inner(size)), palette.RenderOptions{Styles: palette.RenderStyles{Base: styles.PickerBase, Row: styles.PickerBase, Selection: styles.PickerSelection, Description: styles.PickerDescription, SelectionDescription: styles.PickerSelectionMuted}, Guidance: guidance, Feedback: snap.paletteFeedback})
 	}
 	if snap.promptActive && snap.promptModel != nil {
 		o.prompt.modal = promptModalFor(snap.promptModel.Title())

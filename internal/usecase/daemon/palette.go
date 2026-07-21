@@ -520,6 +520,6 @@ func composePaletteClientFrame(model *palette.Model, base renderer.Frame, cfg do
 	styleSet := resolveStyles(styles)
 	modal := paletteModalFor(domain.Size{Cols: base.Width, Rows: base.Height}, cfg)
 	return composeModalClientFrame(base, modal, styleSet, func(size domain.Size) renderer.Frame {
-		return model.Render(size, palette.RenderOptions{Styles: palette.RenderStyles{Base: styleSet.PickerBase, Row: styleSet.SurfaceInactive, Selection: styleSet.PickerSelection, Description: styleSet.PickerDescription, SelectionDescription: styleSet.PickerSelectionMuted}, Guidance: guidance})
+		return model.Render(size, palette.RenderOptions{Styles: palette.RenderStyles{Base: styleSet.PickerBase, Row: styleSet.PickerBase, Selection: styleSet.PickerSelection, Description: styleSet.PickerDescription, SelectionDescription: styleSet.PickerSelectionMuted}, Guidance: guidance})
 	})
 }

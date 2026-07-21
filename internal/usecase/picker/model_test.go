@@ -350,7 +350,7 @@ func TestRenderStylesFillBackgroundRowsAndSelection(t *testing.T) {
 	require.True(t, frame.At(19, 1).Style.Equal(selection), "selected row owns active surface")
 }
 
-func TestPickerDetailKeepsInactiveSurfaceAcrossAccentFallbacks(t *testing.T) {
+func TestPickerRowsKeepTerminalBackgroundAcrossAccentFallbacks(t *testing.T) {
 	palette := [16]renderer.RGB{}
 	palette[2] = renderer.RGB{R: 10, G: 230, B: 120}
 	palette[10] = palette[2]
@@ -387,27 +387,22 @@ func TestPickerDetailKeepsInactiveSurfaceAcrossAccentFallbacks(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			styles := themeui.Resolve(tt.theme, tt.policy).Styles
-			require.Equal(t, styles.SurfaceInactive.Background, styles.PickerDescription.Background)
-			require.Equal(t, styles.SurfaceInactive.HasBackgroundRGB, styles.PickerDescription.HasBackgroundRGB)
-			require.Equal(t, styles.SurfaceInactive.BackgroundRGB, styles.PickerDescription.BackgroundRGB)
-			require.Equal(t, styles.SurfaceBar.Background, styles.PickerSeparator.Background)
-			require.Equal(t, styles.SurfaceBar.HasBackgroundRGB, styles.PickerSeparator.HasBackgroundRGB)
-			require.Equal(t, styles.SurfaceBar.BackgroundRGB, styles.PickerSeparator.BackgroundRGB)
+			require.True(t, styles.PickerBase.Equal(renderer.DefaultStyle()))
+			require.False(t, styles.PickerDescription.HasBackgroundRGB)
+			require.False(t, styles.PickerSeparator.HasBackgroundRGB)
 			if tt.name == "indexed only" {
 				require.Equal(t, 2, styles.PickerDescription.Foreground)
 				require.Equal(t, 2, styles.PickerSeparator.Foreground)
-				require.False(t, styles.PickerDescription.HasBackgroundRGB)
-				require.False(t, styles.PickerSeparator.HasBackgroundRGB)
 			}
 
 			frame := model.Render(domain.Size{Cols: 32, Rows: 4}, Preview{}, RenderStyles{
-				Background: styles.PickerBase, Base: styles.SurfaceInactive, Name: styles.SurfaceInactive,
+				Background: styles.PickerBase, Base: styles.PickerBase, Name: styles.PickerName,
 				Detail: styles.PickerDescription, Selection: styles.PickerSelection,
 				SelectionName: styles.PickerSelection, SelectionMuted: styles.PickerSelection,
 				Separator: styles.PickerSeparator,
 			})
-			require.True(t, frame.At(5, 3).Style.Equal(styles.PickerDescription), "description text must retain its contrast-derived foreground and inactive background")
-			require.True(t, frame.At(31, 3).Style.Equal(styles.SurfaceInactive), "unused row cells must retain the inactive surface")
+			require.True(t, frame.At(5, 3).Style.Equal(styles.PickerDescription), "description text keeps a contrast-derived foreground without a background tint")
+			require.True(t, frame.At(31, 3).Style.Equal(styles.PickerBase), "unused row cells retain the terminal background")
 		})
 	}
 }

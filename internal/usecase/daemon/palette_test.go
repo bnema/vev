@@ -74,13 +74,14 @@ func TestCaptureOverlayLayersPreservesPaletteDescriptionSurfaceAcrossFallbacks(t
 			captureOverlayLayers(&state, snap, domain.PaletteConfig{})
 
 			inactive := state.overlays.palette.inner.At(4, 1).Style
-			require.Equal(t, state.styles.SurfaceInactive.Background, inactive.Background)
-			require.Equal(t, state.styles.SurfaceInactive.HasBackgroundRGB, inactive.HasBackgroundRGB)
-			require.Equal(t, state.styles.SurfaceInactive.BackgroundRGB, inactive.BackgroundRGB)
+			require.Equal(t, state.styles.PickerDescription.Foreground, inactive.Foreground)
+			require.Equal(t, state.styles.PickerDescription.HasForegroundRGB, inactive.HasForegroundRGB)
+			require.Equal(t, state.styles.PickerDescription.ForegroundRGB, inactive.ForegroundRGB)
+			require.False(t, inactive.HasBackgroundRGB)
 			if tt.indexed {
 				require.Equal(t, 2, inactive.Foreground)
-				require.False(t, inactive.HasBackgroundRGB)
 			}
+			require.True(t, state.overlays.palette.inner.At(31, 1).Style.Equal(state.styles.PickerBase), "inactive row filler keeps the terminal background")
 
 			selected := state.overlays.palette.inner.At(4, 2).Style
 			require.True(t, selected.Equal(state.styles.PickerSelectionMuted))

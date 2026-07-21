@@ -94,10 +94,13 @@ func TestPickerSeparatorUsesSecondaryTextContrast(t *testing.T) {
 	theme.PaletteKnown = 1<<2 | 1<<10
 	resolved := Resolve(theme, domain.ThemeAccent{Mode: domain.ThemeAccentAuto})
 
-	want, ok := secondaryText(resolved.Styles.PickerBase.ForegroundRGB, resolved.Styles.PickerBase.BackgroundRGB)
+	want, ok := secondaryText(theme.Foreground, theme.Background)
 	require.True(t, ok)
 	require.Equal(t, want, resolved.Styles.PickerSeparator.ForegroundRGB)
-	require.GreaterOrEqual(t, ContrastRatio(resolved.Styles.PickerSeparator.ForegroundRGB, resolved.Styles.PickerBase.BackgroundRGB), normalTextContrast)
+	require.False(t, resolved.Styles.PickerSeparator.HasBackgroundRGB)
+	require.Equal(t, want, resolved.Styles.PickerDescription.ForegroundRGB)
+	require.False(t, resolved.Styles.PickerDescription.HasBackgroundRGB)
+	require.GreaterOrEqual(t, ContrastRatio(resolved.Styles.PickerSeparator.ForegroundRGB, theme.Background), normalTextContrast)
 }
 
 func TestLegacyAliasesPaletteOffAndForcedThemesRemainExact(t *testing.T) {

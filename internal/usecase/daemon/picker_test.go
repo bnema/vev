@@ -717,28 +717,23 @@ func TestCaptureOverlayLayersPreservesPickerSemanticSurfacesAcrossFallbacks(t *t
 
 			captureOverlayLayers(&state, snap, domain.PaletteConfig{})
 
-			require.Equal(t, state.styles.SurfaceInactive.Background, state.styles.PickerDescription.Background)
-			require.Equal(t, state.styles.SurfaceInactive.HasBackgroundRGB, state.styles.PickerDescription.HasBackgroundRGB)
-			require.Equal(t, state.styles.SurfaceInactive.BackgroundRGB, state.styles.PickerDescription.BackgroundRGB)
-			require.Equal(t, state.styles.SurfaceBar.Background, state.styles.PickerSeparator.Background)
-			require.Equal(t, state.styles.SurfaceBar.HasBackgroundRGB, state.styles.PickerSeparator.HasBackgroundRGB)
-			require.Equal(t, state.styles.SurfaceBar.BackgroundRGB, state.styles.PickerSeparator.BackgroundRGB)
+			require.False(t, state.styles.PickerDescription.HasBackgroundRGB)
+			require.False(t, state.styles.PickerSeparator.HasBackgroundRGB)
 			if tt.indexed {
 				require.Equal(t, 2, state.styles.PickerDescription.Foreground)
 				require.Equal(t, 2, state.styles.PickerSeparator.Foreground)
-				require.False(t, state.styles.PickerDescription.HasBackgroundRGB)
-				require.False(t, state.styles.PickerSeparator.HasBackgroundRGB)
 			}
 
 			inner := state.overlays.picker.inner
 			layout := picker.ChooseLayout(domain.Size{Cols: inner.Width, Rows: inner.Height})
 			require.Equal(t, picker.LayoutHorizontal, layout.Mode)
-			require.True(t, inner.At(5, 3).Style.Equal(state.styles.PickerDescription), "description text retains the inactive row surface")
+			require.True(t, inner.At(5, 3).Style.Equal(state.styles.PickerDescription), "description text keeps a muted foreground on the terminal background")
+			require.True(t, inner.At(layout.List.Width-1, 3).Style.Equal(state.styles.PickerBase), "inactive row filler keeps the terminal background")
 			for y := layout.Separator.Y; y < layout.Separator.Y+layout.Separator.Height; y++ {
 				for x := layout.Separator.X; x < layout.Separator.X+layout.Separator.Width; x++ {
 					cell := inner.At(x, y)
 					require.Equal(t, '│', cell.Rune)
-					require.True(t, cell.Style.Equal(state.styles.PickerSeparator), "separator retains the bar surface")
+					require.True(t, cell.Style.Equal(state.styles.PickerSeparator), "separator keeps a foreground-only style on the terminal background")
 				}
 			}
 		})

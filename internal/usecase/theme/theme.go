@@ -367,7 +367,7 @@ func BorderStyle(t Theme) renderer.Style {
 }
 
 func MutedTextStyle(t Theme) renderer.Style {
-	return neutralStyles(t).PickerDescription
+	return legacyMutedText(t)
 }
 
 // mutedVariantBlend is the fraction MutedVariantStyle blends a style's own
