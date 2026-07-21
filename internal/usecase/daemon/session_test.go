@@ -1211,7 +1211,7 @@ func TestPickerStoppedTargetKillPurges(t *testing.T) {
 	WithStore(store)(d)
 	require.NoError(t, d.persist.Save(persist.Record{Name: "old", Cwd: "/tmp", CreatedAt: 1, UpdatedAt: 1}))
 	d.stopped["old"] = stoppedSession{name: "old", cwd: "/tmp", createdAt: 1}
-	d.killPickerTarget(picker.Target{Name: "old", Stopped: true})
+	require.NoError(t, d.killPickerTarget(picker.Target{Name: "old", Stopped: true}))
 	require.False(t, state.has("old"))
 	d.mu.Lock()
 	_, ok := d.stopped["old"]

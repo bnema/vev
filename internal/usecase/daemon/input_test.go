@@ -618,7 +618,7 @@ func TestPaletteBackSessionTogglesPreviousSession(t *testing.T) {
 	recent := d.sessions[domain.SessionID("recent")]
 
 	// Picker-style successful transition records its origin.
-	d.switchToTarget(current, ac, picker.Target{Session: recent.id, TabIndex: -1})
+	require.NoError(t, d.switchToTarget(current, ac, picker.Target{Session: recent.id, TabIndex: -1}))
 	for _, sess := range []*session{current, recent, current} {
 		runPaletteCommand(t, d, ac.currentSession(), ac, "BSK")
 		require.Same(t, sess, ac.currentSession())
@@ -746,7 +746,11 @@ func TestSwitchSourcePreviousSessionContracts(t *testing.T) {
 			defer releaseAll(releases)
 			recent := d.sessions[domain.SessionID("recent")]
 
-			d.switchToTarget(current, ac, tc.target(current, recent))
+			if tc.name == "missing target does not record" {
+				require.Error(t, d.switchToTarget(current, ac, tc.target(current, recent)))
+			} else {
+				require.NoError(t, d.switchToTarget(current, ac, tc.target(current, recent)))
+			}
 			require.Equal(t, domain.SessionID(tc.wantCurrent), ac.currentSession().id)
 			if tc.wantPrev == "" {
 				require.Nil(t, ac.previousSession.Get())

@@ -511,7 +511,7 @@ func TestJumpAttentionCrossesSessionsWhenNoLocalBells(t *testing.T) {
 	}
 	d.sessions[sess2.id] = sess2
 
-	d.jumpAttention(sess1, ac)
+	require.NoError(t, d.jumpAttention(sess1, ac))
 
 	require.Same(t, sess2, ac.currentSession())
 	require.Same(t, ac, sess2.client)
