@@ -79,6 +79,31 @@ func TestClipboardInterceptCtrlVOtherErrorForwardsByte(t *testing.T) {
 	require.Equal(t, [][]byte{{ctrlV}}, col.snapshot())
 }
 
+func TestClipboardInterceptFailureNotifiesDaemonAndForwardsCtrlV(t *testing.T) {
+	tests := []struct {
+		name   string
+		reader ports.ClipboardReader
+		want   uint8
+	}{
+		{name: "image read failure", reader: &ciFakeReader{err: errors.New("boom")}, want: ports.ClientNoticeClipboardFallback},
+		{name: "oversized image", reader: &ciFakeReader{mime: "image/png", data: make([]byte, maxClipboardImagePush+1)}, want: ports.ClientNoticeClipboardTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ci, pc, _, col, images := newTestClipboardIntercept(tt.reader)
+			defer pc.Close()
+			var actions []uint8
+			ci.sendNotice = func(action uint8) { actions = append(actions, action) }
+
+			ci.Scan([]byte{ctrlV})
+
+			require.Equal(t, []uint8{tt.want}, actions)
+			require.Empty(t, *images)
+			require.Equal(t, [][]byte{{ctrlV}}, col.snapshot())
+		})
+	}
+}
+
 func TestClipboardInterceptOversizedImageForwardsByteInsteadOfSwallowing(t *testing.T) {
 	huge := make([]byte, maxClipboardImagePush+1)
 	reader := &ciFakeReader{mime: "image/png", data: huge}

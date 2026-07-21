@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -172,6 +173,31 @@ func TestAltCForwardsToPTY(t *testing.T) {
 	releasePTY()
 }
 
+// TestWriteToPaneFailureNotifiesDroppedInput drives forwarded keystrokes into
+// a pane whose pty.Write always fails (a wedged pty, or a dead child). The
+// user's typing must not silently vanish: each failed write records a
+// NoticeInputDropped notice, and repeated failures on the same code coalesce
+// into a single toast with a rising count rather than spamming one per key.
+func TestWriteToPaneFailureNotifiesDroppedInput(t *testing.T) {
+	writeErr := errors.New("write /dev/ptmx: input/output error")
+	p, releasePTY := newBlockingPTYWithFailingWrite(t, writeErr)
+	defer releasePTY()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+
+	for range 5 {
+		d.handleInput(sess, ac, []byte("x"))
+	}
+
+	toasts := awaitToastCount(t, ac, 1)
+	require.Equal(t, domain.NoticeInputDropped, toasts[0].Code)
+	require.Equal(t, domain.NoticeError, toasts[0].Severity)
+	require.Equal(t, "input not delivered to pane", toasts[0].Message)
+	require.Equal(t, 5, toasts[0].Count, "5 failed writes must coalesce into one toast, not one per keystroke")
+
+	hist := d.notices.history()
+	require.Len(t, hist, 5, "coalescing is display-only; history keeps every occurrence")
+}
+
 func TestAltFToggleRetainedFloatingPaneRepaintsImmediately(t *testing.T) {
 	normal, releaseNormal := newBlockingPTY(t)
 	floatingPTY, releaseFloating := newBlockingPTY(t)
@@ -327,6 +353,38 @@ func TestFloatingStaysTerminalTargetAfterDirectionalFocus(t *testing.T) {
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
 	daemonKeyHandler{d: d, ac: ac}.Forward([]byte("x"))
 	requirePTYWrite(t, floatingWrites, []byte("x"))
+}
+
+// TestActionFocusPaneAtEdgeStaysSilent drives a directional focus move with
+// no pane on that side (the session has a single, unsplit pane). This is
+// routine navigation, not a failure, and must never produce a notice.
+func TestActionFocusPaneAtEdgeStaysSilent(t *testing.T) {
+	d, _, ac, _ := newManualSessionWithPTYs(t, nil)
+
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneLeft)
+
+	require.Empty(t, d.notices.history(), "no-neighbor focus move must stay silent")
+}
+
+// TestActionFocusPaneGenuineErrorReportsNoticeInternal drives a directional
+// focus move against a tab with no layout tree at all — a genuine structural
+// error distinct from "no pane in that direction" — and asserts it reaches
+// the user as a notice instead of being silently discarded.
+func TestActionFocusPaneGenuineErrorReportsNoticeInternal(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+	tb := sess.activeTab()
+	tb.mu.Lock()
+	tb.tree = nil
+	tb.mu.Unlock()
+
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneLeft)
+
+	history := d.notices.history()
+	require.Len(t, history, 2, "the layout error and its failed direct display update must both surface")
+	require.Equal(t, domain.NoticeInternal, history[0].Code)
+	require.Equal(t, "display update failed", history[0].Message)
+	require.Equal(t, domain.NoticeInternal, history[1].Code)
+	require.Equal(t, "internal error", history[1].Message)
 }
 
 func TestFloatingVisibilityRemainsIndependentAcrossTabSwitches(t *testing.T) {
@@ -560,7 +618,7 @@ func TestPaletteBackSessionTogglesPreviousSession(t *testing.T) {
 	recent := d.sessions[domain.SessionID("recent")]
 
 	// Picker-style successful transition records its origin.
-	d.switchToTarget(current, ac, picker.Target{Session: recent.id, TabIndex: -1})
+	require.NoError(t, d.switchToTarget(current, ac, picker.Target{Session: recent.id, TabIndex: -1}))
 	for _, sess := range []*session{current, recent, current} {
 		runPaletteCommand(t, d, ac.currentSession(), ac, "BSK")
 		require.Same(t, sess, ac.currentSession())
@@ -588,6 +646,27 @@ func TestPaletteBackSessionDoesNotMoveWithoutValidTarget(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBackSessionReportsStaleHandoffOnce(t *testing.T) {
+	d, current, ac, _, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	target := d.sessions[domain.SessionID("recent")]
+	ac.previousSession.Set(target)
+
+	// A displaced attachment makes the previously valid handoff stale by the
+	// time switchToTarget commits it.
+	current.mu.Lock()
+	current.client = nil
+	current.mu.Unlock()
+
+	d.backSession(current, ac)
+
+	require.Same(t, current, ac.currentSession(), "a stale handoff must leave the attachment on its origin")
+	require.Same(t, target, ac.previousSession.Get(), "a failed handoff remains retryable")
+	history := d.notices.history()
+	require.Len(t, history, 1, "the switch failure must be reported exactly once")
+	require.Equal(t, domain.NoticeSessionUnavailable, history[0].Code)
 }
 
 func TestStaleBackSessionClearPreservesConcurrentTarget(t *testing.T) {
@@ -688,7 +767,11 @@ func TestSwitchSourcePreviousSessionContracts(t *testing.T) {
 			defer releaseAll(releases)
 			recent := d.sessions[domain.SessionID("recent")]
 
-			d.switchToTarget(current, ac, tc.target(current, recent))
+			if tc.name == "missing target does not record" {
+				require.Error(t, d.switchToTarget(current, ac, tc.target(current, recent)))
+			} else {
+				require.NoError(t, d.switchToTarget(current, ac, tc.target(current, recent)))
+			}
 			require.Equal(t, domain.SessionID(tc.wantCurrent), ac.currentSession().id)
 			if tc.wantPrev == "" {
 				require.Nil(t, ac.previousSession.Get())
@@ -1442,6 +1525,41 @@ func TestMouseHitTestFocusesPaneAndTranslatesSGRColumns(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1b[<0;22;2M"))
 
 	require.Equal(t, layout.PaneID("pane-2"), tb.tree.Focus)
+}
+
+// TestMouseGatedWhileNoticesOverlayActive guards against a click on the
+// notifications modal falling through to pane hit-testing underneath it: the
+// modal has no mouse handler of its own, so without the gate a click would
+// silently retarget focus and forward SGR bytes to whichever pane sits under
+// the modal's coordinates.
+func TestMouseGatedWhileNoticesOverlayActive(t *testing.T) {
+	p1 := portsmocks.NewMockPTY(t)
+	p1.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	p2 := portsmocks.NewMockPTY(t)
+	p2.EXPECT().Resize(domain.Size{Cols: 20, Rows: 5}).Return(nil).Maybe()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p1)
+	d.procComm = nil
+	tb := sess.activeTab()
+	p2pane := newPane("pane-2", p2, domain.Size{Cols: 20, Rows: 5})
+	p2pane.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	tb.mu.Lock()
+	tb.size = domain.Size{Cols: 41, Rows: 5}
+	tb.tree.Root = &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}
+	tb.tree.Focus = "pane-1"
+	tb.panes["pane-2"] = p2pane
+	tb.mu.Unlock()
+
+	d.notices.record(domain.Notification{Code: domain.NoticePaneSpawn, Message: "m", Time: time.Unix(1, 0)})
+	d.enterNotices(sess, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	require.True(t, ac.overlays.noticesActive())
+
+	// Same coordinates that TestMouseHitTestFocusesPaneAndTranslatesSGRColumns
+	// proves would otherwise focus pane-2 and forward the SGR report to it.
+	d.handleInput(sess, ac, []byte("\x1b[<0;22;2M"))
+
+	require.Equal(t, layout.PaneID("pane-1"), tb.tree.Focus, "mouse must not reach pane hit-testing while the notices overlay is open")
+	require.True(t, ac.overlays.noticesActive(), "mouse click must not close the notices overlay")
 }
 
 func TestMouseCollapsedStackBarExpandsAndFocuses(t *testing.T) {

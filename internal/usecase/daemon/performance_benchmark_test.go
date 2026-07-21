@@ -132,7 +132,7 @@ func TestTransactionalResizeMetrics(t *testing.T) {
 	require.Equal(t, uint64(1), metrics.resizeCommits)
 	require.Equal(t, uint64(1), metrics.ptyFailures)
 	require.Equal(t, uint64(1), metrics.ptyRetries)
-	require.Equal(t, uint64(2), metrics.outputFrames, "commit plus successful full-reset retry")
+	require.Equal(t, uint64(3), metrics.outputFrames, "commit, resize-failure notice toast, and successful full-reset retry")
 	require.Zero(t, metrics.frameGapEpochs, "every committed epoch emitted its required frame")
 	require.Equal(t, []domain.Size{{Cols: 50, Rows: 28}, {Cols: 50, Rows: 28}}, fixture.pty.requested())
 	require.Equal(t, domain.Size{Cols: 100, Rows: 30}, fixture.ac.size)

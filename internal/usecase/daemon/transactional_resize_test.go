@@ -204,6 +204,102 @@ func TestTransactionalResizeApplyDoesNotHoldTabOrPaneLocks(t *testing.T) {
 	require.True(t, paneUnlocked, "PTY.Resize must run outside pane.mu")
 }
 
+// P3 degradation: a failing PTY resize is surfaced as exactly one warn notice
+// per applyResize call, collected inside the resizeMu loop and reported once
+// after it returns to lock-free code. The count is the meaningful assertion:
+// notify acquires sess.mu/d.mu and must never run while any resizeMu is held.
+func TestTransactionalResizeApplyReportsFailureOncePerCall(t *testing.T) {
+	countResizeFailed := func(d *Daemon) (int, domain.Notification) {
+		var last domain.Notification
+		count := 0
+		for _, h := range d.notices.history() {
+			if h.Code == domain.NoticeResizeFailed {
+				count++
+				last = h
+			}
+		}
+		return count, last
+	}
+
+	t.Run("one failed member yields one notice after return", func(t *testing.T) {
+		failing := &transactionalResizePTY{errs: []error{errors.New("scripted resize failure")}}
+		d, sess, _, _ := newManualSessionWithPTYs(t, failing)
+		tb := sess.activeTab()
+		p := tb.focusedPane()
+		plan := resizePlan{members: []resizeMember{{session: sess, tab: tb, pane: p, rect: domain.Rect{Width: 100, Height: 20}, retry: true}}}
+
+		require.Empty(t, d.notices.history(), "no notice is recorded before applyResize")
+		require.True(t, d.applyResize(&plan))
+
+		count, n := countResizeFailed(d)
+		require.Equal(t, 1, count, "exactly one NoticeResizeFailed per applyResize call")
+		require.Equal(t, domain.NoticeWarn, n.Severity)
+		require.Equal(t, "pane resize failed; retrying in background", n.Message)
+		require.False(t, plan.members[0].ok, "failed member is not marked ok")
+	})
+
+	for _, tt := range []struct {
+		name       string
+		firstErr   error
+		secondErr  error
+		current    func() bool
+		wantResult bool
+		wantCount  int
+	}{
+		{
+			name:       "normal completion reports one combined failure",
+			firstErr:   errors.New("first fails"),
+			secondErr:  errors.New("second fails"),
+			wantResult: true,
+			wantCount:  1,
+		},
+		{
+			name:      "stale current after failure still reports once",
+			firstErr:  errors.New("first fails"),
+			secondErr: errors.New("must not be resized"),
+			current: func() func() bool {
+				checks := 0
+				return func() bool {
+					checks++
+					return checks == 1
+				}
+			}(),
+			wantResult: false,
+			wantCount:  1,
+		},
+		{
+			name:       "normal completion without failure does not report",
+			wantResult: true,
+			wantCount:  0,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			first := &transactionalResizePTY{errs: []error{tt.firstErr}}
+			second := &transactionalResizePTY{errs: []error{tt.secondErr}}
+			d, sess, _, _ := newManualSessionWithPTYs(t, first, second)
+			tabs := sess.tabs
+			plan := resizePlan{members: []resizeMember{
+				{session: sess, tab: tabs[0], pane: tabs[0].focusedPane(), rect: domain.Rect{Width: 100, Height: 20}, retry: true},
+				{session: sess, tab: tabs[1], pane: tabs[1].focusedPane(), rect: domain.Rect{Width: 100, Height: 20}, retry: true},
+			}}
+
+			var got bool
+			if tt.current == nil {
+				got = d.applyResize(&plan)
+			} else {
+				got = d.applyResize(&plan, tt.current)
+			}
+			require.Equal(t, tt.wantResult, got)
+
+			count, _ := countResizeFailed(d)
+			require.Equal(t, tt.wantCount, count, "one notice per applyResize call, including stale returns")
+			if !tt.wantResult {
+				require.Equal(t, []domain.Size(nil), second.requested(), "stale current check must stop before the next member")
+			}
+		})
+	}
+}
+
 // S3 acceptance: a failed member never publishes speculative parser/screen or
 // rectangle state. Successful members and the client layout commit together;
 // composition clips/pads the retained failed screen against that new layout.

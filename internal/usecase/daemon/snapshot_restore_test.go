@@ -59,6 +59,11 @@ func TestRestorePaneTerminalRejectsMissingOrMalformedCanonicalBlobs(t *testing.T
 	}
 }
 
+func TestRestoreSnapshotsNilDaemonDoesNotPanic(t *testing.T) {
+	var d *Daemon
+	require.NotPanics(t, func() { d.restoreSnapshots(t.Context()) })
+}
+
 func TestRestoreSessionRejectsInvalidActiveTab(t *testing.T) {
 	factory := &restorePTYFactory{}
 	d := newTestDaemon(t, factory, stubClock{})
@@ -497,6 +502,121 @@ func TestRestoreSnapshotsSkipsCreatedAtOverflow(t *testing.T) {
 	require.Nil(t, restored)
 }
 
+// TestRestoreSnapshotsNotifiesGlobalOnUnrestorableSnapshots proves each
+// unrestorable snapshot is recorded to history individually, while the
+// pending-global queue dedups them by code into a single toast with the
+// combined Count. Both blobs decode fine (valid snapcodec bytes, Marshal
+// itself validates Active/tab range) but fail in restoreSession itself: an
+// empty embedded session name is rejected deterministically, before any lock
+// is taken or PTY is opened.
+func TestRestoreSnapshotsNotifiesGlobalOnUnrestorableSnapshots(t *testing.T) {
+	badSnap := mustSnapshotBytes(t, snapcodec.Session{Name: ""})
+	store := &restoreSnapshotStore{blobs: []ports.SnapshotBlob{
+		{Name: "bad-1", Data: badSnap},
+		{Name: "bad-2", Data: badSnap},
+	}}
+	factory := &restorePTYFactory{}
+	d := newTestDaemon(t, factory, newNoticeClock())
+	WithSnapshotStore(store)(d)
+
+	// Mirrors real startup (daemon.go's Serve): restoreSnapshots runs off the
+	// caller goroutine and signals completion by closing d.restoreDone.
+	d.sessWg.Go(func() { d.restoreSnapshots(d.serveCtx) })
+
+	select {
+	case <-d.restoreDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("restoreSnapshots did not close restoreDone in time")
+	}
+
+	require.Empty(t, factory.opens, "both snapshots must fail before any PTY is opened")
+	require.Len(t, d.notices.history(), 2, "each failure is recorded individually")
+	for _, n := range d.notices.history() {
+		require.Equal(t, domain.NoticeSnapshotRestore, n.Code)
+		require.Equal(t, domain.NoticeError, n.Severity)
+	}
+
+	tr, _ := newCapturingTransport(t)
+	sess, ac, err := d.route(ports.Hello{
+		Version: ports.ProtocolVersion,
+		Intent:  ports.IntentEphemeral,
+		Size:    domain.Size{Cols: 80, Rows: 24},
+	}, tr)
+	require.NoError(t, err)
+	d.firstPaint(sess, ac, ac.size)
+
+	toasts := awaitToastCount(t, ac, 1)
+	require.Equal(t, domain.NoticeSnapshotRestore, toasts[0].Code)
+	require.Equal(t, 2, toasts[0].Count, "two same-code failures dedup into one toast counted twice")
+	require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
+}
+
+func TestRestoreSnapshotsDoesNotNotifyForCancelledRestore(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	factory := &restorePTYFactory{onOpen: cancel}
+	store := &restoreSnapshotStore{blobs: []ports.SnapshotBlob{{Name: "cancelled", Data: mustSnapshotBytes(t, snapcodec.Session{
+		Name: "cancelled",
+		Tabs: []snapcodec.Tab{{
+			Cols: 80, Rows: 24,
+			Tree: &layout.Tree{Focus: "one", Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
+				layout.NewLeaf("one"), layout.NewLeaf("two"),
+			}}},
+			Panes: []snapcodec.Pane{
+				emptyTerminalPane(t, "one", "/one"),
+				emptyTerminalPane(t, "two", "/two"),
+			},
+		}},
+	})}}}
+	d := newTestDaemon(t, factory, stubClock{})
+	WithSnapshotStore(store)(d)
+
+	d.restoreSnapshots(ctx)
+
+	require.Len(t, factory.snapshotOpens(), 1, "cancellation stops restore before the next pane")
+	require.Empty(t, d.notices.history(), "shutdown cancellation is not a user-visible restore failure")
+}
+
+func TestRestoreSnapshotsNotifiesGlobalOnResumeCommandWriteFailure(t *testing.T) {
+	proc := &snapcodec.Process{Argv: []string{"pi"}, Strategy: processStrategyPi, Opts: snapcodec.ProcessOpts{AgentSessionID: "abc123"}}
+	store := processRestoreTestStore(t, "agent-session", proc)
+	factory := &restorePTYFactory{writeErr: errors.New("boom")}
+	d := newTestDaemon(t, factory, newNoticeClock())
+	WithSnapshotStore(store)(d)
+	d.ApplyConfig(domain.Config{Snapshot: domain.SnapshotConfig{RestoreProcessesSet: true, RestoreProcesses: []string{"pi"}}})
+
+	// Mirrors real startup (daemon.go's Serve): restoreSnapshots runs off the
+	// caller goroutine and signals completion by closing d.restoreDone.
+	d.sessWg.Go(func() { d.restoreSnapshots(d.serveCtx) })
+
+	select {
+	case <-d.restoreDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("restoreSnapshots did not close restoreDone in time")
+	}
+
+	require.Len(t, factory.opens, 1, "the pane still opens even though the resume write fails")
+	require.Equal(t, []string{"pi --resume abc123\n"}, factory.opens[0].pty.writes)
+
+	history := d.notices.history()
+	require.Len(t, history, 1)
+	require.Equal(t, domain.NoticeAutoResume, history[0].Code)
+	require.Equal(t, domain.NoticeWarn, history[0].Severity)
+	require.Equal(t, "couldn't restore the running program in session agent-session", history[0].Message)
+
+	tr, _ := newCapturingTransport(t)
+	sess, ac, err := d.route(ports.Hello{
+		Version: ports.ProtocolVersion,
+		Intent:  ports.IntentEphemeral,
+		Size:    domain.Size{Cols: 80, Rows: 24},
+	}, tr)
+	require.NoError(t, err)
+	d.firstPaint(sess, ac, ac.size)
+
+	toasts := awaitToastCount(t, ac, 1)
+	require.Equal(t, domain.NoticeAutoResume, toasts[0].Code)
+	require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
+}
+
 func TestNamedRouteWaitsForRestoreBarrier(t *testing.T) {
 	releaseLoad := make(chan struct{})
 	loaded := make(chan struct{})
@@ -599,6 +719,7 @@ type restorePTYFactory struct {
 	mu       sync.Mutex
 	opens    []restorePTYOpen
 	writeErr error
+	onOpen   func()
 }
 
 type restorePTYOpen struct {
@@ -612,10 +733,14 @@ type restorePTYOpen struct {
 
 func (f *restorePTYFactory) Open(ctx context.Context, command string, _ []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	pty := newRestorePTY()
 	pty.writeErr = f.writeErr
 	f.opens = append(f.opens, restorePTYOpen{ctx: ctx, command: command, dir: dir, size: sz, env: append([]string(nil), env...), pty: pty})
+	onOpen := f.onOpen
+	f.mu.Unlock()
+	if onOpen != nil {
+		onOpen()
+	}
 	return pty, nil
 }
 

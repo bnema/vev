@@ -52,6 +52,40 @@ func okLabChroma(color oklab) float64 {
 	return math.Hypot(color.A, color.B)
 }
 
+// oklch is the polar (lightness, chroma, hue) form of oklab. Hue is degrees
+// in [0, 360).
+type oklch struct {
+	L float64
+	C float64
+	H float64
+}
+
+// oklabToOKLCh converts to the polar form used to isolate hue from
+// lightness and chroma.
+func oklabToOKLCh(color oklab) oklch {
+	hue := math.Atan2(color.B, color.A) * 180 / math.Pi
+	if hue < 0 {
+		hue += 360
+	}
+	return oklch{L: color.L, C: okLabChroma(color), H: hue}
+}
+
+// oklchToOKLab converts back from the polar form.
+func oklchToOKLab(color oklch) oklab {
+	rad := color.H * math.Pi / 180
+	return oklab{L: color.L, A: color.C * math.Cos(rad), B: color.C * math.Sin(rad)}
+}
+
+// shiftHue replaces color's OKLCh hue with targetDegrees while preserving
+// its lightness and chroma, so the result stays in the same value/intensity
+// band as the source. A near-neutral source (chroma close to zero) yields a
+// near-neutral result regardless of the target: hue is not meaningful there.
+func shiftHue(color renderer.RGB, targetDegrees float64) renderer.RGB {
+	lch := oklabToOKLCh(rgbToOKLab(color))
+	lch.H = targetDegrees
+	return okLabToRGB(oklchToOKLab(lch))
+}
+
 // okLabLerp interpolates sRGB endpoints in OKLab. Exact endpoints avoid
 // round-trip quantization changing terminal-provided colors.
 func okLabLerp(a, b renderer.RGB, weight float64) renderer.RGB {

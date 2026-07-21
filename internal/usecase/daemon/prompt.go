@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/bnema/vev/internal/domain"
@@ -28,6 +29,14 @@ func (d *Daemon) closePrompt(ac *attachedClient) {
 	ac.overlays.promptSubmit = nil
 	ac.overlays.promptPending = nil
 	ac.overlays.promptMu.Unlock()
+}
+
+// promptValidationError identifies expected prompt feedback that should stay
+// inline rather than creating a history entry or toast.
+func promptValidationError(err error) bool {
+	return errors.Is(err, domain.ErrInvalidSessionName) ||
+		errors.Is(err, errSessionNameRequired) ||
+		errors.Is(err, errSessionNameInUse)
 }
 
 func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte) {
@@ -76,6 +85,9 @@ func (d *Daemon) handlePromptInput(ac *attachedClient, data []byte) {
 				ac.overlays.prompt.SetError(err.Error())
 			}
 			ac.overlays.promptMu.Unlock()
+			if !promptValidationError(err) {
+				d.reportError(sess, err)
+			}
 			d.invalidateRender(sess, ac, true, "prompt.go")
 			return
 		}

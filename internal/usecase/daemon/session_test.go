@@ -304,7 +304,7 @@ func TestAttachReplaceDetachesOld(t *testing.T) {
 	// A is notified it was detached.
 	dA := awaitFrame(t, sendsA, ports.MsgDetached)
 	det, _ := ports.UnmarshalDetached(dA.Payload)
-	require.Equal(t, ports.ReasonDetach, det.Reason)
+	require.Equal(t, ports.ReasonReplaced, det.Reason)
 
 	// B is now the current client.
 	sess.mu.Lock()
@@ -1079,7 +1079,7 @@ func TestEphemeralPromotionLifecyclePreventsStaleSameNamePaletteTarget(t *testin
 	require.NoError(t, d.renameSession(second, "named"))
 	require.NotEqual(t, staleCreatedAt, second.createdAt)
 
-	require.False(t, d.switchToTarget(from, ac, picker.Target{Name: "named", TabIndex: -1, ExpectedCreatedAt: &staleCreatedAt}))
+	require.Error(t, d.switchToTarget(from, ac, picker.Target{Name: "named", TabIndex: -1, ExpectedCreatedAt: &staleCreatedAt}))
 	require.Same(t, from, ac.currentSession())
 	releaseSecond()
 	d.sessWg.Wait()
@@ -1211,7 +1211,7 @@ func TestPickerStoppedTargetKillPurges(t *testing.T) {
 	WithStore(store)(d)
 	require.NoError(t, d.persist.Save(persist.Record{Name: "old", Cwd: "/tmp", CreatedAt: 1, UpdatedAt: 1}))
 	d.stopped["old"] = stoppedSession{name: "old", cwd: "/tmp", createdAt: 1}
-	d.killPickerTarget(picker.Target{Name: "old", Stopped: true})
+	require.NoError(t, d.killPickerTarget(picker.Target{Name: "old", Stopped: true}))
 	require.False(t, state.has("old"))
 	d.mu.Lock()
 	_, ok := d.stopped["old"]
@@ -1302,6 +1302,30 @@ func TestRenameSessionUnsafeNameRejected(t *testing.T) {
 	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.ErrorIs(t, d.renameSession(sess, "my work"), domain.ErrInvalidSessionName)
+}
+
+func TestCreateTabPtyFailureIsUserError(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	p, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+
+	cause := errors.New("fork/exec: no such file")
+	failing := portsmocks.NewMockPTYFactory(t)
+	failing.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, cause).Once()
+	d.ptys = failing
+
+	err = d.createTab(sess, sz)
+
+	var ue *domain.UserError
+	require.ErrorAs(t, err, &ue)
+	require.Equal(t, domain.NoticeTabSpawn, ue.Code)
+	require.Equal(t, domain.NoticeError, ue.Severity)
+	require.Equal(t, "couldn't open tab: shell failed to start", ue.Msg)
+	require.ErrorIs(t, err, cause)
+	require.NotContains(t, ue.Msg, cause.Error())
 }
 
 func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {
@@ -1705,7 +1729,7 @@ func TestLifecycleExpectedTargetChecksAreAtomicAcrossStateTransitions(t *testing
 		target.createdAt = 22
 		expected := int64(21)
 
-		require.False(t, d.switchToTarget(from, ac, picker.Target{Session: target.id, Name: "recent", TabIndex: 0, ExpectedCreatedAt: &expected}))
+		require.Error(t, d.switchToTarget(from, ac, picker.Target{Session: target.id, Name: "recent", TabIndex: 0, ExpectedCreatedAt: &expected}))
 		require.Same(t, from, ac.currentSession())
 	})
 
@@ -1719,7 +1743,7 @@ func TestLifecycleExpectedTargetChecksAreAtomicAcrossStateTransitions(t *testing
 		expected := int64(31)
 		d.stopped["target"] = stoppedSession{name: "target", cwd: "/tmp", createdAt: expected}
 
-		require.True(t, d.switchToTarget(from, ac, picker.Target{Session: "old-active-id", Name: "target", TabIndex: 0, ExpectedCreatedAt: &expected}))
+		require.NoError(t, d.switchToTarget(from, ac, picker.Target{Session: "old-active-id", Name: "target", TabIndex: 0, ExpectedCreatedAt: &expected}))
 		require.Equal(t, "target", ac.currentSession().name)
 		require.Equal(t, expected, ac.currentSession().createdAt)
 	})
@@ -1731,7 +1755,7 @@ func TestLifecycleExpectedTargetChecksAreAtomicAcrossStateTransitions(t *testing
 		target.createdAt = 41
 		expected := int64(41)
 
-		require.True(t, d.switchToTarget(from, ac, picker.Target{Session: "stopped:recent", Name: "recent", TabIndex: 0, Stopped: true, ExpectedCreatedAt: &expected}))
+		require.NoError(t, d.switchToTarget(from, ac, picker.Target{Session: "stopped:recent", Name: "recent", TabIndex: 0, Stopped: true, ExpectedCreatedAt: &expected}))
 		require.Same(t, target, ac.currentSession())
 	})
 
@@ -1742,7 +1766,7 @@ func TestLifecycleExpectedTargetChecksAreAtomicAcrossStateTransitions(t *testing
 		d.stopped["target"] = stoppedSession{name: "target", cwd: "/tmp", createdAt: 52}
 		expected := int64(51)
 
-		require.False(t, d.switchToTarget(from, ac, picker.Target{Name: "target", TabIndex: 0, Stopped: true, ExpectedCreatedAt: &expected}))
+		require.Error(t, d.switchToTarget(from, ac, picker.Target{Name: "target", TabIndex: 0, Stopped: true, ExpectedCreatedAt: &expected}))
 		require.Same(t, from, ac.currentSession())
 	})
 }

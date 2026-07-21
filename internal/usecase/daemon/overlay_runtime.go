@@ -4,7 +4,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
+	"github.com/bnema/vev/internal/usecase/notices"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
 	promptui "github.com/bnema/vev/internal/usecase/prompt"
@@ -44,10 +46,29 @@ type overlayRuntime struct {
 	copyESC           pendingByteTimer
 	copySearch        *visualsearch.Model
 	copySearchPending []byte
-	copyFeedback      string
+	statusFeedback    string
 	copyPointer       copyPointerState
 	copyClick         copyClickCandidate
 	copyPointerEpoch  uint64
+
+	// noticeMu is the innermost overlay lock: it guards the toast fields below
+	// and nothing is ever locked, sent, or rendered while it is held. The only
+	// permitted nesting is sendMu -> noticeMu (rendering reads the toasts).
+	// The notification history overlay's fields share this lock rather than
+	// adding one of their own: both concern notice presentation for this
+	// client and neither is ever held across a render call.
+	noticeMu       sync.Mutex
+	noticeToasts   []noticeToast
+	noticeOverflow int
+	// noticeSeq numbers toast entries so an already-fired expiry timer cannot
+	// dismiss the refreshed entry that replaced the one it belonged to.
+	noticeSeq uint64
+
+	// noticesOverlay is the `notifications` command's history modal. nil when
+	// closed.
+	noticesOverlay *notices.Model
+	noticesPending []byte
+	noticesESC     pendingByteTimer
 }
 
 type copyPointerState struct {
@@ -77,7 +98,7 @@ func (rt *overlayRuntime) Active() bool {
 	if rt == nil || rt.ac == nil {
 		return false
 	}
-	return rt.promptActive() || rt.paletteActive() || rt.pickerActive() || rt.copyActive()
+	return rt.promptActive() || rt.paletteActive() || rt.pickerActive() || rt.noticesActive() || rt.copyActive()
 }
 
 func (rt *overlayRuntime) promptActive() bool {
@@ -105,6 +126,15 @@ func (rt *overlayRuntime) pickerActive() bool {
 	rt.pickerMu.Lock()
 	defer rt.pickerMu.Unlock()
 	return rt.picker != nil
+}
+
+func (rt *overlayRuntime) noticesActive() bool {
+	if rt == nil {
+		return false
+	}
+	rt.noticeMu.Lock()
+	defer rt.noticeMu.Unlock()
+	return rt.noticesOverlay != nil
 }
 
 func (rt *overlayRuntime) copyActive() bool {
@@ -201,6 +231,10 @@ func (rt *overlayRuntime) HandleInput(d *Daemon, data []byte) bool {
 		d.handlePickerInput(ac, data)
 		return true
 	}
+	if rt.noticesActive() {
+		d.handleNoticesInput(ac, data)
+		return true
+	}
 	if rt.copyActive() {
 		d.handleCopyInput(ac, data)
 		return true
@@ -215,11 +249,14 @@ type overlayRenderSnapshot struct {
 	copyMode        *scopy.Mode
 	copyPane        *pane
 	copySearchModel *visualsearch.Model
-	copyFeedback    string
+	statusFeedback  string
 
 	pickerActive bool
 	pickerModel  *picker.Model
 	previewTab   *tab
+
+	noticesOverlayActive bool
+	noticesOverlayModel  *notices.Model
 
 	paletteActive bool
 	paletteModel  *palette.Model
@@ -233,6 +270,9 @@ type overlayRenderSnapshot struct {
 	promptActive bool
 	promptModel  *promptui.Model
 	promptLocked bool
+
+	notices        []domain.Notification
+	noticeOverflow int
 }
 
 // SnapshotForRender captures the overlay state needed by paint.
@@ -247,6 +287,20 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 		return snap
 	}
 
+	// noticeMu is innermost and never held across render, so it is taken and
+	// released here rather than tracked like paletteMu/promptMu below.
+	rt.noticeMu.Lock()
+	if len(rt.noticeToasts) > 0 {
+		snap.notices = make([]domain.Notification, len(rt.noticeToasts))
+		for i, t := range rt.noticeToasts {
+			snap.notices[i] = t.n
+		}
+	}
+	snap.noticeOverflow = rt.noticeOverflow
+	snap.noticesOverlayActive = rt.noticesOverlay != nil
+	snap.noticesOverlayModel = rt.noticesOverlay.Clone()
+	rt.noticeMu.Unlock()
+
 	rt.copyMu.Lock()
 	snap.copyActive = rt.copyMode != nil
 	snap.copyPane = rt.copyPane
@@ -256,9 +310,9 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 		snap.copyMode = &copyModeValue
 	}
 	snap.copySearchModel = rt.copySearch.Clone()
-	snap.copyFeedback = rt.copyFeedback
-	if snap.copyFeedback != "" && !snap.copyActive {
-		rt.copyFeedback = ""
+	snap.statusFeedback = rt.statusFeedback
+	if snap.statusFeedback != "" && !snap.copyActive {
+		rt.statusFeedback = ""
 	}
 	rt.copyMu.Unlock()
 

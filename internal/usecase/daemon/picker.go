@@ -6,7 +6,6 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -93,134 +92,85 @@ func attentionSuffix(label string) string {
 	return label + " " + string(ui.AttentionGlyph)
 }
 
+func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
+	rt := ac.overlays
+	var generation uint64
+	return listInputState{
+		pending:  &rt.pickerPending,
+		esc:      &rt.pickerESC,
+		moveUp:   rt.picker.Up,
+		moveDown: rt.picker.Down,
+		lock:     rt.pickerMu.Lock,
+		unlock:   rt.pickerMu.Unlock,
+		active:   func() bool { return rt.picker != nil },
+		closeLocked: func() {
+			rt.picker = nil
+			generation = rt.pickerPreviewGeneration
+		},
+		afterClose: func() {
+			d.clearPreviewGeneration(ac, generation)
+			if sess := ac.currentSession(); sess != nil {
+				d.invalidateRender(sess, ac, true, "picker.go")
+			}
+		},
+	}
+}
+
 func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 	sess := ac.currentSession()
 	if sess == nil {
 		return
 	}
-	ac.overlays.pickerMu.Lock()
-	if ac.overlays.picker == nil {
-		ac.overlays.pickerPending = nil
-		d.stopPickerPendingTimerLocked(ac)
-		ac.overlays.pickerMu.Unlock()
+	rt := ac.overlays
+	rt.pickerMu.Lock()
+	if rt.picker == nil {
+		rt.pickerPending = nil
+		rt.pickerESC.stop()
+		rt.pickerMu.Unlock()
 		return
 	}
-	if len(ac.overlays.pickerPending) > 0 {
-		d.stopPickerPendingTimerLocked(ac)
-		combined := make([]byte, 0, len(ac.overlays.pickerPending)+len(data))
-		combined = append(combined, ac.overlays.pickerPending...)
-		combined = append(combined, data...)
-		data = combined
-		ac.overlays.pickerPending = nil
-	}
-	changed := false
-	exit := false
-	switchTarget := false
-	for i := 0; i < len(data); i++ {
-		switch data[i] {
+	result := handleListInputLocked(d.clock, data, d.pickerListInputState(ac), func(b byte) listInputResult {
+		switch b {
 		case 'x':
-			target, ok := ac.overlays.picker.Selected()
-			ac.overlays.pickerMu.Unlock()
-			if ok {
-				d.killPickerTarget(target)
-			}
-			d.refreshPicker(ac)
-			d.invalidateRender(sess, ac, true, "picker.go")
-			return
-		case 'j':
-			ac.overlays.picker.Down()
-			changed = true
-		case 'k':
-			ac.overlays.picker.Up()
-			changed = true
+			return listInputResult{action: b, stop: true}
 		case '\r', '\n':
-			switchTarget = true
-			exit = true
-		case 'q', 0x03, 0x1b:
-			if data[i] == 0x1b {
-				tail := data[i:]
-				consumed, ok := routePickerEscape(ac.overlays.picker, tail)
-				if ok {
-					i += consumed - 1
-					changed = true
-					continue
-				}
-				if len(tail) == 1 {
-					d.retainPickerESCLocked(ac)
-					break
-				}
-				if isPickerEscapePrefix(tail) {
-					ac.overlays.pickerPending = append(ac.overlays.pickerPending[:0], tail...)
-					break
-				}
-			}
-			exit = true
-		}
-	}
-	var target picker.Target
-	var ok bool
-	if switchTarget {
-		target, ok = ac.overlays.picker.Selected()
-	}
-	ac.overlays.pickerMu.Unlock()
-
-	if changed {
-		d.registerPreviewForSelection(ac)
-	}
-	if exit {
-		d.closePicker(ac)
-	}
-	if switchTarget && ok {
-		d.switchToTarget(sess, ac, target)
-		return
-	}
-	if exit || changed {
-		d.invalidateRender(sess, ac, true, "picker.go")
-	}
-}
-
-func (d *Daemon) retainPickerESCLocked(ac *attachedClient) {
-	ac.overlays.pickerPending = append(ac.overlays.pickerPending[:0], keys.ESC)
-	ac.overlays.pickerESC.retain(d.clock, keys.ESCDelay, func(timer ports.Timer) {
-		ac.overlays.pickerMu.Lock()
-		if ac.overlays.pickerESC.timer != timer || len(ac.overlays.pickerPending) != 1 || ac.overlays.pickerPending[0] != keys.ESC || ac.overlays.picker == nil {
-			ac.overlays.pickerMu.Unlock()
-			return
-		}
-		ac.overlays.pickerPending = nil
-		ac.overlays.pickerESC.timer = nil
-		ac.overlays.pickerESC.done = nil
-		ac.overlays.picker = nil
-		generation := ac.overlays.pickerPreviewGeneration
-		ac.overlays.pickerMu.Unlock()
-
-		d.clearPreviewGeneration(ac, generation)
-		if sess := ac.currentSession(); sess != nil {
-			d.invalidateRender(sess, ac, true, "picker.go")
+			return listInputResult{action: b, exit: true}
+		default:
+			return listInputResult{}
 		}
 	})
-}
-
-func (d *Daemon) stopPickerPendingTimerLocked(ac *attachedClient) {
-	ac.overlays.pickerESC.stop()
-}
-
-func routePickerEscape(m *picker.Model, data []byte) (int, bool) {
-	if len(data) >= 3 && (data[1] == '[' || data[1] == 'O') {
-		switch data[2] {
-		case 'A':
-			m.Up()
-			return 3, true
-		case 'B':
-			m.Down()
-			return 3, true
-		}
+	var target picker.Target
+	var ok bool
+	if result.action == 'x' || result.action == '\r' || result.action == '\n' {
+		target, ok = rt.picker.Selected()
 	}
-	return 0, false
-}
+	rt.pickerMu.Unlock()
 
-func isPickerEscapePrefix(data []byte) bool {
-	return len(data) == 2 && data[0] == 0x1b && (data[1] == '[' || data[1] == 'O')
+	if result.action == 'x' {
+		if ok {
+			if err := d.killPickerTarget(target); err != nil {
+				d.reportError(sess, err)
+			}
+		}
+		d.refreshPicker(ac)
+		d.invalidateRender(sess, ac, true, "picker.go")
+		return
+	}
+	if result.changed {
+		d.registerPreviewForSelection(ac)
+	}
+	if result.exit {
+		d.closePicker(ac)
+	}
+	if (result.action == '\r' || result.action == '\n') && ok {
+		if err := d.switchToTarget(sess, ac, target); err != nil {
+			d.reportError(sess, err)
+		}
+		return
+	}
+	if result.exit || result.changed {
+		d.invalidateRender(sess, ac, true, "picker.go")
+	}
 }
 
 func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
@@ -364,7 +314,7 @@ func (d *Daemon) closePicker(ac *attachedClient) {
 	ac.overlays.pickerMu.Lock()
 	ac.overlays.picker = nil
 	ac.overlays.pickerPending = nil
-	d.stopPickerPendingTimerLocked(ac)
+	ac.overlays.pickerESC.stop()
 	generation := ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerMu.Unlock()
 	d.clearPreviewGeneration(ac, generation)
@@ -394,19 +344,20 @@ func (d *Daemon) sessionByID(id domain.SessionID) *session {
 // switchToTarget resolves named lifecycle targets and commits their transition
 // while d.mu is held. A named palette result is allowed to cross an
 // active/stopped transition, but it never follows a same-name replacement.
-func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker.Target) bool {
+func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker.Target) error {
 	d.mu.Lock()
 	var (
 		targetSess *session
 		old        *attachedClient
 		cleanups   []renderLifecycleCleanup
 		switched   bool
+		cause      error
 	)
 	if target.Name != "" {
 		active, stopped, isStopped, ok := d.resolveNamedLifecycleTargetLocked(target)
 		if ok {
 			if isStopped {
-				targetSess, cleanups, switched = d.resumeStoppedAndSwitchLocked(from, ac, target, stopped)
+				targetSess, cleanups, switched, cause = d.resumeStoppedAndSwitchLocked(from, ac, target, stopped)
 			} else {
 				// The snapshot ID may describe the stopped representation. The
 				// locked name/lifecycle resolver chose this active incarnation.
@@ -422,14 +373,14 @@ func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker
 
 	if !switched {
 		d.invalidateRender(from, ac, true, "picker.go")
-		return false
+		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", cause)
 	}
 	finishRenderLifecycleCleanups(cleanups)
 	if old != nil && old != ac {
 		d.unregisterPreview(old)
 		old.clearPreviousSession()
 		old.setSession(nil)
-		d.notifyDetachedAsync(old, ports.ReasonDetach)
+		d.notifyDetachedAsync(old, ports.ReasonReplaced)
 	}
 	if targetSess == from {
 		d.activateTab(from, from.activeTab())
@@ -437,7 +388,7 @@ func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker
 	} else {
 		d.firstPaint(targetSess, ac, ac.size)
 	}
-	return true
+	return nil
 }
 
 // resolveNamedLifecycleTargetLocked chooses exactly one current representation
@@ -463,6 +414,10 @@ func (d *Daemon) resolveNamedLifecycleTargetLocked(target picker.Target) (*sessi
 // switchToActiveTargetLocked commits an active target handoff. Caller holds
 // d.mu and releases it before completing render cleanup or first paint.
 func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, targetSess *session, target picker.Target) (*session, *attachedClient, []renderLifecycleCleanup, bool) {
+	// The caller already holds d.mu. Keep handoff ownership atomic with global
+	// routing so it cannot select an attachment midway between sessions.
+	d.notices.routingMu.Lock()
+	defer d.notices.routingMu.Unlock()
 	if d.sessions[target.Session] != targetSess {
 		return nil, nil, nil, false
 	}
@@ -517,11 +472,15 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 // resumeStoppedAndSwitchLocked creates the stopped representation and commits
 // the handoff while d.mu is held. Creation failure leaves the source client
 // and stopped record untouched.
-func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient, target picker.Target, stopped stoppedSession) (*session, []renderLifecycleCleanup, bool) {
+func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient, target picker.Target, stopped stoppedSession) (*session, []renderLifecycleCleanup, bool, error) {
+	// The caller already holds d.mu. Keep handoff ownership atomic with global
+	// routing so it cannot select an attachment midway between sessions.
+	d.notices.routingMu.Lock()
+	defer d.notices.routingMu.Unlock()
 	from.mu.Lock()
 	if from.client != ac {
 		from.mu.Unlock()
-		return nil, nil, false
+		return nil, nil, false, nil
 	}
 	term := from.terminal
 	env := copyEnvironment(from.env)
@@ -530,7 +489,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 	if err != nil {
 		from.mu.Unlock()
 		d.log.Warn("resuming stopped session failed", "err", err, "session", target.Name)
-		return nil, nil, false
+		return nil, nil, false, err
 	}
 	from.client = nil
 	ac.setSession(nil)
@@ -543,7 +502,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 	targetSess.mu.Unlock()
 	d.touchMRU(targetSess)
 	ac.recordPreviousSession(from)
-	return targetSess, cleanups, true
+	return targetSess, cleanups, true, nil
 }
 
 func targetMatchesLifecycle(target picker.Target, name string, createdAt int64) bool {
@@ -574,7 +533,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 		switched   bool
 	)
 	if ok && !stopped.purging && targetMatchesLifecycle(target, stopped.name, stopped.createdAt) {
-		targetSess, cleanups, switched = d.resumeStoppedAndSwitchLocked(from, ac, target, stopped)
+		targetSess, cleanups, switched, _ = d.resumeStoppedAndSwitchLocked(from, ac, target, stopped)
 	}
 	d.mu.Unlock()
 	if !switched {
@@ -586,7 +545,7 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 	return true
 }
 
-func (d *Daemon) killPickerTarget(target picker.Target) {
+func (d *Daemon) killPickerTarget(target picker.Target) error {
 	if target.Stopped {
 		d.mu.Lock()
 		stopped, ok := d.stopped[target.Name]
@@ -594,19 +553,20 @@ func (d *Daemon) killPickerTarget(target picker.Target) {
 			if err := d.persist.Delete(target.Name); err != nil {
 				d.mu.Unlock()
 				d.log.Warn("deleting persisted stopped session failed", "err", err, "session", target.Name)
-				return
+				return domain.UserErr(domain.NoticePersistDelete, "couldn't delete stopped session", err)
 			}
 			delete(d.stopped, target.Name)
 		}
 		d.mu.Unlock()
-		return
+		return nil
 	}
 	d.mu.Lock()
 	targetSess := d.sessions[target.Session]
 	d.mu.Unlock()
 	if targetSess != nil {
-		_ = d.killSession(targetSess, ports.ReasonSessionKilled, true)
+		return d.killSession(targetSess, ports.ReasonSessionKilled, true)
 	}
+	return nil
 }
 
 func (d *Daemon) refreshPicker(ac *attachedClient) {

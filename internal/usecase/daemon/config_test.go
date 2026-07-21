@@ -520,6 +520,22 @@ func TestCodeOverrideVacatedDefaultIsReusableRegardlessOfSlugOrder(t *testing.T)
 	require.Equal(t, "new-session", byCode["CNT"])
 }
 
+func TestBuildCodeOverridesOrdersIndependentConflictWarnings(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+
+	_, warnings := d.buildCodeOverrides(map[string]string{
+		"new-session": "ZZ",
+		"new-tab":     "ZZ",
+		"split-left":  "YY",
+		"split-right": "YY",
+	})
+
+	require.Equal(t, []domain.Warning{
+		{Msg: `command code "YY" for "split-right" conflicts with "split-left"`},
+		{Msg: `command code "ZZ" for "new-tab" conflicts with "new-session"`},
+	}, warnings)
+}
+
 func TestApplyConfigInvalidDefaultsWithoutPanic(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	require.NotPanics(t, func() {
@@ -542,4 +558,60 @@ func TestApplyConfigInvalidDefaultsWithoutPanic(t *testing.T) {
 	require.Equal(t, "new-tab", cmd.Slug)
 	_, ok = d.commandByEffectiveCode("TOOLONG")
 	require.False(t, ok)
+}
+
+func TestConfigReloadNoticeMessageIncludesLineOnlyWhenKnown(t *testing.T) {
+	tests := []struct {
+		name     string
+		warnings []domain.Warning
+		want     string
+	}{
+		{
+			name:     "no source line",
+			warnings: []domain.Warning{{Msg: "unknown action"}},
+			want:     "config reloaded with 1 warning(s): unknown action",
+		},
+		{
+			name:     "source line",
+			warnings: []domain.Warning{{Line: 12, Msg: "unknown action"}},
+			want:     "config reloaded with 1 warning(s): line 12: unknown action",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, configReloadNoticeMessage(tt.warnings))
+		})
+	}
+}
+
+func TestApplyConfigSurfacesOneNoticeAggregatingAllWarnings(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{
+		Theme: domain.ThemeAuto,
+		BindingEntries: []domain.ConfigEntry{
+			{Key: "unknown-action", Value: "alt+x"},
+		},
+		Codes: map[string]string{
+			"missing-command": "OK",
+			"new-tab":         "toolong",
+		},
+	})
+
+	history := d.notices.history()
+	var reloadNotices []domain.Notification
+	for _, n := range history {
+		if n.Code == domain.NoticeConfigReload {
+			reloadNotices = append(reloadNotices, n)
+		}
+	}
+	require.Len(t, reloadNotices, 1, "expected exactly one config-reload notice per ApplyConfig call")
+
+	n := reloadNotices[0]
+	require.Equal(t, domain.NoticeWarn, n.Severity)
+	require.Equal(t, domain.SessionID(""), n.SessionID, "config reload notice must be global")
+	require.Contains(t, n.Message, "config reloaded with 3 warning(s):")
+	require.NotContains(t, n.Message, "line 0:")
+	require.Contains(t, n.Details, `unknown action "unknown-action"`)
+	require.Contains(t, n.Details, `unknown command code slug "missing-command"`)
+	require.Contains(t, n.Details, `invalid command code for "new-tab"`)
 }

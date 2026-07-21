@@ -14,7 +14,9 @@ func (d *Daemon) backSession(current *session, ac *attachedClient) {
 		d.invalidateRender(current, ac, true, "session_back.go")
 		return
 	}
-	d.switchToTarget(current, ac, picker.Target{Session: target.id, TabIndex: -1})
+	if err := d.switchToTarget(current, ac, picker.Target{Session: target.id, TabIndex: -1}); err != nil {
+		d.reportError(current, err)
+	}
 }
 
 // clearPreviousSessionIf clears target only if it has not been replaced since

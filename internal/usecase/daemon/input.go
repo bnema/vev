@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"strconv"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
@@ -35,7 +36,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	frameEvent := ev
 	ac.initOverlays()
 	rt := ac.overlays
-	if rt.promptActive() || rt.paletteActive() || rt.pickerActive() {
+	if rt.promptActive() || rt.paletteActive() || rt.pickerActive() || rt.noticesActive() {
 		return
 	}
 	sess := ac.currentSession()
@@ -212,6 +213,8 @@ func (d *Daemon) writeToPane(sess *session, p *pane, data []byte) {
 			sess.mu.Unlock()
 		}
 		d.log.Error("pty write failed", "err", err, "session", name)
+		d.notify(sess, domain.NoticeError, domain.NoticeInputDropped,
+			"input not delivered to pane", err)
 	}
 }
 
@@ -286,19 +289,30 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 	case keys.ActionOpenPalette:
 		h.d.enterPalette(sess, h.ac)
 	case keys.ActionJumpAttention:
-		h.d.jumpAttention(sess, h.ac)
+		if err := h.d.jumpAttention(sess, h.ac); err != nil {
+			h.d.reportError(sess, err)
+		}
 	case keys.ActionToggleFloatingPane:
 		if err := h.d.toggleFloating(sess, h.ac); err != nil {
 			h.d.log.Warn("toggle floating pane failed", "err", err)
+			h.d.reportError(sess, err)
 		}
 	case keys.ActionFocusPaneLeft:
-		_ = h.d.focusDir(sess, h.ac, layout.Left)
+		if err := h.d.focusDir(sess, h.ac, layout.Left); err != nil {
+			h.d.reportError(sess, err)
+		}
 	case keys.ActionFocusPaneRight:
-		_ = h.d.focusDir(sess, h.ac, layout.Right)
+		if err := h.d.focusDir(sess, h.ac, layout.Right); err != nil {
+			h.d.reportError(sess, err)
+		}
 	case keys.ActionFocusPaneUp:
-		_ = h.d.focusDir(sess, h.ac, layout.Up)
+		if err := h.d.focusDir(sess, h.ac, layout.Up); err != nil {
+			h.d.reportError(sess, err)
+		}
 	case keys.ActionFocusPaneDown:
-		_ = h.d.focusDir(sess, h.ac, layout.Down)
+		if err := h.d.focusDir(sess, h.ac, layout.Down); err != nil {
+			h.d.reportError(sess, err)
+		}
 	case keys.ActionSwitchTab1, keys.ActionSwitchTab2, keys.ActionSwitchTab3,
 		keys.ActionSwitchTab4, keys.ActionSwitchTab5, keys.ActionSwitchTab6,
 		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:

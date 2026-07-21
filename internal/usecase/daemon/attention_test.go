@@ -511,7 +511,7 @@ func TestJumpAttentionCrossesSessionsWhenNoLocalBells(t *testing.T) {
 	}
 	d.sessions[sess2.id] = sess2
 
-	d.jumpAttention(sess1, ac)
+	require.NoError(t, d.jumpAttention(sess1, ac))
 
 	require.Same(t, sess2, ac.currentSession())
 	require.Same(t, ac, sess2.client)
@@ -526,7 +526,7 @@ func TestJumpAttentionNoopsWithNoBells(t *testing.T) {
 	defer releases[1]()
 	sess.active = 0
 
-	d.jumpAttention(sess, ac)
+	require.NoError(t, d.jumpAttention(sess, ac), "no target to jump to is not a failure")
 
 	require.Same(t, sess, ac.currentSession())
 	require.Equal(t, 0, activeTabIndex(sess))
@@ -535,6 +535,41 @@ func TestJumpAttentionNoopsWithNoBells(t *testing.T) {
 		t.Fatalf("unexpected frame on no-op jump: %v", f.Type)
 	case <-time.After(20 * time.Millisecond):
 	}
+}
+
+// TestJumpAttentionSwitchFailureReportsNotice drives jumpAttention's
+// cross-session path once a target has already been chosen, then makes the
+// commit itself fail (the origin session's client no longer matches ac —
+// simulating a client that detached between target selection and commit).
+// Unlike the no-target case, a target existed and the switch to it failed:
+// that is a genuine error, not a benign no-op, and must reach the user.
+func TestJumpAttentionSwitchFailureReportsNotice(t *testing.T) {
+	p1, release1 := newBlockingPTY(t)
+	p2, release2 := newBlockingPTY(t)
+	defer release1()
+	defer release2()
+	d, sess1, ac, _ := newManualSessionWithPTYs(t, p1)
+	sctx2, cancel2 := context.WithCancel(d.serveCtx)
+	defer cancel2()
+	tab2 := newTestTabWithContext(p2, sctx2, cancel2)
+	tab2.attention = true
+	tab2.attentionAt = time.Unix(9, 0)
+	sess2 := &session{id: "other", name: "other", ctx: sctx2, cancel: cancel2, tabs: []*tab{tab2}}
+	d.sessions[sess2.id] = sess2
+
+	sess1.mu.Lock()
+	sess1.client = nil
+	sess1.mu.Unlock()
+
+	err := d.jumpAttention(sess1, ac)
+
+	require.Error(t, err)
+	require.Same(t, sess1, ac.currentSession(), "a failed switch must leave the client on its origin session")
+
+	d.reportError(sess1, err)
+	history := d.notices.history()
+	require.Len(t, history, 1)
+	require.Equal(t, domain.NoticeSessionUnavailable, history[0].Code)
 }
 
 func TestAttentionAnimatorParksAdvancesAndResets(t *testing.T) {

@@ -25,11 +25,12 @@ const maxClipboardImagePush = 1 << 20 // 1 MiB
 // text may legitimately contain it) — is forwarded to next unchanged, so it
 // still gets the coalescer's marker-splitting treatment.
 type clipboardIntercept struct {
-	coalescer *pasteCoalescer
-	reader    ports.ClipboardReader
-	log       *slog.Logger
-	sendImage func(mime string, data []byte)
-	next      func([]byte)
+	coalescer  *pasteCoalescer
+	reader     ports.ClipboardReader
+	log        *slog.Logger
+	sendImage  func(mime string, data []byte)
+	sendNotice func(action uint8)
+	next       func([]byte)
 }
 
 // Scan implements the same func([]byte) shape as pasteCoalescer.Scan, so it
@@ -99,12 +100,18 @@ func (c *clipboardIntercept) handleCtrlV() {
 	if err != nil {
 		if !errors.Is(err, ports.ErrNoClipboardImage) {
 			c.log.Warn("clipboard image read failed", "err", err)
+			if c.sendNotice != nil {
+				c.sendNotice(ports.ClientNoticeClipboardFallback)
+			}
 		}
 		c.next([]byte{ctrlV})
 		return
 	}
 	if len(data) > maxClipboardImagePush {
 		c.log.Warn("clipboard image too large to send, forwarding Ctrl+V instead", "size", len(data), "cap", maxClipboardImagePush)
+		if c.sendNotice != nil {
+			c.sendNotice(ports.ClientNoticeClipboardTooLarge)
+		}
 		c.next([]byte{ctrlV})
 		return
 	}

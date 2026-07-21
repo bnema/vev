@@ -85,14 +85,24 @@ func TestSplitPaneRightFromStackSplitsWholeStack(t *testing.T) {
 
 func TestSplitPaneOpenErrorRollsBackTreeAndPaneMap(t *testing.T) {
 	d, sess, _, factory := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
-	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).Return(nil, errors.New("open failed")).Once()
+	cause := errors.New("open failed")
+	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 10}).Return(nil, cause).Once()
 
 	tb := sess.activeTab()
 	tb.mu.Lock()
 	beforeRoot, beforeFocus, beforeNext, beforePaneCount := tb.tree.Root.Leaf, tb.tree.Focus, tb.nextPaneID, len(tb.panes)
 	tb.mu.Unlock()
 
-	require.Error(t, d.splitPane(sess, nil, layout.Right))
+	err := d.splitPane(sess, nil, layout.Right)
+	require.Error(t, err)
+
+	var ue *domain.UserError
+	require.ErrorAs(t, err, &ue)
+	require.Equal(t, domain.NoticePaneSpawn, ue.Code)
+	require.Equal(t, domain.NoticeError, ue.Severity)
+	require.Equal(t, "couldn't open pane: shell failed to start", ue.Msg)
+	require.ErrorIs(t, err, cause)
+	require.NotContains(t, ue.Msg, cause.Error())
 
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
@@ -263,8 +273,16 @@ func TestStackFocusWalkExpandsAndOverflowRefuses(t *testing.T) {
 	require.Equal(t, layout.PaneID("pane-1"), tb.tree.Root.Expanded)
 	thirdPTY := portsmocks.NewMockPTY(t)
 	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", mock.Anything).Return(thirdPTY, nil).Maybe()
-	require.ErrorIs(t, d.stackPane(sess, nil), layout.ErrTooSmall)
+	err := d.stackPane(sess, nil)
+	require.ErrorIs(t, err, layout.ErrTooSmall)
 	require.Len(t, tb.panes, 2)
+
+	var ue *domain.UserError
+	require.ErrorAs(t, err, &ue)
+	require.Equal(t, domain.NoticeLayoutTooSmall, ue.Code)
+	require.Equal(t, domain.NoticeWarn, ue.Severity)
+	require.Equal(t, "not enough space to split", ue.Msg)
+	require.NotContains(t, ue.Msg, layout.ErrTooSmall.Error())
 }
 
 func newSplitTestDaemon(t *testing.T, sz domain.Size) (*Daemon, *session, *portsmocks.MockPTY, *portsmocks.MockPTYFactory) {

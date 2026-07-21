@@ -121,7 +121,7 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 			Env:     []string{"A=B", "XY=123"},
 		})
 		want := []byte{
-			0x00, 0x10, 0x00, // version, intent
+			0x00, 0x11, 0x00, // version, intent
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // client ID
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // resume token
@@ -335,7 +335,7 @@ func TestThemeGenerationClearedWireGoldenPreservesProtocolVersion(t *testing.T) 
 	}
 	want := append([]byte{0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00}, make([]byte, 48)...)
 	require.Equal(t, want, MarshalTheme(cleared))
-	require.Equal(t, uint16(16), ProtocolVersion)
+	require.Equal(t, uint16(17), ProtocolVersion)
 }
 
 func TestResizeGoldenAndRoundTrip(t *testing.T) {
@@ -502,8 +502,8 @@ func TestAckGoldenAndRoundTrip(t *testing.T) {
 }
 
 func TestDetachedGoldenAndRoundTrip(t *testing.T) {
-	msg := Detached{Reason: ReasonSessionKilled}
-	want := []byte{0x01}
+	msg := Detached{Reason: ReasonReplaced}
+	want := []byte{0x03}
 
 	got := MarshalDetached(msg)
 	if !bytes.Equal(got, want) {
@@ -519,6 +519,32 @@ func TestDetachedGoldenAndRoundTrip(t *testing.T) {
 
 	assertAllPrefixesFail(t, got, UnmarshalDetached)
 	assertTrailingGarbageFails(t, got, UnmarshalDetached)
+}
+
+func TestClientNoticeGoldenAndStrict(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  ClientNotice
+		want []byte
+	}{
+		{name: "clipboard fallback", msg: ClientNotice{Action: ClientNoticeClipboardFallback}, want: []byte{0x01}},
+		{name: "clipboard too large", msg: ClientNotice{Action: ClientNoticeClipboardTooLarge}, want: []byte{0x02}},
+		{name: "link degraded", msg: ClientNotice{Action: ClientNoticeLinkDegraded}, want: []byte{0x03}},
+		{name: "link connected", msg: ClientNotice{Action: ClientNoticeLinkConnected}, want: []byte{0x04}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MarshalClientNotice(tt.msg)
+			require.Equal(t, tt.want, got)
+			back, err := UnmarshalClientNotice(got)
+			require.NoError(t, err)
+			require.Equal(t, tt.msg, back)
+			assertAllPrefixesFail(t, got, UnmarshalClientNotice)
+			assertTrailingGarbageFails(t, got, UnmarshalClientNotice)
+		})
+	}
+	_, err := UnmarshalClientNotice([]byte{0xff})
+	require.Error(t, err, "unknown actions must not become display text")
 }
 
 func TestListGoldenAndRoundTrip(t *testing.T) {
@@ -661,9 +687,10 @@ func TestMsgTypeConstantsDistinct(t *testing.T) {
 			ReasonDetach:         "ReasonDetach",
 			ReasonSessionKilled:  "ReasonSessionKilled",
 			ReasonServerShutdown: "ReasonServerShutdown",
+			ReasonReplaced:       "ReasonReplaced",
 		}
-		if len(vals) != 3 {
-			t.Fatalf("expected 3 distinct detached reasons, got %d", len(vals))
+		if len(vals) != 4 {
+			t.Fatalf("expected 4 distinct detached reasons, got %d", len(vals))
 		}
 	})
 }

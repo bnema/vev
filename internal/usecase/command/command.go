@@ -51,6 +51,8 @@ type Context interface {
 	RenameSession() error
 	RenameTab() error
 	OpenSessionPicker() error
+	OpenNotifications() error
+	YankLastNotification() error
 	JumpRecentSession(rank int) error
 }
 

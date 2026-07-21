@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -500,11 +501,18 @@ func TestFloatingLaunchUsesLiveOrValidatedSessionCwd(t *testing.T) {
 type floatingLogHandler struct {
 	slog.Handler
 	handled chan struct{}
+	mu      sync.Mutex
 }
 
-func (h floatingLogHandler) Handle(ctx context.Context, r slog.Record) error {
+func (h *floatingLogHandler) Handle(ctx context.Context, r slog.Record) error {
 	err := h.Handler.Handle(ctx, r)
-	close(h.handled)
+	h.mu.Lock()
+	select {
+	case <-h.handled:
+	default:
+		close(h.handled)
+	}
+	h.mu.Unlock()
 	return err
 }
 
@@ -513,7 +521,7 @@ func TestFloatingLaunchFailureCapturesSessionNameBeforeConcurrentRename(t *testi
 	var logs bytes.Buffer
 	handled := make(chan struct{})
 	d := newTestDaemon(t, factory, stubClock{})
-	d.log = slog.New(floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
+	d.log = slog.New(&floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
 	tb := newFloatingTestTab(t)
 	sess := &session{name: "captured", tabs: []*tab{tb}, ctx: t.Context()}
 	d.startFloating(sess, tb, false)
@@ -551,7 +559,7 @@ func TestFloatingInstallLogsSessionNameSafelyDuringRename(t *testing.T) {
 	var logs bytes.Buffer
 	handled := make(chan struct{})
 	d := newTestDaemon(t, factory, stubClock{})
-	d.log = slog.New(floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
+	d.log = slog.New(&floatingLogHandler{Handler: slog.NewTextHandler(&logs, nil), handled: handled})
 	tb := newFloatingTestTab(t)
 	sess := &session{name: "captured", tabs: []*tab{tb}, ctx: t.Context()}
 
@@ -590,6 +598,82 @@ func TestFloatingInstallLogsSessionNameSafelyDuringRename(t *testing.T) {
 
 	d.teardownFloating(tb, nil)
 	d.sessWg.Wait()
+}
+
+// TestFloatingAsyncSpawnFailureToastsOnlyForUserOpen drives a failed
+// asynchronous PTY open through failFloatingLaunch. A user-initiated open
+// must surface a toast; a background prewarm must stay silent (the user
+// never asked for it). The failure completes on a worker goroutine, so the
+// test waits on d.sessWg (which the launch worker joins) before asserting on
+// the test goroutine -- no require inside the worker, no sleeps.
+func TestFloatingAsyncSpawnFailureToastsOnlyForUserOpen(t *testing.T) {
+	tests := []struct {
+		name     string
+		userOpen bool
+	}{
+		{name: "user-initiated open toasts", userOpen: true},
+		{name: "background prewarm stays silent", userOpen: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spawnErr := errors.New("fork/exec: no such file or directory")
+			factory := portsmocks.NewMockPTYFactory(t)
+			factory.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				Return(nil, spawnErr).Once()
+			d := newTestDaemon(t, factory, stubClock{})
+			tb := newFloatingTestTab(t)
+			tr, _ := newCapturingTransport(t)
+			ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+			ac.initOverlays()
+			sess := &session{id: "floating-spawn", name: "work", tabs: []*tab{tb}, ctx: t.Context(), client: ac}
+			ac.setSession(sess)
+
+			d.startFloating(sess, tb, tc.userOpen)
+
+			// The launch worker (registered via d.sessWg.Go in launchFloating)
+			// runs failFloatingLaunch synchronously before returning, so
+			// waiting on the group is a deterministic completion signal.
+			d.sessWg.Wait()
+
+			if tc.userOpen {
+				toasts := awaitToastCount(t, ac, 1)
+				require.Equal(t, domain.NoticeFloatingSpawn, toasts[0].Code)
+				require.Equal(t, "couldn't open floating pane: command failed to start", toasts[0].Message)
+			} else {
+				ns, _ := visibleToasts(ac)
+				require.Empty(t, ns, "background prewarm failure must not toast")
+			}
+		})
+	}
+}
+
+func TestToggleFloatingStructuralErrorsAreUserErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		d       *Daemon
+		sess    *session
+		wantMsg string
+		cause   error
+	}{
+		{"nil session", newTestDaemon(t, nil, stubClock{}), nil, "couldn't open floating pane: no active session", nil},
+		{"no active tab", newTestDaemon(t, nil, stubClock{}), &session{}, "couldn't open floating pane: no active tab", layout.ErrNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.d.toggleFloating(tc.sess, nil)
+			require.Error(t, err)
+
+			var ue *domain.UserError
+			require.ErrorAs(t, err, &ue)
+			require.Equal(t, domain.NoticeFloatingSpawn, ue.Code)
+			require.Equal(t, domain.NoticeError, ue.Severity)
+			require.Equal(t, tc.wantMsg, ue.Msg)
+			if tc.cause != nil {
+				require.NotContains(t, ue.Msg, tc.cause.Error())
+				require.ErrorIs(t, ue, tc.cause)
+			}
+		})
+	}
 }
 
 func TestFloatingToggleUsesVisibleTarget(t *testing.T) {

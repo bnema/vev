@@ -319,3 +319,20 @@ func TestComposeCapturedOverlaysUsesCachedModalRoles(t *testing.T) {
 		})
 	}
 }
+
+func TestNoticeStylesFromMapsWarnToDedicatedRoleDistinctFromInfo(t *testing.T) {
+	muted := renderer.Style{Foreground: 1}
+	active := renderer.Style{Foreground: 2}
+	warn := renderer.Style{Foreground: 3}
+	styles := themeui.Styles{BorderMuted: muted, BorderActive: active, BorderWarn: warn}
+
+	got := noticeStylesFrom(styles)
+
+	require.Equal(t, active, got.BoxError)
+	require.Equal(t, muted, got.BoxInfo)
+	// BoxWarn must use the dedicated BorderWarn role, not fall back to the
+	// same muted role BoxInfo uses - that was the pre-existing bug this
+	// role fixes (Warn and Info toasts were visually identical).
+	require.Equal(t, warn, got.BoxWarn)
+	require.NotEqual(t, got.BoxInfo, got.BoxWarn)
+}

@@ -270,7 +270,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 		} else {
 			target.Stopped = true
 		}
-		if !d.switchToTarget(sess, ac, target) {
+		if err := d.switchToTarget(sess, ac, target); err != nil {
 			ac.paletteFailure(generation, rawQuery, "requested session is unavailable")
 			d.invalidateRender(sess, ac, true, "palette.go")
 			return
@@ -305,6 +305,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	}
 	if err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac}, args); err != nil {
 		d.log.Error("palette command failed", "err", err, "command", cmd.Code)
+		d.reportError(sess, err)
 	} else {
 		d.recordPaletteUse(cmd.Code)
 	}
@@ -480,6 +481,24 @@ func (e paletteExec) OpenSessionPicker() error {
 	return nil
 }
 
+func (e paletteExec) OpenNotifications() error {
+	e.d.enterNotices(e.sess, e.ac)
+	return nil
+}
+
+func (e paletteExec) YankLastNotification() error {
+	n, ok := e.d.notices.latest()
+	if !ok {
+		// Reported directly rather than returned: the generic cmd.Run error
+		// path only logs, so a returned error here would never reach the
+		// user as the warn toast this no-op is supposed to produce.
+		e.d.reportError(e.sess, domain.UserWarn(domain.NoticeClipboard, "no notifications yet", nil))
+		return nil
+	}
+	e.d.yankNotice(e.sess, e.ac, n)
+	return nil
+}
+
 func (e paletteExec) JumpRecentSession(rank int) error {
 	if rank < 1 || rank > len(e.recent) {
 		return command.ErrInvalidArguments
@@ -491,7 +510,7 @@ func (e paletteExec) JumpRecentSession(rank int) error {
 	if e.d.beforeRecentSessionHandoff != nil {
 		e.d.beforeRecentSessionHandoff()
 	}
-	if !e.d.switchToTarget(e.sess, e.ac, picker.Target{Session: target.id, TabIndex: -1}) {
+	if err := e.d.switchToTarget(e.sess, e.ac, picker.Target{Session: target.id, TabIndex: -1}); err != nil {
 		return command.ErrInvalidArguments
 	}
 	return nil

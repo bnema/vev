@@ -798,11 +798,20 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			}
 			if ev.State == ports.LinkStateConnected {
 				reconnect.clear()
+				select {
+				case sendCh <- ports.Frame{Type: ports.MsgClientNotice, Payload: ports.MarshalClientNotice(ports.ClientNotice{Action: ports.ClientNoticeLinkConnected})}:
+				case <-loopCtx.Done():
+					return welcomedResult(nil)
+				}
 				continue
 			}
 			if ev.State == ports.LinkStateDegraded {
 				log.Warn("UDP link degraded")
-				reconnect.clear()
+				select {
+				case sendCh <- ports.Frame{Type: ports.MsgClientNotice, Payload: ports.MarshalClientNotice(ports.ClientNotice{Action: ports.ClientNoticeLinkDegraded})}:
+				case <-loopCtx.Done():
+					return welcomedResult(nil)
+				}
 				continue
 			}
 			reconnect.drawStage(stageForLinkState(ev.State))
@@ -1366,6 +1375,9 @@ func (p *stdinPump) run() {
 			coalescer: coalescer,
 			reader:    p.clipboard,
 			log:       p.logger,
+			sendNotice: func(action uint8) {
+				send(ports.Frame{Type: ports.MsgClientNotice, Payload: ports.MarshalClientNotice(ports.ClientNotice{Action: action})})
+			},
 			sendImage: func(mime string, data []byte) {
 				inputSeq++
 				send(ports.Frame{Type: ports.MsgImagePush, Payload: ports.MarshalImagePush(ports.ImagePush{InputSeq: inputSeq, Mime: mime, Data: data})})
@@ -1562,6 +1574,8 @@ func detachedResult(reason uint8) error {
 		return &DetachedError{Reason: reason, Text: "session was killed"}
 	case ports.ReasonServerShutdown:
 		return &DetachedError{Reason: reason, Text: "daemon shut down"}
+	case ports.ReasonReplaced:
+		return &DetachedError{Reason: reason, Text: "session taken over by another client"}
 	default:
 		return &DetachedError{Reason: reason, Text: "detached by daemon"}
 	}

@@ -33,7 +33,13 @@ func drawReconnectToast(out io.Writer, size domain.Size) error {
 }
 
 func drawReconnectToastStage(out io.Writer, size domain.Size, stage reconnectStage) (domain.Rect, error) {
-	message := reconnectStageMessage(stage)
+	return drawClientToast(out, size, reconnectStageMessage(stage))
+}
+
+// drawClientToast draws a client-local toast without changing terminal state.
+// The attach main loop owns both this write and the later daemon-frame
+// reconciliation; input pumps must only publish a request for it.
+func drawClientToast(out io.Writer, size domain.Size, message string) (domain.Rect, error) {
 	bounds := reconnectToastBoundsFor(size, message)
 	if bounds.Width <= 0 || bounds.Height <= 0 {
 		return domain.Rect{}, nil

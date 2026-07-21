@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,24 @@ import (
 )
 
 // --- test doubles -----------------------------------------------------------
+
+// failingDeleteStore is a ports.Store whose Delete always fails, used to
+// exercise the picker's kill-target error path without disturbing the
+// generated mock's default Delete expectation.
+type failingDeleteStore struct{ err error }
+
+func (failingDeleteStore) Get([]byte) ([]byte, bool)    { return nil, false }
+func (failingDeleteStore) Set([]byte, []byte) error     { return nil }
+func (s failingDeleteStore) Delete([]byte) error        { return s.err }
+func (failingDeleteStore) Range(func(k, v []byte) bool) {}
+func (failingDeleteStore) Sync() error                  { return nil }
+func (failingDeleteStore) Close() error                 { return nil }
+
+type refusingSnapshotDeleteStore struct{ err error }
+
+func (refusingSnapshotDeleteStore) Write(string, []byte) error          { return nil }
+func (refusingSnapshotDeleteStore) Load() ([]ports.SnapshotBlob, error) { return nil, nil }
+func (s refusingSnapshotDeleteStore) Delete(string) error               { return s.err }
 
 func newTestTabWithContext(p ports.PTY, ctx context.Context, cancel context.CancelFunc) *tab {
 	tb := newTab(p, domain.Size{Cols: 80, Rows: 23})
@@ -140,7 +159,7 @@ func TestPickerRejectsRecreatedEphemeralTargetFromStaleSelection(t *testing.T) {
 	replacement := &session{id: "ephemeral-2", name: original.name, ephemeral: true, ctx: ctx, cancel: cancel, tabs: []*tab{{}}}
 	d.sessions[replacement.id] = replacement
 
-	require.False(t, d.switchToTarget(current, ac, target))
+	require.Error(t, d.switchToTarget(current, ac, target))
 	require.Same(t, current, ac.currentSession())
 }
 
@@ -152,7 +171,7 @@ func TestSameSessionSwitchRejectsReplacedClient(t *testing.T) {
 	d, current, ac, _ := newManualSessionWithPTYs(t, p1, p2)
 	current.client = &attachedClient{}
 
-	require.False(t, d.switchToTarget(current, ac, picker.Target{Session: current.id, TabIndex: 1}))
+	require.Error(t, d.switchToTarget(current, ac, picker.Target{Session: current.id, TabIndex: 1}))
 	require.Equal(t, 0, current.active)
 }
 
@@ -386,7 +405,7 @@ func TestPickerCrossSessionSwitchDetachesExistingClient(t *testing.T) {
 	det := awaitFrame(t, sends2, ports.MsgDetached)
 	dm, err := ports.UnmarshalDetached(det.Payload)
 	require.NoError(t, err)
-	require.Equal(t, ports.ReasonDetach, dm.Reason)
+	require.Equal(t, ports.ReasonReplaced, dm.Reason)
 	awaitFrame(t, sends1, ports.MsgOutput)
 }
 
@@ -944,4 +963,103 @@ func TestResumeStoppedAndSwitchInheritsTerminalEnv(t *testing.T) {
 	default:
 		t.Fatal("floating prewarm PTY was not closed")
 	}
+}
+
+// TestPickerEnterOnStoppedSessionRestoreFailureSurfacesNoticeAndStaysPut drives
+// Enter on a stopped picker entry whose restore spawn fails (mock PTY Open
+// error). The failure must reach the user as a NoticeSessionUnavailable
+// notice and toast, and the client must remain attached to its origin
+// session rather than being left in limbo.
+func TestPickerEnterOnStoppedSessionRestoreFailureSurfacesNoticeAndStaysPut(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, from, ac, sends := newManualSessionWithPTYs(t, p)
+	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp/stopped", createdAt: 7}
+	cause := errors.New("open failed")
+	ptys := portsmocks.NewMockPTYFactory(t)
+	ptys.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, cause).Once()
+	d.ptys = ptys
+
+	d.enterPicker(from, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(from, ac, []byte("j"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(from, ac, []byte("\r"))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	history := d.notices.history()
+	require.Len(t, history, 1, "failed stopped-session restore must record exactly one notice")
+	require.Equal(t, domain.NoticeSessionUnavailable, history[0].Code)
+	require.Equal(t, domain.NoticeError, history[0].Severity)
+
+	toasts := awaitToastCount(t, ac, 1)
+	require.Equal(t, domain.NoticeSessionUnavailable, toasts[0].Code)
+
+	require.Same(t, from, ac.currentSession(), "a failed restore must leave the client on its origin session")
+}
+
+func TestPickerKillActiveSessionSnapshotDeleteRefusalReportsOnceAndKeepsPicker(t *testing.T) {
+	d, from, ac, sends, releases := newRecentNavigationTestSessions(t)
+	defer releaseAll(releases)
+	cause := errors.New("snapshot delete refused")
+	WithSnapshotStore(refusingSnapshotDeleteStore{err: cause})(d)
+	target := d.sessions[domain.SessionID("recent")]
+
+	d.enterPicker(from, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(from, ac, []byte("k"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(from, ac, []byte("x"))
+
+	history := d.notices.history()
+	require.Len(t, history, 1, "the refused purge must be reported exactly once")
+	require.Equal(t, domain.NoticeInternal, history[0].Code)
+	require.Contains(t, history[0].Details, cause.Error())
+	require.Len(t, awaitToastCount(t, ac, 1), 1, "the refusal must produce one visible notice")
+
+	require.Same(t, from, ac.currentSession(), "purging another session must preserve the attachment")
+	require.True(t, ac.overlays.pickerActive(), "x refreshes the picker instead of closing it")
+	d.mu.Lock()
+	_, stillActive := d.sessions[target.id]
+	d.mu.Unlock()
+	require.False(t, stillActive, "the purge keeps its existing removal semantics despite cleanup failure")
+}
+
+// TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry
+// drives 'x' on a stopped picker entry whose persisted-record delete fails
+// (mock store error). The failure must reach the user as a
+// NoticePersistDelete notice and toast, and the entry must remain listed
+// after the picker refreshes rather than silently vanishing from the daemon's
+// bookkeeping while still present on disk.
+func TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, from, ac, sends := newManualSessionWithPTYs(t, p)
+	cause := errors.New("delete failed")
+	WithStore(failingDeleteStore{err: cause})(d)
+	d.stopped["stopped"] = stoppedSession{name: "stopped", cwd: "/tmp/stopped", createdAt: 7}
+
+	d.enterPicker(from, ac)
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(from, ac, []byte("j"))
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handleInput(from, ac, []byte("x"))
+	awaitFrame(t, sends, ports.MsgOutput)
+
+	history := d.notices.history()
+	require.NotEmpty(t, history, "failed persisted-record delete must record a notice")
+	require.Equal(t, domain.NoticePersistDelete, history[0].Code)
+	require.Equal(t, domain.NoticeError, history[0].Severity)
+
+	toasts := awaitToastCount(t, ac, 1)
+	require.Equal(t, domain.NoticePersistDelete, toasts[0].Code)
+
+	views, _ := d.pickerViews(from)
+	var stillListed bool
+	for _, v := range views {
+		if v.Stopped && v.Name == "stopped" {
+			stillListed = true
+		}
+	}
+	require.True(t, stillListed, "entry must remain listed after refreshPicker when the delete failed")
 }

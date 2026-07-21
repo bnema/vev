@@ -62,13 +62,34 @@ func (d *Daemon) closeRestoreDone() {
 }
 
 func (d *Daemon) restoreSnapshots(ctx context.Context) {
+	if d == nil {
+		return
+	}
 	defer d.closeRestoreDone()
-	if d == nil || !d.snapsEnabled || d.snaps == nil {
+	if ns := d.noticeStore; ns != nil {
+		claimed, err := ns.Claim()
+		if err != nil {
+			d.log.Warn("claiming pending notices failed", "err", err)
+		} else {
+			for _, n := range claimed {
+				d.notices.record(n)
+				d.notices.queueGlobal(n)
+			}
+			// Do not discard the claim until every notice has been recorded and
+			// queued. An Ack failure is safe: the claim is replayed at startup.
+			if err := ns.Ack(); err != nil {
+				d.log.Warn("acknowledging pending notices failed", "err", err)
+			}
+		}
+	}
+	if !d.snapsEnabled || d.snaps == nil {
 		return
 	}
 	blobs, err := d.snaps.Load()
 	if err != nil {
 		d.log.Warn("loading session snapshots failed", "err", err)
+		d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotRestore,
+			"couldn't load saved sessions after restart", err)
 		return
 	}
 	for _, blob := range blobs {
@@ -80,10 +101,16 @@ func (d *Daemon) restoreSnapshots(ctx context.Context) {
 		snap, err := snapcodec.Unmarshal(blob.Data)
 		if err != nil {
 			d.log.Warn("decoding session snapshot failed", "err", err, "session", blob.Name)
+			d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotRestore,
+				"couldn't restore session "+blob.Name+" after restart", err)
 			continue
 		}
 		if err := d.restoreSession(ctx, snap); err != nil {
 			d.log.Warn("restoring session snapshot failed", "err", err, "session", snap.Name)
+			if ctx.Err() == nil {
+				d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotRestore,
+					"couldn't restore session "+snap.Name+" after restart", err)
+			}
 		}
 	}
 }
@@ -209,6 +236,8 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 			if restoreCommand != "" {
 				if _, err := pty.Write([]byte(restoreCommand + "\n")); err != nil {
 					d.log.Warn("writing snapshot restore command failed", "err", err, "session", snap.Name, "pane", paneSnap.ID)
+					d.NotifyGlobal(domain.NoticeWarn, domain.NoticeAutoResume,
+						"couldn't restore the running program in session "+snap.Name, err)
 				}
 			}
 			tb.panes[paneSnap.ID] = p
@@ -579,6 +608,11 @@ func (d *Daemon) startSnapshotEncodeWorker() {
 			d.clearSnapshotWorkerInFlight(workerID, capture)
 			if err != nil && workerCtx.Err() == nil {
 				d.log.Warn("writing session snapshot failed", "err", err, "session", capture.name)
+				// Global, not session-scoped: by now the session may already be
+				// torn down, so a session notice would be dead-on-arrival. No lock
+				// is held here (clearSnapshotWorkerInFlight released its own).
+				d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotWrite,
+					"couldn't save session "+capture.name+"; recent state may be lost on restart", err)
 			}
 			d.finishSnapshotCapture(capture, err == nil && workerCtx.Err() == nil)
 			return workerCtx.Err() == nil

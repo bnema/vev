@@ -114,6 +114,7 @@ type Daemon struct {
 	persistEnabled          bool
 	snaps                   ports.SnapshotStore
 	snapsEnabled            bool
+	noticeStore             ports.NoticeStore
 	snapshotMarshal         func(snapcodec.Session) ([]byte, error)
 	snapshotJobs            chan *snapshotCapture
 	snapshotWorkerMu        sync.Mutex
@@ -146,6 +147,7 @@ type Daemon struct {
 	tabsConfig              atomic.Pointer[domain.TabsConfig]
 	themeConfig             atomic.Pointer[themeConfigSnapshot]
 	barScripts              *barScriptState
+	notices                 *noticeCenter
 	resumeParkGrace         time.Duration
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
@@ -237,6 +239,12 @@ func WithSnapshotStore(store ports.SnapshotStore) Option {
 		d.snaps = store
 		d.snapsEnabled = store != nil
 	}
+}
+
+// WithNoticeStore enables persisting undeliverable notices across daemon
+// restarts. A nil store keeps the daemon in no-op notice-persistence mode.
+func WithNoticeStore(store ports.NoticeStore) Option {
+	return func(d *Daemon) { d.noticeStore = store }
 }
 
 // WithCwdReader overrides the process cwd reader used for persistence tests.
@@ -350,6 +358,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		animWake:        make(chan struct{}, 1),
 		snapshotMarshal: snapcodec.Marshal,
 		snapshotJobs:    make(chan *snapshotCapture, snapshotQueueCapacity),
+		notices:         newNoticeCenter(),
 		resumeParkGrace: defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),

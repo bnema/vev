@@ -43,6 +43,10 @@ type attachedClient struct {
 	resumeToken          uint64
 	parked               bool
 	echoAck              atomic.Uint64
+	// prepareFailureFallback prevents a direct fallback paint from recursively
+	// reporting the same failed prepare through its notice repaint. It is only
+	// needed while no render coordinator is installed.
+	prepareFailureFallback atomic.Bool
 	// pipelineCache is the last successfully emitted composition. pipelineScratch
 	// is its attachment-owned alternate buffer; both are only touched under
 	// sendMu and must never share mutable backing storage.
@@ -443,8 +447,10 @@ func (d *Daemon) attachClientDeferred(sess *session, tr ports.Transport, sz doma
 	ac.setSession(sess)
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, &d.bindings)
 	// Daemon attachment callers hold d.mu, serialising this preparation with
-	// other publications. Bind coordinator ownership before sess.client becomes
-	// visible: an old deadline can then never target this new output chain.
+	// other publications. routingMu makes the whole replacement atomic with
+	// global notice selection: a selected old client cannot become stale before
+	// its toast is published, and a new client is never missed after publication.
+	d.notices.routingMu.Lock()
 	sess.mu.Lock()
 	old := sess.client
 	name := sess.name
@@ -453,6 +459,7 @@ func (d *Daemon) attachClientDeferred(sess *session, tr ports.Transport, sz doma
 	sess.mu.Lock()
 	sess.client = ac
 	sess.mu.Unlock()
+	d.notices.routingMu.Unlock()
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", name, "resume", opts.resumeCapable)
 	d.applyHostTheme(sess, ac, themeui.Theme{}, true)
@@ -571,7 +578,7 @@ func (d *Daemon) retireReplacedClient(old *attachedClient, cleanup renderLifecyc
 		if !blockedRender {
 			// A healthy idle client observes the required replacement notice. Its
 			// watchdog still bounds a peer that stops draining after this check.
-			d.boundedSend(old, frameDetached(ports.ReasonDetach))
+			d.boundedSend(old, frameDetached(ports.ReasonReplaced))
 		}
 		_ = old.closeCapturedTransport(old.revokeTransport(oldTransport))
 		d.unregisterPreview(old)
@@ -589,6 +596,10 @@ func (d *Daemon) retireReplacedClient(old *attachedClient, cleanup renderLifecyc
 // emits a full redraw. Attach must not wait for the resize-idle fallback
 // timer.
 func (d *Daemon) firstPaint(sess *session, ac *attachedClient, clientSize domain.Size) {
+	// Global notices raised while nothing was attached surface on this client.
+	// Drained before the early return below so a session without an active tab
+	// cannot swallow the queue.
+	d.drainPendingForFirstPaint(sess, ac)
 	tb := sess.activeTab()
 	if tb == nil {
 		return
@@ -655,6 +666,12 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 			if ip, derr := ports.UnmarshalImagePush(f.Payload); derr == nil {
 				d.handleSequencedImagePush(sess, ac, ip.InputSeq, ip)
 			}
+		case ports.MsgClientNotice:
+			if notice, derr := ports.UnmarshalClientNotice(f.Payload); derr == nil {
+				d.handleClientNotice(sess, ac, notice)
+			} else {
+				d.log.Warn("malformed client notice", "err", derr)
+			}
 		case ports.MsgDetach:
 			d.clientGone(sess, ac, tr, true)
 			return
@@ -680,7 +697,7 @@ func (d *Daemon) clientGone(sess *session, ac *attachedClient, failed ports.Tran
 	if failed != nil && !ac.currentTransportIs(failed) {
 		return // stale connection loop; a newer transport owns this client
 	}
-	if !sess.detachIfCurrent(ac) {
+	if !d.detachIfCurrent(sess, ac) {
 		return // already displaced by a newer client; nothing to do
 	}
 	if rc := sess.renderCoordinator(); rc != nil {
@@ -744,6 +761,48 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 	d.requestTransactionalResize(sess, ac, sz, false)
 }
 
+// handleClientNotice maps the closed client-event enum to daemon-owned notice
+// content. routingMu makes ownership validation and toast mutation one atomic
+// attachment-routing operation: replacement also takes routingMu before
+// publishing sess.client. Never retain sess.mu while touching notice or overlay
+// state, and retain the routingMu -> sess.mu order used by attachment paths.
+func (d *Daemon) handleClientNotice(sess *session, ac *attachedClient, notice ports.ClientNotice) {
+	d.notices.routingMu.Lock()
+	defer d.notices.routingMu.Unlock()
+
+	sess.mu.Lock()
+	current := sess.client == ac
+	sess.mu.Unlock()
+	if !current {
+		return
+	}
+	if d.notices.beforeClientNoticeMutation != nil {
+		d.notices.beforeClientNoticeMutation()
+	}
+
+	switch notice.Action {
+	case ports.ClientNoticeClipboardFallback:
+		d.recordClientNotice(sess, ac, domain.NoticeError, domain.NoticeClipboard, "image paste failed; sent Ctrl+V")
+	case ports.ClientNoticeClipboardTooLarge:
+		d.recordClientNotice(sess, ac, domain.NoticeWarn, domain.NoticeClipboardTooLarge, "image too large to paste")
+	case ports.ClientNoticeLinkDegraded:
+		d.recordClientNotice(sess, ac, domain.NoticeWarn, domain.NoticeConnection, "connection degraded")
+	case ports.ClientNoticeLinkConnected:
+		d.dismissToast(ac, domain.NoticeConnection, sess.id)
+	}
+}
+
+func (d *Daemon) recordClientNotice(sess *session, ac *attachedClient, sev domain.NoticeSeverity, code domain.NoticeCode, message string) {
+	n := d.notices.record(domain.Notification{
+		Code:      code,
+		Severity:  sev,
+		Message:   message,
+		Time:      d.clock.Now(),
+		SessionID: sess.id,
+	})
+	d.showToast(ac, n)
+}
+
 // resizeForFirstPaint retains attach's synchronous geometry guarantee. The
 // returned value reports whether the synchronous request was accepted.
 func (d *Daemon) resizeForFirstPaint(sess *session, ac *attachedClient, sz domain.Size) bool {
@@ -756,7 +815,7 @@ func (d *Daemon) detachOnSendError(sess *session, ac *attachedClient, failed por
 	if failed != nil && !ac.currentTransportIs(failed) {
 		return
 	}
-	if sess.detachIfCurrent(ac) {
+	if d.detachIfCurrent(sess, ac) {
 		if rc := sess.renderCoordinator(); rc != nil {
 			rc.noteDetach(ac)
 		}

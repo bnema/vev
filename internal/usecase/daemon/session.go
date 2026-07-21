@@ -19,6 +19,11 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
+var (
+	errSessionNameRequired = errors.New("name required")
+	errSessionNameInUse    = errors.New("name already in use")
+)
+
 type terminalEnv struct {
 	TrueColor bool
 }
@@ -145,7 +150,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 			var err error
 			createdAt, err = d.allocateLifecycleCreatedAtLocked()
 			if err != nil {
-				return nil, err
+				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
 			}
 		}
 	}
@@ -160,14 +165,14 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 		if err != nil {
 			closeTabs(tabs)
-			return nil, err
+			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
 		}
 		command, args := d.ptyCommand(env)
 		pty, err := d.ptys.Open(d.serveCtx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
 		if err != nil {
 			closeTabs(tabs)
 			d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "session")
-			return nil, fmt.Errorf("daemon: spawning session %q: %w", name, err)
+			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session: shell failed to start", err)
 		}
 		tb := newTabWithStableID(tabStableID, paneStableID, pty, tbSize)
 		if i < len(names) {
@@ -207,7 +212,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		if err := d.persist.Save(persist.Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names}); err != nil {
 			closeTabs(tabs)
 			cancel()
-			return nil, err
+			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
 		}
 		delete(d.stopped, name)
 	}
@@ -233,7 +238,7 @@ func closeTabs(tabs []*tab) {
 
 func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name string) error {
 	if name == "" {
-		return errors.New("name required")
+		return errSessionNameRequired
 	}
 	if err := domain.ValidateSessionName(name); err != nil {
 		return err
@@ -246,14 +251,19 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	}
 	if d.nameLiveOrStoppedLocked(name) {
 		d.mu.Unlock()
-		return errors.New("name already in use")
+		return errSessionNameInUse
 	}
+	// The caller owns d.mu. Make the entire ownership handoff atomic with
+	// global routing so it cannot select a client between source removal and
+	// destination publication.
+	d.notices.routingMu.Lock()
 	from.mu.Lock()
 	cwd := from.cwd
 	term := from.terminal
 	env := copyEnvironment(from.env)
 	if from.client != ac {
 		from.mu.Unlock()
+		d.notices.routingMu.Unlock()
 		d.mu.Unlock()
 		return errors.New("client detached")
 	}
@@ -261,12 +271,14 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 
 	newSess, err := d.createSessionLocked(name, false, cwd, sz, term, env)
 	if err != nil {
+		d.notices.routingMu.Unlock()
 		d.mu.Unlock()
 		return err
 	}
 	from.mu.Lock()
 	if from.client != ac {
 		from.mu.Unlock()
+		d.notices.routingMu.Unlock()
 		d.mu.Unlock()
 		_ = d.killSession(newSess, ports.ReasonSessionKilled, true)
 		return errors.New("client detached")
@@ -286,6 +298,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	d.touchMRU(newSess)
 	ac.recordPreviousSession(from)
 	d.log.Info("client attached", "session", newSess.name, "resume", ac.resumeCapable)
+	d.notices.routingMu.Unlock()
 	d.mu.Unlock()
 	finishRenderLifecycleCleanups(cleanups)
 	d.firstPaint(newSess, ac, sz)
@@ -309,7 +322,7 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 	pty, err := d.ptys.Open(sess.ctx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
 	if err != nil {
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "tab")
-		return fmt.Errorf("daemon: spawning tab for session %q: %w", name, err)
+		return domain.UserErr(domain.NoticeTabSpawn, "couldn't open tab: shell failed to start", err)
 	}
 	tb := newTabWithStableID(tabStableID, paneStableID, pty, tbSize)
 	if client != nil {
@@ -459,6 +472,15 @@ func (s *session) detachIfCurrent(ac *attachedClient) bool {
 	return false
 }
 
+// detachIfCurrent serializes client removal with global notice routing. The
+// routing lock is released before the caller performs teardown, so it covers
+// only attachment ownership and is never held across transport work.
+func (d *Daemon) detachIfCurrent(sess *session, ac *attachedClient) bool {
+	d.notices.routingMu.Lock()
+	defer d.notices.routingMu.Unlock()
+	return sess.detachIfCurrent(ac)
+}
+
 func (s *session) activeTab() *tab {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -494,7 +516,7 @@ func (s *session) switchRelative(delta int) bool {
 
 func (d *Daemon) renameSession(sess *session, name string) error {
 	if name == "" {
-		return errors.New("name required")
+		return errSessionNameRequired
 	}
 	if err := domain.ValidateSessionName(name); err != nil {
 		return err
@@ -502,10 +524,10 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if taken := d.findByNameLocked(name); taken != nil && taken != sess {
-		return errors.New("name already in use")
+		return errSessionNameInUse
 	}
 	if stopped, ok := d.stopped[name]; ok && stopped.name != sess.name {
-		return errors.New("name already in use")
+		return errSessionNameInUse
 	}
 	sess.mu.Lock()
 	oldName := sess.name
@@ -632,8 +654,13 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 		name := sess.name
 		sess.mu.Unlock()
 		d.mu.Unlock()
+		if err := d.killSession(sess, ports.ReasonSessionKilled, false); err != nil {
+			d.log.Warn("closing last tab failed", "session", name, "err", err)
+			d.reportError(sess, domain.UserErr(domain.NoticeSnapshotSaturated,
+				"couldn't close tab: session state not yet saved; try again", err))
+			return
+		}
 		d.log.Info("tab closed", "session", name, "last", true)
-		_ = d.killSession(sess, ports.ReasonSessionKilled, false)
 		return
 	}
 	ringing := tb.attention
@@ -718,6 +745,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 				if reason != ports.ReasonServerShutdown {
 					return terminalSnapshotErr
 				}
+				d.persistShutdownSnapshotFailure(name, terminalSnapshotErr)
 			}
 		}
 	}
@@ -770,10 +798,14 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 		}
 	}
 
+	// A global route that selected this attachment must publish before terminal
+	// teardown makes it stale.
+	d.notices.routingMu.Lock()
 	sess.mu.Lock()
 	ac := sess.client
 	sess.client = nil
 	sess.mu.Unlock()
+	d.notices.routingMu.Unlock()
 	if rc := sess.renderCoordinator(); rc != nil {
 		// Terminal teardown has two phases: this session owner first prevents any
 		// new worker registration and detaches all tokens, then stops and waits

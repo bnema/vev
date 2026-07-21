@@ -7,6 +7,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/usecase/notices"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/prompt"
@@ -43,6 +44,7 @@ type composeCacheInput struct {
 	floatingGeometry        floatingGeometry
 	floatingTitleGeneration uint64
 	bars                    barCache
+	toastFootprints         []domain.Rect
 	theme                   themeui.Theme
 	styleGeneration         uint64
 }
@@ -151,7 +153,13 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: rows + 1, Width: width, Height: 1})
 		}
 	}
-	if state.overlays.active() {
+	// The cache stays toast-free. The terminal shadow, in contrast, includes
+	// toasts, so every render damages both the last and current toast coverage.
+	// This restores cells exposed by dismissal and redraws a stable toast over
+	// any underlying pane update without promoting either case to a full frame.
+	overlaysActive := state.overlays.active()
+	toastsVisible := len(state.overlays.notices) > 0 || state.overlays.noticeOverflow > 0
+	if overlaysActive || toastsVisible {
 		// Without a floating frame, overlay composition would otherwise mutate
 		// the base cache in place. Floating composition already owns a clone.
 		if !state.floating.visible {
@@ -159,13 +167,17 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		}
 		frame, damage = composeCapturedOverlays(state, frame, damage, content)
 	}
-	if full || state.overlays.active() {
+	toastFootprints := composeCapturedNotices(state.overlays, frame, state.styles)
+	if full || overlaysActive {
 		damage = []renderer.Damage{renderer.FullRedraw()}
+	} else {
+		damage = appendToastDamage(damage, in.toastFootprints)
+		damage = appendToastDamage(damage, toastFootprints)
 	}
 	cursorInputs := state.cursor
-	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || state.overlays.active()
+	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || overlaysActive
 	cursor := desiredCapturedCursor(cursorInputs)
-	outCache := composeCacheInput{valid: !state.overlays.active(), frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, floatingVisible: state.floating.visible, floatingFocused: state.floating.focused, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
+	outCache := composeCacheInput{valid: !overlaysActive, frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, toastFootprints: append(scratch.toastFootprints[:0], toastFootprints...), floatingVisible: state.floating.visible, floatingFocused: state.floating.focused, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
 	outCache.bars.capture(baseFrame.Row(0), baseFrame.Row(rows+1))
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }
@@ -198,7 +210,9 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	}
 	o := &state.overlays
 	o.copyActive, o.copySearchActive, o.pickerActive, o.paletteActive, o.promptActive = snap.copyActive, snap.copySearchModel != nil, snap.pickerActive, snap.paletteActive, snap.promptActive
+	o.noticesOverlayActive = snap.noticesOverlayActive
 	o.copyMode = snap.copyMode
+	o.notices, o.noticeOverflow = snap.notices, snap.noticeOverflow
 	if snap.copyPane != nil {
 		o.copyPaneID = snap.copyPane.id
 	}
@@ -217,6 +231,12 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 		o.picker.focused = true
 		renderStyles := picker.RenderStyles{Background: styles.PickerBase, Selection: styles.PickerSelection, SelectionName: styles.PickerSelectionName, SelectionMuted: styles.PickerSelectionMuted, Name: styles.SurfaceInactive, Detail: styles.PickerDescription, Base: styles.SurfaceInactive, Separator: styles.PickerSeparator}
 		o.picker.inner = snap.pickerModel.Render(rectSize(pickerModal.Inner(size)), state.preview, renderStyles)
+	}
+	if snap.noticesOverlayActive && snap.noticesOverlayModel != nil {
+		o.noticesOverlay.modal = noticesModal
+		o.noticesOverlay.focused = true
+		renderStyles := notices.RenderStyles{Background: styles.PickerBase, Base: styles.SurfaceInactive, Selection: styles.PickerSelection, Text: styles.SurfaceInactive, SelectionText: styles.PickerSelectionName, Muted: styles.PickerDescription, SelectionMuted: styles.PickerSelectionMuted}
+		o.noticesOverlay.inner = snap.noticesOverlayModel.Render(rectSize(noticesModal.Inner(size)), renderStyles)
 	}
 	if snap.paletteActive && snap.paletteModel != nil {
 		o.palette.modal = paletteModalFor(size, paletteCfg)
@@ -262,7 +282,15 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 	if o.paletteActive && !state.floating.visible {
 		(overlayBackdrop{DimPaneContents: true}).apply(frame, content, layoutSnapshot, state.theme)
 	}
-	for _, modal := range []capturedModal{o.copySearch, o.picker, o.palette, o.prompt} {
+	// This paint order intentionally differs from HandleInput's keyboard
+	// priority (prompt > palette > picker > notices > copy, see
+	// overlay_runtime.go), which paints the picker under notices instead of
+	// over it. Currently unreachable: notices only opens via the palette, and
+	// HandleInput short-circuits to the first active overlay, so picker and
+	// notices are never simultaneously active. If that ever changes, this
+	// mismatch would let the picker own the keyboard while notices visually
+	// covers it.
+	for _, modal := range []capturedModal{o.copySearch, o.picker, o.noticesOverlay, o.palette, o.prompt} {
 		if modal.inner.Width == 0 && modal.inner.Height == 0 {
 			continue
 		}
@@ -277,6 +305,38 @@ func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, da
 		damage = []renderer.Damage{renderer.FullRedraw()}
 	}
 	return frame, damage
+}
+
+func composeCapturedNotices(overlays capturedOverlayRenderState, frame renderer.Frame, styles themeui.Styles) []domain.Rect {
+	if len(overlays.notices) == 0 && overlays.noticeOverflow == 0 {
+		return nil
+	}
+	views := make([]ui.NoticeView, len(overlays.notices))
+	for i, n := range overlays.notices {
+		views[i] = ui.NoticeView{Severity: n.Severity, Title: n.Code.String(), Message: n.Message, Count: n.Count}
+	}
+	return ui.ComposeNotices(frame, views, overlays.noticeOverflow, noticeStylesFrom(styles))
+}
+
+func appendToastDamage(damage []renderer.Damage, footprints []domain.Rect) []renderer.Damage {
+	for _, footprint := range footprints {
+		if footprint.Width > 0 && footprint.Height > 0 {
+			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: footprint.X, Y: footprint.Y, Width: footprint.Width, Height: footprint.Height})
+		}
+	}
+	return damage
+}
+
+// noticeStylesFrom picks the toast box color per severity from the theme's
+// chrome roles. Warn uses the dedicated BorderWarn role so it reads as
+// distinct from Info instead of sharing BorderMuted with it.
+func noticeStylesFrom(styles themeui.Styles) ui.NoticeStyles {
+	return ui.NoticeStyles{
+		Text:     styles.PickerBase,
+		BoxError: styles.BorderActive,
+		BoxWarn:  styles.BorderWarn,
+		BoxInfo:  styles.BorderMuted,
+	}
 }
 
 func (ac *attachedClient) encodeCursorTail(desired cursorOut, force bool) []byte {
@@ -368,6 +428,19 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 		ac.sess.mu.Unlock()
 		ac.sendMu.Unlock()
 		d.log.Error("render draw failed", "err", err, "session", sess.name)
+		// Without a coordinator reportError repaints synchronously. Suppress only
+		// that nested notice repaint; leave the guard before returning so a later,
+		// independent failed transaction can still notify the user.
+		if sess.renderCoordinator() == nil {
+			if !ac.prepareFailureFallback.CompareAndSwap(false, true) {
+				return true
+			}
+			d.reportError(sess, domain.UserErr(domain.NoticeInternal, "display update failed", err))
+			ac.prepareFailureFallback.Store(false)
+			return true
+		}
+		d.reportError(sess, domain.UserErr(domain.NoticeInternal, "display update failed", err))
+		d.invalidateRender(sess, ac, true, "render_pipeline.go:prepare-failed")
 		return true
 	}
 	data := append([]byte(nil), prepared.data...)

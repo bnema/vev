@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -216,6 +217,84 @@ func fireCoordinatorTimer(t *testing.T, rc *renderCoordinator, timers []*coordin
 		return
 	}
 	t.Fatalf("coordinator did not arm %s timer", duration)
+}
+
+func TestPTYReaderLogsClosureWithoutNotification(t *testing.T) {
+	pty := portsmocks.NewMockPTY(t)
+	readErr := errors.New("pty master closed")
+	pty.EXPECT().Read(mock.Anything).Return(0, readErr).Once()
+	d, sess, ac, _ := newManualSessionWithPTYs(t, pty)
+	var logs bytes.Buffer
+	d.log = slog.New(slog.NewTextHandler(&logs, nil))
+	pane := sess.tabs[0].focusedPane()
+	pane.onExit = func() {}
+
+	d.sessWg.Add(1)
+	d.ptyReader(sess, sess.tabs[0], pane)
+
+	require.Contains(t, logs.String(), "level=INFO")
+	require.Contains(t, logs.String(), "msg=\"pane pty closed\"")
+	require.Contains(t, logs.String(), "err=\"pty master closed\"")
+	require.Contains(t, logs.String(), "session=work")
+	require.Empty(t, d.notices.history(), "PTY closure is diagnostic only")
+	toasts, _ := visibleToasts(ac)
+	require.Empty(t, toasts, "PTY closure must not notify the user")
+}
+
+type concurrentExitPTY struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func newConcurrentExitPTY() *concurrentExitPTY {
+	return &concurrentExitPTY{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (p *concurrentExitPTY) Read([]byte) (int, error) {
+	close(p.started)
+	<-p.release
+	return 0, io.EOF
+}
+func (*concurrentExitPTY) Write(b []byte) (int, error) { return len(b), nil }
+func (*concurrentExitPTY) Close() error                { return nil }
+func (*concurrentExitPTY) Resize(domain.Size) error    { return nil }
+func (*concurrentExitPTY) Pid() int                    { return 0 }
+func (*concurrentExitPTY) ForegroundPgid() (int, error) {
+	return 0, nil
+}
+
+func TestPTYReaderReadsSessionNameUnderLockDuringConcurrentRename(t *testing.T) {
+	// Repeated synchronized exits make the reader's closure log contend with a
+	// rename. Running this under -race proves the name snapshot uses sess.mu.
+	for range 100 {
+		pty := newConcurrentExitPTY()
+		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+		pane := sess.tabs[0].focusedPane()
+		pane.onExit = func() {}
+
+		d.sessWg.Add(1)
+		go d.ptyReader(sess, sess.tabs[0], pane)
+		<-pty.started
+
+		start := make(chan struct{})
+		renameErr := make(chan error, 1)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			close(pty.release)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			renameErr <- d.renameSession(sess, "renamed")
+		}()
+		close(start)
+		wg.Wait()
+		require.NoError(t, <-renameErr)
+		d.sessWg.Wait()
+	}
 }
 
 func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
@@ -1064,6 +1143,17 @@ func TestPTYQueryGetsResponseWrittenBackToPTY(t *testing.T) {
 		require.NotEqual(t, ports.MsgOutput, f.Type)
 	default:
 	}
+}
+
+func TestCaptureCursorInputsHidesFocusedCursorForNoticesOverlay(t *testing.T) {
+	_, sess, _, _ := newManualSessionWithPTYs(t, nil)
+	p := sess.tabs[0].focusedPane()
+
+	p.mu.Lock()
+	cursor := captureCursorInputsLocked(p, domain.Rect{Width: 80, Height: 23}, capturedOverlayRenderState{noticesOverlayActive: true})
+	p.mu.Unlock()
+
+	require.True(t, cursor.hiddenByOverlay)
 }
 
 func TestCursorTailVisibleHideAndMoveOnly(t *testing.T) {

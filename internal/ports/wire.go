@@ -53,6 +53,7 @@ const (
 	ReasonDetach         uint8 = 0
 	ReasonSessionKilled  uint8 = 1
 	ReasonServerShutdown uint8 = 2
+	ReasonReplaced       uint8 = 3
 )
 
 // Hello is sent by the client immediately after connecting.
@@ -106,6 +107,29 @@ type ImagePush struct {
 	InputSeq uint64
 	Mime     string
 	Data     []byte
+}
+
+// ClientNotice reports a fixed client-side event for daemon-rendered user
+// feedback. Action values are deliberately closed so a client cannot inject
+// arbitrary display text into a shared session.
+type ClientNotice struct {
+	Action uint8
+}
+
+const (
+	ClientNoticeClipboardFallback uint8 = 1
+	ClientNoticeClipboardTooLarge uint8 = 2
+	ClientNoticeLinkDegraded      uint8 = 3
+	ClientNoticeLinkConnected     uint8 = 4
+)
+
+func validClientNoticeAction(action uint8) bool {
+	switch action {
+	case ClientNoticeClipboardFallback, ClientNoticeClipboardTooLarge, ClientNoticeLinkDegraded, ClientNoticeLinkConnected:
+		return true
+	default:
+		return false
+	}
 }
 
 // Detach asks the daemon to detach the current client without killing the
@@ -456,6 +480,28 @@ func UnmarshalImagePush(b []byte) (ImagePush, error) {
 		return ImagePush{}, err
 	}
 	return ImagePush{InputSeq: seq, Mime: mime, Data: r.rest()}, nil
+}
+
+// MarshalClientNotice encodes a fixed one-byte client notice action.
+func MarshalClientNotice(m ClientNotice) []byte {
+	return []byte{m.Action}
+}
+
+// UnmarshalClientNotice decodes a fixed client notice action and rejects both
+// unknown values and any trailing bytes.
+func UnmarshalClientNotice(b []byte) (ClientNotice, error) {
+	r := payloadReader{b: b}
+	action, err := r.getUint8()
+	if err != nil {
+		return ClientNotice{}, err
+	}
+	if !validClientNoticeAction(action) {
+		return ClientNotice{}, errors.New("ports: unknown client notice action")
+	}
+	if err := r.done(); err != nil {
+		return ClientNotice{}, err
+	}
+	return ClientNotice{Action: action}, nil
 }
 
 // MarshalResize encodes m into a Resize message payload.
