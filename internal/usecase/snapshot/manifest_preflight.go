@@ -14,11 +14,11 @@ func preflightManifest(body []byte) error {
 	if _, err := r.getUint64(); err != nil {
 		return err
 	}
-	name, err := preflightString(&r, &budget)
+	name, err := preflightManifestStringBytes(&r, &budget)
 	if err != nil {
 		return err
 	}
-	if name == "" {
+	if len(name) == 0 {
 		return fmt.Errorf("%w: manifest name", ErrInvalidData)
 	}
 	if _, err := r.getUint64(); err != nil {
@@ -56,24 +56,38 @@ func (b *manifestPreflightBudget) add(n uint64) bool {
 	return true
 }
 
-func preflightString(r *payloadReader, budget *manifestPreflightBudget) (string, error) {
+func preflightManifestStringBytes(r *payloadReader, budget *manifestPreflightBudget) ([]byte, error) {
 	n, err := r.getUint16()
+	if err != nil {
+		return nil, err
+	}
+	if uint64(n) > uint64(len(r.b)) {
+		return nil, ErrShortPayload
+	}
+	if !budget.add(uint64(n) + 16) {
+		return nil, fmt.Errorf("%w: string allocation", ErrInvalidData)
+	}
+	b := r.b[:n]
+	r.b = r.b[n:]
+	return b, nil
+}
+
+// skipManifestString accounts for the decoded string without materializing it.
+func skipManifestString(r *payloadReader, budget *manifestPreflightBudget) error {
+	_, err := preflightManifestStringBytes(r, budget)
+	return err
+}
+
+func preflightManifestString(r *payloadReader, budget *manifestPreflightBudget) (string, error) {
+	b, err := preflightManifestStringBytes(r, budget)
 	if err != nil {
 		return "", err
 	}
-	if uint64(n) > uint64(len(r.b)) {
-		return "", ErrShortPayload
-	}
-	if !budget.add(uint64(n) + 16) {
-		return "", fmt.Errorf("%w: string allocation", ErrInvalidData)
-	}
-	s := string(r.b[:n])
-	r.b = r.b[n:]
-	return s, nil
+	return string(b), nil
 }
 
 func preflightManifestTab(r *payloadReader, budget *manifestPreflightBudget) error {
-	if _, err := preflightString(r, budget); err != nil {
+	if err := skipManifestString(r, budget); err != nil {
 		return err
 	}
 	cols, err := r.getUint16()
@@ -90,7 +104,7 @@ func preflightManifestTab(r *payloadReader, budget *manifestPreflightBudget) err
 	if _, err := r.getUint64(); err != nil {
 		return err
 	}
-	focus, err := preflightString(r, budget)
+	focus, err := preflightManifestString(r, budget)
 	if err != nil {
 		return err
 	}
@@ -139,14 +153,14 @@ func preflightManifestNode(r *payloadReader, depth int, root bool, budget *manif
 		return err
 	}
 	switch kind {
-	case 0:
-		leaf, err := preflightString(r, budget)
+	case manifestNodeLeaf:
+		leaf, err := preflightManifestString(r, budget)
 		if err != nil {
 			return err
 		}
 		*refs = append(*refs, layout.PaneID(leaf))
 		return nil
-	case 1:
+	case manifestNodeSplit:
 		dir, err := r.getUint8()
 		if err != nil {
 			return err
@@ -154,15 +168,15 @@ func preflightManifestNode(r *payloadReader, depth int, root bool, budget *manif
 		if layout.SplitDir(dir) != layout.Horizontal && layout.SplitDir(dir) != layout.Vertical {
 			return fmt.Errorf("%w: split dir", ErrInvalidData)
 		}
-	case 2:
-		expanded, err := preflightString(r, budget)
+	case manifestNodeStack:
+		expanded, err := preflightManifestString(r, budget)
 		if err != nil {
 			return err
 		}
 		if expanded != "" {
 			*refs = append(*refs, layout.PaneID(expanded))
 		}
-	case 3:
+	case manifestNodeNil:
 		if !root {
 			return fmt.Errorf("%w: nil child node", ErrInvalidData)
 		}
@@ -186,21 +200,21 @@ func preflightManifestNode(r *payloadReader, depth int, root bool, budget *manif
 }
 
 func preflightManifestPane(r *payloadReader, budget *manifestPreflightBudget) (layout.PaneID, error) {
-	id, err := preflightString(r, budget)
+	id, err := preflightManifestString(r, budget)
 	if err != nil {
 		return "", err
 	}
-	if _, err := preflightString(r, budget); err != nil {
+	if err := skipManifestString(r, budget); err != nil {
 		return "", err
 	}
-	if _, err := preflightString(r, budget); err != nil {
+	if err := skipManifestString(r, budget); err != nil {
 		return "", err
 	}
 	sealed, err := r.getUint16()
 	if err != nil {
 		return "", err
 	}
-	if uint64(sealed) > uint64(len(r.b))/(sha256Size+5) || !budget.add(uint64(sealed)*48) {
+	if uint64(sealed) > uint64(len(r.b))/(objectRefDigestSize+objectRefSizeFieldSize+1) || !budget.add(uint64(sealed)*48) {
 		return "", fmt.Errorf("%w: sealed allocation", ErrInvalidData)
 	}
 	for range sealed {
@@ -220,50 +234,22 @@ func preflightManifestPane(r *payloadReader, budget *manifestPreflightBudget) (l
 	return layout.PaneID(id), nil
 }
 
-const sha256Size = 32
-
 func preflightObjectRef(r *payloadReader, want ObjectKind) error {
-	kind, err := r.getUint8()
+	kind, digest, size, err := parseObjectRef(r)
 	if err != nil {
 		return err
 	}
-	if ObjectKind(kind) != want || len(r.b) < sha256Size+4 {
-		if len(r.b) < sha256Size+4 {
-			return ErrShortPayload
-		}
-		return fmt.Errorf("%w: object kind", ErrInvalidData)
-	}
-	digest := r.b[:sha256Size]
-	r.b = r.b[sha256Size:]
-	if isZeroDigestBytes(digest) {
-		return fmt.Errorf("%w: object digest", ErrInvalidData)
-	}
-	size, err := r.getUint32()
-	if err != nil {
-		return err
-	}
-	if !validObjectEnvelopeSize(size) {
-		return fmt.Errorf("%w: object size", ErrInvalidData)
-	}
-	return nil
-}
-func isZeroDigestBytes(d []byte) bool {
-	for _, b := range d {
-		if b != 0 {
-			return false
-		}
-	}
-	return true
+	return validateObjectRefFields(kind, digest, size, want)
 }
 func preflightManifestProcess(r *payloadReader, budget *manifestPreflightBudget) error {
 	present, err := r.getUint8()
 	if err != nil {
 		return err
 	}
-	if present == 0 {
+	if present == processAbsent {
 		return nil
 	}
-	if present != 1 {
+	if present != processPresent {
 		return fmt.Errorf("%w: process presence", ErrInvalidData)
 	}
 	n, err := r.getUint16()
@@ -274,13 +260,12 @@ func preflightManifestProcess(r *payloadReader, budget *manifestPreflightBudget)
 		return fmt.Errorf("%w: process argv", ErrInvalidData)
 	}
 	for range n {
-		if _, err := preflightString(r, budget); err != nil {
+		if err := skipManifestString(r, budget); err != nil {
 			return err
 		}
 	}
-	if _, err := preflightString(r, budget); err != nil {
+	if err := skipManifestString(r, budget); err != nil {
 		return err
 	}
-	_, err = preflightString(r, budget)
-	return err
+	return skipManifestString(r, budget)
 }

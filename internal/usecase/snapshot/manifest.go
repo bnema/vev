@@ -18,6 +18,16 @@ const (
 	manifestHeaderSize           = 16
 	objectEnvelopeBodyPrefixSize = 1 + 4 // object kind and payload length
 	minObjectEnvelopeSize        = manifestHeaderSize + objectEnvelopeBodyPrefixSize + 1
+	objectRefDigestSize          = sha256.Size
+	objectRefSizeFieldSize       = 4
+
+	manifestNodeLeaf  uint8 = 0
+	manifestNodeSplit uint8 = 1
+	manifestNodeStack uint8 = 2
+	manifestNodeNil   uint8 = 3
+
+	processAbsent  uint8 = 0
+	processPresent uint8 = 1
 	// maxDecodedBodySize includes the object kind and payload-length prefix.
 	maxObjectEnvelopeSize = manifestHeaderSize + maxDecodedBodySize
 	maxObjectPayloadSize  = maxDecodedBodySize - objectEnvelopeBodyPrefixSize
@@ -109,6 +119,12 @@ func UnmarshalManifest(encoded []byte) (Manifest, error) {
 	if err := preflightManifest(body); err != nil {
 		return Manifest{}, err
 	}
+	return decodeManifest(body)
+}
+
+// decodeManifest decodes an already preflighted payload. Keeping this separate
+// allows the preflight grammar to be differentially tested against decoding.
+func decodeManifest(body []byte) (Manifest, error) {
 	r := payloadReader{b: body}
 	generation, err := r.getUint64()
 	if err != nil {
@@ -365,19 +381,32 @@ func readManifestPane(r *payloadReader) (ManifestPane, error) {
 	return pane, err
 }
 func readObjectRef(r *payloadReader) (ObjectRef, error) {
-	kind, err := r.getUint8()
+	kind, digestBytes, size, err := parseObjectRef(r)
 	if err != nil {
 		return ObjectRef{}, err
 	}
-	if len(r.b) < sha256.Size+4 {
-		return ObjectRef{}, ErrShortPayload
-	}
 	var digest SnapshotDigest
-	copy(digest[:], r.b[:sha256.Size])
-	r.b = r.b[sha256.Size:]
-	size := binary.BigEndian.Uint32(r.b)
-	r.b = r.b[4:]
-	return ObjectRef{Kind: ObjectKind(kind), Digest: digest, Size: size}, nil
+	copy(digest[:], digestBytes)
+	return ObjectRef{Kind: kind, Digest: digest, Size: size}, nil
+}
+
+// parseObjectRef advances r over an encoded object reference without copying
+// its digest. Callers that retain the digest must copy it before reusing input.
+func parseObjectRef(r *payloadReader) (ObjectKind, []byte, uint32, error) {
+	kind, err := r.getUint8()
+	if err != nil {
+		return 0, nil, 0, err
+	}
+	if len(r.b) < objectRefDigestSize+objectRefSizeFieldSize {
+		return 0, nil, 0, ErrShortPayload
+	}
+	digest := r.b[:objectRefDigestSize]
+	r.b = r.b[objectRefDigestSize:]
+	size, err := r.getUint32()
+	if err != nil {
+		return 0, nil, 0, err
+	}
+	return ObjectKind(kind), digest, size, nil
 }
 
 func validateManifest(m Manifest) error {
@@ -428,7 +457,11 @@ func validatePaneRefs(p ManifestPane) error {
 	return validateObjectRef(p.Visible, Visible)
 }
 func validateObjectRef(ref ObjectRef, want ObjectKind) error {
-	if ref.Kind != want || !validObjectEnvelopeSize(ref.Size) || isZeroDigest(ref.Digest) {
+	return validateObjectRefFields(ref.Kind, ref.Digest[:], ref.Size, want)
+}
+
+func validateObjectRefFields(kind ObjectKind, digest []byte, size uint32, want ObjectKind) error {
+	if kind != want || !validObjectEnvelopeSize(size) || isZeroDigestBytes(digest) {
 		return fmt.Errorf("%w: object reference", ErrInvalidData)
 	}
 	return nil
@@ -440,7 +473,7 @@ func validObjectEnvelopeSize(size uint32) bool {
 func validObjectKind(kind ObjectKind) bool {
 	return kind == HistoryChunk || kind == HistoryTail || kind == Visible
 }
-func isZeroDigest(d SnapshotDigest) bool {
+func isZeroDigestBytes(d []byte) bool {
 	for _, b := range d {
 		if b != 0 {
 			return false

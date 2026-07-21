@@ -349,19 +349,19 @@ func readTab(r *payloadReader) (Tab, error) {
 
 func writeNode(w *payloadWriter, n *layout.Node) error {
 	if n == nil {
-		w.putUint8(3)
+		w.putUint8(manifestNodeNil)
 		return nil
 	}
 	switch n.Kind {
 	case layout.Leaf:
-		w.putUint8(0)
+		w.putUint8(manifestNodeLeaf)
 		return w.putString(string(n.Leaf))
 	case layout.Split:
-		w.putUint8(1)
+		w.putUint8(manifestNodeSplit)
 		w.putUint8(uint8(n.Dir))
 		return writeChildren(w, n.Children)
 	case layout.Stack:
-		w.putUint8(2)
+		w.putUint8(manifestNodeStack)
 		if err := w.putString(string(n.Expanded)); err != nil {
 			return err
 		}
@@ -390,13 +390,13 @@ func readNode(r *payloadReader) (*layout.Node, error) {
 		return nil, err
 	}
 	switch kind {
-	case 0:
+	case manifestNodeLeaf:
 		leaf, err := r.getString()
 		if err != nil {
 			return nil, err
 		}
 		return layout.NewLeaf(layout.PaneID(leaf)), nil
-	case 1:
+	case manifestNodeSplit:
 		dir, err := r.getUint8()
 		if err != nil {
 			return nil, err
@@ -406,7 +406,7 @@ func readNode(r *payloadReader) (*layout.Node, error) {
 			return nil, err
 		}
 		return &layout.Node{Kind: layout.Split, Dir: layout.SplitDir(dir), Children: children}, nil
-	case 2:
+	case manifestNodeStack:
 		exp, err := r.getString()
 		if err != nil {
 			return nil, err
@@ -416,7 +416,7 @@ func readNode(r *payloadReader) (*layout.Node, error) {
 			return nil, err
 		}
 		return &layout.Node{Kind: layout.Stack, Expanded: layout.PaneID(exp), Children: children}, nil
-	case 3:
+	case manifestNodeNil:
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("%w: unknown node kind", ErrInvalidData)
@@ -516,13 +516,13 @@ func readPane(r *payloadReader) (Pane, error) {
 
 func writeProcess(w *payloadWriter, p *Process) error {
 	if p == nil {
-		w.putUint8(0)
+		w.putUint8(processAbsent)
 		return nil
 	}
 	if len(p.Argv) == 0 {
 		return fmt.Errorf("%w: process argv empty", ErrInvalidData)
 	}
-	w.putUint8(1)
+	w.putUint8(processPresent)
 	if err := w.putStrings(p.Argv); err != nil {
 		return err
 	}
@@ -537,10 +537,10 @@ func readProcess(r *payloadReader) (*Process, error) {
 	if err != nil {
 		return nil, err
 	}
-	if present == 0 {
+	if present == processAbsent {
 		return nil, nil
 	}
-	if present != 1 {
+	if present != processPresent {
 		return nil, fmt.Errorf("%w: process presence", ErrInvalidData)
 	}
 	argv, err := r.getStrings()
