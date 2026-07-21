@@ -101,7 +101,10 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 			d.processPTYData(sess, tb, p, buf[:n], true)
 		}
 		if err != nil {
-			d.log.Info("pane pty closed", "err", err, "session", sess.name)
+			sess.mu.Lock()
+			sessionName := sess.name
+			sess.mu.Unlock()
+			d.log.Info("pane pty closed", "err", err, "session", sessionName)
 			if p.onExit != nil {
 				p.onExit()
 			} else {

@@ -144,10 +144,15 @@ func (d *Daemon) buildCodeOverrides(configured map[string]string) (map[string]st
 		}
 
 		dropped := false
+		conflictCodes := make([]string, 0, len(claimants))
 		for code, slugs := range claimants {
-			if len(slugs) < 2 {
-				continue
+			if len(slugs) > 1 {
+				conflictCodes = append(conflictCodes, code)
 			}
+		}
+		sort.Strings(conflictCodes)
+		for _, code := range conflictCodes {
+			slugs := claimants[code]
 			sort.Strings(slugs)
 
 			// If one claimant holds this code by default (no accepted

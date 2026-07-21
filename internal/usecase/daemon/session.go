@@ -19,6 +19,11 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
+var (
+	errSessionNameRequired = errors.New("name required")
+	errSessionNameInUse    = errors.New("name already in use")
+)
+
 type terminalEnv struct {
 	TrueColor bool
 }
@@ -145,7 +150,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 			var err error
 			createdAt, err = d.allocateLifecycleCreatedAtLocked()
 			if err != nil {
-				return nil, err
+				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
 			}
 		}
 	}
@@ -160,14 +165,14 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		tabStableID, paneStableID, err := d.newTabPaneStableIDs()
 		if err != nil {
 			closeTabs(tabs)
-			return nil, err
+			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
 		}
 		command, args := d.ptyCommand(env)
 		pty, err := d.ptys.Open(d.serveCtx, command, args, childEnvFrom(env, name, tabStableID, paneStableID, term), cwd, tbSize)
 		if err != nil {
 			closeTabs(tabs)
 			d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "session")
-			return nil, fmt.Errorf("daemon: spawning session %q: %w", name, err)
+			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session: shell failed to start", err)
 		}
 		tb := newTabWithStableID(tabStableID, paneStableID, pty, tbSize)
 		if i < len(names) {
@@ -207,7 +212,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		if err := d.persist.Save(persist.Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names}); err != nil {
 			closeTabs(tabs)
 			cancel()
-			return nil, err
+			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
 		}
 		delete(d.stopped, name)
 	}
@@ -233,7 +238,7 @@ func closeTabs(tabs []*tab) {
 
 func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name string) error {
 	if name == "" {
-		return errors.New("name required")
+		return errSessionNameRequired
 	}
 	if err := domain.ValidateSessionName(name); err != nil {
 		return err
@@ -246,7 +251,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	}
 	if d.nameLiveOrStoppedLocked(name) {
 		d.mu.Unlock()
-		return errors.New("name already in use")
+		return errSessionNameInUse
 	}
 	from.mu.Lock()
 	cwd := from.cwd
@@ -494,7 +499,7 @@ func (s *session) switchRelative(delta int) bool {
 
 func (d *Daemon) renameSession(sess *session, name string) error {
 	if name == "" {
-		return errors.New("name required")
+		return errSessionNameRequired
 	}
 	if err := domain.ValidateSessionName(name); err != nil {
 		return err
@@ -502,10 +507,10 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if taken := d.findByNameLocked(name); taken != nil && taken != sess {
-		return errors.New("name already in use")
+		return errSessionNameInUse
 	}
 	if stopped, ok := d.stopped[name]; ok && stopped.name != sess.name {
-		return errors.New("name already in use")
+		return errSessionNameInUse
 	}
 	sess.mu.Lock()
 	oldName := sess.name

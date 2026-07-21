@@ -520,6 +520,22 @@ func TestCodeOverrideVacatedDefaultIsReusableRegardlessOfSlugOrder(t *testing.T)
 	require.Equal(t, "new-session", byCode["CNT"])
 }
 
+func TestBuildCodeOverridesOrdersIndependentConflictWarnings(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+
+	_, warnings := d.buildCodeOverrides(map[string]string{
+		"new-session": "ZZ",
+		"new-tab":     "ZZ",
+		"split-left":  "YY",
+		"split-right": "YY",
+	})
+
+	require.Equal(t, []domain.Warning{
+		{Msg: `command code "YY" for "split-right" conflicts with "split-left"`},
+		{Msg: `command code "ZZ" for "new-tab" conflicts with "new-session"`},
+	}, warnings)
+}
+
 func TestApplyConfigInvalidDefaultsWithoutPanic(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	require.NotPanics(t, func() {

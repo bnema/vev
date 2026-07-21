@@ -2,12 +2,20 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/stretchr/testify/require"
 )
+
+type failingPTYFactory struct{ err error }
+
+func (f failingPTYFactory) Open(context.Context, string, []string, []string, string, domain.Size) (ports.PTY, error) {
+	return nil, f.err
+}
 
 func TestPromptModalGeometry(t *testing.T) {
 	base := domain.Size{Cols: 100, Rows: 40}
@@ -70,6 +78,54 @@ func TestPromptSubmitErrorKeepsPromptOpen(t *testing.T) {
 	out, err := ports.UnmarshalOutput(repaint.Payload)
 	require.NoError(t, err)
 	require.Contains(t, string(out.Data), "name already in use")
+}
+
+func TestPromptSubmitSessionSpawnFailureReportsOneSafeNotice(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+	cause := errors.New("fork/exec /bin/sh: permission denied")
+	d.ptys = failingPTYFactory{err: cause}
+
+	// Submit through the actual prompt input boundary rather than calling its
+	// callback directly.
+	d.enterPrompt(sess, ac, " Create session ", "", func(name string) error {
+		return d.createSessionAndSwitch(sess, ac, name)
+	})
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handlePromptInput(ac, []byte("new\r"))
+	repaint := awaitFrame(t, sends, ports.MsgOutput)
+	output, err := ports.UnmarshalOutput(repaint.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(output.Data), "couldn't create session: shell failed to start")
+
+	history := d.notices.history()
+	require.Len(t, history, 1, "the prompt boundary must report the failure once")
+	notice := history[0]
+	require.Equal(t, domain.NoticeSessionSpawn, notice.Code)
+	require.Equal(t, "couldn't create session: shell failed to start", notice.Message)
+	require.NotContains(t, notice.Message, cause.Error())
+	require.Contains(t, notice.Details, cause.Error())
+	require.True(t, ac.overlays.promptActive(), "failed submission stays inline")
+}
+
+func TestPromptSubmitValidationErrorStaysInlineOnly(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+
+	d.enterPrompt(sess, ac, " Create session ", "", func(name string) error {
+		return d.createSessionAndSwitch(sess, ac, name)
+	})
+	awaitFrame(t, sends, ports.MsgOutput)
+	d.handlePromptInput(ac, []byte("invalid name\r"))
+	repaint := awaitFrame(t, sends, ports.MsgOutput)
+	output, err := ports.UnmarshalOutput(repaint.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(output.Data), domain.ErrInvalidSessionName.Error())
+
+	require.True(t, ac.overlays.promptActive())
+	require.Empty(t, d.notices.history())
 }
 
 func TestPromptEscapeCancelsWithoutRename(t *testing.T) {
