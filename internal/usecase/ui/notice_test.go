@@ -110,7 +110,7 @@ func TestComposeNotices(t *testing.T) {
 				if rowOne < 0 || rowTwo < 0 || rowThree < 0 {
 					t.Fatalf("could not locate all three notice messages in frame: one=%d two=%d three=%d\n%s", rowOne, rowTwo, rowThree, text)
 				}
-				if !(rowOne < rowTwo && rowTwo < rowThree) {
+				if rowOne >= rowTwo || rowTwo >= rowThree {
 					t.Fatalf("notices not stacked newest-first top-down: one=%d two=%d three=%d\n%s", rowOne, rowTwo, rowThree, text)
 				}
 			},
