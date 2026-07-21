@@ -2,10 +2,15 @@ package snapshot
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/bnema/vev/internal/ports"
 )
 
 func TestRepositoryDeleteQuarantinesCanonicalSessionBeforeCleanup(t *testing.T) {
@@ -265,6 +270,91 @@ func TestRepositoryMaintainResumesNestedQuarantineWithinBatch(t *testing.T) {
 	}
 	if _, err := os.Lstat(quarantine); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("quarantine after resumed maintenance = %v, want removed", err)
+	}
+}
+
+func TestRepositoryMaintainDoesNotStarveLaterTemporaryEntries(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	if err := os.Mkdir(repo.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The live entries precede the stale entries in directory insertion order.
+	// A fresh ReadDir from the start on every call would never reach the latter.
+	for i := 0; i < maintenanceBatch+1; i++ {
+		if err := os.WriteFile(filepath.Join(repo.dir, "live-"+string(rune('a'+i))), []byte("live"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < maintenanceBatch+1; i++ {
+		if err := os.WriteFile(filepath.Join(repo.dir, ".tmp-later-"+string(rune('a'+i))), []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		if err := repo.Maintain(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(repo.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".tmp-") {
+			t.Fatalf("stale entry %q was starved", entry.Name())
+		}
+	}
+}
+
+func TestRepositoryMaintainMarksLargeGenerationSetBeforeSweeping(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	var newest ports.SnapshotPublication
+	for generation := uint64(1); generation <= maintenanceBatch+2; generation++ {
+		publication := repositoryPublication(t, "named", generation, []byte(fmt.Sprintf("state-%d", generation)))
+		if err := repo.Publish(context.Background(), publication); err != nil {
+			t.Fatal(err)
+		}
+		newest = publication
+	}
+	key := sessionKey("named")
+	stale := sha256.Sum256([]byte("stale object"))
+	stalePath := repo.objectPath(key, stale)
+	if err := os.MkdirAll(filepath.Dir(stalePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stalePath, []byte("stale object"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The first call has classified only one manifest batch. It must not sweep
+	// even an otherwise stale object, nor a blob owned by a later manifest.
+	if err := repo.Maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(stalePath); err != nil {
+		t.Fatalf("stale object swept before complete mark pass: %v", err)
+	}
+	for _, object := range newest.Objects {
+		if _, err := os.Lstat(repo.objectPath(key, object.Digest)); err != nil {
+			t.Fatalf("object referenced by not-yet-classified manifest removed: %v", err)
+		}
+	}
+
+	for i := 0; i < 600; i++ {
+		if err := repo.Maintain(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(stalePath); errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if i == 599 {
+			t.Fatal("stale object was not eventually swept")
+		}
+	}
+	for _, generation := range []uint64{maintenanceBatch + 1, maintenanceBatch + 2} {
+		if _, err := os.Lstat(repo.manifestPath(key, generation)); err != nil {
+			t.Fatalf("newest complete manifest %d removed: %v", generation, err)
+		}
 	}
 }
 

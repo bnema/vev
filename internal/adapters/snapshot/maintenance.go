@@ -107,22 +107,33 @@ func pendingQuarantine(dir, key string) (bool, error) {
 	}
 }
 
-// Maintain reaps a bounded amount of stale state. Every scan uses ReadDir with
-// a fixed batch, and a quarantine tree is peeled one entry at a time so an
-// interrupted pass can continue after another call or restart.
-func (r *Repository) Maintain(ctx context.Context) error {
+// Maintain reaps a bounded amount of stale state. Continuation handles are
+// repository-owned, so a stable prefix cannot starve entries later in a large
+// directory. Cancellation and errors discard those handles: a restarted
+// repository (and the next fresh cycle) always begins at a safe boundary.
+func (r *Repository) Maintain(ctx context.Context) (err error) {
+	r.maintenanceMu.Lock()
+	defer r.maintenanceMu.Unlock()
 	if err := ctx.Err(); err != nil {
+		r.resetMaintenance()
 		return err
 	}
+	defer func() {
+		if err != nil {
+			r.resetMaintenance()
+		}
+	}()
+	if r.maintenanceCursors == nil {
+		r.maintenanceCursors = make(map[string]*maintenanceCursor)
+		r.maintenanceSessions = make(map[string]*sessionMaintenance)
+	}
+
 	budget := maintenanceBatch
-	if err := r.removeTemps(ctx, r.dir, &budget); err != nil {
+	if err := r.removeTemps(ctx, r.dir, &budget, "root-temps"); err != nil || budget == 0 {
 		return err
-	}
-	if budget == 0 {
-		return nil
 	}
 	sessions := filepath.Join(r.dir, repositorySessionsDir)
-	entries, err := readDirBatch(sessions, maintenanceBatch)
+	entries, _, err := r.readMaintenanceDir(sessions, maintenanceBatch, "sessions")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -157,11 +168,7 @@ func (r *Repository) Maintain(ctx context.Context) error {
 		}
 		lock := r.sessionLock(entry.Name())
 		lock.Lock()
-		if err := ctx.Err(); err != nil {
-			lock.Unlock()
-			return err
-		}
-		err := r.maintainSession(ctx, entry.Name(), &budget)
+		err = r.maintainSession(ctx, entry.Name(), &budget)
 		lock.Unlock()
 		if err != nil {
 			return err
@@ -170,8 +177,68 @@ func (r *Repository) Maintain(ctx context.Context) error {
 	return nil
 }
 
+type maintenanceCursor struct{ file *os.File }
+
+type manifestMaintenance struct {
+	refs     map[ports.SnapshotDigest]codec.ObjectRef
+	complete bool
+}
+
+type sessionMaintenance struct {
+	token         string
+	marked        map[uint64]manifestMaintenance
+	uncertain     bool
+	markDone      bool
+	manifestQueue []uint64
+	sweepQueue    []string
+	sweepRootDone bool
+}
+
+func (r *Repository) resetMaintenance() {
+	for _, cursor := range r.maintenanceCursors {
+		_ = cursor.file.Close()
+	}
+	r.maintenanceCursors = nil
+	r.maintenanceSessions = nil
+}
+
+// readMaintenanceDir advances one named directory cursor. It closes and
+// forgets the handle at EOF, so the following call begins a fresh cycle.
+func (r *Repository) readMaintenanceDir(dir string, n int, purpose string) ([]os.DirEntry, bool, error) {
+	id := purpose + "\x00" + dir
+	cursor := r.maintenanceCursors[id]
+	if cursor == nil {
+		file, err := os.Open(dir)
+		if err != nil {
+			return nil, false, err
+		}
+		cursor = &maintenanceCursor{file: file}
+		r.maintenanceCursors[id] = cursor
+	}
+	entries, err := cursor.file.ReadDir(n)
+	if err != nil && !errors.Is(err, io.EOF) {
+		delete(r.maintenanceCursors, id)
+		closeErr := cursor.file.Close()
+		if closeErr != nil {
+			return nil, false, closeErr
+		}
+		return nil, false, err
+	}
+	if !errors.Is(err, io.EOF) && len(entries) == n {
+		return entries, false, nil
+	}
+	delete(r.maintenanceCursors, id)
+	if closeErr := cursor.file.Close(); closeErr != nil {
+		return nil, false, closeErr
+	}
+	return entries, true, nil
+}
+
 func isQuarantine(name string) bool { return strings.HasPrefix(name, ".deleting-") }
 
+// readDirBatch is used only for a mutating quarantine walk, where every
+// successful step removes the entry it selected. General maintenance scans use
+// repository-owned cursors above.
 func readDirBatch(dir string, n int) ([]os.DirEntry, error) {
 	f, err := os.Open(dir)
 	if err != nil {
@@ -221,6 +288,8 @@ func (r *Repository) removeTreeStep(ctx context.Context, path string, budget *in
 		*budget--
 		return true, nil
 	}
+	// A quarantine tree contains no live entries. Reopening from its start is
+	// safe here because each successful step removes that first descendant.
 	entries, err := readDirBatch(path, 1)
 	if err != nil {
 		return false, err
@@ -242,11 +311,16 @@ func (r *Repository) maintainSession(ctx context.Context, key string, budget *in
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := r.removeTemps(ctx, filepath.Join(r.sessionPath(key), repositoryGenerations), budget); err != nil {
+	state, err := r.sessionMaintenanceState(key)
+	if err != nil {
 		return err
 	}
+	if err := r.removeTemps(ctx, filepath.Join(r.sessionPath(key), repositoryGenerations), budget, "generation-temps:"+key); err != nil || *budget == 0 {
+		return err
+	}
+
 	objectRoot := filepath.Join(r.sessionPath(key), repositoryObjectsDir)
-	shards, err := readDirBatch(objectRoot, maintenanceBatch)
+	shards, _, err := r.readMaintenanceDir(objectRoot, maintenanceBatch, "object-temps-shards:"+key)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read snapshot object shards: %w", safeFilesystemError(err))
 	}
@@ -255,160 +329,286 @@ func (r *Repository) maintainSession(ctx context.Context, key string, budget *in
 			return nil
 		}
 		if shard.IsDir() {
-			if err := r.removeTemps(ctx, filepath.Join(objectRoot, shard.Name()), budget); err != nil {
+			if err := r.removeTemps(ctx, filepath.Join(objectRoot, shard.Name()), budget, "object-temps:"+key+":"+shard.Name()); err != nil {
 				return err
 			}
 		}
 	}
-
-	generations, err := r.generationNumbersBatch(key)
-	if err != nil {
-		return fmt.Errorf("read snapshot generations: %w", safeFilesystemError(err))
-	}
-	type manifestState struct {
-		generation uint64
-		refs       map[ports.SnapshotDigest]codec.ObjectRef
-		complete   bool
-	}
-	states := make([]manifestState, 0, len(generations))
-	complete := 0
-	for _, generation := range generations {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		state := manifestState{generation: generation}
-		data, err := readBounded(r.manifestPath(key, generation))
-		if err == nil {
-			manifest, decodeErr := codec.UnmarshalManifest(data)
-			if decodeErr == nil && manifest.Generation == generation && sessionKey(manifest.Name) == key {
-				state.refs = manifestRefs(manifest)
-				if state.refs != nil && withinGenerationBudget(len(data), state.refs) {
-					_, loadErr := r.loadGeneration(ctx, manifest.Name, key, generation)
-					state.complete = loadErr == nil
-				}
-			}
-		}
-		states = append(states, state)
-	}
-
-	retained := make(map[uint64]bool, 2)
-	for _, state := range states {
-		if state.complete && complete < 2 {
-			retained[state.generation] = true
-			complete++
-		}
-	}
-	referenced := make(map[ports.SnapshotDigest]struct{})
-	for _, state := range states {
-		keep := retained[state.generation] || !state.complete
-		if !keep && *budget > 0 {
-			path := r.manifestPath(key, state.generation)
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("remove snapshot manifest %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
-			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err := r.syncDirectory(filepath.Dir(path)); err != nil {
-				return fmt.Errorf("sync snapshot maintenance directory for %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
-			}
-			*budget--
-			continue
-		}
-		for digest := range state.refs {
-			referenced[digest] = struct{}{}
-		}
-	}
-	return r.removeUnreferencedObjects(ctx, key, referenced, budget)
-}
-
-func (r *Repository) generationNumbersBatch(key string) ([]uint64, error) {
-	entries, err := readDirBatch(filepath.Join(r.sessionPath(key), repositoryGenerations), maintenanceBatch)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	numbers := make([]uint64, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			if generation, ok := parseGenerationFilename(entry.Name()); ok {
-				numbers = append(numbers, generation)
-			}
-		}
-	}
-	// Generation file names are zero-padded, but keep the explicit comparison
-	// in case the representation changes.
-	for i := range numbers {
-		for j := i + 1; j < len(numbers); j++ {
-			if numbers[j] > numbers[i] {
-				numbers[i], numbers[j] = numbers[j], numbers[i]
-			}
-		}
-	}
-	return numbers, nil
-}
-
-func (r *Repository) removeUnreferencedObjects(ctx context.Context, key string, referenced map[ports.SnapshotDigest]struct{}, budget *int) error {
-	root := filepath.Join(r.sessionPath(key), repositoryObjectsDir)
-	shards, err := readDirBatch(root, maintenanceBatch)
-	if errors.Is(err, os.ErrNotExist) {
+	if *budget == 0 {
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("read snapshot objects: %w", safeFilesystemError(err))
-	}
-	for _, shard := range shards {
-		if *budget == 0 {
+	if !state.markDone {
+		if err := r.markSession(ctx, key, state); err != nil {
+			return err
+		}
+		if !state.markDone {
 			return nil
 		}
-		if !shard.IsDir() {
-			continue
-		}
-		dir := filepath.Join(root, shard.Name())
-		objects, err := readDirBatch(dir, maintenanceBatch)
-		if err != nil {
-			return fmt.Errorf("read snapshot object shard: %w", safeFilesystemError(err))
-		}
-		for _, object := range objects {
-			if *budget == 0 {
-				return nil
-			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			digest, ok := parseObjectDigest(object.Name())
-			if !ok || object.IsDir() {
-				continue
-			}
-			if _, used := referenced[digest]; used {
-				continue
-			}
-			path := filepath.Join(dir, object.Name())
-			if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("remove snapshot object %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
-			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err := r.syncDirectory(dir); err != nil {
-				return fmt.Errorf("sync snapshot maintenance directory for %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
-			}
-			*budget--
-		}
+	}
+	if err := r.removeObsoleteManifests(ctx, key, state, budget); err != nil || *budget == 0 {
+		return err
+	}
+	if state.uncertain {
+		// An unreadable or invalid manifest may reference any existing blob. Do
+		// not sweep in this cycle; retry marking from a fresh directory pass.
+		r.clearSessionMaintenance(key)
+		return nil
+	}
+	if err := r.sweepSession(ctx, key, state, budget); err != nil {
+		return err
 	}
 	return nil
 }
 
-func (r *Repository) removeTemps(ctx context.Context, dir string, budget *int) error {
+func (r *Repository) sessionMaintenanceState(key string) (*sessionMaintenance, error) {
+	token, exists, err := r.maintenanceToken(key)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		r.clearSessionMaintenance(key)
+		return &sessionMaintenance{token: "missing", marked: make(map[uint64]manifestMaintenance)}, nil
+	}
+	state := r.maintenanceSessions[key]
+	if state == nil || state.token != token {
+		r.clearSessionMaintenance(key)
+		state = &sessionMaintenance{token: token, marked: make(map[uint64]manifestMaintenance)}
+		r.maintenanceSessions[key] = state
+	}
+	return state, nil
+}
+
+// maintenanceToken is the publication boundary. Publish and Delete share the
+// per-session lock with maintenance, and a changed HEAD on a later call makes
+// us discard partial marking/sweeping before deleting anything else.
+func (r *Repository) maintenanceToken(key string) (string, bool, error) {
+	data, exists, err := readOptionalBounded(r.headPath(key))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if !exists {
+		return "", false, nil
+	}
+	return string(data), true, nil
+}
+
+func (r *Repository) clearSessionMaintenance(key string) {
+	delete(r.maintenanceSessions, key)
+	prefix := "\x00" + filepath.Clean(r.sessionPath(key))
+	for id, cursor := range r.maintenanceCursors {
+		if strings.HasSuffix(id, prefix) || strings.Contains(id, ":"+key+":") || strings.Contains(id, ":"+key+"\x00") {
+			_ = cursor.file.Close()
+			delete(r.maintenanceCursors, id)
+		}
+	}
+}
+
+func (r *Repository) markSession(ctx context.Context, key string, state *sessionMaintenance) error {
+	dir := filepath.Join(r.sessionPath(key), repositoryGenerations)
+	entries, done, err := r.readMaintenanceDir(dir, maintenanceBatch, "mark-generations:"+key)
+	if errors.Is(err, os.ErrNotExist) {
+		state.markDone = true
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read snapshot generations: %w", safeFilesystemError(err))
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			continue
+		}
+		generation, ok := parseGenerationFilename(entry.Name())
+		if !ok {
+			continue
+		}
+		item := manifestMaintenance{}
+		data, err := readBounded(r.manifestPath(key, generation))
+		if err != nil {
+			state.uncertain = true
+			state.marked[generation] = item
+			continue
+		}
+		manifest, err := codec.UnmarshalManifest(data)
+		if err != nil || manifest.Generation != generation || sessionKey(manifest.Name) != key {
+			state.uncertain = true
+			state.marked[generation] = item
+			continue
+		}
+		item.refs = manifestRefs(manifest)
+		if item.refs == nil || !withinGenerationBudget(len(data), item.refs) {
+			state.uncertain = true
+			state.marked[generation] = item
+			continue
+		}
+		// Valid but incomplete generations are marked too. This protects blobs
+		// written before a failed or in-flight publication reaches HEAD.
+		_, loadErr := r.loadGeneration(ctx, manifest.Name, key, generation)
+		item.complete = loadErr == nil
+		state.marked[generation] = item
+	}
+	if done {
+		state.markDone = true
+		state.manifestQueue = retainedManifestQueue(state.marked)
+	}
+	return nil
+}
+
+func retainedManifestQueue(marked map[uint64]manifestMaintenance) []uint64 {
+	complete := make([]uint64, 0, len(marked))
+	for generation, item := range marked {
+		if item.complete {
+			complete = append(complete, generation)
+		}
+	}
+	for i := range complete {
+		for j := i + 1; j < len(complete); j++ {
+			if complete[j] > complete[i] {
+				complete[i], complete[j] = complete[j], complete[i]
+			}
+		}
+	}
+	if len(complete) <= 2 {
+		return nil
+	}
+	return complete[2:]
+}
+
+func (r *Repository) removeObsoleteManifests(ctx context.Context, key string, state *sessionMaintenance, budget *int) error {
+	for len(state.manifestQueue) != 0 && *budget > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		generation := state.manifestQueue[0]
+		path := r.manifestPath(key, generation)
+		if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove snapshot manifest %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := r.syncDirectory(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("sync snapshot maintenance directory for %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
+		}
+		state.manifestQueue = state.manifestQueue[1:]
+		*budget--
+	}
+	return nil
+}
+
+func (r *Repository) sweepSession(ctx context.Context, key string, state *sessionMaintenance, budget *int) error {
+	referenced := retainedReferences(state.marked)
+	root := filepath.Join(r.sessionPath(key), repositoryObjectsDir)
+	if !state.sweepRootDone {
+		entries, done, err := r.readMaintenanceDir(root, maintenanceBatch, "sweep-shards:"+key)
+		if errors.Is(err, os.ErrNotExist) {
+			state.sweepRootDone = true
+		} else if err != nil {
+			return fmt.Errorf("read snapshot objects: %w", safeFilesystemError(err))
+		} else {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					state.sweepQueue = append(state.sweepQueue, entry.Name())
+				}
+			}
+			state.sweepRootDone = done
+		}
+	}
+	if len(state.sweepQueue) != 0 && *budget > 0 {
+		shard := state.sweepQueue[0]
+		done, err := r.sweepShard(ctx, filepath.Join(root, shard), referenced, budget, key, shard)
+		if err != nil {
+			return err
+		}
+		if done {
+			state.sweepQueue = state.sweepQueue[1:]
+		}
+	}
+	if state.sweepRootDone && len(state.sweepQueue) == 0 {
+		r.clearSessionMaintenance(key)
+	}
+	return nil
+}
+
+func retainedReferences(marked map[uint64]manifestMaintenance) map[ports.SnapshotDigest]struct{} {
+	complete := make([]uint64, 0, len(marked))
+	for generation, item := range marked {
+		if item.complete {
+			complete = append(complete, generation)
+		}
+	}
+	for i := range complete {
+		for j := i + 1; j < len(complete); j++ {
+			if complete[j] > complete[i] {
+				complete[i], complete[j] = complete[j], complete[i]
+			}
+		}
+	}
+	keep := make(map[uint64]bool, 2)
+	for _, generation := range complete {
+		if len(keep) == 2 {
+			break
+		}
+		keep[generation] = true
+	}
+	references := make(map[ports.SnapshotDigest]struct{})
+	for generation, item := range marked {
+		if !item.complete || keep[generation] {
+			for digest := range item.refs {
+				references[digest] = struct{}{}
+			}
+		}
+	}
+	return references
+}
+
+func (r *Repository) sweepShard(ctx context.Context, dir string, referenced map[ports.SnapshotDigest]struct{}, budget *int, key, shard string) (bool, error) {
+	entries, done, err := r.readMaintenanceDir(dir, maintenanceBatch, "sweep-objects:"+key+":"+shard)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read snapshot object shard: %w", safeFilesystemError(err))
+	}
+	for _, object := range entries {
+		if *budget == 0 {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		digest, ok := parseObjectDigest(object.Name())
+		if !ok || object.IsDir() {
+			continue
+		}
+		if _, used := referenced[digest]; used {
+			continue
+		}
+		path := filepath.Join(dir, object.Name())
+		if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("remove snapshot object %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if err := r.syncDirectory(dir); err != nil {
+			return false, fmt.Errorf("sync snapshot maintenance directory for %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
+		}
+		*budget--
+	}
+	return done, nil
+}
+
+func (r *Repository) removeTemps(ctx context.Context, dir string, budget *int, purpose string) error {
 	if *budget == 0 {
 		return nil
 	}
-	entries, err := readDirBatch(dir, maintenanceBatch)
+	entries, _, err := r.readMaintenanceDir(dir, maintenanceBatch, purpose)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}

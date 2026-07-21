@@ -25,6 +25,13 @@ type Repository struct {
 	dir   string
 	locks sync.Map // map[string]*sync.Mutex
 	hooks repositoryHooks
+
+	// maintenanceMu owns continuation state for bounded maintenance. Keeping
+	// directory handles on the repository makes successive calls advance rather
+	// than repeatedly reading the first batch of a large directory.
+	maintenanceMu       sync.Mutex
+	maintenanceCursors  map[string]*maintenanceCursor
+	maintenanceSessions map[string]*sessionMaintenance
 }
 
 // repositoryHooks makes each persistence boundary fault-injectable. Hooks run
