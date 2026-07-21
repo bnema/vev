@@ -199,7 +199,7 @@ func TestOverlayRuntimeCopyModeDocumentSurvivesRingOverwrite(t *testing.T) {
 	ac := &attachedClient{}
 	ac.initOverlays()
 	history := newTestHistory(1)
-	history.Append(testRow("before"))
+	require.NoError(t, history.Append(testRow("before")))
 	document := scopy.NewDocument(scopy.NewSnapshot(history, renderer.NewFrame(6, 1)), domain.DefaultWordSeparators)
 
 	ac.overlays.copyMu.Lock()
@@ -207,7 +207,7 @@ func TestOverlayRuntimeCopyModeDocumentSurvivesRingOverwrite(t *testing.T) {
 	ac.overlays.copyDocument = document
 	ac.overlays.copyMu.Unlock()
 
-	history.Append(testRow("after"))
+	require.NoError(t, history.Append(testRow("after")))
 	renderSnap := ac.overlays.SnapshotForRender()
 	defer renderSnap.Unlock()
 	require.NotNil(t, renderSnap.copyMode)

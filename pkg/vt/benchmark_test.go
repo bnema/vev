@@ -175,7 +175,7 @@ func benchmarkHistory(t testing.TB, rows, width, chunkRows int) *History {
 		for col := range cells {
 			cells[col] = renderer.Cell{Rune: rune('a' + (row+col)%26)}
 		}
-		history.Append(cells)
+		requireHistoryAppend(t, history, cells)
 	}
 	return history
 }
@@ -193,7 +193,7 @@ func benchmarkScreenResizeReflow(b *testing.B, historyRows int) {
 	s := NewScreenWithHistory(120, 40, HistoryConfig{MaxRows: historyRows + 500})
 	if historyRows > 0 {
 		for range historyRows {
-			s.history.Append(make([]renderer.Cell, 120))
+			requireHistoryAppend(b, s.history, make([]renderer.Cell, 120))
 		}
 	}
 	s.Write(bytes.Repeat([]byte("x"), 120*39))

@@ -25,7 +25,7 @@ func terminalPane(t *testing.T, id, stableID, cwd string, historyRows, visibleRo
 	t.Helper()
 	h := vt.NewHistory(vt.HistoryConfig{MaxRows: defaultScrollbackRows})
 	for _, row := range historyRows {
-		h.Append(row)
+		require.NoError(t, h.Append(row))
 	}
 	sealed, tail, err := vt.MarshalSealedHistory(h.SealAndView())
 	require.NoError(t, err)

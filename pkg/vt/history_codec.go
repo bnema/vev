@@ -194,10 +194,10 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 			cellCount, ok := p.uint32()
 			cellBytes, validCellBytes := historyCellByteCount(uint64(cellCount))
 			if !ok || !validCellBytes ||
-				uint64(cellCount) > uint64(len(p.data))/historyCellBytes ||
 				!addHistoryDecodeBudget(&stats.cells, uint64(cellCount), maxHistoryCells) ||
 				!addHistoryDecodeBudget(&stats.styles, uint64(cellCount), maxHistoryDecodeStyles) ||
-				!addHistoryDecodeBudget(&stats.bytes, cellBytes, maxHistoryDecodedBytes) {
+				!addHistoryDecodeBudget(&stats.bytes, cellBytes, maxHistoryDecodedBytes) ||
+				uint64(cellCount) > uint64(len(p.data))/historyCellBytes {
 				return HistoryView{}, historyDecodeStats{}, false
 			}
 

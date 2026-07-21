@@ -63,7 +63,9 @@ func benchmarkV3Session(t testing.TB) (Session, []byte) {
 		for col := range cells {
 			cells[col] = renderer.Cell{Rune: rune('a' + (row+col)%26)}
 		}
-		history.Append(cells)
+		if err := history.Append(cells); err != nil {
+			t.Fatal(err)
+		}
 	}
 	sealed, tail, err := vt.MarshalSealedHistory(history.SealAndView())
 	if err != nil {

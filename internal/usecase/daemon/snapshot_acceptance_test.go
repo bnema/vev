@@ -28,7 +28,7 @@ func TestSnapshotCaptureMarshalUnmarshalRestorePreservesTopologyAndTerminalState
 	first.nextPaneID = 3
 	first.panes["pane-1"].stableID = "pane-one"
 	secondPane := newPaneWithStableID("pane-2", "pane-two", snapshotAcceptancePTY(t), domain.Size{Cols: 40, Rows: 24})
-	secondPane.history.Append([]renderer.Cell{{Rune: 't'}, {Rune: 'w'}, {Rune: 'o'}})
+	require.NoError(t, secondPane.history.Append([]renderer.Cell{{Rune: 't'}, {Rune: 'w'}, {Rune: 'o'}}))
 	secondPane.screen.Write([]byte("two"))
 	first.panes["pane-2"] = secondPane
 	first.tree = &layout.Tree{Focus: "pane-2", Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
@@ -40,7 +40,7 @@ func TestSnapshotCaptureMarshalUnmarshalRestorePreservesTopologyAndTerminalState
 	second.stableID = "tab-two"
 	second.nextPaneID = 2
 	second.panes["pane-1"].stableID = "pane-three"
-	second.panes["pane-1"].history.Append([]renderer.Cell{{Rune: 't'}, {Rune: 'h'}, {Rune: 'r'}, {Rune: 'e'}, {Rune: 'e'}})
+	require.NoError(t, second.panes["pane-1"].history.Append([]renderer.Cell{{Rune: 't'}, {Rune: 'h'}, {Rune: 'r'}, {Rune: 'e'}, {Rune: 'e'}}))
 	second.panes["pane-1"].screen.Write([]byte("three"))
 	sess.tabs = []*tab{first, second}
 	sess.active = 1
@@ -102,14 +102,14 @@ func TestSnapshotCaptureRetainsImmutableValuesAfterTailMutationAndEviction(t *te
 	pane := sess.tabs[0].panes["pane-1"]
 	pane.screen = vt.NewScreenWithHistory(8, 3, vt.HistoryConfig{MaxRows: 2, ChunkRows: 1})
 	pane.history = pane.screen.History()
-	pane.history.Append([]renderer.Cell{{Rune: 'o'}, {Rune: 'l'}, {Rune: 'd'}})
+	require.NoError(t, pane.history.Append([]renderer.Cell{{Rune: 'o'}, {Rune: 'l'}, {Rune: 'd'}}))
 	pane.screen.Write([]byte("before"))
 
 	require.True(t, d.captureSession(sess))
 	<-entered
 	pane.mu.Lock()
-	pane.history.Append([]renderer.Cell{{Rune: 'n'}, {Rune: 'e'}, {Rune: 'w'}})
-	pane.history.Append([]renderer.Cell{{Rune: 'e'}, {Rune: 'v'}, {Rune: 'i'}, {Rune: 'c'}, {Rune: 't'}})
+	require.NoError(t, pane.history.Append([]renderer.Cell{{Rune: 'n'}, {Rune: 'e'}, {Rune: 'w'}}))
+	require.NoError(t, pane.history.Append([]renderer.Cell{{Rune: 'e'}, {Rune: 'v'}, {Rune: 'i'}, {Rune: 'c'}, {Rune: 't'}}))
 	pane.screen.Write([]byte("\rafter"))
 	pane.mu.Unlock()
 	close(release)
@@ -130,13 +130,13 @@ func TestDaemonHistoryEvictionLeavesCopyAndSearchSnapshotsUsable(t *testing.T) {
 	pane.screen = vt.NewScreenWithHistory(8, 1, vt.HistoryConfig{MaxRows: 2, ChunkRows: 1})
 	pane.history = pane.screen.History()
 	for _, text := range []string{"first", "second"} {
-		pane.history.Append(cells(text))
+		require.NoError(t, pane.history.Append(cells(text)))
 	}
 	pane.screen.Write([]byte("screen"))
 
 	document := scopy.NewSnapshot(pane.history, pane.screen.Frame)
 	for _, text := range []string{"third", "fourth"} {
-		pane.history.Append(cells(text))
+		require.NoError(t, pane.history.Append(cells(text)))
 	}
 
 	for _, tt := range []struct {

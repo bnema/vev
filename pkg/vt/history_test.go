@@ -8,6 +8,13 @@ import (
 	"github.com/bnema/vev/pkg/renderer"
 )
 
+func requireHistoryAppend(t testing.TB, history *History, row []renderer.Cell) {
+	t.Helper()
+	if err := history.Append(row); err != nil {
+		t.Fatalf("append history row: %v", err)
+	}
+}
+
 func TestHistoryOrdersSealedChunksAndEvictsAtCapacity(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -43,7 +50,7 @@ func TestHistoryOrdersSealedChunksAndEvictsAtCapacity(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			history := NewHistory(HistoryConfig{MaxRows: tt.maxRows, ChunkRows: tt.chunkRows})
 			for _, text := range tt.rows {
-				history.Append(historyRow(text))
+				requireHistoryAppend(t, history, historyRow(text))
 			}
 
 			view := history.View()
@@ -72,15 +79,15 @@ func TestHistoryTailRotationAndStableViews(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			history := NewHistory(HistoryConfig{MaxRows: 6, ChunkRows: 2})
 			first := historyRow("AAAA")
-			history.Append(first)
-			history.Append(historyRow("BBBB"))
+			requireHistoryAppend(t, history, first)
+			requireHistoryAppend(t, history, historyRow("BBBB"))
 			view := history.View()
 			if got, want := view.ChunkCount(), 1; got != want {
 				t.Fatalf("sealed chunk count = %d, want %d", got, want)
 			}
 
 			first[0].Rune = 'X'
-			history.Append(historyRow("CCCC"))
+			requireHistoryAppend(t, history, historyRow("CCCC"))
 
 			if got, want := historyViewTexts(view), []string{"AAAA", "BBBB"}; !equalStrings(got, want) {
 				t.Fatalf("stable view rows = %#v, want %#v", got, want)
@@ -102,11 +109,11 @@ func TestHistoryReusesSealedChunkIdentityAcrossViews(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			history := NewHistory(HistoryConfig{MaxRows: 8, ChunkRows: 2})
-			history.Append(historyRow("AAAA"))
-			history.Append(historyRow("BBBB"))
+			requireHistoryAppend(t, history, historyRow("AAAA"))
+			requireHistoryAppend(t, history, historyRow("BBBB"))
 			before := history.View()
 
-			history.Append(historyRow("CCCC"))
+			requireHistoryAppend(t, history, historyRow("CCCC"))
 			after := history.View()
 
 			if before.ChunkCount() == 0 || after.ChunkCount() == 0 {

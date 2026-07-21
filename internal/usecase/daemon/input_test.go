@@ -1237,7 +1237,7 @@ func TestMouseNormalScreenDragUsesPressOwnedDocumentAfterOutputEviction(t *testi
 
 	// Output evicts five lines after Press; the Document remains immutable.
 	for range 5 {
-		sess.tabs[0].focusedPane().history.Append(testRow("evicted"))
+		require.NoError(t, sess.tabs[0].focusedPane().history.Append(testRow("evicted")))
 	}
 
 	// Motion maps the next endpoint through the press-owned Document.
@@ -1764,7 +1764,7 @@ func TestActiveCopyMouseRejectsViewportChangeAfterMappingSnapshot(t *testing.T) 
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	pane := sess.activeTab().focusedPane()
 	for range 8 {
-		pane.history.Append(testRow("history"))
+		require.NoError(t, pane.history.Append(testRow("history")))
 	}
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)

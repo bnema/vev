@@ -796,7 +796,7 @@ func TestCaptureOverlayLayersResizeRecomposesPickerWithoutStalePreview(t *testin
 }
 
 func TestPickerPreviewContainsOnlyVisibleFrameRowsWithLargeScrollback(t *testing.T) {
-	withScrollback := newPickerPreviewTabWithHistoryRows(10_000)
+	withScrollback := newPickerPreviewTabWithHistoryRows(t, 10_000)
 	require.Equal(t, 10_000, withScrollback.focusedPane().screen.History().Len())
 
 	preview := snapshotPickerPreview(withScrollback)
@@ -820,11 +820,12 @@ func TestPickerPreviewContainsOnlyVisibleFrameRowsWithLargeScrollback(t *testing
 	require.NotContains(t, got, "history-only-marker")
 }
 
-func newPickerPreviewTabWithHistoryRows(historyRows int) *tab {
+func newPickerPreviewTabWithHistoryRows(t testing.TB, historyRows int) *tab {
+	t.Helper()
 	tb := newTab(nil, domain.Size{Cols: 10, Rows: 3})
 	p := tb.focusedPane()
 	for range historyRows {
-		p.screen.History().Append(testRow("history-only-marker"))
+		require.NoError(t, p.screen.History().Append(testRow("history-only-marker")))
 	}
 	p.screen.Write([]byte("NOW"))
 	return tb

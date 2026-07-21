@@ -322,7 +322,7 @@ func TestUnmarshalRejectsProcessWithoutArgv(t *testing.T) {
 func TestUnmarshalGlobalBudgetRejectionDoesNotAllocatePerPane(t *testing.T) {
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 256, ChunkRows: 256})
 	for range 256 {
-		history.Append([]renderer.Cell{{Rune: 'x'}})
+		requireNoError(t, history.Append([]renderer.Cell{{Rune: 'x'}}))
 	}
 	sealed, tail, err := vt.MarshalSealedHistory(history.SealAndView())
 	requireNoError(t, err)
@@ -385,7 +385,7 @@ func historyBlobs(t *testing.T, rows [][]renderer.Cell) ([][]byte, []byte) {
 	t.Helper()
 	h := vt.NewHistory(vt.HistoryConfig{MaxRows: 128, ChunkRows: 2})
 	for _, row := range rows {
-		h.Append(row)
+		requireNoError(t, h.Append(row))
 	}
 	sealed, tail, err := vt.MarshalSealedHistory(h.SealAndView())
 	if err != nil {

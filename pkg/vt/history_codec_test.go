@@ -57,7 +57,7 @@ func TestChunkCodecRoundTripsLosslessCellsAndStyles(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			history := NewHistory(HistoryConfig{MaxRows: 8, ChunkRows: 2})
 			for _, row := range tt.rows {
-				history.Append(row)
+				requireHistoryAppend(t, history, row)
 			}
 
 			encoded, err := MarshalHistory(history.View())
@@ -75,8 +75,8 @@ func TestChunkCodecRoundTripsLosslessCellsAndStyles(t *testing.T) {
 
 func TestChunkCodecRejectsTruncatedAndTrailingPayloads(t *testing.T) {
 	history := NewHistory(HistoryConfig{MaxRows: 4, ChunkRows: 2})
-	history.Append(historyRow("AAAA"))
-	history.Append(historyRow("BBBB"))
+	requireHistoryAppend(t, history, historyRow("AAAA"))
+	requireHistoryAppend(t, history, historyRow("BBBB"))
 	encoded, err := MarshalHistory(history.View())
 	if err != nil {
 		t.Fatalf("marshal history: %v", err)
@@ -136,11 +136,6 @@ func TestChunkCodecRejectsDimensionsBeyondSupportedLimits(t *testing.T) {
 			view: historyViewWithDimensions(supportedRows+1, 0),
 			data: historyPayloadWithDimensions(supportedRows+1, 0),
 		},
-		{
-			name: "too many aggregate cells within row budget",
-			view: historyViewWithDimensions(maxHistoryRows, maxHistoryRowCells+1),
-			data: historyPayloadWithDimensions(maxHistoryRows, maxHistoryRowCells+1),
-		},
 	}
 
 	for _, tt := range tests {
@@ -152,6 +147,19 @@ func TestChunkCodecRejectsDimensionsBeyondSupportedLimits(t *testing.T) {
 				t.Fatal("unmarshal accepted dimensions beyond the supported limits")
 			}
 		})
+	}
+}
+
+func TestChunkCodecRejectsAggregateCellDeclarationBeforePayloadAllocation(t *testing.T) {
+	data := aggregateCellLimitDeclaration()
+	if len(data) >= 1024 {
+		t.Fatalf("aggregate declaration length = %d, want compact fixture", len(data))
+	}
+	if _, err := PreflightHistoryBlob(data); err == nil {
+		t.Fatal("preflight accepted aggregate cell declaration")
+	}
+	if _, err := UnmarshalHistory(data); err == nil {
+		t.Fatal("unmarshal accepted aggregate cell declaration")
 	}
 }
 
@@ -234,6 +242,18 @@ func historyPayloadWithDimensions(rowCount, width int) []byte {
 	return data
 }
 
+// aggregateCellLimitDeclaration declares one row, which is within the row
+// budget, but its cells exceed the aggregate budget. It deliberately omits
+// cell payload bytes: the aggregate limit must reject it before allocation.
+func aggregateCellLimitDeclaration() []byte {
+	data := make([]byte, 9, 21)
+	copy(data, historyMagic)
+	data[4] = historyVersion
+	binary.BigEndian.PutUint32(data[5:], 1)
+	data = binary.BigEndian.AppendUint32(data, 1)
+	return binary.BigEndian.AppendUint32(data, uint32(maxHistoryCells+1))
+}
+
 func hostileHistoryDeclarations(chunkCount, rowCount int) []byte {
 	data := make([]byte, 9, 9+chunkCount*(4+rowCount*4))
 	copy(data, historyMagic)
@@ -269,6 +289,7 @@ func TestHistoryPreflightMatchesUnmarshalMalformedInput(t *testing.T) {
 		{name: "invalid rune", data: invalidRune},
 		{name: "invalid underline style", data: invalidUnderlineStyle},
 		{name: "aggregate row budget", data: hostileHistoryDeclarations(47, maxHistoryChunkRows)},
+		{name: "aggregate cell budget", data: aggregateCellLimitDeclaration()},
 		{name: "zero row count", data: []byte{'V', 'T', 'H', '1', historyVersion, 0, 0, 0, 1, 0, 0, 0, 0}},
 	}
 	for _, tt := range tests {
