@@ -40,6 +40,105 @@ func TestClientNoticeMapsFixedActionsAndDismissesOnlyConnectionToast(t *testing.
 	}
 }
 
+func TestHandleClientNoticeSerializesReplacement(t *testing.T) {
+	d, sess, old, _ := newNoticeFixture(t, newNoticeClock())
+
+	enteredMutation := make(chan struct{})
+	releaseMutation := make(chan struct{})
+	d.notices.beforeClientNoticeMutation = func() {
+		close(enteredMutation)
+		<-releaseMutation
+	}
+	t.Cleanup(func() {
+		select {
+		case <-releaseMutation:
+		default:
+			close(releaseMutation)
+		}
+	})
+
+	noticeDone := make(chan struct{})
+	go func() {
+		d.handleClientNotice(sess, old, ports.ClientNotice{Action: ports.ClientNoticeClipboardFallback})
+		close(noticeDone)
+	}()
+	<-enteredMutation // old has validated ownership and holds routingMu
+	if d.notices.routingMu.TryLock() {
+		d.notices.routingMu.Unlock()
+		t.Fatal("client notice mutation must retain routingMu through publication")
+	}
+
+	tr, _ := newCapturingTransport(t)
+	replaced := make(chan *attachedClient, 1)
+	go func() {
+		current, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+		replaced <- current
+	}()
+
+	// Releasing the mutation lets the already-validated notice publish before
+	// replacement can own the session. Thus no stale attachment can mutate a
+	// toast stack after sess.client changes.
+	close(releaseMutation)
+	<-noticeDone
+	current := <-replaced
+
+	history := d.notices.history()
+	require.Len(t, history, 1)
+	require.Equal(t, domain.NoticeClipboard, history[0].Code)
+	oldToasts, _ := visibleToasts(old)
+	require.Len(t, oldToasts, 1)
+	require.Equal(t, domain.NoticeClipboard, oldToasts[0].Code)
+	newToasts, _ := visibleToasts(current)
+	require.Empty(t, newToasts)
+	sess.mu.Lock()
+	require.Same(t, current, sess.client)
+	sess.mu.Unlock()
+}
+
+func TestHandleClientNoticeRejectsReplacedClient(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		setup     func(*Daemon, *attachedClient, domain.SessionID)
+		notice    ports.ClientNotice
+		wantToast domain.NoticeCode
+	}{
+		{
+			name:   "record",
+			notice: ports.ClientNotice{Action: ports.ClientNoticeClipboardFallback},
+		},
+		{
+			name: "dismiss",
+			setup: func(d *Daemon, ac *attachedClient, sid domain.SessionID) {
+				d.showToast(ac, notice(domain.NoticeConnection, "connection degraded", sid))
+			},
+			notice:    ports.ClientNotice{Action: ports.ClientNoticeLinkConnected},
+			wantToast: domain.NoticeConnection,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d, sess, old, _ := newNoticeFixture(t, newNoticeClock())
+			tr, _ := newCapturingTransport(t)
+			current, _ := d.attachClient(sess, tr, domain.Size{Cols: 80, Rows: 24}, attachClientOptions{})
+			if tt.setup != nil {
+				tt.setup(d, old, sess.id)
+			}
+
+			d.handleClientNotice(sess, old, tt.notice)
+
+			require.Empty(t, d.notices.history(), "a replaced client must not record notices")
+			oldToasts, _ := visibleToasts(old)
+			if tt.setup == nil {
+				require.Empty(t, oldToasts)
+			} else {
+				require.Len(t, oldToasts, 1)
+				require.Equal(t, tt.wantToast, oldToasts[0].Code, "a replaced client must not dismiss toasts")
+			}
+			currentToasts, _ := visibleToasts(current)
+			require.Empty(t, currentToasts)
+		})
+	}
+}
+
 func TestMalformedClientNoticeIsIgnored(t *testing.T) {
 	d, _, ac, _ := newNoticeFixture(t, &noticeClock{})
 	tr, ok := ac.tr.(*portsmocks.MockTransport)

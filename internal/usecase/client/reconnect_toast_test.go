@@ -337,15 +337,25 @@ func TestAttachAttemptOfflineLinkEventReturnsReconnectableError(t *testing.T) {
 }
 
 func TestDetachedResultReplacementAndCleanDetach(t *testing.T) {
-	if err := detachedResult(ports.ReasonDetach); err != nil {
-		t.Fatalf("clean detach = %v, want nil", err)
+	for _, tt := range []struct {
+		name     string
+		reason   uint8
+		wantText string
+	}{
+		{name: "clean detach", reason: ports.ReasonDetach},
+		{name: "replacement", reason: ports.ReasonReplaced, wantText: "session taken over by another client"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := detachedResult(tt.reason)
+			if tt.wantText == "" {
+				require.NoError(t, err)
+				return
+			}
+			var detached *DetachedError
+			require.ErrorAs(t, err, &detached)
+			require.Equal(t, tt.wantText, detached.Text)
+		})
 	}
-	err := detachedResult(ports.ReasonReplaced)
-	var detached *DetachedError
-	if !errors.As(err, &detached) {
-		t.Fatalf("replacement error = %T, want *DetachedError", err)
-	}
-	require.Equal(t, "session taken over by another client", detached.Text)
 }
 
 func TestReconnectToastBoundsUseCenterAnchor(t *testing.T) {

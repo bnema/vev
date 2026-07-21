@@ -41,6 +41,9 @@ type noticeCenter struct {
 	// beforeGlobalDelivery is a deterministic test seam after targets have been
 	// selected and before their toast stacks are touched.
 	beforeGlobalDelivery func()
+	// beforeClientNoticeMutation is a deterministic test seam after a client
+	// notice's ownership validation and before its toast state is changed.
+	beforeClientNoticeMutation func()
 }
 
 func newNoticeCenter() *noticeCenter { return &noticeCenter{} }

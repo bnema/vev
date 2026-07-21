@@ -238,21 +238,66 @@ func TestTransactionalResizeApplyReportsFailureOncePerCall(t *testing.T) {
 		require.False(t, plan.members[0].ok, "failed member is not marked ok")
 	})
 
-	t.Run("two failed members still yield one notice per call", func(t *testing.T) {
-		first := &transactionalResizePTY{errs: []error{errors.New("first fails")}}
-		second := &transactionalResizePTY{errs: []error{errors.New("second fails")}}
-		d, sess, _, _ := newManualSessionWithPTYs(t, first, second)
-		tabs := sess.tabs
-		plan := resizePlan{members: []resizeMember{
-			{session: sess, tab: tabs[0], pane: tabs[0].focusedPane(), rect: domain.Rect{Width: 100, Height: 20}, retry: true},
-			{session: sess, tab: tabs[1], pane: tabs[1].focusedPane(), rect: domain.Rect{Width: 100, Height: 20}, retry: true},
-		}}
+	for _, tt := range []struct {
+		name       string
+		firstErr   error
+		secondErr  error
+		current    func() bool
+		wantResult bool
+		wantCount  int
+	}{
+		{
+			name:       "normal completion reports one combined failure",
+			firstErr:   errors.New("first fails"),
+			secondErr:  errors.New("second fails"),
+			wantResult: true,
+			wantCount:  1,
+		},
+		{
+			name:      "stale current after failure still reports once",
+			firstErr:  errors.New("first fails"),
+			secondErr: errors.New("must not be resized"),
+			current: func() func() bool {
+				checks := 0
+				return func() bool {
+					checks++
+					return checks == 1
+				}
+			}(),
+			wantResult: false,
+			wantCount:  1,
+		},
+		{
+			name:       "normal completion without failure does not report",
+			wantResult: true,
+			wantCount:  0,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			first := &transactionalResizePTY{errs: []error{tt.firstErr}}
+			second := &transactionalResizePTY{errs: []error{tt.secondErr}}
+			d, sess, _, _ := newManualSessionWithPTYs(t, first, second)
+			tabs := sess.tabs
+			plan := resizePlan{members: []resizeMember{
+				{session: sess, tab: tabs[0], pane: tabs[0].focusedPane(), rect: domain.Rect{Width: 100, Height: 20}, retry: true},
+				{session: sess, tab: tabs[1], pane: tabs[1].focusedPane(), rect: domain.Rect{Width: 100, Height: 20}, retry: true},
+			}}
 
-		require.True(t, d.applyResize(&plan))
+			var got bool
+			if tt.current == nil {
+				got = d.applyResize(&plan)
+			} else {
+				got = d.applyResize(&plan, tt.current)
+			}
+			require.Equal(t, tt.wantResult, got)
 
-		count, _ := countResizeFailed(d)
-		require.Equal(t, 1, count, "one notice per applyResize call, not per failed member")
-	})
+			count, _ := countResizeFailed(d)
+			require.Equal(t, tt.wantCount, count, "one notice per applyResize call, including stale returns")
+			if !tt.wantResult {
+				require.Equal(t, []domain.Size(nil), second.requested(), "stale current check must stop before the next member")
+			}
+		})
+	}
 }
 
 // S3 acceptance: a failed member never publishes speculative parser/screen or

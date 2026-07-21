@@ -762,14 +762,22 @@ func (d *Daemon) resize(sess *session, ac *attachedClient, sz domain.Size) {
 }
 
 // handleClientNotice maps the closed client-event enum to daemon-owned notice
-// content. The connection loop has already bound sess and ac to this transport;
-// verify that ownership is still current before changing presentation state.
+// content. routingMu makes ownership validation and toast mutation one atomic
+// attachment-routing operation: replacement also takes routingMu before
+// publishing sess.client. Never retain sess.mu while touching notice or overlay
+// state, and retain the routingMu -> sess.mu order used by attachment paths.
 func (d *Daemon) handleClientNotice(sess *session, ac *attachedClient, notice ports.ClientNotice) {
+	d.notices.routingMu.Lock()
+	defer d.notices.routingMu.Unlock()
+
 	sess.mu.Lock()
 	current := sess.client == ac
 	sess.mu.Unlock()
 	if !current {
 		return
+	}
+	if d.notices.beforeClientNoticeMutation != nil {
+		d.notices.beforeClientNoticeMutation()
 	}
 
 	switch notice.Action {
