@@ -31,6 +31,11 @@ type Pane struct {
 	Tail         []byte   // mandatory nonempty canonical VT blob
 	Visible      []byte   // mandatory nonempty canonical VT blob
 	Process      *Process
+
+	// Objects is used only by the v1 incremental manifest codec. It must be
+	// ordered history objects, then exactly one tail and one visible object.
+	// The v3 codec deliberately ignores it to preserve its wire format.
+	Objects []ObjectRef
 }
 
 // Process captures restorable foreground process metadata.
