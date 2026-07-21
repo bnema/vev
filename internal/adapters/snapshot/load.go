@@ -46,6 +46,13 @@ func (r *Repository) List(ctx context.Context) ([]string, error) {
 			if err != nil || sessionKey(manifest.Name) != entry.Name() {
 				continue
 			}
+			killed, tombstoneErr := r.tombstoned(manifest.Name)
+			if tombstoneErr != nil {
+				return nil, fmt.Errorf("read killed session marker: %w", tombstoneErr)
+			}
+			if killed {
+				break
+			}
 			generation, err := r.loadGeneration(ctx, manifest.Name, entry.Name(), number)
 			if err == nil {
 				out = append(out, generation.Name)
@@ -62,6 +69,13 @@ func (r *Repository) Load(ctx context.Context, name string) (ports.SnapshotGener
 		return ports.SnapshotGeneration{}, err
 	}
 	key := sessionKey(name)
+	killed, err := r.tombstoned(name)
+	if err != nil {
+		return ports.SnapshotGeneration{}, fmt.Errorf("read killed session marker: %w", err)
+	}
+	if killed {
+		return ports.SnapshotGeneration{}, fmt.Errorf("snapshot session %q is killed", name)
+	}
 	lock := r.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()

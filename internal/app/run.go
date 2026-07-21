@@ -1186,6 +1186,27 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 	_ = tw.Flush()
 }
 
+// offlineSnapshotSource owns the durable source and tombstone transitions for
+// a daemon-less kill. It is intentionally local to the composition root: the
+// daemon uses the repository through its narrower ports.
+type offlineSnapshotSource interface {
+	Tombstone(context.Context, string) error
+	Delete(context.Context, string) error
+	DeleteLegacy(context.Context, string) error
+	DeleteTombstone(context.Context, string) error
+}
+
+var newOfflineSnapshotRepository = func(dir string) offlineSnapshotSource {
+	return snapshotadapter.NewRepository(dir)
+}
+
+func phaseError(phase string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("vev: %s: %w", phase, err)
+}
+
 // runKill asks the daemon to terminate a named session, every session, or the daemon.
 func runKill(ctx context.Context, name string, all, daemon bool) error {
 	transport, err := realDial(ctx, ipc.SocketDir())
@@ -1215,22 +1236,33 @@ func runKill(ctx context.Context, name string, all, daemon bool) error {
 			if openErr != nil {
 				return fmt.Errorf("vev: opening stored sessions: %w", openErr)
 			}
+			snapshots := newOfflineSnapshotRepository(snapshotDir())
+			// The durable marker is the commit point for a logical kill. Keep it and
+			// the persisted record until both independently recoverable sources have
+			// crossed their deletion durability boundaries.
+			if tombstoneErr := snapshots.Tombstone(ctx, name); tombstoneErr != nil {
+				_ = p.Close()
+				return fmt.Errorf("vev: marking session killed: %w", tombstoneErr)
+			}
+			incrementalErr := snapshots.Delete(ctx, name)
+			legacyErr := snapshots.DeleteLegacy(ctx, name)
+			if incrementalErr != nil || legacyErr != nil {
+				_ = p.Close()
+				return errors.Join(
+					phaseError("deleting incremental session snapshot", incrementalErr),
+					phaseError("deleting legacy session snapshot", legacyErr),
+				)
+			}
+			if tombstoneErr := snapshots.DeleteTombstone(ctx, name); tombstoneErr != nil {
+				_ = p.Close()
+				return fmt.Errorf("vev: clearing killed session marker: %w", tombstoneErr)
+			}
 			if deleteErr := p.Delete(name); deleteErr != nil {
 				_ = p.Close()
 				return fmt.Errorf("vev: deleting stored session: %w", deleteErr)
 			}
 			if closeErr := p.Close(); closeErr != nil {
 				return fmt.Errorf("vev: closing stored sessions: %w", closeErr)
-			}
-			snapshots := snapshotadapter.NewRepository(snapshotDir())
-			if deleteErr := snapshots.Delete(ctx, name); deleteErr != nil {
-				return fmt.Errorf("vev: deleting session snapshot: %w", deleteErr)
-			}
-			// A daemon-less delete may be the first command after upgrade, before
-			// startup has had a chance to import v3. Remove that one-way source as
-			// well so a later daemon cannot resurrect an explicitly killed session.
-			if deleteErr := snapshots.DeleteLegacy(ctx, name); deleteErr != nil {
-				return fmt.Errorf("vev: deleting legacy session snapshot: %w", deleteErr)
 			}
 			printKillSuccess(name, all, daemon)
 			return nil
