@@ -54,6 +54,12 @@ func MarshalHistoryChunk(chunk *HistoryChunk) ([]byte, error) {
 // MarshalEmptyHistoryTail returns the mandatory canonical empty tail blob.
 func MarshalEmptyHistoryTail() ([]byte, error) { return MarshalHistory(HistoryView{}) }
 
+// MarshalHistoryTail encodes the copied mutable tail of a snapshot view as one
+// canonical history blob. It does not seal or otherwise mutate live history.
+func MarshalHistoryTail(view HistorySnapshotView) ([]byte, error) {
+	return MarshalHistory(view.Tail())
+}
+
 // MarshalSealedHistory serializes a SealAndView result as oldest-first,
 // self-contained sealed blobs plus a mandatory empty canonical tail blob.
 func MarshalSealedHistory(view HistoryView) ([][]byte, []byte, error) {
@@ -86,6 +92,7 @@ func HistoryFromBlobs(config HistoryConfig, sealed [][]byte, tail []byte) (*Hist
 		}
 		h.chunks = append(h.chunks, view.chunks[0])
 		h.rows += len(view.chunks[0].rows)
+		h.cells += view.Cells()
 	}
 	view, err := UnmarshalHistory(tail)
 	if err != nil || len(view.chunks) > 1 {
@@ -94,6 +101,7 @@ func HistoryFromBlobs(config HistoryConfig, sealed [][]byte, tail []byte) (*Hist
 	if len(view.chunks) == 1 {
 		h.tail = view.chunks[0].rows
 		h.rows += len(h.tail)
+		h.cells += view.Cells()
 	}
 	h.evict()
 	return h, nil
