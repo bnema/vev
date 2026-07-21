@@ -31,9 +31,9 @@ type Repository struct {
 	// on-disk namespace.
 	storageEpochs map[string]uint64
 
-	// maintenanceMu owns continuation state for bounded maintenance. Keeping
-	// directory handles on the repository makes successive calls advance rather
-	// than repeatedly reading the first batch of a large directory.
+	// maintenanceMu owns bounded continuation metadata: seek cookies and
+	// pending directory entries. Directory descriptors are opened and closed
+	// for each maintenance call.
 	maintenanceMu       sync.Mutex
 	maintenanceCursors  map[string]*maintenanceCursor
 	maintenanceSessions map[string]*sessionMaintenance
