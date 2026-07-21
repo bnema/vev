@@ -36,8 +36,7 @@ func stylesFromRamp(t Theme, accent Accent, ramp Ramp) Styles {
 
 	inactiveTitle := secondarySurface(ramp.SurfaceInactive)
 	activeTitle := secondarySurface(ramp.SurfaceActive)
-	inactiveDescription := secondarySurface(ramp.SurfaceInactive)
-	barDescription := secondarySurface(ramp.SurfaceBar)
+	overlayDescription := overlaySecondaryText(t)
 	styles := Styles{
 		SurfaceBar:      ramp.SurfaceBar,
 		SurfaceInactive: ramp.SurfaceInactive,
@@ -54,17 +53,28 @@ func stylesFromRamp(t Theme, accent Accent, ramp Ramp) Styles {
 		TabActiveTitle:   activeTitle,
 		MRURecent:        ramp.SurfaceRecent,
 
-		PickerBase:        ramp.SurfaceBar,
+		PickerBase:        renderer.DefaultStyle(),
 		PickerSelection:   EmphasisStyle(ramp.SurfaceActive, t),
-		PickerDescription: inactiveDescription,
-		// Separators are secondary text on the picker base surface, not
+		PickerDescription: overlayDescription,
+		// Separators are secondary text on the terminal background, not
 		// non-text borders; they therefore require the normal 4.5:1 contrast.
-		PickerSeparator: barDescription,
-		PromptBase:      ramp.SurfaceBar,
+		PickerSeparator: overlayDescription,
+		PromptBase:      renderer.DefaultStyle(),
 		CopyStatus:      ramp.SurfaceBar,
 		SearchSelection: EmphasisStyle(ramp.SurfaceActive, t),
 	}
 	return withMRUStyles(withLegacyAliases(styles, t), ramp)
+}
+
+func overlaySecondaryText(t Theme) renderer.Style {
+	if !usable(t) {
+		return renderer.DefaultStyle()
+	}
+	foreground, ok := secondaryText(t.Foreground, t.Background)
+	if !ok {
+		return foregroundStyle(t.Foreground)
+	}
+	return foregroundStyle(foreground)
 }
 
 func secondarySurface(base renderer.Style) renderer.Style {
@@ -113,18 +123,12 @@ func neutralStyles(t Theme) Styles {
 	status := renderer.DefaultStyle()
 	accent := inverseStyle()
 	border := renderer.DefaultStyle()
-	inactiveDescription := status
-	barDescription := status
+	overlayDescription := renderer.DefaultStyle()
 	if usable(t) {
 		status = rgbSurface(t.Foreground, Blend(t.Background, t.Foreground, 0.12))
 		accent = rgbSurface(t.Foreground, Blend(t.Background, t.Foreground, neutralAccentBlend))
 		border = neutralBorder(t)
-		// Preserve the legacy neutral muted foreground while retaining the
-		// semantic row/bar background beneath description and separator cells.
-		inactiveDescription = status
-		inactiveDescription.ForegroundRGB = Blend(t.Foreground, t.Background, 0.45)
-		barDescription = status
-		barDescription.ForegroundRGB = Blend(t.Foreground, t.Background, 0.45)
+		overlayDescription = overlaySecondaryText(t)
 	}
 	styles := Styles{
 		SurfaceBar:      status,
@@ -142,11 +146,11 @@ func neutralStyles(t Theme) Styles {
 		TabActiveTitle:   MutedVariantStyle(accent, t),
 		MRURecent:        status,
 
-		PickerBase:        status,
+		PickerBase:        renderer.DefaultStyle(),
 		PickerSelection:   EmphasisStyle(accent, t),
-		PickerDescription: inactiveDescription,
-		PickerSeparator:   barDescription,
-		PromptBase:        status,
+		PickerDescription: overlayDescription,
+		PickerSeparator:   overlayDescription,
+		PromptBase:        renderer.DefaultStyle(),
 		CopyStatus:        accent,
 		SearchSelection:   accent,
 	}

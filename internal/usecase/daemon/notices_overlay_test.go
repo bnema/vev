@@ -11,7 +11,34 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/notices"
+	themeui "github.com/bnema/vev/internal/usecase/theme"
+	"github.com/bnema/vev/pkg/renderer"
 )
+
+func TestCaptureNoticesOverlayUsesTerminalBackgroundOutsideSelection(t *testing.T) {
+	terminal := renderer.DefaultStyle()
+	inactive := renderer.Style{HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{R: 10, G: 20, B: 30}}
+	selection := renderer.Style{HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{R: 40, G: 50, B: 60}}
+	styles := themeui.Styles{
+		PickerBase: terminal, SurfaceInactive: inactive, PickerSelection: selection,
+		PickerSelectionName: selection, PickerSelectionMuted: selection,
+		PickerDescription: terminal,
+	}
+	model := notices.New([]domain.Notification{
+		{Code: domain.NoticePaneSpawn, Message: "selected", Time: time.Unix(2, 0)},
+		{Code: domain.NoticeTabSpawn, Message: "inactive", Time: time.Unix(1, 0)},
+	}, time.Unix(3, 0))
+	state := capturedRenderState{styles: styles, layout: capturedTabLayout{area: domain.Rect{Width: 100, Height: 38}}}
+	snap := &overlayRenderSnapshot{noticesOverlayActive: true, noticesOverlayModel: model}
+
+	captureOverlayLayers(&state, snap, domain.PaletteConfig{})
+
+	inner := state.overlays.noticesOverlay.inner
+	require.True(t, inner.At(inner.Width-1, 1).Style.Equal(terminal), "inactive row keeps the terminal background")
+	require.True(t, inner.At(inner.Width-1, 2).Style.Equal(terminal), "unused interior keeps the terminal background")
+	require.True(t, inner.At(inner.Width-1, 0).Style.Equal(selection), "selected row keeps the accent background")
+}
 
 func TestNoticesOpenViaPaletteCommandShowsModalWithHistory(t *testing.T) {
 	p, release := newBlockingPTY(t)
