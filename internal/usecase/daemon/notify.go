@@ -159,6 +159,25 @@ func benignNoticeError(err error) bool {
 		errors.Is(err, ports.ErrNoClipboardImage)
 }
 
+// persistShutdownSnapshotFailure records a terminal snapshot failure that
+// cannot be toasted because daemon shutdown has already begun. It belongs to
+// notification ownership so session teardown only decides whether shutdown
+// makes the failure non-retryable.
+func (d *Daemon) persistShutdownSnapshotFailure(name string, cause error) {
+	if d.noticeStore == nil {
+		return
+	}
+	if err := d.noticeStore.Append(domain.Notification{
+		Code:     domain.NoticeSnapshotWrite,
+		Severity: domain.NoticeError,
+		Message:  "session " + name + " shut down without saving terminal state",
+		Details:  noticeDetails(cause),
+		Time:     d.clock.Now(),
+	}); err != nil {
+		d.log.Warn("persisting shutdown notice failed", "err", err, "session", name)
+	}
+}
+
 // reportError turns any error into a user-facing notice. Unclassified errors
 // become NoticeInternal: an error reaching here is never silently dropped
 // unless benignNoticeError says it is routine.

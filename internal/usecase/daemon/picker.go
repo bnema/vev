@@ -6,7 +6,6 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -93,138 +92,85 @@ func attentionSuffix(label string) string {
 	return label + " " + string(ui.AttentionGlyph)
 }
 
+func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
+	rt := ac.overlays
+	var generation uint64
+	return listInputState{
+		pending:  &rt.pickerPending,
+		esc:      &rt.pickerESC,
+		moveUp:   rt.picker.Up,
+		moveDown: rt.picker.Down,
+		lock:     rt.pickerMu.Lock,
+		unlock:   rt.pickerMu.Unlock,
+		active:   func() bool { return rt.picker != nil },
+		closeLocked: func() {
+			rt.picker = nil
+			generation = rt.pickerPreviewGeneration
+		},
+		afterClose: func() {
+			d.clearPreviewGeneration(ac, generation)
+			if sess := ac.currentSession(); sess != nil {
+				d.invalidateRender(sess, ac, true, "picker.go")
+			}
+		},
+	}
+}
+
 func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte) {
 	sess := ac.currentSession()
 	if sess == nil {
 		return
 	}
-	ac.overlays.pickerMu.Lock()
-	if ac.overlays.picker == nil {
-		ac.overlays.pickerPending = nil
-		d.stopPickerPendingTimerLocked(ac)
-		ac.overlays.pickerMu.Unlock()
+	rt := ac.overlays
+	rt.pickerMu.Lock()
+	if rt.picker == nil {
+		rt.pickerPending = nil
+		rt.pickerESC.stop()
+		rt.pickerMu.Unlock()
 		return
 	}
-	if len(ac.overlays.pickerPending) > 0 {
-		d.stopPickerPendingTimerLocked(ac)
-		combined := make([]byte, 0, len(ac.overlays.pickerPending)+len(data))
-		combined = append(combined, ac.overlays.pickerPending...)
-		combined = append(combined, data...)
-		data = combined
-		ac.overlays.pickerPending = nil
-	}
-	changed := false
-	exit := false
-	switchTarget := false
-	for i := 0; i < len(data); i++ {
-		switch data[i] {
+	result := handleListInputLocked(d.clock, data, d.pickerListInputState(ac), func(b byte) listInputResult {
+		switch b {
 		case 'x':
-			target, ok := ac.overlays.picker.Selected()
-			ac.overlays.pickerMu.Unlock()
-			if ok {
-				if err := d.killPickerTarget(target); err != nil {
-					d.reportError(sess, err)
-				}
-			}
-			d.refreshPicker(ac)
-			d.invalidateRender(sess, ac, true, "picker.go")
-			return
-		case 'j':
-			ac.overlays.picker.Down()
-			changed = true
-		case 'k':
-			ac.overlays.picker.Up()
-			changed = true
+			return listInputResult{action: b, stop: true}
 		case '\r', '\n':
-			switchTarget = true
-			exit = true
-		case 'q', 0x03, 0x1b:
-			if data[i] == 0x1b {
-				tail := data[i:]
-				consumed, ok := routePickerEscape(ac.overlays.picker, tail)
-				if ok {
-					i += consumed - 1
-					changed = true
-					continue
-				}
-				if len(tail) == 1 {
-					d.retainPickerESCLocked(ac)
-					break
-				}
-				if isPickerEscapePrefix(tail) {
-					ac.overlays.pickerPending = append(ac.overlays.pickerPending[:0], tail...)
-					break
-				}
-			}
-			exit = true
+			return listInputResult{action: b, exit: true}
+		default:
+			return listInputResult{}
 		}
-	}
+	})
 	var target picker.Target
 	var ok bool
-	if switchTarget {
-		target, ok = ac.overlays.picker.Selected()
+	if result.action == 'x' || result.action == '\r' || result.action == '\n' {
+		target, ok = rt.picker.Selected()
 	}
-	ac.overlays.pickerMu.Unlock()
+	rt.pickerMu.Unlock()
 
-	if changed {
+	if result.action == 'x' {
+		if ok {
+			if err := d.killPickerTarget(target); err != nil {
+				d.reportError(sess, err)
+			}
+		}
+		d.refreshPicker(ac)
+		d.invalidateRender(sess, ac, true, "picker.go")
+		return
+	}
+	if result.changed {
 		d.registerPreviewForSelection(ac)
 	}
-	if exit {
+	if result.exit {
 		d.closePicker(ac)
 	}
-	if switchTarget && ok {
+	if (result.action == '\r' || result.action == '\n') && ok {
 		if err := d.switchToTarget(sess, ac, target); err != nil {
 			d.reportError(sess, err)
 		}
 		return
 	}
-	if exit || changed {
+	if result.exit || result.changed {
 		d.invalidateRender(sess, ac, true, "picker.go")
 	}
-}
-
-func (d *Daemon) retainPickerESCLocked(ac *attachedClient) {
-	ac.overlays.pickerPending = append(ac.overlays.pickerPending[:0], keys.ESC)
-	ac.overlays.pickerESC.retain(d.clock, keys.ESCDelay, func(timer ports.Timer) {
-		ac.overlays.pickerMu.Lock()
-		if ac.overlays.pickerESC.timer != timer || len(ac.overlays.pickerPending) != 1 || ac.overlays.pickerPending[0] != keys.ESC || ac.overlays.picker == nil {
-			ac.overlays.pickerMu.Unlock()
-			return
-		}
-		ac.overlays.pickerPending = nil
-		ac.overlays.pickerESC.timer = nil
-		ac.overlays.pickerESC.done = nil
-		ac.overlays.picker = nil
-		generation := ac.overlays.pickerPreviewGeneration
-		ac.overlays.pickerMu.Unlock()
-
-		d.clearPreviewGeneration(ac, generation)
-		if sess := ac.currentSession(); sess != nil {
-			d.invalidateRender(sess, ac, true, "picker.go")
-		}
-	})
-}
-
-func (d *Daemon) stopPickerPendingTimerLocked(ac *attachedClient) {
-	ac.overlays.pickerESC.stop()
-}
-
-func routePickerEscape(m *picker.Model, data []byte) (int, bool) {
-	if len(data) >= 3 && (data[1] == '[' || data[1] == 'O') {
-		switch data[2] {
-		case 'A':
-			m.Up()
-			return 3, true
-		case 'B':
-			m.Down()
-			return 3, true
-		}
-	}
-	return 0, false
-}
-
-func isPickerEscapePrefix(data []byte) bool {
-	return len(data) == 2 && data[0] == 0x1b && (data[1] == '[' || data[1] == 'O')
 }
 
 func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
@@ -368,7 +314,7 @@ func (d *Daemon) closePicker(ac *attachedClient) {
 	ac.overlays.pickerMu.Lock()
 	ac.overlays.picker = nil
 	ac.overlays.pickerPending = nil
-	d.stopPickerPendingTimerLocked(ac)
+	ac.overlays.pickerESC.stop()
 	generation := ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerMu.Unlock()
 	d.clearPreviewGeneration(ac, generation)

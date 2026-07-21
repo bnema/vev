@@ -114,6 +114,39 @@ func TestNoticesLoneEscapeClosesAfterDelay(t *testing.T) {
 	awaitFrame(t, sends, ports.MsgOutput)
 }
 
+func TestNoticesSplitArrowNavigatesWithoutClosing(t *testing.T) {
+	cases := []struct {
+		name  string
+		input [][]byte
+		want  string
+	}{
+		{name: "escape then CSI down", input: [][]byte{[]byte("\x1b"), []byte("[B")}, want: "first"},
+		{name: "split CSI down", input: [][]byte{[]byte("\x1b["), []byte("B")}, want: "first"},
+		{name: "split SS3 down", input: [][]byte{[]byte("\x1bO"), []byte("B")}, want: "first"},
+		{name: "split CSI up", input: [][]byte{[]byte("j"), []byte("\x1b"), []byte("[A")}, want: "second"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			defer release()
+			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+			d.notices.record(domain.Notification{Code: domain.NoticePaneSpawn, Message: "first", Time: time.Unix(1, 0)})
+			d.notices.record(domain.Notification{Code: domain.NoticeTabSpawn, Message: "second", Time: time.Unix(2, 0)})
+
+			d.enterNotices(sess, ac)
+			awaitFrame(t, sends, ports.MsgOutput)
+			for _, input := range tc.input {
+				d.handleInput(sess, ac, input)
+			}
+
+			require.True(t, ac.overlays.noticesActive())
+			selected, ok := ac.overlays.noticesOverlay.Selected()
+			require.True(t, ok)
+			require.Equal(t, tc.want, selected.Message)
+		})
+	}
+}
+
 func TestNoticesOpenWithEmptyHistoryShowsPlaceholderWithoutPanic(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)

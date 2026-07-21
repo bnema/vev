@@ -313,7 +313,7 @@ func composeCapturedNotices(overlays capturedOverlayRenderState, frame renderer.
 	}
 	views := make([]ui.NoticeView, len(overlays.notices))
 	for i, n := range overlays.notices {
-		views[i] = ui.NoticeView{Severity: uint8(n.Severity), Title: n.Code.String(), Message: n.Message, Count: n.Count}
+		views[i] = ui.NoticeView{Severity: n.Severity, Title: n.Code.String(), Message: n.Message, Count: n.Count}
 	}
 	return ui.ComposeNotices(frame, views, overlays.noticeOverflow, noticeStylesFrom(styles))
 }

@@ -67,7 +67,7 @@ func TestComposeNotices(t *testing.T) {
 		{
 			name: "single error notice draws a bordered box top-right with title and message",
 			notices: []NoticeView{
-				{Severity: uint8(domain.NoticeError), Title: "pane-spawn", Message: "couldn't open pane", Count: 3},
+				{Severity: domain.NoticeError, Title: "pane-spawn", Message: "couldn't open pane", Count: 3},
 			},
 			check: func(t *testing.T, f renderer.Frame) {
 				found := false
@@ -94,9 +94,9 @@ func TestComposeNotices(t *testing.T) {
 		{
 			name: "three notices with overflow renders a +N more line",
 			notices: []NoticeView{
-				{Severity: uint8(domain.NoticeError), Title: "pane-spawn", Message: "one"},
-				{Severity: uint8(domain.NoticeWarn), Title: "tab-spawn", Message: "two"},
-				{Severity: uint8(domain.NoticeInfo), Title: "clipboard", Message: "three"},
+				{Severity: domain.NoticeError, Title: "pane-spawn", Message: "one"},
+				{Severity: domain.NoticeWarn, Title: "tab-spawn", Message: "two"},
+				{Severity: domain.NoticeInfo, Title: "clipboard", Message: "three"},
 			},
 			overflow: 2,
 			check: func(t *testing.T, f renderer.Frame) {
@@ -157,7 +157,7 @@ func TestComposeNoticesSeverityStylingIsDistinguishable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := renderer.NewFrame(80, 24)
-			ComposeNotices(f, []NoticeView{{Severity: uint8(tt.sev), Title: "x", Message: "y"}}, 0, styles)
+			ComposeNotices(f, []NoticeView{{Severity: tt.sev, Title: "x", Message: "y"}}, 0, styles)
 			corner := findRune(f, '┌')
 			if corner == nil {
 				t.Fatalf("no box top-left corner found:\n%s", frameText(f))
@@ -228,7 +228,7 @@ func TestComposeNoticesWidth(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := renderer.NewFrame(tt.frameWidth, 10)
-			ComposeNotices(f, []NoticeView{{Severity: uint8(domain.NoticeInfo), Title: "x", Message: "y"}}, 0, styles)
+			ComposeNotices(f, []NoticeView{{Severity: domain.NoticeInfo, Title: "x", Message: "y"}}, 0, styles)
 
 			wantRight := tt.wantX + tt.wantWidth - 1
 			rightX, rightY := findRunePos(f, '┐')
@@ -273,7 +273,7 @@ func TestComposeNoticesHandlesTinyFrames(t *testing.T) {
 	for _, size := range []domain.Size{{}, {Cols: 1, Rows: 1}, {Cols: 2, Rows: 1}, {Cols: 1, Rows: 2}, {Cols: 24, Rows: 1}} {
 		t.Run(fmt.Sprintf("%dx%d", size.Cols, size.Rows), func(t *testing.T) {
 			f := renderer.NewFrame(size.Cols, size.Rows)
-			notices := []NoticeView{{Severity: uint8(domain.NoticeError), Title: "pane-spawn", Message: "a very long message that should wrap across several lines of text"}}
+			notices := []NoticeView{{Severity: domain.NoticeError, Title: "pane-spawn", Message: "a very long message that should wrap across several lines of text"}}
 			ComposeNotices(f, notices, 5, styles)
 		})
 	}

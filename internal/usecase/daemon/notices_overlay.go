@@ -27,67 +27,164 @@ func (d *Daemon) enterNotices(sess *session, ac *attachedClient) {
 	d.invalidateRender(sess, ac, true, "notices_overlay.go")
 }
 
+// listInputState owns the common pending-ESC lifecycle for list overlays.
+// The caller holds the overlay lock while handleListInputLocked runs. The
+// timer callback takes the same lock before checking its identity, so a later
+// input chunk cannot let a stale lone-ESC close a reopened overlay.
+type listInputState struct {
+	pending     *[]byte
+	esc         *pendingByteTimer
+	moveUp      func()
+	moveDown    func()
+	lock        func()
+	unlock      func()
+	active      func() bool
+	closeLocked func()
+	afterClose  func()
+}
+
+type listInputResult struct {
+	changed bool
+	exit    bool
+	action  byte
+	stop    bool
+}
+
+func handleListInputLocked(clock ports.Clock, data []byte, state listInputState, action func(byte) listInputResult) listInputResult {
+	if len(*state.pending) > 0 {
+		state.esc.stop()
+		combined := make([]byte, 0, len(*state.pending)+len(data))
+		combined = append(combined, (*state.pending)...)
+		combined = append(combined, data...)
+		data = combined
+		*state.pending = nil
+	}
+
+	var result listInputResult
+	for i := 0; i < len(data); i++ {
+		switch data[i] {
+		case 'j':
+			state.moveDown()
+			result.changed = true
+		case 'k':
+			state.moveUp()
+			result.changed = true
+		case 'q', 0x03:
+			result.exit = true
+		case keys.ESC:
+			tail := data[i:]
+			if consumed, ok := routeListEscape(state, tail); ok {
+				i += consumed - 1
+				result.changed = true
+				continue
+			}
+			if len(tail) == 1 {
+				retainListESCLocked(clock, state)
+				break
+			}
+			if isListEscapePrefix(tail) {
+				*state.pending = append((*state.pending)[:0], tail...)
+				break
+			}
+			result.exit = true
+		default:
+			custom := action(data[i])
+			if custom.action != 0 {
+				result.action = custom.action
+			}
+			result.exit = result.exit || custom.exit
+			result.stop = custom.stop
+			if result.stop {
+				return result
+			}
+		}
+	}
+	return result
+}
+
+func routeListEscape(state listInputState, data []byte) (int, bool) {
+	if len(data) >= 3 && (data[1] == '[' || data[1] == 'O') {
+		switch data[2] {
+		case 'A':
+			state.moveUp()
+			return 3, true
+		case 'B':
+			state.moveDown()
+			return 3, true
+		}
+	}
+	return 0, false
+}
+
+func isListEscapePrefix(data []byte) bool {
+	return len(data) == 2 && data[0] == keys.ESC && (data[1] == '[' || data[1] == 'O')
+}
+
+func retainListESCLocked(clock ports.Clock, state listInputState) {
+	*state.pending = append((*state.pending)[:0], keys.ESC)
+	state.esc.retain(clock, keys.ESCDelay, func(timer ports.Timer) {
+		state.lock()
+		if state.esc.timer != timer || len(*state.pending) != 1 || (*state.pending)[0] != keys.ESC || !state.active() {
+			state.unlock()
+			return
+		}
+		*state.pending = nil
+		state.esc.timer = nil
+		state.esc.done = nil
+		state.closeLocked()
+		state.unlock()
+		state.afterClose()
+	})
+}
+
+func (d *Daemon) noticesListInputState(ac *attachedClient) listInputState {
+	rt := ac.overlays
+	return listInputState{
+		pending:  &rt.noticesPending,
+		esc:      &rt.noticesESC,
+		moveUp:   rt.noticesOverlay.Up,
+		moveDown: rt.noticesOverlay.Down,
+		lock:     rt.noticeMu.Lock,
+		unlock:   rt.noticeMu.Unlock,
+		active:   func() bool { return rt.noticesOverlay != nil },
+		closeLocked: func() {
+			rt.noticesOverlay = nil
+		},
+		afterClose: func() {
+			if sess := ac.currentSession(); sess != nil {
+				d.invalidateRender(sess, ac, true, "notices_overlay.go")
+			}
+		},
+	}
+}
+
 func (d *Daemon) handleNoticesInput(ac *attachedClient, data []byte) {
 	sess := ac.currentSession()
 	if sess == nil {
 		return
 	}
-	ac.overlays.noticeMu.Lock()
-	if ac.overlays.noticesOverlay == nil {
-		ac.overlays.noticesPending = nil
-		d.stopNoticesPendingTimerLocked(ac)
-		ac.overlays.noticeMu.Unlock()
+	rt := ac.overlays
+	rt.noticeMu.Lock()
+	if rt.noticesOverlay == nil {
+		rt.noticesPending = nil
+		rt.noticesESC.stop()
+		rt.noticeMu.Unlock()
 		return
 	}
-	if len(ac.overlays.noticesPending) > 0 {
-		d.stopNoticesPendingTimerLocked(ac)
-		combined := make([]byte, 0, len(ac.overlays.noticesPending)+len(data))
-		combined = append(combined, ac.overlays.noticesPending...)
-		combined = append(combined, data...)
-		data = combined
-		ac.overlays.noticesPending = nil
-	}
-	changed := false
-	exit := false
-	yank := false
-	var yankTarget domain.Notification
-	for i := 0; i < len(data); i++ {
-		switch data[i] {
-		case 'j':
-			ac.overlays.noticesOverlay.Down()
-			changed = true
-		case 'k':
-			ac.overlays.noticesOverlay.Up()
-			changed = true
-		case 'y':
-			if n, ok := ac.overlays.noticesOverlay.Selected(); ok {
-				yankTarget = n
-				yank = true
-			}
-		case 'q', 0x03, 0x1b:
-			if data[i] == 0x1b {
-				tail := data[i:]
-				consumed, ok := routeNoticesEscape(ac.overlays.noticesOverlay, tail)
-				if ok {
-					i += consumed - 1
-					changed = true
-					continue
-				}
-				if len(tail) == 1 {
-					d.retainNoticesESCLocked(ac)
-					break
-				}
-				if isPickerEscapePrefix(tail) {
-					ac.overlays.noticesPending = append(ac.overlays.noticesPending[:0], tail...)
-					break
-				}
-			}
-			exit = true
+	result := handleListInputLocked(d.clock, data, d.noticesListInputState(ac), func(b byte) listInputResult {
+		if b == 'y' {
+			return listInputResult{action: b}
 		}
+		return listInputResult{}
+	})
+	var yankTarget domain.Notification
+	yank := result.action == 'y'
+	if yank {
+		yankTarget, yank = rt.noticesOverlay.Selected()
 	}
-	ac.overlays.noticeMu.Unlock()
+	rt.noticeMu.Unlock()
 
-	if exit {
+	if result.exit {
 		d.closeNotices(ac)
 	}
 	if yank {
@@ -96,7 +193,7 @@ func (d *Daemon) handleNoticesInput(ac *attachedClient, data []byte) {
 		// way copy mode's own 'y' commits and exits.
 		d.yankNotice(sess, ac, yankTarget)
 	}
-	if exit || changed {
+	if result.exit || result.changed {
 		d.invalidateRender(sess, ac, true, "notices_overlay.go")
 	}
 }
@@ -153,48 +250,10 @@ func severityWord(sev domain.NoticeSeverity) string {
 	}
 }
 
-func (d *Daemon) retainNoticesESCLocked(ac *attachedClient) {
-	ac.overlays.noticesPending = append(ac.overlays.noticesPending[:0], keys.ESC)
-	ac.overlays.noticesESC.retain(d.clock, keys.ESCDelay, func(timer ports.Timer) {
-		ac.overlays.noticeMu.Lock()
-		if ac.overlays.noticesESC.timer != timer || len(ac.overlays.noticesPending) != 1 || ac.overlays.noticesPending[0] != keys.ESC || ac.overlays.noticesOverlay == nil {
-			ac.overlays.noticeMu.Unlock()
-			return
-		}
-		ac.overlays.noticesPending = nil
-		ac.overlays.noticesESC.timer = nil
-		ac.overlays.noticesESC.done = nil
-		ac.overlays.noticesOverlay = nil
-		ac.overlays.noticeMu.Unlock()
-
-		if sess := ac.currentSession(); sess != nil {
-			d.invalidateRender(sess, ac, true, "notices_overlay.go")
-		}
-	})
-}
-
-func (d *Daemon) stopNoticesPendingTimerLocked(ac *attachedClient) {
-	ac.overlays.noticesESC.stop()
-}
-
 func (d *Daemon) closeNotices(ac *attachedClient) {
 	ac.overlays.noticeMu.Lock()
 	ac.overlays.noticesOverlay = nil
 	ac.overlays.noticesPending = nil
-	d.stopNoticesPendingTimerLocked(ac)
+	ac.overlays.noticesESC.stop()
 	ac.overlays.noticeMu.Unlock()
-}
-
-func routeNoticesEscape(m *notices.Model, data []byte) (int, bool) {
-	if len(data) >= 3 && (data[1] == '[' || data[1] == 'O') {
-		switch data[2] {
-		case 'A':
-			m.Up()
-			return 3, true
-		case 'B':
-			m.Down()
-			return 3, true
-		}
-	}
-	return 0, false
 }

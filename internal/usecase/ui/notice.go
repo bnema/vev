@@ -15,11 +15,9 @@ const (
 	noticeMaxLines = 3
 )
 
-// NoticeView is a plain rendering view of one notification. Severity mirrors
-// domain.NoticeSeverity as a bare uint8 so this package never needs to depend
-// on internal/usecase/daemon for its input type.
+// NoticeView is a plain rendering view of one notification.
 type NoticeView struct {
-	Severity uint8
+	Severity domain.NoticeSeverity
 	Title    string
 	Message  string
 	Count    int
@@ -120,8 +118,8 @@ func ComposeNotices(frame renderer.Frame, notices []NoticeView, overflow int, st
 	return footprints
 }
 
-func noticeBoxStyle(styles NoticeStyles, severity uint8) renderer.Style {
-	switch domain.NoticeSeverity(severity) {
+func noticeBoxStyle(styles NoticeStyles, severity domain.NoticeSeverity) renderer.Style {
+	switch severity {
 	case domain.NoticeWarn:
 		return styles.BoxWarn
 	case domain.NoticeError:
