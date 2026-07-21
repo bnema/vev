@@ -52,3 +52,12 @@ func parseGenerationFilename(name string) (uint64, bool) {
 	generation, err := strconv.ParseUint(n, 10, 64)
 	return generation, err == nil && generationFilename(generation) == name && generation != 0
 }
+
+func parseObjectDigest(name string) (ports.SnapshotDigest, bool) {
+	var digest ports.SnapshotDigest
+	if len(name) != hex.EncodedLen(len(digest)) || strings.ToLower(name) != name {
+		return digest, false
+	}
+	_, err := hex.Decode(digest[:], []byte(name))
+	return digest, err == nil
+}

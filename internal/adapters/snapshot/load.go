@@ -62,6 +62,13 @@ func (r *Repository) Load(ctx context.Context, name string) (ports.SnapshotGener
 		return ports.SnapshotGeneration{}, err
 	}
 	key := sessionKey(name)
+	lock := r.sessionLock(key)
+	lock.Lock()
+	defer lock.Unlock()
+	return r.load(ctx, name, key)
+}
+
+func (r *Repository) load(ctx context.Context, name, key string) (ports.SnapshotGeneration, error) {
 	preferred, preferredDigest, err := r.readHead(key)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		preferred = 0
