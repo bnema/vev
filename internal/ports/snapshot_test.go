@@ -1,33 +1,50 @@
 package ports
 
-import "testing"
+import (
+	"context"
+	"crypto/sha256"
+	"testing"
+)
 
 type snapshotRepositoryContract struct{}
 
-func (snapshotRepositoryContract) Publish(SnapshotPublication) error   { return nil }
-func (snapshotRepositoryContract) Load() ([]SnapshotGeneration, error) { return nil, nil }
-func (snapshotRepositoryContract) Delete(string) error                 { return nil }
+func (snapshotRepositoryContract) Publish(context.Context, SnapshotPublication) error { return nil }
+func (snapshotRepositoryContract) List(context.Context) ([]string, error)             { return nil, nil }
+func (snapshotRepositoryContract) Load(context.Context, string) (SnapshotGeneration, error) {
+	return SnapshotGeneration{}, nil
+}
+func (snapshotRepositoryContract) Delete(context.Context, string) error { return nil }
+func (snapshotRepositoryContract) Maintain(context.Context) error       { return nil }
 
 type legacySnapshotSourceContract struct{}
 
-func (legacySnapshotSourceContract) LoadLegacySnapshots() ([]LegacySnapshot, error) { return nil, nil }
+func (legacySnapshotSourceContract) LoadLegacy(context.Context) ([]LegacySnapshot, error) {
+	return nil, nil
+}
+func (legacySnapshotSourceContract) DeleteLegacy(context.Context, string) error { return nil }
 
 func TestSnapshotRepositoryContracts(t *testing.T) {
 	var _ SnapshotRepository = snapshotRepositoryContract{}
 	var _ LegacySnapshotSource = legacySnapshotSourceContract{}
 
 	publication := SnapshotPublication{
-		Name:    "named-session",
-		Head:    []byte("head-envelope"),
-		Objects: []SnapshotObject{{Digest: SnapshotDigest{1}, Data: []byte("object-envelope")}},
+		Name:       "named-session",
+		Generation: 7,
+		Manifest:   []byte("VEVM"),
+		Objects:    []SnapshotObject{{Digest: SnapshotDigest{1}, Data: []byte("VEVO")}},
 	}
-	generation := SnapshotGeneration{Publication: publication, Manifest: []byte("manifest-envelope")}
-	if publication.Name != "named-session" || string(generation.Manifest) != "manifest-envelope" {
+	generation := SnapshotGeneration{
+		Name:       publication.Name,
+		Generation: publication.Generation,
+		Manifest:   publication.Manifest,
+		Objects:    map[SnapshotDigest][]byte{publication.Objects[0].Digest: publication.Objects[0].Data},
+		Fallback:   true,
+	}
+	if publication.Name != "named-session" || generation.Generation != 7 || !generation.Fallback {
 		t.Fatalf("snapshot publication/generation = %#v", generation)
 	}
-	legacy := LegacySnapshot{Name: "old", Data: []byte("v3")}
-	if legacy.Name != "old" || string(legacy.Data) != "v3" {
-		t.Fatalf("legacy snapshot = %#v", legacy)
+	if len(SnapshotDigest{}) != sha256.Size {
+		t.Fatalf("SnapshotDigest has length %d, want %d", len(SnapshotDigest{}), sha256.Size)
 	}
 }
 
@@ -39,12 +56,4 @@ func (snapshotStoreContract) Delete(name string) error             { return nil 
 
 func TestSnapshotStoreContract(t *testing.T) {
 	var _ SnapshotStore = snapshotStoreContract{}
-
-	blob := SnapshotBlob{Name: "named-session", Data: []byte("snapshot-bytes")}
-	if blob.Name != "named-session" {
-		t.Fatalf("SnapshotBlob.Name = %q, want %q", blob.Name, "named-session")
-	}
-	if string(blob.Data) != "snapshot-bytes" {
-		t.Fatalf("SnapshotBlob.Data = %q, want %q", string(blob.Data), "snapshot-bytes")
-	}
 }

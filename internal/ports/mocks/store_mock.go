@@ -5,6 +5,8 @@
 package portsmocks
 
 import (
+	"context"
+
 	"github.com/bnema/vev/internal/ports"
 	mock "github.com/stretchr/testify/mock"
 )
@@ -552,16 +554,16 @@ func (_m *MockSnapshotRepository) EXPECT() *MockSnapshotRepository_Expecter {
 }
 
 // Delete provides a mock function for the type MockSnapshotRepository
-func (_mock *MockSnapshotRepository) Delete(name string) error {
-	ret := _mock.Called(name)
+func (_mock *MockSnapshotRepository) Delete(context1 context.Context, s string) error {
+	ret := _mock.Called(context1, s)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Delete")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(string) error); ok {
-		r0 = returnFunc(name)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = returnFunc(context1, s)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -574,19 +576,25 @@ type MockSnapshotRepository_Delete_Call struct {
 }
 
 // Delete is a helper method to define mock.On call
-//   - name string
-func (_e *MockSnapshotRepository_Expecter) Delete(name any) *MockSnapshotRepository_Delete_Call {
-	return &MockSnapshotRepository_Delete_Call{Call: _e.mock.On("Delete", name)}
+//   - context1 context.Context
+//   - s string
+func (_e *MockSnapshotRepository_Expecter) Delete(context1 any, s any) *MockSnapshotRepository_Delete_Call {
+	return &MockSnapshotRepository_Delete_Call{Call: _e.mock.On("Delete", context1, s)}
 }
 
-func (_c *MockSnapshotRepository_Delete_Call) Run(run func(name string)) *MockSnapshotRepository_Delete_Call {
+func (_c *MockSnapshotRepository_Delete_Call) Run(run func(context1 context.Context, s string)) *MockSnapshotRepository_Delete_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 string
+		var arg0 context.Context
 		if args[0] != nil {
-			arg0 = args[0].(string)
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
 		}
 		run(
 			arg0,
+			arg1,
 		)
 	})
 	return _c
@@ -597,33 +605,93 @@ func (_c *MockSnapshotRepository_Delete_Call) Return(err error) *MockSnapshotRep
 	return _c
 }
 
-func (_c *MockSnapshotRepository_Delete_Call) RunAndReturn(run func(name string) error) *MockSnapshotRepository_Delete_Call {
+func (_c *MockSnapshotRepository_Delete_Call) RunAndReturn(run func(context1 context.Context, s string) error) *MockSnapshotRepository_Delete_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// List provides a mock function for the type MockSnapshotRepository
+func (_mock *MockSnapshotRepository) List(context1 context.Context) ([]string, error) {
+	ret := _mock.Called(context1)
+
+	if len(ret) == 0 {
+		panic("no return value specified for List")
+	}
+
+	var r0 []string
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) ([]string, error)); ok {
+		return returnFunc(context1)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context) []string); ok {
+		r0 = returnFunc(context1)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]string)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = returnFunc(context1)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockSnapshotRepository_List_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'List'
+type MockSnapshotRepository_List_Call struct {
+	*mock.Call
+}
+
+// List is a helper method to define mock.On call
+//   - context1 context.Context
+func (_e *MockSnapshotRepository_Expecter) List(context1 any) *MockSnapshotRepository_List_Call {
+	return &MockSnapshotRepository_List_Call{Call: _e.mock.On("List", context1)}
+}
+
+func (_c *MockSnapshotRepository_List_Call) Run(run func(context1 context.Context)) *MockSnapshotRepository_List_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockSnapshotRepository_List_Call) Return(strings []string, err error) *MockSnapshotRepository_List_Call {
+	_c.Call.Return(strings, err)
+	return _c
+}
+
+func (_c *MockSnapshotRepository_List_Call) RunAndReturn(run func(context1 context.Context) ([]string, error)) *MockSnapshotRepository_List_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
 // Load provides a mock function for the type MockSnapshotRepository
-func (_mock *MockSnapshotRepository) Load() ([]ports.SnapshotGeneration, error) {
-	ret := _mock.Called()
+func (_mock *MockSnapshotRepository) Load(context1 context.Context, s string) (ports.SnapshotGeneration, error) {
+	ret := _mock.Called(context1, s)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Load")
 	}
 
-	var r0 []ports.SnapshotGeneration
+	var r0 ports.SnapshotGeneration
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func() ([]ports.SnapshotGeneration, error)); ok {
-		return returnFunc()
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (ports.SnapshotGeneration, error)); ok {
+		return returnFunc(context1, s)
 	}
-	if returnFunc, ok := ret.Get(0).(func() []ports.SnapshotGeneration); ok {
-		r0 = returnFunc()
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) ports.SnapshotGeneration); ok {
+		r0 = returnFunc(context1, s)
 	} else {
-		if ret.Get(0) != nil {
-			r0 = ret.Get(0).([]ports.SnapshotGeneration)
-		}
+		r0 = ret.Get(0).(ports.SnapshotGeneration)
 	}
-	if returnFunc, ok := ret.Get(1).(func() error); ok {
-		r1 = returnFunc()
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = returnFunc(context1, s)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -636,38 +704,102 @@ type MockSnapshotRepository_Load_Call struct {
 }
 
 // Load is a helper method to define mock.On call
-func (_e *MockSnapshotRepository_Expecter) Load() *MockSnapshotRepository_Load_Call {
-	return &MockSnapshotRepository_Load_Call{Call: _e.mock.On("Load")}
+//   - context1 context.Context
+//   - s string
+func (_e *MockSnapshotRepository_Expecter) Load(context1 any, s any) *MockSnapshotRepository_Load_Call {
+	return &MockSnapshotRepository_Load_Call{Call: _e.mock.On("Load", context1, s)}
 }
 
-func (_c *MockSnapshotRepository_Load_Call) Run(run func()) *MockSnapshotRepository_Load_Call {
+func (_c *MockSnapshotRepository_Load_Call) Run(run func(context1 context.Context, s string)) *MockSnapshotRepository_Load_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run()
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
 	})
 	return _c
 }
 
-func (_c *MockSnapshotRepository_Load_Call) Return(snapshotGenerations []ports.SnapshotGeneration, err error) *MockSnapshotRepository_Load_Call {
-	_c.Call.Return(snapshotGenerations, err)
+func (_c *MockSnapshotRepository_Load_Call) Return(snapshotGeneration ports.SnapshotGeneration, err error) *MockSnapshotRepository_Load_Call {
+	_c.Call.Return(snapshotGeneration, err)
 	return _c
 }
 
-func (_c *MockSnapshotRepository_Load_Call) RunAndReturn(run func() ([]ports.SnapshotGeneration, error)) *MockSnapshotRepository_Load_Call {
+func (_c *MockSnapshotRepository_Load_Call) RunAndReturn(run func(context1 context.Context, s string) (ports.SnapshotGeneration, error)) *MockSnapshotRepository_Load_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// Maintain provides a mock function for the type MockSnapshotRepository
+func (_mock *MockSnapshotRepository) Maintain(context1 context.Context) error {
+	ret := _mock.Called(context1)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Maintain")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) error); ok {
+		r0 = returnFunc(context1)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockSnapshotRepository_Maintain_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Maintain'
+type MockSnapshotRepository_Maintain_Call struct {
+	*mock.Call
+}
+
+// Maintain is a helper method to define mock.On call
+//   - context1 context.Context
+func (_e *MockSnapshotRepository_Expecter) Maintain(context1 any) *MockSnapshotRepository_Maintain_Call {
+	return &MockSnapshotRepository_Maintain_Call{Call: _e.mock.On("Maintain", context1)}
+}
+
+func (_c *MockSnapshotRepository_Maintain_Call) Run(run func(context1 context.Context)) *MockSnapshotRepository_Maintain_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockSnapshotRepository_Maintain_Call) Return(err error) *MockSnapshotRepository_Maintain_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockSnapshotRepository_Maintain_Call) RunAndReturn(run func(context1 context.Context) error) *MockSnapshotRepository_Maintain_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
 // Publish provides a mock function for the type MockSnapshotRepository
-func (_mock *MockSnapshotRepository) Publish(snapshotPublication ports.SnapshotPublication) error {
-	ret := _mock.Called(snapshotPublication)
+func (_mock *MockSnapshotRepository) Publish(context1 context.Context, snapshotPublication ports.SnapshotPublication) error {
+	ret := _mock.Called(context1, snapshotPublication)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Publish")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(ports.SnapshotPublication) error); ok {
-		r0 = returnFunc(snapshotPublication)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.SnapshotPublication) error); ok {
+		r0 = returnFunc(context1, snapshotPublication)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -680,19 +812,25 @@ type MockSnapshotRepository_Publish_Call struct {
 }
 
 // Publish is a helper method to define mock.On call
+//   - context1 context.Context
 //   - snapshotPublication ports.SnapshotPublication
-func (_e *MockSnapshotRepository_Expecter) Publish(snapshotPublication any) *MockSnapshotRepository_Publish_Call {
-	return &MockSnapshotRepository_Publish_Call{Call: _e.mock.On("Publish", snapshotPublication)}
+func (_e *MockSnapshotRepository_Expecter) Publish(context1 any, snapshotPublication any) *MockSnapshotRepository_Publish_Call {
+	return &MockSnapshotRepository_Publish_Call{Call: _e.mock.On("Publish", context1, snapshotPublication)}
 }
 
-func (_c *MockSnapshotRepository_Publish_Call) Run(run func(snapshotPublication ports.SnapshotPublication)) *MockSnapshotRepository_Publish_Call {
+func (_c *MockSnapshotRepository_Publish_Call) Run(run func(context1 context.Context, snapshotPublication ports.SnapshotPublication)) *MockSnapshotRepository_Publish_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 ports.SnapshotPublication
+		var arg0 context.Context
 		if args[0] != nil {
-			arg0 = args[0].(ports.SnapshotPublication)
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 ports.SnapshotPublication
+		if args[1] != nil {
+			arg1 = args[1].(ports.SnapshotPublication)
 		}
 		run(
 			arg0,
+			arg1,
 		)
 	})
 	return _c
@@ -703,7 +841,7 @@ func (_c *MockSnapshotRepository_Publish_Call) Return(err error) *MockSnapshotRe
 	return _c
 }
 
-func (_c *MockSnapshotRepository_Publish_Call) RunAndReturn(run func(snapshotPublication ports.SnapshotPublication) error) *MockSnapshotRepository_Publish_Call {
+func (_c *MockSnapshotRepository_Publish_Call) RunAndReturn(run func(context1 context.Context, snapshotPublication ports.SnapshotPublication) error) *MockSnapshotRepository_Publish_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -735,57 +873,121 @@ func (_m *MockLegacySnapshotSource) EXPECT() *MockLegacySnapshotSource_Expecter 
 	return &MockLegacySnapshotSource_Expecter{mock: &_m.Mock}
 }
 
-// LoadLegacySnapshots provides a mock function for the type MockLegacySnapshotSource
-func (_mock *MockLegacySnapshotSource) LoadLegacySnapshots() ([]ports.LegacySnapshot, error) {
-	ret := _mock.Called()
+// DeleteLegacy provides a mock function for the type MockLegacySnapshotSource
+func (_mock *MockLegacySnapshotSource) DeleteLegacy(context1 context.Context, s string) error {
+	ret := _mock.Called(context1, s)
 
 	if len(ret) == 0 {
-		panic("no return value specified for LoadLegacySnapshots")
+		panic("no return value specified for DeleteLegacy")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = returnFunc(context1, s)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockLegacySnapshotSource_DeleteLegacy_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteLegacy'
+type MockLegacySnapshotSource_DeleteLegacy_Call struct {
+	*mock.Call
+}
+
+// DeleteLegacy is a helper method to define mock.On call
+//   - context1 context.Context
+//   - s string
+func (_e *MockLegacySnapshotSource_Expecter) DeleteLegacy(context1 any, s any) *MockLegacySnapshotSource_DeleteLegacy_Call {
+	return &MockLegacySnapshotSource_DeleteLegacy_Call{Call: _e.mock.On("DeleteLegacy", context1, s)}
+}
+
+func (_c *MockLegacySnapshotSource_DeleteLegacy_Call) Run(run func(context1 context.Context, s string)) *MockLegacySnapshotSource_DeleteLegacy_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockLegacySnapshotSource_DeleteLegacy_Call) Return(err error) *MockLegacySnapshotSource_DeleteLegacy_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockLegacySnapshotSource_DeleteLegacy_Call) RunAndReturn(run func(context1 context.Context, s string) error) *MockLegacySnapshotSource_DeleteLegacy_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// LoadLegacy provides a mock function for the type MockLegacySnapshotSource
+func (_mock *MockLegacySnapshotSource) LoadLegacy(context1 context.Context) ([]ports.LegacySnapshot, error) {
+	ret := _mock.Called(context1)
+
+	if len(ret) == 0 {
+		panic("no return value specified for LoadLegacy")
 	}
 
 	var r0 []ports.LegacySnapshot
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func() ([]ports.LegacySnapshot, error)); ok {
-		return returnFunc()
+	if returnFunc, ok := ret.Get(0).(func(context.Context) ([]ports.LegacySnapshot, error)); ok {
+		return returnFunc(context1)
 	}
-	if returnFunc, ok := ret.Get(0).(func() []ports.LegacySnapshot); ok {
-		r0 = returnFunc()
+	if returnFunc, ok := ret.Get(0).(func(context.Context) []ports.LegacySnapshot); ok {
+		r0 = returnFunc(context1)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).([]ports.LegacySnapshot)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func() error); ok {
-		r1 = returnFunc()
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = returnFunc(context1)
 	} else {
 		r1 = ret.Error(1)
 	}
 	return r0, r1
 }
 
-// MockLegacySnapshotSource_LoadLegacySnapshots_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'LoadLegacySnapshots'
-type MockLegacySnapshotSource_LoadLegacySnapshots_Call struct {
+// MockLegacySnapshotSource_LoadLegacy_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'LoadLegacy'
+type MockLegacySnapshotSource_LoadLegacy_Call struct {
 	*mock.Call
 }
 
-// LoadLegacySnapshots is a helper method to define mock.On call
-func (_e *MockLegacySnapshotSource_Expecter) LoadLegacySnapshots() *MockLegacySnapshotSource_LoadLegacySnapshots_Call {
-	return &MockLegacySnapshotSource_LoadLegacySnapshots_Call{Call: _e.mock.On("LoadLegacySnapshots")}
+// LoadLegacy is a helper method to define mock.On call
+//   - context1 context.Context
+func (_e *MockLegacySnapshotSource_Expecter) LoadLegacy(context1 any) *MockLegacySnapshotSource_LoadLegacy_Call {
+	return &MockLegacySnapshotSource_LoadLegacy_Call{Call: _e.mock.On("LoadLegacy", context1)}
 }
 
-func (_c *MockLegacySnapshotSource_LoadLegacySnapshots_Call) Run(run func()) *MockLegacySnapshotSource_LoadLegacySnapshots_Call {
+func (_c *MockLegacySnapshotSource_LoadLegacy_Call) Run(run func(context1 context.Context)) *MockLegacySnapshotSource_LoadLegacy_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run()
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
 	})
 	return _c
 }
 
-func (_c *MockLegacySnapshotSource_LoadLegacySnapshots_Call) Return(legacySnapshots []ports.LegacySnapshot, err error) *MockLegacySnapshotSource_LoadLegacySnapshots_Call {
+func (_c *MockLegacySnapshotSource_LoadLegacy_Call) Return(legacySnapshots []ports.LegacySnapshot, err error) *MockLegacySnapshotSource_LoadLegacy_Call {
 	_c.Call.Return(legacySnapshots, err)
 	return _c
 }
 
-func (_c *MockLegacySnapshotSource_LoadLegacySnapshots_Call) RunAndReturn(run func() ([]ports.LegacySnapshot, error)) *MockLegacySnapshotSource_LoadLegacySnapshots_Call {
+func (_c *MockLegacySnapshotSource_LoadLegacy_Call) RunAndReturn(run func(context1 context.Context) ([]ports.LegacySnapshot, error)) *MockLegacySnapshotSource_LoadLegacy_Call {
 	_c.Call.Return(run)
 	return _c
 }

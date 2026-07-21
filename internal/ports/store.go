@@ -1,5 +1,10 @@
 package ports
 
+import (
+	"context"
+	"crypto/sha256"
+)
+
 // Store is a small byte-key/value persistence port.
 //
 // Implementations may buffer writes; Sync is the durability barrier.
@@ -30,40 +35,42 @@ type SnapshotStore interface {
 	Delete(name string) error
 }
 
-// SnapshotDigest is the SHA-256 content address of a complete snapshot object
-// or manifest envelope. The fixed-width value cannot be mutated by a caller.
-type SnapshotDigest [32]byte
+// SnapshotDigest is the SHA-256 content address of a complete snapshot object.
+type SnapshotDigest [sha256.Size]byte
 
-// SnapshotObject is one complete, typed VEVO envelope and its content address.
-// Data is caller-owned: repository implementations must not retain it after
-// Publish returns, and Load returns a fresh copy that callers may mutate.
 type SnapshotObject struct {
 	Digest SnapshotDigest
 	Data   []byte
 }
 
-// SnapshotPublication is the atomic data submitted for a named generation.
-// Head and every object Data slice are caller-owned.
+// SnapshotPublication atomically publishes a complete VEVM manifest and any
+// newly reachable content-addressed VEVO objects for one named generation.
 type SnapshotPublication struct {
-	Name    string
-	Head    []byte
-	Objects []SnapshotObject
+	Name       string
+	Generation uint64
+	Manifest   []byte
+	Objects    []SnapshotObject
 }
 
-// SnapshotGeneration is a published head together with its manifest and all
-// reachable objects. Every byte slice is caller-owned by the recipient.
+// SnapshotGeneration is the caller-owned material needed to restore one
+// named generation. Fallback indicates that the repository selected an older
+// valid generation after the requested/current generation was unavailable.
 type SnapshotGeneration struct {
-	Publication SnapshotPublication
-	Manifest    []byte
+	Name       string
+	Generation uint64
+	Manifest   []byte
+	Objects    map[SnapshotDigest][]byte
+	Fallback   bool
 }
 
 // SnapshotRepository persists content-addressed incremental snapshot
-// generations. Load returns caller-owned copies, so callers may retain or
-// mutate all returned bytes without affecting the repository.
+// generations. All returned bytes are owned by the caller.
 type SnapshotRepository interface {
-	Publish(SnapshotPublication) error
-	Load() ([]SnapshotGeneration, error)
-	Delete(name string) error
+	Publish(context.Context, SnapshotPublication) error
+	List(context.Context) ([]string, error)
+	Load(context.Context, string) (SnapshotGeneration, error)
+	Delete(context.Context, string) error
+	Maintain(context.Context) error
 }
 
 // LegacySnapshot is the pre-incremental named-session blob retained only for
@@ -73,8 +80,9 @@ type LegacySnapshot struct {
 	Data []byte
 }
 
-// LegacySnapshotSource exposes v3 snapshot blobs without coupling the new
-// repository to the legacy SnapshotStore lifecycle.
+// LegacySnapshotSource exposes the v3 bridge separately from the new write
+// contract.
 type LegacySnapshotSource interface {
-	LoadLegacySnapshots() ([]LegacySnapshot, error)
+	LoadLegacy(context.Context) ([]LegacySnapshot, error)
+	DeleteLegacy(context.Context, string) error
 }
