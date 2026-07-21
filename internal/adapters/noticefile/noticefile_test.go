@@ -127,9 +127,10 @@ func TestStoreClaimSkipsOversizedLines(t *testing.T) {
 		require.NoError(t, err)
 		return string(data)
 	}
-	const jsonMessagePrefix = `{"Code":0,"Severity":0,"Message":"`
-	const jsonMessageSuffix = `","Details":"","Time":"0001-01-01T00:00:00Z","Count":0,"SessionID":""}`
-	boundaryMessage := strings.Repeat("x", maxNoticeRecordSize-len(jsonMessagePrefix)-len(jsonMessageSuffix))
+	// Derive JSON overhead from the encoder rather than duplicating its current
+	// field layout here. The boundary payload uses ASCII so each added message
+	// byte remains one marshaled byte.
+	boundaryMessage := strings.Repeat("x", maxNoticeRecordSize-len(validLine("")))
 
 	for _, tt := range []struct {
 		name  string

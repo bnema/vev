@@ -73,9 +73,16 @@ func handleListInputLocked(clock ports.Clock, data []byte, state listInputState,
 			result.exit = true
 		case keys.ESC:
 			tail := data[i:]
-			if consumed, ok := routeListEscape(state, tail); ok {
+			if consumed, move := routeListEscape(tail); consumed > 0 {
+				switch move {
+				case 'A':
+					state.moveUp()
+					result.changed = true
+				case 'B':
+					state.moveDown()
+					result.changed = true
+				}
 				i += consumed - 1
-				result.changed = true
 				continue
 			}
 			if len(tail) == 1 {
@@ -103,22 +110,28 @@ func handleListInputLocked(clock ports.Clock, data []byte, state listInputState,
 	return result
 }
 
-func routeListEscape(state listInputState, data []byte) (int, bool) {
-	if len(data) >= 3 && (data[1] == '[' || data[1] == 'O') {
-		switch data[2] {
-		case 'A':
-			state.moveUp()
-			return 3, true
-		case 'B':
-			state.moveDown()
-			return 3, true
-		}
+// routeListEscape consumes one complete CSI or SS3 sequence. It returns its
+// byte length and the simple arrow final when it is an Up/Down sequence. Other
+// complete terminal sequences are deliberately ignored so their bytes cannot
+// trigger list actions or close the overlay.
+func routeListEscape(data []byte) (consumed int, move byte) {
+	if len(data) < 2 || data[0] != keys.ESC || (data[1] != '[' && data[1] != 'O') {
+		return 0, 0
 	}
-	return 0, false
+	for i := 2; i < len(data); i++ {
+		if data[i] < 0x40 || data[i] > 0x7e {
+			continue
+		}
+		if i == 2 && (data[i] == 'A' || data[i] == 'B') {
+			return i + 1, data[i]
+		}
+		return i + 1, 0
+	}
+	return 0, 0
 }
 
 func isListEscapePrefix(data []byte) bool {
-	return len(data) == 2 && data[0] == keys.ESC && (data[1] == '[' || data[1] == 'O')
+	return len(data) >= 2 && data[0] == keys.ESC && (data[1] == '[' || data[1] == 'O')
 }
 
 func retainListESCLocked(clock ports.Clock, state listInputState) {

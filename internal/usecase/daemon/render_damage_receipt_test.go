@@ -176,6 +176,31 @@ func TestPrepareFailureNotifiesAndSchedulesRecovery(t *testing.T) {
 	require.Contains(t, clock.durations(), urgentRenderDeadline, "notice/recovery invalidation must arm the coordinator")
 }
 
+func TestPrepareFailureFallbackOnlySuppressesRecursiveNoticePaint(t *testing.T) {
+	d, sess, ac, sends := newNoticeFixture(t, newNoticeClock())
+
+	// A failure while reportError is repainting its own toast is intentionally
+	// ignored. It must not start another notification/repaint cycle.
+	ac.prepareFailureFallback.Store(true)
+	state, composed := captureComposeForReceiptTest(t, sess, ac)
+	composed.frame = renderer.Frame{Width: 1}
+	require.True(t, d.emitFrame(sess, ac, state, composed))
+	require.Empty(t, d.notices.history())
+	ac.prepareFailureFallback.Store(false)
+
+	// Later outer failures each notify and repaint after sendMu has been
+	// released; neither may be hidden by the prior recursive guard.
+	for want := 1; want <= 2; want++ {
+		state, composed = captureComposeForReceiptTest(t, sess, ac)
+		composed.frame = renderer.Frame{Width: 1}
+		require.True(t, d.emitFrame(sess, ac, state, composed))
+		require.Len(t, d.notices.history(), want)
+		frame := <-sends
+		require.Equal(t, ports.MsgOutput, frame.Type, "outer failure %d must repaint its notice", want)
+		require.False(t, ac.prepareFailureFallback.Load())
+	}
+}
+
 func TestRenderDamageReceiptStaleGenerationForcesFullRedraw(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
 	d.paint(sess, ac, true, nil)

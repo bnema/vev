@@ -107,8 +107,10 @@ func (d *Daemon) restoreSnapshots(ctx context.Context) {
 		}
 		if err := d.restoreSession(ctx, snap); err != nil {
 			d.log.Warn("restoring session snapshot failed", "err", err, "session", snap.Name)
-			d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotRestore,
-				"couldn't restore session "+snap.Name+" after restart", err)
+			if ctx.Err() == nil {
+				d.NotifyGlobal(domain.NoticeError, domain.NoticeSnapshotRestore,
+					"couldn't restore session "+snap.Name+" after restart", err)
+			}
 		}
 	}
 }

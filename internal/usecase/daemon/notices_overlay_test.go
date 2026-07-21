@@ -185,6 +185,43 @@ func TestHandleListInputConsumesSplitEscapePrefix(t *testing.T) {
 	}
 }
 
+func TestHandleListInputConsumesUnsupportedCompleteEscapeSequences(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		input [][]byte
+	}{
+		{name: "complete CSI right", input: [][]byte{[]byte("\x1b[C")}},
+		{name: "complete SS3 left", input: [][]byte{[]byte("\x1bOD")}},
+		{name: "parameterized CSI", input: [][]byte{[]byte("\x1b[1;5C")}},
+		{name: "split CSI right", input: [][]byte{[]byte("\x1b["), []byte("C")}},
+		{name: "split SS3 left", input: [][]byte{[]byte("\x1bO"), []byte("D")}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var pending, custom []byte
+			state := listInputState{
+				pending:  &pending,
+				esc:      &pendingByteTimer{},
+				moveUp:   func() {},
+				moveDown: func() {},
+			}
+			action := func(b byte) listInputResult {
+				custom = append(custom, b)
+				return listInputResult{action: b}
+			}
+
+			var result listInputResult
+			for _, input := range tt.input {
+				result = handleListInputLocked(nil, input, state, action)
+			}
+
+			require.False(t, result.exit)
+			require.Zero(t, result.action)
+			require.Empty(t, custom, "complete escape bytes must not reach the custom action")
+			require.Empty(t, pending)
+		})
+	}
+}
+
 func TestNoticesOpenWithEmptyHistoryShowsPlaceholderWithoutPanic(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)

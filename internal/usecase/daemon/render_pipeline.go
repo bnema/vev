@@ -428,15 +428,16 @@ func (d *Daemon) emitFrame(sess *session, ac *attachedClient, state *capturedRen
 		ac.sess.mu.Unlock()
 		ac.sendMu.Unlock()
 		d.log.Error("render draw failed", "err", err, "session", sess.name)
-		// Without a coordinator invalidateRender paints synchronously. Suppress
-		// the nested failed paint caused by reportError's notice repaint; the
-		// outer failure still records the notice and attempts recovery once.
-		fallback := sess.renderCoordinator() == nil
-		if fallback && !ac.prepareFailureFallback.CompareAndSwap(false, true) {
+		// Without a coordinator reportError repaints synchronously. Suppress only
+		// that nested notice repaint; leave the guard before returning so a later,
+		// independent failed transaction can still notify the user.
+		if sess.renderCoordinator() == nil {
+			if !ac.prepareFailureFallback.CompareAndSwap(false, true) {
+				return true
+			}
+			d.reportError(sess, domain.UserErr(domain.NoticeInternal, "display update failed", err))
+			ac.prepareFailureFallback.Store(false)
 			return true
-		}
-		if fallback {
-			defer ac.prepareFailureFallback.Store(false)
 		}
 		d.reportError(sess, domain.UserErr(domain.NoticeInternal, "display update failed", err))
 		d.invalidateRender(sess, ac, true, "render_pipeline.go:prepare-failed")

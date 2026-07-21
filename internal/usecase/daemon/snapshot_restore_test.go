@@ -551,6 +551,31 @@ func TestRestoreSnapshotsNotifiesGlobalOnUnrestorableSnapshots(t *testing.T) {
 	require.Empty(t, d.notices.drainPending(), "firstPaint must consume the queue")
 }
 
+func TestRestoreSnapshotsDoesNotNotifyForCancelledRestore(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	factory := &restorePTYFactory{onOpen: cancel}
+	store := &restoreSnapshotStore{blobs: []ports.SnapshotBlob{{Name: "cancelled", Data: mustSnapshotBytes(t, snapcodec.Session{
+		Name: "cancelled",
+		Tabs: []snapcodec.Tab{{
+			Cols: 80, Rows: 24,
+			Tree: &layout.Tree{Focus: "one", Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
+				layout.NewLeaf("one"), layout.NewLeaf("two"),
+			}}},
+			Panes: []snapcodec.Pane{
+				emptyTerminalPane(t, "one", "/one"),
+				emptyTerminalPane(t, "two", "/two"),
+			},
+		}},
+	})}}}
+	d := newTestDaemon(t, factory, stubClock{})
+	WithSnapshotStore(store)(d)
+
+	d.restoreSnapshots(ctx)
+
+	require.Len(t, factory.snapshotOpens(), 1, "cancellation stops restore before the next pane")
+	require.Empty(t, d.notices.history(), "shutdown cancellation is not a user-visible restore failure")
+}
+
 func TestRestoreSnapshotsNotifiesGlobalOnResumeCommandWriteFailure(t *testing.T) {
 	proc := &snapcodec.Process{Argv: []string{"pi"}, Strategy: processStrategyPi, Opts: snapcodec.ProcessOpts{AgentSessionID: "abc123"}}
 	store := processRestoreTestStore(t, "agent-session", proc)
@@ -694,6 +719,7 @@ type restorePTYFactory struct {
 	mu       sync.Mutex
 	opens    []restorePTYOpen
 	writeErr error
+	onOpen   func()
 }
 
 type restorePTYOpen struct {
@@ -707,10 +733,14 @@ type restorePTYOpen struct {
 
 func (f *restorePTYFactory) Open(ctx context.Context, command string, _ []string, env []string, dir string, sz domain.Size) (ports.PTY, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	pty := newRestorePTY()
 	pty.writeErr = f.writeErr
 	f.opens = append(f.opens, restorePTYOpen{ctx: ctx, command: command, dir: dir, size: sz, env: append([]string(nil), env...), pty: pty})
+	onOpen := f.onOpen
+	f.mu.Unlock()
+	if onOpen != nil {
+		onOpen()
+	}
 	return pty, nil
 }
 
