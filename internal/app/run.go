@@ -450,7 +450,8 @@ func runDaemon() (retErr error) {
 	daemonOpts = append(daemonOpts, daemon.WithConfig(cfg))
 	daemonOpts = append(daemonOpts, daemon.WithBarScriptCommandRunner(shellcmd.New()))
 	daemonOpts = append(daemonOpts, daemon.WithProcessInspector(platform.NewProcessInspector()), daemon.WithDirOrHome(platform.DirOrHome))
-	daemonOpts = append(daemonOpts, daemon.WithSnapshotStore(snapshotadapter.NewStore(snapshotDir())))
+	snapshotRepository := snapshotadapter.NewRepository(snapshotDir())
+	daemonOpts = append(daemonOpts, daemon.WithSnapshotRepository(snapshotRepository, snapshotRepository))
 	daemonOpts = append(daemonOpts, daemon.WithNoticeStore(noticefile.New(platform.StateDir())))
 	storePath := persist.StorePath(platform.StateDir())
 	var storeErr error
@@ -1221,9 +1222,15 @@ func runKill(ctx context.Context, name string, all, daemon bool) error {
 			if closeErr := p.Close(); closeErr != nil {
 				return fmt.Errorf("vev: closing stored sessions: %w", closeErr)
 			}
-			snapshots := snapshotadapter.NewStore(snapshotDir())
-			if deleteErr := snapshots.Delete(name); deleteErr != nil {
+			snapshots := snapshotadapter.NewRepository(snapshotDir())
+			if deleteErr := snapshots.Delete(ctx, name); deleteErr != nil {
 				return fmt.Errorf("vev: deleting session snapshot: %w", deleteErr)
+			}
+			// A daemon-less delete may be the first command after upgrade, before
+			// startup has had a chance to import v3. Remove that one-way source as
+			// well so a later daemon cannot resurrect an explicitly killed session.
+			if deleteErr := snapshots.DeleteLegacy(ctx, name); deleteErr != nil {
+				return fmt.Errorf("vev: deleting legacy session snapshot: %w", deleteErr)
 			}
 			printKillSuccess(name, all, daemon)
 			return nil

@@ -553,7 +553,15 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		}
 	}
 	if !wasEphemeral && oldName != name {
-		if d.snapsEnabled && d.snaps != nil {
+		if d.snapsEnabled && d.snapshotRepository != nil {
+			if err := d.snapshotRepository.Delete(context.Background(), oldName); err != nil {
+				if cleanupErr := d.persist.Delete(name); cleanupErr != nil {
+					d.log.Warn("cleaning up renamed persisted session failed", "err", cleanupErr, "session", name)
+				}
+				sess.mu.Unlock()
+				return err
+			}
+		} else if d.snapsEnabled && d.snaps != nil {
 			if err := d.snaps.Delete(oldName); err != nil {
 				if cleanupErr := d.persist.Delete(name); cleanupErr != nil {
 					d.log.Warn("cleaning up renamed persisted session failed", "err", cleanupErr, "session", name)
@@ -731,9 +739,15 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 			sess.mu.Lock()
 			name := sess.name
 			sess.mu.Unlock()
-			if err := d.snaps.Delete(name); err != nil {
-				snapshotDeleteErr = err
-				d.log.Warn("deleting session snapshot failed", "err", err, "session", name)
+			if d.snapshotRepository != nil {
+				// Repository deletion is intentionally deferred until the render
+				// coordinator is cancelled and joined below. See client.go's lock
+				// ordering notes: no coordinator callback may race a purge.
+			} else if d.snaps != nil {
+				if err := d.snaps.Delete(name); err != nil {
+					snapshotDeleteErr = err
+					d.log.Warn("deleting session snapshot failed", "err", err, "session", name)
+				}
 			}
 		} else {
 			markSnapshotDirty(sess)
@@ -838,6 +852,14 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	for _, path := range clipFiles {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			d.log.Warn("removing clipboard temp file failed", "err", err, "path", path)
+		}
+	}
+	// The coordinator and all panes are now stopped, so no producer can
+	// publish another generation after this destructive repository delete.
+	if !ephemeral && purge && d.snapshotRepository != nil {
+		if err := d.snapshotRepository.Delete(context.Background(), stoppedName); err != nil {
+			purgeErr = errors.Join(purgeErr, err)
+			d.log.Warn("deleting session snapshot failed", "err", err, "session", stoppedName)
 		}
 	}
 	if empty {
