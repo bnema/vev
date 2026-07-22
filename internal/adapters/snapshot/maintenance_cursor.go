@@ -150,18 +150,16 @@ func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *mainte
 		if err != nil {
 			return nil, false, maintenanceDirectoryError("read maintenance directory", err)
 		}
+		if count < 0 || count > len(buffer) {
+			return nil, false, syscall.EIO
+		}
 		if count == 0 {
 			return entries, true, nil
 		}
 		for data := buffer[:count]; len(data) != 0 && (len(entries) < limit || drainMaintenanceDirentBatch()); {
-			if len(data) < int(unsafe.Offsetof(syscall.Dirent{}.Name)) {
-				return nil, false, syscall.EIO
-			}
-			record := (*syscall.Dirent)(unsafe.Pointer(&data[0]))
-			reclen := int(record.Reclen)
-			nameOffset := int(unsafe.Offsetof(syscall.Dirent{}.Name))
-			if reclen < nameOffset || reclen > len(data) {
-				return nil, false, syscall.EIO
+			record, nameBytes, reclen, decodeErr := decodeMaintenanceDirent(data)
+			if decodeErr != nil {
+				return nil, false, decodeErr
 			}
 			data = data[reclen:]
 			// Advance past every raw record, including dot and disappeared entries.
@@ -170,7 +168,6 @@ func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *mainte
 				return nil, false, maintenanceDirectoryError("tell maintenance directory", cookieErr)
 			}
 			cursor.offset = offset
-			nameBytes := unsafe.Slice((*byte)(unsafe.Pointer(&record.Name[0])), reclen-nameOffset)
 			if end := strings.IndexByte(string(nameBytes), 0); end >= 0 {
 				nameBytes = nameBytes[:end]
 			}
@@ -202,6 +199,30 @@ func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *mainte
 		}
 	}
 	return entries, false, nil
+}
+
+// decodeMaintenanceDirent copies a bounded raw record into aligned storage
+// before reading its fields. syscall.ReadDirent writes to a byte buffer, whose
+// start and record boundaries are not guaranteed to satisfy syscall.Dirent's
+// alignment requirements on Darwin.
+func decodeMaintenanceDirent(data []byte) (*syscall.Dirent, []byte, int, error) {
+	nameOffset := int(unsafe.Offsetof(syscall.Dirent{}.Name))
+	if len(data) < nameOffset {
+		return nil, nil, 0, syscall.EIO
+	}
+
+	var record syscall.Dirent
+	header := unsafe.Slice((*byte)(unsafe.Pointer(&record)), nameOffset)
+	copy(header, data[:nameOffset])
+	reclen := int(record.Reclen)
+	if reclen < nameOffset || reclen > len(data) || reclen > int(unsafe.Sizeof(record)) {
+		return nil, nil, 0, syscall.EIO
+	}
+
+	recordBytes := unsafe.Slice((*byte)(unsafe.Pointer(&record)), reclen)
+	copy(recordBytes, data[:reclen])
+	name := unsafe.Slice((*byte)(unsafe.Pointer(&record.Name[0])), reclen-nameOffset)
+	return &record, name, reclen, nil
 }
 
 func (r *Repository) requeueMaintenanceEntries(dir, purpose string, entries []maintenanceDirEntry) {

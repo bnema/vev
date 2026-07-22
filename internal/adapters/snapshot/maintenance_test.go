@@ -96,6 +96,54 @@ func TestReadMaintenanceDirentRejectsRecordShorterThanNameOffset(t *testing.T) {
 	}
 }
 
+func TestDecodeMaintenanceDirentBoundsRecords(t *testing.T) {
+	nameOffset := int(unsafe.Offsetof(syscall.Dirent{}.Name))
+	reclenOffset := unsafe.Offsetof(syscall.Dirent{}.Reclen)
+	valid := make([]byte, nameOffset+len("entry")+1)
+	binary.NativeEndian.PutUint16(valid[reclenOffset:], uint16(len(valid)))
+	copy(valid[nameOffset:], "entry")
+
+	tests := []struct {
+		name     string
+		data     []byte
+		wantName string
+		wantErr  bool
+	}{
+		{name: "truncated header", data: make([]byte, nameOffset-1), wantErr: true},
+		{name: "short record", data: append([]byte(nil), valid...), wantErr: true},
+		{name: "truncated record", data: valid[:nameOffset], wantErr: true},
+		{name: "record exceeds aligned storage", data: make([]byte, int(unsafe.Sizeof(syscall.Dirent{}))+1), wantErr: true},
+		{name: "valid", data: valid, wantName: "entry"},
+	}
+	binary.NativeEndian.PutUint16(tests[1].data[reclenOffset:], uint16(nameOffset-1))
+	binary.NativeEndian.PutUint16(tests[2].data[reclenOffset:], uint16(len(valid)))
+	binary.NativeEndian.PutUint16(tests[3].data[reclenOffset:], uint16(len(tests[3].data)))
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			record, name, reclen, err := decodeMaintenanceDirent(tc.data)
+			if tc.wantErr {
+				if !errors.Is(err, syscall.EIO) {
+					t.Fatalf("decodeMaintenanceDirent() error = %v, want EIO", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if record == nil {
+				t.Fatal("decodeMaintenanceDirent() record = nil")
+			}
+			if reclen != len(valid) {
+				t.Fatalf("decodeMaintenanceDirent() reclen = %d, want %d", reclen, len(valid))
+			}
+			if got := string(name[:len(tc.wantName)]); got != tc.wantName {
+				t.Fatalf("decodeMaintenanceDirent() name = %q, want %q", got, tc.wantName)
+			}
+		})
+	}
+}
+
 type fakeMaintenanceDirectory struct {
 	data       []byte
 	seekOffset int64
