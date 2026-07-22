@@ -3,7 +3,6 @@
 package snapshot
 
 import (
-	"errors"
 	"io"
 	"syscall"
 	"unsafe"
@@ -20,9 +19,3 @@ func directoryCookie(file maintenanceDirectory, _ *syscall.Dirent) (int64, error
 }
 
 func drainMaintenanceDirentBatch() bool { return true }
-
-// Darwin reports EPERM, rather than EISDIR, when unlinkat without
-// AT_REMOVEDIR targets a directory. The mode check preserves EPERM for files.
-func directoryUnlinkRetry(err error, mode uint32) bool {
-	return errors.Is(err, syscall.EPERM) && mode&syscall.S_IFMT == syscall.S_IFDIR
-}

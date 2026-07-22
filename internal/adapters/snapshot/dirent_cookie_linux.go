@@ -2,10 +2,7 @@
 
 package snapshot
 
-import (
-	"errors"
-	"syscall"
-)
+import "syscall"
 
 const maintenanceDirentBufferSize = 8192
 
@@ -15,5 +12,3 @@ func directoryCookie(_ maintenanceDirectory, dirent *syscall.Dirent) (int64, err
 }
 
 func drainMaintenanceDirentBatch() bool { return false }
-
-func directoryUnlinkRetry(err error, _ uint32) bool { return errors.Is(err, syscall.EISDIR) }

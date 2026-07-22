@@ -7,8 +7,143 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
+
+func TestRepositoryRejectsSymlinkedRoot(t *testing.T) {
+	configuredRoot := filepath.Join(t.TempDir(), "configured")
+	externalRoot := privateDir(t)
+	if err := os.Symlink(externalRoot, configuredRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewRepository(configuredRoot).openRoot(); err == nil {
+		t.Fatal("openRoot succeeded through configured-root symlink")
+	}
+
+	configuredRoot = privateDir(t)
+	repo := NewRepository(configuredRoot)
+	publication := repositoryPublication(t, "named", 1, []byte("configured"))
+	if err := repo.Publish(context.Background(), publication); err != nil {
+		t.Fatal(err)
+	}
+	external := NewRepository(externalRoot)
+	externalPublication := repositoryPublication(t, publication.Name, 1, []byte("external"))
+	if err := external.Publish(context.Background(), externalPublication); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(configuredRoot, configuredRoot+"-real"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalRoot, configuredRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := repo.Load(context.Background(), publication.Name); err == nil {
+		t.Fatal("Load succeeded through replaced configured-root symlink")
+	}
+	if err := repo.Maintain(context.Background()); err == nil {
+		t.Fatal("Maintain succeeded through replaced configured-root symlink")
+	}
+	loaded, err := external.Load(context.Background(), publication.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(loaded.Manifest) != string(externalPublication.Manifest) {
+		t.Fatal("external repository changed")
+	}
+}
+
+func TestOpenRootRejectsUnsafePinnedRoot(t *testing.T) {
+	dir := privateDir(t)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewRepository(dir).openRoot(); err == nil || !strings.Contains(err.Error(), "not private") {
+		t.Fatalf("openRoot error = %v, want private-directory rejection", err)
+	}
+}
+
+func TestOpenRootDetectsReplacementAfterOpen(t *testing.T) {
+	dir := privateDir(t)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := dir + "-old"
+	replacementMarker := filepath.Join(dir, "replacement-marker")
+	repo := NewRepository(dir)
+	repo.hooks.afterOpenRoot = func() {
+		repo.hooks.afterOpenRoot = nil
+		if err := os.Rename(dir, old); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(replacementMarker, []byte("unchanged"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := repo.openRoot(); !errors.Is(err, syscall.ESTALE) {
+		t.Fatalf("openRoot error = %v, want ESTALE", err)
+	}
+	if got, err := os.ReadFile(replacementMarker); err != nil || string(got) != "unchanged" {
+		t.Fatalf("replacement marker = %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(old, "replacement-marker")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pinned tree was operated on: %v", err)
+	}
+}
+
+func TestOpenDirectoryClosesChildWhenRootCloseFails(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	if err := os.Mkdir(repo.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(repo.dir, "child")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	closeErr := errors.New("injected root close")
+	repo.hooks.closeRoot = func() error { return closeErr }
+	before := openDescriptorCount(t)
+	for range 20 {
+		file, err := repo.openDirectory(child)
+		if file != nil || !errors.Is(err, closeErr) {
+			t.Fatalf("openDirectory = (%v, %v), want nil and close error", file, err)
+		}
+	}
+	if got := openDescriptorCount(t); got > before+4 {
+		t.Fatalf("open descriptors after failed openDirectory = %d, before = %d", got, before)
+	}
+}
+
+func TestRootCloseErrorsJoinAndCloseRealRoot(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	if err := os.Mkdir(repo.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	closeErr := errors.New("injected root close")
+	repo.hooks.closeRoot = func() error { return closeErr }
+	root, err := repo.openRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.closeRoot(root); !errors.Is(err, closeErr) {
+		t.Fatalf("closeRoot error = %v, want injected error", err)
+	}
+	if _, err := root.Stat("."); err == nil {
+		t.Fatal("real root remained open after injected close error")
+	}
+
+	_, err = repo.stat(filepath.Join(repo.dir, "missing"))
+	if !errors.Is(err, closeErr) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat error = %v, want primary and close errors", err)
+	}
+}
 
 func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 	for _, target := range []string{repositoryGenerations, repositoryObjectsDir} {
@@ -34,7 +169,6 @@ func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 			if _, err := repo.Load(context.Background(), publication.Name); err == nil {
 				t.Fatal("Load succeeded through symlinked repository component")
 			}
-			// Maintenance must reject the replacement rather than following it.
 			if err := repo.Maintain(context.Background()); err == nil {
 				t.Fatal("Maintain succeeded through symlinked repository component")
 			}
@@ -46,26 +180,24 @@ func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 	}
 }
 
-func TestStatReturnsInjectedCloseErrorWithContext(t *testing.T) {
+func TestFinalSymlinksRejectedByRootOperations(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	if err := repo.ensurePrivateDirectory(repo.dir); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(repo.dir, "state")
-	if err := os.WriteFile(path, []byte("state"), 0o600); err != nil {
+	target := filepath.Join(repo.dir, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	closeCause := errors.New("injected stat close failure")
-	repo.hooks.closeDescriptor = func(got string) error {
-		if got == "close snapshot file" {
-			return closeCause
-		}
-		return nil
+	link := filepath.Join(repo.dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
 	}
-
-	_, err := repo.stat(path)
-	if !errors.Is(err, closeCause) || !strings.Contains(err.Error(), "close snapshot file") {
-		t.Fatalf("stat error = %v, want contextual close failure", err)
+	if _, err := repo.openDirectory(link); !errors.Is(err, syscall.ELOOP) || strings.Contains(err.Error(), repo.dir) {
+		t.Fatalf("openDirectory error = %v, want sanitized ELOOP", err)
+	}
+	if _, err := repo.readBounded(link); !errors.Is(err, syscall.ELOOP) || strings.Contains(err.Error(), repo.dir) {
+		t.Fatalf("readBounded error = %v, want sanitized ELOOP", err)
 	}
 }
 

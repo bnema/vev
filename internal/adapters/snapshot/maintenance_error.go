@@ -26,6 +26,10 @@ func (e safePathError) Unwrap() error { return e.cause }
 // safeFilesystemError preserves error matching without including a filesystem
 // path from terminal-facing error text.
 func safeFilesystemError(err error) error {
+	var linkError *os.LinkError
+	if errors.As(err, &linkError) {
+		return safePathError{op: linkError.Op, cause: linkError.Err}
+	}
 	var pathError *os.PathError
 	if errors.As(err, &pathError) {
 		return safePathError{op: pathError.Op, cause: pathError.Err}

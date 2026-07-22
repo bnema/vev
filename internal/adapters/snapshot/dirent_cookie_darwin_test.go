@@ -18,12 +18,3 @@ func TestDirectoryCookieUsesDescriptorEntryCount(t *testing.T) {
 		t.Fatalf("directoryCookie() = %d, want descriptor entry count 42", got)
 	}
 }
-
-func TestDirectoryUnlinkRetryRequiresDarwinDirectoryEPERM(t *testing.T) {
-	if directoryUnlinkRetry(syscall.EPERM, syscall.S_IFREG) {
-		t.Fatal("directoryUnlinkRetry(EPERM, regular file) = true, want false")
-	}
-	if !directoryUnlinkRetry(syscall.EPERM, syscall.S_IFDIR) {
-		t.Fatal("directoryUnlinkRetry(EPERM, directory) = false, want true")
-	}
-}
