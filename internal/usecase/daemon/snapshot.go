@@ -1170,21 +1170,3 @@ func (d *Daemon) scheduleEligibleRepositorySnapshots() time.Duration {
 	}
 	return 0
 }
-
-func pruneTreeToPanes(n *layout.Node, panes map[layout.PaneID]struct{}) bool {
-	if n == nil {
-		return false
-	}
-	if n.Kind == layout.Leaf {
-		_, ok := panes[n.Leaf]
-		return ok
-	}
-	kept := n.Children[:0]
-	for _, child := range n.Children {
-		if pruneTreeToPanes(child, panes) {
-			kept = append(kept, child)
-		}
-	}
-	n.Children = kept
-	return len(n.Children) > 0
-}
