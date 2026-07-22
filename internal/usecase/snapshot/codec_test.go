@@ -193,8 +193,8 @@ func TestUnmarshalRejectsInvalidTreeReference(t *testing.T) {
 	}
 }
 
-func TestUnmarshalRejectsNonCanonicalBlobRolesDuringPreflight(t *testing.T) {
-	sealed, tail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'a'}}, {{Rune: 'b'}}, {{Rune: 'c'}}})
+func TestUnmarshalEnforcesCanonicalHistoryBlobRoles(t *testing.T) {
+	sealed, emptyTail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'a'}}, {{Rune: 'b'}}, {{Rune: 'c'}}})
 	if len(sealed) == 0 {
 		t.Fatal("expected a sealed chunk")
 	}
@@ -204,13 +204,34 @@ func TestUnmarshalRejectsNonCanonicalBlobRolesDuringPreflight(t *testing.T) {
 	multiChunk = append(multiChunk, sealed[0][9:]...)
 	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
 	emptyVisible := visibleBlob(t, nil)
+
+	// Incremental captures retain one copied mutable tail chunk instead of
+	// rotating it into the sealed history set. That one chunk is canonical and
+	// must remain a valid v3 import payload.
+	mutableHistory := vt.NewHistory(vt.HistoryConfig{MaxRows: 8, ChunkRows: 2})
+	for _, row := range [][]renderer.Cell{{{Rune: 'a'}}, {{Rune: 'b'}}, {{Rune: 'c'}}} {
+		requireNoError(t, mutableHistory.Append(row))
+	}
+	mutableTail, err := vt.MarshalHistoryTail(mutableHistory.SnapshotView())
+	requireNoError(t, err)
+	fullHistory, err := vt.MarshalHistory(mutableHistory.SealAndView())
+	requireNoError(t, err)
+	valid, err := Marshal(Session{Name: "s", Tabs: []Tab{{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", SealedChunks: sealed[:1], Tail: mutableTail, Visible: visible}}}}})
+	requireNoError(t, err)
+	roundTrip, err := Unmarshal(valid)
+	requireNoError(t, err)
+	if got := roundTrip.Tabs[0].Panes[0].Tail; !bytes.Equal(got, mutableTail) {
+		t.Fatal("mutable tail did not round trip")
+	}
+
 	for _, tc := range []struct {
 		name string
 		tab  Tab
 	}{
-		{name: "sealed multi-chunk", tab: Tab{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", SealedChunks: [][]byte{multiChunk}, Tail: tail, Visible: visible}}}},
-		{name: "nonempty tail", tab: Tab{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", Tail: sealed[0], Visible: visible}}}},
-		{name: "empty visible geometry", tab: Tab{Panes: []Pane{{ID: "p", Tail: tail, Visible: emptyVisible}}}},
+		{name: "sealed multi-chunk", tab: Tab{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", SealedChunks: [][]byte{multiChunk}, Tail: emptyTail, Visible: visible}}}},
+		{name: "tail has multiple chunks", tab: Tab{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", Tail: multiChunk, Visible: visible}}}},
+		{name: "noncanonical full history tail", tab: Tab{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", Tail: fullHistory, Visible: visible}}}},
+		{name: "empty visible geometry", tab: Tab{Panes: []Pane{{ID: "p", Tail: emptyTail, Visible: emptyVisible}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data, err := Marshal(Session{Name: "s", Tabs: []Tab{tc.tab}})

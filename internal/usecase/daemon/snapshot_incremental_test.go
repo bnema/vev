@@ -38,11 +38,11 @@ func TestIncrementalPublicationEncodesAfterPaneUnlock(t *testing.T) {
 func TestIncrementalPublicationReusesSealedChunkObject(t *testing.T) {
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 2, ChunkRows: 1})
 	history.Append([]renderer.Cell{renderer.BlankCell()})
-	view := history.SealAndView()
+	view := history.SnapshotView()
 	visible := vt.NewScreen(1, 1).PrimaryVisibleSnapshot()
 	d := New(nil, nil, nil)
 	sess := newSnapshotTestSession(t, "work", false, "/work")
-	capture := &snapshotCapture{session: sess, name: "work", generation: 1, tabs: []snapshotCaptureTab{{stableID: "t", cols: 1, rows: 1, panes: []snapshotCapturePane{{id: "p", stableID: "p", history: view, visible: visible}}}}}
+	capture := &snapshotCapture{session: sess, name: "work", generation: 1, tabs: []snapshotCaptureTab{{stableID: "t", cols: 1, rows: 1, panes: []snapshotCapturePane{{id: "p", stableID: "p", sealed: view, tail: view.Tail(), visible: visible}}}}}
 	first, err := d.incrementalPublication(capture)
 	if err != nil {
 		t.Fatal(err)

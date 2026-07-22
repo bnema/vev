@@ -19,9 +19,10 @@ import (
 func TestCountingSnapshotRepositoryPublishCountsAndRetainsManifest(t *testing.T) {
 	repository := &countingSnapshotRepository{}
 	payload := []byte{0xff, 0x00, 0xfe}
+	object := []byte{0x01, 0x02}
 
-	require.NoError(t, repository.Publish(context.Background(), ports.SnapshotPublication{Name: "session", Manifest: payload}))
-	require.Equal(t, countingSnapshotMetrics{writes: 1, bytes: uint64(len(payload))}, repository.metrics())
+	require.NoError(t, repository.Publish(context.Background(), ports.SnapshotPublication{Name: "session", Manifest: payload, Objects: []ports.SnapshotObject{{Data: object}}}))
+	require.Equal(t, countingSnapshotMetrics{writes: 1, manifestBytes: uint64(len(payload)), objectBytes: uint64(len(object))}, repository.metrics())
 	require.Equal(t, payload, repository.lastPayload())
 
 	payload[0] = 0x01
@@ -64,7 +65,8 @@ func TestPerformanceFixtureCounters(t *testing.T) {
 	fixture.captureSnapshot()
 	metrics = fixture.metrics()
 	require.Equal(t, uint64(1), metrics.snapshotWrites)
-	require.Positive(t, metrics.snapshotBytes)
+	require.Positive(t, metrics.snapshotManifestBytes)
+	require.Positive(t, metrics.snapshotObjectBytes)
 
 	fixture.enterCopySearch()
 	require.Positive(t, fixture.searchMatches())
@@ -217,14 +219,14 @@ func BenchmarkDaemonHistorySnapshotCapture(b *testing.B) {
 	benchmarkDaemonSnapshotCapture(b)
 }
 
-// BenchmarkDaemonHistorySnapshotEncode measures v3 encoding from an already
-// immutable capture, without queueing or persistence.
+// BenchmarkDaemonHistorySnapshotEncode measures incremental publication from an
+// already immutable capture, without queueing or persistence.
 func BenchmarkDaemonHistorySnapshotEncode(b *testing.B) {
 	benchmarkDaemonSnapshotEncode(b)
 }
 
 // BenchmarkDaemonHistorySnapshotRestore measures terminal-state restoration
-// from a validated v3 pane manifest without spawning PTY or session workers.
+// from a validated incremental manifest without spawning PTY or session workers.
 func BenchmarkDaemonHistorySnapshotRestore(b *testing.B) {
 	benchmarkDaemonSnapshotRestore(b)
 }
@@ -327,7 +329,7 @@ func benchmarkDaemonSnapshotCapture(b *testing.B) {
 				b.Fatal("invalid snapshot capture fixture")
 			}
 			firstPane := first.tabs[0].panes[0]
-			firstChunk := firstPane.history.Chunk(0)
+			firstChunk := firstPane.sealed.Chunk(0)
 			captures := 0
 			var last *snapshotCapture
 			b.ReportAllocs()
@@ -341,7 +343,7 @@ func benchmarkDaemonSnapshotCapture(b *testing.B) {
 			}
 			b.StopTimer()
 			lastPane := capturePaneByID(last, firstPane.id)
-			if captures != b.N || !validBenchmarkCapture(last) || lastPane == nil || lastPane.history.Chunk(0) != firstChunk {
+			if captures != b.N || !validBenchmarkCapture(last) || lastPane == nil || lastPane.sealed.Chunk(0) != firstChunk {
 				b.Fatal("snapshot capture did not preserve immutable sealed history")
 			}
 			b.ReportMetric(float64(capturePaneCount(last)), "capturepanes/op")
@@ -354,34 +356,36 @@ func benchmarkDaemonSnapshotEncode(b *testing.B) {
 		b.Run(topology.name, func(b *testing.B) {
 			fixture := newPerformanceFixture(b, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: topology.tabs, panes: topology.panes, historyRows: 10_000})
 			if !fixture.hasHistoryTopology(topology.tabs, topology.panes, 10_000) {
-				b.Fatal("invalid daemon snapshot encode fixture")
+				b.Fatal("invalid daemon snapshot publication fixture")
 			}
 			capture, ok := fixture.d.captureSnapshotState(fixture.sess, 1)
 			if !ok || !validBenchmarkCapture(capture) {
-				b.Fatal("invalid snapshot encode fixture")
+				b.Fatal("invalid snapshot publication fixture")
 			}
-			encoded, err := fixture.d.encodeSnapshotCapture(capture)
+			publication, err := fixture.d.incrementalPublication(capture)
 			if err != nil {
 				b.Fatal(err)
 			}
-			if _, err := snapcodec.Unmarshal(encoded); err != nil {
-				b.Fatalf("invalid v3 snapshot encode fixture: %v", err)
+			if _, err := snapcodec.UnmarshalManifest(publication.Manifest); err != nil || len(publication.Objects) == 0 {
+				b.Fatalf("invalid incremental snapshot publication fixture: %v", err)
 			}
-			var last []byte
+			var last ports.SnapshotPublication
 			b.ReportAllocs()
-			b.SetBytes(int64(len(encoded)))
+			b.SetBytes(int64(snapshotPublicationBytes(publication)))
 			b.ResetTimer()
 			for range b.N {
-				last, err = fixture.d.encodeSnapshotCapture(capture)
+				last, err = fixture.d.incrementalPublication(capture)
 				if err != nil {
 					b.Fatal(err)
 				}
 			}
 			b.StopTimer()
-			if _, err := snapcodec.Unmarshal(last); err != nil {
-				b.Fatalf("snapshot encoder produced invalid v3 data: %v", err)
+			if _, err := snapcodec.UnmarshalManifest(last.Manifest); err != nil {
+				b.Fatalf("snapshot publication produced invalid manifest: %v", err)
 			}
-			b.ReportMetric(float64(len(last)), "snapshotbytes/op")
+			b.ReportMetric(float64(len(last.Manifest)), "manifestbytes/op")
+			b.ReportMetric(float64(snapshotObjectBytes(last)), "objectbytes/op")
+			b.ReportMetric(float64(len(last.Objects)), "objects/op")
 		})
 	}
 }
@@ -395,17 +399,17 @@ func benchmarkDaemonSnapshotRestore(b *testing.B) {
 	if !ok || !validBenchmarkCapture(capture) {
 		b.Fatal("invalid snapshot restore fixture")
 	}
-	encoded, err := fixture.d.encodeSnapshotCapture(capture)
+	publication, err := fixture.d.incrementalPublication(capture)
 	if err != nil {
 		b.Fatal(err)
 	}
-	snapshot, err := snapcodec.Unmarshal(encoded)
+	snapshot, err := sessionFromGeneration(snapshotGeneration(publication))
 	if err != nil || len(snapshot.Tabs) != 1 || len(snapshot.Tabs[0].Panes) == 0 {
-		b.Fatalf("invalid v3 snapshot restore fixture: %v", err)
+		b.Fatalf("invalid incremental snapshot restore fixture: %v", err)
 	}
 	paneSnapshot := snapshot.Tabs[0].Panes[0]
 	b.ReportAllocs()
-	b.SetBytes(int64(len(encoded)))
+	b.SetBytes(int64(snapshotPublicationBytes(publication)))
 	b.ResetTimer()
 	for range b.N {
 		if err := restorePaneTerminal(fixture.activePane, paneSnapshot); err != nil {
@@ -423,7 +427,27 @@ func benchmarkDaemonSnapshotRestore(b *testing.B) {
 }
 
 func validBenchmarkCapture(capture *snapshotCapture) bool {
-	return capture != nil && len(capture.tabs) > 0 && len(capture.tabs[0].panes) > 0 && capture.tabs[0].panes[0].history.Len() == 10_000 && capture.tabs[0].panes[0].history.ChunkCount() > 0
+	return capture != nil && len(capture.tabs) > 0 && len(capture.tabs[0].panes) > 0 && capture.tabs[0].panes[0].sealed.Len() == 10_000 && capture.tabs[0].panes[0].sealed.ChunkCount() > 0
+}
+
+func snapshotGeneration(publication ports.SnapshotPublication) ports.SnapshotGeneration {
+	objects := make(map[ports.SnapshotDigest][]byte, len(publication.Objects))
+	for _, object := range publication.Objects {
+		objects[object.Digest] = object.Data
+	}
+	return ports.SnapshotGeneration{Name: publication.Name, Generation: publication.Generation, Manifest: publication.Manifest, Objects: objects}
+}
+
+func snapshotObjectBytes(publication ports.SnapshotPublication) uint64 {
+	var bytes uint64
+	for _, object := range publication.Objects {
+		bytes += uint64(len(object.Data))
+	}
+	return bytes
+}
+
+func snapshotPublicationBytes(publication ports.SnapshotPublication) uint64 {
+	return uint64(len(publication.Manifest)) + snapshotObjectBytes(publication)
 }
 
 func capturePaneCount(capture *snapshotCapture) int {
@@ -474,7 +498,8 @@ func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations
 	b.ReportMetric(float64(metrics.outputBytes)/perOperation, "outputbytes/op")
 	b.ReportMetric(float64(metrics.outputPayloadBytes)/perOperation, "framepayloadbytes/op")
 	b.ReportMetric(float64(metrics.snapshotWrites)/perOperation, "snapshotwrites/op")
-	b.ReportMetric(float64(metrics.snapshotBytes)/perOperation, "snapshotbytes/op")
+	b.ReportMetric(float64(metrics.snapshotManifestBytes)/perOperation, "snapshotmanifestbytes/op")
+	b.ReportMetric(float64(metrics.snapshotObjectBytes)/perOperation, "snapshotobjectbytes/op")
 	b.ReportMetric(float64(metrics.coordinatorInvalidations)/perOperation, "coordinatorinvalidations/op")
 	b.ReportMetric(float64(metrics.coordinatorWakes)/perOperation, "coordinatorwakes/op")
 	b.ReportMetric(float64(metrics.coordinatorCoalesced)/perOperation, "coordinatorcoalesced/op")
@@ -588,7 +613,8 @@ type performanceMetrics struct {
 	outputBytes              uint64
 	outputPayloadBytes       uint64
 	snapshotWrites           uint64
-	snapshotBytes            uint64
+	snapshotManifestBytes    uint64
+	snapshotObjectBytes      uint64
 	coordinatorInvalidations uint64
 	coordinatorWakes         uint64
 	coordinatorCoalesced     uint64
@@ -947,7 +973,7 @@ func (f *performanceFixture) metrics() performanceMetrics {
 	snapshots := f.snapshots.metrics()
 	metrics := performanceMetrics{
 		outputFrames: output.frames, outputBytes: output.bytes, outputPayloadBytes: output.payloadBytes,
-		snapshotWrites: snapshots.writes, snapshotBytes: snapshots.bytes,
+		snapshotWrites: snapshots.writes, snapshotManifestBytes: snapshots.manifestBytes, snapshotObjectBytes: snapshots.objectBytes,
 		renderCaptures: f.renderCaptures, renderCompositions: f.renderCompositions, renderEmissions: f.renderEmissions,
 		resizeRequests: f.resizeRequests, resizeCommits: f.resizeCommits, resizeCommitNanos: f.resizeCommitNanos,
 		ptyFailures: f.ptyFailures, ptyRetries: f.ptyRetries,
@@ -1011,7 +1037,9 @@ func (t *countingOutputTransport) lastPayload() []byte {
 	return t.last
 }
 
-type countingSnapshotMetrics struct{ writes, bytes uint64 }
+type countingSnapshotMetrics struct {
+	writes, manifestBytes, objectBytes uint64
+}
 type countingSnapshotRepository struct {
 	mu sync.Mutex
 	countingSnapshotMetrics
@@ -1021,9 +1049,9 @@ type countingSnapshotRepository struct {
 func (s *countingSnapshotRepository) Publish(_ context.Context, publication ports.SnapshotPublication) error {
 	s.mu.Lock()
 	s.writes++
-	s.bytes += uint64(len(publication.Manifest))
+	s.manifestBytes += uint64(len(publication.Manifest))
 	for _, object := range publication.Objects {
-		s.bytes += uint64(len(object.Data))
+		s.objectBytes += uint64(len(object.Data))
 	}
 	s.last = publication.Manifest
 	s.mu.Unlock()

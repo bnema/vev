@@ -120,14 +120,8 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 				return ports.SnapshotPublication{}, fmt.Errorf("snapshot visible: %w", err)
 			}
 			outPane := snapcodec.ManifestPane{ID: pane.id, StableID: pane.stableID, Cwd: pane.cwd, Process: pane.process}
-			sealedCount := pane.sealed.ChunkCount()
-			sealedChunk := pane.sealed.Chunk
-			if sealedCount == 0 && pane.history.ChunkCount() > 0 {
-				sealedCount = pane.history.ChunkCount()
-				sealedChunk = pane.history.Chunk
-			}
-			for i := 0; i < sealedCount; i++ {
-				object, err := snapshotChunkObject(capture, sealedChunk(i))
+			for i := 0; i < pane.sealed.ChunkCount(); i++ {
+				object, err := snapshotChunkObject(capture, pane.sealed.Chunk(i))
 				if err != nil {
 					return ports.SnapshotPublication{}, fmt.Errorf("snapshot history chunk: %w", err)
 				}
@@ -203,14 +197,8 @@ func collectSnapshotCaptureChunks(referenced map[*vt.HistoryChunk]struct{}, capt
 	}
 	for _, tab := range capture.tabs {
 		for _, pane := range tab.panes {
-			sealedCount := pane.sealed.ChunkCount()
-			sealedChunk := pane.sealed.Chunk
-			if sealedCount == 0 && pane.history.ChunkCount() > 0 {
-				sealedCount = pane.history.ChunkCount()
-				sealedChunk = pane.history.Chunk
-			}
-			for i := 0; i < sealedCount; i++ {
-				if chunk := sealedChunk(i); chunk != nil {
+			for i := 0; i < pane.sealed.ChunkCount(); i++ {
+				if chunk := pane.sealed.Chunk(i); chunk != nil {
 					referenced[chunk] = struct{}{}
 				}
 			}

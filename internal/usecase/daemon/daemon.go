@@ -16,7 +16,6 @@ import (
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
-	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
 // Scheduler debounce bounds. Idle updates use the minimum for low latency;
@@ -130,7 +129,6 @@ type Daemon struct {
 	legacyImportMu      sync.Mutex
 	legacyImportPending map[string][]byte
 	noticeStore         ports.NoticeStore
-	snapshotMarshal     func(snapcodec.Session) ([]byte, error)
 	snapshotJobs        chan *snapshotCapture
 	// snapshotWake wakes the repository scheduler when a session becomes dirty
 	// or an attempt completes. It is never closed and producers only send
@@ -377,7 +375,6 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		done:                make(chan struct{}),
 		restoreDone:         make(chan struct{}),
 		animWake:            make(chan struct{}, 1),
-		snapshotMarshal:     snapcodec.Marshal,
 		legacyImportPending: make(map[string][]byte),
 		snapshotJobs:        make(chan *snapshotCapture, snapshotQueueCapacity),
 		snapshotWake:        make(chan struct{}, 1),

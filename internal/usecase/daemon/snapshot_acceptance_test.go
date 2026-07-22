@@ -48,7 +48,7 @@ func TestSnapshotChunkCacheIsScopedToNamedSession(t *testing.T) {
 	require.LessOrEqual(t, b.snapshotChunkCache.used, snapshotChunkCacheLimit)
 }
 
-func snapshotCacheHistory(t *testing.T, chunks int, first rune) vt.HistoryView {
+func snapshotCacheHistory(t *testing.T, chunks int, first rune) vt.HistorySnapshotView {
 	t.Helper()
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: chunks * 256, ChunkRows: 256})
 	for row := 0; row < chunks*256; row++ {
@@ -58,10 +58,10 @@ func snapshotCacheHistory(t *testing.T, chunks int, first rune) vt.HistoryView {
 		}
 		require.NoError(t, history.Append(cells))
 	}
-	return history.SealAndView()
+	return history.SnapshotView()
 }
 
-func snapshotCacheCapture(sess *session, history vt.HistoryView, generation uint64) *snapshotCapture {
+func snapshotCacheCapture(sess *session, history vt.HistorySnapshotView, generation uint64) *snapshotCapture {
 	return &snapshotCapture{
 		session:    sess,
 		name:       sess.name,
@@ -73,7 +73,8 @@ func snapshotCacheCapture(sess *session, history vt.HistoryView, generation uint
 			panes: []snapshotCapturePane{{
 				id:       "pane",
 				stableID: "pane",
-				history:  history,
+				sealed:   history,
+				tail:     history.Tail(),
 				visible:  vt.NewScreen(1, 1).PrimaryVisibleSnapshot(),
 			}},
 		}},
