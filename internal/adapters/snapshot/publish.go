@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -37,7 +38,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	// map. Checking the immutable bytes directly also keeps its descriptor
 	// reads beneath the pinned repository root.
 	if generation, _, err := r.readHead(key); err == nil && generation == publication.Generation {
-		if current, err := r.readBounded(r.manifestPath(key, generation)); err == nil && equalBytes(current, publication.Manifest) {
+		if current, err := r.readBounded(r.manifestPath(key, generation)); err == nil && bytes.Equal(current, publication.Manifest) {
 			return nil
 		}
 	}
@@ -50,7 +51,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		return fmt.Errorf("snapshot generation %d, current %d: immutable conflict", publication.Generation, current)
 	}
 	if publication.Generation == current {
-		if !equalBytes(currentManifest, publication.Manifest) {
+		if !bytes.Equal(currentManifest, publication.Manifest) {
 			return fmt.Errorf("snapshot generation %d: immutable conflict", publication.Generation)
 		}
 		return nil
@@ -111,7 +112,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		return err
 	}
 	if exists {
-		if !equalBytes(existing, publication.Manifest) {
+		if !bytes.Equal(existing, publication.Manifest) {
 			return fmt.Errorf("manifest generation %d: immutable conflict", publication.Generation)
 		}
 	} else {
@@ -124,7 +125,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 			return err
 		}
 		if err := r.writeImmutable(manifestPath, publication.Manifest, func(existing []byte) error {
-			if !equalBytes(existing, publication.Manifest) {
+			if !bytes.Equal(existing, publication.Manifest) {
 				return fmt.Errorf("manifest generation %d: immutable conflict", publication.Generation)
 			}
 			return nil
@@ -251,7 +252,7 @@ func validateSuppliedObject(objects []ports.SnapshotObject, digest ports.Snapsho
 		if actual != candidate.Digest || candidate.Digest != digest {
 			return ports.SnapshotObject{}, fmt.Errorf("object digest mismatch")
 		}
-		if !equalBytes(candidate.Data, object.Data) {
+		if !bytes.Equal(candidate.Data, object.Data) {
 			return ports.SnapshotObject{}, fmt.Errorf("conflicting object")
 		}
 	}

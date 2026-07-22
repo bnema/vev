@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -39,7 +40,7 @@ func prepareHeadStage(t *testing.T, repo *Repository, pub ports.SnapshotPublicat
 	key := sessionKey(pub.Name)
 	prepareObjects(t, repo, pub)
 	if err := repo.writeImmutable(repo.manifestPath(key, pub.Generation), pub.Manifest, func(data []byte) error {
-		if !equalBytes(data, pub.Manifest) {
+		if !bytes.Equal(data, pub.Manifest) {
 			return errors.New("invalid manifest")
 		}
 		return nil
@@ -171,7 +172,7 @@ func prepareObjects(t *testing.T, repo *Repository, pub ports.SnapshotPublicatio
 	for _, object := range pub.Objects {
 		ref := manifestReference(t, pub.Manifest, object.Digest)
 		if err := repo.writeImmutable(repo.objectPath(key, object.Digest), object.Data, func(data []byte) error {
-			if !equalBytes(data, object.Data) || !validObject(data, ref) {
+			if !bytes.Equal(data, object.Data) || !validObject(data, ref) {
 				return errors.New("invalid object")
 			}
 			return nil

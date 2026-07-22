@@ -110,56 +110,20 @@ func (r *Repository) writeImmutable(path string, data []byte, verifier func([]by
 	if err := r.ensurePrivateDirectoryPhase(dir, phase); err != nil {
 		return err
 	}
-	temp, err := r.createTemp(dir)
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	closed := false
-	cleanup := func(cause error) error {
-		if !closed {
-			if err := r.closeFile(temp); err != nil {
-				cause = errors.Join(cause, err)
+	return r.withAtomicTemp(dir, data, func(tempPath string) (bool, error) {
+		if err := r.installImmutable(tempPath, path); err != nil {
+			if !errors.Is(err, os.ErrExist) {
+				return true, err
 			}
-			closed = true
-		}
-		if err := r.remove(tempPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			cause = errors.Join(cause, err)
-		} else if err == nil {
-			cause = errors.Join(cause, r.syncDirectory(dir))
-		}
-		return cause
-	}
-	if err := temp.Chmod(0o600); err != nil {
-		return cleanup(err)
-	}
-	if err := r.writeFile(temp, data); err != nil {
-		return cleanup(err)
-	}
-	if err := r.syncFile(temp); err != nil {
-		return cleanup(err)
-	}
-	if err := r.closeFile(temp); err != nil {
-		closed = true
-		return cleanup(err)
-	}
-	closed = true
-	if err := r.installImmutable(tempPath, path); err != nil {
-		if errors.Is(err, os.ErrExist) {
 			existing, readErr := r.readBounded(path)
 			if readErr != nil {
-				return cleanup(readErr)
+				return true, readErr
 			}
-			if verifyErr := verifier(existing); verifyErr != nil {
-				return cleanup(verifyErr)
-			}
-			return cleanup(nil)
+			return true, verifier(existing)
 		}
-		return cleanup(err)
-	}
-	// Removing the linked temporary entry before the directory sync lets one
-	// sync persist both the immutable install and its consumed temporary file.
-	return cleanup(nil)
+		// link retains the temporary name, so cleanup must remove and sync it.
+		return true, nil
+	})
 }
 
 // writeMutable is used only for HEAD, the sole authoritative pointer allowed
@@ -169,6 +133,24 @@ func (r *Repository) writeMutable(path string, data []byte) error {
 	if err := r.ensurePrivateDirectory(dir); err != nil {
 		return err
 	}
+	return r.withAtomicTemp(dir, data, func(tempPath string) (bool, error) {
+		if err := r.rename(tempPath, path); err != nil {
+			return true, err
+		}
+		// rename consumed tempPath. Its directory sync persists both rename and
+		// the absence of the temporary entry.
+		if err := r.syncDirectory(dir); err != nil {
+			return true, err
+		}
+		return false, nil
+	})
+}
+
+// withAtomicTemp prepares a private, durable temporary file, invokes publish,
+// then closes and removes the temporary entry when publish reports that its
+// operation did not consume it. Cleanup errors are joined after the operation
+// error in the same order as the former immutable and mutable write paths.
+func (r *Repository) withAtomicTemp(dir string, data []byte, publish func(string) (removeTemp bool, err error)) error {
 	temp, err := r.createTemp(dir)
 	if err != nil {
 		return err
@@ -203,15 +185,11 @@ func (r *Repository) writeMutable(path string, data []byte) error {
 		return cleanup(err)
 	}
 	closed = true
-	if err := r.rename(tempPath, path); err != nil {
-		return cleanup(err)
+	removeTemp, err := publish(tempPath)
+	if !removeTemp {
+		return err
 	}
-	if err := r.syncDirectory(dir); err != nil {
-		return cleanup(err)
-	}
-	// rename consumed tempPath. Its directory sync above persists both rename
-	// and the absence of the temporary entry.
-	return nil
+	return cleanup(err)
 }
 
 func (r *Repository) createTemp(dir string) (*os.File, error) {
@@ -411,16 +389,4 @@ func readBoundedFile(f *os.File) ([]byte, error) {
 		return nil, fmt.Errorf("snapshot file too large")
 	}
 	return data, nil
-}
-
-func equalBytes(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
