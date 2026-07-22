@@ -12,7 +12,31 @@ import (
 )
 
 func (r *Repository) openRoot() (*os.Root, error) {
-	return os.OpenRoot(r.dir)
+	// os.OpenRoot follows a final symlink, so validate that its pinned directory
+	// is still the non-symlink directory at the configured path.
+	root, err := os.OpenRoot(r.dir)
+	if err != nil {
+		return nil, err
+	}
+	current, err := os.Lstat(r.dir)
+	if err != nil {
+		return nil, closeRootOnError(root, err)
+	}
+	if !current.IsDir() || current.Mode()&os.ModeSymlink != 0 {
+		return nil, closeRootOnError(root, &os.PathError{Op: "open", Path: r.dir, Err: syscall.ELOOP})
+	}
+	pinned, err := root.Stat(".")
+	if err != nil {
+		return nil, closeRootOnError(root, err)
+	}
+	if !os.SameFile(current, pinned) {
+		return nil, closeRootOnError(root, &os.PathError{Op: "open", Path: r.dir, Err: syscall.ESTALE})
+	}
+	return root, nil
+}
+
+func closeRootOnError(root *os.Root, err error) error {
+	return errors.Join(err, root.Close())
 }
 
 // rejectFinalSymlink preserves the pre-os.Root guarantee that the final

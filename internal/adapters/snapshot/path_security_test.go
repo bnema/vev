@@ -11,6 +11,49 @@ import (
 	"testing"
 )
 
+func TestRepositoryRejectsSymlinkedRoot(t *testing.T) {
+	configuredRoot := filepath.Join(t.TempDir(), "configured")
+	externalRoot := privateDir(t)
+	if err := os.Symlink(externalRoot, configuredRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewRepository(configuredRoot).openRoot(); err == nil {
+		t.Fatal("openRoot succeeded through configured-root symlink")
+	}
+
+	configuredRoot = privateDir(t)
+	repo := NewRepository(configuredRoot)
+	publication := repositoryPublication(t, "named", 1, []byte("configured"))
+	if err := repo.Publish(context.Background(), publication); err != nil {
+		t.Fatal(err)
+	}
+	external := NewRepository(externalRoot)
+	externalPublication := repositoryPublication(t, publication.Name, 1, []byte("external"))
+	if err := external.Publish(context.Background(), externalPublication); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(configuredRoot, configuredRoot+"-real"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalRoot, configuredRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := repo.Load(context.Background(), publication.Name); err == nil {
+		t.Fatal("Load succeeded through replaced configured-root symlink")
+	}
+	if err := repo.Maintain(context.Background()); err == nil {
+		t.Fatal("Maintain succeeded through replaced configured-root symlink")
+	}
+	loaded, err := external.Load(context.Background(), publication.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(loaded.Manifest) != string(externalPublication.Manifest) {
+		t.Fatal("external repository changed")
+	}
+}
+
 func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 	for _, target := range []string{repositoryGenerations, repositoryObjectsDir} {
 		t.Run(target, func(t *testing.T) {
