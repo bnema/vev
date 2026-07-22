@@ -879,6 +879,14 @@ func (d *Daemon) retryStoppedPurge(name string) error {
 }
 
 func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
+	return d.killSessionWithSnapshotDeadline(sess, reason, purge, nil)
+}
+
+// killSessionWithSnapshotDeadline shares Serve's shutdown budget with its
+// terminal checkpoint and coordinator join. A timed-out repository call keeps
+// only immutable capture state; it never observes closed worker channels or
+// session-owned cache that teardown has released.
+func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, purge bool, deadline *snapshotShutdownDeadline) error {
 	ringing := sess.anyAttention()
 	sess.mu.Lock()
 	isEphemeral := sess.ephemeral
@@ -912,7 +920,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 			sess.snapshotMu.Lock()
 			terminalGeneration := sess.snapshotGeneration
 			sess.snapshotMu.Unlock()
-			if !d.scheduleFinalSnapshot(sess) || !d.waitForSnapshotGeneration(sess, terminalGeneration) {
+			if !d.scheduleFinalSnapshot(sess) || !d.waitForSnapshotGenerationWithDeadline(sess, terminalGeneration, deadline) {
 				sess.mu.Lock()
 				name := sess.name
 				sess.mu.Unlock()
@@ -926,11 +934,26 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	}
 	if !isEphemeral {
 		// Joining first preserves byte ownership for a publication that is still
-		// encoding while this session is being torn down.
-		<-quarantineSnapshotCoordinator(sess)
-		sess.snapshotMu.Lock()
-		sess.snapshotChunkCache = nil
-		sess.snapshotMu.Unlock()
+		// encoding while this session is being torn down. Once Serve's shared
+		// budget expires, the worker is cancelled by its one final join instead;
+		// keep the cache reachable because an uncooperative writer may still be
+		// encoding immutable state.
+		quarantineDone := quarantineSnapshotCoordinator(sess)
+		joined := true
+		if deadline != nil {
+			select {
+			case <-quarantineDone:
+			case <-deadline.Done():
+				joined = false
+			}
+		} else {
+			<-quarantineDone
+		}
+		if joined {
+			sess.snapshotMu.Lock()
+			sess.snapshotChunkCache = nil
+			sess.snapshotMu.Unlock()
+		}
 	}
 	d.mu.Lock()
 	if _, ok := d.sessions[sess.id]; !ok {

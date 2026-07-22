@@ -484,11 +484,13 @@ func TestServeShutdownDeadlineDoesNotWaitTwiceForUncooperativeSnapshotRepository
 	case <-time.After(testWaitTimeout):
 		t.Fatal("Serve waited beyond the terminal checkpoint deadline")
 	}
+	require.LessOrEqual(t, clock.finalBudget.Load(), int64(snapshotFinalFlushTimeout), "shutdown must consume at most one snapshot deadline")
 	require.Equal(t, uint64(1), lastValid.Load(), "the last valid checkpoint remains available after the terminal attempt times out")
 }
 
 type serveShutdownClock struct {
 	finalTimers chan *snapshotDeadlineTimer
+	finalBudget atomic.Int64
 }
 
 func newServeShutdownClock() *serveShutdownClock {
@@ -500,7 +502,9 @@ func (c *serveShutdownClock) NewTimer(delay time.Duration) ports.Timer {
 	if delay != snapshotFinalFlushTimeout {
 		return stubTimer{}
 	}
-	timer := &snapshotDeadlineTimer{ch: make(chan time.Time, 1)}
+	timer := &snapshotDeadlineTimer{ch: make(chan time.Time, 1), onFire: func() {
+		c.finalBudget.Add(int64(delay))
+	}}
 	c.finalTimers <- timer
 	return timer
 }
@@ -612,12 +616,20 @@ func (c *snapshotDeadlineClock) nextTimer(t *testing.T) *snapshotDeadlineTimer {
 	}
 }
 
-type snapshotDeadlineTimer struct{ ch chan time.Time }
+type snapshotDeadlineTimer struct {
+	ch     chan time.Time
+	onFire func()
+}
 
 func (t *snapshotDeadlineTimer) C() <-chan time.Time    { return t.ch }
 func (*snapshotDeadlineTimer) Reset(time.Duration) bool { return true }
 func (*snapshotDeadlineTimer) Stop() bool               { return true }
-func (t *snapshotDeadlineTimer) fire()                  { t.ch <- time.Unix(101, 0) }
+func (t *snapshotDeadlineTimer) fire() {
+	if t.onFire != nil {
+		t.onFire()
+	}
+	t.ch <- time.Unix(101, 0)
+}
 
 // deterministicSnapshotClock records timer resets and advances only when a
 // test explicitly fires its timer. It deliberately has no wall-clock behavior.

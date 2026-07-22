@@ -568,8 +568,21 @@ func (d *Daemon) waitForSnapshotGeneration(sess *session, generation uint64) boo
 	if d == nil || sess == nil || generation == 0 {
 		return true
 	}
-	timer := d.clock.NewTimer(snapshotFinalFlushTimeout)
-	defer timer.Stop()
+	deadline := newSnapshotShutdownDeadline(d.clock)
+	defer deadline.stop()
+	return d.waitForSnapshotGenerationWithDeadline(sess, generation, deadline)
+}
+
+// waitForSnapshotGenerationWithDeadline waits for a forced checkpoint without
+// allocating another shutdown interval. Serve shares one deadline across every
+// session and the subsequent worker drain.
+func (d *Daemon) waitForSnapshotGenerationWithDeadline(sess *session, generation uint64, deadline *snapshotShutdownDeadline) bool {
+	if d == nil || sess == nil || generation == 0 {
+		return true
+	}
+	if deadline == nil {
+		return d.waitForSnapshotGeneration(sess, generation)
+	}
 	for {
 		sess.snapshotMu.Lock()
 		published := sess.snapshotPublishedGeneration >= generation
@@ -580,7 +593,7 @@ func (d *Daemon) waitForSnapshotGeneration(sess *session, generation uint64) boo
 		}
 		select {
 		case <-changed:
-		case <-timer.C():
+		case <-deadline.Done():
 			return false
 		}
 	}
@@ -1015,6 +1028,19 @@ func (d *Daemon) stopSnapshotEncodeWorker() {
 	if d == nil {
 		return
 	}
+	deadline := newSnapshotShutdownDeadline(d.clock)
+	defer deadline.stop()
+	d.stopSnapshotEncodeWorkerWithDeadline(deadline)
+}
+
+// stopSnapshotEncodeWorkerWithDeadline performs the one deadline-aware join
+// for a Serve shutdown. Queues are never closed, and detached writers only
+// retain immutable captures plus contexts/channels that remain live, so an
+// uncooperative repository call cannot race teardown or block process exit.
+func (d *Daemon) stopSnapshotEncodeWorkerWithDeadline(deadline *snapshotShutdownDeadline) {
+	if d == nil {
+		return
+	}
 	d.snapshotWorkerMu.Lock()
 	cancel := d.snapshotWorkerCancel
 	if cancel == nil || d.snapshotWorkerClosing {
@@ -1023,19 +1049,21 @@ func (d *Daemon) stopSnapshotEncodeWorker() {
 	}
 	// Stop accepting producers, then let the single worker drain its bounded
 	// queue. A non-context-aware store may still block indefinitely, so the
-	// injected clock bounds how long teardown waits before detaching it.
+	// shared shutdown deadline bounds the one and only join.
 	d.snapshotWorkerClosing = true
 	flush := d.snapshotWorkerFlush
 	done := d.snapshotWorkerDone
 	close(flush)
-	timer := d.clock.NewTimer(snapshotFinalFlushTimeout)
 	d.snapshotWorkerMu.Unlock()
 
+	if deadline == nil {
+		deadline = newSnapshotShutdownDeadline(d.clock)
+		defer deadline.stop()
+	}
 	select {
 	case <-done:
-		timer.Stop()
 		d.finishStoppedSnapshotWorker(false)
-	case <-timer.C():
+	case <-deadline.Done():
 		cancel()
 		d.finishStoppedSnapshotWorker(true)
 	}

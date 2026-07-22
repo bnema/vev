@@ -519,7 +519,15 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	// force-close. Finally drain the conn handlers, run one defensive sweep in
 	// case any ordering ever leaves a session behind, and join the session
 	// goroutines (readers unblock via pty.Close, coordinators via ctx cancel).
-	checkpointIncomplete := d.shutdownAll(ports.ReasonServerShutdown)
+	// One deadline owns every terminal checkpoint wait and the final worker
+	// join. A repository is allowed to ignore cancellation, so spending a fresh
+	// interval at either stage would make shutdown exceed its documented bound.
+	var snapshotDeadline *snapshotShutdownDeadline
+	if d.snapsEnabled {
+		snapshotDeadline = newSnapshotShutdownDeadline(d.clock)
+		defer snapshotDeadline.stop()
+	}
+	d.shutdownAllWithSnapshotDeadline(ports.ReasonServerShutdown, snapshotDeadline)
 	d.waitNotifies()
 	d.hardCancel()
 	d.serveCancel()
@@ -529,13 +537,9 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	d.connWg.Wait()
 	d.attachmentCleanupWg.Wait()
 	// Forced terminal checkpoints run before shutdown stops producers or the
-	// worker. If one consumed its bounded deadline, do not spend a second
-	// deadline trying to flush a repository call that already ignored it.
-	if checkpointIncomplete {
-		d.abandonSnapshotEncodeWorker()
-	} else {
-		d.stopSnapshotEncodeWorker()
-	}
+	// worker. The same deadline bounds the worker's final drain, including a
+	// repository call that ignores cancellation.
+	d.stopSnapshotEncodeWorkerWithDeadline(snapshotDeadline)
 	d.shutdownAll(ports.ReasonServerShutdown)
 	d.sessWg.Wait()
 	d.waitNotifies()
@@ -550,6 +554,10 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 // inserted after the snapshot: route rejects once closing is set, and both run
 // under d.mu. killSession (which relocks) runs after the lock is released.
 func (d *Daemon) shutdownAll(reason uint8) (checkpointIncomplete bool) {
+	return d.shutdownAllWithSnapshotDeadline(reason, nil)
+}
+
+func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapshotShutdownDeadline) (checkpointIncomplete bool) {
 	d.mu.Lock()
 	d.closing = true
 	for token, parked := range d.parked {
@@ -564,7 +572,7 @@ func (d *Daemon) shutdownAll(reason uint8) (checkpointIncomplete bool) {
 		return false
 	}
 	for _, s := range snapshot {
-		if err := d.killSession(s, reason, false); err != nil {
+		if err := d.killSessionWithSnapshotDeadline(s, reason, false, deadline); err != nil {
 			checkpointIncomplete = true
 			d.log.Error("closing session with unpersisted terminal state", "err", err)
 		}
@@ -572,24 +580,46 @@ func (d *Daemon) shutdownAll(reason uint8) (checkpointIncomplete bool) {
 	return checkpointIncomplete
 }
 
-// abandonSnapshotEncodeWorker stops accepting captures and detaches a worker
-// whose repository call already exceeded the terminal checkpoint deadline. A
-// repository implementation is allowed to ignore context cancellation, so
-// Serve cannot join that call without violating its shutdown bound.
-func (d *Daemon) abandonSnapshotEncodeWorker() {
+// snapshotShutdownDeadline is a single-use shutdown budget shared by forced
+// checkpoints and the final snapshot worker join. Its done channel is never
+// closed by callers, so a detached worker can safely retain session state until
+// an uncooperative repository call returns.
+type snapshotShutdownDeadline struct {
+	done     chan struct{}
+	stopCh   chan struct{}
+	finished chan struct{}
+	stopOnce sync.Once
+}
+
+func newSnapshotShutdownDeadline(clock ports.Clock) *snapshotShutdownDeadline {
+	deadline := &snapshotShutdownDeadline{done: make(chan struct{}), stopCh: make(chan struct{}), finished: make(chan struct{})}
+	timer := clock.NewTimer(snapshotFinalFlushTimeout)
+	go func() {
+		defer close(deadline.finished)
+		select {
+		case <-timer.C():
+			close(deadline.done)
+		case <-deadline.stopCh:
+			timer.Stop()
+		}
+	}()
+	return deadline
+}
+
+func (d *snapshotShutdownDeadline) stop() {
+	if d != nil {
+		d.stopOnce.Do(func() {
+			close(d.stopCh)
+			<-d.finished
+		})
+	}
+}
+
+func (d *snapshotShutdownDeadline) Done() <-chan struct{} {
 	if d == nil {
-		return
+		return nil
 	}
-	d.snapshotWorkerMu.Lock()
-	cancel := d.snapshotWorkerCancel
-	if cancel == nil || d.snapshotWorkerClosing {
-		d.snapshotWorkerMu.Unlock()
-		return
-	}
-	d.snapshotWorkerClosing = true
-	cancel()
-	d.snapshotWorkerMu.Unlock()
-	d.finishStoppedSnapshotWorker(true)
+	return d.done
 }
 
 func (d *Daemon) sessionsSnapshotLocked() []*session {
