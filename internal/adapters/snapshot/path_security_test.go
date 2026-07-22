@@ -35,7 +35,9 @@ func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 				t.Fatal("Load succeeded through symlinked repository component")
 			}
 			// Maintenance must reject the replacement rather than following it.
-			_ = repo.Maintain(context.Background())
+			if err := repo.Maintain(context.Background()); err == nil {
+				t.Fatal("Maintain succeeded through symlinked repository component")
+			}
 			got, err := os.ReadFile(guard)
 			if err != nil || string(got) != "guard" {
 				t.Fatalf("outside guard = %q, %v", got, err)

@@ -156,13 +156,14 @@ func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *mainte
 			}
 			record := (*syscall.Dirent)(unsafe.Pointer(&data[0]))
 			reclen := int(record.Reclen)
-			if reclen <= 0 || reclen > len(data) {
+			nameOffset := int(unsafe.Offsetof(syscall.Dirent{}.Name))
+			if reclen < nameOffset || reclen > len(data) {
 				return nil, false, syscall.EIO
 			}
 			data = data[reclen:]
 			// Advance past every raw record, including dot and disappeared entries.
 			cursor.offset = record.Off
-			nameBytes := unsafe.Slice((*byte)(unsafe.Pointer(&record.Name[0])), reclen-int(unsafe.Offsetof(syscall.Dirent{}.Name)))
+			nameBytes := unsafe.Slice((*byte)(unsafe.Pointer(&record.Name[0])), reclen-nameOffset)
 			if end := strings.IndexByte(string(nameBytes), 0); end >= 0 {
 				nameBytes = nameBytes[:end]
 			}

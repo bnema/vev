@@ -72,7 +72,7 @@ func (r *Repository) ensurePrivateDirectoryPhase(dir, phase string) error {
 		created = true
 	}
 	parentCloseErr := r.closeDescriptor(parent, "close snapshot parent directory")
-	if mkdirErr != nil && mkdirErr != syscall.EEXIST {
+	if mkdirErr != nil && !errors.Is(mkdirErr, syscall.EEXIST) {
 		err = mkdirErr
 		joinCloseError(&err, "close snapshot parent directory", parentCloseErr)
 		return err
@@ -326,7 +326,7 @@ func (r *Repository) remove(path string) (err error) {
 	defer func() {
 		joinCloseError(&err, "close snapshot parent directory", r.closeDescriptor(fd, "close snapshot parent directory"))
 	}()
-	if err := syscall.Unlinkat(fd, name); err != syscall.EISDIR {
+	if err := syscall.Unlinkat(fd, name); !errors.Is(err, syscall.EISDIR) {
 		return err
 	}
 	namePtr, err := syscall.BytePtrFromString(name)

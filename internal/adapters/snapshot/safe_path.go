@@ -3,6 +3,7 @@ package snapshot
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -166,7 +167,7 @@ func (r *Repository) createTempAt(dir string) (temp *os.File, err error) {
 		}
 		name := ".tmp-" + hex.EncodeToString(random[:])
 		tempFD, err := syscall.Openat(int(fd.Fd()), name, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
-		if err == syscall.EEXIST {
+		if errors.Is(err, syscall.EEXIST) {
 			continue
 		}
 		if err != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/bnema/vev/internal/ports"
@@ -226,20 +227,21 @@ func maintenanceManifestRefs(manifest codec.Manifest) (map[ports.SnapshotDigest]
 	return refs, true
 }
 
-func retainedManifestQueue(marked map[uint64]manifestMaintenance) []uint64 {
+// completeGenerationsDescending returns only complete generations in canonical
+// newest-first order for both manifest and object retention.
+func completeGenerationsDescending(marked map[uint64]manifestMaintenance) []uint64 {
 	complete := make([]uint64, 0, len(marked))
 	for generation, item := range marked {
 		if item.complete {
 			complete = append(complete, generation)
 		}
 	}
-	for i := range complete {
-		for j := i + 1; j < len(complete); j++ {
-			if complete[j] > complete[i] {
-				complete[i], complete[j] = complete[j], complete[i]
-			}
-		}
-	}
+	sort.Slice(complete, func(i, j int) bool { return complete[i] > complete[j] })
+	return complete
+}
+
+func retainedManifestQueue(marked map[uint64]manifestMaintenance) []uint64 {
+	complete := completeGenerationsDescending(marked)
 	if len(complete) <= 2 {
 		return nil
 	}
@@ -354,19 +356,7 @@ func retainedReferences(marked map[uint64]manifestMaintenance, conservative bool
 		}
 		return references
 	}
-	complete := make([]uint64, 0, len(marked))
-	for generation, item := range marked {
-		if item.complete {
-			complete = append(complete, generation)
-		}
-	}
-	for i := range complete {
-		for j := i + 1; j < len(complete); j++ {
-			if complete[j] > complete[i] {
-				complete[i], complete[j] = complete[j], complete[i]
-			}
-		}
-	}
+	complete := completeGenerationsDescending(marked)
 	keep := make(map[uint64]bool, 2)
 	for _, generation := range complete {
 		if len(keep) == 2 {

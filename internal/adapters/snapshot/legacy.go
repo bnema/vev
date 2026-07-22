@@ -38,6 +38,14 @@ func (r *Repository) openLegacyDirectory(path string) (legacyDirectory, error) {
 	return r.openDirectory(path)
 }
 
+// readLegacyImportCandidate reports whether an untrusted root entry can be
+// safely imported. Legacy scanning skips entries that disappear or fail secure
+// descriptor validation so one hostile .snap file does not block other imports.
+func (r *Repository) readLegacyImportCandidate(path string) ([]byte, bool) {
+	data, err := r.readBounded(path)
+	return data, err == nil
+}
+
 // LoadLegacy reads only pre-incremental root .snap files. It is deliberately
 // isolated from repository reads so incremental directories are never traversed.
 func (r *Repository) LoadLegacy(ctx context.Context) (out []ports.LegacySnapshot, err error) {
@@ -87,8 +95,8 @@ func (r *Repository) LoadLegacy(ctx context.Context) (out []ports.LegacySnapshot
 				return nil, fmt.Errorf("legacy snapshot import has too many files (maximum %d)", maxLegacySnapshotFiles)
 			}
 			path := filepath.Join(r.dir, entry.Name())
-			data, dataErr := r.readBounded(path)
-			if dataErr != nil {
+			data, importable := r.readLegacyImportCandidate(path)
+			if !importable {
 				continue
 			}
 			if len(data) > maxLegacySnapshotBytes-total {

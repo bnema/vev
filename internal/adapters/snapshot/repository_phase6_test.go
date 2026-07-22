@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,7 +28,6 @@ func TestRepositoryPublishDeleteManySessionsRaceFree(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for _, publication := range publications {
-		publication := publication
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
@@ -73,7 +73,7 @@ func TestRepositoryBoundsAndEvictsPartialMaintenanceSessionState(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := repo.Maintain(ctx); err != context.Canceled {
+	if err := repo.Maintain(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled Maintain error = %v, want context canceled", err)
 	}
 	locks, epochs = repo.sessionStateCounts()

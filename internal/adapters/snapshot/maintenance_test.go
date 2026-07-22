@@ -3,12 +3,15 @@ package snapshot
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"unsafe"
 
 	"github.com/bnema/vev/internal/ports"
 )
@@ -77,15 +80,37 @@ func TestReadMaintenanceDirentPreservesCursorAndCloseFailuresWithoutPaths(t *tes
 	}
 }
 
+func TestReadMaintenanceDirentRejectsRecordShorterThanNameOffset(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	nameOffset := int(unsafe.Offsetof(syscall.Dirent{}.Name))
+	recordData := make([]byte, nameOffset)
+	reclenOffset := unsafe.Offsetof(syscall.Dirent{}.Reclen)
+	binary.NativeEndian.PutUint16(recordData[reclenOffset:], 1)
+
+	repo.hooks.openMaintenanceDirectory = func(string) (maintenanceDirectory, error) {
+		return fakeMaintenanceDirectory{data: recordData}, nil
+	}
+	_, _, err := repo.readMaintenanceDirent("unused", 1, &maintenanceCursor{})
+	if !errors.Is(err, syscall.EIO) {
+		t.Fatalf("readMaintenanceDirent error = %v, want EIO", err)
+	}
+}
+
 type fakeMaintenanceDirectory struct {
+	data     []byte
 	seekErr  error
 	readErr  error
 	closeErr error
 }
 
 func (d fakeMaintenanceDirectory) Seek(int64, int) (int64, error) { return 0, d.seekErr }
-func (d fakeMaintenanceDirectory) ReadDirent([]byte) (int, error) { return 0, d.readErr }
-func (d fakeMaintenanceDirectory) Close() error                   { return d.closeErr }
+func (d fakeMaintenanceDirectory) ReadDirent(buffer []byte) (int, error) {
+	if d.readErr != nil {
+		return 0, d.readErr
+	}
+	return copy(buffer, d.data), nil
+}
+func (d fakeMaintenanceDirectory) Close() error { return d.closeErr }
 
 func TestRepositoryDeleteQuarantinesCanonicalSessionBeforeCleanup(t *testing.T) {
 	repo := NewRepository(privateDir(t))
