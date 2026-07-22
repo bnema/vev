@@ -18,25 +18,44 @@ func (r *Repository) openRoot() (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
+	if hook := r.hooks.afterOpenRoot; hook != nil {
+		hook()
+	}
 	current, err := os.Lstat(r.dir)
 	if err != nil {
-		return nil, closeRootOnError(root, err)
+		return nil, r.closeRootOnError(root, err)
 	}
 	if !current.IsDir() || current.Mode()&os.ModeSymlink != 0 {
-		return nil, closeRootOnError(root, &os.PathError{Op: "open", Path: r.dir, Err: syscall.ELOOP})
+		return nil, r.closeRootOnError(root, &os.PathError{Op: "open", Path: r.dir, Err: syscall.ELOOP})
 	}
 	pinned, err := root.Stat(".")
 	if err != nil {
-		return nil, closeRootOnError(root, err)
+		return nil, r.closeRootOnError(root, err)
 	}
 	if !os.SameFile(current, pinned) {
-		return nil, closeRootOnError(root, &os.PathError{Op: "open", Path: r.dir, Err: syscall.ESTALE})
+		return nil, r.closeRootOnError(root, &os.PathError{Op: "open", Path: r.dir, Err: syscall.ESTALE})
+	}
+	if !privateDirectory(pinned) {
+		return nil, r.closeRootOnError(root, fmt.Errorf("snapshot directory is not private"))
 	}
 	return root, nil
 }
 
-func closeRootOnError(root *os.Root, err error) error {
-	return errors.Join(err, root.Close())
+func privateDirectory(fi os.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && fi.IsDir() && int(st.Uid) == os.Geteuid() && fi.Mode().Perm() == 0o700
+}
+
+func (r *Repository) closeRoot(root *os.Root) error {
+	var injected error
+	if hook := r.hooks.closeRoot; hook != nil {
+		injected = hook()
+	}
+	return errors.Join(injected, root.Close())
+}
+
+func (r *Repository) closeRootOnError(root *os.Root, err error) error {
+	return errors.Join(err, r.closeRoot(root))
 }
 
 // rejectFinalSymlink preserves the pre-os.Root guarantee that the final
@@ -62,7 +81,14 @@ func (r *Repository) openDirectory(path string) (file *os.File, err error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { joinCloseError(&err, "close snapshot root", root.Close()) }()
+	defer func() {
+		closeErr := r.closeRoot(root)
+		if closeErr != nil && file != nil {
+			joinCloseError(&err, "close snapshot directory after root close failure", file.Close())
+			file = nil
+		}
+		joinCloseError(&err, "close snapshot root", closeErr)
+	}()
 	if err := rejectFinalSymlink(root, rel); err != nil {
 		return nil, err
 	}
@@ -93,7 +119,7 @@ func (r *Repository) stat(path string) (fi os.FileInfo, err error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { joinCloseError(&err, "close snapshot root", root.Close()) }()
+	defer func() { joinCloseError(&err, "close snapshot root", r.closeRoot(root)) }()
 	return root.Lstat(rel)
 }
 
@@ -109,7 +135,7 @@ func (r *Repository) createTempAt(dir string) (temp *os.File, err error) {
 		return nil, err
 	}
 	defer func() {
-		joinCloseError(&err, "close snapshot root", root.Close())
+		joinCloseError(&err, "close snapshot root", r.closeRoot(root))
 		if err != nil && temp != nil {
 			joinCloseError(&err, "close snapshot temporary file after root close failure", temp.Close())
 			temp = nil

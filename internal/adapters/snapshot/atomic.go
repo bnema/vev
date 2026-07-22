@@ -69,7 +69,7 @@ func (r *Repository) ensurePrivateDirectoryPhase(dir, phase string) (err error) 
 	if err != nil {
 		return err
 	}
-	defer func() { joinCloseError(&err, "close snapshot root", root.Close()) }()
+	defer func() { joinCloseError(&err, "close snapshot root", r.closeRoot(root)) }()
 	created := false
 	mkdirErr := root.Mkdir(rel, 0o700)
 	if mkdirErr == nil {
@@ -85,8 +85,7 @@ func (r *Repository) ensurePrivateDirectoryPhase(dir, phase string) (err error) 
 	if !fi.IsDir() {
 		return fmt.Errorf("snapshot directory is not a directory")
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok || int(st.Uid) != os.Geteuid() || fi.Mode().Perm() != 0o700 {
+	if !privateDirectory(fi) {
 		return fmt.Errorf("snapshot directory is not private")
 	}
 	if created {
@@ -250,7 +249,7 @@ func (r *Repository) installImmutable(oldPath, newPath string) (err error) {
 	if err != nil {
 		return err
 	}
-	defer func() { joinCloseError(&err, "close snapshot root", root.Close()) }()
+	defer func() { joinCloseError(&err, "close snapshot root", r.closeRoot(root)) }()
 	return root.Link(oldRel, newRel)
 }
 func (r *Repository) rename(oldPath, newPath string) (err error) {
@@ -271,7 +270,7 @@ func (r *Repository) rename(oldPath, newPath string) (err error) {
 	if err != nil {
 		return err
 	}
-	defer func() { joinCloseError(&err, "close snapshot root", root.Close()) }()
+	defer func() { joinCloseError(&err, "close snapshot root", r.closeRoot(root)) }()
 	return root.Rename(oldRel, newRel)
 }
 func (r *Repository) remove(path string) (err error) {
@@ -288,7 +287,7 @@ func (r *Repository) remove(path string) (err error) {
 	if err != nil {
 		return err
 	}
-	defer func() { joinCloseError(&err, "close snapshot root", root.Close()) }()
+	defer func() { joinCloseError(&err, "close snapshot root", r.closeRoot(root)) }()
 	return root.Remove(rel)
 }
 func (r *Repository) syncDirectory(dir string) error {
@@ -328,7 +327,7 @@ func (r *Repository) readBounded(path string) (data []byte, err error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { joinCloseError(&err, "close snapshot root", root.Close()) }()
+	defer func() { joinCloseError(&err, "close snapshot root", r.closeRoot(root)) }()
 	return r.readBoundedRoot(root, path)
 }
 
@@ -348,7 +347,7 @@ func (r *Repository) readBoundedRoot(root *os.Root, path string) ([]byte, error)
 }
 
 // readBounded remains for focused descriptor-hardening tests. Repository code
-// must use r.readBounded so intermediate components are pinned and no-follow.
+// must use r.readBounded so every path stays confined to the pinned private root.
 func readBounded(path string) ([]byte, error) {
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {

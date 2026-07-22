@@ -153,7 +153,7 @@ func (r *Repository) unchangedPublication(key string, publication ports.Snapshot
 	if err != nil {
 		return false, err
 	}
-	defer func() { joinCloseError(&err, "close snapshot root", root.Close()) }()
+	defer func() { joinCloseError(&err, "close snapshot root", r.closeRoot(root)) }()
 
 	generation, _, err := r.readHeadWithRoot(root, key)
 	if err != nil || generation != publication.Generation {

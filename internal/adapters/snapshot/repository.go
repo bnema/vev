@@ -71,7 +71,11 @@ type repositoryHooks struct {
 	rename                       func(string) error
 	syncDirectory                func(string) error
 	remove                       func(string) error
-	openMaintenanceDirectory     func(string) (maintenanceDirectory, error)
+	// afterOpenRoot and closeRoot make descriptor race and close-error paths
+	// deterministic in package tests. closeRoot never replaces the real close.
+	afterOpenRoot            func()
+	closeRoot                func() error
+	openMaintenanceDirectory func(string) (maintenanceDirectory, error)
 	// beforeMaintenanceWork observes each budgeted quarantine filesystem step.
 	// It is test-only instrumentation for hostile traversal bounds.
 	beforeMaintenanceWork func(string)

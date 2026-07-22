@@ -54,6 +54,97 @@ func TestRepositoryRejectsSymlinkedRoot(t *testing.T) {
 	}
 }
 
+func TestOpenRootRejectsUnsafePinnedRoot(t *testing.T) {
+	dir := privateDir(t)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewRepository(dir).openRoot(); err == nil || !strings.Contains(err.Error(), "not private") {
+		t.Fatalf("openRoot error = %v, want private-directory rejection", err)
+	}
+}
+
+func TestOpenRootDetectsReplacementAfterOpen(t *testing.T) {
+	dir := privateDir(t)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := dir + "-old"
+	replacementMarker := filepath.Join(dir, "replacement-marker")
+	repo := NewRepository(dir)
+	repo.hooks.afterOpenRoot = func() {
+		repo.hooks.afterOpenRoot = nil
+		if err := os.Rename(dir, old); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(replacementMarker, []byte("unchanged"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := repo.openRoot(); !errors.Is(err, syscall.ESTALE) {
+		t.Fatalf("openRoot error = %v, want ESTALE", err)
+	}
+	if got, err := os.ReadFile(replacementMarker); err != nil || string(got) != "unchanged" {
+		t.Fatalf("replacement marker = %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(old, "replacement-marker")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pinned tree was operated on: %v", err)
+	}
+}
+
+func TestOpenDirectoryClosesChildWhenRootCloseFails(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	if err := os.Mkdir(repo.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(repo.dir, "child")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	closeErr := errors.New("injected root close")
+	repo.hooks.closeRoot = func() error { return closeErr }
+	before := openDescriptorCount(t)
+	for range 20 {
+		file, err := repo.openDirectory(child)
+		if file != nil || !errors.Is(err, closeErr) {
+			t.Fatalf("openDirectory = (%v, %v), want nil and close error", file, err)
+		}
+	}
+	if got := openDescriptorCount(t); got > before+4 {
+		t.Fatalf("open descriptors after failed openDirectory = %d, before = %d", got, before)
+	}
+}
+
+func TestRootCloseErrorsJoinAndCloseRealRoot(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	if err := os.Mkdir(repo.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	closeErr := errors.New("injected root close")
+	repo.hooks.closeRoot = func() error { return closeErr }
+	root, err := repo.openRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.closeRoot(root); !errors.Is(err, closeErr) {
+		t.Fatalf("closeRoot error = %v, want injected error", err)
+	}
+	if _, err := root.Stat("."); err == nil {
+		t.Fatal("real root remained open after injected close error")
+	}
+
+	_, err = repo.stat(filepath.Join(repo.dir, "missing"))
+	if !errors.Is(err, closeErr) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat error = %v, want primary and close errors", err)
+	}
+}
+
 func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 	for _, target := range []string{repositoryGenerations, repositoryObjectsDir} {
 		t.Run(target, func(t *testing.T) {
@@ -78,7 +169,6 @@ func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 			if _, err := repo.Load(context.Background(), publication.Name); err == nil {
 				t.Fatal("Load succeeded through symlinked repository component")
 			}
-			// Maintenance must reject the replacement rather than following it.
 			if err := repo.Maintain(context.Background()); err == nil {
 				t.Fatal("Maintain succeeded through symlinked repository component")
 			}
@@ -103,7 +193,6 @@ func TestFinalSymlinksRejectedByRootOperations(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-
 	if _, err := repo.openDirectory(link); !errors.Is(err, syscall.ELOOP) || strings.Contains(err.Error(), repo.dir) {
 		t.Fatalf("openDirectory error = %v, want sanitized ELOOP", err)
 	}
