@@ -197,6 +197,7 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	d.mu.Unlock()
 	require.NotNil(t, restored)
 	require.False(t, restored.snapDirty.Load(), "a loaded generation must begin clean")
+	require.Equal(t, uint64(9), restored.snapshotPublishedGeneration, "the loaded manifest is the repository generation head")
 	require.Equal(t, 0, restored.active)
 	require.Equal(t, "/snapshot/cwd", restored.cwd)
 	require.Len(t, restored.tabs, 1)
@@ -211,6 +212,13 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	require.Equal(t, defaultScrollbackRows, pane.history.Cap())
 	require.Equal(t, defaultScrollbackCells, pane.history.CellCap())
 	pane.mu.Unlock()
+
+	startSnapshotEncodeWorker(t, d)
+	markSnapshotDirty(restored)
+	require.True(t, d.scheduleSnapshot(restored))
+	awaitSnapshotClean(t, restored)
+	require.Len(t, repository.publishes, 1)
+	require.Equal(t, uint64(10), repository.publishes[0].Generation, "a restored session must continue the concrete repository generation stream")
 }
 
 func TestRestoreIncrementalFallbackAndInvalidObjectMappings(t *testing.T) {

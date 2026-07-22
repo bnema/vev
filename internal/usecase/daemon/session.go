@@ -53,20 +53,21 @@ type session struct {
 	mruAt        atomic.Uint64
 	snapDirty    atomic.Bool
 	snapEligible atomic.Bool
-	// snapshotMu serializes the dirty generation with worker completion. It is
-	// intentionally independent from mu: persistence never holds session state
-	// locks while encoding or writing.
-	snapshotMu                  sync.Mutex
-	snapshotGeneration          uint64
-	snapshotPublishedGeneration uint64
-	snapshotNextEligibleAt      time.Time
+	// snapshotMu serializes mutation revisions and repository publication
+	// generations with worker completion. It is intentionally independent from
+	// mu: persistence never holds session state locks while encoding or writing.
+	snapshotMu                        sync.Mutex
+	snapshotGeneration                uint64 // newest mutation revision
+	snapshotPublishedGeneration       uint64 // newest repository generation
+	snapshotPublishedMutationRevision uint64
+	snapshotNextEligibleAt            time.Time
 	// The coordinator state below is guarded by snapshotMu. A capture can be
 	// queued globally or in flight, never more than one of each per session.
 	// Quarantine cancels the session publication context before destructive
 	// repository operations and publicationDone joins a started publication.
 	snapshotPending         bool
 	snapshotPendingCaptures uint
-	// snapshotForcedGeneration is the newest dirty generation a forced
+	// snapshotForcedGeneration is the newest mutation revision a forced
 	// checkpoint must publish. It survives an older routine capture so worker
 	// completion can enqueue exactly one forced successor.
 	snapshotForcedGeneration   uint64

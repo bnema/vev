@@ -41,7 +41,18 @@ func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bo
 	if sess.snapshotPublicationContext == nil {
 		sess.snapshotPublicationContext, sess.snapshotPublicationCancel = context.WithCancel(context.Background())
 	}
-	generation := sess.snapshotGeneration
+	// A capture's repository generation advances only from the last successful
+	// repository publication. Mutations are independently versioned, so several
+	// changes coalesced before this checkpoint still publish the immediate next
+	// repository generation and a failed attempt retries that same generation.
+	generation := sess.snapshotPublishedGeneration + 1
+	mutationRevision := sess.snapshotGeneration
+	// A restored or test-created dirty session can predate mutation revision
+	// tracking. Normalize that state into the first revision before capture.
+	if mutationRevision == 0 {
+		mutationRevision = 1
+		sess.snapshotGeneration = mutationRevision
+	}
 	publicationContext := sess.snapshotPublicationContext
 	sess.snapshotPendingCaptures++
 	sess.snapshotPending = true
@@ -50,6 +61,7 @@ func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bo
 
 	capture, ok := d.captureSnapshotState(sess, generation)
 	if capture != nil {
+		capture.mutationRevision = mutationRevision
 		capture.attemptKind = kind
 		capture.publicationContext = publicationContext
 	}

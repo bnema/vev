@@ -39,7 +39,7 @@ func (d *Daemon) restoreIncrementalSnapshots(ctx context.Context) {
 			d.snapshotRestoreFailure(name, err)
 			continue
 		}
-		if err := d.restoreSession(ctx, snapshot); err != nil {
+		if err := d.restoreSession(ctx, snapshot, generation.Generation); err != nil {
 			if ctx.Err() == nil {
 				d.snapshotRestoreFailure(name, err)
 			}

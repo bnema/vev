@@ -64,7 +64,7 @@ func validateRestoreSessionSnapshot(snap snapcodec.Session) error {
 
 // restoreSession owns the restored tabs until registration succeeds. Every
 // unsuccessful path closes their PTYs and cancels their shared session context.
-func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) error {
+func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session, repositoryGeneration uint64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -98,6 +98,9 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 	}()
 
 	sess := d.newRestoredSession(snap, sctx, cancel, opened)
+	// The loaded manifest is the repository head for this name. Future dirty
+	// checkpoints must continue from it rather than reuse generation one.
+	sess.snapshotPublishedGeneration = repositoryGeneration
 	registered, err := d.persistAndRegisterRestoredSession(ctx, sess)
 	if err != nil || !registered {
 		return err

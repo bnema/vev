@@ -34,7 +34,8 @@ const (
 type snapshotCapture struct {
 	session              *session
 	attemptKind          snapshotAttemptKind
-	generation           uint64
+	generation           uint64 // repository publication generation
+	mutationRevision     uint64
 	name                 string
 	createdAt            uint64
 	active               uint16

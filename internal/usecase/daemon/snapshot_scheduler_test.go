@@ -352,7 +352,7 @@ func TestMultipleForcedSnapshotsCoalesceToOneSuccessor(t *testing.T) {
 
 	awaitSnapshotClean(t, sess)
 	require.Equal(t, uint64(1), (<-publications).Generation)
-	require.Equal(t, uint64(3), (<-publications).Generation)
+	require.Equal(t, uint64(2), (<-publications).Generation)
 	sess.snapshotMu.Lock()
 	require.False(t, sess.snapshotPending)
 	require.Nil(t, sess.snapshotQueuedCapture)
@@ -911,7 +911,7 @@ func TestSnapshotWorkerQueueIsBoundedAndForcedCapturesCoalesce(t *testing.T) {
 	close(release)
 
 	gotGenerations := []uint64{(<-publications).Generation, (<-publications).Generation, (<-publications).Generation}
-	require.ElementsMatch(t, []uint64{1, 1, 3}, gotGenerations, "one forced successor bypasses the routine limit while queued work remains bounded")
+	require.ElementsMatch(t, []uint64{1, 1, 2}, gotGenerations, "one forced successor bypasses the routine limit while queued work remains bounded")
 	awaitSnapshotCleanSignal(inFlight)
 }
 
