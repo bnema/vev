@@ -118,9 +118,16 @@ func maintenanceDirectoryError(operation string, err error) error {
 
 // readMaintenanceDirent saves a resumable directory cursor. Linux d_off lets
 // a large getdents batch stop at limit. Darwin's syscall.ReadDirent instead
-// stores an entry count in the descriptor offset, so its record-sized batch is
-// always drained before that descriptor-maintained count is saved.
+// stores an entry count in the descriptor offset, so every returned buffer
+// must be drained before that descriptor-maintained count is saved.
 func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *maintenanceCursor) (entries []maintenanceDirEntry, done bool, err error) {
+	return r.readMaintenanceDirentWithDrain(dir, limit, cursor, drainMaintenanceDirentBatch(), directoryCookie)
+}
+
+// readMaintenanceDirentWithDrain contains the shared traversal logic. The
+// explicit parameters permit platform-independent verification of Darwin's
+// buffer-draining semantics with deterministic fake directories.
+func (r *Repository) readMaintenanceDirentWithDrain(dir string, limit int, cursor *maintenanceCursor, drainBuffer bool, cookie func(maintenanceDirectory, *syscall.Dirent) (int64, error)) (entries []maintenanceDirEntry, done bool, err error) {
 	file, err := r.openMaintenanceDirectory(dir)
 	if err != nil {
 		return nil, false, maintenanceDirectoryError("open maintenance directory", err)
@@ -145,7 +152,7 @@ func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *mainte
 
 	entries = make([]maintenanceDirEntry, 0, limit)
 	buffer := make([]byte, maintenanceDirentBufferSize)
-	for len(entries) < limit || drainMaintenanceDirentBatch() {
+	for {
 		count, err := file.ReadDirent(buffer)
 		if err != nil {
 			return nil, false, maintenanceDirectoryError("read maintenance directory", err)
@@ -156,14 +163,14 @@ func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *mainte
 		if count == 0 {
 			return entries, true, nil
 		}
-		for data := buffer[:count]; len(data) != 0 && (len(entries) < limit || drainMaintenanceDirentBatch()); {
+		for data := buffer[:count]; len(data) != 0 && (len(entries) < limit || drainBuffer); {
 			record, nameBytes, reclen, decodeErr := decodeMaintenanceDirent(data)
 			if decodeErr != nil {
 				return nil, false, decodeErr
 			}
 			data = data[reclen:]
 			// Advance past every raw record, including dot and disappeared entries.
-			offset, cookieErr := directoryCookie(file, record)
+			offset, cookieErr := cookie(file, record)
 			if cookieErr != nil {
 				return nil, false, maintenanceDirectoryError("tell maintenance directory", cookieErr)
 			}
@@ -190,15 +197,15 @@ func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *mainte
 			}
 			entries = append(entries, maintenanceDirEntry{name: name, isDir: stat.Mode&syscall.S_IFMT == syscall.S_IFDIR})
 		}
-		if drainMaintenanceDirentBatch() {
-			if len(entries) > limit {
+		if len(entries) >= limit {
+			if drainBuffer && len(entries) > limit {
+				// Darwin has already advanced the descriptor past this entire
+				// buffer, so retain only this final buffer's excess.
 				cursor.pending = append(cursor.pending, entries[limit:]...)
-				entries = entries[:limit]
 			}
-			return entries, false, nil
+			return entries[:limit], false, nil
 		}
 	}
-	return entries, false, nil
 }
 
 // decodeMaintenanceDirent copies a bounded raw record into aligned storage

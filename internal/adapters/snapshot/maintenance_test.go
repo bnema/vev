@@ -6,8 +6,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -160,6 +162,130 @@ func (d fakeMaintenanceDirectory) ReadDirent(buffer []byte) (int, error) {
 	return copy(buffer, d.data), nil
 }
 func (d fakeMaintenanceDirectory) Close() error { return d.closeErr }
+
+func TestReadMaintenanceDirentDrainsDarwinBatchesWithoutStarvation(t *testing.T) {
+	dir := privateDir(t)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	batches := [][]string{
+		{"one", "two"},
+		{"three", "four", "five", "six"},
+	}
+	for _, batch := range batches {
+		for _, name := range batch {
+			if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	file := &fakeMultiBatchMaintenanceDirectory{batches: [][]byte{
+		maintenanceDirentBatch(batches[0]...),
+		maintenanceDirentBatch(batches[1]...),
+	}}
+	repo := NewRepository(dir)
+	repo.hooks.openMaintenanceDirectory = func(string) (maintenanceDirectory, error) { return file, nil }
+	cursor := &maintenanceCursor{}
+
+	entries, done, err := repo.readMaintenanceDirentWithDrain(dir, 4, cursor, true, maintenanceTestDirectoryCookie)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Fatal("readMaintenanceDirentWithDrain() done = true, want false before EOF")
+	}
+	if got, want := maintenanceEntryNames(entries), []string{"one", "two", "three", "four"}; !slices.Equal(got, want) {
+		t.Fatalf("first entries = %v, want %v", got, want)
+	}
+	if got, want := maintenanceEntryNames(cursor.pending), []string{"five", "six"}; !slices.Equal(got, want) {
+		t.Fatalf("pending entries = %v, want exactly final-buffer excess %v", got, want)
+	}
+	if got := file.reads; got != 2 {
+		t.Fatalf("ReadDirent calls = %d, want 2 to fill the requested batch", got)
+	}
+
+	id := maintenanceCursorID(dir, "test")
+	repo.maintenanceCursors = map[string]*maintenanceCursor{id: cursor}
+	entries, done, err = repo.readMaintenanceDir(dir, 4, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Fatal("pending batch done = true, want false before EOF")
+	}
+	if got, want := maintenanceEntryNames(entries), []string{"five", "six"}; !slices.Equal(got, want) {
+		t.Fatalf("pending entries = %v, want %v", got, want)
+	}
+	if got := file.reads; got != 2 {
+		t.Fatalf("ReadDirent calls while delivering pending entries = %d, want 2", got)
+	}
+
+	entries, done, err = repo.readMaintenanceDir(dir, 4, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done {
+		t.Fatal("EOF batch done = false, want true")
+	}
+	if len(entries) != 0 {
+		t.Fatalf("EOF entries = %v, want none", entries)
+	}
+	if _, ok := repo.maintenanceCursors[id]; ok {
+		t.Fatal("EOF cursor retained after pending entries were delivered")
+	}
+}
+
+func maintenanceEntryNames(entries []maintenanceDirEntry) []string {
+	names := make([]string, len(entries))
+	for i, entry := range entries {
+		names[i] = entry.name
+	}
+	return names
+}
+
+func maintenanceDirentBatch(names ...string) []byte {
+	nameOffset := int(unsafe.Offsetof(syscall.Dirent{}.Name))
+	reclenOffset := unsafe.Offsetof(syscall.Dirent{}.Reclen)
+	var data []byte
+	for _, name := range names {
+		record := make([]byte, nameOffset+len(name)+1)
+		binary.NativeEndian.PutUint16(record[reclenOffset:], uint16(len(record)))
+		copy(record[nameOffset:], name)
+		data = append(data, record...)
+	}
+	return data
+}
+
+type fakeMultiBatchMaintenanceDirectory struct {
+	batches [][]byte
+	index   int
+	reads   int
+}
+
+func (d *fakeMultiBatchMaintenanceDirectory) Seek(offset int64, whence int) (int64, error) {
+	if whence == io.SeekCurrent {
+		return int64(d.index), nil
+	}
+	d.index = int(offset)
+	return offset, nil
+}
+
+func (d *fakeMultiBatchMaintenanceDirectory) ReadDirent(buffer []byte) (int, error) {
+	d.reads++
+	if d.index == len(d.batches) {
+		return 0, nil
+	}
+	batch := d.batches[d.index]
+	d.index++
+	return copy(buffer, batch), nil
+}
+
+func (d *fakeMultiBatchMaintenanceDirectory) Close() error { return nil }
+
+func maintenanceTestDirectoryCookie(file maintenanceDirectory, _ *syscall.Dirent) (int64, error) {
+	return file.Seek(0, io.SeekCurrent)
+}
 
 func TestRepositoryDeleteQuarantinesCanonicalSessionBeforeCleanup(t *testing.T) {
 	repo := NewRepository(privateDir(t))
