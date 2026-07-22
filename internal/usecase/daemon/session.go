@@ -908,6 +908,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 		d.refreshSessionCwd(sess)
 	}
 	var terminalSnapshotErr error
+	retainSnapshotRetry := false
 	if d.snapsEnabled && !isEphemeral {
 		if purge {
 			if d.snapshotRepository != nil {
@@ -928,6 +929,10 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 				if reason != ports.ReasonServerShutdown {
 					return terminalSnapshotErr
 				}
+				// Preserve any already-queued routine capture until the blocked
+				// worker can safely discard it. This retains the dirty generation
+				// and forced retry intent without adding another queue entry.
+				retainSnapshotRetry = true
 				d.persistShutdownSnapshotFailure(name, terminalSnapshotErr)
 			}
 		}
@@ -938,7 +943,12 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 		// budget expires, the worker is cancelled by its one final join instead;
 		// keep the cache reachable because an uncooperative writer may still be
 		// encoding immutable state.
-		quarantineDone := quarantineSnapshotCoordinator(sess)
+		var quarantineDone <-chan struct{}
+		if retainSnapshotRetry {
+			quarantineDone = quarantineSnapshotCoordinatorRetainingQueuedCapture(sess)
+		} else {
+			quarantineDone = quarantineSnapshotCoordinator(sess)
+		}
 		joined := true
 		if deadline != nil {
 			select {

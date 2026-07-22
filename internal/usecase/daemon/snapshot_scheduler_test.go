@@ -329,7 +329,11 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 
 	blockerStarted := make(chan struct{})
 	releaseBlocker := make(chan struct{})
-	defer close(releaseBlocker)
+	var releaseBlockerOnce sync.Once
+	release := func() { releaseBlockerOnce.Do(func() { close(releaseBlocker) }) }
+	// Register this after newTestDaemon's worker cleanup so the uncooperative
+	// repository call is always released before cleanup asks the worker to join.
+	t.Cleanup(release)
 	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
 		if publication.Name == "blocker" {
 			close(blockerStarted)
@@ -363,14 +367,28 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 	timer.fire()
 	require.Error(t, <-killed)
 
-	sess.snapshotMu.Lock()
-	require.True(t, sess.snapDirty.Load())
-	require.Greater(t, sess.snapshotForcedGeneration, sess.snapshotPublishedGeneration)
-	require.NotNil(t, sess.snapshotQueuedCapture, "the one routine capture remains retryable")
-	sess.snapshotMu.Unlock()
+	func() {
+		sess.snapshotMu.Lock()
+		defer sess.snapshotMu.Unlock()
+		require.True(t, sess.snapDirty.Load())
+		require.Greater(t, sess.snapshotForcedGeneration, sess.snapshotPublishedGeneration)
+		require.True(t, sess.snapshotPending)
+		require.Equal(t, uint(1), sess.snapshotPendingCaptures)
+		require.NotNil(t, sess.snapshotQueuedCapture, "the one routine capture remains retryable")
+		require.Nil(t, sess.snapshotInFlightCapture)
+	}()
 	d.snapshotWorkerMu.Lock()
 	require.LessOrEqual(t, len(d.snapshotJobs), snapshotQueueCapacity)
 	d.snapshotWorkerMu.Unlock()
+
+	// The retained capture is not published after quarantine, but releasing the
+	// unrelated blocked call lets the worker discard it and lets cleanup join.
+	release()
+	require.Eventually(t, func() bool {
+		sess.snapshotMu.Lock()
+		defer sess.snapshotMu.Unlock()
+		return !sess.snapshotPending && sess.snapshotQueuedCapture == nil
+	}, testWaitTimeout, time.Millisecond)
 }
 
 func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {

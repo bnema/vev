@@ -329,7 +329,20 @@ func quarantineSnapshotCoordinator(sess *session) <-chan struct{} {
 	return quarantineSnapshotCoordinatorWithEpoch(sess).done
 }
 
+// quarantineSnapshotCoordinatorRetainingQueuedCapture is used after a forced
+// shutdown checkpoint times out. Its queued capture is logical retry state, not
+// a repository operation: startSnapshotPublication rejects it while
+// quarantined, and the worker eventually discards it after its blocked call
+// returns.
+func quarantineSnapshotCoordinatorRetainingQueuedCapture(sess *session) <-chan struct{} {
+	return quarantineSnapshotCoordinatorWithOptions(sess, true).done
+}
+
 func quarantineSnapshotCoordinatorWithEpoch(sess *session) snapshotCoordinatorQuarantine {
+	return quarantineSnapshotCoordinatorWithOptions(sess, false)
+}
+
+func quarantineSnapshotCoordinatorWithOptions(sess *session, retainQueuedCapture bool) snapshotCoordinatorQuarantine {
 	if sess == nil {
 		done := make(chan struct{})
 		close(done)
@@ -343,10 +356,10 @@ func quarantineSnapshotCoordinatorWithEpoch(sess *session) snapshotCoordinatorQu
 	if sess.snapshotPublicationCancel != nil {
 		sess.snapshotPublicationCancel()
 	}
-	// Remove a not-yet-started capture from the coordinator immediately. The
-	// global queue may still contain it, but startSnapshotPublication compares
-	// identity and will discard it even if this session is later renamed.
-	if sess.snapshotQueuedCapture != nil {
+	if sess.snapshotQueuedCapture != nil && !retainQueuedCapture {
+		// A rename or purge must discard a capture under the old identity. The
+		// global queue may still contain it, but startSnapshotPublication
+		// compares identity and will discard it even if this session is renamed.
 		sess.snapshotQueuedCapture.coordinatorDiscarded = true
 		sess.snapshotQueuedCapture = nil
 		if sess.snapshotPendingCaptures > 0 {
