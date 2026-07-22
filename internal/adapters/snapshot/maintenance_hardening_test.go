@@ -46,6 +46,53 @@ func TestRepositoryMaintainBoundsCursorsAcrossHostileObjectShards(t *testing.T) 
 	}
 }
 
+func TestRepositoryMaintainBoundsEmptyObjectTempShards(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	key := sessionKey("named")
+	objects := filepath.Join(repo.sessionPath(key), repositoryObjectsDir)
+	const shards = maintenanceBatch * 2
+	for i := 0; i < shards; i++ {
+		if err := os.MkdirAll(filepath.Join(objects, fmt.Sprintf("%03d", i)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	openedShards := make(map[string]struct{}, shards)
+	opensThisPass := 0
+	tempPass := false
+	repo.hooks.openMaintenanceDirectory = func(dir string) (maintenanceDirectory, error) {
+		if tempPass && filepath.Dir(dir) == objects {
+			opensThisPass++
+			openedShards[dir] = struct{}{}
+		}
+		file, err := os.Open(dir)
+		if err != nil {
+			return nil, err
+		}
+		return osMaintenanceDirectory{file: file}, nil
+	}
+
+	for pass := 0; pass < shards*3; pass++ {
+		opensThisPass = 0
+		tempPass = true
+		if err := repo.Maintain(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		tempPass = false
+		if opensThisPass > 1 {
+			t.Fatalf("empty object shards opened in maintenance pass %d = %d, want at most 1", pass, opensThisPass)
+		}
+		state := repo.maintenanceSessions[key]
+		if state != nil && state.objectTempsDone {
+			if got := len(openedShards); got != shards {
+				t.Fatalf("empty object shards opened = %d, want %d", got, shards)
+			}
+			return
+		}
+	}
+	t.Fatal("empty object temp shards were not eventually traversed")
+}
+
 func TestRepositoryMaintainBoundsAndResumesDeepWideQuarantine(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	quarantine := filepath.Join(repo.dir, repositorySessionsDir, ".deleting-hostile")

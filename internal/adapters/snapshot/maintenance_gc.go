@@ -268,39 +268,37 @@ func (r *Repository) removeObsoleteManifests(ctx context.Context, key string, st
 	return nil
 }
 
-// removeObjectTemps processes a single shard to completion before advancing
-// the shard-root cursor. Thus a hostile set of shards can retain at most the
-// root cursor and the one active shard cursor, rather than one cursor per
-// discovered shard.
+// removeObjectTemps performs at most one shard traversal or one root-entry
+// discovery per Maintain call. Empty attacker-controlled shards consume no
+// removal budget, so this fixed step ceiling prevents an unbounded scan of
+// them while retaining only the root cursor and one active shard cursor.
 func (r *Repository) removeObjectTemps(ctx context.Context, key string, state *sessionMaintenance, budget *int) (bool, error) {
 	root := filepath.Join(r.sessionPath(key), repositoryObjectsDir)
-	for *budget > 0 {
-		if state.objectTempShard != "" {
-			done, err := r.removeTemps(ctx, filepath.Join(root, state.objectTempShard), budget, "object-temps:"+key+":"+state.objectTempShard)
-			if err != nil || !done {
-				return false, err
-			}
-			// This releases the active shard cursor before the next root entry
-			// is discovered. A completed small shard may therefore advance in
-			// this call without accumulating continuation state.
-			state.objectTempShard = ""
-			continue
+	if *budget == 0 {
+		return false, nil
+	}
+	if state.objectTempShard != "" {
+		done, err := r.removeTemps(ctx, filepath.Join(root, state.objectTempShard), budget, "object-temps:"+key+":"+state.objectTempShard)
+		if err != nil || !done {
+			return false, err
 		}
-		if state.objectTempsDone {
-			return true, nil
-		}
-		entries, done, err := r.readMaintenanceDir(root, 1, "object-temps-shards:"+key)
-		if errors.Is(err, os.ErrNotExist) {
-			state.objectTempsDone = true
-			return true, nil
-		}
-		if err != nil {
-			return false, fmt.Errorf("read snapshot object shards: %w", safeFilesystemError(err))
-		}
-		state.objectTempsDone = done
-		if len(entries) != 0 && entries[0].isDir {
-			state.objectTempShard = entries[0].name
-		}
+		state.objectTempShard = ""
+		return state.objectTempsDone, nil
+	}
+	if state.objectTempsDone {
+		return true, nil
+	}
+	entries, done, err := r.readMaintenanceDir(root, 1, "object-temps-shards:"+key)
+	if errors.Is(err, os.ErrNotExist) {
+		state.objectTempsDone = true
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read snapshot object shards: %w", safeFilesystemError(err))
+	}
+	state.objectTempsDone = done
+	if len(entries) != 0 && entries[0].isDir {
+		state.objectTempShard = entries[0].name
 	}
 	return state.objectTempsDone && state.objectTempShard == "", nil
 }

@@ -178,10 +178,22 @@ func TestRepositoryMaintainRetainsNewestTwoCompleteGenerations(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := repo.Maintain(context.Background()); err != nil {
-		t.Fatal(err)
-	}
 	key := sessionKey("named")
+	for pass := 0; pass < maintenanceBatch; pass++ {
+		if err := repo.Maintain(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		_, err := os.Lstat(repo.manifestPath(key, 1))
+		if errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("old manifest during Maintain = %v", err)
+		}
+		if pass == maintenanceBatch-1 {
+			t.Fatal("old manifest was not eventually collected")
+		}
+	}
 	for _, generation := range []uint64{2, 3} {
 		if _, err := os.Lstat(repo.manifestPath(key, generation)); err != nil {
 			t.Fatalf("retained manifest %d: %v", generation, err)

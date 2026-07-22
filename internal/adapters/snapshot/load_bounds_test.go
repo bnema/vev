@@ -75,9 +75,15 @@ func TestRepositoryMaintainDoesNotCollectBeyondRetainedMetadataBudget(t *testing
 			t.Fatal(err)
 		}
 	}
-	for pass := 0; pass < 3; pass++ {
+	for pass := 0; pass < maxMaintenanceMarkedGenerations*3; pass++ {
 		if err := repo.Maintain(context.Background()); err != nil {
 			t.Fatal(err)
+		}
+		if repo.maintenanceSessions[sessionKey("named")] == nil {
+			break
+		}
+		if pass == maxMaintenanceMarkedGenerations*3-1 {
+			t.Fatal("maintenance did not complete after bounded object-shard traversal")
 		}
 	}
 	if _, err := os.Lstat(repo.manifestPath(sessionKey("named"), 1)); err != nil {
