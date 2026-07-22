@@ -67,13 +67,19 @@ func (r *Repository) ensurePrivateDirectoryPhase(dir, phase string) error {
 		return err
 	}
 	created := false
-	if err := syscall.Mkdirat(parent, name, 0o700); err == nil {
+	mkdirErr := syscall.Mkdirat(parent, name, 0o700)
+	if mkdirErr == nil {
 		created = true
-	} else if err != syscall.EEXIST {
-		_ = syscall.Close(parent)
+	}
+	parentCloseErr := r.closeDescriptor(parent, "close snapshot parent directory")
+	if mkdirErr != nil && mkdirErr != syscall.EEXIST {
+		err = mkdirErr
+		joinCloseError(&err, "close snapshot parent directory", parentCloseErr)
 		return err
 	}
-	_ = syscall.Close(parent)
+	if parentCloseErr != nil {
+		return fmt.Errorf("close snapshot parent directory: %w", parentCloseErr)
+	}
 	opened, err := r.openDirectory(dir)
 	if err != nil {
 		return err
@@ -160,7 +166,7 @@ func (r *Repository) withAtomicTemp(dir string, data []byte, publish func(string
 	cleanup := func(cause error) error {
 		if !closed {
 			if err := r.closeFile(temp); err != nil {
-				cause = errors.Join(cause, err)
+				cause = errors.Join(cause, fmt.Errorf("close snapshot temporary file: %w", err))
 			}
 			closed = true
 		}
@@ -182,7 +188,7 @@ func (r *Repository) withAtomicTemp(dir string, data []byte, publish func(string
 	}
 	if err := r.closeFile(temp); err != nil {
 		closed = true
-		return cleanup(err)
+		return cleanup(fmt.Errorf("close snapshot temporary file: %w", err))
 	}
 	closed = true
 	removeTemp, err := publish(tempPath)
@@ -222,13 +228,36 @@ func (r *Repository) closeFile(f *os.File) error {
 	if r.hooks.closeFile != nil {
 		injected = r.hooks.closeFile(f.Name())
 	}
-	closeErr := f.Close()
-	if injected != nil {
-		return injected
-	}
-	return closeErr
+	return errors.Join(injected, f.Close())
 }
-func (r *Repository) installImmutable(oldPath, newPath string) error {
+
+// closeDescriptor closes a raw descriptor while keeping its close boundary
+// fault-injectable for tests. Callers add operation context before returning.
+func (r *Repository) closeDescriptor(fd int, operation string) error {
+	var injected error
+	if r.hooks.closeDescriptor != nil {
+		injected = r.hooks.closeDescriptor(operation)
+	}
+	return errors.Join(injected, syscall.Close(fd))
+}
+
+func (r *Repository) closeRepositoryFile(f *os.File, operation string) error {
+	var injected error
+	if r.hooks.closeDescriptor != nil {
+		injected = r.hooks.closeDescriptor(operation)
+	}
+	return errors.Join(injected, f.Close())
+}
+
+// joinCloseError retains a primary operation failure and appends contextual
+// close failures, including cleanup-only paths, without suppressing either.
+func joinCloseError(primary *error, operation string, closeErr error) {
+	if closeErr != nil {
+		*primary = errors.Join(*primary, fmt.Errorf("%s: %w", operation, closeErr))
+	}
+}
+
+func (r *Repository) installImmutable(oldPath, newPath string) (err error) {
 	if r.hooks.installImmutable != nil {
 		if err := r.hooks.installImmutable(newPath); err != nil {
 			return err
@@ -238,12 +267,16 @@ func (r *Repository) installImmutable(oldPath, newPath string) error {
 	if err != nil {
 		return err
 	}
-	defer syscall.Close(oldFD)
+	defer func() {
+		joinCloseError(&err, "close source snapshot parent directory", r.closeDescriptor(oldFD, "close source snapshot parent directory"))
+	}()
 	newFD, newName, err := r.repositoryParent(newPath)
 	if err != nil {
 		return err
 	}
-	defer syscall.Close(newFD)
+	defer func() {
+		joinCloseError(&err, "close destination snapshot parent directory", r.closeDescriptor(newFD, "close destination snapshot parent directory"))
+	}()
 	oldPtr, err := syscall.BytePtrFromString(oldName)
 	if err != nil {
 		return err
@@ -258,7 +291,7 @@ func (r *Repository) installImmutable(oldPath, newPath string) error {
 	}
 	return nil
 }
-func (r *Repository) rename(oldPath, newPath string) error {
+func (r *Repository) rename(oldPath, newPath string) (err error) {
 	if r.hooks.rename != nil {
 		if err := r.hooks.rename(newPath); err != nil {
 			return err
@@ -268,15 +301,19 @@ func (r *Repository) rename(oldPath, newPath string) error {
 	if err != nil {
 		return err
 	}
-	defer syscall.Close(oldFD)
+	defer func() {
+		joinCloseError(&err, "close source snapshot parent directory", r.closeDescriptor(oldFD, "close source snapshot parent directory"))
+	}()
 	newFD, newName, err := r.repositoryParent(newPath)
 	if err != nil {
 		return err
 	}
-	defer syscall.Close(newFD)
+	defer func() {
+		joinCloseError(&err, "close destination snapshot parent directory", r.closeDescriptor(newFD, "close destination snapshot parent directory"))
+	}()
 	return syscall.Renameat(oldFD, oldName, newFD, newName)
 }
-func (r *Repository) remove(path string) error {
+func (r *Repository) remove(path string) (err error) {
 	if r.hooks.remove != nil {
 		if err := r.hooks.remove(path); err != nil {
 			return err
@@ -286,7 +323,9 @@ func (r *Repository) remove(path string) error {
 	if err != nil {
 		return err
 	}
-	defer syscall.Close(fd)
+	defer func() {
+		joinCloseError(&err, "close snapshot parent directory", r.closeDescriptor(fd, "close snapshot parent directory"))
+	}()
 	if err := syscall.Unlinkat(fd, name); err != syscall.EISDIR {
 		return err
 	}

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -72,6 +74,37 @@ func TestWithAtomicTempPreservesLifecycleOrder(t *testing.T) {
 		if events[i] != want[i] {
 			t.Fatalf("lifecycle = %v, want %v", events, want)
 		}
+	}
+}
+
+func TestInstallImmutableJoinsPrimaryAndParentCloseErrors(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	dir := filepath.Join(repo.dir, "objects")
+	if err := repo.ensurePrivateDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(dir, "old")
+	newPath := filepath.Join(dir, "new")
+	if err := os.WriteFile(oldPath, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	closeCause := errors.New("injected source parent close failure")
+	repo.hooks.closeDescriptor = func(operation string) error {
+		if operation == "close source snapshot parent directory" {
+			return closeCause
+		}
+		return nil
+	}
+
+	err := repo.installImmutable(oldPath, newPath)
+	if !errors.Is(err, syscall.EEXIST) || !errors.Is(err, closeCause) {
+		t.Fatalf("installImmutable error = %v, want link and close failures", err)
+	}
+	if !strings.Contains(err.Error(), "close source snapshot parent directory") {
+		t.Fatalf("installImmutable error = %v, want close operation context", err)
 	}
 }
 

@@ -65,6 +65,7 @@ type repositoryHooks struct {
 	writeTemp                    func(string) error
 	syncFile                     func(string) error
 	closeFile                    func(string) error
+	closeDescriptor              func(string) error
 	installImmutable             func(string) error
 	rename                       func(string) error
 	syncDirectory                func(string) error

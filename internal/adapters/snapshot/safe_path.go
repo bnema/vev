@@ -25,17 +25,25 @@ func (r *Repository) repositoryFD(path string, finalFlags int, mode uint32) (*os
 	}
 	if rel == "." {
 		if finalFlags&syscall.O_DIRECTORY == 0 {
-			_ = syscall.Close(root)
-			return nil, fmt.Errorf("invalid snapshot root operation")
+			err = fmt.Errorf("invalid snapshot root operation")
+			joinCloseError(&err, "close snapshot root directory", r.closeDescriptor(root, "close snapshot root directory"))
+			return nil, err
 		}
-		return os.NewFile(uintptr(root), path), nil
+		file := os.NewFile(uintptr(root), path)
+		if file == nil {
+			err = fmt.Errorf("open snapshot root")
+			joinCloseError(&err, "close snapshot root directory", r.closeDescriptor(root, "close snapshot root directory"))
+			return nil, err
+		}
+		return file, nil
 	}
 	parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
 	fd := root
 	for i, part := range parts {
 		if part == "" || part == "." || part == ".." {
-			_ = syscall.Close(fd)
-			return nil, fmt.Errorf("invalid snapshot path")
+			err = fmt.Errorf("invalid snapshot path")
+			joinCloseError(&err, "close snapshot path directory", r.closeDescriptor(fd, "close snapshot path directory"))
+			return nil, err
 		}
 		flags := syscall.O_RDONLY | syscall.O_CLOEXEC | syscall.O_NOFOLLOW
 		if i != len(parts)-1 {
@@ -44,18 +52,26 @@ func (r *Repository) repositoryFD(path string, finalFlags int, mode uint32) (*os
 			flags = finalFlags | syscall.O_CLOEXEC | syscall.O_NOFOLLOW
 		}
 		next, openErr := syscall.Openat(fd, part, flags, mode)
-		_ = syscall.Close(fd)
+		closeErr := r.closeDescriptor(fd, "close snapshot path parent directory")
 		if openErr != nil {
-			return nil, openErr
+			err = openErr
+			joinCloseError(&err, "close snapshot path parent directory", closeErr)
+			return nil, err
+		}
+		if closeErr != nil {
+			err = fmt.Errorf("close snapshot path parent directory: %w", closeErr)
+			joinCloseError(&err, "close snapshot path child directory", r.closeDescriptor(next, "close snapshot path child directory"))
+			return nil, err
 		}
 		fd = next
 	}
-	f := os.NewFile(uintptr(fd), path)
-	if f == nil {
-		_ = syscall.Close(fd)
-		return nil, fmt.Errorf("open snapshot path")
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		err = fmt.Errorf("open snapshot path")
+		joinCloseError(&err, "close snapshot path descriptor", r.closeDescriptor(fd, "close snapshot path descriptor"))
+		return nil, err
 	}
-	return f, nil
+	return file, nil
 }
 
 func (r *Repository) repositoryParent(path string) (int, string, error) {
@@ -73,13 +89,21 @@ func (r *Repository) repositoryParent(path string) (int, string, error) {
 	}
 	for _, part := range parts[:len(parts)-1] {
 		if part == "" || part == "." || part == ".." {
-			_ = syscall.Close(fd)
-			return -1, "", fmt.Errorf("invalid snapshot path")
+			err = fmt.Errorf("invalid snapshot path")
+			joinCloseError(&err, "close snapshot parent directory", r.closeDescriptor(fd, "close snapshot parent directory"))
+			return -1, "", err
 		}
 		next, openErr := syscall.Openat(fd, part, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-		_ = syscall.Close(fd)
+		closeErr := r.closeDescriptor(fd, "close snapshot parent directory")
 		if openErr != nil {
-			return -1, "", openErr
+			err = openErr
+			joinCloseError(&err, "close snapshot parent directory", closeErr)
+			return -1, "", err
+		}
+		if closeErr != nil {
+			err = fmt.Errorf("close snapshot parent directory: %w", closeErr)
+			joinCloseError(&err, "close snapshot child directory", r.closeDescriptor(next, "close snapshot child directory"))
+			return -1, "", err
 		}
 		fd = next
 	}
@@ -105,13 +129,14 @@ func (r *Repository) openDirectory(path string) (*os.File, error) {
 	return r.repositoryFD(path, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
 }
 
-func (r *Repository) stat(path string) (syscall.Stat_t, error) {
+func (r *Repository) stat(path string) (st syscall.Stat_t, err error) {
 	file, err := r.repositoryFD(path, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return syscall.Stat_t{}, err
 	}
-	defer file.Close()
-	var st syscall.Stat_t
+	defer func() {
+		joinCloseError(&err, "close snapshot file", r.closeRepositoryFile(file, "close snapshot file"))
+	}()
 	if err := syscall.Fstat(int(file.Fd()), &st); err != nil {
 		return syscall.Stat_t{}, err
 	}
@@ -120,13 +145,21 @@ func (r *Repository) stat(path string) (syscall.Stat_t, error) {
 
 // createTempAt creates an exclusively owned temporary file in an already
 // validated directory. os.CreateTemp(path) would resolve that path again.
-func (r *Repository) createTempAt(dir string) (*os.File, error) {
+func (r *Repository) createTempAt(dir string) (temp *os.File, err error) {
 	fd, err := r.openDirectory(dir)
 	if err != nil {
 		return nil, err
 	}
-	defer fd.Close()
-	for i := 0; i < 100; i++ {
+	defer func() {
+		if closeErr := r.closeRepositoryFile(fd, "close snapshot temporary directory"); closeErr != nil {
+			if temp != nil {
+				joinCloseError(&err, "close snapshot temporary file after directory close failure", r.closeRepositoryFile(temp, "close snapshot temporary file after directory close failure"))
+				temp = nil
+			}
+			joinCloseError(&err, "close snapshot temporary directory", closeErr)
+		}
+	}()
+	for range 100 {
 		var random [8]byte
 		if _, err := rand.Read(random[:]); err != nil {
 			return nil, err
@@ -139,7 +172,13 @@ func (r *Repository) createTempAt(dir string) (*os.File, error) {
 		if err != nil {
 			return nil, err
 		}
-		return os.NewFile(uintptr(tempFD), filepath.Join(dir, name)), nil
+		temp = os.NewFile(uintptr(tempFD), filepath.Join(dir, name))
+		if temp == nil {
+			err = fmt.Errorf("open snapshot temporary file")
+			joinCloseError(&err, "close snapshot temporary descriptor", r.closeDescriptor(tempFD, "close snapshot temporary descriptor"))
+			return nil, err
+		}
+		return temp, nil
 	}
 	return nil, fmt.Errorf("create snapshot temporary file: too many collisions")
 }

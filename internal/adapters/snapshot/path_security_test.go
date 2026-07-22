@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -40,6 +41,29 @@ func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 				t.Fatalf("outside guard = %q, %v", got, err)
 			}
 		})
+	}
+}
+
+func TestStatReturnsInjectedCloseErrorWithContext(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	if err := repo.ensurePrivateDirectory(repo.dir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(repo.dir, "state")
+	if err := os.WriteFile(path, []byte("state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	closeCause := errors.New("injected stat close failure")
+	repo.hooks.closeDescriptor = func(got string) error {
+		if got == "close snapshot file" {
+			return closeCause
+		}
+		return nil
+	}
+
+	_, err := repo.stat(path)
+	if !errors.Is(err, closeCause) || !strings.Contains(err.Error(), "close snapshot file") {
+		t.Fatalf("stat error = %v, want contextual close failure", err)
 	}
 }
 
