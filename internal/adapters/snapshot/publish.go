@@ -33,6 +33,14 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	if err := r.ensureSession(key); err != nil {
 		return err
 	}
+	// The common replay path needs neither a manifest decode nor a reference
+	// map. Checking the immutable bytes directly also keeps its descriptor
+	// reads beneath the pinned repository root.
+	if generation, _, err := r.readHead(key); err == nil && generation == publication.Generation {
+		if current, err := r.readBounded(r.manifestPath(key, generation)); err == nil && equalBytes(current, publication.Manifest) {
+			return nil
+		}
+	}
 
 	current, currentManifest, currentRefs, err := r.currentPublication(ctx, publication.Name, key)
 	if err != nil {
@@ -98,7 +106,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	}
 
 	manifestPath := r.manifestPath(key, publication.Generation)
-	existing, exists, err := readOptionalBounded(manifestPath)
+	existing, exists, err := r.readOptionalBounded(manifestPath)
 	if err != nil {
 		return err
 	}
@@ -145,7 +153,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 func (r *Repository) currentPublication(ctx context.Context, name, key string) (uint64, []byte, map[ports.SnapshotDigest]codec.ObjectRef, error) {
 	generation, digest, err := r.readHead(key)
 	if err == nil {
-		data, readErr := readBounded(r.manifestPath(key, generation))
+		data, readErr := r.readBounded(r.manifestPath(key, generation))
 		if readErr == nil && sha256.Sum256(data) == digest {
 			refs, validateErr := validateManifest(data, name, generation)
 			if validateErr == nil {
@@ -311,7 +319,7 @@ func (r *Repository) verifyObjectFile(path string, digest ports.SnapshotDigest, 
 	if r.hooks.beforeObjectRead != nil {
 		r.hooks.beforeObjectRead(path)
 	}
-	data, exists, err := readOptionalBounded(path)
+	data, exists, err := r.readOptionalBounded(path)
 	if err != nil || !exists {
 		return exists, err
 	}

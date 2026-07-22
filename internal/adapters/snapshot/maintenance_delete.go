@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // Delete makes a session unavailable by durably moving it out of the canonical
@@ -42,10 +43,12 @@ func (r *Repository) Delete(ctx context.Context, name string) error {
 		}
 		return nil
 	}
-	if _, err := os.Lstat(canonical); errors.Is(err, os.ErrNotExist) {
+	if dir, err := r.openDirectory(canonical); errors.Is(err, os.ErrNotExist) {
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("stat snapshot session %q: %w", key, safeFilesystemError(err))
+	} else if err := dir.Close(); err != nil {
+		return fmt.Errorf("close snapshot session %q: %w", key, safeFilesystemError(err))
 	}
 	quarantine := filepath.Join(sessions, deletingSessionName(key))
 	if err := ctx.Err(); err != nil {
@@ -77,14 +80,14 @@ func (r *Repository) pendingQuarantine(dir, key string) (bool, error) {
 	if hook := r.hooks.beforePendingQuarantineCheck; hook != nil {
 		hook(path)
 	}
-	info, err := os.Lstat(path)
+	file, err := r.openDirectory(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return info.IsDir(), nil
+	return true, file.Close()
 }
 
 // Maintain reaps a bounded amount of stale state. Continuation handles are
@@ -131,7 +134,7 @@ func (r *Repository) maintainQuarantine(ctx context.Context, budget *int) (chang
 		if !r.consumeQuarantineWork(budget, "stat") {
 			return changed, false, nil
 		}
-		info, err := os.Lstat(state.current)
+		stat, err := r.stat(state.current)
 		if errors.Is(err, os.ErrNotExist) {
 			if state.current == state.root {
 				return changed, true, nil
@@ -139,10 +142,10 @@ func (r *Repository) maintainQuarantine(ctx context.Context, budget *int) (chang
 			state.current = filepath.Dir(state.current)
 			continue
 		}
-		if err != nil {
+		if err != nil && !errors.Is(err, syscall.ELOOP) {
 			return changed, false, err
 		}
-		if !info.IsDir() {
+		if err != nil || stat.Mode&syscall.S_IFMT != syscall.S_IFDIR {
 			if !r.consumeQuarantineWork(budget, "remove") {
 				return changed, false, nil
 			}
@@ -157,7 +160,7 @@ func (r *Repository) maintainQuarantine(ctx context.Context, budget *int) (chang
 		if !r.consumeQuarantineWork(budget, "open") {
 			return changed, false, nil
 		}
-		dir, err := os.Open(state.current)
+		dir, err := r.openDirectory(state.current)
 		if err != nil {
 			return changed, false, err
 		}

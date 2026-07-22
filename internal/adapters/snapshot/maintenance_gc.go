@@ -119,7 +119,7 @@ func (r *Repository) sessionMaintenanceState(key string) (*sessionMaintenance, e
 // itself stable maintenance state: we retain every classified reference until a
 // valid publication changes that state, rather than restarting the mark pass.
 func (r *Repository) maintenanceToken(key string) (string, bool, error) {
-	data, exists, err := readOptionalBounded(r.headPath(key))
+	data, exists, err := r.readOptionalBounded(r.headPath(key))
 	if err != nil {
 		return "", false, err
 	}
@@ -167,7 +167,7 @@ func (r *Repository) markSession(ctx context.Context, key string, state *session
 		if !ok {
 			continue
 		}
-		data, err := readBounded(r.manifestPath(key, generation))
+		data, err := r.readBounded(r.manifestPath(key, generation))
 		if err != nil {
 			state.uncertain = true
 			continue

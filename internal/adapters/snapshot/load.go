@@ -32,7 +32,7 @@ func (r *Repository) List(ctx context.Context) ([]string, error) {
 	budget := maxDirectoryTraversalEntries
 	out := make([]string, 0)
 	sessions := filepath.Join(r.dir, repositorySessionsDir)
-	err := walkDirectory(ctx, sessions, &budget, func(entry os.DirEntry) error {
+	err := r.walkDirectory(ctx, sessions, &budget, func(entry os.DirEntry) error {
 		if !entry.IsDir() || !canonicalSessionKey(entry.Name()) {
 			return nil
 		}
@@ -143,7 +143,7 @@ func (r *Repository) loadNewestGeneration(ctx context.Context, key string, budge
 			return ports.SnapshotGeneration{}, false, err
 		}
 		before = generation
-		data, err := readBounded(r.manifestPath(key, generation))
+		data, err := r.readBounded(r.manifestPath(key, generation))
 		if err != nil {
 			continue
 		}
@@ -170,7 +170,7 @@ func (r *Repository) loadNewestGeneration(ctx context.Context, key string, budge
 // newest-to-oldest fallback while work remains bounded by budget.
 func (r *Repository) nextGeneration(ctx context.Context, key string, before, exclude uint64, budget *int) (uint64, bool, error) {
 	var newest uint64
-	err := walkDirectory(ctx, filepath.Join(r.sessionPath(key), repositoryGenerations), budget, func(entry os.DirEntry) error {
+	err := r.walkDirectory(ctx, filepath.Join(r.sessionPath(key), repositoryGenerations), budget, func(entry os.DirEntry) error {
 		if entry.IsDir() {
 			return nil
 		}
@@ -195,8 +195,8 @@ func (r *Repository) nextGeneration(ctx context.Context, key string, before, exc
 // walkDirectory is the common finite directory traversal primitive for reads.
 // File.ReadDir maintains a cursor on one descriptor and returns at most one
 // small batch, so no full directory enumeration is retained in memory.
-func walkDirectory(ctx context.Context, dir string, budget *int, visit func(os.DirEntry) error) (err error) {
-	file, err := os.Open(dir)
+func (r *Repository) walkDirectory(ctx context.Context, dir string, budget *int, visit func(os.DirEntry) error) (err error) {
+	file, err := r.openDirectory(dir)
 	if err != nil {
 		return err
 	}
@@ -229,7 +229,7 @@ func walkDirectory(ctx context.Context, dir string, budget *int, visit func(os.D
 }
 
 func (r *Repository) loadGeneration(ctx context.Context, name, key string, generation uint64) (ports.SnapshotGeneration, error) {
-	data, err := readBounded(r.manifestPath(key, generation))
+	data, err := r.readBounded(r.manifestPath(key, generation))
 	if err != nil {
 		return ports.SnapshotGeneration{}, err
 	}
@@ -246,7 +246,7 @@ func (r *Repository) loadGeneration(ctx context.Context, name, key string, gener
 		if err := ctx.Err(); err != nil {
 			return ports.SnapshotGeneration{}, err
 		}
-		object, err := readBounded(r.objectPath(key, digest))
+		object, err := r.readBounded(r.objectPath(key, digest))
 		if err != nil {
 			return ports.SnapshotGeneration{}, err
 		}
@@ -266,7 +266,7 @@ func marshalHead(generation uint64, digest ports.SnapshotDigest) []byte {
 	return out
 }
 func (r *Repository) readHead(key string) (uint64, ports.SnapshotDigest, error) {
-	data, err := readBounded(r.headPath(key))
+	data, err := r.readBounded(r.headPath(key))
 	if err != nil {
 		return 0, ports.SnapshotDigest{}, err
 	}

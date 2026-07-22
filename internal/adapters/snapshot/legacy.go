@@ -32,7 +32,7 @@ func (r *Repository) openLegacyDirectory(path string) (legacyDirectory, error) {
 	if r.hooks.openLegacyDirectory != nil {
 		return r.hooks.openLegacyDirectory(path)
 	}
-	return os.Open(path)
+	return r.openDirectory(path)
 }
 
 // LoadLegacy reads only pre-incremental root .snap files. It is deliberately
@@ -41,9 +41,13 @@ func (r *Repository) LoadLegacy(ctx context.Context) (out []ports.LegacySnapshot
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// One budget covers marker recovery and import. Every directory entry costs
+	// work, including unrelated attacker-created names, so neither phase can be
+	// made unbounded by a huge legacy root.
+	budget := maxDirectoryTraversalEntries
 	// A marker is an already-authorized deletion, not an import candidate. Finish
 	// it before exposing any legacy blobs so process restart cannot republish one.
-	if err := r.cleanupPendingLegacyDeletes(ctx); err != nil {
+	if err := r.cleanupPendingLegacyDeletes(ctx, &budget); err != nil {
 		return nil, err
 	}
 	f, err := r.openLegacyDirectory(r.dir)
@@ -68,6 +72,10 @@ func (r *Repository) LoadLegacy(ctx context.Context) (out []ports.LegacySnapshot
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
+			if budget == 0 {
+				return nil, ErrDirectoryTraversalBudget
+			}
+			budget--
 			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".snap") {
 				continue
 			}
@@ -76,13 +84,7 @@ func (r *Repository) LoadLegacy(ctx context.Context) (out []ports.LegacySnapshot
 				return nil, fmt.Errorf("legacy snapshot import has too many files (maximum %d)", maxLegacySnapshotFiles)
 			}
 			path := filepath.Join(r.dir, entry.Name())
-			// Check the prospective size before readBounded allocates a buffer.
-			// readBounded repeats the security validation and the actual length is
-			// checked below to close the metadata/read race.
-			if info, statErr := os.Lstat(path); statErr == nil && info.Mode().IsRegular() && info.Size() > int64(maxLegacySnapshotBytes-total) {
-				return nil, fmt.Errorf("legacy snapshot import exceeds aggregate byte limit (%d bytes)", maxLegacySnapshotBytes)
-			}
-			data, dataErr := readBounded(path)
+			data, dataErr := r.readBounded(path)
 			if dataErr != nil {
 				continue
 			}
@@ -180,8 +182,8 @@ func (r *Repository) clearLegacyDeleteAuthorization(name string) error {
 	return nil
 }
 
-func (r *Repository) cleanupPendingLegacyDeletes(ctx context.Context) error {
-	markers, err := r.pendingLegacyDeleteMarkers(ctx)
+func (r *Repository) cleanupPendingLegacyDeletes(ctx context.Context, budget *int) error {
+	markers, err := r.pendingLegacyDeleteMarkers(ctx, budget)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -196,7 +198,7 @@ func (r *Repository) cleanupPendingLegacyDeletes(ctx context.Context) error {
 	return nil
 }
 
-func (r *Repository) pendingLegacyDeleteMarkers(ctx context.Context) (markers []legacyDeleteMarker, err error) {
+func (r *Repository) pendingLegacyDeleteMarkers(ctx context.Context, budget *int) (markers []legacyDeleteMarker, err error) {
 	f, err := r.openLegacyDirectory(r.dir)
 	if err != nil {
 		return nil, err
@@ -213,6 +215,10 @@ func (r *Repository) pendingLegacyDeleteMarkers(ctx context.Context) (markers []
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
+			if *budget == 0 {
+				return nil, ErrDirectoryTraversalBudget
+			}
+			*budget--
 			if entry.IsDir() || !strings.HasPrefix(entry.Name(), legacyDeleteMarkerPrefix) {
 				continue
 			}
@@ -224,10 +230,7 @@ func (r *Repository) pendingLegacyDeleteMarkers(ctx context.Context) (markers []
 				return nil, fmt.Errorf("invalid legacy deletion marker")
 			}
 			path := filepath.Join(r.dir, entry.Name())
-			if info, statErr := os.Lstat(path); statErr != nil || !info.Mode().IsRegular() || info.Size() > maxLegacyDeleteNameBytes {
-				return nil, fmt.Errorf("invalid legacy deletion marker")
-			}
-			data, dataErr := readBounded(path)
+			data, dataErr := r.readBounded(path)
 			if dataErr != nil || len(data) > maxLegacyDeleteNameBytes || sessionKey(string(data)) != key {
 				return nil, fmt.Errorf("invalid legacy deletion marker")
 			}
@@ -300,7 +303,7 @@ func (r *Repository) tombstoned(name string) (bool, error) {
 	if name == "" {
 		return false, nil
 	}
-	data, err := readBounded(filepath.Join(r.dir, tombstoneFilename(sessionKey(name))))
+	data, err := r.readBounded(filepath.Join(r.dir, tombstoneFilename(sessionKey(name))))
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}

@@ -101,7 +101,7 @@ func (r *Repository) openMaintenanceDirectory(dir string) (maintenanceDirectory,
 	if open := r.hooks.openMaintenanceDirectory; open != nil {
 		return open(dir)
 	}
-	file, err := os.Open(dir)
+	file, err := r.openDirectory(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -170,14 +170,20 @@ func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *mainte
 			if name == "." || name == ".." || name == "" {
 				continue
 			}
-			info, err := os.Lstat(filepath.Join(dir, name))
+			stat, err := r.stat(filepath.Join(dir, name))
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			if err != nil {
+				// A final symlink is not traversed and is treated as a non-directory;
+				// deletion remains dirfd-relative and therefore unlinks only the link.
+				if errors.Is(err, syscall.ELOOP) {
+					entries = append(entries, maintenanceDirEntry{name: name})
+					continue
+				}
 				return nil, false, maintenanceDirectoryError("stat maintenance directory entry", err)
 			}
-			entries = append(entries, maintenanceDirEntry{name: name, isDir: info.IsDir()})
+			entries = append(entries, maintenanceDirEntry{name: name, isDir: stat.Mode&syscall.S_IFMT == syscall.S_IFDIR})
 		}
 	}
 	return entries, false, nil

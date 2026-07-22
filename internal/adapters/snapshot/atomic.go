@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"unsafe"
 
 	"github.com/bnema/vev/pkg/safedir"
 )
@@ -34,26 +35,60 @@ func (r *Repository) ensurePrivateDirectory(dir string) error {
 }
 
 func (r *Repository) ensurePrivateDirectoryPhase(dir, phase string) error {
-	_, err := os.Lstat(dir)
-	created := errors.Is(err, os.ErrNotExist)
-	if err != nil && !created {
-		return err
-	}
-	if created {
-		parent := filepath.Dir(dir)
-		if _, err := os.Lstat(parent); errors.Is(err, os.ErrNotExist) {
-			if err := r.ensurePrivateDirectoryPhase(parent, "snapshot directory"); err != nil {
-				return err
+	// The configured root is the trust boundary. Once it is private, every
+	// descendant is created through a pinned parent descriptor rather than via
+	// a path that an attacker can replace between checks.
+	if filepath.Clean(dir) == filepath.Clean(r.dir) {
+		_, statErr := os.Lstat(dir)
+		created := errors.Is(statErr, os.ErrNotExist)
+		if statErr != nil && !created {
+			return statErr
+		}
+		if err := safedir.EnsurePrivate(dir); err != nil {
+			return err
+		}
+		if created {
+			if hook := r.hooks.syncDirectory; hook != nil {
+				if err := hook(filepath.Dir(dir)); err != nil {
+					return fmt.Errorf("%s parent directory sync: %w", phase, err)
+				}
 			}
-		} else if err != nil {
-			return err
+			if err := syncDirectory(filepath.Dir(dir)); err != nil {
+				return fmt.Errorf("%s parent directory sync: %w", phase, err)
+			}
 		}
-		if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-			return err
-		}
+		return nil
 	}
-	if err := safedir.EnsurePrivate(dir); err != nil {
+	if err := r.ensurePrivateDirectoryPhase(filepath.Dir(dir), "snapshot directory"); err != nil {
 		return err
+	}
+	parent, name, err := r.repositoryParent(dir)
+	if err != nil {
+		return err
+	}
+	created := false
+	if err := syscall.Mkdirat(parent, name, 0o700); err == nil {
+		created = true
+	} else if err != syscall.EEXIST {
+		_ = syscall.Close(parent)
+		return err
+	}
+	_ = syscall.Close(parent)
+	opened, err := r.openDirectory(dir)
+	if err != nil {
+		return err
+	}
+	var st syscall.Stat_t
+	statErr := syscall.Fstat(int(opened.Fd()), &st)
+	closeErr := opened.Close()
+	if statErr != nil {
+		return statErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if int(st.Uid) != os.Geteuid() || st.Mode&0o777 != 0o700 {
+		return fmt.Errorf("snapshot directory is not private")
 	}
 	if created {
 		if err := r.syncDirectory(filepath.Dir(dir)); err != nil {
@@ -111,7 +146,7 @@ func (r *Repository) writeImmutable(path string, data []byte, verifier func([]by
 	closed = true
 	if err := r.installImmutable(tempPath, path); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			existing, readErr := readBounded(path)
+			existing, readErr := r.readBounded(path)
 			if readErr != nil {
 				return cleanup(readErr)
 			}
@@ -185,7 +220,7 @@ func (r *Repository) createTemp(dir string) (*os.File, error) {
 			return nil, err
 		}
 	}
-	return os.CreateTemp(dir, ".tmp-")
+	return r.createTempAt(dir)
 }
 func (r *Repository) writeFile(f *os.File, data []byte) error {
 	if r.hooks.writeTemp != nil {
@@ -221,7 +256,29 @@ func (r *Repository) installImmutable(oldPath, newPath string) error {
 			return err
 		}
 	}
-	return os.Link(oldPath, newPath)
+	oldFD, oldName, err := r.repositoryParent(oldPath)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(oldFD)
+	newFD, newName, err := r.repositoryParent(newPath)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(newFD)
+	oldPtr, err := syscall.BytePtrFromString(oldName)
+	if err != nil {
+		return err
+	}
+	newPtr, err := syscall.BytePtrFromString(newName)
+	if err != nil {
+		return err
+	}
+	_, _, errno := syscall.Syscall6(syscall.SYS_LINKAT, uintptr(oldFD), uintptr(unsafe.Pointer(oldPtr)), uintptr(newFD), uintptr(unsafe.Pointer(newPtr)), 0, 0)
+	if errno != 0 {
+		return errno
+	}
+	return nil
 }
 func (r *Repository) rename(oldPath, newPath string) error {
 	if r.hooks.rename != nil {
@@ -229,7 +286,17 @@ func (r *Repository) rename(oldPath, newPath string) error {
 			return err
 		}
 	}
-	return os.Rename(oldPath, newPath)
+	oldFD, oldName, err := r.repositoryParent(oldPath)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(oldFD)
+	newFD, newName, err := r.repositoryParent(newPath)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(newFD)
+	return syscall.Renameat(oldFD, oldName, newFD, newName)
 }
 func (r *Repository) remove(path string) error {
 	if r.hooks.remove != nil {
@@ -237,7 +304,23 @@ func (r *Repository) remove(path string) error {
 			return err
 		}
 	}
-	return os.Remove(path)
+	fd, name, err := r.repositoryParent(path)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(fd)
+	if err := syscall.Unlinkat(fd, name); err != syscall.EISDIR {
+		return err
+	}
+	namePtr, err := syscall.BytePtrFromString(name)
+	if err != nil {
+		return err
+	}
+	_, _, errno := syscall.Syscall(syscall.SYS_UNLINKAT, uintptr(fd), uintptr(unsafe.Pointer(namePtr)), uintptr(0x200)) // AT_REMOVEDIR
+	if errno != 0 {
+		return errno
+	}
+	return nil
 }
 func (r *Repository) syncDirectory(dir string) error {
 	if r.hooks.syncDirectory != nil {
@@ -259,8 +342,8 @@ func syncDirectory(dir string) error {
 	return f.Close()
 }
 
-func readOptionalBounded(path string) ([]byte, bool, error) {
-	data, err := readBounded(path)
+func (r *Repository) readOptionalBounded(path string) ([]byte, bool, error) {
+	data, err := r.readBounded(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	}
@@ -270,6 +353,16 @@ func readOptionalBounded(path string) ([]byte, bool, error) {
 // readBounded opens the final component with O_NOFOLLOW, validates the opened
 // descriptor, then reads a hard bounded amount. It deliberately never trusts
 // path metadata obtained before opening the descriptor.
+func (r *Repository) readBounded(path string) ([]byte, error) {
+	f, err := r.repositoryFD(path, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	return readBoundedFile(f)
+}
+
+// readBounded remains for focused descriptor-hardening tests. Repository code
+// must use r.readBounded so intermediate components are pinned and no-follow.
 func readBounded(path string) ([]byte, error) {
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -280,6 +373,11 @@ func readBounded(path string) ([]byte, error) {
 		_ = syscall.Close(fd)
 		return nil, fmt.Errorf("open snapshot file")
 	}
+	return readBoundedFile(f)
+}
+
+func readBoundedFile(f *os.File) ([]byte, error) {
+	fd := int(f.Fd())
 	var stat syscall.Stat_t
 	if err := syscall.Fstat(fd, &stat); err != nil {
 		_ = f.Close()
