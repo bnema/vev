@@ -1,6 +1,10 @@
 package vt
 
-import "github.com/bnema/vev/pkg/renderer"
+import (
+	"errors"
+
+	"github.com/bnema/vev/pkg/renderer"
+)
 
 func (s *Screen) index() {
 	if s.Frame.Height == 0 {
@@ -88,9 +92,10 @@ func (s *Screen) emitLineEvicted(top, n int) {
 
 func (s *Screen) recordEvicted(row []renderer.Cell) {
 	if s.history != nil {
-		// Oversized rows cannot fit the configured cell budget. Scrolling must
-		// still complete (and notify observers), so history drops that row.
-		_ = s.history.Append(row)
+		if err := s.history.Append(row); errors.Is(err, ErrHistoryRowTooWide) {
+			// Oversized rows cannot fit the configured cell budget. History drops
+			// them, while scrolling and eviction observers proceed below.
+		}
 	}
 	if s.OnLineEvicted != nil {
 		s.OnLineEvicted(append([]renderer.Cell(nil), row...))

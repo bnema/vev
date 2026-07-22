@@ -69,7 +69,9 @@ func TestLivePurgeRetainsTombstoneAcrossPartialSourceDeletion(t *testing.T) {
 			repository := &retryablePurgeRepository{incrementalErr: tt.incremental, legacyErr: tt.legacy}
 			WithSnapshotRepository(repository, repository)(d)
 			sess := newSnapshotTestSession(t, "work", false, "/work")
-			sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY).EXPECT().Close().Return(nil).Once()
+			pty, ok := sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+			require.True(t, ok, "snapshot test pane must use MockPTY")
+			pty.EXPECT().Close().Return(nil).Once()
 			d.sessions = map[domain.SessionID]*session{sess.id: sess}
 
 			require.Error(t, d.killSession(sess, ports.ReasonSessionKilled, true))

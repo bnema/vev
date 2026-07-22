@@ -266,8 +266,8 @@ func TestHistoryRejectsRowWiderThanCellBudgetWithoutMutation(t *testing.T) {
 
 func TestScreenDropsOversizedHistoryRowsWithoutInterruptingScroll(t *testing.T) {
 	screen := NewScreenWithHistory(4, 2, HistoryConfig{MaxRows: 2, MaxCells: 3})
-	events := 0
-	screen.OnLineEvicted = func([]renderer.Cell) { events++ }
+	var events []string
+	screen.OnLineEvicted = func(row []renderer.Cell) { events = append(events, rowText(row)) }
 	copy(screen.Frame.Row(0), historyRow("AAAA"))
 	copy(screen.Frame.Row(1), historyRow("BBBB"))
 	screen.scrollUpRegion(0, 1, 1)
@@ -275,8 +275,8 @@ func TestScreenDropsOversizedHistoryRowsWithoutInterruptingScroll(t *testing.T) 
 	if got := screen.History().Len(); got != 0 {
 		t.Fatalf("oversized scrollback rows = %d, want 0", got)
 	}
-	if got := events; got != 1 {
-		t.Fatalf("scroll callbacks = %d, want 1", got)
+	if got, want := events, []string{"AAAA"}; !equalStrings(got, want) {
+		t.Fatalf("scroll callbacks = %#v, want %#v", got, want)
 	}
 	if got := lineText(screen, 0); got != "BBBB" {
 		t.Fatalf("screen did not scroll after history drop: row 0 = %q", got)

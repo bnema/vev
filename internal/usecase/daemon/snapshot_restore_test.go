@@ -78,6 +78,7 @@ func (r *snapshotAcceptanceRepository) Load(ctx context.Context, name string) (p
 	if !ok {
 		return ports.SnapshotGeneration{}, errors.New("missing generation")
 	}
+	generation = cloneAcceptanceGeneration(generation)
 	if r.loadMutate != nil && len(r.publishes) > 0 {
 		generation = r.loadMutate(generation, r.publishes[len(r.publishes)-1])
 	}
@@ -88,6 +89,30 @@ func (*snapshotAcceptanceRepository) Delete(context.Context, string) error      
 func (*snapshotAcceptanceRepository) Tombstone(context.Context, string) error       { return nil }
 func (*snapshotAcceptanceRepository) DeleteTombstone(context.Context, string) error { return nil }
 func (*snapshotAcceptanceRepository) Maintain(context.Context) error                { return nil }
+
+func TestSnapshotAcceptanceRepositoryLoadMutationDoesNotChangeStoredGeneration(t *testing.T) {
+	digest := ports.SnapshotDigest{1}
+	stored := ports.SnapshotGeneration{
+		Name:     "work",
+		Manifest: []byte("manifest"),
+		Objects:  map[ports.SnapshotDigest][]byte{digest: []byte("object")},
+	}
+	repository := &snapshotAcceptanceRepository{
+		generations: map[string]ports.SnapshotGeneration{"work": stored},
+		publishes:   []ports.SnapshotPublication{{Name: "work"}},
+		loadMutate: func(g ports.SnapshotGeneration, _ ports.SnapshotPublication) ports.SnapshotGeneration {
+			g.Manifest[0] = 'M'
+			g.Objects[digest][0] = 'O'
+			delete(g.Objects, digest)
+			return g
+		},
+	}
+
+	_, err := repository.Load(context.Background(), "work")
+	require.NoError(t, err)
+	require.Equal(t, []byte("manifest"), repository.generations["work"].Manifest)
+	require.Equal(t, []byte("object"), repository.generations["work"].Objects[digest])
+}
 
 func cloneAcceptanceGeneration(g ports.SnapshotGeneration) ports.SnapshotGeneration {
 	out := g

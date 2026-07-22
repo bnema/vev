@@ -396,7 +396,8 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 	}
 
 	sess := newSnapshotTestSession(t, "work", false, "/work")
-	pty := sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+	pty, ok := sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+	require.True(t, ok, "snapshot test pane must use MockPTY")
 	pty.EXPECT().Close().Return(nil).Maybe()
 	d.sessions[sess.id] = sess
 	markSnapshotDirty(sess)
