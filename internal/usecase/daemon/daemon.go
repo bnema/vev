@@ -119,11 +119,7 @@ type Daemon struct {
 	// read-only migration input and is never used for new writes.
 	snapshotRepository ports.SnapshotRepository
 	legacySnapshots    ports.LegacySnapshotSource
-	// snapshotDeletion durably fences a live purge across both snapshot
-	// sources. Production repositories must provide it; nil preserves the
-	// narrower checkpoint-only test seam.
-	snapshotDeletion ports.SnapshotDeletionTombstone
-	snapsEnabled     bool
+	snapsEnabled       bool
 	// legacyImportPending holds verified legacy blobs whose source deletion
 	// failed, so a later import retries only deletion rather than publication.
 	legacyImportMu      sync.Mutex
@@ -251,11 +247,6 @@ func WithSnapshotRepository(repository ports.SnapshotRepository, legacy ports.Le
 	return func(d *Daemon) {
 		d.snapshotRepository = repository
 		d.legacySnapshots = legacy
-		if deletion, ok := repository.(ports.SnapshotDeletionTombstone); ok {
-			d.snapshotDeletion = deletion
-		} else if deletion, ok := legacy.(ports.SnapshotDeletionTombstone); ok {
-			d.snapshotDeletion = deletion
-		}
 		d.snapsEnabled = repository != nil
 	}
 }

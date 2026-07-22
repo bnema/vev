@@ -4,6 +4,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
+	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
 )
@@ -33,6 +36,55 @@ func TestIncrementalPublicationEncodesAfterPaneUnlock(t *testing.T) {
 		t.Fatal("visible encoding waited for pane lock")
 	}
 	pane.mu.Unlock()
+}
+
+func TestSnapshotChunkCacheResistsWarmedOverCapacityHistoryScans(t *testing.T) {
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 6, ChunkRows: 1})
+	for i := range 6 {
+		require.NoError(t, history.Append([]renderer.Cell{{Rune: rune('a' + i)}}))
+	}
+	view := history.SnapshotView()
+	require.Equal(t, 6, view.ChunkCount())
+
+	firstPayload, err := vt.MarshalHistoryChunk(view.Chunk(0))
+	require.NoError(t, err)
+	firstObject, err := snapcodec.MarshalObject(snapcodec.HistoryChunk, firstPayload)
+	require.NoError(t, err)
+	cache := newSnapshotChunkCache(2 * len(firstObject.Data))
+	encodes := make(map[*vt.HistoryChunk]int)
+	cache.marshalChunk = func(chunk *vt.HistoryChunk) ([]byte, error) {
+		encodes[chunk]++
+		return vt.MarshalHistoryChunk(chunk)
+	}
+
+	for pass := range 3 {
+		for i := range view.ChunkCount() {
+			_, err := cache.objectLocked(view.Chunk(i))
+			require.NoError(t, err)
+		}
+		require.LessOrEqual(t, cache.used, cache.limit)
+		if pass == 0 {
+			require.Len(t, cache.byPtr, 2)
+		}
+	}
+
+	// The cache admits the first bounded working set then rejects later scan
+	// misses. Consequently, each warmed retained chunk is encoded only once
+	// even though the history is repeatedly scanned oldest-to-newest.
+	require.Equal(t, 1, encodes[view.Chunk(0)])
+	require.Equal(t, 1, encodes[view.Chunk(1)])
+	require.Equal(t, 3, encodes[view.Chunk(2)])
+	require.Equal(t, 3, encodes[view.Chunk(5)])
+
+	isolated := newSnapshotChunkCache(cache.limit)
+	isolatedEncodes := 0
+	isolated.marshalChunk = func(chunk *vt.HistoryChunk) ([]byte, error) {
+		isolatedEncodes++
+		return vt.MarshalHistoryChunk(chunk)
+	}
+	_, err = isolated.objectLocked(view.Chunk(0))
+	require.NoError(t, err)
+	require.Equal(t, 1, isolatedEncodes, "a session cache must not share encoded history with another session")
 }
 
 func TestIncrementalPublicationReusesSealedChunkObject(t *testing.T) {

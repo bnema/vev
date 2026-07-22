@@ -57,6 +57,10 @@ type SnapshotRepository interface {
 	List(context.Context) ([]string, error)
 	Load(context.Context, string) (SnapshotGeneration, error)
 	Delete(context.Context, string) error
+	// Tombstone fences a named-session purge before either incremental or
+	// legacy data is deleted. It must remain durable until DeleteTombstone.
+	Tombstone(context.Context, string) error
+	DeleteTombstone(context.Context, string) error
 	Maintain(context.Context) error
 }
 
@@ -72,13 +76,4 @@ type LegacySnapshot struct {
 type LegacySnapshotSource interface {
 	LoadLegacy(context.Context) ([]LegacySnapshot, error)
 	DeleteLegacy(context.Context, string) error
-}
-
-// SnapshotDeletionTombstone makes a named-session purge durable across the
-// independent incremental and legacy snapshot sources. A tombstoned name must
-// not be restored or imported until both source deletions and metadata removal
-// have completed.
-type SnapshotDeletionTombstone interface {
-	Tombstone(context.Context, string) error
-	DeleteTombstone(context.Context, string) error
 }

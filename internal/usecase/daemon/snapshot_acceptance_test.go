@@ -18,8 +18,8 @@ func TestSnapshotChunkCacheIsScopedToNamedSession(t *testing.T) {
 	b.snapshotChunkCache = newSnapshotChunkCache(snapshotChunkCacheLimit)
 
 	// Eleven maximum-size chunks exceed the per-session 16 MiB cache budget.
-	// The capture retains independently owned publication objects while its LRU
-	// sheds the oldest entry.
+	// The cache keeps its warmed working set rather than admitting every
+	// oldest-to-newest scan miss.
 	aHistory := snapshotCacheHistory(t, 11, 'a')
 	aCapture := snapshotCacheCapture(a, aHistory, 1)
 	aFirst, err := d.incrementalPublication(aCapture)
@@ -27,7 +27,7 @@ func TestSnapshotChunkCacheIsScopedToNamedSession(t *testing.T) {
 	require.NotEmpty(t, aFirst.Objects)
 	require.LessOrEqual(t, a.snapshotChunkCache.used, a.snapshotChunkCache.limit)
 	require.LessOrEqual(t, a.snapshotChunkCache.limit, snapshotChunkCacheLimit)
-	require.NotContains(t, a.snapshotChunkCache.byPtr, aHistory.Chunk(0), "session A should evict its oldest entry")
+	require.Contains(t, a.snapshotChunkCache.byPtr, aHistory.Chunk(0), "session A should retain its warmed entry")
 
 	bHistory := snapshotCacheHistory(t, 1, 'b')
 	bCapture := snapshotCacheCapture(b, bHistory, 1)
@@ -39,7 +39,7 @@ func TestSnapshotChunkCacheIsScopedToNamedSession(t *testing.T) {
 	aSecond := snapshotCacheCapture(a, snapshotCacheHistory(t, 1, 'z'), 2)
 	_, err = d.incrementalPublication(aSecond)
 	require.NoError(t, err)
-	require.True(t, bytes.Equal(inFlightBytes, aFirst.Objects[0].Data), "LRU eviction must not mutate queued publication bytes")
+	require.True(t, bytes.Equal(inFlightBytes, aFirst.Objects[0].Data), "cache pruning must not mutate queued publication bytes")
 	require.LessOrEqual(t, a.snapshotChunkCache.used, snapshotChunkCacheLimit)
 
 	_, err = d.incrementalPublication(snapshotCacheCapture(b, bHistory, 2))

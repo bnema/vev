@@ -420,6 +420,63 @@ func (_c *MockSnapshotRepository_Delete_Call) RunAndReturn(run func(context1 con
 	return _c
 }
 
+// DeleteTombstone provides a mock function for the type MockSnapshotRepository
+func (_mock *MockSnapshotRepository) DeleteTombstone(context1 context.Context, s string) error {
+	ret := _mock.Called(context1, s)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteTombstone")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = returnFunc(context1, s)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockSnapshotRepository_DeleteTombstone_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteTombstone'
+type MockSnapshotRepository_DeleteTombstone_Call struct {
+	*mock.Call
+}
+
+// DeleteTombstone is a helper method to define mock.On call
+//   - context1 context.Context
+//   - s string
+func (_e *MockSnapshotRepository_Expecter) DeleteTombstone(context1 any, s any) *MockSnapshotRepository_DeleteTombstone_Call {
+	return &MockSnapshotRepository_DeleteTombstone_Call{Call: _e.mock.On("DeleteTombstone", context1, s)}
+}
+
+func (_c *MockSnapshotRepository_DeleteTombstone_Call) Run(run func(context1 context.Context, s string)) *MockSnapshotRepository_DeleteTombstone_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockSnapshotRepository_DeleteTombstone_Call) Return(err error) *MockSnapshotRepository_DeleteTombstone_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockSnapshotRepository_DeleteTombstone_Call) RunAndReturn(run func(context1 context.Context, s string) error) *MockSnapshotRepository_DeleteTombstone_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // List provides a mock function for the type MockSnapshotRepository
 func (_mock *MockSnapshotRepository) List(context1 context.Context) ([]string, error) {
 	ret := _mock.Called(context1)
@@ -656,6 +713,63 @@ func (_c *MockSnapshotRepository_Publish_Call) RunAndReturn(run func(context1 co
 	return _c
 }
 
+// Tombstone provides a mock function for the type MockSnapshotRepository
+func (_mock *MockSnapshotRepository) Tombstone(context1 context.Context, s string) error {
+	ret := _mock.Called(context1, s)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Tombstone")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = returnFunc(context1, s)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockSnapshotRepository_Tombstone_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Tombstone'
+type MockSnapshotRepository_Tombstone_Call struct {
+	*mock.Call
+}
+
+// Tombstone is a helper method to define mock.On call
+//   - context1 context.Context
+//   - s string
+func (_e *MockSnapshotRepository_Expecter) Tombstone(context1 any, s any) *MockSnapshotRepository_Tombstone_Call {
+	return &MockSnapshotRepository_Tombstone_Call{Call: _e.mock.On("Tombstone", context1, s)}
+}
+
+func (_c *MockSnapshotRepository_Tombstone_Call) Run(run func(context1 context.Context, s string)) *MockSnapshotRepository_Tombstone_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockSnapshotRepository_Tombstone_Call) Return(err error) *MockSnapshotRepository_Tombstone_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockSnapshotRepository_Tombstone_Call) RunAndReturn(run func(context1 context.Context, s string) error) *MockSnapshotRepository_Tombstone_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // NewMockLegacySnapshotSource creates a new instance of MockLegacySnapshotSource. It also registers a testing interface on the mock and a cleanup function to assert the mocks expectations.
 // The first argument is typically a *testing.T value.
 func NewMockLegacySnapshotSource(t interface {
@@ -798,147 +912,6 @@ func (_c *MockLegacySnapshotSource_LoadLegacy_Call) Return(legacySnapshots []por
 }
 
 func (_c *MockLegacySnapshotSource_LoadLegacy_Call) RunAndReturn(run func(context1 context.Context) ([]ports.LegacySnapshot, error)) *MockLegacySnapshotSource_LoadLegacy_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// NewMockSnapshotDeletionTombstone creates a new instance of MockSnapshotDeletionTombstone. It also registers a testing interface on the mock and a cleanup function to assert the mocks expectations.
-// The first argument is typically a *testing.T value.
-func NewMockSnapshotDeletionTombstone(t interface {
-	mock.TestingT
-	Cleanup(func())
-}) *MockSnapshotDeletionTombstone {
-	mock := &MockSnapshotDeletionTombstone{}
-	mock.Mock.Test(t)
-
-	t.Cleanup(func() { mock.AssertExpectations(t) })
-
-	return mock
-}
-
-// MockSnapshotDeletionTombstone is an autogenerated mock type for the SnapshotDeletionTombstone type
-type MockSnapshotDeletionTombstone struct {
-	mock.Mock
-}
-
-type MockSnapshotDeletionTombstone_Expecter struct {
-	mock *mock.Mock
-}
-
-func (_m *MockSnapshotDeletionTombstone) EXPECT() *MockSnapshotDeletionTombstone_Expecter {
-	return &MockSnapshotDeletionTombstone_Expecter{mock: &_m.Mock}
-}
-
-// DeleteTombstone provides a mock function for the type MockSnapshotDeletionTombstone
-func (_mock *MockSnapshotDeletionTombstone) DeleteTombstone(context1 context.Context, s string) error {
-	ret := _mock.Called(context1, s)
-
-	if len(ret) == 0 {
-		panic("no return value specified for DeleteTombstone")
-	}
-
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
-		r0 = returnFunc(context1, s)
-	} else {
-		r0 = ret.Error(0)
-	}
-	return r0
-}
-
-// MockSnapshotDeletionTombstone_DeleteTombstone_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteTombstone'
-type MockSnapshotDeletionTombstone_DeleteTombstone_Call struct {
-	*mock.Call
-}
-
-// DeleteTombstone is a helper method to define mock.On call
-//   - context1 context.Context
-//   - s string
-func (_e *MockSnapshotDeletionTombstone_Expecter) DeleteTombstone(context1 any, s any) *MockSnapshotDeletionTombstone_DeleteTombstone_Call {
-	return &MockSnapshotDeletionTombstone_DeleteTombstone_Call{Call: _e.mock.On("DeleteTombstone", context1, s)}
-}
-
-func (_c *MockSnapshotDeletionTombstone_DeleteTombstone_Call) Run(run func(context1 context.Context, s string)) *MockSnapshotDeletionTombstone_DeleteTombstone_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 string
-		if args[1] != nil {
-			arg1 = args[1].(string)
-		}
-		run(
-			arg0,
-			arg1,
-		)
-	})
-	return _c
-}
-
-func (_c *MockSnapshotDeletionTombstone_DeleteTombstone_Call) Return(err error) *MockSnapshotDeletionTombstone_DeleteTombstone_Call {
-	_c.Call.Return(err)
-	return _c
-}
-
-func (_c *MockSnapshotDeletionTombstone_DeleteTombstone_Call) RunAndReturn(run func(context1 context.Context, s string) error) *MockSnapshotDeletionTombstone_DeleteTombstone_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// Tombstone provides a mock function for the type MockSnapshotDeletionTombstone
-func (_mock *MockSnapshotDeletionTombstone) Tombstone(context1 context.Context, s string) error {
-	ret := _mock.Called(context1, s)
-
-	if len(ret) == 0 {
-		panic("no return value specified for Tombstone")
-	}
-
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
-		r0 = returnFunc(context1, s)
-	} else {
-		r0 = ret.Error(0)
-	}
-	return r0
-}
-
-// MockSnapshotDeletionTombstone_Tombstone_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Tombstone'
-type MockSnapshotDeletionTombstone_Tombstone_Call struct {
-	*mock.Call
-}
-
-// Tombstone is a helper method to define mock.On call
-//   - context1 context.Context
-//   - s string
-func (_e *MockSnapshotDeletionTombstone_Expecter) Tombstone(context1 any, s any) *MockSnapshotDeletionTombstone_Tombstone_Call {
-	return &MockSnapshotDeletionTombstone_Tombstone_Call{Call: _e.mock.On("Tombstone", context1, s)}
-}
-
-func (_c *MockSnapshotDeletionTombstone_Tombstone_Call) Run(run func(context1 context.Context, s string)) *MockSnapshotDeletionTombstone_Tombstone_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 string
-		if args[1] != nil {
-			arg1 = args[1].(string)
-		}
-		run(
-			arg0,
-			arg1,
-		)
-	})
-	return _c
-}
-
-func (_c *MockSnapshotDeletionTombstone_Tombstone_Call) Return(err error) *MockSnapshotDeletionTombstone_Tombstone_Call {
-	_c.Call.Return(err)
-	return _c
-}
-
-func (_c *MockSnapshotDeletionTombstone_Tombstone_Call) RunAndReturn(run func(context1 context.Context, s string) error) *MockSnapshotDeletionTombstone_Tombstone_Call {
 	_c.Call.Return(run)
 	return _c
 }

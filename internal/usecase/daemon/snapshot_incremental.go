@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"container/list"
 	"fmt"
 
 	"github.com/bnema/vev/internal/ports"
@@ -14,7 +13,6 @@ import (
 const snapshotChunkCacheLimit = 16 << 20
 
 type snapshotChunkCacheEntry struct {
-	chunk  *vt.HistoryChunk
 	object ports.SnapshotObject
 }
 
@@ -25,12 +23,18 @@ type snapshotChunkCacheEntry struct {
 type snapshotChunkCache struct {
 	limit int
 	used  int
-	byPtr map[*vt.HistoryChunk]*list.Element
-	lru   *list.List // front is most recently used; values are snapshotChunkCacheEntry
+	byPtr map[*vt.HistoryChunk]snapshotChunkCacheEntry
+	// marshalChunk makes cache admission measurable without coupling the cache
+	// policy test to VT's wire encoding implementation.
+	marshalChunk func(*vt.HistoryChunk) ([]byte, error)
 }
 
 func newSnapshotChunkCache(limit int) *snapshotChunkCache {
-	return &snapshotChunkCache{limit: limit, byPtr: make(map[*vt.HistoryChunk]*list.Element), lru: list.New()}
+	return &snapshotChunkCache{
+		limit:        limit,
+		byPtr:        make(map[*vt.HistoryChunk]snapshotChunkCacheEntry),
+		marshalChunk: vt.MarshalHistoryChunk,
+	}
 }
 
 // objectLocked returns an independently owned object. Caller holds the owning
@@ -39,12 +43,11 @@ func (c *snapshotChunkCache) objectLocked(chunk *vt.HistoryChunk) (ports.Snapsho
 	if chunk == nil {
 		return ports.SnapshotObject{}, fmt.Errorf("snapshot: nil history chunk")
 	}
-	if elem := c.byPtr[chunk]; elem != nil {
-		c.lru.MoveToFront(elem)
-		return copySnapshotObject(elem.Value.(snapshotChunkCacheEntry).object), nil
+	if entry, ok := c.byPtr[chunk]; ok {
+		return copySnapshotObject(entry.object), nil
 	}
 
-	payload, err := vt.MarshalHistoryChunk(chunk)
+	payload, err := c.marshalChunk(chunk)
 	if err != nil {
 		return ports.SnapshotObject{}, err
 	}
@@ -53,41 +56,28 @@ func (c *snapshotChunkCache) objectLocked(chunk *vt.HistoryChunk) (ports.Snapsho
 		return ports.SnapshotObject{}, err
 	}
 
-	// A single chunk over the ceiling must not flush useful smaller entries.
-	// It is already independently owned by this publication, so skipping the
-	// cache cannot affect its lifetime.
-	if len(object.Data) > c.limit {
+	// An oldest-to-newest snapshot scan can exceed the cache. LRU would admit
+	// every early miss and evict the later working set, causing the next scan to
+	// encode every immutable chunk again. Once full, retain the warmed set and
+	// return later misses uncached. Pruning makes space when a retained chunk is
+	// no longer reachable by a queued or in-flight capture.
+	if len(object.Data) > c.limit || c.used > c.limit-len(object.Data) {
 		return object, nil
 	}
 	stored := copySnapshotObject(object)
-	elem := c.lru.PushFront(snapshotChunkCacheEntry{chunk: chunk, object: stored})
-	c.byPtr[chunk] = elem
+	c.byPtr[chunk] = snapshotChunkCacheEntry{object: stored}
 	c.used += len(stored.Data)
-	for c.used > c.limit {
-		oldest := c.lru.Back()
-		if oldest == nil {
-			break
-		}
-		entry := oldest.Value.(snapshotChunkCacheEntry)
-		delete(c.byPtr, entry.chunk)
-		c.used -= len(entry.object.Data)
-		c.lru.Remove(oldest)
-	}
 	return object, nil
 }
 
 // pruneLocked releases cached encodings which no currently queued or in-flight
 // capture can use. Caller holds the owning session's snapshotMu.
 func (c *snapshotChunkCache) pruneLocked(referenced map[*vt.HistoryChunk]struct{}) {
-	for elem := c.lru.Back(); elem != nil; {
-		previous := elem.Prev()
-		entry := elem.Value.(snapshotChunkCacheEntry)
-		if _, keep := referenced[entry.chunk]; !keep {
-			delete(c.byPtr, entry.chunk)
+	for chunk, entry := range c.byPtr {
+		if _, keep := referenced[chunk]; !keep {
+			delete(c.byPtr, chunk)
 			c.used -= len(entry.object.Data)
-			c.lru.Remove(elem)
 		}
-		elem = previous
 	}
 }
 

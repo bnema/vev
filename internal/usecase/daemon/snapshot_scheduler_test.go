@@ -82,11 +82,13 @@ func TestRenameKeepsSnapshotCoordinatorQuarantinedUntilNewIdentityCommits(t *tes
 	deleteEntered := make(chan struct{})
 	allowDelete := make(chan struct{})
 	published := make(chan ports.SnapshotPublication, 2)
+	repository.EXPECT().Tombstone(mock.Anything, "work").Return(nil).Once()
 	repository.EXPECT().Delete(mock.Anything, "work").RunAndReturn(func(context.Context, string) error {
 		close(deleteEntered)
 		<-allowDelete
 		return nil
 	}).Once()
+	repository.EXPECT().DeleteTombstone(mock.Anything, "work").Return(nil).Once()
 	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
 		published <- publication
 		return nil
@@ -159,6 +161,7 @@ func TestRenameRollbackAfterOldDeleteLeavesOldCoordinatorStopped(t *testing.T) {
 		return nil
 	}
 	state.mu.Unlock()
+	repository.EXPECT().Tombstone(mock.Anything, "work").Return(nil).Once()
 	repository.EXPECT().Delete(mock.Anything, "work").Return(nil).Once()
 	repository.EXPECT().Publish(mock.Anything, mock.Anything).Run(func(context.Context, ports.SnapshotPublication) {
 		t.Fatal("rollback resurrected the deleted old snapshot identity")

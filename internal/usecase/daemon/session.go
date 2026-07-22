@@ -800,10 +800,10 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 // identity or persisted metadata is removed. It never runs under daemon or
 // session locks.
 func (d *Daemon) beginSnapshotPurge(name string) error {
-	if d.snapshotDeletion == nil || name == "" {
+	if d.snapshotRepository == nil || name == "" {
 		return nil
 	}
-	return d.snapshotDeletion.Tombstone(context.Background(), name)
+	return d.snapshotRepository.Tombstone(context.Background(), name)
 }
 
 // finishSnapshotPurge deletes both independently durable snapshot sources,
@@ -811,10 +811,11 @@ func (d *Daemon) beginSnapshotPurge(name string) error {
 // leaves the marker in place so startup cannot restore or import the name and
 // a later live/offline kill can retry the idempotent source deletes.
 func (d *Daemon) finishSnapshotPurge(name string) error {
-	var incrementalErr, legacyErr error
-	if d.snapshotRepository != nil {
-		incrementalErr = d.snapshotRepository.Delete(context.Background(), name)
+	if d.snapshotRepository == nil {
+		return d.persist.Delete(name)
 	}
+	incrementalErr := d.snapshotRepository.Delete(context.Background(), name)
+	var legacyErr error
 	if d.legacySnapshots != nil {
 		legacyErr = d.legacySnapshots.DeleteLegacy(context.Background(), name)
 	}
@@ -824,10 +825,7 @@ func (d *Daemon) finishSnapshotPurge(name string) error {
 	if err := d.persist.Delete(name); err != nil {
 		return err
 	}
-	if d.snapshotDeletion != nil {
-		return d.snapshotDeletion.DeleteTombstone(context.Background(), name)
-	}
-	return nil
+	return d.snapshotRepository.DeleteTombstone(context.Background(), name)
 }
 
 // retryStoppedPurge completes a previously closed session's durable purge.
@@ -840,9 +838,9 @@ func (d *Daemon) retryStoppedPurge(name string) error {
 		d.mu.Unlock()
 		return nil
 	}
-	// A stopped session without a durable snapshot source retains the existing
-	// metadata-only delete behavior. There is no restore/import source to fence.
-	if d.snapshotDeletion == nil {
+	// Without a repository there is no restore/import source to fence, so the
+	// stopped record retains the metadata-only deletion behavior.
+	if d.snapshotRepository == nil {
 		d.mu.Unlock()
 		if err := d.persist.Delete(name); err != nil {
 			return err

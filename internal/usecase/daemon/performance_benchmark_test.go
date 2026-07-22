@@ -1061,8 +1061,10 @@ func (*countingSnapshotRepository) List(context.Context) ([]string, error) { ret
 func (*countingSnapshotRepository) Load(context.Context, string) (ports.SnapshotGeneration, error) {
 	return ports.SnapshotGeneration{}, nil
 }
-func (*countingSnapshotRepository) Delete(context.Context, string) error { return nil }
-func (*countingSnapshotRepository) Maintain(context.Context) error       { return nil }
+func (*countingSnapshotRepository) Delete(context.Context, string) error          { return nil }
+func (*countingSnapshotRepository) Tombstone(context.Context, string) error       { return nil }
+func (*countingSnapshotRepository) DeleteTombstone(context.Context, string) error { return nil }
+func (*countingSnapshotRepository) Maintain(context.Context) error                { return nil }
 func (s *countingSnapshotRepository) reset() {
 	s.mu.Lock()
 	s.countingSnapshotMetrics = countingSnapshotMetrics{}

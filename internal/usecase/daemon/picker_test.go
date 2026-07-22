@@ -44,8 +44,12 @@ func (refusingSnapshotDeleteRepository) List(context.Context) ([]string, error) 
 func (refusingSnapshotDeleteRepository) Load(context.Context, string) (ports.SnapshotGeneration, error) {
 	return ports.SnapshotGeneration{}, nil
 }
-func (s refusingSnapshotDeleteRepository) Delete(context.Context, string) error { return s.err }
-func (refusingSnapshotDeleteRepository) Maintain(context.Context) error         { return nil }
+func (s refusingSnapshotDeleteRepository) Delete(context.Context, string) error  { return s.err }
+func (refusingSnapshotDeleteRepository) Tombstone(context.Context, string) error { return nil }
+func (refusingSnapshotDeleteRepository) DeleteTombstone(context.Context, string) error {
+	return nil
+}
+func (refusingSnapshotDeleteRepository) Maintain(context.Context) error { return nil }
 
 func newTestTabWithContext(p ports.PTY, ctx context.Context, cancel context.CancelFunc) *tab {
 	tb := newTab(p, domain.Size{Cols: 80, Rows: 23})

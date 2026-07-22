@@ -83,8 +83,10 @@ func (r *snapshotAcceptanceRepository) Load(ctx context.Context, name string) (p
 	return cloneAcceptanceGeneration(generation), nil
 }
 
-func (*snapshotAcceptanceRepository) Delete(context.Context, string) error { return nil }
-func (*snapshotAcceptanceRepository) Maintain(context.Context) error       { return nil }
+func (*snapshotAcceptanceRepository) Delete(context.Context, string) error          { return nil }
+func (*snapshotAcceptanceRepository) Tombstone(context.Context, string) error       { return nil }
+func (*snapshotAcceptanceRepository) DeleteTombstone(context.Context, string) error { return nil }
+func (*snapshotAcceptanceRepository) Maintain(context.Context) error                { return nil }
 
 func cloneAcceptanceGeneration(g ports.SnapshotGeneration) ports.SnapshotGeneration {
 	out := g
