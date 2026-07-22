@@ -65,9 +65,8 @@ func (r *Repository) Load(ctx context.Context, name string) (ports.SnapshotGener
 	if killed {
 		return ports.SnapshotGeneration{}, fmt.Errorf("snapshot session %q is killed", name)
 	}
-	lock := r.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	lock := r.lockSession(key)
+	defer r.unlockSession(lock)
 	if err := ctx.Err(); err != nil {
 		return ports.SnapshotGeneration{}, err
 	}

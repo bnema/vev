@@ -23,13 +23,15 @@ const (
 // Store remains available separately for the one-way legacy bridge.
 type Repository struct {
 	dir   string
-	locks sync.Map // map[string]*sessionMutex
 	hooks repositoryHooks
 
-	// storageEpochs is guarded by each session's lock. It invalidates a
-	// maintenance mark whenever publication or deletion changes that session's
-	// on-disk namespace.
-	storageEpochs map[string]uint64
+	// sessionStateMu owns both maps. A caller retains a reference before it
+	// waits on a session mutex, so an idle entry can never be removed while a
+	// waiter still holds its old mutex. Epoch entries share that lifetime.
+	sessionStateMu sync.Mutex
+	locks          map[string]*sessionMutex
+	storageEpochs  map[string]uint64
+	nextEpoch      uint64
 
 	// maintenanceMu owns bounded continuation metadata: seek cookies and
 	// pending directory entries. Directory descriptors are opened and closed
@@ -53,21 +55,22 @@ type repositoryHooks struct {
 	// Object hooks instrument the publication path in package tests. They keep
 	// the steady-state cost of retained history observable without exposing a
 	// production metrics surface.
-	beforeObjectRead         func(string)
-	beforeObjectHash         func([]byte)
-	beforeObjectCopy         func([]byte)
-	beforeHeadWrite          func(string) error
-	createTemp               func(string) error
-	writeTemp                func(string) error
-	syncFile                 func(string) error
-	closeFile                func(string) error
-	installImmutable         func(string) error
-	rename                   func(string) error
-	syncDirectory            func(string) error
-	remove                   func(string) error
-	openMaintenanceDirectory func(string) (maintenanceDirectory, error)
-	openLegacyDirectory      func(string) (legacyDirectory, error)
-	beforeSessionLock        func(string)
+	beforeObjectRead             func(string)
+	beforeObjectHash             func([]byte)
+	beforeObjectCopy             func([]byte)
+	beforeHeadWrite              func(string) error
+	beforePendingQuarantineCheck func(string)
+	createTemp                   func(string) error
+	writeTemp                    func(string) error
+	syncFile                     func(string) error
+	closeFile                    func(string) error
+	installImmutable             func(string) error
+	rename                       func(string) error
+	syncDirectory                func(string) error
+	remove                       func(string) error
+	openMaintenanceDirectory     func(string) (maintenanceDirectory, error)
+	openLegacyDirectory          func(string) (legacyDirectory, error)
+	beforeSessionLock            func(string)
 }
 
 var _ ports.SnapshotRepository = (*Repository)(nil)
@@ -76,35 +79,93 @@ var _ ports.LegacySnapshotSource = (*Repository)(nil)
 // NewRepository creates a repository rooted at dir. It does not create files
 // until the first publication, so merely constructing it is side-effect free.
 func NewRepository(dir string) *Repository {
-	return &Repository{dir: dir, storageEpochs: make(map[string]uint64)}
+	return &Repository{
+		dir:           dir,
+		locks:         make(map[string]*sessionMutex),
+		storageEpochs: make(map[string]uint64),
+	}
 }
 
-// invalidateStorageEpoch must be called with sessionLock(key) held.
+// invalidateStorageEpoch must be called with lockSession(key) held. The
+// registry mutex makes accesses for different session keys race-free too.
 func (r *Repository) invalidateStorageEpoch(key string) {
-	r.storageEpochs[key]++
+	r.sessionStateMu.Lock()
+	r.nextEpoch++
+	r.storageEpochs[key] = r.nextEpoch
+	r.sessionStateMu.Unlock()
 }
 
-// storageEpoch must be called with sessionLock(key) held.
-func (r *Repository) storageEpoch(key string) uint64 { return r.storageEpochs[key] }
+// storageEpoch must be called with lockSession(key) held.
+func (r *Repository) storageEpoch(key string) uint64 {
+	r.sessionStateMu.Lock()
+	epoch := r.storageEpochs[key]
+	r.sessionStateMu.Unlock()
+	return epoch
+}
 
-// sessionMutex provides a test-only boundary immediately before a contested
-// session mutex. Production hooks are nil, so normal locking is unchanged.
+// sessionMutex is retained by each waiter and each resumable maintenance
+// state. That reference is what makes eviction safe: a new caller cannot lock
+// a replacement mutex until all users of the prior mutex have left it.
 type sessionMutex struct {
-	repository *Repository
 	key        string
 	mu         sync.Mutex
+	references int
 }
 
-func (m *sessionMutex) Lock() {
-	if hook := m.repository.hooks.beforeSessionLock; hook != nil {
-		hook(m.key)
+func (r *Repository) lockSession(key string) *sessionMutex {
+	r.sessionStateMu.Lock()
+	lock := r.locks[key]
+	if lock == nil {
+		lock = &sessionMutex{key: key}
+		r.locks[key] = lock
 	}
-	m.mu.Lock()
+	lock.references++
+	r.sessionStateMu.Unlock()
+	if hook := r.hooks.beforeSessionLock; hook != nil {
+		hook(key)
+	}
+	lock.mu.Lock()
+	return lock
 }
 
-func (m *sessionMutex) Unlock() { m.mu.Unlock() }
+func (r *Repository) unlockSession(lock *sessionMutex) {
+	lock.mu.Unlock()
+	r.releaseSessionReference(lock)
+}
 
-func (r *Repository) sessionLock(key string) *sessionMutex {
-	lock, _ := r.locks.LoadOrStore(key, &sessionMutex{repository: r, key: key})
-	return lock.(*sessionMutex)
+func (r *Repository) retainSessionState(key string) *sessionMutex {
+	r.sessionStateMu.Lock()
+	lock := r.locks[key]
+	// sessionMaintenanceState is called while the active session lock is held.
+	if lock == nil {
+		panic("snapshot: retain missing session lock")
+	}
+	lock.references++
+	r.sessionStateMu.Unlock()
+	return lock
+}
+
+func (r *Repository) releaseSessionReference(lock *sessionMutex) {
+	r.sessionStateMu.Lock()
+	lock.references--
+	if lock.references < 0 {
+		r.sessionStateMu.Unlock()
+		panic("snapshot: release of unretained session lock")
+	}
+	if lock.references == 0 {
+		if r.locks[lock.key] != lock {
+			r.sessionStateMu.Unlock()
+			panic("snapshot: session lock registry mismatch")
+		}
+		delete(r.locks, lock.key)
+		delete(r.storageEpochs, lock.key)
+	}
+	r.sessionStateMu.Unlock()
+}
+
+// sessionStateCounts is test evidence that idle per-session state is evicted.
+func (r *Repository) sessionStateCounts() (locks, epochs int) {
+	r.sessionStateMu.Lock()
+	defer r.sessionStateMu.Unlock()
+	return len(r.locks), len(r.storageEpochs)
 }

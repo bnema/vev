@@ -14,9 +14,8 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		return err
 	}
 	key := sessionKey(publication.Name)
-	lock := r.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	lock := r.lockSession(key)
+	defer r.unlockSession(lock)
 	if err := ctx.Err(); err != nil {
 		return err
 	}

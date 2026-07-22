@@ -42,6 +42,15 @@ func (r *Repository) Maintain(ctx context.Context) (err error) {
 	if err := r.removeTemps(ctx, r.dir, &budget, "root-temps"); err != nil || budget == 0 {
 		return err
 	}
+	// Resume an incomplete session before discovering another one. This keeps
+	// retained marks (and their session lock/epoch references) bounded even
+	// when a hostile repository contains arbitrarily many partial sessions.
+	for key := range r.maintenanceSessions {
+		lock := r.lockSession(key)
+		err = r.maintainSession(ctx, key, &budget)
+		r.unlockSession(lock)
+		return err
+	}
 	sessions := filepath.Join(r.dir, repositorySessionsDir)
 	entries, _, err := r.readMaintenanceDir(sessions, maintenanceBatch, "sessions")
 	if errors.Is(err, os.ErrNotExist) {
@@ -77,12 +86,14 @@ func (r *Repository) Maintain(ctx context.Context) (err error) {
 		if !entry.isDir || !canonicalSessionKey(entry.name) {
 			continue
 		}
-		lock := r.sessionLock(entry.name)
-		lock.Lock()
+		lock := r.lockSession(entry.name)
 		err = r.maintainSession(ctx, entry.name, &budget)
-		lock.Unlock()
+		r.unlockSession(lock)
 		if err != nil {
 			return err
+		}
+		if r.maintenanceSessions[entry.name] != nil {
+			return nil
 		}
 	}
 	return nil

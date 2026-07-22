@@ -19,6 +19,7 @@ type manifestMaintenance struct {
 }
 
 type sessionMaintenance struct {
+	lock           *sessionMutex
 	token          string
 	epoch          uint64
 	marked         map[uint64]manifestMaintenance
@@ -115,6 +116,7 @@ func (r *Repository) sessionMaintenanceState(key string) (*sessionMaintenance, e
 	if state == nil || state.token != token || state.epoch != r.storageEpoch(key) {
 		r.clearSessionMaintenance(key)
 		state = &sessionMaintenance{
+			lock:         r.retainSessionState(key),
 			token:        token,
 			epoch:        r.storageEpoch(key),
 			conservative: conservative,
@@ -144,6 +146,9 @@ func (r *Repository) maintenanceToken(key string) (string, bool, error) {
 }
 
 func (r *Repository) clearSessionMaintenance(key string) {
+	if state := r.maintenanceSessions[key]; state != nil && state.lock != nil {
+		r.releaseSessionReference(state.lock)
+	}
 	delete(r.maintenanceSessions, key)
 	prefix := "\x00" + filepath.Clean(r.sessionPath(key))
 	for id := range r.maintenanceCursors {

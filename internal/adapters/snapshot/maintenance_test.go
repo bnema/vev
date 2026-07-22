@@ -224,8 +224,7 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 	t.Run("publish", func(t *testing.T) {
 		repo := NewRepository(privateDir(t))
 		key := sessionKey("named")
-		lock := repo.sessionLock(key)
-		lock.Lock()
+		lock := repo.lockSession(key)
 		ctx, cancel := context.WithCancel(context.Background())
 		reached := make(chan struct{})
 		release := make(chan struct{})
@@ -235,7 +234,7 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 		<-reached
 		cancel()
 		close(release)
-		lock.Unlock()
+		repo.unlockSession(lock)
 		if err := <-done; !errors.Is(err, context.Canceled) {
 			t.Fatalf("Publish error = %v, want canceled", err)
 		}
@@ -257,8 +256,7 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 			{"delete", func(ctx context.Context) error { return repo.Delete(ctx, "named") }},
 		} {
 			t.Run(operation.name, func(t *testing.T) {
-				lock := repo.sessionLock(key)
-				lock.Lock()
+				lock := repo.lockSession(key)
 				ctx, cancel := context.WithCancel(context.Background())
 				reached := make(chan struct{})
 				release := make(chan struct{})
@@ -268,7 +266,7 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 				<-reached
 				cancel()
 				close(release)
-				lock.Unlock()
+				repo.unlockSession(lock)
 				if err := <-done; !errors.Is(err, context.Canceled) {
 					t.Fatalf("%s error = %v, want canceled", operation.name, err)
 				}
@@ -284,8 +282,7 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 		if err := repo.Publish(context.Background(), repositoryPublication(t, "named", 1, []byte("state"))); err != nil {
 			t.Fatal(err)
 		}
-		lock := repo.sessionLock(sessionKey("named"))
-		lock.Lock()
+		lock := repo.lockSession(sessionKey("named"))
 		ctx, cancel := context.WithCancel(context.Background())
 		reached := make(chan struct{})
 		release := make(chan struct{})
@@ -295,7 +292,7 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 		<-reached
 		cancel()
 		close(release)
-		lock.Unlock()
+		repo.unlockSession(lock)
 		if err := <-done; !errors.Is(err, context.Canceled) {
 			t.Fatalf("Maintain error = %v, want canceled", err)
 		}

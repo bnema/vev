@@ -24,6 +24,9 @@ type maintenanceDirEntry struct {
 }
 
 func (r *Repository) resetMaintenance() {
+	for key := range r.maintenanceSessions {
+		r.clearSessionMaintenance(key)
+	}
 	r.maintenanceCursors = nil
 	r.maintenanceSessions = nil
 }

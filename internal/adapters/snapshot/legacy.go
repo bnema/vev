@@ -122,9 +122,8 @@ func (r *Repository) DeleteLegacy(ctx context.Context, name string) error {
 		return err
 	}
 	filename := filenameForName(name)
-	lock := r.sessionLock("legacy-sync:" + filename)
-	lock.Lock()
-	defer lock.Unlock()
+	lock := r.lockSession("legacy-sync:" + filename)
+	defer r.unlockSession(lock)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -252,9 +251,8 @@ func (r *Repository) Tombstone(ctx context.Context, name string) error {
 		return err
 	}
 	key := sessionKey(name)
-	lock := r.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	lock := r.lockSession(key)
+	defer r.unlockSession(lock)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -280,9 +278,8 @@ func (r *Repository) DeleteTombstone(ctx context.Context, name string) error {
 		return err
 	}
 	key := sessionKey(name)
-	lock := r.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	lock := r.lockSession(key)
+	defer r.unlockSession(lock)
 	if err := ctx.Err(); err != nil {
 		return err
 	}

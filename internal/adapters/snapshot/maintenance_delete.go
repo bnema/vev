@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // Delete makes a session unavailable by durably moving it out of the canonical
@@ -19,9 +18,8 @@ func (r *Repository) Delete(ctx context.Context, name string) error {
 		return err
 	}
 	key := sessionKey(name)
-	lock := r.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	lock := r.lockSession(key)
+	defer r.unlockSession(lock)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -31,9 +29,9 @@ func (r *Repository) Delete(ctx context.Context, name string) error {
 	// A prior rename may have succeeded while its parent sync failed. Complete
 	// that durability boundary before considering a canonical directory: this
 	// also leaves a newly recreated session untouched.
-	pending, err := pendingQuarantine(sessions, key)
+	pending, err := r.pendingQuarantine(sessions, key)
 	if err != nil {
-		return fmt.Errorf("read deleting snapshot session %q: %w", key, safeFilesystemError(err))
+		return fmt.Errorf("stat deleting snapshot session %q: %w", key, safeFilesystemError(err))
 	}
 	if pending {
 		if err := ctx.Err(); err != nil {
@@ -49,15 +47,7 @@ func (r *Repository) Delete(ctx context.Context, name string) error {
 	} else if err != nil {
 		return fmt.Errorf("stat snapshot session %q: %w", key, safeFilesystemError(err))
 	}
-	quarantine := filepath.Join(sessions, ".deleting-"+key+"-"+fmt.Sprintf("%d", time.Now().UnixNano()))
-	for attempt := 0; ; attempt++ {
-		if _, err := os.Lstat(quarantine); errors.Is(err, os.ErrNotExist) {
-			break
-		} else if err != nil {
-			return fmt.Errorf("stat deleting snapshot session %q: %w", key, safeFilesystemError(err))
-		}
-		quarantine = filepath.Join(sessions, ".deleting-"+key+"-"+fmt.Sprintf("%d-%d", time.Now().UnixNano(), attempt))
-	}
+	quarantine := filepath.Join(sessions, deletingSessionName(key))
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -76,34 +66,25 @@ func (r *Repository) Delete(ctx context.Context, name string) error {
 	return nil
 }
 
-func pendingQuarantine(dir, key string) (pending bool, err error) {
-	f, err := os.Open(dir)
+// deletingSessionName is a deterministic pending-delete record. Its presence
+// is checked directly rather than scanning an attacker-controlled sessions
+// directory, and it prevents a retry from deleting a session republished after
+// the initial rename reached disk but its directory sync failed.
+func deletingSessionName(key string) string { return ".deleting-" + key }
+
+func (r *Repository) pendingQuarantine(dir, key string) (bool, error) {
+	path := filepath.Join(dir, deletingSessionName(key))
+	if hook := r.hooks.beforePendingQuarantineCheck; hook != nil {
+		hook(path)
+	}
+	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	defer func() {
-		if closeErr := f.Close(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("close deleting snapshot directory: %w", safeFilesystemError(closeErr)))
-		}
-	}()
-	prefix := ".deleting-" + key + "-"
-	for {
-		entries, err := f.ReadDir(maintenanceBatch)
-		for _, entry := range entries {
-			if entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
-				return true, nil
-			}
-		}
-		if errors.Is(err, io.EOF) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-	}
+	return info.IsDir(), nil
 }
 
 // Maintain reaps a bounded amount of stale state. Continuation handles are
