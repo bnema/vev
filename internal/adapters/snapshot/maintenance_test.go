@@ -350,9 +350,12 @@ func TestRepositoryMaintainResumesNestedQuarantineWithinBatch(t *testing.T) {
 	if _, err := os.Lstat(quarantine); errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("quarantine after one bounded call = %v, want remaining tree", err)
 	}
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 12; i++ {
 		if err := repo.Maintain(context.Background()); err != nil {
 			t.Fatal(err)
+		}
+		if _, err := os.Lstat(quarantine); errors.Is(err, os.ErrNotExist) {
+			return
 		}
 	}
 	if _, err := os.Lstat(quarantine); !errors.Is(err, os.ErrNotExist) {
@@ -408,8 +411,8 @@ func TestRepositoryMaintainBoundsQueuedShardNames(t *testing.T) {
 		if err := repo.sweepSession(context.Background(), key, state, &budget); err != nil {
 			t.Fatal(err)
 		}
-		if got := len(state.sweepQueue); got > maintenanceBatch {
-			t.Fatalf("queued shard names = %d, want at most %d", got, maintenanceBatch)
+		if state.sweepShard != "" && len(repo.maintenanceCursors) > maxMaintenanceCursors {
+			t.Fatalf("retained maintenance cursors = %d, want at most %d", len(repo.maintenanceCursors), maxMaintenanceCursors)
 		}
 	}
 }
@@ -594,22 +597,30 @@ func TestRepositoryMaintainQueuesFetchedSessionsPastWorkBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	queued := fetched[len(fetched)-1].Name()
-	if err := repo.Maintain(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := repo.Maintain(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Lstat(filepath.Join(sessions, queued)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("fetched but unprocessed session %q = %v, want removed on next call", queued, err)
+	for i := 0; i < maintenanceBatch+4; i++ {
+		if err := repo.Maintain(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(sessions, queued)); errors.Is(err, os.ErrNotExist) {
+			break
+		} else if i == maintenanceBatch+3 {
+			t.Fatalf("fetched but unprocessed session %q = %v, want eventually removed", queued, err)
+		}
 	}
 	if _, err := os.Lstat(filepath.Join(sessions, unread[0].Name())); err != nil {
 		t.Fatalf("unread session %q = %v, want queued entry to run first", unread[0].Name(), err)
 	}
 
-	for i := 0; i < 2; i++ {
+	for i := 0; i < maintenanceBatch+4; i++ {
 		if err := repo.Maintain(context.Background()); err != nil {
 			t.Fatal(err)
+		}
+		entries, err := os.ReadDir(sessions)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) == 0 {
+			break
 		}
 	}
 	entries, err := os.ReadDir(sessions)

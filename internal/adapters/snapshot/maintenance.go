@@ -39,8 +39,23 @@ func (r *Repository) Maintain(ctx context.Context) (err error) {
 	}
 
 	budget := maintenanceBatch
-	if err := r.removeTemps(ctx, r.dir, &budget, "root-temps"); err != nil || budget == 0 {
+	if _, err := r.removeTemps(ctx, r.dir, &budget, "root-temps"); err != nil || budget == 0 {
 		return err
+	}
+	if r.maintenanceQuarantine != nil {
+		changed, done, err := r.maintainQuarantine(ctx, &budget)
+		if err != nil {
+			return err
+		}
+		if changed {
+			if err := r.syncDirectory(filepath.Join(r.dir, repositorySessionsDir)); err != nil {
+				return fmt.Errorf("sync snapshot maintenance directory: %w", safeFilesystemError(err))
+			}
+		}
+		if done {
+			r.maintenanceQuarantine = nil
+		}
+		return nil
 	}
 	// Resume an incomplete session before discovering another one. This keeps
 	// retained marks (and their session lock/epoch references) bounded even
@@ -69,7 +84,8 @@ func (r *Repository) Maintain(ctx context.Context) (err error) {
 		}
 		path := filepath.Join(sessions, entry.name)
 		if isQuarantine(entry.name) {
-			changed, err := r.removeTreeBatch(ctx, path, &budget)
+			r.maintenanceQuarantine = &quarantineMaintenance{root: path, current: path}
+			changed, done, err := r.maintainQuarantine(ctx, &budget)
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("remove snapshot quarantine %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
 			}
@@ -81,7 +97,13 @@ func (r *Repository) Maintain(ctx context.Context) (err error) {
 					return fmt.Errorf("sync snapshot maintenance directory for %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
 				}
 			}
-			continue
+			if done {
+				r.maintenanceQuarantine = nil
+			}
+			if i+1 < len(entries) {
+				r.requeueMaintenanceEntries(sessions, "sessions", entries[i+1:])
+			}
+			return nil
 		}
 		if !entry.isDir || !canonicalSessionKey(entry.name) {
 			continue

@@ -12,6 +12,13 @@ import (
 	"unsafe"
 )
 
+// maxMaintenanceCursors bounds all retained directory seek cookies, including
+// cursors for attacker-controlled object shards. Maintenance processes only
+// one shard at a time, so normal operation stays well below this ceiling.
+const maxMaintenanceCursors = 8
+
+var errMaintenanceCursorLimit = errors.New("snapshot maintenance cursor limit")
+
 type maintenanceCursor struct {
 	offset  int64
 	pending []maintenanceDirEntry
@@ -29,6 +36,7 @@ func (r *Repository) resetMaintenance() {
 	}
 	r.maintenanceCursors = nil
 	r.maintenanceSessions = nil
+	r.maintenanceQuarantine = nil
 }
 
 func maintenanceCursorID(dir, purpose string) string { return purpose + "\x00" + dir }
@@ -50,6 +58,9 @@ func (r *Repository) readMaintenanceDir(dir string, n int, purpose string) ([]ma
 		return entries, cursor.done, nil
 	}
 	if cursor == nil {
+		if len(r.maintenanceCursors) >= maxMaintenanceCursors {
+			return nil, false, errMaintenanceCursorLimit
+		}
 		cursor = &maintenanceCursor{}
 		r.maintenanceCursors[id] = cursor
 	}
@@ -185,41 +196,41 @@ func (r *Repository) requeueMaintenanceEntries(dir, purpose string, entries []ma
 	cursor.pending = append(entries, cursor.pending...)
 }
 
-func (r *Repository) removeTemps(ctx context.Context, dir string, budget *int, purpose string) error {
+func (r *Repository) removeTemps(ctx context.Context, dir string, budget *int, purpose string) (bool, error) {
 	if *budget == 0 {
-		return nil
+		return false, nil
 	}
-	entries, _, err := r.readMaintenanceDir(dir, maintenanceBatch, purpose)
+	entries, done, err := r.readMaintenanceDir(dir, maintenanceBatch, purpose)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return true, nil
 	}
 	if err != nil {
-		return fmt.Errorf("read snapshot maintenance directory: %w", safeFilesystemError(err))
+		return false, fmt.Errorf("read snapshot maintenance directory: %w", safeFilesystemError(err))
 	}
 	for i, entry := range entries {
 		if *budget == 0 {
 			r.requeueMaintenanceEntries(dir, purpose, entries[i:])
-			return nil
+			return false, nil
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return false, err
 		}
 		if entry.isDir || !strings.HasPrefix(entry.name, ".tmp-") {
 			continue
 		}
 		path := filepath.Join(dir, entry.name)
 		if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove snapshot maintenance file %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
+			return false, fmt.Errorf("remove snapshot maintenance file %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return false, err
 		}
 		if err := r.syncDirectory(dir); err != nil {
-			return fmt.Errorf("sync snapshot maintenance directory for %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
+			return false, fmt.Errorf("sync snapshot maintenance directory for %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
 		}
 		*budget--
 	}
-	return nil
+	return done, nil
 }
 
 // maintenancePath avoids exposing the repository root while retaining a

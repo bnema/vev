@@ -36,9 +36,10 @@ type Repository struct {
 	// maintenanceMu owns bounded continuation metadata: seek cookies and
 	// pending directory entries. Directory descriptors are opened and closed
 	// for each maintenance call.
-	maintenanceMu       sync.Mutex
-	maintenanceCursors  map[string]*maintenanceCursor
-	maintenanceSessions map[string]*sessionMaintenance
+	maintenanceMu         sync.Mutex
+	maintenanceCursors    map[string]*maintenanceCursor
+	maintenanceSessions   map[string]*sessionMaintenance
+	maintenanceQuarantine *quarantineMaintenance
 
 	// pendingLegacySync records an unlink whose root-directory sync failed.
 	// It is keyed by the deterministic legacy filename and shares a per-file
@@ -69,8 +70,11 @@ type repositoryHooks struct {
 	syncDirectory                func(string) error
 	remove                       func(string) error
 	openMaintenanceDirectory     func(string) (maintenanceDirectory, error)
-	openLegacyDirectory          func(string) (legacyDirectory, error)
-	beforeSessionLock            func(string)
+	// beforeMaintenanceWork observes each budgeted quarantine filesystem step.
+	// It is test-only instrumentation for hostile traversal bounds.
+	beforeMaintenanceWork func(string)
+	openLegacyDirectory   func(string) (legacyDirectory, error)
+	beforeSessionLock     func(string)
 }
 
 var _ ports.SnapshotRepository = (*Repository)(nil)

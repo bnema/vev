@@ -19,17 +19,19 @@ type manifestMaintenance struct {
 }
 
 type sessionMaintenance struct {
-	lock           *sessionMutex
-	token          string
-	epoch          uint64
-	marked         map[uint64]manifestMaintenance
-	referenceCount int
-	uncertain      bool
-	conservative   bool
-	markDone       bool
-	manifestQueue  []uint64
-	sweepQueue     []string
-	sweepRootDone  bool
+	lock            *sessionMutex
+	token           string
+	epoch           uint64
+	marked          map[uint64]manifestMaintenance
+	referenceCount  int
+	uncertain       bool
+	conservative    bool
+	markDone        bool
+	manifestQueue   []uint64
+	objectTempShard string
+	objectTempsDone bool
+	sweepShard      string
+	sweepRootDone   bool
 }
 
 // canRetainManifest reserves bounded state before retaining a manifest's
@@ -54,28 +56,14 @@ func (r *Repository) maintainSession(ctx context.Context, key string, budget *in
 	if err != nil {
 		return err
 	}
-	if err := r.removeTemps(ctx, filepath.Join(r.sessionPath(key), repositoryGenerations), budget, "generation-temps:"+key); err != nil || *budget == 0 {
+	if _, err := r.removeTemps(ctx, filepath.Join(r.sessionPath(key), repositoryGenerations), budget, "generation-temps:"+key); err != nil || *budget == 0 {
 		return err
 	}
-
-	objectRoot := filepath.Join(r.sessionPath(key), repositoryObjectsDir)
-	shards, _, err := r.readMaintenanceDir(objectRoot, maintenanceBatch, "object-temps-shards:"+key)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read snapshot object shards: %w", safeFilesystemError(err))
-	}
-	for i, shard := range shards {
-		if *budget == 0 {
-			r.requeueMaintenanceEntries(objectRoot, "object-temps-shards:"+key, shards[i:])
-			return nil
+	if !state.objectTempsDone {
+		done, err := r.removeObjectTemps(ctx, key, state, budget)
+		if err != nil || !done || *budget == 0 {
+			return err
 		}
-		if shard.isDir {
-			if err := r.removeTemps(ctx, filepath.Join(objectRoot, shard.name), budget, "object-temps:"+key+":"+shard.name); err != nil {
-				return err
-			}
-		}
-	}
-	if *budget == 0 {
-		return nil
 	}
 	if !state.markDone {
 		if err := r.markSession(ctx, key, state); err != nil {
@@ -280,6 +268,43 @@ func (r *Repository) removeObsoleteManifests(ctx context.Context, key string, st
 	return nil
 }
 
+// removeObjectTemps processes a single shard to completion before advancing
+// the shard-root cursor. Thus a hostile set of shards can retain at most the
+// root cursor and the one active shard cursor, rather than one cursor per
+// discovered shard.
+func (r *Repository) removeObjectTemps(ctx context.Context, key string, state *sessionMaintenance, budget *int) (bool, error) {
+	root := filepath.Join(r.sessionPath(key), repositoryObjectsDir)
+	for *budget > 0 {
+		if state.objectTempShard != "" {
+			done, err := r.removeTemps(ctx, filepath.Join(root, state.objectTempShard), budget, "object-temps:"+key+":"+state.objectTempShard)
+			if err != nil || !done {
+				return false, err
+			}
+			// This releases the active shard cursor before the next root entry
+			// is discovered. A completed small shard may therefore advance in
+			// this call without accumulating continuation state.
+			state.objectTempShard = ""
+			continue
+		}
+		if state.objectTempsDone {
+			return true, nil
+		}
+		entries, done, err := r.readMaintenanceDir(root, 1, "object-temps-shards:"+key)
+		if errors.Is(err, os.ErrNotExist) {
+			state.objectTempsDone = true
+			return true, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("read snapshot object shards: %w", safeFilesystemError(err))
+		}
+		state.objectTempsDone = done
+		if len(entries) != 0 && entries[0].isDir {
+			state.objectTempShard = entries[0].name
+		}
+	}
+	return state.objectTempsDone && state.objectTempShard == "", nil
+}
+
 func (r *Repository) sweepSession(ctx context.Context, key string, state *sessionMaintenance, budget *int) error {
 	// Every bounded sweep batch is tied to the mark's storage epoch. Do not use
 	// stale references after any publication or replacement.
@@ -289,35 +314,33 @@ func (r *Repository) sweepSession(ctx context.Context, key string, state *sessio
 	}
 	referenced := retainedReferences(state.marked, state.conservative)
 	root := filepath.Join(r.sessionPath(key), repositoryObjectsDir)
-	// Do not keep accumulating shard names while draining earlier work. This
-	// bounds retained names to one directory batch even for a session with many
-	// object shards.
-	if !state.sweepRootDone && len(state.sweepQueue) == 0 {
-		entries, done, err := r.readMaintenanceDir(root, maintenanceBatch, "sweep-shards:"+key)
+	if state.sweepShard != "" && *budget > 0 {
+		shard := state.sweepShard
+		done, err := r.sweepShard(ctx, filepath.Join(root, shard), referenced, budget, key, shard)
+		if err != nil {
+			return err
+		}
+		if !done {
+			return nil
+		}
+		state.sweepShard = ""
+		// Release this shard's cursor before discovering another shard.
+		return nil
+	}
+	if !state.sweepRootDone {
+		entries, done, err := r.readMaintenanceDir(root, 1, "sweep-shards:"+key)
 		if errors.Is(err, os.ErrNotExist) {
 			state.sweepRootDone = true
 		} else if err != nil {
 			return fmt.Errorf("read snapshot objects: %w", safeFilesystemError(err))
 		} else {
-			for _, entry := range entries {
-				if entry.isDir {
-					state.sweepQueue = append(state.sweepQueue, entry.name)
-				}
-			}
 			state.sweepRootDone = done
+			if len(entries) != 0 && entries[0].isDir {
+				state.sweepShard = entries[0].name
+			}
 		}
 	}
-	if len(state.sweepQueue) != 0 && *budget > 0 {
-		shard := state.sweepQueue[0]
-		done, err := r.sweepShard(ctx, filepath.Join(root, shard), referenced, budget, key, shard)
-		if err != nil {
-			return err
-		}
-		if done {
-			state.sweepQueue = state.sweepQueue[1:]
-		}
-	}
-	if state.sweepRootDone && len(state.sweepQueue) == 0 {
+	if state.sweepRootDone && state.sweepShard == "" {
 		r.clearSessionMaintenance(key)
 	}
 	return nil

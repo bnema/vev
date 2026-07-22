@@ -93,73 +93,104 @@ func (r *Repository) pendingQuarantine(dir, key string) (bool, error) {
 // repository (and the next fresh cycle) always begins at a safe boundary.
 func isQuarantine(name string) bool { return strings.HasPrefix(name, ".deleting-") }
 
-// readDirBatch is used only for a mutating quarantine walk, where every
-// successful step removes the entry it selected. General maintenance scans use
-// repository-owned cursors above.
-func readDirBatch(dir string, n int) ([]os.DirEntry, error) {
-	f, err := os.Open(dir)
-	if err != nil {
-		return nil, err
-	}
-	entries, readErr := f.ReadDir(n)
-	closeErr := f.Close()
-	if readErr != nil && !errors.Is(readErr, io.EOF) {
-		return nil, readErr
-	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
-	return entries, nil
+// quarantineMaintenance retains one root-to-current path, never an unbounded
+// stack of directory handles or names. Parent paths are recovered after a
+// removal, while descent resumes from current on the next budgeted step.
+type quarantineMaintenance struct {
+	root    string
+	current string
 }
 
-func (r *Repository) removeTreeBatch(ctx context.Context, path string, budget *int) (bool, error) {
-	changed := false
-	for *budget > 0 {
-		did, err := r.removeTreeStep(ctx, path, budget)
-		if err != nil || !did {
-			return changed, err
-		}
-		changed = true
-	}
-	return changed, nil
-}
-
-func (r *Repository) removeTreeStep(ctx context.Context, path string, budget *int) (bool, error) {
+// consumeQuarantineWork charges every filesystem operation that can be driven
+// by quarantine contents. This makes deep and wide trees subject to exactly
+// the same maintenanceBatch ceiling as removal work.
+func (r *Repository) consumeQuarantineWork(budget *int, operation string) bool {
 	if *budget == 0 {
-		return false, nil
+		return false
 	}
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+	*budget--
+	if hook := r.hooks.beforeMaintenanceWork; hook != nil {
+		hook(operation)
 	}
-	if err != nil {
-		return false, err
+	return true
+}
+
+// maintainQuarantine makes one bounded depth-first traversal step at a time.
+// It deliberately reopens a directory to select its first child: every
+// successful child removal changes that prefix, so no directory cursor is
+// retained at each hostile nesting level.
+func (r *Repository) maintainQuarantine(ctx context.Context, budget *int) (changed, done bool, err error) {
+	state := r.maintenanceQuarantine
+	if state == nil {
+		return false, true, nil
 	}
-	if !info.IsDir() {
+	for *budget > 0 {
 		if err := ctx.Err(); err != nil {
-			return false, err
+			return changed, false, err
 		}
-		if err := r.remove(path); err != nil {
-			return false, err
+		if !r.consumeQuarantineWork(budget, "stat") {
+			return changed, false, nil
 		}
-		*budget--
-		return true, nil
+		info, err := os.Lstat(state.current)
+		if errors.Is(err, os.ErrNotExist) {
+			if state.current == state.root {
+				return changed, true, nil
+			}
+			state.current = filepath.Dir(state.current)
+			continue
+		}
+		if err != nil {
+			return changed, false, err
+		}
+		if !info.IsDir() {
+			if !r.consumeQuarantineWork(budget, "remove") {
+				return changed, false, nil
+			}
+			if err := r.remove(state.current); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return changed, false, err
+			}
+			changed = true
+			state.current = filepath.Dir(state.current)
+			continue
+		}
+
+		if !r.consumeQuarantineWork(budget, "open") {
+			return changed, false, nil
+		}
+		dir, err := os.Open(state.current)
+		if err != nil {
+			return changed, false, err
+		}
+		if !r.consumeQuarantineWork(budget, "read") {
+			_ = dir.Close()
+			return changed, false, nil
+		}
+		entries, readErr := dir.ReadDir(1)
+		closeErr := dir.Close()
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return changed, false, readErr
+		}
+		if closeErr != nil {
+			return changed, false, closeErr
+		}
+		if len(entries) == 0 {
+			if !r.consumeQuarantineWork(budget, "remove") {
+				return changed, false, nil
+			}
+			if err := r.remove(state.current); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return changed, false, err
+			}
+			changed = true
+			if state.current == state.root {
+				return changed, true, nil
+			}
+			state.current = filepath.Dir(state.current)
+			continue
+		}
+		if !r.consumeQuarantineWork(budget, "descend") {
+			return changed, false, nil
+		}
+		state.current = filepath.Join(state.current, entries[0].Name())
 	}
-	// A quarantine tree contains no live entries. Reopening from its start is
-	// safe here because each successful step removes that first descendant.
-	entries, err := readDirBatch(path, 1)
-	if err != nil {
-		return false, err
-	}
-	if len(entries) == 0 {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		if err := r.remove(path); err != nil {
-			return false, err
-		}
-		*budget--
-		return true, nil
-	}
-	return r.removeTreeStep(ctx, filepath.Join(path, entries[0].Name()), budget)
+	return changed, false, nil
 }
