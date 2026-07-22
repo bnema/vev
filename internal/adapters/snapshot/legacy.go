@@ -362,7 +362,11 @@ func (r *Repository) tombstoned(name string) (bool, error) {
 	if name == "" {
 		return false, nil
 	}
-	data, err := r.readBounded(filepath.Join(r.dir, tombstoneFilename(sessionKey(name))))
+	path := filepath.Join(r.dir, tombstoneFilename(sessionKey(name)))
+	if hook := r.hooks.beforeTombstoneCheck; hook != nil {
+		hook(path)
+	}
+	data, err := r.readBounded(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}

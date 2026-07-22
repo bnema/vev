@@ -59,7 +59,9 @@ type repositoryHooks struct {
 	beforeObjectRead             func(string)
 	beforeObjectHash             func([]byte)
 	beforeObjectCopy             func([]byte)
+	beforeHeadRead               func(string) error
 	beforeHeadWrite              func(string) error
+	beforeTombstoneCheck         func(string)
 	beforePendingQuarantineCheck func(string)
 	createTemp                   func(string) error
 	writeTemp                    func(string) error
