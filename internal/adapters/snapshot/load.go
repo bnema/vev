@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,51 +15,39 @@ import (
 	codec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
+// Directory scans are deliberately finite. Snapshot directories are attacker
+// controlled state, so callers get a retryable error instead of retaining an
+// arbitrary number of names or spending an arbitrary amount of work.
+const (
+	directoryTraversalBatch      = 64
+	maxDirectoryTraversalEntries = 4096
+)
+
+var ErrDirectoryTraversalBudget = errors.New("snapshot directory traversal budget exceeded")
+
 func (r *Repository) List(ctx context.Context) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(filepath.Join(r.dir, repositorySessionsDir))
+	budget := maxDirectoryTraversalEntries
+	out := make([]string, 0)
+	sessions := filepath.Join(r.dir, repositorySessionsDir)
+	err := walkDirectory(ctx, sessions, &budget, func(entry os.DirEntry) error {
+		if !entry.IsDir() || !canonicalSessionKey(entry.Name()) {
+			return nil
+		}
+		generation, ok, err := r.loadNewestGeneration(ctx, entry.Name(), &budget)
+		if err != nil || !ok {
+			return err
+		}
+		out = append(out, generation.Name)
+		return nil
+	})
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read snapshot sessions: %w", err)
-	}
-	out := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if !entry.IsDir() || !canonicalSessionKey(entry.Name()) {
-			continue
-		}
-		numbers, err := r.generationNumbers(entry.Name())
-		if err != nil {
-			continue
-		}
-		for _, number := range numbers {
-			data, err := readBounded(r.manifestPath(entry.Name(), number))
-			if err != nil {
-				continue
-			}
-			manifest, err := codec.UnmarshalManifest(data)
-			if err != nil || sessionKey(manifest.Name) != entry.Name() {
-				continue
-			}
-			killed, tombstoneErr := r.tombstoned(manifest.Name)
-			if tombstoneErr != nil {
-				return nil, fmt.Errorf("read killed session marker: %w", tombstoneErr)
-			}
-			if killed {
-				break
-			}
-			generation, err := r.loadGeneration(ctx, manifest.Name, entry.Name(), number)
-			if err == nil {
-				out = append(out, generation.Name)
-				break
-			}
-		}
 	}
 	sort.Strings(out)
 	return out, nil
@@ -90,24 +79,32 @@ func (r *Repository) load(ctx context.Context, name, key string) (ports.Snapshot
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		preferred = 0
 	}
-	candidates, err := r.generationNumbers(key)
-	if err != nil {
-		return ports.SnapshotGeneration{}, err
-	}
-	if preferred != 0 {
-		candidates = append([]uint64{preferred}, removeGeneration(candidates, preferred)...)
-	}
 	skipped := false
-	for _, generation := range candidates {
-		if err := ctx.Err(); err != nil {
+	if preferred != 0 {
+		got, err := r.loadGeneration(ctx, name, key, preferred)
+		if err == nil && sha256.Sum256(got.Manifest) == preferredDigest {
+			return got, nil
+		}
+		skipped = true
+	}
+
+	budget := maxDirectoryTraversalEntries
+	before := uint64(0) // zero means no upper bound.
+	for {
+		generation, ok, err := r.nextGeneration(ctx, key, before, preferred, &budget)
+		if err != nil {
 			return ports.SnapshotGeneration{}, err
 		}
+		if !ok {
+			break
+		}
+		before = generation
 		got, err := r.loadGeneration(ctx, name, key, generation)
-		if err != nil || (generation == preferred && sha256.Sum256(got.Manifest) != preferredDigest) {
+		if err != nil {
 			skipped = true
 			continue
 		}
-		got.Fallback = skipped || (preferred != 0 && generation != preferred)
+		got.Fallback = skipped || preferred != 0
 		return got, nil
 	}
 	return ports.SnapshotGeneration{}, fmt.Errorf("no complete snapshot generation for %q", name)
@@ -121,16 +118,115 @@ func (r *Repository) currentGeneration(ctx context.Context, name, key string) (u
 			return generation, got.Manifest, nil
 		}
 	}
-	candidates, err := r.generationNumbers(key)
-	if err != nil {
-		return 0, nil, err
-	}
-	for _, candidate := range candidates {
-		if got, err := r.loadGeneration(ctx, name, key, candidate); err == nil {
-			return candidate, got.Manifest, nil
+	budget := maxDirectoryTraversalEntries
+	before := uint64(0)
+	for {
+		generation, ok, err := r.nextGeneration(ctx, key, before, 0, &budget)
+		if err != nil || !ok {
+			return 0, nil, err
+		}
+		before = generation
+		got, err := r.loadGeneration(ctx, name, key, generation)
+		if err == nil {
+			return generation, got.Manifest, nil
 		}
 	}
-	return 0, nil, nil
+}
+
+// loadNewestGeneration validates candidates in descending generation order
+// without materializing the generations directory. It is used by List, whose
+// name is discovered from each manifest rather than supplied by a caller.
+func (r *Repository) loadNewestGeneration(ctx context.Context, key string, budget *int) (ports.SnapshotGeneration, bool, error) {
+	before := uint64(0)
+	for {
+		generation, ok, err := r.nextGeneration(ctx, key, before, 0, budget)
+		if err != nil || !ok {
+			return ports.SnapshotGeneration{}, false, err
+		}
+		before = generation
+		data, err := readBounded(r.manifestPath(key, generation))
+		if err != nil {
+			continue
+		}
+		manifest, err := codec.UnmarshalManifest(data)
+		if err != nil || sessionKey(manifest.Name) != key {
+			continue
+		}
+		killed, err := r.tombstoned(manifest.Name)
+		if err != nil {
+			return ports.SnapshotGeneration{}, false, fmt.Errorf("read killed session marker: %w", err)
+		}
+		if killed {
+			return ports.SnapshotGeneration{}, false, nil
+		}
+		got, err := r.loadGeneration(ctx, manifest.Name, key, generation)
+		if err == nil {
+			return got, true, nil
+		}
+	}
+}
+
+// nextGeneration finds one candidate in a complete, batched directory cursor
+// pass. Repeating it with the returned number as before preserves strict
+// newest-to-oldest fallback while work remains bounded by budget.
+func (r *Repository) nextGeneration(ctx context.Context, key string, before, exclude uint64, budget *int) (uint64, bool, error) {
+	var newest uint64
+	err := walkDirectory(ctx, filepath.Join(r.sessionPath(key), repositoryGenerations), budget, func(entry os.DirEntry) error {
+		if entry.IsDir() {
+			return nil
+		}
+		generation, ok := parseGenerationFilename(entry.Name())
+		if !ok || generation == exclude || (before != 0 && generation >= before) {
+			return nil
+		}
+		if generation > newest {
+			newest = generation
+		}
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return newest, newest != 0, nil
+}
+
+// walkDirectory is the common finite directory traversal primitive for reads.
+// File.ReadDir maintains a cursor on one descriptor and returns at most one
+// small batch, so no full directory enumeration is retained in memory.
+func walkDirectory(ctx context.Context, dir string, budget *int, visit func(os.DirEntry) error) (err error) {
+	file, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := file.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entries, readErr := file.ReadDir(directoryTraversalBatch)
+		for _, entry := range entries {
+			if *budget == 0 {
+				return ErrDirectoryTraversalBudget
+			}
+			*budget--
+			if err := visit(entry); err != nil {
+				return err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 func (r *Repository) loadGeneration(ctx context.Context, name, key string, generation uint64) (ports.SnapshotGeneration, error) {
@@ -158,41 +254,9 @@ func (r *Repository) loadGeneration(ctx context.Context, name, key string, gener
 		if sha256.Sum256(object) != digest || !validObject(object, ref) {
 			return ports.SnapshotGeneration{}, fmt.Errorf("invalid object")
 		}
-		// readBounded returns a fresh caller-owned buffer, so returning it directly
-		// avoids a second allocation without retaining it in the repository.
 		objects[digest] = object
 	}
 	return ports.SnapshotGeneration{Name: manifest.Name, Generation: generation, Manifest: data, Objects: objects}, nil
-}
-
-func (r *Repository) generationNumbers(key string) ([]uint64, error) {
-	entries, err := os.ReadDir(filepath.Join(r.sessionPath(key), repositoryGenerations))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	numbers := make([]uint64, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		if generation, ok := parseGenerationFilename(entry.Name()); ok {
-			numbers = append(numbers, generation)
-		}
-	}
-	sort.Slice(numbers, func(i, j int) bool { return numbers[i] > numbers[j] })
-	return numbers, nil
-}
-func removeGeneration(numbers []uint64, generation uint64) []uint64 {
-	out := numbers[:0]
-	for _, n := range numbers {
-		if n != generation {
-			out = append(out, n)
-		}
-	}
-	return out
 }
 
 func marshalHead(generation uint64, digest ports.SnapshotDigest) []byte {
