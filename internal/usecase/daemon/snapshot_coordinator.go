@@ -3,8 +3,6 @@ package daemon
 import (
 	"context"
 	"time"
-
-	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
 func snapshotCoordinatorContext(sess *session) (context.Context, context.CancelFunc) {
@@ -156,83 +154,6 @@ func (sess *session) signalSnapshotChangedLocked() {
 	sess.snapshotChanged = make(chan struct{})
 }
 
-func (d *Daemon) scheduleSnapshot(sess *session) bool {
-	return d.scheduleSnapshotWithFinalFallback(sess, false)
-}
-
-// scheduleFinalSnapshot captures the terminal state even when an older capture
-// is pending. A removed session cannot be retried by the repository scheduler, so the
-// worker drains its retained terminal state before it stops.
-func (d *Daemon) scheduleFinalSnapshot(sess *session) bool {
-	return d.scheduleSnapshotWithFinalFallback(sess, true)
-}
-
-func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bool {
-	if d == nil || sess == nil || !d.snapsEnabled || d.snapshotRepository == nil || !sess.snapEligible.Load() {
-		return true
-	}
-	kind := snapshotAttemptRoutine
-	if final {
-		kind = snapshotAttemptForced
-	}
-	sess.snapshotMu.Lock()
-	if sess.snapshotQuarantined || !sess.snapDirty.Load() {
-		available := !sess.snapshotQuarantined
-		sess.snapshotMu.Unlock()
-		return available
-	}
-	if final && sess.snapshotGeneration > sess.snapshotForcedGeneration {
-		// Do not let an older queued or in-flight routine publication satisfy a
-		// terminal checkpoint. The intent is retained until a publication at
-		// this generation (or newer) succeeds.
-		sess.snapshotForcedGeneration = sess.snapshotGeneration
-	}
-	if sess.snapshotPending ||
-		(!final && !sess.snapshotNextEligibleAt.IsZero() && d.clock.Now().Before(sess.snapshotNextEligibleAt)) {
-		sess.snapshotMu.Unlock()
-		return true
-	}
-	if sess.snapshotPublicationContext == nil {
-		sess.snapshotPublicationContext, sess.snapshotPublicationCancel = context.WithCancel(context.Background())
-	}
-	generation := sess.snapshotGeneration
-	publicationContext := sess.snapshotPublicationContext
-	sess.snapshotCapturedGeneration = generation
-	sess.snapshotAttempted = true
-	sess.snapshotAttemptKind = kind
-	sess.snapshotPendingCaptures++
-	sess.snapshotPending = true
-	sess.signalSnapshotChangedLocked()
-	sess.snapshotMu.Unlock()
-
-	capture, ok := d.captureSnapshotState(sess, generation)
-	if capture != nil {
-		capture.attemptKind = kind
-		capture.publicationContext = publicationContext
-	}
-	if !ok {
-		d.finishSnapshotCapture(capture, false)
-		return false
-	}
-	sess.snapshotMu.Lock()
-	quarantined := sess.snapshotQuarantined
-	if !quarantined {
-		sess.snapshotQueuedCapture = capture
-	}
-	sess.snapshotMu.Unlock()
-	if quarantined {
-		d.finishSnapshotCapture(capture, false)
-		return false
-	}
-	if d.enqueueSnapshotCapture(capture) || (final && d.enqueueFinalSnapshotCapture(capture)) {
-		return true
-	}
-	// Coalesce under saturation or shutdown: the latest state stays dirty and
-	// will be captured on a later tick once an active worker has room.
-	d.finishSnapshotCapture(capture, false)
-	return false
-}
-
 // waitForSnapshotGeneration waits only for the bounded terminal checkpoint
 // deadline. It observes successful publication, rather than dirty state, so a
 // concurrent later mutation cannot turn a completed forced checkpoint into a
@@ -270,137 +191,6 @@ func (d *Daemon) waitForSnapshotGenerationWithDeadline(sess *session, generation
 			return false
 		}
 	}
-}
-
-// enqueueSnapshotCapture serializes worker shutdown with the non-blocking
-// queue send. The queue is deliberately never closed: producers can race
-// shutdown without risking a send-on-closed panic.
-func (d *Daemon) enqueueSnapshotCapture(capture *snapshotCapture) bool {
-	d.snapshotWorkerMu.Lock()
-	defer d.snapshotWorkerMu.Unlock()
-	if d.snapshotWorkerClosing || d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
-		return false
-	}
-	select {
-	case d.snapshotJobs <- capture:
-		return true
-	default:
-		return false
-	}
-}
-
-// enqueueFinalSnapshotCapture hands terminal captures to the existing worker
-// without making session teardown wait behind its normal bounded queue. A
-// blocked worker retains at most one terminal capture per session, replacing
-// stale state with the newest immutable capture.
-func (d *Daemon) enqueueFinalSnapshotCapture(capture *snapshotCapture) bool {
-	if capture == nil || capture.session == nil {
-		return false
-	}
-	d.snapshotWorkerMu.Lock()
-	if d.snapshotWorkerClosing || d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
-		d.snapshotWorkerMu.Unlock()
-		return false
-	}
-	if d.snapshotFinalJobs == nil {
-		d.snapshotFinalJobs = make(map[*session]*snapshotCapture)
-	}
-	replaced, exists := d.snapshotFinalJobs[capture.session]
-	if !exists && len(d.snapshotFinalJobs) >= snapshotFinalQueueCapacity {
-		d.snapshotWorkerMu.Unlock()
-		d.log.Warn("terminal snapshot retention saturated; capture rejected", "session", capture.name, "capacity", snapshotFinalQueueCapacity)
-		return false
-	}
-	// Finish the stale capture before publishing its replacement. Otherwise a
-	// fast worker could persist the replacement and then have this stale failure
-	// mark the session dirty again.
-	d.finishSnapshotCapture(replaced, false)
-	if !exists {
-		d.snapshotFinalOrder = append(d.snapshotFinalOrder, capture.session)
-	}
-	d.snapshotFinalJobs[capture.session] = capture
-	select {
-	case d.snapshotWorkerFinalWake <- struct{}{}:
-	default:
-	}
-	d.snapshotWorkerMu.Unlock()
-	return true
-}
-
-// captureSession rotates history tails and clones visible frames while holding
-// each pane lock. The returned capture contains only immutable state; encoding
-// and persistence are deliberately deferred to snapshotEncodeWorker.
-func (d *Daemon) captureSnapshotState(sess *session, generation uint64) (*snapshotCapture, bool) {
-	sess.mu.Lock()
-	capture := &snapshotCapture{
-		session:    sess,
-		generation: generation,
-		name:       sess.name,
-		createdAt:  uint64(sess.createdAt),
-		active:     uint16(max(sess.active, 0)),
-	}
-	ephemeral := sess.ephemeral
-	fallbackCwd := sess.cwd
-	tabs := append([]*tab(nil), sess.tabs...)
-	sess.mu.Unlock()
-	if ephemeral || capture.name == "" {
-		return capture, false
-	}
-
-	capture.tabs = make([]snapshotCaptureTab, 0, len(tabs))
-	for _, tb := range tabs {
-		tb.mu.Lock()
-		tabCapture := snapshotCaptureTab{
-			stableID:   tb.stableID,
-			cols:       uint16(max(tb.size.Cols, 0)),
-			rows:       uint16(max(tb.size.Rows, 0)),
-			nextPaneID: uint64(max(tb.nextPaneID, 0)),
-			tree:       tb.tree.Clone(),
-		}
-		if tb.tree != nil {
-			tabCapture.focus = tb.tree.Focus
-		}
-		panes := make([]*pane, 0, len(tb.panes))
-		for _, p := range tb.panes {
-			panes = append(panes, p)
-		}
-		tb.mu.Unlock()
-
-		tabCapture.panes = make([]snapshotCapturePane, 0, len(panes))
-		for _, p := range panes {
-			p.mu.Lock()
-			pty := p.pty
-			pid := 0
-			if pty != nil {
-				pid = pty.Pid()
-			}
-			paneCapture := snapshotCapturePane{
-				id:       p.id,
-				stableID: p.stableID,
-				visible:  p.screen.PrimaryVisibleSnapshot(),
-			}
-			paneCapture.sealed = p.history.SnapshotView()
-			paneCapture.tail = paneCapture.sealed.Tail()
-			p.mu.Unlock()
-			paneCapture.cwd = fallbackCwd
-			if d.procCwd != nil && pid > 0 {
-				if cwd, err := d.procCwd(pid); err == nil && cwd != "" {
-					paneCapture.cwd = cwd
-				}
-			}
-			paneCapture.process = d.capturePaneProcess(pty, pid)
-			tabCapture.panes = append(tabCapture.panes, paneCapture)
-		}
-		capture.tabs = append(capture.tabs, tabCapture)
-	}
-	return capture, true
-}
-
-// captureSession remains the synchronous producer-facing trigger for callers
-// such as teardown and benchmarks; the actual encoding and Write stay async.
-func (d *Daemon) captureSession(sess *session) bool {
-	markSnapshotDirty(sess)
-	return d.scheduleSnapshot(sess)
 }
 
 // startSnapshotPublication moves a retained capture from the producer queue to
@@ -497,28 +287,6 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 // displays a toast when its stable phase/error class changes. This keeps a
 // blocked disk from repeatedly repainting every attached client while retaining
 // the count in notification history.
-
-func (d *Daemon) capturePaneProcess(pty interface{ ForegroundPgid() (int, error) }, shellPid int) *snapcodec.Process {
-	if d == nil || pty == nil || shellPid <= 0 || d.procGroupArgv == nil {
-		return nil
-	}
-	pgid, err := pty.ForegroundPgid()
-	if err != nil || pgid <= 0 || pgid == shellPid {
-		return nil
-	}
-	argv, err := d.procGroupArgv(pgid, shellPid)
-	if err != nil || len(argv) == 0 || argv[0] == "" {
-		return nil
-	}
-	strategy := detectProcessStrategy(argv)
-	return &snapcodec.Process{
-		Argv:     append([]string(nil), argv...),
-		Strategy: strategy,
-		Opts: snapcodec.ProcessOpts{
-			AgentSessionID: extractAgentSessionID(strategy, argv),
-		},
-	}
-}
 
 // snapshotRepositorySaver waits until the earliest completion-derived routine
 // eligibility. State changes wake it immediately, so a newly dirty session is

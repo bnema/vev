@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"testing"
 
@@ -153,6 +154,29 @@ func acceptanceGeneration(t *testing.T, snapshot snapcodec.Session, generation u
 		objects[object.Digest] = append([]byte(nil), object.Data...)
 	}
 	return ports.SnapshotGeneration{Name: snapshot.Name, Generation: generation, Manifest: encoded, Objects: objects}
+}
+
+func TestValidateRestoreSessionSnapshot(t *testing.T) {
+	valid := restoreAcceptanceSession(t, "restored")
+	for _, test := range []struct {
+		name string
+		snap snapcodec.Session
+	}{
+		{"valid", valid},
+		{"empty name", func() snapcodec.Session { snap := valid; snap.Name = ""; return snap }()},
+		{"active without tabs", func() snapcodec.Session { snap := valid; snap.Tabs = nil; snap.Active = 1; return snap }()},
+		{"active beyond tabs", func() snapcodec.Session { snap := valid; snap.Active = 1; return snap }()},
+		{"created at overflow", func() snapcodec.Session { snap := valid; snap.CreatedAt = math.MaxInt64 + 1; return snap }()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateRestoreSessionSnapshot(test.snap)
+			if test.name == "valid" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+		})
+	}
 }
 
 func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {

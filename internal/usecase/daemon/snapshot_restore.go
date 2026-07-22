@@ -45,10 +45,7 @@ func (d *Daemon) restoreSnapshots(ctx context.Context) {
 
 }
 
-func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
+func validateRestoreSessionSnapshot(snap snapcodec.Session) error {
 	if len(snap.Tabs) == 0 {
 		if snap.Active != 0 {
 			return fmt.Errorf("snapshot: active tab out of range")
@@ -62,127 +59,182 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 	if snap.CreatedAt > math.MaxInt64 {
 		return fmt.Errorf("snapshot: created_at overflows int64")
 	}
-	d.mu.Lock()
-	if d.closing || d.findByNameLocked(snap.Name) != nil {
-		d.mu.Unlock()
+	return nil
+}
+
+// restoreSession owns the restored tabs until registration succeeds. Every
+// unsuccessful path closes their PTYs and cancels their shared session context.
+func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateRestoreSessionSnapshot(snap); err != nil {
+		return err
+	}
+	if d.restoredSessionAlreadyExists(snap.Name) {
 		return nil
 	}
-	d.mu.Unlock()
 
 	parent := d.serveCtx
 	if parent == nil {
 		parent = context.Background()
 	}
 	sctx, cancel := context.WithCancel(parent)
-	opened := make([]*tab, 0, len(snap.Tabs))
-	// Snapshot restore runs before any client Hello is available. Start panes
-	// from the daemon environment captured at startup; the next attach replaces
-	// this snapshot for future panes from the client's capability.
-	restoreTerm := terminalEnv{}
-	restoreEnv := copyEnvironment(d.baseEnv)
-	closeOpened := func() {
-		for _, tb := range opened {
-			tb.closeAllPanes()
-		}
+	opened, err := d.restoreSnapshotTabs(ctx, sctx, snap)
+	if err != nil {
 		cancel()
-	}
-	allowlist := d.restoreProcessAllowlistSnapshot()
-	d.mu.Lock()
-	persisted := d.stopped[snap.Name]
-	d.mu.Unlock()
-	for tabIndex, tabSnap := range snap.Tabs {
-		if err := ctx.Err(); err != nil {
-			closeOpened()
-			return err
-		}
-		tbSize := domain.Size{Cols: int(tabSnap.Cols), Rows: int(tabSnap.Rows)}
-		if !tbSize.Valid() {
-			closeOpened()
-			return fmt.Errorf("snapshot: invalid tab size")
-		}
-		placements, ok := layout.Solve(tabSnap.Tree.Root, domain.Rect{Width: tbSize.Cols, Height: tbSize.Rows})
-		if !ok {
-			closeOpened()
-			return fmt.Errorf("snapshot: unsolvable layout")
-		}
-		placementByPane := make(map[layout.PaneID]domain.Rect, len(placements))
-		for _, pl := range placements {
-			placementByPane[pl.ID] = pl.Content
-		}
-		tabStableID := tabSnap.StableID
-		if tabStableID == "" {
-			var err error
-			tabStableID, err = newStableID("t")
-			if err != nil {
-				closeOpened()
-				return fmt.Errorf("snapshot: generating tab identity: %w", err)
-			}
-		}
-		tb := &tab{stableID: tabStableID, tree: tabSnap.Tree.Clone(), panes: make(map[layout.PaneID]*pane, len(tabSnap.Panes)), nextPaneID: int(tabSnap.NextPaneID), size: tbSize}
-		if tabIndex < len(persisted.tabNames) {
-			tb.name = persisted.tabNames[tabIndex]
-		}
-		if tb.nextPaneID <= 0 {
-			tb.nextPaneID = 1
-		}
-		tb.ctx, tb.cancel = context.WithCancel(sctx)
-		opened = append(opened, tb)
-		for _, paneSnap := range tabSnap.Panes {
-			restoreCommand := ""
-			if decision := planProcessRestore(paneSnap.Process, allowlist); decision.Restore {
-				restoreCommand = decision.Command
-			}
-			if err := ctx.Err(); err != nil {
-				closeOpened()
-				return err
-			}
-			contentRect, ok := placementByPane[paneSnap.ID]
-			if !ok {
-				closeOpened()
-				return fmt.Errorf("snapshot: missing pane placement")
-			}
-			contentSize := restorePTYSize(contentRect, tbSize)
-			paneStableID := paneSnap.StableID
-			if paneStableID == "" {
-				var err error
-				paneStableID, err = newStableID("p")
-				if err != nil {
-					closeOpened()
-					return fmt.Errorf("snapshot: generating pane identity: %w", err)
-				}
-			}
-			command, args := d.ptyCommand(restoreEnv)
-			pty, err := d.ptys.Open(ctx, command, args, childEnvFrom(restoreEnv, snap.Name, tabStableID, paneStableID, restoreTerm), paneSnap.Cwd, contentSize)
-			if err != nil {
-				closeOpened()
-				return err
-			}
-			p := newPaneWithStableID(paneSnap.ID, paneStableID, pty, contentSize)
-			p.ctx, p.cancel = context.WithCancel(tb.ctx)
-			p.rect = contentRect
-			if err := restorePaneTerminal(p, paneSnap); err != nil {
-				// p is not in tb.panes yet, so closeOpened cannot reach it.
-				p.cancel()
-				_ = pty.Close()
-				closeOpened()
-				return err
-			}
-			if restoreCommand != "" {
-				if _, err := pty.Write([]byte(restoreCommand + "\n")); err != nil {
-					d.log.Warn("writing snapshot restore command failed", "err", err, "session", snap.Name, "pane", paneSnap.ID)
-					d.NotifyGlobal(domain.NoticeWarn, domain.NoticeAutoResume,
-						"couldn't restore the running program in session "+snap.Name, err)
-				}
-			}
-			tb.panes[paneSnap.ID] = p
-		}
+		return err
 	}
 	if len(opened) == 0 {
 		cancel()
 		return nil
 	}
-	createdAt := int64(snap.CreatedAt)
-	sess := &session{name: snap.Name, ctx: sctx, cancel: cancel, tabs: opened, active: int(snap.Active), terminal: restoreTerm, env: restoreEnv, createdAt: createdAt, snapshotWake: d.snapshotWake, snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit)}
+	ownsOpened := true
+	defer func() {
+		if ownsOpened {
+			closeRestoredTabs(opened)
+			cancel()
+		}
+	}()
+
+	sess := d.newRestoredSession(snap, sctx, cancel, opened)
+	registered, err := d.persistAndRegisterRestoredSession(ctx, sess)
+	if err != nil || !registered {
+		return err
+	}
+	ownsOpened = false
+	for _, tb := range opened {
+		d.startTabGoroutines(sess, tb)
+	}
+	return nil
+}
+
+func (d *Daemon) restoredSessionAlreadyExists(name string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.closing || d.findByNameLocked(name) != nil
+}
+
+func (d *Daemon) restoreSnapshotTabs(ctx, sctx context.Context, snap snapcodec.Session) ([]*tab, error) {
+	// Restore runs before client Hello. Future panes therefore inherit the
+	// daemon's startup environment until an attach supplies terminal capability.
+	restoreTerm := terminalEnv{}
+	restoreEnv := copyEnvironment(d.baseEnv)
+	allowlist := d.restoreProcessAllowlistSnapshot()
+	stoppedTabNames := d.restoredSessionTabNames(snap.Name)
+	opened := make([]*tab, 0, len(snap.Tabs))
+	for index, tabSnap := range snap.Tabs {
+		if err := ctx.Err(); err != nil {
+			closeRestoredTabs(opened)
+			return nil, err
+		}
+		tabName := ""
+		if index < len(stoppedTabNames) {
+			tabName = stoppedTabNames[index]
+		}
+		tb, err := d.restoreSnapshotTab(ctx, sctx, snap.Name, tabName, tabSnap, restoreEnv, restoreTerm, allowlist)
+		if err != nil {
+			closeRestoredTabs(opened)
+			return nil, err
+		}
+		opened = append(opened, tb)
+	}
+	return opened, nil
+}
+
+// closeRestoredTabs releases every PTY and pane context still owned by a
+// failed restore. Registered sessions transfer this ownership to the daemon.
+func closeRestoredTabs(tabs []*tab) {
+	for _, tb := range tabs {
+		tb.closeAllPanes()
+	}
+}
+
+func (d *Daemon) restoredSessionTabNames(name string) []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.stopped[name].tabNames...)
+}
+
+func (d *Daemon) restoreSnapshotTab(ctx, sctx context.Context, sessionName, tabName string, tabSnap snapcodec.Tab, restoreEnv []string, restoreTerm terminalEnv, allowlist map[string]struct{}) (*tab, error) {
+	tbSize := domain.Size{Cols: int(tabSnap.Cols), Rows: int(tabSnap.Rows)}
+	if !tbSize.Valid() {
+		return nil, fmt.Errorf("snapshot: invalid tab size")
+	}
+	placements, ok := layout.Solve(tabSnap.Tree.Root, domain.Rect{Width: tbSize.Cols, Height: tbSize.Rows})
+	if !ok {
+		return nil, fmt.Errorf("snapshot: unsolvable layout")
+	}
+	placementByPane := make(map[layout.PaneID]domain.Rect, len(placements))
+	for _, placement := range placements {
+		placementByPane[placement.ID] = placement.Content
+	}
+	tabStableID := tabSnap.StableID
+	if tabStableID == "" {
+		var err error
+		tabStableID, err = newStableID("t")
+		if err != nil {
+			return nil, fmt.Errorf("snapshot: generating tab identity: %w", err)
+		}
+	}
+	tb := &tab{stableID: tabStableID, name: tabName, tree: tabSnap.Tree.Clone(), panes: make(map[layout.PaneID]*pane, len(tabSnap.Panes)), nextPaneID: int(tabSnap.NextPaneID), size: tbSize}
+	if tb.nextPaneID <= 0 {
+		tb.nextPaneID = 1
+	}
+	tb.ctx, tb.cancel = context.WithCancel(sctx)
+	for _, paneSnap := range tabSnap.Panes {
+		if err := ctx.Err(); err != nil {
+			tb.closeAllPanes()
+			return nil, err
+		}
+		contentRect, ok := placementByPane[paneSnap.ID]
+		if !ok {
+			tb.closeAllPanes()
+			return nil, fmt.Errorf("snapshot: missing pane placement")
+		}
+		p, err := d.restoreSnapshotPane(ctx, sessionName, tabStableID, paneSnap, contentRect, tbSize, restoreEnv, restoreTerm, allowlist, tb.ctx)
+		if err != nil {
+			tb.closeAllPanes()
+			return nil, err
+		}
+		tb.panes[paneSnap.ID] = p
+	}
+	return tb, nil
+}
+
+func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStableID string, paneSnap snapcodec.Pane, contentRect domain.Rect, tabSize domain.Size, restoreEnv []string, restoreTerm terminalEnv, allowlist map[string]struct{}, tabCtx context.Context) (*pane, error) {
+	paneStableID := paneSnap.StableID
+	if paneStableID == "" {
+		var err error
+		paneStableID, err = newStableID("p")
+		if err != nil {
+			return nil, fmt.Errorf("snapshot: generating pane identity: %w", err)
+		}
+	}
+	command, args := d.ptyCommand(restoreEnv)
+	pty, err := d.ptys.Open(ctx, command, args, childEnvFrom(restoreEnv, sessionName, tabStableID, paneStableID, restoreTerm), paneSnap.Cwd, restorePTYSize(contentRect, tabSize))
+	if err != nil {
+		return nil, err
+	}
+	p := newPaneWithStableID(paneSnap.ID, paneStableID, pty, restorePTYSize(contentRect, tabSize))
+	p.ctx, p.cancel = context.WithCancel(tabCtx)
+	p.rect = contentRect
+	if err := restorePaneTerminal(p, paneSnap); err != nil {
+		p.cancel()
+		_ = pty.Close()
+		return nil, err
+	}
+	if decision := planProcessRestore(paneSnap.Process, allowlist); decision.Restore {
+		if _, err := pty.Write([]byte(decision.Command + "\n")); err != nil {
+			d.log.Warn("writing snapshot restore command failed", "err", err, "session", sessionName, "pane", paneSnap.ID)
+			d.NotifyGlobal(domain.NoticeWarn, domain.NoticeAutoResume, "couldn't restore the running program in session "+sessionName, err)
+		}
+	}
+	return p, nil
+}
+
+func (d *Daemon) newRestoredSession(snap snapcodec.Session, sctx context.Context, cancel context.CancelFunc, tabs []*tab) *session {
+	sess := &session{name: snap.Name, ctx: sctx, cancel: cancel, tabs: tabs, active: int(snap.Active), terminal: terminalEnv{}, env: copyEnvironment(d.baseEnv), createdAt: int64(snap.CreatedAt), snapshotWake: d.snapshotWake, snapshotChunkCache: newSnapshotChunkCache(snapshotChunkCacheLimit)}
 	sess.snapEligible.Store(true)
 	if len(snap.Tabs) > 0 && len(snap.Tabs[0].Panes) > 0 {
 		sess.cwd = snap.Tabs[0].Panes[0].Cwd
@@ -192,32 +244,27 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session) err
 		sess.mruAt.Store(stopped.lastUsedSeq)
 	}
 	d.mu.Unlock()
-	record := sess.persistRecordLocked(createdAt)
-	if err := d.persist.Save(record); err != nil {
-		closeOpened()
-		return err
-	}
-	d.mu.Lock()
-	if d.closing || d.findByNameLocked(snap.Name) != nil || ctx.Err() != nil {
-		d.mu.Unlock()
-		closeOpened()
-		return nil
-	}
-	id := domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
-	d.nextID++
-	sess.id = id
-	delete(d.stopped, snap.Name)
-	d.sessions[id] = sess
-	d.mu.Unlock()
-	sess.snapDirty.Store(false)
-	for _, tb := range opened {
-		d.startTabGoroutines(sess, tb)
-	}
-	return nil
+	return sess
 }
 
-// snapshotCoordinatorContext returns the cancellation context shared by this
-// session's queued and in-flight captures. snapshotMu serializes creation with
+// persistAndRegisterRestoredSession atomically transfers a successfully
+// persisted session to the daemon. The caller retains cleanup on false/error.
+func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *session) (bool, error) {
+	if err := d.persist.Save(sess.persistRecordLocked(sess.createdAt)); err != nil {
+		return false, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closing || d.findByNameLocked(sess.name) != nil || ctx.Err() != nil {
+		return false, nil
+	}
+	sess.id = domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))
+	d.nextID++
+	delete(d.stopped, sess.name)
+	d.sessions[sess.id] = sess
+	sess.snapDirty.Store(false)
+	return true, nil
+}
 
 func restorePaneTerminal(p *pane, snap snapcodec.Pane) error {
 	if len(snap.Tail) == 0 {
