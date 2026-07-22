@@ -174,9 +174,8 @@ func TestRenameRollbackAfterOldDeleteLeavesOldCoordinatorStopped(t *testing.T) {
 	state.mu.Unlock()
 	repository.EXPECT().Tombstone(mock.Anything, "work").Return(nil).Once()
 	repository.EXPECT().Delete(mock.Anything, "work").Return(nil).Once()
-	repository.EXPECT().Publish(mock.Anything, mock.Anything).Run(func(context.Context, ports.SnapshotPublication) {
-		t.Fatal("rollback resurrected the deleted old snapshot identity")
-	}).Maybe()
+	// No Publish expectation is installed: any publication is an unexpected mock
+	// call. The saver handshake below joins the scheduler before this test ends.
 
 	pty, release := newBlockingPTY(t)
 	defer release()
@@ -198,14 +197,43 @@ func TestRenameRollbackAfterOldDeleteLeavesOldCoordinatorStopped(t *testing.T) {
 	sess.snapshotMu.Unlock()
 	require.True(t, quarantined)
 
+	// Drain stale producer notifications, then use the timer-reset handshake to
+	// prove the saver consumed this wake and completed its scheduling pass. Stop
+	// and join it before asserting: no publisher can start after this point.
+	for {
+		select {
+		case <-d.snapshotWake:
+		default:
+			goto wakeDrained
+		}
+	}
+
+wakeDrained:
+	clock := newDeterministicSnapshotClock(time.Unix(100, 0))
+	d.clock = clock
 	schedulerCtx, cancelScheduler := context.WithCancel(context.Background())
-	defer cancelScheduler()
-	go d.snapshotRepositorySaver(schedulerCtx)
+	schedulerDone := make(chan struct{})
+	go func() {
+		d.snapshotRepositorySaver(schedulerCtx)
+		close(schedulerDone)
+	}()
+	timer := clock.timer()
+	require.Equal(t, 24*time.Hour, <-timer.resets)
 	select {
 	case d.snapshotWake <- struct{}{}:
 	default:
+		t.Fatal("snapshot wake unexpectedly remained full")
 	}
-	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, 24*time.Hour, <-timer.resets, "scheduler did not process the rollback wake")
+	cancelScheduler()
+	select {
+	case <-schedulerDone:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("snapshot scheduler did not stop")
+	}
+	// The deterministic scheduler clock has no independently firing deadline;
+	// restore the daemon's normal test clock before its session cleanup runs.
+	d.clock = stubClock{}
 }
 
 func TestForcedSnapshotSchedulesSuccessorAfterRoutineInFlight(t *testing.T) {

@@ -19,26 +19,91 @@ func TestRepositoryPublishSkipsUnchangedTenThousandObjectHistory(t *testing.T) {
 	first, second := largeIncrementalPublications(t, "named", historyObjects)
 	seedCompletePublication(t, repo, first)
 
-	var reads, hashes, copies int
-	repo.hooks.beforeObjectRead = func(string) { reads++ }
-	repo.hooks.beforeObjectHash = func([]byte) { hashes++ }
-	repo.hooks.beforeObjectCopy = func([]byte) { copies++ }
-
+	accounting := installFilesystemPublishAccounting(repo)
 	if err := repo.Publish(context.Background(), second); err != nil {
 		t.Fatal(err)
 	}
 	// Only the new mutable tail and visible objects need work. The 10k sealed
 	// objects are retained history supplied again by the producer, not input
-	// that Publish needs to read, hash, or copy.
-	if reads != 2 || hashes != 2 || copies != 2 {
-		t.Fatalf("unchanged 10k history reads/hashes/copies = %d/%d/%d, want 2/2/2", reads, hashes, copies)
+	// that Publish needs to read, hash, copy, or write.
+	requireFilesystemPublishAccounting(t, accounting, filesystemPublishAccounting{
+		objectReads: 2, objectHashes: 2, objectCopies: 2,
+		tempCreates: 4, tempWrites: 4, fileSyncs: 4,
+		objectWrites: 2, manifestWrites: 1, headWrites: 1,
+		immutableInstalls: 3, mutableRenames: 1, tempRemoves: 3, directorySyncs: 4,
+	})
+
+	// Replaying the now-current generation still parses the 10k references, but
+	// must not allocate one object-sized buffer per retained history entry.
+	allocations := testing.AllocsPerRun(3, func() {
+		if err := repo.Publish(context.Background(), second); err != nil {
+			panic(err)
+		}
+	})
+	if allocations > 300 {
+		t.Fatalf("unchanged 10k history Publish allocations = %.0f, want <= 300; retained objects were likely copied", allocations)
 	}
+
 	got, err := repo.Load(context.Background(), second.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Generation != second.Generation {
 		t.Fatalf("published generation = %d, want %d", got.Generation, second.Generation)
+	}
+}
+
+type filesystemPublishAccounting struct {
+	objectReads, objectHashes, objectCopies                        int
+	tempCreates, tempWrites, fileSyncs                             int
+	objectWrites, manifestWrites, headWrites                       int
+	immutableInstalls, mutableRenames, tempRemoves, directorySyncs int
+}
+
+func installFilesystemPublishAccounting(repo *Repository) *filesystemPublishAccounting {
+	accounting := &filesystemPublishAccounting{}
+	repo.hooks.beforeObjectRead = func(string) { accounting.objectReads++ }
+	repo.hooks.beforeObjectHash = func([]byte) { accounting.objectHashes++ }
+	repo.hooks.beforeObjectCopy = func([]byte) { accounting.objectCopies++ }
+	repo.hooks.createTemp = func(string) error { accounting.tempCreates++; return nil }
+	repo.hooks.writeTemp = func(string) error { accounting.tempWrites++; return nil }
+	repo.hooks.syncFile = func(string) error { accounting.fileSyncs++; return nil }
+	repo.hooks.beforeBlobWrite = func(string) error { accounting.objectWrites++; return nil }
+	repo.hooks.beforeManifestWrite = func(string) error { accounting.manifestWrites++; return nil }
+	repo.hooks.beforeHeadWrite = func(string) error { accounting.headWrites++; return nil }
+	repo.hooks.installImmutable = func(string) error { accounting.immutableInstalls++; return nil }
+	repo.hooks.rename = func(string) error { accounting.mutableRenames++; return nil }
+	repo.hooks.remove = func(string) error { accounting.tempRemoves++; return nil }
+	repo.hooks.syncDirectory = func(string) error { accounting.directorySyncs++; return nil }
+	return accounting
+}
+
+func requireFilesystemPublishAccounting(t *testing.T, got *filesystemPublishAccounting, want filesystemPublishAccounting) {
+	t.Helper()
+	if *got != want {
+		t.Fatalf("filesystem Publish accounting = %+v, want %+v", *got, want)
+	}
+}
+
+func BenchmarkRepositoryPublishUnchangedTenThousandObjectHistory(b *testing.B) {
+	first, second := largeIncrementalPublications(b, "named", 10_000)
+	repo := NewRepository(filepath.Join(b.TempDir(), "vev"))
+	seedCompletePublication(b, repo, first)
+	accounting := installFilesystemPublishAccounting(repo)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if err := repo.Publish(context.Background(), second); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	// The benchmark deliberately replays the current generation so it can run
+	// repeatedly without fixture writes. Its bounds catch a regression that
+	// reads, hashes, or copies all 10k retained objects on the fast path.
+	if accounting.objectReads > 2 || accounting.objectHashes > 2 || accounting.objectCopies > 2 {
+		b.Fatalf("unchanged 10k history per-run object work = %d/%d/%d, want <= 2/2/2", accounting.objectReads, accounting.objectHashes, accounting.objectCopies)
 	}
 }
 
@@ -72,7 +137,7 @@ func TestRepositoryPublishVerifiesNecessaryExistingObjectOnce(t *testing.T) {
 	}
 }
 
-func largeIncrementalPublications(t *testing.T, name string, count int) (ports.SnapshotPublication, ports.SnapshotPublication) {
+func largeIncrementalPublications(t testing.TB, name string, count int) (ports.SnapshotPublication, ports.SnapshotPublication) {
 	t.Helper()
 	sealed := make([]codec.ObjectRef, 0, count)
 	objects := make([]ports.SnapshotObject, 0, count+2)
@@ -103,7 +168,7 @@ func largeIncrementalPublications(t *testing.T, name string, count int) (ports.S
 	return makePublication(1, "tail-1", "visible-1"), makePublication(2, "tail-2", "visible-2")
 }
 
-func seedCompletePublication(t *testing.T, repo *Repository, publication ports.SnapshotPublication) {
+func seedCompletePublication(t testing.TB, repo *Repository, publication ports.SnapshotPublication) {
 	t.Helper()
 	key := sessionKey(publication.Name)
 	if err := repo.ensureSession(key); err != nil {
