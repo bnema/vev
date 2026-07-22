@@ -24,7 +24,7 @@ const (
 	magic                = "VEVS"
 	version              = uint16(3)
 	maxDecodedBodySize   = 256 << 20
-	maxSnapshotBlobs     = 1 << 16
+	maxSnapshotObjects   = 1 << 16
 	maxSnapshotBytes     = 256 << 20
 	maxSnapshotRows      = 1 << 20
 	maxSnapshotCells     = 16 << 20
@@ -33,24 +33,6 @@ const (
 	// while bounding hostile manifests before decoded slices are allocated.
 	maxSnapshotDecodedAllocation = 256 << 20
 )
-
-// Marshal encodes the strict v3, flags-zero durable envelope.
-func Marshal(s Session) ([]byte, error) {
-	var w payloadWriter
-	if err := writeSession(&w, s); err != nil {
-		return nil, err
-	}
-	if len(w.b) > maxDecodedBodySize || len(w.b) > math.MaxUint32 {
-		return nil, fmt.Errorf("%w: body too large", ErrInvalidData)
-	}
-	out := make([]byte, 16+len(w.b))
-	copy(out[:4], magic)
-	binary.BigEndian.PutUint16(out[4:6], version)
-	binary.BigEndian.PutUint32(out[8:12], uint32(len(w.b)))
-	binary.BigEndian.PutUint32(out[12:16], crc32.ChecksumIEEE(w.b))
-	copy(out[16:], w.b)
-	return out, nil
-}
 
 // Unmarshal validates the complete manifest and all VT blobs without
 // allocations first, then decodes the already preflighted data.
@@ -146,6 +128,61 @@ func (w *payloadWriter) putStrings(ss []string) error {
 	return nil
 }
 
+func writeNode(w *payloadWriter, n *layout.Node) error {
+	if n == nil {
+		w.putUint8(manifestNodeNil)
+		return nil
+	}
+	switch n.Kind {
+	case layout.Leaf:
+		w.putUint8(manifestNodeLeaf)
+		return w.putString(string(n.Leaf))
+	case layout.Split:
+		w.putUint8(manifestNodeSplit)
+		w.putUint8(uint8(n.Dir))
+		return writeChildren(w, n.Children)
+	case layout.Stack:
+		w.putUint8(manifestNodeStack)
+		if err := w.putString(string(n.Expanded)); err != nil {
+			return err
+		}
+		return writeChildren(w, n.Children)
+	default:
+		return fmt.Errorf("%w: unknown node kind", ErrInvalidData)
+	}
+}
+
+func writeChildren(w *payloadWriter, children []*layout.Node) error {
+	if len(children) > math.MaxUint16 {
+		return fmt.Errorf("%w: too many children", ErrInvalidData)
+	}
+	w.putUint16(uint16(len(children)))
+	for _, c := range children {
+		if err := writeNode(w, c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeProcess(w *payloadWriter, p *Process) error {
+	if p == nil {
+		w.putUint8(processAbsent)
+		return nil
+	}
+	if len(p.Argv) == 0 {
+		return fmt.Errorf("%w: process argv empty", ErrInvalidData)
+	}
+	w.putUint8(processPresent)
+	if err := w.putStrings(p.Argv); err != nil {
+		return err
+	}
+	if err := w.putString(p.Strategy); err != nil {
+		return err
+	}
+	return w.putString(p.Opts.AgentSessionID)
+}
+
 type payloadReader struct{ b []byte }
 
 func (r *payloadReader) getUint8() (uint8, error) {
@@ -226,27 +263,6 @@ func (r *payloadReader) done() error {
 	return nil
 }
 
-func writeSession(w *payloadWriter, s Session) error {
-	if len(s.Tabs) > math.MaxUint16 {
-		return fmt.Errorf("%w: too many tabs", ErrInvalidData)
-	}
-	if err := validateActive(s.Active, len(s.Tabs)); err != nil {
-		return err
-	}
-	if err := w.putString(s.Name); err != nil {
-		return err
-	}
-	w.putUint64(s.CreatedAt)
-	w.putUint16(s.Active)
-	w.putUint16(uint16(len(s.Tabs)))
-	for _, t := range s.Tabs {
-		if err := writeTab(w, t); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func readSession(r *payloadReader) (Session, error) {
 	name, err := r.getString()
 	if err != nil {
@@ -276,35 +292,6 @@ func readSession(r *payloadReader) (Session, error) {
 		s.Tabs[i] = t
 	}
 	return s, nil
-}
-
-func writeTab(w *payloadWriter, t Tab) error {
-	if err := w.putString(t.StableID); err != nil {
-		return err
-	}
-	w.putUint16(t.Cols)
-	w.putUint16(t.Rows)
-	w.putUint64(t.NextPaneID)
-	if err := w.putString(string(t.Focus)); err != nil {
-		return err
-	}
-	var root *layout.Node
-	if t.Tree != nil {
-		root = t.Tree.Root
-	}
-	if err := writeNode(w, root); err != nil {
-		return err
-	}
-	if len(t.Panes) > math.MaxUint16 {
-		return fmt.Errorf("%w: too many panes", ErrInvalidData)
-	}
-	w.putUint16(uint16(len(t.Panes)))
-	for _, p := range t.Panes {
-		if err := writePane(w, p); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func readTab(r *payloadReader) (Tab, error) {
@@ -347,56 +334,19 @@ func readTab(r *payloadReader) (Tab, error) {
 	return t, nil
 }
 
-func writeNode(w *payloadWriter, n *layout.Node) error {
-	if n == nil {
-		w.putUint8(3)
-		return nil
-	}
-	switch n.Kind {
-	case layout.Leaf:
-		w.putUint8(0)
-		return w.putString(string(n.Leaf))
-	case layout.Split:
-		w.putUint8(1)
-		w.putUint8(uint8(n.Dir))
-		return writeChildren(w, n.Children)
-	case layout.Stack:
-		w.putUint8(2)
-		if err := w.putString(string(n.Expanded)); err != nil {
-			return err
-		}
-		return writeChildren(w, n.Children)
-	default:
-		return fmt.Errorf("%w: unknown node kind", ErrInvalidData)
-	}
-}
-
-func writeChildren(w *payloadWriter, children []*layout.Node) error {
-	if len(children) > math.MaxUint16 {
-		return fmt.Errorf("%w: too many children", ErrInvalidData)
-	}
-	w.putUint16(uint16(len(children)))
-	for _, c := range children {
-		if err := writeNode(w, c); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func readNode(r *payloadReader) (*layout.Node, error) {
 	kind, err := r.getUint8()
 	if err != nil {
 		return nil, err
 	}
 	switch kind {
-	case 0:
+	case manifestNodeLeaf:
 		leaf, err := r.getString()
 		if err != nil {
 			return nil, err
 		}
 		return layout.NewLeaf(layout.PaneID(leaf)), nil
-	case 1:
+	case manifestNodeSplit:
 		dir, err := r.getUint8()
 		if err != nil {
 			return nil, err
@@ -406,7 +356,7 @@ func readNode(r *payloadReader) (*layout.Node, error) {
 			return nil, err
 		}
 		return &layout.Node{Kind: layout.Split, Dir: layout.SplitDir(dir), Children: children}, nil
-	case 2:
+	case manifestNodeStack:
 		exp, err := r.getString()
 		if err != nil {
 			return nil, err
@@ -416,7 +366,7 @@ func readNode(r *payloadReader) (*layout.Node, error) {
 			return nil, err
 		}
 		return &layout.Node{Kind: layout.Stack, Expanded: layout.PaneID(exp), Children: children}, nil
-	case 3:
+	case manifestNodeNil:
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("%w: unknown node kind", ErrInvalidData)
@@ -439,40 +389,6 @@ func readChildren(r *payloadReader) ([]*layout.Node, error) {
 	return out, nil
 }
 
-func writePane(w *payloadWriter, p Pane) error {
-	if err := w.putString(string(p.ID)); err != nil {
-		return err
-	}
-	if err := w.putString(p.StableID); err != nil {
-		return err
-	}
-	if err := w.putString(p.Cwd); err != nil {
-		return err
-	}
-	if len(p.SealedChunks) > maxSnapshotBlobs {
-		return fmt.Errorf("%w: too many sealed chunks", ErrInvalidData)
-	}
-	w.putUint32(uint32(len(p.SealedChunks)))
-	for _, blob := range p.SealedChunks {
-		if len(blob) == 0 || len(blob) > math.MaxUint32 {
-			return fmt.Errorf("%w: sealed chunk length", ErrInvalidData)
-		}
-		w.putUint32(uint32(len(blob)))
-		w.b = append(w.b, blob...)
-	}
-	if len(p.Tail) == 0 || len(p.Tail) > math.MaxUint32 {
-		return fmt.Errorf("%w: tail length", ErrInvalidData)
-	}
-	w.putUint32(uint32(len(p.Tail)))
-	w.b = append(w.b, p.Tail...)
-	if len(p.Visible) == 0 || len(p.Visible) > math.MaxUint32 {
-		return fmt.Errorf("%w: visible length", ErrInvalidData)
-	}
-	w.putUint32(uint32(len(p.Visible)))
-	w.b = append(w.b, p.Visible...)
-	return writeProcess(w, p.Process)
-}
-
 func readPane(r *payloadReader) (Pane, error) {
 	id, err := r.getString()
 	if err != nil {
@@ -490,7 +406,7 @@ func readPane(r *payloadReader) (Pane, error) {
 	if err != nil {
 		return Pane{}, err
 	}
-	if n > maxSnapshotBlobs || uint64(n) > uint64(len(r.b))/4 {
+	if n > maxSnapshotObjects || uint64(n) > uint64(len(r.b))/4 {
 		return Pane{}, fmt.Errorf("%w: sealed chunks", ErrInvalidData)
 	}
 	sealed := make([][]byte, n)
@@ -514,33 +430,15 @@ func readPane(r *payloadReader) (Pane, error) {
 	return Pane{ID: layout.PaneID(id), StableID: stableID, Cwd: cwd, SealedChunks: sealed, Tail: tail, Visible: visible, Process: proc}, nil
 }
 
-func writeProcess(w *payloadWriter, p *Process) error {
-	if p == nil {
-		w.putUint8(0)
-		return nil
-	}
-	if len(p.Argv) == 0 {
-		return fmt.Errorf("%w: process argv empty", ErrInvalidData)
-	}
-	w.putUint8(1)
-	if err := w.putStrings(p.Argv); err != nil {
-		return err
-	}
-	if err := w.putString(p.Strategy); err != nil {
-		return err
-	}
-	return w.putString(p.Opts.AgentSessionID)
-}
-
 func readProcess(r *payloadReader) (*Process, error) {
 	present, err := r.getUint8()
 	if err != nil {
 		return nil, err
 	}
-	if present == 0 {
+	if present == processAbsent {
 		return nil, nil
 	}
-	if present != 1 {
+	if present != processPresent {
 		return nil, fmt.Errorf("%w: process presence", ErrInvalidData)
 	}
 	argv, err := r.getStrings()

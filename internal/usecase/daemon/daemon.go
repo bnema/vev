@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"math"
 	"os"
-	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -17,7 +16,6 @@ import (
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
-	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
 // Scheduler debounce bounds. Idle updates use the minimum for low latency;
@@ -32,8 +30,13 @@ const debounceInterval = minDebounceInterval
 // ptyReadBufSize is the PTY reader's read buffer.
 const ptyReadBufSize = 32 * 1024
 
-// defaultScrollbackRows is the per-tab retained history size.
-const defaultScrollbackRows = 10_000
+// New and restored panes are bounded by both history rows and cells. The
+// cell budget keeps a very wide terminal from retaining disproportionately
+// more scrollback than the normal 160-column case.
+const (
+	defaultScrollbackRows  = 10_000
+	defaultScrollbackCells = 12_000 * 160
+)
 
 // detachNotifyTimeout bounds the best-effort Detached notification on the
 // detach/kill/shutdown paths: if a wedged client (full kernel send buffer)
@@ -101,22 +104,32 @@ type Daemon struct {
 	beforeCopyModeRevalidate func()
 	// beforeCopyMouseMap is a deterministic seam after an immutable copy-input
 	// snapshot is captured and before its mapped position is applied.
-	beforeCopyMouseMap      func()
-	ptys                    ports.PTYFactory
-	clock                   ports.Clock
-	log                     *slog.Logger
-	runtimeObserver         ports.RuntimeObserver
-	baseEnv                 []string
-	shell                   string
-	shellArgs               []string
-	shellOverride           bool
-	persist                 *persist.Persister
-	persistEnabled          bool
-	snaps                   ports.SnapshotStore
-	snapsEnabled            bool
-	noticeStore             ports.NoticeStore
-	snapshotMarshal         func(snapcodec.Session) ([]byte, error)
-	snapshotJobs            chan *snapshotCapture
+	beforeCopyMouseMap func()
+	ptys               ports.PTYFactory
+	clock              ports.Clock
+	log                *slog.Logger
+	runtimeObserver    ports.RuntimeObserver
+	baseEnv            []string
+	shell              string
+	shellArgs          []string
+	shellOverride      bool
+	persist            *persist.Persister
+	persistEnabled     bool
+	// snapshotRepository is the sole checkpoint contract. legacySnapshots is
+	// read-only migration input and is never used for new writes.
+	snapshotRepository ports.SnapshotRepository
+	legacySnapshots    ports.LegacySnapshotSource
+	snapsEnabled       bool
+	// legacyImportPending holds verified legacy blobs whose source deletion
+	// failed, so a later import retries only deletion rather than publication.
+	legacyImportMu      sync.Mutex
+	legacyImportPending map[string][]byte
+	noticeStore         ports.NoticeStore
+	snapshotJobs        chan *snapshotCapture
+	// snapshotWake wakes the repository scheduler when a session becomes dirty
+	// or an attempt completes. It is never closed and producers only send
+	// non-blockingly.
+	snapshotWake            chan struct{}
 	snapshotWorkerMu        sync.Mutex
 	snapshotWorkerID        uint64
 	snapshotWorkerCtx       context.Context
@@ -127,28 +140,33 @@ type Daemon struct {
 	// snapshotFinalJobs coalesces terminal captures by session when the bounded
 	// regular queue is full. It retains at most snapshotFinalQueueCapacity named
 	// sessions, each with only its newest terminal state while the worker blocks.
-	snapshotFinalJobs       map[*session]*snapshotCapture
-	snapshotFinalOrder      []*session
-	snapshotWorkerClosing   bool
-	snapshotWorkerInFlight  *snapshotCapture
-	restoreDone             chan struct{}
-	restoreOnce             sync.Once
-	procCwd                 func(int) (string, error)
-	procComm                func(int) (string, error)
-	procArgv                func(int) ([]string, error)
-	procGroupArgv           func(int, int) ([]string, error)
-	dirOrHome               func(string) string
-	bindings                atomic.Pointer[keys.Bindings]
-	codeOverrides           atomic.Pointer[map[string]string]
-	restoreProcessAllowlist atomic.Pointer[map[string]struct{}]
-	floatingConfig          atomic.Pointer[domain.FloatingConfig]
-	copyConfig              atomic.Pointer[domain.CopyConfig]
-	paletteConfig           atomic.Pointer[domain.PaletteConfig]
-	tabsConfig              atomic.Pointer[domain.TabsConfig]
-	themeConfig             atomic.Pointer[themeConfigSnapshot]
-	barScripts              *barScriptState
-	notices                 *noticeCenter
-	resumeParkGrace         time.Duration
+	snapshotFinalJobs      map[*session]*snapshotCapture
+	snapshotFinalOrder     []*session
+	snapshotWorkerClosing  bool
+	snapshotWorkerInFlight *snapshotCapture
+	// snapshotNoticeMu guards the active global persistence failure signature.
+	// It is separate from snapshotWorkerMu so notice routing cannot block a
+	// producer or a repository worker.
+	snapshotNoticeMu               sync.Mutex
+	snapshotActiveFailureSignature string
+	restoreDone                    chan struct{}
+	restoreOnce                    sync.Once
+	procCwd                        func(int) (string, error)
+	procComm                       func(int) (string, error)
+	procArgv                       func(int) ([]string, error)
+	procGroupArgv                  func(int, int) ([]string, error)
+	dirOrHome                      func(string) string
+	bindings                       atomic.Pointer[keys.Bindings]
+	codeOverrides                  atomic.Pointer[map[string]string]
+	restoreProcessAllowlist        atomic.Pointer[map[string]struct{}]
+	floatingConfig                 atomic.Pointer[domain.FloatingConfig]
+	copyConfig                     atomic.Pointer[domain.CopyConfig]
+	paletteConfig                  atomic.Pointer[domain.PaletteConfig]
+	tabsConfig                     atomic.Pointer[domain.TabsConfig]
+	themeConfig                    atomic.Pointer[themeConfigSnapshot]
+	barScripts                     *barScriptState
+	notices                        *noticeCenter
+	resumeParkGrace                time.Duration
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
 	tempDir string
@@ -194,15 +212,6 @@ type stoppedSession struct {
 	purging     bool
 }
 
-func (s stoppedSession) same(other stoppedSession) bool {
-	return s.name == other.name &&
-		s.cwd == other.cwd &&
-		s.createdAt == other.createdAt &&
-		s.lastUsedSeq == other.lastUsedSeq &&
-		s.purging == other.purging &&
-		slices.Equal(s.tabNames, other.tabNames)
-}
-
 type Option func(*Daemon)
 
 // WithRuntimeObserver accepts only a composition-root serialized observer.
@@ -232,12 +241,13 @@ func WithStore(store ports.Store) Option {
 	}
 }
 
-// WithSnapshotStore enables durable named session snapshots. A nil store keeps
-// the daemon in no-op snapshot mode.
-func WithSnapshotStore(store ports.SnapshotStore) Option {
+// WithSnapshotRepository enables content-addressed incremental snapshots. The
+// legacy source is read-only migration input and is never used for new writes.
+func WithSnapshotRepository(repository ports.SnapshotRepository, legacy ports.LegacySnapshotSource) Option {
 	return func(d *Daemon) {
-		d.snaps = store
-		d.snapsEnabled = store != nil
+		d.snapshotRepository = repository
+		d.legacySnapshots = legacy
+		d.snapsEnabled = repository != nil
 	}
 }
 
@@ -343,23 +353,24 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		shell = "/bin/sh"
 	}
 	d := &Daemon{
-		sessions:        make(map[domain.SessionID]*session),
-		stopped:         make(map[string]stoppedSession),
-		parked:          make(map[uint64]*parkedAttachment),
-		ptys:            ptys,
-		clock:           clock,
-		log:             log,
-		baseEnv:         os.Environ(),
-		shell:           shell,
-		persist:         persist.New(nil),
-		dirOrHome:       dirOrHome,
-		done:            make(chan struct{}),
-		restoreDone:     make(chan struct{}),
-		animWake:        make(chan struct{}, 1),
-		snapshotMarshal: snapcodec.Marshal,
-		snapshotJobs:    make(chan *snapshotCapture, snapshotQueueCapacity),
-		notices:         newNoticeCenter(),
-		resumeParkGrace: defaultResumeParkGrace,
+		sessions:            make(map[domain.SessionID]*session),
+		stopped:             make(map[string]stoppedSession),
+		parked:              make(map[uint64]*parkedAttachment),
+		ptys:                ptys,
+		clock:               clock,
+		log:                 log,
+		baseEnv:             os.Environ(),
+		shell:               shell,
+		persist:             persist.New(nil),
+		dirOrHome:           dirOrHome,
+		done:                make(chan struct{}),
+		restoreDone:         make(chan struct{}),
+		animWake:            make(chan struct{}, 1),
+		legacyImportPending: make(map[string][]byte),
+		snapshotJobs:        make(chan *snapshotCapture, snapshotQueueCapacity),
+		snapshotWake:        make(chan struct{}, 1),
+		notices:             newNoticeCenter(),
+		resumeParkGrace:     defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
@@ -443,7 +454,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	if d.snapsEnabled {
 		d.startSnapshotEncodeWorker()
 		d.sessWg.Go(func() {
-			d.snapshotSaver(d.serveCtx)
+			d.snapshotRepositorySaver(d.serveCtx)
 		})
 		d.sessWg.Go(func() {
 			d.restoreSnapshots(d.serveCtx)
@@ -486,7 +497,15 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	// force-close. Finally drain the conn handlers, run one defensive sweep in
 	// case any ordering ever leaves a session behind, and join the session
 	// goroutines (readers unblock via pty.Close, coordinators via ctx cancel).
-	d.shutdownAll(ports.ReasonServerShutdown)
+	// One deadline owns every terminal checkpoint wait and the final worker
+	// join. A repository is allowed to ignore cancellation, so spending a fresh
+	// interval at either stage would make shutdown exceed its documented bound.
+	var snapshotDeadline *snapshotShutdownDeadline
+	if d.snapsEnabled {
+		snapshotDeadline = newSnapshotShutdownDeadline(d.clock)
+		defer snapshotDeadline.stop()
+	}
+	d.shutdownAllWithSnapshotDeadline(ports.ReasonServerShutdown, snapshotDeadline)
 	d.waitNotifies()
 	d.hardCancel()
 	d.serveCancel()
@@ -495,7 +514,10 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	// registry snapshot has been removed.
 	d.connWg.Wait()
 	d.attachmentCleanupWg.Wait()
-	d.stopSnapshotEncodeWorker()
+	// Forced terminal checkpoints run before shutdown stops producers or the
+	// worker. The same deadline bounds the worker's final drain, including a
+	// repository call that ignores cancellation.
+	d.stopSnapshotEncodeWorkerWithDeadline(snapshotDeadline)
 	d.shutdownAll(ports.ReasonServerShutdown)
 	d.sessWg.Wait()
 	d.waitNotifies()
@@ -509,7 +531,11 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 // closing under the same lock as the snapshot guarantees no session can be
 // inserted after the snapshot: route rejects once closing is set, and both run
 // under d.mu. killSession (which relocks) runs after the lock is released.
-func (d *Daemon) shutdownAll(reason uint8) {
+func (d *Daemon) shutdownAll(reason uint8) (checkpointIncomplete bool) {
+	return d.shutdownAllWithSnapshotDeadline(reason, nil)
+}
+
+func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapshotShutdownDeadline) (checkpointIncomplete bool) {
 	d.mu.Lock()
 	d.closing = true
 	for token, parked := range d.parked {
@@ -521,13 +547,57 @@ func (d *Daemon) shutdownAll(reason uint8) {
 	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
-		return
+		return false
 	}
 	for _, s := range snapshot {
-		if err := d.killSession(s, reason, false); err != nil {
+		if err := d.killSessionWithSnapshotDeadline(s, reason, false, deadline); err != nil {
+			checkpointIncomplete = true
 			d.log.Error("closing session with unpersisted terminal state", "err", err)
 		}
 	}
+	return checkpointIncomplete
+}
+
+// snapshotShutdownDeadline is a single-use shutdown budget shared by forced
+// checkpoints and the final snapshot worker join. Its done channel is never
+// closed by callers, so a detached worker can safely retain session state until
+// an uncooperative repository call returns.
+type snapshotShutdownDeadline struct {
+	done     chan struct{}
+	stopCh   chan struct{}
+	finished chan struct{}
+	stopOnce sync.Once
+}
+
+func newSnapshotShutdownDeadline(clock ports.Clock) *snapshotShutdownDeadline {
+	deadline := &snapshotShutdownDeadline{done: make(chan struct{}), stopCh: make(chan struct{}), finished: make(chan struct{})}
+	timer := clock.NewTimer(snapshotFinalFlushTimeout)
+	go func() {
+		defer close(deadline.finished)
+		select {
+		case <-timer.C():
+			close(deadline.done)
+		case <-deadline.stopCh:
+			timer.Stop()
+		}
+	}()
+	return deadline
+}
+
+func (d *snapshotShutdownDeadline) stop() {
+	if d != nil {
+		d.stopOnce.Do(func() {
+			close(d.stopCh)
+			<-d.finished
+		})
+	}
+}
+
+func (d *snapshotShutdownDeadline) Done() <-chan struct{} {
+	if d == nil {
+		return nil
+	}
+	return d.done
 }
 
 func (d *Daemon) sessionsSnapshotLocked() []*session {
@@ -620,25 +690,15 @@ func (d *Daemon) handleKill(tr ports.Transport, f ports.Frame) {
 	d.mu.Lock()
 	target := d.findByNameLocked(k.Name)
 	if target == nil {
-		if stopped, ok := d.stopped[k.Name]; ok {
+		if _, ok := d.stopped[k.Name]; ok {
 			d.mu.Unlock()
-			if d.snapsEnabled && d.snaps != nil {
-				if err := d.snaps.Delete(k.Name); err != nil {
-					d.log.Warn("deleting stopped session snapshot failed", "err", err, "session", k.Name)
-					_ = tr.Send(frameError(ports.ErrInternal, "deleting stopped session snapshot failed"))
-					return
-				}
+			// Stopped sessions follow the same tombstone-backed transaction as
+			// live and offline purges. In particular, a retained legacy source
+			// must never outlive metadata after an interrupted control kill.
+			if err := d.retryStoppedPurge(k.Name); err != nil {
+				d.log.Warn("deleting stopped session failed", "err", err, "session", k.Name)
+				_ = tr.Send(frameError(ports.ErrInternal, "deleting stopped session failed"))
 			}
-			if err := d.persist.Delete(k.Name); err != nil {
-				d.log.Warn("deleting persisted stopped session failed", "err", err, "session", k.Name)
-				_ = tr.Send(frameError(ports.ErrInternal, "deleting persisted stopped session failed"))
-				return
-			}
-			d.mu.Lock()
-			if cur, ok := d.stopped[k.Name]; ok && cur.same(stopped) {
-				delete(d.stopped, k.Name)
-			}
-			d.mu.Unlock()
 			return
 		}
 	}

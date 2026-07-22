@@ -8,9 +8,10 @@ import (
 )
 
 var (
-	benchmarkHistoryViewSink  HistoryView
-	benchmarkHistoryBlobSink  []byte
-	benchmarkHistoryBlobsSink [][]byte
+	benchmarkHistoryViewSink     HistoryView
+	benchmarkHistorySnapshotSink HistorySnapshotView
+	benchmarkHistoryBlobSink     []byte
+	benchmarkHistoryBlobsSink    [][]byte
 )
 
 // TestHistoryViewPartialTailAllocationBounded guards the capture property used
@@ -73,6 +74,25 @@ func BenchmarkHistoryView10KRowsPartialTail(b *testing.B) {
 		b.Fatal("partial-tail capture did not reuse its sealed chunks")
 	}
 	b.ReportMetric(float64(10_000%256), "tailrows/view")
+}
+
+func BenchmarkHistorySnapshotView10KRowsPartialTail(b *testing.B) {
+	history := benchmarkHistory(b, 10_000, 120, 256)
+	if got, want := len(history.tail), 16; got != want {
+		b.Fatalf("partial tail rows = %d, want %d", got, want)
+	}
+	sealed := history.View().Chunk(0)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		benchmarkHistorySnapshotSink = history.SnapshotView()
+	}
+	b.StopTimer()
+	if got := benchmarkHistorySnapshotSink; got.Chunk(0) != sealed || got.Tail().Len() != 16 {
+		b.Fatal("snapshot did not preserve chunk identity and tail rows")
+	}
+	b.ReportMetric(float64(benchmarkHistorySnapshotSink.ChunkCount()), "sealedchunks/view")
 }
 
 func BenchmarkMarshalHistoryChunk256x120(b *testing.B) {
@@ -155,7 +175,7 @@ func benchmarkHistory(t testing.TB, rows, width, chunkRows int) *History {
 		for col := range cells {
 			cells[col] = renderer.Cell{Rune: rune('a' + (row+col)%26)}
 		}
-		history.Append(cells)
+		requireHistoryAppend(t, history, cells)
 	}
 	return history
 }
@@ -173,7 +193,7 @@ func benchmarkScreenResizeReflow(b *testing.B, historyRows int) {
 	s := NewScreenWithHistory(120, 40, HistoryConfig{MaxRows: historyRows + 500})
 	if historyRows > 0 {
 		for range historyRows {
-			s.history.Append(make([]renderer.Cell, 120))
+			requireHistoryAppend(b, s.history, make([]renderer.Cell, 120))
 		}
 	}
 	s.Write(bytes.Repeat([]byte("x"), 120*39))

@@ -547,17 +547,10 @@ func (d *Daemon) resumeStoppedAndSwitch(from *session, ac *attachedClient, targe
 
 func (d *Daemon) killPickerTarget(target picker.Target) error {
 	if target.Stopped {
-		d.mu.Lock()
-		stopped, ok := d.stopped[target.Name]
-		if ok && !stopped.purging {
-			if err := d.persist.Delete(target.Name); err != nil {
-				d.mu.Unlock()
-				d.log.Warn("deleting persisted stopped session failed", "err", err, "session", target.Name)
-				return domain.UserErr(domain.NoticePersistDelete, "couldn't delete stopped session", err)
-			}
-			delete(d.stopped, target.Name)
+		if err := d.retryStoppedPurge(target.Name); err != nil {
+			d.log.Warn("deleting persisted stopped session failed", "err", err, "session", target.Name)
+			return domain.UserErr(domain.NoticePersistDelete, "couldn't delete stopped session", err)
 		}
-		d.mu.Unlock()
 		return nil
 	}
 	d.mu.Lock()

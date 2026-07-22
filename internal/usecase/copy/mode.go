@@ -2,6 +2,7 @@ package copy
 
 import (
 	"encoding/base64"
+	"math"
 	"slices"
 	"strings"
 	"unicode"
@@ -27,11 +28,30 @@ func NewSnapshot(historySource *vt.History, screen renderer.Frame) Snapshot {
 	return Snapshot{history: history, screen: screen.Clone(), Width: screen.Width, Height: screen.Height}
 }
 func NewSnapshotFromRows(rows [][]renderer.Cell, width, height int) Snapshot {
-	history := vt.NewHistory(vt.HistoryConfig{MaxRows: len(rows), ChunkRows: 256})
+	history := vt.NewHistory(vt.HistoryConfig{
+		MaxRows:   len(rows),
+		MaxCells:  snapshotRowsCellBudget(rows),
+		ChunkRows: 256,
+	})
 	for _, row := range rows {
-		history.Append(row)
+		if err := history.Append(row); err != nil {
+			panic("copy snapshot: configured history rejected supplied row")
+		}
 	}
 	return Snapshot{history: history.SealAndView(), Width: width, Height: height}
+}
+
+// snapshotRowsCellBudget returns a capacity that retains every supplied row.
+// Saturation is safe because a larger representable capacity does not exist.
+func snapshotRowsCellBudget(rows [][]renderer.Cell) int {
+	cells := 0
+	for _, row := range rows {
+		if len(row) > math.MaxInt-cells {
+			return math.MaxInt
+		}
+		cells += len(row)
+	}
+	return cells
 }
 func (s Snapshot) Len() int { return s.history.Len() + s.screen.Height }
 func (s Snapshot) Row(i int) []renderer.Cell {

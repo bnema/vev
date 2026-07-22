@@ -43,6 +43,7 @@ type session struct {
 	client                 *attachedClient
 	clipboardQueue         []clipboardForward
 	clipboardWorkerRunning bool
+	renameInProgress       bool
 	cwd                    string
 	terminal               terminalEnv
 	// env is the authoritative immutable environment snapshot for future PTY children.
@@ -52,14 +53,37 @@ type session struct {
 	mruAt        atomic.Uint64
 	snapDirty    atomic.Bool
 	snapEligible atomic.Bool
-	// snapshotMu serializes the dirty generation with worker completion. It is
-	// intentionally independent from mu: persistence never holds session state
-	// locks while encoding or writing.
-	snapshotMu              sync.Mutex
-	snapshotGeneration      uint64
+	// snapshotMu serializes mutation revisions and repository publication
+	// generations with worker completion. It is intentionally independent from
+	// mu: persistence never holds session state locks while encoding or writing.
+	snapshotMu                        sync.Mutex
+	snapshotGeneration                uint64 // newest mutation revision
+	snapshotPublishedGeneration       uint64 // newest repository generation
+	snapshotPublishedMutationRevision uint64
+	snapshotNextEligibleAt            time.Time
+	// The coordinator state below is guarded by snapshotMu. A capture can be
+	// queued globally or in flight, never more than one of each per session.
+	// Quarantine cancels the session publication context before destructive
+	// repository operations and publicationDone joins a started publication.
 	snapshotPending         bool
 	snapshotPendingCaptures uint
-	snapshotChanged         chan struct{}
+	// snapshotForcedGeneration is the newest mutation revision a forced
+	// checkpoint must publish. It survives an older routine capture so worker
+	// completion can enqueue exactly one forced successor.
+	snapshotForcedGeneration   uint64
+	snapshotQueuedCapture      *snapshotCapture
+	snapshotInFlightCapture    *snapshotCapture
+	snapshotPublicationDone    chan struct{}
+	snapshotPublicationContext context.Context
+	snapshotPublicationCancel  context.CancelFunc
+	snapshotQuarantined        bool
+	snapshotQuarantineEpoch    uint64
+	// snapshotChunkCache retains encoded sealed history only for this named
+	// session. snapshotMu owns it so cache touches never contend with pane
+	// state or mutate bytes retained by queued/in-flight publications.
+	snapshotChunkCache *snapshotChunkCache
+	snapshotChanged    chan struct{}
+	snapshotWake       chan struct{}
 	// syncGen makes synchronized-output watchdog generations unique across all
 	// panes in this session.
 	syncGen atomic.Uint64
@@ -193,16 +217,20 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		lastUsedSeq = stopped.lastUsedSeq
 	}
 	sess := &session{
-		id:        id,
-		name:      name,
-		ephemeral: ephemeral,
-		ctx:       sctx,
-		cancel:    cancel,
-		tabs:      tabs,
-		cwd:       cwd,
-		terminal:  term,
-		env:       env,
-		createdAt: createdAt,
+		id:           id,
+		name:         name,
+		ephemeral:    ephemeral,
+		ctx:          sctx,
+		cancel:       cancel,
+		tabs:         tabs,
+		cwd:          cwd,
+		terminal:     term,
+		env:          env,
+		createdAt:    createdAt,
+		snapshotWake: d.snapshotWake,
+	}
+	if !ephemeral && name != "" {
+		sess.snapshotChunkCache = newSnapshotChunkCache(snapshotChunkCacheLimit)
 	}
 	if lastUsedSeq > 0 {
 		sess.mruAt.Store(lastUsedSeq)
@@ -521,15 +549,27 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	if err := domain.ValidateSessionName(name); err != nil {
 		return err
 	}
+
+	// Reserve the rename while state is inspected, then perform persistence and
+	// repository I/O without daemon/session locks. The old identity is first
+	// quarantined and durably purged; committing the new record before that
+	// transaction completes could leave a restorable old legacy source.
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if taken := d.findByNameLocked(name); taken != nil && taken != sess {
-		return errSessionNameInUse
-	}
-	if stopped, ok := d.stopped[name]; ok && stopped.name != sess.name {
+		d.mu.Unlock()
 		return errSessionNameInUse
 	}
 	sess.mu.Lock()
+	if sess.renameInProgress {
+		sess.mu.Unlock()
+		d.mu.Unlock()
+		return errors.New("session rename already in progress")
+	}
+	if stopped, ok := d.stopped[name]; ok && stopped.name != sess.name {
+		sess.mu.Unlock()
+		d.mu.Unlock()
+		return errSessionNameInUse
+	}
 	oldName := sess.name
 	wasEphemeral := sess.ephemeral
 	createdAt := sess.createdAt
@@ -538,45 +578,79 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		createdAt, err = d.allocateLifecycleCreatedAtLocked()
 		if err != nil {
 			sess.mu.Unlock()
+			d.mu.Unlock()
 			return err
 		}
 	}
 	lastUsedSeq := sess.mruAt.Load()
-	if wasEphemeral || oldName != name {
-		record := sess.persistRecordLocked(d.nowUnixNano())
-		record.Name = name
-		record.CreatedAt = createdAt
-		record.LastUsedSeq = lastUsedSeq
-		if err := d.persist.Save(record); err != nil {
-			sess.mu.Unlock()
-			return err
-		}
+	record := sess.persistRecordLocked(d.nowUnixNano())
+	record.Name = name
+	record.CreatedAt = createdAt
+	record.LastUsedSeq = lastUsedSeq
+	sess.renameInProgress = true
+	sess.mu.Unlock()
+	d.mu.Unlock()
+
+	rollback := func(err error) error {
+		sess.mu.Lock()
+		sess.renameInProgress = false
+		sess.mu.Unlock()
+		return err
 	}
+	var quarantine snapshotCoordinatorQuarantine
 	if !wasEphemeral && oldName != name {
-		if d.snapsEnabled && d.snaps != nil {
-			if err := d.snaps.Delete(oldName); err != nil {
-				if cleanupErr := d.persist.Delete(name); cleanupErr != nil {
-					d.log.Warn("cleaning up renamed persisted session failed", "err", cleanupErr, "session", name)
-				}
-				sess.mu.Unlock()
-				return err
-			}
+		quarantine = quarantineSnapshotCoordinatorWithEpoch(sess)
+		<-quarantine.done
+		if err := d.beginSnapshotPurge(oldName); err != nil {
+			return rollback(err)
 		}
-		if err := d.persist.Delete(oldName); err != nil {
-			if cleanupErr := d.persist.Delete(name); cleanupErr != nil {
-				d.log.Warn("cleaning up renamed persisted session failed", "err", cleanupErr, "session", name)
-			}
-			sess.mu.Unlock()
-			return err
+		// finishSnapshotPurge preserves the tombstone through both source
+		// deletions and the old metadata delete, including a retained legacy
+		// import whose verified source delete is still pending.
+		if err := d.finishSnapshotPurge(oldName); err != nil {
+			return rollback(err)
 		}
 	}
+	// For a named rename this is the durable commit point, deliberately after
+	// the old tombstone transaction. Ephemeral promotion has no old durable
+	// identity and can create its first record directly.
+	if wasEphemeral || oldName != name {
+		if err := d.persist.Save(record); err != nil {
+			return rollback(err)
+		}
+	}
+
+	d.mu.Lock()
+	sess.mu.Lock()
+	// The reservation prevents another rename. A closing session is allowed to
+	// finish this short commit; killSession subsequently owns its teardown.
 	delete(d.stopped, oldName)
 	delete(d.stopped, name)
 	sess.name = name
 	sess.createdAt = createdAt
 	sess.ephemeral = false
-	sess.snapEligible.Store(name != "")
+	sess.renameInProgress = false
+	// Keep the coordinator in quarantine until the new in-memory identity is
+	// fully committed. The fresh coordinator below makes the new repository
+	// start at generation one.
+	if !wasEphemeral && oldName != name {
+		sess.snapEligible.Store(false)
+	} else {
+		sess.snapEligible.Store(name != "")
+	}
 	sess.mu.Unlock()
+	d.mu.Unlock()
+	if !wasEphemeral && oldName != name {
+		// A concurrent teardown may have quarantined after this rename did. In
+		// that case its newer epoch owns the stopped coordinator.
+		resumeSnapshotCoordinatorForNewIdentity(sess, quarantine)
+		return nil
+	}
+	if wasEphemeral {
+		sess.snapshotMu.Lock()
+		sess.snapshotChunkCache = newSnapshotChunkCache(snapshotChunkCacheLimit)
+		sess.snapshotMu.Unlock()
+	}
 	markSnapshotDirty(sess)
 	return nil
 }
@@ -717,36 +791,155 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 // ptyReader drains child output into the VT screen and pokes the dirty channel
 // (non-blocking: a full channel already means a render is pending). On any read
 
+// beginSnapshotPurge commits a logical named-session kill before its live
+// identity or persisted metadata is removed. It never runs under daemon or
+// session locks.
+func (d *Daemon) beginSnapshotPurge(name string) error {
+	if d.snapshotRepository == nil || name == "" {
+		return nil
+	}
+	return d.snapshotRepository.Tombstone(context.Background(), name)
+}
+
+// finishSnapshotPurge deletes both independently durable snapshot sources,
+// then metadata, and only then clears the tombstone. Any failure deliberately
+// leaves the marker in place so startup cannot restore or import the name and
+// a later live/offline kill can retry the idempotent source deletes.
+func (d *Daemon) finishSnapshotPurge(name string) error {
+	if d.snapshotRepository == nil {
+		return d.persist.Delete(name)
+	}
+	incrementalErr := d.snapshotRepository.Delete(context.Background(), name)
+	var legacyErr error
+	if d.legacySnapshots != nil {
+		legacyErr = d.legacySnapshots.DeleteLegacy(context.Background(), name)
+	}
+	if incrementalErr != nil || legacyErr != nil {
+		return errors.Join(incrementalErr, legacyErr)
+	}
+	if err := d.persist.Delete(name); err != nil {
+		return err
+	}
+	return d.snapshotRepository.DeleteTombstone(context.Background(), name)
+}
+
+// retryStoppedPurge completes a previously closed session's durable purge.
+// It keeps the stopped record hidden until all sources and metadata cross their
+// deletion boundaries.
+func (d *Daemon) retryStoppedPurge(name string) error {
+	d.mu.Lock()
+	stopped, ok := d.stopped[name]
+	if !ok {
+		d.mu.Unlock()
+		return nil
+	}
+	// Without a repository there is no restore/import source to fence, so the
+	// stopped record retains the metadata-only deletion behavior.
+	if d.snapshotRepository == nil {
+		d.mu.Unlock()
+		if err := d.persist.Delete(name); err != nil {
+			return err
+		}
+		d.mu.Lock()
+		delete(d.stopped, name)
+		d.mu.Unlock()
+		return nil
+	}
+	stopped.purging = true
+	d.stopped[name] = stopped
+	d.mu.Unlock()
+
+	if err := d.beginSnapshotPurge(name); err != nil {
+		return err
+	}
+	if err := d.finishSnapshotPurge(name); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	if current, ok := d.stopped[name]; ok && current.purging {
+		delete(d.stopped, name)
+	}
+	d.mu.Unlock()
+	return nil
+}
+
 func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
+	return d.killSessionWithSnapshotDeadline(sess, reason, purge, nil)
+}
+
+// killSessionWithSnapshotDeadline shares Serve's shutdown budget with its
+// terminal checkpoint and coordinator join. A timed-out repository call keeps
+// only immutable capture state; it never observes closed worker channels or
+// session-owned cache that teardown has released.
+func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, purge bool, deadline *snapshotShutdownDeadline) error {
 	ringing := sess.anyAttention()
 	sess.mu.Lock()
 	isEphemeral := sess.ephemeral
+	name := sess.name
 	sess.mu.Unlock()
+	// Commit the tombstone before changing live identity or metadata. A
+	// repository delete must never race an older publication that could recreate
+	// the just-quarantined name. Do not hold daemon or session locks while
+	// tombstoning or joining: a repository implementation may block on I/O.
+	if purge && !isEphemeral {
+		if err := d.beginSnapshotPurge(name); err != nil {
+			return err
+		}
+		if d.snapshotRepository != nil {
+			<-quarantineSnapshotCoordinator(sess)
+		}
+	}
 	if !purge && !isEphemeral && d.persistEnabled {
 		d.refreshSessionCwd(sess)
 	}
-	var snapshotDeleteErr, terminalSnapshotErr error
-	if d.snapsEnabled && !isEphemeral {
-		if purge {
+	var terminalSnapshotErr error
+	retainSnapshotRetry := false
+	if d.snapsEnabled && !isEphemeral && !purge {
+		markSnapshotDirty(sess)
+		sess.snapshotMu.Lock()
+		terminalGeneration := sess.snapshotGeneration
+		sess.snapshotMu.Unlock()
+		if !d.scheduleFinalSnapshot(sess) || !d.waitForSnapshotGenerationWithDeadline(sess, terminalGeneration, deadline) {
 			sess.mu.Lock()
 			name := sess.name
 			sess.mu.Unlock()
-			if err := d.snaps.Delete(name); err != nil {
-				snapshotDeleteErr = err
-				d.log.Warn("deleting session snapshot failed", "err", err, "session", name)
+			terminalSnapshotErr = fmt.Errorf("retain final snapshot for session %q: snapshot worker unavailable, saturated, or timed out", name)
+			if reason != ports.ReasonServerShutdown {
+				return terminalSnapshotErr
+			}
+			// Preserve any already-queued routine capture until the blocked
+			// worker can safely discard it. This retains the dirty generation
+			// and forced retry intent without adding another queue entry.
+			retainSnapshotRetry = true
+			d.persistShutdownSnapshotFailure(name, terminalSnapshotErr)
+		}
+	}
+	if !isEphemeral {
+		// Joining first preserves byte ownership for a publication that is still
+		// encoding while this session is being torn down. Once Serve's shared
+		// budget expires, the worker is cancelled by its one final join instead;
+		// keep the cache reachable because an uncooperative writer may still be
+		// encoding immutable state.
+		var quarantineDone <-chan struct{}
+		if retainSnapshotRetry {
+			quarantineDone = quarantineSnapshotCoordinatorRetainingQueuedCapture(sess)
+		} else {
+			quarantineDone = quarantineSnapshotCoordinator(sess)
+		}
+		joined := true
+		if deadline != nil {
+			select {
+			case <-quarantineDone:
+			case <-deadline.Done():
+				joined = false
 			}
 		} else {
-			markSnapshotDirty(sess)
-			if !d.scheduleFinalSnapshot(sess) {
-				sess.mu.Lock()
-				name := sess.name
-				sess.mu.Unlock()
-				terminalSnapshotErr = fmt.Errorf("retain final snapshot for session %q: snapshot worker unavailable or saturated", name)
-				if reason != ports.ReasonServerShutdown {
-					return terminalSnapshotErr
-				}
-				d.persistShutdownSnapshotFailure(name, terminalSnapshotErr)
-			}
+			<-quarantineDone
+		}
+		if joined {
+			sess.snapshotMu.Lock()
+			sess.snapshotChunkCache = nil
+			sess.snapshotMu.Unlock()
 		}
 	}
 	d.mu.Lock()
@@ -778,25 +971,7 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	d.mu.Unlock()
 	d.log.Info("session closed", "session", stoppedName, "id", sess.id, "ephemeral", ephemeral, "purge", purge, "reason", reason)
 
-	purgeErr := snapshotDeleteErr
-	if !ephemeral && purge {
-		if err := d.persist.Delete(stoppedName); err != nil {
-			purgeErr = err
-			d.log.Warn("deleting persisted session failed", "err", err, "session", stoppedName)
-			d.mu.Lock()
-			if stopped, ok := d.stopped[stoppedName]; ok && stopped.purging {
-				stopped.purging = false
-				d.stopped[stoppedName] = stopped
-			}
-			d.mu.Unlock()
-		} else {
-			d.mu.Lock()
-			if stopped, ok := d.stopped[stoppedName]; ok && stopped.purging {
-				delete(d.stopped, stoppedName)
-			}
-			d.mu.Unlock()
-		}
-	}
+	var purgeErr error
 
 	// A global route that selected this attachment must publish before terminal
 	// teardown makes it stale.
@@ -838,6 +1013,22 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	for _, path := range clipFiles {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			d.log.Warn("removing clipboard temp file failed", "err", err, "path", path)
+		}
+	}
+	// The coordinator and all panes are now stopped, so no producer can publish
+	// another generation after this destructive source deletion. Keep the
+	// tombstone and hidden stopped record when any source or metadata operation
+	// fails; retryStoppedPurge (including a repeated live kill) resumes safely.
+	if !ephemeral && purge {
+		if err := d.finishSnapshotPurge(stoppedName); err != nil {
+			purgeErr = errors.Join(purgeErr, err)
+			d.log.Warn("finishing session snapshot purge failed", "err", err, "session", stoppedName)
+		} else {
+			d.mu.Lock()
+			if stopped, ok := d.stopped[stoppedName]; ok && stopped.purging {
+				delete(d.stopped, stoppedName)
+			}
+			d.mu.Unlock()
 		}
 	}
 	if empty {

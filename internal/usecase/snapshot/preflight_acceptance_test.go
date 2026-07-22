@@ -33,7 +33,7 @@ func TestPreflightRejectsDanglingTreeAndFocusReferencesBeforeDecode(t *testing.T
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			encoded, err := Marshal(Session{Name: "hostile", Tabs: []Tab{tt.tab}})
+			encoded, err := marshalTest(Session{Name: "hostile", Tabs: []Tab{tt.tab}})
 			if err != nil {
 				t.Fatalf("Marshal: %v", err)
 			}

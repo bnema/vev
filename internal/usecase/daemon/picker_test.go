@@ -35,11 +35,21 @@ func (failingDeleteStore) Range(func(k, v []byte) bool) {}
 func (failingDeleteStore) Sync() error                  { return nil }
 func (failingDeleteStore) Close() error                 { return nil }
 
-type refusingSnapshotDeleteStore struct{ err error }
+type refusingSnapshotDeleteRepository struct{ err error }
 
-func (refusingSnapshotDeleteStore) Write(string, []byte) error          { return nil }
-func (refusingSnapshotDeleteStore) Load() ([]ports.SnapshotBlob, error) { return nil, nil }
-func (s refusingSnapshotDeleteStore) Delete(string) error               { return s.err }
+func (refusingSnapshotDeleteRepository) Publish(context.Context, ports.SnapshotPublication) error {
+	return nil
+}
+func (refusingSnapshotDeleteRepository) List(context.Context) ([]string, error) { return nil, nil }
+func (refusingSnapshotDeleteRepository) Load(context.Context, string) (ports.SnapshotGeneration, error) {
+	return ports.SnapshotGeneration{}, nil
+}
+func (s refusingSnapshotDeleteRepository) Delete(context.Context, string) error  { return s.err }
+func (refusingSnapshotDeleteRepository) Tombstone(context.Context, string) error { return nil }
+func (refusingSnapshotDeleteRepository) DeleteTombstone(context.Context, string) error {
+	return nil
+}
+func (refusingSnapshotDeleteRepository) Maintain(context.Context) error { return nil }
 
 func newTestTabWithContext(p ports.PTY, ctx context.Context, cancel context.CancelFunc) *tab {
 	tb := newTab(p, domain.Size{Cols: 80, Rows: 23})
@@ -796,7 +806,7 @@ func TestCaptureOverlayLayersResizeRecomposesPickerWithoutStalePreview(t *testin
 }
 
 func TestPickerPreviewContainsOnlyVisibleFrameRowsWithLargeScrollback(t *testing.T) {
-	withScrollback := newPickerPreviewTabWithHistoryRows(10_000)
+	withScrollback := newPickerPreviewTabWithHistoryRows(t, 10_000)
 	require.Equal(t, 10_000, withScrollback.focusedPane().screen.History().Len())
 
 	preview := snapshotPickerPreview(withScrollback)
@@ -820,11 +830,12 @@ func TestPickerPreviewContainsOnlyVisibleFrameRowsWithLargeScrollback(t *testing
 	require.NotContains(t, got, "history-only-marker")
 }
 
-func newPickerPreviewTabWithHistoryRows(historyRows int) *tab {
+func newPickerPreviewTabWithHistoryRows(t testing.TB, historyRows int) *tab {
+	t.Helper()
 	tb := newTab(nil, domain.Size{Cols: 10, Rows: 3})
 	p := tb.focusedPane()
 	for range historyRows {
-		p.screen.History().Append(testRow("history-only-marker"))
+		require.NoError(t, p.screen.History().Append(testRow("history-only-marker")))
 	}
 	p.screen.Write([]byte("NOW"))
 	return tb
@@ -997,7 +1008,7 @@ func TestPickerKillActiveSessionSnapshotDeleteRefusalReportsOnceAndKeepsPicker(t
 	d, from, ac, sends, releases := newRecentNavigationTestSessions(t)
 	defer releaseAll(releases)
 	cause := errors.New("snapshot delete refused")
-	WithSnapshotStore(refusingSnapshotDeleteStore{err: cause})(d)
+	WithSnapshotRepository(refusingSnapshotDeleteRepository{err: cause}, nil)(d)
 	target := d.sessions[domain.SessionID("recent")]
 
 	d.enterPicker(from, ac)

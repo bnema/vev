@@ -62,7 +62,7 @@ func TestSnapshotCodecsPreserveEveryTerminalCellAcrossSealedTailAndVisible(t *te
 					makeRow('D', rgb), makeRow('E', indexed), makeRow('F', rgb), makeRow('G', indexed),
 				}
 				for _, row := range want {
-					history.Append(row)
+					requireHistoryAppend(t, history, row)
 				}
 				if got, wantChunks := history.View().ChunkCount(), 4; got != wantChunks {
 					t.Fatalf("chunk count = %d, want three sealed chunks plus copied tail %d", got, wantChunks)

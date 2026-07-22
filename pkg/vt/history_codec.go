@@ -46,7 +46,7 @@ func MarshalHistory(view HistoryView) ([]byte, error) {
 		for _, row := range chunk.rows {
 			cellCount := uint64(len(row))
 			cellBytes, ok := historyCellByteCount(cellCount)
-			if cellCount > maxHistoryRowCells || !ok ||
+			if !ok ||
 				!addHistoryDecodeBudget(&stats.cells, cellCount, maxHistoryCells) ||
 				!addHistoryDecodeBudget(&stats.styles, cellCount, maxHistoryDecodeStyles) ||
 				!addHistoryDecodeBudget(&stats.bytes, cellBytes, maxHistoryDecodedBytes) {
@@ -193,11 +193,11 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 		for range rowCount {
 			cellCount, ok := p.uint32()
 			cellBytes, validCellBytes := historyCellByteCount(uint64(cellCount))
-			if !ok || uint64(cellCount) > maxHistoryRowCells || !validCellBytes ||
-				uint64(cellCount) > uint64(len(p.data))/historyCellBytes ||
+			if !ok || !validCellBytes ||
 				!addHistoryDecodeBudget(&stats.cells, uint64(cellCount), maxHistoryCells) ||
 				!addHistoryDecodeBudget(&stats.styles, uint64(cellCount), maxHistoryDecodeStyles) ||
-				!addHistoryDecodeBudget(&stats.bytes, cellBytes, maxHistoryDecodedBytes) {
+				!addHistoryDecodeBudget(&stats.bytes, cellBytes, maxHistoryDecodedBytes) ||
+				uint64(cellCount) > uint64(len(p.data))/historyCellBytes {
 				return HistoryView{}, historyDecodeStats{}, false
 			}
 
@@ -205,7 +205,7 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 			if populate {
 				row = make([]renderer.Cell, cellCount)
 			}
-			for i := uint32(0); i < cellCount; i++ {
+			for i := range cellCount {
 				cell, ok := p.cell()
 				if !ok || !validHistoryCell(cell) {
 					return HistoryView{}, historyDecodeStats{}, false
@@ -225,7 +225,7 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 	if len(p.data) != 0 {
 		return HistoryView{}, historyDecodeStats{}, false
 	}
-	return HistoryView{chunks: chunks, rows: int(stats.rows)}, stats, true
+	return HistoryView{chunks: chunks, rows: int(stats.rows), cells: int(stats.cells)}, stats, true
 }
 
 func historyCellByteCount(cellCount uint64) (uint64, bool) {

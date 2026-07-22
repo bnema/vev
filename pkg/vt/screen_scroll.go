@@ -1,6 +1,10 @@
 package vt
 
-import "github.com/bnema/vev/pkg/renderer"
+import (
+	"errors"
+
+	"github.com/bnema/vev/pkg/renderer"
+)
 
 func (s *Screen) index() {
 	if s.Frame.Height == 0 {
@@ -88,7 +92,12 @@ func (s *Screen) emitLineEvicted(top, n int) {
 
 func (s *Screen) recordEvicted(row []renderer.Cell) {
 	if s.history != nil {
-		s.history.Append(row)
+		err := s.history.Append(row)
+		if err != nil && !errors.Is(err, ErrHistoryRowTooWide) {
+			panic(err)
+		}
+		// A nil error records the row; ErrHistoryRowTooWide explicitly leaves it
+		// unrecorded. Both cases continue to the eviction observer below.
 	}
 	if s.OnLineEvicted != nil {
 		s.OnLineEvicted(append([]renderer.Cell(nil), row...))

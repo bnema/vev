@@ -32,7 +32,7 @@ func TestV3SnapshotRoundTripPreservesExactTerminalData(t *testing.T) {
 		{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible},
 		{ID: "p2", SealedChunks: sealed2, Tail: tail2, Visible: visible2},
 	}}}}
-	encoded, err := Marshal(want)
+	encoded, err := marshalTest(want)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,13 +86,13 @@ func TestActiveTabReferenceMustBeExact(t *testing.T) {
 		{name: "nonempty tabs active past end", s: Session{Active: 1, Tabs: []Tab{validTab}}},
 	} {
 		t.Run("marshal "+tc.name, func(t *testing.T) {
-			_, err := Marshal(tc.s)
+			_, err := marshalTest(tc.s)
 			if tc.valid {
 				requireNoError(t, err)
 				return
 			}
 			if !errors.Is(err, ErrInvalidData) {
-				t.Fatalf("Marshal() error = %v, want %v", err, ErrInvalidData)
+				t.Fatalf("marshalTest() error = %v, want %v", err, ErrInvalidData)
 			}
 		})
 	}
@@ -153,7 +153,7 @@ func TestUnmarshalRejectsHostileV3ManifestDeclarationsBeforeAllocation(t *testin
 func TestUnmarshalRejectsEveryV3PrefixAndTrailingGarbage(t *testing.T) {
 	sealed, tail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'h'}}})
 	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
-	encoded, err := Marshal(Session{Name: "p", Tabs: []Tab{{Focus: "p", Tree: layout.NewTree("p"), Panes: []Pane{{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible}}}}})
+	encoded, err := marshalTest(Session{Name: "p", Tabs: []Tab{{Focus: "p", Tree: layout.NewTree("p"), Panes: []Pane{{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible}}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestUnmarshalRejectsEmptyAndDuplicatePaneIDsDuringPreflight(t *testing.T) {
 		{name: "duplicate", panes: []Pane{{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible}, {ID: "p", Tail: tail, Visible: visible}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			data, err := Marshal(Session{Name: "s", Tabs: []Tab{{Panes: tc.panes}}})
+			data, err := marshalTest(Session{Name: "s", Tabs: []Tab{{Panes: tc.panes}}})
 			requireNoError(t, err)
 			reject(t, data, ErrInvalidData)
 		})
@@ -184,7 +184,7 @@ func TestUnmarshalRejectsEmptyAndDuplicatePaneIDsDuringPreflight(t *testing.T) {
 func TestUnmarshalRejectsInvalidTreeReference(t *testing.T) {
 	sealed, tail := historyBlobs(t, nil)
 	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
-	encoded, err := Marshal(Session{Name: "p", Tabs: []Tab{{Focus: "missing", Tree: layout.NewTree("missing"), Panes: []Pane{{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible}}}}})
+	encoded, err := marshalTest(Session{Name: "p", Tabs: []Tab{{Focus: "missing", Tree: layout.NewTree("missing"), Panes: []Pane{{ID: "p", SealedChunks: sealed, Tail: tail, Visible: visible}}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,8 +193,8 @@ func TestUnmarshalRejectsInvalidTreeReference(t *testing.T) {
 	}
 }
 
-func TestUnmarshalRejectsNonCanonicalBlobRolesDuringPreflight(t *testing.T) {
-	sealed, tail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'a'}}, {{Rune: 'b'}}, {{Rune: 'c'}}})
+func TestUnmarshalEnforcesCanonicalHistoryBlobRoles(t *testing.T) {
+	sealed, emptyTail := historyBlobs(t, [][]renderer.Cell{{{Rune: 'a'}}, {{Rune: 'b'}}, {{Rune: 'c'}}})
 	if len(sealed) == 0 {
 		t.Fatal("expected a sealed chunk")
 	}
@@ -204,16 +204,37 @@ func TestUnmarshalRejectsNonCanonicalBlobRolesDuringPreflight(t *testing.T) {
 	multiChunk = append(multiChunk, sealed[0][9:]...)
 	visible := visibleBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
 	emptyVisible := visibleBlob(t, nil)
+
+	// Incremental captures retain one copied mutable tail chunk instead of
+	// rotating it into the sealed history set. That one chunk is canonical and
+	// must remain a valid v3 import payload.
+	mutableHistory := vt.NewHistory(vt.HistoryConfig{MaxRows: 8, ChunkRows: 2})
+	for _, row := range [][]renderer.Cell{{{Rune: 'a'}}, {{Rune: 'b'}}, {{Rune: 'c'}}} {
+		requireNoError(t, mutableHistory.Append(row))
+	}
+	mutableTail, err := vt.MarshalHistoryTail(mutableHistory.SnapshotView())
+	requireNoError(t, err)
+	fullHistory, err := vt.MarshalHistory(mutableHistory.SealAndView())
+	requireNoError(t, err)
+	valid, err := marshalTest(Session{Name: "s", Tabs: []Tab{{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", SealedChunks: sealed[:1], Tail: mutableTail, Visible: visible}}}}})
+	requireNoError(t, err)
+	roundTrip, err := Unmarshal(valid)
+	requireNoError(t, err)
+	if got := roundTrip.Tabs[0].Panes[0].Tail; !bytes.Equal(got, mutableTail) {
+		t.Fatal("mutable tail did not round trip")
+	}
+
 	for _, tc := range []struct {
 		name string
 		tab  Tab
 	}{
-		{name: "sealed multi-chunk", tab: Tab{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", SealedChunks: [][]byte{multiChunk}, Tail: tail, Visible: visible}}}},
-		{name: "nonempty tail", tab: Tab{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", Tail: sealed[0], Visible: visible}}}},
-		{name: "empty visible geometry", tab: Tab{Panes: []Pane{{ID: "p", Tail: tail, Visible: emptyVisible}}}},
+		{name: "sealed multi-chunk", tab: Tab{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", SealedChunks: [][]byte{multiChunk}, Tail: emptyTail, Visible: visible}}}},
+		{name: "tail has multiple chunks", tab: Tab{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", Tail: multiChunk, Visible: visible}}}},
+		{name: "noncanonical full history tail", tab: Tab{Cols: 1, Rows: 1, Panes: []Pane{{ID: "p", Tail: fullHistory, Visible: visible}}}},
+		{name: "empty visible geometry", tab: Tab{Panes: []Pane{{ID: "p", Tail: emptyTail, Visible: emptyVisible}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			data, err := Marshal(Session{Name: "s", Tabs: []Tab{tc.tab}})
+			data, err := marshalTest(Session{Name: "s", Tabs: []Tab{tc.tab}})
 			requireNoError(t, err)
 			reject(t, data, ErrInvalidData)
 		})
@@ -238,7 +259,7 @@ func TestRoundTripNilTreeAndRootDoNotMaterializeLeaf(t *testing.T) {
 		{name: "nil root", tab: Tab{Tree: &layout.Tree{Root: nil}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			data, err := Marshal(Session{Name: "s", Tabs: []Tab{tc.tab}})
+			data, err := marshalTest(Session{Name: "s", Tabs: []Tab{tc.tab}})
 			requireNoError(t, err)
 			got, err := Unmarshal(data)
 			requireNoError(t, err)
@@ -265,7 +286,7 @@ func TestRoundTripSessionMetadataAndProcess(t *testing.T) {
 		},
 		{StableID: "t2", Cols: 80, Rows: 24, NextPaneID: 2, Focus: "a", Tree: layout.NewTree("a"), Panes: []Pane{{ID: "a", Cwd: "/tmp", SealedChunks: sealed, Tail: tail, Visible: visible}}},
 	}}
-	data, err := Marshal(want)
+	data, err := marshalTest(want)
 	requireNoError(t, err)
 	got, err := Unmarshal(data)
 	requireNoError(t, err)
@@ -279,11 +300,11 @@ func TestRoundTripSessionMetadataAndProcess(t *testing.T) {
 }
 
 func TestMarshalRejectsProcessWithoutArgv(t *testing.T) {
-	_, err := Marshal(Session{Name: "s", Tabs: []Tab{
+	_, err := marshalTest(Session{Name: "s", Tabs: []Tab{
 		{Tree: layout.NewTree("p"), Focus: "p", Panes: []Pane{{ID: "p", Process: &Process{Strategy: "generic"}}}},
 	}})
 	if !errors.Is(err, ErrInvalidData) {
-		t.Fatalf("Marshal() error = %v, want %v", err, ErrInvalidData)
+		t.Fatalf("marshalTest() error = %v, want %v", err, ErrInvalidData)
 	}
 }
 
@@ -322,7 +343,7 @@ func TestUnmarshalRejectsProcessWithoutArgv(t *testing.T) {
 func TestUnmarshalGlobalBudgetRejectionDoesNotAllocatePerPane(t *testing.T) {
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 256, ChunkRows: 256})
 	for range 256 {
-		history.Append([]renderer.Cell{{Rune: 'x'}})
+		requireNoError(t, history.Append([]renderer.Cell{{Rune: 'x'}}))
 	}
 	sealed, tail, err := vt.MarshalSealedHistory(history.SealAndView())
 	requireNoError(t, err)
@@ -333,7 +354,7 @@ func TestUnmarshalGlobalBudgetRejectionDoesNotAllocatePerPane(t *testing.T) {
 	for i := range tabs {
 		tabs[i] = Tab{Panes: []Pane{{ID: layout.PaneID(strconv.Itoa(i)), SealedChunks: sealed, Tail: tail, Visible: visible}}}
 	}
-	data, err := Marshal(Session{Name: "over-budget", Tabs: tabs})
+	data, err := marshalTest(Session{Name: "over-budget", Tabs: tabs})
 	requireNoError(t, err)
 
 	allocs := testing.AllocsPerRun(3, func() {
@@ -385,7 +406,7 @@ func historyBlobs(t *testing.T, rows [][]renderer.Cell) ([][]byte, []byte) {
 	t.Helper()
 	h := vt.NewHistory(vt.HistoryConfig{MaxRows: 128, ChunkRows: 2})
 	for _, row := range rows {
-		h.Append(row)
+		requireNoError(t, h.Append(row))
 	}
 	sealed, tail, err := vt.MarshalSealedHistory(h.SealAndView())
 	if err != nil {

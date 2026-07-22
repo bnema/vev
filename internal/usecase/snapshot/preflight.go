@@ -198,7 +198,7 @@ func preflightPaneStructure(r *payloadReader, totals *vt.DecodeStats, blobs *uin
 	if err != nil {
 		return err
 	}
-	if n > maxSnapshotBlobs || uint64(n) > uint64(len(r.b))/4 {
+	if n > maxSnapshotObjects || uint64(n) > uint64(len(r.b))/4 {
 		return fmt.Errorf("%w: sealed chunks", ErrInvalidData)
 	}
 	for range n {
@@ -214,7 +214,10 @@ func preflightPaneStructure(r *payloadReader, totals *vt.DecodeStats, blobs *uin
 	if err != nil {
 		return err
 	}
-	if tail.Chunks != 0 || tail.Rows != 0 || tail.Cells != 0 {
+	// A capture keeps the live mutable tail separate from immutable sealed
+	// chunks. It may therefore contain one partial chunk (or the canonical
+	// empty tail), but never a sequence of sealed chunks.
+	if tail.Chunks > 1 {
 		return fmt.Errorf("%w: tail blob role", ErrInvalidData)
 	}
 	visible, err := preflightBlob(r, totals, blobs, false, budget)
@@ -235,7 +238,7 @@ func preflightBlob(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, hist
 	if n == 0 || uint64(n) > uint64(len(r.b)) || uint64(n) > maxSnapshotBytes {
 		return vt.DecodeStats{}, fmt.Errorf("%w: VT blob length", ErrInvalidData)
 	}
-	if *blobs >= maxSnapshotBlobs {
+	if *blobs >= maxSnapshotObjects {
 		return vt.DecodeStats{}, fmt.Errorf("%w: too many VT blobs", ErrInvalidData)
 	}
 	blob := r.b[:n]

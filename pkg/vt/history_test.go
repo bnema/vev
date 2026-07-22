@@ -1,10 +1,19 @@
 package vt
 
 import (
+	"errors"
+	"math"
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
 )
+
+func requireHistoryAppend(t testing.TB, history *History, row []renderer.Cell) {
+	t.Helper()
+	if err := history.Append(row); err != nil {
+		t.Fatalf("append history row: %v", err)
+	}
+}
 
 func TestHistoryOrdersSealedChunksAndEvictsAtCapacity(t *testing.T) {
 	tests := []struct {
@@ -22,11 +31,11 @@ func TestHistoryOrdersSealedChunksAndEvictsAtCapacity(t *testing.T) {
 			want:      []string{"cccc", "dddd", "eeee", "ffff"},
 		},
 		{
-			name:      "nonmultiple capacity evicts a whole oldest immutable chunk",
+			name:      "nonmultiple capacity evicts exactly the oldest row",
 			maxRows:   5,
 			chunkRows: 2,
 			rows:      []string{"0000", "1111", "2222", "3333", "4444", "5555"},
-			want:      []string{"2222", "3333", "4444", "5555"},
+			want:      []string{"1111", "2222", "3333", "4444", "5555"},
 		},
 		{
 			name:      "rows preserve append order across chunk boundaries",
@@ -41,7 +50,7 @@ func TestHistoryOrdersSealedChunksAndEvictsAtCapacity(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			history := NewHistory(HistoryConfig{MaxRows: tt.maxRows, ChunkRows: tt.chunkRows})
 			for _, text := range tt.rows {
-				history.Append(historyRow(text))
+				requireHistoryAppend(t, history, historyRow(text))
 			}
 
 			view := history.View()
@@ -70,15 +79,15 @@ func TestHistoryTailRotationAndStableViews(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			history := NewHistory(HistoryConfig{MaxRows: 6, ChunkRows: 2})
 			first := historyRow("AAAA")
-			history.Append(first)
-			history.Append(historyRow("BBBB"))
+			requireHistoryAppend(t, history, first)
+			requireHistoryAppend(t, history, historyRow("BBBB"))
 			view := history.View()
 			if got, want := view.ChunkCount(), 1; got != want {
 				t.Fatalf("sealed chunk count = %d, want %d", got, want)
 			}
 
 			first[0].Rune = 'X'
-			history.Append(historyRow("CCCC"))
+			requireHistoryAppend(t, history, historyRow("CCCC"))
 
 			if got, want := historyViewTexts(view), []string{"AAAA", "BBBB"}; !equalStrings(got, want) {
 				t.Fatalf("stable view rows = %#v, want %#v", got, want)
@@ -100,11 +109,11 @@ func TestHistoryReusesSealedChunkIdentityAcrossViews(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			history := NewHistory(HistoryConfig{MaxRows: 8, ChunkRows: 2})
-			history.Append(historyRow("AAAA"))
-			history.Append(historyRow("BBBB"))
+			requireHistoryAppend(t, history, historyRow("AAAA"))
+			requireHistoryAppend(t, history, historyRow("BBBB"))
 			before := history.View()
 
-			history.Append(historyRow("CCCC"))
+			requireHistoryAppend(t, history, historyRow("CCCC"))
 			after := history.View()
 
 			if before.ChunkCount() == 0 || after.ChunkCount() == 0 {
@@ -189,6 +198,95 @@ func TestHistoryRecordsOnlyTopEdgeScrollEvictions(t *testing.T) {
 				t.Errorf("eviction events = %d, want %d", events, tt.wantEvents)
 			}
 		})
+	}
+}
+
+func TestHistoryBoundsRowsAndCellsWithExactRowEviction(t *testing.T) {
+	history := NewHistory(HistoryConfig{MaxRows: 4, MaxCells: 5, ChunkRows: 2})
+	for _, text := range []string{"aa", "bbb", "c", "dd"} {
+		if err := history.Append(historyRow(text)); err != nil {
+			t.Fatalf("append %q: %v", text, err)
+		}
+	}
+
+	view := history.View()
+	if got, want := historyViewTexts(view), []string{"c", "dd"}; !equalStrings(got, want) {
+		t.Fatalf("retained rows = %#v, want %#v", got, want)
+	}
+	if got, want := history.Len(), 2; got != want {
+		t.Fatalf("retained rows = %d, want %d", got, want)
+	}
+	if got, want := history.Cells(), 3; got != want {
+		t.Fatalf("retained cells = %d, want %d", got, want)
+	}
+	if got, want := view.Cells(), 3; got != want {
+		t.Fatalf("view cells = %d, want %d", got, want)
+	}
+}
+
+func TestHistoryAppendIsNoOpForNilAndZeroValue(t *testing.T) {
+	tests := []struct {
+		name    string
+		history *History
+	}{
+		{name: "nil history"},
+		{name: "zero-value history", history: &History{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.history.Append(historyRow("row")); err != nil {
+				t.Fatalf("append error = %v, want nil", err)
+			}
+			if got := tt.history.Len(); got != 0 {
+				t.Fatalf("retained rows = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestHistoryRejectsRowWiderThanCellBudgetWithoutMutation(t *testing.T) {
+	history := NewHistory(HistoryConfig{MaxRows: 2, MaxCells: 2, ChunkRows: 2})
+	if err := history.Append(historyRow("ok")); err != nil {
+		t.Fatalf("append retained row: %v", err)
+	}
+	before := history.View()
+
+	err := history.Append(historyRow("wide"))
+	if !errors.Is(err, ErrHistoryRowTooWide) {
+		t.Fatalf("append oversized row error = %v, want ErrHistoryRowTooWide", err)
+	}
+	if got, want := historyViewTexts(history.View()), historyViewTexts(before); !equalStrings(got, want) {
+		t.Fatalf("history mutated after rejected append: got %#v, want %#v", got, want)
+	}
+	if got, want := history.Cells(), 2; got != want {
+		t.Fatalf("retained cells after rejected append = %d, want %d", got, want)
+	}
+}
+
+func TestScreenDropsOversizedHistoryRowsWithoutInterruptingScroll(t *testing.T) {
+	screen := NewScreenWithHistory(4, 2, HistoryConfig{MaxRows: 2, MaxCells: 3})
+	var events []string
+	screen.OnLineEvicted = func(row []renderer.Cell) { events = append(events, rowText(row)) }
+	copy(screen.Frame.Row(0), historyRow("AAAA"))
+	copy(screen.Frame.Row(1), historyRow("BBBB"))
+	screen.scrollUpRegion(0, 1, 1)
+
+	if got := screen.History().Len(); got != 0 {
+		t.Fatalf("oversized scrollback rows = %d, want 0", got)
+	}
+	if got, want := events, []string{"AAAA"}; !equalStrings(got, want) {
+		t.Fatalf("scroll callbacks = %#v, want %#v", got, want)
+	}
+	if got := lineText(screen, 0); got != "BBBB" {
+		t.Fatalf("screen did not scroll after history drop: row 0 = %q", got)
+	}
+}
+
+func TestHistoryDefaultCellBudgetDoesNotOverflow(t *testing.T) {
+	history := NewHistory(HistoryConfig{MaxRows: math.MaxInt, ChunkRows: 1})
+	if got, want := history.CellCap(), math.MaxInt; got != want {
+		t.Fatalf("default cell cap = %d, want %d", got, want)
 	}
 }
 

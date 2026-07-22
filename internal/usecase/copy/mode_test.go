@@ -27,6 +27,21 @@ func modeFor(lines []string, height int) *Mode {
 	return NewMode(NewDocument(NewSnapshotFromRows(rows, 16, height), domain.DefaultWordSeparators))
 }
 
+func TestNewSnapshotFromRowsPreservesWideRows(t *testing.T) {
+	wide := make([]renderer.Cell, 321)
+	for i := range wide {
+		wide[i] = renderer.Cell{Rune: rune('a' + i%26)}
+	}
+	rows := [][]renderer.Cell{wide, row("tail")}
+
+	snapshot := NewSnapshotFromRows(rows, len(wide), len(rows))
+
+	require.Equal(t, len(rows), snapshot.history.Len())
+	for i, want := range rows {
+		require.Equal(t, want, snapshot.history.Row(i))
+	}
+}
+
 func TestCopyModeKeyboardSelection(t *testing.T) {
 	m := modeFor([]string{"alpha", "xy", "bravo", "charlie"}, 2)
 	require.Equal(t, Pos{Row: 3}, m.Cursor())
@@ -175,9 +190,9 @@ func TestFindMatchesUsesSealedScrollbackWithoutGlobalCopy(t *testing.T) {
 	const rows = 10_000
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: rows + 1, ChunkRows: 256})
 	for range rows {
-		history.Append(row("unmatched"))
+		require.NoError(t, history.Append(row("unmatched")))
 	}
-	history.Append(row("target"))
+	require.NoError(t, history.Append(row("target")))
 	snapshot := NewSnapshot(history, renderer.NewFrame(16, 1))
 	view := history.SealAndView()
 	require.Same(t, view.Chunk(0), snapshot.history.Chunk(0))

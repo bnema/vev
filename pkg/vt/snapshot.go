@@ -54,6 +54,12 @@ func MarshalHistoryChunk(chunk *HistoryChunk) ([]byte, error) {
 // MarshalEmptyHistoryTail returns the mandatory canonical empty tail blob.
 func MarshalEmptyHistoryTail() ([]byte, error) { return MarshalHistory(HistoryView{}) }
 
+// MarshalHistoryTail encodes the copied mutable tail of a snapshot view as one
+// canonical history blob. It does not seal or otherwise mutate live history.
+func MarshalHistoryTail(view HistorySnapshotView) ([]byte, error) {
+	return MarshalHistory(view.Tail())
+}
+
 // MarshalSealedHistory serializes a SealAndView result as oldest-first,
 // self-contained sealed blobs plus a mandatory empty canonical tail blob.
 func MarshalSealedHistory(view HistoryView) ([][]byte, []byte, error) {
@@ -84,18 +90,23 @@ func HistoryFromBlobs(config HistoryConfig, sealed [][]byte, tail []byte) (*Hist
 		if err != nil || len(view.chunks) != 1 || len(view.chunks[0].rows) == 0 {
 			return nil, fmt.Errorf("restore sealed history: %w", errInvalidHistory)
 		}
+		h.evictUntil(len(view.chunks[0].rows), view.Cells())
 		h.chunks = append(h.chunks, view.chunks[0])
 		h.rows += len(view.chunks[0].rows)
+		h.cells += view.Cells()
 	}
 	view, err := UnmarshalHistory(tail)
 	if err != nil || len(view.chunks) > 1 {
 		return nil, fmt.Errorf("restore history tail: %w", errInvalidHistory)
 	}
 	if len(view.chunks) == 1 {
+		h.evictUntil(len(view.chunks[0].rows), view.Cells())
 		h.tail = view.chunks[0].rows
 		h.rows += len(h.tail)
+		h.cells += view.Cells()
 	}
 	h.evict()
+	h.normalizeTail()
 	return h, nil
 }
 
@@ -130,17 +141,47 @@ func MarshalVisible(frame renderer.Frame) ([]byte, error) {
 	return marshalVisible(frame, boundaries)
 }
 
-// MarshalPrimaryVisible preserves the primary buffer's logical-line boundaries
-// alongside its cells so a restored viewport can subsequently reflow.
-func (s *Screen) MarshalPrimaryVisible() ([]byte, error) {
+// PrimaryVisibleSnapshot is an owned copy of the primary buffer's visible
+// state. Capture it while the screen owner is synchronized, then Marshal it
+// after releasing that lock.
+type PrimaryVisibleSnapshot struct {
+	frame      renderer.Frame
+	boundaries []lineBoundary
+}
+
+// PrimaryVisibleSnapshot copies the saved primary frame and its logical-line
+// boundaries. When the alternate screen is active, the saved primary buffer is
+// copied rather than the currently displayed alternate buffer.
+func (s *Screen) PrimaryVisibleSnapshot() PrimaryVisibleSnapshot {
 	b := s.buffer
 	if s.alternate != nil {
 		b = s.alternate.buffer
 	}
 	if b == nil {
-		return MarshalVisible(s.PrimaryVisibleFrame())
+		return PrimaryVisibleSnapshot{frame: s.PrimaryVisibleFrame()}
 	}
-	return marshalVisible(b.frame, b.boundaries)
+	return PrimaryVisibleSnapshot{
+		frame:      b.frame.Clone(),
+		boundaries: append([]lineBoundary(nil), b.boundaries...),
+	}
+}
+
+// Marshal encodes an owned primary visible snapshot without accessing live VT
+// state.
+func (v PrimaryVisibleSnapshot) Marshal() ([]byte, error) {
+	if len(v.boundaries) == 0 && v.frame.Height > 0 {
+		return MarshalVisible(v.frame)
+	}
+	return marshalVisible(v.frame, v.boundaries)
+}
+
+// MarshalPrimaryVisible preserves the primary buffer's logical-line boundaries
+// alongside its cells so a restored viewport can subsequently reflow.
+//
+// Deprecated: callers holding a pane lock should use PrimaryVisibleSnapshot
+// and marshal the result after unlocking.
+func (s *Screen) MarshalPrimaryVisible() ([]byte, error) {
+	return s.PrimaryVisibleSnapshot().Marshal()
 }
 
 func marshalVisible(frame renderer.Frame, boundaries []lineBoundary) ([]byte, error) {
