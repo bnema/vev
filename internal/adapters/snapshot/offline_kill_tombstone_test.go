@@ -49,5 +49,5 @@ func TestRepositoryDeleteLegacyRetriesDurabilityAfterTombstone(t *testing.T) {
 		return nil
 	}
 	require.NoError(t, repo.DeleteLegacy(context.Background(), "named"))
-	require.Equal(t, 4, calls, "authorization and its cleanup are durably synced around the retry")
+	require.Equal(t, 2, calls, "explicit purge retries only the pending source-directory sync")
 }

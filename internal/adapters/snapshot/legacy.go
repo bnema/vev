@@ -1,7 +1,9 @@
 package snapshot
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -14,13 +16,14 @@ import (
 )
 
 const (
-	legacyDeleteMarkerPrefix = ".legacy-delete-"
+	legacyDeleteMarkerPrefix = ".legacy-import-receipt-"
 	maxLegacyDeleteMarkers   = maxLegacySnapshotFiles
 	maxLegacyDeleteNameBytes = 200
 )
 
 type legacyDeleteMarker struct {
-	name string
+	name   string
+	digest [sha256.Size]byte
 }
 
 type legacyDirectory interface {
@@ -116,9 +119,28 @@ func (r *Repository) LoadLegacy(ctx context.Context) (out []ports.LegacySnapshot
 	return out, nil
 }
 
-// DeleteLegacy durably authorizes deletion before unlinking the legacy source.
-// The private marker survives process restart, so LoadLegacy retries an
-// authorized deletion rather than returning it for a second import.
+// DeleteVerifiedLegacy records a hash-bound import receipt before deleting the
+// source. LoadLegacy consumes surviving receipts after restart, but only when
+// the source still has the exact bytes that were verified and published.
+func (r *Repository) DeleteVerifiedLegacy(ctx context.Context, blob ports.LegacySnapshot) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	filename := filenameForName(blob.Name)
+	lock := r.lockSession("legacy-sync:" + filename)
+	defer r.unlockSession(lock)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	receipt := legacyDeleteMarker{name: blob.Name, digest: sha256.Sum256(blob.Data)}
+	if err := r.authorizeLegacyDelete(receipt); err != nil {
+		return err
+	}
+	return r.deleteAuthorizedLegacy(ctx, filename, receipt)
+}
+
+// DeleteLegacy is for deliberate session purges, which do not represent a
+// verified import and therefore must not create an import receipt.
 func (r *Repository) DeleteLegacy(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -126,58 +148,85 @@ func (r *Repository) DeleteLegacy(ctx context.Context, name string) error {
 	filename := filenameForName(name)
 	lock := r.lockSession("legacy-sync:" + filename)
 	defer r.unlockSession(lock)
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := r.authorizeLegacyDelete(name); err != nil {
-		return err
-	}
-	return r.deleteAuthorizedLegacy(ctx, name, filename)
+	return r.deleteLegacyFile(ctx, filename)
 }
 
 func legacyDeleteMarkerFilename(key string) string { return legacyDeleteMarkerPrefix + key }
 
-func (r *Repository) authorizeLegacyDelete(name string) error {
+func (r *Repository) authorizeLegacyDelete(receipt legacyDeleteMarker) error {
 	if err := r.ensurePrivateDirectory(r.dir); err != nil {
-		return fmt.Errorf("create legacy deletion marker directory: %w", safeFilesystemError(err))
+		return fmt.Errorf("create legacy import receipt directory: %w", safeFilesystemError(err))
 	}
-	path := filepath.Join(r.dir, legacyDeleteMarkerFilename(sessionKey(name)))
-	if err := r.writeImmutable(path, []byte(name), func(data []byte) error {
-		if string(data) != name {
-			return fmt.Errorf("legacy deletion marker identity mismatch")
+	path := filepath.Join(r.dir, legacyDeleteMarkerFilename(sessionKey(receipt.name)))
+	data := append(receipt.digest[:], receipt.name...)
+	if err := r.writeImmutable(path, data, func(data []byte) error {
+		if len(data) != sha256.Size+len(receipt.name) || string(data[sha256.Size:]) != receipt.name || !bytes.Equal(data[:sha256.Size], receipt.digest[:]) {
+			return fmt.Errorf("legacy import receipt identity mismatch")
 		}
 		return nil
 	}); err != nil {
-		return fmt.Errorf("write legacy deletion marker: %w", safeFilesystemError(err))
+		return fmt.Errorf("write legacy import receipt: %w", safeFilesystemError(err))
 	}
 	return nil
 }
 
-func (r *Repository) deleteAuthorizedLegacy(ctx context.Context, name, filename string) error {
+// deleteAuthorizedLegacy deletes only a source whose bytes match the durable
+// receipt. A replaced source invalidates the receipt and remains importable.
+func (r *Repository) deleteAuthorizedLegacy(ctx context.Context, filename string, receipt legacyDeleteMarker) error {
 	if _, pending := r.pendingLegacySync.Load(filename); pending {
 		if err := r.syncPendingLegacy(ctx, filename); err != nil {
 			return err
 		}
-		return r.clearLegacyDeleteAuthorization(name)
+		return r.clearLegacyDeleteAuthorization(receipt.name)
 	}
 	path := filepath.Join(r.dir, filename)
-	if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("delete legacy snapshot: %w", safeFilesystemError(err))
+	data, err := r.readBounded(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read legacy snapshot for deletion: %w", safeFilesystemError(err))
 	}
-	r.pendingLegacySync.Store(filename, struct{}{})
-	if err := r.syncPendingLegacy(ctx, filename); err != nil {
-		return err
+	if err == nil && sha256.Sum256(data) != receipt.digest {
+		return r.clearLegacyDeleteAuthorization(receipt.name)
 	}
-	return r.clearLegacyDeleteAuthorization(name)
+	return r.deleteLegacyFile(ctx, filename, receipt.name)
+}
+
+func (r *Repository) deleteLegacyFile(ctx context.Context, filename string, clearReceipt ...string) error {
+	if _, pending := r.pendingLegacySync.Load(filename); pending {
+		if err := r.syncPendingLegacy(ctx, filename); err != nil {
+			return err
+		}
+	} else {
+		path := filepath.Join(r.dir, filename)
+		if err := r.remove(path); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("delete legacy snapshot: %w", safeFilesystemError(err))
+			}
+			// A missing repository has no deletion to make durable. This preserves
+			// idempotence for explicit purges before the snapshot root exists.
+			if _, statErr := os.Lstat(r.dir); errors.Is(statErr, os.ErrNotExist) {
+				return nil
+			} else if statErr != nil {
+				return fmt.Errorf("stat legacy snapshot directory: %w", safeFilesystemError(statErr))
+			}
+		}
+		r.pendingLegacySync.Store(filename, struct{}{})
+		if err := r.syncPendingLegacy(ctx, filename); err != nil {
+			return err
+		}
+	}
+	if len(clearReceipt) != 0 {
+		return r.clearLegacyDeleteAuthorization(clearReceipt[0])
+	}
+	return nil
 }
 
 func (r *Repository) clearLegacyDeleteAuthorization(name string) error {
 	path := filepath.Join(r.dir, legacyDeleteMarkerFilename(sessionKey(name)))
 	if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("clear legacy deletion marker: %w", safeFilesystemError(err))
+		return fmt.Errorf("clear legacy import receipt: %w", safeFilesystemError(err))
 	}
 	if err := r.syncDirectory(r.dir); err != nil {
-		return fmt.Errorf("sync legacy deletion marker directory: %w", safeFilesystemError(err))
+		return fmt.Errorf("sync legacy import receipt directory: %w", safeFilesystemError(err))
 	}
 	return nil
 }
@@ -191,7 +240,11 @@ func (r *Repository) cleanupPendingLegacyDeletes(ctx context.Context, budget *in
 		return err
 	}
 	for _, marker := range markers {
-		if err := r.DeleteLegacy(ctx, marker.name); err != nil {
+		filename := filenameForName(marker.name)
+		lock := r.lockSession("legacy-sync:" + filename)
+		err := r.deleteAuthorizedLegacy(ctx, filename, marker)
+		r.unlockSession(lock)
+		if err != nil {
 			return fmt.Errorf("retry authorized legacy deletion: %w", err)
 		}
 	}
@@ -231,10 +284,16 @@ func (r *Repository) pendingLegacyDeleteMarkers(ctx context.Context, budget *int
 			}
 			path := filepath.Join(r.dir, entry.Name())
 			data, dataErr := r.readBounded(path)
-			if dataErr != nil || len(data) > maxLegacyDeleteNameBytes || sessionKey(string(data)) != key {
-				return nil, fmt.Errorf("invalid legacy deletion marker")
+			if dataErr != nil || len(data) < sha256.Size || len(data)-sha256.Size > maxLegacyDeleteNameBytes {
+				return nil, fmt.Errorf("invalid legacy import receipt")
 			}
-			markers = append(markers, legacyDeleteMarker{name: string(data)})
+			name := string(data[sha256.Size:])
+			if sessionKey(name) != key {
+				return nil, fmt.Errorf("invalid legacy import receipt")
+			}
+			marker := legacyDeleteMarker{name: name}
+			copy(marker.digest[:], data[:sha256.Size])
+			markers = append(markers, marker)
 		}
 		if errors.Is(readErr, io.EOF) {
 			break

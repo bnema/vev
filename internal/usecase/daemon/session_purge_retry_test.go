@@ -34,6 +34,9 @@ func (r *retryablePurgeRepository) Delete(_ context.Context, name string) error 
 func (r *retryablePurgeRepository) LoadLegacy(context.Context) ([]ports.LegacySnapshot, error) {
 	return nil, nil
 }
+func (r *retryablePurgeRepository) DeleteVerifiedLegacy(ctx context.Context, blob ports.LegacySnapshot) error {
+	return r.DeleteLegacy(ctx, blob.Name)
+}
 func (r *retryablePurgeRepository) DeleteLegacy(_ context.Context, name string) error {
 	r.calls = append(r.calls, "legacy")
 	return r.legacyErr

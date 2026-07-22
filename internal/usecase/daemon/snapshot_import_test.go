@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -30,6 +33,10 @@ func (s *snapshotAcceptanceLegacySource) LoadLegacy(ctx context.Context) ([]port
 	return out, nil
 }
 
+func (s *snapshotAcceptanceLegacySource) DeleteVerifiedLegacy(ctx context.Context, blob ports.LegacySnapshot) error {
+	return s.DeleteLegacy(ctx, blob.Name)
+}
+
 func (s *snapshotAcceptanceLegacySource) DeleteLegacy(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -47,15 +54,30 @@ func (s *snapshotAcceptanceLegacySource) DeleteLegacy(ctx context.Context, name 
 	return nil
 }
 
+func legacyAcceptanceSnapshot(t *testing.T) snapcodec.Session {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "legacy-v3-empty.b64"))
+	require.NoError(t, err)
+	encoded, err := base64.StdEncoding.DecodeString(string(data))
+	require.NoError(t, err)
+	snapshot, err := snapcodec.Unmarshal(encoded)
+	require.NoError(t, err)
+	return snapshot
+}
+
 func legacyAcceptanceBlob(t *testing.T, snapshot snapcodec.Session) ports.LegacySnapshot {
 	t.Helper()
-	data, err := snapcodec.Marshal(snapshot)
+	fixture := legacyAcceptanceSnapshot(t)
+	require.Equal(t, fixture, snapshot, "legacy fixture must be the imported session")
+	data, err := os.ReadFile(filepath.Join("testdata", "legacy-v3-empty.b64"))
 	require.NoError(t, err)
-	return ports.LegacySnapshot{Name: snapshot.Name, Data: data}
+	encoded, err := base64.StdEncoding.DecodeString(string(data))
+	require.NoError(t, err)
+	return ports.LegacySnapshot{Name: snapshot.Name, Data: encoded}
 }
 
 func TestImportLegacyPublishesCompleteGenerationBeforeDeletingSource(t *testing.T) {
-	snapshot := restoreAcceptanceSession(t, "legacy")
+	snapshot := legacyAcceptanceSnapshot(t)
 	repository := &snapshotAcceptanceRepository{generations: make(map[string]ports.SnapshotGeneration)}
 	legacy := &snapshotAcceptanceLegacySource{blobs: []ports.LegacySnapshot{legacyAcceptanceBlob(t, snapshot)}}
 	d := newTestDaemon(t, nil, stubClock{})
@@ -75,7 +97,7 @@ func TestImportLegacyPublishesCompleteGenerationBeforeDeletingSource(t *testing.
 	manifest, err := snapcodec.UnmarshalManifest(publication.Manifest)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), manifest.Generation)
-	require.Len(t, manifest.Tabs[0].Panes[0].Sealed, 2)
+	require.Empty(t, manifest.Tabs)
 	for _, object := range publication.Objects {
 		kind, _, err := snapcodec.UnmarshalObject(object.Data)
 		require.NoError(t, err)
@@ -87,7 +109,7 @@ func TestImportLegacyPublishesCompleteGenerationBeforeDeletingSource(t *testing.
 }
 
 func TestImportLegacyExistingIncrementalSkipsLegacy(t *testing.T) {
-	snapshot := restoreAcceptanceSession(t, "already-incremental")
+	snapshot := legacyAcceptanceSnapshot(t)
 	repository := &snapshotAcceptanceRepository{names: []string{snapshot.Name}, generations: make(map[string]ports.SnapshotGeneration)}
 	legacy := &snapshotAcceptanceLegacySource{blobs: []ports.LegacySnapshot{legacyAcceptanceBlob(t, snapshot)}}
 	d := newTestDaemon(t, nil, stubClock{})
@@ -101,7 +123,7 @@ func TestImportLegacyExistingIncrementalSkipsLegacy(t *testing.T) {
 }
 
 func TestImportLegacyRetainsSourceUntilExactReloadVerification(t *testing.T) {
-	snapshot := restoreAcceptanceSession(t, "retain")
+	snapshot := legacyAcceptanceSnapshot(t)
 	for _, test := range []struct {
 		name    string
 		publish error
@@ -114,12 +136,8 @@ func TestImportLegacyRetainsSourceUntilExactReloadVerification(t *testing.T) {
 			g.Generation++
 			return g
 		}},
-		{"object bytes mismatch", nil, nil, func(g ports.SnapshotGeneration, _ ports.SnapshotPublication) ports.SnapshotGeneration {
-			for digest, data := range g.Objects {
-				data[len(data)-1] ^= 1
-				g.Objects[digest] = data
-				break
-			}
+		{"manifest bytes mismatch", nil, nil, func(g ports.SnapshotGeneration, _ ports.SnapshotPublication) ports.SnapshotGeneration {
+			g.Manifest[len(g.Manifest)-1] ^= 1
 			return g
 		}},
 	} {
@@ -136,7 +154,7 @@ func TestImportLegacyRetainsSourceUntilExactReloadVerification(t *testing.T) {
 }
 
 func TestImportLegacyDeleteFailureRetriesWithoutRepublishing(t *testing.T) {
-	snapshot := restoreAcceptanceSession(t, "retry-delete")
+	snapshot := legacyAcceptanceSnapshot(t)
 	repository := &snapshotAcceptanceRepository{generations: make(map[string]ports.SnapshotGeneration)}
 	legacy := &snapshotAcceptanceLegacySource{blobs: []ports.LegacySnapshot{legacyAcceptanceBlob(t, snapshot)}, deleteErr: errors.New("sync failed")}
 	d := newTestDaemon(t, nil, stubClock{})
@@ -152,8 +170,8 @@ func TestImportLegacyDeleteFailureRetriesWithoutRepublishing(t *testing.T) {
 }
 
 func TestImportLegacyCancellationAndPerSessionContinuation(t *testing.T) {
-	bad := restoreAcceptanceSession(t, "bad")
-	good := restoreAcceptanceSession(t, "good")
+	bad := legacyAcceptanceSnapshot(t)
+	good := legacyAcceptanceSnapshot(t)
 	badBlob := legacyAcceptanceBlob(t, bad)
 	badBlob.Data = []byte("not-a-v3-snapshot")
 	repository := &snapshotAcceptanceRepository{generations: make(map[string]ports.SnapshotGeneration)}

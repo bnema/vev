@@ -150,7 +150,7 @@ func (d *Daemon) importLegacySnapshots(ctx context.Context) {
 			continue
 		}
 		d.rememberLegacyDelete(blob)
-		if err := d.legacySnapshots.DeleteLegacy(ctx, blob.Name); err != nil {
+		if err := d.legacySnapshots.DeleteVerifiedLegacy(ctx, blob); err != nil {
 			d.log.Warn("deleting imported legacy snapshot failed", "session", blob.Name, "err", err)
 			continue
 		}
@@ -207,7 +207,7 @@ func (d *Daemon) retryLegacyDelete(ctx context.Context, blob ports.LegacySnapsho
 	if !ok || !bytes.Equal(pending, blob.Data) {
 		return
 	}
-	if err := d.legacySnapshots.DeleteLegacy(ctx, blob.Name); err != nil {
+	if err := d.legacySnapshots.DeleteVerifiedLegacy(ctx, blob); err != nil {
 		d.log.Warn("deleting imported legacy snapshot failed", "session", blob.Name, "err", err)
 		return
 	}

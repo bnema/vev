@@ -854,6 +854,63 @@ func (_c *MockLegacySnapshotSource_DeleteLegacy_Call) RunAndReturn(run func(cont
 	return _c
 }
 
+// DeleteVerifiedLegacy provides a mock function for the type MockLegacySnapshotSource
+func (_mock *MockLegacySnapshotSource) DeleteVerifiedLegacy(context1 context.Context, legacySnapshot ports.LegacySnapshot) error {
+	ret := _mock.Called(context1, legacySnapshot)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteVerifiedLegacy")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.LegacySnapshot) error); ok {
+		r0 = returnFunc(context1, legacySnapshot)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockLegacySnapshotSource_DeleteVerifiedLegacy_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteVerifiedLegacy'
+type MockLegacySnapshotSource_DeleteVerifiedLegacy_Call struct {
+	*mock.Call
+}
+
+// DeleteVerifiedLegacy is a helper method to define mock.On call
+//   - context1 context.Context
+//   - legacySnapshot ports.LegacySnapshot
+func (_e *MockLegacySnapshotSource_Expecter) DeleteVerifiedLegacy(context1 any, legacySnapshot any) *MockLegacySnapshotSource_DeleteVerifiedLegacy_Call {
+	return &MockLegacySnapshotSource_DeleteVerifiedLegacy_Call{Call: _e.mock.On("DeleteVerifiedLegacy", context1, legacySnapshot)}
+}
+
+func (_c *MockLegacySnapshotSource_DeleteVerifiedLegacy_Call) Run(run func(context1 context.Context, legacySnapshot ports.LegacySnapshot)) *MockLegacySnapshotSource_DeleteVerifiedLegacy_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 ports.LegacySnapshot
+		if args[1] != nil {
+			arg1 = args[1].(ports.LegacySnapshot)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockLegacySnapshotSource_DeleteVerifiedLegacy_Call) Return(err error) *MockLegacySnapshotSource_DeleteVerifiedLegacy_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockLegacySnapshotSource_DeleteVerifiedLegacy_Call) RunAndReturn(run func(context1 context.Context, legacySnapshot ports.LegacySnapshot) error) *MockLegacySnapshotSource_DeleteVerifiedLegacy_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // LoadLegacy provides a mock function for the type MockLegacySnapshotSource
 func (_mock *MockLegacySnapshotSource) LoadLegacy(context1 context.Context) ([]ports.LegacySnapshot, error) {
 	ret := _mock.Called(context1)

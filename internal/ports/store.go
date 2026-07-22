@@ -75,5 +75,10 @@ type LegacySnapshot struct {
 // contract.
 type LegacySnapshotSource interface {
 	LoadLegacy(context.Context) ([]LegacySnapshot, error)
+	// DeleteVerifiedLegacy removes precisely the legacy blob that was verified
+	// after import. Implementations must persist its identity before unlinking.
+	DeleteVerifiedLegacy(context.Context, LegacySnapshot) error
+	// DeleteLegacy is reserved for explicit session purges, which intentionally
+	// delete by name rather than as part of an import receipt.
 	DeleteLegacy(context.Context, string) error
 }
