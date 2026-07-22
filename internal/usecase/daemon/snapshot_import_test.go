@@ -76,6 +76,31 @@ func legacyAcceptanceBlob(t *testing.T, snapshot snapcodec.Session) ports.Legacy
 	return ports.LegacySnapshot{Name: snapshot.Name, Data: encoded}
 }
 
+func TestLegacyPublicationMarshalObjectErrorsIdentifyPaneAndStage(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(*snapcodec.Pane)
+		stage  string
+	}{
+		{name: "sealed chunk", mutate: func(pane *snapcodec.Pane) { pane.SealedChunks = [][]byte{nil} }, stage: "sealed chunk 0"},
+		{name: "tail", mutate: func(pane *snapcodec.Pane) { pane.Tail = nil }, stage: "tail"},
+		{name: "visible", mutate: func(pane *snapcodec.Pane) { pane.Visible = nil }, stage: "visible"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pane := snapcodec.Pane{ID: "pane-1", StableID: "pane-stable", Tail: []byte("tail"), Visible: []byte("visible")}
+			tt.mutate(&pane)
+			snapshot := snapcodec.Session{Name: "legacy", Tabs: []snapcodec.Tab{{StableID: "tab-1", Panes: []snapcodec.Pane{pane}}}}
+
+			_, err := legacyPublication(snapshot)
+			require.Error(t, err)
+			require.ErrorContains(t, err, `tab "tab-1"`)
+			require.ErrorContains(t, err, `pane "pane-1"`)
+			require.ErrorContains(t, err, tt.stage)
+			require.ErrorContains(t, err, "marshal object")
+		})
+	}
+}
+
 func TestImportLegacyPublishesCompleteGenerationBeforeDeletingSource(t *testing.T) {
 	snapshot := legacyAcceptanceSnapshot(t)
 	repository := &snapshotAcceptanceRepository{generations: make(map[string]ports.SnapshotGeneration)}

@@ -11,6 +11,36 @@ import (
 	"github.com/bnema/vev/pkg/vt"
 )
 
+func TestMarshalSnapshotTailSelectsCanonicalEncoder(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		fill bool
+	}{
+		{name: "empty tail"},
+		{name: "non-empty tail", fill: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			history := vt.NewHistory(vt.HistoryConfig{MaxRows: 2, ChunkRows: 2})
+			if tt.fill {
+				require.NoError(t, history.Append([]renderer.Cell{{Rune: 'x'}}))
+			}
+			tail := history.SnapshotView().Tail()
+
+			got, err := marshalSnapshotTail(tail)
+			require.NoError(t, err)
+			if tt.fill {
+				want, err := vt.MarshalHistory(tail)
+				require.NoError(t, err)
+				require.Equal(t, want, got)
+				return
+			}
+			want, err := vt.MarshalEmptyHistoryTail()
+			require.NoError(t, err)
+			require.Equal(t, want, got)
+		})
+	}
+}
+
 func TestIncrementalPublicationEncodesAfterPaneUnlock(t *testing.T) {
 	d := New(nil, nil, nil)
 	sess := newSnapshotTestSession(t, "work", false, "/work")

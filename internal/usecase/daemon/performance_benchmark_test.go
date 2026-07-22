@@ -76,8 +76,12 @@ func TestDaemonSnapshotDoesNotResupplyUnchangedTenThousandChunkHistory(t *testin
 	fixture.sess.snapshotMu.Unlock()
 	fixture.snapshots.reset()
 	fixture.activePane.mu.Lock()
-	fixture.activePane.screen.Write([]byte("\\x1b[1;1Hchanged"))
+	fixture.activePane.screen.Write([]byte("\x1b[1;1Hchanged"))
+	frame := fixture.activePane.screen.PrimaryVisibleFrame()
 	fixture.activePane.mu.Unlock()
+	for i, r := range "changed" {
+		require.Equalf(t, r, frame.At(i, 0).Rune, "fixture must overwrite at column %d", i)
+	}
 	markSnapshotDirty(fixture.sess)
 	require.True(t, fixture.d.scheduleFinalSnapshot(fixture.sess))
 	awaitSnapshotClean(t, fixture.sess)

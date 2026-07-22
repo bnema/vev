@@ -14,21 +14,21 @@ func legacyPublication(snapshot snapcodec.Session) (ports.SnapshotPublication, e
 		outTab := snapcodec.ManifestTab{StableID: tab.StableID, Cols: tab.Cols, Rows: tab.Rows, NextPaneID: tab.NextPaneID, Focus: tab.Focus, Tree: tab.Tree, Panes: make([]snapcodec.ManifestPane, 0, len(tab.Panes))}
 		for _, pane := range tab.Panes {
 			outPane := snapcodec.ManifestPane{ID: pane.ID, StableID: pane.StableID, Cwd: pane.Cwd, Process: pane.Process}
-			for _, payload := range pane.SealedChunks {
+			for i, payload := range pane.SealedChunks {
 				object, err := snapcodec.MarshalObject(snapcodec.HistoryChunk, payload)
 				if err != nil {
-					return ports.SnapshotPublication{}, err
+					return ports.SnapshotPublication{}, fmt.Errorf("snapshot legacy import: tab %q pane %q sealed chunk %d: marshal object: %w", tab.StableID, pane.ID, i, err)
 				}
 				outPane.Sealed = append(outPane.Sealed, objectRef(snapcodec.HistoryChunk, object))
 				objects = append(objects, object)
 			}
 			tail, err := snapcodec.MarshalObject(snapcodec.HistoryTail, pane.Tail)
 			if err != nil {
-				return ports.SnapshotPublication{}, err
+				return ports.SnapshotPublication{}, fmt.Errorf("snapshot legacy import: tab %q pane %q tail: marshal object: %w", tab.StableID, pane.ID, err)
 			}
 			visible, err := snapcodec.MarshalObject(snapcodec.Visible, pane.Visible)
 			if err != nil {
-				return ports.SnapshotPublication{}, err
+				return ports.SnapshotPublication{}, fmt.Errorf("snapshot legacy import: tab %q pane %q visible: marshal object: %w", tab.StableID, pane.ID, err)
 			}
 			outPane.Tail, outPane.Visible = objectRef(snapcodec.HistoryTail, tail), objectRef(snapcodec.Visible, visible)
 			objects = append(objects, tail, visible)

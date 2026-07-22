@@ -137,10 +137,7 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 					objects = append(objects, *object)
 				}
 			}
-			tail, err := vt.MarshalHistory(pane.tail)
-			if pane.tail.Len() == 0 {
-				tail, err = vt.MarshalEmptyHistoryTail()
-			}
+			tail, err := marshalSnapshotTail(pane.tail)
 			if err != nil {
 				return ports.SnapshotPublication{}, err
 			}
@@ -164,6 +161,16 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 		return ports.SnapshotPublication{}, err
 	}
 	return ports.SnapshotPublication{Name: capture.name, Generation: capture.generation, Manifest: encoded, Objects: objects}, nil
+}
+
+// marshalSnapshotTail selects the canonical empty-tail encoding before any
+// general history encoding. An empty tail is represented by its dedicated
+// canonical blob; a non-empty copied tail retains its rows.
+func marshalSnapshotTail(tail vt.HistoryView) ([]byte, error) {
+	if tail.Len() == 0 {
+		return vt.MarshalEmptyHistoryTail()
+	}
+	return vt.MarshalHistory(tail)
 }
 
 func prepareSnapshotChunkCache(capture *snapshotCapture) error {

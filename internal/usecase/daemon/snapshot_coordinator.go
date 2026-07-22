@@ -208,7 +208,7 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 		return
 	}
 	capture.finishOnce.Do(func() {
-		shouldScheduleForcedSuccessor := false
+		var shouldScheduleForcedSuccessor bool
 		capture.session.snapshotMu.Lock()
 		if capture.session.snapshotPendingCaptures > 0 {
 			capture.session.snapshotPendingCaptures--
