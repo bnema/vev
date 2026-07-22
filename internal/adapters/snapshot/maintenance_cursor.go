@@ -114,9 +114,9 @@ func maintenanceDirectoryError(operation string, err error) error {
 	return fmt.Errorf("%s: %w", operation, safeFilesystemError(err))
 }
 
-// readMaintenanceDirent uses the Linux getdents seek cookie from each record.
-// syscall.Dirent's Off field is the d_off member of linux_dirent64 and
-// syscall.Seek is lseek(2), as defined by Go's syscall Linux sources.
+// readMaintenanceDirent saves the OS-provided seek cookie from each record.
+// The field differs by platform; directoryCookie abstracts that layout while
+// syscall.Seek resumes the descriptor at the saved directory position.
 func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *maintenanceCursor) (entries []maintenanceDirEntry, done bool, err error) {
 	file, err := r.openMaintenanceDirectory(dir)
 	if err != nil {
@@ -162,7 +162,7 @@ func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *mainte
 			}
 			data = data[reclen:]
 			// Advance past every raw record, including dot and disappeared entries.
-			cursor.offset = record.Off
+			cursor.offset = directoryCookie(record)
 			nameBytes := unsafe.Slice((*byte)(unsafe.Pointer(&record.Name[0])), reclen-nameOffset)
 			if end := strings.IndexByte(string(nameBytes), 0); end >= 0 {
 				nameBytes = nameBytes[:end]

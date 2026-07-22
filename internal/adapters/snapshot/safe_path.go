@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // repositoryFD opens a repository-relative path one component at a time. Each
@@ -52,7 +54,7 @@ func (r *Repository) repositoryFD(path string, finalFlags int, mode uint32) (*os
 		} else {
 			flags = finalFlags | syscall.O_CLOEXEC | syscall.O_NOFOLLOW
 		}
-		next, openErr := syscall.Openat(fd, part, flags, mode)
+		next, openErr := unix.Openat(fd, part, flags, mode)
 		closeErr := r.closeDescriptor(fd, "close snapshot path parent directory")
 		if openErr != nil {
 			err = openErr
@@ -94,7 +96,7 @@ func (r *Repository) repositoryParent(path string) (int, string, error) {
 			joinCloseError(&err, "close snapshot parent directory", r.closeDescriptor(fd, "close snapshot parent directory"))
 			return -1, "", err
 		}
-		next, openErr := syscall.Openat(fd, part, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+		next, openErr := unix.Openat(fd, part, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 		closeErr := r.closeDescriptor(fd, "close snapshot parent directory")
 		if openErr != nil {
 			err = openErr
@@ -166,7 +168,7 @@ func (r *Repository) createTempAt(dir string) (temp *os.File, err error) {
 			return nil, err
 		}
 		name := ".tmp-" + hex.EncodeToString(random[:])
-		tempFD, err := syscall.Openat(int(fd.Fd()), name, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+		tempFD, err := unix.Openat(int(fd.Fd()), name, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
 		if errors.Is(err, syscall.EEXIST) {
 			continue
 		}

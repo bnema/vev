@@ -7,9 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
-	"unsafe"
 
 	"github.com/bnema/vev/pkg/safedir"
+	"golang.org/x/sys/unix"
 )
 
 func (r *Repository) ensureSession(key string) error {
@@ -67,7 +67,7 @@ func (r *Repository) ensurePrivateDirectoryPhase(dir, phase string) error {
 		return err
 	}
 	created := false
-	mkdirErr := syscall.Mkdirat(parent, name, 0o700)
+	mkdirErr := unix.Mkdirat(parent, name, 0o700)
 	if mkdirErr == nil {
 		created = true
 	}
@@ -277,19 +277,7 @@ func (r *Repository) installImmutable(oldPath, newPath string) (err error) {
 	defer func() {
 		joinCloseError(&err, "close destination snapshot parent directory", r.closeDescriptor(newFD, "close destination snapshot parent directory"))
 	}()
-	oldPtr, err := syscall.BytePtrFromString(oldName)
-	if err != nil {
-		return err
-	}
-	newPtr, err := syscall.BytePtrFromString(newName)
-	if err != nil {
-		return err
-	}
-	_, _, errno := syscall.Syscall6(syscall.SYS_LINKAT, uintptr(oldFD), uintptr(unsafe.Pointer(oldPtr)), uintptr(newFD), uintptr(unsafe.Pointer(newPtr)), 0, 0)
-	if errno != 0 {
-		return errno
-	}
-	return nil
+	return unix.Linkat(oldFD, oldName, newFD, newName, 0)
 }
 func (r *Repository) rename(oldPath, newPath string) (err error) {
 	if r.hooks.rename != nil {
@@ -311,7 +299,7 @@ func (r *Repository) rename(oldPath, newPath string) (err error) {
 	defer func() {
 		joinCloseError(&err, "close destination snapshot parent directory", r.closeDescriptor(newFD, "close destination snapshot parent directory"))
 	}()
-	return syscall.Renameat(oldFD, oldName, newFD, newName)
+	return unix.Renameat(oldFD, oldName, newFD, newName)
 }
 func (r *Repository) remove(path string) (err error) {
 	if r.hooks.remove != nil {
@@ -326,18 +314,10 @@ func (r *Repository) remove(path string) (err error) {
 	defer func() {
 		joinCloseError(&err, "close snapshot parent directory", r.closeDescriptor(fd, "close snapshot parent directory"))
 	}()
-	if err := syscall.Unlinkat(fd, name); !errors.Is(err, syscall.EISDIR) {
+	if err := unix.Unlinkat(fd, name, 0); !errors.Is(err, unix.EISDIR) {
 		return err
 	}
-	namePtr, err := syscall.BytePtrFromString(name)
-	if err != nil {
-		return err
-	}
-	_, _, errno := syscall.Syscall(syscall.SYS_UNLINKAT, uintptr(fd), uintptr(unsafe.Pointer(namePtr)), uintptr(0x200)) // AT_REMOVEDIR
-	if errno != 0 {
-		return errno
-	}
-	return nil
+	return unix.Unlinkat(fd, name, unix.AT_REMOVEDIR)
 }
 func (r *Repository) syncDirectory(dir string) error {
 	if r.hooks.syncDirectory != nil {
