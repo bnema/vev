@@ -120,7 +120,7 @@ func restoreAcceptanceSession(t *testing.T, name string) snapcodec.Session {
 	screen.Write([]byte("primary-visible"))
 	screen.Write([]byte("\x1b[?1049h"))
 	screen.Write([]byte("alternate-active"))
-	visible, err := screen.MarshalPrimaryVisible()
+	visible, err := screen.PrimaryVisibleSnapshot().Marshal()
 	require.NoError(t, err)
 
 	paneID := layout.PaneID("pane-7")

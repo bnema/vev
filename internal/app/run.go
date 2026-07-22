@@ -1253,13 +1253,13 @@ func runKill(ctx context.Context, name string, all, daemon bool) error {
 					phaseError("deleting legacy session snapshot", legacyErr),
 				)
 			}
-			if tombstoneErr := snapshots.DeleteTombstone(ctx, name); tombstoneErr != nil {
-				_ = p.Close()
-				return fmt.Errorf("vev: clearing killed session marker: %w", tombstoneErr)
-			}
 			if deleteErr := p.Delete(name); deleteErr != nil {
 				_ = p.Close()
 				return fmt.Errorf("vev: deleting stored session: %w", deleteErr)
+			}
+			if tombstoneErr := snapshots.DeleteTombstone(ctx, name); tombstoneErr != nil {
+				_ = p.Close()
+				return fmt.Errorf("vev: clearing killed session marker: %w", tombstoneErr)
 			}
 			if closeErr := p.Close(); closeErr != nil {
 				return fmt.Errorf("vev: closing stored sessions: %w", closeErr)

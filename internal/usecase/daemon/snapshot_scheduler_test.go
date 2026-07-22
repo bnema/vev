@@ -191,9 +191,7 @@ func TestRenameRollbackAfterOldDeleteLeavesOldCoordinatorStopped(t *testing.T) {
 	case d.snapshotWake <- struct{}{}:
 	default:
 	}
-	select {
-	case <-time.After(50 * time.Millisecond):
-	}
+	time.Sleep(50 * time.Millisecond)
 }
 
 func TestForcedSnapshotSchedulesSuccessorAfterRoutineInFlight(t *testing.T) {

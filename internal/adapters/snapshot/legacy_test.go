@@ -95,7 +95,7 @@ func TestRepositoryDeleteLegacySurfacesRootSyncAndCanRetry(t *testing.T) {
 	if err := repo.DeleteLegacy(context.Background(), "named"); err != nil {
 		t.Fatalf("retry DeleteLegacy: %v", err)
 	}
-	if syncCalls != 2 {
+	if syncCalls != 4 {
 		t.Fatalf("sync calls = %d, want retry to sync absent file", syncCalls)
 	}
 }

@@ -556,9 +556,9 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	}
 
 	// Reserve the rename while state is inspected, then perform persistence and
-	// repository I/O without daemon/session locks. In particular, Delete must
-	// follow coordinator quarantine+join or a late Publish could recreate the
-	// old repository identity.
+	// repository I/O without daemon/session locks. The old identity is first
+	// quarantined and durably purged; committing the new record before that
+	// transaction completes could leave a restorable old legacy source.
 	d.mu.Lock()
 	if taken := d.findByNameLocked(name); taken != nil && taken != sess {
 		d.mu.Unlock()
@@ -597,36 +597,30 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	d.mu.Unlock()
 
 	rollback := func(err error) error {
-		// The old record remains authoritative until its deletion succeeds. If
-		// repository deletion was attempted, its outcome is not safely
-		// reversible, so the coordinator stays quarantined rather than risking a
-		// publication that recreates the deleted old identity.
-		if cleanupErr := d.persist.Delete(name); cleanupErr != nil {
-			d.log.Warn("cleaning up renamed persisted session failed", "err", cleanupErr, "session", name)
-		}
 		sess.mu.Lock()
 		sess.renameInProgress = false
 		sess.mu.Unlock()
 		return err
 	}
-	if wasEphemeral || oldName != name {
-		if err := d.persist.Save(record); err != nil {
-			sess.mu.Lock()
-			sess.renameInProgress = false
-			sess.mu.Unlock()
-			return err
-		}
-	}
 	var quarantine snapshotCoordinatorQuarantine
 	if !wasEphemeral && oldName != name {
 		quarantine = quarantineSnapshotCoordinatorWithEpoch(sess)
 		<-quarantine.done
-		if d.snapsEnabled && d.snapshotRepository != nil {
-			if err := d.snapshotRepository.Delete(context.Background(), oldName); err != nil {
-				return rollback(err)
-			}
+		if err := d.beginSnapshotPurge(oldName); err != nil {
+			return rollback(err)
 		}
-		if err := d.persist.Delete(oldName); err != nil {
+		// finishSnapshotPurge preserves the tombstone through both source
+		// deletions and the old metadata delete, including a retained legacy
+		// import whose verified source delete is still pending.
+		if err := d.finishSnapshotPurge(oldName); err != nil {
+			return rollback(err)
+		}
+	}
+	// For a named rename this is the durable commit point, deliberately after
+	// the old tombstone transaction. Ephemeral promotion has no old durable
+	// identity and can create its first record directly.
+	if wasEphemeral || oldName != name {
+		if err := d.persist.Save(record); err != nil {
 			return rollback(err)
 		}
 	}
@@ -854,9 +848,7 @@ func (d *Daemon) retryStoppedPurge(name string) error {
 			return err
 		}
 		d.mu.Lock()
-		if _, ok := d.stopped[name]; ok {
-			delete(d.stopped, name)
-		}
+		delete(d.stopped, name)
 		d.mu.Unlock()
 		return nil
 	}
