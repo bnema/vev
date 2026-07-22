@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
+	"github.com/bnema/vev/pkg/renderer"
 )
 
 func TestCountingSnapshotRepositoryPublishCountsAndRetainsManifest(t *testing.T) {
@@ -22,11 +23,76 @@ func TestCountingSnapshotRepositoryPublishCountsAndRetainsManifest(t *testing.T)
 	object := []byte{0x01, 0x02}
 
 	require.NoError(t, repository.Publish(context.Background(), ports.SnapshotPublication{Name: "session", Manifest: payload, Objects: []ports.SnapshotObject{{Data: object}}}))
-	require.Equal(t, countingSnapshotMetrics{writes: 1, manifestBytes: uint64(len(payload)), objectBytes: uint64(len(object))}, repository.metrics())
+	require.Equal(t, countingSnapshotMetrics{writes: 1, manifestBytes: uint64(len(payload)), objectBytes: uint64(len(object)), headBytes: snapshotHeadBytes}, repository.metrics())
 	require.Equal(t, payload, repository.lastPayload())
 
 	payload[0] = 0x01
 	require.Equal(t, payload, repository.lastPayload(), "the counting sink must retain the payload slice header, not copy it")
+}
+
+func TestCountingSnapshotRepositoryDoesNotRewriteKnownObjects(t *testing.T) {
+	repository := &countingSnapshotRepository{}
+	object, err := snapcodec.MarshalObject(snapcodec.HistoryChunk, []byte{0x01})
+	require.NoError(t, err)
+	publication := ports.SnapshotPublication{Name: "session", Manifest: []byte("manifest"), Objects: []ports.SnapshotObject{object}}
+
+	require.NoError(t, repository.Publish(context.Background(), publication))
+	repository.reset()
+	require.NoError(t, repository.Publish(context.Background(), publication))
+
+	require.Zero(t, repository.metrics().objectBytes, "filesystem repositories retain immutable content-addressed objects")
+}
+
+func TestIncrementalSnapshotMetricsWriteNoUnchangedHistoryBlobsAndBoundCache(t *testing.T) {
+	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: 1, historyRows: 10_000})
+
+	publishBenchmarkSnapshot(t, fixture, 1)
+	fixture.snapshots.reset()
+	publishBenchmarkSnapshot(t, fixture, 2)
+
+	metrics := fixture.snapshots.metrics()
+	require.Zero(t, metrics.historyBlobBytes)
+	require.Zero(t, metrics.objectBytes)
+	require.Positive(t, metrics.manifestBytes)
+	require.Equal(t, uint64(snapshotHeadBytes), metrics.headBytes)
+	require.LessOrEqual(t, benchmarkSnapshotCacheBytes(fixture.sess), snapshotChunkCacheLimit)
+}
+
+func TestIncrementalSnapshotMetricScenarios(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		historyRows int
+		mutate      func(*performanceFixture, int)
+		wantHistory bool
+	}{
+		{name: "tail-only", historyRows: 9_999, mutate: mutateBenchmarkTail},
+		{name: "new-sealed-chunk", historyRows: 10_000, mutate: mutateBenchmarkSealedChunk, wantHistory: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: 1, historyRows: tt.historyRows})
+			publishBenchmarkSnapshot(t, fixture, 1)
+			fixture.snapshots.reset()
+			tt.mutate(fixture, 0)
+			publishBenchmarkSnapshot(t, fixture, 2)
+
+			metrics := fixture.snapshots.metrics()
+			if tt.wantHistory {
+				require.Positive(t, metrics.historyBlobBytes)
+			} else {
+				require.Zero(t, metrics.historyBlobBytes)
+			}
+			require.LessOrEqual(t, benchmarkSnapshotCacheBytes(fixture.sess), snapshotChunkCacheLimit)
+		})
+	}
+}
+
+func TestPerformanceFixtureCellLimitedHistory(t *testing.T) {
+	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 293, Rows: 40}, panes: 1, historyRows: 10_000})
+	fixture.activePane.mu.Lock()
+	rows, cells, capCells := fixture.activePane.history.Len(), fixture.activePane.history.Cells(), fixture.activePane.history.CellCap()
+	fixture.activePane.mu.Unlock()
+	require.Less(t, rows, 10_000)
+	require.LessOrEqual(t, cells, capCells)
 }
 
 func TestCountingOutputTransportCountsOpaquePayloadAndRejectsShortPayload(t *testing.T) {
@@ -219,10 +285,16 @@ func BenchmarkDaemonHistorySnapshotCapture(b *testing.B) {
 	benchmarkDaemonSnapshotCapture(b)
 }
 
-// BenchmarkDaemonHistorySnapshotEncode measures incremental publication from an
-// already immutable capture, without queueing or persistence.
-func BenchmarkDaemonHistorySnapshotEncode(b *testing.B) {
-	benchmarkDaemonSnapshotEncode(b)
+// BenchmarkDaemonIncrementalSnapshotRepository measures the complete
+// content-addressed publication path against a filesystem-equivalent byte
+// counter. Each scenario reports persisted VEVO, VEVM, and VEVH bytes, plus
+// allocation/time and the per-session encoded-history cache high-water mark.
+func BenchmarkDaemonIncrementalSnapshotRepository(b *testing.B) {
+	for _, scenario := range snapshotBenchmarkScenarios {
+		b.Run(scenario.name, func(b *testing.B) {
+			benchmarkIncrementalSnapshotRepository(b, scenario)
+		})
+	}
 }
 
 // BenchmarkDaemonHistorySnapshotRestore measures terminal-state restoration
@@ -351,43 +423,156 @@ func benchmarkDaemonSnapshotCapture(b *testing.B) {
 	}
 }
 
-func benchmarkDaemonSnapshotEncode(b *testing.B) {
-	for _, topology := range daemonSnapshotTopologies {
-		b.Run(topology.name, func(b *testing.B) {
-			fixture := newPerformanceFixture(b, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: topology.tabs, panes: topology.panes, historyRows: 10_000})
-			if !fixture.hasHistoryTopology(topology.tabs, topology.panes, 10_000) {
-				b.Fatal("invalid daemon snapshot publication fixture")
-			}
-			capture, ok := fixture.d.captureSnapshotState(fixture.sess, 1)
-			if !ok || !validBenchmarkCapture(capture) {
-				b.Fatal("invalid snapshot publication fixture")
-			}
-			publication, err := fixture.d.incrementalPublication(capture)
-			if err != nil {
-				b.Fatal(err)
-			}
-			if _, err := snapcodec.UnmarshalManifest(publication.Manifest); err != nil || len(publication.Objects) == 0 {
-				b.Fatalf("invalid incremental snapshot publication fixture: %v", err)
-			}
-			var last ports.SnapshotPublication
-			b.ReportAllocs()
-			b.SetBytes(int64(snapshotPublicationBytes(publication)))
-			b.ResetTimer()
-			for range b.N {
-				last, err = fixture.d.incrementalPublication(capture)
-				if err != nil {
-					b.Fatal(err)
-				}
-			}
-			b.StopTimer()
-			if _, err := snapcodec.UnmarshalManifest(last.Manifest); err != nil {
-				b.Fatalf("snapshot publication produced invalid manifest: %v", err)
-			}
-			b.ReportMetric(float64(len(last.Manifest)), "manifestbytes/op")
-			b.ReportMetric(float64(snapshotObjectBytes(last)), "objectbytes/op")
-			b.ReportMetric(float64(len(last.Objects)), "objects/op")
-		})
+type snapshotBenchmarkScenario struct {
+	name        string
+	size        domain.Size
+	historyRows int
+	baseline    bool
+	mutate      func(*performanceFixture, int)
+	unchanged   bool
+	cellLimited bool
+}
+
+var snapshotBenchmarkScenarios = []snapshotBenchmarkScenario{
+	{name: "initial-10k-x-120", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000},
+	{name: "unchanged", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000, baseline: true, unchanged: true},
+	{name: "visible-only", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000, baseline: true, mutate: mutateBenchmarkVisible},
+	// Leave one row below the retention cap so the mutation changes only the
+	// mutable tail and cannot evict a sealed chunk.
+	{name: "tail-only", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 9_999, baseline: true, mutate: mutateBenchmarkTail},
+	{name: "new-sealed-chunk", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000, baseline: true, mutate: mutateBenchmarkSealedChunk},
+	{name: "cell-limited-293-columns", size: domain.Size{Cols: 293, Rows: 40}, historyRows: 10_000, cellLimited: true},
+}
+
+func benchmarkIncrementalSnapshotRepository(b *testing.B, scenario snapshotBenchmarkScenario) {
+	var (
+		metrics        countingSnapshotMetrics
+		peakCacheBytes int
+	)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for operation := 0; b.Loop(); operation++ {
+		// A new fixture is deliberately outside the timed region. It gives every
+		// iteration the same filesystem state: initial has no generation,
+		// unchanged/visible/tail/sealed begin after one persisted generation.
+		// Reusing one fixture would eventually turn a tail into a sealed chunk
+		// and dilute initial-write bytes over later idempotent publications.
+		b.StopTimer()
+		fixture := newPerformanceFixture(b, performanceConfig{size: scenario.size, panes: 1, historyRows: scenario.historyRows})
+		validateSnapshotBenchmarkFixture(b, fixture, scenario)
+		generation := uint64(1)
+		if scenario.baseline {
+			publishBenchmarkSnapshot(b, fixture, generation)
+			generation++
+			fixture.snapshots.reset()
+		}
+		b.StartTimer()
+		if scenario.mutate != nil {
+			scenario.mutate(fixture, operation)
+		}
+		publishBenchmarkSnapshot(b, fixture, generation)
+		b.StopTimer()
+
+		metrics = addCountingSnapshotMetrics(metrics, fixture.snapshots.metrics())
+		peakCacheBytes = max(peakCacheBytes, benchmarkSnapshotCacheBytes(fixture.sess))
+		// B.Loop requires the timer to be running at the next iteration.
+		b.StartTimer()
 	}
+	b.StopTimer()
+	if scenario.unchanged && metrics.historyBlobBytes != 0 {
+		b.Fatalf("unchanged snapshot wrote %d history blob bytes", metrics.historyBlobBytes)
+	}
+	if peakCacheBytes > snapshotChunkCacheLimit {
+		b.Fatalf("snapshot cache peak = %d, limit = %d", peakCacheBytes, snapshotChunkCacheLimit)
+	}
+	benchmarkReportSnapshotRepositoryMetrics(b, metrics, b.N, peakCacheBytes)
+}
+
+func validateSnapshotBenchmarkFixture(b *testing.B, fixture *performanceFixture, scenario snapshotBenchmarkScenario) {
+	b.Helper()
+	if !fixture.hasHistoryTopology(1, 1, scenario.historyRows) && !scenario.cellLimited {
+		b.Fatal("invalid incremental snapshot fixture")
+	}
+	if !scenario.cellLimited {
+		return
+	}
+	fixture.activePane.mu.Lock()
+	rows, cells, capCells := fixture.activePane.history.Len(), fixture.activePane.history.Cells(), fixture.activePane.history.CellCap()
+	fixture.activePane.mu.Unlock()
+	if rows >= scenario.historyRows || cells > capCells {
+		b.Fatalf("293-column fixture did not enforce cell limit: rows=%d cells=%d cap=%d", rows, cells, capCells)
+	}
+}
+
+func addCountingSnapshotMetrics(a, b countingSnapshotMetrics) countingSnapshotMetrics {
+	return countingSnapshotMetrics{
+		writes:           a.writes + b.writes,
+		objectBytes:      a.objectBytes + b.objectBytes,
+		historyBlobBytes: a.historyBlobBytes + b.historyBlobBytes,
+		manifestBytes:    a.manifestBytes + b.manifestBytes,
+		headBytes:        a.headBytes + b.headBytes,
+	}
+}
+
+func publishBenchmarkSnapshot(b testing.TB, fixture *performanceFixture, generation uint64) {
+	b.Helper()
+	capture, ok := fixture.d.captureSnapshotState(fixture.sess, generation)
+	if !ok {
+		b.Fatal("snapshot capture unexpectedly rejected benchmark fixture")
+	}
+	publication, err := fixture.d.incrementalPublication(capture)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := fixture.snapshots.Publish(context.Background(), publication); err != nil {
+		b.Fatal(err)
+	}
+}
+
+func mutateBenchmarkVisible(fixture *performanceFixture, operation int) {
+	fixture.activePane.mu.Lock()
+	fixture.activePane.screen.Write([]byte(fmt.Sprintf("\x1b[1;1Hvisible-%08d", operation)))
+	fixture.activePane.mu.Unlock()
+}
+
+func mutateBenchmarkTail(fixture *performanceFixture, operation int) {
+	fixture.activePane.mu.Lock()
+	defer fixture.activePane.mu.Unlock()
+	row := make([]renderer.Cell, fixture.activePane.screen.Frame.Width)
+	for column := range row {
+		row[column] = renderer.Cell{Rune: rune('a' + (operation+column)%26)}
+	}
+	if err := fixture.activePane.history.Append(row); err != nil {
+		fixture.t.Fatal(err)
+	}
+}
+
+func mutateBenchmarkSealedChunk(fixture *performanceFixture, operation int) {
+	for row := 0; row < 256; row++ {
+		mutateBenchmarkTail(fixture, operation*256+row)
+	}
+}
+
+func benchmarkSnapshotCacheBytes(sess *session) int {
+	sess.snapshotMu.Lock()
+	defer sess.snapshotMu.Unlock()
+	if sess.snapshotChunkCache == nil {
+		return 0
+	}
+	return sess.snapshotChunkCache.used
+}
+
+func benchmarkReportSnapshotRepositoryMetrics(b *testing.B, metrics countingSnapshotMetrics, operations int, peakCacheBytes int) {
+	b.Helper()
+	if operations == 0 {
+		return
+	}
+	perOperation := float64(operations)
+	b.ReportMetric(float64(metrics.objectBytes)/perOperation, "objectbytes/op")
+	b.ReportMetric(float64(metrics.historyBlobBytes)/perOperation, "historyblobbytes/op")
+	b.ReportMetric(float64(metrics.manifestBytes)/perOperation, "manifestbytes/op")
+	b.ReportMetric(float64(metrics.headBytes)/perOperation, "headbytes/op")
+	b.ReportMetric(float64(peakCacheBytes), "peakcachebytes")
 }
 
 func benchmarkDaemonSnapshotRestore(b *testing.B) {
@@ -805,7 +990,7 @@ func (f *performanceFixture) configureTab(tb *tab, tabIndex, paneCount, historyR
 	for _, p := range tb.panes {
 		p.mu.Lock()
 		width := p.screen.Frame.Width
-		for row := 0; p.history.Len() < historyRows; row++ {
+		for row := 0; p.history.Len() < historyRows && row < historyRows+p.screen.Frame.Height; row++ {
 			p.screen.Write([]byte(performanceFullWidthRow(width, tabIndex, row) + "\r\n"))
 		}
 		p.mu.Unlock()
@@ -1037,24 +1222,50 @@ func (t *countingOutputTransport) lastPayload() []byte {
 	return t.last
 }
 
+// snapshotHeadBytes is the on-disk VEVH header (magic, generation, and
+// manifest digest) written by the filesystem repository for every generation.
+const snapshotHeadBytes = 4 + 8 + 32
+
 type countingSnapshotMetrics struct {
-	writes, manifestBytes, objectBytes uint64
+	writes, objectBytes, historyBlobBytes, manifestBytes, headBytes uint64
 }
 type countingSnapshotRepository struct {
 	mu sync.Mutex
 	countingSnapshotMetrics
-	last []byte
+	objects map[string]map[ports.SnapshotDigest]struct{}
+	last    []byte
 }
 
+// Publish models the bytes written by the filesystem repository: immutable
+// VEVO objects are written once per session and each generation writes a VEVM
+// manifest plus the mutable VEVH pointer. It intentionally does not measure
+// directory metadata, temporary files, or fsyncs.
 func (s *countingSnapshotRepository) Publish(_ context.Context, publication ports.SnapshotPublication) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.objects == nil {
+		s.objects = make(map[string]map[ports.SnapshotDigest]struct{})
+	}
+	objects := s.objects[publication.Name]
+	if objects == nil {
+		objects = make(map[ports.SnapshotDigest]struct{})
+		s.objects[publication.Name] = objects
+	}
 	s.writes++
 	s.manifestBytes += uint64(len(publication.Manifest))
+	s.headBytes += snapshotHeadBytes
 	for _, object := range publication.Objects {
+		if _, exists := objects[object.Digest]; exists {
+			continue
+		}
+		objects[object.Digest] = struct{}{}
 		s.objectBytes += uint64(len(object.Data))
+		kind, _, err := snapcodec.PreflightObject(object.Data)
+		if err == nil && kind == snapcodec.HistoryChunk {
+			s.historyBlobBytes += uint64(len(object.Data))
+		}
 	}
 	s.last = publication.Manifest
-	s.mu.Unlock()
 	return nil
 }
 func (*countingSnapshotRepository) List(context.Context) ([]string, error) { return nil, nil }
