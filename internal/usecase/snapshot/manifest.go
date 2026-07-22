@@ -13,6 +13,7 @@ import (
 
 const (
 	manifestMagic                = "VEVM"
+	headMagic                    = "VEVH"
 	objectMagic                  = "VEVO"
 	ManifestVersion              = uint16(1)
 	manifestHeaderSize           = 16
@@ -57,6 +58,37 @@ type ObjectRef struct {
 type Head struct {
 	Generation     uint64
 	ManifestDigest SnapshotDigest
+}
+
+// MarshalHead encodes the deterministic, strict VEVH generation pointer.
+func MarshalHead(h Head) ([]byte, error) {
+	if h.Generation == 0 || isZeroDigestBytes(h.ManifestDigest[:]) {
+		return nil, fmt.Errorf("%w: head", ErrInvalidData)
+	}
+	var w payloadWriter
+	w.putUint64(h.Generation)
+	w.b = append(w.b, h.ManifestDigest[:]...)
+	return marshalManifestEnvelope(headMagic, w.b)
+}
+
+// UnmarshalHead decodes a complete VEVH generation pointer.
+func UnmarshalHead(encoded []byte) (Head, error) {
+	body, err := unmarshalManifestEnvelope(encoded, headMagic)
+	if err != nil {
+		return Head{}, err
+	}
+	if len(body) < 8+sha256.Size {
+		return Head{}, ErrShortPayload
+	}
+	if len(body) != 8+sha256.Size {
+		return Head{}, ErrTrailingBytes
+	}
+	head := Head{Generation: binary.BigEndian.Uint64(body[:8])}
+	copy(head.ManifestDigest[:], body[8:])
+	if head.Generation == 0 || isZeroDigestBytes(head.ManifestDigest[:]) {
+		return Head{}, fmt.Errorf("%w: head", ErrInvalidData)
+	}
+	return head, nil
 }
 
 // Manifest is the complete VEVM payload carried directly in a publication.
