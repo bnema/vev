@@ -262,13 +262,23 @@ func marshalHead(generation uint64, digest ports.SnapshotDigest) []byte {
 	return out
 }
 func (r *Repository) readHead(key string) (uint64, ports.SnapshotDigest, error) {
+	return r.readHeadWithRoot(nil, key)
+}
+
+func (r *Repository) readHeadWithRoot(root *os.Root, key string) (uint64, ports.SnapshotDigest, error) {
 	path := r.headPath(key)
 	if hook := r.hooks.beforeHeadRead; hook != nil {
 		if err := hook(path); err != nil {
 			return 0, ports.SnapshotDigest{}, err
 		}
 	}
-	data, err := r.readBounded(path)
+	var data []byte
+	var err error
+	if root == nil {
+		data, err = r.readBounded(path)
+	} else {
+		data, err = r.readBoundedRoot(root, path)
+	}
 	if err != nil {
 		return 0, ports.SnapshotDigest{}, err
 	}

@@ -37,10 +37,8 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	// The common replay path needs neither a manifest decode nor a reference
 	// map. Checking the immutable bytes directly also keeps its descriptor
 	// reads beneath the pinned repository root.
-	if generation, _, err := r.readHead(key); err == nil && generation == publication.Generation {
-		if current, err := r.readBounded(r.manifestPath(key, generation)); err == nil && bytes.Equal(current, publication.Manifest) {
-			return nil
-		}
+	if unchanged, err := r.unchangedPublication(key, publication); err == nil && unchanged {
+		return nil
 	}
 
 	current, currentManifest, currentRefs, err := r.currentPublication(ctx, publication.Name, key)
@@ -145,6 +143,24 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		return fmt.Errorf("write HEAD: %w", err)
 	}
 	return nil
+}
+
+// unchangedPublication uses one root for the two reads in the replay fast
+// path. The root is confined to this operation and is closed before return;
+// all other repository operations retain their open-per-operation roots.
+func (r *Repository) unchangedPublication(key string, publication ports.SnapshotPublication) (unchanged bool, err error) {
+	root, err := r.openRoot()
+	if err != nil {
+		return false, err
+	}
+	defer func() { joinCloseError(&err, "close snapshot root", root.Close()) }()
+
+	generation, _, err := r.readHeadWithRoot(root, key)
+	if err != nil || generation != publication.Generation {
+		return false, nil
+	}
+	current, err := r.readBoundedRoot(root, r.manifestPath(key, generation))
+	return err == nil && bytes.Equal(current, publication.Manifest), nil
 }
 
 // currentPublication takes the normal HEAD path without loading every object

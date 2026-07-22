@@ -35,13 +35,18 @@ func TestRepositoryPublishSkipsUnchangedTenThousandObjectHistory(t *testing.T) {
 
 	// Replaying the now-current generation still parses the 10k references, but
 	// must not allocate one object-sized buffer per retained history entry.
+	// The limit is 350, not lower: the os.Root-based fast path pays a constant
+	// ~15 extra allocations (2 guarded reads, each a Root.Lstat symlink check
+	// plus a Root.OpenFile, and os.Root re-walks the path per call), and -race
+	// adds ~20 more. A per-retained-object regression would exceed this by
+	// orders of magnitude.
 	allocations := testing.AllocsPerRun(3, func() {
 		if err := repo.Publish(context.Background(), second); err != nil {
 			panic(err)
 		}
 	})
-	if allocations > 300 {
-		t.Fatalf("unchanged 10k history Publish allocations = %.0f, want <= 300; retained objects were likely copied", allocations)
+	if allocations > 350 {
+		t.Fatalf("unchanged 10k history Publish allocations = %.0f, want <= 350; retained objects were likely copied", allocations)
 	}
 
 	got, err := repo.Load(context.Background(), second.Name)

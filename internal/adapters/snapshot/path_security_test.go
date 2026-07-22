@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -46,26 +47,25 @@ func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 	}
 }
 
-func TestStatReturnsInjectedCloseErrorWithContext(t *testing.T) {
+func TestFinalSymlinksRejectedByRootOperations(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	if err := repo.ensurePrivateDirectory(repo.dir); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(repo.dir, "state")
-	if err := os.WriteFile(path, []byte("state"), 0o600); err != nil {
+	target := filepath.Join(repo.dir, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	closeCause := errors.New("injected stat close failure")
-	repo.hooks.closeDescriptor = func(got string) error {
-		if got == "close snapshot file" {
-			return closeCause
-		}
-		return nil
+	link := filepath.Join(repo.dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
 	}
 
-	_, err := repo.stat(path)
-	if !errors.Is(err, closeCause) || !strings.Contains(err.Error(), "close snapshot file") {
-		t.Fatalf("stat error = %v, want contextual close failure", err)
+	if _, err := repo.openDirectory(link); !errors.Is(err, syscall.ELOOP) || strings.Contains(err.Error(), repo.dir) {
+		t.Fatalf("openDirectory error = %v, want sanitized ELOOP", err)
+	}
+	if _, err := repo.readBounded(link); !errors.Is(err, syscall.ELOOP) || strings.Contains(err.Error(), repo.dir) {
+		t.Fatalf("readBounded error = %v, want sanitized ELOOP", err)
 	}
 }
 

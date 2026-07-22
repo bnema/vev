@@ -17,6 +17,13 @@ func TestSafeFilesystemErrorDoesNotExposePath(t *testing.T) {
 	}
 }
 
+func TestSafeFilesystemErrorDoesNotExposeLinkErrorPath(t *testing.T) {
+	err := safeFilesystemError(&os.LinkError{Op: "rename", Old: "/unsafe/old", New: "/unsafe/new", Err: os.ErrExist})
+	if !errors.Is(err, os.ErrExist) || strings.Contains(err.Error(), "/unsafe/") {
+		t.Fatalf("safe link error = %q", err)
+	}
+}
+
 func TestRepositoryMaintenanceFilesystemErrorsHaveSafeContext(t *testing.T) {
 	injected := errors.New("injected filesystem failure")
 	cases := []struct {

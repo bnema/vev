@@ -187,15 +187,9 @@ func (r *Repository) readMaintenanceDirentWithDrain(dir string, limit int, curso
 				continue
 			}
 			if err != nil {
-				// A final symlink is not traversed and is treated as a non-directory;
-				// deletion remains dirfd-relative and therefore unlinks only the link.
-				if errors.Is(err, syscall.ELOOP) {
-					entries = append(entries, maintenanceDirEntry{name: name})
-					continue
-				}
 				return nil, false, maintenanceDirectoryError("stat maintenance directory entry", err)
 			}
-			entries = append(entries, maintenanceDirEntry{name: name, isDir: stat.Mode&syscall.S_IFMT == syscall.S_IFDIR})
+			entries = append(entries, maintenanceDirEntry{name: name, isDir: stat.IsDir()})
 		}
 		if len(entries) >= limit {
 			if drainBuffer && len(entries) > limit {

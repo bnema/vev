@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 // Delete makes a session unavailable by durably moving it out of the canonical
@@ -142,10 +141,10 @@ func (r *Repository) maintainQuarantine(ctx context.Context, budget *int) (chang
 			state.current = filepath.Dir(state.current)
 			continue
 		}
-		if err != nil && !errors.Is(err, syscall.ELOOP) {
+		if err != nil {
 			return changed, false, err
 		}
-		if err != nil || stat.Mode&syscall.S_IFMT != syscall.S_IFDIR {
+		if !stat.IsDir() {
 			if !r.consumeQuarantineWork(budget, "remove") {
 				return changed, false, nil
 			}
