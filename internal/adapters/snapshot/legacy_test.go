@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,45 @@ func TestRepositoryLegacyReadsOnlyBoundedRootSnapshots(t *testing.T) {
 		t.Fatalf("LoadLegacy = %#v, want root safe and hashed snapshots", got)
 	}
 }
+
+func TestRepositoryLoadLegacyReportsDirectoryCloseError(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		failOpen  int
+		operation string
+	}{
+		{name: "pending deletion markers", failOpen: 1, operation: "close legacy deletion marker directory"},
+		{name: "legacy snapshots", failOpen: 2, operation: "close legacy snapshot directory"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			closeErr := errors.New("injected directory close failure")
+			repo := NewRepository(privateDir(t))
+			openCalls := 0
+			repo.hooks.openLegacyDirectory = func(string) (legacyDirectory, error) {
+				openCalls++
+				if openCalls == tt.failOpen {
+					return fakeLegacyDirectory{closeErr: closeErr}, nil
+				}
+				return fakeLegacyDirectory{}, nil
+			}
+
+			_, err := repo.LoadLegacy(context.Background())
+			if !errors.Is(err, closeErr) {
+				t.Fatalf("LoadLegacy error = %v, want close error", err)
+			}
+			if !strings.Contains(err.Error(), tt.operation) {
+				t.Fatalf("LoadLegacy error = %v, want %q", err, tt.operation)
+			}
+		})
+	}
+}
+
+type fakeLegacyDirectory struct {
+	closeErr error
+}
+
+func (d fakeLegacyDirectory) ReadDir(int) ([]os.DirEntry, error) { return nil, io.EOF }
+func (d fakeLegacyDirectory) Close() error                       { return d.closeErr }
 
 func TestRepositoryLegacyRejectsTooManyAndTooLargeAggregateSnapshots(t *testing.T) {
 	t.Run("count", func(t *testing.T) {

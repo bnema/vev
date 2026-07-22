@@ -58,11 +58,8 @@ type session struct {
 	// locks while encoding or writing.
 	snapshotMu                  sync.Mutex
 	snapshotGeneration          uint64
-	snapshotCapturedGeneration  uint64
 	snapshotPublishedGeneration uint64
 	snapshotNextEligibleAt      time.Time
-	snapshotAttempted           bool
-	snapshotAttemptKind         snapshotAttemptKind
 	// The coordinator state below is guarded by snapshotMu. A capture can be
 	// queued globally or in flight, never more than one of each per session.
 	// Quarantine cancels the session publication context before destructive
@@ -80,9 +77,6 @@ type session struct {
 	snapshotPublicationCancel  context.CancelFunc
 	snapshotQuarantined        bool
 	snapshotQuarantineEpoch    uint64
-	// snapshotFailureSig is the stable class of the active failed publication.
-	// It is guarded by snapshotMu and deliberately never contains error text.
-	snapshotFailureSig string
 	// snapshotChunkCache retains encoded sealed history only for this named
 	// session. snapshotMu owns it so cache touches never contend with pane
 	// state or mutate bytes retained by queued/in-flight publications.
@@ -899,32 +893,24 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	}
 	var terminalSnapshotErr error
 	retainSnapshotRetry := false
-	if d.snapsEnabled && !isEphemeral {
-		if purge {
-			if d.snapshotRepository != nil {
-				// Repository deletion is intentionally deferred until the render
-				// coordinator is cancelled and joined below. See client.go's lock
-				// ordering notes: no coordinator callback may race a purge.
+	if d.snapsEnabled && !isEphemeral && !purge {
+		markSnapshotDirty(sess)
+		sess.snapshotMu.Lock()
+		terminalGeneration := sess.snapshotGeneration
+		sess.snapshotMu.Unlock()
+		if !d.scheduleFinalSnapshot(sess) || !d.waitForSnapshotGenerationWithDeadline(sess, terminalGeneration, deadline) {
+			sess.mu.Lock()
+			name := sess.name
+			sess.mu.Unlock()
+			terminalSnapshotErr = fmt.Errorf("retain final snapshot for session %q: snapshot worker unavailable, saturated, or timed out", name)
+			if reason != ports.ReasonServerShutdown {
+				return terminalSnapshotErr
 			}
-		} else {
-			markSnapshotDirty(sess)
-			sess.snapshotMu.Lock()
-			terminalGeneration := sess.snapshotGeneration
-			sess.snapshotMu.Unlock()
-			if !d.scheduleFinalSnapshot(sess) || !d.waitForSnapshotGenerationWithDeadline(sess, terminalGeneration, deadline) {
-				sess.mu.Lock()
-				name := sess.name
-				sess.mu.Unlock()
-				terminalSnapshotErr = fmt.Errorf("retain final snapshot for session %q: snapshot worker unavailable, saturated, or timed out", name)
-				if reason != ports.ReasonServerShutdown {
-					return terminalSnapshotErr
-				}
-				// Preserve any already-queued routine capture until the blocked
-				// worker can safely discard it. This retains the dirty generation
-				// and forced retry intent without adding another queue entry.
-				retainSnapshotRetry = true
-				d.persistShutdownSnapshotFailure(name, terminalSnapshotErr)
-			}
+			// Preserve any already-queued routine capture until the blocked
+			// worker can safely discard it. This retains the dirty generation
+			// and forced retry intent without adding another queue entry.
+			retainSnapshotRetry = true
+			d.persistShutdownSnapshotFailure(name, terminalSnapshotErr)
 		}
 	}
 	if !isEphemeral {

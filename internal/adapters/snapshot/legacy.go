@@ -23,9 +23,21 @@ type legacyDeleteMarker struct {
 	name string
 }
 
+type legacyDirectory interface {
+	ReadDir(int) ([]os.DirEntry, error)
+	Close() error
+}
+
+func (r *Repository) openLegacyDirectory(path string) (legacyDirectory, error) {
+	if r.hooks.openLegacyDirectory != nil {
+		return r.hooks.openLegacyDirectory(path)
+	}
+	return os.Open(path)
+}
+
 // LoadLegacy reads only pre-incremental root .snap files. It is deliberately
 // isolated from repository reads so incremental directories are never traversed.
-func (r *Repository) LoadLegacy(ctx context.Context) ([]ports.LegacySnapshot, error) {
+func (r *Repository) LoadLegacy(ctx context.Context) (out []ports.LegacySnapshot, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -34,16 +46,20 @@ func (r *Repository) LoadLegacy(ctx context.Context) ([]ports.LegacySnapshot, er
 	if err := r.cleanupPendingLegacyDeletes(ctx); err != nil {
 		return nil, err
 	}
-	f, err := os.Open(r.dir)
+	f, err := r.openLegacyDirectory(r.dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read legacy snapshot directory: %w", safeFilesystemError(err))
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close legacy snapshot directory: %w", safeFilesystemError(closeErr)))
+		}
+	}()
 
-	out := make([]ports.LegacySnapshot, 0, maxLegacySnapshotFiles)
+	out = make([]ports.LegacySnapshot, 0, maxLegacySnapshotFiles)
 	files := 0
 	total := 0
 	for {
@@ -181,13 +197,17 @@ func (r *Repository) cleanupPendingLegacyDeletes(ctx context.Context) error {
 	return nil
 }
 
-func (r *Repository) pendingLegacyDeleteMarkers(ctx context.Context) ([]legacyDeleteMarker, error) {
-	f, err := os.Open(r.dir)
+func (r *Repository) pendingLegacyDeleteMarkers(ctx context.Context) (markers []legacyDeleteMarker, err error) {
+	f, err := r.openLegacyDirectory(r.dir)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	markers := make([]legacyDeleteMarker, 0, maxLegacyDeleteMarkers)
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close legacy deletion marker directory: %w", safeFilesystemError(closeErr)))
+		}
+	}()
+	markers = make([]legacyDeleteMarker, 0, maxLegacyDeleteMarkers)
 	for {
 		entries, readErr := f.ReadDir(maintenanceBatch)
 		for _, entry := range entries {

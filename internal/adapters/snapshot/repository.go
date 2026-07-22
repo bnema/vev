@@ -60,6 +60,7 @@ type repositoryHooks struct {
 	syncDirectory            func(string) error
 	remove                   func(string) error
 	openMaintenanceDirectory func(string) (maintenanceDirectory, error)
+	openLegacyDirectory      func(string) (legacyDirectory, error)
 	beforeSessionLock        func(string)
 }
 

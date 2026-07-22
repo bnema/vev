@@ -89,7 +89,7 @@ func TestSnapshotChunkCacheResistsWarmedOverCapacityHistoryScans(t *testing.T) {
 
 func TestIncrementalPublicationReusesSealedChunkObject(t *testing.T) {
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 2, ChunkRows: 1})
-	history.Append([]renderer.Cell{renderer.BlankCell()})
+	require.NoError(t, history.Append([]renderer.Cell{renderer.BlankCell()}))
 	view := history.SnapshotView()
 	visible := vt.NewScreen(1, 1).PrimaryVisibleSnapshot()
 	d := New(nil, nil, nil)

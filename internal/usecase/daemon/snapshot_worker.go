@@ -11,10 +11,6 @@ func (d *Daemon) reportSnapshotFailure(capture *snapshotCapture, phase string, c
 		return
 	}
 	signature := snapshotFailureSignature(phase, cause)
-	capture.session.snapshotMu.Lock()
-	capture.session.snapshotFailureSig = signature
-	capture.session.snapshotMu.Unlock()
-
 	d.snapshotNoticeMu.Lock()
 	changed := d.snapshotActiveFailureSignature != signature
 	d.snapshotActiveFailureSignature = signature

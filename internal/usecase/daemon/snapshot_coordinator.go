@@ -5,15 +5,6 @@ import (
 	"time"
 )
 
-func snapshotCoordinatorContext(sess *session) (context.Context, context.CancelFunc) {
-	sess.snapshotMu.Lock()
-	defer sess.snapshotMu.Unlock()
-	if sess.snapshotPublicationContext == nil {
-		sess.snapshotPublicationContext, sess.snapshotPublicationCancel = context.WithCancel(context.Background())
-	}
-	return sess.snapshotPublicationContext, sess.snapshotPublicationCancel
-}
-
 // snapshotCoordinatorQuarantine identifies one stop request. A later teardown
 // can supersede it, in which case only that later owner may resume publication.
 type snapshotCoordinatorQuarantine struct {
@@ -98,13 +89,9 @@ func resumeSnapshotCoordinatorForNewIdentity(sess *session, quarantine snapshotC
 	// state while eligibility remains false, then atomically make generation 1
 	// dirty and wake the scheduler.
 	sess.snapshotGeneration = 1
-	sess.snapshotCapturedGeneration = 0
 	sess.snapshotPublishedGeneration = 0
 	sess.snapshotForcedGeneration = 0
 	sess.snapshotNextEligibleAt = time.Time{}
-	sess.snapshotAttempted = false
-	sess.snapshotAttemptKind = snapshotAttemptRoutine
-	sess.snapshotFailureSig = ""
 	sess.snapshotChunkCache = newSnapshotChunkCache(snapshotChunkCacheLimit)
 	sess.snapDirty.Store(true)
 	sess.snapEligible.Store(true)
@@ -247,7 +234,6 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 		}
 		if succeeded && capture.session.snapshotGeneration == capture.generation {
 			capture.session.snapDirty.Store(false)
-			capture.session.snapshotFailureSig = ""
 		} else if !succeeded {
 			capture.session.snapDirty.Store(true)
 		}
@@ -282,12 +268,3 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 		}
 	})
 }
-
-// reportSnapshotFailure records every failed persistence attempt but only
-// displays a toast when its stable phase/error class changes. This keeps a
-// blocked disk from repeatedly repainting every attached client while retaining
-// the count in notification history.
-
-// snapshotRepositorySaver waits until the earliest completion-derived routine
-// eligibility. State changes wake it immediately, so a newly dirty session is
-// captured without waiting for an unrelated session's interval.

@@ -18,21 +18,32 @@ import (
 )
 
 func TestSnapshotCoordinatorQuarantineCancelsPublicationBeforeDelete(t *testing.T) {
-	sess := newSnapshotTestSession(t, "work", false, "/work")
-	ctx, cancel := snapshotCoordinatorContext(sess)
-	done := quarantineSnapshotCoordinator(sess)
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	WithSnapshotRepository(repository, nil)(d)
+	startSnapshotEncodeWorker(t, d)
 
+	started := make(chan struct{})
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, _ ports.SnapshotPublication) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}).Once()
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	markSnapshotDirty(sess)
+	require.True(t, d.scheduleSnapshot(sess))
 	select {
-	case <-ctx.Done():
+	case <-started:
 	case <-time.After(testWaitTimeout):
-		t.Fatal("quarantine did not cancel publication")
+		t.Fatal("publication did not start")
 	}
+
+	done := quarantineSnapshotCoordinator(sess)
 	select {
 	case <-done:
 	case <-time.After(testWaitTimeout):
-		t.Fatal("quarantine did not join idle coordinator")
+		t.Fatal("quarantine did not join canceled publication")
 	}
-	cancel()
 }
 
 func TestSnapshotCoordinatorQuarantineJoinsInFlightPublication(t *testing.T) {
@@ -750,17 +761,28 @@ func TestSnapshotSchedulerImmediateEligibilityAndStaleCapturesRemainDirty(t *tes
 	WithSnapshotRepository(portsmocks.NewMockSnapshotRepository(t), nil)(d)
 
 	t.Run("no prior attempt is immediately eligible", func(t *testing.T) {
+		published := make(chan ports.SnapshotPublication, 1)
+		repository := portsmocks.NewMockSnapshotRepository(t)
+		WithSnapshotRepository(repository, nil)(d)
+		startSnapshotEncodeWorker(t, d)
+		repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
+			published <- publication
+			return nil
+		}).Once()
+
 		sess := newSnapshotTestSession(t, "immediate", false, "/work")
 		sess.snapshotWake = d.snapshotWake
 		sess.snapDirty.Store(true)
 		d.sessions[sess.id] = sess
 
-		require.Equal(t, snapshotInterval, d.scheduleEligibleRepositorySnapshots())
-		sess.snapshotMu.Lock()
-		require.True(t, sess.snapshotAttempted)
-		require.Equal(t, uint64(0), sess.snapshotCapturedGeneration)
-		require.Equal(t, now.Add(snapshotInterval), sess.snapshotNextEligibleAt)
-		sess.snapshotMu.Unlock()
+		d.scheduleEligibleRepositorySnapshots()
+		select {
+		case publication := <-published:
+			require.Equal(t, "immediate", publication.Name)
+		case <-time.After(testWaitTimeout):
+			t.Fatal("immediately eligible snapshot was not published")
+		}
+		awaitSnapshotClean(t, sess)
 	})
 
 	t.Run("queued and in-flight stale successes cannot clear newer generation", func(t *testing.T) {

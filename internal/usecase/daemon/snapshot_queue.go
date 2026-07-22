@@ -43,9 +43,6 @@ func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bo
 	}
 	generation := sess.snapshotGeneration
 	publicationContext := sess.snapshotPublicationContext
-	sess.snapshotCapturedGeneration = generation
-	sess.snapshotAttempted = true
-	sess.snapshotAttemptKind = kind
 	sess.snapshotPendingCaptures++
 	sess.snapshotPending = true
 	sess.signalSnapshotChangedLocked()

@@ -87,7 +87,7 @@ func (r *Repository) Delete(ctx context.Context, name string) error {
 	return nil
 }
 
-func pendingQuarantine(dir, key string) (bool, error) {
+func pendingQuarantine(dir, key string) (pending bool, err error) {
 	f, err := os.Open(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -95,7 +95,11 @@ func pendingQuarantine(dir, key string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close deleting snapshot directory: %w", safeFilesystemError(closeErr)))
+		}
+	}()
 	prefix := ".deleting-" + key + "-"
 	for {
 		entries, err := f.ReadDir(maintenanceBatch)
