@@ -50,12 +50,14 @@ func (r *Repository) readMaintenanceDir(dir string, n int, purpose string) ([]ma
 	id := maintenanceCursorID(dir, purpose)
 	cursor := r.maintenanceCursors[id]
 	if cursor != nil && len(cursor.pending) != 0 {
-		entries := cursor.pending
-		cursor.pending = nil
-		if cursor.done {
+		count := min(n, len(cursor.pending))
+		entries := cursor.pending[:count]
+		cursor.pending = cursor.pending[count:]
+		done := cursor.done && len(cursor.pending) == 0
+		if done {
 			delete(r.maintenanceCursors, id)
 		}
-		return entries, cursor.done, nil
+		return entries, done, nil
 	}
 	if cursor == nil {
 		if len(r.maintenanceCursors) >= maxMaintenanceCursors {
@@ -114,9 +116,10 @@ func maintenanceDirectoryError(operation string, err error) error {
 	return fmt.Errorf("%s: %w", operation, safeFilesystemError(err))
 }
 
-// readMaintenanceDirent saves the OS-provided seek cookie from each record.
-// The field differs by platform; directoryCookie abstracts that layout while
-// syscall.Seek resumes the descriptor at the saved directory position.
+// readMaintenanceDirent saves a resumable directory cursor. Linux d_off lets
+// a large getdents batch stop at limit. Darwin's syscall.ReadDirent instead
+// stores an entry count in the descriptor offset, so its record-sized batch is
+// always drained before that descriptor-maintained count is saved.
 func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *maintenanceCursor) (entries []maintenanceDirEntry, done bool, err error) {
 	file, err := r.openMaintenanceDirectory(dir)
 	if err != nil {
@@ -141,8 +144,8 @@ func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *mainte
 	}
 
 	entries = make([]maintenanceDirEntry, 0, limit)
-	buffer := make([]byte, 8192)
-	for len(entries) < limit {
+	buffer := make([]byte, maintenanceDirentBufferSize)
+	for len(entries) < limit || drainMaintenanceDirentBatch() {
 		count, err := file.ReadDirent(buffer)
 		if err != nil {
 			return nil, false, maintenanceDirectoryError("read maintenance directory", err)
@@ -150,7 +153,7 @@ func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *mainte
 		if count == 0 {
 			return entries, true, nil
 		}
-		for data := buffer[:count]; len(data) != 0 && len(entries) < limit; {
+		for data := buffer[:count]; len(data) != 0 && (len(entries) < limit || drainMaintenanceDirentBatch()); {
 			if len(data) < int(unsafe.Offsetof(syscall.Dirent{}.Name)) {
 				return nil, false, syscall.EIO
 			}
@@ -162,7 +165,11 @@ func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *mainte
 			}
 			data = data[reclen:]
 			// Advance past every raw record, including dot and disappeared entries.
-			cursor.offset = directoryCookie(record)
+			offset, cookieErr := directoryCookie(file, record)
+			if cookieErr != nil {
+				return nil, false, maintenanceDirectoryError("tell maintenance directory", cookieErr)
+			}
+			cursor.offset = offset
 			nameBytes := unsafe.Slice((*byte)(unsafe.Pointer(&record.Name[0])), reclen-nameOffset)
 			if end := strings.IndexByte(string(nameBytes), 0); end >= 0 {
 				nameBytes = nameBytes[:end]
@@ -185,6 +192,13 @@ func (r *Repository) readMaintenanceDirent(dir string, limit int, cursor *mainte
 				return nil, false, maintenanceDirectoryError("stat maintenance directory entry", err)
 			}
 			entries = append(entries, maintenanceDirEntry{name: name, isDir: stat.Mode&syscall.S_IFMT == syscall.S_IFDIR})
+		}
+		if drainMaintenanceDirentBatch() {
+			if len(entries) > limit {
+				cursor.pending = append(cursor.pending, entries[limit:]...)
+				entries = entries[:limit]
+			}
+			return entries, false, nil
 		}
 	}
 	return entries, false, nil

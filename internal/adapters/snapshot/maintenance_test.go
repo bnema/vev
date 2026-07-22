@@ -97,13 +97,14 @@ func TestReadMaintenanceDirentRejectsRecordShorterThanNameOffset(t *testing.T) {
 }
 
 type fakeMaintenanceDirectory struct {
-	data     []byte
-	seekErr  error
-	readErr  error
-	closeErr error
+	data       []byte
+	seekOffset int64
+	seekErr    error
+	readErr    error
+	closeErr   error
 }
 
-func (d fakeMaintenanceDirectory) Seek(int64, int) (int64, error) { return 0, d.seekErr }
+func (d fakeMaintenanceDirectory) Seek(int64, int) (int64, error) { return d.seekOffset, d.seekErr }
 func (d fakeMaintenanceDirectory) ReadDirent(buffer []byte) (int, error) {
 	if d.readErr != nil {
 		return 0, d.readErr
@@ -421,15 +422,6 @@ func TestRepositoryMaintainClosesContinuationDirectories(t *testing.T) {
 	if got := openDescriptorCount(t); got > before+4 {
 		t.Fatalf("open descriptors after bounded maintenance = %d, want at most %d", got, before+4)
 	}
-}
-
-func openDescriptorCount(t *testing.T) int {
-	t.Helper()
-	entries, err := os.ReadDir("/proc/self/fd")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return len(entries)
 }
 
 func TestRepositoryMaintainBoundsQueuedShardNames(t *testing.T) {

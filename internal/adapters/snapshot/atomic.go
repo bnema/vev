@@ -314,8 +314,13 @@ func (r *Repository) remove(path string) (err error) {
 	defer func() {
 		joinCloseError(&err, "close snapshot parent directory", r.closeDescriptor(fd, "close snapshot parent directory"))
 	}()
-	if err := unix.Unlinkat(fd, name, 0); !errors.Is(err, unix.EISDIR) {
-		return err
+	unlinkErr := unix.Unlinkat(fd, name, 0)
+	if unlinkErr == nil {
+		return nil
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstatat(fd, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil || !directoryUnlinkRetry(unlinkErr, uint32(stat.Mode)) {
+		return unlinkErr
 	}
 	return unix.Unlinkat(fd, name, unix.AT_REMOVEDIR)
 }
