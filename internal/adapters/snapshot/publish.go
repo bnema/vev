@@ -21,7 +21,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		return err
 	}
 
-	refs, supplied, err := validatePublication(publication)
+	refs, err := validatePublicationManifest(publication)
 	if err != nil {
 		return err
 	}
@@ -35,7 +35,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		return err
 	}
 
-	current, currentManifest, err := r.currentGeneration(ctx, publication.Name, key)
+	current, currentManifest, currentRefs, err := r.currentPublication(ctx, publication.Name, key)
 	if err != nil {
 		return err
 	}
@@ -49,21 +49,36 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		return nil
 	}
 
+	// Retained refs from the authoritative generation were verified when their
+	// immutable files were installed. They are intentionally not re-read when a
+	// producer supplies them again. Every other referenced object is checked
+	// from disk once, or validated and installed from the supplied bytes.
+	supplied, err := suppliedNecessaryObjects(refs, currentRefs, publication.Objects)
+	if err != nil {
+		return err
+	}
 	for digest, ref := range refs {
+		if retainedObject(currentRefs, digest, ref) {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		path := r.objectPath(key, digest)
-		exists, err := verifyObjectFile(path, digest, ref)
+		exists, err := r.verifyObjectFile(path, digest, ref)
 		if err != nil {
 			return fmt.Errorf("verify object %x: %w", digest, err)
 		}
 		if exists {
 			continue
 		}
-		object, ok := supplied[digest]
-		if !ok {
+		objects := supplied[digest]
+		if len(objects) == 0 {
 			return fmt.Errorf("missing referenced object %x", digest)
+		}
+		object, err := r.validateSuppliedObject(objects, digest, ref)
+		if err != nil {
+			return err
 		}
 		if r.hooks.beforeBlobWrite != nil {
 			if err := r.hooks.beforeBlobWrite(path); err != nil {
@@ -74,7 +89,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 			return err
 		}
 		if err := r.writeImmutable(path, object.Data, func(existing []byte) error {
-			if sha256.Sum256(existing) != digest || !validObject(existing, ref) {
+			if r.objectDigest(existing) != digest || !validObject(existing, ref) {
 				return fmt.Errorf("existing immutable object is invalid")
 			}
 			return nil
@@ -123,40 +138,124 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	}
 	return nil
 }
-func validatePublication(p ports.SnapshotPublication) (map[ports.SnapshotDigest]codec.ObjectRef, map[ports.SnapshotDigest]ports.SnapshotObject, error) {
-	manifest, err := codec.UnmarshalManifest(p.Manifest)
-	if err != nil {
-		return nil, nil, fmt.Errorf("invalid manifest: %w", err)
+
+// currentPublication takes the normal HEAD path without loading every object
+// in the current generation. A damaged HEAD or manifest still uses the full
+// fallback scan, because only Load's object validation can establish a safe
+// replacement authoritative generation in that recovery case.
+func (r *Repository) currentPublication(ctx context.Context, name, key string) (uint64, []byte, map[ports.SnapshotDigest]codec.ObjectRef, error) {
+	generation, digest, err := r.readHead(key)
+	if err == nil {
+		data, readErr := readBounded(r.manifestPath(key, generation))
+		if readErr == nil && sha256.Sum256(data) == digest {
+			refs, validateErr := validateManifest(data, name, generation)
+			if validateErr == nil {
+				return generation, data, refs, nil
+			}
+		}
 	}
-	if manifest.Name != p.Name || manifest.Generation != p.Generation || p.Generation == 0 {
-		return nil, nil, fmt.Errorf("manifest name or generation does not match publication")
+
+	generation, data, err := r.currentGeneration(ctx, name, key)
+	if err != nil || generation == 0 {
+		return generation, data, nil, err
+	}
+	refs, err := validateManifest(data, name, generation)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return generation, data, refs, nil
+}
+
+func validatePublication(p ports.SnapshotPublication) (map[ports.SnapshotDigest]codec.ObjectRef, map[ports.SnapshotDigest]ports.SnapshotObject, error) {
+	refs, err := validatePublicationManifest(p)
+	if err != nil {
+		return nil, nil, err
+	}
+	supplied, err := suppliedNecessaryObjects(refs, nil, p.Objects)
+	if err != nil {
+		return nil, nil, err
+	}
+	objects := make(map[ports.SnapshotDigest]ports.SnapshotObject, len(supplied))
+	for digest, entries := range supplied {
+		object, err := validateSuppliedObject(entries, digest, refs[digest], nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		objects[digest] = object
+	}
+	return refs, objects, nil
+}
+
+func validatePublicationManifest(p ports.SnapshotPublication) (map[ports.SnapshotDigest]codec.ObjectRef, error) {
+	return validateManifest(p.Manifest, p.Name, p.Generation)
+}
+
+func validateManifest(data []byte, name string, generation uint64) (map[ports.SnapshotDigest]codec.ObjectRef, error) {
+	manifest, err := codec.UnmarshalManifest(data)
+	if err != nil {
+		return nil, fmt.Errorf("invalid manifest: %w", err)
+	}
+	if manifest.Name != name || manifest.Generation != generation || generation == 0 {
+		return nil, fmt.Errorf("manifest name or generation does not match publication")
 	}
 	refs := manifestRefs(manifest)
 	if refs == nil {
-		return nil, nil, fmt.Errorf("conflicting manifest references")
+		return nil, fmt.Errorf("conflicting manifest references")
 	}
-	if !withinGenerationBudget(len(p.Manifest), refs) {
-		return nil, nil, fmt.Errorf("snapshot generation too large")
+	if !withinGenerationBudget(len(data), refs) {
+		return nil, fmt.Errorf("snapshot generation too large")
 	}
-	objects := make(map[ports.SnapshotDigest]ports.SnapshotObject, len(p.Objects))
-	for _, object := range p.Objects {
-		if sha256.Sum256(object.Data) != object.Digest {
-			return nil, nil, fmt.Errorf("object digest mismatch")
+	return refs, nil
+}
+
+// suppliedNecessaryObjects first rejects unreferenced input without inspecting
+// its payload. Objects retained from currentRefs cannot affect publication and
+// are left out so callers do not pay to hash or copy a full history again.
+func suppliedNecessaryObjects(refs, currentRefs map[ports.SnapshotDigest]codec.ObjectRef, supplied []ports.SnapshotObject) (map[ports.SnapshotDigest][]ports.SnapshotObject, error) {
+	out := make(map[ports.SnapshotDigest][]ports.SnapshotObject)
+	for _, object := range supplied {
+		if _, used := refs[object.Digest]; !used {
+			return nil, fmt.Errorf("unreferenced object")
 		}
-		ref, used := refs[object.Digest]
-		if !used {
-			return nil, nil, fmt.Errorf("unreferenced object")
+		if retainedObject(currentRefs, object.Digest, refs[object.Digest]) {
+			continue
 		}
-		kind, payload, err := codec.PreflightObject(object.Data)
-		if err != nil || kind != ref.Kind || len(object.Data) != int(ref.Size) || len(payload) == 0 {
-			return nil, nil, fmt.Errorf("invalid object envelope")
-		}
-		if old, duplicate := objects[object.Digest]; duplicate && !equalBytes(old.Data, object.Data) {
-			return nil, nil, fmt.Errorf("conflicting object")
-		}
-		objects[object.Digest] = ports.SnapshotObject{Digest: object.Digest, Data: append([]byte(nil), object.Data...)}
+		out[object.Digest] = append(out[object.Digest], object)
 	}
-	return refs, objects, nil
+	return out, nil
+}
+
+func retainedObject(currentRefs map[ports.SnapshotDigest]codec.ObjectRef, digest ports.SnapshotDigest, ref codec.ObjectRef) bool {
+	currentRef, ok := currentRefs[digest]
+	return ok && currentRef == ref
+}
+
+func (r *Repository) validateSuppliedObject(objects []ports.SnapshotObject, digest ports.SnapshotDigest, ref codec.ObjectRef) (ports.SnapshotObject, error) {
+	return validateSuppliedObject(objects, digest, ref, r)
+}
+
+func validateSuppliedObject(objects []ports.SnapshotObject, digest ports.SnapshotDigest, ref codec.ObjectRef, repository *Repository) (ports.SnapshotObject, error) {
+	object := objects[0]
+	for _, candidate := range objects {
+		actual := sha256.Sum256(candidate.Data)
+		if repository != nil {
+			actual = repository.objectDigest(candidate.Data)
+		}
+		if actual != candidate.Digest || candidate.Digest != digest {
+			return ports.SnapshotObject{}, fmt.Errorf("object digest mismatch")
+		}
+		if !equalBytes(candidate.Data, object.Data) {
+			return ports.SnapshotObject{}, fmt.Errorf("conflicting object")
+		}
+	}
+	kind, payload, err := codec.PreflightObject(object.Data)
+	if err != nil || kind != ref.Kind || len(object.Data) != int(ref.Size) || len(payload) == 0 {
+		return ports.SnapshotObject{}, fmt.Errorf("invalid object envelope")
+	}
+	if repository != nil && repository.hooks.beforeObjectCopy != nil {
+		repository.hooks.beforeObjectCopy(object.Data)
+	}
+	return ports.SnapshotObject{Digest: digest, Data: append([]byte(nil), object.Data...)}, nil
 }
 
 func withinGenerationBudget(manifestSize int, refs map[ports.SnapshotDigest]codec.ObjectRef) bool {
@@ -196,17 +295,28 @@ func manifestRefs(manifest codec.Manifest) map[ports.SnapshotDigest]codec.Object
 	}
 	return refs
 }
+
 func validObject(data []byte, ref codec.ObjectRef) bool {
 	kind, payload, err := codec.PreflightObject(data)
 	return err == nil && kind == ref.Kind && len(payload) > 0 && len(data) == int(ref.Size)
 }
 
-func verifyObjectFile(path string, digest ports.SnapshotDigest, ref codec.ObjectRef) (bool, error) {
+func (r *Repository) objectDigest(data []byte) ports.SnapshotDigest {
+	if r.hooks.beforeObjectHash != nil {
+		r.hooks.beforeObjectHash(data)
+	}
+	return sha256.Sum256(data)
+}
+
+func (r *Repository) verifyObjectFile(path string, digest ports.SnapshotDigest, ref codec.ObjectRef) (bool, error) {
+	if r.hooks.beforeObjectRead != nil {
+		r.hooks.beforeObjectRead(path)
+	}
 	data, exists, err := readOptionalBounded(path)
 	if err != nil || !exists {
 		return exists, err
 	}
-	if sha256.Sum256(data) != digest || !validObject(data, ref) {
+	if r.objectDigest(data) != digest || !validObject(data, ref) {
 		return true, fmt.Errorf("existing immutable object is invalid")
 	}
 	return true, nil

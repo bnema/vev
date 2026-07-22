@@ -48,8 +48,14 @@ type Repository struct {
 // immediately before their respective syscall and are intentionally package
 // private so production callers cannot weaken repository guarantees.
 type repositoryHooks struct {
-	beforeBlobWrite          func(string) error
-	beforeManifestWrite      func(string) error
+	beforeBlobWrite     func(string) error
+	beforeManifestWrite func(string) error
+	// Object hooks instrument the publication path in package tests. They keep
+	// the steady-state cost of retained history observable without exposing a
+	// production metrics surface.
+	beforeObjectRead         func(string)
+	beforeObjectHash         func([]byte)
+	beforeObjectCopy         func([]byte)
 	beforeHeadWrite          func(string) error
 	createTemp               func(string) error
 	writeTemp                func(string) error
