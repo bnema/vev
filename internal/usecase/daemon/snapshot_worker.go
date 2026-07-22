@@ -134,6 +134,9 @@ func (d *Daemon) publishSnapshotCapture(workerCtx context.Context, workerID uint
 		}
 	}
 	d.clearSnapshotWorkerInFlight(workerID, capture)
+	if err == nil && workerCtx.Err() == nil {
+		markSnapshotCaptureObjectsPublished(capture)
+	}
 	if err != nil && workerCtx.Err() == nil && publicationContext.Err() == nil {
 		// Global, not session-scoped: by now the session may already be torn
 		// down, so a session notice would be dead-on-arrival. No lock is held

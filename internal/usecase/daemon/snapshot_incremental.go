@@ -17,44 +17,54 @@ type snapshotChunkCacheEntry struct {
 }
 
 // snapshotChunkCache is keyed by immutable HistoryChunk identity. Its owner
-// must hold the named session's snapshotMu for every operation. Entries never
-// expose cache-owned bytes: a publication gets a fresh slice, so a repository
-// cannot mutate data used by an in-flight or later checkpoint.
+// must hold the named session's snapshotMu for every operation. Encoded bytes
+// remain cache-owned; publications receive a copy only until a successful
+// repository publication has made the immutable object available by reference.
 type snapshotChunkCache struct {
-	limit int
-	used  int
-	byPtr map[*vt.HistoryChunk]snapshotChunkCacheEntry
+	limit     int
+	used      int
+	byPtr     map[*vt.HistoryChunk]snapshotChunkCacheEntry
+	persisted map[*vt.HistoryChunk]snapcodec.ObjectRef
 	// marshalChunk makes cache admission measurable without coupling the cache
 	// policy test to VT's wire encoding implementation.
 	marshalChunk func(*vt.HistoryChunk) ([]byte, error)
+	copyObject   func(ports.SnapshotObject) ports.SnapshotObject
 }
 
 func newSnapshotChunkCache(limit int) *snapshotChunkCache {
 	return &snapshotChunkCache{
 		limit:        limit,
 		byPtr:        make(map[*vt.HistoryChunk]snapshotChunkCacheEntry),
+		persisted:    make(map[*vt.HistoryChunk]snapcodec.ObjectRef),
 		marshalChunk: vt.MarshalHistoryChunk,
+		copyObject:   copySnapshotObject,
 	}
 }
 
-// objectLocked returns an independently owned object. Caller holds the owning
-// session's snapshotMu.
-func (c *snapshotChunkCache) objectLocked(chunk *vt.HistoryChunk) (ports.SnapshotObject, error) {
+// objectLocked returns a complete manifest reference and, when the repository
+// does not already retain it, an independently owned object to supply. Caller
+// holds the owning session's snapshotMu.
+func (c *snapshotChunkCache) objectLocked(chunk *vt.HistoryChunk) (snapcodec.ObjectRef, *ports.SnapshotObject, error) {
 	if chunk == nil {
-		return ports.SnapshotObject{}, fmt.Errorf("snapshot: nil history chunk")
+		return snapcodec.ObjectRef{}, nil, fmt.Errorf("snapshot: nil history chunk")
+	}
+	if ref, ok := c.persisted[chunk]; ok {
+		return ref, nil, nil
 	}
 	if entry, ok := c.byPtr[chunk]; ok {
-		return copySnapshotObject(entry.object), nil
+		object := c.copyObject(entry.object)
+		return objectRef(snapcodec.HistoryChunk, object), &object, nil
 	}
 
 	payload, err := c.marshalChunk(chunk)
 	if err != nil {
-		return ports.SnapshotObject{}, err
+		return snapcodec.ObjectRef{}, nil, err
 	}
 	object, err := snapcodec.MarshalObject(snapcodec.HistoryChunk, payload)
 	if err != nil {
-		return ports.SnapshotObject{}, err
+		return snapcodec.ObjectRef{}, nil, err
 	}
+	ref := objectRef(snapcodec.HistoryChunk, object)
 
 	// An oldest-to-newest snapshot scan can exceed the cache. LRU would admit
 	// every early miss and evict the later working set, causing the next scan to
@@ -62,12 +72,12 @@ func (c *snapshotChunkCache) objectLocked(chunk *vt.HistoryChunk) (ports.Snapsho
 	// return later misses uncached. Pruning makes space when a retained chunk is
 	// no longer reachable by a queued or in-flight capture.
 	if len(object.Data) > c.limit || c.used > c.limit-len(object.Data) {
-		return object, nil
+		return ref, &object, nil
 	}
-	stored := copySnapshotObject(object)
+	stored := c.copyObject(object)
 	c.byPtr[chunk] = snapshotChunkCacheEntry{object: stored}
 	c.used += len(stored.Data)
-	return object, nil
+	return ref, &object, nil
 }
 
 // pruneLocked releases cached encodings which no currently queued or in-flight
@@ -77,6 +87,11 @@ func (c *snapshotChunkCache) pruneLocked(referenced map[*vt.HistoryChunk]struct{
 		if _, keep := referenced[chunk]; !keep {
 			delete(c.byPtr, chunk)
 			c.used -= len(entry.object.Data)
+		}
+	}
+	for chunk := range c.persisted {
+		if _, keep := referenced[chunk]; !keep {
+			delete(c.persisted, chunk)
 		}
 	}
 }
@@ -100,6 +115,7 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 	}
 	manifest := snapcodec.Manifest{Generation: capture.generation, Name: capture.name, CreatedAt: capture.createdAt, Active: capture.active, Tabs: make([]snapcodec.ManifestTab, 0, len(capture.tabs))}
 	objects := make([]ports.SnapshotObject, 0)
+	capture.sealedRefs = make(map[*vt.HistoryChunk]snapcodec.ObjectRef)
 	for _, tab := range capture.tabs {
 		outTab := snapcodec.ManifestTab{StableID: tab.stableID, Cols: tab.cols, Rows: tab.rows, NextPaneID: tab.nextPaneID, Focus: tab.focus, Tree: tab.tree, Panes: make([]snapcodec.ManifestPane, 0, len(tab.panes))}
 		for _, pane := range tab.panes {
@@ -111,12 +127,15 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 			}
 			outPane := snapcodec.ManifestPane{ID: pane.id, StableID: pane.stableID, Cwd: pane.cwd, Process: pane.process}
 			for i := 0; i < pane.sealed.ChunkCount(); i++ {
-				object, err := snapshotChunkObject(capture, pane.sealed.Chunk(i))
+				ref, object, err := snapshotChunkObject(capture, pane.sealed.Chunk(i))
 				if err != nil {
 					return ports.SnapshotPublication{}, fmt.Errorf("snapshot history chunk: %w", err)
 				}
-				outPane.Sealed = append(outPane.Sealed, objectRef(snapcodec.HistoryChunk, object))
-				objects = append(objects, object)
+				outPane.Sealed = append(outPane.Sealed, ref)
+				capture.sealedRefs[pane.sealed.Chunk(i)] = ref
+				if object != nil {
+					objects = append(objects, *object)
+				}
 			}
 			tail, err := vt.MarshalHistory(pane.tail)
 			if pane.tail.Len() == 0 {
@@ -161,11 +180,32 @@ func prepareSnapshotChunkCache(capture *snapshotCapture) error {
 	return nil
 }
 
-func snapshotChunkObject(capture *snapshotCapture, chunk *vt.HistoryChunk) (ports.SnapshotObject, error) {
+func snapshotChunkObject(capture *snapshotCapture, chunk *vt.HistoryChunk) (snapcodec.ObjectRef, *ports.SnapshotObject, error) {
 	sess := capture.session
 	sess.snapshotMu.Lock()
 	defer sess.snapshotMu.Unlock()
 	return sess.snapshotChunkCache.objectLocked(chunk)
+}
+
+// markSnapshotCaptureObjectsPublished records that the immutable sealed
+// history referenced by capture is available in this session's repository
+// lineage. It is called only after Publish succeeds.
+func markSnapshotCaptureObjectsPublished(capture *snapshotCapture) {
+	if capture == nil || capture.session == nil {
+		return
+	}
+	sess := capture.session
+	sess.snapshotMu.Lock()
+	defer sess.snapshotMu.Unlock()
+	cache := sess.snapshotChunkCache
+	if cache == nil {
+		return
+	}
+	for chunk, ref := range capture.sealedRefs {
+		if chunk != nil {
+			cache.persisted[chunk] = ref
+		}
+	}
 }
 
 // pruneSnapshotChunkCacheLocked retains only chunks referenced by captures that

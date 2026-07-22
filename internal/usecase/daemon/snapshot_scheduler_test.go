@@ -92,6 +92,8 @@ func TestRenameKeepsSnapshotCoordinatorQuarantinedUntilNewIdentityCommits(t *tes
 
 	deleteEntered := make(chan struct{})
 	allowDelete := make(chan struct{})
+	deleteCompleted := make(chan struct{})
+	state.deleteDone = deleteCompleted
 	published := make(chan ports.SnapshotPublication, 2)
 	repository.EXPECT().Tombstone(mock.Anything, "work").Return(nil).Once()
 	repository.EXPECT().Delete(mock.Anything, "work").RunAndReturn(func(context.Context, string) error {
@@ -103,7 +105,7 @@ func TestRenameKeepsSnapshotCoordinatorQuarantinedUntilNewIdentityCommits(t *tes
 	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
 		published <- publication
 		return nil
-	}).Maybe()
+	}).Once()
 
 	pty, release := newBlockingPTY(t)
 	defer release()
@@ -124,7 +126,12 @@ func TestRenameKeepsSnapshotCoordinatorQuarantinedUntilNewIdentityCommits(t *tes
 	// during this window must not capture or publish the old name.
 	d.mu.Lock()
 	close(allowDelete)
-	require.Eventually(t, func() bool { return !state.has("work") }, testWaitTimeout, time.Millisecond)
+	select {
+	case <-deleteCompleted:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("old snapshot identity was not deleted")
+	}
+	require.False(t, state.has("work"))
 	sess.snapshotMu.Lock()
 	quarantined := sess.snapshotQuarantined
 	sess.snapshotMu.Unlock()
@@ -137,12 +144,7 @@ func TestRenameKeepsSnapshotCoordinatorQuarantinedUntilNewIdentityCommits(t *tes
 	case d.snapshotWake <- struct{}{}:
 	default:
 	}
-	require.True(t, d.scheduleSnapshot(sess))
-	select {
-	case publication := <-published:
-		t.Fatalf("published %q after old Delete before identity commit", publication.Name)
-	case <-time.After(50 * time.Millisecond):
-	}
+	require.True(t, d.scheduleSnapshot(sess), "old work may be coalesced while the coordinator is quarantined")
 	d.mu.Unlock()
 
 	require.NoError(t, <-renameDone)
@@ -375,12 +377,11 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 	// repository call is always released before cleanup asks the worker to join.
 	t.Cleanup(release)
 	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
-		if publication.Name == "blocker" {
-			close(blockerStarted)
-			<-releaseBlocker
-		}
+		require.Equal(t, "blocker", publication.Name)
+		close(blockerStarted)
+		<-releaseBlocker
 		return nil
-	}).Maybe()
+	}).Once()
 	notices.EXPECT().Append(mock.MatchedBy(func(notification domain.Notification) bool {
 		return notification.Code == domain.NoticeSnapshotWrite && notification.Severity == domain.NoticeError
 	})).Return(nil).Once()
@@ -424,11 +425,20 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 	// The retained capture is not published after quarantine, but releasing the
 	// unrelated blocked call lets the worker discard it and lets cleanup join.
 	release()
-	require.Eventually(t, func() bool {
+	for {
 		sess.snapshotMu.Lock()
-		defer sess.snapshotMu.Unlock()
-		return !sess.snapshotPending && sess.snapshotQueuedCapture == nil
-	}, testWaitTimeout, time.Millisecond)
+		complete := !sess.snapshotPending && sess.snapshotQueuedCapture == nil
+		changed := sess.snapshotChangeLocked()
+		sess.snapshotMu.Unlock()
+		if complete {
+			break
+		}
+		select {
+		case <-changed:
+		case <-time.After(testWaitTimeout):
+			t.Fatal("quarantined capture was not discarded")
+		}
+	}
 }
 
 func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
@@ -491,12 +501,14 @@ func TestServeShutdownDeadlineDoesNotWaitTwiceForUncooperativeSnapshotRepository
 		return n.Code == domain.NoticeSnapshotWrite && n.Severity == domain.NoticeError
 	})).Return(nil).Once()
 
+	firstPublicationCompleted := make(chan struct{})
 	terminalPublicationStarted := make(chan struct{})
 	releaseTerminalPublication := make(chan struct{})
 	var lastValid atomic.Uint64
 	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
 		if publication.Generation == 1 {
 			lastValid.Store(publication.Generation)
+			close(firstPublicationCompleted)
 			return nil
 		}
 		close(terminalPublicationStarted)
@@ -514,7 +526,11 @@ func TestServeShutdownDeadlineDoesNotWaitTwiceForUncooperativeSnapshotRepository
 	awaitFrame(t, sends, ports.MsgWelcome)
 	markSnapshotDirty(firstSession(d))
 	d.snapshotWake <- struct{}{}
-	require.Eventually(t, func() bool { return lastValid.Load() == 1 }, testWaitTimeout, time.Millisecond)
+	select {
+	case <-firstPublicationCompleted:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("initial checkpoint did not complete")
+	}
 
 	cancel()
 	select {
@@ -626,7 +642,7 @@ func TestRoutineSnapshotEligibilityStartsAtCompletionAndForcedDoesNotMoveIt(t *t
 
 	markSnapshotDirty(sess)
 	require.True(t, d.scheduleSnapshot(sess))
-	require.Eventually(t, func() bool { return publishes.Load() == 1 }, time.Second, time.Millisecond)
+	require.Equal(t, int32(1), publishes.Load(), "rate-limited routine work must not publish")
 
 	require.True(t, d.scheduleFinalSnapshot(sess))
 	awaitSnapshotClean(t, sess)

@@ -59,7 +59,7 @@ func TestSnapshotChunkCacheResistsWarmedOverCapacityHistoryScans(t *testing.T) {
 
 	for pass := range 3 {
 		for i := range view.ChunkCount() {
-			_, err := cache.objectLocked(view.Chunk(i))
+			_, _, err := cache.objectLocked(view.Chunk(i))
 			require.NoError(t, err)
 		}
 		require.LessOrEqual(t, cache.used, cache.limit)
@@ -82,7 +82,7 @@ func TestSnapshotChunkCacheResistsWarmedOverCapacityHistoryScans(t *testing.T) {
 		isolatedEncodes++
 		return vt.MarshalHistoryChunk(chunk)
 	}
-	_, err = isolated.objectLocked(view.Chunk(0))
+	_, _, err = isolated.objectLocked(view.Chunk(0))
 	require.NoError(t, err)
 	require.Equal(t, 1, isolatedEncodes, "a session cache must not share encoded history with another session")
 }

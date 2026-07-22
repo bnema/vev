@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,7 +24,7 @@ func TestCountingSnapshotRepositoryPublishCountsAndRetainsManifest(t *testing.T)
 	object := []byte{0x01, 0x02}
 
 	require.NoError(t, repository.Publish(context.Background(), ports.SnapshotPublication{Name: "session", Manifest: payload, Objects: []ports.SnapshotObject{{Data: object}}}))
-	require.Equal(t, countingSnapshotMetrics{writes: 1, manifestBytes: uint64(len(payload)), objectBytes: uint64(len(object)), headBytes: snapshotHeadBytes}, repository.metrics())
+	require.Equal(t, countingSnapshotMetrics{writes: 1, manifestBytes: uint64(len(payload)), objectBytes: uint64(len(object)), suppliedObjectBytes: uint64(len(object)), headBytes: snapshotHeadBytes}, repository.metrics())
 	require.Equal(t, payload, repository.lastPayload())
 
 	payload[0] = 0x01
@@ -52,10 +53,59 @@ func TestIncrementalSnapshotMetricsWriteNoUnchangedHistoryBlobsAndBoundCache(t *
 
 	metrics := fixture.snapshots.metrics()
 	require.Zero(t, metrics.historyBlobBytes)
+	require.Zero(t, metrics.suppliedHistoryBytes)
 	require.Zero(t, metrics.objectBytes)
 	require.Positive(t, metrics.manifestBytes)
 	require.Equal(t, uint64(snapshotHeadBytes), metrics.headBytes)
 	require.LessOrEqual(t, benchmarkSnapshotCacheBytes(fixture.sess), snapshotChunkCacheLimit)
+}
+
+func TestDaemonSnapshotDoesNotResupplyUnchangedTenThousandChunkHistory(t *testing.T) {
+	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: 1, historyRows: 10_000})
+
+	markSnapshotDirty(fixture.sess)
+	require.True(t, fixture.d.scheduleSnapshot(fixture.sess))
+	awaitSnapshotClean(t, fixture.sess)
+
+	var copies atomic.Uint64
+	fixture.sess.snapshotMu.Lock()
+	fixture.sess.snapshotChunkCache.copyObject = func(object ports.SnapshotObject) ports.SnapshotObject {
+		copies.Add(1)
+		return copySnapshotObject(object)
+	}
+	fixture.sess.snapshotMu.Unlock()
+	fixture.snapshots.reset()
+	fixture.activePane.mu.Lock()
+	fixture.activePane.screen.Write([]byte("\\x1b[1;1Hchanged"))
+	fixture.activePane.mu.Unlock()
+	markSnapshotDirty(fixture.sess)
+	require.True(t, fixture.d.scheduleFinalSnapshot(fixture.sess))
+	awaitSnapshotClean(t, fixture.sess)
+
+	metrics := fixture.snapshots.metrics()
+	require.Equal(t, uint64(1), metrics.writes)
+	require.Zero(t, metrics.suppliedHistoryBytes, "retained sealed history must not be resupplied")
+	require.Zero(t, copies.Load(), "retained sealed history must not be deep-copied")
+	require.Positive(t, metrics.suppliedObjectBytes, "changed tail and visible state must still be supplied")
+	requireCompleteSnapshotManifest(t, fixture.snapshots, fixture.sess.name)
+}
+
+func requireCompleteSnapshotManifest(t *testing.T, repository *countingSnapshotRepository, name string) {
+	t.Helper()
+	repository.mu.Lock()
+	manifestBytes := append([]byte(nil), repository.last...)
+	objects := repository.objects[name]
+	repository.mu.Unlock()
+	manifest, err := snapcodec.UnmarshalManifest(manifestBytes)
+	require.NoError(t, err)
+	for _, tab := range manifest.Tabs {
+		for _, pane := range tab.Panes {
+			for _, ref := range append(append([]snapcodec.ObjectRef(nil), pane.Sealed...), pane.Tail, pane.Visible) {
+				_, ok := objects[ref.Digest]
+				require.True(t, ok, "manifest reference %x is not retained", ref.Digest)
+			}
+		}
+	}
 }
 
 func TestIncrementalSnapshotMetricScenarios(t *testing.T) {
@@ -506,11 +556,13 @@ func validateSnapshotBenchmarkFixture(b *testing.B, fixture *performanceFixture,
 
 func addCountingSnapshotMetrics(a, b countingSnapshotMetrics) countingSnapshotMetrics {
 	return countingSnapshotMetrics{
-		writes:           a.writes + b.writes,
-		objectBytes:      a.objectBytes + b.objectBytes,
-		historyBlobBytes: a.historyBlobBytes + b.historyBlobBytes,
-		manifestBytes:    a.manifestBytes + b.manifestBytes,
-		headBytes:        a.headBytes + b.headBytes,
+		writes:               a.writes + b.writes,
+		objectBytes:          a.objectBytes + b.objectBytes,
+		historyBlobBytes:     a.historyBlobBytes + b.historyBlobBytes,
+		suppliedObjectBytes:  a.suppliedObjectBytes + b.suppliedObjectBytes,
+		suppliedHistoryBytes: a.suppliedHistoryBytes + b.suppliedHistoryBytes,
+		manifestBytes:        a.manifestBytes + b.manifestBytes,
+		headBytes:            a.headBytes + b.headBytes,
 	}
 }
 
@@ -527,6 +579,7 @@ func publishBenchmarkSnapshot(b testing.TB, fixture *performanceFixture, generat
 	if err := fixture.snapshots.Publish(context.Background(), publication); err != nil {
 		b.Fatal(err)
 	}
+	markSnapshotCaptureObjectsPublished(capture)
 }
 
 func mutateBenchmarkVisible(fixture *performanceFixture, operation int) {
@@ -1227,7 +1280,7 @@ func (t *countingOutputTransport) lastPayload() []byte {
 const snapshotHeadBytes = 4 + 8 + 32
 
 type countingSnapshotMetrics struct {
-	writes, objectBytes, historyBlobBytes, manifestBytes, headBytes uint64
+	writes, objectBytes, historyBlobBytes, suppliedObjectBytes, suppliedHistoryBytes, manifestBytes, headBytes uint64
 }
 type countingSnapshotRepository struct {
 	mu sync.Mutex
@@ -1255,12 +1308,16 @@ func (s *countingSnapshotRepository) Publish(_ context.Context, publication port
 	s.manifestBytes += uint64(len(publication.Manifest))
 	s.headBytes += snapshotHeadBytes
 	for _, object := range publication.Objects {
+		s.suppliedObjectBytes += uint64(len(object.Data))
+		kind, _, err := snapcodec.PreflightObject(object.Data)
+		if err == nil && kind == snapcodec.HistoryChunk {
+			s.suppliedHistoryBytes += uint64(len(object.Data))
+		}
 		if _, exists := objects[object.Digest]; exists {
 			continue
 		}
 		objects[object.Digest] = struct{}{}
 		s.objectBytes += uint64(len(object.Data))
-		kind, _, err := snapcodec.PreflightObject(object.Data)
 		if err == nil && kind == snapcodec.HistoryChunk {
 			s.historyBlobBytes += uint64(len(object.Data))
 		}

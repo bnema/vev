@@ -40,7 +40,8 @@ type snapshotCapture struct {
 	active               uint16
 	tabs                 []snapshotCaptureTab
 	publicationContext   context.Context
-	coordinatorDiscarded bool // guarded by session.snapshotMu
+	sealedRefs           map[*vt.HistoryChunk]snapcodec.ObjectRef // set by the single encoder worker
+	coordinatorDiscarded bool                                     // guarded by session.snapshotMu
 	finishOnce           sync.Once
 }
 
