@@ -174,6 +174,27 @@ type closeTrackPacketConn struct {
 
 func (c closeTrackPacketConn) Close() error { *c.closed = true; return c.PacketConn.Close() }
 
+func TestDeliverUDPReadyErasesParsedKeyAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	key := make([]byte, pdgram.KeySize)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	ready, err := readUDPReady(strings.NewReader("VEV-UDP 1234 " + base64.StdEncoding.EncodeToString(key) + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deliverUDPReady(ctx, make(chan udpReadyResult), udpReadyResult{ready: ready})
+
+	for i, b := range ready.key {
+		if b != 0 {
+			t.Fatalf("key[%d] = %d, want erased", i, b)
+		}
+	}
+}
+
 func TestReadUDPReady(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(make([]byte, pdgram.KeySize))
 	tests := []struct {

@@ -198,15 +198,24 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 	return t, nil
 }
 
-func readUDPReadyContext(ctx context.Context, r io.Reader) (udpReady, error) {
-	type result struct {
-		ready udpReady
-		err   error
+type udpReadyResult struct {
+	ready udpReady
+	err   error
+}
+
+func deliverUDPReady(ctx context.Context, ch chan<- udpReadyResult, res udpReadyResult) {
+	select {
+	case ch <- res:
+	case <-ctx.Done():
+		pdgram.Erase(res.ready.key)
 	}
-	ch := make(chan result, 1)
+}
+
+func readUDPReadyContext(ctx context.Context, r io.Reader) (udpReady, error) {
+	ch := make(chan udpReadyResult)
 	go func() {
 		ready, err := readUDPReady(r)
-		ch <- result{ready: ready, err: err}
+		deliverUDPReady(ctx, ch, udpReadyResult{ready: ready, err: err})
 	}()
 	select {
 	case res := <-ch:
