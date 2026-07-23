@@ -1,10 +1,10 @@
 package dgram
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -14,14 +14,17 @@ import (
 )
 
 type ProxyRecord struct {
-	Session string    `json:"session"`
-	PID     int       `json:"pid"`
-	Port    int       `json:"port"`
-	Key     string    `json:"key"`
-	Created time.Time `json:"created"`
+	Session        string    `json:"session"`
+	PID            int       `json:"pid"`
+	Port           int       `json:"port"`
+	KeyFingerprint string    `json:"key_fingerprint"`
+	Created        time.Time `json:"created"`
 }
 
-func (r ProxyRecord) ReadyLine() string { return fmt.Sprintf("VEV-UDP %d %s\n", r.Port, r.Key) }
+func KeyFingerprint(key []byte) string {
+	sum := sha256.Sum256(key)
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
 
 type ProxyRegistry struct{ dir string }
 
@@ -88,7 +91,7 @@ func (r *ProxyRegistry) RemoveOwned(rec ProxyRecord) error {
 		if err != nil {
 			return err
 		}
-		if cur.PID != rec.PID || cur.Port != rec.Port || cur.Key != rec.Key {
+		if cur.PID != rec.PID || cur.Port != rec.Port || cur.KeyFingerprint != rec.KeyFingerprint {
 			return nil
 		}
 		return r.removeLocked(rec.Session)

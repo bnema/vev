@@ -954,7 +954,7 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr e
 	}
 	keyText := base64.StdEncoding.EncodeToString(key)
 	registry := dgram.NewProxyRegistry(filepath.Join(ipc.SocketDir(), "udp-proxies"))
-	record := dgram.ProxyRecord{Session: session, PID: os.Getpid(), Port: addr.Port, Key: keyText}
+	record := dgram.ProxyRecord{Session: session, PID: os.Getpid(), Port: addr.Port, KeyFingerprint: dgram.KeyFingerprint(key)}
 	if err := registry.Publish(record); err != nil {
 		return err
 	}
