@@ -48,6 +48,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
+	pdgram "github.com/bnema/vev/pkg/dgram"
 	"github.com/bnema/vev/pkg/kv"
 )
 
@@ -929,10 +930,6 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr e
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return err
-	}
 	daemonTr, err := ensureDaemon(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
 		return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(observer))
 	}, realSpawn, defaultBackoff)
@@ -942,26 +939,54 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr e
 	defer func() { _ = daemonTr.Close() }()
 	udpOptions := udpProxyClientTransportOptions
 	udpOptions.Observe = dgram.DiagnosticLogObserver(log)
-	dg, err := dgram.NewTransportWithOptions(conn, nil, key, 2, 1, udpOptions, dgram.WithRuntimeObserver(observer))
-	if err != nil {
-		return err
-	}
-	defer func() { _ = dg.Close() }()
-
 	addr, ok := conn.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		return errors.New("vev: udp proxy did not get a UDP address")
 	}
-	keyText := base64.StdEncoding.EncodeToString(key)
 	registry := dgram.NewProxyRegistry(filepath.Join(ipc.SocketDir(), "udp-proxies"))
-	record := dgram.ProxyRecord{Session: session, PID: os.Getpid(), Port: addr.Port, KeyFingerprint: dgram.KeyFingerprint(key)}
-	if err := registry.Publish(record); err != nil {
-		return err
+
+	var (
+		dg        *dgram.Transport
+		record    dgram.ProxyRecord
+		published bool
+		setupErr  error
+	)
+	pdgram.SecretDo(func() {
+		key := make([]byte, pdgram.KeySize)
+		defer pdgram.Erase(key)
+		if _, setupErr = rand.Read(key); setupErr != nil {
+			return
+		}
+		dg, setupErr = dgram.NewTransportWithOptions(conn, nil, key, 2, 1, udpOptions, dgram.WithRuntimeObserver(observer))
+		if setupErr != nil {
+			return
+		}
+		record = dgram.ProxyRecord{Session: session, PID: os.Getpid(), Port: addr.Port, KeyFingerprint: dgram.KeyFingerprint(key)}
+		if setupErr = registry.Publish(record); setupErr != nil {
+			return
+		}
+		published = true
+
+		readiness := append([]byte("VEV-UDP "), strconv.Itoa(addr.Port)...)
+		readiness = append(readiness, ' ')
+		readiness = base64.StdEncoding.AppendEncode(readiness, key)
+		readiness = append(readiness, '\n')
+		defer pdgram.Erase(readiness)
+		_, setupErr = ready.Write(readiness)
+		pdgram.Erase(readiness)
+		pdgram.Erase(key)
+	})
+	if setupErr != nil {
+		if dg != nil {
+			_ = dg.Close()
+		}
+		if published {
+			_ = registry.RemoveOwned(record)
+		}
+		return setupErr
 	}
+	defer func() { _ = dg.Close() }()
 	defer func() { _ = registry.RemoveOwned(record) }()
-	if _, err := fmt.Fprintf(ready, "VEV-UDP %d %s\n", addr.Port, keyText); err != nil {
-		return err
-	}
 
 	return runUDPProxyRuntime(ctx, session, dg, daemonTr, os.Environ(), log)
 }
