@@ -60,7 +60,7 @@ func TestRemoteDialerUDPBootstrapFailures(t *testing.T) {
 		wantStdoutClosed bool
 	}{
 		{name: "start failure", start: errors.New("ssh missing"), want: "remote UDP transport unavailable: start bootstrap: ssh missing", wantStdoutClosed: true},
-		{name: "malformed readiness", stdout: "hello\n", want: "malformed readiness line", killed: true, waited: true, wantStdoutClosed: true},
+		{name: "malformed readiness", stdout: "hello\n", want: "malformed UDP readiness line", killed: true, waited: true, wantStdoutClosed: true},
 		{name: "bootstrap wait failure", stdout: "VEV-UDP 4444 " + key + "\n", want: "wait bootstrap: exit status 255", waited: true, wantStdoutClosed: true},
 		{name: "packet listen failure", stdout: "VEV-UDP 4444 " + key + "\n", listen: errors.New("bind denied"), want: "listen UDP: bind denied", waited: true, wantStdoutClosed: true},
 	}
@@ -174,24 +174,52 @@ type closeTrackPacketConn struct {
 
 func (c closeTrackPacketConn) Close() error { *c.closed = true; return c.PacketConn.Close() }
 
+func TestDeliverUDPReadyErasesParsedKeyAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	key := make([]byte, pdgram.KeySize)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	ready, err := readUDPReady(strings.NewReader("VEV-UDP 1234 " + base64.StdEncoding.EncodeToString(key) + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deliverUDPReady(ctx, make(chan udpReadyResult), udpReadyResult{ready: ready})
+
+	for i, b := range ready.key {
+		if b != 0 {
+			t.Fatalf("key[%d] = %d, want erased", i, b)
+		}
+	}
+}
+
 func TestReadUDPReady(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(make([]byte, pdgram.KeySize))
 	tests := []struct {
 		name, line string
 		wantPort   int
 		wantErr    string
+		exactErr   bool
 	}{
 		{name: "valid", line: "VEV-UDP 1234 " + key + "\n", wantPort: 1234},
-		{name: "bad prefix", line: "NOPE 1234 " + key + "\n", wantErr: "malformed readiness"},
-		{name: "bad port", line: "VEV-UDP 99999 " + key + "\n", wantErr: "invalid UDP port"},
+		{name: "bad prefix", line: "NOPE 1234 " + key + "\n", wantErr: "malformed UDP readiness line", exactErr: true},
+		{name: "bad port", line: "VEV-UDP 99999 " + key + "\n", wantErr: `invalid UDP port "99999"`, exactErr: true},
 		{name: "bad key", line: "VEV-UDP 1234 !!!\n", wantErr: "invalid bootstrap key"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := readUDPReady(strings.NewReader(tt.line))
 			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("err=%v, want %q", err, tt.wantErr)
+				if err == nil {
+					t.Fatalf("err=nil, want %q", tt.wantErr)
+				}
+				if tt.exactErr && err.Error() != tt.wantErr {
+					t.Fatalf("err=%q, want exactly %q", err, tt.wantErr)
+				}
+				if !tt.exactErr && !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err=%v, want containing %q", err, tt.wantErr)
 				}
 				return
 			}
