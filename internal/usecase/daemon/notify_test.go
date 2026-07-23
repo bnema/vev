@@ -528,19 +528,30 @@ func TestNotifyRoutesToSessionClientOnly(t *testing.T) {
 func TestNotifySessionScopedSerializesDetachThroughToastPublication(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 
-	selected := make(chan struct{})
+	selected := make(chan bool, 1)
 	releasePublication := make(chan struct{})
 	d.notices.beforeSessionDelivery = func() {
-		close(selected)
+		unlocked := d.notices.routingMu.TryLock()
+		if unlocked {
+			d.notices.routingMu.Unlock()
+		}
+		selected <- !unlocked
 		<-releasePublication
 	}
+	t.Cleanup(func() {
+		select {
+		case <-releasePublication:
+		default:
+			close(releasePublication)
+		}
+	})
 
 	notifyDone := make(chan struct{})
 	go func() {
 		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "hello", nil)
 		close(notifyDone)
 	}()
-	<-selected
+	require.True(t, <-selected, "routingMu must remain held from attachment selection through toast publication")
 
 	detachStarted := make(chan struct{})
 	detachDone := make(chan bool, 1)
