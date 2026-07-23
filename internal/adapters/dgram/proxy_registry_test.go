@@ -2,6 +2,8 @@ package dgram
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -14,15 +16,21 @@ func privateDir(t *testing.T) string {
 }
 
 func TestKeyFingerprint(t *testing.T) {
-	const want = "K7gNU3sdo+OL0wNhqoVWhr3g6s1xYv72ol/pe/Unols="
-	if got := KeyFingerprint([]byte("secret")); got != want {
+	key := bytes.Repeat([]byte{0xA5}, 32)
+	sum := sha256.Sum256(key)
+	want := base64.StdEncoding.EncodeToString(sum[:])
+	if got := KeyFingerprint(key); got != want {
 		t.Fatalf("KeyFingerprint()=%q, want %q", got, want)
+	}
+	other := bytes.Repeat([]byte{0xA6}, 32)
+	if KeyFingerprint(key) == KeyFingerprint(other) {
+		t.Fatal("distinct keys produced identical fingerprints")
 	}
 }
 
 func TestProxyRegistryFileHoldsNoKeyMaterial(t *testing.T) {
 	r := NewProxyRegistry(privateDir(t))
-	key := []byte("raw-secret-key-material")
+	key := bytes.Repeat([]byte{0xA5}, 32)
 	fingerprint := KeyFingerprint(key)
 	rec := ProxyRecord{Session: "work", PID: os.Getpid(), Port: 61000, KeyFingerprint: fingerprint}
 	if err := r.Publish(rec); err != nil {
@@ -33,7 +41,7 @@ func TestProxyRegistryFileHoldsNoKeyMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(data, key) {
+	if bytes.Contains(data, key) || bytes.Contains(data, []byte(base64.StdEncoding.EncodeToString(key))) {
 		t.Fatalf("registry file contains raw key material: %s", data)
 	}
 	var fields map[string]json.RawMessage

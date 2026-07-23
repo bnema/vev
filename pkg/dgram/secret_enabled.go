@@ -1,13 +1,12 @@
-//go:build goexperiment.runtimesecret && linux && (amd64 || arm64)
+//go:build goexperiment.runtimesecret
 
 package dgram
 
 import "runtime/secret"
 
-// SecretDo runs f synchronously. On supported platforms with Go 1.26's
-// experimental runtime secret support enabled, it protects temporary storage
-// used by f's full call tree. Protection does not extend to global variables or
-// goroutines started by f.
-func SecretDo(f func()) {
-	secret.Do(f)
-}
+// SecretDo invokes f through runtime/secret.Do. On supported Go 1.26
+// platforms this protects temporary stack/register storage for f's call tree
+// and marks its allocations for clearing after they become unreachable and
+// the GC notices. On unsupported platforms runtime/secret.Do invokes f
+// directly. It does not protect globals or goroutines started by f.
+func SecretDo(f func()) { secret.Do(f) }

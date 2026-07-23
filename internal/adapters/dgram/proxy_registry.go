@@ -14,13 +14,16 @@ import (
 )
 
 type ProxyRecord struct {
-	Session        string    `json:"session"`
-	PID            int       `json:"pid"`
-	Port           int       `json:"port"`
+	Session string `json:"session"`
+	PID     int    `json:"pid"`
+	Port    int    `json:"port"`
+	// KeyFingerprint is a non-secret ownership tag (SHA-256 of the AEAD key).
+	// The raw key must never be persisted by vev.
 	KeyFingerprint string    `json:"key_fingerprint"`
 	Created        time.Time `json:"created"`
 }
 
+// KeyFingerprint derives the non-secret registry ownership tag.
 func KeyFingerprint(key []byte) string {
 	sum := sha256.Sum256(key)
 	return base64.StdEncoding.EncodeToString(sum[:])

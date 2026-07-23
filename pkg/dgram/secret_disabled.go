@@ -1,11 +1,7 @@
-//go:build !goexperiment.runtimesecret || !linux || (!amd64 && !arm64)
+//go:build !goexperiment.runtimesecret
 
 package dgram
 
-// SecretDo runs f synchronously. Without Go 1.26's experimental runtime secret
-// support on linux/amd64 or linux/arm64, it invokes f directly. Runtime secret
-// protection, when available, does not extend to global variables or goroutines
-// started by f.
-func SecretDo(f func()) {
-	f()
-}
+// SecretDo invokes f directly when runtime/secret is not in this build.
+// Callers still explicitly clear every reachable key buffer with Erase.
+func SecretDo(f func()) { f() }
