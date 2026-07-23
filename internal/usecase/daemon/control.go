@@ -66,7 +66,7 @@ func (d *Daemon) runControl(cmd command.Command, exec controlExec, request ports
 		return ports.CommandResult{OK: true, Output: result.Output}
 	}
 	switch {
-	case errors.Is(err, command.ErrInvalidArguments), errors.Is(err, errSessionNameRequired):
+	case errors.Is(err, command.ErrInvalidArguments), errors.Is(err, errSessionNameRequired), errors.Is(err, domain.ErrInvalidSessionName):
 		return commandFailure(ports.ErrInvalidCommandArgs, "usage: "+cmd.Usage)
 	case errors.Is(err, errSessionNameInUse):
 		return commandFailure(ports.ErrNameTaken, err.Error())
@@ -135,7 +135,7 @@ func (s *session) containsStableIDs(tabID, paneID string) bool {
 	return false
 }
 
-func resolveControlTarget(sess *session, kind command.TargetKind, tabID, paneID string) (*tab, *pane, uint16, string) {
+func resolveControlTarget(sess *session, kind command.TargetKind, _, _ string) (*tab, *pane, uint16, string) {
 	sess.mu.Lock()
 	tabs := append([]*tab(nil), sess.tabs...)
 	active := sess.active
@@ -144,31 +144,11 @@ func resolveControlTarget(sess *session, kind command.TargetKind, tabID, paneID 
 		return nil, nil, ports.ErrNoSuchTarget, "target session has no active tab"
 	}
 	tb := tabs[active]
-	if tabID != "" {
-		tb = nil
-		for _, candidate := range tabs {
-			candidate.mu.Lock()
-			match := candidate.stableID == tabID
-			candidate.mu.Unlock()
-			if match {
-				tb = candidate
-				break
-			}
-		}
-		if tb == nil {
-			return nil, nil, ports.ErrNoSuchTarget, "no such target tab"
-		}
-	}
 	if kind != command.TargetPane {
 		return tb, nil, 0, ""
 	}
 	tb.mu.Lock()
-	var target *pane
-	if paneID != "" {
-		target = paneByStableIDLocked(tb, paneID)
-	} else {
-		target = tb.focusedPane()
-	}
+	target := tb.focusedPane()
 	tb.mu.Unlock()
 	if target == nil {
 		return nil, nil, ports.ErrNoSuchTarget, "no such target pane"
@@ -200,27 +180,6 @@ func (e controlExec) client() *attachedClient {
 	return e.sess.client
 }
 
-// selectTarget translates an explicit stable target to the canonical active
-// tab/focus state expected by the existing daemon action seam.
-func (e controlExec) selectTarget() {
-	if e.tab == nil {
-		return
-	}
-	e.sess.mu.Lock()
-	for i, tb := range e.sess.tabs {
-		if tb == e.tab {
-			e.sess.active = i
-			break
-		}
-	}
-	e.sess.mu.Unlock()
-	if e.pane != nil {
-		e.tab.mu.Lock()
-		e.tab.tree.Focus = e.pane.id
-		e.tab.mu.Unlock()
-	}
-}
-
 func (e controlExec) CreateTab() error { return e.d.createTab(e.sess, e.sess.fullViewportSize()) }
 func (e controlExec) CreateSessionNamed(name string) error {
 	if err := domain.ValidateSessionName(name); err != nil {
@@ -242,49 +201,38 @@ func (e controlExec) CreateSessionNamed(name string) error {
 	return err
 }
 func (e controlExec) CloseTab() error {
-	e.selectTarget()
 	e.d.closeTab(e.sess, e.tab, true)
 	return nil
 }
 func (e controlExec) ClosePane() error {
-	e.selectTarget()
 	return e.d.closeFocusedPane(e.sess, e.client())
 }
 func (e controlExec) SplitRight() error {
-	e.selectTarget()
 	return e.d.splitPane(e.sess, e.client(), layout.Right)
 }
 func (e controlExec) SplitLeft() error {
-	e.selectTarget()
 	return e.d.splitPane(e.sess, e.client(), layout.Left)
 }
 func (e controlExec) SplitUp() error {
-	e.selectTarget()
 	return e.d.splitPane(e.sess, e.client(), layout.Up)
 }
 func (e controlExec) SplitDown() error {
-	e.selectTarget()
 	return e.d.splitPane(e.sess, e.client(), layout.Down)
 }
-func (e controlExec) StackPane() error { e.selectTarget(); return e.d.stackPane(e.sess, e.client()) }
+func (e controlExec) StackPane() error { return e.d.stackPane(e.sess, e.client()) }
 func (e controlExec) ToggleStack() error {
-	e.selectTarget()
 	return e.d.toggleStack(e.sess, e.client())
 }
 func (e controlExec) FocusPaneLeft() error {
-	e.selectTarget()
 	return e.d.focusDir(e.sess, e.client(), layout.Left)
 }
 func (e controlExec) FocusPaneRight() error {
-	e.selectTarget()
 	return e.d.focusDir(e.sess, e.client(), layout.Right)
 }
 func (e controlExec) FocusPaneUp() error {
-	e.selectTarget()
 	return e.d.focusDir(e.sess, e.client(), layout.Up)
 }
 func (e controlExec) FocusPaneDown() error {
-	e.selectTarget()
 	return e.d.focusDir(e.sess, e.client(), layout.Down)
 }
 func (e controlExec) NextTab() error { return e.switchRelative(1) }
@@ -297,7 +245,6 @@ func (e controlExec) switchRelative(delta int) error {
 }
 func (e controlExec) RenameSessionTo(name string) error { return e.d.renameSession(e.sess, name) }
 func (e controlExec) RenameTabTo(name string) error {
-	e.selectTarget()
 	return e.d.renameTab(e.sess, e.tab, name)
 }
 func (e controlExec) Toast(severity, message string) error {

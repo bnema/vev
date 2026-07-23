@@ -90,9 +90,10 @@ func TestHandleCommandResolvesStaleSessionNameByStableIDs(t *testing.T) {
 	require.Equal(t, uint64(1), sess.mruAt.Load())
 }
 
-func TestHandleCommandTargetsTabByStableIDs(t *testing.T) {
+func TestHandleCommandStableIDsResolveSessionWithoutSelectingTab(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "t_first", "p_first")
+	first := sess.tabs[0]
 	second := newTabWithStableID("t_second", "p_second", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	second.ctx, second.cancel = context.WithCancel(d.serveCtx)
 	sess.mu.Lock()
@@ -106,12 +107,66 @@ func TestHandleCommandTargetsTabByStableIDs(t *testing.T) {
 	})
 
 	require.True(t, result.OK, result.Text)
+	first.mu.Lock()
+	require.Equal(t, "targeted", first.name)
+	first.mu.Unlock()
 	second.mu.Lock()
-	require.Equal(t, "targeted", second.name)
+	require.Empty(t, second.name)
 	second.mu.Unlock()
 	sess.mu.Lock()
-	require.Equal(t, 1, sess.active)
+	require.Zero(t, sess.active)
 	sess.mu.Unlock()
+}
+
+func TestHandleCommandStableIDsDoNotRedirectSplitFromCurrentFocus(t *testing.T) {
+	factory := &controlPTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+	sess := addControlSession(d, "work", "t_active", "p_active")
+	active := sess.tabs[0]
+	originFocus := active.tree.Focus
+	origin := active.focusedPane()
+	second := newTabWithStableID("t_origin", "p_origin", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	second.ctx, second.cancel = context.WithCancel(d.serveCtx)
+	sess.mu.Lock()
+	sess.tabs = append(sess.tabs, second)
+	sess.active = 0
+	sess.mu.Unlock()
+
+	result := sendCommand(t, d, ports.CommandRequest{
+		Slug: "split-right", TargetSession: "work",
+		TargetTab: "t_origin", TargetPane: "p_origin",
+	})
+
+	require.True(t, result.OK, result.Text)
+	sess.mu.Lock()
+	activeIndex := sess.active
+	sess.mu.Unlock()
+	require.Zero(t, activeIndex)
+	active.mu.Lock()
+	activePaneCount := len(active.panes)
+	activeFocus := active.tree.Focus
+	originRetained := active.panes[origin.id] == origin
+	active.mu.Unlock()
+	require.Equal(t, 2, activePaneCount, "split must mutate the daemon-focused tab")
+	require.NotEqual(t, originFocus, activeFocus, "split must focus the new pane beside the daemon-focused pane")
+	require.True(t, originRetained)
+	second.mu.Lock()
+	secondPaneCount := len(second.panes)
+	second.mu.Unlock()
+	require.Equal(t, 1, secondPaneCount, "stable IDs are only a session locator")
+}
+
+func TestHandleCommandRenameSessionRejectsInvalidNameAsCommandArgs(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	addControlSession(d, "work", "t_work", "p_work")
+
+	result := sendCommand(t, d, ports.CommandRequest{
+		Slug: "rename-session", Args: []string{"invalid name"}, TargetSession: "work",
+	})
+
+	require.False(t, result.OK)
+	require.Equal(t, ports.ErrInvalidCommandArgs, result.Code)
 }
 
 func TestHandleCommandHeadlessMutations(t *testing.T) {
