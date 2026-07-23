@@ -158,6 +158,7 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 		cleanup = false
 		return nil, udpUnavailable("read bootstrap readiness", err, &stderr)
 	}
+	defer pdgram.Erase(ready.key)
 	if err := waitBootstrapContext(bootstrapCtx, proc); err != nil {
 		waited = true
 		cleanup = false
@@ -182,6 +183,7 @@ func (d RemoteDialer) Dial(ctx context.Context) (ports.Transport, error) {
 			return listenUDPPacket(ctx)
 		},
 	}, WithRuntimeObserver(d.RuntimeObserver))
+	pdgram.Erase(ready.key)
 	if err != nil {
 		_ = pc.Close()
 		return nil, udpUnavailable("create UDP transport", err, &stderr)
@@ -251,22 +253,37 @@ func readUDPReady(r io.Reader) (udpReady, error) {
 	if err != nil && line == "" {
 		return udpReady{}, err
 	}
-	fields := strings.Fields(line)
-	if len(fields) != 3 || fields[0] != "VEV-UDP" {
-		return udpReady{}, fmt.Errorf("malformed readiness line %q", strings.TrimSpace(line))
+
+	ready := udpReady{key: make([]byte, pdgram.KeySize)}
+	var parseErr error
+	pdgram.SecretDo(func() {
+		fields := strings.Fields(line)
+		if len(fields) != 3 || fields[0] != "VEV-UDP" {
+			parseErr = fmt.Errorf("malformed UDP readiness line")
+			return
+		}
+		ready.port, parseErr = strconv.Atoi(fields[1])
+		if parseErr != nil || ready.port < 1 || ready.port > 65535 {
+			parseErr = fmt.Errorf("invalid UDP port %q", fields[1])
+			return
+		}
+		key, decodeErr := base64.StdEncoding.DecodeString(fields[2])
+		defer pdgram.Erase(key)
+		if decodeErr != nil {
+			parseErr = fmt.Errorf("invalid bootstrap key: %w", decodeErr)
+			return
+		}
+		if len(key) != pdgram.KeySize {
+			parseErr = fmt.Errorf("invalid bootstrap key length %d", len(key))
+			return
+		}
+		copy(ready.key, key)
+	})
+	if parseErr != nil {
+		pdgram.Erase(ready.key)
+		return udpReady{}, parseErr
 	}
-	port, err := strconv.Atoi(fields[1])
-	if err != nil || port < 1 || port > 65535 {
-		return udpReady{}, fmt.Errorf("invalid UDP port %q", fields[1])
-	}
-	key, err := base64.StdEncoding.DecodeString(fields[2])
-	if err != nil {
-		return udpReady{}, fmt.Errorf("invalid bootstrap key: %w", err)
-	}
-	if len(key) != pdgram.KeySize {
-		return udpReady{}, fmt.Errorf("invalid bootstrap key length %d", len(key))
-	}
-	return udpReady{port: port, key: key}, nil
+	return ready, nil
 }
 
 func udpUnavailable(action string, err error, stderr fmt.Stringer) error {
