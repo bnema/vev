@@ -457,12 +457,39 @@ func (tb *tab) closeAllPanes() {
 	}
 }
 
+// tabChromeRows is the vertical chrome (tab bar + status bar) between a
+// client viewport and a tab's content area.
+const tabChromeRows = 2
+
 func tabSize(clientSize domain.Size) domain.Size {
 	if !clientSize.Valid() {
 		clientSize = defaultSize
 	}
-	rows := max(clientSize.Rows-2, 1)
+	rows := max(clientSize.Rows-tabChromeRows, 1)
 	return domain.Size{Cols: clientSize.Cols, Rows: rows}
+}
+
+// fullViewportSize derives a full client-equivalent viewport from the active
+// tab's retained content size, for actions that need a viewport while no
+// client is attached. It falls back to defaultSize when no valid size exists.
+func (s *session) fullViewportSize() domain.Size {
+	s.mu.Lock()
+	var tb *tab
+	if s.active >= 0 && s.active < len(s.tabs) {
+		tb = s.tabs[s.active]
+	}
+	s.mu.Unlock()
+
+	var content domain.Size
+	if tb != nil {
+		tb.mu.Lock()
+		content = tb.size
+		tb.mu.Unlock()
+	}
+	if !content.Valid() {
+		return defaultSize
+	}
+	return domain.Size{Cols: content.Cols, Rows: content.Rows + tabChromeRows}
 }
 
 func (d *Daemon) startTabGoroutines(sess *session, tb *tab) {
