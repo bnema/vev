@@ -525,18 +525,60 @@ func TestNotifyRoutesToSessionClientOnly(t *testing.T) {
 	require.Empty(t, otherToasts, "another session's client must be untouched by session-scoped notices")
 }
 
-func TestNotifySessionWithoutClientRecordsHistoryOnly(t *testing.T) {
-	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
-	sess.mu.Lock()
-	sess.client = nil
-	sess.mu.Unlock()
+func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
+	d, sessA, oldA, _ := newNoticeFixture(t, newNoticeClock())
+	sessA.mu.Lock()
+	sessA.client = nil
+	sessA.mu.Unlock()
 
-	d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
+	clientB := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	clientB.initOverlays()
+	sessB := &session{id: "manual-2", name: "other", ctx: sessA.ctx, cancel: func() {}}
+	clientB.setSession(sessB)
+	d.mu.Lock()
+	d.sessions[sessB.id] = sessB
+	d.mu.Unlock()
 
-	require.Len(t, d.notices.history(), 1)
-	toasts, _ := visibleToasts(ac)
-	require.Empty(t, toasts, "a detached session must not paint a toast")
-	require.Empty(t, d.notices.drainPending(), "session-scoped notices are never queued as pending globals")
+	d.notify(sessA, domain.NoticeInfo, domain.NoticeUser, "hello from a script", nil)
+	// Use the same code globally to prove pending coalescing includes scope.
+	d.NotifyGlobal(domain.NoticeWarn, domain.NoticeUser, "global announcement", nil)
+
+	history := d.notices.history()
+	require.Len(t, history, 2)
+	require.Equal(t, domain.NoticeUser, history[1].Code)
+	oldToasts, _ := visibleToasts(oldA)
+	require.Empty(t, oldToasts, "a detached session must not paint a toast")
+
+	sessB.mu.Lock()
+	sessB.client = clientB
+	sessB.mu.Unlock()
+	d.drainPendingForFirstPaint(sessB, clientB)
+	bToasts, _ := visibleToasts(clientB)
+	require.Len(t, bToasts, 1, "another session receives only the global notice")
+	require.Equal(t, domain.NoticeUser, bToasts[0].Code)
+	require.Empty(t, bToasts[0].SessionID)
+	require.Equal(t, "global announcement", bToasts[0].Message)
+
+	sessA.mu.Lock()
+	sessA.client = oldA
+	sessA.mu.Unlock()
+	d.drainPendingForFirstPaint(sessA, oldA)
+	aToasts, _ := visibleToasts(oldA)
+	require.Len(t, aToasts, 1)
+	require.Equal(t, domain.NoticeUser, aToasts[0].Code)
+	require.Equal(t, sessA.id, aToasts[0].SessionID)
+	require.Equal(t, "hello from a script", aToasts[0].Message)
+	require.Equal(t, 1, aToasts[0].Count)
+
+	secondA := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	secondA.initOverlays()
+	secondA.setSession(sessA)
+	sessA.mu.Lock()
+	sessA.client = secondA
+	sessA.mu.Unlock()
+	d.drainPendingForFirstPaint(sessA, secondA)
+	secondToasts, _ := visibleToasts(secondA)
+	require.Empty(t, secondToasts, "a drained session notice must not be delivered twice")
 }
 
 func TestNotifyGlobalFansOutToAttachedClients(t *testing.T) {

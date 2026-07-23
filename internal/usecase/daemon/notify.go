@@ -25,13 +25,13 @@ const (
 var errNoNeighbor = errors.New("no pane in that direction")
 
 // noticeCenter owns the daemon-wide notification history and the queue of
-// global notices awaiting a first attached client. Its mu is leaf-level: no
-// other lock is ever taken while holding it.
+// global or session-scoped notices awaiting an eligible attached client. Its
+// mu is leaf-level: no other lock is ever taken while holding it.
 type noticeCenter struct {
 	mu sync.Mutex
-	// routingMu serializes global deliver-or-queue with the first-paint drain.
-	// Attachment removal also takes it, so a client selected for a global toast
-	// remains current until that toast is published.
+	// routingMu serializes notice deliver-or-queue with the first-paint drain.
+	// Attachment removal also takes it, so a client selected for a toast remains
+	// current until that toast is published.
 	routingMu sync.Mutex
 	ring      []domain.Notification
 	pending   []domain.Notification
@@ -112,7 +112,7 @@ func (nc *noticeCenter) queueGlobal(n domain.Notification) {
 	nc.mu.Lock()
 	defer nc.mu.Unlock()
 	for i := range nc.pending {
-		if nc.pending[i].Code == n.Code {
+		if nc.pending[i].Code == n.Code && nc.pending[i].SessionID == n.SessionID {
 			nc.pending[i].Count += n.Count
 			nc.pending[i].Time = n.Time
 			return
@@ -223,12 +223,13 @@ func (d *Daemon) reportError(sess *session, err error) {
 
 // notify records a notice and routes it to whoever can see it. A nil sess means
 // daemon-global: every attached client gets it, and if none is attached the
-// notice waits in the pending queue for the next attach.
+// notice waits in the pending queue for the next attach. A detached session's
+// notice waits for that session's next attach.
 //
 // Locking: sess.mu and d.mu are only held to snapshot; showToast is always
-// called with no daemon, session, or pane lock held. Global routing holds the
-// notice center's routingMu across selection and publication, which serializes
-// it with attachment detach and pending-queue drains.
+// called with no daemon, session, or pane lock held. Routing holds the notice
+// center's routingMu across selection and publication, which serializes it with
+// attachment detach and pending-queue drains. The order is routingMu -> sess.mu.
 func (d *Daemon) notify(sess *session, sev domain.NoticeSeverity, code domain.NoticeCode, msg string, cause error) {
 	n := domain.Notification{
 		Code:     code,
@@ -244,12 +245,20 @@ func (d *Daemon) notify(sess *session, sev domain.NoticeSeverity, code domain.No
 	d.log.Log(d.serveCtx, slogLevelFor(sev), "user notice", "code", code.String(), "severity", sev, "msg", msg, "err", cause)
 
 	if sess != nil {
+		d.notices.routingMu.Lock()
 		sess.mu.Lock()
 		ac := sess.client
 		sess.mu.Unlock()
-		if ac != nil {
-			d.showToast(ac, n)
+		if ac == nil {
+			d.notices.queueGlobal(n)
+			d.notices.routingMu.Unlock()
+			return
 		}
+		// Live session-scoped notices do not use the pending queue, so release
+		// routing before painting. Painting can itself report an error, which
+		// may recursively route a notice.
+		d.notices.routingMu.Unlock()
+		d.showToast(ac, n)
 		return
 	}
 
@@ -293,9 +302,10 @@ func (d *Daemon) deliverGlobal(n domain.Notification) {
 	}
 }
 
-// drainPendingForFirstPaint publishes pending globals only while ac remains the
-// session's current attachment. It shares routingMu with deliverGlobal, so an
-// unattached global route cannot queue after this drain has already happened.
+// drainPendingForFirstPaint publishes pending globals and notices scoped to
+// sess only while ac remains the session's current attachment. It shares
+// routingMu with notice routing, so an unattached route cannot queue after this
+// drain has already happened.
 func (d *Daemon) drainPendingForFirstPaint(sess *session, ac *attachedClient) {
 	d.notices.routingMu.Lock()
 	defer d.notices.routingMu.Unlock()
@@ -306,8 +316,16 @@ func (d *Daemon) drainPendingForFirstPaint(sess *session, ac *attachedClient) {
 	if !current {
 		return
 	}
+	var keep []domain.Notification
 	for _, n := range d.notices.drainPending() {
-		d.showToast(ac, n)
+		if n.SessionID == "" || n.SessionID == sess.id {
+			d.showToast(ac, n)
+			continue
+		}
+		keep = append(keep, n)
+	}
+	for _, n := range keep {
+		d.notices.queueGlobal(n)
 	}
 }
 
