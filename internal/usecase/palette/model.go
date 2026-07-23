@@ -51,7 +51,7 @@ func New(results []Result) *Model {
 	return m
 }
 
-func NewRegistry() *Model { return New(CommandResults(command.Registry())) }
+func NewRegistry() *Model { return New(CommandResults(command.PaletteRegistry())) }
 
 func DefaultRenderStyles() RenderStyles {
 	selection := renderer.DefaultStyle()

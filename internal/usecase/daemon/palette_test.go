@@ -608,7 +608,7 @@ func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
 	wg.Wait()
 
 	commands := d.paletteCommands()
-	require.Len(t, commands, len(command.Registry()))
+	require.Len(t, commands, len(command.PaletteRegistry()))
 	seen := map[string]bool{}
 	for _, cmd := range commands {
 		require.False(t, seen[cmd.Code], "duplicate command %s", cmd.Code)

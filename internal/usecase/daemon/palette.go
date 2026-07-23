@@ -103,7 +103,7 @@ func recentSessionHints(recent []recentSession, args []string) palette.Contextua
 }
 
 func (d *Daemon) paletteCommands() []command.Command {
-	commands := command.Registry()
+	commands := command.PaletteRegistry()
 	d.paletteRecentMu.Lock()
 	recent := append([]string(nil), d.paletteRecent...)
 	d.paletteRecentMu.Unlock()

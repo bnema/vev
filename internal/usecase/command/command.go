@@ -72,10 +72,61 @@ const (
 	ContextHintRecentSessions
 )
 
+// TargetKind declares which resolved target a control command needs.
+type TargetKind uint8
+
+const (
+	TargetNone TargetKind = iota
+	TargetSession
+	TargetTab
+	TargetPane
+)
+
+// ControlOptions carries per-invocation output preferences.
+type ControlOptions struct {
+	JSON bool
+}
+
+// ControlResult carries a control command's output.
+type ControlResult struct {
+	Output string
+}
+
+// ControlContext exposes prompt-free daemon actions to control commands.
+type ControlContext interface {
+	CreateTab() error
+	CreateSessionNamed(name string) error
+	CloseTab() error
+	ClosePane() error
+	SplitRight() error
+	SplitLeft() error
+	SplitUp() error
+	SplitDown() error
+	StackPane() error
+	ToggleStack() error
+	FocusPaneLeft() error
+	FocusPaneRight() error
+	FocusPaneUp() error
+	FocusPaneDown() error
+	NextTab() error
+	PrevTab() error
+	RenameSessionTo(name string) error
+	RenameTabTo(name string) error
+	Toast(severity, message string) error
+	ListSessions(json bool) (string, error)
+	ListTabs(json bool) (string, error)
+	ListPanes(json bool) (string, error)
+}
+
 // Command describes an executable command.
 type Command struct {
 	Slug, Code, Name, Desc string
+	Usage                  string
 	Arguments              Arguments
 	ContextHint            ContextHint
+	Scriptable             bool
+	PaletteVisible         bool
+	Target                 TargetKind
 	Run                    func(Context, []string) error
+	Control                func(ControlContext, []string, ControlOptions) (ControlResult, error)
 }

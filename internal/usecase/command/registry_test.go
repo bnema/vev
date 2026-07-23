@@ -1,12 +1,14 @@
 package command
 
 import (
+	"errors"
 	"regexp"
+	"strconv"
 	"testing"
 )
 
 func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
-	commands := Registry()
+	commands := PaletteRegistry()
 	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "JRS", "SSP", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}
 
 	if len(commands) != len(wantCodes) {
@@ -35,6 +37,144 @@ func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
 		}
 		seenSlugs[cmd.Slug] = true
 	}
+}
+
+func TestBySlugExactMatch(t *testing.T) {
+	tests := []struct {
+		slug string
+		ok   bool
+	}{
+		{slug: "split-right", ok: true},
+		{slug: "SPLIT-RIGHT", ok: false},
+		{slug: "toast", ok: true},
+		{slug: "list-panes", ok: true},
+		{slug: "does-not-exist", ok: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.slug, func(t *testing.T) {
+			if _, ok := BySlug(tt.slug); ok != tt.ok {
+				t.Fatalf("BySlug(%q) ok = %v, want %v", tt.slug, ok, tt.ok)
+			}
+		})
+	}
+}
+
+func TestRegistryControlMetadata(t *testing.T) {
+	scriptable := map[string]TargetKind{
+		"split-right": TargetPane, "split-left": TargetPane, "split-up": TargetPane,
+		"split-down": TargetPane, "stack-pane": TargetPane, "toggle-stack": TargetPane,
+		"close-pane": TargetPane, "focus-pane-left": TargetPane, "focus-pane-right": TargetPane,
+		"focus-pane-up": TargetPane, "focus-pane-down": TargetPane,
+		"new-tab": TargetSession, "close-tab": TargetTab, "next-tab": TargetSession,
+		"previous-tab": TargetSession, "rename-session": TargetSession, "rename-tab": TargetTab,
+		"new-session": TargetSession, "toast": TargetSession,
+		"list-sessions": TargetNone, "list-tabs": TargetSession, "list-panes": TargetTab,
+	}
+	notScriptable := []string{
+		"session-picker", "notifications", "visual-mode", "yank-last-notification",
+		"detach", "back-session", "jump-recent-session", "toggle-floating-pane",
+	}
+	for slug, target := range scriptable {
+		cmd, ok := BySlug(slug)
+		if !ok || !cmd.Scriptable {
+			t.Errorf("%s: want scriptable entry, ok=%v scriptable=%v", slug, ok, cmd.Scriptable)
+			continue
+		}
+		if cmd.Target != target || cmd.Control == nil || cmd.Usage == "" || cmd.Desc == "" {
+			t.Errorf("%s: incomplete control metadata: %#v", slug, cmd)
+		}
+	}
+	for _, slug := range notScriptable {
+		cmd, ok := BySlug(slug)
+		if !ok || cmd.Scriptable || cmd.Control != nil {
+			t.Errorf("%s: want present and non-scriptable, got %#v, ok=%v", slug, cmd, ok)
+		}
+	}
+}
+
+func TestPaletteRegistryHidesAPIOnly(t *testing.T) {
+	for _, cmd := range PaletteRegistry() {
+		if !cmd.PaletteVisible || cmd.Run == nil {
+			t.Errorf("palette command is not executable and visible: %#v", cmd)
+		}
+		if cmd.Slug == "toast" || cmd.Slug == "list-sessions" || cmd.Slug == "list-tabs" || cmd.Slug == "list-panes" {
+			t.Errorf("API-only command %q is visible", cmd.Slug)
+		}
+	}
+}
+
+func TestControlHandlersValidateAndDelegate(t *testing.T) {
+	tests := []struct {
+		name       string
+		slug       string
+		args       []string
+		opts       ControlOptions
+		wantCall   string
+		wantOutput string
+		wantErr    error
+	}{
+		{name: "zero argument mutation delegates", slug: "split-right", wantCall: "split-right"},
+		{name: "zero argument mutation rejects args", slug: "split-right", args: []string{"extra"}, wantErr: ErrInvalidArguments},
+		{name: "rename delegates name", slug: "rename-tab", args: []string{"editor"}, wantCall: "rename-tab:editor"},
+		{name: "rename rejects empty name", slug: "rename-tab", args: []string{""}, wantErr: ErrInvalidArguments},
+		{name: "toast delegates severity", slug: "toast", args: []string{"-l", "warn", "hello"}, wantCall: "toast:warn:hello"},
+		{name: "toast rejects malformed flags", slug: "toast", args: []string{"-l", "warn"}, wantErr: ErrInvalidArguments},
+		{name: "query delegates JSON option", slug: "list-panes", opts: ControlOptions{JSON: true}, wantCall: "list-panes:true", wantOutput: "panes"},
+		{name: "query rejects args", slug: "list-panes", args: []string{"extra"}, wantErr: ErrInvalidArguments},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd, ok := BySlug(tt.slug)
+			if !ok {
+				t.Fatalf("BySlug(%q) missing", tt.slug)
+			}
+			ctx := &controlSpy{}
+			got, err := cmd.Control(ctx, tt.args, tt.opts)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Control() error = %v, want %v", err, tt.wantErr)
+			}
+			if ctx.call != tt.wantCall || got.Output != tt.wantOutput {
+				t.Fatalf("Control() call/output = %q/%q, want %q/%q", ctx.call, got.Output, tt.wantCall, tt.wantOutput)
+			}
+		})
+	}
+}
+
+type controlSpy struct{ call string }
+
+func (s *controlSpy) record(call string) error          { s.call = call; return nil }
+func (s *controlSpy) CreateTab() error                  { return s.record("new-tab") }
+func (s *controlSpy) CreateSessionNamed(v string) error { return s.record("new-session:" + v) }
+func (s *controlSpy) CloseTab() error                   { return s.record("close-tab") }
+func (s *controlSpy) ClosePane() error                  { return s.record("close-pane") }
+func (s *controlSpy) SplitRight() error                 { return s.record("split-right") }
+func (s *controlSpy) SplitLeft() error                  { return s.record("split-left") }
+func (s *controlSpy) SplitUp() error                    { return s.record("split-up") }
+func (s *controlSpy) SplitDown() error                  { return s.record("split-down") }
+func (s *controlSpy) StackPane() error                  { return s.record("stack-pane") }
+func (s *controlSpy) ToggleStack() error                { return s.record("toggle-stack") }
+func (s *controlSpy) FocusPaneLeft() error              { return s.record("focus-pane-left") }
+func (s *controlSpy) FocusPaneRight() error             { return s.record("focus-pane-right") }
+func (s *controlSpy) FocusPaneUp() error                { return s.record("focus-pane-up") }
+func (s *controlSpy) FocusPaneDown() error              { return s.record("focus-pane-down") }
+func (s *controlSpy) NextTab() error                    { return s.record("next-tab") }
+func (s *controlSpy) PrevTab() error                    { return s.record("previous-tab") }
+func (s *controlSpy) RenameSessionTo(v string) error    { return s.record("rename-session:" + v) }
+func (s *controlSpy) RenameTabTo(v string) error        { return s.record("rename-tab:" + v) }
+func (s *controlSpy) Toast(level, message string) error {
+	return s.record("toast:" + level + ":" + message)
+}
+func (s *controlSpy) ListSessions(json bool) (string, error) {
+	_ = s.record("list-sessions:" + strconv.FormatBool(json))
+	return "sessions", nil
+}
+func (s *controlSpy) ListTabs(json bool) (string, error) {
+	_ = s.record("list-tabs:" + strconv.FormatBool(json))
+	return "tabs", nil
+}
+func (s *controlSpy) ListPanes(json bool) (string, error) {
+	_ = s.record("list-panes:" + strconv.FormatBool(json))
+	return "panes", nil
 }
 
 func TestRegistryIncludesFloatingPaneToggle(t *testing.T) {
