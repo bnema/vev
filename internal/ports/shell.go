@@ -14,11 +14,11 @@ type CommandSpec struct {
 	StderrLimit int
 }
 
-// CommandResult carries bounded output and the process exit status. ExitCode is
-// 0 when the command ran to completion successfully, the process exit code when
-// it ran and failed, and -1 when the command could not be started or was
-// terminated by a signal.
-type CommandResult struct {
+// ShellCommandResult carries bounded output and the process exit status.
+// ExitCode is 0 when the command ran to completion successfully, the process
+// exit code when it ran and failed, and -1 when the command could not be
+// started or was terminated by a signal.
+type ShellCommandResult struct {
 	Stdout   []byte
 	Stderr   []byte
 	ExitCode int
@@ -26,5 +26,5 @@ type CommandResult struct {
 
 // ShellCommandRunner runs shell commands and returns bounded output.
 type ShellCommandRunner interface {
-	Run(ctx context.Context, spec CommandSpec) (CommandResult, error)
+	Run(ctx context.Context, spec CommandSpec) (ShellCommandResult, error)
 }

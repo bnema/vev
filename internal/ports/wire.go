@@ -45,6 +45,11 @@ const (
 	ErrNameTaken          uint16 = 3
 	ErrServerShutdown     uint16 = 4
 	ErrInvalidSessionName uint16 = 5
+	ErrUnknownCommand     uint16 = 6
+	ErrNotScriptable      uint16 = 7
+	ErrInvalidCommandArgs uint16 = 8
+	ErrNoSuchTarget       uint16 = 9
+	ErrAmbiguousTarget    uint16 = 10
 	ErrInternal           uint16 = 255
 )
 
@@ -183,6 +188,26 @@ type List struct{}
 type Kill struct {
 	Name string
 	All  bool
+}
+
+// CommandRequest asks the daemon to run one control command. Version must
+// stay first so a future payload layout can still be rejected cleanly.
+type CommandRequest struct {
+	Version       uint16
+	Slug          string
+	Args          []string
+	TargetSession string
+	TargetTab     string
+	TargetPane    string
+	JSON          bool
+}
+
+// CommandResult reports a control command's outcome.
+type CommandResult struct {
+	OK     bool
+	Code   uint16
+	Text   string
+	Output string
 }
 
 // SessionInfo describes one session in a Sessions listing.
@@ -336,6 +361,15 @@ func (r *payloadReader) done() error {
 
 // PeekHelloVersion returns the leading protocol version from a Hello payload.
 func PeekHelloVersion(b []byte) (uint16, bool) {
+	if len(b) < 2 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint16(b), true
+}
+
+// PeekCommandVersion returns the leading protocol version from a
+// CommandRequest payload.
+func PeekCommandVersion(b []byte) (uint16, bool) {
 	if len(b) < 2 {
 		return 0, false
 	}
@@ -849,6 +883,117 @@ func UnmarshalKill(b []byte) (Kill, error) {
 		return Kill{}, err
 	}
 	return Kill{Name: name, All: all != 0}, nil
+}
+
+// MarshalCommandRequest encodes m into a CommandRequest payload.
+func MarshalCommandRequest(m CommandRequest) []byte {
+	w := payloadWriter{}
+	w.putUint16(m.Version)
+	w.putString(m.Slug)
+	w.putUint16(uint16(len(m.Args)))
+	for _, arg := range m.Args {
+		w.putLongString(arg)
+	}
+	w.putString(m.TargetSession)
+	w.putString(m.TargetTab)
+	w.putString(m.TargetPane)
+	if m.JSON {
+		w.putUint8(1)
+	} else {
+		w.putUint8(0)
+	}
+	return w.b
+}
+
+// UnmarshalCommandRequest decodes a strict CommandRequest payload.
+func UnmarshalCommandRequest(b []byte) (CommandRequest, error) {
+	r := payloadReader{b: b}
+	var m CommandRequest
+	var err error
+
+	if m.Version, err = r.getUint16(); err != nil {
+		return CommandRequest{}, err
+	}
+	if m.Slug, err = r.getString(); err != nil {
+		return CommandRequest{}, err
+	}
+	argCount, err := r.getUint16()
+	if err != nil {
+		return CommandRequest{}, err
+	}
+	// Every argument requires at least a uint32 length prefix. Reject an
+	// impossible count before allocating from untrusted input.
+	if uint64(argCount) > uint64(len(r.b)/4) {
+		return CommandRequest{}, errShortPayload
+	}
+	if argCount != 0 {
+		m.Args = make([]string, 0, int(argCount))
+		for range int(argCount) {
+			arg, err := r.getLongString()
+			if err != nil {
+				return CommandRequest{}, err
+			}
+			m.Args = append(m.Args, arg)
+		}
+	}
+	if m.TargetSession, err = r.getString(); err != nil {
+		return CommandRequest{}, err
+	}
+	if m.TargetTab, err = r.getString(); err != nil {
+		return CommandRequest{}, err
+	}
+	if m.TargetPane, err = r.getString(); err != nil {
+		return CommandRequest{}, err
+	}
+	jsonFlag, err := r.getUint8()
+	if err != nil {
+		return CommandRequest{}, err
+	}
+	m.JSON = jsonFlag != 0
+	if err := r.done(); err != nil {
+		return CommandRequest{}, err
+	}
+	return m, nil
+}
+
+// MarshalCommandResult encodes m into a CommandResult payload.
+func MarshalCommandResult(m CommandResult) []byte {
+	w := payloadWriter{}
+	if m.OK {
+		w.putUint8(1)
+	} else {
+		w.putUint8(0)
+	}
+	w.putUint16(m.Code)
+	w.putString(m.Text)
+	w.putLongString(m.Output)
+	return w.b
+}
+
+// UnmarshalCommandResult decodes a strict CommandResult payload.
+func UnmarshalCommandResult(b []byte) (CommandResult, error) {
+	r := payloadReader{b: b}
+	var m CommandResult
+	var err error
+
+	okFlag, err := r.getUint8()
+	if err != nil {
+		return CommandResult{}, err
+	}
+	m.OK = okFlag != 0
+	if m.Code, err = r.getUint16(); err != nil {
+		return CommandResult{}, err
+	}
+	if m.Text, err = r.getString(); err != nil {
+		return CommandResult{}, err
+	}
+	if m.Output, err = r.getLongString(); err != nil {
+		return CommandResult{}, err
+	}
+	if err := r.done(); err != nil {
+		return CommandResult{}, err
+	}
+	return m, nil
 }
 
 // MarshalSessions encodes m into a Sessions message payload: a uint16 count

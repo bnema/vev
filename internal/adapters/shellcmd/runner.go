@@ -18,7 +18,7 @@ type Runner struct{}
 func New() Runner { return Runner{} }
 
 // Run executes spec.Command through sh -c, capturing bounded stdout and stderr.
-func (Runner) Run(ctx context.Context, spec ports.CommandSpec) (ports.CommandResult, error) {
+func (Runner) Run(ctx context.Context, spec ports.CommandSpec) (ports.ShellCommandResult, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", spec.Command)
 	cmd.Env = spec.Env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -36,7 +36,7 @@ func (Runner) Run(ctx context.Context, spec ports.CommandSpec) (ports.CommandRes
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	res := ports.CommandResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
+	res := ports.ShellCommandResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
