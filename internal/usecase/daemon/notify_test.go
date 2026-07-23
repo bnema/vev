@@ -525,6 +525,63 @@ func TestNotifyRoutesToSessionClientOnly(t *testing.T) {
 	require.Empty(t, otherToasts, "another session's client must be untouched by session-scoped notices")
 }
 
+func TestNotifySessionScopedSerializesDetachThroughToastPublication(t *testing.T) {
+	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+
+	selected := make(chan struct{})
+	releasePublication := make(chan struct{})
+	d.notices.beforeSessionDelivery = func() {
+		close(selected)
+		<-releasePublication
+	}
+
+	notifyDone := make(chan struct{})
+	go func() {
+		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "hello", nil)
+		close(notifyDone)
+	}()
+	<-selected
+
+	detachStarted := make(chan struct{})
+	detachDone := make(chan bool, 1)
+	go func() {
+		close(detachStarted)
+		detachDone <- d.detachIfCurrent(sess, ac)
+	}()
+	<-detachStarted
+	select {
+	case <-detachDone:
+		t.Fatal("detach completed before the selected toast was durably published")
+	default:
+	}
+
+	close(releasePublication)
+	<-notifyDone
+	require.True(t, <-detachDone)
+
+	toasts, _ := visibleToasts(ac)
+	require.Len(t, toasts, 1)
+	require.Equal(t, "hello", toasts[0].Message)
+	require.Empty(t, d.notices.drainPending(), "a toast published before detach must not also be queued")
+}
+
+func TestNotifySessionScopedReleasesRoutingBeforeRepaint(t *testing.T) {
+	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+
+	repaintObserved := make(chan bool, 1)
+	ac.renderStages.capture = func() {
+		unlocked := d.notices.routingMu.TryLock()
+		if unlocked {
+			d.notices.routingMu.Unlock()
+		}
+		repaintObserved <- unlocked
+	}
+
+	d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "hello", nil)
+
+	require.True(t, <-repaintObserved, "notice repaint must run without routingMu held")
+}
+
 func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
 	d, sessA, oldA, _ := newNoticeFixture(t, newNoticeClock())
 	sessA.mu.Lock()

@@ -41,6 +41,9 @@ type noticeCenter struct {
 	// beforeGlobalDelivery is a deterministic test seam after targets have been
 	// selected and before their toast stacks are touched.
 	beforeGlobalDelivery func()
+	// beforeSessionDelivery is a deterministic test seam after a session client
+	// has been selected and before its toast stack is touched.
+	beforeSessionDelivery func()
 	// beforeClientNoticeMutation is a deterministic test seam after a client
 	// notice's ownership validation and before its toast state is changed.
 	beforeClientNoticeMutation func()
@@ -254,11 +257,16 @@ func (d *Daemon) notify(sess *session, sev domain.NoticeSeverity, code domain.No
 			d.notices.routingMu.Unlock()
 			return
 		}
-		// Live session-scoped notices do not use the pending queue, so release
-		// routing before painting. Painting can itself report an error, which
-		// may recursively route a notice.
+		if d.notices.beforeSessionDelivery != nil {
+			d.notices.beforeSessionDelivery()
+		}
+		// Publish the toast while detach is excluded, then release routing before
+		// repainting. Rendering can report another notice and re-enter routing.
+		published := d.publishToast(ac, n)
 		d.notices.routingMu.Unlock()
-		d.showToast(ac, n)
+		if published {
+			d.repaintForNotice(ac)
+		}
 		return
 	}
 
@@ -266,10 +274,9 @@ func (d *Daemon) notify(sess *session, sev domain.NoticeSeverity, code domain.No
 }
 
 // deliverGlobal atomically selects all current attachments and either publishes
-// to all of them or queues the notice. routingMu is deliberately held through
-// showToast, but never with d.mu or sess.mu held: detach cannot turn a selected
-// target stale between selection and publication, and firstPaint cannot drain
-// before an unattached route has queued its notice.
+// to all of them or queues the notice. routingMu is held through toast-state
+// publication, but never through repaint: detach cannot turn a selected target
+// stale before publication, while rendering remains free to re-enter routing.
 func (d *Daemon) deliverGlobal(n domain.Notification) {
 	d.mu.Lock()
 	d.notices.routingMu.Lock()
@@ -278,27 +285,30 @@ func (d *Daemon) deliverGlobal(n domain.Notification) {
 		sessions = append(sessions, s)
 	}
 	d.mu.Unlock()
-	defer d.notices.routingMu.Unlock()
 
 	if d.notices.beforeGlobalDelivery != nil {
 		d.notices.beforeGlobalDelivery()
 	}
-	delivered := false
+	targets := make([]*attachedClient, 0, len(sessions))
 	for _, s := range sessions {
 		s.mu.Lock()
 		ac := s.client
 		s.mu.Unlock()
-		if ac == nil {
+		if ac == nil || !d.publishToast(ac, n) {
 			continue
 		}
-		d.showToast(ac, n)
-		delivered = true
+		targets = append(targets, ac)
 	}
-	if !delivered {
+	if len(targets) == 0 {
 		if d.notices.beforeQueueGlobal != nil {
 			d.notices.beforeQueueGlobal()
 		}
 		d.notices.queueGlobal(n)
+	}
+	d.notices.routingMu.Unlock()
+
+	for _, ac := range targets {
+		d.repaintForNotice(ac)
 	}
 }
 
@@ -308,24 +318,29 @@ func (d *Daemon) deliverGlobal(n domain.Notification) {
 // drain has already happened.
 func (d *Daemon) drainPendingForFirstPaint(sess *session, ac *attachedClient) {
 	d.notices.routingMu.Lock()
-	defer d.notices.routingMu.Unlock()
 
 	sess.mu.Lock()
 	current := sess.client == ac
 	sess.mu.Unlock()
 	if !current {
+		d.notices.routingMu.Unlock()
 		return
 	}
+	published := false
 	var keep []domain.Notification
 	for _, n := range d.notices.drainPending() {
 		if n.SessionID == "" || n.SessionID == sess.id {
-			d.showToast(ac, n)
+			published = d.publishToast(ac, n) || published
 			continue
 		}
 		keep = append(keep, n)
 	}
 	for _, n := range keep {
 		d.notices.queueGlobal(n)
+	}
+	d.notices.routingMu.Unlock()
+	if published {
+		d.repaintForNotice(ac)
 	}
 }
 
@@ -334,27 +349,33 @@ func (d *Daemon) NotifyGlobal(sev domain.NoticeSeverity, code domain.NoticeCode,
 	d.notify(nil, sev, code, msg, cause)
 }
 
-// showToast publishes a notice into one client's toast stack. An identical
-// code within the same scope coalesces into the existing entry and restarts its
-// TTL; otherwise the notice is prepended and the stack trimmed. The repaint is
-// issued after noticeMu is released.
+// showToast publishes a notice into one client's toast stack and repaints only
+// after the state mutation is complete.
 func (d *Daemon) showToast(ac *attachedClient, n domain.Notification) {
+	if d.publishToast(ac, n) {
+		d.repaintForNotice(ac)
+	}
+}
+
+// publishToast durably mutates one client's toast state without repainting.
+// Routing paths call it while routingMu excludes detach, then release routingMu
+// before rendering so a render failure can safely route another notice.
+func (d *Daemon) publishToast(ac *attachedClient, n domain.Notification) bool {
 	if ac == nil {
-		return
+		return false
 	}
 	ac.initOverlays()
 	rt := ac.overlays
 
 	rt.noticeMu.Lock()
+	defer rt.noticeMu.Unlock()
 	if i := rt.indexOfToastLocked(n.Code, n.SessionID); i >= 0 {
 		rt.noticeToasts[i].n.Count += n.Count
 		rt.noticeToasts[i].n.Time = n.Time
 		rt.noticeToasts[i].n.Details = n.Details
 		rt.noticeToasts[i].timer.stop()
 		d.retainToastTimerLocked(ac, &rt.noticeToasts[i])
-		rt.noticeMu.Unlock()
-		d.repaintForNotice(ac)
-		return
+		return true
 	}
 
 	toast := noticeToast{n: n}
@@ -367,8 +388,7 @@ func (d *Daemon) showToast(ac *attachedClient, n domain.Notification) {
 		rt.noticeToasts = rt.noticeToasts[:maxVisibleToasts]
 	}
 	d.retainToastTimerLocked(ac, &rt.noticeToasts[0])
-	rt.noticeMu.Unlock()
-	d.repaintForNotice(ac)
+	return true
 }
 
 // indexOfToastLocked finds a visible toast with the same code and scope.
