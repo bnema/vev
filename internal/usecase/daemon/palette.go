@@ -303,7 +303,10 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte) {
 	if !ac.closeExecutedPalette(generation, rawQuery) {
 		return
 	}
-	if err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac}, args); err != nil {
+	sess.dispatchMu.Lock()
+	err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac}, args)
+	sess.dispatchMu.Unlock()
+	if err != nil {
 		d.log.Error("palette command failed", "err", err, "command", cmd.Code)
 		d.reportError(sess, err)
 	} else {

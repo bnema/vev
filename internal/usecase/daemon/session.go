@@ -36,6 +36,11 @@ type session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// dispatchMu serializes user-initiated mutating command dispatch (palette
+	// and vev-cmd control) for this session, so a one-shot command cannot
+	// resolve focus against one state and mutate a later one. Lock order:
+	// dispatchMu strictly before d.mu, sess.mu, or any tab mu.
+	dispatchMu             sync.Mutex
 	mu                     sync.Mutex // guards tabs, active, client, clipFiles, and clipboard queue state
 	themeMu                sync.Mutex
 	tabs                   []*tab
