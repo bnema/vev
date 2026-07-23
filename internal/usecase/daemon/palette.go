@@ -351,15 +351,30 @@ func (ac *attachedClient) closeExecutedPalette(generation uint64, rawQuery strin
 }
 
 type paletteExec struct {
-	d      *Daemon
-	sess   *session
-	ac     *attachedClient
-	recent []recentSession
+	d       *Daemon
+	sess    *session
+	ac      *attachedClient
+	recent  []recentSession
+	actions daemonActionRunner
+}
+
+func (e paletteExec) runAction(request daemonActionRequest) error {
+	if request.target.session == nil {
+		request.target = resolveDaemonActionTarget(e.sess)
+	}
+	runner := e.actions
+	if runner == nil {
+		runner = daemonActions{d: e.d}
+	}
+	err := runner.Run(request)
+	if err == nil && e.actions == nil {
+		finishDaemonActionForClient(e.d, request, e.ac, "palette.go")
+	}
+	return err
 }
 
 func (e paletteExec) CreateTab() error {
-	defer e.d.invalidateRender(e.sess, e.ac, true, "palette.go")
-	return e.d.createTab(e.sess, e.ac.size)
+	return e.runAction(daemonActionRequest{kind: daemonActionCreateTab, viewport: e.ac.size})
 }
 
 func (e paletteExec) CreateSession() error {
@@ -370,70 +385,45 @@ func (e paletteExec) CreateSession() error {
 }
 
 func (e paletteExec) CloseTab() error {
-	if tb := e.sess.activeTab(); tb != nil {
-		e.d.closeTab(e.sess, tb, true)
-	}
-	return nil
+	return e.runAction(daemonActionRequest{kind: daemonActionCloseTab})
 }
 
-func (e paletteExec) SplitRight() error {
-	return e.d.splitPane(e.sess, e.ac, layout.Right)
+func (e paletteExec) split(direction layout.Direction) error {
+	return e.runAction(daemonActionRequest{kind: daemonActionSplitPane, direction: direction})
 }
 
-func (e paletteExec) SplitLeft() error {
-	return e.d.splitPane(e.sess, e.ac, layout.Left)
-}
-
-func (e paletteExec) SplitUp() error {
-	return e.d.splitPane(e.sess, e.ac, layout.Up)
-}
-
-func (e paletteExec) SplitDown() error {
-	return e.d.splitPane(e.sess, e.ac, layout.Down)
-}
+func (e paletteExec) SplitRight() error { return e.split(layout.Right) }
+func (e paletteExec) SplitLeft() error  { return e.split(layout.Left) }
+func (e paletteExec) SplitUp() error    { return e.split(layout.Up) }
+func (e paletteExec) SplitDown() error  { return e.split(layout.Down) }
 
 func (e paletteExec) StackPane() error {
-	return e.d.stackPane(e.sess, e.ac)
+	return e.runAction(daemonActionRequest{kind: daemonActionStackPane})
 }
 
 func (e paletteExec) ToggleStack() error {
-	return e.d.toggleStack(e.sess, e.ac)
+	return e.runAction(daemonActionRequest{kind: daemonActionToggleStack})
 }
 
 func (e paletteExec) ClosePane() error {
-	return e.d.closeFocusedPane(e.sess, e.ac)
+	return e.runAction(daemonActionRequest{kind: daemonActionClosePane})
 }
 
-func (e paletteExec) FocusPaneLeft() error {
-	return e.d.focusDir(e.sess, e.ac, layout.Left)
+func (e paletteExec) focus(direction layout.Direction) error {
+	return e.runAction(daemonActionRequest{kind: daemonActionFocusPane, direction: direction})
 }
 
-func (e paletteExec) FocusPaneRight() error {
-	return e.d.focusDir(e.sess, e.ac, layout.Right)
-}
-
-func (e paletteExec) FocusPaneUp() error {
-	return e.d.focusDir(e.sess, e.ac, layout.Up)
-}
-
-func (e paletteExec) FocusPaneDown() error {
-	return e.d.focusDir(e.sess, e.ac, layout.Down)
-}
+func (e paletteExec) FocusPaneLeft() error  { return e.focus(layout.Left) }
+func (e paletteExec) FocusPaneRight() error { return e.focus(layout.Right) }
+func (e paletteExec) FocusPaneUp() error    { return e.focus(layout.Up) }
+func (e paletteExec) FocusPaneDown() error  { return e.focus(layout.Down) }
 
 func (e paletteExec) NextTab() error {
-	if e.sess.switchRelative(1) {
-		e.d.activateTab(e.sess, e.sess.activeTab())
-	}
-	e.d.invalidateRender(e.sess, e.ac, true, "palette.go")
-	return nil
+	return e.runAction(daemonActionRequest{kind: daemonActionNextTab})
 }
 
 func (e paletteExec) PrevTab() error {
-	if e.sess.switchRelative(-1) {
-		e.d.activateTab(e.sess, e.sess.activeTab())
-	}
-	e.d.invalidateRender(e.sess, e.ac, true, "palette.go")
-	return nil
+	return e.runAction(daemonActionRequest{kind: daemonActionPreviousTab})
 }
 
 func (e paletteExec) ToggleFloatingPane() error {
@@ -460,7 +450,7 @@ func (e paletteExec) RenameSession() error {
 	currentName := e.sess.name
 	e.sess.mu.Unlock()
 	e.d.enterPrompt(e.sess, e.ac, " Rename session ", currentName, func(name string) error {
-		return e.d.renameSession(e.sess, name)
+		return e.runAction(daemonActionRequest{kind: daemonActionRenameSession, name: name})
 	})
 	return nil
 }
@@ -474,7 +464,7 @@ func (e paletteExec) RenameTab() error {
 	currentName := tabDisplayName(tb, e.sess.active)
 	e.sess.mu.Unlock()
 	e.d.enterPrompt(e.sess, e.ac, " Rename tab ", currentName, func(name string) error {
-		return e.d.renameTab(e.sess, tb, name)
+		return e.runAction(daemonActionRequest{kind: daemonActionRenameTab, target: daemonActionTarget{session: e.sess, tab: tb}, name: name})
 	})
 	return nil
 }

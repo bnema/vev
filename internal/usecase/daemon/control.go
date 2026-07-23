@@ -57,7 +57,7 @@ func (d *Daemon) dispatchCommand(request ports.CommandRequest) ports.CommandResu
 	if code != 0 {
 		return commandFailure(code, text)
 	}
-	return d.runControl(cmd, controlExec{d: d, sess: sess, tab: tb, pane: pane}, request)
+	return d.runControl(cmd, controlExec{d: d, sess: sess, tab: tb, target: daemonActionTarget{session: sess, tab: tb, pane: pane}}, request)
 }
 
 func (d *Daemon) runControl(cmd command.Command, exec controlExec, request ports.CommandRequest) ports.CommandResult {
@@ -165,22 +165,154 @@ func paneByStableIDLocked(tb *tab, stableID string) *pane {
 	return nil
 }
 
+type daemonActionKind uint8
+
+const (
+	daemonActionCreateTab daemonActionKind = iota
+	daemonActionCloseTab
+	daemonActionSplitPane
+	daemonActionStackPane
+	daemonActionToggleStack
+	daemonActionClosePane
+	daemonActionFocusPane
+	daemonActionNextTab
+	daemonActionPreviousTab
+	daemonActionRenameSession
+	daemonActionRenameTab
+)
+
+type daemonActionTarget struct {
+	session *session
+	tab     *tab
+	pane    *pane
+}
+
+type daemonActionRequest struct {
+	kind      daemonActionKind
+	target    daemonActionTarget
+	direction layout.Direction
+	viewport  domain.Size
+	name      string
+}
+
+type daemonActionRunner interface {
+	Run(daemonActionRequest) error
+}
+
+func resolveDaemonActionTarget(sess *session) daemonActionTarget {
+	if sess == nil {
+		return daemonActionTarget{}
+	}
+	tb := sess.activeTab()
+	if tb == nil {
+		return daemonActionTarget{session: sess}
+	}
+	tb.mu.Lock()
+	pane := tb.focusedPane()
+	tb.mu.Unlock()
+	return daemonActionTarget{session: sess, tab: tb, pane: pane}
+}
+
+// daemonActions is the daemon-owned mutation seam shared by palette and
+// control. Requests contain already-resolved targets and no attachment state;
+// adapters remain responsible for their attached-client UI lifecycle.
+type daemonActions struct{ d *Daemon }
+
+func (a daemonActions) Run(request daemonActionRequest) error {
+	target := request.target
+	switch request.kind {
+	case daemonActionCreateTab:
+		return a.d.createTab(target.session, request.viewport)
+	case daemonActionCloseTab:
+		a.d.closeTab(target.session, target.tab, true)
+		return nil
+	case daemonActionSplitPane:
+		return a.d.splitPaneAt(target.session, target.tab, target.pane, request.direction)
+	case daemonActionStackPane:
+		return a.d.stackPaneAt(target.session, target.tab, target.pane)
+	case daemonActionToggleStack:
+		return a.d.toggleStackAt(target.session, target.tab, target.pane)
+	case daemonActionClosePane:
+		if a.d.ptys == nil {
+			return nil
+		}
+		if target.pane == nil {
+			return layout.ErrNotFound
+		}
+		return a.d.closePane(target.session, target.tab, target.pane.id, nil, true)
+	case daemonActionFocusPane:
+		return a.d.focusDirAt(target.session, target.tab, target.pane, request.direction)
+	case daemonActionNextTab:
+		return a.switchRelative(target.session, 1)
+	case daemonActionPreviousTab:
+		return a.switchRelative(target.session, -1)
+	case daemonActionRenameSession:
+		return a.d.renameSession(target.session, request.name)
+	case daemonActionRenameTab:
+		return a.d.renameTab(target.session, target.tab, request.name)
+	default:
+		return errors.New("daemon: unknown action")
+	}
+}
+
+func (a daemonActions) switchRelative(sess *session, delta int) error {
+	if sess.switchRelative(delta) {
+		a.d.activateTab(sess, sess.activeTab())
+	}
+	return nil
+}
+
 // controlExec implements command.ControlContext against resolved daemon-owned
 // targets. It deliberately contains no attached-client state.
 type controlExec struct {
-	d    *Daemon
-	sess *session
-	tab  *tab
-	pane *pane
+	d       *Daemon
+	sess    *session
+	tab     *tab
+	target  daemonActionTarget
+	actions daemonActionRunner
 }
 
-func (e controlExec) client() *attachedClient {
-	e.sess.mu.Lock()
-	defer e.sess.mu.Unlock()
-	return e.sess.client
+func (e controlExec) runAction(request daemonActionRequest) error {
+	if request.target.session == nil {
+		request.target = e.target
+	}
+	runner := e.actions
+	if runner == nil {
+		runner = daemonActions{d: e.d}
+	}
+	err := runner.Run(request)
+	if err == nil && e.actions == nil {
+		e.sess.mu.Lock()
+		ac := e.sess.client
+		e.sess.mu.Unlock()
+		finishDaemonActionForClient(e.d, request, ac, "control.go")
+	}
+	return err
 }
 
-func (e controlExec) CreateTab() error { return e.d.createTab(e.sess, e.sess.fullViewportSize()) }
+func finishDaemonActionForClient(d *Daemon, request daemonActionRequest, ac *attachedClient, producer string) {
+	if ac == nil {
+		return
+	}
+	if request.kind == daemonActionFocusPane && request.target.tab != nil && request.target.pane != nil {
+		tb := request.target.tab
+		tb.mu.Lock()
+		newFocus := tb.tree.Focus
+		pl, hasPlacement := focusedPlacementLocked(tb)
+		tb.mu.Unlock()
+		if newFocus != request.target.pane.id {
+			d.exitCopyMode(ac)
+			if hasPlacement && pl.TitleBar.Height > 0 {
+				d.refreshPaneTitleOnFocus(request.target.session, newFocus)
+			}
+		}
+	}
+	d.invalidateRender(request.target.session, ac, true, producer)
+}
+
+func (e controlExec) CreateTab() error {
+	return e.runAction(daemonActionRequest{kind: daemonActionCreateTab, viewport: e.sess.fullViewportSize()})
+}
 func (e controlExec) CreateSessionNamed(name string) error {
 	if err := domain.ValidateSessionName(name); err != nil {
 		return command.ErrInvalidArguments
@@ -201,51 +333,42 @@ func (e controlExec) CreateSessionNamed(name string) error {
 	return err
 }
 func (e controlExec) CloseTab() error {
-	e.d.closeTab(e.sess, e.tab, true)
-	return nil
+	return e.runAction(daemonActionRequest{kind: daemonActionCloseTab})
 }
 func (e controlExec) ClosePane() error {
-	return e.d.closeFocusedPane(e.sess, e.client())
+	return e.runAction(daemonActionRequest{kind: daemonActionClosePane})
 }
-func (e controlExec) SplitRight() error {
-	return e.d.splitPane(e.sess, e.client(), layout.Right)
+func (e controlExec) split(direction layout.Direction) error {
+	return e.runAction(daemonActionRequest{kind: daemonActionSplitPane, direction: direction})
 }
-func (e controlExec) SplitLeft() error {
-	return e.d.splitPane(e.sess, e.client(), layout.Left)
+func (e controlExec) SplitRight() error { return e.split(layout.Right) }
+func (e controlExec) SplitLeft() error  { return e.split(layout.Left) }
+func (e controlExec) SplitUp() error    { return e.split(layout.Up) }
+func (e controlExec) SplitDown() error  { return e.split(layout.Down) }
+func (e controlExec) StackPane() error {
+	return e.runAction(daemonActionRequest{kind: daemonActionStackPane})
 }
-func (e controlExec) SplitUp() error {
-	return e.d.splitPane(e.sess, e.client(), layout.Up)
-}
-func (e controlExec) SplitDown() error {
-	return e.d.splitPane(e.sess, e.client(), layout.Down)
-}
-func (e controlExec) StackPane() error { return e.d.stackPane(e.sess, e.client()) }
 func (e controlExec) ToggleStack() error {
-	return e.d.toggleStack(e.sess, e.client())
+	return e.runAction(daemonActionRequest{kind: daemonActionToggleStack})
 }
-func (e controlExec) FocusPaneLeft() error {
-	return e.d.focusDir(e.sess, e.client(), layout.Left)
+func (e controlExec) focus(direction layout.Direction) error {
+	return e.runAction(daemonActionRequest{kind: daemonActionFocusPane, direction: direction})
 }
-func (e controlExec) FocusPaneRight() error {
-	return e.d.focusDir(e.sess, e.client(), layout.Right)
+func (e controlExec) FocusPaneLeft() error  { return e.focus(layout.Left) }
+func (e controlExec) FocusPaneRight() error { return e.focus(layout.Right) }
+func (e controlExec) FocusPaneUp() error    { return e.focus(layout.Up) }
+func (e controlExec) FocusPaneDown() error  { return e.focus(layout.Down) }
+func (e controlExec) NextTab() error {
+	return e.runAction(daemonActionRequest{kind: daemonActionNextTab})
 }
-func (e controlExec) FocusPaneUp() error {
-	return e.d.focusDir(e.sess, e.client(), layout.Up)
+func (e controlExec) PrevTab() error {
+	return e.runAction(daemonActionRequest{kind: daemonActionPreviousTab})
 }
-func (e controlExec) FocusPaneDown() error {
-	return e.d.focusDir(e.sess, e.client(), layout.Down)
+func (e controlExec) RenameSessionTo(name string) error {
+	return e.runAction(daemonActionRequest{kind: daemonActionRenameSession, name: name})
 }
-func (e controlExec) NextTab() error { return e.switchRelative(1) }
-func (e controlExec) PrevTab() error { return e.switchRelative(-1) }
-func (e controlExec) switchRelative(delta int) error {
-	if e.sess.switchRelative(delta) {
-		e.d.activateTab(e.sess, e.sess.activeTab())
-	}
-	return nil
-}
-func (e controlExec) RenameSessionTo(name string) error { return e.d.renameSession(e.sess, name) }
 func (e controlExec) RenameTabTo(name string) error {
-	return e.d.renameTab(e.sess, e.tab, name)
+	return e.runAction(daemonActionRequest{kind: daemonActionRenameTab, name: name})
 }
 func (e controlExec) Toast(severity, message string) error {
 	var level domain.NoticeSeverity

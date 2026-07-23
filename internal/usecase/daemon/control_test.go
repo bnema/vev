@@ -9,8 +9,43 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPaletteAndControlShareExplicitDaemonActionTarget(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := addControlSession(d, "work", "t_work", "p_work")
+	tb := sess.activeTab()
+	tb.mu.Lock()
+	pane := tb.focusedPane()
+	tb.mu.Unlock()
+	spy := &actionRunnerSpy{}
+
+	require.NoError(t, (paletteExec{d: d, sess: sess, actions: spy}).SplitRight())
+	require.NoError(t, (controlExec{
+		d: d, sess: sess, tab: tb, actions: spy,
+		target: daemonActionTarget{session: sess, tab: tb, pane: pane},
+	}).SplitRight())
+
+	require.Len(t, spy.requests, 2)
+	for _, request := range spy.requests {
+		require.Equal(t, daemonActionSplitPane, request.kind)
+		require.Same(t, sess, request.target.session)
+		require.Same(t, tb, request.target.tab)
+		require.Same(t, pane, request.target.pane)
+		require.Equal(t, layout.Right, request.direction)
+	}
+}
+
+type actionRunnerSpy struct {
+	requests []daemonActionRequest
+}
+
+func (s *actionRunnerSpy) Run(request daemonActionRequest) error {
+	s.requests = append(s.requests, request)
+	return nil
+}
 
 func TestHandleCommandRejectsVersionBeforeDecodeOrDispatch(t *testing.T) {
 	// The version prefix is valid and mismatched, while the remainder is not a
