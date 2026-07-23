@@ -40,6 +40,18 @@ vev kill <name>                  kill a session (--all kills everything)
 
 The daemon starts on first use and exits with the last session. Ephemeral sessions are numbered, survive detach, and disappear with the daemon. Named sessions persist across daemon restarts and come back with their layout, scrollback, and allowlisted processes.
 
+## Scripting
+
+`vev cmd` runs control commands against a running daemon; it never starts one. For example:
+
+```sh
+vev cmd split-right
+vev cmd toast -l warn "build failed"
+vev cmd list-panes --json
+```
+
+Target a session explicitly with `-s` (`vev cmd -s work new-tab`). Otherwise vev uses `$VEV` inside a pane, then the only live session; ambiguous targets fail. Run `vev cmd --help` for the scriptable command list and `vev cmd <command> --help` for command usage.
+
 ## Keys
 
 No prefix key; everything is Alt.
