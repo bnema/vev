@@ -258,21 +258,26 @@ type udpReady struct {
 }
 
 func readUDPReady(r io.Reader) (udpReady, error) {
-	line, err := bufio.NewReader(r).ReadString('\n')
-	if err != nil && line == "" {
-		return udpReady{}, err
-	}
-
-	ready := udpReady{key: make([]byte, pdgram.KeySize)}
-	var parseErr error
+	out := make([]byte, pdgram.KeySize)
+	var (
+		port     int
+		keyLen   int
+		parseErr error
+	)
 	pdgram.SecretDo(func() {
+		line, err := bufio.NewReader(r).ReadString('\n')
+		if err != nil && line == "" {
+			parseErr = err
+			return
+		}
+
 		fields := strings.Fields(line)
 		if len(fields) != 3 || fields[0] != "VEV-UDP" {
 			parseErr = fmt.Errorf("malformed UDP readiness line")
 			return
 		}
-		ready.port, parseErr = strconv.Atoi(fields[1])
-		if parseErr != nil || ready.port < 1 || ready.port > 65535 {
+		port, parseErr = strconv.Atoi(fields[1])
+		if parseErr != nil || port < 1 || port > 65535 {
 			parseErr = fmt.Errorf("invalid UDP port %q", fields[1])
 			return
 		}
@@ -282,17 +287,18 @@ func readUDPReady(r io.Reader) (udpReady, error) {
 			parseErr = fmt.Errorf("invalid bootstrap key: %w", decodeErr)
 			return
 		}
-		if len(key) != pdgram.KeySize {
-			parseErr = fmt.Errorf("invalid bootstrap key length %d", len(key))
-			return
-		}
-		copy(ready.key, key)
+		keyLen = len(key)
+		copy(out, key)
 	})
 	if parseErr != nil {
-		pdgram.Erase(ready.key)
+		pdgram.Erase(out)
 		return udpReady{}, parseErr
 	}
-	return ready, nil
+	if keyLen != pdgram.KeySize {
+		pdgram.Erase(out)
+		return udpReady{}, fmt.Errorf("invalid bootstrap key length %d", keyLen)
+	}
+	return udpReady{port: port, key: out}, nil
 }
 
 func udpUnavailable(action string, err error, stderr fmt.Stringer) error {
