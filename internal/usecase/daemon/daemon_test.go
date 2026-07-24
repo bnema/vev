@@ -65,11 +65,18 @@ func (t *signalTimer) Stop() bool               { return true }
 
 func newTestDaemon(t testing.TB, ptys ports.PTYFactory, clk ports.Clock) *Daemon {
 	t.Helper()
+	return newTestDaemonWithCleanup(t, ptys, clk, true)
+}
+
+func newTestDaemonWithCleanup(t testing.TB, ptys ports.PTYFactory, clk ports.Clock, registerCleanup bool) *Daemon {
+	t.Helper()
 	d := New(ptys, clk, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
 	d.hardCtx, d.hardCancel = context.WithCancel(context.Background())
-	t.Cleanup(d.serveCancel)
-	t.Cleanup(d.hardCancel)
+	if registerCleanup {
+		t.Cleanup(d.serveCancel)
+		t.Cleanup(d.hardCancel)
+	}
 	return d
 }
 
@@ -368,7 +375,12 @@ func newCapturingTransport(t testing.TB) (*portsmocks.MockTransport, chan ports.
 
 func newManualSessionWithPTYs(t testing.TB, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan ports.Frame) {
 	t.Helper()
-	d := newTestDaemon(t, nil, stubClock{})
+	return newManualSessionWithPTYsCleanup(t, true, ptys...)
+}
+
+func newManualSessionWithPTYsCleanup(t testing.TB, registerCleanup bool, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan ports.Frame) {
+	t.Helper()
+	d := newTestDaemonWithCleanup(t, nil, stubClock{}, registerCleanup)
 	tr, sends := newCapturingTransport(t)
 	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
 	ac.initOverlays()
@@ -387,7 +399,9 @@ func newManualSessionWithPTYs(t testing.TB, ptys ...ports.PTY) (*Daemon, *sessio
 	ac.setSession(sess)
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, nil)
 	d.sessions[sess.id] = sess
-	t.Cleanup(cancel)
+	if registerCleanup {
+		t.Cleanup(cancel)
+	}
 	return d, sess, ac, sends
 }
 
