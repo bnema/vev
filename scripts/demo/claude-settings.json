@@ -1,0 +1,6 @@
+{
+  "preferredNotifChannel": "terminal_bell",
+  "permissions": {
+    "allow": ["Bash(sleep:*)"]
+  }
+}

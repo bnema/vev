@@ -1,4 +1,4 @@
-.PHONY: install test test-installer lint mocks
+.PHONY: install test test-installer lint mocks demo
 
 install:
 	go install .
@@ -24,3 +24,9 @@ mocks:
 		exit 1; \
 	fi
 	mockery
+
+demo:
+	docker build -f scripts/demo/Dockerfile -t vev-demo .
+	./scripts/demo/run.sh demo.tape
+	mkdir -p docs/assets
+	cp scripts/demo/out/demo.gif docs/assets/demo.gif
