@@ -540,15 +540,16 @@ func benchmarkIncrementalSnapshotRepository(b *testing.B, scenario snapshotBench
 	b.ResetTimer()
 	for operation := 0; b.Loop(); operation++ {
 		func() {
-			// A new fixture is deliberately outside the timed region. It gives every
-			// iteration the same filesystem state: initial has no generation,
-			// unchanged/visible/tail/sealed begin after one persisted generation.
-			// Reusing one fixture would eventually turn a tail into a sealed chunk
-			// and dilute initial-write bytes over later idempotent publications.
-			b.StopTimer()
+			// A new fixture gives every iteration the same filesystem state: initial
+			// has no generation, while changed scenarios begin after one persisted
+			// generation. Keep its expensive 10k-row construction timed so benchmark
+			// calibration accounts for real wall time instead of scheduling thousands
+			// of hidden setup iterations.
+			//
 			// b.Cleanup retains callbacks until the sub-benchmark ends; deferring an
-			// explicit close avoids retaining every 10k-row fixture and OOM.
+			// explicit close avoids retaining every fixture and OOM.
 			fixture := newPerformanceFixtureWithCleanup(b, performanceConfig{size: scenario.size, panes: 1, historyRows: scenario.historyRows}, false)
+			b.StopTimer()
 			defer func() {
 				b.StopTimer()
 				if err := fixture.close(); err != nil {
