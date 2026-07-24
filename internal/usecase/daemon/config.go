@@ -113,7 +113,7 @@ func configWarningsError(warnings []domain.Warning) error {
 }
 
 func (d *Daemon) buildCodeOverrides(configured map[string]string) (map[string]string, []domain.Warning) {
-	commands := command.Registry()
+	commands := command.PaletteRegistry()
 	bySlug := make(map[string]command.Command, len(commands))
 	for _, cmd := range commands {
 		bySlug[cmd.Slug] = cmd
@@ -294,7 +294,7 @@ func commandWithOverrides(cmd command.Command, overrides map[string]string) comm
 func (d *Daemon) commandByEffectiveCode(code string) (command.Command, bool) {
 	code = strings.ToUpper(strings.TrimSpace(code))
 	overrides := d.codeOverrideSnapshot()
-	for _, cmd := range command.Registry() {
+	for _, cmd := range command.PaletteRegistry() {
 		cmd = commandWithOverrides(cmd, overrides)
 		if cmd.Code == code {
 			return cmd, true

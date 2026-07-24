@@ -41,6 +41,7 @@ const (
 	NoticeClipboardTooLarge
 	NoticeAutoResume
 	NoticeConnection
+	NoticeUser
 
 	// noticeCodeLimit is an append-only declaration sentinel, not a persisted
 	// valid notice code. Keep it last when adding a NoticeCode.
@@ -68,6 +69,7 @@ var noticeSlugs = map[NoticeCode]string{
 	NoticeClipboardTooLarge:  "clipboard-too-large",
 	NoticeAutoResume:         "auto-resume",
 	NoticeConnection:         "connection",
+	NoticeUser:               "user",
 }
 
 func (c NoticeCode) String() string {

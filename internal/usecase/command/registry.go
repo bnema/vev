@@ -2,54 +2,126 @@ package command
 
 import "strings"
 
-// Registry returns all commands in display order.
+// Registry returns all palette and control commands in stable display order.
 func Registry() []Command {
 	commands := []Command{
-		{Slug: "new-tab", Code: "CNT", Name: "New tab", Desc: "Create a new tab", Run: func(ctx Context, _ []string) error { return ctx.CreateTab() }},
-		{Slug: "new-session", Code: "CNS", Name: "New session", Desc: "Create and switch to a named session", Run: func(ctx Context, _ []string) error { return ctx.CreateSession() }},
-		{Slug: "close-tab", Code: "CLT", Name: "Close tab", Desc: "Close the current tab", Run: func(ctx Context, _ []string) error { return ctx.CloseTab() }},
-		{Slug: "split-right", Code: "SPR", Name: "Split right", Desc: "Split the focused pane to the right", Run: func(ctx Context, _ []string) error { return ctx.SplitRight() }},
-		{Slug: "split-left", Code: "SPL", Name: "Split left", Desc: "Split the focused pane to the left", Run: func(ctx Context, _ []string) error { return ctx.SplitLeft() }},
-		{Slug: "split-up", Code: "SPU", Name: "Split up", Desc: "Split the focused pane upward", Run: func(ctx Context, _ []string) error { return ctx.SplitUp() }},
-		{Slug: "split-down", Code: "SPD", Name: "Split down", Desc: "Split the focused pane downward", Run: func(ctx Context, _ []string) error { return ctx.SplitDown() }},
-		{Slug: "stack-pane", Code: "STP", Name: "Stack pane", Desc: "Create a new pane in a stack", Run: func(ctx Context, _ []string) error { return ctx.StackPane() }},
-		{Slug: "toggle-stack", Code: "TST", Name: "Toggle stack", Desc: "Toggle the focused pane stack", Run: func(ctx Context, _ []string) error { return ctx.ToggleStack() }},
-		{Slug: "toggle-floating-pane", Code: "FLT", Name: "Toggle floating pane", Desc: "Toggle the floating pane", Run: func(ctx Context, _ []string) error { return ctx.ToggleFloatingPane() }},
-		{Slug: "close-pane", Code: "CLP", Name: "Close pane", Desc: "Close the focused pane", Run: func(ctx Context, _ []string) error { return ctx.ClosePane() }},
-		{Slug: "focus-pane-left", Code: "FPL", Name: "Focus pane left", Desc: "Focus the pane to the left", Run: func(ctx Context, _ []string) error { return ctx.FocusPaneLeft() }},
-		{Slug: "focus-pane-right", Code: "FPR", Name: "Focus pane right", Desc: "Focus the pane to the right", Run: func(ctx Context, _ []string) error { return ctx.FocusPaneRight() }},
-		{Slug: "focus-pane-up", Code: "FPU", Name: "Focus pane up", Desc: "Focus the pane above", Run: func(ctx Context, _ []string) error { return ctx.FocusPaneUp() }},
-		{Slug: "focus-pane-down", Code: "FPD", Name: "Focus pane down", Desc: "Focus the pane below", Run: func(ctx Context, _ []string) error { return ctx.FocusPaneDown() }},
-		{Slug: "next-tab", Code: "NXT", Name: "Next tab", Desc: "Switch to the next tab", Run: func(ctx Context, _ []string) error { return ctx.NextTab() }},
-		{Slug: "previous-tab", Code: "PVT", Name: "Previous tab", Desc: "Switch to the previous tab", Run: func(ctx Context, _ []string) error { return ctx.PrevTab() }},
-		{Slug: "back-session", Code: "BSK", Name: "Previous session", Desc: "Toggle the previously active session", Run: func(ctx Context, _ []string) error { return ctx.BackSession() }},
-		{Slug: "jump-recent-session", Code: "JRS", Name: "Jump to recent session", Desc: "Jump to a recent session by rank", Arguments: ArgumentsRequired, ContextHint: ContextHintRecentSessions, Run: func(ctx Context, args []string) error {
+		paletteControl("new-tab", "CNT", "New tab", "Create a new tab", TargetSession, func(ctx Context, _ []string) error { return ctx.CreateTab() }, func(ctx ControlContext) error { return ctx.CreateTab() }),
+		paletteControlOne("new-session", "CNS", "New session", "Create and switch to a named session", TargetSession, func(ctx Context, _ []string) error { return ctx.CreateSession() }, func(ctx ControlContext, name string) error { return ctx.CreateSessionNamed(name) }),
+		paletteControl("close-tab", "CLT", "Close tab", "Close the current tab", TargetTab, func(ctx Context, _ []string) error { return ctx.CloseTab() }, func(ctx ControlContext) error { return ctx.CloseTab() }),
+		paletteControl("split-right", "SPR", "Split right", "Split the focused pane to the right", TargetPane, func(ctx Context, _ []string) error { return ctx.SplitRight() }, func(ctx ControlContext) error { return ctx.SplitRight() }),
+		paletteControl("split-left", "SPL", "Split left", "Split the focused pane to the left", TargetPane, func(ctx Context, _ []string) error { return ctx.SplitLeft() }, func(ctx ControlContext) error { return ctx.SplitLeft() }),
+		paletteControl("split-up", "SPU", "Split up", "Split the focused pane upward", TargetPane, func(ctx Context, _ []string) error { return ctx.SplitUp() }, func(ctx ControlContext) error { return ctx.SplitUp() }),
+		paletteControl("split-down", "SPD", "Split down", "Split the focused pane downward", TargetPane, func(ctx Context, _ []string) error { return ctx.SplitDown() }, func(ctx ControlContext) error { return ctx.SplitDown() }),
+		paletteControl("stack-pane", "STP", "Stack pane", "Create a new pane in a stack", TargetPane, func(ctx Context, _ []string) error { return ctx.StackPane() }, func(ctx ControlContext) error { return ctx.StackPane() }),
+		paletteControl("toggle-stack", "TST", "Toggle stack", "Toggle the focused pane stack", TargetPane, func(ctx Context, _ []string) error { return ctx.ToggleStack() }, func(ctx ControlContext) error { return ctx.ToggleStack() }),
+		paletteOnly("toggle-floating-pane", "FLT", "Toggle floating pane", "Toggle the floating pane", func(ctx Context, _ []string) error { return ctx.ToggleFloatingPane() }),
+		paletteControl("close-pane", "CLP", "Close pane", "Close the focused pane", TargetPane, func(ctx Context, _ []string) error { return ctx.ClosePane() }, func(ctx ControlContext) error { return ctx.ClosePane() }),
+		paletteControl("focus-pane-left", "FPL", "Focus pane left", "Focus the pane to the left", TargetPane, func(ctx Context, _ []string) error { return ctx.FocusPaneLeft() }, func(ctx ControlContext) error { return ctx.FocusPaneLeft() }),
+		paletteControl("focus-pane-right", "FPR", "Focus pane right", "Focus the pane to the right", TargetPane, func(ctx Context, _ []string) error { return ctx.FocusPaneRight() }, func(ctx ControlContext) error { return ctx.FocusPaneRight() }),
+		paletteControl("focus-pane-up", "FPU", "Focus pane up", "Focus the pane above", TargetPane, func(ctx Context, _ []string) error { return ctx.FocusPaneUp() }, func(ctx ControlContext) error { return ctx.FocusPaneUp() }),
+		paletteControl("focus-pane-down", "FPD", "Focus pane down", "Focus the pane below", TargetPane, func(ctx Context, _ []string) error { return ctx.FocusPaneDown() }, func(ctx ControlContext) error { return ctx.FocusPaneDown() }),
+		paletteControl("next-tab", "NXT", "Next tab", "Switch to the next tab", TargetSession, func(ctx Context, _ []string) error { return ctx.NextTab() }, func(ctx ControlContext) error { return ctx.NextTab() }),
+		paletteControl("previous-tab", "PVT", "Previous tab", "Switch to the previous tab", TargetSession, func(ctx Context, _ []string) error { return ctx.PrevTab() }, func(ctx ControlContext) error { return ctx.PrevTab() }),
+		paletteOnly("back-session", "BSK", "Previous session", "Toggle the previously active session", func(ctx Context, _ []string) error { return ctx.BackSession() }),
+		{Slug: "jump-recent-session", Code: "JRS", Name: "Jump to recent session", Desc: "Jump to a recent session by rank", Usage: "jump-recent-session <rank>", PaletteVisible: true, Arguments: ArgumentsRequired, ContextHint: ContextHintRecentSessions, Run: func(ctx Context, args []string) error {
 			rank, err := ParsePositiveDecimal(args)
 			if err != nil {
 				return err
 			}
 			return ctx.JumpRecentSession(rank)
 		}},
-		{Slug: "session-picker", Code: "SSP", Name: "Session picker", Desc: "Open the session picker", Run: func(ctx Context, _ []string) error { return ctx.OpenSessionPicker() }},
-		{Slug: "notifications", Code: "NTC", Name: "Notifications", Desc: "Show notification history", Run: func(ctx Context, _ []string) error { return ctx.OpenNotifications() }},
-		{Slug: "yank-last-notification", Code: "YLN", Name: "Yank last notification", Desc: "Copy the most recent notification's details to the clipboard", Run: func(ctx Context, _ []string) error { return ctx.YankLastNotification() }},
-		{Slug: "visual-mode", Code: "VIS", Name: "Visual mode", Desc: "Enter visual mode", Run: func(ctx Context, _ []string) error { return ctx.EnterVisualMode() }},
-		{Slug: "rename-session", Code: "RNS", Name: "Rename session", Desc: "Rename the session (an ephemeral session becomes named)", Run: func(ctx Context, _ []string) error { return ctx.RenameSession() }},
-		{Slug: "rename-tab", Code: "RNT", Name: "Rename tab", Desc: "Rename the current tab", Run: func(ctx Context, _ []string) error { return ctx.RenameTab() }},
-		{Slug: "detach", Code: "DET", Name: "Detach", Desc: "Detach from the session", Run: func(ctx Context, _ []string) error { return ctx.Detach() }},
+		paletteOnly("session-picker", "SSP", "Session picker", "Open the session picker", func(ctx Context, _ []string) error { return ctx.OpenSessionPicker() }),
+		paletteOnly("notifications", "NTC", "Notifications", "Show notification history", func(ctx Context, _ []string) error { return ctx.OpenNotifications() }),
+		paletteOnly("yank-last-notification", "YLN", "Yank last notification", "Copy the most recent notification's details to the clipboard", func(ctx Context, _ []string) error { return ctx.YankLastNotification() }),
+		paletteOnly("visual-mode", "VIS", "Visual mode", "Enter visual mode", func(ctx Context, _ []string) error { return ctx.EnterVisualMode() }),
+		paletteControlOne("rename-session", "RNS", "Rename session", "Rename the session (an ephemeral session becomes named)", TargetSession, func(ctx Context, _ []string) error { return ctx.RenameSession() }, func(ctx ControlContext, name string) error { return ctx.RenameSessionTo(name) }),
+		paletteControlOne("rename-tab", "RNT", "Rename tab", "Rename the current tab", TargetTab, func(ctx Context, _ []string) error { return ctx.RenameTab() }, func(ctx ControlContext, name string) error { return ctx.RenameTabTo(name) }),
+		paletteOnly("detach", "DET", "Detach", "Detach from the session", func(ctx Context, _ []string) error { return ctx.Detach() }),
+		toastCommand(),
+		listCommand("list-sessions", "List sessions", "List sessions with active markers", TargetNone, func(ctx ControlContext, json bool) (string, error) { return ctx.ListSessions(json) }),
+		listCommand("list-tabs", "List tabs", "List tabs in the target session", TargetSession, func(ctx ControlContext, json bool) (string, error) { return ctx.ListTabs(json) }),
+		listCommand("list-panes", "List panes", "List panes in the target tab", TargetTab, func(ctx ControlContext, json bool) (string, error) { return ctx.ListPanes(json) }),
 	}
-
 	return commands
+}
+
+func paletteOnly(slug, code, name, desc string, run func(Context, []string) error) Command {
+	return Command{Slug: slug, Code: code, Name: name, Desc: desc, Usage: slug, PaletteVisible: true, Run: run}
+}
+
+func paletteControl(slug, code, name, desc string, target TargetKind, run func(Context, []string) error, control func(ControlContext) error) Command {
+	return Command{Slug: slug, Code: code, Name: name, Desc: desc, Usage: slug, PaletteVisible: true, Scriptable: true, Target: target, Run: run, Control: func(ctx ControlContext, args []string, _ ControlOptions) (ControlResult, error) {
+		if len(args) != 0 {
+			return ControlResult{}, ErrInvalidArguments
+		}
+		return ControlResult{}, control(ctx)
+	}}
+}
+
+func paletteControlOne(slug, code, name, desc string, target TargetKind, run func(Context, []string) error, control func(ControlContext, string) error) Command {
+	cmd := Command{Slug: slug, Code: code, Name: name, Desc: desc, Usage: slug + " <name>", PaletteVisible: true, Scriptable: true, Target: target, Run: run}
+	cmd.Control = func(ctx ControlContext, args []string, _ ControlOptions) (ControlResult, error) {
+		if len(args) != 1 || args[0] == "" {
+			return ControlResult{}, ErrInvalidArguments
+		}
+		return ControlResult{}, control(ctx, args[0])
+	}
+	return cmd
+}
+
+func toastCommand() Command {
+	return Command{Slug: "toast", Name: "Toast", Desc: "Show a toast notification in the target session", Usage: "toast [-l info|warn|error] <message>", Scriptable: true, Target: TargetSession, Control: func(ctx ControlContext, args []string, _ ControlOptions) (ControlResult, error) {
+		severity := "info"
+		if len(args) >= 2 && args[0] == "-l" {
+			severity = args[1]
+			args = args[2:]
+		}
+		if len(args) != 1 || args[0] == "" {
+			return ControlResult{}, ErrInvalidArguments
+		}
+		return ControlResult{}, ctx.Toast(severity, args[0])
+	}}
+}
+
+func listCommand(slug, name, desc string, target TargetKind, list func(ControlContext, bool) (string, error)) Command {
+	return Command{Slug: slug, Name: name, Desc: desc, Usage: slug + " [--json]", Scriptable: true, Target: target, Control: func(ctx ControlContext, args []string, opts ControlOptions) (ControlResult, error) {
+		if len(args) != 0 {
+			return ControlResult{}, ErrInvalidArguments
+		}
+		out, err := list(ctx, opts.JSON)
+		return ControlResult{Output: out}, err
+	}}
 }
 
 // ByCode returns the command matching code, case-insensitively.
 func ByCode(code string) (Command, bool) {
 	code = strings.ToUpper(code)
-	for _, cmd := range Registry() {
+	for _, cmd := range PaletteRegistry() {
 		if cmd.Code == code {
 			return cmd, true
 		}
 	}
-
 	return Command{}, false
+}
+
+// BySlug returns the exact command slug. Slugs are stable CLI identifiers.
+func BySlug(slug string) (Command, bool) {
+	for _, cmd := range Registry() {
+		if cmd.Slug == slug {
+			return cmd, true
+		}
+	}
+	return Command{}, false
+}
+
+// PaletteRegistry returns commands visible in the in-band palette.
+func PaletteRegistry() []Command {
+	all := Registry()
+	out := make([]Command, 0, len(all))
+	for _, cmd := range all {
+		if cmd.PaletteVisible {
+			out = append(out, cmd)
+		}
+	}
+	return out
 }

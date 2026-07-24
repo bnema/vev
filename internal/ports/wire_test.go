@@ -3,6 +3,7 @@ package ports
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"reflect"
 	"testing"
 
@@ -121,7 +122,7 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 			Env:     []string{"A=B", "XY=123"},
 		})
 		want := []byte{
-			0x00, 0x11, 0x00, // version, intent
+			0x00, 0x12, 0x00, // version, intent
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // client ID
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // resume token
@@ -335,7 +336,7 @@ func TestThemeGenerationClearedWireGoldenPreservesProtocolVersion(t *testing.T) 
 	}
 	want := append([]byte{0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00}, make([]byte, 48)...)
 	require.Equal(t, want, MarshalTheme(cleared))
-	require.Equal(t, uint16(17), ProtocolVersion)
+	require.Equal(t, uint16(18), ProtocolVersion)
 }
 
 func TestResizeGoldenAndRoundTrip(t *testing.T) {
@@ -440,6 +441,145 @@ func TestWelcomeGoldenAndRoundTrip(t *testing.T) {
 	full := MarshalWelcome(tests[0].msg)
 	assertAllPrefixesFail(t, full, UnmarshalWelcome)
 	assertTrailingGarbageFails(t, full, UnmarshalWelcome)
+}
+
+func TestCommandErrorCodes(t *testing.T) {
+	require.Equal(t, uint16(6), ErrUnknownCommand)
+	require.Equal(t, uint16(7), ErrNotScriptable)
+	require.Equal(t, uint16(8), ErrInvalidCommandArgs)
+	require.Equal(t, uint16(9), ErrNoSuchTarget)
+	require.Equal(t, uint16(10), ErrAmbiguousTarget)
+}
+
+func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  CommandRequest
+		want []byte
+	}{
+		{
+			name: "minimal",
+			msg:  CommandRequest{Version: ProtocolVersion, Slug: "split-right"},
+			want: []byte{
+				0x00, 0x12,
+				0x00,
+				0x00, 0x0b, 's', 'p', 'l', 'i', 't', '-', 'r', 'i', 'g', 'h', 't',
+				0x00, 0x00,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x00,
+			},
+		},
+		{
+			name: "full",
+			msg: CommandRequest{
+				Version:       ProtocolVersion,
+				Self:          true,
+				Slug:          "toast",
+				Args:          []string{"-l", "warn", "tests KO"},
+				TargetSession: "dev",
+				TargetTab:     "t_abc",
+				TargetPane:    "p_def",
+				JSON:          true,
+			},
+			want: []byte{
+				0x00, 0x12,
+				0x01,
+				0x00, 0x05, 't', 'o', 'a', 's', 't',
+				0x00, 0x03,
+				0x00, 0x00, 0x00, 0x02, '-', 'l',
+				0x00, 0x00, 0x00, 0x04, 'w', 'a', 'r', 'n',
+				0x00, 0x00, 0x00, 0x08, 't', 'e', 's', 't', 's', ' ', 'K', 'O',
+				0x00, 0x03, 'd', 'e', 'v',
+				0x00, 0x05, 't', '_', 'a', 'b', 'c',
+				0x00, 0x05, 'p', '_', 'd', 'e', 'f',
+				0x01,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := MarshalCommandRequest(tt.msg)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+			back, err := UnmarshalCommandRequest(got)
+			require.NoError(t, err)
+			require.Equal(t, tt.msg, back)
+			version, ok := PeekCommandVersion(got)
+			require.True(t, ok)
+			require.Equal(t, tt.msg.Version, version)
+			assertAllPrefixesFail(t, got, UnmarshalCommandRequest)
+			assertTrailingGarbageFails(t, got, UnmarshalCommandRequest)
+		})
+	}
+
+	if _, ok := PeekCommandVersion([]byte{0x00}); ok {
+		t.Fatal("PeekCommandVersion accepted a one-byte payload")
+	}
+}
+
+func TestMarshalCommandRequestRejectsTooManyArguments(t *testing.T) {
+	payload, err := MarshalCommandRequest(CommandRequest{
+		Version: ProtocolVersion,
+		Slug:    "toast",
+		Args:    make([]string, math.MaxUint16+1),
+	})
+
+	require.Nil(t, payload)
+	require.ErrorIs(t, err, ErrTooManyCommandArgs)
+}
+
+func TestCommandRequestRejectsImpossibleArgumentCount(t *testing.T) {
+	payload, err := MarshalCommandRequest(CommandRequest{Version: ProtocolVersion, Slug: "toast"})
+	require.NoError(t, err)
+	argCountOffset := 2 + 1 + 2 + len("toast")
+	payload[argCountOffset] = 0xff
+	payload[argCountOffset+1] = 0xff
+
+	if _, err := UnmarshalCommandRequest(payload); err == nil {
+		t.Fatal("UnmarshalCommandRequest accepted an impossible argument count")
+	}
+}
+
+func TestCommandResultGoldenAndRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  CommandResult
+		want []byte
+	}{
+		{
+			name: "error",
+			msg:  CommandResult{Code: ErrNoSuchTarget, Text: "no such session"},
+			want: []byte{
+				0x00,
+				0x00, 0x09,
+				0x00, 0x0f, 'n', 'o', ' ', 's', 'u', 'c', 'h', ' ', 's', 'e', 's', 's', 'i', 'o', 'n',
+				0x00, 0x00, 0x00, 0x00,
+			},
+		},
+		{
+			name: "success with output",
+			msg:  CommandResult{OK: true, Text: "listed", Output: "ID\tFOCUSED\n"},
+			want: []byte{
+				0x01,
+				0x00, 0x00,
+				0x00, 0x06, 'l', 'i', 's', 't', 'e', 'd',
+				0x00, 0x00, 0x00, 0x0b, 'I', 'D', '\t', 'F', 'O', 'C', 'U', 'S', 'E', 'D', '\n',
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MarshalCommandResult(tt.msg)
+			require.Equal(t, tt.want, got)
+			back, err := UnmarshalCommandResult(got)
+			require.NoError(t, err)
+			require.Equal(t, tt.msg, back)
+			assertAllPrefixesFail(t, got, UnmarshalCommandResult)
+			assertTrailingGarbageFails(t, got, UnmarshalCommandResult)
+		})
+	}
 }
 
 func TestErrorMsgGoldenAndRoundTrip(t *testing.T) {

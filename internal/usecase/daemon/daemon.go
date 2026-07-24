@@ -624,6 +624,8 @@ func (d *Daemon) handleConn(tr ports.Transport) {
 	switch first.Type {
 	case ports.MsgList:
 		d.handleList(tr)
+	case ports.MsgCommand:
+		d.handleCommand(tr, first)
 	case ports.MsgKill:
 		d.handleKill(tr, first)
 	case ports.MsgHello:

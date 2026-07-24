@@ -954,7 +954,7 @@ func TestTabNamePersistenceTracksTabIndexShifts(t *testing.T) {
 				require.NoError(t, d.renameTab(sess, sess.tabs[i], name))
 			}
 
-			d.closeTab(sess, sess.tabs[tt.closeIndex], false)
+			require.NoError(t, d.closeTab(sess, sess.tabs[tt.closeIndex], false))
 			records, err := d.persist.LoadAll()
 			require.NoError(t, err)
 			require.Len(t, records, 1)
@@ -980,7 +980,7 @@ func TestCloseActiveTabActivatesDestinationFloatingPane(t *testing.T) {
 	first.mu.Unlock()
 	closeFloatingPane(stale)
 
-	d.closeTab(sess, closing, false)
+	require.NoError(t, d.closeTab(sess, closing, false))
 
 	require.Same(t, first, sess.activeTab())
 	requireFloatingInitialized(t, first)

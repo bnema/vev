@@ -1185,7 +1185,7 @@ func TestProducerInvalidations(t *testing.T) {
 				sess.mu.Lock()
 				tb := sess.tabs[1]
 				sess.mu.Unlock()
-				d.closeTab(sess, tb, true)
+				require.NoError(t, d.closeTab(sess, tb, true))
 			},
 		},
 		{

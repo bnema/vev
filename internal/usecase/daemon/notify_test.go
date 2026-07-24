@@ -254,10 +254,10 @@ func TestNoticeCenterPendingQueue(t *testing.T) {
 		for i := 0; i < 32; i++ {
 			nc.queueGlobal(notice(domain.NoticeCode(i), fmt.Sprintf("code %d", i), ""))
 		}
-		// The queue is now full. Re-queuing an existing code must coalesce
+		// The queue is now full. Re-queuing an identical notice must coalesce
 		// in place, not hit the overflow-drop branch.
-		nc.queueGlobal(notice(domain.NoticeCode(0), "code 0 again", ""))
-		nc.queueGlobal(notice(domain.NoticeCode(0), "code 0 again", ""))
+		nc.queueGlobal(notice(domain.NoticeCode(0), "code 0", ""))
+		nc.queueGlobal(notice(domain.NoticeCode(0), "code 0", ""))
 		pending := nc.drainPending()
 		if len(pending) != 32 {
 			t.Fatalf("pending len = %d, want 32 (dedup must not grow past cap)", len(pending))
@@ -525,18 +525,128 @@ func TestNotifyRoutesToSessionClientOnly(t *testing.T) {
 	require.Empty(t, otherToasts, "another session's client must be untouched by session-scoped notices")
 }
 
-func TestNotifySessionWithoutClientRecordsHistoryOnly(t *testing.T) {
+func TestNotifySessionScopedSerializesDetachThroughToastPublication(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
-	sess.mu.Lock()
-	sess.client = nil
-	sess.mu.Unlock()
 
-	d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
+	selected := make(chan bool, 1)
+	releasePublication := make(chan struct{})
+	d.notices.beforeSessionDelivery = func() {
+		unlocked := d.notices.routingMu.TryLock()
+		if unlocked {
+			d.notices.routingMu.Unlock()
+		}
+		selected <- !unlocked
+		<-releasePublication
+	}
+	t.Cleanup(func() {
+		select {
+		case <-releasePublication:
+		default:
+			close(releasePublication)
+		}
+	})
 
-	require.Len(t, d.notices.history(), 1)
+	notifyDone := make(chan struct{})
+	go func() {
+		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "hello", nil)
+		close(notifyDone)
+	}()
+	require.True(t, <-selected, "routingMu must remain held from attachment selection through toast publication")
+
+	detachStarted := make(chan struct{})
+	detachDone := make(chan bool, 1)
+	go func() {
+		close(detachStarted)
+		detachDone <- d.detachIfCurrent(sess, ac)
+	}()
+	<-detachStarted
+	select {
+	case <-detachDone:
+		t.Fatal("detach completed before the selected toast was durably published")
+	default:
+	}
+
+	close(releasePublication)
+	<-notifyDone
+	require.True(t, <-detachDone)
+
 	toasts, _ := visibleToasts(ac)
-	require.Empty(t, toasts, "a detached session must not paint a toast")
-	require.Empty(t, d.notices.drainPending(), "session-scoped notices are never queued as pending globals")
+	require.Len(t, toasts, 1)
+	require.Equal(t, "hello", toasts[0].Message)
+	require.Empty(t, d.notices.drainPending(), "a toast published before detach must not also be queued")
+}
+
+func TestNotifySessionScopedReleasesRoutingBeforeRepaint(t *testing.T) {
+	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+
+	repaintObserved := make(chan bool, 1)
+	ac.renderStages.capture = func() {
+		unlocked := d.notices.routingMu.TryLock()
+		if unlocked {
+			d.notices.routingMu.Unlock()
+		}
+		repaintObserved <- unlocked
+	}
+
+	d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "hello", nil)
+
+	require.True(t, <-repaintObserved, "notice repaint must run without routingMu held")
+}
+
+func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
+	d, sessA, oldA, _ := newNoticeFixture(t, newNoticeClock())
+	sessA.mu.Lock()
+	sessA.client = nil
+	sessA.mu.Unlock()
+
+	clientB := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	clientB.initOverlays()
+	sessB := &session{id: "manual-2", name: "other", ctx: sessA.ctx, cancel: func() {}}
+	clientB.setSession(sessB)
+	d.mu.Lock()
+	d.sessions[sessB.id] = sessB
+	d.mu.Unlock()
+
+	d.notify(sessA, domain.NoticeInfo, domain.NoticeUser, "hello from a script", nil)
+	// Use the same code globally to prove pending coalescing includes scope.
+	d.NotifyGlobal(domain.NoticeWarn, domain.NoticeUser, "global announcement", nil)
+
+	history := d.notices.history()
+	require.Len(t, history, 2)
+	require.Equal(t, domain.NoticeUser, history[1].Code)
+	oldToasts, _ := visibleToasts(oldA)
+	require.Empty(t, oldToasts, "a detached session must not paint a toast")
+
+	sessB.mu.Lock()
+	sessB.client = clientB
+	sessB.mu.Unlock()
+	d.drainPendingForFirstPaint(sessB, clientB)
+	bToasts, _ := visibleToasts(clientB)
+	require.Len(t, bToasts, 1, "another session receives only the global notice")
+	require.Equal(t, domain.NoticeUser, bToasts[0].Code)
+	require.Empty(t, bToasts[0].SessionID)
+	require.Equal(t, "global announcement", bToasts[0].Message)
+
+	sessA.mu.Lock()
+	sessA.client = oldA
+	sessA.mu.Unlock()
+	d.drainPendingForFirstPaint(sessA, oldA)
+	aToasts, _ := visibleToasts(oldA)
+	require.Len(t, aToasts, 1)
+	require.Equal(t, domain.NoticeUser, aToasts[0].Code)
+	require.Equal(t, sessA.id, aToasts[0].SessionID)
+	require.Equal(t, "hello from a script", aToasts[0].Message)
+	require.Equal(t, 1, aToasts[0].Count)
+
+	secondA := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	secondA.initOverlays()
+	secondA.setSession(sessA)
+	sessA.mu.Lock()
+	sessA.client = secondA
+	sessA.mu.Unlock()
+	d.drainPendingForFirstPaint(sessA, secondA)
+	secondToasts, _ := visibleToasts(secondA)
+	require.Empty(t, secondToasts, "a drained session notice must not be delivered twice")
 }
 
 func TestNotifyGlobalFansOutToAttachedClients(t *testing.T) {
@@ -665,6 +775,30 @@ func TestNotifyGlobalSerializesReplacementWithDelivery(t *testing.T) {
 	sess.mu.Unlock()
 }
 
+func TestDetachedNoticeCoalescingPreservesDistinctContentAndSeverity(t *testing.T) {
+	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+	sess.mu.Lock()
+	sess.client = nil
+	sess.mu.Unlock()
+
+	d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build started", nil)
+	d.notify(sess, domain.NoticeWarn, domain.NoticeUser, "build delayed", nil)
+	d.notify(sess, domain.NoticeWarn, domain.NoticeUser, "build delayed", nil)
+
+	sess.mu.Lock()
+	sess.client = ac
+	sess.mu.Unlock()
+	d.drainPendingForFirstPaint(sess, ac)
+
+	toasts := awaitToastCount(t, ac, 2)
+	require.Equal(t, "build delayed", toasts[0].Message)
+	require.Equal(t, domain.NoticeWarn, toasts[0].Severity)
+	require.Equal(t, 2, toasts[0].Count, "identical detached notices coalesce")
+	require.Equal(t, "build started", toasts[1].Message)
+	require.Equal(t, domain.NoticeInfo, toasts[1].Severity)
+	require.Equal(t, 1, toasts[1].Count)
+}
+
 func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 	sess.mu.Lock()
@@ -763,17 +897,34 @@ func TestNotifyLogsAtSeverityLevel(t *testing.T) {
 }
 
 func TestShowToastCoalesceAndTrim(t *testing.T) {
-	t.Run("same code and scope coalesces", func(t *testing.T) {
-		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+	t.Run("identical notices coalesce and renew their ttl", func(t *testing.T) {
+		clk := newNoticeClock()
+		d, sess, ac, _ := newNoticeFixture(t, clk)
 
-		d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
-		d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
+		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build finished", nil)
+		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build finished", nil)
 
 		toasts := awaitToastCount(t, ac, 1)
 		require.Equal(t, 2, toasts[0].Count)
+		require.Equal(t, []time.Duration{4 * time.Second, 4 * time.Second}, clk.durations(), "coalescing renews the identical notice's ttl")
 		_, overflow := visibleToasts(ac)
 		require.Zero(t, overflow)
 		require.Len(t, d.notices.history(), 2, "coalescing is display-only; history keeps both")
+	})
+
+	t.Run("same code and scope preserve distinct message and severity", func(t *testing.T) {
+		clk := newNoticeClock()
+		d, sess, ac, _ := newNoticeFixture(t, clk)
+
+		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build started", nil)
+		d.notify(sess, domain.NoticeWarn, domain.NoticeUser, "build delayed", nil)
+
+		toasts := awaitToastCount(t, ac, 2)
+		require.Equal(t, "build delayed", toasts[0].Message)
+		require.Equal(t, domain.NoticeWarn, toasts[0].Severity)
+		require.Equal(t, "build started", toasts[1].Message)
+		require.Equal(t, domain.NoticeInfo, toasts[1].Severity)
+		require.Equal(t, []time.Duration{4 * time.Second, 6 * time.Second}, clk.durations(), "each distinct notice keeps its severity ttl")
 	})
 
 	t.Run("same code different scope does not coalesce", func(t *testing.T) {

@@ -574,6 +574,36 @@ func TestPaletteReopensWithSuccessfulCommandFirst(t *testing.T) {
 	require.Equal(t, "NXT", cmd.Code)
 }
 
+func TestPaletteCodeOverridesRejectAPIOnlyCommands(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+
+	overrides, warnings := d.buildCodeOverrides(map[string]string{
+		"new-tab": "TAB",
+		"toast":   "API",
+	})
+
+	require.Equal(t, map[string]string{"new-tab": "TAB"}, overrides)
+	require.Len(t, warnings, 1)
+	require.Contains(t, warnings[0].Msg, `unknown command code slug "toast"`)
+}
+
+func TestCommandByEffectiveCodeExcludesAPIOnlyCommands(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	overrides := map[string]string{
+		"new-tab": "TAB",
+		"toast":   "API",
+	}
+	d.codeOverrides.Store(&overrides)
+
+	cmd, ok := d.commandByEffectiveCode("tab")
+	require.True(t, ok)
+	require.Equal(t, "new-tab", cmd.Slug)
+	require.Equal(t, "TAB", cmd.Code)
+
+	_, ok = d.commandByEffectiveCode("API")
+	require.False(t, ok)
+}
+
 func TestPaletteRecentCommandsNewestFirstThenRegistryOrder(t *testing.T) {
 	d := &Daemon{}
 	d.recordPaletteUse("SSP")
@@ -608,7 +638,7 @@ func TestPaletteRecencyCanBeUpdatedConcurrently(t *testing.T) {
 	wg.Wait()
 
 	commands := d.paletteCommands()
-	require.Len(t, commands, len(command.Registry()))
+	require.Len(t, commands, len(command.PaletteRegistry()))
 	seen := map[string]bool{}
 	for _, cmd := range commands {
 		require.False(t, seen[cmd.Code], "duplicate command %s", cmd.Code)

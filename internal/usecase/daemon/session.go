@@ -36,6 +36,11 @@ type session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// dispatchMu serializes user-initiated mutating command dispatch (palette
+	// and vev-cmd control) for this session, so a one-shot command cannot
+	// resolve focus against one state and mutate a later one. Lock order:
+	// dispatchMu strictly before d.mu, sess.mu, or any tab mu.
+	dispatchMu             sync.Mutex
 	mu                     sync.Mutex // guards tabs, active, client, clipFiles, and clipboard queue state
 	themeMu                sync.Mutex
 	tabs                   []*tab
@@ -457,12 +462,39 @@ func (tb *tab) closeAllPanes() {
 	}
 }
 
+// tabChromeRows is the vertical chrome (tab bar + status bar) between a
+// client viewport and a tab's content area.
+const tabChromeRows = 2
+
 func tabSize(clientSize domain.Size) domain.Size {
 	if !clientSize.Valid() {
 		clientSize = defaultSize
 	}
-	rows := max(clientSize.Rows-2, 1)
+	rows := max(clientSize.Rows-tabChromeRows, 1)
 	return domain.Size{Cols: clientSize.Cols, Rows: rows}
+}
+
+// fullViewportSize derives a full client-equivalent viewport from the active
+// tab's retained content size, for actions that need a viewport while no
+// client is attached. It falls back to defaultSize when no valid size exists.
+func (s *session) fullViewportSize() domain.Size {
+	s.mu.Lock()
+	var tb *tab
+	if s.active >= 0 && s.active < len(s.tabs) {
+		tb = s.tabs[s.active]
+	}
+	s.mu.Unlock()
+
+	var content domain.Size
+	if tb != nil {
+		tb.mu.Lock()
+		content = tb.size
+		tb.mu.Unlock()
+	}
+	if !content.Valid() {
+		return defaultSize
+	}
+	return domain.Size{Cols: content.Cols, Rows: content.Rows + tabChromeRows}
 }
 
 func (d *Daemon) startTabGoroutines(sess *session, tb *tab) {
@@ -705,11 +737,14 @@ func (s *session) persistRecordLocked(updatedAt int64) persist.Record {
 	return persist.Record{Name: s.name, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, LastUsedSeq: s.mruAt.Load(), TabNames: tabNames}
 }
 
-func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
+func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
+	if sess == nil || tb == nil {
+		return layout.ErrNotFound
+	}
 	d.mu.Lock()
 	if d.sessions[sess.id] != sess {
 		d.mu.Unlock()
-		return
+		return errors.New("daemon: session closed")
 	}
 	sess.mu.Lock()
 	idx := -1
@@ -722,7 +757,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	if idx == -1 {
 		sess.mu.Unlock()
 		d.mu.Unlock()
-		return
+		return errors.New("tab not found")
 	}
 	if len(sess.tabs) == 1 {
 		name := sess.name
@@ -732,10 +767,10 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 			d.log.Warn("closing last tab failed", "session", name, "err", err)
 			d.reportError(sess, domain.UserErr(domain.NoticeSnapshotSaturated,
 				"couldn't close tab: session state not yet saved; try again", err))
-			return
+			return err
 		}
 		d.log.Info("tab closed", "session", name, "last", true)
-		return
+		return nil
 	}
 	ringing := tb.attention
 	wasActive := idx == sess.active
@@ -786,6 +821,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	if ringing {
 		d.repaintAllAttachedClients()
 	}
+	return nil
 }
 
 // ptyReader drains child output into the VT screen and pokes the dirty channel

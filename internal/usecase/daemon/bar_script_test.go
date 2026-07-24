@@ -119,7 +119,7 @@ func TestBarScriptRunner(t *testing.T) {
 				containsEnv(spec.Env, "VEV_PANE_CWD=/repo") &&
 				containsEnv(spec.Env, "VEV_COLS=120") &&
 				!containsEnv(spec.Env, "VEV_ANCHOR=old")
-		})).Return(ports.CommandResult{Stdout: []byte("\x1b[31mok\x1b[0m\nignored")}, nil)
+		})).Return(ports.ShellCommandResult{Stdout: []byte("\x1b[31mok\x1b[0m\nignored")}, nil)
 		runner := barScriptRunner{runner: portRunner, timeout: 50 * time.Millisecond}
 
 		got, err := runner.run(context.Background(), "printf 'ok\\nignored'",
@@ -137,7 +137,7 @@ func TestBarScriptRunner(t *testing.T) {
 		wantErr := errors.New("exit 1")
 		portRunner := portsmocks.NewMockShellCommandRunner(t)
 		portRunner.EXPECT().Run(mock.Anything, mock.Anything).
-			Return(ports.CommandResult{Stdout: []byte("partial\x00 output\nignored"), ExitCode: 1}, wantErr)
+			Return(ports.ShellCommandResult{Stdout: []byte("partial\x00 output\nignored"), ExitCode: 1}, wantErr)
 		runner := barScriptRunner{runner: portRunner, timeout: time.Second}
 
 		got, err := runner.run(context.Background(), "false", nil, barScriptContext{})
@@ -152,9 +152,9 @@ func TestBarScriptRunner(t *testing.T) {
 	t.Run("timeout propagates deadline", func(t *testing.T) {
 		portRunner := portsmocks.NewMockShellCommandRunner(t)
 		portRunner.EXPECT().Run(mock.Anything, mock.Anything).RunAndReturn(
-			func(ctx context.Context, _ ports.CommandSpec) (ports.CommandResult, error) {
+			func(ctx context.Context, _ ports.CommandSpec) (ports.ShellCommandResult, error) {
 				<-ctx.Done()
-				return ports.CommandResult{ExitCode: -1}, ctx.Err()
+				return ports.ShellCommandResult{ExitCode: -1}, ctx.Err()
 			})
 		runner := barScriptRunner{runner: portRunner, timeout: time.Nanosecond}
 
@@ -169,7 +169,7 @@ func TestBarScriptRunnerBoundsStdoutBeforeSanitize(t *testing.T) {
 	portRunner := portsmocks.NewMockShellCommandRunner(t)
 	portRunner.EXPECT().Run(mock.Anything, mock.MatchedBy(func(spec ports.CommandSpec) bool {
 		return spec.StdoutLimit == barScriptOutputLimit
-	})).Return(ports.CommandResult{Stdout: []byte(strings.Repeat("a", 4096))}, nil)
+	})).Return(ports.ShellCommandResult{Stdout: []byte(strings.Repeat("a", 4096))}, nil)
 	runner := barScriptRunner{runner: portRunner, timeout: time.Second}
 
 	got, err := runner.run(context.Background(), "long-output", nil, barScriptContext{})

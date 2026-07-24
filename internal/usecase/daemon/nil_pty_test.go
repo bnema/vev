@@ -36,7 +36,7 @@ func TestNilPTYLifecyclePathsDoNotPanic(t *testing.T) {
 	})
 	require.NotContains(t, first.panes, layout.PaneID("pane-2"))
 
-	require.NotPanics(t, func() { d.closeTab(sess, second, false) })
+	require.NotPanics(t, func() { require.NoError(t, d.closeTab(sess, second, false)) })
 	require.Len(t, sess.tabs, 1)
 }
 

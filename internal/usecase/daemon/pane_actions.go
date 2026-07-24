@@ -10,25 +10,31 @@ import (
 )
 
 func (d *Daemon) splitPane(sess *session, ac *attachedClient, dir layout.Direction) error {
+	target := resolveDaemonActionTarget(sess)
+	err := d.splitPaneAt(sess, target.tab, target.pane, dir)
+	if err == nil && ac != nil {
+		d.invalidateRender(sess, ac, true, "pane_actions.go")
+	}
+	return err
+}
+
+func (d *Daemon) splitPaneAt(sess *session, tb *tab, target *pane, dir layout.Direction) error {
 	after := dir == layout.Right || dir == layout.Down
-	return d.spawnPaneOp(sess, ac, func(tree *layout.Tree, oldFocus, newID layout.PaneID, area domain.Rect) error {
+	return d.spawnPaneOpAt(sess, tb, target, func(tree *layout.Tree, oldFocus, newID layout.PaneID, area domain.Rect) error {
 		return tree.Split(oldFocus, dir, after, newID, area)
 	})
 }
 
-func (d *Daemon) spawnPaneOp(
+func (d *Daemon) spawnPaneOpAt(
 	sess *session,
-	ac *attachedClient,
+	tb *tab,
+	target *pane,
 	mutate func(tree *layout.Tree, oldFocus, newID layout.PaneID, area domain.Rect) error,
 ) error {
 	if d.ptys == nil {
-		if ac != nil {
-			d.invalidateRender(sess, ac, true, "pane_actions.go")
-		}
 		return nil
 	}
-	tb := sess.activeTab()
-	if tb == nil {
+	if tb == nil || target == nil {
 		return layout.ErrNotFound
 	}
 
@@ -43,7 +49,11 @@ func (d *Daemon) spawnPaneOp(
 		tb.mu.Unlock()
 		return layout.ErrNotFound
 	}
-	oldFocus := tb.tree.Focus
+	oldFocus := target.id
+	if tb.panes[oldFocus] != target || !layout.ContainsLeaf(tb.tree.Root, oldFocus) {
+		tb.mu.Unlock()
+		return layout.ErrNotFound
+	}
 	newID := layout.PaneID(fmt.Sprintf("pane-%d", tb.nextPaneID))
 	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
 	if err := mutate(tb.tree, oldFocus, newID, area); err != nil {
@@ -103,9 +113,6 @@ func (d *Daemon) spawnPaneOp(
 
 	d.startPaneGoroutines(sess, tb, p)
 	markSnapshotDirty(sess)
-	if ac != nil {
-		d.invalidateRender(sess, ac, true, "pane_actions.go")
-	}
 	return nil
 }
 
@@ -164,20 +171,34 @@ func placementContent(placements []layout.Placement, id layout.PaneID) domain.Re
 func rectSize(r domain.Rect) domain.Size { return domain.Size{Cols: r.Width, Rows: r.Height} }
 
 func (d *Daemon) stackPane(sess *session, ac *attachedClient) error {
-	return d.spawnPaneOp(sess, ac, func(tree *layout.Tree, oldFocus, newID layout.PaneID, area domain.Rect) error {
+	target := resolveDaemonActionTarget(sess)
+	err := d.stackPaneAt(sess, target.tab, target.pane)
+	if err == nil && ac != nil {
+		d.invalidateRender(sess, ac, true, "pane_actions.go")
+	}
+	return err
+}
+
+func (d *Daemon) stackPaneAt(sess *session, tb *tab, target *pane) error {
+	return d.spawnPaneOpAt(sess, tb, target, func(tree *layout.Tree, oldFocus, newID layout.PaneID, area domain.Rect) error {
 		return tree.StackNew(oldFocus, newID, area)
 	})
 }
 
 func (d *Daemon) toggleStack(sess *session, ac *attachedClient) error {
+	target := resolveDaemonActionTarget(sess)
+	err := d.toggleStackAt(sess, target.tab, target.pane)
+	if err == nil && ac != nil {
+		d.invalidateRender(sess, ac, true, "pane_actions.go")
+	}
+	return err
+}
+
+func (d *Daemon) toggleStackAt(sess *session, tb *tab, target *pane) error {
 	if d.ptys == nil {
-		if ac != nil {
-			d.invalidateRender(sess, ac, true, "pane_actions.go")
-		}
 		return nil
 	}
-	tb := sess.activeTab()
-	if tb == nil {
+	if tb == nil || target == nil {
 		return layout.ErrNotFound
 	}
 	tb.mu.Lock()
@@ -185,16 +206,17 @@ func (d *Daemon) toggleStack(sess *session, ac *attachedClient) error {
 		tb.mu.Unlock()
 		return layout.ErrNotFound
 	}
-	err := tb.tree.ToggleStack(tb.tree.Focus, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
+	if tb.panes[target.id] != target || !layout.ContainsLeaf(tb.tree.Root, target.id) {
+		tb.mu.Unlock()
+		return layout.ErrNotFound
+	}
+	err := tb.tree.ToggleStack(target.id, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
 	if err == nil {
 		d.applyLayoutLocked(tb)
 	}
 	tb.mu.Unlock()
 	if err == nil {
 		markSnapshotDirty(sess)
-		if ac != nil {
-			d.invalidateRender(sess, ac, true, "pane_actions.go")
-		}
 	}
 	return err
 }
@@ -247,8 +269,7 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 		if ac != nil {
 			ac.overlays.clearCopyModeForPane(p)
 		}
-		d.closeTab(sess, tb, repaint)
-		return nil
+		return d.closeTab(sess, tb, repaint)
 	}
 	if err := tb.tree.Close(id); err != nil {
 		tb.mu.Unlock()
@@ -283,38 +304,47 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 }
 
 func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Direction) error {
-	tb := sess.activeTab()
-	if tb == nil {
+	target := resolveDaemonActionTarget(sess)
+	oldFocus := layout.PaneID("")
+	if target.pane != nil {
+		oldFocus = target.pane.id
+	}
+	err := d.focusDirAt(sess, target.tab, target.pane, dir)
+	if err == nil && ac != nil {
+		target.tab.mu.Lock()
+		newFocus := target.tab.tree.Focus
+		pl, hasPlacement := focusedPlacementLocked(target.tab)
+		target.tab.mu.Unlock()
+		if newFocus != oldFocus {
+			d.exitCopyMode(ac)
+			if hasPlacement && pl.TitleBar.Height > 0 {
+				d.refreshPaneTitleOnFocus(sess, newFocus)
+			}
+		}
+		d.invalidateRender(sess, ac, true, "pane_actions.go")
+	}
+	return err
+}
+
+func (d *Daemon) focusDirAt(sess *session, tb *tab, target *pane, dir layout.Direction) error {
+	if tb == nil || target == nil {
 		return layout.ErrNotFound
 	}
 	tb.mu.Lock()
-	if tb.tree == nil {
+	if tb.tree == nil || tb.panes[target.id] != target || !layout.ContainsLeaf(tb.tree.Root, target.id) {
 		tb.mu.Unlock()
 		return layout.ErrNotFound
 	}
-	oldFocus := tb.tree.Focus
+	oldFocus := target.id
+	tb.tree.Focus = oldFocus
 	err := tb.tree.FocusDir(dir, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
 	newFocus := tb.tree.Focus
 	if err == nil {
 		d.applyLayoutLocked(tb)
 	}
 	tb.mu.Unlock()
-	if err == nil {
-		if newFocus != oldFocus {
-			markSnapshotDirty(sess)
-		}
-	}
-	if err == nil && ac != nil {
-		if newFocus != oldFocus {
-			d.exitCopyMode(ac)
-			tb.mu.Lock()
-			pl, ok := focusedPlacementLocked(tb)
-			tb.mu.Unlock()
-			if ok && pl.TitleBar.Height > 0 {
-				d.refreshPaneTitleOnFocus(sess, newFocus)
-			}
-		}
-		d.invalidateRender(sess, ac, true, "pane_actions.go")
+	if err == nil && newFocus != oldFocus {
+		markSnapshotDirty(sess)
 	}
 	if errors.Is(err, layout.ErrNoPane) {
 		return errNoNeighbor

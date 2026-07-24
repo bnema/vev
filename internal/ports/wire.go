@@ -45,6 +45,11 @@ const (
 	ErrNameTaken          uint16 = 3
 	ErrServerShutdown     uint16 = 4
 	ErrInvalidSessionName uint16 = 5
+	ErrUnknownCommand     uint16 = 6
+	ErrNotScriptable      uint16 = 7
+	ErrInvalidCommandArgs uint16 = 8
+	ErrNoSuchTarget       uint16 = 9
+	ErrAmbiguousTarget    uint16 = 10
 	ErrInternal           uint16 = 255
 )
 
