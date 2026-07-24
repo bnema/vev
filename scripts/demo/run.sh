@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 TAPE="${1:-demo.tape}"
-mkdir -p scripts/demo/out
+install -d -m 0777 scripts/demo/out
 
 CLAUDE_TMP=$(mktemp -d)
 trap 'rm -rf "$CLAUDE_TMP"' EXIT
