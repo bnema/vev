@@ -2,6 +2,8 @@
 
 *Norwegian: to weave*
 
+<p align="center"><img src="docs/assets/demo.gif" alt="vev demo: named sessions, splits, stacked panes, floating window, agent bell notification, detach and re-attach" width="800"></p>
+
 A terminal multiplexer for Linux and macOS (arm64). One Go binary, a per-user daemon, a thin client.
 
 What it is built around:
@@ -90,4 +92,5 @@ Optional file at `~/.config/vev/config`, reloaded live. Themes, key bindings, pa
 make test   # go test ./... -race
 make lint   # goimports check, go vet
 make mocks  # regenerate mocks
+make demo   # regenerate docs/assets/demo.gif (needs Docker and ~/.claude credentials)
 ```

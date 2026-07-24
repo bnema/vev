@@ -478,7 +478,7 @@ func (d Dimmer) Dim(style renderer.Style) renderer.Style {
 	if style.HasUnderlineColorRGB || style.HasUnderlineColor {
 		underline := style.UnderlineColorRGB
 		if !style.HasUnderlineColorRGB {
-			underline = xterm256Color(style.UnderlineColor)
+			underline = indexedToRGB(d.theme, style.UnderlineColor)
 		}
 		out.HasUnderlineColor = false
 		out.HasUnderlineColorRGB = true
@@ -492,7 +492,7 @@ func resolveForeground(style renderer.Style, t Theme) renderer.RGB {
 		return style.ForegroundRGB
 	}
 	if style.Foreground >= 0 {
-		return xterm256Color(style.Foreground)
+		return indexedToRGB(t, style.Foreground)
 	}
 	return t.Foreground
 }
@@ -502,9 +502,21 @@ func resolveBackground(style renderer.Style, t Theme) renderer.RGB {
 		return style.BackgroundRGB
 	}
 	if style.Background >= 0 {
-		return xterm256Color(style.Background)
+		return indexedToRGB(t, style.Background)
 	}
 	return t.Background
+}
+
+// indexedToRGB resolves an ANSI color index through the terminal's reported
+// palette when available, so dimming blends toward what the client actually
+// renders rather than the hardcoded classic xterm table. It falls back to
+// the xterm table for the 256-cube, for unreported/unknown slots, and when
+// palette inheritance is disabled.
+func indexedToRGB(t Theme, index int) renderer.RGB {
+	if rgb, ok := t.PaletteColor(index); ok {
+		return rgb
+	}
+	return xterm256Color(index)
 }
 
 func blendPercent(a, b renderer.RGB, percent int) renderer.RGB {

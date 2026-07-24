@@ -429,6 +429,142 @@ func TestDimmerDefaults(t *testing.T) {
 	}
 }
 
+// TestDimmerUsesReportedPalette verifies that Dim resolves indexed ANSI
+// colors (slots 0-15) through the terminal's reported palette when known,
+// so dimming a pane blends toward what the client actually rendered rather
+// than the hardcoded classic xterm table. It falls back to the xterm table
+// when the palette is unreported, disabled, or the slot is outside 0-15.
+func TestDimmerUsesReportedPalette(t *testing.T) {
+	background := renderer.RGB{R: 10, G: 20, B: 30}
+	foreground := renderer.RGB{R: 200, G: 200, B: 200}
+	baseTheme := Theme{
+		Foreground: foreground, Background: background,
+		HasFG: true, HasBG: true, Known: true, TrueColor: true,
+	}
+
+	reportedSlot2 := renderer.RGB{R: 60, G: 180, B: 75}
+	reportedSlot4 := renderer.RGB{R: 30, G: 100, B: 200}
+	reportedSlot6 := renderer.RGB{R: 50, G: 150, B: 150}
+
+	withPalette := baseTheme
+	withPalette.UsePalette = true
+	withPalette.Palette[2] = reportedSlot2
+	withPalette.Palette[4] = reportedSlot4
+	withPalette.Palette[6] = reportedSlot6
+	withPalette.PaletteKnown = 1<<2 | 1<<4 | 1<<6
+
+	unknownBits := baseTheme
+	unknownBits.UsePalette = true
+	unknownBits.Palette[2] = reportedSlot2
+	unknownBits.Palette[4] = reportedSlot4
+	unknownBits.Palette[6] = reportedSlot6
+	// PaletteKnown left zero: reported RGBs exist but no bit says they're valid.
+
+	paletteDisabled := baseTheme
+	paletteDisabled.UsePalette = false
+	paletteDisabled.Palette[2] = reportedSlot2
+	paletteDisabled.PaletteKnown = 1 << 2
+
+	dimmer := NewDimmer(baseTheme)
+	dimBG := func(raw renderer.RGB) renderer.RGB { return blendPercent(raw, background, dimmer.backgroundPercent) }
+	dimFG := func(raw, bg renderer.RGB) renderer.RGB { return blendPercent(raw, bg, dimmer.foregroundPercent) }
+	ptr := func(c renderer.RGB) *renderer.RGB { return &c }
+
+	underlined := renderer.Style{
+		Foreground: -1, Background: -1,
+		HasUnderlineColor: true, UnderlineColor: 6,
+	}
+
+	cases := []struct {
+		name  string
+		theme Theme
+		style renderer.Style
+		// Raw colors Dim's blends must start from; expected values are
+		// derived from them with the same blend math Dim uses.
+		fgSource        renderer.RGB
+		bgSource        renderer.RGB
+		underlineSource *renderer.RGB // nil when the style has no underline color
+		forbidFGSource  *renderer.RGB // a raw color Dim must NOT have blended from
+	}{
+		{
+			name:           "indexed foreground blends from the reported palette color when known",
+			theme:          withPalette,
+			style:          renderer.Style{Foreground: 2, Background: -1},
+			fgSource:       reportedSlot2,
+			bgSource:       background,
+			forbidFGSource: ptr(xterm256Color(2)),
+		},
+		{
+			name:     "indexed foreground falls back to xterm when the palette bit is unknown",
+			theme:    unknownBits,
+			style:    renderer.Style{Foreground: 2, Background: -1},
+			fgSource: xterm256Color(2),
+			bgSource: background,
+		},
+		{
+			name:     "indexed foreground falls back to xterm when UsePalette is disabled",
+			theme:    paletteDisabled,
+			style:    renderer.Style{Foreground: 2, Background: -1},
+			fgSource: xterm256Color(2),
+			bgSource: background,
+		},
+		{
+			name:     "indexed background blends from the reported palette color when known",
+			theme:    withPalette,
+			style:    renderer.Style{Foreground: -1, Background: 4},
+			fgSource: foreground,
+			bgSource: reportedSlot4,
+		},
+		{
+			name:     "indexed background falls back to xterm when the palette bit is unknown",
+			theme:    unknownBits,
+			style:    renderer.Style{Foreground: -1, Background: 4},
+			fgSource: foreground,
+			bgSource: xterm256Color(4),
+		},
+		{
+			name:            "indexed underline blends from the reported palette color when known",
+			theme:           withPalette,
+			style:           underlined,
+			fgSource:        foreground,
+			bgSource:        background,
+			underlineSource: ptr(reportedSlot6),
+		},
+		{
+			name:            "indexed underline falls back to xterm when the palette bit is unknown",
+			theme:           unknownBits,
+			style:           underlined,
+			fgSource:        foreground,
+			bgSource:        background,
+			underlineSource: ptr(xterm256Color(6)),
+		},
+		{
+			name:     "256-cube index is untouched by a reported palette",
+			theme:    withPalette,
+			style:    renderer.Style{Foreground: 196, Background: -1},
+			fgSource: xterm256Color(196),
+			bgSource: background,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NewDimmer(tc.theme).Dim(tc.style)
+
+			dimmedBG := dimBG(tc.bgSource)
+			require.Equal(t, dimmedBG, got.BackgroundRGB)
+			require.Equal(t, dimFG(tc.fgSource, dimmedBG), got.ForegroundRGB)
+			if tc.forbidFGSource != nil {
+				require.NotEqual(t, dimFG(*tc.forbidFGSource, dimmedBG), got.ForegroundRGB, "must not use the xterm table when the palette is known")
+			}
+			if tc.underlineSource != nil {
+				require.True(t, got.HasUnderlineColorRGB)
+				require.Equal(t, dimFG(*tc.underlineSource, dimmedBG), got.UnderlineColorRGB)
+			}
+		})
+	}
+}
+
 func TestStyleHelpersFallbackAndThemed(t *testing.T) {
 	unknown := Theme{}
 	if got := StatusBarStyle(unknown); !got.Equal(renderer.DefaultStyle()) {
