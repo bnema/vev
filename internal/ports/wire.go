@@ -194,6 +194,7 @@ type Kill struct {
 // stay first so a future payload layout can still be rejected cleanly.
 type CommandRequest struct {
 	Version       uint16
+	Self          bool
 	Slug          string
 	Args          []string
 	TargetSession string
@@ -889,6 +890,11 @@ func UnmarshalKill(b []byte) (Kill, error) {
 func MarshalCommandRequest(m CommandRequest) []byte {
 	w := payloadWriter{}
 	w.putUint16(m.Version)
+	if m.Self {
+		w.putUint8(1)
+	} else {
+		w.putUint8(0)
+	}
 	w.putString(m.Slug)
 	w.putUint16(uint16(len(m.Args)))
 	for _, arg := range m.Args {
@@ -914,6 +920,11 @@ func UnmarshalCommandRequest(b []byte) (CommandRequest, error) {
 	if m.Version, err = r.getUint16(); err != nil {
 		return CommandRequest{}, err
 	}
+	selfFlag, err := r.getUint8()
+	if err != nil {
+		return CommandRequest{}, err
+	}
+	m.Self = selfFlag != 0
 	if m.Slug, err = r.getString(); err != nil {
 		return CommandRequest{}, err
 	}

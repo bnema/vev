@@ -117,11 +117,30 @@ func TestRunCmdBuildsOneShotTargetedRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode request: %v", err)
 	}
-	if transport.sent[0].Type != ports.MsgCommand || req.Slug != "split-right" || req.TargetSession != "old" || req.TargetTab != "t_abc" || req.TargetPane != "p_def" {
+	if transport.sent[0].Type != ports.MsgCommand || req.Slug != "split-right" || !req.Self || req.TargetSession != "old" || req.TargetTab != "t_abc" || req.TargetPane != "p_def" {
 		t.Fatalf("request = type %d %+v", transport.sent[0].Type, req)
 	}
 	if out.String() != "done\n" {
 		t.Fatalf("output = %q", out.String())
+	}
+}
+
+func TestRunCmdVEVWithoutSelfUsesIDsOnlyAsSessionLocator(t *testing.T) {
+	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{OK: true})}}
+	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
+		stdout: io.Discard,
+		getenv: func(string) string { return "session=old,tab=t_abc,pane=p_def" },
+		dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+	})
+	if err != nil {
+		t.Fatalf("runCmdWithDeps: %v", err)
+	}
+	req, err := ports.UnmarshalCommandRequest(transport.sent[0].Payload)
+	if err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if req.Self || req.TargetSession != "old" || req.TargetTab != "t_abc" || req.TargetPane != "p_def" {
+		t.Fatalf("VEV locator request = %+v", req)
 	}
 }
 

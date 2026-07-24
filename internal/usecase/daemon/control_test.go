@@ -97,6 +97,15 @@ func TestHandleCommandDispatchAndTargetErrors(t *testing.T) {
 			addControlSession(d, "one", "t_one", "p_one")
 			addControlSession(d, "two", "t_two", "p_two")
 		}, request: ports.CommandRequest{Slug: "split-right", TargetSession: "one", TargetTab: "t_two", TargetPane: "p_two"}, code: ports.ErrNoSuchTarget},
+		{name: "self requires both IDs", arrange: func(d *Daemon) {
+			addControlSession(d, "work", "t_work", "p_work")
+		}, request: ports.CommandRequest{Slug: "split-right", Self: true, TargetSession: "work", TargetTab: "t_work"}, code: ports.ErrNoSuchTarget},
+		{name: "self rejects pane from another tab", arrange: func(d *Daemon) {
+			sess := addControlSession(d, "work", "t_work", "p_work")
+			other := newTabWithStableID("t_other", "p_other", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+			other.ctx, other.cancel = context.WithCancel(d.serveCtx)
+			sess.tabs = append(sess.tabs, other)
+		}, request: ports.CommandRequest{Slug: "split-right", Self: true, TargetSession: "work", TargetTab: "t_work", TargetPane: "p_other"}, code: ports.ErrNoSuchTarget},
 	}
 
 	for _, tt := range tests {
@@ -190,6 +199,63 @@ func TestHandleCommandStableIDsDoNotRedirectSplitFromCurrentFocus(t *testing.T) 
 	secondPaneCount := len(second.panes)
 	second.mu.Unlock()
 	require.Equal(t, 1, secondPaneCount, "stable IDs are only a session locator")
+}
+
+func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
+	factory := &controlPTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+	sess := addControlSession(d, "work", "t_active", "p_active")
+	active := sess.tabs[0]
+	invoking := newTabWithStableID("t_invoking", "p_invoking", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	invoking.ctx, invoking.cancel = context.WithCancel(d.serveCtx)
+	sess.mu.Lock()
+	sess.tabs = append(sess.tabs, invoking)
+	sess.active = 0
+	sess.mu.Unlock()
+
+	rename := sendCommand(t, d, ports.CommandRequest{
+		Slug: "rename-tab", Args: []string{"invoking"}, Self: true,
+		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
+	})
+	require.True(t, rename.OK, rename.Text)
+	active.mu.Lock()
+	require.Empty(t, active.name)
+	active.mu.Unlock()
+	invoking.mu.Lock()
+	require.Equal(t, "invoking", invoking.name)
+	invoking.mu.Unlock()
+
+	split := sendCommand(t, d, ports.CommandRequest{
+		Slug: "split-right", Self: true,
+		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
+	})
+	require.True(t, split.OK, split.Text)
+	active.mu.Lock()
+	require.Len(t, active.panes, 1)
+	active.mu.Unlock()
+	invoking.mu.Lock()
+	require.Len(t, invoking.panes, 2)
+	invoking.mu.Unlock()
+}
+
+func TestHandleCommandSelfListPanesUsesInvokingTab(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := addControlSession(d, "work", "t_active", "p_active")
+	invoking := newTabWithStableID("t_invoking", "p_invoking", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	invoking.ctx, invoking.cancel = context.WithCancel(d.serveCtx)
+	sess.mu.Lock()
+	sess.tabs = append(sess.tabs, invoking)
+	sess.active = 0
+	sess.mu.Unlock()
+
+	result := sendCommand(t, d, ports.CommandRequest{
+		Slug: "list-panes", Self: true, JSON: true,
+		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
+	})
+	require.True(t, result.OK, result.Text)
+	require.Contains(t, result.Output, "p_invoking")
+	require.NotContains(t, result.Output, "p_active")
 }
 
 func TestHandleCommandRenameSessionRejectsInvalidNameAsCommandArgs(t *testing.T) {
@@ -322,14 +388,23 @@ func TestHandleCommandListingsContainStableIDsMarkersAndCWD(t *testing.T) {
 	require.Equal(t, true, decoded[0]["focused"])
 }
 
-func TestHandleCommandSerializesResolutionAndExecutionPerSession(t *testing.T) {
+func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 	factory := &controlPTYFactory{entered: make(chan struct{}), release: make(chan struct{})}
 	d := newTestDaemon(t, factory, stubClock{})
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
-	sess := addControlSession(d, "work", "t_work", "p_work")
-	original := sess.tabs[0].tree.Focus
+	sess := addControlSession(d, "work", "t_active", "p_active")
+	target := newTabWithStableID("t_invoking", "p_invoking", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	target.ctx, target.cancel = context.WithCancel(d.serveCtx)
+	sess.mu.Lock()
+	sess.tabs = append(sess.tabs, target)
+	sess.active = 0
+	sess.mu.Unlock()
+	original := target.tree.Focus
 
-	firstFrame := commandFrame(ports.CommandRequest{Slug: "split-right", TargetSession: "work"})
+	firstFrame := commandFrame(ports.CommandRequest{
+		Slug: "split-right", Self: true, TargetSession: "work",
+		TargetTab: "t_invoking", TargetPane: "p_invoking",
+	})
 	firstTransport, firstSends, _ := newConn(t, firstFrame)
 	firstDone := make(chan struct{})
 	go func() {
@@ -342,7 +417,10 @@ func TestHandleCommandSerializesResolutionAndExecutionPerSession(t *testing.T) {
 		t.Fatal("first command did not enter its blocked action")
 	}
 
-	secondFrame := commandFrame(ports.CommandRequest{Slug: "focus-pane-left", TargetSession: "work"})
+	secondFrame := commandFrame(ports.CommandRequest{
+		Slug: "focus-pane-right", Self: true, TargetSession: "work",
+		TargetTab: "t_invoking", TargetPane: "p_invoking",
+	})
 	secondTransport, secondSends, _ := newConn(t, secondFrame)
 	secondDone := make(chan struct{})
 	go func() {
@@ -360,11 +438,13 @@ func TestHandleCommandSerializesResolutionAndExecutionPerSession(t *testing.T) {
 	require.True(t, awaitCommandResult(t, firstSends).OK)
 	require.True(t, awaitCommandResult(t, secondSends).OK)
 
-	tb := sess.activeTab()
-	tb.mu.Lock()
-	defer tb.mu.Unlock()
-	require.Len(t, tb.panes, 2)
-	require.Equal(t, original, tb.tree.Focus, "second command must resolve after the split changed focus")
+	sess.mu.Lock()
+	require.Zero(t, sess.active, "self commands must not select the invoking tab")
+	sess.mu.Unlock()
+	target.mu.Lock()
+	defer target.mu.Unlock()
+	require.Len(t, target.panes, 2)
+	require.NotEqual(t, original, target.tree.Focus, "second command must execute after the split creates its right neighbor")
 }
 
 func commandFrame(request ports.CommandRequest) ports.Frame {

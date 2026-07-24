@@ -42,7 +42,7 @@ func (d *Daemon) dispatchCommand(request ports.CommandRequest) ports.CommandResu
 	if !cmd.Scriptable || cmd.Control == nil {
 		return commandFailure(ports.ErrNotScriptable, request.Slug+" requires an attached client")
 	}
-	if cmd.Target == command.TargetNone {
+	if cmd.Target == command.TargetNone && !request.Self {
 		return d.runControl(cmd, controlExec{d: d}, request)
 	}
 
@@ -53,7 +53,7 @@ func (d *Daemon) dispatchCommand(request ports.CommandRequest) ports.CommandResu
 	sess.dispatchMu.Lock()
 	defer sess.dispatchMu.Unlock()
 
-	tb, pane, code, text := resolveControlTarget(sess, cmd.Target, request.TargetTab, request.TargetPane)
+	tb, pane, code, text := resolveControlTarget(sess, cmd.Target, request)
 	if code != 0 {
 		return commandFailure(code, text)
 	}
@@ -87,6 +87,9 @@ func (d *Daemon) resolveTargetSession(request ports.CommandRequest) (*session, u
 	defer d.mu.Unlock()
 
 	named := d.findByNameLocked(request.TargetSession)
+	if request.Self && (request.TargetTab == "" || request.TargetPane == "") {
+		return nil, ports.ErrNoSuchTarget, "--self requires target tab and pane IDs"
+	}
 	if request.TargetSession != "" && request.TargetTab == "" && request.TargetPane == "" {
 		if named == nil {
 			return nil, ports.ErrNoSuchTarget, "no such session: " + request.TargetSession
@@ -135,11 +138,27 @@ func (s *session) containsStableIDs(tabID, paneID string) bool {
 	return false
 }
 
-func resolveControlTarget(sess *session, kind command.TargetKind, _, _ string) (*tab, *pane, uint16, string) {
+func resolveControlTarget(sess *session, kind command.TargetKind, request ports.CommandRequest) (*tab, *pane, uint16, string) {
 	sess.mu.Lock()
 	tabs := append([]*tab(nil), sess.tabs...)
 	active := sess.active
 	sess.mu.Unlock()
+	if request.Self {
+		for _, tb := range tabs {
+			tb.mu.Lock()
+			if tb.stableID != request.TargetTab {
+				tb.mu.Unlock()
+				continue
+			}
+			target := paneByStableIDLocked(tb, request.TargetPane)
+			tb.mu.Unlock()
+			if target == nil {
+				return nil, nil, ports.ErrNoSuchTarget, "target pane does not belong to target tab"
+			}
+			return tb, target, 0, ""
+		}
+		return nil, nil, ports.ErrNoSuchTarget, "no such target tab"
+	}
 	if len(tabs) == 0 || active < 0 || active >= len(tabs) {
 		return nil, nil, ports.ErrNoSuchTarget, "target session has no active tab"
 	}

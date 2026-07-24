@@ -139,6 +139,7 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 	}
 	request := ports.CommandRequest{
 		Version:       ports.ProtocolVersion,
+		Self:          invocation.self,
 		Slug:          invocation.slug,
 		Args:          invocation.args,
 		TargetSession: invocation.session,

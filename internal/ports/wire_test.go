@@ -461,6 +461,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 			msg:  CommandRequest{Version: ProtocolVersion, Slug: "split-right"},
 			want: []byte{
 				0x00, 0x12,
+				0x00,
 				0x00, 0x0b, 's', 'p', 'l', 'i', 't', '-', 'r', 'i', 'g', 'h', 't',
 				0x00, 0x00,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -471,6 +472,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 			name: "full",
 			msg: CommandRequest{
 				Version:       ProtocolVersion,
+				Self:          true,
 				Slug:          "toast",
 				Args:          []string{"-l", "warn", "tests KO"},
 				TargetSession: "dev",
@@ -480,6 +482,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 			},
 			want: []byte{
 				0x00, 0x12,
+				0x01,
 				0x00, 0x05, 't', 'o', 'a', 's', 't',
 				0x00, 0x03,
 				0x00, 0x00, 0x00, 0x02, '-', 'l',
@@ -515,7 +518,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 
 func TestCommandRequestRejectsImpossibleArgumentCount(t *testing.T) {
 	payload := MarshalCommandRequest(CommandRequest{Version: ProtocolVersion, Slug: "toast"})
-	argCountOffset := 2 + 2 + len("toast")
+	argCountOffset := 2 + 1 + 2 + len("toast")
 	payload[argCountOffset] = 0xff
 	payload[argCountOffset+1] = 0xff
 
