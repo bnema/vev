@@ -5,7 +5,12 @@ Set FontFamily "JetBrainsMono Nerd Font"
 Set FontSize 20
 Set Width 1200
 Set Height 750
-Set Padding 0
+Set Padding 12
+Set Margin 20
+Set MarginFill "#161B22"
+Set WindowBar Colorful
+Set WindowBarSize 36
+Set BorderRadius 10
 Set Theme "GitHub Dark"
 Set TypingSpeed 100ms
 Set Framerate 30
