@@ -35,8 +35,13 @@ demo:
 	docker run --rm --entrypoint magick -v "$(CURDIR)/scripts/demo/out:/out" vev-demo \
 		-size 1200x750 xc:black -fill white \
 		-draw "roundrectangle 20,20 1179,729 10,10" /out/mask.png
+	# The 2px edge is stroked before the mask is applied so the mask clips the
+	# stroke's antialiased overflow; drawing it after would leave partly
+	# transparent pixels, which a GIF's 1-bit alpha cannot represent.
 	docker run --rm --entrypoint magick -v "$(CURDIR)/scripts/demo/out:/out" vev-demo \
 		-limit memory 8GiB -limit map 12GiB /out/demo.gif -coalesce \
+		-fill none -stroke "#30363D" -strokewidth 2 \
+		-draw "roundrectangle 21,21 1178,728 9,9" \
 		null: \( /out/mask.png -alpha off \) -compose CopyOpacity \
 		-layers composite /out/demo-masked.gif
 	# --lossy above 30 smears the near-identical darks of the window chrome

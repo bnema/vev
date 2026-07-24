@@ -116,7 +116,7 @@ Sleep 550ms
 Alt+f
 Sleep 500ms
 
-# ── Session "monitor": fastfetch + btop, each full-width,
+# ── Session "monitor": fastfetch + htop, each full-width,
 #    never split. ─────────────────────────────────────────
 Alt+" "
 Sleep 550ms
@@ -135,7 +135,7 @@ Sleep 550ms
 Type "CNT"
 Enter
 Sleep 550ms
-Type@90ms "btop"
+Type@90ms "htop"
 Enter
 Sleep 1.9s
 Alt+"1"
