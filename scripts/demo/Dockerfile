@@ -12,6 +12,7 @@ RUN pacman -Sy --noconfirm archlinux-keyring \
       vhs ttyd ffmpeg chromium \
       btop fastfetch gifsicle \
       nodejs npm ncurses \
+      ttf-jetbrains-mono-nerd \
     && pacman -Scc --noconfirm
 RUN npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code
 RUN setcap -r /usr/sbin/btop
