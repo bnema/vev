@@ -11,7 +11,7 @@ RUN pacman -Sy --noconfirm archlinux-keyring \
     && pacman -Syu --noconfirm \
       vhs ttyd ffmpeg chromium \
       btop fastfetch gifsicle \
-      nodejs npm \
+      nodejs npm ncurses \
     && pacman -Scc --noconfirm
 RUN npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code
 RUN setcap -r /usr/sbin/btop
@@ -22,4 +22,5 @@ RUN chmod +x /usr/local/bin/ticker
 USER demo
 WORKDIR /home/demo
 ENV VHS_NO_SANDBOX=true
+ENV COLORTERM=truecolor
 ENTRYPOINT ["vhs"]
