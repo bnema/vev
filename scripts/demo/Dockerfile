@@ -11,6 +11,7 @@ RUN pacman -Sy --noconfirm archlinux-keyring \
     && pacman -Syu --noconfirm \
       vhs ttyd ffmpeg chromium \
       btop fastfetch gifsicle \
+      cmatrix eza \
       nodejs npm ncurses \
       ttf-jetbrains-mono-nerd \
     && pacman -Scc --noconfirm
