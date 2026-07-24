@@ -80,6 +80,9 @@ func parseCmdArgs(args []string) (cmdInvocation, error) {
 		invocation.help = true
 		return invocation, nil
 	}
+	if invocation.self && invocation.session != "" {
+		return cmdInvocation{}, usagef("`cmd --self` cannot be combined with `-s`")
+	}
 	cmd, ok := commandusecase.BySlug(invocation.slug)
 	if !ok || !cmd.Scriptable {
 		return cmdInvocation{}, usagef("unknown command %q; see `vev cmd --help`", invocation.slug)
@@ -155,7 +158,7 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 
 	transport, err := deps.dial(ctx, ipc.SocketDir())
 	if err != nil {
-		return &exitCoded{code: 3, err: fmt.Errorf("%w: %v", errDaemonUnreachable, err)}
+		return &exitCoded{code: 3, err: fmt.Errorf("%w: %w", errDaemonUnreachable, err)}
 	}
 	defer func() { _ = transport.Close() }()
 

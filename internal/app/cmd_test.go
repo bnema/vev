@@ -25,6 +25,7 @@ func TestParseCmdArgs(t *testing.T) {
 		{"session flag", []string{"cmd", "-s", "dev", "new-tab"}, cmdInvocation{slug: "new-tab", session: "dev"}, false},
 		{"json flag", []string{"cmd", "list-panes", "--json"}, cmdInvocation{slug: "list-panes", jsonOut: true}, false},
 		{"self flag", []string{"cmd", "--self", "split-right"}, cmdInvocation{slug: "split-right", self: true}, false},
+		{"self and session conflict", []string{"cmd", "-s", "other", "--self", "split-right"}, cmdInvocation{}, true},
 		{"passthrough args", []string{"cmd", "toast", "-l", "warn", "hello"}, cmdInvocation{slug: "toast", args: []string{"-l", "warn", "hello"}}, false},
 		{"unknown slug", []string{"cmd", "frobnicate"}, cmdInvocation{}, true},
 		{"non-scriptable slug", []string{"cmd", "detach"}, cmdInvocation{}, true},
@@ -145,16 +146,20 @@ func TestRunCmdExplicitSessionDoesNotUseEnvIDsWithoutSelf(t *testing.T) {
 
 func TestRunCmdDoesNotAutostartAndClassifiesDialFailure(t *testing.T) {
 	dials := 0
+	dialErr := errors.New("unreachable")
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "" },
 		dial: func(context.Context, string) (ports.Transport, error) {
 			dials++
-			return nil, errors.New("unreachable")
+			return nil, dialErr
 		},
 	})
 	if ExitCode(err) != 3 || dials != 1 {
 		t.Fatalf("error=%v code=%d dials=%d, want unreachable/3 and one dial", err, ExitCode(err), dials)
+	}
+	if !errors.Is(err, dialErr) {
+		t.Fatalf("error=%v does not wrap dial error", err)
 	}
 }
 

@@ -50,7 +50,7 @@ vev cmd toast -l warn "build failed"
 vev cmd list-panes --json
 ```
 
-Target a session explicitly with `-s` (`vev cmd -s work new-tab`). Otherwise vev uses `$VEV` inside a pane, then the only live session; ambiguous targets fail. Run `vev cmd --help` for the scriptable command list and `vev cmd <command> --help` for command usage.
+Target a session explicitly with `-s` (`vev cmd -s work new-tab`). Inside a pane, `--self` targets that pane; it cannot be combined with `-s`. Otherwise vev uses `$VEV` inside a pane, then the only live session; ambiguous targets fail. Run `vev cmd --help` for the scriptable command list and `vev cmd <command> --help` for command usage.
 
 ## Keys
 
