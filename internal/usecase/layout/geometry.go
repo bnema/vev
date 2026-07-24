@@ -186,21 +186,23 @@ func distribute(total int, minimums []int, weights []float64) ([]int, bool) {
 
 	for {
 		normalized, sum := normalizedActiveWeights(weights, active)
-		pinned := false
+		var pinned []int
 		for i := range active {
 			if !active[i] {
 				continue
 			}
 			quota := float64(remaining) * normalized[i] / sum
 			if quota < float64(minimums[i]) {
-				allocations[i] = minimums[i]
-				remaining -= minimums[i]
-				active[i] = false
-				pinned = true
+				pinned = append(pinned, i)
 			}
 		}
-		if !pinned {
+		if len(pinned) == 0 {
 			break
+		}
+		for _, i := range pinned {
+			allocations[i] = minimums[i]
+			remaining -= minimums[i]
+			active[i] = false
 		}
 	}
 

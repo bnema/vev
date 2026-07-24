@@ -59,6 +59,15 @@ func TestWeightedSplitAllocation(t *testing.T) {
 	}
 }
 
+func TestDistributePinsChildrenFromOneQuotaSnapshot(t *testing.T) {
+	t.Parallel()
+
+	allocations, ok := distribute(100, []int{20, 33, 42}, []float64{1, 4, 5})
+	require.True(t, ok)
+	require.Equal(t, []int{20, 36, 44}, allocations)
+	require.Equal(t, 100, allocations[0]+allocations[1]+allocations[2])
+}
+
 func TestWeightedSplitRecursiveMinima(t *testing.T) {
 	t.Parallel()
 
