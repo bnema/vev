@@ -14,7 +14,7 @@ RUN pacman -Sy --noconfirm archlinux-keyring \
     && sed -i '/^NoExtract.*usr\/share\/man/d' /etc/pacman.conf \
     && pacman -Syu --noconfirm \
       vhs ttyd ffmpeg chromium \
-      btop fastfetch gifsicle \
+      btop fastfetch gifsicle imagemagick \
       eza neovim man-db man-pages coreutils \
       nodejs npm ncurses \
       ttf-jetbrains-mono-nerd \
