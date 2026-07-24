@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -443,6 +442,85 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 	}
 }
 
+func TestShutdownDeadlineBoundsWaitForExistingTeardownOwner(t *testing.T) {
+	clock := newSnapshotDeadlineClock()
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), clock)
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	WithSnapshotRepository(repository, nil)(d)
+	startSnapshotEncodeWorker(t, d)
+
+	publicationStarted := make(chan struct{})
+	releasePublication := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releasePublication) }) }
+	t.Cleanup(release)
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, _ ports.SnapshotPublication) error {
+		close(publicationStarted)
+		<-releasePublication
+		return nil
+	}).Once()
+
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	pty, ok := sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+	require.True(t, ok)
+	pty.EXPECT().Close().Return(nil).Maybe()
+	d.sessions[sess.id] = sess
+
+	ordinaryDone := make(chan error, 1)
+	go func() { ordinaryDone <- d.killSession(sess, ports.ReasonSessionKilled, false) }()
+	select {
+	case <-publicationStarted:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("ordinary teardown did not become owner")
+	}
+
+	// The ordinary teardown owns its own final-snapshot deadline. Leave it
+	// unfired so it remains distinct from Serve's shared shutdown budget.
+	_ = clock.nextTimer(t)
+	deadline := newSnapshotShutdownDeadline(clock)
+	defer deadline.stop()
+	shutdownDeadlineTimer := clock.nextTimer(t)
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- d.killSessionWithSnapshotDeadline(sess, ports.ReasonServerShutdown, false, deadline)
+	}()
+	awaitTeardownWaiters(t, sess, 1)
+	shutdownDeadlineTimer.fire()
+
+	select {
+	case err := <-shutdownDone:
+		require.NoError(t, err)
+	case <-time.After(testWaitTimeout):
+		t.Fatal("daemon shutdown waited beyond its shared deadline for the ordinary teardown owner")
+	}
+
+	release()
+	select {
+	case err := <-ordinaryDone:
+		require.NoError(t, err)
+	case <-time.After(testWaitTimeout):
+		t.Fatal("ordinary teardown did not finish after its publication was released")
+	}
+}
+
+func awaitTeardownWaiters(t *testing.T, sess *session, want uint) {
+	t.Helper()
+	for {
+		sess.teardownMu.Lock()
+		waiters := sess.teardownWaiters
+		changed := sess.teardownChangeLocked()
+		sess.teardownMu.Unlock()
+		if waiters == want {
+			return
+		}
+		select {
+		case <-changed:
+		case <-time.After(testWaitTimeout):
+			t.Fatalf("teardown ownership waiters = %d, want %d", waiters, want)
+		}
+	}
+}
+
 func TestConcurrentSessionTeardownPublishesOneFinalSnapshot(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)
@@ -466,34 +544,28 @@ func TestConcurrentSessionTeardownPublishesOneFinalSnapshot(t *testing.T) {
 	d.sessions[sess.id] = sess
 
 	first := make(chan error, 1)
-	go func() { first <- d.killSession(sess, ports.ReasonServerShutdown, false) }()
+	go func() { first <- d.killSession(sess, ports.ReasonSessionKilled, false) }()
 	select {
 	case <-publicationStarted:
 	case <-time.After(testWaitTimeout):
-		t.Fatal("first terminal snapshot did not reach repository")
+		t.Fatal("ordinary teardown did not publish its terminal snapshot")
 	}
 
+	sess.teardownMu.Lock()
+	require.True(t, sess.teardownActive)
+	require.NotNil(t, sess.teardownDone)
+	sess.teardownMu.Unlock()
+
 	const duplicateCallers = 8
-	started := make(chan struct{}, duplicateCallers)
 	duplicates := make(chan error, duplicateCallers)
 	for range duplicateCallers {
 		go func() {
-			started <- struct{}{}
-			duplicates <- d.killSession(sess, ports.ReasonServerShutdown, false)
+			duplicates <- d.killSession(sess, ports.ReasonSessionKilled, false)
 		}()
 	}
-	for range duplicateCallers {
-		<-started
-	}
-	for range 1000 {
-		runtime.Gosched()
-		sess.snapshotMu.Lock()
-		generation := sess.snapshotGeneration
-		sess.snapshotMu.Unlock()
-		if generation > 1 {
-			break
-		}
-	}
+	// Synchronize on the ownership state itself: every duplicate is waiting
+	// behind the distinct ordinary teardown before its publication is released.
+	awaitTeardownWaiters(t, sess, duplicateCallers)
 
 	sess.snapshotMu.Lock()
 	generation := sess.snapshotGeneration
@@ -501,9 +573,19 @@ func TestConcurrentSessionTeardownPublishesOneFinalSnapshot(t *testing.T) {
 	require.Equal(t, uint64(1), generation, "duplicate teardown callers must not create synthetic terminal generations")
 
 	releaseOnce.Do(func() { close(releasePublication) })
-	require.NoError(t, <-first)
+	select {
+	case err := <-first:
+		require.NoError(t, err)
+	case <-time.After(testWaitTimeout):
+		t.Fatal("ordinary teardown did not finish")
+	}
 	for range duplicateCallers {
-		require.NoError(t, <-duplicates)
+		select {
+		case err := <-duplicates:
+			require.NoError(t, err)
+		case <-time.After(testWaitTimeout):
+			t.Fatal("duplicate teardown did not observe the completed registry transition")
+		}
 	}
 	sess.snapshotMu.Lock()
 	generation = sess.snapshotGeneration

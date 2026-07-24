@@ -41,10 +41,16 @@ type session struct {
 	// resolve focus against one state and mutate a later one. Lock order:
 	// dispatchMu strictly before d.mu, sess.mu, or any tab mu.
 	dispatchMu sync.Mutex
-	// teardownMu is the outermost per-session lifecycle lock. It serializes
-	// competing pane-exit, control, and daemon-shutdown teardown paths before
-	// they acquire daemon, session, snapshot, or pane locks.
+	// teardownMu guards teardown ownership and is the outermost per-session
+	// lifecycle lock: never acquire it while holding daemon, session, snapshot,
+	// tab, or pane locks. The owner performs teardown without holding teardownMu;
+	// duplicate daemon-shutdown callers can therefore bound their ownership wait
+	// with Serve's shared snapshot deadline.
 	teardownMu             sync.Mutex
+	teardownActive         bool
+	teardownDone           chan struct{}
+	teardownWaiters        uint
+	teardownChanged        chan struct{}
 	mu                     sync.Mutex // guards tabs, active, client, clipFiles, and clipboard queue state
 	themeMu                sync.Mutex
 	tabs                   []*tab
@@ -907,6 +913,82 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	return d.killSessionWithSnapshotDeadline(sess, reason, purge, nil)
 }
 
+func (s *session) teardownChangeLocked() chan struct{} {
+	if s.teardownChanged == nil {
+		s.teardownChanged = make(chan struct{})
+	}
+	return s.teardownChanged
+}
+
+func (s *session) signalTeardownChangedLocked() {
+	close(s.teardownChangeLocked())
+	s.teardownChanged = make(chan struct{})
+}
+
+// beginTeardown waits for ownership without holding teardownMu across teardown.
+// A false result means Serve's shared shutdown budget expired while another
+// lifecycle path owned the session. Ordinary callers wait and retry ownership,
+// preserving failed-teardown and stopped-purge retry semantics.
+func (s *session) beginTeardown(deadline *snapshotShutdownDeadline) bool {
+	for {
+		if deadline != nil {
+			select {
+			case <-deadline.Done():
+				return false
+			default:
+			}
+		}
+
+		s.teardownMu.Lock()
+		if !s.teardownActive {
+			if deadline != nil {
+				select {
+				case <-deadline.Done():
+					s.teardownMu.Unlock()
+					return false
+				default:
+				}
+			}
+			s.teardownActive = true
+			s.teardownDone = make(chan struct{})
+			s.signalTeardownChangedLocked()
+			s.teardownMu.Unlock()
+			return true
+		}
+		done := s.teardownDone
+		s.teardownWaiters++
+		s.signalTeardownChangedLocked()
+		s.teardownMu.Unlock()
+
+		timedOut := false
+		if deadline == nil {
+			<-done
+		} else {
+			select {
+			case <-done:
+			case <-deadline.Done():
+				timedOut = true
+			}
+		}
+		s.teardownMu.Lock()
+		s.teardownWaiters--
+		s.signalTeardownChangedLocked()
+		s.teardownMu.Unlock()
+		if timedOut {
+			return false
+		}
+	}
+}
+
+func (s *session) finishTeardown() {
+	s.teardownMu.Lock()
+	s.teardownActive = false
+	close(s.teardownDone)
+	s.teardownDone = nil
+	s.signalTeardownChangedLocked()
+	s.teardownMu.Unlock()
+}
+
 // killSessionWithSnapshotDeadline shares Serve's shutdown budget with its
 // terminal checkpoint and coordinator join. A timed-out repository call keeps
 // only immutable capture state; it never observes closed worker channels or
@@ -918,9 +1000,12 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	// Pane EOF, explicit close, and daemon shutdown can all converge on the same
 	// session. Only one owner may create the terminal mutation and checkpoint;
 	// later callers observe the completed registry transition instead of
-	// manufacturing a newer generation that the owner will quarantine.
-	sess.teardownMu.Lock()
-	defer sess.teardownMu.Unlock()
+	// manufacturing a newer generation that the owner will quarantine. A
+	// shutdown duplicate abandons this wait when the shared budget expires.
+	if !sess.beginTeardown(deadline) {
+		return nil
+	}
+	defer sess.finishTeardown()
 
 	d.mu.Lock()
 	current := d.sessions[sess.id]
