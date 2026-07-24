@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -440,6 +441,74 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 			t.Fatal("quarantined capture was not discarded")
 		}
 	}
+}
+
+func TestConcurrentSessionTeardownPublishesOneFinalSnapshot(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	WithSnapshotRepository(repository, nil)(d)
+	startSnapshotEncodeWorker(t, d)
+
+	publicationStarted := make(chan struct{})
+	releasePublication := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releasePublication) }) })
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, _ ports.SnapshotPublication) error {
+		close(publicationStarted)
+		<-releasePublication
+		return nil
+	}).Once()
+
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	pty, ok := sess.tabs[0].panes["pane-1"].pty.(*portsmocks.MockPTY)
+	require.True(t, ok)
+	pty.EXPECT().Close().Return(nil).Maybe()
+	d.sessions[sess.id] = sess
+
+	first := make(chan error, 1)
+	go func() { first <- d.killSession(sess, ports.ReasonServerShutdown, false) }()
+	select {
+	case <-publicationStarted:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("first terminal snapshot did not reach repository")
+	}
+
+	const duplicateCallers = 8
+	started := make(chan struct{}, duplicateCallers)
+	duplicates := make(chan error, duplicateCallers)
+	for range duplicateCallers {
+		go func() {
+			started <- struct{}{}
+			duplicates <- d.killSession(sess, ports.ReasonServerShutdown, false)
+		}()
+	}
+	for range duplicateCallers {
+		<-started
+	}
+	for range 1000 {
+		runtime.Gosched()
+		sess.snapshotMu.Lock()
+		generation := sess.snapshotGeneration
+		sess.snapshotMu.Unlock()
+		if generation > 1 {
+			break
+		}
+	}
+
+	sess.snapshotMu.Lock()
+	generation := sess.snapshotGeneration
+	sess.snapshotMu.Unlock()
+	require.Equal(t, uint64(1), generation, "duplicate teardown callers must not create synthetic terminal generations")
+
+	releaseOnce.Do(func() { close(releasePublication) })
+	require.NoError(t, <-first)
+	for range duplicateCallers {
+		require.NoError(t, <-duplicates)
+	}
+	sess.snapshotMu.Lock()
+	generation = sess.snapshotGeneration
+	sess.snapshotMu.Unlock()
+	require.Equal(t, uint64(1), generation, "completed duplicate teardowns must leave the terminal generation unchanged")
 }
 
 func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
