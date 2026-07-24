@@ -66,7 +66,9 @@ func TestHandleCommandRejectsVersionBeforeDecodeOrDispatch(t *testing.T) {
 func TestHandleConnRoutesCommand(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	request := ports.CommandRequest{Version: ports.ProtocolVersion, Slug: "list-sessions"}
-	frame := ports.Frame{Type: ports.MsgCommand, Payload: ports.MarshalCommandRequest(request)}
+	payload, err := ports.MarshalCommandRequest(request)
+	require.NoError(t, err)
+	frame := ports.Frame{Type: ports.MsgCommand, Payload: payload}
 	tr, sends, _ := newConn(t, frame)
 
 	d.handleConn(tr)
@@ -463,7 +465,7 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 	sess.mu.Unlock()
 	original := target.tree.Focus
 
-	firstFrame := commandFrame(ports.CommandRequest{
+	firstFrame := commandFrame(t, ports.CommandRequest{
 		Slug: "split-right", Self: true, TargetSession: "work",
 		TargetTab: "t_invoking", TargetPane: "p_invoking",
 	})
@@ -479,7 +481,7 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 		t.Fatal("first command did not enter its blocked action")
 	}
 
-	secondFrame := commandFrame(ports.CommandRequest{
+	secondFrame := commandFrame(t, ports.CommandRequest{
 		Slug: "focus-pane-right", Self: true, TargetSession: "work",
 		TargetTab: "t_invoking", TargetPane: "p_invoking",
 	})
@@ -509,16 +511,19 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 	require.NotEqual(t, original, target.tree.Focus, "second command must execute after the split creates its right neighbor")
 }
 
-func commandFrame(request ports.CommandRequest) ports.Frame {
+func commandFrame(t *testing.T, request ports.CommandRequest) ports.Frame {
+	t.Helper()
 	if request.Version == 0 {
 		request.Version = ports.ProtocolVersion
 	}
-	return ports.Frame{Type: ports.MsgCommand, Payload: ports.MarshalCommandRequest(request)}
+	payload, err := ports.MarshalCommandRequest(request)
+	require.NoError(t, err)
+	return ports.Frame{Type: ports.MsgCommand, Payload: payload}
 }
 
 func sendCommand(t *testing.T, d *Daemon, request ports.CommandRequest) ports.CommandResult {
 	t.Helper()
-	frame := commandFrame(request)
+	frame := commandFrame(t, request)
 	tr, sends, _ := newConn(t, frame)
 	d.handleCommand(tr, frame)
 	return awaitCommandResult(t, sends)

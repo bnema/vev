@@ -1,6 +1,13 @@
 package ports
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"errors"
+	"math"
+)
+
+// ErrTooManyCommandArgs reports that a request exceeds the wire count limit.
+var ErrTooManyCommandArgs = errors.New("ports: too many command arguments")
 
 // CommandRequest asks the daemon to run one control command. Version must
 // stay first so a future payload layout can still be rejected cleanly.
@@ -33,7 +40,11 @@ func PeekCommandVersion(b []byte) (uint16, bool) {
 }
 
 // MarshalCommandRequest encodes m into a CommandRequest payload.
-func MarshalCommandRequest(m CommandRequest) []byte {
+func MarshalCommandRequest(m CommandRequest) ([]byte, error) {
+	if len(m.Args) > math.MaxUint16 {
+		return nil, ErrTooManyCommandArgs
+	}
+
 	w := payloadWriter{}
 	w.putUint16(m.Version)
 	if m.Self {
@@ -54,7 +65,7 @@ func MarshalCommandRequest(m CommandRequest) []byte {
 	} else {
 		w.putUint8(0)
 	}
-	return w.b
+	return w.b, nil
 }
 
 // UnmarshalCommandRequest decodes a strict CommandRequest payload.

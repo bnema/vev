@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -160,6 +161,28 @@ func TestRunCmdExplicitSessionDoesNotUseEnvIDsWithoutSelf(t *testing.T) {
 	}
 	if req.TargetSession != "current" || req.TargetTab != "" || req.TargetPane != "" {
 		t.Fatalf("explicit targeting request = %+v", req)
+	}
+}
+
+func TestRunCmdRejectsTooManyArgumentsBeforeDialing(t *testing.T) {
+	dialed := false
+	err := runCmdWithDeps(context.Background(), cmdInvocation{
+		slug: "toast",
+		args: make([]string, math.MaxUint16+1),
+	}, cmdDeps{
+		stdout: io.Discard,
+		getenv: func(string) string { return "" },
+		dial: func(context.Context, string) (ports.Transport, error) {
+			dialed = true
+			return nil, errors.New("must not dial")
+		},
+	})
+
+	if ExitCode(err) != 2 {
+		t.Fatalf("error=%v code=%d, want usage error/2", err, ExitCode(err))
+	}
+	if dialed {
+		t.Fatal("oversized command dialed daemon")
 	}
 }
 

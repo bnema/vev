@@ -157,13 +157,21 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 		return usagef("--self requires running inside a vev pane")
 	}
 
+	payload, err := ports.MarshalCommandRequest(request)
+	if errors.Is(err, ports.ErrTooManyCommandArgs) {
+		return usagef("too many command arguments")
+	}
+	if err != nil {
+		return fmt.Errorf("encoding command: %w", err)
+	}
+
 	transport, err := deps.dial(ctx, ipc.SocketDir())
 	if err != nil {
 		return &exitCoded{code: 3, err: fmt.Errorf("%w: %w", errDaemonUnreachable, err)}
 	}
 	defer func() { _ = transport.Close() }()
 
-	frame := ports.Frame{Type: ports.MsgCommand, Payload: ports.MarshalCommandRequest(request)}
+	frame := ports.Frame{Type: ports.MsgCommand, Payload: payload}
 	if err := transport.Send(frame); err != nil {
 		return &exitCoded{code: 3, err: fmt.Errorf("sending command: %w", err)}
 	}

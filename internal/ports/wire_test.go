@@ -3,6 +3,7 @@ package ports
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"reflect"
 	"testing"
 
@@ -498,7 +499,8 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := MarshalCommandRequest(tt.msg)
+			got, err := MarshalCommandRequest(tt.msg)
+			require.NoError(t, err)
 			require.Equal(t, tt.want, got)
 			back, err := UnmarshalCommandRequest(got)
 			require.NoError(t, err)
@@ -516,8 +518,20 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMarshalCommandRequestRejectsTooManyArguments(t *testing.T) {
+	payload, err := MarshalCommandRequest(CommandRequest{
+		Version: ProtocolVersion,
+		Slug:    "toast",
+		Args:    make([]string, math.MaxUint16+1),
+	})
+
+	require.Nil(t, payload)
+	require.ErrorIs(t, err, ErrTooManyCommandArgs)
+}
+
 func TestCommandRequestRejectsImpossibleArgumentCount(t *testing.T) {
-	payload := MarshalCommandRequest(CommandRequest{Version: ProtocolVersion, Slug: "toast"})
+	payload, err := MarshalCommandRequest(CommandRequest{Version: ProtocolVersion, Slug: "toast"})
+	require.NoError(t, err)
 	argCountOffset := 2 + 1 + 2 + len("toast")
 	payload[argCountOffset] = 0xff
 	payload[argCountOffset+1] = 0xff
