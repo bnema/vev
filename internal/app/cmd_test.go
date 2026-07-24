@@ -182,15 +182,35 @@ func TestRunCmdDoesNotAutostartAndClassifiesDialFailure(t *testing.T) {
 	}
 }
 
-func TestRunCmdDaemonErrorHasExitOne(t *testing.T) {
-	transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{Code: ports.ErrNoSuchTarget, Text: "no live sessions"})}}
-	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
-		stdout: io.Discard,
-		getenv: func(string) string { return "" },
-		dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
-	})
-	if err == nil || ExitCode(err) != 1 || !strings.Contains(err.Error(), "no live sessions") {
-		t.Fatalf("error=%v code=%d", err, ExitCode(err))
+func TestRunCmdClassifiesDaemonCommandErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   ports.CommandResult
+		wantCode int
+	}{
+		{
+			name:     "invalid command arguments are usage errors",
+			result:   ports.CommandResult{Code: ports.ErrInvalidCommandArgs, Text: "usage: toast [-l level] <message>"},
+			wantCode: 2,
+		},
+		{
+			name:     "missing runtime target is a command failure",
+			result:   ports.CommandResult{Code: ports.ErrNoSuchTarget, Text: "no live sessions"},
+			wantCode: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(tt.result)}}
+			err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
+				stdout: io.Discard,
+				getenv: func(string) string { return "" },
+				dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+			})
+			if err == nil || ExitCode(err) != tt.wantCode || err.Error() != tt.result.Text {
+				t.Fatalf("error=%v code=%d, want message %q and code %d", err, ExitCode(err), tt.result.Text, tt.wantCode)
+			}
+		})
 	}
 }
 

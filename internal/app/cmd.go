@@ -179,6 +179,9 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 		return fmt.Errorf("decoding command reply: %w", err)
 	}
 	if !result.OK {
+		if result.Code == ports.ErrInvalidCommandArgs {
+			return &exitCoded{code: 2, err: errors.New(result.Text)}
+		}
 		return errors.New(result.Text)
 	}
 	if result.Output != "" {
