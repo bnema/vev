@@ -1,17 +1,13 @@
-# vev
+<h1 align="center">vev</h1>
 
-*Norwegian: to weave*
+<p align="center"><em>Norwegian: to weave</em></p>
+
+<p align="center">A terminal multiplexer for Linux and macOS.<br>
+One Go binary, zero runtime dependencies, remote attach that survives bad networks.</p>
 
 <p align="center"><img src="docs/assets/demo.gif" alt="vev demo: named sessions, splits, stacked panes, floating window, agent bell notification, detach and re-attach" width="800"></p>
 
-A terminal multiplexer for Linux and macOS (arm64). One Go binary, a per-user daemon, a thin client.
-
-What it is built around:
-
-- **Remote attach that survives bad networks.** SSH bootstraps the connection, then the session runs over UDP and resumes after sleep or Wi-Fi changes. Inspired by mosh, with its own protocol.
-- **Server-side rendering.** The daemon keeps a full VT screen per pane and sends minimal diffs to the client, so high-output programs (agents, build logs) stay smooth locally and over SSH.
-- **Nothing but the standard library.** VT emulation, renderer, wire protocol, and UDP transport are all in this repo. Zero runtime dependencies.
-- **Performance treated as a feature.** A reproducible harness measures 252 scenarios across workloads and transports, including lossy and high-latency UDP.
+---
 
 ## Install
 
@@ -42,18 +38,6 @@ vev kill <name>                  kill a session (--all kills everything)
 
 The daemon starts on first use and exits with the last session. Ephemeral sessions are numbered, survive detach, and disappear with the daemon. Named sessions persist across daemon restarts and come back with their layout, scrollback, and allowlisted processes.
 
-## Scripting
-
-`vev cmd` runs control commands against a running daemon; it never starts one. For example:
-
-```sh
-vev cmd split-right
-vev cmd toast -l warn "build failed"
-vev cmd list-panes --json
-```
-
-Target a session explicitly with `-s` (`vev cmd -s work new-tab`). Inside a pane, `--self` targets that pane; it cannot be combined with `-s`. Otherwise vev uses `$VEV` inside a pane, then the only live session; ambiguous targets fail. Run `vev cmd --help` for the scriptable command list and `vev cmd <command> --help` for command usage.
-
 ## Keys
 
 No prefix key; everything is Alt.
@@ -74,13 +58,25 @@ The palette does the rest: type a short code (`SPR` split right, `CNT` new tab, 
 vev attach user@host[:session]
 ```
 
-vev must be installed on the remote. If your firewall only allows SSH, open the UDP range first (default `61000:61023`, override with `VEV_UDP_PORT_RANGE`):
+SSH bootstraps the connection, then the session runs over UDP and resumes after sleep or Wi-Fi changes. vev must be installed on the remote. If your firewall only allows SSH, open the UDP range first (default `61000:61023`, override with `VEV_UDP_PORT_RANGE`):
 
 ```sh
 sudo ufw allow 61000:61023/udp
 ```
 
 Where UDP is not an option, `VEV_REMOTE_TRANSPORT=stdio` keeps everything inside SSH at the cost of slower disconnect detection. Details in [docs/remote-resilience.md](docs/remote-resilience.md).
+
+## Scripting
+
+`vev cmd` runs control commands against a running daemon; it never starts one. For example:
+
+```sh
+vev cmd split-right
+vev cmd toast -l warn "build failed"
+vev cmd list-panes --json
+```
+
+Target a session explicitly with `-s` (`vev cmd -s work new-tab`). Inside a pane, `--self` targets that pane; it cannot be combined with `-s`. Otherwise vev uses `$VEV` inside a pane, then the only live session; ambiguous targets fail. Run `vev cmd --help` for the scriptable command list and `vev cmd <command> --help` for command usage.
 
 ## Configuration
 
