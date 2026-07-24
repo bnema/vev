@@ -40,7 +40,11 @@ type session struct {
 	// and vev-cmd control) for this session, so a one-shot command cannot
 	// resolve focus against one state and mutate a later one. Lock order:
 	// dispatchMu strictly before d.mu, sess.mu, or any tab mu.
-	dispatchMu             sync.Mutex
+	dispatchMu sync.Mutex
+	// teardownMu is the outermost per-session lifecycle lock. It serializes
+	// competing pane-exit, control, and daemon-shutdown teardown paths before
+	// they acquire daemon, session, snapshot, or pane locks.
+	teardownMu             sync.Mutex
 	mu                     sync.Mutex // guards tabs, active, client, clipFiles, and clipboard queue state
 	themeMu                sync.Mutex
 	tabs                   []*tab
@@ -908,6 +912,29 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 // only immutable capture state; it never observes closed worker channels or
 // session-owned cache that teardown has released.
 func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, purge bool, deadline *snapshotShutdownDeadline) error {
+	if sess == nil {
+		return nil
+	}
+	// Pane EOF, explicit close, and daemon shutdown can all converge on the same
+	// session. Only one owner may create the terminal mutation and checkpoint;
+	// later callers observe the completed registry transition instead of
+	// manufacturing a newer generation that the owner will quarantine.
+	sess.teardownMu.Lock()
+	defer sess.teardownMu.Unlock()
+
+	d.mu.Lock()
+	current := d.sessions[sess.id]
+	d.mu.Unlock()
+	if current != sess {
+		if purge {
+			sess.mu.Lock()
+			name := sess.name
+			sess.mu.Unlock()
+			return d.retryStoppedPurge(name)
+		}
+		return nil
+	}
+
 	ringing := sess.anyAttention()
 	sess.mu.Lock()
 	isEphemeral := sess.ephemeral
