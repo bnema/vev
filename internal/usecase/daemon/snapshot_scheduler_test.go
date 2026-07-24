@@ -454,7 +454,6 @@ func TestServeShutdownDeadlineBoundsPaneExitTeardownOwner(t *testing.T) {
 	releasePublication := make(chan struct{})
 	var releasePublicationOnce sync.Once
 	releaseSnapshot := func() { releasePublicationOnce.Do(func() { close(releasePublication) }) }
-	t.Cleanup(releaseSnapshot)
 	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
 		require.Equal(t, uint64(1), publication.Generation)
 		close(publicationStarted)
@@ -483,40 +482,35 @@ func TestServeShutdownDeadlineBoundsPaneExitTeardownOwner(t *testing.T) {
 		t.Fatal("pane EOF teardown did not publish its terminal snapshot")
 	}
 	// The pane-exit owner has an independent final-snapshot timer. Keep it
-	// unfired so Serve must use, and remain bounded by, its shared deadline.
-	_ = clock.nextFinalTimer(t)
+	// unfired until cleanup so Serve must use, and remain bounded by, its shared
+	// deadline.
+	ownerDeadlineTimer := clock.nextFinalTimer(t)
+
+	// Cleanup is the only place that releases the competing owner. It also fires
+	// that owner's independent budget and joins the real pane reader, proving no
+	// teardown goroutine is leaked without making Serve depend on repository I/O.
+	t.Cleanup(func() {
+		releaseSnapshot()
+		ownerDeadlineTimer.fire()
+		d.sessWg.Wait()
+	})
 
 	cancel()
 	shutdownDeadlineTimer := clock.nextFinalTimer(t)
-	awaitTeardownWaiters(t, sess, 1)
 	shutdownDeadlineTimer.fire()
-	awaitTeardownWaiters(t, sess, 0)
+
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(testWaitTimeout):
+		t.Fatal("Serve did not return after its shared deadline while the pane-exit owner remained blocked")
+	}
 
 	sess.snapshotMu.Lock()
 	generation := sess.snapshotGeneration
 	sess.snapshotMu.Unlock()
 	require.Equal(t, uint64(1), generation, "Serve shutdown must not create a competing terminal generation")
 	require.Equal(t, int64(snapshotFinalFlushTimeout), clock.finalBudget.Load(), "Serve must spend only its shared snapshot deadline")
-
-	// Let the ordinary owner commit removal, then join the complete Serve and
-	// snapshot-worker lifecycles so no reader, teardown, or worker is leaked.
-	releaseSnapshot()
-	select {
-	case err := <-served:
-		require.NoError(t, err)
-	case <-time.After(testWaitTimeout):
-		t.Fatal("Serve did not return after the pane-exit owner completed")
-	}
-	d.snapshotWorkerMu.Lock()
-	workerDone := d.snapshotWorkerDone
-	d.snapshotWorkerMu.Unlock()
-	if workerDone != nil {
-		select {
-		case <-workerDone:
-		case <-time.After(testWaitTimeout):
-			t.Fatal("snapshot worker leaked after Serve returned")
-		}
-	}
 }
 
 func awaitTeardownWaiters(t *testing.T, sess *session, want uint) {

@@ -51,6 +51,7 @@ type session struct {
 	teardownDone           chan struct{}
 	teardownWaiters        uint
 	teardownChanged        chan struct{}
+	lifecycleStopOnce      sync.Once
 	mu                     sync.Mutex // guards tabs, active, client, clipFiles, and clipboard queue state
 	themeMu                sync.Mutex
 	tabs                   []*tab
@@ -913,6 +914,25 @@ func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	return d.killSessionWithSnapshotDeadline(sess, reason, purge, nil)
 }
 
+// stopInMemoryLifecycle cancels every session producer and closes every PTY
+// independently of teardown ownership. Repository work may remain blocked, but
+// repeated shutdown passes cannot leave pane readers or launches running.
+func (s *session) stopInMemoryLifecycle() {
+	if s == nil {
+		return
+	}
+	s.lifecycleStopOnce.Do(func() {
+		s.stopFloatingLaunches()
+		s.cancel()
+		s.mu.Lock()
+		tabs := append([]*tab(nil), s.tabs...)
+		s.mu.Unlock()
+		for _, tb := range tabs {
+			tb.closeAllPanes()
+		}
+	})
+}
+
 func (s *session) teardownChangeLocked() chan struct{} {
 	if s.teardownChanged == nil {
 		s.teardownChanged = make(chan struct{})
@@ -1143,11 +1163,10 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 		ac.clearCaptureFrames()
 	}
 
-	// Prevent queued launches from entering Open, then cancel the parent
-	// context. The launch worker owns any late PTY result and closes it rather
-	// than publishing it into the torn-down tab.
-	sess.stopFloatingLaunches()
-	sess.cancel()
+	// Prevent queued launches from entering Open, cancel the parent context, and
+	// close PTYs. Serve may already have performed this phase while repository
+	// work owned by this teardown was blocked.
+	sess.stopInMemoryLifecycle()
 	sess.mu.Lock()
 	tabs := append([]*tab(nil), sess.tabs...)
 	clipFiles := sess.clipFiles
@@ -1156,7 +1175,6 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	for _, tb := range tabs {
 		d.clearDestroyedTabPreview(tb)
 		d.teardownFloating(tb, ac)
-		tb.closeAllPanes()
 	}
 	for _, path := range clipFiles {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
