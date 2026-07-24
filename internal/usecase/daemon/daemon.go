@@ -518,8 +518,8 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	// worker. The same deadline bounds the worker's final drain, including a
 	// repository call that ignores cancellation.
 	d.stopSnapshotEncodeWorkerWithDeadline(snapshotDeadline)
-	d.shutdownAll(ports.ReasonServerShutdown)
-	d.sessWg.Wait()
+	d.shutdownAllWithSnapshotDeadline(ports.ReasonServerShutdown, snapshotDeadline)
+	d.waitSessionWorkersWithSnapshotDeadline(snapshotDeadline)
 	d.waitNotifies()
 	if err := d.persist.Close(); err != nil {
 		d.log.Warn("closing session persister failed", "err", err)
@@ -550,12 +550,35 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 		return false
 	}
 	for _, s := range snapshot {
+		// Cancellation and PTY closure must not wait behind a teardown owner that
+		// is blocked in snapshot publication or purge work.
+		s.stopInMemoryLifecycle()
 		if err := d.killSessionWithSnapshotDeadline(s, reason, false, deadline); err != nil {
 			checkpointIncomplete = true
 			d.log.Error("closing session with unpersisted terminal state", "err", err)
 		}
 	}
 	return checkpointIncomplete
+}
+
+// waitSessionWorkersWithSnapshotDeadline joins in-memory workers when possible,
+// but never extends Serve beyond the shared repository shutdown budget. By this
+// point connection handlers are joined and every session has been cancelled, so
+// no new session worker can be registered while the waiter is active.
+func (d *Daemon) waitSessionWorkersWithSnapshotDeadline(deadline *snapshotShutdownDeadline) {
+	done := make(chan struct{})
+	go func() {
+		d.sessWg.Wait()
+		close(done)
+	}()
+	if deadline == nil {
+		<-done
+		return
+	}
+	select {
+	case <-done:
+	case <-deadline.Done():
+	}
 }
 
 // snapshotShutdownDeadline is a single-use shutdown budget shared by forced
