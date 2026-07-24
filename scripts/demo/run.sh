@@ -18,9 +18,12 @@ printf '{"hasCompletedOnboarding": true, "theme": "dark", "projects": {"/home/de
 
 # Rootless docker maps host-owned files (uid 1000) to container root, but the
 # container runs as demo (uid 1000 -> a subuid), so demo cannot read the
-# credentials or write its config dir. Make the throwaway home world-accessible
-# so claude can authenticate and write transcripts.
+# credentials or write its config dir. Open up the throwaway home's contents so
+# claude can authenticate and write transcripts, then restore the mktemp
+# parent to 0700: bind mounts hand the container the inner paths directly, but
+# other host users would have to traverse the parent, which now blocks them.
 chmod -R a+rwX "$CLAUDE_TMP"
+chmod 0700 "$CLAUDE_TMP"
 
 docker run --rm --hostname vev-demo \
   -v "$PWD/scripts/demo:/tape:ro" \
