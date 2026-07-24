@@ -170,11 +170,16 @@ func TestPerformanceFixtureExplicitCloseReleasesIterationState(t *testing.T) {
 	require.Error(t, serveCtx.Err())
 	require.Error(t, hardCtx.Err())
 	d.mu.Lock()
-	require.NotContains(t, d.sessions, sess.id)
+	sessionIDs := make([]domain.SessionID, 0, len(d.sessions))
+	for id := range d.sessions {
+		sessionIDs = append(sessionIDs, id)
+	}
 	d.mu.Unlock()
+	require.NotContains(t, sessionIDs, sess.id)
 	d.snapshotWorkerMu.Lock()
-	require.Nil(t, d.snapshotWorkerCancel)
+	workerCancel := d.snapshotWorkerCancel
 	d.snapshotWorkerMu.Unlock()
+	require.Nil(t, workerCancel)
 }
 
 func TestCountingOutputTransportCountsOpaquePayloadAndRejectsShortPayload(t *testing.T) {
