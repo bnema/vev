@@ -243,8 +243,7 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 	case daemonActionCreateTab:
 		return a.d.createTab(target.session, request.viewport)
 	case daemonActionCloseTab:
-		a.d.closeTab(target.session, target.tab, true)
-		return nil
+		return a.d.closeTab(target.session, target.tab, true)
 	case daemonActionSplitPane:
 		return a.d.splitPaneAt(target.session, target.tab, target.pane, request.direction)
 	case daemonActionStackPane:
@@ -255,10 +254,16 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 		if a.d.ptys == nil {
 			return nil
 		}
-		if target.pane == nil {
+		if !a.d.hasDaemonActionPaneTarget(target) {
 			return layout.ErrNotFound
 		}
-		return a.d.closePane(target.session, target.tab, target.pane.id, nil, true)
+		if err := a.d.closePane(target.session, target.tab, target.pane.id, nil, true); err != nil {
+			return err
+		}
+		if a.d.hasDaemonActionPaneTarget(target) {
+			return errors.New("pane close did not complete")
+		}
+		return nil
 	case daemonActionFocusPane:
 		return a.d.focusDirAt(target.session, target.tab, target.pane, request.direction)
 	case daemonActionNextTab:
@@ -272,6 +277,36 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 	default:
 		return errors.New("daemon: unknown action")
 	}
+}
+
+// hasDaemonActionPaneTarget verifies that an already-resolved pane still
+// belongs to the live tab and session. Close-pane uses it both before mutation
+// and as a postcondition because closing a final pane delegates to close-tab.
+func (d *Daemon) hasDaemonActionPaneTarget(target daemonActionTarget) bool {
+	if target.session == nil || target.tab == nil || target.pane == nil {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.sessions[target.session.id] != target.session {
+		return false
+	}
+	target.session.mu.Lock()
+	defer target.session.mu.Unlock()
+	foundTab := false
+	for _, tb := range target.session.tabs {
+		if tb == target.tab {
+			foundTab = true
+			break
+		}
+	}
+	if !foundTab {
+		return false
+	}
+	target.tab.mu.Lock()
+	defer target.tab.mu.Unlock()
+	return target.tab.panes[target.pane.id] == target.pane &&
+		target.tab.tree != nil && layout.ContainsLeaf(target.tab.tree.Root, target.pane.id)
 }
 
 func (a daemonActions) switchRelative(sess *session, delta int) error {

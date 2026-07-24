@@ -737,11 +737,14 @@ func (s *session) persistRecordLocked(updatedAt int64) persist.Record {
 	return persist.Record{Name: s.name, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, LastUsedSeq: s.mruAt.Load(), TabNames: tabNames}
 }
 
-func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
+func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
+	if sess == nil || tb == nil {
+		return layout.ErrNotFound
+	}
 	d.mu.Lock()
 	if d.sessions[sess.id] != sess {
 		d.mu.Unlock()
-		return
+		return errors.New("daemon: session closed")
 	}
 	sess.mu.Lock()
 	idx := -1
@@ -754,7 +757,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	if idx == -1 {
 		sess.mu.Unlock()
 		d.mu.Unlock()
-		return
+		return errors.New("tab not found")
 	}
 	if len(sess.tabs) == 1 {
 		name := sess.name
@@ -764,10 +767,10 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 			d.log.Warn("closing last tab failed", "session", name, "err", err)
 			d.reportError(sess, domain.UserErr(domain.NoticeSnapshotSaturated,
 				"couldn't close tab: session state not yet saved; try again", err))
-			return
+			return err
 		}
 		d.log.Info("tab closed", "session", name, "last", true)
-		return
+		return nil
 	}
 	ringing := tb.attention
 	wasActive := idx == sess.active
@@ -818,6 +821,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) {
 	if ringing {
 		d.repaintAllAttachedClients()
 	}
+	return nil
 }
 
 // ptyReader drains child output into the VT screen and pokes the dirty channel

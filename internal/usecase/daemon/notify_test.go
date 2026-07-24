@@ -254,10 +254,10 @@ func TestNoticeCenterPendingQueue(t *testing.T) {
 		for i := 0; i < 32; i++ {
 			nc.queueGlobal(notice(domain.NoticeCode(i), fmt.Sprintf("code %d", i), ""))
 		}
-		// The queue is now full. Re-queuing an existing code must coalesce
+		// The queue is now full. Re-queuing an identical notice must coalesce
 		// in place, not hit the overflow-drop branch.
-		nc.queueGlobal(notice(domain.NoticeCode(0), "code 0 again", ""))
-		nc.queueGlobal(notice(domain.NoticeCode(0), "code 0 again", ""))
+		nc.queueGlobal(notice(domain.NoticeCode(0), "code 0", ""))
+		nc.queueGlobal(notice(domain.NoticeCode(0), "code 0", ""))
 		pending := nc.drainPending()
 		if len(pending) != 32 {
 			t.Fatalf("pending len = %d, want 32 (dedup must not grow past cap)", len(pending))
@@ -775,6 +775,30 @@ func TestNotifyGlobalSerializesReplacementWithDelivery(t *testing.T) {
 	sess.mu.Unlock()
 }
 
+func TestDetachedNoticeCoalescingPreservesDistinctContentAndSeverity(t *testing.T) {
+	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+	sess.mu.Lock()
+	sess.client = nil
+	sess.mu.Unlock()
+
+	d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build started", nil)
+	d.notify(sess, domain.NoticeWarn, domain.NoticeUser, "build delayed", nil)
+	d.notify(sess, domain.NoticeWarn, domain.NoticeUser, "build delayed", nil)
+
+	sess.mu.Lock()
+	sess.client = ac
+	sess.mu.Unlock()
+	d.drainPendingForFirstPaint(sess, ac)
+
+	toasts := awaitToastCount(t, ac, 2)
+	require.Equal(t, "build delayed", toasts[0].Message)
+	require.Equal(t, domain.NoticeWarn, toasts[0].Severity)
+	require.Equal(t, 2, toasts[0].Count, "identical detached notices coalesce")
+	require.Equal(t, "build started", toasts[1].Message)
+	require.Equal(t, domain.NoticeInfo, toasts[1].Severity)
+	require.Equal(t, 1, toasts[1].Count)
+}
+
 func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 	sess.mu.Lock()
@@ -873,17 +897,34 @@ func TestNotifyLogsAtSeverityLevel(t *testing.T) {
 }
 
 func TestShowToastCoalesceAndTrim(t *testing.T) {
-	t.Run("same code and scope coalesces", func(t *testing.T) {
-		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+	t.Run("identical notices coalesce and renew their ttl", func(t *testing.T) {
+		clk := newNoticeClock()
+		d, sess, ac, _ := newNoticeFixture(t, clk)
 
-		d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
-		d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
+		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build finished", nil)
+		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build finished", nil)
 
 		toasts := awaitToastCount(t, ac, 1)
 		require.Equal(t, 2, toasts[0].Count)
+		require.Equal(t, []time.Duration{4 * time.Second, 4 * time.Second}, clk.durations(), "coalescing renews the identical notice's ttl")
 		_, overflow := visibleToasts(ac)
 		require.Zero(t, overflow)
 		require.Len(t, d.notices.history(), 2, "coalescing is display-only; history keeps both")
+	})
+
+	t.Run("same code and scope preserve distinct message and severity", func(t *testing.T) {
+		clk := newNoticeClock()
+		d, sess, ac, _ := newNoticeFixture(t, clk)
+
+		d.notify(sess, domain.NoticeInfo, domain.NoticeUser, "build started", nil)
+		d.notify(sess, domain.NoticeWarn, domain.NoticeUser, "build delayed", nil)
+
+		toasts := awaitToastCount(t, ac, 2)
+		require.Equal(t, "build delayed", toasts[0].Message)
+		require.Equal(t, domain.NoticeWarn, toasts[0].Severity)
+		require.Equal(t, "build started", toasts[1].Message)
+		require.Equal(t, domain.NoticeInfo, toasts[1].Severity)
+		require.Equal(t, []time.Duration{4 * time.Second, 6 * time.Second}, clk.durations(), "each distinct notice keeps its severity ttl")
 	})
 
 	t.Run("same code different scope does not coalesce", func(t *testing.T) {

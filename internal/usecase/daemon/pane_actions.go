@@ -269,8 +269,7 @@ func (d *Daemon) closePane(sess *session, tb *tab, id layout.PaneID, ac *attache
 		if ac != nil {
 			ac.overlays.clearCopyModeForPane(p)
 		}
-		d.closeTab(sess, tb, repaint)
-		return nil
+		return d.closeTab(sess, tb, repaint)
 	}
 	if err := tb.tree.Close(id); err != nil {
 		tb.mu.Unlock()

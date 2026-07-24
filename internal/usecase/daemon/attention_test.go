@@ -326,7 +326,7 @@ func TestCloseRingingTabClearsClientBar(t *testing.T) {
 	before := mustOutputData(t, sends)
 	require.Contains(t, string(before), "")
 
-	d.closeTab(sess, ringing, true)
+	require.NoError(t, d.closeTab(sess, ringing, true))
 	after := mustOutputData(t, sends)
 	require.NotContains(t, string(after), "")
 }
@@ -455,7 +455,7 @@ func TestCloseRingingTabRefreshesOtherSessionBottomBar(t *testing.T) {
 	before := mustOutputData(t, sendsB)
 	require.Contains(t, string(before), string(ui.AttentionGlyph))
 
-	d.closeTab(sessA, ringing, true)
+	require.NoError(t, d.closeTab(sessA, ringing, true))
 	_ = mustOutputData(t, sendsA)
 
 	after := mustOutputData(t, sendsB)

@@ -157,7 +157,7 @@ func TestCloseTabPrunesAttachedCaptureFrames(t *testing.T) {
 		survivor: cachedSurvivor,
 	}
 
-	d.closeTab(sess, closedTab, false)
+	require.NoError(t, d.closeTab(sess, closedTab, false))
 	require.NotContains(t, ac.captureFrames, closed, "closed tab panes must not remain strongly retained by its attachment")
 	require.Equal(t, cachedSurvivor, ac.captureFrames[survivor], "surviving tab pane keeps its incremental capture")
 }

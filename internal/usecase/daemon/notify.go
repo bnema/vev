@@ -115,7 +115,7 @@ func (nc *noticeCenter) queueGlobal(n domain.Notification) {
 	nc.mu.Lock()
 	defer nc.mu.Unlock()
 	for i := range nc.pending {
-		if nc.pending[i].Code == n.Code && nc.pending[i].SessionID == n.SessionID {
+		if sameToastNotice(nc.pending[i], n) {
 			nc.pending[i].Count += n.Count
 			nc.pending[i].Time = n.Time
 			return
@@ -369,10 +369,9 @@ func (d *Daemon) publishToast(ac *attachedClient, n domain.Notification) bool {
 
 	rt.noticeMu.Lock()
 	defer rt.noticeMu.Unlock()
-	if i := rt.indexOfToastLocked(n.Code, n.SessionID); i >= 0 {
+	if i := rt.indexOfMatchingToastLocked(n); i >= 0 {
 		rt.noticeToasts[i].n.Count += n.Count
 		rt.noticeToasts[i].n.Time = n.Time
-		rt.noticeToasts[i].n.Details = n.Details
 		rt.noticeToasts[i].timer.stop()
 		d.retainToastTimerLocked(ac, &rt.noticeToasts[i])
 		return true
@@ -389,6 +388,33 @@ func (d *Daemon) publishToast(ac *attachedClient, n domain.Notification) bool {
 	}
 	d.retainToastTimerLocked(ac, &rt.noticeToasts[0])
 	return true
+}
+
+func sameToastNotice(a, b domain.Notification) bool {
+	if a.Code != b.Code || a.SessionID != b.SessionID {
+		return false
+	}
+	// NoticeUser is intentionally generic: its message and selected severity
+	// are the notice identity. Typed daemon notices retain their established
+	// code-and-scope coalescing behavior.
+	if a.Code != domain.NoticeUser {
+		return true
+	}
+	return a.Severity == b.Severity &&
+		a.Message == b.Message &&
+		a.Details == b.Details
+}
+
+// indexOfMatchingToastLocked finds a visible toast with the code-specific
+// coalescing identity. Count and time are occurrence metadata, not identity.
+// Callers must hold noticeMu.
+func (rt *overlayRuntime) indexOfMatchingToastLocked(n domain.Notification) int {
+	for i := range rt.noticeToasts {
+		if sameToastNotice(rt.noticeToasts[i].n, n) {
+			return i
+		}
+	}
+	return -1
 }
 
 // indexOfToastLocked finds a visible toast with the same code and scope.

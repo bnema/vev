@@ -9,6 +9,8 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
 )
@@ -268,6 +270,66 @@ func TestHandleCommandRenameSessionRejectsInvalidNameAsCommandArgs(t *testing.T)
 
 	require.False(t, result.OK)
 	require.Equal(t, ports.ErrInvalidCommandArgs, result.Code)
+}
+
+func TestCloseCommandsReportMutationOutcome(t *testing.T) {
+	t.Run("stale close tab target fails", func(t *testing.T) {
+		d := newTestDaemon(t, nil, stubClock{})
+		sess := addControlSession(d, "work", "t_work", "p_work")
+		stale := newTabWithStableID("t_stale", "p_stale", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+		cmd, ok := command.BySlug("close-tab")
+		require.True(t, ok)
+
+		result := d.runControl(cmd, controlExec{
+			d: d, sess: sess, tab: stale,
+			target: daemonActionTarget{session: sess, tab: stale},
+		}, ports.CommandRequest{Slug: "close-tab"})
+
+		require.False(t, result.OK)
+		require.Equal(t, ports.ErrInternal, result.Code)
+		require.Len(t, sess.tabs, 1, "a stale close must retain the live tab")
+	})
+
+	t.Run("failed final pane close fails and retains session", func(t *testing.T) {
+		d := newTestDaemon(t, &controlPTYFactory{}, stubClock{})
+		d.snapsEnabled = true
+		d.snapshotRepository = portsmocks.NewMockSnapshotRepository(t)
+		sess := addControlSession(d, "work", "t_work", "p_work")
+		sess.mu.Lock()
+		sess.ephemeral = false
+		sess.mu.Unlock()
+		sess.snapEligible.Store(true)
+
+		result := sendCommand(t, d, ports.CommandRequest{Slug: "close-pane", TargetSession: "work"})
+
+		require.False(t, result.OK)
+		require.Equal(t, ports.ErrInternal, result.Code)
+		d.mu.Lock()
+		require.Same(t, sess, d.sessions[sess.id], "failed final-pane close must retain the session")
+		d.mu.Unlock()
+		sess.mu.Lock()
+		require.Len(t, sess.tabs, 1)
+		sess.mu.Unlock()
+	})
+
+	t.Run("successful close tab remains successful", func(t *testing.T) {
+		d := newTestDaemon(t, nil, stubClock{})
+		sess := addControlSession(d, "work", "t_first", "p_first")
+		second := newTabWithStableID("t_second", "p_second", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+		second.ctx, second.cancel = context.WithCancel(d.serveCtx)
+		sess.mu.Lock()
+		sess.tabs = append(sess.tabs, second)
+		sess.active = 1
+		sess.mu.Unlock()
+
+		result := sendCommand(t, d, ports.CommandRequest{Slug: "close-tab", TargetSession: "work"})
+
+		require.True(t, result.OK, result.Text)
+		sess.mu.Lock()
+		require.Len(t, sess.tabs, 1)
+		require.Equal(t, "t_first", sess.tabs[0].stableID)
+		sess.mu.Unlock()
+	})
 }
 
 func TestHandleCommandHeadlessMutations(t *testing.T) {
