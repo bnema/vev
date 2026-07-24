@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -152,11 +153,41 @@ func realDial(ctx context.Context, dir string) (ports.Transport, error) {
 	return ipc.DialContext(ctx, dir)
 }
 
-// realSpawn re-execs this binary as a detached daemon: a new session
-// (Setsid) with stdio bound to /dev/null so it survives the client's exit
-// and never writes to the client's terminal. It logs via slog to the shared
-// log file instead.
+// realSpawn re-execs this binary through a short-lived launcher. Waiting for
+// that launcher to exit ensures the daemon has been re-parented before the
+// client continues, keeping process-tree termination from reaching it.
 func realSpawn() error {
+	exePath, err := selfExePath()
+	if err != nil {
+		return fmt.Errorf("resolving executable path: %w", err)
+	}
+
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("opening %s: %w", os.DevNull, err)
+	}
+	defer func() { _ = devNull.Close() }()
+
+	var stderr bytes.Buffer
+	cmd := exec.Command(exePath, "--daemon-launcher")
+	cmd.Dir = platform.DirOrHome("")
+	cmd.Stdin = devNull
+	cmd.Stdout = devNull
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if detail := bytes.TrimSpace(stderr.Bytes()); len(detail) > 0 {
+			return fmt.Errorf("%w: %s", err, detail)
+		}
+		return err
+	}
+	slog.Info("daemon process detached")
+	return nil
+}
+
+// runDaemonLauncher is the intermediate half of the double-fork. It starts
+// the long-lived daemon in a new session and exits immediately; realSpawn
+// waits for this exit so the daemon is no longer descended from the client.
+func runDaemonLauncher() error {
 	exePath, err := selfExePath()
 	if err != nil {
 		return fmt.Errorf("resolving executable path: %w", err)
@@ -177,7 +208,5 @@ func realSpawn() error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	slog.Info("daemon process started", "pid", cmd.Process.Pid)
-	// Detach: we neither wait for nor signal the daemon after launch.
 	return cmd.Process.Release()
 }

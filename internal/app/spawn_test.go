@@ -3,10 +3,14 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -15,6 +19,73 @@ import (
 )
 
 var errDialFailed = errors.New("dial failed")
+
+const spawnTestChildFileEnv = "VEV_SPAWN_TEST_CHILD_FILE"
+
+func TestMain(m *testing.M) {
+	if len(os.Args) == 2 {
+		switch os.Args[1] {
+		case "--daemon-launcher":
+			if err := Run(os.Args[1:]); err != nil {
+				os.Exit(2)
+			}
+			os.Exit(0)
+		case "--daemon":
+			path := os.Getenv(spawnTestChildFileEnv)
+			if path == "" {
+				os.Exit(2)
+			}
+			if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+				os.Exit(2)
+			}
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
+	}
+	os.Exit(m.Run())
+}
+
+func TestRealSpawnReparentsDaemonBeforeReturning(t *testing.T) {
+	childFile := filepath.Join(t.TempDir(), "child")
+	t.Setenv(spawnTestChildFileEnv, childFile)
+
+	if err := realSpawn(); err != nil {
+		t.Fatalf("realSpawn: %v", err)
+	}
+
+	var pid int
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(childFile)
+		if err == nil {
+			pid, err = strconv.Atoi(string(data))
+			if err != nil {
+				t.Fatalf("parse child PID: %v", err)
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read child process record: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid == 0 {
+		t.Fatal("daemon child did not report its ancestry")
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+
+	status, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
+	if err != nil {
+		t.Fatalf("read daemon status: %v", err)
+	}
+	if strings.Contains(string(status), fmt.Sprintf("PPid:\t%d\n", os.Getpid())) {
+		t.Fatalf("daemon PPID = client PID %d; daemon remains in the client process tree", os.Getpid())
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("daemon exited with its intermediate parent: %v", err)
+	}
+}
 
 // fastBackoff keeps the retry loop snappy for tests.
 var fastBackoff = backoffConfig{initial: time.Millisecond, max: 5 * time.Millisecond, total: 100 * time.Millisecond}
