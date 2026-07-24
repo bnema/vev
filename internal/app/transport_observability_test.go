@@ -203,6 +203,7 @@ type runtimeObserverFunc func(ports.RuntimeMark)
 func (f runtimeObserverFunc) ObserveRuntime(mark ports.RuntimeMark) { f(mark) }
 
 func TestRunAttachPropagatesOneObserverToRemoteTransportFactory(t *testing.T) {
+	t.Setenv("VEV", "")
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv(envRemoteTransport, string(ports.RemoteTransportStdio))

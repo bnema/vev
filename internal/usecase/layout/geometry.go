@@ -185,13 +185,13 @@ func distribute(total int, minimums []int, weights []float64) ([]int, bool) {
 	remaining := total
 
 	for {
-		normalized, sum := normalizedActiveWeights(weights, active)
+		largest, sum := activeWeightScale(weights, active)
 		var pinned []int
 		for i := range active {
 			if !active[i] {
 				continue
 			}
-			quota := float64(remaining) * normalized[i] / sum
+			quota := float64(remaining) * (effectiveWeight(weights[i]) / largest) / sum
 			if quota < float64(minimums[i]) {
 				pinned = append(pinned, i)
 			}
@@ -206,7 +206,7 @@ func distribute(total int, minimums []int, weights []float64) ([]int, bool) {
 		}
 	}
 
-	normalized, sum := normalizedActiveWeights(weights, active)
+	largest, sum := activeWeightScale(weights, active)
 	type remainder struct {
 		index    int
 		fraction float64
@@ -217,7 +217,7 @@ func distribute(total int, minimums []int, weights []float64) ([]int, bool) {
 		if !active[i] {
 			continue
 		}
-		quota := float64(remaining) * normalized[i] / sum
+		quota := float64(remaining) * (effectiveWeight(weights[i]) / largest) / sum
 		whole := int(math.Floor(quota))
 		allocations[i] = whole
 		allocated += whole
@@ -232,23 +232,20 @@ func distribute(total int, minimums []int, weights []float64) ([]int, bool) {
 	return allocations, true
 }
 
-func normalizedActiveWeights(weights []float64, active []bool) ([]float64, float64) {
+func activeWeightScale(weights []float64, active []bool) (float64, float64) {
 	largest := 0.0
 	for i, weight := range weights {
 		if active[i] {
 			largest = math.Max(largest, effectiveWeight(weight))
 		}
 	}
-	normalized := make([]float64, len(weights))
 	sum := 0.0
 	for i, weight := range weights {
-		if !active[i] {
-			continue
+		if active[i] {
+			sum += effectiveWeight(weight) / largest
 		}
-		normalized[i] = effectiveWeight(weight) / largest
-		sum += normalized[i]
 	}
-	return normalized, sum
+	return largest, sum
 }
 
 func solveStack(n *Node, r domain.Rect, out *[]Placement) bool {
