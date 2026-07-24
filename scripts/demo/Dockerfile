@@ -7,11 +7,15 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o /out/vev .
 
 FROM archlinux:latest
+# The base image ships a pacman.conf that skips extracting man/info pages
+# (NoExtract) to stay small; the demo wants a real `man ls`, so drop that
+# rule and reinstall coreutils to pull its man page onto disk.
 RUN pacman -Sy --noconfirm archlinux-keyring \
+    && sed -i '/^NoExtract.*usr\/share\/man/d' /etc/pacman.conf \
     && pacman -Syu --noconfirm \
       vhs ttyd ffmpeg chromium \
       btop fastfetch gifsicle \
-      cmatrix eza \
+      eza neovim man-db man-pages coreutils \
       nodejs npm ncurses \
       ttf-jetbrains-mono-nerd \
     && pacman -Scc --noconfirm
@@ -25,4 +29,5 @@ USER demo
 WORKDIR /home/demo
 ENV VHS_NO_SANDBOX=true
 ENV COLORTERM=truecolor
+ENV EZA_ICONS_AUTO=1
 ENTRYPOINT ["vhs"]
