@@ -61,6 +61,7 @@ const (
 	kindKill
 	kindCmd
 	kindDaemon
+	kindDaemonLauncher
 	kindStdio
 	kindUDPBootstrap
 	kindUDPProxy
@@ -141,6 +142,8 @@ func parseArgs(args []string) (command, error) {
 	switch args[0] {
 	case "--daemon":
 		return command{kind: kindDaemon}, nil
+	case "--daemon-launcher":
+		return command{kind: kindDaemonLauncher}, nil
 	case "_stdio":
 		if len(args) > 2 {
 			return command{}, usagef("`_stdio` accepts at most one session name")
@@ -244,6 +247,8 @@ func dispatch(ctx context.Context, cmd command) error {
 		return nil
 	case kindDaemon:
 		return runDaemon()
+	case kindDaemonLauncher:
+		return runDaemonLauncher()
 	case kindStdio:
 		return runStdio(ctx)
 	case kindUDPBootstrap:
