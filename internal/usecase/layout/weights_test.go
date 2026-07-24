@@ -68,6 +68,20 @@ func TestDistributePinsChildrenFromOneQuotaSnapshot(t *testing.T) {
 	require.Equal(t, 100, allocations[0]+allocations[1]+allocations[2])
 }
 
+func TestWeightedSplitNestedMinimumRedistributesWithFreshDenominator(t *testing.T) {
+	t.Parallel()
+
+	root := split(Horizontal,
+		weightedNode(split(Horizontal, NewLeaf("a"), NewLeaf("b")), 2),
+		weightedLeaf("c", 2),
+		weightedLeaf("d", 6),
+	)
+
+	rects, ok := splitChildRects(root, domain.Rect{Width: 132, Height: 2})
+	require.True(t, ok)
+	require.Equal(t, []int{41, 22, 67}, []int{rects[0].Width, rects[1].Width, rects[2].Width})
+}
+
 func TestWeightedSplitRecursiveMinima(t *testing.T) {
 	t.Parallel()
 
