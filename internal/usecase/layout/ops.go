@@ -18,7 +18,7 @@ var (
 // is placed after target on the chosen axis.
 func (t *Tree) Split(target PaneID, dir Direction, after bool, newID PaneID, area domain.Rect) error {
 	candidate := t.clone()
-	if candidate == nil || candidate.Root == nil || !insertSplit(candidate.Root, target, axisFor(dir), after, newID) {
+	if candidate == nil || candidate.Root == nil || !insertSplit(candidate.Root, target, axisFor(dir), after, newID, area) {
 		return ErrNotFound
 	}
 	candidate.Focus = newID
@@ -29,14 +29,16 @@ func (t *Tree) Split(target PaneID, dir Direction, after bool, newID PaneID, are
 	return nil
 }
 
-func insertSplit(n *Node, target PaneID, axis SplitDir, after bool, newID PaneID) bool {
+func insertSplit(n *Node, target PaneID, axis SplitDir, after bool, newID PaneID, area domain.Rect) bool {
 	if n == nil {
 		return false
 	}
+	childAreas := nodeChildAreas(n, area)
 	for i, child := range n.Children {
 		if child.Kind == Leaf && child.Leaf == target {
 			newLeaf := NewLeaf(newID)
 			if n.Kind == Split && n.Dir == axis {
+				normalizeChildWeightsFromArea(n, area)
 				at := i
 				if after {
 					at++
@@ -47,34 +49,80 @@ func insertSplit(n *Node, target PaneID, axis SplitDir, after bool, newID PaneID
 				return true
 			}
 			if n.Kind == Stack {
+				weight := n.Weight
 				stack := n.clone()
+				stack.Weight = 0
+				clearChildWeights(stack)
 				children := []*Node{stack, newLeaf}
 				if !after {
 					children = []*Node{newLeaf, stack}
 				}
-				*n = Node{Kind: Split, Dir: axis, Children: children}
+				*n = Node{Kind: Split, Dir: axis, Children: children, Weight: weight}
 				return true
 			}
+			weight := child.Weight
+			child.Weight = 0
 			children := []*Node{child, newLeaf}
 			if !after {
 				children = []*Node{newLeaf, child}
 			}
-			n.Children[i] = &Node{Kind: Split, Dir: axis, Children: children}
+			n.Children[i] = &Node{Kind: Split, Dir: axis, Children: children, Weight: weight}
 			return true
 		}
-		if insertSplit(child, target, axis, after, newID) {
+		childArea := area
+		if i < len(childAreas) {
+			childArea = childAreas[i]
+		}
+		if insertSplit(child, target, axis, after, newID, childArea) {
 			return true
 		}
 	}
 	if n.Kind == Leaf && n.Leaf == target {
-		children := []*Node{n.clone(), NewLeaf(newID)}
+		weight := n.Weight
+		existing := n.clone()
+		existing.Weight = 0
+		children := []*Node{existing, NewLeaf(newID)}
 		if !after {
-			children = []*Node{NewLeaf(newID), n.clone()}
+			children = []*Node{NewLeaf(newID), existing}
 		}
-		*n = Node{Kind: Split, Dir: axis, Children: children}
+		*n = Node{Kind: Split, Dir: axis, Children: children, Weight: weight}
 		return true
 	}
 	return false
+}
+
+func nodeChildAreas(n *Node, area domain.Rect) []domain.Rect {
+	if n.Kind == Split {
+		rects, ok := splitChildRects(n, area)
+		if ok {
+			return rects
+		}
+	}
+	areas := make([]domain.Rect, len(n.Children))
+	for i := range areas {
+		areas[i] = area
+	}
+	return areas
+}
+
+func normalizeChildWeightsFromArea(n *Node, area domain.Rect) {
+	rects, ok := splitChildRects(n, area)
+	if !ok || len(rects) == 0 {
+		return
+	}
+	for i, rect := range rects {
+		extent := rect.Width
+		if n.Dir == Vertical {
+			extent = rect.Height
+		}
+		n.Children[i].Weight = float64(extent)
+	}
+}
+
+func clearChildWeights(n *Node) {
+	for _, child := range n.Children {
+		child.Weight = 0
+	}
 }
 
 // StackNew puts newID in target's stack, creating one if target is not stacked.
@@ -100,13 +148,16 @@ func stackNew(n *Node, target, newID PaneID) bool {
 			if child.Kind == Leaf && child.Leaf == target {
 				n.Children = append(n.Children, NewLeaf(newID))
 				n.Expanded = newID
+				clearChildWeights(n)
 				return true
 			}
 		}
 	}
 	for i, child := range n.Children {
 		if child.Kind == Leaf && child.Leaf == target {
-			n.Children[i] = &Node{Kind: Stack, Children: []*Node{child, NewLeaf(newID)}, Expanded: newID}
+			weight := child.Weight
+			child.Weight = 0
+			n.Children[i] = &Node{Kind: Stack, Children: []*Node{child, NewLeaf(newID)}, Expanded: newID, Weight: weight}
 			return true
 		}
 		if stackNew(child, target, newID) {
@@ -114,7 +165,8 @@ func stackNew(n *Node, target, newID PaneID) bool {
 		}
 	}
 	if n.Kind == Leaf && n.Leaf == target {
-		*n = Node{Kind: Stack, Children: []*Node{NewLeaf(target), NewLeaf(newID)}, Expanded: newID}
+		weight := n.Weight
+		*n = Node{Kind: Stack, Children: []*Node{NewLeaf(target), NewLeaf(newID)}, Expanded: newID, Weight: weight}
 		return true
 	}
 	return false
@@ -169,11 +221,13 @@ func toggleStack(n *Node, target PaneID) toggleResult {
 		n.Kind = Split
 		n.Dir = Vertical
 		n.Expanded = ""
+		clearChildWeights(n)
 		return toggleToggled
 	}
 	if n.Kind == Split && len(n.Children) == 2 && splitDirectLeavesContain(n, target) {
 		n.Kind = Stack
 		n.Expanded = target
+		clearChildWeights(n)
 		return toggleToggled
 	}
 	return toggleNotToggleable
@@ -252,16 +306,13 @@ func closeNode(n *Node, target PaneID) (*Node, bool) {
 	if !removed {
 		return n, false
 	}
-	if n.Kind == Stack {
-		if n.Expanded == target && len(n.Children) > 0 {
-			n.Expanded = firstLeaf(n.Children[0])
-		}
-		if len(n.Children) == 1 {
-			return n.Children[0], true
-		}
+	if n.Kind == Stack && n.Expanded == target && len(n.Children) > 0 {
+		n.Expanded = firstLeaf(n.Children[0])
 	}
-	if n.Kind == Split && len(n.Children) == 1 {
-		return n.Children[0], true
+	if (n.Kind == Stack || n.Kind == Split) && len(n.Children) == 1 {
+		promoted := n.Children[0]
+		promoted.Weight = n.Weight
+		return promoted, true
 	}
 	return n, true
 }

@@ -46,6 +46,7 @@ type Node struct {
 	Children []*Node
 	Leaf     PaneID
 	Expanded PaneID
+	Weight   float64
 }
 
 // Tree is a pane layout plus its focused pane.
