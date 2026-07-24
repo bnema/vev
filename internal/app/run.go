@@ -58,6 +58,7 @@ const (
 	kindAttach cmdKind = iota // ephemeral/new/attach — distinguished by intent
 	kindList
 	kindKill
+	kindCmd
 	kindDaemon
 	kindStdio
 	kindUDPBootstrap
@@ -75,6 +76,7 @@ type command struct {
 	remoteTarget string
 	killAll      bool
 	killDaemon   bool
+	cmd          cmdInvocation
 }
 
 // usageError is a user-facing argument error; the app prints it (with usage)
@@ -99,6 +101,7 @@ usage:
   vev kill <name>     kill a session
   vev kill --all      kill all sessions and stop the daemon
   vev kill --daemon   stop the active vev daemon
+  vev cmd <command>   run a control command (vev cmd --help)
   vev --help          show this help
   vev --version       show version`
 
@@ -193,6 +196,12 @@ func parseArgs(args []string) (command, error) {
 		return cmd, nil
 	case "ls", "list":
 		return command{kind: kindList}, nil
+	case "cmd":
+		invocation, err := parseCmdArgs(args[1:])
+		if err != nil {
+			return command{}, err
+		}
+		return command{kind: kindCmd, cmd: invocation}, nil
 	case "kill":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`kill` requires a session name, --all, or --daemon")
@@ -244,6 +253,8 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runList(ctx)
 	case kindKill:
 		return runKill(ctx, cmd.name, cmd.killAll, cmd.killDaemon)
+	case kindCmd:
+		return runCmd(ctx, cmd.cmd)
 	case kindAttach:
 		return runAttach(ctx, cmd.intent, cmd.name, cmd.remoteTarget)
 	default:
