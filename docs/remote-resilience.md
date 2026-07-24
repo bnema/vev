@@ -2,6 +2,8 @@
 
 Remote attach starts with SSH bootstrap and then carries the vev session over authenticated UDP. The design is inspired by mosh's mobile-shell resilience, but vev uses its own protocol and is not compatible with mosh clients or servers.
 
+The raw UDP AEAD key is never persisted by vev; the proxy registry stores only its SHA-256 ownership fingerprint. During bootstrap, the key briefly exists in memory in the proxy, the `_udp-bootstrap` relay, the client, and associated SSH/readiness I/O and string buffers. vev promptly clears reachable key buffers after handoff on a best-effort basis. Builds made with Go 1.26 and `GOEXPERIMENT=runtimesecret` additionally protect key-handling call trees with `runtime/secret` on linux/amd64 and linux/arm64; on unsupported platforms, `runtime/secret` calls the function directly. These protections do not cover globals, goroutines started by protected calls, copies retained by I/O implementations, or key material retained in cipher state.
+
 ## Operational model
 
 - SSH bootstrap starts or finds the remote UDP endpoint.

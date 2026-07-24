@@ -24,6 +24,12 @@ var (
 	ErrFragment  = errors.New("dgram: invalid fragment")
 )
 
+// Erase overwrites b with zeroes. This is best effort: copies made by the
+// compiler, runtime, or called code may retain the original data.
+func Erase(b []byte) {
+	clear(b)
+}
+
 type Codec struct {
 	gcm cipher.AEAD
 }

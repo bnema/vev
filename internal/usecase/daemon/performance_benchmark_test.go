@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -147,6 +148,38 @@ func TestPerformanceFixtureCellLimitedHistory(t *testing.T) {
 	fixture.activePane.mu.Unlock()
 	require.Less(t, rows, 10_000)
 	require.LessOrEqual(t, cells, capCells)
+}
+
+func TestPerformanceFixtureExplicitCloseReleasesIterationState(t *testing.T) {
+	fixture := newPerformanceFixtureWithCleanup(t, performanceConfig{}, false)
+	d, sess := fixture.d, fixture.sess
+	serveCtx, hardCtx := d.serveCtx, d.hardCtx
+	killErr := errors.New("scripted kill failure")
+	fixture.killSession = func(sess *session, reason uint8, purge bool) error {
+		require.NoError(t, d.killSession(sess, reason, purge))
+		return killErr
+	}
+
+	err := fixture.close()
+
+	require.ErrorIs(t, err, killErr)
+	require.Nil(t, fixture.d)
+	require.Nil(t, fixture.sess)
+	require.Nil(t, fixture.activePane)
+	require.Error(t, sess.ctx.Err())
+	require.Error(t, serveCtx.Err())
+	require.Error(t, hardCtx.Err())
+	d.mu.Lock()
+	sessionIDs := make([]domain.SessionID, 0, len(d.sessions))
+	for id := range d.sessions {
+		sessionIDs = append(sessionIDs, id)
+	}
+	d.mu.Unlock()
+	require.NotContains(t, sessionIDs, sess.id)
+	d.snapshotWorkerMu.Lock()
+	workerCancel := d.snapshotWorkerCancel
+	d.snapshotWorkerMu.Unlock()
+	require.Nil(t, workerCancel)
 }
 
 func TestCountingOutputTransportCountsOpaquePayloadAndRejectsShortPayload(t *testing.T) {
@@ -506,29 +539,40 @@ func benchmarkIncrementalSnapshotRepository(b *testing.B, scenario snapshotBench
 	b.ReportAllocs()
 	b.ResetTimer()
 	for operation := 0; b.Loop(); operation++ {
-		// A new fixture is deliberately outside the timed region. It gives every
-		// iteration the same filesystem state: initial has no generation,
-		// unchanged/visible/tail/sealed begin after one persisted generation.
-		// Reusing one fixture would eventually turn a tail into a sealed chunk
-		// and dilute initial-write bytes over later idempotent publications.
-		b.StopTimer()
-		fixture := newPerformanceFixture(b, performanceConfig{size: scenario.size, panes: 1, historyRows: scenario.historyRows})
-		validateSnapshotBenchmarkFixture(b, fixture, scenario)
-		generation := uint64(1)
-		if scenario.baseline {
+		func() {
+			// A new fixture gives every iteration the same filesystem state: initial
+			// has no generation, while changed scenarios begin after one persisted
+			// generation. Keep its expensive 10k-row construction timed so benchmark
+			// calibration accounts for real wall time instead of scheduling thousands
+			// of hidden setup iterations.
+			//
+			// b.Cleanup retains callbacks until the sub-benchmark ends; deferring an
+			// explicit close avoids retaining every fixture and OOM.
+			fixture := newPerformanceFixtureWithCleanup(b, performanceConfig{size: scenario.size, panes: 1, historyRows: scenario.historyRows}, false)
+			b.StopTimer()
+			defer func() {
+				b.StopTimer()
+				if err := fixture.close(); err != nil {
+					b.Fatalf("close performance fixture: %v", err)
+				}
+			}()
+			validateSnapshotBenchmarkFixture(b, fixture, scenario)
+			generation := uint64(1)
+			if scenario.baseline {
+				publishBenchmarkSnapshot(b, fixture, generation)
+				generation++
+				fixture.snapshots.reset()
+			}
+			b.StartTimer()
+			if scenario.mutate != nil {
+				scenario.mutate(fixture, operation)
+			}
 			publishBenchmarkSnapshot(b, fixture, generation)
-			generation++
-			fixture.snapshots.reset()
-		}
-		b.StartTimer()
-		if scenario.mutate != nil {
-			scenario.mutate(fixture, operation)
-		}
-		publishBenchmarkSnapshot(b, fixture, generation)
-		b.StopTimer()
+			b.StopTimer()
 
-		metrics = addCountingSnapshotMetrics(metrics, fixture.snapshots.metrics())
-		peakCacheBytes = max(peakCacheBytes, benchmarkSnapshotCacheBytes(fixture.sess))
+			metrics = addCountingSnapshotMetrics(metrics, fixture.snapshots.metrics())
+			peakCacheBytes = max(peakCacheBytes, benchmarkSnapshotCacheBytes(fixture.sess))
+		}()
 		// B.Loop requires the timer to be running at the next iteration.
 		b.StartTimer()
 	}
@@ -952,6 +996,7 @@ type performanceFixture struct {
 	resizedSize         domain.Size
 	pty                 *scriptedPerformancePTY
 	clock               *performanceClock
+	killSession         func(*session, uint8, bool) error
 	resizeRequests      uint64
 	resizeCommits       uint64
 	resizeCommitNanos   uint64
@@ -964,6 +1009,11 @@ type performanceFixture struct {
 }
 
 func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceFixture {
+	t.Helper()
+	return newPerformanceFixtureWithCleanup(t, config, true)
+}
+
+func newPerformanceFixtureWithCleanup(t testing.TB, config performanceConfig, registerCleanup bool) *performanceFixture {
 	t.Helper()
 	if !config.size.Valid() {
 		config.size = domain.Size{Cols: 80, Rows: 24}
@@ -980,7 +1030,7 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 	pty := &scriptedPerformancePTY{}
 	ptys := make([]ports.PTY, config.tabs)
 	ptys[0] = pty
-	d, sess, ac, _ := newManualSessionWithPTYs(t, ptys...)
+	d, sess, ac, _ := newManualSessionWithPTYsCleanup(t, registerCleanup, ptys...)
 	clock := &performanceClock{}
 	d.clock = clock
 	output := &countingOutputTransport{}
@@ -999,12 +1049,15 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 		snapshots:   &countingSnapshotRepository{},
 		pty:         pty,
 		clock:       clock,
+		killSession: d.killSession,
 		liveWrites:  [][]byte{[]byte("\x1b[1;1HA\x1b[2;2HA"), []byte("\x1b[1;1HB\x1b[2;2HB")},
 		resizeSizes: [2]domain.Size{{Cols: 100, Rows: 30}, config.size},
 	}
 	WithSnapshotRepository(fixture.snapshots, nil)(d)
 	d.startSnapshotEncodeWorker()
-	t.Cleanup(d.stopSnapshotEncodeWorker)
+	if registerCleanup {
+		t.Cleanup(d.stopSnapshotEncodeWorker)
+	}
 	for tabIndex, tb := range sess.tabs {
 		fixture.configureTab(tb, tabIndex, config.panes, config.historyRows, tabSize(config.size))
 	}
@@ -1027,6 +1080,31 @@ func newPerformanceFixture(t testing.TB, config performanceConfig) *performanceF
 	d.paint(sess, ac, true, nil)
 	fixture.resetMetrics()
 	return fixture
+}
+
+func (f *performanceFixture) close() error {
+	if f.d == nil {
+		return nil
+	}
+	d, sess := f.d, f.sess
+	sess.mu.Lock()
+	sess.ephemeral = true
+	sess.mu.Unlock()
+	killErr := f.killSession(sess, ports.ReasonServerShutdown, false)
+	d.stopSnapshotEncodeWorker()
+	d.serveCancel()
+	d.hardCancel()
+
+	f.d = nil
+	f.sess = nil
+	f.ac = nil
+	f.output = nil
+	f.snapshots = nil
+	f.activePane = nil
+	f.pty = nil
+	f.clock = nil
+	f.killSession = nil
+	return killErr
 }
 
 func (f *performanceFixture) configureTab(tb *tab, tabIndex, paneCount, historyRows int, size domain.Size) {
