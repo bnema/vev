@@ -14,13 +14,12 @@ RUN pacman -Sy --noconfirm archlinux-keyring \
     && sed -i '/^NoExtract.*usr\/share\/man/d' /etc/pacman.conf \
     && pacman -Syu --noconfirm \
       vhs ttyd ffmpeg chromium \
-      btop fastfetch gifsicle imagemagick \
+      htop fastfetch gifsicle imagemagick \
       eza neovim man-db man-pages coreutils \
       nodejs npm ncurses \
       ttf-jetbrains-mono-nerd \
     && pacman -Scc --noconfirm
 RUN npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code
-RUN setcap -r /usr/sbin/btop
 RUN useradd -m -u 1000 demo
 COPY --from=build /out/vev /usr/local/bin/vev
 COPY scripts/demo/ticker.sh /usr/local/bin/ticker
