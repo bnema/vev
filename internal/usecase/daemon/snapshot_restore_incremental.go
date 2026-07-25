@@ -167,7 +167,6 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 	if len(candidates) == 0 {
 		return errors.New("snapshot: healthy record has no checkpoint")
 	}
-	valid := make([]domain.CheckpointRef, 0, len(candidates))
 	var selected domain.CheckpointRef
 	var selectedGeneration ports.SnapshotGeneration
 	var selectedSnapshot snapcodec.Session
@@ -181,28 +180,21 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 		if err != nil || generation.IncarnationID != record.IncarnationID || generation.Name != record.Name || generation.Generation != candidate.Generation {
 			continue
 		}
-		valid = append(valid, candidate)
-		if selectedIndex < 0 {
-			selected, selectedGeneration, selectedSnapshot, selectedIndex = candidate, generation, snapshot, i
-			if i == 0 {
-				break
-			}
-		}
+		selected, selectedGeneration, selectedSnapshot, selectedIndex = candidate, generation, snapshot, i
+		break
 	}
 	if selectedIndex < 0 {
 		return errors.New("snapshot: no catalogue checkpoint validated")
 	}
 
 	if selectedIndex > 0 {
-		record = promoteFallback(record, selected, valid)
-		if d.catalogue == nil {
-			return errors.New("snapshot: catalogue unavailable for fallback promotion")
+		if d.checkpointRecovery == nil {
+			return errors.New("snapshot: checkpoint coordinator unavailable for fallback promotion")
 		}
-		if err := d.catalogue.Replace(record.Name, record); err != nil {
+		var err error
+		record, err = d.checkpointRecovery.PromoteFallback(ctx, record.Name, selected)
+		if err != nil {
 			return fmt.Errorf("snapshot: promote fallback: %w", err)
-		}
-		if err := d.snapshotRepository.RepairHEAD(ctx, record.IncarnationID, selected); err != nil {
-			return fmt.Errorf("snapshot: repair head: %w", err)
 		}
 		d.log.Warn("restored session from fallback checkpoint", "session", record.Name, "generation", selected.Generation)
 	}
@@ -225,24 +217,6 @@ func checkpointCandidates(record domain.CatalogueRecord) []domain.CheckpointRef 
 		}
 	}
 	return candidates
-}
-
-func promoteFallback(record domain.CatalogueRecord, selected domain.CheckpointRef, valid []domain.CheckpointRef) domain.CatalogueRecord {
-	next := record
-	next.RecoveryState = domain.RecoveryHealthy
-	next.Committed = &selected
-	next.Fallbacks = [2]*domain.CheckpointRef{}
-	next.DegradedReason = ""
-	slot := 0
-	for _, candidate := range valid {
-		if candidate == selected || slot == len(next.Fallbacks) {
-			continue
-		}
-		copy := candidate
-		next.Fallbacks[slot] = &copy
-		slot++
-	}
-	return next
 }
 
 func sessionFromGeneration(generation ports.SnapshotGeneration) (snapcodec.Session, error) {

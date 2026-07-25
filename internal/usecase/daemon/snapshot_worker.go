@@ -130,7 +130,15 @@ func (d *Daemon) publishSnapshotCapture(workerCtx context.Context, workerID uint
 	}
 	if err == nil && workerCtx.Err() == nil {
 		if err = publicationContext.Err(); err == nil {
-			err = d.snapshotRepository.Publish(publicationContext, publication)
+			if d.checkpointRecovery != nil {
+				var record domain.CatalogueRecord
+				record, err = d.checkpointRecovery.PublishCheckpoint(publicationContext, capture.name, publication)
+				if err == nil && record.Committed != nil {
+					capture.checkpoint = *record.Committed
+				}
+			} else {
+				err = d.snapshotRepository.Publish(publicationContext, publication)
+			}
 		}
 	}
 	d.clearSnapshotWorkerInFlight(workerID, capture)

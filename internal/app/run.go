@@ -530,6 +530,7 @@ func runDaemonOwned(ctx context.Context) (retErr error) {
 	if err := coordinator.Recover(ctx); err != nil {
 		return errors.Join(fmt.Errorf("vev: recover durable session transactions: %w", err), opened.Catalogue.Close())
 	}
+	daemonOpts = append(daemonOpts, daemon.WithCheckpointCoordinator(coordinator))
 	log.Info("session persistence enabled", "path", storePath)
 	daemonOpts = append(daemonOpts, daemon.WithCatalogue(opened.Catalogue, opened.Records))
 

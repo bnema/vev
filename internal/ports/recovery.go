@@ -123,6 +123,11 @@ type RecoveryJournal interface {
 	DeleteDiscard(context.Context, domain.IncarnationID) error
 }
 
+type CheckpointCoordinator interface {
+	PublishCheckpoint(context.Context, string, SnapshotPublication) (domain.CatalogueRecord, error)
+	PromoteFallback(context.Context, string, domain.CheckpointRef) (domain.CatalogueRecord, error)
+}
+
 type Catalogue interface {
 	Records() []domain.CatalogueRecord
 	Record(string) (domain.CatalogueRecord, bool)

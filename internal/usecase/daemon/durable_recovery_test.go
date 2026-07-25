@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
@@ -125,10 +127,46 @@ func validGeneration(t testing.TB, record domain.CatalogueRecord) ports.Snapshot
 func newDurableRecoveryDaemon(t testing.TB, records []domain.CatalogueRecord, repository ports.SnapshotRepository) (*Daemon, *durableRecoveryCatalogue) {
 	t.Helper()
 	catalogue := newDurableRecoveryCatalogue(records)
-	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, records), WithSnapshotRepository(repository, nil))
+	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil, nil)
+	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, records), WithSnapshotRepository(repository, nil), WithCheckpointCoordinator(coordinator))
 	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
 	t.Cleanup(d.serveCancel)
 	return d, catalogue
+}
+
+func TestFinalCheckpointFailurePreservesCatalogue(t *testing.T) {
+	priorRef := domain.CheckpointRef{Generation: 7, ManifestDigest: [32]byte{7}}
+	prior := domain.CatalogueRecord{
+		Name:          "work",
+		IncarnationID: domain.IncarnationID{1},
+		Cwd:           "/work",
+		CreatedAt:     42,
+		RecoveryState: domain.RecoveryHealthy,
+		Committed:     &priorRef,
+	}
+	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{prior})
+	repository := &durableRecoveryRepository{}
+	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil, nil)
+	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, []domain.CatalogueRecord{prior}), WithSnapshotRepository(repository, nil), WithCheckpointCoordinator(coordinator))
+	startSnapshotEncodeWorker(t, d)
+
+	sess := newSnapshotTestSession(t, prior.Name, false, prior.Cwd)
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	sess.snapshotMu.Lock()
+	sess.snapshotPublishedGeneration = priorRef.Generation
+	sess.snapshotPublishedCheckpoint = &priorRef
+	sess.snapshotGeneration = priorRef.Generation + 1
+	sess.snapshotPublicationContext = expired
+	sess.snapDirty.Store(true)
+	sess.snapshotMu.Unlock()
+
+	require.True(t, d.scheduleFinalSnapshot(sess))
+	awaitSnapshotIdle(t, sess)
+	got, ok := catalogue.Record(prior.Name)
+	require.True(t, ok)
+	require.Equal(t, prior, got, "a timed-out final checkpoint must not change authoritative bytes")
+	require.Equal(t, priorRef, *sess.snapshotPublishedCheckpoint)
 }
 
 func TestCatalogueRestoreIndependent(t *testing.T) {
@@ -173,12 +211,14 @@ func TestCatalogueRestoreIndependent(t *testing.T) {
 	require.Empty(t, d.sessions, "a corrupt record must never open a replacement runtime")
 
 	fallback := durableRecoveryRecord(2)
-	fallbackRef := domain.CheckpointRef{Generation: fallback.Committed.Generation - 1, ManifestDigest: [32]byte{77}}
-	fallback.Fallbacks[0] = &fallbackRef
+	fallbackRef := domain.CheckpointRef{Generation: fallback.Committed.Generation - 1}
 	fallbackSnapshotRecord := fallback
 	fallbackSnapshotRecord.Committed = &fallbackRef
+	fallbackGeneration := validGeneration(t, fallbackSnapshotRecord)
+	fallbackRef.ManifestDigest = sha256.Sum256(fallbackGeneration.Manifest)
+	fallback.Fallbacks[0] = &fallbackRef
 	fallbackRepository := &durableRecoveryRepository{
-		generations: map[string]ports.SnapshotGeneration{fallback.Name: validGeneration(t, fallbackSnapshotRecord)},
+		generations: map[string]ports.SnapshotGeneration{fallback.Name: fallbackGeneration},
 		errors:      make(map[string]error),
 		loads:       make(map[string]int),
 		repairs:     make(map[string]domain.CheckpointRef),
@@ -189,7 +229,7 @@ func TestCatalogueRestoreIndependent(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, fallbackRef, *promoted.Committed)
 	require.Equal(t, runtimeHealthy, fallbackDaemon.stopped[fallback.Name].state)
-	require.Equal(t, 2, fallbackRepository.loads[fallback.Name])
+	require.Equal(t, 3, fallbackRepository.loads[fallback.Name])
 	require.Equal(t, fallbackRef, fallbackRepository.repairs[fallback.IncarnationID.String()])
 }
 

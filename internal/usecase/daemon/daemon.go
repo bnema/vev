@@ -125,6 +125,7 @@ type Daemon struct {
 	// snapshotRepository is the sole checkpoint contract. legacySnapshots is
 	// read-only migration input and is never used for new writes.
 	snapshotRepository ports.SnapshotRepository
+	checkpointRecovery ports.CheckpointCoordinator
 	legacySnapshots    ports.LegacySnapshotSource
 	snapsEnabled       bool
 	// legacyImportPending holds verified legacy blobs whose source deletion
@@ -274,6 +275,13 @@ func WithCatalogue(catalogue ports.Catalogue, records []domain.CatalogueRecord) 
 		d.persistEnabled = catalogue != nil
 		d.catalogueRecords = append([]domain.CatalogueRecord(nil), records...)
 		d.catalogueRecordsProvided = true
+	}
+}
+
+// WithCheckpointCoordinator installs the shared durable checkpoint transaction seam.
+func WithCheckpointCoordinator(coordinator ports.CheckpointCoordinator) Option {
+	return func(d *Daemon) {
+		d.checkpointRecovery = coordinator
 	}
 }
 
