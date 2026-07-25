@@ -40,6 +40,18 @@ func (s *Screen) putRune(r rune) {
 	}
 }
 
+// relinkWrap restores the soft link a deferred wrap just set when index()
+// scrolled the row out from under it. buffer.scrollUp severs the last moved
+// row on purpose — a linefeed there really does stop preceding anything — but
+// a wrap is the one case where that row flowed into the row below it, so the
+// link has to be put back after the rotation moved it to s.Row-1. movedUp is
+// false when nothing survived the scroll, and then there is no row to link.
+func (s *Screen) relinkWrap(movedUp bool) {
+	if movedUp {
+		s.buffer.continueRow(s.Row - 1)
+	}
+}
+
 func (s *Screen) putPrintable(r rune) {
 	w := renderer.RuneWidth(r)
 	// Skip combining marks and zero-width characters.
@@ -53,7 +65,7 @@ func (s *Screen) putPrintable(r rune) {
 	if s.Col >= s.Frame.Width {
 		s.buffer.soft(s.Row)
 		s.Col = 0
-		s.index()
+		s.relinkWrap(s.index())
 	}
 	if s.Row >= s.Frame.Height {
 		s.Row = s.Frame.Height - 1
@@ -80,7 +92,7 @@ func (s *Screen) putPrintable(r rune) {
 			s.buffer.continueRow(s.Row)
 			s.record(renderer.Damage{Kind: renderer.DamageText, X: cx, Y: s.Row, Width: s.Col - cx + 1, Height: 1, Count: 1})
 			s.Col = 0
-			s.index()
+			s.relinkWrap(s.index())
 			if s.Row >= s.Frame.Height {
 				s.Row = s.Frame.Height - 1
 			}
