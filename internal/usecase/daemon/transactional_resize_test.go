@@ -423,6 +423,61 @@ func TestTransactionalResizeEpochLifecycleAndRetryContract(t *testing.T) {
 // stopped.  Only the newest prepared epoch may apply, commit, and emit one full
 // frame. coordinatorMockClock is a generated MockClock/MockTimer harness; its
 // channels make callback order explicit and do not use wall-clock waits.
+func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing.T) {
+	first, second := &transactionalResizePTY{}, &transactionalResizePTY{}
+	d, sess, ac, _ := newManualSessionWithPTYs(t, first, second)
+	observer := &daemonRuntimeObserver{}
+	d.runtimeObserver = observer
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	lease := rc.attachmentLease(ac)
+	var newer uint64
+	d.beforeSessionResizePublication = func() {
+		// Final external PTY validation is complete, but epoch admission and
+		// every session-visible publication must still be pending.
+		for _, tb := range sess.tabs {
+			require.Equal(t, domain.Size{Cols: 80, Rows: 23}, tb.size)
+			p := tb.focusedPane()
+			p.mu.Lock()
+			require.Equal(t, domain.Rect{Width: 80, Height: 23}, p.rect)
+			require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height})
+			p.mu.Unlock()
+		}
+		require.False(t, sess.snapDirty.Load())
+		for _, mark := range observer.marks {
+			require.NotEqual(t, ports.RuntimeResizeCommitted, mark.Kind)
+		}
+		newer = rc.recordResizeRequestForLease(domain.Size{Cols: 120, Rows: 34}, ac, lease)
+		require.NotZero(t, newer)
+	}
+
+	require.False(t, d.requestTransactionalResize(sess, ac, domain.Size{Cols: 100, Rows: 30}, true))
+	d.beforeSessionResizePublication = nil
+	require.False(t, sess.snapDirty.Load(), "rejected epoch must not dirty the snapshot")
+	for _, tb := range sess.tabs {
+		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, tb.size, "rejected epoch published a tab size")
+		p := tb.focusedPane()
+		require.Equal(t, domain.Rect{Width: 80, Height: 23}, p.rect, "rejected epoch published a pane rectangle")
+		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height}, "rejected epoch published a VT size")
+	}
+
+	require.True(t, d.runResizeTransaction(sess, ac, lease, newer))
+	for _, tb := range sess.tabs {
+		require.Equal(t, domain.Size{Cols: 120, Rows: 32}, tb.size)
+		p := tb.focusedPane()
+		require.Equal(t, domain.Rect{Width: 120, Height: 32}, p.rect)
+		require.Equal(t, domain.Size{Cols: 120, Rows: 32}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height})
+	}
+	committed := 0
+	for _, mark := range observer.marks {
+		if mark.Kind == ports.RuntimeResizeCommitted {
+			committed++
+		}
+	}
+	require.Equal(t, 1, committed, "only the current epoch emits commit telemetry")
+	require.Equal(t, []domain.Size{{Cols: 100, Rows: 28}, {Cols: 120, Rows: 32}}, first.requested())
+	require.Equal(t, []domain.Size{{Cols: 100, Rows: 28}, {Cols: 120, Rows: 32}}, second.requested())
+}
+
 func TestTransactionalResizeObsoleteTimerCallbacksCommitOnlyLatestEpoch(t *testing.T) {
 	clock := newCoordinatorMockClock(t, 8)
 	pty := &transactionalResizePTY{}

@@ -339,11 +339,12 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 		awaitSignal(t, entered, "old size apply did not block")
 		resizeDone := make(chan bool, 1)
 		go func() { resizeDone <- d.requestTransactionalResize(sess, nil, domain.Size{Cols: 100, Rows: 30}, true) }()
-		require.Eventually(t, func() bool {
-			tb.mu.Lock()
-			defer tb.mu.Unlock()
-			return tb.size == (domain.Size{Cols: 100, Rows: 28}) && tb.layoutGeneration > 0
-		}, time.Second, time.Millisecond)
+		// Session resize now stages the target privately until every external
+		// apply validates and the transaction is admitted, so neither the size
+		// nor pane geometry is visible while the old PTY call is blocked.
+		tb.mu.Lock()
+		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, tb.size)
+		tb.mu.Unlock()
 		require.Equal(t, domain.Rect{Width: 20, Height: 10}, p.rect, "stale size published before release")
 		close(release)
 		awaitSignal(t, oldDone, "old size apply did not finish")

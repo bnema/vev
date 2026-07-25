@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"math"
 	"strconv"
 	"strings"
 
@@ -66,8 +67,47 @@ func solveTabLayoutLocked(tb *tab) tabLayoutSnapshot {
 
 func layoutFingerprint(root *layout.Node) string {
 	var b strings.Builder
+	b.Grow(layoutFingerprintLength(root))
 	writeLayoutFingerprint(&b, root)
 	return b.String()
+}
+
+func layoutFingerprintLength(n *layout.Node) int {
+	if n == nil {
+		return 1
+	}
+	length := 2 + weightFingerprintLength(n.Weight) + 1 + paneIDFingerprintLength(n.Leaf) + 1 + paneIDFingerprintLength(n.Expanded) + 2
+	for _, child := range n.Children {
+		length += layoutFingerprintLength(child) + 1
+	}
+	return length
+}
+
+func paneIDFingerprintLength(id layout.PaneID) int {
+	length := len(id)
+	return decimalDigits(length) + 1 + length
+}
+
+func decimalDigits(value int) int {
+	if value == 0 {
+		return 1
+	}
+	digits := 0
+	for value > 0 {
+		value /= 10
+		digits++
+	}
+	return digits
+}
+
+func weightFingerprintLength(weight float64) int {
+	bits := math.Float64bits(weight)
+	length := 1
+	for bits >= 16 {
+		bits >>= 4
+		length++
+	}
+	return length
 }
 
 func writeLayoutFingerprint(b *strings.Builder, n *layout.Node) {
@@ -77,6 +117,8 @@ func writeLayoutFingerprint(b *strings.Builder, n *layout.Node) {
 	}
 	b.WriteByte(byte('0' + n.Kind))
 	b.WriteByte(byte('0' + n.Dir))
+	writeWeightFingerprint(b, n.Weight)
+	b.WriteByte('|')
 	writePaneIDFingerprint(b, n.Leaf)
 	b.WriteByte('|')
 	writePaneIDFingerprint(b, n.Expanded)
@@ -86,6 +128,22 @@ func writeLayoutFingerprint(b *strings.Builder, n *layout.Node) {
 		b.WriteByte(',')
 	}
 	b.WriteByte(']')
+}
+
+func writeWeightFingerprint(b *strings.Builder, weight float64) {
+	const hex = "0123456789abcdef"
+	bits := math.Float64bits(weight)
+	started := false
+	for shift := uint(60); ; shift -= 4 {
+		digit := byte(bits >> shift & 0xf)
+		if digit != 0 || started || shift == 0 {
+			b.WriteByte(hex[digit])
+			started = true
+		}
+		if shift == 0 {
+			return
+		}
+	}
 }
 
 func writePaneIDFingerprint(b *strings.Builder, id layout.PaneID) {

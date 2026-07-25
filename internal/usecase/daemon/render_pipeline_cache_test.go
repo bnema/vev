@@ -125,6 +125,45 @@ func TestComposeFrameCacheSkipsUndamagedBlitsAndInvalidatesFocusAndLayout(t *tes
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, out.damage)
 }
 
+func TestLayoutFingerprintWeightChangeInvalidatesGeometryCache(t *testing.T) {
+	root := &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
+		{Kind: layout.Leaf, Leaf: "left", Weight: 1},
+		{Kind: layout.Leaf, Leaf: "right", Weight: 1},
+	}}
+	stateFor := func(reset bool, damage []renderer.Damage) capturedRenderState {
+		placements, ok := layout.Solve(root, domain.Rect{Width: 61, Height: 5})
+		require.True(t, ok)
+		panes := make([]capturedPaneRenderState, 0, len(placements))
+		for _, placement := range placements {
+			frame := renderer.NewFrame(placement.Content.Width, placement.Content.Height)
+			for y := 0; y < frame.Height; y++ {
+				for x := 0; x < frame.Width; x++ {
+					frame.Set(x, y, renderer.Cell{Rune: rune(placement.ID[0]), Style: renderer.DefaultStyle()})
+				}
+			}
+			panes = append(panes, capturedPaneRenderState{
+				id: placement.ID, frame: frame, placement: placement, focused: placement.ID == "left", damage: damage,
+			})
+		}
+		return capturedRenderState{
+			reset:  reset,
+			layout: capturedTabLayout{root: root, area: domain.Rect{Width: 61, Height: 5}, focus: "left", placements: placements, fingerprint: layoutFingerprint(root), valid: true},
+			panes:  panes, styles: resolveStyles(nil),
+		}
+	}
+
+	initial := stateFor(true, []renderer.Damage{renderer.FullRedraw()})
+	committed := composeFrame(initial, composeCacheInput{})
+	root.Children[0].Weight = 2
+	next := stateFor(false, nil)
+	require.NotEqual(t, initial.layout.fingerprint, next.layout.fingerprint)
+	require.Equal(t, 41, next.layout.placements[1].Content.X)
+	out := composeFrame(next, committed.cache, composeCacheInput{})
+	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, out.damage)
+	require.Equal(t, 'l', out.frame.At(31, 1).Rune, "the enlarged pane must replace its old divider/cache footprint")
+	require.Equal(t, 'r', out.frame.At(41, 1).Rune, "weight-derived pane geometry must be reblitted at its new position")
+}
+
 func TestComposeFrameUsesCachedNeutralStructuralBorder(t *testing.T) {
 	theme := themeui.Theme{Known: true, TrueColor: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 220, G: 210, B: 200}, Background: renderer.RGB{R: 20, G: 30, B: 40}}
 	neutralBorder := renderer.Style{HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 170, G: 80, B: 30}}

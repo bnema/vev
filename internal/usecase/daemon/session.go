@@ -105,6 +105,10 @@ type session struct {
 	syncGen atomic.Uint64
 	// coordinator fans in this session's producer render invalidations.
 	coordinator atomic.Pointer[renderCoordinator]
+	// layoutApplyMu serializes whole-session resize prepare/apply/admit/publish
+	// transactions. It is deliberately not an architecture lock and may span
+	// external PTY.Resize calls.
+	layoutApplyMu sync.Mutex
 	// clipFiles records clipboard-image-transfer temp file paths (see
 	// clipboard.go) written for this session, removed best-effort in
 	// killSession.

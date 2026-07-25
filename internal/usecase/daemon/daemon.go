@@ -105,16 +105,20 @@ type Daemon struct {
 	// beforeCopyMouseMap is a deterministic seam after an immutable copy-input
 	// snapshot is captured and before its mapped position is applied.
 	beforeCopyMouseMap func()
-	ptys               ports.PTYFactory
-	clock              ports.Clock
-	log                *slog.Logger
-	runtimeObserver    ports.RuntimeObserver
-	baseEnv            []string
-	shell              string
-	shellArgs          []string
-	shellOverride      bool
-	persist            *persist.Persister
-	persistEnabled     bool
+	// beforeSessionResizePublication runs after final external PTY validation
+	// and before coordinator epoch admission. It is a deterministic regression
+	// seam for stale resize publication.
+	beforeSessionResizePublication func()
+	ptys                           ports.PTYFactory
+	clock                          ports.Clock
+	log                            *slog.Logger
+	runtimeObserver                ports.RuntimeObserver
+	baseEnv                        []string
+	shell                          string
+	shellArgs                      []string
+	shellOverride                  bool
+	persist                        *persist.Persister
+	persistEnabled                 bool
 	// snapshotRepository is the sole checkpoint contract. legacySnapshots is
 	// read-only migration input and is never used for new writes.
 	snapshotRepository ports.SnapshotRepository

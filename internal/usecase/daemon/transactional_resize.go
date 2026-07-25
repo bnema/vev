@@ -28,17 +28,23 @@ type resizePlan struct {
 }
 
 type preparedTabLayout struct {
-	generation uint64
-	size       domain.Size
-	members    []resizeMember
+	tab          *tab
+	generation   uint64
+	size         domain.Size
+	previousSize domain.Size
+	members      []resizeMember
 }
 
 func prepareTabLayoutLocked(sess *session, tb *tab) preparedTabLayout {
-	plan := preparedTabLayout{generation: tb.layoutGeneration, size: tb.size}
-	if tb.tree == nil || tb.tree.Root == nil || !tb.size.Valid() {
+	return prepareTabLayoutForSizeLocked(sess, tb, tb.size)
+}
+
+func prepareTabLayoutForSizeLocked(sess *session, tb *tab, size domain.Size) preparedTabLayout {
+	plan := preparedTabLayout{tab: tb, generation: tb.layoutGeneration, size: size, previousSize: tb.size}
+	if tb.tree == nil || tb.tree.Root == nil || !size.Valid() {
 		return plan
 	}
-	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
+	area := domain.Rect{Width: size.Cols, Height: size.Rows}
 	placements, ok := layout.Solve(tb.tree.Root, area)
 	if !ok && tb.tree.Root.Kind == layout.Leaf {
 		placements = []layout.Placement{{ID: tb.tree.Root.Leaf, Content: area}}
@@ -96,7 +102,7 @@ func (d *Daemon) applyPreparedTabMembers(plan *preparedTabLayout) {
 }
 
 func validatePreparedTabLayoutLocked(tb *tab, plan *preparedTabLayout) bool {
-	if tb.layoutGeneration != plan.generation || tb.size != plan.size {
+	if tb.layoutGeneration != plan.generation || tb.size != plan.previousSize {
 		return false
 	}
 	for i := range plan.members {
@@ -474,47 +480,127 @@ func (d *Daemon) applyVisibleFloatingLayout(sess *session, tb *tab, current func
 	return plan.members, true
 }
 
-func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current func() bool) ([]resizeMember, bool) {
-	sess.mu.Lock()
-	tabs := append([]*tab(nil), sess.tabs...)
-	active := sess.active
-	sess.mu.Unlock()
+// releasePreparedSessionGates abandons a session attempt which cannot be
+// retried here (for example because a newer coordinator epoch won). Unlike a
+// stale per-tab retry, no succeeding attempt is owned by this call, so every
+// successful external resize must reopen its parser gate at the old screen
+// size.
+func (d *Daemon) releasePreparedSessionGates(plans []*preparedTabLayout) {
+	for _, plan := range plans {
+		if plan == nil {
+			continue
+		}
+		for i := range plan.members {
+			member := &plan.members[i]
+			if !member.screenResized {
+				continue
+			}
+			member.pane.resizeMu.Lock()
+			d.replayResizePending(member.session, member.tab, member.pane, false, member.rect)
+			member.pane.resizeMu.Unlock()
+		}
+	}
+}
+
+// applySessionLayout keeps client resize publication as a two-phase session
+// transaction: all PTYs are applied and plans validated first, then the
+// coordinator admits the epoch before any tab size, rectangle, VT screen,
+// snapshot dirtiness, or resize telemetry becomes visible.
+func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, admit func() bool) ([]resizeMember, bool) {
+	if sess == nil {
+		return nil, false
+	}
+	sess.layoutApplyMu.Lock()
+	defer sess.layoutApplyMu.Unlock()
+
 	target := tabSize(size)
-	for _, tb := range tabs {
+	for {
 		if current != nil && !current() {
 			return nil, false
 		}
-		tb.mu.Lock()
-		if tb.size != target {
-			tb.size = target
-			tb.bumpLayoutGenerationLocked()
+		sess.mu.Lock()
+		tabs := append([]*tab(nil), sess.tabs...)
+		active := sess.active
+		sess.mu.Unlock()
+		plans := make([]*preparedTabLayout, 0, len(tabs))
+		for _, tb := range tabs {
+			tb.mu.Lock()
+			plan := prepareTabLayoutForSizeLocked(sess, tb, target)
+			tb.mu.Unlock()
+			plans = append(plans, &plan)
 		}
-		tb.mu.Unlock()
-	}
-	failed := make([]resizeMember, 0)
-	for i, tb := range tabs {
-		var members []resizeMember
-		var ok bool
-		if current == nil {
-			members, ok = d.applyTabLayoutTransaction(sess, tb)
-		} else {
-			members, ok = d.applyTabLayoutTransaction(sess, tb, current)
+		for _, plan := range plans {
+			d.applyPreparedTabMembers(plan)
 		}
-		if !ok {
-			return nil, false
+
+		// Hold every tab lock across final validation, epoch admission, and all
+		// publication. This makes the session commit indivisible to layout
+		// mutators while still keeping PTY.Resize outside every state lock.
+		for _, tb := range tabs {
+			tb.mu.Lock()
 		}
-		failed = append(failed, members...)
-		if i == active {
-			members, ok = d.applyVisibleFloatingLayout(sess, tb, current)
+		valid := true
+		for _, plan := range plans {
+			if !validatePreparedTabLayoutLocked(plan.tab, plan) {
+				valid = false
+				break
+			}
+		}
+		// This is the final external-apply validation boundary. Tests use the
+		// seam to install a newer epoch here; that epoch must reject admission
+		// before this attempt publishes any session geometry.
+		if valid && d.beforeSessionResizePublication != nil {
+			d.beforeSessionResizePublication()
+		}
+		if valid && current != nil && !current() {
+			valid = false
+		}
+		if valid && admit != nil && !admit() {
+			valid = false
+		}
+		if valid {
+			for _, plan := range plans {
+				plan.tab.size = plan.size
+				commitPreparedTabLayoutLocked(plan)
+			}
+		}
+		for i := len(tabs) - 1; i >= 0; i-- {
+			tabs[i].mu.Unlock()
+		}
+		if !valid {
+			d.releasePreparedSessionGates(plans)
+			if current == nil || !current() {
+				return nil, false
+			}
+			// A layout mutation invalidated the plans while this epoch remains
+			// current. Reapply the fresh session geometry before admitting it.
+			continue
+		}
+
+		failed := make([]resizeMember, 0)
+		for _, plan := range plans {
+			d.finishPreparedTabMembers(plan, true)
+			for _, member := range plan.members {
+				if !member.ok {
+					failed = append(failed, member)
+				}
+			}
+		}
+		if active >= 0 && active < len(tabs) {
+			floatingFailed, ok := d.applyVisibleFloatingLayout(sess, tabs[active], current)
 			if !ok {
 				return nil, false
 			}
-			failed = append(failed, members...)
+			failed = append(failed, floatingFailed...)
 		}
+		if len(failed) != 0 {
+			d.notify(sess, domain.NoticeWarn, domain.NoticeResizeFailed,
+				"pane resize failed; retrying in background", failed[len(failed)-1].err)
+		}
+		markSnapshotDirty(sess)
+		d.observeRuntime(ports.RuntimeResizeCommitted, 0, true)
+		return failed, true
 	}
-	markSnapshotDirty(sess)
-	d.observeRuntime(ports.RuntimeResizeCommitted, 0, true)
-	return failed, true
 }
 
 func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *attachmentLease, epoch uint64) bool {
@@ -528,8 +614,10 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *
 		return false
 	}
 	d.exitCopyMode(ac)
-	failed, ok := d.applySessionLayout(sess, snap.size, current)
-	if !ok || !rc.resizeCurrentForLease(epoch, ac, lease, true) {
+	failed, ok := d.applySessionLayout(sess, snap.size, current, func() bool {
+		return rc.resizeCurrentForLease(epoch, ac, lease, true)
+	})
+	if !ok {
 		return false
 	}
 	ac.sendMu.Lock()
@@ -658,7 +746,7 @@ func (d *Daemon) requestTransactionalResizeForLease(sess *session, ac *attachedC
 	if ac == nil {
 		// Headless geometry has no coordinator/transport to coalesce, but keeps
 		// the same prepare/apply/commit ordering.
-		_, ok := d.applySessionLayout(sess, size, nil)
+		_, ok := d.applySessionLayout(sess, size, nil, nil)
 		return ok
 	}
 	rc := sess.renderCoordinator()
