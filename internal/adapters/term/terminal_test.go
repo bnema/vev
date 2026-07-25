@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,12 +61,86 @@ func TestTerminal_EnterRaw_NonTTY_EmitsAltScreenAndCursorEscapes(t *testing.T) {
 	_ = outW.Close()
 	<-done
 
-	want := altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + altScreenExit
+	want := altScreenEnter + autowrapDisable + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + autowrapEnable + altScreenExit
 	if got := captured.String(); got != want {
 		t.Fatalf("captured escapes = %q, want %q", got, want)
 	}
 	if got := captured.String(); bytes.Contains([]byte(got), []byte("\x1b]10;?")) || bytes.Contains([]byte(got), []byte("\x1b]4;")) {
 		t.Fatalf("EnterRaw emitted a color query: %q", got)
+	}
+}
+
+// A frame the daemon composed for a wider terminal must never bleed onto the
+// next row: with DECAWM left on, an over-long styled run (the full-width tab
+// bar) wraps and paints a second row in the accent colour. vev positions every
+// row explicitly and never relies on the terminal wrapping for it, so autowrap
+// stays off for as long as vev owns the alt screen.
+func TestTerminal_EnterRaw_DisablesAutowrapInsideAltScreen(t *testing.T) {
+	const (
+		autowrapOff = "\x1b[?7l"
+		autowrapOn  = "\x1b[?7h"
+		altEnter    = "\x1b[?1049h"
+		altExit     = "\x1b[?1049l"
+	)
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe(in): %v", err)
+	}
+	defer func() { _ = inW.Close() }()
+	defer func() { _ = inR.Close() }()
+
+	outR, outW, captured, done := pipeCapture(t)
+	defer func() { _ = outR.Close() }()
+
+	tm := NewWithFiles(inR, outW)
+
+	restore, err := tm.EnterRaw()
+	if err != nil {
+		t.Fatalf("EnterRaw: %v", err)
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	_ = outW.Close()
+	<-done
+	got := captured.String()
+
+	for _, tc := range []struct {
+		name string
+		seq  string
+	}{
+		{"autowrap disabled exactly once", autowrapOff},
+		{"autowrap restored exactly once", autowrapOn},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if n := strings.Count(got, tc.seq); n != 1 {
+				t.Fatalf("emitted %q %d times, want exactly 1; full output %q", tc.seq, n, got)
+			}
+		})
+	}
+
+	// Ordering: disabling autowrap must land inside the alt screen, and it
+	// must be restored before vev hands the screen back to the shell.
+	for _, tc := range []struct {
+		name   string
+		before string
+		after  string
+	}{
+		{"alt screen entered before autowrap is disabled", altEnter, autowrapOff},
+		{"autowrap disabled before it is restored", autowrapOff, autowrapOn},
+		{"autowrap restored before leaving the alt screen", autowrapOn, altExit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			i, j := strings.Index(got, tc.before), strings.Index(got, tc.after)
+			if i < 0 || j < 0 {
+				t.Fatalf("missing sequence: %q at %d, %q at %d; full output %q", tc.before, i, tc.after, j, got)
+			}
+			if i >= j {
+				t.Fatalf("%q (index %d) must precede %q (index %d); full output %q", tc.before, i, tc.after, j, got)
+			}
+		})
 	}
 }
 
@@ -103,7 +178,7 @@ func TestTerminal_EnterRaw_IsIdempotentAcrossCalls(t *testing.T) {
 
 	// Alt-screen/cursor escapes must appear exactly once for enter and exits
 	// exactly once, regardless of how many times EnterRaw/restore were called.
-	want := altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + altScreenExit
+	want := altScreenEnter + autowrapDisable + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + autowrapEnable + altScreenExit
 	if got := captured.String(); got != want {
 		t.Fatalf("captured escapes = %q, want %q", got, want)
 	}

@@ -31,6 +31,14 @@ const (
 	bracketedPasteDisable = "\x1b[?2004l"
 	colorSchemeEnable     = "\x1b[?2031h"
 	colorSchemeDisable    = "\x1b[?2031l"
+	// DECAWM. vev addresses every row explicitly and never relies on the
+	// terminal wrapping its output, so autowrap stays off while it owns the
+	// alt screen: a frame the daemon composed for a wider terminal is then
+	// clipped at the right margin instead of bleeding a styled run onto the
+	// next row. Restored alongside the other modes, since DECAWM is global
+	// and is not saved by the alt-screen switch.
+	autowrapDisable = "\x1b[?7l"
+	autowrapEnable  = "\x1b[?7h"
 )
 
 // bufSize is the batched writer's buffer capacity.
@@ -107,7 +115,7 @@ func (t *Terminal) EnterRaw() (func() error, error) {
 	}
 	t.orig = old
 
-	if _, err := t.bw.WriteString(altScreenEnter + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable); err != nil {
+	if _, err := t.bw.WriteString(altScreenEnter + autowrapDisable + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable); err != nil {
 		_ = t.restoreRawLocked()
 		return nil, fmt.Errorf("term: enter alt screen: %w", err)
 	}
@@ -141,7 +149,7 @@ func (t *Terminal) restore() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	_, werr := t.bw.WriteString(cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + altScreenExit)
+	_, werr := t.bw.WriteString(cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + autowrapEnable + altScreenExit)
 	ferr := t.bw.Flush()
 
 	rerr := t.restoreRawLocked()
