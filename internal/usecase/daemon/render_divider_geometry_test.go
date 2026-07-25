@@ -9,46 +9,74 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestComposeFrameDividerFollowsWeights proves the rendered divider glyph
-// tracks the weight-aware pane geometry from layout.Solve, rather than an
-// equal-split recomputation. On a 61-wide area, equal weights place the
-// divider at x=30; a 2:1 weight split moves the real gap to x=40. The
-// divider must move with it and must not linger at the old column.
+// TestComposeFrameDividerFollowsWeights proves rendered divider glyphs track
+// weight-aware pane geometry rather than an equal-split recomputation.
 func TestComposeFrameDividerFollowsWeights(t *testing.T) {
-	root := &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
-		{Kind: layout.Leaf, Leaf: "left", Weight: 1},
-		{Kind: layout.Leaf, Leaf: "right", Weight: 1},
-	}}
-	area := domain.Rect{Width: 61, Height: 5}
-
-	stateFor := func() capturedRenderState {
-		placements, dividers, ok := layout.SolveWithDividers(root, area)
-		require.True(t, ok)
-		panes := make([]capturedPaneRenderState, 0, len(placements))
-		for _, placement := range placements {
-			frame := cachePaneFrame(placement.Content.Width, placement.Content.Height, rune(placement.ID[0]))
-			panes = append(panes, capturedPaneRenderState{
-				id: placement.ID, frame: frame, placement: placement, focused: placement.ID == "left",
-				damage: []renderer.Damage{renderer.FullRedraw()},
-			})
-		}
-		return capturedRenderState{
-			reset:  true,
-			layout: capturedTabLayout{root: root, area: area, focus: "left", placements: placements, dividers: dividers, fingerprint: layoutFingerprint(root), valid: true},
-			panes:  panes, styles: resolveStyles(nil),
-		}
+	tests := []struct {
+		name                 string
+		direction            layout.SplitDir
+		area                 domain.Rect
+		glyph                rune
+		equalX, equalY       int
+		weightedX, weightedY int
+	}{
+		{
+			name:      "horizontal split",
+			direction: layout.Horizontal,
+			area:      domain.Rect{Width: 61, Height: 5},
+			glyph:     '│',
+			equalX:    30,
+			equalY:    1,
+			weightedX: 40,
+			weightedY: 1,
+		},
+		{
+			name:      "vertical split",
+			direction: layout.Vertical,
+			area:      domain.Rect{Width: 41, Height: 10},
+			glyph:     '─',
+			equalX:    1,
+			equalY:    6,
+			weightedX: 1,
+			weightedY: 7,
+		},
 	}
 
-	equal := stateFor()
-	out := composeFrame(equal, composeCacheInput{})
-	require.Equal(t, '│', out.frame.At(30, 1).Rune, "equal weights must place the divider at the equal-split column")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := &layout.Node{Kind: layout.Split, Dir: tt.direction, Children: []*layout.Node{
+				{Kind: layout.Leaf, Leaf: "first", Weight: 1},
+				{Kind: layout.Leaf, Leaf: "second", Weight: 1},
+			}}
+			stateFor := func() capturedRenderState {
+				placements, dividers, ok := layout.SolveWithDividers(root, tt.area)
+				require.True(t, ok)
+				panes := make([]capturedPaneRenderState, 0, len(placements))
+				for _, placement := range placements {
+					frame := cachePaneFrame(placement.Content.Width, placement.Content.Height, rune(placement.ID[0]))
+					panes = append(panes, capturedPaneRenderState{
+						id: placement.ID, frame: frame, placement: placement, focused: placement.ID == "first",
+						damage: []renderer.Damage{renderer.FullRedraw()},
+					})
+				}
+				return capturedRenderState{
+					reset:  true,
+					layout: capturedTabLayout{area: tt.area, focus: "first", placements: placements, dividers: dividers, fingerprint: layoutFingerprint(root), valid: true},
+					panes:  panes, styles: resolveStyles(nil),
+				}
+			}
 
-	root.Children[0].Weight = 2
-	weighted := stateFor()
-	require.NotEqual(t, equal.layout.fingerprint, weighted.layout.fingerprint)
-	require.Equal(t, 41, weighted.layout.placements[1].Content.X, "sanity check: left pane is 40 wide, so the right pane starts at x=41")
+			equal := stateFor()
+			out := composeFrame(equal, composeCacheInput{})
+			require.Equal(t, tt.glyph, out.frame.At(tt.equalX, tt.equalY).Rune, "equal weights must place the divider at the equal-split gap")
 
-	out = composeFrame(weighted, out.cache, composeCacheInput{})
-	require.Equal(t, '│', out.frame.At(40, 1).Rune, "the divider must follow the weight-derived gap")
-	require.NotEqual(t, '│', out.frame.At(30, 1).Rune, "the divider must not linger at the old equal-split column")
+			root.Children[0].Weight = 2
+			weighted := stateFor()
+			require.NotEqual(t, equal.layout.fingerprint, weighted.layout.fingerprint)
+
+			out = composeFrame(weighted, out.cache, composeCacheInput{})
+			require.Equal(t, tt.glyph, out.frame.At(tt.weightedX, tt.weightedY).Rune, "the divider must follow the weight-derived gap")
+			require.NotEqual(t, tt.glyph, out.frame.At(tt.equalX, tt.equalY).Rune, "the divider must not linger at the old equal-split gap")
+		})
+	}
 }

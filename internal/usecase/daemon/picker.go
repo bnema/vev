@@ -630,7 +630,7 @@ func snapshotPickerPreview(tb *tab) picker.Preview {
 		return preview
 	}
 	state := capturedRenderState{layout: capturedTabLayout{
-		root: tb.tree.Clone().Root, area: layoutSnap.area, focus: layoutSnap.focus,
+		area: layoutSnap.area, focus: layoutSnap.focus,
 		placements:  append([]layout.Placement(nil), layoutSnap.placements...),
 		dividers:    append([]layout.Divider(nil), layoutSnap.dividers...),
 		fingerprint: layoutSnap.fingerprint, valid: true,

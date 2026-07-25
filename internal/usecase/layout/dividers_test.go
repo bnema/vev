@@ -7,22 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// countGaps returns the number of sibling gaps in the tree, i.e. the number
-// of divider rects SolveWithDividers is expected to produce.
-func countGaps(n *Node) int {
-	if n == nil || n.Kind != Split {
-		return 0
-	}
-	total := 0
-	if len(n.Children) > 1 {
-		total = len(n.Children) - 1
-	}
-	for _, child := range n.Children {
-		total += countGaps(child)
-	}
-	return total
-}
-
 func rectsOverlap(a, b domain.Rect) bool {
 	if a.Width <= 0 || a.Height <= 0 || b.Width <= 0 || b.Height <= 0 {
 		return false
@@ -34,9 +18,10 @@ func TestDividersMatchSolvedGaps(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		root *Node
-		area domain.Rect
+		name     string
+		root     *Node
+		area     domain.Rect
+		expected []Divider
 	}{
 		{
 			name: "equal weights",
@@ -44,7 +29,8 @@ func TestDividersMatchSolvedGaps(t *testing.T) {
 				{Kind: Leaf, Leaf: "a", Weight: 1},
 				{Kind: Leaf, Leaf: "b", Weight: 1},
 			}},
-			area: domain.Rect{Width: 61, Height: 10},
+			area:     domain.Rect{Width: 61, Height: 10},
+			expected: []Divider{{Rect: domain.Rect{X: 30, Width: 1, Height: 10}, Dir: Horizontal}},
 		},
 		{
 			name: "unequal weights 2:1",
@@ -52,7 +38,8 @@ func TestDividersMatchSolvedGaps(t *testing.T) {
 				{Kind: Leaf, Leaf: "a", Weight: 2},
 				{Kind: Leaf, Leaf: "b", Weight: 1},
 			}},
-			area: domain.Rect{Width: 61, Height: 10},
+			area:     domain.Rect{Width: 61, Height: 10},
+			expected: []Divider{{Rect: domain.Rect{X: 40, Width: 1, Height: 10}, Dir: Horizontal}},
 		},
 		{
 			name: "unequal weights 1:3",
@@ -60,7 +47,8 @@ func TestDividersMatchSolvedGaps(t *testing.T) {
 				{Kind: Leaf, Leaf: "a", Weight: 1},
 				{Kind: Leaf, Leaf: "b", Weight: 3},
 			}},
-			area: domain.Rect{Width: 81, Height: 10},
+			area:     domain.Rect{Width: 81, Height: 10},
+			expected: []Divider{{Rect: domain.Rect{X: 20, Width: 1, Height: 10}, Dir: Horizontal}},
 		},
 		{
 			name: "nested split",
@@ -72,6 +60,10 @@ func TestDividersMatchSolvedGaps(t *testing.T) {
 				}},
 			}},
 			area: domain.Rect{Width: 61, Height: 20},
+			expected: []Divider{
+				{Rect: domain.Rect{X: 30, Width: 1, Height: 20}, Dir: Horizontal},
+				{Rect: domain.Rect{X: 31, Y: 10, Width: 30, Height: 1}, Dir: Vertical},
+			},
 		},
 		{
 			name: "three or more children",
@@ -81,6 +73,10 @@ func TestDividersMatchSolvedGaps(t *testing.T) {
 				{Kind: Leaf, Leaf: "c", Weight: 1},
 			}},
 			area: domain.Rect{Width: 62, Height: 10},
+			expected: []Divider{
+				{Rect: domain.Rect{X: 20, Width: 1, Height: 10}, Dir: Horizontal},
+				{Rect: domain.Rect{X: 41, Width: 1, Height: 10}, Dir: Horizontal},
+			},
 		},
 		{
 			name: "minimum pins a child",
@@ -88,7 +84,8 @@ func TestDividersMatchSolvedGaps(t *testing.T) {
 				{Kind: Leaf, Leaf: "a", Weight: 1},
 				{Kind: Leaf, Leaf: "b", Weight: 100},
 			}},
-			area: domain.Rect{Width: 61, Height: 10},
+			area:     domain.Rect{Width: 61, Height: 10},
+			expected: []Divider{{Rect: domain.Rect{X: 20, Width: 1, Height: 10}, Dir: Horizontal}},
 		},
 		{
 			name: "vertical split",
@@ -96,7 +93,8 @@ func TestDividersMatchSolvedGaps(t *testing.T) {
 				{Kind: Leaf, Leaf: "a", Weight: 1},
 				{Kind: Leaf, Leaf: "b", Weight: 2},
 			}},
-			area: domain.Rect{Width: 41, Height: 10},
+			area:     domain.Rect{Width: 41, Height: 10},
+			expected: []Divider{{Rect: domain.Rect{Y: 3, Width: 41, Height: 1}, Dir: Vertical}},
 		},
 	}
 
@@ -110,7 +108,7 @@ func TestDividersMatchSolvedGaps(t *testing.T) {
 			require.True(t, solveOK)
 			require.Equal(t, solved, placements, "collecting dividers must not change the solved placements")
 
-			require.Len(t, dividers, countGaps(tt.root), "expected exactly one divider per sibling gap")
+			require.Equal(t, tt.expected, dividers, "divider geometry and direction must match the solved gaps exactly")
 
 			for _, d := range dividers {
 				require.True(t, d.Rect.Width == 1 || d.Rect.Height == 1, "divider rect must be a single row or column")

@@ -25,8 +25,6 @@ type renderCaptureScratch struct {
 	mru        []recentSession
 	ranked     []rankedRecent
 	titleIDs   []layout.PaneID
-	treeNodes  []layout.Node
-	treeUsed   int
 	receipts   []damageReceipt
 }
 
@@ -55,7 +53,6 @@ type capturedRenderState struct {
 }
 
 type capturedTabLayout struct {
-	root        *layout.Node
 	area        domain.Rect
 	focus       layout.PaneID
 	placements  []layout.Placement
@@ -231,17 +228,12 @@ func capturePrimaryRenderState(
 	layoutSnap := solveTabLayoutLocked(tb)
 	scratch.placements = append(scratch.placements[:0], layoutSnap.placements...)
 	scratch.dividers = append(scratch.dividers[:0], layoutSnap.dividers...)
-	scratch.treeUsed = 0
-	var root *layout.Node
-	if tb.tree != nil {
-		root = cloneLayoutNodeIntoScratch(tb.tree.Root, scratch)
-	}
 	state := &scratch.state
 	*state = capturedRenderState{
 		attachment: ac, lease: lease, reset: reset, bars: bars, theme: bars.theme,
 		styles: request.styles, styleGeneration: request.styleGeneration,
 		overlays: overlays, preview: preview,
-		layout:             capturedTabLayout{root: root, area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, dividers: scratch.dividers, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
+		layout:             capturedTabLayout{area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, dividers: scratch.dividers, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
 		floatingGeneration: tb.floating.generation,
 		receipts:           scratch.receipts[:0],
 	}
@@ -312,25 +304,6 @@ func copyRankedRecentInto(dst, src []rankedRecent) []rankedRecent {
 		return []rankedRecent{}
 	}
 	return append(dst[:0], src...)
-}
-
-func cloneLayoutNodeIntoScratch(src *layout.Node, scratch *renderCaptureScratch) *layout.Node {
-	if src == nil {
-		return nil
-	}
-	if scratch.treeUsed == len(scratch.treeNodes) {
-		scratch.treeNodes = append(scratch.treeNodes, layout.Node{})
-	}
-	index := scratch.treeUsed
-	scratch.treeUsed++
-	dst := &scratch.treeNodes[index]
-	children := dst.Children[:0]
-	*dst = *src
-	dst.Children = children
-	for _, child := range src.Children {
-		dst.Children = append(dst.Children, cloneLayoutNodeIntoScratch(child, scratch))
-	}
-	return dst
 }
 
 func captureCursorInputsLocked(p *pane, content domain.Rect, overlays capturedOverlayRenderState) capturedCursorInputs {

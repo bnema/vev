@@ -43,7 +43,6 @@ func hitTestPlacementLocked(tb *tab, col, row int) (layout.Placement, bool) {
 }
 
 type tabLayoutSnapshot struct {
-	root        *layout.Node
 	fingerprint string
 	area        domain.Rect
 	focus       layout.PaneID
@@ -63,7 +62,7 @@ func solveTabLayoutLocked(tb *tab) tabLayoutSnapshot {
 	}
 	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
 	placements, dividers, ok := layout.SolveWithDividers(tb.tree.Root, area)
-	return tabLayoutSnapshot{root: tb.tree.Root, fingerprint: layoutFingerprint(tb.tree.Root), area: area, focus: tb.tree.Focus, placements: placements, dividers: dividers, ok: ok}
+	return tabLayoutSnapshot{fingerprint: layoutFingerprint(tb.tree.Root), area: area, focus: tb.tree.Focus, placements: placements, dividers: dividers, ok: ok}
 }
 
 func layoutFingerprint(root *layout.Node) string {
