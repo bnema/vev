@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWritePrintableAndUTF8(t *testing.T) {
@@ -924,26 +925,44 @@ func TestC1Controls(t *testing.T) {
 }
 
 func TestScreenLineBoundsDescribesTheLiveGrid(t *testing.T) {
-	s := NewScreen(4, 3)
-	s.Write([]byte("abcdef")) // wraps after column 4
+	tests := []struct {
+		name   string
+		width  int
+		height int
+		write  string
+		want   []LineBound
+		// checkOwned exercises the caller-owned-copy guarantee: it only makes
+		// sense to check once per LineBounds() call, so it lives on the case
+		// whose write actually produces a soft-wrapped row 0 to corrupt.
+		checkOwned bool
+	}{
+		{
+			name:   "wraps after column width",
+			width:  4,
+			height: 3,
+			write:  "abcdef", // wraps after column 4
+			want: []LineBound{
+				{End: 4, Soft: true},  // row 0: filled the row and wrapped
+				{End: 2, Soft: false}, // row 1: "ef", no wrap
+				{End: 0, Soft: false}, // row 2: untouched
+			},
+			checkOwned: true,
+		},
+	}
 
-	bounds := s.LineBounds()
-	if len(bounds) != 3 {
-		t.Fatalf("len(LineBounds()) = %d, want 3", len(bounds))
-	}
-	if !bounds[0].Soft {
-		t.Errorf("bounds[0].Soft = false, want true (row wrapped)")
-	}
-	if bounds[1].Soft {
-		t.Errorf("bounds[1].Soft = true, want false (row did not wrap)")
-	}
-	if bounds[1].End != 2 {
-		t.Errorf("bounds[1].End = %d, want 2", bounds[1].End)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewScreen(tt.width, tt.height)
+			s.Write([]byte(tt.write))
 
-	// The result is owned by the caller.
-	bounds[0] = LineBound{}
-	if !s.LineBounds()[0].Soft {
-		t.Error("mutating the result changed the screen's own boundaries")
+			bounds := s.LineBounds()
+			require.Equal(t, tt.want, bounds)
+
+			if tt.checkOwned {
+				// The result is owned by the caller.
+				bounds[0] = LineBound{}
+				require.True(t, s.LineBounds()[0].Soft, "mutating the result changed the screen's own boundaries")
+			}
+		})
 	}
 }
