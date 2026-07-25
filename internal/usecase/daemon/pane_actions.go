@@ -309,11 +309,33 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 	if target.pane != nil {
 		oldFocus = target.pane.id
 	}
-	_, err := d.focusDirAt(sess, target.tab, target.pane, dir)
-	if err == nil && ac != nil {
-		d.finishPaneFocusForClient(sess, ac, target.tab, oldFocus, "pane_actions.go")
+	span, err := d.focusDirAt(sess, target.tab, target.pane, dir)
+	if err == nil {
+		if ac != nil {
+			d.finishPaneFocusForClient(sess, ac, target.tab, oldFocus, "pane_actions.go")
+		}
+		return nil
 	}
-	return err
+	if !errors.Is(err, errNoNeighbor) || target.tab == nil {
+		return err
+	}
+
+	sess.mu.Lock()
+	position, count := sess.active, len(sess.tabs)
+	sess.mu.Unlock()
+	step := resolveOverflow(dir, d.currentNavConfig(), position, count)
+	if step.kind != overflowTabs {
+		return err
+	}
+	candidate, ok := d.prepareTabOverflow(sess, target.tab, dir, span, step.delta)
+	if !ok || !d.commitTabOverflow(sess, candidate) {
+		return errNoNeighbor
+	}
+	d.activateTab(sess, candidate.target)
+	if ac != nil {
+		d.finishPaneFocusForClient(sess, ac, candidate.target, candidate.targetOldFocus, "pane_actions.go")
+	}
+	return nil
 }
 
 // finishPaneFocusForClient applies the attachment lifecycle shared by every
