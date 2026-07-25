@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -273,9 +272,8 @@ func TestCopyWordDragAndOSC52(t *testing.T) {
 	mode := ac.overlays.copyMode
 	selection := mode.Selection()
 	text := mode.SelectedText()
-	width := mode.Document().Width()
 	ac.overlays.copyMu.Unlock()
-	want := "alpha beta" + strings.Repeat(" ", width-len("alpha beta")) + "\ngamma"
+	want := "alpha beta\ngamma"
 	require.Equal(t, scopy.Word, selection.Granularity)
 	require.Equal(t, want, text)
 	require.Equal(t, scopy.OSC52(want)[0], scopy.OSC52(text)[0])

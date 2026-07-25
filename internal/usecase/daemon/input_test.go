@@ -1115,7 +1115,7 @@ func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 	}, 2*time.Second, 5*time.Millisecond, "OSC52 output = %q", data)
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(strings.TrimPrefix(data, "\x1b]52;c;"), "\a"))
 	require.NoError(t, err)
-	require.Equal(t, "alpha"+strings.Repeat(" ", 75)+"\nb", string(decoded))
+	require.Equal(t, "alpha\nb", string(decoded))
 	require.Nil(t, ac.overlays.copyMode)
 
 	exitPaint := string(mustOutputData(t, sends))

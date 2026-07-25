@@ -137,13 +137,13 @@ func (b selectionBounds) rangeForRow(doc *Document, row int) (CellRange, bool) {
 	return CellRange{Row: row, Start: start, End: end}, true
 }
 
-// Text extracts the selection using its range granularity's newline and
-// trailing-space semantics.
+// Text extracts the selection's ranges. The granularity is already encoded in
+// those ranges, so extraction applies the same padding and wrap rules to all.
 func (s Selection) Text(doc *Document) string {
 	if doc == nil {
 		return ""
 	}
-	return doc.Extract(s.Ranges(doc), s.Granularity == Line)
+	return doc.Extract(s.Ranges(doc))
 }
 
 // Extend moves the active endpoint. Document normalization occurs when ranges

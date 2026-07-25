@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/pkg/renderer"
+	"github.com/bnema/vev/pkg/vt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -216,22 +217,143 @@ func TestDocumentExtractRanges(t *testing.T) {
 	doc := NewDocument(NewSnapshotFromRows([][]renderer.Cell{documentCells("alpha  "), documentCells("beta"), wide, {}}, 7, 4), "")
 
 	tests := []struct {
-		name     string
-		ranges   []CellRange
-		linewise bool
-		want     string
+		name   string
+		ranges []CellRange
+		want   string
 	}{
-		{"inclusive partial multiline preserves spaces", []CellRange{{Row: 0, Start: 2, End: 6}, {Row: 1, Start: 0, End: 1}}, false, "pha  \nbe"},
-		{"linewise trims trailing spaces", []CellRange{{Row: 0, Start: 0, End: 6}}, true, "alpha"},
-		{"wide glyph emitted once", []CellRange{{Row: 2, Start: 1, End: 2}}, false, "界"},
-		{"continuation endpoint normalizes to head", []CellRange{{Row: 2, Start: 2, End: 2}}, false, "界"},
-		{"empty row", []CellRange{{Row: 3, Start: 0, End: 0}}, false, ""},
-		{"out of range ignored", []CellRange{{Row: 8, Start: 0, End: 1}}, false, ""},
-		{"no ranges", nil, false, ""},
+		{"inclusive partial multiline drops each row's padding", []CellRange{{Row: 0, Start: 2, End: 6}, {Row: 1, Start: 0, End: 1}}, "pha\nbe"},
+		{"whole row drops trailing spaces", []CellRange{{Row: 0, Start: 0, End: 6}}, "alpha"},
+		{"wide glyph emitted once", []CellRange{{Row: 2, Start: 1, End: 2}}, "界"},
+		{"continuation endpoint normalizes to head", []CellRange{{Row: 2, Start: 2, End: 2}}, "界"},
+		{"empty row", []CellRange{{Row: 3, Start: 0, End: 0}}, ""},
+		{"out of range ignored", []CellRange{{Row: 8, Start: 0, End: 1}}, ""},
+		{"no ranges", nil, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, doc.Extract(tt.ranges, tt.linewise))
+			require.Equal(t, tt.want, doc.Extract(tt.ranges))
+		})
+	}
+}
+
+func TestDocumentExtractTrimsPaddingAndJoinsWrappedRows(t *testing.T) {
+	// pad renders s into a width-w row, blank-filled like a real terminal grid.
+	pad := func(s string, w int) []renderer.Cell {
+		cells := make([]renderer.Cell, w)
+		for i := range cells {
+			cells[i] = renderer.BlankCell()
+		}
+		for i, r := range []rune(s) {
+			if i >= w {
+				break
+			}
+			cells[i] = renderer.Cell{Rune: r}
+		}
+		return cells
+	}
+
+	tests := []struct {
+		name   string
+		rows   [][]renderer.Cell
+		bounds []vt.LineBound
+		ranges []CellRange
+		want   string
+	}{
+		{
+			name:   "hard row drops its padding",
+			rows:   [][]renderer.Cell{pad("ab", 8)},
+			bounds: []vt.LineBound{{End: 2}},
+			ranges: []CellRange{{Row: 0, Start: 0, End: 7}},
+			want:   "ab",
+		},
+		{
+			name:   "soft row joins without a newline",
+			rows:   [][]renderer.Cell{pad("abcdefgh", 8), pad("ij", 8)},
+			bounds: []vt.LineBound{{End: 8, Soft: true}, {End: 2}},
+			ranges: []CellRange{{Row: 0, Start: 0, End: 7}, {Row: 1, Start: 0, End: 7}},
+			want:   "abcdefghij",
+		},
+		{
+			name:   "soft row keeps a real trailing space",
+			rows:   [][]renderer.Cell{pad("abc     ", 8), pad("de", 8)},
+			bounds: []vt.LineBound{{End: 8, Soft: true}, {End: 2}},
+			ranges: []CellRange{{Row: 0, Start: 0, End: 7}, {Row: 1, Start: 0, End: 7}},
+			want:   "abc     de",
+		},
+		{
+			name: "three consecutive soft rows",
+			rows: [][]renderer.Cell{pad("aaaa", 4), pad("bbbb", 4), pad("cccc", 4), pad("dd", 4)},
+			bounds: []vt.LineBound{
+				{End: 4, Soft: true}, {End: 4, Soft: true}, {End: 4, Soft: true}, {End: 2},
+			},
+			ranges: []CellRange{
+				{Row: 0, Start: 0, End: 3}, {Row: 1, Start: 0, End: 3},
+				{Row: 2, Start: 0, End: 3}, {Row: 3, Start: 0, End: 3},
+			},
+			want: "aaaabbbbccccdd",
+		},
+		{
+			name:   "hard rows keep their newline",
+			rows:   [][]renderer.Cell{pad("ab", 8), pad("cd", 8)},
+			bounds: []vt.LineBound{{End: 2}, {End: 2}},
+			ranges: []CellRange{{Row: 0, Start: 0, End: 7}, {Row: 1, Start: 0, End: 7}},
+			want:   "ab\ncd",
+		},
+		{
+			name:   "sparse ranges do not join across a row gap",
+			rows:   [][]renderer.Cell{pad("ab", 8), pad("ignored", 8), pad("cd", 8)},
+			bounds: []vt.LineBound{{End: 8, Soft: true}, {End: 7}, {End: 2}},
+			ranges: []CellRange{{Row: 0, Start: 0, End: 7}, {Row: 2, Start: 0, End: 7}},
+			want:   "ab\ncd",
+		},
+		{
+			name:   "invalid trailing range does not prevent final emitted row trimming",
+			rows:   [][]renderer.Cell{pad("ab", 8)},
+			bounds: []vt.LineBound{{End: 8, Soft: true}},
+			ranges: []CellRange{{Row: 0, Start: 0, End: 7}, {Row: 99, Start: 0, End: 7}},
+			want:   "ab",
+		},
+		{
+			name:   "blank row survives as an empty line",
+			rows:   [][]renderer.Cell{pad("ab", 8), pad("", 8), pad("cd", 8)},
+			bounds: []vt.LineBound{{End: 2}, {End: 0}, {End: 2}},
+			ranges: []CellRange{{Row: 0, Start: 0, End: 7}, {Row: 1, Start: 0, End: 7}, {Row: 2, Start: 0, End: 7}},
+			want:   "ab\n\ncd",
+		},
+		{
+			name:   "the last row is trimmed even when soft",
+			rows:   [][]renderer.Cell{pad("ab", 8), pad("cd      ", 8)},
+			bounds: []vt.LineBound{{End: 2}, {End: 8, Soft: true}},
+			ranges: []CellRange{{Row: 0, Start: 0, End: 7}, {Row: 1, Start: 0, End: 7}},
+			want:   "ab\ncd",
+		},
+		{
+			name: "wide glyph pushed off a soft row's edge",
+			// "a界" occupies columns 0..2; the wide rune did not fit at column 3,
+			// so End stops at 3 and column 3 is abandoned padding.
+			rows: [][]renderer.Cell{
+				{{Rune: 'a'}, {Rune: '界'}, {Continuation: true}, renderer.BlankCell()},
+				pad("b", 4),
+			},
+			bounds: []vt.LineBound{{End: 3, Soft: true}, {End: 1}},
+			ranges: []CellRange{{Row: 0, Start: 0, End: 3}, {Row: 1, Start: 0, End: 3}},
+			want:   "a界b",
+		},
+		{
+			name:   "selection stopping mid soft row",
+			rows:   [][]renderer.Cell{pad("abcdefgh", 8), pad("ij", 8)},
+			bounds: []vt.LineBound{{End: 8, Soft: true}, {End: 2}},
+			ranges: []CellRange{{Row: 0, Start: 2, End: 4}},
+			want:   "cde",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := NewDocument(NewSnapshotFromLines(tc.rows, tc.bounds, 8, 0), "")
+			if got := doc.Extract(tc.ranges); got != tc.want {
+				t.Errorf("Extract() = %q, want %q", got, tc.want)
+			}
 		})
 	}
 }

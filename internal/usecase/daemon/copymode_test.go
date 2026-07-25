@@ -877,7 +877,7 @@ func TestMouseDragCopyEntryCapturesSourceForYank(t *testing.T) {
 	out := awaitFrame(t, sends, ports.MsgOutput)
 	msg, err := ports.UnmarshalOutput(out.Payload)
 	require.NoError(t, err)
-	want := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte("alpha"+strings.Repeat(" ", 75)+"\nb")) + "\x07"
+	want := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte("alpha\nb")) + "\x07"
 	require.Equal(t, want, string(msg.Data))
 }
 

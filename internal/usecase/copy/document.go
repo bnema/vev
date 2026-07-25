@@ -237,49 +237,92 @@ func (d *Document) LineText(row int) string {
 	return strings.TrimRight(d.cellsText(d.Row(row), 0, len(d.Row(row))-1), " ")
 }
 
-// Extract returns inclusive ranges joined by physical-row newlines. Line-wise
-// extraction trims trailing blank spaces; stream extraction preserves them.
-func (d *Document) Extract(ranges []CellRange, linewise bool) string {
+// Extract renders inclusive ranges as copyable text. Every emitted line drops
+// the grid padding to its right, and rows the VT marked as soft-wrapped are
+// joined only when the next emitted segment is the next physical row.
+func (d *Document) Extract(ranges []CellRange) string {
 	if len(ranges) == 0 {
 		return ""
 	}
-	lines := make([]string, 0, len(ranges))
+
+	// Filter invalid ranges before deciding which segment is final or adjacent.
+	// rangeText with logicalEnd=true performs the same normalization and bounds
+	// checks while deliberately trimming, but this validation text is discarded.
+	emitted := make([]CellRange, 0, len(ranges))
 	for _, r := range ranges {
-		text, ok := d.rangeText(r)
-		if !ok {
-			continue
+		if _, _, ok := d.rangeText(r, true); ok {
+			emitted = append(emitted, r)
 		}
-		if linewise {
-			text = strings.TrimRight(text, " ")
-		}
-		lines = append(lines, text)
 	}
-	return strings.Join(lines, "\n")
+
+	var out strings.Builder
+	for i, r := range emitted {
+		last := i == len(emitted)-1
+		adjacent := !last && emitted[i+1].Row == r.Row+1
+		text, soft, _ := d.rangeText(r, last || !adjacent)
+		out.WriteString(text)
+		if !last && !soft {
+			out.WriteByte('\n')
+		}
+	}
+	return out.String()
 }
 
-func (d *Document) rangeText(r CellRange) (string, bool) {
+// rangeText renders one physical row of a selection and reports whether that
+// row continues into the next emitted physical row. A row that continues is cut
+// at its logical extent, keeping trailing spaces the application really printed;
+// any logical end is cut after its last content cell, dropping grid padding.
+func (d *Document) rangeText(r CellRange, logicalEnd bool) (string, bool, bool) {
 	if r.Row < 0 || r.Row >= d.Len() {
-		return "", false
+		return "", false, false
 	}
 	row := d.Row(r.Row)
 	if len(row) == 0 {
-		return "", r.Start == 0 && r.End == 0
+		return "", false, r.Start == 0 && r.End == 0
 	}
 	start, end := min(r.Start, r.End), max(r.Start, r.End)
 	if end < 0 || start >= len(row) {
-		return "", false
+		return "", false, false
 	}
 	start = max(start, 0)
 	end = min(end, len(row)-1)
-	headStart, ok := d.Normalize(Pos{Row: r.Row, Col: start})
+
+	head, ok := d.Normalize(Pos{Row: r.Row, Col: start})
 	if !ok {
-		return "", false
+		return "", false, false
 	}
-	headEnd, ok := d.Normalize(Pos{Row: r.Row, Col: end})
+	start = head.Col
+
+	bound := d.snapshot.Bound(r.Row)
+	soft := bound.Soft && !logicalEnd && end >= len(row)-1
+	if soft {
+		end = min(end, min(max(bound.End, 0), len(row))-1)
+	} else {
+		end = lastContentCol(row, start, end)
+	}
+	if end < start {
+		return "", soft, true
+	}
+
+	tail, ok := d.Normalize(Pos{Row: r.Row, Col: end})
 	if !ok {
-		return "", false
+		return "", soft, true
 	}
-	return d.cellsText(row, headStart.Col, headEnd.Col), true
+	return d.cellsText(row, start, tail.Col), soft, true
+}
+
+// lastContentCol returns the rightmost column in [start, end] holding content,
+// or start-1 when the span is blank. Continuation cells belong to the glyph on
+// their left, so they never count on their own.
+func lastContentCol(row []renderer.Cell, start, end int) int {
+	for col := end; col >= start; col-- {
+		cell := row[col]
+		if cell.Continuation || cell.Rune == 0 || cell.Rune == ' ' {
+			continue
+		}
+		return col
+	}
+	return start - 1
 }
 
 func (d *Document) cellsText(row []renderer.Cell, start, end int) string {
