@@ -703,21 +703,32 @@ func newMockStore(t *testing.T) (*portsmocks.MockStore, *mockStoreState) {
 	}).Maybe()
 	store.EXPECT().Batch(mock.Anything).RunAndReturn(func(changes []ports.StoreChange) error {
 		state.mu.Lock()
-		defer state.mu.Unlock()
+		deleted := false
 		for _, change := range changes {
 			key := string(change.Key)
 			if change.Delete {
 				state.dels = append(state.dels, key)
 				if state.deleteErr != nil {
 					if err := state.deleteErr(key); err != nil {
+						state.mu.Unlock()
 						return err
 					}
 				}
 				delete(state.data, key)
+				deleted = true
 				continue
 			}
 			state.sets++
 			state.data[key] = append([]byte(nil), change.Value...)
+		}
+		var deleteDone chan struct{}
+		if deleted {
+			deleteDone = state.deleteDone
+			state.deleteDone = nil
+		}
+		state.mu.Unlock()
+		if deleteDone != nil {
+			close(deleteDone)
 		}
 		return nil
 	}).Maybe()
@@ -813,6 +824,18 @@ func (s newStaticStore) Range(fn func(k, v []byte) bool) {
 }
 func (s newStaticStore) Sync() error  { return nil }
 func (s newStaticStore) Close() error { return nil }
+
+func TestNamedSessionCreationIsAllowedWithNilStore(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	WithStore(nil)(d)
+
+	sess, err := d.createSessionLocked("work", false, "/tmp/work", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+	require.Equal(t, "work", sess.name)
+	require.False(t, d.persistEnabled)
+}
 
 func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
 	store, _ := newMockStore(t)

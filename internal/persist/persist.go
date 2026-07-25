@@ -102,7 +102,7 @@ func LoadCatalogueReadOnly(dir string) ([]domain.CatalogueRecord, error) {
 func (p *Persister) Save(record domain.CatalogueRecord) error { return p.Replace(record.Name, record) }
 func (p *Persister) Apply(records map[string]*domain.CatalogueRecord) error {
 	if p == nil || p.store == nil {
-		return errPersistenceUnavailable
+		return nil
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -165,6 +165,9 @@ func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord) erro
 	return p.store.Sync()
 }
 func (p *Persister) Rename(oldName string, next domain.CatalogueRecord) error {
+	if p == nil || p.store == nil {
+		return nil
+	}
 	if oldName == next.Name {
 		return errors.New("persist: rename requires distinct names")
 	}
@@ -177,7 +180,7 @@ func (p *Persister) Replace(name string, next domain.CatalogueRecord) error {
 // Touch updates metadata while retaining the durable identity and recovery state.
 func (p *Persister) Touch(name, cwd string, at int64) error {
 	if p == nil || p.store == nil {
-		return errPersistenceUnavailable
+		return nil
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -198,7 +201,7 @@ func (p *Persister) Touch(name, cwd string, at int64) error {
 }
 func (p *Persister) TouchMRU(name string, sequence uint64) error {
 	if p == nil || p.store == nil {
-		return errPersistenceUnavailable
+		return nil
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -223,7 +226,7 @@ func (p *Persister) Delete(name string) error {
 func (p *Persister) LoadAll() ([]domain.CatalogueRecord, error) { return p.LoadCatalogue() }
 func (p *Persister) LoadCatalogue() ([]domain.CatalogueRecord, error) {
 	if p == nil || p.store == nil {
-		return nil, errPersistenceUnavailable
+		return []domain.CatalogueRecord{}, nil
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -233,7 +236,7 @@ func (p *Persister) LoadCatalogue() ([]domain.CatalogueRecord, error) {
 }
 func (p *Persister) Close() error {
 	if p == nil || p.store == nil {
-		return errPersistenceUnavailable
+		return nil
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()

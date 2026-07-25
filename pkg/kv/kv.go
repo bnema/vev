@@ -27,6 +27,9 @@ type ReplayResult struct {
 
 type fsHooks struct {
 	Open    func(string, int, os.FileMode) (*os.File, error)
+	Write   func(*os.File, []byte) (int, error)
+	Sync    func(*os.File) error
+	Close   func(*os.File) error
 	Remove  func(string) error
 	Rename  func(string, string) error
 	SyncDir func(string) error
@@ -34,7 +37,15 @@ type fsHooks struct {
 }
 
 func defaultFSHooks() fsHooks {
-	return fsHooks{Open: os.OpenFile, Remove: os.Remove, Rename: os.Rename, SyncDir: syncDir}
+	return fsHooks{
+		Open:    os.OpenFile,
+		Write:   func(f *os.File, p []byte) (int, error) { return f.Write(p) },
+		Sync:    func(f *os.File) error { return f.Sync() },
+		Close:   func(f *os.File) error { return f.Close() },
+		Remove:  os.Remove,
+		Rename:  os.Rename,
+		SyncDir: syncDir,
+	}
 }
 
 // Store is an append-only WAL-backed key/value store.
@@ -263,11 +274,11 @@ func (s *Store) compactLocked() (retErr error) {
 	for _, key := range keys {
 		buf, err := encodeRecord(opSet, []byte(key), s.data[key])
 		if err != nil {
-			_ = f.Close()
+			_ = s.hooks.Close(f)
 			return err
 		}
-		if n, err := f.Write(buf); err != nil || n != len(buf) {
-			_ = f.Close()
+		if n, err := s.hooks.Write(f, buf); err != nil || n != len(buf) {
+			_ = s.hooks.Close(f)
 			if err == nil {
 				err = io.ErrShortWrite
 			}
@@ -275,22 +286,22 @@ func (s *Store) compactLocked() (retErr error) {
 		}
 	}
 	if err := injectFault(s.hooks, "after-write-next"); err != nil {
-		_ = f.Close()
+		_ = s.hooks.Close(f)
 		return err
 	}
 	if err := injectFault(s.hooks, "before-sync-next"); err != nil {
-		_ = f.Close()
+		_ = s.hooks.Close(f)
 		return err
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
+	if err := s.hooks.Sync(f); err != nil {
+		_ = s.hooks.Close(f)
 		return err
 	}
 	if err := injectFault(s.hooks, "after-sync-next"); err != nil {
-		_ = f.Close()
+		_ = s.hooks.Close(f)
 		return err
 	}
-	if err := f.Close(); err != nil {
+	if err := s.hooks.Close(f); err != nil {
 		return err
 	}
 	if err := validatePath(next); err != nil {
@@ -341,25 +352,25 @@ func (s *Store) compactLocked() (retErr error) {
 		return err
 	}
 	if err := injectFault(s.hooks, "after-reopen-current"); err != nil {
-		_ = current.Close()
+		_ = s.hooks.Close(current)
 		return err
 	}
 	result, err := replayFile(current)
 	if err != nil || result.TornTail {
-		_ = current.Close()
+		_ = s.hooks.Close(current)
 		if err == nil {
 			err = ErrCorruptWAL
 		}
 		return err
 	}
 	if _, err := current.Seek(0, io.SeekEnd); err != nil {
-		_ = current.Close()
+		_ = s.hooks.Close(current)
 		return err
 	}
 	old := s.file
 	s.file = current
 	s.data, s.entrySize, s.total, s.live = result.Data, result.EntrySize, result.Total, result.Live
-	if err := old.Close(); err != nil {
+	if err := s.hooks.Close(old); err != nil {
 		return err
 	}
 	if err := removeIfExists(s.hooks, prev); err != nil {
@@ -386,7 +397,7 @@ func (s *Store) poisonLocked() error {
 	s.file, s.lockFile = nil, nil
 	var fileErr error
 	if file != nil {
-		fileErr = file.Close()
+		fileErr = s.hooks.Close(file)
 	}
 	return errors.Join(fileErr, releaseLock(lockFile))
 }

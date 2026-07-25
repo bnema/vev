@@ -429,17 +429,21 @@ func TestPrintSessionsMarksEphemeral(t *testing.T) {
 	}
 }
 
+func newTestPersister(t *testing.T, stateDir string) *persist.Persister {
+	t.Helper()
+	store, err := persist.OpenStore(persist.StorePath(stateDir))
+	require.NoError(t, err)
+	return persist.New(store)
+}
+
 func TestRunListReadsStoppedSessionsWithoutDaemon(t *testing.T) {
 	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateRoot)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
 
-	p, err := persist.Open(filepath.Join(stateRoot, "vev"))
-	if err != nil {
-		t.Fatalf("persist.Open error = %v", err)
-	}
+	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
 	now := time.Now().UnixNano()
-	if err := p.Save(persist.Record{Name: "stored", Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}); err != nil {
+	if err := p.Save(persist.Record{Name: "stored", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now, RecoveryState: domain.RecoveryFresh}); err != nil {
 		t.Fatalf("Save error = %v", err)
 	}
 	if err := p.Close(); err != nil {
@@ -477,12 +481,9 @@ func TestRunKillDeletesStoppedSessionWithoutDaemon(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", stateRoot)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
 
-	p, err := persist.Open(filepath.Join(stateRoot, "vev"))
-	if err != nil {
-		t.Fatalf("persist.Open error = %v", err)
-	}
+	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
 	now := time.Now().UnixNano()
-	if err := p.Save(persist.Record{Name: "stored", Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}); err != nil {
+	if err := p.Save(persist.Record{Name: "stored", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now, RecoveryState: domain.RecoveryFresh}); err != nil {
 		t.Fatalf("Save error = %v", err)
 	}
 	if err := p.Close(); err != nil {

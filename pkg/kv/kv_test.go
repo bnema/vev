@@ -416,6 +416,151 @@ func TestCompactionRecoveryMatrix(t *testing.T) {
 	}
 }
 
+func TestCompactionFilesystemOperationFailuresPoisonAndRecover(t *testing.T) {
+	fault := errors.New("injected filesystem failure")
+	tests := []struct {
+		name      string
+		configure func(fsHooks, string) fsHooks
+	}{
+		{name: "write-next", configure: func(h fsHooks, _ string) fsHooks {
+			h.Write = func(*os.File, []byte) (int, error) { return 0, fault }
+			return h
+		}},
+		{name: "sync-next", configure: func(h fsHooks, _ string) fsHooks {
+			h.Sync = func(*os.File) error { return fault }
+			return h
+		}},
+		{name: "close-next", configure: func(h fsHooks, _ string) fsHooks {
+			calls := 0
+			h.Close = func(f *os.File) error {
+				calls++
+				if calls == 1 {
+					return errors.Join(f.Close(), fault)
+				}
+				return f.Close()
+			}
+			return h
+		}},
+		{name: "remove-stale-prev", configure: failRemoveCall(fault, 1)},
+		{name: "rename-current-prev", configure: failRenameCall(fault, 1)},
+		{name: "sync-dir-next", configure: failSyncDirCall(fault, 1)},
+		{name: "sync-dir-prev", configure: failSyncDirCall(fault, 2)},
+		{name: "rename-next-current", configure: failRenameCall(fault, 2)},
+		{name: "sync-dir-current", configure: failSyncDirCall(fault, 3)},
+		{name: "reopen-current", configure: func(h fsHooks, path string) fsHooks {
+			open := h.Open
+			h.Open = func(name string, flags int, mode os.FileMode) (*os.File, error) {
+				if name == path && flags == os.O_RDWR {
+					return nil, fault
+				}
+				return open(name, flags, mode)
+			}
+			return h
+		}},
+		{name: "close-old-current", configure: func(h fsHooks, _ string) fsHooks {
+			calls := 0
+			h.Close = func(f *os.File) error {
+				calls++
+				if calls == 2 {
+					return errors.Join(f.Close(), fault)
+				}
+				return f.Close()
+			}
+			return h
+		}},
+		{name: "remove-prev", configure: failRemoveCall(fault, 2)},
+		{name: "sync-dir-final", configure: failSyncDirCall(fault, 4)},
+	}
+	oldRecord, err := encodeRecord(opSet, []byte("version"), []byte("old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := privatePath(t)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, oldRecord, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.data = map[string][]byte{"version": []byte("new")}
+			s.hooks = tt.configure(s.hooks, path)
+
+			err = s.compactLocked()
+			if !errors.Is(err, fault) {
+				t.Fatalf("compaction error = %v, want injected fault", err)
+			}
+			beforeAppend := candidateBytes(t, path)
+			if err := s.Set([]byte("later"), []byte("must-not-append")); !errors.Is(err, os.ErrClosed) {
+				t.Fatalf("append after compaction fault = %v, want closed store", err)
+			}
+			requireCandidateBytes(t, path, beforeAppend)
+
+			if err := recoverCompaction(path, defaultFSHooks()); err != nil {
+				t.Fatalf("recovery: %v", err)
+			}
+			got, err := Replay(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			version := string(got["version"])
+			if (version != "old" && version != "new") || len(got) != 1 {
+				t.Fatalf("mixed or empty recovered map: %#v", got)
+			}
+		})
+	}
+}
+
+func failRemoveCall(fault error, target int) func(fsHooks, string) fsHooks {
+	return func(h fsHooks, _ string) fsHooks {
+		remove := h.Remove
+		calls := 0
+		h.Remove = func(path string) error {
+			calls++
+			if calls == target {
+				return fault
+			}
+			return remove(path)
+		}
+		return h
+	}
+}
+
+func failRenameCall(fault error, target int) func(fsHooks, string) fsHooks {
+	return func(h fsHooks, _ string) fsHooks {
+		rename := h.Rename
+		calls := 0
+		h.Rename = func(oldPath, newPath string) error {
+			calls++
+			if calls == target {
+				return fault
+			}
+			return rename(oldPath, newPath)
+		}
+		return h
+	}
+}
+
+func failSyncDirCall(fault error, target int) func(fsHooks, string) fsHooks {
+	return func(h fsHooks, _ string) fsHooks {
+		sync := h.SyncDir
+		calls := 0
+		h.SyncDir = func(path string) error {
+			calls++
+			if calls == target {
+				return fault
+			}
+			return sync(path)
+		}
+		return h
+	}
+}
+
 func candidateBytes(t *testing.T, path string) map[string][]byte {
 	t.Helper()
 	got := make(map[string][]byte, 3)

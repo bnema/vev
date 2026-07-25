@@ -64,10 +64,17 @@ func TestCatalogueBatchFailureDoesNotSync(t *testing.T) {
 	require.ErrorIs(t, err, batchErr)
 }
 
-func TestCatalogueNilPersisterFailsClosed(t *testing.T) {
-	var p *Persister
-	require.ErrorIs(t, p.Save(validRecord("one", 1)), errPersistenceUnavailable)
-	_, err := p.LoadAll()
-	require.ErrorIs(t, err, errPersistenceUnavailable)
-	require.ErrorIs(t, p.Close(), errPersistenceUnavailable)
+func TestCatalogueNilStoreIsNoOp(t *testing.T) {
+	persisters := []*Persister{nil, New(nil)}
+	for _, p := range persisters {
+		require.NoError(t, p.Save(validRecord("one", 1)))
+		require.NoError(t, p.Apply(map[string]*domain.CatalogueRecord{"one": nil}))
+		require.NoError(t, p.Touch("one", "/tmp", 1))
+		require.NoError(t, p.TouchMRU("one", 1))
+		require.NoError(t, p.Delete("one"))
+		records, err := p.LoadAll()
+		require.NoError(t, err)
+		require.Empty(t, records)
+		require.NoError(t, p.Close())
+	}
 }

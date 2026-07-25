@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/stretchr/testify/require"
 )
@@ -54,10 +55,9 @@ func TestRunKillOfflineRetriesSnapshotDeletion(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", stateRoot)
 			t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
 
-			p, err := persist.Open(filepath.Join(stateRoot, "vev"))
-			require.NoError(t, err)
+			p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
 			now := time.Now().UnixNano()
-			require.NoError(t, p.Save(persist.Record{Name: "named", Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}))
+			require.NoError(t, p.Save(persist.Record{Name: "named", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now, RecoveryState: domain.RecoveryFresh}))
 			require.NoError(t, p.Close())
 
 			fake := &offlineSnapshotFake{deleteErr: tt.incrementalErr, deleteLegacyErr: tt.legacyErr}
@@ -65,7 +65,7 @@ func TestRunKillOfflineRetriesSnapshotDeletion(t *testing.T) {
 			newOfflineSnapshotRepository = func(string) offlineSnapshotSource { return fake }
 			t.Cleanup(func() { newOfflineSnapshotRepository = originalFactory })
 
-			err = runKill(context.Background(), "named", false, false)
+			err := runKill(context.Background(), "named", false, false)
 			if tt.incrementalErr != nil {
 				require.ErrorIs(t, err, tt.incrementalErr)
 			}
