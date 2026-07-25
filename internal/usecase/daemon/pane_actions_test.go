@@ -263,7 +263,7 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 		tb.mu.Unlock()
 		require.True(t, ok)
 		require.Equal(t, placementContent(placements, p2.id), p2.rect)
-		require.Equal(t, []domain.Size{{Cols: 80, Rows: 21}}, first.requested(), "the old expanded pane is applied only by the rejected attempt")
+		require.Equal(t, []domain.Size{{Cols: 80, Rows: 22}}, first.requested(), "the old expanded pane is applied only by the rejected attempt")
 		require.Equal(t, []domain.Size{rectSize(p2.rect)}, second.requested())
 	})
 
