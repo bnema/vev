@@ -184,16 +184,20 @@ func TestProcessPTYDataRetainsCallbacksDuringResizeReplay(t *testing.T) {
 func TestApplySessionLayoutStopsRetryWhenSessionCanceled(t *testing.T) {
 	pty := &transactionalResizePTY{}
 	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
-	admissions := 0
+	tb, p := sess.activeTab(), sess.activeTab().focusedPane()
 	d.beforeSessionResizePublication = sess.cancel
 
-	_, ok := d.applySessionLayout(sess, domain.Size{Cols: 100, Rows: 30}, nil, func() bool {
-		admissions++
-		return admissions > 1
-	})
+	_, ok := d.applySessionLayout(sess, domain.Size{Cols: 100, Rows: 30}, nil, nil)
 
 	require.False(t, ok)
 	require.Len(t, pty.requested(), 1, "cancellation must stop before a stale retry applies another PTY resize")
+	tb.mu.Lock()
+	require.Equal(t, domain.Size{Cols: 80, Rows: 23}, tb.size, "canceled session published a tab size")
+	tb.mu.Unlock()
+	p.mu.Lock()
+	require.Equal(t, domain.Rect{Width: 80, Height: 23}, p.rect, "canceled session published a pane rectangle")
+	require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height}, "canceled session published a VT size")
+	p.mu.Unlock()
 }
 
 func TestTransactionalResizeApplyDoesNotHoldTabOrPaneLocks(t *testing.T) {
@@ -223,21 +227,41 @@ func TestTransactionalResizeApplyDoesNotHoldTabOrPaneLocks(t *testing.T) {
 // rectangle state. Successful members and the client layout commit together;
 // composition clips/pads the retained failed screen against that new layout.
 func TestApplySessionLayoutReportsResizeFailuresOnce(t *testing.T) {
-	first := &transactionalResizePTY{errs: []error{errors.New("first failure")}}
-	second := &transactionalResizePTY{errs: []error{errors.New("second failure")}}
-	d, sess, _, _ := newManualSessionWithPTYs(t, first, second)
+	for _, tc := range []struct {
+		name              string
+		failureCount      int
+		wantOK            bool
+		wantFailed        int
+		wantFailureNotice int
+	}{
+		{name: "zero failures", wantOK: true},
+		{name: "one failure", failureCount: 1, wantOK: true, wantFailed: 1, wantFailureNotice: 1},
+		{name: "two failures", failureCount: 2, wantOK: true, wantFailed: 2, wantFailureNotice: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := &transactionalResizePTY{}
+			second := &transactionalResizePTY{}
+			if tc.failureCount >= 1 {
+				first.errs = []error{errors.New("first failure")}
+			}
+			if tc.failureCount >= 2 {
+				second.errs = []error{errors.New("second failure")}
+			}
+			d, sess, _, _ := newManualSessionWithPTYs(t, first, second)
 
-	failed, ok := d.applySessionLayout(sess, domain.Size{Cols: 100, Rows: 30}, nil, nil)
+			failed, ok := d.applySessionLayout(sess, domain.Size{Cols: 100, Rows: 30}, nil, nil)
 
-	require.True(t, ok)
-	require.Len(t, failed, 2)
-	count := 0
-	for _, notification := range d.notices.history() {
-		if notification.Code == domain.NoticeResizeFailed {
-			count++
-		}
+			require.Equal(t, tc.wantOK, ok)
+			require.Len(t, failed, tc.wantFailed)
+			count := 0
+			for _, notification := range d.notices.history() {
+				if notification.Code == domain.NoticeResizeFailed {
+					count++
+				}
+			}
+			require.Equal(t, tc.wantFailureNotice, count)
+		})
 	}
-	require.Equal(t, 1, count)
 }
 
 func TestTransactionalResizePartialFailureCommitsOnlySuccessfulPTYState(t *testing.T) {

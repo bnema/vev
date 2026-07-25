@@ -31,6 +31,9 @@ func applyFloatingResizePlanForTest(d *Daemon, p *pane, geometry floatingGeometr
 	p.popupGeometry = geometry
 	p.screen.Resize(geometry.Inner.Width, geometry.Inner.Height)
 	p.mu.Unlock()
+	p.resizeMu.Lock()
+	d.replayResizePending(member.session, member.tab, p, false, member.rect)
+	p.resizeMu.Unlock()
 	return true
 }
 
@@ -719,6 +722,11 @@ func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 		require.Equal(t, second, p.popupGeometry)
 		require.Equal(t, 1, pty.maxConcurrentCalls())
 		require.Equal(t, []domain.Size{{Cols: 4, Rows: 3}, {Cols: 8, Rows: 6}}, pty.sizes())
+		p.mu.Lock()
+		applying, pending := p.resizeApplying, append([]byte(nil), p.resizePending...)
+		p.mu.Unlock()
+		require.False(t, applying, "successful helper apply must release its parser gate")
+		require.Empty(t, pending, "successful helper apply must drain pending parser bytes")
 	})
 }
 

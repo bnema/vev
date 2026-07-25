@@ -142,6 +142,7 @@ func TestResizeFocusSelectsNearestTargetAndAdjacentSibling(t *testing.T) {
 func TestResizeFocusMinimumAndTransactionalFailures(t *testing.T) {
 	t.Parallel()
 
+	minInt := -int(^uint(0)>>1) - 1
 	tests := []struct {
 		name  string
 		tree  *Tree
@@ -158,6 +159,14 @@ func TestResizeFocusMinimumAndTransactionalFailures(t *testing.T) {
 			delta: 5,
 			area:  domain.Rect{Width: 43, Height: 2},
 			want:  map[PaneID]int{"a": 22, "b": 20},
+		},
+		{
+			name:  "minimum integer clamps without overflow",
+			tree:  &Tree{Root: split(Horizontal, weightedLeaf("a", 30), weightedLeaf("b", 20)), Focus: "a"},
+			axis:  Width,
+			delta: minInt,
+			area:  domain.Rect{Width: 51, Height: 2},
+			want:  map[PaneID]int{"a": 20, "b": 30},
 		},
 		{
 			name: "partial growth stops at recursive donor minimum",
@@ -287,17 +296,6 @@ func TestEqualizeFailureIsTransactional(t *testing.T) {
 	before := tr.Clone()
 	require.ErrorIs(t, tr.Equalize(domain.Rect{Width: 20, Height: 2}), ErrTooSmall)
 	require.Equal(t, before, tr)
-}
-
-func TestResizeFocusMinIntClampsWithoutOverflow(t *testing.T) {
-	t.Parallel()
-
-	tr := &Tree{Root: split(Horizontal, weightedLeaf("a", 30), weightedLeaf("b", 20)), Focus: "a"}
-	minInt := -int(^uint(0)>>1) - 1
-	require.NoError(t, tr.ResizeFocus(Width, minInt, domain.Rect{Width: 51, Height: 2}))
-	placements, ok := Solve(tr.Root, domain.Rect{Width: 51, Height: 2})
-	require.True(t, ok)
-	require.Equal(t, map[PaneID]int{"a": 20, "b": 30}, placementWidths(placements))
 }
 
 func TestCanResize(t *testing.T) {

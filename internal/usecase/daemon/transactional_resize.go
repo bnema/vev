@@ -495,6 +495,9 @@ func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, ad
 		if valid && d.beforeSessionResizePublication != nil {
 			d.beforeSessionResizePublication()
 		}
+		if valid && sess.ctx != nil && sess.ctx.Err() != nil {
+			valid = false
+		}
 		if valid && current != nil && !current() {
 			valid = false
 		}
