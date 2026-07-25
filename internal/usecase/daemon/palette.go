@@ -418,6 +418,18 @@ func (e paletteExec) FocusPaneRight() error { return e.focus(layout.Right) }
 func (e paletteExec) FocusPaneUp() error    { return e.focus(layout.Up) }
 func (e paletteExec) FocusPaneDown() error  { return e.focus(layout.Down) }
 
+func (e paletteExec) EnterResizeMode() error { return e.d.enterResizeMode(e.sess, e.ac) }
+func (e paletteExec) resize(axis layout.Axis, delta int) error {
+	return resizeUserError(e.runAction(daemonActionRequest{kind: daemonActionResizePane, axis: axis, delta: delta}))
+}
+func (e paletteExec) GrowPaneWidth() error    { return e.resize(layout.Width, resizeStepCols) }
+func (e paletteExec) ShrinkPaneWidth() error  { return e.resize(layout.Width, -resizeStepCols) }
+func (e paletteExec) GrowPaneHeight() error   { return e.resize(layout.Height, resizeStepRows) }
+func (e paletteExec) ShrinkPaneHeight() error { return e.resize(layout.Height, -resizeStepRows) }
+func (e paletteExec) EqualizePanes() error {
+	return resizeUserError(e.runAction(daemonActionRequest{kind: daemonActionEqualizePanes}))
+}
+
 func (e paletteExec) NextTab() error {
 	return e.runAction(daemonActionRequest{kind: daemonActionNextTab})
 }

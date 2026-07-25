@@ -13,6 +13,8 @@ type overlayEvents struct {
 	cancel    func()
 	up        func()
 	down      func()
+	left      func()
+	right     func()
 }
 
 func routeOverlayBytes(data []byte, pending *[]byte, ev overlayEvents) {
@@ -92,6 +94,10 @@ func routeOverlayEscape(data []byte, ev overlayEvents) (consumed int, incomplete
 			call(ev.up)
 		case 'B':
 			call(ev.down)
+		case 'C':
+			call(ev.right)
+		case 'D':
+			call(ev.left)
 		}
 		return 3, false
 	case '[':
@@ -105,6 +111,10 @@ func routeOverlayEscape(data []byte, ev overlayEvents) (consumed int, incomplete
 					call(ev.up)
 				case 'B':
 					call(ev.down)
+				case 'C':
+					call(ev.right)
+				case 'D':
+					call(ev.left)
 				}
 			}
 			return i + 1, false

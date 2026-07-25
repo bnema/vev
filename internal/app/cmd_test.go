@@ -23,6 +23,8 @@ func TestParseCmdArgs(t *testing.T) {
 		{"cmd help", []string{"cmd", "--help"}, cmdInvocation{help: true}, false},
 		{"slug help", []string{"cmd", "split-right", "--help"}, cmdInvocation{slug: "split-right", help: true}, false},
 		{"simple", []string{"cmd", "split-right"}, cmdInvocation{slug: "split-right"}, false},
+		{"resize one-shot", []string{"cmd", "grow-pane-width"}, cmdInvocation{slug: "grow-pane-width"}, false},
+		{"resize modal is not scriptable", []string{"cmd", "resize-pane"}, cmdInvocation{}, true},
 		{"session flag", []string{"cmd", "-s", "dev", "new-tab"}, cmdInvocation{slug: "new-tab", session: "dev"}, false},
 		{"json flag", []string{"cmd", "list-panes", "--json"}, cmdInvocation{slug: "list-panes", jsonOut: true}, false},
 		{"self flag", []string{"cmd", "--self", "split-right"}, cmdInvocation{slug: "split-right", self: true}, false},
@@ -90,13 +92,15 @@ func TestCmdHelpUsesRegistryWithoutDialing(t *testing.T) {
 	if called {
 		t.Fatal("help dialed daemon")
 	}
-	for _, want := range []string{"usage: vev cmd", "split-right", "list-panes"} {
+	for _, want := range []string{"usage: vev cmd", "split-right", "grow-pane-width", "shrink-pane-width", "grow-pane-height", "shrink-pane-height", "equalize-panes", "list-panes"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("help %q missing %q", out.String(), want)
 		}
 	}
-	if strings.Contains(out.String(), "session-picker") {
-		t.Fatalf("help leaked non-scriptable command: %q", out.String())
+	for _, hidden := range []string{"session-picker", "resize-pane"} {
+		if strings.Contains(out.String(), hidden) {
+			t.Fatalf("help leaked non-scriptable command %q: %q", hidden, out.String())
+		}
 	}
 }
 

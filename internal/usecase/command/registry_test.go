@@ -9,7 +9,7 @@ import (
 
 func TestRegistryCodesAndSlugsAreUniqueInOrder(t *testing.T) {
 	commands := PaletteRegistry()
-	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "NXT", "PVT", "BSK", "JRS", "SSP", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}
+	wantCodes := []string{"CNT", "CNS", "CLT", "SPR", "SPL", "SPU", "SPD", "STP", "TST", "FLT", "CLP", "FPL", "FPR", "FPU", "FPD", "RSZ", "GPW", "SPW", "GPH", "SPH", "EQP", "NXT", "PVT", "BSK", "JRS", "SSP", "NTC", "YLN", "VIS", "RNS", "RNT", "DET"}
 
 	if len(commands) != len(wantCodes) {
 		t.Fatalf("Registry() returned %d commands, want %d", len(commands), len(wantCodes))
@@ -68,11 +68,13 @@ func TestRegistryControlMetadata(t *testing.T) {
 		"new-tab": TargetSession, "close-tab": TargetTab, "next-tab": TargetSession,
 		"previous-tab": TargetSession, "rename-session": TargetSession, "rename-tab": TargetTab,
 		"new-session": TargetSession, "toast": TargetSession,
+		"grow-pane-width": TargetPane, "shrink-pane-width": TargetPane,
+		"grow-pane-height": TargetPane, "shrink-pane-height": TargetPane, "equalize-panes": TargetTab,
 		"list-sessions": TargetNone, "list-tabs": TargetSession, "list-panes": TargetTab,
 	}
 	notScriptable := []string{
 		"session-picker", "notifications", "visual-mode", "yank-last-notification",
-		"detach", "back-session", "jump-recent-session", "toggle-floating-pane",
+		"detach", "back-session", "jump-recent-session", "toggle-floating-pane", "resize-pane",
 	}
 	for slug, target := range scriptable {
 		cmd, ok := BySlug(slug)
@@ -115,6 +117,8 @@ func TestControlHandlersValidateAndDelegate(t *testing.T) {
 	}{
 		{name: "zero argument mutation delegates", slug: "split-right", wantCall: "split-right"},
 		{name: "zero argument mutation rejects args", slug: "split-right", args: []string{"extra"}, wantErr: ErrInvalidArguments},
+		{name: "resize mutation delegates", slug: "grow-pane-width", wantCall: "grow-pane-width"},
+		{name: "equalize mutation delegates", slug: "equalize-panes", wantCall: "equalize-panes"},
 		{name: "rename delegates name", slug: "rename-tab", args: []string{"editor"}, wantCall: "rename-tab:editor"},
 		{name: "rename rejects empty name", slug: "rename-tab", args: []string{""}, wantErr: ErrInvalidArguments},
 		{name: "toast delegates severity", slug: "toast", args: []string{"-l", "warn", "hello"}, wantCall: "toast:warn:hello"},
@@ -153,6 +157,11 @@ func (s *controlSpy) SplitUp() error                    { return s.record("split
 func (s *controlSpy) SplitDown() error                  { return s.record("split-down") }
 func (s *controlSpy) StackPane() error                  { return s.record("stack-pane") }
 func (s *controlSpy) ToggleStack() error                { return s.record("toggle-stack") }
+func (s *controlSpy) GrowPaneWidth() error              { return s.record("grow-pane-width") }
+func (s *controlSpy) ShrinkPaneWidth() error            { return s.record("shrink-pane-width") }
+func (s *controlSpy) GrowPaneHeight() error             { return s.record("grow-pane-height") }
+func (s *controlSpy) ShrinkPaneHeight() error           { return s.record("shrink-pane-height") }
+func (s *controlSpy) EqualizePanes() error              { return s.record("equalize-panes") }
 func (s *controlSpy) FocusPaneLeft() error              { return s.record("focus-pane-left") }
 func (s *controlSpy) FocusPaneRight() error             { return s.record("focus-pane-right") }
 func (s *controlSpy) FocusPaneUp() error                { return s.record("focus-pane-up") }
@@ -244,6 +253,12 @@ func TestCommandRunCallsMatchingContextMethod(t *testing.T) {
 		{code: "FPR", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneRight().Return(nil).Once() }},
 		{code: "FPU", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneUp().Return(nil).Once() }},
 		{code: "FPD", expect: func(ctx *MockContext) { ctx.EXPECT().FocusPaneDown().Return(nil).Once() }},
+		{code: "RSZ", expect: func(ctx *MockContext) { ctx.EXPECT().EnterResizeMode().Return(nil).Once() }},
+		{code: "GPW", expect: func(ctx *MockContext) { ctx.EXPECT().GrowPaneWidth().Return(nil).Once() }},
+		{code: "SPW", expect: func(ctx *MockContext) { ctx.EXPECT().ShrinkPaneWidth().Return(nil).Once() }},
+		{code: "GPH", expect: func(ctx *MockContext) { ctx.EXPECT().GrowPaneHeight().Return(nil).Once() }},
+		{code: "SPH", expect: func(ctx *MockContext) { ctx.EXPECT().ShrinkPaneHeight().Return(nil).Once() }},
+		{code: "EQP", expect: func(ctx *MockContext) { ctx.EXPECT().EqualizePanes().Return(nil).Once() }},
 		{code: "NXT", expect: func(ctx *MockContext) { ctx.EXPECT().NextTab().Return(nil).Once() }},
 		{code: "PVT", expect: func(ctx *MockContext) { ctx.EXPECT().PrevTab().Return(nil).Once() }},
 		{code: "BSK", expect: func(ctx *MockContext) { ctx.EXPECT().BackSession().Return(nil).Once() }},

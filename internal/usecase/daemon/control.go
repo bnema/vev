@@ -70,6 +70,10 @@ func (d *Daemon) runControl(cmd command.Command, exec controlExec, request ports
 		return commandFailure(ports.ErrInvalidCommandArgs, "usage: "+cmd.Usage)
 	case errors.Is(err, errSessionNameInUse):
 		return commandFailure(ports.ErrNameTaken, err.Error())
+	case errors.Is(err, layout.ErrNotInSplit):
+		return commandFailure(ports.ErrNoSuchTarget, "pane is not in a split")
+	case errors.Is(err, layout.ErrTooSmall):
+		return commandFailure(ports.ErrNoSuchTarget, "pane cannot be resized further")
 	default:
 		return commandFailure(ports.ErrInternal, err.Error())
 	}
@@ -198,6 +202,8 @@ const (
 	daemonActionPreviousTab
 	daemonActionRenameSession
 	daemonActionRenameTab
+	daemonActionResizePane
+	daemonActionEqualizePanes
 )
 
 type daemonActionTarget struct {
@@ -210,6 +216,8 @@ type daemonActionRequest struct {
 	kind      daemonActionKind
 	target    daemonActionTarget
 	direction layout.Direction
+	axis      layout.Axis
+	delta     int
 	viewport  domain.Size
 	name      string
 }
@@ -274,6 +282,10 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 		return a.d.renameSession(target.session, request.name)
 	case daemonActionRenameTab:
 		return a.d.renameTab(target.session, target.tab, request.name)
+	case daemonActionResizePane:
+		return a.d.resizePane(target, request.axis, request.delta)
+	case daemonActionEqualizePanes:
+		return a.d.equalizePanes(target)
 	default:
 		return errors.New("daemon: unknown action")
 	}
@@ -404,6 +416,16 @@ func (e controlExec) StackPane() error {
 }
 func (e controlExec) ToggleStack() error {
 	return e.runAction(daemonActionRequest{kind: daemonActionToggleStack})
+}
+func (e controlExec) GrowPaneWidth() error    { return e.resize(layout.Width, resizeStepCols) }
+func (e controlExec) ShrinkPaneWidth() error  { return e.resize(layout.Width, -resizeStepCols) }
+func (e controlExec) GrowPaneHeight() error   { return e.resize(layout.Height, resizeStepRows) }
+func (e controlExec) ShrinkPaneHeight() error { return e.resize(layout.Height, -resizeStepRows) }
+func (e controlExec) resize(axis layout.Axis, delta int) error {
+	return e.runAction(daemonActionRequest{kind: daemonActionResizePane, axis: axis, delta: delta})
+}
+func (e controlExec) EqualizePanes() error {
+	return e.runAction(daemonActionRequest{kind: daemonActionEqualizePanes})
 }
 func (e controlExec) focus(direction layout.Direction) error {
 	return e.runAction(daemonActionRequest{kind: daemonActionFocusPane, direction: direction})

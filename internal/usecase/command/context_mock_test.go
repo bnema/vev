@@ -299,6 +299,50 @@ func (_c *MockContext_Detach_Call) RunAndReturn(run func() error) *MockContext_D
 	return _c
 }
 
+// EnterResizeMode provides a mock function for the type MockContext
+func (_mock *MockContext) EnterResizeMode() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for EnterResizeMode")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_EnterResizeMode_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'EnterResizeMode'
+type MockContext_EnterResizeMode_Call struct {
+	*mock.Call
+}
+
+// EnterResizeMode is a helper method to define mock.On call
+func (_e *MockContext_Expecter) EnterResizeMode() *MockContext_EnterResizeMode_Call {
+	return &MockContext_EnterResizeMode_Call{Call: _e.mock.On("EnterResizeMode")}
+}
+
+func (_c *MockContext_EnterResizeMode_Call) Run(run func()) *MockContext_EnterResizeMode_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_EnterResizeMode_Call) Return(err error) *MockContext_EnterResizeMode_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_EnterResizeMode_Call) RunAndReturn(run func() error) *MockContext_EnterResizeMode_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // EnterVisualMode provides a mock function for the type MockContext
 func (_mock *MockContext) EnterVisualMode() error {
 	ret := _mock.Called()
@@ -339,6 +383,50 @@ func (_c *MockContext_EnterVisualMode_Call) Return(err error) *MockContext_Enter
 }
 
 func (_c *MockContext_EnterVisualMode_Call) RunAndReturn(run func() error) *MockContext_EnterVisualMode_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// EqualizePanes provides a mock function for the type MockContext
+func (_mock *MockContext) EqualizePanes() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for EqualizePanes")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_EqualizePanes_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'EqualizePanes'
+type MockContext_EqualizePanes_Call struct {
+	*mock.Call
+}
+
+// EqualizePanes is a helper method to define mock.On call
+func (_e *MockContext_Expecter) EqualizePanes() *MockContext_EqualizePanes_Call {
+	return &MockContext_EqualizePanes_Call{Call: _e.mock.On("EqualizePanes")}
+}
+
+func (_c *MockContext_EqualizePanes_Call) Run(run func()) *MockContext_EqualizePanes_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_EqualizePanes_Call) Return(err error) *MockContext_EqualizePanes_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_EqualizePanes_Call) RunAndReturn(run func() error) *MockContext_EqualizePanes_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -515,6 +603,94 @@ func (_c *MockContext_FocusPaneUp_Call) Return(err error) *MockContext_FocusPane
 }
 
 func (_c *MockContext_FocusPaneUp_Call) RunAndReturn(run func() error) *MockContext_FocusPaneUp_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GrowPaneHeight provides a mock function for the type MockContext
+func (_mock *MockContext) GrowPaneHeight() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for GrowPaneHeight")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_GrowPaneHeight_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GrowPaneHeight'
+type MockContext_GrowPaneHeight_Call struct {
+	*mock.Call
+}
+
+// GrowPaneHeight is a helper method to define mock.On call
+func (_e *MockContext_Expecter) GrowPaneHeight() *MockContext_GrowPaneHeight_Call {
+	return &MockContext_GrowPaneHeight_Call{Call: _e.mock.On("GrowPaneHeight")}
+}
+
+func (_c *MockContext_GrowPaneHeight_Call) Run(run func()) *MockContext_GrowPaneHeight_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_GrowPaneHeight_Call) Return(err error) *MockContext_GrowPaneHeight_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_GrowPaneHeight_Call) RunAndReturn(run func() error) *MockContext_GrowPaneHeight_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GrowPaneWidth provides a mock function for the type MockContext
+func (_mock *MockContext) GrowPaneWidth() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for GrowPaneWidth")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_GrowPaneWidth_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GrowPaneWidth'
+type MockContext_GrowPaneWidth_Call struct {
+	*mock.Call
+}
+
+// GrowPaneWidth is a helper method to define mock.On call
+func (_e *MockContext_Expecter) GrowPaneWidth() *MockContext_GrowPaneWidth_Call {
+	return &MockContext_GrowPaneWidth_Call{Call: _e.mock.On("GrowPaneWidth")}
+}
+
+func (_c *MockContext_GrowPaneWidth_Call) Run(run func()) *MockContext_GrowPaneWidth_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_GrowPaneWidth_Call) Return(err error) *MockContext_GrowPaneWidth_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_GrowPaneWidth_Call) RunAndReturn(run func() error) *MockContext_GrowPaneWidth_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -830,6 +1006,94 @@ func (_c *MockContext_RenameTab_Call) Return(err error) *MockContext_RenameTab_C
 }
 
 func (_c *MockContext_RenameTab_Call) RunAndReturn(run func() error) *MockContext_RenameTab_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ShrinkPaneHeight provides a mock function for the type MockContext
+func (_mock *MockContext) ShrinkPaneHeight() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for ShrinkPaneHeight")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_ShrinkPaneHeight_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ShrinkPaneHeight'
+type MockContext_ShrinkPaneHeight_Call struct {
+	*mock.Call
+}
+
+// ShrinkPaneHeight is a helper method to define mock.On call
+func (_e *MockContext_Expecter) ShrinkPaneHeight() *MockContext_ShrinkPaneHeight_Call {
+	return &MockContext_ShrinkPaneHeight_Call{Call: _e.mock.On("ShrinkPaneHeight")}
+}
+
+func (_c *MockContext_ShrinkPaneHeight_Call) Run(run func()) *MockContext_ShrinkPaneHeight_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_ShrinkPaneHeight_Call) Return(err error) *MockContext_ShrinkPaneHeight_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_ShrinkPaneHeight_Call) RunAndReturn(run func() error) *MockContext_ShrinkPaneHeight_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ShrinkPaneWidth provides a mock function for the type MockContext
+func (_mock *MockContext) ShrinkPaneWidth() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for ShrinkPaneWidth")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockContext_ShrinkPaneWidth_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ShrinkPaneWidth'
+type MockContext_ShrinkPaneWidth_Call struct {
+	*mock.Call
+}
+
+// ShrinkPaneWidth is a helper method to define mock.On call
+func (_e *MockContext_Expecter) ShrinkPaneWidth() *MockContext_ShrinkPaneWidth_Call {
+	return &MockContext_ShrinkPaneWidth_Call{Call: _e.mock.On("ShrinkPaneWidth")}
+}
+
+func (_c *MockContext_ShrinkPaneWidth_Call) Run(run func()) *MockContext_ShrinkPaneWidth_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContext_ShrinkPaneWidth_Call) Return(err error) *MockContext_ShrinkPaneWidth_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockContext_ShrinkPaneWidth_Call) RunAndReturn(run func() error) *MockContext_ShrinkPaneWidth_Call {
 	_c.Call.Return(run)
 	return _c
 }

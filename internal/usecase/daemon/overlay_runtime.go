@@ -37,6 +37,11 @@ type overlayRuntime struct {
 	promptSubmit  func(string) error
 	promptPending []byte
 
+	resizeMu      sync.Mutex
+	resizeActive  bool
+	resizePending []byte
+	resizeESC     pendingByteTimer
+
 	copyMu            sync.Mutex
 	copyMode          *scopy.Mode
 	copyCandidate     *scopy.Mode
@@ -98,7 +103,7 @@ func (rt *overlayRuntime) Active() bool {
 	if rt == nil || rt.ac == nil {
 		return false
 	}
-	return rt.promptActive() || rt.paletteActive() || rt.pickerActive() || rt.noticesActive() || rt.copyActive()
+	return rt.promptActive() || rt.paletteActive() || rt.pickerActive() || rt.noticesActive() || rt.resizeModeActive() || rt.copyActive()
 }
 
 func (rt *overlayRuntime) promptActive() bool {
@@ -135,6 +140,15 @@ func (rt *overlayRuntime) noticesActive() bool {
 	rt.noticeMu.Lock()
 	defer rt.noticeMu.Unlock()
 	return rt.noticesOverlay != nil
+}
+
+func (rt *overlayRuntime) resizeModeActive() bool {
+	if rt == nil {
+		return false
+	}
+	rt.resizeMu.Lock()
+	defer rt.resizeMu.Unlock()
+	return rt.resizeActive
 }
 
 func (rt *overlayRuntime) copyActive() bool {
@@ -235,6 +249,10 @@ func (rt *overlayRuntime) HandleInput(d *Daemon, data []byte) bool {
 		d.handleNoticesInput(ac, data)
 		return true
 	}
+	if rt.resizeModeActive() {
+		d.handleResizeInput(ac, data)
+		return true
+	}
 	if rt.copyActive() {
 		d.handleCopyInput(ac, data)
 		return true
@@ -250,6 +268,7 @@ type overlayRenderSnapshot struct {
 	copyPane        *pane
 	copySearchModel *visualsearch.Model
 	statusFeedback  string
+	resizeActive    bool
 
 	pickerActive bool
 	pickerModel  *picker.Model
@@ -315,6 +334,10 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 		rt.statusFeedback = ""
 	}
 	rt.copyMu.Unlock()
+
+	rt.resizeMu.Lock()
+	snap.resizeActive = rt.resizeActive
+	rt.resizeMu.Unlock()
 
 	rt.pickerMu.Lock()
 	snap.pickerActive = rt.picker != nil
