@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/keys"
@@ -242,6 +243,104 @@ func TestPickerViewsOmitsTerminalTitleWhenTabsConfigDisabled(t *testing.T) {
 	require.Equal(t, []picker.TabEntry{{Name: "1", Detail: " (vim)"}, {Name: "logs", Detail: " (sh)"}}, views[0].Tabs)
 }
 
+func TestPickerWaitsForRestoringTargetBeforeSwitching(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, from, ac, _ := newManualSessionWithPTYs(t, p)
+	record := durableRecoveryRecord(0)
+	record.Name = "restoring"
+	state, done := initialRuntimeRecoveryState(record)
+	d.stopped[record.Name] = stoppedSession{
+		name:        record.Name,
+		createdAt:   record.CreatedAt,
+		incarnation: record.IncarnationID,
+		record:      record,
+		state:       state,
+		restoreDone: done,
+	}
+	factory := &recoveryCountingPTYFactory{}
+	d.ptys = factory
+
+	result := make(chan error, 1)
+	go func() {
+		result <- d.switchToTarget(from, ac, picker.Target{Name: record.Name, Stopped: true})
+	}()
+
+	select {
+	case err := <-result:
+		t.Fatalf("picker switch returned before target restoration completed: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	require.Zero(t, factory.calls.Load())
+	require.Same(t, from, ac.currentSession())
+
+	ctx, cancel := context.WithCancel(d.serveCtx)
+	defer cancel()
+	target := &session{id: "restored", name: record.Name, createdAt: record.CreatedAt, ctx: ctx, cancel: cancel, tabs: []*tab{newTab(nil, domain.Size{Cols: 80, Rows: 23})}}
+	d.mu.Lock()
+	delete(d.stopped, record.Name)
+	d.sessions[target.id] = target
+	d.mu.Unlock()
+	closeRuntimeRestoreDone(done)
+
+	require.NoError(t, <-result)
+	require.Same(t, target, ac.currentSession())
+}
+
+func TestPickerRejectsCatalogueTargetsWithoutFreshRuntime(t *testing.T) {
+	tests := []struct {
+		name         string
+		recovery     domain.RecoveryState
+		runtimeState runtimeRecoveryState
+	}{
+		{name: "degraded", recovery: domain.RecoveryDegraded, runtimeState: runtimeDegraded},
+		{name: "deleting", recovery: domain.RecoveryDeleting, runtimeState: runtimeDeleting},
+		{name: "healthy with missing runtime state", recovery: domain.RecoveryHealthy},
+		{name: "healthy without restored runtime", recovery: domain.RecoveryHealthy, runtimeState: runtimeHealthy},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, release := newBlockingPTY(t)
+			defer release()
+			d, from, ac, _ := newManualSessionWithPTYs(t, p)
+			store, storeState := newMockStore(t)
+			record := durableRecoveryRecord(0)
+			record.Name = "unsafe"
+			record.RecoveryState = tt.recovery
+			catalogue := persist.New(store)
+			WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
+			d.stopped[record.Name] = stoppedSession{
+				name:        record.Name,
+				createdAt:   record.CreatedAt,
+				incarnation: record.IncarnationID,
+				record:      record,
+				state:       tt.runtimeState,
+			}
+			factory := &recoveryCountingPTYFactory{}
+			d.ptys = factory
+
+			err := d.switchToTarget(from, ac, picker.Target{Name: record.Name, Stopped: true})
+
+			var userError *domain.UserError
+			require.ErrorAs(t, err, &userError)
+			require.Equal(t, domain.NoticeSessionUnavailable, userError.Code)
+			var protocolError *protoErr
+			require.ErrorAs(t, err, &protocolError)
+			require.Equal(t, ports.ErrSessionDegraded, protocolError.code)
+			require.Zero(t, factory.calls.Load(), "unsafe target must not open a PTY")
+			require.Same(t, from, ac.currentSession())
+
+			storeState.mu.Lock()
+			sets := storeState.sets
+			storeState.mu.Unlock()
+			require.Zero(t, sets, "unsafe target must not mutate the catalogue")
+			require.Equal(t, record, d.stopped[record.Name].record)
+			require.Equal(t, tt.runtimeState, d.stopped[record.Name].state)
+		})
+	}
+}
+
 func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {
 	p1, release1 := newBlockingPTY(t)
 	p2, release2 := newBlockingPTY(t)
@@ -251,7 +350,7 @@ func TestPickerResumesStoppedSessionWithPersistedTabNames(t *testing.T) {
 	defer release3()
 	d, from, ac, sends := newManualSessionWithPTYs(t, p1)
 	d.ptys = newFactorySeq(t, p2, p3)
-	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}}
+	d.stopped["work"] = stoppedSession{name: "work", cwd: "/tmp/work", createdAt: 7, tabNames: []string{"shell", "logs"}, record: domain.CatalogueRecord{Name: "work", RecoveryState: domain.RecoveryFresh}, state: runtimeFresh}
 
 	d.resumeStoppedAndSwitch(from, ac, picker.Target{Name: "work", Stopped: true})
 	awaitFrame(t, sends, ports.MsgOutput)

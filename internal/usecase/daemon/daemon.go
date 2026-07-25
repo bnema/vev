@@ -916,6 +916,13 @@ func (d *Daemon) waitForTargetRestore(name string) error {
 			return nil
 		}
 		switch stopped.state {
+		case runtimeFresh:
+			if stopped.record.Name == "" || stopped.record.RecoveryState == domain.RecoveryFresh {
+				d.mu.Unlock()
+				return nil
+			}
+			d.mu.Unlock()
+			return &protoErr{ports.ErrSessionDegraded, "session durable state is degraded: " + name}
 		case runtimeRestoring:
 			done := stopped.restoreDone
 			var shutdown <-chan struct{}
@@ -934,6 +941,9 @@ func (d *Daemon) waitForTargetRestore(name string) error {
 			return &protoErr{ports.ErrSessionDegraded, "session durable state is degraded: " + name}
 		default:
 			d.mu.Unlock()
+			if stopped.record.Name != "" {
+				return &protoErr{ports.ErrSessionDegraded, "session durable state is degraded: " + name}
+			}
 			return nil
 		}
 	}

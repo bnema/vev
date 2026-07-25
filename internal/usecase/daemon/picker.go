@@ -358,6 +358,13 @@ func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker
 // switchToTargetGuarded is the navigation-only variant whose guard is checked
 // as part of the source ownership transfer.
 func (d *Daemon) switchToTargetGuarded(from *session, ac *attachedClient, target picker.Target, guard sessionHandoffGuard) error {
+	if target.Name != "" {
+		if err := d.waitForTargetRestore(target.Name); err != nil {
+			d.invalidateRender(from, ac, true, "picker.go")
+			return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", err)
+		}
+	}
+
 	d.mu.Lock()
 	var (
 		targetSess *session
@@ -508,6 +515,10 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 // the handoff while d.mu is held. Creation failure leaves the source client
 // and stopped record untouched.
 func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient, target picker.Target, stopped stoppedSession) (*session, []renderLifecycleCleanup, bool, error) {
+	if stopped.record.Name != "" && (stopped.state != runtimeFresh || stopped.record.RecoveryState != domain.RecoveryFresh) {
+		return nil, nil, false, &protoErr{ports.ErrSessionDegraded, "session durable state is degraded: " + target.Name}
+	}
+
 	// The caller already holds d.mu. Keep handoff ownership atomic with global
 	// routing so it cannot select an attachment midway between sessions.
 	d.notices.routingMu.Lock()
