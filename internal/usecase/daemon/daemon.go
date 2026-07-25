@@ -743,6 +743,7 @@ func (d *Daemon) handleList(tr ports.Transport) {
 		info := ports.SessionInfo{
 			SessionID: string(s.id),
 			Name:      s.name,
+			State:     ports.SessionRunning,
 			Ephemeral: s.ephemeral,
 			Tabs:      uint16(len(s.tabs)),
 			Attached:  s.client != nil,
@@ -752,13 +753,20 @@ func (d *Daemon) handleList(tr ports.Transport) {
 		infos = append(infos, info)
 	}
 	for name, stopped := range d.stopped {
-		if stopped.purging {
-			continue
-		}
 		if _, live := liveNames[name]; live {
 			continue
 		}
-		infos = append(infos, ports.SessionInfo{Name: name, Stopped: true})
+		state := ports.SessionStopped
+		if stopped.purging {
+			state = ports.SessionDegraded
+		}
+		switch stopped.state {
+		case runtimeRestoring:
+			state = ports.SessionRestoring
+		case runtimeDegraded, runtimeDeleting:
+			state = ports.SessionDegraded
+		}
+		infos = append(infos, ports.SessionInfo{Name: name, State: state})
 	}
 	d.mu.Unlock()
 
@@ -895,6 +903,42 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 	return ac
 }
 
+func (d *Daemon) waitForTargetRestore(name string) error {
+	for {
+		d.mu.Lock()
+		if d.findByNameLocked(name) != nil {
+			d.mu.Unlock()
+			return nil
+		}
+		stopped, ok := d.stopped[name]
+		if !ok || stopped.purging {
+			d.mu.Unlock()
+			return nil
+		}
+		switch stopped.state {
+		case runtimeRestoring:
+			done := stopped.restoreDone
+			var shutdown <-chan struct{}
+			if d.serveCtx != nil {
+				shutdown = d.serveCtx.Done()
+			}
+			d.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-shutdown:
+				return &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
+			}
+		case runtimeDegraded, runtimeDeleting, runtimeHealthy:
+			d.mu.Unlock()
+			return &protoErr{ports.ErrSessionDegraded, "session durable state is degraded: " + name}
+		default:
+			d.mu.Unlock()
+			return nil
+		}
+	}
+}
+
 // route resolves a Hello to a session and a freshly attached client, creating
 // the session for ephemeral/new intents.
 func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedClient, error) {
@@ -902,18 +946,16 @@ func (d *Daemon) route(h ports.Hello, tr ports.Transport) (*session, *attachedCl
 	if !sz.Valid() {
 		sz = defaultSize
 	}
-	if d.snapsEnabled && (h.Intent == ports.IntentResume || h.Intent == ports.IntentAttach || h.Intent == ports.IntentNew) {
-		select {
-		case <-d.restoreDone:
-		case <-d.serveCtx.Done():
-			return nil, nil, &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
-		}
-	}
 	term := terminalEnv{TrueColor: h.TrueColor}
 
 	if h.Intent == ports.IntentResume {
 		if sess, ac, ok, err := d.resumeParked(h, tr, sz); ok || err != nil {
 			return sess, ac, err
+		}
+	}
+	if h.Intent == ports.IntentResume || h.Intent == ports.IntentAttach {
+		if err := d.waitForTargetRestore(h.Name); err != nil {
+			return nil, nil, err
 		}
 	}
 

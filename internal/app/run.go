@@ -1236,7 +1236,11 @@ func runList(ctx context.Context) error {
 		}
 		infos := make([]ports.SessionInfo, 0, len(records))
 		for _, r := range records {
-			infos = append(infos, ports.SessionInfo{Name: r.Name, Stopped: true})
+			state := ports.SessionStopped
+			if r.RecoveryState == domain.RecoveryDegraded || r.RecoveryState == domain.RecoveryDeleting {
+				state = ports.SessionDegraded
+			}
+			infos = append(infos, ports.SessionInfo{Name: r.Name, State: state})
 		}
 		printSessions(os.Stdout, infos)
 		return nil
@@ -1277,11 +1281,20 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 		state := "running"
 		tabs := fmt.Sprintf("%d", s.Tabs)
 		attached := "no"
-		if s.Stopped {
+		switch s.State {
+		case ports.SessionStopped:
 			state = "stopped"
 			tabs = "-"
-		} else if s.Ephemeral {
-			state = "temporary"
+		case ports.SessionRestoring:
+			state = "restoring"
+			tabs = "-"
+		case ports.SessionDegraded:
+			state = "degraded"
+			tabs = "-"
+		default:
+			if s.Ephemeral {
+				state = "temporary"
+			}
 		}
 		if s.Attached {
 			attached = "yes"

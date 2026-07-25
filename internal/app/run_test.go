@@ -426,11 +426,26 @@ func TestParseArgsNewRejectsUnsafeSessionName(t *testing.T) {
 	}
 }
 
+func TestListShowsDegraded(t *testing.T) {
+	var out bytes.Buffer
+	printSessions(&out, []ports.SessionInfo{
+		{Name: "fresh", State: ports.SessionStopped},
+		{Name: "loading", State: ports.SessionRestoring},
+		{Name: "broken", State: ports.SessionDegraded},
+	})
+	require.Contains(t, out.String(), "fresh")
+	require.Contains(t, out.String(), "stopped")
+	require.Contains(t, out.String(), "loading")
+	require.Contains(t, out.String(), "restoring")
+	require.Contains(t, out.String(), "broken")
+	require.Contains(t, out.String(), "degraded")
+}
+
 func TestPrintSessionsShowsStoppedState(t *testing.T) {
 	var out bytes.Buffer
 	printSessions(&out, []ports.SessionInfo{
-		{Name: "main", Tabs: 2, Attached: true},
-		{Name: "old", Stopped: true},
+		{Name: "main", State: ports.SessionRunning, Tabs: 2, Attached: true},
+		{Name: "old", State: ports.SessionStopped},
 	})
 	got := out.String()
 	for _, want := range []string{"NAME", "STATE", "main", "running", "2", "yes", "old", "stopped", "-"} {
@@ -443,9 +458,9 @@ func TestPrintSessionsShowsStoppedState(t *testing.T) {
 func TestPrintSessionsMarksEphemeral(t *testing.T) {
 	var buf bytes.Buffer
 	printSessions(&buf, []ports.SessionInfo{
-		{Name: "0", Ephemeral: true, Tabs: 1, Attached: false},
-		{Name: "work", Tabs: 2, Attached: true},
-		{Name: "old", Stopped: true},
+		{Name: "0", State: ports.SessionRunning, Ephemeral: true, Tabs: 1, Attached: false},
+		{Name: "work", State: ports.SessionRunning, Tabs: 2, Attached: true},
+		{Name: "old", State: ports.SessionStopped},
 	})
 	out := buf.String()
 	for _, want := range []string{"0", "temporary", "work", "running", "old", "stopped"} {

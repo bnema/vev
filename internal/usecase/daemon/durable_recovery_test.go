@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -277,6 +278,77 @@ func TestCatalogueRestoreIncarnationMismatch(t *testing.T) {
 	require.Equal(t, runtimeDegraded, d.stopped[record.Name].state)
 	got, _ := catalogue.Record(record.Name)
 	require.Equal(t, domain.RecoveryDegraded, got.RecoveryState)
+}
+
+type recoveryCountingPTYFactory struct {
+	calls atomic.Int32
+}
+
+func (f *recoveryCountingPTYFactory) Open(context.Context, string, []string, []string, string, domain.Size) (ports.PTY, error) {
+	f.calls.Add(1)
+	return nil, errors.New("unexpected PTY open")
+}
+
+func TestListShowsDegraded(t *testing.T) {
+	fresh := durableRecoveryRecord(0)
+	fresh.RecoveryState = domain.RecoveryFresh
+	fresh.Committed = nil
+	restoring := durableRecoveryRecord(1)
+	degraded := durableRecoveryRecord(2)
+	degraded.RecoveryState = domain.RecoveryDegraded
+	degraded.DegradedReason = "checkpoint validation failed"
+	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{fresh, restoring, degraded}, &durableRecoveryRepository{})
+
+	listed := listSessions(t, d)
+	require.Equal(t, []ports.SessionInfo{
+		{Name: fresh.Name, State: ports.SessionStopped},
+		{Name: restoring.Name, State: ports.SessionRestoring},
+		{Name: degraded.Name, State: ports.SessionDegraded},
+	}, listed.Sessions)
+}
+
+func TestAttachWaitsForRestore(t *testing.T) {
+	record := durableRecoveryRecord(0)
+	factory := &recoveryCountingPTYFactory{}
+	d := New(factory, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(newDurableRecoveryCatalogue([]domain.CatalogueRecord{record}), []domain.CatalogueRecord{record}))
+	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
+	defer d.serveCancel()
+
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: record.Name}, nil)
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		t.Fatalf("attach returned before target restoration completed: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	require.Zero(t, factory.calls.Load())
+
+	d.setStoppedRecovery(record, runtimeDegraded)
+	closeRuntimeRestoreDone(d.recordRestoreDone(record.Name))
+	var protocolError *protoErr
+	require.ErrorAs(t, <-result, &protocolError)
+	require.Equal(t, ports.ErrSessionDegraded, protocolError.code)
+	require.Zero(t, factory.calls.Load())
+}
+
+func TestAttachRejectsDegraded(t *testing.T) {
+	record := durableRecoveryRecord(0)
+	record.RecoveryState = domain.RecoveryDegraded
+	record.DegradedReason = "checkpoint validation failed"
+	factory := &recoveryCountingPTYFactory{}
+	d := New(factory, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(newDurableRecoveryCatalogue([]domain.CatalogueRecord{record}), []domain.CatalogueRecord{record}))
+	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
+	defer d.serveCancel()
+
+	_, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: record.Name}, nil)
+	var protocolError *protoErr
+	require.ErrorAs(t, err, &protocolError)
+	require.Equal(t, ports.ErrSessionDegraded, protocolError.code)
+	require.Zero(t, factory.calls.Load())
 }
 
 func TestCatalogueRestoreDegradedVisible(t *testing.T) {

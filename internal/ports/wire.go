@@ -49,7 +49,9 @@ const (
 	ErrNotScriptable      uint16 = 7
 	ErrInvalidCommandArgs uint16 = 8
 	ErrNoSuchTarget       uint16 = 9
-	ErrAmbiguousTarget    uint16 = 10
+	ErrSessionRestoring   uint16 = 10
+	ErrSessionDegraded    uint16 = 11
+	ErrAmbiguousTarget    uint16 = 12
 	ErrInternal           uint16 = 255
 )
 
@@ -190,14 +192,24 @@ type Kill struct {
 	All  bool
 }
 
+// SessionState is the client-visible lifecycle state of a session.
+type SessionState uint8
+
+const (
+	SessionRunning SessionState = iota + 1
+	SessionStopped
+	SessionRestoring
+	SessionDegraded
+)
+
 // SessionInfo describes one session in a Sessions listing.
 type SessionInfo struct {
 	SessionID string
 	Name      string
+	State     SessionState
 	Ephemeral bool
 	Tabs      uint16
 	Attached  bool
-	Stopped   bool
 }
 
 // Sessions is the daemon's reply to a List, enumerating live sessions.
@@ -875,11 +887,7 @@ func MarshalSessions(m Sessions) []byte {
 		} else {
 			w.putUint8(0)
 		}
-		if s.Stopped {
-			w.putUint8(1)
-		} else {
-			w.putUint8(0)
-		}
+		w.putUint8(uint8(s.State))
 	}
 	return w.b
 }
@@ -913,11 +921,14 @@ func UnmarshalSessions(b []byte) (Sessions, error) {
 			return Sessions{}, err
 		}
 		s.Attached = att != 0
-		stopped, err := r.getUint8()
+		state, err := r.getUint8()
 		if err != nil {
 			return Sessions{}, err
 		}
-		s.Stopped = stopped != 0
+		s.State = SessionState(state)
+		if s.State < SessionRunning || s.State > SessionDegraded {
+			return Sessions{}, errors.New("ports: invalid session state")
+		}
 		sessions = append(sessions, s)
 	}
 	if err := r.done(); err != nil {
