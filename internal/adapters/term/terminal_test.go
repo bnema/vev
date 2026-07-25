@@ -145,12 +145,28 @@ func TestTerminal_EnterRaw_DisablesAutowrapInsideAltScreen(t *testing.T) {
 	}
 }
 
-// failingWriter fails every write, standing in for a tty that stops
-// accepting output midway through a mode change.
-type failingWriter struct{}
+// prefixThenFailWriter forwards at most prefix bytes to sink and then reports
+// a failure, standing in for a tty that accepts part of a mode sequence and
+// then stops. A prefix of 0 fails without emitting anything.
+type prefixThenFailWriter struct {
+	sink   io.Writer
+	prefix int
+}
 
-func (failingWriter) Write(p []byte) (int, error) {
-	return 0, errors.New("sink failed")
+func (w *prefixThenFailWriter) Write(p []byte) (int, error) {
+	if len(p) > w.prefix {
+		p = p[:w.prefix]
+	}
+	n := 0
+	if len(p) > 0 {
+		var err error
+		n, err = w.sink.Write(p)
+		if err != nil {
+			return n, err
+		}
+	}
+	w.prefix -= n
+	return n, errors.New("sink failed after prefix")
 }
 
 // When the batched writer fails, part of the mode sequence may already have
@@ -159,20 +175,33 @@ func (failingWriter) Write(p []byte) (int, error) {
 // leaving tm.out intact isolates that fallback: the buffered path fails, the
 // real descriptor still records what the fallback attempted.
 func TestTerminal_WriteFailure_AttemptsVisualResetOnFd(t *testing.T) {
+	// Every mode EnterRaw can turn on has to be turned back off, not just the
+	// alt screen: a partial emission that got as far as cursorHide/mouseEnable
+	// would otherwise leave the cursor hidden and mouse reporting on.
+	const wantCleanup = cursorShow + cursorStyleDefault + mouseDisable +
+		bracketedPasteDisable + colorSchemeDisable + autowrapEnable + altScreenExit
+	const enterSequence = altScreenEnter + autowrapDisable + cursorHide +
+		mouseEnable + bracketedPasteEnable + colorSchemeEnable
+
 	for _, tc := range []struct {
 		name        string
+		prefix      int  // bytes the sink accepts before failing
 		poisonAfter bool // poison the writer after EnterRaw, i.e. fail during restore
 		want        string
 	}{
 		{
-			name: "enter fails before the session starts",
-			want: autowrapEnable + altScreenExit,
+			name: "enter fails before emitting anything",
+			want: wantCleanup,
+		},
+		{
+			name:   "enter fails after emitting part of the sequence",
+			prefix: len(altScreenEnter + autowrapDisable + cursorHide),
+			want:   altScreenEnter + autowrapDisable + cursorHide + wantCleanup,
 		},
 		{
 			name:        "restore fails after a successful enter",
 			poisonAfter: true,
-			want: altScreenEnter + autowrapDisable + cursorHide + mouseEnable +
-				bracketedPasteEnable + colorSchemeEnable + autowrapEnable + altScreenExit,
+			want:        enterSequence + wantCleanup,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -187,9 +216,12 @@ func TestTerminal_WriteFailure_AttemptsVisualResetOnFd(t *testing.T) {
 			defer func() { _ = outR.Close() }()
 
 			tm := NewWithFiles(inR, outW)
+			poison := func() {
+				tm.bw = newBatchWriter(&prefixThenFailWriter{sink: outW, prefix: tc.prefix}, bufSize)
+			}
 
 			if !tc.poisonAfter {
-				tm.bw = newBatchWriter(failingWriter{}, bufSize)
+				poison()
 				if _, err := tm.EnterRaw(); err == nil {
 					t.Fatalf("EnterRaw returned nil error on a failing sink")
 				}
@@ -198,7 +230,7 @@ func TestTerminal_WriteFailure_AttemptsVisualResetOnFd(t *testing.T) {
 				if err != nil {
 					t.Fatalf("EnterRaw: %v", err)
 				}
-				tm.bw = newBatchWriter(failingWriter{}, bufSize)
+				poison()
 				if err := restore(); err == nil {
 					t.Fatalf("restore returned nil error on a failing sink")
 				}

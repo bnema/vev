@@ -41,6 +41,14 @@ const (
 	autowrapEnable  = "\x1b[?7h"
 )
 
+// visualRestore turns off every mode EnterRaw turns on, in reverse order, and
+// hands the normal screen back. Shared by the ordinary restore and the direct
+// fallback so the two can never drift: a partial emission may have left any
+// prefix of the enter sequence in effect, so the reset has to cover all of it.
+// Every mode reset here is idempotent.
+const visualRestore = cursorShow + cursorStyleDefault + mouseDisable +
+	bracketedPasteDisable + colorSchemeDisable + autowrapEnable + altScreenExit
+
 // bufSize is the batched writer's buffer capacity.
 const bufSize = 64 * 1024
 
@@ -131,16 +139,15 @@ func (t *Terminal) EnterRaw() (func() error, error) {
 	return t.restoreFn, nil
 }
 
-// resetVisualModesDirect returns the terminal to the normal screen with
-// autowrap on, writing straight to the descriptor instead of through the
-// batched writer. It is the fallback for a writer that has already failed:
-// part of a mode sequence may have reached the terminal, and leaving it on
-// the alt screen or with autowrap off would outlive the process. Both modes
-// are idempotent, so replaying them when nothing was emitted is harmless.
-// Best effort by construction — the descriptor is usually broken too.
-// Must be called with t.mu held.
+// resetVisualModesDirect writes visualRestore straight to the descriptor
+// instead of through the batched writer. It is the fallback for a writer that
+// has already failed: any prefix of the enter sequence may have reached the
+// terminal, and a hidden cursor, live mouse reporting or the alt screen would
+// outlive the process. Replaying the resets when nothing was emitted is
+// harmless. Best effort by construction — the descriptor is usually broken
+// too. Must be called with t.mu held.
 func (t *Terminal) resetVisualModesDirect() {
-	_, _ = t.out.WriteString(autowrapEnable + altScreenExit)
+	_, _ = t.out.WriteString(visualRestore)
 }
 
 // makeRestoreLocked returns an idempotent restore closure for the
@@ -163,7 +170,7 @@ func (t *Terminal) restore() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	_, werr := t.bw.WriteString(cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + autowrapEnable + altScreenExit)
+	_, werr := t.bw.WriteString(visualRestore)
 	ferr := t.bw.Flush()
 	if werr != nil || ferr != nil {
 		t.resetVisualModesDirect()
