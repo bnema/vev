@@ -69,6 +69,12 @@ type FloatingConfig struct {
 	Height  int
 }
 
+// NavConfig contains directional navigation overflow settings.
+type NavConfig struct {
+	OverflowTabs     bool
+	OverflowSessions bool
+}
+
 // TabsConfig contains tab label display settings.
 type TabsConfig struct {
 	// TerminalTitle includes the focused pane's OSC terminal title in tab
@@ -90,6 +96,7 @@ type Config struct {
 	Copy           CopyConfig
 	Palette        PaletteConfig
 	Floating       FloatingConfig
+	Nav            NavConfig
 	Tabs           TabsConfig
 }
 

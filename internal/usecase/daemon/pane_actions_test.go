@@ -152,6 +152,36 @@ func TestResizeReflowsAllPanes(t *testing.T) {
 	require.Equal(t, 29, tb.panes["pane-2"].screen.Frame.Width)
 }
 
+func TestFocusDirAtReturnsDepartingSpanAndMapsNoNeighbor(t *testing.T) {
+	tests := []struct {
+		name      string
+		direction layout.Direction
+		wantErr   error
+		wantFocus layout.PaneID
+	}{
+		{name: "moves right", direction: layout.Right, wantFocus: "pane-2"},
+		{name: "maps missing left neighbor", direction: layout.Left, wantErr: errNoNeighbor, wantFocus: "pane-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, sess, _, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
+			tb := sess.activeTab()
+			target := tb.panes["pane-1"]
+			tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-1"}
+			tb.panes["pane-1"].rect = domain.Rect{Width: 20, Height: 10}
+			tb.panes["pane-2"] = newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
+			tb.panes["pane-2"].rect = domain.Rect{X: 21, Width: 20, Height: 10}
+
+			span, err := d.focusDirAt(sess, tb, target, tt.direction)
+
+			require.ErrorIs(t, err, tt.wantErr)
+			require.Equal(t, domain.Rect{Width: 20, Height: 10}, span)
+			require.Equal(t, tt.wantFocus, tb.tree.Focus)
+		})
+	}
+}
+
 func TestFocusDirMovesFocusAndExitsCopyMode(t *testing.T) {
 	d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
 	tb := sess.activeTab()

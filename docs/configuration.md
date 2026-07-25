@@ -19,6 +19,10 @@ floating.command =
 floating.width = 80%
 floating.height = 80%
 
+# Let directional keyboard focus continue past a pane edge. Both default off.
+nav.overflow-tabs = off
+nav.overflow-sessions = off
+
 # Show the focused pane's terminal title in tab labels; off keeps the process name only.
 tabs.terminal-title = on
 
@@ -83,6 +87,12 @@ Slots `0`, `7`, `8`, and `15` are valid explicit selections, but log a warning b
 ## Bindings
 
 Key specs: `alt+<char>`, `alt+space`, `alt+left/right/up/down`, `alt+1` through `alt+9`. Configuring an action replaces all of its built-in aliases (set `focus-pane-left` and the Alt+Arrow alias is gone). Tab switching also accepts the top-row symbols of non-QWERTY layouts, so AZERTY works without extra config.
+
+## Navigation overflow
+
+Both settings are independent and default to `off`. With `nav.overflow-tabs = on`, left/right keyboard focus (`Alt+H`/`Alt+L` by default) continues from a pane edge to the adjacent tab. With `nav.overflow-sessions = on`, up/down keyboard focus (`Alt+K`/`Alt+J` by default) continues to the adjacent live session in alphabetical order. Neither setting wraps at the first or last destination.
+
+Overflow applies only to keyboard focus actions; mouse navigation does not overflow, and floating panes never overflow. Hot reload applies either setting to subsequent navigation without restarting the daemon.
 
 ## Copy mode
 

@@ -341,10 +341,23 @@ func (d *Daemon) sessionByID(id domain.SessionID) *session {
 	return d.sessions[id]
 }
 
+// sessionHandoffGuard optionally constrains an active-session handoff to the
+// tab that initiated navigation. Its zero value preserves ordinary picker and
+// command switching behavior.
+type sessionHandoffGuard struct {
+	expectedSource *tab
+}
+
 // switchToTarget resolves named lifecycle targets and commits their transition
 // while d.mu is held. A named palette result is allowed to cross an
 // active/stopped transition, but it never follows a same-name replacement.
 func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker.Target) error {
+	return d.switchToTargetGuarded(from, ac, target, sessionHandoffGuard{})
+}
+
+// switchToTargetGuarded is the navigation-only variant whose guard is checked
+// as part of the source ownership transfer.
+func (d *Daemon) switchToTargetGuarded(from *session, ac *attachedClient, target picker.Target, guard sessionHandoffGuard) error {
 	d.mu.Lock()
 	var (
 		targetSess *session
@@ -363,15 +376,18 @@ func (d *Daemon) switchToTarget(from *session, ac *attachedClient, target picker
 				// locked name/lifecycle resolver chose this active incarnation.
 				resolvedTarget := target
 				resolvedTarget.Session = active.id
-				targetSess, old, cleanups, switched = d.switchToActiveTargetLocked(from, ac, active, resolvedTarget)
+				targetSess, old, cleanups, switched = d.switchToActiveTargetLocked(from, ac, active, resolvedTarget, guard)
 			}
 		}
 	} else if active := d.sessions[target.Session]; active != nil {
-		targetSess, old, cleanups, switched = d.switchToActiveTargetLocked(from, ac, active, target)
+		targetSess, old, cleanups, switched = d.switchToActiveTargetLocked(from, ac, active, target, guard)
 	}
 	d.mu.Unlock()
 
 	if !switched {
+		if guard.expectedSource != nil {
+			return errNoNeighbor
+		}
 		d.invalidateRender(from, ac, true, "picker.go")
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", cause)
 	}
@@ -413,7 +429,7 @@ func (d *Daemon) resolveNamedLifecycleTargetLocked(target picker.Target) (*sessi
 
 // switchToActiveTargetLocked commits an active target handoff. Caller holds
 // d.mu and releases it before completing render cleanup or first paint.
-func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, targetSess *session, target picker.Target) (*session, *attachedClient, []renderLifecycleCleanup, bool) {
+func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, targetSess *session, target picker.Target, guard sessionHandoffGuard) (*session, *attachedClient, []renderLifecycleCleanup, bool) {
 	// The caller already holds d.mu. Keep handoff ownership atomic with global
 	// routing so it cannot select an attachment midway between sessions.
 	d.notices.routingMu.Lock()
@@ -443,10 +459,29 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 		targetSess.mu.Unlock()
 		return nil, nil, nil, false
 	}
+	var guardedSource *tab
+	if guard.expectedSource != nil {
+		if from.active < 0 || from.active >= len(from.tabs) || from.tabs[from.active] != guard.expectedSource {
+			from.mu.Unlock()
+			targetSess.mu.Unlock()
+			return nil, nil, nil, false
+		}
+		guardedSource = guard.expectedSource
+		guardedSource.mu.Lock()
+		if guardedSource.floating.state == floatingVisible {
+			guardedSource.mu.Unlock()
+			from.mu.Unlock()
+			targetSess.mu.Unlock()
+			return nil, nil, nil, false
+		}
+	}
 	term := from.terminal
 	env := copyEnvironment(from.env)
 	from.client = nil
 	ac.setSession(nil)
+	if guardedSource != nil {
+		guardedSource.mu.Unlock()
+	}
 	from.mu.Unlock()
 
 	old := targetSess.client
@@ -513,7 +548,7 @@ func targetMatchesLifecycle(target picker.Target, name string, createdAt int64) 
 // targets must use switchToTarget so resolution and commit share d.mu.
 func (d *Daemon) stealClientForTarget(from *session, ac *attachedClient, targetSess *session, target picker.Target) *attachedClient {
 	d.mu.Lock()
-	_, old, cleanups, switched := d.switchToActiveTargetLocked(from, ac, targetSess, target)
+	_, old, cleanups, switched := d.switchToActiveTargetLocked(from, ac, targetSess, target, sessionHandoffGuard{})
 	d.mu.Unlock()
 	if !switched {
 		return nil
