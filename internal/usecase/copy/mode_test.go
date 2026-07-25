@@ -319,3 +319,101 @@ func TestCopyModeRenderStylesStatusFiller(t *testing.T) {
 
 	require.True(t, frame.At(4, frame.Height-1).Style.Equal(status), "status filler keeps cached status surface")
 }
+
+func TestSelectedTextJoinsAcrossTheHistoryScreenBoundary(t *testing.T) {
+	row := func(s string, w int) []renderer.Cell {
+		cells := make([]renderer.Cell, w)
+		for i := range cells {
+			cells[i] = renderer.BlankCell()
+		}
+		for i, r := range []rune(s) {
+			if i >= w {
+				break
+			}
+			cells[i] = renderer.Cell{Rune: r}
+		}
+		return cells
+	}
+
+	const width = 4
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 8, MaxCells: 1024})
+	// The last history row wrapped into what is now the first live screen row.
+	if err := history.Append(row("abcd", width), vt.LineBound{End: width, Soft: true}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	screen := renderer.NewFrame(width, 2)
+	copy(screen.Row(0), row("ef", width))
+	copy(screen.Row(1), row("gh", width))
+
+	snapshot := NewSnapshot(history, screen, []vt.LineBound{{End: 2}, {End: 2}})
+	doc := NewDocument(snapshot, "")
+
+	ranges := []CellRange{
+		{Row: 0, Start: 0, End: width - 1},
+		{Row: 1, Start: 0, End: width - 1},
+		{Row: 2, Start: 0, End: width - 1},
+	}
+	const want = "abcdef\ngh"
+	if got := doc.Extract(ranges); got != want {
+		t.Errorf("Extract() = %q, want %q", got, want)
+	}
+}
+
+// TestSelectedTextJoinsRowsWrappedByTheVT drives the whole chain with no
+// hand-written bounds: a real vt.Screen wraps one logical line itself, its
+// LineBound travels through eviction into history or stays on the live grid,
+// and Extract must give the line back exactly as the application printed it.
+func TestSelectedTextJoinsRowsWrappedByTheVT(t *testing.T) {
+	const (
+		width  = 8
+		height = 4
+		line   = "abcdefghij"
+	)
+	cases := []struct {
+		name string
+		// input is written verbatim to the VT; the wrap and every scroll it
+		// implies are the emulator's own decisions.
+		input string
+		// wantHistoryLen pins where the history/screen seam falls, so a change
+		// in scroll behavior fails loudly instead of silently retargeting the
+		// case onto rows the seam no longer separates.
+		wantHistoryLen int
+		// wrapRow is the first snapshot row of the wrapped logical line.
+		wrapRow int
+	}{
+		{
+			name:           "wrapped line straddles the history and screen seam",
+			input:          line + "\r\nx\r\ny\r\n",
+			wantHistoryLen: 1,
+			wrapRow:        0,
+		},
+		{
+			name:           "wrapped line sits entirely in sealed history",
+			input:          line + "\r\nx\r\ny\r\nz\r\n",
+			wantHistoryLen: 2,
+			wrapRow:        0,
+		},
+		{
+			name:           "wrapped line sits entirely on the live screen",
+			input:          "1\r\n2\r\n3\r\n4\r\n5\r\n\x1b[2;1H" + line,
+			wantHistoryLen: 2,
+			wrapRow:        3,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			screen := vt.NewScreenWithHistory(width, height, vt.HistoryConfig{MaxRows: 64, MaxCells: 4096})
+			screen.Write([]byte(tc.input))
+
+			snapshot := NewSnapshot(screen.History(), screen.Frame, screen.LineBounds())
+			require.Equal(t, tc.wantHistoryLen, snapshot.history.Len(), "history/screen seam moved")
+			doc := NewDocument(snapshot, domain.DefaultWordSeparators)
+
+			got := doc.Extract([]CellRange{
+				{Row: tc.wrapRow, Start: 0, End: width - 1},
+				{Row: tc.wrapRow + 1, Start: 0, End: width - 1},
+			})
+			require.Equal(t, line, got, "the two physical rows must rejoin without a newline or grid padding")
+		})
+	}
+}
