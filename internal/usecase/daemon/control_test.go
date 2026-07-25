@@ -271,6 +271,102 @@ func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
 	invoking.mu.Unlock()
 }
 
+func TestResizeControlOneShotsTargetDetachedSessions(t *testing.T) {
+	targets := []struct {
+		name    string
+		request func() ports.CommandRequest
+	}{
+		{"named", func() ports.CommandRequest { return ports.CommandRequest{TargetSession: "work"} }},
+		{"unique", func() ports.CommandRequest { return ports.CommandRequest{} }},
+	}
+	for _, target := range targets {
+		t.Run(target.name, func(t *testing.T) {
+			for _, slug := range []string{"grow-pane-width", "shrink-pane-width", "grow-pane-height", "shrink-pane-height", "equalize-panes"} {
+				t.Run(slug, func(t *testing.T) {
+					factory := &controlPTYFactory{}
+					d := newTestDaemon(t, factory, stubClock{})
+					t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+					sess := addControlSession(d, "work", "t_work", "p_work")
+					require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
+					require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-down", TargetSession: "work"}).OK)
+					tb := sess.activeTab()
+					tb.mu.Lock()
+					generation := tb.layoutGeneration
+					tb.mu.Unlock()
+					sess.snapEligible.Store(true)
+					sess.snapshotMu.Lock()
+					snapshotGeneration := sess.snapshotGeneration
+					sess.snapshotMu.Unlock()
+					request := target.request()
+					request.Slug = slug
+					result := sendCommand(t, d, request)
+					require.True(t, result.OK, result.Text)
+					require.Empty(t, result.Output)
+					tb.mu.Lock()
+					require.Equal(t, generation+1, tb.layoutGeneration, "one accepted action has one layout generation boundary")
+					tb.mu.Unlock()
+					sess.snapshotMu.Lock()
+					require.Equal(t, snapshotGeneration+1, sess.snapshotGeneration, "one accepted action has one snapshot dirty boundary")
+					sess.snapshotMu.Unlock()
+					sess.mu.Lock()
+					require.Nil(t, sess.client, "one-shots must work headless")
+					sess.mu.Unlock()
+				})
+			}
+		})
+	}
+}
+
+func TestResizeControlNonSelfVEVLocatorUsesActiveTarget(t *testing.T) {
+	factory := &controlPTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+	sess := addControlSession(d, "work", "t_active", "p_active")
+	require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
+	active := sess.tabs[0]
+	locator := newTabWithStableID("t_locator", "p_locator", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+	locator.ctx, locator.cancel = context.WithCancel(d.serveCtx)
+	sess.mu.Lock()
+	sess.tabs = append(sess.tabs, locator)
+	sess.active = 0
+	sess.mu.Unlock()
+	active.mu.Lock()
+	before := active.layoutGeneration
+	active.mu.Unlock()
+
+	result := sendCommand(t, d, ports.CommandRequest{
+		Slug: "grow-pane-width", TargetSession: "work", TargetTab: "t_locator", TargetPane: "p_locator",
+	})
+	require.True(t, result.OK, result.Text)
+	active.mu.Lock()
+	require.Equal(t, before+1, active.layoutGeneration, "stable IDs locate the session but must not redirect a non-self action")
+	active.mu.Unlock()
+	locator.mu.Lock()
+	require.Zero(t, locator.layoutGeneration)
+	locator.mu.Unlock()
+	sess.mu.Lock()
+	require.Zero(t, sess.active)
+	sess.mu.Unlock()
+}
+
+func TestResizeControlTooSmallUsesStableFailure(t *testing.T) {
+	factory := &controlPTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+	sess := addControlSession(d, "work", "t_work", "p_work")
+	require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
+	tb := sess.activeTab()
+	tb.mu.Lock()
+	tb.size.Cols = 41
+	tb.bumpLayoutGenerationLocked()
+	tb.mu.Unlock()
+
+	result := sendCommand(t, d, ports.CommandRequest{Slug: "grow-pane-width", TargetSession: "work"})
+	require.False(t, result.OK)
+	require.Equal(t, ports.ErrNoSuchTarget, result.Code)
+	require.Equal(t, "pane cannot be resized further", result.Text)
+}
+
 func TestHandleCommandSelfListPanesUsesInvokingTab(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "t_active", "p_active")

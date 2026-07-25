@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseCmdArgs(t *testing.T) {
@@ -101,6 +102,29 @@ func TestCmdHelpUsesRegistryWithoutDialing(t *testing.T) {
 		if strings.Contains(out.String(), hidden) {
 			t.Fatalf("help leaked non-scriptable command %q: %q", hidden, out.String())
 		}
+	}
+}
+
+func TestResizeOneShotCmdsParseAndUseSelfTarget(t *testing.T) {
+	for _, slug := range []string{"grow-pane-width", "shrink-pane-width", "grow-pane-height", "shrink-pane-height", "equalize-panes"} {
+		t.Run(slug, func(t *testing.T) {
+			invocation, err := parseArgs([]string{"cmd", "--self", slug})
+			require.NoError(t, err)
+			transport := &cmdTestTransport{recv: ports.Frame{Type: ports.MsgCommandResult, Payload: ports.MarshalCommandResult(ports.CommandResult{OK: true})}}
+			require.NoError(t, runCmdWithDeps(context.Background(), invocation.cmd, cmdDeps{
+				stdout: io.Discard,
+				getenv: func(string) string { return "session=work,tab=t_abc,pane=p_def" },
+				dial:   func(context.Context, string) (ports.Transport, error) { return transport, nil },
+			}))
+			require.Len(t, transport.sent, 1)
+			request, err := ports.UnmarshalCommandRequest(transport.sent[0].Payload)
+			require.NoError(t, err)
+			require.Equal(t, slug, request.Slug)
+			require.True(t, request.Self)
+			require.Equal(t, "work", request.TargetSession)
+			require.Equal(t, "t_abc", request.TargetTab)
+			require.Equal(t, "p_def", request.TargetPane)
+		})
 	}
 }
 
@@ -223,6 +247,16 @@ func TestRunCmdClassifiesDaemonCommandErrors(t *testing.T) {
 		{
 			name:     "missing runtime target is a command failure",
 			result:   ports.CommandResult{Code: ports.ErrNoSuchTarget, Text: "no live sessions"},
+			wantCode: 1,
+		},
+		{
+			name:     "resize not in split remains an exit one failure",
+			result:   ports.CommandResult{Code: ports.ErrNoSuchTarget, Text: "pane is not in a split"},
+			wantCode: 1,
+		},
+		{
+			name:     "resize minimum remains an exit one failure",
+			result:   ports.CommandResult{Code: ports.ErrNoSuchTarget, Text: "pane cannot be resized further"},
 			wantCode: 1,
 		},
 	}

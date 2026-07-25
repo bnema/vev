@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -154,4 +155,242 @@ func TestRouteOverlayDecodesHorizontalArrows(t *testing.T) {
 	require.Equal(t, 1, left)
 	require.Equal(t, 1, right)
 	require.Empty(t, pending)
+}
+
+// TestResizeModeKeysAndEscapes exercises the modal parser through the real
+// action seam. Every directional spelling must commit exactly one mutation;
+// parser prefixes are deliberately split across reads.
+func TestResizeModeKeysAndEscapes(t *testing.T) {
+	tests := []struct {
+		name   string
+		chunks [][]byte
+		change bool
+		exit   bool
+	}{
+		{"h", [][]byte{[]byte("h")}, true, false},
+		{"j", [][]byte{[]byte("j")}, true, false},
+		{"k", [][]byte{[]byte("k")}, true, false},
+		{"l", [][]byte{[]byte("l")}, true, false},
+		{"CSI left split", [][]byte{[]byte("\x1b["), []byte("D")}, true, false},
+		{"CSI right", [][]byte{[]byte("\x1b[C")}, true, false},
+		{"CSI up", [][]byte{[]byte("\x1b[A")}, true, false},
+		{"CSI down", [][]byte{[]byte("\x1b[B")}, true, false},
+		{"SS3 left", [][]byte{[]byte("\x1bOD")}, true, false},
+		{"SS3 right split", [][]byte{[]byte("\x1bO"), []byte("C")}, true, false},
+		{"SS3 up", [][]byte{[]byte("\x1bOA")}, true, false},
+		{"SS3 down", [][]byte{[]byte("\x1bOB")}, true, false},
+		{"equalize", [][]byte{[]byte("=")}, true, false},
+		{"ignored", [][]byte{[]byte("z\x00")}, false, false},
+		{"q exits", [][]byte{[]byte("q")}, false, true},
+		{"enter exits", [][]byte{[]byte("\r")}, false, true},
+		{"escape exits", [][]byte{[]byte("\x1b"), []byte("x")}, false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, sess, ac := resizeModeFixture(t)
+			tb := sess.activeTab()
+			tb.mu.Lock()
+			before := tb.layoutGeneration
+			if tt.name == "equalize" {
+				tb.tree.Root.Children[0].Weight = 3
+			}
+			tb.mu.Unlock()
+			for _, chunk := range tt.chunks {
+				d.handleResizeInput(ac, chunk)
+			}
+			tb.mu.Lock()
+			after := tb.layoutGeneration
+			if tt.name == "equalize" {
+				for _, child := range tb.tree.Root.Children {
+					require.Zero(t, child.Weight)
+				}
+			}
+			tb.mu.Unlock()
+			if tt.change {
+				require.Equal(t, before+1, after)
+			} else {
+				require.Equal(t, before, after)
+			}
+			require.Equal(t, !tt.exit, ac.overlays.resizeModeActive())
+		})
+	}
+}
+
+func TestResizeModeRendersGuidanceWithoutHidingContentOrCursor(t *testing.T) {
+	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
+	tb := sess.activeTab()
+	second := newPane("pane-2", nil, domain.Size{Cols: 39, Rows: 23})
+	tb.mu.Lock()
+	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
+	tb.panes[second.id] = second
+	tb.mu.Unlock()
+	second.screen.Write([]byte("live resize content"))
+	require.NoError(t, d.enterResizeMode(sess, ac))
+	data := string(mustOutputData(t, sends))
+	require.Contains(t, data, "resize: h/j/k/l or arrows")
+	require.Contains(t, data, "live resize content")
+	require.Contains(t, data, "\x1b[?25h", "resize leaves the focused pane cursor visible")
+}
+
+func TestResizeModeOverlayPriority(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []byte
+		setup func(*Daemon, *session, *attachedClient)
+		check func(*testing.T, *attachedClient)
+	}{
+		{"prompt before palette picker notices resize and copy", []byte("q"), func(d *Daemon, sess *session, ac *attachedClient) {
+			d.enterCopyMode(sess, ac)
+			d.enterNotices(sess, ac)
+			d.enterPicker(sess, ac)
+			d.enterPalette(sess, ac)
+			d.enterPrompt(sess, ac, "prompt", "", func(string) error { return nil })
+		}, func(t *testing.T, ac *attachedClient) {
+			require.True(t, ac.overlays.promptActive())
+			require.True(t, ac.overlays.resizeModeActive())
+		}},
+		{"palette before picker notices resize and copy", []byte("q"), func(d *Daemon, sess *session, ac *attachedClient) {
+			d.enterCopyMode(sess, ac)
+			d.enterPicker(sess, ac)
+			d.enterPalette(sess, ac)
+		}, func(t *testing.T, ac *attachedClient) {
+			require.True(t, ac.overlays.paletteActive())
+			require.True(t, ac.overlays.resizeModeActive())
+		}},
+		{"picker before resize and copy", []byte("j"), func(d *Daemon, sess *session, ac *attachedClient) {
+			d.enterCopyMode(sess, ac)
+			d.enterPicker(sess, ac)
+		}, func(t *testing.T, ac *attachedClient) {
+			require.True(t, ac.overlays.pickerActive())
+			require.True(t, ac.overlays.resizeModeActive())
+		}},
+		{"notices before resize and copy", []byte("q"), func(d *Daemon, sess *session, ac *attachedClient) {
+			d.enterCopyMode(sess, ac)
+			d.enterNotices(sess, ac)
+		}, func(t *testing.T, ac *attachedClient) {
+			require.False(t, ac.overlays.noticesActive(), "q must be consumed by notices")
+			require.True(t, ac.overlays.resizeModeActive())
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, sess, ac := resizeModeFixture(t)
+			tt.setup(d, sess, ac)
+			require.True(t, ac.overlays.HandleInput(d, tt.input))
+			tt.check(t, ac)
+		})
+	}
+}
+
+func TestResizeModeWarningPersistsAndActionsShareTransaction(t *testing.T) {
+	t.Run("too small warning leaves mode active", func(t *testing.T) {
+		d, sess, ac := resizeModeFixture(t)
+		tb := sess.activeTab()
+		tb.mu.Lock()
+		tb.size.Cols = 41 // two minimum-width panes and their separator
+		tb.bumpLayoutGenerationLocked()
+		tb.mu.Unlock()
+		d.handleResizeInput(ac, []byte("l"))
+		require.True(t, ac.overlays.resizeModeActive())
+		history := d.notices.history()
+		require.NotEmpty(t, history)
+		require.Equal(t, "pane cannot be resized further", history[len(history)-1].Message)
+	})
+
+	t.Run("palette control and modal have the same committed weights", func(t *testing.T) {
+		type invoke func(*Daemon, *session, *attachedClient) error
+		invocations := []struct {
+			name string
+			run  invoke
+		}{
+			{"palette", func(d *Daemon, sess *session, ac *attachedClient) error {
+				return (paletteExec{d: d, sess: sess, ac: ac}).GrowPaneWidth()
+			}},
+			{"control", func(d *Daemon, sess *session, _ *attachedClient) error {
+				target := resolveDaemonActionTarget(sess)
+				return (controlExec{d: d, sess: sess, tab: target.tab, target: target}).GrowPaneWidth()
+			}},
+			{"modal", func(d *Daemon, _ *session, ac *attachedClient) error {
+				d.handleResizeInput(ac, []byte("l"))
+				return nil
+			}},
+		}
+		var want []float64
+		for _, tt := range invocations {
+			t.Run(tt.name, func(t *testing.T) {
+				d, sess, ac := resizeModeFixture(t)
+				require.NoError(t, tt.run(d, sess, ac))
+				tb := sess.activeTab()
+				tb.mu.Lock()
+				got := []float64{tb.tree.Root.Children[0].Weight, tb.tree.Root.Children[1].Weight}
+				tb.mu.Unlock()
+				if want == nil {
+					want = got
+				} else {
+					require.Equal(t, want, got)
+				}
+			})
+		}
+	})
+}
+
+type resizeLockProbePTY struct {
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+	check   func()
+}
+
+func (p *resizeLockProbePTY) Read([]byte) (int, error)   { return 0, nil }
+func (*resizeLockProbePTY) Write(b []byte) (int, error)  { return len(b), nil }
+func (*resizeLockProbePTY) Close() error                 { return nil }
+func (*resizeLockProbePTY) Pid() int                     { return 0 }
+func (*resizeLockProbePTY) ForegroundPgid() (int, error) { return 0, nil }
+func (p *resizeLockProbePTY) Resize(domain.Size) error {
+	p.once.Do(func() {
+		p.check()
+		close(p.entered)
+		<-p.release
+	})
+	return nil
+}
+
+func TestResizeModeReleasesTabAndOverlayLocksBeforePTY(t *testing.T) {
+	// Build a live tree directly so the probe is not concurrently owned by a
+	// pane reader; this isolates the lock boundary being asserted.
+	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+	tb := sess.activeTab()
+	probe := &resizeLockProbePTY{entered: make(chan struct{}), release: make(chan struct{})}
+	second := newPane("pane-2", probe, domain.Size{Cols: 39, Rows: 23})
+	tb.mu.Lock()
+	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
+	tb.panes[second.id] = second
+	tb.mu.Unlock()
+	probe.check = func() {
+		require.True(t, tb.mu.TryLock(), "PTY callback must not inherit tab.mu")
+		tb.mu.Unlock()
+		require.True(t, ac.overlays.resizeMu.TryLock(), "PTY callback must not inherit resize overlay mutex")
+		ac.overlays.resizeMu.Unlock()
+	}
+	require.NoError(t, d.enterResizeMode(sess, ac))
+	done := make(chan struct{})
+	go func() { d.handleResizeInput(ac, []byte("l")); close(done) }()
+	<-probe.entered
+	close(probe.release)
+	<-done
+}
+
+func resizeModeFixture(t *testing.T) (*Daemon, *session, *attachedClient) {
+	t.Helper()
+	factory := &controlPTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+	sess := addControlSession(d, "work", "t_work", "p_work")
+	require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
+	require.True(t, sendCommand(t, d, ports.CommandRequest{Slug: "split-down", TargetSession: "work"}).OK)
+	ac := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	ac.initOverlays()
+	ac.setSession(sess)
+	require.NoError(t, d.enterResizeMode(sess, ac))
+	return d, sess, ac
 }
