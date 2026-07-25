@@ -273,7 +273,8 @@ func (a daemonActions) Run(request daemonActionRequest) error {
 		}
 		return nil
 	case daemonActionFocusPane:
-		return a.d.focusDirAt(target.session, target.tab, target.pane, request.direction)
+		_, err := a.d.focusDirAt(target.session, target.tab, target.pane, request.direction)
+		return err
 	case daemonActionNextTab:
 		return a.switchRelative(target.session, 1)
 	case daemonActionPreviousTab:
@@ -361,17 +362,8 @@ func finishDaemonActionForClient(d *Daemon, request daemonActionRequest, ac *att
 		return
 	}
 	if request.kind == daemonActionFocusPane && request.target.tab != nil && request.target.pane != nil {
-		tb := request.target.tab
-		tb.mu.Lock()
-		newFocus := tb.tree.Focus
-		pl, hasPlacement := focusedPlacementLocked(tb)
-		tb.mu.Unlock()
-		if newFocus != request.target.pane.id {
-			d.exitCopyMode(ac)
-			if hasPlacement && pl.InStack {
-				d.refreshPaneTitleOnFocus(request.target.session, newFocus)
-			}
-		}
+		d.finishPaneFocusForClient(request.target.session, ac, request.target.tab, request.target.pane.id, producer)
+		return
 	}
 	d.invalidateRender(request.target.session, ac, true, producer)
 }

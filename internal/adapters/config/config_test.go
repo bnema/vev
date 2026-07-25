@@ -476,6 +476,83 @@ func TestParseTabsTerminalTitle(t *testing.T) {
 	}
 }
 
+func TestParseNavigationOverflow(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		input        string
+		want         domain.NavConfig
+		wantWarnings []domain.Warning
+	}{
+		{
+			name: "absent defaults both settings off",
+		},
+		{
+			name:  "tabs on enables only tab overflow",
+			input: "nav.overflow-tabs = on\n",
+			want:  domain.NavConfig{OverflowTabs: true},
+		},
+		{
+			name:  "sessions on enables only session overflow",
+			input: "nav.overflow-sessions = on\n",
+			want:  domain.NavConfig{OverflowSessions: true},
+		},
+		{
+			name:  "off disables both settings",
+			input: "nav.overflow-tabs = off\nnav.overflow-sessions = off\n",
+		},
+		{
+			name:  "settings are independent",
+			input: "nav.overflow-tabs = on\nnav.overflow-sessions = off\n",
+			want:  domain.NavConfig{OverflowTabs: true},
+		},
+		{
+			name:  "invalid values warn and preserve defaults",
+			input: "nav.overflow-tabs = maybe\nnav.overflow-sessions = always\n",
+			wantWarnings: []domain.Warning{
+				{Line: 1, Msg: `invalid nav.overflow-tabs "maybe"`},
+				{Line: 2, Msg: `invalid nav.overflow-sessions "always"`},
+			},
+		},
+		{
+			name:  "duplicate keys warn and last valid value wins",
+			input: "nav.overflow-tabs = off\nnav.overflow-tabs = on\nnav.overflow-sessions = on\nnav.overflow-sessions = off\n",
+			want:  domain.NavConfig{OverflowTabs: true},
+			wantWarnings: []domain.Warning{
+				{Line: 2, Msg: `duplicate key "nav.overflow-tabs"`},
+				{Line: 4, Msg: `duplicate key "nav.overflow-sessions"`},
+			},
+		},
+		{
+			name:  "invalid duplicate still warns and keeps previous value",
+			input: "nav.overflow-tabs = on\nnav.overflow-tabs = maybe\n",
+			want:  domain.NavConfig{OverflowTabs: true},
+			wantWarnings: []domain.Warning{
+				{Line: 2, Msg: `duplicate key "nav.overflow-tabs"`},
+				{Line: 2, Msg: `invalid nav.overflow-tabs "maybe"`},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg, warnings, err := Parse(strings.NewReader(tt.input))
+			require.NoError(t, err)
+			require.Equal(t, tt.want, cfg.Nav)
+			require.Equal(t, tt.wantWarnings, warnings)
+		})
+	}
+}
+
+func TestDefaultsDisableNavigationOverflow(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, domain.NavConfig{}, domain.Defaults().Nav)
+}
+
 func TestDefaultsCopiesSnapshotRestoreProcesses(t *testing.T) {
 	t.Parallel()
 

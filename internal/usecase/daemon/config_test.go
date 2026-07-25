@@ -365,6 +365,24 @@ func TestApplyConfigPublishesImmutableFloatingSnapshot(t *testing.T) {
 	require.Equal(t, domain.FloatingConfig{Command: "lazygit", Width: 90, Height: 85}, second)
 }
 
+func TestApplyConfigPublishesImmutableNavSnapshot(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	require.Equal(t, domain.NavConfig{}, d.currentNavConfig())
+
+	firstConfig := domain.Defaults()
+	firstConfig.Nav = domain.NavConfig{OverflowTabs: true}
+	d.ApplyConfig(firstConfig)
+	first := d.currentNavConfig()
+
+	secondConfig := domain.Defaults()
+	secondConfig.Nav = domain.NavConfig{OverflowSessions: true}
+	d.ApplyConfig(secondConfig)
+	second := d.currentNavConfig()
+
+	require.Equal(t, domain.NavConfig{OverflowTabs: true}, first)
+	require.Equal(t, domain.NavConfig{OverflowSessions: true}, second)
+}
+
 func TestApplyConfigPublishesImmutableTabsSnapshot(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	require.Equal(t, domain.Defaults().Tabs, d.currentTabsConfig())

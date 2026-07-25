@@ -166,6 +166,7 @@ type Daemon struct {
 	floatingConfig                 atomic.Pointer[domain.FloatingConfig]
 	copyConfig                     atomic.Pointer[domain.CopyConfig]
 	paletteConfig                  atomic.Pointer[domain.PaletteConfig]
+	navConfig                      atomic.Pointer[domain.NavConfig]
 	tabsConfig                     atomic.Pointer[domain.TabsConfig]
 	themeConfig                    atomic.Pointer[themeConfigSnapshot]
 	barScripts                     *barScriptState

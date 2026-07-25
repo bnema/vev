@@ -58,9 +58,11 @@ func TestResizeLoop_GetSizeErrorSkipsEmission(t *testing.T) {
 	quit := make(chan struct{})
 
 	var calls int
+	firstGetSize := make(chan struct{})
 	getSize := func() (domain.Size, error) {
 		calls++
 		if calls == 1 {
+			close(firstGetSize)
 			return domain.Size{}, errors.New("boom")
 		}
 		return domain.Size{Cols: 10, Rows: 5}, nil
@@ -69,6 +71,7 @@ func TestResizeLoop_GetSizeErrorSkipsEmission(t *testing.T) {
 	go resizeLoop(sig, out, quit, getSize)
 
 	sig <- syscall.SIGWINCH // errors; no emission
+	<-firstGetSize          // wait until the failed signal has been handled
 	sig <- syscall.SIGWINCH // succeeds
 
 	got := <-out

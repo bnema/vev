@@ -608,6 +608,63 @@ func leafIDs(n *Node) []PaneID {
 	return ids
 }
 
+// FocusSpan returns the solved focus rectangle of the focused pane.
+func (t *Tree) FocusSpan(area domain.Rect) (domain.Rect, error) {
+	if t == nil || t.Root == nil {
+		return domain.Rect{}, ErrNotFound
+	}
+	placements, ok := Solve(t.Root, area)
+	if !ok {
+		return domain.Rect{}, ErrTooSmall
+	}
+	for _, placement := range placements {
+		if placement.ID == t.Focus {
+			return focusRect(placement), nil
+		}
+	}
+	return domain.Rect{}, ErrNotFound
+}
+
+// EntryPane returns the pane on the facing edge that best preserves span on
+// the perpendicular axis. It does not mutate the tree.
+func (t *Tree) EntryPane(dir Direction, span, area domain.Rect) (PaneID, error) {
+	if t == nil || t.Root == nil {
+		return "", ErrNotFound
+	}
+	placements, ok := Solve(t.Root, area)
+	if !ok {
+		return "", ErrTooSmall
+	}
+
+	outside := span
+	switch dir {
+	case Left:
+		outside.X = area.X + area.Width
+	case Right:
+		outside.X = area.X - span.Width
+	case Up:
+		outside.Y = area.Y + area.Height
+	case Down:
+		outside.Y = area.Y - span.Height
+	default:
+		return "", ErrNoPane
+	}
+
+	return selectFacingCandidate(placements, outside, dir, facingGapFirst)
+}
+
+// FocusEnter focuses the best pane on the facing edge and expands it when it
+// is a collapsed stack member.
+func (t *Tree) FocusEnter(dir Direction, span, area domain.Rect) error {
+	id, err := t.EntryPane(dir, span, area)
+	if err != nil {
+		return err
+	}
+	t.Focus = id
+	setExpanded(t.Root, id)
+	return nil
+}
+
 // FocusDir moves focus in dir. Vertical movement within a stack walks stack
 // members before falling back to geometric focus.
 func (t *Tree) FocusDir(dir Direction, area domain.Rect) error {
@@ -632,36 +689,57 @@ func (t *Tree) FocusDir(dir Direction, area domain.Rect) error {
 		return ErrNotFound
 	}
 	current := focusRect(placements[currentIdx])
-	type candidate struct {
-		id      PaneID
-		overlap int
-		gap     int
+	candidate, err := selectFacingCandidate(placements, current, dir, facingOverlapFirst)
+	if err != nil {
+		return err
 	}
-	var candidates []candidate
-	for _, p := range placements {
-		if p.ID == t.Focus {
-			continue
-		}
-		r := focusRect(p)
-		if ok, gap, overlap := sideGapOverlap(current, r, dir); ok {
-			candidates = append(candidates, candidate{id: p.ID, gap: gap, overlap: overlap})
+	t.Focus = candidate
+	setExpanded(t.Root, t.Focus)
+	return nil
+}
+
+type facingMetricPriority uint8
+
+const (
+	facingGapFirst facingMetricPriority = iota
+	facingOverlapFirst
+)
+
+type facingCandidate struct {
+	id      PaneID
+	gap     int
+	overlap int
+}
+
+func selectFacingCandidate(placements []Placement, from domain.Rect, dir Direction, priority facingMetricPriority) (PaneID, error) {
+	candidates := make([]facingCandidate, 0, len(placements))
+	for _, placement := range placements {
+		if facing, gap, perpendicularOverlap := sideGapOverlap(from, focusRect(placement), dir); facing {
+			candidates = append(candidates, facingCandidate{id: placement.ID, gap: gap, overlap: perpendicularOverlap})
 		}
 	}
 	if len(candidates) == 0 {
-		return ErrNoPane
+		return "", ErrNoPane
 	}
 	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].overlap != candidates[j].overlap {
-			return candidates[i].overlap > candidates[j].overlap
-		}
-		if candidates[i].gap != candidates[j].gap {
-			return candidates[i].gap < candidates[j].gap
+		if priority == facingGapFirst {
+			if candidates[i].gap != candidates[j].gap {
+				return candidates[i].gap < candidates[j].gap
+			}
+			if candidates[i].overlap != candidates[j].overlap {
+				return candidates[i].overlap > candidates[j].overlap
+			}
+		} else {
+			if candidates[i].overlap != candidates[j].overlap {
+				return candidates[i].overlap > candidates[j].overlap
+			}
+			if candidates[i].gap != candidates[j].gap {
+				return candidates[i].gap < candidates[j].gap
+			}
 		}
 		return candidates[i].id < candidates[j].id
 	})
-	t.Focus = candidates[0].id
-	setExpanded(t.Root, t.Focus)
-	return nil
+	return candidates[0].id, nil
 }
 
 func focusStackLocal(n *Node, id PaneID, dir Direction, focus *PaneID) bool {
