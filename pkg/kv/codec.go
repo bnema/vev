@@ -12,11 +12,12 @@ const (
 	opDel
 	opBatch
 
-	headerLen         = 8
-	payloadPrefixLen  = 3
-	compactThreshold  = 64
-	compactWasteRatio = 0.5
-	maxKeyLen         = 1<<16 - 1
+	headerLen           = 8
+	payloadPrefixLen    = 3
+	batchEntryPrefixLen = 7
+	compactThreshold    = 64
+	compactWasteRatio   = 0.5
+	maxKeyLen           = 1<<16 - 1
 )
 
 var (
@@ -151,6 +152,10 @@ func decodeBatch(payload []byte) ([]record, error) {
 		return nil, errBadRecord
 	}
 	off := 5
+	maxCount := uint64(len(payload)-off) / batchEntryPrefixLen
+	if uint64(count) > maxCount {
+		return nil, errBadRecord
+	}
 	records := make([]record, 0, int(count))
 	seen := make(map[string]struct{}, int(count))
 	for range count {

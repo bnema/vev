@@ -256,6 +256,7 @@ func TestReplayStrict(t *testing.T) {
 		{name: "final-crc", wal: corruptRecord(append(append([]byte{}, valid...), batch...), len(valid)+4), corrupt: true},
 		{name: "middle-crc", wal: corruptRecord(append(append([]byte{}, valid...), batch...), 4), corrupt: true},
 		{name: "invalid-op", wal: rawRecord([]byte{0xff, 0, 0}), corrupt: true},
+		{name: "impossible-batch-count", wal: rawRecord([]byte{opBatch, 0xff, 0xff, 0xff, 0xff}), corrupt: true},
 		{name: "duplicate-key-in-batch", wal: rawRecord(rawBatchPayload([]BatchChange{{Key: []byte("x")}, {Key: []byte("x"), Delete: true}})), corrupt: true},
 		{name: "trailing-batch-garbage", wal: rawRecord(append(rawBatchPayload([]BatchChange{{Key: []byte("x")}}), 0)), corrupt: true},
 	}
@@ -290,6 +291,18 @@ func TestReplayStrict(t *testing.T) {
 				t.Fatalf("result = %+v", result)
 			}
 		})
+	}
+}
+
+func TestDecodeBatchRejectsImpossibleCountBeforeAllocating(t *testing.T) {
+	payload := []byte{opBatch, 0xff, 0xff, 0xff, 0xff}
+	allocs := testing.AllocsPerRun(10, func() {
+		if _, err := decodeBatch(payload); !errors.Is(err, errBadRecord) {
+			t.Fatalf("decodeBatch error = %v, want errBadRecord", err)
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("decodeBatch allocations = %v, want 0", allocs)
 	}
 }
 
