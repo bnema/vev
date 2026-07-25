@@ -42,6 +42,44 @@ func TestNewSnapshotFromRowsPreservesWideRows(t *testing.T) {
 	}
 }
 
+func TestSnapshotBoundDispatchesLikeRow(t *testing.T) {
+	row := func(s string) []renderer.Cell {
+		cells := make([]renderer.Cell, 0, len(s))
+		for _, r := range s {
+			cells = append(cells, renderer.Cell{Rune: r})
+		}
+		return cells
+	}
+
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 8, MaxCells: 1024})
+	if err := history.Append(row("hist"), vt.LineBound{End: 4, Soft: true}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	screen := renderer.NewFrame(4, 2)
+	copy(screen.Row(0), row("live"))
+
+	snap := NewSnapshot(history, screen, []vt.LineBound{{End: 4}, {End: 0, Soft: true}})
+
+	tests := []struct {
+		name string
+		i    int
+		want vt.LineBound
+	}{
+		{name: "history row", i: 0, want: vt.LineBound{End: 4, Soft: true}},
+		{name: "first screen row", i: 1, want: vt.LineBound{End: 4}},
+		{name: "second screen row", i: 2, want: vt.LineBound{End: 0, Soft: true}},
+		{name: "past the end", i: 3, want: vt.LineBound{}},
+		{name: "negative", i: -1, want: vt.LineBound{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := snap.Bound(tc.i); got != tc.want {
+				t.Errorf("Bound(%d) = %+v, want %+v", tc.i, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCopyModeKeyboardSelection(t *testing.T) {
 	m := modeFor([]string{"alpha", "xy", "bravo", "charlie"}, 2)
 	require.Equal(t, Pos{Row: 3}, m.Cursor())
@@ -194,7 +232,7 @@ func TestFindMatchesUsesSealedScrollbackWithoutGlobalCopy(t *testing.T) {
 		require.NoError(t, history.Append(unmatched, vt.LineBound{End: len(unmatched)}))
 	}
 	require.NoError(t, history.Append(target, vt.LineBound{End: len(target)}))
-	snapshot := NewSnapshot(history, renderer.NewFrame(16, 1))
+	snapshot := NewSnapshot(history, renderer.NewFrame(16, 1), nil)
 	view := history.SealAndView()
 	require.Same(t, view.Chunk(0), snapshot.history.Chunk(0))
 

@@ -1264,7 +1264,7 @@ func TestComposeCopyClientFrameOverlaysBaseAtTarget(t *testing.T) {
 	}
 	p := newPane("floating", nil, domain.Size{Cols: 18, Rows: 2})
 	p.screen.Write([]byte("ab\r\ncd"))
-	document := scopy.NewSnapshot(p.history, p.screen.Frame)
+	document := scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds())
 	mode := scopy.NewMode(scopy.NewDocument(document, domain.DefaultWordSeparators))
 	target := domain.Rect{X: 2, Y: 3, Width: 18, Height: 2}
 

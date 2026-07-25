@@ -352,7 +352,7 @@ func TestCopyPointerAndClickResetOnCopyExitAndReplacement(t *testing.T) {
 		{name: "replacement publication", run: func(d *Daemon, sess *session, ac *attachedClient) {
 			p := sess.activeTab().focusedPane()
 			p.mu.Lock()
-			doc := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame), domain.DefaultWordSeparators)
+			doc := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds()), domain.DefaultWordSeparators)
 			p.mu.Unlock()
 			require.True(t, d.publishCopyMode(sess, ac, sess.activeTab(), p, doc, nil, nil))
 		}},
