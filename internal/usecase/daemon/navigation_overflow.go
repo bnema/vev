@@ -115,14 +115,14 @@ func (d *Daemon) prepareSessionOverflow(current *session, dir layout.Direction, 
 	return picker.Target{Session: target.id, TabIndex: -1}, true
 }
 
-// commitSessionOverflow revalidates the floating-source exclusion immediately
-// before switchToTarget. It deliberately releases session and tab locks first:
-// switchToTarget owns the daemon -> routing -> session lock order.
+// commitSessionOverflow carries its source constraint into the handoff so tab
+// identity and floating visibility are revalidated while source ownership is
+// transferred under the daemon -> routing -> session -> tab lock order.
 func (d *Daemon) commitSessionOverflow(from *session, ac *attachedClient, expectedSource *tab, target picker.Target) error {
-	if !overflowSourceEligible(from, expectedSource) {
+	if from == nil || ac == nil || expectedSource == nil {
 		return errNoNeighbor
 	}
-	return d.switchToTarget(from, ac, target)
+	return d.switchToTargetGuarded(from, ac, target, sessionHandoffGuard{expectedSource: expectedSource})
 }
 
 type tabOverflowCandidate struct {

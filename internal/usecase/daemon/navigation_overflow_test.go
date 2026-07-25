@@ -9,6 +9,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/usecase/picker"
 )
 
 func TestResolveOverflowObeysAxisConfigurationAndWalls(t *testing.T) {
@@ -190,6 +191,67 @@ func TestVerticalOverflowRevalidatesFloatingSourceBeforeHandoff(t *testing.T) {
 	require.Same(t, alpha, ac.currentSession())
 	alpha.mu.Lock()
 	require.Same(t, ac, alpha.client)
+	alpha.mu.Unlock()
+	charlie.mu.Lock()
+	require.Nil(t, charlie.client)
+	charlie.mu.Unlock()
+}
+
+func TestVerticalOverflowRejectsStaleSourceTab(t *testing.T) {
+	d, alpha, ac, _ := newManualSessionWithPTYs(t, nil, nil)
+	alpha.mu.Lock()
+	alpha.name = "alpha"
+	expectedSource := alpha.tabs[0]
+	alpha.active = 1
+	alpha.mu.Unlock()
+	charlie := &session{id: "live-charlie", name: "charlie", ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	d.mu.Lock()
+	d.sessions[charlie.id] = charlie
+	d.mu.Unlock()
+
+	require.ErrorIs(t, d.commitSessionOverflow(alpha, ac, expectedSource, picker.Target{Session: charlie.id, TabIndex: -1}), errNoNeighbor)
+	require.Same(t, alpha, ac.currentSession())
+	alpha.mu.Lock()
+	require.Same(t, ac, alpha.client)
+	alpha.mu.Unlock()
+	charlie.mu.Lock()
+	require.Nil(t, charlie.client)
+	charlie.mu.Unlock()
+}
+
+func TestOrdinarySessionSwitchDoesNotApplyOverflowGuard(t *testing.T) {
+	d, alpha, ac, _ := newManualSessionWithPTYs(t, nil)
+	installTestFloating(alpha.tabs[0], newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), true)
+	charlie := &session{id: "live-charlie", name: "charlie", ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	d.mu.Lock()
+	d.sessions[charlie.id] = charlie
+	d.mu.Unlock()
+
+	require.NoError(t, d.switchToTarget(alpha, ac, picker.Target{Session: charlie.id, TabIndex: -1}))
+	require.Same(t, charlie, ac.currentSession())
+}
+
+func TestVerticalOverflowTreatsDisplacedSourceClientAsNoNeighbor(t *testing.T) {
+	d, alpha, ac, _ := newManualSessionWithPTYs(t, nil)
+	alpha.mu.Lock()
+	alpha.name = "alpha"
+	alpha.mu.Unlock()
+	charlie := &session{id: "live-charlie", name: "charlie", ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	d.mu.Lock()
+	d.sessions[charlie.id] = charlie
+	d.mu.Unlock()
+
+	target, ok := d.prepareSessionOverflow(alpha, layout.Down, domain.NavConfig{OverflowSessions: true})
+	require.True(t, ok)
+	replacement := &attachedClient{}
+	alpha.mu.Lock()
+	alpha.client = replacement
+	alpha.mu.Unlock()
+
+	require.ErrorIs(t, d.commitSessionOverflow(alpha, ac, alpha.tabs[0], target), errNoNeighbor)
+	require.Same(t, alpha, ac.currentSession())
+	alpha.mu.Lock()
+	require.Same(t, replacement, alpha.client)
 	alpha.mu.Unlock()
 	charlie.mu.Lock()
 	require.Nil(t, charlie.client)
