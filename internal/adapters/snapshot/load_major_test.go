@@ -42,7 +42,7 @@ func TestRepositoryLoadFallsBackFromInvalidHead(t *testing.T) {
 func TestRepositoryLoadFallsBackAcrossMultipleCorruptCandidates(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	for generation := uint64(1); generation <= 4; generation++ {
-		require.NoError(t, repo.Publish(context.Background(), repositoryPublication(t, "named", generation, []byte{byte(generation)})))
+		require.NoError(t, repo.Publish(context.Background(), repositoryPublicationAfter(t, repo, "named", generation, []byte{byte(generation)})))
 	}
 	key := legacyIncarnationID("named").String()
 	for _, generation := range []uint64{4, 3} {

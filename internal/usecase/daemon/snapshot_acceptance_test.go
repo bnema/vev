@@ -63,9 +63,10 @@ func snapshotCacheHistory(t *testing.T, chunks int, first rune) vt.HistorySnapsh
 
 func snapshotCacheCapture(sess *session, history vt.HistorySnapshotView, generation uint64) *snapshotCapture {
 	return &snapshotCapture{
-		session:    sess,
-		name:       sess.name,
-		generation: generation,
+		session:     sess,
+		name:        sess.name,
+		incarnation: sess.incarnation,
+		generation:  generation,
 		tabs: []snapshotCaptureTab{{
 			stableID: "tab",
 			cols:     1,

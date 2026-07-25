@@ -18,7 +18,7 @@ func TestRepositoryHeadFailureKeepsOldCompleteGeneration(t *testing.T) {
 	if err := repo.Publish(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
-	second := repositoryPublication(t, "named", 2, []byte("two"))
+	second := repositoryPublicationAfter(t, repo, "named", 2, []byte("two"))
 	repo.hooks.beforeHeadWrite = func(string) error { return errors.New("injected HEAD failure") }
 	if err := repo.Publish(context.Background(), second); err == nil {
 		t.Fatal("Publish succeeded with injected HEAD failure")
@@ -55,7 +55,7 @@ func TestRepositoryCleanupFaultsSurfaceForImmutableAndMutablePublication(t *test
 			if err := repo.Publish(context.Background(), first); err != nil {
 				t.Fatal(err)
 			}
-			second := repositoryPublication(t, "named", 2, []byte("two"))
+			second := repositoryPublicationAfter(t, repo, "named", 2, []byte("two"))
 			key := legacyIncarnationID(second.Name).String()
 			if tc.location == "manifest" {
 				prepareObjects(t, repo, second)
@@ -187,7 +187,7 @@ func TestRepositoryLoadFallsBackFromIncompleteNewestGeneration(t *testing.T) {
 	if err := repo.Publish(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
-	second := repositoryPublication(t, "named", 2, []byte("two"))
+	second := repositoryPublicationAfter(t, repo, "named", 2, []byte("two"))
 	if err := repo.Publish(context.Background(), second); err != nil {
 		t.Fatal(err)
 	}

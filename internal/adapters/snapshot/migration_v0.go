@@ -212,6 +212,9 @@ func uncertainLegacyError(operation string, cause error) error {
 	return fmt.Errorf("%w: %s: %v", ports.ErrLegacySnapshotUncertain, operation, cause)
 }
 
+// MigrateV1Checkpoint is the migration-only admission path for an authoritative
+// legacy checkpoint whose v1 format has no parent link. Runtime snapshot
+// publication must use Publish and cannot bypass its parent-chain validation.
 func (r *Repository) MigrateV1Checkpoint(ctx context.Context, req ports.SnapshotMigrationRequest) (domain.CheckpointRef, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.CheckpointRef{}, err

@@ -78,7 +78,7 @@ func TestRepositoryFaultsAtEveryPublicationBoundary(t *testing.T) {
 			if err := repo.Publish(context.Background(), first); err != nil {
 				t.Fatal(err)
 			}
-			second := repositoryPublication(t, "named", 2, []byte("two"))
+			second := repositoryPublicationAfter(t, repo, "named", 2, []byte("two"))
 			if err := repo.ensureSession(second.IncarnationID); err != nil {
 				t.Fatal(err)
 			}

@@ -90,6 +90,7 @@ func resumeSnapshotCoordinatorForNewIdentity(sess *session, quarantine snapshotC
 	// dirty and wake the scheduler.
 	sess.snapshotGeneration = 1
 	sess.snapshotPublishedGeneration = 0
+	sess.snapshotPublishedCheckpoint = nil
 	sess.snapshotPublishedMutationRevision = 0
 	sess.snapshotForcedGeneration = 0
 	sess.snapshotNextEligibleAt = time.Time{}
@@ -238,6 +239,11 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 			mutationRevision = capture.generation
 		}
 		if succeeded {
+			if capture.generation >= capture.session.snapshotPublishedGeneration &&
+				capture.checkpoint.Generation == capture.generation && capture.checkpoint.ManifestDigest != ([32]byte{}) {
+				checkpoint := capture.checkpoint
+				capture.session.snapshotPublishedCheckpoint = &checkpoint
+			}
 			capture.session.snapshotPublishedGeneration = max(capture.session.snapshotPublishedGeneration, capture.generation)
 			capture.session.snapshotPublishedMutationRevision = max(capture.session.snapshotPublishedMutationRevision, mutationRevision)
 		}

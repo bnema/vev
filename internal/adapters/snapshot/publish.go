@@ -34,12 +34,6 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// A failed publication can still leave immutable blobs or a manifest behind.
-	// Invalidate an in-progress GC mark before creating any publication storage.
-	r.invalidateStorageEpoch(key)
-	if err := r.ensureSession(publication.IncarnationID); err != nil {
-		return err
-	}
 	// The common replay path needs neither a manifest decode nor a reference
 	// map. Checking the immutable bytes directly also keeps its descriptor
 	// reads beneath the pinned repository root.
@@ -59,6 +53,14 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 			return fmt.Errorf("snapshot generation %d: immutable conflict", publication.Generation)
 		}
 		return nil
+	}
+
+	// Parent validation and all other publication checks above happen before
+	// creating or invalidating repository state. A rejected child must leave the
+	// authoritative checkpoint and its storage byte-for-byte unchanged.
+	r.invalidateStorageEpoch(key)
+	if err := r.ensureSession(publication.IncarnationID); err != nil {
+		return err
 	}
 
 	// Retained refs from the authoritative generation were verified when their
@@ -194,11 +196,12 @@ func (r *Repository) currentIncarnationPublication(ctx context.Context, publicat
 	if manifest.IncarnationID != publication.IncarnationID || manifest.Generation != generation {
 		return 0, nil, nil, fmt.Errorf("current manifest identity mismatch")
 	}
-	// Parent checkpoints are optional in manifest v2. When a publisher supplies
-	// one, it must bind the next generation to the authoritative current HEAD.
-	if publication.ParentCheckpoint != nil {
+	// Every normal child checkpoint is bound to the exact authoritative HEAD.
+	// Nil-parent checkpoints beyond generation one are admitted only through the
+	// explicitly migration-only MigrateV1Checkpoint path.
+	if publication.Generation == generation+1 {
 		wantParent := &domain.CheckpointRef{Generation: generation, ManifestDigest: digest}
-		if publication.Generation == generation+1 && !checkpointRefEqual(publication.ParentCheckpoint, wantParent) {
+		if !checkpointRefEqual(publication.ParentCheckpoint, wantParent) {
 			return 0, nil, nil, fmt.Errorf("publication parent does not match current checkpoint")
 		}
 	}

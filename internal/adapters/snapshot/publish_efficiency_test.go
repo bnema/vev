@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	codec "github.com/bnema/vev/internal/usecase/snapshot"
 )
@@ -117,7 +118,7 @@ func TestRepositoryPublishVerifiesNecessaryExistingObjectOnce(t *testing.T) {
 	if err := repo.Publish(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
-	second := repositoryPublication(t, "named", 2, []byte("second"))
+	second := repositoryPublicationAfter(t, repo, "named", 2, []byte("second"))
 	newTail := second.Objects[0]
 	key := legacyIncarnationID(second.Name).String()
 	if err := os.MkdirAll(filepath.Dir(repo.legacyObjectPath(key, newTail.Digest)), 0o700); err != nil {
@@ -154,7 +155,7 @@ func largeIncrementalPublications(t testing.TB, name string, count int) (ports.S
 		sealed = append(sealed, codec.ObjectRef{Kind: codec.HistoryChunk, Digest: object.Digest, Size: uint32(len(object.Data))})
 		objects = append(objects, object)
 	}
-	makePublication := func(generation uint64, tailPayload, visiblePayload string) ports.SnapshotPublication {
+	makePublication := func(generation uint64, parent *domain.CheckpointRef, tailPayload, visiblePayload string) ports.SnapshotPublication {
 		t.Helper()
 		tail, err := codec.MarshalObject(codec.HistoryTail, []byte(tailPayload))
 		if err != nil {
@@ -164,13 +165,15 @@ func largeIncrementalPublications(t testing.TB, name string, count int) (ports.S
 		if err != nil {
 			t.Fatal(err)
 		}
-		manifest, err := codec.MarshalManifest(codec.Manifest{Generation: generation, IncarnationID: id, Name: name, Tabs: []codec.ManifestTab{{Cols: 1, Rows: 1, Panes: []codec.ManifestPane{{ID: "p", Sealed: sealed, Tail: codec.ObjectRef{Kind: codec.HistoryTail, Digest: tail.Digest, Size: uint32(len(tail.Data))}, Visible: codec.ObjectRef{Kind: codec.Visible, Digest: visible.Digest, Size: uint32(len(visible.Data))}}}}}})
+		manifest, err := codec.MarshalManifest(codec.Manifest{Generation: generation, IncarnationID: id, ParentCheckpoint: parent, Name: name, Tabs: []codec.ManifestTab{{Cols: 1, Rows: 1, Panes: []codec.ManifestPane{{ID: "p", Sealed: sealed, Tail: codec.ObjectRef{Kind: codec.HistoryTail, Digest: tail.Digest, Size: uint32(len(tail.Data))}, Visible: codec.ObjectRef{Kind: codec.Visible, Digest: visible.Digest, Size: uint32(len(visible.Data))}}}}}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return ports.SnapshotPublication{IncarnationID: id, Name: name, Generation: generation, Manifest: manifest, Objects: append(append([]ports.SnapshotObject(nil), objects...), tail, visible)}
+		return ports.SnapshotPublication{IncarnationID: id, Name: name, Generation: generation, ParentCheckpoint: parent, Manifest: manifest, Objects: append(append([]ports.SnapshotObject(nil), objects...), tail, visible)}
 	}
-	return makePublication(1, "tail-1", "visible-1"), makePublication(2, "tail-2", "visible-2")
+	first := makePublication(1, nil, "tail-1", "visible-1")
+	parent := &domain.CheckpointRef{Generation: 1, ManifestDigest: sha256.Sum256(first.Manifest)}
+	return first, makePublication(2, parent, "tail-2", "visible-2")
 }
 
 func seedCompletePublication(t testing.TB, repo *Repository, publication ports.SnapshotPublication) {

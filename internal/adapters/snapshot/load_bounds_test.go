@@ -49,7 +49,7 @@ func TestRepositoryLoadStopsAtGenerationTraversalBudget(t *testing.T) {
 func TestRepositoryLoadFallsBackNewestToOldestWithoutGenerationEnumeration(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	for generation := uint64(1); generation <= 3; generation++ {
-		if err := repo.Publish(context.Background(), repositoryPublication(t, "named", generation, []byte(fmt.Sprintf("state-%d", generation)))); err != nil {
+		if err := repo.Publish(context.Background(), repositoryPublicationAfter(t, repo, "named", generation, []byte(fmt.Sprintf("state-%d", generation)))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -71,7 +71,7 @@ func TestRepositoryLoadFallsBackNewestToOldestWithoutGenerationEnumeration(t *te
 func TestRepositoryMaintainDoesNotCollectBeyondRetainedMetadataBudget(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	for generation := uint64(1); generation <= uint64(maxMaintenanceMarkedGenerations+1); generation++ {
-		if err := repo.Publish(context.Background(), repositoryPublication(t, "named", generation, []byte(fmt.Sprintf("state-%d", generation)))); err != nil {
+		if err := repo.Publish(context.Background(), repositoryPublicationAfter(t, repo, "named", generation, []byte(fmt.Sprintf("state-%d", generation)))); err != nil {
 			t.Fatal(err)
 		}
 	}

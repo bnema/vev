@@ -36,6 +36,8 @@ type snapshotCapture struct {
 	session              *session
 	attemptKind          snapshotAttemptKind
 	generation           uint64 // repository publication generation
+	parentCheckpoint     *domain.CheckpointRef
+	checkpoint           domain.CheckpointRef // set by the encoder before publication
 	mutationRevision     uint64
 	name                 string
 	incarnation          domain.IncarnationID

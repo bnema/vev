@@ -128,7 +128,7 @@ func TestMigrateV1CheckpointValidatesObjectEnvelopeAndKind(t *testing.T) {
 	}
 }
 
-func TestMigrationOver4096(t *testing.T) {
+func TestMigrateV1CheckpointAcceptsLegacyNilParentBeyondGenerationOne(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.Chmod(dir, 0o700))
 	repo := NewRepository(dir)

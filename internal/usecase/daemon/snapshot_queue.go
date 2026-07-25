@@ -1,6 +1,10 @@
 package daemon
 
-import "context"
+import (
+	"context"
+
+	"github.com/bnema/vev/internal/domain"
+)
 
 func (d *Daemon) scheduleSnapshot(sess *session) bool {
 	return d.scheduleSnapshotWithFinalFallback(sess, false)
@@ -54,6 +58,11 @@ func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bo
 		sess.snapshotGeneration = mutationRevision
 	}
 	publicationContext := sess.snapshotPublicationContext
+	var parentCheckpoint *domain.CheckpointRef
+	if sess.snapshotPublishedCheckpoint != nil {
+		parent := *sess.snapshotPublishedCheckpoint
+		parentCheckpoint = &parent
+	}
 	sess.snapshotPendingCaptures++
 	sess.snapshotPending = true
 	sess.signalSnapshotChangedLocked()
@@ -64,6 +73,7 @@ func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bo
 		capture.mutationRevision = mutationRevision
 		capture.attemptKind = kind
 		capture.publicationContext = publicationContext
+		capture.parentCheckpoint = parentCheckpoint
 	}
 	if !ok {
 		d.finishSnapshotCapture(capture, false)

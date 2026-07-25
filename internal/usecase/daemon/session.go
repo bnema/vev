@@ -77,6 +77,7 @@ type session struct {
 	snapshotMu                        sync.Mutex
 	snapshotGeneration                uint64 // newest mutation revision
 	snapshotPublishedGeneration       uint64 // newest repository generation
+	snapshotPublishedCheckpoint       *domain.CheckpointRef
 	snapshotPublishedMutationRevision uint64
 	snapshotNextEligibleAt            time.Time
 	// The coordinator state below is guarded by snapshotMu. A capture can be

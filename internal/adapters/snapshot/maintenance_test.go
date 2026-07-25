@@ -348,7 +348,7 @@ func TestRepositoryDeleteWaitsForPublication(t *testing.T) {
 	}
 	publishDone := make(chan error, 1)
 	go func() {
-		publishDone <- repo.Publish(context.Background(), repositoryPublication(t, "named", 2, []byte("second")))
+		publishDone <- repo.Publish(context.Background(), repositoryPublicationAfter(t, repo, "named", 2, []byte("second")))
 	}()
 	<-entered
 	deleteReached := make(chan struct{})
@@ -374,7 +374,7 @@ func TestRepositoryDeleteWaitsForPublication(t *testing.T) {
 func TestRepositoryMaintainRetainsNewestTwoCompleteGenerations(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	for generation := uint64(1); generation <= 3; generation++ {
-		if err := repo.Publish(context.Background(), repositoryPublication(t, "named", generation, []byte{byte(generation)})); err != nil {
+		if err := repo.Publish(context.Background(), repositoryPublicationAfter(t, repo, "named", generation, []byte{byte(generation)})); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -412,7 +412,7 @@ func TestRepositoryMaintainRetainsNewestTwoCompleteGenerations(t *testing.T) {
 func TestRepositoryMaintainPreservesIncompleteManifestReferences(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	for generation := uint64(1); generation <= 3; generation++ {
-		if err := repo.Publish(context.Background(), repositoryPublication(t, "named", generation, []byte{byte(generation)})); err != nil {
+		if err := repo.Publish(context.Background(), repositoryPublicationAfter(t, repo, "named", generation, []byte{byte(generation)})); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -690,7 +690,7 @@ func TestRepositoryMaintainMarksLargeGenerationSetBeforeSweeping(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	var newest ports.SnapshotPublication
 	for generation := uint64(1); generation <= maintenanceBatch+2; generation++ {
-		publication := repositoryPublication(t, "named", generation, []byte(fmt.Sprintf("state-%d", generation)))
+		publication := repositoryPublicationAfter(t, repo, "named", generation, []byte(fmt.Sprintf("state-%d", generation)))
 		if err := repo.Publish(context.Background(), publication); err != nil {
 			t.Fatal(err)
 		}
@@ -872,7 +872,7 @@ func TestRepositoryMaintainClassifiesUnpublishedGenerationsBeforeSweep(t *testin
 			key := legacyIncarnationID("named").String()
 			publications := make([]ports.SnapshotPublication, 0, maintenanceBatch+2)
 			for generation := uint64(1); generation <= maintenanceBatch+2; generation++ {
-				publication := repositoryPublication(t, "named", generation, []byte(fmt.Sprintf("state-%d", generation)))
+				publication := repositoryPublicationAfter(t, repo, "named", generation, []byte(fmt.Sprintf("state-%d", generation)))
 				if err := repo.Publish(context.Background(), publication); err != nil {
 					t.Fatal(err)
 				}
@@ -955,7 +955,7 @@ func TestRepositoryMaintainRestartsMarkAfterFailedPublication(t *testing.T) {
 		t.Fatal("sweep did not leave a pending stale object")
 	}
 
-	second := publicationWithTailShard(t, "named", 2, "ff")
+	second := publicationWithCurrentParent(t, repo, publicationWithTailShard(t, "named", 2, "ff"))
 	injected := errors.New("before HEAD")
 	repo.hooks.beforeHeadWrite = func(string) error { return injected }
 	if err := repo.Publish(context.Background(), second); !errors.Is(err, injected) {

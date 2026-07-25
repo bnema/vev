@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"crypto/sha256"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/domain"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
@@ -124,12 +126,14 @@ func TestIncrementalPublicationReusesSealedChunkObject(t *testing.T) {
 	visible := vt.NewScreen(1, 1).PrimaryVisibleSnapshot()
 	d := New(nil, nil, nil)
 	sess := newSnapshotTestSession(t, "work", false, "/work")
-	capture := &snapshotCapture{session: sess, name: "work", generation: 1, tabs: []snapshotCaptureTab{{stableID: "t", cols: 1, rows: 1, panes: []snapshotCapturePane{{id: "p", stableID: "p", sealed: view, tail: view.Tail(), visible: visible}}}}}
+	capture := &snapshotCapture{session: sess, name: "work", incarnation: domain.IncarnationID{1}, generation: 1, tabs: []snapshotCaptureTab{{stableID: "t", cols: 1, rows: 1, panes: []snapshotCapturePane{{id: "p", stableID: "p", sealed: view, tail: view.Tail(), visible: visible}}}}}
 	first, err := d.incrementalPublication(capture)
 	if err != nil {
 		t.Fatal(err)
 	}
+	firstRef := domain.CheckpointRef{Generation: first.Generation, ManifestDigest: sha256.Sum256(first.Manifest)}
 	capture.generation = 2
+	capture.parentCheckpoint = &firstRef
 	second, err := d.incrementalPublication(capture)
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +141,10 @@ func TestIncrementalPublicationReusesSealedChunkObject(t *testing.T) {
 	if len(first.Objects) == 0 || len(second.Objects) == 0 {
 		t.Fatal("publication omitted required objects")
 	}
+	require.Equal(t, &firstRef, second.ParentCheckpoint)
+	manifest, err := snapcodec.UnmarshalManifest(second.Manifest)
+	require.NoError(t, err)
+	require.Equal(t, &firstRef, manifest.ParentCheckpoint)
 	if got, want := sess.snapshotChunkCache.used, sess.snapshotChunkCache.limit; got > want {
 		t.Fatalf("cache bytes = %d, limit = %d", got, want)
 	}
