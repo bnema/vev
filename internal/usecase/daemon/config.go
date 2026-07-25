@@ -56,6 +56,8 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	d.copyConfig.Store(&copyConfig)
 	palette := cfg.Palette
 	d.paletteConfig.Store(&palette)
+	nav := cfg.Nav
+	d.navConfig.Store(&nav)
 	tabs := cfg.Tabs
 	d.tabsConfig.Store(&tabs)
 	d.storeThemeConfig(cfg)
@@ -260,6 +262,13 @@ func (d *Daemon) currentPaletteConfig() domain.PaletteConfig {
 		return *cfg
 	}
 	return domain.Defaults().Palette
+}
+
+func (d *Daemon) currentNavConfig() domain.NavConfig {
+	if cfg := d.navConfig.Load(); cfg != nil {
+		return *cfg
+	}
+	return domain.Defaults().Nav
 }
 
 func (d *Daemon) currentTabsConfig() domain.TabsConfig {

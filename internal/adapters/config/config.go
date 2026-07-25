@@ -33,6 +33,7 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	seenFloatingKeys := make(map[string]bool)
 	seenCopyKeys := make(map[string]bool)
 	seenPaletteKeys := make(map[string]bool)
+	seenNavKeys := make(map[string]bool)
 	seenTabsKeys := make(map[string]bool)
 
 	scanner := bufio.NewScanner(r)
@@ -118,6 +119,22 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				continue
 			}
 			cfg.Palette = domain.PaletteConfig{Anchor: anchor, AnchorSet: true}
+		case key == "nav.overflow-tabs":
+			warnings = warnDuplicateKey(warnings, seenNavKeys, key, lineNo)
+			on, ok := parseOnOff(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid nav.overflow-tabs %q", value)})
+				continue
+			}
+			cfg.Nav.OverflowTabs = on
+		case key == "nav.overflow-sessions":
+			warnings = warnDuplicateKey(warnings, seenNavKeys, key, lineNo)
+			on, ok := parseOnOff(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid nav.overflow-sessions %q", value)})
+				continue
+			}
+			cfg.Nav.OverflowSessions = on
 		case key == "tabs.terminal-title":
 			warnings = warnDuplicateKey(warnings, seenTabsKeys, key, lineNo)
 			on, ok := parseOnOff(value)
