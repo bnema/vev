@@ -399,6 +399,15 @@ func TestSelectedTextJoinsRowsWrappedByTheVT(t *testing.T) {
 			wantHistoryLen: 2,
 			wrapRow:        3,
 		},
+		{
+			// The common case: the pane is full, so the cursor is on the last
+			// row and the wrap scrolls the screen as it happens. This is what a
+			// long line printed at a shell prompt actually does.
+			name:           "wrapped line wraps out of the bottom row of a full pane",
+			input:          "1\r\n2\r\n3\r\n4\r\n5\r\n" + line,
+			wantHistoryLen: 3,
+			wrapRow:        5,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
