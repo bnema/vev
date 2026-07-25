@@ -37,6 +37,14 @@ const (
 	MinPaneRows = 2
 )
 
+// Axis identifies the dimension changed by a resize operation.
+type Axis int
+
+const (
+	Width Axis = iota
+	Height
+)
+
 // Node is a recursive pane layout node. Leaf is meaningful for Leaf nodes; Dir
 // and Children are meaningful for Split nodes; Children and Expanded are
 // meaningful for Stack nodes.
@@ -46,6 +54,7 @@ type Node struct {
 	Children []*Node
 	Leaf     PaneID
 	Expanded PaneID
+	Weight   float64
 }
 
 // Tree is a pane layout plus its focused pane.

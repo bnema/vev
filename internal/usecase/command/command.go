@@ -43,6 +43,12 @@ type Context interface {
 	FocusPaneRight() error
 	FocusPaneUp() error
 	FocusPaneDown() error
+	EnterResizeMode() error
+	GrowPaneWidth() error
+	ShrinkPaneWidth() error
+	GrowPaneHeight() error
+	ShrinkPaneHeight() error
+	EqualizePanes() error
 	NextTab() error
 	PrevTab() error
 	BackSession() error
@@ -104,6 +110,11 @@ type ControlContext interface {
 	SplitDown() error
 	StackPane() error
 	ToggleStack() error
+	GrowPaneWidth() error
+	ShrinkPaneWidth() error
+	GrowPaneHeight() error
+	ShrinkPaneHeight() error
+	EqualizePanes() error
 	FocusPaneLeft() error
 	FocusPaneRight() error
 	FocusPaneUp() error

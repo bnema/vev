@@ -1110,7 +1110,6 @@ func (f *performanceFixture) close() error {
 func (f *performanceFixture) configureTab(tb *tab, tabIndex, paneCount, historyRows int, size domain.Size) {
 	f.t.Helper()
 	tb.mu.Lock()
-	defer tb.mu.Unlock()
 	tb.size = size
 	left := tb.focusedPane()
 	for paneIndex := 1; paneIndex < paneCount; paneIndex++ {
@@ -1121,8 +1120,13 @@ func (f *performanceFixture) configureTab(tb *tab, tabIndex, paneCount, historyR
 	placements, ok := layout.Solve(tb.tree.Root, domain.Rect{Width: size.Cols, Height: size.Rows})
 	require.True(f.t, ok, "performance fixture layout must be solvable")
 	require.Len(f.t, placements, paneCount)
-	f.d.applyLayoutLocked(tb)
-	for _, p := range tb.panes {
+	tb.bumpLayoutGenerationLocked()
+	tb.mu.Unlock()
+	_, _ = f.d.applyTabLayoutTransaction(f.sess, tb)
+	tb.mu.Lock()
+	panes := tb.panesSnapshot()
+	tb.mu.Unlock()
+	for _, p := range panes {
 		p.mu.Lock()
 		width := p.screen.Frame.Width
 		for row := 0; p.history.Len() < historyRows && row < historyRows+p.screen.Frame.Height; row++ {
@@ -1247,9 +1251,18 @@ func (f *performanceFixture) resizeTo(size domain.Size) {
 
 func (f *performanceFixture) retryLatest() {
 	epoch := f.sess.renderCoordinator().resizeSnapshot().committed
-	plan := f.d.prepareResize(f.sess, f.ac.size)
+	f.sess.mu.Lock()
+	tabs := append([]*tab(nil), f.sess.tabs...)
+	f.sess.mu.Unlock()
+	members := make([]resizeMember, 0)
+	for _, tb := range tabs {
+		tb.mu.Lock()
+		plan := prepareTabLayoutForSizeLocked(f.sess, tb, tabSize(f.ac.size))
+		tb.mu.Unlock()
+		members = append(members, plan.members...)
+	}
 	failuresBefore, callsBefore := f.pty.metrics()
-	f.d.retryResizeMembers(f.sess, f.ac, f.sess.renderCoordinator().attachmentLease(f.ac), epoch, plan.members)
+	f.d.retryResizeMembers(f.sess, f.ac, f.sess.renderCoordinator().attachmentLease(f.ac), epoch, members)
 	failuresAfter, callsAfter := f.pty.metrics()
 	f.ptyFailures += failuresAfter - failuresBefore
 	if callsAfter > callsBefore {

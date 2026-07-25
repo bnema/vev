@@ -23,8 +23,12 @@ func TestNilPTYLifecyclePathsDoNotPanic(t *testing.T) {
 	second := newTab(nil, domain.Size{Cols: 41, Rows: 10})
 	sess.tabs = []*tab{first, second}
 
+	first.mu.Lock()
+	first.size = domain.Size{Cols: 20, Rows: 5}
+	first.bumpLayoutGenerationLocked()
+	first.mu.Unlock()
 	require.NotPanics(t, func() {
-		d.applyPaneResize(first.focusedPane(), domain.Rect{Width: 20, Height: 5})
+		d.applyTabLayout(sess, first)
 	})
 	require.Equal(t, 20, first.focusedPane().screen.Frame.Width)
 	require.Equal(t, 5, first.focusedPane().screen.Frame.Height)

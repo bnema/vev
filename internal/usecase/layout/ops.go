@@ -2,6 +2,7 @@ package layout
 
 import (
 	"errors"
+	"math"
 	"sort"
 
 	"github.com/bnema/vev/internal/domain"
@@ -11,14 +12,198 @@ var (
 	ErrNotFound      = errors.New("pane not found")
 	ErrTooSmall      = errors.New("layout too small")
 	ErrNoPane        = errors.New("no pane in direction")
+	ErrNotInSplit    = errors.New("pane is not in a split")
 	ErrNotToggleable = errors.New("layout node is not toggleable")
 )
+
+// ResizeFocus changes the focused pane subtree's share in the nearest split on
+// axis. It commits only after the candidate layout solves successfully.
+func (t *Tree) ResizeFocus(axis Axis, delta int, area domain.Rect) error {
+	candidate := t.clone()
+	if candidate == nil || candidate.Root == nil {
+		return ErrNotInSplit
+	}
+	dir, ok := splitDirForAxis(axis)
+	if !ok || !hasMatchingSplit(candidate.Root, candidate.Focus, dir) {
+		return ErrNotInSplit
+	}
+	if _, solved := Solve(candidate.Root, area); !solved {
+		return ErrTooSmall
+	}
+
+	splitNode, splitArea, targetIndex, found := nearestMatchingSplit(candidate.Root, candidate.Focus, dir, area)
+	if !found {
+		return ErrTooSmall
+	}
+	rects, solved := splitChildRects(splitNode, splitArea)
+	if !solved {
+		return ErrTooSmall
+	}
+	extents := make([]int, len(rects))
+	minimums := make([]int, len(rects))
+	for i, rect := range rects {
+		extents[i] = rect.Width
+		if dir == Vertical {
+			extents[i] = rect.Height
+		}
+		minimum, valid := minimumExtent(splitNode.Children[i], dir)
+		if !valid {
+			return ErrTooSmall
+		}
+		minimums[i] = minimum
+		splitNode.Children[i].Weight = float64(extents[i])
+	}
+
+	requested := delta
+	if requested < 0 {
+		if requested == math.MinInt {
+			requested = math.MaxInt
+		} else {
+			requested = -requested
+		}
+	}
+	if requested == 0 {
+		return ErrTooSmall
+	}
+
+	neighbor := -1
+	transfer := 0
+	if delta > 0 {
+		for _, index := range preferredNeighbors(targetIndex, len(extents)) {
+			available := extents[index] - minimums[index]
+			if available <= 0 {
+				continue
+			}
+			neighbor = index
+			transfer = min(requested, available)
+			break
+		}
+	} else {
+		neighbors := preferredNeighbors(targetIndex, len(extents))
+		available := extents[targetIndex] - minimums[targetIndex]
+		if len(neighbors) > 0 && available > 0 {
+			neighbor = neighbors[0]
+			transfer = min(requested, available)
+		}
+	}
+	if neighbor < 0 || transfer == 0 {
+		return ErrTooSmall
+	}
+
+	if delta > 0 {
+		extents[targetIndex] += transfer
+		extents[neighbor] -= transfer
+	} else {
+		extents[targetIndex] -= transfer
+		extents[neighbor] += transfer
+	}
+	splitNode.Children[targetIndex].Weight = float64(extents[targetIndex])
+	splitNode.Children[neighbor].Weight = float64(extents[neighbor])
+	if _, solved := Solve(candidate.Root, area); !solved {
+		return ErrTooSmall
+	}
+	*t = *candidate
+	return nil
+}
+
+// Equalize resets every split's direct child shares to their defaults. The
+// candidate must remain solvable before it is committed.
+func (t *Tree) Equalize(area domain.Rect) error {
+	candidate := t.clone()
+	if candidate == nil || candidate.Root == nil {
+		return ErrTooSmall
+	}
+	clearSplitChildWeights(candidate.Root)
+	if _, ok := Solve(candidate.Root, area); !ok {
+		return ErrTooSmall
+	}
+	*t = *candidate
+	return nil
+}
+
+// CanResize reports whether the focused pane is contained by any split.
+func (t *Tree) CanResize() bool {
+	if t == nil || t.Root == nil {
+		return false
+	}
+	return hasMatchingSplit(t.Root, t.Focus, Horizontal) || hasMatchingSplit(t.Root, t.Focus, Vertical)
+}
+
+func splitDirForAxis(axis Axis) (SplitDir, bool) {
+	switch axis {
+	case Width:
+		return Horizontal, true
+	case Height:
+		return Vertical, true
+	default:
+		return Horizontal, false
+	}
+}
+
+func hasMatchingSplit(n *Node, focus PaneID, dir SplitDir) bool {
+	if n == nil || !containsLeaf(n, focus) {
+		return false
+	}
+	for _, child := range n.Children {
+		if containsLeaf(child, focus) && hasMatchingSplit(child, focus, dir) {
+			return true
+		}
+	}
+	return n.Kind == Split && n.Dir == dir
+}
+
+func nearestMatchingSplit(n *Node, focus PaneID, dir SplitDir, area domain.Rect) (*Node, domain.Rect, int, bool) {
+	if n == nil || !containsLeaf(n, focus) {
+		return nil, domain.Rect{}, 0, false
+	}
+	childAreas := nodeChildAreas(n, area)
+	for i, child := range n.Children {
+		if !containsLeaf(child, focus) {
+			continue
+		}
+		childArea := area
+		if i < len(childAreas) {
+			childArea = childAreas[i]
+		}
+		if match, matchArea, index, ok := nearestMatchingSplit(child, focus, dir, childArea); ok {
+			return match, matchArea, index, true
+		}
+		if n.Kind == Split && n.Dir == dir {
+			return n, area, i, true
+		}
+		return nil, domain.Rect{}, 0, false
+	}
+	return nil, domain.Rect{}, 0, false
+}
+
+func preferredNeighbors(target, count int) []int {
+	neighbors := make([]int, 0, 2)
+	if target+1 < count {
+		neighbors = append(neighbors, target+1)
+	}
+	if target > 0 {
+		neighbors = append(neighbors, target-1)
+	}
+	return neighbors
+}
+
+func clearSplitChildWeights(n *Node) {
+	if n == nil {
+		return
+	}
+	if n.Kind == Split {
+		clearChildWeights(n)
+	}
+	for _, child := range n.Children {
+		clearSplitChildWeights(child)
+	}
+}
 
 // Split adds newID next to target. The after flag controls whether the new pane
 // is placed after target on the chosen axis.
 func (t *Tree) Split(target PaneID, dir Direction, after bool, newID PaneID, area domain.Rect) error {
 	candidate := t.clone()
-	if candidate == nil || candidate.Root == nil || !insertSplit(candidate.Root, target, axisFor(dir), after, newID) {
+	if candidate == nil || candidate.Root == nil || !insertSplit(candidate.Root, target, axisFor(dir), after, newID, area) {
 		return ErrNotFound
 	}
 	candidate.Focus = newID
@@ -29,14 +214,16 @@ func (t *Tree) Split(target PaneID, dir Direction, after bool, newID PaneID, are
 	return nil
 }
 
-func insertSplit(n *Node, target PaneID, axis SplitDir, after bool, newID PaneID) bool {
+func insertSplit(n *Node, target PaneID, axis SplitDir, after bool, newID PaneID, area domain.Rect) bool {
 	if n == nil {
 		return false
 	}
+	childAreas := nodeChildAreas(n, area)
 	for i, child := range n.Children {
 		if child.Kind == Leaf && child.Leaf == target {
 			newLeaf := NewLeaf(newID)
 			if n.Kind == Split && n.Dir == axis {
+				normalizeChildWeightsFromArea(n, area)
 				at := i
 				if after {
 					at++
@@ -47,34 +234,80 @@ func insertSplit(n *Node, target PaneID, axis SplitDir, after bool, newID PaneID
 				return true
 			}
 			if n.Kind == Stack {
+				weight := n.Weight
 				stack := n.clone()
+				stack.Weight = 0
+				clearChildWeights(stack)
 				children := []*Node{stack, newLeaf}
 				if !after {
 					children = []*Node{newLeaf, stack}
 				}
-				*n = Node{Kind: Split, Dir: axis, Children: children}
+				*n = Node{Kind: Split, Dir: axis, Children: children, Weight: weight}
 				return true
 			}
+			weight := child.Weight
+			child.Weight = 0
 			children := []*Node{child, newLeaf}
 			if !after {
 				children = []*Node{newLeaf, child}
 			}
-			n.Children[i] = &Node{Kind: Split, Dir: axis, Children: children}
+			n.Children[i] = &Node{Kind: Split, Dir: axis, Children: children, Weight: weight}
 			return true
 		}
-		if insertSplit(child, target, axis, after, newID) {
+		childArea := area
+		if i < len(childAreas) {
+			childArea = childAreas[i]
+		}
+		if insertSplit(child, target, axis, after, newID, childArea) {
 			return true
 		}
 	}
 	if n.Kind == Leaf && n.Leaf == target {
-		children := []*Node{n.clone(), NewLeaf(newID)}
+		weight := n.Weight
+		existing := n.clone()
+		existing.Weight = 0
+		children := []*Node{existing, NewLeaf(newID)}
 		if !after {
-			children = []*Node{NewLeaf(newID), n.clone()}
+			children = []*Node{NewLeaf(newID), existing}
 		}
-		*n = Node{Kind: Split, Dir: axis, Children: children}
+		*n = Node{Kind: Split, Dir: axis, Children: children, Weight: weight}
 		return true
 	}
 	return false
+}
+
+func nodeChildAreas(n *Node, area domain.Rect) []domain.Rect {
+	if n.Kind == Split {
+		rects, ok := splitChildRects(n, area)
+		if ok {
+			return rects
+		}
+	}
+	areas := make([]domain.Rect, len(n.Children))
+	for i := range areas {
+		areas[i] = area
+	}
+	return areas
+}
+
+func normalizeChildWeightsFromArea(n *Node, area domain.Rect) {
+	rects, ok := splitChildRects(n, area)
+	if !ok || len(rects) == 0 {
+		return
+	}
+	for i, rect := range rects {
+		extent := rect.Width
+		if n.Dir == Vertical {
+			extent = rect.Height
+		}
+		n.Children[i].Weight = float64(extent)
+	}
+}
+
+func clearChildWeights(n *Node) {
+	for _, child := range n.Children {
+		child.Weight = 0
+	}
 }
 
 // StackNew puts newID in target's stack, creating one if target is not stacked.
@@ -100,13 +333,16 @@ func stackNew(n *Node, target, newID PaneID) bool {
 			if child.Kind == Leaf && child.Leaf == target {
 				n.Children = append(n.Children, NewLeaf(newID))
 				n.Expanded = newID
+				clearChildWeights(n)
 				return true
 			}
 		}
 	}
 	for i, child := range n.Children {
 		if child.Kind == Leaf && child.Leaf == target {
-			n.Children[i] = &Node{Kind: Stack, Children: []*Node{child, NewLeaf(newID)}, Expanded: newID}
+			weight := child.Weight
+			child.Weight = 0
+			n.Children[i] = &Node{Kind: Stack, Children: []*Node{child, NewLeaf(newID)}, Expanded: newID, Weight: weight}
 			return true
 		}
 		if stackNew(child, target, newID) {
@@ -114,7 +350,8 @@ func stackNew(n *Node, target, newID PaneID) bool {
 		}
 	}
 	if n.Kind == Leaf && n.Leaf == target {
-		*n = Node{Kind: Stack, Children: []*Node{NewLeaf(target), NewLeaf(newID)}, Expanded: newID}
+		weight := n.Weight
+		*n = Node{Kind: Stack, Children: []*Node{NewLeaf(target), NewLeaf(newID)}, Expanded: newID, Weight: weight}
 		return true
 	}
 	return false
@@ -169,11 +406,13 @@ func toggleStack(n *Node, target PaneID) toggleResult {
 		n.Kind = Split
 		n.Dir = Vertical
 		n.Expanded = ""
+		clearChildWeights(n)
 		return toggleToggled
 	}
 	if n.Kind == Split && len(n.Children) == 2 && splitDirectLeavesContain(n, target) {
 		n.Kind = Stack
 		n.Expanded = target
+		clearChildWeights(n)
 		return toggleToggled
 	}
 	return toggleNotToggleable
@@ -252,16 +491,13 @@ func closeNode(n *Node, target PaneID) (*Node, bool) {
 	if !removed {
 		return n, false
 	}
-	if n.Kind == Stack {
-		if n.Expanded == target && len(n.Children) > 0 {
-			n.Expanded = firstLeaf(n.Children[0])
-		}
-		if len(n.Children) == 1 {
-			return n.Children[0], true
-		}
+	if n.Kind == Stack && n.Expanded == target && len(n.Children) > 0 {
+		n.Expanded = firstLeaf(n.Children[0])
 	}
-	if n.Kind == Split && len(n.Children) == 1 {
-		return n.Children[0], true
+	if (n.Kind == Stack || n.Kind == Split) && len(n.Children) == 1 {
+		promoted := n.Children[0]
+		promoted.Weight = n.Weight
+		return promoted, true
 	}
 	return n, true
 }

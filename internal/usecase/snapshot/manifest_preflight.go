@@ -43,10 +43,13 @@ func preflightManifest(body []byte) error {
 			return err
 		}
 	}
-	return r.done()
+	return preflightManifestWeights(&r, budget.nodes)
 }
 
-type manifestPreflightBudget struct{ allocation uint64 }
+type manifestPreflightBudget struct {
+	allocation uint64
+	nodes      uint32
+}
 
 func (b *manifestPreflightBudget) add(n uint64) bool {
 	if n > maxSnapshotDecodedAllocation-b.allocation {
@@ -158,6 +161,7 @@ func preflightManifestNode(r *payloadReader, depth int, root bool, budget *manif
 		if err != nil {
 			return err
 		}
+		budget.nodes++
 		*refs = append(*refs, layout.PaneID(leaf))
 		return nil
 	case manifestNodeSplit:
@@ -184,6 +188,7 @@ func preflightManifestNode(r *payloadReader, depth int, root bool, budget *manif
 	default:
 		return fmt.Errorf("%w: node kind", ErrInvalidData)
 	}
+	budget.nodes++
 	n, err := r.getUint16()
 	if err != nil {
 		return err
@@ -197,6 +202,10 @@ func preflightManifestNode(r *payloadReader, depth int, root bool, budget *manif
 		}
 	}
 	return nil
+}
+
+func preflightManifestWeights(r *payloadReader, wantNodes uint32) error {
+	return readManifestWeightExtension(r, uint64(wantNodes), nil)
 }
 
 func preflightManifestPane(r *payloadReader, budget *manifestPreflightBudget) (layout.PaneID, error) {

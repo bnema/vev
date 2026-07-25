@@ -105,6 +105,10 @@ type session struct {
 	syncGen atomic.Uint64
 	// coordinator fans in this session's producer render invalidations.
 	coordinator atomic.Pointer[renderCoordinator]
+	// layoutApplyMu serializes whole-session resize prepare/apply/admit/publish
+	// transactions. It is deliberately not an architecture lock and may span
+	// external PTY.Resize calls.
+	layoutApplyMu sync.Mutex
 	// clipFiles records clipboard-image-transfer temp file paths (see
 	// clipboard.go) written for this session, removed best-effort in
 	// killSession.
@@ -121,6 +125,17 @@ type session struct {
 // tab is a pane layout container; pane owns PTY/screen/scrollback/render scheduling state.
 type tab struct {
 	mu sync.Mutex // guards tree, panes, floating, nextPaneID, size, and pane map membership
+
+	// layoutGeneration invalidates prepared geometry whenever live tab layout
+	// state changes. layoutApplyMu serializes the lock-free PTY apply boundary.
+	layoutGeneration uint64
+	layoutApplyMu    sync.Mutex
+	// layoutRetryMu owns the one bounded delayed retry worker for accepted
+	// tiled-layout degradation. Its context is derived from ctx, so tab/session
+	// teardown cancels a waiting retry before it can touch PTY state.
+	layoutRetryMu      sync.Mutex
+	layoutRetryCancel  context.CancelFunc
+	layoutRetryRunning bool
 
 	stableID   string
 	name       string
@@ -433,6 +448,10 @@ func newTabWithStableID(tabStableID, paneStableID string, pty ports.PTY, sz doma
 		nextPaneID: 2,
 		size:       sz,
 	}
+}
+
+func (tb *tab) bumpLayoutGenerationLocked() {
+	tb.layoutGeneration++
 }
 
 func (tb *tab) focusedPane() *pane {

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"math"
 	"strconv"
 	"strings"
 
@@ -66,8 +67,39 @@ func solveTabLayoutLocked(tb *tab) tabLayoutSnapshot {
 
 func layoutFingerprint(root *layout.Node) string {
 	var b strings.Builder
+	b.Grow(layoutFingerprintLength(root))
 	writeLayoutFingerprint(&b, root)
 	return b.String()
+}
+
+const weightFingerprintMaxLength = 16
+
+func layoutFingerprintLength(n *layout.Node) int {
+	if n == nil {
+		return 1
+	}
+	length := 2 + weightFingerprintMaxLength + 1 + paneIDFingerprintLength(n.Leaf) + 1 + paneIDFingerprintLength(n.Expanded) + 2
+	for _, child := range n.Children {
+		length += layoutFingerprintLength(child) + 1
+	}
+	return length
+}
+
+func paneIDFingerprintLength(id layout.PaneID) int {
+	length := len(id)
+	return decimalDigits(length) + 1 + length
+}
+
+func decimalDigits(value int) int {
+	if value == 0 {
+		return 1
+	}
+	digits := 0
+	for value > 0 {
+		value /= 10
+		digits++
+	}
+	return digits
 }
 
 func writeLayoutFingerprint(b *strings.Builder, n *layout.Node) {
@@ -77,6 +109,8 @@ func writeLayoutFingerprint(b *strings.Builder, n *layout.Node) {
 	}
 	b.WriteByte(byte('0' + n.Kind))
 	b.WriteByte(byte('0' + n.Dir))
+	writeWeightFingerprint(b, n.Weight)
+	b.WriteByte('|')
 	writePaneIDFingerprint(b, n.Leaf)
 	b.WriteByte('|')
 	writePaneIDFingerprint(b, n.Expanded)
@@ -86,6 +120,22 @@ func writeLayoutFingerprint(b *strings.Builder, n *layout.Node) {
 		b.WriteByte(',')
 	}
 	b.WriteByte(']')
+}
+
+func writeWeightFingerprint(b *strings.Builder, weight float64) {
+	const hex = "0123456789abcdef"
+	bits := math.Float64bits(weight)
+	started := false
+	for shift := uint(60); ; shift -= 4 {
+		digit := byte(bits >> shift & 0xf)
+		if digit != 0 || started || shift == 0 {
+			b.WriteByte(hex[digit])
+			started = true
+		}
+		if shift == 0 {
+			return
+		}
+	}
 }
 
 func writePaneIDFingerprint(b *strings.Builder, id layout.PaneID) {
@@ -99,12 +149,19 @@ func pointInRect(col, row int, r domain.Rect) bool {
 	return r.Width > 0 && r.Height > 0 && col >= r.X && col < r.X+r.Width && row >= r.Y && row < r.Y+r.Height
 }
 
-func focusPlacementLocked(tb *tab, id layout.PaneID) {
+func focusPlacementLocked(tb *tab, id layout.PaneID) bool {
 	if tb == nil || tb.tree == nil {
-		return
+		return false
 	}
+	oldFocus := tb.tree.Focus
+	oldLayout := layoutFingerprint(tb.tree.Root)
 	tb.tree.Focus = id
 	setExpandedLocked(tb.tree.Root, id)
+	changed := oldFocus != tb.tree.Focus || oldLayout != layoutFingerprint(tb.tree.Root)
+	if changed {
+		tb.bumpLayoutGenerationLocked()
+	}
+	return changed
 }
 
 func setExpandedLocked(n *layout.Node, id layout.PaneID) bool {

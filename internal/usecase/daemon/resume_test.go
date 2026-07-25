@@ -372,8 +372,9 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	tb.mu.Lock()
 	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-1"}
 	tb.panes[closed.id] = closed
-	d.applyLayoutLocked(tb)
+	tb.bumpLayoutGenerationLocked()
 	tb.mu.Unlock()
+	d.applyTabLayout(sess, tb)
 	survivor.screen.Write([]byte("survivor"))
 	closed.screen.Write([]byte("closed"))
 	d.paint(sess, ac, true, nil)

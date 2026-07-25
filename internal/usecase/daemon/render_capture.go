@@ -86,7 +86,7 @@ type capturedFloatingRenderState struct {
 
 type capturedOverlayRenderState struct {
 	copyActive, copySearchActive, pickerActive, paletteActive, promptActive bool
-	noticesOverlayActive                                                    bool
+	noticesOverlayActive, resizeActive                                      bool
 	copyMode                                                                *scopy.Mode
 	copyPaneID                                                              layout.PaneID
 	statusFeedback                                                          string

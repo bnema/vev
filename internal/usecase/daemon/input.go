@@ -36,7 +36,7 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	frameEvent := ev
 	ac.initOverlays()
 	rt := ac.overlays
-	if rt.promptActive() || rt.paletteActive() || rt.pickerActive() || rt.noticesActive() {
+	if rt.promptActive() || rt.paletteActive() || rt.pickerActive() || rt.noticesActive() || rt.resizeModeActive() {
 		return
 	}
 	sess := ac.currentSession()
@@ -89,9 +89,11 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 			return
 		}
 		oldFocus := focusedID
-		focusPlacementLocked(tb, pl.ID)
-		d.applyLayoutLocked(tb)
+		layoutChanged := focusPlacementLocked(tb, pl.ID)
 		tb.mu.Unlock()
+		if layoutChanged {
+			d.applyTabLayout(sess, tb)
+		}
 		// A title bar never routes to terminal content. Clear any pre-existing
 		// left-button candidate before handling the focus result, including when
 		// this press leaves the same pane focused.
@@ -108,13 +110,16 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	hoveredFocused := true
 	if hit && !pl.Collapsed && pointInRect(ev.Col, contentRow, pl.Content) {
 		oldFocus := focusedID
+		layoutChanged := false
 		if isMouseFocusPress(ev) {
-			focusPlacementLocked(tb, pl.ID)
-			d.applyLayoutLocked(tb)
+			layoutChanged = focusPlacementLocked(tb, pl.ID)
 		}
 		p = tb.panes[pl.ID]
 		hoveredFocused = pl.ID == oldFocus
 		tb.mu.Unlock()
+		if layoutChanged {
+			d.applyTabLayout(sess, tb)
+		}
 		if p == nil {
 			invalidateRejectedLeftPointer(rt, ev)
 			return
@@ -261,8 +266,9 @@ func sgrOffset(raw []byte, colDelta, rowDelta int) []byte {
 }
 
 type daemonKeyHandler struct {
-	d  *Daemon
-	ac *attachedClient
+	d       *Daemon
+	ac      *attachedClient
+	actions daemonActionRunner
 }
 
 func (h daemonKeyHandler) Forward(data []byte) {
@@ -284,6 +290,20 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 	sess := h.ac.currentSession()
 	if sess == nil {
 		return
+	}
+	runResizeAction := func(request daemonActionRequest) {
+		request.target = resolveDaemonActionTarget(sess)
+		runner := h.actions
+		if runner == nil {
+			runner = daemonActions{d: h.d}
+		}
+		if err := runner.Run(request); err != nil {
+			h.d.reportError(sess, resizeUserError(err))
+			return
+		}
+		if h.actions == nil {
+			finishDaemonActionForClient(h.d, request, h.ac, "input.go")
+		}
 	}
 	switch action {
 	case keys.ActionOpenPalette:
@@ -313,6 +333,16 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 		if err := h.d.focusDir(sess, h.ac, layout.Down); err != nil {
 			h.d.reportError(sess, err)
 		}
+	case keys.ActionGrowPaneWidth:
+		runResizeAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Width, delta: resizeStepCols})
+	case keys.ActionShrinkPaneWidth:
+		runResizeAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Width, delta: -resizeStepCols})
+	case keys.ActionGrowPaneHeight:
+		runResizeAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Height, delta: resizeStepRows})
+	case keys.ActionShrinkPaneHeight:
+		runResizeAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Height, delta: -resizeStepRows})
+	case keys.ActionEqualizePanes:
+		runResizeAction(daemonActionRequest{kind: daemonActionEqualizePanes})
 	case keys.ActionSwitchTab1, keys.ActionSwitchTab2, keys.ActionSwitchTab3,
 		keys.ActionSwitchTab4, keys.ActionSwitchTab5, keys.ActionSwitchTab6,
 		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:

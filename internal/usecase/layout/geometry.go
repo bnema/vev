@@ -1,10 +1,23 @@
 package layout
 
-import "github.com/bnema/vev/internal/domain"
+import (
+	"math"
+	"sort"
+
+	"github.com/bnema/vev/internal/domain"
+)
 
 // Solve returns deterministic pane placements for root inside area.
 func Solve(root *Node, area domain.Rect) ([]Placement, bool) {
 	if root == nil || area.Width <= 0 || area.Height <= 0 {
+		return nil, false
+	}
+	minWidth, ok := minimumExtent(root, Horizontal)
+	if !ok || area.Width < minWidth {
+		return nil, false
+	}
+	minHeight, ok := minimumExtent(root, Vertical)
+	if !ok || area.Height < minHeight {
 		return nil, false
 	}
 	var out []Placement
@@ -32,50 +45,207 @@ func solve(n *Node, r domain.Rect, out *[]Placement) bool {
 }
 
 func solveSplit(n *Node, r domain.Rect, out *[]Placement) bool {
-	count := len(n.Children)
-	if count == 0 {
+	rects, ok := splitChildRects(n, r)
+	if !ok {
 		return false
 	}
-	if count == 1 {
-		return solve(n.Children[0], r, out)
-	}
-	if n.Dir == Horizontal {
-		usable := r.Width - (count - 1)
-		if usable < count*MinPaneCols || r.Height < MinPaneRows {
-			return false
-		}
-		base, rem := usable/count, usable%count
-		x := r.X
-		for i, child := range n.Children {
-			w := base
-			if i < rem {
-				w++
-			}
-			if !solve(child, domain.Rect{X: x, Y: r.Y, Width: w, Height: r.Height}, out) {
-				return false
-			}
-			x += w + 1
-		}
-		return true
-	}
-
-	usable := r.Height - (count - 1)
-	if usable < count*MinPaneRows || r.Width < MinPaneCols {
-		return false
-	}
-	base, rem := usable/count, usable%count
-	y := r.Y
 	for i, child := range n.Children {
-		h := base
-		if i < rem {
-			h++
-		}
-		if !solve(child, domain.Rect{X: r.X, Y: y, Width: r.Width, Height: h}, out) {
+		if !solve(child, rects[i], out) {
 			return false
 		}
-		y += h + 1
 	}
 	return true
+}
+
+func splitChildRects(n *Node, r domain.Rect) ([]domain.Rect, bool) {
+	count := len(n.Children)
+	if count == 0 {
+		return nil, false
+	}
+	if count == 1 {
+		return []domain.Rect{r}, true
+	}
+
+	total := r.Width
+	if n.Dir == Vertical {
+		total = r.Height
+	}
+	usable := total - (count - 1)
+	minimums := make([]int, count)
+	weights := make([]float64, count)
+	for i, child := range n.Children {
+		minimum, ok := minimumExtent(child, n.Dir)
+		if !ok {
+			return nil, false
+		}
+		minimums[i] = minimum
+		weights[i] = effectiveWeight(child.Weight)
+	}
+	extents, ok := distribute(usable, minimums, weights)
+	if !ok {
+		return nil, false
+	}
+
+	rects := make([]domain.Rect, count)
+	x, y := r.X, r.Y
+	for i, extent := range extents {
+		if n.Dir == Horizontal {
+			rects[i] = domain.Rect{X: x, Y: r.Y, Width: extent, Height: r.Height}
+			x += extent + 1
+			continue
+		}
+		rects[i] = domain.Rect{X: r.X, Y: y, Width: r.Width, Height: extent}
+		y += extent + 1
+	}
+	return rects, true
+}
+
+func effectiveWeight(weight float64) float64 {
+	if weight <= 0 || math.IsNaN(weight) || math.IsInf(weight, 0) {
+		return 1
+	}
+	return weight
+}
+
+func minimumExtent(n *Node, axis SplitDir) (int, bool) {
+	if n == nil {
+		return 0, false
+	}
+	switch n.Kind {
+	case Leaf:
+		if axis == Horizontal {
+			return MinPaneCols, true
+		}
+		return MinPaneRows, true
+	case Stack:
+		if len(n.Children) == 0 {
+			return 0, false
+		}
+		for _, child := range n.Children {
+			if child == nil || child.Kind != Leaf {
+				return 0, false
+			}
+		}
+		if axis == Horizontal {
+			return MinPaneCols, true
+		}
+		return len(n.Children) + 1, true
+	case Split:
+		if len(n.Children) == 0 {
+			return 0, false
+		}
+		if n.Dir == axis {
+			total := len(n.Children) - 1
+			for _, child := range n.Children {
+				minimum, ok := minimumExtent(child, axis)
+				if !ok {
+					return 0, false
+				}
+				total += minimum
+			}
+			return total, true
+		}
+		largest := 0
+		for _, child := range n.Children {
+			minimum, ok := minimumExtent(child, axis)
+			if !ok {
+				return 0, false
+			}
+			largest = max(largest, minimum)
+		}
+		return largest, true
+	default:
+		return 0, false
+	}
+}
+
+// distribute allocates total integer cells proportionally while respecting each
+// child's minimum. It uses stable largest-remainder rounding after all
+// constrained children have been pinned.
+func distribute(total int, minimums []int, weights []float64) ([]int, bool) {
+	if total < 0 || len(minimums) == 0 || len(minimums) != len(weights) {
+		return nil, false
+	}
+	minimumTotal := 0
+	for _, minimum := range minimums {
+		if minimum < 0 {
+			return nil, false
+		}
+		minimumTotal += minimum
+	}
+	if minimumTotal > total {
+		return nil, false
+	}
+
+	allocations := make([]int, len(minimums))
+	active := make([]bool, len(minimums))
+	for i := range active {
+		active[i] = true
+	}
+	remaining := total
+
+	for {
+		largest, sum := activeWeightScale(weights, active)
+		var pinned []int
+		for i := range active {
+			if !active[i] {
+				continue
+			}
+			quota := float64(remaining) * (effectiveWeight(weights[i]) / largest) / sum
+			if quota < float64(minimums[i]) {
+				pinned = append(pinned, i)
+			}
+		}
+		if len(pinned) == 0 {
+			break
+		}
+		for _, i := range pinned {
+			allocations[i] = minimums[i]
+			remaining -= minimums[i]
+			active[i] = false
+		}
+	}
+
+	largest, sum := activeWeightScale(weights, active)
+	type remainder struct {
+		index    int
+		fraction float64
+	}
+	remainders := make([]remainder, 0, len(weights))
+	allocated := total - remaining
+	for i := range active {
+		if !active[i] {
+			continue
+		}
+		quota := float64(remaining) * (effectiveWeight(weights[i]) / largest) / sum
+		whole := int(math.Floor(quota))
+		allocations[i] = whole
+		allocated += whole
+		remainders = append(remainders, remainder{index: i, fraction: quota - float64(whole)})
+	}
+	sort.SliceStable(remainders, func(i, j int) bool {
+		return remainders[i].fraction > remainders[j].fraction
+	})
+	for cells, i := total-allocated, 0; cells > 0; cells, i = cells-1, i+1 {
+		allocations[remainders[i%len(remainders)].index]++
+	}
+	return allocations, true
+}
+
+func activeWeightScale(weights []float64, active []bool) (float64, float64) {
+	largest := 0.0
+	for i, weight := range weights {
+		if active[i] {
+			largest = math.Max(largest, effectiveWeight(weight))
+		}
+	}
+	sum := 0.0
+	for i, weight := range weights {
+		if active[i] {
+			sum += effectiveWeight(weight) / largest
+		}
+	}
+	return largest, sum
 }
 
 func solveStack(n *Node, r domain.Rect, out *[]Placement) bool {

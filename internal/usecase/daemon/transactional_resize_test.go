@@ -181,6 +181,25 @@ func TestProcessPTYDataRetainsCallbacksDuringResizeReplay(t *testing.T) {
 // invoke PTY.Resize after all session/tab/pane locks are released. This is the
 // deadlock boundary with PTY readers and scripts which synchronously re-enter
 // daemon state.
+func TestApplySessionLayoutStopsRetryWhenSessionCanceled(t *testing.T) {
+	pty := &transactionalResizePTY{}
+	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+	tb, p := sess.activeTab(), sess.activeTab().focusedPane()
+	d.beforeSessionResizePublication = sess.cancel
+
+	_, ok := d.applySessionLayout(sess, domain.Size{Cols: 100, Rows: 30}, nil, nil)
+
+	require.False(t, ok)
+	require.Len(t, pty.requested(), 1, "cancellation must stop before a stale retry applies another PTY resize")
+	tb.mu.Lock()
+	require.Equal(t, domain.Size{Cols: 80, Rows: 23}, tb.size, "canceled session published a tab size")
+	tb.mu.Unlock()
+	p.mu.Lock()
+	require.Equal(t, domain.Rect{Width: 80, Height: 23}, p.rect, "canceled session published a pane rectangle")
+	require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height}, "canceled session published a VT size")
+	p.mu.Unlock()
+}
+
 func TestTransactionalResizeApplyDoesNotHoldTabOrPaneLocks(t *testing.T) {
 	pty := &transactionalResizePTY{}
 	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
@@ -204,105 +223,47 @@ func TestTransactionalResizeApplyDoesNotHoldTabOrPaneLocks(t *testing.T) {
 	require.True(t, paneUnlocked, "PTY.Resize must run outside pane.mu")
 }
 
-// P3 degradation: a failing PTY resize is surfaced as exactly one warn notice
-// per applyResize call, collected inside the resizeMu loop and reported once
-// after it returns to lock-free code. The count is the meaningful assertion:
-// notify acquires sess.mu/d.mu and must never run while any resizeMu is held.
-func TestTransactionalResizeApplyReportsFailureOncePerCall(t *testing.T) {
-	countResizeFailed := func(d *Daemon) (int, domain.Notification) {
-		var last domain.Notification
-		count := 0
-		for _, h := range d.notices.history() {
-			if h.Code == domain.NoticeResizeFailed {
-				count++
-				last = h
-			}
-		}
-		return count, last
-	}
-
-	t.Run("one failed member yields one notice after return", func(t *testing.T) {
-		failing := &transactionalResizePTY{errs: []error{errors.New("scripted resize failure")}}
-		d, sess, _, _ := newManualSessionWithPTYs(t, failing)
-		tb := sess.activeTab()
-		p := tb.focusedPane()
-		plan := resizePlan{members: []resizeMember{{session: sess, tab: tb, pane: p, rect: domain.Rect{Width: 100, Height: 20}, retry: true}}}
-
-		require.Empty(t, d.notices.history(), "no notice is recorded before applyResize")
-		require.True(t, d.applyResize(&plan))
-
-		count, n := countResizeFailed(d)
-		require.Equal(t, 1, count, "exactly one NoticeResizeFailed per applyResize call")
-		require.Equal(t, domain.NoticeWarn, n.Severity)
-		require.Equal(t, "pane resize failed; retrying in background", n.Message)
-		require.False(t, plan.members[0].ok, "failed member is not marked ok")
-	})
-
-	for _, tt := range []struct {
-		name       string
-		firstErr   error
-		secondErr  error
-		current    func() bool
-		wantResult bool
-		wantCount  int
+// S3 acceptance: a failed member never publishes speculative parser/screen or
+// rectangle state. Successful members and the client layout commit together;
+// composition clips/pads the retained failed screen against that new layout.
+func TestApplySessionLayoutReportsResizeFailuresOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		failureCount      int
+		wantOK            bool
+		wantFailed        int
+		wantFailureNotice int
 	}{
-		{
-			name:       "normal completion reports one combined failure",
-			firstErr:   errors.New("first fails"),
-			secondErr:  errors.New("second fails"),
-			wantResult: true,
-			wantCount:  1,
-		},
-		{
-			name:      "stale current after failure still reports once",
-			firstErr:  errors.New("first fails"),
-			secondErr: errors.New("must not be resized"),
-			current: func() func() bool {
-				checks := 0
-				return func() bool {
-					checks++
-					return checks == 1
-				}
-			}(),
-			wantResult: false,
-			wantCount:  1,
-		},
-		{
-			name:       "normal completion without failure does not report",
-			wantResult: true,
-			wantCount:  0,
-		},
+		{name: "zero failures", wantOK: true},
+		{name: "one failure", failureCount: 1, wantOK: true, wantFailed: 1, wantFailureNotice: 1},
+		{name: "two failures", failureCount: 2, wantOK: true, wantFailed: 2, wantFailureNotice: 1},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			first := &transactionalResizePTY{errs: []error{tt.firstErr}}
-			second := &transactionalResizePTY{errs: []error{tt.secondErr}}
+		t.Run(tc.name, func(t *testing.T) {
+			first := &transactionalResizePTY{}
+			second := &transactionalResizePTY{}
+			if tc.failureCount >= 1 {
+				first.errs = []error{errors.New("first failure")}
+			}
+			if tc.failureCount >= 2 {
+				second.errs = []error{errors.New("second failure")}
+			}
 			d, sess, _, _ := newManualSessionWithPTYs(t, first, second)
-			tabs := sess.tabs
-			plan := resizePlan{members: []resizeMember{
-				{session: sess, tab: tabs[0], pane: tabs[0].focusedPane(), rect: domain.Rect{Width: 100, Height: 20}, retry: true},
-				{session: sess, tab: tabs[1], pane: tabs[1].focusedPane(), rect: domain.Rect{Width: 100, Height: 20}, retry: true},
-			}}
 
-			var got bool
-			if tt.current == nil {
-				got = d.applyResize(&plan)
-			} else {
-				got = d.applyResize(&plan, tt.current)
-			}
-			require.Equal(t, tt.wantResult, got)
+			failed, ok := d.applySessionLayout(sess, domain.Size{Cols: 100, Rows: 30}, nil, nil)
 
-			count, _ := countResizeFailed(d)
-			require.Equal(t, tt.wantCount, count, "one notice per applyResize call, including stale returns")
-			if !tt.wantResult {
-				require.Equal(t, []domain.Size(nil), second.requested(), "stale current check must stop before the next member")
+			require.Equal(t, tc.wantOK, ok)
+			require.Len(t, failed, tc.wantFailed)
+			count := 0
+			for _, notification := range d.notices.history() {
+				if notification.Code == domain.NoticeResizeFailed {
+					count++
+				}
 			}
+			require.Equal(t, tc.wantFailureNotice, count)
 		})
 	}
 }
 
-// S3 acceptance: a failed member never publishes speculative parser/screen or
-// rectangle state. Successful members and the client layout commit together;
-// composition clips/pads the retained failed screen against that new layout.
 func TestTransactionalResizePartialFailureCommitsOnlySuccessfulPTYState(t *testing.T) {
 	ok := &transactionalResizePTY{}
 	failed := &transactionalResizePTY{errs: []error{errors.New("scripted resize failure")}}
@@ -423,6 +384,140 @@ func TestTransactionalResizeEpochLifecycleAndRetryContract(t *testing.T) {
 // stopped.  Only the newest prepared epoch may apply, commit, and emit one full
 // frame. coordinatorMockClock is a generated MockClock/MockTimer harness; its
 // channels make callback order explicit and do not use wall-clock waits.
+func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing.T) {
+	first, second := &transactionalResizePTY{}, &transactionalResizePTY{}
+	d, sess, ac, _ := newManualSessionWithPTYs(t, first, second)
+	observer := &daemonRuntimeObserver{}
+	d.runtimeObserver = observer
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	lease := rc.attachmentLease(ac)
+	var newer uint64
+	d.beforeSessionResizePublication = func() {
+		// Final external PTY validation is complete, but epoch admission and
+		// every session-visible publication must still be pending.
+		for _, tb := range sess.tabs {
+			require.Equal(t, domain.Size{Cols: 80, Rows: 23}, tb.size)
+			p := tb.focusedPane()
+			p.mu.Lock()
+			require.Equal(t, domain.Rect{Width: 80, Height: 23}, p.rect)
+			require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height})
+			p.mu.Unlock()
+		}
+		require.False(t, sess.snapDirty.Load())
+		for _, mark := range observer.marks {
+			require.NotEqual(t, ports.RuntimeResizeCommitted, mark.Kind)
+		}
+		newer = rc.recordResizeRequestForLease(domain.Size{Cols: 120, Rows: 34}, ac, lease)
+		require.NotZero(t, newer)
+	}
+
+	require.False(t, d.requestTransactionalResize(sess, ac, domain.Size{Cols: 100, Rows: 30}, true))
+	d.beforeSessionResizePublication = nil
+	require.False(t, sess.snapDirty.Load(), "rejected epoch must not dirty the snapshot")
+	for _, tb := range sess.tabs {
+		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, tb.size, "rejected epoch published a tab size")
+		p := tb.focusedPane()
+		require.Equal(t, domain.Rect{Width: 80, Height: 23}, p.rect, "rejected epoch published a pane rectangle")
+		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height}, "rejected epoch published a VT size")
+	}
+
+	require.True(t, d.runResizeTransaction(sess, ac, lease, newer))
+	for _, tb := range sess.tabs {
+		require.Equal(t, domain.Size{Cols: 120, Rows: 32}, tb.size)
+		p := tb.focusedPane()
+		require.Equal(t, domain.Rect{Width: 120, Height: 32}, p.rect)
+		require.Equal(t, domain.Size{Cols: 120, Rows: 32}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height})
+	}
+	committed := 0
+	for _, mark := range observer.marks {
+		if mark.Kind == ports.RuntimeResizeCommitted {
+			committed++
+		}
+	}
+	require.Equal(t, 1, committed, "only the current epoch emits commit telemetry")
+	require.Equal(t, []domain.Size{{Cols: 100, Rows: 28}, {Cols: 120, Rows: 32}}, first.requested())
+	require.Equal(t, []domain.Size{{Cols: 100, Rows: 28}, {Cols: 120, Rows: 32}}, second.requested())
+}
+
+func TestStaleRemovedMemberGateIsCanceledOnceByFreshPlan(t *testing.T) {
+	pty := &transactionalResizePTY{}
+	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+	tb := sess.activeTab()
+	p := tb.focusedPane()
+	p.resizeApplying = true
+	p.resizePending = []byte("x")
+	plan := preparedTabLayout{members: []resizeMember{{session: sess, tab: tb, pane: p, rect: p.rect, screenResized: true}}}
+	tb.mu.Lock()
+	delete(tb.panes, p.id)
+	tb.bumpLayoutGenerationLocked()
+	tb.mu.Unlock()
+
+	d.finishPreparedTabMembers(&plan, false)
+	p.mu.Lock()
+	require.True(t, p.resizeApplying, "stale finalization must leave cancellation to the fresh-plan path")
+	p.mu.Unlock()
+	d.cancelStalePreparedGates(sess, tb, &plan)
+	p.mu.Lock()
+	require.False(t, p.resizeApplying)
+	require.Empty(t, p.resizePending)
+	p.mu.Unlock()
+}
+
+func TestHeadlessResizeRetriesInvalidatedPlan(t *testing.T) {
+	pty := &transactionalResizePTY{}
+	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+	tb := sess.activeTab()
+	var invalidate sync.Once
+	pty.onResize = func() {
+		invalidate.Do(func() {
+			tb.mu.Lock()
+			tb.bumpLayoutGenerationLocked()
+			tb.mu.Unlock()
+		})
+	}
+
+	require.True(t, d.requestTransactionalResize(sess, nil, domain.Size{Cols: 100, Rows: 30}, true))
+	require.Equal(t, []domain.Size{{Cols: 100, Rows: 28}, {Cols: 100, Rows: 28}}, pty.requested())
+	tb.mu.Lock()
+	require.Equal(t, domain.Size{Cols: 100, Rows: 28}, tb.size)
+	tb.mu.Unlock()
+}
+
+func TestTransactionalResizeRetriesAcceptedFloatingSlotByIdentity(t *testing.T) {
+	popupPTY := &transactionalResizePTY{errs: []error{errors.New("first popup resize fails")}}
+	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+	tb := sess.activeTab()
+	popup := newPane("popup", popupPTY, domain.Size{Cols: 80, Rows: 23})
+	tb.mu.Lock()
+	tb.floating = floatingSlot{state: floatingVisible, pane: popup, generation: 7}
+	tb.mu.Unlock()
+
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	lease := rc.attachmentLease(ac)
+	epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 80, Rows: 24}, ac, lease)
+	require.NotZero(t, epoch)
+	require.True(t, d.runResizeTransaction(sess, ac, lease, epoch))
+	first := popupPTY.requested()
+	require.Len(t, first, 1)
+
+	d.retryResizeMembers(sess, ac, lease, epoch, []resizeMember{{session: sess, tab: tb, pane: popup, isFloating: true, floatingGeneration: 7}})
+	retried := popupPTY.requested()
+	require.Len(t, retried, 2)
+	require.Equal(t, first[0], retried[1], "retry must use the current validated floating slot geometry")
+	popup.mu.Lock()
+	require.False(t, popup.resizeRetry)
+	popup.mu.Unlock()
+
+	replacementPTY := &transactionalResizePTY{}
+	replacement := newPane("replacement", replacementPTY, domain.Size{Cols: 80, Rows: 23})
+	replacement.resizeRetry = true
+	tb.mu.Lock()
+	tb.floating = floatingSlot{state: floatingVisible, pane: replacement, generation: 8}
+	tb.mu.Unlock()
+	d.retryResizeMembers(sess, ac, lease, epoch, []resizeMember{{session: sess, tab: tb, pane: popup, isFloating: true, floatingGeneration: 7}})
+	require.Empty(t, replacementPTY.requested(), "a replaced floating slot must not inherit an old retry")
+}
+
 func TestTransactionalResizeObsoleteTimerCallbacksCommitOnlyLatestEpoch(t *testing.T) {
 	clock := newCoordinatorMockClock(t, 8)
 	pty := &transactionalResizePTY{}

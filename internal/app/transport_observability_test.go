@@ -184,11 +184,15 @@ func TestRunAttachJoinsTraceCloseError(t *testing.T) {
 		return ports.NewSerializedRuntimeObserver(runtimeObserverFunc(func(ports.RuntimeMark) {}), 1), errorCloser{err: traceCloseErr}, nil
 	}
 	t.Cleanup(func() { newPerformanceTrace = original })
+	t.Setenv("VEV", "")
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv(envRemoteTransport, "invalid")
 
 	err := runAttach(context.Background(), ports.IntentEphemeral, "", "host")
+	if !strings.Contains(err.Error(), "invalid remote transport") {
+		t.Fatalf("runAttach() error = %v, want remote transport validation error", err)
+	}
 	if !errors.Is(err, traceCloseErr) {
 		t.Fatalf("runAttach() error = %v, want joined trace close error %v", err, traceCloseErr)
 	}
@@ -203,6 +207,7 @@ type runtimeObserverFunc func(ports.RuntimeMark)
 func (f runtimeObserverFunc) ObserveRuntime(mark ports.RuntimeMark) { f(mark) }
 
 func TestRunAttachPropagatesOneObserverToRemoteTransportFactory(t *testing.T) {
+	t.Setenv("VEV", "")
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv(envRemoteTransport, string(ports.RemoteTransportStdio))

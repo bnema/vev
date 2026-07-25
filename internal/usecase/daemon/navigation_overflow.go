@@ -228,17 +228,19 @@ func (d *Daemon) commitTabOverflow(sess *session, candidate tabOverflowCandidate
 		sess.mu.Unlock()
 		return false
 	}
-	if err := candidate.target.tree.FocusEnter(candidate.direction, candidate.span, area); err != nil {
+	targetTree := candidate.target.tree.Clone()
+	if err := targetTree.FocusEnter(candidate.direction, candidate.span, area); err != nil {
 		candidate.target.mu.Unlock()
 		candidate.source.mu.Unlock()
 		sess.mu.Unlock()
 		return false
 	}
-	d.applyLayoutLocked(candidate.target)
+	candidate.target.tree = targetTree
+	candidate.target.bumpLayoutGenerationLocked()
 	sess.active = targetIndex
 	candidate.target.mu.Unlock()
 	candidate.source.mu.Unlock()
 	sess.mu.Unlock()
-	markSnapshotDirty(sess)
+	d.applyTabLayout(sess, candidate.target)
 	return true
 }
