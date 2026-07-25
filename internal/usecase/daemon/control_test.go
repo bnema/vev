@@ -240,6 +240,34 @@ func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
 	active.mu.Unlock()
 	invoking.mu.Lock()
 	require.Len(t, invoking.panes, 2)
+	beforeFocus := invoking.tree.Focus
+	beforeGeneration := invoking.layoutGeneration
+	invoking.mu.Unlock()
+
+	grow := sendCommand(t, d, ports.CommandRequest{
+		Slug: "grow-pane-width", Self: true,
+		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
+	})
+	require.True(t, grow.OK, grow.Text)
+	invoking.mu.Lock()
+	require.Equal(t, beforeFocus, invoking.tree.Focus, "targeted resize must not refocus the tab")
+	require.Equal(t, beforeGeneration+1, invoking.layoutGeneration)
+	require.NotZero(t, invoking.tree.Root.Children[0].Weight, "resize must update the invoking tab's shares")
+	invoking.mu.Unlock()
+	active.mu.Lock()
+	require.Len(t, active.panes, 1, "--self resize must not mutate the active tab")
+	active.mu.Unlock()
+
+	equalize := sendCommand(t, d, ports.CommandRequest{
+		Slug: "equalize-panes", Self: true,
+		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
+	})
+	require.True(t, equalize.OK, equalize.Text)
+	invoking.mu.Lock()
+	require.Equal(t, beforeFocus, invoking.tree.Focus, "targeted equalize must not refocus the tab")
+	for _, child := range invoking.tree.Root.Children {
+		require.Zero(t, child.Weight, "equalize must clear each target-tab share")
+	}
 	invoking.mu.Unlock()
 }
 

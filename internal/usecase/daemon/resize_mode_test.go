@@ -83,6 +83,20 @@ func TestResizeControlHeadlessAndErrors(t *testing.T) {
 	require.Empty(t, equalized.Output)
 }
 
+func TestEnterResizeModeRejectsPaneOutsideSplit(t *testing.T) {
+	factory := &controlPTYFactory{}
+	d := newTestDaemon(t, factory, stubClock{})
+	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
+	sess := addControlSession(d, "work", "t_work", "p_work")
+	ac := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	ac.initOverlays()
+	ac.setSession(sess)
+
+	err := d.enterResizeMode(sess, ac)
+	require.ErrorIs(t, err, layout.ErrNotInSplit)
+	require.False(t, ac.overlays.resizeModeActive())
+}
+
 func TestResizeModeStateRenderingAndMouseConsumption(t *testing.T) {
 	factory := &controlPTYFactory{}
 	d := newTestDaemon(t, factory, stubClock{})
