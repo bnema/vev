@@ -309,35 +309,44 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 	if target.pane != nil {
 		oldFocus = target.pane.id
 	}
-	err := d.focusDirAt(sess, target.tab, target.pane, dir)
+	_, err := d.focusDirAt(sess, target.tab, target.pane, dir)
 	if err == nil && ac != nil {
-		target.tab.mu.Lock()
-		newFocus := target.tab.tree.Focus
-		pl, hasPlacement := focusedPlacementLocked(target.tab)
-		target.tab.mu.Unlock()
-		if newFocus != oldFocus {
-			d.exitCopyMode(ac)
-			if hasPlacement && pl.InStack {
-				d.refreshPaneTitleOnFocus(sess, newFocus)
-			}
-		}
-		d.invalidateRender(sess, ac, true, "pane_actions.go")
+		d.finishPaneFocusForClient(sess, ac, target.tab, oldFocus, "pane_actions.go")
 	}
 	return err
 }
 
-func (d *Daemon) focusDirAt(sess *session, tb *tab, target *pane, dir layout.Direction) error {
+// finishPaneFocusForClient applies the attachment lifecycle shared by every
+// successful directional focus move. Keep copy-mode exit before the optional
+// stack title refresh, and both before render invalidation.
+func (d *Daemon) finishPaneFocusForClient(sess *session, ac *attachedClient, tb *tab, oldFocus layout.PaneID, producer string) {
+	tb.mu.Lock()
+	newFocus := tb.tree.Focus
+	pl, hasPlacement := focusedPlacementLocked(tb)
+	tb.mu.Unlock()
+	if newFocus != oldFocus {
+		d.exitCopyMode(ac)
+		if hasPlacement && pl.InStack {
+			d.refreshPaneTitleOnFocus(sess, newFocus)
+		}
+	}
+	d.invalidateRender(sess, ac, true, producer)
+}
+
+func (d *Daemon) focusDirAt(sess *session, tb *tab, target *pane, dir layout.Direction) (domain.Rect, error) {
 	if tb == nil || target == nil {
-		return layout.ErrNotFound
+		return domain.Rect{}, layout.ErrNotFound
 	}
 	tb.mu.Lock()
 	if tb.tree == nil || tb.panes[target.id] != target || !layout.ContainsLeaf(tb.tree.Root, target.id) {
 		tb.mu.Unlock()
-		return layout.ErrNotFound
+		return domain.Rect{}, layout.ErrNotFound
 	}
 	oldFocus := target.id
 	tb.tree.Focus = oldFocus
-	err := tb.tree.FocusDir(dir, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
+	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
+	span, _ := tb.tree.FocusSpan(area)
+	err := tb.tree.FocusDir(dir, area)
 	newFocus := tb.tree.Focus
 	if err == nil {
 		d.applyLayoutLocked(tb)
@@ -347,7 +356,7 @@ func (d *Daemon) focusDirAt(sess *session, tb *tab, target *pane, dir layout.Dir
 		markSnapshotDirty(sess)
 	}
 	if errors.Is(err, layout.ErrNoPane) {
-		return errNoNeighbor
+		return span, errNoNeighbor
 	}
-	return err
+	return span, err
 }
