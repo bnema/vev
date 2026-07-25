@@ -464,6 +464,15 @@ func runDaemon() error {
 	return runWithLifecycleOwner(ctx, ipc.SocketDir(), platform.StateDir(), runDaemonOwned)
 }
 
+func constructDaemonBeforeSocketPublication(
+	construct func() *daemon.Daemon,
+	listen func() (ports.Listener, error),
+) (*daemon.Daemon, ports.Listener, error) {
+	d := construct()
+	ln, err := listen()
+	return d, ln, err
+}
+
 func runDaemonOwned(ctx context.Context) (retErr error) {
 	log, logCloser, err := configureLogging(logging.Daemon, true)
 	if err != nil {
@@ -522,11 +531,14 @@ func runDaemonOwned(ctx context.Context) (retErr error) {
 		return errors.Join(fmt.Errorf("vev: recover durable session transactions: %w", err), opened.Catalogue.Close())
 	}
 	log.Info("session persistence enabled", "path", storePath)
-	daemonOpts = append(daemonOpts, daemon.WithCatalogue(opened.Catalogue))
+	daemonOpts = append(daemonOpts, daemon.WithCatalogue(opened.Catalogue, opened.Records))
 
-	// Socket publication follows lifecycle acquisition, migration, and strict
-	// recovery. Any earlier failure leaves no apparently healthy daemon.
-	ln, err := ipc.Listen(ipc.SocketDir(), ipc.WithRuntimeObserver(observer))
+	// Construct the catalogue-backed expected-session registry before socket
+	// publication. Phase 3 snapshot restoration remains asynchronous in Serve.
+	d, ln, err := constructDaemonBeforeSocketPublication(
+		func() *daemon.Daemon { return daemon.New(pty.NewFactory(), clk, log, daemonOpts...) },
+		func() (ports.Listener, error) { return ipc.Listen(ipc.SocketDir(), ipc.WithRuntimeObserver(observer)) },
+	)
 	if err != nil {
 		closeErr := opened.Catalogue.Close()
 		log.Error("daemon listen failed", "socket_dir", ipc.SocketDir(), "err", err)
@@ -535,7 +547,6 @@ func runDaemonOwned(ctx context.Context) (retErr error) {
 	defer func() { _ = ln.Close() }()
 	log.Info("daemon starting", "socket", ln.Addr())
 
-	d := daemon.New(pty.NewFactory(), clk, log, daemonOpts...)
 	watchCtx, stopWatch := context.WithCancel(ctx)
 	defer stopWatch()
 	go func() {

@@ -21,6 +21,7 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/confirm"
+	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/pkg/kv"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -31,6 +32,23 @@ type fakeLifecycleOwnership struct {
 }
 
 func (o fakeLifecycleOwnership) Release() error { return o.release() }
+
+func TestCatalogueRegistryConstructionPrecedesSocketPublication(t *testing.T) {
+	var events []string
+	_, _, err := constructDaemonBeforeSocketPublication(
+		func() *daemon.Daemon {
+			events = append(events, "catalogue-registry")
+			return nil
+		},
+		func() (ports.Listener, error) {
+			require.Equal(t, []string{"catalogue-registry"}, events)
+			events = append(events, "socket-publication")
+			return nil, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"catalogue-registry", "socket-publication"}, events)
+}
 
 func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
 	t.Run("ownership prefix is exact", func(t *testing.T) {

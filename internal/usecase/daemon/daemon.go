@@ -119,6 +119,8 @@ type Daemon struct {
 	shellOverride                  bool
 	persist                        *persist.Persister
 	persistEnabled                 bool
+	catalogueRecords               []domain.CatalogueRecord
+	catalogueRecordsProvided       bool
 	// snapshotRepository is the sole checkpoint contract. legacySnapshots is
 	// read-only migration input and is never used for new writes.
 	snapshotRepository ports.SnapshotRepository
@@ -247,11 +249,14 @@ func WithStore(store ports.Store) Option {
 	}
 }
 
-// WithCatalogue installs the singular catalogue opened by startup.
-func WithCatalogue(catalogue *persist.Persister) Option {
+// WithCatalogue installs the singular catalogue and the strictly opened
+// records that define the daemon's expected-session registry at startup.
+func WithCatalogue(catalogue *persist.Persister, records []domain.CatalogueRecord) Option {
 	return func(d *Daemon) {
 		d.persist = catalogue
 		d.persistEnabled = catalogue != nil
+		d.catalogueRecords = append([]domain.CatalogueRecord(nil), records...)
+		d.catalogueRecordsProvided = true
 	}
 }
 
@@ -431,27 +436,32 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		allow := buildRestoreProcessAllowlist(domain.DefaultSnapshotRestoreProcesses())
 		d.restoreProcessAllowlist.Store(&allow)
 	}
-	if records, err := d.persist.LoadAll(); err != nil {
-		d.log.Warn("loading persisted sessions failed", "err", err)
-	} else {
-		var maxSeq uint64
-		var maxCreatedAt int64
-		hasCreatedAt := false
-		for _, r := range records {
-			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, incarnation: r.IncarnationID, lastUsedSeq: r.LastUsedSeq, tabNames: r.TabNames}
-			if !hasCreatedAt || r.CreatedAt > maxCreatedAt {
-				maxCreatedAt = r.CreatedAt
-				hasCreatedAt = true
-			}
-			if r.LastUsedSeq > maxSeq {
-				maxSeq = r.LastUsedSeq
-			}
+	records := d.catalogueRecords
+	if !d.catalogueRecordsProvided {
+		var err error
+		records, err = d.persist.LoadAll()
+		if err != nil {
+			d.log.Warn("loading persisted sessions failed", "err", err)
+			return d
 		}
-		if hasCreatedAt {
-			d.lastAllocatedCreatedAt = maxCreatedAt
-		}
-		d.mruSeq.Store(maxSeq)
 	}
+	var maxSeq uint64
+	var maxCreatedAt int64
+	hasCreatedAt := false
+	for _, r := range records {
+		d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, incarnation: r.IncarnationID, lastUsedSeq: r.LastUsedSeq, tabNames: append([]string(nil), r.TabNames...)}
+		if !hasCreatedAt || r.CreatedAt > maxCreatedAt {
+			maxCreatedAt = r.CreatedAt
+			hasCreatedAt = true
+		}
+		if r.LastUsedSeq > maxSeq {
+			maxSeq = r.LastUsedSeq
+		}
+	}
+	if hasCreatedAt {
+		d.lastAllocatedCreatedAt = maxCreatedAt
+	}
+	d.mruSeq.Store(maxSeq)
 	return d
 }
 

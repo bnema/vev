@@ -1765,6 +1765,20 @@ func TestNamedSessionLifecycleExhaustionDoesNotMutateSessionState(t *testing.T) 
 	require.Equal(t, stoppedSession{name: "retained", cwd: "/tmp", createdAt: 9}, d.stopped["retained"])
 }
 
+func TestCatalogueRecordsConstructExpectedSessionRegistry(t *testing.T) {
+	records := []domain.CatalogueRecord{
+		{Name: "alpha", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/alpha", CreatedAt: 7, LastUsedSeq: 11, TabNames: []string{"shell"}, RecoveryState: domain.RecoveryHealthy},
+		{Name: "work", IncarnationID: domain.IncarnationID{2}, Cwd: "/tmp/work", CreatedAt: 9, LastUsedSeq: 13, TabNames: []string{"editor", "logs"}, RecoveryState: domain.RecoveryDegraded, DegradedReason: "uncertain legacy checkpoint"},
+	}
+
+	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(persist.New(nil), records))
+
+	require.Equal(t, stoppedSession{name: "alpha", incarnation: domain.IncarnationID{1}, cwd: "/tmp/alpha", createdAt: 7, lastUsedSeq: 11, tabNames: []string{"shell"}}, d.stopped["alpha"])
+	require.Equal(t, stoppedSession{name: "work", incarnation: domain.IncarnationID{2}, cwd: "/tmp/work", createdAt: 9, lastUsedSeq: 13, tabNames: []string{"editor", "logs"}}, d.stopped["work"])
+	require.Equal(t, int64(9), d.lastAllocatedCreatedAt)
+	require.Equal(t, uint64(13), d.mruSeq.Load())
+}
+
 func TestNamedSessionLifecycleTimestampStartsAfterPersistedHighWaterMark(t *testing.T) {
 	store, _ := newMockStore(t)
 	seed := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithStore(store))
