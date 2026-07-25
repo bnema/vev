@@ -111,6 +111,15 @@ func NewScreenWithHistory(width, height int, config HistoryConfig) *Screen {
 // configured with NewScreenWithHistory.
 func (s *Screen) History() *History { return s.history }
 
+// LineBounds returns an owned copy of the live grid's per-row logical extents,
+// indexed like Frame rows. It returns nil when the screen has no buffer.
+func (s *Screen) LineBounds() []LineBound {
+	if s == nil || s.buffer == nil {
+		return nil
+	}
+	return append([]LineBound(nil), s.buffer.boundaries...)
+}
+
 func (s *Screen) Write(data []byte) {
 	if len(s.escapeBuf) > 0 {
 		combined := make([]byte, 0, len(s.escapeBuf)+len(data))

@@ -922,3 +922,28 @@ func TestC1Controls(t *testing.T) {
 		t.Run(tt.name, tt.run)
 	}
 }
+
+func TestScreenLineBoundsDescribesTheLiveGrid(t *testing.T) {
+	s := NewScreen(4, 3)
+	s.Write([]byte("abcdef")) // wraps after column 4
+
+	bounds := s.LineBounds()
+	if len(bounds) != 3 {
+		t.Fatalf("len(LineBounds()) = %d, want 3", len(bounds))
+	}
+	if !bounds[0].Soft {
+		t.Errorf("bounds[0].Soft = false, want true (row wrapped)")
+	}
+	if bounds[1].Soft {
+		t.Errorf("bounds[1].Soft = true, want false (row did not wrap)")
+	}
+	if bounds[1].End != 2 {
+		t.Errorf("bounds[1].End = %d, want 2", bounds[1].End)
+	}
+
+	// The result is owned by the caller.
+	bounds[0] = LineBound{}
+	if !s.LineBounds()[0].Soft {
+		t.Error("mutating the result changed the screen's own boundaries")
+	}
+}
