@@ -34,7 +34,7 @@ func NewSnapshotFromRows(rows [][]renderer.Cell, width, height int) Snapshot {
 		ChunkRows: 256,
 	})
 	for _, row := range rows {
-		if err := history.Append(row); err != nil {
+		if err := history.Append(row, vt.LineBound{End: len(row)}); err != nil {
 			panic("copy snapshot: configured history rejected supplied row")
 		}
 	}

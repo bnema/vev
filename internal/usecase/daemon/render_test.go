@@ -1289,7 +1289,7 @@ func TestPaintComposesCopyBodyAboveFloating(t *testing.T) {
 	defer releaseFloating()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
 	fp := newPane("floating", floatingPTY, domain.Size{Cols: 20, Rows: 3})
-	require.NoError(t, fp.history.Append(testRow("flt-old")))
+	appendHistoryRow(t, fp.history, testRow("flt-old"))
 	fp.screen.Write([]byte("flt-live"))
 	installTestFloating(sess.activeTab(), fp, true)
 

@@ -189,10 +189,11 @@ func TestFindMatchesRepeatedUnicodeDisplayCells(t *testing.T) {
 func TestFindMatchesUsesSealedScrollbackWithoutGlobalCopy(t *testing.T) {
 	const rows = 10_000
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: rows + 1, ChunkRows: 256})
+	unmatched, target := row("unmatched"), row("target")
 	for range rows {
-		require.NoError(t, history.Append(row("unmatched")))
+		require.NoError(t, history.Append(unmatched, vt.LineBound{End: len(unmatched)}))
 	}
-	require.NoError(t, history.Append(row("target")))
+	require.NoError(t, history.Append(target, vt.LineBound{End: len(target)}))
 	snapshot := NewSnapshot(history, renderer.NewFrame(16, 1))
 	view := history.SealAndView()
 	require.Same(t, view.Chunk(0), snapshot.history.Chunk(0))

@@ -85,14 +85,16 @@ func (s *Screen) emitLineEvicted(top, n int) {
 	if s.alternate != nil || top != 0 {
 		return
 	}
+	// Read boundaries before the caller rotates the frame: a soft link belongs
+	// to the row it follows, and rotation reassigns row indices.
 	for y := top; y < top+n; y++ {
-		s.recordEvicted(s.Frame.Row(y))
+		s.recordEvicted(s.Frame.Row(y), s.buffer.bound(y))
 	}
 }
 
-func (s *Screen) recordEvicted(row []renderer.Cell) {
+func (s *Screen) recordEvicted(row []renderer.Cell, bound LineBound) {
 	if s.history != nil {
-		err := s.history.Append(row)
+		err := s.history.Append(row, bound)
 		if err != nil && !errors.Is(err, ErrHistoryRowTooWide) {
 			panic(err)
 		}

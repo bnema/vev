@@ -56,7 +56,7 @@ func snapshotCacheHistory(t *testing.T, chunks int, first rune) vt.HistorySnapsh
 		for col := range cells {
 			cells[col] = renderer.Cell{Rune: first + rune((row+col)%26)}
 		}
-		require.NoError(t, history.Append(cells))
+		appendHistoryRow(t, history, cells)
 	}
 	return history.SnapshotView()
 }

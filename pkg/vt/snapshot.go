@@ -102,6 +102,7 @@ func HistoryFromBlobs(config HistoryConfig, sealed [][]byte, tail []byte) (*Hist
 	if len(view.chunks) == 1 {
 		h.evictUntil(len(view.chunks[0].rows), view.Cells())
 		h.tail = view.chunks[0].rows
+		h.tailBounds = growBounds(view.chunks[0].bounds, len(h.tail))
 		h.rows += len(h.tail)
 		h.cells += view.Cells()
 	}

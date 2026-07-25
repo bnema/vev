@@ -432,6 +432,14 @@ func testRow(text string) []renderer.Cell {
 	return cells
 }
 
+// appendHistoryRow records a row whose logical extent covers it entirely and
+// that ends its logical line — the shape of a line scrolled off a grid it never
+// wrapped out of. Tests that care about wrapped extents build the bound instead.
+func appendHistoryRow(tb testing.TB, history *vt.History, row []renderer.Cell) {
+	tb.Helper()
+	require.NoError(tb, history.Append(row, vt.LineBound{End: len(row)}))
+}
+
 func tabCount(sess *session) int {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()

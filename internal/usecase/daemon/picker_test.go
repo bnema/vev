@@ -835,7 +835,7 @@ func newPickerPreviewTabWithHistoryRows(t testing.TB, historyRows int) *tab {
 	tb := newTab(nil, domain.Size{Cols: 10, Rows: 3})
 	p := tb.focusedPane()
 	for range historyRows {
-		require.NoError(t, p.screen.History().Append(testRow("history-only-marker")))
+		appendHistoryRow(t, p.screen.History(), testRow("history-only-marker"))
 	}
 	p.screen.Write([]byte("NOW"))
 	return tb

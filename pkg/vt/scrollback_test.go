@@ -99,6 +99,65 @@ func TestOnLineEvictedAltScreenAndRotation(t *testing.T) {
 	}
 }
 
+func TestEvictedLinesCarryTheirBound(t *testing.T) {
+	tests := []struct {
+		name     string
+		evict    func(s *Screen)
+		wantSoft bool
+	}{
+		{
+			name: "scroll evicts a soft-wrapped row",
+			evict: func(s *Screen) {
+				// Filling all four columns only leaves deferred wrap pending. The
+				// fifth printable character triggers the soft wrap before scrolling.
+				s.Write([]byte("abcde"))
+				s.Write([]byte("\r\n\r\n\r\n\r\n"))
+			},
+			wantSoft: true,
+		},
+		{
+			name: "scroll evicts a hard row",
+			evict: func(s *Screen) {
+				s.Write([]byte("ab\r\n\r\n\r\n\r\n"))
+			},
+			wantSoft: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewScreenWithHistory(4, 2, HistoryConfig{MaxRows: 16, MaxCells: 1024})
+			tc.evict(s)
+			view := s.History().SealAndView()
+			if view.Len() == 0 {
+				t.Fatal("nothing was evicted to history")
+			}
+			if got := view.Bound(0).Soft; got != tc.wantSoft {
+				t.Errorf("Bound(0).Soft = %v, want %v", got, tc.wantSoft)
+			}
+		})
+	}
+}
+
+func TestReflowEvictedLinesCarryTheirBound(t *testing.T) {
+	s := NewScreenWithHistory(8, 3, HistoryConfig{MaxRows: 16, MaxCells: 1024})
+	// Fill the grid with wrapped content, then shrink so rows are evicted by
+	// the reflow path in buffer.resize rather than by scrolling.
+	s.Write([]byte("aaaaaaaabbbbbbbbcccccccc"))
+	s.Resize(4, 2)
+
+	view := s.History().SealAndView()
+	if view.Len() == 0 {
+		t.Fatal("reflow evicted nothing to history")
+	}
+	for i := range view.Len() {
+		bound := view.Bound(i)
+		if bound.End == 0 {
+			t.Errorf("Bound(%d).End = 0, want the reflowed row extent", i)
+		}
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

@@ -132,7 +132,7 @@ func restoreAcceptanceSession(t *testing.T, name string) snapcodec.Session {
 		for i := range row {
 			row[i] = renderer.Cell{Rune: ch}
 		}
-		require.NoError(t, history.Append(row))
+		appendHistoryRow(t, history, row)
 	}
 	view := history.SnapshotView()
 	sealed := make([][]byte, view.ChunkCount())
