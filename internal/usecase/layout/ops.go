@@ -55,7 +55,10 @@ func (t *Tree) ResizeFocus(axis Axis, delta int, area domain.Rect) error {
 
 	requested := delta
 	if requested < 0 {
-		requested = -requested
+		// -(MinInt) overflows. Splitting the negation keeps the magnitude
+		// representable even for a deliberately hostile caller.
+		requested = -(requested + 1)
+		requested++
 	}
 	if requested == 0 {
 		return ErrTooSmall

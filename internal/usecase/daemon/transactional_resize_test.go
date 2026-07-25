@@ -478,6 +478,85 @@ func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing
 	require.Equal(t, []domain.Size{{Cols: 100, Rows: 28}, {Cols: 120, Rows: 32}}, second.requested())
 }
 
+func TestStaleRemovedMemberGateIsCanceledOnceByFreshPlan(t *testing.T) {
+	pty := &transactionalResizePTY{}
+	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+	tb := sess.activeTab()
+	p := tb.focusedPane()
+	p.resizeApplying = true
+	p.resizePending = []byte("x")
+	plan := preparedTabLayout{members: []resizeMember{{session: sess, tab: tb, pane: p, rect: p.rect, screenResized: true}}}
+	tb.mu.Lock()
+	delete(tb.panes, p.id)
+	tb.bumpLayoutGenerationLocked()
+	tb.mu.Unlock()
+
+	d.finishPreparedTabMembers(&plan, false)
+	p.mu.Lock()
+	require.True(t, p.resizeApplying, "stale finalization must leave cancellation to the fresh-plan path")
+	p.mu.Unlock()
+	d.cancelStalePreparedGates(sess, tb, &plan)
+	p.mu.Lock()
+	require.False(t, p.resizeApplying)
+	require.Empty(t, p.resizePending)
+	p.mu.Unlock()
+}
+
+func TestHeadlessResizeRetriesInvalidatedPlan(t *testing.T) {
+	pty := &transactionalResizePTY{}
+	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+	tb := sess.activeTab()
+	var invalidate sync.Once
+	pty.onResize = func() {
+		invalidate.Do(func() {
+			tb.mu.Lock()
+			tb.bumpLayoutGenerationLocked()
+			tb.mu.Unlock()
+		})
+	}
+
+	require.True(t, d.requestTransactionalResize(sess, nil, domain.Size{Cols: 100, Rows: 30}, true))
+	require.Equal(t, []domain.Size{{Cols: 100, Rows: 28}, {Cols: 100, Rows: 28}}, pty.requested())
+	tb.mu.Lock()
+	require.Equal(t, domain.Size{Cols: 100, Rows: 28}, tb.size)
+	tb.mu.Unlock()
+}
+
+func TestTransactionalResizeRetriesAcceptedFloatingSlotByIdentity(t *testing.T) {
+	popupPTY := &transactionalResizePTY{errs: []error{errors.New("first popup resize fails")}}
+	d, sess, ac, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+	tb := sess.activeTab()
+	popup := newPane("popup", popupPTY, domain.Size{Cols: 80, Rows: 23})
+	tb.mu.Lock()
+	tb.floating = floatingSlot{state: floatingVisible, pane: popup, generation: 7}
+	tb.mu.Unlock()
+
+	rc := d.attachCoordinator(sess, nil, ac, true)
+	lease := rc.attachmentLease(ac)
+	epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 80, Rows: 24}, ac, lease)
+	require.NotZero(t, epoch)
+	require.True(t, d.runResizeTransaction(sess, ac, lease, epoch))
+	first := popupPTY.requested()
+	require.Len(t, first, 1)
+
+	d.retryResizeMembers(sess, ac, lease, epoch, []resizeMember{{session: sess, tab: tb, pane: popup, isFloating: true, floatingGeneration: 7}})
+	retried := popupPTY.requested()
+	require.Len(t, retried, 2)
+	require.Equal(t, first[0], retried[1], "retry must use the current validated floating slot geometry")
+	popup.mu.Lock()
+	require.False(t, popup.resizeRetry)
+	popup.mu.Unlock()
+
+	replacementPTY := &transactionalResizePTY{}
+	replacement := newPane("replacement", replacementPTY, domain.Size{Cols: 80, Rows: 23})
+	replacement.resizeRetry = true
+	tb.mu.Lock()
+	tb.floating = floatingSlot{state: floatingVisible, pane: replacement, generation: 8}
+	tb.mu.Unlock()
+	d.retryResizeMembers(sess, ac, lease, epoch, []resizeMember{{session: sess, tab: tb, pane: popup, isFloating: true, floatingGeneration: 7}})
+	require.Empty(t, replacementPTY.requested(), "a replaced floating slot must not inherit an old retry")
+}
+
 func TestTransactionalResizeObsoleteTimerCallbacksCommitOnlyLatestEpoch(t *testing.T) {
 	clock := newCoordinatorMockClock(t, 8)
 	pty := &transactionalResizePTY{}

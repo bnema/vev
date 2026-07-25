@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"context"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -9,16 +11,20 @@ import (
 // resizeMember is an unpublished layout decision.  Prepare only reads guarded
 // state; apply performs the external PTY call; commit is the sole publisher.
 type resizeMember struct {
-	session       *session
-	tab           *tab
-	pane          *pane
-	rect          domain.Rect
-	floating      floatingGeometry
-	isFloating    bool
-	retry         bool
-	ok            bool
-	err           error
-	screenResized bool
+	session    *session
+	tab        *tab
+	pane       *pane
+	rect       domain.Rect
+	floating   floatingGeometry
+	isFloating bool
+	// floatingGeneration identifies the exact popup slot accepted by a failed
+	// resize. Floating panes are intentionally outside tb.panes, so retries
+	// must validate this generation and pointer rather than use tiled lookup.
+	floatingGeneration uint64
+	retry              bool
+	ok                 bool
+	err                error
+	screenResized      bool
 }
 
 type resizePlan struct {
@@ -153,18 +159,16 @@ func (d *Daemon) cancelStalePreparedGates(sess *session, tb *tab, plan *prepared
 }
 
 func (d *Daemon) finishPreparedTabMembers(plan *preparedTabLayout, accepted bool) {
+	if !accepted {
+		// cancelStalePreparedGates owns stale-plan cancellation. Keeping this
+		// path empty ensures a removed member's pending bytes are replayed once,
+		// after the fresh layout determines it cannot survive the retry.
+		return
+	}
 	for i := range plan.members {
 		member := &plan.members[i]
 		if !member.screenResized {
 			continue
-		}
-		if !accepted {
-			member.tab.mu.Lock()
-			current := member.tab.panes[member.pane.id] == member.pane
-			member.tab.mu.Unlock()
-			if current {
-				continue
-			}
 		}
 		member.pane.resizeMu.Lock()
 		d.replayResizePending(member.session, member.tab, member.pane, false, member.rect)
@@ -176,6 +180,10 @@ func (d *Daemon) finishPreparedTabMembers(plan *preparedTabLayout, accepted bool
 // one per-tab single-writer loop, but never holds tab or pane state locks while
 // invoking PTY.Resize.
 func (d *Daemon) applyTabLayoutTransaction(sess *session, tb *tab, current ...func() bool) ([]resizeMember, bool) {
+	return d.applyTabLayoutTransactionWithNotice(sess, tb, true, current...)
+}
+
+func (d *Daemon) applyTabLayoutTransactionWithNotice(sess *session, tb *tab, reportFailure bool, current ...func() bool) ([]resizeMember, bool) {
 	if tb == nil {
 		return nil, false
 	}
@@ -225,7 +233,7 @@ func (d *Daemon) applyTabLayoutTransaction(sess *session, tb *tab, current ...fu
 				failed = append(failed, member)
 			}
 		}
-		if len(failed) != 0 {
+		if reportFailure && len(failed) != 0 {
 			d.notify(sess, domain.NoticeWarn, domain.NoticeResizeFailed,
 				"pane resize failed; retrying in background", failed[len(failed)-1].err)
 		}
@@ -245,34 +253,57 @@ func (d *Daemon) applyTabLayout(sess *session, tb *tab) bool {
 	return true
 }
 
-// scheduleAcceptedTabLayoutRetry retries a failed PTY resize only after its
-// geometry has passed the tab generation and pane-membership validation. The
-// retry prepares a new canonical plan, so a later layout mutation supersedes
-// this target rather than replaying stale rectangles.
+const maxAcceptedTabLayoutRetries = 3
+
+// scheduleAcceptedTabLayoutRetry owns one bounded retry worker per tab. The
+// worker is deduplicated, derives cancellation from the tab lifecycle, and
+// suppresses repeat degradation notices after the accepted initial failure.
 func (d *Daemon) scheduleAcceptedTabLayoutRetry(sess *session, tb *tab) {
 	if d.clock == nil || tb == nil || tb.ctx == nil {
 		return
 	}
-	timer := d.clock.NewTimer(minOutputRenderDeadline)
-	if timer == nil {
+	tb.layoutRetryMu.Lock()
+	if tb.layoutRetryRunning {
+		tb.layoutRetryMu.Unlock()
 		return
 	}
-	timerC := timer.C()
-	if timerC == nil {
-		timer.Stop()
-		return
-	}
+	ctx, cancel := context.WithCancel(tb.ctx)
+	tb.layoutRetryRunning = true
+	tb.layoutRetryCancel = cancel
+	tb.layoutRetryMu.Unlock()
+
 	go func() {
-		select {
-		case <-tb.ctx.Done():
-			timer.Stop()
-			return
-		case <-timerC:
-		}
-		if tb.ctx.Err() != nil {
-			return
-		}
-		if d.applyTabLayout(sess, tb) {
+		defer func() {
+			cancel()
+			tb.layoutRetryMu.Lock()
+			tb.layoutRetryRunning = false
+			tb.layoutRetryCancel = nil
+			tb.layoutRetryMu.Unlock()
+		}()
+		for range maxAcceptedTabLayoutRetries {
+			timer := d.clock.NewTimer(minOutputRenderDeadline)
+			if timer == nil {
+				return
+			}
+			timerC := timer.C()
+			if timerC == nil {
+				timer.Stop()
+				return
+			}
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timerC:
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			failed, ok := d.applyTabLayoutTransactionWithNotice(sess, tb, false, func() bool { return ctx.Err() == nil })
+			if !ok || len(failed) == 0 {
+				return
+			}
+			markSnapshotDirty(sess)
 			sess.mu.Lock()
 			ac := sess.client
 			sess.mu.Unlock()
@@ -413,11 +444,19 @@ func (d *Daemon) replayResizePending(sess *session, tb *tab, p *pane, resized bo
 // generation, so its slot generation and exact pane identity validate its
 // publication instead.
 func (d *Daemon) applyVisibleFloatingLayout(sess *session, tb *tab, current func() bool) ([]resizeMember, bool) {
+	return d.applyVisibleFloatingLayoutForMember(sess, tb, current, nil)
+}
+
+// applyVisibleFloatingLayoutForMember optionally fences a delayed retry to the
+// exact failed floating slot. Unlike tiled panes, a popup is not in tb.panes,
+// so accepting a replacement here would silently retry unrelated geometry.
+func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, current func() bool, expected *resizeMember) ([]resizeMember, bool) {
 	if tb == nil {
 		return nil, true
 	}
 	tb.mu.Lock()
-	if tb.floating.state != floatingVisible || tb.floating.pane == nil {
+	if tb.floating.state != floatingVisible || tb.floating.pane == nil ||
+		(expected != nil && (tb.floating.generation != expected.floatingGeneration || tb.floating.pane != expected.pane)) {
 		tb.mu.Unlock()
 		return nil, true
 	}
@@ -434,7 +473,7 @@ func (d *Daemon) applyVisibleFloatingLayout(sess *session, tb *tab, current func
 	// floating slot and tab size are revalidated. A newer client resize may
 	// otherwise publish this obsolete popup geometry after its PTY call returns.
 	plan := preparedTabLayout{members: []resizeMember{{
-		session: sess, tab: tb, pane: p, rect: geometry.Inner, floating: geometry, isFloating: true,
+		session: sess, tab: tb, pane: p, rect: geometry.Inner, floating: geometry, isFloating: true, floatingGeneration: generation,
 	}}}
 	d.applyPreparedTabMembers(&plan)
 
@@ -569,7 +608,10 @@ func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, ad
 		}
 		if !valid {
 			d.releasePreparedSessionGates(plans)
-			if current == nil || !current() {
+			// Headless requests have no attachment epoch. A live tab mutation
+			// still invalidates their plan, but must trigger a fresh prepare rather
+			// than being mistaken for a canceled request.
+			if current != nil && !current() {
 				return nil, false
 			}
 			// A layout mutation invalidated the plans while this epoch remains
@@ -654,7 +696,7 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *at
 	tabs := make([]*tab, 0, len(members))
 	seen := make(map[*tab]struct{}, len(members))
 	for _, member := range members {
-		if member.tab == nil {
+		if member.tab == nil || member.isFloating {
 			continue
 		}
 		if _, ok := seen[member.tab]; ok {
@@ -712,6 +754,48 @@ func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *at
 			member.pane.mu.Unlock()
 		}
 		tb.mu.Unlock()
+	}
+	for _, member := range members {
+		if !member.isFloating || member.tab == nil || member.pane == nil {
+			continue
+		}
+		if !rc.retryCurrentForLease(epoch, ac, lease) {
+			return
+		}
+		// Floating panes are outside tb.panes. Validate the exact accepted slot
+		// before preparing a fresh geometry; applyVisibleFloatingLayout repeats
+		// the same pointer/generation check around external PTY.Resize.
+		member.tab.mu.Lock()
+		currentSlot := member.tab.floating.state == floatingVisible &&
+			member.tab.floating.generation == member.floatingGeneration &&
+			member.tab.floating.pane == member.pane
+		retryPending := false
+		if currentSlot {
+			member.pane.mu.Lock()
+			retryPending = member.pane.resizeRetry
+			member.pane.mu.Unlock()
+		}
+		member.tab.mu.Unlock()
+		if !currentSlot || !retryPending {
+			continue
+		}
+		freshFailed, ok := d.applyVisibleFloatingLayoutForMember(sess, member.tab, func() bool {
+			return rc.retryCurrentForLease(epoch, ac, lease)
+		}, &member)
+		if !ok || !rc.retryCurrentForLease(epoch, ac, lease) {
+			return
+		}
+		failed = append(failed, freshFailed...)
+		member.tab.mu.Lock()
+		stillCurrent := member.tab.floating.state == floatingVisible &&
+			member.tab.floating.generation == member.floatingGeneration &&
+			member.tab.floating.pane == member.pane
+		member.tab.mu.Unlock()
+		if stillCurrent && len(freshFailed) == 0 {
+			member.pane.mu.Lock()
+			succeeded = succeeded || !member.pane.resizeRetry
+			member.pane.mu.Unlock()
+		}
 	}
 	if len(failed) != 0 {
 		rc.scheduleResizeRetryForLease(epoch, ac, lease, func() { d.retryResizeMembers(sess, ac, lease, epoch, failed) })

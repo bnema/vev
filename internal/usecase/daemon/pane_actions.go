@@ -286,17 +286,16 @@ func (d *Daemon) focusDirAt(sess *session, tb *tab, target *pane, dir layout.Dir
 		tb.mu.Unlock()
 		return layout.ErrNotFound
 	}
-	oldFocus := target.id
 	candidate := tb.tree.Clone()
-	candidate.Focus = oldFocus
+	candidate.Focus = target.id
 	err := candidate.FocusDir(dir, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
-	newFocus := candidate.Focus
-	if err == nil && newFocus != tb.tree.Focus {
+	committed := err == nil && candidate.Focus != tb.tree.Focus
+	if committed {
 		tb.tree = candidate
 		tb.bumpLayoutGenerationLocked()
 	}
 	tb.mu.Unlock()
-	if err == nil && newFocus != oldFocus {
+	if committed {
 		d.applyTabLayout(sess, tb)
 	}
 	if errors.Is(err, layout.ErrNoPane) {

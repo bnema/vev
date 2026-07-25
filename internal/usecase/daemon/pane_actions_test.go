@@ -72,6 +72,92 @@ func (*layoutRetryTimer) Reset(time.Duration) bool { return false }
 func (*layoutRetryTimer) Stop() bool               { return true }
 func (t *layoutRetryTimer) fire()                  { t.ch <- time.Unix(0, 0) }
 
+func TestLayoutRetryIsBoundedDeduplicatedAndCanceled(t *testing.T) {
+	t.Run("persistent failure is bounded and reports once", func(t *testing.T) {
+		pty := &transactionalResizePTY{errs: []error{errors.New("initial"), errors.New("retry 1"), errors.New("retry 2"), errors.New("retry 3")}}
+		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+		clock := &layoutRetryClock{timers: make(chan *layoutRetryTimer, 16)}
+		d.clock = clock
+		tb := sess.activeTab()
+		tb.mu.Lock()
+		tb.size = domain.Size{Cols: 100, Rows: 20}
+		tb.bumpLayoutGenerationLocked()
+		tb.mu.Unlock()
+
+		d.applyTabLayout(sess, tb)
+		// A second accepted failure joins the existing worker rather than adding
+		// another timer/goroutine.
+		d.scheduleAcceptedTabLayoutRetry(sess, tb)
+		for range maxAcceptedTabLayoutRetries {
+			var timer *layoutRetryTimer
+			for timer == nil {
+				candidate := <-clock.timers
+				if candidate.delay == minOutputRenderDeadline {
+					timer = candidate
+				}
+			}
+			timer.fire()
+		}
+		require.Eventually(t, func() bool {
+			tb.layoutRetryMu.Lock()
+			defer tb.layoutRetryMu.Unlock()
+			return !tb.layoutRetryRunning
+		}, time.Second, time.Millisecond)
+		require.Len(t, pty.requested(), 1+maxAcceptedTabLayoutRetries)
+		count := 0
+		for _, notice := range d.notices.history() {
+			if notice.Code == domain.NoticeResizeFailed {
+				count++
+			}
+		}
+		require.Equal(t, 1, count, "background retries must not create a notification storm")
+	})
+
+	t.Run("tab cancellation stops a waiting retry", func(t *testing.T) {
+		pty := &transactionalResizePTY{errs: []error{errors.New("initial")}}
+		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+		clock := &layoutRetryClock{timers: make(chan *layoutRetryTimer, 16)}
+		d.clock = clock
+		tb := sess.activeTab()
+		tb.mu.Lock()
+		tb.size = domain.Size{Cols: 100, Rows: 20}
+		tb.bumpLayoutGenerationLocked()
+		tb.mu.Unlock()
+		d.applyTabLayout(sess, tb)
+		var timer *layoutRetryTimer
+		for timer == nil {
+			candidate := <-clock.timers
+			if candidate.delay == minOutputRenderDeadline {
+				timer = candidate
+			}
+		}
+		tb.cancel()
+		timer.fire()
+		require.Eventually(t, func() bool {
+			tb.layoutRetryMu.Lock()
+			defer tb.layoutRetryMu.Unlock()
+			return !tb.layoutRetryRunning
+		}, time.Second, time.Millisecond)
+		require.Len(t, pty.requested(), 1)
+	})
+}
+
+func TestFocusDirAtDoesNotApplyUncommittedCandidate(t *testing.T) {
+	pty := &transactionalResizePTY{}
+	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+	tb := sess.activeTab()
+	second := newPane("pane-2", nil, domain.Size{Cols: 80, Rows: 23})
+	tb.mu.Lock()
+	tb.panes[second.id] = second
+	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
+	tb.panes["pane-1"].resizeRetry = true
+	target := tb.panes["pane-1"]
+	tb.mu.Unlock()
+
+	require.NoError(t, d.focusDirAt(sess, tb, target, layout.Right))
+	require.Empty(t, pty.requested(), "an equality-mismatched candidate was not committed and must not apply")
+}
+
 func TestLayoutApplicationRetriesOnlyAcceptedFailedGeometry(t *testing.T) {
 	pty := &transactionalResizePTY{errs: []error{errors.New("first resize fails")}}
 	d, sess, _, _ := newManualSessionWithPTYs(t, pty)

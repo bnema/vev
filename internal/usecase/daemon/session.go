@@ -130,6 +130,12 @@ type tab struct {
 	// state changes. layoutApplyMu serializes the lock-free PTY apply boundary.
 	layoutGeneration uint64
 	layoutApplyMu    sync.Mutex
+	// layoutRetryMu owns the one bounded delayed retry worker for accepted
+	// tiled-layout degradation. Its context is derived from ctx, so tab/session
+	// teardown cancels a waiting retry before it can touch PTY state.
+	layoutRetryMu      sync.Mutex
+	layoutRetryCancel  context.CancelFunc
+	layoutRetryRunning bool
 
 	stableID   string
 	name       string
