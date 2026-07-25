@@ -72,11 +72,13 @@ func layoutFingerprint(root *layout.Node) string {
 	return b.String()
 }
 
+const weightFingerprintMaxLength = 16
+
 func layoutFingerprintLength(n *layout.Node) int {
 	if n == nil {
 		return 1
 	}
-	length := 2 + weightFingerprintLength(n.Weight) + 1 + paneIDFingerprintLength(n.Leaf) + 1 + paneIDFingerprintLength(n.Expanded) + 2
+	length := 2 + weightFingerprintMaxLength + 1 + paneIDFingerprintLength(n.Leaf) + 1 + paneIDFingerprintLength(n.Expanded) + 2
 	for _, child := range n.Children {
 		length += layoutFingerprintLength(child) + 1
 	}
@@ -98,16 +100,6 @@ func decimalDigits(value int) int {
 		digits++
 	}
 	return digits
-}
-
-func weightFingerprintLength(weight float64) int {
-	bits := math.Float64bits(weight)
-	length := 1
-	for bits >= 16 {
-		bits >>= 4
-		length++
-	}
-	return length
 }
 
 func writeLayoutFingerprint(b *strings.Builder, n *layout.Node) {

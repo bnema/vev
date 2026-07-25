@@ -425,7 +425,7 @@ func (e controlExec) resize(axis layout.Axis, delta int) error {
 	return e.runAction(daemonActionRequest{kind: daemonActionResizePane, axis: axis, delta: delta})
 }
 func (e controlExec) EqualizePanes() error {
-	return e.runAction(daemonActionRequest{kind: daemonActionEqualizePanes})
+	return resizeUserError(e.runAction(daemonActionRequest{kind: daemonActionEqualizePanes}))
 }
 func (e controlExec) focus(direction layout.Direction) error {
 	return e.runAction(daemonActionRequest{kind: daemonActionFocusPane, direction: direction})

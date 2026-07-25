@@ -27,12 +27,6 @@ type resizeMember struct {
 	screenResized      bool
 }
 
-type resizePlan struct {
-	size    domain.Size
-	tabs    []*tab
-	members []resizeMember
-}
-
 type preparedTabLayout struct {
 	tab          *tab
 	generation   uint64
@@ -314,99 +308,6 @@ func (d *Daemon) scheduleAcceptedTabLayoutRetry(sess *session, tb *tab) {
 	}()
 }
 
-func (d *Daemon) prepareResize(sess *session, size domain.Size) resizePlan {
-	plan := resizePlan{size: size}
-	sess.mu.Lock()
-	plan.tabs = append(plan.tabs, sess.tabs...)
-	active := sess.active
-	sess.mu.Unlock()
-	for i, tb := range plan.tabs {
-		tb.mu.Lock()
-		if tb.tree != nil && tb.tree.Root != nil {
-			ts := tabSize(size)
-			area := domain.Rect{Width: ts.Cols, Height: ts.Rows}
-			if placements, ok := layout.Solve(tb.tree.Root, area); ok {
-				for _, pl := range placements {
-					if !pl.Collapsed && pl.Content.Width > 0 && pl.Content.Height > 0 {
-						if p := tb.panes[pl.ID]; p != nil {
-							plan.members = append(plan.members, resizeMember{session: sess, tab: tb, pane: p, rect: pl.Content})
-						}
-					}
-				}
-			} else if tb.tree.Root.Kind == layout.Leaf {
-				// A single pane remains a valid PTY target even when a tiny client
-				// is below the interactive layout minimum. Keeping it live avoids
-				// stale screen dimensions (and lost scrollback) until the client
-				// grows back into a solvable layout.
-				if p := tb.panes[tb.tree.Root.Leaf]; p != nil {
-					plan.members = append(plan.members, resizeMember{session: sess, tab: tb, pane: p, rect: area})
-				}
-			}
-		}
-		// Hidden retained popups enter this same primitive when shown; only a
-		// visible popup participates in an unrelated client resize.
-		if i == active && tb.floating.state == floatingVisible && tb.floating.pane != nil {
-			g := calculateContentFloatingGeometry(tabSize(size), d.currentFloatingConfig())
-			if g.valid() {
-				plan.members = append(plan.members, resizeMember{session: sess, tab: tb, pane: tb.floating.pane, rect: g.Inner, floating: g, isFloating: true})
-			}
-		}
-		tb.mu.Unlock()
-	}
-	return plan
-}
-
-// applyResize deliberately holds only a pane's resizeMu around its PTY call;
-// no daemon, session, tab, or pane lock crosses the external boundary.
-func (d *Daemon) applyResize(plan *resizePlan, current ...func() bool) bool {
-	// Collect degradation across the loop and report once from the explicit
-	// lock-free return points. notify acquires sess.mu/d.mu and repaints, so it
-	// must never run while a pane's resizeMu is held.
-	failed := 0
-	var lastErr error
-	reportFailure := func() {
-		if failed == 0 {
-			return
-		}
-		// A failure can only come from a plan member, so members[0] is safe.
-		d.notify(plan.members[0].session, domain.NoticeWarn, domain.NoticeResizeFailed,
-			"pane resize failed; retrying in background", lastErr)
-	}
-	for i := range plan.members {
-		if len(current) != 0 && !current[0]() {
-			reportFailure()
-			return false
-		}
-		m := &plan.members[i]
-		m.pane.resizeMu.Lock()
-		m.pane.mu.Lock()
-		old, pty := m.pane.rect, m.pane.pty
-		screenSize := domain.Size{Cols: m.pane.screen.Frame.Width, Rows: m.pane.screen.Frame.Height}
-		needsApply := m.retry || old.Width != m.rect.Width || old.Height != m.rect.Height || screenSize != rectSize(m.rect)
-		if needsApply && pty != nil {
-			// Publish this gate before the external call. ptyReader keeps draining
-			// but does not parse bytes at the stale width while Resize is in flight.
-			m.pane.resizeApplying = true
-		}
-		m.pane.mu.Unlock()
-		if !needsApply || pty == nil {
-			m.ok = true
-		} else if err := pty.Resize(rectSize(m.rect)); err != nil {
-			d.log.Warn("pty resize failed", "err", err)
-			failed++
-			lastErr = err
-			d.replayResizePending(m.session, m.tab, m.pane, false, m.rect)
-		} else {
-			m.ok = true
-			d.replayResizePending(m.session, m.tab, m.pane, true, m.rect)
-			m.screenResized = true
-		}
-		m.pane.resizeMu.Unlock()
-	}
-	reportFailure()
-	return true
-}
-
 // replayResizePending completes a pane's apply epoch. It keeps the gate set
 // while each buffered batch goes through the normal VT path, so reads arriving
 // during replay join the same ordered stream. Failure deliberately omits the
@@ -469,7 +370,7 @@ func (d *Daemon) applyVisibleFloatingLayoutForMember(sess *session, tb *tab, cur
 		return nil, true
 	}
 
-	// Unlike applyResize, this keeps successful PTY resizes gated until the
+	// This keeps successful PTY resizes gated until the
 	// floating slot and tab size are revalidated. A newer client resize may
 	// otherwise publish this obsolete popup geometry after its PTY call returns.
 	plan := preparedTabLayout{members: []resizeMember{{
@@ -554,6 +455,9 @@ func (d *Daemon) applySessionLayout(sess *session, size domain.Size, current, ad
 
 	target := tabSize(size)
 	for {
+		if sess.ctx != nil && sess.ctx.Err() != nil {
+			return nil, false
+		}
 		if current != nil && !current() {
 			return nil, false
 		}

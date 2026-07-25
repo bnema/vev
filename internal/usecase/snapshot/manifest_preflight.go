@@ -2,7 +2,6 @@ package snapshot
 
 import (
 	"fmt"
-	"math"
 
 	"github.com/bnema/vev/internal/usecase/layout"
 )
@@ -206,39 +205,7 @@ func preflightManifestNode(r *payloadReader, depth int, root bool, budget *manif
 }
 
 func preflightManifestWeights(r *payloadReader, wantNodes uint32) error {
-	if len(r.b) == 0 {
-		return nil
-	}
-	if len(r.b) < len(manifestWeightTag) {
-		return ErrShortPayload
-	}
-	if string(r.b[:len(manifestWeightTag)]) != manifestWeightTag {
-		return fmt.Errorf("%w: weight extension tag", ErrInvalidData)
-	}
-	r.b = r.b[len(manifestWeightTag):]
-	count, err := r.getUint32()
-	if err != nil {
-		return err
-	}
-	if count != wantNodes {
-		return fmt.Errorf("%w: weight node count", ErrInvalidData)
-	}
-	if uint64(count) > uint64(len(r.b))/manifestWeightSize {
-		return ErrShortPayload
-	}
-	if uint64(len(r.b)) != uint64(count)*manifestWeightSize {
-		return ErrTrailingBytes
-	}
-	for range count {
-		bits, err := r.getUint64()
-		if err != nil {
-			return err
-		}
-		if !validManifestWeight(math.Float64frombits(bits)) {
-			return fmt.Errorf("%w: node weight", ErrInvalidData)
-		}
-	}
-	return r.done()
+	return readManifestWeightExtension(r, uint64(wantNodes), nil)
 }
 
 func preflightManifestPane(r *payloadReader, budget *manifestPreflightBudget) (layout.PaneID, error) {

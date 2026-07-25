@@ -20,8 +20,8 @@ func applyFloatingResizePlanForTest(d *Daemon, p *pane, geometry floatingGeometr
 	if p == nil || !geometry.valid() {
 		return false
 	}
-	plan := resizePlan{members: []resizeMember{{pane: p, rect: geometry.Inner, floating: geometry, isFloating: true}}}
-	d.applyResize(&plan)
+	plan := preparedTabLayout{members: []resizeMember{{pane: p, rect: geometry.Inner, floating: geometry, isFloating: true}}}
+	d.applyPreparedTabMembers(&plan)
 	member := plan.members[0]
 	if !member.ok {
 		return false

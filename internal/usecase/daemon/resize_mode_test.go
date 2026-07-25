@@ -42,6 +42,16 @@ func TestPaletteAndControlShareResizeAction(t *testing.T) {
 	}
 }
 
+func TestControlEqualizeMapsResizeErrors(t *testing.T) {
+	runner := &actionRunnerSpy{err: layout.ErrTooSmall}
+	err := (controlExec{actions: runner}).EqualizePanes()
+	require.ErrorIs(t, err, layout.ErrTooSmall)
+	var userErr *domain.UserError
+	require.ErrorAs(t, err, &userErr)
+	require.Len(t, runner.requests, 1)
+	require.Equal(t, daemonActionEqualizePanes, runner.requests[0].kind)
+}
+
 func TestResizeControlHeadlessAndErrors(t *testing.T) {
 	factory := &controlPTYFactory{}
 	d := newTestDaemon(t, factory, stubClock{})
@@ -162,28 +172,29 @@ func TestRouteOverlayDecodesHorizontalArrows(t *testing.T) {
 // parser prefixes are deliberately split across reads.
 func TestResizeModeKeysAndEscapes(t *testing.T) {
 	tests := []struct {
-		name   string
-		chunks [][]byte
-		change bool
-		exit   bool
+		name     string
+		chunks   [][]byte
+		change   bool
+		exit     bool
+		equalize bool
 	}{
-		{"h", [][]byte{[]byte("h")}, true, false},
-		{"j", [][]byte{[]byte("j")}, true, false},
-		{"k", [][]byte{[]byte("k")}, true, false},
-		{"l", [][]byte{[]byte("l")}, true, false},
-		{"CSI left split", [][]byte{[]byte("\x1b["), []byte("D")}, true, false},
-		{"CSI right", [][]byte{[]byte("\x1b[C")}, true, false},
-		{"CSI up", [][]byte{[]byte("\x1b[A")}, true, false},
-		{"CSI down", [][]byte{[]byte("\x1b[B")}, true, false},
-		{"SS3 left", [][]byte{[]byte("\x1bOD")}, true, false},
-		{"SS3 right split", [][]byte{[]byte("\x1bO"), []byte("C")}, true, false},
-		{"SS3 up", [][]byte{[]byte("\x1bOA")}, true, false},
-		{"SS3 down", [][]byte{[]byte("\x1bOB")}, true, false},
-		{"equalize", [][]byte{[]byte("=")}, true, false},
-		{"ignored", [][]byte{[]byte("z\x00")}, false, false},
-		{"q exits", [][]byte{[]byte("q")}, false, true},
-		{"enter exits", [][]byte{[]byte("\r")}, false, true},
-		{"escape exits", [][]byte{[]byte("\x1b"), []byte("x")}, false, true},
+		{"h", [][]byte{[]byte("h")}, true, false, false},
+		{"j", [][]byte{[]byte("j")}, true, false, false},
+		{"k", [][]byte{[]byte("k")}, true, false, false},
+		{"l", [][]byte{[]byte("l")}, true, false, false},
+		{"CSI left split", [][]byte{[]byte("\x1b["), []byte("D")}, true, false, false},
+		{"CSI right", [][]byte{[]byte("\x1b[C")}, true, false, false},
+		{"CSI up", [][]byte{[]byte("\x1b[A")}, true, false, false},
+		{"CSI down", [][]byte{[]byte("\x1b[B")}, true, false, false},
+		{"SS3 left", [][]byte{[]byte("\x1bOD")}, true, false, false},
+		{"SS3 right split", [][]byte{[]byte("\x1bO"), []byte("C")}, true, false, false},
+		{"SS3 up", [][]byte{[]byte("\x1bOA")}, true, false, false},
+		{"SS3 down", [][]byte{[]byte("\x1bOB")}, true, false, false},
+		{"equalize", [][]byte{[]byte("=")}, true, false, true},
+		{"ignored", [][]byte{[]byte("z\x00")}, false, false, false},
+		{"q exits", [][]byte{[]byte("q")}, false, true, false},
+		{"enter exits", [][]byte{[]byte("\r")}, false, true, false},
+		{"escape exits", [][]byte{[]byte("\x1b"), []byte("x")}, false, true, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -191,7 +202,7 @@ func TestResizeModeKeysAndEscapes(t *testing.T) {
 			tb := sess.activeTab()
 			tb.mu.Lock()
 			before := tb.layoutGeneration
-			if tt.name == "equalize" {
+			if tt.equalize {
 				tb.tree.Root.Children[0].Weight = 3
 			}
 			tb.mu.Unlock()
@@ -200,7 +211,7 @@ func TestResizeModeKeysAndEscapes(t *testing.T) {
 			}
 			tb.mu.Lock()
 			after := tb.layoutGeneration
-			if tt.name == "equalize" {
+			if tt.equalize {
 				for _, child := range tb.tree.Root.Children {
 					require.Zero(t, child.Weight)
 				}
@@ -348,8 +359,10 @@ func (*resizeLockProbePTY) Pid() int                     { return 0 }
 func (*resizeLockProbePTY) ForegroundPgid() (int, error) { return 0, nil }
 func (p *resizeLockProbePTY) Resize(domain.Size) error {
 	p.once.Do(func() {
-		p.check()
-		close(p.entered)
+		func() {
+			defer close(p.entered)
+			p.check()
+		}()
 		<-p.release
 	})
 	return nil
@@ -367,10 +380,16 @@ func TestResizeModeReleasesTabAndOverlayLocksBeforePTY(t *testing.T) {
 	tb.panes[second.id] = second
 	tb.mu.Unlock()
 	probe.check = func() {
-		require.True(t, tb.mu.TryLock(), "PTY callback must not inherit tab.mu")
-		tb.mu.Unlock()
-		require.True(t, ac.overlays.resizeMu.TryLock(), "PTY callback must not inherit resize overlay mutex")
-		ac.overlays.resizeMu.Unlock()
+		if tb.mu.TryLock() {
+			tb.mu.Unlock()
+		} else {
+			t.Error("PTY callback must not inherit tab.mu")
+		}
+		if ac.overlays.resizeMu.TryLock() {
+			ac.overlays.resizeMu.Unlock()
+		} else {
+			t.Error("PTY callback must not inherit resize overlay mutex")
+		}
 	}
 	require.NoError(t, d.enterResizeMode(sess, ac))
 	done := make(chan struct{})

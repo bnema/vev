@@ -1251,9 +1251,18 @@ func (f *performanceFixture) resizeTo(size domain.Size) {
 
 func (f *performanceFixture) retryLatest() {
 	epoch := f.sess.renderCoordinator().resizeSnapshot().committed
-	plan := f.d.prepareResize(f.sess, f.ac.size)
+	f.sess.mu.Lock()
+	tabs := append([]*tab(nil), f.sess.tabs...)
+	f.sess.mu.Unlock()
+	members := make([]resizeMember, 0)
+	for _, tb := range tabs {
+		tb.mu.Lock()
+		plan := prepareTabLayoutForSizeLocked(f.sess, tb, tabSize(f.ac.size))
+		tb.mu.Unlock()
+		members = append(members, plan.members...)
+	}
 	failuresBefore, callsBefore := f.pty.metrics()
-	f.d.retryResizeMembers(f.sess, f.ac, f.sess.renderCoordinator().attachmentLease(f.ac), epoch, plan.members)
+	f.d.retryResizeMembers(f.sess, f.ac, f.sess.renderCoordinator().attachmentLease(f.ac), epoch, members)
 	failuresAfter, callsAfter := f.pty.metrics()
 	f.ptyFailures += failuresAfter - failuresBefore
 	if callsAfter > callsBefore {

@@ -289,14 +289,15 @@ func TestEqualizeFailureIsTransactional(t *testing.T) {
 	require.Equal(t, before, tr)
 }
 
-func TestResizeFocusMinIntDoesNotOverflow(t *testing.T) {
+func TestResizeFocusMinIntClampsWithoutOverflow(t *testing.T) {
 	t.Parallel()
 
-	tr := &Tree{Root: split(Horizontal, NewLeaf("a"), NewLeaf("b")), Focus: "a"}
-	before := tr.Clone()
+	tr := &Tree{Root: split(Horizontal, weightedLeaf("a", 30), weightedLeaf("b", 20)), Focus: "a"}
 	minInt := -int(^uint(0)>>1) - 1
-	require.ErrorIs(t, tr.ResizeFocus(Width, minInt, domain.Rect{Width: 41, Height: 2}), ErrTooSmall)
-	require.Equal(t, before, tr, "an unrepresentable shrink magnitude must remain transactional")
+	require.NoError(t, tr.ResizeFocus(Width, minInt, domain.Rect{Width: 51, Height: 2}))
+	placements, ok := Solve(tr.Root, domain.Rect{Width: 51, Height: 2})
+	require.True(t, ok)
+	require.Equal(t, map[PaneID]int{"a": 20, "b": 30}, placementWidths(placements))
 }
 
 func TestCanResize(t *testing.T) {

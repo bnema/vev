@@ -42,11 +42,12 @@ func TestPaletteAndControlShareExplicitDaemonActionTarget(t *testing.T) {
 
 type actionRunnerSpy struct {
 	requests []daemonActionRequest
+	err      error
 }
 
 func (s *actionRunnerSpy) Run(request daemonActionRequest) error {
 	s.requests = append(s.requests, request)
-	return nil
+	return s.err
 }
 
 func TestHandleCommandRejectsVersionBeforeDecodeOrDispatch(t *testing.T) {

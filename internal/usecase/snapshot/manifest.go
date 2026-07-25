@@ -345,6 +345,14 @@ func writeManifestWeights(w *payloadWriter, nodes []*layout.Node) error {
 }
 
 func readManifestWeights(r *payloadReader, nodes []*layout.Node) error {
+	return readManifestWeightExtension(r, uint64(len(nodes)), func(i int, weight float64) {
+		nodes[i].Weight = weight
+	})
+}
+
+// readManifestWeightExtension validates the optional weight extension and
+// calls assign for each decoded weight when assignment is required.
+func readManifestWeightExtension(r *payloadReader, wantNodes uint64, assign func(int, float64)) error {
 	if len(r.b) == 0 {
 		return nil
 	}
@@ -359,7 +367,7 @@ func readManifestWeights(r *payloadReader, nodes []*layout.Node) error {
 	if err != nil {
 		return err
 	}
-	if uint64(count) != uint64(len(nodes)) {
+	if uint64(count) != wantNodes {
 		return fmt.Errorf("%w: weight node count", ErrInvalidData)
 	}
 	if uint64(count) > uint64(len(r.b))/manifestWeightSize {
@@ -368,7 +376,7 @@ func readManifestWeights(r *payloadReader, nodes []*layout.Node) error {
 	if uint64(len(r.b)) != uint64(count)*manifestWeightSize {
 		return ErrTrailingBytes
 	}
-	for i := range nodes {
+	for i := range count {
 		bits, err := r.getUint64()
 		if err != nil {
 			return err
@@ -377,7 +385,9 @@ func readManifestWeights(r *payloadReader, nodes []*layout.Node) error {
 		if !validManifestWeight(weight) {
 			return fmt.Errorf("%w: node weight", ErrInvalidData)
 		}
-		nodes[i].Weight = weight
+		if assign != nil {
+			assign(int(i), weight)
+		}
 	}
 	return r.done()
 }

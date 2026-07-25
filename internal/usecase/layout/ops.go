@@ -2,6 +2,7 @@ package layout
 
 import (
 	"errors"
+	"math"
 	"sort"
 
 	"github.com/bnema/vev/internal/domain"
@@ -55,10 +56,11 @@ func (t *Tree) ResizeFocus(axis Axis, delta int, area domain.Rect) error {
 
 	requested := delta
 	if requested < 0 {
-		// -(MinInt) overflows. Splitting the negation keeps the magnitude
-		// representable even for a deliberately hostile caller.
-		requested = -(requested + 1)
-		requested++
+		if requested == math.MinInt {
+			requested = math.MaxInt
+		} else {
+			requested = -requested
+		}
 	}
 	if requested == 0 {
 		return ErrTooSmall
