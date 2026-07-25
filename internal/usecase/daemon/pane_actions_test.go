@@ -67,7 +67,7 @@ func TestSplitPaneRightFromStackSplitsWholeStack(t *testing.T) {
 	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}, Expanded: "pane-2"}, Focus: "pane-2"}
 	tb.nextPaneID = 3
 	newPTY := portsmocks.NewMockPTY(t)
-	stackPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 2}).Return(nil).Once()
+	stackPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 3}).Return(nil).Once()
 	newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
 	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 4}).Return(newPTY, nil).Once()
 
@@ -79,7 +79,7 @@ func TestSplitPaneRightFromStackSplitsWholeStack(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, layout.PaneID("pane-3"), tb.tree.Focus)
 	require.Len(t, tb.panes, 3)
-	require.Equal(t, domain.Rect{Y: 2, Width: 20, Height: 2}, placementContent(placements, "pane-2"))
+	require.Equal(t, domain.Rect{Y: 1, Width: 20, Height: 3}, placementContent(placements, "pane-2"))
 	require.Equal(t, domain.Rect{X: 21, Width: 20, Height: 4}, placementContent(placements, "pane-3"))
 }
 
@@ -242,7 +242,7 @@ func TestStackPaneCreatesStackAndToggleRestoresSplit(t *testing.T) {
 	d, sess, oldPTY, factory := newSplitTestDaemon(t, domain.Size{Cols: 20, Rows: 5})
 	newPTY := portsmocks.NewMockPTY(t)
 	newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
-	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 3}).Return(newPTY, nil).Once()
+	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 4}).Return(newPTY, nil).Once()
 
 	require.NoError(t, d.stackPane(sess, nil))
 	tb := sess.activeTab()
@@ -262,9 +262,9 @@ func TestStackFocusWalkExpandsAndOverflowRefuses(t *testing.T) {
 	d, sess, oldPTY, factory := newSplitTestDaemon(t, domain.Size{Cols: 20, Rows: 3})
 	newPTY := portsmocks.NewMockPTY(t)
 	newPTY.EXPECT().Read(mock.Anything).RunAndReturn(blockingRead(t)).Maybe()
-	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 1}).Return(newPTY, nil).Once()
+	factory.EXPECT().Open(mock.Anything, "/bin/sh", []string(nil), mock.Anything, "/work", domain.Size{Cols: 20, Rows: 2}).Return(newPTY, nil).Once()
 	require.NoError(t, d.stackPane(sess, nil))
-	oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 1}).Return(nil).Once()
+	oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 2}).Return(nil).Once()
 
 	require.NoError(t, d.focusDir(sess, nil, layout.Up))
 

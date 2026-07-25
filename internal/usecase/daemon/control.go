@@ -356,7 +356,7 @@ func finishDaemonActionForClient(d *Daemon, request daemonActionRequest, ac *att
 		tb.mu.Unlock()
 		if newFocus != request.target.pane.id {
 			d.exitCopyMode(ac)
-			if hasPlacement && pl.TitleBar.Height > 0 {
+			if hasPlacement && pl.InStack {
 				d.refreshPaneTitleOnFocus(request.target.session, newFocus)
 			}
 		}

@@ -65,12 +65,84 @@ func TestSolveStackFitAndOverflow(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []Placement{
 		{ID: "a", TitleBar: domain.Rect{Width: 20, Height: 1}, Collapsed: true, InStack: true},
-		{ID: "b", Content: domain.Rect{Y: 2, Width: 20, Height: 1}, TitleBar: domain.Rect{Y: 1, Width: 20, Height: 1}, InStack: true},
+		{ID: "b", Content: domain.Rect{Y: 1, Width: 20, Height: 2}, InStack: true},
 		{ID: "c", TitleBar: domain.Rect{Y: 3, Width: 20, Height: 1}, Collapsed: true, InStack: true},
 	}, got)
 
 	_, ok = Solve(stack, domain.Rect{Width: 20, Height: 3})
 	require.False(t, ok)
+}
+
+func TestSolveStackExpandedMemberHasNoTitleBar(t *testing.T) {
+	t.Parallel()
+	area := domain.Rect{X: 5, Y: 2, Width: 20, Height: 5}
+	tests := []struct {
+		name     string
+		expanded PaneID
+		want     []Placement
+	}{
+		{
+			name:     "edge member expanded",
+			expanded: "a",
+			want: []Placement{
+				{ID: "a", Content: domain.Rect{X: 5, Y: 2, Width: 20, Height: 3}, InStack: true},
+				{ID: "b", TitleBar: domain.Rect{X: 5, Y: 5, Width: 20, Height: 1}, Collapsed: true, InStack: true},
+				{ID: "c", TitleBar: domain.Rect{X: 5, Y: 6, Width: 20, Height: 1}, Collapsed: true, InStack: true},
+			},
+		},
+		{
+			name:     "middle member expanded",
+			expanded: "b",
+			want: []Placement{
+				{ID: "a", TitleBar: domain.Rect{X: 5, Y: 2, Width: 20, Height: 1}, Collapsed: true, InStack: true},
+				{ID: "b", Content: domain.Rect{X: 5, Y: 3, Width: 20, Height: 3}, InStack: true},
+				{ID: "c", TitleBar: domain.Rect{X: 5, Y: 6, Width: 20, Height: 1}, Collapsed: true, InStack: true},
+			},
+		},
+		{
+			name:     "other edge member expanded",
+			expanded: "c",
+			want: []Placement{
+				{ID: "a", TitleBar: domain.Rect{X: 5, Y: 2, Width: 20, Height: 1}, Collapsed: true, InStack: true},
+				{ID: "b", TitleBar: domain.Rect{X: 5, Y: 3, Width: 20, Height: 1}, Collapsed: true, InStack: true},
+				{ID: "c", Content: domain.Rect{X: 5, Y: 4, Width: 20, Height: 3}, InStack: true},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stack := &Node{Kind: Stack, Children: []*Node{NewLeaf("a"), NewLeaf("b"), NewLeaf("c")}, Expanded: tt.expanded}
+			got, ok := Solve(stack, area)
+			require.True(t, ok)
+			require.Equal(t, tt.want, got)
+
+			// Invariant: total consumed rows equal area.Height, and rows are
+			// contiguous and non-overlapping across title bars and content.
+			rows := make(map[int]PaneID, area.Height)
+			for _, p := range got {
+				if p.TitleBar.Height > 0 {
+					require.Zero(t, p.Content.Height, "expanded member must not have both a title bar and content")
+					for y := p.TitleBar.Y; y < p.TitleBar.Y+p.TitleBar.Height; y++ {
+						_, dup := rows[y]
+						require.False(t, dup, "row %d already occupied", y)
+						rows[y] = p.ID
+					}
+				} else {
+					require.Equal(t, tt.expanded, p.ID, "only the expanded member may omit its title bar")
+					for y := p.Content.Y; y < p.Content.Y+p.Content.Height; y++ {
+						_, dup := rows[y]
+						require.False(t, dup, "row %d already occupied", y)
+						rows[y] = p.ID
+					}
+				}
+			}
+			require.Len(t, rows, area.Height)
+			for y := area.Y; y < area.Y+area.Height; y++ {
+				_, ok := rows[y]
+				require.True(t, ok, "row %d not covered", y)
+			}
+		})
+	}
 }
 
 func TestSplitStackedLeafSplitsWholeStack(t *testing.T) {
@@ -85,7 +157,7 @@ func TestSplitStackedLeafSplitsWholeStack(t *testing.T) {
 	placements, ok := Solve(tr.Root, area)
 	require.True(t, ok)
 	require.Equal(t, PaneID("three"), tr.Focus)
-	require.Equal(t, domain.Rect{Y: 2, Width: 20, Height: 2}, contents(placements)["two"], "existing stack should remain visible on the left")
+	require.Equal(t, domain.Rect{Y: 1, Width: 20, Height: 3}, contents(placements)["two"], "existing stack should remain visible on the left")
 	require.Equal(t, domain.Rect{X: 21, Width: 20, Height: 4}, contents(placements)["three"], "new split pane should appear to the right of the stack")
 }
 

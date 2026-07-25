@@ -317,7 +317,7 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 		target.tab.mu.Unlock()
 		if newFocus != oldFocus {
 			d.exitCopyMode(ac)
-			if hasPlacement && pl.TitleBar.Height > 0 {
+			if hasPlacement && pl.InStack {
 				d.refreshPaneTitleOnFocus(sess, newFocus)
 			}
 		}
