@@ -24,6 +24,33 @@ type Persister struct {
 	mu    sync.Mutex
 }
 
+// KVStore adapts the reusable WAL implementation to the persistence port.
+type KVStore struct{ store *kv.Store }
+
+func OpenStore(path string) (*KVStore, error) {
+	store, err := kv.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	return &KVStore{store: store}, nil
+}
+
+func (s *KVStore) Get(key []byte) ([]byte, bool) { return s.store.Get(key) }
+func (s *KVStore) Set(key, value []byte) error   { return s.store.Set(key, value) }
+func (s *KVStore) Delete(key []byte) error       { return s.store.Delete(key) }
+func (s *KVStore) Range(fn func(key, value []byte) bool) {
+	s.store.Range(fn)
+}
+func (s *KVStore) Sync() error  { return s.store.Sync() }
+func (s *KVStore) Close() error { return s.store.Close() }
+func (s *KVStore) Batch(changes []ports.StoreChange) error {
+	batch := make([]kv.BatchChange, len(changes))
+	for i, change := range changes {
+		batch[i] = kv.BatchChange{Key: change.Key, Value: change.Value, Delete: change.Delete}
+	}
+	return s.store.Batch(batch)
+}
+
 // Open opens an existing strict catalogue and never creates an unproven empty one.
 func Open(dir string) (*Persister, error) {
 	p, _, err := openCurrentCatalogue(dir, false)
@@ -47,7 +74,7 @@ func openCurrentCatalogue(dir string, createProvenEmpty bool) (*Persister, []dom
 	if absent && !createProvenEmpty {
 		return nil, nil, fmt.Errorf("%w: no catalogue candidates", errPersistenceUnavailable)
 	}
-	store, err := kv.Open(path)
+	store, err := OpenStore(path)
 	if err != nil {
 		return nil, nil, err
 	}

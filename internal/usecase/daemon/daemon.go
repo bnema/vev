@@ -212,6 +212,7 @@ type stoppedSession struct {
 	name        string
 	cwd         string
 	createdAt   int64
+	incarnation domain.IncarnationID
 	lastUsedSeq uint64
 	tabNames    []string
 	purging     bool
@@ -419,7 +420,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		var maxCreatedAt int64
 		hasCreatedAt := false
 		for _, r := range records {
-			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, lastUsedSeq: r.LastUsedSeq, tabNames: r.TabNames}
+			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, incarnation: r.IncarnationID, lastUsedSeq: r.LastUsedSeq, tabNames: r.TabNames}
 			if !hasCreatedAt || r.CreatedAt > maxCreatedAt {
 				maxCreatedAt = r.CreatedAt
 				hasCreatedAt = true

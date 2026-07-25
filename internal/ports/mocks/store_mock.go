@@ -39,8 +39,8 @@ func (_m *MockStore) EXPECT() *MockStore_Expecter {
 }
 
 // Batch provides a mock function for the type MockStore
-func (_mock *MockStore) Batch(vs []ports.StoreChange) error {
-	ret := _mock.Called(vs)
+func (_mock *MockStore) Batch(storeChanges []ports.StoreChange) error {
+	ret := _mock.Called(storeChanges)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Batch")
@@ -48,7 +48,7 @@ func (_mock *MockStore) Batch(vs []ports.StoreChange) error {
 
 	var r0 error
 	if returnFunc, ok := ret.Get(0).(func([]ports.StoreChange) error); ok {
-		r0 = returnFunc(vs)
+		r0 = returnFunc(storeChanges)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -61,12 +61,12 @@ type MockStore_Batch_Call struct {
 }
 
 // Batch is a helper method to define mock.On call
-//   - vs []ports.StoreChange
-func (_e *MockStore_Expecter) Batch(vs any) *MockStore_Batch_Call {
-	return &MockStore_Batch_Call{Call: _e.mock.On("Batch", vs)}
+//   - storeChanges []ports.StoreChange
+func (_e *MockStore_Expecter) Batch(storeChanges any) *MockStore_Batch_Call {
+	return &MockStore_Batch_Call{Call: _e.mock.On("Batch", storeChanges)}
 }
 
-func (_c *MockStore_Batch_Call) Run(run func(vs []ports.StoreChange)) *MockStore_Batch_Call {
+func (_c *MockStore_Batch_Call) Run(run func(storeChanges []ports.StoreChange)) *MockStore_Batch_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 []ports.StoreChange
 		if args[0] != nil {
@@ -84,7 +84,7 @@ func (_c *MockStore_Batch_Call) Return(err error) *MockStore_Batch_Call {
 	return _c
 }
 
-func (_c *MockStore_Batch_Call) RunAndReturn(run func(vs []ports.StoreChange) error) *MockStore_Batch_Call {
+func (_c *MockStore_Batch_Call) RunAndReturn(run func(storeChanges []ports.StoreChange) error) *MockStore_Batch_Call {
 	_c.Call.Return(run)
 	return _c
 }

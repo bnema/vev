@@ -28,8 +28,16 @@ import (
 // generated mock's default Delete expectation.
 type failingDeleteStore struct{ err error }
 
-func (failingDeleteStore) Get([]byte) ([]byte, bool)    { return nil, false }
-func (failingDeleteStore) Set([]byte, []byte) error     { return nil }
+func (failingDeleteStore) Get([]byte) ([]byte, bool) { return nil, false }
+func (failingDeleteStore) Set([]byte, []byte) error  { return nil }
+func (s failingDeleteStore) Batch(changes []ports.StoreChange) error {
+	for _, change := range changes {
+		if change.Delete {
+			return s.err
+		}
+	}
+	return nil
+}
 func (s failingDeleteStore) Delete([]byte) error        { return s.err }
 func (failingDeleteStore) Range(func(k, v []byte) bool) {}
 func (failingDeleteStore) Sync() error                  { return nil }

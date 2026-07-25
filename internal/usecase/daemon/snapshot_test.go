@@ -46,6 +46,9 @@ func newSnapshotTestSession(t *testing.T, name string, ephemeral bool, cwd strin
 	p.screen.Write([]byte("hello"))
 	appendHistoryRow(t, p.history, []renderer.Cell{{Rune: 'h'}, {Rune: 'i'}})
 	sess := &session{id: domain.SessionID("sess-" + name), name: name, ephemeral: ephemeral, ctx: context.Background(), cancel: func() {}, tabs: []*tab{tb}, active: 0, cwd: cwd, createdAt: 42}
+	if !ephemeral {
+		sess.incarnation = domain.IncarnationID{1}
+	}
 	sess.snapEligible.Store(!ephemeral && name != "")
 	return sess
 }

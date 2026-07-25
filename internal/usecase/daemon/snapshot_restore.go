@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"math"
 
@@ -253,6 +254,19 @@ func (d *Daemon) newRestoredSession(snap snapcodec.Session, sctx context.Context
 // persistAndRegisterRestoredSession atomically transfers a successfully
 // persisted session to the daemon. The caller retains cleanup on false/error.
 func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *session) (bool, error) {
+	if sess.incarnation == (domain.IncarnationID{}) {
+		d.mu.Lock()
+		stopped := d.stopped[sess.name]
+		d.mu.Unlock()
+		sess.incarnation = stopped.incarnation
+		if sess.incarnation == (domain.IncarnationID{}) {
+			var err error
+			sess.incarnation, err = domain.NewIncarnationID(rand.Reader)
+			if err != nil {
+				return false, fmt.Errorf("snapshot: generate durable identity: %w", err)
+			}
+		}
+	}
 	if err := d.persist.Save(sess.persistRecordLocked(sess.createdAt)); err != nil {
 		return false, err
 	}

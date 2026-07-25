@@ -50,7 +50,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	pdgram "github.com/bnema/vev/pkg/dgram"
-	"github.com/bnema/vev/pkg/kv"
 	"github.com/bnema/vev/pkg/safedir"
 )
 
@@ -519,7 +518,7 @@ func runDaemonOwned(ctx context.Context) (retErr error) {
 	if !catalogueCandidate {
 		return fmt.Errorf("vev: durable session catalogue unavailable at %s", storePath)
 	}
-	store, err := kv.Open(storePath)
+	store, err := persist.OpenStore(storePath)
 	if err != nil {
 		log.Error("opening session store failed", "path", storePath, "err", err)
 		return fmt.Errorf("vev: open durable session catalogue %s: %w", storePath, err)

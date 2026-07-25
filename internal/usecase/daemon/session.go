@@ -3,6 +3,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -66,6 +67,7 @@ type session struct {
 	// It is guarded by mu and is always copied on ingress and egress.
 	env          []string
 	createdAt    int64
+	incarnation  domain.IncarnationID
 	mruAt        atomic.Uint64
 	snapDirty    atomic.Bool
 	snapEligible atomic.Bool
@@ -193,11 +195,13 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	env = copyEnvironment(env)
 	stopped, resuming := d.stopped[name]
 	var createdAt int64
+	var incarnation domain.IncarnationID
 	if !ephemeral {
 		if resuming {
 			// A stopped session is the same lifecycle when resumed; it must retain
 			// the persisted identity rather than receive a fresh timestamp.
 			createdAt = stopped.createdAt
+			incarnation = stopped.incarnation
 			if createdAt > d.lastAllocatedCreatedAt {
 				d.lastAllocatedCreatedAt = createdAt
 			}
@@ -206,6 +210,13 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 			createdAt, err = d.allocateLifecycleCreatedAtLocked()
 			if err != nil {
 				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
+			}
+		}
+		if incarnation == (domain.IncarnationID{}) {
+			var err error
+			incarnation, err = domain.NewIncarnationID(rand.Reader)
+			if err != nil {
+				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", fmt.Errorf("generate durable identity: %w", err))
 			}
 		}
 	}
@@ -258,6 +269,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 		terminal:     term,
 		env:          env,
 		createdAt:    createdAt,
+		incarnation:  incarnation,
 		snapshotWake: d.snapshotWake,
 	}
 	if !ephemeral && name != "" {
@@ -268,7 +280,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	}
 	sess.snapEligible.Store(!ephemeral && name != "")
 	if !ephemeral {
-		if err := d.persist.Save(persist.Record{Name: name, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names}); err != nil {
+		if err := d.persist.Save(persist.Record{Name: name, IncarnationID: incarnation, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names, RecoveryState: domain.RecoveryFresh}); err != nil {
 			closeTabs(tabs)
 			cancel()
 			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
@@ -643,6 +655,12 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 			d.mu.Unlock()
 			return err
 		}
+		sess.incarnation, err = domain.NewIncarnationID(rand.Reader)
+		if err != nil {
+			sess.mu.Unlock()
+			d.mu.Unlock()
+			return fmt.Errorf("generate durable identity: %w", err)
+		}
 	}
 	lastUsedSeq := sess.mruAt.Load()
 	record := sess.persistRecordLocked(d.nowUnixNano())
@@ -764,7 +782,7 @@ func (s *session) persistRecordLocked(updatedAt int64) persist.Record {
 	} else {
 		tabNames = tabNames[:lastCustom+1]
 	}
-	return persist.Record{Name: s.name, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, LastUsedSeq: s.mruAt.Load(), TabNames: tabNames}
+	return persist.Record{Name: s.name, IncarnationID: s.incarnation, Cwd: s.cwd, CreatedAt: createdAt, UpdatedAt: updatedAt, LastUsedSeq: s.mruAt.Load(), TabNames: tabNames, RecoveryState: domain.RecoveryFresh}
 }
 
 func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
@@ -1145,7 +1163,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	ephemeral := sess.ephemeral
 	sess.mu.Unlock()
 	if !ephemeral {
-		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, lastUsedSeq: sess.mruAt.Load(), tabNames: tabNames, purging: purge}
+		stopped := stoppedSession{name: stoppedName, cwd: stoppedCwd, createdAt: createdAt, incarnation: sess.incarnation, lastUsedSeq: sess.mruAt.Load(), tabNames: tabNames, purging: purge}
 		d.stopped[stoppedName] = stopped
 	}
 	empty := len(d.sessions) == 0

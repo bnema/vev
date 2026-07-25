@@ -241,7 +241,12 @@ func (s *Store) shouldCompact() bool {
 	return s.total > compactThreshold && float64(s.total-s.live)/float64(s.total) > compactWasteRatio
 }
 
-func (s *Store) compactLocked() error {
+func (s *Store) compactLocked() (retErr error) {
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, s.poisonLocked())
+		}
+	}()
 	next, prev := s.path+".next", s.path+".prev"
 	if err := injectFault(s.hooks, "before-write-next"); err != nil {
 		return err
@@ -367,6 +372,23 @@ func (s *Store) compactLocked() error {
 		return err
 	}
 	return injectFault(s.hooks, "after-final-sync-dir")
+}
+
+// poisonLocked permanently disables a store whose compaction did not complete.
+// The caller holds s.mu, so no later append can retain a descriptor for a
+// transitional pathname.
+func (s *Store) poisonLocked() error {
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	file, lockFile := s.file, s.lockFile
+	s.file, s.lockFile = nil, nil
+	var fileErr error
+	if file != nil {
+		fileErr = file.Close()
+	}
+	return errors.Join(fileErr, releaseLock(lockFile))
 }
 
 func replayFile(f *os.File) (ReplayResult, error) {

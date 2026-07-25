@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -395,10 +396,11 @@ func TestCompactionRecoveryMatrix(t *testing.T) {
 			if err := s.compactLocked(); err == nil {
 				t.Fatalf("fault %q did not interrupt compaction", point)
 			}
-			if s.file != nil {
-				_ = s.file.Close()
+			beforeAppend := candidateBytes(t, path)
+			if err := s.Set([]byte("later"), []byte("must-not-append")); !errors.Is(err, os.ErrClosed) {
+				t.Fatalf("append after compaction fault = %v, want closed store", err)
 			}
-			_ = releaseLock(s.lockFile)
+			requireCandidateBytes(t, path, beforeAppend)
 			if err := recoverCompaction(path, defaultFSHooks()); err != nil {
 				t.Fatalf("recovery: %v", err)
 			}
@@ -411,6 +413,30 @@ func TestCompactionRecoveryMatrix(t *testing.T) {
 				t.Fatalf("mixed or empty recovered map: %#v", got)
 			}
 		})
+	}
+}
+
+func candidateBytes(t *testing.T, path string) map[string][]byte {
+	t.Helper()
+	got := make(map[string][]byte, 3)
+	for _, suffix := range []string{"", ".next", ".prev"} {
+		data, err := os.ReadFile(path + suffix)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[suffix] = data
+	}
+	return got
+}
+
+func requireCandidateBytes(t *testing.T, path string, want map[string][]byte) {
+	t.Helper()
+	got := candidateBytes(t, path)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("catalogue candidates changed after poisoned append: got %#v, want %#v", got, want)
 	}
 }
 
