@@ -319,13 +319,16 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 	if !errors.Is(err, errNoNeighbor) || target.tab == nil {
 		return err
 	}
+	if !overflowSourceEligible(sess, target.tab) {
+		return errNoNeighbor
+	}
 
 	cfg := d.currentNavConfig()
 	if sessionTarget, ok := d.prepareSessionOverflow(sess, dir, cfg); ok {
 		if ac == nil {
 			return errNoNeighbor
 		}
-		return d.switchToTarget(sess, ac, sessionTarget)
+		return d.commitSessionOverflow(sess, ac, target.tab, sessionTarget)
 	}
 
 	sess.mu.Lock()

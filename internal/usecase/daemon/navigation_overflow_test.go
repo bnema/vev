@@ -149,6 +149,53 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 	require.Same(t, ac, attached, "the source session owns the genuinely attached client after returning")
 }
 
+func TestKeyboardVerticalOverflowRefusesVisibleFloatingSource(t *testing.T) {
+	d, alpha, ac, _ := newManualSessionWithPTYs(t, nil)
+	alpha.mu.Lock()
+	alpha.name = "alpha"
+	alpha.mu.Unlock()
+	installTestFloating(alpha.tabs[0], newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), true)
+	charlie := &session{id: "live-charlie", name: "charlie", ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	d.mu.Lock()
+	d.sessions[charlie.id] = charlie
+	d.mu.Unlock()
+	d.ApplyConfig(domain.Config{Nav: domain.NavConfig{OverflowSessions: true}})
+
+	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionFocusPaneDown)
+
+	require.Same(t, alpha, ac.currentSession())
+	alpha.mu.Lock()
+	require.Same(t, ac, alpha.client)
+	alpha.mu.Unlock()
+	charlie.mu.Lock()
+	require.Nil(t, charlie.client)
+	charlie.mu.Unlock()
+}
+
+func TestVerticalOverflowRevalidatesFloatingSourceBeforeHandoff(t *testing.T) {
+	d, alpha, ac, _ := newManualSessionWithPTYs(t, nil)
+	alpha.mu.Lock()
+	alpha.name = "alpha"
+	alpha.mu.Unlock()
+	charlie := &session{id: "live-charlie", name: "charlie", ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	d.mu.Lock()
+	d.sessions[charlie.id] = charlie
+	d.mu.Unlock()
+
+	target, ok := d.prepareSessionOverflow(alpha, layout.Down, domain.NavConfig{OverflowSessions: true})
+	require.True(t, ok)
+	installTestFloating(alpha.tabs[0], newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), true)
+
+	require.ErrorIs(t, d.commitSessionOverflow(alpha, ac, alpha.tabs[0], target), errNoNeighbor)
+	require.Same(t, alpha, ac.currentSession())
+	alpha.mu.Lock()
+	require.Same(t, ac, alpha.client)
+	alpha.mu.Unlock()
+	charlie.mu.Lock()
+	require.Nil(t, charlie.client)
+	charlie.mu.Unlock()
+}
+
 func TestVerticalOverflowIsRaceFreeDuringSessionRename(t *testing.T) {
 	d, alpha, ac, _ := newManualSessionWithPTYs(t, nil)
 	alpha.mu.Lock()

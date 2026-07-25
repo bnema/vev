@@ -50,6 +50,23 @@ func resolveOverflow(dir layout.Direction, cfg domain.NavConfig, position, count
 	return step
 }
 
+// overflowSourceEligible validates that directional overflow still originates
+// from the active tiled tab. The session-to-tab lock order matches tab overflow
+// commit and leaves no lock held across a session handoff.
+func overflowSourceEligible(sess *session, expectedSource *tab) bool {
+	if sess == nil || expectedSource == nil {
+		return false
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.active < 0 || sess.active >= len(sess.tabs) || sess.tabs[sess.active] != expectedSource {
+		return false
+	}
+	expectedSource.mu.Lock()
+	defer expectedSource.mu.Unlock()
+	return expectedSource.floating.state != floatingVisible
+}
+
 type sessionOverflowSnapshot struct {
 	session *session
 	id      domain.SessionID
@@ -96,6 +113,16 @@ func (d *Daemon) prepareSessionOverflow(current *session, dir layout.Direction, 
 	}
 	target := snapshots[position+step.delta]
 	return picker.Target{Session: target.id, TabIndex: -1}, true
+}
+
+// commitSessionOverflow revalidates the floating-source exclusion immediately
+// before switchToTarget. It deliberately releases session and tab locks first:
+// switchToTarget owns the daemon -> routing -> session lock order.
+func (d *Daemon) commitSessionOverflow(from *session, ac *attachedClient, expectedSource *tab, target picker.Target) error {
+	if !overflowSourceEligible(from, expectedSource) {
+		return errNoNeighbor
+	}
+	return d.switchToTarget(from, ac, target)
 }
 
 type tabOverflowCandidate struct {
