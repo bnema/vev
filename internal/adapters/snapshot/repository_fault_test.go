@@ -56,7 +56,7 @@ func TestRepositoryCleanupFaultsSurfaceForImmutableAndMutablePublication(t *test
 				t.Fatal(err)
 			}
 			second := repositoryPublication(t, "named", 2, []byte("two"))
-			key := sessionKey(second.Name)
+			key := legacyIncarnationID(second.Name).String()
 			if tc.location == "manifest" {
 				prepareObjects(t, repo, second)
 			} else {
@@ -119,10 +119,14 @@ func TestRepositoryNewDirectorySyncFaultsAreIndependent(t *testing.T) {
 		{name: "repository", phase: "repository", occurrence: 1, directory: func(_ *Repository, root string) string { return filepath.Dir(root) }},
 		{name: "sessions", phase: "sessions", occurrence: 1, directory: func(repo *Repository, _ string) string { return repo.dir }},
 		{name: "session", phase: "session", occurrence: 1, directory: func(repo *Repository, _ string) string { return filepath.Join(repo.dir, repositorySessionsDir) }},
-		{name: "objects", phase: "objects", occurrence: 1, directory: func(repo *Repository, _ string) string { return repo.legacySessionPath(sessionKey("named")) }},
-		{name: "generations", phase: "generations", occurrence: 2, directory: func(repo *Repository, _ string) string { return repo.legacySessionPath(sessionKey("named")) }},
+		{name: "objects", phase: "objects", occurrence: 1, directory: func(repo *Repository, _ string) string {
+			return repo.legacySessionPath(legacyIncarnationID("named").String())
+		}},
+		{name: "generations", phase: "generations", occurrence: 2, directory: func(repo *Repository, _ string) string {
+			return repo.legacySessionPath(legacyIncarnationID("named").String())
+		}},
 		{name: "object shard", phase: "object shard", occurrence: 1, directory: func(repo *Repository, _ string) string {
-			return filepath.Join(repo.legacySessionPath(sessionKey("named")), repositoryObjectsDir)
+			return filepath.Join(repo.legacySessionPath(legacyIncarnationID("named").String()), repositoryObjectsDir)
 		}},
 	}
 	for _, tc := range cases {
@@ -191,7 +195,7 @@ func TestRepositoryLoadFallsBackFromIncompleteNewestGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(repo.legacyObjectPath(sessionKey("named"), manifest.Tabs[0].Panes[0].Tail.Digest)); err != nil {
+	if err := os.Remove(repo.legacyObjectPath(legacyIncarnationID("named").String(), manifest.Tabs[0].Panes[0].Tail.Digest)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := repo.Load(context.Background(), "named")

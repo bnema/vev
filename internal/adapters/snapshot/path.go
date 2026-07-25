@@ -27,6 +27,15 @@ func filenameForName(name string) string {
 	return "@" + hex.EncodeToString(sum[:])[:40] + ".snap"
 }
 
+// legacyIncarnationID is used only by retired name-keyed compatibility
+// operations. New callers must supply the durable catalogue incarnation ID.
+func legacyIncarnationID(name string) domain.IncarnationID {
+	id := domain.IncarnationID{}
+	digest := sha256.Sum256([]byte(name))
+	copy(id[:], digest[:])
+	return id
+}
+
 func incarnationKey(id domain.IncarnationID) (string, error) {
 	if id == (domain.IncarnationID{}) {
 		return "", fmt.Errorf("snapshot: zero incarnation ID")

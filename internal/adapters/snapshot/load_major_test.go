@@ -25,14 +25,14 @@ func TestRepositoryCurrentGenerationPropagatesOperationalHeadErrors(t *testing.T
 
 	repo.hooks.beforeHeadRead = func(string) error { return syscall.EIO }
 
-	_, _, err := repo.currentGeneration(context.Background(), "named", sessionKey("named"))
+	_, _, err := repo.currentGeneration(context.Background(), "named", legacyIncarnationID("named").String())
 	require.ErrorIs(t, err, syscall.EIO)
 }
 
 func TestRepositoryLoadFallsBackFromInvalidHead(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	require.NoError(t, repo.Publish(context.Background(), repositoryPublication(t, "named", 1, []byte("state"))))
-	require.NoError(t, os.WriteFile(repo.legacyHeadPath(sessionKey("named")), []byte("invalid"), 0o600))
+	require.NoError(t, os.WriteFile(repo.legacyHeadPath(legacyIncarnationID("named").String()), []byte("invalid"), 0o600))
 
 	got, err := repo.Load(context.Background(), "named")
 	require.NoError(t, err)
@@ -44,7 +44,7 @@ func TestRepositoryLoadFallsBackAcrossMultipleCorruptCandidates(t *testing.T) {
 	for generation := uint64(1); generation <= 4; generation++ {
 		require.NoError(t, repo.Publish(context.Background(), repositoryPublication(t, "named", generation, []byte{byte(generation)})))
 	}
-	key := sessionKey("named")
+	key := legacyIncarnationID("named").String()
 	for _, generation := range []uint64{4, 3} {
 		publication := repositoryPublication(t, "named", generation, []byte{byte(generation)})
 		require.NoError(t, os.Remove(repo.legacyObjectPath(key, publication.Objects[0].Digest)))

@@ -47,7 +47,11 @@ func (r *Repository) Load(ctx context.Context, name string) (ports.SnapshotGener
 	if err := ctx.Err(); err != nil {
 		return ports.SnapshotGeneration{}, err
 	}
-	key := sessionKey(name)
+	id := legacyIncarnationID(name)
+	key, err := incarnationKey(id)
+	if err != nil {
+		return ports.SnapshotGeneration{}, err
+	}
 	lock := r.lockSession(key)
 	defer r.unlockSession(lock)
 	if err := ctx.Err(); err != nil {

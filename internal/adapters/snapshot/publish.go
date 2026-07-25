@@ -194,9 +194,13 @@ func (r *Repository) currentIncarnationPublication(ctx context.Context, publicat
 	if manifest.IncarnationID != publication.IncarnationID || manifest.Generation != generation {
 		return 0, nil, nil, fmt.Errorf("current manifest identity mismatch")
 	}
-	wantParent := &domain.CheckpointRef{Generation: generation, ManifestDigest: digest}
-	if publication.Generation == generation+1 && !checkpointRefEqual(publication.ParentCheckpoint, wantParent) {
-		return 0, nil, nil, fmt.Errorf("publication parent does not match current checkpoint")
+	// Parent checkpoints are optional in manifest v2. When a publisher supplies
+	// one, it must bind the next generation to the authoritative current HEAD.
+	if publication.ParentCheckpoint != nil {
+		wantParent := &domain.CheckpointRef{Generation: generation, ManifestDigest: digest}
+		if publication.Generation == generation+1 && !checkpointRefEqual(publication.ParentCheckpoint, wantParent) {
+			return 0, nil, nil, fmt.Errorf("publication parent does not match current checkpoint")
+		}
 	}
 	refs := manifestRefs(manifest)
 	if refs == nil || !withinGenerationBudget(len(data), refs) {

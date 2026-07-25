@@ -328,37 +328,41 @@ func (r *Repository) Delete(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	key := sessionKey(name)
+	id := legacyIncarnationID(name)
+	key, err := incarnationKey(id)
+	if err != nil {
+		return err
+	}
 	lock := r.lockSession(key)
 	defer r.unlockSession(lock)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	canonical := r.legacySessionPath(key)
+	canonical := r.sessionPath(id)
 	sessions := filepath.Dir(canonical)
 	// A prior rename may have succeeded while its parent sync failed. Complete
 	// that durability boundary before considering a canonical directory: this
 	// also leaves a newly recreated session untouched.
 	pending, err := r.pendingQuarantine(sessions, key)
 	if err != nil {
-		return fmt.Errorf("stat deleting snapshot session %q: %w", key, safeFilesystemError(err))
+		return fmt.Errorf("stat deleting snapshot session %q: %w", name, safeFilesystemError(err))
 	}
 	if pending {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if err := r.syncDirectory(sessions); err != nil {
-			return fmt.Errorf("sync deleted snapshot session directory %q: %w", key, safeFilesystemError(err))
+			return fmt.Errorf("sync deleted snapshot session directory %q: %w", name, safeFilesystemError(err))
 		}
 		return nil
 	}
 	if dir, err := r.openDirectory(canonical); errors.Is(err, os.ErrNotExist) {
 		return nil
 	} else if err != nil {
-		return fmt.Errorf("stat snapshot session %q: %w", key, safeFilesystemError(err))
+		return fmt.Errorf("stat snapshot session %q: %w", name, safeFilesystemError(err))
 	} else if err := dir.Close(); err != nil {
-		return fmt.Errorf("close snapshot session %q: %w", key, safeFilesystemError(err))
+		return fmt.Errorf("close snapshot session %q: %w", name, safeFilesystemError(err))
 	}
 	quarantine := filepath.Join(sessions, deletingSessionName(key))
 	if err := ctx.Err(); err != nil {
@@ -368,13 +372,13 @@ func (r *Repository) Delete(ctx context.Context, name string) error {
 	// mark made for the old namespace before that replacement becomes possible.
 	r.invalidateStorageEpoch(key)
 	if err := r.rename(canonical, quarantine); err != nil {
-		return fmt.Errorf("quarantine snapshot session %q: %w", key, safeFilesystemError(err))
+		return fmt.Errorf("quarantine snapshot session %q: %w", name, safeFilesystemError(err))
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := r.syncDirectory(sessions); err != nil {
-		return fmt.Errorf("sync deleted snapshot session directory %q: %w", key, safeFilesystemError(err))
+		return fmt.Errorf("sync deleted snapshot session directory %q: %w", name, safeFilesystemError(err))
 	}
 	return nil
 }

@@ -29,7 +29,7 @@ func TestRepositoryListStopsAtTraversalBudget(t *testing.T) {
 
 func TestRepositoryLoadStopsAtGenerationTraversalBudget(t *testing.T) {
 	repo := NewRepository(privateDir(t))
-	key := sessionKey("named")
+	key := legacyIncarnationID("named").String()
 	generations := filepath.Join(repo.legacySessionPath(key), repositoryGenerations)
 	if err := os.MkdirAll(generations, 0o700); err != nil {
 		t.Fatal(err)
@@ -53,7 +53,7 @@ func TestRepositoryLoadFallsBackNewestToOldestWithoutGenerationEnumeration(t *te
 			t.Fatal(err)
 		}
 	}
-	key := sessionKey("named")
+	key := legacyIncarnationID("named").String()
 	publication := repositoryPublication(t, "named", 3, []byte("state-3"))
 	if err := os.Remove(repo.legacyObjectPath(key, publication.Objects[0].Digest)); err != nil {
 		t.Fatal(err)
@@ -79,17 +79,17 @@ func TestRepositoryMaintainDoesNotCollectBeyondRetainedMetadataBudget(t *testing
 		if err := repo.Maintain(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if repo.maintenanceSessions[sessionKey("named")] == nil {
+		if repo.maintenanceSessions[legacyIncarnationID("named").String()] == nil {
 			break
 		}
 		if pass == maxMaintenanceMarkedGenerations*3-1 {
 			t.Fatal("maintenance did not complete after bounded object-shard traversal")
 		}
 	}
-	if _, err := os.Lstat(repo.legacyManifestPath(sessionKey("named"), 1)); err != nil {
+	if _, err := os.Lstat(repo.legacyManifestPath(legacyIncarnationID("named").String(), 1)); err != nil {
 		t.Fatalf("old manifest collected after mark budget overflow: %v", err)
 	}
-	if state := repo.maintenanceSessions[sessionKey("named")]; state != nil {
+	if state := repo.maintenanceSessions[legacyIncarnationID("named").String()]; state != nil {
 		t.Fatalf("overflow maintenance state retained = %#v, want reset", state)
 	}
 }

@@ -296,7 +296,7 @@ func TestRepositoryDeleteQuarantinesCanonicalSessionBeforeCleanup(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	canonical := repo.legacySessionPath(sessionKey("named"))
+	canonical := repo.legacySessionPath(legacyIncarnationID("named").String())
 	if _, err := os.Lstat(canonical); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("canonical session after Delete = %v, want not exist", err)
 	}
@@ -329,7 +329,7 @@ func TestRepositoryDeleteReturnsRootSyncFailureAfterQuarantine(t *testing.T) {
 	if err := repo.Delete(context.Background(), "named"); !errors.Is(err, injected) {
 		t.Fatalf("Delete error = %v, want root sync failure", err)
 	}
-	if _, err := os.Lstat(repo.legacySessionPath(sessionKey("named"))); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(repo.legacySessionPath(legacyIncarnationID("named").String())); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("canonical session after failed sync = %v, want not exist", err)
 	}
 }
@@ -366,7 +366,7 @@ func TestRepositoryDeleteWaitsForPublication(t *testing.T) {
 	if err := <-deleteDone; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(repo.legacySessionPath(sessionKey("named"))); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(repo.legacySessionPath(legacyIncarnationID("named").String())); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("canonical session after concurrent Delete = %v, want not exist", err)
 	}
 }
@@ -378,7 +378,7 @@ func TestRepositoryMaintainRetainsNewestTwoCompleteGenerations(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	key := sessionKey("named")
+	key := legacyIncarnationID("named").String()
 	for pass := 0; pass < maintenanceBatch; pass++ {
 		if err := repo.Maintain(context.Background()); err != nil {
 			t.Fatal(err)
@@ -416,7 +416,7 @@ func TestRepositoryMaintainPreservesIncompleteManifestReferences(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	key := sessionKey("named")
+	key := legacyIncarnationID("named").String()
 	manifest := repositoryPublication(t, "named", 3, []byte{3})
 	if err := os.Remove(repo.legacyObjectPath(key, manifest.Objects[1].Digest)); err != nil {
 		t.Fatal(err)
@@ -435,7 +435,7 @@ func TestRepositoryMaintainPreservesIncompleteManifestReferences(t *testing.T) {
 func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.T) {
 	t.Run("publish", func(t *testing.T) {
 		repo := NewRepository(privateDir(t))
-		key := sessionKey("named")
+		key := legacyIncarnationID("named").String()
 		lock := repo.lockSession(key)
 		ctx, cancel := context.WithCancel(context.Background())
 		reached := make(chan struct{})
@@ -459,7 +459,7 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 		if err := repo.Publish(context.Background(), repositoryPublication(t, "named", 1, []byte("state"))); err != nil {
 			t.Fatal(err)
 		}
-		key := sessionKey("named")
+		key := legacyIncarnationID("named").String()
 		for _, operation := range []struct {
 			name string
 			run  func(context.Context) error
@@ -494,7 +494,7 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 		if err := repo.Publish(context.Background(), repositoryPublication(t, "named", 1, []byte("state"))); err != nil {
 			t.Fatal(err)
 		}
-		lock := repo.lockSession(sessionKey("named"))
+		lock := repo.lockSession(legacyIncarnationID("named").String())
 		ctx, cancel := context.WithCancel(context.Background())
 		reached := make(chan struct{})
 		release := make(chan struct{})
@@ -600,7 +600,7 @@ func TestRepositoryMaintainClosesContinuationDirectories(t *testing.T) {
 
 func TestRepositoryMaintainBoundsQueuedShardNames(t *testing.T) {
 	repo := NewRepository(privateDir(t))
-	key := sessionKey("named")
+	key := legacyIncarnationID("named").String()
 	root := filepath.Join(repo.legacySessionPath(key), repositoryObjectsDir)
 	for i := 0; i < maintenanceBatch*2; i++ {
 		if err := os.MkdirAll(filepath.Join(root, fmt.Sprintf("%02x", i)), 0o700); err != nil {
@@ -696,7 +696,7 @@ func TestRepositoryMaintainMarksLargeGenerationSetBeforeSweeping(t *testing.T) {
 		}
 		newest = publication
 	}
-	key := sessionKey("named")
+	key := legacyIncarnationID("named").String()
 	stale := sha256.Sum256([]byte("stale object"))
 	stalePath := repo.legacyObjectPath(key, stale)
 	if err := os.MkdirAll(filepath.Dir(stalePath), 0o700); err != nil {
@@ -869,7 +869,7 @@ func TestRepositoryMaintainClassifiesUnpublishedGenerationsBeforeSweep(t *testin
 	} {
 		t.Run(head.name, func(t *testing.T) {
 			repo := NewRepository(privateDir(t))
-			key := sessionKey("named")
+			key := legacyIncarnationID("named").String()
 			publications := make([]ports.SnapshotPublication, 0, maintenanceBatch+2)
 			for generation := uint64(1); generation <= maintenanceBatch+2; generation++ {
 				publication := repositoryPublication(t, "named", generation, []byte(fmt.Sprintf("state-%d", generation)))
@@ -921,7 +921,7 @@ func TestRepositoryMaintainClassifiesUnpublishedGenerationsBeforeSweep(t *testin
 
 func TestRepositoryMaintainRestartsMarkAfterFailedPublication(t *testing.T) {
 	repo := NewRepository(privateDir(t))
-	key := sessionKey("named")
+	key := legacyIncarnationID("named").String()
 	first := publicationWithTailShard(t, "named", 1, "ff")
 	stalePaths := make([]string, 0, maintenanceBatch+1)
 	for i := 0; i < maintenanceBatch+1; i++ {

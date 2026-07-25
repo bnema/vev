@@ -119,7 +119,7 @@ func TestRepositoryPublishVerifiesNecessaryExistingObjectOnce(t *testing.T) {
 	}
 	second := repositoryPublication(t, "named", 2, []byte("second"))
 	newTail := second.Objects[0]
-	key := sessionKey(second.Name)
+	key := legacyIncarnationID(second.Name).String()
 	if err := os.MkdirAll(filepath.Dir(repo.legacyObjectPath(key, newTail.Digest)), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +143,7 @@ func TestRepositoryPublishVerifiesNecessaryExistingObjectOnce(t *testing.T) {
 
 func largeIncrementalPublications(t testing.TB, name string, count int) (ports.SnapshotPublication, ports.SnapshotPublication) {
 	t.Helper()
+	id := legacyIncarnationID(name)
 	sealed := make([]codec.ObjectRef, 0, count)
 	objects := make([]ports.SnapshotObject, 0, count+2)
 	for i := range count {
@@ -163,18 +164,18 @@ func largeIncrementalPublications(t testing.TB, name string, count int) (ports.S
 		if err != nil {
 			t.Fatal(err)
 		}
-		manifest, err := codec.MarshalManifest(codec.Manifest{Generation: generation, Name: name, Tabs: []codec.ManifestTab{{Cols: 1, Rows: 1, Panes: []codec.ManifestPane{{ID: "p", Sealed: sealed, Tail: codec.ObjectRef{Kind: codec.HistoryTail, Digest: tail.Digest, Size: uint32(len(tail.Data))}, Visible: codec.ObjectRef{Kind: codec.Visible, Digest: visible.Digest, Size: uint32(len(visible.Data))}}}}}})
+		manifest, err := codec.MarshalManifest(codec.Manifest{Generation: generation, IncarnationID: id, Name: name, Tabs: []codec.ManifestTab{{Cols: 1, Rows: 1, Panes: []codec.ManifestPane{{ID: "p", Sealed: sealed, Tail: codec.ObjectRef{Kind: codec.HistoryTail, Digest: tail.Digest, Size: uint32(len(tail.Data))}, Visible: codec.ObjectRef{Kind: codec.Visible, Digest: visible.Digest, Size: uint32(len(visible.Data))}}}}}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return ports.SnapshotPublication{Name: name, Generation: generation, Manifest: manifest, Objects: append(append([]ports.SnapshotObject(nil), objects...), tail, visible)}
+		return ports.SnapshotPublication{IncarnationID: id, Name: name, Generation: generation, Manifest: manifest, Objects: append(append([]ports.SnapshotObject(nil), objects...), tail, visible)}
 	}
 	return makePublication(1, "tail-1", "visible-1"), makePublication(2, "tail-2", "visible-2")
 }
 
 func seedCompletePublication(t testing.TB, repo *Repository, publication ports.SnapshotPublication) {
 	t.Helper()
-	key := sessionKey(publication.Name)
+	key := legacyIncarnationID(publication.Name).String()
 	if err := repo.ensureSession(publication.IncarnationID); err != nil {
 		t.Fatal(err)
 	}

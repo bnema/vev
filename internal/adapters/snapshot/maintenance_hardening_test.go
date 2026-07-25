@@ -11,7 +11,7 @@ import (
 
 func TestRepositoryMaintainBoundsCursorsAcrossHostileObjectShards(t *testing.T) {
 	repo := NewRepository(privateDir(t))
-	key := sessionKey("named")
+	key := legacyIncarnationID("named").String()
 	objects := filepath.Join(repo.legacySessionPath(key), repositoryObjectsDir)
 	const shards = maintenanceBatch * 2
 	for i := 0; i < shards; i++ {
@@ -48,7 +48,7 @@ func TestRepositoryMaintainBoundsCursorsAcrossHostileObjectShards(t *testing.T) 
 
 func TestRepositoryMaintainBoundsEmptyObjectTempShards(t *testing.T) {
 	repo := NewRepository(privateDir(t))
-	key := sessionKey("named")
+	key := legacyIncarnationID("named").String()
 	objects := filepath.Join(repo.legacySessionPath(key), repositoryObjectsDir)
 	const shards = maintenanceBatch * 2
 	for i := 0; i < shards; i++ {

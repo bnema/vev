@@ -16,7 +16,7 @@ func TestRepositoryImmutableInstallDoesNotOverwriteRacedTarget(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	pub := repositoryPublication(t, "named", 1, []byte("state"))
 	object := pub.Objects[0]
-	target := repo.legacyObjectPath(sessionKey(pub.Name), object.Digest)
+	target := repo.legacyObjectPath(legacyIncarnationID(pub.Name).String(), object.Digest)
 	repo.hooks.installImmutable = func(path string) error {
 		if path == target {
 			return os.WriteFile(path, []byte("attacker bytes"), 0o600)
@@ -37,7 +37,7 @@ func TestRepositoryImmutableInstallDoesNotOverwriteRacedTarget(t *testing.T) {
 
 func prepareHeadStage(t *testing.T, repo *Repository, pub ports.SnapshotPublication) {
 	t.Helper()
-	key := sessionKey(pub.Name)
+	key := legacyIncarnationID(pub.Name).String()
 	prepareObjects(t, repo, pub)
 	if err := repo.writeImmutable(repo.legacyManifestPath(key, pub.Generation), pub.Manifest, func(data []byte) error {
 		if !bytes.Equal(data, pub.Manifest) {
@@ -112,7 +112,7 @@ func preparePublicationLocation(t *testing.T, repo *Repository, pub ports.Snapsh
 }
 
 func injectBoundary(repo *Repository, location, operation string, pub ports.SnapshotPublication) {
-	key := sessionKey(pub.Name)
+	key := legacyIncarnationID(pub.Name).String()
 	dir := filepath.Dir(repo.legacyObjectPath(key, pub.Objects[0].Digest))
 	if location == "manifest" {
 		dir = filepath.Dir(repo.legacyManifestPath(key, pub.Generation))
@@ -167,7 +167,7 @@ func injectBoundary(repo *Repository, location, operation string, pub ports.Snap
 
 func prepareObjects(t *testing.T, repo *Repository, pub ports.SnapshotPublication) {
 	t.Helper()
-	key := sessionKey(pub.Name)
+	key := legacyIncarnationID(pub.Name).String()
 	for _, object := range pub.Objects {
 		ref := manifestReference(t, pub.Manifest, object.Digest)
 		if err := repo.writeImmutable(repo.legacyObjectPath(key, object.Digest), object.Data, func(data []byte) error {

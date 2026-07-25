@@ -101,7 +101,7 @@ func TestRepositoryDeleteUsesDeterministicPendingQuarantine(t *testing.T) {
 	if got := checks.Load(); got != 1 {
 		t.Fatalf("pending quarantine checks = %d, want one deterministic lookup", got)
 	}
-	if _, err := os.Lstat(filepath.Join(sessions, deletingSessionName(sessionKey("named")))); err != nil {
+	if _, err := os.Lstat(filepath.Join(sessions, deletingSessionName(legacyIncarnationID("named").String()))); err != nil {
 		t.Fatalf("deterministic quarantine missing: %v", err)
 	}
 }

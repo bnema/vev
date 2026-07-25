@@ -153,7 +153,7 @@ func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 			if err := repo.Publish(context.Background(), publication); err != nil {
 				t.Fatal(err)
 			}
-			key := sessionKey(publication.Name)
+			key := legacyIncarnationID(publication.Name).String()
 			inside := filepath.Join(repo.legacySessionPath(key), target)
 			outside := t.TempDir()
 			guard := filepath.Join(outside, "must-not-change")

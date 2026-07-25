@@ -174,7 +174,7 @@ func (r *Repository) markSession(ctx context.Context, key string, state *session
 			continue
 		}
 		manifest, err := codec.UnmarshalManifest(data)
-		if err != nil || manifest.Generation != generation || sessionKey(manifest.Name) != key {
+		if err != nil || manifest.Generation != generation || manifest.IncarnationID.String() != key {
 			state.uncertain = true
 			continue
 		}
