@@ -129,11 +129,11 @@ func MarshalVisible(frame renderer.Frame) ([]byte, error) {
 	if _, _, _, ok := visibleEncodingBudget(frame.Width, frame.Height); !ok {
 		return nil, fmt.Errorf("marshal visible: %w", errInvalidHistory)
 	}
-	boundaries := make([]lineBoundary, frame.Height)
+	boundaries := make([]LineBound, frame.Height)
 	for y := range boundaries {
 		for x := frame.Width - 1; x >= 0; x-- {
 			if !frame.At(x, y).Equal(renderer.BlankCell()) {
-				boundaries[y].end = x + 1
+				boundaries[y].End = x + 1
 				break
 			}
 		}
@@ -146,7 +146,7 @@ func MarshalVisible(frame renderer.Frame) ([]byte, error) {
 // after releasing that lock.
 type PrimaryVisibleSnapshot struct {
 	frame      renderer.Frame
-	boundaries []lineBoundary
+	boundaries []LineBound
 }
 
 // PrimaryVisibleSnapshot copies the saved primary frame and its logical-line
@@ -162,7 +162,7 @@ func (s *Screen) PrimaryVisibleSnapshot() PrimaryVisibleSnapshot {
 	}
 	return PrimaryVisibleSnapshot{
 		frame:      b.frame.Clone(),
-		boundaries: append([]lineBoundary(nil), b.boundaries...),
+		boundaries: append([]LineBound(nil), b.boundaries...),
 	}
 }
 
@@ -184,7 +184,7 @@ func (s *Screen) MarshalPrimaryVisible() ([]byte, error) {
 	return s.PrimaryVisibleSnapshot().Marshal()
 }
 
-func marshalVisible(frame renderer.Frame, boundaries []lineBoundary) ([]byte, error) {
+func marshalVisible(frame renderer.Frame, boundaries []LineBound) ([]byte, error) {
 	_, bytes, boundaryBytes, ok := visibleEncodingBudget(frame.Width, frame.Height)
 	if !ok || len(boundaries) != frame.Height {
 		return nil, fmt.Errorf("marshal visible: %w", errInvalidHistory)
@@ -203,8 +203,8 @@ func marshalVisible(frame renderer.Frame, boundaries []lineBoundary) ([]byte, er
 		}
 	}
 	for _, boundary := range boundaries {
-		out = binary.BigEndian.AppendUint32(out, uint32(boundary.end))
-		if boundary.soft {
+		out = binary.BigEndian.AppendUint32(out, uint32(boundary.End))
+		if boundary.Soft {
 			out = append(out, 1)
 		} else {
 			out = append(out, 0)
@@ -269,7 +269,7 @@ func UnmarshalVisible(data []byte) (renderer.Frame, error) {
 	return frame, err
 }
 
-func unmarshalVisible(data []byte) (renderer.Frame, []lineBoundary, error) {
+func unmarshalVisible(data []byte) (renderer.Frame, []LineBound, error) {
 	if _, err := PreflightVisibleBlob(data); err != nil {
 		return renderer.Frame{}, nil, err
 	}
@@ -283,10 +283,10 @@ func unmarshalVisible(data []byte) (renderer.Frame, []lineBoundary, error) {
 			frame.Set(x, y, cell)
 		}
 	}
-	boundaries := make([]lineBoundary, height)
+	boundaries := make([]LineBound, height)
 	offset := 13 + int(cellBytes)
 	for y := range boundaries {
-		boundaries[y] = lineBoundary{end: clamp(int(binary.BigEndian.Uint32(data[offset:offset+4])), 0, width), soft: data[offset+4] == 1}
+		boundaries[y] = LineBound{End: clamp(int(binary.BigEndian.Uint32(data[offset:offset+4])), 0, width), Soft: data[offset+4] == 1}
 		offset += 5
 	}
 	return frame, boundaries, nil

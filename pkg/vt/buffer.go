@@ -7,26 +7,28 @@ import "github.com/bnema/vev/pkg/renderer"
 // reflow is bounded by the live grid.
 type buffer struct {
 	frame      renderer.Frame
-	boundaries []lineBoundary
+	boundaries []LineBound
 }
 
-type lineBoundary struct {
-	// end is the meaningful cell extent. It excludes padding introduced when a
-	// wide rune was moved off the right edge.
-	end  int
-	soft bool // the row continues into the following physical row
+// LineBound describes a physical row's logical extent. End is exclusive: it is
+// the count of meaningful cells, so the last significant column is End-1. It
+// excludes padding introduced when a wide rune was moved off the right edge.
+// Soft reports that the row continues into the following physical row.
+type LineBound struct {
+	End  int
+	Soft bool
 }
 
 func newBuffer(width, height int) *buffer {
-	return &buffer{frame: renderer.NewFrame(width, height), boundaries: make([]lineBoundary, height)}
+	return &buffer{frame: renderer.NewFrame(width, height), boundaries: make([]LineBound, height)}
 }
 
 func bufferFromFrame(frame renderer.Frame) *buffer {
-	return &buffer{frame: frame, boundaries: make([]lineBoundary, frame.Height)}
+	return &buffer{frame: frame, boundaries: make([]LineBound, frame.Height)}
 }
 
 func (b *buffer) clone() *buffer {
-	out := &buffer{frame: cloneFrame(b.frame), boundaries: append([]lineBoundary(nil), b.boundaries...)}
+	out := &buffer{frame: cloneFrame(b.frame), boundaries: append([]LineBound(nil), b.boundaries...)}
 	return out
 }
 
@@ -34,40 +36,40 @@ func (b *buffer) content(y, end int) {
 	if y < 0 || y >= len(b.boundaries) {
 		return
 	}
-	b.boundaries[y].end = max(b.boundaries[y].end, clamp(end, 0, b.frame.Width))
+	b.boundaries[y].End = max(b.boundaries[y].End, clamp(end, 0, b.frame.Width))
 }
 
 func (b *buffer) truncate(y, end int) {
 	if y < 0 || y >= len(b.boundaries) {
 		return
 	}
-	b.boundaries[y].end = min(b.boundaries[y].end, clamp(end, 0, b.frame.Width))
+	b.boundaries[y].End = min(b.boundaries[y].End, clamp(end, 0, b.frame.Width))
 }
 
 // insert retains the meaningful shifted tail when insertion happens within it.
 func (b *buffer) insert(y, at, width int) {
-	if y < 0 || y >= len(b.boundaries) || at >= b.boundaries[y].end {
+	if y < 0 || y >= len(b.boundaries) || at >= b.boundaries[y].End {
 		return
 	}
-	b.boundaries[y].end = min(b.boundaries[y].end+width, b.frame.Width)
+	b.boundaries[y].End = min(b.boundaries[y].End+width, b.frame.Width)
 }
 
 func (b *buffer) hard(y int) {
 	if y >= 0 && y < len(b.boundaries) {
-		b.boundaries[y].soft = false
+		b.boundaries[y].Soft = false
 	}
 }
 
 func (b *buffer) soft(y int) {
 	if y >= 0 && y < len(b.boundaries) {
-		b.boundaries[y].end = b.frame.Width
-		b.boundaries[y].soft = true
+		b.boundaries[y].End = b.frame.Width
+		b.boundaries[y].Soft = true
 	}
 }
 
 func (b *buffer) continueRow(y int) {
 	if y >= 0 && y < len(b.boundaries) {
-		b.boundaries[y].soft = true
+		b.boundaries[y].Soft = true
 	}
 }
 
@@ -80,10 +82,10 @@ func (b *buffer) clear(y, x0, x1 int) {
 		// Erasing through the right edge leaves nothing flowing onto the next
 		// row: the logical line ends here. Keeping a stale soft link would let
 		// reflow merge a repainted row with the unrelated row below it.
-		b.boundaries[y].soft = false
+		b.boundaries[y].Soft = false
 	}
 	if x0 == 0 && x1 >= b.frame.Width {
-		b.boundaries[y] = lineBoundary{}
+		b.boundaries[y] = LineBound{}
 	}
 }
 
@@ -95,7 +97,7 @@ func (b *buffer) scrollUp(top, bottom, n int) {
 	b.hard(top - 1)
 	copy(b.boundaries[top:bottom-n+1], b.boundaries[top+n:bottom+1])
 	for y := bottom - n + 1; y <= bottom; y++ {
-		b.boundaries[y] = lineBoundary{}
+		b.boundaries[y] = LineBound{}
 	}
 	b.hard(bottom - n)
 }
@@ -106,19 +108,19 @@ func (b *buffer) scrollDown(top, bottom, n int) {
 	b.hard(top - 1)
 	copy(b.boundaries[top+n:bottom+1], b.boundaries[top:bottom-n+1])
 	for y := top; y < top+n; y++ {
-		b.boundaries[y] = lineBoundary{}
+		b.boundaries[y] = LineBound{}
 	}
 	b.hard(bottom)
 }
 
 func (b *buffer) hydrate() {
 	for y := range b.boundaries {
-		if b.boundaries[y].end != 0 {
+		if b.boundaries[y].End != 0 {
 			continue
 		}
 		for x := b.frame.Width - 1; x >= 0; x-- {
 			if !b.frame.At(x, y).Equal(renderer.BlankCell()) {
-				b.boundaries[y].end = x + 1
+				b.boundaries[y].End = x + 1
 				break
 			}
 		}
@@ -129,7 +131,7 @@ type bufferCursor struct{ row, col int }
 
 func (b *buffer) hasSoft() bool {
 	for _, boundary := range b.boundaries {
-		if boundary.soft {
+		if boundary.Soft {
 			return true
 		}
 	}
@@ -153,7 +155,7 @@ func (b *buffer) resizeFixed(width, height int, active, saved *bufferCursor) [][
 	// sequence does not add metadata allocation to every resize epoch.
 	boundaries := b.boundaries
 	if cap(boundaries) < height {
-		boundaries = make([]lineBoundary, height)
+		boundaries = make([]LineBound, height)
 	} else {
 		boundaries = boundaries[:height]
 	}
@@ -166,7 +168,7 @@ func (b *buffer) resizeFixed(width, height int, active, saved *bufferCursor) [][
 		}
 		copy(next.frame.Row(y), b.frame.Row(sy))
 		next.boundaries[y] = b.boundaries[sy]
-		next.boundaries[y].end = min(next.boundaries[y].end, width)
+		next.boundaries[y].End = min(next.boundaries[y].End, width)
 		repairFrameRow(next.frame, y)
 		copied++
 	}
@@ -194,7 +196,7 @@ func (b *buffer) cursorReflowPoints(active, saved *bufferCursor) [2]reflowPoint 
 	cursors := [2]*bufferCursor{active, saved}
 	for start := 0; start < b.frame.Height; {
 		end := start
-		for b.boundaries[end].soft && end+1 < b.frame.Height {
+		for b.boundaries[end].Soft && end+1 < b.frame.Height {
 			end++
 		}
 		for i, cur := range cursors {
@@ -203,11 +205,11 @@ func (b *buffer) cursorReflowPoints(active, saved *bufferCursor) [2]reflowPoint 
 			}
 			offset := 0
 			for y := start; y < cur.row; y++ {
-				offset += b.boundaries[y].end
+				offset += b.boundaries[y].End
 			}
 			points[i] = reflowPoint{
 				line:   start,
-				offset: offset + min(clamp(cur.col, 0, b.frame.Width), b.boundaries[cur.row].end),
+				offset: offset + min(clamp(cur.col, 0, b.frame.Width), b.boundaries[cur.row].End),
 			}
 		}
 		start = end + 1
@@ -287,7 +289,7 @@ func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, sh
 	}
 	finishRow := func(soft bool) {
 		if dst != nil && row >= shift && row < shift+dst.frame.Height {
-			dst.boundaries[row-shift] = lineBoundary{end: col, soft: soft}
+			dst.boundaries[row-shift] = LineBound{End: col, Soft: soft}
 		}
 		row++
 		col = 0
@@ -312,7 +314,7 @@ func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, sh
 
 	for start := 0; start < b.frame.Height; {
 		end := start
-		for b.boundaries[end].soft && end+1 < b.frame.Height {
+		for b.boundaries[end].Soft && end+1 < b.frame.Height {
 			end++
 		}
 		reflow := end > start
@@ -320,7 +322,7 @@ func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, sh
 		truncated := false
 		for y := start; y <= end && !truncated; y++ {
 			cells := b.frame.Row(y)
-			limit := b.boundaries[y].end
+			limit := b.boundaries[y].End
 			for x := 0; x < limit; {
 				cell := cells[x]
 				if cell.Continuation { // Repair malformed rows by dropping orphaned tails.
