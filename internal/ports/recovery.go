@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"errors"
 
 	"github.com/bnema/vev/internal/domain"
 )
@@ -98,6 +99,8 @@ type ReconcileDecision struct {
 	Candidate  *domain.CheckpointRef
 	ReasonCode string
 }
+
+var ErrLegacySnapshotUncertain = errors.New("legacy snapshot state is uncertain")
 
 type SnapshotMigrationRequest struct {
 	LegacyName    string
