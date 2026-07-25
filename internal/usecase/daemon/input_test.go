@@ -69,6 +69,7 @@ func TestResizeActionAdaptersProduceEquivalentGeometry(t *testing.T) {
 	type adapterState struct {
 		tree               *layout.Tree
 		placements         []layout.Placement
+		ptySizes           map[layout.PaneID][]domain.Size
 		generationDelta    uint64
 		snapshotDirtyDelta uint64
 	}
@@ -87,11 +88,15 @@ func TestResizeActionAdaptersProduceEquivalentGeometry(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			run := func(t *testing.T, adapter string) adapterState {
-				d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+			run := func(t *testing.T, adapter string, attached bool) adapterState {
+				t.Helper()
+				ptys := map[layout.PaneID]*resizeActionPTY{
+					"pane-1": {}, "pane-2": {}, "pane-3": {},
+				}
+				d, sess, ac, _ := newManualSessionWithPTYs(t, ptys["pane-1"])
 				tb := sess.activeTab()
-				p2 := newPane("pane-2", nil, tb.size)
-				p3 := newPane("pane-3", nil, tb.size)
+				p2 := newPane("pane-2", ptys["pane-2"], tb.size)
+				p3 := newPane("pane-3", ptys["pane-3"], tb.size)
 				tb.mu.Lock()
 				tb.panes[p2.id] = p2
 				tb.panes[p3.id] = p3
@@ -114,6 +119,20 @@ func TestResizeActionAdaptersProduceEquivalentGeometry(t *testing.T) {
 				dirty := sess.snapshotGeneration
 				sess.snapshotMu.Unlock()
 
+				invalidations := make(chan renderInvalidation, 2)
+				rc := newRenderCoordinator(renderCoordinatorOptions{
+					wake:         func(renderWake) {},
+					onInvalidate: func(inv renderInvalidation) { invalidations <- inv },
+				})
+				sess.installRenderCoordinator(rc)
+				if attached {
+					rc.attach(ac)
+				} else {
+					sess.mu.Lock()
+					sess.client = nil
+					sess.mu.Unlock()
+				}
+
 				switch adapter {
 				case "key":
 					daemonKeyHandler{d: d, ac: ac}.Action(tt.action)
@@ -135,16 +154,57 @@ func TestResizeActionAdaptersProduceEquivalentGeometry(t *testing.T) {
 				sess.snapshotMu.Lock()
 				gotDirty := sess.snapshotGeneration
 				sess.snapshotMu.Unlock()
-				return adapterState{tree: tree, placements: placements, generationDelta: gotGeneration - generation, snapshotDirtyDelta: gotDirty - dirty}
+
+				gotPTY := make(map[layout.PaneID][]domain.Size, len(ptys))
+				for id, pty := range ptys {
+					gotPTY[id] = pty.Sizes()
+				}
+				for _, placement := range placements {
+					require.Equal(t, []domain.Size{{Cols: placement.Content.Width, Rows: placement.Content.Height}}, gotPTY[placement.ID], "canonical PTY resize for %s", placement.ID)
+				}
+				if attached {
+					awaitInvalidation(t, invalidations)
+					requireNoInvalidation(t, invalidations)
+				} else {
+					requireNoInvalidation(t, invalidations)
+				}
+				return adapterState{tree: tree, placements: placements, ptySizes: gotPTY, generationDelta: gotGeneration - generation, snapshotDirtyDelta: gotDirty - dirty}
 			}
 
-			keyState := run(t, "key")
+			keyState := run(t, "key", true)
 			require.Equal(t, uint64(1), keyState.generationDelta)
 			require.Equal(t, uint64(1), keyState.snapshotDirtyDelta)
-			require.Equal(t, keyState, run(t, "palette"))
-			require.Equal(t, keyState, run(t, "control"))
+			require.Equal(t, keyState, run(t, "palette", true))
+			require.Equal(t, keyState, run(t, "control", true))
+			headless := run(t, "control", false)
+			require.Equal(t, uint64(1), headless.generationDelta)
+			require.Equal(t, uint64(1), headless.snapshotDirtyDelta)
+			require.Equal(t, keyState, headless)
 		})
 	}
+}
+
+type resizeActionPTY struct {
+	mu    sync.Mutex
+	sizes []domain.Size
+}
+
+func (*resizeActionPTY) Read([]byte) (int, error)     { return 0, nil }
+func (*resizeActionPTY) Write(b []byte) (int, error)  { return len(b), nil }
+func (*resizeActionPTY) Close() error                 { return nil }
+func (*resizeActionPTY) Pid() int                     { return 0 }
+func (*resizeActionPTY) ForegroundPgid() (int, error) { return 0, nil }
+func (p *resizeActionPTY) Resize(size domain.Size) error {
+	p.mu.Lock()
+	p.sizes = append(p.sizes, size)
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *resizeActionPTY) Sizes() []domain.Size {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]domain.Size(nil), p.sizes...)
 }
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
