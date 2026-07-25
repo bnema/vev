@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
@@ -20,9 +21,144 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/confirm"
+	"github.com/bnema/vev/pkg/kv"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+type fakeLifecycleOwnership struct {
+	release func() error
+}
+
+func (o fakeLifecycleOwnership) Release() error { return o.release() }
+
+func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
+	t.Run("ownership prefix is exact", func(t *testing.T) {
+		var events []string
+		owner := fakeLifecycleOwnership{release: func() error {
+			events = append(events, "unlock")
+			return nil
+		}}
+		deps := lifecycleStartupDeps{
+			ensurePrivate: func(path string) error {
+				if path == "runtime" {
+					events = append(events, "ensure-runtime")
+				} else {
+					events = append(events, "ensure-state")
+				}
+				return nil
+			},
+			acquire: func(context.Context, string, time.Duration) (lifecycleOwnership, error) {
+				events = append(events, "lock")
+				return owner, nil
+			},
+		}
+
+		err := runWithLifecycleOwnerDeps(context.Background(), "runtime", "state", func(context.Context) error {
+			events = append(events, "durable-open", "listen", "serve")
+			return nil
+		}, deps)
+		require.NoError(t, err)
+		require.Equal(t, []string{"ensure-runtime", "ensure-state", "lock"}, events[:3])
+		require.Equal(t, []string{"ensure-runtime", "ensure-state", "lock", "durable-open", "listen", "serve", "unlock"}, events)
+	})
+
+	t.Run("callback observes held lock and failure releases it", func(t *testing.T) {
+		runtimeDir := filepath.Join(t.TempDir(), "runtime")
+		stateDir := filepath.Join(t.TempDir(), "state")
+		startErr := errors.New("catalogue corrupt")
+
+		err := runWithLifecycleOwner(context.Background(), runtimeDir, stateDir, func(context.Context) error {
+			_, lockErr := lifecycle.TryAcquire(runtimeDir)
+			require.ErrorIs(t, lockErr, lifecycle.ErrBusy)
+			return startErr
+		})
+		require.ErrorIs(t, err, startErr)
+
+		owner, err := lifecycle.TryAcquire(runtimeDir)
+		require.NoError(t, err, "callback failure must release lifecycle ownership")
+		require.NoError(t, owner.Release())
+	})
+
+	t.Run("busy and unavailable ownership fail before startup", func(t *testing.T) {
+		runtimeDir := filepath.Join(t.TempDir(), "runtime")
+		stateDir := filepath.Join(t.TempDir(), "state")
+		owner, err := lifecycle.TryAcquire(runtimeDir)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, owner.Release()) }()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		started := false
+		err = runWithLifecycleOwner(ctx, runtimeDir, stateDir, func(context.Context) error {
+			started = true
+			return nil
+		})
+		require.ErrorIs(t, err, context.Canceled)
+		require.False(t, started)
+
+		badState := filepath.Join(t.TempDir(), "state-file")
+		require.NoError(t, os.WriteFile(badState, []byte("unavailable"), 0o600))
+		err = runWithLifecycleOwner(context.Background(), filepath.Join(t.TempDir(), "other-runtime"), badState, func(context.Context) error {
+			started = true
+			return nil
+		})
+		require.Error(t, err)
+		require.False(t, started)
+	})
+
+	t.Run("corrupt catalogue fails before socket publication", func(t *testing.T) {
+		runtimeRoot, stateRoot := t.TempDir(), t.TempDir()
+		runtimeDir := filepath.Join(runtimeRoot, "vev")
+		stateDir := filepath.Join(stateRoot, "vev")
+		require.NoError(t, os.Mkdir(stateDir, 0o700))
+		store, err := kv.Open(persist.StorePath(stateDir))
+		require.NoError(t, err)
+		require.NoError(t, store.Set([]byte("work"), []byte("malformed catalogue value")))
+		require.NoError(t, store.Close())
+
+		t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+		t.Setenv("XDG_STATE_HOME", stateRoot)
+		err = runWithLifecycleOwner(context.Background(), runtimeDir, stateDir, runDaemonOwned)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "validate durable session catalogue")
+		_, statErr := os.Stat(filepath.Join(runtimeDir, "daemon.sock"))
+		require.ErrorIs(t, statErr, os.ErrNotExist)
+	})
+
+	t.Run("unavailable catalogue fails without creating state or socket", func(t *testing.T) {
+		runtimeRoot, stateRoot := t.TempDir(), t.TempDir()
+		runtimeDir := filepath.Join(runtimeRoot, "vev")
+		stateDir := filepath.Join(stateRoot, "vev")
+		t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+		t.Setenv("XDG_STATE_HOME", stateRoot)
+
+		err := runWithLifecycleOwner(context.Background(), runtimeDir, stateDir, runDaemonOwned)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "durable session catalogue unavailable")
+		_, statErr := os.Stat(persist.StorePath(stateDir))
+		require.ErrorIs(t, statErr, os.ErrNotExist)
+		_, statErr = os.Stat(filepath.Join(runtimeDir, "daemon.sock"))
+		require.ErrorIs(t, statErr, os.ErrNotExist)
+	})
+
+	t.Run("callback and release errors are joined", func(t *testing.T) {
+		startErr := errors.New("catalogue unavailable")
+		releaseErr := errors.New("unlock failed")
+		deps := lifecycleStartupDeps{
+			ensurePrivate: func(string) error { return nil },
+			acquire: func(context.Context, string, time.Duration) (lifecycleOwnership, error) {
+				return fakeLifecycleOwnership{release: func() error { return releaseErr }}, nil
+			},
+		}
+
+		err := runWithLifecycleOwnerDeps(context.Background(), "runtime", "state", func(context.Context) error {
+			return startErr
+		}, deps)
+		require.ErrorIs(t, err, startErr)
+		require.ErrorIs(t, err, releaseErr)
+	})
+}
 
 // scriptRecv makes a transport yield frames in order, then wait for done
 // before returning EOF. The shared done channel coordinates proxy readers
