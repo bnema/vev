@@ -266,8 +266,9 @@ func sgrOffset(raw []byte, colDelta, rowDelta int) []byte {
 }
 
 type daemonKeyHandler struct {
-	d  *Daemon
-	ac *attachedClient
+	d       *Daemon
+	ac      *attachedClient
+	actions daemonActionRunner
 }
 
 func (h daemonKeyHandler) Forward(data []byte) {
@@ -289,6 +290,20 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 	sess := h.ac.currentSession()
 	if sess == nil {
 		return
+	}
+	runResizeAction := func(request daemonActionRequest) {
+		request.target = resolveDaemonActionTarget(sess)
+		runner := h.actions
+		if runner == nil {
+			runner = daemonActions{d: h.d}
+		}
+		if err := runner.Run(request); err != nil {
+			h.d.reportError(sess, resizeUserError(err))
+			return
+		}
+		if h.actions == nil {
+			finishDaemonActionForClient(h.d, request, h.ac, "input.go")
+		}
 	}
 	switch action {
 	case keys.ActionOpenPalette:
@@ -318,6 +333,16 @@ func (h daemonKeyHandler) Action(action keys.Action) {
 		if err := h.d.focusDir(sess, h.ac, layout.Down); err != nil {
 			h.d.reportError(sess, err)
 		}
+	case keys.ActionGrowPaneWidth:
+		runResizeAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Width, delta: resizeStepCols})
+	case keys.ActionShrinkPaneWidth:
+		runResizeAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Width, delta: -resizeStepCols})
+	case keys.ActionGrowPaneHeight:
+		runResizeAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Height, delta: resizeStepRows})
+	case keys.ActionShrinkPaneHeight:
+		runResizeAction(daemonActionRequest{kind: daemonActionResizePane, axis: layout.Height, delta: -resizeStepRows})
+	case keys.ActionEqualizePanes:
+		runResizeAction(daemonActionRequest{kind: daemonActionEqualizePanes})
 	case keys.ActionSwitchTab1, keys.ActionSwitchTab2, keys.ActionSwitchTab3,
 		keys.ActionSwitchTab4, keys.ActionSwitchTab5, keys.ActionSwitchTab6,
 		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:

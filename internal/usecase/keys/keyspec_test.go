@@ -79,6 +79,11 @@ func TestActionNamesAreCanonical(t *testing.T) {
 		{ActionSwitchTab7, "switch-tab-7"},
 		{ActionSwitchTab8, "switch-tab-8"},
 		{ActionSwitchTab9, "switch-tab-9"},
+		{ActionGrowPaneWidth, "grow-pane-width"},
+		{ActionShrinkPaneWidth, "shrink-pane-width"},
+		{ActionGrowPaneHeight, "grow-pane-height"},
+		{ActionShrinkPaneHeight, "shrink-pane-height"},
+		{ActionEqualizePanes, "equalize-panes"},
 	}
 
 	for _, tc := range cases {
@@ -112,6 +117,36 @@ func TestBuildBindingsAppliesOverrides(t *testing.T) {
 	assertAltRuneUnbound(t, bindings, 'h')
 	assertAltRuneAction(t, bindings, '2', ActionSwitchTab2)
 	assertAltRuneAction(t, bindings, 'é', ActionSwitchTab2)
+}
+
+func TestResizeActionsBindWithoutDefaults(t *testing.T) {
+	tests := []struct {
+		name   string
+		action Action
+		key    rune
+	}{
+		{"grow-pane-width", ActionGrowPaneWidth, 'w'},
+		{"shrink-pane-width", ActionShrinkPaneWidth, 's'},
+		{"grow-pane-height", ActionGrowPaneHeight, 'g'},
+		{"shrink-pane-height", ActionShrinkPaneHeight, 'r'},
+		{"equalize-panes", ActionEqualizePanes, 'e'},
+	}
+
+	defaults := DefaultBindings()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, bound := range defaults.altRunes {
+				require.NotEqual(t, tt.action, bound)
+			}
+			for _, bound := range defaults.altArrows {
+				require.NotEqual(t, tt.action, bound)
+			}
+
+			bindings, warnings := BuildBindings(map[string]string{tt.name: "alt+" + string(tt.key)})
+			require.Empty(t, warnings)
+			assertAltRuneAction(t, bindings, tt.key, tt.action)
+		})
+	}
 }
 
 func TestBuildBindingsWarnsAndSkipsInvalidEntries(t *testing.T) {

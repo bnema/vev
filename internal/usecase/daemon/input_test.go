@@ -26,6 +26,127 @@ import (
 
 // --- test doubles -----------------------------------------------------------
 
+func TestResizeActionAdaptersSubmitEquivalentRequests(t *testing.T) {
+	tests := []struct {
+		name    string
+		action  keys.Action
+		palette func(paletteExec) error
+		control func(controlExec) error
+	}{
+		{"grow width", keys.ActionGrowPaneWidth, func(e paletteExec) error { return e.GrowPaneWidth() }, func(e controlExec) error { return e.GrowPaneWidth() }},
+		{"shrink width", keys.ActionShrinkPaneWidth, func(e paletteExec) error { return e.ShrinkPaneWidth() }, func(e controlExec) error { return e.ShrinkPaneWidth() }},
+		{"grow height", keys.ActionGrowPaneHeight, func(e paletteExec) error { return e.GrowPaneHeight() }, func(e controlExec) error { return e.GrowPaneHeight() }},
+		{"shrink height", keys.ActionShrinkPaneHeight, func(e paletteExec) error { return e.ShrinkPaneHeight() }, func(e controlExec) error { return e.ShrinkPaneHeight() }},
+		{"equalize", keys.ActionEqualizePanes, func(e paletteExec) error { return e.EqualizePanes() }, func(e controlExec) error { return e.EqualizePanes() }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			sess := addControlSession(d, "work", "t_work", "p_work")
+			ac := &attachedClient{}
+			ac.setSession(sess)
+			target := resolveDaemonActionTarget(sess)
+			keySpy := &actionRunnerSpy{}
+			paletteSpy := &actionRunnerSpy{}
+			controlSpy := &actionRunnerSpy{}
+
+			daemonKeyHandler{d: d, ac: ac, actions: keySpy}.Action(tt.action)
+			require.NoError(t, tt.palette(paletteExec{d: d, sess: sess, actions: paletteSpy}))
+			require.NoError(t, tt.control(controlExec{d: d, sess: sess, target: target, actions: controlSpy}))
+
+			require.Len(t, keySpy.requests, 1)
+			require.Equal(t, keySpy.requests, paletteSpy.requests)
+			require.Equal(t, keySpy.requests, controlSpy.requests)
+			require.Same(t, sess, keySpy.requests[0].target.session)
+			require.Same(t, target.tab, keySpy.requests[0].target.tab)
+			require.Same(t, target.pane, keySpy.requests[0].target.pane)
+		})
+	}
+}
+
+func TestResizeActionAdaptersProduceEquivalentGeometry(t *testing.T) {
+	type adapterState struct {
+		tree               *layout.Tree
+		placements         []layout.Placement
+		generationDelta    uint64
+		snapshotDirtyDelta uint64
+	}
+	tests := []struct {
+		name    string
+		action  keys.Action
+		palette func(paletteExec) error
+		control func(controlExec) error
+	}{
+		{"grow width", keys.ActionGrowPaneWidth, func(e paletteExec) error { return e.GrowPaneWidth() }, func(e controlExec) error { return e.GrowPaneWidth() }},
+		{"shrink width", keys.ActionShrinkPaneWidth, func(e paletteExec) error { return e.ShrinkPaneWidth() }, func(e controlExec) error { return e.ShrinkPaneWidth() }},
+		{"grow height", keys.ActionGrowPaneHeight, func(e paletteExec) error { return e.GrowPaneHeight() }, func(e controlExec) error { return e.GrowPaneHeight() }},
+		{"shrink height", keys.ActionShrinkPaneHeight, func(e paletteExec) error { return e.ShrinkPaneHeight() }, func(e controlExec) error { return e.ShrinkPaneHeight() }},
+		{"equalize", keys.ActionEqualizePanes, func(e paletteExec) error { return e.EqualizePanes() }, func(e controlExec) error { return e.EqualizePanes() }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := func(t *testing.T, adapter string) adapterState {
+				d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+				tb := sess.activeTab()
+				p2 := newPane("pane-2", nil, tb.size)
+				p3 := newPane("pane-3", nil, tb.size)
+				tb.mu.Lock()
+				tb.panes[p2.id] = p2
+				tb.panes[p3.id] = p3
+				tb.tree = &layout.Tree{
+					Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{
+						layout.NewLeaf("pane-1"),
+						{Kind: layout.Split, Dir: layout.Vertical, Weight: 2, Children: []*layout.Node{
+							layout.NewLeaf("pane-2"), layout.NewLeaf("pane-3"),
+						}},
+					}},
+					Focus: "pane-2",
+				}
+				tb.tree.Root.Children[0].Weight = 1
+				tb.tree.Root.Children[1].Children[0].Weight = 1
+				tb.tree.Root.Children[1].Children[1].Weight = 2
+				generation := tb.layoutGeneration
+				tb.mu.Unlock()
+				sess.snapEligible.Store(true)
+				sess.snapshotMu.Lock()
+				dirty := sess.snapshotGeneration
+				sess.snapshotMu.Unlock()
+
+				switch adapter {
+				case "key":
+					daemonKeyHandler{d: d, ac: ac}.Action(tt.action)
+				case "palette":
+					require.NoError(t, tt.palette(paletteExec{d: d, sess: sess, ac: ac}))
+				case "control":
+					target := resolveDaemonActionTarget(sess)
+					require.NoError(t, tt.control(controlExec{d: d, sess: sess, target: target}))
+				default:
+					t.Fatalf("unknown adapter %q", adapter)
+				}
+
+				tb.mu.Lock()
+				tree := tb.tree.Clone()
+				gotGeneration := tb.layoutGeneration
+				placements, ok := layout.Solve(tb.tree.Root, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
+				tb.mu.Unlock()
+				require.True(t, ok)
+				sess.snapshotMu.Lock()
+				gotDirty := sess.snapshotGeneration
+				sess.snapshotMu.Unlock()
+				return adapterState{tree: tree, placements: placements, generationDelta: gotGeneration - generation, snapshotDirtyDelta: gotDirty - dirty}
+			}
+
+			keyState := run(t, "key")
+			require.Equal(t, uint64(1), keyState.generationDelta)
+			require.Equal(t, uint64(1), keyState.snapshotDirtyDelta)
+			require.Equal(t, keyState, run(t, "palette"))
+			require.Equal(t, keyState, run(t, "control"))
+		})
+	}
+}
+
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
 

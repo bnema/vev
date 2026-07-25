@@ -65,6 +65,11 @@ var actionNames = map[Action]string{
 	ActionSwitchTab7:         "switch-tab-7",
 	ActionSwitchTab8:         "switch-tab-8",
 	ActionSwitchTab9:         "switch-tab-9",
+	ActionGrowPaneWidth:      "grow-pane-width",
+	ActionShrinkPaneWidth:    "shrink-pane-width",
+	ActionGrowPaneHeight:     "grow-pane-height",
+	ActionShrinkPaneHeight:   "shrink-pane-height",
+	ActionEqualizePanes:      "equalize-panes",
 }
 
 var actionsByName = func() map[string]Action {
