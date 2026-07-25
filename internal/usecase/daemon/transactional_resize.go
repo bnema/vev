@@ -417,41 +417,58 @@ func (d *Daemon) applyVisibleFloatingLayout(sess *session, tb *tab, current func
 	}
 	p := tb.floating.pane
 	generation := tb.floating.generation
-	geometry := calculateContentFloatingGeometry(tb.size, d.currentFloatingConfig())
+	size := tb.size
+	geometry := calculateContentFloatingGeometry(size, d.currentFloatingConfig())
 	tb.mu.Unlock()
 	if !geometry.valid() {
 		return nil, true
 	}
 
-	plan := resizePlan{members: []resizeMember{{
+	// Unlike applyResize, this keeps successful PTY resizes gated until the
+	// floating slot and tab size are revalidated. A newer client resize may
+	// otherwise publish this obsolete popup geometry after its PTY call returns.
+	plan := preparedTabLayout{members: []resizeMember{{
 		session: sess, tab: tb, pane: p, rect: geometry.Inner, floating: geometry, isFloating: true,
 	}}}
-	if current == nil {
-		if !d.applyResize(&plan) {
-			return nil, false
-		}
-	} else if !d.applyResize(&plan, current) {
-		return nil, false
-	}
+	d.applyPreparedTabMembers(&plan)
 
 	// The PTY may have accepted an intermediate size, but a hidden, replaced,
-	// or relaunched slot must never receive this attempt's geometry.
+	// relaunched, or resized slot must never receive this attempt's geometry.
 	tb.mu.Lock()
-	currentSlot := tb.floating.state == floatingVisible && tb.floating.generation == generation && tb.floating.pane == p
+	currentSlot := tb.floating.state == floatingVisible && tb.floating.generation == generation && tb.floating.pane == p && tb.size == size
+	if current != nil && !current() {
+		currentSlot = false
+	}
 	if currentSlot {
 		p.mu.Lock()
 		p.rect = geometry.Inner
 		p.popupGeometry = geometry
-		if plan.members[0].ok && !plan.members[0].screenResized {
+		if plan.members[0].ok {
+			p.resizeRetry = false
 			p.screen.Resize(geometry.Inner.Width, geometry.Inner.Height)
 		}
 		p.mu.Unlock()
 	}
 	tb.mu.Unlock()
 	if !currentSlot {
+		// This attempt has no tiled transaction loop to retain the gate for, so
+		// discard its buffered bytes at the old screen size before returning.
+		for i := range plan.members {
+			member := &plan.members[i]
+			if !member.screenResized {
+				continue
+			}
+			member.pane.resizeMu.Lock()
+			d.replayResizePending(member.session, member.tab, member.pane, false, member.rect)
+			member.pane.resizeMu.Unlock()
+		}
+		if current != nil && !current() {
+			return nil, false
+		}
 		return nil, true
 	}
 	if plan.members[0].ok {
+		d.finishPreparedTabMembers(&plan, true)
 		return nil, true
 	}
 	return plan.members, true

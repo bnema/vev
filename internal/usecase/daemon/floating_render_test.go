@@ -636,6 +636,52 @@ func TestFailedFloatingResizeKeepsCommittedRenderAndInputGeometry(t *testing.T) 
 	}
 }
 
+func TestFloatingLayoutRejectsStaleResizeBeforePublishing(t *testing.T) {
+	cfg := domain.FloatingConfig{Width: 50, Height: 50}
+	oldSize := domain.Size{Cols: 80, Rows: 24}
+	newSize := domain.Size{Cols: 100, Rows: 40}
+	previousGeometry := calculateContentFloatingGeometry(domain.Size{Cols: 60, Rows: 20}, cfg)
+	oldGeometry := calculateContentFloatingGeometry(oldSize, cfg)
+	newGeometry := calculateContentFloatingGeometry(newSize, cfg)
+	pty := &resizePTY{entered: make(chan struct{}), release: make(chan struct{})}
+	p := newPane("floating", pty, rectSize(previousGeometry.Inner))
+	p.rect = previousGeometry.Inner
+	p.popupGeometry = previousGeometry
+	tb := newTab(nil, oldSize)
+	installTestFloating(tb, p, true)
+	d := newTestDaemon(t, nil, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: cfg})
+
+	done := make(chan bool, 1)
+	go func() {
+		_, ok := d.applyVisibleFloatingLayout(&session{tabs: []*tab{tb}}, tb, nil)
+		done <- ok
+	}()
+	<-pty.entered
+	tb.mu.Lock()
+	tb.size = newSize
+	tb.bumpLayoutGenerationLocked()
+	tb.mu.Unlock()
+	close(pty.release)
+	require.True(t, <-done)
+
+	p.mu.Lock()
+	require.Equal(t, previousGeometry.Inner, p.rect, "a stale floating apply must not publish its rectangle")
+	require.Equal(t, previousGeometry, p.popupGeometry, "a stale floating apply must not publish its geometry")
+	require.Equal(t, previousGeometry.Inner.Width, p.screen.Frame.Width, "a stale floating apply must not resize the screen")
+	require.Equal(t, previousGeometry.Inner.Height, p.screen.Frame.Height, "a stale floating apply must not resize the screen")
+	require.False(t, p.resizeApplying, "a stale floating apply must release its parser gate")
+	p.mu.Unlock()
+
+	_, ok := d.applyVisibleFloatingLayout(&session{tabs: []*tab{tb}}, tb, nil)
+	require.True(t, ok)
+	require.Equal(t, []domain.Size{rectSize(oldGeometry.Inner), rectSize(newGeometry.Inner)}, pty.sizes())
+	require.Equal(t, newGeometry.Inner, p.rect)
+	require.Equal(t, newGeometry, p.popupGeometry)
+	require.Equal(t, newGeometry.Inner.Width, p.screen.Frame.Width)
+	require.Equal(t, newGeometry.Inner.Height, p.screen.Frame.Height)
+}
+
 func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 	t.Run("failure preserves state", func(t *testing.T) {
 		pty := &resizePTY{err: errors.New("nope")}
