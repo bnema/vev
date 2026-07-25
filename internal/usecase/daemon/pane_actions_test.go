@@ -21,13 +21,94 @@ import (
 )
 
 func TestLayoutGenerationMutationBookkeeping(t *testing.T) {
-	tb := newTab(nil, domain.Size{Cols: 41, Rows: 10})
+	t.Run("focus and expanded member share one logical bump", func(t *testing.T) {
+		tb := newTab(nil, domain.Size{Cols: 41, Rows: 10})
+		second := newPane("pane-2", nil, domain.Size{Cols: 41, Rows: 10})
+		tb.mu.Lock()
+		tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}, Expanded: "pane-1"}, Focus: "pane-1"}
+		tb.panes[second.id] = second
+		require.Zero(t, tb.layoutGeneration)
+		require.True(t, focusPlacementLocked(tb, second.id))
+		require.Equal(t, uint64(1), tb.layoutGeneration)
+		require.False(t, focusPlacementLocked(tb, second.id))
+		require.Equal(t, uint64(1), tb.layoutGeneration)
+		tb.mu.Unlock()
+	})
 
+	t.Run("size changes bump only when the value changes", func(t *testing.T) {
+		tb := newTab(nil, domain.Size{Cols: 41, Rows: 10})
+		tb.mu.Lock()
+		if tb.size != (domain.Size{Cols: 80, Rows: 23}) {
+			tb.size = domain.Size{Cols: 80, Rows: 23}
+			tb.bumpLayoutGenerationLocked()
+		}
+		require.Equal(t, uint64(1), tb.layoutGeneration)
+		if tb.size != (domain.Size{Cols: 80, Rows: 23}) {
+			tb.size = domain.Size{Cols: 80, Rows: 23}
+			tb.bumpLayoutGenerationLocked()
+		}
+		require.Equal(t, uint64(1), tb.layoutGeneration)
+		tb.mu.Unlock()
+	})
+}
+
+type layoutRetryClock struct{ timers chan *layoutRetryTimer }
+
+type layoutRetryTimer struct {
+	ch    chan time.Time
+	delay time.Duration
+}
+
+func (c *layoutRetryClock) Now() time.Time { return time.Unix(0, 0) }
+
+func (c *layoutRetryClock) NewTimer(delay time.Duration) ports.Timer {
+	timer := &layoutRetryTimer{ch: make(chan time.Time, 1), delay: delay}
+	c.timers <- timer
+	return timer
+}
+
+func (t *layoutRetryTimer) C() <-chan time.Time    { return t.ch }
+func (*layoutRetryTimer) Reset(time.Duration) bool { return false }
+func (*layoutRetryTimer) Stop() bool               { return true }
+func (t *layoutRetryTimer) fire()                  { t.ch <- time.Unix(0, 0) }
+
+func TestLayoutApplicationRetriesOnlyAcceptedFailedGeometry(t *testing.T) {
+	pty := &transactionalResizePTY{errs: []error{errors.New("first resize fails")}}
+	d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+	clock := &layoutRetryClock{timers: make(chan *layoutRetryTimer, 16)}
+	d.clock = clock
+	tb, p := sess.activeTab(), sess.activeTab().focusedPane()
 	tb.mu.Lock()
-	require.Zero(t, tb.layoutGeneration)
+	tb.size = domain.Size{Cols: 100, Rows: 20}
 	tb.bumpLayoutGenerationLocked()
-	require.Equal(t, uint64(1), tb.layoutGeneration)
 	tb.mu.Unlock()
+
+	secondResize := make(chan struct{})
+	var resized sync.Once
+	pty.onResize = func() {
+		if len(pty.requested()) == 2 {
+			resized.Do(func() { close(secondResize) })
+		}
+	}
+	d.applyTabLayout(sess, tb)
+
+	var timer *layoutRetryTimer
+	for timer == nil {
+		candidate := <-clock.timers
+		if candidate.delay == minOutputRenderDeadline {
+			timer = candidate
+		}
+	}
+	require.Equal(t, []domain.Size{{Cols: 100, Rows: 20}}, pty.requested())
+	require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height}, "failed apply must not publish a VT resize")
+	timer.fire()
+	awaitSignal(t, secondResize, "accepted failure was not retried")
+	require.Equal(t, []domain.Size{{Cols: 100, Rows: 20}, {Cols: 100, Rows: 20}}, pty.requested())
+	require.Eventually(t, func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.screen.Frame.Width == 100 && p.screen.Frame.Height == 20
+	}, time.Second, time.Millisecond, "successful retry did not publish its VT size")
 }
 
 func TestLayoutApplicationDoesNotHoldTabLock(t *testing.T) {
@@ -147,6 +228,8 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 		require.False(t, p2.resizeApplying, "removed pane gate was not cancelled")
 		p2.mu.Unlock()
 		require.Equal(t, domain.Rect{Width: 80, Height: 23}, p1.rect)
+		require.Equal(t, []domain.Size{{Cols: 40, Rows: 23}, {Cols: 80, Rows: 23}}, first.requested(), "the rejected plan must be followed by a fresh surviving-pane apply")
+		require.Equal(t, []domain.Size{{Cols: 39, Rows: 23}}, second.requested(), "the removed pane may receive an obsolete external resize but must never be published")
 	})
 
 	t.Run("focus expansion replaces a stale stack placement", func(t *testing.T) {
@@ -180,6 +263,7 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 		tb.mu.Unlock()
 		require.True(t, ok)
 		require.Equal(t, placementContent(placements, p2.id), p2.rect)
+		require.Equal(t, []domain.Size{{Cols: 80, Rows: 21}}, first.requested(), "the old expanded pane is applied only by the rejected attempt")
 		require.Equal(t, []domain.Size{rectSize(p2.rect)}, second.requested())
 	})
 

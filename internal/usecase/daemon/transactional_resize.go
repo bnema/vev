@@ -70,8 +70,9 @@ func (d *Daemon) applyPreparedTabMembers(plan *preparedTabLayout) {
 		pty := p.pty
 		// A rejected earlier attempt deliberately leaves its parser gate open.
 		// Reapply even if the committed rectangle already matches: the PTY may
-		// still be at that rejected attempt's external size.
-		needsApply := p.resizeApplying || old.Width != member.rect.Width || old.Height != member.rect.Height
+		// still be at that rejected attempt's external size. An accepted failed
+		// attempt records resizeRetry for the same reason after its gate closes.
+		needsApply := p.resizeApplying || p.resizeRetry || old.Width != member.rect.Width || old.Height != member.rect.Height
 		if needsApply && pty != nil {
 			p.resizeApplying = true
 		}
@@ -80,6 +81,9 @@ func (d *Daemon) applyPreparedTabMembers(plan *preparedTabLayout) {
 			member.ok = true
 		} else if err := pty.Resize(rectSize(member.rect)); err != nil {
 			d.log.Warn("pty resize failed", "err", err)
+			p.mu.Lock()
+			p.resizeRetry = true
+			p.mu.Unlock()
 			d.replayResizePending(member.session, member.tab, p, false, member.rect)
 			member.retry = true
 			member.err = err
@@ -110,6 +114,7 @@ func commitPreparedTabLayoutLocked(plan *preparedTabLayout) {
 		member.pane.mu.Lock()
 		member.pane.rect = member.rect
 		if member.ok {
+			member.pane.resizeRetry = false
 			member.pane.screen.Resize(member.rect.Width, member.rect.Height)
 		}
 		member.pane.mu.Unlock()
@@ -222,10 +227,54 @@ func (d *Daemon) applyTabLayoutTransaction(sess *session, tb *tab, current ...fu
 	}
 }
 
-func (d *Daemon) applyTabLayout(sess *session, tb *tab) {
-	if _, ok := d.applyTabLayoutTransaction(sess, tb); ok {
-		markSnapshotDirty(sess)
+func (d *Daemon) applyTabLayout(sess *session, tb *tab) bool {
+	failed, ok := d.applyTabLayoutTransaction(sess, tb)
+	if !ok {
+		return false
 	}
+	markSnapshotDirty(sess)
+	if len(failed) != 0 {
+		d.scheduleAcceptedTabLayoutRetry(sess, tb)
+	}
+	return true
+}
+
+// scheduleAcceptedTabLayoutRetry retries a failed PTY resize only after its
+// geometry has passed the tab generation and pane-membership validation. The
+// retry prepares a new canonical plan, so a later layout mutation supersedes
+// this target rather than replaying stale rectangles.
+func (d *Daemon) scheduleAcceptedTabLayoutRetry(sess *session, tb *tab) {
+	if d.clock == nil || tb == nil || tb.ctx == nil {
+		return
+	}
+	timer := d.clock.NewTimer(minOutputRenderDeadline)
+	if timer == nil {
+		return
+	}
+	timerC := timer.C()
+	if timerC == nil {
+		timer.Stop()
+		return
+	}
+	go func() {
+		select {
+		case <-tb.ctx.Done():
+			timer.Stop()
+			return
+		case <-timerC:
+		}
+		if tb.ctx.Err() != nil {
+			return
+		}
+		if d.applyTabLayout(sess, tb) {
+			sess.mu.Lock()
+			ac := sess.client
+			sess.mu.Unlock()
+			if ac != nil {
+				d.invalidateRender(sess, ac, true, "transactional_resize.go")
+			}
+		}
+	}()
 }
 
 func (d *Daemon) prepareResize(sess *session, size domain.Size) resizePlan {

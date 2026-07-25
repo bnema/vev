@@ -18,7 +18,7 @@ type pane struct {
 	id       layout.PaneID
 	stableID string
 	pty      ports.PTY
-	mu       sync.Mutex // guards screen, history, syncGen, rect, resizeApplying, resizePending, PTY side effects, and title
+	mu       sync.Mutex // guards screen, history, syncGen, rect, resizeApplying, resizeRetry, resizePending, PTY side effects, and title
 	resizeMu sync.Mutex // serializes PTY resizes without holding mu
 	screen   *vt.Screen
 	history  *vt.History
@@ -28,6 +28,7 @@ type pane struct {
 	// draining into resizePending so output is replayed against the target (or
 	// retained old) screen only after apply resolves.
 	resizeApplying    bool
+	resizeRetry       bool // PTY resize failed for the committed rectangle; retry on the next accepted plan.
 	resizePending     []byte
 	ptyResponses      []byte
 	ptyClipboards     []string
