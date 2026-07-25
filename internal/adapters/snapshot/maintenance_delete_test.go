@@ -2,9 +2,11 @@ package snapshot
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -66,6 +68,82 @@ func TestDeletionTombstoneCodec(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeletionTombstoneListingResumesAcrossRepositoryRecreation(t *testing.T) {
+	dir := privateDir(t)
+	ctx := context.Background()
+	want := []domain.DeletionTombstone{
+		{Name: "first", IncarnationID: domain.IncarnationID{15: 1}},
+		{Name: "second", IncarnationID: domain.IncarnationID{15: 2}},
+		{Name: "third", IncarnationID: domain.IncarnationID{15: 3}},
+	}
+	repo := NewRepository(dir)
+	for _, index := range []int{2, 0, 1} {
+		if err := repo.WriteDeletionTombstone(ctx, want[index]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var got []domain.DeletionTombstone
+	cursor := ports.DeletionTombstoneCursor{}
+	reads := 0
+	for calls := 0; ; calls++ {
+		if calls == 32 {
+			t.Fatal("listing did not complete")
+		}
+		// A new Repository has no in-memory scan state. Every continuation must
+		// therefore carry everything needed to resume the bounded directory scan.
+		repo = NewRepository(dir)
+		repo.hooks.beforeDeletionTombstoneRead = func(string) { reads++ }
+		page, err := repo.ListDeletionTombstones(ctx, cursor, ports.MaintenanceBudget{Entries: 1, Bytes: 1024})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, page.Tombstones...)
+		if page.Done {
+			break
+		}
+		if page.Next.After == "" || page.Next.After == cursor.After {
+			t.Fatalf("continuation did not advance: before=%q after=%q", cursor.After, page.Next.After)
+		}
+		cursor = page.Next
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("tombstones = %#v, want %#v", got, want)
+	}
+	if reads != len(want) {
+		t.Fatalf("tombstone object reads = %d, want %d", reads, len(want))
+	}
+}
+
+func TestDeletionTombstoneListingRejectsMalformedContinuation(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	ctx := context.Background()
+	after := domain.IncarnationID{15: 2}.String() + ".tombstone"
+
+	tests := []struct {
+		name   string
+		cursor ports.DeletionTombstoneCursor
+	}{
+		{name: "repository-memory token", cursor: ports.DeletionTombstoneCursor{After: "@1"}},
+		{name: "non-advancing empty state", cursor: rawDeletionListingCursor(t, `{}`)},
+		{name: "non-canonical key", cursor: rawDeletionListingCursor(t, `{"after":"ABC.tombstone"}`)},
+		{name: "candidate does not advance", cursor: rawDeletionListingCursor(t, `{"after":"`+after+`","candidate":"`+after+`","found":1}`)},
+		{name: "unknown field", cursor: rawDeletionListingCursor(t, `{"unknown":1}`)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := repo.ListDeletionTombstones(ctx, test.cursor, ports.MaintenanceBudget{Entries: 1, Bytes: 1024}); err == nil {
+				t.Fatal("malformed continuation accepted")
+			}
+		})
+	}
+}
+
+func rawDeletionListingCursor(t *testing.T, state string) ports.DeletionTombstoneCursor {
+	t.Helper()
+	return ports.DeletionTombstoneCursor{After: deletionListingCursorPrefix + base64.RawURLEncoding.EncodeToString([]byte(state))}
 }
 
 func TestDeletionTombstoneListing(t *testing.T) {

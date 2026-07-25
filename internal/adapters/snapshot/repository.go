@@ -40,8 +40,6 @@ type Repository struct {
 	maintenanceCursors    map[string]*maintenanceCursor
 	maintenanceSessions   map[string]*sessionMaintenance
 	maintenanceQuarantine *quarantineMaintenance
-	deletionListing       *deletionListingState
-	deletionListingToken  uint64
 
 	// pendingLegacySync records an unlink whose root-directory sync failed.
 	// It is keyed by the deterministic legacy filename and shares a per-file

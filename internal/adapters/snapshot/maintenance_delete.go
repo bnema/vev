@@ -1,8 +1,11 @@
 package snapshot
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -84,76 +87,193 @@ func (r *Repository) WriteDeletionTombstone(ctx context.Context, tombstone domai
 	})
 }
 
+const (
+	deletionListingCursorPrefix = "dt1:"
+	maxDeletionListingCursor    = 64 << 10
+)
+
 type deletionListingState struct {
-	after     string
-	candidate maintenanceDirEntry
-	found     uint64
-	scanDone  bool
-	token     string
+	After     string                `json:"after,omitempty"`
+	Offset    int64                 `json:"offset,omitempty"`
+	Pending   []maintenanceDirEntry `json:"pending,omitempty"`
+	PendingAt int                   `json:"pending_at,omitempty"`
+	ScanDone  bool                  `json:"scan_done,omitempty"`
+	Candidate string                `json:"candidate,omitempty"`
+	Found     uint8                 `json:"found,omitempty"`
+}
+
+// MarshalJSON keeps maintenanceDirEntry private while making a continuation
+// self-contained. Pending entries are bounded by one directory read buffer.
+func (entry maintenanceDirEntry) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Name  string `json:"name"`
+		IsDir bool   `json:"is_dir,omitempty"`
+	}{Name: entry.name, IsDir: entry.isDir})
+}
+
+func (entry *maintenanceDirEntry) UnmarshalJSON(encoded []byte) error {
+	var wire struct {
+		Name  string `json:"name"`
+		IsDir bool   `json:"is_dir,omitempty"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&wire); err != nil {
+		return err
+	}
+	entry.name, entry.isDir = wire.Name, wire.IsDir
+	return nil
+}
+
+func canonicalDeletionTombstoneFilename(name string) bool {
+	if len(name) != 32+len(".tombstone") || !strings.HasSuffix(name, ".tombstone") {
+		return false
+	}
+	var id domain.IncarnationID
+	key := strings.TrimSuffix(name, ".tombstone")
+	return id.UnmarshalText([]byte(key)) == nil && id.String()+".tombstone" == name
+}
+
+func decodeDeletionListingCursor(cursor ports.DeletionTombstoneCursor) (deletionListingState, error) {
+	if cursor.After == "" {
+		return deletionListingState{}, nil
+	}
+	if len(cursor.After) > maxDeletionListingCursor || !strings.HasPrefix(cursor.After, deletionListingCursorPrefix) {
+		return deletionListingState{}, fmt.Errorf("snapshot: malformed deletion tombstone continuation")
+	}
+	encoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(cursor.After, deletionListingCursorPrefix))
+	if err != nil {
+		return deletionListingState{}, fmt.Errorf("snapshot: malformed deletion tombstone continuation: %w", err)
+	}
+	var state deletionListingState
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
+		return deletionListingState{}, fmt.Errorf("snapshot: malformed deletion tombstone continuation: %w", err)
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return deletionListingState{}, fmt.Errorf("snapshot: malformed deletion tombstone continuation")
+	}
+	if err := validateDeletionListingState(state); err != nil {
+		return deletionListingState{}, err
+	}
+	return state, nil
+}
+
+func validateDeletionListingState(state deletionListingState) error {
+	if state.After != "" && !canonicalDeletionTombstoneFilename(state.After) {
+		return fmt.Errorf("snapshot: non-canonical deletion tombstone continuation key")
+	}
+	if state.Offset < 0 || state.PendingAt < 0 || state.PendingAt > len(state.Pending) || state.Found > 2 {
+		return fmt.Errorf("snapshot: malformed deletion tombstone continuation")
+	}
+	if state.After == "" && state.Offset == 0 && len(state.Pending) == 0 && !state.ScanDone && state.Candidate == "" {
+		return fmt.Errorf("snapshot: non-advancing deletion tombstone continuation")
+	}
+	if (state.Candidate == "") != (state.Found == 0) || (state.Candidate != "" && (!canonicalDeletionTombstoneFilename(state.Candidate) || state.Candidate <= state.After)) {
+		return fmt.Errorf("snapshot: non-advancing deletion tombstone continuation")
+	}
+	if len(state.Pending) > maintenanceDirentBufferSize {
+		return fmt.Errorf("snapshot: malformed deletion tombstone continuation")
+	}
+	for _, entry := range state.Pending {
+		if entry.isDir || !canonicalDeletionTombstoneFilename(entry.name) {
+			return fmt.Errorf("snapshot: non-canonical deletion tombstone continuation entry")
+		}
+	}
+	return nil
+}
+
+func encodeDeletionListingCursor(state deletionListingState) (ports.DeletionTombstoneCursor, error) {
+	if err := validateDeletionListingState(state); err != nil {
+		return ports.DeletionTombstoneCursor{}, err
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return ports.DeletionTombstoneCursor{}, err
+	}
+	return ports.DeletionTombstoneCursor{After: deletionListingCursorPrefix + base64.RawURLEncoding.EncodeToString(encoded)}, nil
+}
+
+func (r *Repository) readDeletionListingEntries(dir string, limit int, state *deletionListingState) ([]maintenanceDirEntry, bool, error) {
+	if state.PendingAt < len(state.Pending) {
+		end := min(state.PendingAt+limit, len(state.Pending))
+		entries := state.Pending[state.PendingAt:end]
+		state.PendingAt = end
+		done := state.ScanDone && end == len(state.Pending)
+		return entries, done, nil
+	}
+	cursor := &maintenanceCursor{offset: state.Offset}
+	entries, done, err := r.readMaintenanceDirent(dir, limit, cursor)
+	state.Offset = cursor.offset
+	state.Pending = cursor.pending
+	state.PendingAt = 0
+	state.ScanDone = done || cursor.done
+	return entries, done && len(cursor.pending) == 0, err
 }
 
 func (r *Repository) ListDeletionTombstones(ctx context.Context, cursor ports.DeletionTombstoneCursor, budget ports.MaintenanceBudget) (ports.DeletionTombstonePage, error) {
 	if budget.Entries == 0 || budget.Bytes == 0 {
 		return ports.DeletionTombstonePage{}, ErrMaintenanceBudgetTooSmall
 	}
+	if err := ctx.Err(); err != nil {
+		return ports.DeletionTombstonePage{}, err
+	}
+	state, err := decodeDeletionListingCursor(cursor)
+	if err != nil {
+		return ports.DeletionTombstonePage{}, err
+	}
 	dir := filepath.Join(r.dir, deletionTombstonesDir)
 	r.maintenanceMu.Lock()
 	defer r.maintenanceMu.Unlock()
 
-	state := r.deletionListing
-	if state == nil || (cursor.After != state.token && cursor.After != state.after) {
-		state = &deletionListingState{after: cursor.After}
-		r.deletionListing = state
-		delete(r.maintenanceCursors, maintenanceCursorID(dir, "deletion-tombstones"))
+	entryLimit := budget.Entries
+	if maxInt := uint64(^uint(0) >> 1); entryLimit > maxInt {
+		entryLimit = maxInt
 	}
-	if !state.scanDone {
-		entryLimit := budget.Entries
-		if maxInt := uint64(^uint(0) >> 1); entryLimit > maxInt {
-			entryLimit = maxInt
-		}
-		entries, done, err := r.readMaintenanceDir(dir, int(entryLimit), "deletion-tombstones")
-		if errors.Is(err, os.ErrNotExist) {
-			r.deletionListing = nil
-			return ports.DeletionTombstonePage{Done: true}, nil
-		}
-		if err != nil {
-			r.deletionListing = nil
-			return ports.DeletionTombstonePage{}, err
-		}
-		for _, entry := range entries {
-			if err := ctx.Err(); err != nil {
-				return ports.DeletionTombstonePage{}, err
-			}
-			if entry.isDir || !strings.HasSuffix(entry.name, ".tombstone") {
-				r.deletionListing = nil
-				return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: invalid deletion tombstone entry")
-			}
-			if entry.name > state.after {
-				state.found++
-				if state.candidate.name == "" || entry.name < state.candidate.name {
-					state.candidate = entry
-				}
-			}
-		}
-		state.scanDone = done
-		if !done {
-			r.deletionListingToken++
-			state.token = fmt.Sprintf("@%d", r.deletionListingToken)
-			return ports.DeletionTombstonePage{Next: ports.DeletionTombstoneCursor{After: state.token}}, nil
-		}
-	}
-	if state.candidate.name == "" {
-		r.deletionListing = nil
+	entries, done, err := r.readDeletionListingEntries(dir, int(entryLimit), &state)
+	if errors.Is(err, os.ErrNotExist) {
 		return ports.DeletionTombstonePage{Done: true}, nil
 	}
-	path := filepath.Join(dir, state.candidate.name)
+	if err != nil {
+		return ports.DeletionTombstonePage{}, err
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return ports.DeletionTombstonePage{}, err
+		}
+		if entry.isDir || !canonicalDeletionTombstoneFilename(entry.name) {
+			return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: invalid deletion tombstone entry")
+		}
+		if entry.name > state.After {
+			if state.Found < 2 {
+				state.Found++
+			}
+			if state.Candidate == "" || entry.name < state.Candidate {
+				state.Candidate = entry.name
+			}
+		}
+	}
+	if !done {
+		next, err := encodeDeletionListingCursor(state)
+		if err != nil {
+			return ports.DeletionTombstonePage{}, err
+		}
+		if next.After == cursor.After {
+			return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: deletion tombstone continuation did not advance")
+		}
+		return ports.DeletionTombstonePage{Next: next}, nil
+	}
+	if state.Candidate == "" {
+		return ports.DeletionTombstonePage{Done: true}, nil
+	}
+	path := filepath.Join(dir, state.Candidate)
 	info, err := r.stat(path)
 	if err != nil {
 		return ports.DeletionTombstonePage{}, err
 	}
-	charge := uint64(len(state.candidate.name))
+	charge := uint64(len(state.Candidate))
 	if info.Size() < 0 || uint64(info.Size()) > budget.Bytes || charge > budget.Bytes-uint64(info.Size()) {
-		r.deletionListing = nil
 		return ports.DeletionTombstonePage{}, ErrMaintenanceBudgetTooSmall
 	}
 	if hook := r.hooks.beforeDeletionTombstoneRead; hook != nil {
@@ -167,16 +287,18 @@ func (r *Repository) ListDeletionTombstones(ctx context.Context, cursor ports.De
 	if err != nil {
 		return ports.DeletionTombstonePage{}, err
 	}
-	if state.candidate.name != decoded.IncarnationID.String()+".tombstone" {
+	if state.Candidate != decoded.IncarnationID.String()+".tombstone" {
 		return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: non-canonical deletion tombstone filename")
 	}
-	page := ports.DeletionTombstonePage{Tombstones: []domain.DeletionTombstone{decoded}, Next: ports.DeletionTombstoneCursor{After: state.candidate.name}, Done: state.found == 1}
-	if page.Done {
-		r.deletionListing = nil
-	} else {
-		r.deletionListing = &deletionListingState{after: state.candidate.name}
+	next, err := encodeDeletionListingCursor(deletionListingState{After: state.Candidate})
+	if err != nil {
+		return ports.DeletionTombstonePage{}, err
 	}
-	return page, nil
+	return ports.DeletionTombstonePage{
+		Tombstones: []domain.DeletionTombstone{decoded},
+		Next:       next,
+		Done:       state.Found == 1,
+	}, nil
 }
 
 func (r *Repository) DeleteDeletionTombstone(ctx context.Context, id domain.IncarnationID) error {
