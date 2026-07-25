@@ -147,7 +147,7 @@ func TestLayoutFingerprintWeightChangeInvalidatesGeometryCache(t *testing.T) {
 		}
 		return capturedRenderState{
 			reset:  reset,
-			layout: capturedTabLayout{root: root, area: domain.Rect{Width: 61, Height: 5}, focus: "left", placements: placements, fingerprint: layoutFingerprint(root), valid: true},
+			layout: capturedTabLayout{area: domain.Rect{Width: 61, Height: 5}, focus: "left", placements: placements, fingerprint: layoutFingerprint(root), valid: true},
 			panes:  panes, styles: resolveStyles(nil),
 		}
 	}
@@ -258,15 +258,17 @@ func TestComposeFrameCachedTitleBarsDoNotAllocate(t *testing.T) {
 
 func cachedSplitState(fingerprint string, focus layout.PaneID, direction layout.SplitDir, theme themeui.Theme) capturedRenderState {
 	left, right := layout.PaneID("left"), layout.PaneID("right")
-	placements := []layout.Placement{{ID: left, Content: domain.Rect{Width: 20, Height: 5}}, {ID: right, Content: domain.Rect{X: 21, Width: 20, Height: 5}}}
-	leftFrame, rightFrame := cachePaneFrame(20, 5, 'L'), cachePaneFrame(20, 5, 'R')
-	if direction == layout.Vertical {
-		placements = []layout.Placement{{ID: left, Content: domain.Rect{Width: 41, Height: 2}}, {ID: right, Content: domain.Rect{Y: 3, Width: 41, Height: 2}}}
-		leftFrame, rightFrame = cachePaneFrame(41, 2, 'L'), cachePaneFrame(41, 2, 'R')
+	area := domain.Rect{Width: 41, Height: 5}
+	root := &layout.Node{Kind: layout.Split, Dir: direction, Children: []*layout.Node{layout.NewLeaf(left), layout.NewLeaf(right)}}
+	placements, dividers, ok := layout.SolveWithDividers(root, area)
+	if !ok {
+		panic("cached split fixture has invalid geometry")
 	}
+	leftFrame := cachePaneFrame(placements[0].Content.Width, placements[0].Content.Height, 'L')
+	rightFrame := cachePaneFrame(placements[1].Content.Width, placements[1].Content.Height, 'R')
 	return capturedRenderState{
 		reset:  true,
-		layout: capturedTabLayout{root: &layout.Node{Kind: layout.Split, Dir: direction, Children: []*layout.Node{layout.NewLeaf(left), layout.NewLeaf(right)}}, area: domain.Rect{Width: 41, Height: 5}, focus: focus, placements: placements, fingerprint: fingerprint, valid: true},
+		layout: capturedTabLayout{area: area, focus: focus, placements: placements, dividers: dividers, fingerprint: fingerprint, valid: true},
 		panes:  []capturedPaneRenderState{{id: left, frame: leftFrame, placement: placements[0], focused: focus == left, damage: []renderer.Damage{renderer.FullRedraw()}}, {id: right, frame: rightFrame, placement: placements[1], focused: focus == right, damage: []renderer.Damage{renderer.FullRedraw()}}},
 		theme:  theme,
 		styles: themeui.Resolve(theme, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles,
@@ -281,7 +283,7 @@ func cachedStackTitleState(title string, generation uint64, reset bool) captured
 	}
 	return capturedRenderState{
 		reset:  reset,
-		layout: capturedTabLayout{root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(first), layout.NewLeaf(second)}, Expanded: second}, area: domain.Rect{Width: 20, Height: 5}, focus: second, placements: placements, fingerprint: "stack", valid: true},
+		layout: capturedTabLayout{area: domain.Rect{Width: 20, Height: 5}, focus: second, placements: placements, fingerprint: "stack", valid: true},
 		panes:  []capturedPaneRenderState{{id: first, title: title, titleGeneration: generation, placement: placements[0]}, {id: second, frame: cachePaneFrame(20, 3, 'E'), title: "second", titleGeneration: 1, placement: placements[1], focused: true, damage: []renderer.Damage{renderer.FullRedraw()}}},
 		styles: resolveStyles(nil),
 	}

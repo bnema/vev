@@ -96,8 +96,8 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	drawTopBarSnapshot(frame.Row(0), state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
 	drawStatusBarState(frame.Row(rows+1), state.bars, styles)
 	content := domain.Rect{Y: 1, Width: width, Height: rows}
-	if state.layout.valid && state.layout.root != nil {
-		drawDividers(frame, state.layout.root, content, defaultDimmer.Dim(neutralBorder))
+	if state.layout.valid {
+		drawDividers(frame, state.layout.dividers, content.Y, defaultDimmer.Dim(neutralBorder))
 	}
 
 	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != rows+2 || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme || in.styleGeneration != state.styleGeneration || in.floatingVisible != state.floating.visible
