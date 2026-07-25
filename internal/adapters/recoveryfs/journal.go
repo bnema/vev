@@ -16,9 +16,16 @@ import (
 	"github.com/bnema/vev/pkg/safedir"
 )
 
-const discardVersion = 1
+const (
+	discardVersion       = 1
+	maxDiscardIntents    = 1024
+	maxDiscardIntentSize = 64 << 10
+)
 
-type Journal struct{ dir string }
+type Journal struct {
+	dir   string
+	hooks journalHooks
+}
 
 type discardFile struct {
 	Version int                  `json:"version"`
@@ -76,24 +83,37 @@ func (j *Journal) SaveDiscard(ctx context.Context, intent domain.DiscardIntent) 
 		return err
 	}
 	path := j.path(intent.OldIncarnation)
-	if existing, err := os.ReadFile(path); err == nil {
+	if existing, err := readFileBounded(path, maxDiscardIntentSize); err == nil {
 		if !bytes.Equal(existing, data) {
 			return errors.New("recovery journal: discard identity collision")
 		}
-		return nil
+		// Re-sync the parent on idempotent retry: the prior install may have
+		// succeeded while its durability acknowledgement failed.
+		return j.syncDir(filepath.Dir(path))
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return atomicWrite(path, data)
+	return j.atomicWrite(path, data)
 }
 
 func (j *Journal) ListDiscards(ctx context.Context) ([]domain.DiscardIntent, error) {
-	entries, err := os.ReadDir(j.dir)
+	dir, err := os.Open(j.dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	entries, readErr := dir.ReadDir(maxDiscardIntents + 1)
+	closeErr := dir.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if len(entries) > maxDiscardIntents {
+		return nil, errors.New("recovery journal: transaction entry limit exceeded")
 	}
 	sort.Slice(entries, func(a, b int) bool { return entries[a].Name() < entries[b].Name() })
 	out := make([]domain.DiscardIntent, 0, len(entries))
@@ -105,7 +125,7 @@ func (j *Journal) ListDiscards(ctx context.Context) ([]domain.DiscardIntent, err
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "discard-") {
 			return nil, errors.New("recovery journal: invalid transaction entry")
 		}
-		data, err := os.ReadFile(filepath.Join(j.dir, entry.Name()))
+		data, err := readFileBounded(filepath.Join(j.dir, entry.Name()), maxDiscardIntentSize)
 		if err != nil {
 			return nil, err
 		}
@@ -138,5 +158,24 @@ func (j *Journal) DeleteDiscard(ctx context.Context, id domain.IncarnationID) er
 	if err := os.Remove(j.path(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return syncDir(j.dir)
+	return j.syncDir(j.dir)
+}
+
+func readFileBounded(path string, limit int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, limit+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if int64(len(data)) > limit {
+		return nil, errors.New("recovery journal: intent size limit exceeded")
+	}
+	return data, nil
 }

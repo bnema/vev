@@ -76,6 +76,58 @@ func TestHasLegacyState(t *testing.T) {
 	}
 }
 
+func TestMigrateV1CheckpointValidatesObjectEnvelopeAndKind(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		object func(t *testing.T) ports.SnapshotObject
+	}{
+		{"malformed envelope", func(t *testing.T) ports.SnapshotObject {
+			object, err := codec.MarshalObject(codec.HistoryTail, []byte("payload"))
+			require.NoError(t, err)
+			object.Data[0] = 'X'
+			object.Digest = sha256.Sum256(object.Data)
+			return object
+		}},
+		{"kind mismatch", func(t *testing.T) ports.SnapshotObject {
+			object, err := codec.MarshalObject(codec.Visible, []byte("wrong kind"))
+			require.NoError(t, err)
+			return object
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := privateDir(t)
+			repo := NewRepository(dir)
+			object := tc.object(t)
+			visible, err := codec.MarshalObject(codec.Visible, []byte("visible"))
+			require.NoError(t, err)
+			manifest := codec.Manifest{Generation: 1, IncarnationID: domain.IncarnationID{1}, Name: "work", Tabs: []codec.ManifestTab{{Cols: 1, Rows: 1, Panes: []codec.ManifestPane{{ID: "p", Tail: codec.ObjectRef{Kind: codec.HistoryTail, Digest: object.Digest, Size: uint32(len(object.Data))}, Visible: codec.ObjectRef{Kind: codec.Visible, Digest: visible.Digest, Size: uint32(len(visible.Data))}}}}}}
+			modern, err := codec.MarshalManifest(manifest)
+			require.NoError(t, err)
+			body := append([]byte(nil), modern[legacyManifestHeaderSize:]...)
+			body = append(body[:8], body[25:]...)
+			legacyManifest := make([]byte, legacyManifestHeaderSize, legacyManifestHeaderSize+len(body))
+			copy(legacyManifest, "VEVM")
+			binary.BigEndian.PutUint16(legacyManifest[4:6], 1)
+			binary.BigEndian.PutUint32(legacyManifest[8:12], uint32(len(body)))
+			binary.BigEndian.PutUint32(legacyManifest[12:16], crc32.ChecksumIEEE(body))
+			legacyManifest = append(legacyManifest, body...)
+			key := sessionKey("work")
+			for _, stored := range []ports.SnapshotObject{object, visible} {
+				require.NoError(t, os.MkdirAll(filepath.Dir(repo.legacyObjectPath(key, stored.Digest)), 0o700))
+				require.NoError(t, os.WriteFile(repo.legacyObjectPath(key, stored.Digest), stored.Data, 0o600))
+			}
+			manifestPath := repo.legacyManifestPath(key, 1)
+			require.NoError(t, os.MkdirAll(filepath.Dir(manifestPath), 0o700))
+			require.NoError(t, os.WriteFile(manifestPath, legacyManifest, 0o600))
+			legacyRef := domain.CheckpointRef{Generation: 1, ManifestDigest: sha256.Sum256(legacyManifest)}
+
+			_, err = repo.MigrateV1Checkpoint(context.Background(), ports.SnapshotMigrationRequest{LegacyName: "work", IncarnationID: domain.IncarnationID{9}, LegacyRef: legacyRef})
+			require.ErrorIs(t, err, ports.ErrLegacySnapshotUncertain)
+			require.FileExists(t, manifestPath)
+		})
+	}
+}
+
 func TestMigrationOver4096(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.Chmod(dir, 0o700))

@@ -79,22 +79,29 @@ func TestDeletionTombstoneListing(t *testing.T) {
 	if err := repo.WriteDeletionTombstone(ctx, first); err != nil {
 		t.Fatal(err)
 	}
-	page, err := repo.ListDeletionTombstones(ctx, ports.DeletionTombstoneCursor{}, ports.MaintenanceBudget{Entries: 1, Bytes: 1024})
+	page, err := repo.ListDeletionTombstones(ctx, ports.DeletionTombstoneCursor{}, ports.MaintenanceBudget{Entries: 3, Bytes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if page.Done || len(page.Tombstones) != 1 || page.Tombstones[0] != first || page.Next.After == "" {
 		t.Fatalf("first page = %#v", page)
 	}
-	page, err = repo.ListDeletionTombstones(ctx, page.Next, ports.MaintenanceBudget{Entries: 1, Bytes: 1024})
+	page, err = repo.ListDeletionTombstones(ctx, page.Next, ports.MaintenanceBudget{Entries: 3, Bytes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Done || len(page.Tombstones) != 1 || page.Tombstones[0] != second {
+	if !page.Done || len(page.Tombstones) != 1 || page.Tombstones[0] != second || page.Next.After == "" {
 		t.Fatalf("second page = %#v", page)
 	}
-	if _, err := repo.ListDeletionTombstones(ctx, ports.DeletionTombstoneCursor{}, ports.MaintenanceBudget{Entries: 1, Bytes: 1}); err == nil {
+	if _, err := repo.ListDeletionTombstones(ctx, ports.DeletionTombstoneCursor{}, ports.MaintenanceBudget{Entries: 3, Bytes: 1}); err == nil {
 		t.Fatal("non-advancing budget accepted")
+	}
+
+	reads := 0
+	repo.hooks.beforeDeletionTombstoneRead = func(string) { reads++ }
+	page, err = repo.ListDeletionTombstones(ctx, ports.DeletionTombstoneCursor{}, ports.MaintenanceBudget{Entries: 1, Bytes: 1024})
+	if err != nil || reads != 0 || len(page.Tombstones) != 0 || page.Next.After == "" {
+		t.Fatalf("bounded scan read %d objects: page=%#v err=%v", reads, page, err)
 	}
 
 	injected := errors.New("injected directory sync failure")

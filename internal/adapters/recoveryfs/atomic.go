@@ -8,7 +8,13 @@ import (
 	"github.com/bnema/vev/pkg/safedir"
 )
 
-func atomicWrite(path string, data []byte) (retErr error) {
+type journalHooks struct {
+	syncFile      func(string) error
+	rename        func(string, string) error
+	syncDirectory func(string) error
+}
+
+func (j *Journal) atomicWrite(path string, data []byte) (retErr error) {
 	dir := filepath.Dir(path)
 	if err := safedir.EnsurePrivate(dir); err != nil {
 		return err
@@ -29,19 +35,30 @@ func atomicWrite(path string, data []byte) (retErr error) {
 	if _, err := file.Write(data); err != nil {
 		return errors.Join(err, file.Close())
 	}
-	if err := file.Sync(); err != nil {
+	if j.hooks.syncFile != nil {
+		if err := j.hooks.syncFile(tmp); err != nil {
+			return errors.Join(err, file.Close())
+		}
+	} else if err := file.Sync(); err != nil {
 		return errors.Join(err, file.Close())
 	}
 	if err := file.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if j.hooks.rename != nil {
+		if err := j.hooks.rename(tmp, path); err != nil {
+			return err
+		}
+	} else if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
-	return syncDir(dir)
+	return j.syncDir(dir)
 }
 
-func syncDir(dir string) error {
+func (j *Journal) syncDir(dir string) error {
+	if j.hooks.syncDirectory != nil {
+		return j.hooks.syncDirectory(dir)
+	}
 	file, err := os.Open(dir)
 	if err != nil {
 		return err

@@ -40,6 +40,8 @@ type Repository struct {
 	maintenanceCursors    map[string]*maintenanceCursor
 	maintenanceSessions   map[string]*sessionMaintenance
 	maintenanceQuarantine *quarantineMaintenance
+	deletionListing       *deletionListingState
+	deletionListingToken  uint64
 
 	// pendingLegacySync records an unlink whose root-directory sync failed.
 	// It is keyed by the deterministic legacy filename and shares a per-file
@@ -73,10 +75,11 @@ type repositoryHooks struct {
 	remove                       func(string) error
 	// afterOpenRoot and closeRoot make descriptor race and close-error paths
 	// deterministic in package tests. closeRoot never replaces the real close.
-	afterOpenRoot            func()
-	closeRoot                func() error
-	openMaintenanceDirectory func(string) (maintenanceDirectory, error)
-	beforeDirectoryRead      func(string)
+	afterOpenRoot               func()
+	closeRoot                   func() error
+	openMaintenanceDirectory    func(string) (maintenanceDirectory, error)
+	beforeDirectoryRead         func(string)
+	beforeDeletionTombstoneRead func(string)
 	// beforeMaintenanceWork observes each budgeted quarantine filesystem step.
 	// It is test-only instrumentation for hostile traversal bounds.
 	beforeMaintenanceWork func(string)
@@ -91,9 +94,11 @@ var _ ports.LegacySnapshotSource = (*Repository)(nil)
 // until the first publication, so merely constructing it is side-effect free.
 func NewRepository(dir string) *Repository {
 	return &Repository{
-		dir:           dir,
-		locks:         make(map[string]*sessionMutex),
-		storageEpochs: make(map[string]uint64),
+		dir:                 dir,
+		locks:               make(map[string]*sessionMutex),
+		storageEpochs:       make(map[string]uint64),
+		maintenanceCursors:  make(map[string]*maintenanceCursor),
+		maintenanceSessions: make(map[string]*sessionMaintenance),
 	}
 }
 

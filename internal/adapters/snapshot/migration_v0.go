@@ -261,6 +261,13 @@ func (r *Repository) MigrateV1Checkpoint(ctx context.Context, req ports.Snapshot
 		if sha256.Sum256(object) != ref.Digest || uint64(len(object)) != ref.Size {
 			return domain.CheckpointRef{}, uncertainLegacyError("invalid object", nil)
 		}
+		kind, _, err := codec.UnmarshalObject(object)
+		if err != nil {
+			return domain.CheckpointRef{}, uncertainLegacyError("decode referenced object", err)
+		}
+		if uint8(kind) != ref.Kind {
+			return domain.CheckpointRef{}, uncertainLegacyError("referenced object kind mismatch", nil)
+		}
 		if err := r.writeImmutable(r.objectPath(req.IncarnationID, ref.Digest), object, func(existing []byte) error {
 			if sha256.Sum256(existing) != ref.Digest {
 				return uncertainLegacyError("migrated object conflict", nil)

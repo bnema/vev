@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/bnema/vev/internal/domain"
@@ -85,61 +84,98 @@ func (r *Repository) WriteDeletionTombstone(ctx context.Context, tombstone domai
 	})
 }
 
+type deletionListingState struct {
+	after     string
+	candidate maintenanceDirEntry
+	found     uint64
+	scanDone  bool
+	token     string
+}
+
 func (r *Repository) ListDeletionTombstones(ctx context.Context, cursor ports.DeletionTombstoneCursor, budget ports.MaintenanceBudget) (ports.DeletionTombstonePage, error) {
 	if budget.Entries == 0 || budget.Bytes == 0 {
 		return ports.DeletionTombstonePage{}, ErrMaintenanceBudgetTooSmall
 	}
 	dir := filepath.Join(r.dir, deletionTombstonesDir)
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
+	r.maintenanceMu.Lock()
+	defer r.maintenanceMu.Unlock()
+
+	state := r.deletionListing
+	if state == nil || (cursor.After != state.token && cursor.After != state.after) {
+		state = &deletionListingState{after: cursor.After}
+		r.deletionListing = state
+		delete(r.maintenanceCursors, maintenanceCursorID(dir, "deletion-tombstones"))
+	}
+	if !state.scanDone {
+		entryLimit := budget.Entries
+		if maxInt := uint64(^uint(0) >> 1); entryLimit > maxInt {
+			entryLimit = maxInt
+		}
+		entries, done, err := r.readMaintenanceDir(dir, int(entryLimit), "deletion-tombstones")
+		if errors.Is(err, os.ErrNotExist) {
+			r.deletionListing = nil
+			return ports.DeletionTombstonePage{Done: true}, nil
+		}
+		if err != nil {
+			r.deletionListing = nil
+			return ports.DeletionTombstonePage{}, err
+		}
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return ports.DeletionTombstonePage{}, err
+			}
+			if entry.isDir || !strings.HasSuffix(entry.name, ".tombstone") {
+				r.deletionListing = nil
+				return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: invalid deletion tombstone entry")
+			}
+			if entry.name > state.after {
+				state.found++
+				if state.candidate.name == "" || entry.name < state.candidate.name {
+					state.candidate = entry
+				}
+			}
+		}
+		state.scanDone = done
+		if !done {
+			r.deletionListingToken++
+			state.token = fmt.Sprintf("@%d", r.deletionListingToken)
+			return ports.DeletionTombstonePage{Next: ports.DeletionTombstoneCursor{After: state.token}}, nil
+		}
+	}
+	if state.candidate.name == "" {
+		r.deletionListing = nil
 		return ports.DeletionTombstonePage{Done: true}, nil
 	}
+	path := filepath.Join(dir, state.candidate.name)
+	info, err := r.stat(path)
 	if err != nil {
 		return ports.DeletionTombstonePage{}, err
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	page := ports.DeletionTombstonePage{}
-	seen := make(map[domain.IncarnationID]struct{})
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return ports.DeletionTombstonePage{}, err
-		}
-		if entry.Name() <= cursor.After {
-			continue
-		}
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tombstone") {
-			return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: invalid deletion tombstone entry")
-		}
-		if uint64(len(page.Tombstones)) >= budget.Entries {
-			return page, nil
-		}
-		data, err := r.readBounded(filepath.Join(dir, entry.Name()))
-		if err != nil {
-			return ports.DeletionTombstonePage{}, err
-		}
-		decoded, err := decodeDeletionTombstone(data)
-		if err != nil {
-			return ports.DeletionTombstonePage{}, err
-		}
-		charge := uint64(len(entry.Name()) + len(data))
-		if charge > budget.Bytes {
-			if len(page.Tombstones) == 0 {
-				return ports.DeletionTombstonePage{}, ErrMaintenanceBudgetTooSmall
-			}
-			return page, nil
-		}
-		if entry.Name() != decoded.IncarnationID.String()+".tombstone" {
-			return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: non-canonical deletion tombstone filename")
-		}
-		if _, duplicate := seen[decoded.IncarnationID]; duplicate {
-			return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: duplicate deletion tombstone identity")
-		}
-		seen[decoded.IncarnationID] = struct{}{}
-		page.Tombstones = append(page.Tombstones, decoded)
-		page.Next.After = entry.Name()
-		budget.Bytes -= charge
+	charge := uint64(len(state.candidate.name))
+	if info.Size() < 0 || uint64(info.Size()) > budget.Bytes || charge > budget.Bytes-uint64(info.Size()) {
+		r.deletionListing = nil
+		return ports.DeletionTombstonePage{}, ErrMaintenanceBudgetTooSmall
 	}
-	page.Done = true
+	if hook := r.hooks.beforeDeletionTombstoneRead; hook != nil {
+		hook(path)
+	}
+	data, err := r.readBounded(path)
+	if err != nil {
+		return ports.DeletionTombstonePage{}, err
+	}
+	decoded, err := decodeDeletionTombstone(data)
+	if err != nil {
+		return ports.DeletionTombstonePage{}, err
+	}
+	if state.candidate.name != decoded.IncarnationID.String()+".tombstone" {
+		return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: non-canonical deletion tombstone filename")
+	}
+	page := ports.DeletionTombstonePage{Tombstones: []domain.DeletionTombstone{decoded}, Next: ports.DeletionTombstoneCursor{After: state.candidate.name}, Done: state.found == 1}
+	if page.Done {
+		r.deletionListing = nil
+	} else {
+		r.deletionListing = &deletionListingState{after: state.candidate.name}
+	}
 	return page, nil
 }
 
