@@ -95,23 +95,22 @@ func solveStack(n *Node, r domain.Rect, out *[]Placement) bool {
 	if idx < 0 {
 		return false
 	}
-	contentRows := r.Height - count
+	contentRows := r.Height - (count - 1)
 	for i, child := range n.Children {
 		if i < idx {
-			*out = append(*out, Placement{ID: child.Leaf, TitleBar: domain.Rect{X: r.X, Y: r.Y + i, Width: r.Width, Height: 1}, Collapsed: true, InStack: true})
+			titleY := r.Y + i
+			*out = append(*out, Placement{ID: child.Leaf, TitleBar: domain.Rect{X: r.X, Y: titleY, Width: r.Width, Height: 1}, Collapsed: true, InStack: true})
 			continue
 		}
 		if i == idx {
-			titleY := r.Y + i
 			*out = append(*out, Placement{
-				ID:       child.Leaf,
-				TitleBar: domain.Rect{X: r.X, Y: titleY, Width: r.Width, Height: 1},
-				Content:  domain.Rect{X: r.X, Y: titleY + 1, Width: r.Width, Height: contentRows},
-				InStack:  true,
+				ID:      child.Leaf,
+				Content: domain.Rect{X: r.X, Y: r.Y + idx, Width: r.Width, Height: contentRows},
+				InStack: true,
 			})
 			continue
 		}
-		titleY := r.Y + idx + 1 + contentRows + (i - idx - 1)
+		titleY := r.Y + idx + contentRows + (i - idx - 1)
 		*out = append(*out, Placement{ID: child.Leaf, TitleBar: domain.Rect{X: r.X, Y: titleY, Width: r.Width, Height: 1}, Collapsed: true, InStack: true})
 	}
 	return true

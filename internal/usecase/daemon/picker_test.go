@@ -882,8 +882,7 @@ func TestPickerPreviewMultiPaneComposesTabFrame(t *testing.T) {
 	require.Equal(t, 'L', preview.Rows[0][0].Rune, "left pane content should remain visible")
 	require.Equal(t, '│', preview.Rows[0][20].Rune, "split divider should be included")
 	require.Equal(t, "two", rowText(preview.Rows[0][21:24]), "collapsed stack title bar should be included")
-	require.Equal(t, "three", rowText(preview.Rows[1][21:26]), "expanded stack title bar should be included")
-	require.Equal(t, 'R', preview.Rows[2][21].Rune, "expanded stacked pane content should be included")
+	require.Equal(t, 'R', preview.Rows[1][21].Rune, "expanded stack member draws no title bar; its content starts where the title bar used to be")
 }
 
 func TestPickerModalGeometry(t *testing.T) {

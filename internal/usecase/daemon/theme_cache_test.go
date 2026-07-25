@@ -100,5 +100,5 @@ func TestChromeDimmersUseNeutralInputsOutsideAccentRamp(t *testing.T) {
 	require.Equal(t, 'i', titleOut.frame.At(0, 1).Rune, "inactive title geometry must remain unchanged")
 	require.Equal(t, want, titleOut.frame.At(0, 1).Style, "inactive title must dim a neutral input")
 	require.NotEqual(t, accentDerived, titleOut.frame.At(0, 1).Style, "inactive title must exclude accent-ramp styles from Dimmer")
-	require.Equal(t, 'E', titleOut.frame.At(0, 3).Rune, "pane content must remain unchanged")
+	require.Equal(t, 'E', titleOut.frame.At(0, 2).Rune, "pane content must remain unchanged")
 }

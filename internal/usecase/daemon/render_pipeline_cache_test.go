@@ -167,10 +167,7 @@ func TestComposeFrameStackDrawsTitleBarsAndDimsCollapsed(t *testing.T) {
 	collapsedTitle := out.frame.At(0, 1)
 	require.Equal(t, 'c', collapsedTitle.Rune)
 	require.True(t, collapsedTitle.Style.HasForegroundRGB, "collapsed title bar must use dimmed chrome")
-	focusedTitle := out.frame.At(0, 2)
-	require.Equal(t, 's', focusedTitle.Rune)
-	require.True(t, focusedTitle.Style.Inverse || focusedTitle.Style.HasBackgroundRGB, "focused title bar must use accent chrome")
-	require.Equal(t, 'E', out.frame.At(0, 3).Rune, "expanded pane content must be visible below its title bar")
+	require.Equal(t, 'E', out.frame.At(0, 2).Rune, "expanded pane must draw no title row; its content starts where the title bar used to be")
 	require.Equal(t, before, state, "composition must not mutate the captured source frame")
 }
 
@@ -241,7 +238,7 @@ func cachedStackTitleState(title string, generation uint64, reset bool) captured
 	first, second := layout.PaneID("first"), layout.PaneID("second")
 	placements := []layout.Placement{
 		{ID: first, TitleBar: domain.Rect{Width: 20, Height: 1}, Collapsed: true, InStack: true},
-		{ID: second, TitleBar: domain.Rect{Y: 1, Width: 20, Height: 1}, Content: domain.Rect{Y: 2, Width: 20, Height: 3}, InStack: true},
+		{ID: second, Content: domain.Rect{Y: 1, Width: 20, Height: 4}, InStack: true},
 	}
 	return capturedRenderState{
 		reset:  reset,
