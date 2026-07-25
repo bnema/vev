@@ -29,6 +29,9 @@ const (
 
 	processAbsent  uint8 = 0
 	processPresent uint8 = 1
+
+	manifestWeightTag  = "WGT1"
+	manifestWeightSize = 8
 	// maxDecodedBodySize includes the object kind and payload-length prefix.
 	maxObjectEnvelopeSize = manifestHeaderSize + maxDecodedBodySize
 	maxObjectPayloadSize  = maxDecodedBodySize - objectEnvelopeBodyPrefixSize
@@ -140,6 +143,9 @@ func MarshalManifest(m Manifest) ([]byte, error) {
 			return nil, err
 		}
 	}
+	if err := writeManifestWeights(&w, manifestNodes(m)); err != nil {
+		return nil, err
+	}
 	return marshalManifestEnvelope(manifestMagic, w.b)
 }
 
@@ -184,7 +190,7 @@ func decodeManifest(body []byte) (Manifest, error) {
 			return Manifest{}, err
 		}
 	}
-	if err := r.done(); err != nil {
+	if err := readManifestWeights(&r, manifestNodes(m)); err != nil {
 		return Manifest{}, err
 	}
 	if err := validateManifest(m); err != nil {
@@ -316,6 +322,90 @@ func writeManifestTab(w *payloadWriter, tab ManifestTab) error {
 	}
 	return nil
 }
+func writeManifestWeights(w *payloadWriter, nodes []*layout.Node) error {
+	hasWeights := false
+	for _, node := range nodes {
+		if node.Weight != 0 {
+			hasWeights = true
+			break
+		}
+	}
+	if !hasWeights {
+		return nil
+	}
+	if len(nodes) > math.MaxUint32 {
+		return fmt.Errorf("%w: too many weighted nodes", ErrInvalidData)
+	}
+	w.b = append(w.b, manifestWeightTag...)
+	w.putUint32(uint32(len(nodes)))
+	for _, node := range nodes {
+		w.putUint64(math.Float64bits(node.Weight))
+	}
+	return nil
+}
+
+func readManifestWeights(r *payloadReader, nodes []*layout.Node) error {
+	if len(r.b) == 0 {
+		return nil
+	}
+	if len(r.b) < len(manifestWeightTag) {
+		return ErrShortPayload
+	}
+	if string(r.b[:len(manifestWeightTag)]) != manifestWeightTag {
+		return fmt.Errorf("%w: weight extension tag", ErrInvalidData)
+	}
+	r.b = r.b[len(manifestWeightTag):]
+	count, err := r.getUint32()
+	if err != nil {
+		return err
+	}
+	if uint64(count) != uint64(len(nodes)) {
+		return fmt.Errorf("%w: weight node count", ErrInvalidData)
+	}
+	if uint64(count) > uint64(len(r.b))/manifestWeightSize {
+		return ErrShortPayload
+	}
+	if uint64(len(r.b)) != uint64(count)*manifestWeightSize {
+		return ErrTrailingBytes
+	}
+	for i := range nodes {
+		bits, err := r.getUint64()
+		if err != nil {
+			return err
+		}
+		weight := math.Float64frombits(bits)
+		if !validManifestWeight(weight) {
+			return fmt.Errorf("%w: node weight", ErrInvalidData)
+		}
+		nodes[i].Weight = weight
+	}
+	return r.done()
+}
+
+func manifestNodes(m Manifest) []*layout.Node {
+	var nodes []*layout.Node
+	var visit func(*layout.Node)
+	visit = func(node *layout.Node) {
+		if node == nil {
+			return
+		}
+		nodes = append(nodes, node)
+		for _, child := range node.Children {
+			visit(child)
+		}
+	}
+	for _, tab := range m.Tabs {
+		if tab.Tree != nil {
+			visit(tab.Tree.Root)
+		}
+	}
+	return nodes
+}
+
+func validManifestWeight(weight float64) bool {
+	return weight >= 0 && !math.IsNaN(weight) && !math.IsInf(weight, 0)
+}
+
 func writeManifestPane(w *payloadWriter, pane ManifestPane) error {
 	if err := w.putString(string(pane.ID)); err != nil {
 		return err
@@ -447,6 +537,11 @@ func validateManifest(m Manifest) error {
 	}
 	if err := validateActive(m.Active, len(m.Tabs)); err != nil {
 		return err
+	}
+	for _, node := range manifestNodes(m) {
+		if !validManifestWeight(node.Weight) {
+			return fmt.Errorf("%w: node weight", ErrInvalidData)
+		}
 	}
 	for _, tab := range m.Tabs {
 		if !safeDimensions(tab.Cols, tab.Rows) {
