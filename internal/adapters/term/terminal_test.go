@@ -2,6 +2,7 @@ package term
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -139,6 +140,75 @@ func TestTerminal_EnterRaw_DisablesAutowrapInsideAltScreen(t *testing.T) {
 			}
 			if i >= j {
 				t.Fatalf("%q (index %d) must precede %q (index %d); full output %q", tc.before, i, tc.after, j, got)
+			}
+		})
+	}
+}
+
+// failingWriter fails every write, standing in for a tty that stops
+// accepting output midway through a mode change.
+type failingWriter struct{}
+
+func (failingWriter) Write(p []byte) (int, error) {
+	return 0, errors.New("sink failed")
+}
+
+// When the batched writer fails, part of the mode sequence may already have
+// reached the terminal, so the visual modes must be reset straight to the fd
+// rather than through the writer that just failed. Poisoning tm.bw while
+// leaving tm.out intact isolates that fallback: the buffered path fails, the
+// real descriptor still records what the fallback attempted.
+func TestTerminal_WriteFailure_AttemptsVisualResetOnFd(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		poisonAfter bool // poison the writer after EnterRaw, i.e. fail during restore
+		want        string
+	}{
+		{
+			name: "enter fails before the session starts",
+			want: autowrapEnable + altScreenExit,
+		},
+		{
+			name:        "restore fails after a successful enter",
+			poisonAfter: true,
+			want: altScreenEnter + autowrapDisable + cursorHide + mouseEnable +
+				bracketedPasteEnable + colorSchemeEnable + autowrapEnable + altScreenExit,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inR, inW, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("os.Pipe(in): %v", err)
+			}
+			defer func() { _ = inW.Close() }()
+			defer func() { _ = inR.Close() }()
+
+			outR, outW, captured, done := pipeCapture(t)
+			defer func() { _ = outR.Close() }()
+
+			tm := NewWithFiles(inR, outW)
+
+			if !tc.poisonAfter {
+				tm.bw = newBatchWriter(failingWriter{}, bufSize)
+				if _, err := tm.EnterRaw(); err == nil {
+					t.Fatalf("EnterRaw returned nil error on a failing sink")
+				}
+			} else {
+				restore, err := tm.EnterRaw()
+				if err != nil {
+					t.Fatalf("EnterRaw: %v", err)
+				}
+				tm.bw = newBatchWriter(failingWriter{}, bufSize)
+				if err := restore(); err == nil {
+					t.Fatalf("restore returned nil error on a failing sink")
+				}
+			}
+
+			_ = outW.Close()
+			<-done
+
+			if got := captured.String(); got != tc.want {
+				t.Fatalf("bytes written to the fd = %q, want %q", got, tc.want)
 			}
 		})
 	}

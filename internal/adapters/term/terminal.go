@@ -116,10 +116,12 @@ func (t *Terminal) EnterRaw() (func() error, error) {
 	t.orig = old
 
 	if _, err := t.bw.WriteString(altScreenEnter + autowrapDisable + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable); err != nil {
+		t.resetVisualModesDirect()
 		_ = t.restoreRawLocked()
 		return nil, fmt.Errorf("term: enter alt screen: %w", err)
 	}
 	if err := t.bw.Flush(); err != nil {
+		t.resetVisualModesDirect()
 		_ = t.restoreRawLocked()
 		return nil, fmt.Errorf("term: enter alt screen: %w", err)
 	}
@@ -127,6 +129,18 @@ func (t *Terminal) EnterRaw() (func() error, error) {
 	t.entered = true
 	t.restoreFn = t.makeRestoreLocked()
 	return t.restoreFn, nil
+}
+
+// resetVisualModesDirect returns the terminal to the normal screen with
+// autowrap on, writing straight to the descriptor instead of through the
+// batched writer. It is the fallback for a writer that has already failed:
+// part of a mode sequence may have reached the terminal, and leaving it on
+// the alt screen or with autowrap off would outlive the process. Both modes
+// are idempotent, so replaying them when nothing was emitted is harmless.
+// Best effort by construction — the descriptor is usually broken too.
+// Must be called with t.mu held.
+func (t *Terminal) resetVisualModesDirect() {
+	_, _ = t.out.WriteString(autowrapEnable + altScreenExit)
 }
 
 // makeRestoreLocked returns an idempotent restore closure for the
@@ -151,6 +165,9 @@ func (t *Terminal) restore() error {
 
 	_, werr := t.bw.WriteString(cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + autowrapEnable + altScreenExit)
 	ferr := t.bw.Flush()
+	if werr != nil || ferr != nil {
+		t.resetVisualModesDirect()
+	}
 
 	rerr := t.restoreRawLocked()
 
