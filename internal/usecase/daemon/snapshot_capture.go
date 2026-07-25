@@ -8,11 +8,12 @@ import snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 func (d *Daemon) captureSnapshotState(sess *session, generation uint64) (*snapshotCapture, bool) {
 	sess.mu.Lock()
 	capture := &snapshotCapture{
-		session:    sess,
-		generation: generation,
-		name:       sess.name,
-		createdAt:  uint64(sess.createdAt),
-		active:     uint16(max(sess.active, 0)),
+		session:     sess,
+		generation:  generation,
+		name:        sess.name,
+		incarnation: sess.incarnation,
+		createdAt:   uint64(sess.createdAt),
+		active:      uint16(max(sess.active, 0)),
 	}
 	ephemeral := sess.ephemeral
 	fallbackCwd := sess.cwd

@@ -108,25 +108,46 @@ func TestMigrationOver4096(t *testing.T) {
 }
 
 func TestMigrationResumeMatrix(t *testing.T) {
-	dir := t.TempDir()
-	writeLegacyCatalogue(t, dir,
-		legacyCatalogueRecordV0{Name: "alpha", Cwd: "/tmp"},
-		legacyCatalogueRecordV0{Name: "work", Cwd: "/tmp"},
-	)
-	ref := domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
-	first := &migrationStub{heads: map[string]domain.CheckpointRef{"alpha": ref, "work": ref}, migrateErr: map[string]error{}}
-	_, err := OpenOrMigrate(context.Background(), OpenDeps{StateDir: dir, Random: io.LimitReader(&countingReader{}, 16), SnapshotMigration: first})
-	require.Error(t, err)
-	journal, err := readMigrationRecord(filepath.Join(dir, "migration", "durable-session-v1.intent"))
-	require.NoError(t, err)
-	assigned := journal.Assignments["alpha"]
-	require.NotEqual(t, domain.IncarnationID{}, assigned)
-	second := &migrationStub{heads: map[string]domain.CheckpointRef{"alpha": ref, "work": ref}, migrateErr: map[string]error{}}
-	result, err := OpenOrMigrate(context.Background(), OpenDeps{StateDir: dir, Random: &countingReader{next: 16}, SnapshotMigration: second})
-	require.NoError(t, err)
-	require.NoError(t, result.Catalogue.Close())
-	require.Equal(t, assigned, second.assignments["alpha"])
-	require.FileExists(t, filepath.Join(dir, "migration", "durable-session-v1.complete"))
+	for _, boundary := range []string{"backup-sync", "intent-sync", "identity-sync", "head-validation", "catalogue-sync", "receipt-sync", "complete-sync"} {
+		t.Run(boundary, func(t *testing.T) {
+			dir := t.TempDir()
+			writeLegacyCatalogue(t, dir,
+				legacyCatalogueRecordV0{Name: "alpha", Cwd: "/tmp"},
+				legacyCatalogueRecordV0{Name: "work", Cwd: "/tmp"},
+			)
+			ref := domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
+			stub := &migrationStub{heads: map[string]domain.CheckpointRef{"alpha": ref, "work": ref}, migrateErr: map[string]error{}}
+			crashed := false
+			_, err := OpenOrMigrate(context.Background(), OpenDeps{StateDir: dir, Random: &countingReader{}, SnapshotMigration: stub, Fault: func(got string) error {
+				if got == boundary && !crashed {
+					crashed = true
+					return errors.New("simulated crash")
+				}
+				return nil
+			}})
+			require.Error(t, err)
+			require.True(t, crashed)
+
+			before := map[string]domain.IncarnationID{}
+			intentPath := filepath.Join(dir, "migration", migrationIntentName)
+			if journal, journalErr := readMigrationRecord(intentPath); journalErr == nil {
+				for name, id := range journal.Assignments {
+					before[name] = id
+				}
+			}
+			restarted := &migrationStub{heads: map[string]domain.CheckpointRef{"alpha": ref, "work": ref}, migrateErr: map[string]error{}}
+			result, err := OpenOrMigrate(context.Background(), OpenDeps{StateDir: dir, Random: &countingReader{next: 64}, SnapshotMigration: restarted})
+			require.NoError(t, err)
+			require.NoError(t, result.Catalogue.Close())
+			completed, err := readMigrationRecord(intentPath)
+			require.NoError(t, err)
+			for name, id := range before {
+				require.Equal(t, id, completed.Assignments[name], "assigned identities must survive restart")
+			}
+			require.FileExists(t, filepath.Join(dir, migrationDirName, migrationBackupName))
+			require.FileExists(t, filepath.Join(dir, migrationDirName, migrationCompleteName))
+		})
+	}
 }
 
 func TestMigrationPreservesUncertain(t *testing.T) {

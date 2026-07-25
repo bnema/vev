@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 	"github.com/bnema/vev/pkg/vt"
@@ -37,6 +38,7 @@ type snapshotCapture struct {
 	generation           uint64 // repository publication generation
 	mutationRevision     uint64
 	name                 string
+	incarnation          domain.IncarnationID
 	createdAt            uint64
 	active               uint16
 	tabs                 []snapshotCaptureTab

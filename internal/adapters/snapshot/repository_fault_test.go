@@ -62,10 +62,10 @@ func TestRepositoryCleanupFaultsSurfaceForImmutableAndMutablePublication(t *test
 			} else {
 				prepareHeadStage(t, repo, second)
 			}
-			dir := filepath.Dir(repo.manifestPath(key, second.Generation))
+			dir := filepath.Dir(repo.legacyManifestPath(key, second.Generation))
 			phase := "write manifest"
 			if tc.location == "HEAD" {
-				dir = filepath.Dir(repo.headPath(key))
+				dir = filepath.Dir(repo.legacyHeadPath(key))
 				phase = "write HEAD"
 			}
 			repo.hooks.writeTemp = func(path string) error {
@@ -119,10 +119,10 @@ func TestRepositoryNewDirectorySyncFaultsAreIndependent(t *testing.T) {
 		{name: "repository", phase: "repository", occurrence: 1, directory: func(_ *Repository, root string) string { return filepath.Dir(root) }},
 		{name: "sessions", phase: "sessions", occurrence: 1, directory: func(repo *Repository, _ string) string { return repo.dir }},
 		{name: "session", phase: "session", occurrence: 1, directory: func(repo *Repository, _ string) string { return filepath.Join(repo.dir, repositorySessionsDir) }},
-		{name: "objects", phase: "objects", occurrence: 1, directory: func(repo *Repository, _ string) string { return repo.sessionPath(sessionKey("named")) }},
-		{name: "generations", phase: "generations", occurrence: 2, directory: func(repo *Repository, _ string) string { return repo.sessionPath(sessionKey("named")) }},
+		{name: "objects", phase: "objects", occurrence: 1, directory: func(repo *Repository, _ string) string { return repo.legacySessionPath(sessionKey("named")) }},
+		{name: "generations", phase: "generations", occurrence: 2, directory: func(repo *Repository, _ string) string { return repo.legacySessionPath(sessionKey("named")) }},
 		{name: "object shard", phase: "object shard", occurrence: 1, directory: func(repo *Repository, _ string) string {
-			return filepath.Join(repo.sessionPath(sessionKey("named")), repositoryObjectsDir)
+			return filepath.Join(repo.legacySessionPath(sessionKey("named")), repositoryObjectsDir)
 		}},
 	}
 	for _, tc := range cases {
@@ -191,7 +191,7 @@ func TestRepositoryLoadFallsBackFromIncompleteNewestGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(repo.objectPath(sessionKey("named"), manifest.Tabs[0].Panes[0].Tail.Digest)); err != nil {
+	if err := os.Remove(repo.legacyObjectPath(sessionKey("named"), manifest.Tabs[0].Panes[0].Tail.Digest)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := repo.Load(context.Background(), "named")

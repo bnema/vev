@@ -120,10 +120,10 @@ func TestRepositoryPublishVerifiesNecessaryExistingObjectOnce(t *testing.T) {
 	second := repositoryPublication(t, "named", 2, []byte("second"))
 	newTail := second.Objects[0]
 	key := sessionKey(second.Name)
-	if err := os.MkdirAll(filepath.Dir(repo.objectPath(key, newTail.Digest)), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(repo.legacyObjectPath(key, newTail.Digest)), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(repo.objectPath(key, newTail.Digest), newTail.Data, 0o600); err != nil {
+	if err := os.WriteFile(repo.legacyObjectPath(key, newTail.Digest), newTail.Data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -175,7 +175,7 @@ func largeIncrementalPublications(t testing.TB, name string, count int) (ports.S
 func seedCompletePublication(t testing.TB, repo *Repository, publication ports.SnapshotPublication) {
 	t.Helper()
 	key := sessionKey(publication.Name)
-	if err := repo.ensureSession(key); err != nil {
+	if err := repo.ensureSession(publication.IncarnationID); err != nil {
 		t.Fatal(err)
 	}
 	manifest, err := codec.UnmarshalManifest(publication.Manifest)
@@ -183,17 +183,17 @@ func seedCompletePublication(t testing.TB, repo *Repository, publication ports.S
 		t.Fatal(err)
 	}
 	for _, object := range publication.Objects {
-		if err := os.MkdirAll(filepath.Dir(repo.objectPath(key, object.Digest)), 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Dir(repo.legacyObjectPath(key, object.Digest)), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(repo.objectPath(key, object.Digest), object.Data, 0o600); err != nil {
+		if err := os.WriteFile(repo.legacyObjectPath(key, object.Digest), object.Data, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(repo.manifestPath(key, publication.Generation), publication.Manifest, 0o600); err != nil {
+	if err := os.WriteFile(repo.legacyManifestPath(key, publication.Generation), publication.Manifest, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(repo.headPath(key), marshalHead(publication.Generation, sha256.Sum256(publication.Manifest)), 0o600); err != nil {
+	if err := os.WriteFile(repo.legacyHeadPath(key), marshalHead(publication.Generation, sha256.Sum256(publication.Manifest)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if refs := manifestRefs(manifest); refs == nil {

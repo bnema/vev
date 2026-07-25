@@ -34,31 +34,33 @@ func incarnationKey(id domain.IncarnationID) (string, error) {
 	return id.String(), nil
 }
 
-// repositoryKey accepts string only for pre-migration maintenance code. Normal
-// publication and loading always pass an IncarnationID.
-func repositoryKey(identity any) string {
-	switch value := identity.(type) {
-	case domain.IncarnationID:
-		return value.String()
-	case string:
-		return value
-	default:
-		panic("snapshot: invalid repository identity")
-	}
+func (r *Repository) sessionPath(id domain.IncarnationID) string {
+	return filepath.Join(r.dir, repositorySessionsDir, id.String())
+}
+func (r *Repository) objectPath(id domain.IncarnationID, digest ports.SnapshotDigest) string {
+	hexDigest := hex.EncodeToString(digest[:])
+	return filepath.Join(r.sessionPath(id), repositoryObjectsDir, hexDigest[:2], hexDigest)
+}
+func (r *Repository) manifestPath(id domain.IncarnationID, generation uint64) string {
+	return filepath.Join(r.sessionPath(id), repositoryGenerations, generationFilename(generation))
+}
+func (r *Repository) headPath(id domain.IncarnationID) string {
+	return filepath.Join(r.sessionPath(id), repositoryHead)
 }
 
-func (r *Repository) sessionPath(identity any) string {
-	return filepath.Join(r.dir, repositorySessionsDir, repositoryKey(identity))
+// Legacy path helpers are isolated from normal incarnation-keyed operations.
+func (r *Repository) legacySessionPath(key string) string {
+	return filepath.Join(r.dir, repositorySessionsDir, key)
 }
-func (r *Repository) objectPath(identity any, digest ports.SnapshotDigest) string {
+func (r *Repository) legacyObjectPath(key string, digest ports.SnapshotDigest) string {
 	hexDigest := hex.EncodeToString(digest[:])
-	return filepath.Join(r.sessionPath(identity), repositoryObjectsDir, hexDigest[:2], hexDigest)
+	return filepath.Join(r.legacySessionPath(key), repositoryObjectsDir, hexDigest[:2], hexDigest)
 }
-func (r *Repository) manifestPath(identity any, generation uint64) string {
-	return filepath.Join(r.sessionPath(identity), repositoryGenerations, generationFilename(generation))
+func (r *Repository) legacyManifestPath(key string, generation uint64) string {
+	return filepath.Join(r.legacySessionPath(key), repositoryGenerations, generationFilename(generation))
 }
-func (r *Repository) headPath(identity any) string {
-	return filepath.Join(r.sessionPath(identity), repositoryHead)
+func (r *Repository) legacyHeadPath(key string) string {
+	return filepath.Join(r.legacySessionPath(key), repositoryHead)
 }
 func sessionKey(name string) string {
 	if safeNameRE.MatchString(name) && name != "." && name != ".." {

@@ -36,6 +36,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/noticefile"
 	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/adapters/pty"
+	"github.com/bnema/vev/internal/adapters/recoveryfs"
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/adapters/shellcmd"
 	snapshotadapter "github.com/bnema/vev/internal/adapters/snapshot"
@@ -49,6 +50,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
+	"github.com/bnema/vev/internal/usecase/recovery"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 	"github.com/bnema/vev/pkg/safedir"
 )
@@ -507,35 +509,26 @@ func runDaemonOwned(ctx context.Context) (retErr error) {
 	daemonOpts = append(daemonOpts, daemon.WithSnapshotRepository(snapshotRepository, snapshotRepository))
 	daemonOpts = append(daemonOpts, daemon.WithNoticeStore(noticefile.New(platform.StateDir())))
 	storePath := persist.StorePath(platform.StateDir())
-	catalogueCandidate := false
-	for _, candidate := range []string{storePath, storePath + ".next", storePath + ".prev"} {
-		if _, statErr := os.Stat(candidate); statErr == nil {
-			catalogueCandidate = true
-		} else if !errors.Is(statErr, os.ErrNotExist) {
-			return fmt.Errorf("vev: inspect durable session catalogue %s: %w", candidate, statErr)
-		}
-	}
-	if !catalogueCandidate {
-		return fmt.Errorf("vev: durable session catalogue unavailable at %s", storePath)
-	}
-	store, err := persist.OpenStore(storePath)
+	opened, err := persist.OpenOrMigrate(ctx, persist.OpenDeps{
+		StateDir:          platform.StateDir(),
+		Random:            rand.Reader,
+		SnapshotMigration: snapshotRepository,
+	})
 	if err != nil {
-		log.Error("opening session store failed", "path", storePath, "err", err)
-		return fmt.Errorf("vev: open durable session catalogue %s: %w", storePath, err)
+		return fmt.Errorf("vev: open or migrate durable session state %s: %w", storePath, err)
 	}
-	if _, err := persist.New(store).LoadAll(); err != nil {
-		closeErr := store.Close()
-		log.Error("validating session catalogue failed", "path", storePath, "err", err)
-		return errors.Join(fmt.Errorf("vev: validate durable session catalogue %s: %w", storePath, err), closeErr)
+	coordinator := recovery.NewCoordinator(opened.Catalogue, snapshotRepository, recoveryfs.New(platform.StateDir()), rand.Reader)
+	if err := coordinator.Recover(ctx); err != nil {
+		return errors.Join(fmt.Errorf("vev: recover durable session transactions: %w", err), opened.Catalogue.Close())
 	}
 	log.Info("session persistence enabled", "path", storePath)
-	daemonOpts = append(daemonOpts, daemon.WithStore(store))
+	daemonOpts = append(daemonOpts, daemon.WithCatalogue(opened.Catalogue))
 
-	// Socket publication follows lifecycle acquisition and strict catalogue
-	// validation. Any earlier failure leaves no apparently healthy daemon.
+	// Socket publication follows lifecycle acquisition, migration, and strict
+	// recovery. Any earlier failure leaves no apparently healthy daemon.
 	ln, err := ipc.Listen(ipc.SocketDir(), ipc.WithRuntimeObserver(observer))
 	if err != nil {
-		closeErr := store.Close()
+		closeErr := opened.Catalogue.Close()
 		log.Error("daemon listen failed", "socket_dir", ipc.SocketDir(), "err", err)
 		return errors.Join(fmt.Errorf("vev: daemon listen: %w", err), closeErr)
 	}

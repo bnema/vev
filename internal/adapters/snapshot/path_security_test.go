@@ -154,7 +154,7 @@ func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 				t.Fatal(err)
 			}
 			key := sessionKey(publication.Name)
-			inside := filepath.Join(repo.sessionPath(key), target)
+			inside := filepath.Join(repo.legacySessionPath(key), target)
 			outside := t.TempDir()
 			guard := filepath.Join(outside, "must-not-change")
 			if err := os.WriteFile(guard, []byte("guard"), 0o600); err != nil {

@@ -681,13 +681,13 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	if !wasEphemeral && oldName != name {
 		quarantine = quarantineSnapshotCoordinatorWithEpoch(sess)
 		<-quarantine.done
-		if err := d.beginSnapshotPurge(oldName); err != nil {
+		if err := d.beginSnapshotPurge(oldName, sess.incarnation); err != nil {
 			return rollback(err)
 		}
 		// finishSnapshotPurge preserves the tombstone through both source
 		// deletions and the old metadata delete, including a retained legacy
 		// import whose verified source delete is still pending.
-		if err := d.finishSnapshotPurge(oldName); err != nil {
+		if err := d.finishSnapshotPurge(oldName, sess.incarnation); err != nil {
 			return rollback(err)
 		}
 	}
@@ -878,33 +878,28 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 // beginSnapshotPurge commits a logical named-session kill before its live
 // identity or persisted metadata is removed. It never runs under daemon or
 // session locks.
-func (d *Daemon) beginSnapshotPurge(name string) error {
+func (d *Daemon) beginSnapshotPurge(name string, incarnation domain.IncarnationID) error {
 	if d.snapshotRepository == nil || name == "" {
 		return nil
 	}
-	return d.snapshotRepository.Tombstone(context.Background(), name)
+	return d.snapshotRepository.WriteDeletionTombstone(context.Background(), domain.DeletionTombstone{Name: name, IncarnationID: incarnation})
 }
 
 // finishSnapshotPurge deletes both independently durable snapshot sources,
 // then metadata, and only then clears the tombstone. Any failure deliberately
 // leaves the marker in place so startup cannot restore or import the name and
 // a later live/offline kill can retry the idempotent source deletes.
-func (d *Daemon) finishSnapshotPurge(name string) error {
+func (d *Daemon) finishSnapshotPurge(name string, incarnation domain.IncarnationID) error {
 	if d.snapshotRepository == nil {
 		return d.persist.Delete(name)
 	}
-	incrementalErr := d.snapshotRepository.Delete(context.Background(), name)
-	var legacyErr error
-	if d.legacySnapshots != nil {
-		legacyErr = d.legacySnapshots.DeleteLegacy(context.Background(), name)
-	}
-	if incrementalErr != nil || legacyErr != nil {
-		return errors.Join(incrementalErr, legacyErr)
+	if err := d.snapshotRepository.QuarantineDeletionSources(context.Background(), domain.DeletionTombstone{Name: name, IncarnationID: incarnation}, false); err != nil {
+		return err
 	}
 	if err := d.persist.Delete(name); err != nil {
 		return err
 	}
-	return d.snapshotRepository.DeleteTombstone(context.Background(), name)
+	return d.snapshotRepository.DeleteDeletionTombstone(context.Background(), incarnation)
 }
 
 // retryStoppedPurge completes a previously closed session's durable purge.
@@ -933,10 +928,10 @@ func (d *Daemon) retryStoppedPurge(name string) error {
 	d.stopped[name] = stopped
 	d.mu.Unlock()
 
-	if err := d.beginSnapshotPurge(name); err != nil {
+	if err := d.beginSnapshotPurge(name, stopped.incarnation); err != nil {
 		return err
 	}
-	if err := d.finishSnapshotPurge(name); err != nil {
+	if err := d.finishSnapshotPurge(name, stopped.incarnation); err != nil {
 		return err
 	}
 	d.mu.Lock()
@@ -1087,7 +1082,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	// the just-quarantined name. Do not hold daemon or session locks while
 	// tombstoning or joining: a repository implementation may block on I/O.
 	if purge && !isEphemeral {
-		if err := d.beginSnapshotPurge(name); err != nil {
+		if err := d.beginSnapshotPurge(name, sess.incarnation); err != nil {
 			return err
 		}
 		if d.snapshotRepository != nil {
@@ -1223,7 +1218,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	// tombstone and hidden stopped record when any source or metadata operation
 	// fails; retryStoppedPurge (including a repeated live kill) resumes safely.
 	if !ephemeral && purge {
-		if err := d.finishSnapshotPurge(stoppedName); err != nil {
+		if err := d.finishSnapshotPurge(stoppedName, sess.incarnation); err != nil {
 			purgeErr = errors.Join(purgeErr, err)
 			d.log.Warn("finishing session snapshot purge failed", "err", err, "session", stoppedName)
 		} else {

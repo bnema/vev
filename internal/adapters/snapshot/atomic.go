@@ -8,19 +8,20 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/pkg/safedir"
 )
 
-func (r *Repository) ensureSession(key string) error {
+func (r *Repository) ensureSession(id domain.IncarnationID) error {
 	for _, directory := range []struct {
 		path  string
 		phase string
 	}{
 		{r.dir, "repository"},
 		{filepath.Join(r.dir, repositorySessionsDir), "sessions"},
-		{r.sessionPath(key), "session"},
-		{filepath.Join(r.sessionPath(key), repositoryObjectsDir), "objects"},
-		{filepath.Join(r.sessionPath(key), repositoryGenerations), "generations"},
+		{r.sessionPath(id), "session"},
+		{filepath.Join(r.sessionPath(id), repositoryObjectsDir), "objects"},
+		{filepath.Join(r.sessionPath(id), repositoryGenerations), "generations"},
 	} {
 		if err := r.ensurePrivateDirectoryPhase(directory.path, directory.phase); err != nil {
 			return fmt.Errorf("create snapshot repository directory: %w", err)

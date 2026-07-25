@@ -12,7 +12,7 @@ import (
 func TestRepositoryMaintainBoundsCursorsAcrossHostileObjectShards(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	key := sessionKey("named")
-	objects := filepath.Join(repo.sessionPath(key), repositoryObjectsDir)
+	objects := filepath.Join(repo.legacySessionPath(key), repositoryObjectsDir)
 	const shards = maintenanceBatch * 2
 	for i := 0; i < shards; i++ {
 		shard := filepath.Join(objects, fmt.Sprintf("%03d", i))
@@ -49,7 +49,7 @@ func TestRepositoryMaintainBoundsCursorsAcrossHostileObjectShards(t *testing.T) 
 func TestRepositoryMaintainBoundsEmptyObjectTempShards(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	key := sessionKey("named")
-	objects := filepath.Join(repo.sessionPath(key), repositoryObjectsDir)
+	objects := filepath.Join(repo.legacySessionPath(key), repositoryObjectsDir)
 	const shards = maintenanceBatch * 2
 	for i := 0; i < shards; i++ {
 		if err := os.MkdirAll(filepath.Join(objects, fmt.Sprintf("%03d", i)), 0o700); err != nil {

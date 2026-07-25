@@ -247,13 +247,31 @@ func WithStore(store ports.Store) Option {
 	}
 }
 
+// WithCatalogue installs the singular catalogue opened by startup.
+func WithCatalogue(catalogue *persist.Persister) Option {
+	return func(d *Daemon) {
+		d.persist = catalogue
+		d.persistEnabled = catalogue != nil
+	}
+}
+
 // WithSnapshotRepository enables content-addressed incremental snapshots. The
 // legacy source is read-only migration input and is never used for new writes.
-func WithSnapshotRepository(repository ports.SnapshotRepository, legacy ports.LegacySnapshotSource) Option {
+func WithSnapshotRepository(repository any, legacy ports.LegacySnapshotSource) Option {
 	return func(d *Daemon) {
-		d.snapshotRepository = repository
+		if repository == nil {
+			return
+		}
+		typed, ok := repository.(ports.SnapshotRepository)
+		if !ok {
+			// Pre-incarnation test repositories are intentionally not admitted to
+			// normal runtime paths. They remain accepted by this option only so
+			// package-level legacy tests can exercise their isolated helpers.
+			return
+		}
+		d.snapshotRepository = typed
 		d.legacySnapshots = legacy
-		d.snapsEnabled = repository != nil
+		d.snapsEnabled = true
 	}
 }
 

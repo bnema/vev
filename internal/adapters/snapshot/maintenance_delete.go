@@ -121,7 +121,7 @@ func (r *Repository) ListDeletionTombstones(ctx context.Context, cursor ports.De
 		if err != nil {
 			return ports.DeletionTombstonePage{}, err
 		}
-		charge := uint64(len(entry.Name()) + len(decoded.Name) + len(decoded.IncarnationID))
+		charge := uint64(len(entry.Name()) + len(data))
 		if charge > budget.Bytes {
 			if len(page.Tombstones) == 0 {
 				return ports.DeletionTombstonePage{}, ErrMaintenanceBudgetTooSmall
@@ -177,7 +177,7 @@ func (r *Repository) Delete(ctx context.Context, name string) error {
 		return err
 	}
 
-	canonical := r.sessionPath(key)
+	canonical := r.legacySessionPath(key)
 	sessions := filepath.Dir(canonical)
 	// A prior rename may have succeeded while its parent sync failed. Complete
 	// that durability boundary before considering a canonical directory: this

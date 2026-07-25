@@ -100,6 +100,34 @@ func LoadCatalogueReadOnly(dir string) ([]domain.CatalogueRecord, error) {
 }
 
 func (p *Persister) Save(record domain.CatalogueRecord) error { return p.Replace(record.Name, record) }
+func (p *Persister) Create(record domain.CatalogueRecord) error {
+	if p == nil || p.store == nil {
+		return errPersistenceUnavailable
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, exists := p.store.Get([]byte(record.Name)); exists {
+		return errors.New("persist: session already exists")
+	}
+	return p.applyLocked(map[string]*domain.CatalogueRecord{record.Name: &record})
+}
+func (p *Persister) Records() []domain.CatalogueRecord {
+	records, _ := p.LoadCatalogue()
+	return records
+}
+func (p *Persister) Record(name string) (domain.CatalogueRecord, bool) {
+	if p == nil || p.store == nil {
+		return domain.CatalogueRecord{}, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	value, ok := p.store.Get([]byte(name))
+	if !ok {
+		return domain.CatalogueRecord{}, false
+	}
+	record, err := decodeRecordValue(name, value)
+	return record, err == nil
+}
 func (p *Persister) Apply(records map[string]*domain.CatalogueRecord) error {
 	if p == nil || p.store == nil {
 		return nil

@@ -57,7 +57,7 @@ func (r *Repository) maintainSession(ctx context.Context, key string, budget *in
 	if err != nil {
 		return err
 	}
-	if _, err := r.removeTemps(ctx, filepath.Join(r.sessionPath(key), repositoryGenerations), budget, "generation-temps:"+key); err != nil || *budget == 0 {
+	if _, err := r.removeTemps(ctx, filepath.Join(r.legacySessionPath(key), repositoryGenerations), budget, "generation-temps:"+key); err != nil || *budget == 0 {
 		return err
 	}
 	if !state.objectTempsDone {
@@ -120,7 +120,7 @@ func (r *Repository) sessionMaintenanceState(key string) (*sessionMaintenance, e
 // itself stable maintenance state: we retain every classified reference until a
 // valid publication changes that state, rather than restarting the mark pass.
 func (r *Repository) maintenanceToken(key string) (string, bool, error) {
-	data, exists, err := r.readOptionalBounded(r.headPath(key))
+	data, exists, err := r.readOptionalBounded(r.legacyHeadPath(key))
 	if err != nil {
 		return "", false, err
 	}
@@ -128,7 +128,7 @@ func (r *Repository) maintenanceToken(key string) (string, bool, error) {
 		return "missing", true, nil
 	}
 	sum := sha256.Sum256(data)
-	if _, _, err := r.readHead(key); err != nil {
+	if _, _, err := r.readLegacyHead(key); err != nil {
 		return fmt.Sprintf("invalid:%x", sum), true, nil
 	}
 	return fmt.Sprintf("valid:%x", sum), false, nil
@@ -139,7 +139,7 @@ func (r *Repository) clearSessionMaintenance(key string) {
 		r.releaseSessionReference(state.lock)
 	}
 	delete(r.maintenanceSessions, key)
-	prefix := "\x00" + filepath.Clean(r.sessionPath(key))
+	prefix := "\x00" + filepath.Clean(r.legacySessionPath(key))
 	for id := range r.maintenanceCursors {
 		if strings.HasSuffix(id, prefix) || strings.Contains(id, ":"+key+":") || strings.Contains(id, ":"+key+"\x00") {
 			delete(r.maintenanceCursors, id)
@@ -148,7 +148,7 @@ func (r *Repository) clearSessionMaintenance(key string) {
 }
 
 func (r *Repository) markSession(ctx context.Context, key string, state *sessionMaintenance) error {
-	dir := filepath.Join(r.sessionPath(key), repositoryGenerations)
+	dir := filepath.Join(r.legacySessionPath(key), repositoryGenerations)
 	entries, done, err := r.readMaintenanceDir(dir, maintenanceBatch, "mark-generations:"+key)
 	if errors.Is(err, os.ErrNotExist) {
 		state.markDone = true
@@ -168,7 +168,7 @@ func (r *Repository) markSession(ctx context.Context, key string, state *session
 		if !ok {
 			continue
 		}
-		data, err := r.readBounded(r.manifestPath(key, generation))
+		data, err := r.readBounded(r.legacyManifestPath(key, generation))
 		if err != nil {
 			state.uncertain = true
 			continue
@@ -254,7 +254,7 @@ func (r *Repository) removeObsoleteManifests(ctx context.Context, key string, st
 			return err
 		}
 		generation := state.manifestQueue[0]
-		path := r.manifestPath(key, generation)
+		path := r.legacyManifestPath(key, generation)
 		if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove snapshot manifest %q: %w", maintenancePath(r.dir, path), safeFilesystemError(err))
 		}
@@ -275,7 +275,7 @@ func (r *Repository) removeObsoleteManifests(ctx context.Context, key string, st
 // removal budget, so this fixed step ceiling prevents an unbounded scan of
 // them while retaining only the root cursor and one active shard cursor.
 func (r *Repository) removeObjectTemps(ctx context.Context, key string, state *sessionMaintenance, budget *int) (bool, error) {
-	root := filepath.Join(r.sessionPath(key), repositoryObjectsDir)
+	root := filepath.Join(r.legacySessionPath(key), repositoryObjectsDir)
 	if *budget == 0 {
 		return false, nil
 	}
@@ -313,7 +313,7 @@ func (r *Repository) sweepSession(ctx context.Context, key string, state *sessio
 		return nil
 	}
 	referenced := retainedReferences(state.marked, state.conservative)
-	root := filepath.Join(r.sessionPath(key), repositoryObjectsDir)
+	root := filepath.Join(r.legacySessionPath(key), repositoryObjectsDir)
 	if state.sweepShard != "" && *budget > 0 {
 		shard := state.sweepShard
 		done, err := r.sweepShard(ctx, filepath.Join(root, shard), referenced, budget, key, shard)

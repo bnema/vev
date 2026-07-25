@@ -30,7 +30,7 @@ func TestRepositoryListStopsAtTraversalBudget(t *testing.T) {
 func TestRepositoryLoadStopsAtGenerationTraversalBudget(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	key := sessionKey("named")
-	generations := filepath.Join(repo.sessionPath(key), repositoryGenerations)
+	generations := filepath.Join(repo.legacySessionPath(key), repositoryGenerations)
 	if err := os.MkdirAll(generations, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestRepositoryLoadFallsBackNewestToOldestWithoutGenerationEnumeration(t *te
 	}
 	key := sessionKey("named")
 	publication := repositoryPublication(t, "named", 3, []byte("state-3"))
-	if err := os.Remove(repo.objectPath(key, publication.Objects[0].Digest)); err != nil {
+	if err := os.Remove(repo.legacyObjectPath(key, publication.Objects[0].Digest)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -86,7 +86,7 @@ func TestRepositoryMaintainDoesNotCollectBeyondRetainedMetadataBudget(t *testing
 			t.Fatal("maintenance did not complete after bounded object-shard traversal")
 		}
 	}
-	if _, err := os.Lstat(repo.manifestPath(sessionKey("named"), 1)); err != nil {
+	if _, err := os.Lstat(repo.legacyManifestPath(sessionKey("named"), 1)); err != nil {
 		t.Fatalf("old manifest collected after mark budget overflow: %v", err)
 	}
 	if state := repo.maintenanceSessions[sessionKey("named")]; state != nil {

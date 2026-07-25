@@ -37,17 +37,17 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	// A failed publication can still leave immutable blobs or a manifest behind.
 	// Invalidate an in-progress GC mark before creating any publication storage.
 	r.invalidateStorageEpoch(key)
-	if err := r.ensureSession(key); err != nil {
+	if err := r.ensureSession(publication.IncarnationID); err != nil {
 		return err
 	}
 	// The common replay path needs neither a manifest decode nor a reference
 	// map. Checking the immutable bytes directly also keeps its descriptor
 	// reads beneath the pinned repository root.
-	if unchanged, err := r.unchangedPublication(key, publication); err == nil && unchanged {
+	if unchanged, err := r.unchangedPublication(publication); err == nil && unchanged {
 		return nil
 	}
 
-	current, currentManifest, currentRefs, err := r.currentIncarnationPublication(ctx, publication, key)
+	current, currentManifest, currentRefs, err := r.currentIncarnationPublication(ctx, publication)
 	if err != nil {
 		return err
 	}
@@ -76,7 +76,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		path := r.objectPath(key, digest)
+		path := r.objectPath(publication.IncarnationID, digest)
 		exists, err := r.verifyObjectFile(path, digest, ref)
 		if err != nil {
 			return fmt.Errorf("verify object %x: %w", digest, err)
@@ -110,7 +110,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		}
 	}
 
-	manifestPath := r.manifestPath(key, publication.Generation)
+	manifestPath := r.manifestPath(publication.IncarnationID, publication.Generation)
 	existing, exists, err := r.readOptionalBounded(manifestPath)
 	if err != nil {
 		return err
@@ -138,14 +138,14 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		}
 	}
 	if r.hooks.beforeHeadWrite != nil {
-		if err := r.hooks.beforeHeadWrite(r.headPath(key)); err != nil {
+		if err := r.hooks.beforeHeadWrite(r.headPath(publication.IncarnationID)); err != nil {
 			return err
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := r.writeMutable(r.headPath(key), marshalHead(publication.Generation, sha256.Sum256(publication.Manifest))); err != nil {
+	if err := r.writeMutable(r.headPath(publication.IncarnationID), marshalHead(publication.Generation, sha256.Sum256(publication.Manifest))); err != nil {
 		return fmt.Errorf("write HEAD: %w", err)
 	}
 	return nil
@@ -154,23 +154,23 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 // unchangedPublication uses one root for the two reads in the replay fast
 // path. The root is confined to this operation and is closed before return;
 // all other repository operations retain their open-per-operation roots.
-func (r *Repository) unchangedPublication(key string, publication ports.SnapshotPublication) (unchanged bool, err error) {
+func (r *Repository) unchangedPublication(publication ports.SnapshotPublication) (unchanged bool, err error) {
 	root, err := r.openRoot()
 	if err != nil {
 		return false, err
 	}
 	defer func() { joinCloseError(&err, "close snapshot root", r.closeRoot(root)) }()
 
-	generation, _, err := r.readHeadWithRoot(root, key)
+	generation, _, err := r.readHeadWithRoot(root, publication.IncarnationID)
 	if err != nil || generation != publication.Generation {
 		return false, nil
 	}
-	current, err := r.readBoundedRoot(root, r.manifestPath(key, generation))
+	current, err := r.readBoundedRoot(root, r.manifestPath(publication.IncarnationID, generation))
 	return err == nil && bytes.Equal(current, publication.Manifest), nil
 }
 
-func (r *Repository) currentIncarnationPublication(ctx context.Context, publication ports.SnapshotPublication, key string) (uint64, []byte, map[ports.SnapshotDigest]codec.ObjectRef, error) {
-	generation, digest, err := r.readHead(key)
+func (r *Repository) currentIncarnationPublication(ctx context.Context, publication ports.SnapshotPublication) (uint64, []byte, map[ports.SnapshotDigest]codec.ObjectRef, error) {
+	generation, digest, err := r.readHead(publication.IncarnationID)
 	if errors.Is(err, os.ErrNotExist) {
 		if publication.Generation != 1 || publication.ParentCheckpoint != nil {
 			return 0, nil, nil, fmt.Errorf("first snapshot generation must be 1 with no parent")

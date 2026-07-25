@@ -249,7 +249,6 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 func TestRestoreIncrementalFallbackAndInvalidObjectMappings(t *testing.T) {
 	snapshot := restoreAcceptanceSession(t, "fallback")
 	valid := acceptanceGeneration(t, snapshot, 3)
-	valid.Fallback = true
 	pty, release := newBlockingPTY(t)
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	store, _ := newMockStore(t)
@@ -300,7 +299,6 @@ func TestRestoreIncrementalFallbackAndInvalidObjectMappings(t *testing.T) {
 	} {
 		t.Run(mutate.name, func(t *testing.T) {
 			generation := cloneAcceptanceGeneration(valid)
-			generation.Fallback = false
 			mutate.fn(&generation)
 			_, err := sessionFromGeneration(generation)
 			require.Error(t, err)

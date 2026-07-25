@@ -95,13 +95,13 @@ func TestRenameKeepsSnapshotCoordinatorQuarantinedUntilNewIdentityCommits(t *tes
 	deleteCompleted := make(chan struct{})
 	state.deleteDone = deleteCompleted
 	published := make(chan ports.SnapshotPublication, 2)
-	repository.EXPECT().Tombstone(mock.Anything, "work").Return(nil).Once()
-	repository.EXPECT().Delete(mock.Anything, "work").RunAndReturn(func(context.Context, string) error {
+	repository.EXPECT().WriteDeletionTombstone(mock.Anything, mock.Anything).Return(nil).Once()
+	repository.EXPECT().QuarantineDeletionSources(mock.Anything, mock.Anything, false).RunAndReturn(func(context.Context, domain.DeletionTombstone, bool) error {
 		close(deleteEntered)
 		<-allowDelete
 		return nil
 	}).Once()
-	repository.EXPECT().DeleteTombstone(mock.Anything, "work").Return(nil).Once()
+	repository.EXPECT().DeleteDeletionTombstone(mock.Anything, mock.Anything).Return(nil).Once()
 	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
 		published <- publication
 		return nil
@@ -174,8 +174,8 @@ func TestRenameRollbackAfterOldDeleteLeavesOldCoordinatorStopped(t *testing.T) {
 		return nil
 	}
 	state.mu.Unlock()
-	repository.EXPECT().Tombstone(mock.Anything, "work").Return(nil).Once()
-	repository.EXPECT().Delete(mock.Anything, "work").Return(nil).Once()
+	repository.EXPECT().WriteDeletionTombstone(mock.Anything, mock.Anything).Return(nil).Once()
+	repository.EXPECT().QuarantineDeletionSources(mock.Anything, mock.Anything, false).Return(nil).Once()
 	// No Publish expectation is installed: any publication is an unexpected mock
 	// call. The saver handshake below joins the scheduler before this test ends.
 
@@ -448,7 +448,6 @@ func TestServeShutdownDeadlineBoundsPaneExitTeardownOwner(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, pty), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository, nil)(d)
-	repository.EXPECT().List(mock.Anything).Return(nil, nil).Maybe()
 
 	publicationStarted := make(chan struct{})
 	releasePublication := make(chan struct{})
@@ -609,7 +608,6 @@ func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository, nil)(d)
-	repository.EXPECT().List(mock.Anything).Return(nil, nil).Maybe()
 
 	published := make(chan ports.SnapshotPublication, 2)
 	allowTerminalPublication := make(chan struct{})
@@ -654,7 +652,6 @@ func TestServeShutdownDeadlineDoesNotWaitTwiceForUncooperativeSnapshotRepository
 	d := newTestDaemon(t, newFactory(t, p), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
 	WithSnapshotRepository(repository, nil)(d)
-	repository.EXPECT().List(mock.Anything).Return(nil, nil).Maybe()
 	noticeStore := portsmocks.NewMockNoticeStore(t)
 	WithNoticeStore(noticeStore)(d)
 	noticeStore.EXPECT().Claim().Return(nil, nil).Maybe()

@@ -113,7 +113,7 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 	if err := prepareSnapshotChunkCache(capture); err != nil {
 		return ports.SnapshotPublication{}, err
 	}
-	manifest := snapcodec.Manifest{Generation: capture.generation, Name: capture.name, CreatedAt: capture.createdAt, Active: capture.active, Tabs: make([]snapcodec.ManifestTab, 0, len(capture.tabs))}
+	manifest := snapcodec.Manifest{Generation: capture.generation, IncarnationID: capture.incarnation, Name: capture.name, CreatedAt: capture.createdAt, Active: capture.active, Tabs: make([]snapcodec.ManifestTab, 0, len(capture.tabs))}
 	objects := make([]ports.SnapshotObject, 0)
 	capture.sealedRefs = make(map[*vt.HistoryChunk]snapcodec.ObjectRef)
 	for _, tab := range capture.tabs {
@@ -160,7 +160,7 @@ func (d *Daemon) incrementalPublication(capture *snapshotCapture) (ports.Snapsho
 	if err != nil {
 		return ports.SnapshotPublication{}, err
 	}
-	return ports.SnapshotPublication{Name: capture.name, Generation: capture.generation, Manifest: encoded, Objects: objects}, nil
+	return ports.SnapshotPublication{IncarnationID: capture.incarnation, Name: capture.name, Generation: capture.generation, Manifest: encoded, Objects: objects}, nil
 }
 
 // marshalSnapshotTail selects the canonical empty-tail encoding before any

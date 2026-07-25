@@ -32,7 +32,7 @@ func TestRepositoryCurrentGenerationPropagatesOperationalHeadErrors(t *testing.T
 func TestRepositoryLoadFallsBackFromInvalidHead(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	require.NoError(t, repo.Publish(context.Background(), repositoryPublication(t, "named", 1, []byte("state"))))
-	require.NoError(t, os.WriteFile(repo.headPath(sessionKey("named")), []byte("invalid"), 0o600))
+	require.NoError(t, os.WriteFile(repo.legacyHeadPath(sessionKey("named")), []byte("invalid"), 0o600))
 
 	got, err := repo.Load(context.Background(), "named")
 	require.NoError(t, err)
@@ -47,7 +47,7 @@ func TestRepositoryLoadFallsBackAcrossMultipleCorruptCandidates(t *testing.T) {
 	key := sessionKey("named")
 	for _, generation := range []uint64{4, 3} {
 		publication := repositoryPublication(t, "named", generation, []byte{byte(generation)})
-		require.NoError(t, os.Remove(repo.objectPath(key, publication.Objects[0].Digest)))
+		require.NoError(t, os.Remove(repo.legacyObjectPath(key, publication.Objects[0].Digest)))
 	}
 
 	got, err := repo.Load(context.Background(), "named")

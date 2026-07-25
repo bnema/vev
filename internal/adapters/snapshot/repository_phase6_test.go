@@ -53,7 +53,7 @@ func TestRepositoryPublishDeleteManySessionsRaceFree(t *testing.T) {
 func TestRepositoryBoundsAndEvictsPartialMaintenanceSessionState(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	for _, key := range []string{"named-000", "named-001"} {
-		generations := filepath.Join(repo.sessionPath(key), repositoryGenerations)
+		generations := filepath.Join(repo.legacySessionPath(key), repositoryGenerations)
 		for i := 0; i < maintenanceBatch+1; i++ {
 			if err := os.MkdirAll(generations, 0o700); err != nil {
 				t.Fatal(err)

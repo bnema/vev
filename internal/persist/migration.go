@@ -37,6 +37,8 @@ type OpenDeps struct {
 	StateDir          string
 	Random            io.Reader
 	SnapshotMigration ports.SnapshotMigration
+	// Fault is a test-only crash seam called after named durable boundaries.
+	Fault func(string) error
 }
 
 type OpenResult struct {
@@ -227,8 +229,14 @@ func startLegacyMigration(ctx context.Context, deps OpenDeps) (OpenResult, error
 	if err := atomicMigrationWrite(backup, source); err != nil {
 		return OpenResult{}, err
 	}
+	if err := migrationBoundary(deps, "backup-sync"); err != nil {
+		return OpenResult{}, err
+	}
 	record := MigrationRecord{Phase: MigrationBackedUp, Assignments: map[string]domain.IncarnationID{}, Validated: map[string]*domain.CheckpointRef{}, Degraded: map[string]string{}}
 	if err := writeMigrationRecord(filepath.Join(migrationDir, migrationIntentName), record); err != nil {
+		return OpenResult{}, err
+	}
+	if err := migrationBoundary(deps, "intent-sync"); err != nil {
 		return OpenResult{}, err
 	}
 	return resumeLegacyMigration(ctx, deps)
@@ -261,6 +269,9 @@ func resumeLegacyMigration(ctx context.Context, deps OpenDeps) (OpenResult, erro
 			}
 			record.Assignments[legacy.Name] = id
 			if err := writeMigrationRecord(intent, record); err != nil {
+				return OpenResult{}, err
+			}
+			if err := migrationBoundary(deps, "identity-sync"); err != nil {
 				return OpenResult{}, err
 			}
 		}
@@ -298,6 +309,9 @@ func resumeLegacyMigration(ctx context.Context, deps OpenDeps) (OpenResult, erro
 			if err := writeMigrationRecord(intent, record); err != nil {
 				return OpenResult{}, err
 			}
+			if err := migrationBoundary(deps, "head-validation"); err != nil {
+				return OpenResult{}, err
+			}
 		}
 		record.Phase = MigrationValidated
 		if err := writeMigrationRecord(intent, record); err != nil {
@@ -323,8 +337,14 @@ func resumeLegacyMigration(ctx context.Context, deps OpenDeps) (OpenResult, erro
 		if err := installMigratedCatalogue(deps.StateDir, records); err != nil {
 			return OpenResult{}, err
 		}
+		if err := migrationBoundary(deps, "catalogue-sync"); err != nil {
+			return OpenResult{}, err
+		}
 		record.Phase = MigrationInstalled
 		if err := writeMigrationRecord(intent, record); err != nil {
+			return OpenResult{}, err
+		}
+		if err := migrationBoundary(deps, "receipt-sync"); err != nil {
 			return OpenResult{}, err
 		}
 	}
@@ -346,8 +366,19 @@ func resumeLegacyMigration(ctx context.Context, deps OpenDeps) (OpenResult, erro
 			_ = catalogue.Close()
 			return OpenResult{}, err
 		}
+		if err := migrationBoundary(deps, "complete-sync"); err != nil {
+			_ = catalogue.Close()
+			return OpenResult{}, err
+		}
 	}
 	return OpenResult{Catalogue: catalogue, Records: opened, Migrated: true}, nil
+}
+
+func migrationBoundary(deps OpenDeps, name string) error {
+	if deps.Fault != nil {
+		return deps.Fault(name)
+	}
+	return nil
 }
 
 func installMigratedCatalogue(stateDir string, records []domain.CatalogueRecord) error {

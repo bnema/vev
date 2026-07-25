@@ -296,7 +296,7 @@ func TestRepositoryDeleteQuarantinesCanonicalSessionBeforeCleanup(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	canonical := repo.sessionPath(sessionKey("named"))
+	canonical := repo.legacySessionPath(sessionKey("named"))
 	if _, err := os.Lstat(canonical); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("canonical session after Delete = %v, want not exist", err)
 	}
@@ -329,7 +329,7 @@ func TestRepositoryDeleteReturnsRootSyncFailureAfterQuarantine(t *testing.T) {
 	if err := repo.Delete(context.Background(), "named"); !errors.Is(err, injected) {
 		t.Fatalf("Delete error = %v, want root sync failure", err)
 	}
-	if _, err := os.Lstat(repo.sessionPath(sessionKey("named"))); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(repo.legacySessionPath(sessionKey("named"))); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("canonical session after failed sync = %v, want not exist", err)
 	}
 }
@@ -366,7 +366,7 @@ func TestRepositoryDeleteWaitsForPublication(t *testing.T) {
 	if err := <-deleteDone; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(repo.sessionPath(sessionKey("named"))); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(repo.legacySessionPath(sessionKey("named"))); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("canonical session after concurrent Delete = %v, want not exist", err)
 	}
 }
@@ -383,7 +383,7 @@ func TestRepositoryMaintainRetainsNewestTwoCompleteGenerations(t *testing.T) {
 		if err := repo.Maintain(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		_, err := os.Lstat(repo.manifestPath(key, 1))
+		_, err := os.Lstat(repo.legacyManifestPath(key, 1))
 		if errors.Is(err, os.ErrNotExist) {
 			break
 		}
@@ -395,11 +395,11 @@ func TestRepositoryMaintainRetainsNewestTwoCompleteGenerations(t *testing.T) {
 		}
 	}
 	for _, generation := range []uint64{2, 3} {
-		if _, err := os.Lstat(repo.manifestPath(key, generation)); err != nil {
+		if _, err := os.Lstat(repo.legacyManifestPath(key, generation)); err != nil {
 			t.Fatalf("retained manifest %d: %v", generation, err)
 		}
 	}
-	if _, err := os.Lstat(repo.manifestPath(key, 1)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(repo.legacyManifestPath(key, 1)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("old manifest after Maintain = %v, want not exist", err)
 	}
 	for _, generation := range []uint64{2, 3} {
@@ -418,16 +418,16 @@ func TestRepositoryMaintainPreservesIncompleteManifestReferences(t *testing.T) {
 	}
 	key := sessionKey("named")
 	manifest := repositoryPublication(t, "named", 3, []byte{3})
-	if err := os.Remove(repo.objectPath(key, manifest.Objects[1].Digest)); err != nil {
+	if err := os.Remove(repo.legacyObjectPath(key, manifest.Objects[1].Digest)); err != nil {
 		t.Fatal(err)
 	}
 	if err := repo.Maintain(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(repo.manifestPath(key, 3)); err != nil {
+	if _, err := os.Lstat(repo.legacyManifestPath(key, 3)); err != nil {
 		t.Fatalf("incomplete manifest removed: %v", err)
 	}
-	if _, err := os.Lstat(repo.objectPath(key, manifest.Objects[0].Digest)); err != nil {
+	if _, err := os.Lstat(repo.legacyObjectPath(key, manifest.Objects[0].Digest)); err != nil {
 		t.Fatalf("object referenced by incomplete manifest removed: %v", err)
 	}
 }
@@ -601,7 +601,7 @@ func TestRepositoryMaintainClosesContinuationDirectories(t *testing.T) {
 func TestRepositoryMaintainBoundsQueuedShardNames(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	key := sessionKey("named")
-	root := filepath.Join(repo.sessionPath(key), repositoryObjectsDir)
+	root := filepath.Join(repo.legacySessionPath(key), repositoryObjectsDir)
 	for i := 0; i < maintenanceBatch*2; i++ {
 		if err := os.MkdirAll(filepath.Join(root, fmt.Sprintf("%02x", i)), 0o700); err != nil {
 			t.Fatal(err)
@@ -698,7 +698,7 @@ func TestRepositoryMaintainMarksLargeGenerationSetBeforeSweeping(t *testing.T) {
 	}
 	key := sessionKey("named")
 	stale := sha256.Sum256([]byte("stale object"))
-	stalePath := repo.objectPath(key, stale)
+	stalePath := repo.legacyObjectPath(key, stale)
 	if err := os.MkdirAll(filepath.Dir(stalePath), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -715,7 +715,7 @@ func TestRepositoryMaintainMarksLargeGenerationSetBeforeSweeping(t *testing.T) {
 		t.Fatalf("stale object swept before complete mark pass: %v", err)
 	}
 	for _, object := range newest.Objects {
-		if _, err := os.Lstat(repo.objectPath(key, object.Digest)); err != nil {
+		if _, err := os.Lstat(repo.legacyObjectPath(key, object.Digest)); err != nil {
 			t.Fatalf("object referenced by not-yet-classified manifest removed: %v", err)
 		}
 	}
@@ -732,7 +732,7 @@ func TestRepositoryMaintainMarksLargeGenerationSetBeforeSweeping(t *testing.T) {
 		}
 	}
 	for _, generation := range []uint64{maintenanceBatch + 1, maintenanceBatch + 2} {
-		if _, err := os.Lstat(repo.manifestPath(key, generation)); err != nil {
+		if _, err := os.Lstat(repo.legacyManifestPath(key, generation)); err != nil {
 			t.Fatalf("newest complete manifest %d removed: %v", generation, err)
 		}
 	}
@@ -852,7 +852,7 @@ func TestRepositoryMaintainClassifiesUnpublishedGenerationsBeforeSweep(t *testin
 			name: "missing",
 			set: func(t *testing.T, repo *Repository, key string) {
 				t.Helper()
-				if err := os.Remove(repo.headPath(key)); err != nil {
+				if err := os.Remove(repo.legacyHeadPath(key)); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -861,7 +861,7 @@ func TestRepositoryMaintainClassifiesUnpublishedGenerationsBeforeSweep(t *testin
 			name: "corrupt",
 			set: func(t *testing.T, repo *Repository, key string) {
 				t.Helper()
-				if err := os.WriteFile(repo.headPath(key), []byte("corrupt"), 0o600); err != nil {
+				if err := os.WriteFile(repo.legacyHeadPath(key), []byte("corrupt"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -880,7 +880,7 @@ func TestRepositoryMaintainClassifiesUnpublishedGenerationsBeforeSweep(t *testin
 			}
 			head.set(t, repo, key)
 			stale := sha256.Sum256([]byte("unpublished stale object"))
-			stalePath := repo.objectPath(key, stale)
+			stalePath := repo.legacyObjectPath(key, stale)
 			if err := os.MkdirAll(filepath.Dir(stalePath), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -895,7 +895,7 @@ func TestRepositoryMaintainClassifiesUnpublishedGenerationsBeforeSweep(t *testin
 				t.Fatalf("stale object swept before full manifest classification: %v", err)
 			}
 			for _, publication := range publications {
-				if _, err := os.Lstat(repo.objectPath(key, publication.Objects[0].Digest)); err != nil {
+				if _, err := os.Lstat(repo.legacyObjectPath(key, publication.Objects[0].Digest)); err != nil {
 					t.Fatalf("object for unpublished generation %d removed early: %v", publication.Generation, err)
 				}
 			}
@@ -911,7 +911,7 @@ func TestRepositoryMaintainClassifiesUnpublishedGenerationsBeforeSweep(t *testin
 				}
 			}
 			for _, publication := range publications {
-				if _, err := os.Lstat(repo.objectPath(key, publication.Objects[0].Digest)); err != nil {
+				if _, err := os.Lstat(repo.legacyObjectPath(key, publication.Objects[0].Digest)); err != nil {
 					t.Fatalf("object for unpublished generation %d removed: %v", publication.Generation, err)
 				}
 			}
@@ -926,7 +926,7 @@ func TestRepositoryMaintainRestartsMarkAfterFailedPublication(t *testing.T) {
 	stalePaths := make([]string, 0, maintenanceBatch+1)
 	for i := 0; i < maintenanceBatch+1; i++ {
 		digest := digestInShard(t, "00", i)
-		path := repo.objectPath(key, digest)
+		path := repo.legacyObjectPath(key, digest)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -968,7 +968,7 @@ func TestRepositoryMaintainRestartsMarkAfterFailedPublication(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, object := range second.Objects {
-			if _, err := os.Lstat(repo.objectPath(key, object.Digest)); err != nil {
+			if _, err := os.Lstat(repo.legacyObjectPath(key, object.Digest)); err != nil {
 				t.Fatalf("object referenced by failed publication removed on pass %d: %v", i, err)
 			}
 		}

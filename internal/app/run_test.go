@@ -121,25 +121,31 @@ func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", stateRoot)
 		err = runWithLifecycleOwner(context.Background(), runtimeDir, stateDir, runDaemonOwned)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "validate durable session catalogue")
+		require.Contains(t, err.Error(), "open or migrate durable session state")
 		_, statErr := os.Stat(filepath.Join(runtimeDir, "daemon.sock"))
 		require.ErrorIs(t, statErr, os.ErrNotExist)
 	})
 
-	t.Run("unavailable catalogue fails without creating state or socket", func(t *testing.T) {
+	t.Run("proven absence creates the catalogue before socket publication", func(t *testing.T) {
 		runtimeRoot, stateRoot := t.TempDir(), t.TempDir()
 		runtimeDir := filepath.Join(runtimeRoot, "vev")
 		stateDir := filepath.Join(stateRoot, "vev")
 		t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
 		t.Setenv("XDG_STATE_HOME", stateRoot)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			for {
+				if _, err := os.Stat(filepath.Join(runtimeDir, "daemon.sock")); err == nil {
+					cancel()
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}()
 
-		err := runWithLifecycleOwner(context.Background(), runtimeDir, stateDir, runDaemonOwned)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "durable session catalogue unavailable")
-		_, statErr := os.Stat(persist.StorePath(stateDir))
-		require.ErrorIs(t, statErr, os.ErrNotExist)
-		_, statErr = os.Stat(filepath.Join(runtimeDir, "daemon.sock"))
-		require.ErrorIs(t, statErr, os.ErrNotExist)
+		require.NoError(t, runWithLifecycleOwner(ctx, runtimeDir, stateDir, runDaemonOwned))
+		require.FileExists(t, persist.StorePath(stateDir))
 	})
 
 	t.Run("callback and release errors are joined", func(t *testing.T) {
@@ -506,12 +512,12 @@ func TestRunKillDeletesStoppedSessionWithoutDaemon(t *testing.T) {
 	if len(records) != 0 {
 		t.Fatalf("records after kill = %#v, want none", records)
 	}
-	names, err := snapshots.List(context.Background())
+	page, err := snapshots.ListDeletionTombstones(context.Background(), ports.DeletionTombstoneCursor{}, ports.MaintenanceBudget{Entries: 1, Bytes: 1024})
 	if err != nil {
-		t.Fatalf("snapshot List error = %v", err)
+		t.Fatalf("list deletion tombstones: %v", err)
 	}
-	if len(names) != 0 {
-		t.Fatalf("snapshots after kill = %#v, want none", names)
+	if len(page.Tombstones) != 0 {
+		t.Fatalf("deletion tombstones after kill = %#v, want none", page.Tombstones)
 	}
 }
 

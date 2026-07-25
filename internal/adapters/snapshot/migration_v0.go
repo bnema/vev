@@ -178,14 +178,14 @@ func (r *Repository) ReadLegacyHEAD(ctx context.Context, name string) (domain.Ch
 		return domain.CheckpointRef{}, err
 	}
 	key := sessionKey(name)
-	generation, digest, err := r.readHead(key)
+	generation, digest, err := r.readLegacyHead(key)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrInvalidHEAD) {
 			return domain.CheckpointRef{}, uncertainLegacyError("read HEAD", err)
 		}
 		return domain.CheckpointRef{}, fmt.Errorf("snapshot: read legacy HEAD: %w", err)
 	}
-	data, err := r.readBounded(r.manifestPath(key, generation))
+	data, err := r.readBounded(r.legacyManifestPath(key, generation))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return domain.CheckpointRef{}, uncertainLegacyError("read referenced manifest", err)
@@ -220,7 +220,7 @@ func (r *Repository) MigrateV1Checkpoint(ctx context.Context, req ports.Snapshot
 		return domain.CheckpointRef{}, errors.New("snapshot: invalid migration request")
 	}
 	legacyKey := sessionKey(req.LegacyName)
-	data, err := r.readBounded(r.manifestPath(legacyKey, req.LegacyRef.Generation))
+	data, err := r.readBounded(r.legacyManifestPath(legacyKey, req.LegacyRef.Generation))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return domain.CheckpointRef{}, uncertainLegacyError("referenced manifest missing", err)
@@ -244,14 +244,14 @@ func (r *Repository) MigrateV1Checkpoint(ctx context.Context, req ports.Snapshot
 	key, _ := incarnationKey(req.IncarnationID)
 	lock := r.lockSession(key)
 	defer r.unlockSession(lock)
-	if err := r.ensureSession(key); err != nil {
+	if err := r.ensureSession(req.IncarnationID); err != nil {
 		return domain.CheckpointRef{}, err
 	}
 	for _, ref := range decoded.Objects {
 		if err := ctx.Err(); err != nil {
 			return domain.CheckpointRef{}, err
 		}
-		object, err := r.readBounded(r.objectPath(legacyKey, ref.Digest))
+		object, err := r.readBounded(r.legacyObjectPath(legacyKey, ref.Digest))
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return domain.CheckpointRef{}, uncertainLegacyError("referenced object missing", err)
