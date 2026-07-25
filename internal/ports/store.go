@@ -3,7 +3,12 @@ package ports
 import (
 	"context"
 	"crypto/sha256"
+
+	"github.com/bnema/vev/pkg/kv"
 )
+
+// StoreChange is one key mutation in an atomic store batch.
+type StoreChange = kv.BatchChange
 
 // Store is a small byte-key/value persistence port.
 //
@@ -14,6 +19,7 @@ type Store interface {
 	Get(key []byte) ([]byte, bool)
 	Set(key, val []byte) error
 	Delete(key []byte) error
+	Batch([]StoreChange) error
 	// Range iterates key/value pairs; fn returning false stops iteration early.
 	// Each key and value is a stable copy owned by the caller, which may retain
 	// or mutate either slice after Range returns.

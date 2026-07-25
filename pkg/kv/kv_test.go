@@ -3,6 +3,8 @@ package kv
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"testing"
@@ -149,7 +151,7 @@ func TestOpenTruncatesMidRecordTail(t *testing.T) {
 	}
 }
 
-func TestCRCcorruptionOfLastRecordDropsIt(t *testing.T) {
+func TestCRCcorruptionOfLastRecordFailsClosed(t *testing.T) {
 	path := privatePath(t)
 	first, _ := encodeRecord(opSet, []byte("k"), []byte("old"))
 	second, _ := encodeRecord(opSet, []byte("k"), []byte("new"))
@@ -162,21 +164,16 @@ func TestCRCcorruptionOfLastRecordDropsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
+	_, err := Open(path)
+	if !errors.Is(err, ErrCorruptWAL) {
+		t.Fatalf("Open error = %v, want ErrCorruptWAL", err)
 	}
-	defer closeStore(t, s)
-	got, ok := s.Get([]byte("k"))
-	if !ok || string(got) != "old" {
-		t.Fatalf("corrupt last record not dropped: %q %v", got, ok)
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatal(statErr)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Size() != int64(len(first)) {
-		t.Fatalf("corrupt tail not truncated: size=%d want=%d", info.Size(), len(first))
+	if info.Size() != int64(len(buf)) {
+		t.Fatalf("corrupt WAL was mutated: size=%d want=%d", info.Size(), len(buf))
 	}
 }
 
@@ -235,6 +232,209 @@ func TestTombstoneSurvivesCompaction(t *testing.T) {
 	if got, ok := s.Get([]byte("keep")); !ok || len(got) != 128 || got[0] != 'k' {
 		t.Fatalf("live key missing after compaction/reopen: len=%d ok=%v", len(got), ok)
 	}
+}
+
+func TestReplayStrict(t *testing.T) {
+	valid, err := encodeRecord(opSet, []byte("old"), []byte("value"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := encodeBatch([]BatchChange{{Key: []byte("old"), Delete: true}, {Key: []byte("new"), Value: []byte("value")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		wal     []byte
+		torn    bool
+		corrupt bool
+	}{
+		{name: "torn-final-header", wal: append(append([]byte{}, valid...), batch[:headerLen-1]...), torn: true},
+		{name: "torn-final-payload", wal: append(append([]byte{}, valid...), batch[:len(batch)-1]...), torn: true},
+		{name: "final-crc", wal: corruptRecord(append(append([]byte{}, valid...), batch...), len(valid)+4), corrupt: true},
+		{name: "middle-crc", wal: corruptRecord(append(append([]byte{}, valid...), batch...), 4), corrupt: true},
+		{name: "invalid-op", wal: rawRecord([]byte{0xff, 0, 0}), corrupt: true},
+		{name: "duplicate-key-in-batch", wal: rawRecord(rawBatchPayload([]BatchChange{{Key: []byte("x")}, {Key: []byte("x"), Delete: true}})), corrupt: true},
+		{name: "trailing-batch-garbage", wal: rawRecord(append(rawBatchPayload([]BatchChange{{Key: []byte("x")}}), 0)), corrupt: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := privatePath(t)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, tt.wal, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, replayErr := replayFile(f)
+			_ = f.Close()
+			if tt.corrupt {
+				if !errors.Is(replayErr, ErrCorruptWAL) {
+					t.Fatalf("replay error = %v, want ErrCorruptWAL", replayErr)
+				}
+				return
+			}
+			if replayErr != nil {
+				t.Fatal(replayErr)
+			}
+			if string(result.Data["old"]) != "value" || result.Data["new"] != nil {
+				t.Fatalf("torn batch was partially applied: %#v", result.Data)
+			}
+			if !result.TornTail || result.LastGood != int64(len(valid)) {
+				t.Fatalf("result = %+v", result)
+			}
+		})
+	}
+}
+
+func TestBatchAtomicity(t *testing.T) {
+	path := privatePath(t)
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(t, s)
+	if err := s.Set([]byte("old"), []byte("before")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Batch(nil); err == nil {
+		t.Fatal("empty batch succeeded")
+	}
+	if err := s.Batch([]BatchChange{{Key: []byte("duplicate")}, {Key: []byte("duplicate"), Delete: true}}); err == nil {
+		t.Fatal("duplicate-key batch succeeded")
+	}
+	if err := s.Batch([]BatchChange{{Key: []byte("old"), Delete: true}, {Key: []byte("new"), Value: []byte("same-incarnation")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.Get([]byte("old")); ok {
+		t.Fatal("old key remains")
+	}
+	got, ok := s.Get([]byte("new"))
+	if !ok || !bytes.Equal(got, []byte("same-incarnation")) {
+		t.Fatalf("new = %q, %v", got, ok)
+	}
+}
+
+func TestCompactionRecoveryMatrix(t *testing.T) {
+	oldRecord, _ := encodeRecord(opSet, []byte("version"), []byte("old"))
+	newRecord, _ := encodeRecord(opSet, []byte("version"), []byte("new"))
+	tests := []struct {
+		name                string
+		current, next, prev []byte
+		want                string
+	}{
+		{name: "current-alone", current: oldRecord, want: "old"},
+		{name: "current-next", current: oldRecord, next: newRecord, want: "old"},
+		{name: "prev-next", prev: oldRecord, next: newRecord, want: "new"},
+		{name: "prev-invalid-next", prev: oldRecord, next: rawRecord([]byte{0xff, 0, 0}), want: "old"},
+		{name: "prev-torn-next", prev: oldRecord, next: newRecord[:len(newRecord)-1], want: "old"},
+		{name: "current-prev", current: newRecord, prev: oldRecord, want: "new"},
+		{name: "invalid-current-prev", current: rawRecord([]byte{0xff, 0, 0}), prev: oldRecord, want: "old"},
+		{name: "prev-alone", prev: oldRecord, want: "old"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := privatePath(t)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for suffix, data := range map[string][]byte{"": tt.current, ".next": tt.next, ".prev": tt.prev} {
+				if data != nil {
+					if err := os.WriteFile(path+suffix, data, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := recoverCompaction(path, defaultFSHooks()); err != nil {
+				t.Fatal(err)
+			}
+			got, err := Replay(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got["version"]) != tt.want {
+				t.Fatalf("version = %q, want %q", got["version"], tt.want)
+			}
+		})
+	}
+
+	faultPoints := []string{
+		"before-write-next", "after-write-next", "before-sync-next", "after-sync-next",
+		"after-sync-dir-next", "after-remove-stale-prev", "after-rename-current-prev",
+		"after-sync-dir-prev", "after-rename-next-current", "after-sync-dir-current",
+		"before-reopen-current", "after-reopen-current", "after-remove-prev", "after-final-sync-dir",
+	}
+	for _, point := range faultPoints {
+		t.Run("fault-"+point, func(t *testing.T) {
+			path := privatePath(t)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, oldRecord, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.data = map[string][]byte{"version": []byte("new")}
+			s.hooks.Fault = func(got string) error {
+				if got == point {
+					return errors.New("injected " + point)
+				}
+				return nil
+			}
+			if err := s.compactLocked(); err == nil {
+				t.Fatalf("fault %q did not interrupt compaction", point)
+			}
+			if s.file != nil {
+				_ = s.file.Close()
+			}
+			_ = releaseLock(s.lockFile)
+			if err := recoverCompaction(path, defaultFSHooks()); err != nil {
+				t.Fatalf("recovery: %v", err)
+			}
+			got, err := Replay(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			version := string(got["version"])
+			if (version != "old" && version != "new") || len(got) != 1 {
+				t.Fatalf("mixed or empty recovered map: %#v", got)
+			}
+		})
+	}
+}
+
+func corruptRecord(buf []byte, offset int) []byte { buf[offset] ^= 0xff; return buf }
+func rawRecord(payload []byte) []byte {
+	buf := make([]byte, headerLen+len(payload))
+	binary.BigEndian.PutUint32(buf[:4], uint32(len(payload)))
+	binary.BigEndian.PutUint32(buf[4:8], crc32.ChecksumIEEE(payload))
+	copy(buf[8:], payload)
+	return buf
+}
+func rawBatchPayload(changes []BatchChange) []byte {
+	payload := []byte{opBatch, 0, 0, 0, byte(len(changes))}
+	for _, change := range changes {
+		op := opSet
+		if change.Delete {
+			op = opDel
+		}
+		payload = append(payload, op, 0, byte(len(change.Key)))
+		payload = append(payload, change.Key...)
+		payload = binary.BigEndian.AppendUint32(payload, uint32(len(change.Value)))
+		payload = append(payload, change.Value...)
+	}
+	return payload
 }
 
 func TestReplayStopsAtBadPayloadLengthWithoutAllocatingHugeBuffer(t *testing.T) {

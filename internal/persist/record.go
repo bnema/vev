@@ -5,122 +5,213 @@ import (
 	"errors"
 	"fmt"
 	"math"
+
+	"github.com/bnema/vev/internal/domain"
 )
 
-// Record is the persisted metadata for a named session.
-type Record struct {
-	Name        string
-	Cwd         string
-	CreatedAt   int64
-	UpdatedAt   int64
-	LastUsedSeq uint64
-	TabNames    []string
+const catalogueRecordVersion uint16 = 1
+
+var errMalformedRecord = errors.New("persist: malformed catalogue record")
+
+var catalogueMagic = [4]byte{'V', 'E', 'V', 'C'}
+
+// Record is the durable catalogue record used by daemon code.
+type Record = domain.CatalogueRecord
+
+func encodeRecordValue(record domain.CatalogueRecord) ([]byte, error) {
+	if err := record.Validate(); err != nil {
+		return nil, fmt.Errorf("persist: invalid catalogue record: %w", err)
+	}
+	buf := make([]byte, 0, 128)
+	buf = append(buf, catalogueMagic[:]...)
+	buf = binary.BigEndian.AppendUint16(buf, catalogueRecordVersion)
+	buf = append(buf, record.IncarnationID[:]...)
+	buf = appendString(buf, record.Cwd)
+	buf = binary.BigEndian.AppendUint64(buf, uint64(record.CreatedAt))
+	buf = binary.BigEndian.AppendUint64(buf, uint64(record.UpdatedAt))
+	buf = binary.BigEndian.AppendUint64(buf, record.LastUsedSeq)
+	if uint64(len(record.TabNames)) > math.MaxUint32 {
+		return nil, errors.New("persist: too many tab names")
+	}
+	buf = binary.BigEndian.AppendUint32(buf, uint32(len(record.TabNames)))
+	for _, name := range record.TabNames {
+		var err error
+		buf, err = appendCheckedString(buf, name)
+		if err != nil {
+			return nil, err
+		}
+	}
+	buf = append(buf, byte(record.RecoveryState))
+	buf = appendRef(buf, record.Committed)
+	buf = appendRef(buf, record.Fallbacks[0])
+	buf = appendRef(buf, record.Fallbacks[1])
+	var err error
+	buf, err = appendCheckedString(buf, record.DegradedReason)
+	return buf, err
 }
 
-var (
-	errEmptyName       = errors.New("persist: empty session name")
-	errMalformedRecord = errors.New("persist: malformed record")
-)
-
-func encodeRecordValue(r Record) ([]byte, error) {
-	if r.Name == "" {
-		return nil, errEmptyName
+func decodeRecordValue(name string, value []byte) (domain.CatalogueRecord, error) {
+	if err := domain.ValidateSessionName(name); err != nil {
+		return domain.CatalogueRecord{}, err
 	}
-	if uint64(len(r.Cwd)) > math.MaxUint32 {
-		return nil, fmt.Errorf("persist: cwd too large")
+	reader := valueReader{data: value}
+	magic, ok := reader.take(4)
+	if !ok || string(magic) != string(catalogueMagic[:]) {
+		return domain.CatalogueRecord{}, errMalformedRecord
 	}
-	if uint64(len(r.TabNames)) > math.MaxUint32 {
-		return nil, fmt.Errorf("persist: too many tab names")
+	version, ok := reader.u16()
+	if !ok || version != catalogueRecordVersion {
+		return domain.CatalogueRecord{}, errMalformedRecord
 	}
-	tabNamesSize := 4
-	for _, name := range r.TabNames {
-		if uint64(len(name)) > math.MaxUint32 {
-			return nil, fmt.Errorf("persist: tab name too large")
+	id, ok := reader.take(16)
+	if !ok {
+		return domain.CatalogueRecord{}, errMalformedRecord
+	}
+	record := domain.CatalogueRecord{Name: name}
+	copy(record.IncarnationID[:], id)
+	var valid bool
+	if record.Cwd, valid = reader.str(); !valid {
+		return domain.CatalogueRecord{}, errMalformedRecord
+	}
+	created, ok := reader.u64()
+	if !ok {
+		return domain.CatalogueRecord{}, errMalformedRecord
+	}
+	record.CreatedAt = int64(created)
+	updated, ok := reader.u64()
+	if !ok {
+		return domain.CatalogueRecord{}, errMalformedRecord
+	}
+	record.UpdatedAt = int64(updated)
+	if record.LastUsedSeq, ok = reader.u64(); !ok {
+		return domain.CatalogueRecord{}, errMalformedRecord
+	}
+	count, ok := reader.u32()
+	if !ok || uint64(count) > uint64(reader.remaining())/4 {
+		return domain.CatalogueRecord{}, errMalformedRecord
+	}
+	if count > 0 {
+		record.TabNames = make([]string, 0, int(count))
+	}
+	for range count {
+		tab, ok := reader.str()
+		if !ok {
+			return domain.CatalogueRecord{}, errMalformedRecord
 		}
-		tabNamesSize += 4 + len(name)
+		record.TabNames = append(record.TabNames, tab)
 	}
-
-	buf := make([]byte, 4+len(r.Cwd)+8+8+8+tabNamesSize)
-	binary.BigEndian.PutUint32(buf[:4], uint32(len(r.Cwd)))
-	copy(buf[4:], r.Cwd)
-	off := 4 + len(r.Cwd)
-	binary.BigEndian.PutUint64(buf[off:off+8], uint64(r.CreatedAt))
-	binary.BigEndian.PutUint64(buf[off+8:off+16], uint64(r.UpdatedAt))
-	binary.BigEndian.PutUint64(buf[off+16:off+24], r.LastUsedSeq)
-	off += 24
-	binary.BigEndian.PutUint32(buf[off:off+4], uint32(len(r.TabNames)))
-	off += 4
-	for _, name := range r.TabNames {
-		binary.BigEndian.PutUint32(buf[off:off+4], uint32(len(name)))
-		off += 4
-		copy(buf[off:], name)
-		off += len(name)
+	state, ok := reader.byte()
+	if !ok {
+		return domain.CatalogueRecord{}, errMalformedRecord
 	}
-	return buf, nil
+	record.RecoveryState = domain.RecoveryState(state)
+	if record.Committed, ok = reader.ref(); !ok {
+		return domain.CatalogueRecord{}, errMalformedRecord
+	}
+	if record.Fallbacks[0], ok = reader.ref(); !ok {
+		return domain.CatalogueRecord{}, errMalformedRecord
+	}
+	if record.Fallbacks[1], ok = reader.ref(); !ok {
+		return domain.CatalogueRecord{}, errMalformedRecord
+	}
+	if record.DegradedReason, ok = reader.str(); !ok || reader.remaining() != 0 {
+		return domain.CatalogueRecord{}, errMalformedRecord
+	}
+	if err := record.Validate(); err != nil {
+		return domain.CatalogueRecord{}, fmt.Errorf("%w: %v", errMalformedRecord, err)
+	}
+	return record, nil
 }
 
-func decodeRecordValue(name string, value []byte) (Record, error) {
-	if name == "" {
-		return Record{}, errEmptyName
+func appendString(buf []byte, value string) []byte {
+	buf = binary.BigEndian.AppendUint32(buf, uint32(len(value)))
+	return append(buf, value...)
+}
+func appendCheckedString(buf []byte, value string) ([]byte, error) {
+	if uint64(len(value)) > math.MaxUint32 {
+		return nil, errors.New("persist: string too large")
 	}
-	if len(value) < 4 {
-		return Record{}, errMalformedRecord
+	return appendString(buf, value), nil
+}
+func appendRef(buf []byte, ref *domain.CheckpointRef) []byte {
+	if ref == nil {
+		return append(buf, 0)
 	}
-	cwdLen32 := binary.BigEndian.Uint32(value[:4])
-	remaining := len(value) - 4
-	if uint64(cwdLen32) > uint64(remaining) {
-		return Record{}, errMalformedRecord
+	buf = append(buf, 1)
+	buf = binary.BigEndian.AppendUint64(buf, ref.Generation)
+	return append(buf, ref.ManifestDigest[:]...)
+}
+
+type valueReader struct {
+	data []byte
+	off  int
+}
+
+func (r *valueReader) remaining() int { return len(r.data) - r.off }
+func (r *valueReader) take(n int) ([]byte, bool) {
+	if n < 0 || n > r.remaining() {
+		return nil, false
 	}
-	cwdLen := int(cwdLen32)
-	baseLen := 4 + cwdLen + 8 + 8
-	if len(value) < baseLen {
-		return Record{}, errMalformedRecord
+	value := r.data[r.off : r.off+n]
+	r.off += n
+	return value, true
+}
+func (r *valueReader) byte() (byte, bool) {
+	value, ok := r.take(1)
+	if !ok {
+		return 0, false
 	}
-	off := 4 + cwdLen
-	r := Record{
-		Name:      name,
-		Cwd:       string(value[4:off]),
-		CreatedAt: int64(binary.BigEndian.Uint64(value[off : off+8])),
-		UpdatedAt: int64(binary.BigEndian.Uint64(value[off+8 : off+16])),
+	return value[0], true
+}
+func (r *valueReader) u16() (uint16, bool) {
+	value, ok := r.take(2)
+	if !ok {
+		return 0, false
 	}
-	if len(value) == baseLen {
-		return r, nil
+	return binary.BigEndian.Uint16(value), true
+}
+func (r *valueReader) u32() (uint32, bool) {
+	value, ok := r.take(4)
+	if !ok {
+		return 0, false
 	}
-	if len(value) < baseLen+8 {
-		return Record{}, errMalformedRecord
+	return binary.BigEndian.Uint32(value), true
+}
+func (r *valueReader) u64() (uint64, bool) {
+	value, ok := r.take(8)
+	if !ok {
+		return 0, false
 	}
-	if len(value) == baseLen+8 {
-		r.LastUsedSeq = binary.BigEndian.Uint64(value[off+16 : off+24])
-		return r, nil
+	return binary.BigEndian.Uint64(value), true
+}
+func (r *valueReader) str() (string, bool) {
+	size, ok := r.u32()
+	if !ok || uint64(size) > uint64(r.remaining()) {
+		return "", false
 	}
-	r.LastUsedSeq = binary.BigEndian.Uint64(value[off+16 : off+24])
-	off += 24
-	if len(value)-off < 4 {
-		return Record{}, errMalformedRecord
+	value, _ := r.take(int(size))
+	return string(value), true
+}
+func (r *valueReader) ref() (*domain.CheckpointRef, bool) {
+	present, ok := r.byte()
+	if !ok {
+		return nil, false
 	}
-	tabCount32 := binary.BigEndian.Uint32(value[off : off+4])
-	off += 4
-	if uint64(tabCount32) > uint64(len(value)-off)/4 {
-		return Record{}, errMalformedRecord
+	if present == 0 {
+		return nil, true
 	}
-	if tabCount32 > 0 {
-		r.TabNames = make([]string, 0, int(tabCount32))
+	if present != 1 {
+		return nil, false
 	}
-	for range tabCount32 {
-		if len(value)-off < 4 {
-			return Record{}, errMalformedRecord
-		}
-		nameLen32 := binary.BigEndian.Uint32(value[off : off+4])
-		off += 4
-		if uint64(nameLen32) > uint64(len(value)-off) {
-			return Record{}, errMalformedRecord
-		}
-		nameLen := int(nameLen32)
-		r.TabNames = append(r.TabNames, string(value[off:off+nameLen]))
-		off += nameLen
+	generation, ok := r.u64()
+	if !ok {
+		return nil, false
 	}
-	if off != len(value) {
-		return Record{}, errMalformedRecord
+	digest, ok := r.take(32)
+	if !ok {
+		return nil, false
 	}
-	return r, nil
+	ref := &domain.CheckpointRef{Generation: generation}
+	copy(ref.ManifestDigest[:], digest)
+	return ref, true
 }
