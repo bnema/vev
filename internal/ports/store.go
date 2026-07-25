@@ -38,40 +38,6 @@ type SnapshotObject struct {
 	Data   []byte
 }
 
-// SnapshotPublication atomically publishes a complete VEVM manifest and any
-// newly reachable content-addressed VEVO objects for one named generation.
-type SnapshotPublication struct {
-	Name       string
-	Generation uint64
-	Manifest   []byte
-	Objects    []SnapshotObject
-}
-
-// SnapshotGeneration is the caller-owned material needed to restore one
-// named generation. Fallback indicates that the repository selected an older
-// valid generation after the requested/current generation was unavailable.
-type SnapshotGeneration struct {
-	Name       string
-	Generation uint64
-	Manifest   []byte
-	Objects    map[SnapshotDigest][]byte
-	Fallback   bool
-}
-
-// SnapshotRepository persists content-addressed incremental snapshot
-// generations. All returned bytes are owned by the caller.
-type SnapshotRepository interface {
-	Publish(context.Context, SnapshotPublication) error
-	List(context.Context) ([]string, error)
-	Load(context.Context, string) (SnapshotGeneration, error)
-	Delete(context.Context, string) error
-	// Tombstone fences a named-session purge before either incremental or
-	// legacy data is deleted. It must remain durable until DeleteTombstone.
-	Tombstone(context.Context, string) error
-	DeleteTombstone(context.Context, string) error
-	Maintain(context.Context) error
-}
-
 // LegacySnapshot is the pre-incremental named-session blob retained only for
 // one-way migration. Data is caller-owned.
 type LegacySnapshot struct {

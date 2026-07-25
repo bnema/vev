@@ -6,6 +6,7 @@ import (
 	"hash/crc32"
 	"testing"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
 
@@ -163,7 +164,7 @@ func checksum(body []byte) uint32 {
 }
 
 func testManifest(tree *layout.Tree, process *Process) Manifest {
-	return Manifest{Name: "named", Tabs: []ManifestTab{{
+	return Manifest{Generation: 1, IncarnationID: domain.IncarnationID{1}, Name: "named", Tabs: []ManifestTab{{
 		StableID: "tab", Cols: 80, Rows: 24, Focus: "one", Tree: tree,
 		Panes: []ManifestPane{
 			{ID: "one", StableID: "one", Cwd: "/one", Sealed: []ObjectRef{{Kind: HistoryChunk, Digest: SnapshotDigest{1}, Size: minObjectEnvelopeSize}}, Tail: ObjectRef{Kind: HistoryTail, Digest: SnapshotDigest{2}, Size: minObjectEnvelopeSize}, Visible: ObjectRef{Kind: Visible, Digest: SnapshotDigest{3}, Size: minObjectEnvelopeSize}, Process: process},

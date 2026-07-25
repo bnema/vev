@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"math"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
@@ -15,7 +16,7 @@ const (
 	manifestMagic                = "VEVM"
 	headMagic                    = "VEVH"
 	objectMagic                  = "VEVO"
-	ManifestVersion              = uint16(1)
+	ManifestVersion              = uint16(2)
 	manifestHeaderSize           = 16
 	objectEnvelopeBodyPrefixSize = 1 + 4 // object kind and payload length
 	minObjectEnvelopeSize        = manifestHeaderSize + objectEnvelopeBodyPrefixSize + 1
@@ -96,11 +97,13 @@ func UnmarshalHead(encoded []byte) (Head, error) {
 
 // Manifest is the complete VEVM payload carried directly in a publication.
 type Manifest struct {
-	Generation uint64
-	Name       string
-	CreatedAt  uint64
-	Active     uint16
-	Tabs       []ManifestTab
+	Generation       uint64
+	IncarnationID    domain.IncarnationID
+	ParentCheckpoint *domain.CheckpointRef
+	Name             string
+	CreatedAt        uint64
+	Active           uint16
+	Tabs             []ManifestTab
 }
 
 type ManifestTab struct {
@@ -129,6 +132,14 @@ func MarshalManifest(m Manifest) ([]byte, error) {
 	}
 	var w payloadWriter
 	w.putUint64(m.Generation)
+	w.b = append(w.b, m.IncarnationID[:]...)
+	if m.ParentCheckpoint == nil {
+		w.putUint8(0)
+	} else {
+		w.putUint8(1)
+		w.putUint64(m.ParentCheckpoint.Generation)
+		w.b = append(w.b, m.ParentCheckpoint.ManifestDigest[:]...)
+	}
 	if err := w.putString(m.Name); err != nil {
 		return nil, err
 	}
@@ -168,6 +179,33 @@ func decodeManifest(body []byte) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
+	if len(r.b) < len(domain.IncarnationID{}) {
+		return Manifest{}, ErrShortPayload
+	}
+	var incarnationID domain.IncarnationID
+	copy(incarnationID[:], r.b[:len(incarnationID)])
+	r.b = r.b[len(incarnationID):]
+	parentPresent, err := r.getUint8()
+	if err != nil {
+		return Manifest{}, err
+	}
+	var parent *domain.CheckpointRef
+	switch parentPresent {
+	case 0:
+	case 1:
+		parent = &domain.CheckpointRef{}
+		parent.Generation, err = r.getUint64()
+		if err != nil {
+			return Manifest{}, err
+		}
+		if len(r.b) < len(parent.ManifestDigest) {
+			return Manifest{}, ErrShortPayload
+		}
+		copy(parent.ManifestDigest[:], r.b[:len(parent.ManifestDigest)])
+		r.b = r.b[len(parent.ManifestDigest):]
+	default:
+		return Manifest{}, fmt.Errorf("%w: parent checkpoint presence", ErrInvalidData)
+	}
 	name, err := r.getString()
 	if err != nil {
 		return Manifest{}, err
@@ -184,7 +222,7 @@ func decodeManifest(body []byte) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
-	m := Manifest{Generation: generation, Name: name, CreatedAt: createdAt, Active: active, Tabs: make([]ManifestTab, n)}
+	m := Manifest{Generation: generation, IncarnationID: incarnationID, ParentCheckpoint: parent, Name: name, CreatedAt: createdAt, Active: active, Tabs: make([]ManifestTab, n)}
 	for i := range m.Tabs {
 		if m.Tabs[i], err = readManifestTab(&r); err != nil {
 			return Manifest{}, err
@@ -257,11 +295,18 @@ func marshalManifestEnvelope(magic string, body []byte) ([]byte, error) {
 	}
 	out := make([]byte, manifestHeaderSize+len(body))
 	copy(out[:4], magic)
-	binary.BigEndian.PutUint16(out[4:6], ManifestVersion)
+	binary.BigEndian.PutUint16(out[4:6], envelopeVersion(magic))
 	binary.BigEndian.PutUint32(out[8:12], uint32(len(body)))
 	binary.BigEndian.PutUint32(out[12:16], crc32.ChecksumIEEE(body))
 	copy(out[16:], body)
 	return out, nil
+}
+
+func envelopeVersion(magic string) uint16 {
+	if magic == manifestMagic {
+		return ManifestVersion
+	}
+	return 1
 }
 
 func unmarshalManifestEnvelope(encoded []byte, expectedMagic string) ([]byte, error) {
@@ -271,7 +316,7 @@ func unmarshalManifestEnvelope(encoded []byte, expectedMagic string) ([]byte, er
 	if string(encoded[:4]) != expectedMagic {
 		return nil, ErrBadMagic
 	}
-	if binary.BigEndian.Uint16(encoded[4:6]) != ManifestVersion {
+	if binary.BigEndian.Uint16(encoded[4:6]) != envelopeVersion(expectedMagic) {
 		return nil, ErrBadVersion
 	}
 	if binary.BigEndian.Uint16(encoded[6:8]) != 0 {
@@ -542,6 +587,17 @@ func parseObjectRef(r *payloadReader) (ObjectKind, []byte, uint32, error) {
 }
 
 func validateManifest(m Manifest) error {
+	if m.Generation == 0 {
+		return fmt.Errorf("%w: manifest generation", ErrInvalidData)
+	}
+	if m.IncarnationID == (domain.IncarnationID{}) {
+		return fmt.Errorf("%w: manifest incarnation", ErrInvalidData)
+	}
+	if m.ParentCheckpoint != nil {
+		if m.ParentCheckpoint.Generation == 0 || m.ParentCheckpoint.Generation >= m.Generation || isZeroDigestBytes(m.ParentCheckpoint.ManifestDigest[:]) {
+			return fmt.Errorf("%w: parent checkpoint", ErrInvalidData)
+		}
+	}
 	if m.Name == "" {
 		return fmt.Errorf("%w: manifest name", ErrInvalidData)
 	}

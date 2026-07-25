@@ -198,7 +198,7 @@ func TestRepositoryLoadFallsBackFromIncompleteNewestGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Generation != 1 || !got.Fallback {
-		t.Fatalf("Load = generation %d fallback %v, want generation 1 fallback true", got.Generation, got.Fallback)
+	if got.Generation != 1 {
+		t.Fatalf("Load generation = %d, want 1", got.Generation)
 	}
 }

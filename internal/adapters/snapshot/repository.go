@@ -76,6 +76,7 @@ type repositoryHooks struct {
 	afterOpenRoot            func()
 	closeRoot                func() error
 	openMaintenanceDirectory func(string) (maintenanceDirectory, error)
+	beforeDirectoryRead      func(string)
 	// beforeMaintenanceWork observes each budgeted quarantine filesystem step.
 	// It is test-only instrumentation for hostile traversal bounds.
 	beforeMaintenanceWork func(string)

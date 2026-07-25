@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"os"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	codec "github.com/bnema/vev/internal/usecase/snapshot"
 )
@@ -14,7 +17,10 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	key := sessionKey(publication.Name)
+	key, err := incarnationKey(publication.IncarnationID)
+	if err != nil {
+		return err
+	}
 	lock := r.lockSession(key)
 	defer r.unlockSession(lock)
 	if err := ctx.Err(); err != nil {
@@ -41,7 +47,7 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 		return nil
 	}
 
-	current, currentManifest, currentRefs, err := r.currentPublication(ctx, publication.Name, key)
+	current, currentManifest, currentRefs, err := r.currentIncarnationPublication(ctx, publication, key)
 	if err != nil {
 		return err
 	}
@@ -163,31 +169,47 @@ func (r *Repository) unchangedPublication(key string, publication ports.Snapshot
 	return err == nil && bytes.Equal(current, publication.Manifest), nil
 }
 
-// currentPublication takes the normal HEAD path without loading every object
-// in the current generation. A damaged HEAD or manifest still uses the full
-// fallback scan, because only Load's object validation can establish a safe
-// replacement authoritative generation in that recovery case.
-func (r *Repository) currentPublication(ctx context.Context, name, key string) (uint64, []byte, map[ports.SnapshotDigest]codec.ObjectRef, error) {
+func (r *Repository) currentIncarnationPublication(ctx context.Context, publication ports.SnapshotPublication, key string) (uint64, []byte, map[ports.SnapshotDigest]codec.ObjectRef, error) {
 	generation, digest, err := r.readHead(key)
-	if err == nil {
-		data, readErr := r.readBounded(r.manifestPath(key, generation))
-		if readErr == nil && sha256.Sum256(data) == digest {
-			refs, validateErr := validateManifest(data, name, generation)
-			if validateErr == nil {
-				return generation, data, refs, nil
-			}
+	if errors.Is(err, os.ErrNotExist) {
+		if publication.Generation != 1 || publication.ParentCheckpoint != nil {
+			return 0, nil, nil, fmt.Errorf("first snapshot generation must be 1 with no parent")
 		}
+		return 0, nil, nil, nil
 	}
-
-	generation, data, err := r.currentGeneration(ctx, name, key)
-	if err != nil || generation == 0 {
-		return generation, data, nil, err
-	}
-	refs, err := validateManifest(data, name, generation)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, nil, fmt.Errorf("read snapshot HEAD: %w", err)
 	}
-	return generation, data, refs, nil
+	data, err := r.readBounded(r.manifestPath(publication.IncarnationID, generation))
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("validate current checkpoint: %w", err)
+	}
+	if sha256.Sum256(data) != digest {
+		return 0, nil, nil, fmt.Errorf("validate current checkpoint: manifest digest mismatch")
+	}
+	manifest, err := codec.UnmarshalManifest(data)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("validate current manifest: %w", err)
+	}
+	if manifest.IncarnationID != publication.IncarnationID || manifest.Generation != generation {
+		return 0, nil, nil, fmt.Errorf("current manifest identity mismatch")
+	}
+	wantParent := &domain.CheckpointRef{Generation: generation, ManifestDigest: digest}
+	if publication.Generation == generation+1 && !checkpointRefEqual(publication.ParentCheckpoint, wantParent) {
+		return 0, nil, nil, fmt.Errorf("publication parent does not match current checkpoint")
+	}
+	refs := manifestRefs(manifest)
+	if refs == nil || !withinGenerationBudget(len(data), refs) {
+		return 0, nil, nil, fmt.Errorf("invalid current generation")
+	}
+	return generation, data, refs, ctx.Err()
+}
+
+func checkpointRefEqual(left, right *domain.CheckpointRef) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func validatePublication(p ports.SnapshotPublication) (map[ports.SnapshotDigest]codec.ObjectRef, map[ports.SnapshotDigest]ports.SnapshotObject, error) {
@@ -211,16 +233,16 @@ func validatePublication(p ports.SnapshotPublication) (map[ports.SnapshotDigest]
 }
 
 func validatePublicationManifest(p ports.SnapshotPublication) (map[ports.SnapshotDigest]codec.ObjectRef, error) {
-	return validateManifest(p.Manifest, p.Name, p.Generation)
+	return validateManifest(p.Manifest, p.IncarnationID, p.Name, p.Generation, p.ParentCheckpoint)
 }
 
-func validateManifest(data []byte, name string, generation uint64) (map[ports.SnapshotDigest]codec.ObjectRef, error) {
+func validateManifest(data []byte, incarnationID domain.IncarnationID, name string, generation uint64, parent *domain.CheckpointRef) (map[ports.SnapshotDigest]codec.ObjectRef, error) {
 	manifest, err := codec.UnmarshalManifest(data)
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest: %w", err)
 	}
-	if manifest.Name != name || manifest.Generation != generation || generation == 0 {
-		return nil, fmt.Errorf("manifest name or generation does not match publication")
+	if manifest.IncarnationID != incarnationID || manifest.Name != name || manifest.Generation != generation || generation == 0 || !checkpointRefEqual(manifest.ParentCheckpoint, parent) {
+		return nil, fmt.Errorf("manifest identity, name, generation, or parent does not match publication")
 	}
 	refs := manifestRefs(manifest)
 	if refs == nil {

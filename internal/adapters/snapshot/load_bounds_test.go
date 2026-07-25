@@ -63,8 +63,8 @@ func TestRepositoryLoadFallsBackNewestToOldestWithoutGenerationEnumeration(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Generation != 2 || !got.Fallback {
-		t.Fatalf("Load = generation %d fallback %v, want generation 2 fallback true", got.Generation, got.Fallback)
+	if got.Generation != 2 {
+		t.Fatalf("Load generation = %d, want 2", got.Generation)
 	}
 }
 

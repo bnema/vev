@@ -37,7 +37,6 @@ func TestRepositoryLoadFallsBackFromInvalidHead(t *testing.T) {
 	got, err := repo.Load(context.Background(), "named")
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), got.Generation)
-	require.True(t, got.Fallback)
 }
 
 func TestRepositoryLoadFallsBackAcrossMultipleCorruptCandidates(t *testing.T) {
@@ -54,7 +53,6 @@ func TestRepositoryLoadFallsBackAcrossMultipleCorruptCandidates(t *testing.T) {
 	got, err := repo.Load(context.Background(), "named")
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), got.Generation)
-	require.True(t, got.Fallback)
 }
 
 func TestRepositoryLoadHoldsSessionLockAcrossTombstoneCheck(t *testing.T) {

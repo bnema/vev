@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	codec "github.com/bnema/vev/internal/usecase/snapshot"
 )
@@ -101,7 +102,7 @@ func (r *Repository) load(ctx context.Context, name, key string) (ports.Snapshot
 			skipped = true
 			continue
 		}
-		got.Fallback = skipped || preferred != 0
+		_ = skipped
 		return got, nil
 	}
 	return ports.SnapshotGeneration{}, fmt.Errorf("no complete snapshot generation for %q", name)
@@ -192,6 +193,9 @@ func (r *Repository) generationCandidates(ctx context.Context, key string, exclu
 // File.ReadDir maintains a cursor on one descriptor and returns at most one
 // small batch, so no full directory enumeration is retained in memory.
 func (r *Repository) walkDirectory(ctx context.Context, dir string, budget *int, visit func(os.DirEntry) error) (err error) {
+	if hook := r.hooks.beforeDirectoryRead; hook != nil {
+		hook(dir)
+	}
 	file, err := r.openDirectory(dir)
 	if err != nil {
 		return err
@@ -222,6 +226,82 @@ func (r *Repository) walkDirectory(ctx context.Context, dir string, budget *int,
 			return readErr
 		}
 	}
+}
+
+func (r *Repository) LoadCheckpoint(ctx context.Context, id domain.IncarnationID, name string, ref ports.CheckpointRef) (ports.SnapshotGeneration, error) {
+	if err := ctx.Err(); err != nil {
+		return ports.SnapshotGeneration{}, err
+	}
+	key, err := incarnationKey(id)
+	if err != nil {
+		return ports.SnapshotGeneration{}, err
+	}
+	lock := r.lockSession(key)
+	defer r.unlockSession(lock)
+	return r.loadCheckpointLocked(ctx, id, name, ref)
+}
+
+func (r *Repository) loadCheckpointLocked(ctx context.Context, id domain.IncarnationID, name string, ref ports.CheckpointRef) (ports.SnapshotGeneration, error) {
+	if ref.Generation == 0 || ref.ManifestDigest == ([32]byte{}) {
+		return ports.SnapshotGeneration{}, fmt.Errorf("invalid checkpoint reference")
+	}
+	data, err := r.readBounded(r.manifestPath(id, ref.Generation))
+	if err != nil {
+		return ports.SnapshotGeneration{}, err
+	}
+	if sha256.Sum256(data) != ref.ManifestDigest {
+		return ports.SnapshotGeneration{}, fmt.Errorf("manifest digest mismatch")
+	}
+	manifest, err := codec.UnmarshalManifest(data)
+	if err != nil || manifest.IncarnationID != id || manifest.Generation != ref.Generation {
+		return ports.SnapshotGeneration{}, fmt.Errorf("invalid manifest")
+	}
+	refs := manifestRefs(manifest)
+	if refs == nil || !withinGenerationBudget(len(data), refs) {
+		return ports.SnapshotGeneration{}, fmt.Errorf("snapshot generation too large")
+	}
+	objects := make(map[ports.SnapshotDigest][]byte, len(refs))
+	for digest, objectRef := range refs {
+		if err := ctx.Err(); err != nil {
+			return ports.SnapshotGeneration{}, err
+		}
+		object, err := r.readBounded(r.objectPath(id, digest))
+		if err != nil {
+			return ports.SnapshotGeneration{}, err
+		}
+		if sha256.Sum256(object) != digest || !validObject(object, objectRef) {
+			return ports.SnapshotGeneration{}, fmt.Errorf("invalid object")
+		}
+		objects[digest] = object
+	}
+	return ports.SnapshotGeneration{IncarnationID: id, Name: name, Generation: ref.Generation, ParentCheckpoint: manifest.ParentCheckpoint, Manifest: data, Objects: objects}, nil
+}
+
+func (r *Repository) RepairHEAD(ctx context.Context, id domain.IncarnationID, ref ports.CheckpointRef) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	key, err := incarnationKey(id)
+	if err != nil {
+		return err
+	}
+	lock := r.lockSession(key)
+	defer r.unlockSession(lock)
+	data, err := r.readBounded(r.manifestPath(id, ref.Generation))
+	if err != nil {
+		return fmt.Errorf("validate checkpoint before HEAD repair: %w", err)
+	}
+	if sha256.Sum256(data) != ref.ManifestDigest {
+		return fmt.Errorf("validate checkpoint before HEAD repair: manifest digest mismatch")
+	}
+	manifest, err := codec.UnmarshalManifest(data)
+	if err != nil || manifest.IncarnationID != id || manifest.Generation != ref.Generation {
+		return fmt.Errorf("validate checkpoint before HEAD repair: invalid manifest")
+	}
+	if _, err := r.loadCheckpointLocked(ctx, id, manifest.Name, ref); err != nil {
+		return err
+	}
+	return r.writeMutable(r.headPath(id), marshalHead(ref.Generation, ref.ManifestDigest))
 }
 
 func (r *Repository) loadGeneration(ctx context.Context, name, key string, generation uint64) (ports.SnapshotGeneration, error) {

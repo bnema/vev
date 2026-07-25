@@ -3,13 +3,58 @@ package snapshot
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"math"
 	"testing"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
+
+func TestManifestIncarnation(t *testing.T) {
+	manifest := manifestWithTailSize(minObjectEnvelopeSize)
+	manifest.Generation = 2
+	manifest.IncarnationID = domain.IncarnationID{1}
+	manifest.ParentCheckpoint = &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{2}}
+
+	encoded, err := MarshalManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := UnmarshalManifest(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.IncarnationID != manifest.IncarnationID || decoded.ParentCheckpoint == nil || *decoded.ParentCheckpoint != *manifest.ParentCheckpoint {
+		t.Fatalf("round trip = %#v", decoded)
+	}
+	reencoded, err := MarshalManifest(decoded)
+	if err != nil || !bytes.Equal(encoded, reencoded) {
+		t.Fatalf("manifest bytes are not canonical: %v", err)
+	}
+	if got := binary.BigEndian.Uint16(encoded[4:6]); got != ManifestVersion {
+		t.Fatalf("manifest version = %d", got)
+	}
+	for n := range len(encoded) {
+		if _, err := UnmarshalManifest(encoded[:n]); err == nil {
+			t.Fatalf("prefix %d accepted", n)
+		}
+	}
+	if _, err := UnmarshalManifest(append(encoded, 0)); err == nil {
+		t.Fatal("trailing data accepted")
+	}
+	versionOne := append([]byte(nil), encoded...)
+	binary.BigEndian.PutUint16(versionOne[4:6], 1)
+	if _, err := UnmarshalManifest(versionOne); !errors.Is(err, ErrBadVersion) {
+		t.Fatalf("manifest v1 error = %v", err)
+	}
+	manifest.IncarnationID = domain.IncarnationID{}
+	if _, err := MarshalManifest(manifest); err == nil {
+		t.Fatal("zero incarnation accepted")
+	}
+}
 
 func TestManifestCodecUsesGenerationAndOrderedTypedReferences(t *testing.T) {
 	chunk, err := MarshalObject(HistoryChunk, []byte("history"))
@@ -24,7 +69,7 @@ func TestManifestCodecUsesGenerationAndOrderedTypedReferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest := Manifest{Generation: 7, Name: "named", CreatedAt: 9, Active: 0, Tabs: []ManifestTab{{
+	manifest := Manifest{Generation: 7, IncarnationID: domain.IncarnationID{1}, Name: "named", CreatedAt: 9, Active: 0, Tabs: []ManifestTab{{
 		StableID: "tab", Cols: 80, Rows: 24, NextPaneID: 2, Focus: "pane", Tree: layout.NewTree("pane"),
 		Panes: []ManifestPane{{ID: "pane", StableID: "pane-stable", Cwd: "/tmp",
 			Sealed:  []ObjectRef{{Kind: HistoryChunk, Digest: chunk.Digest, Size: uint32(len(chunk.Data))}},
@@ -97,7 +142,7 @@ func TestManifestDimensionBoundaries(t *testing.T) {
 		{"hostile product", math.MaxUint16, math.MaxUint16, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := Manifest{Name: "safe", Tabs: []ManifestTab{{Cols: tc.cols, Rows: tc.rows, Panes: []ManifestPane{{ID: "p", Tail: ref, Visible: visible}}}}}
+			m := Manifest{Generation: 1, IncarnationID: domain.IncarnationID{1}, Name: "safe", Tabs: []ManifestTab{{Cols: tc.cols, Rows: tc.rows, Panes: []ManifestPane{{ID: "p", Tail: ref, Visible: visible}}}}}
 			_, err := MarshalManifest(m)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("MarshalManifest() error = %v, want error=%v", err, tc.wantErr)
@@ -107,7 +152,7 @@ func TestManifestDimensionBoundaries(t *testing.T) {
 }
 
 func TestManifestRejectsImpossibleObjectEnvelopeSize(t *testing.T) {
-	manifest := Manifest{Name: "named", Tabs: []ManifestTab{{Cols: 1, Rows: 1, Panes: []ManifestPane{{
+	manifest := Manifest{Generation: 1, IncarnationID: domain.IncarnationID{1}, Name: "named", Tabs: []ManifestTab{{Cols: 1, Rows: 1, Panes: []ManifestPane{{
 		ID:      "pane",
 		Tail:    ObjectRef{Kind: HistoryTail, Digest: SnapshotDigest{1}, Size: 1},
 		Visible: ObjectRef{Kind: Visible, Digest: SnapshotDigest{2}, Size: minObjectEnvelopeSize},
@@ -171,7 +216,7 @@ func TestObjectRefEnvelopeSizeBoundaries(t *testing.T) {
 }
 
 func manifestWithTailSize(size uint32) Manifest {
-	return Manifest{Name: "named", Tabs: []ManifestTab{{
+	return Manifest{Generation: 1, IncarnationID: domain.IncarnationID{1}, Name: "named", Tabs: []ManifestTab{{
 		Cols: 1,
 		Rows: 1,
 		Panes: []ManifestPane{{

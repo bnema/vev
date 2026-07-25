@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -26,18 +27,38 @@ func filenameForName(name string) string {
 	return "@" + hex.EncodeToString(sum[:])[:40] + ".snap"
 }
 
-func (r *Repository) sessionPath(key string) string {
-	return filepath.Join(r.dir, repositorySessionsDir, key)
+func incarnationKey(id domain.IncarnationID) (string, error) {
+	if id == (domain.IncarnationID{}) {
+		return "", fmt.Errorf("snapshot: zero incarnation ID")
+	}
+	return id.String(), nil
 }
-func (r *Repository) objectPath(key string, digest ports.SnapshotDigest) string {
+
+// repositoryKey accepts string only for pre-migration maintenance code. Normal
+// publication and loading always pass an IncarnationID.
+func repositoryKey(identity any) string {
+	switch value := identity.(type) {
+	case domain.IncarnationID:
+		return value.String()
+	case string:
+		return value
+	default:
+		panic("snapshot: invalid repository identity")
+	}
+}
+
+func (r *Repository) sessionPath(identity any) string {
+	return filepath.Join(r.dir, repositorySessionsDir, repositoryKey(identity))
+}
+func (r *Repository) objectPath(identity any, digest ports.SnapshotDigest) string {
 	hexDigest := hex.EncodeToString(digest[:])
-	return filepath.Join(r.sessionPath(key), repositoryObjectsDir, hexDigest[:2], hexDigest)
+	return filepath.Join(r.sessionPath(identity), repositoryObjectsDir, hexDigest[:2], hexDigest)
 }
-func (r *Repository) manifestPath(key string, generation uint64) string {
-	return filepath.Join(r.sessionPath(key), repositoryGenerations, generationFilename(generation))
+func (r *Repository) manifestPath(identity any, generation uint64) string {
+	return filepath.Join(r.sessionPath(identity), repositoryGenerations, generationFilename(generation))
 }
-func (r *Repository) headPath(key string) string {
-	return filepath.Join(r.sessionPath(key), repositoryHead)
+func (r *Repository) headPath(identity any) string {
+	return filepath.Join(r.sessionPath(identity), repositoryHead)
 }
 func sessionKey(name string) string {
 	if safeNameRE.MatchString(name) && name != "." && name != ".." {

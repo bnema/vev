@@ -2,13 +2,166 @@ package snapshot
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 )
+
+const (
+	deletionTombstoneVersion = uint16(1)
+	deletionTombstoneMagic   = "VEVD"
+	deletionTombstonesDir    = "deletions"
+)
+
+var ErrMaintenanceBudgetTooSmall = errors.New("snapshot: maintenance budget too small")
+
+func encodeDeletionTombstone(tombstone domain.DeletionTombstone) ([]byte, error) {
+	if err := tombstone.Validate(); err != nil {
+		return nil, err
+	}
+	if len(tombstone.Name) > 200 {
+		return nil, fmt.Errorf("snapshot: deletion tombstone name too long")
+	}
+	encoded := make([]byte, 4+2+2+len(tombstone.Name)+len(tombstone.IncarnationID))
+	copy(encoded, deletionTombstoneMagic)
+	binary.BigEndian.PutUint16(encoded[4:6], deletionTombstoneVersion)
+	binary.BigEndian.PutUint16(encoded[6:8], uint16(len(tombstone.Name)))
+	copy(encoded[8:], tombstone.Name)
+	copy(encoded[8+len(tombstone.Name):], tombstone.IncarnationID[:])
+	return encoded, nil
+}
+
+func decodeDeletionTombstone(encoded []byte) (domain.DeletionTombstone, error) {
+	if len(encoded) < 8 {
+		return domain.DeletionTombstone{}, fmt.Errorf("snapshot: truncated deletion tombstone")
+	}
+	if string(encoded[:4]) != deletionTombstoneMagic || binary.BigEndian.Uint16(encoded[4:6]) != deletionTombstoneVersion {
+		return domain.DeletionTombstone{}, fmt.Errorf("snapshot: invalid deletion tombstone header")
+	}
+	nameLength := int(binary.BigEndian.Uint16(encoded[6:8]))
+	want := 8 + nameLength + len(domain.IncarnationID{})
+	if len(encoded) != want {
+		return domain.DeletionTombstone{}, fmt.Errorf("snapshot: malformed deletion tombstone length")
+	}
+	tombstone := domain.DeletionTombstone{Name: string(encoded[8 : 8+nameLength])}
+	copy(tombstone.IncarnationID[:], encoded[8+nameLength:])
+	if err := tombstone.Validate(); err != nil {
+		return domain.DeletionTombstone{}, err
+	}
+	return tombstone, nil
+}
+
+func (r *Repository) deletionTombstonePath(id domain.IncarnationID) string {
+	return filepath.Join(r.dir, deletionTombstonesDir, id.String()+".tombstone")
+}
+
+func (r *Repository) WriteDeletionTombstone(ctx context.Context, tombstone domain.DeletionTombstone) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	encoded, err := encodeDeletionTombstone(tombstone)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(r.dir, deletionTombstonesDir)
+	if err := r.ensurePrivateDirectory(dir); err != nil {
+		return err
+	}
+	path := r.deletionTombstonePath(tombstone.IncarnationID)
+	return r.writeImmutable(path, encoded, func(existing []byte) error {
+		decoded, err := decodeDeletionTombstone(existing)
+		if err != nil || decoded != tombstone {
+			return fmt.Errorf("snapshot: deletion tombstone identity mismatch")
+		}
+		return nil
+	})
+}
+
+func (r *Repository) ListDeletionTombstones(ctx context.Context, cursor ports.DeletionTombstoneCursor, budget ports.MaintenanceBudget) (ports.DeletionTombstonePage, error) {
+	if budget.Entries == 0 || budget.Bytes == 0 {
+		return ports.DeletionTombstonePage{}, ErrMaintenanceBudgetTooSmall
+	}
+	dir := filepath.Join(r.dir, deletionTombstonesDir)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return ports.DeletionTombstonePage{Done: true}, nil
+	}
+	if err != nil {
+		return ports.DeletionTombstonePage{}, err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	page := ports.DeletionTombstonePage{}
+	seen := make(map[domain.IncarnationID]struct{})
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return ports.DeletionTombstonePage{}, err
+		}
+		if entry.Name() <= cursor.After {
+			continue
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tombstone") {
+			return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: invalid deletion tombstone entry")
+		}
+		if uint64(len(page.Tombstones)) >= budget.Entries {
+			return page, nil
+		}
+		data, err := r.readBounded(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return ports.DeletionTombstonePage{}, err
+		}
+		decoded, err := decodeDeletionTombstone(data)
+		if err != nil {
+			return ports.DeletionTombstonePage{}, err
+		}
+		charge := uint64(len(entry.Name()) + len(decoded.Name) + len(decoded.IncarnationID))
+		if charge > budget.Bytes {
+			if len(page.Tombstones) == 0 {
+				return ports.DeletionTombstonePage{}, ErrMaintenanceBudgetTooSmall
+			}
+			return page, nil
+		}
+		if entry.Name() != decoded.IncarnationID.String()+".tombstone" {
+			return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: non-canonical deletion tombstone filename")
+		}
+		if _, duplicate := seen[decoded.IncarnationID]; duplicate {
+			return ports.DeletionTombstonePage{}, fmt.Errorf("snapshot: duplicate deletion tombstone identity")
+		}
+		seen[decoded.IncarnationID] = struct{}{}
+		page.Tombstones = append(page.Tombstones, decoded)
+		page.Next.After = entry.Name()
+		budget.Bytes -= charge
+	}
+	page.Done = true
+	return page, nil
+}
+
+func (r *Repository) DeleteDeletionTombstone(ctx context.Context, id domain.IncarnationID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := incarnationKey(id); err != nil {
+		return err
+	}
+	path := r.deletionTombstonePath(id)
+	dir := filepath.Dir(path)
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return r.syncDirectory(dir)
+}
 
 // Delete makes a session unavailable by durably moving it out of the canonical
 // namespace. Maintain reaps the private quarantine later; Delete never restores
@@ -195,4 +348,72 @@ func (r *Repository) maintainQuarantine(ctx context.Context, budget *int) (chang
 		state.current = filepath.Join(state.current, entries[0].Name())
 	}
 	return changed, false, nil
+}
+
+func (r *Repository) QuarantineDeletionSources(ctx context.Context, tombstone domain.DeletionTombstone, includeLegacyName bool) error {
+	if err := tombstone.Validate(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	quarantineDir := filepath.Join(r.dir, "quarantine", tombstone.IncarnationID.String())
+	if err := r.ensurePrivateDirectory(quarantineDir); err != nil {
+		return err
+	}
+	if err := r.quarantineSource(r.sessionPath(tombstone.IncarnationID), filepath.Join(quarantineDir, "snapshot")); err != nil {
+		return err
+	}
+	if includeLegacyName {
+		if err := r.quarantineSource(filepath.Join(r.dir, filenameForName(tombstone.Name)), filepath.Join(quarantineDir, "legacy.snap")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repository) quarantineSource(source, target string) error {
+	if _, err := os.Lstat(target); err == nil {
+		if _, sourceErr := os.Lstat(source); errors.Is(sourceErr, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("snapshot: quarantine target already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if _, err := os.Lstat(source); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := r.rename(source, target); err != nil {
+		return err
+	}
+	if err := r.syncDirectory(filepath.Dir(source)); err != nil {
+		return err
+	}
+	if filepath.Clean(filepath.Dir(source)) != filepath.Clean(filepath.Dir(target)) {
+		return r.syncDirectory(filepath.Dir(target))
+	}
+	return nil
+}
+
+func (r *Repository) SaveQuarantineDescriptor(context.Context, domain.QuarantineDescriptor) error {
+	return errors.New("snapshot: quarantine descriptors not implemented")
+}
+
+func (r *Repository) QuarantineIncarnation(ctx context.Context, id domain.IncarnationID) error {
+	return r.QuarantineDeletionSources(ctx, domain.DeletionTombstone{Name: "quarantined", IncarnationID: id}, false)
+}
+
+func (r *Repository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
+	return errors.New("snapshot: direct incarnation deletion not implemented")
+}
+
+func (r *Repository) MaintainSession(context.Context, ports.RetentionPlan, ports.MaintenanceBudget) (bool, error) {
+	return false, errors.New("snapshot: incarnation retention not implemented")
+}
+
+func (r *Repository) Reconcile(_ context.Context, _ []domain.CatalogueRecord, cursor ports.ReconcileCursor, _ ports.MaintenanceBudget) (ports.ReconcileCursor, []ports.ReconcileFinding, error) {
+	return cursor, nil, errors.New("snapshot: incarnation reconciliation not implemented")
 }
