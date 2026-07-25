@@ -122,6 +122,11 @@ type session struct {
 type tab struct {
 	mu sync.Mutex // guards tree, panes, floating, nextPaneID, size, and pane map membership
 
+	// layoutGeneration invalidates prepared geometry whenever live tab layout
+	// state changes. layoutApplyMu serializes the lock-free PTY apply boundary.
+	layoutGeneration uint64
+	layoutApplyMu    sync.Mutex
+
 	stableID   string
 	name       string
 	tree       *layout.Tree
@@ -433,6 +438,10 @@ func newTabWithStableID(tabStableID, paneStableID string, pty ports.PTY, sz doma
 		nextPaneID: 2,
 		size:       sz,
 	}
+}
+
+func (tb *tab) bumpLayoutGenerationLocked() {
+	tb.layoutGeneration++
 }
 
 func (tb *tab) focusedPane() *pane {

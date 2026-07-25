@@ -268,6 +268,7 @@ func (d *Daemon) handleActiveCopyMouse(sess *session, ac *attachedClient, tb *ta
 	tb.mu.Lock()
 	geometry, ok := copyMouseGeometryForPaneLocked(tb, cfg, snapshot.pane)
 	otherPane := false
+	layoutChanged := false
 	if ev.Type == mouse.Press {
 		// A new press is allowed to change focus, but never the document owned
 		// by the active copy mode. Do all tab work first; exitCopyMode takes
@@ -275,12 +276,14 @@ func (d *Daemon) handleActiveCopyMouse(sess *session, ac *attachedClient, tb *ta
 		if hit, hitOK := hitTestCopyMouseGeometryLocked(tb, cfg, ev.Col, ev.Row); hitOK && hit.pane != snapshot.pane {
 			otherPane = true
 			if tb.tree != nil {
-				focusPlacementLocked(tb, hit.pane.id)
-				d.applyLayoutLocked(tb)
+				layoutChanged = focusPlacementLocked(tb, hit.pane.id)
 			}
 		}
 	}
 	tb.mu.Unlock()
+	if layoutChanged {
+		d.applyTabLayout(sess, tb)
+	}
 	if otherPane {
 		d.exitCopyMode(ac)
 		return

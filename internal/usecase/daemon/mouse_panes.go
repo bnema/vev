@@ -99,12 +99,19 @@ func pointInRect(col, row int, r domain.Rect) bool {
 	return r.Width > 0 && r.Height > 0 && col >= r.X && col < r.X+r.Width && row >= r.Y && row < r.Y+r.Height
 }
 
-func focusPlacementLocked(tb *tab, id layout.PaneID) {
+func focusPlacementLocked(tb *tab, id layout.PaneID) bool {
 	if tb == nil || tb.tree == nil {
-		return
+		return false
 	}
+	oldFocus := tb.tree.Focus
+	oldLayout := layoutFingerprint(tb.tree.Root)
 	tb.tree.Focus = id
 	setExpandedLocked(tb.tree.Root, id)
+	changed := oldFocus != tb.tree.Focus || oldLayout != layoutFingerprint(tb.tree.Root)
+	if changed {
+		tb.bumpLayoutGenerationLocked()
+	}
+	return changed
 }
 
 func setExpandedLocked(n *layout.Node, id layout.PaneID) bool {

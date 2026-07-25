@@ -89,9 +89,11 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 			return
 		}
 		oldFocus := focusedID
-		focusPlacementLocked(tb, pl.ID)
-		d.applyLayoutLocked(tb)
+		layoutChanged := focusPlacementLocked(tb, pl.ID)
 		tb.mu.Unlock()
+		if layoutChanged {
+			d.applyTabLayout(sess, tb)
+		}
 		// A title bar never routes to terminal content. Clear any pre-existing
 		// left-button candidate before handling the focus result, including when
 		// this press leaves the same pane focused.
@@ -108,13 +110,16 @@ func (d *Daemon) handleMouse(ac *attachedClient, ev mouse.Event) {
 	hoveredFocused := true
 	if hit && !pl.Collapsed && pointInRect(ev.Col, contentRow, pl.Content) {
 		oldFocus := focusedID
+		layoutChanged := false
 		if isMouseFocusPress(ev) {
-			focusPlacementLocked(tb, pl.ID)
-			d.applyLayoutLocked(tb)
+			layoutChanged = focusPlacementLocked(tb, pl.ID)
 		}
 		p = tb.panes[pl.ID]
 		hoveredFocused = pl.ID == oldFocus
 		tb.mu.Unlock()
+		if layoutChanged {
+			d.applyTabLayout(sess, tb)
+		}
 		if p == nil {
 			invalidateRejectedLeftPointer(rt, ev)
 			return

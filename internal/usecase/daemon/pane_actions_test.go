@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,205 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/pkg/renderer"
 )
+
+func TestLayoutGenerationMutationBookkeeping(t *testing.T) {
+	tb := newTab(nil, domain.Size{Cols: 41, Rows: 10})
+
+	tb.mu.Lock()
+	require.Zero(t, tb.layoutGeneration)
+	tb.bumpLayoutGenerationLocked()
+	require.Equal(t, uint64(1), tb.layoutGeneration)
+	tb.mu.Unlock()
+}
+
+func TestLayoutApplicationDoesNotHoldTabLock(t *testing.T) {
+	d, sess, pty, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
+	tb := sess.activeTab()
+	tb.focusedPane().rect = domain.Rect{Width: 20, Height: 10}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	pty.EXPECT().Resize(domain.Size{Cols: 41, Rows: 10}).Run(func(domain.Size) {
+		close(entered)
+		<-release
+	}).Return(nil).Once()
+
+	done := make(chan struct{})
+	go func() {
+		d.applyTabLayout(sess, tb)
+		close(done)
+	}()
+	awaitSignal(t, entered, "PTY resize did not start")
+
+	locked := make(chan struct{})
+	go func() {
+		tb.mu.Lock()
+		_ = tb.layoutGeneration
+		tb.mu.Unlock()
+		close(locked)
+	}()
+	awaitSignal(t, locked, "tab lock remained held across PTY resize")
+	close(release)
+	awaitSignal(t, done, "layout application did not finish")
+}
+
+func TestLayoutApplicationRejectsStalePaneIdentity(t *testing.T) {
+	d, sess, oldPTY, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
+	tb := sess.activeTab()
+	oldPane := tb.focusedPane()
+	oldPane.rect = domain.Rect{Width: 20, Height: 10}
+	oldPane.screen.Resize(20, 10)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	oldPTY.EXPECT().Resize(domain.Size{Cols: 41, Rows: 10}).Run(func(domain.Size) {
+		close(entered)
+		<-release
+	}).Return(nil).Once()
+
+	done := make(chan struct{})
+	go func() {
+		d.applyTabLayout(sess, tb)
+		close(done)
+	}()
+	awaitSignal(t, entered, "stale PTY resize did not start")
+
+	newPTY := portsmocks.NewMockPTY(t)
+	replacement := newPane("pane-1", newPTY, domain.Size{Cols: 20, Rows: 10})
+	newPTY.EXPECT().Resize(domain.Size{Cols: 41, Rows: 10}).Return(nil).Once()
+	tb.mu.Lock()
+	tb.panes["pane-1"] = replacement
+	tb.bumpLayoutGenerationLocked()
+	tb.mu.Unlock()
+	close(release)
+	awaitSignal(t, done, "stale layout did not retry")
+
+	require.Equal(t, domain.Rect{Width: 20, Height: 10}, oldPane.rect, "stale pane rectangle was published")
+	require.Equal(t, 20, oldPane.screen.Frame.Width, "stale pane screen was published")
+	require.Equal(t, domain.Rect{Width: 41, Height: 10}, replacement.rect)
+	require.Equal(t, 41, replacement.screen.Frame.Width)
+}
+
+func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
+	newBlockedPTY := func() (*transactionalResizePTY, <-chan struct{}, chan<- struct{}) {
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		var once sync.Once
+		return &transactionalResizePTY{onResize: func() {
+			once.Do(func() {
+				close(entered)
+				<-release
+			})
+		}}, entered, release
+	}
+
+	t.Run("close removes a stale plan member", func(t *testing.T) {
+		first, entered, release := newBlockedPTY()
+		second := &transactionalResizePTY{}
+		d, sess, _, _ := newManualSessionWithPTYs(t, first)
+		tb := sess.activeTab()
+		p1 := tb.focusedPane()
+		p2 := newPane("pane-2", second, domain.Size{Cols: 80, Rows: 23})
+		tb.mu.Lock()
+		tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(p1.id), layout.NewLeaf(p2.id)}}, Focus: p1.id}
+		tb.panes[p2.id] = p2
+		tb.bumpLayoutGenerationLocked()
+		tb.mu.Unlock()
+
+		done := make(chan struct{})
+		go func() { d.applyTabLayout(sess, tb); close(done) }()
+		awaitSignal(t, entered, "old layout apply did not block")
+		closed := make(chan error, 1)
+		go func() { closed <- d.closePane(sess, tb, p2.id, nil, false) }()
+		require.Eventually(t, func() bool {
+			tb.mu.Lock()
+			defer tb.mu.Unlock()
+			return tb.panes[p2.id] == nil && tb.layoutGeneration > 1
+		}, time.Second, time.Millisecond, "close must mutate before its serialized apply waits")
+		require.Equal(t, domain.Rect{Width: 80, Height: 23}, p1.rect, "stale plan published before release")
+		close(release)
+		awaitSignal(t, done, "stale layout apply did not finish")
+		require.NoError(t, <-closed)
+
+		tb.mu.Lock()
+		_, exists := tb.panes[p2.id]
+		tb.mu.Unlock()
+		require.False(t, exists)
+		require.Equal(t, domain.Rect{Width: 80, Height: 23}, p2.rect, "removed pane received a stale rectangle publication")
+		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p2.screen.Frame.Width, Rows: p2.screen.Frame.Height}, "removed pane received a stale screen publication")
+		p2.mu.Lock()
+		require.False(t, p2.resizeApplying, "removed pane gate was not cancelled")
+		p2.mu.Unlock()
+		require.Equal(t, domain.Rect{Width: 80, Height: 23}, p1.rect)
+	})
+
+	t.Run("focus expansion replaces a stale stack placement", func(t *testing.T) {
+		first, entered, release := newBlockedPTY()
+		second := &transactionalResizePTY{}
+		d, sess, _, _ := newManualSessionWithPTYs(t, first)
+		tb := sess.activeTab()
+		p1 := tb.focusedPane()
+		p2 := newPane("pane-2", second, domain.Size{Cols: 80, Rows: 23})
+		tb.mu.Lock()
+		tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Stack, Children: []*layout.Node{layout.NewLeaf(p1.id), layout.NewLeaf(p2.id)}, Expanded: p1.id}, Focus: p1.id}
+		tb.panes[p2.id] = p2
+		tb.bumpLayoutGenerationLocked()
+		tb.mu.Unlock()
+
+		done := make(chan struct{})
+		go func() { d.applyTabLayout(sess, tb); close(done) }()
+		awaitSignal(t, entered, "old stack apply did not block")
+		tb.mu.Lock()
+		require.True(t, focusPlacementLocked(tb, p2.id))
+		tb.mu.Unlock()
+		close(release)
+		awaitSignal(t, done, "stale stack apply did not retry")
+
+		require.Equal(t, domain.Rect{Width: 80, Height: 23}, p1.rect, "collapsed pane received stale geometry")
+		p1.mu.Lock()
+		require.False(t, p1.resizeApplying, "collapsed pane gate was not cancelled")
+		p1.mu.Unlock()
+		tb.mu.Lock()
+		placements, ok := layout.Solve(tb.tree.Root, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
+		tb.mu.Unlock()
+		require.True(t, ok)
+		require.Equal(t, placementContent(placements, p2.id), p2.rect)
+		require.Equal(t, []domain.Size{rectSize(p2.rect)}, second.requested())
+	})
+
+	t.Run("client size rejects and retries a blocked plan", func(t *testing.T) {
+		pty, entered, release := newBlockedPTY()
+		d, sess, _, _ := newManualSessionWithPTYs(t, pty)
+		tb := sess.activeTab()
+		p := tb.focusedPane()
+		p.rect = domain.Rect{Width: 20, Height: 10}
+
+		oldDone := make(chan struct{})
+		go func() { d.applyTabLayout(sess, tb); close(oldDone) }()
+		awaitSignal(t, entered, "old size apply did not block")
+		resizeDone := make(chan bool, 1)
+		go func() { resizeDone <- d.requestTransactionalResize(sess, nil, domain.Size{Cols: 100, Rows: 30}, true) }()
+		require.Eventually(t, func() bool {
+			tb.mu.Lock()
+			defer tb.mu.Unlock()
+			return tb.size == (domain.Size{Cols: 100, Rows: 28}) && tb.layoutGeneration > 0
+		}, time.Second, time.Millisecond)
+		require.Equal(t, domain.Rect{Width: 20, Height: 10}, p.rect, "stale size published before release")
+		close(release)
+		awaitSignal(t, oldDone, "old size apply did not finish")
+		require.True(t, <-resizeDone)
+		require.Equal(t, domain.Rect{Width: 100, Height: 28}, p.rect)
+		require.Equal(t, domain.Size{Cols: 100, Rows: 28}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height})
+		require.Equal(t, []domain.Size{{Cols: 80, Rows: 23}, {Cols: 100, Rows: 28}}, pty.requested())
+	})
+}
+
+func awaitSignal(t *testing.T, ch <-chan struct{}, message string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal(message)
+	}
+}
 
 func TestSplitPaneCreatesFocusedShellInRequestedPosition(t *testing.T) {
 	tests := []struct {
@@ -123,9 +323,7 @@ func TestApplyLayoutResizesPTYsAndScreens(t *testing.T) {
 	oldPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Once()
 	newPTY.EXPECT().Resize(domain.Size{Cols: 20, Rows: 10}).Return(nil).Once()
 
-	tb.mu.Lock()
-	d.applyLayoutLocked(tb)
-	tb.mu.Unlock()
+	d.applyTabLayout(sess, tb)
 
 	require.Equal(t, 20, tb.panes["pane-1"].screen.Frame.Width)
 	require.Equal(t, 20, tb.panes["pane-2"].screen.Frame.Width)
