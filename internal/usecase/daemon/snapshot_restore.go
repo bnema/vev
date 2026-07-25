@@ -267,8 +267,12 @@ func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *se
 			}
 		}
 	}
-	if err := d.persist.Save(sess.persistRecordLocked(sess.createdAt)); err != nil {
-		return false, err
+	// The catalogue checkpoint already authorizes this runtime. Rewriting it
+	// during restoration would discard committed/fallback recovery metadata.
+	if d.catalogue == nil {
+		if err := d.persist.Save(sess.persistRecordLocked(sess.createdAt)); err != nil {
+			return false, err
+		}
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()

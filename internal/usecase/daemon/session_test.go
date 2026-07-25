@@ -1766,15 +1766,33 @@ func TestNamedSessionLifecycleExhaustionDoesNotMutateSessionState(t *testing.T) 
 }
 
 func TestCatalogueRecordsConstructExpectedSessionRegistry(t *testing.T) {
+	alphaRef := &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
+	workRef := &domain.CheckpointRef{Generation: 2, ManifestDigest: [32]byte{2}}
 	records := []domain.CatalogueRecord{
-		{Name: "alpha", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/alpha", CreatedAt: 7, LastUsedSeq: 11, TabNames: []string{"shell"}, RecoveryState: domain.RecoveryHealthy},
-		{Name: "work", IncarnationID: domain.IncarnationID{2}, Cwd: "/tmp/work", CreatedAt: 9, LastUsedSeq: 13, TabNames: []string{"editor", "logs"}, RecoveryState: domain.RecoveryDegraded, DegradedReason: "uncertain legacy checkpoint"},
+		{Name: "alpha", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp/alpha", CreatedAt: 7, LastUsedSeq: 11, TabNames: []string{"shell"}, RecoveryState: domain.RecoveryHealthy, Committed: alphaRef},
+		{Name: "work", IncarnationID: domain.IncarnationID{2}, Cwd: "/tmp/work", CreatedAt: 9, LastUsedSeq: 13, TabNames: []string{"editor", "logs"}, RecoveryState: domain.RecoveryDegraded, Committed: workRef, DegradedReason: "uncertain legacy checkpoint"},
 	}
 
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(persist.New(nil), records))
 
-	require.Equal(t, stoppedSession{name: "alpha", incarnation: domain.IncarnationID{1}, cwd: "/tmp/alpha", createdAt: 7, lastUsedSeq: 11, tabNames: []string{"shell"}}, d.stopped["alpha"])
-	require.Equal(t, stoppedSession{name: "work", incarnation: domain.IncarnationID{2}, cwd: "/tmp/work", createdAt: 9, lastUsedSeq: 13, tabNames: []string{"editor", "logs"}}, d.stopped["work"])
+	alpha := d.stopped["alpha"]
+	require.Equal(t, records[0], alpha.record)
+	require.Equal(t, runtimeRestoring, alpha.state)
+	require.NotNil(t, alpha.restoreDone)
+	select {
+	case <-alpha.restoreDone:
+		t.Fatal("healthy catalogue record must begin in restoring state")
+	default:
+	}
+	work := d.stopped["work"]
+	require.Equal(t, records[1], work.record)
+	require.Equal(t, runtimeDegraded, work.state)
+	require.NotNil(t, work.restoreDone)
+	select {
+	case <-work.restoreDone:
+	default:
+		t.Fatal("degraded catalogue record must not wait for restoration")
+	}
 	require.Equal(t, int64(9), d.lastAllocatedCreatedAt)
 	require.Equal(t, uint64(13), d.mruSeq.Load())
 }

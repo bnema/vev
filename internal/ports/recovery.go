@@ -100,7 +100,10 @@ type ReconcileDecision struct {
 	ReasonCode string
 }
 
-var ErrLegacySnapshotUncertain = errors.New("legacy snapshot state is uncertain")
+var (
+	ErrLegacySnapshotUncertain = errors.New("legacy snapshot state is uncertain")
+	ErrBudgetExhausted         = errors.New("snapshot maintenance budget exhausted")
+)
 
 type SnapshotMigrationRequest struct {
 	LegacyName    string

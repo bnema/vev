@@ -3,16 +3,247 @@ package daemon
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"sync"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
-// restoreIncrementalSnapshots intentionally performs no repository discovery.
-// Catalogue-indexed restoration is introduced as a separate recovery phase;
-// until then startup must not fall back to name scans or generation traversal.
-func (d *Daemon) restoreIncrementalSnapshots(context.Context) {}
+const catalogueRestoreConcurrency = 8
+
+func initialRuntimeRecoveryState(record domain.CatalogueRecord) (runtimeRecoveryState, chan struct{}) {
+	done := make(chan struct{})
+	var state runtimeRecoveryState
+	switch record.RecoveryState {
+	case domain.RecoveryFresh:
+		state = runtimeFresh
+		close(done)
+	case domain.RecoveryHealthy:
+		state = runtimeRestoring
+	case domain.RecoveryDegraded:
+		state = runtimeDegraded
+		close(done)
+	case domain.RecoveryDeleting:
+		state = runtimeDeleting
+		close(done)
+	default:
+		state = runtimeDegraded
+		close(done)
+	}
+	return state, done
+}
+
+// restoreIncrementalSnapshots restores only records named by the authoritative
+// catalogue. Snapshot repository discovery is deliberately not part of this
+// path, so stale or oversized namespaces cannot affect unrelated sessions.
+func (d *Daemon) restoreIncrementalSnapshots(ctx context.Context) {
+	if d.catalogue == nil {
+		return
+	}
+	d.restoreCatalogue(ctx, d.catalogue.Records())
+}
+
+// restoreCatalogue gives every expected record an independent bounded job.
+// A failed record is degraded without cancelling any sibling restoration.
+func (d *Daemon) restoreCatalogue(ctx context.Context, records []domain.CatalogueRecord) {
+	jobs := make(chan domain.CatalogueRecord)
+	workers := min(catalogueRestoreConcurrency, len(records))
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for record := range jobs {
+				d.ensureCatalogueRegistryEntry(record)
+				done := d.recordRestoreDone(record.Name)
+				err := d.restoreRecord(ctx, record)
+				if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+					d.markRecordDegraded(record, err)
+				}
+				closeRuntimeRestoreDone(done)
+			}
+		})
+	}
+	for _, record := range records {
+		jobs <- record
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func (d *Daemon) ensureCatalogueRegistryEntry(record domain.CatalogueRecord) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if entry, ok := d.stopped[record.Name]; ok && entry.restoreDone != nil {
+		return
+	}
+	state, done := initialRuntimeRecoveryState(record)
+	d.stopped[record.Name] = stoppedSession{
+		name:        record.Name,
+		cwd:         record.Cwd,
+		createdAt:   record.CreatedAt,
+		incarnation: record.IncarnationID,
+		lastUsedSeq: record.LastUsedSeq,
+		tabNames:    append([]string(nil), record.TabNames...),
+		record:      record,
+		state:       state,
+		restoreDone: done,
+	}
+}
+
+func (d *Daemon) recordRestoreDone(name string) chan struct{} {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.stopped[name].restoreDone
+}
+
+func closeRuntimeRestoreDone(done chan struct{}) {
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	default:
+		close(done)
+	}
+}
+
+func (d *Daemon) setStoppedRecovery(record domain.CatalogueRecord, state runtimeRecoveryState) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	entry, ok := d.stopped[record.Name]
+	if !ok {
+		return
+	}
+	entry.record = record
+	entry.state = state
+	entry.cwd = record.Cwd
+	entry.createdAt = record.CreatedAt
+	entry.incarnation = record.IncarnationID
+	entry.lastUsedSeq = record.LastUsedSeq
+	entry.tabNames = append([]string(nil), record.TabNames...)
+	d.stopped[record.Name] = entry
+}
+
+func (d *Daemon) markRecordDegraded(record domain.CatalogueRecord, restoreErr error) {
+	if d.catalogue != nil {
+		if current, ok := d.catalogue.Record(record.Name); ok && current.IncarnationID == record.IncarnationID {
+			record = current
+		}
+	}
+	record.RecoveryState = domain.RecoveryDegraded
+	record.DegradedReason = "checkpoint validation failed"
+	if d.catalogue != nil {
+		if err := d.catalogue.Replace(record.Name, record); err != nil {
+			d.log.Error("marking session degraded failed", "session", record.Name, "err", err)
+		}
+	}
+	d.setStoppedRecovery(record, runtimeDegraded)
+	d.log.Warn("session checkpoint restore failed", "session", record.Name, "err", restoreErr)
+}
+
+func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecord) error {
+	switch record.RecoveryState {
+	case domain.RecoveryFresh:
+		d.setStoppedRecovery(record, runtimeFresh)
+		return nil
+	case domain.RecoveryDegraded:
+		d.setStoppedRecovery(record, runtimeDegraded)
+		return nil
+	case domain.RecoveryDeleting:
+		d.setStoppedRecovery(record, runtimeDeleting)
+		return nil
+	case domain.RecoveryHealthy:
+		// Continue below.
+	default:
+		return errors.New("snapshot: invalid catalogue recovery state")
+	}
+	if d.snapshotRepository == nil {
+		return errors.New("snapshot: repository unavailable")
+	}
+
+	candidates := checkpointCandidates(record)
+	if len(candidates) == 0 {
+		return errors.New("snapshot: healthy record has no checkpoint")
+	}
+	valid := make([]domain.CheckpointRef, 0, len(candidates))
+	var selected domain.CheckpointRef
+	var selectedGeneration ports.SnapshotGeneration
+	var selectedSnapshot snapcodec.Session
+	selectedIndex := -1
+	for i, candidate := range candidates {
+		generation, err := d.snapshotRepository.LoadCheckpoint(ctx, record.IncarnationID, record.Name, candidate)
+		if err != nil {
+			continue
+		}
+		snapshot, err := sessionFromGeneration(generation)
+		if err != nil || generation.IncarnationID != record.IncarnationID || generation.Name != record.Name || generation.Generation != candidate.Generation {
+			continue
+		}
+		valid = append(valid, candidate)
+		if selectedIndex < 0 {
+			selected, selectedGeneration, selectedSnapshot, selectedIndex = candidate, generation, snapshot, i
+			if i == 0 {
+				break
+			}
+		}
+	}
+	if selectedIndex < 0 {
+		return errors.New("snapshot: no catalogue checkpoint validated")
+	}
+
+	if selectedIndex > 0 {
+		record = promoteFallback(record, selected, valid)
+		if d.catalogue == nil {
+			return errors.New("snapshot: catalogue unavailable for fallback promotion")
+		}
+		if err := d.catalogue.Replace(record.Name, record); err != nil {
+			return fmt.Errorf("snapshot: promote fallback: %w", err)
+		}
+		if err := d.snapshotRepository.RepairHEAD(ctx, record.IncarnationID, selected); err != nil {
+			return fmt.Errorf("snapshot: repair head: %w", err)
+		}
+		d.log.Warn("restored session from fallback checkpoint", "session", record.Name, "generation", selected.Generation)
+	}
+
+	if err := d.restoreSession(ctx, selectedSnapshot, selectedGeneration.Generation); err != nil {
+		return err
+	}
+	d.setStoppedRecovery(record, runtimeHealthy)
+	return nil
+}
+
+func checkpointCandidates(record domain.CatalogueRecord) []domain.CheckpointRef {
+	candidates := make([]domain.CheckpointRef, 0, 3)
+	if record.Committed != nil {
+		candidates = append(candidates, *record.Committed)
+	}
+	for _, fallback := range record.Fallbacks {
+		if fallback != nil {
+			candidates = append(candidates, *fallback)
+		}
+	}
+	return candidates
+}
+
+func promoteFallback(record domain.CatalogueRecord, selected domain.CheckpointRef, valid []domain.CheckpointRef) domain.CatalogueRecord {
+	next := record
+	next.RecoveryState = domain.RecoveryHealthy
+	next.Committed = &selected
+	next.Fallbacks = [2]*domain.CheckpointRef{}
+	next.DegradedReason = ""
+	slot := 0
+	for _, candidate := range valid {
+		if candidate == selected || slot == len(next.Fallbacks) {
+			continue
+		}
+		copy := candidate
+		next.Fallbacks[slot] = &copy
+		slot++
+	}
+	return next
+}
 
 func sessionFromGeneration(generation ports.SnapshotGeneration) (snapcodec.Session, error) {
 	manifest, err := snapcodec.UnmarshalManifest(generation.Manifest)

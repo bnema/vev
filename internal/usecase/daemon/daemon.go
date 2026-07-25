@@ -119,6 +119,7 @@ type Daemon struct {
 	shellOverride                  bool
 	persist                        *persist.Persister
 	persistEnabled                 bool
+	catalogue                      ports.Catalogue
 	catalogueRecords               []domain.CatalogueRecord
 	catalogueRecordsProvided       bool
 	// snapshotRepository is the sole checkpoint contract. legacySnapshots is
@@ -210,6 +211,16 @@ type parkedAttachment struct {
 
 // session is a single multiplexed session. It owns one or more full-screen
 
+type runtimeRecoveryState uint8
+
+const (
+	runtimeFresh runtimeRecoveryState = iota + 1
+	runtimeRestoring
+	runtimeHealthy
+	runtimeDegraded
+	runtimeDeleting
+)
+
 type stoppedSession struct {
 	name        string
 	cwd         string
@@ -218,6 +229,9 @@ type stoppedSession struct {
 	lastUsedSeq uint64
 	tabNames    []string
 	purging     bool
+	record      domain.CatalogueRecord
+	state       runtimeRecoveryState
+	restoreDone chan struct{}
 }
 
 type Option func(*Daemon)
@@ -251,9 +265,12 @@ func WithStore(store ports.Store) Option {
 
 // WithCatalogue installs the singular catalogue and the strictly opened
 // records that define the daemon's expected-session registry at startup.
-func WithCatalogue(catalogue *persist.Persister, records []domain.CatalogueRecord) Option {
+func WithCatalogue(catalogue ports.Catalogue, records []domain.CatalogueRecord) Option {
 	return func(d *Daemon) {
-		d.persist = catalogue
+		d.catalogue = catalogue
+		if persister, ok := catalogue.(*persist.Persister); ok {
+			d.persist = persister
+		}
 		d.persistEnabled = catalogue != nil
 		d.catalogueRecords = append([]domain.CatalogueRecord(nil), records...)
 		d.catalogueRecordsProvided = true
@@ -449,7 +466,12 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	var maxCreatedAt int64
 	hasCreatedAt := false
 	for _, r := range records {
-		d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, incarnation: r.IncarnationID, lastUsedSeq: r.LastUsedSeq, tabNames: append([]string(nil), r.TabNames...)}
+		stopped := stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, incarnation: r.IncarnationID, lastUsedSeq: r.LastUsedSeq, tabNames: append([]string(nil), r.TabNames...)}
+		if d.catalogueRecordsProvided {
+			stopped.record = r
+			stopped.state, stopped.restoreDone = initialRuntimeRecoveryState(r)
+		}
+		d.stopped[r.Name] = stopped
 		if !hasCreatedAt || r.CreatedAt > maxCreatedAt {
 			maxCreatedAt = r.CreatedAt
 			hasCreatedAt = true
@@ -555,8 +577,14 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	d.shutdownAllWithSnapshotDeadline(ports.ReasonServerShutdown, snapshotDeadline)
 	d.waitSessionWorkersWithSnapshotDeadline(snapshotDeadline)
 	d.waitNotifies()
-	if err := d.persist.Close(); err != nil {
-		d.log.Warn("closing session persister failed", "err", err)
+	var closeErr error
+	if d.catalogue != nil {
+		closeErr = d.catalogue.Close()
+	} else {
+		closeErr = d.persist.Close()
+	}
+	if closeErr != nil {
+		d.log.Warn("closing session persister failed", "err", closeErr)
 	}
 	return nil
 }
