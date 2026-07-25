@@ -31,6 +31,8 @@ func TestResolveOverflowObeysAxisConfigurationAndWalls(t *testing.T) {
 		{name: "down session", dir: layout.Down, cfg: domain.NavConfig{OverflowSessions: true}, position: 0, count: 2, want: overflowStep{kind: overflowSessions, delta: 1}},
 		{name: "tabs alone do not enable sessions", dir: layout.Down, cfg: domain.NavConfig{OverflowTabs: true}, position: 0, count: 2},
 		{name: "single destination is a wall", dir: layout.Right, cfg: domain.NavConfig{OverflowTabs: true}, position: 0, count: 1},
+		{name: "negative position is out of range", dir: layout.Right, cfg: domain.NavConfig{OverflowTabs: true}, position: -1, count: 2},
+		{name: "position at count is out of range", dir: layout.Down, cfg: domain.NavConfig{OverflowSessions: true}, position: 2, count: 2},
 	}
 
 	for _, tt := range tests {
@@ -298,7 +300,20 @@ func TestVerticalOverflowIsRaceFreeDuringSessionRename(t *testing.T) {
 	for err := range renameErrors {
 		require.NoError(t, err)
 	}
-	require.NotNil(t, ac.currentSession())
+
+	current := ac.currentSession()
+	owners := make([]*session, 0, 1)
+	d.mu.Lock()
+	for _, candidate := range d.sessions {
+		candidate.mu.Lock()
+		if candidate.client == ac {
+			owners = append(owners, candidate)
+		}
+		candidate.mu.Unlock()
+	}
+	d.mu.Unlock()
+	require.Len(t, owners, 1)
+	require.Same(t, current, owners[0])
 }
 
 func TestKeyboardHorizontalOverflowRespectsDefaultsWallsFailedEntryAndFloating(t *testing.T) {
@@ -338,8 +353,19 @@ func TestCommitTabOverflowRevalidatesTabPointerIdentities(t *testing.T) {
 		name   string
 		mutate func(sess *session, candidate tabOverflowCandidate)
 	}{
-		{name: "source no longer active", mutate: func(sess *session, _ tabOverflowCandidate) { sess.active = 1 }},
-		{name: "target entry replaced", mutate: func(sess *session, candidate tabOverflowCandidate) { sess.tabs[1] = newTab(nil, candidate.target.size) }},
+		{name: "source no longer active", mutate: func(sess *session, _ tabOverflowCandidate) {
+			sess.mu.Lock()
+			sess.active = 1
+			sess.mu.Unlock()
+		}},
+		{name: "target entry replaced", mutate: func(sess *session, candidate tabOverflowCandidate) {
+			sess.mu.Lock()
+			sess.tabs[1] = newTab(nil, candidate.target.size)
+			sess.mu.Unlock()
+		}},
+		{name: "source gains visible floating pane", mutate: func(_ *session, candidate tabOverflowCandidate) {
+			installTestFloating(candidate.source, newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), true)
+		}},
 	}
 
 	for _, tt := range tests {
@@ -347,11 +373,11 @@ func TestCommitTabOverflowRevalidatesTabPointerIdentities(t *testing.T) {
 			d, sess, _, _ := newManualSessionWithPTYs(t, nil, nil)
 			candidate, ok := d.prepareTabOverflow(sess, sess.tabs[0], layout.Right, domain.Rect{Width: 80, Height: 23}, 1)
 			require.True(t, ok)
-			sess.mu.Lock()
 			tt.mutate(sess, candidate)
-			sess.mu.Unlock()
+			activeBeforeCommit := activeTabIndex(sess)
 
 			require.False(t, d.commitTabOverflow(sess, candidate))
+			require.Equal(t, activeBeforeCommit, activeTabIndex(sess))
 		})
 	}
 }

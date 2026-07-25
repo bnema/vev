@@ -414,30 +414,7 @@ func (t *Tree) EntryPane(dir Direction, span, area domain.Rect) (PaneID, error) 
 		return "", ErrNoPane
 	}
 
-	type candidate struct {
-		id      PaneID
-		gap     int
-		overlap int
-	}
-	candidates := make([]candidate, 0, len(placements))
-	for _, placement := range placements {
-		if facing, gap, perpendicularOverlap := sideGapOverlap(outside, focusRect(placement), dir); facing {
-			candidates = append(candidates, candidate{id: placement.ID, gap: gap, overlap: perpendicularOverlap})
-		}
-	}
-	if len(candidates) == 0 {
-		return "", ErrNoPane
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].gap != candidates[j].gap {
-			return candidates[i].gap < candidates[j].gap
-		}
-		if candidates[i].overlap != candidates[j].overlap {
-			return candidates[i].overlap > candidates[j].overlap
-		}
-		return candidates[i].id < candidates[j].id
-	})
-	return candidates[0].id, nil
+	return selectFacingCandidate(placements, outside, dir, facingGapFirst)
 }
 
 // FocusEnter focuses the best pane on the facing edge and expands it when it
@@ -476,36 +453,57 @@ func (t *Tree) FocusDir(dir Direction, area domain.Rect) error {
 		return ErrNotFound
 	}
 	current := focusRect(placements[currentIdx])
-	type candidate struct {
-		id      PaneID
-		overlap int
-		gap     int
+	candidate, err := selectFacingCandidate(placements, current, dir, facingOverlapFirst)
+	if err != nil {
+		return err
 	}
-	var candidates []candidate
-	for _, p := range placements {
-		if p.ID == t.Focus {
-			continue
-		}
-		r := focusRect(p)
-		if ok, gap, overlap := sideGapOverlap(current, r, dir); ok {
-			candidates = append(candidates, candidate{id: p.ID, gap: gap, overlap: overlap})
+	t.Focus = candidate
+	setExpanded(t.Root, t.Focus)
+	return nil
+}
+
+type facingMetricPriority uint8
+
+const (
+	facingGapFirst facingMetricPriority = iota
+	facingOverlapFirst
+)
+
+type facingCandidate struct {
+	id      PaneID
+	gap     int
+	overlap int
+}
+
+func selectFacingCandidate(placements []Placement, from domain.Rect, dir Direction, priority facingMetricPriority) (PaneID, error) {
+	candidates := make([]facingCandidate, 0, len(placements))
+	for _, placement := range placements {
+		if facing, gap, perpendicularOverlap := sideGapOverlap(from, focusRect(placement), dir); facing {
+			candidates = append(candidates, facingCandidate{id: placement.ID, gap: gap, overlap: perpendicularOverlap})
 		}
 	}
 	if len(candidates) == 0 {
-		return ErrNoPane
+		return "", ErrNoPane
 	}
 	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].overlap != candidates[j].overlap {
-			return candidates[i].overlap > candidates[j].overlap
-		}
-		if candidates[i].gap != candidates[j].gap {
-			return candidates[i].gap < candidates[j].gap
+		if priority == facingGapFirst {
+			if candidates[i].gap != candidates[j].gap {
+				return candidates[i].gap < candidates[j].gap
+			}
+			if candidates[i].overlap != candidates[j].overlap {
+				return candidates[i].overlap > candidates[j].overlap
+			}
+		} else {
+			if candidates[i].overlap != candidates[j].overlap {
+				return candidates[i].overlap > candidates[j].overlap
+			}
+			if candidates[i].gap != candidates[j].gap {
+				return candidates[i].gap < candidates[j].gap
+			}
 		}
 		return candidates[i].id < candidates[j].id
 	})
-	t.Focus = candidates[0].id
-	setExpanded(t.Root, t.Focus)
-	return nil
+	return candidates[0].id, nil
 }
 
 func focusStackLocal(n *Node, id PaneID, dir Direction, focus *PaneID) bool {

@@ -166,13 +166,14 @@ func (d *Daemon) prepareTabOverflow(sess *session, expectedSource *tab, dir layo
 	}
 
 	target.mu.Lock()
+	if target.tree == nil {
+		target.mu.Unlock()
+		return tabOverflowCandidate{}, false
+	}
 	area := domain.Rect{Width: target.size.Cols, Height: target.size.Rows}
 	entry, err := target.tree.EntryPane(dir, span, area)
 	entryPane := target.panes[entry]
-	oldFocus := layout.PaneID("")
-	if target.tree != nil {
-		oldFocus = target.tree.Focus
-	}
+	oldFocus := target.tree.Focus
 	valid := err == nil && entryPane != nil && layout.ContainsLeaf(target.tree.Root, entry)
 	target.mu.Unlock()
 	if !valid {
@@ -213,6 +214,12 @@ func (d *Daemon) commitTabOverflow(sess *session, candidate tabOverflowCandidate
 		return false
 	}
 	candidate.target.mu.Lock()
+	if candidate.target.tree == nil {
+		candidate.target.mu.Unlock()
+		candidate.source.mu.Unlock()
+		sess.mu.Unlock()
+		return false
+	}
 	area := domain.Rect{Width: candidate.target.size.Cols, Height: candidate.target.size.Rows}
 	entry, err := candidate.target.tree.EntryPane(candidate.direction, candidate.span, area)
 	if err != nil || entry != candidate.entry || candidate.target.panes[entry] != candidate.entryPane || !layout.ContainsLeaf(candidate.target.tree.Root, entry) {
