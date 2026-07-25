@@ -111,6 +111,66 @@ func TestLayoutApplicationRetriesOnlyAcceptedFailedGeometry(t *testing.T) {
 	}, time.Second, time.Millisecond, "successful retry did not publish its VT size")
 }
 
+func TestDelayedRetryUsesFreshLayoutAfterPaneResize(t *testing.T) {
+	clock := newCoordinatorMockClock(t, 8)
+	// The failed apply also posts its preserved degradation warning; its toast
+	// lifetime is unrelated to the coordinator deadlines driven below.
+	clock.clock.EXPECT().NewTimer(6 * time.Second).Return(stubTimer{}).Once()
+	failed := &transactionalResizePTY{errs: []error{errors.New("first resize fails")}}
+	d, sess, ac, _ := newManualSessionWithPTYs(t, failed)
+	d.clock = clock.clock
+	tb := sess.activeTab()
+	first := tb.focusedPane()
+	second := newPane("pane-2", nil, domain.Size{Cols: 80, Rows: 23})
+	tb.mu.Lock()
+	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf(first.id), layout.NewLeaf(second.id)}}, Focus: first.id}
+	tb.panes[second.id] = second
+	tb.bumpLayoutGenerationLocked()
+	tb.mu.Unlock()
+
+	// A client resize commits the new layout but leaves the failed PTY on the
+	// coordinator retry lane. Drive both deadlines explicitly so this ordering
+	// cannot depend on wall-clock scheduling.
+	d.resize(sess, ac, domain.Size{Cols: 80, Rows: 24})
+	rc := sess.renderCoordinator()
+	resizeTimer := awaitCoordinatorScheduledTimer(t, clock)
+	resizeDone := captureResizeCallbackDone(t, rc)
+	resizeTimer.ch <- time.Time{}
+	awaitTestCompletion(t, resizeDone, "failed client resize did not complete")
+	var retryTimer *coordinatorMockTimer
+	for retryTimer == nil {
+		candidate := awaitCoordinatorScheduledTimer(t, clock)
+		if candidate.duration == minOutputRenderDeadline {
+			retryTimer = candidate
+		}
+	}
+
+	// A later pane-resize changes the solved rectangle and repairs the failed
+	// PTY before the delayed callback fires. Retrying its old captured 40-column
+	// rectangle would regress the PTY, VT, and published pane geometry.
+	require.NoError(t, d.resizePane(daemonActionTarget{session: sess, tab: tb, pane: first}, layout.Width, resizeStepCols))
+	tb.mu.Lock()
+	placements, ok := layout.Solve(tb.tree.Root, domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows})
+	currentFirst := placementContent(placements, first.id)
+	currentSecond := placementContent(placements, second.id)
+	tb.mu.Unlock()
+	require.True(t, ok)
+	require.Equal(t, currentFirst, first.rect)
+	require.Equal(t, currentSecond, second.rect)
+	require.Equal(t, rectSize(currentFirst), domain.Size{Cols: first.screen.Frame.Width, Rows: first.screen.Frame.Height})
+	require.Equal(t, []domain.Size{{Cols: 40, Rows: 22}, rectSize(currentFirst)}, failed.requested())
+
+	rc.mu.Lock()
+	retryDone := rc.retryLane.token.done
+	rc.mu.Unlock()
+	retryTimer.ch <- time.Time{}
+	awaitTestCompletion(t, retryDone, "delayed resize retry did not complete")
+
+	require.Equal(t, []domain.Size{{Cols: 40, Rows: 22}, rectSize(currentFirst)}, failed.requested(), "delayed retry must not apply stale PTY geometry")
+	require.Equal(t, currentFirst, first.rect, "delayed retry must not publish a stale rectangle")
+	require.Equal(t, rectSize(currentFirst), domain.Size{Cols: first.screen.Frame.Width, Rows: first.screen.Frame.Height}, "delayed retry must not publish a stale VT size")
+}
+
 func TestLayoutApplicationDoesNotHoldTabLock(t *testing.T) {
 	d, sess, pty, _ := newSplitTestDaemon(t, domain.Size{Cols: 41, Rows: 10})
 	tb := sess.activeTab()

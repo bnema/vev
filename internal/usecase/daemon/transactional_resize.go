@@ -551,36 +551,79 @@ func (d *Daemon) runResizeTransaction(sess *session, ac *attachedClient, lease *
 	return true
 }
 
-// retryResizeMembers retries only members which failed the committed epoch.
-// It never republishes geometry: an intervening resize owns that publication.
+// retryResizeMembers retries failed committed members through a freshly
+// prepared tab transaction. The captured members identify retry candidates
+// only: their rectangles must never cross this delayed boundary, because any
+// later layout mutation may have changed their geometry or removed them.
 func (d *Daemon) retryResizeMembers(sess *session, ac *attachedClient, lease *attachmentLease, epoch uint64, members []resizeMember) {
 	rc := sess.renderCoordinator()
 	if rc == nil || !rc.retryCurrentForLease(epoch, ac, lease) {
 		return
 	}
-	plan := resizePlan{members: append([]resizeMember(nil), members...)}
-	for i := range plan.members {
-		plan.members[i].retry = true
-	}
-	if !d.applyResize(&plan, func() bool { return rc.retryCurrentForLease(epoch, ac, lease) }) || !rc.retryCurrentForLease(epoch, ac, lease) {
-		return
-	}
-	failed := make([]resizeMember, 0, len(plan.members))
-	succeeded := false
-	for _, member := range plan.members {
-		if !member.ok {
-			failed = append(failed, member)
+
+	// Retain tab order for deterministic external PTY ordering while collapsing
+	// several failed members from the same tab into one canonical transaction.
+	tabs := make([]*tab, 0, len(members))
+	seen := make(map[*tab]struct{}, len(members))
+	for _, member := range members {
+		if member.tab == nil {
 			continue
 		}
-		member.pane.mu.Lock()
-		// The rect is the already committed layout target. A successful apply
-		// already resized before replaying buffered bytes; PTY-less members still
-		// need their VT resized here. Force a reset below in either case.
-		if !member.screenResized {
-			member.pane.screen.Resize(member.rect.Width, member.rect.Height)
+		if _, ok := seen[member.tab]; ok {
+			continue
 		}
-		member.pane.mu.Unlock()
-		succeeded = true
+		seen[member.tab] = struct{}{}
+		tabs = append(tabs, member.tab)
+	}
+
+	failed := make([]resizeMember, 0, len(members))
+	succeeded := false
+	for _, tb := range tabs {
+		if !rc.retryCurrentForLease(epoch, ac, lease) {
+			return
+		}
+		// A later accepted layout transaction clears resizeRetry. In that case
+		// this delayed callback has no remaining work and, importantly, must not
+		// replay the obsolete rectangle it captured before the mutation.
+		retryPending := false
+		tb.mu.Lock()
+		for _, member := range members {
+			if member.tab != tb || member.pane == nil || tb.panes[member.pane.id] != member.pane {
+				continue
+			}
+			member.pane.mu.Lock()
+			retryPending = retryPending || member.pane.resizeRetry
+			member.pane.mu.Unlock()
+		}
+		tb.mu.Unlock()
+		if !retryPending {
+			continue
+		}
+
+		// applyTabLayoutTransaction captures the current generation, pane
+		// pointers, and solved rectangles, and validates them again before any
+		// VT/rectangle publication. It also preserves the resize gate and
+		// degradation notice behavior for another failed external attempt.
+		freshFailed, ok := d.applyTabLayoutTransaction(sess, tb, func() bool {
+			return rc.retryCurrentForLease(epoch, ac, lease)
+		})
+		if !ok || !rc.retryCurrentForLease(epoch, ac, lease) {
+			return
+		}
+		failed = append(failed, freshFailed...)
+		// A retry success is a formerly failed, still-current target whose
+		// canonical apply cleared its retry bit. A collapsed or removed target
+		// is neither a retry completion nor a reason to publish a reset.
+		tb.mu.Lock()
+		for _, member := range members {
+			if member.tab != tb || member.pane == nil || tb.panes[member.pane.id] != member.pane {
+				continue
+			}
+			member.pane.mu.Lock()
+			succeeded = succeeded || !member.pane.resizeRetry
+			member.pane.mu.Unlock()
+		}
+		tb.mu.Unlock()
 	}
 	if len(failed) != 0 {
 		rc.scheduleResizeRetryForLease(epoch, ac, lease, func() { d.retryResizeMembers(sess, ac, lease, epoch, failed) })
