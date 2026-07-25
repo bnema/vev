@@ -320,10 +320,18 @@ func (d *Daemon) focusDir(sess *session, ac *attachedClient, dir layout.Directio
 		return err
 	}
 
+	cfg := d.currentNavConfig()
+	if sessionTarget, ok := d.prepareSessionOverflow(sess, dir, cfg); ok {
+		if ac == nil {
+			return errNoNeighbor
+		}
+		return d.switchToTarget(sess, ac, sessionTarget)
+	}
+
 	sess.mu.Lock()
 	position, count := sess.active, len(sess.tabs)
 	sess.mu.Unlock()
-	step := resolveOverflow(dir, d.currentNavConfig(), position, count)
+	step := resolveOverflow(dir, cfg, position, count)
 	if step.kind != overflowTabs {
 		return err
 	}

@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"sort"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/usecase/picker"
 )
 
 type overflowKind uint8
@@ -45,6 +48,54 @@ func resolveOverflow(dir layout.Direction, cfg domain.NavConfig, position, count
 		return overflowStep{}
 	}
 	return step
+}
+
+type sessionOverflowSnapshot struct {
+	session *session
+	id      domain.SessionID
+	name    string
+}
+
+// prepareSessionOverflow snapshots only the live registry entries, then sorts
+// immutable names exactly like the picker. No daemon or session lock survives
+// the snapshot, sorting, or the later switchToTarget call.
+func (d *Daemon) prepareSessionOverflow(current *session, dir layout.Direction, cfg domain.NavConfig) (picker.Target, bool) {
+	if current == nil || !cfg.OverflowSessions || (dir != layout.Up && dir != layout.Down) {
+		return picker.Target{}, false
+	}
+	current.mu.Lock()
+	currentID := current.id
+	current.mu.Unlock()
+
+	d.mu.Lock()
+	live := make([]*session, 0, len(d.sessions))
+	for _, sess := range d.sessions {
+		live = append(live, sess)
+	}
+	d.mu.Unlock()
+
+	snapshots := make([]sessionOverflowSnapshot, 0, len(live))
+	for _, sess := range live {
+		sess.mu.Lock()
+		snapshot := sessionOverflowSnapshot{session: sess, id: sess.id, name: sess.name}
+		sess.mu.Unlock()
+		snapshots = append(snapshots, snapshot)
+	}
+	sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].name < snapshots[j].name })
+
+	position := -1
+	for i, snapshot := range snapshots {
+		if snapshot.session == current && snapshot.id == currentID {
+			position = i
+			break
+		}
+	}
+	step := resolveOverflow(dir, cfg, position, len(snapshots))
+	if step.kind != overflowSessions {
+		return picker.Target{}, false
+	}
+	target := snapshots[position+step.delta]
+	return picker.Target{Session: target.id, TabIndex: -1}, true
 }
 
 type tabOverflowCandidate struct {

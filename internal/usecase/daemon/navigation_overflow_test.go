@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -74,6 +75,121 @@ func TestKeyboardHorizontalOverflowLandsOnFacingEdge(t *testing.T) {
 			require.NotSame(t, source, sess.activeTab())
 		})
 	}
+}
+
+func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *testing.T) {
+	d, alpha, ac, _ := newManualSessionWithPTYs(t, nil, nil)
+	alpha.mu.Lock()
+	alpha.name = "alpha"
+	alpha.mu.Unlock()
+
+	newSession := func(id, name string, active int, focus layout.PaneID) *session {
+		tabs := []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10}), newTab(nil, domain.Size{Cols: 41, Rows: 10})}
+		target := tabs[active]
+		target.mu.Lock()
+		target.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: focus}
+		target.panes["pane-2"] = newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
+		target.mu.Unlock()
+		return &session{id: domain.SessionID(id), name: name, ctx: t.Context(), cancel: func() {}, tabs: tabs, active: active}
+	}
+	charlie := newSession("live-charlie", "charlie", 1, "pane-2")
+	echo := newSession("live-echo", "echo", 1, "pane-2")
+
+	// Deliberately register the live sessions out of alphabetical order. The
+	// stopped name sorts between alpha and charlie but must never be resumed.
+	d.mu.Lock()
+	delete(d.sessions, alpha.id)
+	d.sessions[echo.id] = echo
+	d.sessions[alpha.id] = alpha
+	d.sessions[charlie.id] = charlie
+	d.stopped["bravo"] = stoppedSession{name: "bravo", cwd: "/tmp/bravo"}
+	d.mu.Unlock()
+	d.ApplyConfig(domain.Config{Nav: domain.NavConfig{OverflowSessions: true}})
+	handler := daemonKeyHandler{d: d, ac: ac}
+
+	moves := []struct {
+		name   string
+		action keys.Action
+		want   *session
+	}{
+		{name: "down to charlie", action: keys.ActionFocusPaneDown, want: charlie},
+		{name: "down to echo", action: keys.ActionFocusPaneDown, want: echo},
+		{name: "down wall", action: keys.ActionFocusPaneDown, want: echo},
+		{name: "up to charlie", action: keys.ActionFocusPaneUp, want: charlie},
+		{name: "up to alpha", action: keys.ActionFocusPaneUp, want: alpha},
+		{name: "up wall", action: keys.ActionFocusPaneUp, want: alpha},
+	}
+	for _, move := range moves {
+		t.Run(move.name, func(t *testing.T) {
+			handler.Action(move.action)
+			require.Same(t, move.want, ac.currentSession())
+		})
+	}
+
+	for _, target := range []*session{charlie, echo} {
+		require.Equal(t, 1, activeTabIndex(target), "switch preserves the target active tab")
+		target.tabs[1].mu.Lock()
+		require.Equal(t, layout.PaneID("pane-2"), target.tabs[1].tree.Focus, "switch preserves the target pane focus")
+		target.tabs[1].mu.Unlock()
+	}
+	d.mu.Lock()
+	_, stopped := d.stopped["bravo"]
+	var bravoLive bool
+	for _, candidate := range d.sessions {
+		candidate.mu.Lock()
+		bravoLive = bravoLive || candidate.name == "bravo"
+		candidate.mu.Unlock()
+	}
+	d.mu.Unlock()
+	alpha.mu.Lock()
+	attached := alpha.client
+	alpha.mu.Unlock()
+	require.True(t, stopped, "vertical overflow leaves the stopped session stopped")
+	require.False(t, bravoLive, "the stopped session is absent from the live registry")
+	require.Same(t, ac, attached, "the source session owns the genuinely attached client after returning")
+}
+
+func TestVerticalOverflowIsRaceFreeDuringSessionRename(t *testing.T) {
+	d, alpha, ac, _ := newManualSessionWithPTYs(t, nil)
+	alpha.mu.Lock()
+	alpha.name = "alpha"
+	alpha.mu.Unlock()
+	charlie := &session{id: "live-charlie", name: "charlie", ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	echo := &session{id: "live-echo", name: "echo", ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	d.mu.Lock()
+	d.sessions[echo.id] = echo
+	d.sessions[charlie.id] = charlie
+	d.mu.Unlock()
+	d.ApplyConfig(domain.Config{Nav: domain.NavConfig{OverflowSessions: true}})
+
+	start := make(chan struct{})
+	renameErrors := make(chan error, 40)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-start
+		for i := range 40 {
+			name := "charlie"
+			if i%2 == 0 {
+				name = "delta"
+			}
+			if err := d.renameSession(charlie, name); err != nil {
+				renameErrors <- err
+			}
+		}
+	})
+
+	close(start)
+	handler := daemonKeyHandler{d: d, ac: ac}
+	for range 20 {
+		handler.Action(keys.ActionFocusPaneDown)
+		handler.Action(keys.ActionFocusPaneUp)
+	}
+	wg.Wait()
+	close(renameErrors)
+	for err := range renameErrors {
+		require.NoError(t, err)
+	}
+	require.NotNil(t, ac.currentSession())
 }
 
 func TestKeyboardHorizontalOverflowRespectsDefaultsWallsFailedEntryAndFloating(t *testing.T) {
