@@ -258,15 +258,18 @@ func TestComposeFrameCachedTitleBarsDoNotAllocate(t *testing.T) {
 
 func cachedSplitState(fingerprint string, focus layout.PaneID, direction layout.SplitDir, theme themeui.Theme) capturedRenderState {
 	left, right := layout.PaneID("left"), layout.PaneID("right")
+	area := domain.Rect{Width: 41, Height: 5}
+	root := &layout.Node{Kind: layout.Split, Dir: direction, Children: []*layout.Node{layout.NewLeaf(left), layout.NewLeaf(right)}}
 	placements := []layout.Placement{{ID: left, Content: domain.Rect{Width: 20, Height: 5}}, {ID: right, Content: domain.Rect{X: 21, Width: 20, Height: 5}}}
 	leftFrame, rightFrame := cachePaneFrame(20, 5, 'L'), cachePaneFrame(20, 5, 'R')
 	if direction == layout.Vertical {
 		placements = []layout.Placement{{ID: left, Content: domain.Rect{Width: 41, Height: 2}}, {ID: right, Content: domain.Rect{Y: 3, Width: 41, Height: 2}}}
 		leftFrame, rightFrame = cachePaneFrame(41, 2, 'L'), cachePaneFrame(41, 2, 'R')
 	}
+	_, dividers, _ := layout.SolveWithDividers(root, area)
 	return capturedRenderState{
 		reset:  true,
-		layout: capturedTabLayout{root: &layout.Node{Kind: layout.Split, Dir: direction, Children: []*layout.Node{layout.NewLeaf(left), layout.NewLeaf(right)}}, area: domain.Rect{Width: 41, Height: 5}, focus: focus, placements: placements, fingerprint: fingerprint, valid: true},
+		layout: capturedTabLayout{root: root, area: area, focus: focus, placements: placements, dividers: dividers, fingerprint: fingerprint, valid: true},
 		panes:  []capturedPaneRenderState{{id: left, frame: leftFrame, placement: placements[0], focused: focus == left, damage: []renderer.Damage{renderer.FullRedraw()}}, {id: right, frame: rightFrame, placement: placements[1], focused: focus == right, damage: []renderer.Damage{renderer.FullRedraw()}}},
 		theme:  theme,
 		styles: themeui.Resolve(theme, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles,

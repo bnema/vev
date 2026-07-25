@@ -20,6 +20,7 @@ type renderCaptureScratch struct {
 	state      capturedRenderState
 	panes      []capturedPaneRenderState
 	placements []layout.Placement
+	dividers   []layout.Divider
 	statusTabs []statusTab
 	mru        []recentSession
 	ranked     []rankedRecent
@@ -58,6 +59,7 @@ type capturedTabLayout struct {
 	area        domain.Rect
 	focus       layout.PaneID
 	placements  []layout.Placement
+	dividers    []layout.Divider
 	fingerprint string
 	valid       bool
 }
@@ -228,6 +230,7 @@ func capturePrimaryRenderState(
 	defer tb.mu.Unlock()
 	layoutSnap := solveTabLayoutLocked(tb)
 	scratch.placements = append(scratch.placements[:0], layoutSnap.placements...)
+	scratch.dividers = append(scratch.dividers[:0], layoutSnap.dividers...)
 	scratch.treeUsed = 0
 	var root *layout.Node
 	if tb.tree != nil {
@@ -238,7 +241,7 @@ func capturePrimaryRenderState(
 		attachment: ac, lease: lease, reset: reset, bars: bars, theme: bars.theme,
 		styles: request.styles, styleGeneration: request.styleGeneration,
 		overlays: overlays, preview: preview,
-		layout:             capturedTabLayout{root: root, area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
+		layout:             capturedTabLayout{root: root, area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, dividers: scratch.dividers, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
 		floatingGeneration: tb.floating.generation,
 		receipts:           scratch.receipts[:0],
 	}

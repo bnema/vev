@@ -48,6 +48,7 @@ type tabLayoutSnapshot struct {
 	area        domain.Rect
 	focus       layout.PaneID
 	placements  []layout.Placement
+	dividers    []layout.Divider
 	ok          bool
 }
 
@@ -61,8 +62,8 @@ func solveTabLayoutLocked(tb *tab) tabLayoutSnapshot {
 		return tabLayoutSnapshot{}
 	}
 	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
-	placements, ok := layout.Solve(tb.tree.Root, area)
-	return tabLayoutSnapshot{root: tb.tree.Root, fingerprint: layoutFingerprint(tb.tree.Root), area: area, focus: tb.tree.Focus, placements: placements, ok: ok}
+	placements, dividers, ok := layout.SolveWithDividers(tb.tree.Root, area)
+	return tabLayoutSnapshot{root: tb.tree.Root, fingerprint: layoutFingerprint(tb.tree.Root), area: area, focus: tb.tree.Focus, placements: placements, dividers: dividers, ok: ok}
 }
 
 func layoutFingerprint(root *layout.Node) string {

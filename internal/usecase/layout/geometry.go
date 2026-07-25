@@ -9,25 +9,42 @@ import (
 
 // Solve returns deterministic pane placements for root inside area.
 func Solve(root *Node, area domain.Rect) ([]Placement, bool) {
+	placements, _, ok := solveArea(root, area, false)
+	return placements, ok
+}
+
+// solveArea is the single geometry traversal behind Solve and
+// SolveWithDividers. Divider gaps are collected only when withDividers is set,
+// so both callers share one weight- and minimum-aware pass and cannot drift.
+func solveArea(root *Node, area domain.Rect, withDividers bool) ([]Placement, []Divider, bool) {
 	if root == nil || area.Width <= 0 || area.Height <= 0 {
-		return nil, false
+		return nil, nil, false
 	}
 	minWidth, ok := minimumExtent(root, Horizontal)
 	if !ok || area.Width < minWidth {
-		return nil, false
+		return nil, nil, false
 	}
 	minHeight, ok := minimumExtent(root, Vertical)
 	if !ok || area.Height < minHeight {
-		return nil, false
+		return nil, nil, false
 	}
 	var out []Placement
-	if !solve(root, area, &out) {
-		return nil, false
+	var dividers *[]Divider
+	if withDividers {
+		dividers = new([]Divider)
 	}
-	return out, true
+	if !solve(root, area, &out, dividers) {
+		return nil, nil, false
+	}
+	if dividers == nil {
+		return out, nil, true
+	}
+	return out, *dividers, true
 }
 
-func solve(n *Node, r domain.Rect, out *[]Placement) bool {
+// solve appends the placements for n inside r. divs is nil when the caller does
+// not need divider geometry.
+func solve(n *Node, r domain.Rect, out *[]Placement, divs *[]Divider) bool {
 	switch n.Kind {
 	case Leaf:
 		if r.Width < MinPaneCols || r.Height < MinPaneRows {
@@ -36,7 +53,7 @@ func solve(n *Node, r domain.Rect, out *[]Placement) bool {
 		*out = append(*out, Placement{ID: n.Leaf, Content: r})
 		return true
 	case Split:
-		return solveSplit(n, r, out)
+		return solveSplit(n, r, out, divs)
 	case Stack:
 		return solveStack(n, r, out)
 	default:
@@ -44,13 +61,16 @@ func solve(n *Node, r domain.Rect, out *[]Placement) bool {
 	}
 }
 
-func solveSplit(n *Node, r domain.Rect, out *[]Placement) bool {
+func solveSplit(n *Node, r domain.Rect, out *[]Placement, divs *[]Divider) bool {
 	rects, ok := splitChildRects(n, r)
 	if !ok {
 		return false
 	}
 	for i, child := range n.Children {
-		if !solve(child, rects[i], out) {
+		if i > 0 && divs != nil {
+			*divs = append(*divs, dividerBetween(n.Dir, r, rects[i-1]))
+		}
+		if !solve(child, rects[i], out, divs) {
 			return false
 		}
 	}

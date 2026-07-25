@@ -409,46 +409,21 @@ func blitPaneFrame(dst renderer.Frame, r domain.Rect, src renderer.Frame, dim bo
 	}
 }
 
-func drawDividers(frame renderer.Frame, n *layout.Node, r domain.Rect, style renderer.Style) {
-	if n == nil || n.Kind != layout.Split || len(n.Children) <= 1 {
-		return
-	}
-	count := len(n.Children)
-	if n.Dir == layout.Horizontal {
-		usable := r.Width - (count - 1)
-		base, rem := usable/count, usable%count
-		x := r.X
-		for i, child := range n.Children {
-			w := base
-			if i < rem {
-				w++
-			}
-			drawDividers(frame, child, domain.Rect{X: x, Y: r.Y, Width: w, Height: r.Height}, style)
-			x += w
-			if i < count-1 {
-				for y := r.Y; y < r.Y+r.Height; y++ {
-					frame.Set(x, y, renderer.Cell{Rune: '│', Style: style})
-				}
-				x++
-			}
+// drawDividers paints each precomputed divider gap onto frame, offsetting by
+// dy (composeFrame's content area starts one row below the top status bar).
+// The dividers themselves come from layout.SolveWithDividers, computed once
+// per capture alongside pane placements, rather than recomputed here.
+func drawDividers(frame renderer.Frame, dividers []layout.Divider, dy int, style renderer.Style) {
+	for _, d := range dividers {
+		glyph := rune('│')
+		if d.Dir == layout.Vertical {
+			glyph = '─'
 		}
-		return
-	}
-	usable := r.Height - (count - 1)
-	base, rem := usable/count, usable%count
-	y := r.Y
-	for i, child := range n.Children {
-		h := base
-		if i < rem {
-			h++
-		}
-		drawDividers(frame, child, domain.Rect{X: r.X, Y: y, Width: r.Width, Height: h}, style)
-		y += h
-		if i < count-1 {
-			for x := r.X; x < r.X+r.Width; x++ {
-				frame.Set(x, y, renderer.Cell{Rune: '─', Style: style})
+		y0 := d.Rect.Y + dy
+		for y := y0; y < y0+d.Rect.Height; y++ {
+			for x := d.Rect.X; x < d.Rect.X+d.Rect.Width; x++ {
+				frame.Set(x, y, renderer.Cell{Rune: glyph, Style: style})
 			}
-			y++
 		}
 	}
 }
