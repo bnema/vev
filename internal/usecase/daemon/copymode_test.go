@@ -112,7 +112,7 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	tb := sess.activeTab()
 	pane := tb.focusedPane()
 	pane.mu.Lock()
-	snap := scopy.NewSnapshot(pane.history, pane.screen.Frame)
+	snap := scopy.NewSnapshot(pane.history, pane.screen.Frame, pane.screen.LineBounds())
 	pane.mu.Unlock()
 	mode := scopy.NewMode(scopy.NewDocument(snap, domain.DefaultWordSeparators))
 
@@ -146,7 +146,7 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 	tb := sess.activeTab()
 	tb.focusedPane().screen = vt.NewScreen(12, 3)
 	tb.focusedPane().screen.Write([]byte("live"))
-	snap := scopy.NewSnapshot(tb.focusedPane().history, tb.focusedPane().screen.Frame)
+	snap := scopy.NewSnapshot(tb.focusedPane().history, tb.focusedPane().screen.Frame, tb.focusedPane().screen.LineBounds())
 	mode := scopy.NewMode(scopy.NewDocument(snap, domain.DefaultWordSeparators))
 
 	bars := barState{status: sess.statusSegments(true)}
@@ -301,7 +301,7 @@ func TestCopyModeSearchModalCapturesMouseAndClearsOnExit(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	pane := sess.tabs[0].focusedPane()
 	installTestHistory(pane, vt.HistoryConfig{MaxRows: 4})
-	require.NoError(t, pane.history.Append(testRow("old alpha")))
+	appendHistoryRow(t, pane.history, testRow("old alpha"))
 	copy(pane.screen.Frame.Row(0), testRow("live alpha"))
 
 	d.enterCopyMode(sess, ac)
@@ -330,8 +330,8 @@ func TestCopyModeInputNotForwardedAndOSC52Copy(t *testing.T) {
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 4})
-	require.NoError(t, sess.tabs[0].focusedPane().history.Append(testRow("old1    ")))
-	require.NoError(t, sess.tabs[0].focusedPane().history.Append(testRow("old2    ")))
+	appendHistoryRow(t, sess.tabs[0].focusedPane().history, testRow("old1    "))
+	appendHistoryRow(t, sess.tabs[0].focusedPane().history, testRow("old2    "))
 	sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 	d.enterCopyMode(sess, ac)
@@ -434,7 +434,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		return scopy.NewSnapshot(p.history, p.screen.Frame).Len() >= 12
+		return scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds()).Len() >= 12
 	}, 2*time.Second, 5*time.Millisecond)
 
 	sess := firstSession(d)
@@ -505,8 +505,8 @@ func TestCopyModeSplitArrowDoesNotExit(t *testing.T) {
 			p, _ := newBlockingPTY(t)
 			d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 			installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 4})
-			require.NoError(t, sess.tabs[0].focusedPane().history.Append(testRow("old1    ")))
-			require.NoError(t, sess.tabs[0].focusedPane().history.Append(testRow("old2    ")))
+			appendHistoryRow(t, sess.tabs[0].focusedPane().history, testRow("old1    "))
+			appendHistoryRow(t, sess.tabs[0].focusedPane().history, testRow("old2    "))
 			sess.tabs[0].focusedPane().screen.Write([]byte("live"))
 
 			d.enterCopyMode(sess, ac)
@@ -739,11 +739,11 @@ func TestCopyModeCapturesSourceAndRetainsItAcrossFocusMove(t *testing.T) {
 			var want *pane
 			if tc.useFloating {
 				want = installFloatingCopyFixture(t, sess, domain.Size{Cols: 20, Rows: 3})
-				require.NoError(t, want.history.Append(testRow("flt-old")))
+				appendHistoryRow(t, want.history, testRow("flt-old"))
 				want.screen.Write([]byte("flt-live"))
 			} else {
 				want = main
-				require.NoError(t, want.history.Append(testRow("one-old")))
+				appendHistoryRow(t, want.history, testRow("one-old"))
 				want.screen.Write([]byte("one-live"))
 			}
 
@@ -780,11 +780,11 @@ func TestFloatingCopyModeWheelUsesCapturedSnapshot(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
 	fp := installFloatingCopyFixture(t, sess, domain.Size{Cols: 20, Rows: 3})
 	for i := range 30 {
-		require.NoError(t, fp.history.Append(testRow(fmt.Sprintf("old-%02d", i))))
+		appendHistoryRow(t, fp.history, testRow(fmt.Sprintf("old-%02d", i)))
 	}
 	fp.screen.Write([]byte("live"))
 	fp.mu.Lock()
-	total := scopy.NewSnapshot(fp.history, fp.screen.Frame).Len()
+	total := scopy.NewSnapshot(fp.history, fp.screen.Frame, fp.screen.LineBounds()).Len()
 	fp.mu.Unlock()
 
 	d.enterCopyMode(sess, ac)
@@ -806,7 +806,7 @@ func TestFloatingCopyModeMouseSelectsFloatingRows(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, normal)
 	fp := installFloatingCopyFixture(t, sess, domain.Size{Cols: 20, Rows: 3})
 	for i := range 5 {
-		require.NoError(t, fp.history.Append(testRow(fmt.Sprintf("old-%d", i))))
+		appendHistoryRow(t, fp.history, testRow(fmt.Sprintf("old-%d", i)))
 	}
 	fp.screen.Write([]byte("live"))
 
@@ -877,7 +877,7 @@ func TestMouseDragCopyEntryCapturesSourceForYank(t *testing.T) {
 	out := awaitFrame(t, sends, ports.MsgOutput)
 	msg, err := ports.UnmarshalOutput(out.Payload)
 	require.NoError(t, err)
-	want := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte("alpha"+strings.Repeat(" ", 75)+"\nb")) + "\x07"
+	want := "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte("alpha\nb")) + "\x07"
 	require.Equal(t, want, string(msg.Data))
 }
 
@@ -894,7 +894,7 @@ func TestComposeCopyClientFrameStylesStatusContentAndSurround(t *testing.T) {
 			base := renderer.NewFrame(20, 8)
 			pane := newPane("split", nil, domain.Size{Cols: 12, Rows: 2})
 			pane.screen.Write([]byte("copy"))
-			mode := scopy.NewMode(scopy.NewDocument(scopy.NewSnapshot(pane.history, pane.screen.Frame), domain.DefaultWordSeparators))
+			mode := scopy.NewMode(scopy.NewDocument(scopy.NewSnapshot(pane.history, pane.screen.Frame, pane.screen.LineBounds()), domain.DefaultWordSeparators))
 			if tt.selectMode {
 				mode.ToggleLineSelection()
 			}

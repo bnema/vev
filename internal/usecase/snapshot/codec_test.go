@@ -210,7 +210,7 @@ func TestUnmarshalEnforcesCanonicalHistoryBlobRoles(t *testing.T) {
 	// must remain a valid v3 import payload.
 	mutableHistory := vt.NewHistory(vt.HistoryConfig{MaxRows: 8, ChunkRows: 2})
 	for _, row := range [][]renderer.Cell{{{Rune: 'a'}}, {{Rune: 'b'}}, {{Rune: 'c'}}} {
-		requireNoError(t, mutableHistory.Append(row))
+		requireNoError(t, mutableHistory.Append(row, vt.LineBound{End: len(row)}))
 	}
 	mutableTail, err := vt.MarshalHistoryTail(mutableHistory.SnapshotView())
 	requireNoError(t, err)
@@ -343,7 +343,7 @@ func TestUnmarshalRejectsProcessWithoutArgv(t *testing.T) {
 func TestUnmarshalGlobalBudgetRejectionDoesNotAllocatePerPane(t *testing.T) {
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 256, ChunkRows: 256})
 	for range 256 {
-		requireNoError(t, history.Append([]renderer.Cell{{Rune: 'x'}}))
+		requireNoError(t, history.Append([]renderer.Cell{{Rune: 'x'}}, vt.LineBound{End: 1}))
 	}
 	sealed, tail, err := vt.MarshalSealedHistory(history.SealAndView())
 	requireNoError(t, err)
@@ -406,7 +406,7 @@ func historyBlobs(t *testing.T, rows [][]renderer.Cell) ([][]byte, []byte) {
 	t.Helper()
 	h := vt.NewHistory(vt.HistoryConfig{MaxRows: 128, ChunkRows: 2})
 	for _, row := range rows {
-		requireNoError(t, h.Append(row))
+		requireNoError(t, h.Append(row, vt.LineBound{End: len(row)}))
 	}
 	sealed, tail, err := vt.MarshalSealedHistory(h.SealAndView())
 	if err != nil {

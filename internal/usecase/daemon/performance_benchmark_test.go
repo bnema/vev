@@ -643,9 +643,7 @@ func mutateBenchmarkTail(fixture *performanceFixture, operation int) {
 	for column := range row {
 		row[column] = renderer.Cell{Rune: rune('a' + (operation+column)%26)}
 	}
-	if err := fixture.activePane.history.Append(row); err != nil {
-		fixture.t.Fatal(err)
-	}
+	appendHistoryRow(fixture.t, fixture.activePane.history, row)
 }
 
 func mutateBenchmarkSealedChunk(fixture *performanceFixture, operation int) {

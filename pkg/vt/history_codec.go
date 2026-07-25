@@ -12,7 +12,7 @@ import (
 
 const (
 	historyMagic        = "VTH1"
-	historyVersion      = 1
+	historyVersion      = 2
 	historyCellBytes    = 41
 	maxHistoryChunkRows = 256
 
@@ -64,8 +64,12 @@ func MarshalHistory(view HistoryView) ([]byte, error) {
 			return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
 		}
 		out = appendUint32(out, uint32(len(chunk.rows)))
-		for _, row := range chunk.rows {
+		for i, row := range chunk.rows {
 			if uint64(len(row)) > math.MaxUint32 {
+				return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
+			}
+			bound := chunkBound(chunk, i)
+			if !validHistoryBound(bound, len(row)) {
 				return nil, fmt.Errorf("marshal history: %w", errInvalidHistory)
 			}
 			out = appendUint32(out, uint32(len(row)))
@@ -75,6 +79,7 @@ func MarshalHistory(view HistoryView) ([]byte, error) {
 				}
 				out = appendHistoryCell(out, cell)
 			}
+			out = appendHistoryBound(out, bound)
 		}
 	}
 	return out, nil
@@ -135,6 +140,26 @@ func appendHistoryCell(dst []byte, cell renderer.Cell) []byte {
 	return append(dst, style.UnderlineColorRGB.R, style.UnderlineColorRGB.G, style.UnderlineColorRGB.B)
 }
 
+func chunkBound(chunk *HistoryChunk, i int) LineBound {
+	if i < 0 || i >= len(chunk.bounds) {
+		return LineBound{}
+	}
+	return chunk.bounds[i]
+}
+
+func appendHistoryBound(dst []byte, b LineBound) []byte {
+	dst = binary.BigEndian.AppendUint32(dst, uint32(b.End))
+	if b.Soft {
+		return append(dst, 1)
+	}
+	return append(dst, 0)
+}
+
+// validHistoryBound rejects extents that cannot describe their own row.
+func validHistoryBound(b LineBound, cells int) bool {
+	return b.End >= 0 && b.End <= cells
+}
+
 // UnmarshalHistory strictly decodes a MarshalHistory payload. It rejects
 // malformed declarations, cells, truncated data, and trailing bytes.
 func UnmarshalHistory(data []byte) (HistoryView, error) {
@@ -181,14 +206,16 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 	for range chunkCount {
 		rowCount, ok := p.uint32()
 		if !ok || rowCount == 0 || rowCount > maxHistoryChunkRows ||
-			uint64(rowCount) > uint64(len(p.data))/4 ||
+			uint64(rowCount) > uint64(len(p.data))/(4+visibleBoundaryBytes) ||
 			!addHistoryDecodeBudget(&stats.rows, uint64(rowCount), maxHistoryRows) {
 			return HistoryView{}, historyDecodeStats{}, false
 		}
 
 		var rows [][]renderer.Cell
+		var bounds []LineBound
 		if populate {
 			rows = make([][]renderer.Cell, 0, rowCount)
+			bounds = make([]LineBound, 0, rowCount)
 		}
 		for range rowCount {
 			cellCount, ok := p.uint32()
@@ -214,12 +241,17 @@ func parseHistory(data []byte, populate bool) (HistoryView, historyDecodeStats, 
 					row[i] = cell
 				}
 			}
+			bound, ok := p.bound()
+			if !ok || !validHistoryBound(bound, int(cellCount)) {
+				return HistoryView{}, historyDecodeStats{}, false
+			}
 			if populate {
 				rows = append(rows, row)
+				bounds = append(bounds, bound)
 			}
 		}
 		if populate {
-			chunks = append(chunks, &HistoryChunk{rows: rows})
+			chunks = append(chunks, &HistoryChunk{rows: rows, bounds: bounds})
 		}
 	}
 	if len(p.data) != 0 {
@@ -294,6 +326,19 @@ func (p *historyParser) cell() (renderer.Cell, bool) {
 			UnderlineColorRGB:    renderer.RGB{R: b[38], G: b[39], B: b[40]},
 		},
 	}, true
+}
+
+func (p *historyParser) bound() (LineBound, bool) {
+	if len(p.data) < visibleBoundaryBytes {
+		return LineBound{}, false
+	}
+	end := binary.BigEndian.Uint32(p.data[:4])
+	flag := p.data[4]
+	p.data = p.data[visibleBoundaryBytes:]
+	if flag > 1 || uint64(end) > math.MaxInt32 {
+		return LineBound{}, false
+	}
+	return LineBound{End: int(end), Soft: flag == 1}, true
 }
 
 func historyInt(raw uint64) (int, bool) {

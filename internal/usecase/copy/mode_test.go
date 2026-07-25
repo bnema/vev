@@ -42,6 +42,44 @@ func TestNewSnapshotFromRowsPreservesWideRows(t *testing.T) {
 	}
 }
 
+func TestSnapshotBoundDispatchesLikeRow(t *testing.T) {
+	row := func(s string) []renderer.Cell {
+		cells := make([]renderer.Cell, 0, len(s))
+		for _, r := range s {
+			cells = append(cells, renderer.Cell{Rune: r})
+		}
+		return cells
+	}
+
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 8, MaxCells: 1024})
+	if err := history.Append(row("hist"), vt.LineBound{End: 4, Soft: true}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	screen := renderer.NewFrame(4, 2)
+	copy(screen.Row(0), row("live"))
+
+	snap := NewSnapshot(history, screen, []vt.LineBound{{End: 4}, {End: 0, Soft: true}})
+
+	tests := []struct {
+		name string
+		i    int
+		want vt.LineBound
+	}{
+		{name: "history row", i: 0, want: vt.LineBound{End: 4, Soft: true}},
+		{name: "first screen row", i: 1, want: vt.LineBound{End: 4}},
+		{name: "second screen row", i: 2, want: vt.LineBound{End: 0, Soft: true}},
+		{name: "past the end", i: 3, want: vt.LineBound{}},
+		{name: "negative", i: -1, want: vt.LineBound{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := snap.Bound(tc.i); got != tc.want {
+				t.Errorf("Bound(%d) = %+v, want %+v", tc.i, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCopyModeKeyboardSelection(t *testing.T) {
 	m := modeFor([]string{"alpha", "xy", "bravo", "charlie"}, 2)
 	require.Equal(t, Pos{Row: 3}, m.Cursor())
@@ -189,11 +227,12 @@ func TestFindMatchesRepeatedUnicodeDisplayCells(t *testing.T) {
 func TestFindMatchesUsesSealedScrollbackWithoutGlobalCopy(t *testing.T) {
 	const rows = 10_000
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: rows + 1, ChunkRows: 256})
+	unmatched, target := row("unmatched"), row("target")
 	for range rows {
-		require.NoError(t, history.Append(row("unmatched")))
+		require.NoError(t, history.Append(unmatched, vt.LineBound{End: len(unmatched)}))
 	}
-	require.NoError(t, history.Append(row("target")))
-	snapshot := NewSnapshot(history, renderer.NewFrame(16, 1))
+	require.NoError(t, history.Append(target, vt.LineBound{End: len(target)}))
+	snapshot := NewSnapshot(history, renderer.NewFrame(16, 1), nil)
 	view := history.SealAndView()
 	require.Same(t, view.Chunk(0), snapshot.history.Chunk(0))
 
@@ -279,4 +318,111 @@ func TestCopyModeRenderStylesStatusFiller(t *testing.T) {
 	frame := m.Render(status, selection)
 
 	require.True(t, frame.At(4, frame.Height-1).Style.Equal(status), "status filler keeps cached status surface")
+}
+
+func TestSelectedTextJoinsAcrossTheHistoryScreenBoundary(t *testing.T) {
+	row := func(s string, w int) []renderer.Cell {
+		cells := make([]renderer.Cell, w)
+		for i := range cells {
+			cells[i] = renderer.BlankCell()
+		}
+		for i, r := range []rune(s) {
+			if i >= w {
+				break
+			}
+			cells[i] = renderer.Cell{Rune: r}
+		}
+		return cells
+	}
+
+	const width = 4
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 8, MaxCells: 1024})
+	// The last history row wrapped into what is now the first live screen row.
+	if err := history.Append(row("abcd", width), vt.LineBound{End: width, Soft: true}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	screen := renderer.NewFrame(width, 2)
+	copy(screen.Row(0), row("ef", width))
+	copy(screen.Row(1), row("gh", width))
+
+	snapshot := NewSnapshot(history, screen, []vt.LineBound{{End: 2}, {End: 2}})
+	doc := NewDocument(snapshot, "")
+
+	ranges := []CellRange{
+		{Row: 0, Start: 0, End: width - 1},
+		{Row: 1, Start: 0, End: width - 1},
+		{Row: 2, Start: 0, End: width - 1},
+	}
+	const want = "abcdef\ngh"
+	if got := doc.Extract(ranges); got != want {
+		t.Errorf("Extract() = %q, want %q", got, want)
+	}
+}
+
+// TestSelectedTextJoinsRowsWrappedByTheVT drives the whole chain with no
+// hand-written bounds: a real vt.Screen wraps one logical line itself, its
+// LineBound travels through eviction into history or stays on the live grid,
+// and Extract must give the line back exactly as the application printed it.
+func TestSelectedTextJoinsRowsWrappedByTheVT(t *testing.T) {
+	const (
+		width  = 8
+		height = 4
+		line   = "abcdefghij"
+	)
+	cases := []struct {
+		name string
+		// input is written verbatim to the VT; the wrap and every scroll it
+		// implies are the emulator's own decisions.
+		input string
+		// wantHistoryLen pins where the history/screen seam falls, so a change
+		// in scroll behavior fails loudly instead of silently retargeting the
+		// case onto rows the seam no longer separates.
+		wantHistoryLen int
+		// wrapRow is the first snapshot row of the wrapped logical line.
+		wrapRow int
+	}{
+		{
+			name:           "wrapped line straddles the history and screen seam",
+			input:          line + "\r\nx\r\ny\r\n",
+			wantHistoryLen: 1,
+			wrapRow:        0,
+		},
+		{
+			name:           "wrapped line sits entirely in sealed history",
+			input:          line + "\r\nx\r\ny\r\nz\r\n",
+			wantHistoryLen: 2,
+			wrapRow:        0,
+		},
+		{
+			name:           "wrapped line sits entirely on the live screen",
+			input:          "1\r\n2\r\n3\r\n4\r\n5\r\n\x1b[2;1H" + line,
+			wantHistoryLen: 2,
+			wrapRow:        3,
+		},
+		{
+			// The common case: the pane is full, so the cursor is on the last
+			// row and the wrap scrolls the screen as it happens. This is what a
+			// long line printed at a shell prompt actually does.
+			name:           "wrapped line wraps out of the bottom row of a full pane",
+			input:          "1\r\n2\r\n3\r\n4\r\n5\r\n" + line,
+			wantHistoryLen: 3,
+			wrapRow:        5,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			screen := vt.NewScreenWithHistory(width, height, vt.HistoryConfig{MaxRows: 64, MaxCells: 4096})
+			screen.Write([]byte(tc.input))
+
+			snapshot := NewSnapshot(screen.History(), screen.Frame, screen.LineBounds())
+			require.Equal(t, tc.wantHistoryLen, snapshot.history.Len(), "history/screen seam moved")
+			doc := NewDocument(snapshot, domain.DefaultWordSeparators)
+
+			got := doc.Extract([]CellRange{
+				{Row: tc.wrapRow, Start: 0, End: width - 1},
+				{Row: tc.wrapRow + 1, Start: 0, End: width - 1},
+			})
+			require.Equal(t, line, got, "the two physical rows must rejoin without a newline or grid padding")
+		})
+	}
 }

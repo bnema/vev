@@ -10,15 +10,9 @@ import (
 
 func TestHistorySnapshotViewDoesNotSealTailAndCopiesIt(t *testing.T) {
 	history := NewHistory(HistoryConfig{MaxRows: 8, ChunkRows: 2})
-	if err := history.Append(historyRow("AAAA")); err != nil {
-		t.Fatal(err)
-	}
-	if err := history.Append(historyRow("BBBB")); err != nil {
-		t.Fatal(err)
-	}
-	if err := history.Append(historyRow("CCCC")); err != nil {
-		t.Fatal(err)
-	}
+	requireHistoryAppend(t, history, historyRow("AAAA"))
+	requireHistoryAppend(t, history, historyRow("BBBB"))
+	requireHistoryAppend(t, history, historyRow("CCCC"))
 	sealed := history.View().Chunk(0)
 
 	view := history.SnapshotView()
@@ -58,7 +52,7 @@ func TestHistoryFromBlobsNormalizesFullTailBeforeAppend(t *testing.T) {
 
 	restored, err := HistoryFromBlobs(HistoryConfig{MaxRows: 4, ChunkRows: 2}, nil, fullTail)
 	require.NoError(t, err)
-	require.NoError(t, restored.Append(historyRow("CCCC")))
+	requireHistoryAppend(t, restored, historyRow("CCCC"))
 
 	require.Equal(t, []string{"AAAA", "BBBB", "CCCC"}, historyViewTexts(restored.View()))
 	require.Len(t, restored.chunks, 1, "a full restored tail must become sealed")
@@ -68,7 +62,7 @@ func TestHistoryFromBlobsNormalizesFullTailBeforeAppend(t *testing.T) {
 func TestHistoryFromBlobsRestoresCellAccountingAndEvictsToBothBudgets(t *testing.T) {
 	history := NewHistory(HistoryConfig{MaxRows: 4, MaxCells: 10, ChunkRows: 2})
 	for _, text := range []string{"a", "b", "cc"} {
-		require.NoError(t, history.Append(historyRow(text)))
+		requireHistoryAppend(t, history, historyRow(text))
 	}
 	view := history.SnapshotView()
 	sealed := make([][]byte, view.ChunkCount())

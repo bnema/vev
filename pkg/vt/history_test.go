@@ -10,7 +10,7 @@ import (
 
 func requireHistoryAppend(t testing.TB, history *History, row []renderer.Cell) {
 	t.Helper()
-	if err := history.Append(row); err != nil {
+	if err := history.Append(row, LineBound{End: len(row)}); err != nil {
 		t.Fatalf("append history row: %v", err)
 	}
 }
@@ -204,7 +204,7 @@ func TestHistoryRecordsOnlyTopEdgeScrollEvictions(t *testing.T) {
 func TestHistoryBoundsRowsAndCellsWithExactRowEviction(t *testing.T) {
 	history := NewHistory(HistoryConfig{MaxRows: 4, MaxCells: 5, ChunkRows: 2})
 	for _, text := range []string{"aa", "bbb", "c", "dd"} {
-		if err := history.Append(historyRow(text)); err != nil {
+		if err := history.Append(historyRow(text), LineBound{End: len(text)}); err != nil {
 			t.Fatalf("append %q: %v", text, err)
 		}
 	}
@@ -235,7 +235,8 @@ func TestHistoryAppendIsNoOpForNilAndZeroValue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := tt.history.Append(historyRow("row")); err != nil {
+			row := historyRow("row")
+			if err := tt.history.Append(row, LineBound{End: len(row)}); err != nil {
 				t.Fatalf("append error = %v, want nil", err)
 			}
 			if got := tt.history.Len(); got != 0 {
@@ -247,12 +248,14 @@ func TestHistoryAppendIsNoOpForNilAndZeroValue(t *testing.T) {
 
 func TestHistoryRejectsRowWiderThanCellBudgetWithoutMutation(t *testing.T) {
 	history := NewHistory(HistoryConfig{MaxRows: 2, MaxCells: 2, ChunkRows: 2})
-	if err := history.Append(historyRow("ok")); err != nil {
+	kept := historyRow("ok")
+	if err := history.Append(kept, LineBound{End: len(kept)}); err != nil {
 		t.Fatalf("append retained row: %v", err)
 	}
 	before := history.View()
 
-	err := history.Append(historyRow("wide"))
+	wide := historyRow("wide")
+	err := history.Append(wide, LineBound{End: len(wide)})
 	if !errors.Is(err, ErrHistoryRowTooWide) {
 		t.Fatalf("append oversized row error = %v, want ErrHistoryRowTooWide", err)
 	}
@@ -280,6 +283,70 @@ func TestScreenDropsOversizedHistoryRowsWithoutInterruptingScroll(t *testing.T) 
 	}
 	if got := lineText(screen, 0); got != "BBBB" {
 		t.Fatalf("screen did not scroll after history drop: row 0 = %q", got)
+	}
+}
+
+func TestHistoryAppendRetainsBounds(t *testing.T) {
+	row := func(s string) []renderer.Cell {
+		cells := make([]renderer.Cell, 0, len(s))
+		for _, r := range s {
+			cells = append(cells, renderer.Cell{Rune: r})
+		}
+		return cells
+	}
+
+	tests := []struct {
+		name      string
+		chunkRows int
+		bounds    []LineBound
+	}{
+		{
+			name:      "within the mutable tail",
+			chunkRows: 8,
+			bounds:    []LineBound{{End: 3, Soft: true}, {End: 2}},
+		},
+		{
+			name:      "across a sealed chunk boundary",
+			chunkRows: 2,
+			bounds:    []LineBound{{End: 3, Soft: true}, {End: 3, Soft: true}, {End: 2}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewHistory(HistoryConfig{MaxRows: 16, MaxCells: 1024, ChunkRows: tc.chunkRows})
+			for i, b := range tc.bounds {
+				if err := h.Append(row("abc"[:b.End]), b); err != nil {
+					t.Fatalf("append %d: %v", i, err)
+				}
+			}
+			view := h.SealAndView()
+			for i, want := range tc.bounds {
+				if got := view.Bound(i); got != want {
+					t.Errorf("Bound(%d) = %+v, want %+v", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestHistoryEvictionKeepsRowsAndBoundsAligned(t *testing.T) {
+	h := NewHistory(HistoryConfig{MaxRows: 3, MaxCells: 1024, ChunkRows: 2})
+	for i := range 5 {
+		cells := []renderer.Cell{{Rune: rune('a' + i)}}
+		if err := h.Append(cells, LineBound{End: 1, Soft: i%2 == 0}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	view := h.SealAndView()
+	if view.Len() != 3 {
+		t.Fatalf("Len() = %d, want 3", view.Len())
+	}
+	// Rows 2, 3, 4 survived; their Soft flags were true, false, true.
+	for i, want := range []bool{true, false, true} {
+		if got := view.Bound(i).Soft; got != want {
+			t.Errorf("Bound(%d).Soft = %v, want %v (row %q)", i, got, want, view.BorrowedRow(i)[0].Rune)
+		}
 	}
 }
 

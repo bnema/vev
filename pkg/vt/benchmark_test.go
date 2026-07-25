@@ -28,9 +28,14 @@ func TestHistoryViewPartialTailAllocationBounded(t *testing.T) {
 	partial := benchmarkHistory(t, chunkRows*4+tailRows, width, chunkRows)
 	partialBefore := partial.View()
 
+	// Copying a partial tail costs one allocation per row plus a fixed set of
+	// headers: the chunk slice, its growth for the tail chunk, the chunk itself,
+	// the row slice, and the bounds slice parallel to it.
+	const tailHeaders = 4
+
 	sealedAllocs := testing.AllocsPerRun(20, func() { benchmarkHistoryViewSink = sealed.View() })
 	partialAllocs := testing.AllocsPerRun(20, func() { benchmarkHistoryViewSink = partial.View() })
-	if partialAllocs > sealedAllocs+tailRows+3 {
+	if partialAllocs > sealedAllocs+tailRows+tailHeaders {
 		t.Fatalf("partial-tail View allocations = %v, sealed=%v, tail rows=%d; sealed history was copied", partialAllocs, sealedAllocs, tailRows)
 	}
 	if partial.View().Chunk(0) != partialBefore.Chunk(0) {

@@ -7,26 +7,28 @@ import "github.com/bnema/vev/pkg/renderer"
 // reflow is bounded by the live grid.
 type buffer struct {
 	frame      renderer.Frame
-	boundaries []lineBoundary
+	boundaries []LineBound
 }
 
-type lineBoundary struct {
-	// end is the meaningful cell extent. It excludes padding introduced when a
-	// wide rune was moved off the right edge.
-	end  int
-	soft bool // the row continues into the following physical row
+// LineBound describes a physical row's logical extent. End is exclusive: it is
+// the count of meaningful cells, so the last significant column is End-1. It
+// excludes padding introduced when a wide rune was moved off the right edge.
+// Soft reports that the row continues into the following physical row.
+type LineBound struct {
+	End  int
+	Soft bool
 }
 
 func newBuffer(width, height int) *buffer {
-	return &buffer{frame: renderer.NewFrame(width, height), boundaries: make([]lineBoundary, height)}
+	return &buffer{frame: renderer.NewFrame(width, height), boundaries: make([]LineBound, height)}
 }
 
 func bufferFromFrame(frame renderer.Frame) *buffer {
-	return &buffer{frame: frame, boundaries: make([]lineBoundary, frame.Height)}
+	return &buffer{frame: frame, boundaries: make([]LineBound, frame.Height)}
 }
 
 func (b *buffer) clone() *buffer {
-	out := &buffer{frame: cloneFrame(b.frame), boundaries: append([]lineBoundary(nil), b.boundaries...)}
+	out := &buffer{frame: cloneFrame(b.frame), boundaries: append([]LineBound(nil), b.boundaries...)}
 	return out
 }
 
@@ -34,40 +36,50 @@ func (b *buffer) content(y, end int) {
 	if y < 0 || y >= len(b.boundaries) {
 		return
 	}
-	b.boundaries[y].end = max(b.boundaries[y].end, clamp(end, 0, b.frame.Width))
+	b.boundaries[y].End = max(b.boundaries[y].End, clamp(end, 0, b.frame.Width))
+}
+
+// bound reports the logical extent of row y. Callers on eviction paths may run
+// against a nil or shorter buffer than the frame they are walking, so an
+// unknown row reads as a hard row of no extent rather than panicking.
+func (b *buffer) bound(y int) LineBound {
+	if b == nil || y < 0 || y >= len(b.boundaries) {
+		return LineBound{}
+	}
+	return b.boundaries[y]
 }
 
 func (b *buffer) truncate(y, end int) {
 	if y < 0 || y >= len(b.boundaries) {
 		return
 	}
-	b.boundaries[y].end = min(b.boundaries[y].end, clamp(end, 0, b.frame.Width))
+	b.boundaries[y].End = min(b.boundaries[y].End, clamp(end, 0, b.frame.Width))
 }
 
 // insert retains the meaningful shifted tail when insertion happens within it.
 func (b *buffer) insert(y, at, width int) {
-	if y < 0 || y >= len(b.boundaries) || at >= b.boundaries[y].end {
+	if y < 0 || y >= len(b.boundaries) || at >= b.boundaries[y].End {
 		return
 	}
-	b.boundaries[y].end = min(b.boundaries[y].end+width, b.frame.Width)
+	b.boundaries[y].End = min(b.boundaries[y].End+width, b.frame.Width)
 }
 
 func (b *buffer) hard(y int) {
 	if y >= 0 && y < len(b.boundaries) {
-		b.boundaries[y].soft = false
+		b.boundaries[y].Soft = false
 	}
 }
 
 func (b *buffer) soft(y int) {
 	if y >= 0 && y < len(b.boundaries) {
-		b.boundaries[y].end = b.frame.Width
-		b.boundaries[y].soft = true
+		b.boundaries[y].End = b.frame.Width
+		b.boundaries[y].Soft = true
 	}
 }
 
 func (b *buffer) continueRow(y int) {
 	if y >= 0 && y < len(b.boundaries) {
-		b.boundaries[y].soft = true
+		b.boundaries[y].Soft = true
 	}
 }
 
@@ -80,10 +92,10 @@ func (b *buffer) clear(y, x0, x1 int) {
 		// Erasing through the right edge leaves nothing flowing onto the next
 		// row: the logical line ends here. Keeping a stale soft link would let
 		// reflow merge a repainted row with the unrelated row below it.
-		b.boundaries[y].soft = false
+		b.boundaries[y].Soft = false
 	}
 	if x0 == 0 && x1 >= b.frame.Width {
-		b.boundaries[y] = lineBoundary{}
+		b.boundaries[y] = LineBound{}
 	}
 }
 
@@ -95,7 +107,7 @@ func (b *buffer) scrollUp(top, bottom, n int) {
 	b.hard(top - 1)
 	copy(b.boundaries[top:bottom-n+1], b.boundaries[top+n:bottom+1])
 	for y := bottom - n + 1; y <= bottom; y++ {
-		b.boundaries[y] = lineBoundary{}
+		b.boundaries[y] = LineBound{}
 	}
 	b.hard(bottom - n)
 }
@@ -106,19 +118,19 @@ func (b *buffer) scrollDown(top, bottom, n int) {
 	b.hard(top - 1)
 	copy(b.boundaries[top+n:bottom+1], b.boundaries[top:bottom-n+1])
 	for y := top; y < top+n; y++ {
-		b.boundaries[y] = lineBoundary{}
+		b.boundaries[y] = LineBound{}
 	}
 	b.hard(bottom)
 }
 
 func (b *buffer) hydrate() {
 	for y := range b.boundaries {
-		if b.boundaries[y].end != 0 {
+		if b.boundaries[y].End != 0 {
 			continue
 		}
 		for x := b.frame.Width - 1; x >= 0; x-- {
 			if !b.frame.At(x, y).Equal(renderer.BlankCell()) {
-				b.boundaries[y].end = x + 1
+				b.boundaries[y].End = x + 1
 				break
 			}
 		}
@@ -129,7 +141,7 @@ type bufferCursor struct{ row, col int }
 
 func (b *buffer) hasSoft() bool {
 	for _, boundary := range b.boundaries {
-		if boundary.soft {
+		if boundary.Soft {
 			return true
 		}
 	}
@@ -138,22 +150,25 @@ func (b *buffer) hasSoft() bool {
 
 // resizeFixed keeps hard physical lines independent. It is the common shell
 // path and avoids constructing logical-line scratch state when nothing wraps.
-func (b *buffer) resizeFixed(width, height int, active, saved *bufferCursor) [][]renderer.Cell {
+func (b *buffer) resizeFixed(width, height int, active, saved *bufferCursor) ([][]renderer.Cell, []LineBound) {
 	anchor := 0
 	if active != nil {
 		anchor = active.row
 	}
 	shift := clamp(anchor-(height-1), 0, max(b.frame.Height-height, 0))
 	evicted := make([][]renderer.Cell, 0, shift)
+	evictedBounds := make([]LineBound, 0, shift)
 	for y := range shift {
 		evicted = append(evicted, append([]renderer.Cell(nil), b.frame.Row(y)...))
+		// The evicted row keeps its source width, so its extent needs no clamping.
+		evictedBounds = append(evictedBounds, b.boundaries[y])
 	}
 	// Fixed-line resizes can retain the boundary backing store. In particular,
 	// keep its capacity through a short viewport so the common shrink/grow
 	// sequence does not add metadata allocation to every resize epoch.
 	boundaries := b.boundaries
 	if cap(boundaries) < height {
-		boundaries = make([]lineBoundary, height)
+		boundaries = make([]LineBound, height)
 	} else {
 		boundaries = boundaries[:height]
 	}
@@ -166,7 +181,7 @@ func (b *buffer) resizeFixed(width, height int, active, saved *bufferCursor) [][
 		}
 		copy(next.frame.Row(y), b.frame.Row(sy))
 		next.boundaries[y] = b.boundaries[sy]
-		next.boundaries[y].end = min(next.boundaries[y].end, width)
+		next.boundaries[y].End = min(next.boundaries[y].End, width)
 		repairFrameRow(next.frame, y)
 		copied++
 	}
@@ -178,7 +193,7 @@ func (b *buffer) resizeFixed(width, height int, active, saved *bufferCursor) [][
 		}
 	}
 	*b = next
-	return evicted
+	return evicted, evictedBounds
 }
 
 type reflowPoint struct {
@@ -194,7 +209,7 @@ func (b *buffer) cursorReflowPoints(active, saved *bufferCursor) [2]reflowPoint 
 	cursors := [2]*bufferCursor{active, saved}
 	for start := 0; start < b.frame.Height; {
 		end := start
-		for b.boundaries[end].soft && end+1 < b.frame.Height {
+		for b.boundaries[end].Soft && end+1 < b.frame.Height {
 			end++
 		}
 		for i, cur := range cursors {
@@ -203,11 +218,11 @@ func (b *buffer) cursorReflowPoints(active, saved *bufferCursor) [2]reflowPoint 
 			}
 			offset := 0
 			for y := start; y < cur.row; y++ {
-				offset += b.boundaries[y].end
+				offset += b.boundaries[y].End
 			}
 			points[i] = reflowPoint{
 				line:   start,
-				offset: offset + min(clamp(cur.col, 0, b.frame.Width), b.boundaries[cur.row].end),
+				offset: offset + min(clamp(cur.col, 0, b.frame.Width), b.boundaries[cur.row].End),
 			}
 		}
 		start = end + 1
@@ -219,7 +234,7 @@ func (b *buffer) cursorReflowPoints(active, saved *bufferCursor) [2]reflowPoint 
 // the first maps both cursors and counts rows; the second writes only the
 // retained viewport (and the rows genuinely evicted to history). It never
 // materializes logical lines, per-cell position maps, or temporary output rows.
-func (b *buffer) resize(width, height int, active, saved *bufferCursor) [][]renderer.Cell {
+func (b *buffer) resize(width, height int, active, saved *bufferCursor) ([][]renderer.Cell, []LineBound) {
 	if !b.hasSoft() {
 		return b.resizeFixed(width, height, active, saved)
 	}
@@ -233,7 +248,7 @@ func (b *buffer) resize(width, height int, active, saved *bufferCursor) [][]rend
 	}
 
 	points := b.cursorReflowPoints(active, saved)
-	rows := b.layoutReflow(width, &points, nil, 0, nil)
+	rows := b.layoutReflow(width, &points, nil, 0, nil, nil)
 	anchor := 0
 	if active != nil {
 		anchor = points[0].row
@@ -243,16 +258,18 @@ func (b *buffer) resize(width, height int, active, saved *bufferCursor) [][]rend
 	next := newBuffer(width, height)
 	var evicted [][]renderer.Cell
 	var evictedCells []renderer.Cell
+	var evictedBounds []LineBound
 	if shift > 0 {
 		// History needs owned rows. One flat backing store replaces a temporary
 		// allocation per evicted output row.
 		evicted = make([][]renderer.Cell, shift)
 		evictedCells = make([]renderer.Cell, shift*width)
+		evictedBounds = make([]LineBound, shift)
 		for y := range evicted {
 			evicted[y] = evictedCells[y*width : (y+1)*width]
 		}
 	}
-	b.layoutReflow(width, &points, next, shift, evictedCells)
+	b.layoutReflow(width, &points, next, shift, evictedCells, evictedBounds)
 	for i, cur := range [2]*bufferCursor{active, saved} {
 		if cur != nil {
 			cur.row = clamp(points[i].row-shift, 0, height-1)
@@ -260,13 +277,13 @@ func (b *buffer) resize(width, height int, active, saved *bufferCursor) [][]rend
 		}
 	}
 	*b = *next
-	return evicted
+	return evicted, evictedBounds
 }
 
 // layoutReflow maps source offsets and, when dst is non-nil, emits only rows in
 // [shift, shift+dst.height). Rows before shift are written straight into the
 // contiguous eviction backing store. The return is the logical output height.
-func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, shift int, evicted []renderer.Cell) int {
+func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, shift int, evicted []renderer.Cell, evictedBounds []LineBound) int {
 	row, col := 0, 0
 	blankEvicted := func(outputRow int) []renderer.Cell {
 		if outputRow < shift {
@@ -286,8 +303,16 @@ func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, sh
 		output = blankEvicted(0)
 	}
 	finishRow := func(soft bool) {
-		if dst != nil && row >= shift && row < shift+dst.frame.Height {
-			dst.boundaries[row-shift] = lineBoundary{end: col, soft: soft}
+		// An output row belongs either to history or to the retained viewport, and
+		// only this pass knows where it ended, so both destinations are written here.
+		bound := LineBound{End: col, Soft: soft}
+		switch {
+		case row < shift:
+			if evictedBounds != nil {
+				evictedBounds[row] = bound
+			}
+		case dst != nil && row < shift+dst.frame.Height:
+			dst.boundaries[row-shift] = bound
 		}
 		row++
 		col = 0
@@ -312,7 +337,7 @@ func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, sh
 
 	for start := 0; start < b.frame.Height; {
 		end := start
-		for b.boundaries[end].soft && end+1 < b.frame.Height {
+		for b.boundaries[end].Soft && end+1 < b.frame.Height {
 			end++
 		}
 		reflow := end > start
@@ -320,7 +345,7 @@ func (b *buffer) layoutReflow(width int, points *[2]reflowPoint, dst *buffer, sh
 		truncated := false
 		for y := start; y <= end && !truncated; y++ {
 			cells := b.frame.Row(y)
-			limit := b.boundaries[y].end
+			limit := b.boundaries[y].End
 			for x := 0; x < limit; {
 				cell := cells[x]
 				if cell.Continuation { // Repair malformed rows by dropping orphaned tails.

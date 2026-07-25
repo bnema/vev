@@ -22,7 +22,7 @@ func TestMarshalSnapshotTailSelectsCanonicalEncoder(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			history := vt.NewHistory(vt.HistoryConfig{MaxRows: 2, ChunkRows: 2})
 			if tt.fill {
-				require.NoError(t, history.Append([]renderer.Cell{{Rune: 'x'}}))
+				appendHistoryRow(t, history, []renderer.Cell{{Rune: 'x'}})
 			}
 			tail := history.SnapshotView().Tail()
 
@@ -71,7 +71,7 @@ func TestIncrementalPublicationEncodesAfterPaneUnlock(t *testing.T) {
 func TestSnapshotChunkCacheResistsWarmedOverCapacityHistoryScans(t *testing.T) {
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 6, ChunkRows: 1})
 	for i := range 6 {
-		require.NoError(t, history.Append([]renderer.Cell{{Rune: rune('a' + i)}}))
+		appendHistoryRow(t, history, []renderer.Cell{{Rune: rune('a' + i)}})
 	}
 	view := history.SnapshotView()
 	require.Equal(t, 6, view.ChunkCount())
@@ -119,7 +119,7 @@ func TestSnapshotChunkCacheResistsWarmedOverCapacityHistoryScans(t *testing.T) {
 
 func TestIncrementalPublicationReusesSealedChunkObject(t *testing.T) {
 	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 2, ChunkRows: 1})
-	require.NoError(t, history.Append([]renderer.Cell{renderer.BlankCell()}))
+	appendHistoryRow(t, history, []renderer.Cell{renderer.BlankCell()})
 	view := history.SnapshotView()
 	visible := vt.NewScreen(1, 1).PrimaryVisibleSnapshot()
 	d := New(nil, nil, nil)

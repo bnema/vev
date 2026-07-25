@@ -13,32 +13,53 @@ import (
 
 const OSC52MaxPayloadBytes = 75_000
 
-// Snapshot is the immutable scrollback document: sealed history plus a cloned screen.
+// Snapshot is the immutable scrollback document: sealed history plus a cloned
+// screen. screenBounds is parallel to screen rows, exactly as the history view's
+// own bounds are parallel to its chunk rows.
 type Snapshot struct {
 	history       vt.HistoryView
 	screen        renderer.Frame
+	screenBounds  []vt.LineBound
 	Width, Height int
 }
 
-func NewSnapshot(historySource *vt.History, screen renderer.Frame) Snapshot {
+func NewSnapshot(historySource *vt.History, screen renderer.Frame, bounds []vt.LineBound) Snapshot {
 	var history vt.HistoryView
 	if historySource != nil {
 		history = historySource.SealAndView()
 	}
-	return Snapshot{history: history, screen: screen.Clone(), Width: screen.Width, Height: screen.Height}
+	return Snapshot{
+		history:      history,
+		screen:       screen.Clone(),
+		screenBounds: append([]vt.LineBound(nil), bounds...),
+		Width:        screen.Width,
+		Height:       screen.Height,
+	}
 }
-func NewSnapshotFromRows(rows [][]renderer.Cell, width, height int) Snapshot {
+
+// NewSnapshotFromLines builds a snapshot from raw rows and their bounds. It
+// exists for tests; production code goes through NewSnapshot.
+func NewSnapshotFromLines(rows [][]renderer.Cell, bounds []vt.LineBound, width, height int) Snapshot {
 	history := vt.NewHistory(vt.HistoryConfig{
-		MaxRows:   len(rows),
+		MaxRows:   max(len(rows), 1),
 		MaxCells:  snapshotRowsCellBudget(rows),
 		ChunkRows: 256,
 	})
-	for _, row := range rows {
-		if err := history.Append(row); err != nil {
+	for i, row := range rows {
+		bound := vt.LineBound{End: len(row)}
+		if i < len(bounds) {
+			bound = bounds[i]
+		}
+		if err := history.Append(row, bound); err != nil {
 			panic("copy snapshot: configured history rejected supplied row")
 		}
 	}
 	return Snapshot{history: history.SealAndView(), Width: width, Height: height}
+}
+
+// NewSnapshotFromRows builds a snapshot whose rows are all hard logical lines.
+func NewSnapshotFromRows(rows [][]renderer.Cell, width, height int) Snapshot {
+	return NewSnapshotFromLines(rows, nil, width, height)
 }
 
 // snapshotRowsCellBudget returns a capacity that retains every supplied row.
@@ -66,6 +87,22 @@ func (s Snapshot) Row(i int) []renderer.Cell {
 		return nil
 	}
 	return s.screen.Row(i)
+}
+
+// Bound returns the logical extent of row i, dispatching between sealed history
+// and the live screen exactly as Row does.
+func (s Snapshot) Bound(i int) vt.LineBound {
+	if i < 0 {
+		return vt.LineBound{}
+	}
+	if i < s.history.Len() {
+		return s.history.Bound(i)
+	}
+	i -= s.history.Len()
+	if i >= s.screen.Height || i >= len(s.screenBounds) {
+		return vt.LineBound{}
+	}
+	return s.screenBounds[i]
 }
 func (s Snapshot) rangeRows(yield func(int, []renderer.Cell) bool) {
 	i := 0

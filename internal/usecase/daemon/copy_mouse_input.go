@@ -68,7 +68,7 @@ func (d *Daemon) handleFreshCopyPress(sess *session, ac *attachedClient, tb *tab
 	geometry.pane.mu.Lock()
 	mouseMode, _ := geometry.pane.screen.MouseMode()
 	altScreen := geometry.pane.screen.AltScreenActive()
-	snapshot := scopy.NewSnapshot(geometry.pane.history, geometry.pane.screen.Frame)
+	snapshot := scopy.NewSnapshot(geometry.pane.history, geometry.pane.screen.Frame, geometry.pane.screen.LineBounds())
 	geometry.pane.mu.Unlock()
 	if mouseMode != 0 || altScreen {
 		return false // child forwarding retains its existing raw-byte path.

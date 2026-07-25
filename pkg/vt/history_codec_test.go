@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -8,6 +9,94 @@ import (
 
 	"github.com/bnema/vev/pkg/renderer"
 )
+
+func TestHistoryCodecV2Bytes(t *testing.T) {
+	h := NewHistory(HistoryConfig{MaxRows: 8, MaxCells: 1024, ChunkRows: 2})
+	if err := h.Append([]renderer.Cell{{Rune: 'a'}}, LineBound{End: 1, Soft: true}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	got, err := MarshalHistory(h.SealAndView())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	want := []byte{
+		'V', 'T', 'H', '1', 2, // magic, version
+		0, 0, 0, 1, // chunk count
+		0, 0, 0, 1, // row count
+		0, 0, 0, 1, // cell count
+		0, 0, 0, 'a', // Rune
+		0,    // flags
+		0, 0, // Attrs
+		0, 0, 0, 0, 0, 0, 0, 0, // Foreground
+		0, 0, 0, 0, 0, 0, 0, 0, // Background
+		0, 0, 0, // ForegroundRGB
+		0, 0, 0, // BackgroundRGB
+		0,                      // UnderlineStyle
+		0, 0, 0, 0, 0, 0, 0, 0, // UnderlineColor
+		0, 0, 0, // UnderlineColorRGB — 41 cell bytes through here
+		0, 0, 0, 1, 1, // bound: End=1, Soft=true
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("MarshalHistory() = % x, want % x", got, want)
+	}
+}
+
+func TestHistoryCodecRoundTripsBounds(t *testing.T) {
+	h := NewHistory(HistoryConfig{MaxRows: 8, MaxCells: 1024, ChunkRows: 2})
+	bounds := []LineBound{{End: 2, Soft: true}, {End: 1}, {End: 2, Soft: true}}
+	for _, b := range bounds {
+		if err := h.Append([]renderer.Cell{{Rune: 'a'}, {Rune: 'b'}}, b); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	blob, err := MarshalHistory(h.SealAndView())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	view, err := UnmarshalHistory(blob)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for i, want := range bounds {
+		if got := view.Bound(i); got != want {
+			t.Errorf("Bound(%d) = %+v, want %+v", i, got, want)
+		}
+	}
+}
+
+func TestHistoryCodecRejectsMalformedAndV1Payloads(t *testing.T) {
+	// Canonical v2 fixture from TestHistoryCodecV2Bytes.
+	v2 := []byte{
+		'V', 'T', 'H', '1', 2,
+		0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1,
+		0, 0, 0, 'a',
+		0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0,
+		0,
+		0, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0,
+		0, 0, 0, 1, 1,
+	}
+
+	// This is a genuine v1-layout payload: version 1 and no trailing bound
+	// bytes. It is not a v2 payload with only its version byte changed.
+	v1 := append([]byte(nil), v2[:len(v2)-visibleBoundaryBytes]...)
+	v1[4] = 1
+	if _, err := UnmarshalHistory(v1); err == nil {
+		t.Fatal("accepted a genuine v1 history payload")
+	}
+
+	for i := 0; i < len(v2); i++ {
+		if _, err := UnmarshalHistory(v2[:i]); err == nil {
+			t.Fatalf("accepted truncated prefix of length %d", i)
+		}
+	}
+	if _, err := UnmarshalHistory(append(append([]byte(nil), v2...), 0xff)); err == nil {
+		t.Fatal("accepted trailing garbage")
+	}
+}
 
 func TestChunkCodecRoundTripsLosslessCellsAndStyles(t *testing.T) {
 	indexed := renderer.Style{
