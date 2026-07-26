@@ -791,12 +791,12 @@ func (_c *MockSnapshotRepository_Publish_Call) RunAndReturn(run func(context1 co
 	return _c
 }
 
-// RepairHEAD provides a mock function for the type MockSnapshotRepository
-func (_mock *MockSnapshotRepository) RepairHEAD(context1 context.Context, incarnationID domain.IncarnationID, v ports.CheckpointRef) error {
+// ReconcileCheckpoint provides a mock function for the type MockSnapshotRepository
+func (_mock *MockSnapshotRepository) ReconcileCheckpoint(context1 context.Context, incarnationID domain.IncarnationID, v ports.CheckpointRef) error {
 	ret := _mock.Called(context1, incarnationID, v)
 
 	if len(ret) == 0 {
-		panic("no return value specified for RepairHEAD")
+		panic("no return value specified for ReconcileCheckpoint")
 	}
 
 	var r0 error
@@ -808,20 +808,20 @@ func (_mock *MockSnapshotRepository) RepairHEAD(context1 context.Context, incarn
 	return r0
 }
 
-// MockSnapshotRepository_RepairHEAD_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RepairHEAD'
-type MockSnapshotRepository_RepairHEAD_Call struct {
+// MockSnapshotRepository_ReconcileCheckpoint_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ReconcileCheckpoint'
+type MockSnapshotRepository_ReconcileCheckpoint_Call struct {
 	*mock.Call
 }
 
-// RepairHEAD is a helper method to define mock.On call
+// ReconcileCheckpoint is a helper method to define mock.On call
 //   - context1 context.Context
 //   - incarnationID domain.IncarnationID
 //   - v ports.CheckpointRef
-func (_e *MockSnapshotRepository_Expecter) RepairHEAD(context1 any, incarnationID any, v any) *MockSnapshotRepository_RepairHEAD_Call {
-	return &MockSnapshotRepository_RepairHEAD_Call{Call: _e.mock.On("RepairHEAD", context1, incarnationID, v)}
+func (_e *MockSnapshotRepository_Expecter) ReconcileCheckpoint(context1 any, incarnationID any, v any) *MockSnapshotRepository_ReconcileCheckpoint_Call {
+	return &MockSnapshotRepository_ReconcileCheckpoint_Call{Call: _e.mock.On("ReconcileCheckpoint", context1, incarnationID, v)}
 }
 
-func (_c *MockSnapshotRepository_RepairHEAD_Call) Run(run func(context1 context.Context, incarnationID domain.IncarnationID, v ports.CheckpointRef)) *MockSnapshotRepository_RepairHEAD_Call {
+func (_c *MockSnapshotRepository_ReconcileCheckpoint_Call) Run(run func(context1 context.Context, incarnationID domain.IncarnationID, v ports.CheckpointRef)) *MockSnapshotRepository_ReconcileCheckpoint_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -844,12 +844,12 @@ func (_c *MockSnapshotRepository_RepairHEAD_Call) Run(run func(context1 context.
 	return _c
 }
 
-func (_c *MockSnapshotRepository_RepairHEAD_Call) Return(err error) *MockSnapshotRepository_RepairHEAD_Call {
+func (_c *MockSnapshotRepository_ReconcileCheckpoint_Call) Return(err error) *MockSnapshotRepository_ReconcileCheckpoint_Call {
 	_c.Call.Return(err)
 	return _c
 }
 
-func (_c *MockSnapshotRepository_RepairHEAD_Call) RunAndReturn(run func(context1 context.Context, incarnationID domain.IncarnationID, v ports.CheckpointRef) error) *MockSnapshotRepository_RepairHEAD_Call {
+func (_c *MockSnapshotRepository_ReconcileCheckpoint_Call) RunAndReturn(run func(context1 context.Context, incarnationID domain.IncarnationID, v ports.CheckpointRef) error) *MockSnapshotRepository_ReconcileCheckpoint_Call {
 	_c.Call.Return(run)
 	return _c
 }

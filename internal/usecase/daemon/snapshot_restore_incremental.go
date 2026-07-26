@@ -54,8 +54,7 @@ func (d *Daemon) restoreCatalogue(ctx context.Context, records []domain.Catalogu
 	for range workers {
 		wg.Go(func() {
 			for record := range jobs {
-				d.ensureCatalogueRegistryEntry(record)
-				done := d.recordRestoreDone(record.Name)
+				done := d.ensureCatalogueRegistryEntry(record)
 				err := d.restoreRecord(ctx, record)
 				d.finishRecordRestore(record, err, done)
 			}
@@ -68,14 +67,8 @@ func (d *Daemon) restoreCatalogue(ctx context.Context, records []domain.Catalogu
 	wg.Wait()
 }
 
-func (d *Daemon) ensureCatalogueRegistryEntry(record domain.CatalogueRecord) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if entry, ok := d.stopped[record.Name]; ok && entry.restoreDone != nil {
-		return
-	}
-	state, done := initialSessionState(record)
-	d.stopped[record.Name] = stoppedSession{
+func stoppedSessionFromRecord(record domain.CatalogueRecord, state ports.SessionState, done chan struct{}) stoppedSession {
+	return stoppedSession{
 		name:        record.Name,
 		cwd:         record.Cwd,
 		createdAt:   record.CreatedAt,
@@ -88,10 +81,15 @@ func (d *Daemon) ensureCatalogueRegistryEntry(record domain.CatalogueRecord) {
 	}
 }
 
-func (d *Daemon) recordRestoreDone(name string) chan struct{} {
+func (d *Daemon) ensureCatalogueRegistryEntry(record domain.CatalogueRecord) chan struct{} {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.stopped[name].restoreDone
+	if entry, ok := d.stopped[record.Name]; ok {
+		return entry.restoreDone
+	}
+	state, done := initialSessionState(record)
+	d.stopped[record.Name] = stoppedSessionFromRecord(record, state, done)
+	return done
 }
 
 // closeRuntimeRestoreDoneLocked closes a per-record restoration barrier.
@@ -114,54 +112,33 @@ func (d *Daemon) setStoppedRecovery(record domain.CatalogueRecord, state ports.S
 	if !ok {
 		return
 	}
-	entry.record = record
-	entry.state = state
-	entry.cwd = record.Cwd
-	entry.createdAt = record.CreatedAt
-	entry.incarnation = record.IncarnationID
-	entry.lastUsedSeq = record.LastUsedSeq
-	entry.tabNames = append([]string(nil), record.TabNames...)
-	d.stopped[record.Name] = entry
+	d.stopped[record.Name] = stoppedSessionFromRecord(record, state, entry.restoreDone)
 }
 
 func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr error, done chan struct{}) {
 	retryable := errors.Is(restoreErr, errRetryableRestoreLoad)
 	degraded := false
-	if restoreErr != nil && d.catalogue != nil {
-		current, ok, readErr := d.catalogue.Record(record.Name)
+	if restoreErr != nil {
+		reason := "checkpoint validation failed"
 		switch {
-		case readErr != nil:
-			d.log.Error("reading catalogue before degradation failed", "session", record.Name, "err", readErr)
-		case ok && current.IncarnationID == record.IncarnationID:
+		case retryable:
+			reason = "checkpoint load failed"
+		case errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded):
+			reason = "restore interrupted"
+		}
+		if d.recovery == nil {
+			d.log.Error("marking session degraded failed", "session", record.Name, "err", errors.New("recovery coordinator unavailable"))
+		} else if current, marked, err := d.recovery.MarkBroken(context.Background(), record.Name, record.IncarnationID, reason); err != nil {
+			d.log.Error("marking session degraded failed", "session", record.Name, "err", err)
+		} else if marked {
 			record = current
-			record.DegradedReason = "checkpoint validation failed"
-			switch {
-			case retryable:
-				record.DegradedReason = "checkpoint load failed"
-			case errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded):
-				record.DegradedReason = "restore interrupted"
-			}
-			if err := d.catalogue.Replace(record.Name, record); err != nil {
-				d.log.Error("marking session degraded failed", "session", record.Name, "err", err)
-			}
 			degraded = true
 		}
 	}
 
 	d.mu.Lock()
-	entry, ok := d.stopped[record.Name]
-	if ok {
-		switch {
-		case degraded:
-			entry.record = record
-			entry.state = ports.SessionBroken
-			entry.cwd = record.Cwd
-			entry.createdAt = record.CreatedAt
-			entry.incarnation = record.IncarnationID
-			entry.lastUsedSeq = record.LastUsedSeq
-			entry.tabNames = append([]string(nil), record.TabNames...)
-			d.stopped[record.Name] = entry
-		}
+	if entry, ok := d.stopped[record.Name]; ok && degraded {
+		d.stopped[record.Name] = stoppedSessionFromRecord(record, ports.SessionBroken, entry.restoreDone)
 	}
 	closeRuntimeRestoreDoneLocked(done)
 	d.mu.Unlock()
@@ -224,10 +201,10 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 		d.logRejectedRestoreCandidate(record, selected, false, "generation-mismatch", nil)
 		return errors.New("snapshot: committed checkpoint did not validate")
 	}
-	if err := d.snapshotRepository.RepairHEAD(ctx, record.IncarnationID, selected); err != nil {
-		d.log.Warn("snapshot_head_repair_pending", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation, "reason_code", "repair-failed")
+	if err := d.snapshotRepository.ReconcileCheckpoint(ctx, record.IncarnationID, selected); err != nil {
+		d.log.Warn("snapshot_checkpoint_reconciliation_pending", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation, "reason_code", "reconcile-failed")
 	} else {
-		d.log.Info("snapshot_head_repair_complete", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation)
+		d.log.Info("snapshot_checkpoint_reconciliation_complete", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation)
 	}
 
 	if err := d.restoreSession(ctx, selectedSnapshot, selectedGeneration.Generation, selected); err != nil {

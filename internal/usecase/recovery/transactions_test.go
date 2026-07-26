@@ -108,6 +108,8 @@ type transactionRepository struct {
 	mu            sync.Mutex
 	deleteErrOnce error
 	deletedIDs    []domain.IncarnationID
+	deleteEntered chan struct{}
+	releaseDelete chan struct{}
 }
 
 type garbageCollectionFenceRepository struct {
@@ -196,6 +198,10 @@ func (r *garbageCollectionFenceRepository) eventLog() ([]string, bool) {
 }
 
 func (r *transactionRepository) DeleteIncarnation(_ context.Context, id domain.IncarnationID) error {
+	if r.deleteEntered != nil {
+		close(r.deleteEntered)
+		<-r.releaseDelete
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.deleteErrOnce != nil {
@@ -293,6 +299,43 @@ func TestStartupGarbageCollectionFencesNewIncarnationsAndCheckpointPublications(
 		require.False(t, publishedBeforeGC)
 		require.True(t, repository.hasGeneration(record.IncarnationID, 2), "GC's stale keep snapshot must finish before generation two is published")
 	})
+}
+
+func TestMarkBrokenCannotOverwriteDiscardReplacement(t *testing.T) {
+	t.Parallel()
+	old := degradedTransactionRecord()
+	catalogue := newTransactionCatalogue(old)
+	repository := &transactionRepository{deleteEntered: make(chan struct{}), releaseDelete: make(chan struct{})}
+	coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+
+	discarded := make(chan error, 1)
+	go func() { discarded <- coordinator.Discard(t.Context(), old.Name) }()
+	<-repository.deleteEntered // Replace committed the fresh incarnation while Discard retains the mutation fence.
+
+	marked := make(chan struct {
+		marked bool
+		err    error
+	}, 1)
+	go func() {
+		_, markedSession, err := coordinator.MarkBroken(t.Context(), old.Name, old.IncarnationID, "late restore failure")
+		marked <- struct {
+			marked bool
+			err    error
+		}{markedSession, err}
+	}()
+
+	close(repository.releaseDelete)
+	require.NoError(t, <-discarded)
+	result := <-marked
+	require.NoError(t, result.err)
+	require.False(t, result.marked, "a late restore must not degrade the replacement incarnation")
+
+	got, ok, err := catalogue.Record(old.Name)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotEqual(t, old.IncarnationID, got.IncarnationID)
+	require.Nil(t, got.Committed)
+	require.Empty(t, got.DegradedReason)
 }
 
 func TestDiscardIsRetryIdempotent(t *testing.T) {

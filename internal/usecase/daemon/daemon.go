@@ -127,12 +127,11 @@ type Daemon struct {
 	// snapshotRepository is the sole checkpoint storage contract.
 	snapshotRepository      ports.SnapshotRepository
 	recovery                *recoveryusecase.Coordinator
-	maintenance             maintenanceDependencies
 	maintenanceWorkerCancel context.CancelFunc
 	maintenanceWorkerDone   chan struct{}
 	// restoreWorkerDone is the restoration goroutine's ownership signal. Startup
-	// restoration may repair a repository HEAD, so it is a durable writer and is
-	// guarded by snapshotWorkerMu with the other two.
+	// restoration reconciles durable checkpoints, so it is a durable writer and
+	// is guarded by snapshotWorkerMu with the other two.
 	restoreWorkerDone chan struct{}
 	snapsEnabled      bool
 	noticeStore       ports.NoticeStore
@@ -326,11 +325,14 @@ func WithNoticeStore(store ports.NoticeStore) Option {
 	return func(d *Daemon) { d.noticeStore = store }
 }
 
-// WithDurableMaintenance configures the one pre-publication garbage-collection
-// pass. The application invokes it before opening the daemon socket.
+// WithDurableMaintenance retains the application wiring for the one
+// pre-publication GC pass. Standalone users without an explicitly supplied
+// coordinator receive the same canonical coordinator path.
 func WithDurableMaintenance(catalogue ports.Catalogue, repository ports.SnapshotRepository) Option {
 	return func(d *Daemon) {
-		d.maintenance = newMaintenanceDependencies(catalogue, repository)
+		if d.recovery == nil {
+			d.recovery = recoveryusecase.NewCoordinator(catalogue, repository, nil)
+		}
 	}
 }
 
@@ -498,12 +500,12 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	var maxCreatedAt int64
 	hasCreatedAt := false
 	for _, r := range records {
-		stopped := stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, incarnation: r.IncarnationID, lastUsedSeq: r.LastUsedSeq, tabNames: append([]string(nil), r.TabNames...)}
 		if d.catalogueRecordsProvided {
-			stopped.record = r
-			stopped.state, stopped.restoreDone = initialSessionState(r)
+			state, done := initialSessionState(r)
+			d.stopped[r.Name] = stoppedSessionFromRecord(r, state, done)
+		} else {
+			d.stopped[r.Name] = stoppedSession{name: r.Name, cwd: r.Cwd, createdAt: r.CreatedAt, incarnation: r.IncarnationID, lastUsedSeq: r.LastUsedSeq, tabNames: append([]string(nil), r.TabNames...)}
 		}
-		d.stopped[r.Name] = stopped
 		if !hasCreatedAt || r.CreatedAt > maxCreatedAt {
 			maxCreatedAt = r.CreatedAt
 			hasCreatedAt = true

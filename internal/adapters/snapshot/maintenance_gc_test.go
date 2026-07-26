@@ -37,6 +37,49 @@ func TestCollectGarbageClearsUncommittedCheckpointHead(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestCollectGarbageRejectsMalformedAuthorityWithoutMutation(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(*testing.T, *Repository, domain.IncarnationID, domain.CheckpointRef) domain.CheckpointRef
+	}{
+		{
+			name: "committed digest mismatch",
+			mutate: func(_ *testing.T, _ *Repository, _ domain.IncarnationID, committed domain.CheckpointRef) domain.CheckpointRef {
+				committed.ManifestDigest[0]++
+				return committed
+			},
+		},
+		{
+			name: "committed manifest missing",
+			mutate: func(t *testing.T, repository *Repository, id domain.IncarnationID, committed domain.CheckpointRef) domain.CheckpointRef {
+				t.Helper()
+				require.NoError(t, os.Remove(repository.manifestPath(id, committed.Generation)))
+				return committed
+			},
+		},
+		{
+			name: "committed manifest corrupt",
+			mutate: func(t *testing.T, repository *Repository, id domain.IncarnationID, committed domain.CheckpointRef) domain.CheckpointRef {
+				t.Helper()
+				require.NoError(t, os.WriteFile(repository.manifestPath(id, committed.Generation), []byte("corrupt"), 0o600))
+				return committed
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			repository := NewRepository(privateDir(t))
+			publications := publishGarbageCollectionGenerations(t, repository, "work", 3)
+			id := publications[0].IncarnationID
+			committed := domain.CheckpointRef{Generation: 3, ManifestDigest: sha256.Sum256(publications[2].Manifest)}
+			committed = tt.mutate(t, repository, id, committed)
+			before := snapshotRepositoryFiles(t, repository.dir)
+
+			require.Error(t, repository.CollectGarbage(t.Context(), map[domain.IncarnationID]domain.CheckpointRef{id: committed}))
+			require.Equal(t, before, snapshotRepositoryFiles(t, repository.dir), "malformed catalogue authority must fail closed")
+		})
+	}
+}
+
 func TestCollectGarbage(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -46,8 +89,7 @@ func TestCollectGarbage(t *testing.T) {
 		wantGenerations []uint64
 	}{
 		{name: "incarnation absent from catalogue is removed whole"},
-		{name: "committed and immediate predecessor survive", committed: 3, known: true, wantGenerations: []uint64{2, 3}},
-		{name: "forward orphan newer than committed is removed", committed: 3, known: true, wantGenerations: []uint64{2, 3}},
+		{name: "committed checkpoint prunes forward orphan and keeps predecessor", committed: 3, known: true, wantGenerations: []uint64{2, 3}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

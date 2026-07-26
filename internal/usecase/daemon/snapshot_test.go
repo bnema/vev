@@ -106,7 +106,7 @@ func (noOpSnapshotRepository) Publish(context.Context, ports.SnapshotPublication
 func (noOpSnapshotRepository) LoadCheckpoint(context.Context, domain.IncarnationID, string, ports.CheckpointRef) (ports.SnapshotGeneration, error) {
 	return ports.SnapshotGeneration{}, errors.New("unused")
 }
-func (noOpSnapshotRepository) RepairHEAD(context.Context, domain.IncarnationID, ports.CheckpointRef) error {
+func (noOpSnapshotRepository) ReconcileCheckpoint(context.Context, domain.IncarnationID, ports.CheckpointRef) error {
 	return nil
 }
 func (noOpSnapshotRepository) DeleteIncarnation(context.Context, domain.IncarnationID) error {

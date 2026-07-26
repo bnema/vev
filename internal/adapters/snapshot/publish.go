@@ -34,10 +34,12 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// The common replay path needs neither a manifest decode nor a reference
-	// map. Checking the immutable bytes directly also keeps its descriptor
-	// reads beneath the pinned repository root.
-	if unchanged, err := r.unchangedPublication(publication); err == nil && unchanged {
+	// A replay may find a forward orphan left after publication but before its
+	// catalogue commit. Accept it only after the canonical checkpoint loader has
+	// revalidated the pointer digest, manifest, and every referenced object.
+	if unchanged, err := r.unchangedPublication(ctx, publication); err != nil {
+		return err
+	} else if unchanged {
 		return nil
 	}
 
@@ -137,22 +139,22 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	return nil
 }
 
-// unchangedPublication uses one root for the two reads in the replay fast
-// path. The root is confined to this operation and is closed before return;
-// all other repository operations retain their open-per-operation roots.
-func (r *Repository) unchangedPublication(publication ports.SnapshotPublication) (unchanged bool, err error) {
-	root, err := r.openRoot()
-	if err != nil {
-		return false, err
-	}
-	defer func() { joinCloseError(&err, "close snapshot root", r.closeRoot(root)) }()
-
-	generation, _, err := r.readHeadWithRoot(root, publication.IncarnationID)
+// unchangedPublication validates an existing forward orphan through the same
+// loader used for recovery. A corrupt replay must not be accepted merely
+// because its manifest bytes happen to match the requested publication.
+func (r *Repository) unchangedPublication(ctx context.Context, publication ports.SnapshotPublication) (bool, error) {
+	generation, digest, err := r.readHead(publication.IncarnationID)
 	if err != nil || generation != publication.Generation {
 		return false, nil
 	}
-	current, err := r.readBoundedRoot(root, r.manifestPath(publication.IncarnationID, generation))
-	return err == nil && bytes.Equal(current, publication.Manifest), nil
+	current, _, err := r.loadCheckpointLocked(ctx, publication.IncarnationID, publication.Name, ports.CheckpointRef{
+		Generation:     generation,
+		ManifestDigest: digest,
+	})
+	if err != nil {
+		return false, fmt.Errorf("validate replayed checkpoint: %w", err)
+	}
+	return bytes.Equal(current.Manifest, publication.Manifest), nil
 }
 
 func (r *Repository) currentIncarnationPublication(ctx context.Context, publication ports.SnapshotPublication) (uint64, []byte, map[ports.SnapshotDigest]codec.ObjectRef, error) {

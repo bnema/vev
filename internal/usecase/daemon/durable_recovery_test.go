@@ -146,7 +146,7 @@ func (r *durableRecoveryRepository) LoadCheckpoint(_ context.Context, id domain.
 	return generation, nil
 }
 
-func (r *durableRecoveryRepository) RepairHEAD(_ context.Context, id domain.IncarnationID, ref ports.CheckpointRef) error {
+func (r *durableRecoveryRepository) ReconcileCheckpoint(_ context.Context, id domain.IncarnationID, ref ports.CheckpointRef) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.repairCalls++
@@ -431,6 +431,7 @@ func TestFinishRecordRestoreDoesNotDegradeStaleCatalogueAuthority(t *testing.T) 
 			name: "catalogue read error",
 			setup: func(d *Daemon, c *durableRecoveryCatalogue, _ domain.CatalogueRecord) {
 				d.catalogue = recordErrorCatalogue{durableRecoveryCatalogue: c, err: errors.New("read failed")}
+				d.recovery = recoveryusecase.NewCoordinator(d.catalogue, nil, nil)
 			},
 		},
 	} {
@@ -555,7 +556,9 @@ func TestAttachWaitsForRestore(t *testing.T) {
 func TestAttachBarrierSurvivesLiveRegistryPublication(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, &durableRecoveryRepository{})
-	done := d.recordRestoreDone(record.Name)
+	d.mu.Lock()
+	done := d.stopped[record.Name].restoreDone
+	d.mu.Unlock()
 	sess := &session{name: record.Name, incarnation: record.IncarnationID}
 
 	registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess)

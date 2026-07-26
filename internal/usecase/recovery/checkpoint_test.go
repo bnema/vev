@@ -85,7 +85,7 @@ func (r *checkpointRepository) LoadCheckpoint(_ context.Context, _ domain.Incarn
 	return generation, nil
 }
 
-func (r *checkpointRepository) RepairHEAD(_ context.Context, _ domain.IncarnationID, ref ports.CheckpointRef) error {
+func (r *checkpointRepository) ReconcileCheckpoint(_ context.Context, _ domain.IncarnationID, ref ports.CheckpointRef) error {
 	r.repairs = append(r.repairs, ref)
 	return r.repairErr
 }

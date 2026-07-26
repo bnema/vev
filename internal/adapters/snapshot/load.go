@@ -65,7 +65,7 @@ func (r *Repository) loadCheckpointLocked(ctx context.Context, id domain.Incarna
 	return ports.SnapshotGeneration{IncarnationID: id, Name: name, Generation: ref.Generation, ParentCheckpoint: manifest.ParentCheckpoint, Manifest: data, Objects: objects}, manifest, nil
 }
 
-func (r *Repository) RepairHEAD(ctx context.Context, id domain.IncarnationID, ref ports.CheckpointRef) error {
+func (r *Repository) ReconcileCheckpoint(ctx context.Context, id domain.IncarnationID, ref ports.CheckpointRef) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

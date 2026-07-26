@@ -38,5 +38,4 @@ func TestStartupGarbageCollectionSkipsUnknownCatalogueState(t *testing.T) {
 
 	require.Error(t, d.CollectStartupGarbage(context.Background()))
 	repository.AssertNotCalled(t, "CollectGarbage", mock.Anything, mock.Anything)
-	require.NotNil(t, d.maintenance.catalogue)
 }

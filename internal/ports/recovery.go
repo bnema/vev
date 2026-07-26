@@ -42,7 +42,7 @@ type Catalogue interface {
 type SnapshotRepository interface {
 	Publish(context.Context, SnapshotPublication) error
 	LoadCheckpoint(context.Context, domain.IncarnationID, string, CheckpointRef) (SnapshotGeneration, error)
-	RepairHEAD(context.Context, domain.IncarnationID, CheckpointRef) error
+	ReconcileCheckpoint(context.Context, domain.IncarnationID, CheckpointRef) error
 	DeleteIncarnation(context.Context, domain.IncarnationID) error
 	CollectGarbage(context.Context, map[domain.IncarnationID]domain.CheckpointRef) error
 }

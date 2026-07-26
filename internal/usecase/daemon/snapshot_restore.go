@@ -37,8 +37,8 @@ func (d *Daemon) closeRestoreDone() {
 }
 
 // startSnapshotRestoration launches catalogue-driven restoration as a durable
-// writer. Restoration may repair HEADs, so lifecycle ownership must outlive it
-// exactly as it outlives the snapshot and maintenance workers. The completion
+// writer. Restoration reconciles committed checkpoints, so lifecycle ownership
+// must outlive it exactly as it outlives the snapshot and maintenance workers. The completion
 // channel is registered before the goroutine starts, so shutdown can never
 // begin waiting while this writer is still unregistered.
 func (d *Daemon) startSnapshotRestoration() {

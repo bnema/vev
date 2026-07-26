@@ -790,11 +790,11 @@ func (r *lifecycleBlockingRestore) LoadCheckpoint(ctx context.Context, id domain
 	return r.SnapshotRepository.LoadCheckpoint(ctx, id, name, ref)
 }
 
-func (r *lifecycleBlockingRestore) RepairHEAD(ctx context.Context, id domain.IncarnationID, ref domain.CheckpointRef) error {
+func (r *lifecycleBlockingRestore) ReconcileCheckpoint(ctx context.Context, id domain.IncarnationID, ref domain.CheckpointRef) error {
 	r.enterOnce.Do(func() { close(r.entered) })
 	<-r.release // Intentionally ignore cancellation: lifecycle ownership must outlive this call.
 	r.returnOnce.Do(func() { close(r.returned) })
-	return r.SnapshotRepository.RepairHEAD(ctx, id, ref)
+	return r.SnapshotRepository.ReconcileCheckpoint(ctx, id, ref)
 }
 
 func (r *lifecycleBlockingRestore) repairedName() string {

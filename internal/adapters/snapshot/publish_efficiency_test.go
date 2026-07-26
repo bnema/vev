@@ -13,7 +13,7 @@ import (
 	codec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
-func TestRepositoryPublishSkipsUnchangedTenThousandObjectHistory(t *testing.T) {
+func TestRepositoryPublishRevalidatesUnchangedTenThousandObjectHistory(t *testing.T) {
 	const historyObjects = 10_000
 
 	repo := NewRepository(privateDir(t))
@@ -24,19 +24,12 @@ func TestRepositoryPublishSkipsUnchangedTenThousandObjectHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Replaying the now-current generation still parses the 10k references, but
-	// must not allocate one object-sized buffer per retained history entry.
-	// The limit is 450, not lower: the os.Root-based fast path pays a constant
-	// allocation cost for guarded reads and root identity validation, and -race
-	// adds further overhead. A per-retained-object regression would exceed this
-	// by orders of magnitude.
-	allocations := testing.AllocsPerRun(3, func() {
-		if err := repo.Publish(context.Background(), second); err != nil {
-			panic(err)
-		}
-	})
-	if allocations > 450 {
-		t.Fatalf("unchanged 10k history Publish allocations = %.0f, want <= 450; retained objects were likely copied", allocations)
+	// Replaying the current generation revalidates every referenced immutable
+	// object before accepting it. That is required for a forward orphan retry:
+	// the catalogue must not advance to a checkpoint whose files were damaged
+	// after its original publication.
+	if err := repo.Publish(context.Background(), second); err != nil {
+		t.Fatal(err)
 	}
 
 	got, err := loadPublication(context.Background(), repo, second)
