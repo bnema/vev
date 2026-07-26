@@ -198,9 +198,10 @@ func (d *Daemon) stopSnapshotEncodeWorker() {
 	d.WaitDurableWriters()
 }
 
-// StopDurableWriters stops admission and requests the worker's final drain.
-// The context bounds checkpoint success only: cancellation asks cooperative
-// repository calls to stop, but it never detaches the worker from its owner.
+// StopDurableWriters stops maintenance scheduling, cancels cooperative
+// maintenance calls, stops snapshot admission, and requests the snapshot
+// worker's final drain. The context bounds checkpoint success only:
+// cancellation never detaches a writer from its owner.
 func (d *Daemon) StopDurableWriters(ctx context.Context) []string {
 	if d == nil {
 		return nil
@@ -228,18 +229,24 @@ func (d *Daemon) WaitDurableWriters() {
 		return
 	}
 	d.snapshotWorkerMu.Lock()
-	done := d.snapshotWorkerDone
+	snapshotDone := d.snapshotWorkerDone
+	maintenanceDone := d.maintenanceWorkerDone
 	d.snapshotWorkerMu.Unlock()
-	if done == nil {
-		return
+	if snapshotDone != nil {
+		<-snapshotDone
+		d.finishStoppedSnapshotWorker(false)
 	}
-	<-done
-	d.finishStoppedSnapshotWorker(false)
+	if maintenanceDone != nil {
+		<-maintenanceDone
+	}
 }
 
 func (d *Daemon) requestDurableWriterStop() (context.CancelFunc, <-chan struct{}) {
 	d.snapshotWorkerMu.Lock()
 	defer d.snapshotWorkerMu.Unlock()
+	if d.maintenanceWorkerCancel != nil {
+		d.maintenanceWorkerCancel()
+	}
 	cancel := d.snapshotWorkerCancel
 	if cancel == nil {
 		return nil, nil

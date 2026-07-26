@@ -58,6 +58,29 @@ func retentionPlan(record domain.CatalogueRecord, unresolved, restoring bool) po
 	return plan
 }
 
+func (d *Daemon) startDurableMaintenance() {
+	if d == nil {
+		return
+	}
+	d.snapshotWorkerMu.Lock()
+	if d.maintenanceWorkerCancel != nil {
+		d.snapshotWorkerMu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(d.serveCtx)
+	d.maintenanceWorkerCancel = cancel
+	d.maintenanceWorkerDone = make(chan struct{})
+	done := d.maintenanceWorkerDone
+	d.snapshotWorkerMu.Unlock()
+
+	// Register the completion channel before launch so shutdown can never begin
+	// waiting while this durable writer is still unregistered.
+	go func() {
+		defer close(done)
+		d.runDurableMaintenance(ctx)
+	}()
+}
+
 func (d *Daemon) runDurableMaintenance(ctx context.Context) {
 	select {
 	case <-ctx.Done():

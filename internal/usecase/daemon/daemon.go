@@ -124,15 +124,17 @@ type Daemon struct {
 	catalogueRecordsProvided       bool
 	// snapshotRepository is the sole checkpoint contract. legacySnapshots is
 	// read-only migration input and is never used for new writes.
-	snapshotRepository ports.SnapshotRepository
-	checkpointRecovery ports.CheckpointCoordinator
-	lifecycleRecovery  ports.SessionLifecycleCoordinator
-	degradedRecovery   ports.DegradedRecoveryCoordinator
-	maintenance        maintenanceDependencies
-	legacySnapshots    ports.LegacySnapshotSource
-	snapsEnabled       bool
-	noticeStore        ports.NoticeStore
-	snapshotJobs       chan *snapshotCapture
+	snapshotRepository      ports.SnapshotRepository
+	checkpointRecovery      ports.CheckpointCoordinator
+	lifecycleRecovery       ports.SessionLifecycleCoordinator
+	degradedRecovery        ports.DegradedRecoveryCoordinator
+	maintenance             maintenanceDependencies
+	maintenanceWorkerCancel context.CancelFunc
+	maintenanceWorkerDone   chan struct{}
+	legacySnapshots         ports.LegacySnapshotSource
+	snapsEnabled            bool
+	noticeStore             ports.NoticeStore
+	snapshotJobs            chan *snapshotCapture
 	// snapshotWake wakes the repository scheduler when a session becomes dirty
 	// or an attempt completes. It is never closed and producers only send
 	// non-blockingly.
@@ -546,9 +548,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 		d.closeRestoreDone()
 	}
 	if d.maintenance.reconciler != nil {
-		d.sessWg.Go(func() {
-			d.runDurableMaintenance(d.serveCtx)
-		})
+		d.startDurableMaintenance()
 	}
 
 	// Break the accept loop when either the parent context is cancelled or the

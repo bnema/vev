@@ -529,6 +529,101 @@ func TestKillDaemonWaitsForOwnershipTransfer(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	stateDir := filepath.Join(t.TempDir(), "state")
+	catalogue := &lifecycleObservedCatalogue{
+		Catalogue: newTestPersister(t, stateDir),
+		closed:    make(chan struct{}),
+	}
+	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
+	shutdownClock := newLifecycleShutdownClock()
+	reconciler := &lifecycleBlockingReconciler{
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+		returned: make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var releaseOnce sync.Once
+	releaseMaintenance := func() { releaseOnce.Do(func() { close(reconciler.release) }) }
+	t.Cleanup(releaseMaintenance)
+
+	listenerReady := make(chan struct{})
+	callbackReturned := make(chan struct{})
+	wrapperReturned := make(chan error, 1)
+	go func() {
+		wrapperReturned <- runWithLifecycleOwner(ctx, runtimeDir, stateDir, func(ctx context.Context) error {
+			defer close(callbackReturned)
+			listener, err := ipc.Listen(runtimeDir)
+			if err != nil {
+				return err
+			}
+			close(listenerReady)
+			d := daemon.New(
+				pty.NewFactory(),
+				shutdownClock,
+				discardLog(),
+				daemon.WithSnapshotRepository(repository, nil),
+				daemon.WithDurableMaintenance(catalogue, repository, reconciler, nil),
+				daemon.WithCatalogue(catalogue, nil),
+			)
+			return d.Serve(ctx, listener)
+		})
+	}()
+
+	awaitLifecycleStage(t, listenerReady, "daemon listener")
+	awaitLifecycleStage(t, reconciler.entered, "maintenance repository call")
+	cancel()
+	shutdownClock.nextTimer(t).fire()
+	select {
+	case <-callbackReturned:
+		t.Fatal("Serve callback returned after shutdown deadline while maintenance was blocked")
+	case <-time.After(100 * time.Millisecond):
+	}
+	assertLifecycleStagePending(t, callbackReturned, "Serve callback return while maintenance is blocked")
+	assertLifecycleStagePending(t, catalogue.closed, "catalogue close while maintenance is blocked")
+	assertLifecycleResultPending(t, wrapperReturned, "lifecycle wrapper return while maintenance is blocked")
+	_, err := lifecycle.TryAcquire(runtimeDir)
+	require.ErrorIs(t, err, lifecycle.ErrBusy)
+
+	releaseMaintenance()
+	awaitLifecycleStage(t, reconciler.returned, "maintenance repository return")
+	awaitLifecycleStage(t, catalogue.closed, "catalogue close after maintenance")
+	awaitLifecycleStage(t, callbackReturned, "Serve callback return after catalogue close")
+	require.NoError(t, awaitLifecycleResult(t, wrapperReturned, "lifecycle wrapper return"))
+	owner, err := lifecycle.TryAcquire(runtimeDir)
+	require.NoError(t, err)
+	require.NoError(t, owner.Release())
+}
+
+type lifecycleBlockingReconciler struct {
+	entered    chan struct{}
+	release    chan struct{}
+	returned   chan struct{}
+	enterOnce  sync.Once
+	returnOnce sync.Once
+}
+
+func (r *lifecycleBlockingReconciler) Step(context.Context, ports.ReconcileCursor) (ports.ReconcileCursor, []ports.ReconcileDecision, error) {
+	r.enterOnce.Do(func() { close(r.entered) })
+	<-r.release // Intentionally ignore cancellation: lifecycle ownership must outlive this call.
+	r.returnOnce.Do(func() { close(r.returned) })
+	return ports.ReconcileCursor{}, nil, nil
+}
+
+type lifecycleObservedCatalogue struct {
+	ports.Catalogue
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *lifecycleObservedCatalogue) Close() error {
+	err := c.Catalogue.Close()
+	c.closeOnce.Do(func() { close(c.closed) })
+	return err
+}
+
 func TestLifecycleOwnershipOutlivesSnapshotWriter(t *testing.T) {
 	result := runBlockedSnapshotWriterShutdown(t)
 	assertLifecycleStagePending(t, result.callbackReturned, "Serve callback return while snapshot writer is blocked")
