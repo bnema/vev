@@ -64,16 +64,16 @@ func (c *Coordinator) PublishCheckpoint(ctx context.Context, name string, public
 // PromoteFallback validates a directly indexed fallback and any alternatives,
 // commits the bounded validated set, and repairs HEAD only after the catalogue
 // commit is durable.
-func (c *Coordinator) PromoteFallback(ctx context.Context, name string, ref domain.CheckpointRef) (domain.CatalogueRecord, error) {
+func (c *Coordinator) PromoteFallback(ctx context.Context, name string, ref domain.CheckpointRef) (ports.FallbackPromotionOutcome, error) {
 	if c == nil || c.catalogue == nil || c.repository == nil || c.locks == nil {
-		return domain.CatalogueRecord{}, errors.New("recovery: incomplete checkpoint coordinator dependencies")
+		return ports.FallbackPromotionOutcome{}, errors.New("recovery: incomplete checkpoint coordinator dependencies")
 	}
 	unlock := c.locks.Lock([]string{name})
 	defer unlock()
 
 	record, ok := c.catalogue.Record(name)
 	if !ok {
-		return domain.CatalogueRecord{}, ErrCheckpointRecordNotFound
+		return ports.FallbackPromotionOutcome{}, ErrCheckpointRecordNotFound
 	}
 	found := false
 	for _, fallback := range record.Fallbacks {
@@ -83,10 +83,10 @@ func (c *Coordinator) PromoteFallback(ctx context.Context, name string, ref doma
 		}
 	}
 	if !found {
-		return domain.CatalogueRecord{}, ErrFallbackNotFound
+		return ports.FallbackPromotionOutcome{}, ErrFallbackNotFound
 	}
 	if err := c.validateCheckpoint(ctx, record, ref); err != nil {
-		return domain.CatalogueRecord{}, err
+		return ports.FallbackPromotionOutcome{}, err
 	}
 
 	alternatives := make([]domain.CheckpointRef, 0, 2)
@@ -111,15 +111,14 @@ func (c *Coordinator) PromoteFallback(ctx context.Context, name string, ref doma
 		next.Fallbacks[i] = copyCheckpointRef(&alternatives[i])
 	}
 	if err := next.Validate(); err != nil {
-		return domain.CatalogueRecord{}, fmt.Errorf("recovery: invalid fallback promotion: %w", err)
+		return ports.FallbackPromotionOutcome{}, fmt.Errorf("recovery: invalid fallback promotion: %w", err)
 	}
 	if err := c.catalogue.Replace(name, next); err != nil {
-		return domain.CatalogueRecord{}, err
+		return ports.FallbackPromotionOutcome{}, err
 	}
-	if err := c.repository.RepairHEAD(ctx, record.IncarnationID, ref); err != nil {
-		return next, err
-	}
-	return next, nil
+	outcome := ports.FallbackPromotionOutcome{Record: next, CatalogueCommitted: true}
+	outcome.HEADRepairError = c.repository.RepairHEAD(ctx, record.IncarnationID, ref)
+	return outcome, nil
 }
 
 func (c *Coordinator) validateCheckpoint(ctx context.Context, record domain.CatalogueRecord, ref domain.CheckpointRef) error {

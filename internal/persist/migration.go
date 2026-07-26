@@ -416,13 +416,6 @@ func installMigratedCatalogue(stateDir string, records []domain.CatalogueRecord)
 	return atomicMigrationWrite(filepath.Join(stateDir, migrationDirName, catalogueFormatName), []byte("v1\n"))
 }
 
-func decodeLegacyCatalogueV0(data []byte) ([]legacyCatalogueRecordV0, error) {
-	record, err := decodeLegacyRecordV0("legacy", data)
-	if err != nil {
-		return nil, err
-	}
-	return []legacyCatalogueRecordV0{record}, nil
-}
 func decodeLegacyMap(data map[string][]byte) ([]legacyCatalogueRecordV0, error) {
 	out := make([]legacyCatalogueRecordV0, 0, len(data))
 	for name, value := range data {

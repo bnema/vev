@@ -462,22 +462,22 @@ func (_m *MockCheckpointCoordinator) EXPECT() *MockCheckpointCoordinator_Expecte
 }
 
 // PromoteFallback provides a mock function for the type MockCheckpointCoordinator
-func (_mock *MockCheckpointCoordinator) PromoteFallback(context1 context.Context, s string, checkpointRef domain.CheckpointRef) (domain.CatalogueRecord, error) {
+func (_mock *MockCheckpointCoordinator) PromoteFallback(context1 context.Context, s string, checkpointRef domain.CheckpointRef) (ports.FallbackPromotionOutcome, error) {
 	ret := _mock.Called(context1, s, checkpointRef)
 
 	if len(ret) == 0 {
 		panic("no return value specified for PromoteFallback")
 	}
 
-	var r0 domain.CatalogueRecord
+	var r0 ports.FallbackPromotionOutcome
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, domain.CheckpointRef) (domain.CatalogueRecord, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, domain.CheckpointRef) (ports.FallbackPromotionOutcome, error)); ok {
 		return returnFunc(context1, s, checkpointRef)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, domain.CheckpointRef) domain.CatalogueRecord); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, domain.CheckpointRef) ports.FallbackPromotionOutcome); ok {
 		r0 = returnFunc(context1, s, checkpointRef)
 	} else {
-		r0 = ret.Get(0).(domain.CatalogueRecord)
+		r0 = ret.Get(0).(ports.FallbackPromotionOutcome)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, string, domain.CheckpointRef) error); ok {
 		r1 = returnFunc(context1, s, checkpointRef)
@@ -523,12 +523,12 @@ func (_c *MockCheckpointCoordinator_PromoteFallback_Call) Run(run func(context1 
 	return _c
 }
 
-func (_c *MockCheckpointCoordinator_PromoteFallback_Call) Return(catalogueRecord domain.CatalogueRecord, err error) *MockCheckpointCoordinator_PromoteFallback_Call {
-	_c.Call.Return(catalogueRecord, err)
+func (_c *MockCheckpointCoordinator_PromoteFallback_Call) Return(fallbackPromotionOutcome ports.FallbackPromotionOutcome, err error) *MockCheckpointCoordinator_PromoteFallback_Call {
+	_c.Call.Return(fallbackPromotionOutcome, err)
 	return _c
 }
 
-func (_c *MockCheckpointCoordinator_PromoteFallback_Call) RunAndReturn(run func(context1 context.Context, s string, checkpointRef domain.CheckpointRef) (domain.CatalogueRecord, error)) *MockCheckpointCoordinator_PromoteFallback_Call {
+func (_c *MockCheckpointCoordinator_PromoteFallback_Call) RunAndReturn(run func(context1 context.Context, s string, checkpointRef domain.CheckpointRef) (ports.FallbackPromotionOutcome, error)) *MockCheckpointCoordinator_PromoteFallback_Call {
 	_c.Call.Return(run)
 	return _c
 }

@@ -123,9 +123,15 @@ type RecoveryJournal interface {
 	DeleteDiscard(context.Context, domain.IncarnationID) error
 }
 
+type FallbackPromotionOutcome struct {
+	Record             domain.CatalogueRecord
+	CatalogueCommitted bool
+	HEADRepairError    error
+}
+
 type CheckpointCoordinator interface {
 	PublishCheckpoint(context.Context, string, SnapshotPublication) (domain.CatalogueRecord, error)
-	PromoteFallback(context.Context, string, domain.CheckpointRef) (domain.CatalogueRecord, error)
+	PromoteFallback(context.Context, string, domain.CheckpointRef) (FallbackPromotionOutcome, error)
 }
 
 type Catalogue interface {

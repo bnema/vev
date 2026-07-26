@@ -17,6 +17,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
+	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/pkg/renderer"
 	"github.com/bnema/vev/pkg/vt"
@@ -285,6 +286,45 @@ func TestPickerWaitsForRestoringTargetBeforeSwitching(t *testing.T) {
 
 	require.NoError(t, <-result)
 	require.Same(t, target, ac.currentSession())
+}
+
+func TestRestoreCancellationTransitionsBeforePickerCompletion(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, from, ac, _ := newManualSessionWithPTYs(t, p)
+	record := durableRecoveryRecord(0)
+	record.Name = "restoring"
+	repository := &cancellationRecoveryRepository{started: make(chan struct{})}
+	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
+	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil, nil)
+	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
+	WithSnapshotRepository(repository, nil)(d)
+	WithCheckpointCoordinator(coordinator)(d)
+	restoreCtx, cancelRestore := context.WithCancel(context.Background())
+	restored := make(chan struct{})
+	go func() {
+		d.restoreCatalogue(restoreCtx, catalogue.Records())
+		close(restored)
+	}()
+	<-repository.started
+
+	result := make(chan error, 1)
+	go func() {
+		result <- d.switchToTarget(from, ac, picker.Target{Name: record.Name, Stopped: true})
+	}()
+	cancelRestore()
+
+	require.Error(t, <-result)
+	<-restored
+	require.Same(t, from, ac.currentSession())
+	entry := d.stopped[record.Name]
+	require.Equal(t, runtimeDegraded, entry.state)
+	require.Equal(t, "restore interrupted", entry.record.DegradedReason)
+	select {
+	case <-entry.restoreDone:
+	default:
+		t.Fatal("restore completion was not signaled")
+	}
 }
 
 func TestPickerRejectsCatalogueTargetsWithoutFreshRuntime(t *testing.T) {

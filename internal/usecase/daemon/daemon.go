@@ -128,12 +128,8 @@ type Daemon struct {
 	checkpointRecovery ports.CheckpointCoordinator
 	legacySnapshots    ports.LegacySnapshotSource
 	snapsEnabled       bool
-	// legacyImportPending holds verified legacy blobs whose source deletion
-	// failed, so a later import retries only deletion rather than publication.
-	legacyImportMu      sync.Mutex
-	legacyImportPending map[string][]byte
-	noticeStore         ports.NoticeStore
-	snapshotJobs        chan *snapshotCapture
+	noticeStore        ports.NoticeStore
+	snapshotJobs       chan *snapshotCapture
 	// snapshotWake wakes the repository scheduler when a session becomes dirty
 	// or an attempt completes. It is never closed and producers only send
 	// non-blockingly.
@@ -407,24 +403,23 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		shell = "/bin/sh"
 	}
 	d := &Daemon{
-		sessions:            make(map[domain.SessionID]*session),
-		stopped:             make(map[string]stoppedSession),
-		parked:              make(map[uint64]*parkedAttachment),
-		ptys:                ptys,
-		clock:               clock,
-		log:                 log,
-		baseEnv:             os.Environ(),
-		shell:               shell,
-		persist:             persist.New(nil),
-		dirOrHome:           dirOrHome,
-		done:                make(chan struct{}),
-		restoreDone:         make(chan struct{}),
-		animWake:            make(chan struct{}, 1),
-		legacyImportPending: make(map[string][]byte),
-		snapshotJobs:        make(chan *snapshotCapture, snapshotQueueCapacity),
-		snapshotWake:        make(chan struct{}, 1),
-		notices:             newNoticeCenter(),
-		resumeParkGrace:     defaultResumeParkGrace,
+		sessions:        make(map[domain.SessionID]*session),
+		stopped:         make(map[string]stoppedSession),
+		parked:          make(map[uint64]*parkedAttachment),
+		ptys:            ptys,
+		clock:           clock,
+		log:             log,
+		baseEnv:         os.Environ(),
+		shell:           shell,
+		persist:         persist.New(nil),
+		dirOrHome:       dirOrHome,
+		done:            make(chan struct{}),
+		restoreDone:     make(chan struct{}),
+		animWake:        make(chan struct{}, 1),
+		snapshotJobs:    make(chan *snapshotCapture, snapshotQueueCapacity),
+		snapshotWake:    make(chan struct{}, 1),
+		notices:         newNoticeCenter(),
+		resumeParkGrace: defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
@@ -904,6 +899,7 @@ func (d *Daemon) finishAttach(sess *session, tr ports.Transport, sz domain.Size,
 }
 
 func (d *Daemon) waitForTargetRestore(name string) error {
+	var observedClosed chan struct{}
 	for {
 		d.mu.Lock()
 		if d.findByNameLocked(name) != nil {
@@ -925,6 +921,10 @@ func (d *Daemon) waitForTargetRestore(name string) error {
 			return &protoErr{ports.ErrSessionDegraded, "session durable state is degraded: " + name}
 		case runtimeRestoring:
 			done := stopped.restoreDone
+			if done == nil || done == observedClosed {
+				d.mu.Unlock()
+				return &protoErr{ports.ErrSessionDegraded, "session durable state is degraded: " + name}
+			}
 			var shutdown <-chan struct{}
 			if d.serveCtx != nil {
 				shutdown = d.serveCtx.Done()
@@ -932,6 +932,7 @@ func (d *Daemon) waitForTargetRestore(name string) error {
 			d.mu.Unlock()
 			select {
 			case <-done:
+				observedClosed = done
 				continue
 			case <-shutdown:
 				return &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}

@@ -58,10 +58,7 @@ func (d *Daemon) restoreCatalogue(ctx context.Context, records []domain.Catalogu
 				d.ensureCatalogueRegistryEntry(record)
 				done := d.recordRestoreDone(record.Name)
 				err := d.restoreRecord(ctx, record)
-				if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-					d.markRecordDegraded(record, err)
-				}
-				closeRuntimeRestoreDone(done)
+				d.finishRecordRestore(record, err, done)
 			}
 		})
 	}
@@ -126,21 +123,44 @@ func (d *Daemon) setStoppedRecovery(record domain.CatalogueRecord, state runtime
 	d.stopped[record.Name] = entry
 }
 
-func (d *Daemon) markRecordDegraded(record domain.CatalogueRecord, restoreErr error) {
-	if d.catalogue != nil {
-		if current, ok := d.catalogue.Record(record.Name); ok && current.IncarnationID == record.IncarnationID {
-			record = current
+func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr error, done chan struct{}) {
+	if restoreErr != nil {
+		if d.catalogue != nil {
+			if current, ok := d.catalogue.Record(record.Name); ok && current.IncarnationID == record.IncarnationID {
+				record = current
+			}
+		}
+		record.RecoveryState = domain.RecoveryDegraded
+		record.DegradedReason = "checkpoint validation failed"
+		if errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded) {
+			record.DegradedReason = "restore interrupted"
+		}
+		if d.catalogue != nil {
+			if err := d.catalogue.Replace(record.Name, record); err != nil {
+				d.log.Error("marking session degraded failed", "session", record.Name, "err", err)
+			}
 		}
 	}
-	record.RecoveryState = domain.RecoveryDegraded
-	record.DegradedReason = "checkpoint validation failed"
-	if d.catalogue != nil {
-		if err := d.catalogue.Replace(record.Name, record); err != nil {
-			d.log.Error("marking session degraded failed", "session", record.Name, "err", err)
+
+	d.mu.Lock()
+	entry, ok := d.stopped[record.Name]
+	if ok {
+		if restoreErr != nil {
+			entry.record = record
+			entry.state = runtimeDegraded
+			entry.cwd = record.Cwd
+			entry.createdAt = record.CreatedAt
+			entry.incarnation = record.IncarnationID
+			entry.lastUsedSeq = record.LastUsedSeq
+			entry.tabNames = append([]string(nil), record.TabNames...)
+			d.stopped[record.Name] = entry
 		}
+		closeRuntimeRestoreDone(done)
 	}
-	d.setStoppedRecovery(record, runtimeDegraded)
-	d.log.Warn("session checkpoint restore failed", "session", record.Name, "err", restoreErr)
+	d.mu.Unlock()
+	if restoreErr != nil {
+		d.log.Warn("session checkpoint restore failed", "session", record.Name, "err", restoreErr)
+	}
 }
 
 func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecord) error {
@@ -174,6 +194,9 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 	for i, candidate := range candidates {
 		generation, err := d.snapshotRepository.LoadCheckpoint(ctx, record.IncarnationID, record.Name, candidate)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			continue
 		}
 		snapshot, err := sessionFromGeneration(generation)
@@ -191,12 +214,20 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 		if d.checkpointRecovery == nil {
 			return errors.New("snapshot: checkpoint coordinator unavailable for fallback promotion")
 		}
-		var err error
-		record, err = d.checkpointRecovery.PromoteFallback(ctx, record.Name, selected)
+		outcome, err := d.checkpointRecovery.PromoteFallback(ctx, record.Name, selected)
 		if err != nil {
 			return fmt.Errorf("snapshot: promote fallback: %w", err)
 		}
+		if !outcome.CatalogueCommitted {
+			return errors.New("snapshot: fallback promotion did not commit catalogue")
+		}
+		record = outcome.Record
+		if outcome.HEADRepairError != nil {
+			d.log.Warn("fallback committed with HEAD repair pending", "session", record.Name, "err", outcome.HEADRepairError)
+		}
 		d.log.Warn("restored session from fallback checkpoint", "session", record.Name, "generation", selected.Generation)
+	} else if err := d.snapshotRepository.RepairHEAD(ctx, record.IncarnationID, selected); err != nil {
+		d.log.Warn("checkpoint HEAD repair pending", "session", record.Name, "err", err)
 	}
 
 	if err := d.restoreSession(ctx, selectedSnapshot, selectedGeneration.Generation); err != nil {

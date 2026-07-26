@@ -70,6 +70,8 @@ type durableRecoveryRepository struct {
 	errors      map[string]error
 	loads       map[string]int
 	repairs     map[string]domain.CheckpointRef
+	repairErr   error
+	repairCalls int
 }
 
 func (r *durableRecoveryRepository) LoadCheckpoint(_ context.Context, id domain.IncarnationID, name string, ref ports.CheckpointRef) (ports.SnapshotGeneration, error) {
@@ -89,6 +91,10 @@ func (r *durableRecoveryRepository) LoadCheckpoint(_ context.Context, id domain.
 func (r *durableRecoveryRepository) RepairHEAD(_ context.Context, id domain.IncarnationID, ref ports.CheckpointRef) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.repairCalls++
+	if r.repairErr != nil {
+		return r.repairErr
+	}
 	r.repairs[id.String()] = ref
 	return nil
 }
@@ -234,6 +240,40 @@ func TestCatalogueRestoreIndependent(t *testing.T) {
 	require.Equal(t, fallbackRef, fallbackRepository.repairs[fallback.IncarnationID.String()])
 }
 
+func TestCatalogueRestoreKeepsCommittedFallbackHealthyWhenHEADRepairFails(t *testing.T) {
+	record := durableRecoveryRecord(2)
+	fallbackRef := domain.CheckpointRef{Generation: record.Committed.Generation - 1}
+	fallbackRecord := record
+	fallbackRecord.Committed = &fallbackRef
+	generation := validGeneration(t, fallbackRecord)
+	fallbackRef.ManifestDigest = sha256.Sum256(generation.Manifest)
+	record.Fallbacks[0] = &fallbackRef
+	repository := &durableRecoveryRepository{
+		generations: map[string]ports.SnapshotGeneration{record.Name: generation},
+		errors:      make(map[string]error),
+		loads:       make(map[string]int),
+		repairs:     make(map[string]domain.CheckpointRef),
+		repairErr:   errors.New("head repair unavailable"),
+	}
+
+	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+	d.restoreCatalogue(context.Background(), catalogue.Records())
+
+	committed, ok := catalogue.Record(record.Name)
+	require.True(t, ok)
+	require.Equal(t, domain.RecoveryHealthy, committed.RecoveryState)
+	require.Equal(t, fallbackRef, *committed.Committed)
+	require.Equal(t, runtimeHealthy, d.stopped[record.Name].state)
+	require.Equal(t, 1, repository.repairCalls)
+
+	repository.repairErr = nil
+	next, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{committed}, repository)
+	next.restoreCatalogue(context.Background(), catalogue.Records())
+	require.Equal(t, runtimeHealthy, next.stopped[record.Name].state)
+	require.Equal(t, 2, repository.repairCalls, "the next startup retries the pending HEAD repair")
+	require.Equal(t, fallbackRef, repository.repairs[record.IncarnationID.String()])
+}
+
 func TestCatalogueRestoreAggregateOver4096(t *testing.T) {
 	const count = 4200
 	records := make([]domain.CatalogueRecord, count)
@@ -278,6 +318,18 @@ func TestCatalogueRestoreIncarnationMismatch(t *testing.T) {
 	require.Equal(t, runtimeDegraded, d.stopped[record.Name].state)
 	got, _ := catalogue.Record(record.Name)
 	require.Equal(t, domain.RecoveryDegraded, got.RecoveryState)
+}
+
+type cancellationRecoveryRepository struct {
+	ports.SnapshotRepository
+	started chan struct{}
+	once    sync.Once
+}
+
+func (r *cancellationRecoveryRepository) LoadCheckpoint(ctx context.Context, _ domain.IncarnationID, _ string, _ ports.CheckpointRef) (ports.SnapshotGeneration, error) {
+	r.once.Do(func() { close(r.started) })
+	<-ctx.Done()
+	return ports.SnapshotGeneration{}, ctx.Err()
 }
 
 type recoveryCountingPTYFactory struct {
@@ -333,6 +385,60 @@ func TestAttachWaitsForRestore(t *testing.T) {
 	require.ErrorAs(t, <-result, &protocolError)
 	require.Equal(t, ports.ErrSessionDegraded, protocolError.code)
 	require.Zero(t, factory.calls.Load())
+}
+
+func TestRestoreCancellationTransitionsBeforeAttachCompletion(t *testing.T) {
+	record := durableRecoveryRecord(0)
+	repository := &cancellationRecoveryRepository{started: make(chan struct{})}
+	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+	restoreCtx, cancelRestore := context.WithCancel(context.Background())
+	restored := make(chan struct{})
+	go func() {
+		d.restoreCatalogue(restoreCtx, catalogue.Records())
+		close(restored)
+	}()
+	<-repository.started
+
+	attached := make(chan error, 1)
+	go func() {
+		_, _, err := d.route(ports.Hello{Version: ports.ProtocolVersion, Intent: ports.IntentAttach, Name: record.Name}, nil)
+		attached <- err
+	}()
+	cancelRestore()
+
+	var protocolError *protoErr
+	require.ErrorAs(t, <-attached, &protocolError)
+	require.Equal(t, ports.ErrSessionDegraded, protocolError.code)
+	<-restored
+	entry := d.stopped[record.Name]
+	require.Equal(t, runtimeDegraded, entry.state)
+	require.Equal(t, domain.RecoveryDegraded, entry.record.RecoveryState)
+	require.Equal(t, "restore interrupted", entry.record.DegradedReason)
+	select {
+	case <-entry.restoreDone:
+	default:
+		t.Fatal("restore completion was not signaled")
+	}
+	committed, _ := catalogue.Record(record.Name)
+	require.Equal(t, entry.record, committed)
+}
+
+func TestWaitForTargetRestoreRejectsClosedRestoringChannel(t *testing.T) {
+	record := durableRecoveryRecord(0)
+	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, &durableRecoveryRepository{})
+	closeRuntimeRestoreDone(d.stopped[record.Name].restoreDone)
+
+	result := make(chan error, 1)
+	go func() { result <- d.waitForTargetRestore(record.Name) }()
+
+	select {
+	case err := <-result:
+		var protocolError *protoErr
+		require.ErrorAs(t, err, &protocolError)
+		require.Equal(t, ports.ErrSessionDegraded, protocolError.code)
+	case <-time.After(time.Second):
+		t.Fatal("waiter spun on a closed restore channel")
+	}
 }
 
 func TestAttachRejectsDegraded(t *testing.T) {
