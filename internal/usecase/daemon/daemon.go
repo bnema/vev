@@ -131,10 +131,15 @@ type Daemon struct {
 	maintenance             maintenanceDependencies
 	maintenanceWorkerCancel context.CancelFunc
 	maintenanceWorkerDone   chan struct{}
-	legacySnapshots         ports.LegacySnapshotSource
-	snapsEnabled            bool
-	noticeStore             ports.NoticeStore
-	snapshotJobs            chan *snapshotCapture
+	// restoreWorkerDone is the restoration goroutine's ownership signal. Startup
+	// restoration repairs HEADs, promotes fallbacks, and replaces catalogue
+	// records, so it is a durable writer and is guarded by snapshotWorkerMu with
+	// the other two.
+	restoreWorkerDone chan struct{}
+	legacySnapshots   ports.LegacySnapshotSource
+	snapsEnabled      bool
+	noticeStore       ports.NoticeStore
+	snapshotJobs      chan *snapshotCapture
 	// snapshotWake wakes the repository scheduler when a session becomes dirty
 	// or an attempt completes. It is never closed and producers only send
 	// non-blockingly.
@@ -483,7 +488,13 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		d.restoreProcessAllowlist.Store(&allow)
 	}
 	records := d.catalogueRecords
-	if !d.catalogueRecordsProvided {
+	// Only attempt the load when persistence is actually configured
+	// (d.persistEnabled tracks the same store-is-non-nil condition
+	// persist.Persister uses to distinguish "no store" from "load failed").
+	// Without this gate, the default no-persistence Daemon (persist.New(nil))
+	// would log a false-alarm "loading persisted sessions failed" warning on
+	// every construction: nothing failed, persistence simply isn't enabled.
+	if !d.catalogueRecordsProvided && d.persistEnabled {
 		var err error
 		records, err = d.persist.LoadAll()
 		if err != nil {
@@ -541,9 +552,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 		d.sessWg.Go(func() {
 			d.snapshotRepositorySaver(d.serveCtx)
 		})
-		d.sessWg.Go(func() {
-			d.restoreSnapshots(d.serveCtx)
-		})
+		d.startSnapshotRestoration()
 	} else {
 		d.closeRestoreDone()
 	}
@@ -992,7 +1001,14 @@ func (d *Daemon) waitForTargetRestore(name string) error {
 			case <-shutdown:
 				return &protoErr{ports.ErrServerShutdown, "daemon is shutting down"}
 			}
-		case runtimeDegraded, runtimeDeleting, runtimeHealthy:
+		case runtimeHealthy:
+			// The catalogue record is healthy; only its runtime registration was
+			// skipped (shutdown, or a live session claimed the name first). Saying
+			// "degraded" here would send the operator to durable recovery for a
+			// session whose durable state is intact.
+			d.mu.Unlock()
+			return &protoErr{ports.ErrSessionDegraded, "session was not restored into this daemon: " + name}
+		case runtimeDegraded, runtimeDeleting:
 			d.mu.Unlock()
 			return &protoErr{ports.ErrSessionDegraded, "session durable state is degraded: " + name}
 		default:

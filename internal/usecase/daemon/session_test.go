@@ -851,6 +851,35 @@ func TestDaemonLoadsPersistedSessionsAsStopped(t *testing.T) {
 	require.Equal(t, uint64(9), d.mruSeq.Load())
 }
 
+// TestDaemonNewWithoutPersistenceLogsNoLoadWarning covers the default,
+// persistence-free construction path (no WithStore/WithCatalogue option):
+// d.persist is the persist.New(nil) sentinel, so LoadAll now returns
+// errPersistenceUnavailable instead of an empty slice. That must not surface
+// as a "loading persisted sessions failed" warning, since nothing failed —
+// persistence simply was never configured.
+func TestDaemonNewWithoutPersistenceLogsNoLoadWarning(t *testing.T) {
+	var logBuf strings.Builder
+	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(&logBuf, nil)))
+	require.NotNil(t, d)
+	require.False(t, d.persistEnabled)
+	require.Empty(t, d.stopped)
+	require.NotContains(t, logBuf.String(), "loading persisted sessions failed")
+}
+
+// TestDaemonNewWithConfiguredStoreStillLogsLoadFailure is the inverse of the
+// above: when persistence IS configured (a real store via WithStore) and the
+// load genuinely fails (an undecodable catalogue record here), the warning
+// must still fire.
+func TestDaemonNewWithConfiguredStoreStillLogsLoadFailure(t *testing.T) {
+	store, state := newMockStore(t)
+	state.data["bad"] = []byte{0, 1} // not a valid encoded catalogue record
+	var logBuf strings.Builder
+	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(&logBuf, nil)), WithStore(store))
+	require.NotNil(t, d)
+	require.True(t, d.persistEnabled)
+	require.Contains(t, logBuf.String(), "loading persisted sessions failed")
+}
+
 func TestTouchMRUConcurrentUpdatesRemainMonotonic(t *testing.T) {
 	d := &Daemon{}
 	sess := &session{}

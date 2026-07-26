@@ -510,6 +510,32 @@ func TestWaitForTargetRestoreRejectsClosedRestoringChannel(t *testing.T) {
 	}
 }
 
+// A healthy catalogue record whose runtime registration was skipped is not
+// degraded durable state, and must not send the operator to durable recovery.
+func TestWaitForTargetRestoreDistinguishesHealthyRuntime(t *testing.T) {
+	record := durableRecoveryRecord(0)
+	tests := []struct {
+		name    string
+		state   runtimeRecoveryState
+		message string
+	}{
+		{name: "healthy record without runtime", state: runtimeHealthy, message: "session was not restored into this daemon: " + record.Name},
+		{name: "degraded durable state", state: runtimeDegraded, message: "session durable state is degraded: " + record.Name},
+		{name: "deleting durable state", state: runtimeDeleting, message: "session durable state is degraded: " + record.Name},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, &durableRecoveryRepository{})
+			d.setStoppedRecovery(record, tt.state)
+
+			var protocolError *protoErr
+			require.ErrorAs(t, d.waitForTargetRestore(record.Name), &protocolError)
+			require.Equal(t, ports.ErrSessionDegraded, protocolError.code)
+			require.Equal(t, tt.message, protocolError.Error())
+		})
+	}
+}
+
 func TestAttachRejectsDegraded(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	record.RecoveryState = domain.RecoveryDegraded

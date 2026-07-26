@@ -16,6 +16,30 @@ func (d *Daemon) closeRestoreDone() {
 	d.restoreOnce.Do(func() { close(d.restoreDone) })
 }
 
+// startSnapshotRestoration launches catalogue-driven restoration as a durable
+// writer. Restoration repairs HEADs, promotes fallbacks, and replaces catalogue
+// records, so lifecycle ownership must outlive it exactly as it outlives the
+// snapshot and maintenance workers. The completion channel is registered before
+// the goroutine starts, so shutdown can never begin waiting while this writer
+// is still unregistered.
+func (d *Daemon) startSnapshotRestoration() {
+	if d == nil {
+		return
+	}
+	d.snapshotWorkerMu.Lock()
+	if d.restoreWorkerDone != nil {
+		d.snapshotWorkerMu.Unlock()
+		return
+	}
+	done := make(chan struct{})
+	d.restoreWorkerDone = done
+	d.snapshotWorkerMu.Unlock()
+	d.sessWg.Go(func() {
+		defer close(done)
+		d.restoreSnapshots(d.serveCtx)
+	})
+}
+
 func (d *Daemon) restoreSnapshots(ctx context.Context) {
 	if d == nil {
 		return

@@ -224,6 +224,9 @@ func (d *Daemon) StopDurableWriters(ctx context.Context) []string {
 
 // WaitDurableWriters is the unconditional ownership barrier. It has no timeout
 // or status branch: every writer goroutine must exit before Serve may return.
+// Restoration is joined with the others because it mutates durable state too;
+// it observes serveCtx cancellation, so waiting for it cannot outlive an
+// uncooperative repository call any longer than the snapshot worker does.
 func (d *Daemon) WaitDurableWriters() {
 	if d == nil {
 		return
@@ -231,6 +234,7 @@ func (d *Daemon) WaitDurableWriters() {
 	d.snapshotWorkerMu.Lock()
 	snapshotDone := d.snapshotWorkerDone
 	maintenanceDone := d.maintenanceWorkerDone
+	restoreDone := d.restoreWorkerDone
 	d.snapshotWorkerMu.Unlock()
 	if snapshotDone != nil {
 		<-snapshotDone
@@ -238,6 +242,11 @@ func (d *Daemon) WaitDurableWriters() {
 	}
 	if maintenanceDone != nil {
 		<-maintenanceDone
+	}
+	// Restoration never blocks on the workers above (snapshot admission is
+	// non-blocking), so joining it last cannot deadlock.
+	if restoreDone != nil {
+		<-restoreDone
 	}
 }
 

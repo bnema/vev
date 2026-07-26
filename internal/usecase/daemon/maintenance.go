@@ -119,13 +119,20 @@ func (d *Daemon) runDurableMaintenanceTick(ctx context.Context) {
 		if ok && !decision.RetentionResolved {
 			deps.repairUncertain[record.IncarnationID] = struct{}{}
 		}
-		d.log.Info("durable_reconciliation_decision",
-			"incarnation", record.IncarnationID.String(),
+		// The catalogue lookup can miss (e.g. an unknown-incarnation finding for a
+		// name the catalogue never held); logging record.IncarnationID.String() in
+		// that case would emit a misleading all-zero incarnation, so the field is
+		// omitted rather than logged as a fabricated identity.
+		args := []any{
 			"session", decision.Name,
 			"action", decision.Kind,
 			"reason_code", decision.ReasonCode,
 			"cursor", next.DirectoryCookie,
-		)
+		}
+		if ok {
+			args = append([]any{"incarnation", record.IncarnationID.String()}, args...)
+		}
+		d.log.Info("durable_reconciliation_decision", args...)
 	}
 	d.log.Info("durable_reconciliation_tick", "action", "scan", "cursor", next.DirectoryCookie, "done", next.DirectoryCookie == 0, "err", nil)
 	if next.DirectoryCookie != 0 {
