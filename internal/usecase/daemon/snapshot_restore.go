@@ -21,6 +21,7 @@ func (d *Daemon) restoreSnapshots(ctx context.Context) {
 		return
 	}
 	defer d.closeRestoreDone()
+	defer d.logStartupRecoveryCounts(0)
 	if ns := d.noticeStore; ns != nil {
 		claimed, err := ns.Claim()
 		if err != nil {

@@ -370,7 +370,7 @@ func keepSet(plan ports.RetentionPlan) map[uint64]ports.SnapshotDigest {
 
 // MaintainSession incrementally validates and retains only catalogue-indexed
 // checkpoints. Every incarnation owns its budget and continuation state.
-func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPlan, budget ports.MaintenanceBudget) (bool, error) {
+func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPlan, budget ports.MaintenanceBudget) (done bool, err error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -378,6 +378,14 @@ func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPl
 	if err != nil {
 		return false, err
 	}
+	defer func() {
+		r.log.Info("snapshot_maintenance_progress",
+			"incarnation", plan.IncarnationID.String(),
+			"retained", len(plan.Keep),
+			"cursor", key,
+			"budget_exhausted", !done && err == nil,
+		)
+	}()
 	if plan.PinAll {
 		r.maintenanceMu.Lock()
 		r.clearRetentionMaintenance(key)

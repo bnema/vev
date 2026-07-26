@@ -159,7 +159,11 @@ func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr e
 	}
 	d.mu.Unlock()
 	if restoreErr != nil {
-		d.log.Warn("session checkpoint restore failed", "session", record.Name, "err", restoreErr)
+		reasonCode := "checkpoint-invalid"
+		if errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded) {
+			reasonCode = "restore-interrupted"
+		}
+		d.logSessionDegraded(record, reasonCode)
 	}
 }
 
@@ -167,9 +171,11 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 	switch record.RecoveryState {
 	case domain.RecoveryFresh:
 		d.setStoppedRecovery(record, runtimeFresh)
+		d.logSessionRestoreComplete(record, 0, false)
 		return nil
 	case domain.RecoveryDegraded:
 		d.setStoppedRecovery(record, runtimeDegraded)
+		d.logSessionDegraded(record, "persisted-degraded")
 		return nil
 	case domain.RecoveryDeleting:
 		d.setStoppedRecovery(record, runtimeDeleting)
@@ -223,17 +229,22 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 		}
 		record = outcome.Record
 		if outcome.HEADRepairError != nil {
-			d.log.Warn("fallback committed with HEAD repair pending", "session", record.Name, "err", outcome.HEADRepairError)
+			d.log.Warn("snapshot_head_repair_pending", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation, "reason_code", "repair-failed")
+		} else {
+			d.log.Info("fallback_checkpoint_promoted", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation)
+			d.log.Info("snapshot_head_repair_complete", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation)
 		}
-		d.log.Warn("restored session from fallback checkpoint", "session", record.Name, "generation", selected.Generation)
 	} else if err := d.snapshotRepository.RepairHEAD(ctx, record.IncarnationID, selected); err != nil {
-		d.log.Warn("checkpoint HEAD repair pending", "session", record.Name, "err", err)
+		d.log.Warn("snapshot_head_repair_pending", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation, "reason_code", "repair-failed")
+	} else {
+		d.log.Info("snapshot_head_repair_complete", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation)
 	}
 
 	if err := d.restoreSession(ctx, selectedSnapshot, selectedGeneration.Generation, selected); err != nil {
 		return err
 	}
 	d.setStoppedRecovery(record, runtimeHealthy)
+	d.logSessionRestoreComplete(record, selected.Generation, selectedIndex > 0)
 	return nil
 }
 

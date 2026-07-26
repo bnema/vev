@@ -1,10 +1,14 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -26,6 +30,87 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+func decodeJSONLogs(t *testing.T, data []byte) []map[string]any {
+	t.Helper()
+	var entries []map[string]any
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		var entry map[string]any
+		require.NoError(t, json.Unmarshal(scanner.Bytes(), &entry))
+		entries = append(entries, entry)
+	}
+	require.NoError(t, scanner.Err())
+	return entries
+}
+
+func eventNames(entries []map[string]any) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if name, ok := entry["msg"].(string); ok {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func requireEvent(t *testing.T, entries []map[string]any, name string) map[string]any {
+	t.Helper()
+	for _, entry := range entries {
+		if entry["msg"] == name {
+			return entry
+		}
+	}
+	t.Fatalf("event %q not found in %v", name, eventNames(entries))
+	return nil
+}
+
+func TestRecoveryObservability(t *testing.T) {
+	var logBuffer bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logBuffer, nil))
+	owner := fakeLifecycleOwnership{release: func() error { return nil }}
+	deps := lifecycleStartupDeps{
+		ensurePrivate: func(string) error { return nil },
+		acquire: func(context.Context, string, time.Duration) (lifecycleOwnership, error) {
+			return owner, nil
+		},
+		log: log,
+	}
+	records := []domain.CatalogueRecord{
+		{RecoveryState: domain.RecoveryHealthy},
+		{RecoveryState: domain.RecoveryHealthy},
+		{RecoveryState: domain.RecoveryFresh},
+		{RecoveryState: domain.RecoveryDegraded},
+	}
+	noticeStore := portsmocks.NewMockNoticeStore(t)
+	var recoveryNotice domain.Notification
+	noticeStore.EXPECT().Append(mock.Anything).Run(func(n domain.Notification) { recoveryNotice = n }).Return(nil).Once()
+	require.NoError(t, runWithLifecycleOwnerDeps(context.Background(), "/runtime/vev", "/state/vev", func(context.Context) error {
+		logCatalogueRecovery(log, records, "current")
+		logTransactionRecovery(log, 2)
+		persistTransactionRecoveryNotices(noticeStore, []interruptedRecoveryIdentity{{name: "work", id: domain.IncarnationID{9}}}, time.Unix(1, 0))
+		logStartupRecoveryCounts(log, records, 0)
+		return nil
+	}, deps))
+
+	entries := decodeJSONLogs(t, logBuffer.Bytes())
+	for _, name := range []string{"lifecycle_owner_wait", "lifecycle_owner_acquired", "catalogue_validated", "catalogue_compaction_recovery_complete", "interrupted_transaction_recovery_complete", "daemon_startup_complete", "lifecycle_owner_released"} {
+		require.Contains(t, eventNames(entries), name)
+	}
+	startup := requireEvent(t, entries, "daemon_startup_complete")
+	require.EqualValues(t, 2, startup["healthy"])
+	require.EqualValues(t, 1, startup["fresh"])
+	require.EqualValues(t, 0, startup["restoring"])
+	require.EqualValues(t, 1, startup["degraded"])
+
+	logBuffer.Reset()
+	log.Error("catalogue_validation_failed", "path", "/state/vev/sessions.kv", "reason_code", "corrupt")
+	require.NotContains(t, eventNames(decodeJSONLogs(t, logBuffer.Bytes())), "daemon_startup_complete")
+	require.NotContains(t, fmt.Sprint(requireEvent(t, entries, "interrupted_transaction_recovery_complete")), "terminal contents")
+	require.Equal(t, domain.NoticeSnapshotRestore, recoveryNotice.Code)
+	require.Equal(t, domain.SessionID(domain.IncarnationID{9}.String()), recoveryNotice.SessionID)
+	require.NotContains(t, fmt.Sprint(recoveryNotice), "terminal contents")
+}
 
 type fakeLifecycleOwnership struct {
 	release func() error

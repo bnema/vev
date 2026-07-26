@@ -426,6 +426,7 @@ func joinLifecycleReleaseError(retErr *error, owner lifecycleOwnership) {
 type lifecycleStartupDeps struct {
 	ensurePrivate func(string) error
 	acquire       func(context.Context, string, time.Duration) (lifecycleOwnership, error)
+	log           *slog.Logger
 }
 
 const lifecycleAcquireRetry = 25 * time.Millisecond
@@ -440,18 +441,32 @@ func runWithLifecycleOwner(ctx context.Context, runtimeDir, stateDir string, sta
 }
 
 func runWithLifecycleOwnerDeps(ctx context.Context, runtimeDir, stateDir string, start ownedDaemonStart, deps lifecycleStartupDeps) (retErr error) {
+	log := deps.log
+	if log == nil {
+		log = slog.Default()
+	}
 	if err := deps.ensurePrivate(runtimeDir); err != nil {
 		return fmt.Errorf("vev: secure runtime directory: %w", err)
 	}
 	if err := deps.ensurePrivate(stateDir); err != nil {
 		return fmt.Errorf("vev: secure state directory: %w", err)
 	}
+	lockPath := lifecycle.Path(runtimeDir)
+	log.Info("lifecycle_owner_wait", "path", lockPath)
 	owner, err := deps.acquire(ctx, runtimeDir, lifecycleAcquireRetry)
 	if err != nil {
+		log.Warn("lifecycle_owner_wait_failed", "path", lockPath, "reason_code", "acquire-failed")
 		return fmt.Errorf("vev: acquire lifecycle ownership: %w", err)
 	}
+	log.Info("lifecycle_owner_acquired", "path", lockPath)
 	defer func() {
-		retErr = errors.Join(retErr, owner.Release())
+		releaseErr := owner.Release()
+		if releaseErr != nil {
+			log.Error("lifecycle_owner_release_failed", "path", lockPath, "reason_code", "release-failed")
+		} else {
+			log.Info("lifecycle_owner_released", "path", lockPath)
+		}
+		retErr = errors.Join(retErr, releaseErr)
 	}()
 	if start == nil {
 		return errors.New("vev: nil owned daemon startup")
@@ -462,10 +477,98 @@ func runWithLifecycleOwnerDeps(ctx context.Context, runtimeDir, stateDir string,
 // runDaemon runs the daemon in the foreground (the hidden --daemon path,
 // entered by an auto-spawned child) while holding exclusive lifecycle
 // ownership through complete teardown.
-func runDaemon() error {
+func runDaemon() (retErr error) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	return runWithLifecycleOwner(ctx, ipc.SocketDir(), platform.StateDir(), runDaemonOwned)
+	log, logCloser, err := configureLogging(logging.Daemon, true)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, logCloser.Close()) }()
+	return runWithLifecycleOwnerDeps(ctx, ipc.SocketDir(), platform.StateDir(), func(ctx context.Context) error {
+		return runDaemonOwnedWithLogger(ctx, log)
+	}, lifecycleStartupDeps{
+		ensurePrivate: safedir.EnsurePrivate,
+		acquire: func(ctx context.Context, runtimeDir string, retry time.Duration) (lifecycleOwnership, error) {
+			return lifecycle.Acquire(ctx, runtimeDir, retry)
+		},
+		log: log,
+	})
+}
+
+func logCatalogueRecovery(log *slog.Logger, records []domain.CatalogueRecord, recoveryMode string) {
+	log.Info("catalogue_validated", "records", len(records), "recovery", recoveryMode)
+	log.Info("catalogue_compaction_recovery_complete", "recovery", recoveryMode)
+}
+
+func logTransactionRecovery(log *slog.Logger, examined int) {
+	log.Info("interrupted_transaction_recovery_complete", "sessions_examined", examined)
+}
+
+type interruptedRecoveryIdentity struct {
+	name string
+	id   domain.IncarnationID
+}
+
+func pendingInterruptedRecoveries(ctx context.Context, records []domain.CatalogueRecord, journal ports.RecoveryJournal, repository ports.SnapshotRepository) ([]interruptedRecoveryIdentity, error) {
+	pending := make([]interruptedRecoveryIdentity, 0)
+	for _, record := range records {
+		if record.RecoveryState == domain.RecoveryDeleting {
+			pending = append(pending, interruptedRecoveryIdentity{name: record.Name, id: record.IncarnationID})
+		}
+	}
+	intents, err := journal.ListDiscards(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, intent := range intents {
+		pending = append(pending, interruptedRecoveryIdentity{name: intent.SessionName, id: intent.OldIncarnation})
+	}
+	cursor := ports.DeletionTombstoneCursor{}
+	for {
+		page, err := repository.ListDeletionTombstones(ctx, cursor, ports.MaintenanceBudget{Entries: 64, Bytes: 64 << 10})
+		if err != nil {
+			return nil, err
+		}
+		for _, tombstone := range page.Tombstones {
+			pending = append(pending, interruptedRecoveryIdentity{name: tombstone.Name, id: tombstone.IncarnationID})
+		}
+		if page.Done {
+			return pending, nil
+		}
+		if page.Next.After == cursor.After {
+			return nil, errors.New("vev: recovery tombstone listing did not advance")
+		}
+		cursor = page.Next
+	}
+}
+
+func persistTransactionRecoveryNotices(store ports.NoticeStore, recovered []interruptedRecoveryIdentity, now time.Time) {
+	for _, item := range recovered {
+		_ = store.Append(domain.Notification{
+			Code:      domain.NoticeSnapshotRestore,
+			Severity:  domain.NoticeWarn,
+			Message:   "recovered an interrupted durable session transaction",
+			Details:   "session=" + item.name + " incarnation=" + item.id.String(),
+			Time:      now,
+			SessionID: domain.SessionID(item.id.String()),
+		})
+	}
+}
+
+func logStartupRecoveryCounts(log *slog.Logger, records []domain.CatalogueRecord, restoring int) {
+	healthy, fresh, degraded := 0, 0, 0
+	for _, record := range records {
+		switch record.RecoveryState {
+		case domain.RecoveryHealthy:
+			healthy++
+		case domain.RecoveryFresh:
+			fresh++
+		case domain.RecoveryDegraded:
+			degraded++
+		}
+	}
+	log.Info("daemon_startup_complete", "healthy", healthy, "fresh", fresh, "restoring", restoring, "degraded", degraded)
 }
 
 func constructDaemonBeforeSocketPublication(
@@ -482,8 +585,11 @@ func runDaemonOwned(ctx context.Context) (retErr error) {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = logCloser.Close() }()
+	defer func() { retErr = errors.Join(retErr, logCloser.Close()) }()
+	return runDaemonOwnedWithLogger(ctx, log)
+}
 
+func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr error) {
 	clk := clock.New()
 	observer, observerCloser, err := newPerformanceTrace(clk)
 	if err != nil {
@@ -518,9 +624,10 @@ func runDaemonOwned(ctx context.Context) (retErr error) {
 	daemonOpts = append(daemonOpts, daemon.WithConfig(cfg))
 	daemonOpts = append(daemonOpts, daemon.WithBarScriptCommandRunner(shellcmd.New()))
 	daemonOpts = append(daemonOpts, daemon.WithProcessInspector(platform.NewProcessInspector()), daemon.WithDirOrHome(platform.DirOrHome))
-	snapshotRepository := snapshotadapter.NewRepository(snapshotDir())
+	snapshotRepository := snapshotadapter.NewRepository(snapshotDir(), log)
 	daemonOpts = append(daemonOpts, daemon.WithSnapshotRepository(snapshotRepository, snapshotRepository))
-	daemonOpts = append(daemonOpts, daemon.WithNoticeStore(noticefile.New(platform.StateDir())))
+	noticeStore := noticefile.New(platform.StateDir())
+	daemonOpts = append(daemonOpts, daemon.WithNoticeStore(noticeStore))
 	storePath := persist.StorePath(platform.StateDir())
 	opened, err := persist.OpenOrMigrate(ctx, persist.OpenDeps{
 		StateDir:          platform.StateDir(),
@@ -528,12 +635,27 @@ func runDaemonOwned(ctx context.Context) (retErr error) {
 		SnapshotMigration: snapshotRepository,
 	})
 	if err != nil {
+		log.Error("catalogue_validation_failed", "path", storePath, "reason_code", "open-failed")
 		return fmt.Errorf("vev: open or migrate durable session state %s: %w", storePath, err)
 	}
-	coordinator := recovery.NewCoordinator(opened.Catalogue, snapshotRepository, recoveryfs.New(platform.StateDir()), rand.Reader)
+	recoveryMode := "current"
+	if opened.NewInstall {
+		recoveryMode = "new-install"
+	} else if opened.Migrated {
+		recoveryMode = "migrated"
+	}
+	logCatalogueRecovery(log, opened.Records, recoveryMode)
+	journal := recoveryfs.New(platform.StateDir())
+	pendingRecoveries, err := pendingInterruptedRecoveries(ctx, opened.Records, journal, snapshotRepository)
+	if err != nil {
+		return errors.Join(fmt.Errorf("vev: inspect durable session transactions: %w", err), opened.Catalogue.Close())
+	}
+	coordinator := recovery.NewCoordinator(opened.Catalogue, snapshotRepository, journal, rand.Reader)
 	if err := coordinator.Recover(ctx); err != nil {
 		return errors.Join(fmt.Errorf("vev: recover durable session transactions: %w", err), opened.Catalogue.Close())
 	}
+	persistTransactionRecoveryNotices(noticeStore, pendingRecoveries, clk.Now())
+	logTransactionRecovery(log, len(pendingRecoveries))
 	daemonOpts = append(daemonOpts, daemon.WithRecoveryCoordinator(coordinator))
 	log.Info("session persistence enabled", "path", storePath)
 	daemonOpts = append(daemonOpts, daemon.WithCatalogue(opened.Catalogue, opened.Records))

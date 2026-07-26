@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"log/slog"
 	"sync"
 
 	"github.com/bnema/vev/internal/ports"
@@ -24,6 +25,7 @@ const (
 type Repository struct {
 	dir   string
 	hooks repositoryHooks
+	log   *slog.Logger
 
 	// sessionStateMu owns both maps. A caller retains a reference before it
 	// waits on a session mutex, so an idle entry can never be removed while a
@@ -95,9 +97,14 @@ var _ ports.LegacySnapshotSource = (*Repository)(nil)
 
 // NewRepository creates a repository rooted at dir. It does not create files
 // until the first publication, so merely constructing it is side-effect free.
-func NewRepository(dir string) *Repository {
+func NewRepository(dir string, logs ...*slog.Logger) *Repository {
+	log := slog.Default()
+	if len(logs) > 0 && logs[0] != nil {
+		log = logs[0]
+	}
 	return &Repository{
 		dir:                 dir,
+		log:                 log,
 		locks:               make(map[string]*sessionMutex),
 		storageEpochs:       make(map[string]uint64),
 		maintenanceCursors:  make(map[string]*maintenanceCursor),
