@@ -1,6 +1,7 @@
 package kv
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -15,7 +16,9 @@ import (
 	"github.com/bnema/vev/pkg/safedir"
 )
 
-// ReplayResult describes a strictly validated WAL prefix.
+// ReplayResult describes a strictly validated WAL prefix. LastGood is an
+// absolute file offset, so truncating a torn tail to it preserves the file
+// header of a current-format file.
 type ReplayResult struct {
 	Data      map[string][]byte
 	EntrySize map[string]int64
@@ -23,7 +26,33 @@ type ReplayResult struct {
 	Live      int64
 	LastGood  int64
 	TornTail  bool
+	Format    walFormat
 }
+
+// walFormat is the on-disk framing a file was written with.
+type walFormat uint8
+
+const (
+	// formatLegacy is a file written before the record header carried its own
+	// checksum. It is read with the original semantics and upgraded at Open.
+	formatLegacy walFormat = iota
+	formatCurrent
+)
+
+func (f walFormat) headerLen() int64 {
+	if f == formatCurrent {
+		return recordHeaderLen
+	}
+	return legacyHeaderLen
+}
+
+type headerStatus uint8
+
+const (
+	headerOK headerStatus = iota
+	headerEOF
+	headerTorn
+)
 
 type fsHooks struct {
 	Open    func(string, int, os.FileMode) (*os.File, error)
@@ -97,7 +126,15 @@ func openWithHooks(path string, hooks fsHooks) (*Store, error) {
 		return cleanupLock(err)
 	}
 	s := &Store{path: path, file: f, lockFile: lockFile, data: result.Data, entrySize: result.EntrySize, total: result.Total, live: result.Live, hooks: hooks}
-	if s.shouldCompact() {
+	// A legacy file has already replayed with its original semantics, so the
+	// data is exactly what the previous release would have loaded. Rewriting it
+	// through the compaction protocol upgrades the framing without a second
+	// rewrite path: every crash state it can leave behind is one recoverCompaction
+	// already resolves, so a restart sees either the whole legacy file or the
+	// whole upgraded one. A failed compaction poisons the store, so there is no
+	// safe way to continue in legacy mode; Open fails closed and the next start
+	// retries from whichever complete file recovery selects.
+	if result.Format != formatCurrent || s.shouldCompact() {
 		if err := s.compactLocked(); err != nil {
 			_ = f.Close()
 			return cleanupLock(err)
@@ -266,6 +303,16 @@ func (s *Store) compactLocked() (retErr error) {
 	if err != nil {
 		return err
 	}
+	// Every replacement is written in the current format, which is also how a
+	// legacy file is upgraded.
+	header := fileHeader()
+	if n, err := s.hooks.Write(f, header); err != nil || n != len(header) {
+		_ = s.hooks.Close(f)
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		return err
+	}
 	keys := make([]string, 0, len(s.data))
 	for k := range s.data {
 		keys = append(keys, k)
@@ -356,7 +403,7 @@ func (s *Store) compactLocked() (retErr error) {
 		return err
 	}
 	result, err := replayFile(current)
-	if err != nil || result.TornTail {
+	if err != nil || result.TornTail || result.Format != formatCurrent {
 		_ = s.hooks.Close(current)
 		if err == nil {
 			err = ErrCorruptWAL
@@ -402,6 +449,10 @@ func (s *Store) poisonLocked() error {
 	return errors.Join(fileErr, releaseLock(lockFile))
 }
 
+// replayFile validates a WAL prefix in whichever framing the file uses. A torn
+// tail is the only truncatable outcome; every other inconsistency is corruption
+// and fails closed, so a damaged record can never be silently dropped along
+// with everything written after it.
 func replayFile(f *os.File) (ReplayResult, error) {
 	info, err := f.Stat()
 	if err != nil {
@@ -411,34 +462,34 @@ func replayFile(f *os.File) (ReplayResult, error) {
 		return ReplayResult{}, err
 	}
 	fileSize := info.Size()
-	result := ReplayResult{Data: make(map[string][]byte), EntrySize: make(map[string]int64)}
-	header := make([]byte, headerLen)
+	format, err := readFileFormat(f, fileSize)
+	if err != nil {
+		return ReplayResult{}, err
+	}
+	result := ReplayResult{Data: make(map[string][]byte), EntrySize: make(map[string]int64), Format: format}
+	if format == formatCurrent {
+		result.LastGood = fileHeaderLen
+	}
 	for {
-		n, err := io.ReadFull(f, header)
-		if errors.Is(err, io.EOF) {
-			return result, nil
-		}
-		if errors.Is(err, io.ErrUnexpectedEOF) {
-			_ = n
-			result.TornTail = true
-			return result, nil
-		}
+		header, status, err := readRecordHeader(f, format, fileSize, result.LastGood)
 		if err != nil {
 			return ReplayResult{}, err
 		}
-		payloadLen := binary.BigEndian.Uint32(header[:4])
-		if int64(payloadLen) > fileSize-result.LastGood-headerLen {
+		if status == headerEOF {
+			return result, nil
+		}
+		if status == headerTorn {
 			result.TornTail = true
 			return result, nil
 		}
-		payload := make([]byte, int(payloadLen))
+		payload := make([]byte, int(header.payloadLen))
 		if _, err := io.ReadFull(f, payload); errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			result.TornTail = true
 			return result, nil
 		} else if err != nil {
 			return ReplayResult{}, err
 		}
-		if crc32.ChecksumIEEE(payload) != binary.BigEndian.Uint32(header[4:8]) {
+		if crc32.ChecksumIEEE(payload) != header.payloadCRC {
 			return ReplayResult{}, fmt.Errorf("%w: CRC mismatch at offset %d", ErrCorruptWAL, result.LastGood)
 		}
 		var records []record
@@ -452,11 +503,71 @@ func replayFile(f *os.File) (ReplayResult, error) {
 		if err != nil {
 			return ReplayResult{}, fmt.Errorf("%w: invalid record at offset %d: %v", ErrCorruptWAL, result.LastGood, err)
 		}
-		size := int64(headerLen + len(payload))
+		size := format.headerLen() + int64(len(payload))
 		applyRecords(result.Data, result.EntrySize, &result.Live, records, size)
 		result.Total += size
 		result.LastGood += size
 	}
+}
+
+// readFileFormat consumes the file header when one is present and leaves the
+// reader positioned at the first record either way.
+func readFileFormat(f io.ReadSeeker, fileSize int64) (walFormat, error) {
+	if fileSize < fileHeaderLen {
+		return formatLegacy, nil
+	}
+	header := make([]byte, fileHeaderLen)
+	if _, err := io.ReadFull(f, header); err != nil {
+		return formatLegacy, err
+	}
+	if !bytes.Equal(header[:fileMagicLen], fileMagic[:]) {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return formatLegacy, err
+		}
+		return formatLegacy, nil
+	}
+	if version := binary.BigEndian.Uint16(header[fileMagicLen:]); version != formatVersion {
+		return formatLegacy, fmt.Errorf("%w: unsupported format version %d", ErrCorruptWAL, version)
+	}
+	return formatCurrent, nil
+}
+
+type recordHeader struct {
+	payloadLen uint32
+	payloadCRC uint32
+}
+
+// readRecordHeader implements the replay decision table. In the current format
+// the header checksum is verified before the length is trusted for anything:
+// an unverifiable header is corruption, and only a header that checks out may
+// declare the record short (a torn tail).
+func readRecordHeader(f io.Reader, format walFormat, fileSize, offset int64) (recordHeader, headerStatus, error) {
+	buf := make([]byte, format.headerLen())
+	if _, err := io.ReadFull(f, buf); errors.Is(err, io.EOF) {
+		return recordHeader{}, headerEOF, nil
+	} else if errors.Is(err, io.ErrUnexpectedEOF) {
+		return recordHeader{}, headerTorn, nil
+	} else if err != nil {
+		return recordHeader{}, headerOK, err
+	}
+	header := recordHeader{
+		payloadLen: binary.BigEndian.Uint32(buf[0:4]),
+		payloadCRC: binary.BigEndian.Uint32(buf[4:8]),
+	}
+	if format == formatCurrent {
+		if crc32.ChecksumIEEE(buf[0:8]) != binary.BigEndian.Uint32(buf[8:recordHeaderLen]) {
+			return recordHeader{}, headerOK, fmt.Errorf("%w: record header CRC mismatch at offset %d", ErrCorruptWAL, offset)
+		}
+		// The length is now trustworthy, so an implausible one is corruption
+		// rather than a short tail. Checked before any allocation.
+		if header.payloadLen > maxPayloadLen {
+			return recordHeader{}, headerOK, fmt.Errorf("%w: record length %d exceeds maximum at offset %d", ErrCorruptWAL, header.payloadLen, offset)
+		}
+	}
+	if int64(header.payloadLen) > fileSize-offset-format.headerLen() {
+		return recordHeader{}, headerTorn, nil
+	}
+	return header, headerOK, nil
 }
 
 func applyRecords(data map[string][]byte, sizes map[string]int64, live *int64, records []record, size int64) {
@@ -495,7 +606,7 @@ func recoverCompaction(path string, hooks fsHooks) error {
 	}
 	dir := filepath.Dir(path)
 	if currentExists && currentErr == nil {
-		if nextExists && !prevExists {
+		if nextExists {
 			if err := hooks.Remove(path + ".next"); err != nil {
 				return err
 			}
@@ -580,7 +691,9 @@ func validatePath(path string) error {
 	if err != nil {
 		return err
 	}
-	if !exists || result.TornTail {
+	// A replacement this package just wrote must be complete and in the current
+	// format; anything else means the write did not land as intended.
+	if !exists || result.TornTail || result.Format != formatCurrent {
 		return ErrCorruptWAL
 	}
 	return nil

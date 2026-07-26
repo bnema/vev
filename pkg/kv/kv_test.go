@@ -16,6 +16,41 @@ func privatePath(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "vev", "store.kv")
 }
 
+// currentFile frames records the way the store writes them today: a file
+// header followed by self-checksummed record headers.
+func currentFile(records ...[]byte) []byte {
+	buf := fileHeader()
+	for _, record := range records {
+		buf = append(buf, record...)
+	}
+	return buf
+}
+
+// legacyFile reproduces the framing written by the released version: no file
+// header, and a record header of length plus payload CRC only. Compatibility
+// with these files is a hard requirement, so the fixture stays in the tests.
+func legacyFile(records ...[]byte) []byte {
+	var buf []byte
+	for _, record := range records {
+		payload := record[recordHeaderLen:]
+		header := make([]byte, legacyHeaderLen)
+		binary.BigEndian.PutUint32(header[0:4], uint32(len(payload)))
+		binary.BigEndian.PutUint32(header[4:8], crc32.ChecksumIEEE(payload))
+		buf = append(append(buf, header...), payload...)
+	}
+	return buf
+}
+
+func writeFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func closeStore(t *testing.T, s *Store) {
 	t.Helper()
 	if err := s.Close(); err != nil {
@@ -128,7 +163,7 @@ func TestOpenTruncatesMidRecordTail(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, append(first, second[:len(second)/2]...), 0o600); err != nil {
+	if err := os.WriteFile(path, currentFile(first, second[:len(second)/2]), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -147,8 +182,8 @@ func TestOpenTruncatesMidRecordTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() != int64(len(first)) {
-		t.Fatalf("tail not truncated: size=%d want=%d", info.Size(), len(first))
+	if want := int64(fileHeaderLen + len(first)); info.Size() != want {
+		t.Fatalf("tail not truncated: size=%d want=%d", info.Size(), want)
 	}
 }
 
@@ -156,8 +191,8 @@ func TestCRCcorruptionOfLastRecordFailsClosed(t *testing.T) {
 	path := privatePath(t)
 	first, _ := encodeRecord(opSet, []byte("k"), []byte("old"))
 	second, _ := encodeRecord(opSet, []byte("k"), []byte("new"))
-	buf := append(append([]byte{}, first...), second...)
-	buf[len(first)+headerLen+payloadPrefixLen+1] ^= 0xff
+	buf := currentFile(first, second)
+	buf[fileHeaderLen+len(first)+recordHeaderLen+payloadPrefixLen+1] ^= 0xff
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -251,14 +286,14 @@ func TestReplayStrict(t *testing.T) {
 		torn    bool
 		corrupt bool
 	}{
-		{name: "torn-final-header", wal: append(append([]byte{}, valid...), batch[:headerLen-1]...), torn: true},
-		{name: "torn-final-payload", wal: append(append([]byte{}, valid...), batch[:len(batch)-1]...), torn: true},
-		{name: "final-crc", wal: corruptRecord(append(append([]byte{}, valid...), batch...), len(valid)+4), corrupt: true},
-		{name: "middle-crc", wal: corruptRecord(append(append([]byte{}, valid...), batch...), 4), corrupt: true},
-		{name: "invalid-op", wal: rawRecord([]byte{0xff, 0, 0}), corrupt: true},
-		{name: "impossible-batch-count", wal: rawRecord([]byte{opBatch, 0xff, 0xff, 0xff, 0xff}), corrupt: true},
-		{name: "duplicate-key-in-batch", wal: rawRecord(rawBatchPayload([]BatchChange{{Key: []byte("x")}, {Key: []byte("x"), Delete: true}})), corrupt: true},
-		{name: "trailing-batch-garbage", wal: rawRecord(append(rawBatchPayload([]BatchChange{{Key: []byte("x")}}), 0)), corrupt: true},
+		{name: "torn-final-header", wal: currentFile(valid, batch[:recordHeaderLen-1]), torn: true},
+		{name: "torn-final-payload", wal: currentFile(valid, batch[:len(batch)-1]), torn: true},
+		{name: "final-crc", wal: corruptRecord(currentFile(valid, batch), fileHeaderLen+len(valid)+recordHeaderLen), corrupt: true},
+		{name: "middle-crc", wal: corruptRecord(currentFile(valid, batch), fileHeaderLen+recordHeaderLen), corrupt: true},
+		{name: "invalid-op", wal: currentFile(rawRecord([]byte{0xff, 0, 0})), corrupt: true},
+		{name: "impossible-batch-count", wal: currentFile(rawRecord([]byte{opBatch, 0xff, 0xff, 0xff, 0xff})), corrupt: true},
+		{name: "duplicate-key-in-batch", wal: currentFile(rawRecord(rawBatchPayload([]BatchChange{{Key: []byte("x")}, {Key: []byte("x"), Delete: true}}))), corrupt: true},
+		{name: "trailing-batch-garbage", wal: currentFile(rawRecord(append(rawBatchPayload([]BatchChange{{Key: []byte("x")}}), 0))), corrupt: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -287,8 +322,57 @@ func TestReplayStrict(t *testing.T) {
 			if string(result.Data["old"]) != "value" || result.Data["new"] != nil {
 				t.Fatalf("torn batch was partially applied: %#v", result.Data)
 			}
-			if !result.TornTail || result.LastGood != int64(len(valid)) {
+			if !result.TornTail || result.LastGood != int64(fileHeaderLen+len(valid)) {
 				t.Fatalf("result = %+v", result)
+			}
+		})
+	}
+}
+
+// TestRecoverCompactionCleansStaleNextRegardlessOfPrev covers the branch
+// where current is valid: any stale .next must be removed even when a .prev
+// also exists (previously the "nextExists && !prevExists" guard left a .next
+// behind whenever .prev was present too, so spec §3's complete-cleanup
+// requirement was not met after certain crash-then-retry sequences).
+func TestRecoverCompactionCleansStaleNextRegardlessOfPrev(t *testing.T) {
+	oldRecord, _ := encodeRecord(opSet, []byte("version"), []byte("old"))
+	newRecord, _ := encodeRecord(opSet, []byte("version"), []byte("new"))
+	oldFile, newFile := currentFile(oldRecord), currentFile(newRecord)
+	tests := []struct {
+		name                string
+		current, next, prev []byte
+	}{
+		{name: "current-next-only", current: oldFile, next: newFile},
+		{name: "current-next-and-prev", current: oldFile, next: newFile, prev: oldFile},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := privatePath(t)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for suffix, data := range map[string][]byte{"": tt.current, ".next": tt.next, ".prev": tt.prev} {
+				if data != nil {
+					if err := os.WriteFile(path+suffix, data, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := recoverCompaction(path, defaultFSHooks()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(path + ".next"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf(".next survived recovery: err = %v", err)
+			}
+			if _, err := os.Stat(path + ".prev"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf(".prev survived recovery: err = %v", err)
+			}
+			got, err := Replay(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got["version"]) != "old" {
+				t.Fatalf("version = %q, want %q (current must remain authoritative)", got["version"], "old")
 			}
 		})
 	}
@@ -340,19 +424,20 @@ func TestBatchAtomicity(t *testing.T) {
 func TestCompactionRecoveryMatrix(t *testing.T) {
 	oldRecord, _ := encodeRecord(opSet, []byte("version"), []byte("old"))
 	newRecord, _ := encodeRecord(opSet, []byte("version"), []byte("new"))
+	oldFile, newFile := currentFile(oldRecord), currentFile(newRecord)
 	tests := []struct {
 		name                string
 		current, next, prev []byte
 		want                string
 	}{
-		{name: "current-alone", current: oldRecord, want: "old"},
-		{name: "current-next", current: oldRecord, next: newRecord, want: "old"},
-		{name: "prev-next", prev: oldRecord, next: newRecord, want: "new"},
-		{name: "prev-invalid-next", prev: oldRecord, next: rawRecord([]byte{0xff, 0, 0}), want: "old"},
-		{name: "prev-torn-next", prev: oldRecord, next: newRecord[:len(newRecord)-1], want: "old"},
-		{name: "current-prev", current: newRecord, prev: oldRecord, want: "new"},
-		{name: "invalid-current-prev", current: rawRecord([]byte{0xff, 0, 0}), prev: oldRecord, want: "old"},
-		{name: "prev-alone", prev: oldRecord, want: "old"},
+		{name: "current-alone", current: oldFile, want: "old"},
+		{name: "current-next", current: oldFile, next: newFile, want: "old"},
+		{name: "prev-next", prev: oldFile, next: newFile, want: "new"},
+		{name: "prev-invalid-next", prev: oldFile, next: currentFile(rawRecord([]byte{0xff, 0, 0})), want: "old"},
+		{name: "prev-torn-next", prev: oldFile, next: newFile[:len(newFile)-1], want: "old"},
+		{name: "current-prev", current: newFile, prev: oldFile, want: "new"},
+		{name: "invalid-current-prev", current: currentFile(rawRecord([]byte{0xff, 0, 0})), prev: oldFile, want: "old"},
+		{name: "prev-alone", prev: oldFile, want: "old"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -392,7 +477,7 @@ func TestCompactionRecoveryMatrix(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, oldRecord, 0o600); err != nil {
+			if err := os.WriteFile(path, oldFile, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			s, err := Open(path)
@@ -488,13 +573,14 @@ func TestCompactionFilesystemOperationFailuresPoisonAndRecover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	oldFile := currentFile(oldRecord)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := privatePath(t)
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, oldRecord, 0o600); err != nil {
+			if err := os.WriteFile(path, oldFile, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			s, err := Open(path)
@@ -599,13 +685,7 @@ func requireCandidateBytes(t *testing.T, path string, want map[string][]byte) {
 }
 
 func corruptRecord(buf []byte, offset int) []byte { buf[offset] ^= 0xff; return buf }
-func rawRecord(payload []byte) []byte {
-	buf := make([]byte, headerLen+len(payload))
-	binary.BigEndian.PutUint32(buf[:4], uint32(len(payload)))
-	binary.BigEndian.PutUint32(buf[4:8], crc32.ChecksumIEEE(payload))
-	copy(buf[8:], payload)
-	return buf
-}
+func rawRecord(payload []byte) []byte             { return framePayload(payload) }
 func rawBatchPayload(changes []BatchChange) []byte {
 	payload := []byte{opBatch, 0, 0, 0, byte(len(changes))}
 	for _, change := range changes {
@@ -621,23 +701,275 @@ func rawBatchPayload(changes []BatchChange) []byte {
 	return payload
 }
 
-func TestReplayStopsAtBadPayloadLengthWithoutAllocatingHugeBuffer(t *testing.T) {
-	path := privatePath(t)
+// An oversized length must never drive an allocation. In a legacy file the
+// length is unprotected, so it stays a torn tail; in the current format the
+// header checksum proves the length was written that way, which is corruption.
+func TestReplayRejectsOversizedLengthWithoutAllocating(t *testing.T) {
 	first, _ := encodeRecord(opSet, []byte("a"), []byte("one"))
-	header := make([]byte, headerLen)
-	binary.BigEndian.PutUint32(header[0:4], 1<<31)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, append(first, header...), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	s, err := Open(path)
+	legacyHeader := make([]byte, legacyHeaderLen)
+	binary.BigEndian.PutUint32(legacyHeader[0:4], 1<<31)
+
+	t.Run("legacy length is a torn tail", func(t *testing.T) {
+		path := privatePath(t)
+		writeFile(t, path, append(legacyFile(first), legacyHeader...))
+		s, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer closeStore(t, s)
+		if got, ok := s.Get([]byte("a")); !ok || string(got) != "one" {
+			t.Fatalf("good record missing before bad length: %q %v", got, ok)
+		}
+	})
+
+	t.Run("current oversized length fails closed", func(t *testing.T) {
+		path := privatePath(t)
+		wal := currentFile(first, oversizedRecordHeader(maxPayloadLen+1))
+		writeFile(t, path, wal)
+		if _, err := Open(path); !errors.Is(err, ErrCorruptWAL) {
+			t.Fatalf("Open error = %v, want ErrCorruptWAL", err)
+		}
+		requireFileBytes(t, path, wal)
+	})
+}
+
+// oversizedRecordHeader is a record header whose own checksum is valid, so the
+// length is provably what the writer put there rather than a bit flip.
+func oversizedRecordHeader(payloadLen uint32) []byte {
+	header := make([]byte, recordHeaderLen)
+	binary.BigEndian.PutUint32(header[0:4], payloadLen)
+	binary.BigEndian.PutUint32(header[8:recordHeaderLen], crc32.ChecksumIEEE(header[0:8]))
+	return header
+}
+
+func requireFileBytes(t *testing.T, path string, want []byte) {
+	t.Helper()
+	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer closeStore(t, s)
-	if got, ok := s.Get([]byte("a")); !ok || string(got) != "one" {
-		t.Fatalf("good record missing before bad length: %q %v", got, ok)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("file was mutated: got %d bytes, want %d", len(got), len(want))
+	}
+}
+
+// The regression this format exists for: a bit flip in the length field of an
+// early record used to look exactly like a torn tail, so Open truncated every
+// record written after it and reopened a smaller, structurally valid file.
+func TestCorruptLengthOfEarlyRecordFailsClosedWithoutTruncating(t *testing.T) {
+	first, _ := encodeRecord(opSet, []byte("a"), []byte("one"))
+	second, _ := encodeRecord(opSet, []byte("b"), []byte("two"))
+	third, _ := encodeRecord(opSet, []byte("c"), []byte("three"))
+
+	tests := []struct {
+		name   string
+		offset int
+	}{
+		{name: "first-record-length", offset: fileHeaderLen},
+		{name: "second-record-length", offset: fileHeaderLen + len(first) + 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := privatePath(t)
+			wal := currentFile(first, second, third)
+			// Flip a high bit so the length claims far more than the file holds:
+			// the exact shape that used to be misread as an incomplete tail.
+			wal[tt.offset] ^= 0x40
+			writeFile(t, path, wal)
+
+			if _, err := Open(path); !errors.Is(err, ErrCorruptWAL) {
+				t.Fatalf("Open error = %v, want ErrCorruptWAL", err)
+			}
+			requireFileBytes(t, path, wal)
+			if _, err := Replay(path); !errors.Is(err, ErrCorruptWAL) {
+				t.Fatalf("Replay error = %v, want ErrCorruptWAL", err)
+			}
+		})
+	}
+}
+
+// Every row of the replay decision table for the current format. A torn tail is
+// the only truncatable outcome.
+func TestCurrentFormatReplayDecisionTable(t *testing.T) {
+	first, _ := encodeRecord(opSet, []byte("a"), []byte("one"))
+	second, _ := encodeRecord(opSet, []byte("b"), []byte("two"))
+	invalidOp := rawRecord([]byte{0xff, 0, 0})
+
+	tests := []struct {
+		name    string
+		wal     []byte
+		torn    bool
+		corrupt bool
+	}{
+		{name: "partial-header", wal: currentFile(first, second[:recordHeaderLen-1]), torn: true},
+		{name: "header-checksum-mismatch", wal: corruptRecord(currentFile(first, second), fileHeaderLen+len(first)+1), corrupt: true},
+		{name: "short-payload", wal: currentFile(first, second[:len(second)-1]), torn: true},
+		{name: "payload-checksum-mismatch", wal: corruptRecord(currentFile(first, second), fileHeaderLen+len(first)+recordHeaderLen), corrupt: true},
+		{name: "undecodable-payload", wal: currentFile(first, invalidOp), corrupt: true},
+		{name: "oversized-length", wal: currentFile(first, oversizedRecordHeader(maxPayloadLen+1)), corrupt: true},
+		{name: "complete-records", wal: currentFile(first, second)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := privatePath(t)
+			writeFile(t, path, tt.wal)
+			f, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := replayFile(f)
+			_ = f.Close()
+
+			if tt.corrupt {
+				if !errors.Is(err, ErrCorruptWAL) {
+					t.Fatalf("replay error = %v, want ErrCorruptWAL", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Format != formatCurrent {
+				t.Fatalf("format = %d, want current", result.Format)
+			}
+			if result.TornTail != tt.torn {
+				t.Fatalf("TornTail = %v, want %v", result.TornTail, tt.torn)
+			}
+			if string(result.Data["a"]) != "one" {
+				t.Fatalf("prefix lost: %#v", result.Data)
+			}
+			wantLastGood := int64(fileHeaderLen + len(first))
+			if !tt.torn {
+				wantLastGood += int64(len(second))
+			}
+			if result.LastGood != wantLastGood {
+				t.Fatalf("LastGood = %d, want %d", result.LastGood, wantLastGood)
+			}
+		})
+	}
+}
+
+// A file written by the released version must keep working: it opens with the
+// original semantics, is upgraded in place, and reopens identically.
+func TestLegacyFileOpensAndUpgradesInPlace(t *testing.T) {
+	setA, _ := encodeRecord(opSet, []byte("a"), []byte("one"))
+	setB, _ := encodeRecord(opSet, []byte("b"), []byte("two"))
+	replaceA, _ := encodeRecord(opSet, []byte("a"), []byte("uno"))
+	delB, _ := encodeRecord(opDel, []byte("b"), nil)
+	torn, _ := encodeRecord(opSet, []byte("c"), []byte("three"))
+
+	tests := []struct {
+		name string
+		wal  []byte
+		want map[string]string
+	}{
+		{name: "complete", wal: legacyFile(setA, setB, replaceA), want: map[string]string{"a": "uno", "b": "two"}},
+		{name: "tombstone", wal: legacyFile(setA, setB, delB), want: map[string]string{"a": "one"}},
+		{name: "torn-tail", wal: append(legacyFile(setA, setB), legacyFile(torn)[:legacyHeaderLen+2]...), want: map[string]string{"a": "one", "b": "two"}},
+		{name: "empty", wal: nil, want: map[string]string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := privatePath(t)
+			writeFile(t, path, tt.wal)
+
+			s, err := Open(path)
+			if err != nil {
+				t.Fatalf("legacy file failed to open: %v", err)
+			}
+			requireContents(t, s, tt.want)
+			if err := s.Set([]byte("added"), []byte("after-upgrade")); err != nil {
+				t.Fatal(err)
+			}
+			closeStore(t, s)
+
+			upgraded, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.HasPrefix(upgraded, fileMagic[:]) {
+				t.Fatal("legacy file was not upgraded in place")
+			}
+			reopened, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer closeStore(t, reopened)
+			want := map[string]string{"added": "after-upgrade"}
+			for k, v := range tt.want {
+				want[k] = v
+			}
+			requireContents(t, reopened, want)
+			replayed, err := Replay(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(replayed) != len(want) {
+				t.Fatalf("Replay = %#v, want %#v", replayed, want)
+			}
+		})
+	}
+}
+
+func requireContents(t *testing.T, s *Store, want map[string]string) {
+	t.Helper()
+	for key, value := range want {
+		got, ok := s.Get([]byte(key))
+		if !ok || string(got) != value {
+			t.Fatalf("Get(%q) = %q, %v; want %q", key, got, ok, value)
+		}
+	}
+	count := 0
+	s.Range(func([]byte, []byte) bool { count++; return true })
+	if count != len(want) {
+		t.Fatalf("store holds %d keys, want %d", count, len(want))
+	}
+}
+
+// The upgrade runs through the compaction protocol, so a crash at any of its
+// boundaries must leave either the whole legacy file or the whole upgraded one.
+func TestLegacyUpgradeCrashSafety(t *testing.T) {
+	setA, _ := encodeRecord(opSet, []byte("a"), []byte("one"))
+	setB, _ := encodeRecord(opSet, []byte("b"), []byte("two"))
+	legacy := legacyFile(setA, setB)
+	want := map[string]string{"a": "one", "b": "two"}
+
+	faultPoints := []string{
+		"before-write-next", "after-write-next", "before-sync-next", "after-sync-next",
+		"after-sync-dir-next", "after-remove-stale-prev", "after-rename-current-prev",
+		"after-sync-dir-prev", "after-rename-next-current", "after-sync-dir-current",
+		"before-reopen-current", "after-reopen-current", "after-remove-prev", "after-final-sync-dir",
+	}
+	for _, point := range faultPoints {
+		t.Run("fault-"+point, func(t *testing.T) {
+			path := privatePath(t)
+			writeFile(t, path, legacy)
+			hooks := defaultFSHooks()
+			hooks.Fault = func(got string) error {
+				if got == point {
+					return errors.New("injected " + point)
+				}
+				return nil
+			}
+			if _, err := openWithHooks(path, hooks); err == nil {
+				t.Fatalf("fault %q did not interrupt the upgrade", point)
+			}
+
+			// Restart: recovery selects a complete file, and the data is intact
+			// whichever format that file happens to be in.
+			s, err := Open(path)
+			if err != nil {
+				t.Fatalf("restart after fault %q: %v", point, err)
+			}
+			requireContents(t, s, want)
+			closeStore(t, s)
+			upgraded, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.HasPrefix(upgraded, fileMagic[:]) {
+				t.Fatal("restart did not complete the upgrade")
+			}
+		})
 	}
 }

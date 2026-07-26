@@ -12,13 +12,42 @@ const (
 	opDel
 	opBatch
 
-	headerLen           = 8
+	// Legacy record framing (files with no file header): a 4-byte big-endian
+	// payload length followed by CRC32(payload). The length itself is
+	// unprotected, so a bit flip in it is indistinguishable from a torn tail.
+	// These files are replayed with the original semantics and upgraded in
+	// place by Open; nothing ever writes this framing again.
+	legacyHeaderLen = 8
+
+	// Current framing. Every file starts with fileMagic plus a uint16 format
+	// version, and every record carries a self-verifying header:
+	//
+	//	[0:4]   payload length, big endian
+	//	[4:8]   CRC32(payload)
+	//	[8:12]  CRC32(header[0:8])
+	//
+	// The header checksum is what makes the length trustworthy: a corrupt
+	// length now fails closed instead of masquerading as a torn tail and
+	// silently truncating every record that follows it.
+	recordHeaderLen = 12
+	fileMagicLen    = 4
+	fileHeaderLen   = fileMagicLen + 2
+	formatVersion   = 1
+
+	// maxPayloadLen bounds any allocation driven by a length field. Catalogue
+	// records and batches are orders of magnitude smaller than this.
+	maxPayloadLen = 64 << 20
+
 	payloadPrefixLen    = 3
 	batchEntryPrefixLen = 7
 	compactThreshold    = 64
 	compactWasteRatio   = 0.5
 	maxKeyLen           = 1<<16 - 1
 )
+
+// fileMagic cannot be mistaken for a legacy record header: read as a legacy
+// big-endian length it is ~1.4 GiB, far beyond maxPayloadLen.
+var fileMagic = [fileMagicLen]byte{'V', 'E', 'V', 'K'}
 
 var (
 	errBadRecord  = errors.New("bad record")
@@ -49,7 +78,7 @@ func encodeRecord(op byte, key, value []byte) ([]byte, error) {
 	if op == opSet {
 		payloadLen += len(value)
 	}
-	if uint64(payloadLen) > math.MaxUint32 {
+	if payloadLen > maxPayloadLen {
 		return nil, errors.New("payload too large")
 	}
 	payload := make([]byte, payloadLen)
@@ -86,7 +115,7 @@ func encodeBatch(changes []BatchChange) ([]byte, error) {
 			}
 		}
 		payloadLen += 1 + 2 + len(change.Key) + 4 + valueLen
-		if uint64(payloadLen) > math.MaxUint32 {
+		if payloadLen > maxPayloadLen {
 			return nil, errors.New("payload too large")
 		}
 	}
@@ -112,11 +141,20 @@ func encodeBatch(changes []BatchChange) ([]byte, error) {
 	return framePayload(payload), nil
 }
 
+// fileHeader is the fixed prefix of every file written in the current format.
+func fileHeader() []byte {
+	buf := make([]byte, fileHeaderLen)
+	copy(buf, fileMagic[:])
+	binary.BigEndian.PutUint16(buf[fileMagicLen:], formatVersion)
+	return buf
+}
+
 func framePayload(payload []byte) []byte {
-	buf := make([]byte, headerLen+len(payload))
-	binary.BigEndian.PutUint32(buf[:4], uint32(len(payload)))
+	buf := make([]byte, recordHeaderLen+len(payload))
+	binary.BigEndian.PutUint32(buf[0:4], uint32(len(payload)))
 	binary.BigEndian.PutUint32(buf[4:8], crc32.ChecksumIEEE(payload))
-	copy(buf[headerLen:], payload)
+	binary.BigEndian.PutUint32(buf[8:recordHeaderLen], crc32.ChecksumIEEE(buf[0:8]))
+	copy(buf[recordHeaderLen:], payload)
 	return buf
 }
 
