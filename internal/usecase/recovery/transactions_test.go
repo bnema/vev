@@ -60,6 +60,7 @@ func (c *transactionCatalogue) Create(record domain.CatalogueRecord) error {
 }
 
 func (c *transactionCatalogue) UpdateMetadata(domain.CatalogueMetadataUpdate) error { return nil }
+func (c *transactionCatalogue) Sync() error                                         { return nil }
 
 func (c *transactionCatalogue) Replace(name string, record domain.CatalogueRecord) error {
 	c.mu.Lock()

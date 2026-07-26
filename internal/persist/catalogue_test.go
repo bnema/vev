@@ -17,6 +17,7 @@ func TestCatalogue(t *testing.T) {
 	t.Run("open-fails-closed", testCatalogueOpenFailsClosed)
 	t.Run("apply-rename-replace", testCatalogueApplyRenameReplace)
 	t.Run("metadata-update-preserves-authority", testCatalogueMetadataUpdatePreservesAuthority)
+	t.Run("metadata-update-is-deferred", testCatalogueMetadataUpdateIsDeferred)
 	t.Run("read-only-malformed", testCatalogueLoadReadOnlyRejectsMalformedValue)
 	t.Run("read-only-fresh-install", testCatalogueLoadReadOnlyFreshInstallHasNoSessions)
 	t.Run("read-only-ignores-stray-tmp", testCatalogueLoadReadOnlyIgnoresStrayTmp)
@@ -158,6 +159,42 @@ func testCatalogueMetadataUpdatePreservesAuthority(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, expected, unchanged)
+}
+
+func testCatalogueMetadataUpdateIsDeferred(t *testing.T) {
+	dir := privateDir(t)
+	p, _, err := openCurrentCatalogue(dir, true)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, p.Close()) }()
+
+	record := domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/old"}
+	require.NoError(t, p.Create(record))
+	before, err := os.ReadFile(StorePath(dir))
+	require.NoError(t, err)
+
+	cwd := "/buffered"
+	require.NoError(t, p.UpdateMetadata(domain.CatalogueMetadataUpdate{
+		Name: record.Name, IncarnationID: record.IncarnationID, Cwd: &cwd,
+	}))
+	afterBuffered, err := os.ReadFile(StorePath(dir))
+	require.NoError(t, err)
+	require.Equal(t, before, afterBuffered, "metadata must remain buffered before Sync")
+
+	require.NoError(t, p.Sync())
+	afterSync, err := os.ReadFile(StorePath(dir))
+	require.NoError(t, err)
+	require.NotEqual(t, before, afterSync)
+
+	cwd = "/next-identity"
+	require.NoError(t, p.UpdateMetadata(domain.CatalogueMetadataUpdate{
+		Name: record.Name, IncarnationID: record.IncarnationID, Cwd: &cwd,
+	}))
+	record.Cwd = cwd
+	record.UpdatedAt = 2
+	require.NoError(t, p.Replace(record.Name, record))
+	afterIdentity, err := os.ReadFile(StorePath(dir))
+	require.NoError(t, err)
+	require.NotEqual(t, afterSync, afterIdentity, "identity writes must sync before returning")
 }
 
 func testCatalogueLoadReadOnlyRejectsMalformedValue(t *testing.T) {

@@ -265,6 +265,31 @@ func WithCatalogue(catalogue ports.Catalogue, records []domain.CatalogueRecord) 
 	}
 }
 
+func (d *Daemon) catalogueRecord(name string) (domain.CatalogueRecord, bool, error) {
+	if d == nil || d.catalogue == nil {
+		return domain.CatalogueRecord{}, false, nil
+	}
+	return d.catalogue.Record(name)
+}
+
+// markCatalogueDirty buffers metadata. The periodic catalogue timer, the next
+// identity write, or shutdown provides the durability barrier.
+func (d *Daemon) markCatalogueDirty(update domain.CatalogueMetadataUpdate) {
+	if d == nil || d.catalogue == nil {
+		return
+	}
+	if err := d.catalogue.UpdateMetadata(update); err != nil {
+		d.log.Warn("buffering session metadata failed", "err", err, "session", update.Name)
+	}
+}
+
+func (d *Daemon) flushCatalogue() error {
+	if d == nil || d.catalogue == nil {
+		return nil
+	}
+	return d.catalogue.Sync()
+}
+
 // WithRecoveryCoordinator installs the durable recovery coordinator.
 func WithRecoveryCoordinator(coordinator *recoveryusecase.Coordinator) Option {
 	return func(d *Daemon) {
@@ -510,7 +535,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	d.sessWg.Go(func() {
 		d.barScriptPoller(d.serveCtx)
 	})
-	if d.persistEnabled && d.procCwd != nil {
+	if d.persistEnabled {
 		d.sessWg.Go(func() {
 			d.cwdSampler(d.serveCtx)
 		})
@@ -589,12 +614,13 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	d.shutdownAllWithSnapshotDeadline(ports.ReasonServerShutdown, snapshotDeadline)
 	d.waitSessionWorkersWithSnapshotDeadline(snapshotDeadline)
 	d.waitNotifies()
-	var closeErr error
-	if d.catalogue != nil {
-		closeErr = d.catalogue.Close()
+	if err := d.flushCatalogue(); err != nil {
+		d.log.Warn("flushing session catalogue at shutdown failed", "err", err)
 	}
-	if closeErr != nil {
-		d.log.Warn("closing session catalogue failed", "err", closeErr)
+	if d.catalogue != nil {
+		if err := d.catalogue.Close(); err != nil {
+			d.log.Warn("closing session catalogue failed", "err", err)
+		}
 	}
 	return nil
 }

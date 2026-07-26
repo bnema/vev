@@ -143,7 +143,7 @@ func (p *Persister) Create(record domain.CatalogueRecord) error {
 	if _, exists := p.store.Get([]byte(record.Name)); exists {
 		return errors.New("persist: session already exists")
 	}
-	return p.applyLocked(map[string]*domain.CatalogueRecord{record.Name: &record})
+	return p.applyLocked(map[string]*domain.CatalogueRecord{record.Name: &record}, true)
 }
 
 func (p *Persister) Records() ([]domain.CatalogueRecord, error) { return p.LoadCatalogue() }
@@ -172,9 +172,9 @@ func (p *Persister) Apply(records map[string]*domain.CatalogueRecord) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.applyLocked(records)
+	return p.applyLocked(records, true)
 }
-func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord) error {
+func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord, durable bool) error {
 	if len(records) == 0 {
 		return errors.New("persist: empty catalogue batch")
 	}
@@ -238,9 +238,11 @@ func (p *Persister) applyLocked(records map[string]*domain.CatalogueRecord) erro
 			return err
 		}
 	}
-	if err := p.store.Sync(); err != nil {
-		p.incarnationIndex = false
-		return err
+	if durable {
+		if err := p.store.Sync(); err != nil {
+			p.incarnationIndex = false
+			return err
+		}
 	}
 	for name := range records {
 		if id, ok := p.nameIncarnations[name]; ok {
@@ -303,9 +305,10 @@ func (p *Persister) Replace(name string, next domain.CatalogueRecord) error {
 	return p.Apply(map[string]*domain.CatalogueRecord{name: &next})
 }
 
-// UpdateMetadata atomically updates ordinary session metadata on the existing
-// authoritative incarnation. Recovery and transaction fields are retained from
-// the stored record rather than accepted from a potentially stale runtime copy.
+// UpdateMetadata buffers ordinary session metadata on the existing authoritative
+// incarnation. Recovery and transaction fields are retained from the stored
+// record rather than accepted from a potentially stale runtime copy. Sync or the
+// next identity operation makes the update durable.
 func (p *Persister) UpdateMetadata(update domain.CatalogueMetadataUpdate) error {
 	if p == nil {
 		return nil
@@ -338,7 +341,20 @@ func (p *Persister) UpdateMetadata(update domain.CatalogueMetadataUpdate) error 
 	if update.TabNames != nil {
 		current.TabNames = append([]string(nil), (*update.TabNames)...)
 	}
-	return p.applyLocked(map[string]*domain.CatalogueRecord{current.Name: &current})
+	return p.applyLocked(map[string]*domain.CatalogueRecord{current.Name: &current}, false)
+}
+
+// Sync makes every buffered catalogue mutation durable.
+func (p *Persister) Sync() error {
+	if p == nil {
+		return nil
+	}
+	if p.store == nil {
+		return errPersistenceUnavailable
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.store.Sync()
 }
 
 func (p *Persister) Delete(name string) error {

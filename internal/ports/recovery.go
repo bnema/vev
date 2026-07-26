@@ -34,6 +34,8 @@ type Catalogue interface {
 	Replace(string, domain.CatalogueRecord) error
 	Rename(string, domain.CatalogueRecord) error
 	Delete(string) error
+	// Sync makes buffered metadata durable. Identity operations sync internally.
+	Sync() error
 	Close() error
 }
 

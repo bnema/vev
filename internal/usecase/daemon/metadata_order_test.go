@@ -1,294 +1,95 @@
 package daemon
 
 import (
-	"errors"
+	"bytes"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 )
 
-type blockingMetadataCatalogue struct {
-	ports.Catalogue
+type syncCountingCatalogue struct {
+	*durableRecoveryCatalogue
 
-	mu           sync.Mutex
-	calls        int
-	firstStarted chan struct{}
-	releaseFirst chan struct{}
-	firstErr     error
-	secondErr    error
+	muSync sync.Mutex
+	syncs  int
 }
 
-func (c *blockingMetadataCatalogue) UpdateMetadata(update domain.CatalogueMetadataUpdate) error {
+func (c *syncCountingCatalogue) Sync() error {
+	c.muSync.Lock()
+	defer c.muSync.Unlock()
+	c.syncs++
+	return nil
+}
+
+func (c *syncCountingCatalogue) syncCount() int {
+	c.muSync.Lock()
+	defer c.muSync.Unlock()
+	return c.syncs
+}
+
+func (c *syncCountingCatalogue) Create(record domain.CatalogueRecord) error {
 	c.mu.Lock()
-	c.calls++
-	call := c.calls
+	if _, exists := c.records[record.Name]; exists {
+		c.mu.Unlock()
+		return errSessionNameInUse
+	}
+	c.records[record.Name] = record
 	c.mu.Unlock()
-	if call == 1 {
-		close(c.firstStarted)
-		<-c.releaseFirst
-		if c.firstErr != nil {
-			return c.firstErr
-		}
-	}
-	if call == 2 && c.secondErr != nil {
-		return c.secondErr
-	}
-	return c.Catalogue.UpdateMetadata(update)
+	return c.Sync()
 }
 
-func newBlockingCatalogue(sess *session, firstErr error) (*durableRecoveryCatalogue, *blockingMetadataCatalogue) {
-	sess.mu.Lock()
-	record := sess.persistRecordLocked(sess.createdAt)
-	sess.mu.Unlock()
-	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
-	return catalogue, &blockingMetadataCatalogue{
-		Catalogue:    catalogue,
-		firstStarted: make(chan struct{}),
-		releaseFirst: make(chan struct{}),
-		firstErr:     firstErr,
-	}
-}
-
-func TestMetadataWritesPreserveLaterMutationWhenFirstWriteIsBlocked(t *testing.T) {
-	firstFailure := errors.New("first metadata write failed")
-	for _, tt := range []struct {
-		name     string
-		firstErr error
-	}{
-		{name: "delayed success"},
-		{name: "delayed failure does not roll back newer state", firstErr: firstFailure},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			sess := newSnapshotTestSession(t, "work", false, "/work")
-			catalogue, blocking := newBlockingCatalogue(sess, tt.firstErr)
-			d := newTestDaemon(t, nil, stubClock{})
-			d.catalogue = blocking
-			d.sessions[sess.id] = sess
-
-			firstDone := make(chan error, 1)
-			go func() { firstDone <- d.renameTab(sess, sess.tabs[0], "first") }()
-			select {
-			case <-blocking.firstStarted:
-			case <-time.After(testWaitTimeout):
-				t.Fatal("first metadata write did not block")
-			}
-
-			secondDone := make(chan error, 1)
-			go func() { secondDone <- d.renameTab(sess, sess.tabs[0], "second") }()
-			require.Eventually(t, func() bool {
-				sess.mu.Lock()
-				defer sess.mu.Unlock()
-				return sess.tabs[0].name == "second"
-			}, testWaitTimeout, time.Millisecond, "later mutation did not proceed while storage was blocked")
-
-			close(blocking.releaseFirst)
-			firstResult := <-firstDone
-			if tt.firstErr == nil {
-				require.NoError(t, firstResult)
-			} else {
-				require.ErrorIs(t, firstResult, tt.firstErr, "an in-memory revision cannot subsume a failed durable write")
-			}
-			require.NoError(t, <-secondDone)
-
-			persisted, ok, err := catalogue.Record("work")
-			require.NoError(t, err)
-			require.True(t, ok)
-			require.Equal(t, []string{"second"}, persisted.TabNames)
-			require.Equal(t, "second", sess.tabs[0].name)
-		})
-	}
-}
-
-func TestTwoConsecutiveMetadataFailuresAreBothReported(t *testing.T) {
-	firstFailure := errors.New("first metadata write failed")
-	secondFailure := errors.New("second metadata write failed")
-	sess := newSnapshotTestSession(t, "work", false, "/work")
-	catalogue, blocking := newBlockingCatalogue(sess, firstFailure)
-	blocking.secondErr = secondFailure
-	close(blocking.releaseFirst)
-	d := newTestDaemon(t, nil, stubClock{})
-	d.catalogue = blocking
-	d.sessions[sess.id] = sess
-
-	require.ErrorIs(t, d.renameTab(sess, sess.tabs[0], "first"), firstFailure)
-	require.ErrorIs(t, d.renameTab(sess, sess.tabs[0], "second"), secondFailure)
-
-	persisted, ok, err := catalogue.Record("work")
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Empty(t, persisted.TabNames)
-	sess.mu.Lock()
-	require.Empty(t, sess.tabs[0].name)
-	sess.mu.Unlock()
-}
-
-func TestConsecutiveMetadataFailuresRestoreDurableState(t *testing.T) {
-	firstFailure := errors.New("first metadata write failed")
-	secondFailure := errors.New("second metadata write failed")
-	sess := newSnapshotTestSession(t, "work", false, "/work")
-	catalogue, blocking := newBlockingCatalogue(sess, firstFailure)
-	blocking.secondErr = secondFailure
-	d := newTestDaemon(t, nil, stubClock{})
-	d.catalogue = blocking
-	d.sessions[sess.id] = sess
-
-	firstDone := make(chan error, 1)
-	go func() { firstDone <- d.renameTab(sess, sess.tabs[0], "first") }()
-	select {
-	case <-blocking.firstStarted:
-	case <-time.After(testWaitTimeout):
-		t.Fatal("first metadata write did not block")
-	}
-	secondDone := make(chan error, 1)
-	go func() { secondDone <- d.renameTab(sess, sess.tabs[0], "second") }()
-	require.Eventually(t, func() bool {
-		sess.mu.Lock()
-		defer sess.mu.Unlock()
-		return sess.tabs[0].name == "second"
-	}, testWaitTimeout, time.Millisecond)
-
-	close(blocking.releaseFirst)
-	require.ErrorIs(t, <-firstDone, firstFailure)
-	require.ErrorIs(t, <-secondDone, secondFailure)
-
-	persisted, ok, err := catalogue.Record("work")
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Empty(t, persisted.TabNames)
-	sess.mu.Lock()
-	require.Empty(t, sess.tabs[0].name)
-	sess.mu.Unlock()
-}
-
-func TestNewerMetadataFailureDoesNotSkipOlderSnapshot(t *testing.T) {
-	failure := errors.New("newer metadata write failed")
+func TestMetadataWritesAreDeferred(t *testing.T) {
+	t.Parallel()
 	sess := newSnapshotTestSession(t, "work", false, "/work")
 	sess.mu.Lock()
 	record := sess.persistRecordLocked(sess.createdAt)
 	sess.mu.Unlock()
-	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
-	blocking := &blockingMetadataCatalogue{
-		Catalogue:    catalogue,
-		firstStarted: make(chan struct{}),
-		releaseFirst: make(chan struct{}),
-		firstErr:     failure,
-	}
-	close(blocking.releaseFirst)
+	cat := &syncCountingCatalogue{durableRecoveryCatalogue: newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})}
 	d := newTestDaemon(t, nil, stubClock{})
-	d.catalogue = blocking
+	d.catalogue = cat
+	d.persistEnabled = true
 	d.sessions[sess.id] = sess
-	tb := sess.tabs[0]
 
-	sess.mu.Lock()
-	tb.name = "first"
-	firstRecord, firstVersion := sess.nextPersistRecordLocked(sess.createdAt + 1)
-	tb.name = "second"
-	secondRecord, secondVersion := sess.nextPersistRecordLocked(sess.createdAt + 2)
-	sess.mu.Unlock()
+	syncsBefore := cat.syncCount()
+	require.NoError(t, d.renameTab(sess, sess.tabs[0], "build"))
+	d.touchMRU(sess)
+	require.Equal(t, syncsBefore, cat.syncCount(), "metadata updates must not force a durable write")
 
-	secondRollback := func() bool {
-		sess.mu.Lock()
-		defer sess.mu.Unlock()
-		if tb.name != "second" {
-			return false
-		}
-		tb.name = "first"
-		return true
-	}
-	firstRollback := func() bool {
-		sess.mu.Lock()
-		defer sess.mu.Unlock()
-		if tb.name != "first" {
-			return false
-		}
-		tb.name = ""
-		return true
-	}
+	require.NoError(t, d.flushCatalogue())
+	require.Greater(t, cat.syncCount(), syncsBefore)
 
-	_, err := d.persistSessionMetadata(sess, secondVersion, secondRecord.MetadataUpdate(), secondRollback)
-	require.ErrorIs(t, err, failure)
-	_, err = d.persistSessionMetadata(sess, firstVersion, firstRecord.MetadataUpdate(), firstRollback)
-	require.NoError(t, err)
-
-	persisted, ok, err := catalogue.Record("work")
+	got, ok, err := cat.Record("work")
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Equal(t, []string{"first"}, persisted.TabNames)
+	require.Equal(t, []string{"build"}, got.TabNames)
+}
+
+func TestIdentityWritesAreSynchronous(t *testing.T) {
+	t.Parallel()
+	sess := newSnapshotTestSession(t, "0", true, "/work")
+	cat := &syncCountingCatalogue{durableRecoveryCatalogue: newDurableRecoveryCatalogue(nil)}
+	d := newTestDaemon(t, nil, stubClock{})
+	d.catalogue = cat
+	d.persistEnabled = true
+	d.recovery = recoveryusecase.NewCoordinator(cat, nil, bytes.NewReader(bytes.Repeat([]byte{1}, 16)))
+	d.sessions[sess.id] = sess
+
+	syncsBefore := cat.syncCount()
+	require.NoError(t, d.renameSession(sess, "work"))
+	require.Greater(t, cat.syncCount(), syncsBefore, "creating a named session must be durable before it is exposed")
+
+	d.mu.Lock()
+	published := d.findByNameLocked("work")
+	d.mu.Unlock()
+	require.Same(t, sess, published)
 	sess.mu.Lock()
-	require.Equal(t, "first", tb.name)
+	require.False(t, sess.ephemeral)
 	sess.mu.Unlock()
 }
 
-func TestLatestMetadataFailureRollsBackRename(t *testing.T) {
-	failure := errors.New("metadata write failed")
-	sess := newSnapshotTestSession(t, "work", false, "/work")
-	catalogue, blocking := newBlockingCatalogue(sess, failure)
-	d := newTestDaemon(t, nil, stubClock{})
-	d.catalogue = blocking
-	d.sessions[sess.id] = sess
-
-	done := make(chan error, 1)
-	go func() { done <- d.renameTab(sess, sess.tabs[0], "failed") }()
-	select {
-	case <-blocking.firstStarted:
-	case <-time.After(testWaitTimeout):
-		t.Fatal("metadata write did not block")
-	}
-	close(blocking.releaseFirst)
-	require.ErrorIs(t, <-done, failure)
-
-	persisted, ok, err := catalogue.Record("work")
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Empty(t, persisted.TabNames)
-	sess.mu.Lock()
-	require.Empty(t, sess.tabs[0].name)
-	sess.mu.Unlock()
-}
-
-func TestBlockedCwdWriteCannotOverwriteLaterTabMetadata(t *testing.T) {
-	sess := newSnapshotTestSession(t, "work", false, "/work")
-	catalogue, blocking := newBlockingCatalogue(sess, nil)
-	d := newTestDaemon(t, nil, stubClock{})
-	d.catalogue = blocking
-	d.sessions[sess.id] = sess
-	d.procCwd = func(int) (string, error) { return "/later-cwd", nil }
-
-	cwdDone := make(chan struct{})
-	go func() {
-		d.refreshSessionCwd(sess)
-		close(cwdDone)
-	}()
-	select {
-	case <-blocking.firstStarted:
-	case <-time.After(testWaitTimeout):
-		t.Fatal("cwd metadata write did not block")
-	}
-
-	renameDone := make(chan error, 1)
-	go func() { renameDone <- d.renameTab(sess, sess.tabs[0], "later-tab") }()
-	require.Eventually(t, func() bool {
-		sess.mu.Lock()
-		defer sess.mu.Unlock()
-		return sess.tabs[0].name == "later-tab"
-	}, testWaitTimeout, time.Millisecond)
-
-	close(blocking.releaseFirst)
-	select {
-	case <-cwdDone:
-	case <-time.After(testWaitTimeout):
-		t.Fatal("cwd refresh deadlocked")
-	}
-	require.NoError(t, <-renameDone)
-
-	persisted, ok, err := catalogue.Record("work")
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, "/later-cwd", persisted.Cwd)
-	require.Equal(t, []string{"later-tab"}, persisted.TabNames)
-}
+var _ ports.Catalogue = (*syncCountingCatalogue)(nil)

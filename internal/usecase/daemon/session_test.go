@@ -969,17 +969,15 @@ func TestRenameTabPersistsForNamedSession(t *testing.T) {
 	require.Equal(t, []string{"shell"}, records[0].TabNames)
 }
 
-func TestRenameTabDoesNotHoldDaemonOrSessionMutexDuringCatalogueIO(t *testing.T) {
+func TestRenameTabBuffersMetadataUnderStateLocks(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	sess := newSnapshotTestSession(t, "work", false, "/work")
 	d.sessions[sess.id] = sess
 	catalogue := portsmocks.NewMockCatalogue(t)
 	WithCatalogue(catalogue, nil)(d)
 	catalogue.EXPECT().UpdateMetadata(mock.Anything).RunAndReturn(func(domain.CatalogueMetadataUpdate) error {
-		require.True(t, d.mu.TryLock(), "daemon mutex held during catalogue I/O")
-		d.mu.Unlock()
-		require.True(t, sess.mu.TryLock(), "session mutex held during catalogue I/O")
-		sess.mu.Unlock()
+		require.False(t, d.mu.TryLock(), "daemon mutex must guard the metadata snapshot")
+		require.False(t, sess.mu.TryLock(), "session mutex must guard the metadata snapshot")
 		return nil
 	}).Once()
 

@@ -115,6 +115,7 @@ func (c *durableRecoveryCatalogue) MetadataUpdates() []domain.CatalogueMetadataU
 	return append([]domain.CatalogueMetadataUpdate(nil), c.metadataUpdates...)
 }
 
+func (c *durableRecoveryCatalogue) Sync() error  { return nil }
 func (c *durableRecoveryCatalogue) Close() error { return nil }
 
 type durableRecoveryRepository struct {

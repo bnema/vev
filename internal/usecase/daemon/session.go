@@ -55,25 +55,15 @@ type session struct {
 	mu                sync.Mutex // guards tabs, active, client, restoreDone, clipFiles, and clipboard queue state
 	// restoreDone remains attached to a restored session after it is published in
 	// the live registry, so racing attaches cannot bypass restoration completion.
-	restoreDone chan struct{}
-	// metadataPersistMu serializes authority writes and post-I/O rollback. State
-	// mutation paths must release d.mu and mu before acquiring it. After durable
-	// I/O completes it may acquire d.mu then mu to reconcile failed revisions.
-	metadataPersistMu       sync.Mutex
-	metadataVersion         uint64                 // guarded by mu; every durable metadata snapshot receives a revision
-	metadataDurableVersion  uint64                 // guarded by metadataPersistMu
-	metadataLiveVersion     uint64                 // rollback cursor guarded by metadataPersistMu
-	metadataFailedRollbacks map[uint64]func() bool // guarded by metadataPersistMu
-	themeMu                 sync.Mutex
-	tabs                    []*tab
-	active                  int
-	client                  *attachedClient
-	clipboardQueue          []clipboardForward
-	clipboardWorkerRunning  bool
-	renameInProgress        bool
-	renameDone              chan struct{}
-	cwd                     string
-	terminal                terminalEnv
+	restoreDone            chan struct{}
+	themeMu                sync.Mutex
+	tabs                   []*tab
+	active                 int
+	client                 *attachedClient
+	clipboardQueue         []clipboardForward
+	clipboardWorkerRunning bool
+	cwd                    string
+	terminal               terminalEnv
 	// env is the authoritative immutable environment snapshot for future PTY children.
 	// It is guarded by mu and is always copied on ingress and egress.
 	env          []string
@@ -177,39 +167,20 @@ func (d *Daemon) touchMRU(sess *session) {
 		return
 	}
 	seq := d.mruSeq.Add(1)
-	updated := false
-	var previous uint64
 	for {
 		old := sess.mruAt.Load()
 		if old >= seq {
 			return
 		}
 		if sess.mruAt.CompareAndSwap(old, seq) {
-			previous = old
-			updated = true
 			break
 		}
 	}
-	if !updated {
-		return
-	}
 	sess.mu.Lock()
-	name := sess.name
-	ephemeral := sess.ephemeral
-	var record domain.CatalogueRecord
-	var version uint64
-	if !ephemeral {
-		record, version = sess.nextPersistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
+	if !sess.ephemeral {
+		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
 	}
 	sess.mu.Unlock()
-	if !ephemeral {
-		rollback := func() bool {
-			return sess.mruAt.CompareAndSwap(seq, previous)
-		}
-		if _, err := d.persistSessionMetadata(sess, version, record.MetadataUpdate(), rollback); err != nil {
-			d.log.Warn("touching persisted session recency failed", "err", err, "session", name)
-		}
-	}
 }
 
 func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz domain.Size, term terminalEnv, env []string, restoredTabNames ...[]string) (*session, error) {
@@ -329,38 +300,19 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 				cancel()
 				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", errors.New("durable session authority is not configured"))
 			}
-			// The name reservation remains visible while durable authority I/O runs,
-			// but daemon/session mutexes are released so storage cannot block routing.
-			d.mu.Unlock()
 			var err error
 			if resuming && authoritativeExists {
-				err = d.updateCatalogueMetadata(record.MetadataUpdate())
+				err = d.catalogue.UpdateMetadata(record.MetadataUpdate())
+				if err == nil {
+					err = d.catalogue.Sync()
+				}
 			} else {
 				record, err = d.recovery.Create(d.serveCtx, record)
 			}
-			d.mu.Lock()
 			if err != nil {
 				closeTabs(tabs)
 				cancel()
 				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", err)
-			}
-			if d.closing {
-				// Creation lost its race with shutdown. Roll back a newly committed
-				// authority record without holding mu; resumed metadata remains owned
-				// by the existing stopped lifecycle.
-				if !resuming {
-					d.mu.Unlock()
-					rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(d.serveCtx), snapshotFinalFlushTimeout)
-					rollbackErr := d.recovery.Delete(rollbackCtx, name)
-					rollbackCancel()
-					d.mu.Lock()
-					if rollbackErr != nil {
-						d.log.Warn("rolling back session creation during shutdown failed", "session", name, "err", rollbackErr)
-					}
-				}
-				closeTabs(tabs)
-				cancel()
-				return nil, errors.New("daemon is shutting down")
 			}
 			sess.incarnation = record.IncarnationID
 		}
@@ -494,58 +446,14 @@ func (d *Daemon) createTab(sess *session, sz domain.Size) error {
 		p.ctx, p.cancel = context.WithCancel(tb.ctx)
 	}
 	sess.mu.Lock()
-	oldActive := sess.active
 	sess.tabs = append(sess.tabs, tb)
 	sess.active = len(sess.tabs) - 1
 	tabIndex := sess.active
-	record, metadataVersion := sess.nextPersistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
-	ephemeral := sess.ephemeral
+	if !sess.ephemeral {
+		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
+	}
 	sess.mu.Unlock()
 	d.mu.Unlock()
-	if !ephemeral {
-		rollback := func() bool {
-			d.mu.Lock()
-			defer d.mu.Unlock()
-			if d.sessions[sess.id] != sess {
-				return true
-			}
-			sess.mu.Lock()
-			if !slices.Contains(sess.tabs, tb) {
-				sess.mu.Unlock()
-				return true
-			}
-			if sess.tabs[len(sess.tabs)-1] != tb {
-				sess.mu.Unlock()
-				return false
-			}
-			sess.tabs = slices.DeleteFunc(sess.tabs, func(candidate *tab) bool { return candidate == tb })
-			sess.active = min(oldActive, len(sess.tabs)-1)
-			sess.mu.Unlock()
-			if tb.cancel != nil {
-				tb.cancel()
-			}
-			_ = pty.Close()
-			return true
-		}
-		rollbackRejected, err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback)
-		if err != nil {
-			if rollbackRejected {
-				d.mu.Lock()
-				if d.sessions[sess.id] == sess {
-					sess.mu.Lock()
-					sess.tabs = slices.DeleteFunc(sess.tabs, func(candidate *tab) bool { return candidate == tb })
-					sess.active = min(sess.active, len(sess.tabs)-1)
-					sess.mu.Unlock()
-				}
-				d.mu.Unlock()
-				if tb.cancel != nil {
-					tb.cancel()
-				}
-				tb.closeAllPanes()
-			}
-			return err
-		}
-	}
 	d.log.Info("tab created", "session", name, "tab", tabIndex)
 	d.startTabGoroutines(sess, tb)
 	d.activateTab(sess, tb)
@@ -731,19 +639,14 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		return err
 	}
 
-	// Reserve the rename while state is inspected, then persist the new name
-	// without changing the incarnation-keyed snapshot namespace.
+	// Hold daemon then session state across the durable identity write. The
+	// incarnation-keyed snapshot namespace is never relocated.
 	d.mu.Lock()
 	if taken := d.findByNameLocked(name); taken != nil && taken != sess {
 		d.mu.Unlock()
 		return errSessionNameInUse
 	}
 	sess.mu.Lock()
-	if sess.renameInProgress {
-		sess.mu.Unlock()
-		d.mu.Unlock()
-		return errors.New("session rename already in progress")
-	}
 	if stopped, ok := d.stopped[name]; ok && stopped.name != sess.name {
 		sess.mu.Unlock()
 		d.mu.Unlock()
@@ -773,20 +676,10 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	record.Name = name
 	record.CreatedAt = createdAt
 	record.LastUsedSeq = lastUsedSeq
-	sess.renameInProgress = true
-	sess.renameDone = make(chan struct{})
-	sess.mu.Unlock()
-	d.mu.Unlock()
-
 	rollback := func(err error) error {
-		sess.mu.Lock()
 		sess.incarnation = priorIncarnation
-		sess.renameInProgress = false
-		if sess.renameDone != nil {
-			close(sess.renameDone)
-			sess.renameDone = nil
-		}
 		sess.mu.Unlock()
+		d.mu.Unlock()
 		return err
 	}
 	// Durable named renames are one atomic catalogue batch. The incarnation-keyed
@@ -810,21 +703,12 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 		}
 	}
 
-	d.mu.Lock()
-	sess.mu.Lock()
-	// The reservation prevents another rename. A closing session is allowed to
-	// finish this short commit; killSession subsequently owns its teardown.
 	delete(d.stopped, oldName)
 	delete(d.stopped, name)
 	sess.name = name
 	sess.createdAt = createdAt
 	sess.incarnation = record.IncarnationID
 	sess.ephemeral = false
-	sess.renameInProgress = false
-	if sess.renameDone != nil {
-		close(sess.renameDone)
-		sess.renameDone = nil
-	}
 	sess.snapEligible.Store(name != "")
 	sess.mu.Unlock()
 	d.mu.Unlock()
@@ -852,41 +736,13 @@ func (d *Daemon) renameTab(sess *session, tb *tab, name string) error {
 		d.mu.Unlock()
 		return errors.New("tab not found")
 	}
-	oldName := tb.name
 	tb.name = name
-	record, metadataVersion := sess.nextPersistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
-	ephemeral := sess.ephemeral
+	if !sess.ephemeral {
+		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
+	}
 	sess.mu.Unlock()
 	d.mu.Unlock()
-	if ephemeral {
-		return nil
-	}
-	rollback := func() bool {
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		if d.sessions[sess.id] != sess {
-			return true
-		}
-		sess.mu.Lock()
-		defer sess.mu.Unlock()
-		if !slices.Contains(sess.tabs, tb) {
-			return true
-		}
-		if tb.name != name {
-			return false
-		}
-		tb.name = oldName
-		return true
-	}
-	if _, err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback); err != nil {
-		return err
-	}
 	return nil
-}
-
-func (s *session) nextPersistRecordLocked(updatedAt int64) (domain.CatalogueRecord, uint64) {
-	s.metadataVersion++
-	return s.persistRecordLocked(updatedAt), s.metadataVersion
 }
 
 func (s *session) persistRecordLocked(updatedAt int64) domain.CatalogueRecord {
@@ -943,10 +799,8 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 		return nil
 	}
 	ringing := tb.attention
-	oldActive := sess.active
 	wasActive := idx == sess.active
 	sess.tabs = append(sess.tabs[:idx], sess.tabs[idx+1:]...)
-	tabsAfterClose := len(sess.tabs)
 	if sess.active >= len(sess.tabs) {
 		sess.active = len(sess.tabs) - 1
 	} else if idx < sess.active {
@@ -955,41 +809,11 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 	destination := sess.tabs[sess.active]
 	ac := sess.client
 	name := sess.name
-	record, metadataVersion := sess.nextPersistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
-	ephemeral := sess.ephemeral
+	if !sess.ephemeral {
+		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
+	}
 	sess.mu.Unlock()
 	d.mu.Unlock()
-	if !ephemeral {
-		rollback := func() bool {
-			d.mu.Lock()
-			defer d.mu.Unlock()
-			if d.sessions[sess.id] != sess {
-				return true
-			}
-			sess.mu.Lock()
-			defer sess.mu.Unlock()
-			if slices.Contains(sess.tabs, tb) {
-				return true
-			}
-			if len(sess.tabs) != tabsAfterClose {
-				return false
-			}
-			sess.tabs = slices.Insert(sess.tabs, min(idx, len(sess.tabs)), tb)
-			sess.active = min(oldActive, len(sess.tabs)-1)
-			return true
-		}
-		rollbackRejected, err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback)
-		if err != nil {
-			d.log.Warn("persisting closed tab failed", "err", err, "session", name)
-			if rollbackRejected {
-				if tb.cancel != nil {
-					tb.cancel()
-				}
-				tb.closeAllPanes()
-			}
-			return err
-		}
-	}
 	d.log.Info("tab closed", "session", name)
 	markSnapshotDirty(sess)
 
@@ -1071,15 +895,15 @@ func (d *Daemon) retryStoppedPurgeContext(ctx context.Context, name string) erro
 	}
 	stopped.purging = true
 	d.stopped[name] = stopped
-	d.mu.Unlock()
 
 	if err := d.beginSnapshotPurge(name, stopped.incarnation); err != nil {
+		d.mu.Unlock()
 		return err
 	}
 	if err := d.finishSnapshotPurge(ctx, name, stopped.incarnation); err != nil {
+		d.mu.Unlock()
 		return err
 	}
-	d.mu.Lock()
 	if current, ok := d.stopped[name]; ok && current.purging {
 		delete(d.stopped, name)
 	}
@@ -1203,23 +1027,6 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 		return nil
 	}
 	defer sess.finishTeardown()
-
-	// A rename reserves durable identity while coordinator I/O runs unlocked.
-	// Teardown waits for that reservation before selecting the purge name.
-	sess.mu.Lock()
-	renameDone := sess.renameDone
-	sess.mu.Unlock()
-	if renameDone != nil {
-		if deadline == nil {
-			<-renameDone
-		} else {
-			select {
-			case <-renameDone:
-			case <-deadline.Done():
-				return context.DeadlineExceeded
-			}
-		}
-	}
 
 	d.mu.Lock()
 	current := d.sessions[sess.id]
@@ -1378,16 +1185,17 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 	// another generation after this destructive source deletion. Keep the hidden
 	// stopped record when deletion fails so a repeated live kill can retry.
 	if !ephemeral && purge {
-		if err := d.finishSnapshotPurge(d.serveCtx, stoppedName, incarnation); err != nil {
+		d.mu.Lock()
+		sess.mu.Lock()
+		err := d.finishSnapshotPurge(d.serveCtx, stoppedName, incarnation)
+		sess.mu.Unlock()
+		if err != nil {
 			purgeErr = errors.Join(purgeErr, err)
 			d.log.Warn("finishing session snapshot purge failed", "err", err, "session", stoppedName)
-		} else {
-			d.mu.Lock()
-			if stopped, ok := d.stopped[stoppedName]; ok && stopped.purging {
-				delete(d.stopped, stoppedName)
-			}
-			d.mu.Unlock()
+		} else if stopped, ok := d.stopped[stoppedName]; ok && stopped.purging {
+			delete(d.stopped, stoppedName)
 		}
+		d.mu.Unlock()
 	}
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
@@ -1448,7 +1256,12 @@ func (d *Daemon) cwdSampler(ctx context.Context) {
 			return
 		case <-t.C():
 		}
-		d.refreshNamedSessionCwds()
+		if d.procCwd != nil {
+			d.refreshNamedSessionCwds()
+		}
+		if err := d.flushCatalogue(); err != nil {
+			d.log.Warn("flushing session catalogue failed", "err", err)
+		}
 		t.Reset(5 * time.Second)
 	}
 }
@@ -1496,38 +1309,13 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 		d.mu.Unlock()
 		return
 	}
-	oldCwd := sess.cwd
 	sess.cwd = cwd
-	name := sess.name
-	ephemeral := sess.ephemeral
-	var record domain.CatalogueRecord
-	var metadataVersion uint64
-	if !ephemeral {
-		record, metadataVersion = sess.nextPersistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
+	if !sess.ephemeral {
+		d.markCatalogueDirty(sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1))).MetadataUpdate())
 	}
 	sess.mu.Unlock()
 	d.mu.Unlock()
-	if !ephemeral {
-		rollback := func() bool {
-			d.mu.Lock()
-			defer d.mu.Unlock()
-			if d.sessions[sess.id] != sess {
-				return true
-			}
-			sess.mu.Lock()
-			defer sess.mu.Unlock()
-			if sess.cwd != cwd {
-				return false
-			}
-			sess.cwd = oldCwd
-			return true
-		}
-		if _, err := d.persistSessionMetadata(sess, metadataVersion, record.MetadataUpdate(), rollback); err != nil {
-			d.log.Warn("touching persisted session cwd failed", "err", err, "session", name)
-			return
-		}
-		markSnapshotDirty(sess)
-	}
+	markSnapshotDirty(sess)
 }
 
 // childEnv retains the daemon-environment helper for daemon-local legacy callers.
