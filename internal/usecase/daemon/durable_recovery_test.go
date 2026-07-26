@@ -360,7 +360,6 @@ func (s explicitRecoveryStub) Discard(context.Context, string, string) (domain.C
 }
 
 type contextRecoveryStub struct {
-	explicitRecoveryStub
 	wantKey any
 	want    any
 	seen    bool

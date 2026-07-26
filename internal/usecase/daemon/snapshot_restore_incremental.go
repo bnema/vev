@@ -135,13 +135,9 @@ func (d *Daemon) setStoppedRecovery(record domain.CatalogueRecord, state runtime
 }
 
 func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr error, done chan struct{}) {
-	d.finishRecordRestoreAttempt(record, restoreErr, done, false)
-}
-
-func (d *Daemon) finishRecordRestoreAttempt(record domain.CatalogueRecord, restoreErr error, done chan struct{}, resetRetryable bool) {
 	retryable := errors.Is(restoreErr, errRetryableRestoreLoad)
 	degraded := false
-	if restoreErr != nil && !retryable && d.catalogue != nil {
+	if restoreErr != nil && d.catalogue != nil {
 		current, ok, readErr := d.catalogue.Record(record.Name)
 		switch {
 		case readErr != nil:
@@ -150,7 +146,10 @@ func (d *Daemon) finishRecordRestoreAttempt(record domain.CatalogueRecord, resto
 			record = current
 			record.RecoveryState = domain.RecoveryDegraded
 			record.DegradedReason = "checkpoint validation failed"
-			if errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded) {
+			switch {
+			case retryable:
+				record.DegradedReason = "checkpoint load failed"
+			case errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded):
 				record.DegradedReason = "restore interrupted"
 			}
 			if err := d.catalogue.Replace(record.Name, record); err != nil {
@@ -173,16 +172,16 @@ func (d *Daemon) finishRecordRestoreAttempt(record domain.CatalogueRecord, resto
 			entry.lastUsedSeq = record.LastUsedSeq
 			entry.tabNames = append([]string(nil), record.TabNames...)
 			d.stopped[record.Name] = entry
-		case retryable && resetRetryable && entry.state == runtimeRestoring && entry.restoreDone == done:
-			entry.state = runtimeDegraded
-			d.stopped[record.Name] = entry
 		}
 	}
 	closeRuntimeRestoreDoneLocked(done)
 	d.mu.Unlock()
 	if degraded {
 		reasonCode := "checkpoint-invalid"
-		if errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded) {
+		switch {
+		case retryable:
+			reasonCode = "checkpoint-load-failed"
+		case errors.Is(restoreErr, context.Canceled) || errors.Is(restoreErr, context.DeadlineExceeded):
 			reasonCode = "restore-interrupted"
 		}
 		d.logSessionDegraded(record, reasonCode)

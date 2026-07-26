@@ -11,7 +11,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-func TestRestoreTransientLoadFailurePreservesHealthyAuthority(t *testing.T) {
+func TestRestoreTransientLoadFailureBecomesDiscardable(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	repository := &durableRecoveryRepository{
 		errors:  map[string]error{record.Name: ports.ErrBudgetExhausted},
@@ -25,12 +25,14 @@ func TestRestoreTransientLoadFailurePreservesHealthyAuthority(t *testing.T) {
 	persisted, ok, err := catalogue.Record(record.Name)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Equal(t, domain.RecoveryHealthy, persisted.RecoveryState)
+	require.Equal(t, domain.RecoveryDegraded, persisted.RecoveryState)
+	require.Equal(t, "checkpoint load failed", persisted.DegradedReason)
 	d.mu.Lock()
 	entry := d.stopped[record.Name]
 	d.mu.Unlock()
-	require.Equal(t, runtimeRestoring, entry.state)
-	require.NotEqual(t, runtimeDegraded, entry.state)
+	require.Equal(t, runtimeDegraded, entry.state)
+	require.Equal(t, persisted, entry.record)
+	require.Equal(t, ports.SessionDegraded, listSessions(t, d).Sessions[0].State)
 	select {
 	case <-entry.restoreDone:
 	default:
