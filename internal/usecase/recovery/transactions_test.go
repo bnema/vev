@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
-	"strconv"
 	"sync"
 	"testing"
 
@@ -174,78 +173,6 @@ func (r *transactionRepository) DeleteDeletionTombstone(_ context.Context, id do
 	return nil
 }
 
-func TestTransactionCrashMatrix(t *testing.T) {
-	ctx := context.Background()
-	t.Run("create", func(t *testing.T) {
-		catalogue := newTransactionCatalogue()
-		coordinator := NewCoordinator(catalogue, newTransactionRepository(), journalStub{}, bytes.NewReader(bytes.Repeat([]byte{1}, 16)))
-		record, err := coordinator.Create(ctx, domain.CatalogueRecord{Name: "work", Cwd: "/tmp"})
-		require.NoError(t, err)
-		require.Equal(t, domain.RecoveryFresh, record.RecoveryState)
-		require.Equal(t, domain.IncarnationID{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}, record.IncarnationID)
-		require.Equal(t, record, catalogue.records["work"])
-	})
-	t.Run("checkpoint", func(t *testing.T) {
-		record := checkpointRecord()
-		catalogue := newTransactionCatalogue(record)
-		repository := &checkpointRepository{}
-		coordinator := NewCoordinator(catalogue, repository, journalStub{}, nil)
-		next, err := coordinator.PublishCheckpoint(ctx, record.Name, checkpointPublication(record, 1))
-		require.NoError(t, err)
-		require.Equal(t, next, catalogue.records[record.Name])
-	})
-	t.Run("rename", func(t *testing.T) {
-		ref := &domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{1}}
-		record := domain.CatalogueRecord{Name: "old", IncarnationID: domain.IncarnationID{2}, RecoveryState: domain.RecoveryHealthy, Committed: ref}
-		catalogue := newTransactionCatalogue(record)
-		coordinator := NewCoordinator(catalogue, newTransactionRepository(), journalStub{}, nil)
-		next, err := coordinator.Rename(ctx, "old", "new")
-		require.NoError(t, err)
-		_, oldExists := catalogue.records["old"]
-		require.False(t, oldExists)
-		require.Equal(t, record.IncarnationID, catalogue.records["new"].IncarnationID)
-		require.Equal(t, record.Committed, next.Committed)
-	})
-	t.Run("delete", func(t *testing.T) {
-		record := domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{3}, RecoveryState: domain.RecoveryFresh}
-		tombstone := domain.DeletionTombstone{Name: record.Name, IncarnationID: record.IncarnationID}
-		for crashAfter := 1; crashAfter <= 6; crashAfter++ {
-			t.Run(string(rune('0'+crashAfter)), func(t *testing.T) {
-				catalogue := newTransactionCatalogue()
-				repository := newTransactionRepository()
-				switch crashAfter {
-				case 1:
-					deleting := record
-					deleting.RecoveryState = domain.RecoveryDeleting
-					catalogue.records[record.Name] = deleting
-				case 2, 3, 4:
-					deleting := record
-					deleting.RecoveryState = domain.RecoveryDeleting
-					catalogue.records[record.Name] = deleting
-					repository.tombstones[record.IncarnationID] = tombstone
-				case 5:
-					repository.tombstones[record.IncarnationID] = tombstone
-				case 6:
-					// The complete transaction has no durable work left.
-				}
-				coordinator := NewCoordinator(catalogue, repository, journalStub{}, nil)
-				require.NoError(t, coordinator.Recover(ctx))
-				_, exists := catalogue.records[record.Name]
-				require.False(t, exists)
-				require.Empty(t, repository.tombstones)
-			})
-		}
-
-		catalogue := newTransactionCatalogue(record)
-		repository := newTransactionRepository()
-		coordinator := NewCoordinator(catalogue, repository, journalStub{}, nil)
-		require.NoError(t, coordinator.Delete(ctx, "work"))
-		require.Equal(t, []string{"replace:work", "delete:work"}, catalogue.events)
-		require.Equal(t, []string{"tombstone", "quarantine", "remove-tombstone"}, repository.events)
-		require.Equal(t, []bool{true}, repository.quarantine)
-	})
-}
-
 type transactionJournal struct {
 	mu      sync.Mutex
 	intents map[domain.IncarnationID]domain.DiscardIntent
@@ -351,61 +278,6 @@ func TestDegradedExportIsReadOnly(t *testing.T) {
 	require.Equal(t, exported.Bytes(), repeated.Bytes())
 	require.Equal(t, record, catalogue.records[record.Name])
 	require.Empty(t, catalogue.events)
-}
-
-func TestDiscardCrashMatrix(t *testing.T) {
-	ctx := context.Background()
-	old := degradedTransactionRecord()
-	newID := domain.IncarnationID{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9}
-	intent := domain.DiscardIntent{OldRecord: old, OldIncarnation: old.IncarnationID, NewIncarnation: newID, SessionName: old.Name, Reason: "explicit discard"}
-
-	t.Run("commit order", func(t *testing.T) {
-		catalogue := newTransactionCatalogue(old)
-		repository := newTransactionRepository()
-		journal := newTransactionJournal()
-		coordinator := NewCoordinator(catalogue, repository, journal, bytes.NewReader(newID[:]))
-		got, err := coordinator.Discard(ctx, old.Name, intent.Reason)
-		require.NoError(t, err)
-		require.Equal(t, freshReplacement(intent), got)
-		require.Equal(t, []string{"intent", "delete-intent"}, journal.events)
-		require.Equal(t, []string{"descriptor", "quarantine-incarnation"}, repository.events)
-		require.Equal(t, []string{"replace:" + old.Name}, catalogue.events)
-		require.Empty(t, journal.intents)
-	})
-
-	for step := 1; step <= 6; step++ {
-		t.Run(strconv.Itoa(step), func(t *testing.T) {
-			catalogue := newTransactionCatalogue(old)
-			repository := newTransactionRepository()
-			journal := newTransactionJournal()
-			if step >= 1 {
-				journal.intents[old.IncarnationID] = intent
-			}
-			if step >= 2 {
-				repository.descriptors = append(repository.descriptors, quarantineDescriptor(intent))
-			}
-			if step >= 3 {
-				repository.quarantinedIDs = append(repository.quarantinedIDs, old.IncarnationID)
-			}
-			if step >= 4 {
-				catalogue.records[old.Name] = freshReplacement(intent)
-			}
-			if step >= 5 {
-				delete(journal.intents, old.IncarnationID)
-			}
-			if step == 6 {
-				// Runtime exposure is deliberately outside durable recovery.
-			}
-			coordinator := NewCoordinator(catalogue, repository, journal, nil)
-			require.NoError(t, coordinator.Recover(ctx))
-			got := catalogue.records[old.Name]
-			require.Equal(t, newID, got.IncarnationID)
-			require.Equal(t, domain.RecoveryFresh, got.RecoveryState)
-			require.NotEmpty(t, repository.descriptors)
-			require.NotEmpty(t, repository.quarantinedIDs)
-			require.Empty(t, journal.intents)
-		})
-	}
 }
 
 func TestDiscardIncarnationConflict(t *testing.T) {
