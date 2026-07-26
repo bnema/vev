@@ -15,6 +15,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -1007,4 +1008,114 @@ func digestInShard(t *testing.T, shard string, n int) ports.SnapshotDigest {
 	}
 	t.Fatalf("did not find stale digest in shard %q", shard)
 	return ports.SnapshotDigest{}
+}
+
+func TestRetentionSlots(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		refs []uint64
+		want []uint64
+	}{
+		{name: "first checkpoint", refs: []uint64{1}, want: []uint64{1}},
+		{name: "second checkpoint", refs: []uint64{2, 1}, want: []uint64{2, 1}},
+		{name: "committed and two predecessors", refs: []uint64{4, 3, 2}, want: []uint64{4, 3, 2}},
+		{name: "fallback hole", refs: []uint64{4, 2}, want: []uint64{4, 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := NewRepository(privateDir(t))
+			publications := publishMaintenanceGenerations(t, repo, "work", 4)
+			plan := ports.RetentionPlan{IncarnationID: publications[0].IncarnationID}
+			for _, generation := range tc.refs {
+				plan.Keep = append(plan.Keep, checkpointRefForPublication(publications[generation-1]))
+			}
+			done, err := repo.MaintainSession(context.Background(), plan, ports.MaintenanceBudget{Entries: 64, Bytes: 8 << 20})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !done {
+				t.Fatal("MaintainSession() done = false with sufficient budget")
+			}
+			if got := remainingMaintenanceGenerations(t, repo, plan.IncarnationID); !slices.Equal(got, tc.want) {
+				t.Fatalf("remaining generations = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUnresolvedDataPinned(t *testing.T) {
+	for _, state := range []string{"degraded", "deleting", "migration", "transaction"} {
+		t.Run(state, func(t *testing.T) {
+			repo := NewRepository(privateDir(t))
+			publications := publishMaintenanceGenerations(t, repo, state, 4)
+			done, err := repo.MaintainSession(context.Background(), ports.RetentionPlan{IncarnationID: publications[0].IncarnationID, PinAll: true}, ports.MaintenanceBudget{Entries: 1, Bytes: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !done {
+				t.Fatal("pinned maintenance did not complete without traversing")
+			}
+			if got := remainingMaintenanceGenerations(t, repo, publications[0].IncarnationID); !slices.Equal(got, []uint64{4, 3, 2, 1}) {
+				t.Fatalf("pinned generations = %v", got)
+			}
+		})
+	}
+}
+
+func TestPerSessionBudgetIsolation(t *testing.T) {
+	repo := NewRepository(privateDir(t))
+	large := publishMaintenanceGenerations(t, repo, "large", 4)
+	small := publishMaintenanceGenerations(t, repo, "small", 2)
+	largePlan := ports.RetentionPlan{IncarnationID: large[0].IncarnationID, Keep: []ports.CheckpointRef{checkpointRefForPublication(large[3])}}
+	smallPlan := ports.RetentionPlan{IncarnationID: small[0].IncarnationID, Keep: []ports.CheckpointRef{checkpointRefForPublication(small[1])}}
+
+	done, err := repo.MaintainSession(context.Background(), largePlan, ports.MaintenanceBudget{Entries: 1, Bytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Fatal("large session unexpectedly exhausted no budget")
+	}
+	done, err = repo.MaintainSession(context.Background(), smallPlan, ports.MaintenanceBudget{Entries: 64, Bytes: 8 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done {
+		t.Fatal("small session did not progress after unrelated exhaustion")
+	}
+	if got := remainingMaintenanceGenerations(t, repo, small[0].IncarnationID); !slices.Equal(got, []uint64{2}) {
+		t.Fatalf("small generations = %v, want [2]", got)
+	}
+}
+
+func publishMaintenanceGenerations(t *testing.T, repo *Repository, name string, count uint64) []ports.SnapshotPublication {
+	t.Helper()
+	publications := make([]ports.SnapshotPublication, 0, count)
+	for generation := uint64(1); generation <= count; generation++ {
+		publication := repositoryPublicationAfter(t, repo, name, generation, []byte{byte(generation)})
+		if err := repo.Publish(context.Background(), publication); err != nil {
+			t.Fatal(err)
+		}
+		publications = append(publications, publication)
+	}
+	return publications
+}
+
+func checkpointRefForPublication(publication ports.SnapshotPublication) domain.CheckpointRef {
+	return domain.CheckpointRef{Generation: publication.Generation, ManifestDigest: sha256.Sum256(publication.Manifest)}
+}
+
+func remainingMaintenanceGenerations(t *testing.T, repo *Repository, id domain.IncarnationID) []uint64 {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(repo.sessionPath(id), repositoryGenerations))
+	if err != nil {
+		t.Fatal(err)
+	}
+	generations := make([]uint64, 0, len(entries))
+	for _, entry := range entries {
+		if generation, ok := parseGenerationFilename(entry.Name()); ok {
+			generations = append(generations, generation)
+		}
+	}
+	slices.SortFunc(generations, func(a, b uint64) int { return int(b) - int(a) })
+	return generations
 }

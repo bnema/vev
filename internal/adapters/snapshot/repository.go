@@ -39,6 +39,7 @@ type Repository struct {
 	maintenanceMu         sync.Mutex
 	maintenanceCursors    map[string]*maintenanceCursor
 	maintenanceSessions   map[string]*sessionMaintenance
+	retentionSessions     map[string]*retentionMaintenance
 	maintenanceQuarantine *quarantineMaintenance
 
 	// pendingLegacySync records an unlink whose root-directory sync failed.
@@ -101,6 +102,7 @@ func NewRepository(dir string) *Repository {
 		storageEpochs:       make(map[string]uint64),
 		maintenanceCursors:  make(map[string]*maintenanceCursor),
 		maintenanceSessions: make(map[string]*sessionMaintenance),
+		retentionSessions:   make(map[string]*retentionMaintenance),
 	}
 }
 

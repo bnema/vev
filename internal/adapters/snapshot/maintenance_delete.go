@@ -675,11 +675,3 @@ func (r *Repository) QuarantineIncarnation(ctx context.Context, id domain.Incarn
 func (r *Repository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
 	return errors.New("snapshot: direct incarnation deletion not implemented")
 }
-
-func (r *Repository) MaintainSession(context.Context, ports.RetentionPlan, ports.MaintenanceBudget) (bool, error) {
-	return false, errors.New("snapshot: incarnation retention not implemented")
-}
-
-func (r *Repository) Reconcile(_ context.Context, _ []domain.CatalogueRecord, cursor ports.ReconcileCursor, _ ports.MaintenanceBudget) (ports.ReconcileCursor, []ports.ReconcileFinding, error) {
-	return cursor, nil, errors.New("snapshot: incarnation reconciliation not implemented")
-}

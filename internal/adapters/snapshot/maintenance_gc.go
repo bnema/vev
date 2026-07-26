@@ -10,9 +10,21 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	codec "github.com/bnema/vev/internal/usecase/snapshot"
 )
+
+type retentionMaintenance struct {
+	token          string
+	references     map[ports.SnapshotDigest]struct{}
+	validateQueue  []ports.CheckpointRef
+	validateIndex  int
+	validated      bool
+	manifestsDone  bool
+	objectShard    string
+	objectRootDone bool
+}
 
 type manifestMaintenance struct {
 	refs     map[ports.SnapshotDigest]codec.ObjectRef
@@ -344,6 +356,363 @@ func (r *Repository) sweepSession(ctx context.Context, key string, state *sessio
 		r.clearSessionMaintenance(key)
 	}
 	return nil
+}
+
+// keepSet is the complete catalogue-owned retention index. Directory order and
+// HEAD never grant retention authority.
+func keepSet(plan ports.RetentionPlan) map[uint64]ports.SnapshotDigest {
+	keep := make(map[uint64]ports.SnapshotDigest, len(plan.Keep))
+	for _, ref := range plan.Keep {
+		keep[ref.Generation] = ref.ManifestDigest
+	}
+	return keep
+}
+
+// MaintainSession incrementally validates and retains only catalogue-indexed
+// checkpoints. Every incarnation owns its budget and continuation state.
+func (r *Repository) MaintainSession(ctx context.Context, plan ports.RetentionPlan, budget ports.MaintenanceBudget) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	key, err := incarnationKey(plan.IncarnationID)
+	if err != nil {
+		return false, err
+	}
+	if plan.PinAll {
+		r.maintenanceMu.Lock()
+		r.clearRetentionMaintenance(key)
+		r.maintenanceMu.Unlock()
+		return true, nil
+	}
+	if budget.Entries == 0 || budget.Bytes == 0 {
+		return false, nil
+	}
+
+	r.maintenanceMu.Lock()
+	defer r.maintenanceMu.Unlock()
+	lock := r.lockSession(key)
+	defer r.unlockSession(lock)
+	if r.maintenanceCursors == nil {
+		r.maintenanceCursors = make(map[string]*maintenanceCursor)
+	}
+	if r.retentionSessions == nil {
+		r.retentionSessions = make(map[string]*retentionMaintenance)
+	}
+
+	token := retentionToken(plan)
+	state := r.retentionSessions[key]
+	if state == nil || state.token != token {
+		r.clearRetentionMaintenance(key)
+		state = &retentionMaintenance{
+			token:         token,
+			references:    make(map[ports.SnapshotDigest]struct{}),
+			validateQueue: append([]ports.CheckpointRef(nil), plan.Keep...),
+		}
+		r.retentionSessions[key] = state
+	}
+	keep := keepSet(plan)
+	if !state.validated {
+		for state.validateIndex < len(state.validateQueue) {
+			ref := state.validateQueue[state.validateIndex]
+			generation, digest := ref.Generation, ref.ManifestDigest
+			data, err := r.readBounded(r.manifestPath(plan.IncarnationID, generation))
+			if err != nil {
+				return false, fmt.Errorf("validate retained manifest %d: %w", generation, err)
+			}
+			manifest, err := codec.UnmarshalManifest(data)
+			if err != nil || manifest.Generation != generation || manifest.IncarnationID != plan.IncarnationID || sha256.Sum256(data) != digest {
+				return false, fmt.Errorf("validate retained manifest %d: catalogue reference mismatch", generation)
+			}
+			loaded, err := r.loadGeneration(ctx, manifest.Name, key, generation)
+			if err != nil {
+				return false, fmt.Errorf("validate retained manifest %d: %w", generation, err)
+			}
+			consumedBytes := uint64(len(data))
+			for _, object := range loaded.Objects {
+				consumedBytes += uint64(len(object))
+			}
+			if budget.Entries == 0 || consumedBytes > budget.Bytes {
+				return false, nil
+			}
+			budget.Entries--
+			budget.Bytes -= consumedBytes
+			for digest := range loaded.Objects {
+				state.references[digest] = struct{}{}
+			}
+			state.validateIndex++
+		}
+		state.validated = true
+	}
+
+	purpose := "retention-manifests:" + key + ":" + token
+	for !state.manifestsDone && budget.Entries > 0 && budget.Bytes > 0 {
+		limit := int(min(budget.Entries, uint64(maintenanceBatch)))
+		entries, done, err := r.readMaintenanceDir(filepath.Join(r.sessionPath(plan.IncarnationID), repositoryGenerations), limit, purpose)
+		if errors.Is(err, os.ErrNotExist) {
+			state.manifestsDone = true
+			break
+		}
+		if err != nil {
+			return false, err
+		}
+		for i, entry := range entries {
+			path := r.manifestPath(plan.IncarnationID, 0)
+			path = filepath.Join(filepath.Dir(path), entry.name)
+			info, statErr := r.stat(path)
+			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+				return false, statErr
+			}
+			size := uint64(0)
+			if statErr == nil && info.Size() > 0 {
+				size = uint64(info.Size())
+			}
+			if budget.Entries == 0 || size > budget.Bytes {
+				r.requeueMaintenanceEntries(filepath.Dir(path), purpose, entries[i:])
+				return false, nil
+			}
+			budget.Entries--
+			budget.Bytes -= size
+			generation, canonical := parseGenerationFilename(entry.name)
+			if !entry.isDir && canonical {
+				if _, retained := keep[generation]; !retained {
+					if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+						return false, err
+					}
+					if err := r.syncDirectory(filepath.Dir(path)); err != nil {
+						return false, err
+					}
+				}
+			}
+		}
+		state.manifestsDone = done
+		if len(entries) == 0 && !done {
+			return false, nil
+		}
+	}
+	if !state.manifestsDone {
+		return false, nil
+	}
+
+	objectsRoot := filepath.Join(r.sessionPath(plan.IncarnationID), repositoryObjectsDir)
+	for budget.Entries > 0 && budget.Bytes > 0 {
+		if state.objectShard != "" {
+			shard := state.objectShard
+			dir := filepath.Join(objectsRoot, shard)
+			objectPurpose := "retention-objects:" + key + ":" + shard + ":" + token
+			entries, done, err := r.readMaintenanceDir(dir, int(min(budget.Entries, uint64(maintenanceBatch))), objectPurpose)
+			if errors.Is(err, os.ErrNotExist) {
+				state.objectShard = ""
+				continue
+			}
+			if err != nil {
+				return false, err
+			}
+			for i, entry := range entries {
+				path := filepath.Join(dir, entry.name)
+				info, statErr := r.stat(path)
+				if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+					return false, statErr
+				}
+				size := uint64(0)
+				if statErr == nil && info.Size() > 0 {
+					size = uint64(info.Size())
+				}
+				if budget.Entries == 0 || size > budget.Bytes {
+					r.requeueMaintenanceEntries(dir, objectPurpose, entries[i:])
+					return false, nil
+				}
+				budget.Entries--
+				budget.Bytes -= size
+				digest, canonical := parseObjectDigest(entry.name)
+				if !entry.isDir && canonical {
+					if _, retained := state.references[digest]; !retained {
+						if err := r.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+							return false, err
+						}
+						if err := r.syncDirectory(dir); err != nil {
+							return false, err
+						}
+					}
+				}
+			}
+			if done {
+				state.objectShard = ""
+			} else if len(entries) == 0 {
+				return false, nil
+			}
+			continue
+		}
+		if state.objectRootDone {
+			delete(r.retentionSessions, key)
+			return true, nil
+		}
+		entries, done, err := r.readMaintenanceDir(objectsRoot, 1, "retention-shards:"+key+":"+token)
+		if errors.Is(err, os.ErrNotExist) {
+			delete(r.retentionSessions, key)
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		state.objectRootDone = done
+		if len(entries) != 0 {
+			budget.Entries--
+			if entries[0].isDir {
+				state.objectShard = entries[0].name
+			}
+		}
+	}
+	return false, nil
+}
+
+func (r *Repository) clearRetentionMaintenance(key string) {
+	delete(r.retentionSessions, key)
+	for id := range r.maintenanceCursors {
+		if strings.Contains(id, "retention-") && strings.Contains(id, key) {
+			delete(r.maintenanceCursors, id)
+		}
+	}
+}
+
+func retentionToken(plan ports.RetentionPlan) string {
+	var b strings.Builder
+	b.WriteString(plan.IncarnationID.String())
+	for _, ref := range plan.Keep {
+		fmt.Fprintf(&b, ":%d:%x", ref.Generation, ref.ManifestDigest)
+	}
+	return b.String()
+}
+
+// Reconcile scans top-level incarnation namespaces from an external seek
+// cookie. Checkpoint-chain work receives a fresh budget for every directory.
+func (r *Repository) Reconcile(ctx context.Context, records []domain.CatalogueRecord, cursor ports.ReconcileCursor, budget ports.MaintenanceBudget) (ports.ReconcileCursor, []ports.ReconcileFinding, error) {
+	if err := ctx.Err(); err != nil {
+		return cursor, nil, err
+	}
+	if budget.Entries == 0 || budget.Bytes == 0 {
+		return cursor, nil, nil
+	}
+	offset := int64(cursor.DirectoryCookie)
+	if offset < 0 {
+		return cursor, nil, errors.New("snapshot: invalid reconciliation cursor")
+	}
+	byIncarnation := make(map[domain.IncarnationID]domain.CatalogueRecord, len(records))
+	for _, record := range records {
+		byIncarnation[record.IncarnationID] = record
+	}
+
+	r.maintenanceMu.Lock()
+	defer r.maintenanceMu.Unlock()
+	root := filepath.Join(r.dir, repositorySessionsDir)
+	state := &maintenanceCursor{offset: offset}
+	findingCapacity := maintenanceBatch
+	if budget.Entries < maintenanceBatch {
+		findingCapacity = int(budget.Entries)
+	}
+	findings := make([]ports.ReconcileFinding, 0, findingCapacity)
+	for scanned := uint64(0); scanned < budget.Entries; scanned++ {
+		entries, done, err := r.readMaintenanceDirent(root, 1, state)
+		if errors.Is(err, os.ErrNotExist) {
+			return ports.ReconcileCursor{}, findings, nil
+		}
+		if err != nil {
+			return cursor, nil, err
+		}
+		if len(entries) == 0 {
+			if done {
+				return ports.ReconcileCursor{}, findings, nil
+			}
+			continue
+		}
+		entry := entries[0]
+		next := ports.ReconcileCursor{DirectoryCookie: uint64(state.offset)}
+		if !entry.isDir || isQuarantine(entry.name) {
+			if done {
+				return ports.ReconcileCursor{}, findings, nil
+			}
+			continue
+		}
+		var id domain.IncarnationID
+		if err := id.UnmarshalText([]byte(entry.name)); err != nil {
+			findings = append(findings, ports.ReconcileFinding{Kind: ports.ReconcileUnknownIncarnation, Status: ports.ReconcileQuarantined, Candidate: ports.ReconcileCandidate{Name: entry.name}, Cursor: next, Consumed: ports.MaintenanceBudget{Entries: 1}})
+		} else if record, ok := byIncarnation[id]; !ok {
+			findings = append(findings, ports.ReconcileFinding{Kind: ports.ReconcileUnknownIncarnation, Status: ports.ReconcileQuarantined, Candidate: ports.ReconcileCandidate{Name: entry.name, IncarnationID: id}, Cursor: next, Consumed: ports.MaintenanceBudget{Entries: 1}})
+		} else {
+			finding := r.reconcileIncarnation(ctx, record, budget)
+			finding.Cursor = next
+			findings = append(findings, finding)
+		}
+		if done {
+			return ports.ReconcileCursor{}, findings, nil
+		}
+	}
+	return ports.ReconcileCursor{DirectoryCookie: uint64(state.offset)}, findings, nil
+}
+
+func (r *Repository) reconcileIncarnation(ctx context.Context, record domain.CatalogueRecord, budget ports.MaintenanceBudget) ports.ReconcileFinding {
+	finding := ports.ReconcileFinding{Kind: ports.ReconcileInvalidCandidate, Status: ports.ReconcileQuarantined, Candidate: ports.ReconcileCandidate{Name: record.Name, IncarnationID: record.IncarnationID}, Consumed: ports.MaintenanceBudget{Entries: 1}}
+	if record.Committed == nil {
+		return finding
+	}
+	generation, digest, err := r.readHead(record.IncarnationID)
+	if err != nil {
+		return finding
+	}
+	candidateRef := domain.CheckpointRef{Generation: generation, ManifestDigest: digest}
+	finding.Candidate.Ref = candidateRef
+	if generation <= record.Committed.Generation {
+		finding.Status = ports.ReconcileValidated
+		return finding
+	}
+	finding.Kind = ports.ReconcileForwardOrphan
+
+	candidate, exhausted, err := r.reconcileLoad(ctx, record, candidateRef, &finding.Consumed, budget)
+	if exhausted {
+		finding.Status = ports.ReconcileBudgetExhausted
+		return finding
+	}
+	if err != nil {
+		return finding
+	}
+	finding.Candidate.Parent = candidate.ParentCheckpoint
+	parent := candidate.ParentCheckpoint
+	for parent != nil && *parent != *record.Committed {
+		ancestor, exhausted, err := r.reconcileLoad(ctx, record, *parent, &finding.Consumed, budget)
+		if exhausted {
+			finding.Status = ports.ReconcileBudgetExhausted
+			return finding
+		}
+		if err != nil {
+			return finding
+		}
+		finding.AncestorChain = append(finding.AncestorChain, ports.ValidatedCheckpoint{Ref: *parent, Parent: ancestor.ParentCheckpoint})
+		parent = ancestor.ParentCheckpoint
+	}
+	if parent == nil {
+		return finding
+	}
+	finding.Status = ports.ReconcileValidated
+	return finding
+}
+
+func (r *Repository) reconcileLoad(ctx context.Context, record domain.CatalogueRecord, ref domain.CheckpointRef, consumed *ports.MaintenanceBudget, budget ports.MaintenanceBudget) (ports.SnapshotGeneration, bool, error) {
+	if consumed.Entries >= budget.Entries {
+		return ports.SnapshotGeneration{}, true, nil
+	}
+	generation, err := r.LoadCheckpoint(ctx, record.IncarnationID, record.Name, ref)
+	if err != nil {
+		return ports.SnapshotGeneration{}, false, err
+	}
+	bytes := uint64(len(generation.Manifest))
+	for _, object := range generation.Objects {
+		bytes += uint64(len(object))
+	}
+	if bytes > budget.Bytes-consumed.Bytes {
+		return ports.SnapshotGeneration{}, true, nil
+	}
+	consumed.Entries++
+	consumed.Bytes += bytes
+	return generation, false, nil
 }
 
 func retainedReferences(marked map[uint64]manifestMaintenance, conservative bool) map[ports.SnapshotDigest]struct{} {
