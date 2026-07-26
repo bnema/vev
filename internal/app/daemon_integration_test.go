@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"io"
 	"log/slog"
@@ -22,10 +23,13 @@ import (
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/adapters/pty"
+	"github.com/bnema/vev/internal/adapters/recoveryfs"
+	"github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/daemon"
+	"github.com/bnema/vev/internal/usecase/recovery"
 	"github.com/bnema/vev/pkg/vt"
 )
 
@@ -526,22 +530,212 @@ func TestKillDaemonWaitsForOwnershipTransfer(t *testing.T) {
 }
 
 func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "runtime")
-	old, err := lifecycle.TryAcquire(dir)
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	stateDir := filepath.Join(t.TempDir(), "state")
+	snapshotRepository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
+
+	oldOwner, err := lifecycle.TryAcquire(runtimeDir)
 	require.NoError(t, err)
-	var catalogueOpen, listenCalled atomic.Bool
+	oldOpened, err := persist.OpenOrMigrate(context.Background(), persist.OpenDeps{
+		StateDir:          stateDir,
+		Random:            rand.Reader,
+		SnapshotMigration: snapshotRepository,
+	})
+	require.NoError(t, err)
+	oldListener, err := ipc.Listen(runtimeDir)
+	require.NoError(t, err)
+
+	socketCloseEntered := make(chan struct{})
+	allowSocketClose := make(chan struct{})
+	socketClosed := make(chan struct{})
+	catalogueCloseEntered := make(chan struct{})
+	allowCatalogueClose := make(chan struct{})
+	catalogueClosed := make(chan struct{})
+	ownerReleaseEntered := make(chan struct{})
+	allowOwnerRelease := make(chan struct{})
+	ownerReleased := make(chan struct{})
+	teardownEvents := make(chan string, 3)
+
+	controlledListener := &lifecycleControlledListener{
+		Listener: oldListener,
+		entered:  socketCloseEntered,
+		proceed:  allowSocketClose,
+		closed:   socketClosed,
+		events:   teardownEvents,
+	}
+	controlledCatalogue := &lifecycleControlledCatalogue{
+		Catalogue: oldOpened.Catalogue,
+		entered:   catalogueCloseEntered,
+		proceed:   allowCatalogueClose,
+		closed:    catalogueClosed,
+		events:    teardownEvents,
+	}
+	oldDaemon := daemon.New(pty.NewFactory(), clock.New(), discardLog(), daemon.WithCatalogue(controlledCatalogue, oldOpened.Records))
+	oldCtx, stopOld := context.WithCancel(context.Background())
+	oldDone := make(chan error, 1)
+	go func() {
+		serveErr := oldDaemon.Serve(oldCtx, controlledListener)
+		teardownEvents <- "owner-release"
+		close(ownerReleaseEntered)
+		<-allowOwnerRelease
+		releaseErr := oldOwner.Release()
+		close(ownerReleased)
+		oldDone <- errors.Join(serveErr, releaseErr)
+	}()
+
+	newAcquireAttempted := make(chan struct{})
+	newDurableOpen := make(chan struct{})
+	newListen := make(chan struct{})
+	startupEvents := make(chan string, 3)
 	newDone := make(chan error, 1)
 	go func() {
-		newDone <- runWithLifecycleOwner(context.Background(), dir, filepath.Join(t.TempDir(), "state"), func(context.Context) error {
-			catalogueOpen.Store(true)
-			listenCalled.Store(true)
-			return nil
+		newDone <- runWithLifecycleOwnerDeps(context.Background(), runtimeDir, stateDir, func(ctx context.Context) error {
+			close(newDurableOpen)
+			opened, err := persist.OpenOrMigrate(ctx, persist.OpenDeps{
+				StateDir:          stateDir,
+				Random:            rand.Reader,
+				SnapshotMigration: snapshotRepository,
+			})
+			if err != nil {
+				return err
+			}
+			coordinator := recovery.NewCoordinator(opened.Catalogue, snapshotRepository, recoveryfs.New(stateDir), rand.Reader)
+			if err := coordinator.Recover(ctx); err != nil {
+				return errors.Join(err, opened.Catalogue.Close())
+			}
+			startupEvents <- "durable-open-recover"
+
+			close(newListen)
+			listener, err := ipc.Listen(runtimeDir)
+			if err != nil {
+				return errors.Join(err, opened.Catalogue.Close())
+			}
+			startupEvents <- "listen"
+			return errors.Join(listener.Close(), opened.Catalogue.Close())
+		}, lifecycleStartupDeps{
+			ensurePrivate: func(string) error { return nil },
+			acquire: func(ctx context.Context, dir string, retry time.Duration) (lifecycleOwnership, error) {
+				close(newAcquireAttempted)
+				owner, err := lifecycle.Acquire(ctx, dir, retry)
+				if err != nil {
+					return nil, err
+				}
+				<-ownerReleased
+				startupEvents <- "owner-acquired"
+				return owner, nil
+			},
 		})
 	}()
-	require.Never(t, func() bool { return catalogueOpen.Load() || listenCalled.Load() }, 50*time.Millisecond, time.Millisecond)
-	require.NoError(t, old.Release())
-	require.Eventually(t, catalogueOpen.Load, time.Second, time.Millisecond)
-	require.NoError(t, <-newDone)
+
+	awaitLifecycleStage(t, newAcquireAttempted, "new lifecycle acquisition attempt")
+	assertLifecycleStagePending(t, newDurableOpen, "new durable open before old teardown")
+	assertLifecycleStagePending(t, newListen, "new listen before old teardown")
+
+	stopOld()
+	awaitLifecycleStage(t, socketCloseEntered, "old socket close")
+	assertNewDaemonStartupPending(t, newDurableOpen, newListen, "socket close")
+	close(allowSocketClose)
+	awaitLifecycleStage(t, socketClosed, "old socket closed")
+
+	awaitLifecycleStage(t, catalogueCloseEntered, "old catalogue close")
+	assertNewDaemonStartupPending(t, newDurableOpen, newListen, "catalogue close")
+	close(allowCatalogueClose)
+	awaitLifecycleStage(t, catalogueClosed, "old catalogue closed")
+
+	awaitLifecycleStage(t, ownerReleaseEntered, "old lifecycle owner release")
+	assertNewDaemonStartupPending(t, newDurableOpen, newListen, "owner release")
+	close(allowOwnerRelease)
+	awaitLifecycleStage(t, ownerReleased, "old lifecycle owner released")
+
+	require.NoError(t, awaitLifecycleResult(t, oldDone, "old daemon teardown"))
+	require.NoError(t, awaitLifecycleResult(t, newDone, "new daemon startup"))
+	require.Equal(t, []string{"socket-close", "catalogue-close", "owner-release"}, []string{
+		<-teardownEvents,
+		<-teardownEvents,
+		<-teardownEvents,
+	})
+	require.Equal(t, []string{"owner-acquired", "durable-open-recover", "listen"}, []string{
+		<-startupEvents,
+		<-startupEvents,
+		<-startupEvents,
+	})
+}
+
+func awaitLifecycleStage(t *testing.T, stage <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-stage:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+	}
+}
+
+func awaitLifecycleResult(t *testing.T, result <-chan error, name string) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+		return nil
+	}
+}
+
+func assertLifecycleStagePending(t *testing.T, stage <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-stage:
+		t.Fatalf("unexpected %s", name)
+	default:
+	}
+}
+
+func assertNewDaemonStartupPending(t *testing.T, durableOpen, listen <-chan struct{}, heldAt string) {
+	t.Helper()
+	assertLifecycleStagePending(t, durableOpen, "new durable open while old daemon held at "+heldAt)
+	assertLifecycleStagePending(t, listen, "new listen while old daemon held at "+heldAt)
+}
+
+type lifecycleControlledListener struct {
+	ports.Listener
+	entered chan struct{}
+	proceed chan struct{}
+	closed  chan struct{}
+	events  chan<- string
+	once    sync.Once
+	err     error
+}
+
+func (l *lifecycleControlledListener) Close() error {
+	l.once.Do(func() {
+		l.events <- "socket-close"
+		close(l.entered)
+		<-l.proceed
+		l.err = l.Listener.Close()
+		close(l.closed)
+	})
+	return l.err
+}
+
+type lifecycleControlledCatalogue struct {
+	ports.Catalogue
+	entered chan struct{}
+	proceed chan struct{}
+	closed  chan struct{}
+	events  chan<- string
+	once    sync.Once
+	err     error
+}
+
+func (c *lifecycleControlledCatalogue) Close() error {
+	c.once.Do(func() {
+		c.events <- "catalogue-close"
+		close(c.entered)
+		<-c.proceed
+		c.err = c.Catalogue.Close()
+		close(c.closed)
+	})
+	return c.err
 }
 
 type integrationTransport struct{}
