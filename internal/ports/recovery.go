@@ -3,6 +3,7 @@ package ports
 import (
 	"context"
 	"errors"
+	"io"
 
 	"github.com/bnema/vev/internal/domain"
 )
@@ -142,6 +143,14 @@ type SessionLifecycleCoordinator interface {
 	Create(context.Context, domain.CatalogueRecord) (domain.CatalogueRecord, error)
 	Rename(context.Context, string, string) (domain.CatalogueRecord, error)
 	Delete(context.Context, string) error
+}
+
+// DegradedRecoveryCoordinator exposes only explicit operator recovery actions.
+type DegradedRecoveryCoordinator interface {
+	Retry(context.Context, string) error
+	RestoreFallback(context.Context, string, domain.CheckpointRef) error
+	Export(context.Context, string, io.Writer) error
+	Discard(context.Context, string, string) (domain.CatalogueRecord, error)
 }
 
 type Catalogue interface {

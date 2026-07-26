@@ -7,12 +7,161 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
+
+func TestDiscardCrashMatrix(t *testing.T) {
+	ctx := context.Background()
+	old := domain.IncarnationID{1}
+	replacement := domain.IncarnationID{2}
+	record := domain.CatalogueRecord{
+		Name: "broken", IncarnationID: old, RecoveryState: domain.RecoveryDegraded,
+		Committed: &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}, DegradedReason: "corrupt",
+	}
+	descriptor := domain.QuarantineDescriptor{
+		OldRecord: record, OldIncarnation: old, ReplacementIncarnation: replacement,
+		SessionName: record.Name, Reason: "explicit discard",
+	}
+
+	t.Run("descriptor is immutable and idempotent", func(t *testing.T) {
+		repo := NewRepository(privateDir(t))
+		if err := repo.SaveQuarantineDescriptor(ctx, descriptor); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.SaveQuarantineDescriptor(ctx, descriptor); err != nil {
+			t.Fatalf("idempotent retry: %v", err)
+		}
+		path := filepath.Join(repo.dir, "quarantine", old.String(), "record")
+		encoded, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := decodeQuarantineDescriptor(encoded)
+		if err != nil || !reflect.DeepEqual(got, descriptor) {
+			t.Fatalf("descriptor round trip = %#v, %v", got, err)
+		}
+		changed := descriptor
+		changed.Reason = "different"
+		if err := repo.SaveQuarantineDescriptor(ctx, changed); err == nil {
+			t.Fatal("descriptor overwrite accepted")
+		}
+		if err := os.WriteFile(path, append(encoded, 0), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.SaveQuarantineDescriptor(ctx, descriptor); err == nil {
+			t.Fatal("malformed existing descriptor accepted")
+		}
+	})
+
+	for _, boundary := range []string{"descriptor-file-sync", "descriptor-install", "descriptor-directory-sync"} {
+		t.Run(boundary, func(t *testing.T) {
+			repo := NewRepository(privateDir(t))
+			dir := filepath.Join(repo.dir, "quarantine", old.String())
+			if err := repo.ensurePrivateDirectory(dir); err != nil {
+				t.Fatal(err)
+			}
+			injected := errors.New("injected descriptor durability failure")
+			switch boundary {
+			case "descriptor-file-sync":
+				repo.hooks.syncFile = func(string) error { return injected }
+			case "descriptor-install":
+				repo.hooks.installImmutable = func(string) error { return injected }
+			case "descriptor-directory-sync":
+				repo.hooks.syncDirectory = func(path string) error {
+					if path == dir {
+						return injected
+					}
+					return nil
+				}
+			}
+			if err := repo.SaveQuarantineDescriptor(ctx, descriptor); !errors.Is(err, injected) {
+				t.Fatalf("SaveQuarantineDescriptor() error = %v", err)
+			}
+			repo.hooks = repositoryHooks{}
+			if err := repo.SaveQuarantineDescriptor(ctx, descriptor); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+		})
+	}
+
+	for _, boundary := range []string{"rename", "source-directory-sync", "destination-directory-sync"} {
+		t.Run(boundary, func(t *testing.T) {
+			repo := NewRepository(privateDir(t))
+			source := repo.sessionPath(old)
+			destinationDir := filepath.Join(repo.dir, "quarantine", old.String())
+			if err := os.MkdirAll(source, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.ensurePrivateDirectory(destinationDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(source, "payload"), []byte("uncertain"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			injected := errors.New("injected quarantine durability failure")
+			switch boundary {
+			case "rename":
+				repo.hooks.rename = func(string) error { return injected }
+			case "source-directory-sync":
+				repo.hooks.syncDirectory = func(path string) error {
+					if path == filepath.Dir(source) {
+						return injected
+					}
+					return nil
+				}
+			case "destination-directory-sync":
+				repo.hooks.syncDirectory = func(path string) error {
+					if path == destinationDir {
+						return injected
+					}
+					return nil
+				}
+			}
+			if err := repo.QuarantineIncarnation(ctx, old); !errors.Is(err, injected) {
+				t.Fatalf("QuarantineIncarnation() error = %v", err)
+			}
+			repo.hooks = repositoryHooks{}
+			if err := repo.QuarantineIncarnation(ctx, old); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			got, err := os.ReadFile(filepath.Join(destinationDir, "snapshot", "payload"))
+			if err != nil || string(got) != "uncertain" {
+				t.Fatalf("quarantined payload = %q, %v", got, err)
+			}
+		})
+	}
+
+	t.Run("quarantine never removes source data", func(t *testing.T) {
+		repo := NewRepository(privateDir(t))
+		source := repo.sessionPath(old)
+		if err := os.MkdirAll(source, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		payload := filepath.Join(source, "payload")
+		if err := os.WriteFile(payload, []byte("uncertain"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.SaveQuarantineDescriptor(ctx, descriptor); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.QuarantineIncarnation(ctx, old); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(repo.dir, "quarantine", old.String(), "snapshot", "payload")
+		got, err := os.ReadFile(target)
+		if err != nil || string(got) != "uncertain" {
+			t.Fatalf("quarantined payload = %q, %v", got, err)
+		}
+		if err := repo.QuarantineIncarnation(ctx, old); err != nil {
+			t.Fatalf("idempotent retry: %v", err)
+		}
+	})
+}
 
 func TestDeletionTombstoneCodec(t *testing.T) {
 	want := domain.DeletionTombstone{Name: "work", IncarnationID: domain.IncarnationID{1}}

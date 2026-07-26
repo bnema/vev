@@ -105,6 +105,32 @@ func TestPaletteRegistryHidesAPIOnly(t *testing.T) {
 	}
 }
 
+func TestSessionRecoveryCommand(t *testing.T) {
+	cmd, ok := BySlug("session-recovery")
+	if !ok || !cmd.Scriptable || cmd.Target != TargetNone {
+		t.Fatalf("session-recovery command = %#v, ok=%v", cmd, ok)
+	}
+	tests := []struct {
+		args     []string
+		wantCall string
+		wantErr  error
+	}{
+		{args: []string{"retry"}, wantCall: "session-recovery:retry:"},
+		{args: []string{"restore", "7"}, wantCall: "session-recovery:restore:7"},
+		{args: []string{"export", "/tmp/export"}, wantCall: "session-recovery:export:/tmp/export"},
+		{args: []string{"discard"}, wantCall: "session-recovery:discard:"},
+		{args: []string{"restore", "0"}, wantErr: ErrInvalidArguments},
+		{args: []string{"unknown"}, wantErr: ErrInvalidArguments},
+	}
+	for _, test := range tests {
+		ctx := &controlSpy{}
+		_, err := cmd.Control(ctx, test.args, ControlOptions{})
+		if !errors.Is(err, test.wantErr) || ctx.call != test.wantCall {
+			t.Errorf("args %v: call/error = %q/%v, want %q/%v", test.args, ctx.call, err, test.wantCall, test.wantErr)
+		}
+	}
+}
+
 func TestControlHandlersValidateAndDelegate(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -177,6 +203,9 @@ func (s *controlSpy) RenameSessionTo(v string) error    { return s.record("renam
 func (s *controlSpy) RenameTabTo(v string) error        { return s.record("rename-tab:" + v) }
 func (s *controlSpy) Toast(level, message string) error {
 	return s.record("toast:" + level + ":" + message)
+}
+func (s *controlSpy) SessionRecovery(action, argument string) (string, error) {
+	return "", s.record("session-recovery:" + action + ":" + argument)
 }
 func (s *controlSpy) ListSessions(json bool) (string, error) {
 	_ = s.record("list-sessions:" + strconv.FormatBool(json))

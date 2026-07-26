@@ -375,6 +375,41 @@ func (f *recoveryCountingPTYFactory) Open(context.Context, string, []string, []s
 	return nil, errors.New("unexpected PTY open")
 }
 
+type explicitRecoveryStub struct {
+	record domain.CatalogueRecord
+}
+
+func (s explicitRecoveryStub) Retry(context.Context, string) error { return nil }
+func (s explicitRecoveryStub) RestoreFallback(context.Context, string, domain.CheckpointRef) error {
+	return nil
+}
+func (s explicitRecoveryStub) Export(_ context.Context, _ string, w io.Writer) error {
+	_, err := w.Write([]byte("export"))
+	return err
+}
+func (s explicitRecoveryStub) Discard(context.Context, string, string) (domain.CatalogueRecord, error) {
+	return s.record, nil
+}
+
+func TestSessionRecoveryCommand(t *testing.T) {
+	degraded := durableRecoveryRecord(2)
+	degraded.RecoveryState = domain.RecoveryDegraded
+	degraded.DegradedReason = "checkpoint validation failed"
+	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{degraded}, &durableRecoveryRepository{})
+	fresh := degraded
+	fresh.IncarnationID = domain.IncarnationID{9}
+	fresh.RecoveryState = domain.RecoveryFresh
+	fresh.Committed = nil
+	fresh.Fallbacks = [2]*domain.CheckpointRef{}
+	fresh.DegradedReason = ""
+	d.degradedRecovery = explicitRecoveryStub{record: fresh}
+
+	_, err := (controlExec{d: d, recoveryName: degraded.Name}).SessionRecovery("discard", "")
+	require.NoError(t, err)
+	require.Equal(t, runtimeFresh, d.stopped[degraded.Name].state)
+	require.Equal(t, fresh, d.stopped[degraded.Name].record)
+}
+
 func TestListShowsDegraded(t *testing.T) {
 	fresh := durableRecoveryRecord(0)
 	fresh.RecoveryState = domain.RecoveryFresh

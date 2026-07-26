@@ -47,6 +47,7 @@ func Registry() []Command {
 		listCommand("list-sessions", "List sessions", "List sessions with active markers", TargetNone, func(ctx ControlContext, json bool) (string, error) { return ctx.ListSessions(json) }),
 		listCommand("list-tabs", "List tabs", "List tabs in the target session", TargetSession, func(ctx ControlContext, json bool) (string, error) { return ctx.ListTabs(json) }),
 		listCommand("list-panes", "List panes", "List panes in the target tab", TargetTab, func(ctx ControlContext, json bool) (string, error) { return ctx.ListPanes(json) }),
+		sessionRecoveryCommand(),
 	}
 	return commands
 }
@@ -87,6 +88,32 @@ func toastCommand() Command {
 		}
 		return ControlResult{}, ctx.Toast(severity, args[0])
 	}}
+}
+
+func sessionRecoveryCommand() Command {
+	return Command{
+		Slug: "session-recovery", Name: "Session recovery", Desc: "Explicitly recover a degraded durable session",
+		Usage:      "session-recovery retry\nsession-recovery restore <generation>\nsession-recovery export <path>\nsession-recovery discard",
+		Scriptable: true, Target: TargetNone,
+		Control: func(ctx ControlContext, args []string, _ ControlOptions) (ControlResult, error) {
+			var action, argument string
+			switch {
+			case len(args) == 1 && (args[0] == "retry" || args[0] == "discard"):
+				action = args[0]
+			case len(args) == 2 && args[0] == "restore":
+				if _, err := ParsePositiveDecimal(args[1:]); err != nil {
+					return ControlResult{}, ErrInvalidArguments
+				}
+				action, argument = args[0], args[1]
+			case len(args) == 2 && args[0] == "export" && args[1] != "":
+				action, argument = args[0], args[1]
+			default:
+				return ControlResult{}, ErrInvalidArguments
+			}
+			output, err := ctx.SessionRecovery(action, argument)
+			return ControlResult{Output: output}, err
+		},
+	}
 }
 
 func listCommand(slug, name, desc string, target TargetKind, list func(ControlContext, bool) (string, error)) Command {

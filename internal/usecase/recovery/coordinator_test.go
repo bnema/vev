@@ -22,12 +22,25 @@ func (j journalStub) ListDiscards(context.Context) ([]domain.DiscardIntent, erro
 }
 func (j journalStub) DeleteDiscard(context.Context, domain.IncarnationID) error { return nil }
 
-func TestCoordinatorRecoverFailsClosedForPendingWork(t *testing.T) {
+func TestCoordinatorRecoverRollsPendingDiscardForward(t *testing.T) {
+	ctx := context.Background()
+	old := domain.CatalogueRecord{
+		Name: "broken", IncarnationID: domain.IncarnationID{1}, RecoveryState: domain.RecoveryDegraded,
+		Committed: &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}, DegradedReason: "corrupt",
+	}
+	intent := domain.DiscardIntent{
+		OldRecord: old, OldIncarnation: old.IncarnationID, NewIncarnation: domain.IncarnationID{2},
+		SessionName: old.Name, Reason: "discard",
+	}
 	repo := portsmocks.NewMockSnapshotRepository(t)
-	repo.EXPECT().ListDeletionTombstones(context.Background(), ports.DeletionTombstoneCursor{}, recoveryListingBudget).
+	repo.EXPECT().SaveQuarantineDescriptor(ctx, quarantineDescriptor(intent)).Return(nil)
+	repo.EXPECT().QuarantineIncarnation(ctx, old.IncarnationID).Return(nil)
+	repo.EXPECT().ListDeletionTombstones(ctx, ports.DeletionTombstoneCursor{}, recoveryListingBudget).
 		Return(ports.DeletionTombstonePage{Done: true}, nil)
-	c := NewCoordinator(newTransactionCatalogue(), repo, journalStub{intents: []domain.DiscardIntent{{}}}, nil)
-	require.ErrorIs(t, c.Recover(context.Background()), ErrPendingRecoveryUnsupported)
+	catalogue := newTransactionCatalogue(old)
+	c := NewCoordinator(catalogue, repo, journalStub{intents: []domain.DiscardIntent{intent}}, nil)
+	require.NoError(t, c.Recover(ctx))
+	require.Equal(t, intent.NewIncarnation, catalogue.records[old.Name].IncarnationID)
 }
 
 func TestCoordinatorRecoverPagesTombstonesAndPropagatesErrors(t *testing.T) {

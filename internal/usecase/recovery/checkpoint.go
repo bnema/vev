@@ -70,7 +70,10 @@ func (c *Coordinator) PromoteFallback(ctx context.Context, name string, ref doma
 	}
 	unlock := c.locks.Lock([]string{name})
 	defer unlock()
+	return c.promoteFallbackLocked(ctx, name, ref)
+}
 
+func (c *Coordinator) promoteFallbackLocked(ctx context.Context, name string, ref domain.CheckpointRef) (ports.FallbackPromotionOutcome, error) {
 	record, ok := c.catalogue.Record(name)
 	if !ok {
 		return ports.FallbackPromotionOutcome{}, ErrCheckpointRecordNotFound

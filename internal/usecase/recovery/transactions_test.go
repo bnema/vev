@@ -3,7 +3,9 @@ package recovery
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -87,14 +89,56 @@ func (c *transactionCatalogue) Close() error { return nil }
 
 type transactionRepository struct {
 	ports.SnapshotRepository
-	mu         sync.Mutex
-	tombstones map[domain.IncarnationID]domain.DeletionTombstone
-	events     []string
-	quarantine []bool
+	mu             sync.Mutex
+	tombstones     map[domain.IncarnationID]domain.DeletionTombstone
+	generations    map[domain.CheckpointRef]ports.SnapshotGeneration
+	loadErr        error
+	events         []string
+	quarantine     []bool
+	descriptors    []domain.QuarantineDescriptor
+	quarantinedIDs []domain.IncarnationID
+	repaired       []domain.CheckpointRef
 }
 
 func newTransactionRepository() *transactionRepository {
-	return &transactionRepository{tombstones: make(map[domain.IncarnationID]domain.DeletionTombstone)}
+	return &transactionRepository{
+		tombstones:  make(map[domain.IncarnationID]domain.DeletionTombstone),
+		generations: make(map[domain.CheckpointRef]ports.SnapshotGeneration),
+	}
+}
+func (r *transactionRepository) LoadCheckpoint(_ context.Context, _ domain.IncarnationID, _ string, ref domain.CheckpointRef) (ports.SnapshotGeneration, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, "load")
+	if r.loadErr != nil {
+		return ports.SnapshotGeneration{}, r.loadErr
+	}
+	generation, ok := r.generations[ref]
+	if !ok {
+		return ports.SnapshotGeneration{}, errors.New("checkpoint missing")
+	}
+	return generation, nil
+}
+func (r *transactionRepository) RepairHEAD(_ context.Context, _ domain.IncarnationID, ref domain.CheckpointRef) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.repaired = append(r.repaired, ref)
+	r.events = append(r.events, "repair-head")
+	return nil
+}
+func (r *transactionRepository) SaveQuarantineDescriptor(_ context.Context, descriptor domain.QuarantineDescriptor) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.descriptors = append(r.descriptors, descriptor)
+	r.events = append(r.events, "descriptor")
+	return nil
+}
+func (r *transactionRepository) QuarantineIncarnation(_ context.Context, id domain.IncarnationID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.quarantinedIDs = append(r.quarantinedIDs, id)
+	r.events = append(r.events, "quarantine-incarnation")
+	return nil
 }
 func (r *transactionRepository) WriteDeletionTombstone(_ context.Context, tombstone domain.DeletionTombstone) error {
 	r.mu.Lock()
@@ -200,6 +244,183 @@ func TestTransactionCrashMatrix(t *testing.T) {
 		require.Equal(t, []string{"tombstone", "quarantine", "remove-tombstone"}, repository.events)
 		require.Equal(t, []bool{true}, repository.quarantine)
 	})
+}
+
+type transactionJournal struct {
+	mu      sync.Mutex
+	intents map[domain.IncarnationID]domain.DiscardIntent
+	events  []string
+}
+
+func newTransactionJournal() *transactionJournal {
+	return &transactionJournal{intents: make(map[domain.IncarnationID]domain.DiscardIntent)}
+}
+func (j *transactionJournal) SaveDiscard(_ context.Context, intent domain.DiscardIntent) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.intents[intent.OldIncarnation] = intent
+	j.events = append(j.events, "intent")
+	return nil
+}
+func (j *transactionJournal) ListDiscards(context.Context) ([]domain.DiscardIntent, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	out := make([]domain.DiscardIntent, 0, len(j.intents))
+	for _, intent := range j.intents {
+		out = append(out, intent)
+	}
+	return out, nil
+}
+func (j *transactionJournal) DeleteDiscard(_ context.Context, id domain.IncarnationID) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	delete(j.intents, id)
+	j.events = append(j.events, "delete-intent")
+	return nil
+}
+
+func degradedTransactionRecord() domain.CatalogueRecord {
+	return domain.CatalogueRecord{
+		Name: "broken", IncarnationID: domain.IncarnationID{1}, RecoveryState: domain.RecoveryDegraded,
+		Committed:      &domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{3}},
+		Fallbacks:      [2]*domain.CheckpointRef{{Generation: 2, ManifestDigest: [32]byte{2}}, {Generation: 1, ManifestDigest: [32]byte{1}}},
+		DegradedReason: "checkpoint unreadable",
+	}
+}
+
+func TestDegradedRetryIsReadOnly(t *testing.T) {
+	record := degradedTransactionRecord()
+	catalogue := newTransactionCatalogue(record)
+	repository := newTransactionRepository()
+	repository.loadErr = errors.New("corrupt checkpoint")
+	coordinator := NewCoordinator(catalogue, repository, newTransactionJournal(), bytes.NewReader(bytes.Repeat([]byte{9}, 16)))
+
+	require.Error(t, coordinator.Retry(context.Background(), record.Name))
+	require.Equal(t, record, catalogue.records[record.Name])
+	require.Empty(t, catalogue.events)
+}
+
+func TestFallbackPromotion(t *testing.T) {
+	record := degradedTransactionRecord()
+	fallback := *record.Fallbacks[0]
+	catalogue := newTransactionCatalogue(record)
+	repository := newTransactionRepository()
+	repository.generations[fallback] = ports.SnapshotGeneration{
+		IncarnationID: record.IncarnationID, Name: record.Name, Generation: fallback.Generation,
+		Manifest: []byte("fallback"),
+	}
+	fallback.ManifestDigest = checkpointDigest(repository.generations[*record.Fallbacks[0]].Manifest)
+	record.Fallbacks[0] = &fallback
+	catalogue.records[record.Name] = record
+	repository.generations[fallback] = ports.SnapshotGeneration{
+		IncarnationID: record.IncarnationID, Name: record.Name, Generation: fallback.Generation,
+		Manifest: []byte("fallback"),
+	}
+	coordinator := NewCoordinator(catalogue, repository, newTransactionJournal(), nil)
+
+	require.NoError(t, coordinator.RestoreFallback(context.Background(), record.Name, fallback))
+	got := catalogue.records[record.Name]
+	require.Equal(t, domain.RecoveryHealthy, got.RecoveryState)
+	require.Equal(t, fallback, *got.Committed)
+	require.Equal(t, []domain.CheckpointRef{fallback}, repository.repaired)
+	require.Equal(t, []string{"load", "load", "repair-head"}, repository.events)
+}
+
+func checkpointDigest(data []byte) [32]byte {
+	return sha256.Sum256(data)
+}
+
+func TestDegradedExportIsReadOnly(t *testing.T) {
+	record := degradedTransactionRecord()
+	manifest := []byte("manifest")
+	ref := *record.Committed
+	ref.ManifestDigest = checkpointDigest(manifest)
+	record.Committed = &ref
+	catalogue := newTransactionCatalogue(record)
+	repository := newTransactionRepository()
+	repository.generations[ref] = ports.SnapshotGeneration{
+		IncarnationID: record.IncarnationID, Name: record.Name, Generation: ref.Generation,
+		Manifest: manifest, Objects: map[ports.SnapshotDigest][]byte{{2}: []byte("second"), {1}: []byte("first")},
+	}
+	coordinator := NewCoordinator(catalogue, repository, newTransactionJournal(), nil)
+	var exported, repeated bytes.Buffer
+
+	require.NoError(t, coordinator.Export(context.Background(), record.Name, &exported))
+	require.NoError(t, coordinator.Export(context.Background(), record.Name, &repeated))
+	require.NotEmpty(t, exported.Bytes())
+	require.Equal(t, exported.Bytes(), repeated.Bytes())
+	require.Equal(t, record, catalogue.records[record.Name])
+	require.Empty(t, catalogue.events)
+}
+
+func TestDiscardCrashMatrix(t *testing.T) {
+	ctx := context.Background()
+	old := degradedTransactionRecord()
+	newID := domain.IncarnationID{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9}
+	intent := domain.DiscardIntent{OldRecord: old, OldIncarnation: old.IncarnationID, NewIncarnation: newID, SessionName: old.Name, Reason: "explicit discard"}
+
+	t.Run("commit order", func(t *testing.T) {
+		catalogue := newTransactionCatalogue(old)
+		repository := newTransactionRepository()
+		journal := newTransactionJournal()
+		coordinator := NewCoordinator(catalogue, repository, journal, bytes.NewReader(newID[:]))
+		got, err := coordinator.Discard(ctx, old.Name, intent.Reason)
+		require.NoError(t, err)
+		require.Equal(t, freshReplacement(intent), got)
+		require.Equal(t, []string{"intent", "delete-intent"}, journal.events)
+		require.Equal(t, []string{"descriptor", "quarantine-incarnation"}, repository.events)
+		require.Equal(t, []string{"replace:" + old.Name}, catalogue.events)
+		require.Empty(t, journal.intents)
+	})
+
+	for step := 1; step <= 6; step++ {
+		t.Run(strconv.Itoa(step), func(t *testing.T) {
+			catalogue := newTransactionCatalogue(old)
+			repository := newTransactionRepository()
+			journal := newTransactionJournal()
+			if step >= 1 {
+				journal.intents[old.IncarnationID] = intent
+			}
+			if step >= 2 {
+				repository.descriptors = append(repository.descriptors, quarantineDescriptor(intent))
+			}
+			if step >= 3 {
+				repository.quarantinedIDs = append(repository.quarantinedIDs, old.IncarnationID)
+			}
+			if step >= 4 {
+				catalogue.records[old.Name] = freshReplacement(intent)
+			}
+			if step >= 5 {
+				delete(journal.intents, old.IncarnationID)
+			}
+			if step == 6 {
+				// Runtime exposure is deliberately outside durable recovery.
+			}
+			coordinator := NewCoordinator(catalogue, repository, journal, nil)
+			require.NoError(t, coordinator.Recover(ctx))
+			got := catalogue.records[old.Name]
+			require.Equal(t, newID, got.IncarnationID)
+			require.Equal(t, domain.RecoveryFresh, got.RecoveryState)
+			require.NotEmpty(t, repository.descriptors)
+			require.NotEmpty(t, repository.quarantinedIDs)
+			require.Empty(t, journal.intents)
+		})
+	}
+}
+
+func TestDiscardIncarnationConflict(t *testing.T) {
+	old := degradedTransactionRecord()
+	intent := domain.DiscardIntent{OldRecord: old, OldIncarnation: old.IncarnationID, NewIncarnation: domain.IncarnationID{2}, SessionName: old.Name, Reason: "discard"}
+	conflict := old
+	conflict.IncarnationID = domain.IncarnationID{3}
+	catalogue := newTransactionCatalogue(conflict)
+	journal := newTransactionJournal()
+	journal.intents[old.IncarnationID] = intent
+	coordinator := NewCoordinator(catalogue, newTransactionRepository(), journal, nil)
+
+	require.Error(t, coordinator.Recover(context.Background()))
+	require.Equal(t, conflict, catalogue.records[old.Name])
+	require.Contains(t, journal.intents, old.IncarnationID)
 }
 
 func TestDeleteRecoveryAfterCatalogueRemoval(t *testing.T) {

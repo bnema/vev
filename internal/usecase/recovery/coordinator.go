@@ -14,8 +14,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-var ErrPendingRecoveryUnsupported = errors.New("pending recovery intent requires transaction recovery")
-
 var recoveryListingBudget = ports.MaintenanceBudget{Entries: 64, Bytes: 64 << 10}
 
 type KeyLocks struct {
@@ -212,6 +210,11 @@ func (c *Coordinator) Recover(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	for _, intent := range intents {
+		if err := c.recoverDiscard(ctx, intent); err != nil {
+			return err
+		}
+	}
 	for _, candidate := range c.catalogue.Records() {
 		if candidate.RecoveryState != domain.RecoveryDeleting {
 			continue
@@ -239,9 +242,6 @@ func (c *Coordinator) Recover(ctx context.Context) error {
 			}
 		}
 		if page.Done {
-			if len(intents) != 0 {
-				return ErrPendingRecoveryUnsupported
-			}
 			return nil
 		}
 		if page.Next.After == cursor.After {

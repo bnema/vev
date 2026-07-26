@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	deletionTombstoneVersion = uint16(1)
-	deletionTombstoneMagic   = "VEVD"
-	deletionTombstonesDir    = "deletions"
+	deletionTombstoneVersion    = uint16(1)
+	deletionTombstoneMagic      = "VEVD"
+	deletionTombstonesDir       = "deletions"
+	quarantineDescriptorVersion = 1
 )
 
 var ErrMaintenanceBudgetTooSmall = errors.New("snapshot: maintenance budget too small")
@@ -537,6 +538,12 @@ func (r *Repository) QuarantineDeletionSources(ctx context.Context, tombstone do
 func (r *Repository) quarantineSource(source, target string) error {
 	if _, err := os.Lstat(target); err == nil {
 		if _, sourceErr := os.Lstat(source); errors.Is(sourceErr, os.ErrNotExist) {
+			if err := r.syncDirectory(filepath.Dir(source)); err != nil {
+				return err
+			}
+			if filepath.Clean(filepath.Dir(source)) != filepath.Clean(filepath.Dir(target)) {
+				return r.syncDirectory(filepath.Dir(target))
+			}
 			return nil
 		}
 		return fmt.Errorf("snapshot: quarantine target already exists")
@@ -560,8 +567,95 @@ func (r *Repository) quarantineSource(source, target string) error {
 	return nil
 }
 
-func (r *Repository) SaveQuarantineDescriptor(context.Context, domain.QuarantineDescriptor) error {
-	return errors.New("snapshot: quarantine descriptors not implemented")
+type quarantineDescriptorFile struct {
+	Version    int                         `json:"version"`
+	Descriptor domain.QuarantineDescriptor `json:"descriptor"`
+}
+
+func validateQuarantineDescriptor(descriptor domain.QuarantineDescriptor) error {
+	if err := descriptor.OldRecord.Validate(); err != nil {
+		return fmt.Errorf("snapshot: quarantine old record: %w", err)
+	}
+	if descriptor.SessionName != descriptor.OldRecord.Name || descriptor.OldIncarnation != descriptor.OldRecord.IncarnationID {
+		return errors.New("snapshot: inconsistent quarantine identity")
+	}
+	if descriptor.ReplacementIncarnation == (domain.IncarnationID{}) || descriptor.ReplacementIncarnation == descriptor.OldIncarnation || descriptor.Reason == "" {
+		return errors.New("snapshot: incomplete quarantine descriptor")
+	}
+	return nil
+}
+
+func encodeQuarantineDescriptor(descriptor domain.QuarantineDescriptor) ([]byte, error) {
+	if err := validateQuarantineDescriptor(descriptor); err != nil {
+		return nil, err
+	}
+	return json.Marshal(quarantineDescriptorFile{Version: quarantineDescriptorVersion, Descriptor: descriptor})
+}
+
+func decodeQuarantineDescriptor(encoded []byte) (domain.QuarantineDescriptor, error) {
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	var file quarantineDescriptorFile
+	if err := decoder.Decode(&file); err != nil {
+		return domain.QuarantineDescriptor{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return domain.QuarantineDescriptor{}, errors.New("snapshot: trailing quarantine descriptor data")
+	}
+	if file.Version != quarantineDescriptorVersion {
+		return domain.QuarantineDescriptor{}, errors.New("snapshot: unsupported quarantine descriptor version")
+	}
+	return file.Descriptor, validateQuarantineDescriptor(file.Descriptor)
+}
+
+func (r *Repository) SaveQuarantineDescriptor(ctx context.Context, descriptor domain.QuarantineDescriptor) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	encoded, err := encodeQuarantineDescriptor(descriptor)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(r.dir, "quarantine", descriptor.OldIncarnation.String())
+	if err := r.ensurePrivateDirectory(dir); err != nil {
+		return err
+	}
+	return r.writeImmutable(filepath.Join(dir, "record"), encoded, func(existing []byte) error {
+		decoded, err := decodeQuarantineDescriptor(existing)
+		if err != nil {
+			return err
+		}
+		if !quarantineDescriptorsEqual(decoded, descriptor) || !bytes.Equal(existing, encoded) {
+			return errors.New("snapshot: quarantine descriptor identity mismatch")
+		}
+		return nil
+	})
+}
+
+func quarantineDescriptorsEqual(a, b domain.QuarantineDescriptor) bool {
+	return a.OldIncarnation == b.OldIncarnation && a.ReplacementIncarnation == b.ReplacementIncarnation &&
+		a.SessionName == b.SessionName && a.Reason == b.Reason && catalogueRecordsEqual(a.OldRecord, b.OldRecord)
+}
+
+func catalogueRecordsEqual(a, b domain.CatalogueRecord) bool {
+	if a.Name != b.Name || a.IncarnationID != b.IncarnationID || a.Cwd != b.Cwd || a.CreatedAt != b.CreatedAt ||
+		a.UpdatedAt != b.UpdatedAt || a.LastUsedSeq != b.LastUsedSeq || a.RecoveryState != b.RecoveryState ||
+		a.DegradedReason != b.DegradedReason || len(a.TabNames) != len(b.TabNames) {
+		return false
+	}
+	for i := range a.TabNames {
+		if a.TabNames[i] != b.TabNames[i] {
+			return false
+		}
+	}
+	return checkpointRefsEqual(a.Committed, b.Committed) && checkpointRefsEqual(a.Fallbacks[0], b.Fallbacks[0]) && checkpointRefsEqual(a.Fallbacks[1], b.Fallbacks[1])
+}
+
+func checkpointRefsEqual(a, b *domain.CheckpointRef) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func (r *Repository) QuarantineIncarnation(ctx context.Context, id domain.IncarnationID) error {

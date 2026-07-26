@@ -127,6 +127,7 @@ type Daemon struct {
 	snapshotRepository ports.SnapshotRepository
 	checkpointRecovery ports.CheckpointCoordinator
 	lifecycleRecovery  ports.SessionLifecycleCoordinator
+	degradedRecovery   ports.DegradedRecoveryCoordinator
 	legacySnapshots    ports.LegacySnapshotSource
 	snapsEnabled       bool
 	noticeStore        ports.NoticeStore
@@ -286,6 +287,9 @@ func WithRecoveryCoordinator(coordinator ports.SessionLifecycleCoordinator) Opti
 	return func(d *Daemon) {
 		d.checkpointRecovery = coordinator
 		d.lifecycleRecovery = coordinator
+		if degraded, ok := coordinator.(ports.DegradedRecoveryCoordinator); ok {
+			d.degradedRecovery = degraded
+		}
 	}
 }
 
