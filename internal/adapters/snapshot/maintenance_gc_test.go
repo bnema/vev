@@ -13,6 +13,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCollectGarbageClearsUncommittedCheckpointHead(t *testing.T) {
+	t.Parallel()
+	repository := NewRepository(privateDir(t))
+	publication := repositoryPublication(t, "work", 1, []byte("first checkpoint"))
+	require.NoError(t, repository.Publish(context.Background(), publication))
+
+	// Repository publication completed, but the catalogue commit did not.
+	// Startup GC knows the incarnation but has no committed checkpoint for it.
+	keep := map[domain.IncarnationID]domain.CheckpointRef{publication.IncarnationID: {}}
+	require.NoError(t, repository.CollectGarbage(context.Background(), keep))
+	_, err := os.Stat(repository.headPath(publication.IncarnationID))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	require.Empty(t, garbageCollectionGenerations(t, repository, publication.IncarnationID))
+
+	// Retrying starts from an empty repository, then the resulting checkpoint
+	// can be committed to the catalogue and restored.
+	require.NoError(t, repository.Publish(context.Background(), publication))
+	committed := domain.CheckpointRef{Generation: publication.Generation, ManifestDigest: sha256.Sum256(publication.Manifest)}
+	keep[publication.IncarnationID] = committed
+	require.NoError(t, repository.CollectGarbage(context.Background(), keep))
+	_, err = repository.LoadCheckpoint(context.Background(), publication.IncarnationID, publication.Name, committed)
+	require.NoError(t, err)
+}
+
 func TestCollectGarbage(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

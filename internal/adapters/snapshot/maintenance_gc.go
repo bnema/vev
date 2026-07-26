@@ -116,7 +116,39 @@ func (r *Repository) pruneGenerations(ctx context.Context, id domain.Incarnation
 		}
 		r.log.Info("snapshot_garbage_collected", "incarnation", id.String(), "action", "remove-generations", "removed", removed)
 	}
+	if err := r.removeHeadForDiscardedGenerations(id, kept); err != nil {
+		return err
+	}
 	return r.sweepUnreferencedObjects(ctx, id, references)
+}
+
+// removeHeadForDiscardedGenerations removes a repository HEAD only when its
+// generation was removed by the retention policy. In particular, an
+// incarnation with no committed checkpoint retains no generations, so its
+// crash-published HEAD cannot make a retry conflict with an orphan.
+func (r *Repository) removeHeadForDiscardedGenerations(id domain.IncarnationID, kept map[uint64]struct{}) error {
+	removeHead := len(kept) == 0
+	if !removeHead {
+		generation, _, err := r.readHead(id)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read snapshot HEAD for %s: %w", id.String(), safeFilesystemError(err))
+		}
+		_, retained := kept[generation]
+		removeHead = !retained
+	}
+	if !removeHead {
+		return nil
+	}
+	if err := r.remove(r.headPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove snapshot HEAD for %s: %w", id.String(), safeFilesystemError(err))
+	}
+	if err := r.syncDirectory(r.sessionPath(id)); err != nil {
+		return fmt.Errorf("sync snapshot incarnation for %s: %w", id.String(), safeFilesystemError(err))
+	}
+	return nil
 }
 
 func (r *Repository) referencesForGenerations(id domain.IncarnationID, entries []os.DirEntry, keep map[uint64]struct{}, committed domain.CheckpointRef) (map[ports.SnapshotDigest]struct{}, error) {

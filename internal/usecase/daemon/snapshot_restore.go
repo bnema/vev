@@ -37,11 +37,10 @@ func (d *Daemon) closeRestoreDone() {
 }
 
 // startSnapshotRestoration launches catalogue-driven restoration as a durable
-// writer. Restoration repairs HEADs, promotes fallbacks, and replaces catalogue
-// records, so lifecycle ownership must outlive it exactly as it outlives the
-// snapshot and maintenance workers. The completion channel is registered before
-// the goroutine starts, so shutdown can never begin waiting while this writer
-// is still unregistered.
+// writer. Restoration may repair HEADs, so lifecycle ownership must outlive it
+// exactly as it outlives the snapshot and maintenance workers. The completion
+// channel is registered before the goroutine starts, so shutdown can never
+// begin waiting while this writer is still unregistered.
 func (d *Daemon) startSnapshotRestoration() {
 	if d == nil {
 		return
@@ -314,7 +313,7 @@ func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *se
 		}
 	}
 	// Restoration is catalogue-authorized. Missing or unreadable authority is a
-	// hard failure; migration creates catalogue records before daemon startup.
+	// hard failure.
 	if d.persistEnabled {
 		record, ok, err := d.catalogueRecord(sess.name)
 		if err != nil {

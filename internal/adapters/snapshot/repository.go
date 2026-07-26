@@ -21,13 +21,11 @@ type Repository struct {
 	dir string
 	log *slog.Logger
 
-	// sessionStateMu owns both maps. A caller retains a reference before it
-	// waits on a session mutex, so an idle entry can never be removed while a
-	// waiter still holds its old mutex. Epoch entries share that lifetime.
+	// sessionStateMu owns locks. A caller retains a reference before it waits
+	// on a session mutex, so an idle entry can never be removed while a waiter
+	// still holds its old mutex.
 	sessionStateMu sync.Mutex
 	locks          map[string]*sessionMutex
-	storageEpochs  map[string]uint64
-	nextEpoch      uint64
 }
 
 var _ ports.SnapshotRepository = (*Repository)(nil)
@@ -40,33 +38,15 @@ func NewRepository(dir string, logs ...*slog.Logger) *Repository {
 		log = logs[0]
 	}
 	return &Repository{
-		dir:           dir,
-		log:           log,
-		locks:         make(map[string]*sessionMutex),
-		storageEpochs: make(map[string]uint64),
+		dir:   dir,
+		log:   log,
+		locks: make(map[string]*sessionMutex),
 	}
 }
 
-// invalidateStorageEpoch must be called with lockSession(key) held. The
-// registry mutex makes accesses for different session keys race-free too.
-func (r *Repository) invalidateStorageEpoch(key string) {
-	r.sessionStateMu.Lock()
-	r.nextEpoch++
-	r.storageEpochs[key] = r.nextEpoch
-	r.sessionStateMu.Unlock()
-}
-
-// storageEpoch must be called with lockSession(key) held.
-func (r *Repository) storageEpoch(key string) uint64 {
-	r.sessionStateMu.Lock()
-	epoch := r.storageEpochs[key]
-	r.sessionStateMu.Unlock()
-	return epoch
-}
-
-// sessionMutex is retained by each waiter and each resumable maintenance
-// state. That reference is what makes eviction safe: a new caller cannot lock
-// a replacement mutex until all users of the prior mutex have left it.
+// sessionMutex is retained by each waiter. That reference makes eviction
+// safe: a new caller cannot lock a replacement mutex until all users of the
+// prior mutex have left it.
 type sessionMutex struct {
 	key        string
 	mu         sync.Mutex
@@ -91,18 +71,6 @@ func (r *Repository) unlockSession(lock *sessionMutex) {
 	r.releaseSessionReference(lock)
 }
 
-func (r *Repository) retainSessionState(key string) *sessionMutex {
-	r.sessionStateMu.Lock()
-	lock := r.locks[key]
-	// sessionMaintenanceState is called while the active session lock is held.
-	if lock == nil {
-		panic("snapshot: retain missing session lock")
-	}
-	lock.references++
-	r.sessionStateMu.Unlock()
-	return lock
-}
-
 func (r *Repository) releaseSessionReference(lock *sessionMutex) {
 	r.sessionStateMu.Lock()
 	lock.references--
@@ -116,14 +84,6 @@ func (r *Repository) releaseSessionReference(lock *sessionMutex) {
 			panic("snapshot: session lock registry mismatch")
 		}
 		delete(r.locks, lock.key)
-		delete(r.storageEpochs, lock.key)
 	}
 	r.sessionStateMu.Unlock()
-}
-
-// sessionStateCounts is test evidence that idle per-session state is evicted.
-func (r *Repository) sessionStateCounts() (locks, epochs int) {
-	r.sessionStateMu.Lock()
-	defer r.sessionStateMu.Unlock()
-	return len(r.locks), len(r.storageEpochs)
 }

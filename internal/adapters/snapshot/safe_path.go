@@ -103,19 +103,6 @@ func (r *Repository) repositoryRelative(path string) (string, bool) {
 	return rel, true
 }
 
-func (r *Repository) stat(path string) (fi os.FileInfo, err error) {
-	rel, ok := r.repositoryRelative(path)
-	if !ok {
-		return nil, fmt.Errorf("snapshot path outside repository")
-	}
-	root, err := r.openRoot()
-	if err != nil {
-		return nil, err
-	}
-	defer func() { joinCloseError(&err, "close snapshot root", r.closeRoot(root)) }()
-	return root.Lstat(rel)
-}
-
 // createTempAt creates an exclusively owned temporary file in an already
 // validated directory. os.CreateTemp(path) would resolve that path again.
 func (r *Repository) createTempAt(dir string) (temp *os.File, err error) {

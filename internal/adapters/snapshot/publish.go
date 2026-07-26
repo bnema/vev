@@ -56,9 +56,8 @@ func (r *Repository) Publish(ctx context.Context, publication ports.SnapshotPubl
 	}
 
 	// Parent validation and all other publication checks above happen before
-	// creating or invalidating repository state. A rejected child must leave the
-	// authoritative checkpoint and its storage byte-for-byte unchanged.
-	r.invalidateStorageEpoch(key)
+	// creating repository state. A rejected child must leave the authoritative
+	// checkpoint and its storage byte-for-byte unchanged.
 	if err := r.ensureSession(publication.IncarnationID); err != nil {
 		return err
 	}

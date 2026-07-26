@@ -35,17 +35,6 @@ func loadPublication(ctx context.Context, repo *Repository, publication ports.Sn
 	})
 }
 
-func loadGenerationCheckpoint(ctx context.Context, repo *Repository, id domain.IncarnationID, name string, generation uint64) (ports.SnapshotGeneration, error) {
-	manifest, err := repo.readBounded(repo.manifestPath(id, generation))
-	if err != nil {
-		return ports.SnapshotGeneration{}, err
-	}
-	return repo.LoadCheckpoint(ctx, id, name, ports.CheckpointRef{
-		Generation:     generation,
-		ManifestDigest: codec.ManifestDigest(manifest),
-	})
-}
-
 func repositoryPublicationAfter(t *testing.T, repo *Repository, name string, generation uint64, payload []byte) ports.SnapshotPublication {
 	t.Helper()
 	return publicationWithCurrentParent(t, repo, repositoryPublication(t, name, generation, payload))

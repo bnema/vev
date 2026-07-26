@@ -131,9 +131,8 @@ type Daemon struct {
 	maintenanceWorkerCancel context.CancelFunc
 	maintenanceWorkerDone   chan struct{}
 	// restoreWorkerDone is the restoration goroutine's ownership signal. Startup
-	// restoration repairs HEADs, promotes fallbacks, and replaces catalogue
-	// records, so it is a durable writer and is guarded by snapshotWorkerMu with
-	// the other two.
+	// restoration may repair a repository HEAD, so it is a durable writer and is
+	// guarded by snapshotWorkerMu with the other two.
 	restoreWorkerDone chan struct{}
 	snapsEnabled      bool
 	noticeStore       ports.NoticeStore

@@ -22,7 +22,6 @@ func (r *Repository) DeleteIncarnation(ctx context.Context, id domain.Incarnatio
 	}
 	lock := r.lockSession(key)
 	defer r.unlockSession(lock)
-	r.invalidateStorageEpoch(key)
 
 	path := r.sessionPath(id)
 	if err := os.RemoveAll(path); err != nil {

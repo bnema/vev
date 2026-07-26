@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 
 	"github.com/bnema/vev/internal/domain"
@@ -14,54 +13,7 @@ import (
 	codec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
-// Directory scans are deliberately finite. Snapshot directories are attacker
-// controlled state, so callers get a retryable error instead of retaining an
-// arbitrary number of names or spending an arbitrary amount of work.
-const (
-	directoryTraversalBatch      = 64
-	maxDirectoryTraversalEntries = 4096
-)
-
-var (
-	ErrDirectoryTraversalBudget = errors.New("snapshot directory traversal budget exceeded")
-	ErrInvalidHEAD              = errors.New("invalid snapshot HEAD")
-)
-
-// walkDirectory is the common finite directory traversal primitive for reads.
-// File.ReadDir maintains a cursor on one descriptor and returns at most one
-// small batch, so no full directory enumeration is retained in memory.
-func (r *Repository) walkDirectory(ctx context.Context, dir string, budget *int, visit func(os.DirEntry) error) (err error) {
-	file, err := r.openDirectory(dir)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if closeErr := file.Close(); err == nil && closeErr != nil {
-			err = closeErr
-		}
-	}()
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		entries, readErr := file.ReadDir(directoryTraversalBatch)
-		for _, entry := range entries {
-			if *budget == 0 {
-				return ErrDirectoryTraversalBudget
-			}
-			*budget--
-			if err := visit(entry); err != nil {
-				return err
-			}
-		}
-		if errors.Is(readErr, io.EOF) {
-			return nil
-		}
-		if readErr != nil {
-			return readErr
-		}
-	}
-}
+var ErrInvalidHEAD = errors.New("invalid snapshot HEAD")
 
 func (r *Repository) LoadCheckpoint(ctx context.Context, id domain.IncarnationID, name string, ref ports.CheckpointRef) (ports.SnapshotGeneration, error) {
 	if err := ctx.Err(); err != nil {
