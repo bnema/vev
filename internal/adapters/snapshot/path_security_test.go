@@ -38,13 +38,13 @@ func TestRepositoryRejectsSymlinkedRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := repo.Load(context.Background(), publication.Name); err == nil {
-		t.Fatal("Load succeeded through replaced configured-root symlink")
+	if _, err := loadPublication(context.Background(), repo, publication); err == nil {
+		t.Fatal("LoadCheckpoint succeeded through replaced configured-root symlink")
 	}
 	if err := repo.Maintain(context.Background()); err == nil {
 		t.Fatal("Maintain succeeded through replaced configured-root symlink")
 	}
-	loaded, err := external.Load(context.Background(), publication.Name)
+	loaded, err := loadPublication(context.Background(), external, externalPublication)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,8 +165,8 @@ func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 			if err := os.Symlink(outside, inside); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := repo.Load(context.Background(), publication.Name); err == nil {
-				t.Fatal("Load succeeded through symlinked repository component")
+			if _, err := loadPublication(context.Background(), repo, publication); err == nil {
+				t.Fatal("LoadCheckpoint succeeded through symlinked repository component")
 			}
 			if err := repo.Maintain(context.Background()); err == nil {
 				t.Fatal("Maintain succeeded through symlinked repository component")

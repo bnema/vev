@@ -49,7 +49,7 @@ func TestRepositoryPublishSkipsUnchangedTenThousandObjectHistory(t *testing.T) {
 		t.Fatalf("unchanged 10k history Publish allocations = %.0f, want <= 450; retained objects were likely copied", allocations)
 	}
 
-	got, err := repo.Load(context.Background(), second.Name)
+	got, err := loadPublication(context.Background(), repo, second)
 	if err != nil {
 		t.Fatal(err)
 	}

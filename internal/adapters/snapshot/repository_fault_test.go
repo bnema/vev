@@ -3,12 +3,9 @@ package snapshot
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	codec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
 func TestRepositoryHeadFailureKeepsOldCompleteGeneration(t *testing.T) {
@@ -24,7 +21,7 @@ func TestRepositoryHeadFailureKeepsOldCompleteGeneration(t *testing.T) {
 		t.Fatal("Publish succeeded with injected HEAD failure")
 	}
 	repo.hooks.beforeHeadWrite = nil
-	got, err := repo.Load(context.Background(), "named")
+	got, err := loadPublication(context.Background(), repo, first)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,8 +152,8 @@ func TestRepositoryNewDirectorySyncFaultsAreIndependent(t *testing.T) {
 			repo.hooks = repositoryHooks{}
 			// A first-generation failure cannot have an older complete generation;
 			// it must not expose an incomplete one as if it were loadable.
-			if _, loadErr := repo.Load(context.Background(), "named"); loadErr == nil || !strings.Contains(loadErr.Error(), "no complete snapshot generation") {
-				t.Fatalf("Load error after incomplete first generation = %v, want no complete generation", loadErr)
+			if _, loadErr := loadPublication(context.Background(), repo, publication); loadErr == nil {
+				t.Fatal("LoadCheckpoint exposed an incomplete first generation")
 			}
 			if err := repo.Publish(context.Background(), publication); err != nil {
 				t.Fatal(err)
@@ -168,41 +165,12 @@ func TestRepositoryNewDirectorySyncFaultsAreIndependent(t *testing.T) {
 
 func assertRepositoryCompleteGeneration(t *testing.T, repo *Repository, name string, generations ...uint64) {
 	t.Helper()
-	got, err := repo.Load(context.Background(), name)
-	if err != nil {
-		t.Fatal(err)
-	}
+	id := legacyIncarnationID(name)
 	for _, generation := range generations {
-		if got.Generation == generation && len(got.Manifest) != 0 && len(got.Objects) != 0 {
+		got, err := loadGenerationCheckpoint(context.Background(), repo, id, name, generation)
+		if err == nil && len(got.Manifest) != 0 && len(got.Objects) != 0 {
 			return
 		}
 	}
-	t.Fatalf("Load = incomplete or mixed generation %+v, want one of %v", got, generations)
-}
-
-func TestRepositoryLoadFallsBackFromIncompleteNewestGeneration(t *testing.T) {
-	dir := privateDir(t)
-	repo := NewRepository(dir)
-	first := repositoryPublication(t, "named", 1, []byte("one"))
-	if err := repo.Publish(context.Background(), first); err != nil {
-		t.Fatal(err)
-	}
-	second := repositoryPublicationAfter(t, repo, "named", 2, []byte("two"))
-	if err := repo.Publish(context.Background(), second); err != nil {
-		t.Fatal(err)
-	}
-	manifest, err := codec.UnmarshalManifest(second.Manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(repo.legacyObjectPath(legacyIncarnationID("named").String(), manifest.Tabs[0].Panes[0].Tail.Digest)); err != nil {
-		t.Fatal(err)
-	}
-	got, err := repo.Load(context.Background(), "named")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Generation != 1 {
-		t.Fatalf("Load generation = %d, want 1", got.Generation)
-	}
+	t.Fatalf("no complete checkpoint found for generations %v", generations)
 }

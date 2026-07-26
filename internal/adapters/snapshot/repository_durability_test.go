@@ -88,12 +88,15 @@ func TestRepositoryFaultsAtEveryPublicationBoundary(t *testing.T) {
 				t.Fatal("Publish succeeded with injected persistence failure")
 			}
 			repo.hooks = repositoryHooks{}
-			got, err := repo.Load(context.Background(), "named")
-			if err != nil {
-				t.Fatal(err)
+			var loaded bool
+			for _, publication := range []ports.SnapshotPublication{second, first} {
+				if _, err := loadPublication(context.Background(), repo, publication); err == nil {
+					loaded = true
+					break
+				}
 			}
-			if got.Generation != 1 && got.Generation != 2 {
-				t.Fatalf("authoritative generation = %d, want old or new", got.Generation)
+			if !loaded {
+				t.Fatal("neither the old nor new checkpoint is complete")
 			}
 		})
 	}

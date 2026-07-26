@@ -18,7 +18,7 @@ func TestRepositoryPublishesAndLoadsCompleteGeneration(t *testing.T) {
 	if err := repo.Publish(context.Background(), pub); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
-	got, err := repo.Load(context.Background(), "named")
+	got, err := loadPublication(context.Background(), repo, pub)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -56,6 +56,24 @@ func TestRepositoryDoesNotRewriteVerifiedImmutableBlob(t *testing.T) {
 	if writes != 0 {
 		t.Fatalf("blob writes = %d, want 0", writes)
 	}
+}
+
+func loadPublication(ctx context.Context, repo *Repository, publication ports.SnapshotPublication) (ports.SnapshotGeneration, error) {
+	return repo.LoadCheckpoint(ctx, publication.IncarnationID, publication.Name, ports.CheckpointRef{
+		Generation:     publication.Generation,
+		ManifestDigest: codec.ManifestDigest(publication.Manifest),
+	})
+}
+
+func loadGenerationCheckpoint(ctx context.Context, repo *Repository, id domain.IncarnationID, name string, generation uint64) (ports.SnapshotGeneration, error) {
+	manifest, err := repo.readBounded(repo.manifestPath(id, generation))
+	if err != nil {
+		return ports.SnapshotGeneration{}, err
+	}
+	return repo.LoadCheckpoint(ctx, id, name, ports.CheckpointRef{
+		Generation:     generation,
+		ManifestDigest: codec.ManifestDigest(manifest),
+	})
 }
 
 func repositoryPublicationAfter(t *testing.T, repo *Repository, name string, generation uint64, payload []byte) ports.SnapshotPublication {

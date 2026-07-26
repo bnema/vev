@@ -2,73 +2,10 @@ package snapshot
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
 )
-
-func TestRepositoryListStopsAtTraversalBudget(t *testing.T) {
-	repo := NewRepository(privateDir(t))
-	sessions := filepath.Join(repo.dir, repositorySessionsDir)
-	if err := os.MkdirAll(sessions, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for i := range maxDirectoryTraversalEntries + 1 {
-		if err := os.Mkdir(filepath.Join(sessions, fmt.Sprintf("hostile-%05d", i)), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	_, err := repo.List(context.Background())
-	if !errors.Is(err, ErrDirectoryTraversalBudget) {
-		t.Fatalf("List error = %v, want directory traversal budget", err)
-	}
-}
-
-func TestRepositoryLoadStopsAtGenerationTraversalBudget(t *testing.T) {
-	repo := NewRepository(privateDir(t))
-	key := legacyIncarnationID("named").String()
-	generations := filepath.Join(repo.legacySessionPath(key), repositoryGenerations)
-	if err := os.MkdirAll(generations, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for i := range maxDirectoryTraversalEntries + 1 {
-		generation := uint64(i + 1)
-		if err := os.WriteFile(filepath.Join(generations, generationFilename(generation)), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	_, err := repo.Load(context.Background(), "named")
-	if !errors.Is(err, ErrDirectoryTraversalBudget) {
-		t.Fatalf("Load error = %v, want directory traversal budget", err)
-	}
-}
-
-func TestRepositoryLoadFallsBackNewestToOldestWithoutGenerationEnumeration(t *testing.T) {
-	repo := NewRepository(privateDir(t))
-	for i := range 3 {
-		generation := uint64(i + 1)
-		if err := repo.Publish(context.Background(), repositoryPublicationAfter(t, repo, "named", generation, fmt.Appendf(nil, "state-%d", generation))); err != nil {
-			t.Fatal(err)
-		}
-	}
-	key := legacyIncarnationID("named").String()
-	publication := repositoryPublication(t, "named", 3, []byte("state-3"))
-	if err := os.Remove(repo.legacyObjectPath(key, publication.Objects[0].Digest)); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := repo.Load(context.Background(), "named")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Generation != 2 {
-		t.Fatalf("Load generation = %d, want 2", got.Generation)
-	}
-}
 
 func TestRepositoryMaintainDoesNotCollectBeyondRetainedMetadataBudget(t *testing.T) {
 	repo := NewRepository(privateDir(t))

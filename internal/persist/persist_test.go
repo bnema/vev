@@ -55,6 +55,62 @@ func TestOpenOrCreate(t *testing.T) {
 	}
 }
 
+func TestOpenOrCreateRejectsNonCurrentDurableStateWithoutMutation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		files map[string][]byte
+	}{
+		{
+			name: "old VEVK version",
+			files: map[string][]byte{
+				filename: {'V', 'E', 'V', 'K', 0, 1},
+			},
+		},
+		{
+			name: "next companion without catalogue",
+			files: map[string][]byte{
+				filename + ".next": []byte("uncommitted catalogue candidate"),
+			},
+		},
+		{
+			name: "previous companion without catalogue",
+			files: map[string][]byte{
+				filename + ".prev": []byte("previous catalogue candidate"),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := privateDir(t)
+			require.NoError(t, os.MkdirAll(dir, 0o700))
+			for name, data := range tt.files {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, name), data, 0o600))
+			}
+
+			before := directoryBytes(t, dir)
+			_, err := OpenOrCreate(dir)
+			require.ErrorIs(t, err, ErrCatalogueUnreadable)
+			require.Equal(t, before, directoryBytes(t, dir), "failure must preserve every durable path and byte")
+		})
+	}
+}
+
+func directoryBytes(t *testing.T, dir string) map[string][]byte {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	files := make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		require.False(t, entry.IsDir(), "unexpected directory %q", entry.Name())
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		require.NoError(t, err)
+		files[entry.Name()] = data
+	}
+	return files
+}
+
 func TestCatalogueDecodeAllFailsOnMalformedRecord(t *testing.T) {
 	good, err := encodeRecordValue(validRecord("good", 1))
 	require.NoError(t, err)

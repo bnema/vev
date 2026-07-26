@@ -408,8 +408,8 @@ func TestRepositoryMaintainRetainsNewestTwoCompleteGenerations(t *testing.T) {
 		t.Fatalf("old manifest after Maintain = %v, want not exist", err)
 	}
 	for _, generation := range []uint64{2, 3} {
-		if _, err := repo.Load(context.Background(), "named"); err != nil {
-			t.Fatalf("Load after collecting generation %d: %v", generation, err)
+		if _, err := loadGenerationCheckpoint(context.Background(), repo, legacyIncarnationID("named"), "named", generation); err != nil {
+			t.Fatalf("LoadCheckpoint after collecting generation %d: %v", generation, err)
 		}
 	}
 }
@@ -461,15 +461,16 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 	})
 	t.Run("load and delete", func(t *testing.T) {
 		repo := NewRepository(privateDir(t))
-		if err := repo.Publish(context.Background(), repositoryPublication(t, "named", 1, []byte("state"))); err != nil {
+		publication := repositoryPublication(t, "named", 1, []byte("state"))
+		if err := repo.Publish(context.Background(), publication); err != nil {
 			t.Fatal(err)
 		}
-		key := legacyIncarnationID("named").String()
+		key := publication.IncarnationID.String()
 		for _, operation := range []struct {
 			name string
 			run  func(context.Context) error
 		}{
-			{"load", func(ctx context.Context) error { _, err := repo.Load(ctx, "named"); return err }},
+			{"load", func(ctx context.Context) error { _, err := loadPublication(ctx, repo, publication); return err }},
 			{"delete", func(ctx context.Context) error { return repo.Delete(ctx, "named") }},
 		} {
 			t.Run(operation.name, func(t *testing.T) {
@@ -488,7 +489,7 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 					t.Fatalf("%s error = %v, want canceled", operation.name, err)
 				}
 				repo.hooks.beforeSessionLock = nil
-				if _, err := repo.Load(context.Background(), "named"); err != nil {
+				if _, err := loadPublication(context.Background(), repo, publication); err != nil {
 					t.Fatalf("%s mutated session: %v", operation.name, err)
 				}
 			})
@@ -496,10 +497,11 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 	})
 	t.Run("maintain", func(t *testing.T) {
 		repo := NewRepository(privateDir(t))
-		if err := repo.Publish(context.Background(), repositoryPublication(t, "named", 1, []byte("state"))); err != nil {
+		publication := repositoryPublication(t, "named", 1, []byte("state"))
+		if err := repo.Publish(context.Background(), publication); err != nil {
 			t.Fatal(err)
 		}
-		lock := repo.lockSession(legacyIncarnationID("named").String())
+		lock := repo.lockSession(publication.IncarnationID.String())
 		ctx, cancel := context.WithCancel(context.Background())
 		reached := make(chan struct{})
 		release := make(chan struct{})
@@ -514,7 +516,7 @@ func TestRepositoryCancellationAfterSessionLockWaitPreventsMutations(t *testing.
 			t.Fatalf("Maintain error = %v, want canceled", err)
 		}
 		repo.hooks.beforeSessionLock = nil
-		if _, err := repo.Load(context.Background(), "named"); err != nil {
+		if _, err := loadPublication(context.Background(), repo, publication); err != nil {
 			t.Fatalf("Maintain mutated session: %v", err)
 		}
 	})
@@ -538,13 +540,14 @@ func TestRepositoryDeleteRetriesPendingQuarantineSyncWithoutDeletingRecreatedSes
 		t.Fatalf("Delete error = %v, want sync failure", err)
 	}
 	repo.hooks.syncDirectory = nil
-	if err := repo.Publish(context.Background(), repositoryPublication(t, "named", 1, []byte("new"))); err != nil {
+	recreated := repositoryPublication(t, "named", 1, []byte("new"))
+	if err := repo.Publish(context.Background(), recreated); err != nil {
 		t.Fatal(err)
 	}
 	if err := repo.Delete(context.Background(), "named"); err != nil {
 		t.Fatalf("retry Delete: %v", err)
 	}
-	if _, err := repo.Load(context.Background(), "named"); err != nil {
+	if _, err := loadPublication(context.Background(), repo, recreated); err != nil {
 		t.Fatalf("recreated session was deleted: %v", err)
 	}
 }

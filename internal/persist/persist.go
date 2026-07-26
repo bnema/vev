@@ -1,6 +1,7 @@
 package persist
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -13,7 +14,10 @@ import (
 	"github.com/bnema/vev/pkg/kv"
 )
 
-const filename = "sessions.kv"
+const (
+	filename                = "sessions.kv"
+	currentCatalogueVersion = 2
+)
 
 var errPersistenceUnavailable = errors.New("persist: catalogue unavailable")
 
@@ -76,17 +80,27 @@ func Open(dir string) (*Persister, error) {
 // durable state exists. Any state that exists but does not decode is returned
 // as ErrCatalogueUnreadable and left untouched on disk.
 func OpenOrCreate(dir string) (OpenResult, error) {
-	existed := true
-	if _, err := os.Stat(StorePath(dir)); errors.Is(err, os.ErrNotExist) {
-		existed = false
-	}
 	path := StorePath(dir)
+	_, statErr := os.Stat(path)
+	existed := statErr == nil
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return OpenResult{}, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, path, statErr)
+	}
+	if !existed {
+		for _, companion := range []string{path + ".next", path + ".prev"} {
+			if _, err := os.Stat(companion); err == nil {
+				return OpenResult{}, fmt.Errorf("%w: %s exists without %s", ErrCatalogueUnreadable, companion, path)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return OpenResult{}, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, companion, err)
+			}
+		}
+	}
 	if existed {
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return OpenResult{}, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, path, err)
 		}
-		if len(raw) < 4 || string(raw[:4]) != "VEVK" {
+		if len(raw) < 6 || string(raw[:4]) != "VEVK" || binary.BigEndian.Uint16(raw[4:6]) != currentCatalogueVersion {
 			return OpenResult{}, fmt.Errorf("%w: %s: unknown catalogue format", ErrCatalogueUnreadable, path)
 		}
 		data, err := kv.Replay(path)
