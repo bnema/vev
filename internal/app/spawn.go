@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/pkg/safedir"
@@ -39,6 +40,18 @@ type dialFunc func(ctx context.Context, dir string) (ports.Transport, error)
 // re-exec a real binary.
 type spawnFunc func() error
 
+type lifecycleProbe interface {
+	TryAcquire(string) (*lifecycle.Owner, error)
+}
+
+type osLifecycleProbe struct{}
+
+func (osLifecycleProbe) TryAcquire(runtimeDir string) (*lifecycle.Owner, error) {
+	return lifecycle.TryAcquire(runtimeDir)
+}
+
+var daemonLifecycleProbe lifecycleProbe = osLifecycleProbe{}
+
 // backoffConfig parameterises retry-dial timing so tests can shrink it.
 type backoffConfig struct {
 	initial time.Duration
@@ -54,10 +67,97 @@ var defaultBackoff = backoffConfig{
 	total:   5 * time.Second,
 }
 
+func waitForLifecycleAvailability(ctx context.Context, runtimeDir string, cfg backoffConfig) (*lifecycle.Owner, error) {
+	deadline := time.Now().Add(cfg.total)
+	backoff := cfg.initial
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		owner, err := daemonLifecycleProbe.TryAcquire(runtimeDir)
+		if err == nil {
+			return owner, nil
+		}
+		if !errors.Is(err, lifecycle.ErrBusy) {
+			return nil, err
+		}
+		if !time.Now().Before(deadline) {
+			return nil, ErrDaemonUnreachable
+		}
+		if err := waitBackoff(ctx, backoff); err != nil {
+			return nil, err
+		}
+		if backoff *= 2; backoff > cfg.max {
+			backoff = cfg.max
+		}
+	}
+}
+
+func waitForDaemonOrLifecycle(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig) (ports.Transport, *lifecycle.Owner, error) {
+	deadline := time.Now().Add(cfg.total)
+	backoff := cfg.initial
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if transport, err := dial(ctx, dir); err == nil {
+			return transport, nil, nil
+		}
+		owner, err := daemonLifecycleProbe.TryAcquire(dir)
+		if err == nil {
+			return nil, owner, nil
+		}
+		if !errors.Is(err, lifecycle.ErrBusy) {
+			return nil, nil, err
+		}
+		if !time.Now().Before(deadline) {
+			return nil, nil, ErrDaemonUnreachable
+		}
+		if err := waitBackoff(ctx, backoff); err != nil {
+			return nil, nil, err
+		}
+		if backoff *= 2; backoff > cfg.max {
+			backoff = cfg.max
+		}
+	}
+}
+
+func waitBackoff(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// ensureDaemonWithLifecycle never elects a spawner while another lifecycle
+// owner may still be initializing or tearing down durable state.
+func ensureDaemonWithLifecycle(ctx context.Context, dir string, dial dialFunc, spawn spawnFunc, cfg backoffConfig) (ports.Transport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if transport, err := dial(ctx, dir); err == nil {
+		return transport, nil
+	}
+	transport, owner, err := waitForDaemonOrLifecycle(ctx, dir, dial, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if transport != nil {
+		return transport, nil
+	}
+	if err := owner.Release(); err != nil {
+		return nil, fmt.Errorf("vev: release lifecycle spawn probe: %w", err)
+	}
+	return ensureDaemon(ctx, dir, dial, spawn, cfg)
+}
+
 // ensureDaemon returns a transport to a running daemon, spawning one if
-// necessary. It first tries a plain dial; on failure it elects a single
-// spawner via an mkdir lock (losers simply wait), then retry-dials with
-// backoff until the socket is live or the budget expires.
+// necessary after ensureDaemonWithLifecycle has established lifecycle
+// availability. Tests also exercise this lower-level spawn election directly.
 func ensureDaemon(ctx context.Context, dir string, dial dialFunc, spawn spawnFunc, cfg backoffConfig) (ports.Transport, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

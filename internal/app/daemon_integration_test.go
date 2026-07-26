@@ -7,9 +7,12 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,8 +20,10 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/adapters/pty"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/pkg/vt"
@@ -421,6 +426,131 @@ func TestIntegration_NamedSurvivesReattach(t *testing.T) {
 	defer func() { _ = tr2.Close() }()
 	awaitText(t, p2, sz, "MARKER")
 }
+
+func TestMultipleClientsOneLifecycleOwner(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "runtime")
+	owner, err := lifecycle.TryAcquire(dir)
+	require.NoError(t, err)
+
+	ready := make(chan struct{})
+	transport := &integrationTransport{}
+	dial := func(context.Context, string) (ports.Transport, error) {
+		select {
+		case <-ready:
+			return transport, nil
+		default:
+			return nil, os.ErrNotExist
+		}
+	}
+	var spawns atomic.Int32
+	cfg := backoffConfig{initial: time.Millisecond, max: 2 * time.Millisecond, total: time.Second}
+
+	const clients = 4
+	errs := make(chan error, clients)
+	var wg sync.WaitGroup
+	for range clients {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := ensureDaemonWithLifecycle(context.Background(), dir, dial, func() error {
+				spawns.Add(1)
+				return nil
+			}, cfg)
+			errs <- err
+		}()
+	}
+	require.Never(t, func() bool { return spawns.Load() != 0 }, 50*time.Millisecond, time.Millisecond)
+	close(ready)
+	require.NoError(t, owner.Release())
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Zero(t, spawns.Load())
+}
+
+func TestListWaitsForLifecycleOwner(t *testing.T) {
+	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
+	require.NoError(t, p.Close())
+	owner, err := lifecycle.TryAcquire(ipc.SocketDir())
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- runList(context.Background()) }()
+	require.Never(t, func() bool { return len(done) != 0 }, 50*time.Millisecond, time.Millisecond)
+	require.NoError(t, owner.Release())
+	require.NoError(t, <-done)
+}
+
+func TestOfflineKillWaitsForLifecycleOwner(t *testing.T) {
+	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
+	now := time.Now().UnixNano()
+	require.NoError(t, p.Save(persist.Record{Name: "named", IncarnationID: domain.IncarnationID{1}, CreatedAt: now, UpdatedAt: now, RecoveryState: domain.RecoveryFresh}))
+	require.NoError(t, p.Close())
+	owner, err := lifecycle.TryAcquire(ipc.SocketDir())
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- runKill(context.Background(), "named", false, false) }()
+	require.Never(t, func() bool { return len(done) != 0 }, 50*time.Millisecond, time.Millisecond)
+	require.NoError(t, owner.Release())
+	require.NoError(t, <-done)
+}
+
+func TestKillDaemonWaitsForOwnershipTransfer(t *testing.T) {
+	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	owner, err := lifecycle.TryAcquire(ipc.SocketDir())
+	require.NoError(t, err)
+	_, served := startDaemonInDir(t, ipc.SocketDir())
+
+	done := make(chan error, 1)
+	go func() { done <- requestDaemonStop(context.Background()) }()
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("daemon did not stop")
+	}
+	require.Never(t, func() bool { return len(done) != 0 }, 50*time.Millisecond, time.Millisecond)
+	require.NoError(t, owner.Release())
+	require.NoError(t, <-done)
+}
+
+func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "runtime")
+	old, err := lifecycle.TryAcquire(dir)
+	require.NoError(t, err)
+	var catalogueOpen, listenCalled atomic.Bool
+	newDone := make(chan error, 1)
+	go func() {
+		newDone <- runWithLifecycleOwner(context.Background(), dir, filepath.Join(t.TempDir(), "state"), func(context.Context) error {
+			catalogueOpen.Store(true)
+			listenCalled.Store(true)
+			return nil
+		})
+	}()
+	require.Never(t, func() bool { return catalogueOpen.Load() || listenCalled.Load() }, 50*time.Millisecond, time.Millisecond)
+	require.NoError(t, old.Release())
+	require.Eventually(t, catalogueOpen.Load, time.Second, time.Millisecond)
+	require.NoError(t, <-newDone)
+}
+
+type integrationTransport struct{}
+
+func (*integrationTransport) Send(ports.Frame) error     { return nil }
+func (*integrationTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (*integrationTransport) Close() error               { return nil }
+func (*integrationTransport) LocalAddr() net.Addr        { return nil }
+func (*integrationTransport) RemoteAddr() net.Addr       { return nil }
 
 func TestIntegration_KillAllShutsDownDaemon(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}

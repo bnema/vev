@@ -759,7 +759,7 @@ func (d localDaemonDialer) Dial(ctx context.Context) (ports.Transport, error) {
 			return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(d.observer))
 		}
 	}
-	return ensureDaemon(ctx, d.dir, dial, realSpawn, defaultBackoff)
+	return ensureDaemonWithLifecycle(ctx, d.dir, dial, realSpawn, defaultBackoff)
 }
 
 func detachedLocalHello(name, cwd string) ports.Hello {
@@ -777,7 +777,7 @@ func detachedLocalHello(name, cwd string) ports.Hello {
 }
 
 func createDetachedLocalSession(ctx context.Context, name string) error {
-	transport, err := ensureDaemon(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+	transport, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
 	if err != nil {
 		return err
 	}
@@ -840,40 +840,26 @@ func requestDaemonStop(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, daemonStopTimeout)
 	defer cancel()
 
-	done := make(chan error, 1)
-	go func() {
-		transport, err := realDial(ctx, ipc.SocketDir())
-		if err != nil {
-			done <- fmt.Errorf("vev: no daemon running")
-			return
-		}
-		defer func() { _ = transport.Close() }()
-		closed := make(chan struct{})
-		go func() {
-			select {
-			case <-ctx.Done():
-				_ = transport.Close()
-			case <-closed:
-			}
-		}()
-		defer close(closed)
-		if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}); err != nil {
-			done <- fmt.Errorf("vev: requesting daemon stop: %w", err)
-			return
-		}
-		if _, err := transport.Recv(); err != nil && !errors.Is(err, io.EOF) {
-			done <- fmt.Errorf("vev: reading daemon stop reply: %w", err)
-			return
-		}
-		done <- nil
-	}()
-
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		return fmt.Errorf("vev: stopping daemon: %w", ctx.Err())
+	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), realDial, defaultBackoff)
+	if err != nil {
+		return fmt.Errorf("vev: stopping daemon: %w", err)
 	}
+	if owner != nil {
+		return errors.Join(errors.New("vev: no daemon running"), owner.Release())
+	}
+	defer func() { _ = transport.Close() }()
+	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(ports.Kill{All: true})}); err != nil {
+		return fmt.Errorf("vev: requesting daemon stop: %w", err)
+	}
+	if _, err := transport.Recv(); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("vev: reading daemon stop reply: %w", err)
+	}
+
+	owner, err = waitForLifecycleAvailability(ctx, ipc.SocketDir(), defaultBackoff)
+	if err != nil {
+		return fmt.Errorf("vev: waiting for daemon ownership transfer: %w", err)
+	}
+	return owner.Release()
 }
 
 // runStdio is the hidden remote-side mode used by `ssh host vev _stdio`: it
@@ -895,7 +881,7 @@ func runStdio(ctx context.Context) (retErr error) {
 	if observerCloser != nil {
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
 	}
-	transport, err := ensureDaemon(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
+	transport, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
 		return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(observer))
 	}, realSpawn, defaultBackoff)
 	if err != nil {
@@ -1010,7 +996,7 @@ func runUDPProxy(ctx context.Context, session string, ready io.Writer) (retErr e
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	daemonTr, err := ensureDaemon(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
+	daemonTr, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (ports.Transport, error) {
 		return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(observer))
 	}, realSpawn, defaultBackoff)
 	if err != nil {
@@ -1228,8 +1214,12 @@ func proxyTransports(ctx context.Context, a, b ports.Transport, log *slog.Logger
 // runList prints the daemon's session listing. With no daemon running, it
 // falls back to the persisted stopped-session records.
 func runList(ctx context.Context) error {
-	transport, err := realDial(ctx, ipc.SocketDir())
+	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), realDial, defaultBackoff)
 	if err != nil {
+		return fmt.Errorf("vev: waiting for durable session state: %w", err)
+	}
+	if owner != nil {
+		defer func() { _ = owner.Release() }()
 		records, loadErr := persist.LoadReadOnly(platform.StateDir())
 		if loadErr != nil {
 			return fmt.Errorf("vev: reading stored sessions: %w", loadErr)
@@ -1304,83 +1294,62 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 	_ = tw.Flush()
 }
 
-// offlineSnapshotSource owns the durable source and tombstone transitions for
-// a daemon-less kill. It is intentionally local to the composition root: the
-// daemon uses the repository through its narrower ports.
-type offlineSnapshotSource interface {
-	Tombstone(context.Context, string) error
-	Delete(context.Context, string) error
-	DeleteLegacy(context.Context, string) error
-	DeleteTombstone(context.Context, string) error
-}
-
-var newOfflineSnapshotRepository = func(dir string) offlineSnapshotSource {
-	return snapshotadapter.NewRepository(dir)
-}
-
-func phaseError(phase string, err error) error {
-	if err == nil {
-		return nil
+func runOfflineNamedKill(ctx context.Context, name string) (retErr error) {
+	if _, err := os.Stat(persist.StorePath(platform.StateDir())); errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("vev: no such session: %s", name)
+	} else if err != nil {
+		return fmt.Errorf("vev: reading stored sessions: %w", err)
 	}
-	return fmt.Errorf("vev: %s: %w", phase, err)
+	records, err := persist.LoadReadOnly(platform.StateDir())
+	if err != nil {
+		return fmt.Errorf("vev: reading stored sessions: %w", err)
+	}
+	found := false
+	for _, record := range records {
+		if record.Name == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("vev: no such session: %s", name)
+	}
+
+	repository := snapshotadapter.NewRepository(snapshotDir())
+	opened, err := persist.OpenOrMigrate(ctx, persist.OpenDeps{
+		StateDir:          platform.StateDir(),
+		Random:            rand.Reader,
+		SnapshotMigration: repository,
+	})
+	if err != nil {
+		return fmt.Errorf("vev: opening stored sessions: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, opened.Catalogue.Close()) }()
+
+	if _, ok := opened.Catalogue.Record(name); !ok {
+		return fmt.Errorf("vev: no such session: %s", name)
+	}
+	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, recoveryfs.New(platform.StateDir()), rand.Reader)
+	if err := coordinator.Recover(ctx); err != nil {
+		return fmt.Errorf("vev: recovering stored session transactions: %w", err)
+	}
+	if err := coordinator.Delete(ctx, name); err != nil {
+		return fmt.Errorf("vev: deleting stored session: %w", err)
+	}
+	return nil
 }
 
 // runKill asks the daemon to terminate a named session, every session, or the daemon.
 func runKill(ctx context.Context, name string, all, daemon bool) error {
-	transport, err := realDial(ctx, ipc.SocketDir())
+	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), realDial, defaultBackoff)
 	if err != nil {
+		return fmt.Errorf("vev: waiting for durable session state: %w", err)
+	}
+	if owner != nil {
+		defer func() { _ = owner.Release() }()
 		if name != "" && !all && !daemon {
-			storePath := persist.StorePath(platform.StateDir())
-			if _, statErr := os.Stat(storePath); errors.Is(statErr, os.ErrNotExist) {
-				return fmt.Errorf("vev: no such session: %s", name)
-			} else if statErr != nil {
-				return fmt.Errorf("vev: reading stored sessions: %w", statErr)
-			}
-			records, loadErr := persist.LoadReadOnly(platform.StateDir())
-			if loadErr != nil {
-				return fmt.Errorf("vev: reading stored sessions: %w", loadErr)
-			}
-			found := false
-			for _, record := range records {
-				if record.Name == name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return fmt.Errorf("vev: no such session: %s", name)
-			}
-			p, openErr := persist.Open(platform.StateDir())
-			if openErr != nil {
-				return fmt.Errorf("vev: opening stored sessions: %w", openErr)
-			}
-			snapshots := newOfflineSnapshotRepository(snapshotDir())
-			// The durable marker is the commit point for a logical kill. Keep it and
-			// the persisted record until both independently recoverable sources have
-			// crossed their deletion durability boundaries.
-			if tombstoneErr := snapshots.Tombstone(ctx, name); tombstoneErr != nil {
-				_ = p.Close()
-				return fmt.Errorf("vev: marking session killed: %w", tombstoneErr)
-			}
-			incrementalErr := snapshots.Delete(ctx, name)
-			legacyErr := snapshots.DeleteLegacy(ctx, name)
-			if incrementalErr != nil || legacyErr != nil {
-				_ = p.Close()
-				return errors.Join(
-					phaseError("deleting incremental session snapshot", incrementalErr),
-					phaseError("deleting legacy session snapshot", legacyErr),
-				)
-			}
-			if deleteErr := p.Delete(name); deleteErr != nil {
-				_ = p.Close()
-				return fmt.Errorf("vev: deleting stored session: %w", deleteErr)
-			}
-			if tombstoneErr := snapshots.DeleteTombstone(ctx, name); tombstoneErr != nil {
-				_ = p.Close()
-				return fmt.Errorf("vev: clearing killed session marker: %w", tombstoneErr)
-			}
-			if closeErr := p.Close(); closeErr != nil {
-				return fmt.Errorf("vev: closing stored sessions: %w", closeErr)
+			if err := runOfflineNamedKill(ctx, name); err != nil {
+				return err
 			}
 			printKillSuccess(name, all, daemon)
 			return nil
