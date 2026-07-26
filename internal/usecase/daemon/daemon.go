@@ -325,12 +325,11 @@ func WithNoticeStore(store ports.NoticeStore) Option {
 	return func(d *Daemon) { d.noticeStore = store }
 }
 
-// WithDurableMaintenance schedules bounded retention and reconciliation after
-// catalogue-driven restoration. Each call receives an independent budget;
-// unresolved incarnation IDs remain pinned for this daemon lifetime.
-func WithDurableMaintenance(catalogue ports.Catalogue, repository ports.SnapshotRepository, reconciler maintenanceReconciler, unresolved []domain.IncarnationID) Option {
+// WithDurableMaintenance schedules bounded retention after catalogue-driven
+// restoration. Unresolved incarnation IDs remain pinned for this daemon lifetime.
+func WithDurableMaintenance(catalogue ports.Catalogue, repository ports.SnapshotRepository, unresolved []domain.IncarnationID) Option {
 	return func(d *Daemon) {
-		d.maintenance = newMaintenanceDependencies(catalogue, repository, reconciler, unresolved)
+		d.maintenance = newMaintenanceDependencies(catalogue, repository, unresolved)
 	}
 }
 
@@ -548,7 +547,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.Listener) error {
 	} else {
 		d.closeRestoreDone()
 	}
-	if d.maintenance.reconciler != nil {
+	if d.maintenance.catalogue != nil && d.maintenance.repository != nil {
 		d.startDurableMaintenance()
 	}
 

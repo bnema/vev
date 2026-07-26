@@ -36,7 +36,6 @@ import (
 	"github.com/bnema/vev/internal/adapters/noticefile"
 	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/adapters/pty"
-	"github.com/bnema/vev/internal/adapters/recoveryfs"
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/adapters/shellcmd"
 	snapshotadapter "github.com/bnema/vev/internal/adapters/snapshot"
@@ -521,19 +520,12 @@ type interruptedRecoveryIdentity struct {
 	id   domain.IncarnationID
 }
 
-func pendingInterruptedRecoveries(ctx context.Context, records []domain.CatalogueRecord, journal ports.RecoveryJournal, repository ports.SnapshotRepository) ([]interruptedRecoveryIdentity, error) {
+func pendingInterruptedRecoveries(ctx context.Context, records []domain.CatalogueRecord, repository ports.SnapshotRepository) ([]interruptedRecoveryIdentity, error) {
 	pending := make([]interruptedRecoveryIdentity, 0)
 	for _, record := range records {
 		if record.RecoveryState == domain.RecoveryDeleting {
 			pending = append(pending, interruptedRecoveryIdentity{name: record.Name, id: record.IncarnationID})
 		}
-	}
-	intents, err := journal.ListDiscards(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, intent := range intents {
-		pending = append(pending, interruptedRecoveryIdentity{name: intent.SessionName, id: intent.OldIncarnation})
 	}
 	cursor := ports.DeletionTombstoneCursor{}
 	for {
@@ -602,10 +594,6 @@ func fencedRecoveries(conflicts []recovery.RecoveryConflict, catalogue ports.Cat
 
 func fencedRecoveryReasonCode(err error) string {
 	switch {
-	case errors.Is(err, recovery.ErrDiscardConflict):
-		return "discard-intent-conflict"
-	case errors.Is(err, recovery.ErrDiscardIntentInvalid):
-		return "discard-intent-invalid"
 	case errors.Is(err, recovery.ErrDeletionTombstoneConflict):
 		return "deletion-tombstone-conflict"
 	case errors.Is(err, recovery.ErrDeletionTombstoneInvalid):
@@ -738,12 +726,11 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 		recoveryMode = "new-install"
 	}
 	logCatalogueRecovery(log, opened.Records, recoveryMode)
-	journal := recoveryfs.New(platform.StateDir())
-	pendingRecoveries, err := pendingInterruptedRecoveries(ctx, opened.Records, journal, snapshotRepository)
+	pendingRecoveries, err := pendingInterruptedRecoveries(ctx, opened.Records, snapshotRepository)
 	if err != nil {
 		return errors.Join(fmt.Errorf("vev: inspect durable session transactions: %w", err), opened.Catalogue.Close())
 	}
-	coordinator := recovery.NewCoordinator(opened.Catalogue, snapshotRepository, journal, rand.Reader)
+	coordinator := recovery.NewCoordinator(opened.Catalogue, snapshotRepository, rand.Reader)
 	// Recovery may roll catalogue changes forward, so reload the authoritative
 	// snapshot before constructing runtime reservations. A failed reload aborts
 	// startup rather than treating durable sessions as absent.
@@ -774,8 +761,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	for _, pending := range pendingRecoveries {
 		unresolved = append(unresolved, pending.id)
 	}
-	reconciler := recovery.NewReconciler(coordinator, opened.Catalogue, snapshotRepository, ports.MaintenanceBudget{Entries: 64, Bytes: 8 << 20})
-	daemonOpts = append(daemonOpts, daemon.WithDurableMaintenance(opened.Catalogue, snapshotRepository, reconciler, unresolved))
+	daemonOpts = append(daemonOpts, daemon.WithDurableMaintenance(opened.Catalogue, snapshotRepository, unresolved))
 	log.Info("session persistence enabled", "path", storePath)
 	daemonOpts = append(daemonOpts, daemon.WithCatalogue(opened.Catalogue, opened.Records))
 
@@ -1577,7 +1563,7 @@ func runOfflineNamedKill(ctx context.Context, name string) (retErr error) {
 	} else if !ok {
 		return fmt.Errorf("vev: no such session: %s", name)
 	}
-	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, recoveryfs.New(platform.StateDir()), rand.Reader)
+	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, rand.Reader)
 	if err := coordinator.Recover(ctx); err != nil {
 		return fmt.Errorf("vev: recovering stored session transactions: %w", err)
 	}

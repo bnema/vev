@@ -38,8 +38,6 @@ type MaintenanceBudget struct {
 	Bytes   uint64
 }
 
-type ReconcileCursor struct{ DirectoryCookie uint64 }
-
 type DeletionTombstoneCursor struct{ After string }
 
 type DeletionTombstonePage struct {
@@ -48,68 +46,7 @@ type DeletionTombstonePage struct {
 	Done       bool
 }
 
-type ReconcileFindingKind uint8
-
-const (
-	ReconcileForwardOrphan ReconcileFindingKind = iota + 1
-	ReconcileUnknownIncarnation
-	ReconcileInvalidCandidate
-)
-
-type ReconcileValidationStatus uint8
-
-const (
-	ReconcileValidated ReconcileValidationStatus = iota + 1
-	ReconcileQuarantined
-	ReconcileBudgetExhausted
-)
-
-type ReconcileCandidate struct {
-	IncarnationID domain.IncarnationID
-	Name          string
-	Ref           domain.CheckpointRef
-	Parent        *domain.CheckpointRef
-}
-
-type ValidatedCheckpoint struct {
-	Ref    domain.CheckpointRef
-	Parent *domain.CheckpointRef
-}
-
-type ReconcileFinding struct {
-	Kind          ReconcileFindingKind
-	Status        ReconcileValidationStatus
-	Candidate     ReconcileCandidate
-	AncestorChain []ValidatedCheckpoint
-	Cursor        ReconcileCursor
-	Consumed      MaintenanceBudget
-}
-
-type ReconcileDecisionKind uint8
-
-const (
-	ReconcileAdopt ReconcileDecisionKind = iota + 1
-	ReconcileKeepQuarantined
-	ReconcileDefer
-)
-
-type ReconcileDecision struct {
-	Kind       ReconcileDecisionKind
-	Name       string
-	Candidate  *domain.CheckpointRef
-	ReasonCode string
-	// RetentionResolved permits collection after a conclusive adoption or
-	// not-forward decision. Its zero value conservatively pins known sessions.
-	RetentionResolved bool
-}
-
 var ErrBudgetExhausted = errors.New("snapshot maintenance budget exhausted")
-
-type RecoveryJournal interface {
-	SaveDiscard(context.Context, domain.DiscardIntent) error
-	ListDiscards(context.Context) ([]domain.DiscardIntent, error)
-	DeleteDiscard(context.Context, domain.IncarnationID) error
-}
 
 type CheckpointCoordinator interface {
 	PublishCheckpoint(context.Context, string, SnapshotPublication) (domain.CatalogueRecord, error)
@@ -127,7 +64,7 @@ type SessionLifecycleCoordinator interface {
 
 // DegradedRecoveryCoordinator exposes only the explicit operator discard action.
 type DegradedRecoveryCoordinator interface {
-	Discard(context.Context, string, string) (domain.CatalogueRecord, error)
+	Discard(context.Context, string) error
 }
 
 type Catalogue interface {
@@ -147,11 +84,7 @@ type SnapshotRepository interface {
 	RepairHEAD(context.Context, domain.IncarnationID, CheckpointRef) error
 	WriteDeletionTombstone(context.Context, domain.DeletionTombstone) error
 	ListDeletionTombstones(context.Context, DeletionTombstoneCursor, MaintenanceBudget) (DeletionTombstonePage, error)
-	QuarantineDeletionSources(context.Context, domain.DeletionTombstone, bool) error
 	DeleteDeletionTombstone(context.Context, domain.IncarnationID) error
-	SaveQuarantineDescriptor(context.Context, domain.QuarantineDescriptor) error
-	QuarantineIncarnation(context.Context, domain.IncarnationID) error
 	DeleteIncarnation(context.Context, domain.IncarnationID) error
 	MaintainSession(context.Context, RetentionPlan, MaintenanceBudget) (bool, error)
-	Reconcile(context.Context, []domain.CatalogueRecord, ReconcileCursor, MaintenanceBudget) (ReconcileCursor, []ReconcileFinding, error)
 }

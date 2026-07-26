@@ -81,24 +81,6 @@ func (r CatalogueRecord) MetadataUpdate() CatalogueMetadataUpdate {
 	}
 }
 
-// DiscardIntent records a requested replacement of uncertain persisted state.
-type DiscardIntent struct {
-	OldRecord      CatalogueRecord
-	OldIncarnation IncarnationID
-	NewIncarnation IncarnationID
-	SessionName    string
-	Reason         string
-}
-
-// QuarantineDescriptor records persisted state retained during replacement.
-type QuarantineDescriptor struct {
-	OldRecord              CatalogueRecord
-	OldIncarnation         IncarnationID
-	ReplacementIncarnation IncarnationID
-	SessionName            string
-	Reason                 string
-}
-
 // DeletionTombstone identifies exactly one deleted session incarnation.
 type DeletionTombstone struct {
 	Name          string

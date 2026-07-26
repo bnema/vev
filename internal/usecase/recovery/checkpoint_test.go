@@ -112,7 +112,7 @@ func runCheckpointCommit(t *testing.T, count int) (domain.CatalogueRecord, *chec
 	events := make([]string, 0, count*2)
 	catalogue := &checkpointCatalogue{record: checkpointRecord(), events: &events}
 	repository := &checkpointRepository{events: &events}
-	coordinator := NewCoordinator(catalogue, repository, nil, nil)
+	coordinator := NewCoordinator(catalogue, repository, nil)
 	for generation := uint64(1); generation <= uint64(count); generation++ {
 		var err error
 		catalogue.record, err = coordinator.PublishCheckpoint(context.Background(), "work", checkpointPublication(catalogue.record, generation))
@@ -153,7 +153,7 @@ func TestCheckpointCommitPublishOrphan(t *testing.T) {
 	cause := errors.New("catalogue sync failed")
 	catalogue := &checkpointCatalogue{record: prior, replaceErr: cause}
 	repository := &checkpointRepository{}
-	coordinator := NewCoordinator(catalogue, repository, nil, nil)
+	coordinator := NewCoordinator(catalogue, repository, nil)
 	publication := checkpointPublication(prior, 8)
 
 	_, err := coordinator.PublishCheckpoint(context.Background(), prior.Name, publication)

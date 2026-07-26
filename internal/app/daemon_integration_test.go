@@ -23,7 +23,6 @@ import (
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/adapters/pty"
-	"github.com/bnema/vev/internal/adapters/recoveryfs"
 	"github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
@@ -534,17 +533,19 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 		Catalogue: newTestPersister(t, stateDir),
 		closed:    make(chan struct{}),
 	}
+	require.NoError(t, catalogue.Create(domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}, RecoveryState: domain.RecoveryFresh}))
 	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
 	shutdownClock := newLifecycleShutdownClock(t)
-	reconciler := &lifecycleBlockingReconciler{
-		entered:  make(chan struct{}),
-		release:  make(chan struct{}),
-		returned: make(chan struct{}),
+	maintenanceRepository := &lifecycleBlockingMaintenanceRepository{
+		SnapshotRepository: repository,
+		entered:            make(chan struct{}),
+		release:            make(chan struct{}),
+		returned:           make(chan struct{}),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	var releaseOnce sync.Once
-	releaseMaintenance := func() { releaseOnce.Do(func() { close(reconciler.release) }) }
+	releaseMaintenance := func() { releaseOnce.Do(func() { close(maintenanceRepository.release) }) }
 	t.Cleanup(releaseMaintenance)
 
 	listenerReady := make(chan struct{})
@@ -563,7 +564,7 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 				shutdownClock,
 				discardLog(),
 				daemon.WithSnapshotRepository(repository),
-				daemon.WithDurableMaintenance(catalogue, repository, reconciler, nil),
+				daemon.WithDurableMaintenance(catalogue, maintenanceRepository, nil),
 				daemon.WithCatalogue(catalogue, nil),
 			)
 			return d.Serve(ctx, listener)
@@ -571,7 +572,7 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 	}()
 
 	awaitLifecycleStage(t, listenerReady, "daemon listener")
-	awaitLifecycleStage(t, reconciler.entered, "maintenance repository call")
+	awaitLifecycleStage(t, maintenanceRepository.entered, "maintenance repository call")
 	cancel()
 	shutdownClock.nextTimer(t).fire()
 	select {
@@ -585,7 +586,7 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 	require.ErrorIs(t, err, lifecycle.ErrBusy)
 
 	releaseMaintenance()
-	awaitLifecycleStage(t, reconciler.returned, "maintenance repository return")
+	awaitLifecycleStage(t, maintenanceRepository.returned, "maintenance repository return")
 	awaitLifecycleStage(t, catalogue.closed, "catalogue close after maintenance")
 	awaitLifecycleStage(t, callbackReturned, "Serve callback return after catalogue close")
 	require.NoError(t, awaitLifecycleResult(t, wrapperReturned, "lifecycle wrapper return"))
@@ -594,7 +595,8 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 	require.NoError(t, owner.Release())
 }
 
-type lifecycleBlockingReconciler struct {
+type lifecycleBlockingMaintenanceRepository struct {
+	ports.SnapshotRepository
 	entered    chan struct{}
 	release    chan struct{}
 	returned   chan struct{}
@@ -602,11 +604,11 @@ type lifecycleBlockingReconciler struct {
 	returnOnce sync.Once
 }
 
-func (r *lifecycleBlockingReconciler) Step(context.Context, ports.ReconcileCursor) (ports.ReconcileCursor, []ports.ReconcileDecision, error) {
+func (r *lifecycleBlockingMaintenanceRepository) MaintainSession(context.Context, ports.RetentionPlan, ports.MaintenanceBudget) (bool, error) {
 	r.enterOnce.Do(func() { close(r.entered) })
 	<-r.release // Intentionally ignore cancellation: lifecycle ownership must outlive this call.
 	r.returnOnce.Do(func() { close(r.returned) })
-	return ports.ReconcileCursor{}, nil, nil
+	return true, nil
 }
 
 type lifecycleObservedCatalogue struct {
@@ -743,7 +745,7 @@ func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snap
 
 	opened, err := persist.OpenOrCreate(stateDir)
 	require.NoError(t, err)
-	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, recoveryfs.New(stateDir), rand.Reader)
+	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, rand.Reader)
 	require.NoError(t, coordinator.Recover(ctx))
 	listener, err := ipc.Listen(runtimeDir)
 	require.NoError(t, err)
@@ -1054,7 +1056,7 @@ func TestLifecycleSocketCloseCatalogueRace(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			coordinator := recovery.NewCoordinator(opened.Catalogue, snapshotRepository, recoveryfs.New(stateDir), rand.Reader)
+			coordinator := recovery.NewCoordinator(opened.Catalogue, snapshotRepository, rand.Reader)
 			if err := coordinator.Recover(ctx); err != nil {
 				return errors.Join(err, opened.Catalogue.Close())
 			}

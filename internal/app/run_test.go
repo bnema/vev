@@ -21,7 +21,6 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/adapters/noticefile"
-	"github.com/bnema/vev/internal/adapters/recoveryfs"
 	"github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
@@ -132,7 +131,7 @@ func TestStartupReloadsCatalogueAfterRolledForwardDeletion(t *testing.T) {
 		CreatedAt: 1, UpdatedAt: 1, RecoveryState: domain.RecoveryDeleting,
 	}
 	require.NoError(t, catalogue.Save(record))
-	coordinator := recovery.NewCoordinator(catalogue, repository, recoveryfs.New(stateDir), rand.Reader)
+	coordinator := recovery.NewCoordinator(catalogue, repository, rand.Reader)
 
 	records, err := recoverAuthoritativeCatalogue(ctx, coordinator, catalogue)
 	require.NoError(t, err)

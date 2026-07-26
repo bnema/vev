@@ -98,15 +98,13 @@ var (
 // Degraded reasons are content-free by construction: they never carry paths,
 // terminal content, or operator input.
 const (
-	degradedReasonDiscardIntent = "discard intent conflict"
-	degradedReasonTombstone     = "deletion tombstone conflict"
-	degradedReasonRecord        = "catalogue record conflict"
+	degradedReasonTombstone = "deletion tombstone conflict"
+	degradedReasonRecord    = "catalogue record conflict"
 )
 
 type Coordinator struct {
 	catalogue  ports.Catalogue
 	repository ports.SnapshotRepository
-	journal    ports.RecoveryJournal
 	locks      *KeyLocks
 	random     io.Reader
 
@@ -133,8 +131,8 @@ func (c *Coordinator) Conflicts() []RecoveryConflict {
 	return append([]RecoveryConflict(nil), c.conflicts...)
 }
 
-func NewCoordinator(catalogue ports.Catalogue, repository ports.SnapshotRepository, journal ports.RecoveryJournal, random io.Reader) *Coordinator {
-	return &Coordinator{catalogue: catalogue, repository: repository, journal: journal, locks: NewKeyLocks(), random: random}
+func NewCoordinator(catalogue ports.Catalogue, repository ports.SnapshotRepository, random io.Reader) *Coordinator {
+	return &Coordinator{catalogue: catalogue, repository: repository, locks: NewKeyLocks(), random: random}
 }
 
 // Create commits fresh catalogue metadata before the caller creates or exposes
@@ -244,7 +242,7 @@ func (c *Coordinator) deleteLocked(ctx context.Context, record domain.CatalogueR
 	if err := c.repository.WriteDeletionTombstone(ctx, tombstone); err != nil {
 		return err
 	}
-	if err := c.repository.QuarantineDeletionSources(ctx, tombstone, true); err != nil {
+	if err := c.repository.DeleteIncarnation(ctx, record.IncarnationID); err != nil {
 		return err
 	}
 	if err := c.catalogue.Delete(record.Name); err != nil {
@@ -260,29 +258,16 @@ func (c *Coordinator) deleteLocked(ctx context.Context, record domain.CatalogueR
 // A per-item failure that only proves one session's durable state disagrees
 // with itself fences that session and lets startup continue: healthy sessions
 // must still restore next to a corrupt neighbour. Infrastructure failures
-// (listing, journal, repository, or catalogue IO, and a non-advancing cursor)
-// still abort startup, because they say nothing about any single session.
+// (listing, repository, or catalogue IO, and a non-advancing cursor) still
+// abort startup, because they say nothing about any single session.
 func (c *Coordinator) Recover(ctx context.Context) error {
-	if c == nil || c.catalogue == nil || c.repository == nil || c.journal == nil || c.locks == nil {
+	if c == nil || c.catalogue == nil || c.repository == nil || c.locks == nil {
 		return errors.New("recovery: incomplete coordinator dependencies")
 	}
 	c.conflictMu.Lock()
 	c.conflicts = nil
 	c.conflictMu.Unlock()
 
-	intents, err := c.journal.ListDiscards(ctx)
-	if err != nil {
-		return err
-	}
-	for _, intent := range intents {
-		// The intent is deliberately retained for a fenced session: only a
-		// successful roll-forward may remove it.
-		if err := c.recoverDiscard(ctx, intent); err != nil {
-			if err := c.fenceSession(intent.SessionName, "discard-intent", degradedReasonDiscardIntent, err); err != nil {
-				return err
-			}
-		}
-	}
 	records, err := c.catalogue.Records()
 	if err != nil {
 		return err
@@ -370,8 +355,7 @@ func (c *Coordinator) fenceSession(name, kind, reason string, cause error) error
 // durable state is self-inconsistent. Everything else - IO, decode, traversal,
 // context cancellation - is treated as infrastructure and aborts startup.
 func isSessionScopedConflict(err error) bool {
-	return errors.Is(err, ErrDiscardConflict) || errors.Is(err, ErrDiscardIntentInvalid) ||
-		errors.Is(err, ErrDeletionTombstoneConflict) || errors.Is(err, ErrDeletionTombstoneInvalid) ||
+	return errors.Is(err, ErrDeletionTombstoneConflict) || errors.Is(err, ErrDeletionTombstoneInvalid) ||
 		errors.Is(err, ErrSessionRecordInvalid)
 }
 
@@ -385,16 +369,10 @@ func (c *Coordinator) recoverDeletionTombstone(ctx context.Context, tombstone do
 	if err != nil {
 		return err
 	}
-	includeLegacyName := true
-	if exists {
-		switch {
-		case record.IncarnationID != tombstone.IncarnationID:
-			includeLegacyName = false
-		case record.RecoveryState != domain.RecoveryDeleting:
-			return fmt.Errorf("%w: non-deleting session %q", ErrDeletionTombstoneConflict, tombstone.Name)
-		}
+	if exists && record.IncarnationID == tombstone.IncarnationID && record.RecoveryState != domain.RecoveryDeleting {
+		return fmt.Errorf("%w: non-deleting session %q", ErrDeletionTombstoneConflict, tombstone.Name)
 	}
-	if err := c.repository.QuarantineDeletionSources(ctx, tombstone, includeLegacyName); err != nil {
+	if err := c.repository.DeleteIncarnation(ctx, tombstone.IncarnationID); err != nil {
 		return err
 	}
 	if exists && record.IncarnationID == tombstone.IncarnationID {

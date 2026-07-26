@@ -14,27 +14,19 @@ const (
 	maintenanceBytes    = 8 << 20
 )
 
-type maintenanceReconciler interface {
-	Step(context.Context, ports.ReconcileCursor) (ports.ReconcileCursor, []ports.ReconcileDecision, error)
-}
-
 // maintenanceDependencies is exclusively owned by runDurableMaintenance's
 // single goroutine after startup. Shutdown joins that goroutine before these
 // cursor and repair sets can be observed or reused.
 type maintenanceDependencies struct {
-	catalogue       ports.Catalogue
-	repository      ports.SnapshotRepository
-	reconciler      maintenanceReconciler
-	unresolved      map[domain.IncarnationID]struct{}
-	repairUncertain map[domain.IncarnationID]struct{}
-	cursor          ports.ReconcileCursor
+	catalogue  ports.Catalogue
+	repository ports.SnapshotRepository
+	unresolved map[domain.IncarnationID]struct{}
 }
 
-func newMaintenanceDependencies(catalogue ports.Catalogue, repository ports.SnapshotRepository, reconciler maintenanceReconciler, unresolved []domain.IncarnationID) maintenanceDependencies {
+func newMaintenanceDependencies(catalogue ports.Catalogue, repository ports.SnapshotRepository, unresolved []domain.IncarnationID) maintenanceDependencies {
 	deps := maintenanceDependencies{
-		catalogue: catalogue, repository: repository, reconciler: reconciler,
-		unresolved:      make(map[domain.IncarnationID]struct{}, len(unresolved)),
-		repairUncertain: make(map[domain.IncarnationID]struct{}),
+		catalogue: catalogue, repository: repository,
+		unresolved: make(map[domain.IncarnationID]struct{}, len(unresolved)),
 	}
 	for _, id := range unresolved {
 		if id != (domain.IncarnationID{}) {
@@ -107,47 +99,8 @@ func (d *Daemon) runDurableMaintenance(ctx context.Context) {
 // continued immediately rather than delayed until the periodic interval.
 func (d *Daemon) runDurableMaintenanceTick(ctx context.Context) bool {
 	deps := &d.maintenance
-	if deps.catalogue == nil || deps.repository == nil || deps.reconciler == nil {
+	if deps.catalogue == nil || deps.repository == nil {
 		return false
-	}
-
-	// Reconcile before collection. Until a complete top-level scan reaches EOF,
-	// an unseen forward orphan may still be repairable, so retention yields
-	// without deleting any incarnation data.
-	previousCursor := deps.cursor
-	next, decisions, err := deps.reconciler.Step(ctx, previousCursor)
-	if err != nil {
-		d.log.Warn("durable_reconciliation_tick", "action", "scan", "cursor", deps.cursor.DirectoryCookie, "done", false, "err", err)
-		return false
-	}
-	deps.cursor = next
-	for _, decision := range decisions {
-		record, ok, err := deps.catalogue.Record(decision.Name)
-		if err != nil {
-			d.log.Warn("durable_reconciliation_tick", "action", "catalogue-read", "done", false, "err", err)
-			return false
-		}
-		if ok && !decision.RetentionResolved {
-			deps.repairUncertain[record.IncarnationID] = struct{}{}
-		}
-		// The catalogue lookup can miss (e.g. an unknown-incarnation finding for a
-		// name the catalogue never held); logging record.IncarnationID.String() in
-		// that case would emit a misleading all-zero incarnation, so the field is
-		// omitted rather than logged as a fabricated identity.
-		args := []any{
-			"session", decision.Name,
-			"action", decision.Kind,
-			"reason_code", decision.ReasonCode,
-			"cursor", next.DirectoryCookie,
-		}
-		if ok {
-			args = append([]any{"incarnation", record.IncarnationID.String()}, args...)
-		}
-		d.log.Info("durable_reconciliation_decision", args...)
-	}
-	d.log.Info("durable_reconciliation_tick", "action", "scan", "cursor", next.DirectoryCookie, "done", next.DirectoryCookie == 0, "err", nil)
-	if next.DirectoryCookie != 0 {
-		return next.DirectoryCookie != previousCursor.DirectoryCookie
 	}
 
 	records, err := deps.catalogue.Records()
@@ -170,9 +123,8 @@ func (d *Daemon) runDurableMaintenanceTick(ctx context.Context) bool {
 			return false
 		}
 		_, unresolved := deps.unresolved[record.IncarnationID]
-		_, uncertainRepair := deps.repairUncertain[record.IncarnationID]
 		_, restoring := restoringIncarnations[record.IncarnationID]
-		plan := retentionPlan(record, unresolved || uncertainRepair, restoring)
+		plan := retentionPlan(record, unresolved, restoring)
 		done, err := deps.repository.MaintainSession(ctx, plan, ports.MaintenanceBudget{Entries: maintenanceEntries, Bytes: maintenanceBytes})
 		if err == nil && !done {
 			incomplete = true
@@ -187,6 +139,5 @@ func (d *Daemon) runDurableMaintenanceTick(ctx context.Context) bool {
 			"err", err,
 		)
 	}
-	clear(deps.repairUncertain)
 	return incomplete
 }

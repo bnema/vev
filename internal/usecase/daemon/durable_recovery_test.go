@@ -192,7 +192,7 @@ func validGeneration(t testing.TB, record domain.CatalogueRecord) ports.Snapshot
 func newDurableRecoveryDaemon(t testing.TB, records []domain.CatalogueRecord, repository ports.SnapshotRepository) (*Daemon, *durableRecoveryCatalogue) {
 	t.Helper()
 	catalogue := newDurableRecoveryCatalogue(records)
-	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil, nil)
+	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, records), WithSnapshotRepository(repository), WithCheckpointCoordinator(coordinator))
 	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
 	t.Cleanup(d.serveCancel)
@@ -211,7 +211,7 @@ func TestFinalCheckpointFailurePreservesCatalogue(t *testing.T) {
 	}
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{prior})
 	repository := &durableRecoveryRepository{}
-	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil, nil)
+	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, []domain.CatalogueRecord{prior}), WithSnapshotRepository(repository), WithCheckpointCoordinator(coordinator))
 	startSnapshotEncodeWorker(t, d)
 
@@ -352,11 +352,12 @@ func (f *recoveryCountingPTYFactory) Open(context.Context, string, []string, []s
 }
 
 type explicitRecoveryStub struct {
-	record domain.CatalogueRecord
+	record    domain.CatalogueRecord
+	catalogue ports.Catalogue
 }
 
-func (s explicitRecoveryStub) Discard(context.Context, string, string) (domain.CatalogueRecord, error) {
-	return s.record, nil
+func (s explicitRecoveryStub) Discard(_ context.Context, name string) error {
+	return s.catalogue.Replace(name, s.record)
 }
 
 type contextRecoveryStub struct {
@@ -366,9 +367,9 @@ type contextRecoveryStub struct {
 	err     error
 }
 
-func (s *contextRecoveryStub) Discard(ctx context.Context, _, _ string) (domain.CatalogueRecord, error) {
+func (s *contextRecoveryStub) Discard(ctx context.Context, _ string) error {
 	s.seen = ctx.Value(s.wantKey) == s.want
-	return domain.CatalogueRecord{}, s.err
+	return s.err
 }
 
 func TestSessionRecoveryUsesIncomingCommandContext(t *testing.T) {
@@ -481,13 +482,13 @@ func TestSessionRecoveryCommand(t *testing.T) {
 	degraded := durableRecoveryRecord(2)
 	degraded.RecoveryState = domain.RecoveryDegraded
 	degraded.DegradedReason = "checkpoint validation failed"
-	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{degraded}, &durableRecoveryRepository{})
+	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{degraded}, &durableRecoveryRepository{})
 	fresh := degraded
 	fresh.IncarnationID = domain.IncarnationID{9}
 	fresh.RecoveryState = domain.RecoveryFresh
 	fresh.Committed = nil
 	fresh.DegradedReason = ""
-	d.degradedRecovery = explicitRecoveryStub{record: fresh}
+	d.degradedRecovery = explicitRecoveryStub{record: fresh, catalogue: catalogue}
 
 	_, err := (controlExec{d: d, recoveryName: degraded.Name}).SessionRecovery("discard")
 	require.NoError(t, err)

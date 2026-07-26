@@ -19,10 +19,9 @@ import (
 )
 
 const (
-	deletionTombstoneVersion    = uint16(1)
-	deletionTombstoneMagic      = "VEVD"
-	deletionTombstonesDir       = "deletions"
-	quarantineDescriptorVersion = 1
+	deletionTombstoneVersion = uint16(1)
+	deletionTombstoneMagic   = "VEVD"
+	deletionTombstonesDir    = "deletions"
 )
 
 var ErrMaintenanceBudgetTooSmall = errors.New("snapshot: maintenance budget too small")
@@ -550,151 +549,30 @@ func (r *Repository) maintainQuarantine(ctx context.Context, budget *int) (chang
 	return changed, false, nil
 }
 
-func (r *Repository) QuarantineDeletionSources(ctx context.Context, tombstone domain.DeletionTombstone, includeLegacyName bool) error {
-	if err := tombstone.Validate(); err != nil {
-		return err
-	}
+func (r *Repository) DeleteIncarnation(ctx context.Context, id domain.IncarnationID) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	key, err := incarnationKey(tombstone.IncarnationID)
+	key, err := incarnationKey(id)
 	if err != nil {
 		return err
 	}
 	lock := r.lockSession(key)
 	defer r.unlockSession(lock)
 	r.invalidateStorageEpoch(key)
-	quarantineDir := filepath.Join(r.dir, "quarantine", tombstone.IncarnationID.String())
-	if err := r.ensurePrivateDirectory(quarantineDir); err != nil {
-		return err
-	}
-	if err := r.quarantineSource(r.sessionPath(tombstone.IncarnationID), filepath.Join(quarantineDir, "snapshot")); err != nil {
-		return err
-	}
-	if hook := r.hooks.afterDeletionIncarnationQuarantine; hook != nil {
-		if err := hook(); err != nil {
-			return err
-		}
-	}
-	if includeLegacyName {
-		if err := r.quarantineSource(filepath.Join(r.dir, filenameForName(tombstone.Name)), filepath.Join(quarantineDir, "legacy.snap")); err != nil {
-			return err
-		}
-		if hook := r.hooks.afterDeletionLegacyQuarantine; hook != nil {
-			if err := hook(); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
 
-func (r *Repository) quarantineSource(source, target string) error {
-	if _, err := r.stat(target); err == nil {
-		if _, sourceErr := r.stat(source); errors.Is(sourceErr, os.ErrNotExist) {
-			if err := r.syncDirectory(filepath.Dir(source)); err != nil {
-				return err
-			}
-			if filepath.Clean(filepath.Dir(source)) != filepath.Clean(filepath.Dir(target)) {
-				return r.syncDirectory(filepath.Dir(target))
-			}
-			return nil
-		}
-		return fmt.Errorf("snapshot: quarantine target already exists")
-	} else if !errors.Is(err, os.ErrNotExist) {
+	path := r.sessionPath(id)
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("remove snapshot incarnation %s: %w", id.String(), safeFilesystemError(err))
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if _, err := r.stat(source); errors.Is(err, os.ErrNotExist) {
+	parent := filepath.Dir(path)
+	if _, err := os.Lstat(parent); errors.Is(err, os.ErrNotExist) {
 		return nil
 	} else if err != nil {
 		return err
 	}
-	if err := r.rename(source, target); err != nil {
-		return err
-	}
-	if err := r.syncDirectory(filepath.Dir(source)); err != nil {
-		return err
-	}
-	if filepath.Clean(filepath.Dir(source)) != filepath.Clean(filepath.Dir(target)) {
-		return r.syncDirectory(filepath.Dir(target))
-	}
-	return nil
-}
-
-type quarantineDescriptorFile struct {
-	Version    int                         `json:"version"`
-	Descriptor domain.QuarantineDescriptor `json:"descriptor"`
-}
-
-func validateQuarantineDescriptor(descriptor domain.QuarantineDescriptor) error {
-	if err := descriptor.OldRecord.Validate(); err != nil {
-		return fmt.Errorf("snapshot: quarantine old record: %w", err)
-	}
-	if descriptor.SessionName != descriptor.OldRecord.Name || descriptor.OldIncarnation != descriptor.OldRecord.IncarnationID {
-		return errors.New("snapshot: inconsistent quarantine identity")
-	}
-	if descriptor.ReplacementIncarnation == (domain.IncarnationID{}) || descriptor.ReplacementIncarnation == descriptor.OldIncarnation || descriptor.Reason == "" {
-		return errors.New("snapshot: incomplete quarantine descriptor")
-	}
-	return nil
-}
-
-func encodeQuarantineDescriptor(descriptor domain.QuarantineDescriptor) ([]byte, error) {
-	if err := validateQuarantineDescriptor(descriptor); err != nil {
-		return nil, err
-	}
-	return json.Marshal(quarantineDescriptorFile{Version: quarantineDescriptorVersion, Descriptor: descriptor})
-}
-
-func decodeQuarantineDescriptor(encoded []byte) (domain.QuarantineDescriptor, error) {
-	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	decoder.DisallowUnknownFields()
-	var file quarantineDescriptorFile
-	if err := decoder.Decode(&file); err != nil {
-		return domain.QuarantineDescriptor{}, err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return domain.QuarantineDescriptor{}, errors.New("snapshot: trailing quarantine descriptor data")
-	}
-	if file.Version != quarantineDescriptorVersion {
-		return domain.QuarantineDescriptor{}, errors.New("snapshot: unsupported quarantine descriptor version")
-	}
-	return file.Descriptor, validateQuarantineDescriptor(file.Descriptor)
-}
-
-func (r *Repository) SaveQuarantineDescriptor(ctx context.Context, descriptor domain.QuarantineDescriptor) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	encoded, err := encodeQuarantineDescriptor(descriptor)
-	if err != nil {
-		return err
-	}
-	dir := filepath.Join(r.dir, "quarantine", descriptor.OldIncarnation.String())
-	if err := r.ensurePrivateDirectory(dir); err != nil {
-		return err
-	}
-	return r.writeImmutable(filepath.Join(dir, "record"), encoded, func(existing []byte) error {
-		decoded, err := decodeQuarantineDescriptor(existing)
-		if err != nil {
-			return err
-		}
-		if !quarantineDescriptorsEqual(decoded, descriptor) || !bytes.Equal(existing, encoded) {
-			return errors.New("snapshot: quarantine descriptor identity mismatch")
-		}
-		return nil
-	})
-}
-
-func quarantineDescriptorsEqual(a, b domain.QuarantineDescriptor) bool {
-	return a.OldIncarnation == b.OldIncarnation && a.ReplacementIncarnation == b.ReplacementIncarnation &&
-		a.SessionName == b.SessionName && a.Reason == b.Reason && a.OldRecord.Equal(b.OldRecord)
-}
-
-func (r *Repository) QuarantineIncarnation(ctx context.Context, id domain.IncarnationID) error {
-	return r.QuarantineDeletionSources(ctx, domain.DeletionTombstone{Name: "quarantined", IncarnationID: id}, false)
-}
-
-func (r *Repository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
-	return errors.New("snapshot: direct incarnation deletion not implemented")
+	return r.syncDirectory(parent)
 }

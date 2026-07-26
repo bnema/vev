@@ -107,16 +107,7 @@ func (noOpSnapshotRepository) WriteDeletionTombstone(context.Context, domain.Del
 func (noOpSnapshotRepository) ListDeletionTombstones(context.Context, ports.DeletionTombstoneCursor, ports.MaintenanceBudget) (ports.DeletionTombstonePage, error) {
 	return ports.DeletionTombstonePage{Done: true}, nil
 }
-func (noOpSnapshotRepository) QuarantineDeletionSources(context.Context, domain.DeletionTombstone, bool) error {
-	return nil
-}
 func (noOpSnapshotRepository) DeleteDeletionTombstone(context.Context, domain.IncarnationID) error {
-	return nil
-}
-func (noOpSnapshotRepository) SaveQuarantineDescriptor(context.Context, domain.QuarantineDescriptor) error {
-	return nil
-}
-func (noOpSnapshotRepository) QuarantineIncarnation(context.Context, domain.IncarnationID) error {
 	return nil
 }
 func (noOpSnapshotRepository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
@@ -124,9 +115,6 @@ func (noOpSnapshotRepository) DeleteIncarnation(context.Context, domain.Incarnat
 }
 func (noOpSnapshotRepository) MaintainSession(context.Context, ports.RetentionPlan, ports.MaintenanceBudget) (bool, error) {
 	return true, nil
-}
-func (noOpSnapshotRepository) Reconcile(context.Context, []domain.CatalogueRecord, ports.ReconcileCursor, ports.MaintenanceBudget) (ports.ReconcileCursor, []ports.ReconcileFinding, error) {
-	return ports.ReconcileCursor{}, nil, nil
 }
 
 func awaitSnapshotIdle(t testing.TB, sess *session) {

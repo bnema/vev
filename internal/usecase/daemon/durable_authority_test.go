@@ -18,7 +18,7 @@ type testLifecycleRepository struct{ ports.SnapshotRepository }
 func (testLifecycleRepository) WriteDeletionTombstone(context.Context, domain.DeletionTombstone) error {
 	return nil
 }
-func (testLifecycleRepository) QuarantineDeletionSources(context.Context, domain.DeletionTombstone, bool) error {
+func (testLifecycleRepository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
 	return nil
 }
 func (testLifecycleRepository) DeleteDeletionTombstone(context.Context, domain.IncarnationID) error {
@@ -44,7 +44,7 @@ func WithStore(t testing.TB, store ports.Store) Option {
 		if repository == nil {
 			repository = testLifecycleRepository{}
 		}
-		authority := recoveryusecase.NewCoordinator(catalogue, repository, nil, rand.Reader)
+		authority := recoveryusecase.NewCoordinator(catalogue, repository, rand.Reader)
 		d.lifecycleRecovery = authority
 		d.checkpointRecovery = authority
 	}

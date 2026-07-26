@@ -33,7 +33,7 @@ type refusingSnapshotDeleteRepository struct {
 func (refusingSnapshotDeleteRepository) Publish(context.Context, ports.SnapshotPublication) error {
 	return nil
 }
-func (s refusingSnapshotDeleteRepository) QuarantineDeletionSources(context.Context, domain.DeletionTombstone, bool) error {
+func (s refusingSnapshotDeleteRepository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
 	return s.err
 }
 
@@ -272,7 +272,7 @@ func TestRestoreCancellationTransitionsBeforePickerCompletion(t *testing.T) {
 	record.Name = "restoring"
 	repository := &cancellationRecoveryRepository{started: make(chan struct{})}
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
-	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil, nil)
+	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
 	WithSnapshotRepository(repository)(d)
 	WithCheckpointCoordinator(coordinator)(d)

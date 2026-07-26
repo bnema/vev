@@ -8,13 +8,17 @@ import (
 	"github.com/bnema/vev/pkg/safedir"
 )
 
+type atomicWriter struct {
+	hooks journalHooks
+}
+
 type journalHooks struct {
 	syncFile      func(string) error
 	rename        func(string, string) error
 	syncDirectory func(string) error
 }
 
-func (j *Journal) atomicWrite(path string, data []byte) (retErr error) {
+func (j *atomicWriter) atomicWrite(path string, data []byte) (retErr error) {
 	dir := filepath.Dir(path)
 	if err := safedir.EnsurePrivate(dir); err != nil {
 		return err
@@ -55,7 +59,7 @@ func (j *Journal) atomicWrite(path string, data []byte) (retErr error) {
 	return j.syncDir(dir)
 }
 
-func (j *Journal) syncDir(dir string) error {
+func (j *atomicWriter) syncDir(dir string) error {
 	if j.hooks.syncDirectory != nil {
 		return j.hooks.syncDirectory(dir)
 	}

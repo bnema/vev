@@ -223,7 +223,7 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{record})
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
 	WithSnapshotRepository(repository)(d)
-	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil, nil))(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
 	t.Cleanup(func() { release(); d.sessWg.Wait() })
 
 	d.restoreIncrementalSnapshots(context.Background())
@@ -272,7 +272,7 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 
 	pty, release := newBlockingPTY(t)
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil, nil)
+	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
 	WithSnapshotRepository(repository)(d)
 	WithRecoveryCoordinator(coordinator)(d)

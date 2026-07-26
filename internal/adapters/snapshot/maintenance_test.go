@@ -1220,47 +1220,6 @@ func TestMaintainSessionDistinguishesInitialOversizeFromResumableExhaustion(t *t
 	}
 }
 
-func TestReconcileDoesNotHoldMaintenanceLockDuringPayloadRead(t *testing.T) {
-	repo := NewRepository(privateDir(t))
-	publications := publishMaintenanceGenerations(t, repo, "reconcile-lock", 2)
-	committed := checkpointRefForPublication(publications[0])
-	record := domain.CatalogueRecord{Name: "reconcile-lock", IncarnationID: publications[0].IncarnationID, RecoveryState: domain.RecoveryHealthy, Committed: &committed}
-
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	defer releaseOnce.Do(func() { close(release) })
-	var enteredOnce sync.Once
-	repo.hooks.beforeMaintenancePayloadRead = func(string) {
-		enteredOnce.Do(func() { close(entered) })
-		<-release
-	}
-	reconcileDone := make(chan error, 1)
-	go func() {
-		_, _, err := repo.Reconcile(context.Background(), []domain.CatalogueRecord{record}, ports.ReconcileCursor{}, ports.MaintenanceBudget{Entries: 64, Bytes: 8 << 20})
-		reconcileDone <- err
-	}()
-	<-entered
-
-	pinDone := make(chan error, 1)
-	go func() {
-		_, err := repo.MaintainSession(context.Background(), ports.RetentionPlan{IncarnationID: record.IncarnationID, PinAll: true}, ports.MaintenanceBudget{Entries: 1, Bytes: 1})
-		pinDone <- err
-	}()
-	select {
-	case err := <-pinDone:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(remainingTestTime(t) / 2):
-		t.Fatal("maintenance lock remained held during reconciliation payload I/O")
-	}
-	releaseOnce.Do(func() { close(release) })
-	if err := <-reconcileDone; err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestMaintainSessionYieldsOnEmptyNonDoneObjectShardBatch(t *testing.T) {
 	repo := NewRepository(privateDir(t))
 	publication := publishMaintenanceGenerations(t, repo, "empty-shard-batch", 1)[0]

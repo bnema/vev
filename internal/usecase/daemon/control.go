@@ -465,11 +465,17 @@ func (e controlExec) SessionRecovery(action string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	record, err := e.d.degradedRecovery.Discard(ctx, e.recoveryName, "explicit operator discard")
-	if err == nil {
+	if err := e.d.degradedRecovery.Discard(ctx, e.recoveryName); err != nil {
+		return "", err
+	}
+	record, ok, err := e.d.catalogue.Record(e.recoveryName)
+	if err != nil {
+		return "", err
+	}
+	if ok {
 		e.d.setStoppedRecovery(record, runtimeFresh)
 	}
-	return "", err
+	return "", nil
 }
 
 func (e controlExec) ListSessions(asJSON bool) (string, error) {
