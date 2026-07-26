@@ -506,8 +506,15 @@ func logCatalogueRecovery(log *slog.Logger, records []domain.CatalogueRecord, re
 	log.Info("catalogue_compaction_recovery_complete", "recovery", recoveryMode)
 }
 
-func logTransactionRecovery(log *slog.Logger, examined int) {
-	log.Info("interrupted_transaction_recovery_complete", "sessions_examined", examined)
+// logTransactionRecovery reports the recovery outcome. A startup that fenced
+// any session is never reported as clean: the daemon comes up, but one or more
+// sessions were skipped and still need an operator decision.
+func logTransactionRecovery(log *slog.Logger, examined, fenced int) {
+	outcome := "clean"
+	if fenced > 0 {
+		outcome = "fenced"
+	}
+	log.Info("interrupted_transaction_recovery_complete", "sessions_examined", examined, "sessions_fenced", fenced, "outcome", outcome)
 }
 
 type interruptedRecoveryIdentity struct {
@@ -559,6 +566,76 @@ func persistTransactionRecoveryNotices(store ports.NoticeStore, recovered []inte
 			SessionID: domain.SessionID(item.id.String()),
 		}); err != nil {
 			return fmt.Errorf("persist interrupted transaction recovery notice for session %q incarnation %s: %w", item.name, item.id.String(), err)
+		}
+	}
+	return nil
+}
+
+// fencedRecoveryIdentity is one session that recovery fenced instead of failing
+// startup for. Only the session identity and a sentinel-derived reason code are
+// retained: raw causes can embed paths or operator input.
+type fencedRecoveryIdentity struct {
+	name       string
+	id         domain.IncarnationID
+	kind       string
+	reasonCode string
+}
+
+// fencedRecoveries resolves each conflict against the post-recovery catalogue
+// so a fenced session is reported with the incarnation it actually holds now.
+func fencedRecoveries(conflicts []recovery.RecoveryConflict, catalogue ports.Catalogue) []fencedRecoveryIdentity {
+	fenced := make([]fencedRecoveryIdentity, 0, len(conflicts))
+	for _, conflict := range conflicts {
+		identity := fencedRecoveryIdentity{name: conflict.Session, kind: conflict.Kind, reasonCode: fencedRecoveryReasonCode(conflict.Err)}
+		if catalogue != nil {
+			if record, ok := catalogue.Record(conflict.Session); ok {
+				identity.id = record.IncarnationID
+			}
+		}
+		fenced = append(fenced, identity)
+	}
+	return fenced
+}
+
+func fencedRecoveryReasonCode(err error) string {
+	switch {
+	case errors.Is(err, recovery.ErrDiscardConflict):
+		return "discard-intent-conflict"
+	case errors.Is(err, recovery.ErrDiscardIntentInvalid):
+		return "discard-intent-invalid"
+	case errors.Is(err, recovery.ErrDeletionTombstoneConflict):
+		return "deletion-tombstone-conflict"
+	case errors.Is(err, recovery.ErrDeletionTombstoneInvalid):
+		return "deletion-tombstone-invalid"
+	case errors.Is(err, recovery.ErrSessionRecordInvalid):
+		return "catalogue-record-invalid"
+	default:
+		return "unclassified"
+	}
+}
+
+func logFencedRecoveries(log *slog.Logger, fenced []fencedRecoveryIdentity) {
+	for _, item := range fenced {
+		log.Warn("interrupted_transaction_fenced",
+			"session", item.name,
+			"incarnation", item.id.String(),
+			"kind", item.kind,
+			"reason_code", item.reasonCode,
+		)
+	}
+}
+
+func persistFencedRecoveryNotices(store ports.NoticeStore, fenced []fencedRecoveryIdentity, now time.Time) error {
+	for _, item := range fenced {
+		if err := store.Append(domain.Notification{
+			Code:      domain.NoticeSnapshotRestore,
+			Severity:  domain.NoticeWarn,
+			Message:   "skipped a durable session transaction that conflicts with its session state",
+			Details:   "session=" + item.name + " incarnation=" + item.id.String() + " kind=" + item.kind + " reason_code=" + item.reasonCode,
+			Time:      now,
+			SessionID: domain.SessionID(item.id.String()),
+		}); err != nil {
+			return fmt.Errorf("persist fenced transaction notice for session %q incarnation %s: %w", item.name, item.id.String(), err)
 		}
 	}
 	return nil
@@ -662,11 +739,20 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	if err := coordinator.Recover(ctx); err != nil {
 		return errors.Join(fmt.Errorf("vev: recover durable session transactions: %w", err), opened.Catalogue.Close())
 	}
+	// Recovery fences a session instead of failing startup when only that
+	// session's durable state is self-inconsistent. The daemon then comes up
+	// looking healthy, so every fenced session must be reported and persisted.
+	fenced := fencedRecoveries(coordinator.Conflicts(), opened.Catalogue)
+	logFencedRecoveries(log, fenced)
 	if err := persistTransactionRecoveryNotices(noticeStore, pendingRecoveries, clk.Now()); err != nil {
 		log.Error("transaction_recovery_notice_failed", "err", err)
 		return errors.Join(fmt.Errorf("vev: persist durable transaction recovery notice: %w", err), opened.Catalogue.Close())
 	}
-	logTransactionRecovery(log, len(pendingRecoveries))
+	if err := persistFencedRecoveryNotices(noticeStore, fenced, clk.Now()); err != nil {
+		log.Error("transaction_recovery_notice_failed", "reason_code", "fenced-notice-failed")
+		return errors.Join(fmt.Errorf("vev: persist fenced transaction notice: %w", err), opened.Catalogue.Close())
+	}
+	logTransactionRecovery(log, len(pendingRecoveries), len(fenced))
 	daemonOpts = append(daemonOpts, daemon.WithRecoveryCoordinator(coordinator))
 	unresolved := make([]domain.IncarnationID, 0, len(pendingRecoveries))
 	for _, pending := range pendingRecoveries {
@@ -1438,11 +1524,14 @@ func printSessions(w io.Writer, sessions []ports.SessionInfo) {
 }
 
 func runOfflineNamedKill(ctx context.Context, name string) (retErr error) {
-	if _, err := os.Stat(persist.StorePath(platform.StateDir())); errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("vev: no such session: %s", name)
-	} else if err != nil {
-		return fmt.Errorf("vev: reading stored sessions: %w", err)
-	}
+	// LoadReadOnly already distinguishes a genuinely absent catalogue (empty
+	// slice, nil error) from a real IO error, and recovers the same
+	// fixed-path crash states LoadCatalogueReadOnly does, so a stray .next or
+	// .prev left by a crash mid-compaction no longer wrongly denies a session
+	// that still exists. A separate os.Stat precheck here was both redundant
+	// with that recovery and a regression of the same bug class: it treated
+	// "no sessions.kv" as "no such session" even when a recoverable .next or
+	// .prev candidate was present.
 	records, err := persist.LoadReadOnly(platform.StateDir())
 	if err != nil {
 		return fmt.Errorf("vev: reading stored sessions: %w", err)

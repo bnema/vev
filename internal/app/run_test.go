@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/lifecycle"
+	"github.com/bnema/vev/internal/adapters/recoveryfs"
 	"github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
@@ -26,6 +28,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
+	"github.com/bnema/vev/internal/usecase/recovery"
 	"github.com/bnema/vev/pkg/kv"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -87,7 +90,7 @@ func TestRecoveryObservability(t *testing.T) {
 	noticeStore.EXPECT().Append(mock.Anything).Run(func(n domain.Notification) { recoveryNotice = n }).Return(nil).Once()
 	require.NoError(t, runWithLifecycleOwnerDeps(context.Background(), "/runtime/vev", "/state/vev", func(context.Context) error {
 		logCatalogueRecovery(log, records, "current")
-		logTransactionRecovery(log, 2)
+		logTransactionRecovery(log, 2, 0)
 		require.NoError(t, persistTransactionRecoveryNotices(noticeStore, []interruptedRecoveryIdentity{{name: "work", id: domain.IncarnationID{9}}}, time.Unix(1, 0)))
 		logStartupRecoveryCounts(log, records, 0)
 		return nil
@@ -102,6 +105,10 @@ func TestRecoveryObservability(t *testing.T) {
 	require.EqualValues(t, 1, startup["fresh"])
 	require.EqualValues(t, 0, startup["restoring"])
 	require.EqualValues(t, 1, startup["degraded"])
+	recovered := requireEvent(t, entries, "interrupted_transaction_recovery_complete")
+	require.EqualValues(t, 0, recovered["sessions_fenced"])
+	require.Equal(t, "clean", recovered["outcome"])
+	require.NotContains(t, eventNames(entries), "interrupted_transaction_fenced")
 
 	logBuffer.Reset()
 	log.Error("catalogue_validation_failed", "path", "/state/vev/sessions.kv", "reason_code", "corrupt")
@@ -110,6 +117,75 @@ func TestRecoveryObservability(t *testing.T) {
 	require.Equal(t, domain.NoticeSnapshotRestore, recoveryNotice.Code)
 	require.Equal(t, domain.SessionID(domain.IncarnationID{9}.String()), recoveryNotice.SessionID)
 	require.NotContains(t, fmt.Sprint(recoveryNotice), "terminal contents")
+}
+
+// A session-scoped conflict no longer aborts startup, so the daemon comes up
+// looking healthy. Startup must therefore name the fenced session in the log,
+// persist a notice for it, and never report the recovery as clean.
+func TestFencedRecoveryObservability(t *testing.T) {
+	ctx := context.Background()
+	stateDir := filepath.Join(t.TempDir(), "vev")
+	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
+	catalogue := newTestPersister(t, stateDir)
+	t.Cleanup(func() { _ = catalogue.Close() })
+
+	live := domain.CatalogueRecord{
+		Name: "work", IncarnationID: domain.IncarnationID{7}, Cwd: t.TempDir(),
+		CreatedAt: 1, UpdatedAt: 1, RecoveryState: domain.RecoveryHealthy,
+		Committed: &domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}},
+	}
+	require.NoError(t, catalogue.Save(live))
+	require.NoError(t, repository.WriteDeletionTombstone(ctx, domain.DeletionTombstone{Name: live.Name, IncarnationID: live.IncarnationID}))
+
+	coordinator := recovery.NewCoordinator(catalogue, repository, recoveryfs.New(stateDir), rand.Reader)
+	require.NoError(t, coordinator.Recover(ctx), "a session-scoped conflict must not abort startup")
+	fenced := fencedRecoveries(coordinator.Conflicts(), catalogue)
+	require.Equal(t, []fencedRecoveryIdentity{{
+		name: live.Name, id: live.IncarnationID, kind: "deletion-tombstone", reasonCode: "deletion-tombstone-conflict",
+	}}, fenced)
+
+	var logBuffer bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logBuffer, nil))
+	logFencedRecoveries(log, fenced)
+	logTransactionRecovery(log, 1, len(fenced))
+	logStartupRecoveryCounts(log, catalogue.Records(), 0)
+
+	entries := decodeJSONLogs(t, logBuffer.Bytes())
+	event := requireEvent(t, entries, "interrupted_transaction_fenced")
+	require.Equal(t, "WARN", event["level"])
+	require.Equal(t, live.Name, event["session"])
+	require.Equal(t, live.IncarnationID.String(), event["incarnation"])
+	require.Equal(t, "deletion-tombstone", event["kind"])
+	require.Equal(t, "deletion-tombstone-conflict", event["reason_code"])
+	require.NotContains(t, fmt.Sprint(event), "conflicts with catalogue", "raw cause text must not be logged")
+	recovered := requireEvent(t, entries, "interrupted_transaction_recovery_complete")
+	require.EqualValues(t, 1, recovered["sessions_fenced"])
+	require.Equal(t, "fenced", recovered["outcome"])
+	require.Contains(t, eventNames(entries), "daemon_startup_complete")
+
+	store := portsmocks.NewMockNoticeStore(t)
+	var notice domain.Notification
+	store.EXPECT().Append(mock.Anything).Run(func(n domain.Notification) { notice = n }).Return(nil).Once()
+	require.NoError(t, persistFencedRecoveryNotices(store, fenced, time.Unix(1, 0)))
+	require.Equal(t, domain.NoticeSnapshotRestore, notice.Code)
+	require.Equal(t, domain.NoticeWarn, notice.Severity)
+	require.Equal(t, domain.SessionID(live.IncarnationID.String()), notice.SessionID)
+	require.Contains(t, notice.Details, "session="+live.Name)
+	require.Contains(t, notice.Details, "reason_code=deletion-tombstone-conflict")
+
+	degraded, ok := catalogue.Record(live.Name)
+	require.True(t, ok)
+	require.Equal(t, domain.RecoveryDegraded, degraded.RecoveryState)
+}
+
+func TestFencedRecoveryNoticeFailurePropagates(t *testing.T) {
+	store := portsmocks.NewMockNoticeStore(t)
+	store.EXPECT().Append(mock.Anything).Return(errors.New("disk full")).Once()
+	err := persistFencedRecoveryNotices(store, []fencedRecoveryIdentity{{
+		name: "work", id: domain.IncarnationID{1}, kind: "discard-intent", reasonCode: "discard-intent-conflict",
+	}}, time.Unix(1, 0))
+	require.ErrorContains(t, err, "session \"work\"")
+	require.ErrorContains(t, err, domain.IncarnationID{1}.String())
 }
 
 func TestTransactionRecoveryNoticeFailurePropagates(t *testing.T) {

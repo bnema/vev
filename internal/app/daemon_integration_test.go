@@ -659,6 +659,161 @@ func TestFinalCheckpointTimeoutKeepsOwner(t *testing.T) {
 	require.NoError(t, awaitLifecycleResult(t, result.wrapperReturned, "lifecycle wrapper return"))
 }
 
+// Startup restoration repairs HEADs, promotes fallbacks, and replaces catalogue
+// records. Lifecycle ownership must therefore outlive it: releasing the flock
+// while a restoration repository call is still running would let a second
+// daemon mutate the same durable state.
+func TestLifecycleOwnershipOutlivesRestorationWriter(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
+	checkpointed := publishRestorableCheckpoint(t, stateDir, repository)
+
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	blocking := &lifecycleBlockingRestore{
+		SnapshotRepository: repository,
+		entered:            make(chan struct{}),
+		release:            make(chan struct{}),
+		returned:           make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseRestore := func() { releaseOnce.Do(func() { close(blocking.release) }) }
+	t.Cleanup(releaseRestore)
+
+	shutdownClock := newLifecycleShutdownClock()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	listenerReady := make(chan struct{})
+	callbackReturned := make(chan struct{})
+	wrapperReturned := make(chan error, 1)
+	go func() {
+		wrapperReturned <- runWithLifecycleOwner(ctx, runtimeDir, stateDir, func(ctx context.Context) error {
+			defer close(callbackReturned)
+			opened, err := persist.OpenOrMigrate(ctx, persist.OpenDeps{
+				StateDir:          stateDir,
+				Random:            rand.Reader,
+				SnapshotMigration: repository,
+			})
+			if err != nil {
+				return err
+			}
+			listener, err := ipc.Listen(runtimeDir)
+			if err != nil {
+				return errors.Join(err, opened.Catalogue.Close())
+			}
+			close(listenerReady)
+			d := daemon.New(
+				pty.NewFactory(),
+				shutdownClock,
+				discardLog(),
+				daemon.WithShell("/bin/cat", nil),
+				daemon.WithCatalogue(opened.Catalogue, opened.Records),
+				daemon.WithSnapshotRepository(blocking, nil),
+			)
+			return d.Serve(ctx, listener)
+		})
+	}()
+
+	awaitLifecycleStage(t, listenerReady, "daemon listener")
+	awaitLifecycleStage(t, blocking.entered, "restoration repository call")
+	require.Equal(t, checkpointed, blocking.repairedName(), "restoration must target the checkpointed session")
+
+	cancel()
+	shutdownClock.nextTimer(t).fire()
+	select {
+	case <-callbackReturned:
+		t.Fatal("Serve callback returned after shutdown deadline while restoration was blocked")
+	case <-time.After(100 * time.Millisecond):
+	}
+	assertLifecycleStagePending(t, callbackReturned, "Serve callback return while restoration is blocked")
+	assertLifecycleResultPending(t, wrapperReturned, "lifecycle wrapper return while restoration is blocked")
+	_, err := lifecycle.TryAcquire(runtimeDir)
+	require.ErrorIs(t, err, lifecycle.ErrBusy)
+
+	releaseRestore()
+	awaitLifecycleStage(t, blocking.returned, "restoration repository return")
+	awaitLifecycleStage(t, callbackReturned, "Serve callback return after restoration")
+	require.NoError(t, awaitLifecycleResult(t, wrapperReturned, "lifecycle wrapper return"))
+	owner, err := lifecycle.TryAcquire(runtimeDir)
+	require.NoError(t, err)
+	require.NoError(t, owner.Release())
+}
+
+// publishRestorableCheckpoint runs a complete daemon over the real catalogue and
+// repository until one named session owns a committed checkpoint, then shuts it
+// down. The returned name is restorable by any later daemon on the same state.
+func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snapshot.Repository) string {
+	t.Helper()
+	const name = "restorable"
+	runtimeDir := filepath.Join(t.TempDir(), "seed-runtime")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	opened, err := persist.OpenOrMigrate(ctx, persist.OpenDeps{
+		StateDir:          stateDir,
+		Random:            rand.Reader,
+		SnapshotMigration: repository,
+	})
+	require.NoError(t, err)
+	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, recoveryfs.New(stateDir), rand.Reader)
+	require.NoError(t, coordinator.Recover(ctx))
+	listener, err := ipc.Listen(runtimeDir)
+	require.NoError(t, err)
+	d := daemon.New(
+		pty.NewFactory(),
+		clock.New(),
+		discardLog(),
+		daemon.WithShell("/bin/cat", nil),
+		daemon.WithCatalogue(opened.Catalogue, opened.Records),
+		daemon.WithSnapshotRepository(repository, nil),
+		daemon.WithRecoveryCoordinator(coordinator),
+	)
+	served := make(chan error, 1)
+	go func() { served <- d.Serve(ctx, listener) }()
+
+	tr, _ := attach(t, runtimeDir, ports.IntentNew, name, domain.Size{Cols: 80, Rows: 24})
+	require.NoError(t, tr.Send(ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(ports.Input{Data: []byte("checkpoint me\n")})}))
+	require.Eventually(t, func() bool {
+		record, ok := opened.Catalogue.Record(name)
+		return ok && record.RecoveryState == domain.RecoveryHealthy && record.Committed != nil
+	}, 5*time.Second, 10*time.Millisecond, "session never committed a checkpoint")
+	require.NoError(t, tr.Close())
+
+	cancel()
+	require.NoError(t, awaitLifecycleResult(t, served, "seed daemon shutdown"))
+	return name
+}
+
+type lifecycleBlockingRestore struct {
+	ports.SnapshotRepository
+	entered    chan struct{}
+	release    chan struct{}
+	returned   chan struct{}
+	enterOnce  sync.Once
+	returnOnce sync.Once
+	mu         sync.Mutex
+	repaired   string
+}
+
+func (r *lifecycleBlockingRestore) LoadCheckpoint(ctx context.Context, id domain.IncarnationID, name string, ref domain.CheckpointRef) (ports.SnapshotGeneration, error) {
+	r.mu.Lock()
+	r.repaired = name
+	r.mu.Unlock()
+	return r.SnapshotRepository.LoadCheckpoint(ctx, id, name, ref)
+}
+
+func (r *lifecycleBlockingRestore) RepairHEAD(ctx context.Context, id domain.IncarnationID, ref domain.CheckpointRef) error {
+	r.enterOnce.Do(func() { close(r.entered) })
+	<-r.release // Intentionally ignore cancellation: lifecycle ownership must outlive this call.
+	r.returnOnce.Do(func() { close(r.returned) })
+	return r.SnapshotRepository.RepairHEAD(ctx, id, ref)
+}
+
+func (r *lifecycleBlockingRestore) repairedName() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.repaired
+}
+
 type blockedSnapshotWriterShutdown struct {
 	runtimeDir       string
 	callbackReturned <-chan struct{}
