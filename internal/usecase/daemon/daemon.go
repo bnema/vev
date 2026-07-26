@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys"
+	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 )
 
 // Scheduler debounce bounds. Idle updates use the minimum for low latency;
@@ -123,11 +124,9 @@ type Daemon struct {
 	catalogue                      ports.Catalogue
 	catalogueRecords               []domain.CatalogueRecord
 	catalogueRecordsProvided       bool
-	// snapshotRepository is the sole checkpoint contract.
+	// snapshotRepository is the sole checkpoint storage contract.
 	snapshotRepository      ports.SnapshotRepository
-	checkpointRecovery      ports.CheckpointCoordinator
-	lifecycleRecovery       ports.SessionLifecycleCoordinator
-	degradedRecovery        ports.DegradedRecoveryCoordinator
+	recovery                *recoveryusecase.Coordinator
 	maintenance             maintenanceDependencies
 	maintenanceWorkerCancel context.CancelFunc
 	maintenanceWorkerDone   chan struct{}
@@ -276,22 +275,10 @@ func WithCatalogue(catalogue ports.Catalogue, records []domain.CatalogueRecord) 
 	}
 }
 
-// WithCheckpointCoordinator installs the shared durable checkpoint transaction seam.
-func WithCheckpointCoordinator(coordinator ports.CheckpointCoordinator) Option {
+// WithRecoveryCoordinator installs the durable recovery coordinator.
+func WithRecoveryCoordinator(coordinator *recoveryusecase.Coordinator) Option {
 	return func(d *Daemon) {
-		d.checkpointRecovery = coordinator
-	}
-}
-
-// WithRecoveryCoordinator installs all durable checkpoint and named-session
-// lifecycle transaction seams.
-func WithRecoveryCoordinator(coordinator ports.SessionLifecycleCoordinator) Option {
-	return func(d *Daemon) {
-		d.checkpointRecovery = coordinator
-		d.lifecycleRecovery = coordinator
-		if degraded, ok := coordinator.(ports.DegradedRecoveryCoordinator); ok {
-			d.degradedRecovery = degraded
-		}
+		d.recovery = coordinator
 	}
 }
 

@@ -26,25 +26,6 @@ type SnapshotGeneration struct {
 	Objects          map[SnapshotDigest][]byte
 }
 
-type CheckpointCoordinator interface {
-	PublishCheckpoint(context.Context, string, SnapshotPublication) (domain.CatalogueRecord, error)
-}
-
-// SessionLifecycleCoordinator owns durable named-session create, rename, and
-// delete commit protocols. Runtime registries update only after these calls
-// complete successfully.
-type SessionLifecycleCoordinator interface {
-	CheckpointCoordinator
-	Create(context.Context, domain.CatalogueRecord) (domain.CatalogueRecord, error)
-	Rename(context.Context, string, string) (domain.CatalogueRecord, error)
-	Delete(context.Context, string) error
-}
-
-// DegradedRecoveryCoordinator exposes only the explicit operator discard action.
-type DegradedRecoveryCoordinator interface {
-	Discard(context.Context, string) error
-}
-
 type Catalogue interface {
 	Records() ([]domain.CatalogueRecord, error)
 	Record(string) (domain.CatalogueRecord, bool, error)

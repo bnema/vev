@@ -275,7 +275,7 @@ func TestRestoreCancellationTransitionsBeforePickerCompletion(t *testing.T) {
 	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
 	WithCatalogue(catalogue, []domain.CatalogueRecord{record})(d)
 	WithSnapshotRepository(repository)(d)
-	WithCheckpointCoordinator(coordinator)(d)
+	WithRecoveryCoordinator(coordinator)(d)
 	restoreCtx, cancelRestore := context.WithCancel(context.Background())
 	restored := make(chan struct{})
 	go func() {

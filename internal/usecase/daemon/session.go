@@ -321,7 +321,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 	if !ephemeral {
 		if d.persistEnabled {
 			record := domain.CatalogueRecord{Name: name, IncarnationID: incarnation, Cwd: cwd, CreatedAt: createdAt, UpdatedAt: createdAt, LastUsedSeq: lastUsedSeq, TabNames: names, RecoveryState: domain.RecoveryFresh}
-			if d.lifecycleRecovery == nil {
+			if d.recovery == nil {
 				closeTabs(tabs)
 				cancel()
 				return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session", errors.New("durable session authority is not configured"))
@@ -333,7 +333,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 			if resuming && authoritativeExists {
 				err = d.updateCatalogueMetadata(record.MetadataUpdate())
 			} else {
-				record, err = d.lifecycleRecovery.Create(d.serveCtx, record)
+				record, err = d.recovery.Create(d.serveCtx, record)
 			}
 			d.mu.Lock()
 			if err != nil {
@@ -348,7 +348,7 @@ func (d *Daemon) createSessionLocked(name string, ephemeral bool, cwd string, sz
 				if !resuming {
 					d.mu.Unlock()
 					rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(d.serveCtx), snapshotFinalFlushTimeout)
-					rollbackErr := d.lifecycleRecovery.Delete(rollbackCtx, name)
+					rollbackErr := d.recovery.Delete(rollbackCtx, name)
 					rollbackCancel()
 					d.mu.Lock()
 					if rollbackErr != nil {
@@ -789,16 +789,16 @@ func (d *Daemon) renameSession(sess *session, name string) error {
 	// Durable named renames are one atomic catalogue batch. The incarnation-keyed
 	// snapshot namespace is intentionally untouched.
 	if (wasEphemeral || oldName != name) && d.persistEnabled {
-		if d.lifecycleRecovery == nil {
+		if d.recovery == nil {
 			return rollback(errors.New("durable session authority is not configured"))
 		}
 		{
 			var committed domain.CatalogueRecord
 			var err error
 			if wasEphemeral {
-				committed, err = d.lifecycleRecovery.Create(d.serveCtx, record)
+				committed, err = d.recovery.Create(d.serveCtx, record)
 			} else {
-				committed, err = d.lifecycleRecovery.Rename(d.serveCtx, oldName, name)
+				committed, err = d.recovery.Rename(d.serveCtx, oldName, name)
 			}
 			if err != nil {
 				return rollback(err)
@@ -1026,7 +1026,7 @@ func (d *Daemon) closeTab(sess *session, tb *tab, repaint bool) error {
 // identity or persisted metadata is removed. It never runs under daemon or
 // session locks.
 func (d *Daemon) beginSnapshotPurge(_ string, _ domain.IncarnationID) error {
-	if d.persistEnabled && d.lifecycleRecovery == nil {
+	if d.persistEnabled && d.recovery == nil {
 		return errors.New("durable session authority is not configured")
 	}
 	// The lifecycle coordinator performs the complete ordered protocol after
@@ -1041,7 +1041,7 @@ func (d *Daemon) finishSnapshotPurge(ctx context.Context, name string, _ domain.
 	if !d.persistEnabled {
 		return nil
 	}
-	if d.lifecycleRecovery == nil {
+	if d.recovery == nil {
 		return errors.New("durable session authority is not configured")
 	}
 	if ctx == nil {
@@ -1049,7 +1049,7 @@ func (d *Daemon) finishSnapshotPurge(ctx context.Context, name string, _ domain.
 	}
 	purgeCtx, cancel := context.WithTimeout(ctx, snapshotFinalFlushTimeout)
 	defer cancel()
-	return d.lifecycleRecovery.Delete(purgeCtx, name)
+	return d.recovery.Delete(purgeCtx, name)
 }
 
 // retryStoppedPurge completes a previously closed session's durable purge.

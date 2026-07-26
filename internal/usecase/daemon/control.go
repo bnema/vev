@@ -455,7 +455,7 @@ func (e controlExec) Toast(severity, message string) error {
 }
 
 func (e controlExec) SessionRecovery(action string) (string, error) {
-	if e.d == nil || e.d.degradedRecovery == nil || e.recoveryName == "" || action != "discard" {
+	if e.d == nil || e.d.recovery == nil || e.recoveryName == "" || action != "discard" {
 		return "", command.ErrInvalidArguments
 	}
 	ctx := e.ctx
@@ -465,7 +465,7 @@ func (e controlExec) SessionRecovery(action string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := e.d.degradedRecovery.Discard(ctx, e.recoveryName); err != nil {
+	if err := e.d.recovery.Discard(ctx, e.recoveryName); err != nil {
 		return "", err
 	}
 	record, ok, err := e.d.catalogue.Record(e.recoveryName)

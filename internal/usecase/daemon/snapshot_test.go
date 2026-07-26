@@ -12,6 +12,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 	"github.com/bnema/vev/pkg/renderer"
 )
 
@@ -38,18 +39,26 @@ func TestDurableWriterFailureNamesIncludesBufferedCapture(t *testing.T) {
 	require.Equal(t, []string{"work"}, d.durableWriterFailureNames())
 }
 
-func TestCheckpointPublicationWithoutCommittedRefFailsCapture(t *testing.T) {
+func TestCheckpointCatalogueFailureKeepsCaptureRetryable(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	WithSnapshotRepository(portsmocks.NewMockSnapshotRepository(t))(d)
-	coordinator := portsmocks.NewMockCheckpointCoordinator(t)
-	WithCheckpointCoordinator(coordinator)(d)
+	catalogue := portsmocks.NewMockCatalogue(t)
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	record := domain.CatalogueRecord{
+		Name:          "work",
+		IncarnationID: domain.IncarnationID{1},
+		RecoveryState: domain.RecoveryFresh,
+	}
+	catalogue.EXPECT().Record("work").Return(record, true, nil).Once()
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).Return(nil).Once()
+	catalogue.EXPECT().Replace("work", mock.Anything).Return(errors.New("catalogue unavailable")).Once()
+	WithSnapshotRepository(repository)(d)
+	WithRecoveryCoordinator(recoveryusecase.NewCoordinator(catalogue, repository, nil))(d)
 	startSnapshotEncodeWorker(t, d)
-	coordinator.EXPECT().PublishCheckpoint(mock.Anything, "work", mock.Anything).Return(domain.CatalogueRecord{Name: "work"}, nil).Once()
 
 	sess := newSnapshotTestSession(t, "work", false, "/work")
 	require.True(t, d.captureSession(sess))
 	awaitSnapshotIdle(t, sess)
-	require.True(t, sess.snapDirty.Load(), "nil committed publication must remain retryable")
+	require.True(t, sess.snapDirty.Load(), "failed catalogue commit must remain retryable")
 }
 
 func TestSnapshotWorkerPublishesContentAddressedCapture(t *testing.T) {

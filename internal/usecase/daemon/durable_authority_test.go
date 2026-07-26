@@ -41,9 +41,7 @@ func WithStore(t testing.TB, store ports.Store) Option {
 		if repository == nil {
 			repository = testLifecycleRepository{}
 		}
-		authority := recoveryusecase.NewCoordinator(catalogue, repository, rand.Reader)
-		d.lifecycleRecovery = authority
-		d.checkpointRecovery = authority
+		d.recovery = recoveryusecase.NewCoordinator(catalogue, repository, rand.Reader)
 	}
 }
 

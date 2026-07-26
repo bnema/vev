@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
@@ -193,7 +195,7 @@ func newDurableRecoveryDaemon(t testing.TB, records []domain.CatalogueRecord, re
 	t.Helper()
 	catalogue := newDurableRecoveryCatalogue(records)
 	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
-	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, records), WithSnapshotRepository(repository), WithCheckpointCoordinator(coordinator))
+	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, records), WithSnapshotRepository(repository), WithRecoveryCoordinator(coordinator))
 	d.serveCtx, d.serveCancel = context.WithCancel(context.Background())
 	t.Cleanup(d.serveCancel)
 	return d, catalogue
@@ -212,7 +214,7 @@ func TestFinalCheckpointFailurePreservesCatalogue(t *testing.T) {
 	catalogue := newDurableRecoveryCatalogue([]domain.CatalogueRecord{prior})
 	repository := &durableRecoveryRepository{}
 	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, nil)
-	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, []domain.CatalogueRecord{prior}), WithSnapshotRepository(repository), WithCheckpointCoordinator(coordinator))
+	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), WithCatalogue(catalogue, []domain.CatalogueRecord{prior}), WithSnapshotRepository(repository), WithRecoveryCoordinator(coordinator))
 	startSnapshotEncodeWorker(t, d)
 
 	sess := newSnapshotTestSession(t, prior.Name, false, prior.Cwd)
@@ -351,39 +353,30 @@ func (f *recoveryCountingPTYFactory) Open(context.Context, string, []string, []s
 	return nil, errors.New("unexpected PTY open")
 }
 
-type explicitRecoveryStub struct {
-	record    domain.CatalogueRecord
-	catalogue ports.Catalogue
-}
-
-func (s explicitRecoveryStub) Discard(_ context.Context, name string) error {
-	return s.catalogue.Replace(name, s.record)
-}
-
-type contextRecoveryStub struct {
-	wantKey any
-	want    any
-	seen    bool
-	err     error
-}
-
-func (s *contextRecoveryStub) Discard(ctx context.Context, _ string) error {
-	s.seen = ctx.Value(s.wantKey) == s.want
-	return s.err
-}
-
 func TestSessionRecoveryUsesIncomingCommandContext(t *testing.T) {
 	type contextKey struct{}
 	key := contextKey{}
 	ctx := context.WithValue(t.Context(), key, "request")
 	wantErr := errors.New("stop after context capture")
-	stub := &contextRecoveryStub{wantKey: key, want: "request", err: wantErr}
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	d.degradedRecovery = stub
+	record := durableRecoveryRecord(0)
+	record.RecoveryState = domain.RecoveryDegraded
+	record.DegradedReason = "checkpoint validation failed"
+	catalogue := portsmocks.NewMockCatalogue(t)
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	catalogue.EXPECT().Record(record.Name).Return(record, true, nil).Once()
+	catalogue.EXPECT().Replace(record.Name, mock.Anything).Return(nil).Once()
+	seen := false
+	repository.EXPECT().DeleteIncarnation(mock.Anything, record.IncarnationID).
+		Run(func(got context.Context, _ domain.IncarnationID) { seen = got.Value(key) == "request" }).
+		Return(wantErr).Once()
 
-	_, err := (controlExec{ctx: ctx, d: d, recoveryName: "work"}).SessionRecovery("discard")
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	d.catalogue = catalogue
+	d.recovery = recoveryusecase.NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{9}, 16)))
+
+	_, err := (controlExec{ctx: ctx, d: d, recoveryName: record.Name}).SessionRecovery("discard")
 	require.ErrorIs(t, err, wantErr)
-	require.True(t, stub.seen)
+	require.True(t, seen)
 }
 
 type temporaryRestoreError struct{}
@@ -481,13 +474,21 @@ func TestSessionRecoveryCommand(t *testing.T) {
 	degraded := durableRecoveryRecord(2)
 	degraded.RecoveryState = domain.RecoveryDegraded
 	degraded.DegradedReason = "checkpoint validation failed"
-	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{degraded}, &durableRecoveryRepository{})
 	fresh := degraded
-	fresh.IncarnationID = domain.IncarnationID{9}
+	fresh.IncarnationID = domain.IncarnationID{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9}
 	fresh.RecoveryState = domain.RecoveryFresh
 	fresh.Committed = nil
 	fresh.DegradedReason = ""
-	d.degradedRecovery = explicitRecoveryStub{record: fresh, catalogue: catalogue}
+	catalogue := portsmocks.NewMockCatalogue(t)
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	catalogue.EXPECT().Record(degraded.Name).Return(degraded, true, nil).Once()
+	catalogue.EXPECT().Replace(degraded.Name, fresh).Return(nil).Once()
+	repository.EXPECT().DeleteIncarnation(mock.Anything, degraded.IncarnationID).Return(nil).Once()
+	catalogue.EXPECT().Record(degraded.Name).Return(fresh, true, nil).Once()
+	coordinator := recoveryusecase.NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{9}, 16)))
+	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithCatalogue(catalogue, []domain.CatalogueRecord{degraded}),
+		WithSnapshotRepository(repository), WithRecoveryCoordinator(coordinator))
 
 	_, err := (controlExec{d: d, recoveryName: degraded.Name}).SessionRecovery("discard")
 	require.NoError(t, err)

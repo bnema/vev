@@ -132,9 +132,9 @@ func (d *Daemon) publishSnapshotCapture(workerCtx context.Context, workerID uint
 	}
 	if err == nil && workerCtx.Err() == nil {
 		if err = publicationContext.Err(); err == nil {
-			if d.checkpointRecovery != nil {
+			if d.recovery != nil {
 				var record domain.CatalogueRecord
-				record, err = d.checkpointRecovery.PublishCheckpoint(publicationContext, capture.name, publication)
+				record, err = d.recovery.PublishCheckpoint(publicationContext, capture.name, publication)
 				if err == nil {
 					if record.Committed == nil {
 						err = errors.New("snapshot: checkpoint publication returned no committed checkpoint")
